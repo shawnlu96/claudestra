@@ -94,6 +94,8 @@ export interface TaskView extends LedgerTask {
   lastEvent: LedgerEvent | null;
   /** 进入当前阶段的时刻（时间线最后一段的 from）；没有建任务事件的残缺数据为 null */
   stageSince: number | null;
+  /** stageSince 是导入时推断的近似时间：网页不拿它判「卡住」，时长前面标 ≈ */
+  stageSinceApprox: boolean;
   lastReview: ReviewSummary | null;
   metrics: TaskMetrics;
 }
@@ -107,10 +109,20 @@ export interface ProjectView {
 
 const numOrNull = (v: unknown): number | null => (typeof v === "number" && Number.isFinite(v) ? v : null);
 
+/** 总览只要一句原因：首行、按码点截到 120（全文在详情接口里） */
+const REVIEW_TEXT_MAX = 120;
+
 function reviewSummary(e: LedgerEvent | undefined): ReviewSummary | null {
   if (!e) return null;
   const d = e.data;
-  return { round: numOrNull(d.round), verdict: typeof d.verdict === "string" ? d.verdict : null, p0: numOrNull(d.p0), p1: numOrNull(d.p1), p2: numOrNull(d.p2), text: e.text, ts: e.ts };
+  const first = [...(e.text.split("\n").find((l) => l.trim()) ?? "").trim()];
+  const text = first.length > REVIEW_TEXT_MAX ? `${first.slice(0, REVIEW_TEXT_MAX).join("")}…` : first.join("");
+  return { round: numOrNull(d.round), verdict: typeof d.verdict === "string" ? d.verdict : null, p0: numOrNull(d.p0), p1: numOrNull(d.p1), p2: numOrNull(d.p2), text, ts: e.ts };
+}
+
+/** 时间线最后一段是由哪条事件开出来的（建任务或 stage，与 stageTimeline 的取点规则一致）；导入推断的时间带 approxTime */
+function currentStageMark(own: readonly LedgerEvent[]): LedgerEvent | undefined {
+  return own.findLast((e) => e.kind === "stage" || (e.kind === "task" && e.data.op === "new"));
 }
 
 function taskView(task: LedgerTask, own: readonly LedgerEvent[], now: number): TaskView {
@@ -118,6 +130,7 @@ function taskView(task: LedgerTask, own: readonly LedgerEvent[], now: number): T
     ...task,
     lastEvent: own.at(-1) ?? null,
     stageSince: stageTimeline(own, now).at(-1)?.from ?? null,
+    stageSinceApprox: currentStageMark(own)?.data.approxTime === true,
     lastReview: reviewSummary(own.findLast((e) => e.kind === "review")),
     metrics: taskMetrics(task, own, now),
   };

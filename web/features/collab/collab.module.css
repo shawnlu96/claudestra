@@ -148,7 +148,7 @@
 .steps .s.cur i { background: var(--sc); }
 .steps .s.cur { color: var(--text); font-weight: 500; }
 .steps .s em { white-space: nowrap; display: block; font-style: normal; color: var(--muted); font-variant-numeric: tabular-nums; margin-top: 2px; }
-.ev { display: grid; grid-template-columns: 44px 16px 1fr; gap: 8px; font-size: var(--fs-2); color: var(--text-2); margin-bottom: 8px; line-height: 1.45; }
+.ev { display: grid; grid-template-columns: 82px 16px 1fr; gap: 8px; font-size: var(--fs-2); color: var(--text-2); margin-bottom: 8px; line-height: 1.45; }
 .ev .tm { color: var(--faint); font-family: var(--mono); font-size: var(--fs-3); padding-top: 2px; }
 .ev .ic { color: var(--muted); margin-top: 2px; }
 .rr { font-size: var(--fs-2); color: var(--text-2); margin-bottom: 8px; }
@@ -171,6 +171,7 @@
 .seg button { border: 0; background: transparent; color: var(--muted); font-size: var(--fs-3); padding: 4px 8px; cursor: pointer; }
 .seg button.on { background: var(--panel-2); color: var(--text); }
 .seg button:disabled { opacity: .45; cursor: not-allowed; }
+.sayHint { flex: 1; min-width: 0; color: var(--warn); font-size: var(--fs-3); line-height: 1.4; }
 .btn { height: 28px; padding: 0 12px; border-radius: 7px; border: 1px solid var(--line-2); background: var(--panel); color: var(--text-2); cursor: pointer; font-size: var(--fs-2); display: inline-flex; align-items: center; gap: 6px; text-decoration: none; }
 .btn.pri { background: var(--accent); border-color: var(--accent); color: #fff; margin-left: auto; }
 .btn:disabled { opacity: .5; cursor: default; }

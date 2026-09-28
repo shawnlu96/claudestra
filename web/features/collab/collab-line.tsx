@@ -4,7 +4,7 @@
  * 工位卡停在当前列；阶段推进时 left / transform 过渡把它滑过去，只有刚推进的那一条用品牌色（ux.md「推进时只做一次短动效」）。
  */
 import type { ActionKind } from "./collab-action";
-import { COLUMNS, fmtDuration, skippedColumns, type LineView, type Tr } from "./collab-model";
+import { COLUMNS, dwellText, skippedColumns, type LineView, type Tr } from "./collab-model";
 import { Icon } from "./collab-icons";
 import s from "./collab.module.css";
 
@@ -77,7 +77,7 @@ export function CollabLine(props: {
             <Icon name={stageIcon(l)} size={12} />
             {l.stageLabel}
           </span>
-          {l.dwellMs !== null && <span className={s.dw}>· {tr("在此阶段 {d}", { d: fmtDuration(l.dwellMs, tr) })}</span>}
+          {l.dwellMs !== null && <span className={s.dw}>· {dwellText(l, tr)}</span>}
         </div>
         {l.reason && <div className={s.why}>{l.reason}</div>}
       </div>

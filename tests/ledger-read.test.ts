@@ -8,7 +8,7 @@ import { existsSync, renameSync } from "node:fs";
 import { taskMetrics } from "../src/lib/ledger-metrics.js";
 import { activeTasksByAgent, LedgerReader, ledgerFeedTicker, PROJECT_EVENTS_LIMIT, projectView, taskDetail } from "../src/lib/ledger-read.js";
 import { closeLedger, listEvents, openLedger } from "../src/lib/ledger-store.js";
-import { appendEvent, createItem, createTask, moveStage } from "../src/lib/ledger-write.js";
+import { appendEvent, createItem, createTask, importTask, moveStage, recordReview } from "../src/lib/ledger-write.js";
 import { ledgerScript, runLedgerScript, seedLedger, tempLedgerPath } from "./ledger-test-helpers.js";
 
 function withWriter<T>(path: string, fn: (db: Database) => T): T {
@@ -103,6 +103,47 @@ describe("视图", () => {
     expect(t1.lastReview).toEqual({ round: 2, verdict: "pass", p0: 0, p1: 0, p2: 1, text: "", ts: 520 });
     expect(t2.stageSince).toBe(600);
     expect(t2.lastReview).toBeNull();
+  });
+
+  test("stageSinceApprox：当前阶段由导入推断的时间开出来时为 true；之后真实推进一次就变回 false", () => {
+    const p = tempLedgerPath();
+    withWriter(p, (w) => {
+      const imp = { actor: "import", now: 0 };
+      importTask(w, imp, {
+        task: { project: "p", id: "TI", title: "导入的", kind: "code", stage: "build", agent: "agent-x" },
+        initialStage: "spec",
+        createdTs: 50,
+        events: [
+          { kind: "stage", ts: 100, data: { from: "spec", to: "restate" } },
+          { kind: "stage", ts: 200, data: { from: "restate", to: "build", approxTime: true } },
+        ],
+      });
+    });
+    const r = new LedgerReader(p);
+    expect(projectView(r.get()!, "p", 1000).tasks[0]).toMatchObject({ stageSince: 200, stageSinceApprox: true });
+    withWriter(p, (w) => moveStage(w, { actor: "owner", now: 300 }, { taskId: "TI", from: "build", to: "review" }));
+    expect(projectView(r.get()!, "p", 1000).tasks[0]).toMatchObject({ stageSince: 300, stageSinceApprox: false });
+  });
+
+  test("blocked 往返：stageSince 取回到原阶段的时刻，不是第一次进入的时刻", () => {
+    const p = tempLedgerPath();
+    withWriter(p, (w) => {
+      createTask(w, { actor: "owner", now: 0 }, { project: "p", id: "TB", title: "受阻往返", kind: "ops", stage: "build", agent: "agent-x" });
+      moveStage(w, { actor: "owner", now: 100 }, { taskId: "TB", from: "build", to: "blocked" });
+      moveStage(w, { actor: "owner", now: 400 }, { taskId: "TB", from: "blocked", to: "build" });
+    });
+    expect(projectView(new LedgerReader(p).get()!, "p", 1000).tasks[0]).toMatchObject({ stage: "build", stageSince: 400, stageSinceApprox: false });
+  });
+
+  test("lastReview.text 只下发首行、按码点截到 120 字", () => {
+    const p = tempLedgerPath();
+    const long = "意".repeat(130);
+    withWriter(p, (w) => {
+      createTask(w, { actor: "owner", now: 0 }, { project: "p", id: "TR", title: "审查", kind: "code", stage: "review", agent: "agent-x" });
+      recordReview(w, { actor: "owner", now: 10 }, { taskId: "TR", reviewer: "r", verdict: "changes", p0: 0, p1: 1, p2: 0, text: `\n${long}\n第二行细节` });
+    });
+    const text = projectView(new LedgerReader(p).get()!, "p", 1000).tasks[0].lastReview!.text;
+    expect(text).toBe(`${"意".repeat(120)}…`);
   });
 
   test("项目级事件只带 target 为空的、最近 PROJECT_EVENTS_LIMIT 条、seq 升序", () => {

@@ -1,55 +1,52 @@
 "use client";
 /**
  * 侧栏项目组里的「协作视图」入口（每个项目一个，放组内第一行）。
- * 只在 bridge 报了 ledger 能力时出现；读台账被拒过（403：不是全 scope 的 owner 设备）就在本页收起，不留一个点了没用的入口。
+ * 出现前先真的读一次这个项目的台账总览：能读才显示（顺手把结果放进缓存，点开就有数据）；
+ * 403（guest / 部分 scope）、404（老 bridge 没有台账接口或项目不在）不显示；网络错误先不显示，下次挂载再探。
  */
-import { useEffect, useSyncExternalStore } from "react";
-import { api } from "@/lib/api/client";
+import { useEffect } from "react";
+import { ApiError } from "@/lib/api/client";
+import { fetchLedger } from "@/lib/api/ledger";
 import { useT } from "@/lib/i18n";
 import { useChatNav } from "../chat/components/nav-context";
+import { cacheOverview, setLedgerAccess, useLedgerAccess } from "./collab-cache";
 import { Icon } from "./collab-icons";
 import { openCollab, useCollabNav } from "./collab-nav";
 
-type Access = "unknown" | "yes" | "no";
-let access: Access = "unknown";
-let probing = false;
-const subs = new Set<() => void>();
-const setAccess = (a: Access) => {
-  access = a;
-  for (const cb of subs) cb();
-};
+const probing = new Set<string>();
+const retryMs = new Map<string, number>();
+const RETRY_MIN_MS = 10_000;
+const RETRY_MAX_MS = 60_000;
 
-/** use-collab 拿到 403 时调：这台设备读不了台账，入口收起 */
-export const markLedgerForbidden = () => setAccess("no");
-
-function probe() {
-  if (probing || access !== "unknown") return;
-  probing = true;
-  api<{ features?: string[] }>("/capabilities", { timeoutMs: 4000 })
-    .then((j) => setAccess(j.features?.includes("ledger") ? "yes" : "no"))
-    .catch(() => undefined) // 探不到（老 bridge / 断网 / 限流）先不显示，下次挂载入口时再探
-    .finally(() => {
-      probing = false;
-    });
-}
-
-function useLedgerAccess(): Access {
-  useEffect(probe, []);
-  return useSyncExternalStore(
-    (cb) => {
-      subs.add(cb);
-      return () => subs.delete(cb);
-    },
-    () => access,
-    () => "unknown",
-  );
+/** 读一次总览定入口去留；网络 / bridge 重启这类临时失败按 10s → 60s 退避重探，只在第一次失败时打一行日志 */
+function probe(project: string) {
+  if (probing.has(project)) return;
+  probing.add(project);
+  fetchLedger(project)
+    .then((ov) => {
+      retryMs.delete(project);
+      cacheOverview(project, ov, ov.now - Date.now());
+    })
+    .catch((e) => {
+      if (e instanceof ApiError && (e.status === 403 || e.status === 404)) return setLedgerAccess(project, "no");
+      const wait = retryMs.get(project);
+      if (wait === undefined) console.warn(`[collab] 探测台账 ${project} 失败，入口先不显示、稍后重试：${(e as Error).message}`);
+      const next = Math.min((wait ?? RETRY_MIN_MS / 2) * 2, RETRY_MAX_MS);
+      retryMs.set(project, next);
+      setTimeout(() => probe(project), next);
+    })
+    .finally(() => probing.delete(project));
 }
 
 export function CollabEntry({ projectId }: { projectId: string }) {
   const t = useT();
   const nav = useChatNav();
   const cur = useCollabNav();
-  if (useLedgerAccess() !== "yes") return null;
+  const access = useLedgerAccess(projectId);
+  useEffect(() => {
+    if (access === "unknown") probe(projectId);
+  }, [access, projectId]);
+  if (access !== "yes") return null;
   const on = cur.project === projectId;
   return (
     <li>

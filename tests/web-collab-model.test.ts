@@ -2,8 +2,8 @@
  * 协作视图首页纯逻辑（web/features/collab/collab-model.ts、collab-action.ts）：排序、停留时长、卡住判定、一句话状态、此刻动作。
  */
 import { describe, expect, test } from "bun:test";
-import { actionLine, reduceAction, shortDetail, type ActionMap } from "../web/features/collab/collab-action";
-import { dwellMs, fmtDuration, homeView, isStuck, STUCK_MS, type LedgerOverview, type LedgerTaskView, type Stage } from "../web/features/collab/collab-model";
+import { actionLine, reduceAction, sayGate, shortDetail, type ActionMap } from "../web/features/collab/collab-action";
+import { dwellMs, dwellText, fmtDuration, homeView, isStuck, STUCK_MS, type LedgerOverview, type LedgerTaskView, type Stage } from "../web/features/collab/collab-model";
 
 const MIN = 60_000;
 const NOW = new Date(2026, 8, 28, 18, 0).getTime();
@@ -33,8 +33,18 @@ describe("停留时长与卡住", () => {
   test("只有等待类阶段超过 30 分钟算卡住；开发、返工再久也不算", () => {
     const long = { stageSince: NOW - STUCK_MS - MIN };
     for (const s of ["restate", "review", "merge", "live"] as Stage[]) expect(isStuck(task("X", s, long), NOW)).toBe(true);
-    for (const s of ["build", "fix"] as Stage[]) expect(isStuck(task("X", s, long), NOW)).toBe(false);
+    for (const s of ["build", "fix", "spec"] as Stage[]) expect(isStuck(task("X", s, long), NOW)).toBe(false);
     expect(isStuck(task("X", "review", { stageSince: NOW - STUCK_MS }), NOW)).toBe(false);
+  });
+
+  test("导入推断的 stageSince 不判卡住，时长前面标 ≈", () => {
+    const t = task("A", "review", { stageSince: NOW - 3 * 60 * MIN, stageSinceApprox: true });
+    expect(isStuck(t, NOW)).toBe(false);
+    const line = homeView(overview([t]), NOW).lines[0];
+    expect(line).toMatchObject({ attention: "waiting", dwellApprox: true, reason: "" });
+    expect(dwellText(line)).toBe("在此阶段 ≈3小时");
+    expect(dwellText({ dwellMs: 5 * MIN, dwellApprox: false })).toBe("在此阶段 5分");
+    expect(dwellText({ dwellMs: null, dwellApprox: false })).toBe("");
   });
 
   test("fmtDuration：分 / 小时分 / 整小时 / 不到 1 分", () => {
@@ -118,10 +128,48 @@ describe("此刻动作", () => {
     expect(reduceAction(m, { agent: "task-t5", type: "assistant_text", data: {} }, 4)).toBe(m);
   });
 
-  test("shortDetail：路径只留文件名，长命令按码点截 40 字", () => {
-    expect(shortDetail("src/lib/ledger-read.ts")).toBe("ledger-read.ts");
-    expect(shortDetail("git rebase origin/main && bun run check && echo done-and-more-text")).toBe("git rebase origin/main && bun run check …");
-    expect(shortDetail("第一行\n第二行")).toBe("第一行");
+  // detail 是 jsonl-watcher.formatToolDetail 的输出：Bash = description\n───\ncommand（没有 description 只有 command）
+  const SECRETS = ["sk-ant", "ghp_", "Bearer", "/Users", "~/", ".env", "My Docs", "TOKEN=", "abc"];
+  const clean = (out: string) => SECRETS.filter((x) => out.includes(x));
+
+  test("shortDetail 不泄露 token、环境变量、绝对路径、带空格的路径（审查 #144 P1-2）", () => {
+    const cases: [string, string, string][] = [
+      ["Bash", 'curl -H "Authorization: Bearer sk-ant-api03-AAAABBBB" https://x', "curl"],
+      ["Bash", "GITHUB_TOKEN=ghp_abcdefghijklmnopqrstuvwxyz0123 gh pr list", "gh"],
+      ["Bash", "cat /Users/shawn/.config/mem0/.env", "cat"],
+      ["Bash", "cd /Users/shawn/repos/claude-orchestrator && bun test", "bun"],
+      ["Bash", "/opt/homebrew/bin/git status", "git"],
+      ["Bash", "Run tests\n───\nTOKEN=abc bun test", "Run tests"],
+      ["Bash", "Read /Users/shawn/.ssh/config\n───\ncat ~/.ssh/config", "Read config"],
+      ["Bash", "Call API with sk-ant-api03-XXXXXXXX\n───\ncurl x", "Call API with •••"],
+      ["Read", "/Users/shawn/My Docs/secret plan.md\noffset=10", "secret plan.md"],
+      ["Edit", "/Users/shawn/repos/x/web/a.ts\n─── old ───\nTOKEN=abc\n─── new ───\nb", "a.ts"],
+      ["Grep", '{"pattern":"foo","path":"/Users/shawn/repos"}', ""],
+      ["mcp__mem0__memory_search", '{"query":"x"}', ""],
+      ["bash", "ls /Users/shawn", ""],
+    ];
+    for (const [tool, detail, want] of cases) {
+      const out = shortDetail(tool, detail);
+      expect(out).toBe(want);
+      expect(clean(out)).toEqual([]);
+    }
+  });
+
+  test("shortDetail：description 过长按码点截 40 字，不截半个 emoji", () => {
+    expect(shortDetail("Bash", `${"跑".repeat(45)}\n───\nls`)).toBe(`${"跑".repeat(40)}…`);
+    expect([...shortDetail("Bash", `${"🚀".repeat(41)}\n───\nls`)].length).toBe(41);
+  });
+
+  test("MCP 工具名只留最后一段；不在白名单的工具不带 detail", () => {
+    const m = reduceAction(new Map(), { agent: "a", type: "tool_start", data: { name: "mcp__mem0__memory_search", detail: '{"query":"secret"}' } }, 1);
+    expect(m.get("a")).toEqual({ kind: "tool", tool: "memory_search", ts: 1 });
+  });
+
+  test("sayGate：它在干活时不许发（web 消息会先 C-c 打断它），空闲且有字才能发（审查 #144 P0）", () => {
+    expect(sayGate(true, "先别动", false)).toEqual({ canSend: false, blockedByWork: true });
+    expect(sayGate(false, "先别动", false)).toEqual({ canSend: true, blockedByWork: false });
+    expect(sayGate(false, "   ", false).canSend).toBe(false);
+    expect(sayGate(false, "先别动", true).canSend).toBe(false);
   });
 
   test("actionLine：工具 > 思考 > busy 兜底 > 等人 > 空闲", () => {

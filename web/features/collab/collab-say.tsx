@@ -1,34 +1,35 @@
 "use client";
 /**
- * 详情里的「对它说」。第一版只有「等这步做完」：走普通的 POST /agents/:name/messages——
- * agent 忙时 bridge 押后、回合边界送达，闲时直接送达；「立即打断」要 T13a 的投递语义，先灰着。
- * 回执只按发送那一刻的 busy 说「排队中」还是「已送达」，不假装知道它读没读。
+ * 详情里的「对它说」。web 发的是人类消息：Claude Code 的 agent 忙时，bridge 会先 C-c 再投递（bridge.ts 的 preemptOnHumanMessage），
+ * 等于打断它。所以第一版只在它空闲时能发，忙时按钮置灰、写明怎么办；「等这步做完再送达」的排队投递留给 T13a。
+ * 能不能发的判定在 collab-action.ts 的 sayGate（有单测）。
  */
 import { useRef, useState } from "react";
 import { sendMessage } from "@/lib/api/chat";
+import { sayGate } from "./collab-action";
 import { Icon } from "./collab-icons";
 import type { Tr } from "./collab-model";
 import s from "./collab.module.css";
 
-type Receipt = { kind: "queued" | "sent"; at: number } | { kind: "error"; message: string } | null;
+type Receipt = { kind: "sent"; at: number } | { kind: "error"; message: string } | null;
 
 const hhmm = (ms: number) => new Date(ms).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false });
 
-export function CollabSay({ agent, busy, tr }: { agent: string; busy: boolean; tr: Tr }) {
+export function CollabSay({ agent, working, tr }: { agent: string; working: boolean; tr: Tr }) {
   const [text, setText] = useState("");
   const [sending, setSending] = useState(false);
   const [receipt, setReceipt] = useState<Receipt>(null);
   const ctrl = useRef<AbortController | null>(null);
+  const gate = sayGate(working, text, sending);
 
   const send = async () => {
-    const body = text.trim();
-    if (!body || sending) return;
+    if (!gate.canSend) return;
     setSending(true);
     ctrl.current = new AbortController();
     try {
-      await sendMessage(agent, body, undefined, ctrl.current.signal);
+      await sendMessage(agent, text.trim(), undefined, ctrl.current.signal);
       setText("");
-      setReceipt({ kind: busy ? "queued" : "sent", at: Date.now() });
+      setReceipt({ kind: "sent", at: Date.now() });
     } catch (e) {
       setReceipt({ kind: "error", message: (e as Error).message });
     } finally {
@@ -48,22 +49,13 @@ export function CollabSay({ agent, busy, tr }: { agent: string; busy: boolean; t
           }}
         />
         <div className={s.bar}>
-          <div className={s.seg}>
-            <button type="button" className={s.on}>{tr("等这步做完")}</button>
-            <button type="button" disabled title={tr("下一版支持")}>{tr("立即打断")}</button>
-          </div>
-          <button type="button" className={`${s.btn} ${s.pri}`} disabled={!text.trim() || sending} onClick={() => void send()}>
+          {gate.blockedByWork && <span className={s.sayHint}>{tr("它在干活。等它这步做完再说；要打断它，请到它的会话里说")}</span>}
+          <button type="button" className={`${s.btn} ${s.pri}`} disabled={!gate.canSend} onClick={() => void send()}>
             <Icon name="send" size={13} />
             {tr("发送")}
           </button>
         </div>
       </div>
-      {receipt?.kind === "queued" && (
-        <div className={s.rcpt}>
-          <Icon name="hourglass" size={12} />
-          {tr("排队中 · {t}，它这步做完后送达", { t: hhmm(receipt.at) })}
-        </div>
-      )}
       {receipt?.kind === "sent" && (
         <div className={`${s.rcpt} ${s.ok}`}>
           <Icon name="circleCheck" size={12} />

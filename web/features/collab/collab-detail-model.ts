@@ -100,6 +100,19 @@ function eventText(e: LedgerEventView, who: string, tail: string, tr: Tr): strin
   }
 }
 
+const pad = (n: number) => String(n).padStart(2, "0");
+const dayKey = (d: Date) => `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
+
+/** 事件时刻的短写，写法同值守卡片（mission-ui.tsx）：今天 HH:mm / 昨天 HH:mm / MM-DD HH:mm；按设备本地时区 */
+export function fmtEventTime(ts: number, now: number, tr: Tr = zh): string {
+  const d = new Date(ts);
+  const n = new Date(now);
+  const hm = `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  if (dayKey(d) === dayKey(n)) return `${tr("今天")} ${hm}`;
+  if (dayKey(d) === dayKey(new Date(n.getFullYear(), n.getMonth(), n.getDate() - 1))) return `${tr("昨天")} ${hm}`;
+  return `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${hm}`;
+}
+
 export interface RecentItem {
   seq: number;
   ts: number;

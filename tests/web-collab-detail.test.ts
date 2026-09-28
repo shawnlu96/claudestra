@@ -2,7 +2,7 @@
  * 协作视图详情面板纯逻辑（web/features/collab/collab-detail-model.ts）：阶段用时条、最近 3 件事、审查摘要、参与者。
  */
 import { describe, expect, test } from "bun:test";
-import { actorName, eventLine, participants, recentThree, reviewRows, stageSegments } from "../web/features/collab/collab-detail-model";
+import { actorName, eventLine, fmtEventTime, participants, recentThree, reviewRows, stageSegments } from "../web/features/collab/collab-detail-model";
 import type { LedgerEventView, LedgerTaskView } from "../web/features/collab/collab-model";
 
 const MIN = 60_000;
@@ -77,5 +77,17 @@ describe("审查与参与者", () => {
       { name: "claude-reviewer", role: "reviewer", rounds: [1, 2] },
       { name: "codex", role: "reviewer", rounds: [2] },
     ]);
+  });
+});
+
+describe("事件时刻", () => {
+  test("今天 / 昨天 / MM-DD，跨年也只写月日（同值守卡片）", () => {
+    const now = new Date(2026, 8, 28, 9, 5).getTime();
+    expect(fmtEventTime(new Date(2026, 8, 28, 0, 1).getTime(), now)).toBe("今天 00:01");
+    expect(fmtEventTime(new Date(2026, 8, 27, 23, 59).getTime(), now)).toBe("昨天 23:59");
+    expect(fmtEventTime(new Date(2026, 8, 26, 17, 30).getTime(), now)).toBe("09-26 17:30");
+    const jan1 = new Date(2027, 0, 1, 8, 0).getTime();
+    expect(fmtEventTime(new Date(2026, 11, 31, 22, 0).getTime(), jan1)).toBe("昨天 22:00");
+    expect(fmtEventTime(new Date(2026, 11, 30, 22, 0).getTime(), jan1)).toBe("12-30 22:00");
   });
 });

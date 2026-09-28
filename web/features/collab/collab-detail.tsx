@@ -3,16 +3,15 @@
  * 任务详情（第二层，ux.md §3）：现在 → 阶段与用时 → 最近 3 件事 → 审查 → 参与者 → 对它说 → PR。
  * 桌面是首页右侧的面板；手机是全屏页，必须 portal 到 body（会话页在 transform 横滑容器里，web/CLAUDE.md PWA 第 4 条）。
  */
-import { useEffect, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useSyncExternalStore } from "react";
 import { createPortal } from "react-dom";
 import { useT } from "@/lib/i18n";
 import { useChatStore } from "../chat/chat-store";
-import { useChatNav } from "../chat/components/nav-context";
 import type { AgentSession } from "@/lib/chat/agents";
 import type { LineAction } from "./collab-line";
-import { participants, recentThree, reviewRows, stageSegments, type Participant, type TaskDetail } from "./collab-detail-model";
+import { fmtEventTime, participants, recentThree, reviewRows, stageSegments, type Participant, type TaskDetail } from "./collab-detail-model";
 import { Icon, type IconName } from "./collab-icons";
-import { fmtDuration, lineOf, type LedgerOverview, type LineView, type Tr } from "./collab-model";
+import { dwellText, fmtDuration, lineOf, type LedgerOverview, type LineView, type Tr } from "./collab-model";
 import { CollabSay } from "./collab-say";
 import { useTaskDetail } from "./use-collab";
 import s from "./collab.module.css";
@@ -30,7 +29,26 @@ function useNarrow(): boolean {
   );
 }
 
-const hhmm = (ms: number) => new Date(ms).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false });
+const COLLAB_Q = "collab=";
+const onDetailEntry = () => window.location.hash.includes(COLLAB_Q);
+
+/**
+ * 手机全屏详情占一条历史记录（#chat?collab=<id>）：系统返回（左滑 / 返回键）先回协作视图首页，不直接退到会话列表。
+ * 只在已经处于 #chat（手机横滑到内容页）时压；桌面窗口拉窄不压也不关。返回的关闭函数：压过就 back，由 popstate 收起。
+ */
+function useDetailHistory(narrow: boolean, id: string, onClose: () => void): () => void {
+  useEffect(() => {
+    if (!narrow || window.location.hash.split("?")[0] !== "#chat") return;
+    const tagged = `#chat?${COLLAB_Q}${encodeURIComponent(id)}`;
+    if (onDetailEntry()) window.history.replaceState(window.history.state, "", tagged);
+    else window.history.pushState({ cstraCollab: true }, "", tagged);
+    const onPop = () => !onDetailEntry() && onClose();
+    window.addEventListener("popstate", onPop);
+    return () => window.removeEventListener("popstate", onPop);
+  }, [narrow, id, onClose]);
+  return useCallback(() => (narrow && onDetailEntry() ? window.history.back() : onClose()), [narrow, onClose]);
+}
+
 const TONE = { red: s.red, amber: s.amber, neutral: s.neutral, green: s.green } as const;
 const EVENT_ICON: Record<string, IconName> = {
   stage: "zap", deliver: "gitPullRequest", review: "fileText", decision: "circleCheck",
@@ -61,7 +79,7 @@ function NowSec({ line, total, tr }: { line: LineView; total: number | undefined
         </div>
         {line.reason && <div className={s.r}>{line.reason}</div>}
         <div className={s.m}>
-          {line.dwellMs !== null && tr("在此阶段 {d}", { d: fmtDuration(line.dwellMs, tr) })}
+          {dwellText(line, tr)}
           {typeof total === "number" && total > 0 && ` · ${tr("已用时 {d}", { d: fmtDuration(total, tr) })}`}
         </div>
       </div>
@@ -94,7 +112,7 @@ function RecentSec({ d, tr }: { d: TaskDetail; tr: Tr }) {
         <div key={r.seq} className={s.ev}>
           <span className={s.tm} title={r.approx ? tr("导入时推算的近似时间") : undefined}>
             {r.approx && <span className={s.approx}>≈</span>}
-            {hhmm(r.ts)}
+            {fmtEventTime(r.ts, d.now, tr)}
           </span>
           <span className={s.ic}>
             <Icon name={EVENT_ICON[r.kind] ?? "history"} size={13} />
@@ -118,7 +136,7 @@ function ReviewSec({ d, tr }: { d: TaskDetail; tr: Tr }) {
             <span className={`${s.vd} ${r.verdict === "pass" ? s.pass : r.verdict === "block" ? s.block : s.changes}`}>
               {r.verdict === "pass" ? tr("通过") : `P0 ${r.p0 ?? "?"} · P1 ${r.p1 ?? "?"} · P2 ${r.p2 ?? "?"}`}
             </span>
-            <span className={s.tm}>{hhmm(r.ts)}</span>
+            <span className={s.tm}>{fmtEventTime(r.ts, d.now, tr)}</span>
           </div>
           {r.text && <div className={s.tx}>{r.text}</div>}
         </div>
@@ -158,6 +176,8 @@ function PeopleSec({ d, exec, action, tr }: { d: TaskDetail; exec: AgentSession 
 function Body({ d, line, action, tr }: { d: TaskDetail; line: LineView; action: LineAction; tr: Tr }) {
   const agents = useChatStore((st) => st.state.agents);
   const exec = line.agent ? agents.find((a) => a.name === line.agent) : undefined;
+  // 和工位卡同一个判定：事件流说在思考 / 跑工具 / 压缩，或流里没有但 /agents 说 busy
+  const working = action.kind === "thinking" || action.kind === "tool" || action.kind === "compacting";
   const pr = d.task.pr && /^https:\/\//.test(d.task.pr) ? d.task.pr : null;
   return (
     <div className={s.pb}>
@@ -177,7 +197,7 @@ function Body({ d, line, action, tr }: { d: TaskDetail; line: LineView; action: 
       {line.agent && d.task.stage !== "done" && d.task.stage !== "cancelled" && (
         <div className={s.sayDock}>
           <Sec title={`${tr("对它说")} · ${line.agent}`}>
-            <CollabSay agent={line.agent} busy={exec?.busy === true} tr={tr} />
+            <CollabSay agent={line.agent} working={working} tr={tr} />
           </Sec>
         </div>
       )}
@@ -199,16 +219,12 @@ export function CollabDetail(props: {
   const tr = useT();
   const narrow = useNarrow();
   const load = useTaskDetail(project, id, rev);
-  const { showContent } = useChatNav();
-  // 手机上系统返回（左滑 / 返回键）回到会话列表时，全屏详情跟着收起，不留在列表上面
+  const close = useDetailHistory(narrow, id, onClose);
   useEffect(() => {
-    if (narrow && !showContent) onClose();
-  }, [narrow, showContent, onClose]);
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
+    const onKey = (e: KeyboardEvent) => e.key === "Escape" && close();
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
+  }, [close]);
   const task = ov.tasks.find((t) => t.id === id);
   // 今日完成的任务不在首页的线里：现算一条，详情照样有「现在」与用时
   const line = props.line ?? (task ? lineOf(task, ov, new Map(ov.items.map((i) => [i.id, i])), now, tr) : null);
@@ -223,7 +239,7 @@ export function CollabDetail(props: {
           </div>
           {line?.goal && <div className={s.b}>{line.goal}</div>}
         </div>
-        <button type="button" className={s.ib} aria-label={tr("关闭")} onClick={onClose}>
+        <button type="button" className={s.ib} aria-label={tr("关闭")} onClick={close}>
           <Icon name={narrow ? "arrowLeft" : "x"} size={15} />
         </button>
       </div>

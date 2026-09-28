@@ -529,14 +529,14 @@ function ChatInner() {
     if (qa) {
       window.history.replaceState(null, "", window.location.pathname);
       void store.openAgent(qa);
-      toContent();
+      closingCollab(toContent)(); // 通知直达：哪怕正是底下这个会话，也得把协作视图收起来
     }
     // v2.22+ 原生壳:绑定 APNs 插件事件(token 登记 / 点通知直达),已授权则静默刷新 token
     if (isNativeShell()) {
       void import("@/lib/push/native").then((m) => {
         m.bindNativePushListeners((agent) => {
           void store.openAgent(agent);
-          toContent();
+          closingCollab(toContent)(); // 通知直达：哪怕正是底下这个会话，也得把协作视图收起来
         });
         void m.refreshNativeRegistration();
       });
@@ -546,7 +546,7 @@ function ChatInner() {
       const d = e.data as { type?: string; agent?: string; fp?: string };
       if (d?.type !== "cstra-open-agent" || !d.agent) return;
       void hopThenOpen(d.fp, () => store.resetForMachine(), () => store.openAgent(String(d.agent))); // 别的机器发的通知：先切机器再开会话
-      toContent();
+      closingCollab(toContent)(); // 通知直达：哪怕正是底下这个会话，也得把协作视图收起来
     };
     navigator.serviceWorker.addEventListener("message", onMsg);
     return () => navigator.serviceWorker.removeEventListener("message", onMsg);

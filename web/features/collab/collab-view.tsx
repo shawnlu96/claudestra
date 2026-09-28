@@ -14,6 +14,7 @@ import { CollabLine, LineHeaderCols } from "./collab-line";
 import { columnOf, homeView, type HomeView, type LedgerOverview, type LineView, type Tr } from "./collab-model";
 import { openCollabTask, useCollabNav } from "./collab-nav";
 import { useCollab, type Advance } from "./use-collab";
+import { cachedOverview } from "./collab-cache";
 import s from "./collab.module.css";
 
 /** 模块级稳定引用：详情里的 effect 依赖它，每次渲染换新函数会白跑 */
@@ -23,7 +24,7 @@ const hhmm = (ms: number) => new Date(ms).toLocaleTimeString([], { hour: "2-digi
 
 function Headline({ v, tr, connected, now, projectName }: { v: HomeView; tr: Tr; connected: boolean; now: number; projectName: string }) {
   const parts: { cls?: string; text: string }[] = [{ text: tr("{n} 条在推进", { n: v.headline.advancing }) }];
-  if (v.headline.problem) parts.push({ cls: s.bad, text: tr("{n} 条返工", { n: v.headline.problem }) });
+  if (v.headline.problem) parts.push({ cls: s.bad, text: tr("{n} 条出问题", { n: v.headline.problem }) });
   if (v.headline.stuck) parts.push({ cls: s.stuck, text: tr("{n} 条卡住", { n: v.headline.stuck }) });
   return (
     <div className={s.top}>
@@ -128,7 +129,13 @@ export function CollabView({ project }: { project: string }) {
   const { task: openTask } = useCollabNav();
   const agents = useChatStore((st) => st.state.agents);
   const projects = useChatStore((st) => st.state.projects);
-  const { load, now, actions, connected, rev, advance, refetch } = useCollab(project);
+  // 本项目的 agent：registry 里归这个项目的，加上台账任务挂着的执行者 / PM（缓存的总览里有）
+  const members = useMemo(() => {
+    const set = new Set(agents.filter((a) => a.projectId === project).map((a) => a.name));
+    for (const t of cachedOverview(project)?.ov.tasks ?? []) for (const n of [t.agent, t.pm]) if (n) set.add(n.replace(/^agent-/, ""));
+    return set;
+  }, [agents, project]);
+  const { load, now, actions, connected, rev, advance, refetch } = useCollab(project, members);
   const busy = useMemo(() => new Map(agents.map((a) => [a.name, a.busy])), [agents]);
   const ov = load.status === "ok" ? load.ov : null;
   const view = useMemo(() => (ov ? homeView(ov, now, tr) : null), [ov, now, tr]);

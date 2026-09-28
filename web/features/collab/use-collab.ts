@@ -9,7 +9,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { ApiError } from "@/lib/api/client";
 import { fetchLedger, fetchLedgerTask, followCollabEvents } from "@/lib/api/ledger";
 import { reduceAction, type ActionMap } from "./collab-action";
-import { markLedgerForbidden } from "./collab-entry";
+import { cachedOverview, cacheOverview, setLedgerAccess } from "./collab-cache";
 import type { LedgerOverview, Stage } from "./collab-model";
 import type { TaskDetail } from "./collab-detail-model";
 import type { BridgeEvent } from "@/lib/chat/stream-shape";
@@ -28,11 +28,9 @@ const REFETCH_DEBOUNCE_MS = 250;
 const RETRY_MIN_MS = 2_000;
 const RETRY_MAX_MS = 30_000;
 
-/** 上次拉到的总览（按项目）：切回协作视图先显示它、后台再重拉，不从「正在读取」开始 */
-const lastOverview = new Map<string, { ov: LedgerOverview; offset: number }>();
-
-export function useCollab(project: string) {
-  const cached = lastOverview.get(project);
+/** members：本项目的 agent（前端会话名）；别的项目的 agent 在跑什么与这里无关，不进此刻动作表 */
+export function useCollab(project: string, members: ReadonlySet<string>) {
+  const cached = cachedOverview(project);
   const [load, setLoad] = useState<CollabLoad>(cached ? { status: "ok", ov: cached.ov } : { status: "loading" });
   const [offset, setOffset] = useState(cached?.offset ?? 0);
   const [clock, setClock] = useState(() => Date.now());
@@ -53,7 +51,7 @@ export function useCollab(project: string) {
       const moved = prev ? ov.tasks.find((t) => prev.has(t.id) && prev.get(t.id) !== t.stage) : undefined;
       if (moved) setAdvance({ id: moved.id, from: prev!.get(moved.id)!, at: Date.now() });
       prevStages.current = new Map(ov.tasks.map((t) => [t.id, t.stage]));
-      lastOverview.set(project, { ov, offset: ov.now - Date.now() });
+      cacheOverview(project, ov, ov.now - Date.now());
       setOffset(ov.now - Date.now());
       setClock(Date.now());
       setLoad({ status: "ok", ov });
@@ -61,7 +59,7 @@ export function useCollab(project: string) {
     } catch (e) {
       if (ctrl.signal.aborted) return;
       if (e instanceof ApiError && e.status === 403) {
-        markLedgerForbidden();
+        setLedgerAccess(project, "no");
         setLoad({ status: "forbidden" });
       }
       // 已经有数据时重拉失败不清屏：留着旧的，下次事件 / 重连再拉
@@ -70,7 +68,7 @@ export function useCollab(project: string) {
   }, [project]);
 
   useEffect(() => {
-    const seen = lastOverview.get(project)?.ov;
+    const seen = cachedOverview(project)?.ov;
     prevStages.current = seen ? new Map(seen.tasks.map((t) => [t.id, t.stage])) : null;
     setAdvance(null);
     // 先拉一次：事件流连不上（老 bridge / 限流）也有数据看；连上后 onOpen 再全量拉一次（会中止这一次）
@@ -81,7 +79,13 @@ export function useCollab(project: string) {
       inflight.current?.abort();
     };
   }, [project, refetch]);
-  const onAction = useCallback((e: BridgeEvent) => setActions((m) => reduceAction(m, e, Date.now())), []);
+  const membersRef = useRef(members);
+  useEffect(() => {
+    membersRef.current = members;
+  }, [members]);
+  const onAction = useCallback((e: BridgeEvent) => {
+    if (membersRef.current.has(e.agent.replace(/^agent-/, ""))) setActions((m) => reduceAction(m, e, Date.now()));
+  }, []);
   const connected = useCollabStream(project, refetch, onAction);
 
   return { load, now: clock + offset, actions, connected, rev, advance, refetch };

@@ -54,6 +54,8 @@ export interface LedgerTaskView {
   updatedAt: number;
   lastEvent: LedgerEventView | null;
   stageSince?: number | null;
+  /** stageSince 是导入推断的近似时间（老 bridge 没有这个字段 = false） */
+  stageSinceApprox?: boolean;
   lastReview?: ReviewSummaryView | null;
   metrics: TaskMetricsView;
 }
@@ -76,8 +78,8 @@ export function skippedColumns(kind: string): number[] {
   return kind === "investigate" ? [4, 5, 6] : kind === "ops" ? [1] : [];
 }
 
-/** 在等别人的阶段：停太久就是卡住。build / fix 是在干活，时间长不算卡住（PM 09-28 定） */
-const WAIT_STAGES: ReadonlySet<Stage> = new Set(["spec", "restate", "review", "merge", "live", "blocked"]);
+/** 在等别人的阶段：停太久就是卡住。build / fix 是在干活，spec 还没开工，时间长都不算卡住（PM 09-28 开工确认 c 条） */
+const WAIT_STAGES: ReadonlySet<Stage> = new Set(["restate", "review", "merge", "live", "blocked"]);
 export const STUCK_MS = 30 * 60_000;
 
 /** 关注度：数字小的排前面。owner（等你）要 T11 的数据，第一版恒不出现，槽位保留 */
@@ -99,6 +101,8 @@ export interface LineView {
   /** 阶段短语：「返工中 · 第 1 轮意见」「等合并 · 队列第 2 位」「开发中」 */
   stageLabel: string;
   dwellMs: number | null;
+  /** 停留时长是从导入推断的时间算的：显示时前面加 ≈，也不拿它判卡住 */
+  dwellApprox: boolean;
   stuck: boolean;
   /** 出问题 / 卡住时的一句原因 */
   reason: string;
@@ -148,6 +152,7 @@ export function dwellMs(t: LedgerTaskView, now: number): number | null {
 }
 
 export function isStuck(t: LedgerTaskView, now: number): boolean {
+  if (t.stageSinceApprox === true) return false;
   const d = dwellMs(t, now);
   return WAIT_STAGES.has(t.stage) && d !== null && d > STUCK_MS;
 }
@@ -176,6 +181,12 @@ export function fmtDuration(ms: number, tr: Tr = zh): string {
   if (m < 60) return tr("{m}分", { m });
   const h = Math.floor(m / 60);
   return m % 60 ? tr("{h}小时{m}分", { h, m: m % 60 }) : tr("{h}小时", { h });
+}
+
+/** 「在此阶段 X」；导入推断的时间前面加 ≈；没有时长为空串 */
+export function dwellText(l: Pick<LineView, "dwellMs" | "dwellApprox">, tr: Tr = zh): string {
+  if (l.dwellMs === null) return "";
+  return tr("在此阶段 {d}", { d: `${l.dwellApprox ? "≈" : ""}${fmtDuration(l.dwellMs, tr)}` });
 }
 
 function reviewRound(t: LedgerTaskView): number {
@@ -255,6 +266,7 @@ export function lineOf(t: LedgerTaskView, ov: Pick<LedgerOverview, "tasks" | "me
     tone: toneOf(att),
     stageLabel: stageLabel(t, ov.tasks, frozen, tr),
     dwellMs: dwell,
+    dwellApprox: t.stageSinceApprox === true,
     stuck: att === "stuck",
     reason: reasonOf(t, att, dwell, frozen, tr),
     agent: bareAgent(t.agent),
