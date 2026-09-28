@@ -29,7 +29,7 @@ export interface LpRead {
   busy: boolean;
   compacting: boolean;
   input: InputState;
-  /** 输入框里的字（去色，去掉行首 ❯ / !，多行用换行连）；没有输入框时是空串 */
+  /** 输入框里的字（去色，去掉行首 ❯ / ! 和它后面那一个空格，多行用换行连；行首多出的空格保留，调用方比原文）；没有输入框时是空串 */
   inputText: string;
   /**
    * 稳定接口（T36 注入闸门看它）：底部被模态占着——没有输入框（额度菜单、权限框、AUQ、Rewind、各种确认框、认不出的画面），
@@ -174,7 +174,7 @@ function busyAbove(above: string[]): boolean {
   return above.some((l) => SPINNER_LINE_RE.test(l) && CC_BUSY_RE.test(l.replace(/esc (?:or type )?to cancel/gi, "")));
 }
 
-const inputTextOf = (lines: string[]) => lines.map((l, i) => (i ? l.replace(/^ {1,2}/, "") : l.slice(1).replace(/^ /, ""))).join("\n").trim();
+const inputTextOf = (lines: string[]) => lines.map((l, i) => (i ? l.replace(/^ {1,2}/, "") : l.slice(1).replace(/^ /, ""))).join("\n").trimEnd();
 
 /**
  * 模态时的结果：只有底部真额度菜单（顶格 ▔ 上沿、下面没有输入框）才算撞墙，有 LP 项算「关、能开」（只是 runner 不会去按它）；
