@@ -107,15 +107,26 @@ export interface Who {
   name: string;
   project: string;
   channelId: string;
-  /** 派发者（registry parent）：建 ask 时就记进 extra——kill 会删掉 registry 条目，到答复时再查就查不到了 */
+  /**
+   * 派发者（registry parent）和它的频道：建 ask 时就记进 extra——kill 会删掉 registry 条目，到答复时再查就查不到了。
+   * 改投按频道认人，名字只作显示：派发者改名后名字对不上，旧名又可能被别的 agent 占用
+   */
   parent?: string;
+  parentChannelId?: string;
 }
 
 export async function whoIs(channelId: string): Promise<Who | null> {
   if (deps && channelId === deps.controlChannelId) return { name: "master", project: MASTER_PROJECT, channelId };
-  const r = (await readRegistry()).find((a) => a.channelId === channelId);
-  return r ? { name: r.name, project: r.projectId || MASTER_PROJECT, channelId, ...(r.parent ? { parent: r.parent } : {}) } : null;
+  const regs = await readRegistry();
+  const r = regs.find((a) => a.channelId === channelId);
+  if (!r) return null;
+  const parentChannelId = r.parent ? regs.find((a) => a.name === r.parent)?.channelId : undefined;
+  return { name: r.name, project: r.projectId || MASTER_PROJECT, channelId, ...(r.parent ? { parent: r.parent } : {}), ...(parentChannelId ? { parentChannelId } : {}) };
 }
+
+/** 建 ask 时记下的派发者（见 Who.parent） */
+export const parentExtra = (w: Who): { extra?: Record<string, string> } =>
+  w.parent ? { extra: { parent: w.parent, ...(w.parentChannelId ? { parentChannelId: w.parentChannelId } : {}) } } : {};
 
 export function taskOf(name: string): string | null {
   try {
@@ -145,7 +156,7 @@ async function openAskForReply(env: Envelope, chatId: string, fromChannelId: str
   const a = openAsk(askDb(), {
     project: who.project, taskId: taskOf(who.name), fromAgent: who.name, fromChannelId, source: "reply", kind: "decide", blocking: null,
     title: draft.title, context: draft.context, body: env.content, options: draft.options, kindHint: draft.kindHint, chatId, threadId: env.meta.threadId,
-    ...(who.parent ? { extra: { parent: who.parent } } : {}),
+    ...parentExtra(who),
   });
   publishAsk(a);
   return a;
@@ -211,8 +222,9 @@ export function answerContent(a: Ask, picks: WireMatch[], text: string, original
 }
 
 /**
- * 发起方还在就投它；不在了（停了或被 kill）改投它的派发者，派发者也不在就投大总管。派发者优先看 registry，
- * 被 kill 的已经从 registry 删掉了，就用建 ask 时记下的 extra.parent（设计 §4.6-3）。
+ * 发起方还在就投它；不在了（停了或被 kill）改投它的派发者，派发者也不在就投大总管。派发者优先看 registry（kill / 改名时
+ * repointParentRefs 会修正引用）；被 kill 的已经从 registry 删掉了，就按建 ask 时记下的 extra.parentChannelId 找还在的那个频道，
+ * 找不到（只记了名字的旧 ask、派发者也没了）落到大总管——不按名字找，同名的可能是后来新建的不相干 agent（设计 §4.6-3）。
  */
 async function answerTarget(a: Ask): Promise<Target> {
   const d = deps!;
@@ -220,8 +232,10 @@ async function answerTarget(a: Ask): Promise<Target> {
   const regs = await readRegistry();
   const self = regs.find((r) => r.channelId === a.fromChannelId);
   if (self?.status === "active") return { channelId: a.fromChannelId, agentName: a.fromAgent };
-  const parentName = self?.parent ?? (typeof a.extra.parent === "string" ? a.extra.parent : undefined);
-  const parent = parentName ? regs.find((r) => r.name === parentName && r.status === "active" && r.channelId) : undefined;
+  const snap = typeof a.extra.parentChannelId === "string" ? a.extra.parentChannelId : undefined;
+  const parent = self
+    ? self.parent ? regs.find((r) => r.name === self.parent && r.status === "active" && r.channelId) : undefined
+    : snap ? regs.find((r) => r.channelId === snap && r.status === "active") : undefined;
   if (parent?.channelId) return { channelId: parent.channelId, agentName: parent.name, redirected: parent.name };
   return { channelId: d.controlChannelId, agentName: "master", redirected: "master" };
 }

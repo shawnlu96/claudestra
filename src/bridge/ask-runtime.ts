@@ -9,7 +9,7 @@
 import { t } from "../lib/i18n.js";
 import { answerAsk, closeAsk, hasAsksTable, listAsks, MASTER_PROJECT, openAsk, type AskSource, type AskVia, type NewAsk } from "../lib/ledger-asks.js";
 import { detectCodexRuntimeDialog } from "../lib/runtime-dialogs.js";
-import { askDb, askDbIfExists, notePresenceFromEvent, publishAsk, registry, taskOf, whoIs } from "./asks.js";
+import { askDb, askDbIfExists, notePresenceFromEvent, parentExtra, publishAsk, registry, taskOf, whoIs } from "./asks.js";
 import { subscribeEvents } from "./event-bus.js";
 
 type RuntimeSource = Exclude<AskSource, "reply">;
@@ -57,7 +57,7 @@ export async function openRuntimeAsk(r: RuntimeAskInput): Promise<void> {
     const a = openAsk(askDb(), {
       project: who.project, taskId: taskOf(who.name), fromAgent: who.name, fromChannelId: r.channelId, source: r.source, kind: r.kind, blocking: true,
       urgency: urgent ? "urgent" : "normal", title: r.title, context: r.context, options: r.options, allowText: false, chatId: r.channelId,
-      ...(who.parent ? { extra: { parent: who.parent } } : {}),
+      ...parentExtra(who),
     });
     publishAsk(a);
     // 建的途中弹框已经没了（settle 先到、删了占位）：立刻结案，别留一条永远开着的

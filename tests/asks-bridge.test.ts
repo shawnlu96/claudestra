@@ -228,7 +228,7 @@ describe("改投、过期、运行时弹框", () => {
     await answerFromChat({ agent: "agent-x", text: "[button:go]", principal: owner() });
     expect(delivered[0].to).toMatchObject({ channelId: "222", agentName: "agent-pm" });
     expect(delivered[0].content.split("\n")[0]).toContain("原本是 agent-x 问的");
-    expect(getAsk(openLedger(path), a.id)?.extra).toEqual({ parent: "agent-pm", redirectedTo: "agent-pm" });
+    expect(getAsk(openLedger(path), a.id)?.extra).toEqual({ parent: "agent-pm", parentChannelId: "222", redirectedTo: "agent-pm" });
     const b = (await reply())!;
     clients.clear();
     setAsksForTest({ path, deps: mkDeps(), registry: [], ownerChats: ["api:owner:self"] });
@@ -417,11 +417,25 @@ describe("第二轮审查的复现", () => {
 
   test("P2-3 发起方被 kill（registry 条目已删）：答复仍先投给建 ask 时记下的派发者", async () => {
     const a = (await reply())!;
-    expect(a.extra).toEqual({ parent: "agent-pm" });
+    expect(a.extra).toEqual({ parent: "agent-pm", parentChannelId: "222" });
     clients.delete("111");
     setAsksForTest({ path, deps: mkDeps(), registry: [REGISTRY[1]], ownerChats: ["api:owner:self"] });
     await answerFromChat({ agent: "agent-x", text: "[button:go]", principal: owner() });
     expect(delivered[0].to).toMatchObject({ channelId: "222", agentName: "agent-pm" });
+  });
+
+  test("r3 P2-1 派发者按频道认：它也被 kill、旧名被新 agent 占了 → 大总管；它只是改了名 → 投给改名后的它", async () => {
+    const a = (await reply())!;
+    const b = (await reply())!;
+    clients.clear();
+    const squatter = { name: "agent-pm", channelId: "555", status: "active", projectId: "q" } as RegistryAgent;
+    setAsksForTest({ path, deps: mkDeps(), registry: [squatter], ownerChats: ["api:owner:self"] });
+    await answerFromChat({ agent: "agent-x", text: "[button:go]", principal: owner(), askId: a.id });
+    expect(held.map((e) => e.to)).toMatchObject([{ channelId: "999", agentName: "master" }]);
+    const renamed = { ...REGISTRY[1], name: "agent-pm2" } as RegistryAgent;
+    setAsksForTest({ path, deps: mkDeps(), registry: [renamed, { ...squatter, channelId: "666" } as RegistryAgent], ownerChats: ["api:owner:self"] });
+    await answerFromChat({ agent: "agent-x", text: "[button:go]", principal: owner(), askId: b.id });
+    expect(held[1].to).toMatchObject({ channelId: "222", agentName: "agent-pm2" });
   });
 
   test("P2-2 过期通知：改投派发者时写明原发起方；只能落到大总管的不发", async () => {
