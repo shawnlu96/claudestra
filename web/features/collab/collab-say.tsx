@@ -12,7 +12,7 @@ import { Icon } from "./collab-icons";
 import type { Tr } from "./collab-model";
 import s from "./collab.module.css";
 
-type Receipt = { kind: "sent"; at: number } | { kind: "busy" } | { kind: "error"; message: string } | null;
+type Receipt = { kind: "sent"; at: number } | { kind: "busy" } | { kind: "unknown" } | { kind: "error"; message: string } | null;
 
 const hhmm = (ms: number) => new Date(ms).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false });
 
@@ -28,9 +28,11 @@ export function CollabSay({ agent, working, tr }: { agent: string; working: bool
     setSending(true);
     ctrl.current = new AbortController();
     try {
-      // 页面上的忙闲可能是十几秒前的：发之前再问一次 bridge，它此刻在回合里就不发（发了就是 C-c）
-      if (!liveIdle(await agentPending(agent))) {
-        setReceipt({ kind: "busy" });
+      // 页面上的忙闲可能是十几秒前的：发之前再问一次 bridge（/pending 的 thinking），它此刻在回合里就不发（发了就是 C-c）。
+      // 这个空闲判定不含画面探测：回合刚开始、thinking 还没置上的那一小段仍可能被打断，由 T13a 的不抢占投递兜底。
+      const pending = await agentPending(agent);
+      if (!liveIdle(pending)) {
+        setReceipt({ kind: pending === null ? "unknown" : "busy" });
         return;
       }
       await sendMessage(agent, text.trim(), undefined, ctrl.current.signal);
@@ -69,6 +71,7 @@ export function CollabSay({ agent, working, tr }: { agent: string; working: bool
         </div>
       )}
       {receipt?.kind === "busy" && <div className={`${s.rcpt} ${s.err}`}>{tr("它刚开始干活，没发。等它这步做完再说")}</div>}
+      {receipt?.kind === "unknown" && <div className={`${s.rcpt} ${s.err}`}>{tr("没查到它的状态，没发")}</div>}
       {receipt?.kind === "error" && <div className={`${s.rcpt} ${s.err}`}>{tr("没发出去：{m}", { m: receipt.message })}</div>}
     </div>
   );

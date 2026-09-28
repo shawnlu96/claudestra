@@ -12,12 +12,14 @@
 import { COLLAB_DICT } from "./i18n-dict-collab";
 import { LEDGER_DICT } from "./i18n-dict-ledger";
 import { QUOTA_DICT } from "./i18n-dict-quota";
+import { SESSIONS_DICT } from "./i18n-dict-sessions";
 import { SKILLS_DICT } from "./i18n-dict-skills";
 
 export const DICT: Record<string, string> = {
   ...LEDGER_DICT,
   ...COLLAB_DICT,
   ...QUOTA_DICT, // 订阅额度卡片组与开关（lib/i18n-dict-quota.ts）
+  ...SESSIONS_DICT, // 未纳管会话 / 归档（lib/i18n-dict-sessions.ts）
   ...SKILLS_DICT, // 技能库与按会话启停（lib/i18n-dict-skills.ts）
   // ── 通用 ─────────────────────────────────────────────
   "关闭": "Close",
@@ -491,33 +493,6 @@ export const DICT: Record<string, string> = {
   "下次": "Next run:", // 后接时间或「已停用」
   "上次": "Last run:",
   "已停用": "disabled",
-
-  // ── 未纳管会话 / 归档 ────────────────────────────────
-  "未纳管会话": "Unmanaged sessions",
-  "没有未纳管的会话": "No unmanaged sessions",
-  "会话文件 2 分钟内还在写 —— 大概率正在运行（启发式）": "Session file written in the last 2 minutes — probably still running (heuristic)",
-  "活跃": "Active",
-  "已归档并从列表移除（内容留在归档目录，可找回）": "Archived and removed from the list (the content stays in the archive and can be restored)",
-  "已受理，正在后台收编（约 10-40 秒），完成后会出现在 agent 列表里。":
-    "Accepted — adopting in the background (about 10–40 s). It will show up in the agent list when done.",
-  "这个会话还没有消息": "This session has no messages yet",
-  "用户": "User",
-  "助手": "Assistant",
-  "系统": "System",
-  "agent 名字": "Agent name",
-  "收编": "Adopt",
-  "收编为 agent": "Adopt as agent",
-  "← 返回": "← Back",
-  "这个会话没有纳管，现在收不到消息。收编后会建窗口、能对话、进 agent 列表。":
-    "This session isn't managed, so it can't receive messages. Adopting it opens a window for it, lets you chat with it and adds it to the agent list.",
-  "这种运行时的会话只读：历史能看能搜，但收编不了——Claudestra 还没法往这种会话里发消息。":
-    "Sessions from this runtime are read-only: you can browse and search the history but can't adopt them — Claudestra can't send messages into them yet.",
-  "刷新": "Refresh",
-  "归档是空的": "The archive is empty",
-  "恢复": "Restore",
-  "{n} 个会话": "{n} session|{n} sessions",
-  "归档失败:": "Archive failed: ", // 值尾带空格
-  "沉寂": "Dormant",
 
   // ── 上下文徽章 / 存记忆 + Compact ─────────────────────
   "上下文": "Context",

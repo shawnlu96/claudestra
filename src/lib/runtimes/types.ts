@@ -25,6 +25,13 @@ import type { StatsWindowScanner } from "../agent-stats.js";
 
 export type AnyRecord = Record<string, any>;
 
+/** 子会话的归属（目前只有 Codex：subagent / guardian_review 自动审查线程）：直接父会话 id、来源、昵称 */
+export interface SubSessionInfo {
+  parentId: string;
+  kind: string;
+  nickname?: string;
+}
+
 /** 会话列表里的一条（三种来源统一成这个形状） */
 export interface DiscoveredSession {
   sessionId: string;
@@ -33,6 +40,8 @@ export interface DiscoveredSession {
   modifiedAt: Date;
   lastUserMessage: string;
   runtime: string;
+  /** 主会话不带 */
+  sub?: SubSessionInfo;
 }
 
 export interface SessionSourceAdapter {
