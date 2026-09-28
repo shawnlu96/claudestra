@@ -272,7 +272,9 @@ export function initMission(d: MissionDeps): void {
   deps = d;
   initAutopilotEvidence();
   subscribeEvents({}, (evt) => {
-    if (evt.type !== "agent_status" || (evt.data as { status?: unknown })?.status !== "done") return;
+    const d = evt.data as { status?: unknown; reason?: unknown };
+    // bridge 重启时给每个频道补发的 done 不是回合结束：当成回合结束会把「等人拍板 / 待命」提前放行；在跑的 run 由 decideFire 按画面收尾
+    if (evt.type !== "agent_status" || d?.status !== "done" || d.reason === "bridge_restarted") return;
     onTurnDone(evt.agent).catch((e) => console.error("⏱ Autopilot 回合结束处理失败:", (e as Error).message));
   });
   const rerun = (why: string) => () => void reconcileMissions().catch((e) => console.error(`⏱ Autopilot ${why}失败:`, (e as Error).message));

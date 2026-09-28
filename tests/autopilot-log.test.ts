@@ -39,6 +39,7 @@ describe("formatRunLine", () => {
     expect(s).toContain("action_taken 5 分钟");
     expect(s).toContain("中途有人插话");
     expect(s).toContain("（干了活，接着推）");
+    expect(formatRunLine(line({ durationMs: 7_800 }))).toContain("action_taken 8 秒");
     expect(formatRunLine(line({ outcome: "skipped", reason: "排队 30 分钟没推进：主回合在跑" }))).toContain("skipped · 排队 30 分钟没推进");
   });
 });

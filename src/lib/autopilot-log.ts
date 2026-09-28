@@ -95,7 +95,8 @@ const hhmm = (s?: string) => (s ? new Date(s).toTimeString().slice(0, 5) : "--:-
 
 /** 给人看的一行：「03:41 action_taken 12 分钟 · 调了 8 个工具… · 下次 03:42（接着推）」 */
 export function formatRunLine(l: RunLogLine): string {
-  const dur = l.durationMs !== undefined ? ` ${Math.max(1, Math.round(l.durationMs / 60_000))} 分钟` : "";
+  const d = l.durationMs;
+  const dur = d === undefined ? "" : d < 60_000 ? ` ${Math.max(1, Math.round(d / 1000))} 秒` : ` ${Math.round(d / 60_000)} 分钟`;
   const flags = [l.evidence?.humanInterleaved ? "中途有人插话" : "", l.evidence?.evidenceLost ? "bridge 重启过、证据不全" : ""].filter(Boolean);
   const next = l.nextWakeAt ? ` · 下次 ${hhmm(l.nextWakeAt)}${l.why ? `（${l.why}）` : ""}` : "";
   return `${hhmm(l.startedAt ?? l.ts)} ${l.outcome}${dur} · ${l.reason}${flags.length ? `（${flags.join("，")}）` : ""}${next}`;

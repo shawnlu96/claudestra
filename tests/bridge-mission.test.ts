@@ -177,6 +177,13 @@ describe("到点", () => {
 });
 
 describe("bridge 重启后（只有落盘的状态）", () => {
+  test("重启时补发的 done（reason=bridge_restarted）不算回合结束：不放行等人拍板", async () => {
+    await put({ wakeSeq: 1, wake: { seq: 1, source: "turn_end", dueAt: new Date(Date.now() + 3_600_000).toISOString(), firstAt: new Date().toISOString(), merged: 0, hold: "blocked" } });
+    ev("agent_status", { status: "done", reason: "bridge_restarted" });
+    await settle();
+    expect((await cur()).wake).toMatchObject({ seq: 1, hold: "blocked" });
+    expect(sent.length).toBe(0);
+  });
   test("落盘的唤醒 → 重排后递一次，不多递", async () => {
     await put({ wakeSeq: 3, wake: { seq: 3, source: "turn_end", dueAt: new Date(Date.now() - 1000).toISOString(), firstAt: new Date().toISOString(), merged: 2 } });
     await reconcileMissions();
