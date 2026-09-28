@@ -10,7 +10,7 @@ import {
   keepOlderPrefix,
   resolveAnchor,
   seqOfId,
-  windowToKeep,
+  windowForTop,
 } from "@/features/chat/scroll-anchor";
 import { ReloadScroll } from "@/features/chat/reload-scroll";
 import type { ChatMessage } from "@/features/chat/type";
@@ -39,6 +39,10 @@ describe("captureAnchor", () => {
       view,
     );
     expect(a).toEqual({ atBottom: false, id: "h12", seq: 12, offset: -120 });
+  });
+
+  test("吸底跟随中（手指按住时流式长高、几何上已离底）也记 atBottom", () => {
+    expect(captureAnchor([], { ...view, following: true }).atBottom).toBe(true);
   });
 
   test("贴底（离底 < 90px）记 atBottom", () => {
@@ -89,26 +93,33 @@ describe("anchorScrollDelta", () => {
   });
 });
 
-describe("followAfterScroll（内容变矮造成的 scrollTop 下降不算用户上滑）", () => {
+describe("followAfterScroll（被夹回 / 回弹落位不算用户上滑）", () => {
+  const at = (top: number, max: number) => ({ top, max });
+
   test("用户上滑离开底部 → 退出吸底", () => {
-    expect(followAfterScroll(4400, 4380, 5000, 600)).toBe(false);
+    expect(followAfterScroll(at(4400, 4400), 4380, 5000, 600)).toBe(false);
   });
 
-  test("重拉 / 思考点消失让内容变矮，scrollTop 被夹到新的最底 → 仍吸底（09-28 复现 trace：27470→27446）", () => {
-    expect(followAfterScroll(27470, 27446, 28088, 642)).toBe(true);
+  test("内容变矮，scrollTop 被夹到新的最底 → 仍吸底（复现 trace：max 27470→27446）", () => {
+    expect(followAfterScroll(at(27470, 27470), 27446, 28088, 642)).toBe(true);
   });
 
   test("视口变高（输入框收起）被夹回 → 仍吸底", () => {
-    expect(followAfterScroll(4400, 4370, 5000, 630)).toBe(true);
+    expect(followAfterScroll(at(4400, 4400), 4370, 5000, 630)).toBe(true);
   });
 
-  test("iOS 底部回弹落位（scrollTop 从越界值回到 max）→ 仍吸底", () => {
-    expect(followAfterScroll(4430, 4400, 5000, 600)).toBe(true);
+  test("iOS 底部回弹落位（上一拍 scrollTop 越过 max）→ 仍吸底", () => {
+    expect(followAfterScroll(at(4430, 4400), 4400, 5000, 600)).toBe(true);
+  });
+
+  test("桌面高 DPR 触控板慢速上滑、单帧 ≤1px（max 没变）→ 退出吸底，不被当成夹回", () => {
+    expect(followAfterScroll(at(4400, 4400), 4399.5, 5000, 600)).toBe(false);
+    expect(followAfterScroll(at(4400, 4400), 4399, 5000, 600)).toBe(false);
   });
 
   test("往下滑到接近底部 → 恢复吸底；在中间往下滑 → 不吸", () => {
-    expect(followAfterScroll(4300, 4350, 5000, 600)).toBe(true);
-    expect(followAfterScroll(1000, 1200, 5000, 600)).toBe(false);
+    expect(followAfterScroll(at(4300, 4400), 4350, 5000, 600)).toBe(true);
+    expect(followAfterScroll(at(1000, 4400), 1200, 5000, 600)).toBe(false);
   });
 });
 
@@ -140,65 +151,89 @@ describe("keepOlderPrefix（往上翻时全量重拉保留已翻出的更早前�
 });
 
 describe("ReloadScroll（store ↔ 列表交接）", () => {
-  const anchorAt = (atBottom: boolean) => ({ capture: () => ({ atBottom, id: "h8", seq: 8, offset: -40 }) });
+  const view = (atBottom: boolean) => ({ capture: () => ({ atBottom, id: "h8", seq: 8, offset: -40 }) });
   const current = ["h5", "h8", "h10"].map(msg);
   const next = ["h8", "h10", "h11"].map(msg);
+  const base = { sameSession: true, current, next };
 
-  test("没 expect 过（首次打开 / 切会话）→ 不锚定、不拼前缀", () => {
+  test("不传 reload（首次打开 / 切会话 / 历史现场）→ 不交接、不拼前缀", () => {
     const r = new ReloadScroll();
-    r.attach(anchorAt(false));
-    expect(ids(r.merge("a", { sameSession: true, current, next }))).toEqual(["h8", "h10", "h11"]);
+    r.attach(view(false));
+    expect(ids(r.merge("a", base))).toEqual(["h8", "h10", "h11"]);
     expect(r.take("a")).toBeNull();
   });
 
-  test("对齐重拉 + 往上翻 → 拼前缀并交出锚点（只交一次）", () => {
+  test("align + 往上翻 → 拼前缀并交出锚点（只交一次）", () => {
     const r = new ReloadScroll();
-    r.attach(anchorAt(false));
-    r.expect("a");
-    expect(ids(r.merge("a", { sameSession: true, current, next }))).toEqual(["h5", "h8", "h10", "h11"]);
-    expect(r.take("a")).toMatchObject({ agent: "a", prefix: 1, anchor: { seq: 8 } });
+    r.attach(view(false));
+    expect(ids(r.merge("a", { ...base, reload: "align" }))).toEqual(["h5", "h8", "h10", "h11"]);
+    expect(r.take("a")).toMatchObject({ agent: "a", why: "anchor", prefix: 1, anchor: { seq: 8 } });
     expect(r.take("a")).toBeNull();
   });
 
-  test("对齐重拉 + 贴底 → 不拼前缀（回到最近一页），锚点照交（列表据此继续贴底）", () => {
+  test("align + 贴底 → 不拼前缀，落底", () => {
     const r = new ReloadScroll();
-    r.attach(anchorAt(true));
-    r.expect("a");
-    expect(ids(r.merge("a", { sameSession: true, current, next }))).toEqual(["h8", "h10", "h11"]);
-    expect(r.take("a")?.anchor.atBottom).toBe(true);
+    r.attach(view(true));
+    expect(ids(r.merge("a", { ...base, reload: "align" }))).toEqual(["h8", "h10", "h11"]);
+    expect(r.take("a")?.why).toBe("bottom");
   });
 
-  test("session 轮转了不拼；换了会话的快照不交给别的会话", () => {
+  test("latest（点推送 / 深链 / 重点当前会话）→ 不看位置，一律落底", () => {
     const r = new ReloadScroll();
-    r.attach(anchorAt(false));
-    r.expect("a");
-    expect(ids(r.merge("a", { sameSession: false, current, next }))).toEqual(["h8", "h10", "h11"]);
+    r.attach(view(false));
+    expect(ids(r.merge("a", { ...base, reload: "latest" }))).toEqual(["h8", "h10", "h11"]);
+    expect(r.take("a")).toMatchObject({ why: "latest", anchor: null, prefix: 0 });
+  });
+
+  test("align 但 session 轮转了（/clear 之后）→ 不拼、不锚定，落底并注明 rotated", () => {
+    const r = new ReloadScroll();
+    r.attach(view(false));
+    expect(ids(r.merge("a", { ...base, reload: "align", sameSession: false }))).toEqual(["h8", "h10", "h11"]);
+    expect(r.take("a")?.why).toBe("rotated");
+  });
+
+  test("差量替换直播气泡（delta）：新视图本就含全部历史气泡 → 不会重复拼前缀，照样交出锚点", () => {
+    const r = new ReloadScroll();
+    r.attach(view(false));
+    const composed = ["h5", "h8", "h10", "h11"].map(msg);
+    expect(ids(r.merge("a", { reload: "align", delta: true, sameSession: true, current: ["h5", "h8", "h10", "live_1"].map(msg), next: composed }))).toEqual(
+      ["h5", "h8", "h10", "h11"],
+    );
+    expect(r.take("a")).toMatchObject({ why: "anchor", prefix: 0, delta: true });
+  });
+
+  test("快照不交给别的会话；列表没挂载时 align 不交接", () => {
+    const r = new ReloadScroll();
+    r.attach(view(false));
+    r.merge("a", { ...base, reload: "align" });
     expect(r.take("b")).toBeNull();
-    r.expect("a");
-    r.merge("b", { sameSession: true, current, next });
-    expect(r.take("b")).toBeNull();
+    const bare = new ReloadScroll();
+    expect(ids(bare.merge("a", { ...base, reload: "align" }))).toEqual(["h8", "h10", "h11"]);
+    expect(bare.take("a")).toBeNull();
   });
 
   test("注销只清自己", () => {
     const r = new ReloadScroll();
-    const off1 = r.attach(anchorAt(false));
-    r.attach(anchorAt(true));
+    const off1 = r.attach(view(false));
+    r.attach(view(true));
     off1();
-    r.expect("a");
-    r.merge("a", { sameSession: true, current, next });
-    expect(r.take("a")?.anchor.atBottom).toBe(true);
+    r.merge("a", { ...base, reload: "align" });
+    expect(r.take("a")?.why).toBe("bottom");
   });
 });
 
-describe("windowToKeep（往上翻着时渲染窗口只扩不滑）", () => {
+describe("windowForTop（往上翻着时窗口按顶部那条定位）", () => {
   const list = ["h1", "h2", "h3", "h4", "h5", "h6"];
-  test("原顶部 h3、窗口 3 条（尾部新来一条就把它滑掉了）→ 要扩到 4", () => {
-    expect(windowToKeep("h3", list, 3)).toBe(4);
-    expect(windowToKeep("h1", list, 4)).toBe(6);
+  test("尾部新增：原顶部 h3、窗口 3 条（已被滑掉）→ 扩到 4", () => {
+    expect(windowForTop("h3", list, 3)).toBe(4);
+    expect(windowForTop("h1", list, 4)).toBe(6);
   });
-  test("原顶部仍在窗口内 / 已不在列表里 / 没有记录 → null", () => {
-    expect(windowToKeep("h4", list, 4)).toBeNull();
-    expect(windowToKeep("h9", list, 4)).toBeNull();
-    expect(windowToKeep(null, list, 4)).toBeNull();
+  test("尾部合并 / 清掉：原顶部 h4、窗口 5 条（顶部插进了更早的 h2）→ 缩到 3", () => {
+    expect(windowForTop("h4", list, 5)).toBe(3);
+  });
+  test("原顶部正好在窗口顶 / 已不在列表里 / 没有记录 → null", () => {
+    expect(windowForTop("h3", list, 4)).toBeNull();
+    expect(windowForTop("h9", list, 4)).toBeNull();
+    expect(windowForTop(null, list, 4)).toBeNull();
   });
 });

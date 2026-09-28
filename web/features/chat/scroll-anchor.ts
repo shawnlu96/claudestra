@@ -1,9 +1,7 @@
 /**
- * 消息列表的滚动锚定（纯函数，单测 tests/web-scroll-anchor.test.ts）。
- *
- * 全量重拉历史会整体替换 messages：直播气泡换成 jsonl 的 h<seq> 正主、渲染窗口随条数滑动、
- * 富文本重挂先变矮再长高。scrollTop 按像素不动，视口下面就换成了别的内容（owner 2026-09-28
- * 「用着用着会跳到上面的消息」）。这里按消息 id / seq 记锚点、算恢复位移，不按像素。
+ * 消息列表的滚动锚定与吸底判据（纯函数，单测 tests/web-scroll-anchor.test.ts）。
+ * 全量重拉整体替换 messages（直播气泡换成 h<seq> 正主、窗口随条数滑动、富文本重挂先矮后高），
+ * scrollTop 按像素不动视口就换了内容，所以锚点按消息 id / seq 记、按 DOM 实测算位移。
  */
 import type { ChatMessage } from "./type";
 import { isNearBottom } from "./scroll-follow";
@@ -39,9 +37,10 @@ export function seqOfId(id: string): number | null {
  */
 export function captureAnchor(
   rows: readonly RowBox[],
-  view: { scrollTop: number; scrollHeight: number; clientHeight: number },
+  view: { scrollTop: number; scrollHeight: number; clientHeight: number; following?: boolean },
 ): ViewAnchor {
-  const atBottom = isNearBottom(view.scrollHeight, view.scrollTop, view.clientHeight);
+  // 吸底跟随中也算贴底：手指按住时流式长高会让几何上离底，但抬手后本该继续吸底
+  const atBottom = !!view.following || isNearBottom(view.scrollHeight, view.scrollTop, view.clientHeight);
   const at = rows.findIndex((r) => r.bottom > 0);
   if (at < 0) return { atBottom, id: null, seq: null, offset: 0 };
   const hasSeq = (r: RowBox) => seqOfId(r.id) !== null;
@@ -74,26 +73,27 @@ export function anchorScrollDelta(nodeTop: number, wantOffset: number): number {
 }
 
 /**
- * 往上翻着时渲染窗口只扩不滑。窗口按「尾部 N 条」截，尾部每来一条新消息顶部就滑掉一条，
- * 视口里的内容被整体顶上去（iOS 没有 overflow-anchor 补偿，09-28 复现里每个回合顶走约 200px）。
- * 返回保住原顶部那条所需的窗口条数；原顶部仍在窗口内、或已不在列表里（换会话 / 重拉换了 id）返回 null。
+ * 往上翻着时渲染窗口按顶部那条定位，不按尾部条数滑。窗口是「尾部 N 条」：尾部新增 k 条顶部就滑掉 k 条，
+ * 尾部合并 / 清掉 k 条顶部就插进更早的 k 条，视口里的内容被整体推走（iOS 没有 overflow-anchor 补偿）。
+ * 返回让原顶部那条仍在窗口顶所需的条数；已经是、或它已不在列表里（换会话 / 重拉换了 id）返回 null。
  */
-export function windowToKeep(topId: string | null, ids: readonly string[], windowSize: number): number | null {
+export function windowForTop(topId: string | null, ids: readonly string[], windowSize: number): number | null {
   const idx = topId ? ids.indexOf(topId) : -1;
   if (idx < 0) return null;
   const need = ids.length - idx;
-  return need > windowSize ? need : null;
+  return need !== windowSize ? need : null;
 }
 
 /**
- * 一次 scroll 事件之后还吸不吸底。
- * 以前是「本次 scrollTop 变小 = 用户上滑 → 退出吸底」。但内容变矮 / 视口变高时浏览器把
- * scrollTop 夹到新的最大值，同样是变小（重拉替换气泡、思考点消失、iOS 底部回弹落位都会），
- * 于是吸底被误关，随后内容长高就把人留在上面。停在最底（夹回后恰在 max）不可能是在往上看。
+ * 一次 scroll 事件之后还吸不吸底。scrollTop 变小通常 = 用户上滑、退出吸底；但内容变矮 / 视口变高时
+ * 浏览器把 scrollTop 夹到新的最大值（max 变小），iOS 底部回弹落位时 scrollTop 从越界值回到 max——
+ * 这两种不是用户动作，误判会关掉吸底、随后内容长高就把人留在上面。只凭「停在最底」判不行：
+ * 高 DPR 触控板慢速上滑单帧 ≤1px，会被当成夹回、流式时拖不动。prev = 上一次事件时的 scrollTop 与 max。
  */
-export function followAfterScroll(prevTop: number, top: number, scrollHeight: number, clientHeight: number): boolean {
-  if (top >= scrollHeight - clientHeight - 1) return true;
-  return top >= prevTop && isNearBottom(scrollHeight, top, clientHeight);
+export function followAfterScroll(prev: { top: number; max: number }, top: number, scrollHeight: number, clientHeight: number): boolean {
+  const max = scrollHeight - clientHeight;
+  if (top >= max - 1 && (max < prev.max || prev.top > prev.max)) return true;
+  return top >= prev.top && isNearBottom(scrollHeight, top, clientHeight);
 }
 
 /**

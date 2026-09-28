@@ -1,10 +1,13 @@
 /**
- * 全量重拉 ↔ 消息列表的滚动交接。store 不碰 DOM：整体替换 messages 前向列表要一份锚点快照
- * （列表没挂载 = 没有快照，照旧），列表在这次替换提交后取走快照恢复位置（components/use-scroll-follow.ts）。
- * 用户往上翻着时顺带保留已翻出的更早前缀，锚点才不会随「只剩最近一页」一起消失。
+ * 全量重拉 ↔ 消息列表的滚动交接。store 不碰 DOM：整体替换 messages 前向列表要一份锚点快照，
+ * 列表在这次替换提交后取走恢复（components/use-scroll-follow.ts）。
+ * align（回到页面：后台恢复 / 断线重连 / bridge 重启 / 差量回退全量 / 差量替换直播气泡）锚定原位，
+ * 往上翻着时保留已翻出的更早前缀；latest（点推送 / 深链 / 重点当前会话）一律落到最底。
  */
 import { keepOlderPrefix, type ViewAnchor } from "./scroll-anchor";
 import type { ChatMessage } from "./type";
+
+export type ReloadKind = "align" | "latest";
 
 export interface ReloadScrollView {
   capture(): ViewAnchor | null;
@@ -12,23 +15,18 @@ export interface ReloadScrollView {
 
 export interface ArmedReload {
   agent: string;
-  anchor: ViewAnchor;
+  /** anchor = 放回锚点；其余都落到最底：latest 要看最新 / rotated 换了 session（seq 不可比）/ bottom 原本就贴底 */
+  why: "anchor" | "latest" | "rotated" | "bottom";
+  anchor: ViewAnchor | null;
   /** 保留下来的更早前缀条数（日志用） */
   prefix: number;
+  /** 差量对齐（syncDelta 替换直播气泡）：7s 对账心跳也走这里，只在真的按锚点放回时记日志 */
+  delta: boolean;
 }
 
 export class ReloadScroll {
   private view: ReloadScrollView | null = null;
   private armed: ArmedReload | null = null;
-  private expected: string | null = null;
-
-  /**
-   * 重连选路走全量时调：只有「同一会话的对齐重拉」才锚定。首次打开 / 切会话 / 退出历史现场
-   * 也走 loadMessages，但那些本来就该落到最新尾部，锚定反而会把人留在缓存快照的半截。
-   */
-  expect(agent: string): void {
-    this.expected = agent;
-  }
 
   /** 列表挂载时登记；返回注销函数（只注销自己，防新旧实例交替卸载时误清） */
   attach(v: ReloadScrollView): () => void {
@@ -39,16 +37,21 @@ export class ReloadScroll {
   }
 
   /**
-   * store 在整体替换前调：expect 过的才取快照并挂起给列表；按快照决定要不要拼回更早前缀。
-   * 会话换了（sid 变）不拼——两个 session 的 seq 不可比。
+   * store 在整体替换前调。reload 为空（首次打开 / 切会话 / 历史现场进出）不交接——那些路径的
+   * 落点由列表自己的 active / browsing 逻辑管。返回要写进视图的 messages（可能拼了前缀）。
    */
-  merge(agent: string, p: { sameSession: boolean; current: readonly ChatMessage[]; next: ChatMessage[] }): ChatMessage[] {
-    const want = this.expected === agent;
-    this.expected = null;
-    const anchor = want ? (this.view?.capture() ?? null) : null;
-    const messages = anchor && !anchor.atBottom && p.sameSession ? keepOlderPrefix(p.current, p.next) : p.next;
-    const prefix = messages.length - p.next.length;
-    this.armed = anchor ? { agent, anchor, prefix } : null;
+  merge(
+    agent: string,
+    p: { reload?: ReloadKind; delta?: boolean; sameSession: boolean; current: readonly ChatMessage[]; next: ChatMessage[] },
+  ): ChatMessage[] {
+    this.armed = null;
+    if (!p.reload) return p.next;
+    const anchor = p.reload === "align" ? (this.view?.capture() ?? null) : null;
+    if (p.reload === "align" && !anchor) return p.next; // 列表没挂载：没有位置可恢复
+    const why: ArmedReload["why"] =
+      p.reload === "latest" ? "latest" : !p.sameSession ? "rotated" : anchor?.atBottom ? "bottom" : "anchor";
+    const messages = why === "anchor" ? keepOlderPrefix(p.current, p.next) : p.next;
+    this.armed = { agent, why, anchor, prefix: messages.length - p.next.length, delta: !!p.delta };
     return messages;
   }
 

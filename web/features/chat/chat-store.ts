@@ -23,7 +23,7 @@ import {
 } from "./live-merge";
 import { composeView, droppedBlobUrls, revokeBlobUrls, stripInboundHeader } from "./view-compose";
 import { decideReconnect } from "./reconnect-policy";
-import { ReloadScroll } from "./reload-scroll";
+import { ReloadScroll, type ReloadKind } from "./reload-scroll";
 
 import type { WebStreamEvent, WebComponentRow, BgMeta, BgProgress, BgEndStatus } from "@/lib/chat/events";
 import { getLang, t as tr } from "@/lib/i18n";
@@ -551,10 +551,10 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
         void this.returnToLatest();
         return;
       }
-      // 重复打开当前会话(点推送/深链/桌面重点)= 要看最新,force 全量对齐:冻结页面点通知进来正是
-      // 这条路(2026-07-24 wechat-bot 事故),bridge 重启纪元切换的静默缺口只有重拉历史能补。
+      // 重复打开当前会话(点推送/深链/桌面重点)= 要看最新,force 全量对齐并落底:冻结页面点通知
+      // 进来正是这条路,bridge 重启纪元切换的静默缺口只有重拉历史能补。
       // 窄屏返回列表再点回来只是回到页面:走常规选路(流健康=判活探针,否则 fast/delta),
-      // 不无条件全量——长对话全量重拉会把人从原位置挪走(owner 2026-09-28)。
+      // 不无条件全量——全量重拉会把长对话里的阅读位置挪走。
       this.clientLog(`openAgent(same): ${intent === "reenter" ? "回到页面,常规对齐" : "强制对齐"}`);
       this.maybeReconnect(intent === "reenter" ? undefined : { force: true });
       return;
@@ -828,7 +828,7 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
         // quiet 心跳不接管全量(会闪 loading);留给 reconnect/openAgent 处理轮转
         if (quiet) return;
         this.clientLog(`syncDelta: ${json.rotated ? "session 已轮转" : "差量超一页"} → 回退全量 agent=${name}`);
-        return this.loadMessages(name, gen);
+        return this.loadMessages(name, gen, 0, json.rotated ? "latest" : "align");
       }
       const delta = hydrateHistoryMessages(json.data ?? []);
       if (typeof json.lastSeq === "number") this.historyCursor = { sid: cur.sid, lastSeq: json.lastSeq };
@@ -866,7 +866,7 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
           nowMs: Date.now(),
         });
         revokeBlobUrls(droppedBlobUrls(s.messages, v.messages));
-        s.messages = v.messages;
+        s.messages = this.reloadScroll.merge(name, { reload: "align", delta: true, sameSession: true, current: s.messages, next: v.messages });
         if (v.restoreAwaiting) s.awaitingChunk = true;
         // 差量补到 agent 的新产出(reply/工具/文本)→ 清掉可能卡住的「正在回复…」指示
         // (2026-09-16:流漏了 reply 的 chat_message(out),setReplyText 没跑过,replying 一直挂;
@@ -891,7 +891,7 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
         return;
       }
       // 差量救不回来 → 全量兜底(带它自己的重试梯子)
-      return this.loadMessages(name, gen);
+      return this.loadMessages(name, gen, 0, "align");
     }
   }
 
@@ -980,7 +980,8 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
    *  maybeReconnect 看到同 agent 的新鲜在飞请求就让路,等它自然完成)。 */
   private historyLoad: { agent: string; at: number } | null = null;
 
-  private async loadMessages(name: string, gen: number, attempt = 0) {
+  /** reload：对齐重拉的落点交接（reload-scroll.ts）；首次打开 / 切会话 / 历史现场不传 */
+  private async loadMessages(name: string, gen: number, attempt = 0, reload?: ReloadKind) {
     // 对齐指示:陈旧快照秒开时这趟就是「后台在拉取」本体,必须可视(owner
     // 2026-08-08:「不知道是在 loading 还是卡住了」)。空视图场景 loadingHistory
     // 的骨架屏在,pill 由 UI 侧按需隐藏。
@@ -1029,7 +1030,7 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
           cursor: this.historyCursor,
           nowMs: Date.now(),
         });
-        const msgs = this.reloadScroll.merge(name, { sameSession: prev.sid === json.sessionId, current: s.messages, next: v.messages });
+        const msgs = this.reloadScroll.merge(name, { reload, sameSession: prev.sid === json.sessionId, current: s.messages, next: v.messages });
         if (msgs.length > v.messages.length) [this.olderCursor, s.historyHasMore] = [prev.older, prev.more];
         revokeBlobUrls(droppedBlobUrls(s.messages, msgs));
         s.messages = msgs;
@@ -1048,7 +1049,7 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
         // 瞬时失败自动重试:1.5s/3s/6s 盖住网络唤醒/Wi-Fi 切换窗口(iOS 回前台
         // 头几秒网络栈未醒 fetch 必败,2026-07-14 真机);保持 loading 态不闪空
         setTimeout(() => {
-          if (gen === this.openGen) void this.loadMessages(name, gen, attempt + 1);
+          if (gen === this.openGen) void this.loadMessages(name, gen, attempt + 1, reload);
         }, 1500 * 2 ** attempt);
         return;
       }
@@ -1063,7 +1064,7 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
       // 重试(gen 守卫:切走即停),重试按钮/pill 点按只是手动快进
       setTimeout(() => {
         if (gen === this.openGen && (this.state.historyError || this.state.syncState === "error")) {
-          void this.loadMessages(name, gen, 0);
+          void this.loadMessages(name, gen, 0, reload);
         }
       }, 15_000);
     } finally {
@@ -1271,7 +1272,7 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
           // 事件永久丢失)→ 全量重拉历史补缺口,一次即可(之后 seq 恢复单调)
           if (this.lastEventAgent === name && eid < this.lastEventSeq) {
             const g = ++this.openGen;
-            void this.loadMessages(name, g);
+            void this.loadMessages(name, g, 0, "align");
           }
           this.lastEventSeq = eid;
           this.lastEventAgent = name;
@@ -1500,8 +1501,7 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
       return;
     }
     this.clientLog(`reconnect(full): agent=${name} 重拉历史+重连流`);
-    this.reloadScroll.expect(name);
-    void this.loadMessages(name, gen).then(() => {
+    void this.loadMessages(name, gen, 0, opts?.force ? "latest" : "align").then(() => {
       if (gen !== this.openGen) return;
       void this.openStream(name);
     });
