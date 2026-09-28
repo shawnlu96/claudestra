@@ -78,13 +78,38 @@ async function siblingRepoDir(c: LedgerCli, fd: FactsDeps, task: LedgerTask, pr:
 }
 
 /**
- * PR 指向项目里另一个仓库：PM 在 extra.repo 声明过同一个仓库 → 只核证据；没声明 / 声明的不一样 → unknown 并给出 PM 怎么声明
- * （项目目录明确不含本仓库时 ownership 照旧按目录判不属于）。执行者能改 PR 链接、改不了 extra，本仓库的活挂错另一个仓库的 PR 就停在这里。
+ * 声明了另一个仓库之后的反证：本仓库 origin 上查得到 task.branch 的 PR，说明是本仓库的活挂错了 PR → 不是另一个仓库。
+ * 查不了（没记分支、gh 失败 / 超时）一律按查到处理（fail-closed），返回原因；确认没有 → null。
  */
-function siblingOwnership(task: LedgerTask, pr: string, dir: string): Ownership {
+async function ownBranchPr(fd: FactsDeps, task: LedgerTask, origin: string): Promise<Note | null> {
+  const params = { branch: task.branch ?? "", origin, task: task.id, pr: "", error: "" };
+  if (!task.branch) return { tpl: "任务没记分支，核对不了本仓库 {origin} 上有没有它的 PR：PM 先 ledger task-set {task} --branch <分支> 再重跑", params };
+  const r = await fd.run(["gh", "pr", "list", "--repo", origin, "--head", task.branch, "--state", "all", "--json", "number", "--limit", "5"]);
+  let prs: { number: number }[] | null = null;
+  try {
+    prs = r.code === 0 ? (JSON.parse(r.stdout) as { number: number }[]) : null;
+  } catch {
+    prs = null; // gh 输出不是 JSON：和失败一样按查不了处理
+  }
+  if (!prs) return { tpl: "查不了本仓库 {origin} 上有没有分支 {branch} 的 PR（{error}），按判断不了处理", params: { ...params, error: (r.stderr || r.stdout).trim().slice(0, 200) || `exit ${r.code}` } };
+  if (!prs.length) return null;
+  const pr = prs.map((p) => `#${p.number}`).join(" ");
+  return { tpl: "本仓库 {origin} 上有分支 {branch} 的 PR {pr}：这是本仓库的活，PR 链接应该指向它", params: { ...params, pr } };
+}
+
+/**
+ * PR 指向项目里另一个仓库：PM 在 extra.repo 声明过同一个仓库、且本仓库上没有这个任务分支的 PR → 只核证据；
+ * 没声明 / 声明的不一样 / 反证成立或查不了 → unknown 并给出原因（项目目录明确不含本仓库时 ownership 照旧按目录判不属于）。
+ * 执行者能改 PR 链接、改不了 extra，本仓库的活挂错另一个仓库的 PR 就停在这里。
+ */
+async function siblingOwnership(fd: FactsDeps, task: LedgerTask, pr: string, dir: string, origin: string): Promise<Ownership> {
   const declared = asInvalid(() => parseExtraRepo(task.extra.repo));
   const params = { project: task.project, prRepo: pr, dir, task: task.id, declared: declared ?? "" };
-  if (declared === pr) return { owns: "no", note: { tpl: "PR 属于项目 {project} 的另一个仓库 {prRepo}（{dir}），本仓库的探针核不了，只核证据文件（--evidence）", params } };
+  if (declared === pr) {
+    const own = await ownBranchPr(fd, task, origin);
+    if (!own) return { owns: "no", note: { tpl: "PR 属于项目 {project} 的另一个仓库 {prRepo}（{dir}），本仓库的探针核不了，只核证据文件（--evidence）", params } };
+    return { owns: "unknown", note: own };
+  }
   if (declared) return { owns: "unknown", note: { tpl: "PR 指向项目 {project} 的另一个仓库 {prRepo}（{dir}），但 PM 声明的仓库是 {declared}：改对 PR 链接或 extra.repo 后重跑", params } };
   const cmd = `ledger task-set ${task.id} --rev <rev> --extra '${JSON.stringify({ ...task.extra, repo: pr })}'`;
   return {
@@ -105,7 +130,7 @@ async function ownership(c: LedgerCli, fd: FactsDeps, task: LedgerTask): Promise
   if (pr && origin === pr) return { owns: "yes" };
   const project = task.project;
   const sib = pr ? await siblingRepoDir(c, fd, task, pr) : null;
-  const sibling = pr && sib ? siblingOwnership(task, pr, sib) : null;
+  const sibling = pr && sib ? await siblingOwnership(fd, task, pr, sib, origin as string) : null;
   if (sibling?.owns === "no") return sibling;
   const dirs = await dirOwnership(c, fd, task);
   if (sibling && dirs !== "no") return sibling; // 目录没排除本仓库：可能是本仓库的活挂了那边的 PR，要 PM 声明

@@ -49,6 +49,8 @@ let sc: {
   /** 项目里别的目录的 origin（一个项目登记多个仓库）；missing = 不存在的目录 */
   origins: Record<string, string>;
   missing: string[];
+  /** 本仓库上 task.branch 的 PR（gh pr list）；"fail" = gh 失败 */
+  branchPrs: number[] | "fail";
   projects: ProjectDef[];
   sizes: Record<string, number>;
 };
@@ -65,6 +67,9 @@ function fakeRun(argv: string[]) {
   if (cmd.startsWith("gh pr view")) {
     if (sc.ghFails) return out(1, "", "gh: not logged in\n");
     return out(0, JSON.stringify({ state: sc.state, mergeCommit: { oid: "m1" }, mergedAt: new Date(MERGED).toISOString(), headRefOid: "h1", headRefName: sc.branch }));
+  }
+  if (cmd.startsWith("gh pr list --repo x/y --head ")) {
+    return sc.branchPrs === "fail" ? out(1, "", "HTTP 502") : out(0, JSON.stringify(sc.branchPrs.map((number) => ({ number }))));
   }
   if (cmd.startsWith("gh api --paginate repos/x/y/pulls/150/files")) return sc.files ? out(0, sc.files.join("\n") + "\n") : out(1, "", "HTTP 502");
   if (at("/repo", "fetch --quiet origin main")) return out(0);
@@ -125,7 +130,7 @@ beforeEach(() => {
   calls = [];
   sc = { files: ["web/a.tsx", "src/bridge/x.ts"], state: "MERGED", branch: "task/t9", ghFails: false, mergeInMain: true, localWeb: "w1",
     relay: { enabled: true, base: "relay.example" }, relayWeb: "w2", bridgeStart: PULLED + 60_000, codeHasMerge: true,
-    cwdIsRepo: true, worktreeClean: true, origin: "git@github.com:x/y.git", mainRepoOk: true, mergeParents: 2, mainRepo: "/repo", origins: {}, missing: [], projects: [proj(P, ["/repo"])], sizes: {} };
+    cwdIsRepo: true, worktreeClean: true, origin: "git@github.com:x/y.git", mainRepoOk: true, mergeParents: 2, mainRepo: "/repo", origins: {}, missing: [], branchPrs: [], projects: [proj(P, ["/repo"])], sizes: {} };
   db = openLedger(":memory:");
   setMeta(db, { actor: "owner" }, { project: P, key: "pms", value: [PM] });
   liveTask();
@@ -334,6 +339,20 @@ describe("没 PR 与别的项目", () => {
     sc.missing = ["/relay"]; // 那个目录不在了：认不出是它的仓库 → 回到「对不上」
     liveTask("T31", { pr: RELAY_PR, extra: { repo: "shawnlu96/claudestra-relay" } });
     expect(await pm("verify", "T31", "--dry-run")).toMatchObject({ result: "unknown", noteTpl: expect.stringContaining("对不上") });
+  });
+  test("声明了也要反证：本仓库上有这个分支的 PR / gh 查不了 / 任务没记分支 → unknown（fail-closed）", async () => {
+    relayProject();
+    sc.sizes["docs/r.md"] = 500;
+    liveTask("T38", { pr: RELAY_PR, extra: { repo: "shawnlu96/claudestra-relay" } });
+    sc.branchPrs = [151];
+    expect(await pm("verify", "T38", "--evidence", "docs/r.md")).toMatchObject({ ok: false, result: "unknown", note: expect.stringContaining("有分支 task/t9 的 PR #151") });
+    expect(calls).toContain("gh pr list --repo x/y --head task/t9 --state all --json number --limit 5");
+    sc.branchPrs = "fail";
+    expect(await pm("verify", "T38", "--evidence", "docs/r.md")).toMatchObject({ ok: false, result: "unknown", note: expect.stringContaining("HTTP 502") });
+    liveTask("T39", { pr: RELAY_PR, branch: null, extra: { repo: "shawnlu96/claudestra-relay" } });
+    expect(await pm("verify", "T39", "--evidence", "docs/r.md")).toMatchObject({ ok: false, result: "unknown", note: expect.stringContaining("任务没记分支") });
+    sc.branchPrs = [];
+    expect(await pm("verify", "T38", "--evidence", "docs/r.md")).toMatchObject({ ok: true, moved: true });
   });
   test("没声明 / 声明的是别的仓库 → unknown，提示 PM 怎么声明（命令里带上原有的 extra 键）", async () => {
     relayProject();

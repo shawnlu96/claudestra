@@ -116,6 +116,10 @@ export const COLLAB_DICT: Record<string, string> = {
   "判断不了任务所属项目是不是本仓库，不知道该核什么": "Can’t tell whether the task’s project is this repository, so there’s nothing to check against",
   "PR 属于 {prRepo}，不是本仓库 {origin}，只核证据文件（--evidence）": "The PR belongs to {prRepo}, not this repository {origin}; only the evidence file is checked (--evidence)",
   "项目 {project} 的目录里没有本仓库，只核证据文件（--evidence）": "Project {project} doesn’t include this repository; only the evidence file is checked (--evidence)",
+  "任务没记分支，核对不了本仓库 {origin} 上有没有它的 PR：PM 先 ledger task-set {task} --branch <分支> 再重跑":
+    "The task has no branch recorded, so we can’t check whether {origin} has a PR for it: a PM runs ledger task-set {task} --branch <branch>, then rerun",
+  "查不了本仓库 {origin} 上有没有分支 {branch} 的 PR（{error}），按判断不了处理": "Couldn’t check whether {origin} has a PR from branch {branch} ({error}); treated as inconclusive",
+  "本仓库 {origin} 上有分支 {branch} 的 PR {pr}：这是本仓库的活，PR 链接应该指向它": "{origin} has PR {pr} from branch {branch}: this is this repository’s work, so the PR link should point there",
   "PR 指向项目 {project} 的另一个仓库 {prRepo}（{dir}），但 PM 声明的仓库是 {declared}：改对 PR 链接或 extra.repo 后重跑":
     "The PR points to {prRepo} ({dir}), another repository of project {project}, but the PM declared {declared} — fix the PR link or extra.repo, then rerun",
   "PR 指向项目 {project} 的另一个仓库 {prRepo}（{dir}），PM 还没声明这个任务属于它：确实是那边的活就由 PM 跑 {cmd}，否则把 PR 改回本仓库的":
