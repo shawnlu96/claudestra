@@ -1,5 +1,5 @@
 /**
- * "*" 不含 master：凡是按名字解析 agent 的地方，master 判定都走 isMasterName（src/lib/registry.ts：NFKC → 小写 →
+ * "*" 不含 master：凡是按名字解析 agent 的地方，master 判定都走 isMasterName（src/lib/registry.ts：规范名 → 去空白 →
  * 去掉所有层 agent- 前缀 → master，__master__ 也算）。判定只要比路由解析「窄」一处，"*" 就能从那里碰到 master：
  * - 以前 "agent-master" 加前缀成 "agent-agent-master" 就不算 master，guest "*" 能读历史、打断 master（热修 #182）；
  * - "Master" 在 scope 判定里是普通 agent，history 拼出 archive/agent-Master，APFS 不分大小写，读到 master 的归档（HF182-r1 P1-1）；
@@ -29,10 +29,12 @@ const PRINCIPALS = [
   { id: "guest:all", role: "external", name: "friend", agents: ["*"], createdAt: at, credentials: [device("guest", guestGrant(["*"]))] },
   { id: "token:tok_star", role: "external", name: "legacy-star", agents: ["*"], secret: "s-star", createdAt: at },
   { id: "token:tok_cc", role: "external", name: "cc-only", agents: ["cc"], secret: "s-cc", createdAt: at },
+  // 老版本（大总管只认逐字写法）签出的 guest：--agents MASTER,cc 把 MASTER 当普通名字写进了 principal 和 grant（T42-r2 P1）
+  { id: "guest:legacy", role: "external", name: "legacy", agents: ["MASTER", "cc"], createdAt: at, credentials: [device("legacy", { agents: ["MASTER", "cc"], terminal: false, manage: false })] },
 ];
 const OWNER = { device: "dev_owner" };
 const STAR = { bearer: "s-star" };
-const CREDS = { "guest *": { device: "dev_guest" }, "老 * Bearer": STAR, "scoped token": { bearer: "s-cc" } };
+const CREDS = { "guest *": { device: "dev_guest" }, "老 * Bearer": STAR, "scoped token": { bearer: "s-cc" }, "老 guest [MASTER]": { device: "dev_legacy" } };
 // 全角 ｍ（U+FF4D）、全角大写整词经 NFKC 都变回 master
 const MASTER_NAMES = ["master", "agent-master", "agent-agent-master", "__master__", "Master", "MASTER", "agent-Master", "AGENT-master", "ｍaster", "ＭＡＳＴＥＲ"];
 const SID_AM = "11111111-2222-3333-4444-555555555555"; // archive/agent-master 里的 master 归档
@@ -79,6 +81,8 @@ beforeAll(() => {
       MASTER_NAMES.flatMap((n) => ENDPOINTS.map(([method, ep, body]) => req(`${cred} ${n} ${ep}`, method, `${at_(n)}/${ep}`, auth, body))),
     ),
     req("owner agent-master pending", "GET", `${at_("agent-master")}/pending`, OWNER),
+    req("owner master history", "GET", `${at_("master")}/history`, OWNER),
+    req("老 guest [MASTER] cc pending", "GET", `${at_("cc")}/pending`, CREDS["老 guest [MASTER]"]),
     req("guest cc pending", "GET", `${at_("cc")}/pending`, CREDS["guest *"]),
     req("guest agent-cc pending", "GET", `${at_("agent-cc")}/pending`, CREDS["guest *"]),
     // registry 查不到：只认逐字同名的归档目录（被 remove 的 agent 照常读；大小写写法、master 不认）
@@ -113,14 +117,17 @@ const status = (n: string) => byName(n).status;
 const leaks = (n: string) => /MASTER-(ARCHIVE|LIVE)-SECRET/.test(String(byName(n).body));
 
 describe("master 的各种写法（含大小写、全角）：生产路由 + 假 tmux", () => {
-  test("guest * / 老 * Bearer / scoped token × 10 种写法 × 9 个端点：一律 403，正文不外泄", () => {
-    const matrix = results.filter((r) => MASTER_NAMES.some((n) => r.name.startsWith(`guest * ${n} `) || r.name.startsWith(`老 * Bearer ${n} `) || r.name.startsWith(`scoped token ${n} `)));
-    expect(matrix.length).toBe(3 * MASTER_NAMES.length * ENDPOINTS.length);
+  test("guest * / 老 * Bearer / scoped token / 名单写了 MASTER 的老 guest × 10 种写法 × 9 个端点：一律 403，正文不外泄", () => {
+    const creds = Object.keys(CREDS);
+    const matrix = results.filter((r) => MASTER_NAMES.some((n) => creds.some((c) => r.name.startsWith(`${c} ${n} `))));
+    expect(matrix.length).toBe(creds.length * MASTER_NAMES.length * ENDPOINTS.length);
     expect(matrix.filter((r) => r.status !== 403 || leaks(r.name)).map((r) => `${r.name} → ${r.status}`)).toEqual([]);
   });
 
   test("scope 显式列了 master 的 owner 设备照常能用 agent-master 写法；普通 agent 两种写法照常放行", () => {
     expect(status("owner agent-master pending")).toBe(200);
+    expect(status("owner master history")).toBe(200);
+    expect(status("老 guest [MASTER] cc pending")).toBe(200); // 老 guest 的 MASTER 条目作废（上面矩阵读 master 全 403），开放的 cc 照常
     expect(status("guest cc pending")).toBe(200);
     expect(status("guest agent-cc pending")).toBe(200);
   });
@@ -194,10 +201,11 @@ describe("按会话 id：大总管的会话只给显式列了 master 的凭据�
 
 describe("isMasterName / inScopeEitherName / terminalAllowedFor（纯函数）", () => {
   const p = (agents: string[], extra: Partial<Principal> = {}): Principal => ({ id: "token:x", role: "external", name: "x", agents, createdAt: at, secret: "s", ...extra });
-  test("isMasterName：大小写、全角、多层前缀、__master__ 都算；名字里带 master 的普通 agent、零宽写法不算", () => {
+  test("isMasterName：大小写、全角、多层前缀、__master__、夹不可见字符或空白都算；名字里带 master 的普通 agent 不算", () => {
     for (const n of [...MASTER_NAMES, "__MASTER__", "agent-__master__", "Agent-Agent-MASTER"]) expect([n, isMasterName(n)]).toEqual([n, true]);
-    // 零宽写法：NFKC 不删它，路由解析也是逐字比较，落不到 master（HF182-r1 对照表），两边一致
-    for (const n of ["mastermind", "agent-masters", "master2", "m​aster", "", undefined, null]) expect([n, isMasterName(n)]).toEqual([n, false]);
+    // 零宽 / 变体选择符 / 空白：路由按逐字解析落不到 master，但判定只能宽不能窄——宽了只是多挡一个本来就 404 的名字（T42-r2）
+    for (const n of ["m\u200baster", "master\ufe0f", "master\u3164", " master ", "agent- master ", "agent-\u200bmaster"]) expect([n, isMasterName(n)]).toEqual([n, true]);
+    for (const n of ["mastermind", "agent-masters", "master2", "", undefined, null]) expect([n, isMasterName(n)]).toEqual([n, false]);
   });
   test("inScopeEitherName：master 的写法只按 master 判；显式列 master 才放行", () => {
     for (const n of MASTER_NAMES) {
@@ -210,6 +218,7 @@ describe("isMasterName / inScopeEitherName / terminalAllowedFor（纯函数）",
     expect(inScopeEitherName(p(["cc"]), "agent-cc")).toBe(true);
     expect(inScopeEitherName(p(["cc"]), "other")).toBe(false);
     expect(inScopeEitherName(p(["*"]), "mastermind")).toBe(true);
+    for (const n of [" master ", "agent- master ", "m\u200baster"]) expect([n, inScopeEitherName(p(["*"]), n)]).toEqual([n, false]);
   });
   test("terminalAllowedFor：* + 终端权限开不了 master 的任何写法；普通 agent 照常", () => {
     const t = p(["*"], { terminal: true });
