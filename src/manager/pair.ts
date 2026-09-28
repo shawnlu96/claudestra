@@ -21,11 +21,30 @@ const POLL_MS = 2000;
 const GUEST_EXAMPLE = `例：claudestra pair --guest "Alex 的手机" --agents gc-car,relay`;
 export const GUEST_ALL_WARNING = "给别人开放 '*' 等于开放全部非大总管 agent（以后新建的也算）";
 
-/** 旗标后面紧跟的值；下一个还是旗标（或没有）就当没给——免得 `--guest --agents a` 把 "--agents" 当成名字 */
-function flagValue(args: string[], name: string): string | undefined {
-  const i = args.indexOf(name);
-  const v = i >= 0 ? args[i + 1] : undefined;
-  return v && !v.startsWith("--") ? v : undefined;
+const USAGE = "用法：claudestra pair [--agents a,b|*] [--no-terminal] [--no-manage] [--guest 名字 --agents a,b [--confirm-all]] [--url 入口] [--json]";
+const VALUE_FLAGS = new Set(["--agents", "--guest", "--url"]);
+const BOOL_FLAGS = new Set(["--no-terminal", "--no-manage", "--json", "--confirm-all"]);
+
+/**
+ * 逐个认参数：`--x v` 和 `--x=v` 都认；值位置上又是旗标（`--guest --agents a`）按没给值。不认识的旗标、多出来的词直接报错——
+ * 打错一个字母（--Guest、--guest=… 写法没认出来）不能悄悄变成给自己签全权码。
+ */
+function readFlags(args: string[]): { values: Map<string, string>; given: Set<string>; error?: string } {
+  const values = new Map<string, string>();
+  const given = new Set<string>();
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    const eq = a.startsWith("--") ? a.indexOf("=") : -1;
+    const name = eq > 0 ? a.slice(0, eq) : a;
+    if (BOOL_FLAGS.has(a)) given.add(a);
+    else if (VALUE_FLAGS.has(name)) {
+      given.add(name);
+      const v = eq > 0 ? a.slice(eq + 1) : args[i + 1]?.startsWith("--") ? undefined : args[++i];
+      if (v !== undefined) values.set(name, v);
+      else if (name !== "--guest") return { values, given, error: `${name} 后面要跟值。${USAGE}` }; // --guest 缺名字由调用方带示例报
+    } else return { values, given, error: `不认识的参数 ${a}。${USAGE}` };
+  }
+  return { values, given };
 }
 
 export interface PairArgs {
@@ -38,21 +57,23 @@ export interface PairArgs {
 }
 
 export function parsePairArgs(args: string[]): PairArgs {
-  const agents = flagValue(args, "--agents")?.split(",").map((s) => s.trim()).filter(Boolean);
-  const guest = flagValue(args, "--guest");
-  const url = flagValue(args, "--url");
-  const confirmAll = args.includes("--confirm-all");
+  const { values, given, error: flagError } = readFlags(args);
+  const agents = values.get("--agents")?.split(",").map((s) => s.trim()).filter(Boolean);
+  const guest = values.get("--guest")?.trim(); // 全空白的名字按没写：bridge 也拒（guest_name_required）
+  const url = values.get("--url");
+  const confirmAll = given.has("--confirm-all");
   const body = {
     ...(agents?.length ? { agents } : {}),
     ...(url ? { url } : {}),
-    ...(args.includes("--no-terminal") ? { terminal: false } : {}),
-    ...(args.includes("--no-manage") ? { manage: false } : {}),
+    ...(given.has("--no-terminal") ? { terminal: false } : {}),
+    ...(given.has("--no-manage") ? { manage: false } : {}),
     ...(guest ? { guest } : {}),
     ...(guest && confirmAll ? { confirmAllAgents: true } : {}),
   };
-  const json = args.includes("--json");
+  const json = given.has("--json");
+  if (flagError) return { body, json, error: flagError };
   // 没给名字的 --guest 不能悄悄变成给自己签全权码
-  if (args.includes("--guest") && !guest) return { body, json, error: `--guest 后面要写这台设备是给谁的。${GUEST_EXAMPLE}` };
+  if (given.has("--guest") && !guest) return { body, json, error: `--guest 后面要写这台设备是给谁的。${GUEST_EXAMPLE}` };
   if (!guest) return { body, json };
   const named = (agents ?? []).filter((a) => !isMasterAgent(a));
   if (!named.length) return { body, json, error: `--guest 要用 --agents 写明开放哪些 agent（guest 默认一个都不开放，大总管不能给）。${GUEST_EXAMPLE}` };
@@ -82,29 +103,38 @@ async function readLine(prompt: string): Promise<string> {
   return line;
 }
 
+/** 出错的结果：退出码非 0，脚本不用解析 JSON 也知道没签成 */
+function fail(data: Record<string, unknown>): void {
+  process.exitCode = 1;
+  output({ ok: false, ...data });
+}
+
 async function post(path: string, body: unknown): Promise<Response> {
   return fetch(`${bridgeHttpBase()}${path}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body), signal: AbortSignal.timeout(5000) });
 }
 
 export async function cmdPair(args: string[]): Promise<void> {
   const { body, json, error, needsAllConfirm } = parsePairArgs(args);
-  if (error) return output({ ok: false, error });
+  if (error) return fail({ error });
   if (needsAllConfirm) {
-    if (json || !process.stdin.isTTY) return output({ ok: false, error: `${GUEST_ALL_WARNING}。确定要这样就加 --confirm-all` });
-    if (!/^\s*y/i.test(await readLine(`${GUEST_ALL_WARNING}。确定？[y/N] `))) return void process.stdout.write("已取消，没有签码。\n");
+    if (json || !process.stdin.isTTY) return fail({ error: `${GUEST_ALL_WARNING}。确定要这样就加 --confirm-all` });
+    if (!/^\s*y/i.test(await readLine(`${GUEST_ALL_WARNING}。确定？[y/N] `))) {
+      process.exitCode = 1;
+      return void process.stdout.write("已取消，没有签码。\n");
+    }
     body.confirmAllAgents = true;
   }
   let r: Response;
   try {
     r = await post("/relay/pair/new", body);
   } catch (e) {
-    return output({ ok: false, error: `bridge 没有响应（${(e as Error).message}）——先确认 bridge 在跑：claudestra doctor` });
+    return fail({ error: `bridge 没有响应（${(e as Error).message}）——先确认 bridge 在跑：claudestra doctor` });
   }
   const fallback = { ok: false, error: `bridge 返回 ${r.status} 且不是 JSON——多半还在跑没有 /relay 路由的旧版本，重启 bridge 到新代码` };
   const info = (await r.json().catch(() => fallback)) as PairInfo; // 非 JSON 响应按失败：状态码与这句提示就是全部信息
-  if (!info.ok && info.code) return output({ ok: false, error: info.error ?? "无法签发配对码" }); // 请求体被拒（guest 没写 agents 等），不是中继的事
+  if (!info.ok && info.code) return fail({ error: info.error ?? "无法签发配对码" }); // 请求体被拒（guest 没写 agents 等），不是中继的事
   if (!info.ok) {
-    return output({ ok: false, error: info.error ?? "无法签发配对码", hint: "在仓库根 .env 写 RELAY_URL=wss://<中继地址>（可选 RELAY_NAME=<子域名标签>），重启 bridge 后再跑 pair" });
+    return fail({ error: info.error ?? "无法签发配对码", hint: "在仓库根 .env 写 RELAY_URL=wss://<中继地址>（可选 RELAY_NAME=<子域名标签>），重启 bridge 后再跑 pair" });
   }
   if (json) return output({ ...info });
   const qr = info.link ? await qrToString(info.link, { type: "terminal", small: true }).catch(() => "") : ""; // 终端不支持时只少一张二维码，链接与短码照给
@@ -143,5 +173,6 @@ async function decideInteractively(a: Approval): Promise<void> {
   const approve = !/^\s*n/i.test(line);
   const r = await post("/relay/pair/approve", { id: a.id, approve });
   const j = (await r.json().catch(() => null)) as { ok?: boolean; state?: string; error?: string } | null; // 非 JSON 就按失败提示
+  if (!j?.ok) process.exitCode = 1;
   process.stdout.write(j?.ok ? (approve ? "✓ 已批准，设备正在完成配对。\n" : "已拒绝。\n") : `处理失败：${j?.error ?? r.status}\n`);
 }

@@ -3,11 +3,13 @@
  * 负向用例先写：隧道来源打不到本机配对、没有 CSRF 头的写请求、guest / 受限凭据碰管理端点、撤销后立刻失效、短码穷举限流。
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setApiAuthPrincipalsPathForTest, authenticateApi } from "../src/bridge/api-auth.js";
-import { decideApproval, handleDevicesManaged, handleDevicesPublic, issuePairing, pendingApprovals, setDevicesPrincipalsPathForTest } from "../src/bridge/devices.js";
+import {
+  decideApproval, handleDevicesManaged, handleDevicesPublic, issuePairing, pendingApprovals, setDevicesPrincipalsPathForTest, setDevicesRegistryPathForTest,
+} from "../src/bridge/devices.js";
 import { setRequestContext, type RequestContext } from "../src/bridge/request-context.js";
 import { OWNER_PRINCIPAL_ID } from "../src/lib/devices.js";
 import { proofFor } from "../src/lib/pairing-codes.js";
@@ -24,10 +26,13 @@ beforeAll(() => {
   dir = mkdtempSync(join(tmpdir(), "devices-"));
   setDevicesPrincipalsPathForTest(join(dir, "principals.json"));
   setApiAuthPrincipalsPathForTest(join(dir, "principals.json"));
+  writeFileSync(join(dir, "registry.json"), JSON.stringify({ agents: { "agent-worker-a": {} } })); // guest 只能开放 registry 里有的名字
+  setDevicesRegistryPathForTest(join(dir, "registry.json"));
 });
 afterAll(() => {
   setDevicesPrincipalsPathForTest(undefined);
   setApiAuthPrincipalsPathForTest(undefined);
+  setDevicesRegistryPathForTest(undefined);
   rmSync(dir, { recursive: true, force: true });
 });
 

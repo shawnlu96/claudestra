@@ -13,6 +13,7 @@ import {
 import { LEGACY_SESSION_COOKIE, redeemLegacySession } from "../lib/legacy-web.js";
 import { webDb } from "./local-api/db.js";
 import { readPrincipalsStrict, updatePrincipals, type Principal } from "../lib/principals.js";
+import { canonicalAgentName, REGISTRY_PATH, readRegistryAgentsSync } from "../lib/registry.js";
 import { formatCode } from "../lib/relay-protocol.js";
 import { apiJson, forbidden, INVALID_JSON, invalidJsonBody, readJsonBody } from "./api-respond.js";
 import { emitCredentialRevoked } from "./credential-revocation.js";
@@ -24,10 +25,20 @@ const challenges = new ChallengeStore();
 const approvals = new Approvals();
 const MANAGE_MSG = "device management requires a credential with manage grant";
 const PAIR_ADMIN_MSG = "pairing management requires a device credential with manage grant";
-/** 单测把 principals.json 指到临时目录；生产不调 */
+/** 单测把 principals.json / registry.json 指到临时目录；生产不调 */
 let principalsPath: string | undefined;
+let registryPath = REGISTRY_PATH;
 export function setDevicesPrincipalsPathForTest(path: string | undefined): void {
   principalsPath = path;
+}
+export function setDevicesRegistryPathForTest(path: string | undefined): void {
+  registryPath = path ?? REGISTRY_PATH;
+}
+
+/** guest 能开放的名字：registry 里有的（按规范名比，裸名、agent- 前缀都认，与 agentInScope 同口径） */
+function registryHas(): (canonical: string) => boolean {
+  const names = new Set(readRegistryAgentsSync(registryPath).map((a) => canonicalAgentName(a.name)));
+  return (n) => names.has(n) || names.has(`agent-${n}`);
 }
 
 interface PairOutcome { token: string; principalId: string; credentialId: string; grant: Grant; expiresAt: string }
@@ -247,7 +258,7 @@ export async function decideApproval(id: string, approve: boolean, approver?: Pr
 }
 
 /**
- * `claudestra pair` 的签码：grant 由 CLI 给（默认全权；--guest 给别人的设备，agents 必须写明，见 checkGuestAgents）；短码给中继（连着的话），秘密只进链接的 # 片段。
+ * `claudestra pair` 的签码：grant 由 CLI 给（默认全权；--guest 给别人的设备，名字和 agents 都必须写明，见 checkGuestAgents）；短码给中继（连着的话），秘密只进链接的 # 片段。
  * 没连中继也能签（直托管入口）：link 要有入口地址才拼得出（CLI 的 --url），否则只给短码与 fragment 让用户手动进配对页。
  */
 export function issuePairing(
@@ -256,7 +267,9 @@ export function issuePairing(
   issuer?: Principal,
 ): Record<string, unknown> {
   const guest = str(body.guest);
-  const guestAgents = guest ? checkGuestAgents(body.agents, body.confirmAllAgents) : null;
+  // 带了 guest 字段名字却是空白 / 数字 / null：拒，不能当成没带、退化成给自己签全权码
+  if (body.guest !== undefined && !guest) return { ok: false, code: "guest_name_required", error: "guest 要写这台设备是给谁的（名字不能是空白，也得是文字）" };
+  const guestAgents = guest ? checkGuestAgents(body.agents, body.confirmAllAgents, registryHas()) : null;
   if (guestAgents && !guestAgents.ok) return { ok: false, code: guestAgents.code, error: guestAgents.error };
   const fp = i.fp ?? machineFp();
   if (!fp) return { ok: false, error: "本机没有实例密钥（instance-key.pem 读写失败），签不了配对码" };

@@ -95,6 +95,12 @@ describe("isMasterAgent", () => {
     expect(isMasterAgent("market-maker")).toBe(false);
   });
 
+  test("大小写、全角、零宽字符变体也是大总管（T42：guest / scope 按规范名比，变体不能绕过排除）", () => {
+    for (const n of ["MASTER", "Master", "agent-MASTER", "Agent-Master", "\uff4daster", "master\u200b", " master "]) expect(isMasterAgent(n)).toBe(true);
+    expect(isMasterAgent("")).toBe(false);
+    expect(isMasterAgent(undefined)).toBe(false);
+  });
+
   test("名字里含 master 但不是大总管 → 不认（别写成 includes）", () => {
     expect(isMasterAgent("agent-master-plan")).toBe(false);
     expect(isMasterAgent("masterful")).toBe(false);

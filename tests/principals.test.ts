@@ -114,6 +114,25 @@ describe("agentInScope", () => {
     const p = newTokenPrincipal("web-ui", ["*", "master"]);
     expect(agentInScope(p, "master")).toBe(true);
   });
+
+  test("普通 agent 按规范名比：大小写 / 全角 / 零宽变体是同一个，接口间不会一处认一处不认", () => {
+    const p = newTokenPrincipal("t", ["CC"]); // T42 之前签出的老条目
+    for (const name of ["cc", "agent-cc", "CC", "Agent-CC", "\uff43\uff43", "c\u200bc"]) expect(agentInScope(p, name)).toBe(true);
+    expect(agentInScope(p, "agent-cc2")).toBe(false);
+    expect(agentInScope(newTokenPrincipal("t", ["cc"]), "agent-CC")).toBe(true);
+  });
+
+  test("大总管变体：\"*\" 不含它们；老条目里的 MASTER / 全角变体也匹配不上大总管，只认逐字列出的 master", () => {
+    for (const name of ["MASTER", "Agent-Master", "\uff4daster", "master\u200b"]) {
+      expect(agentInScope(newTokenPrincipal("t", ["*"]), name)).toBe(false);
+      expect(agentInScope(newTokenPrincipal("t", ["MASTER", "Agent-Master"]), "master")).toBe(false);
+    }
+    expect(agentInScope(newTokenPrincipal("t", ["*", "master"]), "agent-master")).toBe(true);
+  });
+
+  test('"*" 的变体（全角 ＊、agent-*）不是通配：老条目里有也不放行别的 agent', () => {
+    expect(agentInScope(newTokenPrincipal("t", ["\uff0a", "agent-*"]), "agent-cc")).toBe(false);
+  });
 });
 
 describe("SlidingWindowLimiter", () => {

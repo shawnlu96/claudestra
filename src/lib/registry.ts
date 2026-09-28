@@ -25,7 +25,17 @@ export type AgentRuntime = "claude-code" | "pi" | "codex";
  * `agent-master` 绕过 master 排除），`manager.ts list` 这次踩的是另一头。
  */
 export function isMasterAgent(name: string | undefined | null): boolean {
-  return name === "master" || name === "agent-master";
+  if (name === "master" || name === "agent-master") return true;
+  const c = name ? canonicalAgentName(name) : "";
+  return c === "master" || c === "agent-master"; // MASTER、全角、夹零宽字符的变体也是大总管：scope / guest 名按规范形式比，变体不能绕过排除
+}
+
+/**
+ * agent 名的规范形式：NFKC（全角 → 半角）、去掉零宽等不可见格式字符、去首尾空白、转小写。scope 比对（principals.agentInScope）
+ * 与 guest 开放名校验（devices.checkGuestAgents）都按它——否则大小写不敏感的文件系统上，各接口认到的范围会不一致。
+ */
+export function canonicalAgentName(name: string): string {
+  return name.normalize("NFKC").replace(/\p{Cf}/gu, "").trim().toLowerCase();
 }
 
 /**

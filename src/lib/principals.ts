@@ -18,7 +18,7 @@
 
 import { acquireLock } from "./file-lock.js";
 import { STATE_DIR } from "./paths.js";
-import { isMasterAgent } from "./registry.js";
+import { canonicalAgentName, isMasterAgent } from "./registry.js";
 import { OWNER_PRINCIPAL_ID } from "./devices.js";
 import { timingSafeEqual } from "crypto";
 import { readJsonState, readJsonLenient, writeJsonStateGuarded, StateCorruptError } from "./state-file.js";
@@ -187,6 +187,8 @@ export function findToken(file: PrincipalsFile, idOrName: string): Principal | n
   );
 }
 
+const bareCanonical = (name: string): string => canonicalAgentName(name).replace(/^agent-/, "");
+
 /**
  * scope 检查。registry 名带 "agent-" 前缀（如 "agent-worker"），token 里可能
  * 存的是用户输入的裸名（"worker"）—— 双向兼容。
@@ -202,12 +204,14 @@ export function agentInScope(p: Principal, agentName: string): boolean {
   // 分享出去」）。历史 token 显式列了 master（老版本 --force 能签出）也在
   // 这里截断——签发侧和消费侧双闸。
   if (p.peer && isMaster) return false;
+  const want = bareCanonical(agentName);
   for (const a of p.agents) {
     if (a === "*") {
       if (!isMaster) return true;
       continue;
     }
-    if (a === agentName || `agent-${a}` === agentName || a === `agent-${agentName}`) return true;
+    // 普通 agent 按规范名比（CC / 全角 / 零宽变体 = 同一个）；大总管只认逐字列出的 master，老条目里的 MASTER 之类变体不能借规范化匹配上它
+    if (isMaster ? a === agentName || `agent-${a}` === agentName || a === `agent-${agentName}` : bareCanonical(a) === want) return true;
   }
   return false;
 }
