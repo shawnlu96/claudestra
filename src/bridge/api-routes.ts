@@ -79,6 +79,7 @@ import { activeBgJob, bgJobLog, bgJobLogResponse, spawnBgJob } from "./bg-jobs-h
 import { handleUpdateRoutes } from "./update-routes.js";
 import { handlePeersRoutes } from "./peers-routes.js";
 import { agentListExtras, handleAgentInfoRoutes } from "./agent-info-routes.js";
+import { refuseUnconfirmedSubSession } from "./subsession-guard.js";
 import { sseEventAllow } from "./ledger-feed.js";
 import { firstFlagLikeField } from "../lib/flag-like.js";
 import { handleRuntimeSettingsRoutes } from "./runtime-settings-routes.js";
@@ -1211,13 +1212,13 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
     if (!inScopeEitherName(principal, agentParam)) return notInScope(agentParam);
     const agent = await findApiAgent(agentParam);
     if (!agent) return apiJson(404, { ok: false, error: `agent "${agentParam}" not found` });
-    const client = deps.clients.get(agent.channelId);
+    const client = agent.status === "creating" ? undefined : deps.clients.get(agent.channelId); // create 还没落盘：当离线，不投递（manager list 的 creating）
     if (!client) {
       // ws 不在 ≠ agent 死了。channel-server 是独立子进程，被顶替/重启时 ws 会短暂
       // 缺席，而 tmux window 里的 Claude Code 照常跑着上一回合（2026-07-25 owner:
       // 「提示已断开，我进 console 看你还在进行上一轮对话」）。window 还在就报可重试的
       // 503，别把「链路重连中」说成「会话不存在」。
-      const alive = (await listWindows().catch((): string[] => [])).includes(agent.name);
+      const alive = agent.status !== "creating" && (await listWindows().catch((): string[] => [])).includes(agent.name);
       if (alive) {
         return apiJson(503, {
           ok: false,
@@ -1748,9 +1749,7 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
     // v2.23+ 运行时：Web 端也能建 Pi agent（此前只有命令行能建）
     const runtime = String(body?.runtime || "").trim();
     const piBase = String(body?.piBase || "").trim();
-    if (runtime && !managedFor(runtime)) {
-      return apiJson(400, { ok: false, error: `runtime must be one of: ${manageableRuntimeIds().join(", ")}` });
-    }
+    if (runtime && !managedFor(runtime)) return apiJson(400, { ok: false, error: `runtime must be one of: ${manageableRuntimeIds().join(", ")}` });
     if (piBase && piBase !== "minimal" && piBase !== "inherit") {
       return apiJson(400, { ok: false, error: 'piBase must be "minimal" or "inherit"' });
     }
@@ -1789,9 +1788,7 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
     const sessionId = String(body?.sessionId || "").trim();
     const runtime = String(body?.runtime || "").trim();
     const cwd = String(body?.cwd || "").trim();
-    if (!agent || !sessionId) {
-      return apiJson(400, { ok: false, error: 'body must be {"agent", "sessionId", "runtime"?, "cwd"?}' });
-    }
+    if (!agent || !sessionId) return apiJson(400, { ok: false, error: 'body must be {"agent", "sessionId", "runtime"?, "cwd"?}' });
     if (agent.startsWith("-") || sessionId.startsWith("-") || cwd.startsWith("-")) {
       return apiJson(400, { ok: false, error: 'agent/sessionId/cwd 不能以 "-" 开头' });
     }
@@ -1800,6 +1797,8 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
     if (runtime && !managedFor(runtime)) {
       return apiJson(400, { ok: false, error: `runtime must be one of: ${manageableRuntimeIds().join(", ")}` });
     }
+    const subRefusal = await refuseUnconfirmedSubSession(body, sessionId, runtime); // Codex 子会话要前端二次确认（subsession-guard.ts）
+    if (subRefusal) return subRefusal;
     const args = ["resume", agent, sessionId];
     if (cwd) args.push(cwd);
     if (runtime && runtime !== DEFAULT_RUNTIME) args.push("--runtime", runtime);

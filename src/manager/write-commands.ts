@@ -85,6 +85,7 @@ export function isWriteInvocation(cmd: string | undefined, args: readonly string
   if (!cmd) return false;
   if (WRITE_COMMANDS.has(cmd)) return true;
   if (cmd === "takeover") return takeoverWrites(args);
+  if (cmd === "repair") return args.includes("--apply"); // 不带 --apply 只列计划
   const sub = args[0] ?? "";
   const subs = WRITE_SUBCOMMANDS[cmd];
   if (subs) return subs.has(sub);
