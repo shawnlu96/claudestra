@@ -7,8 +7,8 @@
  * instance-id 是对方自报的合并标识，这个才是凭据。纯逻辑部分单测在 tests/instance-key.test.ts。
  */
 import { createHash, createPrivateKey, createPublicKey, generateKeyPairSync, sign, verify, type KeyObject } from "node:crypto";
-import { linkSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { readOrCreateKeyFile } from "./key-file.js";
 import { STATE_DIR } from "./paths.js";
 
 export interface InstanceKey {
@@ -38,24 +38,7 @@ export function instanceKeySync(dir: string = STATE_DIR): InstanceKey | null {
   if (hit) return hit;
   const path = join(dir, "instance-key.pem");
   try {
-    let pem: string;
-    try {
-      pem = readFileSync(path, "utf8");
-    } catch (e) {
-      if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e;
-      // 先写临时文件再 link：两个进程同时首用时只有一个 link 成功，另一个读回它的
-      mkdirSync(dir, { recursive: true });
-      const tmp = `${path}.${process.pid}.tmp`;
-      writeFileSync(tmp, generateKeyPairSync("ed25519").privateKey.export({ format: "pem", type: "pkcs8" }), { mode: 0o600 });
-      try {
-        linkSync(tmp, path);
-      } catch (le) {
-        if ((le as NodeJS.ErrnoException).code !== "EEXIST") throw le;
-      } finally {
-        rmSync(tmp, { force: true });
-      }
-      pem = readFileSync(path, "utf8");
-    }
+    const pem = readOrCreateKeyFile(path, () => String(generateKeyPairSync("ed25519").privateKey.export({ format: "pem", type: "pkcs8" })));
     const privateKey = createPrivateKey(pem);
     const key = { publicKey: publicOf(privateKey), privateKey };
     cache.set(dir, key);
