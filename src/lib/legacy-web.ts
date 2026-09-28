@@ -14,6 +14,7 @@ import { mergeEnvContent, readDotenvFileSync } from "./env-file.js";
 import { STATE_DIR } from "./paths.js";
 import { LEGACY_WEB_DAEMON, legacyWebPlistPath } from "./web-static.js";
 import { migrateWebState, sessionIdHash } from "./web-state-migrate.js";
+import { publishWebOut } from "./web-build.js";
 import { migrateStaticDirToReleases } from "./web-releases.js";
 
 /** 旧 web 的会话 cookie 名（web/lib/services/auth.service.ts，已删） */
@@ -64,7 +65,7 @@ function addMissingEnv(envFile: string, updates: Record<string, string>): string
  */
 /** install-cli 的网页托管迁移一步做完：旧 web 服务 → bridge 托管 web/out → 按版本发布（lib/web-releases.ts，不抛错） */
 export async function migrateWebHosting(repoRoot: string): Promise<string[]> {
-  return [...(await autoMigrateLegacyWeb(repoRoot)), ...migrateStaticDirToReleases(repoRoot)];
+  return [...(await autoMigrateLegacyWeb(repoRoot)), ...(await migrateStaticDirToReleases(repoRoot, () => publishWebOut(repoRoot)))];
 }
 
 async function autoMigrateLegacyWeb(repoRoot: string): Promise<string[]> {

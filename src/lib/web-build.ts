@@ -26,7 +26,7 @@ import { existsSync, mkdirSync, openSync, closeSync, readFileSync, rmSync, statS
 import { spawnSync } from "child_process";
 import { resolveNpm } from "./npm-path.js";
 import { healSelfDirty } from "./self-dirty.js";
-import { publishWebRelease, releasesManaged } from "./web-releases.js";
+import { clearPendingPublish, hasPendingPublish, markPendingPublish, publishWebRelease, releasesManaged, type PublishResult } from "./web-releases.js";
 
 /** 仓库根下的 web pathspec —— 与 gen-build-info.mjs 在 web/ 下的 `-- . ':(exclude)*.md'` 等价 */
 export const WEB_PATHSPEC = ["--", "web", ":(exclude)web/*.md"];
@@ -276,6 +276,41 @@ function discardBackups(): void {
   for (const b of BACKUPS) rmSync(b.prev, { recursive: true, force: true });
 }
 
+const outDirOf = (repoRoot: string) => `${repoRoot}/web/out`;
+
+/** 构建成功后（已持有构建锁）：按版本托管就发布；发布失败 = 这次没上线（线上仍是上一个版本），记待发布并按失败报 */
+async function publishAfterBuild(repoRoot: string, result: WebBuildResult): Promise<void> {
+  if (!releasesManaged(`${repoRoot}/.env`)) return;
+  const p = await publishWebRelease(outDirOf(repoRoot));
+  if (!p.ok) {
+    markPendingPublish(p.error ?? "");
+    Object.assign(result, { ok: false, error: `构建成功但${p.error}` });
+    return;
+  }
+  clearPendingPublish();
+  if (p.pruneError) result.error = `新版本已上线，但清理旧版本失败：${p.pruneError}`;
+}
+
+/** 不用重建时：上次构建成功却没发布成（待发布标记还在）→ 补发布。用户主动回滚不留标记，不会被这里顶回去 */
+async function retryPendingPublish(repoRoot: string, detail: string): Promise<WebBuildResult> {
+  if (!hasPendingPublish() || !releasesManaged(`${repoRoot}/.env`)) return { attempted: false, skipped: detail };
+  const p = await publishWebOut(repoRoot);
+  return p.ok ? { attempted: false, skipped: `${detail}；补发布了上次没上线的版本` } : { attempted: false, error: `补发布失败：${p.error}` };
+}
+
+/** 手动发布、迁移、补发布的入口：先拿构建锁（web/out 正在被构建就不去复制半套产物），再拿发布锁发布 */
+export async function publishWebOut(repoRoot: string): Promise<PublishResult> {
+  if (!takeLock()) return { ok: false, error: "web 正在构建，稍后再发布" };
+  try {
+    const p = await publishWebRelease(outDirOf(repoRoot));
+    if (p.ok) clearPendingPublish();
+    else if (releasesManaged(`${repoRoot}/.env`)) markPendingPublish(p.error ?? "");
+    return p;
+  } finally {
+    releaseLock();
+  }
+}
+
 /**
  * 静态包过期就重建。失败只报告不抛：web 是附属前端，不能拖垮 install-cli / update。
  * 构建成功后 bridge 立刻服务新文件（它按请求读 out/，不用重启）。
@@ -288,7 +323,7 @@ export async function rebuildWebIfStale(repoRoot: string): Promise<WebBuildResul
   if (!existsSync(`${webDir}/node_modules/.bin/next`)) return { attempted: false, skipped: "web 依赖没装" };
 
   const verdict = webBuildVerdict(readWebBuildFacts(repoRoot));
-  if (!verdict.stale) return { attempted: false, skipped: verdict.detail };
+  if (!verdict.stale) return retryPendingPublish(repoRoot, verdict.detail);
 
   // 主树就是线上：脏树构建会把未提交代码烤进 bundle，且烤入的 commit 与代码对不上
   const dirty = git(repoRoot, ["status", "--porcelain", ...WEB_PATHSPEC]);
@@ -338,11 +373,7 @@ export async function rebuildWebIfStale(repoRoot: string): Promise<WebBuildResul
       let baked: string | null = null;
       try { baked = parseBakedWebCommit(readFileSync(`${webDir}/lib/build-info.ts`, "utf-8")); } catch { /* 没有就不写 */ }
       if (baked) writeMarker(nextDir, baked);
-      // 按版本托管：发布失败 = 这次没上线（线上仍是上一个版本、没坏），按失败报出去
-      if (releasesManaged(`${repoRoot}/.env`)) {
-        const p = publishWebRelease(`${webDir}/out`);
-        if (!p.ok) Object.assign(result, { ok: false, error: `构建成功但${p.error}` });
-      }
+      await publishAfterBuild(repoRoot, result);
     } else if (hadBuild) {
       result.restored = restoreBuild(webDir);
       if (result.restored) writeMarker(nextDir, "");
