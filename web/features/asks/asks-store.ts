@@ -227,7 +227,8 @@ export function useAsks(): AsksSnap {
   return useSyncExternalStore(asksStore.subscribe, asksStore.get, none);
 }
 
-/** 只在 on 时读内容；off 时快照恒为 EMPTY，store 变了也不重渲染（每条助手消息都挂着 useReplyAsk，没有按钮的不该跟着 ask 事件重算） */
+const noSubscribe = () => () => undefined;
+/** 只在 on 时订阅：每条助手消息都挂着 useReplyAsk，没有按钮的气泡不订阅、快照恒为 EMPTY，ask 事件来了也不重算不重渲染 */
 export function useAsksIf(on: boolean): AsksSnap {
-  return useSyncExternalStore(asksStore.subscribe, on ? asksStore.get : none, none);
+  return useSyncExternalStore(on ? asksStore.subscribe : noSubscribe, on ? asksStore.get : none, none);
 }

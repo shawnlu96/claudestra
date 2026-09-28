@@ -721,7 +721,7 @@ async function deliverToApi(env: RouterEnvelope, to: RouterApiUserEndpoint): Pro
     agent: agentName,
     chatId: `api:${to.tokenId}`,
     type: "chat_message",
-    data: { direction: "out", from: agentName, text: env.content, threadId, api: true, ...(env.meta.components ? { components: env.meta.components, askId: env.meta.askId } : {}), ...(eventFiles.length ? { files: eventFiles } : {}) },
+    data: { direction: "out", from: agentName, text: env.content, threadId, api: true, ...(env.meta.components ? { components: env.meta.components } : {}), ...(env.meta.askId ? { askId: env.meta.askId } : {}), ...(eventFiles.length ? { files: eventFiles } : {}) },
   });
 
   // R2 审计镜像（fire-and-forget，走 bridge→user 的 UI 类通道）
@@ -1904,7 +1904,7 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
         // 这里再发就是同一条回复的重复事件（web 前端会渲染两遍）。
         if (parseChatId(msg.chatId).transport !== "api") {
           const evAgent = agentLabelForChannel(fromChannelId);
-          emitEvent({ agent: evAgent, chatId: msg.chatId, type: "chat_message", data: { direction: "out", from: evAgent, text, threadId: env.meta.threadId, ...(msg.components ? { components: msg.components, askId: env.meta.askId } : {}) } });
+          emitEvent({ agent: evAgent, chatId: msg.chatId, type: "chat_message", data: { direction: "out", from: evAgent, text, threadId: env.meta.threadId, ...(msg.components ? { components: msg.components } : {}), ...(env.meta.askId ? { askId: env.meta.askId } : {}) } });
         }
 
         // v1.9.21+ send_to_agent 推回机制：

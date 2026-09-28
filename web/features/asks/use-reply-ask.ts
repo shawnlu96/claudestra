@@ -24,7 +24,7 @@ export function useReplyAsk(m: ChatMessage) {
   const agent = useChatStore((s) => s.state.activeAgent);
   const inlineIds = useMemo(() => parseInlineButtons(m.replyText ?? "").map((b) => b.id), [m.replyText]);
   const { asks } = useAsksIf(!!rows?.length || inlineIds.length > 0);
-  const ask = useMemo(() => askForReply(asks, agent, rows, m.replyTs ?? m.ts, inlineIds), [asks, agent, rows, m.replyTs, m.ts, inlineIds]);
+  const ask = useMemo(() => askForReply(asks, agent, rows, m.replyTs ?? m.ts, inlineIds, m.replyAskId), [asks, agent, rows, m.replyTs, m.ts, inlineIds, m.replyAskId]);
   const closed = ask && ask.state !== "open" ? ask : null;
   const done = useMemo(() => (ask?.answer && rows ? answeredGroups(rows, ask.answer.choices) : new Set<string>()), [ask, rows]);
   // 老快照只有单值 replyClickedId 时退化推导（bug ①，deriveClicksFromLegacy）

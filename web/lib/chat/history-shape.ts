@@ -24,6 +24,8 @@ export interface NeutralMessage {
   replyComponents?: WebComponentRow[];
   /** reply() 出站附件文件名（basename） */
   replyFiles?: string[];
+  /** reply() 建出的「待你处理」id（后端从 reply 的 tool_result 解析） */
+  replyAskId?: string;
   /** 回合耗时 ms（正常收尾的回合才有）——历史尾轮据此渲染完成标记 */
   turnMs?: number;
   compactSummary?: boolean;
@@ -141,12 +143,14 @@ function accumulate(group: ChatMessage | null, m: NeutralMessage, toolCalls: Too
     if (m.replyText) g.replyText = m.replyText;
     if (m.replyComponents?.length) g.replyComponents = m.replyComponents;
     if (replyAtts.length) g.attachments = replyAtts;
+    if (m.replyAskId) g.replyAskId = m.replyAskId;
   } else {
     g.seqEnd = m.seq; // 气泡覆盖的原始记录区间尾（「删除」按区间隐藏）
     if (m.text) g.content = g.content ? `${g.content}\n\n${m.text}` : m.text;
     if (toolCalls) g.toolCalls = [...(g.toolCalls ?? []), ...toolCalls];
     if (m.replyText) g.replyText = g.replyText ? `${g.replyText}\n${m.replyText}` : m.replyText;
     if (m.replyComponents?.length) g.replyComponents = [...(g.replyComponents ?? []), ...m.replyComponents];
+    if (m.replyAskId) g.replyAskId = m.replyAskId; // 一个气泡并了几条 reply 时认最后建的那条
     if (replyAtts.length) g.attachments = [...(g.attachments ?? []), ...replyAtts];
   }
   if (typeof m.turnMs === "number") g.turnMs = m.turnMs;

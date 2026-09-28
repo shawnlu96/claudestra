@@ -110,18 +110,20 @@ function canon(v: unknown): string {
 const buttonIds = (row: WebComponentRow | undefined) => (row?.type === "buttons" ? row.buttons.map((b) => b.id).join(",") : "");
 
 /**
- * 这个聊天气泡是哪条 ask 建出来的：同一个 agent、ask 的选项以气泡的 components 开头，行内按钮合成的那一行排在后面（按 id 对）；
- * agent 复用同一组按钮时取建立时间离气泡最近的一条（两分钟内），对不上就当没有。
+ * 这个聊天气泡是哪条 ask 建出来的：气泡带 askId（出站事件 / 历史里 reply 的 tool_result）就只按 id 认。
+ * 没带的（老消息、历史尾读跨了窗口）才按形状对：同一个 agent、ask 的选项以气泡的 components 开头，行内按钮合成的那一行排在后面（按 id 对），
+ * 复用同一组按钮时取建立时间离气泡最近的一条（两分钟内）；授权类不这样猜——认错了会带着新参数那条的 id 去批（bridge 同样一律 409）。
  */
-export function askForReply(asks: WebAsk[], agent: string, rows: WebComponentRow[] | undefined, replyTs?: string, inlineIds: string[] = []): WebAsk | null {
+export function askForReply(asks: WebAsk[], agent: string, rows: WebComponentRow[] | undefined, replyTs?: string, inlineIds: string[] = [], askId?: string): WebAsk | null {
   const block = rows ?? [];
   if ((!block.length && !inlineIds.length) || !agent) return null;
+  if (askId) return asks.find((a) => a.id === askId) ?? null;
   const want = canon(block);
   const wantInline = inlineIds.join(",");
   const at = replyTs ? Date.parse(replyTs) : NaN;
   let best: WebAsk | null = null;
   for (const a of asks) {
-    if (a.source !== "reply" || !a.fromAgent || !sameAgent(a.fromAgent, agent)) continue;
+    if (a.source !== "reply" || a.bind || !a.fromAgent || !sameAgent(a.fromAgent, agent)) continue;
     if (canon(a.options.slice(0, block.length)) !== want) continue;
     if (wantInline && buttonIds(a.options[block.length] as WebComponentRow | undefined) !== wantInline) continue;
     if (Number.isFinite(at) && Math.abs(a.createdAt - at) > 120_000) continue;
