@@ -151,7 +151,7 @@ describe("P0：只有 bridge 写的头属性是可信绑定", () => {
     expect([await anchor("2026-09-20/ab12cd34-plan.pdf", guest), await anchor("2026-09-20/deadbeef-plan.pdf", guest)]).toEqual([404, 404]);
     expect(await anchor("2026-09-20/ab12cd34-plan.pdf", OWNER)).toBe(200);
   });
-  test("「可信但文件不在」「找到但不可信」「没找到且不可信」对 guest 逐字节一致：列表字段与 raw / thumb 的 404", async () => {
+  test("「可信但文件不在」「找到但不可信」「没找到且不可信」「不存在 / scope 外」对 guest 逐字节一致：列表字段与 raw / thumb 的 404", async () => {
     const guest: Principal = { ...GUEST, id: "guest:3", agents: ["probe"], credential: "dev_g3" };
     await list("agent=probe", guest); // 先按文件还在时建好索引，再删
     unlinkSync(join(inbox, "api_1700000000900_gone.pdf"));
@@ -161,7 +161,9 @@ describe("P0：只有 bridge 写的头属性是可信绑定", () => {
     expect(new Set(items.map(shape)).size).toBe(1);
     expect(items[0]).toMatchObject({ available: false, size: null, mime: null });
     const bodies = new Set<string>();
-    for (const it of items) {
+    // 再加两种：id 根本不存在、id 属于 scope 外的 agent——对 guest 也必须是同一个 404
+    const outside = (await list("agent=other")).items[0];
+    for (const it of [...items, { id: "0".repeat(24) }, outside]) {
       for (const v of ["raw", "thumb"]) {
         const res = await get(`/media/${it.id}/${v}`, guest);
         bodies.add(`${res.status} ${res.headers.get("content-type")} ${await res.text()}`);
