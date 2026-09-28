@@ -59,6 +59,8 @@ export interface QuotaState {
   accounts: Record<string, AccountState>;
   credHealth: Partial<Record<QuotaProvider, CredHealth>>;
   reminders: ReminderLedger;
+  /** 后台查询的上次尝试时刻（成功失败都算）：Claude 后台读 Keychain 只按它的 6 小时节奏走，凭据坏着也不会每个 tick 都读 */
+  bgAttemptAt?: Partial<Record<QuotaProvider, number>>;
 }
 
 export function emptyQuotaState(): QuotaState {
@@ -135,6 +137,7 @@ export function normalizeQuotaState(v: unknown): QuotaState {
     current: keep(v.current, (p, k) => PROVIDERS.has(p) && (k === null || safeKey(k))),
     accounts,
     credHealth: keep(v.credHealth, (p, c) => PROVIDERS.has(p) && isObj(c) && typeof c.code === "string" && num(c.at) && numOrNull(c.until)),
+    ...(isObj(v.bgAttemptAt) ? { bgAttemptAt: keep(v.bgAttemptAt, (p, at) => PROVIDERS.has(p) && num(at)) } : {}),
     reminders: {
       credits: keep(r.credits, (_k, c) => isObj(c) && num(c.expiresAtMs) && Array.isArray(c.coveredH) && c.coveredH.every(num)),
       exhausted: keep(r.exhausted, (_k, at) => num(at)),

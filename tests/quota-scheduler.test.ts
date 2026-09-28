@@ -24,55 +24,7 @@ import {
   resetCreditsBody,
 } from "./quota-fixtures.js";
 
-const MIN = 60_000;
-const HOUR = 60 * MIN;
-
-type Route = (url: string, signal: AbortSignal) => Response | Promise<Response>;
-interface Harness {
-  now: number;
-  enabled: boolean;
-  claudeBg: boolean;
-  cd: ReturnType<typeof fakeCredDeps>;
-  fetch: ReturnType<typeof fakeFetch>;
-  route: Route;
-  store: QuotaStore;
-  scheduler: QuotaScheduler;
-  advance(ms: number): void;
-  fresh(): QuotaScheduler;
-}
-
-function harness(route: Route = okRoutes, store: QuotaStore = memoryQuotaStore()): Harness {
-  const h: Harness = {
-    now: T0,
-    enabled: true,
-    claudeBg: false,
-    cd: fakeCredDeps(),
-    fetch: fakeFetch((u, s) => h.route(u, s)),
-    route,
-    store,
-    scheduler: null as unknown as QuotaScheduler,
-    advance(ms: number) {
-      h.now += ms;
-    },
-    fresh() {
-      h.scheduler = new QuotaScheduler({
-        now: () => h.now,
-        random: () => 0.5,
-        fetch: h.fetch,
-        readCredential: (p) => (p === "claude" ? readClaudeCredential(h.cd) : readCodexCredential(h.cd)),
-        confirmCredential: (c) => confirmCredential(c, h.cd),
-        peekAccountKey: (p) => peekAccountKey(p, h.cd),
-        hashCreditId: (acct, id) => hmacHex(SECRET, acct, id),
-        store: h.store,
-        isEnabled: () => h.enabled,
-        claudeBackground: () => h.claudeBg,
-      });
-      return h.scheduler;
-    },
-  };
-  h.fresh();
-  return h;
-}
+import { HOUR, MIN, harness, type Harness } from "./quota-scheduler-harness.js";
 
 const urlsOf = (h: Harness) => h.fetch.calls.map((c) => c.url.split("?")[0].split("/").pop());
 
@@ -117,50 +69,6 @@ describe("合并与限频", () => {
     expect((await h.scheduler.refresh("claude", "background")).status).toBe("skipped_policy");
     expect(h.cd.keychainCalls).toHaveLength(0);
     expect(h.fetch.calls).toHaveLength(0);
-  });
-});
-
-describe("Claude 后台读取开关（owner 09-28 批准，bridge 缺省开）", () => {
-  test("开：没人看时 Claude 也按 6 小时查；关回去立刻停，策略闸照旧", async () => {
-    const h = harness();
-    const claudeCalls = () => h.fetch.calls.filter((c) => c.url.includes("/oauth/usage")).length;
-    await h.scheduler.tick({ viewing: false });
-    expect(claudeCalls()).toBe(0);
-    h.claudeBg = true;
-    h.advance(5 * MIN);
-    await h.scheduler.tick({ viewing: false });
-    expect(claudeCalls()).toBe(1);
-    h.advance(5 * MIN);
-    await h.scheduler.tick({ viewing: false });
-    expect(claudeCalls()).toBe(1);
-    for (let i = 0; i < 72; i++) {
-      h.advance(5 * MIN);
-      await h.scheduler.tick({ viewing: false });
-    }
-    expect(claudeCalls()).toBe(2); // 6 小时后第二次
-    h.claudeBg = false;
-    for (let i = 0; i < 80; i++) {
-      h.advance(5 * MIN);
-      await h.scheduler.tick({ viewing: false });
-    }
-    expect(claudeCalls()).toBe(2);
-    expect((await h.scheduler.refresh("claude", "background")).status).toBe("skipped_policy");
-  });
-
-  test("看板设置里的总开关关掉：后台开关开着也不读 Keychain、不发请求", async () => {
-    const h = harness();
-    h.claudeBg = true;
-    h.enabled = false;
-    for (let i = 0; i < 80; i++) {
-      h.advance(5 * MIN);
-      await h.scheduler.tick({ viewing: false });
-    }
-    expect(h.cd.keychainCalls).toHaveLength(0);
-    expect(h.fetch.calls).toHaveLength(0);
-    h.enabled = true; // 打开后下一个后台 tick 就读
-    h.advance(5 * MIN);
-    await h.scheduler.tick({ viewing: false });
-    expect(h.fetch.calls.filter((c) => c.url.includes("/oauth/usage"))).toHaveLength(1);
   });
 });
 

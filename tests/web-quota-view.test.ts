@@ -57,8 +57,11 @@ describe("文案与按钮", () => {
   test("重试只给 Keychain 被拒 / 超时、端点暂停；按量接入商和本机缓存永远没有", () => {
     expect(canRetry(d.entries[1])).toBe("codex");
     expect(canRetry(d.entries[0])).toBeNull();
-    expect(canRetry({ ...d.entries[0], source: { layer: "none", observedAt: null, reason: "http_5xx" } })).toBeNull();
-    expect(canRetry({ ...d.entries[0], source: { layer: "none", observedAt: null, reason: "bad_shape" } })).toBe("claude");
+    expect(canRetry({ ...d.entries[0], source: { layer: "none", observedAt: null, reason: "http_5xx", needsUserRetry: false } })).toBeNull();
+    expect(canRetry({ ...d.entries[0], source: { layer: "none", observedAt: null, reason: "bad_shape", needsUserRetry: false } })).toBe("claude");
+    // bridge 标了需要用户重试就给按钮，不管原因码是什么（先 5xx 再 Keychain 出错之类）；keychain_error 兜底名单也认
+    expect(canRetry({ ...d.entries[0], source: { layer: "live_stale", observedAt: null, reason: "http_5xx", needsUserRetry: true } })).toBe("claude");
+    expect(canRetry({ ...d.entries[0], source: { layer: "none", observedAt: null, reason: "keychain_error", needsUserRetry: false } })).toBe("claude");
     expect(canRetry(d.entries[2])).toBeNull();
   });
 
@@ -89,6 +92,7 @@ describe("重置卡截止说明", () => {
     expect(keys({ at, left: 2, requiresLimit: true })).toEqual(["{at} 到期", "剩 {n} 次", "到限额才能用"]);
     expect(keys({ at, left: 1, requiresLimit: false })).toEqual(["{at} 到期"]);
     expect(expiryParts({ at, left: null, requiresLimit: false })[0].params.at).toBe("10-04 22:28");
+    expect(keys({ at: null, left: 1, requiresLimit: true })).toEqual(["无截止日", "到限额才能用"]);
   });
 });
 

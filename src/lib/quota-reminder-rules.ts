@@ -79,7 +79,8 @@ export function isEligibleCredit(c: ResetCreditDto, now: number): boolean {
  */
 export function claudeGrantCredits(r: ClaudeResetsDto | null): ResetCreditDto[] {
   if (!r) return [];
-  return r.grants.map((g) => ({
+  // 没有截止日的卡不会过期，不进快过期提醒
+  return r.grants.flatMap((g) => (g.endsAtMs === null ? [] : [{
     key: g.key,
     status: g.paused || g.resetsLeft <= 0 ? "other" : "available",
     supportedByPlan: r.eligible,
@@ -87,7 +88,7 @@ export function claudeGrantCredits(r: ClaudeResetsDto | null): ResetCreditDto[] 
     redeemed: false,
     grantedAtMs: null,
     expiresAtMs: g.endsAtMs,
-  }));
+  } satisfies ResetCreditDto]));
 }
 
 function newNotice(kind: ReminderNotice["kind"], ctx: PlanContext, tag: string): ReminderNotice {

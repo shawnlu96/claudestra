@@ -20,6 +20,7 @@ export const QUOTA_DICT: Record<string, string> = {
   "明细偏旧": "details may be stale",
   "剩 {n} 次": "{n} left",
   "到限额才能用": "usable once you hit the limit",
+  "无截止日": "no expiry",
   "用了补满额度，周重置日不变": "Using one refills your usage; the weekly reset date stays the same",
   "账户归属未知": "account unknown",
   "账户按本机登录推定": "account assumed from local login",

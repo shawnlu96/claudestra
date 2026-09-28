@@ -25,11 +25,12 @@ export interface EntryView {
   meters: MeterView[];
   /** expiries：每张卡 / 每条 credit 的截止；left = 这张卡剩几次（Claude 一张卡可含多次），requiresLimit = 到限额才能用 */
   resetCredits: { held: number; applicableNow: number; expiries: CreditExpiry[] | null; stale: boolean } | null;
-  source: { layer: LayerSource; observedAt: number | null; reason: string | null };
+  source: { layer: LayerSource; observedAt: number | null; reason: string | null; needsUserRetry: boolean };
 }
 
 export interface CreditExpiry {
-  at: number;
+  /** null = 没有截止日（Claude 的卡可以没有） */
+  at: number | null;
   left: number | null;
   requiresLimit: boolean;
 }
@@ -57,8 +58,10 @@ function creditsOf(v: unknown): EntryView["resetCredits"] {
   if (!c) return null;
   const expiry = (x: unknown): CreditExpiry | null => {
     const o = obj(x);
-    const at = num(o?.expiresAtMs);
-    return at === null ? null : { at, left: num(o?.left), requiresLimit: o?.requiresLimit === true };
+    if (!o) return null;
+    const at = num(o.expiresAtMs);
+    if (at === null && o.expiresAtMs !== null) return null; // 缺字段 / 坏值丢掉；明确的 null 才是「无截止日」
+    return { at, left: num(o.left), requiresLimit: o.requiresLimit === true };
   };
   const list = Array.isArray(c.credits) ? c.credits.map(expiry).filter((x): x is CreditExpiry => x !== null) : null;
   return { held: num(c.held) ?? 0, applicableNow: num(c.applicableNow) ?? 0, expiries: list, stale: c.stale === true };
@@ -78,7 +81,7 @@ function entryOf(v: unknown): EntryView | null {
     identity: identity === "assumed" || identity === "bound" ? identity : "unknown",
     meters: (Array.isArray(e.meters) ? e.meters : []).map(meterOf).filter((m): m is MeterView => m !== null),
     resetCredits: creditsOf(e.resetCredits),
-    source: { layer, observedAt: num(src.observedAt), reason: str(src.reason) },
+    source: { layer, observedAt: num(src.observedAt), reason: str(src.reason), needsUserRetry: src.needsUserRetry === true },
   };
 }
 
@@ -143,11 +146,14 @@ export function reasonText(code: string | null): string | null {
   return code ? (REASONS[code] ?? code) : null;
 }
 
-/** 只有「用户主动重试」才解除的状态：Keychain 被拒 / 超时、端点暂停 */
-const RETRY_CODES = new Set(["keychain_denied", "keychain_timeout", "http_404", "http_4xx", "bad_shape", "bad_json", "redirect", "too_large"]);
+/**
+ * 只有「用户主动重试」才解除的状态：以 bridge 给的 needsUserRetry 为准；老 bridge 没这个字段时按原因码兜底
+ * （Keychain 被拒 / 超时 / 出错、端点暂停）。
+ */
+const RETRY_CODES = new Set(["keychain_denied", "keychain_timeout", "keychain_error", "http_404", "http_4xx", "bad_shape", "bad_json", "redirect", "too_large"]);
 export function canRetry(e: EntryView): "claude" | "codex" | null {
   if (e.id !== "claude" && e.id !== "codex") return null;
-  return e.source.reason && RETRY_CODES.has(e.source.reason) ? e.id : null;
+  return e.source.needsUserRetry || (e.source.reason && RETRY_CODES.has(e.source.reason)) ? e.id : null;
 }
 
 /** 量条标签（zh 原文）：5 小时 / 本周 / 本周 · 模型 */
@@ -177,7 +183,9 @@ export function identityNote(e: EntryView): string | null {
 
 /** 一张卡 / 一条 credit 的截止说明（zh 原文 + 参数，面板里过 t()） */
 export function expiryParts(x: CreditExpiry): { key: string; params: Record<string, string | number> }[] {
-  const out: { key: string; params: Record<string, string | number> }[] = [{ key: "{at} 到期", params: { at: fmtAt(x.at) } }];
+  const out: { key: string; params: Record<string, string | number> }[] = [
+    x.at === null ? { key: "无截止日", params: {} } : { key: "{at} 到期", params: { at: fmtAt(x.at) } },
+  ];
   if (x.left !== null && x.left > 1) out.push({ key: "剩 {n} 次", params: { n: x.left } });
   if (x.requiresLimit) out.push({ key: "到限额才能用", params: {} });
   return out;

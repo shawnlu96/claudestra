@@ -67,7 +67,7 @@ describe("选层", () => {
     const r = remote();
     r.claude.endpoints.claude_usage = { ...r.claude.endpoints.claude_usage!, lastCode: "http_5xx", stale: true };
     const s = selectQuotaLayers({ now: T0, enabled: true, remote: r, local: { claudeCache: cache, codexRollout: null } });
-    expect(byId(s.providers, "claude")?.source).toEqual({ layer: "live_stale", observedAt: T0 - 60_000, reason: "http_5xx" });
+    expect(byId(s.providers, "claude")?.source).toEqual({ layer: "live_stale", observedAt: T0 - 60_000, reason: "http_5xx", needsUserRetry: false });
     const local = byId(s.providers, "claude.local")!;
     expect(local.account).toEqual({ key: null, identity: "unknown" });
     expect(local.source.layer).toBe("local_cache");
@@ -77,7 +77,24 @@ describe("选层", () => {
   test("从没成功过 → none + 原因；Keychain 被拒的原因也带出来", () => {
     const r = remote({ claude: { account: { key: "ck", identity: "assumed", uncertain: true }, credFailure: { code: "keychain_denied", needsUserRetry: true }, endpoints: {} } });
     const s = selectQuotaLayers({ now: T0, enabled: true, remote: r, local: { claudeCache: null, codexRollout: null } });
-    expect(byId(s.providers, "claude")?.source).toEqual({ layer: "none", observedAt: null, reason: "keychain_denied" });
+    expect(byId(s.providers, "claude")?.source).toEqual({ layer: "none", observedAt: null, reason: "keychain_denied", needsUserRetry: true });
+  });
+
+  test("先 5xx 再 Keychain 被拒 / 出错：原因写凭据失败（不是「稍后自动重试」），并标需要用户重试；端点暂停也标", () => {
+    for (const code of ["keychain_denied", "keychain_error"] as const) {
+      const r = remote({ claude: {
+        account: { key: "ck", identity: "assumed", uncertain: true }, credFailure: { code, needsUserRetry: true },
+        endpoints: { claude_usage: { snapshot: { data: claudeData, observedAt: T0 - 60_000 }, lastCode: "http_5xx", paused: false, stale: true } },
+      } });
+      const src = byId(selectQuotaLayers({ now: T0, enabled: true, remote: r, local: { claudeCache: null, codexRollout: null } }).providers, "claude")?.source;
+      expect(src).toEqual({ layer: "live_stale", observedAt: T0 - 60_000, reason: code, needsUserRetry: true });
+    }
+    const paused = remote({ claude: {
+      account: { key: "ck", identity: "assumed", uncertain: false }, credFailure: null,
+      endpoints: { claude_usage: { snapshot: { data: claudeData, observedAt: T0 - 60_000 }, lastCode: "bad_shape", paused: true, stale: true } },
+    } });
+    const src = byId(selectQuotaLayers({ now: T0, enabled: true, remote: paused, local: { claudeCache: null, codexRollout: null } }).providers, "claude")?.source;
+    expect(src?.needsUserRetry).toBe(true);
   });
 
   test("没配这家（缺 auth.json / Keychain 没条目）→ 不出账户卡、不报错，只看本机缓存", () => {
@@ -196,6 +213,14 @@ describe("Claude 重置卡（cedar_ember）", () => {
     ]);
     expect(claudeCard(withBlock(block)).resetCredits!.held).toBe(1);
     expect(claudeCard(withBlock({ ...block, eligible: false })).resetCredits!.held).toBe(0);
+  });
+
+  test("没有截止日的卡：计入持有、排在最后、expiresAtMs null", () => {
+    const block = cedarEmberBlock([{ endsAt: "2026-10-01T09:00:00Z" }, { endsAt: "2026-10-05T09:00:00Z", left: 2 }]);
+    (block.grants as Record<string, unknown>[])[1].ends_at = null;
+    const rc = claudeCard(withBlock(block)).resetCredits!;
+    expect(rc.held).toBe(3);
+    expect(rc.credits!.map((c) => c.expiresAtMs)).toEqual([Date.parse("2026-10-01T09:00:00Z"), null]);
   });
 
   test("接口没给这个块（旧账号）→ 卡上没有重置这一行，卡本身照常是 live", () => {

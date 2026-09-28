@@ -12,7 +12,7 @@
 
 import type { CodexQuotaObservation } from "./codex-usage.js";
 import type { QuotaWindowDto } from "./quota-dto.js";
-import { claudeGrantCredits, isEligibleCredit } from "./quota-reminder-rules.js";
+import { isEligibleCredit } from "./quota-reminder-rules.js";
 import type { ProviderRemote, RemoteView } from "./quota-scheduler.js";
 import { resetPassed, type CachedUsage } from "./usage-cache.js";
 
@@ -40,7 +40,8 @@ export interface ResetCreditsView {
   held: number;
   applicableNow: number;
   /** 明细拿不到（从没成功过）= null，只剩汇总数 */
-  credits: { key: string; expiresAtMs: number; left?: number; requiresLimit?: boolean }[] | null;
+  /** expiresAtMs = null：Claude 的卡没有截止日 */
+  credits: { key: string; expiresAtMs: number | null; left?: number; requiresLimit?: boolean }[] | null;
   stale: boolean;
   observedAt: number | null;
 }
@@ -55,7 +56,8 @@ export interface ProviderEntry {
   meters: QuotaMeter[];
   balance?: { amount: string; currency: string | null } | null;
   resetCredits?: ResetCreditsView | null;
-  source: { layer: LayerSource; observedAt: number | null; reason: string | null };
+  /** needsUserRetry：Keychain 被拒 / 超时 / 出错、端点暂停——只认用户主动重试，界面要给「重试」按钮 */
+  source: { layer: LayerSource; observedAt: number | null; reason: string | null; needsUserRetry?: boolean };
 }
 
 export interface QuotaSnapshot {
@@ -121,8 +123,9 @@ function claudeResetsOf(r: ProviderRemote, now: number): ResetCreditsView | null
   const ev = r.endpoints.claude_usage;
   const resets = ev?.snapshot?.data.resets ?? null;
   if (!resets) return null;
-  const ok = new Set(claudeGrantCredits(resets).filter((c) => isEligibleCredit(c, now)).map((c) => c.key));
-  const grants = resets.grants.filter((g) => ok.has(g.key)).sort((a, b) => a.endsAtMs - b.endsAtMs);
+  // 与提醒（claudeGrantCredits）同一口径：有资格、没暂停、还有次数、没过期；只是没有截止日的卡也算持有
+  const usable = (g: (typeof resets.grants)[number]) => resets.eligible && !g.paused && g.resetsLeft > 0 && (g.endsAtMs === null || g.endsAtMs > now);
+  const grants = resets.grants.filter(usable).sort((a, b) => (a.endsAtMs ?? Infinity) - (b.endsAtMs ?? Infinity));
   return {
     held: grants.reduce((n, g) => n + g.resetsLeft, 0),
     applicableNow: grants.filter((g) => g.usableNow).reduce((n, g) => n + g.resetsLeft, 0),
@@ -136,10 +139,13 @@ function claudeResetsOf(r: ProviderRemote, now: number): ResetCreditsView | null
 function accountCard(p: "claude" | "codex", r: ProviderRemote, now: number): ProviderEntry | null {
   const ev = p === "claude" ? r.endpoints.claude_usage : r.endpoints.codex_usage;
   const snap = ev?.snapshot ?? null;
-  const reason = ev?.lastCode ?? r.credFailure?.code ?? (r.account?.uncertain ? "account_uncertain" : null);
+  // 要用户重试的凭据失败优先：先 5xx 再 Keychain 被拒时，写「服务端出错，稍后自动重试」就是在误导——它不会自己好
+  const blocked = r.credFailure?.needsUserRetry ? r.credFailure.code : null;
+  const reason = blocked ?? ev?.lastCode ?? r.credFailure?.code ?? (r.account?.uncertain ? "account_uncertain" : null);
+  const needsUserRetry = blocked !== null || !!ev?.paused;
   if (!r.account) {
     if (!r.credFailure || NOT_CONFIGURED.has(r.credFailure.code)) return null;
-    return { id: p, name: NAMES[p], kind: "subscription", account: { key: null, identity: "unknown" }, meters: [], source: { layer: "none", observedAt: null, reason } };
+    return { id: p, name: NAMES[p], kind: "subscription", account: { key: null, identity: "unknown" }, meters: [], source: { layer: "none", observedAt: null, reason, needsUserRetry } };
   }
   const layer: LayerSource = !snap ? "none" : ev?.stale ? "live_stale" : "live";
   const codex = p === "codex" ? r.endpoints.codex_usage?.snapshot?.data : undefined;
@@ -152,7 +158,7 @@ function accountCard(p: "claude" | "codex", r: ProviderRemote, now: number): Pro
     meters: snap ? snap.data.windows.map((w) => windowMeter(w, now)) : [],
     balance: codex?.balance ? { amount: codex.balance, currency: null } : null,
     resetCredits: p === "codex" ? resetCreditsOf(r, now) : claudeResetsOf(r, now),
-    source: { layer, observedAt: snap?.observedAt ?? null, reason: layer === "live" ? null : reason },
+    source: { layer, observedAt: snap?.observedAt ?? null, reason: layer === "live" ? null : reason, needsUserRetry: layer !== "live" && needsUserRetry },
   };
 }
 

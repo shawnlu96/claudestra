@@ -240,6 +240,15 @@ describe("Claude 重置卡（与 Codex 同一套规则与去重）", () => {
     expect(t.h.sent).toHaveLength(2);
   });
 
+  test("没有截止日的卡不会过期，不进快过期提醒", async () => {
+    const block = cedarEmberBlock([{ endsAt: iso(local(12) + 10 * HOUR) }]);
+    (block.grants as Record<string, unknown>[])[0].ends_at = null;
+    const t = harness({ now: local(12), credits: creditsExpiring(local(12) + 20 * 24 * HOUR), claude: { ...claudeUsageBody(), cedar_ember: block } });
+    await t.h.scheduler.refresh("claude", "view");
+    await t.run();
+    expect(t.h.sent).toHaveLength(0);
+  });
+
   test("没有 cedar_ember（旧账号）/ 卡没到 72 小时：不提醒", async () => {
     const none = harness({ now: local(12), credits: creditsExpiring(local(12) + 20 * 24 * HOUR), claude: claudeUsageBody() });
     await none.h.scheduler.refresh("claude", "view");
@@ -248,5 +257,66 @@ describe("Claude 重置卡（与 Codex 同一套规则与去重）", () => {
     await far.h.scheduler.refresh("claude", "view");
     await far.run();
     expect([...none.h.sent, ...far.h.sent]).toHaveLength(0);
+  });
+});
+
+describe("发出前复核（暂存 / 重试期间情况变了）", () => {
+  const maxedAt = (resetsAt: number, used = 100) => {
+    const b = codexUsageBody() as { rate_limit: Record<string, unknown> };
+    b.rate_limit = { ...b.rate_limit, primary_window: { used_percent: used, limit_window_seconds: 18000, reset_at: Math.floor(resetsAt / 1000) } };
+    return { ...b, rate_limit_reset_credits: { available_count: 1, applicable_available_count: 1 } };
+  };
+
+  test("夜里暂存的用满提醒：到 08:00 窗口已经重置 → 不发，账本里也清掉", async () => {
+    const t = harness({ now: local(2), credits: creditsExpiring(local(2) + 20 * 24 * HOUR), usage: maxedAt(local(5)) });
+    await t.fetchCodex();
+    await t.run();
+    expect(t.h.sent).toHaveLength(0);
+    t.h.now = local(8, 5);
+    t.h.usage = maxedAt(local(10), 3); // 05:00 重置过了，新窗口才用 3%
+    await t.h.scheduler.refresh("codex", "view");
+    await t.run();
+    expect(t.h.sent).toHaveLength(0);
+    expect((await t.h.store.load())!.reminders.outbox).toHaveLength(0);
+  });
+
+  test("Discord 失败待重试期间重置卡被用掉了 → 不再补发", async () => {
+    const t = harness({ now: local(12), credits: creditsExpiring(local(12) + 48 * HOUR) });
+    t.h.discordOk = false;
+    await t.fetchCodex();
+    await t.run();
+    expect(t.h.sent).toHaveLength(2);
+    const used = creditsExpiring(local(12) + 48 * HOUR) as { credits: Record<string, unknown>[] };
+    used.credits[0] = { ...used.credits[0], status: "redeemed", redeemed_at: "2026-10-01T04:00:00Z" };
+    t.h.credits = used;
+    t.h.discordOk = true;
+    t.h.now += 6 * MIN;
+    await t.h.scheduler.refreshResetCredits("view");
+    await t.run();
+    expect(t.h.sent).toHaveLength(2);
+  });
+
+  test("只剩部分重置仍有效：文案只写还有效的那几条", async () => {
+    const t = harness({ now: local(12), credits: creditsExpiring(local(12) + 30 * HOUR, local(12) + 40 * HOUR) });
+    t.h.discordOk = false;
+    await t.fetchCodex();
+    await t.run();
+    const partly = creditsExpiring(local(12) + 30 * HOUR, local(12) + 40 * HOUR) as { credits: Record<string, unknown>[] };
+    partly.credits[0] = { ...partly.credits[0], status: "redeemed", redeemed_at: "2026-10-01T04:00:00Z" };
+    t.h.credits = partly;
+    t.h.discordOk = true;
+    t.h.now += 6 * MIN;
+    await t.h.scheduler.refreshResetCredits("view");
+    await t.run();
+    const retry = t.h.sent.at(-1)!;
+    expect(retry.channel).toBe("discord");
+    expect(retry.body).toContain("Codex 有 1 次");
+    expect(retry.body).toContain(fmtLocal(local(12) + 40 * HOUR));
+    expect(retry.body).not.toContain(fmtLocal(local(12) + 30 * HOUR));
+  });
+
+  test("破例立即发只对还没过期的卡：已过期的不算紧急", () => {
+    const n = (exp: number) => ({ kind: "expiry", credits: [{ key: "k", expiresAtMs: exp, thresholdH: 24 }] }) as ReminderNotice;
+    expect(urgentAtNight(n(local(1)), local(3))).toBe(false);
   });
 });

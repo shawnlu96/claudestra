@@ -78,6 +78,16 @@ describe("Claude 重置卡（cedar_ember）", () => {
     expectNoSentinel(JSON.stringify(d));
   });
 
+  test("ends_at 为空或缺席 = 无截止日，卡照样保留；给了却认不出才丢", () => {
+    const block = cedarEmberBlock([{ endsAt: "2026-10-01T09:00:00Z" }]);
+    const g = block.grants as Record<string, unknown>[];
+    g.push({ ...g[0], id: "grant_NULL", ends_at: null }, { ...g[0], id: "grant_ABSENT", ends_at: undefined }, { ...g[0], id: "grant_BAD", ends_at: "someday" });
+    const d = parseClaudeUsage({ ...claudeUsageBody(), cedar_ember: block }, (id) => id.replace("grant_", "k-"));
+    expect(d?.resets?.grants.map((x) => [x.key.slice(0, 8), x.endsAtMs])).toEqual([
+      ["k-RAWGRA", Date.parse("2026-10-01T09:00:00Z")], ["k-NULL", null], ["k-ABSENT", null],
+    ]);
+  });
+
   test("旧账号 / 接口没给这个块 → resets null，额度照常；坏的 grant 丢掉", () => {
     expect(parseClaudeUsage(claudeUsageBody(), hash)?.resets).toBeNull();
     const block = cedarEmberBlock();

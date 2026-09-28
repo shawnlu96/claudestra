@@ -179,6 +179,29 @@ describe("Pi 按接入商拆（piProviders）", () => {
     }
   });
 
+  test("接入商名是 __proto__ / constructor / toString：照常分桶，全机统计不抛", async () => {
+    const root = mkdtempSync(join(tmpdir(), "machine-usage-pi-proto-"));
+    const prev = process.env.PI_CODING_AGENT_DIR;
+    process.env.PI_CODING_AGENT_DIR = join(root, "pi");
+    try {
+      const dir = join(root, "pi", "sessions", "--Users-x-repo--");
+      writeJsonl(dir, "2026-09-28T00-00-00-000Z_s1.jsonl", [
+        piLine("q1", NOW - H, "__proto__", 10, 0),
+        piLine("q2", NOW - H, "constructor", 20, 0),
+        piLine("q3", NOW - H, "toString", 30, 0),
+      ]);
+      const m = await scanMachineUsage(W, [join(root, "pi", "sessions")]);
+      expect(Object.keys(m.piProviders).sort()).toEqual(["__proto__", "constructor", "toString"]);
+      expect(new Map(Object.entries(m.piProviders)).get("constructor")?.week.tokens).toBe(20);
+      expect(m.week.tokens).toBe(60);
+      const back = JSON.parse(JSON.stringify(m)) as typeof m; // 子进程 → bridge 走 JSON
+      expect(Object.keys(back.piProviders).sort()).toEqual(["__proto__", "constructor", "toString"]);
+    } finally {
+      if (prev === undefined) delete process.env.PI_CODING_AGENT_DIR;
+      else process.env.PI_CODING_AGENT_DIR = prev;
+    }
+  });
+
   test("Claude Code 会话不进 piProviders", async () => {
     const m = await scanMachineUsage(W, [fixture()]);
     expect(m.piProviders).toEqual({});

@@ -37,7 +37,8 @@ interface ClaudeResetGrantDto {
   key: string;
   resetsLeft: number;
   resetsTotal: number | null;
-  endsAtMs: number;
+  /** 没有截止日 = null（CC 的 schema 允许）：照样持有，只是不参与快过期提醒 */
+  endsAtMs: number | null;
   paused: boolean;
   usableNow: boolean;
   /** 要撞到限额才能用（缺省 true，照 CC 界面） */
@@ -137,9 +138,10 @@ function claudeLegacy(j: AnyRecord): QuotaWindowDto[] {
 }
 
 function claudeGrant(g: AnyRecord, hashId: (rawId: string) => string): ClaudeResetGrantDto | null {
-  const endsAtMs = timeOf(g.ends_at);
+  const endsAtMs = g.ends_at == null ? null : timeOf(g.ends_at);
   const left = countOf(g.resets_left);
-  if (typeof g.id !== "string" || !g.id || g.id.length > 256 || endsAtMs === null || left === null) return null;
+  // 给了 ends_at 却认不出（坏串 / 超出可信区间）整条丢；没给才算「无截止日」
+  if (typeof g.id !== "string" || !g.id || g.id.length > 256 || (g.ends_at != null && endsAtMs === null) || left === null) return null;
   return {
     key: hashId(g.id),
     resetsLeft: left,

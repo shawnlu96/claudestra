@@ -135,7 +135,8 @@ export async function scanMachineUsage(
   const seen = new Set<string>();
   const total = emptyPair();
   const byRuntime: Record<string, UsagePair> = {};
-  const piProviders: Record<string, UsagePair> = {};
+  // 接入商名来自会话文件（用户可写）：__proto__ / constructor 这类名字在普通对象上会撞原型链，累加器不带原型
+  const piProviders: Record<string, UsagePair> = Object.create(null);
   let bytesRead = 0;
   for (const f of files) {
     const runtime = runtimeForSessionPath(f);
