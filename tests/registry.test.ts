@@ -96,7 +96,7 @@ describe("isMasterAgent", () => {
   });
 
   test("大小写、全角、零宽字符变体也是大总管（T42：guest / scope 按规范名比，变体不能绕过排除）", () => {
-    for (const n of ["MASTER", "Master", "agent-MASTER", "Agent-Master", "\uff4daster", "master\u200b", " master "]) expect(isMasterAgent(n)).toBe(true);
+    for (const n of ["MASTER", "Master", "agent-MASTER", "Agent-Master", "\uff4daster", "master\u200b", " master ", "agent-agent-master"]) expect(isMasterAgent(n)).toBe(true);
     expect(isMasterAgent("")).toBe(false);
     expect(isMasterAgent(undefined)).toBe(false);
   });

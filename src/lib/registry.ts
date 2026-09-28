@@ -26,8 +26,8 @@ export type AgentRuntime = "claude-code" | "pi" | "codex";
  */
 export function isMasterAgent(name: string | undefined | null): boolean {
   if (name === "master" || name === "agent-master") return true;
-  const c = name ? canonicalAgentName(name) : "";
-  return c === "master" || c === "agent-master"; // MASTER、全角、夹零宽字符的变体也是大总管：scope / guest 名按规范形式比，变体不能绕过排除
+  // MASTER、全角、夹零宽字符、多层 agent- 前缀的变体也是大总管：scope / guest 名按规范形式比，变体不能绕过排除
+  return !!name && canonicalAgentName(name).replace(/^(agent-)+/, "") === "master";
 }
 
 /**
