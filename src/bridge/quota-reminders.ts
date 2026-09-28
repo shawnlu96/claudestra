@@ -1,6 +1,6 @@
 /**
  * 重置次数的提醒投递（设计稿 T2b §4 / §6.1；规则与账本在 lib/quota-reminder-rules.ts）：Codex 的 credit 与 Claude 的重置卡
- * 走同一套 72 / 24 小时规则和去重。Claude 的数据只在有人看看板时才查（后台不读 Keychain），所以它的提醒也只在那时出。
+ * 走同一套 72 / 24 小时规则和去重。两家都在后台每 6 小时查一次（Claude 要读 Keychain，owner 09-28 已批，config quotaClaudeBackground 可单独关）。
  *
  *   - 每个额度 tick 之后跑一次：按当前视图规划「快过期」（72 / 24 小时）与「用满了还有可用重置」，再投递账本里没送到的。
  *   - 两个渠道各记各的：推送（owner 的所有设备）、Discord #control。失败的渠道按规则退避重试，已成功的不重发。

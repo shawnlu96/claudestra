@@ -41,7 +41,7 @@ export interface AppConfig {
   /** 订阅额度：从订阅接口读取实时额度（缺省开；关了只用本机缓存，bridge 不读 Keychain / auth.json）。bridge/quota-service.ts */
   quotaLive?: boolean;
   /** 没人看看板时也在后台读 Claude 的 Keychain、查 Claude 额度与重置卡（6 小时一次），让 Claude 的快过期提醒也能后台触发。
-   *  缺省关：要 owner 另批（设计稿 T2b §3 / §5 原定 Claude 只在看板打开时读）。每个 tick 现读，改完不用重启 */
+   *  缺省开（owner 09-28 批准；设计稿 T2b §3 / §5 原定只在看板打开时读）；false 单独关掉。每个 tick 现读，改完不用重启 */
   quotaClaudeBackground?: boolean;
 }
 

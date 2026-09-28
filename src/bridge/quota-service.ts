@@ -3,8 +3,8 @@
  *
  *   - 「有人在看」= 最近 90 秒内 GET 过 /api/v1/quota（网页打开看板期间每 60 秒拉一次，这就是心跳）。
  *   - 定时器：有人看 60 秒一次，没人看 5 分钟一次。不能更慢：调度器把两次 tick 间隔超过 15 分钟当成睡眠唤醒、立刻重查。
- *     查什么、多久查一次由调度器自己定（没人看只查 Codex 重置明细，6 小时一次；Claude 不在后台读 Keychain，
- *     除非 config.json 的 quotaClaudeBackground 打开——要 owner 另批，打开后 Claude 也按 6 小时后台查）。
+ *     查什么、多久查一次由调度器自己定（没人看：Codex 重置明细与 Claude 额度 + 重置卡各 6 小时一次，Claude 要读 Keychain——
+ *     owner 09-28 已批，缺省开；config.json quotaClaudeBackground=false 单独关掉它；总开关 quotaLive 关则两家后台都停）。
  *   - 从没人看切到有人看：先让两家各查一次（60 秒间隔照样生效），最多等 6 秒再回快照。
  *   - 开关（config.json quotaLive，缺省开）：关 = 先落盘，再让 isEnabled 返回 false，再 onDisabled（在途结果丢弃）。
  * 单测 tests/quota-service.test.ts（假调度器 / 假定时器）。
@@ -165,7 +165,7 @@ function productionScheduler(isEnabled: () => boolean): QuotaScheduler {
     },
     store: fileQuotaStore(),
     isEnabled,
-    claudeBackground: () => readConfigSync().quotaClaudeBackground === true,
+    claudeBackground: () => readConfigSync().quotaClaudeBackground !== false,
   });
 }
 

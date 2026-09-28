@@ -120,7 +120,7 @@ describe("合并与限频", () => {
   });
 });
 
-describe("Claude 后台读取开关（owner 另批才开）", () => {
+describe("Claude 后台读取开关（owner 09-28 批准，bridge 缺省开）", () => {
   test("开：没人看时 Claude 也按 6 小时查；关回去立刻停，策略闸照旧", async () => {
     const h = harness();
     const claudeCalls = () => h.fetch.calls.filter((c) => c.url.includes("/oauth/usage")).length;
@@ -145,6 +145,22 @@ describe("Claude 后台读取开关（owner 另批才开）", () => {
     }
     expect(claudeCalls()).toBe(2);
     expect((await h.scheduler.refresh("claude", "background")).status).toBe("skipped_policy");
+  });
+
+  test("看板设置里的总开关关掉：后台开关开着也不读 Keychain、不发请求", async () => {
+    const h = harness();
+    h.claudeBg = true;
+    h.enabled = false;
+    for (let i = 0; i < 80; i++) {
+      h.advance(5 * MIN);
+      await h.scheduler.tick({ viewing: false });
+    }
+    expect(h.cd.keychainCalls).toHaveLength(0);
+    expect(h.fetch.calls).toHaveLength(0);
+    h.enabled = true; // 打开后下一个后台 tick 就读
+    h.advance(5 * MIN);
+    await h.scheduler.tick({ viewing: false });
+    expect(h.fetch.calls.filter((c) => c.url.includes("/oauth/usage"))).toHaveLength(1);
   });
 });
 

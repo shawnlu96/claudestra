@@ -31,7 +31,7 @@ export function QuotaLiveSection() {
   return (
     <Section
       title={t("订阅额度实时读取")}
-      desc={t("用 Claude Code / codex 已登录的凭据，只读查询订阅额度和免费重置次数（只在看用量时查，后台只查重置到期）。关掉后只显示本机缓存。")}
+      desc={t("用 Claude Code / codex 已登录的凭据，只读查询订阅额度和免费重置次数：看用量时实时查，后台每 6 小时查一次（快过期提醒靠它）。关掉后只显示本机缓存。")}
       aside={
         <input type="checkbox" className="toggle toggle-sm" checked={enabled} disabled={busy} onChange={(e) => void save(e.target.checked)} />
       }

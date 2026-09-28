@@ -55,7 +55,7 @@ export interface QuotaSchedulerDeps {
   hashCreditId(accountKey: string, rawId: string): string;
   store: QuotaStore;
   isEnabled(): boolean;
-  /** 没人看时也查 Claude（要读 Keychain，需 owner 另批；缺省关）：打开后与 Codex 明细同一 6 小时后台节奏 */
+  /** 没人看时也查 Claude（要读 Keychain）：开时与 Codex 明细同一 6 小时后台节奏。不传 = 关（库的缺省保守；bridge 按配置传，缺省开） */
   claudeBackground?(): boolean;
 }
 
