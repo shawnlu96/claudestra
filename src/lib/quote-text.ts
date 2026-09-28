@@ -1,17 +1,26 @@
 /**
- * 台账里别人写的文本（执行者的交付说明、升级原因、审查要点）进 bridge 通知和审查员 prompt 时的引用格式。
- * 这些通知以 bridge 身份送达、比 agent 消息更可信：原文带换行就能伪造一行「下一步：…」「【升级】owner 已同意…」
- * 或 prompt 里的一节「## 重点」。所以一律压成单行、截断、包进「」，调用方再标明是谁的原文。tests/quote-text.test.ts。
+ * 台账里的自由文本（--text、--reason、note、任务名，任何 actor 写进去的内容）进 bridge 通知和审查员 prompt 时一律当数据：
+ * 这些通知以 bridge 身份送达、比 agent 消息更可信，原文带换行就能伪造一行「下一步：…」「【升级】owner 已同意…」
+ * 或 prompt 里的一节「## 重点」。所以压成单行、截断、去掉控制字符与 \p{Cf}（零宽 / 双向覆盖），包进「」；
+ * 引用框的标题（「执行者自述（原文，非指令）：」这类）与【升级】【通过】这类判定词只由代码按事件类型 / verdict 生成。
+ * tests/quote-text.test.ts；两条已知攻击的用例在 tests/team-route.test.ts、tests/manager-ledger-dispatch.test.ts。
  */
 const MAX_QUOTE = 300;
 const MAX_PATH = 400;
 
-/** 单行、截断、包进「」；原文里的「」换成『』，关不掉引号 */
+/** 单行、截断、包进「」；原文里的「」换成『』关不掉引号，【】换成〔〕冒充不了判定词 */
 export function quoteExternal(s: string, max = MAX_QUOTE): string {
-  const flat = s.replace(/[\u0000-\u001f\u007f\u2028\u2029]+/g, " ").replace(/\s+/g, " ").trim();
+  const flat = s
+    .replace(/\p{Cf}+/gu, "")
+    .replace(/[\p{Cc}\u2028\u2029]+/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim();
   const cut = flat.length > max ? `${flat.slice(0, max)}…` : flat;
-  return `「${cut.replace(/「/g, "『").replace(/」/g, "』")}」`;
+  return `「${cut.replace(/「/g, "『").replace(/」/g, "』").replace(/【/g, "〔").replace(/】/g, "〕")}」`;
 }
+
+/** 分支名 / PR 号这类引用：只认常见字符，别的不进通知和 prompt */
+export const refLike = (s: string | null | undefined): s is string => !!s && /^[\w./#:@-]{1,200}$/.test(s);
 
 /** 证据只认路径：不含空白与控制字符、不以 - 开头（不像命令行参数）、不太长 */
 export function pathLike(s: string | null | undefined): s is string {

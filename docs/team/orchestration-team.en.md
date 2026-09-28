@@ -71,6 +71,15 @@ executor: ledger deliver ─▶ bridge notifies the dispatcher (or the PM if the
 
 **Notify once**: the bridge saves how far it has processed (the ledger event seq) in `team-router.json` under the state directory, and it saves that *before* sending. So a bridge restart never re-sends. A crash between the two steps drops the notices of that batch not yet sent (they are never re-sent); a single failed delivery only affects that notice, which goes to the held queue. If something was lost, check `team status` and send a line by hand; to replay a range, stop the bridge, set the seq in `team-router.json` back, and start it again. If the recipient is busy or offline, the notice waits in the held queue until its turn ends; it never interrupts. Events from before the team was set up are not replayed.
 
+## Moving over from the manual process
+
+Once a project's team is on (`team up` confirmed by the owner), steps that used to be relayed by hand are done by the ledger and the bridge. Doing them by hand as well sends everything twice:
+
+- **Executors** only run `ledger deliver` and no longer send the PM a delivery message (that is what `routed: true` in the output means).
+- **The dispatcher** is done once `ledger review` is recorded; it no longer forwards the verdict to the executor or the PM.
+- **Escalation**: a P0 and a task still failing at round 3 are escalated by the bridge automatically; otherwise use `ledger escalate` only when a person has to decide.
+- Projects without a team work as before: after `deliver`, the executor still sends the PM a one-shot message.
+
 ## Checking and taking over
 
 ```bash

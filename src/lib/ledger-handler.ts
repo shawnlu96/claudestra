@@ -4,11 +4,12 @@
  *
  * 规则：先按当前阶段定默认的一环，再按进入当前阶段之后的事件往后推：
  *   deliver → 调度助理（没配就是 PM）；dispatch → 审查员；review 没带阶段移动 → 通过归 PM、否则回调度助理，
- *   但常规轮通过而规格卡还要对抗式（派审时记在 dispatch 的 adversarialNext）仍归调度助理；
+ *   但通过了而下一轮还要审（nextReview：规格卡要对抗式、这轮不是，派审时 dispatch 记下了规格卡的审查策略）仍归调度助理；
  *   escalate → PM（data.to = owner 时归 owner；硬规则的自动升级 data.auto 不改处理人）；升级给 owner 之后 owner 记了 decision → 回到 PM。
  *   进入新阶段（stage 事件）重新从默认值算起。
  */
 import type { LedgerEvent, LedgerTask, Stage } from "./ledger-stages.js";
+import { nextReview, type LastReview, type NextReview } from "./review-pack.js";
 
 type HandlerRole = "executor" | "dispatcher" | "reviewer" | "pm" | "owner";
 
@@ -56,14 +57,24 @@ function resolve(role: HandlerRole, task: Pick<LedgerTask, "agent" | "pm">, team
   return { role, agent: null };
 }
 
+const num = (v: unknown): number => (typeof v === "number" ? v : 0);
+
 /**
- * 这条 review 通过了，但派审时记着「还有对抗式最后一轮」（ledger dispatch 的 adversarialNext）：还没到 PM 合并那一步。
- * events = 同一任务的事件（seq 升序），取这条 review 之前最近的一条 dispatch。
+ * 一条 review 的「上一轮」画像：审查员种类与规格卡审查策略取这条 review 之前最近的 dispatch（代码写的），
+ * review 自己的 reviewer 字段是自由文本，不作数。events = 同一任务的事件（seq 升序）。
  */
-export function adversarialPending(review: LedgerEvent, events: readonly LedgerEvent[]): boolean {
-  if (review.data.verdict !== "pass" || review.data.reviewer === "adversarial") return false;
+export function lastReviewOf(review: LedgerEvent, events: readonly LedgerEvent[]): { policy: string | null; last: LastReview } {
   const d = events.findLast((e) => e.kind === "dispatch" && e.seq < review.seq);
-  return d?.data.adversarialNext === true;
+  const kind = d?.data.reviewer === "adversarial" ? "adversarial" : d?.data.reviewer === "regular" ? "regular" : null;
+  const policy = typeof d?.data.policy === "string" ? d.data.policy : null;
+  const verdict = typeof review.data.verdict === "string" ? review.data.verdict : null;
+  return { policy, last: { kind, verdict, p0: num(review.data.p0), p1: num(review.data.p1) } };
+}
+
+/** 这条 review 之后下一轮是什么；null = 审查走完（lib/review-pack.ts 的 nextReview，路由与 review-pack 同一算法） */
+export function nextAfterReview(review: LedgerEvent, events: readonly LedgerEvent[]): NextReview {
+  const { policy, last } = lastReviewOf(review, events);
+  return nextReview(policy, last);
 }
 
 /** 事件把接手的一环推到哪；null = 这条不改变谁在接（note 等） */
@@ -74,7 +85,7 @@ function roleAfter(e: LedgerEvent, cur: HandlerRole, events: readonly LedgerEven
     case "dispatch":
       return "reviewer";
     case "review":
-      return e.data.verdict === "pass" && !adversarialPending(e, events) ? "pm" : "dispatcher";
+      return e.data.verdict === "pass" && nextAfterReview(e, events) === null ? "pm" : "dispatcher";
     case "escalate":
       // 硬规则的自动升级只是抄送 PM，任务仍在原处理人手上（比如 P0 推回 fix 后仍是执行者在修）
       if (e.data.auto === true) return null;

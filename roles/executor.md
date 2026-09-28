@@ -20,7 +20,7 @@ description: Claudestra 编排班子的执行者。在自己的 worktree 里按�
 ## 交付
 1. 证据先落在你这边：写一份报告（任务文件旁的 `<T>.report.md`，或者写在 PR 正文里），内容包括做了什么、验收命令和输出、沙箱实测过程、没做完的部分。
 2. 记账：`{{manager}} ledger deliver <T> --from build|fix --head <sha> --evidence <报告路径> --text "<一句话>"`。
-   - 输出里 `routed: true` 表示项目开了班子，bridge 会自动通知调度助理或 PM，你不用再发消息。
+   - 输出里 `routed: true` 表示项目开了班子，bridge 会自动通知调度助理或 PM：**不要再 send_to_agent 报交付**（会双发）。
    - `routed: false` 时，再用 send_to_agent 给 PM 发一条 oneShot，只带任务号和 head。
 3. 审查结论出来之前，不要再往分支推东西。结论推到 fix 时会自动发给你（带 md 路径和修复重点）。P2 默认一起修，修完再 `ledger deliver … --from fix`。
 
