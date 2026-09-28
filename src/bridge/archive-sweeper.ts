@@ -22,6 +22,7 @@ import { ARCHIVE_ROOT, USER_ARCHIVE_ROOT } from "../lib/session-archive.js";
 import { DEFAULT_ARCHIVE_RETENTION_DAYS, readConfigSync } from "../lib/config-store.js";
 import { readRegistryAgents } from "../lib/registry.js";
 import { archiveSession } from "../lib/session-archive.js";
+import { CODEX_SUB_IDLE_DAYS, sweepIdleCodexSubSessions } from "../lib/unmanaged-archive.js";
 import { projectsSlug } from "../lib/jsonl-cost.js";
 import { tmuxRaw, MASTER_SESSION } from "../lib/tmux-helper.js";
 import { MASTER_DIR } from "./config.js";
@@ -85,6 +86,14 @@ export async function sweepArchives(): Promise<{ agents: number; archived: numbe
   }
 
   const agents = await readRegistryAgents();
+
+  // Codex 子线程结束 N 天收进归档（已纳管 agent 挂着的会话不动）；失败不挡下面的快照
+  try {
+    const n = await sweepIdleCodexSubSessions({ keep: new Set(agents.map((a) => a.sessionId).filter((s): s is string => !!s)) });
+    if (n > 0) console.log(`🗄 Codex 子会话：${n} 个超过 ${CODEX_SUB_IDLE_DAYS} 天没写的收进归档区(archived/)`);
+  } catch (e) {
+    console.log(`⚠️ Codex 子会话归档扫描失败: ${(e as Error).message}`);
+  }
 
   // tmux 实际存在的 agent 窗口（P2：registry 标 stopped 但窗口还活着的也要归档）
   const liveWindows = new Set<string>();

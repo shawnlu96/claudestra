@@ -94,6 +94,7 @@ import { pickSwitchOverride, rememberSwitchOverride } from "./switch-override.js
 import { displayModelEffort } from "../lib/display-model.js";
 import { cachedCodexCatalog, readCodexConfigDefaults } from "../lib/codex-catalog.js";
 import { invitePageResponse } from "./invite-page.js";
+import { archiveUnmanagedFile } from "../lib/unmanaged-archive.js";
 
 /**
  * 只允许当作**单层目录名**用的标识（归档区 archived/<name>）：拒绝路径分隔符、相对段、NUL。
@@ -873,18 +874,8 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
     } catch {
       /* stat 失败就照常走 */
     }
-    if (action === "archive") {
-      const { USER_ARCHIVE_ROOT } = await import("../lib/session-archive.js");
-      const dest = `${USER_ARCHIVE_ROOT}/${sid}`;
-      await fsp.mkdir(dest, { recursive: true });
-      await fsp.copyFile(mfile, `${dest}/${mfile.split("/").pop()}`);
-      // 记一份 meta：恢复时要知道它原来在哪个目录（cwd 编码不可逆）
-      await fsp.writeFile(
-        `${dest}/.meta.json`,
-        JSON.stringify({ kind: "unmanaged", originalPath: mfile, runtime: mRuntime ?? null, cwd: mCwd ?? null, sessionId: sid }, null, 2),
-      );
-    }
-    await fsp.rm(mfile, { force: true });
+    if (action === "archive") await archiveUnmanagedFile(mfile, { sessionId: sid, runtime: mRuntime, cwd: mCwd }); // 快照 + meta + 删原件
+    else await fsp.rm(mfile, { force: true });
     console.log(`🗂 会话处置: ${action} ${sid} (${mfile})`);
     return apiJson(200, { ok: true, action, sessionId: sid, archived: action === "archive" });
   }
