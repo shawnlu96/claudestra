@@ -6,7 +6,7 @@
  * bg 只给显示用（侧栏黄点仍是 paneLooksWorking，语义 = main 非 idle 或 bg）。
  */
 import { controlFor } from "./runtimes/index.js";
-import { paneLooksWorking, paneMainTurnBusy, paneShowsCompacting, probeTuiContract } from "./tmux-helper.js";
+import { CC_BUSY_RE, probeTuiContract } from "./tmux-helper.js";
 
 type MainTurn = "busy" | "idle" | "compacting" | "unknown";
 
@@ -27,14 +27,51 @@ export interface TurnState {
   bg: boolean;
 }
 
+/**
+ * 主回合信号所在的区域，按输入框定位、不按固定尾部行数：底栏的后台 agent 行一多（80 列约 4 行、272 列约 6 行）
+ * 就把 spinner 挤出「尾部 14 行」。above = 输入框上边框往上 8 行（spinner / 压缩行 / Tip），rest = 边框到底（❯ 行、页脚）。
+ * 找不到输入框（窄窗口折行、弹窗盖住）退回尾部 14 行。
+ */
+function turnZone(pane: string): { above: string; rest: string } {
+  const lines = pane.replace(/\s+$/, "").split("\n");
+  for (let i = lines.length - 1; i > 0; i--) {
+    if (/^\s*❯/.test(lines[i]!) && /^\s*─{8,}/.test(lines[i - 1]!)) {
+      return { above: lines.slice(Math.max(0, i - 9), i - 1).join("\n"), rest: lines.slice(i - 1).join("\n") };
+    }
+  }
+  return { above: lines.slice(-14).join("\n"), rest: "" };
+}
+
+/** 画面上是否在压缩上下文（「Compacting conversation…」在 spinner 位置） */
+function paneCompacting(pane: string): boolean {
+  return /\bCompacting\b/i.test(turnZone(pane).above);
+}
+
+/** 只认主回合在跑：spinner（CC_BUSY_RE，锚定行首）、老 TUI 的 esc to interrupt、排队消息提示。见 tests/pane-main-turn.test.ts。 */
+export function paneMainTurnBusy(pane: string): boolean {
+  const z = turnZone(pane);
+  return CC_BUSY_RE.test(z.above) || /esc to interrupt|Press up to edit queued messages/i.test(`${z.above}\n${z.rest}`);
+}
+
+/**
+ * 画面呈现「工作中」的任一信号（侧栏黄点）：主回合，或后台——「Waiting for N background agent(s)」、
+ * 底栏 agents 行「◯ general-purpose  Anal… 1m 13s · ↓ 58.1k tokens」。空闲态的「✻ Worked for 46s · done」不含任何信号。
+ */
+export function paneLooksWorking(pane: string): boolean {
+  const tail = pane.split("\n").slice(-14).join("\n");
+  return paneMainTurnBusy(pane) || /Waiting for \d+ background/i.test(tail) || /\b(\d+m\s*)?\d+s\s*·\s*[↓↑]\s*[\d.]+k?\s*tokens/i.test(tail);
+}
+
 function mainTurn(i: TurnInput): MainTurn {
   if (i.status === "compacting") return "compacting";
+  const cc = controlFor(i.runtime).paneHeuristics;
+  // 压缩先于 thinking 判：回合中途的自动压缩事件态还是 thinking，手动 /compact 到 watcher 置态之间事件态是 done——
+  // 这两段只有画面知道；判成 busy 的话人类消息会 C-c 掉压缩
+  if (cc && i.pane !== null && paneCompacting(i.pane)) return "compacting";
   if (i.status === "thinking") return "busy";
   // Codex / Pi 的忙闲靠 hook 上报；它们的窗口套 CC 的屏幕正则会误命中（Pi 恒判忙），只看事件态
-  if (!controlFor(i.runtime).paneHeuristics) return "idle";
+  if (!cc) return "idle";
   if (i.pane === null) return "unknown";
-  // 手动 /compact 开始到 watcher 置 compacting 之间只有画面知道；排在 busy 前面，人类消息才不会 C-c 掉压缩
-  if (paneShowsCompacting(i.pane)) return "compacting";
   if (paneMainTurnBusy(i.pane)) return "busy";
   // CC 的横幅和忙碌标记都不在（文案改了 / 弹窗盖住）：认不出，交给调用方按各自的保守方向处理
   return probeTuiContract(i.pane).suspect ? "unknown" : "idle";
@@ -51,7 +88,8 @@ export function turnState(input: TurnInput): TurnState {
 
 /**
  * agent→agent 消息（和值守提醒）现在要不要先押着：主回合在跑 / 压缩中。只剩后台在跑不押。
- * 后台 subagent 结束时 CC 会立刻自动开 task-notification 回合，撞上它靠屏幕判忙（spinner 一出来 main 就是 busy）；
+ * 后台 subagent 结束时 CC 会立刻自动开 task-notification 回合，撞上它靠屏幕判忙（回合开头不带括号的 spinner 也认）；
+ * 从 CC 排队通知到 spinner 第一帧之间仍有几十到几百毫秒看不出来——根治靠送达确认，不在这里。
  * 别按 bg-activity 的「结束」事件加时间窗：它 10 秒扫一轮，检测到时通知回合往往已经跑完（实测时序见 git log -S bgJustEnded）。
  * unknown 放行——认不出画面就押，消息可能永远投不出去。
  */

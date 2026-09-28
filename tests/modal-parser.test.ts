@@ -929,7 +929,7 @@ describe("paneCompactProgress", () => {
   });
 });
 
-import { paneLooksWorking } from "../src/lib/tmux-helper.js";
+import { paneLooksWorking } from "../src/lib/turn-state.js";
 
 describe("paneLooksWorking(v2.21.2 工作中五信号)", () => {
   const footer = "─────\n❯ \n─────\n  Fable 5.1 · ctx 59% · 5h 77% · 7d 17%\n  ⏵⏵ bypass permissions on (shift+tab to cycle)";

@@ -6,8 +6,7 @@ import { describe, expect, test } from "bun:test";
 import { flushHeld } from "../src/bridge/held-flush.js";
 import { HeldQueue } from "../src/bridge/held-queue.js";
 import type { Envelope, LocalEndpoint } from "../src/bridge/router.js";
-import { paneLooksWorking } from "../src/lib/tmux-helper.js";
-import { agentMsgMustWait, thinkingLooksStuck, turnState, type TurnInput } from "../src/lib/turn-state.js";
+import { agentMsgMustWait, paneLooksWorking, thinkingLooksStuck, turnState, type TurnInput } from "../src/lib/turn-state.js";
 
 const RULE = "─".repeat(80);
 const footer = (agentsBar: string[]) =>
@@ -144,3 +143,25 @@ describe("thinking 反向对账（permission-watcher）的单帧判据", () => {
     expect(thinkingLooksStuck(ONLY_BG, "done", false)).toBe(false);
   });
 });
+
+describe("N7 对抗复核", () => {
+  const rows = ["  ⏺ main", ...Array.from({ length: 6 }, (_, k) => `  ◯ general-purpose  task ${k}                  ${k + 10}s · ↓ 20.${k}k tokens`)];
+  test("P1：回合开头首个 token 前的 spinner 不带括号，事件态还是 done → busy，agent 消息押", () => {
+    const pane = ["⏺ Background command \"Sleep 20 seconds in background\" completed (exit code 0)", "", "✢ Concocting…", "  ⎿  Tip: x", "", footer([])].join("\n");
+    const s = turnState(at({ pane, status: "done" }));
+    expect(s.main).toBe("busy");
+    expect(agentMsgMustWait(s)).toBe(true);
+  });
+  test("5：回合中途自动压缩，事件态还是 thinking → compacting（人类消息不 C-c 掉压缩）", () => {
+    const pane = ["✻ Compacting conversation… (40s)", "  ▰▰▰▱▱▱▱ 37%", "", footer([])].join("\n");
+    expect(turnState(at({ pane, status: "thinking" })).main).toBe("compacting");
+  });
+  test("6：6 个后台 agent 行把 spinner 挤出尾部 14 行——仍判 busy，对账也不会把它误收敛成 done", () => {
+    const pane = ["✽ Pondering… (1m 3s · ↓ 2.1k tokens)", "  ⎿  Tip: x", "", footer(rows)].join("\n");
+    expect(turnState(at({ pane, status: "done" })).main).toBe("busy");
+    expect(thinkingLooksStuck(pane, "thinking", false)).toBe(false);
+    const idle = ["✻ Worked for 46s · done 9:51 PM", "", footer(rows)].join("\n");
+    expect(turnState(at({ pane: idle, status: "done" }))).toEqual({ main: "idle", bg: true });
+  });
+});
+

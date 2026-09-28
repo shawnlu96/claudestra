@@ -315,15 +315,13 @@ export async function clearShellInitPrompts(
 export const CC_MODE_BANNER_RE = /shift\+tab to cycle|bypass permissions/i;
 
 /**
- * v2.21.4+ 「回合进行中」标记。老 TUI 在 spinner 行/页脚写 "esc to interrupt";
- * CC 2.1.25x 把它去掉了,进行中只剩 spinner 行本身:
- *   `✽ Pondering… (2m 23s · ↓ 9.9k tokens)` / `✻ Thinking… (3s)` / `· Cooking… (1m 2s · ↑ 12 tokens)`
- * 形态 = 行首 spinner 字形 + 动词… + 括号内的耗时。2026-09-04 实证:忙碌 pane 的输入框
- * 渲染成 `❯\u00a0`(❯ + NBSP,`\s` 匹配 NBSP),模式 1 严格匹配直接命中 → 全体 agent
- * 干活时被判 idle,cron 的「等 idle 再 kill」在临时 agent 拉完第一个工具结果 20s 内
- * 就把它杀了(mem0-hygiene 两次运行都没活过第一个工具调用,报告从未产出)。
+ * 「回合进行中」标记：老 TUI 的 "esc to interrupt"，或 spinner 行（行首字形 + 动词…）：
+ *   `✽ Pondering… (2m 23s · ↓ 9.9k tokens)` / `· Cooking… (1h 2s)` / `✻ Concocting… (running Stop hook · 3s …)`；回合刚开始、首个 token 回来前（实测 0.6–2.1s）
+ *   只有 `✽ Actioning…`、不带括号——这一支锁第 0 列且行尾就是「…」，空闲态的 `✻ Worked for…` / `✻ Waiting for…` 不带「…」。
+ * 锚定行首：空闲画面里工具输出的「⎿ Compiling… (12s)」不算。忙碌输入框可能渲染成 `❯\u00a0`，所以要先于 ❯ 判（paneLooksIdle）。
+ * 见 tests/pane-main-turn.test.ts。
  */
-export const CC_BUSY_RE = /esc to interrupt|esc to cancel|^\s*[·✢✳✶✻✽*]\s+\S[^\n]*…\s*\((?:\d+h\s*)?(?:\d+m\s*)?\d+s\b/im;
+export const CC_BUSY_RE = /esc to interrupt|esc to cancel|^\s*[·✢✳✶✻✽*]\s+\S[^\n]*…\s*\([^)\n]*?(?:\d+h\s*)?(?:\d+m\s*)?\d+s\b|^[·✢✳✶✻✽*] \S[^\n]*…[^\S\n]*$/im;
 
 /** 剪掉 capture-pane 输出的尾部空行(v2.17.2 P0,peer 报告)。pane 比 TUI 实绘区
  *  高(窗口 resize 后 CC 未重绘底部)时,capture 会带出成片尾部空行——最多实测
@@ -1345,22 +1343,4 @@ export function paneCompactProgress(pane: string): number | null {
   if (!m) return null;
   const n = Number(m[1]);
   return n >= 0 && n <= 100 ? n : null;
-}
-
-/**
- * pane 是否呈现 Claude Code「工作中」的任一信号(输入框常驻,"esc to interrupt" 只是轮换提示之一,单认它会漏):
- *   主回合(paneMainTurnBusy):① "esc to interrupt" ② 主 spinner 计时「✽ Wrangling… (2m 7s · ↓ 4.6k tokens)」⑤「Press up to edit queued messages」
- *   后台:③「Waiting for N background agent(s) to finish」(主 spinner 无计时)④ 底部 agents 栏「◯ general-purpose  Anal… 1m 13s · ↓ 58.1k tokens」
- * 只看尾部 14 行(更早的行可能是滚出去的旧输出)。空闲态的「✻ Worked for 46s · done 9:51 PM」不含任何信号。
- */
-export function paneLooksWorking(pane: string): boolean {
-  const tail = pane.split("\n").slice(-14).join("\n");
-  return paneMainTurnBusy(tail) || /Waiting for \d+ background/i.test(tail) || /\b(\d+m\s*)?\d+s\s*·\s*[↓↑]\s*[\d.]+k?\s*tokens/i.test(tail);
-}
-
-/** 只认主回合在跑(③④ 只剩后台时照样显示,那时的 C-c 会把后台 agent 全停掉)。spinner 用 CC_BUSY_RE 锚定行首的那支:
- *  不锚定会把空闲画面里的「⎿ Compiling… (12s)」判忙,Discord 抢占就会对空闲 CC 连发 C-c。见 tests/pane-main-turn.test.ts。 */
-export function paneMainTurnBusy(pane: string): boolean {
-  const tail = pane.split("\n").slice(-14).join("\n");
-  return CC_BUSY_RE.test(tail) || /Press up to edit queued messages/i.test(tail);
 }

@@ -174,8 +174,8 @@ import { initHttpPeer, cancelHttpPeerCallsForChannel } from "./bridge/http-peer.
 import { readRegistryAgents, readRegistryAgentsSync, agentRuntime, type AgentRuntime } from "./lib/registry.js";
 import { statePath } from "./lib/paths.js";
 import { controlFor, managedFor } from "./lib/runtimes/index.js";
-import { interruptWindow, preemptIfBusy, stopNeedsPaneRecheck } from "./lib/runtimes/window-ops.js";
-import { PreemptCooldown } from "./lib/preempt-cooldown.js";
+import { stopNeedsPaneRecheck } from "./lib/runtimes/window-ops.js";
+import { interruptGate } from "./bridge/interrupt-gate.js";
 import { notifyTargetVerdict } from "./lib/notify.js";
 import { readProjects } from "./lib/projects.js";
 import {
@@ -393,6 +393,13 @@ async function agentLabelForChannelAsync(channelId: string): Promise<string> {
   return "?";
 }
 
+/** 频道的 agent 还在册(master / registry 里 active)。kill 会把它标 stopped 或删掉;bridge 刚重启、它还在重连退避时仍算在册 */
+async function channelStillRegistered(channelId: string): Promise<boolean> {
+  if (channelId === CONTROL_CHANNEL_ID) return true;
+  const regs = await readRegistryAgents().catch(() => null); // 读不到就当还在册:多挂一个看门狗只是多催一次,比漏判安全
+  return !regs || regs.some((a) => a.channelId === channelId && a.status === "active");
+}
+
 /** send_to_agent 回程路由簿：target 答复时推回 caller。落盘、caller 的 ws 推回时现取，见 bridge/agent-calls.ts */
 const pendingAgentCalls = new AgentCallBook();
 
@@ -536,7 +543,7 @@ import type {
 import { endpointLabel, envelopeLabel, newThreadId, parseChatId } from "./bridge/router.js";
 import { ageHeld, heldNoticeText, HeldQueue, unseenFrom } from "./bridge/held-queue.js";
 import { flushHeld } from "./bridge/held-flush.js";
-import { probeTurn, probeTurnAt, resolveTurnWindow } from "./bridge/turn-probe.js";
+import { probeTurn } from "./bridge/turn-probe.js";
 import { agentMsgMustWait } from "./lib/turn-state.js";
 import { AgentCallBook, ambiguityNotice, type PendingAgentCall } from "./bridge/agent-calls.js";
 import { startCodexTurnFailureWatch } from "./bridge/codex-turn-failure.js";
@@ -749,8 +756,6 @@ async function mirrorApiExchange(to: RouterApiUserEndpoint, agentChannelId: stri
 }
 
 /** 投递到本地 Claude Code session —— 通过 ws 注入一条 "message" 事件 */
-/** 人类连发抢占的每频道冷却(与 Discord 入站那道共用)：C-c 后短窗内不再重复打断（防打断叠加 + 双 C-c 退出）。 */
-const preemptCooldown = new PreemptCooldown(4_000);
 
 // ── 大总管的 jsonl watcher（v2.14+）──────────────────────────────────────
 // master 不在 registry（它是 tmux window 0，没有 create/resume 那套注册流程），
@@ -822,31 +827,11 @@ async function deliverToLocal(env: RouterEnvelope, to: RouterLocalEndpoint, stil
   // 上下文都在,agent 带着前一条的进度优先响应补充,而不是把补充压到回复之后。
   // 只对人类的 request 生效(Discord user / API user);agent↔agent、peer、bridge
   // 系统消息、response 回执不抢占目标的工作。
-  // 「主回合在跑」= turnState().main==="busy"(lib/turn-state.ts):只剩后台 subagent 不算——那时的 C-c 会把
-  // 后台 agent 全停掉,消息本来就能直接投递,不需要腾空。
-  // 误判空闲时单发一次 C-c 只清输入行不退出 CC(退出要短窗内连按两次);同频道 4s 冷却,连发不叠加打断。
-  if (
-    // v2.11: peer 标记的 api 入站不算「人类抢占」——那是对方实例的 agent 请求,
-    // C-c 掐断本机正跑的回合等于让外机打断本机用户的活(review 2026-07-19 #1)
-    (env.from.kind === "user" || (env.from.kind === "api" && !env.from.peer)) &&
-    env.intent === "request" &&
-    preemptCooldown.ready(to.channelId)
-  ) {
+  // 判忙、冷却、串行都在 interruptGate(lib/interrupt-gate.ts):只看主回合、压缩中和 Pi / Codex 不打断,打断后等 CC 收尾一拍。
+  // v2.11: peer 标记的 api 入站不算「人类抢占」——那是对方实例的 agent 请求,C-c 掐断本机正跑的回合等于让外机打断本机用户的活
+  if ((env.from.kind === "user" || (env.from.kind === "api" && !env.from.peer)) && env.intent === "request") {
     try {
-      const { win, runtime: targetRuntime } = await resolveTurnWindow(to.channelId, CONTROL_CHANNEL_ID);
-      // 压缩中 main=compacting 不算 busy:不 C-c(会把跑了几分钟的压缩掐掉),下面押后到压缩结束
-      // v2.23+ 能把消息 steer / 排进回合的运行时(Pi)**人类消息一律不打断**:打断反而把
-      // 干到一半的回合掐了(2026-09-14 实测)。由 control.preemptOnHumanMessage 声明。
-      if (win && (await probeTurnAt(win, targetRuntime, evAgent)).main === "busy" && controlFor(targetRuntime).preemptOnHumanMessage) {
-        preemptCooldown.mark(to.channelId);
-        await interruptWindow(win, targetRuntime);
-        recordMetric("agent_interrupt", { channelId: to.channelId, agent: evAgent, meta: { trigger: "preempt" } });
-        // 让前端给被掐的回合标「已打断」(与手动停止同一事件形状)
-        emitEvent({ agent: evAgent, chatId: to.channelId, type: "agent_status", data: { status: "done", trigger: "interrupt" } });
-        console.log(`⚡ 抢占打断 ${evAgent}（人类补充消息优先处理）`);
-        // CC 中断收尾需要一拍;立刻投递会混进垂死回合的尾流
-        await new Promise((r) => setTimeout(r, 1200));
-      }
+      await interruptGate.preempt(to.channelId, evAgent);
     } catch (e) {
       console.log(`⚠️ 抢占打断失败,按常规投递: ${(e as Error).message}`);
     }
@@ -916,7 +901,7 @@ async function deliverToLocal(env: RouterEnvelope, to: RouterLocalEndpoint, stil
     // reply→别agent forward 都经这里），记看门狗 pending。
     // v2.4.16+: meta.skipInterAgentWatchdog=true 时不挂 watchdog（oneShot 的 fire
     // -and-forget 场景，caller 不期待回应，watchdog 没必要打扰 target）。
-    if (env.from.kind === "local" && hangsInterAgentWatchdog(env.from.ws === to.ws, env.meta.skipInterAgentWatchdog, clients.has(env.from.channelId))) {
+    if (env.from.kind === "local" && hangsInterAgentWatchdog(env.from.ws === to.ws, env.meta.skipInterAgentWatchdog, await channelStillRegistered(env.from.channelId))) {
       pendingInterAgentMsg.set(to.channelId, {
         fromLabel: env.from.agentName || "另一个 agent",
         fromChannelId: env.from.channelId,
@@ -1465,14 +1450,11 @@ discord.on("messageCreate", async (msg: DiscordMessage) => {
   // 新用户消息到达 → 如果 agent 还在忙（不 idle），先发 Ctrl+C 打断，让新消息覆盖旧任务
   {
     try {
-      const listResult = await runManager("list");
-      const agent = (listResult.agents || []).find((a: any) => a.channelId === channelId);
-      const targetWindow = agent ? `master:${agent.name}` : `master:0`;
-      // 只看主回合（契约可疑时宁可不打断）；只对 preemptOnHumanMessage + paneHeuristics 的运行时（CC），Pi / Codex 跳过
-      const verdict = (w: string) => probeTurnAt(w, agent?.runtime, agent?.name ?? "master").then((s) => s.main);
-      // 打断后等 CC 收尾一拍（与 deliverToLocal 同为 1.2s）：共用冷却让那边不再打断、也就不再等，立刻投会混进垂死回合的尾流
-      if (await preemptIfBusy(targetWindow, agent?.runtime, verdict, undefined, preemptCooldown.for(channelId))) await Bun.sleep(1200);
-    } catch { /* non-critical */ }
+      // 与 deliverToLocal 那道是同一个闸（interruptGate）：这里打断了，那边在冷却期内不会再发第二次 C-c
+      await interruptGate.preempt(channelId, await agentLabelForChannelAsync(channelId));
+    } catch (e) {
+      console.log(`⚠️ Discord 入站抢占失败,按常规投递: ${(e as Error).message}`);
+    }
 
     // v2.4.16+ 用户发消息 = 显式接管这个 channel 的对话方向。把该 channel 上挂着
     // 的所有 inter-agent pending 一并清掉，否则它们会在下一轮 Stop hook 触发
