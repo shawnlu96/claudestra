@@ -58,7 +58,7 @@ export function MentionLayer({ m, active }: { m: MentionState; active: string })
       {m.target && (
         <div className="mb-1.5 flex items-center gap-2 rounded-xl border border-accent/30 bg-accent/10 px-3 py-1.5 text-xs">
           <span className="shrink-0 text-accent"><AtIcon /></span>
-          <span className="min-w-0 flex-1 truncate">
+          <span className="min-w-0 flex-1 break-words leading-snug">
             {t("发送时让 {me} 去找 {who}，并把回复带回来", { me: active, who: mentionLabel(m.target) })}
           </span>
           <button
