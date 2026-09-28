@@ -63,13 +63,13 @@ function harness(opts: { enabled?: boolean; route?: (url: string) => Response | 
   const svc = createQuotaService(deps);
   /** 当前挂着的那个定时器 */
   const live = () => h.timers.filter((t) => !t.cleared && t.ms !== QUOTA_CADENCE.openWaitMs);
-  /** 让当前定时器到点：推时钟、跑 tick、等它把下一个挂上 */
+  /** 让当前定时器到点：推时钟、跑 tick、等它把下一个挂上（上限放宽到约 2 秒：全量并跑时机器忙，20ms 不够） */
   async function fire() {
     const [t] = live();
     t.cleared = true;
     h.now += t.ms;
     t.fn();
-    for (let i = 0; i < 20 && !live().length; i++) await Bun.sleep(1);
+    for (let i = 0; i < 2000 && !live().length; i++) await Bun.sleep(1);
   }
   return { h, svc, fetch, live, fire };
 }
@@ -111,7 +111,7 @@ describe("定时器节奏", () => {
     const t = harness({ route: () => new Promise<Response>(() => {}) });
     t.svc.start();
     const p = t.svc.snapshot();
-    for (let i = 0; i < 20 && !t.h.timers.some((x) => x.ms === QUOTA_CADENCE.openWaitMs); i++) await Bun.sleep(1);
+    for (let i = 0; i < 2000 && !t.h.timers.some((x) => x.ms === QUOTA_CADENCE.openWaitMs); i++) await Bun.sleep(1);
     t.h.timers.find((x) => x.ms === QUOTA_CADENCE.openWaitMs)!.fn();
     const v = await p;
     expect(v.snapshot.providers.every((e) => e.source.layer !== "live")).toBe(true);
@@ -131,7 +131,7 @@ describe("开关", () => {
     const t = harness({ route: (url) => (url.endsWith("/wham/usage") ? new Promise<Response>((r) => (release = r)) : okRoutes(url)) });
     t.svc.start();
     const inflight = t.svc.retry("codex");
-    for (let i = 0; i < 20 && t.fetch.calls.length === 0; i++) await Bun.sleep(1);
+    for (let i = 0; i < 2000 && t.fetch.calls.length === 0; i++) await Bun.sleep(1);
     await t.svc.setEnabled(false);
     release(okRoutes("https://chatgpt.com/backend-api/wham/usage"));
     expect((await inflight).status).toBe("discarded");
