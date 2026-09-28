@@ -13,7 +13,7 @@
  */
 
 import { existsSync, statSync } from "fs";
-import { projectJsonlPath, findJsonlBySessionId, usageDedupKey } from "./jsonl-cost.js";
+import { projectJsonlPath, findJsonlBySessionId, firstSeen } from "./jsonl-cost.js";
 import {
   findSessionJsonlBySessionId,
   runtimeForSessionPath,
@@ -218,12 +218,7 @@ export function scanStatsWindow(
     }
     const ts = new Date(rec.timestamp).getTime();
     if (!Number.isFinite(ts) || ts < windowFloor(dayTs, weekTs)) continue;
-    // 从尾往前扫，同一响应先遇到的是最后写的那行（usage 最完整）
-    const dk = usageDedupKey(rec);
-    if (dk !== null) {
-      if (seen.has(dk)) continue;
-      seen.add(dk);
-    }
+    if (!firstSeen(seen, rec)) continue; // 从尾往前扫：同一响应先遇到的是最后写的那行（usage 最完整）
     const tok =
       Number(u.input_tokens || 0) +
       Number(u.cache_creation_input_tokens || 0) +

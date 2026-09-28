@@ -158,10 +158,11 @@ export function CodexQuotaCard({ q }: { q: QuotaView }) {
   );
 }
 
-export function UsageTable({ agents, machine, window: win }: {
+export function UsageTable({ agents, machine, window: win, sandbox }: {
   agents: StatAgent[];
   machine?: MachineView | null;
   window?: UsageWindowView | null;
+  sandbox?: boolean;
 }) {
   const t = useT();
   const rows = groupUsageRows(agents, machine);
@@ -199,8 +200,11 @@ export function UsageTable({ agents, machine, window: win }: {
       {machine && (
         <div className="text-[10.5px] text-base-content/35">
           {t("这台机器合计 = 全部会话（含已结束的 agent、子 agent、终端里直接开的），同一次响应只计一次")}
+          {/* 全机合计有 60 秒缓存，agent 行是即时的：「其他会话」是两者相减，标出扫描时刻免得把差值当精确值 */}
+          {typeof machine.scannedAt === "number" && ` · ${t("扫描于")} ${fmtAge(machine.scannedAt)}`}
         </div>
       )}
+      {sandbox && <div className="text-[10.5px] text-base-content/35">{t("沙箱内不统计全机，只有 agent 当前会话")}</div>}
       {weekNote && win?.weekSource === "quota" && (
         <div className="text-[10.5px] text-base-content/35">{t("本周 = 当前周额度周期，与上面的周额度条同一口径")}</div>
       )}

@@ -406,6 +406,8 @@ export const DICT: Record<string, string> = {
   "这台机器合计": "This machine",
   "agent 当前会话": "Agents (current sessions)",
   "其他会话": "Other sessions",
+  "扫描于": "scanned",
+  "沙箱内不统计全机，只有 agent 当前会话": "Machine-wide totals aren't collected in the sandbox; only agents' current sessions are shown",
   "运行时报告的费用": "Runtime-reported cost",
   "「—」= 没有牌价可折算（如 Codex 的模型）": "“—” = no list price to estimate with (e.g. Codex models)",
   "运行时报告的费用：Pi 会话记录里的 usage.cost，是 Pi 按自己的价目表算的，不是账单；与牌价折算分开记":

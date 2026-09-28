@@ -99,6 +99,14 @@ describe("groupUsageRows：有全机合计（新 bridge）", () => {
     expect(others.week.tokens).toBe(0);
   });
 
+  test("其他会话的成本被夹成 0 而 token > 0：显示 $0.00，不是「—」（那是「没有牌价」）", () => {
+    const m = { today: { tokens: 1000, costUsd: 1 }, week: { tokens: 1000, costUsd: 1 } };
+    const rows = groupUsageRows([agent("a", "claude-code", win(400, 5))], m);
+    const others = rows.find((r) => r.key === "others")!;
+    expect(others.kind).toBe("derived");
+    expect(fmtUsageCell(others, "today")).toBe("600 · $0.00");
+  });
+
   test("多个 runtime：按全机的 byRuntime 分行，不是按 agent", () => {
     const rows = groupUsageRows([agent("a", "claude-code", win(1))], machine(30, 60, { codex: [10, 20], "claude-code": [20, 40] }));
     expect(rows.map((r) => r.key)).toEqual(["all", "claude-code", "codex", "agents", "others"]);
@@ -163,9 +171,15 @@ describe("额度卡数据", () => {
 
 describe("usageTableData", () => {
   test("老 bridge 没有 machine / window；形态不对的一律当没有", () => {
-    expect(usageTableData({})).toEqual({ agents: [], machine: null, window: null });
-    expect(usageTableData({ agents: "x", machine: [1], window: 3 })).toEqual({ agents: [], machine: null, window: null });
+    expect(usageTableData({})).toEqual({ agents: [], machine: null, window: null, sandbox: false });
+    expect(usageTableData({ agents: "x", machine: [1], window: 3 })).toEqual({ agents: [], machine: null, window: null, sandbox: false });
     const m = { today: { tokens: 1 } };
     expect(usageTableData({ agents: [], machine: m, window: { weekStart: 1 } }).machine).toBe(m);
+  });
+
+  test("沙箱 bridge：{unavailable:\"sandbox\"} 不当全机合计，只打标记", () => {
+    const d = usageTableData({ agents: [], machine: { unavailable: "sandbox" } });
+    expect(d.machine).toBeNull();
+    expect(d.sandbox).toBe(true);
   });
 });

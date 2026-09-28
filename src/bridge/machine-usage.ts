@@ -6,15 +6,25 @@ import { formatTokens } from "../lib/agent-stats.js";
 import { createMachineUsageCache } from "../lib/machine-usage-cache.js";
 import type { MachineUsage } from "../lib/machine-usage.js";
 import { runManagerProcess } from "../lib/run-manager.js";
+import { isSandbox } from "../lib/sandbox.js";
 import { formatResetTs } from "../lib/usage-cache.js";
 import type { UsageWindowBounds } from "../lib/usage-window.js";
 import { BUN_PATH, ENV_WITH_BUN, MANAGER_PATH } from "./config.js";
 
-export type { MachineUsage };
+/** 快照里的全机合计：结果 / 沙箱不统计 / 还没有（首扫未出或失败） */
+export type MachineSlot = MachineUsage | { unavailable: "sandbox" } | null;
 
-export const machineUsage = createMachineUsageCache((args) =>
-  runManagerProcess(args, { bunPath: BUN_PATH, managerPath: MANAGER_PATH, env: ENV_WITH_BUN, timeoutMs: 60_000 }),
-);
+const SANDBOX_SLOT = { unavailable: "sandbox" } as const;
+
+/**
+ * 沙箱不统计全机：扫的是真实 HOME 下的会话（~/.claude/projects），沙箱的 manager 白名单也刻意不放行 `cost`。
+ * 看板照样显示 agent 当前会话，全机那一行写明「沙箱内不统计」。
+ */
+export const machineUsage: (w: UsageWindowBounds) => Promise<MachineSlot> = isSandbox()
+  ? async () => SANDBOX_SLOT
+  : createMachineUsageCache((args) =>
+      runManagerProcess(args, { bunPath: BUN_PATH, managerPath: MANAGER_PATH, env: ENV_WITH_BUN, timeoutMs: 60_000 }),
+    );
 
 /** 抓取时间 → "刚刚 / N 分钟前 / N 小时前"（用户要能看出 gauge 数据多旧） */
 export function fmtAge(scrapedAt: number): string {
@@ -31,8 +41,9 @@ function weekLabel(w: UsageWindowBounds | undefined): string {
 }
 
 /** Discord 看板 footer：全机合计 + 口径说明（agent 字段只是各自当前会话） */
-export function machineFooter(m: MachineUsage | null | undefined, w: UsageWindowBounds | undefined): string {
+export function machineFooter(m: MachineSlot | undefined, w: UsageWindowBounds | undefined): string {
   const src = "agent 行 = 各自当前会话 · 本地 JSONL + /status";
+  if (m && "unavailable" in m) return `沙箱内不统计全机 · ${src}`;
   if (!m) return `本机合计统计中… · ${src}`;
   const tok = (n: number) => formatTokens(n);
   return `本机合计（全部会话）今 ${tok(m.today.tokens)} · ${weekLabel(m.window ?? w)} ${tok(m.week.tokens)} · 扫描于 ${fmtAge(m.scannedAt)} · ${src}`;

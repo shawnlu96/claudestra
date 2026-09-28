@@ -71,7 +71,8 @@ function wallToUtc(y: number, mo: number, d: number, h: number, mi: number, tz: 
 
 /**
  * /status 面板的重置文字 → 绝对毫秒。认的形态："Sep 30, 6am (Asia/Tokyo)"、"Sep 30 at 6:30pm"、"6am (UTC)"。
- * 面板不带年份：取离现在最近、且落在 [now − 7d, now + 8d] 内的那一年（周重置不可能更远）。认不出返回 null。
+ * 带日期不带年份：取离现在最近、且落在 [now − 7d, now + 8d] 内的那一年（周重置不可能更远）。
+ * 只有时刻：重置总在将来，取不早于 now − 5 分钟的最早那个（离得最近的可能是已经过去的昨天同一时刻）。认不出返回 null。
  */
 export function parseResetText(text: string, nowMs: number): number | null {
   const m = text.trim().match(/^(?:([A-Za-z]{3,9})\.?\s+(\d{1,2}),?\s+(?:at\s+)?)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)\b\s*(?:\(([^)]+)\))?/i);
@@ -81,7 +82,8 @@ export function parseResetText(text: string, nowMs: number): number | null {
   const minute = m[4] ? Number(m[4]) : 0;
   const tz = m[6]?.trim() || null;
   const candidates: number[] = [];
-  if (m[1]) {
+  const dated = !!m[1];
+  if (dated) {
     const mo = MONTHS.indexOf(m[1].slice(0, 3).toLowerCase());
     if (mo < 0) return null;
     const y0 = new Date(nowMs).getFullYear();
@@ -90,6 +92,10 @@ export function parseResetText(text: string, nowMs: number): number | null {
     // 只有时刻：今天或明天的那个点（按面板时区的日期推，这里用本机日期加减一天兜住跨日）
     const d = new Date(nowMs);
     for (const off of [-1, 0, 1]) candidates.push(wallToUtc(d.getFullYear(), d.getMonth(), d.getDate() + off, hour, minute, tz));
+  }
+  if (!dated) {
+    const upcoming = candidates.filter((c) => Number.isFinite(c) && c >= nowMs - 5 * 60_000).sort((a, b) => a - b);
+    return upcoming[0] ?? null;
   }
   const ok = candidates.filter((c) => Number.isFinite(c) && c >= nowMs - WEEK_MS && c <= nowMs + WEEK_MS + 24 * 3600_000);
   if (!ok.length) return null;

@@ -32,7 +32,7 @@ export interface UsageWindowView {
   weekSource?: string;
 }
 
-/** bridge /stats 的 machine：这台机器上全部会话（含已结束的、子 agent、终端里直接开的），按响应去重 */
+/** bridge /stats 的 machine：这台机器上全部会话（含已结束的、子 agent、终端里直接开的），按响应去重；沙箱里是 {unavailable:"sandbox"} */
 export interface MachineView {
   today?: UsageWin;
   week?: UsageWin;
@@ -44,8 +44,11 @@ export interface UsageRow {
   key: string;
   /** 中文原文（组件里过 t()）或品牌名 */
   label: string;
-  /** usage = token · 牌价折算；reported = 运行时报告的费用（挂在所属 runtime 下面一行） */
-  kind: "usage" | "reported";
+  /**
+   * usage = token · 牌价折算；reported = 运行时报告的费用（挂在所属 runtime 下面一行）；
+   * derived = 相减得来（其他会话）：成本被夹到 0 不等于「没有牌价」，照样显示 $0.00 而不是「—」
+   */
+  kind: "usage" | "reported" | "derived";
   today: UsageCell;
   week: UsageCell;
 }
@@ -119,19 +122,30 @@ export function groupUsageRows(agents: StatAgent[], machine?: MachineView | null
   const total = rows[0];
   const others = minusCell(total.today, mine.today);
   const othersWeek = minusCell(total.week, mine.week);
-  return [...rows, mine, { key: "others", label: "其他会话", kind: "usage", today: others, week: othersWeek }];
+  return [...rows, mine, { key: "others", label: "其他会话", kind: "derived", today: others, week: othersWeek }];
 }
 
-/** 用量表的三样数据；老 bridge 没有 machine / window → null（表格退回「agent 当前会话」口径、列头不写起点） */
+/**
+ * 用量表的数据；老 bridge 没有 machine / window → null（表格退回「agent 当前会话」口径、列头不写起点）。
+ * 沙箱 bridge 回 {unavailable:"sandbox"}：不当成全机合计，只打 sandbox 标记让表格写明「沙箱内不统计」。
+ */
 export interface UsageTableData {
   agents: StatAgent[];
   machine: MachineView | null;
   window: UsageWindowView | null;
+  sandbox: boolean;
 }
 
 export function usageTableData(j: { agents?: unknown; machine?: unknown; window?: unknown }): UsageTableData {
   const obj = <T>(v: unknown): T | null => (v && typeof v === "object" && !Array.isArray(v) ? (v as T) : null);
-  return { agents: Array.isArray(j.agents) ? j.agents : [], machine: obj<MachineView>(j.machine), window: obj<UsageWindowView>(j.window) };
+  const m = obj<MachineView & { unavailable?: unknown }>(j.machine);
+  const sandbox = m?.unavailable === "sandbox";
+  return {
+    agents: Array.isArray(j.agents) ? j.agents : [],
+    machine: m && !("unavailable" in m) ? m : null,
+    window: obj<UsageWindowView>(j.window),
+    sandbox,
+  };
 }
 
 /** 「本周」列头下的起点说明：周额度周期写「自 9/23 06:00」（手机本地时间），滚动写「近 7 天」；老 bridge 没有 window → 空 */
@@ -160,7 +174,7 @@ export function listPriceUsd(c: UsageCell): number | null {
 export function fmtUsageCell(row: UsageRow, win: "today" | "week"): string {
   const c = row[win];
   if (row.kind === "reported") return `$${c.reportedCostUsd.toFixed(2)}`;
-  const usd = listPriceUsd(c);
+  const usd = row.kind === "derived" ? c.costUsd : listPriceUsd(c);
   return `${fmtTok(c.tokens)} · ${usd === null ? "—" : `$${usd.toFixed(2)}`}`;
 }
 

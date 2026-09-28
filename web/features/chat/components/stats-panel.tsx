@@ -24,7 +24,7 @@ export function StatsPanel({ open, onClose }: { open: boolean; onClose: () => vo
   const store = useChatStoreApi();
   const agents = useChatStore((s) => s.state.agents);
   const [g, setG] = useState<GlobalStats | null>(null);
-  const [usage, setUsage] = useState<UsageTableData>({ agents: [], machine: null, window: null });
+  const [usage, setUsage] = useState<UsageTableData>({ agents: [], machine: null, window: null, sandbox: false });
   // 老 bridge 没有 quotas 字段 → 空数组，不画 Codex 卡
   const [quotas, setQuotas] = useState<QuotaView[]>([]);
   const [refreshing, setRefreshing] = useState(false);

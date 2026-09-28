@@ -121,6 +121,21 @@ describe("createMachineUsageCache", () => {
     expect(await get(next)).toBeNull();
   });
 
+  test("失败后 TTL 内不再起子进程（Stop hook 每几秒来问一次）", async () => {
+    let t = 0;
+    let calls = 0;
+    const get = createMachineUsageCache(async () => (calls++, { ok: false, error: "boom" }), { ttlMs: 60_000, now: () => t, log: () => {} });
+    expect(await get(W)).toBeNull();
+    t = 5_000;
+    expect(await get(W)).toBeNull();
+    t = 30_000;
+    expect(await get(W)).toBeNull();
+    expect(calls).toBe(1);
+    t = 61_000;
+    await get(W);
+    expect(calls).toBe(2);
+  });
+
   test("子进程卡住：最多等 waitMs 就返回 null，不拖住看板", async () => {
     const get = createMachineUsageCache(() => new Promise(() => {}), { waitMs: 20, log: () => {} });
     const t0 = Date.now();

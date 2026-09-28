@@ -65,6 +65,15 @@ describe("parseResetText（/status 面板文字，没配 statusline 时的次来
     expect(parseResetText("Jan 2, 6am (UTC)", now)).toBe(Date.parse("2027-01-02T06:00:00Z"));
   });
 
+  test("只有时刻：取将来最近的那次，不选已经过去的昨天同一时刻", () => {
+    // now = 09-28 17:00 JST
+    expect(parseResetText("11pm (Asia/Tokyo)", NOW)).toBe(Date.parse("2026-09-28T23:00:00+09:00"));
+    // 今天 05:00（已过 12h）与明天 05:00（12h 后）离 now 一样近，旧的「取最近」会选中已过去的今天：必须取明天
+    expect(parseResetText("5am (Asia/Tokyo)", NOW)).toBe(Date.parse("2026-09-29T05:00:00+09:00"));
+    // 刚过几分钟（面板还没刷新）：容差内仍取这一次
+    expect(parseResetText("4:58pm (Asia/Tokyo)", NOW)).toBe(Date.parse("2026-09-28T16:58:00+09:00"));
+  });
+
   test("认不出 / 时区名不认识 / 离谱日期", () => {
     expect(parseResetText("", NOW)).toBeNull();
     expect(parseResetText("soon", NOW)).toBeNull();

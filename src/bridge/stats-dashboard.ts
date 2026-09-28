@@ -37,7 +37,7 @@ import { readUsageCache, readUsageCacheStale, deriveStaleUsage, readSessionCtx }
 import { discordCreateChannel } from "./discord-api.js";
 import { computeAgentStats, formatTokens, type AgentStat } from "../lib/agent-stats.js";
 import { currentUsageWindow, noteWeekResetText, type UsageWindowBounds } from "../lib/usage-window.js";
-import { fmtAge, machineFooter, machineUsage, type MachineUsage } from "./machine-usage.js";
+import { fmtAge, machineFooter, machineUsage, type MachineSlot } from "./machine-usage.js";
 import { withCodexQuota, type CodexQuotaObservation } from "../lib/codex-usage.js";
 
 const DASHBOARD_CHANNEL_NAME = "📊-claudestra-stats";
@@ -67,7 +67,7 @@ export interface StatsSnapshot {
   quotas?: CodexQuotaObservation[];
   /** 今日 / 本周的边界（本周 = 周额度周期，拿不到退回滚动 7 天）与全机合计（所有会话、按响应去重；首次扫描前为 null） */
   window?: UsageWindowBounds;
-  machine?: MachineUsage | null;
+  machine?: MachineSlot;
 }
 
 // ── 账号级 /status 抓取 ────────────────────────────────────────────────

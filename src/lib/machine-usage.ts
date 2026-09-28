@@ -7,7 +7,7 @@
  * 临时字符串峰值 200MB 级，放进 bridge 就是 513MB 会话那次的同类 RSS 棘轮；子进程退出即全部归还。
  */
 
-import { closeSync, openSync, readdirSync, readSync, statSync } from "fs";
+import { closeSync, fstatSync, openSync, readdirSync, readSync, statSync } from "fs";
 import { join } from "path";
 import { readFileStats, scanStatsWindow, type UsageWindow } from "./agent-stats.js";
 import { codexSessionsRoot } from "./codex-session.js";
@@ -81,7 +81,7 @@ function scanFileBackwards(
   try { fd = openSync(path, "r"); } catch { return 0; } // 扫描期间被删：不计
   let bytes = 0;
   try {
-    let pos = statSync(path).size;
+    let pos = fstatSync(fd).size; // 与读的是同一个打开的文件（open 与 stat 之间被轮转 / 替换也对得上）
     let carry = Buffer.alloc(0);
     const floor = windowFloor(w.dayStart, w.weekStart);
     while (pos > 0) {

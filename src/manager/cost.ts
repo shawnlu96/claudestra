@@ -21,15 +21,15 @@ export async function cmdCost(args: string[]) {
 
   // 参数解析。--week = 当前周额度周期（与用量看板同一口径），拿不到重置时刻退回滚动 7 天
   let agentFilter: string | null = null;
-  let sinceTs = 0;
+  let period: "today" | "week" | null = null;
   let machine = false;
   let win = currentUsageWindow();
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
     if (a === "--today") {
-      sinceTs = win.dayStart;
+      period = "today";
     } else if (a === "--week") {
-      sinceTs = win.weekStart;
+      period = "week";
     } else if (a === "--machine") {
       machine = true;
     } else if (a === "--window" && args[i + 1]) {
@@ -41,6 +41,9 @@ export async function cmdCost(args: string[]) {
       agentFilter = a;
     }
   }
+
+  // 窗口要等参数全解析完再取：--window 可能写在 --week 后面
+  const sinceTs = period === "today" ? win.dayStart : period === "week" ? win.weekStart : 0;
 
   // 全机（所有会话文件、按响应去重）今日 + 本周；bridge 看板在子进程里调它，见 bridge/machine-usage.ts
   if (machine) {
@@ -99,7 +102,7 @@ export async function cmdCost(args: string[]) {
     ok: true,
     scope: agentFilter ? `agent=${agentFilter}` : "all",
     period: sinceTs ? `since ${new Date(sinceTs).toISOString()}` : "all-time",
-    ...(args.includes("--week") ? { weekSource: win.weekSource } : {}),
+    ...(period === "week" ? { weekSource: win.weekSource } : {}),
     perAgent,
     byModel: total,
     grand: {

@@ -36,13 +36,36 @@ function addUsage(acc: Usage, u: any): void {
 
 /**
  * 一次 API 响应的去重键。Claude Code 把一个响应的每个内容块（thinking / text / tool_use）各写一行，
- * 每行都带同一份 usage；fork / resume 又会把历史行抄进新文件。逐行累加会多算约一倍（2026-09-28 实测
- * 2495 行只有 1209 个响应）。没有 message.id 的记录（Pi 等）不去重，逐条计。
+ * 每行都带这个响应的 usage；fork / resume 又会把历史行抄进新文件。逐行累加会多算约一倍（2026-09-28 实测
+ * 2495 行只有 1209 个响应）。同一响应的几行 usage 不一定相同：流式落盘时先写的行 output_tokens 偏小，
+ * **最后写的那行才完整**——两个消费者都取它（倒扫用 firstSeen，正扫用 keepLatest）。
+ * 已知缺口：没有 id 的记录逐条计（Pi 由 pi-session 把 entry.id 填进 message.id；老格式没有就算了）；
+ * Codex 按文件做累计值差分、不走这里，fork 出来的 rollout 若抄了累计计数器会重复计（本机未见）。
  */
-export function usageDedupKey(rec: any): string | null {
+function usageDedupKey(rec: any): string | null {
   const id = rec?.message?.id;
   if (typeof id !== "string" || !id) return null;
   return `${id}:${typeof rec.requestId === "string" ? rec.requestId : ""}`;
+}
+
+/** 从尾往前扫的去重：同一响应第一次遇到（= 最后写的那行）返回 true 计入，之后的返回 false。没有键的一律计 */
+export function firstSeen(seen: Set<string>, rec: any): boolean {
+  const k = usageDedupKey(rec);
+  if (k === null) return true;
+  if (seen.has(k)) return false;
+  seen.add(k);
+  return true;
+}
+
+/**
+ * 从头往后扫的去重：有键的记录先存进 latest（后写的覆盖先写的），扫完再统一计；返回 true = 没有键，当场计。
+ * 调用方最后遍历 latest.values()。
+ */
+function keepLatest(latest: Map<string, any>, rec: any): boolean {
+  const k = usageDedupKey(rec);
+  if (k === null) return true;
+  latest.set(k, rec);
+  return false;
 }
 
 /**
@@ -53,7 +76,13 @@ export async function rollupJsonl(path: string, sinceTs = 0): Promise<ModelUsage
   if (!existsSync(path)) return [];
   const text = await Bun.file(path).text();
   const buckets = new Map<string, Usage>();
-  const seen = new Set<string>();
+  const latest = new Map<string, any>();
+  const add = (rec: any) => {
+    const model = rec?.message?.model || "unknown";
+    const acc = buckets.get(model) || emptyUsage();
+    addUsage(acc, rec.message.usage);
+    buckets.set(model, acc);
+  };
   for (const line of text.split("\n")) {
     if (!line) continue;
     let rec: any;
@@ -66,18 +95,10 @@ export async function rollupJsonl(path: string, sinceTs = 0): Promise<ModelUsage
       const ts = new Date(rec.timestamp).getTime();
       if (!Number.isFinite(ts) || ts < sinceTs) continue;
     }
-    const model = rec?.message?.model || "unknown";
-    const usage = rec?.message?.usage;
-    if (!usage) continue;
-    const dk = usageDedupKey(rec);
-    if (dk !== null) {
-      if (seen.has(dk)) continue;
-      seen.add(dk);
-    }
-    const acc = buckets.get(model) || emptyUsage();
-    addUsage(acc, usage);
-    buckets.set(model, acc);
+    if (!rec?.message?.usage) continue;
+    if (keepLatest(latest, rec)) add(rec);
   }
+  for (const rec of latest.values()) add(rec);
   return [...buckets.entries()].map(([model, u]) => ({ model, ...u }));
 }
 
