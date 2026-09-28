@@ -8,9 +8,12 @@ import {
   groupUsageRows,
   listPriceUsd,
   quotaOrigin,
+  weekColumnNote,
   windowLabel,
+  type MachineView,
   type QuotaView,
   type StatAgent,
+  type UsageWindowView,
 } from "../usage-view";
 
 /**
@@ -155,9 +158,15 @@ export function CodexQuotaCard({ q }: { q: QuotaView }) {
   );
 }
 
-export function UsageTable({ agents }: { agents: StatAgent[] }) {
+export function UsageTable({ agents, machine, window: win, sandbox }: {
+  agents: StatAgent[];
+  machine?: MachineView | null;
+  window?: UsageWindowView | null;
+  sandbox?: boolean;
+}) {
   const t = useT();
-  const rows = groupUsageRows(agents);
+  const rows = groupUsageRows(agents, machine);
+  const weekNote = weekColumnNote(win, getLang() === "en");
   const unpriced = rows.some((r) => r.kind === "usage" && (listPriceUsd(r.today) === null || listPriceUsd(r.week) === null));
   const reported = rows.some((r) => r.kind === "reported");
   return (
@@ -165,10 +174,21 @@ export function UsageTable({ agents }: { agents: StatAgent[] }) {
       <div className="grid grid-cols-[1fr_auto_auto] items-baseline gap-x-3 gap-y-0.5 text-xs">
         <span className="font-medium">{t("token 与花费")}</span>
         <span className="text-right text-[10.5px] text-base-content/40">{t("今日")}</span>
-        <span className="text-right text-[10.5px] text-base-content/40">{t("本周")}</span>
+        <span className="text-right text-[10.5px] leading-tight text-base-content/40">
+          {t("本周")}
+          {weekNote && <span className="block text-[9.5px] text-base-content/35">{weekNote}</span>}
+        </span>
         {rows.map((r) => (
           <Fragment key={r.key}>
-            <span className={r.kind === "reported" ? "pl-3 text-[10.5px] text-base-content/45" : "text-base-content/60"}>
+            <span
+              className={
+                r.kind === "reported"
+                  ? "pl-3 text-[10.5px] text-base-content/45"
+                  : r.key === "agents" || r.key === "others"
+                    ? "pl-3 text-base-content/50"
+                    : "text-base-content/60"
+              }
+            >
               {t(r.label)}
             </span>
             <span className="text-right font-mono tabular-nums">{fmtUsageCell(r, "today")}</span>
@@ -176,7 +196,18 @@ export function UsageTable({ agents }: { agents: StatAgent[] }) {
           </Fragment>
         ))}
       </div>
-      <div className="text-[10.5px] text-base-content/35">{t("成本为 API 牌价折算（订阅制实际不按此扣费）· 活跃 agent 合计")}</div>
+      <div className="text-[10.5px] text-base-content/35">{t("成本为 API 牌价折算（订阅制实际不按此扣费）")}</div>
+      {machine && (
+        <div className="text-[10.5px] text-base-content/35">
+          {t("这台机器合计 = 全部会话（含已结束的 agent、子 agent、终端里直接开的），同一次响应只计一次")}
+          {/* 全机合计有 60 秒缓存，agent 行是即时的：「其他会话」是两者相减，标出扫描时刻免得把差值当精确值 */}
+          {typeof machine.scannedAt === "number" && ` · ${t("扫描于")} ${fmtAge(machine.scannedAt)}`}
+        </div>
+      )}
+      {sandbox && <div className="text-[10.5px] text-base-content/35">{t("沙箱内不统计全机，只有 agent 当前会话")}</div>}
+      {weekNote && win?.weekSource === "quota" && (
+        <div className="text-[10.5px] text-base-content/35">{t("本周 = 当前周额度周期，与上面的周额度条同一口径")}</div>
+      )}
       {unpriced && <div className="text-[10.5px] text-base-content/35">{t("「—」= 没有牌价可折算（如 Codex 的模型）")}</div>}
       {reported && (
         <div className="text-[10.5px] text-base-content/35">

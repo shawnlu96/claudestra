@@ -5,6 +5,7 @@ import { useChatStore, useChatStoreApi } from "../chat-store";
 import { agentRepoLabel, repoTagFits } from "../agent-repo";
 import type { AgentSession } from "../type";
 import { ctxView } from "../ctx-level";
+import { rowOpenIntent } from "../open-intent";
 import { fmtAgo } from "../fmt-time";
 import { useT } from "@/lib/i18n";
 import { MasterIcon } from "./master-icon";
@@ -157,7 +158,7 @@ export function AgentRow({
     onSelect();
     requestAnimationFrame(() =>
       requestAnimationFrame(() => {
-        void store.openAgent(intended);
+        void store.openAgent(intended, rowOpenIntent());
       }),
     );
   };

@@ -4,28 +4,52 @@
  * 从 manager.ts 逐字搬出（函数体未改，只加 export / 改相对路径）。
  */
 import { loadRegistry, output } from "./core.js";
+import { currentUsageWindow, type UsageWindowBounds } from "../lib/usage-window.js";
+
+/** bridge 传来的 `--window <dayStart>,<weekStart>,<quota|rolling>`：两边用同一个窗口，别各算各的 */
+function parseWindowArg(v: string | undefined): UsageWindowBounds | null {
+  const [d, w, src] = (v ?? "").split(",");
+  const dayStart = Number(d);
+  const weekStart = Number(w);
+  if (!Number.isFinite(dayStart) || !Number.isFinite(weekStart) || !d || !w) return null;
+  return { dayStart, weekStart, weekSource: src === "quota" ? "quota" : "rolling" };
+}
 
 export async function cmdCost(args: string[]) {
   const { rollupJsonl, projectJsonlPath, findJsonlBySessionId, mergeByModel } =
     await import("../lib/jsonl-cost.js");
 
-  // 参数解析
+  // 参数解析。--week = 当前周额度周期（与用量看板同一口径），拿不到重置时刻退回滚动 7 天
   let agentFilter: string | null = null;
-  let sinceTs = 0;
+  let period: "today" | "week" | null = null;
+  let machine = false;
+  let win = currentUsageWindow();
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
     if (a === "--today") {
-      const d = new Date();
-      d.setHours(0, 0, 0, 0);
-      sinceTs = d.getTime();
+      period = "today";
     } else if (a === "--week") {
-      sinceTs = Date.now() - 7 * 24 * 3600_000;
+      period = "week";
+    } else if (a === "--machine") {
+      machine = true;
+    } else if (a === "--window" && args[i + 1]) {
+      win = parseWindowArg(args[++i]) ?? win;
     } else if (a === "--agent" && args[i + 1]) {
       agentFilter = args[i + 1];
       i++;
     } else if (!a.startsWith("--")) {
       agentFilter = a;
     }
+  }
+
+  // 窗口要等参数全解析完再取：--window 可能写在 --week 后面
+  const sinceTs = period === "today" ? win.dayStart : period === "week" ? win.weekStart : 0;
+
+  // 全机（所有会话文件、按响应去重）今日 + 本周；bridge 看板在子进程里调它，见 bridge/machine-usage.ts
+  if (machine) {
+    const { scanMachineUsage } = await import("../lib/machine-usage.js");
+    output({ ok: true, machine: await scanMachineUsage(win) });
+    return;
   }
 
   const reg = await loadRegistry();
@@ -78,6 +102,7 @@ export async function cmdCost(args: string[]) {
     ok: true,
     scope: agentFilter ? `agent=${agentFilter}` : "all",
     period: sinceTs ? `since ${new Date(sinceTs).toISOString()}` : "all-time",
+    ...(period === "week" ? { weekSource: win.weekSource } : {}),
     perAgent,
     byModel: total,
     grand: {

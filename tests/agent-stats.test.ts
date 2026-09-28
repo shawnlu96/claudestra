@@ -184,3 +184,41 @@ describe("readFileStats 尾读扩窗", () => {
     expect(r.stats.week.requests).toBe(0);
   });
 });
+
+// ── 按响应去重（2026-09-28 owner「本周 token 数不对」）─────────────────────────────
+// Claude Code 把一次响应的每个内容块各写一行、每行带同一份 usage；逐行累加多算约一倍。
+describe("scanStatsWindow 按响应去重", () => {
+  const ts = new Date().toISOString();
+  const line = (id: string | null, input: number, requestId = "req_1") =>
+    JSON.stringify({
+      type: "assistant",
+      timestamp: ts,
+      requestId,
+      message: { ...(id ? { id } : {}), model: "claude-opus-5-5", usage: { input_tokens: input, output_tokens: 0 } },
+    });
+  const DAY = 86400_000;
+
+  test("同一 message.id + requestId 的多行只计一次；没有 id 的逐条计", () => {
+    const lines = [line("msg_a", 100), line("msg_a", 100), line("msg_a", 100), line("msg_b", 5), line(null, 1), line(null, 1)];
+    const { stats } = scanStatsWindow(lines, Date.now() - DAY, Date.now() - 7 * DAY);
+    expect(stats.week.tokens).toBe(107);
+    expect(stats.week.requests).toBe(4);
+    expect(stats.today.tokens).toBe(107);
+  });
+
+  test("共享 seen 集合：跨段（跨文件）也去重", () => {
+    const seen = new Set<string>();
+    const a = scanStatsWindow([line("msg_a", 100)], Date.now() - DAY, Date.now() - 7 * DAY, undefined, seen);
+    const b = scanStatsWindow([line("msg_a", 100), line("msg_c", 3)], Date.now() - DAY, Date.now() - 7 * DAY, undefined, seen);
+    expect(a.stats.week.tokens + b.stats.week.tokens).toBe(103);
+  });
+
+  test("周期起点晚于今天 00:00（今天刚重置）：今日照样从 00:00 算，不被周期截掉", () => {
+    const now = Date.now();
+    const at = (t: number, id: string) =>
+      JSON.stringify({ type: "assistant", timestamp: new Date(t).toISOString(), message: { id, usage: { input_tokens: 10 } } });
+    const { stats } = scanStatsWindow([at(now - 3 * 3600_000, "x"), at(now - 60_000, "y")], now - 4 * 3600_000, now - 3600_000);
+    expect(stats.today.tokens).toBe(20);
+    expect(stats.week.tokens).toBe(10);
+  });
+});

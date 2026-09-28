@@ -30,7 +30,7 @@ import type {
   WindowOps,
 } from "./types.js";
 
-function claudeProjectsRoot(home: string = homedir()): string {
+export function claudeProjectsRoot(home: string = homedir()): string {
   return join(home, ".claude", "projects");
 }
 
