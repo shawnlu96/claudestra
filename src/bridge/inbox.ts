@@ -83,7 +83,8 @@ async function readPaged(d: InboxDeps, channelId: string, readId: string, page: 
   const text = await entryText(d, it, now);
   const pages = Math.max(1, Math.ceil(text.length / PAGE_CHARS));
   const p = Math.min(Math.max(1, Math.floor(page)), pages);
-  const next = p < pages ? `下一页 check_inbox({ read: "${messageId}", page: ${p + 1} })；` : "";
+  // 翻页沿用传进来的 readId：旧格式 id 可能撞号，拿 thread_id 读的换成 message_id 会串到另一封
+  const next = p < pages ? `下一页 check_inbox({ read: "${readId}", page: ${p + 1} })；` : "";
   const head = `[📬 message_id=${messageId} 第 ${p}/${pages} 页。${next}读完处理后调 check_inbox({ ack: "${it.lease!.batchId}" }) 确认。]`;
   return { result: { n: 1, text: `${head}\n\n${text.slice((p - 1) * PAGE_CHARS, p * PAGE_CHARS)}` } };
 }

@@ -159,6 +159,25 @@ describe("takeInbox", () => {
     expect("result" in pa && pa.result.text).toContain('message_id=m-a 第 2/3 页');
   });
 
+  test("旧格式 id 撞号的两条长消息：拿 thread_id 读，翻页提示沿用 thread_id，第 2 页不串到另一封", async () => {
+    const dup = (t: string, ch: string) => {
+      const i = item(ch.repeat(30_000));
+      i.env.meta.messageId = "agent_1790591988218";
+      i.env.meta.threadId = t;
+      return i;
+    };
+    const { held } = setup([dup("thr-a", "a"), dup("thr-b", "b")]);
+    const p1 = await takeInbox(me, 1000, { read: "thr-b" });
+    expect("result" in p1 && p1.result.text).toContain('read: "thr-b", page: 2');
+    const p2 = await takeInbox(me, 1000, { read: "thr-b", page: 2 });
+    if ("error" in p2) throw new Error(p2.error);
+    expect(p2.result.text).toContain("bbbb");
+    expect(p2.result.text).not.toContain("aaaa");
+    const [a, b] = held.get("c-me")!;
+    expect(a.lease).toBeUndefined(); // 租约只打在读的那一封上
+    expect(b.lease).toBeDefined();
+  });
+
   test("旧格式 message_id（agent_<毫秒>，线上押后队列里已有的）：照常领取、分页读、ack 出队", async () => {
     const short = item("旧的短消息");
     short.env.meta.messageId = "agent_1790591988218";

@@ -1004,7 +1004,7 @@ async function handleInteraction(discord: Client, deps: InteractionDeps, interac
             intent: "notification",
             content: mgmtResult.text,
             meta: {
-              messageId: `mgmt_${Date.now()}`,
+              messageId: newMessageId("mgmt"),
               triggerKind: "bridge_synth",
               ts: new Date().toISOString(),
               threadId: newThreadId(),
@@ -1112,7 +1112,7 @@ async function handleInteraction(discord: Client, deps: InteractionDeps, interac
             intent: "notification",
             content: mgmtResult.text,
             meta: {
-              messageId: `mgmt_${Date.now()}`,
+              messageId: newMessageId("mgmt"),
               triggerKind: "bridge_synth",
               ts: new Date().toISOString(),
               threadId: newThreadId(),

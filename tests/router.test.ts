@@ -146,7 +146,7 @@ describe("newMessageId", () => {
     expect(newMessageId("held_gave-up").startsWith("held_gave-up_")).toBe(true);
   });
 
-  test("同一毫秒生成的也不撞（押后队列按它去重）", () => {
+  test("同一毫秒生成的也不撞（check_inbox 按它读）", () => {
     const now = spyOn(Date, "now").mockReturnValue(1_790_591_988_218);
     try {
       const ids = new Set(Array.from({ length: 1000 }, () => newMessageId("agent")));
