@@ -71,7 +71,7 @@ export function Composer() {
     }
   };
   useEffect(() => () => void (textRafRef.current != null && cancelAnimationFrame(textRafRef.current)), []);
-  useComposerBus(text, setText); // 多选表单勾选 = 输入框里的同步行（form-sync）
+  const flushFormEdits = useComposerBus(text, setText, composingRef); // 多选表单勾选 = 输入框里的同步行（form-sync）
   const active = useChatStore((s) => s.state.activeAgent);
   const streaming = useChatStore((s) => s.state.streaming);
   // v2.15+ 思考遥测:耗时 + ↓token 跳动(token 在涨 = 模型活着,消除「卡住」错觉)
@@ -635,11 +635,10 @@ export function Composer() {
           )}
           <textarea
             ref={taRef}
-            onCompositionStart={() => {
-              composingRef.current = true;
-            }}
+            onCompositionStart={() => void (composingRef.current = true)}
             onCompositionEnd={() => {
               composingRef.current = false;
+              requestAnimationFrame(flushFormEdits); // 组合期勾的表单：等收尾的 input 把 DOM 值落进 textRef 再补做
             }}
             onFocus={() => setTaFocused(true)}
             onBlur={() => setTaFocused(false)}

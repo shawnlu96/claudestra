@@ -4,8 +4,8 @@
  * （每个 tool_use / 每段 text 各一条），1:1 映射成气泡刷新后就「稀碎」；实时链路不碎是因为 ensureLiveAssistant 把整回合并进一个气泡。
  * 这里让历史对齐实时：连续 assistant 记录累积进一个气泡，遇到 user / system / compact 边界断开。
  */
-import { matchClickedRow, replyRowKey } from "./reply-clicks";
-import { formTitles, wireToDisplay, type MultiRow } from "./form-compose";
+import { matchClickedRow } from "./reply-clicks";
+import { FormLookup } from "./form-restore";
 import { parseInlineButtons, plainLabel } from "./inline-buttons";
 import type { ChatMessage, ToolCallView, AssistantSegment, ChatAttachmentView } from "@/features/chat/type";
 import type { WebComponentRow } from "./events";
@@ -93,41 +93,6 @@ function resolveClick(text: string, anchor: ChatMessage | null, forms: FormLooku
   return `🔘 ${btnMatch ? btnMatch[1] : selMatch![2]}`; // 组件气泡不在本页时兜底 id
 }
 
-/** 历史里带组件的 assistant 气泡（按出现顺序），给选单回投按 id 找所属消息 */
-class FormLookup {
-  private anchors: ChatMessage[] = [];
-  add(g: ChatMessage) {
-    if (g.replyComponents?.length && this.anchors[this.anchors.length - 1] !== g) this.anchors.push(g);
-  }
-  /** 含该 id 的最近一条，优先还没作答的（同一 id 被多条消息复用时对应最新未答的那条） */
-  find(id: string): ChatMessage | null {
-    const has = (g: ChatMessage) => g.replyComponents!.findIndex((r) => r.type !== "buttons" && r.id === id);
-    let fallback: ChatMessage | null = null;
-    for (let i = this.anchors.length - 1; i >= 0; i--) {
-      const g = this.anchors[i];
-      const ri = has(g);
-      if (ri < 0) continue;
-      if (!g.replyClicks?.[replyRowKey(g.replyComponents![ri], ri)]) return g;
-      fallback ??= g;
-    }
-    return fallback;
-  }
-  /** 输入框同步发出的多行消息：select 行还原成「【标题】✓ …」并回填已答（见 form-compose） */
-  display(text: string): string | null {
-    if (!text.includes("\n")) return null;
-    const rows = this.anchors.flatMap((g) => g.replyComponents!.filter((r): r is MultiRow => r.type === "multiselect"));
-    const titles = formTitles(rows);
-    return wireToDisplay(text, (id, values) => {
-      const g = this.find(id);
-      const ri = g?.replyComponents!.findIndex((r) => r.type === "multiselect" && r.id === id) ?? -1;
-      if (!g || ri < 0) return null;
-      const row = g.replyComponents![ri] as MultiRow;
-      (g.replyClicks ??= {})[replyRowKey(row, ri)] = `${id}:${values.join(",")}`;
-      return { row, title: titles.get(id) ?? id };
-    });
-  }
-}
-
 function userMessage(m: NeutralMessage, anchor: ChatMessage | null, opts: ShapeOpts, forms: FormLookup): ChatMessage {
   const text = m.text || "";
   // CC 写入的中断标记 / TUI 斜杠命令记录不是用户打的字 → 轻分隔线
@@ -135,7 +100,8 @@ function userMessage(m: NeutralMessage, anchor: ChatMessage | null, opts: ShapeO
   const cmd = text.match(/^<command-name>(\/[\w-]+)<\/command-name>/);
   if (cmd) return systemDivider(m, cmd[1], opts.sid);
   const from = isSelfSource(m.from, m.fromId, opts.selfIds ?? new Set()) ? undefined : m.from; // 本人的所有来源都不标
-  let raw = resolveClick(text, anchor, forms) ?? forms.display(text) ?? text;
+  // 多选表单的回投（点「提交」或输入框同步行发出）统一还原成「【标题】✓ …」，与发送时的气泡一致
+  let raw = forms.restore(text) ?? resolveClick(text, anchor, forms) ?? text;
   // 外源入站剥掉 bridge 注入的来源头（[🤝 来自 peer…] 多行方括号块）——UI 用来源 chip 展示，留着就是双份说明
   if (from) raw = raw.replace(/^\[[^\]]{0,800}\]\s*\n*/, "");
   const { content, attachments } = extractAttachments(raw);

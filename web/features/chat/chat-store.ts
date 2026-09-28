@@ -28,6 +28,7 @@ import { ReloadScroll, reloadKindFor, type ReloadKind } from "./reload-scroll";
 import type { WebStreamEvent, WebComponentRow, BgMeta, BgProgress, BgEndStatus } from "@/lib/chat/events";
 import { getLang, t as tr } from "@/lib/i18n";
 import { postClientLog } from "@/lib/client-log";
+import { restoreFormReply } from "@/lib/chat/form-restore";
 import { ApiError, DeviceInvalidError } from "@/lib/api/client";
 import { agentExtraSig, loadAgents as apiLoadAgents, MASTER_AGENT_NAME } from "@/lib/chat/agents";
 import { createAgent as apiCreateAgent, lifecycleAction as apiLifecycle } from "@/lib/api/agents";
@@ -1540,7 +1541,7 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
       s.messages.push({
         id: `ru_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
         role: "user",
-        content: text,
+        content: restoreFormReply(text, s.messages) ?? text, // 他端发的表单回投：显示可读行 + 标已答
         ts: new Date().toISOString(),
         ...(from ? { from } : {}),
         ...(attachments?.length ? { attachments } : {}),

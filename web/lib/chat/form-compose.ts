@@ -1,52 +1,68 @@
 /**
- * 多选表单 ↔ 输入框文字（T10，owner 2026-09-28「每勾一个，就同步到我的聊天框里」）。
- *
- * 输入框里每个表单占一行：`【<标题>】✓ <label>；✓ <label>`，标题 = placeholder（没有就用
- * id，同一视图 placeholder 重名时 `placeholder · id`）。**输入框文字是唯一事实来源**：
- * 勾选框的状态每次都从这一行解析出来，不另存——owner 手改了这一行，勾选就跟着变，不会
- * 出现「框里写的和勾的不一样」。发送时这一行原位换成 `[select:<id>:<v1>,<v2>]`，与点
- * 「提交」的回投一致，老 agent 不用改。纯函数，单测见 tests/web-form-compose.test.ts。
+ * 多选表单 ↔ 输入框同步行 `【标题】✓ label；✓ label`。输入框文字是唯一事实来源：勾选框显示、
+ * 勾 / 取消、发送转换都经 lineOwners 这一条规则认行，三处不会对不上。发送时同步行换成
+ * `[select:<id>:<v1>,<v2>]`，与点「提交」一致。agent 给的 label / placeholder 先单行化，
+ * 选项不合格（空、重名、带 ✓、value 会破坏 wire）的表单整组不同步——否则能伪造出别的表单的回投。
+ * 单测：tests/web-form-compose.test.ts。
  */
 import type { WebComponentRow } from "./events";
 
 export type MultiRow = Extract<WebComponentRow, { type: "multiselect" }>;
 
-/** 一个可同步的表单：messageId/rowKey 定位到消息里的行（标已答用） */
-export interface OpenForm {
-  messageId: string;
-  rowKey: string;
+/** 参与同步的表单：messageId/rowKey 定位到消息里的行（发送后标已答用） */
+export interface SyncForm {
   row: MultiRow;
+  title: string;
+  messageId?: string;
+  rowKey?: string;
 }
 
-/** 每个表单 id 的显示标题。placeholder 在不同 id 之间重名时加 id 区分。 */
+/** 换行、控制字符、连续空白压成一个空格再 trim——agent 给的文字进输入框前一律过这里 */
+export function oneLine(s: string | undefined): string {
+  return (s ?? "").replace(/[\u0000-\u001f\u007f\u2028\u2029\s]+/g, " ").trim();
+}
+
+const BAD_VALUE = /[\u0000-\u001f\u007f\u2028\u2029,\]]/;
+
+/** 能否同步进输入框：id 合法；label 单行化后非空、不重名、不含 ✓；value 非空、不重复、不含破坏 wire 的字符 */
+export function syncable(row: MultiRow): boolean {
+  if (!/^[\w-]+$/.test(row.id) || row.options.length === 0) return false;
+  const labels = row.options.map((o) => oneLine(o.label));
+  const values = row.options.map((o) => o.value);
+  return (
+    labels.every((l) => l && !l.includes("✓")) &&
+    new Set(labels).size === labels.length &&
+    values.every((v) => v && !BAD_VALUE.test(v)) &&
+    new Set(values).size === values.length
+  );
+}
+
+/** 每个表单 id 的显示标题：placeholder（单行化）；不同表单 placeholder 重名时 `placeholder · id`；没有 placeholder 用 id */
 export function formTitles(rows: MultiRow[]): Map<string, string> {
   const idsByPh = new Map<string, Set<string>>();
   for (const r of rows) {
-    const ph = r.placeholder?.trim();
+    const ph = oneLine(r.placeholder);
     if (ph) idsByPh.set(ph, (idsByPh.get(ph) ?? new Set()).add(r.id));
   }
   const out = new Map<string, string>();
   for (const r of rows) {
-    if (out.has(r.id)) continue;
-    const ph = r.placeholder?.trim();
-    if (!ph) out.set(r.id, r.id);
-    else out.set(r.id, (idsByPh.get(ph)?.size ?? 0) > 1 ? `${ph} · ${r.id}` : ph);
+    const ph = oneLine(r.placeholder);
+    if (!out.has(r.id)) out.set(r.id, !ph ? r.id : (idsByPh.get(ph)?.size ?? 0) > 1 ? `${ph} · ${r.id}` : ph);
   }
   return out;
 }
 
-/** 行首锚点可以写成的几种样子（显示标题 / placeholder / id / placeholder · id），长的先试 */
+/** 行首锚点的合法写法：标题 / id / `placeholder · id`。裸 placeholder 只有在它就是标题（视图里唯一）时才认 */
 function anchorsOf(row: MultiRow, title: string): string[] {
-  const ph = row.placeholder?.trim();
-  const all = [title, row.id, ...(ph ? [ph, `${ph} · ${row.id}`] : [])];
-  return [...new Set(all)].sort((a, b) => b.length - a.length);
+  const ph = oneLine(row.placeholder);
+  return [...new Set([title, row.id, ...(ph ? [`${ph} · ${row.id}`] : [])])].sort((a, b) => b.length - a.length);
 }
 
 export function renderFormLine(row: MultiRow, title: string, values: string[]): string {
   const items = values
-    .map((v) => row.options.find((o) => o.value === v)?.label)
-    .filter((l): l is string => !!l)
-    .map((l) => `✓ ${l}`);
+    .map((v) => row.options.find((o) => o.value === v))
+    .filter((o): o is MultiRow["options"][number] => !!o)
+    .map((o) => `✓ ${oneLine(o.label)}`);
   return items.length ? `【${title}】${items.join("；")}` : "";
 }
 
@@ -58,21 +74,20 @@ export interface ParsedLine {
 }
 
 /**
- * 解析一行是否是该表单的同步行。锚点按整段前缀匹配（不找第一个 `】`，placeholder 里带
- * `】` 也不切错）；选项按 label 最长匹配（label 里带 `；` 也不歧义），label 后面必须是
- * 行尾、`；` 或空白，免得 `A` 吃掉 `AB` 的前缀。
+ * 解析一行是否是该表单的同步行。锚点按整段前缀匹配（placeholder 里带 `】` 也不切错）；选项按
+ * label 最长匹配，label 后面必须是行尾、`；` 或空白，免得 `A` 吃掉 `AB` 的前缀。
  */
 export function parseFormLine(line: string, row: MultiRow, title: string): ParsedLine | null {
   const anchor = anchorsOf(row, title).find((a) => line.startsWith(`【${a}】`));
   if (anchor == null) return null;
-  const labels = [...row.options].sort((a, b) => b.label.length - a.label.length);
+  const opts = row.options.map((o) => ({ value: o.value, label: oneLine(o.label) })).sort((a, b) => b.label.length - a.label.length);
   const values: string[] = [];
   let s = line.slice(anchor.length + 2);
   for (;;) {
     const m = /^\s*✓\s*/.exec(s);
     if (!m) break;
     const tail = s.slice(m[0].length);
-    const hit = labels.find((o) => tail.startsWith(o.label) && /^(?:$|[；;\s])/.test(tail.slice(o.label.length)));
+    const hit = opts.find((o) => tail.startsWith(o.label) && /^(?:$|[；;\s])/.test(tail.slice(o.label.length)));
     if (!hit) break;
     if (!values.includes(hit.value)) values.push(hit.value);
     s = tail.slice(hit.label.length).replace(/^\s*[；;]/, "");
@@ -80,24 +95,46 @@ export function parseFormLine(line: string, row: MultiRow, title: string): Parse
   return { values, rest: s.trim() };
 }
 
-function findLine(lines: string[], row: MultiRow, title: string): { index: number; parsed: ParsedLine } | null {
-  for (let i = 0; i < lines.length; i++) {
-    const parsed = parseFormLine(lines[i], row, title);
-    if (parsed) return { index: i, parsed };
-  }
-  return null;
+export interface LineOwner {
+  index: number;
+  parsed: ParsedLine;
+  /** 勾的项超过 max：不转 wire，按普通文字发 */
+  over: boolean;
 }
 
-/** 输入框文字里该表单当前勾了哪些（勾选框的显示状态就是它） */
-export function pickedFromText(text: string, row: MultiRow, title: string): string[] {
-  return findLine(text.split("\n"), row, title)?.parsed.values ?? [];
+/**
+ * 认行规则（勾选显示、勾 / 取消、发送共用）：代码块里的行不算；一行只有恰好一个可同步表单能从中
+ * 解析出 ≥1 个选项才归它（两个以上 = 歧义，按普通文字）；同一表单只认第一行。forms 按 id 去重，先到先得。
+ */
+export function lineOwners(text: string, forms: SyncForm[]): Map<string, LineOwner> {
+  const uniq: SyncForm[] = [];
+  for (const f of forms) if (syncable(f.row) && !uniq.some((u) => u.row.id === f.row.id)) uniq.push(f);
+  const out = new Map<string, LineOwner>();
+  let fenced = false;
+  text.split("\n").forEach((line, index) => {
+    if (/^\s*```/.test(line)) fenced = !fenced;
+    if (fenced || /^\s*```/.test(line)) return;
+    const hits = uniq.flatMap((f) => {
+      const parsed = parseFormLine(line, f.row, f.title);
+      return parsed && parsed.values.length > 0 ? [{ f, parsed }] : [];
+    });
+    if (hits.length !== 1 || out.has(hits[0].f.row.id)) return;
+    const { f, parsed } = hits[0];
+    out.set(f.row.id, { index, parsed, over: parsed.values.length > (Number(f.row.max) || f.row.options.length) });
+  });
+  return out;
 }
 
-/** 用新的选中集合就地改写该表单那一行；没有这一行就在末尾另起一行追加，空集合删行 */
-export function setFormValues(text: string, row: MultiRow, title: string, values: string[]): string {
+/** 输入框里该表单当前勾了哪些（勾选框的显示状态就是它） */
+export function pickedFromText(text: string, form: SyncForm, forms: SyncForm[]): LineOwner | null {
+  return lineOwners(text, forms).get(form.row.id) ?? null;
+}
+
+/** 用新的选中集合就地改写该表单那一行；没有就在末尾另起一行追加；空集合删行（行尾补充留下） */
+export function setFormValues(text: string, form: SyncForm, forms: SyncForm[], values: string[]): string {
   const lines = text.split("\n");
-  const found = findLine(lines, row, title);
-  const body = renderFormLine(row, title, values);
+  const found = lineOwners(text, forms).get(form.row.id);
+  const body = renderFormLine(form.row, form.title, values);
   if (found) {
     const next = [body, found.parsed.rest].filter(Boolean).join(" ");
     if (next) lines[found.index] = next;
@@ -111,13 +148,13 @@ export function setFormValues(text: string, row: MultiRow, title: string, values
   return `${text}${text.endsWith("\n") ? "" : "\n"}${body}\n`;
 }
 
-/** 勾 / 取消一项；超过 max 的勾选不生效（与提交按钮的约束一致） */
-export function toggleFormValue(text: string, row: MultiRow, title: string, value: string): string {
-  const cur = pickedFromText(text, row, title);
-  const max = Number(row.max) || row.options.length;
-  if (cur.includes(value)) return setFormValues(text, row, title, cur.filter((v) => v !== value));
+/** 勾 / 取消一项；已到 max 时再勾不生效（与提交按钮的约束一致） */
+export function toggleFormValue(text: string, form: SyncForm, forms: SyncForm[], value: string): string {
+  const cur = pickedFromText(text, form, forms)?.parsed.values ?? [];
+  const max = Number(form.row.max) || form.row.options.length;
+  if (cur.includes(value)) return setFormValues(text, form, forms, cur.filter((v) => v !== value));
   if (cur.length >= max) return text;
-  return setFormValues(text, row, title, [...cur, value]);
+  return setFormValues(text, form, forms, [...cur, value]);
 }
 
 export interface ComposedSend {
@@ -127,49 +164,47 @@ export interface ComposedSend {
   answered: { messageId: string; rowKey: string; choiceValue: string }[];
 }
 
-/**
- * 发送前转换。forms = 仍可作答的表单，**新的在前**：同一 id 出现在多条消息里时对应最新
- * 一条未作答的。一行只转一次、一个表单只认第一行；没勾任何项的行、已作答 / 不在视图里的
- * 表单的行都按普通文字发（映射不回 value 就不能冒充结构化选择）。
- */
-export function composeFormSend(text: string, forms: OpenForm[], titles: Map<string, string>): ComposedSend {
+/** 发送前转换。forms = 仍可作答的表单，新的在前（同一 id 复用时对应最新一条）；超过 max 的行按普通文字发 */
+export function composeFormSend(text: string, forms: SyncForm[]): ComposedSend {
+  const lines = text.split("\n");
   const answered: ComposedSend["answered"] = [];
-  const used = new Set<string>(); // 已转过的表单 id
-  const lines = text.split("\n").map((line) => {
-    for (const f of forms) {
-      if (used.has(f.row.id)) continue;
-      const p = parseFormLine(line, f.row, titles.get(f.row.id) ?? f.row.id);
-      if (!p || p.values.length === 0) continue;
-      used.add(f.row.id);
-      const v = p.values.join(",");
-      answered.push({ messageId: f.messageId, rowKey: f.rowKey, choiceValue: `${f.row.id}:${v}` });
-      return p.rest ? `[select:${f.row.id}:${v}]\n${p.rest}` : `[select:${f.row.id}:${v}]`;
-    }
-    return line;
-  });
+  for (const [id, o] of lineOwners(text, forms)) {
+    const f = forms.find((x) => x.row.id === id)!;
+    if (o.over || !f.messageId || !f.rowKey) continue;
+    const v = o.parsed.values.join(",");
+    answered.push({ messageId: f.messageId, rowKey: f.rowKey, choiceValue: `${id}:${v}` });
+    lines[o.index] = o.parsed.rest ? `[select:${id}:${v}]\n${o.parsed.rest}` : `[select:${id}:${v}]`;
+  }
   return { wire: lines.join("\n").trim(), answered };
 }
 
 const SELECT_LINE = /^\[select:([\w-]+):(.+)\]$/;
 
+export interface ResolvedForm {
+  row: MultiRow;
+  title: string;
+  /** 确认能还原成可读行之后才调：回填已答 */
+  commit: (values: string[]) => void;
+}
+
 /**
- * 历史还原（composeFormSend 的反向）：多行消息里的 `[select:id:v]` 行还原成同步行的可读
- * 写法。resolve 返回该 id 所属的行与标题（找不到 = 原样保留）。没有任何 select 行 → null。
+ * composeFormSend 的反向（历史 / 他端实时）：`[select:id:v]` 行还原成同步行的写法。值必须全都
+ * 对得上选项才还原并回填已答——讨论里随手写的 `[select:x:bogus]`、代码块里的行原样保留。
+ * 没有任何行被还原 → null。
  */
-export function wireToDisplay(
-  text: string,
-  resolve: (id: string, values: string[]) => { row: MultiRow; title: string } | null,
-): string | null {
+export function wireToDisplay(text: string, resolve: (id: string) => ResolvedForm | null): string | null {
   let hit = false;
+  let fenced = false;
   const lines = text.split("\n").map((line) => {
-    const m = SELECT_LINE.exec(line.trim());
+    if (/^\s*```/.test(line)) fenced = !fenced;
+    const m = fenced ? null : SELECT_LINE.exec(line.trim());
     if (!m) return line;
     const values = m[2].split(",").map((v) => v.trim()).filter(Boolean);
-    const r = resolve(m[1], values);
-    const body = r ? renderFormLine(r.row, r.title, values) : "";
-    if (!body) return line;
+    const r = resolve(m[1]);
+    if (!r || !values.length || !values.every((v) => r.row.options.some((o) => o.value === v))) return line;
+    r.commit(values);
     hit = true;
-    return body;
+    return renderFormLine(r.row, r.title, values);
   });
   return hit ? lines.join("\n") : null;
 }
