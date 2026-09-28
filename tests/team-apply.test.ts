@@ -87,7 +87,7 @@ describe("ledger team-apply", () => {
     expect(getMeta(db, P).pms).toEqual(["agent-pm", "agent-exec"]);
     expect((await readProposals(path))[p.id]?.status).toBe("applied");
     const count = listEvents(db).length;
-    expect(await run("owner", NOW + 3, "team-apply", p.id)).toMatchObject({ ok: false, code: "forbidden", error: expect.stringContaining("applied") });
+    expect(await run("owner", NOW + 3, "team-apply", p.id)).toMatchObject({ ok: false, code: "forbidden", error: expect.stringContaining("已经写进台账了") });
     expect(listEvents(db)).toHaveLength(count);
     expect(listEvents(db).filter((e) => e.kind === "decision")).toEqual([expect.objectContaining({ actor: "owner", data: { transcribed: true, proposal: p.id } })]);
   });
@@ -103,11 +103,12 @@ describe("ledger team-apply", () => {
     expect(getMeta(db, P)).toMatchObject({ pms: ["agent-pm"], team: null });
   });
 
-  test("拒绝：agent 身份、没经确认（pending）、确认后被改、过期后才确认、确认超过 10 分钟", async () => {
+  test("拒绝：agent 身份、没经确认（pending）、已经写过（applied）、确认后被改、过期后才确认、确认超过 10 分钟", async () => {
     const p = newProposal(draft(["agent-evil"]), NOW, "33333333");
     const cases: [TeamProposal, string, string][] = [
       [confirmed(p), "agent-pm", "只在 owner 点确认后"],
       [p, "owner", "没有经 owner 确认"],
+      [{ ...confirmed(p), status: "applied" }, "owner", "已经写进台账了"],
       [{ ...confirmed(p), pms: ["agent-pm", "agent-evil"] }, "owner", "被改过"],
       [confirmed(p, p.expiresAt + 1), "owner", "过期后才确认"],
     ];

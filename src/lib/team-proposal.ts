@@ -85,6 +85,7 @@ const APPLY_WINDOW_MS = 10 * 60_000;
 /** `ledger team-apply` 的核对：必须是 bridge 标过的 confirmed、内容没被改过、确认发生在过期之前、还在执行窗口内；null = 可以写 */
 export function applyRefusal(p: TeamProposal | undefined, now: number): string | null {
   if (!p) return "提案不存在";
+  if (p.status === "applied") return "提案已经写进台账了，不用再跑；要改请重新提议";
   if (p.status !== "confirmed" || typeof p.confirmedAt !== "number") return `提案状态是 ${p.status}，没有经 owner 确认，不能写台账`;
   if (proposalHash(p) !== p.hash) return "提案内容在确认后被改过，作废";
   if (p.confirmedAt > p.expiresAt) return "提案是过期后才确认的，作废";
