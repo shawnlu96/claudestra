@@ -452,14 +452,16 @@ function nudgeAmbiguousCallers(cid: string): void {
 
 /** target 的答复推回 caller。caller 的 ws 按 channelId 现取(回程簿落盘不存 ws,caller 重连 / bridge 重启后旧连接已失效);
  *  caller 此刻不在线就进押后队列,它连上后的每分钟扫描会投。fromChannel = 推回的 meta.chat_id(见 originalReplyChannel)。 */
-async function pushBackToCaller(pac: PendingAgentCall, fromWs: ServerWebSocket<unknown> | undefined, fromChannel: string, content: string, idPrefix: string) {
+async function pushBackToCaller(
+  pac: PendingAgentCall, fromWs: ServerWebSocket<unknown> | undefined, fromChannel: string, content: string, idPrefix: string, intent: "response" | "notification" = "response",
+) {
   const live = clients.get(pac.callerChannelId);
   // 不在线时没有可用的 ws:押后队列落盘本来就剥掉 ws、投递时换最新连接,这里同样留空
   const callerWs = live?.ws as ServerWebSocket<unknown>;
   const env: RouterEnvelope = {
     from: { kind: "local", agentName: pac.targetName, channelId: fromChannel, ws: fromWs ?? callerWs },
     to: { kind: "local", agentName: pac.callerName, channelId: pac.callerChannelId, ws: callerWs, cwd: live?.cwd },
-    intent: "response",
+    intent,
     content,
     meta: { messageId: newMessageId(idPrefix), triggerKind: "agent_tool", ts: new Date().toISOString(), threadId: newThreadId() },
   };
@@ -472,6 +474,8 @@ async function pushBackToCaller(pac: PendingAgentCall, fromWs: ServerWebSocket<u
 const stopSettleDeps: import("./bridge/stop-settle.js").CallerSettleDeps = {
   answerable: answerablePac, consume: (cid, pac) => void pendingAgentCalls.consume(cid, pac.callerChannelId, pac), nudgeAmbiguous: nudgeAmbiguousCallers,
   pushBack: (pac, cid, body) => pushBackToCaller(pac, clients.get(cid)?.ws, pac.originalReplyChannel || cid, body, "agent_drain"),
+  notify: (pac, cid, body) => pushBackToCaller(pac, clients.get(cid)?.ws, pac.originalReplyChannel || cid, body, "agent_apierr", "notification"),
+  takeApiErrorNotice: (cid) => pendingAgentCalls.takeApiErrorNotice(cid, stillHeldFor(cid)),
   metric: (name, channelId, meta) => recordMetric(name, { channelId, meta }),
 };
 
@@ -546,7 +550,7 @@ import { flushHeld } from "./bridge/held-flush.js";
 import { probeTurn } from "./bridge/turn-probe.js";
 import { agentMsgMustWait } from "./lib/turn-state.js";
 import { AgentCallBook, ambiguityNotice, withExpecting, type PendingAgentCall } from "./bridge/agent-calls.js";
-import { settleStopTurn } from "./bridge/stop-settle.js";
+import { awaitsResume, settleStopTurn, takeApiWaiters } from "./bridge/stop-settle.js";
 import { startCodexTurnFailureWatch } from "./bridge/codex-turn-failure.js";
 // v2.6.0+ C1：出站按 transport 分发（设计 §6）
 import { registerAdapter, adapterFor } from "./bridge/adapters.js";
@@ -1436,7 +1440,7 @@ discord.on("messageCreate", async (msg: DiscordMessage) => {
     // v2.4.16+ 用户发消息 = 显式接管这个 channel 的对话方向。把该 channel 上挂着
     // 的所有 inter-agent pending 一并清掉，否则它们会在下一轮 Stop hook 触发
     // drain兜底 / nudge，把用户刚说的 "停下来" 拽回 agent-to-agent 链里去。
-    const cleared = clearInterAgentPendingsForChannel(channelId);
+    const cleared = awaitsResume(channelId, answerablePac(channelId)) ? 0 : clearInterAgentPendingsForChannel(channelId); // 撞错等续跑的不算接管（stop-settle.ts）
     if (cleared > 0) {
       console.log(`🧹 user 消息到达 → 清掉 ${cleared} 条 inter-agent pending (channel=${channelId})`);
     }
@@ -2863,34 +2867,22 @@ async function handleHookRequest(req: Request): Promise<Response> {
             const drainedText = drainResult.text;
             // 下面三个消费点（回程簿、API 请求、看门狗）都在回答「cid 欠谁一个回应」：只有 cid 自己正常结束的一轮才结算，
             // 别人的频道、以 API 错误结束的一轮（那句错误不是答复，回程留着等真实答复）都不动（bridge/stop-settle.ts）
-            const ownTurn = await settleStopTurn(stopSettleDeps, {
+            const turn = {
               cid, stopChannelId: channelId, stopWs: thisClientForStatus?.ws, candidateWs: clients.get(cid)?.ws, event, runtime: clients.get(cid)?.runtime, drain: drainResult,
               humanTurn: ["user", "api"].includes(lastMessageSource.get(cid) ?? ""),
-            });
-
-            // v2.6.0+ R3: API waiter 兜底 —— agent end_turn 没 reply() 时，用
-            // drain 出的 assistant 文本 resolve 挂着的 API 请求，wait 调用方不必
-            // 干等到超时。连文本都没有 → resolve reply:null（"结束但没回复"）。
-            for (const [pKey, pQueue] of ownTurn ? pendingApiRequests.entries() : []) {
-              if (!pQueue.length || pQueue[0].agentChannelId !== cid) continue;
-              pendingApiRequests.delete(pKey);
-              for (const p of pQueue) {
-                const result: ApiReplyResult = {
-                  reply: drainedText || null,
-                  threadId: p.threadId,
-                  agent: p.agentName,
-                  viaFallback: true,
-                };
-                apiThreadResults.set(p.threadId, { result, ts: Date.now(), tokenId: p.tokenId });
-                p.resolve?.(result);
-                emitEvent({
-                  agent: p.agentName,
-                  chatId: `api:${p.tokenId}`,
-                  type: "chat_message",
-                  data: { direction: "out", from: p.agentName, text: drainedText || "", threadId: p.threadId, api: true, viaFallback: true },
-                });
-                console.log(`🌐 API waiter drain 兜底: ${p.agentName} → token ${p.tokenId}（${drainedText ? drainedText.length + " chars" : "no-text"}）`);
-              }
+            };
+            const ownTurn = await settleStopTurn(stopSettleDeps, turn);
+            // v2.6.0+ R3: API waiter 兜底——agent end_turn 没 reply() 时这一轮就结掉挂着的 API 请求，wait 调用方不必干等到超时
+            for (const { waiter: p, result } of takeApiWaiters(pendingApiRequests, turn, ownTurn)) {
+              apiThreadResults.set(p.threadId, { result, ts: Date.now(), tokenId: p.tokenId });
+              p.resolve?.(result);
+              emitEvent({
+                agent: p.agentName,
+                chatId: `api:${p.tokenId}`,
+                type: "chat_message",
+                data: { direction: "out", from: p.agentName, text: result.reply || "", threadId: p.threadId, api: true, viaFallback: true, ...(result.apiError ? { apiError: true } : {}) },
+              });
+              console.log(`🌐 API waiter drain 兜底: ${p.agentName} → token ${p.tokenId}（${result.apiError ? `API 错误 ${result.error}` : result.reply ? result.reply.length + " chars" : "no-text"}）`);
             }
 
             // v2.0.16+ inter-agent 看门狗: 这一轮结束时如果 cid 还挂着 inter-agent

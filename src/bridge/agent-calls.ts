@@ -32,6 +32,8 @@ export interface PendingAgentCall {
   ts: number;
   /** 已经提醒过 target「好几个人在等你，分别回」的时刻（同一批只提醒一次） */
   ambiguityNotifiedAt?: number;
+  /** 已经告诉过 caller「它这轮以 API 错误结束、回程保留」的时刻（每槽一次，bridge/stop-settle.ts） */
+  apiErrorNotifiedAt?: number;
   /** 这一槽的各条请求（老数据没有：整槽当一条） */
   requests?: CallRequest[];
   /** requests 的 message_id（stale 扫描判「全都还押着」用，lib/held-pac.ts） */
@@ -86,7 +88,7 @@ export class AgentCallBook extends PersistedMap<PendingAgentCall> {
   add(target: string, call: PendingAgentCall, messageId?: string): void {
     const prev = this.slot(target, call.callerChannelId);
     const req: CallRequest = { messageId, expecting: call.expecting, originalReplyChannel: call.originalReplyChannel, ts: call.ts };
-    this.store(target, { ...(prev ?? call), ...call, ambiguityNotifiedAt: undefined }, [...requestsOf(prev), req]);
+    this.store(target, { ...(prev ?? call), ...call, ambiguityNotifiedAt: undefined, apiErrorNotifiedAt: undefined }, [...requestsOf(prev), req]);
   }
 
   slot(target: string, caller: string): PendingAgentCall | undefined {
@@ -158,6 +160,17 @@ export class AgentCallBook extends PersistedMap<PendingAgentCall> {
       if (raw) this.setQuiet(keyOf(target, c.callerChannelId), { ...raw, ambiguityNotifiedAt: now });
     }
     this.persist();
+    return w;
+  }
+
+  /** 在等 target、还没收到过 API 错误说明的槽：返回并记下已说明（落盘）。caller 再发一条请求会重新计（add） */
+  takeApiErrorNotice(target: string, stillHeld: StillHeld, now = Date.now()): PendingAgentCall[] {
+    const w = this.waiting(target, stillHeld).filter((c) => !c.apiErrorNotifiedAt);
+    for (const c of w) {
+      const raw = this.slot(target, c.callerChannelId);
+      if (raw) this.setQuiet(keyOf(target, c.callerChannelId), { ...raw, apiErrorNotifiedAt: now });
+    }
+    if (w.length) this.persist();
     return w;
   }
 

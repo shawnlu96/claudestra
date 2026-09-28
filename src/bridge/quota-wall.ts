@@ -10,7 +10,7 @@ import {
   type UsageSignal, type Wall, type WallExitVia, type WallState,
 } from "../lib/quota-wall.js";
 import { recoveredNotice, wallNotice, wallResumeText } from "../lib/quota-wall-notice.js";
-import { countLimitsResetEcho, matchLimitMenu, parseWallText } from "../lib/quota-wall-text.js";
+import { countLimitsResetEcho, matchLimitMenu, wallHitOf } from "../lib/quota-wall-text.js";
 import type { Envelope } from "./router.js";
 
 /** 一个 Claude Code 窗口（含 master） */
@@ -206,7 +206,7 @@ async function tickOnce(c: Ctx): Promise<void> {
  */
 async function noteApiErrorIn(c: Ctx, e: { channelId: string; agent: string; at: number; error: string; text: string }): Promise<boolean> {
   if (!(await c.d.isClaudeCode(e.channelId))) return false;
-  const parsed = e.error === "rate_limit" ? parseWallText(e.text, e.at) : null;
+  const parsed = wallHitOf(e.error, e.text, e.at);
   if (parsed) {
     const again = !!c.state.wall?.hits[e.channelId] && wallActive(c.state);
     const r = noteWallHit(c.state, { ...e, parsed }, c.d.newId);

@@ -5,12 +5,13 @@
  *   "You've hit your weekly limit · resets Sep 30 at 6am (Asia/Tokyo)" / "You've hit your session limit · resets 10:40pm (Asia/Tokyo)"
  *   "You've hit your limit · resets 2am (Asia/Shanghai)"；Codex 译过来的是 "You've hit your usage limit. … try again at 8:41 AM."
  * 同样 error=rate_limit 的还有 429「This request would exceed your account's rate limit」——那是临时限流、不带重置时间，
- * 不算撞墙（按普通 API 错误续跑）。只认句首：agent 自己的话里引用这句不能被当成撞墙。
+ * 不算撞墙（按普通 API 错误续跑）。调用方只拿 CC / Codex 合成的错误条目来问（jsonl-watcher 看 isApiErrorMessage / error），
+ * agent 自己的正文不问；这里再只认句首、limit 后面紧跟标点或行尾，「You've hit your API limit on GitHub」这类话也不算。
  */
-import { parseResetText } from "./usage-window.js";
+import { parseResetAt } from "./autopilot-run.js";
 
-/** 「hit」是额度窗口，「reached your Fable limit」是单个模型的额度（本机 48 条实录）；都只认句首 */
-const LIMIT_HIT_RE = /^(?:You['’]?ve (?:hit|reached) your (?:[\w-]+ ){0,2}limit|Hit your (?:rate |usage )?limit)/i;
+/** 「hit」是额度窗口，「reached your Fable limit」「Fable 5 limit」是单个模型的额度（本机实录 99 条） */
+const LIMIT_HIT_RE = /^(?:You['’]?ve (?:hit|reached) your (?:[\w.-]+ ){0,3}limit|Hit your (?:rate |usage )?limit)(?=\s*(?:[·.,;:!\n]|$))/i;
 
 export const isLimitHitText = (text: string): boolean => LIMIT_HIT_RE.test(text.trim());
 
@@ -27,6 +28,9 @@ export interface WallHit {
 /** 整个账号的额度窗口；别的词是单个模型的额度（「reached your Fable limit」「hit your Opus limit」），换模型就能接着用 */
 const ACCOUNT_WINDOWS = new Set(["weekly", "session", "usage"]);
 
+/** 一条 API 错误条目算不算撞墙（进闸的唯一判据，额度闸和 Stop 兜底共用）：error 是 rate_limit 且原文是账号级额度 */
+export const wallHitOf = (error: string, text: string, now: number): WallHit | null => (error === "rate_limit" ? parseWallText(text, now) : null);
+
 /** 撞墙原文 → 种类 + 重置时刻；不是撞墙原文、或只是单个模型的额度（不闸整台机器）返回 null */
 export function parseWallText(text: string, now: number): WallHit | null {
   const t = text.trim();
@@ -34,9 +38,10 @@ export function parseWallText(text: string, now: number): WallHit | null {
   const k = /(?:hit|reached) your ((?:[\w-]+ ){0,1}[\w-]+) limit/i.exec(t)?.[1]?.toLowerCase();
   if (k && !ACCOUNT_WINDOWS.has(k)) return null;
   const kind: WallKind = k === "weekly" ? "weekly" : k === "session" ? "session" : "unknown";
-  const rm = /\bresets\s+(.+?)\s*$/i.exec(t.split("\n")[0]);
-  const resetsText = rm ? rm[1].trim() : null;
-  return { kind, resetsAt: resetsText ? parseResetText(resetsText, now) : null, resetsText };
+  // CC「resets Fri 9am (Asia/Tokyo)」，Codex「try again at 8:41 AM」「try again in 3 hours」；解析与 Autopilot 同一份
+  const rm = /\b(?:resets|try again)\s+(.+?)\s*$/i.exec(t.split("\n")[0]);
+  const resetsText = rm ? rm[1].replace(/[.。]$/, "").trim() : null;
+  return { kind, resetsAt: resetsText ? parseResetAt(t, now) : null, resetsText };
 }
 
 /**

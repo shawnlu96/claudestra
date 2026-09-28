@@ -132,8 +132,8 @@ export interface ApiReplyResult {
   files?: { name: string; url: string }[];
   threadId: string;
   agent: string;
-  /** true = agent 没调 reply()，文本来自 Stop-hook drain 兜底（R3） */
-  viaFallback?: boolean;
+  /** true = agent 没调 reply()，文本来自 Stop-hook drain 兜底（R3）；apiError = 那一轮以 API 错误结束、reply 为 null，error = 错误类型 */
+  viaFallback?: boolean; apiError?: boolean; error?: string;
 }
 
 export const pendingApiRequests = new Map<string, PendingApiRequest[]>();

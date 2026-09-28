@@ -1,16 +1,16 @@
 /**
- * Stop hook 里 send_to_agent 回程的兜底结算（从 bridge.ts 搬出、依赖注入，单测 tests/stop-settle.test.ts）：
- * target 这一轮没调 reply() 就结束了，拿 drain 出来的 assistant 文字推回 caller（没文字就静默消化）。
+ * Stop hook 里的兜底结算（从 bridge.ts 搬出、依赖注入，单测 tests/stop-settle.test.ts）：target 这一轮没调 reply() 就结束了，
+ * send_to_agent 回程拿 drain 出来的 assistant 文字推回 caller（没文字就静默消化），挂着的 API 请求也在这一轮结掉。
  *
- * 以 API 错误结束的一轮（Claude Code 的 StopFailure，或最后一条 assistant 是 isApiErrorMessage——额度墙也是）不结算：那句错误不是答复。
+ * 以 API 错误结束的一轮（Claude Code 的 StopFailure，或最后一条 assistant 是 isApiErrorMessage——额度墙也是）不结算回程：
+ * 那句错误不是答复，回程留着等它接着做完的那一轮；不是撞墙的错误给 caller 推一条说明（每槽一次）。API 请求照常结掉、
+ * 回 reply:null + apiError（挂着等下一轮会把别的回合的文字当成答复发给那个 token）。
  * Codex 的 StopFailure 不是这个意思，照常结算：撞额度时是 codex-turn-failure 替它补的（⛔ 那句要推给 caller，
- * 它的额度条目不带 isApiErrorMessage），被打断时是 typing-hook 把 Interrupt 映射过来的（那一轮就该结掉，
- * 否则打断后 owner 另问的答复会推给旧 caller）。tests/stop-settle.test.ts。
- * 2026-09-28 撞额度时这里把「You've hit your weekly limit」当 t18/t13a 的答复推给了 PM，还消化了回程簿，
- * 它们之后的真实答复就没了路由。现在回程簿原样留着，等它的真实答复（reply / 下一个正常结束的 Stop）。
+ * 它的额度条目不带 isApiErrorMessage），被打断时是 typing-hook 把 Interrupt 映射过来的（那一轮就该结掉）。
  */
 import type { MetricEvent } from "../lib/metrics.js";
 import { isOwnStopChannel } from "../lib/pushback-scope.js";
+import { wallHitOf } from "../lib/quota-wall-text.js";
 import { DEFAULT_RUNTIME } from "../lib/runtimes/index.js";
 import { withExpecting, type PendingAgentCall } from "./agent-calls.js";
 
@@ -24,41 +24,102 @@ export interface StopTurn {
   event: string;
   /** cid 这个 agent 的 runtime（ClientInfo.runtime；master / 老连接没有 = Claude Code） */
   runtime?: string;
-  /** drainChannelWatcher 的结果：text 是兜底要转的文字，apiError = 最后一条 assistant 是 API 错误 */
-  drain: { text: string | null; apiError?: boolean };
+  /** drainChannelWatcher 的结果：text 是兜底要转的答复文字（不含错误原文），apiError / error = 最后一条 assistant 是 API 错误 */
+  drain: { text: string | null; apiError?: boolean; error?: { error: string; text: string } };
   /** 这一轮是人发的消息触发的（lastMessageSource 是 user / api） */
   humanTurn?: boolean;
 }
 
 /**
- * 以 API 错误结束、手上还有没答完的回程的频道：它欠 caller 的答复要等「接着做」的那一轮（出闸续跑 / 补投 / 60 秒续跑）。
- * 这期间人触发的回合（owner 用完卡顺手问了件别的事）答的是人，不拿去结算旧 caller（T24a 对抗审查 P2-2）。
+ * 以 API 错误结束、手上还有没答完的回程的频道 → 那几轮被扣下的答复文字（错误前它已经说了的，接着做完时一起推）。
+ * 它欠 caller 的答复要等「接着做」的那一轮（出闸续跑 / 补投 / 60 秒续跑）；这期间人触发的回合（owner 用完卡顺手问了
+ * 件别的事）答的是人，不拿去结算旧 caller。记下当时那几条请求：它们被 reply / send_to_agent 答掉了，这条就作废。
  * 进程内：bridge 重启丢了只是退回「下一个正常回合结算」的老行为。
  */
-const awaitingResume = new Set<string>();
+const awaitingResume = new Map<string, { requests: Set<string | undefined>; withheld: string[] }>();
+
+const reqIds = (pac: PendingAgentCall | undefined) => (pac?.requests ?? []).map((r) => r.messageId);
+
+/** cid 还欠着当时那几条请求的答复才算数；答掉了（或换成了新请求）就清掉 */
+function resumeOf(cid: string, pac: PendingAgentCall | undefined) {
+  const r = awaitingResume.get(cid);
+  if (r && reqIds(pac).some((id) => r.requests.has(id))) return r;
+  awaitingResume.delete(cid);
+  return undefined;
+}
 
 /**
- * 这一轮算不算 cid 自己「答完了」——只有算的才去结算回程簿、API 请求、看门狗。
+ * 这个频道以 API 错误结束、欠着 caller 的答复。owner 这时在 Discord 频道里打字（多半是「继续」或 /limit-reset）
+ * 不算接管：回程簿照留，不然它接着做完的答复就没了路由（T24a 常规审查 P2-3）。
+ */
+export const awaitsResume = (cid: string, pac: PendingAgentCall | undefined): boolean => !!resumeOf(cid, pac);
+
+const ranIntoApiError = (t: StopTurn): boolean =>
+  !!t.drain.apiError || (t.event === "StopFailure" && (t.runtime ?? DEFAULT_RUNTIME) === DEFAULT_RUNTIME);
+
+/**
+ * 这一轮算不算 cid 自己「答完了」——只有算的才去结算回程簿、看门狗。
  * 别人的频道不算（channelsToClear 里还有 pendingReplies 里别人的 intendedReplyChannel，拿别人的收尾结算就是张冠李戴）；
  * 以 API 错误结束的也不算（Codex 的 StopFailure 除外，见文件头）。
  */
 export function settlesOwnTurn(t: StopTurn): boolean {
-  if (t.drain.apiError) return false;
-  if (t.event === "StopFailure" && (t.runtime ?? DEFAULT_RUNTIME) === DEFAULT_RUNTIME) return false;
-  return isOwnStopChannel(t.cid, t.stopChannelId, t.stopWs, t.candidateWs);
+  return !ranIntoApiError(t) && isOwnStopChannel(t.cid, t.stopChannelId, t.stopWs, t.candidateWs);
 }
 
-/** bridge 的 Stop 处理每个频道调一次：判这一轮算不算 cid 答完、算就结算回程簿。返回判定，API 请求与看门狗照它走 */
+/** bridge 的 Stop 处理每个频道调一次：判这一轮算不算 cid 答完、算就结算回程簿。返回判定，看门狗照它走 */
 export async function settleStopTurn(d: CallerSettleDeps, t: StopTurn): Promise<boolean> {
   const own = settlesOwnTurn(t);
   if (!own) {
-    if (isOwnStopChannel(t.cid, t.stopChannelId, t.stopWs, t.candidateWs) && d.answerable(t.cid)) awaitingResume.add(t.cid);
+    if (isOwnStopChannel(t.cid, t.stopChannelId, t.stopWs, t.candidateWs)) await onApiErrorTurn(d, t);
     return false;
   }
-  if (awaitingResume.has(t.cid) && t.humanTurn) return own; // 答的是人：回程留着，API 请求 / 看门狗照常按「答完了」走
+  const r = resumeOf(t.cid, d.answerable(t.cid));
+  if (r && t.humanTurn) return own; // 答的是人：回程留着，看门狗照常按「答完了」走
   awaitingResume.delete(t.cid);
-  await settleCallers(d, t.cid, t.drain.text);
+  await settleCallers(d, t.cid, [...(r?.withheld ?? []), t.drain.text].filter(Boolean).join("\n\n") || null);
   return own;
+}
+
+/** 自己频道这一轮以 API 错误结束：回程留着（连同错误前已说的话），不是撞墙的给 caller 推一条说明 */
+async function onApiErrorTurn(d: CallerSettleDeps, t: StopTurn): Promise<void> {
+  const pac = d.answerable(t.cid);
+  if (pac) {
+    const prev = resumeOf(t.cid, pac);
+    awaitingResume.set(t.cid, { requests: new Set(reqIds(pac)), withheld: [...(prev?.withheld ?? []), ...(t.drain.text ? [t.drain.text] : [])] });
+  }
+  const err = t.drain.error;
+  // 撞墙的留给额度闸（整台机器押住、出闸续跑，caller 不用知道）；没读到错误条目（Stop 比 jsonl 先到）不猜
+  if (!err || ((t.runtime ?? DEFAULT_RUNTIME) === DEFAULT_RUNTIME && wallHitOf(err.error, err.text, Date.now()))) return;
+  const summary = err.text.split("\n")[0].trim().slice(0, 160) || err.error;
+  for (const pac of d.takeApiErrorNotice(t.cid)) {
+    const body = `[ℹ️ ${pac.targetName} 这轮以 API 错误结束：${summary}；回程保留，它恢复后的答复仍会推给你]`;
+    await d.notify(pac, t.cid, body).catch((e) => console.error(`API 错误说明推给 ${pac.callerName} 失败（回程照旧留着）:`, e));
+    console.log(`ℹ️ ${pac.targetName} 这轮以 API 错误结束 → 告诉 ${pac.callerName}（${summary.slice(0, 60)}）`);
+  }
+}
+
+/** 挂着的 API 请求（bridge 的 pendingApiRequests 条目；这里不 import api-routes，按形状收） */
+export interface ApiWaiter { agentChannelId: string; agentName: string; threadId: string; tokenId: string }
+export interface ApiWaiterResult { reply: string | null; threadId: string; agent: string; viaFallback: true; apiError?: boolean; error?: string }
+
+/**
+ * cid 这一轮收尾时结掉它名下的 API 请求（wait 调用方不必干等超时）：正常结束 → drain 文字（没有 = reply:null）；
+ * 以 API 错误结束 → reply:null + apiError、error = 错误类型。不能挂着等下一轮：之后随便哪一轮（比如 owner 在 Discord 上聊的）
+ * 都会被当成答复发给那个 token，重试的请求还会错位；Bun 对一个字节都没写的 HTTP 请求约 10 秒就掐断。返回结掉的请求。
+ */
+export function takeApiWaiters<W extends ApiWaiter>(queues: Map<string, W[]>, t: StopTurn, own: boolean): { waiter: W; result: ApiWaiterResult }[] {
+  const apiErr = !own && ranIntoApiError(t) && isOwnStopChannel(t.cid, t.stopChannelId, t.stopWs, t.candidateWs);
+  if (!own && !apiErr) return [];
+  const out: { waiter: W; result: ApiWaiterResult }[] = [];
+  for (const [key, queue] of [...queues.entries()]) {
+    if (!queue.length || queue[0].agentChannelId !== t.cid) continue;
+    queues.delete(key);
+    for (const w of queue) {
+      const base = { threadId: w.threadId, agent: w.agentName, viaFallback: true as const };
+      out.push({ waiter: w, result: apiErr ? { ...base, reply: null, apiError: true, error: t.drain.error?.error || t.event } : { ...base, reply: t.drain.text || null } });
+    }
+  }
+  return out;
 }
 
 export interface CallerSettleDeps {
@@ -68,6 +129,10 @@ export interface CallerSettleDeps {
   pushBack(pac: PendingAgentCall, cid: string, body: string): Promise<unknown>;
   /** 好几个 caller 在等、它又没指明答给谁：提醒它分别回 */
   nudgeAmbiguous(cid: string): void;
+  /** 在等 cid 的、还没为 API 错误说明过的槽，取出即记下（落盘，回程簿 takeApiErrorNotice） */
+  takeApiErrorNotice(cid: string): PendingAgentCall[];
+  /** 推给 caller 一条 intent=notification（不带 expecting、不当答复） */
+  notify(pac: PendingAgentCall, cid: string, body: string): Promise<unknown>;
   metric(name: MetricEvent, callerChannelId: string, meta: Record<string, string>): void;
 }
 

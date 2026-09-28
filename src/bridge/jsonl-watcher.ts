@@ -43,6 +43,8 @@ interface WatcherState {
   tools: ToolEntry[];
   toolMsgId: string | null;
   textQueue: string[];
+  /** 还没发出去的 textQueue 里算「答复」的文字（Stop 兜底转发用）：API 错误条目的文字不在里面 */
+  answerParts: string[];
   textTimer: ReturnType<typeof setTimeout> | null;
   agentName: string;
   /** v2.23+ 运行时：决定行怎么翻译（Pi 的行形状与 Claude Code 不同） */
@@ -53,8 +55,8 @@ interface WatcherState {
   pollInterval: ReturnType<typeof setInterval> | null;
   /** 本轮命中额度墙（"You've hit your … limit"）：下一条 turn_duration 是被拒的等待时长，不显示；读到它时复位 */
   rateLimited: boolean;
-  /** 最后一条 assistant 条目是 API 错误（额度 / 网络…）：Stop 时 drain 兜底据此不把错误文字当答复（bridge.ts） */
-  apiErrorTurn?: boolean;
+  /** 最后一条 assistant 条目是 API 错误（额度 / 网络…）：error 字段 + 原文；Stop 时 drain 兜底据此不把错误文字当答复（bridge/stop-settle.ts） */
+  apiErrorTurn?: { error: string; text: string } | false;
 }
 
 const watchers = new Map<string, WatcherState>();
@@ -208,8 +210,9 @@ async function syncToolMsg(state: WatcherState, discord: Client) {
  *  上限自动分段，再加 trackSentMessage 跟原逻辑一致。 */
 async function flushText(state: WatcherState, discord: Client) {
   if (state.textQueue.length === 0) return;
-  if (isLocalChannel(state.channelId)) { state.textQueue.length = 0; return; }
+  if (isLocalChannel(state.channelId)) { state.textQueue.length = state.answerParts.length = 0; return; }
   const items = state.textQueue.splice(0);
+  state.answerParts.length = 0;
   const body = items.map((item) => `-# ${item}`).join("\n");
   try {
     await discordReply(discord, state.channelId, body);
@@ -320,6 +323,7 @@ async function maybePostAutoDeny(discord: Client, state: WatcherState, reason: s
 /** 原路径读不到：Claude Code 的 EnterWorktree 会把会话文件整个挪进 worktree 的项目目录（记录里一条 relocated），
  *  按 id 找到新家接着读。内容原样搬走，lastSize / lineNo 照旧有效；哪都找不到（真被删了）这一拍什么都不做。 */
 async function followMovedSession(state: WatcherState, discord: Client) {
+  if (watchers.get(state.agentName) !== state) return null; // 已经 stopWatching 了（在途的最后一拍）：再 watch 新家就漏一个关不掉的 watcher
   const moved = findSessionJsonlBySessionId(state.runtime, state.sessionId);
   if (!moved || moved === state.jsonlPath) return null;
   console.log(`🚚 会话文件搬家了（进了 worktree）: ${state.agentName} → ${moved}`);
@@ -456,11 +460,8 @@ async function processNewData(state: WatcherState, discord: Client): Promise<voi
 
         if (entry.type === "assistant") {
           // 回合被 API 错误终止（assistant 条目 + isApiErrorMessage，紧跟 turn_duration）→ bridge 续跑 / 额度闸（text 给闸认撞墙原文）
-          state.apiErrorTurn = entry.isApiErrorMessage === true;
-          if (state.apiErrorTurn) {
-            const text = String(entry.message?.content?.[0]?.text ?? "").slice(0, 300);
-            emitEvent({ agent: state.agentName, chatId: state.channelId, type: "api_error_turn", data: { error: String(entry.error ?? ""), ts: entry.timestamp ?? null, text } });
-          }
+          state.apiErrorTurn = entry.isApiErrorMessage === true && { error: String(entry.error ?? ""), text: String(entry.message?.content?.[0]?.text ?? "").slice(0, 300) };
+          if (state.apiErrorTurn) emitEvent({ agent: state.agentName, chatId: state.channelId, type: "api_error_turn", data: { ...state.apiErrorTurn, ts: entry.timestamp ?? null } });
           const content = entry.message?.content;
           if (!Array.isArray(content)) continue;
 
@@ -562,7 +563,8 @@ async function processNewData(state: WatcherState, discord: Client): Promise<voi
               const t = block.text.trim();
               // 撞额度的提示（"You've hit your limit · resets 2am (Asia/Shanghai)"）按 ⛔ 发、不按 💬（会像 agent 的正常输出），
               // 置 flag 让后面那条 turn_duration 也跳过。
-              if (isLimitHitText(t)) { // weekly / session / usage 各种写法（lib/quota-wall-text.ts）
+              // 只在 CC / Codex 合成的错误条目上认（Codex 的额度条目不带 isApiErrorMessage、带 error，lib/codex-session.ts）
+              if ((state.apiErrorTurn || entry.error != null) && isLimitHitText(t)) {
                 state.textQueue.push(`⛔ ${t}`);
                 state.rateLimited = true;
                 emitEvent({ agent: state.agentName, chatId: state.channelId, type: "assistant_text", data: { text: t, rateLimited: true, apiError: !!state.apiErrorTurn, seq, sid: state.sessionId } });
@@ -570,6 +572,7 @@ async function processNewData(state: WatcherState, discord: Client): Promise<voi
                 state.textQueue.push(`💬 ${t}`); // apiError：网页画成一行系统提示、连续相同的合并（web/features/chat/notice-merge.ts）
                 emitEvent({ agent: state.agentName, chatId: state.channelId, type: "assistant_text", data: { text: t, seq, sid: state.sessionId, ...(state.apiErrorTurn ? { apiError: true } : {}) } });
               }
+              if (!state.apiErrorTurn) state.answerParts.push(t); // 错误原文不算答复；Codex 额度那句算（它的 StopFailure 要把它推给 caller）
             }
             // v2.21.3+ Fable 5.1 的进度句:Anthropic 文档所说的 progress-update thinking
             // 块(CC 2.1.25x 请求 display=updates,落盘为**非空** thinking)。5.1 在长工具链
@@ -634,7 +637,7 @@ async function processNewData(state: WatcherState, discord: Client): Promise<voi
 export async function drainChannelWatcher(
   channelId: string,
   discord: Client,
-): Promise<{ drained: boolean; text: string | null; apiError?: boolean }> {
+): Promise<{ drained: boolean; text: string | null; apiError?: boolean; error?: { error: string; text: string } }> {
   for (const state of watchers.values()) {
     if (state.channelId !== channelId) continue;
     try {
@@ -644,20 +647,12 @@ export async function drainChannelWatcher(
       clearTimeout(state.textTimer);
       state.textTimer = null;
     }
-    let captured: string | null = null;
+    // flushText 清掉之前先截一份没发出去的答复原文给 Stop 兜底 pushback（不带 `-# ` 前缀、不含 ⏱/📦 这类提示和 API 错误原文）
+    const captured = state.answerParts.join("\n").trim() || null;
     if (state.textQueue.length > 0) {
-      // v2.0.13+: 在 flushText splice 掉 textQueue 之前先截一份。Stop hook 兜底
-      // pushback 需要这段原文（不要带 flushText 加的 `-# ` 前缀）。
-      // 只保留 `💬 ` / `⛔ ` 前缀的真 assistant 文字，跳过 ⏱/📖/✏️ 这种 telemetry。
-      const assistantOnly = state.textQueue
-        .filter((item) => item.startsWith("💬 ") || item.startsWith("⛔ "))
-        .map((item) => item.replace(/^[💬⛔]\s+/u, ""))
-        .join("\n")
-        .trim();
-      captured = assistantOnly || null;
       try { await flushText(state, discord); } catch { /* non-critical */ }
     }
-    return { drained: true, text: captured, apiError: !!state.apiErrorTurn };
+    return { drained: true, text: captured, apiError: !!state.apiErrorTurn, ...(state.apiErrorTurn ? { error: state.apiErrorTurn } : {}) };
   }
   return { drained: false, text: null };
 }
@@ -756,6 +751,7 @@ export async function startWatching(
     tools: [],
     toolMsgId: null,
     textQueue: [],
+    answerParts: [],
     textTimer: null,
     agentName,
     runtime,

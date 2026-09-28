@@ -4,8 +4,8 @@
  *
  * rollout 里失败的回合是 task_complete + error，lib/codex-session.ts 把它翻成错误条目，jsonl-watcher 照常发
  * ⛔（额度，assistant_text rateLimited）或 api_error_turn（其它错误）。这里见到这两种事件、且频道属于 Codex agent，
- * 就替它补一个 StopFailure：走 bridge 正常的回合收尾（状态收敛、drain 把 ⛔ 那句推给等答复的 caller——Codex 的
- * StopFailure 照常结算，Claude Code 的才按「API 错误不结算」处理，见 bridge/stop-settle.ts）。
+ * 就替它补一个 StopFailure：走 bridge 正常的回合收尾（状态收敛；额度那句不是 API 错误条目，drain 把 ⛔ 推给等答复的
+ * caller 并结算；其它错误是 API 错误条目：回程留着、给 caller 推一句说明，60 秒续跑接着做。见 bridge/stop-settle.ts）。
  * Claude Code 失败时自己会发 StopFailure，不补。
  */
 import { subscribeEvents } from "./event-bus.js";

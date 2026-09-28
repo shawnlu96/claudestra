@@ -3,9 +3,15 @@
  * 临时 429 和 agent 自己话里引用这句都不算撞墙。
  */
 import { describe, expect, test } from "bun:test";
-import { isLimitHitText, parseWallText } from "../src/lib/quota-wall-text.js";
+import { isLimitHitText, parseWallText, wallHitOf } from "../src/lib/quota-wall-text.js";
 
 const at = (iso: string) => Date.parse(iso);
+
+/** 本机 ~/.claude/projects 里 CC 合成的模型级额度原文（2026-09-29 扫：前一句 83 处、后一句 15 处） */
+const REAL_MODEL_LIMIT = [
+  "You've reached your Fable limit. Run /usage-credits to continue or switch models with /model.",
+  "You've reached your Fable 5 limit. Run /usage-credits to continue or switch models with /model.",
+];
 
 describe("isLimitHitText", () => {
   test("认 CC 的几种写法（2026-09-28 实录的原文）", () => {
@@ -13,9 +19,16 @@ describe("isLimitHitText", () => {
     expect(isLimitHitText("You've hit your session limit · resets 10:40pm (Asia/Tokyo)")).toBe(true);
     expect(isLimitHitText("You've hit your limit · resets 2am (Asia/Shanghai)")).toBe(true);
     expect(isLimitHitText("You’ve hit your usage limit. Upgrade to Pro or try again at 8:41 AM.")).toBe(true);
-    // 单个模型的额度（本机 48 条实录，error 也是 rate_limit）
-    expect(isLimitHitText("You've reached your Fable limit. Run /usage-credits to continue or switch models with /model.")).toBe(true);
-    expect(isLimitHitText("You've reached your Fable 5 limit. Run /usage-credits to continue or switch models with /model.")).toBe(true);
+    expect(isLimitHitText("You've hit your weekly limit · resets Fri 9am (Asia/Tokyo)")).toBe(true);
+    expect(isLimitHitText("You've hit your usage limit")).toBe(true);
+    // 单个模型的额度（error 也是 rate_limit）：本机 jsonl 里 CC 合成的这两句原样各出现几十次
+    for (const t of REAL_MODEL_LIMIT) expect(isLimitHitText(t)).toBe(true);
+  });
+
+  test("agent 话里常见的「hit your … limit」：limit 后面不是标点 / 行尾就不算（常规审查 P1-2 的误判样本）", () => {
+    expect(isLimitHitText("You've hit your API limit on GitHub, so I paused the sync.")).toBe(false);
+    expect(isLimitHitText("Hit your rate limit on npm, retrying…")).toBe(false);
+    expect(isLimitHitText("You've hit your limit of three retries")).toBe(false);
   });
 
   test("临时 429 限流、别处引用这句、普通文字都不算", () => {
@@ -63,6 +76,23 @@ describe("parseWallText", () => {
     expect(parseWallText("You've reached your Fable 5 limit. Run /usage-credits to continue.", Date.now())).toBeNull();
     expect(parseWallText("You've hit your Opus limit · resets 3pm", Date.now())).toBeNull();
     expect(parseWallText("You've hit your usage limit.", Date.now())!.kind).toBe("unknown");
+  });
+
+  test("星期写法与 Codex 的 try again（常规审查 P2-6）", () => {
+    const now = at("2026-09-28T13:00:00Z"); // 周一，东京 22:00
+    expect(parseWallText("You've hit your weekly limit · resets Fri 9am (Asia/Tokyo)", now)).toEqual({
+      kind: "weekly", resetsAt: at("2026-10-02T00:00:00Z"), resetsText: "Fri 9am (Asia/Tokyo)",
+    });
+    expect(parseWallText("You've hit your weekly limit · resets Mon 9am (Asia/Tokyo)", now)!.resetsAt).toBe(at("2026-10-05T00:00:00Z"));
+    expect(parseWallText("You've hit your usage limit. Try again in 3 hours.", now)!.resetsAt).toBe(now + 3 * 3600_000);
+  });
+
+  test("wallHitOf：只有 error=rate_limit 的账号级额度才进闸", () => {
+    const now = Date.now();
+    expect(wallHitOf("rate_limit", "You've hit your session limit · resets 10:40pm (Asia/Tokyo)", now)?.kind).toBe("session");
+    expect(wallHitOf("rate_limit", REAL_MODEL_LIMIT[0], now)).toBeNull();
+    expect(wallHitOf("rate_limit", "API Error: Server is temporarily limiting requests (not your usage limit) · Rate limited", now)).toBeNull();
+    expect(wallHitOf("server_error", "You've hit your weekly limit", now)).toBeNull();
   });
 
   test("不是撞墙原文 → null", () => {
