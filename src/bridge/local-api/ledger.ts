@@ -28,6 +28,11 @@ export function setLedgerApiProjectsForTest(p: string | undefined): void {
 
 const notFound = (error: string) => apiJson(404, { ok: false, error });
 
+/** project 在不在 projects.json（台账与「上次以来」两个端点共用这份校验） */
+export async function ledgerProjectExists(project: string): Promise<boolean> {
+  return (await readProjects(projectsPath)).projects.some((p) => p.id === project);
+}
+
 function decode(s: string): string | null {
   try {
     const d = decodeURIComponent(s);
@@ -46,7 +51,7 @@ export async function handleLedgerApi(req: Request, path: string, principal: Pri
   const project = decode(m[1]);
   const taskId = m[2] === undefined ? undefined : decode(m[2]);
   if (project === null || taskId === null) return apiJson(400, { ok: false, error: "bad path encoding" });
-  if (!(await readProjects(projectsPath)).projects.some((p) => p.id === project)) return notFound(`project "${project}" not found`);
+  if (!(await ledgerProjectExists(project))) return notFound(`project "${project}" not found`);
   let db: ReturnType<typeof ledgerDb>;
   try {
     db = ledgerDb();

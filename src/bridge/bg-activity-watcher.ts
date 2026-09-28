@@ -464,9 +464,9 @@ export function activeBgTasksFor(agentName: string): BgTaskSnapshot[] {
   const out: BgTaskSnapshot[] = [];
   for (const act of activities.values()) {
     if (act.agentName !== agentName || act.finished) continue;
+    if (act.kind === "subagent" && !act.meta.description) act.meta = readSubagentMeta(act.filePath); // 起活动时 meta 可能还没落盘：快照补读，协作视图按 description 挂审查员
     const title = act.meta.description ? `🤖 ${act.meta.description}` : titleFor(act.kind, act.filePath);
-    const { agentType, model } = act.meta;
-    out.push({ id: act.id, kind: act.kind, title, startedAt: act.startedAt, lines: [...act.recent], agentType, model, progress: progressView(act) });
+    out.push({ id: act.id, kind: act.kind, title, startedAt: act.startedAt, lines: [...act.recent], agentType: act.meta.agentType, model: act.meta.model, progress: progressView(act) });
   }
   return out.sort((a, b) => a.startedAt - b.startedAt);
 }

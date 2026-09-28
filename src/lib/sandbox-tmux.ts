@@ -44,7 +44,7 @@ export function sandboxTmuxArgv(argv: string[]): string[] {
 export async function sandboxVerifyNewWindow(args: string[], run: (a: string[]) => Promise<string>): Promise<void> {
   if (!isSandbox() || args[0] !== "new-window") return;
   const t = args[args.indexOf("-t") + 1] ?? "";
-  const target = `${t.endsWith(":") ? t : `${t}:`}${args[args.indexOf("-n") + 1] ?? ""}`;
+  const target = `${t.endsWith(":") ? t : `${t}:`}=${args[args.indexOf("-n") + 1] ?? ""}`; // = 精确匹配：别复核到前缀同名的窗口上
   const cwd = (await run(["display-message", "-p", "-t", target, "#{pane_current_path}"])).trim();
   const problem = sandboxAgentDirProblem(cwd);
   if (!problem) return;

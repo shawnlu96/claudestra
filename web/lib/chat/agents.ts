@@ -52,7 +52,8 @@ export interface AgentSession {
   displayName: string;
   purpose: string;
   cwd: string;
-  status: "active" | "stopped";
+  /** creating = create 进行中 / 砍在半路的占位 */
+  status: "active" | "stopped" | "creating";
   /** 大总管置顶入口——不可 kill/restart，列表第一位。 */
   pinnedMaster?: boolean;
   /** 遗留字段（mock 模式已随 /api/v1 迁移移除，恒为 undefined）。 */
@@ -128,6 +129,11 @@ interface ApiAgent {
   ledgerTask?: unknown;
 }
 
+/** bridge 的状态串 → 网页三态；dead 等未知值按 active（旧行为），creating 单列（不能发消息） */
+function agentStatus(s: string | undefined): AgentSession["status"] {
+  return s === "stopped" ? "stopped" : s === "creating" ? "creating" : "active";
+}
+
 function mapAgent(a: ApiAgent): AgentSession {
   if (a.name === "master") {
     return {
@@ -138,7 +144,7 @@ function mapAgent(a: ApiAgent): AgentSession {
       displayName: "大总管",
       purpose: a.purpose || "调度员：管理/派发多个 agent",
       cwd: "",
-      status: a.status === "stopped" ? "stopped" : "active",
+      status: agentStatus(a.status),
       pinnedMaster: true,
       lastActivityTs: a.lastActivityTs ?? null,
       busy: a.busy === true,
@@ -157,12 +163,12 @@ function mapAgent(a: ApiAgent): AgentSession {
     displayName: bare,
     purpose: a.purpose || "",
     cwd: a.cwd || "",
-    status: a.status === "stopped" ? "stopped" : "active",
+    status: agentStatus(a.status),
     // 刚建出来的 agent 还没说过话 → lastActivityTs 为 null 会沉底；用创建时间兜底，刚建的自然在最上面
     lastActivityTs: a.lastActivityTs ?? (a.created ? Date.parse(a.created) || null : null),
     // bridge 的 busy（hook 驱动）优先；老 bridge 无此字段时退回 idle 探测
-    busy: a.status !== "stopped" && (a.busy ?? a.idle === false),
-    compacting: a.status !== "stopped" && a.compacting === true,
+    busy: agentStatus(a.status) === "active" && (a.busy ?? a.idle === false),
+    compacting: agentStatus(a.status) === "active" && a.compacting === true,
     contextTokens: a.contextTokens ?? null,
     model: a.model ?? null,
     runtime: a.runtime ?? null,

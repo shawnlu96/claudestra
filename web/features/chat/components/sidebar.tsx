@@ -10,8 +10,7 @@ import { SidebarBanners } from "./sidebar-banners";
 import { StatsPanel } from "./stats-panel";
 import { useT, getLang } from "@/lib/i18n";
 import { ChatHitRow, type ChatSearchHit } from "./search-hits";
-import { UnmanagedSessions } from "./unmanaged-sessions";
-import { ArchivedSessions } from "./archived-sessions";
+import { SidebarExtraGroups } from "./sidebar-extra-groups";
 import { buildSidebarEntries, buildTeams, entryMembers, filterAndRankWorkers, splitDormant, splitMasterKids, type SidebarEntry, type TeamNode } from "../sidebar-entries";
 import { MasterTeam, TeamGroup, type RowSlots } from "./team-group";
 import { usePersistedSet } from "../use-persisted-set";
@@ -543,15 +542,10 @@ export function Sidebar({ onSelect }: { onSelect: () => void }) {
         </div>
       ) : (
         <>
-          {/* v2.23+ 未纳管会话分区：机器上没纳管的会话（pi-web 起的 Pi 会话、终端手敲的）。
+          {/* 附加分组（联系人 / 未纳管会话 / 归档，sidebar-extra-groups.tsx）。
               放在版本行**之上** —— 版本行是页面收尾元素，功能分区压在它下面很反常
               （视觉审查 P2-5）。样式复用项目组头，不再自创一套。 */}
-          {!manage ? (
-            <>
-              <UnmanagedSessions />
-              <ArchivedSessions />
-            </>
-          ) : null}
+          {!manage ? <SidebarExtraGroups /> : null}
           {/* 底部安全区：max() 取大不叠加——home 条区高度只算一次，不再「env+间距」双层 */}
           <div
             className="border-t border-base-300 px-4 pt-2 text-xs opacity-50"

@@ -15,6 +15,7 @@ import { newMessageId, newThreadId } from "./router.js";
 import { readRegistryAgents } from "../lib/registry.js";
 import { agentInScope, findByTokenId, readPrincipals } from "../lib/principals.js";
 import { forwardHeader, forwardNotice, forwardVerdict } from "../lib/forward.js";
+import { withoutAttachmentLines } from "../lib/inbound-body.js";
 
 const RECENT_MAX = 300;
 const recent = new Map<string, { env: Envelope; channelId: string }>();
@@ -82,7 +83,7 @@ export async function handleForward(ws: ServerWebSocket<unknown>, msg: Record<st
     meta: { ...orig.env.meta, messageId: newMessageId("fwd"), threadId: newThreadId(), ts: new Date().toISOString(), forwarded: true, discordMsg: undefined },
   };
   if (from.kind === "user" && d.postDiscord) {
-    await d.postDiscord(target.channelId, `↪ 由 <#${fromChannelId}> 转来（原本发给 ${short(fromName)}）：\n${orig.env.content}`, orig.env.meta.attachments)
+    await d.postDiscord(target.channelId, `↪ 由 <#${fromChannelId}> 转来（原本发给 ${short(fromName)}）：\n${withoutAttachmentLines(orig.env.content)}`, orig.env.meta.attachments)
       .catch((e: Error) => console.error(`⚠️ 转交：原话贴到 ${targetName} 频道失败: ${e.message}`));
   }
   await d.deliver(env);
