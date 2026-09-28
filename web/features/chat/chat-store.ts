@@ -23,7 +23,7 @@ import {
 } from "./live-merge";
 import { composeView, droppedBlobUrls, revokeBlobUrls, stripInboundHeader } from "./view-compose";
 import { decideReconnect } from "./reconnect-policy";
-import { ReloadScroll, type ReloadKind } from "./reload-scroll";
+import { ReloadScroll, reloadKindFor, type ReloadKind } from "./reload-scroll";
 
 import type { WebStreamEvent, WebComponentRow, BgMeta, BgProgress, BgEndStatus } from "@/lib/chat/events";
 import { getLang, t as tr } from "@/lib/i18n";
@@ -1440,12 +1440,12 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
     }, 12_000);
   }
 
-  /** v2.17.2+ 顶栏「同步失败」pill 的点按重试:整链强制对齐(重拉历史+重连流)。 */
+  /** v2.17.2+ 顶栏「同步失败」pill 的点按重试:整链强制对齐(重拉历史+重连流),停在原位(恢复动作)。 */
   public retrySync() {
-    this.maybeReconnect({ force: true });
+    this.maybeReconnect({ force: true, keepPlace: true });
   }
 
-  public maybeReconnect(opts?: { fast?: boolean; force?: boolean }) {
+  public maybeReconnect(opts?: { fast?: boolean; force?: boolean; keepPlace?: boolean }) {
     const name = this.state.activeAgent;
     if (!name) return;
     // 走哪条路（地板 / 让路 / 判活 / 快路径 / 差量 / 全量）由 reconnect-policy.ts 的纯函数
@@ -1501,7 +1501,7 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
       return;
     }
     this.clientLog(`reconnect(full): agent=${name} 重拉历史+重连流`);
-    void this.loadMessages(name, gen, 0, opts?.force ? "latest" : "align").then(() => {
+    void this.loadMessages(name, gen, 0, reloadKindFor(opts)).then(() => {
       if (gen !== this.openGen) return;
       void this.openStream(name);
     });

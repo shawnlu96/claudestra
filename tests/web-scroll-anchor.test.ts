@@ -12,7 +12,7 @@ import {
   seqOfId,
   windowForTop,
 } from "@/features/chat/scroll-anchor";
-import { ReloadScroll } from "@/features/chat/reload-scroll";
+import { ReloadScroll, reloadKindFor } from "@/features/chat/reload-scroll";
 import type { ChatMessage } from "@/features/chat/type";
 
 const msg = (id: string): ChatMessage => ({ id, role: "assistant", content: id, ts: "2026-09-28T00:00:00Z" }) as ChatMessage;
@@ -235,5 +235,18 @@ describe("windowForTop（往上翻着时窗口按顶部那条定位）", () => {
     expect(windowForTop("h3", list, 4)).toBeNull();
     expect(windowForTop("h9", list, 4)).toBeNull();
     expect(windowForTop(null, list, 4)).toBeNull();
+  });
+});
+
+describe("reloadKindFor（reconnect(full) 的落点）", () => {
+  test("force（点推送 / 深链 / 重点当前会话）→ latest 落底", () => {
+    expect(reloadKindFor({ force: true })).toBe("latest");
+  });
+  test("同步失败 pill 的重试（force + keepPlace）→ align 停在原位", () => {
+    expect(reloadKindFor({ force: true, keepPlace: true })).toBe("align");
+  });
+  test("非 force（后台恢复 / 断线重连 / 回到页面）→ align", () => {
+    expect(reloadKindFor()).toBe("align");
+    expect(reloadKindFor({ force: false })).toBe("align");
   });
 });

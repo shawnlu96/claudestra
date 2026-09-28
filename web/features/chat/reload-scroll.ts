@@ -9,6 +9,14 @@ import type { ChatMessage } from "./type";
 
 export type ReloadKind = "align" | "latest";
 
+/**
+ * reconnect(full) 的落点：force（点推送 / 深链 / 重点当前会话）= 要看最新 → latest；其余与
+ * keepPlace（同步失败 pill 的重试：强制重拉，但它是恢复动作）→ align 停在原位。
+ */
+export function reloadKindFor(opts?: { force?: boolean; keepPlace?: boolean }): ReloadKind {
+  return opts?.force && !opts.keepPlace ? "latest" : "align";
+}
+
 export interface ReloadScrollView {
   capture(): ViewAnchor | null;
 }
