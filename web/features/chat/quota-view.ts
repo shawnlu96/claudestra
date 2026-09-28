@@ -1,0 +1,159 @@
+/**
+ * 订阅额度卡片组的纯映射（bridge GET /api/v1/quota → 卡片）：数据层与原因码的人话、量条标签、重置时刻、
+ * 「重试」按钮该不该出。形状照 src/lib/quota-layers.ts 的 ProviderEntry（web 与 src 互不 import，这里只取要用的字段，
+ * 未知字段一律丢掉）。单测 tests/web-quota-view.test.ts。
+ */
+
+export type LayerSource = "live" | "live_stale" | "local_cache" | "none";
+
+export interface MeterView {
+  id: string;
+  kind: string;
+  label: string | null;
+  unit: "pct" | "tokens" | "usd" | "requests";
+  used: number | null;
+  resetsAtMs: number | null;
+  resetPassed: boolean;
+}
+
+export interface EntryView {
+  id: string;
+  name: string;
+  kind: "subscription" | "api";
+  plan: string | null;
+  identity: "assumed" | "bound" | "unknown";
+  meters: MeterView[];
+  resetCredits: { held: number; applicableNow: number; expiries: number[] | null; stale: boolean } | null;
+  source: { layer: LayerSource; observedAt: number | null; reason: string | null };
+}
+
+export interface QuotaPanelData {
+  enabled: boolean;
+  generatedAt: number;
+  entries: EntryView[];
+}
+
+const LAYERS: readonly LayerSource[] = ["live", "live_stale", "local_cache", "none"];
+const num = (v: unknown): number | null => (typeof v === "number" && Number.isFinite(v) ? v : null);
+const str = (v: unknown): string | null => (typeof v === "string" && v ? v : null);
+const obj = (v: unknown): Record<string, unknown> | null => (v && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : null);
+
+function meterOf(v: unknown): MeterView | null {
+  const m = obj(v);
+  const unit = m?.unit;
+  if (!m || typeof m.id !== "string" || (unit !== "pct" && unit !== "tokens" && unit !== "usd" && unit !== "requests")) return null;
+  return { id: m.id, kind: String(m.kind ?? "other"), label: str(m.label), unit, used: num(m.used), resetsAtMs: num(m.resetsAtMs), resetPassed: m.resetPassed === true };
+}
+
+function creditsOf(v: unknown): EntryView["resetCredits"] {
+  const c = obj(v);
+  if (!c) return null;
+  const list = Array.isArray(c.credits) ? c.credits.map((x) => num(obj(x)?.expiresAtMs)).filter((x): x is number => x !== null) : null;
+  return { held: num(c.held) ?? 0, applicableNow: num(c.applicableNow) ?? 0, expiries: list, stale: c.stale === true };
+}
+
+function entryOf(v: unknown): EntryView | null {
+  const e = obj(v);
+  const src = obj(e?.source);
+  if (!e || !src || typeof e.id !== "string" || typeof e.name !== "string") return null;
+  const layer = LAYERS.includes(src.layer as LayerSource) ? (src.layer as LayerSource) : "none";
+  const identity = obj(e.account)?.identity;
+  return {
+    id: e.id,
+    name: e.name,
+    kind: e.kind === "api" ? "api" : "subscription",
+    plan: str(e.plan),
+    identity: identity === "assumed" || identity === "bound" ? identity : "unknown",
+    meters: (Array.isArray(e.meters) ? e.meters : []).map(meterOf).filter((m): m is MeterView => m !== null),
+    resetCredits: creditsOf(e.resetCredits),
+    source: { layer, observedAt: num(src.observedAt), reason: str(src.reason) },
+  };
+}
+
+/** GET /quota 的响应 → 面板数据；形状不对返回 null（面板退回旧卡） */
+export function quotaPanelData(j: unknown): QuotaPanelData | null {
+  const r = obj(j);
+  const snap = obj(r?.snapshot);
+  if (!r || !snap || !Array.isArray(snap.providers)) return null;
+  return {
+    enabled: r.enabled !== false,
+    generatedAt: num(snap.generatedAt) ?? Date.now(),
+    entries: snap.providers.map(entryOf).filter((e): e is EntryView => e !== null),
+  };
+}
+
+/** 卡片左上角的运行时徽章 */
+export function entryRuntime(e: EntryView): string {
+  if (e.id.startsWith("pi:")) return "pi";
+  return e.id.startsWith("codex") ? "codex" : "claude-code";
+}
+
+export const LAYER_LABEL: Record<LayerSource, string> = {
+  live: "实时",
+  live_stale: "实时过期",
+  local_cache: "本机缓存",
+  none: "无",
+};
+
+/** 固定错误码 → 人话（zh 原文，面板里再过 t()）；认不出的码原样显示 */
+const REASONS: Record<string, string> = {
+  timeout: "接口超时",
+  network: "网络不通",
+  http_5xx: "服务端出错，稍后自动重试",
+  http_429: "请求太频繁，按对方要求等一会儿",
+  http_401: "凭据过期或已撤销，等 Claude Code / codex 自己续期",
+  http_403: "接口拒绝访问",
+  http_404: "接口变了，已暂停，可点重试",
+  http_4xx: "接口变了，已暂停，可点重试",
+  bad_shape: "返回格式变了，已暂停，可点重试",
+  bad_json: "返回格式变了，已暂停，可点重试",
+  redirect: "接口跳转了，已暂停，可点重试",
+  too_large: "返回过大，已暂停，可点重试",
+  keychain_denied: "钥匙串拒绝访问，点重试再读",
+  keychain_timeout: "钥匙串没响应（可能在等授权弹框），点重试再读",
+  keychain_error: "读钥匙串出错",
+  keychain_missing: "钥匙串里没有凭据",
+  auth_missing: "没有找到登录凭据",
+  auth_bad_shape: "凭据格式认不出",
+  account_missing: "找不到账户标识",
+  token_expired: "凭据已过期，等客户端自己续期",
+  identity_changed: "读取期间换了账号，这次结果已丢弃",
+  account_uncertain: "账户不确定，暂不出提醒",
+  no_secret: "本机密钥不可用",
+  internal: "内部出错，稍后自动重试",
+};
+export function reasonText(code: string | null): string | null {
+  return code ? (REASONS[code] ?? code) : null;
+}
+
+/** 只有「用户主动重试」才解除的状态：Keychain 被拒 / 超时、端点暂停 */
+const RETRY_CODES = new Set(["keychain_denied", "keychain_timeout", "http_404", "http_4xx", "bad_shape", "bad_json", "redirect", "too_large"]);
+export function canRetry(e: EntryView): "claude" | "codex" | null {
+  if (e.id !== "claude" && e.id !== "codex") return null;
+  return e.source.reason && RETRY_CODES.has(e.source.reason) ? e.id : null;
+}
+
+/** 量条标签（zh 原文）：5 小时 / 本周 / 本周 · 模型 */
+export function meterLabel(m: MeterView): string {
+  if (m.kind === "session") return "5 小时";
+  if (m.kind === "weekly") return "本周";
+  if (m.kind === "weekly_scoped") return m.label ? `本周 · ${m.label}` : "本周";
+  if (m.id === "week_tokens") return "本周 tokens";
+  if (m.id === "week_usd") return "本周花费";
+  return m.label ?? m.id;
+}
+
+const pad = (n: number) => String(n).padStart(2, "0");
+/** 本机时区：今天只写 HH:mm，其余 MM-DD HH:mm */
+export function fmtAt(ms: number, now = Date.now()): string {
+  const d = new Date(ms);
+  const hm = `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  return new Date(now).toDateString() === d.toDateString() ? hm : `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${hm}`;
+}
+
+/** 本机缓存条目的账户归属一律未知（设计稿 §2.1）；按量接入商没有账户概念 */
+export function identityNote(e: EntryView): string | null {
+  if (e.kind === "api") return null;
+  if (e.source.layer === "local_cache") return "账户归属未知";
+  return e.identity === "assumed" ? "账户按本机登录推定" : null;
+}

@@ -1,0 +1,49 @@
+/**
+ * i18n 字典分册：用量看板「订阅额度」卡片组、数据层 / 原因码人话、设置里的实时读取开关（features/chat/quota-view.ts、
+ * components/subscription-quota-cards.tsx、settings/quota-live-section.tsx）。规则同 lib/i18n-dict.ts；主字典到了
+ * 数据文件的行数上限，新功能的整块词条放分册再并进 DICT。
+ */
+export const QUOTA_DICT: Record<string, string> = {
+  "订阅额度": "Subscription quotas",
+  "数据": "Data",
+  "实时": "live",
+  "实时过期": "live (stale)",
+  "本机缓存": "local cache",
+  "无": "none",
+  "5 小时": "5-hour",
+  "本周 tokens": "Tokens this week",
+  "本周花费": "Cost this week",
+  "免费额度重置": "Free usage resets",
+  "持有 {n} 次，此刻可用 {m} 次": "{n} held, {m} usable now",
+  "{at} 到期": "expires {at}",
+  "明细偏旧": "details may be stale",
+  "账户归属未知": "account unknown",
+  "账户按本机登录推定": "account assumed from local login",
+  "实时读取已关闭，只显示本机缓存（设置 · 集成里可打开）": "Live reading is off; showing local cache only (turn it on in Settings · Integrations)",
+  "订阅额度实时读取": "Live subscription quotas",
+  "用 Claude Code / codex 已登录的凭据，只读查询订阅额度和免费重置次数（只在看用量时查，后台只查重置到期）。关掉后只显示本机缓存。":
+    "Uses the credentials Claude Code / codex are already signed in with to read (read-only) your subscription quotas and free resets — " +
+    "only while you view usage; in the background only reset expiry is checked. Turn off to show local cache only.",
+  "接口超时": "request timed out",
+  "网络不通": "network unreachable",
+  "服务端出错，稍后自动重试": "server error, will retry automatically",
+  "请求太频繁，按对方要求等一会儿": "rate limited, waiting as requested",
+  "凭据过期或已撤销，等 Claude Code / codex 自己续期": "credential expired or revoked; waiting for Claude Code / codex to renew it",
+  "接口拒绝访问": "access denied by the service",
+  "接口变了，已暂停，可点重试": "endpoint changed; paused — tap Retry",
+  "返回格式变了，已暂停，可点重试": "response format changed; paused — tap Retry",
+  "接口跳转了，已暂停，可点重试": "endpoint redirected; paused — tap Retry",
+  "返回过大，已暂停，可点重试": "response too large; paused — tap Retry",
+  "钥匙串拒绝访问，点重试再读": "Keychain denied access; tap Retry to read again",
+  "钥匙串没响应（可能在等授权弹框），点重试再读": "Keychain didn't respond (maybe waiting on a permission prompt); tap Retry",
+  "读钥匙串出错": "Keychain read failed",
+  "钥匙串里没有凭据": "no credential in Keychain",
+  "没有找到登录凭据": "no sign-in credential found",
+  "凭据格式认不出": "credential format not recognized",
+  "找不到账户标识": "account id not found",
+  "凭据已过期，等客户端自己续期": "credential expired; waiting for the client to renew it",
+  "读取期间换了账号，这次结果已丢弃": "account switched mid-read; result discarded",
+  "账户不确定，暂不出提醒": "account uncertain; reminders paused",
+  "本机密钥不可用": "local key unavailable",
+  "内部出错，稍后自动重试": "internal error, will retry automatically",
+};
