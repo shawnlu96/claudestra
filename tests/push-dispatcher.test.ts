@@ -203,3 +203,50 @@ describe("待你处理 → onAsk（规则表见 tests/ask-push.test.ts，这里�
     expect(sent.length).toBeGreaterThan(0);
   });
 });
+
+describe("推送不带正文（lib/push-redact.ts；开关每条现读）", () => {
+  let hide = true;
+  const FP = "9109-17c6-8e77-dfff";
+  beforeEach(() => {
+    hide = true;
+    dispatcher.stop();
+    dispatcher = createDispatcher({ db, sender, fp: FP, noContent: () => hide, isOwnerChat: (id) => id === OWNER_CHAT_ID, now: () => now, log: () => {} });
+  });
+  /** 中继和推送服务看得到的全部字节里，不能出现 agent 名、正文、设备名、ask id */
+  const leaks = (words: string[]) => sent.filter((s) => words.some((w) => JSON.stringify(s.payload).includes(w)));
+
+  test("回复：Web Push 和 APNs 都只剩「Claudestra · 有新消息」+ 角标 + 时间（Web Push 另有 fp）", async () => {
+    await dispatcher.onEvent(evt({ agent: "agent-secretproj", data: { direction: "out", text: "机密内容" } }));
+    expect(unreadCounts(db)).toEqual({ secretproj: 1 }); // 未读照计，只是推送不说是谁
+    const web = sent.filter((s) => s.kind === "web");
+    expect(web).toHaveLength(3);
+    for (const w of web) expect(w.payload).toEqual({ fp: FP, title: "Claudestra", body: "有新消息", url: "/chat", tag: `cstra-${now}`, agent: "", ts: now, badge: 1 });
+    expect(sent.find((s) => s.kind === "apns")!.payload).toEqual({ title: "Claudestra", body: "有新消息", agent: "", url: "/chat", ts: now, tag: `cstra-${now}`, badge: 1 });
+    expect(leaks(["secretproj", "机密"])).toEqual([]);
+  });
+
+  test("已读：dismiss 不带 agent，静默 APNs 不带 thread-id", async () => {
+    await dispatcher.onEvent(evt({ agent: "secretproj" }));
+    sent.length = 0;
+    now += 1000;
+    markAgentRead(db, "secretproj", now);
+    await flush();
+    expect(sent.filter((s) => s.kind === "web").map((s) => s.payload)).toEqual([{ fp: FP, type: "dismiss", ts: now, badge: 0 }]);
+    expect(sent.find((s) => s.kind === "apns")!.payload).toEqual({ silent: true, title: "", body: "", agent: "", url: "/chat", ts: now, tag: `cstra-badge-${now}`, badge: 0 });
+    expect(leaks(["secretproj"])).toEqual([]);
+  });
+
+  test("系统提醒与待你处理同样改写：不带设备名、ask id、agent", async () => {
+    await dispatcher.notice({ title: "新设备已配对", body: "「测试机 iPhone」刚配对了这台电脑（给 guest-bob 用）。" });
+    await dispatcher.onAsk({ id: "ask_9", fromAgent: "agent-secretproj", title: "发版吗", state: "open", kind: "decide", blocking: true, urgency: "normal" } as never, "away");
+    expect(sent.length).toBe(8);
+    for (const s of sent) expect(s.payload).toMatchObject({ title: "Claudestra", body: "有新消息", url: "/chat", agent: "" });
+    expect(leaks(["iPhone", "guest-bob", "ask_9", "secretproj", "发版", "配对"])).toEqual([]);
+  });
+
+  test("关掉之后下一条就恢复正文，不用重启", async () => {
+    hide = false;
+    await dispatcher.onEvent(evt({}));
+    expect(sent.find((s) => s.kind === "web")!.payload).toMatchObject({ title: "alpha", body: "hello there", agent: "alpha" });
+  });
+});
