@@ -1,11 +1,13 @@
 /**
  * 推送的出口（docs/design-hosted-frontend.md §7）。Web Push 按订阅的 VAPID 公钥选路：订阅只认订它时用的那把钥匙，
  * 用中继公钥订的走中继（push 帧），用本机公钥订的（托管前端之前的老浏览器）由 bridge 直发——两把钥匙签错一律 403。
- * 不知道钥匙的老订阅两条路依次试，401/403 才换下一条（没投出去，不会重复）。APNs 另行选路：中继有 p8 走中继，否则本机 p8。
+ * 不知道钥匙的老订阅两条路依次试，推送服务 401/403 才换下一条（没投出去，不会重复）。托管 origin 的订阅必是中继公钥，
+ * 直发签不进去，所以 sw.js「中继模式的推送一定经中继、fp 已钉死」仍成立。APNs 另行选路：中继有 p8 走中继，否则本机 p8。
  * 两个后端都是注入的：relay 是 bridge/relay-link.ts 的 relayClient()，direct 由 init.ts 从磁盘 / env 懒加载。
  */
 import { apnsTokenDead, type ApnsClient, type ApnsMessage } from "../../lib/apns.js";
 import { RelayError, type PushAck, type RelayClient } from "../../lib/relay-client.js";
+import { pushEndpointProblem } from "../../lib/push-endpoint.js";
 import type { WebPushSubscription } from "../../lib/relay-protocol.js";
 import { webPushOutcome, type WebPushSend } from "../../lib/web-push.js";
 
@@ -47,8 +49,11 @@ export interface SenderDeps {
 
 const fromAck = (a: PushAck): SendOutcome => ({ ok: a.ok, gone: a.gone === true, ...(a.status !== undefined ? { status: a.status } : {}), ...(a.error ? { error: a.error } : {}) });
 const relayFailed = (e: unknown): SendOutcome => ({ ok: false, gone: false, error: e instanceof RelayError ? `relay_${e.code}` : (e as Error).message });
-/** 推送服务拒了签名：多半是订阅用的不是这把钥匙（FCM 403、Mozilla 401），换另一把还有救 */
-const keyRejected = (o: SendOutcome): boolean => o.status === 401 || o.status === 403;
+/**
+ * 推送服务拒了签名：多半是订阅用的不是这把钥匙（FCM 403、Mozilla 401），换另一把还有救。
+ * 中继回包只认 upstream_error（推送服务的原状态），中继自己将来若加 403 类拒绝不能被当成换钥匙的信号
+ */
+const keyRejected = (o: SendOutcome): boolean => (o.status === 401 || o.status === 403) && (o.error === undefined || o.error === "upstream_error");
 
 interface WebPushRoute {
   key: string;
@@ -83,7 +88,8 @@ export function createPushSender(d: SenderDeps): PushSender {
     if (send && b.vapidPublicKey && !out.some((o) => o.key === b.vapidPublicKey)) {
       out.push({
         key: b.vapidPublicKey,
-        send: (sub, payload, ttl) =>
+        // 中继那边投前会再验 endpoint；直发只能自己验——存量订阅（迁移按列复制）没经过登记时的检查
+        send: (sub, payload, ttl) => pushEndpointProblem(sub.endpoint) ? Promise.resolve({ ok: false, gone: false, error: "endpoint_forbidden" }) :
           send(sub, payload, { ttl }).then(
             (status): SendOutcome => ({ ...webPushOutcome(status), status }),
             (e: unknown): SendOutcome => ({ ok: false, gone: false, error: (e as Error).message }),

@@ -70,7 +70,9 @@ describe("Web Push 按订阅的公钥选路", () => {
     await sender.sendWebPush({ ...SUB, vapidKey: null }, "{}");
     relayAck = { ok: false, error: "rate_limited" };
     await sender.sendWebPush({ ...SUB, vapidKey: null }, "{}");
-    expect(calls.map((c) => c.via)).toEqual(["relay", "relay", "relay"]);
+    relayAck = { ok: false, status: 403, error: "some_future_relay_refusal" }; // 中继自己的 403 不是推送服务拒签名
+    await sender.sendWebPush({ ...SUB, vapidKey: null }, "{}");
+    expect(calls.map((c) => c.via)).toEqual(["relay", "relay", "relay", "relay"]);
   });
   test("中继离线：只剩直发；webPushKeys 中继在前、离线时只剩本机", async () => {
     expect(sender.webPushKeys()).toEqual(["RELAY", "OWN"]);
@@ -78,6 +80,11 @@ describe("Web Push 按订阅的公钥选路", () => {
     expect(sender.webPushKeys()).toEqual(["OWN"]);
     await sender.sendWebPush({ ...SUB, vapidKey: "RELAY" }, "{}");
     expect(calls.map((c) => c.via)).toEqual(["direct"]);
+  });
+  test("直发前也验 endpoint（存量订阅没经过登记检查）：私网地址不发", async () => {
+    const r = await sender.sendWebPush({ endpoint: "https://10.0.0.8/push", keys: SUB.keys, vapidKey: "OWN" }, "{}");
+    expect(r).toMatchObject({ ok: false, error: "endpoint_forbidden" });
+    expect(calls).toEqual([]);
   });
   test("交给后端的只有 endpoint + keys，本地字段（vapidKey / ua）不进 push 帧", async () => {
     await sender.sendWebPush({ ...SUB, vapidKey: "RELAY", ua: "Mozilla" } as never, "{}");

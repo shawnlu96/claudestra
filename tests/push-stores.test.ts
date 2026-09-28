@@ -31,8 +31,12 @@ describe("push-store", () => {
     expect(listPushSubscriptions(db)[0].vapidKey).toBe("RELAY");
     savePushSubscription(db, sub("a"), "ua", "OWN");
     expect(listPushSubscriptions(db)[0].vapidKey).toBe("OWN");
-    setPushSubscriptionKey(db, "https://push.example/a", "RELAY");
+    setPushSubscriptionKey(db, sub("a"), "RELAY");
     expect(listPushSubscriptions(db)[0].vapidKey).toBe("RELAY");
+    // 发送途中被重新订阅（密钥变了）：旧投递结果不覆盖新登记
+    savePushSubscription(db, { ...sub("a"), keys: { p256dh: "re", auth: "re" } }, "ua", "OWN");
+    setPushSubscriptionKey(db, sub("a"), "RELAY");
+    expect(listPushSubscriptions(db)[0].vapidKey).toBe("OWN");
   });
   test("dismissSafe：UA 为空或 iOS 的不发 dismiss", () => {
     expect(dismissSafe({ ...sub("x"), ua: "", vapidKey: null })).toBe(false);

@@ -27,6 +27,9 @@ function parseKeys(raw: string): WebPushSubscription["keys"] | null {
   }
 }
 
+/** keys 列只存两把密钥（别的字段不存） */
+const keysJson = (k: WebPushSubscription["keys"]) => JSON.stringify({ p256dh: k.p256dh, auth: k.auth });
+
 export function listPushSubscriptions(db: Database): PushSubscriptionRow[] {
   const rows = db.prepare("SELECT endpoint, keys, ua, vapid_key FROM push_subscriptions").all() as { endpoint: string; keys: string; ua: string; vapid_key: string | null }[];
   const out: PushSubscriptionRow[] = [];
@@ -42,12 +45,18 @@ export function savePushSubscription(db: Database, sub: WebPushSubscription, ua:
   db.prepare(
     `INSERT INTO push_subscriptions (endpoint, keys, ua, created_at, vapid_key) VALUES (?, ?, ?, ?, ?)
      ON CONFLICT(endpoint) DO UPDATE SET keys = excluded.keys, ua = excluded.ua, vapid_key = excluded.vapid_key`,
-  ).run(sub.endpoint, JSON.stringify({ p256dh: sub.keys.p256dh, auth: sub.keys.auth }), ua.slice(0, 300), now.toISOString(), vapidKey);
+  ).run(sub.endpoint, keysJson(sub.keys), ua.slice(0, 300), now.toISOString(), vapidKey);
 }
 
-/** 投递成功后记下实际对上的那把公钥（老订阅 / 登记时记错的，下次直接走对的路） */
-export function setPushSubscriptionKey(db: Database, endpoint: string, vapidKey: string): void {
-  db.prepare("UPDATE push_subscriptions SET vapid_key = ? WHERE endpoint = ?").run(vapidKey, endpoint);
+/**
+ * 投递成功后记下实际对上的那把公钥（老订阅 / 登记时记错的，下次直接走对的路）。
+ * 带上投递时的密钥做条件（按字段比，不比 JSON 原文——BFF 时代迁来的行格式不一定相同）：
+ * 发送途中这个 endpoint 被重新订阅（换了密钥和公钥）时，旧结果不能盖掉新登记
+ */
+export function setPushSubscriptionKey(db: Database, sub: WebPushSubscription, vapidKey: string): void {
+  db.prepare(
+    "UPDATE push_subscriptions SET vapid_key = ? WHERE endpoint = ? AND json_extract(keys, '$.p256dh') = ? AND json_extract(keys, '$.auth') = ?",
+  ).run(vapidKey, sub.endpoint, sub.keys.p256dh, sub.keys.auth);
 }
 
 export function deletePushSubscription(db: Database, endpoint: string): boolean {

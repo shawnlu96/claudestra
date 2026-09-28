@@ -70,7 +70,7 @@ export function createDispatcher(d: DispatcherDeps): Dispatcher {
     const json = JSON.stringify(d.fp ? { fp: d.fp, ...payload } : payload);
     await Promise.all(subs.map(async (s) => {
       const r = await d.sender.sendWebPush(s, json);
-      if (r.ok && r.vapidKey && r.vapidKey !== s.vapidKey) setPushSubscriptionKey(d.db, s.endpoint, r.vapidKey);
+      if (r.ok && r.vapidKey && r.vapidKey !== s.vapidKey) setPushSubscriptionKey(d.db, s, r.vapidKey);
       if (r.gone) {
         deletePushSubscription(d.db, s.endpoint);
         log(`订阅已失效，已清理（${r.status ?? r.error}）`);
