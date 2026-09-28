@@ -4,11 +4,13 @@
  */
 import type { Database } from "bun:sqlite";
 import {
+  ASSIGNEE_KINDS,
   isStageOfKind,
   ITEM_STATUSES,
   roleOf,
   STAGES,
   TASK_KINDS,
+  type AssigneeKind,
   type ItemStatus,
   type LedgerEvent,
   type LedgerItem,
@@ -21,7 +23,7 @@ import { getItem, getMeta, getTask, LedgerError } from "./ledger-store.js";
 
 /** specRev 不在里面：它只由阶段机（回退到 spec）维护 */
 export const ITEM_FIELDS = ["title", "ownerWords", "priority", "status", "oneLine", "next", "extra"] as const;
-export const TASK_FIELDS = ["title", "itemId", "agent", "pm", "branch", "pr", "headSHA", "spec", "model", "extra"] as const;
+export const TASK_FIELDS = ["title", "itemId", "agent", "assigneeKind", "assignee", "pm", "branch", "pr", "headSHA", "spec", "model", "extra"] as const;
 
 export type ItemPatch = Partial<Pick<LedgerItem, (typeof ITEM_FIELDS)[number]>>;
 export type TaskPatch = Partial<Pick<LedgerTask, (typeof TASK_FIELDS)[number]>>;
@@ -85,6 +87,8 @@ export interface NewTask {
   kind: TaskKind;
   itemId?: string | null;
   agent?: string | null;
+  assigneeKind?: AssigneeKind | null;
+  assignee?: string | null;
   pm?: string | null;
   branch?: string | null;
   pr?: string | null;
@@ -113,6 +117,42 @@ export function checkNewTask(db: Database, actor: string, input: NewTask): boole
   checkIdFree(db, input.id, "task");
   checkItemRef(db, input.project, input.itemId);
   return imported;
+}
+
+type Assignment = Pick<LedgerTask, "agent" | "assigneeKind" | "assignee">;
+const ASSIGNEE_MAX = 64;
+
+function checkAssignee(kind: unknown, who: string): void {
+  if (!ASSIGNEE_KINDS.includes(kind as AssigneeKind)) throw new LedgerError("invalid", `assigneeKind 只能是 ${ASSIGNEE_KINDS.join(" / ")}，收到 ${String(kind)}`);
+  // 控制字符与空白会让 name@peer 路由、principal 比对都对不上，名字太长多半是把整句话塞进来了
+  if ([...who].length > ASSIGNEE_MAX || /[\s\p{Cc}]/u.test(who)) throw new LedgerError("invalid", `assignee 不能含空白 / 控制字符，且不超过 ${ASSIGNEE_MAX} 字：${who}`);
+  if (kind === "peer_agent" && !/^[^@]+@[^@]+$/.test(who)) throw new LedgerError("invalid", `peer_agent 的 assignee 要写成 agent@peer：${who}`);
+}
+
+/**
+ * 负责人三列的联动（改 / 建任务都经这里）：agent 列仍是执行者角色的依据（roleOf），所以 kind=agent 时 agent 与 assignee 同值，
+ * 人 / 别的实例上的 agent 在本机没有执行者身份，agent 置空。patch 里 agent 与 assignee* 不能同时出现（两个来源会打架）。
+ * 返回要写的列；patch 不涉及负责人时为空对象。
+ */
+export function resolveAssignee(cur: Assignment, patch: Record<string, unknown>): Partial<Assignment> {
+  const byAgent = "agent" in patch;
+  const byAssignee = "assignee" in patch || "assigneeKind" in patch;
+  if (byAgent && byAssignee) throw new LedgerError("invalid", "agent 与 assigneeKind / assignee 不能同时改：本机 agent 用其一即可");
+  if (byAgent) {
+    const agent = (patch.agent as string | null) || null;
+    if (agent) return { agent, assigneeKind: "agent", assignee: agent };
+    return cur.assigneeKind === "agent" || cur.assigneeKind === null ? { agent: null, assigneeKind: null, assignee: null } : { agent: null };
+  }
+  if (!byAssignee) return {};
+  const kind = ("assigneeKind" in patch ? patch.assigneeKind : cur.assigneeKind) as AssigneeKind | null;
+  const who = (("assignee" in patch ? patch.assignee : cur.assignee) as string | null) || null;
+  if (!who) {
+    if ("assigneeKind" in patch && patch.assigneeKind) throw new LedgerError("invalid", "给了 assigneeKind 就要同时给 assignee");
+    return { agent: null, assigneeKind: null, assignee: null };
+  }
+  if ("assigneeKind" in patch && !("assignee" in patch) && kind !== cur.assigneeKind) throw new LedgerError("invalid", "换负责人类型要同时给 assignee");
+  checkAssignee(kind, who);
+  return { agent: kind === "agent" ? who : null, assigneeKind: kind, assignee: who };
 }
 
 export interface WriteCtx {

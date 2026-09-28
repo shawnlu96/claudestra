@@ -16,13 +16,17 @@ export type Role = (typeof ROLES)[number];
 export const ITEM_STATUSES = ["todo", "decide", "design", "doing", "done", "dropped"] as const;
 export type ItemStatus = (typeof ITEM_STATUSES)[number];
 
-/** stage / item / task / meta 由写入函数自动产生；其余由调用方显式追加 */
+/** stage / item / task / meta / dep 由写入函数自动产生；其余由调用方显式追加 */
 const EVENT_KINDS = [
-  "stage", "item", "task", "meta", "note", "deliver", "review", "decision", "deploy", "verify", "rollback", "freeze", "unfreeze",
+  "stage", "item", "task", "meta", "dep", "note", "deliver", "review", "decision", "deploy", "verify", "rollback", "freeze", "unfreeze",
 ] as const;
 export type EventKind = (typeof EVENT_KINDS)[number];
 
 export type ReviewVerdict = "pass" | "changes" | "block";
+
+/** 负责人类型：本机 agent（agent 列同值，执行者角色照旧按 agent 认）/ 人（principal 名）/ 别的实例上的 agent（name@peer） */
+export const ASSIGNEE_KINDS = ["agent", "human", "peer_agent"] as const;
+export type AssigneeKind = (typeof ASSIGNEE_KINDS)[number];
 
 export interface LedgerItem {
   project: string;
@@ -49,6 +53,8 @@ export interface LedgerTask {
   stageBefore: Stage | null;
   round: number;
   agent: string | null;
+  assigneeKind: AssigneeKind | null;
+  assignee: string | null;
   pm: string | null;
   branch: string | null;
   pr: string | null;

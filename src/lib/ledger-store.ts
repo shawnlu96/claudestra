@@ -6,13 +6,12 @@
 import { Database } from "bun:sqlite";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
-import type { EventKind, LedgerEvent, LedgerItem, LedgerTask } from "./ledger-stages.js";
+import type { DepKind, DepState, LedgerDep } from "./ledger-deps.js";
+import type { AssigneeKind, EventKind, LedgerEvent, LedgerItem, LedgerTask } from "./ledger-stages.js";
 import { statePath } from "./paths.js";
 
 export const LEDGER_PATH = statePath("ledger.sqlite");
-export const LEDGER_TABLES = ["items", "tasks", "events", "meta"] as const;
-/** PRAGMA user_version；升级时在 MIGRATIONS 末尾追加一步，旧库按顺序补齐 */
-export const LEDGER_SCHEMA_VERSION = 1;
+export const LEDGER_TABLES = ["items", "tasks", "events", "meta", "task_deps"] as const;
 /** 另一个进程持有写锁时最多等这么久，再报 SQLITE_BUSY */
 const BUSY_TIMEOUT_MS = 5000;
 /** 切 WAL 时每次尝试只等这么久，总时长由 ensureWal 的退避循环控制在 BUSY_TIMEOUT_MS 内 */
@@ -69,8 +68,34 @@ CREATE TABLE meta (
   value TEXT NOT NULL, PRIMARY KEY (project, key));
 `;
 
-/** 下标 i 把库从版本 i 升到 i+1 */
-const MIGRATIONS: string[] = [SCHEMA_V1];
+/**
+ * 依赖边 + 负责人类型（T8h）。when / from / to 是 SQL 关键字，列名用 cond / fromTask / toTask，行映射成 when / from / to。
+ * 旧任务有 agent 的回填成 assigneeKind=agent；两端都要是已有任务、不许自环，环与同项目在写入层判（ledger-deps-write.ts）。
+ */
+const SCHEMA_DEPS = `
+ALTER TABLE tasks ADD COLUMN assigneeKind TEXT CHECK (assigneeKind IN ('agent','human','peer_agent'));
+ALTER TABLE tasks ADD COLUMN assignee TEXT;
+UPDATE tasks SET assigneeKind = 'agent', assignee = agent WHERE agent IS NOT NULL AND agent != '';
+CREATE TABLE task_deps (
+  project TEXT NOT NULL,
+  fromTask TEXT NOT NULL REFERENCES tasks(id), toTask TEXT NOT NULL REFERENCES tasks(id),
+  kind TEXT NOT NULL CHECK (kind IN ('blocks','branch')),
+  cond TEXT NOT NULL DEFAULT '',
+  state TEXT CHECK (state IN ('waiting','active','done')),
+  rev INTEGER NOT NULL DEFAULT 1, createdBy TEXT NOT NULL,
+  createdAt INTEGER NOT NULL, updatedAt INTEGER NOT NULL,
+  PRIMARY KEY (fromTask, toTask), CHECK (fromTask <> toTask));
+CREATE INDEX task_deps_to ON task_deps(toTask);
+CREATE INDEX task_deps_project ON task_deps(project);
+`;
+
+/** 下标 i 把库从版本 i 升到 i+1；新迁移只往末尾追加（并行分支后合的一方改号即可，常量都由下标算） */
+export const LEDGER_MIGRATIONS: readonly string[] = [SCHEMA_V1, SCHEMA_DEPS];
+const MIGRATIONS = LEDGER_MIGRATIONS;
+/** PRAGMA user_version 的最新值 */
+export const LEDGER_SCHEMA_VERSION = MIGRATIONS.length;
+/** 从这个版本起库里有 task_deps 与 assignee 列：bridge 读到还没被 CLI 迁移的旧库时据此跳过 */
+export const DEPS_SCHEMA_VERSION = MIGRATIONS.indexOf(SCHEMA_DEPS) + 1;
 
 function isBusy(e: unknown): boolean {
   return String((e as { code?: unknown })?.code ?? "").startsWith("SQLITE_BUSY");
@@ -160,8 +185,17 @@ export function toItem(r: Row): LedgerItem {
   return { ...(r as unknown as LedgerItem), extra: parseJson(r.extra) };
 }
 
+/** 旧版本库（还没迁移）读出来没有 assignee 列，补成 null，接口形状不随库版本变 */
 export function toTask(r: Row): LedgerTask {
-  return { ...(r as unknown as LedgerTask), extra: parseJson(r.extra) };
+  const assigneeKind = (r.assigneeKind ?? null) as AssigneeKind | null;
+  return { ...(r as unknown as LedgerTask), assigneeKind, assignee: (r.assignee ?? null) as string | null, extra: parseJson(r.extra) };
+}
+
+export function toDep(r: Row): LedgerDep {
+  return {
+    project: String(r.project), from: String(r.fromTask), to: String(r.toTask), kind: r.kind as DepKind, when: String(r.cond),
+    state: (r.state ?? null) as DepState | null, rev: Number(r.rev), createdBy: String(r.createdBy), createdAt: Number(r.createdAt), updatedAt: Number(r.updatedAt),
+  };
 }
 
 export function toEvent(r: Row): LedgerEvent {
@@ -186,6 +220,17 @@ export function getTask(db: Database, id: string): LedgerTask | null {
 
 export function listTasks(db: Database, project: string): LedgerTask[] {
   return (db.prepare("SELECT * FROM tasks WHERE project = ? ORDER BY id").all(project) as Row[]).map(toTask);
+}
+
+export function getDep(db: Database, from: string, to: string): LedgerDep | null {
+  const r = db.prepare("SELECT * FROM task_deps WHERE fromTask = ? AND toTask = ?").get(from, to) as Row | null;
+  return r ? toDep(r) : null;
+}
+
+/** 项目的全部依赖边；库还是迁移前的版本（bridge 先于 CLI 升级）时为空 */
+export function listDeps(db: Database, project: string): LedgerDep[] {
+  if (schemaVersion(db) < DEPS_SCHEMA_VERSION) return [];
+  return (db.prepare("SELECT * FROM task_deps WHERE project = ? ORDER BY fromTask, toTask").all(project) as Row[]).map(toDep);
 }
 
 export interface EventQuery {

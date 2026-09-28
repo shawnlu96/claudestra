@@ -21,16 +21,21 @@ import { agentKey, intFlag, jsonObjectFlag } from "./ledger-identity.js";
 import { MASTER_PARENT, TASK_MAX, validateParent, validateTask } from "./team.js";
 
 const ITEM_FLAGS: Record<string, string> = { title: "title", status: "status", priority: "priority", "owner-words": "ownerWords", "one-line": "oneLine", next: "next" };
-const TASK_FLAGS: Record<string, string> = { title: "title", item: "itemId", agent: "agent", pm: "pm", branch: "branch", pr: "pr", head: "headSHA", spec: "spec", model: "model" };
+const TASK_FLAGS: Record<string, string> = {
+  title: "title", item: "itemId", agent: "agent", "assignee-kind": "assigneeKind", assignee: "assignee", pm: "pm", branch: "branch", pr: "pr", head: "headSHA", spec: "spec", model: "model",
+};
 const ITEM_VALUED = [...Object.keys(ITEM_FLAGS), "extra", "project", "dedup"];
 const TASK_VALUED = [...Object.keys(TASK_FLAGS), "extra", "dedup"];
 
-/** 旗标 → 字段 patch；agent / pm 归一成 registry 键 */
-function fieldsFrom(c: LedgerCli, map: Record<string, string>): Record<string, unknown> {
+/** 旗标 → 字段 patch；agent / pm（以及类型为 agent 的 assignee）归一成 registry 键，空串 = 清空 */
+function fieldsFrom(c: LedgerCli, map: Record<string, string>, curKind: string | null = null): Record<string, unknown> {
   const out: Record<string, unknown> = {};
+  const localAssignee = (c.p.flags["assignee-kind"] ?? curKind) === "agent";
   for (const [flag, field] of Object.entries(map)) {
     const v = c.p.flags[flag];
-    if (v !== undefined) out[field] = field === "agent" || field === "pm" ? (v ? agentKey(v) : null) : v;
+    if (v === undefined) continue;
+    const isAgent = field === "agent" || field === "pm" || (field === "assignee" && localAssignee);
+    out[field] = isAgent ? (v ? agentKey(v) : null) : field === "assigneeKind" || field === "assignee" ? v || null : v;
   }
   const extra = jsonObjectFlag(c.p, "extra");
   if (extra) out.extra = extra;
@@ -127,9 +132,9 @@ async function taskSet(c: LedgerCli): Promise<Result> {
   }
   const rev = intFlag(c.p, "rev");
   if (rev === undefined) throw new LedgerError("invalid", "改任务要带 --rev（show 里看当前 rev）");
-  const r = setTask(c.db, c.ctx(), { id: cur.id, rev, patch: fieldsFrom(c, TASK_FLAGS) as never });
-  // dedup 重试：上次是否改了执行者看不出来，只要这次带了 --agent 就再挂一次（幂等）
-  const relink = r.row.agent && (r.duplicate ? c.p.flags.agent !== undefined : r.row.agent !== cur.agent);
+  const r = setTask(c.db, c.ctx(), { id: cur.id, rev, patch: fieldsFrom(c, TASK_FLAGS, cur.assigneeKind) as never });
+  // dedup 重试：上次是否改了执行者看不出来，只要这次带了 --agent / --assignee 就再挂一次（幂等）
+  const relink = r.row.agent && (r.duplicate ? c.p.flags.agent !== undefined || c.p.flags.assignee !== undefined : r.row.agent !== cur.agent);
   return { ok: true, task: r.row, duplicate: r.duplicate, ...(relink ? await linkRegistry(c, r.row.agent as string, r.row.title) : {}) };
 }
 
@@ -219,10 +224,14 @@ export const WRITE_CMDS: Record<string, CommandSpec> = {
   "item-set": { valued: [...ITEM_VALUED, "rev"], usage: "item-set <id> --rev <n> [--title --status --priority --owner-words --one-line --next --extra]", run: itemSet },
   "task-new": {
     valued: [...TASK_VALUED, "kind", "project"],
-    usage: "task-new <id> --title <t> --kind code|investigate|ops [--item --agent --pm --branch --pr --head --spec --model --extra]",
+    usage: "task-new <id> --title <t> --kind code|investigate|ops [--item --agent | --assignee-kind agent|human|peer_agent --assignee <名>] [--pm --branch --pr --head --spec --model --extra]",
     run: taskNew,
   },
-  "task-set": { valued: [...TASK_VALUED, "rev"], usage: "task-set <id> --rev <n> [--title --item --agent --pm --branch --pr --head --spec --model --extra]", run: taskSet },
+  "task-set": {
+    valued: [...TASK_VALUED, "rev"],
+    usage: "task-set <id> --rev <n> [--title --item --agent | --assignee-kind --assignee] [--pm --branch --pr --head --spec --model --extra]",
+    run: taskSet,
+  },
   stage: { valued: ["from", "to", "text", "dedup"], usage: "stage <task> --from <当前阶段> --to <阶段> [--text]", run: stage },
   note: { valued: ["project", "dedup"], usage: "note <task|item|-> <正文>", run: note },
   deliver: { valued: ["head", "evidence", "from", "text", "dedup"], usage: "deliver <task> [--head <sha>] [--evidence <path>] [--from build|fix] [--text]", run: deliverCmd },
