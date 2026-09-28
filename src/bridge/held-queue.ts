@@ -57,17 +57,22 @@ export class HeldQueue extends PersistedMap<HeldItem[]> {
   }
 
   /**
-   * 追加一条并落盘，返回这个频道排队的条数。同一封（messageId + threadId 都相同；messageId 只是「前缀_毫秒」会撞）已在队里就不再加：
+   * 追加一条并落盘，返回这个频道排队的条数。同一封（messageId 相同，router.ts newMessageId 保证唯一）已在队里就不再加：
    * flush 投到一半目标又忙，deliverToLocal 会把正在投的那条再 hold 一次——原条目留着，首次入队 / 提醒时间不被刷新。
    * 换新数组不原地 push：flush 遍历的快照不受影响。
    */
   hold(channelId: string, item: HeldItem): number {
     const cur = this.get(channelId) ?? [];
-    const same = (i: HeldItem) => i.env.meta.messageId === item.env.meta.messageId && i.env.meta.threadId === item.env.meta.threadId;
-    if (cur.some(same)) return cur.length;
+    if (cur.some((i) => i.env.meta.messageId === item.env.meta.messageId)) return cur.length;
     const q = [...cur, item];
     this.set(channelId, q);
     return q.length;
+  }
+
+  /** 按信封的收件方押后，入队时间取现在 */
+  holdEnv(env: Envelope): number {
+    const to = env.to as LocalEndpoint;
+    return this.hold(to.channelId, { env, to, heldAt: Date.now() });
   }
 
   /** 投出去之后才摘掉并落盘：投递中途崩溃 / 别处 set 触发整表落盘时，盘上都还有它（至少投一次，收件方看 message_id 去重） */

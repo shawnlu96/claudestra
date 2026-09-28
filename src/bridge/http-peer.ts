@@ -8,7 +8,7 @@
 
 import type { ServerWebSocket } from "bun";
 import type { Envelope, Delivery } from "./router.js";
-import { newThreadId } from "./router.js";
+import { newMessageId, newThreadId } from "./router.js";
 import { findHttpPeer, type HttpPeer } from "../lib/peers.js";
 import { handoffEnd, handoffStart } from "../lib/handoff-log.js";
 import { signedFor } from "../lib/instance-key.js";
@@ -365,7 +365,7 @@ async function pushToCaller(caller: CallerRef, content: string, peer: HttpPeer, 
   }
   const ws = (caller.ws ?? d.getClientWs?.(caller.channelId) ?? undefined) as ServerWebSocket<unknown>;
   // messageId 按 callId 派生：重启后同一条推回再推一次时 ID 不变，收件方认得出是重复
-  const messageId = callId ? `hp_${callId}_${isReply ? "reply" : Bun.hash(content).toString(36)}` : `hp_reply_${Date.now()}`;
+  const messageId = callId ? `hp_${callId}_${isReply ? "reply" : Bun.hash(content).toString(36)}` : newMessageId("hp_reply");
   const env: Envelope = {
     from: { kind: "local", agentName: `peer ${peer.name}/${peerAgent}`, channelId: caller.channelId, ws },
     to: { kind: "local", agentName: caller.name, channelId: caller.channelId, ws },

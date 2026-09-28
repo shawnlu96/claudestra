@@ -7,12 +7,13 @@
  * 证。
  */
 
-import { describe, test, expect } from "bun:test";
+import { describe, test, expect, spyOn } from "bun:test";
 import {
   parseAddress,
   formatAddress,
   parseChatId,
   formatChatId,
+  newMessageId,
   newThreadId,
   endpointLabel,
   envelopeLabel,
@@ -136,6 +137,24 @@ describe("newThreadId", () => {
   test("格式 thr_<ts>_<rand>", () => {
     const id = newThreadId();
     expect(id).toMatch(/^thr_\d+_[a-z0-9]+$/);
+  });
+});
+
+describe("newMessageId", () => {
+  test("格式 <前缀>_<ts>_<rand>，前缀原样保留", () => {
+    expect(newMessageId("agent")).toMatch(/^agent_\d+_[a-z0-9]+$/);
+    expect(newMessageId("held_gave-up").startsWith("held_gave-up_")).toBe(true);
+  });
+
+  test("同一毫秒生成的也不撞（押后队列按它去重）", () => {
+    const now = spyOn(Date, "now").mockReturnValue(1_790_591_988_218);
+    try {
+      const ids = new Set(Array.from({ length: 1000 }, () => newMessageId("agent")));
+      expect(ids.size).toBe(1000);
+      for (const id of ids) expect(id.startsWith("agent_1790591988218_")).toBe(true);
+    } finally {
+      now.mockRestore();
+    }
   });
 });
 

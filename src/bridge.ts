@@ -451,7 +451,7 @@ function nudgeAmbiguousCallers(cid: string): void {
   const amb = pendingAgentCalls.takeAmbiguity(cid, stillHeldFor(cid));
   const to = amb.length ? clients.get(cid) : undefined;
   if (to) void deliver({ from: { kind: "bridge", label: "agent-calls" }, to: { kind: "local", channelId: cid, ws: to.ws, cwd: to.cwd }, intent: "notification",
-    content: ambiguityNotice(amb), meta: { messageId: `amb_${Date.now()}`, triggerKind: "bridge_synth", ts: new Date().toISOString(), threadId: newThreadId() } });
+    content: ambiguityNotice(amb), meta: { messageId: newMessageId("amb"), triggerKind: "bridge_synth", ts: new Date().toISOString(), threadId: newThreadId() } });
 }
 
 /** caller 当时填的 expecting 放在答复最前面,caller 不靠自己记得也能接着干 */
@@ -472,10 +472,10 @@ async function pushBackToCaller(pac: PendingAgentCall, fromWs: ServerWebSocket<u
     to: { kind: "local", agentName: pac.callerName, channelId: pac.callerChannelId, ws: callerWs, cwd: live?.cwd },
     intent: "response",
     content,
-    meta: { messageId: `${idPrefix}_${Date.now()}`, triggerKind: "agent_tool", ts: new Date().toISOString(), threadId: newThreadId() },
+    meta: { messageId: newMessageId(idPrefix), triggerKind: "agent_tool", ts: new Date().toISOString(), threadId: newThreadId() },
   };
   if (live) return (await deliver(env)).outcome;
-  heldLocalMsgs.hold(pac.callerChannelId, { env, to: env.to as RouterLocalEndpoint, heldAt: Date.now() });
+  heldLocalMsgs.holdEnv(env);
   console.log(`⏸ ${pac.callerName} 不在线,${pac.targetName} 的答复进押后队列,连上后投`);
   return { kind: "sent" as const, note: "queued" };
 }
@@ -543,7 +543,7 @@ import type {
   Envelope as RouterEnvelope,
   Delivery as RouterDelivery,
 } from "./bridge/router.js";
-import { endpointLabel, envelopeLabel, newThreadId, parseChatId } from "./bridge/router.js";
+import { endpointLabel, envelopeLabel, newMessageId, newThreadId, parseChatId } from "./bridge/router.js";
 import { ageHeld, heldNoticeText, HeldQueue, unseenFrom } from "./bridge/held-queue.js";
 import { flushHeld } from "./bridge/held-flush.js";
 import { AgentCallBook, ambiguityNotice, type PendingAgentCall } from "./bridge/agent-calls.js";
@@ -745,7 +745,7 @@ async function mirrorApiExchange(to: RouterApiUserEndpoint, agentChannelId: stri
       intent: "notification",
       content: text,
       meta: {
-        messageId: `api_mirror_${Date.now()}`,
+        messageId: newMessageId("api_mirror"),
         triggerKind: "system",
         ts: new Date().toISOString(),
         threadId: newThreadId(),
@@ -880,7 +880,7 @@ async function deliverToLocal(env: RouterEnvelope, to: RouterLocalEndpoint, stil
   // flush 投递途中(上面几处 await)这条已被别处从押后队列摘掉(kill 清理 / 24 小时放弃):既不押回(会复活)也不发
   if (stillWanted && !stillWanted()) return { envelope: env, outcome: { kind: "dropped", reason: "已从押后队列撤下" } };
   if (busy) {
-    const n = heldLocalMsgs.hold(to.channelId, { env, to, heldAt: Date.now() });
+    const n = heldLocalMsgs.holdEnv(env); // 从 flush 来的是同一封,按 messageId 去重不会重复入队
     console.log(`⏸ 消息押后(${evAgent} ${compactingNow ? "压缩上下文中" : "回合中"}): 来自 ${meta.user},队列 ${n} 条`);
     // 对调用方是「已受理、排队中」(note=queued):真正 ws.send 在 Stop/扫描时发生,send_to_agent 据此告诉发送方
     return { envelope: env, outcome: { kind: "sent", note: "queued" } };
@@ -1068,7 +1068,7 @@ async function forwardReplyToAgentClaude(
     intent: answering ? "response" : "notification",
     content: answering ? withExpecting(answering, text) : text,
     meta: {
-      messageId: `reply_fwd_${Date.now()}`,
+      messageId: newMessageId("reply_fwd"),
       triggerKind: "agent_tool",
       ts: new Date().toISOString(),
       threadId: newThreadId(),
@@ -1521,7 +1521,7 @@ discord.on("messageCreate", async (msg: DiscordMessage) => {
     intent: "notification",
     content: t("💭 大聪明思考中...", "💭 Thinking..."),
     meta: {
-      messageId: `status_${channelId}_${Date.now()}`,
+      messageId: newMessageId(`status_${channelId}`),
       triggerKind: "bridge_synth",
       ts: new Date().toISOString(),
       threadId: newThreadId(),
@@ -1650,7 +1650,7 @@ async function notifyMaster(content: string): Promise<void> {
       intent: "notification",
       content,
       meta: {
-        messageId: `notify_${Date.now()}`,
+        messageId: newMessageId("notify"),
         triggerKind: "bridge_synth",
         ts: new Date().toISOString(),
         threadId: newThreadId(),
@@ -1911,7 +1911,7 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
           intent: "response",
           content: text,
           meta: {
-            messageId: `reply_${Date.now()}`,
+            messageId: newMessageId("reply"),
             triggerKind: "agent_tool",
             ts: new Date().toISOString(),
             threadId: newThreadId(),
@@ -2012,7 +2012,7 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
           intent: "notification",
           content: text,
           meta: {
-            messageId: `notify_${Date.now()}`,
+            messageId: newMessageId("notify"),
             triggerKind: "bridge_synth",
             ts: new Date().toISOString(),
             threadId: newThreadId(),
@@ -2405,7 +2405,7 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
           intent: "request",
           content: msg.text || "",
           meta: {
-            messageId: `agent_${Date.now()}`,
+            messageId: newMessageId("agent"),
             triggerKind: "agent_tool",
             ts: new Date().toISOString(),
             threadId: newThreadId(),
@@ -2703,7 +2703,7 @@ async function cleanupStaleThinkingMessages(): Promise<void> {
 const PAC_STALE_MS = 2 * 3_600_000;
 setInterval(() => {
   const now = Date.now();
-  const STALE_MS = 10 * 60_000;
+  const IA_WATCHDOG_STALE_MS = 10 * 60_000;
   for (const [key, pending] of pendingAgentCalls.entries()) {
     if (!shouldSweepPac(pending, heldFromOf(pending.targetChannelId ?? ""), now, PAC_STALE_MS)) continue;
     pendingAgentCalls.delete(key);
@@ -2716,7 +2716,7 @@ setInterval(() => {
     const caller = from.kind === "local" ? clients.get(from.channelId) : undefined;
     try {
       caller?.ws.send(JSON.stringify({ type: "message", content: heldNoticeText(n), meta: {
-        chat_id: (from as RouterLocalEndpoint).channelId, message_id: `held_${n.kind}_${now}`, ts: new Date().toISOString(), trigger: "system",
+        chat_id: (from as RouterLocalEndpoint).channelId, message_id: newMessageId(`held_${n.kind}`), ts: new Date().toISOString(), trigger: "system",
         intent: "notification", thread_id: newThreadId(), user: "bridge", user_id: "bridge", is_bridge: "true",
       } }));
     } catch { /* caller 也没了就算了:消息本身按上面的规则留着 / 已放弃 */ }
@@ -2739,7 +2739,7 @@ setInterval(() => {
     }
   }
   for (const [channelId, pending] of pendingInterAgentMsg.entries()) {
-    if (now - pending.ts > STALE_MS) {
+    if (now - pending.ts > IA_WATCHDOG_STALE_MS) {
       pendingInterAgentMsg.delete(channelId);
       console.log(`🧹 pendingInterAgentMsg stale: 清掉 ${channelId}（来自 ${pending.fromLabel}）`);
     }
@@ -2960,10 +2960,7 @@ async function handleHookRequest(req: Request): Promise<Response> {
                 });
               } else {
                 try {
-                  const callerCtxLine = pendingAgent.expecting
-                    ? `[💡 你之前 send_to_agent 给 ${pendingAgent.targetName} 时填的期望：${pendingAgent.expecting}]\n`
-                    : "";
-                  const pushBody = `${callerCtxLine}[ℹ️ 对方 (${pendingAgent.targetName}) 这轮没用 reply() 工具，下面是 bridge 从 assistant 文字兜底转发的：]\n\n${drainedText}`;
+                  const pushBody = withExpecting(pendingAgent, `[ℹ️ 对方 (${pendingAgent.targetName}) 这轮没用 reply() 工具，下面是 bridge 从 assistant 文字兜底转发的：]\n\n${drainedText}`);
                   await pushBackToCaller(pendingAgent, clients.get(cid)?.ws, pendingAgent.originalReplyChannel || cid, pushBody, "agent_drain");
                   pendingAgentCalls.consume(cid, pendingAgent.callerChannelId, pendingAgent);
                   console.log(`📨 AGENT PUSH-BACK (drain兜底): ${pendingAgent.targetName} → ${pendingAgent.callerName}（drain 文字）`);
@@ -3031,7 +3028,7 @@ async function handleHookRequest(req: Request): Promise<Response> {
                       intent: "notification",
                       content: nudgeText,
                       meta: {
-                        messageId: `ia_nudge_${Date.now()}`,
+                        messageId: newMessageId("ia_nudge"),
                         triggerKind: "bridge_synth",
                         ts: new Date().toISOString(),
                         threadId: newThreadId(),
@@ -3197,7 +3194,7 @@ initApiRoutes({
 // v2.11+ HTTP peer 出站 transport（docs/design-http-peers.md）
 initHttpPeer({
   deliver, getClientWs: (channelId) => (clients.get(channelId)?.ws as any) ?? null,
-  hold: (env) => void heldLocalMsgs.hold((env.to as RouterLocalEndpoint).channelId, { env, to: env.to as RouterLocalEndpoint, heldAt: Date.now() }),
+  hold: (env) => void heldLocalMsgs.holdEnv(env),
   handleApi: async (r) => (await handleTerminalApi(r, new URL(r.url))) ?? serveApiRequest(r, new URL(r.url)), // 中继路径模式的进程内 dispatch（relay-dispatch.ts）
 });
 
