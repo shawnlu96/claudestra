@@ -22,10 +22,16 @@ export function quoteExternal(s: string, max = MAX_QUOTE): string {
 /** 分支名 / PR 号这类引用：只认常见字符，别的不进通知和 prompt */
 export const refLike = (s: string | null | undefined): s is string => !!s && /^[\w./#:@-]{1,200}$/.test(s);
 
-/** 证据只认路径：不含空白与控制字符、不以 - 开头（不像命令行参数）、不太长 */
+/**
+ * 证据 / 结论 md 只认路径：字母数字（含中文文件名）加 ASCII 路径标点，至少带一个 / 或 .，不以 - 开头（不像命令行参数）、不太长。
+ * 空白、控制字符（C0 / C1）、\p{Cf}、【】「」和全角标点一律不认——放宽会让「路径」冒充判定词；显示时仍进引用框（pathQuote）。
+ */
 export function pathLike(s: string | null | undefined): s is string {
-  return !!s && s.length <= MAX_PATH && /^[\w~./][^\s\u0000-\u001f\u007f]*$/u.test(s);
+  return !!s && s.length <= MAX_PATH && /[./]/.test(s) && /^[\p{L}\p{N}_~./][\p{L}\p{M}\p{N}_~./+@%=,:#()-]*$/u.test(s);
 }
+
+/** 路径进通知 / prompt：认得是路径才引用，否则一句代码写的说明 */
+export const pathQuote = (s: string, notPath: string): string => (pathLike(s) ? quoteExternal(s, MAX_PATH) : notPath);
 
 /** git sha（短的也认）；执行者 --head 填的别的东西不进 prompt */
 export const shaLike = (s: string | null | undefined): s is string => !!s && /^[0-9a-f]{4,64}$/i.test(s);

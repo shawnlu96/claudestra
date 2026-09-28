@@ -14,10 +14,11 @@ import type { ServerWebSocket } from "bun";
 import { LedgerReader } from "../lib/ledger-read.js";
 import { getMeta, getTask, listEvents } from "../lib/ledger-store.js";
 import { statePath } from "../lib/paths.js";
+import { specPolicyOf } from "../lib/task-spec.js";
 import { readRegistryAgentsSync } from "../lib/registry.js";
 import { readJsonStateSync, writeJsonAtomicSync } from "../lib/state-file.js";
 import { runManagerProcess } from "../lib/run-manager.js";
-import { autoEscalations, routeEvents, type AutoEscalation, type RouteNotice } from "../lib/team-route.js";
+import { autoEscalations, routeEvents, type AutoEscalation, type RouteCtx, type RouteNotice } from "../lib/team-route.js";
 import { BUN_PATH, ENV_WITH_BUN, MANAGER_PATH } from "./config.js";
 import { onHeldDelivered } from "./held-flush.js";
 import { newThreadId, type Delivery, type Envelope } from "./router.js";
@@ -137,15 +138,16 @@ export function teamRouterTicker(d: TickerDeps): () => Promise<void> {
       const cursor = stale ? top : (saved as Cursor).seq;
       if (top === cursor) return;
       const batch = listEvents(db, { afterSeq: cursor });
-      const ctx = {
-        task: (id: string) => getTask(db, id),
-        team: (project: string) => {
+      const ctx: RouteCtx = {
+        task: (id) => getTask(db, id),
+        team: (project) => {
           const m = getMeta(db, project);
           return { pms: m.pms, team: m.team };
         },
-        events: (id: string) => listEvents(db, { target: id }),
+        events: (id) => listEvents(db, { target: id }),
+        policy: (t) => specPolicyOf(t, getMeta(db, t.project).docsDir),
         managerCmd: `bun ${MANAGER_PATH}`,
-        warn: (m: string) => d.log(`⚠️ 班子路由：${m}`),
+        warn: (m) => d.log(`⚠️ 班子路由：${m}`),
       };
       const notices = routeEvents(batch, ctx);
       const escalations = autoEscalations(batch, ctx);

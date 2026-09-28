@@ -1,7 +1,7 @@
 /** currentHandler（src/lib/ledger-handler.ts）：阶段默认值 + 事件推进，有 / 没有调度助理，终态为 null */
 import type { Database } from "bun:sqlite";
 import { beforeEach, describe, expect, test } from "bun:test";
-import { currentHandler, pmOf, type HandlerTeam } from "../src/lib/ledger-handler.js";
+import { currentHandler, pmOf, type HandlerTeam, type SpecPolicy } from "../src/lib/ledger-handler.js";
 import { getTask, listEvents, openLedger } from "../src/lib/ledger-store.js";
 import { appendEvent, createTask, deliver, moveStage, recordReview } from "../src/lib/ledger-write.js";
 import { tempLedgerPath } from "./ledger-test-helpers.js";
@@ -11,10 +11,10 @@ const owner = (now: number) => ({ actor: "owner", now });
 const withD: HandlerTeam = { pms: ["agent-pm", "agent-disp"], dispatcher: "agent-disp" };
 const noD: HandlerTeam = { pms: ["agent-pm"], dispatcher: null };
 
-function h(team: HandlerTeam = withD) {
+function h(team: HandlerTeam = withD, specPolicy?: SpecPolicy) {
   const t = getTask(db, "T1");
   if (!t) throw new Error("no task");
-  return currentHandler(t, listEvents(db, { target: "T1" }), team);
+  return currentHandler(t, listEvents(db, { target: "T1" }), team, specPolicy);
 }
 
 beforeEach(() => {
@@ -45,14 +45,14 @@ describe("currentHandler", () => {
     expect(h()).toMatchObject({ role: "executor", since: 60 });
   });
 
-  test("review 没推阶段：pass → PM，changes → 调度助理；escalate → PM / owner", () => {
+  test("review 没推阶段：pass（规格卡不要对抗式）→ PM，changes → 调度助理；escalate → PM / owner", () => {
     moveStage(db, owner(20), { taskId: "T1", from: "spec", to: "restate" });
     moveStage(db, owner(30), { taskId: "T1", from: "restate", to: "build" });
     deliver(db, { actor: "agent-exec", now: 40 }, { taskId: "T1", moveFrom: "build" });
     recordReview(db, owner(50), { taskId: "T1", reviewer: "regular", verdict: "changes", p0: 0, p1: 0, p2: 1 });
     expect(h()).toMatchObject({ role: "dispatcher", since: 50 });
     recordReview(db, owner(60), { taskId: "T1", reviewer: "adversarial", verdict: "pass", p0: 0, p1: 0, p2: 0 });
-    expect(h()).toMatchObject({ role: "pm", since: 60 });
+    expect(h(withD, "Claude 审查员一轮")).toMatchObject({ role: "pm", since: 60 });
     appendEvent(db, { actor: "agent-pm", now: 70 }, { project: "p", target: "T1", kind: "escalate", text: "要拍板", data: { to: "owner" } });
     expect(h()).toMatchObject({ role: "owner", agent: null, since: 70 });
     appendEvent(db, { actor: "agent-disp", now: 80 }, { project: "p", target: "T1", kind: "note", text: "note 不改谁在接" });
@@ -75,6 +75,19 @@ describe("currentHandler", () => {
     expect(h()).toMatchObject({ role: "pm", agent: "agent-pm", since: 100 });
     appendEvent(db, owner(110), { project: "p", target: "T1", kind: "decision", text: "再记一条", data: {} });
     expect(h()).toMatchObject({ since: 100 }); // 不在等 owner 时 decision 不改谁在接
+  });
+
+  test("没有 dispatch 的 pass：审查策略取规格卡（与 review-pack 同源），规格卡也没有 = 不知道 → 调度助理", () => {
+    moveStage(db, owner(20), { taskId: "T1", from: "spec", to: "restate" });
+    moveStage(db, owner(30), { taskId: "T1", from: "restate", to: "build" });
+    deliver(db, { actor: "agent-exec", now: 40 }, { taskId: "T1", moveFrom: "build" });
+    recordReview(db, { actor: "agent-disp", now: 50 }, { taskId: "T1", reviewer: "adversarial", verdict: "pass", p0: 0, p1: 0, p2: 0 });
+    // review 的 reviewer 是自由文本，写 adversarial 也不作数
+    expect(h(withD, "Claude 审查员一轮；最后一轮对抗式")).toMatchObject({ role: "dispatcher", agent: "agent-disp", since: 50 });
+    expect(h(withD)).toMatchObject({ role: "dispatcher", since: 50 });
+    expect(h(noD)).toMatchObject({ role: "pm", agent: "agent-pm" });
+    expect(h(withD, null)).toMatchObject({ role: "pm", since: 50 });
+    expect(h(withD, "Claude 审查员一轮")).toMatchObject({ role: "pm" });
   });
 
   test("merge 之后归 PM，终态返回 null", () => {
