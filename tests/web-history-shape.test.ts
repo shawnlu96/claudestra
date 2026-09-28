@@ -55,6 +55,18 @@ describe("toChatMessages（历史记录 → 气泡）", () => {
     const out = toChatMessages(items);
     expect(out.map((m) => `${m.role}:${m.content}`)).toEqual(["assistant:a", "system:已被用户中断", "assistant:b", "system:/clear", "system:上下文已压缩", "assistant:c"]);
   });
+  test("入站附件：头属性里的路径（网页上传）+ 正文标记（Discord 两处都写）合并去重；只有附件没有正文也成泡", () => {
+    const out = toChatMessages([
+      u(1, "看这两张", { attachments: ["/s/inbox/api_1_a.png", "/s/inbox/api_2_b.pdf"] }),
+      u(2, "[attachment: /s/inbox/1525_c.png]", { attachments: ["/s/inbox/1525_c.png"] }),
+      u(3, "", { attachments: ["/s/inbox/api_3_d.jpg"] }),
+    ]);
+    expect(out.map((m) => [m.content, m.attachments?.map((x) => `${x.kind}:${x.name}`)])).toEqual([
+      ["看这两张", ["image:api_1_a.png", "file:api_2_b.pdf"]],
+      ["", ["image:c.png"]],
+      ["", ["image:api_3_d.jpg"]],
+    ]);
+  });
   test("按钮点击的机器 payload 还原成组件 label，并回填锚点气泡的 replyClicks（已答态跨刷新持久）", () => {
     const comps = [{ type: "buttons" as const, buttons: [{ id: "go", label: "✅ 发版" }] }];
     const out = toChatMessages([a(1, { replyText: "要发版吗", replyComponents: comps }), u(2, "[button:go]"), u(3, "[button:nope]")]);

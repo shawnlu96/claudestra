@@ -23,6 +23,12 @@ describe("mediaRefsOf", () => {
     const rec = userRec(wrap('chat_id="api:1" message_id="m1" user="shawn" user_id="api:tok"', "看\n\n[attachment: /s/inbox/1_a.png]"));
     expect(mediaRefsOf(rec, 7)).toEqual([{ seq: 7, ts: TS, idx: 0, dir: "in", sender: "shawn", path: "/s/inbox/1_a.png", mid: "m1", prio: 1 }]);
   });
+  test("头属性里的附件（网页上传只有这一份）与正文标记合并去重", () => {
+    const attrs = 'message_id="m2" user="dev" attachments="/s/inbox/api_1_a.png;/s/inbox/1525_c.png"';
+    const refs = mediaRefsOf(userRec(wrap(attrs, "看\n\n[attachment: /s/inbox/1525_c.png]")), 4);
+    expect(refs.map((r) => [r.idx, r.path])).toEqual([[0, "/s/inbox/api_1_a.png"], [1, "/s/inbox/1525_c.png"]]);
+    expect(mediaRefsOf(userRec(wrap(attrs, "")), 4)).toHaveLength(2); // 只有附件没有正文
+  });
   test("queued_command 入站 prio=0，同 mid", () => {
     const rec = { type: "attachment", timestamp: TS, attachment: { type: "queued_command", commandMode: "prompt", prompt: wrap('message_id="m1" user="shawn"', "[attachment: /s/inbox/1_a.png]") } };
     const [r] = mediaRefsOf(rec, 3);

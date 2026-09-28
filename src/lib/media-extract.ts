@@ -1,7 +1,8 @@
 /**
  * 媒体索引的逐行抽取（纯函数）：一条已翻译成 Claude Code 形状的会话记录 → 里面人与 agent 之间传的附件引用。
  * 认的形态与历史面板一致（session-history.parseHistoryLines / web lib/chat/attachments.extractAttachments）：
- *  - 我发的：<channel> 入站消息正文里的 `[attachment: /path]`，旧 BFF 的 `[用户上传了 N 个文件…:\n- /path]`；
+ *  - 我发的：<channel> 头里的 attachments="a;b"（bridge 投递时写；网页上传只有这一份），正文里的 `[attachment: /path]`，
+ *    旧 BFF 的 `[用户上传了 N 个文件…:\n- /path]`；
  *    回合中途被队列吸收的入站消息落成 attachment/queued_command 记录，同一 message_id 另有 user 记录时以后者为准（prio 高）；
  *  - agent 发的：reply 工具调用的 input.files（绝对路径，bridge 投递时另拷一份进 inbox）。
  * agent↔agent 消息（is_agent="true"）与 bridge 注入（user="bridge:*"）不收：媒体视图只看人和 agent 之间的往来。
@@ -53,7 +54,7 @@ function channelHeader(raw: string): string {
 }
 
 function inboundRefs(raw: string, seq: number, ts: string | null, prio: number, wrapped: boolean): MediaRef[] {
-  let text = raw;
+  let paths = attachmentPathsInText(raw);
   let sender: string | undefined;
   let mid: string | undefined;
   if (wrapped) {
@@ -61,11 +62,12 @@ function inboundRefs(raw: string, seq: number, ts: string | null, prio: number, 
     if (!un) return [];
     if (un.from && /^bridge(:|$)/.test(un.from)) return [];
     if (/(?:^|\s)is_agent="true"/.test(channelHeader(raw))) return [];
-    text = un.text;
+    // 头属性（网页上传只有这一份）+ 正文标记（Discord 附件两处都有），按路径去重
+    paths = [...new Set([...(un.attachments ?? []), ...attachmentPathsInText(un.text)])];
     sender = un.from;
     mid = channelMessageId(raw) ?? undefined;
   }
-  return attachmentPathsInText(text).map((path, idx) => ({ seq, ts, idx, dir: "in" as const, sender, path, mid, prio }));
+  return paths.map((path, idx) => ({ seq, ts, idx, dir: "in" as const, sender, path, mid, prio }));
 }
 
 /** 一条记录 → 附件引用（没有返回空数组）。rec 是 translateSessionLine 的结果。 */
@@ -103,4 +105,4 @@ export function mediaRefsOf(rec: any, seq: number): MediaRef[] {
  * 出站 files 的标记太常见（工具参数、配置文件内容里都有），所以要求同一行里还有 `reply"`（MCP 名与 Pi 裸名都以它结尾）；
  * Codex 的工具参数是 JSON 字符串，引号被转义，单列一种写法。
  */
-export const MEDIA_MARKERS = { inbound: ["[attachment:", "用户上传了"], outbound: ['"files":[', '\\"files\\":['], outboundNeeds: 'reply"' };
+export const MEDIA_MARKERS = { inbound: ["[attachment:", "用户上传了", 'attachments=\\"'], outbound: ['"files":[', '\\"files\\":['], outboundNeeds: 'reply"' };
