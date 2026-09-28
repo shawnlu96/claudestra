@@ -69,4 +69,5 @@ export const COLLAB_DICT: Record<string, string> = {
   "没通过": "Failed",
   "查不到": "Inconclusive",
   "{who} 核对于 {t}": "Checked by {who} {t}",
+  "没查到它的状态，没发": "Couldn’t check its status — not sent.",
 };
