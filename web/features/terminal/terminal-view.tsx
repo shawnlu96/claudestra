@@ -6,6 +6,8 @@ import "@xterm/xterm/css/xterm.css";
 import { ControlBar } from "./control-bar";
 import { useT } from "@/lib/i18n";
 import { terminalInput, terminalResize, terminalStream } from "@/lib/api/terminal";
+import { postClientLog } from "@/lib/client-log";
+import { createOpenSettle } from "./open-settle";
 
 /**
  * 复制:剪贴板 API 优先;局域网明文 http(非安全上下文)下它不存在,回退
@@ -293,11 +295,14 @@ export function TerminalView({
     term.onBinary((data) => queueInputRef.current(data));
 
     // ── SSE 下行 ──
-    // ⚠ 延迟 50ms 再连：React dev 双 effect 的第一个 effect 会被同步清理——若
-    // 它已发出 fetch，abort 落在「Bridge 已开 PTY、Next 响应流未建立」的 race
-    // 窗口时取消传导会丢（实测漏过一条 → Bridge 僵尸 PTY，靠 TTL 才能回收）。
-    // 延迟让第一个 effect 的连接根本不发生；50ms 对真人无感。
+    // ⚠ 延迟 50ms 再连：React dev 双 effect 的第一个会被同步清理，已发出的 fetch 其 abort 可能丢 → Bridge 僵尸 PTY
     const connectTimer = window.setTimeout(connect, 50);
+    const settle = createOpenSettle((bytes, ms) => { // 画面稳定再揭开（open-settle.ts）；记首轮输出量，核对「尺寸一变 CC 整段重画」
+      if (disposed) return;
+      term.scrollToBottom();
+      setStatus("connected");
+      postClientLog(`[term] open settled agent=${agent} bytes=${bytes} ms=${ms} ${term.cols}x${term.rows}`);
+    });
     // 僵尸连接看门狗：iOS 回前台的挂起 socket 常常既不报错也不关闭——终端永远
     // 冻结且无重连入口。bridge 每 5s 发 ping,>15s 无任何字节 = 连接已死,主动
     // abort 走 error 分支,配合上面的自愈逻辑自动重连。
@@ -342,6 +347,7 @@ export function TerminalView({
             }
             if (evt.t === "o" && evt.d) {
               term.write(b64decode(evt.d));
+              settle.data(evt.d.length); // base64 长度，量级够用
             } else if (evt.t === "open" && evt.id) {
               termIdRef.current = evt.id;
               // 后端把 PTY clamp 到 tmux window 实际尺寸（被 iTerm 钳住时 < 视口）
@@ -358,6 +364,7 @@ export function TerminalView({
                   lastRows = r;
                   adaptFontSize(c);
                   setMirror({ cols: c, rows: r });
+                  settle.start(); // 手机要再按 window 尺寸 resize 一次：尺寸定了才开始等画面稳定
                 };
                 if (wc !== evt.cols || wr !== evt.rows) {
                   terminalResize(evt.id, wc, wr)
@@ -366,10 +373,10 @@ export function TerminalView({
                 } else {
                   apply(evt.cols, evt.rows);
                 }
-              } else if (evt.cols && evt.rows && (term.cols !== evt.cols || term.rows !== evt.rows)) {
-                term.resize(evt.cols, evt.rows);
+              } else {
+                if (evt.cols && evt.rows && (term.cols !== evt.cols || term.rows !== evt.rows)) term.resize(evt.cols, evt.rows);
+                settle.start();
               }
-              if (!disposed) setStatus("connected");
               autoRetriedRef.current = false; // 连上了,自愈闸复位
             } else if (evt.t === "resize" && evt.cols && evt.rows) {
               // 后端 settle 校正推送（iTerm 钳制解除失败的降级/恢复）——同步 xterm
@@ -527,6 +534,7 @@ export function TerminalView({
 
     return () => {
       disposed = true;
+      settle.cancel();
       clearTimeout(connectTimer); // dev 双 effect：首个 effect 的连接在 fire 前取消
       clearInterval(stallTimer);
       ro.disconnect();
@@ -537,11 +545,9 @@ export function TerminalView({
       if (wheelRaf !== null) cancelAnimationFrame(wheelRaf);
       stopInertia();
       if (resizeTimer !== null) clearTimeout(resizeTimer);
-      if (flushTimerRef.current !== null) {
-        clearTimeout(flushTimerRef.current);
-        flushTimerRef.current = null;
-        pendingRef.current = "";
-      }
+      if (flushTimerRef.current !== null) clearTimeout(flushTimerRef.current);
+      flushTimerRef.current = null;
+      pendingRef.current = "";
       abort.abort(); // 断 SSE → Bridge 销毁 PTY + viewer session
       term.dispose();
       termRef.current = null;
@@ -551,13 +557,8 @@ export function TerminalView({
 
   return (
     <div className="flex min-h-0 flex-1 flex-col bg-[#1e1e2e]">
-      {/* [mobile] 容器高 = 画布自然高（window 行数 × 行高），ControlBar 紧贴
-          其下，剩余空白由底部 spacer 沉底——修「画布 23 行 + 控制条钉屏底，
-          中间半屏留白」；且总高变小后 iOS 键盘弹出多数不再需要平移页面。
-          shrink + justify-end + overflow-hidden（2026-07-15）：远端行数多到
-          画布自然高超出可用高时（52×44 真机），容器被压缩、画布底对齐、裁的
-          是**顶部**——CC 的输入框/状态栏全在底部，裁顶无感;之前 shrink-0
-          会把键条下的提示行挤出屏（「底部截断」）。 */}
+      {/* [mobile] 容器高 = 画布自然高，ControlBar 紧贴其下、空白沉底（否则中间半屏留白）。画布比可用高还高时
+          shrink + justify-end + overflow-hidden 裁**顶部**——CC 的输入框/状态栏在底部；shrink-0 会把键条下的提示行挤出屏。 */}
       <div className={mobile ? "relative flex min-h-0 shrink flex-col items-center justify-end overflow-hidden px-2 pt-2" : "relative min-h-0 flex-1 px-2 pt-2"}>
         {/* touchAction:none —— 触摸手势全归我们处理（合成 wheel 滚动），
             iOS 才不会在 preventDefault 前先把首个 move 吃成原生滚动/橡皮筋 */}
@@ -570,8 +571,8 @@ export function TerminalView({
           // onPointerDown preventDefault：断连遮罩区域内的任何触点都不许改焦点
           // （否则点偏一点就聚焦到输入通道弹键盘,重连按钮跟着位移点不中,
           // 2026-07-13 真机）;按钮走 pointerup,不受影响
-          <div
-            className="absolute inset-0 grid place-items-center bg-[#1e1e2e]/70"
+          <div // 连接中用不透明底：open-settle 等画面稳定前，底下的重画过程不该透出来
+            className={`absolute inset-0 grid place-items-center ${status === "connecting" ? "bg-[#1e1e2e]" : "bg-[#1e1e2e]/70"}`}
             onPointerDown={(e) => e.preventDefault()}
           >
             {status === "connecting" && (
@@ -600,14 +601,9 @@ export function TerminalView({
       </div>
       <ControlBar
         onKeys={(seq) => {
-          // 「⤓ 底」按场景分流(镜像画面就在 xterm buffer 里,按画面特征判断):
-          //  1. tmux copy-mode:右上角有右对齐 [n/m] 指示器 → 发 q 退出,回实时底部
-          //  2. CC 转录视图(^O):底部状态栏含 "transcript" → 发 G(vi 键位,
-          //     ? 帮助实测 g/G=top/bottom;End 不在表里,首版栽在这)
-          //  3. 主界面(owner 的高频场景,前两版「一点用没有」的真因):PgUp 翻
-          //     上去的 CC 内部滚动,End/Esc/wheel 都拉不回来(逐一实测),唯一
-          //     可靠的是连发 PageDown——到底后多余的是无操作,天然无害
-          //  裸发 q/G 有毒(主界面会打进输入框,实验真打出过 ❯ GG),必须先验画面。
+          // 「⤓ 底」按画面分流：① tmux copy-mode（右上角 [n/m]）→ 发 q；② CC 转录视图（状态栏 "transcript"）→ 发 G
+          //  （End 不在它的键表里）；③ 主界面：PgUp 翻上去的 CC 内部滚动只有连发 PageDown 拉得回来，到底后多余的无害。
+          //  裸发 q/G 有毒（主界面会打进输入框，真打出过 ❯ GG），必须先验画面。
           if (seq === "\x1b[F") {
             const term = termRef.current;
             term?.scrollToBottom();
