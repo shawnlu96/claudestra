@@ -23,6 +23,7 @@ import { existsSync } from "fs";
 import { mkdir, readFile, rename, stat, writeFile } from "fs/promises";
 import { homedir } from "os";
 import { join } from "path";
+import { sandboxDisabled } from "./sandbox.js";
 
 const JOBS_DIR = join(homedir(), ".claude", "jobs");
 const QUARANTINE_DIR = join(homedir(), ".claude", "jobs-quarantine");
@@ -109,6 +110,8 @@ export async function tryRosterCleanup(
   bgId: string,
   rosterPath = ROSTER_PATH,
 ): Promise<{ done: boolean; note: string }> {
+  const off = sandboxDisabled("清理 / 收编 bg job"); // 沙箱看不到生产 registry，眼里的「分身」可能是生产会话
+  if (off) return { done: false, note: off };
   try {
     if (!existsSync(rosterPath)) return { done: false, note: "无 roster.json" };
     const roster = JSON.parse(await readFile(rosterPath, "utf-8"));
@@ -148,6 +151,8 @@ export async function cleanupBgJob(
   if (!/^[a-z0-9-]+$/i.test(bgId)) {
     return { ok: false, note: `非法 bgId: ${bgId}` };
   }
+  const off = sandboxDisabled("清理 / 收编 bg job");
+  if (off) return { ok: false, note: off };
   const jobsDir = opts.jobsDir ?? JOBS_DIR;
   const quarantineDir = opts.quarantineDir ?? QUARANTINE_DIR;
   const maxRounds = opts.maxRounds ?? 3;

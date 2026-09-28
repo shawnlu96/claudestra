@@ -171,7 +171,8 @@ import { nudgeReason, pickUnrepliedForNudge } from "./lib/reply-nudge.js";
 import { hangsPendingReply, pendingKeysOwedBy } from "./lib/pending-reply-scope.js";
 import { countsAsActivity, dueForResume, markResumed, noteActivity, noteApiError, resumeText, type ApiErrorState } from "./lib/api-error-resume.js";
 import { initHttpPeer, cancelHttpPeerCallsForChannel } from "./bridge/http-peer.js";
-import { readRegistryAgents, agentRuntime, type AgentRuntime } from "./lib/registry.js";
+import { readRegistryAgents, readRegistryAgentsSync, agentRuntime, type AgentRuntime } from "./lib/registry.js";
+import { statePath } from "./lib/paths.js";
 import { controlFor, managedFor } from "./lib/runtimes/index.js";
 import { interruptWindow, preemptIfBusy, stopNeedsPaneRecheck } from "./lib/runtimes/window-ops.js";
 import { notifyTargetVerdict } from "./lib/notify.js";
@@ -651,16 +652,7 @@ function agentNameByChannelFromRegistry(channelId: string): string | null {
   const now = Date.now();
   if (!regChannelNameCache || now - regChannelNameCache.ts > 30_000) {
     const map = new Map<string, string>();
-    try {
-      const raw = JSON.parse(
-        readFileSync(`${process.env.HOME}/.claude-orchestrator/registry.json`, "utf8"),
-      ) as { agents?: Record<string, { channelId?: string }> };
-      for (const [name, info] of Object.entries(raw.agents || {})) {
-        if (info?.channelId) map.set(String(info.channelId), name);
-      }
-    } catch {
-      /* 读不到就空表，下一轮再试 */
-    }
+    for (const a of readRegistryAgentsSync()) if (a.channelId) map.set(String(a.channelId), a.name); // 读不到 = 空表，下一轮再试
     // master 不在 registry，但它有固定频道
     if (CONTROL_CHANNEL_ID) map.set(CONTROL_CHANNEL_ID, "master");
     regChannelNameCache = { ts: now, map };
@@ -2520,7 +2512,7 @@ const lastCompletionMsg = new Map<string, string>();
  */
 class PersistedSourceMap extends Map<string, "user" | "agent" | "api"> {
   private timer: ReturnType<typeof setTimeout> | null = null;
-  private readonly path = `${process.env.HOME}/.claude-orchestrator/msg-source.json`;
+  private readonly path = statePath("msg-source.json");
   /**
    * 「最后一个**人类**是从哪儿来的」——只记 user / api，不被 agent 覆盖。
    *

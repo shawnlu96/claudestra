@@ -10,6 +10,7 @@
 
 import { readFileSync } from "fs";
 import { REPO_ROOT } from "./repo-root.js";
+import { isSandbox } from "./sandbox.js";
 
 const KEY_LINE_RE = /^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=(.*)$/;
 
@@ -81,9 +82,11 @@ export function readDotenvFileSync(path: string): Record<string, string> | null 
  * 缺了后来加的键——直接读 process.env 会拿到默认值（D7-3：master 跑 peer-invite-new
  * 报「bridge 只监听 127.0.0.1」而 bridge 实际在 *:3847）。
  * doctor 不用它：doctor 要看的是 daemon 实际拿到的文件内容，终端 export 的值不该掩盖它。
+ * 沙箱进程只看 env：从主树起的沙箱也不能读到主树 .env 里的中继 / 推送 / 端口配置。
  */
 export function repoEnvVar(key: string, repoRoot = REPO_ROOT, env: Record<string, string | undefined> = process.env): string {
   if (env[key]) return env[key]!;
+  if (isSandbox(env)) return "";
   return readDotenvFileSync(`${repoRoot}/.env`)?.[key] || "";
 }
 

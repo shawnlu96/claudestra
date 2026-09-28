@@ -6,6 +6,7 @@
  */
 
 import { RUNTIME_DIR, TMUX_SOCK } from "./paths.js"; export { TMUX_SOCK };
+import { sandboxDisabled } from "./sandbox.js";
 export const MASTER_SESSION = "master";
 /**
  * 大总管窗口（index 0）的显式名字。不命名的话 tmux 按前台进程自动改名（claude / 版本号），
@@ -1073,7 +1074,7 @@ export async function pressSwitchConfirm(target: string, p: SwitchConfirmPrompt,
 /**
  * 注入 `/model X` 或 `/effort X`，确认框出现就代按 Yes，等到命令真正落地再返回。
  * claude-settings 端点与 manager 的 enforceSessionModel 共用；返回 applied/confirmed 时
- * TUI 已回到输入框，调用方可以放心接着注入下一条命令。
+ * TUI 已回到输入框，调用方可以放心接着注入下一条命令。沙箱里拒绝：CC 会把它存成 ~/.claude/settings.json 的全局默认。
  */
 export async function runSwitchCommand(
   target: string,
@@ -1082,6 +1083,7 @@ export async function runSwitchCommand(
   opts: { sendDelayMs?: number; ticks?: number; intervalMs?: number; captureLines?: number; io?: SwitchIO } = {},
 ): Promise<SwitchResult> {
   const { sendDelayMs = 100, ticks = 10, intervalMs = 700, captureLines = 120, io = tmuxSwitchIO } = opts;
+  const off = sandboxDisabled(`/${kind} 切换`); if (off) return { outcome: "rejected", pane: "", reason: off };
   const capture = () => io.capture(target, captureLines).catch(() => "");
   const before = await capture();
   const base = countSettledSwitchCommands(before, kind);
@@ -1089,7 +1091,6 @@ export async function runSwitchCommand(
   const baseReject = switchRejectionToast(before);
   const baseLast = lastSettledSwitch(before, kind);
   const want = `❯ /${kind} ${arg.trim()}`.replace(/\s+/g, " ");
-
   // 这次命令落地了吗：数目涨了 / 最底下那条换成了这次的命令 / 出了新 toast
   const landed = (pane: string): SettledSwitch | "toast" | null => {
     const last = lastSettledSwitch(pane, kind);
@@ -1109,7 +1110,6 @@ export async function runSwitchCommand(
     if (pressed && paneLooksIdle(pane)) return { outcome: "confirmed", pane };
     return null;
   };
-
   await io.sendLine(target, `/${kind} ${arg}`, sendDelayMs);
   let presses = 0;
   let pane = "";

@@ -64,7 +64,7 @@ src/
   lib/                 纯逻辑 / 共用逻辑——规范 helper 所在地（见防腐规则第 4 条）；仓库路径只经 lib/repo-root.ts
   runtimes（lib/ 下）   各 runtime 的启动与会话适配（claude-code / pi / codex）
 web/                   Next.js PWA 客户端（有自己的 CLAUDE.md 和 npm 依赖树）
-tests/                 纯逻辑 bun 测试（`bun test`）；bridge.ts 本身靠 sandbox 实测
+tests/                 纯逻辑 bun 测试（`bun test`）；bridge.ts 本身靠沙箱实测
 scripts/guard/         防腐棘轮：规则、配置、baseline.json（见防腐规则）
 docs/                  设计文档 + architecture/（本文件搬出去的细节）
 master/                大总管指令模板（由 setup.ts 渲染）
@@ -227,4 +227,4 @@ tmux -S /tmp/claude-orchestrator/master.sock -CC attach
 - `tmux-helper.ts` 和 `claude-launch.ts` 是 tmux 命令和 Claude Code 启动参数的**唯一权威位置**。新文件里不要再内联这些。
 - 需要绕过 LLM 的管理按钮放到 `bridge/management.ts`。把 `id` 同时加到 `handleMgmtButton` 和对应的面板构造器。
 - 提交前跑 `bun run check`（= `tsc --noEmit` + `bun test` + `scripts/guard`）。**`bun build` 不做类型检查** —— 它对 `const x: number = "str"` 直接放行，此前"用它快速抓类型错误"的说法是错的。每个入口仍要 `bun build src/<entry>.ts --target=bun` 跑一遍（`bridge`、`channel-server`、`manager`、`launcher`、`cron`、`setup`），它能抓到类型检查覆盖不到的模块解析错误。CI 在每次 push / PR 上跑这三件事。
-- Cron 测试套件覆盖解析器和下次触发时间计算，但不跑真实 agent——集成测试在 sandbox Discord server 里手动做。
+- Cron 测试测解析与触发时间；实机走沙箱（`bun run sandbox`，[docs/architecture/sandbox.md](./docs/architecture/sandbox.md)）。

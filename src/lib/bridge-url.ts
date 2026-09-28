@@ -18,6 +18,8 @@
  * `BRIDGE_PORT` 推**，两者都没有才回默认端口。
  */
 
+import { enforceSandboxBridgeUrl } from "./sandbox.js";
+
 export const DEFAULT_BRIDGE_PORT = 3847;
 
 /** BRIDGE_PORT → 端口号；没设 / 不是 1-65535 的整数 → 默认端口（与 resolveBridgeUrl 同一口径） */
@@ -28,8 +30,10 @@ export function resolveBridgePort(env: Record<string, string | undefined> = proc
 
 export function resolveBridgeUrl(env: Record<string, string | undefined> = process.env): string {
   const explicit = (env.BRIDGE_URL || "").trim();
-  if (explicit) return explicit;
-  return `ws://localhost:${resolveBridgePort(env)}`;
+  const url = explicit || `ws://localhost:${resolveBridgePort(env)}`;
+  // 沙箱进程（hook / channel-server / manager）拿到生产地址就抛错，而不是悄悄连上生产 bridge
+  enforceSandboxBridgeUrl(url, DEFAULT_BRIDGE_PORT, env);
+  return url;
 }
 
 /**

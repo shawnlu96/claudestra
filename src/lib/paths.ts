@@ -12,11 +12,9 @@
  * ⚠ override 只作用于读到它的进程。Pi 扩展（src/pi/claudestra-extension.ts）为了只依赖
  * node: 模块而内联了同一条规则，改这里的默认值要同步改那边。
  *
- * ⚠ 目前**还不能**靠它隔离出一个沙箱 bridge：bridge.ts 里仍有直接 readFileSync 生产
- * registry.json 的地方、msg-source.json 与 api-routes 的日志路径还是手写的、web BFF 读 inbox
- * 也没接（这些文件归 P10）。设了 override 的沙箱 bridge 会读生产 registry、而 manager 写沙箱
- * 那份。manager / cron / launcher / lib 这一侧已全部走这里；剩余手写点见 tests/paths-guard.test.ts
- * 的白名单，P10 收完后删白名单条目即可。默认值不受影响。
+ * 光有 override 不等于沙箱：沙箱实例另设 `CLAUDESTRA_SANDBOX=1`（lib/sandbox.ts），本模块加载时
+ * 据此检查两个目录不与生产重叠、并装上出站闸门，不安全就抛错。新代码仍须经这里取路径——
+ * 手写的字面量由 tests/paths-guard.test.ts 拦。
  *
  * 路径都在模块加载时求值（与之前各处的常量语义一致）；需要「换一个 home 算路径」的
  * 纯函数（测试用）走 `stateDirIn(home)`。
@@ -24,6 +22,8 @@
 
 import { homedir } from "os";
 import { join } from "path";
+import { resolveBridgePort } from "./bridge-url.js";
+import { enforceSandboxProcess } from "./sandbox.js";
 
 /** 某个 home 下的默认状态目录（不看 override）。给带 `home` 参数的纯函数用。 */
 export function stateDirIn(home: string): string {
@@ -38,8 +38,16 @@ function envDir(name: string): string | undefined {
 /** ~/.claude-orchestrator（或 CLAUDESTRA_STATE_DIR） */
 export const STATE_DIR = envDir("CLAUDESTRA_STATE_DIR") ?? stateDirIn(homedir());
 
+const DEFAULT_RUNTIME_DIR = "/tmp/claude-orchestrator";
+
 /** /tmp/claude-orchestrator（或 CLAUDESTRA_RUNTIME_DIR） */
-export const RUNTIME_DIR = envDir("CLAUDESTRA_RUNTIME_DIR") ?? "/tmp/claude-orchestrator";
+export const RUNTIME_DIR = envDir("CLAUDESTRA_RUNTIME_DIR") ?? DEFAULT_RUNTIME_DIR;
+
+// 沙箱进程（CLAUDESTRA_SANDBOX=1）在任何路径被用到之前过闸；非沙箱是空操作
+enforceSandboxProcess({
+  env: process.env, stateDir: STATE_DIR, runtimeDir: RUNTIME_DIR,
+  defaultStateDir: stateDirIn(homedir()), defaultRuntimeDir: DEFAULT_RUNTIME_DIR, bridgePort: resolveBridgePort(),
+});
 
 /** 状态目录下的文件 */
 export function statePath(...parts: string[]): string {
@@ -76,7 +84,7 @@ export function pathOverrideAssignments(escape: (v: string) => string, env: Reco
 
 export function pathOverrideEnv(env: Record<string, string | undefined> = process.env): Record<string, string> {
   const out: Record<string, string> = {};
-  for (const k of ["CLAUDESTRA_STATE_DIR", "CLAUDESTRA_RUNTIME_DIR"]) {
+  for (const k of ["CLAUDESTRA_STATE_DIR", "CLAUDESTRA_RUNTIME_DIR", "CLAUDESTRA_SANDBOX"]) {
     const v = (env[k] || "").trim();
     if (v) out[k] = v;
   }
