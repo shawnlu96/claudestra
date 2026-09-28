@@ -29,6 +29,9 @@ describe("注入闸看到的画面（真实样本）", () => {
     expect(state(fx("input-draft")).draft).toBe(true);
     expect(state(fx("input-draft-multiline")).draft).toBe(true);
   });
+  test("bash 模式（空的也算：这时敲 /compact 会被当成 shell 命令）/ 16 行长草稿 / 草稿里带整行横线 → 草稿（沙箱实测样本）", () => {
+    for (const f of ["input-bash-empty", "input-bash-typed", "input-draft-long", "input-draft-rule"]) expect(state(fx(f)).draft).toBe(true);
+  });
   test("权限框 / AUQ / Rewind → 挡（menu 或 draft 至少一个为真）", () => {
     for (const f of ["modal-permission", "modal-auq", "modal-rewind"]) {
       const s = state(fx(f));
@@ -76,6 +79,9 @@ describe("执行器接上真实判定：草稿 / 对话框过硬上限也一个�
     const screens = [
       fx("input-draft"),
       fx("input-draft-multiline"),
+      fx("input-bash-empty"),
+      fx("input-draft-long"),
+      fx("input-draft-rule"),
       withInput(["\x1b[39m!\xa0ls -la"]),
       withInput(["\x1b[39m❯\xa0l1", ...Array.from({ length: 15 }, () => "  x")]),
       fx("modal-permission"),
