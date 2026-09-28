@@ -71,7 +71,7 @@ async function listMedia(url: URL, principal: Principal): Promise<Response> {
   if (anchored) {
     const seqTo = num(p.get("seq"));
     const key = { id: p.get("around") || undefined, name: p.get("name") || undefined, sessionId: p.get("session") || undefined, seqFrom: num(p.get("seq_from")) ?? seqTo, seqTo };
-    const anchor = findAnchor(db, f, key);
+    const anchor = findAnchor(db, f, key, v.manage);
     if (!anchor) return apiJson(404, { ok: false, error: "media not found", building });
     return apiJson(200, { ok: true, building, ...queryAround(db, f, anchor, Math.ceil(limit / 2), v) });
   }

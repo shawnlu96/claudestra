@@ -36,7 +36,7 @@ const outLine = (ms: number, paths: string[]) =>
   JSON.stringify({ type: "assistant", timestamp: iso(ms), message: { content: [{ type: "tool_use", name: "mcp__claudestra__reply", input: { text: "给你", files: paths } }] } });
 const noise = (n: number) => Array.from({ length: n }, (_, i) => JSON.stringify({ type: "assistant", message: { content: [{ type: "text", text: `t${i}` }] } }));
 
-const AGENTS: AgentInfo[] = [{ name: "agent-worker" }, { name: "agent-other" }, { name: "agent-b" }];
+const AGENTS: AgentInfo[] = [{ name: "agent-worker" }, { name: "agent-other" }, { name: "agent-b" }, { name: "agent-probe" }];
 /** 重新接线 = 清掉刷新节流，下一次请求看得到刚追加的内容 */
 function wire(skip?: string): void {
   setMediaForTest({
@@ -75,6 +75,9 @@ beforeAll(async () => {
   ].join("\n"));
   writeFileSync(jl["agent-other"], [inLine(NOW - 3600_000, "m_o", [bank]), ""].join("\n"));
   writeFileSync(jl["agent-b"], "");
+  // 手写标记指向旧上传目录里一个在、一个不在的文件（审查 r3：拿锚点请求的 200 / 404 探测文件在不在）
+  const probe = (n: string) => `[attachment: ${uploads}/2026-09-20/./${n}]`;
+  writeFileSync(jl["agent-probe"], `${inLine(NOW - 300, "probe", [], `${probe("ab12cd34-plan.pdf")} ${probe("deadbeef-plan.pdf")}`, "friend")}\n`);
 });
 afterAll(() => {
   setMediaForTest(undefined);
@@ -136,6 +139,12 @@ describe("P0：只有 bridge 写的头属性是可信绑定", () => {
     const it = (await list("agent=other", GUEST_OTHER)).items[0];
     expect(it).toMatchObject({ available: true });
     expect(await (await get(`/media/${it.id}/raw`, GUEST_OTHER)).text()).toBe("VICTIM-OTHER-AGENT");
+  });
+  test("锚点请求探测不出文件在不在：不可信行的落盘名不参与 guest 的匹配", async () => {
+    const guest: Principal = { ...GUEST, id: "guest:3", agents: ["probe"], credential: "dev_g3" };
+    const anchor = async (name: string, p: Principal) => (await get(`/media?agent=probe&name=${encodeURIComponent(name)}`, p)).status;
+    expect([await anchor("2026-09-20/ab12cd34-plan.pdf", guest), await anchor("2026-09-20/deadbeef-plan.pdf", guest)]).toEqual([404, 404]);
+    expect(await anchor("2026-09-20/ab12cd34-plan.pdf", OWNER)).toBe(200);
   });
   test("可信行对 guest 照常可取；不再给 immutable 长缓存", async () => {
     const p0 = (await list("agent=worker&q=pic0", GUEST)).items[0];

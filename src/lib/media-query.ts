@@ -134,15 +134,22 @@ export function queryMedia(db: Database, f: MediaFilter, opts: { before?: string
  * 找锚点：媒体 id，或气泡里的文件名（展示名 / 落盘名 / agent 原路径的 basename）。
  * 带了 session + seq 区间（气泡覆盖的记录范围）就只在这个区间里找，找不到就是找不到——
  * 退回「seq 之前最近的同名」会把同名旧图当成这一张打开（T22 审查 P1-3），调用方收到 404 退回只翻气泡里的几张。
+ * 非 manage 只按可信行的落盘名（loc）匹配：不可信行的 loc 是按引用去解析的结果，拿它匹配 200 / 404 就泄露了文件在不在。
  */
-export function findAnchor(db: Database, f: MediaFilter, key: { id?: string; name?: string; sessionId?: string; seqFrom?: number; seqTo?: number }): { sk: string; id: string } | null {
+export function findAnchor(
+  db: Database,
+  f: MediaFilter,
+  key: { id?: string; name?: string; sessionId?: string; seqFrom?: number; seqTo?: number },
+  manage: boolean,
+): { sk: string; id: string } | null {
   const w = where(f);
   if (key.id) {
     return (db.prepare(`SELECT sk, id FROM media WHERE ${w.sql} AND id = ?`).get(...w.args, key.id) as { sk: string; id: string } | null) ?? null;
   }
   if (!key.name) return null;
   const n = key.name;
-  const nameSql = "(name = ? OR loc LIKE ? ESCAPE '\\' OR ref_path LIKE ? ESCAPE '\\' OR ref_path = ?)";
+  const locSql = manage ? "loc LIKE ? ESCAPE '\\'" : "(trusted = 1 AND loc LIKE ? ESCAPE '\\')";
+  const nameSql = `(name = ? OR ${locSql} OR ref_path LIKE ? ESCAPE '\\' OR ref_path = ?)`;
   const esc = n.replace(/[\\%_]/g, (c) => `\\${c}`);
   const nameArgs = [n, `%:${esc}`, `%/${esc}`, n];
   const exact = key.sessionId && key.seqTo != null;
