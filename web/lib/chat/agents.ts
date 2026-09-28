@@ -16,6 +16,14 @@ export interface LedgerTaskRef {
   round: number;
 }
 
+/** GET /agents 的 ledgerTask 原样不可信（老 / 新 bridge、手改的库）：id 和 stage 不是字符串就当没挂任务，round 不是整数按 0 */
+export function parseLedgerTask(raw: unknown): LedgerTaskRef | null {
+  if (!raw || typeof raw !== "object") return null;
+  const r = raw as Record<string, unknown>;
+  if (typeof r.id !== "string" || !r.id || typeof r.stage !== "string" || !r.stage) return null;
+  return { id: r.id, stage: r.stage, round: Number.isInteger(r.round) ? (r.round as number) : 0 };
+}
+
 /** 大总管的前端保留名 ↔ API 的 "master"。 */
 export const MASTER_AGENT_NAME = "__master__";
 
@@ -116,7 +124,8 @@ interface ApiAgent {
   /** 派发者的裸名（大总管 = master）与任务短名（bridge agent-info-routes.ts teamField） */
   parent?: string | null;
   task?: string | null;
-  ledgerTask?: LedgerTaskRef | null;
+  /** 原样不可信，mapAgent 经 parseLedgerTask 过一遍 */
+  ledgerTask?: unknown;
 }
 
 function mapAgent(a: ApiAgent): AgentSession {
@@ -138,6 +147,7 @@ function mapAgent(a: ApiAgent): AgentSession {
       model: a.model ?? null,
       runtime: a.runtime ?? null,
       effort: a.effort ?? null,
+      ledgerTask: parseLedgerTask(a.ledgerTask),
     };
   }
   const bare = a.name.replace(/^agent-/, "");
@@ -159,6 +169,7 @@ function mapAgent(a: ApiAgent): AgentSession {
     effort: a.effort ?? null,
     projectId: a.projectId ?? null,
     parent: a.parent ? uiAgentName(a.parent) : null,
+    ledgerTask: parseLedgerTask(a.ledgerTask),
   };
 }
 

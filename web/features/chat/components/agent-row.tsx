@@ -309,7 +309,7 @@ export function AgentRow({
             <NameTags a={a} projEmoji={projEmoji} />
           </span>
           <RepoTag a={a} />
-          {tail}{a.ledgerTask && <LedgerStageChip task={a.ledgerTask} name={a.label || a.displayName} />}
+          {tail}{a.ledgerTask && <LedgerStageChip task={a.ledgerTask} names={[a.label, a.displayName]} />}
           {a.mission && <MissionBadge mission={a.mission} compact />}
           {/* 非激活且输入框里有没发的字 → 【草稿】(owner 2026-09-24);切回来就是当前会话,标自然消失。
               放在 truncate 容器**外面**、时间之前:侧栏窄时只缩名字,标不被省略号吃掉;描边警示色不铺底 */}
