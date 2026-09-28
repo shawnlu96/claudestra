@@ -195,7 +195,8 @@ function oldChunk(pinned: string, pathname: string): StaticHit | null {
   if (!pathname.startsWith("/_next/static/")) return null;
   for (const root of fallbackStaticRoots(pinned)) {
     const hit = resolveExportedPath(root, pathname);
-    if (hit?.status === 200) return hit;
+    // 前缀是在解码、规范化之前看的：编码的 ../ 能在版本根内绕出 _next/static，所以按落地路径再限一次
+    if (hit?.status === 200 && hit.path.startsWith(`${root}/_next/static/`)) return hit;
   }
   return null;
 }

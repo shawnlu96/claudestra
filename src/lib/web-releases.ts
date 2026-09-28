@@ -3,11 +3,12 @@
  * bridge 的 BRIDGE_STATIC_DIR 指向 current，`next build` 期间 web/out 被清空重建也不再让线上缺文件。
  * 每个请求先把 current 钉成具体版本目录（pinnedStaticRoot）：路径解析、CSP、正文都读同一份不可变目录——否则
  * CSP 按旧 HTML 算、正文延后读到新 HTML，页面脚本被自己的 CSP 拦掉（codex 复核实测）。
- * 保留 current + KEEP_PREVIOUS 个旧版本：已打开的旧页面要的旧 chunk 去旧版本找（fallbackStaticRoots），也是回滚余地。
+ * 保留 current + KEEP_PREVIOUS 个旧版本：已打开的旧页面要的旧 chunk 去旧版本找（fallbackStaticRoots），也是回滚余地；
+ * 一个页面开着期间又连发了 KEEP_PREVIOUS+1 次，它的旧 chunk 就没了（刷新即可），这是有意的保留窗口。
  * 发布 / 回滚 / 清理共用一把严格的发布锁；从 web/out 复制还要先拿构建锁（web-build.ts publishWebOut），免得复制到半套产物。
  */
 import { cpSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
-import { basename, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { mergeEnvContent, readDotenvFileSync } from "./env-file.js";
 import { acquireLock } from "./file-lock.js";
 import { statePath } from "./paths.js";
@@ -143,7 +144,7 @@ export function pinnedStaticRoot(rootDir: string, dir = RELEASES_DIR): string {
 
 /**
  * 旧 chunk 的兜底目录：pinned 是本模块的某个版本目录时，返回除它以外保留的版本（新到旧）；别的目录 → 空。
- * 只给 /_next/static/ 用——文件名带内容哈希，旧页面要的旧 chunk 只可能在旧版本里，拿错版本的风险为零。
+ * 只给 /_next/static/ 用：那里的文件名带内容哈希，新版本不会有同名文件，旧页面要的旧 chunk 只会在旧版本里。
  */
 export function fallbackStaticRoots(pinned: string, dir = RELEASES_DIR): string[] {
   const own = resolve(pinned);
@@ -151,10 +152,16 @@ export function fallbackStaticRoots(pinned: string, dir = RELEASES_DIR): string[
   return listReleases(dir).map((id) => join(dir, id)).filter((p) => resolve(p) !== own).slice(0, KEEP_PREVIOUS);
 }
 
+/** .env 里的 BRIDGE_STATIC_DIR，相对路径按 .env 所在目录（= 仓库根，bridge 的 WorkingDirectory）解释，不按调用者的 cwd */
+function staticDirIn(envFile: string): string {
+  const v = (readDotenvFileSync(envFile)?.BRIDGE_STATIC_DIR ?? "").trim();
+  return v ? resolve(dirname(envFile), v) : "";
+}
+
 /** .env 的 BRIDGE_STATIC_DIR 已经指向 current（由本模块管）→ 构建成功后要发布 */
 export function releasesManaged(envFile: string, dir = RELEASES_DIR): boolean {
-  const v = (readDotenvFileSync(envFile)?.BRIDGE_STATIC_DIR ?? "").trim();
-  return !!v && resolve(v) === resolve(currentLink(dir));
+  const v = staticDirIn(envFile);
+  return !!v && v === resolve(currentLink(dir));
 }
 
 /** 构建成功但发布失败 → 记一笔；下次 update 即使不用重建也会重试（构建状态与上线状态分开记） */
@@ -177,7 +184,8 @@ export function clearPendingPublish(dir = RELEASES_DIR): void {
 
 /**
  * install-cli 调（reload bridge 之前）：BRIDGE_STATIC_DIR 还直接指着仓库的 web/out → 先把 web/out 发布成第一个版本
- * （publish 由调用方给，带构建锁），再把 .env 改指 current；reload 后 bridge 按版本托管。没托管、指向别处 → 不动。不抛错
+ * （publish 由调用方给，带构建锁），再把 .env 改指 current；reload 后 bridge 按版本托管。没托管、指向别处（包括指向
+ * web/out 的符号链接）→ 不动。不抛错。已知一次性局限：做迁移的这一轮 update 里，构建仍在旧配置下原地进行（和以前一样）
  */
 export async function migrateStaticDirToReleases(
   repoRoot: string, publish: () => Promise<PublishResult>, opts: { envFile?: string; dir?: string } = {},
@@ -185,12 +193,14 @@ export async function migrateStaticDirToReleases(
   const envFile = opts.envFile ?? join(repoRoot, ".env");
   const dir = opts.dir ?? RELEASES_DIR;
   const out = join(repoRoot, "web", "out");
-  const v = (readDotenvFileSync(envFile)?.BRIDGE_STATIC_DIR ?? "").trim();
-  if (!v || resolve(v) !== resolve(out)) return [];
+  const v = staticDirIn(envFile);
+  if (!v || v !== resolve(out)) return [];
   const r = await publish();
   if (!r.ok) return [`网页没改成按版本发布：${r.error}（仍直接托管 web/out，下次 install-cli 再试）`];
   try {
-    writeFileSync(envFile, mergeEnvContent(readFileSync(envFile, "utf8"), { BRIDGE_STATIC_DIR: currentLink(dir) }, "# Claudestra"));
+    const tmp = `${envFile}.tmp-${process.pid}`; // 先写临时文件再 rename：写到一半失败不会截断原 .env
+    writeFileSync(tmp, mergeEnvContent(readFileSync(envFile, "utf8"), { BRIDGE_STATIC_DIR: currentLink(dir) }, "# Claudestra"), { mode: statSync(envFile).mode });
+    renameSync(tmp, envFile);
   } catch (e) {
     return [`网页没改成按版本发布：写 .env 失败（${(e as Error).message}），仍直接托管 web/out`];
   }

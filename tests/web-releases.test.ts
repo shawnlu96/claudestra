@@ -126,6 +126,7 @@ describe("回滚、钉版本与旧 chunk 兜底", () => {
   });
   test("serveStaticSite 端到端：旧 chunk 200、没有的仍 null、兜底只限 /_next/static/", async () => {
     build("v1");
+    writeFileSync(join(out, "old-only.txt"), "v1 only");
     await publishWebRelease(out, { now: at(0) });
     build("v2");
     await publishWebRelease(out, { now: at(1) });
@@ -135,6 +136,10 @@ describe("回滚、钉版本与旧 chunk 兜底", () => {
     expect(serveStaticSite(cur, "/_next/static/chunks/never.js")).toBeNull();
     expect(serveStaticSite(cur, "/v1.js")).toBeNull();
     expect(serveStaticSite(cur, "/_next/static/../../../../etc/passwd")).toBeNull();
+    // 编码的 ../ 在旧版本根内绕出 _next/static（想拿只有旧版本才有的文件）：兜底不给
+    expect(serveStaticSite(cur, "/_next/static/%2e%2e/%2e%2e/old-only.txt")).toBeNull();
+    // 同样的绕法落到当前版本的 HTML：照旧能取到（站点根内），但不再拿永久缓存
+    expect(serveStaticSite(cur, "/_next/static/%2e%2e/%2e%2e/index.html")?.headers.get("cache-control")).toBe("no-cache, must-revalidate");
   });
   test("不是版本目录时行为不变（缺的 chunk 仍是 null）", () => {
     build("v1");
@@ -165,6 +170,15 @@ describe("待发布与迁移", () => {
     expect(releasesManaged(env, dir)).toBe(true);
     expect(readFileSync(join(currentLink(dir), "index.html"), "utf8")).toBe(html("v1"));
     expect(await migrateStaticDirToReleases(repo(), publish, { envFile: env, dir })).toEqual([]);
+  });
+  test("相对路径按 .env 所在目录解释（不看当前 cwd）；.env 权限保留", async () => {
+    build("v1");
+    const env = join(repo(), ".env");
+    writeFileSync(env, "BRIDGE_STATIC_DIR=web/out\n", { mode: 0o600 });
+    const publish = () => publishWebRelease(out, { dir, now: at(0) });
+    expect(await migrateStaticDirToReleases(repo(), publish, { envFile: env, dir })).toHaveLength(1);
+    expect(readFileSync(env, "utf8")).toBe(`BRIDGE_STATIC_DIR=${currentLink(dir)}\n`);
+    expect(lstatSync(env).mode & 0o777).toBe(0o600);
   });
   test("没托管 / 指向自定义目录 → 不动；发布失败 → .env 不改", async () => {
     const env = join(repo(), ".env");
