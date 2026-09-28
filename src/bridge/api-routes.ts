@@ -27,7 +27,7 @@ import {
   invalidJsonBody,
   liveInteractiveHolder,
 } from "./api-respond.js";
-import { interruptAgent } from "../lib/runtimes/window-ops.js";
+import { interruptAgentByName } from "./interrupt-gate.js";
 import { existsSync, readdirSync, statSync } from "fs";
 import { TMP_DIR, MASTER_DIR, INBOX_DIR, REPO_ROOT, ALLOWED_USER_IDS } from "./config.js";
 import {
@@ -66,8 +66,8 @@ import {
   detectRuntimePermissionPrompt,
   listWindows,
   MASTER_SESSION,
-  paneLooksWorking,
 } from "../lib/tmux-helper.js";
+import { paneLooksWorking } from "../lib/turn-state.js";
 import { stopTyping } from "./components.js";
 import { clearSafetyTimer } from "./discord-adapter.js";
 import { recordMetric } from "../lib/metrics.js";
@@ -104,8 +104,6 @@ function isPathSafeName(x: string): boolean {
 // master 不在 registry，从 env 读其控制频道 id（各端点的 master 特判用）
 const CONTROL_CHANNEL_ID = process.env.CONTROL_CHANNEL_ID || "";
 
-/** interrupt 端点的每 agent 冷却(防双击双 C-c——空闲态连按两次是 CC 退出键)。 */
-const interruptCooldown = new Map<string, number>();
 
 // ── API 会话状态（v2.6.0+，原 bridge.ts Phase B 区块） ──────────────────
 
@@ -1423,16 +1421,13 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
     if (!inScopeEitherName(principal, agentParam)) return notInScope(agentParam);
     const agent = await findApiAgent(agentParam);
     if (!agent) return apiJson(404, { ok: false, error: `agent "${agentParam}" not found` });
-    // 防重入(owner 2026-07-16:「打断按钮点两次出两个打断」):3s 冷却——
-    // 空闲态连发两次 C-c 是 CC 的退出快捷键,双击可能直接把会话关了
-    const lastInt = interruptCooldown.get(agent.name) ?? 0;
-    if (Date.now() - lastInt < 3_000) return apiJson(200, { ok: true, deduped: true });
-    interruptCooldown.set(agent.name, Date.now());
-    // 按键由运行时决定（空闲的 Codex 收到 C-c 会直接退出，所以它空闲时一个键都不发）
-    const sent = await interruptAgent(agent.name).catch((e: Error) => e);
-    if (sent instanceof Error) return apiJson(500, { ok: false, error: `tmux send-keys 失败: ${sent.message}` });
+    // 防重入 + 按键选择都在 interruptGate（与人类消息抢占、Discord 停止按钮同一个每频道冷却）：
+    // 空闲态连发两次 C-c 是 CC 的退出快捷键，双击可能直接把会话关了；CC 主回合空闲一个键都不发
+    const r = await interruptAgentByName(agent.name, agent.channelId).catch((e: Error) => e);
+    if (r instanceof Error) return apiJson(500, { ok: false, error: `tmux send-keys 失败: ${r.message}` });
+    if (r.deduped) return apiJson(200, { ok: true, deduped: true });
+    const sent = r.keys;
     if (sent.length) recordMetric("agent_interrupt", { channelId: agent.channelId, agent: agent.name, meta: { trigger: "api" } });
-    else interruptCooldown.delete(agent.name); // 空闲没发键：不记打断指标，也不占 3s 冷却
     stopTyping(agent.channelId);
     clearSafetyTimer(agent.channelId);
     // 被打断的回合 CC 不触发 Stop hook —— agentStatuses 会永远卡在 thinking：

@@ -46,11 +46,11 @@ const PREVIEW_CHARS = 2_000;
 const BUDGET = MAX_CHARS - 1_000;
 const MAX_PREVIEWS = 3;
 
-/** 放进工具结果的一条：放得下给全文，放不下给开头 + 分页读入口（read 用 thread_id——message_id 只是「前缀_毫秒」会撞） */
+/** 放进工具结果的一条：放得下给全文，放不下给开头 + 分页读入口（read = message_id） */
 async function fitEntry(d: InboxDeps, it: HeldItem, now: number): Promise<{ text: string; long: boolean }> {
   const text = await entryText(d, it, now);
   if (text.length <= BUDGET) return { text, long: false };
-  const hint = `要现在看全文用 check_inbox({ read: "${it.env.meta.threadId}" }) 分页读，否则这一轮结束时送达`;
+  const hint = `要现在看全文用 check_inbox({ read: "${it.env.meta.messageId}" }) 分页读，否则这一轮结束时送达`;
   return { text: `${text.slice(0, PREVIEW_CHARS)}\n…（这条共 ${text.length} 字，这里只给开头；${hint}）`, long: true };
 }
 
@@ -71,13 +71,10 @@ const PAGE_CHARS = 12_000;
 /** 分页读一条（太长进不了批的）：第一次读就给它单独打租约，读完照样 ack 确认，全文不会在回合结束时再投一遍 */
 async function readPaged(d: InboxDeps, channelId: string, readId: string, page: number, now: number): Promise<Result> {
   const q = (d.held.get(channelId) ?? []).filter(isAgentMsg);
-  const byMsg = q.filter((i) => i.env.meta.messageId === readId); // 兼容按 message_id 读；它会撞，撞了不猜
-  const it = q.find((i) => i.env.meta.threadId === readId) ?? (byMsg.length === 1 ? byMsg[0] : undefined);
-  if (!it && byMsg.length > 1) {
-    return { result: { n: 0, text: `message_id=${readId} 对应 ${byMsg.length} 条，请用 thread_id 读：${byMsg.map((i) => i.env.meta.threadId).join("、")}` } };
-  }
+  // 也认 thread_id：旧版的分页读入口给的是 thread_id，agent 手里可能还拿着
+  const it = q.find((i) => i.env.meta.messageId === readId) ?? q.find((i) => i.env.meta.threadId === readId);
   if (!it) return { result: { n: 0, text: `收件箱里没有 ${readId}（已确认过，或已按普通消息送达）。` } };
-  const { messageId, threadId } = it.env.meta;
+  const { messageId } = it.env.meta;
   if (!leaseActive(it, now)) {
     d.calls.touch(channelId, it.env.from.kind === "local" ? it.env.from.channelId : undefined);
     it.lease = { batchId: `inbox_${randomUUID()}`, at: now };
@@ -86,7 +83,8 @@ async function readPaged(d: InboxDeps, channelId: string, readId: string, page: 
   const text = await entryText(d, it, now);
   const pages = Math.max(1, Math.ceil(text.length / PAGE_CHARS));
   const p = Math.min(Math.max(1, Math.floor(page)), pages);
-  const next = p < pages ? `下一页 check_inbox({ read: "${threadId}", page: ${p + 1} })；` : "";
+  // 翻页沿用传进来的 readId：旧格式 id 可能撞号，拿 thread_id 读的换成 message_id 会串到另一封
+  const next = p < pages ? `下一页 check_inbox({ read: "${readId}", page: ${p + 1} })；` : "";
   const head = `[📬 message_id=${messageId} 第 ${p}/${pages} 页。${next}读完处理后调 check_inbox({ ack: "${it.lease!.batchId}" }) 确认。]`;
   return { result: { n: 1, text: `${head}\n\n${text.slice((p - 1) * PAGE_CHARS, p * PAGE_CHARS)}` } };
 }

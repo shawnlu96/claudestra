@@ -6,6 +6,16 @@
 import type { ChatMessage } from "@/features/chat/type";
 import { replyRowKey } from "./reply-clicks";
 import { formTitles, wireToDisplay, type MultiRow } from "./form-compose";
+import type { WebComponentRow } from "./events";
+
+/** 该 id 的选单在这条消息里的最后一行（同一回合前后两段复用 id 时认最新那段，与 matchClickedRow / openForms 一致） */
+function lastRowOf(rows: WebComponentRow[], id: string, multiOnly: boolean): number {
+  for (let ri = rows.length - 1; ri >= 0; ri--) {
+    const r = rows[ri];
+    if (r.type !== "buttons" && r.id === id && (!multiOnly || r.type === "multiselect")) return ri;
+  }
+  return -1;
+}
 
 /** 带组件的 assistant 气泡（按出现顺序），给选单回投按 id 找所属消息 */
 export class FormLookup {
@@ -18,7 +28,7 @@ export class FormLookup {
     let fallback: ChatMessage | null = null;
     for (let i = this.anchors.length - 1; i >= 0; i--) {
       const g = this.anchors[i];
-      const ri = g.replyComponents!.findIndex((r) => r.type !== "buttons" && r.id === id);
+      const ri = lastRowOf(g.replyComponents!, id, false);
       if (ri < 0) continue;
       if (!g.replyClicks?.[replyRowKey(g.replyComponents![ri], ri)]) return g;
       fallback ??= g;
@@ -32,7 +42,7 @@ export class FormLookup {
     const titles = formTitles(rows);
     return wireToDisplay(text, (id) => {
       const g = this.find(id);
-      const ri = g?.replyComponents!.findIndex((r) => r.type === "multiselect" && r.id === id) ?? -1;
+      const ri = g ? lastRowOf(g.replyComponents!, id, true) : -1;
       if (!g || ri < 0) return null;
       const row = g.replyComponents![ri] as MultiRow;
       const mark = (values: string[]) => void (commit && ((g.replyClicks ??= {})[replyRowKey(row, ri)] = `${id}:${values.join(",")}`));
