@@ -83,8 +83,9 @@ export interface PaneQuotaState {
 }
 
 /**
- * T35 的 readLpPane（一次 `capture-pane -p -e`）→ 注入闸要的几样。输入框只要不是 empty 一律当草稿：unknown 也算——
- * 14 行以上的长草稿、bash 模式、草稿里有整行横线、权限框 / AUQ 这类盖住输入框的画面都会判成 unknown，放过就会误压。
+ * T35 的 readLpPane（一次 `capture-pane -p -e`）→ 注入闸要的几样。输入框不是 empty 就当草稿，unknown 也算——14 行以上的
+ * 长草稿、bash 模式、草稿里有整行横线、权限框 / AUQ 这类盖住输入框的画面都会判成 unknown，放过就会误压。唯一例外是 queued：
+ * 那是「有排队消息、输入框本身是空的」，打字不会粘上别人的字（自动压缩另有「已排队就不叠」一步，批量动作照 T35 的设计照发）。
  * 挡注入同时看 menu 和 modal（权限框 / AUQ / Rewind 认不成 menu，T35 另给 modal）。
  */
 export function paneStateFromLp(r: LpRead): PaneQuotaState {
@@ -94,7 +95,7 @@ export function paneStateFromLp(r: LpRead): PaneQuotaState {
     exhausted: r.lowPriority === "exhausted",
     menu: r.menu !== null || !!(r as LpRead & { modal?: unknown }).modal,
     compacting: r.compacting,
-    draft: r.input !== "empty",
+    draft: r.input !== "empty" && r.input !== "queued",
   };
 }
 

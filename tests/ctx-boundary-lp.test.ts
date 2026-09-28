@@ -43,6 +43,11 @@ describe("认不出的输入框一律当草稿（unknown 也算）", () => {
       expect(state(withInput(lines)).draft).toBe(true);
     });
   }
+  test("有排队消息（输入框本身空）→ 不算草稿；自动压缩那边另由「已排队」一步挡住", () => {
+    const raw = withInput(["\x1b[39m❯\xa0/compact x", "  Press up to edit queued messages"]);
+    expect(readLpPane(raw).input).toBe("queued");
+    expect(state(raw).draft).toBe(false);
+  });
   test("纯文本（没带 -e）分不清灰字和草稿 → 也当草稿", () => {
     expect(state(fx("empty").replace(/\x1b\[[0-9;]*m/g, "")).draft).toBe(true);
   });
