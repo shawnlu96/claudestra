@@ -134,8 +134,8 @@ describe("paneShowsWallWait（T35 实测：撞墙等待画面带「esc to cancel
   ].join("\n");
   const countdownAbove = ["  ⎿  You've hit your session limit", "  continuing automatically at 3:20am · esc to cancel", "", border, "❯ ", border, "  ? for shortcuts"].join("\n");
 
-  test("菜单开着 / 状态栏自动续跑倒计时：不算在跑（通用判忙会把菜单判成忙，这里不改它）", () => {
-    expect(paneMainTurnBusy(menu)).toBe(true);
+  test("菜单开着 / 状态栏自动续跑倒计时：不算在跑（通用判忙只认顶格 spinner 行，菜单的「Esc to cancel」也不再判成忙）", () => {
+    expect(paneMainTurnBusy(menu)).toBe(false);
     for (const p of [menu, countdownBelow]) expect(paneShowsWallWait(p)).toBe(true);
   });
 

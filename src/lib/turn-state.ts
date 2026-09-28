@@ -30,25 +30,28 @@ export interface TurnState {
 /**
  * 主回合信号所在的区域，按输入框定位、不按固定尾部行数：底栏的后台 agent 行一多（80 列约 4 行、272 列约 6 行）
  * 就把 spinner 挤出「尾部 14 行」。above = 输入框上边框往上 12 行（spinner / 压缩行 / Tip / 任务列表最多 5 行 + 「… +N」
- * + 排队消息预览），rest = 边框到底（❯ 行、页脚）。
- * 找不到输入框（窄窗口折行、弹窗盖住）退回尾部 14 行。
+ * + 排队消息预览），rest = 边框到底（❯ 行、页脚）。真输入框的边框和 ❯ 都顶格（第 0 列），对话 / 工具输出里贴进来的
+ * 输入框都有缩进，不能被当成输入框（同 T35 lp-state 的做法）。找不到输入框（窄窗口折行、弹窗盖住）退回尾部 14 行。
  */
 function turnZone(pane: string): { above: string; rest: string } {
   const lines = pane.replace(/\s+$/, "").split("\n");
   for (let i = lines.length - 1; i > 0; i--) {
-    if (/^\s*❯/.test(lines[i]!) && /^\s*─{8,}/.test(lines[i - 1]!)) {
+    if (/^❯/.test(lines[i]!) && /^─{8,}/.test(lines[i - 1]!)) {
       return { above: lines.slice(Math.max(0, i - 13), i - 1).join("\n"), rest: lines.slice(i - 1).join("\n") };
     }
   }
   return { above: lines.slice(-14).join("\n"), rest: "" };
 }
 
+/** 顶格、spinner 字形开头的行：真 spinner / 压缩行 / 重试横幅都在第 0 列，对话和工具输出里的同样字样都有缩进 */
+const spinnerRows = (zone: string): string[] => zone.split("\n").filter((l) => /^[·✢✳✶✻✽*]\s/.test(l));
+
 /**
  * 画面上是否在压缩上下文：spinner 位置那一行是「✻ Compacting conversation…」。锚定 spinner 行形态——正文里提到 compacting
  * 不算；结束后 CC 打印的是「Compacted (ctrl+o …)」，不会误判成仍在压缩。permission-watcher 置 compacting 也用它。
  */
 export function paneShowsCompacting(pane: string): boolean {
-  return /^\s*[·✢✳✶✻✽*]\s+Compacting\b/im.test(turnZone(pane).above);
+  return spinnerRows(turnZone(pane).above).some((l) => /^\S\s+Compacting\b/i.test(l));
 }
 
 /**
@@ -56,13 +59,19 @@ export function paneShowsCompacting(pane: string): boolean {
  * 压缩中碰上重试时「Compacting conversation…」会被它替换掉：这时不能据此判定压缩结束（permission-watcher 的兜底收敛）。
  */
 export function paneShowsApiRetry(pane: string): boolean {
-  return /^\s*[·✢✳✶✻✽*]\s+[^\n]*\b(?:retrying|will retry)\b/im.test(turnZone(pane).above);
+  return spinnerRows(turnZone(pane).above).some((l) => /\b(?:retrying|will retry)\b/i.test(l));
 }
 
-/** 只认主回合在跑：spinner（CC_BUSY_RE，锚定行首）、老 TUI 的 esc to interrupt、排队消息提示。见 tests/pane-main-turn.test.ts。 */
+/**
+ * 只认主回合在跑：顶格的 spinner 行（CC_BUSY_RE）、老 TUI 页脚的 esc to interrupt、顶格的排队消息提示。见 tests/pane-main-turn.test.ts。
+ * 不拿 CC_BUSY_RE 扫整段：它的「esc to cancel」会命中权限弹窗 / 额度菜单的「Esc to cancel」，贴进对话的忙画面也会命中，
+ * 判成忙就会往空闲输入框或权限弹窗上发 C-c（后者等于替人拒了权限）。见 tests/turn-zone.test.ts。
+ */
 export function paneMainTurnBusy(pane: string): boolean {
   const z = turnZone(pane);
-  return CC_BUSY_RE.test(z.above) || /esc to interrupt|Press up to edit queued messages/i.test(`${z.above}\n${z.rest}`);
+  if (spinnerRows(z.above).some((l) => CC_BUSY_RE.test(l))) return true;
+  const rows = `${z.above}\n${z.rest}`.split("\n");
+  return rows.some((l) => /^❯ Press up to edit queued messages/.test(l) || (/^\s*⏵⏵/.test(l) && /esc to interrupt/i.test(l)));
 }
 
 /**
