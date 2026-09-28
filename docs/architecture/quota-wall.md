@@ -34,5 +34,7 @@ State: `~/.claude-orchestrator/quota-wall.json` (written on every change, surviv
 
 ## Integration points
 
-- `quotaWall()` (from `bridge/quota-wall-wiring.ts`) exposes `active()`, `until()` (reset time while walled) and `onExit(cb)` for the Autopilot scheduler.
+- `quotaWall()` (from `bridge/quota-wall-wiring.ts`) exposes `active()`, `gates(channelId)`, `until()` (reset time while walled) and `onExit(cb)`; `onQuotaWallExit(cb)` works before the wall is created.
+- Autopilot: `yieldReason` yields with `quota_wall` while the agent is gated (the nudge would only be held); a `rate_limited` run's next wake uses `until()` over its own text (`RunEvidence.wallUntil`, set in `autopilot-close.ts`); on exit every `hold: "rate_limit"` wake is released at once (`releaseRateLimitHold`). Its "compact first" and deadline nudges are ordinary bridge messages, so they are covered by the same yield and, failing that, by the hold.
+- Reset-time parsing has one implementation: `lib/usage-window.ts#parseResetText` (time zone, year roll-over, DST, time-only). `autopilot-run.ts#parseResetAt` only locates the reset phrase (CC `resets …`, Codex `try again at/in …`) and applies the 8-day plausibility window.
 - The recovery resume message should move to `meta.waitForIdle` once that exists; until then the bridge checks the main turn is idle right before sending.

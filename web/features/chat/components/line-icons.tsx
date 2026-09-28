@@ -73,7 +73,7 @@ const MENU_ICONS: Record<LineIconName, (p: IconProps) => ReactNode> = {
   ),
 };
 
-/** 菜单项图标：有线条图标名就画 SVG（14px，与值守图标同尺寸），否则是文字符号 */
+/** 菜单项图标：有线条图标名就画 SVG（14px，与 Autopilot 图标同尺寸），否则是文字符号 */
 export function menuItemIcon(it: { icon: string; lineIcon?: LineIconName }): ReactNode {
   const Icon = it.lineIcon && MENU_ICONS[it.lineIcon];
   return Icon ? <Icon size={14} /> : it.icon;

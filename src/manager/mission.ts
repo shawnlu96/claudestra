@@ -1,11 +1,13 @@
 /**
- * `mission` 命令族（值守，lib/missions.ts）：
+ * `mission` 命令族（Autopilot，原名「值守」，lib/missions.ts；`autopilot` 是同一组命令的别名）：
  *   mission start <agent> --until <HH:MM|+3h|ISO> --goal "<目标>" [--ledger <路径>]
  *   mission stop <agent>                 人手动收回
- *   mission done <agent> ["<总结>"]      agent 自己宣告做完（值守提醒里写着这条）
+ *   mission done <agent> ["<总结>"]      agent 自己宣告做完（Autopilot 提醒里写着这条）
  *   mission list
+ *   mission log <agent> [-n <条数>]      最近几轮 run 的日志（lib/autopilot-log.ts）：推进了没有、发现了什么、为什么没执行
  * bridge 监听 missions.json，开了之后 agent 空闲就会收到第一句提醒。
  */
+import { formatRunLine, readRunLog } from "../lib/autopilot-log.js";
 import { missionKey, newMission, parseUntil, readMissions, updateMissions } from "../lib/missions.js";
 import { extractStringFlag, loadRegistry, output } from "./core.js";
 
@@ -44,7 +46,18 @@ async function finish(agent: string, status: "done" | "stopped", summary: string
     delete cur.resumeAt;
     return { ...cur };
   });
-  output(hit ? { ok: true, mission: hit } : { ok: false, error: `${key} 没有进行中的值守` });
+  output(hit ? { ok: true, mission: hit } : { ok: false, error: `${key} 没有进行中的 Autopilot` });
+}
+
+/** 日志跟着 mission 的 id 走：进行中的、或刚结束的那一代；更早的几代文件还在 ~/.claude-orchestrator/autopilot/ 下 */
+async function log(args: string[]): Promise<void> {
+  const n = extractStringFlag(args, "-n");
+  const key = missionKey(n.rest[0] || "");
+  if (!key) return output({ ok: false, error: "mission log <agent> [-n <条数>]" });
+  const m = (await readMissions())[key];
+  if (!m?.id) return output({ ok: false, error: `${key} 没有 Autopilot 记录` });
+  const lines = readRunLog(m.id, Math.max(1, Number(n.value) || 20));
+  output({ ok: true, agent: key, missionId: m.id, status: m.status, lines: lines.map(formatRunLine), raw: lines });
 }
 
 export async function cmdMission(args: string[]): Promise<void> {
@@ -56,5 +69,6 @@ export async function cmdMission(args: string[]): Promise<void> {
     const all = Object.values(await readMissions()).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
     return output({ ok: true, missions: all });
   }
-  output({ ok: false, error: "mission start|stop|done|list" });
+  if (sub === "log") return log(rest);
+  output({ ok: false, error: "mission start|stop|done|list|log（autopilot 同义）" });
 }

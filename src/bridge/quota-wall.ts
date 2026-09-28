@@ -237,6 +237,9 @@ export function createQuotaWall(d: QuotaWallDeps) {
     },
     snapshot: (): { active: boolean; wall: Wall | null; queued: number } => ({ active: wallActive(c.state), wall: c.state.wall, queued: d.held.wallCount() }),
 
+    /** 这个频道此刻在闸里：闸开着、是 Claude Code agent（Autopilot 据此让位） */
+    gates: async (channelId: string): Promise<boolean> => wallActive(c.state) && d.isClaudeCode(channelId),
+
     /** 这条消息此刻要不要押住：闸开着、收件方是 Claude Code、不是人发的 */
     async holds(env: Envelope, channelId: string): Promise<boolean> {
       if (!wallActive(c.state) || isHumanSender(env.from)) return false;

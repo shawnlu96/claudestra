@@ -38,6 +38,12 @@ export interface WallBridgeDeps {
 let wall: QuotaWall | null = null;
 /** 闸（T14 调度器 / 本地 API / 回程簿清扫用）；bridge 还没启动完 = null */
 export const quotaWall = (): QuotaWall | null => wall;
+const earlyExitListeners: ((via: string) => void)[] = [];
+/** 出闸回调，闸还没建好时先记着（Autopilot 的 initMission 与起闸的先后不固定） */
+export function onQuotaWallExit(cb: (via: string) => void): void {
+  if (wall) wall.onExit(cb);
+  else earlyExitListeners.push(cb);
+}
 
 function loadState(): WallState {
   const r = readJsonStateSync(QUOTA_WALL_PATH, isWallState);
@@ -111,6 +117,7 @@ function productionWall(b: WallBridgeDeps): QuotaWall {
 /** bridge 启动时调一次：起闸、接 api_error_turn、15 秒一拍（续跑到期 + 闸的 tick） */
 export function startQuotaWall(b: WallBridgeDeps): QuotaWall {
   const w = (wall = productionWall(b));
+  for (const cb of earlyExitListeners.splice(0)) w.onExit(cb);
   // 闸内回程簿不按 2 小时扫（撞周额度一等一两天）；出闸时整本失效钟重新起算，等它们的真实答复
   w.onExit(() => {
     for (const c of [...b.calls.values()]) b.calls.touch(c.targetChannelId ?? "", c.callerChannelId);

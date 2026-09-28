@@ -38,6 +38,7 @@
 import { existsSync, readdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import type { SubSessionInfo } from "./runtimes/types.js";
 
 type AnyRecord = Record<string, any>;
 
@@ -107,7 +108,7 @@ const foundPaths = new Map<string, string>();
  * cwd 取不到 ⇒ 整个会话被悄悄跳过（第一版就是这么扫出 0 条的）。
  * 这里按需倍增到找到换行为止，封顶 4MB 防着坏文件。
  */
-export async function readCodexMeta(path: string): Promise<{ sessionId: string; cwd: string } | null> {
+export async function readCodexMeta(path: string): Promise<{ sessionId: string; cwd: string; sub?: SubSessionInfo } | null> {
   const MAX = 4 * 1024 * 1024;
   for (let want = 64 * 1024; ; want = Math.min(want * 4, MAX)) {
     let chunk: string;
@@ -120,13 +121,22 @@ export async function readCodexMeta(path: string): Promise<{ sessionId: string; 
     try {
       const obj = JSON.parse(chunk.slice(0, nl));
       if (obj?.type !== "session_meta") return null;
-      const cwd = typeof obj?.payload?.cwd === "string" ? obj.payload.cwd : "";
-      const sessionId = String(obj?.payload?.session_id ?? obj?.payload?.id ?? "");
-      return cwd && sessionId ? { sessionId, cwd } : null;
+      const p = obj?.payload ?? {};
+      const cwd = typeof p.cwd === "string" ? p.cwd : "";
+      // id 是本线程自己的；session_id 是根会话的——子线程两者不同（主会话相同）
+      const sessionId = String(p.id ?? p.session_id ?? "");
+      if (!cwd || !sessionId) return null;
+      return p.session_id && p.id && p.session_id !== p.id ? { sessionId, cwd, sub: codexSubOf(p) } : { sessionId, cwd };
     } catch {
       return null;
     }
   }
+}
+
+/** 子线程的直接父会话、来源（subagent / guardian_review 自动审查）与昵称（subagent 才有，如 Popper） */
+function codexSubOf(p: AnyRecord): SubSessionInfo {
+  const sub: SubSessionInfo = { parentId: String(p.parent_thread_id ?? p.session_id), kind: String(p.thread_source ?? "subagent") };
+  return typeof p.agent_nickname === "string" && p.agent_nickname ? { ...sub, nickname: p.agent_nickname } : sub;
 }
 
 /** content 数组（`[{type:"input_text"|"output_text", text}]`）→ 纯文本 */
