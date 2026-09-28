@@ -2,7 +2,7 @@
 import { describe, expect, test } from "bun:test";
 import { reservedAgentNameChecks } from "../src/lib/doctor-state.js";
 import { isReservedAgentName } from "../src/lib/registry.js";
-import { assertValidNewName } from "../src/manager/core.js";
+import { assertValidNewAgent, assertValidNewName } from "../src/manager/core.js";
 import { agentKey, intFlag, jsonObjectFlag, parseLedgerArgs, resolveActor, type ParsedArgs } from "../src/manager/ledger-identity.js";
 import { isWriteInvocation, needsWriteLock } from "../src/manager/write-commands.js";
 
@@ -57,6 +57,12 @@ describe("保留名 owner / master", () => {
   test("isReservedAgentName 认裸名与 agent- 前缀、不分大小写", () => {
     for (const n of ["owner", "Owner", "agent-owner", "master", "agent-MASTER"]) expect(isReservedAgentName(n)).toBe(true);
     for (const n of ["owners", "agent-task-owner", "masterful"]) expect(isReservedAgentName(n)).toBe(false);
+  });
+  test("新建 / resume / 收编：跟已有 agent 规范化后撞名就拒（cc 与全角 ｃｃ 会共用授权，T42-r2）；已有的同名照旧", () => {
+    const reg = ["agent-cc", "agent-data"];
+    expect(() => assertValidNewAgent("\uff43\uff43", reg)).toThrow("跟已有的 agent-cc");
+    expect(() => assertValidNewAgent("cc", reg)).not.toThrow();
+    expect(() => assertValidNewAgent("cc2", reg)).not.toThrow();
   });
   test("新建 / resume / 改名共用的 assertValidNewName 拒绝保留名", () => {
     expect(() => assertValidNewName("owner")).toThrow("保留名");

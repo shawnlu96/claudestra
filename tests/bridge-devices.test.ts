@@ -3,11 +3,13 @@
  * 负向用例先写：隧道来源打不到本机配对、没有 CSRF 头的写请求、guest / 受限凭据碰管理端点、撤销后立刻失效、短码穷举限流。
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setApiAuthPrincipalsPathForTest, authenticateApi } from "../src/bridge/api-auth.js";
-import { decideApproval, handleDevicesManaged, handleDevicesPublic, issuePairing, pendingApprovals, setDevicesPrincipalsPathForTest } from "../src/bridge/devices.js";
+import {
+  decideApproval, handleDevicesManaged, handleDevicesPublic, issuePairing, pendingApprovals, setDevicesPrincipalsPathForTest, setDevicesRegistryPathForTest,
+} from "../src/bridge/devices.js";
 import { setRequestContext, type RequestContext } from "../src/bridge/request-context.js";
 import { OWNER_PRINCIPAL_ID } from "../src/lib/devices.js";
 import { proofFor } from "../src/lib/pairing-codes.js";
@@ -24,10 +26,13 @@ beforeAll(() => {
   dir = mkdtempSync(join(tmpdir(), "devices-"));
   setDevicesPrincipalsPathForTest(join(dir, "principals.json"));
   setApiAuthPrincipalsPathForTest(join(dir, "principals.json"));
+  writeFileSync(join(dir, "registry.json"), JSON.stringify({ agents: { "agent-worker-a": {} } })); // guest 只能开放 registry 里有的名字
+  setDevicesRegistryPathForTest(join(dir, "registry.json"));
 });
 afterAll(() => {
   setDevicesPrincipalsPathForTest(undefined);
   setApiAuthPrincipalsPathForTest(undefined);
+  setDevicesRegistryPathForTest(undefined);
   rmSync(dir, { recursive: true, force: true });
 });
 
@@ -128,6 +133,42 @@ describe("手输短码：进待确认，Mac 侧点头才发凭据", () => {
     const after = (await auth(cookiePair(res), RELAY)) as Response;
     expect(after.status).toBe(401);
     expect(await after.json()).toMatchObject({ code: "device_invalid" });
+  });
+
+  test("DELETE /devices/current：guest 不拉列表也能退出登录；撤完清 cookie、最后一条就停用 principal、旧 cookie 401", async () => {
+    const info = issuePairing(machine, { guest: "Bob", agents: ["worker-a"] });
+    const pair = async (deviceName: string) => {
+      const ch = (await (await pub("GET", "/api/v1/devices/pair/challenge", RELAY))!.json()) as { challenge: string };
+      return (await pub("POST", "/api/v1/devices/pair", RELAY, { body: { proof: { challenge: ch.challenge, hmac: proofFor(secretOf(info), ch.challenge) }, deviceName } }))!;
+    };
+    const res = await pair("Bob 的手机");
+    const cookie = cookiePair(res);
+    // 写请求照样要 x-cstra-device（跨站表单附不上这个头）
+    expect(((await auth(cookie, RELAY, "DELETE")) as Response).status).toBe(403);
+    const p = (await auth(cookie, RELAY, "DELETE", { "x-cstra-device": "1" })) as Principal;
+    expect(p.id.startsWith("guest:")).toBe(true);
+    const out = await handleDevicesManaged(req("DELETE", "/api/v1/devices/current", RELAY), new URL("http://x/api/v1/devices/current"), p);
+    expect(out!.status).toBe(200);
+    expect(await out!.json()).toMatchObject({ ok: true, revoked: p.credential, principal: p.id });
+    expect(cookieOf(out!)).toContain(`cstra_dev=; Path=/m/${FP}/`);
+    expect(((await auth(cookie, RELAY)) as Response).status).toBe(401);
+    const file = await readPrincipalsStrict(join(dir, "principals.json"));
+    expect(file.principals.find((x) => x.id === p.id)).toMatchObject({ disabled: true, credentials: [] });
+    // 再调一次（凭据已撤）：鉴权这层就 401，走不到路由
+    expect(((await auth(cookie, RELAY, "DELETE", { "x-cstra-device": "1" })) as Response).status).toBe(401);
+  });
+
+  test("DELETE /devices/current：Bearer token、peer token 没有设备凭据，404，什么都不撤", async () => {
+    const before = JSON.stringify(await readPrincipalsStrict(join(dir, "principals.json")));
+    const tokens: Principal[] = [
+      { id: "token:web", role: "owner", name: "web-ui", agents: ["*", "master"], createdAt: "2026-01-01T00:00:00Z" },
+      { id: "token:peer", role: "external", name: "peer-x", peer: "x", agents: ["worker-a"], createdAt: "2026-01-01T00:00:00Z" },
+    ];
+    for (const t of tokens) {
+      const r = await handleDevicesManaged(req("DELETE", "/api/v1/devices/current", RELAY), new URL("http://x/api/v1/devices/current"), t);
+      expect(r!.status).toBe(404);
+    }
+    expect(JSON.stringify(await readPrincipalsStrict(join(dir, "principals.json")))).toBe(before);
   });
 });
 
