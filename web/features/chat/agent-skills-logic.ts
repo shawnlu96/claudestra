@@ -32,15 +32,19 @@ export interface AgentSkillView {
   rows: AgentSkillRow[];
 }
 
-/** 关着的在前（最常见的操作是找回来），再按名字；搜索看名字和说明 */
+/** 行里显示的名字：同步技能去掉 anthropic-skills: 前缀（旁边的「claude.ai 同步」徽章已经说明来源，手机上前缀会把名字挤没） */
+export const displaySkillName = (r: Pick<AgentSkillRow, "name" | "scope">): string =>
+  r.scope === "synced" ? r.name.replace(/^anthropic-skills:/, "") : r.name;
+
+/** 只按名字排（不按档位：切完开关那一行不能在手指底下跳走）；搜索看名字和说明 */
 export function sortRows(rows: AgentSkillRow[], query: string): AgentSkillRow[] {
   const q = query.trim().toLowerCase();
   return rows
     .filter((r) => !q || r.name.toLowerCase().includes(q) || r.description.toLowerCase().includes(q))
-    .sort((a, b) => Number(a.state === "on") - Number(b.state === "on") || a.name.localeCompare(b.name));
+    .sort((a, b) => displaySkillName(a).localeCompare(displaySkillName(b)));
 }
 
-/** 技能库页：{ agent: { skill: 档位 } } → { skill: [agent…] }（只算不是「开」的） */
+/** 技能库页「在 N 个会话里调过档位」：{ agent: { skill: 档位 } } → { skill: [agent…] }（只算不是「开」的） */
 export function offAgentsBySkill(overrides: Record<string, Record<string, string>> | undefined): Record<string, string[]> {
   const out: Record<string, string[]> = {};
   for (const [agent, table] of Object.entries(overrides ?? {})) {

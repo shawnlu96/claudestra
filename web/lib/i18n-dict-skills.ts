@@ -22,7 +22,7 @@ export const SKILLS_DICT: Record<string, string> = {
   "不存在": "missing",
   // ── 按会话启停 ──
   "这个会话的技能": "Skills in this session",
-  "{n} 个，{m} 个没开": "{n} skills, {m} not on",
+  "{n} 个，{m} 个调过档位": "{n} skills, {m} adjusted",
   "只影响这个会话，改完重启后生效。": "Affects this session only; changes apply after a restart.",
   "只显示开关": "Just on / off",
   "显示全部档位": "Show all levels",
@@ -44,5 +44,5 @@ export const SKILLS_DICT: Record<string, string> = {
   "模型看不到，只能在 / 菜单里手动调": "Hidden from the model; only callable from the / menu",
   "模型和 / 菜单都看不到": "Hidden from both the model and the / menu",
   "大总管的技能": "Master's skills",
-  "在 {n} 个会话里没开": "Not on in {n} session|Not on in {n} sessions",
+  "在 {n} 个会话里调过档位": "Adjusted in {n} session|Adjusted in {n} sessions",
 };

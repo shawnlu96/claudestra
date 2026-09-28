@@ -28,6 +28,7 @@ export function SkillsSection() {
   const [err, setErr] = useState("");
   const [rt, setRt] = useState<RuntimeFilter>("all");
   const [q, setQ] = useState("");
+  const [masterOpen, setMasterOpen] = useState(false); // 展开才拉大总管的技能（少一次扫盘）
   useEffect(() => {
     let alive = true;
     skillLibrary<SkillLibrary>()
@@ -78,9 +79,9 @@ export function SkillsSection() {
         )}
       </section>
       {lib && (
-        <details className="rounded-xl bg-base-200/60 p-4">
+        <details className="rounded-xl bg-base-200/60 p-4" onToggle={(e) => setMasterOpen(e.currentTarget.open)}>
           <summary className="cursor-pointer text-[13px] font-medium">{t("大总管的技能")}</summary>
-          <AgentSkillsSection name="master" master />
+          {masterOpen && <AgentSkillsSection name="master" master />}
         </details>
       )}
       {lib && <RootsSection roots={lib.roots} home={home} />}
@@ -105,7 +106,7 @@ function SkillRow({ s, home, showRuntime, offIn }: { s: LibrarySkill; home: stri
         {!s.userInvocable && <span className={`${tag} badge-ghost`}>{t("不在 / 菜单")}</span>}
         {!s.modelInvocable && <span className={`${tag} badge-ghost`}>{t("只能手动调用")}</span>}
         {offIn?.length ? (
-          <span className={`${tag} badge-warning badge-outline`} title={offIn.map((a) => (a === "master" ? t("大总管") : uiAgentName(a))).join(", ")}>{t("在 {n} 个会话里没开", { n: offIn.length })}</span>
+          <span className={`${tag} badge-warning badge-outline`} title={offIn.map((a) => (a === "master" ? t("大总管") : uiAgentName(a))).join(", ")}>{t("在 {n} 个会话里调过档位", { n: offIn.length })}</span>
         ) : null}
       </div>
       {s.description && <p className="mt-0.5 line-clamp-2 text-[11.5px] leading-relaxed text-base-content/60">{s.description}</p>}

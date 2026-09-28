@@ -4,7 +4,7 @@ import { useT } from "@/lib/i18n";
 import { ApiError } from "@/lib/api/client";
 import { useChatStoreApi } from "../chat-store";
 import { fetchAgentSkills, markSkillsPending, setAgentSkill, useSkillsPending } from "../agent-skills-api";
-import { SKILL_STATES, sortRows, STATE_HINT, STATE_LABEL, type AgentSkillRow, type AgentSkillView, type SkillState } from "../agent-skills-logic";
+import { displaySkillName, SKILL_STATES, sortRows, STATE_HINT, STATE_LABEL, type AgentSkillRow, type AgentSkillView, type SkillState } from "../agent-skills-logic";
 import { SCOPE_LABEL } from "../skills-library-logic";
 
 /**
@@ -52,7 +52,7 @@ export function AgentSkillsSection({ name, master = false }: { name: string; mas
         <div className="min-w-0">
           <div className="text-[13px] font-medium">{t("这个会话的技能")}</div>
           <div className="mt-0.5 text-[12px] text-base-content/55">
-            {view ? t("{n} 个，{m} 个没开", { n: view.rows.length, m: off }) : t("只影响这个会话，改完重启后生效。")}
+            {view ? t("{n} 个，{m} 个调过档位", { n: view.rows.length, m: off }) : t("只影响这个会话，改完重启后生效。")}
           </div>
         </div>
         {view?.supported && fourStates && (
@@ -116,10 +116,10 @@ function PendingBar({ name, master }: { name: string; master: boolean }) {
 function SkillToggleRow({ r, full, readOnly, busy, onChange }: { r: AgentSkillRow; full: boolean; readOnly: boolean; busy: boolean; onChange: (s: SkillState) => void }) {
   const t = useT();
   return (
-    <li className="flex min-w-0 items-center gap-2 rounded-lg bg-base-200/50 px-2.5 py-1.5">
-      <div className="min-w-0 flex-1">
+    <li className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 rounded-lg bg-base-200/50 px-2.5 py-1.5">
+      <div className="min-w-0 flex-1 basis-40">
         <div className="flex min-w-0 items-center gap-1.5">
-          <span className={`min-w-0 truncate font-mono text-[12.5px] ${r.state === "off" ? "text-base-content/45 line-through" : ""}`}>{r.name}</span>
+          <span className={`min-w-0 truncate font-mono text-[12.5px] ${r.state === "off" ? "text-base-content/45 line-through" : ""}`} title={r.name}>{displaySkillName(r)}</span>
           <span className="badge badge-ghost badge-xs shrink-0">{r.scope === "missing" ? t("已不存在") : t(SCOPE_LABEL[r.scope])}</span>
           {!full && r.state !== "on" && r.state !== "off" && <span className="badge badge-info badge-outline badge-xs shrink-0">{t(STATE_LABEL[r.state])}</span>}
         </div>
@@ -127,7 +127,7 @@ function SkillToggleRow({ r, full, readOnly, busy, onChange }: { r: AgentSkillRo
       </div>
       {busy && <span className="loading loading-spinner loading-xs shrink-0" />}
       {full ? (
-        <div className="join shrink-0" role="group" aria-label={r.name}>
+        <div className="join ml-auto shrink-0" role="group" aria-label={r.name}>
           {SKILL_STATES.map((s) => (
             <button
               key={s}
