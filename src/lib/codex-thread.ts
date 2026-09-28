@@ -176,6 +176,8 @@ export interface CodexQueueSinkDeps {
    * ok:false = 没打进去、输入框也没留下它，照常走 queue
    */
   typeIn?(text: string): Promise<{ ok: true; unconfirmed?: true } | { ok: false; why: string }>;
+  /** 打字投递没做成、退回了 queue：告诉 bridge 下一条再打字（否则这条和后面的都卡在暂停的队列里） */
+  onTypeInFailed?(): void;
   /**
    * 重启 / 收编后第一条成功投递前附的前言（codex-launch.codexContextPreamble）。只附一次，
    * 投递失败不算用掉——下一条再附。
@@ -183,6 +185,9 @@ export interface CodexQueueSinkDeps {
   preamble?: string;
 }
 
+/** 打字投递没做成：消息进了 Codex 队列，但 Codex 刚被打断、队列暂停，下一条消息打进去（或有人在终端里提交一轮）之前不会处理 */
+const TYPEIN_FAILED_NOTICE = "⚠️ Codex 刚被打断，这条没能直接打进它的输入框（终端里可能有人在打字或有弹窗），已排进队列：下一条消息或终端里提交一轮之后才会处理";
+const TYPEIN_UNCONFIRMED_NOTICE = "⚠️ 这条已经粘进 Codex 的输入框，但没看到它提交——可能要到终端里按一下回车";
 export const OFFLINE_NOTICE = "⚠️ Codex 会话不在线，消息未投递";
 /** 同一 Codex 进程持有多个线程锁、且都不是已知那个（刚 /new 过、或子 agent 在跑）：认不准，宁可不投 */
 export const AMBIGUOUS_NOTICE = "⚠️ Codex 进程同时开着多个会话（刚 /new 过或有子 agent 在跑），认不准该投哪个，消息未投递——请先在终端里发一条消息，再从这里重发";
@@ -234,8 +239,13 @@ export class CodexQueueSink implements InboundSink {
       const preamble = this.preamblePending;
       const text = preamble ? `${preamble}\n\n${wrapped}` : wrapped;
       const typed = afterInterrupt === "true" && d.typeIn ? await d.typeIn(text) : undefined;
-      if (typed && !typed.ok) d.log?.(`⌨️ 打断后改打字投递没做成（${typed.why}），退回 codex queue`);
+      if (typed && !typed.ok) {
+        d.log?.(`⌨️ 打断后改打字投递没做成（${typed.why}），退回 codex queue`);
+        d.onTypeInFailed?.();
+        await d.notify(chatId, TYPEIN_FAILED_NOTICE).catch((e) => d.log?.(`通知发送方失败（投递照常走 queue）: ${(e as Error).message}`));
+      }
       if (typed?.ok) d.log?.(typed.unconfirmed ? "⚠️ 打断后已粘进 Codex 输入框，但没看到提交，需要人看一眼" : "⌨️ 打断后的消息已直接打进 Codex");
+      if (typed?.ok && typed.unconfirmed) await d.notify(chatId, TYPEIN_UNCONFIRMED_NOTICE).catch((e) => d.log?.(`通知发送方失败: ${(e as Error).message}`));
       const r: CmdResult = typed?.ok ? { ok: true, out: "", err: "" } : await d.queue(decision.sid, text);
       if (r.ok && preamble) this.preamblePending = undefined;
       if (!r.ok) {

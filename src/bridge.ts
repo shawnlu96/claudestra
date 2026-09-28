@@ -176,7 +176,7 @@ import { statePath } from "./lib/paths.js";
 import { controlFor, managedFor } from "./lib/runtimes/index.js";
 import { stopNeedsPaneRecheck } from "./lib/runtimes/window-ops.js";
 import { onCodexInterrupt, preemptForHuman } from "./bridge/preempt.js";
-import { resumeNoticeEnv, turnCuts } from "./bridge/turn-cuts.js";
+import { isCutNotice, turnCuts } from "./bridge/turn-cuts.js";
 import { withInterruptNote } from "./lib/turn-cuts.js";
 import { createKeyedSerial } from "./lib/keyed-serial.js";
 import { notifyTargetVerdict } from "./lib/notify.js";
@@ -796,7 +796,7 @@ async function deliverToLocal(env: RouterEnvelope, to: RouterLocalEndpoint, stil
   if (env.from.kind === "api") lastMessageSource.set(to.channelId, "api");
   // v2.11: HTTP peer pushback 送达 caller 后,caller 接下来的回合是「处理 peer 回复」——Stop 不该
   // @ 用户(与 Discord peer pushback 的 set "agent" 对齐,review 2026-07-19 #2)
-  if (env.meta.triggerKind === "peer_http") lastMessageSource.set(to.channelId, "agent");
+  if (env.meta.triggerKind === "peer_http" || isCutNotice(env)) lastMessageSource.set(to.channelId, "agent"); // 打断收尾提醒同理:bridge 发起的回合
   // chat_id 是 agent reply() 时要传回的 id：消息从哪个会话来，回复就发回那里。
   const replyBackChannel = resolveReplyBackChannel(env);
   rememberInbound(env, to.channelId); // 转交（bridge/forward.ts）只能转最近收到的用户原话
@@ -840,7 +840,8 @@ async function deliverToLocal(env: RouterEnvelope, to: RouterLocalEndpoint, stil
   const compactingNow = turn.main === "compacting";
   const busy = compactingNow || ((env.from.kind === "local" || !!env.meta.waitForIdle) && agentMsgMustWait(turn));
   // flush 投递途中(上面几处 await)这条已被别处从押后队列摘掉(kill 清理 / 24 小时放弃):既不押回(会复活)也不发
-  if (stillWanted && !stillWanted()) return { envelope: env, outcome: { kind: "dropped", reason: "已从押后队列撤下" } };
+  // 押着的打断收尾提醒:之后又被打断 / 叫停过、那件事已续上、过了 30 分钟,就不投了(turnCuts.noticeWanted)
+  if ((stillWanted && !stillWanted()) || !turnCuts.noticeWanted(env)) return { envelope: env, outcome: { kind: "dropped", reason: "已从押后队列撤下" } };
   if (busy) {
     const n = heldLocalMsgs.holdEnv(env); // 从 flush 来的是队里那个 env 本身,不会重复入队
     console.log(`⏸ 消息押后(${evAgent} ${compactingNow ? "压缩上下文中" : "回合中"}): 来自 ${meta.user},队列 ${n} 条`);
@@ -1768,6 +1769,7 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
         pid: typeof msg.pid === "number" ? msg.pid : undefined,
         ppid: typeof msg.ppid === "number" ? msg.ppid : undefined,
       });
+      turnCuts.setCodexTypeIn(msg.channelId, msg.typeIn === true); // Codex channel-server 会打字投递才对它抢占(老版本打断后消息会卡在 queue)
       console.log(`📌 注册频道: ${msg.channelId} (共 ${clients.size} 个)`);
       ws.send(JSON.stringify({ type: "registered", channelId: msg.channelId }));
 
@@ -2248,6 +2250,7 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
       break;
     }
 
+    case "codex_typein_failed": if (clients.get(msg.channelId)?.ws === ws) turnCuts.rearmAfterInterrupt(msg.channelId); break; // 退回了 queue:下一条再打字
     case "forward_to_agent": ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, ...(await handleForward(ws, msg)) })); break;
     case "route_to_agent": {
       try {
@@ -2775,8 +2778,8 @@ async function handleHookRequest(req: Request): Promise<Response> {
         // 轮转（不经 clear 端点）自愈。后台异步，不阻塞 Stop 主流程。
         void maybeHealRotatedSession(channelId);
         // 插话那一回合结束、被打断的事还没续上 → 打断收尾提醒进押后队列,和押后消息一起由同一个投递者投(lib/turn-cuts.ts)
-        const cutNotice = turnCuts.onStop(channelId, event === "stop" ? "Stop" : event);
-        if (cutNotice) heldLocalMsgs.holdEnv(resumeNoticeEnv(channelId, evAgent, cutNotice));
+        const cutNotice = turnCuts.onStop(channelId, event === "stop" ? "Stop" : event, evAgent);
+        if (cutNotice) heldLocalMsgs.holdEnv(cutNotice);
         // v2.21.1+ 回合结束 → 投递押后的 agent→agent 消息(2s 让 TUI 回到提示符)
         if (heldLocalMsgs.get(channelId)?.length) {
           setTimeout(() => void flushHeldLocalMsgs(channelId, "stop"), 2000);

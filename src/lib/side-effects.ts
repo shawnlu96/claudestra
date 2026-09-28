@@ -41,6 +41,8 @@ function mcpReadOnly(short: string): boolean {
   const words = short.split(/[_-]/);
   return !words.some((w) => MCP_WRITE_WORD.test(w)) && words.some((w) => MCP_READ_WORD.test(w));
 }
+/** 这些服务的 MCP 写操作别人看得见 / 收不回（发消息、开 PR、发邮件、扣款）：写动词一律算对外 */
+const MCP_EXTERNAL_SERVER = /slack|github|gitlab|gmail|mail|linear|jira|notion|discord|telegram|twitter|x_com|stripe|calendar|drive|figma|asana/i;
 
 /**
  * 分类一次工具调用。command：Bash 的命令原文（jsonl-watcher 的 detail 里「描述 ─── 命令」取后半，见 bashCommandOf）；
@@ -58,6 +60,8 @@ export function classifyTool(name: string, opts: { command?: string; target?: st
   }
   if (short === "reply") return v("check_first", "先看回复发出去没有，别重复发");
   if (mcpReadOnly(short)) return v("none");
+  const server = name.startsWith("mcp__") ? name.split("__")[1] ?? "" : "";
+  if (MCP_EXTERNAL_SERVER.test(server)) return v("external", "对外操作可能已经生效（消息已发、PR 已开），先去对方那边核对，别重复做");
   return v("check_first");
 }
 
@@ -115,10 +119,11 @@ function classifyCommand(t: string[], has: (re: RegExp) => boolean): SideEffectV
   const [c0 = "", c1 = "", c2 = ""] = t;
   if (c0 === "git") return classifyGit(t);
   if (c0 === "gh") return classifyGh(t);
-  if (c0 === "curl" || c0 === "wget" || c0 === "http") {
-    const mutating = has(/^-X(POST|PUT|DELETE|PATCH)?$|^--request$|^(-d|--data.*|-F|--form|--upload-file|-T)$/) && !has(/^-XGET$/);
-    return mutating ? v("external", "请求可能已经发出，先查对方状态，别重复提交") : v("none");
+  if (["curl", "wget", "http", "https", "xh"].includes(c0)) {
+    return httpMutates(t) ? v("external", "请求可能已经发出，先查对方状态，别重复提交") : v("none");
   }
+  const cloud = classifyCloud(t);
+  if (cloud) return cloud;
   if (["npm", "bun", "yarn", "pnpm", "cargo", "docker"].includes(c0) && ["publish", "push"].includes(c1)) {
     return v("external", "可能已经发布了，先查线上版本");
   }
@@ -137,6 +142,45 @@ function classifyCommand(t: string[], has: (re: RegExp) => boolean): SideEffectV
   if (c0 === "mkdir" && has(/^-p$/)) return v("idempotent");
   if (READ_CMDS.has(c0)) return v("none");
   return v("check_first", "先核对这条命令做到了哪一步");
+}
+
+const WRITE_METHOD = /^(POST|PUT|PATCH|DELETE)$/i;
+
+/** curl / wget / httpie（http、https、xh）会不会改对方的东西：显式写方法，或带请求体 */
+function httpMutates(t: string[]): boolean {
+  const args = t.slice(1);
+  for (let k = 0; k < args.length; k++) {
+    const a = args[k];
+    const method = /^-X(.+)$/.exec(a)?.[1] ?? /^--(?:request|method)=(.+)$/.exec(a)?.[1] ?? (/^(-X|--request|--method)$/.test(a) ? args[k + 1] : undefined);
+    if (method && WRITE_METHOD.test(method)) return true;
+    if (/^(-d|--data.*|-F|--form.*|--json|--upload-file|-T|--post-data|--post-file|--body-data|--body-file)(=.*)?$/.test(a)) return true;
+  }
+  // httpie：方法是第一个非选项参数，或带 key=value / key:=json 数据项
+  if (["http", "https", "xh"].includes(t[0] ?? "")) {
+    const pos = args.filter((a) => !a.startsWith("-"));
+    return WRITE_METHOD.test(pos[0] ?? "") || pos.slice(1).some((a) => /^[\w.-]+:?=/.test(a));
+  }
+  return false;
+}
+
+/** 云 / 集群 / 基础设施命令：删改建一律对外（生产资源，收不回），查看类只读，其余先核对 */
+function classifyCloud(t: string[]): SideEffectVerdict | null {
+  const [c0 = "", c1 = "", c2 = ""] = t;
+  const verbs = t.slice(1).filter((a) => !a.startsWith("-"));
+  const ext = (hint: string) => v("external", hint);
+  if (c0 === "kubectl") {
+    if (/^(get|describe|logs|top|explain|version|config|api-resources|auth)$/.test(c1)) return v("none");
+    return ext("集群资源可能已经改了，先 kubectl get 核对现状");
+  }
+  if (c0 === "helm") return /^(list|ls|status|get|show|history|search|template|lint)$/.test(c1) ? v("none") : ext("release 可能已经变了，先 helm status 核对");
+  if (c0 === "terraform" || c0 === "tofu") return /^(apply|destroy|import|taint|untaint)$/.test(c1) || c1 === "state" && /^(rm|mv|push)$/.test(c2) ? ext("基础设施可能已经改了一半，先 plan 看现状，别直接重跑") : v("none");
+  if (c0 === "aws" || c0 === "gcloud" || c0 === "az") {
+    if (verbs.some((w) => /^(delete|remove|rm|destroy|terminate|create|put|update|set|deploy|run|start|stop|reboot|mv|cp|sync|apply|attach|detach|modify|restore|invoke|publish|send)/.test(w))) {
+      return ext("云资源可能已经改了，先 describe / list 核对，别直接重跑");
+    }
+    return v("none");
+  }
+  return null;
 }
 
 function classifyGit(all: string[]): SideEffectVerdict {

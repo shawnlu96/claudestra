@@ -12,14 +12,19 @@ import type { TurnState } from "./turn-state.js";
 export interface InterruptGateDeps {
   /** 频道 → 窗口和运行时；查不到窗口 = null */
   resolve: (channelId: string) => Promise<{ win: string | null; runtime?: string }>;
-  probe: (win: string, runtime: string | undefined, agent: string) => Promise<TurnState>;
+  probe: (win: string, runtime: string | undefined, agent: string, channelId: string) => Promise<TurnState>;
   /** 按运行时声明发打断键（CC / Codex 是 Esc，Pi 是 C-c），返回实际发出的键 */
-  interrupt: (win: string, runtime: string | undefined) => Promise<readonly string[]>;
+  interrupt: (win: string, runtime: string | undefined, channelId: string) => Promise<readonly string[]>;
+  /** 这一次允不允许由 bridge 主动打断（Codex：channel-server 得会打字投递、上次 Stop 之后没抢占过） */
+  allow?: (channelId: string, runtime: string | undefined, stop: boolean) => boolean;
   /** 抢占成功后的收尾（指标 + done/interrupt 事件 + 日志） */
   onPreempted: (agent: string, channelId: string) => void;
   sleep: (ms: number) => Promise<void>;
   now?: () => number;
 }
+
+/** preempt 的结果：fired = 发了键且画面确认停下了；否则 why 说明为什么没打断 */
+export type PreemptResult = { fired: true } | { fired: false; why: "cooldown" | "not_allowed" | "not_busy" | "no_keys" | "ineffective" };
 
 /** 打断之后等 CC 收尾一拍再投递：立刻投会混进垂死回合的尾流 */
 const SETTLE_MS = 1_200;
@@ -35,25 +40,36 @@ export function createInterruptGate(deps: InterruptGateDeps, cooldownMs = 4_000)
 
   return {
     /**
-     * 人类消息到达：目标主回合在跑就打断并等收尾，返回是否打断了。只看 main==="busy"：只剩后台 subagent 时不该打断（CC 已改发 Esc，不会再停掉它们，见 runtimes/claude-code.ts）；
-     * 压缩中不打断（会掐掉压缩）；Pi 不打断（preemptOnHumanMessage=false，消息 steer 进回合）。
-     * stop（停字）：人明确要停——不看 preemptOnHumanMessage（Pi 也打断），冷却按手动的最小间隔（刚抢占完紧接着说「停」必须生效），
+     * 人类消息到达：目标主回合在跑就打断并等收尾。只看 main==="busy"：只剩后台 subagent 时不打断；压缩中不打断（会掐掉压缩）；
+     * Pi 不打断（preemptOnHumanMessage=false，消息 steer 进回合）。发完键再看一眼：画面还在忙（焦点在浮层 / copy-mode / vim 插入模式，
+     * 键没起作用）就不算打断——调用方不能据此告诉 agent「你被打断了」。
+     * stop（停字）：人明确要停——不看 preemptOnHumanMessage（Pi 也打断）；离上一次发键不足最小间隔就等够再发（不丢这次停）；
      * 判据失效（unknown）也发键；只有确认空闲或压缩中才不发。
      */
-    preempt(channelId: string, agent: string, opts: { stop?: boolean } = {}): Promise<boolean> {
-      return serial(channelId, async () => {
-        // 刚打断过（抢占或手动）就不再打：连发的补充消息不叠加打断，也不会离上一次发键太近
-        if (sinceKey(channelId) <= (opts.stop ? MANUAL_GAP_MS : cooldownMs)) return false;
+    preempt(channelId: string, agent: string, opts: { stop?: boolean } = {}): Promise<PreemptResult> {
+      return serial(channelId, async (): Promise<PreemptResult> => {
+        const stop = !!opts.stop;
+        const since = sinceKey(channelId);
+        // 刚打断过（抢占或手动）：连发的补充消息不叠加打断；停字等够最小间隔再发
+        if (!stop && since <= cooldownMs) return { fired: false, why: "cooldown" };
+        if (stop && since <= MANUAL_GAP_MS) await deps.sleep(MANUAL_GAP_MS - since + 50);
         const { win, runtime } = await deps.resolve(channelId);
-        if (!win || (!opts.stop && !controlFor(runtime).preemptOnHumanMessage)) return false;
-        const { main } = await deps.probe(win, runtime, agent);
-        if (main === "unknown" && !opts.stop) console.warn(`⚠️ ${win} 忙闲判据失效（TUI 文案可能已变），跳过自动打断`);
-        if (main !== "busy" && !(opts.stop && main === "unknown")) return false;
+        if (!win || (!stop && !controlFor(runtime).preemptOnHumanMessage)) return { fired: false, why: "not_allowed" };
+        if (deps.allow && !deps.allow(channelId, runtime, stop)) return { fired: false, why: "not_allowed" };
+        const { main } = await deps.probe(win, runtime, agent, channelId);
+        if (main === "unknown" && !stop) console.warn(`⚠️ ${win} 忙闲判据失效（TUI 文案可能已变），跳过自动打断`);
+        if (main !== "busy" && !(stop && main === "unknown")) return { fired: false, why: "not_busy" };
         lastKeyAt.set(channelId, now());
-        await deps.interrupt(win, runtime);
+        const keys = await deps.interrupt(win, runtime, channelId);
+        if (!keys.length) return { fired: false, why: "no_keys" };
         deps.onPreempted(agent, channelId);
         await deps.sleep(SETTLE_MS);
-        return true;
+        // 只对看画面的运行时（CC）复核：Codex / Pi 的忙闲来自 hook，打断回报可能晚于这一拍，复核会误判成没打断
+        if (controlFor(runtime).paneHeuristics && (await deps.probe(win, runtime, agent, channelId)).main === "busy") {
+          console.warn(`⚠️ ${win} 发了 ${keys.join(" ")} 画面仍在忙（焦点可能在浮层 / copy-mode），不当成已打断`);
+          return { fired: false, why: "ineffective" };
+        }
+        return { fired: true };
       });
     },
 
@@ -64,7 +80,7 @@ export function createInterruptGate(deps: InterruptGateDeps, cooldownMs = 4_000)
     manual(channelId: string, win: string, runtime: string | undefined): Promise<{ keys: readonly string[]; deduped?: true }> {
       return serial(channelId, async () => {
         if (sinceKey(channelId) <= MANUAL_GAP_MS) return { keys: [], deduped: true as const };
-        const keys = await deps.interrupt(win, runtime);
+        const keys = await deps.interrupt(win, runtime, channelId);
         if (keys.length) lastKeyAt.set(channelId, now());
         return { keys };
       });

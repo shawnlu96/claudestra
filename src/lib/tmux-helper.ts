@@ -196,29 +196,21 @@ export function tmuxInterrupt(target: string): void {
 }
 
 /**
- * v2.19.0 双 Esc 护栏（2026-08-11 事故：一夜之间 8 个 agent 逐个卡死）。
- *
- * Claude Code 2.1.x 把**连按两次 Esc** 当作 Rewind 手势 —— 弹出「Restore the
- * code and/or conversation to the point before…」检查点对话框，窗口从此被模态
- * 挡住：收不了消息、pane 永远非 idle。实测阈值（agent-temp 真机二分）：
- * 间隔 ≤600ms 必开，≥700ms 不开。而用量抓取的收尾是「发 Esc → 等 350ms →
- * 没关掉再发」，正好落在窗口内；每被毒一个窗口就永远不 idle，抓取只好换下
- * 一个窗口下手，于是一小时毒一个，像瘟疫一样扩散。
- *
- * 所以**所有 Esc 都必须走这里**：同一 window 两次 Esc 之间强制 ≥1200ms
- * （对 700ms 阈值留一倍余量），不够就先等。跨模块的巧合双发（watcher 与抓取
- * 同时对同一窗口发 Esc）也一并挡住——这正是裸 tmuxRaw 挡不住的那类。
- *
- * 局限：节流表是进程内的，manager.ts 子进程与 bridge 各有一份。跨进程双发只
- * 在「restart 正在退出旧会话」这类场景出现，那时窗口本就要被换掉，可接受。
+ * 双 Esc 护栏：CC 把间隔 ≤600ms 的两次 Esc 当 Rewind 手势，弹出检查点对话框挡住窗口（≥700ms 不开，git log -S ESC_DOUBLE_TAP_MS）。
+ * 所以所有 Esc 都走这里：同一窗口两次之间 ≥1200ms。占位是同步的（先算好这一发的时刻、记下、再等），进程内并发的调用方依次排开；
+ * 跨进程（manager 子进程发的 Esc）另把预定时刻写进窗口选项 ESC_AT_OPTION，发之前两边都看——读写之间仍有毫秒级的跨进程竞态。
  */
 export const ESC_DOUBLE_TAP_MS = 1200;
+const ESC_AT_OPTION = "@claudestra_esc_at";
 const lastEscapeAt = new Map<string, number>();
 export async function tmuxSendEscape(target: string, opts: { strict?: boolean } = {}): Promise<void> {
-  const wait = ESC_DOUBLE_TAP_MS - (Date.now() - (lastEscapeAt.get(target) ?? 0));
-  if (wait > 0) await Bun.sleep(wait);
+  const shared = Number(await windowOption(target, ESC_AT_OPTION)) || 0;
+  const now = Date.now();
+  const at = Math.max(now, (lastEscapeAt.get(target) ?? 0) + ESC_DOUBLE_TAP_MS, shared + ESC_DOUBLE_TAP_MS);
+  lastEscapeAt.set(target, at); // 同步占位：await 之前记下
+  await setWindowOption(target, ESC_AT_OPTION, String(at));
+  if (at > Date.now()) await Bun.sleep(at - Date.now());
   await (opts.strict ? tmuxRawStrict : tmuxRaw)(["send-keys", "-t", target, "Escape"]); // strict：打断键发不出去要报给按按钮的人
-  lastEscapeAt.set(target, Date.now());
 }
 
 /**

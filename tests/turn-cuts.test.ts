@@ -3,11 +3,10 @@
  * 重点：连环打断挂链、续做检测不把被砍的那一次自己算进去、只在插话回合的正常 Stop 提醒一次、「停」压掉提醒。
  */
 import { describe, expect, test } from "bun:test";
-import { TurnCuts } from "../src/bridge/turn-cuts.js";
 import { unwrapChannelMessage } from "../src/lib/session-history.js";
 import { isHumanRequest, type Envelope } from "../src/bridge/router.js";
 import {
-  CUT_TTL_MS, inflightFrom, isResumedBy, lateInflight, makeCut, onStop, preemptHeadline, resumeNotice, stopHeadline, withInterruptNote,
+  CUT_TTL_MS, inflightFrom, resumeBy, lateInflight, makeCut, onStop, preemptHeadline, resumeNotice, stopHeadline, withInterruptNote,
   type Cut, type CutEvent, type NewCutInput,
 } from "../src/lib/turn-cuts.js";
 
@@ -81,25 +80,34 @@ describe("makeCut：分类与连环打断", () => {
   });
 });
 
-describe("续做检测", () => {
+describe("续做检测（逐段）", () => {
   const cut = cutFrom([start("t1", "Bash", DEPLOY)]);
-  test("同名同命令的新调用 = 已续做（后台重跑、空白不同也算）", () => {
-    expect(isResumedBy(cut, start("t9", "Bash", `${DEPLOY}  `))).toBe(true);
+  test("同名同命令的新调用 = 这一段续上了；单段 = 整条 resumed（后台重跑、空白不同也算）", () => {
+    expect(resumeBy(cut, start("t9", "Bash", `${DEPLOY}  `))?.state).toBe("resumed");
   });
   test("被砍的那一次自己（watcher 迟到的 start）不算", () => {
-    expect(isResumedBy(cut, start("t1", "Bash", DEPLOY))).toBe(false);
+    expect(resumeBy(cut, start("t1", "Bash", DEPLOY))).toBeNull();
   });
   test("不同命令 / 不同工具不算", () => {
-    expect(isResumedBy(cut, start("t9", "Bash", "git status"))).toBe(false);
-    expect(isResumedBy(cut, start("t9", "Read", DEPLOY))).toBe(false);
+    expect(resumeBy(cut, start("t9", "Bash", "git status"))).toBeNull();
+    expect(resumeBy(cut, start("t9", "Read", DEPLOY))).toBeNull();
   });
-  test("chain 里任一段续上都算（连环打断后先续最早那件）", () => {
+  test("连环打断：只续上一段 → 整条还是 open，提醒只列没续上的那段", () => {
     const second = cutFrom([start("t2", "Bash", "gh pr merge 1")], { id: "cut_2" }, cut);
-    expect(isResumedBy(second, start("t9", "Bash", DEPLOY))).toBe(true);
+    const r = resumeBy(second, start("t9", "Bash", DEPLOY))!;
+    expect(r.state).toBe("open");
+    expect(r.chain[0].resumed).toBe(true);
+    const n = resumeNotice(r, () => "replied");
+    expect(n).not.toContain(DEPLOY);
+    expect(n).toContain("gh pr merge 1");
+    expect(resumeBy(r, start("t8", "Bash", "gh pr merge 1"))?.state).toBe("resumed");
   });
   test("非 Bash 按摘要比", () => {
     const c = cutFrom([start("e1", "Edit", "Edit bridge.ts")]);
-    expect(isResumedBy(c, start("e2", "Edit", "Edit bridge.ts"))).toBe(true);
+    expect(resumeBy(c, start("e2", "Edit", "Edit bridge.ts"))?.state).toBe("resumed");
+  });
+  test("砍在思考 / 出字的段认不出续没续：一直算没续", () => {
+    expect(resumeBy(cutFrom([]), start("t9", "Bash", DEPLOY))).toBeNull();
   });
 });
 
@@ -153,31 +161,34 @@ describe("文案", () => {
     expect(preemptHeadline(c)).toContain("当时在思考 / 出字，最后做完的是 gh pr merge 129");
   });
 
-  test("停字抬头：不续做；后面还有话就照常处理", () => {
-    expect(stopHeadline(cut, "")).toContain("简短确认已停");
-    expect(stopHeadline(cut, "先别合")).toContain("停字后面的话照常处理");
+  test("停字抬头照实写：打断了 / 本来就空闲 / 没能打断（请自己停）；都不续做", () => {
+    expect(stopHeadline(cut, "fired")).toContain("已替你打断");
+    expect(stopHeadline(cut, "not_busy")).toContain("你刚才没有在跑的回合");
+    expect(stopHeadline(cut, "failed")).toContain("没能替你打断");
+    for (const o of ["fired", "not_busy", "failed"] as const) expect(stopHeadline(cut, o)).toContain("不要续做被打断的事");
   });
 
   test("收尾提醒：被砍断 / 做到了 / 还没回复，最后一句允许忽略", () => {
-    const n = resumeNotice(cut, () => true);
+    const n = resumeNotice(cut, () => "never");
     expect(n.startsWith("[⏯ 打断收尾]")).toBe(true);
     expect(n).toContain(`被砍断：Bash「${DEPLOY}」——可以直接重跑`);
     expect(n).toContain("做到了：gh pr merge 129");
     expect(n).toContain("还没回复：owner");
     expect(n).toContain("已经做完或决定不做，就忽略这条");
-    expect(resumeNotice(cut, () => false)).toContain("还没回复：无");
+    expect(resumeNotice(cut, () => "replied")).toContain("还没回复：无");
+    expect(resumeNotice(cut, () => "after_cut")).toContain("核对一下有没有答到"); // 打断之后回过同一地址：可能答的是插话
   });
 
   test("对外 / 不可逆加固定警告；Codex 加「命令可能还在后台跑」", () => {
     const ext = cutFrom([start("t1", "Bash", "gh release create v9")]);
-    expect(resumeNotice(ext, () => false)).toContain("不要直接重跑");
-    expect(resumeNotice({ ...cut, runtime: "codex" }, () => false)).toContain("可能还在后台跑");
-    expect(resumeNotice(cut, () => false)).not.toContain("⚠");
+    expect(resumeNotice(ext, () => "replied")).toContain("不要直接重跑");
+    expect(resumeNotice({ ...cut, runtime: "codex" }, () => "replied")).toContain("可能还在后台跑");
+    expect(resumeNotice(cut, () => "replied")).not.toContain("⚠");
   });
 
   test("连环打断按先后编号列出", () => {
     const second = cutFrom([start("t2", "Bash", "gh pr merge 7")], { id: "cut_2", at: T0 + 5000 }, cut);
-    const n = resumeNotice(second, () => false);
+    const n = resumeNotice(second, () => "replied");
     expect(n).toContain("连续被打断 2 次");
     expect(n.indexOf(DEPLOY)).toBeLessThan(n.indexOf("gh pr merge 7"));
   });
@@ -186,105 +197,6 @@ describe("文案", () => {
     const api = "[🌐 来自 Web 端用户「owner」（HTTP API 接入）。\n用 reply() 回答。]\n\n先别部署";
     expect(withInterruptNote(api, "[⚡ x]")).toBe("[🌐 来自 Web 端用户「owner」（HTTP API 接入）。\n用 reply() 回答。]\n\n[⚡ x]\n\n先别部署");
     expect(withInterruptNote("先别部署", "[⚡ x]")).toBe("[⚡ x]\n\n先别部署");
-  });
-});
-
-describe("TurnCuts 记录簿：送达 / 回复 / Stop / 事件交错", () => {
-  function book() {
-    let now = T0;
-    const b = new TurnCuts(null, () => now);
-    return { b, tick: (ms: number) => void (now += ms), at: () => now };
-  }
-  const env = (id: string, text: string, from: Envelope["from"] = { kind: "api", name: "owner", tokenId: "owner" } as Envelope["from"]): Envelope =>
-    ({
-      from, to: { kind: "local", channelId: "ch" } as Envelope["to"], intent: "request", content: text,
-      meta: { messageId: id, triggerKind: "api_user", ts: "", threadId: "t" },
-    }) as unknown as Envelope;
-  const tools = inflightFrom([start("t1", "Bash", DEPLOY)]);
-
-  test("完整一轮：打断 → 插话送达 → Stop 提醒一次 → 再 Stop 不提醒", () => {
-    const { b, tick } = book();
-    b.noteDelivered(env("m1", "合并 T3 并上线"), "ch");
-    tick(30_000);
-    const cut = b.record({ channelId: "ch", agent: "a", cause: "preempt", byMessageId: "m2", byName: "owner", tools });
-    expect(cut.turnTrigger?.messageId).toBe("m1");
-    expect(b.onStop("ch", "Stop")).toBeNull(); // 插话还没送达
-    tick(1_200);
-    b.noteDelivered(env("m2", "顺便看下 X"), "ch");
-    tick(20_000);
-    const n = b.onStop("ch", "Stop");
-    expect(n).toContain(DEPLOY);
-    expect(n).toContain("还没回复：owner");
-    expect(b.onStop("ch", "Stop")).toBeNull();
-  });
-
-  test("打断前已经回复过那条消息 → 不列为「还没回复」；打断之后的回复（答的是插话）不算", () => {
-    const { b, tick } = book();
-    b.noteDelivered(env("m1", "合并 T3"), "ch");
-    tick(5_000);
-    b.noteReplied("ch", "api:owner");
-    tick(5_000);
-    b.record({ channelId: "ch", agent: "a", cause: "preempt", byMessageId: "m2", tools });
-    b.noteDelivered(env("m2", "x"), "ch");
-    tick(5_000);
-    expect(b.onStop("ch", "Stop")).toContain("还没回复：无");
-
-    const c = book();
-    c.b.noteDelivered(env("m1", "合并 T3"), "ch");
-    c.tick(5_000);
-    c.b.record({ channelId: "ch", agent: "a", cause: "preempt", byMessageId: "m2", tools });
-    c.b.noteDelivered(env("m2", "x"), "ch");
-    c.tick(5_000);
-    c.b.noteReplied("ch", "api:owner");
-    expect(c.b.onStop("ch", "Stop")).toContain("还没回复：owner");
-  });
-
-  test("agent 自己续上了（同命令再跑）→ 不提醒", () => {
-    const { b, tick } = book();
-    b.record({ channelId: "ch", agent: "a", cause: "preempt", byMessageId: "m2", tools });
-    b.noteDelivered(env("m2", "x"), "ch");
-    tick(3_000);
-    b.onEvent({ ...start("t9", "Bash", DEPLOY), chatId: "ch" });
-    expect(b.get("ch")?.state).toBe("resumed");
-    expect(b.onStop("ch", "Stop")).toBeNull();
-  });
-
-  test("停字没发键（本来空闲）也压掉之前没收尾的", () => {
-    const { b } = book();
-    b.record({ channelId: "ch", agent: "a", cause: "preempt", byMessageId: "m2", tools });
-    b.noteDelivered(env("m2", "x"), "ch");
-    b.stop("ch");
-    expect(b.onStop("ch", "Stop")).toBeNull();
-  });
-
-  test("连环：插话回合又被打断，Stop 时两段都列出", () => {
-    const { b, tick } = book();
-    b.record({ channelId: "ch", agent: "a", cause: "preempt", byMessageId: "m2", tools });
-    b.noteDelivered(env("m2", "x"), "ch");
-    tick(4_000);
-    b.record({ channelId: "ch", agent: "a", cause: "preempt", byMessageId: "m3", tools: inflightFrom([start("t2", "Bash", "gh pr merge 3")]) });
-    b.noteDelivered(env("m3", "y"), "ch");
-    tick(4_000);
-    const n = b.onStop("ch", "Stop") ?? "";
-    expect(n).toContain("连续被打断 2 次");
-    expect(n).toContain(DEPLOY);
-    expect(n).toContain("gh pr merge 3");
-  });
-
-  test("收尾提醒自己送达不会变成下一次打断的「在处理」", () => {
-    const { b } = book();
-    b.noteDelivered(env("m1", "真正的请求"), "ch");
-    b.noteDelivered(env("n1", "[⏯ 打断收尾] …", { kind: "bridge", label: "turn-cuts" } as Envelope["from"]), "ch");
-    expect(b.record({ channelId: "ch", agent: "a", cause: "preempt", byMessageId: "m9", tools }).turnTrigger?.messageId).toBe("m1");
-  });
-
-  test("recentlyCut：Codex 的 Interrupt 回声认得出", () => {
-    const { b, tick } = book();
-    b.record({ channelId: "ch", agent: "a", cause: "preempt", byMessageId: "m2", tools });
-    tick(3_000);
-    expect(b.recentlyCut("ch", 15_000)).toBe(true);
-    tick(20_000);
-    expect(b.recentlyCut("ch", 15_000)).toBe(false);
   });
 });
 

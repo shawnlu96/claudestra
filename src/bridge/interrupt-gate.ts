@@ -7,13 +7,15 @@ import { recordMetric } from "../lib/metrics.js";
 import { interruptWindow } from "../lib/runtimes/window-ops.js";
 import { emitEvent } from "./event-bus.js";
 import { probeTurnAt, resolveTurnWindow } from "./turn-probe.js";
+import { turnCuts } from "./turn-cuts.js";
 
 const controlChannelId = () => process.env.CONTROL_CHANNEL_ID || "";
 
 export const interruptGate = createInterruptGate({
   resolve: (ch) => resolveTurnWindow(ch, controlChannelId()),
   probe: probeTurnAt,
-  interrupt: interruptWindow,
+  interrupt: (win, runtime, ch) => (turnCuts.noteKeySent(ch), interruptWindow(win, runtime)), // 先记：Codex 的打断回报 0.5 秒就到
+  allow: (ch, runtime, stop) => turnCuts.mayBridgeInterrupt(ch, runtime, stop),
   onPreempted: (agent, channelId) => {
     recordMetric("agent_interrupt", { channelId, agent, meta: { trigger: "preempt" } });
     // 让前端给被掐的回合标「已打断」(与手动停止同一事件形状)

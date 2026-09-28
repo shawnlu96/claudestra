@@ -6,6 +6,7 @@
  */
 import {
   setWindowOption,
+  ensurePaneInteractive,
   tmuxCapture,
   tmuxRaw,
   tmuxRawStrict,
@@ -64,6 +65,7 @@ export async function interruptVia(io: InterruptIO, runtime: string | undefined 
 
 /** interruptVia 的 tmux 版 */
 export async function interruptWindow(target: string, runtime: string | undefined | null): Promise<readonly string[]> {
+  await ensurePaneInteractive(target); // pane 在 copy-mode 时键会被 tmux 自己吃掉（发了也打断不了）
   return interruptVia(
     {
       capture: (lines) => tmuxCapture(target, lines),

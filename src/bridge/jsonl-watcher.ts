@@ -267,9 +267,7 @@ export async function hasRecentScheduleWakeup(
       if (d.type === "assistant") {
         const content = d.message?.content || [];
         for (const item of content) {
-          if (item?.type === "tool_use" && item?.name === "ScheduleWakeup") {
-            return true;
-          }
+          if (item?.type === "tool_use" && item?.name === "ScheduleWakeup") return true;
         }
       }
     }
@@ -594,11 +592,13 @@ async function processNewData(state: WatcherState, discord: Client): Promise<voi
 
         if (entry.type === "user") {
           const content = entry.message?.content;
+          // 打断标记（终端里按的或 bridge 发的键）：CC 写这一行、不发 Stop，打断记录据此认出「人在终端里叫停」（bridge/turn-cuts.ts）
+          const first = typeof content === "string" ? content : Array.isArray(content) ? String(content[0]?.text ?? "") : "";
+          if (first.startsWith("[Request interrupted by user")) emitEvent({ agent: state.agentName, chatId: state.channelId, type: "turn_interrupted", data: { ts: entry.timestamp } });
           if (!Array.isArray(content)) continue;
           for (const block of content) {
             if (block.type === "tool_result" && block.tool_use_id) {
-              // 并行调用的每个 tool_use 各占一条 jsonl，新一条会清空 state.tools：前面几个的结果在这里找不到，
-              // 但它们的 tool_start 已经发过——tool_done 照发（网页工具卡和打断记录都靠它判「做完了」）
+              // 并行 tool_use 各占一条 jsonl、新一条会清空 state.tools：前面几个的结果这里找不到，但 tool_start 发过了，tool_done 照发
               const tool = state.tools.find((t) => t.id === block.tool_use_id);
               if (tool?.done) continue;
               if (tool) [tool.done, tool.error, toolsChanged] = [true, !!block.is_error, true];

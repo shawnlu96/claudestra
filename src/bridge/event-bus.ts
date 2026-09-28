@@ -43,6 +43,8 @@ export type BridgeEventType =
   | "thinking_telemetry"
   // v2.24+ 回合以 API 错误结束（jsonl assistant 条目 isApiErrorMessage:true）——bridge 据此 60s 后自动续跑一次
   | "api_error_turn"
+  // 会话记录里出现打断标记 [Request interrupted by user（data.ts = 那一行的时间）：打断记录据此认出人在终端里叫停
+  | "turn_interrupted"
   // 内置台账有写入（lib/ledger-read.ts 的 data_version 轮询）：data 只有 {project}，agent / chatId 为空；
   // transient 发、不补发——网页每次 SSE 连上 / 重连都全量重拉台账。只推给 canReadLedger 的连接（bridge/ledger-feed.ts）
   | "ledger";
@@ -216,6 +218,16 @@ export function replayEventsSince(
 /** 打断那一刻本回合还在跑的工具和最后做完的一步（打断记录用，扫的是这个 agent 的环形缓冲，规则见 lib/turn-cuts.ts） */
 export function inflightTools(agent: string): ReturnType<typeof inflightFrom> {
   return inflightFrom(rings.get(agent) ?? []);
+}
+
+/**
+ * 这个 agent 最近一次主会话活动的时刻（环形缓冲里最后一条事件；bg_task_* 不算——后台 subagent 一直在报进度，
+ * 会让「主回合其实早停了」永远显得不安静）。没有事件 = 0。turn-probe 判「事件态卡 thinking」用。
+ */
+export function lastActivityAt(agent: string): number {
+  const ring = rings.get(agent) ?? [];
+  for (let i = ring.length - 1; i >= 0; i--) if (!ring[i].type.startsWith("bg_task_")) return Date.parse(ring[i].ts) || 0;
+  return 0;
 }
 
 /** 当前订阅者数量（测试/诊断用） */

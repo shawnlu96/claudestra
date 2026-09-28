@@ -94,6 +94,12 @@ describe("yieldReason：人优先", () => {
     expect(yieldReason({ online: true, turnBusy: false, lastHumanAt: NOW - T.humanQuietMs }, NOW)).toBeNull();
     expect(yieldReason({ online: true, turnBusy: false }, NOW)).toBeNull();
   });
+  test("人叫停了（之后没再说别的）→ 不推进，哪怕已经安静很久；打断收尾提醒还没投 → 先等它（T13a）", () => {
+    expect(yieldReason({ online: true, turnBusy: false, interruptHold: "stopped" }, NOW)).toBe("human_stopped");
+    expect(yieldReason({ online: true, turnBusy: false, lastHumanAt: NOW - T.humanQuietMs * 10, interruptHold: "stopped" }, NOW)).toBe("human_stopped");
+    expect(yieldReason({ online: true, turnBusy: false, interruptHold: "notice" }, NOW)).toBe("cut_notice");
+    expect(yieldReason({ online: true, turnBusy: false, interruptHold: null }, NOW)).toBeNull();
+  });
 });
 
 describe("parseResetAt", () => {

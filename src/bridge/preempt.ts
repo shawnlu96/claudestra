@@ -11,6 +11,7 @@ import { preemptHeadline, stopHeadline } from "../lib/turn-cuts.js";
 import { stopTyping } from "./components.js";
 import { clearSafetyTimer } from "./discord-adapter.js";
 import { emitEvent, inflightTools } from "./event-bus.js";
+import type { PreemptResult } from "../lib/interrupt-gate.js";
 import { interruptGate } from "./interrupt-gate.js";
 import type { Envelope } from "./router.js";
 import { resolveTurnWindow } from "./turn-probe.js";
@@ -24,31 +25,28 @@ function senderName(env: Envelope): string {
 
 /**
  * 人类 request 到达、投递之前调：目标主回合在跑就打断（CC / Codex；Pi steer 不打断），停字三种运行时都打断。
- * 打断了就记 cut，并把抬头写进 env.meta.interruptNote。发键失败只记日志，消息照常投递。
+ * 真打断了（键发出、画面确认停下）才记 cut、加「这条消息打断了你」的抬头；「停」不管打没打断都记一条「停」类 cut
+ * （压掉续做提醒、Autopilot 不推进），抬头照实写打断没打断。发键失败只记日志，消息照常投递。
  */
 export async function preemptForHuman(env: Envelope, channelId: string, agent: string): Promise<void> {
-  const stop = matchStopWord(env.content);
+  const stop = matchStopWord(env.content).stop;
+  turnCuts.noteHuman(channelId, stop);
   const tools = inflightTools(agent); // 发键之前取：打断后 CC 会给被砍的工具写一条出错结果，快照就看不出砍在哪了
-  let fired = false;
+  let r: PreemptResult = { fired: false, why: "not_allowed" };
   try {
-    fired = await interruptGate.preempt(channelId, agent, { stop: stop.stop });
+    r = await interruptGate.preempt(channelId, agent, { stop });
   } catch (e) {
     console.log(`⚠️ 抢占打断失败,按常规投递: ${(e as Error).message}`);
   }
-  if (!fired) {
-    if (!stop.stop) return;
-    const open = turnCuts.get(channelId)?.state === "open";
-    turnCuts.stop(channelId);
-    if (open) env.meta.interruptNote = stopHeadline(undefined, stop.rest);
-    return;
-  }
+  if (!r.fired && !stop) return;
   const { runtime } = await resolveTurnWindow(channelId, controlChannelId());
   const cut = turnCuts.record({
-    channelId, agent, runtime, cause: stop.stop ? "stopword" : "preempt",
-    byMessageId: env.meta.messageId, byName: senderName(env), tools,
+    channelId, agent, runtime, cause: stop ? "stopword" : "preempt",
+    byMessageId: env.meta.messageId, byName: senderName(env), tools: r.fired ? tools : { inflight: [] },
   });
-  env.meta.interruptNote = stop.stop ? stopHeadline(cut, stop.rest) : preemptHeadline(cut);
-  if (stop.stop) console.log(`⏹ 停字打断 ${agent}（${runtime ?? "claude-code"}）`);
+  if (!stop) return void (env.meta.interruptNote = preemptHeadline(cut));
+  env.meta.interruptNote = stopHeadline(cut, r.fired ? "fired" : r.why === "not_busy" ? "not_busy" : "failed");
+  console.log(`⏹ 停字${r.fired ? "打断" : `（没发键：${r.why}）`} ${agent}（${runtime ?? "claude-code"}）`);
 }
 
 /**
@@ -62,10 +60,9 @@ export async function manualInterrupt(
   const tools = inflightTools(agent);
   const r = await interruptGate.manual(channelId, win, runtime);
   if (r.deduped) return r; // 1.5 秒内刚发过键（多半是抢占，新消息正在投）：别把正在开始的回合收成 done
-  if (r.keys.length) {
-    turnCuts.record({ channelId, agent, runtime, cause: "manual", tools });
-    recordMetric("agent_interrupt", { channelId, agent, meta: { trigger } });
-  }
+  // 空闲时也记：人按了停，续做提醒和 Autopilot 都该停下
+  turnCuts.record({ channelId, agent, runtime, cause: "manual", tools: r.keys.length ? tools : { inflight: [] } });
+  if (r.keys.length) recordMetric("agent_interrupt", { channelId, agent, meta: { trigger } });
   stopTyping(channelId);
   clearSafetyTimer(channelId);
   // 空闲时也发 done：前端误判忙时借此解锁
@@ -82,11 +79,10 @@ export async function interruptAgentByName(name: string, channelId: string): Pro
 }
 
 /**
- * Codex 的 Interrupt hook（typing-hook 报成 StopFailure + interrupt）：我们刚发过 Esc 的是回声，已经记过；
- * 否则是有人在终端里自己按了 Esc——记一条「停」类 cut，只留档不提醒。返回 true = 回声（调用方据此不把回合收成 done）。
+ * Codex 的 Interrupt hook（typing-hook 报成 StopFailure + interrupt，Esc 后约 0.5 秒到）：bridge 刚发过键的是回声，抢占那边会记；
+ * 否则是有人在终端里自己按了 Esc——记一条「停」类 cut，只留档不提醒。
  */
-export function onCodexInterrupt(channelId: string, agent: string): boolean {
-  if (turnCuts.recentlyCut(channelId, 15_000)) return true;
+export function onCodexInterrupt(channelId: string, agent: string): void {
+  if (turnCuts.keySentWithin(channelId, Date.now())) return;
   turnCuts.record({ channelId, agent, runtime: "codex", cause: "codex_interrupt", tools: inflightTools(agent) });
-  return false;
 }

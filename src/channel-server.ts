@@ -143,18 +143,17 @@ function registerFrame(): string {
     type: "register",
     channelId: CHANNEL_ID,
     cwd: process.cwd(),
-    // 自报进程身份：bridge 靠它区分「Claude Code 重启了 MCP server」（每个新
-    // pid 只出现一次）和「两个活实例在对抢」（同一个 pid 被顶掉又抢回来），
-    // 也让告警能直接给出可 ps 的 pid，不必再翻环境变量考古。
+    // 自报进程身份：bridge 靠它区分「Claude Code 重启了 MCP server」（每个新 pid 只出现一次）和「两个活实例在对抢」
+    // （同一个 pid 被顶掉又抢回来），也让告警能直接给出可 ps 的 pid，不必再翻环境变量考古。
     pid: process.pid,
     ppid: process.ppid,
   };
-  // Codex：自报运行时与当前线程 id（fork / /new 之后只有这里知道新 id）。刻意**不报**
-  // sessionFile：自报路径只对 Pi 放行，Codex 的 rollout 由 bridge 按 registry 的 sessionId
-  // 自己定位（~/.codex/sessions 里还有用户的私人会话，不能让自报路径指过去）。
+  // Codex：自报运行时与当前线程 id（fork / /new 之后只有这里知道新 id）。刻意**不报** sessionFile：自报路径只对 Pi 放行，
+  // Codex 的 rollout 由 bridge 按 registry 的 sessionId 自己定位（~/.codex/sessions 里还有用户的私人会话，不能让自报路径指过去）。
   // CC 模式不加字段，帧逐字不变。
   if (IS_CODEX) {
     frame.runtime = "codex";
+    frame.typeIn = true; // 被打断后的第一条会打进 TUI（lib/codex-tui-submit.ts）；bridge 只对声明过的 Codex 频道抢占
     frame.agentName = AGENT_NAME || undefined;
     frame.sessionId = codexSessionId;
   }
@@ -399,6 +398,7 @@ const codexSink = new CodexQueueSink({
   notify: (chatId, text) => bridgeRequest({ type: "reply", chatId: chatId || CHANNEL_ID, text }).then(() => undefined),
   log: (line) => console.error(line),
   typeIn: typeIntoOwnPane, // Codex 被打断后 queue 会卡住，打断后的第一条直接打进自己的 pane
+  onTypeInFailed: () => void (bridgeWs?.readyState === WebSocket.OPEN && bridgeWs.send(JSON.stringify({ type: "codex_typein_failed", channelId: CHANNEL_ID }))),
   preamble: IS_CODEX ? decodePreambleEnv(process.env.CLAUDESTRA_CODEX_PREAMBLE) : undefined, // 重启 / 收编后的职责前言
 });
 

@@ -5,7 +5,8 @@
  */
 import { bashCommandOf, classifyTool, heavier, sideEffectLabel, type SideEffect, type SideEffectVerdict } from "./side-effects.js";
 
-export type CutCause = "preempt" | "manual" | "stopword" | "codex_interrupt";
+/** terminal：人在 CC 终端里自己按了打断（会话记录出现 [Request interrupted by user，而 bridge 没发过键） */
+export type CutCause = "preempt" | "manual" | "stopword" | "codex_interrupt" | "terminal";
 type CutState = "open" | "resumed" | "stopped" | "hinted" | "expired";
 
 export interface CutTool {
@@ -46,6 +47,8 @@ export interface Cut {
   /** 打断它的那条消息真正送达的时刻：只有之后的 Stop 才是「插话那一回合结束」 */
   deliveredAt?: number;
   /** 之前还没收尾的 cut（按先后，已摊平） */
+  /** 这一段被砍的工具 agent 已经重跑过（连环打断时逐段记，全部续上才算整条 resumed） */
+  resumed?: boolean;
   chain: Cut[];
 }
 
@@ -126,14 +129,21 @@ export function makeCut(i: NewCutInput, prev?: Cut): Cut {
 
 const norm = (s: string) => s.replace(/\s+/g, " ").trim();
 
-/** 打断之后又出现同名同内容的工具调用（不是被砍的那一次本身）= agent 自己续上了 */
-export function isResumedBy(cut: Cut, e: CutEvent): boolean {
-  if (cut.state !== "open" || e.type !== "tool_start") return false;
+/**
+ * 打断之后又出现同名同内容的工具调用（不是被砍的那一次本身）= agent 把那一段续上了。连环打断逐段记：
+ * 只有每一段都续上，整条才是 resumed；否则提醒里只列还没续上的段。没有在跑工具的段（砍在思考 / 出字）认不出续没续，一直算没续。
+ * 返回更新后的 cut；没有新续上的段返回 null。
+ */
+export function resumeBy(cut: Cut, e: CutEvent): Cut | null {
+  if (e.type !== "tool_start") return null;
   const t = toolOf(e);
-  const segs = [cut, ...cut.chain];
-  return segs.some((c) =>
-    c.inflight.some((x) => x.toolId !== t.toolId && x.name === t.name && (x.command !== undefined ? norm(x.command) === norm(t.command ?? "") : x.summary === t.summary)),
-  );
+  const hit = (c: Cut) => !c.resumed && c.inflight.some((x) => x.toolId !== t.toolId && x.name === t.name
+    && (x.command !== undefined ? norm(x.command) === norm(t.command ?? "") : x.summary === t.summary));
+  const chain = cut.chain.map((c) => (hit(c) ? { ...c, resumed: true } : c));
+  const self = hit(cut);
+  if (!self && chain.every((c, k) => c === cut.chain[k])) return null;
+  const next = { ...cut, chain, ...(self ? { resumed: true } : {}) };
+  return [next, ...chain].every((c) => c.resumed) ? { ...next, state: "resumed" } : next;
 }
 
 /** cut 刚记下时 watcher 可能还没读到刚起的工具（约 2 秒轮询）：打断后几秒内出现的出错 tool_done 补进 inflight */
@@ -190,12 +200,14 @@ export function preemptHeadline(c: Cut): string {
   ].join("\n");
 }
 
-/** 停字消息的抬头：已打断（或本来就空闲）、不续做；停字后面还有话就照常处理 */
-export function stopHeadline(c: Cut | undefined, rest: string): string {
-  const what = c ? `已替你打断（${doingText(c)}）` : "你刚才没有在跑的回合";
-  return rest
-    ? `[⏹ 这条以「停」开头：${what}。不要续做被打断的事，除非用户之后再让你做；停字后面的话照常处理。]`
-    : `[⏹ 这是一条「停」指令：${what}。停下手上的事，简短确认已停；不要续做被打断的事，除非用户之后再让你做。]`;
+/**
+ * 停字消息的抬头：不续做。fired = 已替你打断；not_busy = 本来就没有在跑的回合；
+ * 其它（键发了画面仍在忙 / 这个运行时这次不能由 bridge 打断）= 没能替你打断，请自己停下。
+ */
+export function stopHeadline(c: Cut | undefined, outcome: "fired" | "not_busy" | "failed"): string {
+  const what = outcome === "fired" && c ? `已替你打断（${doingText(c)}）`
+    : outcome === "not_busy" ? "你刚才没有在跑的回合" : "bridge 没能替你打断，请你自己马上停下手上的事";
+  return `[⏹ 这是一条「停」指令：${what}。停下手上的事，简短确认已停；不要续做被打断的事，除非用户之后再让你做。]`;
 }
 
 /**
@@ -207,9 +219,12 @@ export function withInterruptNote(rendered: string, note: string): string {
   return m ? `${m[0]}${note}\n\n${rendered.slice(m[0].length)}` : `${note}\n\n${rendered}`;
 }
 
-/** (b) 插话那一回合 Stop 之后的收尾提醒。unreplied：各段被打断时在处理、但还没回过的人类消息 */
-export function resumeNotice(c: Cut, unreplied: (seg: Cut) => boolean): string {
-  const segs = [...c.chain, { ...c, chain: [] }];
+/** 被打断时在处理的人类消息回过没有：never = 送达以来一次都没回过这个地址；after_cut = 只在打断之后回过（可能答的是插话） */
+export type ReplyState = "replied" | "never" | "after_cut";
+
+/** (b) 插话那一回合 Stop 之后的收尾提醒：只列还没续上的段 */
+export function resumeNotice(c: Cut, replyState: (seg: Cut) => ReplyState): string {
+  const segs = [...c.chain, { ...c, chain: [] }].filter((s) => !s.resumed);
   const block = (s: Cut) => {
     const cutLines = s.inflight.length
       ? s.inflight.map((t) => {
@@ -219,8 +234,10 @@ export function resumeNotice(c: Cut, unreplied: (seg: Cut) => boolean): string {
       : [`· 被砍断：当时在思考 / 出字，没有在跑的工具`];
     const lines = [...cutLines];
     if (s.lastDone) lines.push(`· 做到了：${s.lastDone.summary || s.lastDone.name}`);
-    const pending = s.turnTrigger && unreplied(s) ? triggerText(s.turnTrigger) : "";
-    lines.push(`· 还没回复：${pending || "无"}`);
+    const rs = s.turnTrigger ? replyState(s) : "replied";
+    const trigText = s.turnTrigger ? triggerText(s.turnTrigger) : "";
+    lines.push(rs === "never" ? `· 还没回复：${trigText}`
+      : rs === "after_cut" ? `· 回复：打断之后你往同一个地址回过话，核对一下有没有答到 ${trigText}，答过就别重复` : "· 还没回复：无");
     const trig = triggerText(s.turnTrigger);
     const head = `${hhmmss(s.at)} 你${trig ? `在处理 ${trig} 时` : ""}被${s.byName ? ` ${s.byName} 的` : ""}新消息打断：`;
     return [head, ...lines].join("\n");

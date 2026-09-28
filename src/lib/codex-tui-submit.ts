@@ -44,6 +44,14 @@ export interface TypeInIO {
   sleep(ms: number): Promise<void>;
 }
 
+/**
+ * 粘贴前去掉控制字符：内容里夹着 ESC[201~（括号粘贴的结束符）时，tmux 不会剥，结束符后面的字就成了按键
+ * （能打出 !shell、连发 C-c）。只留换行和制表符；\r 统一成换行。ESC 没了，剩下的「[201~」只是普通文字。
+ */
+export function sanitizeForPaste(text: string): string {
+  return text.replace(/\r\n?/g, "\n").replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/g, "");
+}
+
 /** unconfirmed：粘进去了、回车后没看到提交（不能再退回 queue，会重复；调用方记日志留给人看） */
 export type TypeInResult = { ok: true; unconfirmed?: true } | { ok: false; why: string };
 
@@ -54,7 +62,8 @@ const SUBMIT_POLLS = 10;
  * 粘贴并提交。失败时保证输入框里没有留下这条（粘了但没认出来就清掉），调用方退回 queue 不会重复。
  * 回车后等到「回合开始（busy）」或「输入框变空」才算提交成功；第一下回车被当成换行时再补一下。
  */
-export async function typeIntoCodex(io: TypeInIO, text: string): Promise<TypeInResult> {
+export async function typeIntoCodex(io: TypeInIO, raw: string): Promise<TypeInResult> {
+  const text = sanitizeForPaste(raw);
   // TUI 里 / 开头是斜杠命令、! 开头是本机 shell：投递内容正常以 <channel 或 [ 开头，万一不是就别打
   if (/^\s*[/!]/.test(text)) return { ok: false, why: "内容以 / 或 ! 开头，TUI 会当成命令" };
   const before = composerState(await io.capture());
