@@ -98,13 +98,13 @@ export const SKIP_REASON_TEXT: Record<SkipReason, string> = {
   "quota-wall": "撞了额度墙又没开 low-priority",
   menu: "画面上有选择菜单",
   draft: "输入框里有没发出去的字",
-  queued: "已经有排队的消息",
+  queued: "已经有排队的消息（多半是上一条压缩）",
   busy: "还在忙",
 };
 
 /**
  * 按顺序判，先命中先返回：
- *   没过线 → 正在压缩 → 30 分钟重试冷却 → 读不到画面 → 撞墙且没开 LP → 画面上有选择菜单 → 输入框有草稿 → 已有排队消息
+ *   没过线 → 正在压缩 → 30 分钟重试冷却 → 读不到画面 → 撞墙且没开 LP → 画面上有选择菜单 → 已有排队消息 → 输入框有草稿
  *   → 过硬上限（忙也注入，排队到回合结束） → 过软线且闲置 → 其余（忙）不动。
  * 撞墙那条排在冷却之后、且不开火，所以不占重试计时；菜单那条挡的是「往菜单里敲字」——额度墙菜单第 3 项是花钱的 usage credits；
  * 草稿那条挡的是「把 owner 打了一半的字连着 /compact 一起提交」，硬上限也不能越过它。
@@ -118,8 +118,9 @@ export function boundaryDecision(i: BoundaryInput): BoundaryVerdict {
   if (!i.pane) return { fire: false, reason: "pane-unknown" };
   if ((i.pane.wall && i.pane.lp !== "on") || i.pane.exhausted) return { fire: false, reason: "quota-wall" };
   if (i.pane.menu) return { fire: false, reason: "menu" };
-  if (i.pane.draft) return { fire: false, reason: "draft" };
+  // 排队在草稿之前判：lp-state 把排队也算进 draft（输入框不是确定的空），这里单独报出来，owner 看结果分得清
   if (i.queued) return { fire: false, reason: "queued" };
+  if (i.pane.draft) return { fire: false, reason: "draft" };
   if (overHard) return { fire: true, kind: "hard-cap" };
   if (i.idle) return { fire: true, kind: "idle" };
   return { fire: false, reason: "busy" };

@@ -247,6 +247,15 @@ describe("injectCompact（T35 批量动作的入口）", () => {
     expect(await injectCompact(tgt("gone"), { action: "compact" }, h.deps)).toEqual({ status: "failed", error: "no window" });
   });
 
+  test("排队（lp-state 同时报 draft）→ 跳过，原因写「已排队」，和草稿分开", async () => {
+    const h = harness([], { state: { draft: true }, panes: { "master:q": "❯ /compact x\n  Press up to edit queued messages\n" } });
+    expect(await injectCompact(tgt("q"), { action: "compact" }, h.deps)).toMatchObject({ status: "skipped", reason: "queued" });
+    expect(await injectCompact(tgt("d"), { action: "compact" }, h.deps)).toMatchObject({ status: "skipped", reason: "draft" });
+    h.deps.agents = async () => [agent({ name: "q", target: "master:q", ctx: 400_000, convTs: h.now })];
+    expect((await ctxBoundaryTick(h.deps))[0].verdict).toEqual({ fire: false, reason: "queued" });
+    expect(h.sent.length).toBe(0);
+  });
+
   test("gate:false（Discord 手动按钮，lp-state 到位前）：不看画面照发；执行者照样改 compact", async () => {
     const h = harness([], { state: { menu: true, draft: true } });
     expect(await injectCompact(tgt("car"), { action: "save-compact", gate: false }, h.deps)).toEqual({ status: "executed", line: "/save-compact" });

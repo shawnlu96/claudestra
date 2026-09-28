@@ -71,7 +71,7 @@ export interface CtxBoundaryDeps {
   gateGlobal: boolean;
 }
 
-type InjectSkip = Extract<SkipReason, "pane-unknown" | "quota-wall" | "menu" | "draft" | "compacting">;
+type InjectSkip = Extract<SkipReason, "pane-unknown" | "quota-wall" | "menu" | "queued" | "draft" | "compacting">;
 export type InjectResult =
   | { status: "executed" | "queued"; line: string }
   | { status: "skipped"; reason: InjectSkip; text: string }
@@ -135,10 +135,12 @@ function boundaryFor(
   return { ...b, action: effectiveAction(a.executor, b.action) };
 }
 
-function paneGate(ps: PaneQuotaState): InjectSkip | null {
+/** 能证明输入框是空的、也没有排队，才发（PM 09-29：排队的多半就是上一条 /compact，再发就叠上去了）。排队和草稿分开报 */
+function paneGate(ps: PaneQuotaState, plain: string): InjectSkip | null {
   if (ps.compacting) return "compacting";
   if ((ps.wall && ps.lp !== "on") || ps.exhausted) return "quota-wall";
   if (ps.menu) return "menu";
+  if (QUEUED_RE.test(plain)) return "queued";
   if (ps.draft) return "draft";
   return null;
 }
@@ -156,7 +158,7 @@ export async function injectCompact(
 ): Promise<InjectResult> {
   const pane = opts.pane !== undefined ? opts.pane : await deps.capture(t.target);
   // 读不到画面（多半是窗口不在）不管 gate 都不发：tmux 往不存在的窗口 send-keys 不报错，发了也只会假报「已开始」
-  const reason: InjectSkip | null = !pane ? "pane-unknown" : opts.gate === false ? null : paneGate(deps.paneState(pane.plain, pane.esc));
+  const reason: InjectSkip | null = !pane ? "pane-unknown" : opts.gate === false ? null : paneGate(deps.paneState(pane.plain, pane.esc), pane.plain);
   if (reason || !pane) return { status: "skipped", reason: reason ?? "pane-unknown", text: SKIP_REASON_TEXT[reason ?? "pane-unknown"] };
   const line = compactCommand(effectiveAction(t.executor, opts.action), opts.keep ?? null);
   try {
