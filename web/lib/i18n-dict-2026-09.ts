@@ -1,0 +1,62 @@
+/**
+ * 2026-09-28 起新增的词条（会话详情 / external 闸门 / Jev / Chat Guard），从 i18n-dict.ts 拆出来：主字典触到 1000 行上限。
+ * 规则同主字典：key = 源码原文逐字一致；主字典末尾 `...DICT_2026_09` 合并进去。
+ */
+export const DICT_2026_09: Record<string, string> = {
+  // ── 会话详情 / external 闸门（2026-09-27）──────────────
+  "详情": "Details",
+  "会话详情": "Session details",
+  "用途": "Purpose",
+  "运行时": "Runtime",
+  "状态": "Status",
+  "会话 ID": "Session ID",
+  "Discord 频道": "Discord channel",
+  "创建时间": "Created",
+  "最近活动": "Last activity",
+  "运行中": "Running",
+  "对外共享（external）": "Shared externally (external)",
+  "开启后可共享给 peer；对方能看到该会话的全部上下文。关闭时会从所有 peer 的共享范围里移除。": "When on, peers can be given this session and see its whole context. Turning it off removes it from every peer's scope.",
+  "已共享给": "Shared with",
+  "未共享": "Not shared",
+  "已从以下 peer 的共享范围移除：": "Removed from these peers' scope: ",
+  "关闭 external 闸门": "Turn off external",
+  "该会话正在共享给以下 peer，关闭后会从他们的共享范围里移除。输入会话名以确认：": "This session is shared with the peers below; turning it off removes it from their scope. Type the session name to confirm:",
+  "以下 peer 持有全量（*）授权，仍可访问，请在 Peer 面板调整其范围：": "These peers hold a wildcard (*) grant and can still reach it; adjust their scope in the Peers panel: ",
+  "确认关闭": "Confirm turn-off",
+  "未开闸": "external off",
+  "开启 external 闸门": "Turn on external",
+  "暂不提供：请逐个选择已开闸的会话": "Unavailable for now: pick external-enabled sessions one by one",
+  "显示名": "Display name",
+  "留空则只显示会话名": "Leave empty to show only the session name",
+  // ── Jev / TypeSafe（2026-09-28）──────────────
+  "Jev · TypeSafe API Key": "Jev · TypeSafe API Key",
+  "未配置。到 console.typesafe.ai/keys 生成 key。Jev 是 TypeSafe 的 System One 判断模型。": "Not configured. Create a key at console.typesafe.ai/keys. Jev is TypeSafe's System One judgment model.",
+  "已保存，Jev 调用即时生效": "Saved; Jev calls take effect immediately",
+  "测试连接": "Test connection",
+  "测试中…": "Testing…",
+  "未配置 key，先保存再测试": "No key configured; save one before testing",
+  "Jev 连通，结果通顺": "Jev reachable, answers look right",
+  "Jev 连通，但结果可疑（请检查 key 与模型）": "Jev reachable, but the answers look off (check key and model)",
+  "耗时": "Latency",
+  // ── Chat Guard（2026-09-28）──────────────
+  "守门拦下一条消息": "Chat Guard held a message",
+  "来自": "from",
+  "放行": "Release",
+  "丢弃": "Discard",
+  "入站守门（Chat Guard）": "Inbound guard (Chat Guard)",
+  "消息进入 agent 前先用 Jev 判定是否在套取敏感信息或要求破坏性操作；命中即隔离，需你放行。未配 Jev 时不生效。":
+    "Jev screens messages for secret extraction or destructive requests before they reach an agent; hits wait for your release. Needs a Jev key.",
+  "未配置 Jev key（连接与集成 → 集成）": "No Jev key configured (Connections → Integrations)",
+  "拦截阈值": "Block threshold",
+  "入站守门": "Inbound guard",
+  "进入该会话的消息先经 Jev 判定，疑似套取敏感信息或破坏性操作的先隔离，等你放行。":
+    "Messages to this session are screened by Jev first; suspected secret extraction or destructive requests are held until you release them.",
+  "该会话已对外共享，强烈建议开启 Chat Guard。": "This session is shared externally; enabling Chat Guard is strongly recommended.",
+  "无法开启 Chat Guard": "Cannot enable Chat Guard",
+  "Chat Guard 依赖 Jev（TypeSafe）判定，还没有配置 API key。": "Chat Guard relies on Jev (TypeSafe) and no API key is configured yet.",
+  "Jev 连接测试没有通过：": "The Jev connection test failed:",
+  "打开设置 → 集成": "Open Settings → Integrations",
+  "Chat Guard 已开启：点击关闭": "Chat Guard is on: click to disable",
+  "Chat Guard 未开启：点击开启": "Chat Guard is off: click to enable",
+  "按会话开启：会话详情里的 Chat Guard 开关，或顶栏的盾牌图标。": "Enabled per session: the Chat Guard switch in session details, or the shield icon in the header.",
+};

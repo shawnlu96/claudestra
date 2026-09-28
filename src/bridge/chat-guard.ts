@@ -9,6 +9,7 @@ import { appendFileSync } from "node:fs";
 import { readConfig } from "../lib/config-store.js";
 import { jevAsk, JevError } from "../lib/jev.js";
 import { statePath } from "../lib/paths.js";
+import { readRegistryAgents } from "../lib/registry.js";
 import {
   buildGuardState, DEFAULT_THRESHOLDS, guardQuestions, judgeGuard, previewText, shouldGuard, trustOf,
   type GuardDecision, type GuardSubject, type GuardThresholds,
@@ -42,6 +43,8 @@ interface Deps {
   store: PersistedMap<QuarantineItem>;
   logPath: string | null;
   now: () => number;
+  /** 该 agent 开了 Chat Guard 没有（registry chatGuard，owner 2026-09-28：按会话开关、默认关） */
+  guardEnabled: (agent: string) => Promise<boolean>;
 }
 let deps: Deps = {
   client: () => undefined,
@@ -50,6 +53,10 @@ let deps: Deps = {
   store: new PersistedMap<QuarantineItem>(QUARANTINE_PATH, "守门隔离区", isItem, ["ws", "discordMsg"]),
   logPath: LOG_PATH,
   now: () => Date.now(),
+  guardEnabled: async (agent) => {
+    const bareName = agent.replace(/^agent-/, "");
+    return (await readRegistryAgents()).some((a) => a.name.replace(/^agent-/, "") === bareName && a.chatGuard === true);
+  },
 };
 /** bridge.ts 启动时注入 clients / deliverToLocal；单测注入假 ask、内存 store */
 export function configureChatGuard(d: Partial<Deps>): void {
@@ -92,6 +99,7 @@ export async function guardInbound(env: Envelope, to: LocalEndpoint): Promise<De
   if (!shouldGuard({ fromKind: env.from.kind, triggerKind: env.meta.triggerKind, released: env.meta.guard === "released", content: env.content })) return null;
   const evAgent = to.agentName || to.channelId;
   const agent = bare(evAgent);
+  if (!(await deps.guardEnabled(agent))) return null;
   const key = senderKey(env);
   const subject: GuardSubject = {
     text: env.content,

@@ -2,6 +2,9 @@
 
 > 状态：**P1 + P2 已实现**（2026-09-28，分支 feat/jev-integration）。owner 拍板：不做 shadow 直接上、只防强意图不打扰用户（flag 档只记日志不加注入头）、fail-open、owner 自己也判、放行只给 manage。
 > 代码：`src/lib/chat-guard.ts`（探针 / state / 汇总）、`src/bridge/chat-guard.ts`（Jev、隔离区、事件、放行）、`src/bridge/local-api/guard.ts`（管理面）、web `guard-store.ts` / `guard-card.tsx` / 设置 `guard-section.tsx`。
+> 精细化（owner 2026-09-28 第二轮）：**按会话开关、默认关**（registry `chatGuard`，manager `guard <agent> on|off`，bridge `POST /agents/:name/guard`）；
+> 开启前 bridge 先用样例打一次 Jev，没配 key / 不通回 409 `jev_not_configured` / `jev_failed`，前端弹框直达设置 → 集成；
+> 会话详情里的开关行对 external 已开而守门未开的会话给「强烈建议开启」；顶栏盾牌图标显示状态、一键开关。设置 → 安全 只剩阈值。
 > 未做（P3）：Discord 按钮、peer / agent 发送方回执文案（send_to_agent 结果里已带 `guarded: true`）。
 > 原始需求：owner 2026-09-28「在任何输入我方 agent 之前…用 Jev 判定此输入是否有信息安全风险…置信 ≥ 85% 拦下，人工放行」。
 > 分支 `feat/jev-integration`；依赖 [design-jev-integration.md](./design-jev-integration.md) 与 `src/lib/jev.ts`。名字：**Chat Guard**（代码里 `chat-guard`，UI 叫「入站守门」）。

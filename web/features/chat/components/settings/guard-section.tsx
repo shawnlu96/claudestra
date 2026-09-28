@@ -36,19 +36,10 @@ export function GuardSection() {
         <div className="text-xs text-base-content/50">…</div>
       ) : (
         <>
-          <label className="flex items-center justify-between gap-3 text-sm">
-            <span>
-              {t("开启")}
-              {!s.configured && <span className="ml-2 text-[11px] text-warning">{t("未配置 Jev key（连接与集成 → 集成）")}</span>}
-            </span>
-            <input
-              type="checkbox"
-              className="toggle toggle-sm toggle-success"
-              checked={s.mode === "on"}
-              disabled={busy}
-              onChange={(e) => void save({ mode: e.target.checked ? "on" : "off" })}
-            />
-          </label>
+          <div className="text-[12px] text-base-content/60">
+            {t("按会话开启：会话详情里的 Chat Guard 开关，或顶栏的盾牌图标。")}
+            {!s.configured && <span className="ml-1 text-warning">{t("未配置 Jev key（连接与集成 → 集成）")}</span>}
+          </div>
           <label className="mt-3 flex items-center justify-between gap-3 text-sm">
             <span>
               {t("拦截阈值")} <span className="font-mono text-[12px] text-base-content/60">{s.blockAt.toFixed(2)}</span>
