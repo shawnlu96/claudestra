@@ -92,7 +92,7 @@ export function PushSection({ push }: { push: ReturnType<typeof usePushToggle> }
               onChange={() => void noContent.toggle()}
             />
           }
-          desc={t("打开后，这台电脑发出的推送只写「有新消息」，不带 agent 名和消息内容，点开再看。推送要经过中继和 Apple / Google 的推送服务，打开后它们看不到内容。对这台电脑配对的所有设备都生效。")}
+          desc={t("推送里看不到内容，点开才看得到：打开后，这台电脑发出的推送只写「有新消息」，不带 agent 名和消息内容，点开进会话列表。推送要经过中继和 Apple / Google 的推送服务，打开后它们看不到内容。对这台电脑配对的所有设备都生效。")}
         >
           {noContent.err ? <div className="text-xs text-error">{noContent.err}</div> : null}
         </Section>
