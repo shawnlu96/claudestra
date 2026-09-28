@@ -37,10 +37,14 @@ export interface PublishResult {
 export const currentLink = (dir = RELEASES_DIR): string => join(dir, CURRENT);
 const pendingPath = (dir: string) => join(dir, ".pending.json");
 
-function releaseId(outDir: string, now: Date): string {
-  const stamp = now.toISOString().replace(/[:.]/g, "-");
+function releaseId(outDir: string, now: Date, dir: string): string {
   const commit = readBuildInfo(outDir)?.webCommit;
-  return commit && /^[0-9a-f]{7,40}$/i.test(commit) ? `${stamp}_${commit.slice(0, 12)}` : stamp;
+  const suffix = commit && /^[0-9a-f]{7,40}$/i.test(commit) ? `_${commit.slice(0, 12)}` : "";
+  // 同一毫秒发布两次（CI 上连发的测试）会撞名，rename 到非空目录失败 → 顺延 1ms 直到空位，排序仍按时间
+  for (let t = now.getTime(); ; t++) {
+    const id = `${new Date(t).toISOString().replace(/[:.]/g, "-")}${suffix}`;
+    if (!existsSync(join(dir, id))) return id;
+  }
 }
 
 /** 按时间从新到旧的版本目录名（不含 current 与半成品） */
@@ -89,7 +93,7 @@ export function publishWebRelease(outDir: string, opts: { dir?: string; now?: Da
   const now = opts.now ?? new Date();
   mkdirSync(dir, { recursive: true });
   if (!existsSync(join(outDir, "index.html"))) return { ok: false, error: `${outDir} 里没有 index.html，不发布` };
-  const id = releaseId(outDir, now);
+  const id = releaseId(outDir, now, dir);
   const staging = join(dir, `.staging-${id}`);
   try {
     rmSync(staging, { recursive: true, force: true });
