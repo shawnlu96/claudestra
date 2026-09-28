@@ -115,7 +115,7 @@ describe("按调用方收窄", () => {
     for (const a of ["compact", "lp-compact", "save-compact"] as const) {
       expect(run(PM, { agents: ["claudestra", "task-t43"] }, a).error).toContain("不能对自己压缩");
     }
-    expect(run(MASTER, { agents: ["master"] }, "compact").error).toContain("不能对自己压缩");
+    expect(run(MASTER, { agents: ["master"] }, "compact").error).toContain("不能动大总管"); // 大总管点名自己：先撞这一条
   });
 
   test("点名自己做非压缩动作：自己剔掉附原因，其余照做", () => {
@@ -129,11 +129,11 @@ describe("按调用方收窄", () => {
     expect(run(PM, { all: true }, "lp-compact").targets).not.toContain("agent-claudestra");
   });
 
-  test("大总管永远不选：点名也只进 excluded；includeMaster 整个报错", () => {
-    const r = run(OPS, { agents: ["master", "loose"] });
-    expect(r.targets).toEqual(["agent-loose"]);
-    expect(r.excluded).toEqual([{ name: "master", reason: expect.stringContaining("owner") }]);
-    expect(run(OPS, { all: true, includeMaster: true }).error).toContain("includeMaster");
+  test("大总管永远不选：点名（带不带前缀）或 includeMaster 都整个报错，和 CLI 同一条线", () => {
+    for (const sel of [{ agents: ["master", "loose"] }, { agents: ["agent-master"] }, { all: true, includeMaster: true }]) {
+      expect(run(OPS, sel).error).toBe("fleet 不能动大总管：大总管只由 owner 在网页上操作");
+    }
+    expect(run(OPS, { all: true }).targets).not.toContain("master");
   });
 
   test("大总管 / fleet.callers 管全部（大总管自己和 master 除外）", () => {
@@ -142,9 +142,9 @@ describe("按调用方收窄", () => {
   });
 
   test("点名的全被收掉：一个都不选，但每个都有原因", () => {
-    const r = run(PM, { agents: ["master", "other"] });
+    const r = run(PM, { agents: ["loose", "other"] });
     expect(r.targets).toEqual([]);
-    expect(r.excluded.map((e) => e.name).sort()).toEqual(["master", "other"]);
+    expect(r.excluded.map((e) => e.name).sort()).toEqual(["loose", "other"]);
   });
 
   test("state 的可见范围和 run 一致", () => {

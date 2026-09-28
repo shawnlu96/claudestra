@@ -22,7 +22,7 @@ const ACTION_KIND: Record<string, string> = {
 };
 
 const FLEET_DESCRIPTION = `批量管理其他 agent 的会话：看状态、开关 low-priority（LP）、压缩上下文、统一下发一段指令。
-**只有大总管和 PM（台账 pms 名单上的 agent，只能动自己项目里的 agent）能用**，其他 agent 调用会被 bridge 拒绝。大总管和你自己永远不会被选中。
+**只有大总管和 PM（台账 pms 名单上的 agent，只能动自己项目里的 agent）能用**，其他 agent 调用会被 bridge 拒绝。大总管不能动（点名 master 整个报错），你自己永远不会被选中。
 
 什么时候用：
 - 额度撞墙后，批量开 LP 再压缩：action=lp_compact, select={walled:true, ...}

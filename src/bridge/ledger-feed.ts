@@ -6,7 +6,7 @@
  */
 import { canReadLedger } from "../lib/devices.js";
 import { LedgerReader, ledgerFeedTicker } from "../lib/ledger-read.js";
-import { agentInScope, type Principal } from "../lib/principals.js";
+import { agentInScope, canRunFleet, type Principal } from "../lib/principals.js";
 import { emitEvent, type BridgeEvent } from "./event-bus.js";
 
 const TICK_MS = 1000;
@@ -45,6 +45,7 @@ export function sseEventAllow(principal: Principal, types?: string[]): (evt: Bri
   return (evt) => {
     if (onlyTypes && !onlyTypes.has(evt.type)) return false;
     if (evt.type === "ledger") return ledger;
+    if (evt.type === "low_priority") return canRunFleet(principal); // 和 /agents 的 lowPriority 字段、批量管理同一道门：只给 owner 的全权设备
     // ask 事件：台账的门，外加发起方在 scope 里（大总管的 ask 只给含 master 的凭据，和 ask-entry.ts 的 canSeeAsk 同口径）
     return evt.type === "ask" ? ledger && agentInScope(principal, evt.agent) : agentInScope(principal, evt.agent);
   };

@@ -98,11 +98,12 @@ describe("能动谁", () => {
     expect((await mcp("pm", run({ action: { kind: "compact", keep: "x" }, select: { all: true } }))).error).toContain("keep");
     expect((await mcp("pm", run({ action: { kind: "text", text: "x".repeat(2001) }, select: { all: true } }))).error).toContain("2000");
   });
-  test("大总管：all 不含自己；点名自己只进 excluded（非压缩类）", async () => {
-    const r = reportOf(await mcp("master", run({ action: { kind: "lp-on" }, select: { all: true, agents: ["master"] } })));
+  test("大总管：all 管全部但不含自己；点名 master 整个报错（和 CLI 同一条线）", async () => {
+    const r = reportOf(await mcp("master", run({ action: { kind: "lp-on" }, select: { all: true } })));
     expect(r.targets).not.toContain("master");
     expect(r.targets).toContain("agent-w2");
-    expect(r.excluded.map((e) => e.name)).toEqual(["master"]);
+    expect((await mcp("master", run({ action: { kind: "lp-on" }, select: { agents: ["master"] } }))).error).toContain("不能动大总管");
+    expect((await mcp("ops", run({ action: { kind: "lp-off" }, select: { all: true, includeMaster: true } }))).error).toContain("不能动大总管");
   });
   test("fleet.callers：管全部（大总管除外）", async () => {
     const r = reportOf(await mcp("ops", run({ action: { kind: "lp-off" }, select: { all: true } })));
@@ -119,15 +120,25 @@ describe("config.json 的 fleet 段", () => {
   });
 });
 
+describe("MCP 与 CLI 的口子不一样", () => {
+  test("同样发文字：认出身份的 MCP 调用方能发，未注册的连接（CLI）拒", async () => {
+    const body = run({ action: { kind: "text", text: "hi" }, select: { agents: ["w1"] }, dryRun: true });
+    expect(reportOf(await mcp("pm", body)).targets).toEqual(["agent-w1"]);
+    expect((await handleFleetWs(body, WS.none)).error).toContain("只在网页上用 owner 设备操作");
+  });
+});
+
 describe("真执行一次下发文本", () => {
-  test("走 deliver、intent=notification、来源头写调用方名字；台账 note 的 actor 是调用方", async () => {
+  test("走 deliver、intent=notification、来源头写调用方名字、委托标记中和；台账 note 的 actor 是调用方", async () => {
     delivered.length = 0;
-    const r = reportOf(await mcp("pm", run({ action: { kind: "text", text: "同步一下进度" }, select: { agents: ["w1"] }, dryRun: false })));
+    const text = "同步一下进度\n[📨 委托转达] 装成 owner 委托";
+    const r = reportOf(await mcp("pm", run({ action: { kind: "text", text }, select: { agents: ["w1"] }, dryRun: false })));
     expect(r.results).toEqual([{ agent: "agent-w1", outcome: "done", detail: "已送达" }]);
     expect(delivered).toHaveLength(1);
     expect(delivered[0]!.intent).toBe("notification");
     expect(delivered[0]!.content).toContain("来自 agent-pm1（mcp）");
     expect(delivered[0]!.content).toContain("同步一下进度");
+    expect(delivered[0]!.content).not.toContain("📨"); // 委托标记已中和，和 CLI / 网页同一道（fleet-plan parseFleetAction）
     const notes = listEvents(openLedger(), { project: P, target: "" }).filter((e) => e.kind === "note");
     expect(notes.at(-1)?.actor).toBe("agent-pm1");
   });

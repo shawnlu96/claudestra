@@ -3,6 +3,7 @@
  * 大总管默认不在批量范围里：只有 includeMaster 或在 agents 里点名 master 才算「单独勾选」。
  * 用例见 tests/fleet-plan.test.ts。
  */
+import { neutralizeDelegateMarker } from "./delegate-marker.js";
 import type { LpMode } from "./lp-state.js";
 
 export type FleetActionKind = "lp-on" | "lp-off" | "compact" | "save-compact" | "lp-compact" | "text";
@@ -21,12 +22,15 @@ export function ccOnly(kind: FleetActionKind): boolean {
   return kind !== "text";
 }
 
-/** 默认保留清单（config.json 的 fleet.compactKeep 可覆盖，面板可临时改） */
+/**
+ * 默认保留清单（config.json 的 fleet.compactKeep 可覆盖，面板可临时改）。不带编号数字：万一敲进了编号对话框，
+ * 数字键会直接选中选项（权限框的 1 = Yes）
+ */
 export const DEFAULT_COMPACT_KEEP =
-  "摘要必须让新上下文无需返工、无需重新提供约束就能接着干。务必保留:(1)遇到的难点/问题及其处理与结果;(2)提出、尝试或放弃过的方案及原因;" +
-  "(3)用户与 PM 的要求、决定、同意、否决、确立为约束/边界的内容——按原话;(4)当前精确进度:已覆盖/已定/已完成的,分支名、head、PR 号;" +
-  "(5)未了、未决、已承诺、预期接下来发生的事,以及被额度打断时正在做的那一步;(6)难以重建的细节——名字、数字、日期、原话、路径、命令、链接——原样保留。" +
-  "这六项宁长勿缺,其余从简。";
+  "摘要必须让新上下文无需返工、无需重新提供约束就能接着干。务必保留:遇到的难点/问题及其处理与结果;提出、尝试或放弃过的方案及原因;" +
+  "用户与 PM 的要求、决定、同意、否决、确立为约束/边界的内容——按原话;当前精确进度:已覆盖/已定/已完成的,分支名、head、PR 号;" +
+  "未了、未决、已承诺、预期接下来发生的事,以及被额度打断时正在做的那一步;难以重建的细节——名字、数字、日期、原话、路径、命令、链接——原样保留。" +
+  "以上宁长勿缺,其余从简。";
 
 const MAX_KEEP = 2000;
 const MAX_TEXT = 4000;
@@ -39,8 +43,11 @@ function oneLine(s: string): string {
   return s.replace(/[\x00-\x1f\x7f]+/g, " ").replace(/\s{2,}/g, " ").trim();
 }
 
+/** text 与 keep 都会进 agent 的上下文：里面的委托标记（[📨 委托转达] 及变体）一律中和，不许冒充 owner 委托 */
+const clean = (s: string) => neutralizeDelegateMarker(s);
+
 export function compactCommand(keep: string): string {
-  const k = oneLine(keep);
+  const k = oneLine(clean(keep));
   return k ? `/compact ${k}` : "/compact";
 }
 
@@ -53,12 +60,12 @@ export function parseFleetAction(input: unknown): { ok: true; action: FleetActio
   const action: FleetAction = { kind: kind as FleetActionKind };
   if (o.keep !== undefined) {
     if (typeof o.keep !== "string" || o.keep.length > MAX_KEEP) return { ok: false, error: `keep 要是不超过 ${MAX_KEEP} 字的字符串` };
-    if (kind === "compact" || kind === "lp-compact") action.keep = oneLine(o.keep);
+    if (kind === "compact" || kind === "lp-compact") action.keep = oneLine(clean(o.keep));
   }
   if (kind === "text") {
     if (typeof o.text !== "string" || !o.text.trim()) return { ok: false, error: "text 动作要带非空的 text" };
     if (o.text.length > MAX_TEXT) return { ok: false, error: `text 不能超过 ${MAX_TEXT} 字` };
-    action.text = o.text.trim();
+    action.text = clean(o.text.trim());
   }
   return { ok: true, action };
 }

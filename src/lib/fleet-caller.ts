@@ -2,7 +2,7 @@
  * 批量管理（fleet）经 ws 调用时「谁在调、能动谁」的纯判定。身份只认 bridge 这边 ws 连接上已注册的频道，
  * 不信请求里自报的名字；manager CLI 的连接不注册，落到 cli（T35 的最低口径，身份自报、防手滑级别）。
  * 能调的：大总管、台账 pms 上的 agent（只管自己是 PM 的项目）、config.json fleet.callers（管全部）。
- * 经 MCP 一律不动大总管、不动调用方自己。用例见 tests/fleet-caller.test.ts。
+ * 经 MCP 一律不动大总管（带上就整个拒）、不动调用方自己。用例见 tests/fleet-caller.test.ts。
  */
 import { bareName, type Excluded, type FleetActionKind, type FleetCandidate, type FleetSelect } from "./fleet-plan.js";
 
@@ -53,26 +53,29 @@ export function identifyFleetCaller(x: CallerInput): CallerDecision {
   return { kind: "deny", error: FLEET_DENIED };
 }
 
+const MASTER_OWNER_ONLY = "大总管只由 owner 在网页上操作";
+
 /** 会打断调用方正在跑的这一轮的动作：对自己点名做这些，整个请求报错 */
 const INTERRUPTS_SELF: readonly FleetActionKind[] = ["compact", "lp-compact", "save-compact"];
 
-/** 调用方越界（不是它的项目、点名自己压缩、includeMaster）：是拒绝不是故障，入口原样报给调用方 */
+/** 调用方越界（不是它的项目、点名自己压缩、带上大总管）：是拒绝不是故障，入口原样报给调用方 */
 export class FleetScopeError extends Error {}
 
 export type ScopeResult<T> = { ok: true; cands: T[]; select: FleetSelect; excluded: Excluded[] } | { ok: false; error: string };
 
 /**
  * 在 selectTargets 之前按调用方收窄候选：去掉大总管、调用方自己、PM 管不到的项目。
- * 点名了但被收掉的记进 excluded，并从 select.agents 里拿掉（否则 selectTargets 会再报一次「没有这个 agent」）；
+ * 点名了但被收掉的（自己、别的项目）记进 excluded，并从 select.agents 里拿掉（否则 selectTargets 会再报一次「没有这个 agent」）；
  * all / project 带进来的自己也记一条，免得调用方以为漏了；PM 管不到的其他 agent 直接不出现（all 只展开到它的项目）。
  */
 export function scopeForCaller<T extends FleetCandidate>(caller: FleetCaller, action: FleetActionKind, sel: FleetSelect, cands: T[]): ScopeResult<T> {
-  if (sel.includeMaster) return { ok: false, error: "fleet 不操作大总管（includeMaster 不可用），大总管只由 owner 在网页或 CLI 上操作" };
+  const named = new Set((sel.agents ?? []).map(bareName));
+  // 和 ws 的 CLI 分支同一条线（bridge/fleet/ws.ts）：includeMaster、点名 master 都整个拒，不是悄悄跳过
+  if (sel.includeMaster || named.has("master")) return { ok: false, error: `fleet 不能动大总管：${MASTER_OWNER_ONLY}` };
   if (caller.projects && sel.project !== undefined && !caller.projects.includes(sel.project)) {
     return { ok: false, error: `你不是项目 ${sel.project} 的 PM（你管：${caller.projects.join("、")}）` };
   }
   const me = bareName(caller.name);
-  const named = new Set((sel.agents ?? []).map(bareName));
   if (named.has(me) && INTERRUPTS_SELF.includes(action)) {
     return { ok: false, error: "不能对自己压缩：你正在这一轮里调用 fleet，压缩会打断它。要压自己请在这一轮结束后自己跑 /compact" };
   }
@@ -83,7 +86,7 @@ export function scopeForCaller<T extends FleetCandidate>(caller: FleetCaller, ac
     const n = bareName(c.name);
     const picked = named.has(n) || (!c.master && (!!sel.all || (sel.project !== undefined && c.project === sel.project)));
     const reason = c.master
-      ? "大总管只由 owner 在网页或 CLI 上操作"
+      ? MASTER_OWNER_ONLY
       : n === me
         ? "调用方自己：你正在这一轮里，发键会插进或打断它"
         : caller.projects && !(c.project && caller.projects.includes(c.project))

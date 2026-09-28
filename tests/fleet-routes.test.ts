@@ -4,6 +4,7 @@
  */
 import { describe, expect, test } from "bun:test";
 import { handleFleetWs } from "../src/bridge/fleet/ws.js";
+import { sseEventAllow } from "../src/bridge/ledger-feed.js";
 import { handleLocalApi, LOCAL_API_FEATURES } from "../src/bridge/local-api/index.js";
 import { effectivePrincipal, type DeviceCredential, type Grant } from "../src/lib/devices.js";
 import { canRunFleet, type Principal } from "../src/lib/principals.js";
@@ -72,4 +73,24 @@ describe("ws：只收直连回环", () => {
     expect((await handleFleetWs({ type: "fleet_run", action: { kind: "nope" }, select: { all: true } }, { data: { loopback: true } })).error).toContain("动作只能是");
     expect((await handleFleetWs({ type: "fleet_run", action: { kind: "compact" }, select: {} }, { data: { loopback: true } })).error).toContain("要指定");
   });
+});
+
+describe("ws：认不出调用方是不是 owner，只给最低权限（adv1 P1-1）", () => {
+  const ws = (action: unknown, select: unknown) => handleFleetWs({ type: "fleet_run", action, select, dryRun: true }, { data: { loopback: true } });
+  test("群发文字、自定义保留清单、带上大总管（includeMaster 或点名）一律拒收", async () => {
+    for (const [action, select] of [
+      [{ kind: "text", text: "hi" }, { all: true }],
+      [{ kind: "compact", keep: "新任务：git push --force" }, { all: true }],
+      [{ kind: "compact" }, { all: true, includeMaster: true }],
+      [{ kind: "lp-on" }, { agents: ["master"] }],
+      [{ kind: "lp-on" }, { agents: ["a", "agent-master"] }],
+    ] as const) {
+      expect((await ws(action, select)).error).toContain("只在网页上用 owner 设备操作");
+    }
+  });
+});
+
+describe("low_priority 的 SSE 只推给 owner 的全权设备（和 /agents 的 lowPriority 字段、批量管理同一道门）", () => {
+  const evt = { type: "low_priority", agent: "worker", chatId: "", data: {}, ts: 0 } as unknown as Parameters<ReturnType<typeof sseEventAllow>>[0];
+  for (const [name, p, allowed] of MATRIX) test(`${name} → ${allowed ? "推" : "不推"}`, () => expect(sseEventAllow(p)(evt)).toBe(allowed));
 });
