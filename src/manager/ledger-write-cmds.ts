@@ -2,7 +2,7 @@
  * `ledger` 的写子命令（docs 10-ledger §3 动作表）：参数 → lib/ledger-write.ts。角色：阶段与 meta 由库判，其余在这里（LedgerCli.require*）。
  * task-new / task-set 改执行者时经 T4 的派发规则联动 registry 的 parent / task（manager/team.ts），台账先写、registry 后写。
  */
-import { parseExtraChecks } from "../lib/ledger-probes.js";
+import { parseExtraChecks, parseExtraRepo } from "../lib/ledger-probes.js";
 import { STAGES, TASK_KINDS, type Stage, type TaskKind } from "../lib/ledger-stages.js";
 import { LedgerError } from "../lib/ledger-store.js";
 import {
@@ -34,10 +34,11 @@ function fieldsFrom(c: LedgerCli, map: Record<string, string>): Record<string, u
     if (v !== undefined) out[field] = field === "agent" || field === "pm" ? (v ? agentKey(v) : null) : v;
   }
   const extra = jsonObjectFlag(c.p, "extra");
-  if (extra && "checks" in extra) {
-    // 写进去的时候就拦：等到 verify 才报错，PM 早就以为检查单配好了
+  if (extra) {
+    // 写进去的时候就拦：等到 verify 才报错，PM 早就以为检查单 / 仓库声明配好了
     try {
       parseExtraChecks(extra.checks);
+      parseExtraRepo(extra.repo);
     } catch (e) {
       throw new LedgerError("invalid", (e as Error).message);
     }
