@@ -81,7 +81,7 @@ function changedProjects(db: Database, afterSeq: number): { projects: string[]; 
 }
 
 /** 最近一轮审查的摘要：首页「返工原因」只要这一条，不必为每条线再拉详情 */
-export interface ReviewSummary {
+interface ReviewSummary {
   round: number | null;
   verdict: string | null;
   p0: number | null;

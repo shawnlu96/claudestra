@@ -21,19 +21,13 @@ export interface LedgerEventView {
   data: Record<string, unknown>;
 }
 
-export interface ReviewSummaryView {
-  round: number | null;
-  verdict: string | null;
-  p0: number | null;
-  p1: number | null;
-  p2: number | null;
-  text: string;
-  ts: number;
-}
+/** 总览下发的最近一轮审查（src/lib/ledger-read.ts 的 ReviewSummary） */
+export interface ReviewSummaryView { round: number | null; verdict: string | null; p0: number | null; p1: number | null; p2: number | null; text: string; ts: number }
 
 export interface TaskMetricsView {
   startTs: number | null;
   endTs: number | null;
+  totalMs?: number;
   stageMs: Partial<Record<Stage, number>>;
   reviewRounds: number;
   reviewWaitPendingMs: number | null;
@@ -75,6 +69,12 @@ export interface LedgerOverview {
 /** 首页 7 列；审查与返工同一列（⇄） */
 export const COLUMNS = ["规格", "复述", "开发", "审查 ⇄ 返工", "合并", "上线", "验证"] as const;
 const COLUMN_OF: Record<Stage, number> = { spec: 0, restate: 1, build: 2, review: 3, fix: 3, merge: 4, live: 5, verified: 6, done: 6, blocked: 2, cancelled: 0 };
+export const columnOf = (stage: Stage, before: Stage | null = null): number => COLUMN_OF[stage === "blocked" ? before ?? "build" : stage];
+
+/** 这类任务不走的列：调查没有合并 / 上线 / 验证，运维不复述 */
+export function skippedColumns(kind: string): number[] {
+  return kind === "investigate" ? [4, 5, 6] : kind === "ops" ? [1] : [];
+}
 
 /** 在等别人的阶段：停太久就是卡住。build / fix 是在干活，时间长不算卡住（PM 09-28 定） */
 const WAIT_STAGES: ReadonlySet<Stage> = new Set(["spec", "restate", "review", "merge", "live", "blocked"]);
@@ -91,6 +91,7 @@ export interface LineView {
   id: string;
   title: string;
   goal: string;
+  kind: string;
   stage: Stage;
   column: number;
   attention: Attention;
@@ -246,9 +247,10 @@ export function lineOf(t: LedgerTaskView, ov: Pick<LedgerOverview, "tasks" | "me
   return {
     id: t.id,
     title: t.title,
+    kind: t.kind,
     goal: goalOf(t, items),
     stage: t.stage,
-    column: COLUMN_OF[t.stage === "blocked" ? t.stageBefore ?? "build" : t.stage],
+    column: columnOf(t.stage, t.stageBefore),
     attention: att,
     tone: toneOf(att),
     stageLabel: stageLabel(t, ov.tasks, frozen, tr),

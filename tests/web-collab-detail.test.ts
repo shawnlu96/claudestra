@@ -22,7 +22,7 @@ describe("阶段用时条", () => {
     ] as const;
     const segs = stageSegments({ task, timeline: [...timeline] });
     expect(segs.map((s) => [s.label, s.ms / MIN, s.state])).toEqual([
-      ["规格", 4, "past"], ["复述", 3, "past"], ["开发", 75, "past"], ["审查 ⇄ 返工", 16, "current"], ["合并", 0, "future"], ["上线", 0, "future"], ["验证", 0, "future"],
+      ["规格", 4, "past"], ["复述", 3, "past"], ["开发", 75, "past"], ["审查", 16, "current"], ["合并", 0, "future"], ["上线", 0, "future"], ["验证", 0, "future"],
     ]);
   });
 });
@@ -44,9 +44,11 @@ describe("最近 3 件事", () => {
     ]);
   });
 
-  test("导入的近似时间标出来；owner / import 的名字", () => {
-    expect(recentThree([ev("decision", { approxTime: true }, "先按这个来", "owner")])[0]).toMatchObject({ text: "你 拍板：先按这个来", approx: true });
-    expect(actorName("import")).toBe("导入");
+  test("导入的近似时间标出来；拍板不写记录人；导入的事件不写操作者", () => {
+    expect(recentThree([ev("decision", { approxTime: true }, "先按这个来", "agent-pm")])[0]).toMatchObject({ text: "拍板：先按这个来", approx: true });
+    expect(actorName("owner")).toBe("你");
+    expect(eventLine(ev("stage", { from: "spec", to: "restate" }, "", "import"))).toBe("推到「复述」");
+    expect(eventLine(ev("note", {}, "老台账的一条日志", "import"))).toBe("老台账的一条日志");
     expect(eventLine(ev("stage", { from: "build", to: "review" }))).toBe("pm 推到「审查」");
     expect(eventLine(ev("verify", { result: "fail" }, "白屏"))).toBe("线上验证失败：白屏");
     expect(eventLine(ev("meta"))).toBeNull();
@@ -61,7 +63,11 @@ describe("审查与参与者", () => {
   ];
 
   test("reviewRows：P 计数解析不出为 null", () => {
-    expect(reviewRows(events).map((r) => [r.round, r.verdict, r.p0, r.p1, r.reviewer])).toEqual([[1, "changes", 0, 3, "claude-reviewer"], [2, "pass", 0, 0, "claude-reviewer"], [2, "pass", null, null, "codex"]]);
+    expect(reviewRows(events).map((r) => [r.round, r.verdict, r.p0, r.p1, r.reviewer])).toEqual([
+      [1, "changes", 0, 3, "claude-reviewer"],
+      [2, "pass", 0, 0, "claude-reviewer"],
+      [2, "pass", null, null, "codex"],
+    ]);
   });
 
   test("执行者、PM、审查员按人去重并记轮次", () => {

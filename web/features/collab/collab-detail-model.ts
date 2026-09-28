@@ -2,7 +2,7 @@
  * 协作视图详情面板（第二层）的纯逻辑：阶段用时条、最近 3 件事、审查摘要、参与者。
  * 输入是 GET /api/v1/ledger/:project/tasks/:id 的 {task, events, timeline}；单测 tests/web-collab-detail.test.ts。
  */
-import { bareAgent, COLUMNS, type LedgerEventView, type LedgerTaskView, type Stage, type Tr } from "./collab-model";
+import { bareAgent, type LedgerEventView, type LedgerTaskView, type Stage, type Tr } from "./collab-model";
 import { fillParams } from "@/lib/i18n-fill";
 
 const zh: Tr = fillParams;
@@ -25,7 +25,8 @@ export const STAGE_NAME: Record<Stage, string> = {
   live: "上线", verified: "验证", done: "完成", blocked: "受阻", cancelled: "取消",
 };
 
-/** 用时条的 7 段与首页 7 列对齐：审查与返工分开计时，但落在同一段里（「审查 13分 · 返工 3分」） */
+/** 用时条的 7 段与首页 7 列对齐：审查与返工合在一段计时；面板窄，段名用短的 */
+const SEGMENT_LABELS = ["规格", "复述", "开发", "审查", "合并", "上线", "验证"] as const;
 const SEGMENTS: Stage[][] = [["spec"], ["restate"], ["build"], ["review", "fix"], ["merge"], ["live"], ["verified", "done"]];
 
 export interface Segment {
@@ -40,14 +41,14 @@ export function stageSegments(d: Pick<TaskDetail, "task" | "timeline">): Segment
   return SEGMENTS.map((g, i) => {
     const ms = d.timeline.filter((e) => g.includes(e.stage)).reduce((s, e) => s + Math.max(0, e.to - e.from), 0);
     const state = i === curIdx ? "current" : i < curIdx ? "past" : "future";
-    return { label: COLUMNS[i], ms, state };
+    return { label: SEGMENT_LABELS[i], ms, state };
   });
 }
 
-/** 显示用的人名：agent-xxx → xxx；owner → 你；导入 / 系统写的标出来，不冒充某个人 */
+/** 显示用的人名：agent-xxx → xxx；owner → 你；导入的事件不写操作者（写成「导入」读起来像有个叫导入的人） */
 export function actorName(actor: string, tr: Tr = zh): string {
   if (actor === "owner") return tr("你");
-  if (actor === "import") return tr("导入");
+  if (actor === "import") return "";
   if (actor === "system") return tr("系统");
   return bareAgent(actor) ?? actor;
 }
@@ -65,6 +66,11 @@ const firstLine = (s: string) => s.split("\n").find((l) => l.trim())?.trim() ?? 
 export function eventLine(e: LedgerEventView, tr: Tr = zh): string | null {
   const who = actorName(e.actor, tr);
   const tail = firstLine(e.text);
+  const line = eventText(e, who, tail, tr);
+  return line === null ? null : line.trim();
+}
+
+function eventText(e: LedgerEventView, who: string, tail: string, tr: Tr): string | null {
   const d = e.data;
   switch (e.kind) {
     case "stage": {
@@ -79,7 +85,8 @@ export function eventLine(e: LedgerEventView, tr: Tr = zh): string | null {
       return tr("审查 · 第 {n} 轮：{v}", { n: typeof d.round === "number" ? d.round : "?", v: verdict }) + ` · ${pCounts(d)}` + (tail ? `：${tail}` : "");
     }
     case "decision":
-      return tr("{who} 拍板：{t}", { who, t: tail });
+      // 拍板一律是 owner 的原话（PM 代记也一样），不写记录人
+      return tr("拍板：{t}", { t: tail });
     case "deploy":
       return tr("上线 {v}", { v: typeof d.version === "string" ? d.version : "" }).trim() + (tail ? `：${tail}` : "");
     case "verify":
@@ -87,7 +94,7 @@ export function eventLine(e: LedgerEventView, tr: Tr = zh): string | null {
     case "rollback":
       return tr("{who} 回滚", { who }) + (tail ? `：${tail}` : "");
     case "note":
-      return tail ? `${who}：${tail}` : null;
+      return tail ? (who ? `${who}：${tail}` : tail) : null;
     default:
       return null;
   }

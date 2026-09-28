@@ -1,13 +1,7 @@
 "use client";
 import { AgentTitle } from "./agent-title";
-import {
-  useCallback,
-  useEffect,
-  useLayoutEffect,
-  useMemo,
-  useRef,
-  useState,
-} from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { closingCollab, CollabSwitch } from "@/features/collab/collab-switch";
 import { ChatStoreProvider, useChatStore, useChatStoreApi } from "../chat-store";
 import { ChatNavContext, useChatNav, type ChatNav } from "./nav-context";
 import { Sidebar } from "./sidebar";
@@ -733,12 +727,12 @@ function ChatInner() {
               : `relative transition-none ${showContent ? "left-[-100%] sm:left-0" : "left-0"}`
           }`}
         >
-          <Sidebar onSelect={toContent} />
+          <Sidebar onSelect={closingCollab(toContent)} />
 
-          <main className="flex w-full min-w-0 shrink-0 flex-col bg-base-100 sm:w-0 sm:flex-1">
+          <main className="relative flex w-full min-w-0 shrink-0 flex-col bg-base-100 sm:w-0 sm:flex-1">
+            <CollabSwitch />
             <TopBar />
-            {/* 对齐横幅锚点:零高度 relative 壳,chip 绝对定位悬浮在消息区顶部,
-                不产生布局位移。⚠ 不能 fixed——本容器在横滑 transform 内(规则 5b) */}
+            {/* 对齐横幅锚点:零高度 relative 壳,chip 绝对定位悬浮在消息区顶部,不产生布局位移。⚠ 不能 fixed——本容器在横滑 transform 内(规则 5b) */}
             <div className="relative">
               <SyncBanner />
               <UpdateToast />
