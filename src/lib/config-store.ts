@@ -92,16 +92,17 @@ function merge(base: AppConfig, raw: any): AppConfig {
     ...(typeof raw.groqApiKey === "string" && raw.groqApiKey ? { groqApiKey: raw.groqApiKey } : {}),
     ...(typeof raw.quotaLive === "boolean" ? { quotaLive: raw.quotaLive } : {}),
     ...(typeof raw.quotaClaudeBackground === "boolean" ? { quotaClaudeBackground: raw.quotaClaudeBackground } : {}),
+    // 批量管理（bridge/fleet）：白名单带 compactKeep 和 callers；漏在这里读不到，任何 set* 还会把它抹掉
     ...fleetOf(raw.fleet),
   };
 }
 
-/** 白名单式读 fleet：漏在 merge 外面的字段读出来是 undefined，而且任何 set*（读→改→写）都会把它从磁盘上抹掉 */
+/** 白名单式读 fleet：新加字段要加在这里，否则读出来是 undefined，而且任何 set*（读→改→写）都会把它从磁盘上抹掉 */
 function fleetOf(f: unknown): Pick<AppConfig, "fleet"> {
   if (!f || typeof f !== "object") return {};
   const { compactKeep, callers } = f as Record<string, unknown>;
   const list = Array.isArray(callers) ? callers.filter((c): c is string => typeof c === "string" && c.trim() !== "") : null;
-  const fleet = { ...(typeof compactKeep === "string" ? { compactKeep } : {}), ...(list ? { callers: list } : {}) };
+  const fleet = { ...(typeof compactKeep === "string" && compactKeep.trim() ? { compactKeep } : {}), ...(list ? { callers: list } : {}) };
   return Object.keys(fleet).length ? { fleet } : {};
 }
 

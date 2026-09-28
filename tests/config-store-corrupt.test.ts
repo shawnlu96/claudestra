@@ -119,3 +119,31 @@ describe("config-store 坏文件", () => {
     expect(readdirSync(dir).filter((f) => f.endsWith(".tmp"))).toEqual([]);
   });
 });
+
+describe("config-store 的 fleet 段（批量管理的保留清单、fleet 工具的调用方）", () => {
+  test("compactKeep、callers 能读到；类型不对或空白的丢掉", () => {
+    const dir = mkdtempSync(join(tmpdir(), "cfg-fleet-read-"));
+    writeFileSync(join(dir, "config.json"), JSON.stringify({ fleet: { compactKeep: "保留进度与决定", callers: ["x", 3, " "], other: 1 } }));
+    expect(JSON.parse(run(dir, `console.log(JSON.stringify(c.readConfigSync().fleet ?? null));`).out)).toEqual({ compactKeep: "保留进度与决定", callers: ["x"] });
+    writeFileSync(join(dir, "config.json"), JSON.stringify({ fleet: { compactKeep: 3, callers: "x" } }));
+    expect(run(dir, `console.log(JSON.stringify(c.readConfigSync().fleet ?? null));`).out).toBe("null");
+    writeFileSync(join(dir, "config.json"), JSON.stringify({ fleet: { compactKeep: "  " } }));
+    expect(run(dir, `console.log(JSON.stringify(c.readConfigSync().fleet ?? null));`).out).toBe("null");
+  });
+
+  test("写别的配置（set*：读 → 改 → 写）不会抹掉磁盘上的 fleet 段（compactKeep、callers 都在）", () => {
+    const dir = mkdtempSync(join(tmpdir(), "cfg-fleet-keep-"));
+    writeFileSync(join(dir, "config.json"), JSON.stringify({ lang: "zh", fleet: { compactKeep: "保留进度与决定", callers: ["ops"] } }));
+    const r = run(dir, `await c.setLang("en"); await c.setArchiveRetention(30);`);
+    expect(r.status).toBe(0);
+    const disk = JSON.parse(readFileSync(join(dir, "config.json"), "utf-8"));
+    expect(disk).toMatchObject({ lang: "en", archiveRetentionDays: 30, fleet: { compactKeep: "保留进度与决定", callers: ["ops"] } });
+  });
+
+  test("只配了 callers 时，写别的配置也不会抹掉它", () => {
+    const dir = mkdtempSync(join(tmpdir(), "cfg-fleet-callers-"));
+    writeFileSync(join(dir, "config.json"), JSON.stringify({ fleet: { callers: ["ops", "agent-y"] } }));
+    expect(run(dir, `await c.setLang("en");`).status).toBe(0);
+    expect(JSON.parse(readFileSync(join(dir, "config.json"), "utf-8")).fleet).toEqual({ callers: ["ops", "agent-y"] });
+  });
+});

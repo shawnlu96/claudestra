@@ -111,15 +111,6 @@ describe("能动谁", () => {
   });
 });
 
-describe("config.json 的 fleet 段", () => {
-  test("callers / compactKeep 读得出来，读→改→写不丢，脏值滤掉", async () => {
-    await writeConfig({ ...readConfigSync(), fleet: { compactKeep: "留卡号", callers: ["ops", 3, " ", "agent-y"] as never } });
-    await writeConfig(readConfigSync()); // 任何 set* 都是这样读改写的
-    expect(readConfigSync().fleet).toEqual({ compactKeep: "留卡号", callers: ["ops", "agent-y"] });
-    await writeConfig({ ...readConfigSync(), fleet: { callers: ["ops"] } });
-  });
-});
-
 describe("MCP 与 CLI 的口子不一样", () => {
   test("同样发文字：认出身份的 MCP 调用方能发，未注册的连接（CLI）拒", async () => {
     const body = run({ action: { kind: "text", text: "hi" }, select: { agents: ["w1"] }, dryRun: true });

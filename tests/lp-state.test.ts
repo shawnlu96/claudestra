@@ -1,5 +1,5 @@
 /**
- * lib/lp-state.ts：状态栏画面 → low-priority 状态、「设成开 / 设成关」的决策表、额度菜单导航。
+ * lib/lp-state.ts：状态栏画面 → low-priority 状态、「设成开 / 设成关」的决策表、菜单 / 对话框识别（认出来也不导航）。
  * tests/fixtures/lp/ 是 2026-09-29 撞墙时在沙箱里抓的真实画面（capture-pane -p -e，CC 2.1.283）。
  */
 import { describe, expect, test } from "bun:test";
@@ -245,5 +245,40 @@ describe("adv1 / r1 的 P2 与 T36 约定", () => {
   test("bash 模式的输入框：不管有没有字都当草稿（敲进去的 /compact 会被当成 shell 命令）", () => {
     expect(inputStateOf(["! "], ["! "])).toBe("draft");
     expect(readLpPane(fx("input-bash-empty")).inputText).toContain("Try");
+  });
+});
+
+describe("adv2 / r2：对话里的字不能冒充底部状态", () => {
+  const lpOn = ["⚠ Lower priority until 3:20am · 90% allowance left · /low-priority to stop", "Opus 5.5"];
+
+  test("输入框上方引用了额度菜单（agent 回复里贴的）：判 unknown、不算撞墙，照样不按键，lp-off 不许报「本来就是关的」", () => {
+    const quoted = ["⏺ 撞墙时底部是这样的：", `  ${"▔".repeat(40)}`, "     What do you want to do?", "     ❯ 1. Stop and wait for limit to reset",
+      "       2. Continue now at lower priority", "     Enter to confirm · Esc to cancel", "✻ Worked for 3s · done 1:00 AM"];
+    const raw = pane({ above: quoted, footer: lpOn });
+    expect(readLpPane(raw)).toMatchObject({ lowPriority: "unknown", walled: false, offer: false, modal: true, menu: null });
+    expect(decideLp("off", readLpPane(raw)).kind).toBe("refuse");
+    expect(paneQuotaState(raw, raw)).toMatchObject({ wall: false, lp: "unknown", menu: true });
+  });
+
+  test("底部的额度菜单缺了顶格 ▔ 上沿：认不准，判 unknown、不算撞墙", () => {
+    const raw = fx("menu-5-items").replace(/\n[^\n]*▔{8,}[^\n]*/, "\n");
+    expect(readLpPane(raw)).toMatchObject({ lowPriority: "unknown", walled: false, modal: true, menu: null });
+    expect(read("menu-5-items")).toMatchObject({ lowPriority: "off", walled: true }); // 原样的真菜单照旧
+  });
+
+  test("判忙只认顶格 spinner 行：正文、工具输出、缩进列表、工具输出里抓到的别的窗口 spinner 都不算", () => {
+    const noise = ["⏺ 判忙的正则里有 esc to interrupt，看到它就算忙", "  ⎿  328: /esc to interrupt|esc to cancel/", "  * 跑测试… (约 30s)",
+      "  ✢ Hatching… (12s · ↓ 10 tokens)", "✻ Worked for 3s · done 1:00 AM"];
+    expect(readLpPane(pane({ above: noise, footer: lpOn })).busy).toBe(false);
+    expect(readLpPane(pane({ above: [...noise, "✢ Hatching… (12s · ↓ 10 tokens)"], footer: lpOn })).busy).toBe(true);
+    expect(read("lp-on-autocontinue").busy).toBe(true); // 首个 token 前不带括号的「✢ Hullaballooing…」
+  });
+
+  test("对话里引用的「❯ /low-priority」和回显（有缩进）不算命令行：不算回显、也不算本窗口手动关过", () => {
+    const quoted = ["⏺ 上次是这样关的：", "  ❯ /low-priority", "    ⎿  Lower-priority mode is off. Run /low-priority again to turn it back on."];
+    const raw = pane({ above: quoted, footer: ["Opus 5.5"] });
+    expect(lastLpEcho(raw)).toBeNull();
+    expect(lastLpEcho(raw, false)).toBeNull();
+    expect(readLpPane(raw).resumable).toBeUndefined();
   });
 });

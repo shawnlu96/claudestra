@@ -96,13 +96,15 @@ function afterCommand(raw: string, prefix: string): string {
   return "";
 }
 
-/** 能不能往输入框敲一条斜杠命令（忙 / 有排队的消息可以，会排队）：null = 能 */
+/** 能不能往输入框敲一条斜杠命令（回合在跑、输入框是空的可以，会排队）：null = 能 */
 function slashBlock(r: LpRead): Step | null {
   if (r.modal) return failed(`${r.reason ?? "底部没有输入框"}，没按任何键`);
   if (r.compacting) return skipped("正在压缩");
   // 与 T36 注入闸门同一口径：撞墙没开 LP，命令发进去也跑不动，只会一直挂在输入框里
   if (r.lowPriority === "exhausted" || (r.walled && r.lowPriority !== "on")) return failed("撞墙等待中、没开 low-priority，没发（先开 LP，或用「开 LP 再压缩」）");
-  if (r.input === "draft") return failed("输入框里有没发出去的文字，没动");
+  // 草稿和排队分开写：owner 要分得清是有人在打字，还是前面已经有消息在排队（PM 09-29 口径：两种都不发）
+  if (r.input === "draft") return failed("输入框里有没发出去的文字（草稿），没动");
+  if (r.input === "queued") return failed("输入框里已有排队的消息，没发（等它们发出去再试）");
   if (r.input === "unknown") return failed("看不清输入框是否为空，没动");
   return null;
 }
@@ -114,7 +116,7 @@ async function slash(io: PaneIO, win: string, cmd: string, echoRe: RegExp | null
   const name = cmd.split(" ")[0]!;
   const before = cmdCount(x0.raw, name);
   await io.sendLine(win, cmd);
-  if (x0.r.busy || x0.r.input === "queued") {
+  if (x0.r.busy) {
     const q = await waitFor(io, win, 3000, (x) => x.r.input === "queued");
     return { outcome: "queued", detail: q.ok ? "忙，已排队，回合结束后执行" : "忙，已发进输入框（没看到排队提示）" };
   }
@@ -142,6 +144,7 @@ async function clearOwnEcho(io: PaneIO, win: string): Promise<Step | null> {
   const { block } = await gateTwice(io, win, (r): Step | null => {
     if (r.modal) return failed(`LP 已开，但${r.reason ?? "底部没有输入框"}，没压缩`);
     if (r.input === "empty" || (r.input === "draft" && r.inputText === "/low-priority")) return null;
+    if (r.input === "queued") return skipped("LP 已开；输入框里已有排队的消息，没压缩");
     return skipped(`LP 已开；输入框里有别的字（${r.inputText.slice(0, 40) || "看不清"}），没清也没压缩`);
   });
   if (block) return block;
