@@ -189,3 +189,20 @@ export function frameData(frame: string): string | null {
   const lines = frame.split("\n").filter((l) => l.startsWith("data:")).map((l) => l.slice(5).trimStart());
   return lines.length ? lines.join("\n") : null;
 }
+
+/** 累积的 SSE 字节缓冲 → 其中完整帧解析出的事件 + 剩下的半帧；心跳 / 注释帧和坏帧都跳过（坏帧丢了流照样继续） */
+export function drainFrames(buffer: string): { events: BridgeEvent[]; rest: string } {
+  const frames = buffer.split("\n\n");
+  const rest = frames.pop() || "";
+  const events: BridgeEvent[] = [];
+  for (const f of frames) {
+    const data = frameData(f);
+    if (data === null) continue;
+    try {
+      events.push(JSON.parse(data) as BridgeEvent);
+    } catch {
+      continue; // 坏帧丢弃：少一条事件由调用方的重连 / 全量拉兜底
+    }
+  }
+  return { events, rest };
+}
