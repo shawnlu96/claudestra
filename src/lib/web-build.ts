@@ -15,9 +15,10 @@
  * （predev、手动 typecheck 前都会跑），它的内容与 mtime 都不能证明 .next / out 里是哪次构建。标记在
  * 构建成功后写入并绑定 BUILD_ID——BUILD_ID 对不上（别人手动 build 过）就作废，退回比 build-info。
  *
- * 重建为什么要备份 .next 和 out：next build 开局清空 .next（cleanDistDir），导出阶段清空 out——而 bridge
- * 正是从 out 服务网页的。失败时旧构建已经没了，网页直接 404。所以先把两份都克隆一份
- * （APFS clonefile，秒级、几乎不占空间），失败就换回去。
+ * 重建为什么要备份 .next 和 out：next build 开局清空 .next（cleanDistDir），导出阶段清空 out。
+ * 失败时旧构建已经没了，所以先把两份都克隆一份（APFS clonefile，秒级、几乎不占空间），失败就换回去。
+ * bridge 按版本托管（BRIDGE_STATIC_DIR = web-releases/current，lib/web-releases.ts）时，线上读的不是 out：
+ * 构建成功才发布一个新版本并切换，构建过程中线上一直是上一个版本；还直接托管 out 的老配置由 install-cli 迁移。
  */
 
 import { STATE_DIR } from "./paths.js";
@@ -25,6 +26,7 @@ import { existsSync, mkdirSync, openSync, closeSync, readFileSync, rmSync, statS
 import { spawnSync } from "child_process";
 import { resolveNpm } from "./npm-path.js";
 import { healSelfDirty } from "./self-dirty.js";
+import { publishWebRelease, releasesManaged } from "./web-releases.js";
 
 /** 仓库根下的 web pathspec —— 与 gen-build-info.mjs 在 web/ 下的 `-- . ':(exclude)*.md'` 等价 */
 export const WEB_PATHSPEC = ["--", "web", ":(exclude)web/*.md"];
@@ -336,6 +338,11 @@ export async function rebuildWebIfStale(repoRoot: string): Promise<WebBuildResul
       let baked: string | null = null;
       try { baked = parseBakedWebCommit(readFileSync(`${webDir}/lib/build-info.ts`, "utf-8")); } catch { /* 没有就不写 */ }
       if (baked) writeMarker(nextDir, baked);
+      // 按版本托管：发布失败 = 这次没上线（线上仍是上一个版本、没坏），按失败报出去
+      if (releasesManaged(`${repoRoot}/.env`)) {
+        const p = publishWebRelease(`${webDir}/out`);
+        if (!p.ok) Object.assign(result, { ok: false, error: `构建成功但${p.error}` });
+      }
     } else if (hadBuild) {
       result.restored = restoreBuild(webDir);
       if (result.restored) writeMarker(nextDir, "");

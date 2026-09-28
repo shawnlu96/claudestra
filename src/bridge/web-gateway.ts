@@ -9,7 +9,8 @@
  */
 
 import { timingSafeEqual } from "crypto";
-import { resolveExportedPath, staticResponse } from "../lib/static-site.js";
+import { resolveExportedPath, staticResponse, type StaticHit } from "../lib/static-site.js";
+import { fallbackStaticRoots } from "../lib/web-releases.js";
 
 /** bridge.ts 只从这一个模块 import 静态托管相关的东西（它在 guard 基线里只许缩，多一行 import 都不行） */
 export { appConfigResponse } from "./local-api/version.js";
@@ -184,6 +185,16 @@ export function controlAccessVerdict(opts: {
  * 缓存头、CSP（含该页内联脚本哈希）、nosniff 都在 lib/static-site.ts 的 staticResponse——与中继托管同一份。
  */
 export function serveStaticSite(rootDir: string, pathname: string, method = "GET"): Response | null {
-  const hit = resolveExportedPath(rootDir, pathname);
+  const hit = resolveExportedPath(rootDir, pathname) ?? oldChunk(rootDir, pathname);
   return hit ? staticResponse(hit, method) : null;
+}
+
+/** 已打开的旧页面要的旧 chunk：当前版本里没有就去保留的旧版本里找。只限 /_next/static/（文件名带内容哈希，不会拿错版本） */
+function oldChunk(rootDir: string, pathname: string): StaticHit | null {
+  if (!pathname.startsWith("/_next/static/")) return null;
+  for (const root of fallbackStaticRoots(rootDir)) {
+    const hit = resolveExportedPath(root, pathname);
+    if (hit?.status === 200) return hit;
+  }
+  return null;
 }

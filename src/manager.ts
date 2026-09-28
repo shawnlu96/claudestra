@@ -107,6 +107,7 @@ import { cmdTokenAdd, cmdTokenList, cmdTokenRevoke } from "./manager/tokens.js";
 import { cmdPeerHttpInvite, cmdPeerHttpJoin, cmdPeerHttpAccept, cmdPeerHttpTest, cmdPeerHttpList, cmdPeerHttpScope, cmdPeerHttpRemove, cmdPeerInviteNew, cmdPeerInviteList, cmdPeerInviteRevoke, cmdPeerInviteRedeem, cmdPeerJoinAuto } from "./manager/peers.js";
 import { cmdCost, cmdMetrics } from "./manager/cost.js";
 import { cmdAutoUpdate } from "./manager/auto-update.js";
+import { cmdWebRelease, maybeBuildWeb } from "./manager/web-release.js";
 import { isWriteInvocation, PRINCIPALS_WRITE_COMMANDS } from "./manager/write-commands.js";
 
 const BRIDGE_URL = resolveBridgeUrl();
@@ -2217,24 +2218,6 @@ async function cmdVersion() {
   });
 }
 
-/** v2.16.3 update 附带的 web 构建。返回值进 update 输出的 webBuild 字段——skipped/ok/error 三态,绝不静默。
- *  判据与 install-cli / doctor 共用(lib/web-build.ts,按 hash 比对):此前按「本次 diff 是否触及
- *  web/」触发,某一轮构建失败后下一轮 diff 不再含 web/,就永远不重试。 */
-async function maybeBuildWeb(): Promise<{ built: boolean; restored?: boolean; skipped?: string; error?: string }> {
-  const { rebuildWebIfStale } = await import("./lib/web-build.js");
-  // 没装 web 的实例跳过,不拖垮整体 update
-  if (!existsSync(`${REPO_ROOT}/web/node_modules`)) return { built: false, skipped: "web 未安装(无 node_modules)" };
-  // bridge 按请求读 web/out,构建完即生效,不用重启任何服务
-  const r = await rebuildWebIfStale(REPO_ROOT);
-  if (!r.attempted) return { built: false, ...(r.error ? { error: r.error } : { skipped: r.skipped }) };
-  if (!r.ok) {
-    const tail = (r.log ?? []).join("\n");
-    console.error(`[update] web 构建失败:\n${tail}`);
-    return { built: false, restored: r.restored, error: `${r.error ?? "web 构建失败"}: ${tail.slice(0, 500)}` };
-  }
-  return { built: true };
-}
-
 /** update.lock 互斥。锁文件里是持有者 pid——已有锁时先验持有者是否还活着:
  *  v2.17.2(peer 取证):update 子进程常由 launcher 派生,installClaudestraCli
  *  bootout launcher 时 launchd 会把它连坐回收(macOS 责任链不随 detach 断),
@@ -3413,6 +3396,7 @@ switch (cmd) {
 
   case "migrate": output({ ok: true, ...(await migrateWorkerToAgent()) }); break;
   case "migrate-web-state": await (await import("./manager/migrate-web-state.js")).cmdMigrateWebState(); break; // 旧 Next BFF 的 settings.db / config.json → bridge（先 tar 备份，幂等）
+  case "web-release": cmdWebRelease(args); break; // 网页版本发布 / 回滚（lib/web-releases.ts）
   case "retire-web": await (await import("./manager/retire-web.js")).cmdRetireWeb(); break; // 卸旧 com.claudestra.web（前端已由 bridge 托管；先验新模式 + 有备份才动手）
 
   case "permissions":
@@ -3545,6 +3529,7 @@ switch (cmd) {
         "archive-workflows               — backfill Dynamic Workflow records (run JSON, scripts, journals) into the session archive (idempotent)",
         "migrate-web-state               — copy the old web BFF's settings.db tables + groqApiKey/lang into the bridge (tar backup of the web data dir first; idempotent)",
         "retire-web                      — unload + back up the old com.claudestra.web daemon (the bridge serves web/out now); refuses until BRIDGE_STATIC_DIR is served and migrate-web-state ran",
+        "web-release publish|rollback|list — publish web/out as a new versioned release (atomic switch of web-releases/current), roll back, or list",
         "version                         — show the current version and whether an update is available",
         "update                          — git pull and reload the three launchd daemons",
         "auto-update status              — show auto-update toggles",
