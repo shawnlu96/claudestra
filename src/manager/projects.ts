@@ -25,7 +25,7 @@ async function cmdProjectAdd(
     return;
   }
   const checked = validateProjectDirs(opts.dirs || [], data.projects, id);
-  if (!checked.ok) return output({ ok: false, error: checked.error });
+  if (!checked.ok) return output(checked);
   const dirs = checked.dirs;
   if (dirs.length === 0) {
     output({ ok: false, error: "至少要一个工作目录: --dirs <a,b>" });
@@ -78,7 +78,7 @@ async function cmdProjectEdit(
   }
   if (opts.dirs !== undefined) {
     const checked = validateProjectDirs(opts.dirs, data.projects, id);
-    if (!checked.ok) return output({ ok: false, error: checked.error });
+    if (!checked.ok) return output(checked);
     const dirs = checked.dirs;
     if (dirs.length === 0) {
       output({ ok: false, error: "目录列表不能为空(project 至少要有一个工作目录)" });
@@ -191,10 +191,10 @@ export async function runProjectCommand(cmd: string, args: string[]): Promise<vo
     output({ ok: false, error: USAGE[cmd] ?? `unknown ${cmd}` });
     return;
   }
-  // 能改目录归属的三个命令只许 owner / master / PM（project-guard.ts）
+  // 能改目录归属的三个命令只许 owner / master / 目标项目的 PM（merge 要两边都是）（project-guard.ts）
   if (cmd === "project-add" || cmd === "project-merge" || (cmd === "project-edit" && opts.dirs !== undefined)) {
-    const denied = await requireProjectWriter((await readProjects()).projects);
-    if (denied) return output({ ok: false, code: "forbidden", error: denied });
+    const denied = await requireProjectWriter(cmd === "project-merge" ? [a, b] : [a]);
+    if (denied) return output({ ok: false, code: "forbidden", ...denied });
   }
   if (cmd === "project-add") return cmdProjectAdd(a, opts);
   if (cmd === "project-edit") return cmdProjectEdit(a, opts);

@@ -17,24 +17,28 @@ const db = openLedger(path);
 setMeta(db, { actor: "owner" }, { project: "q", key: "pms", value: ["agent-pm"] });
 afterAll(() => closeLedger(path));
 
-const projects: ProjectDef[] = ["p", "q"].map((id) => ({ id, name: id, dirs: [`/${id}`], createdAt: "" }));
 const agents = { "agent-pm": { channelId: "1" }, "agent-exec": { channelId: "2" }, "agent-codex": { channelId: "3" } };
-const as = (channelId?: string, ledger = path) => projectWriterError({ channelId, controlChannelId: "9" }, agents, projects, ledger);
+const as = (channelId?: string, targets = ["q"], ledger = path) => projectWriterError({ channelId, controlChannelId: "9" }, agents, targets, ledger);
 
 describe("projectWriterError", () => {
-  test("owner（没有频道：终端 / bridge / 网页）、master（控制频道）、任一项目的 PM 放行", () => {
+  test("owner（没有频道：终端 / bridge / 网页）、master（控制频道）、目标项目的 PM 放行", () => {
     expect(as(undefined)).toBeNull();
     expect(as("9")).toBeNull();
     expect(as("1")).toBeNull();
   });
+  test("只认目标项目的 PM：是 q 的 PM 也不能改 p；merge 要两边都是", () => {
+    expect(as("1", ["p"])?.error).toBe("agent-pm 不是项目 p 的 PM，不能改项目目录：改项目目录要找 PM 或 owner（网页 / master）");
+    expect(as("1", ["q", "p"])).toMatchObject({ tpl: expect.stringContaining("{projects}"), params: { actor: "agent-pm", projects: "q / p" } });
+    expect(as("1", ["new-proj"])).not.toBeNull(); // 新建项目还没有 PM：只剩 owner / master
+  });
   test("执行者、非台账 agent 拒绝，报错里写找谁；认不出的频道也拒绝", () => {
-    expect(as("2")).toContain("agent-exec 不能改项目目录：改项目目录要找 PM 或 owner（网页 / master）");
-    expect(as("3")).toContain("agent-codex 不能改项目目录");
-    expect(as("777")).toContain("认不出身份");
+    expect(as("2")?.error).toContain("agent-exec 不是项目 q 的 PM");
+    expect(as("3")?.error).toContain("找 PM 或 owner");
+    expect(as("777")?.error).toContain("认不出身份");
   });
   test("台账库还没建：只剩 owner / master", () => {
-    expect(as("1", "/no/such/ledger.sqlite")).toContain("不能改项目目录");
-    expect(as(undefined, "/no/such/ledger.sqlite")).toBeNull();
+    expect(as("1", ["q"], "/no/such/ledger.sqlite")).not.toBeNull();
+    expect(as(undefined, ["q"], "/no/such/ledger.sqlite")).toBeNull();
   });
 });
 

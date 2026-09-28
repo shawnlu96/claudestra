@@ -477,7 +477,18 @@ export const DICT: Record<string, string> = {
   "新建 project": "New project",
   "id(小写)": "id (lowercase)",
   "显示名(可中文)": "Display name (any language)",
-  "工作目录,一行一个,如 ~/repos/qingniao/miniapp": "Working directories, one per line, e.g. ~/repos/acme/app",
+  "工作目录(绝对路径),一行一个,如 /Users/you/repos/qingniao/miniapp": "Working directories (absolute paths), one per line, e.g. /Users/you/repos/acme/app",
+  // 项目目录校验与改目录的角色校验（模板与 src/lib/project-dirs.ts、src/manager/project-guard.ts 同一份字面量，tests/project-dirs.test.ts 对账）
+  "项目目录要写绝对路径：「{dir}」里的 ~ 不会被展开，请写成「{fix}」": "Project directories must be absolute: “~” in “{dir}” isn’t expanded — write “{fix}”",
+  "项目目录要写绝对路径：「{dir}」里的 $HOME 不会被展开，请写成「{fix}」": "Project directories must be absolute: “$HOME” in “{dir}” isn’t expanded — write “{fix}”",
+  "项目目录要写绝对路径：「{dir}」里的 ~用户名 或环境变量不会被展开，请写成展开后的绝对路径":
+    "Project directories must be absolute: “~user” or environment variables in “{dir}” aren’t expanded — write the expanded absolute path",
+  "项目目录要写绝对路径：「{dir}」是相对路径，请写成绝对路径，例如「{fix}」": "Project directories must be absolute: “{dir}” is relative — write an absolute path, e.g. “{fix}”",
+  "目录「{dir}」已登记在项目 {project} 下：一个目录只能属于一个项目（要合并两个项目用 project-merge <src> <dst>）":
+    "“{dir}” is already registered under project {project}: a directory can belong to one project only (to combine two projects use project-merge <src> <dst>)",
+  "认不出调用方的身份：改项目目录要找 PM 或 owner（网页 / master）": "Caller identity not recognized: ask a PM or the owner (web / master) to change project directories",
+  "{actor} 不是项目 {projects} 的 PM，不能改项目目录：改项目目录要找 PM 或 owner（网页 / master）":
+    "{actor} isn’t a PM of project {projects} and can’t change its directories: ask a PM or the owner (web / master)",
   "工作目录(一行一个,可多仓)": "Working directories (one per line, several repos OK)",
   "项目说明(可选,会注入新建 agent 的上下文)": "Project description (optional, added to new agents' context)",
   "至少要一个工作目录": "At least one working directory is required",
