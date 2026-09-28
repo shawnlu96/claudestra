@@ -83,14 +83,15 @@ export const stopWaitIds = (channelId: string): ReadonlySet<string> => stopWaits
 
 /**
  * Pi 的停字自己的 API 同步等待（adv5 P2-1）：叫停引起的那次 Stop 会把挂着的 API 请求按空答复结掉，连这条「停」也算进去——
- * 发中止之前登记，那次 Stop 跳过它，留给停字那一轮去答。停完调返回的函数：过 waitMs 还没人答，就结成一句「已叫停」（附中止回执），不回 null。
+ * 发中止之前登记，那次 Stop 跳过它，留给停字那一轮去答。停完调返回的函数：过 waitMs（且赶在调用方的等待到期前）还没人答，就结成一句「已叫停」，不回 null。
  * 没有同步等待（网页 wait:0）不登记。
  */
 export function holdStopWait(env: Envelope, channelId: string, agent: string, waitMs = STOP_WAIT_MS): ((text: string) => void) | undefined {
   const queues = echo?.books().pendingApiRequests;
   const id = env.meta.messageId;
-  const waiting = () => [...(queues?.values() ?? [])].some((q) => q.some((p) => p.messageId === id && !!p.resolve));
-  if (!echo || env.from.kind !== "api" || !waiting()) return undefined;
+  const find = () => [...(queues?.values() ?? [])].flat().find((p) => p.messageId === id);
+  const w = find(); // 看 waitUntil：这时 resolve 还没挂（api-routes 在 deliver 返回后才挂）
+  if (!echo || env.from.kind !== "api" || !w || !(w.waitUntil || w.resolve)) return undefined;
   const ids = stopWaits.get(channelId) ?? new Set<string>();
   stopWaits.set(channelId, ids.add(id));
   const d = echo, { tokenId, name } = env.from;
@@ -98,12 +99,12 @@ export function holdStopWait(env: Envelope, channelId: string, agent: string, wa
     setTimeout(() => {
       ids.delete(id);
       if (!ids.size && stopWaits.get(channelId) === ids) stopWaits.delete(channelId);
-      if (!waiting()) return; // 停字那一轮已经答了
+      if (!find()) return; // 停字那一轮已经答了（认领走了）
       const from: Endpoint = { kind: "local", channelId, agentName: agent, ws: socketOf(channelId) as ServerWebSocket<unknown> };
       const meta = { messageId: newMessageId("stopped"), triggerKind: "bridge_synth" as const, ts: new Date().toISOString(), threadId: newThreadId(), inReplyTo: id };
       void d.deliver({ from, to: { kind: "api", tokenId, name }, intent: "response", content: text, meta })
         .catch((e: Error) => console.error(`⚠️ 「已叫停」答复发给 ${name} 失败: ${e.message}`));
-    }, waitMs).unref?.();
+    }, Math.max(0, Math.min(waitMs, (w.waitUntil ?? Infinity) - Date.now() - 1_500))).unref?.(); // 赶在调用方自己等超时之前，别让它拿到 timedOut
   };
 }
 

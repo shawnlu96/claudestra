@@ -15,7 +15,7 @@ import type { Envelope } from "../src/bridge/router.js";
 const CH = "pi-stop-ch";
 const log: string[] = [];
 const delivered: Envelope[] = [];
-type Wait = { messageId?: string; resolve?: unknown };
+type Wait = { messageId?: string; waitUntil?: number; resolve?: unknown };
 const apiQueues = new Map<string, Wait[]>();
 const books = {
   pendingReplies: new Map(), pendingThreads: new Map(), pendingInterAgentMsg: new Map(),
@@ -58,15 +58,18 @@ describe("Pi 在处理别的 agent 的请求时 owner 叫停：先清 agent 间�
   test("网页停字（wait:0，没有同步等待）：先清账；不登记、不另发答复", async () => {
     log.length = 0;
     delivered.length = 0;
+    apiQueues.set(`tok-owner|${CH}`, [{ messageId: "s-web" }]); // wait:0 也进队列，只是不标 waitUntil
     await preemptForHuman(stopEnv("s-web", true), CH, "agent-pi");
     expect(log).toEqual([`clear:${CH}`, "abort(skip=)"]);
     expect(delivered).toEqual([]);
+    apiQueues.clear();
   });
 
   test("API 停字（wait>0）：先清账；中止之前就登记了它自己的同步等待（那次 Stop 跳过它），它留在账上等停字那一轮答", async () => {
     log.length = 0;
     delivered.length = 0;
-    apiQueues.set(`tok-owner|${CH}`, [{ messageId: "other-req", resolve: () => undefined }, { messageId: "s-api", resolve: () => undefined }]);
+    // 真实时序（adv6 P2）：api-routes 先把请求放进队列、标 waitUntil，再 deliver（抢占在 deliver 里跑），resolve 要等 deliver 返回后才挂
+    apiQueues.set(`tok-owner|${CH}`, [{ messageId: "other-req", waitUntil: Date.now() + 60_000, resolve: () => undefined }, { messageId: "s-api", waitUntil: Date.now() + 60_000 }]);
     await preemptForHuman(stopEnv("s-api", true), CH, "agent-pi");
     expect(log).toEqual([`clear:${CH}`, "abort(skip=s-api)"]);
     expect(apiQueues.get(`tok-owner|${CH}`)?.map((p) => p.messageId)).toEqual(["other-req", "s-api"]);
@@ -85,7 +88,7 @@ describe("Pi 在处理别的 agent 的请求时 owner 叫停：先清 agent 间�
 describe("停字那一轮迟迟不来：超时结成「已叫停」，不回 null", () => {
   test("超时还在账上 → 发一条带 inReplyTo 的 response（deliverToApi 按它认领）；登记随之撤掉", async () => {
     delivered.length = 0;
-    apiQueues.set(`tok-owner|${CH}`, [{ messageId: "s-late", resolve: () => undefined }]);
+    apiQueues.set(`tok-owner|${CH}`, [{ messageId: "s-late", waitUntil: Date.now() + 60_000 }]); // resolve 还没挂也要登记上
     const settle = holdStopWait(stopEnv("s-late", true), CH, "agent-pi", 10);
     expect(stopWaitIds(CH).has("s-late")).toBe(true);
     settle?.("[⏹ bridge] 已叫停 agent-pi：Pi 回执：已中止当前回合。");
@@ -99,12 +102,21 @@ describe("停字那一轮迟迟不来：超时结成「已叫停」，不回 nul
 
   test("超时前停字那一轮已经答了（不在账上）→ 不再发", async () => {
     delivered.length = 0;
-    apiQueues.set(`tok-owner|${CH}`, [{ messageId: "s-done", resolve: () => undefined }]);
+    apiQueues.set(`tok-owner|${CH}`, [{ messageId: "s-done", waitUntil: Date.now() + 60_000 }]);
     const settle = holdStopWait(stopEnv("s-done", true), CH, "agent-pi", 10);
     settle?.("已叫停");
     apiQueues.clear(); // 那一轮的回复认领走了
     await sleep(40);
     expect(delivered).toEqual([]);
     expect(stopWaitIds(CH).has("s-done")).toBe(false);
+  });
+
+  test("调用方等得比兜底短（wait=3 秒）：赶在它到期前回「已叫停」，不让它拿到 timedOut", async () => {
+    delivered.length = 0;
+    apiQueues.set(`tok-owner|${CH}`, [{ messageId: "s-short", waitUntil: Date.now() + 1_550 }]);
+    holdStopWait(stopEnv("s-short", true), CH, "agent-pi")?.("已叫停");
+    await sleep(80);
+    expect(delivered.map((e) => e.meta.inReplyTo)).toEqual(["s-short"]);
+    apiQueues.clear();
   });
 });

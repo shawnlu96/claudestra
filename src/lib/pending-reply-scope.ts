@@ -168,7 +168,7 @@ export function takeApiPending<T extends { messageId?: string }>(queue: T[], inR
   return k >= 0 ? queue.splice(k, 1)[0] : undefined;
 }
 
-type ApiWait = { messageId?: string; resolve?: unknown };
+type ApiWait = { messageId?: string; waitUntil?: number; resolve?: unknown };
 
 /**
  * Stop 兜底收尾要结掉的 API 请求（从账上拿走），skip 里的留在队里：Pi 叫停引起的那次 Stop 不结停字自己的同步等待，

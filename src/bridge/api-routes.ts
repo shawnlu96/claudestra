@@ -118,7 +118,7 @@ export interface PendingApiRequest {
   agentChannelId: string;
   agentName: string;
   threadId: string;
-  messageId?: string; // 带 inReplyTo 的回复（作废回显）按它认领（lib/pending-reply-scope.ts takeApiPending）
+  messageId?: string; waitUntil?: number; // messageId：带 inReplyTo 的回复（作废回显）按它认领（lib/pending-reply-scope.ts takeApiPending）；waitUntil：同步等到几时
   ts: number;
   /** wait 模式挂的 resolver（无 wait 则为空） */
   resolve?: (result: ApiReplyResult) => void;
@@ -1337,7 +1337,7 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
       agentChannelId: agent.channelId,
       agentName: agent.name,
       threadId,
-      messageId: env.meta.messageId,
+      messageId: env.meta.messageId, waitUntil: waitSec > 0 ? Date.now() + waitSec * 1000 : undefined, // 投递前就标：停字的抢占在 deliver 里跑，resolve 这时还没挂（pi-abort holdStopWait）
       ts: Date.now(),
     };
     const queue = pendingApiRequests.get(key) || [];
