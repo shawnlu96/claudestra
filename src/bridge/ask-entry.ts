@@ -1,7 +1,7 @@
 /**
  * 「待你处理」的作答入口（docs 13 §4.4 §4.7）：聊天里的按钮 / 表单同步发送（POST /agents/:name/messages）、Discord 交互、网页卡片。
  * 三条路都先认出这是哪条 ask，再交给 asks.ts 的 commitAnswer——答复是 intent=response，不抢占正在干活的 agent。
- * 已结案的 ask 再点：网页回 409 ask_closed（前端提示「已处理」），Discord 回一条只有点的人看得见的「已处理」，都不再投给 agent。
+ * 已结案的 ask 再点：网页回 409 code=ask_closed（聊天里是一句「已经处理过了」，气泡本身也已按 ask 状态锁住），Discord 回一条只有点的人看得见的「已处理」，都不再投给 agent。
  * 只有 canReadLedger 的 owner 凭据（非 peer、全 scope）和 Discord 的 ALLOWED_USER_IDS 能作答；别的 token 发 [button:x] 照旧是普通消息。
  */
 import { matchWire, splitWire, type AskRow, type WireMatch } from "../lib/ask-options.js";
@@ -40,7 +40,8 @@ export function findAskForWires(agent: string, wires: string[], hint?: string | 
   return null;
 }
 
-const closedBody = (a: Ask) => ({ ok: false, error: "ask_closed", askId: a.id, state: a.state, answer: a.answer });
+/** 409 的体：code 给程序判，error 是网页失败提示里直接显示的那句 */
+const closedBody = (a: Ask) => ({ ok: false, code: "ask_closed", error: t("这件「待你处理」已经处理过了（或已过期）", "This ask was already handled (or expired)"), askId: a.id, state: a.state, answer: a.answer });
 
 /** 冲突（刚被别处答了 / 到点过期）→ 409，其余错误照抛 */
 async function commitOr409(run: () => Promise<Ask>, fallback: Ask): Promise<Response> {

@@ -117,7 +117,7 @@ describe("作答 → 答复不抢占", () => {
     delivered = [];
     const res = (await answerFromChat({ agent: "agent-x", text: "[button:no]", principal: owner() }))!;
     expect(res.status).toBe(409);
-    expect(await res.json()).toMatchObject({ error: "ask_closed", state: "answered" });
+    expect(await res.json()).toMatchObject({ code: "ask_closed", state: "answered" });
     expect(delivered).toEqual([]);
   });
 

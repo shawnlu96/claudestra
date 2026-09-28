@@ -7,6 +7,7 @@
 import { apiAgentName } from "@/lib/chat/agents";
 import { SSE_DONE, type AnchoredStreamEvent } from "@/lib/chat/events";
 import { agentNameVariants, bgReplayEvents, frameData, pendingEvents, translate, type BridgeEvent, type Lang } from "@/lib/chat/stream-shape";
+import { notifyAskEvent } from "./asks";
 import { api, apiStream } from "./client";
 import { selfIds } from "./history";
 
@@ -60,6 +61,7 @@ export async function openAgentEventStream(agent: string, opts: { since?: number
         } catch {
           continue; // 坏帧丢弃，流继续
         }
+        if (evt.type === "ask") notifyAskEvent(); // 「待你处理」变了：不属于哪个会话，侧栏入口自己重拉
         if (!variants.has(evt.agent)) continue;
         const mapped = translate(evt, opts.lang, ids);
         if (!mapped) continue;
