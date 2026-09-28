@@ -155,3 +155,13 @@ export function dropVoidedPendings(books: VoidableBooks, channelId: string, void
   for (const v of voided) if (v.agentChannel) books.pendingAgentCalls.dropRequest(channelId, v.agentChannel, v.messageId);
   return n;
 }
+
+/**
+ * 出站回复认领挂着的哪条 API 请求（队列按 token + agent 频道分）：普通回复先来先答；带 inReplyTo 的（作废回显）只认它回的那一条，
+ * 对不上就谁也不认——按先来先答会把「你那条已作废」塞给同一 token 在等的另一条同步请求，那条自己的等待反而拿到空结果（adv5）。
+ */
+export function takeApiPending<T extends { messageId?: string }>(queue: T[], inReplyTo?: string): T | undefined {
+  if (!inReplyTo) return queue.shift();
+  const k = queue.findIndex((p) => p.messageId === inReplyTo);
+  return k >= 0 ? queue.splice(k, 1)[0] : undefined;
+}

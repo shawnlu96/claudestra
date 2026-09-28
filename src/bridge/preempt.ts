@@ -35,7 +35,8 @@ const toolsAt = (agent: string, runtime: string | undefined) => inflightTools(ag
  * （压掉续做提醒、Autopilot 不推进），抬头照实写打断没打断。发键失败只记日志，消息照常投递。
  * 停字和「解除叫停」只认 owner：外源（非 owner 的 API 用户）的「停」按普通消息处理，也解不开 owner 的「停」。
  */
-export async function preemptForHuman(env: Envelope, channelId: string, agent: string): Promise<void> {
+/** 返回这条是不是 owner 的「停」：调用方据此清掉这个频道上 agent 间的待回账（停 = owner 接管，看门狗别在停之后又把 agent 拉起来） */
+export async function preemptForHuman(env: Envelope, channelId: string, agent: string): Promise<boolean> {
   const { owner, stop } = ownerStopOf(env);
   if (owner) turnCuts.noteHuman(channelId, stop);
   const { runtime } = await resolveTurnWindow(channelId, controlChannelId());
@@ -47,18 +48,22 @@ export async function preemptForHuman(env: Envelope, channelId: string, agent: s
   } catch (e) {
     console.log(`⚠️ 抢占打断失败,按常规投递: ${(e as Error).message}`);
   }
-  if (!r.fired && !stop) return;
+  if (!r.fired && !stop) return false;
   const cut = turnCuts.record({
     channelId, agent, runtime, cause: stop ? "stopword" : "preempt",
     byMessageId: env.meta.messageId, byName: senderName(env), tools: r.fired ? tools : { inflight: [] }, interrupted: r.fired,
   });
-  if (!stop) return void (env.meta.interruptNote = preemptHeadline(cut));
+  if (!stop) {
+    env.meta.interruptNote = preemptHeadline(cut);
+    return false;
+  }
   // Pi 的中止靠扩展里的 abort()：有回执 = 真停了，等不到回执如实写「已请求」；扩展回「本来就空闲」= 没有在跑的回合
   const pi = runtime === "pi" ? lastAbortResult(channelId) : undefined;
   const outcome = r.fired ? (runtime === "pi" && pi?.result !== "aborted" ? "requested" : "fired")
     : r.why === "not_busy" || (runtime === "pi" && r.why === "no_keys") ? "not_busy" : "failed";
   env.meta.interruptNote = stopHeadline(cut, outcome, queuedBefore, r.fired ? (pi?.inEditor ?? 0) : 0);
   console.log(`⏹ 停字${r.fired ? "打断" : `（没发键：${r.why}）`} ${agent}（${runtime ?? "claude-code"}）`);
+  return true;
 }
 
 /**

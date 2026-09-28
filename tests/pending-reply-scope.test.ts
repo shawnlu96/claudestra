@@ -7,7 +7,7 @@
  * ② 销账不验欠账人，会把别的 agent 的欠账顺手销掉。
  */
 import { describe, test, expect } from "bun:test";
-import { dropPendingsForChannel, dropVoidedPendings, hangsInterAgentWatchdog, hangsPendingReply, nudgesForOrigin, ownsPendingReply, pendingKeysOwedBy, type ThreadEnds } from "../src/lib/pending-reply-scope.js";
+import { dropPendingsForChannel, dropVoidedPendings, takeApiPending, hangsInterAgentWatchdog, hangsPendingReply, nudgesForOrigin, ownsPendingReply, pendingKeysOwedBy, type ThreadEnds } from "../src/lib/pending-reply-scope.js";
 import { pickUnrepliedForNudge } from "../src/lib/reply-nudge.js";
 
 describe("hangsPendingReply", () => {
@@ -208,5 +208,15 @@ describe("dropVoidedPendings（T13a adv4：叫停作废的消息不再被催）"
     expect(dropVoidedPendings(b, "pi", [{ messageId: "m7", agentChannel: "ag" }], 300)).toBe(1);
     expect(b.pendingInterAgentMsg.has("pi")).toBe(false);
     expect(b.dropped).toEqual(["pi<-ag:m8", "pi<-ag:m7"]);
+  });
+});
+
+describe("takeApiPending（adv5：作废回显不能认领同一 token 的别的请求）", () => {
+  test("普通回复先来先答；带 inReplyTo 只认那一条，对不上谁也不认", () => {
+    const q = [{ messageId: "sync1", n: 1 }, { messageId: "c3", n: 2 }, { n: 3 }];
+    expect(takeApiPending(q, "c3")?.n).toBe(2);
+    expect(takeApiPending(q, "gone")).toBeUndefined();
+    expect(q.map((p) => p.n)).toEqual([1, 3]);
+    expect(takeApiPending(q)?.n).toBe(1);
   });
 });

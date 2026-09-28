@@ -360,6 +360,23 @@ describe("Workflow 复核 wf2（@2968ec7f）", () => {
     expect(book({ path }).b.stoppedAt("ch")).toBe(T0);
   });
 
+  test("adv5：叫停记录解除超过 24 小时才清（押后消息最长押 24 小时）；没解除的一直留着", () => {
+    const { b, tick } = book();
+    ownerStop(b);
+    tick(1_000);
+    b.noteHuman("ch", false);
+    tick(23 * 3_600_000);
+    b.record({ channelId: "other", agent: "o", cause: "preempt", tools: { inflight: [] } }); // 记新 cut 时顺带清理
+    expect(b.stoppedAt("ch")).toBe(T0);
+    tick(2 * 3_600_000);
+    b.record({ channelId: "other", agent: "o", cause: "preempt", tools: { inflight: [] } });
+    expect(b.stoppedAt("ch")).toBeUndefined();
+    b.record({ channelId: "ch2", agent: "a2", cause: "stopword", tools: { inflight: [] } });
+    tick(30 * 24 * 3_600_000);
+    b.record({ channelId: "other", agent: "o", cause: "preempt", tools: { inflight: [] } });
+    expect(b.interruptHold("ch2")).toBe("stopped");
+  });
+
   test("esc-keys-2：manager 清场 / tmux-send-keys 发的 C-c 引起的打断标记不记成叫停", async () => {
     let inputs: ProgramInput[] = [];
     const { b, at, tick } = book({ inputs: () => inputs });

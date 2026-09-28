@@ -118,6 +118,7 @@ export interface PendingApiRequest {
   agentChannelId: string;
   agentName: string;
   threadId: string;
+  messageId?: string; // 带 inReplyTo 的回复（作废回显）按它认领（lib/pending-reply-scope.ts takeApiPending）
   ts: number;
   /** wait 模式挂的 resolver（无 wait 则为空） */
   resolve?: (result: ApiReplyResult) => void;
@@ -1348,6 +1349,7 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
       agentChannelId: agent.channelId,
       agentName: agent.name,
       threadId,
+      messageId: env.meta.messageId,
       ts: Date.now(),
     };
     const queue = pendingApiRequests.get(key) || [];

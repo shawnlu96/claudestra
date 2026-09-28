@@ -13,6 +13,7 @@ import {
   type Cut, type CutCause, type CutEvent, type CutTool, type ReplyState, type TurnTrigger,
 } from "../lib/turn-cuts.js";
 import { emitEvent, inflightTools, subscribeEvents } from "./event-bus.js";
+import { HELD_GIVE_UP_MS } from "./held-queue.js";
 import { PersistedMap } from "./persisted-map.js";
 import { newMessageId, newThreadId, type Envelope, type LocalEndpoint } from "./router.js";
 
@@ -279,9 +280,13 @@ export class TurnCuts {
     this.noteHuman(e.chatId, e.data.stop === true);
   }
 
-  /** 过期很久的记录（agent 早被 kill 的频道）不留在盘上；叫停记录单独存、不在这里清 */
+  /**
+   * 过期很久的记录（agent 早被 kill 的频道）不留在盘上。叫停记录只清已解除、且解除超过押后上限（24 小时）的：
+   * 押后的消息靠 stoppedAt 判「是不是叫停之前押的」，押得再久也不会超过这个上限；还没解除的一直留着（Autopilot 要等 owner 开口）
+   */
   private prune(now: number): void {
     for (const [ch, c] of this.cuts) if (now - c.at > CUT_TTL_MS * 4) this.cuts.delete(ch);
+    for (const [ch, s] of this.stops) if (s.goAt !== undefined && now - s.goAt > HELD_GIVE_UP_MS) this.stops.delete(ch);
   }
 }
 
