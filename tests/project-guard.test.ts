@@ -73,5 +73,5 @@ describe("manager project-* 接线（临时 CLAUDESTRA_STATE_DIR）", () => {
     data.projects[1].dirs = ["/no/such/b", "/no/such/a/"];
     writeFileSync(file, JSON.stringify(data));
     expect(run(["project-merge", "bb", "aa"])).toMatchObject({ ok: true, dirs: ["/no/such/a", "/no/such/b"] });
-  });
+  }, 60_000); // 串行起十几个 manager 子进程，机器负载高时单个要近半秒
 });

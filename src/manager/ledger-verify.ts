@@ -99,7 +99,7 @@ async function ownBranchPr(fd: FactsDeps, task: LedgerTask, origin: string): Pro
 
 /**
  * PR 指向项目里另一个仓库：PM 在 extra.repo 声明过同一个仓库、且本仓库上没有这个任务分支的 PR → 只核证据；
- * 没声明 / 声明的不一样 / 反证成立或查不了 → unknown 并给出原因（项目目录明确不含本仓库时 ownership 照旧按目录判不属于）。
+ * 没声明 / 声明的不一样 / 反证成立或查不了 → unknown 并给出原因（项目目录明确不含本仓库时 ownership 照旧按目录判，但同样要过 ownBranchPr 反证）。
  * 执行者能改 PR 链接、改不了 extra，本仓库的活挂错另一个仓库的 PR 就停在这里。
  */
 async function siblingOwnership(fd: FactsDeps, task: LedgerTask, pr: string, dir: string, origin: string): Promise<Ownership> {
@@ -134,6 +134,9 @@ async function ownership(c: LedgerCli, fd: FactsDeps, task: LedgerTask): Promise
   if (sibling?.owns === "no") return sibling;
   const dirs = await dirOwnership(c, fd, task);
   if (sibling && dirs !== "no") return sibling; // 目录没排除本仓库：可能是本仓库的活挂了那边的 PR，要 PM 声明
+  // 目录明确不含本仓库时不要求声明，但反证照样生效：本仓库上有这个分支的 PR（或查不了）就不放行
+  const own = sibling ? await ownBranchPr(fd, task, origin as string) : null;
+  if (own) return { owns: "unknown", note: own };
   if (!pr || !origin) {
     return dirs === "no" ? { owns: "no", note: { tpl: "项目 {project} 的目录里没有本仓库，只核证据文件（--evidence）", params: { project } } } : { owns: dirs };
   }

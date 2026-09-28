@@ -377,11 +377,15 @@ describe("没 PR 与别的项目", () => {
     sc.sizes["docs/T36.md"] = 500;
     expect(await pm("verify", "T36", "--evidence", "docs/T36.md")).toMatchObject({ ok: false, result: "unknown", task: { stage: "live" } });
   });
-  test("项目只登记了 relay（目录明确不含本仓库）：没声明也照旧按目录判不属于、只核证据", async () => {
+  test("项目只登记了 relay（目录明确不含本仓库）：没声明也照旧只核证据，但本仓库上有这个分支的 PR 或查不了仍判断不了", async () => {
     relayProject();
     sc.projects = [proj(P, ["/relay"])];
     liveTask("T37", { pr: RELAY_PR });
     expect(await pm("verify", "T37", "--dry-run")).toMatchObject({ checklistSource: "evidence", noteParams: { prRepo: "shawnlu96/claudestra-relay" } });
+    sc.branchPrs = [151]; // 反证照样生效：本仓库上也有这个分支的 PR → 判断不了
+    expect(await pm("verify", "T37", "--evidence", "docs/r.md")).toMatchObject({ ok: false, result: "unknown", note: expect.stringContaining("有分支 task/t9 的 PR #151") });
+    sc.branchPrs = "fail";
+    expect(await pm("verify", "T37", "--evidence", "docs/r.md")).toMatchObject({ ok: false, result: "unknown", note: expect.stringContaining("HTTP 502") });
   });
   test("extra.repo 写入时校验格式", async () => {
     const rev = String(getTask(db, "T9")!.rev);
