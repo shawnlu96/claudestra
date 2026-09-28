@@ -18,6 +18,7 @@ import {
   type AppendableKind,
 } from "../lib/ledger-write.js";
 import type { LedgerCli, Result } from "./ledger-context.js";
+import { checkMergeGate, checkTaskRefs } from "./ledger-field-checks.js";
 import { agentKey, intFlag, jsonObjectFlag } from "./ledger-identity.js";
 import { MASTER_PARENT, TASK_MAX, validateParent, validateTask } from "./team.js";
 
@@ -110,6 +111,7 @@ async function taskNew(c: LedgerCli): Promise<Result> {
   c.requireManager(project, "建任务");
   const kind = c.need("kind") as TaskKind;
   if (!TASK_KINDS.includes(kind)) throw new LedgerError("invalid", `--kind 只能是 ${TASK_KINDS.join(" / ")}`);
+  checkTaskRefs(c.p.flags);
   const fields = fieldsFrom(c, TASK_FLAGS);
   const r = createTask(c.db, c.ctx(), { ...fields, project, id: c.p.pos[1] ?? "", title: c.need("title"), kind } as never);
   const link = r.row.agent ? await linkRegistry(c, r.row.agent, r.row.title) : {};
@@ -128,6 +130,7 @@ async function taskSet(c: LedgerCli): Promise<Result> {
   }
   const rev = intFlag(c.p, "rev");
   if (rev === undefined) throw new LedgerError("invalid", "改任务要带 --rev（show 里看当前 rev）");
+  checkTaskRefs(c.p.flags);
   const r = setTask(c.db, c.ctx(), { id: cur.id, rev, patch: fieldsFrom(c, TASK_FLAGS) as never });
   // dedup 重试：上次是否改了执行者看不出来，只要这次带了 --agent 就再挂一次（幂等）
   const relink = r.row.agent && (r.duplicate ? c.p.flags.agent !== undefined : r.row.agent !== cur.agent);
@@ -156,6 +159,7 @@ function deliverCmd(c: LedgerCli): Result {
   const moveFrom = c.p.flags.from === undefined ? undefined : stageFlag(c, "from");
   // 证据 / 结论只收路径：它们会进 bridge 通知和审查员 prompt（lib/quote-text.ts pathLike）
   if (c.p.flags.evidence !== undefined && !pathLike(c.p.flags.evidence)) throw new LedgerError("invalid", PATH_ONLY("--evidence"));
+  checkTaskRefs({ head: c.p.flags.head });
   const r = deliver(c.db, c.ctx(), { taskId: task.id, headSHA: c.p.flags.head, evidence: c.p.flags.evidence, text: c.p.flags.text, moveFrom });
   return { ok: true, task: r.row, event: r.event, duplicate: r.duplicate };
 }
@@ -167,8 +171,10 @@ function review(c: LedgerCli): Result {
   if (Object.values(counts).some((v) => v === undefined)) throw new LedgerError("invalid", "要带 --p0 --p1 --p2（没有就写 0）");
   if (c.p.flags.path !== undefined && !pathLike(c.p.flags.path)) throw new LedgerError("invalid", PATH_ONLY("--path"));
   const move = c.p.flags.to === undefined ? undefined : { from: "review" as const, to: stageFlag(c, "to") };
+  const verdict = c.need("verdict");
+  if (move?.to === "merge") checkMergeGate(c, task, verdict);
   const r = recordReview(c.db, c.ctx(), {
-    taskId: task.id, reviewer: c.need("reviewer"), verdict: c.need("verdict") as never, ...(counts as { p0: number; p1: number; p2: number }),
+    taskId: task.id, reviewer: c.need("reviewer"), verdict: verdict as never, ...(counts as { p0: number; p1: number; p2: number }),
     path: c.p.flags.path, text: c.p.flags.text, move,
   });
   return { ok: true, task: r.row, event: r.event, duplicate: r.duplicate };

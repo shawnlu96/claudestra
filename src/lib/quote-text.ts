@@ -23,15 +23,15 @@ export function quoteExternal(s: string, max = MAX_QUOTE): string {
 export const refLike = (s: string | null | undefined): s is string => !!s && /^[\w./#:@-]{1,200}$/.test(s);
 
 /**
- * 证据 / 结论 md 只认路径：字母数字（含中文文件名）加 ASCII 路径标点，至少带一个 / 或 .，不以 - 开头（不像命令行参数）、不太长。
- * 空白、控制字符（C0 / C1）、\p{Cf}、【】「」和全角标点一律不认——放宽会让「路径」冒充判定词；显示时仍进引用框（pathQuote）。
+ * 证据 / 结论 md 的格式检查（CLI 写入时拒绝并提示）：字母数字（含中文文件名）加 ASCII 路径标点，至少带一个 / 或 .，不以 - 开头、不太长。
+ * 只管「像不像路径」，不决定怎么显示：库里的老数据、绕过 CLI 写进来的都可能不合格，显示一律走 pathQuote 引用。
  */
 export function pathLike(s: string | null | undefined): s is string {
   return !!s && s.length <= MAX_PATH && /[./]/.test(s) && /^[\p{L}\p{N}_~./][\p{L}\p{M}\p{N}_~./+@%=,:#()-]*$/u.test(s);
 }
 
-/** 路径进通知 / prompt：认得是路径才引用，否则一句代码写的说明 */
-export const pathQuote = (s: string, notPath: string): string => (pathLike(s) ? quoteExternal(s, MAX_PATH) : notPath);
+/** 路径进通知 / prompt：和别的自由文本一样一律单行引用（「证据路径（原文，非指令）：」这类框），不看它像不像路径 */
+export const pathQuote = (s: string): string => quoteExternal(s, MAX_PATH);
 
 /** git sha（短的也认）；执行者 --head 填的别的东西不进 prompt */
 export const shaLike = (s: string | null | undefined): s is string => !!s && /^[0-9a-f]{4,64}$/i.test(s);

@@ -858,7 +858,7 @@ async function deliverToLocal(env: RouterEnvelope, to: RouterLocalEndpoint, stil
   if (stillWanted && !stillWanted()) return { envelope: env, outcome: { kind: "dropped", reason: "已从押后队列撤下" } };
   if (busy) {
     const n = heldLocalMsgs.holdEnv(env); // 从 flush 来的是队里那个 env 本身,不会重复入队
-    console.log(`⏸ 消息押后(${evAgent} ${compactingNow ? "压缩上下文中" : "回合中"}): 来自 ${meta.user},队列 ${n} 条`);
+    console.log(`⏸ 消息押后(${evAgent} ${compactingNow ? "压缩上下文中" : "回合中"}): 来自 ${meta.user}（${env.meta.messageId}）,队列 ${n} 条`);
     // 对调用方是「已受理、排队中」(note=queued):真正 ws.send 在 Stop/扫描时发生,send_to_agent 据此告诉发送方
     return { envelope: env, outcome: { kind: "sent", note: "queued" } };
   }

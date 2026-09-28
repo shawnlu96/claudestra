@@ -135,6 +135,21 @@ describe("flushHeld", () => {
     expect(seen).toEqual(["c-me:a"]);
   });
 
+  test("送达日志带来源和 messageId：班子通知记 bridge:ledger，能和 team-router 的 📮 行对上", async () => {
+    const ledger = item("n");
+    ledger.env = { ...ledger.env, from: { kind: "bridge", label: "ledger" }, meta: { ...ledger.env.meta, messageId: "ledger-12-agent-me" } };
+    const h = harness([item("a"), ledger]);
+    const logs: string[] = [];
+    const orig = console.log;
+    console.log = (...a: unknown[]) => void logs.push(a.join(" "));
+    try {
+      await flushHeld(h.deps, "c-me", "stop");
+    } finally {
+      console.log = orig;
+    }
+    expect(logs).toEqual(["▶️ 押后消息投递(stop): agent-codex → agent-me（m-a）", "▶️ 押后消息投递(stop): bridge:ledger → agent-me（ledger-12-agent-me）"]);
+  });
+
   test("投递报错：留在队里、不 touch，后面的照投；结束后释放频道锁", async () => {
     const h = harness([item("bad"), item("good")]);
     h.deps.deliver = async (env) => {
