@@ -133,5 +133,6 @@ export function commandStdoutLine(raw: string): string | null | undefined {
   if (!m) return undefined;
   const body = stripAnsi(m[1]).trim();
   if (!body || body === "(no content)") return null;
-  return body.length > 200 ? body.slice(0, 200) + "…" : body;
+  const chars = Array.from(body); // 按码点截：slice 会把 emoji 的代理对切成半个
+  return chars.length > 200 ? chars.slice(0, 200).join("") + "…" : body;
 }

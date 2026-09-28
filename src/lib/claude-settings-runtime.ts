@@ -21,11 +21,12 @@ export function nonClaudeRuntimeError(agentParam: string, regs: readonly Registr
 }
 
 /**
- * 模型名会拼进注入 TUI 的那一行（CC 的 `/model <x>`、Pi 的 `/claudestra-model <x>`）：只许 id 字符。
- * 控制字符（\r \n \t…）单独再拒一次——将来有人放宽字符集，换行也漏不进去，漏进去就是替 owner 多敲一行。
+ * 模型名会拼进注入 TUI 的那一行（CC 的 `/model <x>`、Pi 的 `/claudestra-model <x>`）和启动命令：只许 id 字符，
+ * 首字符是字母或数字（挡 `-x` 被当 flag、`/x` 像命令），最长 128。控制字符（\r \n \t…）单独再拒一次——
+ * 将来有人放宽字符集，换行也漏不进去，漏进去就是替 owner 多敲一行。
  */
 export function isSafeModelArg(m: string): boolean {
-  return !/\p{Cc}/u.test(m) && /^[A-Za-z0-9._\/@:-]+$/.test(m);
+  return !/\p{Cc}/u.test(m) && /^[A-Za-z0-9][A-Za-z0-9._\/@:-]{0,127}$/.test(m);
 }
 
 /** claude-settings 入参 → 给人看的 400 原因，合法 → null。effort 接受 runtime-only 档（ultracode 就是「this session only」语义） */

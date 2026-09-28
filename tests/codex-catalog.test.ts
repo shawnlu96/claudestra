@@ -68,11 +68,12 @@ describe("validateCodexChoice", () => {
   });
   test("值会进启动命令：非法字符和未知档位在目录拉不到时也拦", () => {
     expect(validateCodexChoice(null, { model: "a;rm", effort: "", targetModel: null })).toContain("非法");
-    for (const model of ["gpt-x\r/clear", "gpt-x\nrm", "gpt-x\t", "gpt x"]) {
+    for (const model of ["gpt-x\r/clear", "gpt-x\nrm", "gpt-x\t", "gpt x", "-gpt", ".gpt", "a".repeat(129)]) {
       expect([model, validateCodexChoice(null, { model, effort: "", targetModel: null })]).toEqual([model, "model 含非法字符"]);
     }
     expect(validateCodexChoice(null, { model: "", effort: "turbo", targetModel: null })).toContain("未知");
     expect(validateCodexChoice(null, { model: "gpt-x", effort: "high", targetModel: "gpt-x" })).toBeNull();
+    expect(validateCodexChoice(null, { model: "a".repeat(128), effort: "", targetModel: null })).toBeNull();
   });
 });
 

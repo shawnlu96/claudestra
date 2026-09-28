@@ -17,7 +17,7 @@ import { existsSync, readdirSync, statSync } from "fs";
 import { open as fsOpen } from "fs/promises";
 import { join } from "path";
 import { projectJsonlPath, findJsonlBySessionId } from "./jsonl-cost.js";
-import { agentArchiveDir, ARCHIVE_ROOT } from "./session-archive.js";
+import { agentArchiveDir, ARCHIVE_ROOT, realpathWithin } from "./session-archive.js";
 import { channelBodyText, commandRecordLine, commandStdoutLine } from "./inbound-body.js";
 import { sanitizeComponents } from "./history-components.js";
 
@@ -316,7 +316,7 @@ export async function listAgentSessions(
   if (archiveDir && existsSync(archiveDir)) {
     try {
       for (const f of readdirSync(archiveDir)) {
-        if (!f.endsWith(".jsonl")) continue;
+        if (!f.endsWith(".jsonl") || !realpathWithin(join(archiveDir, f), archiveDir)) continue; // 指到目录外的符号链接不读
         const sid = f.replace(/\.jsonl$/, "");
         const s = summarize(sid, "archive", join(archiveDir, f));
         if (s) byId.set(sid, s);

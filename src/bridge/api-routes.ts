@@ -45,13 +45,14 @@ import { loadJobs } from "../cron.js";
 import { HYGIENE_JOB_NAME, HYGIENE_FREQS, freqOfSchedule, hygienePrompt, mem0McpConfigured, type HygieneFreq } from "../lib/memory-hygiene.js";
 import { readConfig as readAppConfig, setAutoCompact } from "../lib/config-store.js";
 import { readRegistryAgents } from "../lib/registry.js";
-import { claudeSwitchInputError, nonClaudeRuntimeError } from "../lib/claude-settings-runtime.js";
+import { claudeSwitchInputError, isSafeModelArg, nonClaudeRuntimeError } from "../lib/claude-settings-runtime.js";
 import { collectSessions, visibleSessions } from "./sessions-inventory.js";
 import { readPiRuntimeSnapshot } from "../lib/pi-env.js";
 import { findSessionJsonlBySessionId } from "../lib/session-source.js";
 import { cleanupBgJob } from "../lib/bg-jobs.js";
 import { emitEvent, getAgentStatus, type EventFilter, isBusyStatus } from "./event-bus.js";
 import { listAgentSessions, readSessionHistory, isValidSessionId, isValidSubagentId } from "../lib/session-history.js";
+import { ARCHIVE_ROOT, realpathWithin } from "../lib/session-archive.js";
 import { formatTool, formatToolDetail, agentNameForChannel } from "./jsonl-watcher.js";
 import { newThreadId, type Envelope, type ApiUserEndpoint } from "./router.js";
 // additive 端点（interrupt/clear/answer/pending/create/lifecycle）复用的共享 helper。
@@ -83,7 +84,7 @@ import { handlePeersRoutes } from "./peers-routes.js";
 import { agentListExtras, handleAgentInfoRoutes } from "./agent-info-routes.js";
 import { refuseUnconfirmedSubSession } from "./subsession-guard.js";
 import { sseEventAllow } from "./ledger-feed.js";
-import { firstFlagLikeField } from "../lib/flag-like.js";
+import { controlCharError, firstControlCharField, firstFlagLikeField } from "../lib/flag-like.js";
 import { handleRuntimeSettingsRoutes } from "./runtime-settings-routes.js";
 import { trackInboundHandoff } from "./handoff-tracker.js";
 import { authenticateApi } from "./api-auth.js";
@@ -106,6 +107,8 @@ function isPathSafeName(x: string): boolean {
 
 // master 不在 registry，从 env 读其控制频道 id（各端点的 master 特判用）
 const CONTROL_CHANNEL_ID = process.env.CONTROL_CHANNEL_ID || "";
+/** cron 的 prompt 到点原样敲进目标 agent 的 TUI（src/cron.ts，不带来源头）：新建 / 编辑同斜杠直通只认 owner 本人（api-slash.ts） */
+const CRON_OWNER_ONLY = "creating or editing cron jobs requires the owner's own credential";
 
 // ── API 会话状态（v2.6.0+，原 bridge.ts Phase B 区块） ──────────────────
 
@@ -747,7 +750,6 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
     })());
     if (kind === "agent") {
       const { readRegistryAgents } = await import("../lib/registry.js");
-      const { ARCHIVE_ROOT } = await import("../lib/session-archive.js");
       const norm = (x: unknown) => String(x || "").replace(/^agent-/, "");
       const info = (await readRegistryAgents()).find((r) => norm(r.name) === norm(rid));
       const sid = String(meta?.sessionId || (info as any)?.sessionId || "");
@@ -1000,7 +1002,6 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
 
     const { readRegistryAgents } = await import("../lib/registry.js");
     const { readdirSync } = await import("fs");
-    const { ARCHIVE_ROOT } = await import("../lib/session-archive.js");
     // scope 内的候选 agent：registry 全量 + 归档目录（已删 agent）+ master（须显式 scope）
     const regAgents = await readRegistryAgents();
     const regMap = new Map(regAgents.map((a) => [a.name, a]));
@@ -1177,7 +1178,9 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
     if (subagent) {
       if (!isValidSubagentId(subagent)) return apiJson(400, { ok: false, error: "invalid subagent id" });
       file = `${found.path.replace(/\.jsonl$/, "")}/subagents/${subagent}.jsonl`;
-      if (!existsSync(file)) return apiJson(404, { ok: false, error: `subagent "${subagent}" not found in session` });
+      // 归档里的子 agent 目录是符号链接、指到归档根外面 → 当它不存在（lib/session-archive.ts realpathWithin）
+      const escapes = found.source === "archive" && !realpathWithin(file, ARCHIVE_ROOT);
+      if (escapes || !existsSync(file)) return apiJson(404, { ok: false, error: `subagent "${subagent}" not found in session` });
     }
     const limitRaw = Number(url.searchParams.get("limit") || 100);
     const beforeRaw = url.searchParams.get("before");
@@ -1701,6 +1704,10 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
     // 自由文本不会被当成 flag（manager/create-args.ts 注释：曾可用 purpose 替换整个命令黑名单）。
     const flagLike = firstFlagLikeField({ name, dir, project, model, effort });
     if (flagLike) return apiJson(400, { ok: false, error: `${flagLike} 不能以 "-" 开头` });
+    // purpose / model 拼进启动命令后经 send-keys 敲进 shell：控制字符能丢掉整行再执行后半段（lib/flag-like.ts）
+    const ctrl = firstControlCharField({ name, dir, purpose, model, effort, project });
+    if (ctrl) return apiJson(400, { ok: false, error: controlCharError(ctrl) });
+    if (model && !isSafeModelArg(model)) return apiJson(400, { ok: false, error: "model 含非法字符" });
     const createArgs = ["create", name, dir];
     if (purpose) createArgs.push("--purpose", purpose);
     if (model) createArgs.push("--model", model);
@@ -1866,8 +1873,11 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
       });
     }
     if (path === "/cron" && req.method === "POST") {
+      if (!isOwnerPrincipal(principal)) return forbidden(CRON_OWNER_ONLY);
       const body: any = await readJsonBody(req);
       if (body === INVALID_JSON) return invalidJsonBody();
+      const ctrl = firstControlCharField(body);
+      if (ctrl) return apiJson(400, { ok: false, error: controlCharError(ctrl) });
       const name = String(body?.name ?? "").trim();
       const schedule = String(body?.schedule ?? "").trim();
       const prompt = String(body?.prompt ?? "").trim();
@@ -1889,8 +1899,11 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
       if (action === "toggle") r = await runManager("cron-toggle", id);
       else if (action === "remove") r = await runManager("cron-remove", id);
       else {
+        if (!isOwnerPrincipal(principal)) return forbidden(CRON_OWNER_ONLY);
         const body: any = await readJsonBody(req);
         if (body === INVALID_JSON) return invalidJsonBody();
+        const ctrl = firstControlCharField(body);
+        if (ctrl) return apiJson(400, { ok: false, error: controlCharError(ctrl) });
         const flags: string[] = [];
         if (body?.schedule) flags.push("--schedule", String(body.schedule));
         if (body?.prompt) flags.push("--prompt", String(body.prompt));

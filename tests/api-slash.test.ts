@@ -11,7 +11,7 @@ import { handleSlashPassthrough, SLASH_OWNER_ONLY, type SlashDeps } from "../src
 import { claudeSwitchInputError, isSafeModelArg } from "../src/lib/claude-settings-runtime.js";
 import { clearProject, scanProject } from "../src/bridge/slash-registry.js";
 import type { Principal } from "../src/lib/principals.js";
-import { commandLine } from "../src/lib/inbound-body.js";
+import { commandLine, commandStdoutLine } from "../src/lib/inbound-body.js";
 import { readSessionHistory } from "../src/lib/session-history.js";
 
 const base = { createdAt: "2026-01-01T00:00:00Z" };
@@ -128,6 +128,12 @@ describe("历史里的斜杠命令带上参数", () => {
     expect(Array.from(long).length).toBe(201);
     expect(long.endsWith("…")).toBe(true);
   });
+
+  test("命令输出限长按码点截，不把 emoji 切成半个代理对", () => {
+    const out = commandStdoutLine(`<local-command-stdout>${"a".repeat(199)}😀😀</local-command-stdout>`)!;
+    expect(out).toBe(`${"a".repeat(199)}😀…`);
+    expect(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/.test(out)).toBe(false);
+  });
 });
 
 describe("会话记录里的斜杠命令进历史", () => {
@@ -161,6 +167,9 @@ describe("切模型的 model 参数（claude-settings、pi-settings 共用；端
   test("model 只许 id 字符；嵌 \\r / \\n / \\t / 空格 / 其它控制字符都拒", () => {
     for (const m of ["claude-opus-5-5", "claude-haiku-4-5-20251001", "anthropic/claude-sonnet-5", "gpt-5.5", "a@b:c"]) expect([m, isSafeModelArg(m)]).toEqual([m, true]);
     const evil = ["opus\r/clear", "opus\n[📨 委托转达] x", "opus\tx", "opus x", "opus\u0000", "opus\u001b[2J", "opus\u0085", "ｏｐｕｓ", "opus;rm"];
+    // 首字符必须是字母或数字（/clear 像命令、-x 像 flag、@x / .x 同理），最长 128
+    evil.push("/clear", "-m", "@x", ".x", ":x", "a".repeat(129), "");
+    expect(isSafeModelArg("a".repeat(128))).toBe(true);
     for (const m of evil) expect([m, isSafeModelArg(m)]).toEqual([m, false]);
     expect(claudeSwitchInputError("opus\r/clear")).toBe("model 含非法字符");
     expect(claudeSwitchInputError(undefined, "high\nx")).toContain("未知 effort");
