@@ -13,7 +13,9 @@ const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 const MIME: Record<string, string> = {
   png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif", webp: "image/webp", heic: "image/heic", heif: "image/heif",
   bmp: "image/bmp", avif: "image/avif", svg: "image/svg+xml", pdf: "application/pdf",
-  txt: "text/plain; charset=utf-8", log: "text/plain; charset=utf-8", json: "application/json",
+  txt: "text/plain; charset=utf-8", log: "text/plain; charset=utf-8", json: "application/json; charset=utf-8",
+  md: "text/markdown; charset=utf-8", markdown: "text/markdown; charset=utf-8", csv: "text/csv; charset=utf-8",
+  // html 故意不在表里（octet-stream + nosniff）：同源直出会执行脚本；网页端按扩展名把它当源码文本显示（web/lib/chat/attachment-open.ts）
 };
 
 export function attachmentMime(filename: string): string {

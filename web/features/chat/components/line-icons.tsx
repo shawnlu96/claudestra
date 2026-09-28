@@ -42,6 +42,53 @@ export const FolderIcon = (p: IconProps) => (
   </Svg>
 );
 
+/** lucide paperclip */
+export const PaperclipIcon = (p: IconProps) => (
+  <Svg {...p}>
+    <path d="m16 6-8.414 8.586a2 2 0 0 0 2.829 2.829l8.414-8.586a4 4 0 1 0-5.657-5.657l-8.379 8.551a6 6 0 1 0 8.485 8.485l8.379-8.551" />
+  </Svg>
+);
+
+/** lucide x */
+export const XIcon = (p: IconProps) => (
+  <Svg {...p}>
+    <path d="M18 6 6 18" />
+    <path d="m6 6 12 12" />
+  </Svg>
+);
+
+/** lucide copy */
+export const CopyIcon = (p: IconProps) => (
+  <Svg {...p}>
+    <rect width="14" height="14" x="8" y="8" rx="2" ry="2" />
+    <path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2" />
+  </Svg>
+);
+
+/** lucide check */
+export const CheckIcon = (p: IconProps) => (
+  <Svg {...p}>
+    <path d="M20 6 9 17l-5-5" />
+  </Svg>
+);
+
+/** lucide share */
+export const ShareIcon = (p: IconProps) => (
+  <Svg {...p}>
+    <path d="M12 2v13" />
+    <path d="m16 6-4-4-4 4" />
+    <path d="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8" />
+  </Svg>
+);
+
+/** lucide file */
+export const FileIcon = (p: IconProps) => (
+  <Svg {...p}>
+    <path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z" />
+    <path d="M14 2v4a2 2 0 0 0 2 2h4" />
+  </Svg>
+);
+
 /** 菜单里按名字取的图标（名字由 ../agent-menu.ts 的纯函数给出，它不能依赖 React） */
 const MENU_ICONS: Record<LineIconName, (p: IconProps) => ReactNode> = {
   "folder-open": FolderOpenIcon,

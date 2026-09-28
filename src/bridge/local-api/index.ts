@@ -6,6 +6,7 @@
 import type { Principal } from "../../lib/principals.js";
 import { handleAccessPaths } from "./access.js";
 import { handleAgentPrefs } from "./agent-prefs.js";
+import { handleAsksApi } from "./asks.js";
 import { handleAttachments } from "./attachments.js";
 import { handleClientLog } from "./client-log.js";
 import { handleControl } from "./control.js";
@@ -24,13 +25,13 @@ import { versionResponse } from "./version.js";
 /** GET /api/v1/capabilities 的 features 里报的名字（前端按名字判某能力在不在） */
 export const LOCAL_API_FEATURES = [
   "version", "settings", "profile", "agent-settings", "hidden-messages", "skill-prefs", "transcribe", "client-log", "host-open", "attachments",
-  "control", "handoff", "mission", "access-paths", "skill-library", "ledger", "quota", "last-seen", "media",
+  "control", "handoff", "mission", "access-paths", "skill-library", "ledger", "quota", "last-seen", "asks", "media",
 ];
 
 type Family = (req: Request, path: string, principal: Principal, url: URL) => Promise<Response | null> | Response | null;
 const FAMILIES: Family[] = [
   handleSettings, handleAgentPrefs, handleTranscribe, handleClientLog, handleHost, handleAttachments, handleControl, handleHandoff, handleMissionApi,
-  handleAccessPaths, handleSkillLibrary, handleLedgerApi, handleQuotaApi, handleLastSeen, handleMedia,
+  handleAccessPaths, handleSkillLibrary, handleAsksApi, handleLedgerApi, handleQuotaApi, handleLastSeen, handleMedia,
 ];
 
 export async function handleLocalApi(req: Request, url: URL, principal: Principal): Promise<Response | null> {

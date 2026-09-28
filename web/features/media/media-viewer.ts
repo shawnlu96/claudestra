@@ -10,6 +10,7 @@ import type PhotoSwipe from "photoswipe";
 import type { SlideData } from "photoswipe";
 import { selfIds } from "@/lib/api/history";
 import { listMedia, mediaRawUrl, type MediaCursor, type MediaItem, type MediaPage, type MediaQuery } from "@/lib/api/media";
+import { shareFile } from "../chat/attachment-share";
 import { fetchAuthBlob, saveBlob } from "../chat/components/auth-img";
 import { fmtTs } from "../chat/fmt-time";
 import { placePage, wantsDisplayVariant, whoLabel } from "./media-logic";
@@ -57,14 +58,10 @@ const SPINNER = '<div class="flex h-full w-full items-center justify-center"><sp
 export async function shareOrSave(url: string, name: string): Promise<void> {
   try {
     const blob = await fetchAuthBlob(url);
-    const file = new File([blob], name || "image.png", { type: blob.type || "image/png" });
-    if (navigator.canShare?.({ files: [file] })) {
-      await navigator.share({ files: [file] });
-      return;
-    }
-    saveBlob(blob, file.name);
+    // 与气泡里的文件 chip 共用系统分享（../chat/attachment-share）；不支持就下载原图
+    if ((await shareFile(blob, name || "image.png")) === "unsupported") saveBlob(blob, name || "image.png");
   } catch {
-    /* 用户取消分享面板也会 throw；取不到原图时查看器里什么也不做，不弹错 */
+    /* 取不到原图时查看器里什么也不做，不弹错：图正显示着，多半是缓存被清，关掉重开即可 */
   }
 }
 

@@ -1,39 +1,54 @@
 "use client";
-import { useState } from "react";
+import { useRef, useState } from "react";
 import type { ChatAttachmentView, ChatMessage } from "../type";
 import type { MediaItem } from "@/lib/api/media";
 import { useT } from "@/lib/i18n";
 import { ATTACHMENT_API, isApiUrl } from "@/lib/chat/attachments";
 import { useChatStoreApi } from "../chat-store";
 import { openMediaViewer, openStaticViewer } from "../../media/media-viewer";
-import { AuthImg, fetchAuthBlob, saveBlob } from "./auth-img";
+import { AuthImg } from "./auth-img";
+import { AttachmentPreview, openAttachment, type PreviewState } from "./attachment-preview";
+import { PaperclipIcon } from "./line-icons";
 
-/* 气泡里的附件回显：图片缩略图（点开进大图查看器）/ 文件 chip。
+/* 气泡里的附件回显：图片缩略图（点开进大图查看器）/ 文件 chip（文本预览、手机分享、桌面下载）。
    附件在 bridge 的 /api/v1/attachments/<name>，要带设备凭据取（AuthImg 先 fetch 成 blob 再渲染；下载同理），token 永不进 URL。 */
 
-/** 附件文件 chip（非图片 / 图片加载失败的降级）。有 url 可点击下载。 */
+/** 附件文件 chip（非图片 / 图片加载失败的降级）。有 url 可点开：怎么打开见 ./attachment-preview.tsx */
 function FileChip({ a }: { a: ChatAttachmentView }) {
+  const [layer, setLayer] = useState<PreviewState | null>(null);
+  const [busy, setBusy] = useState(false);
+  const seq = useRef(0); // 每次点开 / 关闭 +1：关掉之后才到的结果不再把层弹回来
   const cls =
     "flex max-w-[220px] items-center gap-2 rounded-[12px] border border-base-content/10 bg-base-300 px-3 py-2 text-[12.5px] text-base-content/80";
   if (!a.url) {
     return (
       <span title={a.name} className={cls}>
-        📎 <span className="truncate">{a.name}</span>
+        <PaperclipIcon size={14} className="shrink-0 opacity-70" /> <span className="truncate">{a.name}</span>
       </span>
     );
   }
   const url = a.url;
-  const download = (e: React.MouseEvent) => {
+  const open = (e: React.MouseEvent) => {
     if (!isApiUrl(url)) return; // blob: / data: 的让浏览器自己下
     e.preventDefault();
-    void fetchAuthBlob(url)
-      .then((b) => saveBlob(b, a.name))
-      .catch(() => window.open(url, "_blank")); // 取不到就交给浏览器打开，至少能看到 404 而不是无反应
+    if (busy) return;
+    const mine = ++seq.current;
+    setBusy(true);
+    void openAttachment(url, a.name, (s) => {
+      if (seq.current === mine) setLayer(s);
+    }).finally(() => setBusy(false));
+  };
+  const close = () => {
+    seq.current++;
+    setLayer(null);
   };
   return (
-    <a href={url} download={a.name} title={a.name} className={cls} onClick={download}>
-      📎 <span className="truncate">{a.name}</span>
-    </a>
+    <>
+      <a href={url} download={a.name} title={a.name} aria-busy={busy} className={`${cls} ${busy ? "opacity-60" : ""}`} onClick={open}>
+        <PaperclipIcon size={14} className="shrink-0 opacity-70" /> <span className="truncate">{a.name}</span>
+      </a>
+      {layer && <AttachmentPreview name={a.name} state={layer} onClose={close} />}
+    </>
   );
 }
 

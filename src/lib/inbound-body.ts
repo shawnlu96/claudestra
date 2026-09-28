@@ -94,6 +94,14 @@ const INJECTED_ATTR_RE = /(?:^|\s)(?:api|is_agent)="true"/;
  * 正文里已有整行的附件行（Discord 入口、新 API 入口）就不再按属性补：属性按 ; 拆，文件名带分号会拆出假路径。
  */
 export function channelBodyText(attrs: string, body: string): string {
-  const text = INJECTED_ATTR_RE.test(attrs) ? stripChannelHeader(body) : body.trim();
+  const text = ownerWordsOfAnswer(attrs, INJECTED_ATTR_RE.test(attrs) ? stripChannelHeader(body) : body.trim());
   return (/^\[attachment: [^\]\n]+\]$/m.test(text) ? text : withAttachmentLines(text, channelAttachmentPaths(attrs))).trim();
+}
+
+/**
+ * owner 对「待你处理」的作答（trigger="ask_answer"，bridge/asks.ts answerContent）：第一行是 bridge 给 agent 写的说明，
+ * 历史里只留 owner 发的原文——和网页的乐观气泡、直播回显（web stream-shape）对得上。attrs = <channel …> 的属性串
+ */
+function ownerWordsOfAnswer(attrs: string, text: string): string {
+  return /(?:^|\s)trigger="ask_answer"/.test(attrs) ? text.split("\n").slice(1).join("\n").trim() : text;
 }

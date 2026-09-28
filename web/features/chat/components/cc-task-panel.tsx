@@ -95,7 +95,7 @@ export function CcTaskPanel() {
               >
                 {t.subject}
                 {t.blockedBy.length > 0 && t.status !== "completed" && (
-                  <span className="ml-1.5 text-[10px] text-warning/80">🔒 {tr("待")} #{t.blockedBy.join(" #")}</span>
+                  <span className="ml-1.5 text-[10px] text-warning-soft-80">🔒 {tr("待")} #{t.blockedBy.join(" #")}</span>
                 )}
               </span>
               <span className="shrink-0 font-mono text-[10px] tabular-nums text-base-content/25">#{t.id}</span>
