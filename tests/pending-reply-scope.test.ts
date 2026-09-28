@@ -7,7 +7,10 @@
  * ② 销账不验欠账人，会把别的 agent 的欠账顺手销掉。
  */
 import { describe, test, expect } from "bun:test";
-import { dropPendingsForChannel, hangsInterAgentWatchdog, hangsPendingReply, nudgesForOrigin, ownsPendingReply, pendingKeysOwedBy, type ThreadEnds } from "../src/lib/pending-reply-scope.js";
+import {
+  apiQueueToSettle, dropPendingsForChannel, dropVoidedPendings, takeApiPending, hangsInterAgentWatchdog, hangsPendingReply, nudgesForOrigin, ownsPendingReply,
+  pendingKeysOwedBy, type ThreadEnds,
+} from "../src/lib/pending-reply-scope.js";
 import { pickUnrepliedForNudge } from "../src/lib/reply-nudge.js";
 
 describe("hangsPendingReply", () => {
@@ -178,5 +181,55 @@ describe("hangsInterAgentWatchdog（N7 复核 P2-5）", () => {
     expect(hangsInterAgentWatchdog(false, undefined, true)).toBe(true);
     expect(hangsInterAgentWatchdog(true, undefined, true)).toBe(false);
     expect(hangsInterAgentWatchdog(false, true, true)).toBe(false);
+  });
+});
+
+describe("dropVoidedPendings（T13a adv4：叫停作废的消息不再被催）", () => {
+  const books = () => {
+    const dropped: string[] = [];
+    return {
+      dropped,
+      pendingReplies: new Map<string, { msgId: string; threadId?: string }>([["t1", { msgId: "m1", threadId: "t1" }], ["t2", { msgId: "m2", threadId: "t2" }]]),
+      pendingThreads: new Map<string, unknown>([["t1", {}], ["t2", {}]]),
+      pendingInterAgentMsg: new Map<string, { fromChannelId?: string; ts: number }>([["pi", { ts: 100 }]]),
+      pendingAgentCalls: { dropRequest: (t: string, c: string, id: string) => void dropped.push(`${t}<-${c}:${id}`) },
+    };
+  };
+  test("补答账按 msgId 销、连同 thread；别的欠账不动", () => {
+    const b = books();
+    expect(dropVoidedPendings(b, "pi", [{ messageId: "m1" }], 200)).toBe(1);
+    expect([...b.pendingReplies.keys()]).toEqual(["t2"]);
+    expect([...b.pendingThreads.keys()]).toEqual(["t2"]);
+  });
+  test("看门狗：发送方都没频道（非 agent 来源）不算对上；对上且挂在叫停之前才销；回程槽只撤 agent 来源那一条", () => {
+    const b = books();
+    dropVoidedPendings(b, "pi", [{ messageId: "m9" }], 200);
+    expect(b.pendingInterAgentMsg.has("pi")).toBe(true); // undefined === undefined 不能当成同一个发送方
+    b.pendingInterAgentMsg.set("pi", { fromChannelId: "ag", ts: 300 });
+    dropVoidedPendings(b, "pi", [{ messageId: "m8", agentChannel: "ag" }], 200);
+    expect(b.pendingInterAgentMsg.has("pi")).toBe(true); // 叫停之后才挂的是新请求
+    expect(dropVoidedPendings(b, "pi", [{ messageId: "m7", agentChannel: "ag" }], 300)).toBe(1);
+    expect(b.pendingInterAgentMsg.has("pi")).toBe(false);
+    expect(b.dropped).toEqual(["pi<-ag:m8", "pi<-ag:m7"]);
+  });
+});
+
+describe("takeApiPending（adv5：作废回显不能认领同一 token 的别的请求）", () => {
+  test("普通回复先来先答；带 inReplyTo 只认那一条，对不上谁也不认", () => {
+    const q = [{ messageId: "sync1", n: 1 }, { messageId: "c3", n: 2 }, { n: 3 }];
+    expect(takeApiPending(q, "c3")?.n).toBe(2);
+    expect(takeApiPending(q, "gone")).toBeUndefined();
+    expect(q.map((p) => p.n)).toEqual([1, 3]);
+    expect(takeApiPending(q)?.n).toBe(1);
+  });
+});
+
+describe("apiQueueToSettle（adv5 P2-1：Pi 叫停引起的那次 Stop 不结停字自己的同步等待）", () => {
+  test("skip 里的留在队里，其余拿走去结；都拿走了就删 key", () => {
+    const qs = new Map<string, { messageId?: string }[]>([["tok|pi", [{ messageId: "other" }, { messageId: "stop" }, {}]]]);
+    expect(apiQueueToSettle(qs, "tok|pi", new Set(["stop"])).map((p) => p.messageId)).toEqual(["other", undefined]);
+    expect(qs.get("tok|pi")).toEqual([{ messageId: "stop" }]);
+    expect(apiQueueToSettle(qs, "tok|pi", new Set())).toEqual([{ messageId: "stop" }]);
+    expect(qs.has("tok|pi")).toBe(false);
   });
 });

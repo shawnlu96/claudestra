@@ -40,8 +40,8 @@ export interface TeamRouterDeps {
   markBridgeSource?(channelId: string): void;
 }
 
-/** 班子通知的信封特征：deliverToLocal 据此像 agent→agent 消息一样在目标回合中押后 */
-export function isLedgerNotice(env: Envelope): boolean {
+/** 班子通知的信封特征：押后队列送达时据此标「bridge 发的」（回合中押后靠 envelopeOf 的 waitForIdle） */
+function isLedgerNotice(env: Envelope): boolean {
   return env.from.kind === "bridge" && env.from.label === "ledger";
 }
 
@@ -157,7 +157,8 @@ function envelopeOf(n: RouteNotice, channelId: string, client: Client | undefine
     to: { kind: "local", agentName: n.to, channelId, ws: client?.ws as ServerWebSocket<unknown>, cwd: client?.cwd },
     intent: "notification",
     content: n.text,
-    meta: { messageId: n.messageId, triggerKind: "bridge_synth", ts: new Date().toISOString(), threadId: newThreadId() },
+    // waitForIdle：目标主回合在跑就押到 Stop、永不抢占（bridge.ts deliverToLocal 判忙）；不带的话回合开头投进去会被静默丢掉
+    meta: { messageId: n.messageId, triggerKind: "bridge_synth", ts: new Date().toISOString(), threadId: newThreadId(), waitForIdle: true },
   };
 }
 

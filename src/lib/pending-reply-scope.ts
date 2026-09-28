@@ -121,3 +121,63 @@ export function dropPendingsForChannel(
 export function hangsInterAgentWatchdog(sameWs: boolean, skipWatchdog: boolean | undefined, senderRegistered: boolean): boolean {
   return !sameWs && !skipWatchdog && senderRegistered;
 }
+
+/** 叫停时作废的一条请求：它的 messageId，发送方是本地 agent 时再带上它的频道 */
+export interface VoidedRequest {
+  messageId: string;
+  agentChannel?: string;
+}
+
+/** dropVoidedPendings 要动的几本账（字段名就是 bridge.ts 里的变量名：补答账、thread 追踪、inter-agent 看门狗、回程簿） */
+export interface VoidableBooks {
+  pendingReplies: Map<string, { msgId: string; threadId?: string }>;
+  pendingThreads: Map<string, unknown>;
+  pendingInterAgentMsg: Map<string, { fromChannelId?: string; ts: number }>;
+  pendingAgentCalls: { dropRequest(target: string, caller: string, messageId: string): void };
+  /** API 请求队列（bridge/pi-abort.ts holdStopWait 看停字自己有没有在同步等待） */
+  pendingApiRequests?: Map<string, ApiWait[]>;
+}
+
+/**
+ * Pi 叫停时作废的消息（bridge/pi-abort.ts）从账上销掉，返回销掉几条。发送方已被告知「不会执行」，补 reply 拦截或看门狗再催 Pi 处理它
+ * 就自相矛盾，还会把刚停住的 Pi 拉起来。补答账按 msgId 认（连同它的 thread）；看门狗以接收方频道为 key、只记最后一个发送方，
+ * 只在它就是作废消息的 agent、且挂在叫停之前时销（叫停之后它又发来的是新请求）；回程槽只撤这一条。tests/pending-reply-scope.test.ts。
+ */
+export function dropVoidedPendings(books: VoidableBooks, channelId: string, voided: readonly VoidedRequest[], abortAt: number): number {
+  const ids = new Set(voided.map((v) => v.messageId));
+  let n = 0;
+  for (const [key, p] of books.pendingReplies) {
+    if (!ids.has(p.msgId) || !books.pendingReplies.delete(key)) continue;
+    if (p.threadId) books.pendingThreads.delete(p.threadId);
+    n++;
+  }
+  const w = books.pendingInterAgentMsg.get(channelId);
+  const bySender = voided.some((v) => !!v.agentChannel && v.agentChannel === w?.fromChannelId);
+  if (w && bySender && w.ts <= abortAt && books.pendingInterAgentMsg.delete(channelId)) n++;
+  for (const v of voided) if (v.agentChannel) books.pendingAgentCalls.dropRequest(channelId, v.agentChannel, v.messageId);
+  return n;
+}
+
+/**
+ * 出站回复认领挂着的哪条 API 请求（队列按 token + agent 频道分）：普通回复先来先答；带 inReplyTo 的（作废回显）只认它回的那一条，
+ * 对不上就谁也不认——按先来先答会把「你那条已作废」塞给同一 token 在等的另一条同步请求，那条自己的等待反而拿到空结果（adv5）。
+ */
+export function takeApiPending<T extends { messageId?: string }>(queue: T[], inReplyTo?: string): T | undefined {
+  if (!inReplyTo) return queue.shift();
+  const k = queue.findIndex((p) => p.messageId === inReplyTo);
+  return k >= 0 ? queue.splice(k, 1)[0] : undefined;
+}
+
+type ApiWait = { messageId?: string; waitUntil?: number; resolve?: unknown };
+
+/**
+ * Stop 兜底收尾要结掉的 API 请求（从账上拿走），skip 里的留在队里：Pi 叫停引起的那次 Stop 不结停字自己的同步等待，
+ * 留给停字那一轮去答（adv5 P2-1，bridge/pi-abort.ts stopWaitIds）。
+ */
+export function apiQueueToSettle<T extends ApiWait>(queues: Map<string, T[]>, key: string, skip: ReadonlySet<string>): T[] {
+  const q = queues.get(key) ?? [];
+  const keep = q.filter((p) => !!p.messageId && skip.has(p.messageId));
+  if (keep.length) queues.set(key, keep);
+  else queues.delete(key);
+  return q.filter((p) => !keep.includes(p));
+}

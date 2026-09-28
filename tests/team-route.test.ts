@@ -8,7 +8,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { beforeEach, describe, expect, test } from "bun:test";
 import { makeSender, teamRouterTicker } from "../src/bridge/team-router.js";
-import type { Delivery, Envelope } from "../src/bridge/router.js";
+import { isHumanRequest, type Delivery, type Envelope } from "../src/bridge/router.js";
 import { LedgerReader } from "../src/lib/ledger-read.js";
 import { closeLedger, getMeta, getTask, listEvents, openLedger } from "../src/lib/ledger-store.js";
 import { appendEvent, createTask, deliver, moveStage, recordReview, setMeta } from "../src/lib/ledger-write.js";
@@ -408,5 +408,11 @@ describe("makeSender：送达才标消息来源；没送到进押后队列", () 
     expect([...busy.marked, ...queued.marked]).toEqual([]);
     expect(busy.held).toHaveLength(1);
     expect(queued.held).toHaveLength(0); // deliverToLocal 自己押了
+  });
+  test("班子通知带 waitForIdle：deliverToLocal 在目标回合中押后、永不抢占（不带会在回合开头被静默丢掉）", async () => {
+    const busy = deps({ kind: "sent" }, true);
+    await busy.send(notice, "c-pm");
+    expect(busy.held[0]).toMatchObject({ intent: "notification", from: { kind: "bridge", label: "ledger" }, meta: { waitForIdle: true } });
+    expect(isHumanRequest(busy.held[0])).toBe(false);
   });
 });
