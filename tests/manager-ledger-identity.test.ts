@@ -70,10 +70,16 @@ describe("保留名 owner / master", () => {
 });
 
 describe("写命令判定（认主守卫 + 命令级写锁）", () => {
-  test("ledger 的读子命令放行，其余全算写（含 meta）", () => {
+  test("ledger 的读子命令放行，其余全算写", () => {
     for (const sub of ["", "help", "whoami", "show", "export"]) expect(isWriteInvocation("ledger", [sub].filter(Boolean))).toBe(false);
-    for (const sub of ["item-new", "task-new", "task-set", "stage", "note", "deliver", "review", "decision", "deploy", "verify", "rollback", "freeze", "unfreeze", "meta", "import"]) {
+    for (const sub of ["item-new", "task-new", "task-set", "stage", "note", "deliver", "review", "decision", "deploy", "verify", "rollback", "freeze", "unfreeze", "import"]) {
       expect(isWriteInvocation("ledger", [sub])).toBe(true);
     }
+  });
+  test("meta：不带 --pms / --docs-dir 是查看（算读，备机不挡）；带了才算写", () => {
+    expect(isWriteInvocation("ledger", ["meta"])).toBe(false);
+    expect(isWriteInvocation("ledger", ["meta", "--project", "p"])).toBe(false);
+    expect(isWriteInvocation("ledger", ["meta", "--pms", "a"])).toBe(true);
+    expect(isWriteInvocation("ledger", ["meta", "--project=p", "--docs-dir=~/d"])).toBe(true);
   });
 });

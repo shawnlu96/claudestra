@@ -16,6 +16,10 @@ import { parseLedgerArgs, resolveActor } from "./ledger-identity.js";
 import { importCmd } from "./ledger-import.js";
 import { READ_CMDS } from "./ledger-read-cmds.js";
 import { WRITE_CMDS, type CommandSpec } from "./ledger-write-cmds.js";
+import { isWriteInvocation } from "./write-commands.js";
+
+/** 认不出身份时读命令用的 actor：不是 registry 键、不在任何 PM 名单里，roleOf 恒为 null */
+export const UNKNOWN_ACTOR = "unknown";
 
 const COMMANDS: Record<string, CommandSpec> = {
   ...WRITE_CMDS,
@@ -42,16 +46,20 @@ export async function runLedger(args: string[], deps: LedgerDeps): Promise<Resul
   }
 }
 
-/** 真实依赖：registry、projects.json、环境里的频道号 → actor */
-async function realDeps(): Promise<LedgerDeps | { error: string }> {
+/**
+ * 真实依赖：registry、projects.json、环境里的频道号 → actor。认不出的频道只许读（actor 记 "unknown"，没有任何角色）；
+ * 读写的划分与 manager 的认主守卫同一张表（write-commands.ts），不另列一份。
+ */
+async function realDeps(args: string[]): Promise<LedgerDeps | { error: string }> {
   const reg = await loadRegistry();
   const who = resolveActor({ channelId: process.env.DISCORD_CHANNEL_ID, controlChannelId: repoEnvVar("CONTROL_CHANNEL_ID") }, reg.agents);
-  if (!who.ok) return { error: who.error };
+  if (!who.ok && isWriteInvocation("ledger", args)) return { error: who.error };
+  const actor = who.ok ? who.actor : UNKNOWN_ACTOR;
   const projects = await readProjects();
   return {
     db: openLedger(),
-    actor: who.actor,
-    actorProject: reg.agents[who.actor]?.projectId,
+    actor,
+    actorProject: reg.agents[actor]?.projectId,
     projectIds: projects.projects.map((x) => x.id),
     loadRegistry,
     saveRegistry,
@@ -60,7 +68,7 @@ async function realDeps(): Promise<LedgerDeps | { error: string }> {
 }
 
 export async function cmdLedger(args: string[]): Promise<void> {
-  const deps = await realDeps();
+  const deps = await realDeps(args);
   if ("error" in deps) return output({ ok: false, code: "forbidden", error: deps.error });
   const r = await runLedger(args, deps);
   output(r);

@@ -7,7 +7,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { closeLedger, getTask, listEvents, openLedger } from "../src/lib/ledger-store.js";
 import { createTask } from "../src/lib/ledger-write.js";
 import type { Registry } from "../src/manager/core.js";
-import { renameLedgerAgent, runLedger } from "../src/manager/ledger.js";
+import { renameLedgerAgent, runLedger, UNKNOWN_ACTOR } from "../src/manager/ledger.js";
 import { expandDocsDir } from "../src/manager/ledger-read-cmds.js";
 
 const P = "claude-orchestrator";
@@ -223,14 +223,30 @@ describe("rename 钩子", () => {
   });
 });
 
-test("沙箱：CLAUDESTRA_STATE_DIR 指到哪，ledger.sqlite 就建在哪", async () => {
-  const state = join(dir, "state");
-  mkdirSync(state);
-  writeFileSync(join(state, "projects.json"), JSON.stringify({ projects: [{ id: "demo", name: "demo", dirs: ["/tmp"], createdAt: "2026-09-28" }] }));
+/** 子进程跑真实的 manager.ts（状态目录指到临时目录）；channelId 不给 = 终端（owner） */
+async function manager(state: string, channelId: string | undefined, ...args: string[]): Promise<Record<string, any>> {
   const env: Record<string, string | undefined> = { ...process.env, CLAUDESTRA_STATE_DIR: state, CLAUDESTRA_RUNTIME_DIR: join(dir, "run") };
-  delete env.DISCORD_CHANNEL_ID;
-  const proc = Bun.spawn([process.execPath, resolve(import.meta.dir, "../src/manager.ts"), "ledger", "item-new", "i01", "--project", "demo", "--title", "沙箱"], { env, stdout: "pipe", stderr: "pipe" });
-  const out = (await new Response(proc.stdout).text()).trim().split("\n").at(-1) ?? "";
-  expect(JSON.parse(out)).toMatchObject({ ok: true, item: { project: "demo", id: "i01" } });
-  expect(existsSync(join(state, "ledger.sqlite"))).toBe(true);
-}, 30_000);
+  if (channelId) env.DISCORD_CHANNEL_ID = channelId;
+  else delete env.DISCORD_CHANNEL_ID;
+  const proc = Bun.spawn([process.execPath, resolve(import.meta.dir, "../src/manager.ts"), "ledger", ...args], { env, stdout: "pipe", stderr: "pipe" });
+  return JSON.parse((await new Response(proc.stdout).text()).trim().split("\n").at(-1) ?? "");
+}
+
+describe("真实入口（子进程）", () => {
+  let state: string;
+  beforeEach(() => {
+    state = join(dir, "state");
+    mkdirSync(state);
+    writeFileSync(join(state, "projects.json"), JSON.stringify({ projects: [{ id: "demo", name: "demo", dirs: ["/tmp"], createdAt: "2026-09-28" }] }));
+  });
+  test("沙箱：CLAUDESTRA_STATE_DIR 指到哪，ledger.sqlite 就建在哪", async () => {
+    expect(await manager(state, undefined, "item-new", "i01", "--project", "demo", "--title", "沙箱")).toMatchObject({ ok: true, item: { project: "demo", id: "i01" } });
+    expect(existsSync(join(state, "ledger.sqlite"))).toBe(true);
+  }, 30_000);
+  test("认不出的频道：读命令放行（actor = unknown、没有角色），写命令拒绝", async () => {
+    expect(await manager(state, "1234567890", "whoami", "--project", "demo")).toMatchObject({ ok: true, actor: UNKNOWN_ACTOR, role: null });
+    expect(await manager(state, "1234567890", "show", "--project", "demo")).toMatchObject({ ok: true, project: "demo" });
+    expect(await manager(state, "1234567890", "meta", "--project", "demo")).toMatchObject({ ok: true, meta: { pms: [] } });
+    expect(await manager(state, "1234567890", "item-new", "i02", "--project", "demo", "--title", "x")).toMatchObject({ ok: false, code: "forbidden" });
+  }, 60_000);
+});
