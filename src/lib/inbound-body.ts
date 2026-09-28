@@ -98,6 +98,6 @@ export function channelBodyText(attrs: string, body: string): string {
  * owner 对「待你处理」的作答（trigger="ask_answer"，bridge/asks.ts answerContent）：第一行是 bridge 给 agent 写的说明，
  * 历史里只留 owner 发的原文——和网页的乐观气泡、直播回显（web stream-shape）对得上。attrs = <channel …> 的属性串
  */
-export function ownerWordsOfAnswer(attrs: string, text: string): string {
+function ownerWordsOfAnswer(attrs: string, text: string): string {
   return /(?:^|\s)trigger="ask_answer"/.test(attrs) ? text.split("\n").slice(1).join("\n").trim() : text;
 }
