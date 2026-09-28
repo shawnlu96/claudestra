@@ -2,7 +2,7 @@
 import { useT } from "@/lib/i18n";
 import type { SubSessionRow } from "@/lib/session-nesting";
 
-export { nestSubSessions, type SubSessionInfo } from "@/lib/session-nesting";
+export { nestSubSessions, sessionRowKey, type SubSessionInfo } from "@/lib/session-nesting";
 
 /** 行标题：子会话前面挂「↳ 昵称 / 自动审查 / 子会话」徽章 */
 export function SessionName({ s }: { s: SubSessionRow }) {

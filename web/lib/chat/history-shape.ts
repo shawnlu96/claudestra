@@ -7,6 +7,7 @@
 import { matchClickedRow } from "./reply-clicks";
 import { FormLookup } from "./form-restore";
 import { parseInlineButtons, plainLabel } from "./inline-buttons";
+import { stripMentionDirective } from "./mention-directive";
 import type { ChatMessage, ToolCallView, AssistantSegment, ChatAttachmentView } from "@/features/chat/type";
 import type { WebComponentRow } from "./events";
 import { attachmentFromPath, extractAttachments } from "./attachments";
@@ -32,8 +33,6 @@ export interface NeutralMessage {
   from?: string;
   /** 发送者 id（user_id）：认本人的所有来源 */
   fromId?: string;
-  /** 入站消息头里的附件路径（网页上传只在这里，正文没有 [attachment:] 标记） */
-  attachments?: string[];
 }
 
 /** owner 设备的聊天身份（§3：owner 的所有设备共享 chat_id = api:owner:self） */
@@ -103,14 +102,13 @@ function userMessage(m: NeutralMessage, anchor: ChatMessage | null, opts: ShapeO
   if (cmd) return systemDivider(m, cmd[1], opts.sid);
   const from = isSelfSource(m.from, m.fromId, opts.selfIds ?? new Set()) ? undefined : m.from; // 本人的所有来源都不标
   // 多选表单的回投（点「提交」或输入框同步行发出）统一还原成「【标题】✓ …」，与发送时的气泡一致
-  let raw = forms.restore(text) ?? resolveClick(text, anchor, forms) ?? text;
-  // 外源入站剥掉 bridge 注入的来源头（[🤝 来自 peer…] 多行方括号块）——UI 用来源 chip 展示，留着就是双份说明
-  if (from) raw = raw.replace(/^\[[^\]]{0,800}\]\s*\n*/, "");
-  const inText = extractAttachments(raw);
-  // 头属性与正文标记可能是同一个文件（Discord 附件两处都写）：按地址去重
-  const byUrl = new Map([...(m.attachments ?? []).map(attachmentFromPath), ...(inText.attachments ?? [])].filter((a) => !!a).map((a) => [a!.url, a!]));
-  const attachments = [...byUrl.values()];
-  return { id: `h${m.seq}`, role: "user", content: inText.content, ts: m.ts, from, sid: opts.sid, seqEnd: m.seq, ...(attachments.length ? { attachments } : {}) };
+  const own = from ? text : stripMentionDirective(text); // @ 委托指令行只给 agent 看；只剥本人的（外源的末行照原样给 owner 看）
+  let raw = forms.restore(own) ?? resolveClick(own, anchor, forms) ?? own;
+  // 外源入站剥掉 bridge 注入的来源头（[🤝 来自 peer…] 多行方括号块）——UI 用来源 chip 展示，留着就是双份说明。
+  // 纯附件消息正文以 [attachment: …] 开头，那不是来源头：剥了图就没了
+  if (from) raw = raw.replace(/^\[(?!attachment: )[^\]]{0,800}\]\s*\n*/, "");
+  const { content, attachments } = extractAttachments(raw);
+  return { id: `h${m.seq}`, role: "user", content, ts: m.ts, from, sid: opts.sid, seqEnd: m.seq, ...(attachments ? { attachments } : {}) };
 }
 
 /** assistant 记录并进当前回合气泡（首条建组）；segments 保留叙述 / 工具 / 回复的真实交错序 */
@@ -173,7 +171,7 @@ export function toChatMessages(items: NeutralMessage[], opts: ShapeOpts = {}): C
     const toolCalls: ToolCallView[] | undefined = m.tools?.length
       ? m.tools.map((t) => ({ name: t.name, summary: t.summary, state: t.error ? ("error" as const) : ("done" as const), ts: m.ts, ...(t.detail ? { detail: t.detail } : {}) }))
       : undefined;
-    if (!m.text && !toolCalls && !m.replyText && !m.progress && !m.attachments?.length) continue;
+    if (!m.text && !toolCalls && !m.replyText && !m.progress) continue;
 
     if (m.role === "user") {
       group = null;

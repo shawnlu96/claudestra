@@ -1,0 +1,16 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "The bundled control window: only the app's own commands (commands.rs), no core plugins.",
+  "windows": ["main"],
+  "permissions": [
+    "allow-app-info",
+    "allow-status",
+    "allow-check",
+    "allow-probe-tools",
+    "allow-restart",
+    "allow-open-web",
+    "allow-open-logs",
+    "allow-launch-setup"
+  ]
+}

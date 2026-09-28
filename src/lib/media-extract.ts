@@ -7,6 +7,7 @@
  *  - agent 发的：reply 工具调用的 input.files（agent 本地路径；副本由 bridge 拷进 inbox 并记账，见 media-outbound.ts）。
  * agent↔agent 消息（is_agent="true"）与 bridge 注入（user="bridge:*"）不收：媒体视图只看人和 agent 之间的往来。
  */
+import { channelAttachmentPaths } from "./inbound-body.js";
 import { isReplyTool, queuedPromptOf } from "./session-history.js";
 
 export interface MediaRef {
@@ -53,11 +54,10 @@ function textOf(content: unknown): string {
 }
 
 const CHANNEL_HEAD_RE = /^\s*<channel\s+([^>]*)>/;
-const XML_ENTITY: Record<string, string> = { "&amp;": "&", "&quot;": '"', "&lt;": "<", "&gt;": ">", "&apos;": "'" };
 
+/** 头里的普通属性（发送者、message_id 等；附件路径走 inbound-body.channelAttachmentPaths，它会解码 XML 实体） */
 function attr(attrs: string, name: string): string | undefined {
-  const v = new RegExp(`(?:^|\\s)${name}="([^"]*)"`).exec(attrs)?.[1];
-  return v?.replace(/&(?:amp|quot|lt|gt|apos);/g, (e) => XML_ENTITY[e] ?? e);
+  return new RegExp(`(?:^|\\s)${name}="([^"]*)"`).exec(attrs)?.[1];
 }
 
 /** canTrust：记录本身是 bridge 投递的（isMeta 的 channel 消息 / queued_command）；裸 user 文本里自称的 <channel> 头不算 */
@@ -71,7 +71,7 @@ function inboundRefs(raw: string, seq: number, ts: string | null, prio: number, 
   if ((sender && /^bridge(:|$)/.test(sender)) || attr(attrs, "is_agent") === "true") return [];
   const who = { sender, senderId: attr(attrs, "user_id"), mid: attr(attrs, "message_id") };
   // 头属性（可信）在前；正文里的标记只补头属性里没有的（不可信）
-  const trusted = (attr(attrs, "attachments") ?? "").split(";").map((p) => p.trim()).filter(Boolean);
+  const trusted = channelAttachmentPaths(attrs);
   const body = attachmentPathsInText(raw.slice(head[0].length)).filter((p) => !trusted.includes(p));
   return [...trusted.map((path) => ({ path, trusted: true })), ...[...new Set(body)].map((path) => ({ path, trusted: false }))]
     .map((r, idx) => ({ ...base, ...who, ...r, idx }));

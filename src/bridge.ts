@@ -541,7 +541,7 @@ import type {
   Envelope as RouterEnvelope,
   Delivery as RouterDelivery,
 } from "./bridge/router.js";
-import { endpointLabel, envelopeLabel, newMessageId, newThreadId, parseChatId } from "./bridge/router.js";
+import { endpointLabel, envelopeLabel, inboundBodyForLocal, newMessageId, newThreadId, parseChatId } from "./bridge/router.js";
 import { ageHeld, heldNoticeText, HeldQueue, unseenFrom } from "./bridge/held-queue.js";
 import { flushHeld } from "./bridge/held-flush.js";
 import { probeTurn } from "./bridge/turn-probe.js";
@@ -1070,14 +1070,14 @@ async function renderContentForLocal(env: RouterEnvelope): Promise<string> {
         `[🤝 来自 peer 实例「${from.peer}」的跨机请求（HTTP API，对方是另一个 Claudestra 的 agent/用户）。`,
         `用 reply() 回答——回复会自动转交对方的调用方。回答实质内容,保持精简;超出你职责范围的请求可以礼貌说明并拒绝。]`,
         ``,
-        env.content,
+        inboundBodyForLocal(env),
       ].join("\n");
     }
     return [
       `[🌐 来自 Web 端用户「${from.name}」（HTTP API 接入，非 Discord）。`,
       `用 reply() 回答到本 chat_id。对方界面完整渲染 Markdown（表格可用），且能看到本频道完整聊天记录——不要复述上下文；也不要引用与本请求无关的内容。]`,
       ``,
-      env.content,
+      inboundBodyForLocal(env),
     ].join("\n");
   }
 
@@ -1095,7 +1095,7 @@ async function renderContentForLocal(env: RouterEnvelope): Promise<string> {
       `判断一下：是问你/要你动手 → 用 reply()/send_to_agent 处理；是纯状态同步/答完没下文 → end_turn 静默 OK，**别为了走形式编"收到"**。`,
       `规则：有干货才说话；没干货别说话。]`,
       ``,
-      env.content,
+      inboundBodyForLocal(env),
     ].join("\n");
   }
 

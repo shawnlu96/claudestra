@@ -18,6 +18,7 @@ import { open as fsOpen } from "fs/promises";
 import { join } from "path";
 import { projectJsonlPath, findJsonlBySessionId } from "./jsonl-cost.js";
 import { ARCHIVE_ROOT } from "./session-archive.js";
+import { channelBodyText } from "./inbound-body.js";
 
 /** 超过此字节数的 session jsonl 走尾读(见 readSessionHistory)。与搜索同阈值。 */
 const MAX_HISTORY_FULL_READ_BYTES = 16 * 1024 * 1024;
@@ -124,8 +125,6 @@ export interface HistoryMessage {
   replyComponents?: ReplyComponentRow[];
   /** reply() 附带的出站附件文件名（basename;取回走 inbox 后缀匹配兜底） */
   replyFiles?: string[];
-  /** 入站消息头里的附件路径（<channel attachments=…>）；正文里的 [attachment:] 标记前端自己解析 */
-  attachments?: string[];
   /** 回合耗时 ms(system/turn_duration 回填)——只有正常收尾的回合才有 */
   turnMs?: number;
   /** compact 产生的摘要条目（不是真实用户输入） */
@@ -157,8 +156,17 @@ export function progressNoteOf(block: any): string | null {
 }
 
 /**
- * reply 工具名：Claude Code 的 `mcp__<MCP_NAME>__reply` 与 Pi 扩展注册的裸名 `reply` 都要认。
- * 漏认裸名，Pi 的回复正文在历史里会变成一张 dump 了 JSON 参数的工具卡，搜索也搜不到（git log -S isReplyTool）。
+ * reply 工具名。两种形态都要认：
+ *  - Claude Code：MCP 工具 `mcp__<MCP_NAME>__reply`（MCP_NAME 可配，按前后缀匹配）；
+ *  - Pi（v2.23+）：扩展注册的**裸名** `reply`（Pi 没有 MCP，见 pi/claudestra-extension.ts）。
+ *
+ * 漏掉裸名的后果不是"少个标签"，而是**回复正文在历史里变成一张工具卡**：走下面的
+ * else 分支后，summary 是「💬 回复」，正文被塞进 `detail` —— 也就是把 JSON 参数
+ * 原样 dump 出来，`\n` 全是字面量。owner 2026-09-22 实报的就是这个（Pi 会话里
+ * 一整段回复渲染成转义文本块，末尾还挂着个 `"`）。搜索那条路径（searchHistory）
+ * 同样因此搜不到 Pi 的任何回复。
+ *
+ * jsonl-watcher 的 HIDDEN_TOOLS 与 reply_pending 早就认裸名了，这里是漏网的两处。
  */
 export function isReplyTool(name: string): boolean {
   if (name === "reply") return true; // Pi 侧裸名
@@ -271,22 +279,6 @@ export function listSubagentFiles(mainJsonlPath: string): string[] {
 // 回合结构也随之丢失（连续 assistant 记录跨回合粘连成巨型气泡）。
 const CHANNEL_WRAP_RE = /^\s*<channel\s+([^>]*)>\r?\n?([\s\S]*?)\r?\n?<\/channel>\s*$/;
 
-/**
- * 剥掉 bridge renderContentForLocal 注入的 framing header：正文开头的
- * [🌐 …] / [🤖 …] 方括号块是给 agent 的路由/行为指示，不是用户输入。header 内可能
- * 出现 "]"（如 [DIRECT] 标记），所以用 "]\n\n" 或行尾 "]" + 空行做块边界，而不是
- * 第一个 "]"。没匹配到已知 emoji 开头就原样保留（不误伤以 [ 开头的真实输入）。
- */
-function stripChannelHeader(body: string): string {
-  if (!/^\[(🌐|🤖|🤝|📢|📣)/.test(body)) return body;
-  // header 块与正文用空行分隔——兼容 LF 与 CRLF（L7：CRLF jsonl 下 "]\n\n" 匹配不到
-  // 会把 framing 头留在正文）。仍要求"]"+空行做边界，不用单个换行（正文里可能出现
-  // "]\n"，会误切）。
-  const m = body.match(/]\r?\n\r?\n/);
-  if (!m || m.index === undefined) return body;
-  return body.slice(m.index + m[0].length).trim();
-}
-
 /** attachment 记录是否为「被队列吸收的用户消息」,是则返回原始 prompt(含 channel 包装)。 */
 export function queuedPromptOf(rec: any): string | null {
   const a = rec?.attachment;
@@ -319,17 +311,14 @@ function collectChannelMessageIds(lines: string[]): Set<string> {
  * 解包一条 <channel> 入站消息：返回 { text, from }；不是 channel 包装
  * （caveat / local-command 等真 meta）返回 null。
  */
-export function unwrapChannelMessage(raw: string): { text: string; from?: string; fromId?: string; attachments?: string[] } | null {
+export function unwrapChannelMessage(raw: string): { text: string; from?: string; fromId?: string } | null {
   const m = raw.match(CHANNEL_WRAP_RE);
   if (!m) return null;
   const from = /(?:^|\s)user="([^"]*)"/.exec(m[1])?.[1] || undefined;
   const fromId = /(?:^|\s)user_id="([^"]*)"/.exec(m[1])?.[1] || undefined;
-  // 附件路径在头属性里（bridge 投递时写 attachments="a;b"）；网页上传只有这一份，正文里没有 [attachment:] 标记
-  const attachments = /(?:^|\s)attachments="([^"]*)"/.exec(m[1])?.[1].split(";").map((p) => p.trim()).filter(Boolean);
-  // 只去开头空白：只带附件的消息正文为空，「头 + 空行」的空行一 trim 掉就剥不下头，路由说明会被当成正文
-  const text = stripChannelHeader(m[2].trimStart()).trim();
-  if (!text && !attachments?.length) return null;
-  return { text, from, fromId, ...(attachments?.length ? { attachments } : {}) };
+  const text = channelBodyText(m[1], m[2]); // 剥注入头 + 补附件行（lib/inbound-body.ts）
+  if (!text) return null;
+  return { text, from, fromId };
 }
 
 function summarize(sessionId: string, source: "live" | "archive", path: string): SessionSummary | null {
@@ -564,7 +553,7 @@ function parseHistoryLines(
           const mid = channelMessageId(queued);
           if (!mid || !seenChannelIds.has(mid)) {
             const msg: HistoryMessage = { seq, ts, role: "user", text: un.text };
-            Object.assign(msg, un.from ? { from: un.from, fromId: un.fromId } : {}, un.attachments ? { attachments: un.attachments } : {});
+            if (un.from) Object.assign(msg, { from: un.from, fromId: un.fromId });
             all.push(msg);
           }
         }
@@ -612,7 +601,7 @@ function parseHistoryLines(
         // bridge 内部注入(看门狗 nudge 等,user="bridge:*")是发给 agent 的指令,不是对话,不进历史(直播侧 srcKind 同款排除)
         if (un.from && /^bridge(:|$)/.test(un.from)) continue;
         const msg: HistoryMessage = { seq, ts, role: "user", text: un.text };
-        Object.assign(msg, un.from ? { from: un.from, fromId: un.fromId } : {}, un.attachments ? { attachments: un.attachments } : {});
+        if (un.from) Object.assign(msg, { from: un.from, fromId: un.fromId });
         all.push(msg);
         continue;
       }

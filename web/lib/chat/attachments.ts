@@ -40,9 +40,11 @@ export function attachmentFromPath(p: string): AttachmentView | null {
   const file = p.trim().split("/").pop() || "";
   if (!file) return null;
   const dateDir = p.match(/\/web\/uploads\/(\d{4}-\d{2}-\d{2})\//);
+  // 展示名去掉雪花 id（Discord 下载）/ api_时间戳（API 上传）前缀，二者都没有才去 uuid（旧 web 上传）前缀：
+  // 剥过 id 再剥 uuid 会把 20260929-shot.png 这类名字剥成 shot.png，本端回声对不上、显示名也错
+  const tagged = /^(?:api_)?\d+_(.+)$/.exec(file);
   return {
-    // 展示名去掉落盘前缀：api_毫秒（网页经 bridge 上传）/ 雪花 id（Discord 下载）/ uuid（旧 web 上传）
-    name: file.replace(/^api_\d+_/, "").replace(/^\d+_/, "").replace(/^[0-9a-f]{8}-/, ""),
+    name: tagged ? tagged[1] : file.replace(/^[0-9a-f]{8}-/, ""),
     kind: isImageName(file) ? "image" : "file",
     url: attachmentUrl(file, dateDir?.[1]),
   };

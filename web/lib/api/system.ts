@@ -64,6 +64,10 @@ export function remoteAccess<T>(fresh: boolean): Promise<T> {
 export function peersList<T>(): Promise<T> {
   return api<T>("/peers", { timeoutMs: 10_000 });
 }
+/** 侧栏联系人 / 输入框 @ 候选（bridge lib/peer-contacts.ts）：只读内存里的 presence，便宜，可以每分钟拉 */
+export function peerContacts<T>(): Promise<T> {
+  return api<T>("/peers/contacts", { timeoutMs: 8000 });
+}
 const NAMELESS = new Set(["invite-new", "join-auto", "invite-revoke", "tidy", "inspect"]);
 export function peersAction<T>(body: Record<string, unknown> & { action?: string; name?: string }): Promise<T> {
   const { action, name } = body;
