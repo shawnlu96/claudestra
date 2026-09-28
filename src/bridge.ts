@@ -168,14 +168,17 @@ import { startThinkingTelemetry } from "./bridge/thinking-telemetry.js";
 import { updateStatsDashboard, initStatsDashboard, handleStatsRequest } from "./bridge/stats-dashboard.js";
 import { recordMetric } from "./lib/metrics.js";
 import { nudgeReason, pickUnrepliedForNudge } from "./lib/reply-nudge.js";
-import { dropPendingsForChannel, hangsInterAgentWatchdog, hangsPendingReply, nudgesForOrigin, pendingKeysOwedBy } from "./lib/pending-reply-scope.js";
+import { apiQueueToSettle, dropPendingsForChannel, hangsInterAgentWatchdog, hangsPendingReply, nudgesForOrigin, pendingKeysOwedBy, takeApiPending } from "./lib/pending-reply-scope.js";
 import { countsAsActivity, dueForResume, markResumed, noteActivity, noteApiError, resumeText, type ApiErrorState } from "./lib/api-error-resume.js";
 import { initHttpPeer, cancelHttpPeerCallsForChannel } from "./bridge/http-peer.js";
 import { readRegistryAgents, readRegistryAgentsSync, agentRuntime, type AgentRuntime } from "./lib/registry.js";
 import { statePath } from "./lib/paths.js";
 import { controlFor, managedFor } from "./lib/runtimes/index.js";
 import { stopNeedsPaneRecheck } from "./lib/runtimes/window-ops.js";
-import { interruptGate } from "./bridge/interrupt-gate.js";
+import { onCodexInterrupt, preemptForHuman, setStopHooks } from "./bridge/preempt.js";
+import { HTTP_IDLE_TIMEOUT_S, noteRuntimeCaps, onAbortAck, setExtensionSocket, stopAfterAbort, stopWaitIds } from "./bridge/interrupt-gate.js";
+import { isCutNotice, turnCuts } from "./bridge/turn-cuts.js";
+import { withInterruptNote } from "./lib/turn-cuts.js";
 import { createKeyedSerial } from "./lib/keyed-serial.js";
 import { notifyTargetVerdict } from "./lib/notify.js";
 import { readProjects } from "./lib/projects.js";
@@ -413,11 +416,10 @@ const pendingAgentCalls = new AgentCallBook();
  * 统一投递;每分钟兜底扫描(Stop 丢失/持续忙)。落盘、30 分钟提醒 / 24 小时放弃见 bridge/held-queue.ts。
  */
 const heldLocalMsgs = new HeldQueue();
+// Pi 的停：经 ws 请扩展 abort()、等回执；作废的消息回显给发送方，并从下面这几本欠账上销掉（bridge/pi-abort.ts）
+setExtensionSocket((ch) => clients.get(ch)?.ws, { deliver, ownerId: primaryOwnerId, books: () => ({ pendingReplies, pendingThreads, pendingInterAgentMsg, pendingAgentCalls, pendingApiRequests }) });
+setStopHooks({ clearAgentPendings: (ch) => clearInterAgentPendingsForChannel(ch) }); // owner 的停：发键之前清 agent 间的待回账（bridge/preempt.ts）
 
-/** 人类 request(Discord 用户 / 非 peer 的 API 用户)——抢占与押后规则的分野。 */
-function isHumanRequest(env: RouterEnvelope): boolean {
-  return (env.from.kind === "user" || (env.from.kind === "api" && !env.from.peer)) && env.intent === "request";
-}
 
 /** agent→agent 消息现在要不要押着:只看主回合,只剩后台在跑不算,见 lib/turn-state.ts */
 async function localAgentWorking(channelId: string, evAgent: string): Promise<boolean> {
@@ -429,6 +431,7 @@ function flushHeldLocalMsgs(channelId: string, reason: string): Promise<void> {
   return flushHeld({
     held: heldLocalMsgs, compacting: (a) => getAgentStatus(a) === "compacting", working: localAgentWorking, isHumanRequest,
     client: (c) => clients.get(c), deliver: deliverLocalInOrder, touch: (c, env) => pendingAgentCalls.touch(c, env.from.kind === "local" ? env.from.channelId : undefined),
+    stoppedAt: (c) => turnCuts.stoppedAt(c),
   }, channelId, reason);
 }
 
@@ -539,9 +542,9 @@ import type {
   Envelope as RouterEnvelope,
   Delivery as RouterDelivery,
 } from "./bridge/router.js";
-import { endpointLabel, envelopeLabel, inboundBodyForLocal, newMessageId, newThreadId, parseChatId } from "./bridge/router.js";
+import { endpointLabel, envelopeLabel, inboundBodyForLocal, isHumanRequest, newMessageId, newThreadId, parseChatId } from "./bridge/router.js";
 import { ageHeld, heldNoticeText, HeldQueue, unseenFrom } from "./bridge/held-queue.js";
-import { flushHeld } from "./bridge/held-flush.js";
+import { dropHeldOnKill, flushHeld } from "./bridge/held-flush.js";
 import { probeTurn } from "./bridge/turn-probe.js";
 import { agentMsgMustWait } from "./lib/turn-state.js";
 import { AgentCallBook, ambiguityNotice, type PendingAgentCall } from "./bridge/agent-calls.js";
@@ -670,7 +673,7 @@ async function deliverToApi(env: RouterEnvelope, to: RouterApiUserEndpoint): Pro
   const fromChannelId = env.from.kind === "local" ? env.from.channelId : "";
   const key = apiReqKey(to.tokenId, fromChannelId);
   const queue = pendingApiRequests.get(key);
-  const pending = queue?.shift();
+  const pending = queue ? takeApiPending(queue, env.meta.inReplyTo) : undefined; // 作废回显只对它自己那条请求
   if (queue && queue.length === 0) pendingApiRequests.delete(key);
 
   // 附件登记 → 下载 URL（属主 = 该 token，GET /api/v1/files/:id 校验）
@@ -792,12 +795,11 @@ function deliverLocalInOrder(env: RouterEnvelope, to: RouterLocalEndpoint, still
 
 /** 只经 deliverLocalInOrder 调用 */
 async function deliverToLocal(env: RouterEnvelope, to: RouterLocalEndpoint, stillWanted?: () => boolean): Promise<RouterDelivery> {
-  const content = await renderContentForLocal(env);
   // v2.10+「谁发的谁回」:Web/API 触发的回合,Stop 时不发 Discord @ 推送
   if (env.from.kind === "api") lastMessageSource.set(to.channelId, "api");
   // v2.11: HTTP peer pushback 送达 caller 后,caller 接下来的回合是「处理 peer 回复」——Stop 不该
   // @ 用户(与 Discord peer pushback 的 set "agent" 对齐,review 2026-07-19 #2)
-  if (env.meta.triggerKind === "peer_http") lastMessageSource.set(to.channelId, "agent");
+  if (env.meta.triggerKind === "peer_http" || isCutNotice(env)) lastMessageSource.set(to.channelId, "agent"); // 打断收尾提醒同理:bridge 发起的回合
   // chat_id 是 agent reply() 时要传回的 id：消息从哪个会话来，回复就发回那里。
   const replyBackChannel = resolveReplyBackChannel(env);
   rememberInbound(env, to.channelId); // 转交（bridge/forward.ts）只能转最近收到的用户原话
@@ -831,27 +833,19 @@ async function deliverToLocal(env: RouterEnvelope, to: RouterLocalEndpoint, stil
     meta.attachments = env.meta.attachments.join(";");
   }
   const evAgent = to.agentName || agentLabelForChannel(to.channelId);
-  // ── 人类连发抢占（owner 2026-07-14:「后一条消息应该直接打断前一条,优先处理
-  // 后面的,这样用户可以随时补充」）──目标正在回合中时,先 C-c 掐掉当前回合再投递:
-  // 上下文都在,agent 带着前一条的进度优先响应补充,而不是把补充压到回复之后。
-  // 只对人类的 request 生效(Discord user / API user);agent↔agent、peer、bridge
-  // 系统消息、response 回执不抢占目标的工作。
-  // 判忙、冷却、串行都在 interruptGate(lib/interrupt-gate.ts):只看主回合、压缩中和 Pi / Codex 不打断,打断后等 CC 收尾一拍。
-  // v2.11: peer 标记的 api 入站不算「人类抢占」——那是对方实例的 agent 请求,C-c 掐断本机正跑的回合等于让外机打断本机用户的活
-  if ((env.from.kind === "user" || (env.from.kind === "api" && !env.from.peer)) && env.intent === "request") {
-    try {
-      await interruptGate.preempt(to.channelId, evAgent);
-    } catch (e) {
-      console.log(`⚠️ 抢占打断失败,按常规投递: ${(e as Error).message}`);
-    }
-  }
+  // 人类 request 到达、目标主回合在跑 → 先打断再投(后一条优先,随时补充);停字三种运行时都打断。记 cut、抬头见 bridge/preempt.ts。
+  // agent↔agent、peer(对方实例的 agent 请求)、bridge 系统消息、response 不抢占
+  if (isHumanRequest(env)) await preemptForHuman(env, to.channelId, evAgent);
+  if (env.meta.interruptNote) meta.interrupt_note = "true"; // 历史只剥真由 bridge 加的抬头(lib/inbound-body.ts),用户手写的同样开头不剥
+  const content = await renderContentForLocal(env); // 抢占之后渲染:抬头(env.meta.interruptNote)是抢占时写的
   // agent→agent 目标回合中就不发、押到 Stop(回合中通知有丢弃窗口);人类/API 消息上面已抢占 C-c 不押;压缩中一律押(压缩结束放行)
   // 压缩看 turnState(事件态或画面):permission-watcher 8 秒一扫才置 compacting,只看事件态会在压缩开头几秒把消息投进去
   const turn = await probeTurn(to.channelId, evAgent, CONTROL_CHANNEL_ID);
   const compactingNow = turn.main === "compacting";
-  const busy = compactingNow || (env.from.kind === "local" && agentMsgMustWait(turn));
+  const busy = compactingNow || ((env.from.kind === "local" || !!env.meta.waitForIdle) && agentMsgMustWait(turn));
   // flush 投递途中(上面几处 await)这条已被别处从押后队列摘掉(kill 清理 / 24 小时放弃):既不押回(会复活)也不发
-  if (stillWanted && !stillWanted()) return { envelope: env, outcome: { kind: "dropped", reason: "已从押后队列撤下" } };
+  // 押着的打断收尾提醒:之后又被打断 / 叫停过、那件事已续上、过了 30 分钟,就不投了(turnCuts.noticeWanted)
+  if ((stillWanted && !stillWanted()) || !turnCuts.noticeWanted(env)) return { envelope: env, outcome: { kind: "dropped", reason: "已从押后队列撤下" } };
   if (busy) {
     const n = heldLocalMsgs.holdEnv(env); // 从 flush 来的是队里那个 env 本身,不会重复入队
     console.log(`⏸ 消息押后(${evAgent} ${compactingNow ? "压缩上下文中" : "回合中"}): 来自 ${meta.user},队列 ${n} 条`);
@@ -859,7 +853,9 @@ async function deliverToLocal(env: RouterEnvelope, to: RouterLocalEndpoint, stil
     return { envelope: env, outcome: { kind: "sent", note: "queued" } };
   }
   try {
+    if (turnCuts.takeAfterInterrupt(to.channelId)) meta.after_interrupt = "true"; // Codex 被打断后 queue 会卡住,这条改打进 TUI
     to.ws.send(JSON.stringify({ type: "message", content, meta }));
+    turnCuts.noteDelivered(env, to.channelId, meta.after_interrupt === "true", turn.main === "busy");
     // 入站消息镜像：srcKind(user=Discord 人类/api=Web 用户/local=agent/bridge)让 web 把他端用户发言实时画成气泡、
     // 排除 agent/bridge 注入；fromId(user_id)让 web 认出哪些是本人的其它来源(自己的 Discord 也靠右)
     const inData = { direction: "in", from: meta.user || "?", fromId: meta.user_id, srcKind: env.from.kind, text: env.content, threadId: env.meta.threadId, askId: env.meta.askId };
@@ -1061,6 +1057,8 @@ async function forwardReplyToAgentClaude(
  * 对应的 header 模板。这一处统一做，messageCreate 不再就地拼 header。
  */
 async function renderContentForLocal(env: RouterEnvelope): Promise<string> {
+  const note = env.meta.interruptNote; // 打断抬头放在来源头之后、正文之前(lib/turn-cuts.ts withInterruptNote)
+  if (note) return withInterruptNote(await renderContentForLocal({ ...env, meta: { ...env.meta, interruptNote: undefined } }), note);
   const from = env.from;
 
   // bridge 系统消息（notifyMaster 广播 / hook 事件文字 等）：原样投递，不加
@@ -1457,15 +1455,8 @@ discord.on("messageCreate", async (msg: DiscordMessage) => {
 
   if (!content) return;
 
-  // 新用户消息到达 → 如果 agent 还在忙（不 idle），先发 Ctrl+C 打断，让新消息覆盖旧任务
+  // 抢占(agent 在忙先打断)在下面 deliver → deliverToLocal 里做,与 Web / API 同一道
   {
-    try {
-      // 与 deliverToLocal 那道是同一个闸（interruptGate）：这里打断了，那边在冷却期内不会再发第二次 C-c
-      await interruptGate.preempt(channelId, await agentLabelForChannelAsync(channelId));
-    } catch (e) {
-      console.log(`⚠️ Discord 入站抢占失败,按常规投递: ${(e as Error).message}`);
-    }
-
     // v2.4.16+ 用户发消息 = 显式接管这个 channel 的对话方向。把该 channel 上挂着
     // 的所有 inter-agent pending 一并清掉，否则它们会在下一轮 Stop hook 触发
     // drain兜底 / nudge，把用户刚说的 "停下来" 拽回 agent-to-agent 链里去。
@@ -1781,6 +1772,7 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
         pid: typeof msg.pid === "number" ? msg.pid : undefined,
         ppid: typeof msg.ppid === "number" ? msg.ppid : undefined,
       });
+      noteRuntimeCaps(msg.channelId, msg); // Codex 会打字投递才对它抢占(老版本打断后消息会卡在 queue)、Pi 扩展会中止才发 abort
       console.log(`📌 注册频道: ${msg.channelId} (共 ${clients.size} 个)`);
       ws.send(JSON.stringify({ type: "registered", channelId: msg.channelId }));
 
@@ -1849,6 +1841,7 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
         if (!fromChannelId && typeof msg.fromChannelId === "string") {
           fromChannelId = msg.fromChannelId;
         }
+        if (fromChannelId) turnCuts.noteReplied(fromChannelId, msg.chatId); // 打断收尾提醒据此列「还没回复」
         if (!fromChannelId) {
           // 认不出来源就明确失败,绝不静默投给 "?"。
           ws.send(JSON.stringify({
@@ -2260,6 +2253,8 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
       break;
     }
 
+    case "abort_ack": onAbortAck(msg, ws); break; // Pi 扩展的中止回执（只认这个频道当前的连接）
+    case "codex_typein_failed": if (clients.get(msg.channelId)?.ws === ws) turnCuts.rearmAfterInterrupt(msg.channelId); break; // 退回了 queue:下一条再打字
     case "forward_to_agent": ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, ...(await handleForward(ws, msg)) })); break;
     case "route_to_agent": {
       try {
@@ -2737,17 +2732,20 @@ function sameWsChannels(channelId: string): string[] {
 
 async function handleHookRequest(req: Request): Promise<Response> {
   try {
-    const body = await req.json() as { channelId: string; event: string; stopHookActive?: boolean };
+    const body = await req.json() as { channelId: string; event: string; stopHookActive?: boolean; interrupt?: boolean };
     const { channelId, event } = body;
     if (!channelId || !event) {
       return new Response("Missing channelId or event", { status: 400 });
     }
+    // Codex 被 bridge 自己的 Esc 打断后的 Interrupt 回报（约 0.5 秒到，报成 StopFailure）：不是回合结束——抢占已收尾，新消息正要开回合，
+    // 走下面的 Stop 收尾会把等待中的 API / agent 请求按被砍的回合结算、还给 owner 发假的完成 @
+    if (body.interrupt && turnCuts.keySentWithin(channelId, Date.now(), "preempt")) return new Response("ok");
 
-    // v2.22.x 补 reply 拦截(owner 2026-09-07「agent 总是忘了调 reply」):这回合有
-    // 投递给它却没回的请求 → 让 Claude Code 别结束,带 reason 续跑一次。必须在
-    // 一切 Stop 副作用(done 事件 / 停 typing / 完成 ping / drain / 清 pending)之前
-    // 返回——回合还没完。规则见 lib/reply-nudge.ts。
-    if (event === "Stop") {
+    // 补 reply 拦截:这回合有投递给它却没回的请求 → 让 Claude Code 别结束,带 reason 续跑一次。必须在一切 Stop 副作用
+    // (done / 停 typing / 完成 ping / drain / 清 pending)之前返回——回合还没完(lib/reply-nudge.ts)。Pi 叫停之后的第一次 Stop
+    // 这里和下面的 inter-agent 看门狗都不催:催了等于 bridge 把刚停住的 Pi 又拉起一轮(bridge/pi-abort.ts)
+    const afterAbort = event === "Stop" && stopAfterAbort(channelId);
+    if (event === "Stop" && !afterAbort) {
       const ws = clients.get(channelId)?.ws;
       if (ws) {
         const cands = [...pendingReplies.entries()]
@@ -2777,6 +2775,7 @@ async function handleHookRequest(req: Request): Promise<Response> {
         updateStatsDashboard(discord);
         // v2.6.0+ 事件埋点：turn 结束（在去抖/通知判断之前 —— 事件流忠实反映 hook）
         const evAgent = await agentLabelForChannelAsync(channelId);
+        if (body.interrupt) await onCodexInterrupt(channelId, evAgent); // Codex 被打断(typing-hook 报成 StopFailure):先记 cut 再置 done
         // v2.20.2+ 回合结束≠任务完成:后台还有活(subagent/bg shell)时带上
         // bgPending,web 端把绿勾换成「后台继续中」(owner 实报提前完成误导)
         const bgPending = hasActiveBgActivities(evAgent);
@@ -2784,6 +2783,9 @@ async function handleHookRequest(req: Request): Promise<Response> {
         // 回合结束核对 registry session 是否还是活文件——原生 /clear 类
         // 轮转（不经 clear 端点）自愈。后台异步，不阻塞 Stop 主流程。
         void maybeHealRotatedSession(channelId);
+        // 插话那一回合结束、被打断的事还没续上 → 打断收尾提醒进押后队列,和押后消息一起由同一个投递者投(lib/turn-cuts.ts)
+        const cutNotice = turnCuts.onStop(channelId, event === "stop" ? "Stop" : event, evAgent);
+        if (cutNotice) heldLocalMsgs.holdEnv(cutNotice);
         // v2.21.1+ 回合结束 → 投递押后的 agent→agent 消息(2s 让 TUI 回到提示符)
         if (heldLocalMsgs.get(channelId)?.length) {
           setTimeout(() => void flushHeldLocalMsgs(channelId, "stop"), 2000);
@@ -2944,8 +2946,7 @@ async function handleHookRequest(req: Request): Promise<Response> {
             // 干等到超时。连文本都没有 → resolve reply:null（"结束但没回复"）。
             for (const [pKey, pQueue] of ownTurn ? pendingApiRequests.entries() : []) {
               if (!pQueue.length || pQueue[0].agentChannelId !== cid) continue;
-              pendingApiRequests.delete(pKey);
-              for (const p of pQueue) {
+              for (const p of apiQueueToSettle(pendingApiRequests, pKey, afterAbort ? stopWaitIds(cid) : new Set())) { // Pi 停字自己的等待留给停字那一轮
                 const result: ApiReplyResult = {
                   reply: drainedText || null,
                   threadId: p.threadId,
@@ -2964,14 +2965,10 @@ async function handleHookRequest(req: Request): Promise<Response> {
               }
             }
 
-            // v2.0.16+ inter-agent 看门狗: 这一轮结束时如果 cid 还挂着 inter-agent
-            // 消息 pending（agent 既没 reply 也没 send_to_agent —— 大概率收到消息后
-            // 啥也没干或没报告），注一条 nudge 到它的 ws 提醒处理 + reply() 报告。
-            // v2.4.16+: 最多 nudge **1** 次（之前是 2 次，跟 drain兜底 no-text push
-            // 叠加导致 agent 反复 wake-up 抓 LLM turn，是"聊不停"的另一个根因）。
-            // 1 次未响应直接放弃，少打扰对面 + 少烧 token。
+            // inter-agent 看门狗: 这一轮结束时 cid 还挂着 inter-agent 消息（agent 既没 reply 也没 send_to_agent），
+            // 注一条 nudge 提醒处理 + reply() 报告。最多 nudge 1 次：多了会和 drain 兜底的 push 叠加，agent 反复被叫醒「聊不停」。
             // StopFailure(API 错误 / 额度用完 / 打断)不是「收到了没理」:催它只会再撞一次同样的错
-            const iaPending = ownTurn && event !== "StopFailure" ? pendingInterAgentMsg.get(cid) : undefined;
+            const iaPending = ownTurn && event !== "StopFailure" && !afterAbort ? pendingInterAgentMsg.get(cid) : undefined;
             if (iaPending) {
               if (iaPending.retries >= 1) {
                 pendingInterAgentMsg.delete(cid);
@@ -3387,9 +3384,7 @@ async function handleHttpRoutes(req: Request, url: URL): Promise<Response> {
           });
         }
         const n = clearInterAgentPendingsForChannel(body.channelId) + dropPendingsForChannel(pendingReplies, pendingThreads, pendingInterAgentMsg, body.channelId);
-        // 押给它的消息(含推回给它的答复)不再有人收:丢掉并留日志,别等 24 小时,也别投给日后复用这个频道的新 agent
-        const dropped = heldLocalMsgs.get(body.channelId)?.length ?? 0;
-        if (heldLocalMsgs.delete(body.channelId)) console.log(`🧹 agent 已 kill,丢掉押给它的 ${dropped} 条消息 (channel=${body.channelId})`);
+        dropHeldOnKill(heldLocalMsgs, body.channelId), turnCuts.forget(body.channelId); // 押给它的消息丢掉(ask 答复放回「待你处理」),打断 / 叫停记录也删
         // agent 被永久 kill —— 顺手丢掉它在事件总线里的环形缓冲和回合态。
         // 那 500 条事件（含未截断的 assistant_text）不会再有人订阅，留着只是占内存，
         // 建了又删的 agent 会一路堆积。
@@ -3480,14 +3475,14 @@ const server = Bun.serve({
   // 反代 → 回环上的 peer 专用入口（bridge/peer-ingress.ts），不必对外开放这里。
   hostname: process.env.BRIDGE_BIND || "127.0.0.1",
   fetch: bridgeFetch,
+  idleTimeout: HTTP_IDLE_TIMEOUT_S, // Bun 默认 10 秒：打断请求要等 Esc 窗口锁（最长 12 秒 + 间隔），会先被切断、客户端拿到空响应
   // D5-11 兜底：fetch 里逃逸的异常（/api/v1 以外的路由、终端 API 等）回 JSON，
   // 不再是 Bun 未设 NODE_ENV 时的 67KB HTML 调试页。/api/v1 自己已在 handleApiRequest 里接住。
   error(e) {
     return apiErrorResponse(e);
   },
   websocket: {
-    // v2.2.0+: 抬高 idleTimeout（Bun 默认 120s）。配合 channel-server 每 25s 的
-    // keepalive ping，空闲 agent 的连接不会被关 → 不再 flap。255 是 Bun 上限。
+    // ws 的 idleTimeout 抬到 Bun 上限 255（默认 120s），配合 channel-server 每 25s 的 keepalive ping，空闲 agent 的连接不会被关、不再 flap
     idleTimeout: 255,
     open(ws) {
       console.log("🔌 新的 channel-server 连接");

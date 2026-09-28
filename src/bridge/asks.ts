@@ -10,7 +10,7 @@ import type { ServerWebSocket } from "bun";
 import { draftFromReply, groupsLeft, type AskRow, type WireMatch } from "../lib/ask-options.js";
 import { OWNER_PRINCIPAL_ID } from "../lib/devices.js";
 import { t } from "../lib/i18n.js";
-import { answerAsk, closeAsk, dueAsks, getAsk, hasAsksTable, listAsks, MASTER_PROJECT, openAsk, patchAsk, type Ask, type AskVia } from "../lib/ledger-asks.js";
+import { answerAsk, closeAsk, dueAsks, getAsk, hasAsksTable, listAsks, MASTER_PROJECT, openAsk, patchAsk, reopenAsk, type Ask, type AskVia } from "../lib/ledger-asks.js";
 import { activeTasksByAgent } from "../lib/ledger-read.js";
 import { LEDGER_PATH, LedgerError, openLedger } from "../lib/ledger-store.js";
 import { OwnerPresence } from "../lib/owner-presence.js";
@@ -300,6 +300,30 @@ export async function commitAnswer(i: AnswerInput): Promise<Ask> {
     void deps.editDiscord(a, (a.answer?.labels ?? []).join("、") || i.text).catch((e) => console.error(`⚠️ 改 Discord 原消息为已处理失败: ${(e as Error).message}`));
   }
   return a;
+}
+
+/**
+ * 押着等目标空闲的答复没投出去、收件的 agent 就被 kill 了（bridge.ts 的 kill 清理调）：ask 放回「待你处理」，告诉 owner 再答一次——
+ * 再答时 answerTarget 按那时还在的发起方 / 派发者 / 大总管投。只认 owner 的答复（ask_answer），过期通知之类的丢了无妨。
+ */
+export async function answerDropped(env: Envelope): Promise<void> {
+  const id = env.meta.askId;
+  if (!id || env.meta.triggerKind !== "ask_answer" || !deps) return;
+  const who = env.to.kind === "local" ? (env.to.agentName ?? env.to.channelId) : "?";
+  try {
+    const a = reopenAsk(askDb(), id, t(`答复没送到：${who} 在送到之前被 kill 了`, `Answer not delivered: ${who} was killed first`));
+    if (!a) return;
+    publishAsk(a);
+    const text = t(
+      `[⚠️ 你答的「${a.title}」（${a.id}）没送到：${who} 在答复送到之前被 kill 了。已放回「待你处理」，还要的话在网页上再答一次（会改投给它的派发者或大总管）。]`,
+      `[⚠️ Your answer to "${a.title}" (${a.id}) was not delivered: ${who} was killed first. It is back in your asks; answer again on the web if still needed.]`,
+    );
+    const meta = { messageId: newMessageId("ask"), triggerKind: "bridge_synth" as const, ts: new Date().toISOString(), threadId: newThreadId() };
+    await deps.deliver({ from: { kind: "bridge", label: "ask-dropped" }, to: { kind: "user", userId: "", channelId: deps.controlChannelId }, intent: "notification", content: text, meta });
+    console.log(`↩ ask ${a.id} 的答复没送到（${who} 被 kill），已放回 open 并通知 owner`);
+  } catch (e) {
+    console.error(`⚠️ ask ${id} 的答复没送到，放回 open / 通知 owner 失败（ask 停在已答，owner 看不到这次丢失）: ${(e as Error).message}`);
+  }
 }
 
 // ── 过期 ──
