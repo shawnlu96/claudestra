@@ -5,6 +5,7 @@ import { getLang, useT } from "@/lib/i18n";
 import { resumeSession } from "@/lib/api/agents";
 import { sessionHistory, sessionHistoryError, sessionList, sessionManage } from "@/lib/api/system";
 import { RuntimeBadge } from "./runtime-badge";
+import { nestSubSessions, SessionName, type SubSessionInfo } from "./session-nesting";
 
 /**
  * 侧栏「未纳管会话」分区（v2.23+）。
@@ -30,6 +31,7 @@ interface SessionRow {
   lastMessage: string;
   agentName: string | null;
   manageable?: boolean; // v2.24+ bridge 按运行时适配器给出（老 bridge 不带）
+  sub?: SubSessionInfo; // 子会话归属（lib/session-nesting.ts）
 }
 
 interface HistoryTool {
@@ -287,8 +289,8 @@ export function UnmanagedSessions() {
             </div>
           ) : null}
           <ul className="max-h-64 overflow-y-auto">
-            {unmanaged.map((s) => (
-              <li key={s.sessionId}>
+            {nestSubSessions(unmanaged).map(({ row: s, depth }) => (
+              <li key={s.sessionId} style={{ paddingLeft: Math.min(depth, 3) * 14 }}>
                 <SwipeActions
                   actions={[
                     {
@@ -320,9 +322,7 @@ export function UnmanagedSessions() {
                         {t("活跃")}
                       </span>
                     ) : null}
-                    <span className="truncate text-base-content/80">
-                      {s.name || s.sessionId.slice(0, 8)}
-                    </span>
+                    <SessionName s={s} />
                     <span className="ml-auto shrink-0 text-[11px] text-base-content/40">
                       {s.age || fmtAgo(Date.parse(s.modifiedAt))}
                     </span>

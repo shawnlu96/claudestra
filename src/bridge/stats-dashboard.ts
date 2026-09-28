@@ -28,7 +28,7 @@ import {
   tmuxSendEscape,
   isRewindDialog,
   ESC_DOUBLE_TAP_MS,
-  windowTarget,
+  windowTarget, windowKey,
   tmuxSendLine,
 } from "../lib/tmux-helper.js";
 import { readConfig, readConfigSync, setStatsDashboard, isConfigCorrupt } from "../lib/config-store.js";
@@ -192,7 +192,7 @@ async function findIdleScrapeTarget(): Promise<string | null> {
   const wins = (await tmuxRaw(["list-windows", "-t", MASTER_SESSION, "-F", "#{window_name}"]).catch(() => ""))
     .split("\n")
     .filter((w) => w.startsWith("agent-"));
-  const candidates: string[] = wins.map((w) => `${MASTER_SESSION}:${w}`);
+  const candidates: string[] = wins.map((w) => windowTarget(w));
   candidates.push(`${MASTER_SESSION}:0`);
   for (const t of candidates) {
     const pane = await tmuxRaw(["capture-pane", "-t", t, "-p"]).catch(() => "");
@@ -214,7 +214,7 @@ async function findIdleScrapeTarget(): Promise<string | null> {
     // 硬中断,自激拖长)。①bridge 自有状态:刚注入过 /save-compact 的窗口
     // 15min 内不当抓取源(不依赖 TUI 文案);②文案识别:兜住用户手动 /compact
     // 与超时后仍在跑的超长 compact。
-    const scTs = recentSaveCompact.get(t);
+    const scTs = recentSaveCompact.get(windowKey(t)); // 记账与查询都按窗口身份（写法不同也对得上）
     if (scTs && Date.now() - scTs < SAVE_COMPACT_GUARD_MS) {
       continue;
     }
@@ -809,7 +809,7 @@ const SAVE_COMPACT_GUARD_MS = 15 * 60 * 1000;
 
 /** bridge 的手动按钮路径(savecompact:)也要记账——两条注入路径同一份守卫。 */
 export function noteSaveCompactInjected(target: string): void {
-  recentSaveCompact.set(target, Date.now());
+  recentSaveCompact.set(windowKey(target), Date.now());
 }
 
 async function triggerAutoSaveCompact(a: AgentStat, effThreshold: number): Promise<void> {

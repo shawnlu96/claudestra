@@ -13,10 +13,12 @@ import { COLLAB_DICT } from "./i18n-dict-collab";
 import { LEDGER_DICT } from "./i18n-dict-ledger";
 import { MEDIA_DICT } from "./i18n-dict-media";
 import { QUOTA_DICT } from "./i18n-dict-quota";
+import { SESSIONS_DICT } from "./i18n-dict-sessions";
 
 export const DICT: Record<string, string> = {
   ...LEDGER_DICT, ...COLLAB_DICT, ...MEDIA_DICT,
   ...QUOTA_DICT, // 订阅额度卡片组与开关（lib/i18n-dict-quota.ts）
+  ...SESSIONS_DICT, // 未纳管会话 / 归档（lib/i18n-dict-sessions.ts）
   // ── 通用 ─────────────────────────────────────────────
   "关闭": "Close",
   "正在回复…": "Replying…",
@@ -207,25 +209,25 @@ export const DICT: Record<string, string> = {
   "经你自己的反向代理": "Through your own reverse proxy",
   "高级：自己的域名 + Caddy / nginx，见 web/SETUP.md「Public reverse proxy」": "Advanced: your own domain with Caddy / nginx — see \"Public reverse proxy\" in web/SETUP.md",
   "Tailscale 入口": "Tailscale entry",
-  "开始值守…": "Start a mission…",
-  "结束值守": "End mission",
-  "结束值守失败:": "Failed to end mission: ",
-  "值守中": "On a mission",
+  "开启 Autopilot…": "Start Autopilot…",
+  "关闭 Autopilot": "Stop Autopilot",
+  "关闭 Autopilot 失败:": "Failed to stop Autopilot: ",
+  "Autopilot 中": "On Autopilot",
   "截止": "until",
   "已提醒": "nudges",
   "等到": "waiting until",
   "今天": "today",
   "明天": "tomorrow",
-  "开始值守": "Start mission",
+  "开启 Autopilot": "Start Autopilot",
   "目标": "Goal",
   "截止时间": "Deadline",
   "+2 小时": "+2 h",
   "+4 小时": "+4 h",
   "+8 小时": "+8 h",
-  "写一句值守要推进的目标": "Describe what the mission should push forward",
+  "写一句 Autopilot 要推进的目标": "Describe what Autopilot should push forward",
   "开启失败：": "Couldn't start: ",
   "请稍后再试": "please try again",
-  "它每干完一轮，停一会儿确认你没在跟它说话，就自动接着推进；做完它自己宣告结束，到截止时间就收尾。Claude Code、Codex、Pi 都能用。": "After each turn it waits a moment, and if you are not talking to it, it keeps going on its own. It ends the mission when the work is done, and wraps up at the deadline. Works with Claude Code, Codex and Pi.",
+  "Autopilot（自动推进）：它每干完一轮，停一会儿确认你没在跟它说话，就自动接着推进；做完它自己宣告结束，到截止时间就收尾。Claude Code、Codex、Pi 都能用。": "Autopilot: after each turn it waits a moment, and if you are not talking to it, it keeps going on its own. It turns Autopilot off itself when the work is done, and wraps up at the deadline. Works with Claude Code, Codex and Pi.",
   "比如：按台账一件件推进，能做的直接做，要拍板的记下来跳过": "e.g. work through the ledger item by item; do what you can, note decisions for me and skip them",
   "也可以填 11:00（已过就算明天）或 +90m": "Or type 11:00 (tomorrow if already past) or +90m",
   "访问": "Access",
@@ -426,7 +428,7 @@ export const DICT: Record<string, string> = {
   "Agent 管理": "Manage Agents",
   "＋ 新建": "＋ New",
   "已重启": "restarted",
-  "已停止": "stopped",
+  "已停止": "stopped", "创建中": "creating", "会话创建中，稍后再发…": "Session is being created, send later…",
   "确认重启?": "Confirm restart?",
   "确认停止?": "Confirm stop?",
   "新建会话": "New Session",
@@ -507,33 +509,6 @@ export const DICT: Record<string, string> = {
   "下次": "Next run:", // 后接时间或「已停用」
   "上次": "Last run:",
   "已停用": "disabled",
-
-  // ── 未纳管会话 / 归档 ────────────────────────────────
-  "未纳管会话": "Unmanaged sessions",
-  "没有未纳管的会话": "No unmanaged sessions",
-  "会话文件 2 分钟内还在写 —— 大概率正在运行（启发式）": "Session file written in the last 2 minutes — probably still running (heuristic)",
-  "活跃": "Active",
-  "已归档并从列表移除（内容留在归档目录，可找回）": "Archived and removed from the list (the content stays in the archive and can be restored)",
-  "已受理，正在后台收编（约 10-40 秒），完成后会出现在 agent 列表里。":
-    "Accepted — adopting in the background (about 10–40 s). It will show up in the agent list when done.",
-  "这个会话还没有消息": "This session has no messages yet",
-  "用户": "User",
-  "助手": "Assistant",
-  "系统": "System",
-  "agent 名字": "Agent name",
-  "收编": "Adopt",
-  "收编为 agent": "Adopt as agent",
-  "← 返回": "← Back",
-  "这个会话没有纳管，现在收不到消息。收编后会建窗口、能对话、进 agent 列表。":
-    "This session isn't managed, so it can't receive messages. Adopting it opens a window for it, lets you chat with it and adds it to the agent list.",
-  "这种运行时的会话只读：历史能看能搜，但收编不了——Claudestra 还没法往这种会话里发消息。":
-    "Sessions from this runtime are read-only: you can browse and search the history but can't adopt them — Claudestra can't send messages into them yet.",
-  "刷新": "Refresh",
-  "归档是空的": "The archive is empty",
-  "恢复": "Restore",
-  "{n} 个会话": "{n} session|{n} sessions",
-  "归档失败:": "Archive failed: ", // 值尾带空格
-  "沉寂": "Dormant",
 
   // ── 上下文徽章 / 存记忆 + Compact ─────────────────────
   "上下文": "Context",

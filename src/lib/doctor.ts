@@ -565,7 +565,7 @@ export async function runDoctor(repoRoot: string): Promise<Check[]> {
     checkUndeliveredAlerts(), checkStateFiles(),
     checkBridge(repoRoot),
     checkIntegration(repoRoot),
-    checkAgents(),
+    checkAgents(), import("./doctor-pending.js").then((m) => m.checkPendingOps(repoRoot)), // 做到一半的 create / kill / rename / update 与孤儿窗口、频道
     checkGitHead(repoRoot),
     checkWorktreeClean(repoRoot),
     checkWebBuild(repoRoot),
