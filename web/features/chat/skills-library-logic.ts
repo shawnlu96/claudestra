@@ -32,6 +32,8 @@ export interface SkillRoot {
 export interface SkillLibrary {
   roots: SkillRoot[];
   skills: LibrarySkill[];
+  /** 按会话的技能覆盖 { agent: { skill: 档位 } }（老 bridge 没有） */
+  overrides?: Record<string, Record<string, string>>;
 }
 
 export const RUNTIME_LABEL: Record<SkillRuntime, string> = { "claude-code": "Claude Code", codex: "Codex", pi: "Pi" };

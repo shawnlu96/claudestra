@@ -7,7 +7,7 @@ import { classifyRun, type RunEvidence } from "../lib/autopilot-run.js";
 import { finishRun, type ActiveRun } from "../lib/autopilot-wake.js";
 import { appendRunLog, runLogLine } from "../lib/autopilot-log.js";
 import { missionOnClaudeCode, updateMissions, type Mission } from "../lib/missions.js";
-import { lastEvidenceAt, takeEvidence, takeOrphan } from "./autopilot-evidence.js";
+import { lastEvidenceAt, peekTracked, takeEvidence, takeOrphan } from "./autopilot-evidence.js";
 import { quotaWall } from "./quota-wall-wiring.js";
 
 /** done 之后至少等这么久、且最后一条事件之后安静这么久才取证；最多等 EVIDENCE_MAX_MS（watcher 另有 2s 轮询兜底） */
@@ -22,6 +22,9 @@ const iso = (ms: number) => new Date(ms).toISOString();
 
 /** 正在收尾的 run：同一个 run 的第二个 done（打断之后又来 Stop）不重复收 */
 const closing = new Set<string>();
+/** 收尾时写锁超时：证据留在这里，下一次到点（mission.ts fire）原样重试，不丢日志、也不让这个 run 被当成没投递放回去重投 */
+const pendingClose = new Map<string, RunEvidence>();
+export const pendingCloseOf = (runId: string): RunEvidence | undefined => pendingClose.get(runId);
 
 async function settle(agent: string, doneAt: number): Promise<void> {
   const end = doneAt + EVIDENCE.maxMs;
@@ -36,11 +39,14 @@ async function settle(agent: string, doneAt: number): Promise<void> {
 export interface CloseCtx {
   path: string;
   graceMs: number;
+  /** 写锁最多等多久；不给 = lib/missions.ts 的默认 */
+  lockMs?: number;
 }
 
 /**
  * 收一个 run：只认 runId 对得上的那一个（重复 done、旧一代都不收）；mission 已不在进行中就不再排下一次。
  * ev 为空 = 从证据模块取（afterDone 为真时先等证据到齐）；bridge 判的失败 / 证据丢失由调用方传进来。
+ * 等证据期间换了一代（stop 后立刻 start）→ 给旧一代补一行日志；写锁超时 → 证据进 pendingClose，返回 null 等下次重试。
  */
 export async function closeRun(
   agent: string, runId: string, ctx: CloseCtx, opts: { afterDone?: number; ev?: RunEvidence } = {},
@@ -49,22 +55,36 @@ export async function closeRun(
   closing.add(runId);
   try {
     if (opts.afterDone !== undefined) await settle(agent, opts.afterDone);
-    const ev = opts.ev ?? takeEvidence(agent, runId);
+    const meta = peekTracked(agent, runId);
+    const ev = opts.ev ?? pendingClose.get(runId) ?? takeEvidence(agent, runId);
+    // 每次尝试都按当下重算：写锁超时重试时闸可能已经开了，沿用上次的时刻会把唤醒白押到重置点
     const wallUntil = missionOnClaudeCode(agent) ? quotaWall()?.until() : undefined; // CC 撞墙：下次唤醒按闸的重置时刻排（出闸时 mission.ts 另行放行）
     if (wallUntil) ev.wallUntil = wallUntil;
+    else delete ev.wallUntil;
     const now = Date.now();
     const cls = classifyRun(ev);
     const out = await updateMissions((all) => {
       const cur = all[agent];
       if (!cur || cur.run?.runId !== runId) return null;
       const run: ActiveRun = cur.run;
+      // 只有已经递出去的 run 才会走到这里；「已投递」没来得及落盘（写锁超时）时计数在这里补上
+      if (!run.deliveredAt) Object.assign(cur, { nudges: cur.nudges + 1, lastNudgeAt: run.claimedAt });
       const f = finishRun(cur, runId, cls.outcome, ev, now, ctx.graceMs)!;
       if (cur.status !== "active") delete cur.wake;
       if (f.next.hold && cur.status === "active") cur.resumeAt = iso(f.nextAt); // 网页「等到 …」
       else delete cur.resumeAt;
       return { m: { ...cur }, run, f };
-    }, ctx.path);
-    if (!out) return null;
+    }, ctx.path, ctx.lockMs).catch((e) => {
+      pendingClose.set(runId, ev);
+      console.error(`⏱ Autopilot ${agent}: run ${runId} 收尾写入失败，下次到点重试:`, (e as Error).message);
+      return undefined;
+    });
+    if (out === undefined) return null;
+    pendingClose.delete(runId);
+    if (!out) {
+      if (meta) logLine(agent, meta, ev, "（mission 已停止或换了一代）");
+      return null;
+    }
     const active = out.m.status === "active";
     appendRunLog(runLogLine({
       missionId: out.m.id ?? "unknown", agent, run: out.run, outcome: cls.outcome, reason: cls.reason, evidence: ev, now,
@@ -83,11 +103,11 @@ export async function closeRun(
  */
 export function logOrphanRun(agent: string, currentRunId: string | undefined): void {
   const o = takeOrphan(agent, currentRunId);
-  if (!o) return;
-  const cls = classifyRun(o.ev);
-  const now = Date.now();
-  appendRunLog(runLogLine({
-    missionId: o.missionId, agent, run: o.run, outcome: cls.outcome, reason: `${cls.reason}（mission 已停止或换了一代）`, evidence: o.ev, now,
-  }));
+  if (o) logLine(agent, o, o.ev, "（mission 已停止或换了一代）");
+}
+
+function logLine(agent: string, o: { run: ActiveRun; missionId: string }, ev: RunEvidence, note: string): void {
+  const cls = classifyRun(ev);
+  appendRunLog(runLogLine({ missionId: o.missionId, agent, run: o.run, outcome: cls.outcome, reason: `${cls.reason}${note}`, evidence: ev, now: Date.now() }));
   console.log(`⏱ Autopilot ${agent}: 旧一代的 run ${o.run.runId} 补记 ${cls.outcome}`);
 }

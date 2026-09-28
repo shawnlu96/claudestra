@@ -28,6 +28,8 @@ export interface FactsDeps {
   relayWebCommit(base: string): Promise<string | null>;
   bridgePort(): number | null;
   fileSize(path: string): number | null;
+  /** 目录在不在（归属判定：项目登记的目录不存在就不能据此说「不含本仓库」） */
+  isDir(path: string): boolean;
   /** 仓库相对路径读源码（算 daemon 的 import 闭包） */
   readRepoFile(rel: string): string | null;
 }
@@ -53,6 +55,13 @@ export function realFactsDeps(repoRoot: string): FactsDeps {
         return null; // 不存在 / 读不了：探针按「证据文件不存在」判 fail，原因写在 detail 里
       }
     },
+    isDir: (p) => {
+      try {
+        return statSync(p).isDirectory();
+      } catch {
+        return false; // 不存在 / 读不了：归属判定按「判断不了」处理
+      }
+    },
     readRepoFile: (rel) => {
       try {
         return readFileSync(join(repoRoot, rel), "utf8");
@@ -73,11 +82,19 @@ async function git(d: FactsDeps, repo: string, ...args: string[]) {
 }
 
 /** PR 引用 → gh api 用的 {repo, number}：GitHub 链接带 owner/repo；#12 / 12 用当前仓库（gh 的 {owner}/{repo} 占位） */
+/** 整串锚定：task.pr 执行者能写，前面夹带 `-R evil/x ` 之类的也得认不出，不能被当成那个 PR */
 function parsePrRef(ref: string): { repo: string; number: string } | null {
-  const url = ref.match(/github\.com\/([^/]+\/[^/]+)\/pull\/(\d+)\/?$/);
+  const url = ref.trim().match(/^https:\/\/github\.com\/([\w.-]+\/[\w.-]+)\/pull\/(\d+)\/?$/);
   if (url) return { repo: url[1], number: url[2] };
-  const n = ref.match(/^#?(\d+)$/)?.[1];
+  const n = ref.trim().match(/^#?(\d+)$/)?.[1];
   return n ? { repo: "{owner}/{repo}", number: n } : null;
+}
+
+/** 交给 gh 的 PR 参数：按解析结果重新拼（规范 URL 或纯编号），从不原样转交 task.pr；认不出 → null */
+export function ghPrArg(ref: string): string | null {
+  const id = parsePrRef(ref);
+  if (!id) return null;
+  return id.repo.startsWith("{") ? id.number : `https://github.com/${id.repo}/pull/${id.number}`;
 }
 
 type PrFacts = NonNullable<VerifyFacts["pr"]>;
@@ -86,8 +103,9 @@ type PrFacts = NonNullable<VerifyFacts["pr"]>;
 async function prFacts(d: FactsDeps, ref: string): Promise<PrFacts> {
   const base: PrFacts = { ref, state: null, head: null, branch: null, base: null, mergeCommit: null, mergedAt: null, files: null };
   const id = parsePrRef(ref);
-  if (!id) return { ...base, error: `认不出 PR 编号：${ref}` };
-  const r = await d.run(["gh", "pr", "view", ref, "--json", "state,mergeCommit,mergedAt,headRefOid,headRefName,baseRefOid"]);
+  const arg = ghPrArg(ref);
+  if (!id || !arg) return { ...base, error: `认不出 PR 编号：${ref}` };
+  const r = await d.run(["gh", "pr", "view", arg, "--json", "state,mergeCommit,mergedAt,headRefOid,headRefName,baseRefOid"]);
   if (r.code !== 0) return { ...base, error: firstLine(r.stderr) || `gh 退出码 ${r.code}` };
   let pr: PrFacts;
   try {
@@ -259,9 +277,9 @@ export async function mainRepoRoot(d: FactsDeps): Promise<string | null> {
   return r.code === 0 && dir ? dirname(dir) : null;
 }
 
-/** origin 的 GitHub owner/repo（小写）；不是 GitHub 远端或读不到为 null */
-export async function originRepo(d: FactsDeps): Promise<string | null> {
-  const r = await git(d, d.repoRoot, "remote", "get-url", "origin");
+/** dir（默认本仓库）的 origin 的 GitHub owner/repo（小写）；不是 GitHub 远端或读不到为 null */
+export async function originRepo(d: FactsDeps, dir: string = d.repoRoot): Promise<string | null> {
+  const r = await git(d, dir, "remote", "get-url", "origin");
   const m = firstLine(r.stdout).match(/github\.com[:/]([^/]+\/[^/]+?)(?:\.git)?\/?$/);
   return r.code === 0 && m ? m[1].toLowerCase() : null;
 }

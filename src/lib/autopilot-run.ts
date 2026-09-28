@@ -72,6 +72,8 @@ export const AUTOPILOT_TIMING = {
   runStaleMs: 30 * MINUTE_MS,
   /** 领到了却一直没标「已投递」：进程在领取和投递之间挂了，过这么久放回队列（不能太短：投递本身可能要等抢占收尾） */
   claimStaleMs: 2 * MINUTE_MS,
+  /** 标「已投递」/ 收尾时写锁超时，多久后重试 */
+  lockRetryMs: 5_000,
 } as const;
 
 /**
@@ -144,7 +146,7 @@ export function yieldReason(s: { turnBusy: boolean; online: boolean; lastHumanAt
 
 const MONTHS = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
 const MONTH_RE = "(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\\.?";
-/** Claude Code：「resets 2am (Asia/Shanghai)」「resets 4:40pm (Asia/Tokyo)」「resets Oct 3, 2am (Asia/Tokyo)」 */
+/** Claude Code：「resets 2am (Asia/Shanghai)」「resets 4:40pm (Asia/Tokyo)」「resets Oct 3, 2am (Asia/Tokyo)」「resets Fri 9am (…)」 */
 const CC_RESET = /\bresets\s+(.+)/i;
 /** Codex：「try again at 8:41 AM」「try again at Sep 29th, 2026 8:41 AM」（本机时区） */
 const CODEX_AT = new RegExp(`try again at\\s+(?:${MONTH_RE}\\s+(\\d{1,2})(?:st|nd|rd|th)?,?\\s+(\\d{4})\\s+)?(\\d{1,2}):(\\d{2})\\s*(am|pm)`, "i");
