@@ -71,7 +71,8 @@ export function validateCodexChoice(
   choice: { model: string; effort: string; targetModel: string | null },
 ): string | null {
   const { model, effort, targetModel } = choice;
-  if (model && !/^[A-Za-z0-9._:-]+$/.test(model)) return "model 含非法字符";
+  // 控制字符单独再拒：将来放宽字符集也漏不进换行（与 lib/claude-settings-runtime.ts isSafeModelArg 同一口径）
+  if (model && (/\p{Cc}/u.test(model) || !/^[A-Za-z0-9._:-]+$/.test(model))) return "model 含非法字符";
   if (model && catalog && !catalog.some((m) => m.id === model)) return `未知的 Codex 模型：${model}`;
   if (!effort) return null;
   if (!(CODEX_EFFORT_LEVELS as readonly string[]).includes(effort)) return `未知的推理档位：${effort}`;
