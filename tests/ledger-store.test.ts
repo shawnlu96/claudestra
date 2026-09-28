@@ -7,7 +7,7 @@ import { describe, expect, test } from "bun:test";
 import * as store from "../src/lib/ledger-store.js";
 import * as write from "../src/lib/ledger-write.js";
 
-const { closeLedger, getTask, LEDGER_SCHEMA_VERSION, LEDGER_TABLES, listEvents, openLedger, schemaVersion } = store;
+const { busyAsLedgerError, closeLedger, getTask, LEDGER_SCHEMA_VERSION, LEDGER_TABLES, listEvents, openLedger, schemaVersion } = store;
 
 function tmp(): { dir: string; path: string } {
   const dir = mkdtempSync(join(tmpdir(), "ledger-"));
@@ -119,5 +119,49 @@ describe("老库直接打开", () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+/** 子进程：同一时刻打开同一个新库，各写一条事项 */
+function openerScript(path: string, startAt: number, id: string): string {
+  const storeUrl = resolve(import.meta.dir, "../src/lib/ledger-store.ts");
+  const writeUrl = resolve(import.meta.dir, "../src/lib/ledger-write.ts");
+  return `
+    const { openLedger } = await import(${JSON.stringify(storeUrl)});
+    const { createItem } = await import(${JSON.stringify(writeUrl)});
+    while (Date.now() < ${startAt}) {}
+    try {
+      createItem(openLedger(${JSON.stringify(path)}), { actor: "owner" }, { project: "p", id: ${JSON.stringify(id)}, title: "x" });
+      console.log(JSON.stringify({ ok: true }));
+    } catch (e) {
+      console.log(JSON.stringify({ ok: false, code: e.code, message: String(e.message) }));
+    }
+  `;
+}
+
+describe("多进程同时首次打开新库（审查第 1 轮 P2-6）", () => {
+  test("8 个进程同时打开并写入，连跑 4 轮：全部成功、库是 WAL、事项 8 条", async () => {
+    for (let round = 0; round < 4; round++) {
+      const { dir, path } = tmp();
+      try {
+        const startAt = Date.now() + 600;
+        const procs = Array.from({ length: 8 }, (_, i) =>
+          Bun.spawn([process.execPath, "-e", openerScript(path, startAt, `i${i}`)], { stdout: "pipe", stderr: "pipe", env: { ...process.env, CLAUDESTRA_STATE_DIR: dir } }),
+        );
+        const outs = await Promise.all(procs.map(async (p) => (await new Response(p.stdout).text()).trim()));
+        expect(outs.map((o) => JSON.parse(o) as { ok: boolean })).toEqual(Array.from({ length: 8 }, () => ({ ok: true })));
+        const db = openLedger(path);
+        expect((db.prepare("PRAGMA journal_mode").get() as { journal_mode: string }).journal_mode).toBe("wal");
+        expect(store.listItems(db, "p")).toHaveLength(8);
+        closeLedger(path);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    }
+  }, 60_000);
+  test("等锁超时的 SQLITE_BUSY 换成 LedgerError(busy)，其它错误原样抛", () => {
+    const busy = Object.assign(new Error("database is locked"), { code: "SQLITE_BUSY" });
+    expect(() => busyAsLedgerError("写入", () => { throw busy; })).toThrow(expect.objectContaining({ name: "LedgerError", code: "busy" }));
+    expect(() => busyAsLedgerError("写入", () => { throw new Error("boom"); })).toThrow("boom");
   });
 });

@@ -3,7 +3,7 @@
  * 纯函数、只 import 类型——指标由读接口（T8c）算好下发，网页不直接 import src。
  * 时间一律 epoch ms；事件按 seq 顺序给（listEvents 的默认顺序），同一毫秒的多条以 seq 定先后。
  */
-import { endStages, startStage, TERMINAL_STAGES, type LedgerEvent, type LedgerTask, type Stage } from "./ledger-stages.js";
+import { endStages, TERMINAL_STAGES, type LedgerEvent, type LedgerTask, type Stage } from "./ledger-stages.js";
 
 export interface StageEntry {
   stage: Stage;
@@ -14,7 +14,7 @@ export interface StageEntry {
 }
 
 export interface TaskMetrics {
-  /** 第一次进入 restate（ops 为 build）；导入时直接落在更后阶段的，取第一次离开 spec 的时刻 */
+  /** 时间线上第一段不是 spec / blocked / cancelled 的：通常是 restate（ops 为 build），导入任务就是它落下的阶段 */
   startTs: number | null;
   /** code / ops 取第一次进 verified（没有才看 done），investigate 取 done；cancelled 也算结束；没结束为 null */
   endTs: number | null;
@@ -28,7 +28,7 @@ export interface TaskMetrics {
   stageMs: Partial<Record<Stage, number>>;
   /** review 事件数 */
   reviewRounds: number;
-  /** 进入 fix 的次数 */
+  /** 进入 fix 的次数（从 blocked 回到 fix 不算） */
   reworkCount: number;
   /** 每段「第一次 deliver → 下一条 review 事件」；中间多次 deliver 只从第一次算 */
   reviewWaits: number[];
@@ -60,6 +60,9 @@ export function stageTimeline(events: readonly LedgerEvent[], now: number): Stag
   });
 }
 
+/** 停在这些阶段不算开工：spec→blocked 不是开工，导入后 review→spec→restate 也不能把起点挪到后面那次 restate */
+const NOT_STARTED: readonly Stage[] = ["spec", "blocked", "cancelled"];
+
 function overlap(e: StageEntry, start: number, end: number): number {
   return Math.max(0, Math.min(e.to, end) - Math.max(e.from, start));
 }
@@ -70,7 +73,7 @@ function timeMetrics(
   timeline: readonly StageEntry[],
   now: number,
 ): Pick<TaskMetrics, "startTs" | "endTs" | "totalMs" | "workMs" | "blockedMs" | "stageMs"> {
-  const first = timeline.find((e) => e.stage === startStage(kind)) ?? timeline.find((e) => e.stage !== "spec");
+  const first = timeline.find((e) => !NOT_STARTED.includes(e.stage));
   const startTs = first?.from ?? null;
   let endTs: number | null = null;
   for (const s of endStages(kind)) {
@@ -120,7 +123,7 @@ export function taskMetrics(task: Pick<LedgerTask, "id" | "kind">, events: reado
   return {
     ...time,
     reviewRounds: reviews.length,
-    reworkCount: own.filter((e) => e.kind === "stage" && e.data.to === "fix").length,
+    reworkCount: own.filter((e) => e.kind === "stage" && e.data.to === "fix" && e.data.from !== "blocked").length,
     reviewWaits: waits.waits,
     reviewWaitMs: waits.waits.reduce((s, w) => s + w, 0),
     reviewWaitPendingMs: waits.pendingMs,

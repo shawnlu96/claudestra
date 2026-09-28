@@ -18,7 +18,8 @@ const BUSY_TIMEOUT_MS = 5000;
 
 const cache = new Map<string, Database>();
 
-export type LedgerErrorCode = "conflict" | "not_found" | "forbidden" | "invalid" | "dedup_mismatch";
+/** busy = 等写锁超过 BUSY_TIMEOUT_MS（别的进程长时间占着库），可以重试 */
+export type LedgerErrorCode = "conflict" | "not_found" | "forbidden" | "invalid" | "dedup_mismatch" | "busy";
 
 /** 写入被拒的统一错误；current 带上冲突时库里的实际值（当前阶段 / rev），CLI 原样打印 */
 export class LedgerError extends Error {
@@ -69,15 +70,54 @@ CREATE TABLE meta (
 /** 下标 i 把库从版本 i 升到 i+1 */
 const MIGRATIONS: string[] = [SCHEMA_V1];
 
+function isBusy(e: unknown): boolean {
+  return String((e as { code?: unknown })?.code ?? "").startsWith("SQLITE_BUSY");
+}
+
+/** 把等锁超时的 SQLITE_BUSY 换成 LedgerError("busy")，CLI 能给出清楚的报错；其它错误原样抛 */
+export function busyAsLedgerError<T>(what: string, fn: () => T): T {
+  try {
+    return fn();
+  } catch (e) {
+    if (isBusy(e)) throw new LedgerError("busy", `台账库忙（${what}等锁超过 ${BUSY_TIMEOUT_MS / 1000}s），稍后重试`);
+    throw e;
+  }
+}
+
+/**
+ * 切 WAL 不走 busy_timeout：多个进程同时首次打开新库时会直接 SQLITE_BUSY（审查实测 8 路并发约 1/10）。
+ * 所以先读当前模式，已是 WAL 就不再切；切的时候遇到 BUSY 就退避重试，到期限还不行再抛。
+ */
+function ensureWal(db: Database): void {
+  const deadline = Date.now() + BUSY_TIMEOUT_MS;
+  for (;;) {
+    try {
+      const mode = (db.prepare("PRAGMA journal_mode").get() as { journal_mode: string }).journal_mode;
+      if (mode !== "wal" && mode !== "memory") db.exec("PRAGMA journal_mode = WAL");
+      return;
+    } catch (e) {
+      if (!isBusy(e) || Date.now() > deadline) throw e;
+      Bun.sleepSync(10 + Math.random() * 40);
+    }
+  }
+}
+
 export function openLedger(path: string = LEDGER_PATH): Database {
   const hit = cache.get(path);
   if (hit) return hit;
   if (path !== ":memory:") mkdirSync(dirname(path), { recursive: true });
   const db = new Database(path);
-  db.exec(`PRAGMA busy_timeout = ${BUSY_TIMEOUT_MS}`);
-  db.exec("PRAGMA journal_mode = WAL");
-  db.exec("PRAGMA foreign_keys = ON");
-  migrate(db);
+  try {
+    busyAsLedgerError("打开时", () => {
+      db.exec(`PRAGMA busy_timeout = ${BUSY_TIMEOUT_MS}`);
+      ensureWal(db);
+      db.exec("PRAGMA foreign_keys = ON");
+      migrate(db);
+    });
+  } catch (e) {
+    db.close();
+    throw e;
+  }
   cache.set(path, db);
   return db;
 }

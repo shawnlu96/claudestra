@@ -3,11 +3,11 @@ import { describe, expect, test } from "bun:test";
 import {
   canTransition,
   endStages,
+  isStageOfKind,
   nextTaskState,
   ROLES,
   roleOf,
   STAGES,
-  startStage,
   TASK_KINDS,
   type Role,
   type Stage,
@@ -114,23 +114,27 @@ describe("nextTaskState", () => {
 });
 
 describe("roleOf / 起止阶段", () => {
-  const t = { agent: "agent-task-t8a", pm: "agent-claudestra" };
-  test("master / owner 按名字；PM 名单或任务 pm 字段 → pm；任务 agent → executor；其余 null", () => {
+  const t = { agent: "agent-task-t8a" };
+  test("master / owner 按名字；只有项目 PM 名单 → pm；任务 agent → executor；其余 null", () => {
     expect(roleOf("master", t, [])).toBe("master");
     expect(roleOf("owner", t, [])).toBe("owner");
-    expect(roleOf("agent-claudestra", t, [])).toBe("pm");
-    expect(roleOf("agent-other-pm", t, ["agent-other-pm"])).toBe("pm");
+    expect(roleOf("agent-claudestra", t, ["agent-claudestra"])).toBe("pm");
+    expect(roleOf("agent-claudestra", t, [])).toBeNull();
     expect(roleOf("agent-task-t8a", t, [])).toBe("executor");
     expect(roleOf("agent-task-t4", t, [])).toBeNull();
     expect(ROLES).toContain(roleOf("agent-task-t8a", t, []) as Role);
   });
-  test("PM 自做的 ops 任务（agent = pm）按 pm 算", () => {
-    expect(roleOf("agent-claudestra", { agent: "agent-claudestra", pm: "agent-claudestra" }, [])).toBe("pm");
+  test("PM 自做的 ops 任务（agent 在 PM 名单里）按 pm 算", () => {
+    expect(roleOf("agent-claudestra", { agent: "agent-claudestra" }, ["agent-claudestra"])).toBe("pm");
   });
-  test("起点：ops 为 build，其余 restate；终点：investigate 看 done，code / ops 先看 verified", () => {
-    expect(startStage("ops")).toBe("build");
-    expect(startStage("code")).toBe("restate");
-    expect(startStage("investigate")).toBe("restate");
+  test("isStageOfKind：跳转表里有出边的阶段与终态算，blocked 不算；investigate 没有 merge / live / verified", () => {
+    expect(isStageOfKind("code", "live")).toBe(true);
+    expect(isStageOfKind("code", "done")).toBe(true);
+    expect(isStageOfKind("code", "blocked")).toBe(false);
+    expect(isStageOfKind("investigate", "merge")).toBe(false);
+    expect(isStageOfKind("ops", "restate")).toBe(false);
+  });
+  test("终点：investigate 看 done，code / ops 先看 verified", () => {
     expect(endStages("investigate")[0]).toBe("done");
     expect(endStages("code")[0]).toBe("verified");
   });

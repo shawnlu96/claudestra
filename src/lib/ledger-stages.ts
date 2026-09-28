@@ -105,6 +105,11 @@ const EXECUTOR_MOVES: readonly (readonly [Stage, Stage])[] = [
   ["fix", "review"],
 ];
 
+/** 这种 kind 的任务会不会停在这个阶段（跳转表里有出边的阶段 + 终态）；blocked 不算，它缺 stageBefore 就回不去 */
+export function isStageOfKind(kind: TaskKind, stage: Stage): boolean {
+  return stage in (TRANSITIONS[kind] ?? {}) || TERMINAL_STAGES.includes(stage);
+}
+
 export type TransitionTask = Pick<LedgerTask, "kind" | "stage" | "stageBefore">;
 export type TransitionCheck = { ok: true } | { ok: false; code: "illegal" | "forbidden" | "terminal"; reason: string };
 
@@ -149,17 +154,15 @@ export function nextTaskState(task: TaskStageState, to: Stage): Pick<LedgerTask,
   };
 }
 
-/** actor 在这个任务上的角色；PM 名单优先于执行者（ops 任务 PM 自做时 agent 与 pm 是同一人） */
-export function roleOf(actor: string, task: Pick<LedgerTask, "agent" | "pm">, pms: readonly string[]): Role | null {
+/**
+ * actor 在这个任务上的角色。PM 只认项目 PM 名单（只有 owner 能设）——task.pm 是展示字段，算进来就能 setTask 自封 PM。
+ * 名单优先于执行者（ops 任务 PM 自做时 agent 是 PM 自己）。"master" / "owner" 按名字认，身份推导（T8b）必须保留这两个名字。
+ */
+export function roleOf(actor: string, task: Pick<LedgerTask, "agent">, pms: readonly string[]): Role | null {
   if (actor === "master" || actor === "owner") return actor;
-  if (pms.includes(actor) || task.pm === actor) return "pm";
+  if (pms.includes(actor)) return "pm";
   if (task.agent === actor) return "executor";
   return null;
-}
-
-/** 指标起点：第一次进入的阶段 */
-export function startStage(kind: TaskKind): Stage {
-  return kind === "ops" ? "build" : "restate";
 }
 
 /** 指标终点：按顺序取第一个出现的（code / ops 以 verified 为准，没经过 verified 才看 done）；cancelled 也算结束 */
