@@ -57,7 +57,7 @@ let firstMsg = "";
 
 beforeAll(async () => {
   const dir = mkdtempSync(join(tmpdir(), "talk-api-"));
-  setTalkForTest({ dbPath: join(dir, "talk.sqlite"), attDir: join(dir, "att"), fp: () => FP, principals: async () => ({ principals: [OWNER_BASE, ...GUESTS] }), ownerNickname: () => "Shawn" });
+  setTalkForTest({ dbPath: join(dir, "talk.sqlite"), attDir: join(dir, "att"), fp: () => FP, principals: async () => ({ principals: [OWNER_BASE, ...GUESTS] }), ownerNickname: () => "阿明" });
   clients.set("111", { ws: { tag: "ws" } as never });
   setAsksForTest({
     path: tempLedgerPath(),
