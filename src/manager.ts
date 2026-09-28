@@ -31,6 +31,7 @@ import {
   MASTER_SESSION,
   AGENT_PREFIX,
   tmuxRaw,
+  tmuxSendEscape, noteProgramInput,
   tmuxRawStrict,
   sessionTarget,
   windowTarget,
@@ -2127,10 +2128,9 @@ async function cmdTmuxSendKeys(name: string, keys: string[]) {
   // keys 可以是 "Enter" "Escape" "Left" "C-c" 或普通字符串（用 -l 字面模式）
   for (const k of keys) {
     const special = /^(Enter|Escape|Esc|Left|Right|Up|Down|Tab|BTab|BSpace|C-[a-z]|M-[a-z]|Space)$/i.test(k);
-    const args = special
-      ? ["send-keys", "-t", windowTarget(tmuxName), k]
-      : ["send-keys", "-t", windowTarget(tmuxName), "-l", "--", k];
-    await tmuxRaw(args);
+    const args = special ? ["send-keys", "-t", windowTarget(tmuxName), k] : ["send-keys", "-t", windowTarget(tmuxName), "-l", "--", k];
+    if (!/^(Escape|Esc)$/i.test(k)) await noteProgramInput(windowTarget(tmuxName), special ? "" : k); // bridge 别把程序敲的字 / C-c 当成 owner
+    await (/^(Escape|Esc)$/i.test(k) ? tmuxSendEscape(windowTarget(tmuxName), { strict: true }) : tmuxRaw(args)); // Esc 走双击护栏（跨进程也算），没发出去就报错
     await Bun.sleep(50);
   }
   output({ ok: true, agent: tmuxName, keys });
