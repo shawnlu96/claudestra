@@ -43,8 +43,9 @@ export interface AppConfig {
   /** 没人看看板时也在后台读 Claude 的 Keychain、查 Claude 额度与重置卡（6 小时一次），让 Claude 的快过期提醒也能后台触发。
    *  缺省开（owner 09-28 批准；设计稿 T2b §3 / §5 原定只在看板打开时读）；false 单独关掉。每个 tick 现读，改完不用重启 */
   quotaClaudeBackground?: boolean;
-  /** 批量管理（bridge/fleet）：compactKeep 覆盖 /compact 的默认保留清单（lib/fleet-plan.ts DEFAULT_COMPACT_KEEP） */
-  fleet?: { compactKeep?: string };
+  /** 批量管理（bridge/fleet）：compactKeep 覆盖 /compact 的默认保留清单（lib/fleet-plan.ts DEFAULT_COMPACT_KEEP）；
+   *  callers = 除大总管和台账 PM 外还能调 fleet MCP 工具的 agent（管全部，lib/fleet-caller.ts） */
+  fleet?: { compactKeep?: string; callers?: string[] };
 }
 
 /** 归档保留天数缺省值（设置里可改） */
@@ -91,7 +92,17 @@ function merge(base: AppConfig, raw: any): AppConfig {
     ...(typeof raw.groqApiKey === "string" && raw.groqApiKey ? { groqApiKey: raw.groqApiKey } : {}),
     ...(typeof raw.quotaLive === "boolean" ? { quotaLive: raw.quotaLive } : {}),
     ...(typeof raw.quotaClaudeBackground === "boolean" ? { quotaClaudeBackground: raw.quotaClaudeBackground } : {}),
+    ...fleetOf(raw.fleet),
   };
+}
+
+/** 白名单式读 fleet：漏在 merge 外面的字段读出来是 undefined，而且任何 set*（读→改→写）都会把它从磁盘上抹掉 */
+function fleetOf(f: unknown): Pick<AppConfig, "fleet"> {
+  if (!f || typeof f !== "object") return {};
+  const { compactKeep, callers } = f as Record<string, unknown>;
+  const list = Array.isArray(callers) ? callers.filter((c): c is string => typeof c === "string" && c.trim() !== "") : null;
+  const fleet = { ...(typeof compactKeep === "string" ? { compactKeep } : {}), ...(list ? { callers: list } : {}) };
+  return Object.keys(fleet).length ? { fleet } : {};
 }
 
 function defaults(): AppConfig {

@@ -9,8 +9,9 @@ import { appendEvent } from "../../lib/ledger-write.js";
 export interface AuditInput {
   runId: string;
   action: FleetAction;
+  /** 谁调的：网页 / CLI 是 "owner"，MCP 工具是 bridge 按连接认出的调用方名字；也是台账 note 的 actor */
   actor: string;
-  /** 从哪来：web 设备名 / "cli" */
+  /** 从哪来：web 设备名 / "cli" / "mcp" */
   via: string;
   at: number;
   results: FleetResult[];
@@ -53,7 +54,7 @@ export function auditFleet(x: AuditInput, log: (line: string) => void = console.
   for (const [project, text] of ledgerNotes(x)) {
     try {
       db ??= openLedger();
-      appendEvent(db, { actor: "owner", now: x.at, dedupKey: `fleet:${x.runId}:${project}` }, { project, target: "", kind: "note", text, data: { fleetRun: x.runId } });
+      appendEvent(db, { actor: x.actor, now: x.at, dedupKey: `fleet:${x.runId}:${project}` }, { project, target: "", kind: "note", text, data: { fleetRun: x.runId } });
     } catch (e) {
       console.warn(`⚠️ [fleet] ${x.runId} 台账 note 没写进 ${project}: ${(e as Error).message}`);
     }

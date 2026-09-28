@@ -15,8 +15,8 @@ export interface FleetCaller {
 }
 
 export interface CallerInput {
-  /** 这条 ws 连接注册过的频道；null = 没注册（manager CLI，或还没注册上的 channel-server） */
-  channelId: string | null;
+  /** 这条 ws 连接在 bridge 注册过的频道；空 = 没注册（manager CLI，或还没注册上的 channel-server） */
+  channels: readonly string[];
   /** 请求是不是 MCP 工具发的（channel-server 带 via:"mcp"） */
   mcp: boolean;
   controlChannelId?: string;
@@ -35,12 +35,14 @@ export const FLEET_DENIED = "只有大总管和 PM 能用 fleet";
 export const MCP_TEXT_MAX = 2000;
 
 export function identifyFleetCaller(x: CallerInput): CallerDecision {
-  if (x.channelId === null) {
+  if (!x.channels.length) {
     // channel-server 没注册上（控制频道被拒、还在重连）时发来的 MCP 请求不能掉进 CLI 分支，否则身份判定就被绕过了
     return x.mcp ? { kind: "deny", error: "这条连接还没在 bridge 注册频道，认不出调用方，fleet 不能用" } : { kind: "cli" };
   }
-  if (x.controlChannelId && x.channelId === x.controlChannelId) return { kind: "ok", caller: { kind: "master", name: "master", projects: null } };
-  if (!x.agent) return { kind: "deny", error: `${FLEET_DENIED}（频道 ${x.channelId} 不在 registry 里，认不出是谁）` };
+  // 控制频道只有 MASTER_DIR 里的实例能注册（lib/control-registrant.ts），占着它就是大总管
+  if (x.controlChannelId && x.channels.includes(x.controlChannelId)) return { kind: "ok", caller: { kind: "master", name: "master", projects: null } };
+  if (x.channels.length > 1) return { kind: "deny", error: `${FLEET_DENIED}（这条连接注册了 ${x.channels.length} 个频道，认不准是谁）` };
+  if (!x.agent) return { kind: "deny", error: `${FLEET_DENIED}（频道 ${x.channels[0]} 不在 registry 里，认不出是谁）` };
   const name = x.agent.name;
   // external = 开放给 peer / API token 调用；它的回合可能是外人发的消息触发的，不能拿它的身份去别人窗口里发键
   if (x.agent.external) return { kind: "deny", error: `${FLEET_DENIED}（${name} 开了 external，可被 peer 调用的 agent 不能调 fleet）` };

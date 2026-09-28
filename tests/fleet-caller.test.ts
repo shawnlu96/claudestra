@@ -11,12 +11,12 @@ const PMS = new Map<string, string[]>([
   ["side", ["agent-side-pm"]],
 ]);
 const base = (o: Partial<CallerInput>): CallerInput => ({
-  channelId: "ch-x", mcp: true, controlChannelId: CONTROL, agent: null, pmsByProject: PMS, callers: [], ...o,
+  channels: ["ch-x"], mcp: true, controlChannelId: CONTROL, agent: null, pmsByProject: PMS, callers: [], ...o,
 });
 
 describe("调用方判定矩阵", () => {
   test("大总管：按控制频道认，管全部", () => {
-    expect(identifyFleetCaller(base({ channelId: CONTROL }))).toEqual({ kind: "ok", caller: { kind: "master", name: "master", projects: null } });
+    expect(identifyFleetCaller(base({ channels: [CONTROL] }))).toEqual({ kind: "ok", caller: { kind: "master", name: "master", projects: null } });
   });
 
   test("PM：台账 pms 上的 agent，只管自己是 PM 的项目", () => {
@@ -54,8 +54,14 @@ describe("调用方判定矩阵", () => {
   });
 
   test("没注册的连接：MCP 请求拒（不许掉进 CLI 分支），manager CLI 走 cli", () => {
-    expect(identifyFleetCaller(base({ channelId: null, mcp: true })).kind).toBe("deny");
-    expect(identifyFleetCaller(base({ channelId: null, mcp: false }))).toEqual({ kind: "cli" });
+    expect(identifyFleetCaller(base({ channels: [], mcp: true })).kind).toBe("deny");
+    expect(identifyFleetCaller(base({ channels: [], mcp: false }))).toEqual({ kind: "cli" });
+  });
+
+  test("一条连接注册了多个频道：含控制频道算大总管，否则认不准、拒", () => {
+    expect(identifyFleetCaller(base({ channels: ["ch-x", CONTROL] })).kind === "ok").toBe(true);
+    const r = identifyFleetCaller(base({ channels: ["ch-x", "ch-y"], agent: { name: "agent-claudestra" } }));
+    expect(r.kind === "deny" && r.error).toContain("认不准");
   });
 
   test("请求里自报的名字不参与判定：只看连接的频道", () => {

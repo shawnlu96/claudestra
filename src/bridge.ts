@@ -2261,7 +2261,7 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
     }
 
     case "forward_to_agent": ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, ...(await handleForward(ws, msg)) })); break;
-    case "fleet_state": case "fleet_run": ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, ...(await (await import("./bridge/fleet/ws.js")).handleFleetWs(msg, ws.data)) })); break;
+    case "fleet_state": case "fleet_run": ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, ...(await (await import("./bridge/fleet/ws.js")).handleFleetWs(msg, ws)) })); break;
     case "route_to_agent": {
       try {
         // 找发送方的 channelId

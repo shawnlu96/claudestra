@@ -65,11 +65,11 @@ describe("HTTP 参数校验（owner）", () => {
 describe("ws：只收直连回环", () => {
   test("升级时没标 loopback（非回环 / 带 XFF 的反代）→ 拒绝", async () => {
     for (const data of [undefined, {}, { loopback: false }, { loopback: "true" }]) {
-      expect(await handleFleetWs({ type: "fleet_state" }, data)).toEqual({ error: "批量管理只收本机直连回环的连接" });
+      expect(await handleFleetWs({ type: "fleet_state" }, { data })).toEqual({ error: "批量管理只收本机直连回环的连接" });
     }
   });
   test("回环 + 坏参数 → 报错而不是执行", async () => {
-    expect((await handleFleetWs({ type: "fleet_run", action: { kind: "nope" }, select: { all: true } }, { loopback: true })).error).toContain("动作只能是");
-    expect((await handleFleetWs({ type: "fleet_run", action: { kind: "compact" }, select: {} }, { loopback: true })).error).toContain("要指定");
+    expect((await handleFleetWs({ type: "fleet_run", action: { kind: "nope" }, select: { all: true } }, { data: { loopback: true } })).error).toContain("动作只能是");
+    expect((await handleFleetWs({ type: "fleet_run", action: { kind: "compact" }, select: {} }, { data: { loopback: true } })).error).toContain("要指定");
   });
 });

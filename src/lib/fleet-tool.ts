@@ -83,11 +83,11 @@ interface StateAgent {
   project?: string;
   runtime?: string;
   online?: boolean;
-  busy?: boolean;
   lowPriority?: string;
   walled?: boolean;
   contextTokens?: number;
-  lp?: { resetsAt?: string; allowancePct?: number; offer?: boolean };
+  /** bridge/fleet/lp-monitor.ts 的 LpSnapshot（busy = 输入框上方有 spinner） */
+  lp?: { resetsAt?: string; allowancePct?: number; offer?: boolean; busy?: boolean };
 }
 
 const kTokens = (n: number) => (n >= 1000 ? `${Math.round(n / 1000)}k` : String(n));
@@ -95,7 +95,7 @@ const kTokens = (n: number) => (n >= 1000 ? `${Math.round(n / 1000)}k` : String(
 function stateLine(a: StateAgent): string {
   const bits: string[] = [a.online ? "在线" : "离线"];
   if (a.runtime && a.runtime !== "claude-code") bits.push(a.runtime);
-  if (a.busy !== undefined && a.online) bits.push(a.busy ? "忙" : "闲");
+  if (a.lp?.busy !== undefined && a.online) bits.push(a.lp.busy ? "忙" : "闲");
   if (a.walled) bits.push(`撞墙等待${a.lp?.resetsAt ? `（${a.lp.resetsAt} 恢复）` : ""}${a.lp?.offer ? "，可开 LP" : ""}`);
   if (a.lowPriority === "on") bits.push(`LP 开${a.lp?.resetsAt ? `（到 ${a.lp.resetsAt}）` : ""}${a.lp?.allowancePct !== undefined ? `，LP 额度余 ${a.lp.allowancePct}%` : ""}`);
   else if (a.lowPriority === "unknown" && a.online && a.runtime === "claude-code") bits.push("LP 状态看不清");

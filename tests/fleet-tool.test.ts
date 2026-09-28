@@ -68,10 +68,10 @@ describe("工具说明与排版", () => {
     const text = formatFleetState({
       agents: [
         {
-          name: "agent-task-t43", project: "claude-orchestrator", runtime: "claude-code", online: true, busy: true,
-          lowPriority: "on", lp: { resetsAt: "3:20am", allowancePct: 91 }, contextTokens: 182_400,
+          name: "agent-task-t43", project: "claude-orchestrator", runtime: "claude-code", online: true,
+          lowPriority: "on", lp: { resetsAt: "3:20am", allowancePct: 91, busy: true }, contextTokens: 182_400,
         },
-        { name: "agent-b", runtime: "claude-code", online: true, busy: false, lowPriority: "off", walled: true, lp: { resetsAt: "4am", offer: true } },
+        { name: "agent-b", runtime: "claude-code", online: true, lowPriority: "off", walled: true, lp: { resetsAt: "4am", offer: true, busy: false } },
         { name: "agent-pi", runtime: "pi", online: false },
       ],
     });
