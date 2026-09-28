@@ -77,11 +77,37 @@ describe("推导（纯函数）", () => {
     expect(findPath(edges, "B", "B")).toEqual(["B"]);
   });
 
-  test("reviewBranches：investigate 通过去 done，其余 merge；只认本轮的结论", () => {
-    expect(reviewBranches({ kind: "code", round: 2 }, { round: 2, verdict: "pass" })).toEqual({ pass: "merge", changes: "fix", taken: "pass" });
-    expect(reviewBranches({ kind: "investigate", round: 1 }, { round: 1, verdict: "block" })).toEqual({ pass: "done", changes: "fix", taken: "changes" });
-    expect(reviewBranches({ kind: "code", round: 2 }, { round: 1, verdict: "changes" }).taken).toBeNull();
-    expect(reviewBranches({ kind: "code", round: 0 }, null).taken).toBeNull();
+  test("blocked 按进 blocked 前的阶段推：上游从 live 进 blocked 不会让下游重新被挡；没记 stageBefore 的按 blocked 算", () => {
+    expect(isSatisfied({ kind: "code", stage: "blocked", stageBefore: "live" })).toBe(true);
+    expect(derivedState("blocks", { kind: "code", stage: "blocked", stageBefore: "review" })).toBe("active");
+    expect(derivedState("blocks", { kind: "code", stage: "blocked", stageBefore: null })).toBe("waiting");
+  });
+
+  test("findPath 在写锁里跑：3 万条出边的星形图 + 长链也是线性时间", () => {
+    const edges = Array.from({ length: 30_000 }, (_, i) => ({ from: "hub", to: `n${i}` }));
+    for (let i = 0; i < 5_000; i++) edges.push({ from: `c${i}`, to: `c${i + 1}` });
+    edges.push({ from: "n29999", to: "c0" });
+    const t0 = performance.now();
+    expect(findPath(edges, "hub", "c5000")).toHaveLength(5_003);
+    expect(findPath(edges, "c0", "hub")).toBeNull();
+    expect(performance.now() - t0).toBeLessThan(1_000);
+  });
+
+  test("reviewBranches：investigate 通过去 done，其余 merge；以实际阶段为准，review 中才看本轮结论", () => {
+    const rb = (stage: Stage, round: number, last: { round: number; verdict: string } | null, kind: TaskKind = "code", stageBefore: Stage | null = null) =>
+      reviewBranches({ kind, stage, round, stageBefore }, last).taken;
+    expect(reviewBranches({ kind: "investigate", stage: "review", round: 1 }, null)).toEqual({ pass: "done", changes: "fix", taken: null });
+    expect(rb("review", 2, { round: 2, verdict: "pass" })).toBe("pass");
+    expect(rb("review", 2, { round: 2, verdict: "block" })).toBe("changes");
+    expect(rb("review", 2, { round: 1, verdict: "changes" })).toBeNull();
+    // 结论说 pass，但 PM 实际退回了 fix（例如 rebase 后 CI 红）：以阶段为准
+    expect(rb("fix", 2, { round: 2, verdict: "pass" })).toBe("changes");
+    expect(rb("merge", 2, { round: 2, verdict: "changes" })).toBe("pass");
+    expect(rb("live", 3, null)).toBe("pass");
+    expect(rb("done", 1, null, "investigate")).toBe("pass");
+    expect(rb("blocked", 2, null, "code", "fix")).toBe("changes");
+    expect(rb("spec", 2, { round: 2, verdict: "changes" })).toBeNull();
+    expect(rb("build", 0, null)).toBeNull();
   });
 });
 
@@ -118,6 +144,9 @@ describe("写入：加 / 改 / 删", () => {
 
   test("校验：条件必填且 ≤ 60 字、kind / state 枚举、自环、重复边、不存在的任务、跨项目", () => {
     expect(errOf(() => addDep(db, PM, { from: "A", to: "B", when: " " })).code).toBe("invalid");
+    for (const w of ["第一行\n第二行", "a\rb", "a\u200bb", "a\u2028b"]) expect([w, errOf(() => addDep(db, PM, { from: "A", to: "B", when: w })).code]).toEqual([w, "invalid"]);
+    expect(addDep(db, PM, { from: "C", to: "B", when: ` ${"字".repeat(60)}  ` }).row?.when).toHaveLength(60);
+    removeDep(db, PM, { from: "C", to: "B" });
     expect(errOf(() => addDep(db, PM, { from: "A", to: "B", when: "字".repeat(61) })).code).toBe("invalid");
     expect(addDep(db, PM, { from: "A", to: "B", when: "字".repeat(60) }).row?.when).toHaveLength(60);
     expect(errOf(() => addDep(db, PM, { from: "B", to: "C", when: "x", kind: "soft" as never })).code).toBe("invalid");
@@ -145,6 +174,15 @@ describe("写入：加 / 改 / 删", () => {
     expect(errOf(() => setDep(db, EXE, { from: "A", to: "B", rev: 1, patch: { state: "done" } })).code).toBe("forbidden");
     expect(errOf(() => removeDep(db, EXE, { from: "A", to: "B" })).code).toBe("forbidden");
     expect(setDep(db, OWNER, { from: "A", to: "B", rev: 1, patch: { state: "done" } }).row?.state).toBe("done");
+  });
+
+  test("dedupKey 按动作与前置区分：同 key 用在 add C>B / rm A>B 报 dedup_mismatch，不会被当成重复吞掉；没权限的人拿别人的 key 先被拒", () => {
+    addDep(db, { ...PM, dedupKey: "k1" }, { from: "A", to: "B", when: "x" });
+    expect(errOf(() => addDep(db, { ...PM, dedupKey: "k1" }, { from: "C", to: "B", when: "x" })).code).toBe("dedup_mismatch");
+    expect(errOf(() => removeDep(db, { ...PM, dedupKey: "k1" }, { from: "A", to: "B" })).code).toBe("dedup_mismatch");
+    expect(errOf(() => setDep(db, { ...PM, dedupKey: "k1" }, { from: "A", to: "B", rev: 1, patch: { state: "done" } })).code).toBe("dedup_mismatch");
+    expect(errOf(() => addDep(db, { ...EXE, dedupKey: "k1" }, { from: "A", to: "B", when: "x" })).code).toBe("forbidden");
+    expect(listDeps(db, P).map((d) => [d.from, d.state])).toEqual([["A", null]]);
   });
 
   test("dedupKey：同 key 重复加边返回原事件、不重复写；推阶段后边的推导状态跟着变", () => {
@@ -201,24 +239,33 @@ describe("负责人类型", () => {
 
   test("格式（附录 B-2）：agent = 本机 agent 名；human = local:<principalId>；peer_agent = <fp>/<agent>；各带非法样例", () => {
     const ok: [AssigneeKind, string][] = [
-      ["agent", "agent-task-t8h"], ["agent", "master"], ["agent", "agent-数据"],
+      ["agent", "agent-task-t8h"], ["agent", "master"], ["agent", "agent-数据"], ["agent", "agent-x@peer"],
       ["human", "local:owner:self"], ["human", "local:guest:1a2b3c4d"],
       ["peer_agent", `${FP}/future_data`], ["peer_agent", `${FP}/agent-x`],
     ];
     const bad: [AssigneeKind, string][] = [
-      ["agent", ""], ["agent", "owner"], ["agent", "a b"], ["agent", "x@peer"], ["agent", "a/b"], ["agent", "a:b"], ["agent", "a;rm"], ["agent", "a\u0007"],
-      ["agent", "x".repeat(65)],
+      ["agent", ""], ["agent", "owner"], ["agent", "a b"], ["agent", "a/b"], ["agent", "a:b"], ["agent", "a;rm"], ["agent", "a\u0007"],
+      ["agent", "x".repeat(65)], ["agent", "a\u200bb"], ["agent", "a\u2060b"], ["agent", "a\u202eb"], ["agent", "a\u3000b"],
       ["human", "owner"], ["human", "local:"], ["human", "local:owner:other"], ["human", "local:guest:XYZ"], ["human", "local:token:tok_1a2b"],
       ["human", "guest:1a2b3c4d"], ["human", "local:guest:1a2b3c4d "],
       ["peer_agent", "future_data@ahh"], ["peer_agent", "future_data"], ["peer_agent", `${FP}/`], ["peer_agent", `/future_data`],
       ["peer_agent", `${FP.toUpperCase()}/x`], ["peer_agent", "abcd-ef01/x"], ["peer_agent", `${FP}/a/b`], ["peer_agent", `${FP}/a b`],
+      ["peer_agent", `${FP}/Agent-X`], ["peer_agent", `${FP}/ａｇｅｎｔ`], ["peer_agent", `${FP}/a\u200bb`],
     ];
     for (const [k, v] of ok) expect([k, v, assigneeFormatError(k, v)]).toEqual([k, v, null]);
     for (const [k, v] of bad) expect([k, v, typeof assigneeFormatError(k, v)]).toEqual([k, v, "string"]);
   });
 
-  test("改名钩子：kind=agent 的 assignee 跟着 agent 一起改", () => {
-    renameAgentRefs(db, OWNER, "agent-task-t8h", "agent-t8h-new");
-    expect(who("B")).toEqual(["agent-t8h-new", "agent", "agent-t8h-new"]);
+  test("只改类型不带 assignee：同类型等于没改，不拿旧 assignee 反推 agent（新旧代码混写过的行两列可能不一致）", () => {
+    db.exec("UPDATE tasks SET agent = 'agent-z', assignee = 'agent-x' WHERE id = 'A'");
+    setTask(db, PM, { id: "A", rev: (getTask(db, "A") as LedgerTask).rev, patch: { assigneeKind: "agent" } });
+    expect(who("A")).toEqual(["agent-z", "agent", "agent-x"]);
+    expect(errOf(() => setTask(db, PM, { id: "A", rev: (getTask(db, "A") as LedgerTask).rev, patch: { assigneeKind: "human" } })).code).toBe("invalid");
   });
+
+  test("改名钩子：kind=agent 的 assignee 跟着 agent 一起改；改成带 @ 的名字（manager 允许）台账也跟得上", () => {
+    renameAgentRefs(db, OWNER, "agent-task-t8h", "agent-a@b");
+    expect(who("A")).toEqual(["agent-a@b", "agent", "agent-a@b"]);
+  });
+
 });

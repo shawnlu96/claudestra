@@ -88,11 +88,16 @@ describe("负责人旗标", () => {
     const r = await run(PM, "task-set", "T1", "--rev", rev(), "--assignee-kind", "agent", "--assignee", "Task-X");
     expect(r).toMatchObject({ ok: true, task: { agent: "agent-task-x", assigneeKind: "agent", assignee: "agent-task-x" }, registryLinked: true });
     expect(reg.agents["agent-task-x"]).toMatchObject({ parent: PM, task: "T1" });
-    // 指纹大小写不敏感：CLI 转小写后入库
-    expect(await run(PM, "task-set", "T1", "--rev", rev(), "--assignee-kind", "peer_agent", "--assignee", "1A2B-3C4D-5E6F-7A8B/future_data")).toMatchObject({
+    // 指纹与 agent 部分都归一（小写、NFKC 把全角转半角）后入库：同一个对端 agent 不会因写法不同变成两个负责人
+    expect(await run(PM, "task-set", "T1", "--rev", rev(), "--assignee-kind", "peer_agent", "--assignee", "1A2B-3C4D-5E6F-7A8B/Ｆuture_Data")).toMatchObject({
       ok: true, task: { agent: null, assigneeKind: "peer_agent", assignee: "1a2b-3c4d-5e6f-7a8b/future_data" },
     });
     expect(await run(PM, "task-set", "T1", "--rev", rev(), "--agent", "task-x", "--assignee", "y")).toMatchObject({ ok: false, code: "invalid" });
     expect(await run(PM, "task-set", "T1", "--rev", rev(), "--assignee", "")).toMatchObject({ ok: true, task: { agent: null, assigneeKind: null, assignee: null } });
+  });
+
+  test("kind=agent 指到 registry 里没有的 agent：台账照记，结果里带 registryNote 提示", async () => {
+    const r = await run(PM, "task-set", "T2", "--rev", String(getTask(db, "T2")!.rev), "--assignee-kind", "agent", "--assignee", "nobody");
+    expect(r).toMatchObject({ ok: true, task: { agent: "agent-nobody" }, registryLinked: false, registryNote: expect.stringContaining("registry 里没有 agent-nobody") });
   });
 });

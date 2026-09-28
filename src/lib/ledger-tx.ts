@@ -1,6 +1,6 @@
 /**
  * 台账写入的内部底座：事务、写事件、dedupKey 重放。只给写入模块（ledger-write.ts / ledger-deps-write.ts）用——
- * 直接调 insertEvent 就绕过了阶段机与 owner 校验，tests/ledger-store.test.ts 查着别的文件不许 import 这里。
+ * 直接调 insertEvent 就绕过了阶段机与 owner 校验；tests/ledger-migrate.test.ts 扫 src/ 查着别的文件不许 import 这里。
  */
 import type { Database } from "bun:sqlite";
 import { IMPORT_ACTOR, type WriteCtx, type WriteResult } from "./ledger-checks.js";
@@ -26,13 +26,22 @@ export function insertEvent(db: Database, ctx: WriteCtx, e: EventDraft, primary:
   return toEvent(r as Record<string, unknown>);
 }
 
-/** dedupKey 命中：同一动作 → 原样返回；key 被别的动作用过 → dedup_mismatch */
-export function replay<T>(db: Database, ctx: WriteCtx, e: Pick<EventDraft, "project" | "target" | "kind">, load: () => T): WriteResult<T> | null {
+/**
+ * dedupKey 命中：同一动作 → 原样返回；key 被别的动作用过 → dedup_mismatch。
+ * same 可再比事件 data：同一 target 同一 kind 下还分得出不同动作时（依赖边的 add / set / rm、不同前置）必须给，否则会把别的动作当重复吞掉。
+ */
+export function replay<T>(
+  db: Database,
+  ctx: WriteCtx,
+  e: Pick<EventDraft, "project" | "target" | "kind">,
+  load: () => T,
+  same: (prev: LedgerEvent) => boolean = () => true,
+): WriteResult<T> | null {
   if (ctx.dedupKey === "") throw new LedgerError("invalid", "dedupKey 不能是空字符串（不要幂等就别传）");
   if (!ctx.dedupKey) return null;
   const prev = getEventByDedup(db, ctx.dedupKey);
   if (!prev) return null;
-  if (prev.project !== e.project || prev.target !== e.target || prev.kind !== e.kind) {
+  if (prev.project !== e.project || prev.target !== e.target || prev.kind !== e.kind || !same(prev)) {
     throw new LedgerError("dedup_mismatch", `dedupKey ${ctx.dedupKey} 已用于 ${prev.project}/${prev.target || "(项目)"} 的 ${prev.kind} 事件`);
   }
   return { row: load(), event: prev, duplicate: true };

@@ -29,6 +29,13 @@ export function isMasterAgent(name: string | undefined | null): boolean {
 }
 
 /**
+ * agent 名里不许出现的字符（manager 新建 / resume / 改名与台账的负责人校验共用这一份）：空白、shell 元字符、控制字符，
+ * 以及 `/` `\` `:` `~`——agent 名会拼进归档目录、截图文件路径，带分隔符就能写到预期之外的位置。
+ * \p{Cf}（零宽、方向控制等不可见格式符）让两个看起来一样的名字成了两个人。CJK 等 Unicode 字母允许。
+ */
+export const AGENT_NAME_BLOCKLIST_RE = /[\s"'`$;&|<>()*?{}\\/:~\x00-\x1f\x7f\p{Cf}]/u;
+
+/**
  * 保留给身份的名字：台账（lib/ledger-stages.ts roleOf）把 actor "owner" / "master" 直接当角色。
  * registry 键带 agent- 前缀，推导出的 actor 本不会撞上，但 agent-master 在别处（isMasterAgent）已被当成大总管——
  * 新建 / resume / 改名一律不许用这两个名字（manager/core.ts assertValidNewName），doctor 对已有的 agent-owner 报警。

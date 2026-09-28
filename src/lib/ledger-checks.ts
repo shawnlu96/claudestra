@@ -20,6 +20,7 @@ import {
   type TaskKind,
 } from "./ledger-stages.js";
 import { getItem, getMeta, getTask, LedgerError } from "./ledger-store.js";
+import { AGENT_NAME_BLOCKLIST_RE } from "./registry.js";
 import { FP_RE } from "./relay-protocol.js";
 
 /** specRev 不在里面：它只由阶段机（回退到 spec）维护 */
@@ -121,21 +122,33 @@ export function checkNewTask(db: Database, actor: string, input: NewTask): boole
 }
 
 type Assignment = Pick<LedgerTask, "agent" | "assigneeKind" | "assignee">;
-/** 本机 agent 名：与 manager 建 agent 时的黑名单同一口径（core.ts NAME_BLOCKLIST_RE），另外不许 @（旧的 agent@peer 写法） */
-const AGENT_NAME_RE = /^[^\s"'`$;&|<>()*?{}\\/:~@\p{Cc}]{1,64}$/u;
+/** registry 键的长度上限：manager 裸名 ≤ 48，加上 agent- 前缀留余量 */
+const AGENT_NAME_MAX = 64;
 /** 本机的人：owner 或 guest principal（lib/devices.ts 的 id 形状）；token principal 可能是 peer，不算人 */
 const HUMAN_RE = /^local:(owner:self|guest:[0-9a-f]{1,64})$/;
 
+/** 本机 agent 名：与 manager 建 agent 同一份黑名单（lib/registry.ts），owner 是身份保留名（master 就是大总管本人，可以） */
+function isAgentName(name: string): boolean {
+  return name.length > 0 && [...name].length <= AGENT_NAME_MAX && !AGENT_NAME_BLOCKLIST_RE.test(name) && name !== "owner";
+}
+
 /**
  * assignee 的三种格式（docs 28-human-collab 附录 B-2）：agent = 本机 agent 名；human = local:<principalId>；
- * peer_agent = <fp>/<agent>，fp 是对方实例的指纹——peer 的名字能改、会重名，不能当键。返回错误原因，合格为 null。
+ * peer_agent = <fp>/<agent>，fp 是对方实例的指纹——peer 的名字能改、会重名，不能当键。
+ * peer 的 agent 部分要求已归一（NFKC + 小写，CLI 负责归一），否则 fp/Agent-X 与 fp/agent-x 会被当成两个人。返回错误原因，合格为 null。
  */
 export function assigneeFormatError(kind: AssigneeKind, who: string): string | null {
-  if (kind === "agent") return AGENT_NAME_RE.test(who) && who !== "owner" ? null : "本机 agent 名（不含空白、引号、/ : @ 等）";
+  if (kind === "agent") return isAgentName(who) ? null : "本机 agent 名（不含空白、引号、/ : 等，不能是 owner）";
   if (kind === "human") return HUMAN_RE.test(who) ? null : "local:<principalId>，如 local:owner:self、local:guest:1a2b3c4d";
   const slash = who.indexOf("/");
-  const ok = slash > 0 && FP_RE.test(who.slice(0, slash)) && AGENT_NAME_RE.test(who.slice(slash + 1));
-  return ok ? null : "<fp>/<agent>，fp 是对方指纹（xxxx-xxxx-xxxx-xxxx 小写十六进制）";
+  const agent = who.slice(slash + 1);
+  const ok = slash > 0 && FP_RE.test(who.slice(0, slash)) && isAgentName(agent) && agent === normalizePeerAgent(agent);
+  return ok ? null : "<fp>/<agent>，fp 是对方指纹（xxxx-xxxx-xxxx-xxxx 小写十六进制），agent 小写";
+}
+
+/** peer agent 名的归一：NFKC（全角 → 半角等）+ 小写 */
+export function normalizePeerAgent(name: string): string {
+  return name.normalize("NFKC").toLowerCase();
 }
 
 function checkAssignee(kind: unknown, who: string): void {
@@ -168,7 +181,11 @@ export function resolveAssignee(cur: Assignment, patch: Record<string, unknown>)
     if ("assigneeKind" in patch && patch.assigneeKind) throw new LedgerError("invalid", "给了 assigneeKind 就要同时给 assignee");
     return { agent: null, assigneeKind: null, assignee: null };
   }
-  if ("assigneeKind" in patch && !("assignee" in patch) && kind !== cur.assigneeKind) throw new LedgerError("invalid", "换负责人类型要同时给 assignee");
+  if (!("assignee" in patch)) {
+    // 只给了类型：同类型等于没改（不拿旧 assignee 反推 agent——新旧代码混写过的行两列可能不一致），换类型必须带 assignee
+    if (kind === cur.assigneeKind) return {};
+    throw new LedgerError("invalid", "换负责人类型要同时给 assignee");
+  }
   checkAssignee(kind, who);
   return { agent: kind === "agent" ? who : null, assigneeKind: kind, assignee: who };
 }

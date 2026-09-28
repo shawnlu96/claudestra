@@ -2,6 +2,7 @@
  * `ledger` 的写子命令（docs 10-ledger §3 动作表）：参数 → lib/ledger-write.ts。角色：阶段与 meta 由库判，其余在这里（LedgerCli.require*）。
  * task-new / task-set 改执行者时经 T4 的派发规则联动 registry 的 parent / task（manager/team.ts），台账先写、registry 后写。
  */
+import { normalizePeerAgent } from "../lib/ledger-checks.js";
 import { STAGES, TASK_KINDS, type Stage, type TaskKind } from "../lib/ledger-stages.js";
 import { LedgerError } from "../lib/ledger-store.js";
 import {
@@ -27,12 +28,12 @@ const TASK_FLAGS: Record<string, string> = {
 const ITEM_VALUED = [...Object.keys(ITEM_FLAGS), "extra", "project", "dedup"];
 const TASK_VALUED = [...Object.keys(TASK_FLAGS), "extra", "dedup"];
 
-/** assignee 按类型归一：本机 agent → registry 键；peer_agent 的指纹部分转小写（指纹按小写比）；human 原样，格式由库校验 */
+/** assignee 按类型归一：本机 agent → registry 键；peer_agent 的指纹转小写、agent 部分 NFKC + 小写；human 原样。格式由库校验 */
 function normalizeAssignee(v: string, kind: string | null): string | null {
   if (!v) return null;
   if (kind === "agent") return agentKey(v);
   const slash = v.indexOf("/");
-  return kind === "peer_agent" && slash > 0 ? `${v.slice(0, slash).toLowerCase()}${v.slice(slash)}` : v;
+  return kind === "peer_agent" && slash > 0 ? `${v.slice(0, slash).toLowerCase()}/${normalizePeerAgent(v.slice(slash + 1))}` : v;
 }
 
 /** 旗标 → 字段 patch；agent / pm 归一成 registry 键，空串 = 清空 */

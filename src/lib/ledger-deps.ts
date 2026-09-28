@@ -37,7 +37,14 @@ export interface DepView extends LedgerDep {
   fromCancelled: boolean;
 }
 
-type DepTask = Pick<LedgerTask, "id" | "kind" | "stage">;
+/** stageBefore 可缺（纯函数的调用方不一定有）；blocked 的任务按进 blocked 前的阶段推 */
+type StageOf = Pick<LedgerTask, "kind" | "stage"> & { stageBefore?: Stage | null };
+type DepTask = StageOf & Pick<LedgerTask, "id">;
+
+/** blocked 是暂停，不是倒退：上游从 live 进 blocked，下游不该重新被挡；没记 stageBefore 的残缺数据按 blocked 本身算 */
+function workStage(t: StageOf): Stage {
+  return t.stage === "blocked" && t.stageBefore ? t.stageBefore : t.stage;
+}
 
 /** code / ops 进了 merge 就算满足（依赖要的是进 main，不是上线）；investigate 不经合并，只认 done */
 const SATISFIED: Record<TaskKind, readonly Stage[]> = {
@@ -46,19 +53,19 @@ const SATISFIED: Record<TaskKind, readonly Stage[]> = {
   investigate: ["done"],
 };
 
-export function isSatisfied(task: Pick<LedgerTask, "kind" | "stage">): boolean {
-  return SATISFIED[task.kind]?.includes(task.stage) ?? false;
+export function isSatisfied(task: StageOf): boolean {
+  return SATISFIED[task.kind]?.includes(workStage(task)) ?? false;
 }
 
 /**
  * blocks：前置满足 → done；前置在 review（条件正在判定）→ active；其余 → waiting。
  * branch：前置满足 → active（到了分叉口，等人判定走哪条）；否则 waiting。branch 的 done 只能由 PM 手动选中。
  */
-export function derivedState(kind: DepKind, from: Pick<LedgerTask, "kind" | "stage"> | undefined): DepState {
+export function derivedState(kind: DepKind, from: StageOf | undefined): DepState {
   if (!from) return "waiting";
   if (kind === "branch") return isSatisfied(from) ? "active" : "waiting";
   if (isSatisfied(from)) return "done";
-  return from.stage === "review" ? "active" : "waiting";
+  return workStage(from) === "review" ? "active" : "waiting";
 }
 
 export function depViews(deps: readonly LedgerDep[], tasks: readonly DepTask[]): DepView[] {
@@ -90,18 +97,25 @@ export function runnableTasks<T extends DepTask>(tasks: readonly T[], views: rea
   return tasks.filter((t) => !TERMINAL_STAGES.includes(t.stage) && blockedBy(t.id, views).length === 0);
 }
 
-/** 沿出边从 start 走到 goal 的一条路径（含两端），走不到为 null。加边 from→to 前查 findPath(to, from)：有路就成环 */
+/**
+ * 沿出边从 start 走到 goal 的一条路径（含两端），走不到为 null。加边 from→to 前查 findPath(to, from)：有路就成环。
+ * 在写锁里跑：邻接表原地 push、队列用下标出队，整体 O(边数)（shift / 展开拷贝在大图上是平方级，会把写锁占满）。
+ */
 export function findPath(deps: readonly Pick<LedgerDep, "from" | "to">[], start: string, goal: string): string[] | null {
   const out = new Map<string, string[]>();
-  for (const d of deps) out.set(d.from, [...(out.get(d.from) ?? []), d.to]);
+  for (const d of deps) {
+    const list = out.get(d.from);
+    if (list) list.push(d.to);
+    else out.set(d.from, [d.to]);
+  }
   const prev = new Map<string, string>([[start, start]]);
   const queue = [start];
-  while (queue.length) {
-    const cur = queue.shift() as string;
+  for (let head = 0; head < queue.length; head++) {
+    const cur = queue[head];
     if (cur === goal) {
       const path = [cur];
-      for (let at = cur; at !== start; at = prev.get(at) as string) path.unshift(prev.get(at) as string);
-      return path;
+      for (let at = cur; at !== start; at = prev.get(at) as string) path.push(prev.get(at) as string);
+      return path.reverse();
     }
     for (const next of out.get(cur) ?? []) {
       if (prev.has(next)) continue;
@@ -121,13 +135,23 @@ export interface ReviewBranches {
   taken: "pass" | "changes" | null;
 }
 
-/** 审查分叉：由阶段机与本轮 review 事件现算，不存成边（存了会和真实阶段对不上） */
+/**
+ * 审查分叉：以实际阶段为准，不存成边（存了会和真实阶段对不上）。在 fix → 走了「返工」；已过审进了合并及以后 → 走了「通过」；
+ * 还在 review 时，本轮已记结论就按结论（记了还没推阶段），没记为 null。没进过审查、回到 spec / 取消的为 null。blocked 看进 blocked 前的阶段。
+ */
 export function reviewBranches(
-  task: Pick<LedgerTask, "kind" | "round">,
+  task: StageOf & Pick<LedgerTask, "round">,
   lastReview: { round: number | null; verdict: ReviewVerdict | string | null } | null,
 ): ReviewBranches {
   const pass: Stage = task.kind === "investigate" ? "done" : "merge";
-  const current = lastReview && task.round > 0 && lastReview.round === task.round ? lastReview.verdict : null;
-  const taken = current === "pass" ? "pass" : current === "changes" || current === "block" ? "changes" : null;
+  const stage = workStage(task);
+  const passed: readonly Stage[] = task.kind === "investigate" ? ["done"] : ["merge", "live", "verified", "done"];
+  let taken: ReviewBranches["taken"] = null;
+  if (task.round > 0 && stage === "fix") taken = "changes";
+  else if (task.round > 0 && passed.includes(stage)) taken = "pass";
+  else if (stage === "review" && lastReview && lastReview.round === task.round) {
+    const v = lastReview.verdict;
+    taken = v === "pass" ? "pass" : v === "changes" || v === "block" ? "changes" : null;
+  }
   return { pass, changes: "fix", taken };
 }

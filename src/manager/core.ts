@@ -5,7 +5,7 @@
  * 从 manager.ts 逐字搬出（函数体未改，只加 export / 改相对路径）。
  */
 import { STATE_DIR } from "../lib/paths.js";
-import { isReservedAgentName, REGISTRY_PATH as STATE_REGISTRY_PATH } from "../lib/registry.js";
+import { AGENT_NAME_BLOCKLIST_RE, isReservedAgentName, REGISTRY_PATH as STATE_REGISTRY_PATH } from "../lib/registry.js";
 import { readFile, writeFile, mkdir, rename } from "fs/promises";
 import { writeJsonAtomic } from "../lib/state-file.js";
 import { existsSync } from "fs";
@@ -141,12 +141,8 @@ export async function saveRegistry(reg: Registry) {
 // 拒绝空白、shell 元字符、控制字符。CJK 和其他 Unicode 字母允许。
 // 长度上限 48 — Discord 频道名上限 100，tmux window 名没硬限制，48 足够宽。
 //
-// v2.13.1+ 补上 `/`、`\`、`:`、`~` 和 `..`：agent 名会直接拼进文件路径 ——
-// session-archive.ts 的 join(ARCHIVE_ROOT, agentName)、screenshot.ts 的
-// `${TMP_DIR}/peek_${windowName}_...`。名字里带 `/` 或 `..` 就能把归档目录和
-// 截图文件写到预期之外的位置（攻击者控制得了目录、控制不了完整文件名，所以是
-// 目录创建 + 文件覆盖，不是 RCE，但没有任何理由允许）。
-const NAME_BLOCKLIST_RE = /[\s"'`$;&|<>()*?{}\\/:~\x00-\x1f\x7f]/;
+// 字符黑名单在 lib/registry.ts（AGENT_NAME_BLOCKLIST_RE），台账校验负责人时用同一份。
+const NAME_BLOCKLIST_RE = AGENT_NAME_BLOCKLIST_RE;
 /** 单独挡 `..`（上面的字符类挡不住不含分隔符的纯 ".."） */
 const NAME_TRAVERSAL_RE = /(^|[^\w])\.\.($|[^\w])|^\.+$/;
 

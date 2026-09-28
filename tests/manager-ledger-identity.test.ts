@@ -63,6 +63,11 @@ describe("保留名 owner / master", () => {
     expect(() => assertValidNewName("agent-master")).toThrow("保留名");
     expect(() => assertValidNewName("task-t8b")).not.toThrow();
   });
+  test("名字字符黑名单与台账负责人校验共用（lib/registry.ts）：@ 与 CJK 允许，零宽 / 方向控制等不可见字符拒绝", () => {
+    expect(() => assertValidNewName("a@b")).not.toThrow();
+    expect(() => assertValidNewName("数据")).not.toThrow();
+    for (const bad of ["a\u200bb", "a\u202eb", "a\u2060b"]) expect(() => assertValidNewName(bad)).toThrow("非法字符");
+  });
   test("doctor：已有 agent-owner 报 warn；agent-master 是大总管自己的条目不算", () => {
     expect(reservedAgentNameChecks(["agent-claudestra", "agent-master"])).toEqual([]);
     expect(reservedAgentNameChecks(["agent-owner", "agent-x"])).toMatchObject([{ status: "warn", name: "保留名" }]);

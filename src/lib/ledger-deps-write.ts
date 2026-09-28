@@ -7,7 +7,7 @@
 import type { Database } from "bun:sqlite";
 import { isManager, mustTask, type WriteCtx, type WriteResult } from "./ledger-checks.js";
 import { DEP_KINDS, DEP_STATES, DEP_WHEN_MAX, findPath, type DepKind, type DepState, type LedgerDep } from "./ledger-deps.js";
-import type { LedgerTask } from "./ledger-stages.js";
+import type { LedgerEvent, LedgerTask } from "./ledger-stages.js";
 import { getDep, LedgerError } from "./ledger-store.js";
 import { insertEvent, replay, tx } from "./ledger-tx.js";
 
@@ -28,8 +28,16 @@ function checkPatch(p: DepPatch): void {
   if (p.kind !== undefined && !DEP_KINDS.includes(p.kind)) throw new LedgerError("invalid", `依赖 kind 只能是 ${DEP_KINDS.join(" / ")}，收到 ${String(p.kind)}`);
   if (p.state != null && !DEP_STATES.includes(p.state)) throw new LedgerError("invalid", `依赖 state 只能是 ${DEP_STATES.join(" / ")}（或清掉回到推导），收到 ${String(p.state)}`);
   if (p.when === undefined) return;
-  if (!p.when.trim()) throw new LedgerError("invalid", "依赖要有一句人话条件（--when）");
-  if ([...p.when].length > DEP_WHEN_MAX) throw new LedgerError("invalid", `条件不超过 ${DEP_WHEN_MAX} 字，现在 ${[...p.when].length} 字`);
+  const when = p.when.trim();
+  if (!when) throw new LedgerError("invalid", "依赖要有一句人话条件（--when）");
+  // 一句话：换行 / 控制字符 / 不可见格式符会让看板和 CLI 的单行显示错乱，也能藏东西
+  if (/[\p{Cc}\p{Cf}\u2028\u2029]/u.test(when)) throw new LedgerError("invalid", "条件只能是一行，不能含换行、控制字符或不可见字符");
+  if ([...when].length > DEP_WHEN_MAX) throw new LedgerError("invalid", `条件不超过 ${DEP_WHEN_MAX} 字，现在 ${[...when].length} 字`);
+}
+
+/** 同一 dedupKey 只认同一种动作、同一条边：target 只是后续任务，光比它会把 add C>B / rm A>B 当成 add A>B 的重复吞掉 */
+function sameDep(op: "add" | "set" | "rm", from: string) {
+  return (prev: LedgerEvent) => prev.data.op === op && prev.data.from === from;
 }
 
 /** 两端任务存在、同一项目、actor 是这个项目的 PM / master / owner；返回项目 */
@@ -60,11 +68,11 @@ function eventData(op: "add" | "set" | "rm", d: LedgerDep, extra: Record<string,
 
 export function addDep(db: Database, ctx: WriteCtx, input: NewDep): WriteResult<LedgerDep | null> {
   return tx(db, () => {
-    const to = mustTask(db, input.to);
-    const dup = replay(db, ctx, { project: to.project, target: to.id, kind: "dep" }, () => getDep(db, input.from, input.to));
+    // 权限先于重放：没权限的人拿别人的 dedupKey 也探不出结果
+    const { project } = endpoints(db, ctx.actor, input.from, input.to);
+    const dup = replay(db, ctx, { project, target: input.to, kind: "dep" }, () => getDep(db, input.from, input.to), sameDep("add", input.from));
     if (dup) return dup;
     if (input.from === input.to) throw new LedgerError("invalid", "任务不能依赖自己");
-    const { project } = endpoints(db, ctx.actor, input.from, input.to);
     checkPatch({ when: input.when, kind: input.kind ?? "blocks", state: input.state ?? null });
     const existing = getDep(db, input.from, input.to);
     if (existing) throw new LedgerError("conflict", `依赖 ${input.from} → ${input.to} 已存在（改用 dep-set）`, { rev: existing.rev });
@@ -83,10 +91,9 @@ export function addDep(db: Database, ctx: WriteCtx, input: NewDep): WriteResult<
 
 export function setDep(db: Database, ctx: WriteCtx, input: { from: string; to: string; rev: number; patch: DepPatch }): WriteResult<LedgerDep | null> {
   return tx(db, () => {
-    const to = mustTask(db, input.to);
-    const dup = replay(db, ctx, { project: to.project, target: to.id, kind: "dep" }, () => getDep(db, input.from, input.to));
-    if (dup) return dup;
     const { project } = endpoints(db, ctx.actor, input.from, input.to);
+    const dup = replay(db, ctx, { project, target: input.to, kind: "dep" }, () => getDep(db, input.from, input.to), sameDep("set", input.from));
+    if (dup) return dup;
     const cols = { kind: "kind", when: "cond", state: "state" } as const;
     const keys = (Object.keys(input.patch) as (keyof DepPatch)[]).filter((k) => k in cols);
     if (!keys.length || keys.length !== Object.keys(input.patch).length) throw new LedgerError("invalid", "dep-set 只能改 kind / when / state，且至少改一项");
@@ -106,10 +113,9 @@ export function setDep(db: Database, ctx: WriteCtx, input: { from: string; to: s
 /** rev 可选：带了就做 CAS（防止删掉别人刚改过的边） */
 export function removeDep(db: Database, ctx: WriteCtx, input: { from: string; to: string; rev?: number }): WriteResult<LedgerDep | null> {
   return tx(db, () => {
-    const to = mustTask(db, input.to);
-    const dup = replay(db, ctx, { project: to.project, target: to.id, kind: "dep" }, () => getDep(db, input.from, input.to));
-    if (dup) return dup;
     const { project } = endpoints(db, ctx.actor, input.from, input.to);
+    const dup = replay(db, ctx, { project, target: input.to, kind: "dep" }, () => getDep(db, input.from, input.to), sameDep("rm", input.from));
+    if (dup) return dup;
     const cur = mustDep(db, input.from, input.to);
     checkRev(cur, input.rev);
     db.prepare("DELETE FROM task_deps WHERE fromTask = ? AND toTask = ?").run(input.from, input.to);
