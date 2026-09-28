@@ -1,5 +1,5 @@
 /**
- * 值守界面的时间计算（纯函数，无 import，tests/web-mission-time.test.ts 直测）。
+ * Autopilot 界面的时间计算（纯函数，无 import，tests/web-mission-time.test.ts 直测）。
  * 一律按本设备（手机 / 浏览器）的时区：徽章按它显示，「11:00」也按它换算，两边才对得上。
  */
 

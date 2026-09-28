@@ -55,4 +55,5 @@ export const COLLAB_DICT: Record<string, string> = {
   "读台账失败": "Couldn’t read the ledger",
   "排队 · 等派发": "Queued · awaiting dispatch",
   "它刚开始干活，没发。等它这步做完再说": "It just started working — not sent. Wait for this step to finish.",
+  "没查到它的状态，没发": "Couldn’t check its status — not sent.",
 };

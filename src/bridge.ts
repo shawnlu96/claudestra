@@ -2669,7 +2669,7 @@ async function cleanupStaleThinkingMessages(): Promise<void> {
 
 
 /** 每分钟扫一次：回程簿里送达后 2 小时还没被消化的条目清掉（target 的 Stop / reply / 回发 send_to_agent 都会消化它，
- * 残留只在 Stop 丢失、target 挂了之类的情况）。2 小时 = 值守一轮的长度：以前 10 分钟，target 长回合结束才答时回程已被扫没。
+ * 残留只在 Stop 丢失、target 挂了之类的情况）。2 小时 = Autopilot 一轮的长度：以前 10 分钟，target 长回合结束才答时回程已被扫没。
  * 押在 heldLocalMsgs 里（target 还没看到）时不清，失效钟从真正送达起算（flushHeldLocalMsgs 投递时 touch）。 */
 const PAC_STALE_MS = 2 * 3_600_000;
 setInterval(() => {
@@ -3547,7 +3547,7 @@ initInbox({
     direction: "in", from: env.from.kind === "local" ? env.from.agentName ?? "agent" : "?", fromId: "agent", srcKind: env.from.kind, text: env.content, threadId: env.meta.threadId,
   } }),
 });
-void import("./bridge/mission.js").then((m) => m.initMission({ clients, deliver, lastMessageSource, controlChannelId: CONTROL_CHANNEL_ID })); // 值守：回合结束自动推进
+void import("./bridge/mission.js").then((m) => m.initMission({ clients, deliver, lastMessageSource, controlChannelId: CONTROL_CHANNEL_ID })); // Autopilot：回合结束自动推进
 
 // 清扫上次崩溃/被杀残留的 webterm-* viewer session（grouped session 视图，
 // kill 不伤 master 本体）。Discord 与 Web-only 模式都需要。

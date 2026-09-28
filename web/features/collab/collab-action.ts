@@ -2,7 +2,7 @@
  * 「此刻动作」：bridge /events 的 agent_status / tool_start / tool_done → 每个 agent 一行（思考中 / 运行工具 · Edit · x.ts / 空闲）。
  * 历史不留，只要最新一条（ux.md：「历史是噪音」）。
  * detail 按工具白名单取、宁缺毋滥：命令行里常有 token、环境变量、私有路径（审查 #144 P1-2），首页和截图都会拿去给人看。
- * 单测 tests/web-collab-model.test.ts。
+ * 单测 tests/web-collab-action.test.ts。
  */
 import { bareAgent } from "./collab-model";
 
@@ -29,7 +29,10 @@ function clip(s: string): string {
 const basename = (p: string) => p.slice(Math.max(p.lastIndexOf("/"), p.lastIndexOf("\\")) + 1);
 
 /** 形似密钥：常见前缀（OpenAI/Anthropic、GitHub、GitLab、Slack、AWS、Google、Stripe）、JWT、或 16 位以上字母数字混排的长串 */
-const SECRET_RE = /^(?:sk-|sk_|rk_|pk_live|ghp_|gho_|ghs_|ghu_|github_pat_|glpat-|xox[abpr]-|AKIA|AIza|eyJ)/;
+const SECRET_PREFIX = "(?:sk-|sk_|rk_|pk_live|ghp_|gho_|ghs_|ghu_|github_pat_|glpat-|xox[abpr]-|AKIA|AIza|eyJ)";
+const SECRET_RE = new RegExp(`^${SECRET_PREFIX}`);
+/** 不锚定词首的兜底：密钥前后贴着反引号、括号、JSON 引号或中文时，按词切不出来（审查 #144 第 3 轮 P2-1） */
+const SECRET_ANYWHERE_RE = new RegExp(`${SECRET_PREFIX}[\\w\\-.~+/=]{4,}`, "g");
 const looksSecret = (w: string) => SECRET_RE.test(w) || (w.length >= 16 && /\d/.test(w) && /[A-Za-z]/.test(w) && /^[\w\-.~+/=]+$/.test(w) && !w.includes("/"));
 /** 后面跟着秘密值的词：Bearer / Basic / token / API_KEY: / password: … */
 const SECRET_LEAD_RE = /^(?:bearer|basic|token|[\w.-]*(?:key|token|secret|pass(?:word)?|pwd|auth)[\w.-]*:)$/i;
@@ -63,7 +66,7 @@ function scrub(s: string): string {
     if (clean) out.push(clean);
     maskNext = SECRET_LEAD_RE.test(w);
   }
-  return out.join(" ");
+  return out.join(" ").replace(SECRET_ANYWHERE_RE, "•••");
 }
 
 const SKIP_WORDS = new Set(["export", "env", "sudo", "exec", "time", "nohup", "command", "builtin"]);
@@ -74,6 +77,8 @@ const SEPARATORS = new Set([";", "&&", "||", "|", "&"]);
  * 跳过环境变量赋值、export / sudo 这类前缀、cd 和它的参数，取第一个真正的程序；只放行像程序名的词。
  */
 function programOf(command: string): string {
+  // 转义引号 / 转义空格 / $'…' 或引号不配平：分词会把值的片段当成程序名，宁可不显示（审查 #144 第 3 轮 P2-2）
+  if (/\\["' ]|\$'/.test(command) || /["']/.test(command.replace(/"[^"]*"|'[^']*'/g, ""))) return "";
   const flat = command.replace(/\$\([^)]*\)|`[^`]*`/g, " ");
   const words = flat.match(/(?:"[^"]*"|'[^']*'|[^\s"';&|]+)+|&&|\|\||[;&|]/g) ?? [];
   let skipArg = false;

@@ -1,6 +1,6 @@
 /**
  * turnState（lib/turn-state.ts）的取数一侧：查 registry 拿窗口和运行时、抓屏、读事件态、读后台活动。
- * 押后闸 / flush / 抢占（bridge.ts）、Discord 抢占（window-ops 注入）、值守（mission.ts）共用这一份，
+ * 押后闸 / flush / 抢占（bridge.ts）、Discord 抢占（window-ops 注入）、Autopilot（mission.ts）共用这一份，
  * 免得「忙不忙」又散回四套判据。
  */
 import { readRegistryAgents } from "../lib/registry.js";

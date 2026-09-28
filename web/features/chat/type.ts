@@ -176,7 +176,7 @@ export interface AgentSession {
   /** 全权 token 才有：共享给哪些 peer（顶栏徽章悬停名单）/ 几个（角标数字） */
   sharedWith?: string[];
   sharedPeers?: number;
-  /** 进行中的值守（bridge GET /agents 的 mission 字段）：侧栏图标 / 顶栏「截止 11:00」、菜单「开始 / 结束值守」 */
+  /** 进行中的 Autopilot（bridge GET /agents 的 mission 字段）：侧栏图标 / 顶栏「截止 11:00」、菜单「开启 / 关闭 Autopilot」 */
   mission?: MissionInfo | null;
   /** 别的 agent 发来、它还在回合里没收到的消息数 → 侧栏「排队」小标 */
   queued?: number;
