@@ -505,6 +505,11 @@ export const DICT: Record<string, string> = {
   "任务指令:到点起一个临时 agent 执行,完成后自动清理并报告": "Prompt: a temporary agent runs it on schedule, reports back and is cleaned up",
   "表达式": "Expression",
   "任务指令": "Prompt",
+  "任务名": "Task name",
+  "定时任务的 prompt 只能一行": "A scheduled task's prompt must be a single line",
+  "任务指令里有看不见的控制字符（比如 Tab），请删掉": "The prompt contains an invisible control character (such as Tab) — please remove it",
+  "「{field}」里有换行或看不见的控制字符。到点会原样敲进终端，换行会让它提前提交，所以只能写成一行":
+    "\"{field}\" contains a line break or an invisible control character. It is typed into the terminal as-is at run time, where a line break submits early, so it must be a single line",
   "目录": "Directory",
   "下次": "Next run:", // 后接时间或「已停用」
   "上次": "Last run:",

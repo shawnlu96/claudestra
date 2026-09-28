@@ -17,5 +17,11 @@ export function firstControlCharField(fields: unknown): string | null {
   return entries.find(([, v]) => v != null && /\p{Cc}/u.test(String(v)))?.[0] ?? null;
 }
 
+/** 给人看的原因：哪个字段、为什么不行。网页按 code + field 自己出文案（features/chat/components/cron-modal.tsx） */
 export const controlCharError = (field: string) =>
-  `${field} 不能含换行或控制字符 / ${field} must not contain line breaks or control characters`;
+  `「${field}」里有换行或看不见的控制字符（比如 Tab、Esc）。这段文字会原样敲进终端：换行会让它提前提交，控制字符会被当成按键，所以只能写成一行普通文字。` +
+  ` / "${field}" contains a line break or an invisible control character (such as Tab or Esc). It is typed into the terminal as-is —` +
+  " a line break submits early and control characters act as key presses — so it must be a single line of plain text.";
+
+/** 400 响应体：code 固定、field 给出是哪个字段 */
+export const controlCharBody = (field: string) => ({ ok: false, code: "control_chars", field, error: controlCharError(field) });

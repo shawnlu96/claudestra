@@ -84,7 +84,7 @@ import { handlePeersRoutes } from "./peers-routes.js";
 import { agentListExtras, handleAgentInfoRoutes } from "./agent-info-routes.js";
 import { refuseUnconfirmedSubSession } from "./subsession-guard.js";
 import { sseEventAllow } from "./ledger-feed.js";
-import { controlCharError, firstControlCharField, firstFlagLikeField } from "../lib/flag-like.js";
+import { controlCharBody, firstControlCharField, firstFlagLikeField } from "../lib/flag-like.js";
 import { handleRuntimeSettingsRoutes } from "./runtime-settings-routes.js";
 import { trackInboundHandoff } from "./handoff-tracker.js";
 import { authenticateApi } from "./api-auth.js";
@@ -1706,7 +1706,7 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
     if (flagLike) return apiJson(400, { ok: false, error: `${flagLike} 不能以 "-" 开头` });
     // purpose / model 拼进启动命令后经 send-keys 敲进 shell：控制字符能丢掉整行再执行后半段（lib/flag-like.ts）
     const ctrl = firstControlCharField({ name, dir, purpose, model, effort, project });
-    if (ctrl) return apiJson(400, { ok: false, error: controlCharError(ctrl) });
+    if (ctrl) return apiJson(400, controlCharBody(ctrl));
     if (model && !isSafeModelArg(model)) return apiJson(400, { ok: false, error: "model 含非法字符" });
     const createArgs = ["create", name, dir];
     if (purpose) createArgs.push("--purpose", purpose);
@@ -1877,7 +1877,7 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
       const body: any = await readJsonBody(req);
       if (body === INVALID_JSON) return invalidJsonBody();
       const ctrl = firstControlCharField(body);
-      if (ctrl) return apiJson(400, { ok: false, error: controlCharError(ctrl) });
+      if (ctrl) return apiJson(400, controlCharBody(ctrl));
       const name = String(body?.name ?? "").trim();
       const schedule = String(body?.schedule ?? "").trim();
       const prompt = String(body?.prompt ?? "").trim();
@@ -1903,7 +1903,7 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
         const body: any = await readJsonBody(req);
         if (body === INVALID_JSON) return invalidJsonBody();
         const ctrl = firstControlCharField(body);
-        if (ctrl) return apiJson(400, { ok: false, error: controlCharError(ctrl) });
+        if (ctrl) return apiJson(400, controlCharBody(ctrl));
         const flags: string[] = [];
         if (body?.schedule) flags.push("--schedule", String(body.schedule));
         if (body?.prompt) flags.push("--prompt", String(body.prompt));

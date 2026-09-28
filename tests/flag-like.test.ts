@@ -29,7 +29,8 @@ describe("firstControlCharField", () => {
     expect(firstControlCharField(null)).toBeNull();
     expect(firstControlCharField("a\nb")).toBeNull(); // 不是对象：没有字段可报，调用方的 JSON 形状校验会拦
   });
-  test("报错文案中英各一句", () => {
-    expect(controlCharError("prompt")).toBe("prompt 不能含换行或控制字符 / prompt must not contain line breaks or control characters");
+  test("报错文案说清哪个字段、为什么不行，中英各一段", () => {
+    const e = controlCharError("prompt");
+    for (const part of ["「prompt」", "换行会让它提前提交", "只能写成一行", '"prompt"', "submits early", "single line"]) expect(e).toContain(part);
   });
 });

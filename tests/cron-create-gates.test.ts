@@ -118,6 +118,11 @@ describe("cron 字段拒控制字符（换行、\\r、\\x03、\\x1b、NUL）", (
     }
   });
 
+  test("400 带 code 和 field，网页按它们出本地文案", () => {
+    const r = results.find((x) => x.name === "add ctrl esc")!;
+    expect(JSON.parse(r.body!)).toMatchObject({ ok: false, code: "control_chars", field: "prompt" });
+  });
+
   test("其它字段同样拦（name、数组形式的 targetAgent）", () => {
     expect(res("add ctrl name")).toEqual([400, controlCharError("name")]);
     expect(res("add ctrl targetAgent")).toEqual([400, controlCharError("targetAgent")]);
