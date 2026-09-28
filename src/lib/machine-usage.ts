@@ -24,6 +24,8 @@ interface UsagePair {
 export interface MachineUsage extends UsagePair {
   /** 键 = runtime（claude-code / codex / pi） */
   byRuntime: Record<string, UsagePair>;
+  /** Pi 按接入商（models.json 的 provider 键）拆；名字不合规的归 "unknown" */
+  piProviders: Record<string, UsagePair>;
   window: UsageWindowBounds;
   files: number;
   bytesRead: number;
@@ -69,6 +71,15 @@ export function listRecentJsonl(roots: string[], sinceMs: number): string[] {
 }
 
 const CHUNK_BYTES = 2 * 1024 * 1024;
+const PROVIDER_RE = /^[\w.-]{1,64}$/;
+
+/** Pi 行 → 该接入商的累加器（名字进 API 与网页，只放行短的安全字符） */
+function piBucket(into: Record<string, UsagePair>) {
+  return (rec: any): UsagePair => {
+    const p = rec?.message?.provider;
+    return (into[typeof p === "string" && PROVIDER_RE.test(p) ? p : "unknown"] ??= emptyPair());
+  };
+}
 
 /**
  * 从文件尾按块往前读，逐块交给 scanStatsWindow（共享去重集合）；某块里出现早于窗口下界的记录就停。
@@ -76,10 +87,12 @@ const CHUNK_BYTES = 2 * 1024 * 1024;
  */
 function scanFileBackwards(
   path: string, runtime: string | undefined, w: UsageWindowBounds, seen: Set<string>, acc: UsagePair, chunkBytes: number,
+  pi: Record<string, UsagePair>,
 ): number {
   let fd: number;
   try { fd = openSync(path, "r"); } catch { return 0; } // 扫描期间被删：不计
   let bytes = 0;
+  const bucket = runtime === "pi" ? piBucket(pi) : undefined;
   try {
     let pos = fstatSync(fd).size; // 与读的是同一个打开的文件（open 与 stat 之间被轮转 / 替换也对得上）
     let carry = Buffer.alloc(0);
@@ -99,7 +112,7 @@ function scanFileBackwards(
         start = nl + 1;
       } else carry = Buffer.alloc(0);
       const lines = joined.toString("utf8", start).split("\n");
-      const { stats, oldestTs } = scanStatsWindow(lines, w.dayStart, w.weekStart, runtime, seen);
+      const { stats, oldestTs } = scanStatsWindow(lines, w.dayStart, w.weekStart, runtime, seen, bucket);
       addWin(acc.today, stats.today);
       addWin(acc.week, stats.week);
       if (oldestTs < floor) break;
@@ -122,6 +135,7 @@ export async function scanMachineUsage(
   const seen = new Set<string>();
   const total = emptyPair();
   const byRuntime: Record<string, UsagePair> = {};
+  const piProviders: Record<string, UsagePair> = {};
   let bytesRead = 0;
   for (const f of files) {
     const runtime = runtimeForSessionPath(f);
@@ -131,7 +145,7 @@ export async function scanMachineUsage(
       part.today = s.today;
       part.week = s.week;
     } else {
-      bytesRead += scanFileBackwards(f, runtime, w, seen, part, chunkBytes);
+      bytesRead += scanFileBackwards(f, runtime, w, seen, part, chunkBytes, piProviders);
     }
     const key = runtime ?? "claude-code";
     const r = (byRuntime[key] ??= emptyPair());
@@ -141,7 +155,7 @@ export async function scanMachineUsage(
     }
   }
   return {
-    ...total, byRuntime, window: w, files: files.length, bytesRead,
+    ...total, byRuntime, piProviders, window: w, files: files.length, bytesRead,
     scanMs: Math.round(performance.now() - t0), scannedAt: Date.now(),
   };
 }

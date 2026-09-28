@@ -38,6 +38,8 @@ export interface AppConfig {
   /** 语音转写用的 Groq API key（bridge/local-api：PUT /api/v1/settings 写、GET 只回尾四位提示；env GROQ_API_KEY 兜底）。
    *  以前在 web BFF 的 ~/.claude-orchestrator/web/config.json，manager migrate-web-state 搬过来。 */
   groqApiKey?: string;
+  /** 订阅额度：从订阅接口读取实时额度（缺省开；关了只用本机缓存，bridge 不读 Keychain / auth.json）。bridge/quota-service.ts */
+  quotaLive?: boolean;
 }
 
 /** 归档保留天数缺省值（设置里可改） */
@@ -82,6 +84,7 @@ function merge(base: AppConfig, raw: any): AppConfig {
     // 以前漏在这里：任何 set*（读→改→写）都会把磁盘上的 archiveRetentionDays 抹掉
     ...(typeof raw.archiveRetentionDays === "number" ? { archiveRetentionDays: raw.archiveRetentionDays } : {}),
     ...(typeof raw.groqApiKey === "string" && raw.groqApiKey ? { groqApiKey: raw.groqApiKey } : {}),
+    ...(typeof raw.quotaLive === "boolean" ? { quotaLive: raw.quotaLive } : {}),
   };
 }
 
@@ -190,6 +193,13 @@ export async function setAutoCompact(patch: { window?: number; idleHours?: numbe
     ...(typeof patch.idleHours === "number" ? { idleHours: patch.idleHours } : {}),
     ...(typeof patch.emergency === "boolean" ? { emergency: patch.emergency } : {}),
   };
+  await writeConfig(cfg);
+  return cfg;
+}
+
+export async function setQuotaLive(enabled: boolean): Promise<AppConfig> {
+  const cfg = await readConfig();
+  cfg.quotaLive = enabled;
   await writeConfig(cfg);
   return cfg;
 }
