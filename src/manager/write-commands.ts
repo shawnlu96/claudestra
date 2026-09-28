@@ -25,7 +25,7 @@ export const WRITE_COMMANDS: ReadonlySet<string> = new Set([
   "peer-invite-new", "peer-join-auto", "peer-invite-revoke",
   "token-add", "token-revoke",
   "project-add", "project-edit", "project-remove", "project-assign", "project-merge", "project-migrate", "external", "label",
-  "pi-env-set", "team-link",
+  "pi-env-set", "team-link", "skill-toggle",
   // 以下原先漏掉：set-session / set-claude / announce-focus 写 registry；migrate 直写 registry.json；
   // peer-invite-redeem 写 principals + peers；peer-invite-list 顺手清扫过期邀请（吊销 token、写 peers）
   "set-session", "set-claude", "announce-focus", "migrate", "peer-invite-redeem", "peer-invite-list",

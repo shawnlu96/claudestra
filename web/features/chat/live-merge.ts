@@ -180,6 +180,7 @@ export function mergeContiguousAssistant(base: ChatMessage[], delta: ChatMessage
     ...(replyText ? { replyText } : {}),
     ...(last.replyTs || first.replyTs ? { replyTs: last.replyTs ?? first.replyTs } : {}),
     ...joinReplyComponents(last, first),
+    ...(first.replyAskId ? { replyAskId: first.replyAskId } : {}),
     ...(typeof first.turnMs === "number" ? { turnMs: first.turnMs } : {}),
     seqEnd: typeof first.seqEnd === "number" ? first.seqEnd : last.seqEnd,
   };

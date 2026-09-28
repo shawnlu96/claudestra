@@ -222,6 +222,13 @@ export const asksStore = {
   },
 };
 
+const none = (): AsksSnap => EMPTY;
 export function useAsks(): AsksSnap {
-  return useSyncExternalStore(asksStore.subscribe, asksStore.get, () => EMPTY);
+  return useSyncExternalStore(asksStore.subscribe, asksStore.get, none);
+}
+
+const noSubscribe = () => () => undefined;
+/** 只在 on 时订阅：每条助手消息都挂着 useReplyAsk，没有按钮的气泡不订阅、快照恒为 EMPTY，ask 事件来了也不重算不重渲染 */
+export function useAsksIf(on: boolean): AsksSnap {
+  return useSyncExternalStore(on ? asksStore.subscribe : noSubscribe, on ? asksStore.get : none, none);
 }

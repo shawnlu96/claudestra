@@ -107,7 +107,7 @@ export async function answerFromChat(req: { agent: string; text: string; princip
   const hit = findAskForWires(req.agent, wires, req.askId);
   if (!hit || !canAnswerAsk(p, hit.ask)) return null;
   if (hit.ask.state !== "open") return apiJson(409, closedBody(hit.ask));
-  if (hit.ask.bind && !req.askId) return apiJson(409, { ok: false, code: "ask_id_required", error: BIND_NEEDS_ID, askId: hit.ask.id });
+  if (hit.ask.bind && hit.ask.id !== req.askId) return apiJson(409, { ok: false, code: "ask_id_required", error: BIND_NEEDS_ID, askId: hit.ask.id });
   const blocked = await redirectForbidden(p, hit.ask);
   if (blocked) return blocked;
   return commitOr409(() => commitNoticing({ ask: hit.ask, picks: hit.picks, text: rest, original: req.text, from: apiFrom(p), principal: p.id, device: p.credential, via: "web_chat" }), hit.ask);

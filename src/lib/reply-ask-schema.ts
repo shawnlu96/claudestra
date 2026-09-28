@@ -31,6 +31,13 @@ Answers arrive as a channel message with trigger="ask_answer" and the askId; onl
   required: ["kind"],
 } as const;
 
+/** 历史里 reply 的 tool_result → 它建出的 askId（下面 replyResultText 写的「 · ask <id>」）：网页按它认领「待你处理」，不按时间猜 */
+export function askIdOfReplyResult(b: { content?: unknown }): string | null {
+  const c = b.content;
+  const text = typeof c === "string" ? c : Array.isArray(c) ? c.map((x) => (typeof x?.text === "string" ? x.text : "")).join("\n") : "";
+  return /^Sent message\(s\): .* · ask (ask_[a-z0-9]{1,40})\b/.exec(text)?.[1] ?? null;
+}
+
 /** reply 结果里给 agent 的那句：带 askId（授权类另带 askHash），不带就是普通回复 */
 export function replyResultText(r: { messageIds?: unknown; askId?: unknown; askHash?: unknown }): string {
   const ask = typeof r.askId === "string" ? ` · ask ${r.askId}${typeof r.askHash === "string" ? ` · askHash ${r.askHash}` : ""}` : "";
