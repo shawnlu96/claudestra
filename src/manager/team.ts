@@ -6,13 +6,11 @@
  * 同一把锁在同一进程里再 acquire 会自己等满 20s。纯函数单测见 tests/manager-team.test.ts。
  */
 import { isMasterAgent } from "../lib/registry.js";
-import { repoEnvVar } from "../lib/env-file.js";
+import { hasUnsafeDisplayChars } from "../lib/display-text.js";
 import { loadRegistry, saveRegistry, normalizeName, output, type AgentInfo, type Registry } from "./core.js";
 
 export const MASTER_PARENT = "master";
 export const TASK_MAX = 40;
-/** 与 label 同一条规矩：控制字符 / 方向控制符会让侧栏里的字看起来像别的东西 */
-const UNSAFE_TEXT_RE = /[\u0000-\u001f\u007f‎‏‪-‮⁦-⁩]/;
 
 /** 命令行上的派发字段：undefined = 没写（create 走自动反查）；parent "none" = 显式不挂；task "" = 清除 */
 export interface TeamFlags {
@@ -23,10 +21,14 @@ export interface TeamFlags {
 export type TeamFields = Pick<AgentInfo, "parent" | "task">;
 type ParentMap = Record<string, { parent?: string; channelId?: string }>;
 
-/** 抽出 `--parent <x>` / `--parent=x` / `--task <text>` / `--task=text`；空串的 --task 保留（= 清除） */
-export function extractTeamFlags(args: string[]): { rest: string[]; flags: TeamFlags } {
+/**
+ * 抽出 `--parent <x>` / `--parent=x` / `--task <text>` / `--task=text`；空串的 --task 保留（= 清除）。
+ * 缺值（放在末尾）或 --parent 给空串 → error：否则会悄悄变成「不挂」，把自动反查的结果覆盖掉。
+ */
+export function extractTeamFlags(args: string[]): { rest: string[]; flags: TeamFlags; error?: string } {
   const rest: string[] = [];
   const flags: TeamFlags = {};
+  let error: string | undefined;
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
     const m = a.match(/^--(parent|task)(?:=(.*))?$/s);
@@ -34,10 +36,11 @@ export function extractTeamFlags(args: string[]): { rest: string[]; flags: TeamF
       rest.push(a);
       continue;
     }
-    const v = m[2] ?? args[++i] ?? "";
-    flags[m[1] as keyof TeamFlags] = v;
+    const v = m[2] ?? args[++i];
+    if (v === undefined || (m[1] === "parent" && !v.trim())) error ??= `--${m[1]} 缺少值（不挂派发者请写 --parent none）`;
+    else flags[m[1] as keyof TeamFlags] = v;
   }
-  return { rest, flags };
+  return { rest, flags, error };
 }
 
 /** 用户写的派发者名 → registry 键（master 的各种写法归一成 `master`） */
@@ -48,7 +51,7 @@ export function parentKey(raw: string): string {
 
 export function validateTask(task: string): string | null {
   if (task.length > TASK_MAX) return `--task 最多 ${TASK_MAX} 个字符`;
-  if (UNSAFE_TEXT_RE.test(task)) return "--task 不能含控制字符或方向控制符";
+  if (hasUnsafeDisplayChars(task)) return "--task 不能含控制字符或方向控制符";
   return null;
 }
 
@@ -70,24 +73,28 @@ export function validateParent(agents: ParentMap, child: string, parent: string)
 }
 
 /**
- * 自动 parent：agent 在自己的 Bash 里跑 create 时带着自己的 DISCORD_CHANNEL_ID（claude-launch.ts 注入，大总管的是
- * CONTROL_CHANNEL_ID，launcher.ts）。反查不到（终端手动跑、bridge / cron 调）→ 不设。
+ * 自动 parent：agent 在自己的 Bash 里跑 create 时带着自己的 DISCORD_CHANNEL_ID（claude-launch.ts 注入）。
+ * 反查不到（终端手动跑、bridge / cron 调）→ 不设。大总管的频道（CONTROL_CHANNEL_ID）不在 registry 里，天然反查不到——
+ * 大总管建常驻 agent 是最常用的路径，自动挂 master 会让它们全从项目组里消失；要挂大总管只认显式 --parent master。
  */
-export function autoParent(agents: ParentMap, channelId: string | undefined, controlChannelId: string, child: string): string | undefined {
+export function autoParent(agents: ParentMap, channelId: string | undefined, child: string): string | undefined {
   if (!channelId) return undefined;
-  if (controlChannelId && channelId === controlChannelId) return MASTER_PARENT;
-  const hit = Object.entries(agents).find(([k, v]) => k !== child && v.channelId === channelId);
-  return hit?.[0];
+  return Object.entries(agents).find(([k, v]) => k !== child && v.channelId === channelId)?.[0];
 }
 
-/** create 前（拉起 agent 之前）定下 parent / task；不合法返回错误，调用方拒绝 create */
-export function resolveTeamFields(agents: ParentMap, child: string, flags: TeamFlags, env: { channelId?: string; controlChannelId: string }): TeamFields | { error: string } {
+/**
+ * create 前（拉起 agent 之前）定下 parent / task；显式 --parent 不合法返回错误，调用方拒绝 create。
+ * 自动反查只在带 --task 时生效（带任务名才算派活，普通建会话不挂）；反查结果同样过校验，不合法就不挂（不拒绝 create）。
+ */
+export function resolveTeamFields(agents: ParentMap, child: string, flags: TeamFlags, env: { channelId?: string }): TeamFields | { error: string } {
   const task = flags.task?.trim() ?? "";
   const taskErr = validateTask(task);
   if (taskErr) return { error: taskErr };
   let parent: string | undefined;
-  if (flags.parent === undefined) parent = autoParent(agents, env.channelId, env.controlChannelId, child);
-  else if (flags.parent.trim() && flags.parent.trim() !== "none") {
+  if (flags.parent === undefined) {
+    const auto = task ? autoParent(agents, env.channelId, child) : undefined;
+    parent = auto && !validateParent(agents, child, auto) ? auto : undefined;
+  } else if (flags.parent.trim() !== "none") {
     parent = parentKey(flags.parent);
     const err = validateParent(agents, child, parent);
     if (err) return { error: err };
@@ -97,30 +104,40 @@ export function resolveTeamFields(agents: ParentMap, child: string, flags: TeamF
 
 /** cmdCreate 用：读 registry + 环境后定派发字段；出错直接 output 并返回 null（manager.ts 一行调用） */
 export async function teamFieldsForCreate(child: string, flags: TeamFlags): Promise<TeamFields | null> {
-  const env = { channelId: process.env.DISCORD_CHANNEL_ID, controlChannelId: repoEnvVar("CONTROL_CHANNEL_ID") };
-  const r = resolveTeamFields((await loadRegistry()).agents, child, flags, env);
+  const r = resolveTeamFields((await loadRegistry()).agents, child, flags, { channelId: process.env.DISCORD_CHANNEL_ID });
   if ("error" in r) output({ ok: false, error: r.error });
   return "error" in r ? null : r;
 }
 
-/** resume 整条重写条目时要带过去的字段（缺了就丢挂载关系、显示名、external 闸门） */
-export function keepOnResume(prior: AgentInfo | undefined): Partial<AgentInfo> {
+/**
+ * resume 整条重写条目时要带过去的字段（缺了就丢挂载关系、显示名）。external 是安全闸门，只在接的还是同一个会话时保留：
+ * `resume <已停止的名字> <无关 sessionId>` 若沿用 external，peer token 的 scope 会直接覆盖到这个新会话。
+ */
+export function keepOnResume(prior: AgentInfo | undefined, sessionId: string): Partial<AgentInfo> {
   if (!prior) return {};
-  const { parent, task, label, external } = prior;
+  const { parent, task, label } = prior;
+  const external = prior.external === true && prior.sessionId === sessionId;
   return { ...(parent ? { parent } : {}), ...(task ? { task } : {}), ...(label ? { label } : {}), ...(external ? { external } : {}) };
 }
 
-/** rename：原来挂在旧名下面的子 agent 一起改指新名（在 saveRegistry 之前调） */
-export function renameParentRefs(reg: Registry, oldKey: string, newKey: string): void {
-  for (const info of Object.values(reg.agents)) if (info.parent === oldKey) info.parent = newKey;
+/**
+ * 指向 oldKey 的 parent 一起改：rename 改指新名；remove（newKey 省略）直接清掉——留着的话，
+ * 以后建出同名 agent 会被这些旧孤儿认作父，校验还会误报成环。在 saveRegistry 之前调。
+ */
+export function repointParentRefs(reg: Registry, oldKey: string, newKey?: string): void {
+  for (const info of Object.values(reg.agents)) {
+    if (info.parent !== oldKey) continue;
+    if (newKey) info.parent = newKey;
+    else delete info.parent;
+  }
 }
 
 /** `team-link <agent> [--parent <agent|master|none>] [--task "<text>"]`：给已存在的 agent 补挂 / 改挂 / 改任务名 */
 export async function cmdTeamLink(args: string[]) {
-  const { rest, flags } = extractTeamFlags(args);
+  const { rest, flags, error } = extractTeamFlags(args);
   const [name] = rest;
-  if (!name || rest.length > 1 || (flags.parent === undefined && flags.task === undefined)) {
-    output({ ok: false, error: 'usage: team-link <agent> [--parent <agent|master|none>] [--task "<text>"]（--task "" 清除）' });
+  if (error || !name || rest.length > 1 || (flags.parent === undefined && flags.task === undefined)) {
+    output({ ok: false, error: error ?? 'usage: team-link <agent> [--parent <agent|master|none>] [--task "<text>"]（--task "" 清除）' });
     return;
   }
   const reg = await loadRegistry();
@@ -130,7 +147,7 @@ export async function cmdTeamLink(args: string[]) {
     output({ ok: false, error: `registry 里没有 ${key}` });
     return;
   }
-  const next = resolveTeamFields(reg.agents, key, { parent: flags.parent ?? "none", task: flags.task ?? "" }, { controlChannelId: "" });
+  const next = resolveTeamFields(reg.agents, key, { parent: flags.parent ?? "none", task: flags.task ?? "" }, {});
   if ("error" in next) {
     output({ ok: false, error: next.error });
     return;

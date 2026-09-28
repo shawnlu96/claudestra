@@ -3,10 +3,12 @@ import {
   DORMANT_MS,
   buildSidebarEntries,
   buildTeams,
+  directCount,
   entryMembers,
   filterAndRankWorkers,
   isDormantAgent,
   splitDormant,
+  splitMasterKids,
 } from "@/features/chat/sidebar-entries";
 import type { AgentSession, ProjectMeta } from "@/features/chat/type";
 
@@ -146,6 +148,25 @@ describe("派发关系构树（parent → 执行者挂在派发者下面）", ()
     const ws = [ag("pm"), ag("t1", { parent: "pm", task: "T1 沙箱隔离" }), ag("t3", { parent: "pm", task: "T3 值守卡片" })];
     expect(names(filterAndRankWorkers(ws, "沙箱", new Set()))).toEqual(["t1"]);
     expect(buildSidebarEntries(ws, "沙箱", meta)).toEqual([]);
+  });
+  test("「派出 N」只数直接派出的：提升上来的孙辈不算", () => {
+    const ws = [ag("pm"), ag("t1", { parent: "pm" }), ag("t1a", { parent: "t1" })];
+    const [n] = buildTeams(ws).nodes;
+    expect(directCount(n.a.name, n.children)).toBe(1);
+    expect(directCount(MASTER, [ag("h", { parent: MASTER }), ag("h1", { parent: "h" })])).toBe(1);
+  });
+  test("大总管下挂也走沉寂：沉寂的收进底部，当普通行", () => {
+    const old = NOW - DORMANT_MS * 2;
+    const kids = [ag("h"), ag("z", { lastActivityTs: old })];
+    const { awake, dormantRows } = splitMasterKids(kids, NOW);
+    expect(names(awake)).toEqual(["h"]);
+    expect(shape(dormantRows)).toEqual(["z"]);
+    expect(shape(splitDormant(dormantRows, NOW).dormantEntries)).toEqual(["z"]);
+  });
+  test("普通 agent（大总管建的常驻 agent，没有 parent）留在自己的项目组里", () => {
+    const ws = [ag("codex", { projectId: "p" }), ag("relay", { projectId: "p" }), ag("t1", { projectId: "p", parent: "codex" })];
+    expect(build(ws, MASTER)).toEqual(["[p:codex{t1},relay]"]);
+    expect(buildTeams(ws, MASTER).underMaster).toEqual([]);
   });
   test("置顶只作用于顶层行：被置顶的执行者不把整组拽上去，留在派发者下面", () => {
     const ws = [ag("x"), ag("pm"), ag("t1", { parent: "pm" })];

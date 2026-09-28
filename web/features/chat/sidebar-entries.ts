@@ -77,6 +77,19 @@ export type SidebarEntry =
   | { kind: "group"; id: string; meta?: ProjectMeta; items: AgentSession[]; nodes: TeamNode[] }
   | ({ kind: "row" } & TeamNode);
 
+/** 「派出 N」只数直接派出的：孙辈虽然提升到同一组里显示，但不是这个派发者派的 */
+export function directCount(parentName: string, kids: AgentSession[]): number {
+  return kids.filter((k) => k.parent === parentName).length;
+}
+
+/** 大总管下挂的也走沉寂：沉寂的不占大总管卡片下面的位置，当普通行收进底部「💤 沉寂」 */
+export function splitMasterKids(kids: AgentSession[], now: number = Date.now()): { awake: AgentSession[]; dormantRows: SidebarEntry[] } {
+  return {
+    awake: kids.filter((a) => !isDormantAgent(a, now)),
+    dormantRows: kids.filter((a) => isDormantAgent(a, now)).map((a) => ({ kind: "row" as const, a, children: [] })),
+  };
+}
+
 /** 一个条目里的全部 agent（派发者在前）：组忙碌、沉寂判断与计数用 */
 export function entryMembers(e: SidebarEntry): AgentSession[] {
   return e.kind === "group" ? e.items : [e.a, ...e.children];

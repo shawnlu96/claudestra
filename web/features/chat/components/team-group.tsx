@@ -2,7 +2,7 @@
 import type { ReactNode } from "react";
 import { useT } from "@/lib/i18n";
 import type { AgentSession } from "../type";
-import type { TeamNode } from "../sidebar-entries";
+import { directCount, type TeamNode } from "../sidebar-entries";
 import { Chevron } from "./project-group";
 
 /**
@@ -11,10 +11,15 @@ import { Chevron } from "./project-group";
  * 折叠状态由调用方按设备记住（use-persisted-set.ts）。
  */
 
-/** AgentRow 的两个插槽：lead = 行按钮前的独立控件，tail = 名字容器后的小标（下一期的任务阶段小标也放这里） */
+/**
+ * AgentRow 的插槽：lead = 行按钮前的独立控件，tail = 名字容器后的小标（下一期的任务阶段小标也放这里）。
+ * dropProjectId：拖放「转到 project」的目标。执行者跟着派发者显示在别的组里时按派发者的 project 算（null = 不当放置目标），
+ * 否则拖到它上面会进它自己那个看不见的 project。
+ */
 export interface RowSlots {
   lead?: ReactNode;
   tail?: ReactNode;
+  dropProjectId?: string | null;
 }
 type RenderRow = (a: AgentSession, slots?: RowSlots) => ReactNode;
 
@@ -23,7 +28,7 @@ function TeamToggle({ open, onToggle }: { open: boolean; onToggle: () => void })
   return (
     <button
       type="button"
-      className="-ml-1 -mr-1.5 grid size-5 shrink-0 place-items-center rounded text-base-content/40 hover:bg-base-300 hover:text-base-content/80 sm:-mr-1"
+      className="-mx-2 grid size-8 shrink-0 place-items-center rounded text-base-content/40 hover:bg-base-300 hover:text-base-content/80 sm:-mx-1 sm:size-5"
       aria-expanded={open}
       aria-label={t(open ? "收起派出的 agent" : "展开派出的 agent")}
       title={t(open ? "收起派出的 agent" : "展开派出的 agent")}
@@ -48,10 +53,12 @@ function DispatchCount({ n, busy }: { n: number; busy: boolean }) {
   );
 }
 
-function Kids({ kids, row }: { kids: AgentSession[]; row: RenderRow }) {
+function Kids({ kids, row, dropProjectId }: { kids: AgentSession[]; row: RenderRow; dropProjectId: string | null }) {
   return (
     <li>
-      <ul className="ml-[13px] mt-0.5 flex list-none flex-col gap-0.5 border-l-2 border-base-content/10 pl-1.5">{kids.map((c) => row(c))}</ul>
+      <ul className="ml-[13px] mt-0.5 flex list-none flex-col gap-0.5 border-l-2 border-base-content/10 pl-1.5">
+        {kids.map((c) => row(c, { dropProjectId }))}
+      </ul>
     </li>
   );
 }
@@ -69,15 +76,16 @@ export function TeamGroup({ node, collapsed, busy, onToggle, row }: {
     <>
       {row(node.a, {
         lead: <TeamToggle open={!collapsed} onToggle={onToggle} />,
-        tail: <DispatchCount n={node.children.length} busy={collapsed && busy} />,
+        tail: <DispatchCount n={directCount(node.a.name, node.children)} busy={collapsed && busy} />,
       })}
-      {!collapsed && <Kids kids={node.children} row={row} />}
+      {!collapsed && <Kids kids={node.children} row={row} dropProjectId={node.a.projectId ?? null} />}
     </>
   );
 }
 
 /** 大总管派出的：挂在顶部大总管卡片下面（卡片本身是个按钮，开合放在卡片下方的一行里） */
-export function MasterTeam({ kids, collapsed, busy, onToggle, row }: {
+export function MasterTeam({ masterName, kids, collapsed, busy, onToggle, row }: {
+  masterName: string;
   kids: AgentSession[];
   collapsed: boolean;
   busy: boolean;
@@ -96,9 +104,9 @@ export function MasterTeam({ kids, collapsed, busy, onToggle, row }: {
         onClick={onToggle}
       >
         <Chevron open={!collapsed} />
-        <DispatchCount n={kids.length} busy={collapsed && busy} />
+        <DispatchCount n={directCount(masterName, kids)} busy={collapsed && busy} />
       </button>
-      {!collapsed && <ul className="flex w-full list-none flex-col gap-0.5 p-0"><Kids kids={kids} row={row} /></ul>}
+      {!collapsed && <ul className="flex w-full list-none flex-col gap-0.5 p-0"><Kids kids={kids} row={row} dropProjectId={null} /></ul>}
     </div>
   );
 }

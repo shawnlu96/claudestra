@@ -12,7 +12,7 @@ import { useT, getLang } from "@/lib/i18n";
 import { ChatHitRow, type ChatSearchHit } from "./search-hits";
 import { UnmanagedSessions } from "./unmanaged-sessions";
 import { ArchivedSessions } from "./archived-sessions";
-import { buildSidebarEntries, buildTeams, entryMembers, filterAndRankWorkers, splitDormant, type SidebarEntry, type TeamNode } from "../sidebar-entries";
+import { buildSidebarEntries, buildTeams, entryMembers, filterAndRankWorkers, splitDormant, splitMasterKids, type SidebarEntry, type TeamNode } from "../sidebar-entries";
 import { MasterTeam, TeamGroup, type RowSlots } from "./team-group";
 import { usePersistedSet } from "../use-persisted-set";
 import { AgentRow } from "./agent-row";
@@ -185,8 +185,8 @@ export function Sidebar({ onSelect }: { onSelect: () => void }) {
   const projMeta = new Map(projects.map((p) => [p.id, p] as const));
   // 单成员 project 不成组;整组全员沉寂才下沉「💤 沉寂」——规则见 sidebar-entries.ts
   const entries = buildSidebarEntries(filtered, q, projMeta, master?.name); // 先按 parent 挂树再分组
-  const underMaster = q ? [] : buildTeams(filtered, master?.name).underMaster;
-  const { activeEntries, dormantEntries } = splitDormant(entries);
+  const { awake: underMaster, dormantRows } = splitMasterKids(q ? [] : buildTeams(filtered, master?.name).underMaster);
+  const { activeEntries, dormantEntries } = splitDormant([...entries, ...dormantRows]);
   // 三处列表（搜索平铺 / 单人行 / 组内行）共用一份行 props
   const rowProps = (a: AgentSession) => ({
     a,
@@ -457,7 +457,7 @@ export function Sidebar({ onSelect }: { onSelect: () => void }) {
           </button>
         )}
         {master && (
-          <MasterTeam kids={underMaster} collapsed={collapsedTeams.has(master.name)} busy={underMaster.some(busyOf)} onToggle={() => toggleTeam(master.name)} row={(a) => row(a)} />
+          <MasterTeam masterName={master.name} kids={underMaster} collapsed={collapsedTeams.has(master.name)} busy={underMaster.some(busyOf)} onToggle={() => toggleTeam(master.name)} row={(a) => row(a)} />
         )}
         {agents.length > 0 && filtered.length === 0 && (
           <div className="px-2 py-4 text-sm opacity-50">{t("没有匹配「")}{query.trim()}{t("」的会话")}</div>

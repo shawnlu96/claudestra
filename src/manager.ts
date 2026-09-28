@@ -99,7 +99,7 @@ import {
   rosterLine,
   type ProjectDef,
 } from "./lib/projects.js";
-import { loadRegistry, migrateWorkerToAgent, saveRegistry, normalizeName, assertValidNewName, formatAge, output, extractPermFlags, extractPurposeFlag, rejectFlagLikePositional, extractEffortFlag, extractModeFlag, extractModelFlag, extractBoolFlag, extractMultiFlag, extractStringFlag } from "./manager/core.js";
+import { loadRegistry, migrateWorkerToAgent, saveRegistry, normalizeName, assertValidNewName, formatAge, output, extractPermFlags, extractEffortFlag, extractModeFlag, extractModelFlag, extractBoolFlag, extractMultiFlag, extractStringFlag } from "./manager/core.js";
 import { runProjectCommand } from "./manager/projects.js";
 import { cmdCronAdd, cmdCronList, cmdCronEdit, cmdCronRemove, cmdCronToggle, cmdCronHistory } from "./manager/cron.js";
 import { cmdPermissions } from "./manager/permissions.js";
@@ -936,7 +936,7 @@ async function cmdResume(
     ...(model ? { model } : {}),
     // resume 不提供档案编辑，但**不能把已有的档案弄丢**（丢了下次 restart 就变回继承全局）
     ...adapter.registryFields({ ...spec, extras: { piEnv: prior?.piEnv } }),
-    ...(await import("./manager/team.js")).keepOnResume(prior), // 派发关系 / 显示名 / external 不随重写丢失
+    ...(await import("./manager/team.js")).keepOnResume(prior, actualSessionId), // 派发关系 / 显示名；external 只在同一会话时保留
   };
   await saveRegistry(reg);
 
@@ -1084,6 +1084,7 @@ async function cmdRemove(name: string) {
   for (const key of Object.keys(reg.agents)) {
     if (key.toLowerCase() === tmuxName && key !== tmuxName) delete reg.agents[key];
   }
+  (await import("./manager/team.js")).repointParentRefs(reg, tmuxName); // 清掉子 agent 指向它的 parent，免得同名重建被旧孤儿认作父
   await saveRegistry(reg);
   await triggerSkillsRescan("remove", tmuxName);
   if (info?.channelId) {
@@ -1146,7 +1147,7 @@ async function cmdRename(oldName: string, newName: string) {
   // 2. registry 迁移
   reg.agents[newTmux] = { ...info, displayName: newChannelName };
   delete reg.agents[oldTmux];
-  (await import("./manager/team.js")).renameParentRefs(reg, oldTmux, newTmux); // 子 agent 的 parent 跟着改名
+  (await import("./manager/team.js")).repointParentRefs(reg, oldTmux, newTmux); // 子 agent 的 parent 跟着改名
   await saveRegistry(reg);
   steps.push({ step: "registry", ok: true });
 
@@ -2864,38 +2865,9 @@ switch (cmd) {
   }
 
   case "create": {
-    // v2.21+ --project <id>(也接受 --project=id):显式指定归属 project
-    let projectFlag: string | undefined;
-    const afterProject: string[] = [];
-    for (let i = 0; i < args.length; i++) {
-      const a = args[i];
-      if (a === "--project") projectFlag = args[++i] || undefined;
-      else if (a.startsWith("--project=")) projectFlag = a.slice("--project=".length) || undefined;
-      else afterProject.push(a);
-    }
-    const { rest: afterTeam, flags: teamFlags } = (await import("./manager/team.js")).extractTeamFlags(afterProject); // --parent / --task（manager/team.ts）
-    const { rest: afterExternal, value: external } = extractBoolFlag(afterTeam, "--external");
-    const { rest: afterRuntime, value: runtimeFlag } = extractStringFlag(afterExternal, "--runtime");
-    const { rest: afterPiBase, value: piBaseFlag } = extractStringFlag(afterRuntime, "--pi-base");
-    const { rest: afterModel, model } = extractModelFlag(afterPiBase);
-    const { rest: afterMode, mode } = extractModeFlag(afterModel);
-    const { rest: afterEffort, effort } = extractEffortFlag(afterMode);
-    const { rest: afterPurpose, purpose: purposeFlag } = extractPurposeFlag(afterEffort);
-    const { rest: posArgs, preset, disallowedRaw } = extractPermFlags(afterPurpose);
-    const [name, dir, ...purposeParts] = posArgs;
-    const flagLike = rejectFlagLikePositional(name, dir);
-    if (flagLike) {
-      output({ ok: false, error: flagLike });
-      break;
-    }
-    if (!name || !dir) {
-      output({
-        ok: false,
-        error: 'create <name> <dir> [purpose|--purpose <text>] [--project <id>] [--runtime claude-code|pi] [--pi-base inherit|minimal] [--preset <preset>] [--disallowed "..."] [--effort <level>] [--mode <permission-mode>] [--model <model>] [--external] [--parent <agent|master|none>] [--task "<text>"]',
-      });
-      break;
-    }
-    await cmdCreate(name, dir, purposeFlag ?? purposeParts.join(" "), { preset, disallowedRaw }, effort, mode, model, external, projectFlag, runtimeFlag, piBaseFlag, teamFlags);
+    const c = (await import("./manager/create-args.js")).parseCreateArgs(args); // --purpose 最先抽，自由文本不会被当成 flag
+    if ("error" in c) output({ ok: false, error: c.error });
+    else await cmdCreate(c.name, c.dir, c.purpose, c.perms, c.effort, c.mode, c.model, c.external, c.projectFlag, c.runtimeFlag, c.piBaseFlag, c.teamFlags);
     break;
   }
 

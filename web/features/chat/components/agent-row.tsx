@@ -57,6 +57,7 @@ export function AgentRow({
   projEmoji,
   lead,
   tail,
+  dropProjectId,
 }: {
   a: AgentSession;
   active: boolean;
@@ -128,7 +129,7 @@ export function AgentRow({
   // 右键 / 长按菜单 + 桌面拖拽改 project（owner 2026-09-23）。master / mock / 多选模式无菜单不可拖；
   // 本行也是放置目标 = 它所属的 project（单人 project 没有组头，拖到它的 agent 上就是进那个 project）。
   const menu = useAgentMenuTrigger(() => a, canRemove && !manage);
-  const drop = useAgentDrop({ projectId: a.projectId, agentName: a.name });
+  const drop = useAgentDrop({ projectId: dropProjectId === undefined ? a.projectId : dropProjectId, agentName: a.name }); // 执行者行按派发者的组算
   const drag = canRemove && !manage && dragAllowed() ? dragHandlers({ name: a.name, projectId: a.projectId ?? null }) : {};
 
   /** 点行的实际动作。触摸丢 click 的兜底在列表容器上统一做(lib/tap-rescue.ts 派发合成 click),行不用管。 */
