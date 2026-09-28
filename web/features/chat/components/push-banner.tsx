@@ -3,7 +3,7 @@ import { useEffect, useState } from "react";
 import { pushSupported, getPushSubscription, enablePush } from "@/lib/push/client";
 import { nativePushAvailable, nativePushPermission, enableNativePush } from "@/lib/push/native";
 import { useT } from "@/lib/i18n";
-import { BellIcon } from "./notice-icons";
+import { BellIcon } from "./line-icons";
 
 /**
  * 「开启推送」引导横幅(owner 2026-07-16:「pwa 不能引导用户允许推送权限么」)。

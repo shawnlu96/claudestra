@@ -3,7 +3,7 @@ import { useState } from "react";
 import type { PendingPermission } from "../type";
 import { useChatStoreApi } from "../chat-store";
 import { useT } from "@/lib/i18n";
-import { BellIcon, MoonIcon } from "./notice-icons";
+import { BellIcon, MoonIcon } from "./line-icons";
 
 /** action.style → daisyUI 按钮 class */
 const STYLE_BTN: Record<string, string> = {
