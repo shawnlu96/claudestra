@@ -182,11 +182,11 @@ function JobRow({ job, onChanged }: { job: CronJobView; onChanged: () => void })
                 </button>
               </>
             ) : (
-              <button className="btn btn-ghost btn-xs text-error/80" onClick={() => setConfirmDel(true)}>
+              <button className="btn btn-ghost btn-xs text-error-soft-80" onClick={() => setConfirmDel(true)}>
                 {t("删除")}
               </button>
             )}
-            {msg && <span className="text-[11px] text-error/80">{msg}</span>}
+            {msg && <span className="text-[11px] text-error-soft-80">{msg}</span>}
           </div>
         </div>
       )}
@@ -284,7 +284,7 @@ function AddJobForm({ onChanged }: { onChanged: () => void }) {
         <button className="btn btn-ghost btn-xs" onClick={() => setOpen(false)}>
           {t("取消")}
         </button>
-        {msg && <span className="text-[11px] text-error/80">{msg}</span>}
+        {msg && <span className="text-[11px] text-error-soft-80">{msg}</span>}
       </div>
     </div>
   );
@@ -328,7 +328,7 @@ export function CronModal({ open, onClose }: { open: boolean; onClose: () => voi
           <p className="text-xs leading-relaxed text-base-content/50">
             {t("到点起一个临时 agent 执行指令,完成后报告并清理。改频率/指令是原地编辑,不丢运行历史。")}
           </p>
-          {err && <div className="text-xs text-error/80">{err}</div>}
+          {err && <div className="text-xs text-error-soft-80">{err}</div>}
           {loaded && jobs.length === 0 && !err && (
             <div className="py-4 text-center text-xs opacity-40">{t("还没有定时任务")}</div>
           )}

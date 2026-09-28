@@ -90,7 +90,7 @@ export function MemoryHygieneSection({ hygiene }: { hygiene: ReturnType<typeof u
               {hyg.nextRun ? `${t("下次")} ${new Date(hyg.nextRun).toLocaleString()}` : ""}
             </div>
           )}
-          {hygMsg && <div className="mt-2 text-xs text-error/80">{t(hygMsg)}</div>}
+          {hygMsg && <div className="mt-2 text-xs text-error-soft-80">{t(hygMsg)}</div>}
         </Section>
   );
 }
