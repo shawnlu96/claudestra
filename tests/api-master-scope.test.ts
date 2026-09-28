@@ -39,6 +39,8 @@ const SID_AM = "11111111-2222-3333-4444-555555555555"; // archive/agent-master �
 const SID_G = "22222222-3333-4444-5555-666666666666"; // 被 remove 的 agent-gone 的归档
 const SID_MS = "33333333-4444-5555-6666-777777777777"; // 大总管工作目录下的 CC 会话
 const SID_W = "44444444-5555-6666-7777-888888888888"; // 别处的野生会话
+const SID_MV = "55555555-6666-7777-8888-999999999999"; // 大总管的会话被挪到别的项目目录（开头记录的 cwd 仍是大总管的）
+const SID_WT = "66666666-7777-8888-9999-aaaaaaaaaaaa"; // 大总管 EnterWorktree 后的会话：落在 <MASTER_DIR>/.claude/worktrees/* 的项目目录
 const ENDPOINTS: [string, string, string?][] = [
   ["GET", "history"], ["GET", `history/${SID_AM}`], ["GET", "skills"], ["GET", "pending"],
   ["POST", "interrupt", "{}"], ["POST", "messages", JSON.stringify({ text: "hi" })], ["POST", "notify-read", "{}"],
@@ -72,6 +74,12 @@ beforeAll(() => {
     mkdirSync(dir, { recursive: true });
     writeFileSync(join(dir, `${sid}.jsonl`), line(text));
   }
+  const moved = join(home, ".claude", "projects", projectsSlug("/tmp/elsewhere"));
+  mkdirSync(moved, { recursive: true });
+  writeFileSync(join(moved, `${SID_MV}.jsonl`), JSON.stringify({ type: "user", cwd: masterDir, timestamp: at, message: { role: "user", content: "MASTER-LIVE-SECRET 挪过家" } }) + "\n");
+  const wt = join(home, ".claude", "projects", `${projectsSlug(masterDir)}--claude-worktrees-feat`);
+  mkdirSync(wt, { recursive: true });
+  writeFileSync(join(wt, `${SID_WT}.jsonl`), line("MASTER-LIVE-SECRET 在 worktree 里"));
   const at_ = (name: string) => `/api/v1/agents/${encodeURIComponent(name)}`;
   const req = (name: string, method: string, path: string, auth: object, body?: string) => ({ name, method, path, auth, body });
   const specs = [
@@ -102,6 +110,16 @@ beforeAll(() => {
     req("owner master session", "GET", `/api/v1/sessions/${SID_MS}/history`, OWNER),
     req("star wild session", "GET", `/api/v1/sessions/${SID_W}/history`, STAR),
     req("star delete master session", "POST", `/api/v1/sessions/${SID_MS}/manage`, STAR, JSON.stringify({ action: "delete" })),
+    req("star moved master session", "GET", `/api/v1/sessions/${SID_MV}/history`, STAR),
+    req("star worktree master session", "GET", `/api/v1/sessions/${SID_WT}/history`, STAR),
+    // 收编 / 分叉 / 接管大总管的会话（HF182-r2 P2-A）
+    req("star adopt master session", "POST", `/api/v1/sessions/${SID_MS}/adopt`, STAR, JSON.stringify({ agent: "cc" })),
+    req("star adopt moved master session", "POST", `/api/v1/sessions/${SID_MV}/adopt`, STAR, JSON.stringify({ agent: "cc" })),
+    req("star adopt wild session", "POST", `/api/v1/sessions/${SID_W}/adopt`, STAR, JSON.stringify({ agent: "cc" })),
+    ...[{}, { fork: true }, { takeover: true }].map((o) =>
+      req(`star resume master ${JSON.stringify(o)}`, "POST", "/api/v1/agents/resume", STAR, JSON.stringify({ agent: "probe", sessionId: SID_MS, ...o }))),
+    req("star resume worktree master fork", "POST", "/api/v1/agents/resume", STAR, JSON.stringify({ agent: "probe", sessionId: SID_WT, fork: true })),
+    req("owner resume master fork", "POST", "/api/v1/agents/resume", OWNER, JSON.stringify({ agent: "probe2", sessionId: SID_MS, fork: true })),
   ];
   results = sandbox.run(specs, { RUNNER_PRINCIPALS: JSON.stringify(PRINCIPALS), MASTER_DIR: masterDir });
 }, 120_000);
@@ -176,6 +194,22 @@ describe("按会话 id：大总管的会话只给显式列了 master 的凭据�
     expect(status("star wild session")).toBe(200);
   });
 
+  test("挪了家的大总管会话也认得出：挪到别的项目目录（按开头记录的 cwd）、EnterWorktree 的项目目录，老 * Bearer 都 403", () => {
+    for (const n of ["star moved master session", "star worktree master session"]) expect([n, status(n), leaks(n)]).toEqual([n, 403, false]);
+  });
+
+  test("收编 / 分叉 / 接管大总管的会话：老 * Bearer 403，manager 没收到；owner 照常；别处的会话照常收编", () => {
+    const denied = ["star adopt master session", "star adopt moved master session", "star resume worktree master fork",
+      ...[{}, { fork: true }, { takeover: true }].map((o) => `star resume master ${JSON.stringify(o)}`)];
+    for (const n of denied) expect([n, status(n)]).toEqual([n, 403]);
+    const calls = sandbox!.managerCalls();
+    for (const sid of [SID_MV, SID_WT]) expect(calls).not.toContain(sid);
+    expect(calls).not.toContain(`probe ${SID_MS}`);
+    expect(status("star adopt wild session")).toBe(202);
+    expect(status("owner resume master fork")).not.toBe(403);
+    expect(calls).toContain(`resume probe2 ${SID_MS}`);
+  });
+
   test("GET /sessions（visibleSessions）：master 的会话不把 id 递给老 * Bearer", () => {
     const p = (agents: string[], extra: Partial<Principal> = {}): Principal => ({ id: "token:x", role: "external", name: "x", agents, createdAt: at, secret: "s", ...extra });
     const list: NeutralSessionInfo[] = [
@@ -184,11 +218,12 @@ describe("按会话 id：大总管的会话只给显式列了 master 的凭据�
       { kind: "background", sessionId: "s-dopp", status: "running", doppelgangerOf: "master" },
       { kind: "interactive", sessionId: "s-mdir", status: "running", cwd: "/r/m" },
       { kind: "interactive", sessionId: "s-wild", status: "running", cwd: "/r/other" },
+      { kind: "interactive", sessionId: "s-wt", status: "running", cwd: "/r/m/.claude/worktrees/feat" },
     ];
     const ids = (q: Principal) => visibleSessions(list, q, "/r/m").map((s) => s.sessionId);
     expect(ids(p(["*"]))).toEqual(["s-cc", "s-wild"]);
-    expect(ids(p(["*", "master"]))).toEqual(["s-cc", "s-am", "s-dopp", "s-mdir", "s-wild"]);
-    expect(ids(p(["*"], { id: "owner:self" }))).toEqual(["s-cc", "s-am", "s-dopp", "s-mdir", "s-wild"]);
+    expect(ids(p(["*", "master"]))).toEqual(["s-cc", "s-am", "s-dopp", "s-mdir", "s-wild", "s-wt"]);
+    expect(ids(p(["*"], { id: "owner:self" }))).toEqual(["s-cc", "s-am", "s-dopp", "s-mdir", "s-wild", "s-wt"]);
   });
 });
 

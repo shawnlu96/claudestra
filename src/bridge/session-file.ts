@@ -4,8 +4,8 @@
  * 拿到 master 的 sessionId 就能读它的完整会话、删它的会话文件。GET /sessions 同理要把 master 的会话滤掉，免得把 id 递出去。
  * 测试见 tests/api-master-scope.test.ts。
  */
-import { existsSync, readdirSync, realpathSync } from "fs";
-import { dirname, join, relative, sep } from "path";
+import { closeSync, existsSync, openSync, readdirSync, readSync, realpathSync } from "fs";
+import { basename, dirname, join, relative, sep } from "path";
 import { projectsDir, projectsSlug } from "../lib/jsonl-cost.js";
 import { agentInScope, isOwnerPrincipal, type Principal } from "../lib/principals.js";
 import { isMasterName } from "../lib/registry.js";
@@ -25,11 +25,40 @@ export function locateSessionFile(sid: string, runtime: string | undefined, cwd:
 /** 看得见 master 的会话：scope 显式列了 master，或 owner 本人（isOwnerPrincipal） */
 export const masterSessionsAllowed = (p: Principal): boolean => agentInScope(p, "master") || isOwnerPrincipal(p);
 
-/** 这个会话文件是不是大总管的：在大总管工作目录对应的 CC 项目目录下，或在归档根下 master 的目录里（任何写法，isMasterName） */
-export function isMasterSessionFile(file: string, masterDir: string, archiveRoot: string = ARCHIVE_ROOT): boolean {
-  if (dirname(file) === projectsDir(masterDir)) return true;
+/**
+ * 这个会话文件是不是大总管的（任一条成立）：在大总管工作目录或它的 worktree（EnterWorktree 会把会话挪过去，HF182-r2 P2-B）
+ * 对应的 CC 项目目录下；文件开头记录的 cwd 是大总管的（挪到哪都带着）；在归档根下 master 的目录里（任何写法，isMasterName）。
+ */
+function isMasterSessionFile(file: string, masterDir: string, archiveRoot: string = ARCHIVE_ROOT): boolean {
+  const dir = dirname(file);
+  if (dir === projectsDir(masterDir) || basename(dir).startsWith(`${projectsSlug(masterDir)}--claude-worktrees-`)) return true;
+  if (isMasterCwd(firstRecordedCwd(file), masterDir)) return true;
   const rel = relative(archiveRoot, file);
   return !rel.startsWith("..") && isMasterName(rel.split(sep)[0]);
+}
+
+/** 按会话 id 动大总管的会话（读、删、收编、接管、分叉）要 masterSessionsAllowed；file 为 null（不在磁盘上）交给调用方 */
+export const masterSessionHidden = (p: Principal, file: string | null, masterDir: string): boolean =>
+  !!file && isMasterSessionFile(file, masterDir) && !masterSessionsAllowed(p);
+
+/** 会话文件开头 64KB 里第一条带 cwd 的记录（CC 每条都带；Codex 在 session_meta.payload 里）；读不到 → undefined */
+function firstRecordedCwd(file: string): string | undefined {
+  const buf = Buffer.alloc(65536);
+  let n = 0;
+  try {
+    const fd = openSync(file, "r");
+    try { n = readSync(fd, buf, 0, buf.length, 0); } finally { closeSync(fd); }
+  } catch {
+    return undefined; // 读不了就只按目录判：调用方前面已确认文件存在，这里失败多半是权限，按不是大总管处理与旧口径一致
+  }
+  for (const line of buf.subarray(0, n).toString("utf8").split("\n")) {
+    try {
+      const o = JSON.parse(line);
+      const cwd = o?.cwd ?? o?.payload?.cwd;
+      if (typeof cwd === "string" && cwd) return cwd;
+    } catch { /* 被 64KB 截断的最后一行、非 JSON 行：跳过，看下一行 */ }
+  }
+  return undefined;
 }
 
 /**
@@ -48,5 +77,9 @@ export function archivedOnlyAgent(param: string, archiveRoot: string = ARCHIVE_R
   }
 }
 
-/** 会话的 cwd 是不是大总管的工作目录（按 CC 的 slug 规则比，/tmp 与 /private/tmp 这类链接也算同一个） */
-export const isMasterCwd = (cwd: string | undefined, masterDir: string): boolean => !!cwd && projectsSlug(cwd) === projectsSlug(masterDir);
+/** 会话的 cwd 是不是大总管的工作目录或它的 worktree（<MASTER_DIR>/.claude/worktrees/*；按 CC 的 slug 规则比，/tmp 与 /private/tmp 算同一个） */
+export function isMasterCwd(cwd: string | undefined, masterDir: string): boolean {
+  if (!cwd) return false;
+  const slug = projectsSlug(cwd), master = projectsSlug(masterDir);
+  return slug === master || slug.startsWith(`${master}--claude-worktrees-`);
+}

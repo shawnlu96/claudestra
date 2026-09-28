@@ -47,7 +47,7 @@ import { readConfig as readAppConfig, setAutoCompact } from "../lib/config-store
 import { isMasterName, readRegistryAgents } from "../lib/registry.js";
 import { claudeSwitchInputError, isSafeModelArg, nonClaudeRuntimeError } from "../lib/claude-settings-runtime.js";
 import { collectSessions, visibleSessions } from "./sessions-inventory.js";
-import { archivedOnlyAgent, isMasterSessionFile, locateSessionFile, masterSessionsAllowed } from "./session-file.js";
+import { archivedOnlyAgent, locateSessionFile, masterSessionHidden } from "./session-file.js";
 import { readPiRuntimeSnapshot } from "../lib/pi-env.js";
 import { findSessionJsonlBySessionId } from "../lib/session-source.js";
 import { cleanupBgJob } from "../lib/bg-jobs.js";
@@ -638,12 +638,12 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
     });
   }
 
-  // v2.7+ POST /api/v1/sessions/:sessionId/adopt —— 收编：把该 session 立为
-  // 某正式 agent 的会话并重启拉起（body: {"agent": "<name>"}）。仅全权 token。
+  // v2.7+ POST /api/v1/sessions/:sessionId/adopt —— 收编：把该 session 立为某正式 agent 的会话并重启拉起（body: {"agent": "<name>"}）。仅全权 token；大总管的会话另要 master 在 scope 内
   const adoptMatch = path.match(/^\/sessions\/([^/]+)\/adopt$/);
   if (adoptMatch && req.method === "POST") {
     if (!isFullScope(principal)) return forbidden("adopt requires a full-scope token");
     const sid = decodeURIComponent(adoptMatch[1]);
+    if (masterSessionHidden(principal, locateSessionFile(sid, undefined, undefined), MASTER_DIR)) return notInScope("master");
     let agentName = "";
     try {
       agentName = String(((await req.json()) as any)?.agent || "");
@@ -874,7 +874,7 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
     const mCwd = typeof mbody?.cwd === "string" ? mbody.cwd : undefined;
     const mfile = locateSessionFile(sid, mRuntime, mCwd); // 定位口径与 /sessions/:id/history 同一个函数
     if (!mfile) return apiJson(404, { ok: false, error: `session "${sid}" not found on disk` });
-    if (isMasterSessionFile(mfile, MASTER_DIR) && !masterSessionsAllowed(principal)) return notInScope("master");
+    if (masterSessionHidden(principal, mfile, MASTER_DIR)) return notInScope("master");
     const fsp = await import("node:fs/promises");
     try {
       const st = await fsp.stat(mfile);
@@ -917,7 +917,7 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
     const before = url.searchParams.get("before");
     const file = locateSessionFile(sid, runtime, cwd);
     if (!file) return apiJson(404, { ok: false, error: `session "${sid}" not found on disk` });
-    if (isMasterSessionFile(file, MASTER_DIR) && !masterSessionsAllowed(principal)) return notInScope("master"); // "*" 不含 master（bridge/session-file.ts）
+    if (masterSessionHidden(principal, file, MASTER_DIR)) return notInScope("master"); // "*" 不含 master（bridge/session-file.ts）
     const page = await readSessionHistory(file, {
       limit,
       ...(before ? { before: Number(before) } : {}),
@@ -1727,6 +1727,8 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
       return apiJson(400, { ok: false, error: 'agent/sessionId/cwd 不能以 "-" 开头' });
     }
     if (!isValidSessionId(sessionId)) return apiJson(400, { ok: false, error: "invalid sessionId" });
+    // 收编 / 分叉 / 接管大总管的会话同样要 master 在 scope 内（按会话 id 读历史同一个判定）
+    if (masterSessionHidden(principal, locateSessionFile(sessionId, runtime || undefined, cwd || undefined), MASTER_DIR)) return notInScope("master");
     // 只读来源（Codex 在接线前）不能收编；以前这里不校验，未知值会被悄悄当 Claude Code 起
     if (runtime && !managedFor(runtime)) {
       return apiJson(400, { ok: false, error: `runtime must be one of: ${manageableRuntimeIds().join(", ")}` });
@@ -1736,10 +1738,8 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
     const args = ["resume", agent, sessionId];
     if (cwd) args.push(cwd);
     if (runtime && runtime !== DEFAULT_RUNTIME) args.push("--runtime", runtime);
-    // ⚠ 必须**同步等**（与 POST /agents 的 create 一致）：原来做成 202 + 后台，
-    // 结果只进事件流 → 界面只看到「已受理」，后台失败（最常见：默认名字与已有
-    // agent 撞车 → manager 报「已存在」）时用户完全看不到原因，只会认为"收编失败"。
-    // 代价是这个请求要挂 10-40s（起窗口 + 等就绪），browser 侧超时给到 180s。
+    // ⚠ 必须**同步等**（与 POST /agents 的 create 一致）：做成 202 + 后台的话结果只进事件流，后台失败（最常见：默认名字
+    // 与已有 agent 撞车 → manager 报「已存在」）时用户看不到原因。代价是请求要挂 10-40s（起窗口 + 等就绪），browser 侧超时给到 180s。
     //
     // D1-5 占用闸：这个会话正被本机一个活的 interactive Claude Code 开着（用户在别的终端里），
     // 直接 resume 会让两个进程同时写同一个 session。没带 fork / takeover 就回 409 + {live,pid}，

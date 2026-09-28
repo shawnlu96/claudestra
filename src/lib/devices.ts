@@ -187,6 +187,9 @@ export function canManage(p: Principal): boolean {
   return p.manage !== false && p.agents.includes("*") && !p.peer;
 }
 
+/** 按 scope 过滤后只读返回的管理信息（技能库、按 agent 的技能视图）：全权凭据，或 grant 明确带 manage 的设备（部分 scope 也算），peer 除外。写一律走 canManage */
+export const canReadScopedManage = (p: Principal): boolean => canManage(p) || (p.manage === true && !p.peer);
+
 /**
  * 内置台账（docs 10-ledger §4）的唯一读门，API / SSE ledger 事件 / GET /agents 的 ledgerTask 三处共用。
  * 台账横跨整个项目的任务、执行者与 owner 原话：部分 scope 的 owner 设备、guest、peer 一律不给——canManage 已经要求「全 scope、非 peer」，

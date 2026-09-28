@@ -65,10 +65,11 @@ export function invisibleNameError(name: string): string | null {
  * 保留给身份的名字：台账（lib/ledger-stages.ts roleOf）把 actor "owner" / "master" 直接当角色。
  * registry 键带 agent- 前缀，推导出的 actor 本不会撞上，但 agent-master 在别处（isMasterAgent）已被当成大总管——
  * 新建 / resume / 改名一律不许用这两个名字（manager/core.ts assertValidNewName），doctor 对已有的 agent-owner 报警。
+ * 和 isMasterName 同一口径（NFKC、小写、去掉所有层前缀）：窄了会建出 ｍａｓｔｅｒ 这类被判定当成大总管、却管不了的 agent。
  */
 export function isReservedAgentName(name: string): boolean {
-  const bare = name.trim().toLowerCase().replace(/^agent-/, "");
-  return bare === "owner" || bare === "master";
+  const n = name.trim();
+  return isMasterName(n) || n.normalize("NFKC").toLowerCase().replace(/^(agent-)+/, "") === "owner";
 }
 
 export function agentRuntime(info: { runtime?: string } | undefined | null): AgentRuntime {

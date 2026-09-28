@@ -56,6 +56,8 @@ describe("参数解析", () => {
 describe("保留名 owner / master", () => {
   test("isReservedAgentName 认裸名与 agent- 前缀、不分大小写", () => {
     for (const n of ["owner", "Owner", "agent-owner", "master", "agent-MASTER"]) expect(isReservedAgentName(n)).toBe(true);
+    // 与 isMasterName 同一口径：全角、长 s、多层前缀、__master__ 也是保留名（HF182-r2 P2-C）
+    for (const n of ["ｍａｓｔｅｒ", "ＭＡＳＴＥＲ", "maſter", "agent-agent-master", "__master__", "ｏｗｎｅｒ", "agent-agent-owner"]) expect([n, isReservedAgentName(n)]).toEqual([n, true]);
     for (const n of ["owners", "agent-task-owner", "masterful"]) expect(isReservedAgentName(n)).toBe(false);
   });
   test("新建 / resume / 改名共用的 assertValidNewName 拒绝保留名", () => {
