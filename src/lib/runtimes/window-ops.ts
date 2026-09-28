@@ -6,7 +6,6 @@
  */
 import { readRegistryAgents } from "../registry.js";
 import {
-  idleVerdict,
   MASTER_SESSION,
   setWindowOption,
   tmuxCapture,
@@ -18,6 +17,7 @@ import {
   windowOption,
   windowTarget,
 } from "../tmux-helper.js";
+import { turnState } from "../turn-state.js";
 import { codexBusy } from "./codex-exit.js";
 import { controlFor } from "./index.js";
 import type { WindowOps } from "./types.js";
@@ -82,12 +82,13 @@ export async function interruptWindow(target: string, runtime: string | undefine
  * Discord 入站「忙就先打断」，返回是否发了键。只对「人类消息先抢占」且 CC 屏幕判据适用的运行时（CC）：
  * Pi 能 steer 进回合、Codex 的 queue 排到下一轮，本就不该抢占；它们的屏幕套 CC 判据又恒判 busy，
  * 不拦的话每条 Discord 消息都会误发一次打断键（空闲 Codex 收到 Esc 会挂上 backtrack）。
- * 三态判据：unknown（CC 文案可能变了）时宁可不打断。
+ * 判据是 turnState 的 main（只看主回合：只剩后台 subagent 时 C-c 会把它们全停掉）；unknown（CC 文案可能变了）时宁可不打断。
+ * bridge 注入带事件态的 verdictOf（bridge/turn-probe.ts），默认值只看屏幕。
  */
 export async function preemptIfBusy(
   target: string,
   runtime: string | undefined | null,
-  verdictOf: (target: string) => Promise<string> = idleVerdict,
+  verdictOf: (target: string) => Promise<string> = async (t) => turnState({ pane: await tmuxRaw(["capture-pane", "-t", t, "-p"]), runtime, now: Date.now() }).main,
   interrupt: (target: string, runtime: string | undefined | null) => Promise<readonly string[]> = interruptWindow,
 ): Promise<boolean> {
   const control = controlFor(runtime);

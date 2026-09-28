@@ -106,8 +106,8 @@ describe("preemptIfBusy：Discord 入站的抢占打断", () => {
     expect(s.calls.interrupt).toEqual([undefined]);
   });
 
-  test("CC 空闲 / 判据可疑：不打断", async () => {
-    for (const v of ["idle", "unknown"]) {
+  test("CC 空闲 / 判据可疑 / 压缩中（turnState 的 main）：不打断", async () => {
+    for (const v of ["idle", "unknown", "compacting"]) {
       const s = spy(v);
       expect(await preemptIfBusy("w", "claude-code", s.verdictOf, s.interrupt)).toBe(false);
       expect(s.calls.interrupt).toEqual([]);

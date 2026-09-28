@@ -11,7 +11,9 @@ import { getAgentStatus, isBusyStatus, subscribeEvents } from "./event-bus.js";
 import { REPO_ROOT } from "../lib/repo-root.js";
 import { readRegistryAgentsSync } from "../lib/registry.js";
 import { readSessionCtx } from "../lib/usage-cache.js";
-import { idleVerdict, windowTarget } from "../lib/tmux-helper.js";
+import { windowTarget } from "../lib/tmux-helper.js";
+import { agentMsgMustWait } from "../lib/turn-state.js";
+import { probeTurnAt } from "./turn-probe.js";
 import {
   backoffMs, missionKey, MISSIONS_PATH, nextFastTurns, nudgeKind, nudgeText, readMissions, updateMissions, type Mission, type NudgeKind,
 } from "../lib/missions.js";
@@ -21,19 +23,20 @@ import { newThreadId, type Envelope } from "./router.js";
 let GRACE_MS = 45_000;
 let path = MISSIONS_PATH;
 /**
- * 事件总线只在 bridge 投递时才知道「在忙」：bridge 刚重启、或 agent 自己续着干，状态表是空的。递提醒前再看一眼画面，
- * 只有明确 busy 才让位（unknown 放行——认不出画面就挡，值守会永远递不出去）。
+ * 事件总线只在 bridge 投递时才知道「在忙」：bridge 刚重启、或 agent 自己续着干，状态表是空的。递提醒前再按 turnState 判一次：
+ * 主回合在跑 / 压缩中 / 后台 subagent 刚结束（task-notification 马上开回合，撞上会落进丢弃窗口）才让位；只剩后台在跑不算忙。
+ * unknown 放行——认不出画面就挡，值守会永远递不出去。
  */
-let paneBusy = async (agent: string): Promise<boolean> => {
-  const win = agent === "master" ? "master" : readRegistryAgentsSync().find((a) => missionKey(a.name) === agent)?.name;
-  if (!win) return false;
-  return (await idleVerdict(windowTarget(win)).catch(() => "unknown")) === "busy"; // 抓不到画面（窗口没了）= 不知道，放行
+let turnBusy = async (agent: string): Promise<boolean> => {
+  const reg = agent === "master" ? undefined : readRegistryAgentsSync().find((a) => missionKey(a.name) === agent);
+  if (agent !== "master" && !reg) return false;
+  return agentMsgMustWait(await probeTurnAt(windowTarget(reg ? reg.name : "master"), reg?.runtime, agent));
 };
-/** 单测：状态文件指到临时目录、宽限期缩短、画面判忙换成假的；生产不调 */
-export function setMissionTestHooks(h: { path?: string; graceMs?: number; paneBusy?: (agent: string) => Promise<boolean> }): void {
+/** 单测：状态文件指到临时目录、宽限期缩短、判忙换成假的；生产不调 */
+export function setMissionTestHooks(h: { path?: string; graceMs?: number; turnBusy?: (agent: string) => Promise<boolean> }): void {
   if (h.path) path = h.path;
   if (h.graceMs !== undefined) GRACE_MS = h.graceMs;
-  if (h.paneBusy) paneBusy = h.paneBusy;
+  if (h.turnBusy) turnBusy = h.turnBusy;
 }
 
 interface Client { ws: ServerWebSocket<unknown>; channelId: string; cwd?: string }
@@ -87,7 +90,7 @@ async function tryDeliver(agent: string, m: Mission, kind: NudgeKind, now: numbe
   if (!deps) return false;
   // 人在跟它说话（或它自己还在干）：让位，等下一次回合结束
   if (isBusyStatus(getAgentStatus(agent)) || isBusyStatus(getAgentStatus(`agent-${agent}`))) return false;
-  if (await paneBusy(agent)) return false;
+  if (await turnBusy(agent)) return false;
   const channelId = channelOf(agent);
   const client = channelId ? deps.clients.get(channelId) : undefined;
   if (!channelId || !client) {

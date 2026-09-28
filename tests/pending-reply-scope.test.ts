@@ -7,7 +7,8 @@
  * ② 销账不验欠账人，会把别的 agent 的欠账顺手销掉。
  */
 import { describe, test, expect } from "bun:test";
-import { hangsPendingReply, ownsPendingReply, pendingKeysOwedBy } from "../src/lib/pending-reply-scope.js";
+import { dropPendingsForChannel, hangsPendingReply, nudgesForOrigin, ownsPendingReply, pendingKeysOwedBy, type ThreadEnds } from "../src/lib/pending-reply-scope.js";
+import { pickUnrepliedForNudge } from "../src/lib/reply-nudge.js";
 
 describe("hangsPendingReply", () => {
   test("Web/API 入站：即便 skipInterAgentWatchdog=true 也要挂（补 reply 拦截靠它）", () => {
@@ -113,5 +114,54 @@ describe("pendingKeysOwedBy", () => {
     expect(pendingKeysOwedBy(book(), undefined, WEB)).toEqual([]);
     expect(pendingKeysOwedBy(book(), null, WEB)).toEqual([]);
     expect(pendingKeysOwedBy(book(), wsMmPm, "")).toEqual([]);
+  });
+});
+
+describe("N7：kill 之后的欠账 + 拦截只追非 agent 来源", () => {
+  // 09-28 17:00:09 实况：T3 的请求投给 PM → pendingReplies{targetWs=PM, 回信=T3 频道}；17:02:34 kill T3；17:05:24 PM 的 Stop 被拦
+  const PM = { tag: "pm-ws" };
+  const T5 = { tag: "t5-ws" };
+  type Entry = { targetWs: unknown; intendedReplyChannel: string; ts: number; fromKind?: string };
+  const local = (channelId: string) => ({ kind: "local", channelId });
+  function state() {
+    const replies = new Map<string, Entry>([
+      ["thr-t3", { targetWs: PM, intendedReplyChannel: "c-t3", ts: 1, fromKind: "local" }],
+      ["thr-owner", { targetWs: PM, intendedReplyChannel: "api:owner", ts: 2, fromKind: "api" }],
+      ["thr-pm", { targetWs: T5, intendedReplyChannel: "c-pm", ts: 3, fromKind: "local" }],
+    ]);
+    const threads = new Map<string, ThreadEnds>([
+      ["thr-t3", { request: { from: local("c-t3"), to: local("c-pm") } }],
+      ["thr-to-t3", { request: { from: local("c-pm"), to: local("c-t3") } }],
+      ["thr-owner", { request: { from: { kind: "api" }, to: local("c-pm") } }],
+    ]);
+    return { replies, threads };
+  }
+  const stopPick = (replies: Map<string, Entry>, ws: unknown, originFilter: boolean) =>
+    pickUnrepliedForNudge(
+      [...replies].filter(([, p]) => p.targetWs === ws && (!originFilter || nudgesForOrigin(p.fromKind))).map(([key, p]) => ({ key, ts: p.ts })),
+      { event: "Stop", stopHookActive: false, now: 10_000 },
+    );
+
+  test("cleanup 销掉回信地址是它的欠账、发给它和由它发起的 thread；别人的不动", () => {
+    const { replies, threads } = state();
+    expect(dropPendingsForChannel(replies, threads, "c-t3")).toBe(3);
+    expect([...replies.keys()]).toEqual(["thr-owner", "thr-pm"]);
+    expect([...threads.keys()]).toEqual(["thr-owner"]);
+  });
+
+  test("cleanup 之后 PM 的 Stop 不再被逼着 reply 到已删的频道（不加来源过滤也成立）", () => {
+    const { replies, threads } = state();
+    replies.delete("thr-owner");
+    expect(stopPick(replies, PM, false)?.key).toBe("thr-t3");
+    dropPendingsForChannel(replies, threads, "c-t3");
+    expect(stopPick(replies, PM, false)).toBeNull();
+  });
+
+  test("拦截对 agent 来源不触发（T5 被逼着 reply 到 PM 频道）；人类 / peer / bridge 照拦", () => {
+    const { replies } = state();
+    expect(stopPick(replies, T5, true)).toBeNull();
+    expect(stopPick(replies, PM, true)?.key).toBe("thr-owner");
+    expect(nudgesForOrigin("local")).toBe(false);
+    for (const k of ["user", "api", "bridge", undefined]) expect(nudgesForOrigin(k)).toBe(true);
   });
 });
