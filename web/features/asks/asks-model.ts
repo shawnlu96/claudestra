@@ -57,18 +57,25 @@ export function askCounts(asks: WebAsk[]): { waiting: number; accept: number } {
 /** ask 里的是 bridge 名（master / agent-xxx），聊天里的是前端会话名：都换成前端名再比 */
 export const sameAgent = (a: string, b: string) => uiAgentName(a) === uiAgentName(b);
 
+/** 与键顺序无关的 JSON：历史接口按 agent 调用时的参数顺序给 components，ask 里存的是 bridge 收到时的顺序，两边不一定一致 */
+function canon(v: unknown): string {
+  if (Array.isArray(v)) return `[${v.map(canon).join(",")}]`;
+  if (v && typeof v === "object") return `{${Object.keys(v).sort().map((k) => `${JSON.stringify(k)}:${canon((v as Record<string, unknown>)[k])}`).join(",")}}`;
+  return JSON.stringify(v) ?? "null";
+}
+
 /**
  * 这个聊天气泡是哪条 ask 建出来的：同一个 agent、ask 的选项以气泡的 components 开头（行内按钮排在后面）；
  * agent 复用同一组按钮时取建立时间离气泡最近的一条（两分钟内），对不上就当没有。
  */
 export function askForReply(asks: WebAsk[], agent: string, rows: WebComponentRow[] | undefined, replyTs?: string): WebAsk | null {
   if (!rows?.length || !agent) return null;
-  const want = JSON.stringify(rows);
+  const want = canon(rows);
   const at = replyTs ? Date.parse(replyTs) : NaN;
   let best: WebAsk | null = null;
   for (const a of asks) {
     if (a.source !== "reply" || !sameAgent(a.fromAgent, agent)) continue;
-    if (JSON.stringify(a.options.slice(0, rows.length)) !== want) continue;
+    if (canon(a.options.slice(0, rows.length)) !== want) continue;
     if (Number.isFinite(at) && Math.abs(a.createdAt - at) > 120_000) continue;
     if (!best || (Number.isFinite(at) && Math.abs(a.createdAt - at) < Math.abs(best.createdAt - at))) best = a;
     else if (!Number.isFinite(at) && a.createdAt > best.createdAt) best = a;

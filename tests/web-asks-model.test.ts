@@ -41,6 +41,11 @@ describe("气泡 ↔ ask", () => {
     expect(askForReply([ask({ fromAgent: "master" })], "__master__", rows, ts)?.id).toBe("ask_1");
   });
 
+  test("字段顺序不同也认（历史接口按 agent 的参数顺序给，ask 里存的是 bridge 收到时的顺序）", () => {
+    const shuffled = [rows[0], { options: (rows[1] as { options: unknown[] }).options, id: "f", type: "multiselect" }] as WebComponentRow[];
+    expect(askForReply([ask({})], "x", shuffled, ts)?.id).toBe("ask_1");
+  });
+
   test("复用同一组按钮：取建立时间离气泡最近的；超过两分钟不认", () => {
     const list = [ask({ id: "early", createdAt: 0 }), ask({ id: "near", createdAt: 1_000_000 })];
     expect(askForReply(list, "x", rows, ts)?.id).toBe("near");
