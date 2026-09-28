@@ -111,6 +111,13 @@ describe("flushHeld", () => {
     expect(h.contents()).toEqual(["agent-msg"]);
   });
 
+  test("额度闸里的频道：目标空闲也只投人类消息，agent 消息不投（不会每分钟投一次再被押回来）", async () => {
+    const h = harness([item("agent-msg"), item("human-msg", "user")], { walled: async () => true });
+    await flushHeld(h.deps, "c-me", "sweep");
+    expect(h.delivered).toEqual(["human-msg"]);
+    expect(h.contents()).toEqual(["agent-msg"]);
+  });
+
   test("不在线 / 压缩中 / 别人正在投：一条都不动", async () => {
     const offline = harness([item("a")], { client: () => undefined });
     await flushHeld(offline.deps, "c-me", "stop");

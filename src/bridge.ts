@@ -428,7 +428,7 @@ async function localAgentWorking(channelId: string, evAgent: string): Promise<bo
 /** 押后队列投递:Stop hook / 压缩结束 / 周期扫描调用(规则与交错场景见 bridge/held-flush.ts 及其测试) */
 function flushHeldLocalMsgs(channelId: string, reason: string): Promise<void> {
   return flushHeld({
-    held: heldLocalMsgs, compacting: (a) => getAgentStatus(a) === "compacting", working: localAgentWorking, isHumanRequest,
+    held: heldLocalMsgs, compacting: (a) => getAgentStatus(a) === "compacting", working: localAgentWorking, isHumanRequest, walled: async (c) => !!(await quotaWall()?.gates(c)),
     client: (c) => clients.get(c), deliver: deliverLocalInOrder, touch: (c, env) => pendingAgentCalls.touch(c, env.from.kind === "local" ? env.from.channelId : undefined),
   }, channelId, reason);
 }

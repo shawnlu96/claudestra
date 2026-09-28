@@ -208,12 +208,13 @@ async function noteApiErrorIn(c: Ctx, e: { channelId: string; agent: string; at:
   if (!(await c.d.isClaudeCode(e.channelId))) return false;
   const parsed = e.error === "rate_limit" ? parseWallText(e.text, e.at) : null;
   if (parsed) {
+    const again = !!c.state.wall?.hits[e.channelId] && wallActive(c.state);
     const r = noteWallHit(c.state, { ...e, parsed }, c.d.newId);
     set(c, r.state);
     if (r.entered) await baselineEchoes(c).catch((err) => c.d.log(`额度闸取回显基线出错（第一拍再取）: ${(err as Error).message}`));
     c.d.log(r.entered
       ? `⛔ 额度闸进闸：${e.agent} 撞到 ${parsed.kind} 额度（重置 ${parsed.resetsText ?? "未知"}）——agent 消息押后，人类消息照投`
-      : `⛔ 额度闸：${e.agent} 也撞墙了（名单 ${Object.keys(r.state.wall!.hits).length} 个）`);
+      : `⛔ 额度闸：${e.agent} ${again ? "又撞了一次" : "也撞墙了"}（名单 ${Object.keys(r.state.wall!.hits).length} 个）`);
     return true;
   }
   const other = noteOtherError(c.state, e);

@@ -16,6 +16,8 @@ export interface FlushDeps {
   client: (channelId: string) => { ws: LocalEndpoint["ws"]; cwd?: string } | undefined;
   /** stillWanted：投递途中最后一刻再核对这条还在队里（被 kill 清理 / 放弃摘掉的就不发、不押回） */
   deliver: (env: Envelope, to: LocalEndpoint, stillWanted?: () => boolean) => Promise<Delivery>;
+  /** 这个频道在额度闸里（bridge/quota-wall.ts）：只投人类消息，其余留着等出闸补投——否则每分钟扫描都投一次、再被押回来 */
+  walled?: (channelId: string) => Promise<boolean>;
   /** 回程簿失效钟从真正送达起算（只动这封消息发送方那一槽） */
   touch: (channelId: string, env: Envelope) => void;
 }
@@ -30,7 +32,8 @@ export async function flushHeld(d: FlushDeps, channelId: string, reason: string)
     const working = await d.working(channelId, evAgent);
     // 人类消息只因「别掐压缩」被押,压缩一结束就该到——不等回合空闲,deliverToLocal 自带抢占(C-c)语义;
     // agent→agent 仍等空闲(回合中通知有丢弃窗口)。快照:遍历中别处可能往这个频道 hold 新消息,只投这一刻到期的
-    const due = working ? q.filter((i) => d.isHumanRequest(i.env)) : q.filter((i) => !leaseActive(i));
+    const humanOnly = working || !!(await d.walled?.(channelId));
+    const due = humanOnly ? q.filter((i) => d.isHumanRequest(i.env)) : q.filter((i) => !leaseActive(i));
     for (const item of due) {
       // ws 可能已换代(channel-server 重连 / bridge 重启后从盘上恢复的没有 ws):按 channelId 取最新连接;不在线就留着
       const fresh = d.client(channelId);
