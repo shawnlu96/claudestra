@@ -8,6 +8,7 @@
 import type PhotoSwipe from "photoswipe";
 import type { SlideData } from "photoswipe";
 import { listMedia, mediaRawUrl, type MediaCursor, type MediaItem, type MediaPage, type MediaQuery } from "@/lib/api/media";
+import { uiAgentName } from "@/lib/chat/agents";
 import { fetchAuthBlob, resolveAuthUrl, saveBlob } from "../chat/components/auth-img";
 import { fmtTs } from "../chat/fmt-time";
 import { placePage, wantsDisplayVariant } from "./media-logic";
@@ -28,7 +29,7 @@ export interface ViewerSlide {
 
 export interface ViewerText {
   t: (s: string) => string;
-  /** 媒体项 → 顶部说明（发送方 · 时间） */
+  /** 媒体项 → 顶部说明；不给就是「谁发的 · 时间」 */
   caption?: (item: MediaItem) => string;
   onLocate?: (item: MediaItem) => void;
 }
@@ -85,7 +86,7 @@ function slideOf(item: MediaItem, text: ViewerText): ViewerSlide {
     url: mediaRawUrl(item.id, wantsDisplayVariant(item.name)),
     saveUrl: mediaRawUrl(item.id),
     name: item.name,
-    caption: text.caption?.(item) ?? fmtTs(item.ts ?? undefined),
+    caption: text.caption?.(item) ?? [item.dir === "in" ? text.t("我发的") : uiAgentName(item.agent), fmtTs(item.ts ?? undefined)].join(" · "),
     item,
   };
 }

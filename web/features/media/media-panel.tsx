@@ -55,6 +55,13 @@ export function MediaPanel({ agent, onClose }: { agent?: string; onClose: () => 
   const query = toQuery(f, dq);
   const { items, total, fresh, error, building, loading, retry, endMarker } = useMediaList(query, JSON.stringify({ ...query, since: f.range }));
 
+  // 桌面 Esc 关面板；大图查看器开着时 Esc 归它（PhotoSwipe 自己关），面板不跟着关
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => e.key === "Escape" && !document.querySelector(".pswp") && onClose();
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
   const locate = (it: MediaItem) => {
     void store.openAgent(uiAgentName(it.agent)).then(() => store.jumpToContext(it.sessionId, it.seq));
     onClose();

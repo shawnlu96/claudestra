@@ -16,7 +16,7 @@ import { MEDIA_MARKERS, mediaRefsOf, type MediaRef } from "./media-extract.js";
 import { buildInboxCatalog, displayName, resolveInbound, resolveOutbound, type InboxCatalog, type Resolved } from "./media-store.js";
 import { createLineTranslator, runtimeForSessionPath } from "./session-source.js";
 
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 2;
 const CHUNK_BYTES = 1024 * 1024;
 /** 出站副本可能比 jsonl 记录晚几秒落盘：这么久以内没找到文件的行，下次刷新再解析一次 */
 const RETRY_MISSING_MS = 15 * 60_000;
@@ -44,10 +44,10 @@ export function openMediaIndex(path: string): Database {
     path TEXT PRIMARY KEY, agent TEXT NOT NULL, session_id TEXT NOT NULL, size INTEGER NOT NULL, mtime REAL NOT NULL,
     offset INTEGER NOT NULL, next_seq INTEGER NOT NULL)`);
   db.exec(`CREATE TABLE IF NOT EXISTS media (
-    id TEXT PRIMARY KEY, agent TEXT NOT NULL, session_id TEXT NOT NULL, seq INTEGER NOT NULL, ts TEXT, ts_ms INTEGER NOT NULL,
+    id TEXT PRIMARY KEY, agent TEXT NOT NULL, session_id TEXT NOT NULL, seq INTEGER NOT NULL, ts TEXT, ts_ms INTEGER NOT NULL, sk TEXT NOT NULL,
     dir TEXT NOT NULL, sender TEXT, name TEXT NOT NULL, ref_path TEXT NOT NULL, loc TEXT, size INTEGER, mime TEXT,
     kind TEXT NOT NULL, cat TEXT NOT NULL, ambiguous INTEGER NOT NULL DEFAULT 0, prio INTEGER NOT NULL)`);
-  db.exec("CREATE INDEX IF NOT EXISTS media_ts ON media(ts_ms DESC, id DESC)");
+  db.exec("CREATE INDEX IF NOT EXISTS media_sk ON media(sk)");
   db.exec("CREATE INDEX IF NOT EXISTS media_agent ON media(agent, ts_ms)");
   db.exec("CREATE INDEX IF NOT EXISTS media_loc ON media(loc)");
   dbs.set(path, db);
@@ -76,6 +76,14 @@ function classify(name: string): { kind: "image" | "file"; cat: string } {
   return { kind: "file", cat: "other" };
 }
 
+/**
+ * 排序键（定长字符串，字典序 = 时间序）：时间 → 行号 → 消息内第几个 → id。同一条消息的几张图时间相同，
+ * 只按 id 排就是随机顺序，查看器里「第 n 张」会乱；分页游标也就是它。
+ */
+function sortKey(tsMs: number, seq: number, idx: number, id: string): string {
+  return `${String(Math.max(0, tsMs)).padStart(15, "0")}${String(seq).padStart(10, "0")}${String(idx).padStart(3, "0")}${id}`;
+}
+
 function mediaId(agent: string, sessionId: string, r: MediaRef): string {
   const key = r.mid ? `${agent}|${sessionId}|m:${r.mid}|${r.idx}` : `${agent}|${sessionId}|${r.seq}|${r.dir}|${r.idx}`;
   return createHash("sha256").update(key).digest("hex").slice(0, 24);
@@ -92,12 +100,13 @@ async function upsertRefs(db: Database, src: MediaSource, refs: MediaRef[], dirs
     const name = hit ? displayName(hit.name) : basename(r.path);
     const { kind, cat: c } = classify(name);
     const tsMs = r.ts ? Date.parse(r.ts) || 0 : 0;
-    rows.push([mediaId(src.agent, src.sessionId, r), src.agent, src.sessionId, r.seq, r.ts, tsMs, r.dir, r.sender ?? (r.dir === "out" ? src.agent : null),
+    const id = mediaId(src.agent, src.sessionId, r);
+    rows.push([id, src.agent, src.sessionId, r.seq, r.ts, tsMs, sortKey(tsMs, r.seq, r.idx, id), r.dir, r.sender ?? (r.dir === "out" ? src.agent : null),
       name, r.path, hit?.loc ?? null, hit?.size ?? null, hit?.mime ?? null, kind, c, hit?.ambiguous ? 1 : 0, r.prio]);
   }
-  const stmt = db.prepare(`INSERT INTO media (id, agent, session_id, seq, ts, ts_ms, dir, sender, name, ref_path, loc, size, mime, kind, cat, ambiguous, prio)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    ON CONFLICT(id) DO UPDATE SET seq = excluded.seq, ts = excluded.ts, ts_ms = excluded.ts_ms, prio = excluded.prio
+  const stmt = db.prepare(`INSERT INTO media (id, agent, session_id, seq, ts, ts_ms, sk, dir, sender, name, ref_path, loc, size, mime, kind, cat, ambiguous, prio)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(id) DO UPDATE SET seq = excluded.seq, ts = excluded.ts, ts_ms = excluded.ts_ms, sk = excluded.sk, prio = excluded.prio
     WHERE excluded.prio > media.prio`);
   // 一块一个事务：逐行自动提交在 WAL 下每行一次落盘，一块几十行就能把事件循环卡住几百毫秒
   db.transaction(() => {

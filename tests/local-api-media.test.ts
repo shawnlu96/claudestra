@@ -54,7 +54,13 @@ beforeAll(() => {
     inLine(T0 + 30_000, "mS", "/x/inbox/1700000000999_shared.png"),
     "",
   ].join("\n"));
-  writeFileSync(files.other, [inLine(T0 + 40_000, "mO", "/x/inbox/1700000000999_shared.png"), inLine(T0 + 50_000, "mO2", `${root}/secret.txt`), ""].join("\n"));
+  const multi = JSON.stringify({
+    type: "user", isMeta: true, timestamp: iso(T0 + 60_000),
+    message: {
+      content: `<channel source="claudestra" message_id="mM" user="dev" attachments="${["40_p4", "00_p0", "20_p2"].map((n) => `/x/inbox/17000000000${n}.png`).join(";")}">\n[🌐 头]\n\n\n</channel>`,
+    },
+  });
+  writeFileSync(files.other, [inLine(T0 + 40_000, "mO", "/x/inbox/1700000000999_shared.png"), inLine(T0 + 50_000, "mO2", `${root}/secret.txt`), multi, ""].join("\n"));
   setAttachmentDirsForTest({ uploadDir: join(root, "uploads"), inboxDirs: [inbox] });
   setMediaForTest({
     db: dbPath,
@@ -129,6 +135,11 @@ describe("列表与筛选", () => {
     expect(byName.anchor).toBe(p2.id);
     expect((await get("/media?agent=worker&name=nope.png")).status).toBe(404);
   });
+});
+
+test("同一条消息里的几张图按消息内顺序排（不按随机 id）；头属性附件也认", async () => {
+  const j = await list("agent=other&kind=image");
+  expect(j.items.slice(0, 3).map((i: any) => i.name)).toEqual(["p2.png", "p0.png", "p4.png"]); // 倒序 = 消息内最后一张在前
 });
 
 describe("增量", () => {

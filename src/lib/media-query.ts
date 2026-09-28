@@ -1,5 +1,5 @@
 /**
- * 媒体索引的查询：按 agent 白名单 + 筛选条件分页（时间倒序，游标 = `<ts_ms>_<id>`），以及大图查看器的「围绕某一张取一窗」。
+ * 媒体索引的查询：按 agent 白名单 + 筛选条件分页（时间倒序，游标 = 排序键 sk，见 media-index.sortKey），以及大图查看器的「围绕某一张取一窗」。
  *
  * 权限在这里收口成一个布尔：`restricted` 行（出站副本认领有歧义，或同一个文件被不止一个 agent 的消息认领）
  * 对非 manage 调用方只给元数据、不给取文件——宁可显示占位，也不冒把别的 agent 的文件串给 scoped 用户的险。
@@ -22,13 +22,13 @@ export interface MediaFilter {
 }
 
 type Row = {
-  id: string; agent: string; session_id: string; seq: number; ts: string | null; ts_ms: number; dir: "in" | "out"; sender: string | null;
+  id: string; agent: string; session_id: string; seq: number; ts: string | null; sk: string; dir: "in" | "out"; sender: string | null;
   name: string; loc: string | null; size: number | null; mime: string | null; kind: "image" | "file"; cat: string; ambiguous: number; shared: number;
 };
 
 /** 同一个文件被不同 agent 的消息认领 = shared（跨 agent 串文件的唯一通道） */
 const SHARED_SQL = "(loc IS NOT NULL AND EXISTS (SELECT 1 FROM media m2 WHERE m2.loc = media.loc AND m2.agent != media.agent))";
-const COLS = `id, agent, session_id, seq, ts, ts_ms, dir, sender, name, loc, size, mime, kind, cat, ambiguous, ${SHARED_SQL} AS shared`;
+const COLS = `id, agent, session_id, seq, ts, sk, dir, sender, name, loc, size, mime, kind, cat, ambiguous, ${SHARED_SQL} AS shared`;
 
 function where(f: MediaFilter): { sql: string; args: (string | number)[] } {
   const parts = [`agent IN (${f.agents.map(() => "?").join(",") || "NULL"})`];
@@ -58,14 +58,8 @@ function toItem(r: Row, manage: boolean) {
   };
 }
 
-function cursorOf(r: { ts_ms: number; id: string }): string {
-  return `${r.ts_ms}_${r.id}`;
-}
-
-function parseCursor(c: string | null | undefined): { t: number; id: string } | null {
-  const m = c ? /^(\d{1,16})_([0-9a-f]{24})$/.exec(c) : null;
-  return m ? { t: Number(m[1]), id: m[2] } : null;
-}
+const SK_RE = /^\d{28}[0-9a-f]{24}$/;
+const skOf = (c: string | null | undefined): string | null => (c && SK_RE.test(c) ? c : null);
 
 export interface MediaPage {
   items: ReturnType<typeof toItem>[];
@@ -83,44 +77,40 @@ function countWhere(db: Database, w: { sql: string; args: (string | number)[] },
   return r.n;
 }
 
-const NEWER_THAN = " AND (ts_ms > ? OR (ts_ms = ? AND id > ?))";
-const OLDER_THAN = " AND (ts_ms < ? OR (ts_ms = ? AND id < ?))";
+type Where = { sql: string; args: (string | number)[] };
 
-function fetchOlder(db: Database, w: { sql: string; args: (string | number)[] }, cur: { t: number; id: string } | null, limit: number, inclusive = false): Row[] {
-  const cond = cur ? (inclusive ? " AND (ts_ms < ? OR (ts_ms = ? AND id <= ?))" : OLDER_THAN) : "";
-  const args = cur ? [cur.t, cur.t, cur.id] : [];
-  return db.prepare(`SELECT ${COLS} FROM media WHERE ${w.sql}${cond} ORDER BY ts_ms DESC, id DESC LIMIT ?`).all(...w.args, ...args, limit) as Row[];
+function fetchOlder(db: Database, w: Where, cur: string | null, limit: number, inclusive = false): Row[] {
+  const cond = cur ? (inclusive ? " AND sk <= ?" : " AND sk < ?") : "";
+  return db.prepare(`SELECT ${COLS} FROM media WHERE ${w.sql}${cond} ORDER BY sk DESC LIMIT ?`).all(...w.args, ...(cur ? [cur] : []), limit) as Row[];
 }
 
-function fetchNewer(db: Database, w: { sql: string; args: (string | number)[] }, cur: { t: number; id: string }, limit: number): Row[] {
-  const rows = db.prepare(`SELECT ${COLS} FROM media WHERE ${w.sql}${NEWER_THAN} ORDER BY ts_ms ASC, id ASC LIMIT ?`).all(...w.args, cur.t, cur.t, cur.id, limit) as Row[];
-  return rows.reverse();
+function fetchNewer(db: Database, w: Where, cur: string, limit: number): Row[] {
+  return (db.prepare(`SELECT ${COLS} FROM media WHERE ${w.sql} AND sk > ? ORDER BY sk ASC LIMIT ?`).all(...w.args, cur, limit) as Row[]).reverse();
 }
 
-function page(db: Database, w: { sql: string; args: (string | number)[] }, rows: Row[], manage: boolean, hasOlder: boolean, hasNewer: boolean): MediaPage {
+function page(db: Database, w: Where, rows: Row[], manage: boolean, hasOlder: boolean, hasNewer: boolean): MediaPage {
   const first = rows[0];
   const last = rows[rows.length - 1];
-  const newerCount = first ? countWhere(db, w, NEWER_THAN, [first.ts_ms, first.ts_ms, first.id]) : 0;
   return {
     items: rows.map((r) => toItem(r, manage)),
-    older: last && hasOlder ? cursorOf(last) : null,
-    newer: first && hasNewer ? cursorOf(first) : null,
+    older: last && hasOlder ? last.sk : null,
+    newer: first && hasNewer ? first.sk : null,
     total: countWhere(db, w),
-    newerCount,
+    newerCount: first ? countWhere(db, w, " AND sk > ?", [first.sk]) : 0,
   };
 }
 
 /** 普通分页：before（往更早翻）/ after（往更新翻）二选一，都不给 = 最新一页 */
 export function queryMedia(db: Database, f: MediaFilter, opts: { before?: string | null; after?: string | null; limit: number; manage: boolean }): MediaPage {
   const w = where(f);
-  const after = parseCursor(opts.after);
+  const after = skOf(opts.after);
   if (after) {
     const rows = fetchNewer(db, w, after, opts.limit + 1);
     const more = rows.length > opts.limit;
     const kept = more ? rows.slice(1) : rows;
     return page(db, w, kept, opts.manage, true, more);
   }
-  const before = parseCursor(opts.before);
+  const before = skOf(opts.before);
   const rows = fetchOlder(db, w, before, opts.limit + 1);
   const more = rows.length > opts.limit;
   const kept = rows.slice(0, opts.limit);
@@ -128,26 +118,26 @@ export function queryMedia(db: Database, f: MediaFilter, opts: { before?: string
 }
 
 /** 找锚点：媒体 id，或气泡里的文件名（展示名 / 落盘名 / agent 原路径的 basename），可带 sessionId + seq 精确到那一条 */
-export function findAnchor(db: Database, f: MediaFilter, key: { id?: string; name?: string; sessionId?: string; seq?: number }): { ts_ms: number; id: string } | null {
+export function findAnchor(db: Database, f: MediaFilter, key: { id?: string; name?: string; sessionId?: string; seq?: number }): { sk: string; id: string } | null {
   const w = where(f);
   if (key.id) {
-    return (db.prepare(`SELECT ts_ms, id FROM media WHERE ${w.sql} AND id = ?`).get(...w.args, key.id) as { ts_ms: number; id: string } | null) ?? null;
+    return (db.prepare(`SELECT sk, id FROM media WHERE ${w.sql} AND id = ?`).get(...w.args, key.id) as { sk: string; id: string } | null) ?? null;
   }
   if (!key.name) return null;
   const n = key.name;
   const nameSql = "(name = ? OR loc LIKE ? ESCAPE '\\' OR ref_path LIKE ? ESCAPE '\\' OR ref_path = ?)";
   const esc = n.replace(/[\\%_]/g, (c) => `\\${c}`);
   const nameArgs = [n, `%:${esc}`, `%/${esc}`, n];
-  const at = key.sessionId && key.seq != null ? " AND session_id = ? AND seq <= ? ORDER BY seq DESC" : " ORDER BY ts_ms DESC";
+  const at = key.sessionId && key.seq != null ? " AND session_id = ? AND seq <= ? ORDER BY seq DESC, sk ASC" : " ORDER BY sk DESC";
   const atArgs = key.sessionId && key.seq != null ? [key.sessionId, key.seq] : [];
-  return (db.prepare(`SELECT ts_ms, id FROM media WHERE ${w.sql} AND ${nameSql}${at} LIMIT 1`).get(...w.args, ...nameArgs, ...atArgs) as
-    { ts_ms: number; id: string } | null) ?? null;
+  return (db.prepare(`SELECT sk, id FROM media WHERE ${w.sql} AND ${nameSql}${at} LIMIT 1`).get(...w.args, ...nameArgs, ...atArgs) as
+    { sk: string; id: string } | null) ?? null;
 }
 
 /** 围绕锚点取一窗：锚点 + 更新的 half 条 + 更早的 half 条 */
-export function queryAround(db: Database, f: MediaFilter, anchor: { ts_ms: number; id: string }, half: number, manage: boolean): MediaPage & { anchor: string } {
+export function queryAround(db: Database, f: MediaFilter, anchor: { sk: string; id: string }, half: number, manage: boolean): MediaPage & { anchor: string } {
   const w = where(f);
-  const cur = { t: anchor.ts_ms, id: anchor.id };
+  const cur = anchor.sk;
   const newer = fetchNewer(db, w, cur, half + 1);
   const hasNewer = newer.length > half;
   const older = fetchOlder(db, w, cur, half + 2, true);
