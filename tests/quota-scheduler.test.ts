@@ -81,7 +81,7 @@ describe("合并与限频", () => {
     expect(h.fetch.calls).toHaveLength(1);
   });
 
-  test("同一家的两个端点串行，不并发", async () => {
+  test("同一家的两个端点串行，而且共用 60 秒间隔（设计稿：同一家）", async () => {
     let active = 0;
     let peak = 0;
     const h = harness(async (u, s) => {
@@ -91,9 +91,12 @@ describe("合并与限频", () => {
       active--;
       return okRoutes(u);
     });
-    await Promise.all([h.scheduler.refresh("codex", "view"), h.scheduler.refreshResetCredits("view")]);
+    const rs = await Promise.all([h.scheduler.refresh("codex", "view"), h.scheduler.refreshResetCredits("view")]);
+    expect(rs.map((r) => r.status)).toEqual(["fetched", "skipped_interval"]);
     expect(peak).toBe(1);
-    expect(h.fetch.calls).toHaveLength(2);
+    expect(h.fetch.calls).toHaveLength(1);
+    h.advance(61_000);
+    expect((await h.scheduler.refreshResetCredits("view")).status).toBe("fetched");
   });
 
   test("60 秒内再刷新（含手动）→ skipped_interval，而且不去读 Keychain", async () => {
@@ -115,15 +118,38 @@ describe("合并与限频", () => {
 });
 
 describe("失败分类与冷却", () => {
-  test("401：同一份凭据 30 分钟内不再发；凭据指纹变了立刻可发", async () => {
+  test("401：同一份凭据 30 分钟内不再发；凭据指纹变了，下一次核对（看板节奏）或用户重试立刻可发", async () => {
     const h = harness(() => jsonResponse(401, {}));
     expect(await h.scheduler.refresh("claude", "view")).toEqual({ status: "failed", code: "http_401" });
     h.advance(2 * MIN);
     expect(await h.scheduler.refresh("claude", "manual")).toEqual({ status: "skipped_cooldown", code: "http_401" });
+    expect(h.cd.keychainCalls).toHaveLength(1); // 核对节奏未到，不读 Keychain
+    h.advance(4 * MIN);
+    expect(await h.scheduler.refresh("claude", "view")).toEqual({ status: "skipped_cooldown", code: "http_401" });
+    expect(h.cd.keychainCalls).toHaveLength(2); // 到节奏了读一次，指纹没变照样挡
     expect(h.fetch.calls).toHaveLength(1);
     h.cd.keychain = { status: "ok", stdout: keychainBlob({ accessToken: "renewed-by-cc" }) };
     h.route = okRoutes;
-    expect((await h.scheduler.refresh("claude", "manual")).status).toBe("fetched");
+    expect((await h.scheduler.refresh("claude", "user_retry")).status).toBe("fetched");
+  });
+
+  test("401 冷却期间看板一直开着：30 分钟最多读 6 次 Keychain、只发 1 次请求", async () => {
+    const h = harness(() => jsonResponse(401, {}));
+    for (let i = 0; i < 30; i++) {
+      await h.scheduler.tick({ viewing: true });
+      h.advance(MIN);
+    }
+    expect(h.cd.keychainCalls.length).toBeLessThanOrEqual(6);
+    expect(h.fetch.calls.filter((c) => c.url.endsWith("/oauth/usage"))).toHaveLength(1);
+  });
+
+  test("401 后 CC 续期了 token：下一次核对就恢复，不用等满 30 分钟", async () => {
+    const h = harness(() => jsonResponse(401, {}));
+    await h.scheduler.refresh("claude", "view");
+    h.cd.keychain = { status: "ok", stdout: keychainBlob({ accessToken: "renewed-by-cc" }) };
+    h.route = okRoutes;
+    h.advance(5 * MIN);
+    expect((await h.scheduler.refresh("claude", "view")).status).toBe("fetched");
   });
 
   test("401 冷却到期后同一份凭据也可以再试", async () => {
@@ -287,6 +313,7 @@ describe("账户隔离与持久化", () => {
   test("重置明细失败不影响额度快照", async () => {
     const h = harness((u) => (u.endsWith("reset-credits") ? jsonResponse(500, {}) : okRoutes(u)));
     await h.scheduler.refresh("codex", "view");
+    h.advance(61_000);
     await h.scheduler.refreshResetCredits("view");
     const v = await h.scheduler.view();
     expect(v.codex.endpoints.codex_usage).toMatchObject({ lastCode: null, stale: false });
@@ -331,7 +358,8 @@ describe("账户隔离与持久化", () => {
     const h = harness();
     await h.scheduler.refresh("claude", "view");
     await h.scheduler.refresh("codex", "view");
-    await h.scheduler.refreshResetCredits("view");
+    h.advance(61_000);
+    expect((await h.scheduler.refreshResetCredits("view")).status).toBe("fetched");
     expectNoSentinel(JSON.stringify((h.store as ReturnType<typeof memoryQuotaStore>).peek()));
     expectNoSentinel(JSON.stringify(await h.scheduler.view()));
   });
@@ -357,8 +385,11 @@ describe("账户隔离与持久化", () => {
 });
 
 describe("tick 节奏", () => {
-  test("有人看：两家额度 + 明细；1 分钟后不查；5 分钟后只查额度", async () => {
+  test("有人看：两家额度；明细等过了同家 60 秒再查；5 分钟后只查额度", async () => {
     const h = harness();
+    await h.scheduler.tick({ viewing: true });
+    expect(urlsOf(h)).toEqual(["usage", "usage"]);
+    h.advance(MIN);
     await h.scheduler.tick({ viewing: true });
     expect(urlsOf(h)).toEqual(["usage", "usage", "rate-limit-reset-credits"]);
     h.advance(MIN);
@@ -389,5 +420,61 @@ describe("tick 节奏", () => {
     h.advance(20 * MIN);
     await h.scheduler.tick({ viewing: false });
     expect(urlsOf(h)).toEqual(["rate-limit-reset-credits", "rate-limit-reset-credits"]);
+  });
+});
+
+describe("出错不冒泡、写盘串行、重试不白按", () => {
+  test("读凭据抛异常（如 spawn EMFILE）→ failed internal，挂 5 分钟冷却", async () => {
+    const h = harness();
+    const s = new QuotaScheduler({
+      now: () => h.now, random: () => 0.5, fetch: h.fetch,
+      readCredential: async () => { throw Object.assign(new Error("spawn EMFILE"), { code: "EMFILE" }); },
+      peekAccountKey: (p) => peekAccountKey(p, h.cd),
+      confirmCredential: (c) => confirmCredential(c, h.cd),
+      hashCreditId: (a, id) => hmacHex(SECRET, a, id), store: h.store, isEnabled: () => true,
+    });
+    expect(await s.refresh("codex", "view")).toEqual({ status: "failed", code: "internal" });
+    h.advance(2 * MIN);
+    expect(await s.refresh("codex", "view")).toEqual({ status: "skipped_cooldown", code: "internal" });
+    expect((await s.view()).codex.credFailure).toEqual({ code: "internal", needsUserRetry: false });
+  });
+
+  test("存储读取失败一次：不永久失明，下一次重读", async () => {
+    let fail = true;
+    const inner = memoryQuotaStore();
+    const store: QuotaStore = { load: async () => { if (fail) { fail = false; throw new Error("EIO"); } return inner.load(); }, save: inner.save };
+    const h = harness(okRoutes, store);
+    expect(await h.scheduler.refresh("codex", "view")).toEqual({ status: "failed", code: "internal" });
+    h.advance(6 * MIN);
+    expect((await h.scheduler.refresh("codex", "view")).status).toBe("fetched");
+  });
+
+  test("两家并发写盘：保存排成一条，最后落盘的是完整状态", async () => {
+    const inner = memoryQuotaStore();
+    let n = 0;
+    const store: QuotaStore = {
+      load: inner.load,
+      save: async (st) => {
+        const snap = structuredClone(st);
+        await Bun.sleep(n++ === 0 ? 30 : 0); // 第一次写得慢：不串行的话它会后落盘、盖掉第二次
+        await inner.save(snap);
+      },
+    };
+    const h = harness(okRoutes, store);
+    await Promise.all([h.scheduler.refresh("claude", "view"), h.scheduler.refresh("codex", "view")]);
+    await Bun.sleep(50);
+    const accts = Object.values(inner.peek()!.accounts);
+    expect(accts.some((a) => a.snapshots.claude_usage)).toBe(true);
+    expect(accts.some((a) => a.snapshots.codex_usage)).toBe(true);
+  });
+
+  test("用户重试并进一个被挡掉的普通查询 → 再单独跑一次", async () => {
+    const h = harness(() => jsonResponse(404, {}));
+    await h.scheduler.refresh("codex", "view");
+    h.advance(2 * MIN);
+    h.route = okRoutes;
+    const [plain, retry] = await Promise.all([h.scheduler.refresh("codex", "view"), h.scheduler.refresh("codex", "user_retry")]);
+    expect(plain.status).toBe("skipped_paused");
+    expect(retry.status).toBe("fetched");
   });
 });

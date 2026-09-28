@@ -15,6 +15,7 @@ import { inspect } from "node:util";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { instanceKeySync, type InstanceKey } from "./instance-key.js";
+import { spawnKeychainReader } from "./quota-keychain.js";
 
 export type QuotaProvider = "claude" | "codex";
 
@@ -178,7 +179,7 @@ export async function readCodexCredential(deps: CredDeps): Promise<CredResult> {
 }
 
 /**
- * 只看账户标识、不碰秘密（不读 Keychain）：调度器在读凭据之前先用它判「这个账户是否在冷却 / 限频中」，
+ * 只看账户标识、不读 Keychain（Codex 那条路径会解析整份 auth.json，但只取 account_id 做 HMAC，token 不出函数）：调度器在读凭据之前先用它判「这个账户是否在冷却 / 限频中」，
  * 既不为了被限频而白读一次 Keychain，也不会因为上一个账户在冷却而卡住刚换上的新账户。
  */
 export async function peekAccountKey(p: QuotaProvider, deps: CredDeps): Promise<string | null> {
@@ -209,69 +210,9 @@ export async function confirmCredential(cred: QuotaCredential, deps: CredDeps): 
   return hmacHex(secret, "codex", a.accountId) === cred.accountKey && hmacHex(secret, "fp", a.token) === cred.fingerprint;
 }
 
-// ── Keychain：spawn /usr/bin/security 读 stdout，超时杀掉并回收 ─────────────────
-
-interface SpawnedProc {
-  stdout: ReadableStream<Uint8Array>;
-  stderr: ReadableStream<Uint8Array>;
-  exited: Promise<number>;
-  kill(signal?: number | NodeJS.Signals): void;
-}
-export type SpawnFn = (argv: string[]) => SpawnedProc;
-
-const bunSpawn: SpawnFn = (argv) => Bun.spawn(argv, { stdin: "ignore", stdout: "pipe", stderr: "pipe" }) as unknown as SpawnedProc;
-
-/** 输出上限：Keychain 里的凭据 blob 只有几 KB，超过就当异常，不无限读 */
-const OUTPUT_CAP = 64 * 1024;
-
-/**
- * 跑一个子进程读 stdout；超时 SIGKILL 并 await exited——不能只让 Promise 超时、留下进程和授权框。
- * argv 里不放秘密；stdout / stderr 只交给调用方判定，不打日志。
- */
-export async function runWithTimeout(
-  argv: string[],
-  timeoutMs: number,
-  spawn: SpawnFn = bunSpawn,
-): Promise<{ code: number | null; stdout: string; stderr: string; timedOut: boolean }> {
-  const proc = spawn(argv);
-  let timedOut = false;
-  const timer = setTimeout(() => {
-    timedOut = true;
-    proc.kill("SIGKILL");
-  }, timeoutMs);
-  try {
-    const [stdout, stderr, code] = await Promise.all([
-      new Response(proc.stdout).text(),
-      new Response(proc.stderr).text(),
-      proc.exited,
-    ]);
-    if (timedOut) return { code: null, stdout: "", stderr: "", timedOut };
-    return { code, stdout: stdout.length > OUTPUT_CAP ? "" : stdout, stderr: stderr.slice(0, 512), timedOut };
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-/**
- * 退出码与 stderr 的判定按 `security` 的常见表现写（44 = 找不到条目；锁屏 / 用户点拒绝走 stderr 文案），
- * **launchd 与锁屏环境下未实测**（T2b-1 红线不读真实 Keychain）；认不出的一律 error，调用方长冷却。
- */
-export function classifyKeychain(r: { code: number | null; stdout: string; stderr: string; timedOut: boolean }): KeychainOutcome {
-  if (r.timedOut) return { status: "timeout" };
-  if (r.code === 0 && r.stdout) return { status: "ok", stdout: r.stdout };
-  if (r.code === 44 || /could not be found/i.test(r.stderr)) return { status: "missing" };
-  if (/interaction is not allowed|user canceled|denied|authoriz/i.test(r.stderr)) return { status: "denied" };
-  return { status: "error" };
-}
-
-export function spawnKeychainReader(opts: { timeoutMs?: number; spawn?: SpawnFn } = {}): CredDeps["readKeychain"] {
-  return async (service) =>
-    classifyKeychain(await runWithTimeout(["/usr/bin/security", "find-generic-password", "-s", service, "-w"], opts.timeoutMs ?? 5000, opts.spawn));
-}
-
-/** 生产用的依赖（T2b-2 接线用）；密钥只派生一次 */
+/** 生产用的依赖（T2b-2 接线用）；密钥派生成功后缓存，失败（instance-key 暂时读不了）下次再试 */
 export function defaultCredDeps(): CredDeps {
-  let secret: Buffer | null | undefined;
+  let secret: Buffer | null = null;
   return {
     readKeychain: spawnKeychainReader(),
     readText: async (path) => {
@@ -284,7 +225,7 @@ export function defaultCredDeps(): CredDeps {
     },
     env: process.env,
     home: homedir(),
-    secret: () => (secret === undefined ? (secret = deriveQuotaSecret()) : secret),
+    secret: () => (secret ??= deriveQuotaSecret()),
     now: Date.now,
   };
 }

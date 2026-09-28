@@ -7,7 +7,7 @@ import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { readClaudeCredential, readCodexCredential, type QuotaCredential } from "../src/lib/quota-credentials.js";
-import { getQuota, parseRetryAfter, QUOTA_BODY_CAP, readCappedBody, type QuotaEndpoint } from "../src/lib/quota-providers.js";
+import { getQuota, parseRetryAfter, QUOTA_BODY_CAP, QUOTA_ENDPOINTS, readCappedBody, type QuotaEndpoint } from "../src/lib/quota-providers.js";
 import { T0, claudeUsageBody, expectNoSentinel, fakeCredDeps, fakeFetch, jsonResponse, okRoutes } from "./quota-fixtures.js";
 
 async function creds(): Promise<{ claude: QuotaCredential; codex: QuotaCredential }> {
@@ -40,6 +40,13 @@ describe("请求形状", () => {
     const f = fakeFetch(okRoutes);
     await expect(getQuota("codex_usage", c.claude, deps(f))).rejects.toThrow();
     expect(f.calls).toHaveLength(0);
+  });
+
+  test("端点表逐条冻结：运行时改地址直接抛", () => {
+    expect(() => {
+      (QUOTA_ENDPOINTS.claude_usage as { url: string }).url = "https://evil.example/";
+    }).toThrow(TypeError);
+    expect(QUOTA_ENDPOINTS.claude_usage.url).toBe("https://api.anthropic.com/api/oauth/usage");
   });
 
   test("源码里没有兑换 / 购买接口，也没有非 GET 的 method", () => {

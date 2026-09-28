@@ -1,6 +1,6 @@
 /**
  * 订阅额度凭据适配器（lib/quota-credentials.ts）：账户键 HMAC、脱敏、身份复核、Keychain 子进程超时回收。
- * 全部假 Keychain / 假文件；子进程测试只跑 sleep / printf，不碰 security。
+ * 全部假 Keychain / 假文件。Keychain 子进程见 tests/quota-keychain.test.ts。
  */
 
 import { describe, expect, test } from "bun:test";
@@ -8,7 +8,6 @@ import { generateKeyPairSync } from "node:crypto";
 import { inspect } from "node:util";
 import {
   claudePaths,
-  classifyKeychain,
   codexAuthPath,
   confirmCredential,
   defaultCredDeps,
@@ -16,9 +15,6 @@ import {
   hmacHex,
   readClaudeCredential,
   readCodexCredential,
-  runWithTimeout,
-  spawnKeychainReader,
-  type SpawnFn,
 } from "../src/lib/quota-credentials.js";
 import {
   CLAUDE_ACCOUNT,
@@ -168,48 +164,5 @@ describe("路径与密钥", () => {
     const d = defaultCredDeps();
     expect(typeof d.readKeychain).toBe("function");
     expect(d.home.length).toBeGreaterThan(0);
-  });
-});
-
-describe("Keychain 子进程", () => {
-  test("超时：SIGKILL 并等到进程真正退出", async () => {
-    let proc: ReturnType<typeof Bun.spawn> | null = null;
-    const spawn: SpawnFn = (argv) => {
-      proc = Bun.spawn(argv, { stdin: "ignore", stdout: "pipe", stderr: "pipe" });
-      return proc as never;
-    };
-    const t = Date.now();
-    const r = await runWithTimeout(["sleep", "30"], 150, spawn);
-    expect(r.timedOut).toBe(true);
-    expect(r.stdout).toBe("");
-    expect(Date.now() - t).toBeLessThan(5000);
-    expect(proc!.exitCode !== null || proc!.signalCode !== null).toBe(true);
-    expect(proc!.killed).toBe(true);
-  });
-
-  test("正常收 stdout 与退出码", async () => {
-    const r = await runWithTimeout(["printf", "hello"], 5000);
-    expect(r).toEqual({ code: 0, stdout: "hello", stderr: "", timedOut: false });
-  });
-
-  test("argv 只有固定参数与服务名，不含秘密", async () => {
-    const seen: string[][] = [];
-    const spawn: SpawnFn = (argv) => {
-      seen.push(argv);
-      return Bun.spawn(["printf", keychainBlob()], { stdout: "pipe", stderr: "pipe" }) as never;
-    };
-    const out = await spawnKeychainReader({ spawn })("Claude Code-credentials");
-    expect(out.status).toBe("ok");
-    expect(seen).toEqual([["/usr/bin/security", "find-generic-password", "-s", "Claude Code-credentials", "-w"]]);
-  });
-
-  test("退出码 / stderr 分类", () => {
-    const base = { code: 0, stdout: "", stderr: "", timedOut: false };
-    expect(classifyKeychain({ ...base, timedOut: true, code: null })).toEqual({ status: "timeout" });
-    expect(classifyKeychain({ ...base, stdout: "x" })).toEqual({ status: "ok", stdout: "x" });
-    expect(classifyKeychain({ ...base, code: 44 })).toEqual({ status: "missing" });
-    expect(classifyKeychain({ ...base, code: 36, stderr: "User interaction is not allowed." })).toEqual({ status: "denied" });
-    expect(classifyKeychain({ ...base, code: 128, stderr: "User canceled the operation." })).toEqual({ status: "denied" });
-    expect(classifyKeychain({ ...base, code: 1, stderr: "weird" })).toEqual({ status: "error" });
   });
 });

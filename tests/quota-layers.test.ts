@@ -6,7 +6,7 @@
 import { describe, expect, test } from "bun:test";
 import type { CodexQuotaObservation } from "../src/lib/codex-usage.js";
 import { parseClaudeUsage, parseCodexResetCredits, parseCodexUsage } from "../src/lib/quota-dto.js";
-import { selectQuotaLayers, type ProviderEntry } from "../src/lib/quota-layers.js";
+import { selectQuotaLayers, type LayerSource, type ProviderEntry, type QuotaMeter, type ResetCreditsView } from "../src/lib/quota-layers.js";
 import type { ProviderRemote, RemoteView } from "../src/lib/quota-scheduler.js";
 import type { CachedUsage } from "../src/lib/usage-cache.js";
 import { T0, claudeUsageBody, codexUsageBody, resetCreditsBody } from "./quota-fixtures.js";
@@ -52,6 +52,10 @@ describe("选层", () => {
     const s = selectQuotaLayers({ now: T0, enabled: true, remote: remote(), local: { claudeCache: cache, codexRollout: rollout } });
     expect(s.providers.map((p) => [p.id, p.source.layer])).toEqual([["claude", "live"], ["codex", "live"]]);
     const claude = byId(s.providers, "claude")!;
+    const layer: LayerSource = claude.source.layer;
+    expect(layer).toBe("live");
+    const session: QuotaMeter = claude.meters[0];
+    expect(session.periodMinutes).toBe(300);
     expect(claude.account).toEqual({ key: "ck", identity: "assumed" });
     expect(claude.meters.map((m) => [m.id, m.used, m.label])).toEqual([["5h", 6, null], ["7d", 74, null], ["7d:Fable", 100, "Fable"]]);
     const codex = byId(s.providers, "codex")!;
@@ -112,6 +116,17 @@ describe("重置次数（独立权益）", () => {
     expect(byId(s.providers, "claude")?.resetCredits).toBeNull();
   });
 
+  test("明细列表与提醒同口径：已兑换 / 套餐不支持 / 兑换中的不列", () => {
+    const r = remote();
+    const data = structuredClone(creditsData);
+    data.credits.push({ ...data.credits[0], key: "redeemed", status: "redeemed", redeemed: true });
+    data.credits.push({ ...data.credits[0], key: "unsupported", supportedByPlan: false });
+    data.credits.push({ ...data.credits[0], key: "pending", redeemStarted: true });
+    r.codex.endpoints.codex_reset_credits = { ...r.codex.endpoints.codex_reset_credits!, snapshot: { data, observedAt: T0 } };
+    const rc: ResetCreditsView | null | undefined = byId(selectQuotaLayers({ now: T0, enabled: true, remote: r, local: { claudeCache: null, codexRollout: null } }).providers, "codex")?.resetCredits;
+    expect(rc?.credits?.map((c) => c.key)).toEqual(["key-A", "key-B"]);
+  });
+
   test("明细从没拿到 → 只剩汇总，credits null 且标陈旧", () => {
     const r = remote();
     delete r.codex.endpoints.codex_reset_credits;
@@ -136,7 +151,7 @@ describe("通用接入商条目", () => {
       kind: "api",
       account: { key: null, identity: "unknown" },
       meters: [
-        { id: "today", kind: "usage", label: "deepseek-v4", unit: "tokens", used: 120_000 },
+        { id: "today", kind: "usage", label: "deepseek-v4", unit: "tokens", used: 120_000, periodMinutes: 1440 },
         { id: "month", kind: "usage", label: null, unit: "usd", used: 3.2, limit: 20, resetsAtMs: T0 + 72 * HOUR },
       ],
       balance: { amount: "16.80", currency: "USD" },

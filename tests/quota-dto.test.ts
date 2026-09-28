@@ -39,6 +39,22 @@ describe("Claude /api/oauth/usage", () => {
     expect(d?.windows[0]).toMatchObject({ id: "7d:scoped", scopeModel: null });
   });
 
+  test("原型链上的 kind 名一律不认", () => {
+    const d = parseClaudeUsage({ limits: ["__proto__", "constructor", "prototype", "session"].map((kind) => ({ kind, percent: 1 })) });
+    expect(d?.windows.map((w) => w.id)).toEqual(["5h"]);
+  });
+
+  test("时间戳限制在 2020–2100：负数、毫秒当秒、离谱的未来都不认", () => {
+    const at = (v: unknown) => parseClaudeUsage({ limits: [{ kind: "session", percent: 1, resets_at: v }] })?.windows[0].resetsAtMs;
+    expect(at("2026-09-28T16:10:00Z")).toBe(Date.parse("2026-09-28T16:10:00Z"));
+    expect(at("1999-01-01T00:00:00Z")).toBeNull();
+    expect(at("2200-01-01T00:00:00Z")).toBeNull();
+    const c = resetCreditsBody();
+    (c.credits as Record<string, unknown>[])[0].expires_at = "9999-12-31T00:00:00Z";
+    expect(parseCodexResetCredits(c, hash)?.credits).toHaveLength(1);
+    expect(parseCodexUsage(codexUsageBody({ rate_limit: { primary_window: { used_percent: 1, limit_window_seconds: 18000, reset_at: 1790592554000 } } }))?.windows[0].resetsAtMs).toBeNull();
+  });
+
   test("形状不对 → null", () => {
     expect(parseClaudeUsage(null)).toBeNull();
     expect(parseClaudeUsage([])).toBeNull();

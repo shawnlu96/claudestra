@@ -67,15 +67,23 @@ function countOf(v: unknown): number | null {
   return typeof v === "number" && Number.isInteger(v) && v >= 0 && v < 10_000 ? v : null;
 }
 
-/** ISO 串 / Unix 秒 → ms；认不出 null */
+/** 时间戳的可信区间：2020–2100 之外的值（负数、毫秒当秒、离谱的未来）一律不认 */
+const TS_MIN_MS = Date.UTC(2020, 0, 1);
+export const TS_MAX_MS = Date.UTC(2100, 0, 1);
+
+/** ISO 串 / Unix 秒 → ms；认不出或超出可信区间 null */
 function timeOf(v: unknown): number | null {
   if (typeof v === "string" && !/^\d{4}-\d{2}-\d{2}T[\d:.]+(Z|[+-]\d{2}:?\d{2})?$/.test(v)) return null;
-  return resetTsMs(v);
+  const ms = resetTsMs(v);
+  return ms !== null && ms >= TS_MIN_MS && ms < TS_MAX_MS ? ms : null;
 }
 
 const MODEL_RE = /^[\w .-]{1,32}$/;
 const PLAN_RE = /^[a-z0-9_]{1,24}$/;
 const KIND_RE = /^[a-z_]{1,32}$/;
+/** kind 会被拿去当 id / 对象键：原型链上的名字一律不认 */
+const RESERVED_KEYS = new Set(["__proto__", "constructor", "prototype"]);
+const kindOk = (v: unknown): v is string => typeof v === "string" && KIND_RE.test(v) && !RESERVED_KEYS.has(v);
 const SEVERITIES = new Set(["normal", "warning", "critical"]);
 const severityOf = (v: unknown): QuotaWindowDto["severity"] => (typeof v === "string" && SEVERITIES.has(v) ? (v as QuotaWindowDto["severity"]) : null);
 
@@ -83,7 +91,7 @@ const severityOf = (v: unknown): QuotaWindowDto["severity"] => (typeof v === "st
 
 function claudeLimit(l: AnyRecord): QuotaWindowDto | null {
   const usedPct = pctOf(l.percent);
-  if (usedPct === null || typeof l.kind !== "string" || !KIND_RE.test(l.kind)) return null;
+  if (usedPct === null || !kindOk(l.kind)) return null;
   const base = { usedPct, resetsAtMs: timeOf(l.resets_at), severity: severityOf(l.severity), scopeModel: null };
   if (l.kind === "session") return { ...base, id: "5h", kind: "session", windowMinutes: 300 };
   if (l.kind === "weekly_all") return { ...base, id: "7d", kind: "weekly", windowMinutes: 10080 };

@@ -2,11 +2,12 @@
  * 订阅额度的查询调度（设计稿 T2b §3 / §6.1）：账户级隔离、单一在途请求、失败分类与冷却、快照存储。
  *
  *   - 同一端点同时只有一个在途请求（网页 / Discord / 后台三处合并）；同一家的端点串行。
- *   - 同一端点两次查询至少隔 60 秒，「刷新」也绕不过；冷却只有 Keychain 被拒 / 端点暂停这两类认「用户主动重试」。
- *   - 401 按凭据内容指纹冷却 30 分钟；403 长冷却；429 账户级、按 Retry-After；网络 / 超时 / 5xx 指数退避加抖动；
+ *   - 同一家（同账户）两次查询至少隔 60 秒，「刷新」也绕不过；Keychain 被拒 / 端点暂停 / 401 核对节奏认「用户主动重试」。
+ *   - 401 按凭据内容指纹冷却 30 分钟，冷却期间按看板节奏（5 分钟）读一次凭据核对指纹，不是每个 tick 都读；403 长冷却；429 账户级、按 Retry-After；网络 / 超时 / 5xx 指数退避加抖动；
  *     404 / 形状不对 / 重定向 / 超大 / 其它 4xx 暂停端点。
  *   - Claude 的 Keychain 只在有人看看板时读（后台原因一律跳过）；被拒 / 超时后只认用户主动重试。
  *   - 开关关掉（onDisabled）：代数 +1，在途结果回来一律丢弃、不入库；请求前后身份变了也丢弃。
+ *   - 调度自身出错（spawn 抛错、写盘失败）不冒泡：记成固定错误码 internal 并冷却 5 分钟。
  * 单测 tests/quota-scheduler.test.ts（假 fetch / 时钟 / 凭据 / 存储）。
  */
 
@@ -36,10 +37,11 @@ export const QUOTA_TIMING = {
 } as const;
 
 export type RefreshReason = "view" | "manual" | "background" | "wake" | "user_retry";
+type QuotaErrorCode = FetchErrorCode | CredErrorCode | "internal";
 export type RefreshResult =
   | { status: "fetched" | "skipped_interval" | "skipped_paused" | "skipped_policy" | "disabled" | "discarded" }
-  | { status: "skipped_cooldown"; code: FetchErrorCode | CredErrorCode }
-  | { status: "failed"; code: FetchErrorCode | CredErrorCode };
+  | { status: "skipped_cooldown"; code: QuotaErrorCode }
+  | { status: "failed"; code: QuotaErrorCode };
 
 export interface QuotaSchedulerDeps {
   now(): number;
@@ -65,7 +67,7 @@ interface EndpointView<E extends QuotaEndpoint = QuotaEndpoint> {
 
 export interface ProviderRemote {
   account: { key: string; identity: "assumed" | "bound"; uncertain: boolean } | null;
-  credFailure: { code: CredErrorCode; needsUserRetry: boolean } | null;
+  credFailure: { code: CredErrorCode | "internal"; needsUserRetry: boolean } | null;
   endpoints: { [E in QuotaEndpoint]?: EndpointView<E> };
 }
 export type RemoteView = Record<QuotaProvider, ProviderRemote>;
@@ -123,16 +125,22 @@ const ACCOUNT_UNKNOWN = new Set<CredErrorCode>(["no_secret", "auth_missing", "au
 
 type Gate = Exclude<RefreshResult, { status: "fetched" | "failed" | "disabled" | "discarded" }> | null;
 
-/** 端点当前能不能发。fingerprint = null（还没读凭据）时 401 冷却放行，留到读完凭据再比指纹 */
+/**
+ * 端点当前能不能发。fingerprint = null（还没读凭据）时：401 冷却中、距上次核对指纹不到看板节奏 → 不读 Keychain 直接挡；
+ * 过了节奏（或用户主动重试）才放行去读凭据，读完再按指纹判。
+ */
 function gate(acct: AccountState, endpoint: QuotaEndpoint, now: number, reason: RefreshReason, fingerprint: string | null): Gate {
   if (acct.rateLimitedUntil !== null && acct.rateLimitedUntil > now) return { status: "skipped_cooldown", code: "http_429" };
   const h = acct.health[endpoint];
-  if (!h) return null;
-  if (h.paused && reason !== "user_retry" && (h.cooldownUntil ?? Infinity) > now) return { status: "skipped_paused" };
-  if (h.lastAttemptAt !== null && now - h.lastAttemptAt < QUOTA_TIMING.minIntervalMs) return { status: "skipped_interval" };
-  if (h.paused || h.cooldownUntil === null || h.cooldownUntil <= now || !h.lastCode) return null;
-  if (h.lastCode !== "http_401") return { status: "skipped_cooldown", code: h.lastCode };
-  return fingerprint !== null && fingerprint === h.authFingerprint ? { status: "skipped_cooldown", code: h.lastCode } : null;
+  if (h?.paused && reason !== "user_retry" && (h.cooldownUntil ?? Infinity) > now) return { status: "skipped_paused" };
+  const lastAny = Math.max(-Infinity, ...Object.values(acct.health).map((x) => x?.lastAttemptAt ?? -Infinity));
+  if (now - lastAny < QUOTA_TIMING.minIntervalMs) return { status: "skipped_interval" };
+  if (!h || h.paused || h.cooldownUntil === null || h.cooldownUntil <= now || !h.lastCode) return null;
+  const cooling = { status: "skipped_cooldown", code: h.lastCode } as const;
+  if (h.lastCode !== "http_401") return cooling;
+  if (fingerprint !== null) return fingerprint === h.authFingerprint ? cooling : null;
+  const checked = h.credCheckedAt ?? h.lastAttemptAt;
+  return reason !== "user_retry" && checked !== null && now - checked < QUOTA_TIMING.viewIntervalMs ? cooling : null;
 }
 
 export class QuotaScheduler {
@@ -141,18 +149,29 @@ export class QuotaScheduler {
   private lastTickAt: number | null = null;
   private inflight = new Map<QuotaEndpoint, Promise<RefreshResult>>();
   private chains = new Map<QuotaProvider, Promise<unknown>>();
+  private saving: Promise<void> = Promise.resolve();
 
   constructor(private deps: QuotaSchedulerDeps) {}
 
   private load(): Promise<QuotaState> {
-    return (this.state ??= this.deps.store.load());
+    // 读失败不缓存那个被拒的 Promise：下次再读，而不是永久失明
+    return (this.state ??= this.deps.store.load().catch((e) => {
+      this.state = null;
+      throw e;
+    }));
   }
 
-  private async save(): Promise<void> {
+  private async writeState(): Promise<void> {
     const st = await this.load();
-    const pruned = pruneAccounts(st, this.deps.now());
-    st.accounts = pruned.accounts;
+    st.accounts = pruneAccounts(st, this.deps.now()).accounts;
     await this.deps.store.save(st);
+  }
+
+  /** 两家的链并发时，写盘排成一条：tmp+rename 乱序会让旧状态盖掉新状态 */
+  private save(): Promise<void> {
+    const next = this.saving.then(() => this.writeState(), () => this.writeState());
+    this.saving = next.catch(() => undefined); // 失败已经由这次 save 的调用方收到，链上只管排队
+    return next;
   }
 
   refresh(p: QuotaProvider, reason: RefreshReason): Promise<RefreshResult> {
@@ -164,19 +183,38 @@ export class QuotaScheduler {
     return this.run("codex_reset_credits", reason);
   }
 
-  /** 同端点并发调用共用一个 Promise；同一家的不同端点排队串行 */
-  private run(endpoint: QuotaEndpoint, reason: RefreshReason): Promise<RefreshResult> {
+  /**
+   * 同端点并发调用共用一个 Promise；同一家的不同端点排队串行。
+   * 用户主动重试并进了一个被挡掉（skipped_*）的普通查询时，再单独跑一次，重试按钮不白按。
+   */
+  private run(endpoint: QuotaEndpoint, reason: RefreshReason, join = true): Promise<RefreshResult> {
     if (!this.deps.isEnabled()) return Promise.resolve({ status: "disabled" });
-    const hit = this.inflight.get(endpoint);
+    const hit = join ? this.inflight.get(endpoint) : undefined;
+    if (hit && reason === "user_retry") return hit.then((r) => (r.status.startsWith("skipped_") ? this.run(endpoint, reason, false) : r));
     if (hit) return hit;
     const p = QUOTA_ENDPOINTS[endpoint].provider;
-    const task = (this.chains.get(p) ?? Promise.resolve()).then(() => this.attempt(endpoint, reason));
+    const task = (this.chains.get(p) ?? Promise.resolve()).then(() => this.attempt(endpoint, reason).catch((e) => this.internalFailure(p, e)));
     const tracked = task.finally(() => {
       if (this.inflight.get(endpoint) === tracked) this.inflight.delete(endpoint);
     });
     this.inflight.set(endpoint, tracked);
     this.chains.set(p, tracked.catch(() => undefined)); // 链上只关心上一个结束了，它的异常已经交给它自己的调用方
     return tracked;
+  }
+
+  /** 调度自身出错：只记固定错误码（异常原文可能带路径 / 环境），冷却 5 分钟，不冒泡 */
+  private async internalFailure(p: QuotaProvider, e: unknown): Promise<RefreshResult> {
+    const errno = (e as NodeJS.ErrnoException | null)?.code;
+    console.error(`[quota] ${p} 查询内部出错（${typeof errno === "string" ? errno : "unknown"}），冷却 5 分钟`);
+    const now = this.deps.now();
+    try {
+      const st = await this.load();
+      st.credHealth[p] = { code: "internal", at: now, until: now + 5 * MIN };
+      await this.save();
+    } catch {
+      console.error(`[quota] ${p} 冷却写盘失败，只在本进程内生效`); // 状态已改在内存里，重启前冷却照样有效
+    }
+    return { status: "failed", code: "internal" };
   }
 
   private account(st: QuotaState, p: QuotaProvider, key: string, now: number): AccountState {
@@ -226,8 +264,14 @@ export class QuotaScheduler {
     const cred = cr.cred;
     const acct = this.account(st, p, cred.accountKey, now);
     const g = gate(acct, endpoint, now, reason, cred.fingerprint);
-    if (g) return g;
     const h = (acct.health[endpoint] ??= freshHealth());
+    if (g) {
+      if (g.status === "skipped_cooldown" && g.code === "http_401") {
+        h.credCheckedAt = now;
+        await this.save();
+      }
+      return g;
+    }
     h.lastAttemptAt = now;
     const out = await getQuota(endpoint, cred, {
       fetch: this.deps.fetch,
@@ -256,7 +300,8 @@ export class QuotaScheduler {
     const st = await this.load();
     const key = st.current[QUOTA_ENDPOINTS[endpoint].provider];
     const acct = key ? st.accounts[key] : undefined;
-    const last = Math.max(acct?.snapshots[endpoint]?.observedAt ?? -Infinity, acct?.health[endpoint]?.lastAttemptAt ?? -Infinity);
+    const h = acct?.health[endpoint];
+    const last = Math.max(acct?.snapshots[endpoint]?.observedAt ?? -Infinity, h?.lastAttemptAt ?? -Infinity, h?.credCheckedAt ?? -Infinity);
     return now - last >= interval;
   }
 

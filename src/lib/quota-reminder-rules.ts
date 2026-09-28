@@ -10,7 +10,7 @@
  * 账本存在 quota-state.json（经 quota-scheduler 的 store），重启后去重仍有效。单测 tests/quota-reminder-rules.test.ts。
  */
 
-import type { CodexUsageDto, ResetCreditDto } from "./quota-dto.js";
+import { TS_MAX_MS, type CodexUsageDto, type ResetCreditDto } from "./quota-dto.js";
 
 export type ReminderChannel = "push" | "discord";
 const REMINDER_CHANNELS: readonly ReminderChannel[] = ["push", "discord"];
@@ -65,7 +65,8 @@ export interface PlanContext {
 
 /** 「未用、快过期」的资格：可用、套餐支持、没兑换也没开始兑换、还没过期——缺一不可 */
 export function isEligibleCredit(c: ResetCreditDto, now: number): boolean {
-  return c.status === "available" && c.supportedByPlan && !c.redeemed && !c.redeemStarted && c.expiresAtMs > now;
+  const expiryOk = Number.isFinite(c.expiresAtMs) && c.expiresAtMs > now && c.expiresAtMs < TS_MAX_MS;
+  return c.status === "available" && c.supportedByPlan && !c.redeemed && !c.redeemStarted && expiryOk;
 }
 
 function newNotice(kind: ReminderNotice["kind"], ctx: PlanContext, tag: string): ReminderNotice {

@@ -19,14 +19,26 @@ import {
   type CodexResetCreditsDto,
   type CodexUsageDto,
 } from "./quota-dto.js";
+import { readStreamCapped } from "./quota-keychain.js";
 
 export type QuotaEndpoint = "claude_usage" | "codex_usage" | "codex_reset_credits";
 
-export const QUOTA_ENDPOINTS: Readonly<Record<QuotaEndpoint, { provider: QuotaProvider; url: string }>> = Object.freeze({
-  claude_usage: { provider: "claude", url: "https://api.anthropic.com/api/oauth/usage" },
-  codex_usage: { provider: "codex", url: "https://chatgpt.com/backend-api/wham/usage" },
-  codex_reset_credits: { provider: "codex", url: "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits" },
+const endpoint = (provider: QuotaProvider, url: string) => Object.freeze({ provider, url });
+
+/** 逐条冻结：表本身和每一项都改不了（运行时有人改地址会直接抛 TypeError） */
+export const QUOTA_ENDPOINTS: Readonly<Record<QuotaEndpoint, Readonly<{ provider: QuotaProvider; url: string }>>> = Object.freeze({
+  claude_usage: endpoint("claude", "https://api.anthropic.com/api/oauth/usage"),
+  codex_usage: endpoint("codex", "https://chatgpt.com/backend-api/wham/usage"),
+  codex_reset_credits: endpoint("codex", "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits"),
 });
+
+/** 第二道闸：就算表被绕过，也只往这两个 HTTPS origin 发 */
+const ALLOWED_ORIGINS = new Set(["https://api.anthropic.com", "https://chatgpt.com"]);
+
+function assertAllowedUrl(url: string): void {
+  const u = new URL(url);
+  if (u.protocol !== "https:" || !ALLOWED_ORIGINS.has(u.origin)) throw new Error("quota endpoint 不在白名单 origin 内");
+}
 
 export interface DtoMap {
   claude_usage: ClaudeUsageDto;
@@ -60,21 +72,8 @@ export const QUOTA_BODY_CAP = 256 * 1024;
 
 /** 流式读正文，超过上限立刻 cancel（不把一个异常大的响应整个读进内存） */
 export async function readCappedBody(res: Response, capBytes = QUOTA_BODY_CAP): Promise<{ ok: true; text: string } | { ok: false }> {
-  if (!res.body) return { ok: true, text: "" };
-  const reader = res.body.getReader();
-  const chunks: Uint8Array[] = [];
-  let total = 0;
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    total += value.byteLength;
-    if (total > capBytes) {
-      await reader.cancel().catch(() => {}); // 连接已不要了，cancel 失败也只是晚点被回收
-      return { ok: false };
-    }
-    chunks.push(value);
-  }
-  return { ok: true, text: Buffer.concat(chunks).toString("utf8") };
+  const text = await readStreamCapped(res.body, capBytes);
+  return text === null ? { ok: false } : { ok: true, text };
 }
 
 const RETRY_MIN_MS = 60_000;
@@ -119,6 +118,7 @@ export async function getQuota<E extends QuotaEndpoint>(
 ): Promise<FetchOutcome<DtoMap[E]>> {
   const target = QUOTA_ENDPOINTS[endpoint];
   if (!target || target.provider !== cred.provider) throw new Error(`quota endpoint ${endpoint} 与凭据 ${cred.provider} 不匹配`);
+  assertAllowedUrl(target.url);
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), deps.timeoutMs ?? QUOTA_TIMEOUT_MS);
   try {

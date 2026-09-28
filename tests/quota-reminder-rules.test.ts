@@ -32,6 +32,8 @@ describe("资格", () => {
     expect(isEligibleCredit(credit("a", 10, { redeemed: true }), T0)).toBe(false);
     expect(isEligibleCredit(credit("a", 10, { redeemStarted: true }), T0)).toBe(false);
     expect(isEligibleCredit(credit("a", -1), T0)).toBe(false);
+    expect(isEligibleCredit(credit("a", 10, { expiresAtMs: Infinity }), T0)).toBe(false);
+    expect(isEligibleCredit(credit("a", 10, { expiresAtMs: Date.UTC(2100, 0, 1) }), T0)).toBe(false);
   });
 });
 

@@ -5,20 +5,21 @@
  *   - 本机缓存（statusline usage-cache、Codex rollout）不带账户身份：账户卡不是 live 时另出一条 `*.local`，
  *     identity "unknown"，永不并进账户卡、也不触发提醒。
  *   - 过了 resets_at 的窗口标 resetPassed（「应已重置（未确认）」），不推成 0。
- *   - 重置次数是独立权益，放 resetCredits，不进 meters。
+ *   - 重置次数是独立权益，放 resetCredits，不进 meters；明细列表与提醒同一口径（isEligibleCredit）。
  *   - ProviderEntry 是通用「接入商」条目：Pi 的自定义 provider（按量）等由调用方经 extra 原样拼进来。
  * 单测 tests/quota-layers.test.ts。
  */
 
 import type { CodexQuotaObservation } from "./codex-usage.js";
 import type { QuotaWindowDto } from "./quota-dto.js";
+import { isEligibleCredit } from "./quota-reminder-rules.js";
 import type { ProviderRemote, RemoteView } from "./quota-scheduler.js";
 import { resetPassed, type CachedUsage } from "./usage-cache.js";
 
-type LayerSource = "live" | "live_stale" | "local_cache" | "none";
+export type LayerSource = "live" | "live_stale" | "local_cache" | "none";
 
 /** 一根量条：订阅是百分比；按量接入商是 tokens / 金额 / 请求数 */
-interface QuotaMeter {
+export interface QuotaMeter {
   id: string;
   kind: "session" | "weekly" | "weekly_scoped" | "other" | "usage";
   /** 补充标注（weekly_scoped 的模型名、按量接入商的模型等） */
@@ -27,12 +28,14 @@ interface QuotaMeter {
   used: number | null;
   limit?: number | null;
   resetsAtMs?: number | null;
+  /** 统计周期（分钟）：订阅窗口 = 窗口长度；Pi 等按量接入商的 tokens / usd 表示「这个数是多少分钟内的」 */
+  periodMinutes?: number | null;
   /** 观测到的重置时刻已过：used 是上一个窗口的旧值，前端显示「应已重置（未确认）」 */
   resetPassed?: boolean;
   severity?: "normal" | "warning" | "critical" | null;
 }
 
-interface ResetCreditsView {
+export interface ResetCreditsView {
   /** 持有总数 / 此刻真能兑换的数 */
   held: number;
   applicableNow: number;
@@ -82,13 +85,15 @@ function windowMeter(w: QuotaWindowDto, now: number): QuotaMeter {
     used: w.usedPct,
     limit: 100,
     resetsAtMs: w.resetsAtMs,
+    periodMinutes: w.windowMinutes,
     resetPassed: resetPassed(w.resetsAtMs, now),
     severity: w.severity,
   };
 }
 
-function pctMeter(id: string, kind: QuotaMeter["kind"], used: number | null, resetsAtMs: number | null, now: number): QuotaMeter {
-  return { id, kind, label: null, unit: "pct", used, limit: 100, resetsAtMs, resetPassed: resetPassed(resetsAtMs, now) };
+function pctMeter(id: string, kind: QuotaMeter["kind"], used: number | null, win: { resetsAtMs: number | null; minutes: number | null }, now: number): QuotaMeter {
+  const { resetsAtMs, minutes } = win;
+  return { id, kind, label: null, unit: "pct", used, limit: 100, resetsAtMs, periodMinutes: minutes, resetPassed: resetPassed(resetsAtMs, now) };
 }
 
 function resetCreditsOf(r: ProviderRemote, now: number): ResetCreditsView | null {
@@ -97,7 +102,7 @@ function resetCreditsOf(r: ProviderRemote, now: number): ResetCreditsView | null
   const summary = usage?.data.resetCredits ?? null;
   if (!summary && !detail?.snapshot) return null;
   const credits = detail?.snapshot
-    ? detail.snapshot.data.credits.filter((c) => c.status === "available" && c.expiresAtMs > now).map((c) => ({ key: c.key, expiresAtMs: c.expiresAtMs }))
+    ? detail.snapshot.data.credits.filter((c) => isEligibleCredit(c, now)).map((c) => ({ key: c.key, expiresAtMs: c.expiresAtMs }))
     : null;
   return {
     held: summary?.availableCount ?? detail?.snapshot?.data.availableCount ?? 0,
@@ -138,15 +143,15 @@ function localEntry(id: string, name: string, meters: QuotaMeter[], observedAt: 
 
 function claudeLocal(c: CachedUsage, now: number): ProviderEntry {
   return localEntry("claude.local", NAMES.claude, [
-    pctMeter("5h", "session", c.sessionPct, c.sessionResetsAtMs, now),
-    pctMeter("7d", "weekly", c.weekPct, c.weekResetsAtMs, now),
+    pctMeter("5h", "session", c.sessionPct, { resetsAtMs: c.sessionResetsAtMs, minutes: 300 }, now),
+    pctMeter("7d", "weekly", c.weekPct, { resetsAtMs: c.weekResetsAtMs, minutes: 10080 }, now),
   ], c.scrapedAt);
 }
 
 function codexLocal(o: CodexQuotaObservation, now: number): ProviderEntry {
   const meters = o.windows.map((w) => {
     const kind = w.windowMinutes === 300 ? "session" : w.windowMinutes === 10080 ? "weekly" : "other";
-    return pctMeter(w.id, kind, w.pct, w.resetsAtMs, now);
+    return pctMeter(w.id, kind, w.pct, { resetsAtMs: w.resetsAtMs, minutes: w.windowMinutes }, now);
   });
   return localEntry("codex.local", NAMES.codex, meters, o.observedAt, o.plan);
 }
