@@ -17,12 +17,14 @@ import { MEDIA_DICT } from "./i18n-dict-media";
 import { QUOTA_DICT } from "./i18n-dict-quota";
 import { CONTACTS_DICT } from "./i18n-dict-contacts";
 import { SESSIONS_DICT } from "./i18n-dict-sessions";
+import { SKILLS_DICT } from "./i18n-dict-skills";
 
 export const DICT: Record<string, string> = {
   ...LEDGER_DICT, ...COLLAB_DICT, ...BOUNDARY_DICT, ...ATTACH_DICT, ...MEDIA_DICT,
   ...QUOTA_DICT, // 订阅额度卡片组与开关（lib/i18n-dict-quota.ts）
   ...CONTACTS_DICT, // 侧栏联系人与输入框 @（lib/i18n-dict-contacts.ts）
   ...SESSIONS_DICT, // 未纳管会话 / 归档（lib/i18n-dict-sessions.ts）
+  ...SKILLS_DICT, // 技能库与按会话启停（lib/i18n-dict-skills.ts）
   // ── 通用 ─────────────────────────────────────────────
   "关闭": "Close",
   "正在回复…": "Replying…",
@@ -173,24 +175,6 @@ export const DICT: Record<string, string> = {
   "手机怎么连到这台电脑": "How your phone reaches this computer",
   "{n} 条别的 agent 发来的消息在排队（它这一轮结束或调 check_inbox 时收到）":
     "{n} message from other agents queued (arrives when its turn ends or it calls check_inbox)|{n} messages from other agents queued (arrive when its turn ends or it calls check_inbox)",
-  // ── 设置 · 技能 ──
-  "技能库": "Skills",
-  "这台电脑上的技能": "Skills on this computer",
-  "各 runtime 能用哪些技能、从哪来、同名时谁生效。现在只能看，启用 / 停用和安装后面做。":
-    "Which skills each runtime can use, where they come from, and which one wins on a name clash. Read-only for now; enabling, disabling and installing come later.",
-  "全部": "All",
-  "搜索技能": "Search skills",
-  "没有匹配的技能": "No matching skills",
-  "个人": "personal",
-  "claude.ai 同步": "synced from claude.ai",
-  "自带": "built-in",
-  "共享目录": "shared folder",
-  "被{scope}的同名技能盖过": "overridden by a {scope} skill of the same name",
-  "同名还有 {n} 处": "{n} more with this name",
-  "不在 / 菜单": "hidden from / menu",
-  "只能手动调用": "manual only",
-  "找了哪些目录（{n} 个，{m} 个存在）": "Folders searched ({n}, {m} exist)",
-  "不存在": "missing",
   "这几条路可以同时开着，想用哪个用哪个。每个地址第一次打开都要配对一次：设置 · 设备 → 添加设备。": "These paths can all be on at once; use whichever you like. Each address needs pairing the first time: Settings · Devices → Add device.",
   "局域网": "LAN",
   "自己的域名": "Your own domain",
