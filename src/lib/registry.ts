@@ -25,17 +25,27 @@ export type AgentRuntime = "claude-code" | "pi" | "codex";
  * `agent-master` 绕过 master 排除），`manager.ts list` 这次踩的是另一头。
  */
 export function isMasterAgent(name: string | undefined | null): boolean {
-  if (name === "master" || name === "agent-master") return true;
-  // MASTER、全角、夹零宽字符、多层 agent- 前缀的变体也是大总管：scope / guest 名按规范形式比，变体不能绕过排除
-  return !!name && canonicalAgentName(name).replace(/^(agent-)+/, "") === "master";
+  return isMasterName(name);
 }
 
 /**
- * agent 名的规范形式：NFKC（全角 → 半角）、去掉零宽等不可见格式字符、去首尾空白、转小写。scope 比对（principals.agentInScope）
- * 与 guest 开放名校验（devices.checkGuestAgents）都按它——否则大小写不敏感的文件系统上，各接口认到的范围会不一致。
+ * master 的唯一判定：规范形式（canonicalAgentName）再去掉所有空白 → 去掉所有层 agent- 前缀 → master，网页的会话名 __master__ 也算。
+ * 请求里的名字会落到不区分大小写的文件系统（APFS：Master 的归档目录就是 master 的）、会被 manager 转小写，
+ * 全角写法经 NFKC 也会变回来——判定只要有一处比路由解析「窄」，"*" 就能从那个缺口碰到 master（tests/api-master-scope.test.ts）。
+ * 只能放宽不能收窄：放宽只会多挡；唯一靠它放行的 devices.intersectAgents 另要逐字写法（tests/guest-pairing.test.ts）。
+ */
+export function isMasterName(name: string | undefined | null): boolean {
+  if (!name) return false;
+  const n = canonicalAgentName(name).replace(/\s/gu, "").replace(/^(agent-)+/, "");
+  return n === "master" || n === "__master__";
+}
+
+/**
+ * agent 名的规范形式：NFKC（全角 → 半角）、去掉零宽等不可见字符（INVISIBLE_NAME_RE 那一套）、去首尾空白、转小写。scope 比对
+ * （principals.agentInScope）与 guest 开放名校验（devices.checkGuestAgents）都按它——否则大小写不敏感的文件系统上，各接口认到的范围会不一致。
  */
 export function canonicalAgentName(name: string): string {
-  return name.normalize("NFKC").replace(/\p{Cf}/gu, "").trim().toLowerCase();
+  return name.normalize("NFKC").replace(/[\p{Cf}\p{Default_Ignorable_Code_Point}\u2800]/gu, "").trim().toLowerCase();
 }
 
 /**
