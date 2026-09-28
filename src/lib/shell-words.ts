@@ -3,7 +3,7 @@
  * 只为「这条命令会不会写东西」服务（lib/autopilot-tools.ts），不是完整的 shell 解析；认不出的写法宁可报成「看不清」：
  * - substitution：$(...) / `...` / <(...) / >(...)，包括藏在算术 $((…)) / $[…] 和不带引号的 heredoc 正文里的
  * - structural：没加引号的 ( ) 或单独的 { }（函数定义、子 shell、zsh 的 =(…) / *(e:…:)），调用方整条按写算
- * - 段的 dynamic：参数里有运行时才知道值的东西（$X、${…}、$'…'、带逗号的花括号展开），看标志位的命令据此按写算
+ * - 段的 dynamic：参数里有运行时才知道值的东西（$X、${…}、$'…'、$"…"、带逗号的花括号展开），看标志位的命令据此按写算
  * - broken：引号 / 括号 / heredoc 没闭合（Bash 详情被截断时常见）
  */
 
@@ -136,6 +136,13 @@ class Lexer {
     this.i = j + 1;
     return true;
   }
+  /** $"…"：本地化字符串，bash 当双引号处理（$"-delete" 就是 -delete），zsh 当字面量；两边结果不同，记 dynamic */
+  localeQuote(): boolean {
+    this.i++;
+    const ok = this.doubleQuote();
+    this.dyn = true;
+    return ok;
+  }
   /** 双引号：认反斜杠转义；里面的 $(...) / `...` 照样是命令替换，$X 照样是展开 */
   doubleQuote(): boolean {
     const { cmd } = this;
@@ -204,6 +211,7 @@ class Lexer {
     const two = cmd.slice(i, i + 2);
     if (c === "'") return this.singleQuote();
     if (two === "$'") return this.ansiQuote();
+    if (two === '$"') return this.localeQuote();
     if (c === '"') return this.doubleQuote();
     if (c === "\\") {
       if (cmd[i + 1] !== "\n") this.add(cmd[i + 1] ?? ""), this.quoted = true; // 反斜杠换行 = 续行

@@ -52,6 +52,12 @@ const cases: [string, boolean][] = [
   // others in ALWAYS_READ that can write
   ["xxd f out", W], ["xxd -r in out", W], ["tree -o out", W], ["less -o log f", W], ["ls | less -olog", W], ["file -C -m m", W], ["hostname evil", W],
   ["sort ${X:--o} out in", W], ["sort {-o,out} in", W], ["sort --compress-program=rm in", W],
+  // T14f 第 2 轮复验：$"…" 分词后是普通参数、getopt 长选项缩写、数组下标里的命令替换、gawk 扩展
+  ["find . -name zz $\"-delete\"", W], ["sort $\"-o\" out in", W], ["sort --outp=out in", W], ["read 'a[$(touch P)]' <<< 1", W],
+  ["wait -p 'a[$(touch P)]'", W], ["curl $\"-o\" f http://x", W], ["sed $\"-i\" s/a/b/ f", W], ["sed --in-pl s/a/b/ f", W], ["sed --e='w out' f", W],
+  ["less --log-fi=out f", W], ["less '+!touch P' f", W], ["awk -i inplace '{print}' f", W], ["awk --load x '{print}' f", W], ["xxd -revert in out", W],
+  ["tmux display-message -I -t %1", W], ["git diff --outp=f", W], ["git fetch --upload-p=x origin", W], ["curl --req=POST http://x", W],
+  ["curl --out f http://x", W], ["git branch --del x", W], ["sort -n --reverse f", R], ["sed --quiet -n 1p f", R], ["read -r x", R],
   // tmux
   ["tmux display-message -p x \; kill-server", W], ["tmux list-sessions ';' send-keys -t a 'rm -rf ~' Enter", W], ["tmux display -p '#(touch pwn)'", W],
   ["tmux capture-pane -p -t a", R],

@@ -11,6 +11,8 @@ describe("parseShell", () => {
     ]);
     expect(words("find . -de''lete")).toEqual([["find", ".", "-delete"]]);
     expect(words('cd "/path with space" && pwd')).toEqual([["cd", "/path with space"], ["pwd"]]);
+    // $"…" 按双引号取值，但 bash / zsh 取法不同，记 dynamic
+    expect(parseShell('find . $"-delete"').segments).toEqual([{ words: ["find", ".", "-delete"], redirects: [], dynamic: true }]);
   });
   test("重定向：写文件、fd 复制、/dev/null、紧贴在词后面的 >", () => {
     expect(parseShell("ls 2>&1 >/dev/null").segments[0].redirects).toEqual([{ op: ">&", target: "&1" }, { op: ">", target: "/dev/null" }]);
