@@ -1,6 +1,6 @@
 "use client";
 /**
- * 任务详情（第二层，ux.md §3）：现在 → 阶段与用时 → 最近 3 件事 → 审查 → 参与者 → 对它说 → PR。
+ * 任务详情（第二层，ux.md §3）：现在 → 阶段与用时 → 完成检查单 → 最近 3 件事 → 审查 → 参与者 → 对它说 → PR。
  * 桌面是首页右侧的面板；手机是全屏页，必须 portal 到 body（会话页在 transform 横滑容器里，web/CLAUDE.md PWA 第 4 条）。
  */
 import { useCallback, useEffect, useSyncExternalStore } from "react";
@@ -13,6 +13,7 @@ import type { LineAction } from "./collab-line";
 import { fmtEventTime, participants, recentThree, reviewRows, stageSegments, type Participant, type TaskDetail } from "./collab-detail-model";
 import { Icon, type IconName } from "./collab-icons";
 import { dwellText, fmtDuration, lineOf, type LedgerOverview, type LineView, type Tr } from "./collab-model";
+import { ChecklistSec } from "./collab-checklist";
 import { CollabSay } from "./collab-say";
 import { useTaskDetail } from "./use-collab";
 import s from "./collab.module.css";
@@ -183,6 +184,7 @@ function Body({ d, line, action, stream, tr }: { d: TaskDetail; line: LineView; 
     <div className={s.pb}>
       <NowSec line={line} total={d.task.metrics.totalMs} tr={tr} />
       <StagesSec d={d} line={line} tr={tr} />
+      <ChecklistSec d={d} tr={tr} />
       <RecentSec d={d} tr={tr} />
       <ReviewSec d={d} tr={tr} />
       <PeopleSec d={d} exec={exec} action={action} tr={tr} />

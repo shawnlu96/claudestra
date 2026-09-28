@@ -6,6 +6,7 @@
 import type { Database } from "bun:sqlite";
 import { roleOf, type LedgerTask, type Role } from "../lib/ledger-stages.js";
 import { getItem, getMeta, getTask, LedgerError } from "../lib/ledger-store.js";
+import type { FactsDeps } from "../lib/ledger-verify-facts.js";
 import type { WriteCtx } from "../lib/ledger-write.js";
 import type { Registry } from "./core.js";
 import type { ParsedArgs } from "./ledger-identity.js";
@@ -21,6 +22,8 @@ export interface LedgerDeps {
   loadRegistry(): Promise<Registry>;
   saveRegistry(reg: Registry): Promise<void>;
   now(): number;
+  /** 完成检查单的事实采集（gh / git / 进程）；不给就用真实的（lib/ledger-verify-facts.ts），测试注入假的 */
+  factsDeps?(): FactsDeps;
 }
 
 export type Result = Record<string, unknown>;

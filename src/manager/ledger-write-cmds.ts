@@ -168,7 +168,7 @@ function review(c: LedgerCli): Result {
   return { ok: true, task: r.row, event: r.event, duplicate: r.duplicate };
 }
 
-/** decision / deploy / verify / rollback：PM / master / owner；data 由各自的旗标组成 */
+/** decision / deploy / rollback：PM / master / owner；data 由各自的旗标组成（verify 在 ledger-verify.ts，由系统核对） */
 function managerEvent(kind: AppendableKind, build: (c: LedgerCli) => { target: string; text?: string; data: Record<string, unknown> }) {
   return (c: LedgerCli): Result => {
     const b = build(c);
@@ -190,11 +190,6 @@ const deploy = managerEvent("deploy", (c) => ({
   text: c.p.flags.text,
   data: { version: c.need("version"), rollbackPoint: c.p.flags["rollback-point"] ?? null },
 }));
-const verify = managerEvent("verify", (c) => {
-  const result = c.need("result");
-  if (result !== "pass" && result !== "fail") throw new LedgerError("invalid", "--result 只能是 pass / fail");
-  return { target: c.task(c.p.pos[1]).id, text: c.p.flags.text, data: { result, evidence: c.p.flags.evidence ?? null } };
-});
 const rollback = managerEvent("rollback", (c) => ({ target: c.task(c.p.pos[1]).id, text: c.p.flags.text, data: { to: c.p.flags.to ?? null } }));
 
 function freeze(frozen: boolean) {
@@ -223,7 +218,7 @@ export const WRITE_CMDS: Record<string, CommandSpec> = {
     run: taskNew,
   },
   "task-set": { valued: [...TASK_VALUED, "rev"], usage: "task-set <id> --rev <n> [--title --item --agent --pm --branch --pr --head --spec --model --extra]", run: taskSet },
-  stage: { valued: ["from", "to", "text", "dedup"], usage: "stage <task> --from <当前阶段> --to <阶段> [--text]", run: stage },
+  stage: { valued: ["from", "to", "text", "dedup"], usage: "stage <task> --from <当前阶段> --to <阶段> [--text]（进 verified 用 ledger verify）", run: stage },
   note: { valued: ["project", "dedup"], usage: "note <task|item|-> <正文>", run: note },
   deliver: { valued: ["head", "evidence", "from", "text", "dedup"], usage: "deliver <task> [--head <sha>] [--evidence <path>] [--from build|fix] [--text]", run: deliverCmd },
   review: {
@@ -233,7 +228,6 @@ export const WRITE_CMDS: Record<string, CommandSpec> = {
   },
   decision: { valued: ["project", "dedup"], bools: ["transcribed"], usage: "decision <task|item|-> <原话> [--transcribed]", run: decision },
   deploy: { valued: ["version", "rollback-point", "text", "dedup"], usage: "deploy <task> --version <v> [--rollback-point <x>] [--text]", run: deploy },
-  verify: { valued: ["result", "evidence", "text", "dedup"], usage: "verify <task> --result pass|fail [--evidence <path>] [--text]", run: verify },
   rollback: { valued: ["to", "text", "dedup"], usage: "rollback <task> [--to <version>] [--text]", run: rollback },
   freeze: { valued: ["reason", "project", "dedup"], usage: "freeze --reason <原因>", run: freeze(true) },
   unfreeze: { valued: ["text", "project", "dedup"], usage: "unfreeze [--text]", run: freeze(false) },

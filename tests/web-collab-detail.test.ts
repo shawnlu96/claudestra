@@ -2,7 +2,7 @@
  * 协作视图详情面板纯逻辑（web/features/collab/collab-detail-model.ts）：阶段用时条、最近 3 件事、审查摘要、参与者。
  */
 import { describe, expect, test } from "bun:test";
-import { actorName, eventLine, fmtEventTime, participants, recentThree, reviewRows, stageSegments } from "../web/features/collab/collab-detail-model";
+import { actorName, eventLine, fmtEventTime, latestChecklist, participants, recentThree, reviewRows, stageSegments } from "../web/features/collab/collab-detail-model";
 import type { LedgerEventView, LedgerTaskView } from "../web/features/collab/collab-model";
 import { fillParams } from "../web/lib/i18n-fill";
 
@@ -98,5 +98,30 @@ describe("事件时刻", () => {
     const jan1 = new Date(2027, 0, 1, 8, 0).getTime();
     expect(fmtEventTime(new Date(2026, 11, 31, 22, 0).getTime(), jan1)).toBe("昨天 22:00");
     expect(fmtEventTime(new Date(2026, 11, 30, 22, 0).getTime(), jan1)).toBe("12-30 22:00");
+  });
+});
+
+describe("完成检查单", () => {
+  test("取最近一次系统核对的 verify；老的手填 verify（没有 checks）不算；豁免、未知 id、坏状态都兜住", () => {
+    expect(latestChecklist([ev("verify", { result: "pass", evidence: null })])).toBeNull();
+    const checks = [
+      { id: "pr-merged", status: "pass", detail: "已合并" },
+      { id: "web-relay", status: "unknown", detail: "拿不到", waived: "中继维护" },
+      { id: "daemon-bridge", status: "fail", detail: "还没重启" },
+      { id: "new-probe", status: "weird" },
+    ];
+    const old = ev("verify", { result: "fail", checks: [{ id: "pr-merged", status: "fail" }] });
+    const c = latestChecklist([old, ev("verify", { result: "fail", checks }, "", "owner"), ev("note", {}, "别的")]);
+    expect(c).toMatchObject({ result: "fail", actor: "owner" });
+    expect(c!.rows).toEqual([
+      { id: "pr-merged", label: "PR 已合并", status: "pass", detail: "已合并", waived: null },
+      { id: "web-relay", label: "中继网页已部署", status: "unknown", detail: "拿不到", waived: "中继维护" },
+      { id: "daemon-bridge", label: "bridge 已重启", status: "fail", detail: "还没重启", waived: null },
+      { id: "new-probe", label: "new-probe", status: "unknown", detail: "", waived: null },
+    ]);
+  });
+  test("verify 事件一句话：pass / fail / unknown 三种", () => {
+    expect(eventLine(ev("verify", { result: "pass" }))).toBe("线上验证通过");
+    expect(eventLine(ev("verify", { result: "unknown" }))).toBe("线上验证查不到结果");
   });
 });

@@ -92,7 +92,7 @@ function eventText(e: LedgerEventView, who: string, tail: string, tr: Tr): strin
     case "deploy":
       return tr("上线 {v}", { v: typeof d.version === "string" ? d.version : "" }).trim() + (tail ? `${colon}${tail}` : "");
     case "verify":
-      return tr(d.result === "fail" ? "线上验证失败" : "线上验证通过") + (tail ? `${colon}${tail}` : "");
+      return tr(verifyHeadline(d.result)) + (tail ? `${colon}${tail}` : "");
     case "rollback":
       return tr("{who} 回滚", { who }) + (tail ? `${colon}${tail}` : "");
     case "note":
@@ -184,4 +184,57 @@ export function participants(d: Pick<TaskDetail, "task" | "events">): Participan
   }
   for (const [name, rounds] of byReviewer) out.push({ name, role: "reviewer", rounds });
   return out;
+}
+
+/** verify 事件的结论一句话（unknown = 有项查不到，也没推进 verified） */
+export function verifyHeadline(result: unknown): string {
+  return result === "pass" ? "线上验证通过" : result === "unknown" ? "线上验证查不到结果" : "线上验证失败";
+}
+
+export type CheckStatus = "pass" | "fail" | "unknown";
+
+export interface CheckRow {
+  id: string;
+  label: string;
+  status: CheckStatus;
+  detail: string;
+  /** PM / owner 豁免的理由；有它就不挡 verified */
+  waived: string | null;
+}
+
+export interface ChecklistView {
+  result: CheckStatus;
+  ts: number;
+  actor: string;
+  rows: CheckRow[];
+}
+
+/** 探针 id → 检查项名（与 src/lib/ledger-probes.ts 的 PROBE_IDS 对应；不认识的 id 原样显示） */
+const PROBE_LABEL: Record<string, string> = {
+  "pr-merged": "PR 已合并",
+  "web-local": "本机网页已部署",
+  "web-relay": "中继网页已部署",
+  "daemon-bridge": "bridge 已重启",
+  "daemon-cron": "cron 已重启",
+  "daemon-launcher": "launcher 已重启",
+  "manual-evidence": "证据文件",
+};
+
+const asStatus = (v: unknown): CheckStatus => (v === "pass" || v === "fail" ? v : "unknown");
+
+/** 最近一次系统核对的完成检查单；老的手填 verify 事件没有 checks，不算 */
+export function latestChecklist(events: readonly LedgerEventView[]): ChecklistView | null {
+  for (let i = events.length - 1; i >= 0; i--) {
+    const e = events[i];
+    if (e.kind !== "verify" || !Array.isArray(e.data.checks)) continue;
+    const rows = (e.data.checks as Record<string, unknown>[]).map((c) => ({
+      id: String(c.id ?? ""),
+      label: PROBE_LABEL[String(c.id)] ?? String(c.id ?? ""),
+      status: asStatus(c.status),
+      detail: typeof c.detail === "string" ? c.detail : "",
+      waived: typeof c.waived === "string" && c.waived ? c.waived : null,
+    }));
+    return { result: asStatus(e.data.result), ts: e.ts, actor: e.actor, rows };
+  }
+  return null;
 }
