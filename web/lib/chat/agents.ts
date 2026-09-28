@@ -1,6 +1,6 @@
 import { api } from "@/lib/api/client";
 
-/** 值守（src/lib/missions.ts 的 Mission 子集，bridge GET /agents 的 mission 字段）：until / resumeAt 是 ISO */
+/** Autopilot（src/lib/missions.ts 的 Mission 子集，bridge GET /agents 的 mission 字段）：until / resumeAt 是 ISO */
 export interface MissionInfo {
   goal: string;
   until: string;
@@ -83,7 +83,7 @@ export interface AgentSession {
   sharedPeers?: number;
   sharedWith?: string[];
   updateHint?: UpdateHint | null;
-  /** 进行中的值守（bridge GET /agents 的 mission 字段）：侧栏图标 / 顶栏「截止 11:00」、菜单「开始 / 结束值守」 */
+  /** 进行中的 Autopilot（bridge GET /agents 的 mission 字段）：侧栏图标 / 顶栏「截止 11:00」、菜单「开启 / 关闭 Autopilot」 */
   mission?: MissionInfo | null;
   /** 别的 agent 发来、它还在回合里没收到的消息数（等回合结束或它调 check_inbox）→ 侧栏小标 */
   queued?: number;
@@ -199,7 +199,7 @@ const ledgerSig = (lt?: LedgerTaskRef | null) => (lt ? `|${lt.id}:${lt.stage}:${
 
 /**
  * agentsSignature（features/chat/chat-store.ts）里不断新增的字段拼在这里：chat-store 只许缩，新字段加一处就好。
- * 漏掉的字段 = 列表轮询判「没变」、界面不更新（external / 显示名、值守标记都踩过）。
+ * 漏掉的字段 = 列表轮询判「没变」、界面不更新（external / 显示名、Autopilot 标记都踩过）。
  */
 export function agentExtraSig(a: AgentSession): string {
   const hint = a.updateHint ? JSON.stringify(a.updateHint) : "";
