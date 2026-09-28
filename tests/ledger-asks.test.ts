@@ -143,14 +143,14 @@ describe("台账读侧不被 ask 事件盖掉", () => {
     const d = db();
     createItem(d, { actor: "owner", now: 1 }, { project: "p", id: "i1", title: "x", status: "doing" });
     createTask(d, { actor: "owner", now: 2 }, { project: "p", id: "T9", title: "t", kind: "code", itemId: "i1", agent: "agent-x" });
-    appendEvent(d, { actor: "owner", now: 3 }, { project: "p", target: "T9", kind: "verify", text: "线上验证失败", data: { result: "fail" } });
+    appendEvent(d, { actor: "owner", now: 3 }, { project: "p", target: "T9", kind: "note", text: "任务上的最近一条" });
     appendEvent(d, { actor: "owner", now: 4 }, { project: "p", target: "", kind: "note", text: "项目级" });
     const onTask = openAsk(d, base, 5);
     answerAsk(d, onTask.id, ans(6));
     closeAsk(d, openAsk(d, base, 7).id, "cancelled", "", 8);
     for (let i = 0; i < 25; i++) openAsk(d, { ...base, taskId: undefined, title: `q${i}` }, 10 + i);
     const v = projectView(d, "p", 100);
-    expect(v.tasks[0].lastEvent).toMatchObject({ kind: "verify", data: { result: "fail" } });
+    expect(v.tasks[0].lastEvent).toMatchObject({ kind: "note", text: "任务上的最近一条" });
     expect(v.projectEvents.map((e) => e.kind)).toEqual(["note"]);
   });
 });

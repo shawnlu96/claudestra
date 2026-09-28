@@ -176,7 +176,8 @@ export function isStuck(t: LedgerTaskView, now: number): boolean {
 function isProblem(t: LedgerTaskView): boolean {
   if (t.stage === "fix" || t.stage === "blocked") return true;
   const e = t.lastEvent;
-  return !!e && (e.kind === "rollback" || (e.kind === "verify" && e.data.result === "fail"));
+  // 检查单没过（fail）或有项查不到（unknown）都要人看：任务卡在 live，不会自己往前走
+  return !!e && (e.kind === "rollback" || (e.kind === "verify" && e.data.result !== "pass"));
 }
 
 export function attentionOf(t: LedgerTaskView, now: number): Attention {
@@ -225,7 +226,8 @@ export function stageLabel(t: LedgerTaskView, all: readonly LedgerTaskView[], fr
     case "merge":
       return frozen ? tr("合并队列冻结") : tr("等合并 · 队列第 {n} 位", { n: mergeQueuePos(t, all) });
     case "live":
-      return t.lastEvent?.kind === "verify" && t.lastEvent.data.result === "fail" ? tr("线上验证失败") : tr("已上线 · 等验证");
+      if (t.lastEvent?.kind !== "verify" || t.lastEvent.data.result === "pass") return tr("已上线 · 等验证");
+      return tr(t.lastEvent.data.result === "unknown" ? "线上验证查不到结果" : "线上验证失败");
     case "blocked":
       return tr("受阻");
     case "verified":
