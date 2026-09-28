@@ -6,6 +6,7 @@
 import { isNativeShell, nativePlugin } from "@/lib/native";
 import { apnsRegister, markRead } from "@/lib/api/push";
 import { t } from "@/lib/i18n";
+import { askFromLink } from "@/lib/hash-nav";
 
 type Listener = (ev: unknown) => void;
 interface PushPlugin {
@@ -40,10 +41,12 @@ export async function nativePushPermission(): Promise<"prompt" | "granted" | "de
 
 let listenersBound = false;
 let onOpenAgent: ((agent: string) => void) | null = null;
+let onOpenAsk: ((ask: string) => void) | null = null;
 
-/** 绑定一次性的插件事件(token 登记 / 点通知直达 agent)。App 每次启动调一次。 */
-export function bindNativePushListeners(openAgent: (agent: string) => void): void {
+/** 绑定一次性的插件事件(token 登记 / 点通知直达 agent 或「待你处理」那张卡)。App 每次启动调一次。 */
+export function bindNativePushListeners(openAgent: (agent: string) => void, openAsk: (ask: string) => void): void {
   onOpenAgent = openAgent;
+  onOpenAsk = openAsk;
   const p = plugin();
   if (!p || listenersBound) return;
   listenersBound = true;
@@ -57,12 +60,15 @@ export function bindNativePushListeners(openAgent: (agent: string) => void): voi
     console.warn("[native-push] registration error", ev);
   });
   void p.addListener("pushNotificationActionPerformed", (ev) => {
-    const data = ((ev as { notification?: { data?: Record<string, unknown> } })?.notification?.data || {}) as { agent?: string };
+    const data = ((ev as { notification?: { data?: Record<string, unknown> } })?.notification?.data || {}) as { agent?: string; url?: string };
+    // 「待你处理」推送的 url 带 ?ask=：和 Web Push 一样打开抽屉定位那张卡，而不是进发问 agent 的会话
+    const ask = askFromLink(data.url);
     if (data.agent) {
       // 点了通知 = 读过了:同 SW 的 notificationclick,通知服务端做跨端已读联动
       void markRead(data.agent).catch(() => {}); // 已读回执丢了下一次打开会话会再发
-      onOpenAgent?.(data.agent);
+      if (!ask) onOpenAgent?.(data.agent);
     }
+    if (ask) onOpenAsk?.(ask);
   });
 }
 
