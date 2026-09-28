@@ -5,7 +5,7 @@
  * 要 manage，且 agent 在凭据 scope 内（同目录按 agent 的写端点同一口径）；master 单独判，"*" 不含 master。
  * 改完不自动重启：CC 会话运行中不重读 --settings（lib/agent-settings.ts 顶部的实测），由界面提示「重启后生效」。
  */
-import { isSkillName, isSkillState, outsideSkillOverrides, readAgentSettings, skillOverridesOf } from "../../lib/agent-settings.js";
+import { isSkillName, isSkillState, outsideSkillOverrides, readAgentSettings, skillTableOf } from "../../lib/agent-settings.js";
 import { agentSkillView } from "../../lib/agent-skills.js";
 import { canManage } from "../../lib/devices.js";
 import { normalizePiEnvProfile } from "../../lib/pi-env.js";
@@ -40,7 +40,7 @@ export async function handleAgentSkills(req: Request, path: string, principal: P
     const cc = runtime === "claude-code";
     const view = agentSkillView(runtime, (await localSkillLibrary(cwd ? { cwd, runtime } : undefined)).skills, {
       cwd,
-      overrides: cc ? skillOverridesOf(readAgentSettings(agent.name)) : {},
+      overrides: cc ? skillTableOf(readAgentSettings(agent.name)) : {}, // 含钉住用的 on：视图按 CC 的查键规则算
       piEnv: normalizePiEnvProfile(agent.piEnv),
       outside: cc ? outsideSkillOverrides(cwd) : [],
     });

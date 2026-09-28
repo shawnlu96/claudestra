@@ -4,7 +4,7 @@
  * `manager repair --apply` 据它关窗口（只按记下的 id）、删频道、清 bridge 欠账，再把同名旧条目（prev）
  * 原样放回。频道没删成（bridge 不在）就不动占位：放回 prev 会让那个频道从此无人认领。
  */
-import { removeAgentSettings } from "../lib/agent-settings.js";
+import { releaseNameForFreshAgent } from "../lib/agent-settings.js";
 import { isPendingLive, newPending, type PendingOp } from "../lib/pending-ops.js";
 import { channelFailureText } from "./ops-deps.js";
 import type { AgentInfo, Registry } from "./core.js";
@@ -180,7 +180,7 @@ export async function commitCreate(name: string, entry: AgentInfo, deps: OpsDeps
     if (createPendingOf(reg.agents[name])!.prev) repointParentRefs(reg, name); // kill 后同名重建：旧子 agent 不认新 agent 作父
     reg.agents[name] = entry;
     await deps.saveRegistry(reg);
-    removeAgentSettings(name); // 全新 agent：registry 落盘后才删同名旧 agent 的技能开关（启动时也没带）；早删的话 create 失败会丢掉停止的同名 agent 的档位
+    releaseNameForFreshAgent(name, reg.agents); // 全新 agent：registry 落盘后才清同名旧文件（早清的话 create 失败会丢掉停止的同名 agent 的档位）；rename 没补跑完的替它挪走
     run.committed = true;
     return "ok";
   } finally {

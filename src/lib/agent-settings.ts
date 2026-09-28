@@ -50,35 +50,51 @@ export function readAgentSettings(agent: string): AgentSettings {
   return r.status === "ok" ? (r.data as AgentSettings) : {};
 }
 
-/** skillOverrides 里合法的条目（脏值丢掉，不让一个坏条目拖垮整张表） */
-export function skillOverridesOf(settings: AgentSettings): Record<string, Exclude<SkillState, "on">> {
+/** skillOverrides 里合法的条目，含显式 "on"（同名技能钉住用，lib/agent-skills.ts skillWrites）；脏值丢掉，不让一个坏条目拖垮整张表 */
+export function skillTableOf(settings: AgentSettings): Record<string, SkillState> {
   const raw = settings.skillOverrides;
-  const out: Record<string, Exclude<SkillState, "on">> = {};
+  const out: Record<string, SkillState> = {};
   if (!isPlainObject(raw)) return out;
-  for (const [k, v] of Object.entries(raw)) if (isSkillName(k) && isSkillState(v) && v !== "on") out[k] = v;
+  for (const [k, v] of Object.entries(raw)) if (isSkillName(k) && isSkillState(v)) out[k] = v;
   return out;
 }
 
-/** 纯函数：改一个技能的档位。on = 删键；表空了连 skillOverrides 键一起删；其它键原样保留 */
-export function applySkillOverride(settings: AgentSettings, skill: string, state: SkillState): AgentSettings {
+/** 真正关着 / 降档的条目（不含钉住用的 "on"） */
+export function skillOverridesOf(settings: AgentSettings): Record<string, Exclude<SkillState, "on">> {
+  return Object.fromEntries(Object.entries(skillTableOf(settings)).filter(([, v]) => v !== "on")) as Record<string, Exclude<SkillState, "on">>;
+}
+
+/** 纯函数：按键改（null = 删键，"on" 照写——要不要写 on 由调用方定）；表空了连 skillOverrides 键一起删；其它键原样保留 */
+export function applySkillChanges(settings: AgentSettings, changes: Record<string, SkillState | null>): AgentSettings {
   const next: AgentSettings = { ...settings };
   const table = { ...(isPlainObject(settings.skillOverrides) ? settings.skillOverrides : {}) };
-  if (state === "on") delete table[skill];
-  else table[skill] = state;
+  for (const [k, v] of Object.entries(changes)) {
+    if (v === null) delete table[k];
+    else table[k] = v;
+  }
   if (Object.keys(table).length) next.skillOverrides = table;
   else delete next.skillOverrides;
   return next;
 }
 
+/** 纯函数：改一个技能的档位，on = 删键（显式 on 会让 CC /skills 菜单那一项被锁） */
+export const applySkillOverride = (settings: AgentSettings, skill: string, state: SkillState): AgentSettings =>
+  applySkillChanges(settings, { [skill]: state === "on" ? null : state });
+
 /**
  * 写者（manager）：磁盘上是坏文件就拒写；改完为空就删文件，免得每次启动白带一个空 --settings。
  * aliases：同一个技能的别名键一并清掉（同步技能的裸名写法，CC 两种都认，留着会和界面上的档位对不上）。
  */
-export async function setSkillOverride(agent: string, skill: string, state: SkillState, aliases: string[] = []): Promise<AgentSettings> {
+export function setSkillOverride(agent: string, skill: string, state: SkillState, aliases: string[] = []): Promise<AgentSettings> {
+  return writeSkillChanges(agent, { ...Object.fromEntries(aliases.map((a) => [a, null])), [skill]: state === "on" ? null : state });
+}
+
+/** 按键批量改（applySkillChanges 的落盘版，manager skill-toggle 用 lib/agent-skills.ts skillWrites 算出的改动调它） */
+export async function writeSkillChanges(agent: string, changes: Record<string, SkillState | null>): Promise<AgentSettings> {
   const path = agentSettingsPath(agent);
   const cur = readJsonStateSync(path, isPlainObject);
   const base = cur.status === "ok" ? (cur.data as AgentSettings) : {};
-  const next = applySkillOverride(aliases.reduce((acc, a) => applySkillOverride(acc, a, "on"), base), skill, state);
+  const next = applySkillChanges(base, changes);
   if (Object.keys(next).length === 0 && cur.status !== "corrupt") {
     if (existsSync(path)) unlinkSync(path);
     return next;
@@ -100,6 +116,16 @@ export function removeAgentSettings(agent: string): void {
   }
   dropLaunchSettings(agent);
 }
+/**
+ * 全新 agent 占用 name 时（registry 落盘后）处理同名旧文件：有 rename 还没补跑完（pending.from === name，砍在「registry 已迁、
+ * 文件还没挪」），文件是改名那位的，替它挪过去（补跑见旧名被占就不动文件了）；否则是删掉 / 停止的旧 agent 留下的，删。
+ */
+export function releaseNameForFreshAgent(name: string, agents: Record<string, { pending?: { op: string; from?: string } } | undefined>): void {
+  const heir = Object.entries(agents).find(([n, a]) => n !== name && a?.pending?.op === "rename" && a.pending.from === name)?.[0];
+  if (heir) renameAgentSettings(name, heir, { oldTaken: false });
+  else removeAgentSettings(name);
+}
+
 /**
  * 首次 rename：源文件不在时也要删掉目标位置的旧文件（改名到一个删过的名字，不能继承那个旧 agent 的开关）。
  * 补跑（resume）：只在源文件还在、且旧名没被新 agent 占用时挪，永远不删目标——上次可能已经挪过去了，旧名的文件也可能是新 agent 的。

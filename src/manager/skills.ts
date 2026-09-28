@@ -5,10 +5,10 @@
  * - Pi：能力档案 piEnv.skills，只有 base=minimal 才能逐个管，且只有开 / 关；
  * - Codex：本期不支持。
  */
-import { isSkillName, isSkillState, setSkillOverride, skillOverridesOf, type SkillState } from "../lib/agent-settings.js";
-import { piCandidates, piParentEntryFor, piSkillEntryMatches, syncedAliases } from "../lib/agent-skills.js";
+import { isSkillName, isSkillState, readAgentSettings, skillOverridesOf, skillTableOf, writeSkillChanges, type SkillState } from "../lib/agent-settings.js";
+import { piCandidates, piParentEntryFor, piSkillEntryMatches, skillWrites } from "../lib/agent-skills.js";
 import { normalizePiEnvProfile } from "../lib/pi-env.js";
-import { agentRuntime } from "../lib/registry.js";
+import { agentRuntime, isMasterAgent } from "../lib/registry.js";
 import { expandHome, localSkillLibrary } from "../lib/skill-library.js";
 import { loadRegistry, normalizeName, output, saveRegistry, type Registry } from "./core.js";
 
@@ -19,11 +19,13 @@ export async function cmdSkillToggle(args: string[]): Promise<void> {
   if (!name || !skill || !state) return output({ ok: false, error: USAGE });
   if (!isSkillName(skill)) return output({ ok: false, error: `技能名不合法: ${JSON.stringify(skill)}` });
   if (!isSkillState(state)) return output({ ok: false, error: `未知档位 "${state}"。${USAGE}` });
-  if (name === "master") return toggleClaude("master", null, skill, state);
+  if (isMasterAgent(normalizeName(name))) return toggleClaude("master", null, skill, state); // agent-master / Master 也归到 launcher 读的 master.json
   const reg = await loadRegistry();
   const key = normalizeName(name);
   const info = reg.agents[key];
   if (!info) return output({ ok: false, error: `${key} 不在 registry` });
+  // 做到一半的 create / rename / kill：rename 补跑会用旧名的文件覆盖新名的，这时写进来的开关会丢（manager repair 或重跑那条命令收尾）
+  if (info.pending) return output({ ok: false, error: `${key} 的 ${info.pending.op} 还没做完，等它收尾（或 manager repair）再调技能` });
   const rt = agentRuntime(info);
   if (rt === "codex") return output({ ok: false, error: "Codex agent 暂不支持按 agent 启停技能（它的技能目录是全局的）" });
   if (rt === "pi") return togglePi(reg, key, skill, state);
@@ -31,9 +33,10 @@ export async function cmdSkillToggle(args: string[]): Promise<void> {
 }
 
 async function toggleClaude(agent: string, cwd: string | null, skill: string, state: SkillState): Promise<void> {
-  // 同步技能顺手清掉裸名别名键：CC 两种都认，留着的话界面上的档位和实际对不上（lib/agent-skills.ts syncedAliases）
-  const aliases = skill.startsWith("anthropic-skills:") ? syncedAliases(skill, (await localSkillLibrary(cwd ? { cwd, runtime: "claude-code" } : undefined)).skills, cwd) : [];
-  const next = await setSkillOverride(agent, skill, state, aliases).catch((e: Error) => e);
+  // 按 CC 的查键规则算要写哪些键（同名的个人 / 项目技能与同步技能互相牵连，lib/agent-skills.ts skillWrites）
+  const { skills } = await localSkillLibrary(cwd ? { cwd, runtime: "claude-code" } : undefined);
+  const changes = skillWrites(skill, state, skills, cwd, skillTableOf(readAgentSettings(agent)));
+  const next = await writeSkillChanges(agent, changes).catch((e: Error) => e);
   if (next instanceof Error) return output({ ok: false, error: next.message });
   output({
     ok: true,

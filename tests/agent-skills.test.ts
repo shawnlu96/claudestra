@@ -1,6 +1,9 @@
 /** lib/agent-skills.ts：某个 agent 能看到哪些技能、各是什么档位（会话详情的技能栏、manager skill-toggle 的 Pi 分支） */
 import { describe, expect, test } from "bun:test";
-import { agentSkillView, piCandidates, piParentEntryFor, piSkillEntryMatches, syncedAliases } from "../src/lib/agent-skills.js";
+import { agentSkillView, piCandidates, piParentEntryFor, piSkillEntryMatches, skillWrites } from "../src/lib/agent-skills.js";
+import { applySkillChanges, skillTableOf, type SkillState } from "../src/lib/agent-settings.js";
+
+type Step = [string, SkillState];
 import type { LibrarySkill } from "../src/lib/skill-library.js";
 
 const sk = (name: string, over: Partial<LibrarySkill> = {}): LibrarySkill => ({
@@ -33,33 +36,55 @@ describe("Claude Code", () => {
   });
 });
 
-describe("同步技能的裸名别名、外部设置", () => {
+describe("同名的同步技能与个人 / 项目技能（按 CC 的查键规则：先全名、查到值就停，再裸名）", () => {
   const lib = [
     sk("docx", { scope: "synced", name: "anthropic-skills:docx" }),
     sk("pdf", { scope: "synced", name: "anthropic-skills:pdf" }),
-    sk("pdf"), // 个人技能同名：裸名 pdf 归它，不算同步那个的别名
+    sk("pdf"), // 个人技能同名：裸键 pdf 是它的，但 CC 也会拿它去查同步 pdf
   ];
-  test("syncedAliases：没有同名的个人 / 项目技能才把裸名算作别名", () => {
-    expect(syncedAliases("anthropic-skills:docx", lib, null)).toEqual(["docx"]);
-    expect(syncedAliases("anthropic-skills:pdf", lib, null)).toEqual([]);
-    expect(syncedAliases("save", lib, null)).toEqual([]);
+  const view = (overrides: Record<string, SkillState>) =>
+    agentSkillView("claude-code", lib, { cwd: null, overrides, piEnv: {} }).rows.map((r) => [r.name, r.state]);
+  /** 按 skillWrites 连续改几次，返回最后的表 */
+  const run = (...steps: Step[]): Record<string, SkillState> =>
+    steps.reduce((t, [k, st]) => skillTableOf(applySkillChanges({ skillOverrides: t }, skillWrites(k, st, lib, null, t))), {} as Record<string, SkillState>);
+
+  test("视图：裸键 pdf=off 两个都关（与真 CC 一致）；钉了 anthropic-skills:pdf=on 的只关个人那个；手写裸名 docx 落在同步那一行", () => {
+    expect(view({ pdf: "off" })).toEqual([["anthropic-skills:docx", "on"], ["anthropic-skills:pdf", "off"], ["pdf", "off"]]);
+    expect(view({ pdf: "off", "anthropic-skills:pdf": "on" })).toEqual([["anthropic-skills:docx", "on"], ["anthropic-skills:pdf", "on"], ["pdf", "off"]]);
+    expect(view({ docx: "off" })).toEqual([["anthropic-skills:docx", "off"], ["anthropic-skills:pdf", "on"], ["pdf", "on"]]);
+    expect(view({ gone: "on" }).map(([n]) => n)).not.toContain("gone"); // 钉住用的 on 不成「已不存在」行
   });
-  test("手写的裸名 docx=off 显示在同步技能那一行，不再多出一行「已不存在」；裸名 pdf 仍归个人技能", () => {
-    const v = agentSkillView("claude-code", lib, { cwd: null, overrides: { docx: "off", pdf: "off" }, piEnv: {} });
-    expect(v.rows.map((r) => [r.name, r.scope, r.state])).toEqual([
-      ["anthropic-skills:docx", "synced", "off"],
-      ["anthropic-skills:pdf", "synced", "on"],
-      ["pdf", "personal", "off"],
-    ]);
+  test("写入：关个人 pdf 时把同步 pdf 钉在 on；开回来就拿掉钉子", () => {
+    expect(run(["pdf", "off"])).toEqual({ pdf: "off", "anthropic-skills:pdf": "on" });
+    expect(run(["pdf", "off"], ["pdf", "on"])).toEqual({});
   });
-  test("全局 / 项目设置里的开关标在对应行上（含别名）", () => {
+  test("写入：同步 pdf 只写全名键；个人 pdf 关着时把同步 pdf 开回来要显式 on（不删个人的裸键）", () => {
+    expect(run(["anthropic-skills:pdf", "off"])).toEqual({ "anthropic-skills:pdf": "off" });
+    expect(run(["anthropic-skills:pdf", "off"], ["pdf", "off"])).toEqual({ "anthropic-skills:pdf": "off", pdf: "off" });
+    expect(run(["anthropic-skills:pdf", "off"], ["pdf", "off"], ["anthropic-skills:pdf", "on"])).toEqual({ "anthropic-skills:pdf": "on", pdf: "off" });
+    expect(run(["pdf", "off"], ["anthropic-skills:pdf", "off"], ["pdf", "on"])).toEqual({ "anthropic-skills:pdf": "off" });
+  });
+  test("每一步之后视图都和界面上点的一致", () => {
+    const cases: Step[][] = [[["pdf", "off"]], [["anthropic-skills:pdf", "name-only"], ["pdf", "off"]], [["pdf", "off"], ["anthropic-skills:pdf", "off"], ["anthropic-skills:pdf", "on"]]];
+    for (const steps of cases) {
+      const want = new Map<string, string>([["anthropic-skills:docx", "on"], ["anthropic-skills:pdf", "on"], ["pdf", "on"]]);
+      for (const [k, st] of steps) want.set(k, st);
+      expect(view(run(...steps))).toEqual([...want.entries()].sort(([a], [b]) => a.localeCompare(b)));
+    }
+  });
+  test("没有同名技能的同步技能：写全名键时把裸名旧写法一并删；CLI 手敲裸名也按同步技能写，不钉", () => {
+    expect(skillWrites("anthropic-skills:docx", "off", lib, null, { docx: "off" })).toEqual({ docx: null, "anthropic-skills:docx": "off" });
+    expect(skillWrites("docx", "off", lib, null, {})).toEqual({ docx: null, "anthropic-skills:docx": "off" });
+    expect(skillWrites("gone", "off", lib, null, {})).toEqual({ gone: "off" }); // 技能库里没有的照原样写（界面上的 missing 行）
+  });
+  test("全局 / 项目设置里的开关标在对应行上；裸键也标在同步那一行（CC 会连带用它）", () => {
     const v = agentSkillView("claude-code", lib, {
       cwd: null, overrides: {}, piEnv: {},
       outside: [{ source: "user", overrides: { docx: "off" } }, { source: "local", overrides: { pdf: "name-only" } }],
     });
     expect(v.rows.find((r) => r.name === "anthropic-skills:docx")?.outside).toEqual([{ source: "user", key: "docx", state: "off" }]);
     expect(v.rows.find((r) => r.name === "pdf")?.outside).toEqual([{ source: "local", key: "pdf", state: "name-only" }]);
-    expect(v.rows.find((r) => r.name === "anthropic-skills:pdf")?.outside).toBeUndefined();
+    expect(v.rows.find((r) => r.name === "anthropic-skills:pdf")?.outside).toEqual([{ source: "local", key: "pdf", state: "name-only" }]);
   });
 });
 

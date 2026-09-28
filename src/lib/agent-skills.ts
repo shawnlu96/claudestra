@@ -51,33 +51,54 @@ const visibleTo = (s: LibrarySkill, rt: AgentRuntime, cwd: string | null) =>
 
 const SYNCED_PREFIX = "anthropic-skills:";
 
-/**
- * 同步技能的别名键：CC 对 `anthropic-skills:docx` 和裸名 `docx` 都认（附录 C2 实测）。只有没有同名的个人 / 项目 / 插件技能时
- * 裸名才算它的别名；有同名的，裸名归那个技能，不能拿来算、也不能顺手删。
+/*
+ * CC 怎么查一个技能的档位（2.1.283 读码 + 实测，docs 02-03 附录 C2）：先按全名查键，查到任何值（含 "on"）就停；查不到再按裸名查。
+ * 同步技能全名 `anthropic-skills:x`、裸名 x；个人 / 项目技能全名就是 x。所以裸键 x 会同时关掉个人 / 项目 x 和同步 x，
+ * 想只关前者，得给同步 x 显式钉一个 `anthropic-skills:x: "on"`（它在 CC /skills 菜单里会显示 locked by flag，只在要钉时写）。
  */
-export function syncedAliases(skill: string, skills: LibrarySkill[], cwd: string | null): string[] {
-  if (!skill.startsWith(SYNCED_PREFIX)) return [];
-  const bare = skill.slice(SYNCED_PREFIX.length);
-  return skills.some((s) => visibleTo(s, "claude-code", cwd) && s.scope !== "synced" && s.name === bare) ? [] : [bare];
+const visibleClaude = (skills: LibrarySkill[], cwd: string | null) => skills.filter((s) => visibleTo(s, "claude-code", cwd) && !s.shadowedBy);
+const hasNamesake = (bare: string, visible: LibrarySkill[]) => visible.some((s) => s.scope !== "synced" && s.name === bare);
+
+/** 界面上改一行 → 要写的键（null = 删键）。纯函数，manager skill-toggle 用；table 是这个 agent 现在的表（含钉住的 "on"） */
+export function skillWrites(
+  skill: string, state: SkillState, skills: LibrarySkill[], cwd: string | null, table: Record<string, SkillState>,
+): Record<string, SkillState | null> {
+  const visible = visibleClaude(skills, cwd);
+  if (skill.startsWith(SYNCED_PREFIX)) {
+    const bare = skill.slice(SYNCED_PREFIX.length);
+    // 没有同名技能：裸键是它自己的旧写法，一并删；有：裸键归那个技能，它关着时这边要开就得钉住
+    if (!hasNamesake(bare, visible)) return { [bare]: null, [skill]: state === "on" ? null : state };
+    return { [skill]: state !== "on" ? state : table[bare] && table[bare] !== "on" ? "on" : null };
+  }
+  const twin = SYNCED_PREFIX + skill;
+  const twinVisible = visible.some((s) => s.scope === "synced" && s.name === twin);
+  if (twinVisible && !hasNamesake(skill, visible)) return skillWrites(twin, state, skills, cwd, table); // 裸名只指同步那个（CLI 手敲）
+  const out: Record<string, SkillState | null> = { [skill]: state === "on" ? null : state };
+  if (twinVisible) {
+    if (state !== "on" && table[twin] === undefined) out[twin] = "on"; // 同步的那个界面上开着：钉住，别被裸键连带关掉
+    if (state === "on" && table[twin] === "on") out[twin] = null; // 不用再钉
+  }
+  return out;
 }
 
 const outsideOf = (keys: string[], outside: OutsideOverrides) =>
   outside.flatMap((o) => keys.filter((k) => k in o.overrides).map((k) => ({ source: o.source, key: k, state: o.overrides[k] })));
 
-/** Claude Code：被同名盖过的不列（CC 只认赢家）；overrides 里技能库找不到、也不是别名的补一行 missing */
-function claudeSkillRows(skills: LibrarySkill[], cwd: string | null, overrides: Record<string, SkillState>, outside: OutsideOverrides): AgentSkillRow[] {
+/** Claude Code：被同名盖过的不列（CC 只认赢家）；档位按 CC 的查法算；表里技能库找不到的非 on 键补一行 missing */
+function claudeSkillRows(skills: LibrarySkill[], cwd: string | null, table: Record<string, SkillState>, outside: OutsideOverrides): AgentSkillRow[] {
   const consumed = new Set<string>();
-  const rows = skills
-    .filter((s) => visibleTo(s, "claude-code", cwd) && !s.shadowedBy)
-    .map((s) => {
-      const keys = [s.name, ...syncedAliases(s.name, skills, cwd)];
-      keys.forEach((k) => consumed.add(k));
-      const hit = keys.find((k) => overrides[k]);
-      const out = outsideOf(keys, outside);
-      return { ...row(s, hit ? overrides[hit] : "on"), ...(out.length ? { outside: out } : {}) };
-    });
-  for (const [name, state] of Object.entries(overrides)) {
-    if (consumed.has(name)) continue;
+  const visible = visibleClaude(skills, cwd);
+  const rows = visible.map((s) => {
+    const bare = s.scope === "synced" && s.name.startsWith(SYNCED_PREFIX) ? s.name.slice(SYNCED_PREFIX.length) : null;
+    const keys = bare === null ? [s.name] : [s.name, bare]; // 同步技能的裸键不管归谁，CC 都会连带用到它
+    consumed.add(s.name);
+    if (bare !== null && !hasNamesake(bare, visible)) consumed.add(bare);
+    const state = table[s.name] ?? (bare === null ? undefined : table[bare]) ?? "on";
+    const out = outsideOf(keys, outside);
+    return { ...row(s, state), ...(out.length ? { outside: out } : {}) };
+  });
+  for (const [name, state] of Object.entries(table)) {
+    if (consumed.has(name) || state === "on") continue;
     rows.push({ name, description: "", scope: "missing", dir: null, state, userInvocable: true, modelInvocable: true });
   }
   return rows.sort(byName);

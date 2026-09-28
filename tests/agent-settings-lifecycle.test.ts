@@ -5,7 +5,7 @@
 import { describe, expect, test } from "bun:test";
 import { existsSync, readFileSync } from "node:fs";
 import { makeWorld } from "./resumable-world";
-import { agentSettingsPath, removeAgentSettings, setSkillOverride } from "../src/lib/agent-settings";
+import { agentSettingsPath, releaseNameForFreshAgent, removeAgentSettings, setSkillOverride } from "../src/lib/agent-settings";
 import { abandonCreate, beginCreate, commitCreate, newCreateRun, recordCreate } from "../src/manager/create-guard";
 import { runKill, runRemove } from "../src/manager/agent-kill";
 import { runRename } from "../src/manager/agent-rename";
@@ -94,6 +94,40 @@ describe("rename 做到一半被砍、新进程补跑（resumable-world 的 cras
     expect(r).toMatchObject({ ok: true, resumed: true });
     expect(overridesOf("agent-a")).toEqual({ save: "off" });
     expect(has("agent-b")).toBe(false);
+  });
+});
+
+describe("rename 砍断后、补跑之前有人插进来（adv3 P2-2）", () => {
+  const cutAfterRegistry = async () => {
+    clear("agent-a", "agent-b");
+    await setSkillOverride("agent-a", "pdf", "off");
+    // 已停止的 agent 改名（没有窗口：窗口还在的话同名 create 会被拒）
+    const w = makeWorld({ reg: { socket: "s", agents: { "agent-a": { ...LIVE, status: "stopped" } } }, channels: new Set(["ch1"]) });
+    w.crashAfter("save#1");
+    await expect(runRename("a", "b", w.deps)).rejects.toThrow();
+    w.restart();
+    return w;
+  };
+  test("同名 create 提交：旧名的文件是改名那位的，替它挪到新名，不删；之后补跑（旧名被占）也不动", async () => {
+    const w = await cutAfterRegistry();
+    const run = newCreateRun();
+    expect((await beginCreate("agent-a", "a", { project: "/p", purpose: "new", cwd: "/p" }, w.deps, run)).ok).toBe(true);
+    const ch = w.createChannel("agent-a");
+    await recordCreate("agent-a", { channelId: ch }, w.deps, run);
+    expect(await commitCreate("agent-a", { ...LIVE, channelId: ch }, w.deps, run)).toBe("ok");
+    expect(has("agent-a")).toBe(false); // 新 agent 不继承
+    expect(overridesOf("agent-b")).toEqual({ pdf: "off" });
+    expect(await runRename("a", "b", w.deps)).toMatchObject({ ok: true, resumed: true });
+    expect(has("agent-a")).toBe(false);
+    expect(overridesOf("agent-b")).toEqual({ pdf: "off" });
+  });
+  test("没有 rename 在补跑时照旧删同名旧文件", () => {
+    clear("agent-a", "agent-b");
+    return setSkillOverride("agent-a", "pdf", "off").then(() => {
+      releaseNameForFreshAgent("agent-a", { "agent-b": { pending: { op: "kill" } }, "agent-a": {} });
+      expect(has("agent-a")).toBe(false);
+      expect(has("agent-b")).toBe(false);
+    });
   });
 });
 
