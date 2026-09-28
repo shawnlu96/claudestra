@@ -8,7 +8,7 @@ import { controlFor } from "../lib/runtimes/index.js";
 import { interruptWindow } from "../lib/runtimes/window-ops.js";
 import { emitEvent } from "./event-bus.js";
 import { extensionAbort, setAbortCapable } from "./pi-abort.js";
-export { onAbortAck, setExtensionSocket } from "./pi-abort.js"; // bridge.ts 只从这里接打断相关的线
+export { onAbortAck, setExtensionSocket, stopAfterAbort } from "./pi-abort.js"; // bridge.ts 只从这里接打断相关的线
 import { probeTurnAt, resolveTurnWindow } from "./turn-probe.js";
 import { turnCuts } from "./turn-cuts.js";
 

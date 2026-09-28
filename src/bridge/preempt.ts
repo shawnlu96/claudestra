@@ -62,18 +62,20 @@ export async function preemptForHuman(env: Envelope, channelId: string, agent: s
 }
 
 /**
- * 手动停止（Discord ⚡ 按钮 / /interrupt / API）：按运行时发键，真发出了就记一条「停」类 cut（不提醒续做）、
+ * 手动停止（Discord ⚡ 按钮 / /interrupt / API）：按运行时发键，owner 按的记一条「停」类 cut（不提醒续做、Autopilot 等 owner 再开口）、
  * 记指标、停 typing，并把回合状态收尾成 done——被打断的 CC 回合不发 Stop hook，不收尾的话 web 黄点常驻、busy 补锁复活。
+ * 非 owner（外源 / peer 的 API token）按的照样打断，但不记成 owner 的「停」：不挂起 Autopilot、不清续做链（wf2 stop-semantics-2）。
  * 发键出错原样抛给调用方回报；keys 为空 = 空闲 / 刚按过一次停，调用方各自回执。刚自动抢占过就等够最小间隔再发，不丢这次停。
  */
 export async function manualInterrupt(
-  channelId: string, win: string, runtime: string | undefined, agent: string, trigger: "button" | "slash" | "api",
+  channelId: string, win: string, runtime: string | undefined, agent: string, trigger: "button" | "slash" | "api", by: { owner: boolean; name?: string } = { owner: true },
 ): Promise<{ keys: readonly string[]; deduped?: true }> {
   const tools = toolsAt(agent, runtime);
   const r = await interruptGate.manual(channelId, win, runtime);
   if (r.deduped) return r; // 刚按过一次停：那一次已经记过、收过尾
-  // 空闲也记：人按了停，续做提醒和 Autopilot 都该停下
-  turnCuts.record({ channelId, agent, runtime, cause: "manual", tools: r.keys.length ? tools : { inflight: [] }, interrupted: r.keys.length > 0 });
+  // 空闲也记：owner 按了停，续做提醒和 Autopilot 都该停下
+  if (by.owner) turnCuts.record({ channelId, agent, runtime, cause: "manual", byName: by.name, tools: r.keys.length ? tools : { inflight: [] }, interrupted: r.keys.length > 0 });
+  else console.log(`⏹ ${by.name ?? "非 owner"} 按停止打断了 ${agent}：不记成 owner 的「停」`);
   if (r.keys.length) recordMetric("agent_interrupt", { channelId, agent, meta: { trigger } });
   stopTyping(channelId);
   clearSafetyTimer(channelId);
@@ -83,18 +85,19 @@ export async function manualInterrupt(
 }
 
 /** 按 agent 名手动打断（API 端点）：大总管（"master" / "0"）不在 registry 的普通条目里，按 Claude Code 的 master:0 处理 */
-export async function interruptAgentByName(name: string, channelId: string): Promise<{ keys: readonly string[]; deduped?: true }> {
+export async function interruptAgentByName(name: string, channelId: string, by?: { owner: boolean; name?: string }): Promise<{ keys: readonly string[]; deduped?: true }> {
   const isMaster = name === "master" || name === "0";
   const regs = isMaster ? [] : await readRegistryAgents().catch(() => []); // 读不到就按 CC 的打断键发：人要停，宁可发
   const runtime = regs.find((a) => a.name === name)?.runtime;
-  return manualInterrupt(channelId, agentWindow(name), runtime, isMaster ? "master" : name, "api");
+  return manualInterrupt(channelId, agentWindow(name), runtime, isMaster ? "master" : name, "api", by);
 }
 
 /**
  * Codex 的 Interrupt hook（typing-hook 报成 StopFailure + interrupt，Esc 后约 0.5 秒到）：bridge 刚发过键的是回声，抢占那边会记；
- * 否则是有人在终端里自己按了 Esc——记一条「停」类 cut，只留档不提醒。
+ * 别的进程发的键（manager 重启清场的 C-c、tmux-send-keys）也不算；否则是有人在终端里自己按了 Esc——记一条「停」类 cut，只留档不提醒。
  */
-export function onCodexInterrupt(channelId: string, agent: string): void {
-  if (turnCuts.keySentWithin(channelId, Date.now())) return;
+export async function onCodexInterrupt(channelId: string, agent: string): Promise<void> {
+  const now = Date.now();
+  if (turnCuts.keySentWithin(channelId, now) || (await turnCuts.programKeyNear(agent, now))) return;
   turnCuts.record({ channelId, agent, runtime: "codex", cause: "codex_interrupt", tools: toolsAt(agent, "codex") });
 }

@@ -151,7 +151,7 @@ export function projectView(db: Database, project: string, now: number): Project
   }
   // ask 族事件不进项目级列表（isAskEvent 同一口径）：25 条没挂任务的 ask 就能把这 20 条挤满
   const recent = db
-    .query(`SELECT * FROM events WHERE project = ? AND target = '' AND kind NOT IN ('ask', 'ask_expire', 'ask_cancel')
+    .query(`SELECT * FROM events WHERE project = ? AND target = '' AND kind NOT IN ('ask', 'ask_expire', 'ask_cancel', 'ask_reopen')
       AND NOT (kind = 'decision' AND json_extract(data, '$.askId') IS NOT NULL) ORDER BY seq DESC LIMIT ?`)
     .all(project, PROJECT_EVENTS_LIMIT) as Record<string, unknown>[];
   return {

@@ -4,6 +4,7 @@
  */
 import { describe, expect, test } from "bun:test";
 import { unwrapChannelMessage } from "../src/lib/session-history.js";
+import { inputHash } from "../src/lib/program-input.js";
 import { isHumanRequest, type Envelope } from "../src/bridge/router.js";
 import {
   completedOnlyFrom, settleBy, CUT_TTL_MS, inflightFrom, resumeBy, lateInflight, makeCut, onStop, preemptHeadline, resumeNotice, stopHeadline, withInterruptNote,
@@ -275,9 +276,15 @@ describe("transcriptUserEvent：会话记录里的 user 记录（打断标记 / 
     expect(transcriptUserEvent({ message: { content: "[Request interrupted by user]" } })).toEqual({ type: "turn_interrupted", data: {} });
   });
   test("终端里敲的真实输入 → terminal_input；敲的是停字 → stop", () => {
-    expect(transcriptUserEvent(txt("把 X 也改了", { origin: { kind: "human" }, promptSource: "typed" }))).toEqual({ type: "terminal_input", data: { stop: false }, transient: true });
-    expect(transcriptUserEvent({ message: { content: "2" } })).toEqual({ type: "terminal_input", data: { stop: false }, transient: true }); // 老版本没有 origin
-    expect(transcriptUserEvent(txt("停", { origin: { kind: "human" } }))).toEqual({ type: "terminal_input", data: { stop: true }, transient: true });
+    expect(transcriptUserEvent(txt("把 X 也改了", { origin: { kind: "human" }, promptSource: "typed" }))).toMatchObject({ type: "terminal_input", data: { stop: false }, transient: true });
+    expect(transcriptUserEvent({ message: { content: "2" } })).toMatchObject({ type: "terminal_input", data: { stop: false }, transient: true }); // 老版本没有 origin
+    expect(transcriptUserEvent(txt("停", { origin: { kind: "human" } }))).toMatchObject({ type: "terminal_input", data: { stop: true }, transient: true });
+  });
+  test("带正文指纹（对程序敲过的字）；以 / 开头但不是斜杠命令的路径照样算（wf2 stop-semantics-3）", () => {
+    expect(transcriptUserEvent(txt("把 X 也改了"))?.data.h).toBe(inputHash("把 X 也改了"));
+    expect(transcriptUserEvent(txt("/Users/x/a.log 这个报错看下"))?.type).toBe("terminal_input");
+    expect(transcriptUserEvent(txt("/model opus"))).toBeNull();
+    expect(transcriptUserEvent(txt("/clear"))).toBeNull();
   });
   test("排除：channel 注入、后台通知、自动续跑、compact 续写、meta、斜杠命令、<标签> 系统文本、工具结果", () => {
     const no = [
@@ -298,7 +305,7 @@ describe("transcriptUserEvent：会话记录里的 user 记录（打断标记 / 
   test("只认 Claude Code：Pi / Codex 的会话记录里 bridge 投进去的消息分不出是不是终端里敲的", () => {
     expect(transcriptUserEvent(txt("[🌐 guest] 部署 Y"), "pi")).toBeNull();
     expect(transcriptUserEvent(txt("hi"), "codex")).toBeNull();
-    expect(transcriptUserEvent(txt("hi"), "claude-code")).toEqual({ type: "terminal_input", data: { stop: false }, transient: true });
+    expect(transcriptUserEvent(txt("hi"), "claude-code")).toMatchObject({ type: "terminal_input", data: { stop: false }, transient: true });
     expect(transcriptUserEvent(txt("[Request interrupted by user]"), "pi")).toEqual({ type: "turn_interrupted", data: {} });
   });
 });

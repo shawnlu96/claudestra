@@ -56,5 +56,7 @@ export function createEscGuard(deps: EscGuardDeps) {
   }
   /** 这个窗口最后一次经这里发完 Esc 的时刻（跨进程；没发过 = 0）：认出会话记录里的打断是不是程序发的键 */
   sendEscape.lastSentAt = async (target: string): Promise<number> => lastAt(await keyOf(target));
+  /** 窗口的钥匙（tmux #{window_id}，解析不出退回 windowKey）：别的「按窗口跨进程记」的东西也用它（lib/program-input.ts） */
+  sendEscape.keyOf = keyOf;
   return sendEscape;
 }

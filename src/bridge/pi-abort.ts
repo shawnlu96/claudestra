@@ -1,12 +1,13 @@
 /**
  * Pi 的「停」：Pi 的 C-c 只清空输入框，真正的中止在 Claudestra 扩展里（src/pi/abort-control.ts）。bridge 经 ws 发 {type:"abort", id}，
  * 扩展回 {type:"abort_ack", id, result, voided}。voided = 停之前 steer 进去、还没执行就作废的消息（message_id）：
- * 这里逐条告诉发送方「没执行、要的话请重发」——人发的在这个 agent 的频道（Discord + 网页）里说一声，agent 发的回到它自己那里。
+ * 这里逐条告诉发送方「没执行、要的话请重发」——各回到它自己的回信地址（Discord 人回他发消息的频道、API / 网页 / peer 回它的 api 地址、
+ * agent 回它自己），和 agent 回复它们走同一条路（镜像开关、peer 的等待都照旧）。
  * 扩展在注册帧里声明 abort:true 才发（老扩展收到会默默忽略）；gate 接线在 bridge/interrupt-gate.ts。
  */
 import type { ServerWebSocket } from "bun";
 import { emitEvent } from "./event-bus.js";
-import { newMessageId, newThreadId, type Envelope } from "./router.js";
+import { newMessageId, newThreadId, type Endpoint, type Envelope } from "./router.js";
 import { turnCuts } from "./turn-cuts.js";
 import type { TurnTrigger } from "../lib/turn-cuts.js";
 
@@ -33,23 +34,43 @@ export function setAbortCapable(channelId: string, on: boolean): void {
 
 /** 扩展的中止回执要等多久：它同步调 abort()，正常几毫秒就回；等不到就如实写「已请求、没回执」 */
 const ABORT_ACK_MS = 1_500;
+/** 等超时之后还认多久迟到的回执：抬头已经发出去了，作废的消息照样要告诉发送方 */
+const LATE_ACK_MS = 60_000;
 type AbortResult = "aborted" | "idle" | "no_ack";
-const abortWaiters = new Map<string, { channelId: string; done: (r: AbortResult) => void }>();
+/** done 在等到回执或超时后清掉：超时之后到的回执只补回显 */
+type Waiter = { channelId: string; done?: (r: AbortResult) => void };
+const abortWaiters = new Map<string, Waiter>();
 const lastAbort = new Map<string, { result: AbortResult; inEditor: number }>();
+/** 频道 → 发出中止的时刻：之后第一次 Stop 是叫停的回声（见 stopAfterAbort） */
+const abortedAt = new Map<string, number>();
+const ABORT_STOP_MS = 120_000;
 
-export function onAbortAck(msg: { id?: unknown; result?: unknown; voided?: unknown; inEditor?: unknown }): void {
+/** 扩展的中止回执。from = 发来回执的连接：只认这个频道当前的连接（别的连接对上 id 也不算） */
+export function onAbortAck(msg: { id?: unknown; result?: unknown; voided?: unknown; inEditor?: unknown }, from: Socket): void {
   const w = abortWaiters.get(String(msg.id));
-  if (!w) return;
+  if (!w || socketOf(w.channelId) !== from) return;
   abortWaiters.delete(String(msg.id));
-  const ids = Array.isArray(msg.voided) ? msg.voided.filter((x): x is string => typeof x === "string") : [];
+  const done = w.done;
+  w.done = undefined;
+  const ids = Array.isArray(msg.voided) ? [...new Set(msg.voided.filter((x): x is string => typeof x === "string"))] : [];
   // 先回显再放行：放行之后停字那条会 record() 一条 cut、清掉「这一回合送到了哪些」，就查不到发送方了
   if (ids.length) echoVoided(w.channelId, ids);
+  if (!done) return; // 迟到的回执：只补回显
   lastAbort.set(w.channelId, { result: msg.result === "aborted" ? "aborted" : "idle", inEditor: Number(msg.inEditor) || 0 });
-  w.done(msg.result === "aborted" ? "aborted" : "idle");
+  done(msg.result === "aborted" ? "aborted" : "idle");
 }
 
 /** 这个频道最近一次请 Pi 扩展中止的结果（停字抬头照实写：真停了 / 已请求没回执；inEditor = 作废的消息里几条被 Pi 退回了输入框） */
 export const lastAbortResult = (channelId: string): { result: AbortResult; inEditor: number } | undefined => lastAbort.get(channelId);
+
+/**
+ * Pi 的 Stop 到了：是不是叫停之后的第一次（取一次就清）。是的话 bridge 不做补 reply 拦截——叫停后 Pi 马上 settle 报 Stop，
+ * 拦截会注入提醒再开一轮，等于 bridge 自己把刚停住的 Pi 拉起来（wf2 pi-1）。按 bridge 发出中止算，老扩展也兜得住。
+ */
+export function stopAfterAbort(channelId: string, now = Date.now()): boolean {
+  const at = abortedAt.get(channelId);
+  return abortedAt.delete(channelId) && at !== undefined && now - at < ABORT_STOP_MS;
+}
 
 /** 请 Pi 扩展中止当前回合：真中止了 / 没回执 = ["abort"]，本来就空闲 = []；没连着、扩展太旧不会中止 = 抛错（调用方如实回报，不说「已打断」） */
 export async function extensionAbort(channelId: string): Promise<readonly string[]> {
@@ -57,45 +78,63 @@ export async function extensionAbort(channelId: string): Promise<readonly string
   if (!ws) throw new Error("Pi 会话没连着 bridge，中止请求发不过去");
   if (!abortCapable.has(channelId)) throw new Error("这个 Pi 会话的 Claudestra 扩展太旧、不会中止（重启这个 agent 换上新扩展）");
   const id = `abort_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  abortedAt.set(channelId, Date.now()); // 发之前记：回执和 Stop 几毫秒内先后到
   const r = await new Promise<AbortResult>((resolve) => {
-    abortWaiters.set(id, { channelId, done: resolve });
-    setTimeout(() => abortWaiters.delete(id) && resolve("no_ack"), ABORT_ACK_MS);
+    const w: Waiter = { channelId, done: resolve };
+    abortWaiters.set(id, w);
+    setTimeout(() => {
+      if (!w.done) return;
+      w.done = undefined;
+      resolve("no_ack");
+      setTimeout(() => abortWaiters.get(id) === w && abortWaiters.delete(id), LATE_ACK_MS);
+    }, ABORT_ACK_MS);
     ws.send(JSON.stringify({ type: "abort", id }));
   });
+  if (r === "idle") abortedAt.delete(channelId);
   if (r === "no_ack") lastAbort.set(channelId, { result: r, inEditor: 0 });
   return r === "idle" ? [] : ["abort"];
 }
 
 const clip = (s: string, n = 60) => (s.length > n ? `${s.slice(0, n)}…` : s).replace(/\s+/g, " ");
 
-/** 作废消息的回显文案（单测 tests/pi-abort-control.test.ts） */
-export function voidedNotice(agent: string, trigs: readonly TurnTrigger[], toAgent: boolean): string {
-  const list = trigs.map((t) => `${toAgent ? "" : `${t.fromName}：`}「${clip(t.excerpt)}」`).join("、");
-  return toAgent
+/** 作废回显的文案（单测 tests/pi-abort-control.test.ts）。toSender = 直接对发送方说（API / peer / agent），否则是在频道里说给人看 */
+export function voidedNotice(agent: string, trigs: readonly TurnTrigger[], toSender: boolean): string {
+  const list = trigs.map((t) => `${toSender ? "" : `${t.fromName}：`}「${clip(t.excerpt)}」`).join("、");
+  return toSender
     ? `[⏹ bridge] 你发给 ${agent} 的${list}在它被叫停之前送到、还没执行，已作废，不会执行。还要的话请重发。`
     : `[⏹ bridge] ${agent} 被叫停之前送到、还没执行的消息已作废，不会执行：${list}。还要的话请重发。`;
 }
 
+/** 一条作废消息的回显发到哪：它自己的回信地址。bridge 自己的通知不回显（null） */
+export function voidedEchoTo(t: TurnTrigger): { kind: "user" | "api" | "local"; address: string } | null {
+  if (t.fromKind === "user" && t.replyTo) return { kind: "user", address: t.replyTo };
+  if (t.fromKind === "api" && t.replyTo.startsWith("api:")) return { kind: "api", address: t.replyTo.slice(4) };
+  if (t.fromKind === "local" && t.replyTo) return { kind: "local", address: t.replyTo };
+  return null;
+}
+
 function echoVoided(channelId: string, ids: readonly string[]): void {
-  const found = ids.map((id) => turnCuts.deliveredMessage(channelId, id));
-  const trigs = found.filter((t): t is TurnTrigger => !!t);
-  if (!echo || !trigs.length) return;
-  const agent = found.find((t) => t?.agent)?.agent ?? "这个 agent";
-  const base = { from: { kind: "bridge" as const, label: "pi-abort" }, intent: "notification" as const };
-  const meta = () => ({ messageId: newMessageId("voided"), triggerKind: "bridge_synth" as const, ts: new Date().toISOString(), threadId: newThreadId() });
-  const humans = trigs.filter((t) => t.fromKind === "user" || t.fromKind === "api");
-  if (humans.length) {
-    const text = voidedNotice(agent, humans, false);
-    void echo.deliver({ ...base, to: { kind: "user", userId: echo.ownerId(), channelId }, content: text, meta: meta() })
-      .catch((e: Error) => console.error(`⚠️ 作废回显发到 Discord 失败（网页照样看得到）: ${e.message}`));
-    emitEvent({ agent, chatId: channelId, type: "chat_message", data: { direction: "out", from: "bridge", text, notice: true } });
-  }
-  for (const t of trigs.filter((x) => x.fromKind === "local")) {
-    const ws = socketOf(t.replyTo);
-    if (!ws) continue; // 发送方 agent 不在线：没法告诉它，它的消息反正没执行
-    const to = { kind: "local" as const, channelId: t.replyTo, agentName: t.fromName, ws: ws as ServerWebSocket<unknown> };
-    void echo.deliver({ ...base, to, content: voidedNotice(agent, [t], true), meta: { ...meta(), waitForIdle: true } })
+  const found = ids.map((id) => turnCuts.deliveredMessage(channelId, id)).filter((t): t is NonNullable<typeof t> => !!t);
+  if (!echo || !found.length) return;
+  const d = echo;
+  const agent = found.find((t) => t.agent)?.agent ?? "这个 agent";
+  let sent = 0;
+  for (const t of found) {
+    const dest = voidedEchoTo(t);
+    let to: Endpoint | undefined;
+    if (dest?.kind === "user") to = { kind: "user", userId: d.ownerId(), channelId: dest.address };
+    if (dest?.kind === "api") to = { kind: "api", tokenId: dest.address, name: t.fromName };
+    const ws = dest?.kind === "local" ? socketOf(dest.address) : undefined;
+    if (ws) to = { kind: "local", channelId: dest!.address, agentName: t.fromName, ws: ws as ServerWebSocket<unknown> };
+    if (!to) continue; // bridge 自己的通知、发送方 agent 不在线：没法告诉它，它的消息反正没执行
+    const text = voidedNotice(agent, [t], to.kind !== "user");
+    // response + inReplyTo：那条请求就此了结（不再算「还没回复」、API / peer 的等待拿到这句）；API 回程按 agent 频道认，from 记成这个 agent
+    const from: Endpoint = to.kind === "api" ? { kind: "local", channelId, agentName: agent, ws: socketOf(channelId) as ServerWebSocket<unknown> } : { kind: "bridge", label: "pi-abort" };
+    const meta = { messageId: newMessageId("voided"), triggerKind: "bridge_synth" as const, ts: new Date().toISOString(), threadId: newThreadId(), inReplyTo: t.messageId };
+    void d.deliver({ from, to, intent: "response", content: text, meta: to.kind === "local" ? { ...meta, waitForIdle: true } : meta })
       .catch((e: Error) => console.error(`⚠️ 作废回显发给 ${t.fromName} 失败: ${e.message}`));
+    if (to.kind === "user") emitEvent({ agent, chatId: to.channelId, type: "chat_message", data: { direction: "out", from: "bridge", text, notice: true } });
+    sent++;
   }
-  console.log(`⏹ ${agent}：停之前 steer 进去、还没执行的 ${trigs.length} 条已作废并告诉发送方`);
+  console.log(`⏹ ${agent}：停之前 steer 进去、还没执行的 ${found.length} 条已作废，告诉了发送方 ${sent} 条${sent < found.length ? `（${found.length - sent} 条没法告诉：bridge 通知 / 发送方不在线）` : ""}`);
 }

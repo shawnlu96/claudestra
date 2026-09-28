@@ -176,7 +176,7 @@ import { statePath } from "./lib/paths.js";
 import { controlFor, managedFor } from "./lib/runtimes/index.js";
 import { stopNeedsPaneRecheck } from "./lib/runtimes/window-ops.js";
 import { onCodexInterrupt, preemptForHuman } from "./bridge/preempt.js";
-import { noteRuntimeCaps, onAbortAck, setExtensionSocket } from "./bridge/interrupt-gate.js";
+import { noteRuntimeCaps, onAbortAck, setExtensionSocket, stopAfterAbort } from "./bridge/interrupt-gate.js";
 import { isCutNotice, turnCuts } from "./bridge/turn-cuts.js";
 import { withInterruptNote } from "./lib/turn-cuts.js";
 import { createKeyedSerial } from "./lib/keyed-serial.js";
@@ -429,6 +429,7 @@ function flushHeldLocalMsgs(channelId: string, reason: string): Promise<void> {
   return flushHeld({
     held: heldLocalMsgs, compacting: (a) => getAgentStatus(a) === "compacting", working: localAgentWorking, isHumanRequest,
     client: (c) => clients.get(c), deliver: deliverLocalInOrder, touch: (c, env) => pendingAgentCalls.touch(c, env.from.kind === "local" ? env.from.channelId : undefined),
+    stoppedAt: (c) => turnCuts.stoppedAt(c),
   }, channelId, reason);
 }
 
@@ -541,7 +542,7 @@ import type {
 } from "./bridge/router.js";
 import { endpointLabel, envelopeLabel, inboundBodyForLocal, isHumanRequest, newMessageId, newThreadId, parseChatId } from "./bridge/router.js";
 import { ageHeld, heldNoticeText, HeldQueue, unseenFrom } from "./bridge/held-queue.js";
-import { flushHeld } from "./bridge/held-flush.js";
+import { dropHeldOnKill, flushHeld } from "./bridge/held-flush.js";
 import { probeTurn } from "./bridge/turn-probe.js";
 import { agentMsgMustWait } from "./lib/turn-state.js";
 import { AgentCallBook, ambiguityNotice, type PendingAgentCall } from "./bridge/agent-calls.js";
@@ -2250,7 +2251,7 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
       break;
     }
 
-    case "abort_ack": onAbortAck(msg); break; // Pi 扩展的中止回执
+    case "abort_ack": onAbortAck(msg, ws); break; // Pi 扩展的中止回执（只认这个频道当前的连接）
     case "codex_typein_failed": if (clients.get(msg.channelId)?.ws === ws) turnCuts.rearmAfterInterrupt(msg.channelId); break; // 退回了 queue:下一条再打字
     case "forward_to_agent": ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, ...(await handleForward(ws, msg)) })); break;
     case "route_to_agent": {
@@ -2741,8 +2742,8 @@ async function handleHookRequest(req: Request): Promise<Response> {
     // v2.22.x 补 reply 拦截(owner 2026-09-07「agent 总是忘了调 reply」):这回合有
     // 投递给它却没回的请求 → 让 Claude Code 别结束,带 reason 续跑一次。必须在
     // 一切 Stop 副作用(done 事件 / 停 typing / 完成 ping / drain / 清 pending)之前
-    // 返回——回合还没完。规则见 lib/reply-nudge.ts。
-    if (event === "Stop") {
+    // 返回——回合还没完。规则见 lib/reply-nudge.ts。Pi 叫停之后的第一次 Stop 不拦：拦了等于 bridge 把刚停住的 Pi 又拉起一轮（bridge/pi-abort.ts）
+    if (event === "Stop" && !stopAfterAbort(channelId)) {
       const ws = clients.get(channelId)?.ws;
       if (ws) {
         const cands = [...pendingReplies.entries()]
@@ -2772,7 +2773,7 @@ async function handleHookRequest(req: Request): Promise<Response> {
         updateStatsDashboard(discord);
         // v2.6.0+ 事件埋点：turn 结束（在去抖/通知判断之前 —— 事件流忠实反映 hook）
         const evAgent = await agentLabelForChannelAsync(channelId);
-        if (body.interrupt) onCodexInterrupt(channelId, evAgent); // Codex 被打断(typing-hook 报成 StopFailure):先记 cut 再置 done
+        if (body.interrupt) await onCodexInterrupt(channelId, evAgent); // Codex 被打断(typing-hook 报成 StopFailure):先记 cut 再置 done
         // v2.20.2+ 回合结束≠任务完成:后台还有活(subagent/bg shell)时带上
         // bgPending,web 端把绿勾换成「后台继续中」(owner 实报提前完成误导)
         const bgPending = hasActiveBgActivities(evAgent);
@@ -3386,9 +3387,7 @@ async function handleHttpRoutes(req: Request, url: URL): Promise<Response> {
           });
         }
         const n = clearInterAgentPendingsForChannel(body.channelId) + dropPendingsForChannel(pendingReplies, pendingThreads, pendingInterAgentMsg, body.channelId);
-        // 押给它的消息(含推回给它的答复)不再有人收:丢掉并留日志,别等 24 小时,也别投给日后复用这个频道的新 agent
-        const dropped = heldLocalMsgs.get(body.channelId)?.length ?? 0;
-        if (heldLocalMsgs.delete(body.channelId)) console.log(`🧹 agent 已 kill,丢掉押给它的 ${dropped} 条消息 (channel=${body.channelId})`);
+        dropHeldOnKill(heldLocalMsgs, body.channelId); // 押给它的消息不再有人收:丢掉并留日志;owner 的 ask 答复放回「待你处理」(bridge/held-flush.ts)
         // agent 被永久 kill —— 顺手丢掉它在事件总线里的环形缓冲和回合态。
         // 那 500 条事件（含未截断的 assistant_text）不会再有人订阅，留着只是占内存，
         // 建了又删的 agent 会一路堆积。

@@ -13,7 +13,7 @@ import {
   withAttachmentLines,
   withoutAttachmentLines,
 } from "../src/lib/inbound-body.js";
-import { withInterruptNote } from "../src/lib/turn-cuts.js";
+import { heldAcrossStopNote, withInterruptNote } from "../src/lib/turn-cuts.js";
 import { withMentionDirective } from "@/lib/chat/mention-directive";
 import { restoreUserText } from "@/lib/chat/form-restore";
 import { unwrapChannelMessage } from "../src/lib/session-history.js";
@@ -210,6 +210,13 @@ describe("打断抬头 × 答复说明行 × @ 委托指令行（合 main：T13a
     const answer = "[✅ owner 回复了你 09:00 的「待你处理」（ask_1）：要合吗。下面是 owner 发的原文]\n合吧";
     expect(channelBodyText('api="true" trigger="ask_answer" interrupt_note="true"', withInterruptNote(`${head}${answer}`, note))).toBe("合吧");
     expect(channelBodyText('api="true" trigger="ask_answer"', `${head}${answer}`)).toBe("合吧");
+  });
+
+  test("押在叫停之前、之后才送到的答复（wf2 classify-merge-1）：历史照样剥掉「叫停之前」抬头和说明行，只剩 owner 原话", () => {
+    const answer = "[✅ owner 回复了你 09:00 的「待你处理」（ask_1）：要部署吗。选择：部署。下面是 owner 发的原文]\n[button:deploy]";
+    const body = withInterruptNote(answer, heldAcrossStopNote(Date.parse("2026-09-29T01:00:00Z"), Date.parse("2026-09-29T01:01:00Z")));
+    expect(body.startsWith("[⏹ 这条是叫停之前")).toBe(true);
+    expect(channelBodyText('trigger="ask_answer" interrupt_note="true"', body)).toBe("[button:deploy]");
   });
 
   test("没有 interrupt_note 属性：owner 在答复里手写的同样开头不剥，只去掉 bridge 的说明行", () => {

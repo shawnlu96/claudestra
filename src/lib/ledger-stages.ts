@@ -16,10 +16,10 @@ export type Role = (typeof ROLES)[number];
 export const ITEM_STATUSES = ["todo", "decide", "design", "doing", "done", "dropped"] as const;
 export type ItemStatus = (typeof ITEM_STATUSES)[number];
 
-/** stage / item / task / meta 由写入函数自动产生；ask / ask_expire / ask_cancel（与作答的 decision）只由 bridge 的 ledger-asks.ts 写；其余由调用方显式追加 */
+/** stage / item / task / meta 由写入函数自动产生；ask / ask_expire / ask_cancel / ask_reopen（与作答的 decision）只由 bridge 的 ledger-asks.ts 写；其余由调用方显式追加 */
 const EVENT_KINDS = [
   "stage", "item", "task", "meta", "note", "deliver", "review", "decision", "deploy", "verify", "rollback", "freeze", "unfreeze",
-  "ask", "ask_expire", "ask_cancel",
+  "ask", "ask_expire", "ask_cancel", "ask_reopen",
 ] as const;
 export type EventKind = (typeof EVENT_KINDS)[number];
 
@@ -28,7 +28,7 @@ export type EventKind = (typeof EVENT_KINDS)[number];
  * 它们不算任务的「最近一条」、也不进项目级事件列表——否则一条 ask 就能盖掉「线上验证失败」这类问题态（协作视图靠它）。
  */
 export function isAskEvent(e: { kind: string; data: Record<string, unknown> }): boolean {
-  return e.kind === "ask" || e.kind === "ask_expire" || e.kind === "ask_cancel" || (e.kind === "decision" && typeof e.data.askId === "string");
+  return e.kind === "ask" || e.kind === "ask_expire" || e.kind === "ask_cancel" || e.kind === "ask_reopen" || (e.kind === "decision" && typeof e.data.askId === "string");
 }
 
 export type ReviewVerdict = "pass" | "changes" | "block";

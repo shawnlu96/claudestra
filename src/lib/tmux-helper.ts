@@ -9,6 +9,7 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { createEscGuard } from "./esc-guard.js"; export { ESC_DOUBLE_TAP_MS } from "./esc-guard.js";
 import { acquireLock } from "./file-lock.js";
+import { readProgramInputs, recordProgramInput, type ProgramInput } from "./program-input.js";
 import { RUNTIME_DIR, TMUX_SOCK } from "./paths.js"; export { TMUX_SOCK };
 import { sandboxDisabled } from "./sandbox.js";
 import { sandboxTmuxArgv, sandboxVerifyNewWindow } from "./sandbox-tmux.js"; export { sandboxTmuxArgv };
@@ -190,6 +191,7 @@ export async function tmuxSendLine(
   if (await ensurePaneInteractive(target)) {
     console.log(`⌨️ ${target} 卡在 copy-mode,已 cancel 后注入`);
   }
+  await noteProgramInput(target, text);
   await tmuxRaw(["send-keys", "-t", target, "-l", "--", text]);
   await Bun.sleep(delayMs);
   await tmuxRaw(["send-keys", "-t", target, "Enter"]);
@@ -215,6 +217,10 @@ export const tmuxSendEscape = createEscGuard({
   sleep: (ms) => Bun.sleep(ms),
   now: () => Date.now(),
 });
+
+/** 程序敲进 agent 窗口的字 / 按键：发之前记一笔（按窗口、跨进程），bridge 据此认出会话记录里不是 owner 在终端里打的（lib/program-input.ts） */
+export const noteProgramInput = async (target: string, text = ""): Promise<void> => recordProgramInput(escFile(await tmuxSendEscape.keyOf(target), "input"), text);
+export const programInputsOf = async (target: string): Promise<ProgramInput[]> => readProgramInputs(escFile(await tmuxSendEscape.keyOf(target), "input"));
 
 /**
  * CC 2.1.x 的 Rewind 检查点对话框——**不是我们的面板，永远不要盲发 Esc**。

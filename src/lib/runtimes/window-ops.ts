@@ -7,6 +7,7 @@
 import {
   setWindowOption,
   ensurePaneInteractive,
+  noteProgramInput,
   tmuxCapture,
   tmuxRaw,
   tmuxRawStrict,
@@ -28,9 +29,11 @@ export function tmuxWindowOps(name: string, target: string = windowTarget(name))
     capture: (lines = 40) => tmuxCapture(target, lines),
     sendLine: (text) => tmuxSendLine(target, text),
     sendLiteral: async (text) => {
+      await noteProgramInput(target, text);
       await tmuxRaw(["send-keys", "-t", target, "-l", "--", text]);
     },
-    sendKey: async (key) => {
+    sendKey: async (key) => { // 清场的 C-c 等：记下是程序发的，bridge 别记成 owner 在终端里叫停
+      await noteProgramInput(target);
       await tmuxRaw(["send-keys", "-t", target, key]);
     },
     sendEscape: () => tmuxSendEscape(target),

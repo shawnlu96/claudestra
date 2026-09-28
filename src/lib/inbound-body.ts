@@ -15,12 +15,12 @@ const INBOUND_HEAD_START_RE = /^\s*\[(🌐|🤖|🤝|📢|📣)/;
 const HEAD_END_RE = /]\r?\n\r?\n/;
 
 /**
- * 打断抬头（lib/turn-cuts.ts 的 preemptHeadline / stopHeadline，放在来源头之后、正文之前）。只有 channel 属性带
+ * 打断抬头（lib/turn-cuts.ts 的 preemptHeadline / stopHeadline / heldAcrossStopNote，放在来源头之后、正文之前）。只有 channel 属性带
  * interrupt_note="true"（bridge 真加了抬头才写）时才剥：只按措辞认的话，外源 / Discord 用户自己手写一句「[⚡ 这条消息打断了你…]」
  * 就能把后面的内容从历史里藏起来，agent 却照样收到全文。Pi 裸记录没有属性，抬头留在历史里（只是多一行字）。
  */
 const NOTE_ATTR_RE = /(?:^|\s)interrupt_note="true"/;
-const INTERRUPT_NOTE_RE = /^\s*\[(⚡ 这条消息打断了你|⏹ 这是一条「停」指令)/;
+const INTERRUPT_NOTE_RE = /^\s*\[(⚡ 这条消息打断了你|⏹ 这是一条「停」指令|⏹ 这条是叫停之前)/;
 
 /** 剥掉开头那块打断抬头（没有就原样返回） */
 function stripInterruptNote(body: string): string {

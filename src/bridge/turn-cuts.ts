@@ -1,12 +1,13 @@
 /**
  * 打断记录簿（lib/turn-cuts.ts 的接线）：按频道存最近一条 cut，落盘 turn-cuts.json（bridge 重启后插话那一回合的 Stop 还能提醒）；
  * 记每个频道最后一条入站（被打断的回合在处理谁的什么）、agent 往各地址 reply 的时刻（收尾提醒列「还没回复」）、bridge 发键的时刻
- * （认出 Codex 打断回报的回声、认出人在终端里自己按的打断）、owner 叫停之后有没有再说话（记在 cut.goAt 上、跟着落盘，Autopilot 据此不推进）。
+ * （认出 Codex 打断回报的回声、认出人在终端里自己按的打断）、owner 叫停了还没再开口的频道（单独一份 turn-cuts-stops.json，Autopilot 据此不推进）。
  * 订阅 event-bus：打断后又跑了同名同内容的工具 = 那一段续上了；打断后几秒内出错收尾的工具补进 inflight；会话记录里的打断标记。
  * Codex 的「打断后 queue 卡住」相关状态也在这里（能不能打字投递、下一条要不要打字），见 lib/codex-tui-submit.ts。
  */
 import { statePath } from "../lib/paths.js";
-import { MASTER_SESSION, tmuxSendEscape, windowTarget } from "../lib/tmux-helper.js";
+import { isProgramKey, isProgramText, type ProgramInput } from "../lib/program-input.js";
+import { MASTER_SESSION, programInputsOf, tmuxSendEscape, windowTarget } from "../lib/tmux-helper.js";
 import {
   CUT_TTL_MS, lateInflight, makeCut, onStop, resumeBy, resumeNotice, settleBy,
   type Cut, type CutCause, type CutEvent, type CutTool, type ReplyState, type TurnTrigger,
@@ -15,6 +16,7 @@ import { emitEvent, inflightTools, subscribeEvents } from "./event-bus.js";
 import { PersistedMap } from "./persisted-map.js";
 import { newMessageId, newThreadId, type Envelope, type LocalEndpoint } from "./router.js";
 
+const isStopRec = (v: unknown) => !!v && typeof v === "object" && typeof (v as { at?: unknown }).at === "number";
 const isCut = (v: unknown) => !!v && typeof v === "object" && typeof (v as Cut).id === "string" && Array.isArray((v as Cut).inflight);
 /** 收尾提醒自己也是一条入站：不能被记成「被打断的回合在处理它」 */
 const CUT_NOTICE_LABEL = "turn-cuts";
@@ -38,6 +40,11 @@ export interface RecordCutInput {
 
 export class TurnCuts {
   private readonly cuts: PersistedMap<Cut>;
+  /**
+   * 频道 → owner 最近一次叫停（停字 / 停止按钮 / 终端里按的打断）：at = 叫停时刻，goAt = 之后 owner 说了不是停的话。
+   * 不跟着「最新一条 cut」走：外源消息的抢占会记一条新 cut 盖掉那条停，却不能替 owner 解除（wf2 stop-semantics-1）。落盘、不设期限
+   */
+  private readonly stops: PersistedMap<{ at: number; goAt?: number }>;
   /** 频道 → 这一回合（上次 Stop / 打断之后）送到的消息，按先后；被打断时它们就是「在处理的」 */
   private readonly inbound = new Map<string, TurnTrigger[]>();
   private readonly agentOf = new Map<string, string>();
@@ -62,10 +69,11 @@ export class TurnCuts {
 
   constructor(
     path: string | null = statePath("turn-cuts.json"), private readonly now: () => number = Date.now,
-    /** 这个 agent 的窗口最后一次经 tmuxSendEscape 发 Esc 的时刻（bridge 的取消 AUQ、wedge 救回、按键面板都走它，不算人在终端里叫停） */
-    private readonly escSentAt: (agent: string) => Promise<number> = async () => 0,
+    /** 程序往这个 agent 窗口发过的键（任何进程的 Esc、cron / manager 敲的字和 C-c，lib/program-input.ts）：它们不是人在终端里操作 */
+    private readonly programKeys: (agent: string) => Promise<ProgramInput[]> = async () => [],
   ) {
     this.cuts = new PersistedMap<Cut>(path, "打断记录", isCut, []);
+    this.stops = new PersistedMap(path && path.replace(/\.json$/, "-stops.json"), "叫停记录", isStopRec, []);
   }
 
   get(channelId: string): Cut | undefined {
@@ -112,8 +120,13 @@ export class TurnCuts {
 
   /** owner 的消息到达（抢占判断之前）：不是「停」就解除「已叫停」。外源（非 owner 的 API 用户）不调：他们不能替 owner 叫停或解除 */
   noteHuman(channelId: string, isStop: boolean): void {
-    const cut = this.cuts.get(channelId);
-    if (!isStop && cut && cut.cause !== "preempt" && cut.goAt === undefined) this.cuts.set(channelId, { ...cut, goAt: this.now() });
+    const s = this.stops.get(channelId);
+    if (!isStop && s && s.goAt === undefined) this.stops.set(channelId, { ...s, goAt: this.now() });
+  }
+
+  /** owner 最近一次叫停这个频道的时刻（解除了也还在）：押在它之前、之后才投出去的消息要加抬头（bridge/held-flush.ts） */
+  stoppedAt(channelId: string): number | undefined {
+    return this.stops.get(channelId)?.at;
   }
 
   /** bridge 要发打断键了（发之前记：Codex 的打断回报 0.5 秒就到）。preempt = 后面紧跟着要投一条新消息 */
@@ -143,6 +156,7 @@ export class TurnCuts {
       chainable,
     );
     this.cuts.set(i.channelId, cut);
+    if (cut.state === "stopped") this.stops.set(i.channelId, { at }); // 「停」类只由 owner 记（停字认 owner、非 owner 的停止按钮不记）
     this.noticePending.delete(i.channelId);
     // 真打断了 Codex 才会卡 queue：停字没发出键（空闲 / 被拦）时下一条照常走 queue，不去打字
     if (i.runtime === "codex" && i.interrupted !== false) this.codexPaused.add(i.channelId), this.codexCutSinceStop.add(i.channelId);
@@ -181,8 +195,8 @@ export class TurnCuts {
 
   /** Autopilot 要不要先别推进：人叫停了、之后没再说别的（不设期限：「等人再开口」），或者还有一条打断收尾提醒没投 */
   interruptHold(channelId: string): "stopped" | "notice" | null {
-    const cut = this.cuts.get(channelId);
-    if (cut && holdsStop(cut)) return "stopped";
+    const s = this.stops.get(channelId);
+    if (s && s.goAt === undefined) return "stopped";
     return this.noticePending.has(channelId) ? "notice" : null;
   }
 
@@ -224,7 +238,7 @@ export class TurnCuts {
   /** event-bus 订阅回调：续做检测、迟到的 inflight、会话记录里的打断标记 */
   onEvent(e: CutEvent & { chatId: string; agent: string }): void {
     if (e.type === "turn_interrupted") return void this.onTranscriptInterrupt(e);
-    if (e.type === "terminal_input") return this.noteHuman(e.chatId, e.data.stop === true); // 终端前的就是 owner
+    if (e.type === "terminal_input") return void this.onTerminalInput(e);
     if (e.type === "tool_start") {
       const id = typeof e.data.toolId === "string" ? e.data.toolId : "";
       if (id) this.starts.set(id, e);
@@ -247,21 +261,29 @@ export class TurnCuts {
   private async onTranscriptInterrupt(e: CutEvent & { chatId: string; agent: string }): Promise<void> {
     const at = Date.parse(String(e.data.ts ?? "")) || Date.parse(e.ts) || this.now(); // 那一行写进会话记录的时刻（watcher 约 2 秒后才读到）
     if (this.keySentWithin(e.chatId, at)) return;
-    const esc = await this.escSentAt(e.agent).catch(() => 0); // 读不到就当没发过：最坏把 bridge 的 Esc 记成一次叫停，和改之前一样
-    if (esc && at >= esc - 500 && at - esc <= OWN_KEY_WINDOW_MS) return;
+    if (await this.programKeyNear(e.agent, at)) return;
     console.log(`⏹ ${e.agent} 在终端里被人打断（bridge 没发键）：记为叫停`);
     this.record({ channelId: e.chatId, agent: e.agent, cause: "terminal", tools: inflightTools(e.agent) });
     if ((this.deliveredAt.get(e.chatId) ?? 0) <= at) emitEvent({ agent: e.agent, chatId: e.chatId, type: "agent_status", data: { status: "done", trigger: "terminal_interrupt" } });
   }
 
-  /** 过期很久的记录（agent 早被 kill 的频道）不留在盘上；还挡着 Autopilot 的「停」留着（每个频道只有一条） */
+  /** 程序（任何进程：Esc 护栏、manager 清场的 C-c、tmux-send-keys）刚往这个 agent 窗口发过键：at 时刻的打断不是人在终端里按的 */
+  async programKeyNear(agent: string, at: number): Promise<boolean> {
+    return isProgramKey(await this.programKeys(agent).catch(() => []), at); // 读不到就当没发过：最坏把程序的键记成一次叫停，和改之前一样
+  }
+
+  /** 会话记录里一条终端输入：终端前的就是 owner（不是停就解除「已叫停」）——除非是程序敲进去的（cron、manager tmux-send-keys） */
+  private async onTerminalInput(e: CutEvent & { chatId: string; agent: string }): Promise<void> {
+    const at = Date.parse(String(e.data.ts ?? "")) || Date.parse(e.ts) || this.now();
+    if (isProgramText(await this.programKeys(e.agent).catch(() => []), at, String(e.data.h ?? ""))) return; // 读不到就当人打的
+    this.noteHuman(e.chatId, e.data.stop === true);
+  }
+
+  /** 过期很久的记录（agent 早被 kill 的频道）不留在盘上；叫停记录单独存、不在这里清 */
   private prune(now: number): void {
-    for (const [ch, c] of this.cuts) if (now - c.at > CUT_TTL_MS * 4 && !holdsStop(c)) this.cuts.delete(ch);
+    for (const [ch, c] of this.cuts) if (now - c.at > CUT_TTL_MS * 4) this.cuts.delete(ch);
   }
 }
-
-/** 「停」类 cut、之后 owner 还没再说过话 */
-const holdsStop = (c: Cut) => c.cause !== "preempt" && c.goAt === undefined;
 
 /** 收尾提醒（bridge 身份、label turn-cuts）：处理完的 Stop 不去 @ 用户，和 Autopilot 的提醒一样是 bridge 发起的回合 */
 export function isCutNotice(env: Envelope): boolean {
@@ -284,5 +306,9 @@ function resumeNoticeEnv(channelId: string, agent: string, text: string): Envelo
 
 /** agent 名 → tmux 窗口（大总管 "master" / "0" 不在 registry 的普通条目里，是 master:0） */
 export const agentWindow = (agent: string) => (agent === "master" || agent === "0" ? `${MASTER_SESSION}:0` : windowTarget(agent));
-export const turnCuts = new TurnCuts(undefined, undefined, (agent) => tmuxSendEscape.lastSentAt(agentWindow(agent)));
+const programKeys = async (agent: string): Promise<ProgramInput[]> => {
+  const win = agentWindow(agent);
+  return [{ at: await tmuxSendEscape.lastSentAt(win), h: "" }, ...(await programInputsOf(win))];
+};
+export const turnCuts = new TurnCuts(undefined, undefined, programKeys);
 subscribeEvents({}, (e) => turnCuts.onEvent(e));

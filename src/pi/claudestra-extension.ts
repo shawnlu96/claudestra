@@ -302,7 +302,7 @@ export default function claudestraChannel(pi: PiExtensionApi): void {
         case "message":
           // bridge 已经把 header（[🤖 来自 X] 等）渲染好，原样注入即可
           if (msg.meta?.chat_id) lastChatId = String(msg.meta.chat_id);
-          aborts.onBridgeMessage({ text: String(msg.content ?? ""), messageId: msg.meta?.message_id }, streaming);
+          if (aborts.onBridgeMessage({ text: String(msg.content ?? ""), messageId: msg.meta?.message_id }, streaming)) return; // 叫停中：settle 后再投
           void inject(String(msg.content ?? ""));
           return;
         case "abort": { // 回执照实写，并列出作废的消息（停之前 steer 进去、还没执行的），bridge 逐条告诉发送方
@@ -433,8 +433,9 @@ export default function claudestraChannel(pi: PiExtensionApi): void {
   pi.on("message_start", (event) => aborts.onMessageStart(event?.message));
   pi.on("agent_settled", () => {
     streaming = false;
-    aborts.onSettled();
+    const late = aborts.onSettled();
     reportSettled();
+    for (const text of late) void inject(text);
   });
 
   pi.on("session_shutdown", () => {

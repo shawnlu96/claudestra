@@ -9,6 +9,7 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { CUT_TTL_MS, inflightFrom, stopHeadline, type CutEvent } from "../src/lib/turn-cuts.js";
+import { inputHash, type ProgramInput } from "../src/lib/program-input.js";
 
 const T0 = Date.parse("2026-09-28T08:00:00Z");
 const iso = (ms: number) => new Date(ms).toISOString();
@@ -18,9 +19,9 @@ const start = (id: string, name: string, cmd: string, at = T0): CutEvent => ({
 });
 const tools = inflightFrom([start("t1", "Bash", DEPLOY)]);
 
-function book(opts: { path?: string; escAt?: () => number } = {}) {
+function book(opts: { path?: string; escAt?: () => number; inputs?: () => ProgramInput[] } = {}) {
   let now = T0;
-  const b = new TurnCuts(opts.path ?? null, () => now, async () => opts.escAt?.() ?? 0);
+  const b = new TurnCuts(opts.path ?? null, () => now, async () => [{ at: opts.escAt?.() ?? 0, h: "" }, ...(opts.inputs?.() ?? [])]);
   return { b, tick: (ms: number) => void (now += ms), at: () => now };
 }
 const flush = () => new Promise((r) => setTimeout(r, 0)); // 会话记录打断标记的处理要先查一次 Esc 时刻（异步）
@@ -287,12 +288,14 @@ describe("对抗式第 3 轮（@57b5354）", () => {
     expect(book({ path }).b.interruptHold("ch")).toBeNull();
   });
 
-  test("终端里敲了新输入（terminal_input）也算 owner 又开口了：解除挂起；敲的是停字就还停着", () => {
+  test("终端里敲了新输入（terminal_input）也算 owner 又开口了：解除挂起；敲的是停字就还停着", async () => {
     const { b } = book();
     stopCut(b);
     b.onEvent({ type: "terminal_input", ts: iso(T0), data: { stop: true }, chatId: "ch", agent: "a" });
+    await flush();
     expect(b.interruptHold("ch")).toBe("stopped");
     b.onEvent({ type: "terminal_input", ts: iso(T0), data: { stop: false }, chatId: "ch", agent: "a" });
+    await flush();
     expect(b.interruptHold("ch")).toBeNull();
   });
 
@@ -323,5 +326,66 @@ describe("对抗式第 3 轮（@57b5354）", () => {
     expect(h).toContain("「部署 Y」");
     expect(h).toContain("先别照做");
     expect(stopHeadline(cut, "not_busy")).toContain("在回答你刚问的问题");
+  });
+});
+
+describe("Workflow 复核 wf2（@2968ec7f）", () => {
+  const ownerStop = (b: TurnCuts) => b.record({ channelId: "ch", agent: "a", cause: "stopword", tools: { inflight: [] } });
+
+  test("stop-semantics-1：owner 停 → 外源忙时抢占盖掉那条 cut → 仍然停着；外源那一轮 Stop 了也停着；owner 说句别的才放行", () => {
+    const { b, tick } = book();
+    ownerStop(b);
+    tick(5_000);
+    b.noteDelivered(env("g1", "hi", { kind: "api", name: "guest", tokenId: "g" } as Envelope["from"]), "ch");
+    tick(4_000);
+    preempt(b, "g2"); // 外源不调 noteHuman，但照样抢占
+    expect(b.get("ch")?.cause).toBe("preempt");
+    expect(b.interruptHold("ch")).toBe("stopped");
+    b.noteDelivered(env("g2", "再来"), "ch");
+    tick(1_000);
+    b.onStop("ch", "Stop", "a");
+    expect(b.interruptHold("ch")).toBe("stopped");
+    b.noteHuman("ch", false);
+    expect(b.interruptHold("ch")).toBe("notice"); // 不再挡着「停」；外源那次抢占的收尾提醒照常
+  });
+
+  test("stoppedAt：最近一次叫停的时刻，owner 再开口之后也留着（押在它之前的消息投出去时照样加抬头）；落盘", () => {
+    const path = join(mkdtempSync(join(tmpdir(), "turn-cuts-")), "turn-cuts.json");
+    const { b, tick } = book({ path });
+    expect(b.stoppedAt("ch")).toBeUndefined();
+    ownerStop(b);
+    tick(1_000);
+    b.noteHuman("ch", false);
+    expect(b.stoppedAt("ch")).toBe(T0);
+    expect(book({ path }).b.stoppedAt("ch")).toBe(T0);
+  });
+
+  test("esc-keys-2：manager 清场 / tmux-send-keys 发的 C-c 引起的打断标记不记成叫停", async () => {
+    let inputs: ProgramInput[] = [];
+    const { b, at, tick } = book({ inputs: () => inputs });
+    inputs = [{ at: at(), h: "" }]; // 发 C-c 之前记下
+    b.onEvent({ type: "turn_interrupted", ts: iso(at() + 2_000), data: { ts: iso(at() + 80) }, chatId: "ch", agent: "a" });
+    await flush();
+    expect(b.get("ch")).toBeUndefined();
+    tick(60_000);
+    b.onEvent({ type: "turn_interrupted", ts: iso(at() + 2_000), data: { ts: iso(at()) }, chatId: "ch", agent: "a" });
+    await flush();
+    expect(b.get("ch")?.cause).toBe("terminal");
+  });
+
+  test("stop-semantics-3：cron / manager 敲进 TUI 的字不算 owner 开口；owner 自己敲的照样解除", async () => {
+    let inputs: ProgramInput[] = [];
+    const { b, at, tick } = book({ inputs: () => inputs });
+    ownerStop(b);
+    tick(60_000);
+    inputs = [{ at: at(), h: inputHash("检查爬宠监控服务的运行状态") }];
+    tick(10 * 60_000); // CC 忙时敲进去的，回合结束才写进会话记录
+    const typed = (text: string) => ({ type: "terminal_input", ts: iso(at()), data: { stop: false, h: inputHash(text), ts: iso(at()) }, chatId: "ch", agent: "a" });
+    b.onEvent(typed("检查爬宠监控服务的运行状态"));
+    await flush();
+    expect(b.interruptHold("ch")).toBe("stopped");
+    b.onEvent(typed("把 X 也改了"));
+    await flush();
+    expect(b.interruptHold("ch")).toBeNull();
   });
 });
