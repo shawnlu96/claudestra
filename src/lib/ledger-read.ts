@@ -112,11 +112,16 @@ const numOrNull = (v: unknown): number | null => (typeof v === "number" && Numbe
 /** 总览只要一句原因：首行、按码点截到 120（全文在详情接口里） */
 const REVIEW_TEXT_MAX = 120;
 
+/** 首个非空行，按码点截到 max（超出补 …）：总览只给一句，全文留给详情接口 */
+export function clipFirstLine(text: string, max: number = REVIEW_TEXT_MAX): string {
+  const first = [...(text.split("\n").find((l) => l.trim()) ?? "").trim()];
+  return first.length > max ? `${first.slice(0, max).join("")}…` : first.join("");
+}
+
 function reviewSummary(e: LedgerEvent | undefined): ReviewSummary | null {
   if (!e) return null;
   const d = e.data;
-  const first = [...(e.text.split("\n").find((l) => l.trim()) ?? "").trim()];
-  const text = first.length > REVIEW_TEXT_MAX ? `${first.slice(0, REVIEW_TEXT_MAX).join("")}…` : first.join("");
+  const text = clipFirstLine(e.text);
   return { round: numOrNull(d.round), verdict: typeof d.verdict === "string" ? d.verdict : null, p0: numOrNull(d.p0), p1: numOrNull(d.p1), p2: numOrNull(d.p2), text, ts: e.ts };
 }
 
