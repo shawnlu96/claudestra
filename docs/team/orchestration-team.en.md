@@ -38,16 +38,17 @@ bun src/manager.ts team up --project <id> --dispatcher-agent <existing agent>   
 - The buttons expire after 30 minutes and can only take effect once. They carry a hash of the proposal, so a proposal edited after it was posted is void.
 - The CLI has no "confirm" subcommand.
 
-After the owner confirms, the bridge runs these steps in order. It stops at the first failure and `team status` shows where it stopped:
+When the owner clicks Confirm, the bridge first marks the proposal as confirmed, then runs these steps in order. It stops at the first failure and `team status` shows where it stopped:
 
 1. Create the dispatcher, if a new one was requested, with role `dispatcher`.
 2. Set the PM's role to `pm`. **This takes effect on the PM's next restart; the PM is never restarted automatically.**
-3. Write the ledger's PM list and team config (`meta.team`). Event routing starts from this point.
-4. Record an owner decision in the ledger.
+3. Run `ledger team-apply <proposal id>` to write the ledger. The command checks three things itself: the bridge marked the proposal confirmed, the parameter hash still matches, and the confirmation came before expiry (and no more than 10 minutes ago). Only then does it write the PM list and the team config (`meta.team`; event routing starts from this point) and record an owner decision. The bridge itself stays read-only on the ledger.
+
+**Changing the PM list works the same way**: `ledger meta --pms a,b` writes nothing directly. It creates a proposal and posts the buttons (a PM, the master or the owner may propose; executors may not). The same applies when the owner runs it from a terminal: click Confirm once in the UI. There is no CLI switch for the team config; use `team up` / `team down`.
 
 To take the team down: `team down --project <id>`, also confirmed by the owner. Routing stops, and the dispatcher leaves the PM list and loses its role. The agent itself is not deleted; `kill` it yourself if you want it gone.
 
-**On "agents cannot impersonate the owner"**: this is a product constraint, not a security boundary. Every agent runs as your user with permission checks bypassed by default, so a determined agent could edit the state files or the ledger database directly, or pair a device for itself. What the buttons do guarantee: an agent using the normal tools cannot make itself PM, and every PM-list change in the ledger traces back to the proposal the owner clicked.
+**On "agents cannot impersonate the owner"**: this is a product constraint, not a security boundary. Every agent runs as your user with permission checks bypassed by default, so a determined agent could edit the state files or the ledger database directly, or pair a device for itself. The "confirmed" mark lives in the proposal file in the state directory, so a process running as the same user can forge it too. What the buttons do guarantee: an agent using the normal tools cannot make itself PM, and every PM-list change in the ledger traces back to the proposal the owner clicked.
 
 ## How a task flows
 
@@ -58,13 +59,14 @@ executor: ledger deliver ─▶ bridge notifies the dispatcher (or the PM if the
                           reviewer (read-only) ─▶ dispatcher files reviews/<T>-r<N>.md, then runs ledger review
                              │
      ┌───────────────────────┼─────────────────────────────┐
- moved to fix → executor      moved to merge → PM "ready to merge"      P0, or round ≥ 3 still failing → extra [escalation] to PM
+ moved to fix → executor      moved to merge → PM "ready to merge"      P0, or round ≥ 3 still failing → auto-escalated to PM
 ```
 
 - Executors only run `ledger deliver`. `routed: true` in its output means the bridge will notify whoever picks it up next; the executor sends no message.
 - `ledger dispatch <T>` first checks that the executor's worktree HEAD is the head recorded at delivery, and only then dispatches. If the spec card's review line says "adversarial final round", it switches to the adversarial reviewer once the previous round had no P0 / P1.
 - `ledger review-pack <T>` is the read-only version: it prints the prompt and records nothing.
 - `ledger escalate <T> --reason …` escalates to the PM. Add `--to owner` when the owner has to decide; the PM still does the asking.
+- Two hard rules are fixed in code: a review with a P0, or a task still failing at round 3. When the bridge sees such a verdict it records an escalation with `ledger escalate --auto` (under the actor `bridge-rule`, once per verdict), and the PM then gets an [escalation] notice. This automatic escalation is a copy to the PM; it does not change who is holding the task. Any other escalation is up to the dispatcher or the PM.
 
 **Notify once**: the bridge saves how far it has processed (the ledger event seq) in `team-router.json` under the state directory, and it saves that *before* sending. So a bridge restart never re-sends. A crash between the two steps can drop at most one notice, and the audit catches that. If the recipient is busy or offline, the notice waits in the held queue until its turn ends; it never interrupts. Events from before the team was set up are not replayed.
 
@@ -80,10 +82,10 @@ It lists the PM list, the dispatcher, and for each open task **who is holding it
 
 **Taking over**:
 
-- **New PM**: `team up --pm <new PM>`. Once the owner confirms, the new PM gets the role on its next restart. Make sure the old PM has stopped first, so two PMs never write the ledger at once. The old PM stays on the PM list; to remove it, the owner edits the list from a terminal with `ledger meta --pms`.
+- **New PM**: `team up --pm <new PM>`. Once the owner confirms, the new PM gets the role on its next restart. Make sure the old PM has stopped first, so two PMs never write the ledger at once. The old PM stays on the PM list; to remove it, propose a new list with `ledger meta --pms` and have the owner confirm it in the UI.
 - **Dispatcher died**: `manager restart <dispatcher>`. The role comes back from the registry, and deliveries that arrived in the meantime are waiting in the held queue.
 - **No dispatcher any more**: `team down`, or run `team up` again without `--dispatcher`. Deliveries then go to the PM.
 
 ## Related
 
-- Code: `roles/`, `src/lib/team-*.ts`, `src/lib/ledger-handler.ts`, `src/lib/review-pack.ts`, `src/bridge/team-router.ts`, `src/bridge/team-confirm.ts`, `src/manager/team-up.ts`, `src/manager/ledger-dispatch-cmds.ts`
+- Code: `src/manager/ledger-team-cmds.ts` (team-apply), `roles/`, `src/lib/team-*.ts`, `src/lib/ledger-handler.ts`, `src/lib/review-pack.ts`, `src/bridge/team-router.ts`, `src/bridge/team-confirm.ts`, `src/manager/team-up.ts`, `src/manager/ledger-dispatch-cmds.ts`

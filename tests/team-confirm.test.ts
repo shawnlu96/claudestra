@@ -3,17 +3,19 @@
  * team up / down 的规划与 status（src/manager/team-up.ts）。核心断言：改 PM 名单只能经 owner 在界面上点确认，
  * CLI 与 agent 手里的 Bearer token 都做不到；提案绑参数、过期、只生效一次。
  */
+import type { Database } from "bun:sqlite";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { beforeEach, describe, expect, test } from "bun:test";
 import { canConfirmTeam, handleTeamButton, teamConfirmRoute, type ConfirmDeps } from "../src/bridge/team-confirm.js";
-import { getMeta, openLedger } from "../src/lib/ledger-store.js";
+import { getMeta, listEvents, openLedger } from "../src/lib/ledger-store.js";
 import { createTask, setMeta } from "../src/lib/ledger-write.js";
 import type { Principal } from "../src/lib/principals.js";
 import {
   applyPlan, buttonIds, newProposal, parseTeamButton, proposalHash, readProposals, refuseReason, updateProposals, type TeamProposal,
 } from "../src/lib/team-proposal.js";
+import { runLedger } from "../src/manager/ledger.js";
 import { planDown, planUp, statusView, SUGGEST_AT } from "../src/manager/team-up.js";
 import { tempLedgerPath } from "./ledger-test-helpers.js";
 
@@ -65,16 +67,16 @@ describe("提案", () => {
     expect(proposalHash(p)).toBe(p.hash);
   });
 
-  test("applyPlan：up 先建调度助理（带角色）、设 PM 角色、写名单、开路由、记 owner 决定（标转录）", () => {
+  test("applyPlan：台账只经 ledger team-apply 写；up 先建调度助理（带角色）、设 PM 角色，down 先写台账再撤角色，pms 只写台账", () => {
     const p = newProposal(upDraft(), NOW, "0a1b2c3d");
     const steps = applyPlan(p);
-    expect(steps.map((s) => s.slice(0, 2).join(" "))).toEqual(["create agent-p-dispatch", "team-link agent-pm", "ledger meta", "ledger meta", "ledger decision"]);
+    expect(steps.map((s) => s.slice(0, 2).join(" "))).toEqual(["create agent-p-dispatch", "team-link agent-pm", "ledger team-apply"]);
     expect(steps[0]).toEqual(expect.arrayContaining(["--role", "dispatcher", "--project", "p"]));
-    expect(steps[2]).toEqual(["ledger", "meta", "--project", "p", "--pms", "agent-pm,agent-p-dispatch"]);
-    expect(steps[3]).toEqual(["ledger", "meta", "--project", "p", "--team", "on", "--dispatcher", "agent-p-dispatch"]);
-    expect(steps[4]).toContain("--transcribed");
-    const down = applyPlan(newProposal(planDown("p", "agent-pm", { pms: ["agent-pm", "agent-d"], team: { dispatcher: "agent-d", audit: true, sinceSeq: 1 } }) as never, NOW));
-    expect(down.map((s) => s.slice(0, 5).join(" "))).toEqual(["ledger meta --project p --team", "ledger meta --project p --pms", "team-link agent-d --role none", "ledger decision - --project p"]);
+    expect(steps[2]).toEqual(["ledger", "team-apply", "0a1b2c3d"]);
+    const down = applyPlan(newProposal(planDown("p", "agent-pm", { pms: ["agent-pm", "agent-d"], team: { dispatcher: "agent-d", audit: true, sinceSeq: 1 } }) as never, NOW, "0000aaaa"));
+    expect(down).toEqual([["ledger", "team-apply", "0000aaaa"], ["team-link", "agent-d", "--role", "none"]]);
+    const pms = newProposal({ kind: "pms", project: "p", proposer: "agent-pm", pm: null, pms: ["agent-pm"], dispatcher: null, audit: true }, NOW, "0000bbbb");
+    expect(applyPlan(pms)).toEqual([["ledger", "team-apply", "0000bbbb"]]);
   });
 });
 
@@ -83,15 +85,23 @@ describe("handleTeamButton", () => {
   let calls: string[][];
   let failAt: number;
   let p: TeamProposal;
+  let db: Database;
+  // ledger 子命令真跑（owner 身份 = bridge 经 runManager 调用时的身份），其余命令只记下来
   const deps = (): ConfirmDeps => ({
     path, now: () => NOW + 10,
     runManager: async (...args) => {
       calls.push(args);
-      return calls.length === failAt ? { ok: false, error: "create 超时" } : { ok: true };
+      if (calls.length === failAt) return { ok: false, error: "create 超时" };
+      if (args[0] !== "ledger") return { ok: true };
+      return runLedger(args.slice(1), {
+        db, actor: "owner", projectIds: ["p"], proposals: { path },
+        loadRegistry: async () => ({ socket: "", agents: {} }), saveRegistry: async () => {}, now: () => NOW + 20,
+      }) as Promise<{ ok?: boolean; error?: string }>;
     },
   });
 
   beforeEach(async () => {
+    db = openLedger(tempLedgerPath("team-confirm-"));
     path = join(mkdtempSync(join(tmpdir(), "team-prop-")), "p.json");
     calls = [];
     failAt = -1;
@@ -99,10 +109,13 @@ describe("handleTeamButton", () => {
     await updateProposals((all) => void (all[p.id] = p), NOW, path);
   });
 
-  test("确认：按 applyPlan 依次执行，结案 applied；再点一次被拒、不再执行", async () => {
+  test("确认：标 confirmed → 按 applyPlan 依次执行，team-apply 写名单 / 班子 / owner 决定并结案 applied；再点一次被拒", async () => {
     expect(await handleTeamButton(buttonIds(p).ok, "Discord", deps())).toContain("已生效");
     expect(calls).toEqual(applyPlan(p));
-    expect((await readProposals(path))[p.id]).toMatchObject({ status: "applied", note: "Discord 确认，已生效" });
+    expect((await readProposals(path))[p.id]).toMatchObject({ status: "applied", confirmedAt: NOW + 10, note: "Discord 确认，已生效" });
+    expect(getMeta(db, "p")).toMatchObject({ pms: ["agent-pm", "agent-p-dispatch"], team: { dispatcher: "agent-p-dispatch", audit: true } });
+    const decision = listEvents(db, { project: "p" }).find((e) => e.kind === "decision");
+    expect(decision).toMatchObject({ actor: "owner", data: { transcribed: true, proposal: p.id } });
     expect(await handleTeamButton(buttonIds(p).ok, "Discord", deps())).toContain("不能再点");
     expect(calls).toHaveLength(applyPlan(p).length);
   });
@@ -113,9 +126,10 @@ describe("handleTeamButton", () => {
     const q = newProposal(upDraft(), NOW, "11112222");
     await updateProposals((all) => void (all[q.id] = q), NOW, path);
     failAt = 1;
-    expect(await handleTeamButton(buttonIds(q).ok, "Discord", deps())).toContain("第 1/5 步");
+    expect(await handleTeamButton(buttonIds(q).ok, "Discord", deps())).toContain("第 1/3 步");
     expect(calls).toHaveLength(1);
     expect((await readProposals(path))[q.id]?.status).toBe("failed");
+    expect(getMeta(db, "p").pms).toEqual([]);
   });
 
   test("提案文件里被改了名单：按钮哈希对不上，不执行", async () => {

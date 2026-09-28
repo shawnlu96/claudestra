@@ -38,16 +38,17 @@ bun src/manager.ts team up --project <项目 id> --dispatcher-agent <已有 agen
 - 按钮 30 分钟内有效，只能生效一次。按钮里带着提案内容的哈希：提案在点击前被改过，就会作废。
 - 命令行没有「确认」子命令。
 
-owner 确认后，bridge 依次做下面几步（任何一步失败就停下，并在 `team status` 里写明停在哪一步）：
+owner 点确认后，bridge 先把提案标成「已确认」，再依次做下面几步（任何一步失败就停下，并在 `team status` 里写明停在哪一步）：
 
 1. 建调度助理（如果要新建），角色设为 dispatcher；
 2. 把 PM 的角色设为 pm。**要等 PM 下次重启才生效，不会自动重启 PM**；
-3. 写台账的 PM 名单和班子配置（`meta.team`），从这一刻起开始事件路由；
-4. 在台账记一条 owner 的决定。
+3. 调 `ledger team-apply <提案 id>` 写台账。这条命令自己再核对三件事：提案已被 bridge 标为确认、参数哈希一致、确认发生在过期之前（并且确认后 10 分钟内）。三项都满足，才写 PM 名单、班子配置（`meta.team`，从这一刻起开始事件路由），再记一条 owner 的决定。bridge 自己对台账仍然只读。
+
+**改 PM 名单也走同一条路**：`ledger meta --pms a,b` 不直接写，只生成一份提案、贴出按钮（PM、大总管、owner 可以提议，执行者不行）。owner 在终端里跑也一样，去界面上点一次确认即可。班子配置没有单独的命令行开关，一律用 `team up` / `team down`。
 
 撤下班子：`team down --project <id>`，同样要 owner 确认。撤下后事件路由停止，调度助理移出 PM 名单、撤掉角色；这个 agent 本身不会被删，需要的话手动 `kill`。
 
-**关于「不能冒充 owner」**：这是产品约束，不是安全边界。所有 agent 都以你的用户身份运行，默认不做权限确认，一个铁了心的 agent 可以直接改状态文件和台账库，也可以自己去配对一台设备。按钮保证的是：走正常工具路径的 agent 给不了自己 PM 身份，任何一次 PM 名单的变更都能在台账里查到是 owner 点的哪份提案。
+**关于「不能冒充 owner」**：这是产品约束，不是安全边界。所有 agent 都以你的用户身份运行，默认不做权限确认，一个铁了心的 agent 可以直接改状态文件和台账库，也可以自己去配对一台设备。「已确认」这个标记记在状态目录的提案文件里，同一个用户的进程也能伪造它。按钮保证的是：走正常工具路径的 agent 给不了自己 PM 身份，任何一次 PM 名单的变更都能在台账里查到是 owner 点的哪份提案。
 
 ## 一件任务怎么流转
 
@@ -58,13 +59,14 @@ owner 确认后，bridge 依次做下面几步（任何一步失败就停下，�
                        审查员（只读）─▶ 调度助理把结论存进 reviews/<T>-r<N>.md，再跑 ledger review
                           │
        ┌──────────────────┼──────────────────────────┐
-  推到 fix → bridge 通知执行者    推到 merge → bridge 通知 PM「可以合并」    出 P0 / 第 3 轮还不通过 → PM 另收【升级】
+  推到 fix → bridge 通知执行者    推到 merge → bridge 通知 PM「可以合并」    出 P0 / 第 3 轮还不通过 → 自动升级给 PM
 ```
 
 - 执行者交付只跑 `ledger deliver`。输出里 `routed: true` 表示 bridge 会通知接手的人，执行者不用再发消息。
 - `ledger dispatch <T>` 会先核对执行者 worktree 的 HEAD 是不是交付时记下的那个 head，对上了才派审。规格卡「审查」那一行写了「对抗式最后一轮」的话，前面一轮没有 P0 / P1 时，它会自动换成对抗式审查员。
 - `ledger review-pack <T>` 是只读版：只打印审查员 prompt，不记账。
 - `ledger escalate <T> --reason …` 用来升级给 PM。加 `--to owner` 表示需要 owner 拍板，仍由 PM 去问 owner。
+- 两条硬规则写死在代码里：审出 P0，或者同一任务到第 3 轮还不通过。bridge 看到这样的审查结论，就用 `ledger escalate --auto` 记一条升级（记在 `bridge-rule` 名下，同一条结论只记一次），PM 随后收到【升级】通知。这种自动升级只是抄送，不改变「现在谁在接」。其余情况要不要升级，由调度助理或 PM 自己判断。
 
 **只通知一次**：bridge 把处理到的位置（台账事件 seq）存进状态目录的 `team-router.json`，先存位置、再发通知。所以 bridge 重启后不会重复通知。如果恰好在两步之间崩溃，最多漏发一条，由巡检兜底。通知的对象正在忙或者不在线时，通知进押后队列，等它这一轮结束再送，不会打断它。班子开起来之前的历史事件不会补发。
 
@@ -80,11 +82,11 @@ bun src/manager.ts team status --project <id>
 
 **换人接手**：
 
-- **换 PM**：`team up --pm <新 PM>`，owner 确认后，新 PM 下次重启时带上角色。先确认旧 PM 已经停下，避免两个 PM 同时写台账。旧 PM 仍留在 PM 名单里；要移除，由 owner 在终端里用 `ledger meta --pms` 改。
+- **换 PM**：`team up --pm <新 PM>`，owner 确认后，新 PM 下次重启时带上角色。先确认旧 PM 已经停下，避免两个 PM 同时写台账。旧 PM 仍留在 PM 名单里；要移除，用 `ledger meta --pms` 提议新名单，owner 在界面上确认。
 - **调度助理挂了**：`manager restart <调度助理>`，角色会随 registry 恢复。重启期间积下的交付通知在押后队列里，它连上后会收到。
 - **不要调度助理了**：`team down`；或者重新 `team up` 且不带 `--dispatcher`，交付就改为通知 PM。
 
 ## 相关
 
 - 台账的数据结构与事件形状：台账设计稿（`meta.team`、`dispatch` / `escalate` 事件）
-- 代码：`roles/`、`src/lib/team-*.ts`、`src/lib/ledger-handler.ts`、`src/lib/review-pack.ts`、`src/bridge/team-router.ts`、`src/bridge/team-confirm.ts`、`src/manager/team-up.ts`、`src/manager/ledger-dispatch-cmds.ts`
+- 代码：`src/manager/ledger-team-cmds.ts`（team-apply）、`roles/`、`src/lib/team-*.ts`、`src/lib/ledger-handler.ts`、`src/lib/review-pack.ts`、`src/bridge/team-router.ts`、`src/bridge/team-confirm.ts`、`src/manager/team-up.ts`、`src/manager/ledger-dispatch-cmds.ts`

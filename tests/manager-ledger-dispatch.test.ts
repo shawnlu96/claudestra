@@ -105,22 +105,19 @@ describe("ledger escalate", () => {
   });
 });
 
-describe("ledger meta --team", () => {
-  test("只有 owner 能开班子；sinceSeq 取这条 meta 事件的 seq；--team off 关掉", async () => {
-    expect((await run("agent-pm", "meta", "--team", "on", "--dispatcher", "disp")).code).toBe("forbidden");
-    const r = await run("owner", "meta", "--dispatcher", "disp");
-    const last = listEvents(db).at(-1);
-    expect(r.meta.team).toEqual({ dispatcher: "agent-disp", audit: true, sinceSeq: last?.seq });
-    expect((await run("owner", "meta", "--team", "on")).meta.team.dispatcher).toBeNull();
-    expect((await run("owner", "meta", "--team", "off")).meta.team).toBeNull();
-    expect((await run("owner", "meta", "--team", "off", "--dispatcher", "x")).code).toBe("invalid");
-    expect(isWriteInvocation("ledger", ["meta", "--team", "on"])).toBe(true);
-  });
-
+describe("班子配置", () => {
   test("改名同步班子里的调度助理", async () => {
-    await run("owner", "meta", "--dispatcher", "disp");
+    setMeta(db, { actor: "owner", now: 9 }, { project: P, key: "team", value: { dispatcher: "agent-disp", audit: true } });
     const { renameAgentRefs } = await import("../src/lib/ledger-write.js");
     renameAgentRefs(db, { actor: "system" }, "agent-disp", "agent-disp2");
     expect(getMeta(db, P).team?.dispatcher).toBe("agent-disp2");
+  });
+
+  test("setMeta team：只有 owner；sinceSeq 取这条 meta 事件的 seq；null 关掉", () => {
+    expect(() => setMeta(db, { actor: "agent-pm", now: 9 }, { project: P, key: "team", value: { dispatcher: null, audit: true } })).toThrow("owner");
+    setMeta(db, { actor: "owner", now: 9 }, { project: P, key: "team", value: { dispatcher: "agent-disp", audit: true } });
+    expect(getMeta(db, P).team).toEqual({ dispatcher: "agent-disp", audit: true, sinceSeq: listEvents(db).at(-1)?.seq ?? -1 });
+    setMeta(db, { actor: "owner", now: 10 }, { project: P, key: "team", value: null });
+    expect(getMeta(db, P).team).toBeNull();
   });
 });

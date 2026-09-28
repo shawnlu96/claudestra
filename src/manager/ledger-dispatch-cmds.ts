@@ -129,19 +129,27 @@ async function dispatch(c: LedgerCli): Promise<Result> {
   return { ok: true, event: r.event, duplicate: r.duplicate, ...(headNote ? { headNote } : {}), ...p.pack };
 }
 
+/** 硬规则自动升级的记账身份（bridge 经 runManager 调 `escalate --auto`） */
+const RULE_ACTOR = "bridge-rule";
+
 function escalate(c: LedgerCli): Result {
   const t = c.target(c.p.pos[1]);
   const to = c.p.flags.to ?? "pm";
   if (to !== "pm" && to !== "owner") throw new LedgerError("invalid", "--to 只能是 pm / owner");
+  const auto = c.p.bools.has("auto");
+  // --auto 只给 bridge 用：它经 runManager 调用时身份是 owner；事件记在 bridge-rule 名下，看得出是规则触发、不是谁的判断
+  if (auto && (c.deps.actor !== "owner" || to !== "pm")) throw new LedgerError("forbidden", "--auto 只由 bridge 的硬规则调用，且只升级给 PM");
   if (t.task && to === "pm") c.requireOwnOrManager(t.task, "升级");
   else c.requireManager(t.project, to === "owner" ? "升级给 owner" : "项目级升级");
   const reason = c.need("reason");
-  const r = appendEvent(c.db, c.ctx(), { project: t.project, target: t.target, kind: "escalate", text: reason, data: { to, reason } });
+  const ctx = auto ? { ...c.ctx(), actor: RULE_ACTOR } : c.ctx();
+  const data = { to, reason, ...(auto ? { auto: true } : {}) };
+  const r = appendEvent(c.db, ctx, { project: t.project, target: t.target, kind: "escalate", text: reason, data });
   return { ok: true, event: r.event, duplicate: r.duplicate };
 }
 
 export const DISPATCH_CMDS: Record<string, CommandSpec> = {
   "review-pack": { valued: ["round"], bools: ["adversarial"], usage: "review-pack <task> [--adversarial] [--round N]（只读：打印审查员 prompt）", run: reviewPack },
   dispatch: { valued: ["round", "dedup"], bools: ["adversarial"], usage: "dispatch <task> [--adversarial] [--round N]（核对 head、记派审、打印 prompt）", run: dispatch },
-  escalate: { valued: ["reason", "to", "project", "dedup"], usage: "escalate <task|-> --reason <原因> [--to pm|owner]", run: escalate },
+  escalate: { valued: ["reason", "to", "project", "dedup"], bools: ["auto"], usage: "escalate <task|-> --reason <原因> [--to pm|owner]", run: escalate },
 };

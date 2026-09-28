@@ -3,7 +3,8 @@
  *   Discord：management.ts 的免 LLM 按钮（discord-interactions 已按 ALLOWED_USER_IDS 拦过）
  *   网页：点按钮是往 agent 发一条 `[button:team_ok:…]`（web chat-store），这里在 /api/v1 扩展路由里先截下，
  *        只认 owner 本人的设备凭据——老的全 scope Bearer token（agent 自己 `token-add` 就能拿到）和 guest / peer 一律 403
- * 生效靠 runManager 调 CLI（bridge 进程没有 DISCORD_CHANNEL_ID → CLI 身份是 owner），bridge 对台账仍只读。tests/team-confirm.test.ts。
+ * 这里只把提案标成 confirmed，生效靠 runManager 调 CLI：台账由 `ledger team-apply <id>` 自己核对后写，bridge 对台账仍只读。
+ * tests/team-confirm.test.ts。
  */
 import { canAdministerPairing, OWNER_PRINCIPAL_ID } from "../lib/devices.js";
 import type { Principal } from "../lib/principals.js";
@@ -32,22 +33,26 @@ export function canConfirmTeam(p: Principal): boolean {
   return canAdministerPairing(p) && p.id === OWNER_PRINCIPAL_ID && p.agents.includes("*") && !p.peer;
 }
 
-/** 先在锁里把提案从 pending 挪走（applying / rejected），双击、Discord 与网页同时点都只生效一次 */
+/** 先在锁里把提案从 pending 挪走（confirmed / rejected），双击、Discord 与网页同时点都只生效一次 */
 async function claim(id: string, hash: string, approve: boolean, who: string, d: ConfirmDeps): Promise<TeamProposal | string> {
   return updateProposals((all) => {
     const p = all[id];
     const why = refuseReason(p, hash, d.now());
     if (why || !p) return why ?? "提案不存在";
-    p.status = approve ? "applying" : "rejected";
+    p.status = approve ? "confirmed" : "rejected";
+    if (approve) p.confirmedAt = d.now();
     p.note = `${who} ${approve ? "确认" : "拒绝"}`;
     return { ...p };
   }, d.now(), d.path);
 }
 
-async function finish(id: string, status: TeamProposal["status"], note: string, d: ConfirmDeps): Promise<void> {
+/** 补结案说明；失败时标 failed，但 team-apply 已写过台账（applied）就保留 applied——台账确实改了 */
+async function finish(id: string, failed: boolean, note: string, d: ConfirmDeps): Promise<void> {
   await updateProposals((all) => {
     const p = all[id];
-    if (p) Object.assign(p, { status, note });
+    if (!p) return;
+    p.note = note;
+    if (failed && p.status !== "applied") p.status = "failed";
   }, d.now(), d.path);
 }
 
@@ -58,11 +63,11 @@ async function apply(p: TeamProposal, who: string, d: ConfirmDeps): Promise<stri
     const r = await d.runManager(...args).catch((e: Error) => ({ ok: false, error: e.message }));
     if (!r || r.ok === false || r.error) {
       const why = `第 ${i + 1}/${steps.length} 步（manager ${args.slice(0, 3).join(" ")}）失败：${r?.error ?? "无输出"}`;
-      await finish(p.id, "failed", `${who} 确认；${why}`, d);
+      await finish(p.id, true, `${who} 确认；${why}`, d);
       return `❌ 班子提案 ${p.id} 没有全部生效：${why}。前面的步骤已执行，修好后重新 team up / down`;
     }
   }
-  await finish(p.id, "applied", `${who} 确认，已生效`, d);
+  await finish(p.id, false, `${who} 确认，已生效`, d);
   return p.kind === "up" ? `✅ 项目「${p.project}」的编排班子已生效（提案 ${p.id}）` : `✅ 项目「${p.project}」的编排班子已撤下（提案 ${p.id}）`;
 }
 

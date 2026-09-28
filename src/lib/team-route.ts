@@ -4,8 +4,9 @@
  *   deliver                → 调度助理（没配就 PM）：附上现成的 `ledger dispatch` 命令
  *   review 且推到 fix      → 执行者：结论 md 路径 + 那条 review 的一句话
  *   review 且推到 merge / done / spec，或通过但没推阶段 → PM
- *   review 出 P0，或第 HARD_ROUND 轮还不通过 → PM 另收一条【升级】（硬规则写死在这里，不靠调度助理判断）
  *   escalate               → PM
+ * 硬规则（review 出 P0，或第 HARD_ROUND 轮还不通过）写死在 autoEscalations：bridge 据此调 `ledger escalate --auto` 记一条升级，
+ * 不靠调度助理判断；那条 escalate 事件下一轮照上面的规则通知 PM。
  * 收件人就是写这条事件的人时不发；没开班子的项目、开班子之前的事件一律不管。
  */
 import { pmOf } from "./ledger-handler.js";
@@ -15,7 +16,7 @@ import type { TeamConfig } from "./ledger-store.js";
 /** 同一任务审到第几轮还不通过就自动升级给 PM（07c 第 1 节） */
 const HARD_ROUND = 3;
 
-type NoticeKind = "deliver" | "review-fix" | "review-pm" | "hard-rule" | "escalate";
+type NoticeKind = "deliver" | "review-fix" | "review-pm" | "escalate";
 
 export interface RouteNotice {
   seq: number;
@@ -83,24 +84,26 @@ function reviewNotices(e: LedgerEvent, task: LedgerTask, pm: string | null, batc
     const what = move ? PM_MOVES[move] : "通过（还停在 review，等 PM 推阶段）";
     out.push({ to: pm, kind: "review-pm", text: [`${head}\n→ ${what}`, ...reviewBody(e)].join("\n") });
   }
-  const p0 = num(e.data.p0) > 0;
-  const stuck = num(e.data.round) >= HARD_ROUND && e.data.verdict !== "pass";
-  if (pm && (p0 || stuck) && !out.some((n) => n.to === pm)) {
-    const why = p0 ? "审出 P0" : `第 ${num(e.data.round)} 轮还不通过`;
-    out.push({ to: pm, kind: "hard-rule", text: [`【升级】${task.id}：${why}（硬规则，自动通知）`, head, ...reviewBody(e)].join("\n") });
-  }
   return out;
 }
 
 function escalateText(e: LedgerEvent, task: LedgerTask | null): string {
   const owner = e.data.to === "owner" ? "（需要 owner 拍板）" : "";
-  return `【升级】${task ? `${task.id}「${task.title}」` : "项目级"}${owner}：${e.text}（${e.actor}）`;
+  const who = e.data.auto === true ? "硬规则，自动升级" : e.actor;
+  return `【升级】${task ? `${task.id}「${task.title}」` : "项目级"}${owner}：${e.text}（${who}）`;
+}
+
+/** 开了班子、且在开班子之后写的事件才管 */
+function teamOf(e: LedgerEvent, ctx: RouteCtx): ReturnType<RouteCtx["team"]> | null {
+  const t = ctx.team(e.project);
+  return t.team && e.seq > t.team.sinceSeq ? t : null;
 }
 
 /** 一条事件的通知（还没套上 messageId）；escalate 可以是项目级（target 为空），其余只看任务事件 */
 function draftsFor(e: LedgerEvent, batch: readonly LedgerEvent[], ctx: RouteCtx): Draft[] {
-  const { pms, team } = ctx.team(e.project);
-  if (!team || e.seq <= team.sinceSeq) return [];
+  const t = teamOf(e, ctx);
+  if (!t?.team) return [];
+  const { pms, team } = t;
   const task = e.target ? ctx.task(e.target) : null;
   const handlerTeam = { pms, dispatcher: team.dispatcher };
   const pm = pmOf(task ?? { pm: null }, handlerTeam);
@@ -122,6 +125,26 @@ export function routeEvents(batch: readonly LedgerEvent[], ctx: RouteCtx): Route
       if (d.to === e.actor) continue;
       out.push({ ...d, seq: e.seq, project: e.project, taskId: e.target, messageId: `ledger-${e.seq}-${d.to}` });
     }
+  }
+  return out;
+}
+
+export interface AutoEscalation {
+  seq: number;
+  taskId: string;
+  reason: string;
+  /** 同一条 review 只升级一次（bridge 重启、重跑都不重复记） */
+  dedup: string;
+}
+
+/** 硬规则：review 出 P0，或第 HARD_ROUND 轮起还不通过 → 自动升级给 PM */
+export function autoEscalations(batch: readonly LedgerEvent[], ctx: RouteCtx): AutoEscalation[] {
+  const out: AutoEscalation[] = [];
+  for (const e of batch) {
+    if (e.kind !== "review" || !e.target || !teamOf(e, ctx)) continue;
+    const round = num(e.data.round);
+    const why = num(e.data.p0) > 0 ? `第 ${round} 轮审出 P0（${num(e.data.p0)} 个）` : round >= HARD_ROUND && e.data.verdict !== "pass" ? `第 ${round} 轮还不通过` : null;
+    if (why) out.push({ seq: e.seq, taskId: e.target, reason: [why, ...reviewBody(e)].join("；"), dedup: `auto-escalate:${e.seq}` });
   }
   return out;
 }

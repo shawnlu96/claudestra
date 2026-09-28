@@ -16,6 +16,7 @@ import { parseLedgerArgs, resolveActor } from "./ledger-identity.js";
 import { importCmd } from "./ledger-import.js";
 import { DISPATCH_CMDS } from "./ledger-dispatch-cmds.js";
 import { READ_CMDS } from "./ledger-read-cmds.js";
+import { TEAM_CMDS } from "./ledger-team-cmds.js";
 import { WRITE_CMDS, type CommandSpec } from "./ledger-write-cmds.js";
 import { isWriteInvocation } from "./write-commands.js";
 
@@ -25,6 +26,7 @@ export const UNKNOWN_ACTOR = "unknown";
 const COMMANDS: Record<string, CommandSpec> = {
   ...WRITE_CMDS,
   ...DISPATCH_CMDS,
+  ...TEAM_CMDS,
   ...READ_CMDS,
   import: { valued: ["map", "project"], bools: ["dry-run"], usage: "import <ledger.json> --map <map.json> [--project <id>] [--dry-run]", run: importCmd },
 };

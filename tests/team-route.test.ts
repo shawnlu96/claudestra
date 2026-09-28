@@ -1,6 +1,6 @@
 /**
  * 编排班子的事件路由：规则（src/lib/team-route.ts）+ 轮询与游标（src/bridge/team-router.ts 的 teamRouterTicker）。
- * 有 / 没有调度助理、review 转执行者 / PM、硬规则升级、收件人是写入者本人不发、同一事件只通知一次、bridge 重启后不重发。
+ * 有 / 没有调度助理、review 转执行者 / PM、硬规则自动升级（ledger escalate --auto）、收件人是写入者本人不发、同一事件只通知一次、bridge 重启后不重发。
  */
 import type { Database } from "bun:sqlite";
 import { mkdtempSync, writeFileSync } from "node:fs";
@@ -11,7 +11,7 @@ import { teamRouterTicker } from "../src/bridge/team-router.js";
 import { LedgerReader } from "../src/lib/ledger-read.js";
 import { closeLedger, getMeta, getTask, listEvents, openLedger } from "../src/lib/ledger-store.js";
 import { appendEvent, createTask, deliver, moveStage, recordReview, setMeta } from "../src/lib/ledger-write.js";
-import { routeEvents, type RouteNotice } from "../src/lib/team-route.js";
+import { autoEscalations, routeEvents, type AutoEscalation, type RouteNotice } from "../src/lib/team-route.js";
 import { tempLedgerPath } from "./ledger-test-helpers.js";
 
 let db: Database;
@@ -29,13 +29,13 @@ function toBuild(): void {
   moveStage(db, owner(), { taskId: "T1", from: "restate", to: "build" });
 }
 
-function route(afterSeq = 0): RouteNotice[] {
-  return routeEvents(listEvents(db, { afterSeq }), {
-    task: (id) => getTask(db, id),
-    team: (p) => ({ pms: getMeta(db, p).pms, team: getMeta(db, p).team }),
-    managerCmd: "bun manager.ts",
-  });
-}
+const ctx = () => ({
+  task: (id: string) => getTask(db, id),
+  team: (p: string) => ({ pms: getMeta(db, p).pms, team: getMeta(db, p).team }),
+  managerCmd: "bun manager.ts",
+});
+const route = (afterSeq = 0): RouteNotice[] => routeEvents(listEvents(db, { afterSeq }), ctx());
+const escalations = (afterSeq = 0) => autoEscalations(listEvents(db, { afterSeq }), ctx());
 
 beforeEach(() => {
   path = tempLedgerPath("team-route-");
@@ -104,22 +104,41 @@ describe("routeEvents", () => {
     expect(route(cut3)).toEqual([]);
   });
 
-  test("硬规则：出 P0、第 3 轮还不通过都另外通知 PM", () => {
+  test("硬规则：出 P0、第 3 轮还不通过 → 自动升级（按 review 的 seq 去重）；review 本身照常转执行者", () => {
     team("agent-disp");
     toBuild();
-    let cut = 0;
+    const got: string[] = [];
     for (let r = 1; r <= 3; r++) {
       deliver(db, { actor: "agent-exec", now: 10 * r }, { taskId: "T1", moveFrom: r === 1 ? "build" : "fix" });
-      cut = listEvents(db).at(-1)?.seq ?? 0;
+      const cut = listEvents(db).at(-1)?.seq ?? 0;
       recordReview(db, { actor: "agent-disp", now: 10 * r + 1 }, {
         taskId: "T1", reviewer: "regular", verdict: "changes", p0: r === 1 ? 1 : 0, p1: 1, p2: 0, move: { from: "review", to: "fix" },
       });
-      const kinds = route(cut).map((x) => `${x.to}:${x.kind}`);
-      if (r === 1) expect(kinds).toEqual(["agent-exec:review-fix", "agent-pm:hard-rule"]);
-      if (r === 2) expect(kinds).toEqual(["agent-exec:review-fix"]);
-      if (r === 3) expect(kinds).toEqual(["agent-exec:review-fix", "agent-pm:hard-rule"]);
+      expect(route(cut).map((x) => `${x.to}:${x.kind}`)).toEqual(["agent-exec:review-fix"]);
+      const reviewSeq = listEvents(db).find((e) => e.seq > cut && e.kind === "review")?.seq;
+      for (const a of escalations(cut)) {
+        expect(a).toMatchObject({ taskId: "T1", dedup: `auto-escalate:${reviewSeq}` });
+        got.push(a.reason);
+      }
     }
-    expect(route(cut).at(-1)?.text).toContain("第 3 轮还不通过");
+    expect(got).toEqual([expect.stringContaining("第 1 轮审出 P0（1 个）"), expect.stringContaining("第 3 轮还不通过")]);
+  });
+
+  test("自动升级的 escalate 事件照常通知 PM，注明是硬规则", () => {
+    team("agent-disp");
+    appendEvent(db, { actor: "bridge-rule", now: 2 }, { project: "p", target: "T1", kind: "escalate", text: "第 1 轮审出 P0", data: { to: "pm", auto: true } });
+    const n = route();
+    expect(n.map((x) => [x.to, x.kind])).toEqual([["agent-pm", "escalate"]]);
+    expect(n[0].text).toContain("（硬规则，自动升级）");
+  });
+
+  test("没开班子、开班子之前的 review 不自动升级", () => {
+    toBuild();
+    deliver(db, { actor: "agent-exec", now: 2 }, { taskId: "T1", moveFrom: "build" });
+    recordReview(db, owner(3), { taskId: "T1", reviewer: "regular", verdict: "changes", p0: 2, p1: 0, p2: 0, move: { from: "review", to: "fix" } });
+    expect(escalations()).toEqual([]);
+    team(null);
+    expect(escalations()).toEqual([]);
   });
 
   test("escalate（含项目级）通知 PM", () => {
@@ -133,17 +152,43 @@ describe("routeEvents", () => {
 });
 
 describe("teamRouterTicker：游标与重启", () => {
-  function ticker(cursorPath: string, sent: RouteNotice[], channels: Record<string, string> = { "agent-disp": "c-disp", "agent-pm": "c-pm", "agent-exec": "c-exec" }) {
+  function ticker(cursorPath: string, sent: RouteNotice[], channels: Record<string, string> = { "agent-disp": "c-disp", "agent-pm": "c-pm", "agent-exec": "c-exec" }, esc: AutoEscalation[] = []) {
     const logs: string[] = [];
     const tick = teamRouterTicker({
       reader: new LedgerReader(path),
       cursorPath,
       channelOf: (a) => channels[a] ?? null,
       send: async (n) => void sent.push(n),
+      escalate: async (a) => {
+        esc.push(a);
+        return null;
+      },
       log: (m) => void logs.push(m),
     });
     return { tick, logs };
   }
+
+  test("硬规则：游标写完后调 escalate；CLI 记下的 bridge-rule 升级下一轮通知 PM；重启不再升级", async () => {
+    team("agent-disp");
+    toBuild();
+    deliver(db, { actor: "agent-exec", now: 2 }, { taskId: "T1", moveFrom: "build" });
+    const cursorPath = join(mkdtempSync(join(tmpdir(), "team-router-")), "cursor.json");
+    const sent: RouteNotice[] = [];
+    const esc: AutoEscalation[] = [];
+    const a = ticker(cursorPath, sent, undefined, esc);
+    await a.tick();
+    recordReview(db, { actor: "agent-disp", now: 3 }, { taskId: "T1", reviewer: "regular", verdict: "changes", p0: 1, p1: 0, p2: 0, move: { from: "review", to: "fix" } });
+    await a.tick();
+    expect(esc).toHaveLength(1);
+    expect(sent.map((n) => n.kind)).toEqual(["review-fix"]);
+    // 模拟 CLI：ledger escalate T1 --auto --dedup auto-escalate:<seq>
+    appendEvent(db, { actor: "bridge-rule", now: 4, dedupKey: esc[0].dedup }, { project: "p", target: "T1", kind: "escalate", text: esc[0].reason, data: { to: "pm", auto: true } });
+    await a.tick();
+    expect(sent.map((n) => `${n.to}:${n.kind}`)).toEqual(["agent-exec:review-fix", "agent-pm:escalate"]);
+    await ticker(cursorPath, sent, undefined, esc).tick();
+    expect(esc).toHaveLength(1);
+    expect(a.logs.some((l) => l.includes("硬规则升级"))).toBe(true);
+  });
 
   test("首次运行不补发历史；新事件只通知一次；重启（新 ticker + 同一游标文件）不重发，停机期间的事件照发", async () => {
     team("agent-disp");
@@ -178,7 +223,7 @@ describe("teamRouterTicker：游标与重启", () => {
     let calls = 0;
     const logs: string[] = [];
     const tick = teamRouterTicker({
-      reader: new LedgerReader(path), cursorPath, channelOf: () => "c",
+      reader: new LedgerReader(path), cursorPath, channelOf: () => "c", escalate: async () => null,
       send: async () => {
         calls++;
         throw new Error("ws 断了");

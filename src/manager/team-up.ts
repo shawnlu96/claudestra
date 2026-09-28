@@ -20,7 +20,7 @@ import { parseLedgerArgs, resolveActor } from "./ledger-identity.js";
 /** 执行者超过这么多个、又没开调度助理，status 建议开（PM 一个人接不过来） */
 export const SUGGEST_AT = 5;
 
-type Agents = Record<string, { channelId?: string; projectId?: string; status?: string }>;
+export type Agents = Record<string, { channelId?: string; projectId?: string; status?: string }>;
 
 export interface UpInput {
   project: string;
@@ -92,7 +92,7 @@ export function statusView(db: Database, project: string, proposals: TeamProposa
 }
 
 /** 提案贴到提议者自己的频道（通常是 PM 的），终端里的 owner / 大总管贴控制频道；贴不出去不作废提案，提示去哪儿找 */
-async function post(p: TeamProposal, actor: string, agents: Agents): Promise<string | null> {
+async function postButtons(p: TeamProposal, actor: string, agents: Agents): Promise<string | null> {
   const ch = agents[actor]?.channelId ?? repoEnvVar("CONTROL_CHANNEL_ID");
   if (!ch) return "找不到能贴按钮的频道（不在 agent 会话里、也没配控制频道）";
   const ids = buttonIds(p);
@@ -117,15 +117,22 @@ async function context(args: string[]) {
   return { p, agents: reg.agents as Agents, actor: who.actor, project, dir: def.dirs[0] ?? null };
 }
 
-async function propose(draft: ProposalDraft, actor: string, agents: Agents): Promise<void> {
+/** 提案存哪、按钮怎么贴；单测注入（tests/team-apply.test.ts） */
+export interface ProposeOpts {
+  path?: string;
+  post?(p: TeamProposal, actor: string, agents: Agents): Promise<string | null>;
+}
+
+/** 记下提案并贴按钮；team up / down 与 `ledger meta --pms` 共用 */
+export async function propose(draft: ProposalDraft, agents: Agents, o: ProposeOpts = {}): Promise<Record<string, unknown>> {
   const proposal = newProposal(draft, Date.now());
-  await updateProposals((all) => void (all[proposal.id] = proposal));
-  const postError = await post(proposal, actor, agents);
-  output({
+  await updateProposals((all) => void (all[proposal.id] = proposal), Date.now(), o.path);
+  const postError = await (o.post ?? postButtons)(proposal, draft.proposer, agents);
+  return {
     ok: !postError, proposal: proposal.id, status: "pending", expiresAt: new Date(proposal.expiresAt).toISOString(),
     ...(postError ? { error: `${postError}；提案已记下，可在有按钮的会话里重跑一次` } : { note: "已贴出确认按钮，等 owner 在界面上点确认（30 分钟内有效）" }),
     text: proposalText(proposal),
-  });
+  };
 }
 
 export async function cmdTeam(args: string[]): Promise<void> {
@@ -148,5 +155,5 @@ export async function cmdTeam(args: string[]): Promise<void> {
           dispatcher: c.p.flags["dispatcher-agent"] ?? (c.p.bools.has("dispatcher") ? "new" : undefined),
         });
   if ("error" in draft) return output({ ok: false, error: draft.error });
-  await propose(draft, c.actor, c.agents);
+  output(await propose(draft, c.agents));
 }

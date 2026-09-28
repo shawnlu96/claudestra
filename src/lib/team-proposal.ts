@@ -1,8 +1,8 @@
 /**
  * 编排班子的「提案 → owner 在界面上点确认 → 生效」（docs/team/orchestration-team.md §owner 确认）。
- * 改 PM 名单、开关班子要 owner 身份，而 agent 不能冒充 owner：`team up` / `team down` 只生成提案、贴出按钮；
- * owner 在 Discord（白名单用户）或网页（owner 设备凭据）点确认后，bridge 用 runManager 按 applyPlan 逐条执行（CLI 以 owner 身份写台账）。
- * CLI 没有 confirm 子命令。提案绑参数哈希（按钮 id 里带着，点击时重算比对）、30 分钟过期、只能生效一次。
+ * 改 PM 名单、开关班子要 owner 身份，而 agent 不能冒充 owner：`team up` / `team down` / `ledger meta --pms` 只生成提案、贴出按钮；
+ * owner 在 Discord（白名单用户）或网页（owner 设备凭据）点确认后，bridge 把提案标成 confirmed，再用 runManager 按 applyPlan 逐条执行；
+ * 台账只由 `ledger team-apply <id>` 写，它自己再核对一遍（已确认、哈希一致、确认时未过期）。CLI 没有 confirm 子命令。
  * 这是产品约束，不是安全边界：同一用户的 shell 能直接改状态文件和台账库（见文档）。tests/team-proposal.test.ts。
  */
 import { createHash, randomBytes } from "node:crypto";
@@ -26,7 +26,8 @@ interface DispatcherPlan {
 
 export interface TeamProposal {
   id: string;
-  kind: "up" | "down";
+  /** up / down = 开关班子；pms = 只改 PM 名单（ledger meta --pms） */
+  kind: "up" | "down" | "pms";
   project: string;
   /** 提议者（ledger 身份：agent-xxx / master / owner） */
   proposer: string;
@@ -40,7 +41,9 @@ export interface TeamProposal {
   createdAt: number;
   expiresAt: number;
   hash: string;
-  status: "pending" | "applying" | "applied" | "rejected" | "failed";
+  /** pending → confirmed（bridge 在 owner 点确认时标）→ applied（team-apply 写完台账）；或 rejected / failed */
+  status: "pending" | "confirmed" | "applied" | "rejected" | "failed";
+  confirmedAt?: number;
   /** 结案说明（谁点的、失败在哪一步） */
   note?: string;
 }
@@ -76,6 +79,19 @@ export function refuseReason(p: TeamProposal | undefined, hash: string, now: num
   return null;
 }
 
+/** 确认后 team-apply 要在这么久内跑完（生效步骤里的 create 最多等 3 分钟） */
+const APPLY_WINDOW_MS = 10 * 60_000;
+
+/** `ledger team-apply` 的核对：必须是 bridge 标过的 confirmed、内容没被改过、确认发生在过期之前、还在执行窗口内；null = 可以写 */
+export function applyRefusal(p: TeamProposal | undefined, now: number): string | null {
+  if (!p) return "提案不存在";
+  if (p.status !== "confirmed" || typeof p.confirmedAt !== "number") return `提案状态是 ${p.status}，没有经 owner 确认，不能写台账`;
+  if (proposalHash(p) !== p.hash) return "提案内容在确认后被改过，作废";
+  if (p.confirmedAt > p.expiresAt) return "提案是过期后才确认的，作废";
+  if (now - p.confirmedAt > APPLY_WINDOW_MS) return "确认已超过 10 分钟还没写入，作废；请重新提议";
+  return null;
+}
+
 const bare = (k: string) => k.replace(/^agent-/, "");
 
 /** 贴给 owner 看的说明：按钮点下去会发生什么，逐条写清 */
@@ -90,6 +106,8 @@ export function proposalText(p: TeamProposal): string {
           ...(p.pm ? [`- ${bare(p.pm)} 设为 PM 角色（下次重启生效，不会自动重启）`] : []),
           `- 巡检：${p.audit ? "开" : "关"}；开启后台账事件自动路由`,
         ]
+      : p.kind === "pms"
+      ? [`🧩 PM 名单：请确认项目「${p.project}」的 PM 名单改为 ${p.pms.map(bare).join("、") || "（空）"}（${bare(p.proposer)} 提议）`]
       : [
           `🧩 编排班子：请确认撤掉项目「${p.project}」的班子（${bare(p.proposer)} 提议）`,
           "- 停止台账事件路由",
@@ -99,29 +117,26 @@ export function proposalText(p: TeamProposal): string {
   return [...lines, `只有 owner 本人点确认才生效；30 分钟内有效（提案 ${p.id}）。`].join("\n");
 }
 
-/** 确认后 bridge 依次执行的 manager 命令（第一条失败就停，已执行的不回滚，结果写进提案 note） */
+/**
+ * 确认后 bridge 依次执行的 manager 命令（第一条失败就停，已执行的不回滚，结果写进提案 note）。
+ * 台账只经 `ledger team-apply` 写；建 agent、设角色（只影响启动提示，不涉权限）在它前后照常跑。
+ */
 export function applyPlan(p: TeamProposal): string[][] {
-  const P = ["--project", p.project];
+  const apply = ["ledger", "team-apply", p.id];
   const d = p.dispatcher;
-  const decision = ["ledger", "decision", "-", ...P, "--transcribed", `owner 在界面上确认了班子提案 ${p.id}：${proposalText(p).split("\n").slice(1, -1).join("；")}`];
-  if (p.kind === "down") {
-    return [
-      ["ledger", "meta", ...P, "--team", "off"],
-      ["ledger", "meta", ...P, "--pms", p.pms.join(",")],
-      ...(d ? [["team-link", d.agent, "--role", "none"]] : []),
-      decision,
-    ];
-  }
+  if (p.kind === "pms") return [apply];
+  if (p.kind === "down") return [apply, ...(d ? [["team-link", d.agent, "--role", "none"]] : [])];
   const createD = d?.create ? [["create", d.agent, d.dir ?? "", "--project", p.project, "--role", "dispatcher", "--purpose", `项目 ${p.project} 的调度助理`]] : [];
   const roleD = d && !d.create ? [["team-link", d.agent, "--role", "dispatcher"]] : [];
-  return [
-    ...createD,
-    ...roleD,
-    ...(p.pm ? [["team-link", p.pm, "--role", "pm"]] : []),
-    ["ledger", "meta", ...P, "--pms", p.pms.join(",")],
-    ["ledger", "meta", ...P, "--team", "on", "--dispatcher", d ? d.agent : "-"],
-    decision,
-  ];
+  return [...createD, ...roleD, ...(p.pm ? [["team-link", p.pm, "--role", "pm"]] : []), apply];
+}
+
+/** team-apply 往台账写什么：PM 名单整表替换；班子配置 up = 开、down = 关、pms = 不动 */
+export function ledgerWrites(p: TeamProposal): { pms: string[]; team?: { dispatcher: string | null; audit: boolean } | null; decision: string } {
+  const decision = `owner 在界面上确认了提案 ${p.id}：${proposalText(p).split("\n").slice(p.kind === "pms" ? 0 : 1, -1).join("；")}`;
+  if (p.kind === "pms") return { pms: p.pms, decision };
+  if (p.kind === "down") return { pms: p.pms, team: null, decision };
+  return { pms: p.pms, team: { dispatcher: p.dispatcher?.agent ?? null, audit: p.audit }, decision };
 }
 
 const isMap = (v: unknown): boolean => !!v && typeof v === "object" && !Array.isArray(v);
@@ -138,7 +153,7 @@ export async function updateProposals<T>(mutate: (m: ProposalMap) => T, now = Da
     const all = await readProposals(path);
     const out = mutate(all);
     for (const [id, p] of Object.entries(all)) {
-      if (p.status !== "pending" && p.status !== "applying" && now - p.expiresAt > KEEP_CLOSED_MS) delete all[id];
+      if (p.status !== "pending" && p.status !== "confirmed" && now - p.expiresAt > KEEP_CLOSED_MS) delete all[id];
     }
     await writeJsonStateGuarded(path, all, { validate: isMap });
     return out;

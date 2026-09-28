@@ -5,6 +5,7 @@
  * 只通知一次：游标（最后处理到的事件 seq）落盘在 CURSOR_PATH，先推进游标、再投递——崩溃窗口里最多漏一条（T29 巡检兜），
  * 不会在 bridge 重启后重发。首次运行没有游标就从当前最大 seq 起，库被换成更短的一份也从头起算最大 seq，历史不补发。
  * 不抢占：目标在回合中 / 压缩中 / 不在线就进押后队列（落盘，回合结束或连上后再投），和 agent→agent 消息同一条路。
+ * 硬规则（P0、第 3 轮不通过）：用 runManager 调 `ledger escalate --auto` 由 CLI 记账（dedup 按 review 的 seq），PM 下一轮经 escalate 收到。
  */
 import type { ServerWebSocket } from "bun";
 import { LedgerReader } from "../lib/ledger-read.js";
@@ -12,8 +13,9 @@ import { getMeta, getTask, listEvents } from "../lib/ledger-store.js";
 import { statePath } from "../lib/paths.js";
 import { readRegistryAgentsSync } from "../lib/registry.js";
 import { readJsonStateSync, writeJsonAtomicSync } from "../lib/state-file.js";
-import { routeEvents, type RouteNotice } from "../lib/team-route.js";
-import { MANAGER_PATH } from "./config.js";
+import { runManagerProcess } from "../lib/run-manager.js";
+import { autoEscalations, routeEvents, type AutoEscalation, type RouteNotice } from "../lib/team-route.js";
+import { BUN_PATH, ENV_WITH_BUN, MANAGER_PATH } from "./config.js";
 import { newThreadId, type Envelope } from "./router.js";
 
 const TICK_MS = 2000;
@@ -41,6 +43,8 @@ export interface TickerDeps {
   /** registry 键 → 频道；找不到 = 不在 registry（已删 / 拼错） */
   channelOf(agent: string): string | null;
   send(n: RouteNotice, channelId: string): Promise<void>;
+  /** 记一条硬规则升级（CLI 写台账）；失败返回原因 */
+  escalate(a: AutoEscalation): Promise<string | null>;
   log(msg: string): void;
 }
 
@@ -82,15 +86,21 @@ export function teamRouterTicker(d: TickerDeps): () => Promise<void> {
       }
       if (top === cursor) return;
       const batch = listEvents(db, { afterSeq: cursor });
-      const notices = routeEvents(batch, {
-        task: (id) => getTask(db, id),
-        team: (project) => {
+      const ctx = {
+        task: (id: string) => getTask(db, id),
+        team: (project: string) => {
           const m = getMeta(db, project);
           return { pms: m.pms, team: m.team };
         },
         managerCmd: `bun ${MANAGER_PATH}`,
-      });
+      };
+      const notices = routeEvents(batch, ctx);
+      const escalations = autoEscalations(batch, ctx);
       writeJsonAtomicSync(d.cursorPath, { seq: batch.at(-1)?.seq ?? cursor });
+      for (const a of escalations) {
+        const why = await d.escalate(a);
+        d.log(why ? `⚠️ 班子路由：${a.taskId} 的硬规则升级没记上（${why}），由巡检兜底` : `📮 ${a.taskId} 硬规则升级：${a.reason.split("；")[0]}`);
+      }
       for (const n of notices) {
         const ch = d.channelOf(n.to);
         if (!ch) d.log(`⚠️ 班子路由：${n.to} 不在 registry，${n.taskId || "项目级"} 的 ${n.kind} 通知（seq ${n.seq}）没投`);
@@ -145,6 +155,11 @@ export function initTeamRouter(deps: TeamRouterDeps): void {
     cursorPath: CURSOR_PATH,
     channelOf: (agent) => readRegistryAgentsSync().find((a) => a.name === agent && a.status === "active")?.channelId ?? null,
     send: makeSender(deps, log),
+    escalate: async (a) => {
+      const args = ["ledger", "escalate", a.taskId, "--reason", a.reason, "--auto", "--dedup", a.dedup];
+      const r = await runManagerProcess(args, { bunPath: BUN_PATH, managerPath: MANAGER_PATH, env: ENV_WITH_BUN, timeoutMs: 30_000 }).catch((e: Error) => ({ ok: false, error: e.message }));
+      return r && r.ok !== false ? null : String(r?.error ?? "无输出");
+    },
     log,
   });
   let running = false;

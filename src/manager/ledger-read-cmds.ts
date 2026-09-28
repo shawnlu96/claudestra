@@ -7,11 +7,12 @@ import { homedir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import { taskMetrics } from "../lib/ledger-metrics.js";
 import { getItem, getMeta, getTask, LedgerError, listEvents, listItems, listTasks } from "../lib/ledger-store.js";
-import { setMeta, type TeamInput } from "../lib/ledger-write.js";
+import { setMeta } from "../lib/ledger-write.js";
 import { isUmbrellaDir, normalizeDir } from "../lib/projects.js";
 import type { LedgerCli, Result } from "./ledger-context.js";
 import { agentKey, intFlag } from "./ledger-identity.js";
 import type { CommandSpec } from "./ledger-write-cmds.js";
+import { propose, type Agents } from "./team-up.js";
 
 const DEFAULT_EVENTS = 20;
 
@@ -91,33 +92,25 @@ export function expandDocsDir(raw: string, home = homedir()): string {
   return real;
 }
 
-/** --team on|off [--dispatcher <agent>]：开 / 关编排班子（事件路由）；只带 --dispatcher 视同 --team on */
-function teamValue(c: LedgerCli): TeamInput | undefined {
-  const { team, dispatcher } = c.p.flags;
-  if (team === undefined && dispatcher === undefined) return undefined;
-  if (team !== undefined && team !== "on" && team !== "off") throw new LedgerError("invalid", "--team 只能是 on / off");
-  if (team === "off") {
-    if (dispatcher !== undefined) throw new LedgerError("invalid", "--team off 不能再带 --dispatcher");
-    return null;
-  }
-  const d = dispatcher?.trim();
-  return { dispatcher: d && d !== "-" ? agentKey(d) : null, audit: true };
-}
-
-/** 不带参数 = 查看；--pms / --docs-dir / --team 只有 owner 能设（库里判） */
-function meta(c: LedgerCli): Result {
+/**
+ * 不带参数 = 查看；--docs-dir 只有 owner 能设（库里判）。
+ * --pms 不直接写：PM / master / owner 只能提议，生成提案、贴确认按钮，owner 在界面上点了才由 `ledger team-apply` 写（owner 在终端里也一样）。
+ */
+async function meta(c: LedgerCli): Promise<Result> {
   const project = c.project();
   const { pms, "docs-dir": docsDir } = c.p.flags;
-  const team = teamValue(c);
-  if (pms === undefined && docsDir === undefined && team === undefined) return { ok: true, project, meta: getMeta(c.db, project) };
-  const ctx = { actor: c.deps.actor, now: c.deps.now() };
-  if (pms !== undefined) {
-    const list = pms.split(",").map((s) => s.trim()).filter(Boolean).map(agentKey);
-    setMeta(c.db, ctx, { project, key: "pms", value: list });
+  if (c.p.flags.team !== undefined || c.p.flags.dispatcher !== undefined) {
+    throw new LedgerError("invalid", "班子配置不能直接设：用 team up / team down --project <id>，由 owner 在界面上确认");
   }
-  if (docsDir !== undefined) setMeta(c.db, ctx, { project, key: "docsDir", value: expandDocsDir(docsDir) });
-  if (team !== undefined) setMeta(c.db, ctx, { project, key: "team", value: team });
-  return { ok: true, project, meta: getMeta(c.db, project) };
+  if (pms === undefined && docsDir === undefined) return { ok: true, project, meta: getMeta(c.db, project) };
+  if (docsDir !== undefined) setMeta(c.db, { actor: c.deps.actor, now: c.deps.now() }, { project, key: "docsDir", value: expandDocsDir(docsDir) });
+  if (pms === undefined) return { ok: true, project, meta: getMeta(c.db, project) };
+  c.requireManager(project, "提议改 PM 名单");
+  const list = [...new Set(pms.split(",").map((s) => s.trim()).filter(Boolean).map(agentKey))];
+  const cur = getMeta(c.db, project);
+  const draft = { kind: "pms" as const, project, proposer: c.deps.actor, pm: null, pms: list, dispatcher: null, audit: cur.team?.audit ?? true };
+  const agents = (await c.deps.loadRegistry()).agents as Agents;
+  return { ...(await propose(draft, agents, c.deps.proposals)), project, meta: cur };
 }
 
 export const READ_CMDS: Record<string, CommandSpec> = {
@@ -126,7 +119,7 @@ export const READ_CMDS: Record<string, CommandSpec> = {
   export: { valued: ["out", "sqlite", "project"], usage: "export --out <file.json> | --sqlite <file>", run: exportCmd },
   meta: {
     valued: ["pms", "docs-dir", "team", "dispatcher", "project"],
-    usage: "meta [--pms a,b] [--docs-dir <path>] [--team on|off] [--dispatcher <agent>|-]（不带参数 = 查看）",
+    usage: "meta [--pms a,b（生成提案，owner 确认后生效）] [--docs-dir <path>]（不带参数 = 查看）",
     run: meta,
   },
 };

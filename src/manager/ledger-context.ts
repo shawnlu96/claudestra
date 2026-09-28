@@ -8,6 +8,7 @@ import { roleOf, type LedgerTask, type Role } from "../lib/ledger-stages.js";
 import { getItem, getMeta, getTask, LedgerError } from "../lib/ledger-store.js";
 import type { WriteCtx } from "../lib/ledger-write.js";
 import type { Registry } from "./core.js";
+import type { ProposeOpts } from "./team-up.js";
 import type { ParsedArgs } from "./ledger-identity.js";
 
 export interface LedgerDeps {
@@ -23,6 +24,8 @@ export interface LedgerDeps {
   now(): number;
   /** dispatch 核对 head 用；不给 = 真跑 git（单测注入） */
   gitHead?(dir: string): string | null;
+  /** 班子提案（meta --pms、team-apply）存哪、按钮怎么贴；不给 = 状态目录 + 真贴按钮（单测注入） */
+  proposals?: ProposeOpts;
 }
 
 export type Result = Record<string, unknown>;

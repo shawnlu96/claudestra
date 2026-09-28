@@ -4,7 +4,7 @@
  *
  * 规则：先按当前阶段定默认的一环，再按进入当前阶段之后的事件往后推：
  *   deliver → 调度助理（没配就是 PM）；dispatch → 审查员；review 没带阶段移动 → 通过归 PM、否则回调度助理；
- *   escalate → PM（data.to = owner 时归 owner）。进入新阶段（stage 事件）重新从默认值算起。
+ *   escalate → PM（data.to = owner 时归 owner；硬规则的自动升级 data.auto 不改处理人）。进入新阶段（stage 事件）重新从默认值算起。
  */
 import type { LedgerEvent, LedgerTask, Stage } from "./ledger-stages.js";
 
@@ -64,6 +64,8 @@ function roleAfter(e: LedgerEvent): HandlerRole | null {
     case "review":
       return e.data.verdict === "pass" ? "pm" : "dispatcher";
     case "escalate":
+      // 硬规则的自动升级只是抄送 PM，任务仍在原处理人手上（比如 P0 推回 fix 后仍是执行者在修）
+      if (e.data.auto === true) return null;
       return e.data.to === "owner" ? "owner" : "pm";
     default:
       return null;
