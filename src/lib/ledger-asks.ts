@@ -1,0 +1,226 @@
+/**
+ * 「待你处理」的库（docs 13 §4.2 §4.6）：asks 表 + ask / decision / ask_expire / ask_cancel 事件，每个写函数一个 BEGIN IMMEDIATE 事务。
+ * 10-ledger §2「bridge 只读」的唯一例外：作答只能经 bridge（HTTP 的 owner 凭据 / Discord 交互），CLI 不提供 answer，
+ * 所以 bridge 用自己的写连接写这张表；阶段机、items、tasks 一律不碰（那些只在 ledger-write.ts）。
+ * 读函数同时给 bridge 的只读连接用：库是 v1（CLI 旧版建的、还没人建过 ask）时 hasAsksTable 为假，调用方按空处理。
+ */
+import type { Database } from "bun:sqlite";
+import type { EventKind } from "./ledger-stages.js";
+import { busyAsLedgerError, LedgerError } from "./ledger-store.js";
+
+export type AskKind = "decide" | "authorize" | "owner_action" | "accept";
+type AskState = "open" | "answered" | "expired" | "cancelled";
+export type AskSource = "reply" | "auq" | "permission" | "codex";
+/** 大总管不属于任何项目，它发的 ask 记在这个 project 下，只从跨项目的 /api/v1/asks 读 */
+export const MASTER_PROJECT = "master";
+
+const HOUR = 3600_000;
+/** 默认有效期（docs 13 §4.2）；没人点 ≠ 同意，到期按未批准处理 */
+export const ASK_TTL_MS: Record<AskKind, number> = { decide: 24 * HOUR, authorize: 4 * HOUR, owner_action: 24 * HOUR, accept: 7 * 24 * HOUR };
+
+/** 作答是从哪条路来的：卡片 / 聊天里的按钮或表单 / Discord / 运行时弹框的交互端点 / 终端里自己答了 */
+export type AskVia = "web_card" | "web_chat" | "discord" | "interact" | "terminal";
+
+export interface AskAnswer {
+  /** 回投给 agent 的 wire 行：`[button:id]` / `[select:id:v1,v2]` */
+  choices: string[];
+  /** owner 另外写的话（卡片文本框 / 输入框里表单同步行之外的文字） */
+  text: string;
+  principal: string;
+  device?: string;
+  via: AskVia;
+  at: number;
+}
+
+export interface Ask {
+  id: string;
+  project: string;
+  itemId: string | null;
+  taskId: string | null;
+  fromAgent: string;
+  fromChannelId: string;
+  source: AskSource;
+  kind: AskKind;
+  /** null = 自动建的，不知道卡不卡活 */
+  blocking: boolean | null;
+  urgency: "normal" | "urgent";
+  title: string;
+  context: string;
+  body: string;
+  /** reply 的 components 行（网页 WebComponentRow 同形），运行时弹框是它自己的选项 */
+  options: unknown[];
+  allowText: boolean;
+  kindHint: string | null;
+  chatId: string;
+  threadId: string | null;
+  discordMessageIds: string[];
+  expiresAt: number;
+  state: AskState;
+  answer: AskAnswer | null;
+  outboxMessageId: string | null;
+  extra: Record<string, unknown>;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export type NewAsk = Pick<Ask, "project" | "fromAgent" | "fromChannelId" | "source" | "kind" | "title"> &
+  Partial<Pick<Ask, "itemId" | "taskId" | "blocking" | "urgency" | "context" | "body" | "options" | "allowText" | "kindHint" | "chatId" | "threadId" | "expiresAt" | "extra">>;
+
+type Row = Record<string, unknown>;
+
+function json<T>(s: unknown, fallback: T): T {
+  if (typeof s !== "string" || !s) return fallback;
+  return JSON.parse(s) as T;
+}
+
+function toAsk(r: Row): Ask {
+  return {
+    ...(r as unknown as Ask),
+    blocking: r.blocking === null || r.blocking === undefined ? null : r.blocking === 1,
+    allowText: r.allowText === 1,
+    options: json(r.options, [] as unknown[]),
+    discordMessageIds: json(r.discordMessageIds, [] as string[]),
+    answer: json(r.answer, null as AskAnswer | null),
+    extra: json(r.extra, {} as Record<string, unknown>),
+  };
+}
+
+export function hasAsksTable(db: Database): boolean {
+  return !!db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'asks'").get();
+}
+
+function tx<T>(db: Database, fn: () => T): T {
+  return busyAsLedgerError("写 ask", () => db.transaction(fn).immediate());
+}
+
+function addEvent(db: Database, a: Ask, kind: EventKind, actor: string, text: string, data: Record<string, unknown>, now: number): void {
+  db.prepare("INSERT INTO events (ts, actor, project, target, kind, text, data) VALUES (?, ?, ?, ?, ?, ?, ?)")
+    .run(now, actor, a.project, a.taskId ?? "", kind, text, JSON.stringify({ askId: a.id, ...data }));
+}
+
+function newAskId(): string {
+  return `ask_${Date.now().toString(36)}${crypto.randomUUID().replace(/-/g, "").slice(0, 10)}`;
+}
+
+export function getAsk(db: Database, id: string): Ask | null {
+  const r = db.query("SELECT * FROM asks WHERE id = ?").get(id) as Row | null;
+  return r ? toAsk(r) : null;
+}
+
+export function openAsk(db: Database, input: NewAsk, now = Date.now()): Ask {
+  const id = newAskId();
+  return tx(db, () => {
+    db.prepare(`INSERT INTO asks (id, project, itemId, taskId, fromAgent, fromChannelId, source, kind, blocking, urgency, title, context, body,
+      options, allowText, kindHint, chatId, threadId, expiresAt, state, extra, createdAt, updatedAt)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?)`).run(
+      id, input.project, input.itemId ?? null, input.taskId ?? null, input.fromAgent, input.fromChannelId, input.source, input.kind,
+      input.blocking === undefined || input.blocking === null ? null : input.blocking ? 1 : 0, input.urgency ?? "normal",
+      input.title, input.context ?? "", input.body ?? "", JSON.stringify(input.options ?? []), input.allowText === false ? 0 : 1,
+      input.kindHint ?? null, input.chatId ?? "", input.threadId ?? null, input.expiresAt ?? now + ASK_TTL_MS[input.kind],
+      JSON.stringify(input.extra ?? {}), now, now,
+    );
+    const a = getAsk(db, id) as Ask;
+    addEvent(db, a, "ask", a.fromAgent, a.title, { source: a.source, kind: a.kind, blocking: a.blocking }, now);
+    return a;
+  });
+}
+
+/** 已结案 → conflict，current 带上库里的状态与答案（调用方据此回「已处理」） */
+function closedError(a: Ask): LedgerError {
+  const word = a.state === "answered" ? "处理" : a.state === "expired" ? "过期" : "撤销";
+  return new LedgerError("conflict", `ask ${a.id} 已${word}`, { state: a.state, answer: a.answer });
+}
+
+function setState(db: Database, id: string, state: AskState, now: number, answer?: AskAnswer): Ask {
+  db.prepare("UPDATE asks SET state = ?, answer = COALESCE(?, answer), updatedAt = ? WHERE id = ?").run(state, answer ? JSON.stringify(answer) : null, now, id);
+  return getAsk(db, id) as Ask;
+}
+
+function expireRow(db: Database, a: Ask, now: number): Ask {
+  const out = setState(db, a.id, "expired", now);
+  addEvent(db, out, "ask_expire", "bridge", a.title, {}, now);
+  return out;
+}
+
+/**
+ * owner 作答：open → answered，同一事务里追加 decision 事件（actor = owner，data 带原话与所选）。
+ * 已结案 → conflict；到点还没被扫成 expired 的，这里先记成 expired（事务照常提交）再报 conflict——在事务里抛错会把这笔回滚掉。
+ */
+export function answerAsk(db: Database, id: string, answer: AskAnswer): Ask {
+  const r = tx(db, (): { ask: Ask; done: boolean } => {
+    const a = getAsk(db, id);
+    if (!a) throw new LedgerError("not_found", `ask ${id} 不存在`);
+    if (a.state === "open" && a.expiresAt <= answer.at) return { ask: expireRow(db, a, answer.at), done: false };
+    if (a.state !== "open") return { ask: a, done: false };
+    const out = setState(db, id, "answered", answer.at, answer);
+    const text = [answer.choices.join(" "), answer.text].filter(Boolean).join("；");
+    addEvent(db, out, "decision", "owner", text || out.title, { via: answer.via, choices: answer.choices, ownerWords: answer.text, principal: answer.principal }, answer.at);
+    return { ask: out, done: true };
+  });
+  if (!r.done) throw closedError(r.ask);
+  return r.ask;
+}
+
+/** open → expired / cancelled；已不是 open 的返回 null（重复触发无害） */
+export function closeAsk(db: Database, id: string, state: "expired" | "cancelled", reason = "", now = Date.now()): Ask | null {
+  return tx(db, () => {
+    const a = getAsk(db, id);
+    if (!a || a.state !== "open") return null;
+    if (state === "expired") return expireRow(db, a, now);
+    const out = setState(db, id, "cancelled", now);
+    addEvent(db, out, "ask_cancel", "bridge", reason || a.title, { reason }, now);
+    return out;
+  });
+}
+
+/** 投递信息补记（Discord 消息 id、答复消息 id、改投记录）：不改状态、不记事件 */
+export function patchAsk(db: Database, id: string, p: { discordMessageIds?: string[]; outboxMessageId?: string; extra?: Record<string, unknown> }, now = Date.now()): void {
+  tx(db, () => {
+    const a = getAsk(db, id);
+    if (!a) return;
+    db.prepare("UPDATE asks SET discordMessageIds = ?, outboxMessageId = ?, extra = ?, updatedAt = ? WHERE id = ?").run(
+      JSON.stringify(p.discordMessageIds ?? a.discordMessageIds), p.outboxMessageId ?? a.outboxMessageId,
+      JSON.stringify({ ...a.extra, ...p.extra }), now, id,
+    );
+  });
+}
+
+export interface AskQuery {
+  project?: string;
+  states?: AskState[];
+  fromAgent?: string;
+  source?: AskSource;
+  /** 已结案的只要 updatedAt 晚于它的（「最近处理过」） */
+  closedSince?: number;
+  limit?: number;
+}
+
+/** open 的按 createdAt 升序（等得最久的在前），其余按 updatedAt 降序 */
+export function listAsks(db: Database, q: AskQuery = {}): Ask[] {
+  const conds: string[] = [];
+  const args: (string | number)[] = [];
+  const add = (sql: string, ...v: (string | number)[]) => {
+    conds.push(sql);
+    args.push(...v);
+  };
+  if (q.project !== undefined) add("project = ?", q.project);
+  if (q.fromAgent !== undefined) add("fromAgent = ?", q.fromAgent);
+  if (q.source !== undefined) add("source = ?", q.source);
+  if (q.states?.length) add(`state IN (${q.states.map(() => "?").join(",")})`, ...q.states);
+  if (q.closedSince !== undefined) add("(state = 'open' OR updatedAt > ?)", q.closedSince);
+  const sql = `SELECT * FROM asks${conds.length ? ` WHERE ${conds.join(" AND ")}` : ""}
+    ORDER BY CASE state WHEN 'open' THEN 0 ELSE 1 END, CASE state WHEN 'open' THEN createdAt ELSE -updatedAt END${q.limit ? " LIMIT ?" : ""}`;
+  if (q.limit) args.push(q.limit);
+  return (db.query(sql).all(...args) as Row[]).map(toAsk);
+}
+
+/** Discord 交互按原消息 id 找 ask（一条 reply 分块发成多条消息时，任何一条都认） */
+export function findAskByDiscordMessage(db: Database, messageId: string): Ask | null {
+  const r = db.query("SELECT a.* FROM asks a, json_each(a.discordMessageIds) j WHERE j.value = ? ORDER BY a.createdAt DESC LIMIT 1").get(messageId) as Row | null;
+  return r ? toAsk(r) : null;
+}
+
+/** 到期还开着的（每分钟扫一次） */
+export function dueAsks(db: Database, now = Date.now()): Ask[] {
+  return (db.query("SELECT * FROM asks WHERE state = 'open' AND expiresAt <= ?").all(now) as Row[]).map(toAsk);
+}

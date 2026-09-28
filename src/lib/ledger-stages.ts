@@ -16,9 +16,10 @@ export type Role = (typeof ROLES)[number];
 export const ITEM_STATUSES = ["todo", "decide", "design", "doing", "done", "dropped"] as const;
 export type ItemStatus = (typeof ITEM_STATUSES)[number];
 
-/** stage / item / task / meta 由写入函数自动产生；其余由调用方显式追加 */
+/** stage / item / task / meta 由写入函数自动产生；ask / ask_expire / ask_cancel（与作答的 decision）只由 bridge 的 ledger-asks.ts 写；其余由调用方显式追加 */
 const EVENT_KINDS = [
   "stage", "item", "task", "meta", "note", "deliver", "review", "decision", "deploy", "verify", "rollback", "freeze", "unfreeze",
+  "ask", "ask_expire", "ask_cancel",
 ] as const;
 export type EventKind = (typeof EVENT_KINDS)[number];
 

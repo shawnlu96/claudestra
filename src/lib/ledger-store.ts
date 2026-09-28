@@ -10,9 +10,9 @@ import type { EventKind, LedgerEvent, LedgerItem, LedgerTask } from "./ledger-st
 import { statePath } from "./paths.js";
 
 export const LEDGER_PATH = statePath("ledger.sqlite");
-export const LEDGER_TABLES = ["items", "tasks", "events", "meta"] as const;
+export const LEDGER_TABLES = ["items", "tasks", "events", "meta", "asks"] as const;
 /** PRAGMA user_version；升级时在 MIGRATIONS 末尾追加一步，旧库按顺序补齐 */
-export const LEDGER_SCHEMA_VERSION = 1;
+export const LEDGER_SCHEMA_VERSION = 2;
 /** 另一个进程持有写锁时最多等这么久，再报 SQLITE_BUSY */
 const BUSY_TIMEOUT_MS = 5000;
 /** 切 WAL 时每次尝试只等这么久，总时长由 ensureWal 的退避循环控制在 BUSY_TIMEOUT_MS 内 */
@@ -69,8 +69,30 @@ CREATE TABLE meta (
   value TEXT NOT NULL, PRIMARY KEY (project, key));
 `;
 
+/**
+ * v2「待你处理」（docs 13 §4.2）：唯一由 bridge 写的表（ledger-asks.ts）；阶段机与 items / tasks 仍只有 CLI 写。
+ * project = "master" 表示大总管发的（它不属于任何项目）；blocking NULL = 自动建的、不知道卡不卡活。
+ */
+const SCHEMA_V2 = `
+CREATE TABLE asks (
+  id TEXT PRIMARY KEY, project TEXT NOT NULL, itemId TEXT, taskId TEXT,
+  fromAgent TEXT NOT NULL, fromChannelId TEXT NOT NULL,
+  source TEXT NOT NULL CHECK (source IN ('reply','auq','permission','codex')),
+  kind TEXT NOT NULL CHECK (kind IN ('decide','authorize','owner_action','accept')),
+  blocking INTEGER, urgency TEXT NOT NULL DEFAULT 'normal' CHECK (urgency IN ('normal','urgent')),
+  title TEXT NOT NULL, context TEXT NOT NULL DEFAULT '', body TEXT NOT NULL DEFAULT '',
+  options TEXT NOT NULL DEFAULT '[]', allowText INTEGER NOT NULL DEFAULT 1, kindHint TEXT,
+  chatId TEXT NOT NULL DEFAULT '', threadId TEXT, discordMessageIds TEXT NOT NULL DEFAULT '[]',
+  expiresAt INTEGER NOT NULL,
+  state TEXT NOT NULL CHECK (state IN ('open','answered','expired','cancelled')),
+  answer TEXT, outboxMessageId TEXT, extra TEXT NOT NULL DEFAULT '{}',
+  createdAt INTEGER NOT NULL, updatedAt INTEGER NOT NULL);
+CREATE INDEX asks_state_project ON asks(state, project);
+CREATE INDEX asks_from_state ON asks(fromAgent, state);
+`;
+
 /** 下标 i 把库从版本 i 升到 i+1 */
-const MIGRATIONS: string[] = [SCHEMA_V1];
+const MIGRATIONS: string[] = [SCHEMA_V1, SCHEMA_V2];
 
 function isBusy(e: unknown): boolean {
   return String((e as { code?: unknown })?.code ?? "").startsWith("SQLITE_BUSY");
