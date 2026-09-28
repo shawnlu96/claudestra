@@ -721,7 +721,7 @@ async function deliverToApi(env: RouterEnvelope, to: RouterApiUserEndpoint): Pro
     agent: agentName,
     chatId: `api:${to.tokenId}`,
     type: "chat_message",
-    data: { direction: "out", from: agentName, text: env.content, threadId, api: true, ...(env.meta.components ? { components: env.meta.components } : {}), ...(eventFiles.length ? { files: eventFiles } : {}) },
+    data: { direction: "out", from: agentName, text: env.content, threadId, api: true, ...(env.meta.components ? { components: env.meta.components, askId: env.meta.askId } : {}), ...(eventFiles.length ? { files: eventFiles } : {}) },
   });
 
   // R2 审计镜像（fire-and-forget，走 bridge→user 的 UI 类通道）
@@ -862,7 +862,7 @@ async function deliverToLocal(env: RouterEnvelope, to: RouterLocalEndpoint, stil
     to.ws.send(JSON.stringify({ type: "message", content, meta }));
     // 入站消息镜像：srcKind(user=Discord 人类/api=Web 用户/local=agent/bridge)让 web 把他端用户发言实时画成气泡、
     // 排除 agent/bridge 注入；fromId(user_id)让 web 认出哪些是本人的其它来源(自己的 Discord 也靠右)
-    const inData = { direction: "in", from: meta.user || "?", fromId: meta.user_id, srcKind: env.from.kind, text: env.content, threadId: env.meta.threadId };
+    const inData = { direction: "in", from: meta.user || "?", fromId: meta.user_id, srcKind: env.from.kind, text: env.content, threadId: env.meta.threadId, askId: env.meta.askId };
     emitEvent({ agent: evAgent, chatId: to.channelId, type: "chat_message", data: inData });
     // watcher 入站自愈(2026-07-24 wechat-bot:创建后 >60s 才来首条消息,pending-start 已放弃 → watcher
     // 永久缺位,工具/文本不直播、Stop done 挂 '?' 名下卡「工作中」)。每条入站核对 watcher 在位,缺位按
@@ -1115,7 +1115,6 @@ async function renderContentForLocal(env: RouterEnvelope): Promise<string> {
   // 其他情况（user 在 agent 自己的频道）原样投递
   return env.content;
 }
-
 
 /** 开始 typing + 30min 安全超时（实现在 discord-adapter，这里注入 owner mention） */
 function startTypingWithSafety(channelId: string) {
@@ -1889,7 +1888,7 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
             files: msg.files,
           },
         };
-        const delivery = await deliver(env);
+        const delivery = await (await import("./bridge/asks.js")).deliverReplyWithAsk(env, msg.chatId, fromChannelId, deliver); // 带选项发给 owner → 建「待你处理」
         if (delivery.outcome.kind !== "sent") {
           const errMsg = delivery.outcome.kind === "dropped"
             ? `reply dropped: ${delivery.outcome.reason}`
@@ -1905,7 +1904,7 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
         // 这里再发就是同一条回复的重复事件（web 前端会渲染两遍）。
         if (parseChatId(msg.chatId).transport !== "api") {
           const evAgent = agentLabelForChannel(fromChannelId);
-          emitEvent({ agent: evAgent, chatId: msg.chatId, type: "chat_message", data: { direction: "out", from: evAgent, text, threadId: env.meta.threadId, ...(msg.components ? { components: msg.components } : {}) } });
+          emitEvent({ agent: evAgent, chatId: msg.chatId, type: "chat_message", data: { direction: "out", from: evAgent, text, threadId: env.meta.threadId, ...(msg.components ? { components: msg.components, askId: env.meta.askId } : {}) } });
         }
 
         // v1.9.21+ send_to_agent 推回机制：
@@ -2401,11 +2400,9 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
 
         // v1.9.21+: 记 pending agent call。当 target agent 下一次 reply 到自己 channel
         // 时，bridge 把那段 text 也 push 回 caller 的 ws（免 fetch_messages 轮询）。
-        //
         // v2.0.1+: 同时推断 originalReplyChannel —— caller 手头正在处理的
         // inbound 请求的 intendedReplyChannel。pushback 用它做 meta.chat_id，
         // caller LLM 就不会错用 target 的私频当作回复目标（Bug 2 修复）。
-        //
         // oneShot=true 是 fire-and-forget:不挂 pending(不会 pushback),下游 deliverToLocal 也不给 target 挂
         // pendingInterAgentMsg watchdog。用于 status sync / ack / FYI 等 agent 之间不期待回应的消息。
         // 先记回程再投递:投出去 / 进押后队列之后 bridge 崩溃,重启恢复的也是「有消息、有回程」
@@ -2665,7 +2662,6 @@ async function cleanupStaleThinkingMessages(): Promise<void> {
     console.error("cleanupStaleThinkingMessages 异常:", e);
   }
 }
-
 
 /** 每分钟扫一次：回程簿里送达后 2 小时还没被消化的条目清掉（target 的 Stop / reply / 回发 send_to_agent 都会消化它，
  * 残留只在 Stop 丢失、target 挂了之类的情况）。2 小时 = Autopilot 一轮的长度：以前 10 分钟，target 长回合结束才答时回程已被扫没。
@@ -3547,6 +3543,9 @@ initInbox({
   } }),
 });
 void import("./bridge/mission.js").then((m) => m.initMission({ clients, deliver, lastMessageSource, controlChannelId: CONTROL_CHANNEL_ID })); // Autopilot：回合结束自动推进
+void import("./bridge/ask-entry.js").then((m) => m.initAskWiring({ // 待你处理：答复 / 过期通知不抢占（押后由 waitForIdle 标记）
+  clients, deliver, hold: (e) => void heldLocalMsgs.holdEnv(e), controlChannelId: CONTROL_CHANNEL_ID, discord: WEB_ONLY ? null : discord,
+}));
 void import("./bridge/fleet/service.js").then((m) => m.initFleet({ clients, deliver, controlChannelId: CONTROL_CHANNEL_ID })); // 批量管理：LP 状态轮询 + fleet 动作（bridge/fleet/）
 
 // 清扫上次崩溃/被杀残留的 webterm-* viewer session（grouped session 视图，

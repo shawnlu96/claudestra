@@ -2,8 +2,8 @@
  * 批量管理（bridge/local-api/fleet.ts、bridge/fleet/）：GET /fleet/state、POST /fleet/run，以及 SSE 的 low_priority 事件。
  * 只有 owner 本人的全 scope manage 凭据能用，其余 403（面板直接显示错误）。
  */
-import { api } from "./client";
-import { followBridgeEvents } from "./follow-events";
+import { api, ApiError } from "./client";
+import { followEventStream } from "./ledger";
 
 export type LpMode = "on" | "off" | "exhausted" | "unknown";
 /** bridge/fleet/lp-monitor.ts 的 LpSnapshot 在网页这边的形状（web 与 src 互不 import）：walled = 撞墙等待，offer = 现在能开 */
@@ -45,11 +45,29 @@ export async function runFleet(body: { action: FleetAction; select: FleetSelect;
   return r.report;
 }
 
+/**
+ * 顶栏上下文徽章、输入框警示条的「存记忆 + Compact」：只对这一个 agent 发 save-compact，执行者由 bridge 改成 compact
+ * （它的 save-compact 会盖掉 PM 的 HANDOFF）。返回按钮上显示的一句话；ok=false 时按钮可以再点。
+ */
+export async function requestCompact(agent: string): Promise<{ ok: boolean; text: string }> {
+  try {
+    const r = await runFleet({ action: { kind: "save-compact" }, select: { agents: [agent] } });
+    const x = r.results[0];
+    if (!x) return { ok: false, text: r.excluded[0]?.reason ?? r.summary };
+    return { ok: x.outcome === "done" || x.outcome === "queued", text: x.detail };
+  } catch (e) {
+    const denied = e instanceof ApiError && e.status === 403;
+    return { ok: false, text: denied ? "只有 owner 本机的管理设备能直接压缩" : (e as Error).message };
+  }
+}
+
 /** 订阅 low_priority 事件（面板开着时实时刷新徽章）；signal 中止即关连接 */
 export function followLpEvents(opts: { signal: AbortSignal; onEvent: (agent: string, lp: LpState) => void }): Promise<void> {
-  return followBridgeEvents({ signal: opts.signal, types: LP_EVENTS, onEvent: (e) => opts.onEvent(e.agent, e.data as unknown as LpState) });
+  return followEventStream("/events?types=low_priority", {
+    signal: opts.signal,
+    onEvent: (e) => e.type === "low_priority" && opts.onEvent(e.agent, e.data as unknown as LpState),
+  });
 }
-const LP_EVENTS: ReadonlySet<string> = new Set(["low_priority"]);
 
 /** 徽章文案：开 → 「LP→3:20am」；用完 → 「LP 已用完」；撞墙 → 「撞墙中」；其余不显示 */
 export function lpBadgeText(lp: LpState | null | undefined): string | null {

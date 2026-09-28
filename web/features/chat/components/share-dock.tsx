@@ -166,7 +166,7 @@ export function ShareDock() {
           {t("已选")} <span className="font-mono tabular-nums">{count}</span>
         </span>
         {count === 0 && <span className="text-xs text-base-content/45">{t("先点消息旁的方框选一段")}</span>}
-        {x.err && <span className="text-xs text-error/80">{t("导出失败:")}{x.err}</span>}
+        {x.err && <span className="text-xs text-error-soft-80">{t("导出失败:")}{x.err}</span>}
         <span className="ml-auto flex items-center gap-1.5">
           <select
             className="select select-bordered select-sm w-auto"

@@ -3,10 +3,11 @@
  * tests/fixtures/lp/ 是 2026-09-29 撞墙时在沙箱里抓的真实画面（capture-pane -p -e，CC 2.1.283）。
  */
 import { describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
-  decideLp, inputStateOf, lastLpEcho, LP_MENU_LABEL, LP_WAIT_LABEL, menuKeysTo, parseMenu, readLpPane, selectedLabel, stripAnsi, type LpRead,
+  decideLp, inputStateOf, lastLpEcho, LP_MENU_LABEL, LP_WAIT_LABEL, menuKeysTo, paneQuotaState, parseMenu, readLpPane, selectedLabel, stripAnsi,
+  type LpMode, type LpRead, type PaneQuotaState,
 } from "../src/lib/lp-state.js";
 
 const fx = (name: string) => readFileSync(join(import.meta.dir, "fixtures", "lp", `${name}.ansi`), "utf8");
@@ -38,6 +39,13 @@ describe("真实画面 → 状态", () => {
     ["walled-typing", { input: "draft" }],
   ];
   for (const [name, want] of cases) test(name, () => expect(read(name)).toMatchObject(want));
+
+  test("每份样本都落在四态之内", () => {
+    const modes: LpMode[] = ["on", "off", "exhausted", "unknown"];
+    for (const f of readdirSync(join(import.meta.dir, "fixtures", "lp")).filter((n) => n.endsWith(".ansi"))) {
+      expect(modes).toContain(readLpPane(readFileSync(join(import.meta.dir, "fixtures", "lp", f), "utf8")).lowPriority);
+    }
+  });
 
   test("撞墙等待不算忙：状态栏和对话里的「esc to cancel」不能触发判忙", () => {
     expect(fx("walled")).toContain("esc to cancel");
@@ -160,5 +168,65 @@ describe("输入框", () => {
     expect(inputStateOf(["❯ draft text"], ["❯ draft text"])).toBe("unknown");
     expect(inputStateOf(["❯ "], ["❯ "])).toBe("empty");
     expect(inputStateOf(["❯ line1", "  line2"], ["❯ line1", "  line2"])).toBe("draft");
+  });
+});
+
+describe("paneQuotaState（T36 注入闸门的精简视图）", () => {
+  const q = (name: string) => paneQuotaState(stripAnsi(fx(name)), fx(name));
+  const cases: [string, Partial<PaneQuotaState>][] = [
+    ["walled", { wall: true, lp: "off", exhausted: false, menu: false, compacting: false, draft: false }],
+    ["walled-typing", { wall: true, menu: false, draft: true }],
+    ["lp-on-allowance", { wall: false, lp: "on", menu: false, draft: false }],
+    ["lp-on-suggestion", { lp: "on", draft: false }],
+    ["compacting", { compacting: true, menu: false }],
+    ["busy-queued", { menu: false, draft: false }], // 排队提示不是草稿；排没排队由 T36 自己的 QUEUED_RE 看
+    ["draft", { menu: false, draft: true }],
+    ["fresh-placeholder", { wall: false, lp: "off", menu: false, draft: false }],
+    // 下面三份是 T36 在私有 tmux 里抓的真实 CC 画面（reviews/T36-samples）
+    ["input-suggestion", { menu: false, draft: false }],
+    ["input-draft", { menu: false, draft: true }],
+    ["input-draft-multiline", { menu: false, draft: true }],
+    ["menu-5-items", { wall: true, lp: "off", menu: true }],
+    ["menu-no-lp", { wall: true, lp: "unknown", menu: true }],
+    ["modal-permission", { wall: false, lp: "unknown", menu: true, draft: true }],
+    ["modal-auq", { wall: false, menu: true, draft: true }],
+    ["modal-rewind", { wall: false, menu: true, draft: true }],
+  ];
+  for (const [name, want] of cases) test(name, () => expect(q(name)).toMatchObject(want));
+
+  test("本周 LP 额度用完：lp 报 off，exhausted 为真", () => {
+    const p = pane({ footer: ["⚠ You've used this week's lower-priority allowance", "Opus 5.5 · 5h 100%"] });
+    expect(paneQuotaState(stripAnsi(p), p)).toMatchObject({ lp: "off", exhausted: true, menu: false });
+  });
+
+  test("只有纯文本抓屏：分不清灰字提示和草稿，当有草稿（不敲键）", () => {
+    const plain = readFileSync(join(import.meta.dir, "fixtures", "lp", "input-suggestion.plain.txt"), "utf8");
+    expect(paneQuotaState(plain, "").draft).toBe(true);
+    expect(paneQuotaState(plain, fx("input-suggestion")).draft).toBe(false);
+  });
+
+  test("长得像输入框的对话框：编号选项占了 ❯ 行，或框下有大写的「Esc to cancel」", () => {
+    expect(paneQuotaState("", pane({ input: "1. Yes", footer: ["2. No"] })).menu).toBe(true);
+    expect(paneQuotaState("", pane({ footer: ["Esc to cancel · Tab to amend"] })).menu).toBe(true);
+    expect(paneQuotaState("", pane({ footer: ["Usage limit reached · continuing automatically at 3:20am · esc to cancel"] })).menu).toBe(false);
+  });
+});
+
+describe("额度菜单以外的对话框：认成模态，而且决策表不许按任何键", () => {
+  const repoFx = (p: string) => readFileSync(join(import.meta.dir, "fixtures", p), "utf8");
+  const panes: [string, string][] = [
+    ["权限框", fx("modal-permission")],
+    ["AUQ", fx("modal-auq")],
+    ["Rewind", fx("modal-rewind")],
+    ["切模型确认", repoFx("switch-confirm/cc2.1.280-switch-model.txt")],
+    ["切 effort 确认", repoFx("switch-confirm/cc2.1.280-change-effort.txt")],
+    ["bypass 首启确认（Esc = 退出 CC）", repoFx("cc-bypass-consent-pane.txt")],
+  ];
+  for (const [name, raw] of panes) test(name, () => {
+    const r = readLpPane(raw);
+    expect(r.modal).toBe(true);
+    expect(r.walled).toBe(false);
+    expect(decideLp("on", r).kind).toBe("refuse");
+    expect(decideLp("off", r).kind).toBe("refuse");
   });
 });

@@ -104,9 +104,10 @@ function afterCommand(raw: string, prefix: string): string {
 /** 往输入框提交一条斜杠命令：忙就排队，空闲就等它真的开始 */
 async function slash(io: PaneIO, win: string, cmd: string, started: (x: { raw: string; r: LpRead }) => boolean, what: string): Promise<Step> {
   const { r } = await read(io, win);
-  if (r.menu) return failed("底部有选项菜单挡着，没发");
-  if (r.lowPriority === "unknown" && r.reason === "没找到输入框和状态栏") return failed("没找到输入框，没发");
+  if (r.modal) return failed(`${r.reason ?? "底部没有输入框"}，没发`);
   if (r.compacting) return { outcome: "skipped", detail: "正在压缩" };
+  // 与 T36 注入闸门同一口径：撞墙没开 LP，命令发进去也跑不动，只会一直挂在输入框里
+  if (r.lowPriority === "exhausted" || (r.walled && r.lowPriority !== "on")) return failed("撞墙等待中、没开 low-priority，没发（先开 LP，或用「开 LP 再压缩」）");
   if (r.input === "draft") return failed("输入框里有没发出去的文字，没动");
   if (r.input === "unknown") return failed("看不清输入框是否为空，没动");
   const busy = r.busy || r.input === "queued";

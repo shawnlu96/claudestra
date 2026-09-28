@@ -173,8 +173,8 @@ export function checkReview(input: ReviewInput, task: LedgerTask): void {
   if (task.stage !== "review") throw new LedgerError("invalid", `任务 ${task.id} 在 ${task.stage}，不在 review，不能记审查结论`, { stage: task.stage });
 }
 
-/** 调用方可直接追加的事件；stage / item / task / meta / freeze 由对应写函数产生 */
-export const APPENDABLE_KINDS = ["note", "decision", "deploy", "verify", "rollback"] as const;
+/** 调用方可直接追加的事件；stage / item / task / meta / freeze 由对应写函数产生，verify 只由 recordVerify 写（否则能伪造一条「检查通过」） */
+export const APPENDABLE_KINDS = ["note", "decision", "deploy", "rollback"] as const;
 export type AppendableKind = (typeof APPENDABLE_KINDS)[number];
 
 /**

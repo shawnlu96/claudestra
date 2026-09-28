@@ -104,7 +104,7 @@ export function ManagePanel({ open, onClose }: { open: boolean; onClose: () => v
                   </button>
                   {a.status !== "stopped" && (
                     <button
-                      className={`btn btn-xs shrink-0 ${arming === kk ? "btn-error" : "btn-ghost text-error/70"}`}
+                      className={`btn btn-xs shrink-0 ${arming === kk ? "btn-error" : "btn-ghost text-error-soft-70"}`}
                       disabled={busyKey !== ""}
                       onClick={() => (arming === kk ? void run("kill", a.name) : arm(kk))}
                     >

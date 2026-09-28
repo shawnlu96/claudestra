@@ -2,7 +2,11 @@
  * lib/fleet-plan.ts：动作白名单与参数校验、选人（master 默认不在范围里）、结果汇总；bridge/fleet/audit.ts 的台账分组。
  */
 import { describe, expect, test } from "bun:test";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { ledgerNotes } from "../src/bridge/fleet/audit.js";
+import { isExecutor } from "../src/bridge/fleet/service.js";
 import {
   compactCommand, DEFAULT_COMPACT_KEEP, notApplicable, parseFleetAction, parseFleetSelect, selectTargets, summarizeFleet, type FleetCandidate,
 } from "../src/lib/fleet-plan.js";
@@ -128,5 +132,22 @@ describe("台账 note 按项目分组", () => {
     expect(notes.get("p1")).toContain("a 已执行（已开）；b 已跳过（已经是开）");
     expect(notes.get("p1")).toContain("owner（cli）");
     expect(notes.get("p2")).toContain("c 失败（忙，未发）");
+  });
+});
+
+describe("执行者认定（save-compact 对它改成 compact，不许盖掉 PM 的 HANDOFF）", () => {
+  test("agent-task-* 或 cwd 在 linked worktree 里（.git 是文件）；普通仓库、没有 cwd 的不算", () => {
+    const root = mkdtempSync(join(tmpdir(), "fleet-exec-"));
+    try {
+      mkdirSync(join(root, "repo", ".git"), { recursive: true });
+      mkdirSync(join(root, "wt", "src", "deep"), { recursive: true });
+      writeFileSync(join(root, "wt", ".git"), "gitdir: /x/.git/worktrees/wt\n");
+      expect(isExecutor({ name: "agent-task-t35" })).toBe(true);
+      expect(isExecutor({ name: "agent-foo", cwd: join(root, "wt", "src", "deep") })).toBe(true);
+      expect(isExecutor({ name: "agent-foo", cwd: join(root, "repo") })).toBe(false);
+      expect(isExecutor({ name: "master" })).toBe(false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });
