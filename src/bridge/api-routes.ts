@@ -44,9 +44,10 @@ import { readPeers } from "../lib/peers.js";
 import { loadJobs } from "../cron.js";
 import { HYGIENE_JOB_NAME, HYGIENE_FREQS, freqOfSchedule, hygienePrompt, mem0McpConfigured, type HygieneFreq } from "../lib/memory-hygiene.js";
 import { readConfig as readAppConfig, setAutoCompact } from "../lib/config-store.js";
-import { readRegistryAgents } from "../lib/registry.js";
+import { isMasterName, readRegistryAgents } from "../lib/registry.js";
 import { nonClaudeRuntimeError } from "../lib/claude-settings-runtime.js";
 import { collectSessions, visibleSessions } from "./sessions-inventory.js";
+import { archivedOnlyAgent, isMasterSessionFile, locateSessionFile, masterSessionsAllowed } from "./session-file.js";
 import { readPiRuntimeSnapshot } from "../lib/pi-env.js";
 import { findSessionJsonlBySessionId } from "../lib/session-source.js";
 import { cleanupBgJob } from "../lib/bg-jobs.js";
@@ -537,7 +538,7 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
   if (path === "/sessions" && req.method === "GET") {
     const list = await collectSessions();
     if (list === null) return apiJson(503, { ok: false, error: "claude agents --json unavailable" });
-    return apiJson(200, { ok: true, sessions: visibleSessions(list, principal) });
+    return apiJson(200, { ok: true, sessions: visibleSessions(list, principal, MASTER_DIR) });
   }
 
   // GET /api/v1/remote-access —— 网页「手机访问」面板：Tailscale 状态、每个入口（可达 / 证书剩余天数）、
@@ -664,7 +665,7 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
     if (!agentInScope(principal, name)) return apiJson(403, { ok: false, error: "agent out of scope" });
     // 大总管不参与归档（它是常驻调度器；把它归档掉 = 侧栏消失，2026-09-14 我的测试脚本
     // 误选它当靶子，正好验证了这个坑必须堵）
-    if (String(name).replace(/^agent-/, "") === "master") {
+    if (isMasterName(name)) {
       return apiJson(400, { ok: false, error: "master 不参与归档" });
     }
     // **归档 = 分类**（owner 2026-09-14「他不是只是一个显示逻辑和分类问题吗」）：
@@ -858,17 +859,9 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
     if (!action) return apiJson(400, { ok: false, error: 'body must be {"action":"archive"|"delete"}' });
     const mRuntime = typeof mbody?.runtime === "string" ? mbody.runtime : undefined;
     const mCwd = typeof mbody?.cwd === "string" ? mbody.cwd : undefined;
-    // 定位口径与 /sessions/:id/history 完全一致（Pi 文件名带时间戳，光有 id 推不出路径）
-    let mfile = mCwd ? sessionJsonlPath(mRuntime, mCwd, sid) : null;
-    if (!mfile || !existsSync(mfile)) {
-      mfile =
-        findSessionJsonlBySessionId(mRuntime ?? "pi", sid) ??
-        findSessionJsonlBySessionId("claude-code", sid) ??
-        findSessionJsonlBySessionId("codex", sid);
-    }
-    if (!mfile || !existsSync(mfile)) {
-      return apiJson(404, { ok: false, error: `session "${sid}" not found on disk` });
-    }
+    const mfile = locateSessionFile(sid, mRuntime, mCwd); // 定位口径与 /sessions/:id/history 同一个函数
+    if (!mfile) return apiJson(404, { ok: false, error: `session "${sid}" not found on disk` });
+    if (isMasterSessionFile(mfile, MASTER_DIR) && !masterSessionsAllowed(principal)) return notInScope("master");
     const fsp = await import("node:fs/promises");
     try {
       const st = await fsp.stat(mfile);
@@ -909,17 +902,9 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
     const cwd = url.searchParams.get("cwd") || undefined;
     const limit = Math.min(Number(url.searchParams.get("limit") || 100) || 100, 500);
     const before = url.searchParams.get("before");
-    // 定位：先按 cwd+runtime 精确推，再两种 runtime 各自全库兜底扫
-    let file = cwd ? sessionJsonlPath(runtime, cwd, sid) : null;
-    if (!file || !existsSync(file)) {
-      file =
-        findSessionJsonlBySessionId(runtime ?? "pi", sid) ??
-        findSessionJsonlBySessionId("claude-code", sid) ??
-        findSessionJsonlBySessionId("codex", sid);
-    }
-    if (!file || !existsSync(file)) {
-      return apiJson(404, { ok: false, error: `session "${sid}" not found on disk` });
-    }
+    const file = locateSessionFile(sid, runtime, cwd);
+    if (!file) return apiJson(404, { ok: false, error: `session "${sid}" not found on disk` });
+    if (isMasterSessionFile(file, MASTER_DIR) && !masterSessionsAllowed(principal)) return notInScope("master"); // "*" 不含 master（bridge/session-file.ts）
     const page = await readSessionHistory(file, {
       limit,
       ...(before ? { before: Number(before) } : {}),
@@ -1115,7 +1100,8 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
     const agentParam = decodeURIComponent(histListMatch[1]);
     if (!isPathSafeName(agentParam) || !inScopeEitherName(principal, agentParam)) return notInScope(agentParam); // 名字会拼进归档路径（%2F → /）
     const agent = await findHistoryAgent(agentParam);
-    const canonical = agent?.name ?? (agentParam.startsWith("agent-") ? agentParam : `agent-${agentParam}`);
+    const canonical = agent?.name ?? archivedOnlyAgent(agentParam); // 查不到时只认逐字同名的归档目录（bridge/session-file.ts）
+    if (!canonical) return apiJson(404, { ok: false, error: `agent "${agentParam}" not found (no registry entry, no archives)` });
     const sessions = await listAgentSessions(canonical, {
       cwd: agent?.cwd,
       currentSessionId: agent?.sessionId,
@@ -1140,7 +1126,8 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
     const sid = decodeURIComponent(histSessMatch[2]);
     if (!isValidSessionId(sid)) return apiJson(400, { ok: false, error: "invalid sessionId" });
     const agent = await findHistoryAgent(agentParam);
-    const canonical = agent?.name ?? (agentParam.startsWith("agent-") ? agentParam : `agent-${agentParam}`);
+    const canonical = agent?.name ?? archivedOnlyAgent(agentParam); // 查不到时只认逐字同名的归档目录（bridge/session-file.ts）
+    if (!canonical) return apiJson(404, { ok: false, error: `agent "${agentParam}" not found (no registry entry, no archives)` });
     // 热路径快捷:请求的就是当前活 session → 直接推 live 路径,跳过归档目录扫描
     // (listAgentSessions 每次 stat 全部归档快照 + 子 agent 目录;差量同步 100% 走这条)
     let found: { sessionId: string; source: "live" | "archive"; path: string } | undefined;
@@ -1876,8 +1863,10 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
   if (lifecycleMatch && req.method === "POST") {
     if (!isFullScope(principal)) return forbidden(`${lifecycleMatch[2]} requires a full-scope token`);
     const agentParam = decodeURIComponent(lifecycleMatch[1]);
-    if (agentParam === "master") return apiJson(400, { ok: false, error: "master lifecycle is managed by the launcher" });
-    const r = await runManager(lifecycleMatch[2], agentParam);
+    if (isMasterName(agentParam)) return apiJson(400, { ok: false, error: "master lifecycle is managed by the launcher" });
+    if (firstFlagLikeField({ name: agentParam })) return apiJson(400, { ok: false, error: 'agent name must not start with "-"' });
+    if (!inScopeEitherName(principal, agentParam)) return notInScope(agentParam);
+    const r = await runManager(lifecycleMatch[2], "--", agentParam); // `--` 之后只当名字：`--include-master` 当名字传进来也不会变成开关
     return apiJson(r?.ok ? 200 : 500, r ?? { ok: false, error: `manager ${lifecycleMatch[2]} failed` });
   }
 
