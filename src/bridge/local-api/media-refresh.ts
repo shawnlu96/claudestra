@@ -9,7 +9,7 @@
 import type { Database } from "bun:sqlite";
 import { readdirSync } from "node:fs";
 import { openMediaIndex, refreshMediaIndex, resetMediaIndex, type MediaSource } from "../../lib/media-index.js";
-import { copyOutboundFiles } from "../../lib/media-outbound.js";
+import { copyOutboundFiles, saveUpload } from "../../lib/media-outbound.js";
 import { clearThumbs } from "../../lib/media-thumb.js";
 import { ARCHIVE_ROOT, statePath } from "../../lib/paths.js";
 import { readRegistryAgents } from "../../lib/registry.js";
@@ -130,13 +130,21 @@ export async function awaitRefresh(job: Promise<void>): Promise<boolean> {
   return Promise.race([job.then(() => true), Bun.sleep(ms).then(() => false)]);
 }
 
+function ledgerDb(what: string): Database | null {
+  try {
+    return mediaDb();
+  } catch (e) {
+    console.error(`[media] ${what}记账失败（索引库打不开）:`, (e as Error).message);
+    return null;
+  }
+}
+
 /** bridge 投递 reply 附件时调：拷进 inbox 并记账（库打不开也照样拷，只是这几份没账） */
 export async function copyOutboundToInbox(paths: string[], agent: string): Promise<{ name: string; attachment: string }[]> {
-  let db: Database | null = null;
-  try {
-    db = mediaDb();
-  } catch (e) {
-    console.error("[media] 出站副本记账失败（索引库打不开）:", (e as Error).message);
-  }
-  return copyOutboundFiles(paths, agent, attachmentDirs().inboxDirs[0], db);
+  return copyOutboundFiles(paths, agent, attachmentDirs().inboxDirs[0], ledgerDb("出站副本"));
+}
+
+/** API 入站上传：原子占名写进 inbox 并记下属于哪个 agent；返回落盘路径（写进 attachments= 头） */
+export async function saveUploadToInbox(file: File, agent: string): Promise<string> {
+  return saveUpload(attachmentDirs().inboxDirs[0], file.name, new Uint8Array(await file.arrayBuffer()), agent, ledgerDb("入站上传"));
 }

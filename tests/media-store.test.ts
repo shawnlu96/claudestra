@@ -4,6 +4,7 @@ import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AttachmentDirs } from "../src/lib/attachment-lookup.js";
+import { findAttachment, uploadDayDir } from "../src/lib/attachment-lookup.js";
 import { buildInboxCatalog, displayName, openLoc, resolveInbound, resolveOutbound, safeName, type OutboundLedger } from "../src/lib/media-store.js";
 
 let root: string;
@@ -30,6 +31,9 @@ beforeAll(() => {
   writeFileSync(join(old, "legacy.txt"), "L");
   writeFileSync(join(root, "secret.txt"), "SECRET");
   symlinkSync(join(root, "secret.txt"), join(inbox, "1700000000000_link.png"));
+  mkdirSync(join(root, "outside", "2026-09-22"), { recursive: true });
+  writeFileSync(join(root, "outside", "2026-09-22", "bbbb2222-x.png"), "OUTSIDE-DATED");
+  symlinkSync(join(root, "outside", "2026-09-22"), join(uploadDir, "2026-09-22")); // 软链的日期目录
   dirs = { uploadDir, inboxDirs: [inbox, old] };
 });
 afterAll(() => rmSync(root, { recursive: true, force: true }));
@@ -95,6 +99,17 @@ describe("resolveOutbound", () => {
     expect(await resolveOutbound("/a/shot.png", at(T0 - 3_600_000), dirs, cat(), noLedger)).toBeNull();
     expect(await resolveOutbound("/a/link.png", at(1700000000000), dirs, cat(), noLedger)).toBeNull();
   });
+});
+
+test("上传目录下软链的日期目录一律不认：索引解析、定位串、/attachments?d= 都拿不到根外的文件（adv1 P2-3）", () => {
+  const f = join(dirs.uploadDir, "2026-09-22", "bbbb2222-x.png");
+  expect(uploadDayDir(dirs.uploadDir, "2026-09-22")).toBeNull();
+  expect(uploadDayDir(dirs.uploadDir, "2026-09-01")).not.toBeNull();
+  expect(resolveInbound(f, dirs, true)).toBeNull();
+  expect(openLoc("u:2026-09-22/bbbb2222-x.png", dirs)).toBeNull();
+  expect(findAttachment("bbbb2222-x.png", "2026-09-22", dirs)).toBeNull();
+  expect(findAttachment("bbbb2222-x.png", null, dirs)).toBeNull();
+  expect(findAttachment("aaaa1111-x.png", "2026-09-01", dirs)?.filename).toBe("aaaa1111-x.png");
 });
 
 test("displayName 只剥一层前缀；uuid 规则只用于旧上传目录", () => {

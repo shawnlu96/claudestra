@@ -8,7 +8,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setAttachmentDirsForTest } from "../src/bridge/local-api/attachments.js";
 import { handleLocalApi } from "../src/bridge/local-api/index.js";
-import { copyOutboundToInbox, refreshMedia, setMediaForTest, type AgentInfo } from "../src/bridge/local-api/media-refresh.js";
+import { copyOutboundToInbox, refreshMedia, saveUploadToInbox, setMediaForTest, type AgentInfo } from "../src/bridge/local-api/media-refresh.js";
 import { closeMediaIndex } from "../src/lib/media-index.js";
 import type { Principal } from "../src/lib/principals.js";
 
@@ -36,7 +36,7 @@ const outLine = (ms: number, paths: string[]) =>
   JSON.stringify({ type: "assistant", timestamp: iso(ms), message: { content: [{ type: "tool_use", name: "mcp__claudestra__reply", input: { text: "给你", files: paths } }] } });
 const noise = (n: number) => Array.from({ length: n }, (_, i) => JSON.stringify({ type: "assistant", message: { content: [{ type: "text", text: `t${i}` }] } }));
 
-const AGENTS: AgentInfo[] = [{ name: "agent-worker" }, { name: "agent-other" }, { name: "agent-b" }, { name: "agent-probe" }];
+const AGENTS: AgentInfo[] = [{ name: "agent-worker" }, { name: "agent-other" }, { name: "agent-b" }, { name: "agent-probe" }, { name: "agent-collide" }, { name: "master" }];
 /** 重新接线 = 清掉刷新节流，下一次请求看得到刚追加的内容 */
 function wire(skip?: string): void {
   setMediaForTest({
@@ -75,6 +75,10 @@ beforeAll(async () => {
   ].join("\n"));
   writeFileSync(jl["agent-other"], [inLine(NOW - 3600_000, "m_o", [bank]), ""].join("\n"));
   writeFileSync(jl["agent-b"], "");
+  writeFileSync(jl.master, "");
+  // owner 往 master 上传 image.png（记了账），collide 里有一条可信头指向同一个文件、master 的记录还没落盘（adv1 P1-1 复现 2）
+  const secret = await saveUploadToInbox(new File(["OWNER-SECRET"], "image.png"), "master");
+  writeFileSync(jl["agent-collide"], `${inLine(NOW - 100, "c1", [secret], "看", "friend")}\n`);
   // 手写标记指向旧上传目录里一个在、一个不在的文件（审查 r3：拿锚点请求的 200 / 404 探测文件在不在）
   const probe = (n: string) => `[attachment: ${uploads}/2026-09-20/./${n}]`;
   writeFileSync(join(inbox, "api_1700000000900_gone.pdf"), "GONE"); // 可信绑定，用例里删掉 = 「可信但文件不在」
@@ -171,6 +175,19 @@ describe("P0：只有 bridge 写的头属性是可信绑定", () => {
     }
     expect([...bodies]).toHaveLength(1);
     expect([...bodies][0]).toStartWith("404 ");
+  });
+  test("入站行指向账上属于别的 agent 的上传：对 guest 就是「不存在」，不必等另一方的记录进索引（adv1 P1-1）", async () => {
+    const guest: Principal = { ...GUEST, id: "guest:4", agents: ["collide"], credential: "dev_g4" };
+    const [it] = (await list("agent=collide", guest)).items;
+    expect(it).toMatchObject({ available: false, size: null, mime: null });
+    expect((await get(`/media/${it.id}/raw`, guest)).status).toBe(404);
+    expect((await list("agent=collide")).items[0].available).toBe(true); // owner 照常能看
+  });
+  test("大总管的各种写法：全权 owner 放行，guest（哪怕 *）一律 403（adv1 P2-4）", async () => {
+    for (const a of ["master", "agent-master", "agent-agent-master", "__master__"]) {
+      expect((await get(`/media?agent=${a}`)).status).toBe(200);
+      expect((await get(`/media?agent=${a}`, { ...GUEST, agents: ["*"] })).status).toBe(403);
+    }
   });
   test("可信行对 guest 照常可取；不再给 immutable 长缓存", async () => {
     const p0 = (await list("agent=worker&q=pic0", GUEST)).items[0];

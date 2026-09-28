@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { closeMediaIndex, openMediaIndex } from "../src/lib/media-index.js";
-import { canonicalAgent, copyOutboundFiles, ledgerCopy, ownedByOther } from "../src/lib/media-outbound.js";
+import { canonicalAgent, copyOutboundFiles, ledgerCopy, ownedByOther, saveUpload } from "../src/lib/media-outbound.js";
 import { clearThumbs, pruneThumbs } from "../src/lib/media-thumb.js";
 
 let root: string;
@@ -90,6 +90,28 @@ describe("出站副本账本", () => {
         const row = db.prepare("SELECT agent FROM out_copies WHERE dest = ?").get(c.attachment) as { agent: string };
         expect(row.agent).toBe(`agent-${who}`);
         expect(readFileSync(join(inbox, c.attachment), "utf8")).toBe(`${who.toUpperCase()}-PRIVATE`);
+      }
+    }
+    closeMediaIndex(p);
+  });
+  test("两个 principal 并发上传同名文件、同一请求里两个同名文件：各自占名，内容与账上归属各自正确（adv1 P1-1）", async () => {
+    const p = join(root, "upload.sqlite");
+    const db = openMediaIndex(p);
+    const inbox = join(root, "upload-inbox");
+    const enc = (x: string) => new TextEncoder().encode(x);
+    for (let i = 0; i < 50; i++) {
+      const [g, o, o2] = await Promise.all([
+        saveUpload(inbox, "image.png", enc("GUEST"), "agent-worker", db),
+        saveUpload(inbox, "image.png", enc("OWNER-SECRET"), "master", db),
+        saveUpload(inbox, "image.png", enc("OWNER-SECOND"), "master", db),
+      ]);
+      expect(new Set([g, o, o2]).size).toBe(3);
+      for (const [path, body, agent] of [[g, "GUEST", "agent-worker"], [o, "OWNER-SECRET", "master"], [o2, "OWNER-SECOND", "master"]]) {
+        expect(readFileSync(path, "utf8")).toBe(body);
+        const name = path.slice(inbox.length + 1);
+        expect(name).toMatch(/^api_\d+_image\.png$/);
+        expect(ownedByOther(db, agent === "master" ? "agent-worker" : "master", name)).toBe(true);
+        expect(ownedByOther(db, agent, name)).toBe(false);
       }
     }
     closeMediaIndex(p);

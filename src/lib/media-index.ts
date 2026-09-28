@@ -138,7 +138,11 @@ function ledgerFor(ctx: Ctx, agent: string): OutboundLedger {
 }
 
 function resolveRef(ctx: Ctx, agent: string, r: { dir: string; path: string; ts: string | null; trusted: boolean }): Promise<Resolved | null> | Resolved | null {
-  return r.dir === "in" ? resolveInbound(r.path, ctx.dirs, r.trusted) : resolveOutbound(r.path, r.ts, ctx.dirs, ctx.cat(), ledgerFor(ctx, agent));
+  if (r.dir !== "in") return resolveOutbound(r.path, r.ts, ctx.dirs, ctx.cat(), ledgerFor(ctx, agent));
+  const hit = resolveInbound(r.path, ctx.dirs, r.trusted);
+  // inbox 文件在账上属于别的 agent（它的上传 / 出站副本）：这条入站行就不可信。文件名原子占名、一次写入只属于一方，
+  // 不必等另一方的记录进索引才判成共享（T22 adv1 P1-1 复现 2）
+  return hit?.trusted && hit.loc.startsWith("i") && ownedByOther(ctx.db, agent, hit.name) ? { ...hit, trusted: false } : hit;
 }
 
 /**

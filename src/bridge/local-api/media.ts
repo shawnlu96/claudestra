@@ -21,11 +21,15 @@ const SVG_CSP = "default-src 'none'; style-src 'unsafe-inline'";
 /** 不用 immutable：行的可见性会变（新认领让它变成共享 / 受限），浏览器别把旧结果长期当真 */
 const CACHE = "private, max-age=3600";
 
-/** 调用方 scope 内的 agent；指定了 agent 就只要它（不在 scope → null = 403） */
+/**
+ * 调用方 scope 内的 agent；指定了 agent 就只要它（不在 scope → null = 403）。
+ * master 的写法与 api-respond.inScopeEitherName 一致：去掉任意层 agent- 前缀后是 master、或网页会话名 __master__ 都算 master。
+ */
 async function scopedAgents(principal: Principal, want: string | null): Promise<AgentInfo[] | null> {
   const all = (await listAgents()).filter((a) => agentInScope(principal, a.name));
   if (!want) return all;
-  const hit = all.find((a) => a.name === want || a.name === `agent-${want}`);
+  const name = want === "__master__" || want.replace(/^(agent-)+/, "") === "master" ? "master" : want;
+  const hit = all.find((a) => a.name === name || a.name === `agent-${name}`);
   return hit ? [hit] : null;
 }
 
@@ -91,6 +95,7 @@ async function serveFile(id: string, variant: "raw" | "thumb", display: boolean,
   if (!file || !row.loc) return notFound();
   if (variant === "thumb" || display) {
     const out = await convertedImage(mediaPaths.thumbs, id, row.loc, variant === "thumb" ? "thumb" : "display", file.abs, file.name);
+    if (out === "failed") return apiJson(422, { ok: false, error: "image cannot be converted" }); // 网格 / 查看器显示占位
     if (out === "busy") return new Response(JSON.stringify({ ok: false, error: "thumbnailer busy" }), { status: 503, headers: { "Retry-After": "2", "Content-Type": "application/json" } });
     if (out) return new Response(Bun.file(out), { headers: { "Content-Type": "image/jpeg", "Cache-Control": CACHE, "X-Content-Type-Options": "nosniff" } });
   }

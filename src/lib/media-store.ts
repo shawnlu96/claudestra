@@ -8,11 +8,9 @@
  */
 import { lstatSync, readdirSync, realpathSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
-import { attachmentMime, type AttachmentDirs } from "./attachment-lookup.js";
+import { attachmentMime, uploadDayDir, type AttachmentDirs } from "./attachment-lookup.js";
 import { sanitizeAttachmentBase } from "./attachment-name.js";
 import { OUT_WINDOW_AFTER_MS, OUT_WINDOW_BEFORE_MS } from "./media-outbound.js";
-
-const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
 export interface Resolved {
   loc: string;
@@ -49,7 +47,8 @@ function regularFileIn(dir: string, name: string): { abs: string; size: number }
 export function openLoc(loc: string, dirs: AttachmentDirs): { abs: string; size: number; name: string } | null {
   const u = /^u:(\d{4}-\d{2}-\d{2})\/([^/]+)$/.exec(loc);
   if (u) {
-    const hit = DATE_RE.test(u[1]) ? regularFileIn(join(dirs.uploadDir, u[1]), u[2]) : null;
+    const day = uploadDayDir(dirs.uploadDir, u[1]);
+    const hit = day ? regularFileIn(day, u[2]) : null;
     return hit ? { ...hit, name: u[2] } : null;
   }
   const i = /^i(\d{1,2}):([^/]+)$/.exec(loc);
@@ -104,7 +103,7 @@ export function resolveInbound(path: string, dirs: AttachmentDirs, trusted: bool
   const parent = name ? realDir(dirname(resolve(path))) : null;
   if (!name || !parent) return null;
   const day = basename(parent);
-  if (DATE_RE.test(day) && parent === realDir(join(dirs.uploadDir, day))) {
+  if (parent === uploadDayDir(dirs.uploadDir, day)) {
     const hit = regularFileIn(parent, name);
     return hit ? resolved(`u:${day}/${name}`, name, hit.size, trusted) : null;
   }

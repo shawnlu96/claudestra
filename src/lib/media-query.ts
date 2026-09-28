@@ -31,8 +31,9 @@ type Row = {
 /**
  * 同一个文件被不同 agent 的消息可信地认领 = shared（例如转交时 bridge 给两边都写了头属性）。
  * 只数可信认领：不可信的手写标记要是也算，任何 guest 都能往自己 agent 里写个名字，把别的 agent 的文件弄成对它的 guest 不可见。
+ * 只对可信行算（不可信行本来就只给 manage）：不可信行的 loc 取决于文件在不在，对它跑子查询会让列表耗时透露存在性（adv1 P2-2）。
  */
-const SHARED_SQL = "(loc IS NOT NULL AND EXISTS (SELECT 1 FROM media m2 WHERE m2.loc = media.loc AND m2.agent != media.agent AND m2.trusted = 1))";
+const SHARED_SQL = "(trusted = 1 AND loc IS NOT NULL AND EXISTS (SELECT 1 FROM media m2 WHERE m2.loc = media.loc AND m2.agent != media.agent AND m2.trusted = 1))";
 const COLS = `id, agent, session_id, seq, ts, sk, dir, sender, sender_id, name, loc, size, mime, kind, cat, trusted, ambiguous, ${SHARED_SQL} AS shared`;
 
 function where(f: MediaFilter): { sql: string; args: (string | number)[] } {
