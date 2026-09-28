@@ -300,6 +300,8 @@ export function piLineToClaudeShape(line: string): AnyRecord | null {
       timestamp: ts,
       message: {
         role: "assistant",
+        // 用量去重键（jsonl-cost firstSeen / keepLatest）：Pi 一条 assistant 一行，fork 会把旧行连 id 一起抄进新文件
+        id: typeof entry.id === "string" && entry.id ? `pi:${entry.id}` : undefined,
         model: typeof msg.model === "string" ? msg.model : undefined,
         usage: piUsageToClaude(msg.usage),
         content: piBlocksToClaude(msg.content),

@@ -382,8 +382,10 @@ export const DICT: Record<string, string> = {
     "Fetching account usage… it will show in a few seconds, or tap refresh (top right) to force a re-scrape",
   "本时段用量": "Current period usage",
   "本周用量": "Weekly usage",
-  "成本为 API 牌价折算（订阅制实际不按此扣费）· 活跃 agent 合计":
-    "Cost estimated at API list prices (subscriptions aren't billed this way) · active agents combined",
+  "成本为 API 牌价折算（订阅制实际不按此扣费）": "Cost estimated at API list prices (subscriptions aren't billed this way)",
+  "这台机器合计 = 全部会话（含已结束的 agent、子 agent、终端里直接开的），同一次响应只计一次":
+    "This machine = every session on it (including ended agents, subagents and sessions started in a terminal); each response is counted once",
+  "本周 = 当前周额度周期，与上面的周额度条同一口径": "This week = the current weekly quota cycle, same as the weekly bar above",
   "数据偏旧": "may be stale",
   "各会话上下文占用": "Context usage by session",
   "Claude 订阅额度": "Claude subscription quota",
@@ -401,7 +403,11 @@ export const DICT: Record<string, string> = {
   "token 与花费": "Tokens & cost",
   "今日": "Today",
   "本周": "This week",
-  "全机合计": "All agents",
+  "这台机器合计": "This machine",
+  "agent 当前会话": "Agents (current sessions)",
+  "其他会话": "Other sessions",
+  "扫描于": "scanned",
+  "沙箱内不统计全机，只有 agent 当前会话": "Machine-wide totals aren't collected in the sandbox; only agents' current sessions are shown",
   "运行时报告的费用": "Runtime-reported cost",
   "「—」= 没有牌价可折算（如 Codex 的模型）": "“—” = no list price to estimate with (e.g. Codex models)",
   "运行时报告的费用：Pi 会话记录里的 usage.cost，是 Pi 按自己的价目表算的，不是账单；与牌价折算分开记":
