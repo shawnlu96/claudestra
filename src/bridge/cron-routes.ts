@@ -2,13 +2,13 @@
  * /api/v1/cron*（从 api-routes 拆出：那个文件只许变小）。列表 / 删除：全权凭据（isFullScope）。
  * 新建 / 编辑 / 开关（重新启用）会让 prompt 到点原样敲进目标 agent 的 TUI（src/cron.ts，不带来源头），和斜杠直通同一类，所以要求：
  * 全权（isFullScope，要求 scope 含 "*"）之外还要 owner 本人（isOwnerPrincipal）；有 targetAgent 时它还得在 scope 里——
- * "*" 不含 master，要显式列出（agentInScope）。测试见 tests/cron-create-gates.test.ts。
+ * "*" 不含 master（任何写法），要显式列出（inScopeEitherName）。测试见 tests/cron-create-gates.test.ts。
  * runManager / loadJobs 由调用方注入：一个在 management.ts（hub），一个在 src/cron.ts（入口），bridge 模块都不能 import。
  */
-import { agentInScope, isOwnerPrincipal, type Principal } from "../lib/principals.js";
+import { isOwnerPrincipal, type Principal } from "../lib/principals.js";
 import { textFieldsProblem } from "../lib/flag-like.js";
 import type { CronJob } from "../lib/cron-job.js";
-import { apiJson, forbidden, invalidJsonBody, INVALID_JSON, isFullScope, notInScope, readJsonBody } from "./api-respond.js";
+import { apiJson, forbidden, inScopeEitherName, invalidJsonBody, INVALID_JSON, isFullScope, notInScope, readJsonBody } from "./api-respond.js";
 
 export interface CronRouteDeps {
   runManager: (...args: string[]) => Promise<any>;
@@ -21,9 +21,9 @@ const cronResult = (r: any): Response => apiJson(r?.ok ? 200 : 400, r ?? { ok: f
 /** 新建 / 编辑 / 开关的身份门（读 body 之前；scope 含 "*" 已由外层 isFullScope 保证）：不放行 → 403 响应，放行 → null */
 const cronWriterDenied = (principal: Principal): Response | null => (isOwnerPrincipal(principal) ? null : forbidden(CRON_OWNER_ONLY));
 
-/** prompt 会敲进去的那个 agent（空 = 临时 agent）要在 scope 里："*" 不含 master。按 src/cron.ts 的解析补成 agent-<名> 再判，与调度器落到的是同一个 agent */
+/** prompt 会敲进去的那个 agent（空 = 临时 agent）要在 scope 里："*" 不含 master（任何写法，inScopeEitherName → isMasterName）。按 src/cron.ts 的解析补成 agent-<名> 再判 */
 const targetDenied = (principal: Principal, target: string | null | undefined): Response | null =>
-  target && !agentInScope(principal, target.startsWith("agent-") ? target : `agent-${target}`) ? notInScope(target) : null;
+  target && !inScopeEitherName(principal, target.startsWith("agent-") ? target : `agent-${target}`) ? notInScope(target) : null;
 
 export async function handleCronRoutes(req: Request, path: string, principal: Principal, deps: CronRouteDeps): Promise<Response | null> {
   if (path !== "/cron" && !path.startsWith("/cron/")) return null;
