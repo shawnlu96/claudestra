@@ -9,7 +9,7 @@
 import { existsSync } from "node:fs";
 import { USER_ARCHIVE_ROOT } from "../lib/session-archive.js";
 import type { Principal, PrincipalsFile } from "../lib/principals.js";
-import { agentInScope, readPrincipals } from "../lib/principals.js";
+import { agentInScope, canRunFleet, readPrincipals } from "../lib/principals.js";
 import { readRegistryAgents, type RegistryAgent } from "../lib/registry.js";
 import { missionKey, readMissions, type MissionMap } from "../lib/missions.js";
 import { peersSharingAgent } from "../lib/peer-scope-gate.js";
@@ -67,7 +67,7 @@ export async function agentListExtras(principal: Principal, io: Pick<AgentInfoIo
       ...(r?.channelId && held[r.channelId] ? { queued: held[r.channelId] } : {}),
       ...teamField(principal, r),
       ...ledgerField(ledger, name),
-      ...(principal.peer ? {} : lpField(name)), // low-priority 状态（bridge/fleet/lp-monitor.ts 的缓存）：本机账号的事，不给 peer
+      ...(canRunFleet(principal) ? lpField(name) : {}), // low-priority 状态（fleet/lp-monitor.ts 的缓存）：和批量管理同一道门，只给 owner 的全权设备
     };
   };
 }

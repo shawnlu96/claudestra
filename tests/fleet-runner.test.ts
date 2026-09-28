@@ -80,23 +80,14 @@ describe("设成开 / 设成关", () => {
 });
 
 describe("额度菜单", () => {
-  test("光标在 Switch to usage credits → Up 一次、核对高亮是 LP 才回车", async () => {
-    const r = await run({ kind: "lp-on" }, [fx("menu-on-credits"), fx("menu-on-lp"), fx("lp-on-autocontinue")]);
-    expect(r.outcome).toBe("done");
-    expect(r.keys).toEqual(["press:Up", "press:Enter"]);
-  });
-
-  test("导航后高亮还是 usage credits（菜单重绘了）→ Esc 退出，绝不回车", async () => {
-    const r = await run({ kind: "lp-on" }, [fx("menu-on-credits"), fx("menu-on-credits"), fx("walled")]);
-    expect(r.outcome).toBe("failed");
-    expect(r.keys).toEqual(["press:Up", "escape"]);
-    expect(r.keys).not.toContain("press:Enter");
-  });
-
-  test("菜单里没有 LP 项（只剩 Stop and wait / usage credits）→ 只按 Esc", async () => {
-    const r = await run({ kind: "lp-on" }, [fx("menu-no-lp"), fx("walled")]);
-    expect(r.outcome).toBe("failed");
-    expect(r.keys).toEqual(["escape"]);
+  test("任何额度菜单（光标在 credits 上 / 有 LP 项 / 没有 LP 项）：开关 LP、开 LP 再压缩都一个键不按，Esc 也不按", async () => {
+    for (const name of ["menu-on-credits", "menu-on-lp", "menu-5-items", "menu-no-lp"]) {
+      for (const kind of ["lp-on", "lp-off", "lp-compact"] as const) {
+        const r = await run({ kind }, [fx(name)]);
+        expect([name, kind, r.keys]).toEqual([name, kind, []]);
+        expect(r.outcome).toBe(kind === "lp-off" ? "skipped" : "failed");
+      }
+    }
   });
 
   test("压缩类动作遇到菜单 → 不发键", async () => {
@@ -227,4 +218,43 @@ test("撞墙等待、LP 没开：/compact 不发（发了也跑不动），与 T
   const r = await run({ kind: "compact" }, [fx("walled")]);
   expect(r.outcome).toBe("failed");
   expect(r.keys).toEqual([]);
+});
+
+describe("可见区里有一段像输入框的文字（adv1 P0-1）：底部的菜单照样认得出，一个键都不发", () => {
+  const rule = "─".repeat(60);
+  const fakeBoxes = {
+    缩进: [`  ${rule}`, "  ❯ ", `  ${rule}`, "  /low-priority to continue now at lower priority · uses your weekly limit"],
+    顶格: [rule, "❯ ", rule, "  /low-priority to continue now at lower priority · uses your weekly limit"],
+  };
+  for (const [how, box] of Object.entries(fakeBoxes)) {
+    for (const menu of ["menu-on-credits", "menu-no-lp", "menu-5-items"]) {
+      test(`${how}假框 + ${menu}`, async () => {
+        const raw = fx(menu).replace(/\n([^\n]*▔{8,})/, (_m, bar: string) => `\n${box.join("\n")}\n${bar}`);
+        expect(raw).toContain("▔");
+        expect(raw).toContain(box[1]!);
+        for (const kind of ["compact", "save-compact", "lp-on", "lp-compact"] as const) {
+          const r = await run({ kind, keep: "保留 T35 的进度 3" }, [raw]);
+          expect([kind, r.outcome, r.keys]).toEqual([kind, "failed", []]);
+        }
+      });
+    }
+  }
+});
+
+describe("开 LP 再压缩：Esc 放回输入框的字只清我们自己敲的 /low-priority", () => {
+  test("放回来的是别的字（可能是有人在打）→ 不按 C-u、不压缩，报已跳过", async () => {
+    const other = fx("lp-on-interrupted").replace(/\x1b\[39m❯[^\S\n]*\n/, "\x1b[39m❯ owner half typed\n");
+    expect(other).toContain("owner half typed");
+    const r = await run({ kind: "lp-compact" }, [fx("walled"), fx("lp-on-autocontinue"), other]);
+    expect(r.outcome).toBe("skipped");
+    expect(r.detail).toContain("没清也没压缩");
+    expect(r.keys).toEqual(["line:/low-priority", "escape"]);
+  });
+});
+
+test("scrollback 里更早那条 /compact 的「Compacted」不能冒充这次的结果（adv1 P2-5）", async () => {
+  // compacted 样本的画面上已经有一条带 Compacted 回显的 /compact；这次发完画面没变（命令没进去）→ 不能报已开始
+  const r = await run({ kind: "compact" }, [fx("compacted")]);
+  expect(r.keys[0]).toBe("line:/compact");
+  expect(r.outcome).toBe("failed");
 });

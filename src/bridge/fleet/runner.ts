@@ -1,13 +1,13 @@
 /**
  * 批量管理的发键执行器：一个 agent 一个动作，每一步发完都重抓画面复核，结果归成 已执行 / 已排队 / 已跳过 / 失败。
- * 发键只经注入的 PaneIO（生产实现在 io.ts，全走 tmux-helper），判态全在 lib/lp-state.ts；这里只排步骤。
- * 安全边界：输入框里有别人没发的草稿就不动；额度菜单只在高亮项精确等于允许文案时才按回车；
- * Esc 只在确认有回合在跑时才按（空闲时按两下会弹 Rewind）。用例见 tests/fleet-runner.test.ts。
+ * 发键只经注入的 PaneIO（生产实现在 service.ts，全走 tmux-helper），判态全在 lib/lp-state.ts；这里只排步骤。
+ * 安全边界：画面上有任何菜单 / 对话框一个键都不按（含 Esc）；输入框里有别人的字就不动、绝不清；
+ * 敲字前隔一小段再抓一次屏，两次都过才发；Esc 只在确认有回合在跑时才按（空闲时按两下会弹 Rewind）。用例见 tests/fleet-runner.test.ts。
  */
 import { ccOnly, compactCommand, type FleetAction, type FleetResult } from "../../lib/fleet-plan.js";
-import { decideLp, lastLpEcho, LP_MENU_LABEL, menuKeysTo, readLpPane, selectedLabel, stripAnsi, type LpRead } from "../../lib/lp-state.js";
+import { decideLp, lastLpEcho, readLpPane, stripAnsi, type LpRead } from "../../lib/lp-state.js";
 
-type PaneKey = "Enter" | "Up" | "Down" | "C-u";
+type PaneKey = "C-u";
 export interface PaneIO {
   /** capture-pane -p -e */
   capture(win: string): Promise<string>;
@@ -27,18 +27,22 @@ export interface RunCtx {
 }
 
 type Step = Omit<FleetResult, "agent">;
+type Frame = { raw: string; r: LpRead };
 const done = (detail: string): Step => ({ outcome: "done", detail });
 const failed = (detail: string): Step => ({ outcome: "failed", detail });
+const skipped = (detail: string): Step => ({ outcome: "skipped", detail });
 
 const POLL_MS = 400;
+/** 敲字前第二次抓屏的间隔：两次之间画面变了（有人在打字、弹了对话框、回合开始）就不发 */
+const RECHECK_MS = 300;
 
-async function read(io: PaneIO, win: string): Promise<{ raw: string; r: LpRead }> {
+async function read(io: PaneIO, win: string): Promise<Frame> {
   const raw = await io.capture(win);
   return { raw, r: readLpPane(raw) };
 }
 
 /** 等到 pred 成立，最多 ms 毫秒；返回最后一次读到的画面 */
-async function waitFor(io: PaneIO, win: string, ms: number, pred: (x: { raw: string; r: LpRead }) => boolean) {
+async function waitFor(io: PaneIO, win: string, ms: number, pred: (x: Frame) => boolean) {
   let x = await read(io, win);
   for (let t = 0; !pred(x) && t < ms; t += POLL_MS) {
     await io.sleep(POLL_MS);
@@ -47,38 +51,24 @@ async function waitFor(io: PaneIO, win: string, ms: number, pred: (x: { raw: str
   return { ...x, ok: pred(x) };
 }
 
-/** 额度菜单里走到「Continue now at lower priority」：只有高亮项精确等于它才回车，否则 Esc 退出报失败 */
-async function pickLpInMenu(io: PaneIO, win: string, r: LpRead): Promise<Step | null> {
-  const keys = r.menu ? menuKeysTo(r.menu, LP_MENU_LABEL) : null;
-  if (keys) for (const k of keys) {
-    await io.press(win, k);
-    await io.sleep(250);
-  }
-  const now = await read(io, win);
-  if (!keys || selectedLabel(now.r.menu) !== LP_MENU_LABEL) {
-    await io.escape(win);
-    return failed(`菜单高亮项不是「${LP_MENU_LABEL}」（是「${selectedLabel(now.r.menu) ?? "?"}」），已 Esc 退出，没选任何项`);
-  }
-  await io.press(win, "Enter");
-  return null;
+/** 发键前的闸：抓一次屏判一次，过了隔 RECHECK_MS 再抓一次再判；返回拦下的理由（null = 两次都过）和最后一帧 */
+async function gateTwice<T>(io: PaneIO, win: string, check: (r: LpRead) => T | null): Promise<{ block: T | null; x: Frame }> {
+  let x = await read(io, win);
+  const first = check(x.r);
+  if (first) return { block: first, x };
+  await io.sleep(RECHECK_MS);
+  x = await read(io, win);
+  return { block: check(x.r), x };
 }
 
 /** 「设成开 / 设成关」：先判态，已是目标态不发；发完等状态栏变过来 */
 async function setLp(io: PaneIO, win: string, want: "on" | "off"): Promise<Step> {
-  const { r } = await read(io, win);
-  const d = decideLp(want, r);
-  if (d.kind === "skip") return { outcome: "skipped", detail: d.reason };
-  if (d.kind === "busy" || d.kind === "refuse") return failed(d.reason);
-  if (d.kind === "escape-fail") {
-    await io.escape(win);
-    return failed(`${d.reason}，已 Esc 退出菜单`);
-  }
-  if (d.via === "menu") {
-    const bad = await pickLpInMenu(io, win, r);
-    if (bad) return bad;
-  } else {
-    await io.sendLine(win, "/low-priority");
-  }
+  const { block } = await gateTwice(io, win, (r): Step | null => {
+    const d = decideLp(want, r);
+    return d.kind === "send" ? null : d.kind === "skip" ? skipped(d.reason) : failed(d.reason);
+  });
+  if (block) return block;
+  await io.sendLine(win, "/low-priority");
   const end = await waitFor(io, win, 8000, (x) => x.r.lowPriority === want || badEcho(x.raw) !== null || x.r.input === "queued");
   if (end.r.lowPriority === want) return done(want === "on" ? `已开${end.r.resetsAt ? `，到 ${end.r.resetsAt}` : ""}` : "已关");
   const echo = badEcho(end.raw);
@@ -92,53 +82,75 @@ function badEcho(raw: string): string | null {
   return e && (e.echo === "unavailable" || e.echo === "break" || e.echo === "exhausted") ? e.text : null;
 }
 
-/** 最后一次提交 prefix 开头的命令之后几行（判 /compact 的回显，scrollback 里更早的不算） */
+const isCmdLine = (l: string, prefix: string) => l.startsWith("❯") && l.slice(1).trimStart().startsWith(prefix);
+
+/** 画面上 prefix 开头的已提交命令行有几条：发之前数一次，之后只认多出来的那条的回显（scrollback 里更早的不算） */
+function cmdCount(raw: string, prefix: string): number {
+  return stripAnsi(raw).split("\n").filter((l) => isCmdLine(l, prefix)).length;
+}
+
+/** 最后一条 prefix 开头的命令行之后几行（它的回显） */
 function afterCommand(raw: string, prefix: string): string {
   const plain = stripAnsi(raw).split("\n");
-  for (let i = plain.length - 1; i >= 0; i--) {
-    if (plain[i]!.replace(/^\s*❯\s*/, "").startsWith(prefix) && /^\s*❯/.test(plain[i]!)) return plain.slice(i + 1, i + 12).join("\n");
-  }
+  for (let i = plain.length - 1; i >= 0; i--) if (isCmdLine(plain[i]!, prefix)) return plain.slice(i + 1, i + 12).join("\n");
   return "";
 }
 
-/** 往输入框提交一条斜杠命令：忙就排队，空闲就等它真的开始 */
-async function slash(io: PaneIO, win: string, cmd: string, started: (x: { raw: string; r: LpRead }) => boolean, what: string): Promise<Step> {
-  const { r } = await read(io, win);
-  if (r.modal) return failed(`${r.reason ?? "底部没有输入框"}，没发`);
-  if (r.compacting) return { outcome: "skipped", detail: "正在压缩" };
+/** 能不能往输入框敲一条斜杠命令（忙 / 有排队的消息可以，会排队）：null = 能 */
+function slashBlock(r: LpRead): Step | null {
+  if (r.modal) return failed(`${r.reason ?? "底部没有输入框"}，没按任何键`);
+  if (r.compacting) return skipped("正在压缩");
   // 与 T36 注入闸门同一口径：撞墙没开 LP，命令发进去也跑不动，只会一直挂在输入框里
   if (r.lowPriority === "exhausted" || (r.walled && r.lowPriority !== "on")) return failed("撞墙等待中、没开 low-priority，没发（先开 LP，或用「开 LP 再压缩」）");
   if (r.input === "draft") return failed("输入框里有没发出去的文字，没动");
   if (r.input === "unknown") return failed("看不清输入框是否为空，没动");
-  const busy = r.busy || r.input === "queued";
+  return null;
+}
+
+/** 往输入框提交一条斜杠命令：忙就排队，空闲就等它真的开始（spinner，或这次新命令下面出现 echoRe） */
+async function slash(io: PaneIO, win: string, cmd: string, echoRe: RegExp | null, what: string): Promise<Step> {
+  const { block, x: x0 } = await gateTwice(io, win, slashBlock);
+  if (block) return block;
+  const name = cmd.split(" ")[0]!;
+  const before = cmdCount(x0.raw, name);
   await io.sendLine(win, cmd);
-  if (busy) {
+  if (x0.r.busy || x0.r.input === "queued") {
     const q = await waitFor(io, win, 3000, (x) => x.r.input === "queued");
     return { outcome: "queued", detail: q.ok ? "忙，已排队，回合结束后执行" : "忙，已发进输入框（没看到排队提示）" };
   }
-  const name = cmd.split(" ")[0]!;
-  const end = await waitFor(io, win, 10000, (x) => started(x) || /Not enough messages to compact|Unknown (?:skill|command)/.test(afterCommand(x.raw, name)));
-  const tail = afterCommand(end.raw, name);
-  if (/Not enough messages to compact/.test(tail)) return { outcome: "skipped", detail: "对话太短，不用压缩" };
+  // 发之前验过是空闲的，所以发完出现回合 spinner 就是这条命令在跑（low-priority 下压缩会先显示「Working at lower priority」排队）
+  const echo = (x: Frame) => (cmdCount(x.raw, name) > before ? afterCommand(x.raw, name) : "");
+  const fin = /Not enough messages to compact|Unknown (?:skill|command)/;
+  const started = (x: Frame) => x.r.compacting || x.r.busy || (!!echoRe && echoRe.test(echo(x)));
+  const end = await waitFor(io, win, 10000, (x) => started(x) || fin.test(echo(x)));
+  const tail = echo(end);
+  if (/Not enough messages to compact/.test(tail)) return skipped("对话太短，不用压缩");
   if (/Unknown (?:skill|command)/.test(tail)) return failed(`CC 不认识 ${name}`);
   return end.ok ? done(what) : failed(`发了 ${name}，10 秒内没看到开始，需要人工看`);
 }
 
-/**
- * 压缩开始的样子不止一种：「Compacting conversation…」，或 low-priority 下先排队等算力（「Working at lower priority … next try in 15s」，
- * 十几秒后才换成 Compacting）。发之前验过是空闲的，所以发完出现回合 spinner 就是 /compact 在跑。
- */
-const compactStarted = (x: { raw: string; r: LpRead }) => x.r.compacting || x.r.busy || /Compacting conversation|Compacted/.test(afterCommand(x.raw, "/compact"));
-
 function compact(io: PaneIO, win: string, keep: string): Promise<Step> {
-  return slash(io, win, compactCommand(keep), compactStarted, "已开始压缩");
+  return slash(io, win, compactCommand(keep), /Compacting conversation|Compacted/, "已开始压缩");
 }
 
 function saveCompact(io: PaneIO, win: string): Promise<Step> {
-  return slash(io, win, "/save-compact", (x) => x.r.busy || x.r.compacting, "已开始（先存记忆再压缩）");
+  return slash(io, win, "/save-compact", null, "已开始（先存记忆再压缩）");
 }
 
-/** 开 LP → 打断它自动开的续跑 → 清掉 Esc 放回输入框的字 → 压缩 */
+/** 打断自动续跑后，Esc 可能把我们敲的 /low-priority 放回输入框：只清这一行，别的字可能是有人在打，绝不清 */
+async function clearOwnEcho(io: PaneIO, win: string): Promise<Step | null> {
+  const { block } = await gateTwice(io, win, (r): Step | null => {
+    if (r.modal) return failed(`LP 已开，但${r.reason ?? "底部没有输入框"}，没压缩`);
+    if (r.input === "empty" || (r.input === "draft" && r.inputText === "/low-priority")) return null;
+    return skipped(`LP 已开；输入框里有别的字（${r.inputText.slice(0, 40) || "看不清"}），没清也没压缩`);
+  });
+  if (block) return block;
+  if ((await read(io, win)).r.input === "empty") return null;
+  await io.press(win, "C-u");
+  return (await waitFor(io, win, 2000, (x) => x.r.input === "empty")).ok ? null : failed("LP 已开，但清不掉输入框里的 /low-priority，没压缩");
+}
+
+/** 开 LP → 打断它自动开的续跑 → 清掉 Esc 放回来的 /low-priority → 压缩 */
 async function lpThenCompact(io: PaneIO, win: string, keep: string): Promise<Step> {
   const before = (await read(io, win)).r;
   if (before.lowPriority !== "on") {
@@ -150,11 +162,8 @@ async function lpThenCompact(io: PaneIO, win: string, keep: string): Promise<Ste
       const idle = await waitFor(io, win, 5000, (x) => !x.r.busy);
       if (!idle.ok) return failed("LP 已开，但 Esc 没打断自动续跑，没压缩");
     }
-    // 开 LP 前输入框是空的（decideLp 验过），现在里面的字只能是 Esc 放回来的；C-u 之后要等画面重绘，立刻重读会看到旧字
-    if ((await read(io, win)).r.input !== "empty") {
-      await io.press(win, "C-u");
-      if (!(await waitFor(io, win, 2000, (x) => x.r.input === "empty")).ok) return failed("LP 已开，但清不掉 Esc 放回输入框的字，没压缩");
-    }
+    const bad = await clearOwnEcho(io, win);
+    if (bad) return bad;
     if ((await read(io, win)).r.lowPriority !== "on") return failed("打断后 LP 不在了，没压缩");
   }
   const c = await compact(io, win, keep);

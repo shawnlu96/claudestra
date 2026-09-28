@@ -3036,7 +3036,7 @@ switch (cmd) {
         "tmux-screenshot <agent>         — screenshot an agent's tmux window (returns a PNG path)",
         "tmux-send-keys <agent> <keys...>  — send keys/text to an agent (Enter/Escape/Left/C-c …)",
         "tmux-capture <agent> [lines]    — read the last N lines of an agent's pane",
-        "fleet state | fleet <lp-on|lp-off|compact|save-compact|lp-compact|text> --agents a,b|--project p|--all [--walled] [--ctx-over N] [--dry-run]  — batch ops via the bridge",
+        "fleet state | fleet <lp-on|lp-off|compact|save-compact|lp-compact> --agents a,b|--project p|--all [--walled] [--ctx-over N] [--dry-run]  — batch ops via the bridge",
         "tmux-wait-idle <agent> [ms]     — block until the agent is idle again (default 30s)",
       ],
     });

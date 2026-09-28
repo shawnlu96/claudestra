@@ -53,7 +53,7 @@ export function auditFleet(x: AuditInput, log: (line: string) => void = console.
   for (const [project, text] of ledgerNotes(x)) {
     try {
       db ??= openLedger();
-      appendEvent(db, { actor: "owner", now: x.at, dedupKey: `fleet:${x.runId}:${project}` }, { project, target: "", kind: "note", text, data: { fleetRun: x.runId } });
+      appendEvent(db, { actor: x.actor, now: x.at, dedupKey: `fleet:${x.runId}:${project}` }, { project, target: "", kind: "note", text, data: { fleetRun: x.runId } });
     } catch (e) {
       console.warn(`⚠️ [fleet] ${x.runId} 台账 note 没写进 ${project}: ${(e as Error).message}`);
     }
