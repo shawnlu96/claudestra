@@ -17,19 +17,19 @@ import { output } from "./core.js";
 /** v2.16.3 update 附带的 web 构建。返回值进 update 输出的 webBuild 字段——skipped/ok/error 三态,绝不静默。
  *  判据与 install-cli / doctor 共用(lib/web-build.ts,按 hash 比对):此前按「本次 diff 是否触及
  *  web/」触发,某一轮构建失败后下一轮 diff 不再含 web/,就永远不重试。 */
-export async function maybeBuildWeb(): Promise<{ built: boolean; restored?: boolean; skipped?: string; error?: string }> {
+export async function maybeBuildWeb(): Promise<{ built: boolean; published?: boolean; restored?: boolean; skipped?: string; error?: string; warning?: string }> {
   const { rebuildWebIfStale } = await import("../lib/web-build.js");
   // 没装 web 的实例跳过,不拖垮整体 update
   if (!existsSync(`${REPO_ROOT}/web/node_modules`)) return { built: false, skipped: "web 未安装(无 node_modules)" };
   // 按版本托管时构建成功才发布切换；老配置直接读 web/out。两种都不用重启任何服务
   const r = await rebuildWebIfStale(REPO_ROOT);
-  if (!r.attempted) return { built: false, ...(r.error ? { error: r.error } : { skipped: r.skipped }) };
+  if (!r.attempted) return { built: false, ...(r.published ? { published: true } : {}), ...(r.error ? { error: r.error } : { skipped: r.skipped }) };
   if (!r.ok) {
     const tail = (r.log ?? []).join("\n");
     console.error(`[update] web 构建失败:\n${tail}`);
     return { built: false, restored: r.restored, error: `${r.error ?? "web 构建失败"}: ${tail.slice(0, 500)}` };
   }
-  return { built: true };
+  return { built: true, ...(r.published ? { published: true } : {}), ...(r.error ? { warning: r.error } : {}) }; // warning：已上线但清理旧版本失败等
 }
 
 export async function cmdWebRelease(args: string[]): Promise<void> {
@@ -44,7 +44,7 @@ export async function cmdWebRelease(args: string[]): Promise<void> {
   if (sub === "deploy") {
     // deployed 才表示这次真的构建并上线了；skipped（已是最新 / 构建锁忙 / 缺依赖）不算，自动化按它判断
     const r = await maybeBuildWeb();
-    output({ ok: !r.error, deployed: r.built, ...r });
+    output({ ok: !r.error, deployed: r.built || !!r.published, ...r });
     if (r.error) process.exitCode = 1;
   } else if (sub === "migrate") {
     output({ ok: true, notes: await migrateStaticDirToReleases(REPO_ROOT, () => publishWebOut(REPO_ROOT)) });

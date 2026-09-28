@@ -8,13 +8,22 @@
  *   旧写法 open("wx") 与写 pid 之间有空档，别人看到空文件当孤儿删掉，两边都以为自己拿到了锁。
  * - 内容读不出 pid（空、乱码、读失败）→ 不删、直接失败，留给人处理：身份不确定时宁可这轮不建。
  * - 持有者已死才接管：先把锁 rename 到自己独有的墓碑名，再核对墓碑里确实是那个死 pid；不是（期间别人已重建了锁）
- *   就原样放回并退出。剩余窗口：三方同时抢一个死锁时仍可能出错，概率极低，tests/web-build-lock.test.ts 压测过双方。
+ *   就原样放回并退出。已知剩余窗口（审查员复现过）：有崩溃残锁、且三方在同一毫秒内抢接管时，放回前约 100µs 里
+ *   第三方可能建锁成功，造成双持有。根治要用 flock（内核随进程释放），这里只把它压到这个量级。
+ * - 失败原因要报出去（lockStatus）：只有「锁已存在且持有者活着」才算忙；锁内容异常、非 EEXIST 的文件系统错误
+ *   都是错误——当成「忙」会让自动更新从此静默地不再部署网页。
  */
-import { closeSync, linkSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeSync } from "node:fs";
+import { closeSync, linkSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, unlinkSync, writeSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { STATE_DIR } from "./paths.js";
 
 const lockPath = () => `${STATE_DIR}/web-build.lock`;
+let last: { problem?: string; holder?: number } = {};
+
+/** 上一次 takeLock 失败的原因：problem = 锁本身出了问题（带路径，调用方按错误报）；holder = 正在构建的进程 pid */
+export function lockStatus(): { problem?: string; holder?: number } {
+  return last;
+}
 
 function pidAlive(pid: number): boolean {
   try { process.kill(pid, 0); return true; } catch { return false; }
@@ -35,32 +44,35 @@ export function isBuilderComm(comm: string): boolean {
   return /(^|\/)bun$/.test(comm.trim());
 }
 
-/** 锁文件里的 pid；读不到或不是正整数 → null（身份不确定） */
-function readHolder(path: string): number | null {
+/** 锁文件里的 pid；文件已不在 → "gone"（持有者刚释放，可以再抢）；读到了但不是正整数 → null（身份不确定） */
+function readHolder(path: string): number | null | "gone" {
+  let t: string;
   try {
-    const t = readFileSync(path, "utf-8").trim();
-    return /^\d+$/.test(t) && +t > 0 ? +t : null;
-  } catch {
-    return null; // 读失败按身份不确定处理（可能刚被别人删掉，这轮不抢）
+    t = readFileSync(path, "utf-8").trim();
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") return "gone";
+    throw e; // 权限等真正的错误交给 takeLock 报出去
   }
+  return /^\d+$/.test(t) && +t > 0 ? +t : null;
 }
 
 /** 带完整 pid 的锁文件一步到位：临时文件写好 pid → link 到锁路径（已存在就失败） */
 function tryCreate(path: string): boolean {
   const tmp = `${path}.${process.pid}.${Date.now()}.tmp`;
-  const fd = openSync(tmp, "wx");
   try {
-    writeSync(fd, String(process.pid));
-  } finally {
-    closeSync(fd);
-  }
-  try {
+    const fd = openSync(tmp, "wx");
+    try {
+      writeSync(fd, String(process.pid));
+    } finally {
+      closeSync(fd);
+    }
     linkSync(tmp, path);
     return true;
-  } catch {
-    return false; // 锁已存在
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === "EEXIST") return false; // 锁已存在
+    throw e; // 磁盘满、没权限、文件系统不支持硬链接：是错误，不是「忙」
   } finally {
-    unlinkSync(tmp);
+    rmSync(tmp, { force: true });
   }
 }
 
@@ -79,30 +91,42 @@ function reapDead(path: string, deadPid: number): boolean {
   try {
     linkSync(tomb, path); // 挪走的是别人刚建的活锁：原样放回
   } catch {
-    // 放回时锁路径又被占了：这份活锁的持有者 release 时会发现不是自己的、不会误删别人
+    // 放回时锁路径又被第三方占了：就是文件头注释说的剩余窗口，这里只能不再扩大它
   }
-  unlinkSync(tomb);
+  rmSync(tomb, { force: true });
   return false;
 }
 
+/** 拿锁；永不抛。失败时看 lockStatus()：有 problem 是错误，只有 holder 是别人在构建 */
 export function takeLock(): boolean {
-  mkdirSync(STATE_DIR, { recursive: true });
+  last = {};
   const path = lockPath();
-  for (let i = 0; i < 2; i++) {
-    if (tryCreate(path)) return true;
-    const holder = readHolder(path);
-    if (holder === null) {
-      console.error(`[web-build-lock] 锁文件内容异常（${path}），不自动删除：确认没有构建在跑后手动删掉它`);
-      return false;
+  try {
+    mkdirSync(STATE_DIR, { recursive: true });
+    for (let i = 0; i < 3; i++) {
+      if (tryCreate(path)) return true;
+      const holder = readHolder(path);
+      if (holder === "gone") continue; // 持有者刚释放：再抢
+      if (holder === null) {
+        last = { problem: `web 构建锁文件内容异常（${path}）：确认没有 web 构建在跑之后手动删掉它` };
+        return false;
+      }
+      if (holderBusy(holder)) {
+        last = { holder };
+        return false;
+      }
+      reapDead(path, holder);
     }
-    if (holderBusy(holder) || !reapDead(path, holder)) return false;
+    return false;
+  } catch (e) {
+    last = { problem: `web 构建锁出错（${path}）：${(e as Error).message}` };
+    return false;
   }
-  return false;
 }
 
 export function releaseLock(): void {
   const path = lockPath();
   try {
     if (readHolder(path) === process.pid) unlinkSync(path);
-  } catch { /* 已不在 */ }
+  } catch { /* 已不在或读不了：确认不了是自己的锁就不删 */ }
 }

@@ -30,6 +30,8 @@ export interface PublishResult {
   pruneError?: string;
   /** 没做（例如补发布时待发布标记已被回滚取消） */
   skipped?: string;
+  /** 没拿到构建锁：别人正在构建 / 发布（不是锁本身出错） */
+  busy?: boolean;
 }
 
 export const currentLink = (dir = RELEASES_DIR): string => join(dir, CURRENT);

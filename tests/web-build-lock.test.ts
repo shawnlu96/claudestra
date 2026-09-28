@@ -3,11 +3,11 @@
  * 多进程反复抢锁时临界区里永远只有一个（codex 复核用两个进程复现过旧写法的双持有）。
  */
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { STATE_DIR } from "../src/lib/paths.js";
-import { releaseLock, takeLock } from "../src/lib/web-build-lock.js";
+import { lockStatus, releaseLock, takeLock } from "../src/lib/web-build-lock.js";
 
 const LOCK = join(STATE_DIR, "web-build.lock");
 afterEach(() => rmSync(LOCK, { force: true }));
@@ -43,6 +43,24 @@ describe("takeLock / releaseLock", () => {
     expect(readFileSync(LOCK, "utf8")).toBe(String(process.pid));
     releaseLock();
   });
+  test("别人在构建：返回 false，lockStatus 给出持有者 pid、没有 problem", () => {
+    writeFileSync(LOCK, String(process.pid));
+    expect(takeLock()).toBe(false);
+    expect(lockStatus()).toEqual({ holder: process.pid });
+  });
+  test("锁内容异常 / 文件系统出错：不抛、按错误报出去（带路径），自动更新不会当成「别人在构建」静默跳过", () => {
+    writeFileSync(LOCK, "");
+    expect(takeLock()).toBe(false);
+    expect(lockStatus().problem).toContain(LOCK);
+    rmSync(LOCK, { force: true });
+    chmodSync(STATE_DIR, 0o500); // 状态目录不可写：建临时文件失败
+    try {
+      expect(takeLock()).toBe(false);
+      expect(lockStatus().problem).toContain("web 构建锁出错");
+    } finally {
+      chmodSync(STATE_DIR, 0o700);
+    }
+  });
   test("release 只删自己的锁", () => {
     writeFileSync(LOCK, "999999");
     releaseLock();
@@ -50,16 +68,39 @@ describe("takeLock / releaseLock", () => {
   });
 });
 
+/** 起 n 个子进程跑同一段脚本，统一在 startAt 时刻起跑（屏障），返回各自打印的 JSON */
+async function race<T>(dir: string, body: string, n: number, extraEnv: Record<string, string> = {}): Promise<T[]> {
+  const mod = resolve(import.meta.dir, "../src/lib/web-build-lock.ts");
+  const script = join(dir, `worker-${Math.random().toString(36).slice(2)}.ts`);
+  writeFileSync(script, `import { closeSync, openSync, unlinkSync } from "node:fs";
+import { releaseLock, takeLock } from ${JSON.stringify(mod)};
+const startAt = Number(process.env.START_AT);
+while (Date.now() < startAt) {}
+${body}`);
+  const env = { ...process.env, CLAUDESTRA_STATE_DIR: join(dir, "state"), START_AT: String(Date.now() + 1500), ...extraEnv };
+  const procs = Array.from({ length: n }, () => Bun.spawn(["bun", script], { env, stdout: "pipe", stderr: "pipe" }));
+  return Promise.all(procs.map(async (p) => JSON.parse((await new Response(p.stdout).text()).trim()) as T));
+}
+
 describe("多进程抢锁", () => {
-  test("4 个进程各抢 30 次：临界区里从没出现过两个持有者，且确实都拿到过锁", async () => {
+  test("预置一个死持有者的锁，4 个进程同时起跑抢接管：只有一个拿到", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "web-build-lock-dead-"));
+    try {
+      for (let round = 0; round < 3; round++) {
+        mkdirSync(join(dir, "state"), { recursive: true });
+        writeFileSync(join(dir, "state", "web-build.lock"), String(deadPid()));
+        const outs = await race<{ got: boolean }>(dir, `const got = takeLock(); await Bun.sleep(200); if (got) releaseLock(); console.log(JSON.stringify({ got }));`, 4);
+        expect(outs.filter((o) => o.got)).toHaveLength(1);
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  test("4 个进程同时起跑、各抢 30 次：临界区里从没出现过两个持有者，且确实都拿到过锁", async () => {
     const dir = mkdtempSync(join(tmpdir(), "web-build-lock-"));
     try {
-      const mod = resolve(import.meta.dir, "../src/lib/web-build-lock.ts");
-      const script = join(dir, "worker.ts");
-      writeFileSync(script, `
-import { closeSync, openSync, unlinkSync } from "node:fs";
-import { releaseLock, takeLock } from ${JSON.stringify(mod)};
-const marker = process.env.MARKER!;
+      const body = `const marker = process.env.MARKER!;
 let got = 0, overlap = 0;
 for (let i = 0; i < 30; i++) {
   if (!takeLock()) { await Bun.sleep(1); continue; }
@@ -69,11 +110,8 @@ for (let i = 0; i < 30; i++) {
   try { unlinkSync(marker); } catch {}
   releaseLock();
 }
-console.log(JSON.stringify({ got, overlap }));
-`);
-      const env = { ...process.env, CLAUDESTRA_STATE_DIR: join(dir, "state"), MARKER: join(dir, "inside") };
-      const procs = [0, 1, 2, 3].map(() => Bun.spawn(["bun", script], { env, stdout: "pipe", stderr: "pipe" }));
-      const outs = await Promise.all(procs.map(async (p) => JSON.parse((await new Response(p.stdout).text()).trim()) as { got: number; overlap: number }));
+console.log(JSON.stringify({ got, overlap }));`;
+      const outs = await race<{ got: number; overlap: number }>(dir, body, 4, { MARKER: join(dir, "inside") });
       expect(outs.reduce((n, o) => n + o.overlap, 0)).toBe(0);
       expect(outs.reduce((n, o) => n + o.got, 0)).toBeGreaterThan(4);
     } finally {

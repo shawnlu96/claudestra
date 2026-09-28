@@ -26,7 +26,7 @@ import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } 
 import { spawnSync } from "child_process";
 import { resolveNpm } from "./npm-path.js";
 import { healSelfDirty } from "./self-dirty.js";
-import { releaseLock, takeLock } from "./web-build-lock.js";
+import { lockStatus, releaseLock, takeLock } from "./web-build-lock.js";
 import { clearPendingPublish, hasPendingPublish, markPendingPublish, publishWebRelease, releasesManaged, rollbackWebRelease, type PublishResult, type RollbackResult } from "./web-releases.js";
 
 /** 仓库根下的 web pathspec —— 与 gen-build-info.mjs 在 web/ 下的 `-- . ':(exclude)*.md'` 等价 */
@@ -182,6 +182,8 @@ export interface WebBuildResult {
   restored?: boolean;
   /** 构建输出末尾几行（失败时） */
   log?: string[];
+  /** 这次有新版本上线（构建后发布，或补发布成功） */
+  published?: boolean;
 }
 
 const ORCH_DIR = STATE_DIR;
@@ -235,6 +237,13 @@ function discardBackups(): void {
 
 const outDirOf = (repoRoot: string) => `${repoRoot}/web/out`;
 
+/** 构建锁没拿到：锁本身出问题按错误报（否则自动更新会静默地不再部署）；别人在构建才算跳过 */
+function lockBusy(): WebBuildResult {
+  const s = lockStatus();
+  return s.problem ? { attempted: false, error: s.problem } : { attempted: false, skipped: `另一次 web 构建正在进行${s.holder ? `（pid ${s.holder}）` : ""}` };
+}
+const busyError = (): string => lockStatus().problem ?? `web 正在构建或发布（pid ${lockStatus().holder ?? "?"}），稍后再试`;
+
 /** 持有构建锁时发布：成功清掉待发布标记；已按版本托管时失败记待发布（下次不用重建也会补） */
 function publishHoldingLock(repoRoot: string): PublishResult {
   const p = publishWebRelease(outDirOf(repoRoot));
@@ -247,16 +256,17 @@ function publishHoldingLock(repoRoot: string): PublishResult {
 function publishAfterBuild(repoRoot: string, result: WebBuildResult): void {
   if (!releasesManaged(`${repoRoot}/.env`)) return;
   const p = publishHoldingLock(repoRoot);
-  if (!p.ok) Object.assign(result, { ok: false, error: `构建成功但${p.error}` });
-  else if (p.pruneError) result.error = `新版本已上线，但清理旧版本失败：${p.pruneError}`;
+  if (!p.ok) return void Object.assign(result, { ok: false, error: `构建成功但${p.error}` });
+  result.published = true;
+  if (p.pruneError) result.error = `新版本已上线，但清理旧版本失败：${p.pruneError}`;
 }
 
 /** 不用重建时：上次构建成功却没发布成（待发布标记还在）→ 补发布。标记在锁内复查：期间被回滚取消了就不发 */
 async function retryPendingPublish(repoRoot: string, detail: string): Promise<WebBuildResult> {
   if (!hasPendingPublish() || !releasesManaged(`${repoRoot}/.env`)) return { attempted: false, skipped: detail };
   const p = await publishWebOut(repoRoot, { onlyIfPending: true });
-  if (p.skipped) return { attempted: false, skipped: `${detail}；${p.skipped}` };
-  return p.ok ? { attempted: false, skipped: `${detail}；补发布了上次没上线的版本` } : { attempted: false, error: `补发布失败：${p.error}` };
+  if (p.skipped || p.busy) return { attempted: false, skipped: `${detail}；${p.skipped ?? p.error}` };
+  return p.ok ? { attempted: false, published: true, skipped: `${detail}；补发布了上次没上线的版本` } : { attempted: false, error: `补发布失败：${p.error}` };
 }
 
 /**
@@ -264,7 +274,7 @@ async function retryPendingPublish(repoRoot: string, detail: string): Promise<We
  * 注意：直接在 web/ 里 `npm run build` 不拿这把锁——受支持的手动部署是 `manager web-release deploy`
  */
 export async function publishWebOut(repoRoot: string, opts: { onlyIfPending?: boolean } = {}): Promise<PublishResult> {
-  if (!takeLock()) return { ok: false, error: "web 正在构建或发布，稍后再试" };
+  if (!takeLock()) return { ok: false, error: busyError(), ...(lockStatus().problem ? {} : { busy: true }) };
   try {
     if (opts.onlyIfPending && !hasPendingPublish()) return { ok: true, skipped: "待发布已被回滚或别的发布取消" };
     return publishHoldingLock(repoRoot);
@@ -275,7 +285,7 @@ export async function publishWebOut(repoRoot: string, opts: { onlyIfPending?: bo
 
 /** 回滚：拿构建锁，current 退一个版本，并在同一把锁下清掉待发布标记——之后的 update 不会把失败的候选再顶上去 */
 export async function rollbackWebOut(): Promise<RollbackResult> {
-  if (!takeLock()) return { ok: false, error: "web 正在构建或发布，稍后再试" };
+  if (!takeLock()) return { ok: false, error: busyError() };
   try {
     const r = rollbackWebRelease();
     if (r.ok) clearPendingPublish();
@@ -307,7 +317,7 @@ export async function rebuildWebIfStale(repoRoot: string): Promise<WebBuildResul
   const npmBin = resolveNpm();
   if (!npmBin) return { attempted: false, error: `${verdict.detail};找不到 npm(PATH/nvm/homebrew 都没有),无法重建` };
 
-  if (!takeLock()) return { attempted: false, skipped: "另一次 web 构建正在进行" };
+  if (!takeLock()) return lockBusy();
   try {
     // 上一次构建中途被杀（.next 已清空、备份还在）→ 先把旧构建换回来
     if (!existsSync(`${nextDir}/BUILD_ID`) && existsSync(`${BACKUPS[0]!.prev}/BUILD_ID`)) restoreBuild(webDir);
