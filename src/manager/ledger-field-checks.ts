@@ -40,7 +40,7 @@ export function checkMergeGate(c: LedgerCli, task: LedgerTask, pending: PendingR
   const owes = owesAdversarial(specPolicyOf(task, meta.docsDir), events, task.round, pending);
   if (owes === false || (owes === "unknown" && !specPathFor(task, meta.docsDir))) return;
   const why = owes === true
-    ? `${task.id} 的规格卡要求对抗式，当前 head 上还没有对抗式轮的通过`
+    ? `${task.id} 的规格卡要求对抗式，这一轮、当前 head 上还没有对抗式轮的通过（或 PM 豁免）`
     : `${task.id} 的规格卡提到对抗式，但读不出「审查：」那一行，说不清还欠不欠`;
   const out = c.isRealPm(task.project)
     ? "PM 核对后确实不需要再审，可以带 --waive adversarial --text <理由>"
