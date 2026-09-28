@@ -66,7 +66,17 @@ describe("保留名 owner / master", () => {
   test("名字字符黑名单与台账负责人校验共用（lib/registry.ts）：@ 与 CJK 允许，零宽 / 方向控制等不可见字符拒绝", () => {
     expect(() => assertValidNewName("a@b")).not.toThrow();
     expect(() => assertValidNewName("数据")).not.toThrow();
-    for (const bad of ["a\u200bb", "a\u202eb", "a\u2060b"]) expect(() => assertValidNewName(bad)).toThrow("名字不能含不可见字符（零宽连接符等），请换一个名字");
+    const cases: [string, string][] = [
+      ["a\u200bb", "U+200B"], ["a\u202eb", "U+202E"], ["a\u2060b", "U+2060"], ["a\u200db", "U+200D"],
+      // 不在 \p{Cf} 里的：变体选择符（Mn）、韩文填充符（Lo）、CGJ、高棉文不发音元音、盲文空格
+      ["dev\u2764\ufe0f", "U+FE0F"], ["a\u3164b", "U+3164"], ["a\u115fb", "U+115F"], ["a\u034fb", "U+034F"], ["a\u17b4b", "U+17B4"], ["a\u2800b", "U+2800"],
+    ];
+    for (const [bad, code] of cases) {
+      expect(() => assertValidNewName(bad)).toThrow("名字不能含不可见字符（零宽连接符等）");
+      expect(() => assertValidNewName(bad)).toThrow(`这里有 ${code}，请换一个名字`);
+    }
+    expect(() => assertValidNewName("dev\u2764\ufe0f")).toThrow("变体选择符 U+FE0F，去掉再试");
+    expect(() => assertValidNewName("dev\u2764")).not.toThrow();
   });
   test("doctor：已有 agent-owner 报 warn；agent-master 是大总管自己的条目不算", () => {
     expect(reservedAgentNameChecks(["agent-claudestra", "agent-master"])).toEqual([]);

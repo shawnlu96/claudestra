@@ -32,12 +32,23 @@ export function isMasterAgent(name: string | undefined | null): boolean {
  * agent 名里不许出现的字符（manager 新建 / resume / 改名与台账的负责人校验共用这一份）：空白、shell 元字符、控制字符，
  * 以及 `/` `\` `:` `~`——agent 名会拼进归档目录、截图文件路径，带分隔符就能写到预期之外的位置；
  * `.`——tmux 在目标串里按 `.` 切 pane，带点的窗口按名字永远找不到（tests/resumable-ops.test.ts）；
- * \p{Cf}（零宽、方向控制等不可见格式符）让两个看起来一样的名字成了两个人。CJK 等 Unicode 字母允许。
+ * 不可见字符（INVISIBLE_NAME_RE）让两个看起来一样的名字成了两个人。CJK 等 Unicode 字母允许。
  */
-export const AGENT_NAME_BLOCKLIST_RE = /[\s"'`$;&|<>()*?{}\\/:~.\x00-\x1f\x7f\p{Cf}]/u;
-/** 不可见字符单独报（PM 09-29 定的文案）：终端里看不出名字哪儿不对，直接叫人换一个 */
-export const INVISIBLE_NAME_RE = /\p{Cf}/u;
-export const INVISIBLE_NAME_MSG = "名字不能含不可见字符（零宽连接符等），请换一个名字";
+export const AGENT_NAME_BLOCKLIST_RE = /[\s"'`$;&|<>()*?{}\\/:~.\x00-\x1f\x7f\p{Cf}\p{Default_Ignorable_Code_Point}\u2800]/u;
+/**
+ * 不可见字符：\p{Cf}（零宽、方向控制）只是一部分，变体选择符 FE0F（Mn）、韩文填充符 U+3164（Lo）、CGJ 等在
+ * Default_Ignorable_Code_Point 里，盲文空格 U+2800 两边都不在、单列。带 FE0F 的 emoji 名字因此被拒（PM 09-29 定，可接受）。
+ * 只管新建 / resume / 改名与台账写入；kill / restart 走宽松归一，老名字照旧能操作。
+ */
+const INVISIBLE_NAME_RE = /[\p{Cf}\p{Default_Ignorable_Code_Point}\u2800]/u;
+
+/** 名字里第一个不可见字符的报错（写出 U+XXXX，终端里看不出哪儿不对）；没有为 null */
+export function invisibleNameError(name: string): string | null {
+  const ch = INVISIBLE_NAME_RE.exec(name)?.[0];
+  if (ch === undefined) return null;
+  const code = `U+${(ch.codePointAt(0) as number).toString(16).toUpperCase().padStart(4, "0")}`;
+  return `名字不能含不可见字符（零宽连接符等），这里有 ${code}，请换一个名字（emoji 后面常带不可见的变体选择符 U+FE0F，去掉再试）`;
+}
 
 /**
  * 保留给身份的名字：台账（lib/ledger-stages.ts roleOf）把 actor "owner" / "master" 直接当角色。
