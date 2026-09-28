@@ -138,3 +138,35 @@ export function noteLongYield(m: AutopilotFields, now: number): boolean {
   w.yieldLogged = true;
   return true;
 }
+
+/**
+ * 定时器到点时该做什么（让位另判：要抓屏、查在线，放在 bridge）。until 以外的时刻都从落盘的字段算，所以 bridge 重启后照样能接上：
+ * - run 领了没投递、超过 claimStaleMs → 放回（进程在领取和投递之间挂了）
+ * - run 已投递：还在忙就等；本进程没在给它记账（重启过）且已空闲 → 按证据不全收尾；超过 runStaleMs 仍空闲 → 判失败收尾
+ * - 没有 wake 也没有 run（刚开启、或旧数据）→ 入队一次 start
+ */
+export type FireStep =
+  | { kind: "wait"; ms: number }
+  | { kind: "unclaim" }
+  | { kind: "close"; lost: boolean; failure?: string }
+  | { kind: "enqueue_start" }
+  | { kind: "try" };
+
+export function decideFire(m: AutopilotFields, now: number, s: { busy: boolean; tracked: boolean }): FireStep {
+  const T = AUTOPILOT_TIMING;
+  const r = m.run;
+  if (r && !r.deliveredAt) {
+    const age = now - Date.parse(r.claimedAt);
+    return age >= T.claimStaleMs ? { kind: "unclaim" } : { kind: "wait", ms: T.claimStaleMs - age };
+  }
+  if (r?.deliveredAt) {
+    const age = now - Date.parse(r.deliveredAt);
+    if (s.busy) return { kind: "wait", ms: T.yieldRecheckMs * 5 };
+    if (!s.tracked) return { kind: "close", lost: true };
+    if (age >= T.runStaleMs) return { kind: "close", lost: false, failure: `投递后 ${Math.round(age / 60_000)} 分钟没等到回合结束，agent 已空闲` };
+    return { kind: "wait", ms: T.runStaleMs - age };
+  }
+  if (!m.wake) return { kind: "enqueue_start" };
+  const due = Date.parse(m.wake.dueAt) - now;
+  return due > 0 ? { kind: "wait", ms: due } : { kind: "try" };
+}

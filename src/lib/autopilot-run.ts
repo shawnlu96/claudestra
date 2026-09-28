@@ -79,6 +79,8 @@ export const AUTOPILOT_TIMING = {
   yieldRecheckMs: MINUTE_MS,
   /** 投递之后等不到回合结束多久判失败（agent 空闲却没有 done：事件丢了或 agent 挂了） */
   runStaleMs: 30 * MINUTE_MS,
+  /** 领到了却一直没标「已投递」：进程在领取和投递之间挂了，过这么久放回队列（不能太短：投递本身可能要等抢占收尾） */
+  claimStaleMs: 2 * MINUTE_MS,
 } as const;
 
 /**

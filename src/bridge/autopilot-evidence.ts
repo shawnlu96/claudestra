@@ -24,6 +24,11 @@ export function takeEvidence(agent: string, runId: string): RunEvidence {
   return t.ev;
 }
 
+/** 本进程正在给这个 run 记账；false = bridge 重启过（证据丢了）或早已收尾 */
+export function isTracking(agent: string, runId: string): boolean {
+  return tracking.get(key(agent))?.runId === runId;
+}
+
 /** 放弃记账（领到的 run 没递出去） */
 export function untrackRun(agent: string, runId: string): void {
   if (tracking.get(key(agent))?.runId === runId) tracking.delete(key(agent));

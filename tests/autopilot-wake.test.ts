@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { AUTOPILOT_TIMING as T, emptyEvidence } from "../src/lib/autopilot-run.js";
 import {
-  claimWake, enqueueWake, finishRun, markDelivered, noteLongYield, unclaimRun, type AutopilotFields,
+  claimWake, decideFire, enqueueWake, finishRun, markDelivered, noteLongYield, unclaimRun, type AutopilotFields,
 } from "../src/lib/autopilot-wake.js";
 
 const NOW = Date.parse("2026-09-28T11:00:00Z");
@@ -128,5 +128,33 @@ describe("落盘 → 重新加载（模拟 bridge 重启）", () => {
     const f = finishRun(back, "r1", "normal", { ...emptyEvidence(), evidenceLost: true }, NOW + 120_000, GRACE);
     expect(f?.run.runId).toBe("r1");
     expect(finishRun(roundTrip(p, back), "r1", "normal", emptyEvidence(), NOW + 130_000, GRACE)).toBeNull();
+  });
+});
+
+describe("decideFire：到点该做什么（都从落盘字段算，重启后照样接上）", () => {
+  const idle = { busy: false, tracked: true };
+  test("刚开启没有 wake → 入队 start；wake 没到 → 等；到了 → 试着推进", () => {
+    const m: AutopilotFields = {};
+    expect(decideFire(m, NOW, idle)).toEqual({ kind: "enqueue_start" });
+    enqueueWake(m, { source: "start", dueAt: NOW + 5000 }, NOW);
+    expect(decideFire(m, NOW, idle)).toEqual({ kind: "wait", ms: 5000 });
+    expect(decideFire(m, NOW + 5000, idle)).toEqual({ kind: "try" });
+  });
+  test("领了没投递：短时间内等（投递可能在路上），超时放回", () => {
+    const m: AutopilotFields = {};
+    enqueueWake(m, { source: "start", dueAt: NOW }, NOW);
+    claimWake(m, NOW, "r1");
+    expect(decideFire(m, NOW + 1000, idle).kind).toBe("wait");
+    expect(decideFire(m, NOW + T.claimStaleMs, idle)).toEqual({ kind: "unclaim" });
+  });
+  test("已投递：忙就等；重启过（没在记账）且空闲 → 证据不全收尾；太久没等到结束 → 失败收尾", () => {
+    const m: AutopilotFields = {};
+    enqueueWake(m, { source: "start", dueAt: NOW }, NOW);
+    claimWake(m, NOW, "r1");
+    markDelivered(m, "r1", NOW);
+    expect(decideFire(m, NOW + 60_000, { busy: true, tracked: false }).kind).toBe("wait");
+    expect(decideFire(m, NOW + 60_000, { busy: false, tracked: false })).toEqual({ kind: "close", lost: true });
+    expect(decideFire(m, NOW + 60_000, idle)).toEqual({ kind: "wait", ms: T.runStaleMs - 60_000 });
+    expect(decideFire(m, NOW + T.runStaleMs, idle)).toMatchObject({ kind: "close", lost: false, failure: expect.stringContaining("没等到回合结束") });
   });
 });

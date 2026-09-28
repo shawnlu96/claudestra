@@ -3,7 +3,7 @@ import { describe, expect, test } from "bun:test";
 import { appendFileSync, existsSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { appendRunLog, formatRunLine, readRunLog, type RunLogLine } from "../src/lib/autopilot-log.js";
+import { appendRunLog, formatRunLine, readRunLog, runLogLine, skippedLogLine, type RunLogLine } from "../src/lib/autopilot-log.js";
 import { emptyEvidence } from "../src/lib/autopilot-run.js";
 
 const line = (over: Partial<RunLogLine> = {}): RunLogLine => ({
@@ -40,5 +40,17 @@ describe("formatRunLine", () => {
     expect(s).toContain("中途有人插话");
     expect(s).toContain("（干了活，接着推）");
     expect(formatRunLine(line({ outcome: "skipped", reason: "排队 30 分钟没推进：主回合在跑" }))).toContain("skipped · 排队 30 分钟没推进");
+  });
+});
+
+describe("runLogLine / skippedLogLine", () => {
+  test("run 一行带触发、时长、证据、下次；未推进一行写排了多久和原因", () => {
+    const run = { runId: "r1", seq: 4, source: "turn_end" as const, merged: 2, firstAt: "2026-09-28T10:58:00Z", claimedAt: "2026-09-28T11:00:00Z", deliveredAt: "2026-09-28T11:00:01Z" };
+    const now = Date.parse("2026-09-28T11:10:01Z");
+    const l = runLogLine({ missionId: "m1", agent: "w", run, outcome: "normal", reason: "没调工具", evidence: emptyEvidence(), now, next: { at: now + 45_000, why: "正常一轮，接着推" } });
+    expect(l).toMatchObject({ runId: "r1", trigger: { source: "turn_end", seq: 4, merged: 2 }, durationMs: 600_000, why: "正常一轮，接着推" });
+    const s = skippedLogLine({ missionId: "m1", agent: "w", wake: { seq: 5, source: "turn_end", dueAt: "", firstAt: "2026-09-28T10:40:01Z", merged: 3 }, reason: "刚收到人类消息", now });
+    expect(s.reason).toBe("排队 30 分钟没推进：刚收到人类消息");
+    expect(s.outcome).toBe("skipped");
   });
 });

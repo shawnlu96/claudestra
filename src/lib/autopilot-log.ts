@@ -8,7 +8,7 @@ import { appendFileSync, mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { RunEvidence, RunOutcome } from "./autopilot-run.js";
 import { statePath } from "./paths.js";
-import type { WakeSource } from "./autopilot-wake.js";
+import type { ActiveRun, Wake, WakeSource } from "./autopilot-wake.js";
 
 const AUTOPILOT_LOG_DIR = statePath("autopilot");
 
@@ -66,6 +66,29 @@ export function readRunLog(missionId: string, limit = 50, dir = AUTOPILOT_LOG_DI
     }
   }
   return out.slice(-limit);
+}
+
+/** 一个 run 收尾时的那一行；next 为空 = 不再排下一次（mission 已结束） */
+export function runLogLine(p: {
+  missionId: string; agent: string; run: ActiveRun; outcome: RunOutcome; reason: string; evidence: RunEvidence; now: number;
+  next?: { at: number; why: string };
+}): RunLogLine {
+  const start = Date.parse(p.run.deliveredAt ?? p.run.claimedAt);
+  return {
+    ts: new Date(p.now).toISOString(), missionId: p.missionId, agent: p.agent, outcome: p.outcome, reason: p.reason, runId: p.run.runId,
+    trigger: { source: p.run.source, seq: p.run.seq, merged: p.run.merged },
+    startedAt: new Date(start).toISOString(), endedAt: new Date(p.now).toISOString(), durationMs: Math.max(0, p.now - start), evidence: p.evidence,
+    ...(p.next ? { nextWakeAt: new Date(p.next.at).toISOString(), why: p.next.why } : {}),
+  };
+}
+
+/** 该推进却没推进的那一行（让位太久、agent 不在线） */
+export function skippedLogLine(p: { missionId: string; agent: string; wake: Wake; reason: string; now: number }): RunLogLine {
+  const waited = Math.round((p.now - Date.parse(p.wake.firstAt)) / 60_000);
+  return {
+    ts: new Date(p.now).toISOString(), missionId: p.missionId, agent: p.agent, outcome: "skipped",
+    reason: `排队 ${waited} 分钟没推进：${p.reason}`, trigger: { source: p.wake.source, seq: p.wake.seq, merged: p.wake.merged },
+  };
 }
 
 const hhmm = (s?: string) => (s ? new Date(s).toTimeString().slice(0, 5) : "--:--");
