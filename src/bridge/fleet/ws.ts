@@ -4,7 +4,8 @@
  * 这里再按连接地址判一次回环兜底。本机任何进程（包括被注入的 agent 跑的 Bash）都能连 ws，认不出是不是 owner，
  * 所以落款记 local-cli、不写 owner；群发文字、自定义保留清单、带上大总管只给网页的 owner 路径（T35 adv1 P1-1）。
  */
-import { bareName, parseFleetAction, parseFleetSelect } from "../../lib/fleet-plan.js";
+import { parseFleetAction, parseFleetSelect } from "../../lib/fleet-plan.js";
+import { isMasterName } from "../../lib/registry.js";
 import { fleetState, runFleet } from "./service.js";
 
 /**
@@ -20,7 +21,7 @@ export async function handleFleetWs(msg: Record<string, unknown>, wsData: unknow
     const s = parseFleetSelect(msg.select);
     if (!s.ok) return { error: s.error };
     const keep = (msg.action as { keep?: unknown } | null)?.keep;
-    if (a.action.kind === "text" || keep !== undefined || s.select.includeMaster || s.select.agents?.some((n) => bareName(n) === "master")) {
+    if (a.action.kind === "text" || keep !== undefined || s.select.includeMaster || s.select.agents?.some(isMasterName)) {
       return { error: "命令行不能群发文字、自定义保留清单或带上大总管：这些只在网页上用 owner 设备操作" };
     }
     return { result: await run({ action: a.action, select: s.select, dryRun: msg.dryRun === true, actor: "local-cli", via: "ws" }) };

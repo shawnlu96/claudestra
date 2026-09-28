@@ -85,6 +85,9 @@ describe("ws：认不出调用方是不是 owner，只给最低权限（adv1 P1-
       [{ kind: "compact" }, { all: true, includeMaster: true }],
       [{ kind: "lp-on" }, { agents: ["master"] }],
       [{ kind: "lp-on" }, { agents: ["a", "agent-master"] }],
+      [{ kind: "lp-on" }, { agents: ["MASTER"] }],
+      [{ kind: "lp-on" }, { agents: ["agent-agent-master"] }],
+      [{ kind: "lp-on" }, { agents: ["ｍａｓｔｅｒ"] }],
     ] as const) {
       expect((await ws(action, select)).error).toContain("只在网页上用 owner 设备操作");
     }
