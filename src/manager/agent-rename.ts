@@ -23,7 +23,9 @@ export async function runRename(oldName: string, newName: string, deps: OpsDeps)
   const reg = await deps.loadRegistry();
   const info = reg.agents[oldTmux];
   const target = reg.agents[newTmux];
-  const resuming = !info && target?.pending?.op === "rename" && target.pending.from === oldTmux;
+  const resuming = target?.pending?.op === "rename" && target.pending.from === oldTmux;
+  // 补跑期间旧名又被新建的 agent 占了：旧名窗口和台账都是它的，只补频道
+  const oldTaken = resuming && !!info;
   const pend = resuming ? target!.pending! : info?.pending;
   if (pend && isPendingLive(pend, deps.now(), deps.alive)) {
     return { ok: false, error: `${resuming ? newTmux : oldTmux} 正在 ${pend.op}（pid ${pend.pid}），等它结束再试` };
@@ -47,13 +49,13 @@ export async function runRename(oldName: string, newName: string, deps: OpsDeps)
   steps.push({ step: "registry", ok: true, ...(resuming ? { skipped: "上次已迁移" } : {}) });
 
   const windows = await deps.listWindows();
-  if (windows.includes(oldTmux) && !windows.includes(newTmux)) {
+  if (!oldTaken && windows.includes(oldTmux) && !windows.includes(newTmux)) {
     const err = await deps.renameWindow(oldTmux, newTmux).then(() => null, (e) => (e as Error).message);
     steps.push({ step: "tmux rename-window", ok: !err, ...(err ? { raw: `error: ${err}` } : {}) });
   } else {
-    steps.push({ step: "tmux rename-window", ok: false, skipped: windows.includes(newTmux) ? "窗口已是新名" : "tmux window 不存在" });
+    steps.push({ step: "tmux rename-window", ok: false, skipped: windows.includes(newTmux) ? "窗口已是新名" : oldTaken ? "旧名已被新 agent 占用" : "tmux window 不存在" });
   }
-  await deps.renameLedger(oldTmux, newTmux); // 台账的执行者 / PM 名单跟着改名（重复跑找不到旧名 = 无事）
+  if (!oldTaken) await deps.renameLedger(oldTmux, newTmux); // 台账的执行者 / PM 名单跟着改名（重复跑找不到旧名 = 无事）
 
   let channelDone = true;
   if (entry.channelId) {

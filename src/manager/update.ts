@@ -15,7 +15,7 @@ import { installAfterPull, DEP_MANIFESTS } from "../lib/post-pull.js";
 import { MASTER_SESSION, tmuxRaw } from "../lib/tmux-helper.js";
 import { pidAlive } from "../lib/pending-ops.js";
 import {
-  clearUpdateMarker, launchdStartedAt, readUpdateMarker, updateVerdict, writeUpdateMarker, UPDATE_INFLIGHT,
+  abandonUpdateMarker, clearUpdateMarker, launchdStartedAt, readUpdateMarker, updateVerdict, writeUpdateMarker, UPDATE_ABANDONED, UPDATE_INFLIGHT,
   type UpdateMarker, type UpdateStep,
 } from "../lib/update-inflight.js";
 import { maybeBuildWeb } from "./web-release.js";
@@ -59,9 +59,11 @@ function newMarker(channel: UpdateMarker["channel"], target: string, targetLabel
   return { pid: process.pid, channel, target, targetLabel, fromHead, step: "checkout", startedAt: new Date().toISOString() };
 }
 
-/** 失败时回到升级前：release 是 checkout 回旧 HEAD，beta 在分支上用 reset --keep */
+/** 失败时回到升级前：release 是 checkout 回旧 HEAD，beta 在分支上用 reset --keep。
+ *  HEAD 已在目标之后（有人又提交过）时不回退：reset / checkout 回 fromHead 会把那些提交甩出分支 */
 function rollbackFor(d: UpdateDeps, m: UpdateMarker): () => Promise<string | null> {
   return async () => {
+    if ((await d.git("rev-parse", "HEAD")).out.trim() !== m.target) return "HEAD 已在目标之后（有新提交），不自动回退";
     const r = m.channel === "beta" ? await d.git("reset", "--keep", m.fromHead) : await d.git("checkout", m.fromHead, "--quiet");
     return r.ok ? null : r.err || "git 回退失败";
   };
@@ -78,7 +80,10 @@ async function reloadDaemons(m: UpdateMarker) {
   const skillsInstalled = installRepoSkills(REPO_ROOT);
   for (const sk of skillsInstalled) if (sk.action !== "ok") console.error(`[skills] ${sk.name}: ${sk.action} — ${sk.detail}`);
   // 有 daemon 没 bootstrap 上就留着标记：doctor 报出来，再跑 update 只补 reload
-  if (cliInstall.daemons.every((x) => x.loaded)) clearUpdateMarker();
+  if (cliInstall.daemons.every((x) => x.loaded)) {
+    clearUpdateMarker();
+    clearUpdateMarker(UPDATE_ABANDONED); // 完整 reload 过一次，之前放弃补完的那次也就不欠了
+  }
   return { cliInstall, skillsInstalled };
 }
 
@@ -177,9 +182,10 @@ async function resumeUpdate(d: UpdateDeps): Promise<boolean> {
   const m = readUpdateMarker();
   if (!m) return false;
   const head = (await d.git("rev-parse", "HEAD")).out.trim();
+  const ahead = head !== m.target && (await d.git("merge-base", "--is-ancestor", m.target, "HEAD")).ok;
   const { DAEMONS } = await import("../lib/cli-install.js");
   const starts = Object.fromEntries(DAEMONS.map((x) => [x.label, launchdStartedAt(x.label)]));
-  const v = updateVerdict(m, head, Date.now(), pidAlive, starts);
+  const v = updateVerdict(m, head, Date.now(), pidAlive, starts, ahead);
   if (v.action === "clear") {
     console.error(`[update] 清除上次的进行中标记：${v.why}`);
     clearUpdateMarker();
@@ -187,9 +193,9 @@ async function resumeUpdate(d: UpdateDeps): Promise<boolean> {
   }
   if (v.action === "live") return done({ ok: false, error: `另一次 update 正在进行（pid ${m.pid}，步骤 ${m.step}）——稍后再试` });
   if (v.action === "report") {
-    // 仓库已被人改过：旧标记描述的现场不在了，补不了也不该永远挡住更新——留一句话，照常走 update
-    console.error(`[update] ⚠️ 上次 update（→ ${m.targetLabel}，停在 ${m.step}）没做完，且${v.why}；丢弃标记后照常更新`);
-    clearUpdateMarker();
+    // 仓库被改到别处：补不了，也不该永远挡住更新；标记挪去 abandoned 让 doctor 继续报，照常走 update
+    console.error(`[update] ⚠️ 上次 update（→ ${m.targetLabel}，停在 ${m.step}）没做完，且${v.why}；标记移到 ${UPDATE_ABANDONED}，照常更新`);
+    abandonUpdateMarker();
     return false;
   }
   if (v.action === "finish-tail" && (await d.git("status", "--porcelain")).out) {

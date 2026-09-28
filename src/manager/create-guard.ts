@@ -87,6 +87,8 @@ export async function beginCreate(name: string, channelName: string, base: Parti
   if ((await deps.listWindows()).includes(name)) return { ok: false, error: `${name} 已存在` };
   const reg = await deps.loadRegistry();
   const prev = reg.agents[name];
+  // 两次读之间别人写了标记（写锁降级后的并发 create 等）：不能把它的占位当成 prev 收进来
+  if (prev?.pending) return { ok: false, error: `${name} 另有一个 ${prev.pending.op} 同时在做，这边让开` };
   const mine = newPending("create", { channelName, ...(prev ? { prev: prev as unknown as Record<string, unknown> } : {}) }, deps.now());
   reg.agents[name] = { ...base, status: "creating", channelId: "", created: new Date(deps.now()).toISOString(), pending: mine } as AgentInfo;
   await deps.saveRegistry(reg);
@@ -113,7 +115,8 @@ export function createAborting(): boolean {
 
 /** 建频道 / 建窗口后立刻调：之后任何一刻被杀，残留清理都知道删哪个频道、关哪个窗口 */
 export async function recordCreate(name: string, patch: { channelId?: string; windowId?: string }, deps: OpsDeps): Promise<void> {
-  if (aborting) return;
+  // 信号清理已接手：把主流程冻在这里等它 process.exit，别再往下建窗口（清理按接手时的占位删，后建的它看不见）
+  if (aborting) await new Promise<never>(() => {});
   const reg = await deps.loadRegistry();
   const a = reg.agents[name];
   if (!ownsPlaceholder(reg, name) || !a) return;

@@ -11,7 +11,7 @@ import { TMUX_SOCK, MASTER_SESSION } from "./tmux-helper.js";
 import { agentWindowsOrNull } from "./agent-windows.js";
 import { bridgeRequest } from "./bridge-client.js";
 import { describeResidue, pidAlive, scanResidues, type Residue, type ScanInput } from "./pending-ops.js";
-import { launchdStartedAt, readUpdateMarker, updateVerdict, UPDATE_INFLIGHT } from "./update-inflight.js";
+import { launchdStartedAt, readUpdateMarker, updateVerdict, UPDATE_ABANDONED, UPDATE_INFLIGHT } from "./update-inflight.js";
 
 const REPAIR = "bun src/manager.ts repair（先看计划）→ bun src/manager.ts repair --apply";
 
@@ -53,18 +53,25 @@ export async function gatherScanInput(): Promise<ScanInput> {
 }
 
 async function checkUpdateMarker(repoRoot: string): Promise<Check[]> {
-  const m = readUpdateMarker();
-  if (!m) return [];
   const g = "config";
-  const head = spawnSync("git", ["-C", repoRoot, "rev-parse", "HEAD"], { encoding: "utf8" }).stdout?.trim() ?? "";
+  const gone = readUpdateMarker(UPDATE_ABANDONED);
+  const abandoned: Check[] = gone ? [{ group: g, name: "放弃补完的 update", status: "warn",
+    detail: `update → ${gone.targetLabel} 停在 ${gone.step} 时仓库被改到别处，依赖 / daemon 可能不是新代码`,
+    fix: `bun src/manager.ts install-cli 重装并 reload daemon（成功的 update 也会顺手清掉），核对后可删 ${UPDATE_ABANDONED}` }] : [];
+  const m = readUpdateMarker();
+  if (!m) return abandoned;
+  const git = (...a: string[]) => spawnSync("git", ["-C", repoRoot, ...a], { encoding: "utf8" });
+  const head = git("rev-parse", "HEAD").stdout?.trim() ?? "";
+  const ahead = head !== m.target && git("merge-base", "--is-ancestor", m.target, "HEAD").status === 0;
   const { DAEMONS } = await import("./cli-install.js");
-  const v = updateVerdict(m, head, Date.now(), pidAlive, Object.fromEntries(DAEMONS.map((x) => [x.label, launchdStartedAt(x.label)])));
+  const v = updateVerdict(m, head, Date.now(), pidAlive, Object.fromEntries(DAEMONS.map((x) => [x.label, launchdStartedAt(x.label)])), ahead);
   const what = `update → ${m.targetLabel}（${m.channel}，停在 ${m.step}，${m.startedAt}）`;
   switch (v.action) {
-    case "live": return [{ group: g, name: "update 进行中", status: "ok", detail: `${what}，pid ${m.pid} 还在跑` }];
-    case "clear": return [{ group: g, name: "update 标记", status: "ok", detail: `${what}：${v.why}，下次 update 自动清掉` }];
-    case "report": return [{ group: g, name: "卡住的 update", status: "warn", detail: `${what}：${v.why}`, fix: `bun src/manager.ts update（会丢弃这个过期标记后照常更新；标记文件 ${UPDATE_INFLIGHT}）` }];
-    default: return [{ group: g, name: "卡住的 update", status: "warn",
+    case "live": return [...abandoned, { group: g, name: "update 进行中", status: "ok", detail: `${what}，pid ${m.pid} 还在跑` }];
+    case "clear": return [...abandoned, { group: g, name: "update 标记", status: "ok", detail: `${what}：${v.why}，下次 update 自动清掉` }];
+    case "report": return [...abandoned, { group: g, name: "卡住的 update", status: "warn", detail: `${what}：${v.why}`,
+      fix: `bun src/manager.ts update（会把标记移到 abandoned 后照常更新；标记文件 ${UPDATE_INFLIGHT}）` }];
+    default: return [...abandoned, { group: g, name: "卡住的 update", status: "warn",
       detail: `${what}：${v.action === "finish-reload" ? `这些 daemon 没在 reload 之后重启：${v.stale.join(", ")}` : "切到新版本后没做完（依赖 / 构建 / reload）"}`,
       fix: "bun src/manager.ts update（会从停下的那一步补完）" }];
   }

@@ -35,6 +35,10 @@ describe("updateVerdict", () => {
     expect(updateVerdict(m({ step: "migrated" }), "X".repeat(40), NOW, dead, fresh).action).toBe("report");
     expect(updateVerdict(m(), "X".repeat(40), NOW, dead, { ...fresh, a: null }).action).toBe("report");
   });
+  test("HEAD 在目标之后（又提交过）→ 照样补完", () => {
+    expect(updateVerdict(m({ step: "migrated" }), "X".repeat(40), NOW, dead, fresh, true).action).toBe("finish-tail");
+    expect(updateVerdict(m(), "X".repeat(40), NOW, dead, { ...fresh, a: null }, true)).toEqual({ action: "finish-reload", stale: ["a"] });
+  });
   test("reload 已完成（launcher 连坐回收的常态）之后 HEAD 被人动过 → 仍只清标记，不挡以后的更新", () => {
     expect(updateVerdict(m(), "X".repeat(40), NOW, dead, fresh).action).toBe("clear");
   });

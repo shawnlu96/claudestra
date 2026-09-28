@@ -39,13 +39,26 @@ export function isPendingLive(p: { pid: number; startedAt: string }, now: number
 }
 
 /**
- * restart / resume 能不能碰这个条目：在途的一律不碰；残留的 kill 可以（重新拉起 = kill 的意图作废，调用方清标记）；
- * 残留的 create / rename 不行——窗口 / 频道还挂在标记上，拉起来会多出第二个会话或丢掉线索。
+ * restart / resume 能不能碰这个条目（windows = 当前 agent 窗口名）：
+ * - 在途的一律不碰；残留 create 不行（窗口 / 频道挂在占位上）。
+ * - 残留 rename 只在旧名窗口还在时拦（那时拉起会多出第二个会话）；只差频道改名的照常 restart，不能让它从此失去自愈。
+ * - 残留 kill：restart 可以（沿用原频道，拉起 = kill 作废，调用方清标记）；resume 会新建频道并整条覆盖，
+ *   欠删的旧频道就再也没人记得，所以带 left 的要先收尾。
  */
-export function pendingRefusal(p: PendingOp | undefined, verb: string, now: number, alive: (pid: number) => boolean): string | null {
+export function pendingRefusal(p: PendingOp | undefined, verb: "restart" | "resume", windows: string[], now: number, alive: (pid: number) => boolean): string | null {
   if (!p) return null;
   if (isPendingLive(p, now, alive)) return `${verb} 不了：正在 ${p.op}（pid ${p.pid}），等它结束再试`;
-  return p.op === "kill" ? null : `有做到一半的 ${p.op}，先跑 manager repair --apply 收尾再 ${verb}`;
+  const finish = `先跑 manager repair --apply（或再跑一次 ${p.op}）收尾再 ${verb}`;
+  if (p.op === "create") return `有做到一半的 create，${finish}`;
+  if (p.op === "rename") return windows.includes(p.from) ? `rename 做到一半、旧名窗口 ${p.from} 还在，${finish}` : null;
+  return verb === "resume" && p.left?.length ? `上次 kill 还欠删旧频道，${finish}` : null;
+}
+
+/** list 的 dead 判定要不要跳过它（跳过 = launcher 不自愈）：只跳过在途的、create 占位、残留 kill，以及旧名窗口还在的 rename */
+export function pendingHoldsOffHeal(p: PendingOp | undefined, windows: string[], now: number, alive: (pid: number) => boolean): boolean {
+  if (!p) return false;
+  if (isPendingLive(p, now, alive) || p.op !== "rename") return true;
+  return windows.includes(p.from);
 }
 
 export function newPending<T extends PendingOp["op"]>(op: T, extra: Omit<Extract<PendingOp, { op: T }>, "op" | "pid" | "startedAt">, now = Date.now()): Extract<PendingOp, { op: T }> {

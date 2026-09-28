@@ -4,8 +4,13 @@
  */
 import { AGENT_PREFIX, MASTER_SESSION, tmuxRawStrict } from "./tmux-helper.js";
 
-/** tmux 没起 / master session 不存在 = 确实没有窗口；其余失败 = 不知道 */
-const NO_WINDOWS_RE = /no server running|can't find session|error connecting to|no such file or directory/i;
+/** tmux 没起 / master session 不存在 / socket 不存在或没人听 = 确实没有窗口；权限、路径过长等其余失败 = 不知道 */
+const NO_WINDOWS_RE = /no server running|can't find session|error connecting to .*\((No such file or directory|Connection refused)\)/i;
+
+/** tmux 报错是否等于「一个窗口都没有」（tests/pending-ops.test.ts） */
+export function tmuxErrorMeansNoWindows(msg: string): boolean {
+  return NO_WINDOWS_RE.test(msg);
+}
 
 /** master session 里的 agent-* 窗口 [{name, id}]；null = 查不到（调用方按「不确定」处理，不删不关） */
 export async function agentWindowsOrNull(): Promise<Array<{ name: string; id: string }> | null> {
@@ -13,7 +18,7 @@ export async function agentWindowsOrNull(): Promise<Array<{ name: string; id: st
   try {
     out = await tmuxRawStrict(["list-windows", "-t", MASTER_SESSION, "-F", "#{window_name}\t#{window_id}"]);
   } catch (e) {
-    return NO_WINDOWS_RE.test((e as Error).message) ? [] : null;
+    return tmuxErrorMeansNoWindows((e as Error).message) ? [] : null;
   }
   return out.split("\n").map((l) => l.trim().split("\t")).filter(([n, id]) => n?.startsWith(AGENT_PREFIX) && id).map(([name, id]) => ({ name: name!, id: id! }));
 }

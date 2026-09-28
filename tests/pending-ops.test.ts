@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { isPendingLive, PENDING_STALE_MS, scanResidues, type PendingOp, type ScanInput } from "../src/lib/pending-ops";
 import { residueChecks } from "../src/lib/doctor-pending";
+import { tmuxErrorMeansNoWindows } from "../src/lib/agent-windows";
 
 const NOW = Date.parse("2026-09-28T12:00:00Z");
 const at = (msAgo: number) => new Date(NOW - msAgo).toISOString();
@@ -65,5 +66,19 @@ describe("scanResidues", () => {
     ], true);
     expect(c.find((x) => x.name === "做到一半的操作")!.fix).toContain("repair --apply");
     expect(c.find((x) => x.name === "未登记窗口")!.fix).toContain("kill-window");
+  });
+});
+
+describe("tmuxErrorMeansNoWindows", () => {
+  test("没起 / 没 session / socket 不在或没人听 = 没有窗口", () => {
+    expect(tmuxErrorMeansNoWindows("no server running on /tmp/x/master.sock")).toBe(true);
+    expect(tmuxErrorMeansNoWindows("can't find session: master")).toBe(true);
+    expect(tmuxErrorMeansNoWindows("error connecting to /tmp/x/master.sock (No such file or directory)")).toBe(true);
+    expect(tmuxErrorMeansNoWindows("error connecting to /tmp/x/master.sock (Connection refused)")).toBe(true);
+  });
+  test("权限 / 路径过长等 = 不知道（窗口可能都在）", () => {
+    expect(tmuxErrorMeansNoWindows("error connecting to rt/master.sock (Permission denied)")).toBe(false);
+    expect(tmuxErrorMeansNoWindows("error connecting to /very/long (File name too long)")).toBe(false);
+    expect(tmuxErrorMeansNoWindows("server exited unexpectedly")).toBe(false);
   });
 });

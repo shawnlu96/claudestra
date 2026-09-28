@@ -9,6 +9,7 @@ import { runKill, runRemove } from "../src/manager/agent-kill";
 import { runRename } from "../src/manager/agent-rename";
 import { runRepair } from "../src/manager/repair";
 import type { AgentInfo } from "../src/manager/core";
+import { pendingHoldsOffHeal, pendingRefusal } from "../src/lib/pending-ops";
 
 type World = ReturnType<typeof makeWorld>;
 
@@ -329,6 +330,67 @@ describe("审查发现的误删路径（回归用例）", () => {
     w.st.reg.agents["agent-x"]!.pending = { op: "create", pid: 999999, startedAt: "2026-09-28T12:00:00Z", channelName: "x" };
     expect(await commitCreate("agent-x", LIVE, w.deps)).toBe("lost");
     expect(w.st.reg.agents["agent-x"]!.status).toBe("creating");
+  });
+});
+
+describe("最后一轮审查（回归用例）", () => {
+  test("P1：rename 只差频道 → 标记留着，但 restart / 自愈照常；旧名被新 agent 占了也能只补频道", async () => {
+    const init = { reg: { socket: "s", agents: { "agent-a": { ...LIVE, channelId: "ch1" } } }, windows: ["agent-a"], channels: new Set(["ch1"]), bridgeUp: false };
+    const w = makeWorld(init);
+    expect(await runRename("a", "b", w.deps)).toMatchObject({ ok: true, incomplete: ["channel"] });
+    const p = w.st.reg.agents["agent-b"]!.pending;
+    expect(p).toMatchObject({ op: "rename", from: "agent-a" });
+    w.restart();
+    expect(pendingRefusal(p, "restart", w.st.windows, w.deps.now(), w.deps.alive)).toBeNull();
+    expect(pendingHoldsOffHeal(p, w.st.windows, w.deps.now(), w.deps.alive)).toBe(false);
+    // 旧名又被新建出来（带自己的窗口）
+    w.st.reg.agents["agent-a"] = { ...LIVE, channelId: "chNew" };
+    w.openWindow("agent-a");
+    w.st.channels.add("chNew");
+    w.st.bridgeUp = true;
+    w.st.ledgerRenames = [];
+    expect(await runRename("a", "b", w.deps)).toMatchObject({ ok: true, resumed: true });
+    expect(w.st.windows.sort()).toEqual(["agent-a", "agent-b"]);
+    expect(w.st.ledgerRenames).toEqual([]);
+    expect(w.st.channelNames.get("ch1")).toBe("b");
+    expect(w.st.reg.agents["agent-b"]!.pending).toBeUndefined();
+    expect(w.st.reg.agents["agent-a"]!.channelId).toBe("chNew");
+  });
+
+  test("P1：旧名窗口还在的残留 rename → restart 拒绝、不自愈（否则多出第二个会话）", () => {
+    const p = { op: "rename" as const, pid: 1, startedAt: "2026-09-28T10:00:00Z", from: "agent-a" };
+    const now = Date.parse("2026-09-28T12:00:00Z");
+    expect(pendingRefusal(p, "restart", ["agent-a"], now, () => false)).toContain("旧名窗口");
+    expect(pendingHoldsOffHeal(p, ["agent-a"], now, () => false)).toBe(true);
+  });
+
+  test("P2-1：kill 欠删频道时 resume 拒绝（restart 放行）", () => {
+    const p = { op: "kill" as const, pid: 0, startedAt: "2026-09-28T10:00:00Z", left: ["channel"] };
+    const now = Date.parse("2026-09-28T12:00:00Z");
+    expect(pendingRefusal(p, "resume", [], now, () => false)).toContain("欠删");
+    expect(pendingRefusal(p, "restart", [], now, () => false)).toBeNull();
+  });
+
+  test("P2-2：残留 kill 但窗口里会话还在跑 → repair 不杀", async () => {
+    const pending = { op: "kill" as const, pid: 7, startedAt: "2026-09-28T10:00:00Z" };
+    const w = makeWorld({ reg: { socket: "s", agents: { "agent-x": { ...LIVE, status: "stopped", pending } } }, windows: ["agent-x"], channels: new Set(["ch9"]), busyWindows: ["agent-x"] });
+    const r = await runRepair(true, await scanOf(w), w.deps);
+    expect(r.ok).toBe(false);
+    expect(w.st.windows).toEqual(["agent-x"]);
+    expect(w.st.channels.has("ch9")).toBe(true);
+  });
+
+  test("P2-3：两次读之间别人写了占位 → beginCreate 让开，不把它收成 prev", async () => {
+    const w = makeWorld();
+    const other = { op: "create" as const, pid: 4242, startedAt: "2026-09-28T12:00:00Z", channelName: "x" };
+    const orig = w.deps.listWindows;
+    w.deps.listWindows = async () => {
+      w.st.reg.agents["agent-x"] = { ...LIVE, status: "creating", channelId: "", pending: other };
+      return orig();
+    };
+    const r = await beginCreate("agent-x", "x", {}, w.deps);
+    expect(r.ok).toBe(false);
+    expect(w.st.reg.agents["agent-x"]!.pending).toEqual(other);
   });
 });
 

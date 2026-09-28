@@ -120,7 +120,7 @@ const CATEGORY_NAME = "agents";
 
 import { bridgeRequest } from "./lib/bridge-client.js";
 import { realOpsDeps, triggerSkillsRescan } from "./manager/ops-deps.js";
-import { pendingRefusal, pidAlive } from "./lib/pending-ops.js";
+import { pendingHoldsOffHeal, pendingRefusal, pidAlive } from "./lib/pending-ops.js";
 import { beginCreate, clearCreateResidue, commitCreate, createAborting, guardCreateSignals, recordCreate } from "./manager/create-guard.js"; // create 的 creating 占位
 import { notify } from "./lib/notify.js";
 import { writeJsonAtomic } from "./lib/state-file.js";
@@ -582,12 +582,13 @@ async function cmdCreate(
 
   let ready = false;
   let spec: LaunchSpec;
+  let windowId = "";
   const expandedDir = dir.replace(/^~/, process.env.HOME || "~");
 
   try {
     // 2. 创建 tmux window（在 master session 里）
     await ensureSocket();
-    const windowId = (await tmuxRawStrict(["new-window", "-P", "-F", "#{window_id}", "-t", sessionTarget(MASTER_SESSION), "-n", tmuxName, "-c", expandedDir])).trim();
+    windowId = (await tmuxRawStrict(["new-window", "-P", "-F", "#{window_id}", "-t", sessionTarget(MASTER_SESSION), "-n", tmuxName, "-c", expandedDir])).trim();
     await recordCreate(tmuxName, { windowId }, realOpsDeps); // 残留清理只按这个 id 关窗
     await Bun.sleep(500);
 
@@ -649,7 +650,11 @@ async function cmdCreate(
     ...adapter.registryFields(spec),
   }, realOpsDeps);
   unguard();
-  if (committed === "lost") return output({ ok: false, error: `${tmuxName} 的占位被别的进程当残留接手了（本进程被挂起超过 10 分钟？），这次 create 作废；窗口 / 频道若还在，跑 manager repair 核对` });
+  if (committed === "lost") { // 占位被别的进程当残留接手（本进程被挂起超过 10 分钟？）：按本次自己的 id 收拾，id 唯一不会误伤
+    if (windowId) await realOpsDeps.killWindowId(windowId);
+    await realOpsDeps.deleteChannel(channelId);
+    return output({ ok: false, error: `${tmuxName} 的占位被别的进程接手了，这次 create 作废（本次建的窗口 / 频道已按 id 清掉）` });
+  }
   if (committed === "aborted") return;
 
   await triggerSkillsRescan("add", tmuxName, expandedDir);
@@ -786,7 +791,7 @@ async function cmdResume(
     return;
   }
 
-  const blocked = pendingRefusal((await loadRegistry()).agents[tmuxName]?.pending, "resume", Date.now(), pidAlive);
+  const blocked = pendingRefusal((await loadRegistry()).agents[tmuxName]?.pending, "resume", await listAgentWindowsShared(), Date.now(), pidAlive);
   if (blocked) return output({ ok: false, error: blocked }); // resume 整条覆盖条目：做到一半的 create / rename 的线索会丢
   if (await windowExists(tmuxName)) {
     output({ ok: false, error: `${tmuxName} 已存在` });
@@ -1320,7 +1325,7 @@ async function cmdRestart(name?: string, opts: { includeMaster?: boolean } = {})
 
   for (const tmuxName of targets) {
     const info = reg.agents[tmuxName];
-    const blocked = pendingRefusal(info?.pending, "restart", Date.now(), pidAlive); // 做到一半的 create / rename 不拉起（lib/pending-ops.ts）
+    const blocked = pendingRefusal(info?.pending, "restart", info?.pending ? await listAgentWindowsShared() : [], Date.now(), pidAlive); // 做到一半的 create / rename 不拉起
     if (!info || !info.sessionId || !info.channelId || blocked) {
       results.push({ name: tmuxName, ok: false, error: blocked ?? "registry 中缺少 sessionId 或 channelId" });
       continue;
@@ -1567,7 +1572,7 @@ async function cmdList() {
     // 一律不判——那正是它该停在 shell 的时候。
     // registry 里没这条的孤儿窗口不判 dead：自愈救不了它（没有 sessionId /
     // channelId 可用），判了只会让 launcher 每分钟白试一次并往频道刷失败通知。
-    if (info && !info.pending && info.status !== "creating" && !isRestartInProgress(name) && isAtShell(await captureLast(name, 5))) { // 做到一半的操作归 repair
+    if (info && info.status !== "creating" && !pendingHoldsOffHeal(info.pending, tmuxWindows, Date.now(), pidAlive) && !isRestartInProgress(name) && isAtShell(await captureLast(name, 5))) {
       await Bun.sleep(800);
       // 硬判据兜底（peer 2026-08-23 P0，日志实证误杀）：pane 文本是软判据，会被
       // web 终端 resize 触发的 CC 全屏重绘骗到——重绘窗口期 capture-pane 抓到的是
@@ -1634,7 +1639,7 @@ async function cmdList() {
     //   sessionId + channelId ⇒ 永远失败。实测 2026-09-15 02:04 起每 ~75s 一次，
     //   到发现时已累计 3678 次失败重启，纯空转还刷满 launcher 日志。
     if (isMasterAgent(name)) continue;
-    if (info.status === "active" && !info.pending && !tmuxWindows.includes(name)) { // 做到一半的 rename 窗口还是旧名，归 repair
+    if (info.status === "active" && !pendingHoldsOffHeal(info.pending, tmuxWindows, Date.now(), pidAlive) && !tmuxWindows.includes(name)) { // 做到一半的操作归 repair
       agents.push({
         name,
         status: "dead",

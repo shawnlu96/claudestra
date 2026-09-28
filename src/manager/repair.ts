@@ -44,6 +44,10 @@ async function fixOne(r: Residue, deps: OpsDeps): Promise<{ ok: boolean; detail:
         await deps.saveRegistry(reg);
         return { ok: true, detail: `条目是 ${a.status}（已被重新拉起），只清掉旧的 kill 标记` };
       }
+      // kill 被砍在关窗之前、窗口里的会话还在跑（用户可能一直在用）：要不要杀交给人，repair 不替他决定
+      if ((await deps.listWindows()).includes(r.agent) && !(await deps.windowIsBareShell(r.agent))) {
+        return { ok: false, detail: `窗口里还有进程在跑：确认要销毁就再跑 kill ${r.agent}，想留着就 restart ${r.agent}（会清掉这个 kill 标记）` };
+      }
       const k = await runKill(r.agent, deps);
       return { ok: k.ok === true && !k.incomplete, detail: String(k.message ?? k.error) };
     }
