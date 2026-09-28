@@ -25,9 +25,10 @@
 | 手输短码 | 登记在中继：`code → fp` | 看得见。靠 Mac 侧确认兜底 | protocol.md §5.2 |
 | Web Push 正文 | bridge → `push` 帧 → 中继做 RFC 8291 加密 → 推送服务 | **明文**，因为是中继替机器加密 | protocol.md §3.5 |
 | APNs 正文 | 同上，中继持有 p8 | **明文**；Apple 也看得见 | 同上 |
-| peer 请求 | A → 中继 → B | **明文**，包括 `Authorization: Bearer <peer token>`。中继签不出 A 的签名，所以冒充不了 A | protocol.md §4.1 |
+| peer 请求 | A → 中继 → B | **明文**，包括 `Authorization: Bearer <peer token>`。**现有漏洞（T25）**：① 路径模式 `/m/<fpB>/api/v1/*` 原样转发 `Authorization`（`relay/front.ts` 的 `tunnelHeaders`），bridge 的 `authenticateApi` 不看来源就收 Bearer，所以中继拿看到的 token 从路径模式发请求，完全绕过验签；② peer 路径只核「签名钥匙的指纹 = `from`」，不核这枚 token 是不是签发给这个 fp 的（`bridge/relay-inbound.ts` 的 `verifyPeerRequest`）。所以「中继签不出 A 的签名、就冒充不了 A」**今天不成立** | protocol.md §4.1；T25 |
 | 元数据 | 所有路径 | 在线状态、联系人图、fp、IP、时间、大小 | protocol.md §4、§9 |
 | 前端 JS / HTML / SW | 中继静态托管 | 中继**提供**这些代码，能换成任何内容 | protocol.md §6.2「静态站」 |
+| 子域名隧道请求 | 中继 → `from:"relay"` → 实例把它重放到本机 Web 端口 | **现有漏洞（T25）**：`forwardTunnel` 不强制带 XFF。迁移过旧 web 的机器，3333 端口已由 bridge 接管，这类请求会被当成真本机，享受回环豁免 | protocol.md §4.2；T25 |
 
 ## 2. 威胁模型
 
@@ -55,10 +56,12 @@
 
 「能」= 能拿到明文或能冒用；「元」= 只剩元数据。
 
+**前提**：这张表假设 **T25 已修**（路径模式不收 peer Bearer；peer token 绑定签发对象的 fp；隧道请求永远不算回环）。T25 是无条件修复，不挂在任何 E2E 开关后面。T25 修好之前，今天那一列里 A2 对 C3 的「能」要更严重：拿任何一枚看到过的 peer token，都能以那个 peer 的 scope 调 API。
+
 | 攻击者 | 今天 | P1 后 | P2 后（浏览器用中继托管的前端） | P3 后（可信客户端） |
 |---|---|---|---|---|
 | A1 被动 | C1、C2 能 | 推送正文和 peer 转为「元」 | C1、C2 转为「元」 | 元 |
-| A2 改帧 | C1、C2、C3 能 | 同左，推送和 peer 除外 | 元。中继能丢帧或拖慢，但改不了、伪造不了、重放不了（§4.1.4） | 元 |
+| A2 改帧 | C1、C2、C3 能 | 同左，推送和 peer 除外 | **只在开了 `RELAY_E2E_ONLY` 的机器上**转为「元」：中继能丢帧或拖慢，但改不了、伪造不了、重放不了、也换不了响应（§4.1.4）。**没开的机器**（存量机器默认不开，§7.2）：明文路径还在，老设备的 cookie 仍然经过中继，A2 照旧拿得到 C1、C2、C3 | 同 P2 |
 | A3 换 JS | 全能 | 全能 | **仍然全能**：改过的 JS 直接读明文、用设备密钥 | 可信客户端上转为「元」；浏览器用户照旧全能，只是可以事后审计（§4.4） |
 | A5 其它实例 | 受门控 | 同左 | 同左 | 同左 |
 | A6 跨机器 XSS | 借用凭据 | 同左 | 借用设备密钥（不可导出，偷不走，只能借用） | 同左 |
@@ -112,10 +115,24 @@
 4. 浏览器验 `mac2`。中继不知道 `S`，所以换不掉任何一边的公钥。验 `idSig` 只是多一道校验。fp 只有 64 位，不单独拿它认证密钥；以后要做「只靠 fp 认人」的场景，链接改带完整公钥的哈希。
 5. **不再下发 cookie**（经中继的情况）。设备凭据就是 `devicePub`，principals.json 里用 `v:2, type:"p256"` 登记，这两个字段是 design-hosted-frontend §3 预留的。
 
-**手输短码**：短码中继看得见，中继可以两头各换一把公钥做中间人。对策是 SAS 核对：
+**手输短码**：短码中继看得见，它可以两头各换一把公钥做中间人（对浏览器冒充机器，对机器冒充浏览器）。对策是带**承诺**的 SAS 核对，形状照 Bluetooth 的数字比较（Numeric Comparison）和 ZRTP 的哈希承诺：
 
-- Mac 侧的确认框（`claudestra pair` 和网页确认对话框）显示 6 位数字，由 `SHA-256(devicePub ‖ machineE2ePub ‖ code)` 截取；浏览器显示同一串，用户对上了才点确认。
-- 现在本来就要在 Mac 上点确认，多看一眼数字，操作成本几乎为零。
+```
+浏览器 → bridge   {code, devicePub, C = SHA-256("pair-v2-commit" ‖ devicePub ‖ Nd)}     // Nd：32 字节随机数，先不给
+bridge → 浏览器   {machineE2ePub, idSig, Nm}                                              // Nm：32 字节随机数；bridge 收到 C 之后才生成
+浏览器 → bridge   {Nd}                                                                   // bridge 核 C，不符 → 这次配对作废
+SAS = 取 SHA-256("pair-v2-sas" ‖ devicePub ‖ machineE2ePub ‖ Nd ‖ Nm ‖ code) 的前 4 字节，换成十进制后 mod 10^6，得到 6 位数字
+```
+
+- 两边各自显示 SAS。Mac 侧是 `claudestra pair` 的提示和网页确认对话框，用户对上了才点确认；现在本来就要在 Mac 上确认，所以没有多出步骤。
+- **为什么要承诺**：没有承诺时，中间人可以先看到一边的值，再挑自己的随机数去凑同一个 SAS。有了承诺，任一方揭示随机数之前，另一方的值都已经锁定：
+  - 中间人先跑完「对 bridge」那一段，SAS_bridge 就定了；可是面对浏览器时，它必须先给出 Nm'，而这时浏览器的 Nd 还藏在承诺里，所以 SAS_browser 对它来说是随机的；
+  - 中间人先跑「对浏览器」那一段，情况对称：它得先向 bridge 交出承诺，才能看到 Nm。
+  - 所以每次尝试撞上的概率是 10^-6（6 位十进制，约 19.9 位）。
+- **尝试次数有上限**：
+  - 每次尝试都要用户在 Mac 上看一眼并点确认，SAS 对不上时用户会看到；
+  - 短码一次性，10 分钟过期，bridge 每分钟最多 5 次；
+  - 所以攻击者能用的尝试次数等于用户愿意点确认的次数，成功概率 ≤ 次数 × 10^-6。
 - 局限（A3）：显示 SAS 的 JS 同样来自中继。
 
 **本机回环配对**：不经中继，直接登记 `devicePub`。
@@ -132,7 +149,6 @@ k = HKDF( ECDH(ce,be) ‖ ECDH(D,be) ‖ ECDH(ce,M) ‖ ECDH(D,M), salt = transc
 
 - 认证完全来自 DH，hello 不带签名：P-256 ECDH 密钥不能用来签名，也不需要签名。`confirm` 是用 `k` 对 transcript 算的 MAC，浏览器验过它，才知道对面确实持有 `M`。
 - 重放一条旧的 hello 没用：bridge 每次都生成新的 `be`，中继手里没有 `D`，派生不出 `k`。
-
 - `M` 是机器会话密钥，`D` 是设备密钥。四个 DH 值合在一起，同时提供双向认证和前向保密：临时密钥用完即丢，事后拿到 `D` 或 `M` 也解不开录下来的流量。
 - 派生出两个方向各自的 AES 密钥，外加 `sid`。会话 TTL 24 小时；设备被撤销时 bridge 立刻作废该设备的所有会话。现在已有「凭据 → 活动连接」表，会话接进这张表。
 - `devId` 就是设备公钥的哈希，中继能看到哪台设备在用，与今天看到 cookie 相比只少不多。
@@ -140,14 +156,33 @@ k = HKDF( ECDH(ce,be) ‖ ECDH(D,be) ‖ ECDH(ce,M) ‖ ECDH(D,M), salt = transc
 #### 4.1.4 请求、响应与流
 
 ```
-POST /m/<fp>/api/v1/e2e/<sid>        （中继只看得到这一个路径）
-正文 = 记录流：[len:u32][AES-GCM(key_c2b, nonce = seq, 明文分块)] …
-明文 = {seq, method, path, headers, final?} + 正文分块
-响应 = 同样的记录流（key_b2c），首块是 {status, headers}，SSE 和终端流就是持续追加记录
+POST /m/<fp>/api/v1/e2e/<sid>        （中继只看得到这一个路径；一个 HTTP 请求 = 一个加密请求）
+正文 = 记录流：[len:u32][AES-GCM 密文+tag] …
+记录 i 的 nonce（12 字节）= dir(1 字节：0x01 请求 / 0x02 响应) ‖ rid(7 字节) ‖ i(4 字节，从 0 起)
+记录 i 的 AAD = "cstra-e2e-v1" ‖ sid ‖ dir ‖ rid ‖ i ‖ final(1 字节)
+请求首条记录明文 = {rid, method, path, headers}，之后是正文分块；响应首条 = {rid, status, headers}，之后是正文分块
+SSE 和终端流 = 响应持续追加记录，最后一条 final = 1
 ```
 
+- **请求 id（`rid`）**：每个会话里，客户端用一个计数器从 1 起给每个请求分配。浏览器同时有多路 fetch、SSE、终端输入的 POST，它们可以乱序到达，所以**不要求按序**。
+- **防重放**：bridge 对每个会话维护一个滑动窗口加位图，形状同 IPsec ESP 的防重放（RFC 4303 §3.4.3）、DTLS 的记录窗口（RFC 6347 §4.1.2.6）。窗口 1024：
+  - `rid` 小于等于「已见最大值 − 1024」→ 拒；
+  - 窗口内已经见过 → 拒；
+  - 其余接受并记下。
+  - 拒绝一律回 `409 {code:"e2e_replay"}`。
+- **响应绑定请求**：响应记录用同一个 `rid` 算 nonce 和 AAD，而且 dir = 0x02。客户端用「自己发出的 rid」去解对应 HTTP 响应的记录。于是：
+  - 中继把两个并发请求的响应互换，GCM 校验就失败；
+  - 中继把某个请求的记录搬到另一个请求里，同样失败；
+  - 中继把响应当请求回灌给 bridge，dir 不同，也失败。
+- **截断与重排**：记录序号 `i` 在 nonce 和 AAD 里，调换顺序或删掉中间某条都解不开。最后一条记录的 AAD 里 `final = 1`，流被截断时客户端收不到 final，就报「中断」，不会被当成正常结束。
+- **key 与 nonce 唯一性**：
+  - 两个方向各用一把 AES 密钥（`key_c2b`、`key_b2c`）。它们从本会话的握手派生，`sid` 也在 HKDF 的 info 里，所以不同会话之间密钥不同。
+  - 同一把密钥下，nonce = (dir, rid, i)：dir 在这把密钥下固定；客户端的 rid 计数器只在内存里递增、不回退；每个请求内的 i 递增。所以 (rid, i) 不会重复，nonce 也就不会复用。
+  - 同一浏览器里的多个页面、多个标签页、SW 各自握手、各有会话，不共享计数器。
+  - 页面刷新就是新会话、新密钥，计数器从 1 重来也不冲突。
+  - bridge 侧只用 `key_b2c` 加密响应，响应的 rid 来自请求，而每个 rid 只会被接受一次（上面的窗口），所以响应的 nonce 也不会重复。
+- **用量上限**：rid 7 字节、i 4 字节。单个会话最多 2^31 个请求或 24 小时（先到先算）就重新握手。单个请求最多 2^32 条记录，每条 ≤ 64 KiB，远超任何实际流。确定性 nonce 不受随机 nonce 那种 2^32 次的上限约束。
 - **中继看得到的**：fp、`sid`、每条记录的长度、时间。看不到方法、路径、头、正文、状态码。
-- **重放和截断**：每个方向的 `seq` 严格递增，AES-GCM 的 nonce 由它派生，重放和乱序都会导致解密失败。最后一条记录带 `final`，所以流被中途截断会被识别为「中断」，不会被当成正常结束。bridge 按 `sid` 记住已用过的请求 `seq`。
 - **bridge 侧**：解开后得到一个普通 `Request`，走现有的 `dispatchMachineRequest`（`bridge/relay-dispatch.ts`），`RequestContext` 增加 `e2e: {devId}`。principal 由设备公钥确定，不看 cookie。grant、撤销、owner / guest 的规则都不变。
 - **中继侧**：`/m/<fp>/api/v1/e2e/*` 只按不透明字节转发。规范化、限流、帧上限照旧，Set-Cookie 过滤对这条路径不再相关。协议只加东西、不改东西，中继几乎不用改。
 - **前端**：`lib/api/client.ts` 是唯一出口，在这里包一层 `sealedFetch`。
@@ -217,7 +252,7 @@ POST /m/<fp>/api/v1/e2e/<sid>        （中继只看得到这一个路径）
 
 peer 两端都是 bridge，代码都可信，没有 A3 问题。**同样的加密投入，这里的收益最大。**
 
-- **P1a 立即可做**：现在 peer token 在中继上是明文可见的。经中继的入口会强制验签（`bridge/relay-inbound.ts`），但 authApi 上的 peer 验签只记录、不拦截（`bridge/peer-signature.ts`）。如果某台实例的 peer 入口同时直连对外（`openDirectPeerIngress`），中继拿着看到的 token 就能从那条路打进去。修法：对已钉住公钥的 peer，所有入口都强制验签。
+- **P1a 现有漏洞，归 T25（无条件修，不挂在 E2E 开关后面）**：中继看得见 peer token；路径模式会把 `Authorization` 原样转给 bridge，bridge 不看来源就收 Bearer；peer 路径又不核 token 与 `from` 是否对应（§1）。修法由 T25 定，本稿只要求结果：路径模式的请求（进程内 dispatch，`source: "relay"`）不接受 peer Bearer，peer 只能走验签的 peer 路径；peer token 绑定签发时的 fp，验签时一并核对；已钉住公钥的 peer，所有入口都强制验签。
 - **P1b 加密**：邀请载荷加上邀请方的完整 Ed25519 公钥（现在只有 fp）和 E2E 公钥。经中继的 `req` 改发 `/api/v1/e2e/<sid>`，内层是原请求：包括 Bearer 和签名头，验签照旧在内层做。
   - 握手复用 §4.1.3，双方的静态密钥都是机器的 E2E 密钥。
   - 兑换邀请（`/api/v1/peers/redeem`）用 HPKE 把 join 口令封装给邀请方的公钥，中继就看不到口令。
@@ -261,8 +296,8 @@ peer 两端都是 bridge，代码都可信，没有 A3 问题。**同样的加�
 | 期 | 内容 | 解锁的说法 | 依赖 |
 |---|---|---|---|
 | **P0**（本稿） | 更新 protocol.md §9 和 design-hosted-frontend §11 的措辞，指向本稿 | — | — |
-| **P1** | ① peer 所有入口强制验签；② peer 经中继整体加密（§5.1）；③ `webpush-sealed` 与 fp 的 MAC 校验；④「推送不带正文」开关 | 「机器之间的协作经中继是加密的」「推送正文中继看不到（Web Push）」 | 不依赖前端改造。③ 在 P2 之前只防 A1（订阅明文经过中继） |
-| **P2** | 配对 v2（S 绑定设备密钥，短码加 SAS）；`e2e/hello` 与记录流；API 客户端包一层；`RELAY_E2E_ONLY`；经中继不再发 cookie | 「经中继的对话内容加密传输，中继只看得到元数据；前提是网页代码是官方构建」 | P1 的密码学库（twin） |
+| **P1** | ⓪ 前置：T25（路径模式不收 peer Bearer、token 绑 fp、隧道不算回环）；① peer 所有入口强制验签；② peer 经中继整体加密（§5.1）；③ `webpush-sealed` 与 fp 的 MAC 校验；④「推送不带正文」开关 | 「机器之间的协作经中继是加密的」「推送正文中继看不到（Web Push）」 | 不依赖前端改造。③ 在 P2 之前只防 A1（订阅明文经过中继） |
+| **P2** | 配对 v2（S 绑定设备密钥，短码加 SAS）；`e2e/hello` 与记录流；API 客户端包一层；`RELAY_E2E_ONLY`；经中继不再发 cookie | 「经中继的对话内容加密传输，中继只看得到元数据；前提是网页代码是官方构建，而且这台机器开了「只收加密请求」」 | P1 的密码学库（twin） |
 | **P3** | iOS 壳打包前端和签名热更新；NSE 解密 APNs；签名的 bundle 清单；以后视需要做扩展、跟进 WAICT | 「iOS App 内置代码，中继只看得到元数据，也换不了代码」 | P2；壳只能在 owner 的 MacBook 上签名 |
 
 每一期都能单独发版，也能单独回退：新能力都走能力位协商，关掉开关就回到上一期的行为。
@@ -292,6 +327,8 @@ peer 两端都是 bridge，代码都可信，没有 A3 问题。**同样的加�
 ### 7.3 子域名隧道
 
 子域名模式整条透传本机 Web，cookie 也在里面，**不做加密**。按 design-hosted-frontend §10 的截止日退场（届时中继回 410）；开了 `RELAY_E2E_ONLY` 的机器会提前拒绝 `from:"relay"` 且不带路径模式头的隧道请求。
+
+隧道请求被当成回环（§1 最后一行）是 T25 的范围，不论开不开 `RELAY_E2E_ONLY` 都要修；本稿对存量机器的所有结论都以 T25 已修为前提（§2.3）。
 
 ### 7.4 不受影响
 
