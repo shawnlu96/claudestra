@@ -5,12 +5,13 @@
  */
 import { existsSync, unlinkSync } from "fs";
 import { countsAsActivity, dueForResume, markResumed, noteActivity, noteApiError, resumeText, type ApiErrorState } from "../lib/api-error-resume.js";
+import { isModelLimitHit } from "../lib/quota-wall-text.js";
 import { recordMetric } from "../lib/metrics.js";
 import { emptyWallState, isWallState, QUOTA_WALL_CLEAR_PATH, QUOTA_WALL_PATH, type WallState } from "../lib/quota-wall.js";
 import { readRegistryAgents } from "../lib/registry.js";
 import { DEFAULT_RUNTIME } from "../lib/runtimes/index.js";
 import { readJsonStateSync, reportCorrupt, writeJsonAtomicSync } from "../lib/state-file.js";
-import { tmuxCapture, tmuxSendEscape, windowTarget } from "../lib/tmux-helper.js";
+import { ensurePaneInteractive, tmuxCapture, tmuxSendEscape, windowTarget } from "../lib/tmux-helper.js";
 import { agentMsgMustWait } from "../lib/turn-state.js";
 import { readUsageCache } from "../lib/usage-cache.js";
 import type { AgentCallBook } from "./agent-calls.js";
@@ -75,6 +76,7 @@ function productionWall(b: WallBridgeDeps): QuotaWall {
     isClaudeCode: async (cid) => ((await resolveTurnWindow(cid, b.controlChannelId)).runtime ?? DEFAULT_RUNTIME) === DEFAULT_RUNTIME,
     windows: () => claudeWindows(b.controlChannelId),
     capture: (win) => tmuxCapture(win, 30),
+    prepare: (win) => ensurePaneInteractive(win),
     sendEsc: (win) => tmuxSendEscape(win),
     mainTurnBusy: async (cid, agent) => agentMsgMustWait(await probeTurn(cid, agent, b.controlChannelId)),
     held: {
@@ -137,11 +139,16 @@ export function startQuotaWall(b: WallBridgeDeps): QuotaWall {
           recordMetric("api_error_turn", { agent: evt.agent, meta: { error: err, action: "quota_wall" } });
           return;
         }
-        console.log(`⚠️ 回合以 API 错误结束: ${evt.agent}（${err || "API Error"}）→ ${r === "track" ? "60s 后自动续跑" : "续跑后再撞，升级到频道"}`);
-        recordMetric("api_error_turn", { agent: evt.agent, meta: { error: err, action: r } });
-        if (r === "escalate" && /^\d+$/.test(evt.chatId)) {
-          await b.escalate(evt.chatId, `⛔ ${evt.agent} 连续两次因 API 错误中断（自动续跑一次已用完，不再续）：${err || "API Error"}。需要人看一眼网络/代理后手动发一句继续。`)
-            .catch((e) => console.error("api-error 升级通知失败:", (e as Error).message));
+        const model = isModelLimitHit(err, String(data.text ?? "")); // 模型额度：续跑只会再撞，直接告诉人换模型
+        if (model) states.delete(evt.chatId);
+        const act = model ? "model_limit" : r;
+        console.log(`⚠️ 回合以 API 错误结束: ${evt.agent}（${err || "API Error"}）→ ${act === "track" ? "60s 后自动续跑" : act === "model_limit" ? "模型额度，不续跑" : "续跑后再撞，升级到频道"}`);
+        recordMetric("api_error_turn", { agent: evt.agent, meta: { error: err, action: act } });
+        const why = model
+          ? `撞了单个模型的额度（${String(data.text ?? "").split("\n")[0].slice(0, 120)}），bridge 不自动续跑。在它的窗口里用 /model 换个模型（或 /usage-credits）后发一句继续。`
+          : `连续两次因 API 错误中断（自动续跑一次已用完，不再续）：${err || "API Error"}。需要人看一眼网络/代理后手动发一句继续。`;
+        if (act !== "track" && /^\d+$/.test(evt.chatId)) {
+          await b.escalate(evt.chatId, `⛔ ${evt.agent} ${why}`).catch((e) => console.error("api-error 升级通知失败:", (e as Error).message));
         }
       })();
       return;

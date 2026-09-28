@@ -35,6 +35,7 @@ import { readConfig, readConfigSync, setStatsDashboard, isConfigCorrupt } from "
 import { readRegistryAgents } from "../lib/registry.js";
 import { readUsageCache, readUsageCacheStale, deriveStaleUsage, readSessionCtx } from "../lib/usage-cache.js";
 import { discordCreateChannel } from "./discord-api.js";
+import { quotaWall } from "./quota-wall-wiring.js";
 import { computeAgentStats, formatTokens, type AgentStat } from "../lib/agent-stats.js";
 import { currentUsageWindow, noteWeekResetText, type UsageWindowBounds } from "../lib/usage-window.js";
 import { fmtAge, machineFooter, machineUsage, type MachineSlot } from "./machine-usage.js";
@@ -861,11 +862,10 @@ async function checkContextTiers(discord: Client, agents: AgentStat[]): Promise<
         now: Date.now(),
         retryMs: AUTO_COMPACT_RETRY_MS,
       });
-      if (d.fire) {
+      // 额度闸开着：直接敲进窗口的 /save-compact 不经过 deliver，会起一个注定撞墙的回合（出闸后下一轮扫描再触发）
+      if (d.fire && !quotaWall()?.active()) {
         autoCompactTriggered.set(a.channelId, Date.now());
-        if (d.emergency) {
-          console.log(`🚨 救命线触发(${formatTokens(a.contextTokens)} ≥ ${formatTokens(emergency!)},CC 随时裸压):${a.name} 无视闲置门槛`);
-        }
+        if (d.emergency) console.log(`🚨 救命线触发(${formatTokens(a.contextTokens)} ≥ ${formatTokens(emergency!)},CC 随时裸压):${a.name} 无视闲置门槛`);
         await triggerAutoSaveCompact(a, d.emergency ? emergency! : eff);
       }
     }

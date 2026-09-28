@@ -7,7 +7,7 @@ import { describe, expect, test } from "bun:test";
 import { ageHeld, HeldQueue, HELD_GIVE_UP_MS } from "../src/bridge/held-queue.js";
 import { createQuotaWall, type QuotaWallDeps, type WallWindow } from "../src/bridge/quota-wall.js";
 import type { Envelope } from "../src/bridge/router.js";
-import { emptyWallState, type WallState } from "../src/lib/quota-wall.js";
+import { emptyWallState, type UsageSignal, type WallState } from "../src/lib/quota-wall.js";
 
 const T0 = Date.parse("2026-09-28T13:19:40Z");
 const WEEKLY = "You've hit your weekly limit · resets Sep 30 at 6am (Asia/Tokyo)";
@@ -25,13 +25,15 @@ function env(from: Envelope["from"], to: string, id: string): Envelope {
 }
 const agentFrom = (cid: string): Envelope["from"] => ({ kind: "local", agentName: `agent-${cid}`, channelId: cid, ws: {} as never });
 
-function rig(opts: { disk?: WallState; panes?: Record<string, string>; busy?: string[]; codex?: string[] } = {}) {
+function rig(opts: { disk?: WallState; panes?: Record<string, string>; busy?: string[]; codex?: string[]; stuck?: string[] } = {}) {
   let now = T0;
   let disk: WallState = opts.disk ?? emptyWallState();
   const held = new HeldQueue(null);
   const panes: Record<string, string> = { ...opts.panes };
   const log: string[] = [];
   const esc: string[] = [];
+  const prepared: string[] = [];
+  const cache = { v: null as UsageSignal | null };
   const flushed: string[] = [];
   const resumed: { cid: string; text: string }[] = [];
   const notices: string[] = [];
@@ -46,7 +48,11 @@ function rig(opts: { disk?: WallState; panes?: Record<string, string>; busy?: st
     isClaudeCode: async (cid) => !(opts.codex ?? []).includes(cid),
     windows: async () => windows,
     capture: async (win) => panes[win] ?? "",
-    sendEsc: async (win) => void esc.push(win),
+    prepare: async (win) => void prepared.push(win),
+    sendEsc: async (win) => {
+      esc.push(win);
+      if (!(opts.stuck ?? []).includes(win)) panes[win] = "❯ "; // 菜单收起；stuck = Esc 被吃掉、菜单还在
+    },
     mainTurnBusy: async (cid) => (opts.busy ?? []).includes(cid),
     held: {
       wallCount: () => held.wallCount(),
@@ -62,13 +68,13 @@ function rig(opts: { disk?: WallState; panes?: Record<string, string>; busy?: st
     notifyOwner: async (text) => (notices.push(text), true),
     probe: async () => (probe.calls++, probe.v),
     credits: async () => 1,
-    readCache: () => null,
+    readCache: () => cache.v,
     takeClearRequest: () => (clear.req ? ((clear.req = false), true) : false),
     sleep: async () => {},
     log: (m) => void log.push(m),
   };
   return {
-    wall: createQuotaWall(deps), deps, held, panes, esc, flushed, resumed, notices, clear, probe, log,
+    wall: createQuotaWall(deps), deps, held, panes, esc, prepared, cache, flushed, resumed, notices, clear, probe, log,
     disk: () => disk, advance: (ms: number) => void (now += ms), at: () => now,
   };
 }
@@ -224,6 +230,92 @@ describe("恢复", () => {
     expect(again.esc).toEqual([]);
     expect(again.resumed.map((x) => x.cid)).toEqual(["a"]);
     expect(again.disk().wall!.recovery!.step).toBe("done");
+  });
+});
+
+describe("恢复的边角（T24 r1 P2-1/2/3/7/9）", () => {
+  test("先退出 copy-mode 再抓屏发键；发了 Esc 菜单还在（被吃掉）就不算关了，列进通知", async () => {
+    const r = rig({ panes: { "master:agent-a": MENU, "master:agent-b": MENU }, stuck: ["master:agent-b"] });
+    await hitWall(r, "a");
+    r.wall.clear();
+    await r.wall.tick();
+    expect(r.prepared).toEqual(["master:agent-a", "master:agent-b", "master:agent-c", "master:agent-pm"]);
+    expect(r.esc).toEqual(["master:agent-a", "master:agent-b"]); // 只发一次，不重试
+    expect(r.disk().wall!.recovery).toMatchObject({ escSent: ["a", "b"], escFailed: ["agent-b"] });
+    expect(r.notices.at(-1)).toContain("关菜单 1 个窗口");
+    expect(r.notices.at(-1)).toContain("发了 Esc 菜单还开着");
+  });
+
+  test("关菜单途中又撞墙：旧恢复停下，不把进度写到新闸上、不补投新闸押的消息、不发「已恢复」", async () => {
+    const r = rig({ panes: { "master:agent-a": MENU, "master:agent-b": MENU } });
+    await hitWall(r, "a");
+    r.wall.clear();
+    const send = r.deps.sendEsc;
+    let once = false;
+    r.deps.sendEsc = async (win) => {
+      await send(win);
+      if (!once) {
+        once = true;
+        r.deps.newId = () => "wall_2";
+        await hitWall(r, "c", 60_000); // 假出闸后 CC 自己接着跑、马上又撞
+      }
+    };
+    r.held.holdEnv(env(agentFrom("pm"), "b", "new-wall"), "quota_wall");
+    await r.wall.tick();
+    const w = r.disk().wall!;
+    expect(w.id).toBe("wall_2");
+    expect(w.exit).toBeUndefined();
+    expect(w.recovery).toBeUndefined();
+    expect(r.held.wallCount()).toBe(1);
+    expect(r.flushed).toEqual([]);
+    expect(r.notices.filter((n) => n.startsWith("✅"))).toEqual([]);
+  });
+
+  test("补投记账之后、flush 之前重启：条数不重记成 0", async () => {
+    const r = rig();
+    await hitWall(r, "a");
+    r.held.holdEnv(env(agentFrom("pm"), "b", "q"), "quota_wall");
+    r.wall.clear();
+    const d = r.disk();
+    d.wall!.recovery = { ...d.wall!.recovery!, step: "flush", flushed: 1, flushedTo: ["b"] };
+    const again = rig({ disk: d });
+    await again.wall.tick();
+    expect(again.disk().wall!.recovery).toMatchObject({ step: "done", flushed: 1 });
+    expect(again.notices.at(-1)).toContain("补投 1 条");
+  });
+
+  test("原文没写重置时间：按闸里看到的缓存重置时刻到点出闸；缓存也没有就按 session 5 小时兜底", async () => {
+    const r = rig();
+    await r.wall.noteApiError({ channelId: "a", agent: "agent-a", at: T0, error: "rate_limit", text: "You've hit your session limit" });
+    r.cache.v = { sessionPct: 100, weekPct: 40, sessionResetsAtMs: T0 + 3_600_000, weekResetsAtMs: T0 + 9e7, scrapedAt: T0 + 30_000 };
+    r.advance(30_000);
+    await r.wall.tick();
+    expect(r.wall.until()).toBe(T0 + 3_600_000);
+    r.advance(3_600_000 + 60_000); // 重置时刻 + 1 分钟余量
+    await r.wall.tick();
+    expect(r.disk().wall!.exit!.via).toBe("resets_at");
+    const r2 = rig();
+    await r2.wall.noteApiError({ channelId: "a", agent: "agent-a", at: T0, error: "rate_limit", text: "You've hit your usage limit" });
+    expect(r2.wall.until()).toBe(T0 + 5 * 3_600_000);
+  });
+
+  test("用卡出闸后缓存还是撞墙时的 100%（周重置日不变）：不会刚出又进", async () => {
+    const r = rig();
+    await hitWall(r, "a");
+    const full = { sessionPct: 30, weekPct: 100, sessionResetsAtMs: T0 + 3_600_000, weekResetsAtMs: T0 + 9e7, scrapedAt: T0 + 20_000 };
+    r.cache.v = full;
+    r.advance(20_000);
+    await r.wall.tick();
+    r.panes["master:agent-b"] = "  ⎿  Limits reset · your weekly reset day stays Wed · 1 resets left\n";
+    await r.wall.tick();
+    expect(r.disk().wall!.exit!.via).toBe("limits_reset");
+    const entered = r.notices.filter((n) => n.startsWith("⛔")).length;
+    r.cache.v = { ...full, scrapedAt: r.at() + 60_000 }; // 补投的消息一到，状态栏重渲染又把 100% 写回来
+    r.advance(90_000);
+    await r.wall.tick();
+    await r.wall.tick();
+    expect(r.wall.active()).toBe(false);
+    expect(r.notices.filter((n) => n.startsWith("⛔"))).toHaveLength(entered);
   });
 });
 

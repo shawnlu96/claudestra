@@ -10,7 +10,7 @@
  */
 import type { MetricEvent } from "../lib/metrics.js";
 import { isOwnStopChannel } from "../lib/pushback-scope.js";
-import { wallHitOf } from "../lib/quota-wall-text.js";
+import { isModelLimitHit, wallHitOf } from "../lib/quota-wall-text.js";
 import { DEFAULT_RUNTIME } from "../lib/runtimes/index.js";
 import { withExpecting, type PendingAgentCall } from "./agent-calls.js";
 
@@ -26,33 +26,21 @@ export interface StopTurn {
   runtime?: string;
   /** drainChannelWatcher 的结果：text 是兜底要转的答复文字（不含错误原文），apiError / error = 最后一条 assistant 是 API 错误 */
   drain: { text: string | null; apiError?: boolean; error?: { error: string; text: string } };
-  /** 这一轮是人发的消息触发的（lastMessageSource 是 user / api） */
+  /** 这一轮是外人（人 / API token）触发的；不给 = 按 noteDelivered 记下的来源判 */
   humanTurn?: boolean;
 }
 
 /**
- * 以 API 错误结束、手上还有没答完的回程的频道 → 那几轮被扣下的答复文字（错误前它已经说了的，接着做完时一起推）。
- * 它欠 caller 的答复要等「接着做」的那一轮（出闸续跑 / 补投 / 60 秒续跑）；这期间人触发的回合（owner 用完卡顺手问了
- * 件别的事）答的是人，不拿去结算旧 caller。记下当时那几条请求：它们被 reply / send_to_agent 答掉了，这条就作废。
- * 进程内：bridge 重启丢了只是退回「下一个正常回合结算」的老行为。
+ * 最近一条真正送到 cid 手上的消息是谁发的（deliverToLocal 发出去那一刻记）：outsider = Discord 用户 / Web / API token
+ * （owner、guest、peer 都算），insider = 别的 agent 和 bridge 自己（续跑、补投、看门狗）。以 API 错误结束后，回程要等
+ * insider 触发的「接着做」那一轮才结算——outsider 触发的回合答的是那个人，拿去结算旧 caller 就是把 B 的对话推给 PM。
+ * 不看 lastMessageSource：api-routes 投递后会把它改成 "agent"（只为不 @ owner）。进程内：重启后不知道 = 当 outsider（不结算）。
  */
-const awaitingResume = new Map<string, { requests: Set<string | undefined>; withheld: string[] }>();
-
-const reqIds = (pac: PendingAgentCall | undefined) => (pac?.requests ?? []).map((r) => r.messageId);
-
-/** cid 还欠着当时那几条请求的答复才算数；答掉了（或换成了新请求）就清掉 */
-function resumeOf(cid: string, pac: PendingAgentCall | undefined) {
-  const r = awaitingResume.get(cid);
-  if (r && reqIds(pac).some((id) => r.requests.has(id))) return r;
-  awaitingResume.delete(cid);
-  return undefined;
+const lastTrigger = new Map<string, "outsider" | "insider">();
+export function noteDelivered(cid: string, fromKind: string): void {
+  lastTrigger.set(cid, fromKind === "user" || fromKind === "api" ? "outsider" : "insider");
 }
-
-/**
- * 这个频道以 API 错误结束、欠着 caller 的答复。owner 这时在 Discord 频道里打字（多半是「继续」或 /limit-reset）
- * 不算接管：回程簿照留，不然它接着做完的答复就没了路由（T24a 常规审查 P2-3）。
- */
-export const awaitsResume = (cid: string, pac: PendingAgentCall | undefined): boolean => !!resumeOf(cid, pac);
+const outsiderTurn = (t: StopTurn): boolean => t.humanTurn ?? lastTrigger.get(t.cid) !== "insider";
 
 const ranIntoApiError = (t: StopTurn): boolean =>
   !!t.drain.apiError || (t.event === "StopFailure" && (t.runtime ?? DEFAULT_RUNTIME) === DEFAULT_RUNTIME);
@@ -73,26 +61,26 @@ export async function settleStopTurn(d: CallerSettleDeps, t: StopTurn): Promise<
     if (isOwnStopChannel(t.cid, t.stopChannelId, t.stopWs, t.candidateWs)) await onApiErrorTurn(d, t);
     return false;
   }
-  const r = resumeOf(t.cid, d.answerable(t.cid));
-  if (r && t.humanTurn) return own; // 答的是人：回程留着，看门狗照常按「答完了」走
-  awaitingResume.delete(t.cid);
-  await settleCallers(d, t.cid, [...(r?.withheld ?? []), t.drain.text].filter(Boolean).join("\n\n") || null);
+  const pac = d.answerable(t.cid);
+  if (pac?.apiErrorAt && outsiderTurn(t)) return own; // 答的是外人：回程留着，看门狗照常按「答完了」走
+  await settleCallers(d, t.cid, [...(pac?.withheld ?? []), t.drain.text].filter(Boolean).join("\n\n") || null);
   return own;
 }
 
-/** 自己频道这一轮以 API 错误结束：回程留着（连同错误前已说的话），不是撞墙的给 caller 推一条说明 */
+/**
+ * 自己频道这一轮以 API 错误结束：在等它的回程都记上「等续跑」（落在回程簿上，重启后还在、几个 caller 都记），
+ * 错误前它已经说了的话扣在回程上、接着做完时一起推（外人触发的那一轮说的是给外人的，不扣）；不是撞墙的给 caller 推一条说明
+ */
 async function onApiErrorTurn(d: CallerSettleDeps, t: StopTurn): Promise<void> {
-  const pac = d.answerable(t.cid);
-  if (pac) {
-    const prev = resumeOf(t.cid, pac);
-    awaitingResume.set(t.cid, { requests: new Set(reqIds(pac)), withheld: [...(prev?.withheld ?? []), ...(t.drain.text ? [t.drain.text] : [])] });
-  }
+  d.markApiError(t.cid, outsiderTurn(t) ? null : t.drain.text);
   const err = t.drain.error;
   // 撞墙的留给额度闸（整台机器押住、出闸续跑，caller 不用知道）；没读到错误条目（Stop 比 jsonl 先到）不猜
   if (!err || ((t.runtime ?? DEFAULT_RUNTIME) === DEFAULT_RUNTIME && wallHitOf(err.error, err.text, Date.now()))) return;
   const summary = err.text.split("\n")[0].trim().slice(0, 160) || err.error;
   for (const pac of d.takeApiErrorNotice(t.cid)) {
-    const body = `[ℹ️ ${pac.targetName} 这轮以 API 错误结束：${summary}；回程保留，它恢复后的答复仍会推给你]`;
+    const body = isModelLimitHit(err.error, err.text)
+      ? `[ℹ️ ${pac.targetName} 撞了单个模型的额度：${summary}；要 owner 在它窗口里换模型（/model）后才会接着做，回程保留，答复到了仍会推给你]`
+      : `[ℹ️ ${pac.targetName} 这轮以 API 错误结束：${summary}；回程保留，它恢复后的答复仍会推给你]`;
     await d.notify(pac, t.cid, body).catch((e) => console.error(`API 错误说明推给 ${pac.callerName} 失败（回程照旧留着）:`, e));
     console.log(`ℹ️ ${pac.targetName} 这轮以 API 错误结束 → 告诉 ${pac.callerName}（${summary.slice(0, 60)}）`);
   }
@@ -129,6 +117,8 @@ export interface CallerSettleDeps {
   pushBack(pac: PendingAgentCall, cid: string, body: string): Promise<unknown>;
   /** 好几个 caller 在等、它又没指明答给谁：提醒它分别回 */
   nudgeAmbiguous(cid: string): void;
+  /** 在等 cid 的槽都记上「以 API 错误结束、等续跑」，withheld 有字就追加进去（回程簿 markApiError，落盘） */
+  markApiError(cid: string, withheld: string | null): void;
   /** 在等 cid 的、还没为 API 错误说明过的槽，取出即记下（落盘，回程簿 takeApiErrorNotice） */
   takeApiErrorNotice(cid: string): PendingAgentCall[];
   /** 推给 caller 一条 intent=notification（不带 expecting、不当答复） */

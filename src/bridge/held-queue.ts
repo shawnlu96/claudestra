@@ -86,6 +86,18 @@ export class HeldQueue extends PersistedMap<HeldItem[]> {
     return this.hold(to.channelId, { env, to, heldAt: Date.now(), ...(reason ? { reason } : {}) });
   }
 
+  /**
+   * 闸内把这个频道里还押着的非人类消息改记成额度闸（flush 时调）：闸前因「回合中」押下的、caller 不在线时押的推回、
+   * asks 的押后都不经过 holdForQuotaWall，不改记的话它们照普通消息老化——30 分钟唤醒撞着墙的发送方，24 小时被丢
+   */
+  markWall(channelId: string, pick: (i: HeldItem) => boolean): number {
+    const q = this.get(channelId) ?? [];
+    const hit = q.filter((i) => !i.reason && pick(i));
+    for (const i of hit) i.reason = "quota_wall";
+    if (hit.length) this.set(channelId, [...q]);
+    return hit.length;
+  }
+
   /** 额度闸押着的条数 */
   wallCount(): number {
     return [...this.values()].reduce((n, q) => n + q.filter((i) => i.reason === "quota_wall").length, 0);
@@ -136,8 +148,10 @@ export type HeldNotice = { kind: "still-queued" | "gave-up"; item: HeldItem; cha
  * 每分钟扫描时调：押满 30 分钟、还没通知过的 → still-queued（只发一次）；押满 24 小时 → 出队并 gave-up。
  * 返回要发给发送方的通知，发不发、怎么发由 bridge 决定（它手里有 clients）。
  */
-export function ageHeld(q: HeldQueue, now: number): HeldNotice[] {
+export function ageHeld(q: HeldQueue, now: number, walled = false): HeldNotice[] {
   const out: HeldNotice[] = [];
+  // 闸开着就整体停摆：提醒是直接 ws.send 给发送方的，发送方多半也撞着墙，提醒只会唤醒一个注定失败的回合
+  if (walled) return out;
   for (const [channelId, items] of [...q.entries()]) {
     const keep: HeldItem[] = [];
     let changed = false;

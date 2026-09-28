@@ -29,10 +29,12 @@ export async function flushHeld(d: FlushDeps, channelId: string, reason: string)
   if (d.compacting(evAgent)) return; // 压缩上下文中一律继续押(deliverToLocal 也会押回来,省一次往返)
   if (!d.held.claim(channelId)) return; // Stop / 压缩结束 / 扫描撞车:别人正在投这个频道
   try {
+    const walled = !!(await d.walled?.(channelId));
+    if (walled) d.held.markWall(channelId, (i) => !d.isHumanRequest(i.env)); // 不管从哪条路押进来的，闸内都按额度闸算（不老化、出闸补投）
     const working = await d.working(channelId, evAgent);
     // 人类消息只因「别掐压缩」被押,压缩一结束就该到——不等回合空闲,deliverToLocal 自带抢占(C-c)语义;
     // agent→agent 仍等空闲(回合中通知有丢弃窗口)。快照:遍历中别处可能往这个频道 hold 新消息,只投这一刻到期的
-    const humanOnly = working || !!(await d.walled?.(channelId));
+    const humanOnly = working || walled;
     const due = humanOnly ? q.filter((i) => d.isHumanRequest(i.env)) : q.filter((i) => !leaseActive(i));
     for (const item of due) {
       // ws 可能已换代(channel-server 重连 / bridge 重启后从盘上恢复的没有 ws):按 channelId 取最新连接;不在线就留着

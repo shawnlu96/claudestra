@@ -3,7 +3,7 @@
  * 临时 429 和 agent 自己话里引用这句都不算撞墙。
  */
 import { describe, expect, test } from "bun:test";
-import { isLimitHitText, parseWallText, wallHitOf } from "../src/lib/quota-wall-text.js";
+import { isLimitHitText, isModelLimitHit, parseWallText, wallHitOf } from "../src/lib/quota-wall-text.js";
 
 const at = (iso: string) => Date.parse(iso);
 
@@ -93,6 +93,24 @@ describe("parseWallText", () => {
     expect(wallHitOf("rate_limit", REAL_MODEL_LIMIT[0], now)).toBeNull();
     expect(wallHitOf("rate_limit", "API Error: Server is temporarily limiting requests (not your usage limit) · Rate limited", now)).toBeNull();
     expect(wallHitOf("server_error", "You've hit your weekly limit", now)).toBeNull();
+    expect(isModelLimitHit("rate_limit", REAL_MODEL_LIMIT[1])).toBe(true);
+    expect(isModelLimitHit("rate_limit", "You've hit your weekly limit · resets Fri 9am (Asia/Tokyo)")).toBe(false);
+    expect(isModelLimitHit("rate_limit", "API Error: Server is temporarily limiting requests (not your usage limit) · Rate limited")).toBe(false);
+  });
+
+  test("只写时刻 / 星期的重置按原文时区取日期：本机时区差十几个小时也解得出（T24 r1 P2-6）", () => {
+    const saved = process.env.TZ;
+    try {
+      for (const tz of ["America/Los_Angeles", "Pacific/Kiritimati", "Asia/Tokyo"]) {
+        process.env.TZ = tz;
+        const now = at("2026-09-28T13:00:00Z"); // 东京 22:00
+        expect(parseWallText("You've hit your limit · resets 2am (Asia/Tokyo)", now)!.resetsAt).toBe(at("2026-09-28T17:00:00Z"));
+        expect(parseWallText("You've hit your weekly limit · resets Fri 9am (Asia/Tokyo)", now)!.resetsAt).toBe(at("2026-10-02T00:00:00Z"));
+      }
+    } finally {
+      if (saved === undefined) delete process.env.TZ;
+      else process.env.TZ = saved;
+    }
   });
 
   test("不是撞墙原文 → null", () => {

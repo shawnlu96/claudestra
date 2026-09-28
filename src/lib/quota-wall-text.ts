@@ -31,6 +31,9 @@ const ACCOUNT_WINDOWS = new Set(["weekly", "session", "usage"]);
 /** 一条 API 错误条目算不算撞墙（进闸的唯一判据，额度闸和 Stop 兜底共用）：error 是 rate_limit 且原文是账号级额度 */
 export const wallHitOf = (error: string, text: string, now: number): WallHit | null => (error === "rate_limit" ? parseWallText(text, now) : null);
 
+/** 单个模型的额度（「reached your Fable limit」）：不闸整台机器，但续跑也只会再撞一次——要人换模型（/model）或用 credits */
+export const isModelLimitHit = (error: string, text: string): boolean => error === "rate_limit" && isLimitHitText(text) && !wallHitOf(error, text, 0);
+
 /** 撞墙原文 → 种类 + 重置时刻；不是撞墙原文、或只是单个模型的额度（不闸整台机器）返回 null */
 export function parseWallText(text: string, now: number): WallHit | null {
   const t = text.trim();

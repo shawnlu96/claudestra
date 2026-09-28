@@ -475,6 +475,7 @@ const stopSettleDeps: import("./bridge/stop-settle.js").CallerSettleDeps = {
   pushBack: (pac, cid, body) => pushBackToCaller(pac, clients.get(cid)?.ws, pac.originalReplyChannel || cid, body, "agent_drain"),
   notify: (pac, cid, body) => pushBackToCaller(pac, clients.get(cid)?.ws, pac.originalReplyChannel || cid, body, "agent_apierr", "notification"),
   takeApiErrorNotice: (cid) => pendingAgentCalls.takeApiErrorNotice(cid, stillHeldFor(cid)),
+  markApiError: (cid, text) => pendingAgentCalls.markApiError(cid, stillHeldFor(cid), text),
   metric: (name, channelId, meta) => recordMetric(name, { channelId, meta }),
 };
 
@@ -548,7 +549,7 @@ import { flushHeld } from "./bridge/held-flush.js";
 import { probeTurn } from "./bridge/turn-probe.js";
 import { agentMsgMustWait } from "./lib/turn-state.js";
 import { AgentCallBook, ambiguityNotice, withExpecting, type PendingAgentCall } from "./bridge/agent-calls.js";
-import { awaitsResume, settleStopTurn, takeApiWaiters } from "./bridge/stop-settle.js";
+import { noteDelivered, settleStopTurn, takeApiWaiters } from "./bridge/stop-settle.js";
 import { startCodexTurnFailureWatch } from "./bridge/codex-turn-failure.js";
 // v2.6.0+ C1：出站按 transport 分发（设计 §6）
 import { registerAdapter, adapterFor } from "./bridge/adapters.js";
@@ -861,15 +862,17 @@ async function deliverToLocal(env: RouterEnvelope, to: RouterLocalEndpoint, stil
   const busy = compactingNow || (env.from.kind === "local" && agentMsgMustWait(turn));
   // flush 投递途中(上面几处 await)这条已被别处从押后队列摘掉(kill 清理 / 24 小时放弃):既不押回(会复活)也不发
   if (stillWanted && !stillWanted()) return { envelope: env, outcome: { kind: "dropped", reason: "已从押后队列撤下" } };
-  if (!busy && (await quotaWall()?.holds(env, to.channelId))) return holdForQuotaWall(env, evAgent, meta.user); // 额度闸：agent / bridge 消息押到出闸
+  const wallHold = await quotaWall()?.holds(env, to.channelId); // 额度闸：agent / bridge 消息押到出闸
+  if (!busy && wallHold) return holdForQuotaWall(env, evAgent, meta.user);
   if (busy) {
-    const n = heldLocalMsgs.holdEnv(env); // 从 flush 来的是队里那个 env 本身,不会重复入队
+    const n = heldLocalMsgs.holdEnv(env, wallHold ? "quota_wall" : undefined); // 从 flush 来的是队里那个 env 本身,不会重复入队
     console.log(`⏸ 消息押后(${evAgent} ${compactingNow ? "压缩上下文中" : "回合中"}): 来自 ${meta.user},队列 ${n} 条`);
     // 对调用方是「已受理、排队中」(note=queued):真正 ws.send 在 Stop/扫描时发生,send_to_agent 据此告诉发送方
     return { envelope: env, outcome: { kind: "sent", note: "queued" } };
   }
   try {
     to.ws.send(JSON.stringify({ type: "message", content, meta }));
+    noteDelivered(to.channelId, env.from.kind); // 触发这一轮的是谁（撞错后回程只让「接着做」那一轮结算，bridge/stop-settle.ts）
     // 入站消息镜像：srcKind(user=Discord 人类/api=Web 用户/local=agent/bridge)让 web 把他端用户发言实时画成气泡、
     // 排除 agent/bridge 注入；fromId(user_id)让 web 认出哪些是本人的其它来源(自己的 Discord 也靠右)
     const inData = { direction: "in", from: meta.user || "?", fromId: meta.user_id, srcKind: env.from.kind, text: env.content, threadId: env.meta.threadId, askId: env.meta.askId };
@@ -1437,7 +1440,7 @@ discord.on("messageCreate", async (msg: DiscordMessage) => {
     // v2.4.16+ 用户发消息 = 显式接管这个 channel 的对话方向。把该 channel 上挂着
     // 的所有 inter-agent pending 一并清掉，否则它们会在下一轮 Stop hook 触发
     // drain兜底 / nudge，把用户刚说的 "停下来" 拽回 agent-to-agent 链里去。
-    const cleared = awaitsResume(channelId, answerablePac(channelId)) ? 0 : clearInterAgentPendingsForChannel(channelId); // 撞错等续跑的不算接管（stop-settle.ts）
+    const cleared = pendingAgentCalls.awaitingResume(channelId, stillHeldFor(channelId)) ? 0 : clearInterAgentPendingsForChannel(channelId); // 撞错等续跑的不算接管（stop-settle.ts）
     if (cleared > 0) {
       console.log(`🧹 user 消息到达 → 清掉 ${cleared} 条 inter-agent pending (channel=${channelId})`);
     }
@@ -2645,7 +2648,7 @@ setInterval(() => {
     console.log(`🧹 pendingAgentCalls stale: 清掉 target=${pending.targetName} (caller=${pending.callerName})`);
   }
   // v2.21.1+ 押后队列兜底:Stop 丢失/目标持续忙时,分钟级重试投递;押久了告诉 caller(held-queue.ts ageHeld)
-  for (const n of ageHeld(heldLocalMsgs, now)) {
+  for (const n of ageHeld(heldLocalMsgs, now, !!quotaWall()?.active())) {
     console.log(`${n.kind === "gave-up" ? "🧹 押后消息放弃" : "⏳ 押后消息仍在排队"}: → ${n.item.to.agentName || n.channelId}`);
     const from = n.item.env.from;
     const caller = from.kind === "local" ? clients.get(from.channelId) : undefined;
@@ -2865,19 +2868,14 @@ async function handleHookRequest(req: Request): Promise<Response> {
             // 别人的频道、以 API 错误结束的一轮（那句错误不是答复，回程留着等真实答复）都不动（bridge/stop-settle.ts）
             const turn = {
               cid, stopChannelId: channelId, stopWs: thisClientForStatus?.ws, candidateWs: clients.get(cid)?.ws, event, runtime: clients.get(cid)?.runtime, drain: drainResult,
-              humanTurn: ["user", "api"].includes(lastMessageSource.get(cid) ?? ""),
             };
             const ownTurn = await settleStopTurn(stopSettleDeps, turn);
             // v2.6.0+ R3: API waiter 兜底——agent end_turn 没 reply() 时这一轮就结掉挂着的 API 请求，wait 调用方不必干等到超时
             for (const { waiter: p, result } of takeApiWaiters(pendingApiRequests, turn, ownTurn)) {
               apiThreadResults.set(p.threadId, { result, ts: Date.now(), tokenId: p.tokenId });
               p.resolve?.(result);
-              emitEvent({
-                agent: p.agentName,
-                chatId: `api:${p.tokenId}`,
-                type: "chat_message",
-                data: { direction: "out", from: p.agentName, text: result.reply || "", threadId: p.threadId, api: true, viaFallback: true, ...(result.apiError ? { apiError: true } : {}) },
-              });
+              const data = { direction: "out", from: p.agentName, text: result.reply || "", threadId: p.threadId, api: true, viaFallback: true, ...(result.apiError ? { apiError: true } : {}) };
+              emitEvent({ agent: p.agentName, chatId: `api:${p.tokenId}`, type: "chat_message", data });
               console.log(`🌐 API waiter drain 兜底: ${p.agentName} → token ${p.tokenId}（${result.apiError ? `API 错误 ${result.error}` : result.reply ? result.reply.length + " chars" : "no-text"}）`);
             }
 

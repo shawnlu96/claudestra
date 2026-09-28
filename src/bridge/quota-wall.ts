@@ -6,8 +6,8 @@
  * 收 quota-wall clear 的请求；出闸后按「关菜单 → 补投 → 续跑」三步恢复，每步落盘，bridge 重启后从当前那步接着做。
  */
 import {
-  enterFromUsage, isHumanSender, exitVia, markExit, noteOtherError, noteWallActivity, noteWallHit, notifyDue, probeDue, resumeTargets, wallActive,
-  type UsageSignal, type Wall, type WallExitVia, type WallState,
+  enterFromUsage, isHumanSender, exitVia, observeCache, wallUntil, markExit, noteOtherError, noteWallActivity, noteWallHit, notifyDue, probeDue, resumeTargets, wallActive,
+  type UsageSignal, type Wall, type WallExitVia, type WallRecovery, type WallState,
 } from "../lib/quota-wall.js";
 import { recoveredNotice, wallNotice, wallResumeText } from "../lib/quota-wall-notice.js";
 import { countLimitsResetEcho, matchLimitMenu, wallHitOf } from "../lib/quota-wall-text.js";
@@ -30,6 +30,8 @@ export interface QuotaWallDeps {
   /** 此刻在册的 Claude Code 窗口（扫回显、关菜单用） */
   windows(): Promise<WallWindow[]>;
   capture(win: string): Promise<string>;
+  /** 关菜单前让窗口回到可交互（退出 copy-mode），tmux-helper 的 ensurePaneInteractive */
+  prepare(win: string): Promise<unknown>;
   sendEsc(win: string): Promise<void>;
   mainTurnBusy(channelId: string, agent: string): Promise<boolean>;
   held: {
@@ -125,57 +127,86 @@ async function watchWall(c: Ctx, now: number): Promise<void> {
     patchWall(c, { lastProbeAt: now }); // 先记时刻：探失败也等下一个 5 分钟，退避交给 T2b-2 的调度器
     probe = await c.d.probe().catch(() => null); // 探失败 = 这次没有这个信号，别的出闸来源照常
   }
-  const via = exitVia(c.state.wall!, { now, limitsReset: await sawLimitsReset(c), probe, cache: c.d.readCache() });
+  const cache = c.d.readCache();
+  const seen = observeCache(c.state, cache);
+  if (seen) set(c, seen);
+  const via = exitVia(c.state.wall!, { now, limitsReset: await sawLimitsReset(c), probe, cache });
   if (via) exitWall(c, via);
 }
 
-async function closeMenus(c: Ctx): Promise<void> {
+/** 恢复途中又撞墙会换成一道新闸（新 id、还没出闸）：旧恢复的进度不能写到新闸上，也不能拿新闸押的消息去补投 */
+const stillRecovering = (c: Ctx, id: string): boolean => c.state.wall?.id === id && !!c.state.wall.exit;
+
+function patchRecovery(c: Ctx, id: string, p: Partial<WallRecovery>): boolean {
+  if (!stillRecovering(c, id)) return false;
+  patchWall(c, { recovery: { ...c.state.wall!.recovery!, ...p } });
+  return true;
+}
+
+async function closeMenus(c: Ctx, id: string): Promise<void> {
   const r = structuredClone(c.state.wall!.recovery!);
+  const sent: WallWindow[] = [];
   for (const win of await c.d.windows()) {
     if (r.escSent.includes(win.channelId)) continue;
+    // copy-mode 里画面是翻上去的旧内容、Esc 只会让 tmux 退出 copy-mode：先退出来再看、再发
+    await c.d.prepare(win.win).catch((e) => c.d.log(`额度闸：${win.agent} 退出 copy-mode 失败（照常抓屏，对不上就不发键）: ${(e as Error).message}`));
     const pane = await c.d.capture(win.win).catch(() => ""); // 抓不到画面就不发键：宁可留给人关，也不盲按
     if (matchLimitMenu(pane)) {
       await c.d.sendEsc(win.win);
       r.escSent.push(win.channelId);
+      sent.push(win);
       c.d.log(`⎋ 关掉 ${win.agent} 的撞墙菜单（Esc，不选任何一项）`);
-      patchWall(c, { recovery: r });
+      if (!patchRecovery(c, id, { escSent: r.escSent })) return;
     } else if (/What do you want to do\?/.test(pane) && !r.manual.includes(win.agent)) {
       r.manual.push(win.agent);
       c.d.log(`⚠️ ${win.agent} 画面上有菜单但对不上已知撞墙菜单，不发键，留给人处理`);
     }
   }
-  if (r.escSent.length) await c.d.sleep(MENU_SETTLE_MS);
-  patchWall(c, { recovery: { ...r, step: "flush" } });
+  if (sent.length) await c.d.sleep(MENU_SETTLE_MS);
+  // 发完再看一眼：菜单还在就不算关了（只发一次 Esc，不重试），列进通知让人处理
+  r.escFailed = r.escFailed ?? [];
+  for (const win of sent) {
+    if (!matchLimitMenu(await c.d.capture(win.win).catch(() => ""))) continue; // 抓不到按已关：Esc 发出去了，下一次 owner 看屏自会发现
+    r.escFailed.push(win.agent);
+    c.d.log(`⚠️ ${win.agent} 发了 Esc 之后菜单还在，留给人处理`);
+  }
+  patchRecovery(c, id, { ...r, step: "flush" });
 }
 
-async function deliverQueue(c: Ctx): Promise<void> {
+async function deliverQueue(c: Ctx, id: string): Promise<void> {
   const channels = c.d.held.wallChannels();
-  // 先记账再转回普通押后：中途重启时条数不丢；转回之后 Stop / 扫描也能投，不必等下面逐个 flush
-  patchWall(c, { recovery: { ...c.state.wall!.recovery!, flushed: c.d.held.wallCount(), flushedTo: channels } });
+  // 先记账再转回普通押后：中途重启时条数不丢（已记过就不重记，否则重启后记成 0）；转回之后 Stop / 扫描也能投
+  if (c.state.wall!.recovery!.flushedTo === undefined && !patchRecovery(c, id, { flushed: c.d.held.wallCount(), flushedTo: channels })) return;
   c.d.held.release(c.d.now());
-  for (const cid of channels) await c.d.flush(cid).catch((e) => c.d.log(`额度闸补投 ${cid} 出错（留在队里，下一次触发再投）: ${(e as Error).message}`));
-  patchWall(c, { recovery: { ...c.state.wall!.recovery!, step: "resume" } });
+  for (const cid of c.state.wall!.recovery!.flushedTo ?? channels) {
+    if (!stillRecovering(c, id)) return;
+    await c.d.flush(cid).catch((e) => c.d.log(`额度闸补投 ${cid} 出错（留在队里，下一次触发再投）: ${(e as Error).message}`));
+  }
+  patchRecovery(c, id, { step: "resume" });
 }
 
-async function resumeAgents(c: Ctx): Promise<void> {
+async function resumeAgents(c: Ctx, id: string): Promise<void> {
   const w = c.state.wall!;
   const got = new Set(w.recovery!.flushedTo ?? []);
   for (const cid of resumeTargets(w, (x) => got.has(x) || c.d.held.queuedFor(x))) {
     const h = w.hits[cid];
     const busy = await c.d.mainTurnBusy(cid, h.agent).catch(() => true); // 判不出来按在跑：宁可少续一个，也不在它回合里插话
+    if (!stillRecovering(c, id)) return;
     const r = structuredClone(c.state.wall!.recovery!);
     if (busy) r.running.push(h.agent);
     else if (await c.d.resume(cid, h.agent, wallResumeText(h.at, h.error))) r.resumed.push(h.agent);
-    patchWall(c, { recovery: r });
+    if (!patchRecovery(c, id, r)) return;
   }
-  patchWall(c, { recovery: { ...c.state.wall!.recovery!, step: "done" } });
+  patchRecovery(c, id, { step: "done" });
 }
 
-/** 恢复三步，按 recovery.step 续做（重启后也从这里接上）；做完发出闸通知 */
+/** 恢复三步，按 recovery.step 续做（重启后也从这里接上）；每步都核对还是同一道闸（途中又撞墙就停，交给新闸）；做完发出闸通知 */
 async function recover(c: Ctx): Promise<void> {
-  if (c.state.wall?.recovery?.step === "menus") await closeMenus(c);
-  if (c.state.wall?.recovery?.step === "flush") await deliverQueue(c);
-  if (c.state.wall?.recovery?.step === "resume") await resumeAgents(c);
+  const id = c.state.wall!.id;
+  if (stillRecovering(c, id) && c.state.wall!.recovery?.step === "menus") await closeMenus(c, id);
+  if (stillRecovering(c, id) && c.state.wall!.recovery?.step === "flush") await deliverQueue(c, id);
+  if (stillRecovering(c, id) && c.state.wall!.recovery?.step === "resume") await resumeAgents(c, id);
+  if (!stillRecovering(c, id)) return c.d.log("额度闸：恢复途中又撞墙，旧恢复停下，名单里没续跑的带进新闸");
   const w = c.state.wall!;
   if (w.recovery?.step !== "done" || w.recoveredNotifiedAt !== undefined) return;
   const text = recoveredNotice(w);
@@ -231,7 +262,7 @@ export function createQuotaWall(d: QuotaWallDeps) {
     /** 闸开着（出闸后恢复中不算：新消息照常投，押着的由恢复补投） */
     active: (): boolean => wallActive(c.state),
     /** 闸预计什么时候开（T14 调度器取下一次唤醒用）；没闸 / 重置时刻不明 = null */
-    until: (): number | null => (wallActive(c.state) ? c.state.wall!.resetsAt : null),
+    until: (): number | null => (wallActive(c.state) ? wallUntil(c.state.wall!) : null),
     /** 出闸时回调（T14 据此马上重排唤醒） */
     onExit(cb: (via: WallExitVia) => void): void {
       c.exitListeners.push(cb);

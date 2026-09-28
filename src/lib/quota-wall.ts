@@ -25,11 +25,12 @@ interface WallAgentHit {
 
 type RecoveryStep = "menus" | "flush" | "resume" | "done";
 
-interface WallRecovery {
+export interface WallRecovery {
   step: RecoveryStep;
-  /** 已发过 Esc 的频道（重启后不再发第二次）/ 画面对不上、要人处理的 agent 名 */
+  /** 已发过 Esc 的频道（重启后不再发第二次）/ 画面对不上、要人处理的 agent 名 / 发了 Esc 菜单还在的 agent 名 */
   escSent: string[];
   manual: string[];
+  escFailed?: string[];
   /** 出闸时转回普通押后的「额度闸」消息条数、涉及的频道（这些频道补投的消息自会叫醒它，不再另发续跑） */
   flushed: number;
   flushedTo?: string[];
@@ -53,6 +54,16 @@ export interface Wall {
   exit?: { at: number; via: WallExitVia };
   recovery?: WallRecovery;
   recoveredNotifiedAt?: number;
+  /** 闸里看到的用量缓存：见没见过 ≥100、第一次和最近一次看到的重置时刻（observeCache） */
+  cache?: WallCacheSeen;
+}
+
+interface WallCacheSeen {
+  full: boolean;
+  firstWeek: number | null;
+  firstSession: number | null;
+  lastWeek: number | null;
+  lastSession: number | null;
 }
 
 export interface WallState {
@@ -151,17 +162,41 @@ export interface UsageSignal {
 
 const notPassed = (at: number | null, now: number) => at === null || at > now;
 
+const isFull = (u: UsageSignal): boolean => [u.sessionPct, u.weekPct].some((p) => p !== null && p >= 100);
+
+/**
+ * 闸里每一拍记下缓存的样子。缓存的 scrapedAt 每次渲染都刷新、同一窗口的百分比只升不降，「比进闸新」不代表数据新：
+ * 出闸只认「闸里见过满、后来降下来」或重置时刻变了（exitVia），撞墙那一刻停在 99% 的旧值不会把闸放开。
+ */
+export function observeCache(s: WallState, u: UsageSignal | null): WallState | null {
+  const w = s.wall;
+  if (!u || !w || w.exit || u.scrapedAt <= w.enteredAt) return null;
+  const p = w.cache;
+  const next: WallCacheSeen = {
+    full: !!p?.full || isFull(u), firstWeek: p ? p.firstWeek : u.weekResetsAtMs, firstSession: p ? p.firstSession : u.sessionResetsAtMs,
+    lastWeek: u.weekResetsAtMs, lastSession: u.sessionResetsAtMs,
+  };
+  if (p && JSON.stringify(p) === JSON.stringify(next)) return null;
+  return { v: 1, wall: { ...structuredClone(w), cache: next } };
+}
+
 /**
  * 用量缓存说某个窗口 ≥100% 且重置时刻未过 → 进闸（没闸时）。周优先。
- * 上一道闸出闸之前抓的缓存不算：用卡出闸后缓存里还是撞墙那会儿的 100%，拿它进闸就会刚出又进。
+ * 上一道闸出闸之前抓的缓存不算；上一道不是「到点」出的（用卡 / clear / 探测）时，同一窗口的重置时刻没变就不从缓存进：
+ * 用卡不改周重置日，还没发新请求的窗口一渲染就把撞墙时的 100% 写回去，拿它进闸就会刚出又进。真撞了自有 api_error_turn。
  */
 export function enterFromUsage(s: WallState, u: UsageSignal, now: number, newId: () => string): { state: WallState; entered: boolean } {
-  if (wallActive(s) || (s.wall?.exit && u.scrapedAt <= s.wall.exit.at)) return { state: s, entered: false };
+  const no = { state: s, entered: false };
+  if (wallActive(s) || (s.wall?.exit && u.scrapedAt <= s.wall.exit.at)) return no;
   const week = u.weekPct !== null && u.weekPct >= 100 && notPassed(u.weekResetsAtMs, now);
   const session = u.sessionPct !== null && u.sessionPct >= 100 && notPassed(u.sessionResetsAtMs, now);
-  if (!week && !session) return { state: s, entered: false };
+  if (!week && !session) return no;
   const resetsAt = week ? u.weekResetsAtMs : u.sessionResetsAtMs;
-  return { state: { v: 1, wall: freshWall(s.wall, newId(), now, "usage_cache", week ? "weekly" : "session", resetsAt, null) }, entered: true };
+  const prev = s.wall;
+  if (prev?.exit && prev.exit.via !== "resets_at" && (!prev.cache || resetsAt === (week ? prev.cache.lastWeek : prev.cache.lastSession))) return no;
+  const w = freshWall(s.wall, newId(), now, "usage_cache", week ? "weekly" : "session", resetsAt, null);
+  w.cache = { full: true, firstWeek: u.weekResetsAtMs, firstSession: u.sessionResetsAtMs, lastWeek: u.weekResetsAtMs, lastSession: u.sessionResetsAtMs };
+  return { state: { v: 1, wall: w }, entered: true };
 }
 
 export interface ExitSignals {
@@ -174,17 +209,31 @@ export interface ExitSignals {
   cache?: UsageSignal | null;
 }
 
+/** 原文没写重置时间 / 认不出时的兜底上限：session 墙最长 5 小时、周墙 7 天；过了就当到点出闸（再撞会再进，好过永远等人） */
+const FALLBACK_SPAN_MS = { weekly: 7 * 86_400_000, session: 5 * 3_600_000, unknown: 5 * 3_600_000 } as const;
+
+/** 这道闸按什么时刻到点：原文的重置时刻 → 闸里看到的缓存重置时刻 → 进闸时刻 + 兜底上限 */
+export function wallUntil(w: Wall): number {
+  if (w.resetsAt !== null) return w.resetsAt;
+  const k = w.cache;
+  const fromCache = w.kind === "weekly" ? k?.lastWeek : w.kind === "session" ? k?.lastSession : Math.max(k?.lastWeek ?? 0, k?.lastSession ?? 0) || null;
+  return fromCache && fromCache > w.enteredAt ? fromCache : w.enteredAt + FALLBACK_SPAN_MS[w.kind];
+}
+
 /** 该不该出闸、因为什么；不该返回 null。只有进闸之后的观测才算（进闸前的 <100 是撞墙之前的旧值） */
 export function exitVia(w: Wall, sig: ExitSignals): WallExitVia | null {
   if (w.exit) return null;
   if (sig.cli) return "cli";
   if (sig.limitsReset) return "limits_reset";
-  if (w.resetsAt !== null && sig.now >= w.resetsAt + WALL_TIMING.exitSlackMs) return "resets_at";
+  if (sig.now >= wallUntil(w) + WALL_TIMING.exitSlackMs) return "resets_at";
   if (sig.probe && sig.probe.observedAt > w.enteredAt && sig.probe.pct !== null && sig.probe.pct < 100) return "probe";
   const c = sig.cache;
-  if (c && c.scrapedAt > w.enteredAt) {
+  const k = w.cache; // observeCache 先记过这一拍
+  if (c && k && c.scrapedAt > w.enteredAt) {
     const pcts = [c.sessionPct, c.weekPct].filter((p): p is number => p !== null);
-    if (pcts.length && pcts.every((p) => p < 100)) return "usage_cache";
+    const rolled = (a: number | null, b: number | null) => a !== null && b !== null && a !== b;
+    const below = pcts.length > 0 && pcts.every((p) => p < 100);
+    if (below && (k.full || rolled(k.firstWeek, c.weekResetsAtMs) || rolled(k.firstSession, c.sessionResetsAtMs))) return "usage_cache";
   }
   return null;
 }

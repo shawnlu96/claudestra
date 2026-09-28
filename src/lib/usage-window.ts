@@ -93,11 +93,13 @@ export function parseResetText(text: string, nowMs: number): number | null {
   }
   const wd = m[3] ? WEEKDAYS.indexOf(m[3].slice(0, 3).toLowerCase()) : null;
   if (wd === -1) return null;
-  // 今天前后几天的那个点（按对方时区的日期推，这里用本机日期加减一天兜住跨日）；带星期的只留那一天
-  const d = new Date(nowMs);
+  // 原文时区里「今天」前后几天的那个点（本机和原文时区差十几个小时时，按本机日期推会整天错开）；带星期的只留那一天
+  const tzOff = tz ? tzOffsetMs(nowMs, tz) : null;
+  const d = tzOff === null ? new Date(nowMs) : new Date(nowMs + tzOff);
+  const [y, mo, day] = tzOff === null ? [d.getFullYear(), d.getMonth(), d.getDate()] : [d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()];
   for (let off = -1; off <= (wd === null ? 1 : 7); off++) {
-    if (wd !== null && new Date(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate() + off)).getUTCDay() !== wd) continue;
-    candidates.push(wallToUtc(d.getFullYear(), d.getMonth(), d.getDate() + off, hour, minute, tz));
+    if (wd !== null && new Date(Date.UTC(y, mo, day + off)).getUTCDay() !== wd) continue;
+    candidates.push(wallToUtc(y, mo, day + off, hour, minute, tz));
   }
   const upcoming = candidates.filter((c) => Number.isFinite(c) && c >= nowMs - 5 * 60_000).sort((a, b) => a - b);
   return upcoming[0] ?? null;

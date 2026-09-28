@@ -34,6 +34,9 @@ export interface PendingAgentCall {
   ambiguityNotifiedAt?: number;
   /** 已经告诉过 caller「它这轮以 API 错误结束、回程保留」的时刻（每槽一次，bridge/stop-settle.ts） */
   apiErrorNotifiedAt?: number;
+  /** target 以 API 错误结束、这一槽在等它接着做完的那一轮（bridge/stop-settle.ts）；withheld = 错误前它已经说了的话 */
+  apiErrorAt?: number;
+  withheld?: string[];
   /** 这一槽的各条请求（老数据没有：整槽当一条） */
   requests?: CallRequest[];
   /** requests 的 message_id（stale 扫描判「全都还押着」用，lib/held-pac.ts） */
@@ -103,7 +106,7 @@ export class AgentCallBook extends PersistedMap<PendingAgentCall> {
     const done = new Set(answered.requests.map((r) => r.messageId));
     const left = requestsOf(cur).filter((r) => !done.has(r.messageId));
     if (!left.length) return this.delete(keyOf(target, caller));
-    this.store(target, cur, left);
+    this.store(target, { ...cur, apiErrorAt: undefined, withheld: undefined }, left); // 扣下的话已随答复推走
     return true;
   }
 
@@ -172,6 +175,21 @@ export class AgentCallBook extends PersistedMap<PendingAgentCall> {
     }
     if (w.length) this.persist();
     return w;
+  }
+
+  /** target 这一轮以 API 错误结束：在等它的槽都记上等续跑（第一次的时刻），withheld 有字就追加；落盘 */
+  markApiError(target: string, stillHeld: StillHeld, withheld: string | null, now = Date.now()): void {
+    const w = this.waiting(target, stillHeld);
+    for (const c of w) {
+      const raw = this.slot(target, c.callerChannelId);
+      if (raw) this.setQuiet(keyOf(target, c.callerChannelId), { ...raw, apiErrorAt: raw.apiErrorAt ?? now, withheld: [...(raw.withheld ?? []), ...(withheld ? [withheld] : [])] });
+    }
+    if (w.length) this.persist();
+  }
+
+  /** 有 caller 在等 target 接着做完（它上一轮以 API 错误结束）：这时 owner 在 Discord 打字不算接管 */
+  awaitingResume(target: string, stillHeld: StillHeld): boolean {
+    return this.waiting(target, stillHeld).some((c) => c.apiErrorAt);
   }
 
   /** 失效钟重新起算（押后的消息真正送达时调）：给了 caller 只动那一槽，否则 target 名下全部 */

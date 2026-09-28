@@ -79,12 +79,17 @@ export function recoveredNotice(w: Wall): string {
   const r = w.recovery!;
   const via = VIA[w.exit!.via]();
   const span = fmtSpan(w.exit!.at - w.enteredAt);
+  const closed = r.escSent.length - (r.escFailed?.length ?? 0);
   const running = r.running.length ? t(`（${r.running.length} 个已经自己在跑，没打扰）`, ` (${r.running.length} already running, left alone)`) : "";
   const lines = [
     t(`✅ 额度已恢复（${via}），闸开了 ${span}`, `✅ Usage restored (${via}); the wall lasted ${span}`),
-    `- ${t(`关菜单 ${r.escSent.length} 个窗口；补投 ${r.flushed} 条消息；续跑 ${r.resumed.length} 个 agent`,
-      `Closed ${r.escSent.length} menu(s); delivered ${r.flushed} queued message(s); resumed ${r.resumed.length} agent(s)`)}${running}`,
+    `- ${t(`关菜单 ${closed} 个窗口；补投 ${r.flushed} 条消息；续跑 ${r.resumed.length} 个 agent`,
+      `Closed ${closed} menu(s); delivered ${r.flushed} queued message(s); resumed ${r.resumed.length} agent(s)`)}${running}`,
   ];
+  if (r.escFailed?.length) {
+    lines.push(`- ${t(`这几个窗口发了 Esc 菜单还开着（只发一次，不重试），需要手动关：${r.escFailed.join("、")}`,
+      `These windows still show the menu after one Esc (not retried) — please close them: ${r.escFailed.join(", ")}`)}`);
+  }
   if (r.manual.length) {
     lines.push(`- ${t(`这几个窗口的画面对不上已知菜单，没发键，需要手动看一眼：${r.manual.join("、")}`,
       `These windows didn't show a recognised menu, so no key was sent — please check them: ${r.manual.join(", ")}`)}`);

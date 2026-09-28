@@ -5,7 +5,7 @@
  */
 import { describe, expect, test } from "bun:test";
 import { flushHeld, type FlushDeps } from "../src/bridge/held-flush.js";
-import { HeldQueue, INBOX_LEASE_MS, type HeldItem } from "../src/bridge/held-queue.js";
+import { ageHeld, HELD_GIVE_UP_MS, HELD_NOTIFY_MS, HeldQueue, INBOX_LEASE_MS, type HeldItem } from "../src/bridge/held-queue.js";
 import type { Delivery, Envelope, LocalEndpoint } from "../src/bridge/router.js";
 
 const ws = { tag: "target-ws" } as never;
@@ -116,6 +116,23 @@ describe("flushHeld", () => {
     await flushHeld(h.deps, "c-me", "sweep");
     expect(h.delivered).toEqual(["human-msg"]);
     expect(h.contents()).toEqual(["agent-msg"]);
+  });
+
+  test("闸前因「回合中」押下的（或别的路径押的、不带 reason）闸内一律改记成额度闸：不老化、算进排队数、出闸补投（T24 r1 P1-1）", async () => {
+    const h = harness([item("busy-held", "local", 1000), item("human", "user", 1000)], { walled: async () => true, working: async () => true });
+    await flushHeld(h.deps, "c-me", "sweep");
+    expect(h.held.get("c-me")!.map((i) => [i.env.content, i.reason])).toEqual([["busy-held", "quota_wall"]]);
+    expect(h.held.wallCount()).toBe(1);
+    expect(ageHeld(h.held, 1000 + HELD_GIVE_UP_MS + 1)).toEqual([]); // 32 小时的墙也不丢
+    expect(h.held.releaseWall(5000)).toBe(1);
+    expect(h.held.get("c-me")![0]).toMatchObject({ heldAt: 5000 });
+  });
+
+  test("闸开着时整体不老化：30 分钟提醒是直接 ws.send 给发送方的，会唤醒一个注定撞墙的回合", () => {
+    const h = harness([item("to-codex", "local", 1000)]);
+    expect(ageHeld(h.held, 1000 + HELD_NOTIFY_MS + 1, true)).toEqual([]);
+    expect(h.held.get("c-me")![0].notifiedAt).toBeUndefined(); // 出闸后照常提醒
+    expect(ageHeld(h.held, 1000 + HELD_NOTIFY_MS + 1)).toHaveLength(1);
   });
 
   test("不在线 / 压缩中 / 别人正在投：一条都不动", async () => {

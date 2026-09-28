@@ -6,7 +6,7 @@ import { afterAll, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { apiErrorNotice } from "../src/lib/api-error-rows.js";
+import { apiErrorNotice, pushApiErrorRow } from "../src/lib/api-error-rows.js";
 import { readSessionHistory } from "../src/lib/session-history.js";
 
 const dir = mkdtempSync(join(tmpdir(), "api-error-rows-"));
@@ -49,5 +49,13 @@ describe("历史里的 API 错误", () => {
     const { messages } = await readSessionHistory(p, {});
     expect(messages.map((m) => m.text)).toEqual(["⛔ API Error: 500 upstream", `⛔ ${LIMIT}`]);
     expect(apiErrorNotice("  x  ")).toBe("⛔ x");
+  });
+
+  test("Codex 的额度条目（lib/codex-session.ts 译过来不带 isApiErrorMessage、带 error）也是系统行，和直播一致；agent 正文不算", () => {
+    const codex = "You've hit your usage limit. Upgrade to Pro or try again at 8:41 AM.";
+    const rows: { seq: number; ts: string | null; role: "user" | "assistant" | "system"; text: string }[] = [];
+    expect(pushApiErrorRow(rows, { error: codex, message: { content: [{ type: "text", text: codex }] } }, 1, null)).toBe(true);
+    expect(rows).toEqual([{ seq: 1, ts: null, role: "system", text: `⛔ ${codex}` }]);
+    expect(pushApiErrorRow(rows, { message: { content: [{ type: "text", text: codex }] } }, 2, null)).toBe(false);
   });
 });
