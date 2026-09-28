@@ -8,7 +8,7 @@ import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { beforeEach, describe, expect, test } from "bun:test";
-import { currentHandler, owesAdversarial } from "../src/lib/ledger-handler.js";
+import { currentHandler, lastReviewOf, owesAdversarial } from "../src/lib/ledger-handler.js";
 import { getTask, listEvents, openLedger } from "../src/lib/ledger-store.js";
 import { createTask, deliver, moveStage, setMeta } from "../src/lib/ledger-write.js";
 import { specPolicyOf } from "../src/lib/task-spec.js";
@@ -257,5 +257,20 @@ describe("一次派审只算一次（dispatchKindFor）", () => {
     // 重新派对抗式、判通过才放行
     await run("agent-disp", "dispatch", "T1", "--adversarial");
     expect((await run("agent-disp", ...verdict("pass", "merge"))).task.stage).toBe("merge");
+  });
+
+  test("常规派审 → pass → 再一条 pass（没有新派审）：第二条种类为 null，不能 --to merge、不算还清；PM 豁免不受影响", async () => {
+    ship("aaaa1111", "build");
+    await run("agent-disp", "dispatch", "T1");
+    await run("agent-disp", ...verdict("pass"));
+    await run("agent-disp", ...verdict("pass"));
+    const [first, second] = events().filter((e) => e.kind === "review");
+    expect(lastReviewOf(first, events()).kind).toBe("regular");
+    expect(lastReviewOf(second, events()).kind).toBeNull();
+    expect(owesAdversarial(policy(), events(), round())).toBe(true);
+    expect((await run("agent-disp", ...verdict("pass", "merge"))).code).toBe("conflict");
+    const waived = await run("agent-pm", ...verdict("pass", "merge", "--waive", "adversarial", "--text", "增量只改了文档"));
+    expect(waived.task.stage).toBe("merge");
+    expect(owesAdversarial(policy(), events(), round())).toBe(false);
   });
 });
