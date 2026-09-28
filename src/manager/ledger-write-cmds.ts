@@ -178,7 +178,7 @@ function review(c: LedgerCli): Result {
   const move = c.p.flags.to === undefined ? undefined : { from: "review" as const, to: stageFlag(c, "to") };
   const verdict = c.need("verdict");
   const waive = waiveFlag(c, task, verdict);
-  if (move?.to === "merge") checkMergeGate(c, task, { verdict, round: task.round, waive });
+  if (move?.to === "merge") checkMergeGate(c, task, { verdict, waive });
   const r = recordReview(c.db, c.ctx(), {
     taskId: task.id, reviewer: c.need("reviewer"), verdict: verdict as never, ...(counts as { p0: number; p1: number; p2: number }),
     path: c.p.flags.path, text: c.p.flags.text, move, ...(waive ? { waive } : {}),

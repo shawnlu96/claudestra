@@ -73,6 +73,9 @@ describe("reviewPolicy / policyFromSpec：真实规格卡的写法", () => {
     expect(reviewPolicy("- **审查：** 常规一轮\n")).toBe("常规一轮");
     expect(reviewPolicy("审查: 常规一轮｜分支 x\n- 审查：对抗式\n")).toBe("常规一轮");
     expect(reviewPolicy("## 审查\n审查员说过的话\n")).toBeNull();
+    // ｜ 后面才提对抗式：整行都算，不能读成只要常规
+    expect(reviewPolicy("- 审查：常规一轮｜对抗式：最后一轮\n")).toBe("常规一轮｜对抗式：最后一轮");
+    expect(reviewPolicy("- 审查：常规一轮；最后一轮对抗式｜分支 x\n")).toBe("常规一轮；最后一轮对抗式");
     expect(policyFromSpec("# T\n常规\n")).toBeNull();
     expect(policyFromSpec(null)).toBeUndefined();
   });

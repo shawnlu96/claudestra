@@ -74,19 +74,25 @@ function headAt(events: readonly LedgerEvent[], seq: number): string | null {
   return null;
 }
 
-/** 同一个 commit：短 sha 前缀也认；两边都没记 head 算同一个（没有 head 可比时只剩轮次在约束） */
+/** 同一个 commit：短 sha 前缀也认；两边都没记 head 算同一个（此时靠轮次和「之后没再交付」约束） */
 function sameHead(a: string | null, b: string | null): boolean {
   if (!a || !b) return !a && !b;
   return a.startsWith(b) || b.startsWith(a);
 }
 
+/** a 之后、b 之前（都不含）有没有交付事件 */
+const deliveredBetween = (events: readonly LedgerEvent[], a: number, b: number): LedgerEvent[] =>
+  events.filter((e) => e.kind === "deliver" && e.seq > a && e.seq < b);
+
 /**
- * 这条 review（第 round 轮、seq 之前的 head）是哪种审查员审的：取 seq 之前最近一次派审，它记的 round 与 head 都对得上才算，
- * 否则 null（这一轮没派审，或者派审之后又交付了别的 head）。种类取 dispatch.reviewer（代码写的）；review 的 reviewer 是自由文本，不作数。
+ * 这条 review（第 round 轮、seq 之前的 head）是哪种审查员审的：取 seq 之前最近一次派审，它记的 round 与 head 都对得上、
+ * 并且派审之后没有再交付过（交付不带 head 时说不清换没换代码，一律算换了），才算；否则 null（这一轮没派审，或者派审之后又交付了）。
+ * 种类取 dispatch.reviewer（代码写的）；review 的 reviewer 是自由文本，不作数。
  */
 function dispatchKindFor(events: readonly LedgerEvent[], seq: number, round: unknown): LastReview["kind"] {
   const d = events.findLast((e) => e.kind === "dispatch" && e.seq < seq);
-  if (!d || d.data.round !== round || !sameHead(typeof d.data.head === "string" ? d.data.head : null, headAt(events, seq))) return null;
+  if (!d || d.data.round !== round || deliveredBetween(events, d.seq, seq).length) return null;
+  if (!sameHead(typeof d.data.head === "string" ? d.data.head : null, headAt(events, seq))) return null;
   return d.data.reviewer === "adversarial" ? "adversarial" : d.data.reviewer === "regular" ? "regular" : null;
 }
 
@@ -96,27 +102,34 @@ export function lastReviewOf(review: LedgerEvent, events: readonly LedgerEvent[]
   return { kind: dispatchKindFor(events, review.seq, review.data.round), verdict, p0: num(review.data.p0), p1: num(review.data.p1) };
 }
 
-/** 这条 review 抵得上对抗式：对抗式轮的 pass，或 PM 记的豁免（review --waive adversarial） */
-const settlesAdversarial = (e: LedgerEvent, events: readonly LedgerEvent[]): boolean =>
-  e.kind === "review" && e.data.verdict === "pass" && (e.data.waive === "adversarial" || dispatchKindFor(events, e.seq, e.data.round) === "adversarial");
+/**
+ * 这条 review 还清了第 round 轮的对抗式：对抗式轮的 pass 或 PM 的豁免（review --waive adversarial），并且
+ * ① 就在第 round 轮；② 之后的每次交付都带着同一个非空 head（不带 head 的交付说不清换没换代码，算重新欠）；
+ * ③ 当前 head（之后 task-set 改过也算）还是它审的那个。
+ */
+function settles(e: LedgerEvent, events: readonly LedgerEvent[], round: number): boolean {
+  if (e.kind !== "review" || e.data.verdict !== "pass" || e.data.round !== round) return false;
+  if (e.data.waive !== "adversarial" && dispatchKindFor(events, e.seq, e.data.round) !== "adversarial") return false;
+  const head = headAt(events, e.seq);
+  const later = deliveredBetween(events, e.seq, Infinity);
+  if (later.some((d) => !head || typeof d.data.headSHA !== "string" || !d.data.headSHA || !sameHead(d.data.headSHA, head))) return false;
+  return sameHead(head, headAt(events, Infinity));
+}
 
-/** 正要记、还没入库的那条结论（review --to merge）：round = 任务当前轮次 */
+/** 正要记、还没入库的那条结论（review --to merge） */
 export interface PendingReview {
   verdict: string;
-  round: number;
   waive?: string;
 }
 
 /**
- * 还欠不欠对抗式。路由、currentHandler、`review --to merge` 共用这一个判定：
- * 对抗式轮的 pass（或 PM 的豁免）必须落在当前 head（events 里最后交付的那个）上才算还清——之后又交付了新 head 就重新欠；
- * 正要记的 pending 是这一轮、这个 head 上派的对抗式判通过，或者带豁免，也算还清。
- * 策略只认规格卡（lib/task-spec.ts，与 review-pack 同一来源）：读不到、或提到对抗式却读不出「审查：」= unknown。
+ * 还欠不欠对抗式（第 round 轮 = 任务当前轮次）。路由、currentHandler、`review --to merge` 共用这一个判定：
+ * 还清的条件见 settles——对抗式 pass / 豁免只对它那一轮、那个 head 有效；正要记的 pending 判通过，且这一轮最后一次交付之后
+ * 派的是对抗式（或带豁免），也算还清。策略只认规格卡（lib/task-spec.ts）：读不到、或提到对抗式却读不出「审查：」= unknown。
  */
-export function owesAdversarial(policy: SpecPolicy, events: readonly LedgerEvent[], pending?: PendingReview): boolean | "unknown" {
-  const head = headAt(events, Infinity);
-  if (events.some((e) => settlesAdversarial(e, events) && sameHead(headAt(events, e.seq), head))) return false;
-  if (pending?.verdict === "pass" && (pending.waive === "adversarial" || dispatchKindFor(events, Infinity, pending.round) === "adversarial")) return false;
+export function owesAdversarial(policy: SpecPolicy, events: readonly LedgerEvent[], round: number, pending?: PendingReview): boolean | "unknown" {
+  if (events.some((e) => settles(e, events, round))) return false;
+  if (pending?.verdict === "pass" && (pending.waive === "adversarial" || dispatchKindFor(events, Infinity, round) === "adversarial")) return false;
   if (policy === undefined) return "unknown";
   return !!policy?.includes("对抗");
 }
@@ -128,7 +141,7 @@ export function owesAdversarial(policy: SpecPolicy, events: readonly LedgerEvent
 export function nextAfterReview(review: LedgerEvent, events: readonly LedgerEvent[], specPolicy: SpecPolicy): NextReview | "unknown" {
   const last = lastReviewOf(review, events);
   if (last.verdict !== "pass") return specPolicy === undefined ? "unknown" : nextReview(specPolicy, last);
-  const owes = owesAdversarial(specPolicy, events.filter((e) => e.seq <= review.seq));
+  const owes = owesAdversarial(specPolicy, events.filter((e) => e.seq <= review.seq), num(review.data.round));
   if (owes === "unknown") return "unknown";
   if (!owes) return null;
   return last.kind === null ? "unknown" : nextReview(specPolicy ?? null, last);

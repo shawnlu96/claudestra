@@ -95,18 +95,18 @@ describe("currentHandler", () => {
     moveStage(db, owner(30), { taskId: "T1", from: "restate", to: "build" });
     deliver(db, { actor: "agent-exec", now: 40 }, { taskId: "T1", moveFrom: "build" });
     const ev = () => listEvents(db, { target: "T1" });
-    expect(owesAdversarial(undefined, ev())).toBe("unknown");
-    expect(owesAdversarial(null, ev())).toBe(false);
-    expect(owesAdversarial("Claude 一轮", ev())).toBe(false);
-    expect(owesAdversarial(POL, ev(), { verdict: "pass", round: 1 })).toBe(true);
+    expect(owesAdversarial(undefined, ev(), 1)).toBe("unknown");
+    expect(owesAdversarial(null, ev(), 1)).toBe(false);
+    expect(owesAdversarial("Claude 一轮", ev(), 1)).toBe(false);
+    expect(owesAdversarial(POL, ev(), 1, { verdict: "pass" })).toBe(true);
     // review 的 reviewer 自由文本写 adversarial 不算
     recordReview(db, owner(50), { taskId: "T1", reviewer: "adversarial", verdict: "pass", p0: 0, p1: 0, p2: 0 });
-    expect(owesAdversarial(POL, ev())).toBe(true);
+    expect(owesAdversarial(POL, ev(), 1)).toBe(true);
     appendEvent(db, { actor: "agent-disp", now: 60 }, { project: "p", target: "T1", kind: "dispatch", data: { reviewer: "adversarial", round: 1 } });
-    expect(owesAdversarial(POL, ev(), { verdict: "pass", round: 1 })).toBe(false);
-    expect(owesAdversarial(POL, ev(), { verdict: "changes", round: 1 })).toBe(true);
+    expect(owesAdversarial(POL, ev(), 1, { verdict: "pass" })).toBe(false);
+    expect(owesAdversarial(POL, ev(), 1, { verdict: "changes" })).toBe(true);
     recordReview(db, owner(70), { taskId: "T1", reviewer: "x", verdict: "pass", p0: 0, p1: 0, p2: 0 });
-    expect(owesAdversarial(POL, ev())).toBe(false);
+    expect(owesAdversarial(POL, ev(), 1)).toBe(false);
   });
 
   test("merge 之后归 PM，终态返回 null", () => {

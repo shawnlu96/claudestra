@@ -115,8 +115,10 @@ async function dispatch(c: LedgerCli): Promise<Result> {
   if (p.task.stage !== "review") throw new LedgerError("invalid", `任务 ${p.task.id} 在 ${p.task.stage}，不在 review，不派审查员`, { stage: p.task.stage });
   const headNote = checkHead(p, c.deps.gitHead ?? gitHead);
   const reviewer = p.adversarial ? "adversarial" : "regular";
-  // 去重键带 head：同一轮重新交付了新 head 再派，是新的一次派审，不能拿回带旧 head 的那条
-  const ctx = { ...c.ctx(), dedupKey: c.p.flags.dedup ?? `dispatch:${p.task.id}:r${p.round}:${reviewer}:${p.task.headSHA ?? "-"}` };
+  // 去重键带 head 和最后一次交付：同一轮重新交付后再派是新的一次派审（交付不带 head 时 head 没变，只能靠交付序号区分），
+  // 不能拿回交付之前那条——它已经不算数了（lib/ledger-handler.ts dispatchKindFor）
+  const dkey = `${p.task.headSHA ?? "-"}:d${p.deliverEvent?.seq ?? 0}`;
+  const ctx = { ...c.ctx(), dedupKey: c.p.flags.dedup ?? `dispatch:${p.task.id}:r${p.round}:${reviewer}:${dkey}` };
   // policy：派审当时规格卡的审查策略，备查；路由 / currentHandler 判断还要不要审时读的是规格卡本身
   const data = { reviewer, round: p.round, head: p.task.headSHA, path: p.pack.reviewPath, policy: p.policy };
   const r = appendEvent(c.db, ctx, { project: p.task.project, target: p.task.id, kind: "dispatch", text: p.pack.description, data });

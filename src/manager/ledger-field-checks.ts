@@ -37,7 +37,7 @@ export function checkMergeGate(c: LedgerCli, task: LedgerTask, pending: PendingR
   const meta = getMeta(c.db, task.project);
   if (!meta.team) return;
   const events = listEvents(c.db, { project: task.project, target: task.id });
-  const owes = owesAdversarial(specPolicyOf(task, meta.docsDir), events, pending);
+  const owes = owesAdversarial(specPolicyOf(task, meta.docsDir), events, task.round, pending);
   if (owes === false || (owes === "unknown" && !specPathFor(task, meta.docsDir))) return;
   const why = owes === true
     ? `${task.id} 的规格卡要求对抗式，当前 head 上还没有对抗式轮的通过`
