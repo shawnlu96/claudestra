@@ -4,7 +4,8 @@
  */
 import { describe, expect, test } from "bun:test";
 import { AgentCallBook } from "../src/bridge/agent-calls.js";
-import { HeldQueue, INBOX_LEASE_MS, leaseActive, type HeldItem } from "../src/bridge/held-queue.js";
+import { HeldQueue, INBOX_LEASE_MS, leaseActive, unseenFrom, type HeldItem } from "../src/bridge/held-queue.js";
+import { pacStillHeld } from "../src/lib/held-pac.js";
 import { initInbox, takeInbox } from "../src/bridge/inbox.js";
 
 const me = { tag: "claudestra-ws" } as never;
@@ -23,7 +24,7 @@ function setup(items: HeldItem[]) {
   const held = new HeldQueue(null);
   const calls = new AgentCallBook(null);
   if (items.length) held.set("c-me", items);
-  calls.set("c-me", { callerChannelId: "c-codex", callerName: "agent-codex", targetName: "agent-claudestra", ts: 1 });
+  calls.add("c-me", { callerChannelId: "c-codex", callerName: "agent-codex", targetName: "agent-claudestra", ts: 1 });
   const mirrored: string[] = [];
   initInbox({
     clients: new Map([["c-me", { ws: me }]]),
@@ -40,24 +41,37 @@ describe("takeInbox", () => {
     const r = await takeInbox(me, 5 * 60_000);
     if ("error" in r) throw new Error(r.error);
     expect(r.result.n).toBe(2);
-    expect(r.result.text).toContain("领到 2 条");
+    expect(r.result.text).toMatch(/收件箱 inbox_\w+：2 条/);
     expect(r.result.text).toContain("1/2 · 来自 agent-codex · message_id=m-复核意见 1 · 排队 5 分钟");
     expect(r.result.text).toMatch(/ack: "inbox_\w+"/);
     const q = held.get("c-me")!;
     expect(q.map((i) => i.env.content)).toEqual(["复核意见 1", "人类补充", "复核意见 2"]); // 还在队里
     expect(q.filter((i) => leaseActive(i, 5 * 60_000)).length).toBe(2);
     expect(mirrored).toEqual(["复核意见 1", "复核意见 2"]);
-    expect(calls.get("c-me")!.ts).toBeGreaterThan(1);
+    expect(calls.slot("c-me", "c-codex")!.ts).toBeGreaterThan(1);
   });
 
-  test("租约内再领领不到同一批；过期没确认的可以重领（工具结果丢了 / 回合被取消不丢）", async () => {
-    setup([item("a"), item("b")]);
+  test("没 ack 再调：原样重给还没确认的那批（工具结果丢了也能重读），不续租、不领新的；过期后照常重领", async () => {
+    const { held } = setup([item("a"), item("b")]);
     const first = await takeInbox(me, 1000);
-    expect("result" in first && first.result.n).toBe(2);
+    if ("error" in first) throw new Error(first.error);
+    const batch = /inbox_\w+/.exec(first.result.text)![0];
+    held.set("c-me", [...held.get("c-me")!, item("c")]);
     const again = await takeInbox(me, 2000);
-    expect("result" in again && again.result.text).toContain("没有可领取");
+    if ("error" in again) throw new Error(again.error);
+    expect(again.result.text).toContain(`收件箱 ${batch}：2 条。这是你领过还没确认的一批`);
+    expect(again.result.text).not.toContain("m-c");
+    expect(held.get("c-me")!.filter((i) => i.lease).every((i) => i.lease!.at === 1000)).toBe(true);
     const later = await takeInbox(me, 1000 + INBOX_LEASE_MS + 1);
-    expect("result" in later && later.result.n).toBe(2);
+    expect("result" in later && later.result.n).toBe(3);
+  });
+
+  test("领取后没 ack 就回复：回程判定算它看到了（#112 × #114 的组合）", async () => {
+    const { held, calls } = setup([item("请复核")]);
+    const seen = () => calls.answerable("c-me", (caller) => pacStillHeld(caller, unseenFrom(held, "c-me")));
+    expect(seen()).toBeUndefined(); // 还押着、没领：不算
+    await takeInbox(me, 1000);
+    expect(seen()?.callerChannelId).toBe("c-codex"); // 领了（租约中、未 ack）：算送到了
   });
 
   test("ack：这批出队并顺带领下一批；错的 / 已确认过的批次号只提示", async () => {
@@ -85,7 +99,7 @@ describe("takeInbox", () => {
     const r = await takeInbox(me, 1000);
     if ("error" in r) throw new Error(r.error);
     expect(r.result.n).toBe(1);
-    expect(r.result.text).toContain("另有 1 条太长");
+    expect(r.result.text).toContain("这条共"); // 超长的给开头预览，全文回合结束送达
     expect(held.get("c-me")!.filter((i) => i.lease).length).toBe(1);
   });
 

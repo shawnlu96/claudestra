@@ -7,6 +7,7 @@
  * check_inbox({ ack: batchId }) 确认才出队；租约内 Stop 不再投，INBOX_LEASE_MS 没确认就在回合结束时按普通消息重投
  * （message_id 不变，重复由收件方识别）。和 Stop 后的投递用同一把频道锁（held.claim）。设计稿 docs/15-inbox.md。
  */
+import { randomUUID } from "node:crypto";
 import type { ServerWebSocket } from "bun";
 import type { AgentCallBook } from "./agent-calls.js";
 import { INBOX_LEASE_MS, leaseActive, type HeldItem, type HeldQueue } from "./held-queue.js";
@@ -40,6 +41,20 @@ function ackBatch(d: InboxDeps, channelId: string, batchId: string): number {
   return mine.length;
 }
 
+const PREVIEW_CHARS = 2_000;
+
+async function entryText(d: InboxDeps, it: HeldItem, now: number): Promise<string> {
+  const from = it.env.from.kind === "local" ? it.env.from.agentName || it.env.from.channelId : "?";
+  const mins = Math.max(0, Math.round((now - it.heldAt) / 60_000));
+  return `── 来自 ${from} · message_id=${it.env.meta.messageId} · 排队 ${mins} 分钟 ──\n${await d.render(it.env)}`;
+}
+
+function batchText(batchId: string, texts: string[], note: string, left: number): string {
+  const head = `[📬 收件箱 ${batchId}：${texts.length} 条${left > 0 ? `，还有 ${left} 条` : ""}。${note}`
+    + `处理完调 check_inbox({ ack: "${batchId}" }) 确认（会顺带领下一批）；${INBOX_LEASE_MS / 60_000} 分钟内不确认，这批会在你回合结束时按普通消息重新送达（message_id 不变）。答复别的 agent 用 send_to_agent。]`;
+  return [head, ...texts.map((t, k) => t.replace("── 来自", `── ${k + 1}/${texts.length} · 来自`))].join("\n\n");
+}
+
 export async function takeInbox(ws: ServerWebSocket<unknown>, now = Date.now(), ack?: string): Promise<Result> {
   if (!deps) return { error: "bridge 还没初始化收件箱" };
   const d = deps;
@@ -51,26 +66,33 @@ export async function takeInbox(ws: ServerWebSocket<unknown>, now = Date.now(), 
   try {
     const acked = ack ? ackBatch(d, channelId, ack) : 0;
     const ackNote = ack ? (acked ? `已确认 ${ack}（${acked} 条出队）。` : `${ack} 没有待确认的条目（已确认过，或租约过期后已按普通消息送达）。`) : "";
-    const free = (d.held.get(channelId) ?? []).filter((i) => isAgentMsg(i) && !leaseActive(i, now));
+    const q = d.held.get(channelId) ?? [];
+    // 没带 ack、手上还有没确认的一批（工具结果丢了 / 回合被取消 / 忘了 ack）：原样重给这批，不续租、不领新的
+    const open = ack ? [] : q.filter((i) => isAgentMsg(i) && leaseActive(i, now));
+    if (open.length) {
+      const batchId = open[0].lease!.batchId;
+      const mine = open.filter((i) => i.lease!.batchId === batchId);
+      const texts = await Promise.all(mine.map((it) => entryText(d, it, now)));
+      return { result: { n: mine.length, text: batchText(batchId, texts, "这是你领过还没确认的一批，原样重给。", 0) } };
+    }
+    const free = q.filter((i) => isAgentMsg(i) && !leaseActive(i, now));
     const picked: { it: HeldItem; text: string }[] = [];
+    const previews: string[] = [];
     let chars = 0;
-    let tooLong = 0;
     for (const it of free) {
       if (picked.length >= MAX_TAKE) break;
-      const from = it.env.from.kind === "local" ? it.env.from.agentName || it.env.from.channelId : "?";
-      const mins = Math.max(0, Math.round((now - it.heldAt) / 60_000));
-      const text = `── 来自 ${from} · message_id=${it.env.meta.messageId} · 排队 ${mins} 分钟 ──\n${await d.render(it.env)}`;
+      const text = await entryText(d, it, now);
       if (text.length > MAX_CHARS) {
-        tooLong++;
+        // 太长的不进批（租约只管整条）：先给开头，全文回合结束时按普通消息送达
+        previews.push(`${text.slice(0, PREVIEW_CHARS)}\n…（这条共 ${text.length} 字，这里只给开头；全文在你这一轮结束时送达，不用领）`);
         continue;
       }
       if (chars + text.length > MAX_CHARS) continue; // 这批放不下的等下一批（后面短的还能放进来）
       picked.push({ it, text });
       chars += text.length;
     }
-    const longNote = tooLong ? `另有 ${tooLong} 条太长（超过 ${MAX_CHARS} 字），这一轮结束时完整送达。` : "";
-    if (!picked.length) return { result: { n: 0, text: `${ackNote}收件箱里没有可领取的消息。${longNote}`.trim() } };
-    const batchId = `inbox_${now.toString(36)}`;
+    if (!picked.length) return { result: { n: 0, text: [`${ackNote}收件箱里没有可领取的消息。`, ...previews].join("\n\n") } };
+    const batchId = `inbox_${randomUUID().slice(0, 8)}`; // 毫秒会撞：同一毫秒两次领取会被绑成一批
     // 先 touch 再落租约（和押后投递同序）：落盘后、touch 前崩溃，重启时回程簿会带着旧钟被当成过期扫掉
     for (const { it } of picked) d.calls.touch(channelId, it.env.from.kind === "local" ? it.env.from.channelId : undefined); // 这些请求这会儿才真正到它手上
     for (const { it } of picked) {
@@ -78,10 +100,8 @@ export async function takeInbox(ws: ServerWebSocket<unknown>, now = Date.now(), 
       d.emitIn(channelId, it.env);
     }
     d.held.persist();
-    const left = free.length - picked.length - tooLong;
-    const head = `[📬 收件箱 ${batchId}：领到 ${picked.length} 条${left > 0 ? `，还有 ${left} 条` : ""}。${ackNote}${longNote}`
-      + `处理完调 check_inbox({ ack: "${batchId}" }) 确认（会顺带领下一批）；${INBOX_LEASE_MS / 60_000} 分钟内不确认，这批会在你回合结束时按普通消息重新送达（message_id 不变）。答复别的 agent 用 send_to_agent。]`;
-    return { result: { n: picked.length, text: [head, ...picked.map((p, k) => p.text.replace("── 来自", `── ${k + 1}/${picked.length} · 来自`))].join("\n\n") } };
+    const left = free.length - picked.length - previews.length;
+    return { result: { n: picked.length, text: [batchText(batchId, picked.map((p) => p.text), ackNote, left), ...previews].join("\n\n") } };
   } finally {
     d.held.release(channelId);
   }
