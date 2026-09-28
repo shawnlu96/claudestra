@@ -11,6 +11,8 @@ import { createEditQueue, type EditQueue } from "./ime-queue";
 import { composeFormSend, lineScan, syncBlock, type LineOwner, type MultiRow, type SyncBlock, type SyncForm } from "@/lib/chat/form-compose";
 import { openForms, openFormsSig } from "@/lib/chat/form-open";
 import { restoreFormReply } from "@/lib/chat/form-restore";
+import { withMentionDirective, type MentionTarget } from "@/lib/chat/mention-directive";
+import { getLang } from "@/lib/i18n";
 import { postClientLog } from "@/lib/client-log";
 
 type Update = (prev: string) => string;
@@ -89,17 +91,21 @@ export function useOpenForms(): SyncForm[] {
   return useMemo(() => openForms(store.state.messages), [sig, store]);
 }
 
-/** 输入框里有表单同步行就原位换成 [select:…] 作 wire（气泡仍显示原文）并标已答；没有就是普通发送 */
-export function sendComposed(store: ChatStore, cur: string, files?: File[]): void {
+/**
+ * 输入框里有表单同步行就原位换成 [select:…] 作 wire（气泡仍显示原文）并标已答；没有就是普通发送。
+ * mention = 已复核的 @ 目标（use-mention.ts）：wire 末尾加委托指令行，气泡仍显示原文。keepQuote 恒为 true——引用块照常前置到两边。
+ */
+export function sendComposed(store: ChatStore, cur: string, files?: File[], mention?: MentionTarget): void {
   const { wire, answered } = composeFormSend(cur, openForms(store.state.messages));
+  const tagged = (w: string) => (mention ? withMentionDirective(w, mention, getLang()) : undefined);
   if (!answered.length) {
-    void store.send(cur, files);
+    void store.send(cur, files, tagged(cur), true);
     return;
   }
   // 乐观气泡的显示按 wire 还原（与刷新后历史还原同一写法）：写法不同对账认不出，刷新后会多出一条
   const display = restoreFormReply(wire, store.state.messages, false) ?? cur;
   answered.forEach((a) => store.markReplyAnswered(a.messageId, a.rowKey, a.choiceValue));
-  void store.send(display, files, wire, true);
+  void store.send(display, files, tagged(wire) ?? wire, true);
 }
 
 /**

@@ -1,6 +1,7 @@
 "use client";
 /**
- * 协作视图首页（第一屏，ux.md §3）：一句话状态 → PM 调度窄条 → 按关注度排好的任务线 → 今日完成一行。
+ * 协作视图首页（第一屏，ux.md §3）：一句话状态 → 上次来之后（T12c）→ PM 调度窄条 → 按关注度排好的任务线 → 今日完成一行。
+ * 任务线叠加审查员信号（collab-reviewers.ts）与「上次来之后变过」的小圆点。
  * 点一条线在右侧开详情（手机全屏，collab-detail.tsx），首页不被替换。
  */
 import { useMemo, useState } from "react";
@@ -15,10 +16,15 @@ import { columnOf, homeView, type HomeView, type LedgerOverview, type LineView, 
 import { openCollabTask, useCollabNav } from "./collab-nav";
 import { useCollab, type Advance } from "./use-collab";
 import { cachedOverview } from "./collab-cache";
+import { applyReviewers, reviewersByTask, type RunningReviewer } from "./collab-reviewers";
+import { sinceDigest } from "./collab-since";
+import { SinceCard } from "./collab-since-card";
+import { useLastSeen } from "./use-collab-extra";
 import s from "./collab.module.css";
 
 /** 模块级稳定引用：详情里的 effect 依赖它，每次渲染换新函数会白跑 */
 const closeTask = () => openCollabTask(null);
+const NO_REVIEWERS: readonly RunningReviewer[] = [];
 
 const hhmm = (ms: number) => new Date(ms).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false });
 
@@ -135,10 +141,17 @@ export function CollabView({ project }: { project: string }) {
     for (const t of cachedOverview(project)?.ov.tasks ?? []) for (const n of [t.agent, t.pm]) if (n) set.add(n.replace(/^agent-/, ""));
     return set;
   }, [agents, project]);
-  const { load, now, actions, connected, rev, advance, refetch } = useCollab(project, members);
+  const { load, now, actions, connected, rev, advance, refetch, reviewers } = useCollab(project, members);
+  const lastSeen = useLastSeen(project);
   const busy = useMemo(() => new Map(agents.map((a) => [a.name, a.busy])), [agents]);
   const ov = load.status === "ok" ? load.ov : null;
-  const view = useMemo(() => (ov ? homeView(ov, now, tr) : null), [ov, now, tr]);
+  const byTask = useMemo(() => reviewersByTask(reviewers), [reviewers]);
+  const view = useMemo(() => {
+    if (!ov) return null;
+    const v = homeView(ov, now, tr);
+    return { ...v, ...applyReviewers(v, byTask, tr) };
+  }, [ov, now, tr, byTask]);
+  const digest = useMemo(() => sinceDigest(lastSeen.state.events, ov?.tasks ?? [], tr), [lastSeen.state.events, ov, tr]);
   const projectName = projects.find((p) => p.id === project)?.name || project;
 
   const lineAction = (l: LineView) => {
@@ -173,12 +186,16 @@ export function CollabView({ project }: { project: string }) {
     body = (
       <>
         <Headline v={view!} tr={tr} connected={connected} now={now} projectName={projectName} />
+        {lastSeen.state.since !== null && (
+          <SinceCard digest={digest} since={lastSeen.state.since} truncated={lastSeen.state.truncated} now={now} tr={tr} onOpen={(id) => openCollabTask(id)} onDismiss={lastSeen.dismiss} />
+        )}
         <PmStrip v={view!} action={pmAction} tr={tr} />
         <div className={s.lines}>
           {view!.lines.length > 0 ? <LineHeaderCols tr={tr} /> : <Empty icon="circleCheck" title={tr("没有进行中的任务")} />}
           {view!.lines.map((l) => (
             <CollabLine key={l.id} line={l} action={lineAction(l)} hot={hot.id === l.id} hotFrom={hot.id === l.id ? hot.from : null}
-              selected={openTask === l.id} onOpen={() => openCollabTask(l.id)} tr={tr} />
+              selected={openTask === l.id} onOpen={() => openCollabTask(l.id)} tr={tr}
+              changed={digest.changed.has(l.id)} reviewing={byTask.has(l.id)} reviewerTag={l.reviewerTag} />
           ))}
           <DoneRow ov={ov!} ids={view!.todayDone} tr={tr} onOpen={(id) => openCollabTask(id)} />
         </div>
@@ -198,7 +215,7 @@ export function CollabView({ project }: { project: string }) {
       </div>
       {openTask && ov && (
         <CollabDetail project={project} id={openTask} rev={rev} now={now} ov={ov} line={view?.lines.find((l) => l.id === openTask) ?? null}
-          action={(l) => lineAction(l)} actions={actions} onClose={closeTask} />
+          action={(l) => lineAction(l)} actions={actions} reviewers={byTask.get(openTask) ?? NO_REVIEWERS} onClose={closeTask} />
       )}
     </div>
   );

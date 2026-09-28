@@ -1,0 +1,45 @@
+/* 协作视图第二版（T12c）：「上次以来」卡片、线上的变化小圆点与审查员小标、详情里的回放。
+   颜色 token 继承 collab.module.css 的 .tokens（CSS 变量沿 DOM 往下传），这里不另起一套。 */
+
+/* 上次以来 */
+/* flex: none：.home 是纵向 flex 且会滚动，带 overflow: hidden 的子块不钉住高度会被压成一条线 */
+.since { flex: none; margin: 12px 24px; border: 1px solid var(--line-2); border-radius: 12px; background: var(--panel); box-shadow: var(--shadow); overflow: hidden; }
+.sinceHd { display: flex; align-items: center; gap: 8px; padding: 10px 12px 8px 14px; color: var(--muted); font-size: var(--fs-3); }
+.sinceHd b { color: var(--text); font-size: var(--fs-2); font-weight: 600; }
+.sinceHd span { min-width: 0; }
+.sinceHd .ok { margin-left: auto; flex: none; white-space: nowrap; height: 26px; padding: 0 10px; border-radius: 7px; border: 1px solid var(--line-2); background: transparent; color: var(--text-2); font-size: var(--fs-3); cursor: pointer; }
+.sinceHd .ok:hover { color: var(--text); border-color: var(--faint); }
+.si { display: grid; grid-template-columns: 8px minmax(0, max-content) minmax(0, 1fr); gap: 10px; align-items: center; width: 100%; padding: 7px 14px; border: 0; border-top: 1px solid var(--line);
+  background: transparent; color: var(--text-2); font: inherit; font-size: var(--fs-2); text-align: left; cursor: pointer; }
+.si:hover { background: var(--panel-2); }
+.si i { width: 7px; height: 7px; border-radius: 50%; background: var(--sc); }
+.si .tx { color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.si .tt { color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.more { padding: 6px 14px 9px 32px; border-top: 1px solid var(--line); color: var(--muted); font-size: var(--fs-3); }
+
+/* 任务线：上次以来变过的小圆点；审查员在跑的小标 */
+.chg { width: 6px; height: 6px; border-radius: 50%; background: var(--accent); flex: none; }
+.rvTag { display: inline-flex; align-items: center; gap: 5px; padding: 0 7px; border-radius: 999px; font-size: var(--fs-3); line-height: 18px; white-space: nowrap;
+  color: var(--s-run); background: color-mix(in srgb, var(--s-run) 12%, transparent); border: 1px solid color-mix(in srgb, var(--s-run) 30%, transparent); }
+.rvLive { width: 6px; height: 6px; border-radius: 50%; background: var(--ok); flex: none; }
+
+/* 回放 */
+.rpOpen { align-self: flex-start; }
+.rp { border: 1px solid var(--line-2); border-radius: 10px; background: var(--bg-2); padding: 12px; display: flex; flex-direction: column; gap: 12px; }
+.rpBar { display: flex; align-items: center; gap: 6px; }
+.rpBar button:disabled { opacity: .4; cursor: default; }
+.rpBar .pos { color: var(--muted); font-size: var(--fs-3); font-family: var(--mono); font-variant-numeric: tabular-nums; margin-right: auto; }
+.rpNow { display: grid; grid-template-columns: 16px 1fr; gap: 8px; color: var(--text); font-size: var(--fs-2); line-height: 1.5; min-height: 38px; }
+.rpNow .ic { color: var(--sc); margin-top: 2px; }
+.rpNow .tm { display: block; color: var(--faint); font-family: var(--mono); font-size: var(--fs-3); }
+.rpRange { width: 100%; accent-color: var(--accent); }
+.rpList { max-height: 240px; overflow-y: auto; overscroll-behavior: contain; display: flex; flex-direction: column; margin: 0 -4px; }
+.rpItem { display: grid; grid-template-columns: 82px 1fr; gap: 8px; padding: 4px; border: 0; border-radius: 6px; background: transparent; color: var(--text-2); font: inherit; font-size: var(--fs-3);
+  text-align: left; cursor: pointer; line-height: 1.45; }
+.rpItem .tm { color: var(--faint); font-family: var(--mono); }
+.rpItem.fut { color: var(--faint); }
+.rpItem.cur { background: var(--panel-2); color: var(--text); }
+
+@media (max-width: 639.98px) {
+  .since { margin: 10px 14px; }
+}

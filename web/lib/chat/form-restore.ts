@@ -7,6 +7,7 @@ import type { ChatMessage } from "@/features/chat/type";
 import { replyRowKey } from "./reply-clicks";
 import { formTitles, wireToDisplay, type MultiRow } from "./form-compose";
 import type { WebComponentRow } from "./events";
+import { stripMentionDirective } from "./mention-directive";
 
 /** 该 id 的选单在这条消息里的最后一行（同一回合前后两段复用 id 时认最新那段，与 matchClickedRow / openForms 一致） */
 function lastRowOf(rows: WebComponentRow[], id: string, multiOnly: boolean): number {
@@ -59,4 +60,13 @@ export function restoreFormReply(text: string, messages: ChatMessage[], commit =
   const lookup = new FormLookup();
   messages.forEach((m) => lookup.add(m));
   return lookup.restore(text, commit);
+}
+
+/**
+ * 他端实时推来的用户消息，与本端气泡、历史还原同一显示：本人的先剥 @ 委托指令行（外源不剥，见 mention-directive.ts），
+ * 再把表单回投还原成可读行
+ */
+export function restoreUserText(text: string, messages: ChatMessage[], from?: string): string {
+  const own = from ? text : stripMentionDirective(text);
+  return restoreFormReply(own, messages) ?? own;
 }

@@ -12,6 +12,7 @@
 import { COLLAB_DICT } from "./i18n-dict-collab";
 import { LEDGER_DICT } from "./i18n-dict-ledger";
 import { QUOTA_DICT } from "./i18n-dict-quota";
+import { CONTACTS_DICT } from "./i18n-dict-contacts";
 import { SESSIONS_DICT } from "./i18n-dict-sessions";
 import { SKILLS_DICT } from "./i18n-dict-skills";
 
@@ -19,6 +20,7 @@ export const DICT: Record<string, string> = {
   ...LEDGER_DICT,
   ...COLLAB_DICT,
   ...QUOTA_DICT, // 订阅额度卡片组与开关（lib/i18n-dict-quota.ts）
+  ...CONTACTS_DICT, // 侧栏联系人与输入框 @（lib/i18n-dict-contacts.ts）
   ...SESSIONS_DICT, // 未纳管会话 / 归档（lib/i18n-dict-sessions.ts）
   ...SKILLS_DICT, // 技能库与按会话启停（lib/i18n-dict-skills.ts）
   // ── 通用 ─────────────────────────────────────────────
@@ -105,11 +107,7 @@ export const DICT: Record<string, string> = {
   "整理": "Tidy up",
   "确认整理?": "Tidy up?",
   "整理失败": "Tidy-up failed",
-  "在线": "Online",
-  "离线": "Offline",
-  "每分钟检测一次": "checked every minute",
   "检测中…": "Checking…",
-  "上次在线": "Last online",
   "还没连上过": "Never reached yet",
   "对方开放给我": "Shared with me",
   "单向：只有对方能连你，这边没法主动检测": "One-way: only they can reach you, so it can't be checked from here",

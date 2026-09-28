@@ -943,8 +943,7 @@ async function cmdResume(
     ...adapter.registryFields({ ...spec, extras: { piEnv: prior?.piEnv } }),
     ...(await import("./manager/team.js")).keepOnResume(prior, actualSessionId), // 派发关系 / 显示名；external 只在同一会话时保留
   };
-  await saveRegistry(reg);
-  if (!prior) (await import("./lib/agent-settings.js")).removeAgentSettings(tmuxName); // 新名字 = 全新 agent，同名旧设置此时才删
+  await saveRegistry(reg); if (!prior) (await import("./lib/agent-settings.js")).removeAgentSettings(tmuxName); // 新名字 = 全新 agent，旧设置此时才删
 
   // 截图发到新频道作为上下文预览
   if (ready) {
