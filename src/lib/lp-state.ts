@@ -33,7 +33,7 @@ export interface LpRead {
   inputText: string;
   /**
    * 稳定接口（T36 注入闸门看它）：底部被模态占着——没有输入框（额度菜单、权限框、AUQ、Rewind、各种确认框、认不出的画面），
-   * 或者底部有编号菜单 / 菜单提示。为 true 时任何调用方都不该往这个窗口按键
+   * 或者底部有编号菜单 / 菜单提示；输入框上方有像菜单的字（对话里的引用）也算，此时 lowPriority 为 unknown。为 true 时任何调用方都不该往这个窗口按键
    */
   modal: boolean;
   /** 模态里认得出的编号选择菜单（额度菜单等），认不出 = null */
@@ -61,7 +61,7 @@ const BORDER_RE = /^─{8,}/;
 const PROMPT_RE = /^[❯!]/;
 const TAIL_LINES = 60;
 
-interface Parts { above: string[]; inputPlain: string[]; inputAnsi: string[]; footer: string[] }
+interface Parts { top: number; above: string[]; inputPlain: string[]; inputAnsi: string[]; footer: string[] }
 
 /** 找输入框：最下面一条顶格横线往上找最近的一条顶格横线，且它下一行顶格是提示符；草稿多长都行 */
 function splitPane(ansiLines: string[], plain: string[]): Parts | null {
@@ -72,6 +72,7 @@ function splitPane(ansiLines: string[], plain: string[]): Parts | null {
       if (!BORDER_RE.test(plain[top]!)) continue;
       if (!PROMPT_RE.test(plain[top + 1] ?? "")) break;
       return {
+        top,
         above: plain.slice(start, top),
         inputPlain: plain.slice(top + 1, bottom),
         inputAnsi: ansiLines.slice(top + 1, bottom),
@@ -95,9 +96,10 @@ const boxIsModal = (p: Parts) =>
   [...p.inputPlain, ...p.footer].some((l) => MODAL_HINT_RE.test(l)) ||
   p.footer.some((l) => OPTION_LINE_RE.test(l));
 
-/** 底部的编号选择菜单（额度菜单等）：「Enter to confirm · Esc to cancel」往上收编号项，直到标题行 */
-export function parseMenu(plain: string[]): PaneMenu | null {
-  const tail = plain.slice(-20);
+/** 编号选择菜单（额度菜单等）：「Enter to confirm · Esc to cancel」往上收编号项，直到标题行；title = 标题行在 plain 里的下标 */
+function locateMenu(plain: string[]): { menu: PaneMenu; title: number } | null {
+  const base = Math.max(0, plain.length - 20);
+  const tail = plain.slice(base);
   const end = tail.findIndex((l) => /Enter to confirm\s*·\s*Esc to cancel/.test(l));
   if (end < 0) return null;
   const options: MenuOption[] = [];
@@ -109,7 +111,20 @@ export function parseMenu(plain: string[]): PaneMenu | null {
     options.unshift({ n: Number(m[2]), label: norm(m[3]!), selected: !!m[1] });
   }
   if (!options.length) return null;
-  return { title: norm(tail[i] ?? ""), options };
+  return { menu: { title: norm(tail[i] ?? ""), options }, title: base + Math.max(i, 0) };
+}
+
+export function parseMenu(plain: string[]): PaneMenu | null {
+  return locateMenu(plain)?.menu ?? null;
+}
+
+/** 真菜单的上沿是一整条顶格的 ▔（标题上面，中间最多隔空行）；对话里引用的菜单有缩进，没有这条 */
+function hasMenuTop(plain: string[], title: number): boolean {
+  for (let i = title - 1; i >= Math.max(0, title - 3); i--) {
+    if (/^▔{8,}/.test(plain[i]!)) return true;
+    if (plain[i]!.trim()) return false;
+  }
+  return false;
 }
 
 /**
@@ -150,20 +165,25 @@ const WALLED_RE = new RegExp(`Usage limit reached · continuing (?:automatically
 const LP_MENTION_RE = /low-priority|lower[ -]priority/i;
 
 /**
- * 回合进行中：输入框以上整个可见区里的 spinner 或「esc to interrupt」（spinner 下面可能挂着很长的 todo 列表）。
- * 撞墙提示自带「esc to cancel」/「esc or type to cancel」，先抹掉（不分大小写，与 CC_BUSY_RE 一致）再判
+ * 回合进行中：输入框以上整个可见区里有回合 spinner 行（spinner 下面可能挂着很长的 todo 列表，所以不限行数）。
+ * 只认顶格、spinner 字形开头的行：对话（⏺ 开头、续行缩进）、工具输出（⎿）、缩进的 markdown 列表里出现同样的字
+ * （「esc to interrupt」「跑测试… (约 30s)」）不算。撞墙提示自带的「esc (or type) to cancel」先抹掉（不分大小写）再判
  */
+const SPINNER_LINE_RE = /^[·✢✳✶✻✽*]\s/;
 function busyAbove(above: string[]): boolean {
-  return CC_BUSY_RE.test(above.join("\n").replace(/esc (?:or type )?to cancel/gi, ""));
+  return above.some((l) => SPINNER_LINE_RE.test(l) && CC_BUSY_RE.test(l.replace(/esc (?:or type )?to cancel/gi, "")));
 }
 
 const inputTextOf = (lines: string[]) => lines.map((l, i) => (i ? l.replace(/^ {1,2}/, "") : l.slice(1).replace(/^ /, ""))).join("\n").trim();
 
-/** 底部是模态时的结果：额度菜单里有 LP 项算「关、能开」（只是 runner 不会去按它），其余 unknown */
-function modalRead(menu: PaneMenu | null, hint: boolean): LpRead {
+/**
+ * 模态时的结果：只有底部真额度菜单（顶格 ▔ 上沿、下面没有输入框）才算撞墙，有 LP 项算「关、能开」（只是 runner 不会去按它）；
+ * 其余 unknown。menu 为 null、reason 给了 = 输入框上方有像菜单的字（多半是对话里的引用）：认不准，照样不按键
+ */
+function modalRead(menu: PaneMenu | null, hint: boolean, quoted?: string): LpRead {
   const base = { offer: false, walled: isRateMenu(menu), busy: false, compacting: false, input: "unknown", inputText: "", modal: true, menu } as const;
   const what = base.walled ? "额度菜单" : menu || hint ? "选项菜单" : "对话框（权限框 / AUQ / Rewind 等）或认不出的画面";
-  const reason = `底部是${what}`;
+  const reason = quoted ?? `底部是${what}`;
   if (menu?.options.some((o) => o.label === LP_MENU_LABEL)) return { ...base, lowPriority: "off", offer: true, reason };
   return { ...base, lowPriority: "unknown", reason };
 }
@@ -172,12 +192,15 @@ function modalRead(menu: PaneMenu | null, hint: boolean): LpRead {
 export function readLpPane(raw: string): LpRead {
   const ansiLines = raw.replace(/\s+$/, "").split("\n");
   const plain = ansiLines.map(stripAnsi);
-  // 不管找没找到输入框，先看底部有没有菜单：可见区里有一段像输入框的文字时，不能因此漏掉真正的菜单
-  const menu = parseMenu(plain);
-  const hint = plain.slice(-20).some((l) => /Enter to confirm/.test(l));
+  // 不管找没找到输入框，先看有没有菜单：可见区里有一段像输入框的文字时，不能因此漏掉真正的菜单
+  const found = locateMenu(plain);
+  const hintAt = plain.findLastIndex((l, i) => i >= plain.length - 20 && /Enter to confirm/.test(l));
   const box = splitPane(ansiLines, plain);
-  const parts = box && !menu && !hint && !boxIsModal(box) ? box : null;
-  if (!parts) return modalRead(menu, hint);
+  const realBox = box && !boxIsModal(box) ? box : null;
+  // 菜单字样只出现在真输入框上方 = 对话里的引用：不按键，但也不能据此判「关、撞墙」
+  if (realBox && hintAt >= 0 && hintAt < realBox.top) return modalRead(null, true, "输入框上方有像菜单的字（多半是对话里的引用），认不准");
+  const parts = realBox && hintAt < 0 ? realBox : null;
+  if (!parts) return modalRead(found && hasMenuTop(plain, found.title) ? found.menu : null, hintAt >= 0);
   const footer = norm(parts.footer.join(" "));
   const busy = busyAbove(parts.above);
   const compacting = /Compacting conversation/.test(parts.above.join("\n"));
@@ -208,13 +231,14 @@ const ECHOES: [LpEcho, RegExp][] = [
   ["exhausted", /offered again after your weekly limit resets/],
 ];
 
-const LP_CMD_RE = /^\s*❯\s*\/(?:low-priority|rate-limit-options)\s*$/;
+/** 已提交的命令行和输入框一样顶格；对话里引用的「❯ /low-priority」有缩进，不算 */
+const LP_CMD_RE = /^❯\s*\/(?:low-priority|rate-limit-options)\s*$/;
 
 /** 命令行下面到下一个输入行 / 边框之前的那几行里的回显 */
 function echoAfter(plain: string[], from: number): { echo: LpEcho; text: string } | null {
   const seg: string[] = [];
   for (const l of plain.slice(from + 1, from + 10)) {
-    if (/^\s*(?:❯|─{8,})/.test(l)) break;
+    if (/^(?:❯|─{8,})/.test(l)) break;
     seg.push(l);
   }
   const after = norm(seg.join(" "));
