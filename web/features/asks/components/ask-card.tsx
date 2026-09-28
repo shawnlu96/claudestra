@@ -5,7 +5,7 @@ import { answerAuq, answerPermission } from "@/lib/api/chat";
 import { ApiError } from "@/lib/api/client";
 import type { WebComponentRow } from "@/lib/chat/events";
 import { useT } from "@/lib/i18n";
-import { agentLabel, answerSummary, closedText, spanText, type WebAsk } from "../asks-model";
+import { agentLabel, answeredGroups, answerSummary, closedText, rowGroup, spanText, type WebAsk } from "../asks-model";
 import { asksStore } from "../asks-store";
 import { AuqChoices, PermissionChoices, ReplyChoices } from "./ask-choices";
 import { ChatIcon, ClockIcon, TerminalIcon } from "./ask-icons";
@@ -36,7 +36,10 @@ export function AskCard({ ask, now, focused, onOpenChat }: { ask: WebAsk; now: n
     setBusy(false);
     void asksStore.refresh();
   };
-  const rows = ask.options as WebComponentRow[];
+  // 多行 reply 在聊天 / Discord 里已答过的组不再给选（bridge 会回「这一项已经答过了」），已答内容在下面「已答：…」那行
+  const all = ask.options as WebComponentRow[];
+  const done = answeredGroups(all, ask.answer?.choices ?? []);
+  const rows = all.filter((r) => !done.has(rowGroup(r)));
   // 权限弹框：先按键（原有端点），再补记是谁、选了什么——不然弹框消失时这条会被当成撤销
   const pickPermission = (action: string, label: string) =>
     run(() => answerPermission(ask.fromAgent, action).then(() => answerAskCard(ask.project, ask.id, { label }).catch(() => undefined /* 补记失败不影响按键已生效，最多记成撤销 */)));
