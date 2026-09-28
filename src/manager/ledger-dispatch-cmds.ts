@@ -14,6 +14,7 @@ import { getMeta, LedgerError, listEvents } from "../lib/ledger-store.js";
 import { appendEvent } from "../lib/ledger-write.js";
 import { STATE_DIR, statePath, TMUX_SOCK } from "../lib/paths.js";
 import { buildReviewPack, reviewPolicy, wantsAdversarial, type PrevReview, type ReviewPack } from "../lib/review-pack.js";
+import { REVIEWER_AGENT } from "../lib/team-roles.js";
 import type { LedgerCli, Result } from "./ledger-context.js";
 import { intFlag } from "./ledger-identity.js";
 import type { CommandSpec } from "./ledger-write-cmds.js";
@@ -70,7 +71,7 @@ interface PackPlan {
   adversarial: boolean;
   worktree: string | null;
   deliverEvent: LedgerEvent | undefined;
-  pack: ReviewPack;
+  pack: ReviewPack & { subagentType: string };
 }
 
 /** 第几轮 = 已有 review 事件数 + 1（与指标「审查轮数」同一口径），--round 可覆盖；--adversarial 强制对抗式 */
@@ -95,7 +96,8 @@ async function plan(c: LedgerCli): Promise<PackPlan> {
     workDir: join(REVIEWS_DIR, `${task.id}-r${round}-work`),
     prod: { stateDir: STATE_DIR, tmuxSocket: TMUX_SOCK, bridgePort: resolveBridgePort({ BRIDGE_PORT: repoEnvVar("BRIDGE_PORT") }) },
   });
-  return { task, round, adversarial, worktree, deliverEvent, pack };
+  // subagentType：编排班子内置的审查员 agent（启动时经 --agents 注入，lib/team-roles.ts）
+  return { task, round, adversarial, worktree, deliverEvent, pack: { ...pack, subagentType: REVIEWER_AGENT[adversarial ? "adversarial" : "regular"] } };
 }
 
 async function reviewPack(c: LedgerCli): Promise<Result> {

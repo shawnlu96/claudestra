@@ -86,6 +86,8 @@ export interface AgentInfo {
   /** 派发者的 registry 键（`agent-xxx` / `master`）与任务短名——manager/team.ts 写入，侧栏据此挂树 */
   parent?: string;
   task?: string;
+  /** 编排班子角色：启动时按它注入角色提示（lib/team-roles.ts）；只有 Claude Code runtime 生效 */
+  role?: import("../lib/team-roles.js").TeamRole;
 }
 
 export interface Registry {

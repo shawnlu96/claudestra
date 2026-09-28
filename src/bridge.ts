@@ -54,7 +54,7 @@ import {
 import {
   runManager,
   buildStatusPanel,
-  handleMgmtButton,
+  handleMgmtOrTeamButton,
   handleMgmtSelect,
 } from "./bridge/management.js";
 import { runtimeForSessionPath, sessionJsonlPath, translateSessionLine } from "./lib/session-source.js";
@@ -1676,7 +1676,7 @@ registerInteractionHandlers(discord, {
   scheduleClearRotation,
   runManager,
   buildStatusPanel,
-  handleMgmtButton,
+  handleMgmtButton: handleMgmtOrTeamButton, // 编排班子提案按钮先截（bridge/team-confirm.ts）
   handleMgmtSelect,
 });
 

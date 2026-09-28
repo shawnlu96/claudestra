@@ -292,3 +292,14 @@ export async function collectSessions(opts?: {
   ]);
   return reconcileSessions(raw, jobStates, registry);
 }
+
+/** bg 会话一行摘要：名字、bgId、状态、分身标记 */
+export function bgSessionLine(s: NeutralSessionInfo): string {
+  const mark = s.doppelgangerOf
+    ? `\n　└ ⚠️ 疑似 **${s.doppelgangerOf}** 的分身（${s.doppelgangerReason === "same-name" ? "同名" : "同目录"}）`
+    : s.registeredAgent
+      ? `\n　└ ✓ 正式会话（${s.registeredAgent}）`
+      : "";
+  const intent = s.intent ? `\n　intent: ${s.intent.slice(0, 80)}` : "";
+  return `**${s.name || "(无名)"}** \`${s.bgId}\` — ${s.status}${mark}${intent}`;
+}

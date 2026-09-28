@@ -3,7 +3,7 @@
  * task-new / task-set 改执行者时经 T4 的派发规则联动 registry 的 parent / task（manager/team.ts），台账先写、registry 后写。
  */
 import { STAGES, TASK_KINDS, type Stage, type TaskKind } from "../lib/ledger-stages.js";
-import { LedgerError } from "../lib/ledger-store.js";
+import { getMeta, LedgerError } from "../lib/ledger-store.js";
 import {
   appendEvent,
   createItem,
@@ -152,7 +152,8 @@ function deliverCmd(c: LedgerCli): Result {
   c.requireOwnOrManager(task, "交付");
   const moveFrom = c.p.flags.from === undefined ? undefined : stageFlag(c, "from");
   const r = deliver(c.db, c.ctx(), { taskId: task.id, headSHA: c.p.flags.head, evidence: c.p.flags.evidence, text: c.p.flags.text, moveFrom });
-  return { ok: true, task: r.row, event: r.event, duplicate: r.duplicate };
+  // routed：项目开了编排班子，bridge 会自动通知调度助理 / PM，执行者不用再发消息（roles/executor.md）
+  return { ok: true, task: r.row, event: r.event, duplicate: r.duplicate, routed: getMeta(c.db, task.project).team !== null };
 }
 
 function review(c: LedgerCli): Result {

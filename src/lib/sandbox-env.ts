@@ -135,6 +135,7 @@ const SANDBOX_MANAGER_COMMANDS = new Set([
   "tmux-send-keys", "team-link", // team-link 只改沙箱 registry 的 parent / task（manager/team.ts），同 label
   "rename", "repair", // 只动沙箱 registry / tmux / bridge（manager/agent-rename.ts、manager/repair.ts）；doctor 读生产 launchd，仍不开放
   "ledger", // 台账只写 statePath 下的 ledger.sqlite（沙箱状态目录）与沙箱 registry；编排班子的事件路由要在沙箱里实测
+  "team", // 班子提案只写沙箱状态目录的 team-proposals.json，按钮经沙箱 bridge 贴出
 ]);
 
 /** 返回拒绝原因；null = 可以跑。agent 目录与 runtime 另由 manager 的 create 入口按 lib/sandbox.ts 再查一遍 */

@@ -44,6 +44,7 @@ export const PRINCIPALS_WRITE_COMMANDS: ReadonlySet<string> = new Set([
 /** 读写混合的命令族：只有这些子命令算写（其余 list/get/presets/status 是读） */
 const WRITE_SUBCOMMANDS: Record<string, ReadonlySet<string>> = {
   permissions: new Set(["set", "reset"]),
+  team: new Set(["up", "down"]), // 只写提案文件；真正改台账在 owner 确认后由 bridge 执行
   perm: new Set(["set", "reset"]),
   perms: new Set(["set", "reset"]),
   effort: new Set(["set", "reset", "all"]),
