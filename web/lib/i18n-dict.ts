@@ -205,6 +205,8 @@ export const DICT: Record<string, string> = {
   "截止": "until",
   "已提醒": "nudges",
   "等到": "waiting until",
+  "今天": "today",
+  "明天": "tomorrow",
   "开始值守": "Start mission",
   "目标": "Goal",
   "截止时间": "Deadline",

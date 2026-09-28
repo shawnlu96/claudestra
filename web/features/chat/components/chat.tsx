@@ -19,6 +19,7 @@ import { TopBarActions } from "./topbar-actions";
 import { ManagePanel } from "./manage-panel";
 import { ClaudeSwitcher } from "./claude-switcher";
 import { CtxBadge } from "./ctx-badge";
+import { MissionBadge } from "./mission-ui";
 import { useLayoutMode, useFlowKeyboard } from "../use-keyboard-viewport";
 import { useT } from "@/lib/i18n";
 import { isNativeShell, installNativeKeyboardPadding, installNativeStatusBarSync } from "@/lib/native";
@@ -301,10 +302,9 @@ function TopBar() {
             </span>
           )}
         </div>
-        {/* 上下文占用徽章(2026-07-14 owner:context 超标 web 端毫无提示)——v2.21.3+
-            点开是「什么时候压」建议卡 + 一键存记忆+Compact,见 ctx-badge.tsx */}
+        {/* 窄顶栏的值守徽章（宽时那份在 AgentTitle 里）；ctx 徽章点开是「什么时候压」建议卡 + 一键存记忆+Compact（ctx-badge.tsx） */}
+        {info?.mission && <MissionBadge key={info.name} mission={info.mission} slot="bar" />}
         {info && <CtxBadge agent={info} />}
-        {/* 会话级模型/effort 徽章 + 快速切换（owner 2026-07-23） */}
         {info && <ClaudeSwitcher agent={info} />}
         {info?.cwd && (
           <span className="hidden min-w-0 grow basis-0 truncate font-mono text-xs opacity-50 sm:inline">
