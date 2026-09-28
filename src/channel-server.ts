@@ -20,6 +20,7 @@ import { channelInstructions } from "./lib/channel-instructions.js";
 import { CodexQueueSink, decodePreambleEnv, codexParentGone, codexQueueArgs, defaultRunner, heldThreadIds, isPidAlive, type InboundSink } from "./lib/codex-thread.js";
 import { FORWARD_TO_AGENT_DESCRIPTION, SEND_TO_AGENT_DESCRIPTION } from "./lib/agent-tool-docs.js";
 import { CHECK_INBOX_TOOL, checkInboxTool, forwardTool, sendToAgentTool } from "./lib/agent-tool-calls.js";
+import { REPLY_ASK_PROPERTY, replyResultText } from "./lib/reply-ask-schema.js";
 
 // 进程级异常兜底。**故意不退出**：本进程没有任何守护者（Claude Code 不 respawn
 // MCP server），退出 = 该 agent 永久失联、只能人工 /mcp。记录死因就够了。
@@ -475,10 +476,8 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => INERT ? { tools: [] } 
 - Badge \`[[{.badge .success}deployed]]\` — status pill (tones: success|warning|error|info); plain text on Discord.
 Use inline buttons when ONE action belongs inside a sentence; for several non-exclusive choices use a components multiselect (never a row of single-choice buttons); for standalone option lists use components.`,
           },
-          reply_to: {
-            type: "string",
-            description: "Message ID to reply to (optional, for threading)",
-          },
+          reply_to: { type: "string", description: "Message ID to reply to (optional, for threading)" },
+          ask: REPLY_ASK_PROPERTY,
           components: {
             type: "array",
             description: `Optional UI components (rendered on both Discord and the Web client). Each item is a row:
@@ -657,12 +656,13 @@ mcp.setRequestHandler(CallToolRequestSchema, async (request) => {
         replyTo: args?.reply_to,
         components: args?.components,
         files: args?.files,
+        ask: args?.ask,
       });
       return {
         content: [
           {
             type: "text" as const,
-            text: `Sent message(s): ${JSON.stringify(result.messageIds)}`,
+            text: replyResultText(result),
           },
         ],
       };

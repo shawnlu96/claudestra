@@ -20,7 +20,7 @@ describe("push-store", () => {
     db.prepare("INSERT INTO push_subscriptions (endpoint, keys, ua, created_at) VALUES (?, ?, ?, ?)").run("https://x/bad", "{not json", "", "");
     const rows = listPushSubscriptions(db);
     expect(rows).toHaveLength(2);
-    expect(rows.find((r) => r.endpoint.endsWith("/a"))).toEqual({ endpoint: "https://push.example/a", keys: { p256dh: "new", auth: "new" }, ua: "Mozilla Mac", vapidKey: null });
+    expect(rows.find((r) => r.endpoint.endsWith("/a"))).toEqual({ endpoint: "https://push.example/a", keys: { p256dh: "new", auth: "new" }, ua: "Mozilla Mac", vapidKey: null, audience: "owner", principal: null, credential: null });
     expect(deletePushSubscription(db, "https://push.example/a")).toBe(true);
     expect(deletePushSubscription(db, "https://push.example/a")).toBe(false);
     expect(listPushSubscriptions(db)).toHaveLength(1);
@@ -39,10 +39,10 @@ describe("push-store", () => {
     expect(listPushSubscriptions(db)[0].vapidKey).toBe("OWN");
   });
   test("dismissSafe：UA 为空或 iOS 的不发 dismiss", () => {
-    expect(dismissSafe({ ...sub("x"), ua: "", vapidKey: null })).toBe(false);
-    expect(dismissSafe({ ...sub("x"), ua: "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0)", vapidKey: null })).toBe(false);
-    expect(dismissSafe({ ...sub("x"), ua: "Mozilla/5.0 (iPad; CPU OS 17_0)", vapidKey: null })).toBe(false);
-    expect(dismissSafe({ ...sub("x"), ua: "Mozilla/5.0 (Macintosh)", vapidKey: null })).toBe(true);
+    expect(dismissSafe({ ...sub("x"), ua: "", vapidKey: null, audience: "owner", principal: null, credential: null })).toBe(false);
+    expect(dismissSafe({ ...sub("x"), ua: "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0)", vapidKey: null, audience: "owner", principal: null, credential: null })).toBe(false);
+    expect(dismissSafe({ ...sub("x"), ua: "Mozilla/5.0 (iPad; CPU OS 17_0)", vapidKey: null, audience: "owner", principal: null, credential: null })).toBe(false);
+    expect(dismissSafe({ ...sub("x"), ua: "Mozilla/5.0 (Macintosh)", vapidKey: null, audience: "owner", principal: null, credential: null })).toBe(true);
   });
   test("APNs 设备：token 小写存、upsert 刷 last_seen、删除", () => {
     const db = fresh();

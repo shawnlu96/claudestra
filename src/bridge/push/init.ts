@@ -37,11 +37,16 @@ export async function pushOwnerNoticeTracked(title: string, body: string): Promi
 }
 const DEFAULT_VAPID_SUBJECT = "https://github.com/shawnlu96/claudestra";
 
-/** guest 订阅认人：principal 与凭据都还在、没禁用、没过期才算（最多 60 s 前的 principals.json） */
-function subscriberPrincipal(file: PrincipalsFile, pid: string, cid: string | null, now = Date.now()): Principal | null {
+/**
+ * 订阅认人：principal 还在、没禁用；订阅时带着设备凭据的，凭据也得还在、没禁用、没过期（按凭据收窄 scope）。
+ * 没带凭据的是 token 订的（web-ui token 等），按 principal 本身算。读的是最多 60 s 前的 principals.json
+ */
+export function subscriberPrincipal(file: PrincipalsFile, pid: string, cid: string | null, now = Date.now()): Principal | null {
   const principal = file.principals.find((p) => p.id === pid && !p.disabled);
-  const credential = principal?.credentials?.find((c) => c.id === cid && !c.disabled && Date.parse(c.expiresAt) > now);
-  return principal && credential ? effectivePrincipal({ principal, credential }) : null;
+  if (!principal) return null;
+  if (!cid) return principal;
+  const credential = principal.credentials?.find((c) => c.id === cid && !c.disabled && Date.parse(c.expiresAt) > now);
+  return credential ? effectivePrincipal({ principal, credential }) : null;
 }
 let started = false;
 

@@ -186,7 +186,7 @@ describe("待你处理 → onAsk（规则表见 tests/ask-push.test.ts，这里�
     expect(await dispatcher.onAsk(ask(), "away")).toBe("push");
     const web = sent.filter((s) => s.kind === "web");
     expect(web).toHaveLength(3);
-    expect(web[0].payload).toMatchObject({ title: "待你处理 · agent-alpha", body: "发 v2.32.0 吗", url: "/chat?ask=ask_1", agent: "alpha", ask: "ask_1", tag: "cstra-ask-ask_1" });
+    expect(web[0].payload).toMatchObject({ title: "待你处理 · agent-alpha", body: "发 v2.32.0 吗", url: "/chat?ask=ask_1", agent: "alpha", ask: "ask_1", tag: "cstra-ask-ask_1-open" });
     expect(sent.filter((s) => s.kind === "apns")[0].payload).toMatchObject({ url: "/chat?ask=ask_1", agent: "alpha" });
     expect(unreadCounts(db)).toEqual({});
     sent.length = 0;

@@ -1,7 +1,7 @@
 /** 「待你处理」库的生命周期（lib/ledger-asks.ts）：建 → 答 → 再答被拒；到期；撤销；事件只追加；v1 库升级 */
 import { Database } from "bun:sqlite";
 import { afterEach, describe, expect, test } from "bun:test";
-import { answerAsk, ASK_TTL_MS, closeAsk, dueAsks, findAskByDiscordMessage, getAsk, hasAsksTable, listAsks, openAsk, patchAsk, type AskAnswer, type NewAsk } from "../src/lib/ledger-asks.js";
+import { answerAsk, ASK_TTL_MS, closeAsk, dueAsks, findAskByDiscordMessage, getAsk, hasAsksTable, listAsks, openAsk, openAskFull, patchAsk, type AskAnswer, type NewAsk } from "../src/lib/ledger-asks.js";
 import { projectView } from "../src/lib/ledger-read.js";
 import { closeLedger, LEDGER_MIGRATIONS, LEDGER_SCHEMA_VERSION, LedgerError, listEvents, openLedger, schemaVersion } from "../src/lib/ledger-store.js";
 import { appendEvent, createItem, createTask } from "../src/lib/ledger-write.js";
@@ -181,5 +181,69 @@ describe("迁移", () => {
     expect(LEDGER_SCHEMA_VERSION).toBe(LEDGER_MIGRATIONS.length);
     expect(hasAsksTable(d)).toBe(true);
     expect(d.query("SELECT count(*) AS n FROM items").get()).toEqual({ n: 1 });
+  });
+});
+
+describe("第二版：人 / 系统发起、指派、按 key 取代、去重", () => {
+  test("人发起的指派事项：fromAgent 为空、默认 72 小时、事件 actor 是发起人；作答的 decision actor 是作答的人，答案带附件引用", () => {
+    const d = db();
+    const a = openAsk(d, { project: "p", source: "human", createdBy: "owner:self", kind: "assigned", title: "画登录页", assignee: "local:guest:aa11", taskId: "T9" }, 1000);
+    expect(a).toMatchObject({ fromAgent: null, fromChannelId: null, assignee: "local:guest:aa11", expiresAt: 1000 + 72 * 3600_000 });
+    const out = answerAsk(d, a.id, ans(2000, { choices: ["[button:assign_done]"], principal: "guest:aa11", atts: [{ kind: "talk", ref: "att_1", name: "a.png" }] }));
+    expect(out.answer?.atts).toEqual([{ kind: "talk", ref: "att_1", name: "a.png" }]);
+    const evs = listEvents(d, { project: "p" });
+    expect(evs.map((e) => [e.kind, e.actor])).toEqual([["ask", "owner:self"], ["decision", "guest:aa11"]]);
+    expect(evs[0].data).toMatchObject({ assignee: "local:guest:aa11" });
+    expect(listAsks(d, { assignee: "local:guest:aa11" }).map((x) => x.id)).toEqual([a.id]);
+  });
+
+  test("dedupKey：撞上已有的返回那条（existed），不写第二条、不记第二个事件", () => {
+    const d = db();
+    const first = openAskFull(d, { ...base, dedupKey: "assign:T9:1:1" }, 1000);
+    const again = openAskFull(d, { ...base, dedupKey: "assign:T9:1:1", title: "别的标题" }, 1500);
+    expect(again).toMatchObject({ existed: true, ask: { id: first.ask.id, title: base.title } });
+    expect(listEvents(d, { project: "p" }).filter((e) => e.kind === "ask")).toHaveLength(1);
+  });
+
+  test("按 key 取代：同一个 agent 同一个 key 再开，旧的开着的记 superseded（ask_cancel 带 supersededBy），新的 supersedes 指旧的；别的 key、别的 agent 不动；取代后旧按钮答不了", () => {
+    const d = db();
+    const old = openAsk(d, { ...base, askKey: "release" }, 1000);
+    const other = openAsk(d, { ...base, askKey: "deploy" }, 1100);
+    const otherAgent = openAsk(d, { ...base, fromAgent: "agent-y", askKey: "release" }, 1200);
+    const r = openAskFull(d, { ...base, askKey: "release" }, 1300);
+    expect(r.superseded.map((x) => x.id)).toEqual([old.id]);
+    expect(r.ask.supersedes).toBe(old.id);
+    expect([getAsk(d, old.id)?.state, getAsk(d, other.id)?.state, getAsk(d, otherAgent.id)?.state]).toEqual(["superseded", "open", "open"]);
+    const cancel = listEvents(d, { project: "p" }).find((e) => e.kind === "ask_cancel");
+    expect(cancel?.data).toMatchObject({ askId: old.id, reason: "superseded", supersededBy: r.ask.id });
+    expect(() => answerAsk(d, old.id, ans(2000))).toThrow(LedgerError);
+  });
+});
+
+describe("迁移到第二版", () => {
+  test("v2 的库（T11a 线上那版）：重建后旧数据、索引都在，fromAgent 可空、新的 kind / state / source 写得进；重跑不再重建", () => {
+    path = tempLedgerPath("ledger-asks-v2-");
+    const raw = new Database(path);
+    const [v1, v2] = LEDGER_MIGRATIONS;
+    if (typeof v1 !== "string" || typeof v2 !== "function") throw new Error("前两步应是 v1 SQL + asks 建表函数");
+    raw.exec(`${v1}`);
+    v2(raw);
+    raw.exec("PRAGMA user_version = 2");
+    raw.exec(`INSERT INTO asks (id, project, fromAgent, fromChannelId, source, kind, title, expiresAt, state, createdAt, updatedAt)
+      VALUES ('ask_old', 'p', 'agent-x', '111', 'reply', 'decide', '老的', 9e12, 'open', 1, 1)`);
+    raw.close();
+    const d = openLedger(path);
+    expect(schemaVersion(d)).toBe(LEDGER_MIGRATIONS.length);
+    expect(getAsk(d, "ask_old")).toMatchObject({ title: "老的", fromAgent: "agent-x", assignee: null, bind: null, dedupKey: null });
+    const idx = (d.query("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'asks' AND name NOT LIKE 'sqlite_%' ORDER BY name").all() as { name: string }[]).map((r) => r.name);
+    expect(idx).toEqual(["asks_assignee_state", "asks_from_state", "asks_key_state", "asks_state_project"]);
+    const n = openAsk(d, { project: "p", source: "system", createdBy: "system:peer-409", kind: "assigned", title: "转人工", assignee: "local:owner:self" }, 5);
+    expect(getAsk(d, n.id)?.fromAgent).toBeNull();
+    openAskFull(d, { ...base, askKey: "k" }, 6);
+    openAskFull(d, { ...base, askKey: "k" }, 7);
+    expect(listAsks(d, { states: ["superseded"] })).toHaveLength(1);
+    closeLedger(path);
+    const again = openLedger(path);
+    expect(getAsk(again, "ask_old")?.title).toBe("老的");
   });
 });

@@ -12,7 +12,7 @@
  */
 import type { Database } from "bun:sqlite";
 import type { ApnsMessage } from "../../lib/apns.js";
-import { humanAssignee, isAskAssignee } from "../../lib/ask-access.js";
+import { canSeeAsk, humanAssignee, isAskAssignee } from "../../lib/ask-access.js";
 import { askPushDecision, askPushMessage, askPushToAssignee, type AskPushDecision } from "../../lib/ask-push.js";
 import type { Ask } from "../../lib/ledger-asks.js";
 import type { Presence } from "../../lib/owner-presence.js";
@@ -143,6 +143,13 @@ export function createDispatcher(d: DispatcherDeps): Dispatcher {
     return !!p && isAskAssignee(p, a);
   }
 
+  /** owner 那一路也要看得见这条（部分 scope 的 owner 设备、不含 master 的设备）：老订阅没记 principal 的按 owner 全权算 */
+  function ownerRowSees(s: PushSubscriptionRow, a: Pick<Ask, "fromAgent" | "assignee">): boolean {
+    if (!s.principal) return true;
+    const p = d.resolvePrincipal?.(s.principal, s.credential);
+    return !!p && canSeeAsk(p, a);
+  }
+
   /** 推过的 ask（进程内，键 = id:状态）：开出、过期各只发一次事件，bridge 重启后开着的也不会再发，所以不用落盘 */
   const askPushed = new Set<string>();
   const unsubscribe = onAgentRead((e) => void onRead(e).catch((err) => log(`已读同步失败: ${(err as Error).message}`)));
@@ -191,7 +198,8 @@ export function createDispatcher(d: DispatcherDeps): Dispatcher {
       const m = askPushMessage(a);
       const msg = { title: notificationBody(m.title), body: notificationBody(m.body), url: m.url, agent: bareAgent(a.fromAgent ?? ""), ts: now(), tag: m.tag };
       // Web Push 多带 ask：已有窗口时 SW 直接叫页面打开抽屉定位这张卡（web/public/sw.js）；APNs（owner 的 App）靠 url 冷启动
-      await Promise.all([toOwner ? apnsAll(msg) : NO_SEND, toOwner ? webPushAll({ ...msg, ask: a.id }) : NO_SEND, sendRows(guests, { ...msg, ask: a.id })]);
+      const ownerWeb = toOwner ? webPushAll({ ...msg, ask: a.id }, (s) => ownerRowSees(s, a)) : NO_SEND;
+      await Promise.all([toOwner ? apnsAll(msg) : NO_SEND, ownerWeb, sendRows(guests, { ...msg, ask: a.id })]);
       log(`待你处理已推送 ${a.id}（${a.fromAgent ?? a.assignee}，owner=${toOwner} guest=${guests.length}）`);
       return decision;
     },

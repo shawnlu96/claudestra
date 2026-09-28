@@ -47,7 +47,7 @@ export function sseEventAllow(principal: Principal, types?: string[]): (evt: Bri
   return (evt) => {
     if (onlyTypes && !onlyTypes.has(evt.type)) return false;
     if (evt.type === "ledger") return ledger;
-    if (evt.type === "ask") return canSeeAsk(principal, askWhoOf(evt.data));
+    if (evt.type === "ask") return canSeeAsk(principal, askWhoOf(evt.data, evt.agent));
     return agentInScope(principal, evt.agent);
   };
 }

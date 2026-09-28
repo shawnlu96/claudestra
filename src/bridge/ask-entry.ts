@@ -105,7 +105,7 @@ export async function answerFromCard(project: string, id: string, body: { choice
   if (!a || a.project !== project || !canSeeAsk(p, a)) return apiJson(404, { ok: false, error: `ask "${id}" not found in "${project}"` });
   if (!canAnswerAsk(p, a)) return forbidden("answering requires the owner or the assignee");
   if (a.state !== "open") return apiJson(409, closedBody(a));
-  if (a.source !== "reply") return apiJson(400, { ok: false, error: "runtime dialogs are answered via POST /agents/:name/answer" });
+  if (isRuntimeAsk(a)) return apiJson(400, { ok: false, error: "runtime dialogs are answered via POST /agents/:name/answer" });
   const wires = Array.isArray(body.choices) ? body.choices.filter((c): c is string => typeof c === "string") : [];
   const text = typeof body.text === "string" ? body.text.trim().slice(0, 4000) : "";
   const picks = picksFor(a, wires);
@@ -117,6 +117,9 @@ export async function answerFromCard(project: string, id: string, body: { choice
   if (blocked) return blocked;
   return commitOr409(() => commitAnswer({ ask: a, picks, text, from: apiFrom(p), principal: p.id, device: p.credential, via: "web_card", final: true, atts }), a);
 }
+
+/** 运行时弹框镜像出来的（AUQ / 权限 / Codex）：按键走它们原有的端点，卡片端点不收 */
+const isRuntimeAsk = (a: Pick<Ask, "source">) => a.source === "auq" || a.source === "permission" || a.source === "codex";
 
 /** 作答附带的附件引用（T28a 的 talk 附件库）：只做形状校验、原样存；不合格 → null（400） */
 function attsOf(raw: unknown): AskAtt[] | null {

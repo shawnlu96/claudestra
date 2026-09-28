@@ -18,10 +18,14 @@ export function isAskAssignee(p: Principal, a: Pick<Ask, "assignee">): boolean {
   return !!a.assignee && !p.peer && !p.disabled && a.assignee === humanAssignee(p.id);
 }
 
-/** SSE ask 事件的 data（bridge/asks.ts publishAsk 带 fromAgent / assignee）→ 判定要的那两项；缺的按 null（只剩台账的门） */
-export function askWhoOf(data: unknown): AskWho {
+/**
+ * SSE ask 事件（bridge/asks.ts publishAsk 的 data 带 fromAgent / assignee）→ 判定要的那两项。data 里没有 fromAgent 这个键的
+ * （老的发法）按事件的 agent 算，别让大总管的 ask 因为少了字段漏给不含 master 的凭据
+ */
+export function askWhoOf(data: unknown, agent = ""): AskWho {
   const d = (data ?? {}) as Record<string, unknown>;
-  return { fromAgent: typeof d.fromAgent === "string" ? d.fromAgent : null, assignee: typeof d.assignee === "string" ? d.assignee : null };
+  const from = "fromAgent" in d ? d.fromAgent : agent;
+  return { fromAgent: typeof from === "string" && from ? from : null, assignee: typeof d.assignee === "string" ? d.assignee : null };
 }
 
 export function canSeeAsk(p: Principal, a: AskWho): boolean {
