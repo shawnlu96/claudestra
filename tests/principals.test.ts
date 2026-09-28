@@ -14,6 +14,7 @@ import {
   terminalAllowed,
   SlidingWindowLimiter,
   readPrincipals,
+  warnMasterVariants,
   writePrincipals,
   updatePrincipals,
   principalsLockPath,
@@ -130,8 +131,47 @@ describe("agentInScope", () => {
     expect(agentInScope(newTokenPrincipal("t", ["*", "master"]), "agent-master")).toBe(true);
   });
 
+  test("大总管只认名单里逐字的 master / agent-master：变体条目连请求里同样的写法也不放（T42-r2）", () => {
+    for (const v of ["MASTER", "Master", "\uff4daster", "agent-agent-master", "__master__", " master "]) {
+      expect([v, agentInScope(newTokenPrincipal("t", [v]), v)]).toEqual([v, false]);
+      expect([v, agentInScope(newTokenPrincipal("t", ["master"]), v)]).toEqual([v, true]); // 逐字列了 master：任何写法的请求都是它
+    }
+    expect(agentInScope({ ...newTokenPrincipal("t", ["master"]), peer: "p" }, "MASTER")).toBe(false);
+  });
+
   test('"*" 的变体（全角 ＊、agent-*）不是通配：老条目里有也不放行别的 agent', () => {
     expect(agentInScope(newTokenPrincipal("t", ["\uff0a", "agent-*"]), "agent-cc")).toBe(false);
+  });
+});
+
+describe("warnMasterVariants：名单里的大总管变体只告警、不改盘（T42-r2）", () => {
+  const legacy = (id: string, agents: string[], grant: string[] = []): Principal => ({
+    ...newTokenPrincipal(id, agents), id: `guest:${id}`, credentials: grant.length ? [{ grant: { agents: grant } } as never] : undefined,
+  });
+  test("principal 的 agents 与凭据 grant 里的变体各报一次，写明 principal；逐字 master、普通名字不报；同一进程不重复", () => {
+    const lines: string[] = [];
+    const file = { principals: [legacy("old", ["MASTER", "cc"], ["\uff4daster"]), legacy("owner", ["*", "master", "agent-master"]), legacy("z", ["mastermind"])] };
+    warnMasterVariants(file, (m) => lines.push(m));
+    warnMasterVariants(file, (m) => lines.push(m));
+    expect(lines).toHaveLength(2);
+    expect(lines[0]).toContain("guest:old");
+    expect(lines[0]).toContain('"MASTER"');
+    expect(lines[1]).toContain('"\uff4daster"');
+  });
+  test("readPrincipals 读到变体照原样返回，文件不动", async () => {
+    const path = join(tmpdir(), `principals-variant-${Date.now()}.json`);
+    const raw = JSON.stringify({ principals: [legacy("disk", ["Agent-MASTER", "cc"])] });
+    await Bun.write(path, raw);
+    const warn = console.warn;
+    const lines: string[] = [];
+    console.warn = (m: string) => void lines.push(m);
+    try {
+      expect((await readPrincipals(path)).principals[0]!.agents).toEqual(["Agent-MASTER", "cc"]);
+    } finally {
+      console.warn = warn;
+    }
+    expect(lines.some((l) => l.includes("guest:disk"))).toBe(true);
+    expect(await Bun.file(path).text()).toBe(raw);
   });
 });
 

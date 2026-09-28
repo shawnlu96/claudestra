@@ -8,7 +8,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { issuePairing, setDevicesRegistryPathForTest } from "../src/bridge/devices.js";
 import { pairNew } from "../src/bridge/relay-routes.js";
-import { checkGuestAgents, OWNER_PRINCIPAL_ID } from "../src/lib/devices.js";
+import { inScopeEitherName } from "../src/bridge/api-respond.js";
+import { checkGuestAgents, effectivePrincipal, hashDeviceToken, intersectAgents, OWNER_PRINCIPAL_ID, type Grant } from "../src/lib/devices.js";
+import { agentInScope } from "../src/lib/principals.js";
 import { cmdPair, describeGrant, parsePairArgs } from "../src/manager/pair.js";
 import type { Principal } from "../src/lib/principals.js";
 
@@ -127,6 +129,30 @@ describe("issuePairing：guest 码", () => {
 
   test("自己的设备不受影响：不带 agents 仍是全权", () => {
     expect(issuePairing(machine, {})).toMatchObject({ ok: true, grant: { agents: ["*", "master"], terminal: true, manage: true } });
+  });
+});
+
+describe("升级兼容：老版本签出、名单里写了大总管变体的 guest（T42-r2 P1）", () => {
+  // 老版本只认逐字 master / agent-master，--guest X --agents MASTER,cc 把 MASTER 当普通名字写进了 principal 和 grant
+  const VARIANTS = ["MASTER", "Master", "\uff4daster", "agent-MASTER", "agent-agent-master", "m\u200baster", "__master__"];
+  const cred = (grant: Grant) => ({
+    id: "dev_old", v: 1 as const, type: "bearer" as const, hash: hashDeviceToken("dev_old"), deviceName: "old", grant, createdAt: "", expiresAt: "2099-01-01T00:00:00Z",
+  });
+  test("生效视图里没有 master，变体也不当普通名字留下；读 master 的门对它关着", () => {
+    for (const v of VARIANTS) {
+      const guest: Principal = { id: "guest:old", role: "external", name: "old", agents: [v, "cc"], createdAt: "", credentials: [] };
+      const eff = effectivePrincipal({ principal: guest, credential: cred({ agents: [v, "cc"], terminal: false, manage: false }) });
+      expect({ v, agents: eff.agents, master: agentInScope(eff, "master"), either: inScopeEitherName(eff, "master") }).toEqual({ v, agents: ["cc"], master: false, either: false });
+    }
+  });
+  test("放行只认两边都逐字写的 master / agent-master：一边是变体就不给", () => {
+    for (const v of VARIANTS) {
+      expect([v, intersectAgents([v], [v])]).toEqual([v, []]);
+      expect([v, intersectAgents(["*", "master"], [v])]).toEqual([v, []]);
+      expect([v, intersectAgents([v], ["master"])]).toEqual([v, []]);
+      expect([v, intersectAgents([v, "cc"], ["*"])]).toEqual([v, ["cc"]]);
+    }
+    expect(intersectAgents(["*", "master"], ["agent-master"])).toEqual(["master"]);
   });
 });
 

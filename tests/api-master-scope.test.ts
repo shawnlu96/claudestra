@@ -29,10 +29,12 @@ const PRINCIPALS = [
   { id: "guest:all", role: "external", name: "friend", agents: ["*"], createdAt: at, credentials: [device("guest", guestGrant(["*"]))] },
   { id: "token:tok_star", role: "external", name: "legacy-star", agents: ["*"], secret: "s-star", createdAt: at },
   { id: "token:tok_cc", role: "external", name: "cc-only", agents: ["cc"], secret: "s-cc", createdAt: at },
+  // 老版本（大总管只认逐字写法）签出的 guest：--agents MASTER,cc 把 MASTER 当普通名字写进了 principal 和 grant（T42-r2 P1）
+  { id: "guest:legacy", role: "external", name: "legacy", agents: ["MASTER", "cc"], createdAt: at, credentials: [device("legacy", { agents: ["MASTER", "cc"], terminal: false, manage: false })] },
 ];
 const OWNER = { device: "dev_owner" };
 const STAR = { bearer: "s-star" };
-const CREDS = { "guest *": { device: "dev_guest" }, "老 * Bearer": STAR, "scoped token": { bearer: "s-cc" } };
+const CREDS = { "guest *": { device: "dev_guest" }, "老 * Bearer": STAR, "scoped token": { bearer: "s-cc" }, "老 guest [MASTER]": { device: "dev_legacy" } };
 // 全角 ｍ（U+FF4D）、全角大写整词经 NFKC 都变回 master
 const MASTER_NAMES = ["master", "agent-master", "agent-agent-master", "__master__", "Master", "MASTER", "agent-Master", "AGENT-master", "ｍaster", "ＭＡＳＴＥＲ"];
 const SID_AM = "11111111-2222-3333-4444-555555555555"; // archive/agent-master 里的 master 归档
@@ -79,6 +81,8 @@ beforeAll(() => {
       MASTER_NAMES.flatMap((n) => ENDPOINTS.map(([method, ep, body]) => req(`${cred} ${n} ${ep}`, method, `${at_(n)}/${ep}`, auth, body))),
     ),
     req("owner agent-master pending", "GET", `${at_("agent-master")}/pending`, OWNER),
+    req("owner master history", "GET", `${at_("master")}/history`, OWNER),
+    req("老 guest [MASTER] cc pending", "GET", `${at_("cc")}/pending`, CREDS["老 guest [MASTER]"]),
     req("guest cc pending", "GET", `${at_("cc")}/pending`, CREDS["guest *"]),
     req("guest agent-cc pending", "GET", `${at_("agent-cc")}/pending`, CREDS["guest *"]),
     // registry 查不到：只认逐字同名的归档目录（被 remove 的 agent 照常读；大小写写法、master 不认）
@@ -113,14 +117,17 @@ const status = (n: string) => byName(n).status;
 const leaks = (n: string) => /MASTER-(ARCHIVE|LIVE)-SECRET/.test(String(byName(n).body));
 
 describe("master 的各种写法（含大小写、全角）：生产路由 + 假 tmux", () => {
-  test("guest * / 老 * Bearer / scoped token × 10 种写法 × 9 个端点：一律 403，正文不外泄", () => {
-    const matrix = results.filter((r) => MASTER_NAMES.some((n) => r.name.startsWith(`guest * ${n} `) || r.name.startsWith(`老 * Bearer ${n} `) || r.name.startsWith(`scoped token ${n} `)));
-    expect(matrix.length).toBe(3 * MASTER_NAMES.length * ENDPOINTS.length);
+  test("guest * / 老 * Bearer / scoped token / 名单写了 MASTER 的老 guest × 10 种写法 × 9 个端点：一律 403，正文不外泄", () => {
+    const creds = Object.keys(CREDS);
+    const matrix = results.filter((r) => MASTER_NAMES.some((n) => creds.some((c) => r.name.startsWith(`${c} ${n} `))));
+    expect(matrix.length).toBe(creds.length * MASTER_NAMES.length * ENDPOINTS.length);
     expect(matrix.filter((r) => r.status !== 403 || leaks(r.name)).map((r) => `${r.name} → ${r.status}`)).toEqual([]);
   });
 
   test("scope 显式列了 master 的 owner 设备照常能用 agent-master 写法；普通 agent 两种写法照常放行", () => {
     expect(status("owner agent-master pending")).toBe(200);
+    expect(status("owner master history")).toBe(200);
+    expect(status("老 guest [MASTER] cc pending")).toBe(200); // 老 guest 的 MASTER 条目作废（上面矩阵读 master 全 403），开放的 cc 照常
     expect(status("guest cc pending")).toBe(200);
     expect(status("guest agent-cc pending")).toBe(200);
   });

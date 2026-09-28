@@ -7,7 +7,7 @@
  */
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import type { Principal, PrincipalsFile } from "./principals.js";
-import { canonicalAgentName, isMasterAgent } from "./registry.js";
+import { canonicalAgentName, isLiteralMaster, isMasterAgent } from "./registry.js";
 
 export const OWNER_PRINCIPAL_ID = "owner:self";
 export const DEVICE_COOKIE = "cstra_dev";
@@ -179,9 +179,10 @@ export function intersectAgents(principalAgents: string[], grantAgents: string[]
   if (pAll && gAll) out.add("*");
   for (const a of grantAgents) {
     if (a === "*") continue;
-    // master 的两种写法都只能来自 principal 显式列的 master——"*" 不含它，别让 "agent-master" 借 pAll 混进去
+    // master 只能来自两边都逐字写的 master / agent-master（isLiteralMaster，与 agentInScope 同口径）——"*" 不含它；
+    // MASTER、全角等变体不给任何权限，也不当普通名字留下（等于无效条目）
     if (isMasterAgent(a)) {
-      if (principalAgents.some(isMasterAgent)) out.add("master");
+      if (isLiteralMaster(a) && principalAgents.some(isLiteralMaster)) out.add("master");
     } else if (pAll || principalAgents.includes(a)) out.add(a);
   }
   if (gAll) for (const a of principalAgents) if (a !== "*" && !isMasterAgent(a)) out.add(a);
