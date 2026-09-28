@@ -19,8 +19,8 @@ const none = () => false;
 describe("AgentCallBook", () => {
   test("add 落盘，新实例（= bridge 重启）原样恢复", () => {
     const p = join(dir, "a.json");
-    new AgentCallBook(p).add("c-codex", call(1000));
-    expect(new AgentCallBook(p).slot("c-codex", "c-me")).toEqual({ ...call(1000), targetChannelId: "c-codex" });
+    new AgentCallBook(p).add("c-codex", call(1000), "m1");
+    expect(new AgentCallBook(p).slot("c-codex", "c-me")).toEqual({ ...call(1000), targetChannelId: "c-codex", rev: 1, messageIds: ["m1"] });
   });
 
   test("两个 caller 问同一个 target 各占一槽，互不覆盖；consume 只消化指定那槽", () => {
@@ -35,14 +35,34 @@ describe("AgentCallBook", () => {
     expect(book.slot("c-codex", "c-pi")?.ts).toBe(3);
   });
 
+  test("同一 caller 连着问：并进同一槽（expecting 合并、记下两条请求 id、rev 加一），不覆盖前一个问题", () => {
+    const book = new AgentCallBook(null);
+    expect(book.add("c-codex", { ...call(1), expecting: "改设计稿" }, "m1")).toEqual({ rev: 1, merged: false });
+    expect(book.add("c-codex", { ...call(2), expecting: "再跑测试" }, "m2")).toEqual({ rev: 2, merged: true });
+    const s = book.slot("c-codex", "c-me")!;
+    expect(s.expecting).toBe("改设计稿；接着又问了一件：再跑测试");
+    expect(s.messageIds).toEqual(["m1", "m2"]);
+    expect(book.forTarget("c-codex")).toHaveLength(1);
+  });
+
+  test("consume 带 rev：旧快照（rev 1）删不掉后来并进来的新请求（rev 2）", () => {
+    const book = new AgentCallBook(null);
+    book.add("c-codex", call(1), "m1");
+    book.add("c-codex", call(2), "m2");
+    expect(book.consume("c-codex", "c-me", 1)).toBe(false);
+    expect(book.slot("c-codex", "c-me")).toBeDefined();
+    expect(book.consume("c-codex", "c-me", 2)).toBe(true);
+    expect(book.slot("c-codex", "c-me")).toBeUndefined();
+  });
+
   test("answerable：恰好一个已送达的 caller 在等才算；请求还押着的不算；两个在等谁都不算", () => {
     const book = new AgentCallBook(null);
     book.add("c-codex", call(1, "c-me"));
     expect(book.answerable("c-codex", none)?.callerChannelId).toBe("c-me");
-    expect(book.answerable("c-codex", (c) => c === "c-me")).toBeUndefined();
+    expect(book.answerable("c-codex", (c) => c.callerChannelId === "c-me")).toBeUndefined();
     book.add("c-codex", call(2, "c-pi", "agent-pi"));
     expect(book.answerable("c-codex", none)).toBeUndefined();
-    expect(book.answerable("c-codex", (c) => c === "c-pi")?.callerChannelId).toBe("c-me"); // pi 的还押着 → 只剩 me
+    expect(book.answerable("c-codex", (c) => c.callerChannelId === "c-pi")?.callerChannelId).toBe("c-me"); // pi 的还押着 → 只剩 me
   });
 
   test("takeAmbiguity：多个在等时返回这批并只提醒一次；新来一个再提醒", () => {

@@ -5,7 +5,7 @@
 import { describe, expect, test } from "bun:test";
 import { AgentCallBook } from "../src/bridge/agent-calls.js";
 import { HeldQueue, INBOX_LEASE_MS, leaseActive, unseenFrom, type HeldItem } from "../src/bridge/held-queue.js";
-import { pacStillHeld } from "../src/lib/held-pac.js";
+import { callStillHeld } from "../src/lib/held-pac.js";
 import { initInbox, takeInbox } from "../src/bridge/inbox.js";
 
 const me = { tag: "claudestra-ws" } as never;
@@ -68,7 +68,7 @@ describe("takeInbox", () => {
 
   test("领取后没 ack 就回复：回程判定算它看到了（#112 × #114 的组合）", async () => {
     const { held, calls } = setup([item("请复核")]);
-    const seen = () => calls.answerable("c-me", (caller) => pacStillHeld(caller, unseenFrom(held, "c-me")));
+    const seen = () => calls.answerable("c-me", (c) => callStillHeld(c, unseenFrom(held, "c-me")));
     expect(seen()).toBeUndefined(); // 还押着、没领：不算
     await takeInbox(me, 1000);
     expect(seen()?.callerChannelId).toBe("c-codex"); // 领了（租约中、未 ack）：算送到了

@@ -29,8 +29,10 @@ export const leaseActive = (i: HeldItem, now = Date.now()): boolean => !!i.lease
  * 押在 target 队里、它还没看到的消息各是谁发的（回程簿判「请求送到它手上没有」用，lib/held-pac.ts）。
  * check_inbox 领走的算看到了，哪怕还没 ack——否则 agent 读完就答，答复会被当成「请求还押着」而不算数（codex 2026-09-28 复核）。
  */
-export function unseenFrom(q: HeldQueue, target: string): { fromKind: string; fromChannelId?: string }[] | undefined {
-  return q.get(target)?.filter((i) => !i.lease).map((i) => ({ fromKind: i.env.from.kind, fromChannelId: i.env.from.kind === "local" ? i.env.from.channelId : undefined }));
+export function unseenFrom(q: HeldQueue, target: string): { fromKind: string; fromChannelId?: string; messageId?: string }[] | undefined {
+  return q.get(target)?.filter((i) => !i.lease).map((i) => ({
+    fromKind: i.env.from.kind, fromChannelId: i.env.from.kind === "local" ? i.env.from.channelId : undefined, messageId: i.env.meta.messageId,
+  }));
 }
 
 export const HELD_NOTIFY_MS = 30 * 60_000;

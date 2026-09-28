@@ -2,7 +2,7 @@
  * v2.23.1+ pendingAgentCalls 失效判定：押后期间不清（2026-09-17 master→claudestra 回程丢失）。
  */
 import { describe, test, expect } from "bun:test";
-import { pacStillHeld, shouldSweepPac } from "../src/lib/held-pac.ts";
+import { callStillHeld, pacStillHeld, shouldSweepPac } from "../src/lib/held-pac.ts";
 
 const STALE = 10 * 60_000;
 const now = 1_000_000_000;
@@ -34,5 +34,19 @@ describe("pacStillHeld", () => {
   test("空队列 false；命中同 caller 的 local 消息 true", () => {
     expect(pacStillHeld("a", undefined)).toBe(false);
     expect(pacStillHeld("a", [{ fromKind: "local", fromChannelId: "a" }, { fromKind: "user" }])).toBe(true);
+  });
+});
+
+describe("callStillHeld：槽里记了请求 id 就按 id 判", () => {
+  const held = [{ fromKind: "local", fromChannelId: "c-me", messageId: "m2" }];
+  test("后一条押着、前一条已送到：不算押着（后一条不挡前一条的回程）", () => {
+    expect(callStillHeld({ callerChannelId: "c-me", messageIds: ["m1", "m2"] }, held)).toBe(false);
+  });
+  test("这一槽的请求全都还押着：算押着", () => {
+    expect(callStillHeld({ callerChannelId: "c-me", messageIds: ["m2"] }, held)).toBe(true);
+  });
+  test("老槽没记 id：退回按发送方判", () => {
+    expect(callStillHeld({ callerChannelId: "c-me" }, held)).toBe(true);
+    expect(callStillHeld({ callerChannelId: "c-other" }, held)).toBe(false);
   });
 });

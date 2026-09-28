@@ -6,7 +6,7 @@
  */
 
 import { enableTimestampLogs } from "./lib/log-timestamp.js";
-import { pacStillHeld, shouldSweepPac } from "./lib/held-pac.js";
+import { callStillHeld, shouldSweepPac } from "./lib/held-pac.js";
 import { sanitizeAttachmentBase } from "./lib/attachment-name.js";
 import { splitInlineButtons, toButtonRows, inlineChipsToText } from "./lib/inline-buttons.js";
 import { isTargetsOwnReply, isOwnStopChannel } from "./lib/pushback-scope.js";
@@ -441,10 +441,10 @@ const heldFromOf = (target: string) => unseenFrom(heldLocalMsgs, target);
 
 /** target 没指明答给谁(在自己频道 reply / 回合结束兜底)时算作谁的答复:只有恰好一个已送到它手上的 caller 在等才算——
  *  还押在 target 队里的它根本没看到;好几个在等就谁都不算(不猜、不广播,见 bridge/agent-calls.ts) */
-const stillHeldFor = (target: string) => (caller: string) => pacStillHeld(caller, heldFromOf(target));
+const stillHeldFor = (target: string) => (c: PendingAgentCall) => callStillHeld(c, heldFromOf(target));
 const answerablePac = (target: string): PendingAgentCall | undefined => pendingAgentCalls.answerable(target, stillHeldFor(target));
 /** target 明确答给 caller(回发 send_to_agent / reply 到 caller 的频道):精确取那一槽,请求还押着的不算 */
-const exactPac = (target: string, caller: string) => (stillHeldFor(target)(caller) ? undefined : pendingAgentCalls.slot(target, caller));
+const exactPac = (target: string, caller: string) => [pendingAgentCalls.slot(target, caller)].find((p) => p && !stillHeldFor(target)(p));
 /** 好几个 caller 同时在等、target 又没指明答给谁:谁都不推,提醒它用 send_to_agent 分别回(同一批只提醒一次) */
 function nudgeAmbiguousCallers(cid: string): void {
   const amb = pendingAgentCalls.takeAmbiguity(cid, stillHeldFor(cid));
@@ -1085,7 +1085,7 @@ async function forwardReplyToAgentClaude(
   };
   const fwd = await deliver(fwdEnv);
   if (fwd.outcome.kind === "sent") {
-    if (answering) pendingAgentCalls.consume(fromEndpoint.channelId, targetChannelId);
+    if (answering) pendingAgentCalls.consume(fromEndpoint.channelId, targetChannelId, answering.rev);
     lastMessageSource.set(targetChannelId, "agent");
     console.log(`📨 reply→别agent频道: ${fromAgentName || "?"} 的消息同时 forward 给 ${targetAgentName || targetChannelId} 的 claude`);
     recordMetric("reply_cross_agent_forward", { channelId: targetChannelId, meta: { from: fromAgentName || "" } });
@@ -1989,7 +1989,7 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
           } catch (e) {
             console.error("AGENT PUSH-BACK 异常:", e);
           }
-          pendingAgentCalls.consume(msg.chatId, pending.callerChannelId);
+          pendingAgentCalls.consume(msg.chatId, pending.callerChannelId, pending.rev);
         }
       } catch (err) {
         ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, error: (err as Error).message }));
@@ -2436,7 +2436,7 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
         }
 
         // 发的正是在答复一个正在等我的 caller(target 回发 send_to_agent 给问它的人)→ 投出去之后那条回程算答完了
-        const answering = !!fromChannelId && !!exactPac(fromChannelId, target.channelId);
+        const answering = fromChannelId ? exactPac(fromChannelId, target.channelId) : undefined;
 
         // v1.9.21+: 记 pending agent call。当 target agent 下一次 reply 到自己 channel
         // 时，bridge 把那段 text 也 push 回 caller 的 ws（免 fetch_messages 轮询）。
@@ -2445,10 +2445,10 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
         // inbound 请求的 intendedReplyChannel。pushback 用它做 meta.chat_id，
         // caller LLM 就不会错用 target 的私频当作回复目标（Bug 2 修复）。
         //
-        // v2.4.16+: 支持 oneShot=true —— fire-and-forget 模式，不挂 pending（不会
-        // pushback），同时下游 deliverToLocal 跳过给 target 挂 pendingInterAgentMsg
-        // watchdog。用于 status sync / ack / FYI 等 agent 之间不期待回应的消息。
+        // oneShot=true 是 fire-and-forget:不挂 pending(不会 pushback),下游 deliverToLocal 也不给 target 挂
+        // pendingInterAgentMsg watchdog。用于 status sync / ack / FYI 等 agent 之间不期待回应的消息。
         // 先记回程再投递:投出去 / 进押后队列之后 bridge 崩溃,重启恢复的也是「有消息、有回程」
+        let added: { rev: number; merged: boolean } | undefined; // 并进已有槽的投递失败不回滚(前一个问题还在等)
         if (fromChannelId && !oneShot) {
           let originalReplyChannel: string | undefined;
           for (const [, p] of pendingReplies.entries()) {
@@ -2457,25 +2457,25 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
               break;
             }
           }
-          pendingAgentCalls.add(target.channelId, {
+          added = pendingAgentCalls.add(target.channelId, {
             callerChannelId: fromChannelId,
             callerName: fromName,
             targetName,
             originalReplyChannel,
             expecting: typeof msg.expecting === "string" ? msg.expecting.trim() || undefined : undefined,
             ts: Date.now(),
-          });
+          }, env.meta.messageId);
         }
 
         const delivery = await deliver(env);
         if (delivery.outcome.kind !== "sent") {
-          if (fromChannelId && !oneShot) pendingAgentCalls.consume(target.channelId, fromChannelId);
+          if (fromChannelId && added && !added.merged) pendingAgentCalls.consume(target.channelId, fromChannelId, added.rev);
           const reason = delivery.outcome.kind === "dropped" ? delivery.outcome.reason : String((delivery.outcome as any).error);
           ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, error: `deliver 失败: ${reason}` }));
           break;
         }
 
-        if (answering) pendingAgentCalls.consume(fromChannelId, target.channelId);
+        if (answering && fromChannelId) pendingAgentCalls.consume(fromChannelId, target.channelId, answering.rev);
         // v1.9.6+: send_to_agent 触发的 turn 不发完成 @（用户没在这个 channel 问问题）
         lastMessageSource.set(target.channelId, "agent");
 
@@ -2960,7 +2960,7 @@ async function handleHookRequest(req: Request): Promise<Response> {
                 // 现在静默：caller 的 send_to_agent promise 不 resolve，caller 早
                 // 就 end_turn 了，最多等 staleCleanup 10min 扫掉。caller 没收到推
                 // 不会发起新轮 → 链条天然中断，对应"对方没回话就别盯着"的人类直觉。
-                pendingAgentCalls.consume(cid, pendingAgent.callerChannelId);
+                pendingAgentCalls.consume(cid, pendingAgent.callerChannelId, pendingAgent.rev);
                 console.log(
                   `🤫 drain兜底 no-text 静默清 pending: ${pendingAgent.targetName} → ${pendingAgent.callerName}`
                 );
@@ -2975,7 +2975,7 @@ async function handleHookRequest(req: Request): Promise<Response> {
                     : "";
                   const pushBody = `${callerCtxLine}[ℹ️ 对方 (${pendingAgent.targetName}) 这轮没用 reply() 工具，下面是 bridge 从 assistant 文字兜底转发的：]\n\n${drainedText}`;
                   await pushBackToCaller(pendingAgent, clients.get(cid)?.ws, pendingAgent.originalReplyChannel || cid, pushBody, "agent_drain");
-                  pendingAgentCalls.consume(cid, pendingAgent.callerChannelId);
+                  pendingAgentCalls.consume(cid, pendingAgent.callerChannelId, pendingAgent.rev);
                   console.log(`📨 AGENT PUSH-BACK (drain兜底): ${pendingAgent.targetName} → ${pendingAgent.callerName}（drain 文字）`);
                   recordMetric("agent_pushback_drain", { channelId: pendingAgent.callerChannelId, meta: { hadText: "yes" } });
                 } catch (e) {
