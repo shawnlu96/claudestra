@@ -246,6 +246,12 @@ describe("adv1 / r1 的 P2 与 T36 约定", () => {
     expect(inputStateOf(["! "], ["! "])).toBe("draft");
     expect(readLpPane(fx("input-bash-empty")).inputText).toContain("Try");
   });
+
+  test("输入框文字只去掉提示符后面那一个空格，行首多出的空格保留（T35 adv3 P2-1：runner 比原文）", () => {
+    const at = (line: string) => readLpPane(fx("lp-on-interrupted").replace(/\x1b\[39m❯[^\S\n]*\n/, `\x1b[39m${line}\n`)).inputText;
+    expect(at("❯ /low-priority")).toBe("/low-priority");
+    expect(at("❯  /low-priority")).toBe(" /low-priority");
+  });
 });
 
 describe("adv2 / r2：对话里的字不能冒充底部状态", () => {
