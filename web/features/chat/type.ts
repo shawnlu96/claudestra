@@ -137,6 +137,10 @@ export interface ChatMessage {
   /** 本端乐观发送、尚未在历史(jsonl)中确认——历史重拉时保留不吞
    *  （agent 忙时消息在服务端排队,送达前不进 jsonl）。 */
   local?: boolean;
+  /** 乐观消息发出时视图里的历史游标（view-compose 的 sendCursor）：纯附件消息据此只和之后落盘的记录对账 */
+  sentAfter?: { seq: number; sid?: string };
+  /** 乐观消息已认领的他端回声指纹（view-compose 的 echoKeyOf）：之后只认同一条回声，别人同名的图不再被吞 */
+  echoKey?: string;
   /** v2.15+ 发送失败（超时/网络/服务端拒绝）——气泡标「未送达」,别装作已发出 */
   failed?: boolean;
 }
@@ -146,7 +150,8 @@ export interface AgentSession {
   displayName: string;
   purpose: string;
   cwd: string;
-  status: "active" | "stopped";
+  /** creating = create 进行中 / 砍在半路的占位：显示「创建中」、不能发消息 */
+  status: "active" | "stopped" | "creating";
   mock?: boolean;
   /** 大总管置顶入口——不显示 kill/restart，列表第一位。 */
   pinnedMaster?: boolean;

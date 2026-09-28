@@ -426,7 +426,7 @@ export const DICT: Record<string, string> = {
   "Agent 管理": "Manage Agents",
   "＋ 新建": "＋ New",
   "已重启": "restarted",
-  "已停止": "stopped",
+  "已停止": "stopped", "创建中": "creating", "会话创建中，稍后再发…": "Session is being created, send later…",
   "确认重启?": "Confirm restart?",
   "确认停止?": "Confirm stop?",
   "新建会话": "New Session",

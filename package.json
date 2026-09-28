@@ -8,6 +8,7 @@
     "manager": "bun run src/manager.ts",
     "sandbox": "bun scripts/sandbox.ts",
     "setup": "bun run src/setup.ts",
+    "desktop-cli": "bun run src/desktop-cli.ts",
     "test": "bun test",
     "typecheck": "tsc --noEmit",
     "check": "bun run typecheck && bun test && bun run guard",

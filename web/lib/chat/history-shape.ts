@@ -104,8 +104,9 @@ function userMessage(m: NeutralMessage, anchor: ChatMessage | null, opts: ShapeO
   // 多选表单的回投（点「提交」或输入框同步行发出）统一还原成「【标题】✓ …」，与发送时的气泡一致
   const own = from ? text : stripMentionDirective(text); // @ 委托指令行只给 agent 看；只剥本人的（外源的末行照原样给 owner 看）
   let raw = forms.restore(own) ?? resolveClick(own, anchor, forms) ?? own;
-  // 外源入站剥掉 bridge 注入的来源头（[🤝 来自 peer…] 多行方括号块）——UI 用来源 chip 展示，留着就是双份说明
-  if (from) raw = raw.replace(/^\[[^\]]{0,800}\]\s*\n*/, "");
+  // 外源入站剥掉 bridge 注入的来源头（[🤝 来自 peer…] 多行方括号块）——UI 用来源 chip 展示，留着就是双份说明。
+  // 纯附件消息正文以 [attachment: …] 开头，那不是来源头：剥了图就没了
+  if (from) raw = raw.replace(/^\[(?!attachment: )[^\]]{0,800}\]\s*\n*/, "");
   const { content, attachments } = extractAttachments(raw);
   return { id: `h${m.seq}`, role: "user", content, ts: m.ts, from, sid: opts.sid, seqEnd: m.seq, ...(attachments ? { attachments } : {}) };
 }

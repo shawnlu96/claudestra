@@ -8,6 +8,7 @@
 import { RUNTIME_DIR, TMUX_SOCK } from "./paths.js"; export { TMUX_SOCK };
 import { sandboxDisabled } from "./sandbox.js";
 import { sandboxTmuxArgv, sandboxVerifyNewWindow } from "./sandbox-tmux.js"; export { sandboxTmuxArgv };
+import { windowKey } from "./tmux-target.js"; export { windowKey };
 export const MASTER_SESSION = "master";
 /**
  * 大总管窗口（index 0）的显式名字。不命名的话 tmux 按前台进程自动改名（claude / 版本号），
@@ -150,9 +151,9 @@ export async function setWindowOption(target: string, option: string, value: str
   }
 }
 
-/** tmux window target: `master:agent-xxx` */
+/** `master:=agent-xxx`：`=` 精确匹配，否则窗口不在时 tmux 按前缀落到 agent-xxxbar。⚠ display-message 例外：窗口不在时不报错、退回当前窗口，要核存在用 list-panes */
 export function windowTarget(name: string): string {
-  return `${MASTER_SESSION}:${name}`;
+  return `${MASTER_SESSION}:=${name}`;
 }
 
 /** 发送文本到窗口（literal 模式 + 单独的 Enter） */
@@ -165,7 +166,7 @@ export function windowTarget(name: string): string {
  */
 export async function ensurePaneInteractive(target: string): Promise<boolean> {
   try {
-    const inMode = (await tmuxRaw(["display-message", "-p", "-t", target, "#{pane_in_mode}"])).trim();
+    const inMode = (await tmuxRaw(["list-panes", "-t", target, "-F", "#{pane_in_mode}"])).trim().split("\n")[0] ?? ""; // 窗口不在 = 空（display-message 会退回当前窗口）
     if (inMode !== "" && inMode !== "0") {
       await tmuxRaw(["send-keys", "-t", target, "-X", "cancel"]);
       await Bun.sleep(120);
@@ -215,10 +216,10 @@ export function tmuxInterrupt(target: string): void {
 export const ESC_DOUBLE_TAP_MS = 1200;
 const lastEscapeAt = new Map<string, number>();
 export async function tmuxSendEscape(target: string): Promise<void> {
-  const wait = ESC_DOUBLE_TAP_MS - (Date.now() - (lastEscapeAt.get(target) ?? 0));
+  const wait = ESC_DOUBLE_TAP_MS - (Date.now() - (lastEscapeAt.get(windowKey(target)) ?? 0)); // 按窗口身份计：`master:=x` 与 `master:x` 是同一个窗口
   if (wait > 0) await Bun.sleep(wait);
   await tmuxRaw(["send-keys", "-t", target, "Escape"]);
-  lastEscapeAt.set(target, Date.now());
+  lastEscapeAt.set(windowKey(target), Date.now());
 }
 
 /**
@@ -407,7 +408,6 @@ export async function isIdle(target: string): Promise<boolean> {
  * 由调用点决定往哪边倒。
  */
 export type IdleVerdict = "idle" | "busy" | "unknown";
-
 
 /**
  * v2.23+ Pi 窗口的忙闲判据。
