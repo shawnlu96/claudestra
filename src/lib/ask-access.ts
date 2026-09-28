@@ -28,7 +28,9 @@ export function askWhoOf(data: unknown, agent = ""): AskWho {
   return { fromAgent: typeof from === "string" && from ? from : null, assignee: typeof d.assignee === "string" ? d.assignee : null };
 }
 
+/** 被禁用的 principal 什么都看不见（鉴权本来就挡在前面，这里再兜一层：推送认人读的是最多 60 s 前的 principals.json） */
 export function canSeeAsk(p: Principal, a: AskWho): boolean {
+  if (p.disabled) return false;
   if (isAskAssignee(p, a)) return true;
   return canReadLedger(p) && (a.fromAgent !== "master" || agentInScope(p, "master"));
 }

@@ -36,6 +36,7 @@ export const LEDGER_DICT: Record<string, string> = {
   "已记下": "Recorded",
   "答复：{title}": "Reply to: {title}",
   "答复「待你处理」": "Reply to an ask",
+  "批准的是：{action}": "Approving: {action}",
   "审核": "Review",
   "待你处理 · 已答 {n} 项": "Needs you · {n} answered",
   "已提交": "Submitted",

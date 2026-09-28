@@ -12,10 +12,10 @@ import { BgTaskPanel } from "./bg-task-panel";
 import { CcTaskPanel } from "./cc-task-panel";
 import { useT, getLang } from "@/lib/i18n";
 import { BubbleMenu, SelectModeBar, useBubbleMenuTrigger } from "./bubble-menu";
-import { InlineActionContext, type InlineActionCtx } from "@/components/domd/inline-button";
+import { InlineActionContext } from "@/components/domd/inline-button";
 import { replyEchoMessageIds, isEchoSegment } from "../reply-echo";
-import { plainLabel } from "@/lib/chat/inline-buttons";
-import { agentChipIndex, agentLabelKey, messagePlainText, splitQuoted } from "../message-text";
+import { useInlineActions } from "./use-inline-actions";
+import { messagePlainText, splitQuoted } from "../message-text";
 import { ActiveToolRow, HistoryToolRow, ToolCallsBlock } from "./tool-rows";
 import { ClaudeHeader, CompactingLine, ReplyingLine, ThinkingDots, TurnMark, WorkingLine } from "./turn-indicators";
 import { QuoteSwipe } from "./quote-swipe";
@@ -145,7 +145,6 @@ const TextBlock = memo(function TextBlock({
  * 有 segments（叙述/工具的真实交错序）时按段渲染——修「工具全堆气泡顶部、
  * 文本全挤底部」的时间线错乱；无 segments（旧缓存快照）回退 content+toolCalls。
  * 流式进行中文本段用纯文本（DOMD 只读一次不适合增量喂字），定稿/历史走 DOMD。
- * agent chip 名单只订阅压成字符串的 agentLabelKey（D8-4，见 message-text.ts）。
  */
 function AssistantBody({
   m,
@@ -158,34 +157,7 @@ function AssistantBody({
 }) {
   const segs = m.segments;
   const full = messagePlainText(m); // 长按菜单的「复制整条」用；只有一段时与本段相同,菜单自动不显示
-  // 行内按钮(v2.20+,`[[{#id .style}label]]`):DOMD 深处的 InlineButton 经
-  // context 拿到本条消息的回投回调;点击复用块级组件的 clickReplyComponent
-  // (同 wire `[button:<id>]`、同 replyClicks 状态,rowKey 前缀 `i:` 区分)。
-  const store = useChatStoreApi();
-  const [inlineBusy, setInlineBusy] = useState(false);
-  // agent chip(`[[{.agent}name]]`)的可跳转名单:name / displayName 都认,
-  // master 别名映射到前端的 __master__(bridge-api 的 apiAgentName 约定)
-  const agentKey = useChatStore((s) => agentLabelKey(s.state.agents));
-  const inlineCtx = useMemo<InlineActionCtx>(() => {
-    const { labels, resolve } = agentChipIndex(agentKey);
-    return {
-      clicks: m.replyClicks ?? {},
-      busy: inlineBusy,
-      onClick: async (id, label) => {
-        setInlineBusy(true);
-        try {
-          await store.clickReplyComponent(m.id, `i:${id}`, id, plainLabel(label), `[button:${id}]`);
-        } finally {
-          setInlineBusy(false);
-        }
-      },
-      agents: labels,
-      openAgent: (label) => {
-        const name = resolve(label);
-        if (name) void store.openAgent(name);
-      },
-    };
-  }, [m.id, m.replyClicks, inlineBusy, store, agentKey]);
+  const inlineCtx = useInlineActions(m); // 行内按钮 / agent chip 的回调，跟着「待你处理」走
   const hasSegs = !!segs && segs.length > 0;
   const hasNarration = hasSegs || !!m.content;
   const hasReply = !!m.replyText;

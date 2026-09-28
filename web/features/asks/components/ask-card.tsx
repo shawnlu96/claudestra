@@ -45,6 +45,12 @@ export function AskCard({ ask, now, focused, onOpenChat }: { ask: WebAsk; now: n
         </div>
       )}
       {showBody && <pre className="mt-1.5 max-h-60 overflow-auto whitespace-pre-wrap rounded-lg bg-base-200 p-2.5 font-sans text-[12.5px]">{ask.body}</pre>}
+      {ask.bind && (
+        <div className="mt-2 rounded-lg border border-warning/30 bg-warning/5 p-2.5 text-[12px]">
+          <div className="mb-1 font-medium text-warning">{t("批准的是：{action}", { action: ask.bind.version ? `${ask.bind.action} · ${ask.bind.version}` : ask.bind.action })}</div>
+          <pre className="max-h-40 overflow-auto whitespace-pre-wrap break-all font-mono text-[11.5px] opacity-85">{JSON.stringify(ask.bind.params, null, 2)}</pre>
+        </div>
+      )}
 
       {open && <AskActions ask={ask} agent={agent} />}
       {answerSummary(ask) && <p className="mt-2 text-[12.5px] opacity-75">{open ? t("已答：{s}", { s: answerSummary(ask) }) : answerSummary(ask)}</p>}

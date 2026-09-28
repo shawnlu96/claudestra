@@ -3,7 +3,7 @@
  * 参数变了旧按钮失效（superseded）在 tests/asks-v2.test.ts。
  */
 import { afterEach, describe, expect, test } from "bun:test";
-import { canonicalJson, checkAsk, paramsHash, parseReplyAsk } from "../src/lib/ask-bind.js";
+import { bindHash, canonicalJson, checkAsk, hasDuplicateKeys, parseReplyAsk } from "../src/lib/ask-bind.js";
 import { answerAsk, closeAsk, getAsk, openAsk, openAskFull, type Ask, type NewAsk } from "../src/lib/ledger-asks.js";
 import { closeLedger, openLedger } from "../src/lib/ledger-store.js";
 import { runLedger } from "../src/manager/ledger.js";
@@ -12,7 +12,7 @@ const bind = { action: "release", params: { tag: "v2.32.0", sha: "818a473" }, ap
 const draft = (over: Partial<NewAsk> = {}): NewAsk => ({
   project: "p", fromAgent: "agent-x", fromChannelId: "111", source: "reply", kind: "authorize", title: "发 v2.32.0 吗",
   options: [{ type: "buttons", buttons: [{ id: "go", label: "发" }, { id: "no", label: "不发" }] }],
-  bind: { ...bind, paramsHash: paramsHash(bind.params) }, askKey: "release", ...over,
+  bind: { ...bind, paramsHash: bindHash(bind, "agent-x") }, askKey: "release", ...over,
 });
 const pick = (a: Ask, id: string, at = 2_000) => answerAsk(openLedger(":memory:"), a.id, { choices: [`[button:${id}]`], labels: [id], text: "", principal: "owner:self", via: "web_card", at });
 
@@ -41,30 +41,40 @@ describe("reply 的 ask 字段", () => {
     for (const [raw, re] of bad) expect((parseReplyAsk(raw) as { error: string }).error).toMatch(re);
   });
 
-  test("参数哈希只看内容：键的顺序、undefined 字段不影响；值变了哈希就变", () => {
+  test("哈希只看内容：键的顺序、undefined 字段不影响；参数、action、version、发起 agent 任一变了哈希就变", () => {
     expect(canonicalJson({ b: 1, a: [2, { d: 3, c: undefined }] })).toBe('{"a":[2,{"d":3}],"b":1}');
-    expect(paramsHash({ tag: "v2.32.0", sha: "818a473" })).toBe(paramsHash({ sha: "818a473", tag: "v2.32.0" }));
-    expect(paramsHash({ tag: "v2.32.1", sha: "818a473" })).not.toBe(paramsHash(bind.params));
+    const h = (b: Partial<typeof bind> & { version?: string }, agent = "agent-x") => bindHash({ ...bind, ...b }, agent);
+    expect(h({ params: { sha: "818a473", tag: "v2.32.0" } })).toBe(h({}));
+    for (const other of [h({ params: { ...bind.params, tag: "v2.32.1" } }), h({ action: "deploy" }), h({ version: "2" }), h({}, "agent-y")]) expect(other).not.toBe(h({}));
+  });
+
+  test("会撞哈希的参数拒掉（adv1 P2-3）：超过 2^53 的整数、非有限数；重复键只有原始 JSON 看得出（ask-check --params）", () => {
+    const withParams = (params: unknown) => parseReplyAsk({ kind: "authorize", bind: { ...bind, params } });
+    expect((withParams({ channel: 1495997330061791353 }) as { error: string }).error).toMatch(/2\^53/);
+    expect(withParams({ channel: "1495997330061791353", n: 9007199254740991 })).toHaveProperty("ask");
+    expect([hasDuplicateKeys('{"tag":"a","tag":"b"}'), hasDuplicateKeys('{"a":{"x":1},"b":{"x":1}}'), hasDuplicateKeys('{"a":"\\u0062","\\u0061":1}')]).toEqual([true, false, true]);
+    expect(hasDuplicateKeys('["tag","tag"]')).toBe(false);
   });
 });
 
 describe("ask-check 的判定", () => {
-  const h = paramsHash(bind.params);
-  test("批准：已答、选的是 approve 里的按钮、哈希一致、还在有效期内", () => {
+  const h = bindHash(bind, "agent-x");
+  test("批准：已答、选的是 approve 里的按钮、哈希一致、还在有效期内、核对的就是发起的 agent", () => {
     const a = openAsk(openLedger(":memory:"), draft(), 1_000);
-    expect(checkAsk(pick(a, "go"), h, 3_000)).toEqual({ ok: true });
+    expect(checkAsk(pick(a, "go"), h, "agent-x", 3_000)).toEqual({ ok: true });
+    expect((checkAsk(getAsk(openLedger(":memory:"), a.id), h, "agent-y", 3_000) as { reason: string }).reason).toMatch(/not agent-y/);
   });
 
   test("拒绝：不存在、没有绑定、还没答、答了「不发」、哈希不一致、过了有效期、被取代、过期 / 撤销", () => {
     const db = openLedger(":memory:");
-    const reason = (a: Ask | null, hash = h, now = 3_000) => (checkAsk(a, hash, now) as { reason: string }).reason;
+    const reason = (a: Ask | null, hash = h, now = 3_000) => (checkAsk(a, hash, "agent-x", now) as { reason: string }).reason;
     expect(reason(null)).toMatch(/not found/);
     expect(reason(openAsk(db, draft({ kind: "decide", bind: null, askKey: null }), 1_000))).toMatch(/no authorization binding/);
     const open = openAsk(db, draft({ askKey: "k1" }), 1_000);
     expect(reason(open)).toMatch(/not answered yet/);
     expect(reason(pick(open, "no"))).toMatch(/without approving/);
     const ok = pick(openAsk(db, draft({ askKey: "k2" }), 1_000), "go");
-    expect(reason(ok, paramsHash({ ...bind.params, tag: "v9" }))).toMatch(/hash mismatch/);
+    expect(reason(ok, bindHash({ ...bind, params: { ...bind.params, tag: "v9" } }, "agent-x"))).toMatch(/hash mismatch/);
     expect(reason(ok, h, ok.expiresAt + 1)).toMatch(/approval window ended/);
     const first = openAsk(db, draft({ askKey: "k3" }), 1_000);
     openAskFull(db, draft({ askKey: "k3" }), 1_500);
@@ -84,6 +94,9 @@ describe("ask-check 的判定", () => {
     expect(await run("ask-check", a.id)).toMatchObject({ ok: false, code: "invalid" });
     expect(await run("ask-check", a.id, "--params", "{nope")).toMatchObject({ ok: false, code: "invalid" });
     expect(await run("ask-check", "ask_none", "--hash", h)).toMatchObject({ ok: false, error: expect.stringMatching(/not found/) });
+    expect(await run("ask-check", a.id, "--params", '{"tag":"v2.32.0","tag":"v2.32.0","sha":"818a473"}')).toMatchObject({ ok: false, code: "invalid" });
+    // 别的 agent 拿这条批准去核对：一律拒（adv1 P2-2）
+    expect(await runLedger(["ask-check", a.id, "--hash", h], { ...deps, actor: "agent-y" })).toMatchObject({ ok: false, approved: false, error: expect.stringMatching(/not agent-y/) });
   });
 });
 

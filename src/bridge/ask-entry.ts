@@ -46,11 +46,15 @@ export function findAskForWires(agent: string, wires: string[], hint?: string | 
   return null;
 }
 
+/** 授权按参数批：不带 askId 的点击（旧消息里的按钮）不猜是哪一条，否则旧气泡的「批准」会批掉参数已经变了的新一条 */
+const BIND_NEEDS_ID = t("这条授权要从「待你处理」卡片或原消息的按钮批（没认出是哪一条）", "Approve this from its card or its own message (couldn't tell which ask)");
+
 /** 已结案那一句（Discord 悄悄话、网页 409 的提示）：人话 + 当时选了什么 */
 export function closedWords(a: Pick<Ask, "state" | "answer">): string {
   const picked = a.answer?.labels.join("、");
   if (a.state === "answered") return picked ? t(`已处理：${picked}`, `Already handled: ${picked}`) : t("已处理", "Already handled");
   if (a.state === "expired") return t("已过期，按未批准处理", "Expired — treated as not approved");
+  if (a.state === "superseded") return t("已被新版本取代，请答新的那条", "Superseded by a newer version — answer that one");
   return t("已撤销", "Withdrawn");
 }
 
@@ -103,6 +107,7 @@ export async function answerFromChat(req: { agent: string; text: string; princip
   const hit = findAskForWires(req.agent, wires, req.askId);
   if (!hit || !canAnswerAsk(p, hit.ask)) return null;
   if (hit.ask.state !== "open") return apiJson(409, closedBody(hit.ask));
+  if (hit.ask.bind && !req.askId) return apiJson(409, { ok: false, code: "ask_id_required", error: BIND_NEEDS_ID, askId: hit.ask.id });
   const blocked = await redirectForbidden(p, hit.ask);
   if (blocked) return blocked;
   return commitOr409(() => commitNoticing({ ask: hit.ask, picks: hit.picks, text: rest, original: req.text, from: apiFrom(p), principal: p.id, device: p.credential, via: "web_chat" }), hit.ask);

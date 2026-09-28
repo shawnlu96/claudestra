@@ -13,7 +13,7 @@ const V1_COLUMNS = [
   "createdAt", "updatedAt",
 ].join(", ");
 
-const CREATE_NEXT = `CREATE TABLE asks_next (
+const CREATE_NEXT = `CREATE TABLE IF NOT EXISTS asks_next (
   id TEXT PRIMARY KEY, project TEXT NOT NULL, itemId TEXT, taskId TEXT,
   fromAgent TEXT, fromChannelId TEXT,
   source TEXT NOT NULL CHECK (source IN ('reply','auq','permission','codex','human','system')),
@@ -35,17 +35,21 @@ const REBUILD = [
   `INSERT INTO asks_next (${V1_COLUMNS}) SELECT ${V1_COLUMNS} FROM asks`,
   "DROP TABLE asks",
   "ALTER TABLE asks_next RENAME TO asks",
-  "CREATE INDEX asks_state_project ON asks(state, project)",
-  "CREATE INDEX asks_from_state ON asks(fromAgent, state)",
-  "CREATE INDEX asks_assignee_state ON asks(assignee, state)",
-  "CREATE INDEX asks_key_state ON asks(fromAgent, askKey, state)",
 ];
 
-/** 已经是第二版（分支上提前开过、再按合并后的顺序迁移）就不再重建：看 assignee 列在不在 */
+/** 索引每次都补（IF NOT EXISTS）：重建时跟着表一起没了要建回来，单独少了一个的库也能自愈 */
+const INDEXES = [
+  "CREATE INDEX IF NOT EXISTS asks_state_project ON asks(state, project)",
+  "CREATE INDEX IF NOT EXISTS asks_from_state ON asks(fromAgent, state)",
+  "CREATE INDEX IF NOT EXISTS asks_assignee_state ON asks(assignee, state)",
+  "CREATE INDEX IF NOT EXISTS asks_key_state ON asks(fromAgent, askKey, state)",
+];
+
+/** 已经是第二版（分支上提前开过、再按合并后的顺序迁移）就不再重建：看 assignee 列在不在；索引照补 */
 export function migrateAsksV2(db: Database): void {
   const cols = (db.prepare("PRAGMA table_info(asks)").all() as { name: string }[]).map((c) => c.name);
-  if (cols.includes("assignee")) return;
-  for (const sql of REBUILD) db.prepare(sql).run();
+  if (!cols.includes("assignee")) for (const sql of REBUILD) db.prepare(sql).run();
+  for (const sql of INDEXES) db.prepare(sql).run();
 }
 
 /** 迁移后必须在的 asks 列（ledger-store.ts checkSchema） */

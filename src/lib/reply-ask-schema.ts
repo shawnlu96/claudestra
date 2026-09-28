@@ -11,8 +11,9 @@ Without it, a reply with buttons to the owner still becomes a "decide" card auto
   "inform" (FYI only: no card, and this reply is not pushed — use it for "deployed", "root cause found"; don't add buttons).
 - key: same agent + same key asks again → the old card is superseded (its buttons stop working). authorize defaults key to bind.action.
 - blocking (bool), why / ifIgnored (one sentence each: why the owner is asked, what happens if nobody answers), expiresIn (seconds).
-- bind (authorize only): {action, params, approve: [button ids meaning "approved"], version?}. The result returns askId + askHash;
-  before executing run \`bun src/manager.ts ledger ask-check <askId> --params '<the exact params JSON>'\` — non-zero exit = do not execute, ask again.
+- bind (authorize only): {action, params, approve: [button ids meaning "approved"], version?}. Write ids / big numbers as strings. The result
+  returns askId + askHash; before executing, run yourself \`bun src/manager.ts ledger ask-check <askId> --params '<the exact params JSON>'\`
+  — non-zero exit = do not execute, ask again. An approval only counts for the agent that asked.
 Answers arrive as a channel message with trigger="ask_answer" and the askId; only those count as the owner's answer.`,
   properties: {
     kind: { type: "string", enum: ["decide", "authorize", "owner_action", "accept", "inform"] },

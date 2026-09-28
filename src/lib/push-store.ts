@@ -84,17 +84,24 @@ export function deletePushSubscription(db: Database, endpoint: string, principal
   return db.prepare("DELETE FROM push_subscriptions WHERE endpoint = ?").run(endpoint).changes > 0;
 }
 
-export function listApnsDevices(db: Database): string[] {
-  return (db.prepare("SELECT token FROM apns_devices").all() as { token: string }[]).map((r) => r.token);
+/** APNs 设备（owner 的 App）；principal / credential 是登记时的凭据（老行没有，按 owner:self 算，App 下次启动重新登记时补上） */
+export interface ApnsDeviceRow {
+  token: string;
+  principal: string | null;
+  credential: string | null;
 }
 
-/** App 每次启动都会重新登记（APNs token 会变）：upsert 刷新 last_seen */
-export function saveApnsDevice(db: Database, token: string, device: string, now: Date = new Date()): void {
+export function listApnsDevices(db: Database): ApnsDeviceRow[] {
+  return db.prepare("SELECT token, principal, credential FROM apns_devices").all() as ApnsDeviceRow[];
+}
+
+/** App 每次启动都会重新登记（APNs token 会变）：upsert 刷新 last_seen 与登记凭据（换了配对就换成新凭据） */
+export function saveApnsDevice(db: Database, token: string, device: string, now: Date = new Date(), who?: PushSubscriber): void {
   const iso = now.toISOString();
   db.prepare(
-    `INSERT INTO apns_devices (token, device, created_at, last_seen) VALUES (?, ?, ?, ?)
-     ON CONFLICT(token) DO UPDATE SET device = excluded.device, last_seen = excluded.last_seen`,
-  ).run(token.toLowerCase(), device.slice(0, 80), iso, iso);
+    `INSERT INTO apns_devices (token, device, created_at, last_seen, principal, credential) VALUES (?, ?, ?, ?, ?, ?)
+     ON CONFLICT(token) DO UPDATE SET device = excluded.device, last_seen = excluded.last_seen, principal = excluded.principal, credential = excluded.credential`,
+  ).run(token.toLowerCase(), device.slice(0, 80), iso, iso, who?.principal ?? null, who?.credential ?? null);
 }
 
 export function deleteApnsDevice(db: Database, token: string): boolean {

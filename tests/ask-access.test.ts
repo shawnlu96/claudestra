@@ -18,7 +18,7 @@ import { canAnswerAsk, canSeeAsk } from "../src/lib/ask-access.js";
 import { openAsk, type Ask, type NewAsk } from "../src/lib/ledger-asks.js";
 import { closeLedger, openLedger } from "../src/lib/ledger-store.js";
 import type { Principal } from "../src/lib/principals.js";
-import { savePushSubscription, type PushSubscriber } from "../src/lib/push-store.js";
+import { saveApnsDevice, savePushSubscription, type PushSubscriber } from "../src/lib/push-store.js";
 import { closeWebState, openWebState } from "../src/lib/web-state.js";
 import { at, guest, LEGACY_STAR_TOKEN, owner, ownerWithMaster, PEER } from "./asks-test-kit.js";
 import { tempLedgerPath } from "./ledger-test-helpers.js";
@@ -116,11 +116,12 @@ describe("四处同一口径", () => {
     const wsPath = join(mkdtempSync(join(tmpdir(), "ask-access-push-")), "web-state.sqlite");
     const db = openWebState(wsPath);
     const sent: { endpoint: string }[] = [];
+    const apns: string[] = [];
     const sender = {
-      config: () => ({ webPush: { vapidPublicKey: "K" }, apns: false, mode: "direct" }),
+      config: () => ({ webPush: { vapidPublicKey: "K" }, apns: true, mode: "direct" }),
       webPushKeys: () => ["K"],
       sendWebPush: async (s: { endpoint: string }) => (sent.push({ endpoint: s.endpoint }), { ok: true }),
-      sendApns: async () => ({ ok: true }),
+      sendApns: async (token: string) => (apns.push(token), { ok: true }),
     } as unknown as PushSender;
     // 订阅者：能过推送路由的才有订阅（peer 不行）；canManage 的记 owner，其余设备记 guest（push/routes.ts）
     const subs: [string, PushSubscriber][] = [
@@ -130,18 +131,28 @@ describe("四处同一口径", () => {
       ["otherGuest", { audience: "guest", principal: "guest:bb22", credential: "dev_bb22" }],
     ];
     for (const [name, who] of subs) savePushSubscription(db, { endpoint: `https://push.example/${name}`, keys: { p256dh: "p", auth: "a" } }, "Mac", "K", new Date(), who);
+    // APNs（owner 的 App）同一个判定：按登记时的凭据收窄；凭据撤了的什么都不推；老行没记 principal 的按 owner:self
+    const devices: [string, PushSubscriber | undefined][] = [
+      ["owner", subs[0][1]], ["scopedowner", subs[1][1]], ["revoked", { audience: "owner", principal: "owner:self", credential: "dev_gone" }], ["legacy", undefined],
+    ];
+    for (const [name, who] of devices) saveApnsDevice(db, name, "iPhone", new Date(), who);
+    const apnsWho: Record<string, Principal> = { owner: WHO.owner, scopedowner: WHO.scopedOwner, legacy: WHO.ownerMaster };
     const byCredential: Record<string, Principal> = { dev_1: WHO.owner, dev_scoped: WHO.scopedOwner, dev_aa11: G1, dev_bb22: WHO.otherGuest };
     const d = createDispatcher({ db, sender, isOwnerChat: () => false, resolvePrincipal: (_pid, cid) => (cid ? byCredential[cid] ?? null : null) });
     for (const k of kinds) {
       sent.length = 0;
+      apns.length = 0;
       await d.onAsk({ ...asks[k], blocking: true }, "away");
+      for (const n of apns) expect(canSeeAsk(apnsWho[n], asks[k])).toBe(true);
+      expect(apns).not.toContain("revoked");
       const names = sent.map((s) => s.endpoint.split("/").pop()!);
       for (const n of names) expect(canSeeAsk(WHO[n], asks[k])).toBe(true);
       // 指给 G1 的一定推到 G1；别的 guest 一条也收不到
       if (asks[k].assignee) expect(names).toContain("assigneeGuest");
       expect(names).not.toContain("otherGuest");
       // owner 自己一定收到（卡活 + 不在）；部分 scope 的 owner 设备看不见就收不到
-      if (k === "agent") expect(names.sort()).toEqual(["owner"]);
+      if (k === "agent") expect([names.sort(), apns.sort()]).toEqual([["owner"], ["legacy", "owner"]]);
+      if (k === "master") expect(apns).toEqual(["legacy"]); // 部分 scope 的 owner 设备收不到大总管的
     }
     d.stop();
     closeWebState(wsPath);
@@ -156,6 +167,10 @@ describe("四处同一口径", () => {
       }
     }
   });
+});
+
+test("被禁用的 principal 什么都看不见、答不了（纵深防御，adv1 P2-7）", () => {
+  for (const p of [{ ...WHO.owner, disabled: true }, { ...G1, disabled: true }]) expect(kinds.some((k) => canSeeAsk(p, asks[k]) || canAnswerAsk(p, asks[k]))).toBe(false);
 });
 
 test("矩阵表自己不自相矛盾：答得了的一定看得见", () => {

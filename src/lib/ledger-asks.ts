@@ -160,9 +160,10 @@ export interface OpenedAsk {
 /**
  * 开一条 ask，同一事务里追加 ask 事件（actor = 发起 agent，人 / 系统发起的记 createdBy）。
  * 带 dedupKey 且撞上已有的：返回那条、不写库（T28a 的指派按轮次去重，重复触发无害）。
- * 带 askKey 且有发起 agent：它同 key 还开着的旧 ask 记 superseded（ask_cancel 事件，data.supersededBy），新的 supersedes 指向最近那条
+ * 带 askKey 且有发起 agent：它同 key 还开着的旧 ask 记 superseded（supersedeIn），新的 supersedes 指向最近那条。
+ * deferSupersede：先只记指向、不动旧的——reply 路径投递成功后才调 supersedeOlder，发失败时旧的仍然有效（不会两条都失效）
  */
-export function openAskFull(db: Database, input: NewAsk, now = Date.now()): OpenedAsk {
+export function openAskFull(db: Database, input: NewAsk, now = Date.now(), opts: { deferSupersede?: boolean } = {}): OpenedAsk {
   const id = newAskId();
   return tx(db, (): OpenedAsk => {
     if (input.dedupKey) {
@@ -182,16 +183,27 @@ export function openAskFull(db: Database, input: NewAsk, now = Date.now()): Open
       JSON.stringify(input.extra ?? {}), now, now, input.assignee ?? null, input.createdBy ?? null, input.askKey ?? null,
       input.bind ? JSON.stringify(input.bind) : null, old.at(-1)?.id ?? null, input.dedupKey ?? null,
     );
-    const superseded = old.map((o) => {
-      const out = setState(db, o.id, "superseded", now);
-      addEvent(db, out, "ask_cancel", askActor(out), o.title, { reason: "superseded", supersededBy: id }, now);
-      return out;
-    });
     const a = getAsk(db, id) as Ask;
+    const superseded = opts.deferSupersede ? [] : supersedeIn(db, a, now);
     const data = { source: a.source, kind: a.kind, blocking: a.blocking, ...(a.assignee ? { assignee: a.assignee } : {}), ...(a.dedupKey ? { dedupKey: a.dedupKey } : {}) };
     addEvent(db, a, "ask", askActor(a), a.title, data, now);
     return { ask: a, existed: false, superseded };
   });
+}
+
+/** a 同一个 agent、同一个 key、比它早还开着的 → superseded（ask_cancel 事件，data.supersededBy） */
+function supersedeIn(db: Database, a: Ask, now: number): Ask[] {
+  if (!a.askKey || !a.fromAgent) return [];
+  const old = listAsks(db, { fromAgent: a.fromAgent, states: ["open"] }).filter((x) => x.askKey === a.askKey && x.id !== a.id && x.createdAt <= a.createdAt);
+  return old.map((o) => {
+    const out = setState(db, o.id, "superseded", now);
+    addEvent(db, out, "ask_cancel", askActor(out), o.title, { reason: "superseded", supersededBy: a.id }, now);
+    return out;
+  });
+}
+
+export function supersedeOlder(db: Database, a: Ask, now = Date.now()): Ask[] {
+  return tx(db, () => supersedeIn(db, a, now));
 }
 
 export function openAsk(db: Database, input: NewAsk, now = Date.now()): Ask {
@@ -203,7 +215,7 @@ const askActor = (a: Ask): string => a.fromAgent ?? a.createdBy ?? "system";
 
 /** 已结案 → conflict，current 带上库里的状态与答案（调用方据此回「已处理」） */
 function closedError(a: Ask): LedgerError {
-  const word = a.state === "answered" ? "处理" : a.state === "expired" ? "过期" : "撤销";
+  const word = a.state === "answered" ? "处理" : a.state === "expired" ? "过期" : a.state === "superseded" ? "被新版本取代" : "撤销";
   return new LedgerError("conflict", `ask ${a.id} 已${word}`, { state: a.state, answer: a.answer });
 }
 
