@@ -1,5 +1,5 @@
 /**
- * 巡检结果落库（audit_findings 表，ledger-store.ts 的 v2 迁移）：一轮结果对账成「新开 / 仍在 / 已解决」，去重也靠这张表——
+ * 巡检结果落库（audit_findings 表，迁移步骤在 ledger-audit-schema.ts）：一轮结果对账成「新开 / 仍在 / 已解决」，去重也靠这张表——
  * 已推过（notifiedAt 有值）且还开着的不再推，bridge 重启不重推。只有 CLI 写（bridge 对台账只读，见 ledger-read.ts）。
  * 同一个 key 解决后又出现 = 重新打开：清掉 resolvedAt / notifiedAt，firstSeen 取这次，会再推一次。
  */
@@ -42,7 +42,7 @@ export interface ReconcileResult {
 type Row = Record<string, unknown>;
 const toFinding = (r: Row) => r as unknown as StoredFinding;
 
-/** 表还不存在（库是 v1、写者还没升级过）→ 读侧当没有巡检结果 */
+/** 表还不存在（库停在巡检之前的版本、写者还没升级过）→ 读侧当没有巡检结果 */
 function hasAuditTable(db: Database): boolean {
   return !!db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'audit_findings'").get();
 }

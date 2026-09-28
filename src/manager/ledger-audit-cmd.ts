@@ -1,7 +1,7 @@
 /**
  * `ledger audit`：台账巡检（T29，docs/architecture/ledger-audit.md）。取快照 → 跑规则 → 结果对账进 audit_findings。
  * bridge 每 15 分钟经 runManager 跑一次（bridge/ledger-audit-service.ts），把 pending 推给 PM / 调度助理后再 --ack；
- * 手动跑同一条命令，--dry-run 只算不写（用只读连接，不迁移库，ledger.ts 的 realDeps）。输出一行 JSON；--json 带完整记录（bridge 用）。
+ * 手动跑同一条命令，--dry-run 只算不写（LedgerReader 的 query_only 连接：不建库、不迁移，ledger.ts 的 realDeps）。输出一行 JSON；--json 带完整记录（bridge 用）。
  */
 import { auditLedger, auditRecipient, type AuditFinding } from "../lib/ledger-audit.js";
 import { ackFindings, openFindings, reconcileFindings, type StoredFinding } from "../lib/ledger-audit-store.js";

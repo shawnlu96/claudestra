@@ -17,7 +17,8 @@ import { probeTurn } from "./turn-probe.js";
 const INTERVAL_MS = 15 * 60_000;
 /** 启动后多久跑第一轮：给 channel-server 重连留时间，否则收件人都算不在线 */
 const FIRST_DELAY_MS = 90_000;
-const AUDIT_CMD = `bun ${join(REPO_ROOT, "src/manager.ts")} ledger audit`;
+/** 通知末尾给收件人的查看命令：--dry-run 谁都能跑、只读；不带它的写入只有 owner / master 能跑（PM 会被拒） */
+const AUDIT_CMD = `bun ${join(REPO_ROOT, "src/manager.ts")} ledger audit --dry-run`;
 
 interface Client { ws: ServerWebSocket<unknown>; channelId: string; cwd?: string }
 type Outcome = { outcome?: { kind?: string } } | undefined;

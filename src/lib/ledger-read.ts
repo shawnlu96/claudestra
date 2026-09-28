@@ -113,7 +113,7 @@ export interface ProjectView {
   deps: DepView[];
   /** 最近 PROJECT_EVENTS_LIMIT 条 target 为空的项目级事件，seq 升序 */
   projectEvents: LedgerEvent[];
-  /** 巡检发现、还没解决的「可能漏了」（lib/ledger-audit.ts）；库还是 v1 = 空 */
+  /** 巡检发现、还没解决的「可能漏了」（lib/ledger-audit.ts）；库还没有 audit_findings 表 = 空 */
   audit: StoredFinding[];
 }
 

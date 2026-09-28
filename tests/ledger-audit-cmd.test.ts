@@ -142,6 +142,15 @@ describe("取数", () => {
       expect(parseReviewDescription("Recheck T8b P1 fixes").map((r) => r.taskId)).toEqual(["t8b", "p1"]); // p1 对不上台账 id，规则里自然忽略
       expect(parseReviewDescription("Review T8h+T11a r1")).toEqual([{ taskId: "t8h", round: 1 }, { taskId: "t11a", round: 1 }]);
     });
+    test("带连字符的任务号、reviewer / Reviews / Reviewing、不像任务号的 id；尾巴上的 -rN 是轮次", () => {
+      expect(parseReviewDescription("Review T2b-2 r1")).toEqual([{ taskId: "t2b-2", round: 1 }]);
+      expect(parseReviewDescription("Review HF-182 r1")).toEqual([{ taskId: "hf-182", round: 1 }]);
+      expect(parseReviewDescription("审查 T29-r1")).toEqual([{ taskId: "t29", round: 1 }]);
+      expect(parseReviewDescription("reviewer T12C").map((r) => r.taskId)).toEqual(["t12c"]);
+      expect(parseReviewDescription("Reviews T5 round 3")).toEqual([{ taskId: "t5", round: 3 }]); // 纯数字 3 不当任务号
+      expect(parseReviewDescription("Reviewing T40").map((r) => r.taskId)).toEqual(["t40"]);
+      expect(parseReviewDescription("Review release-v2.32.0").map((r) => r.taskId)).toEqual(["release-v2.32.0"]);
+    });
     test("不像审查的不算：Explore、previews 里的 review", () => {
       expect(parseReviewDescription("Explore the repo for T29")).toEqual([]);
       expect(parseReviewDescription("Build previews for T29")).toEqual([]);
