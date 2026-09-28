@@ -1,7 +1,7 @@
 /**
  * 收件箱（台账 i15，codex 复核意见「可见、可拉取的未读收件箱」）：agent 调 check_inbox，把排队给它的 agent 消息
  * （它在回合中时别的 agent 发来、押在 bridge/held-queue.ts 里等 Stop 的那些）现在就领回来，作为工具结果交给它——
- * 工具结果是回合中一定送得到的通道，不像 channel 通知在回合开头会被静默丢掉。
+ * 走的是工具结果这条通道，不是回合开头会被静默丢掉的 channel 通知；工具结果本身也可能丢（断线 / 回合取消），所以要租约。
  *
  * 领取 = 租约，不是出队：工具结果丢了、客户端断线、回合被取消都不该丢整批（codex 2026-09-28 复核）。agent 处理完用
  * check_inbox({ ack: batchId }) 确认才出队；租约内 Stop 不再投，INBOX_LEASE_MS 没确认就在回合结束时按普通消息重投
@@ -55,7 +55,40 @@ function batchText(batchId: string, texts: string[], note: string, left: number)
   return [head, ...texts.map((t, k) => t.replace("── 来自", `── ${k + 1}/${texts.length} · 来自`))].join("\n\n");
 }
 
-export async function takeInbox(ws: ServerWebSocket<unknown>, now = Date.now(), ack?: string): Promise<Result> {
+const PAGE_CHARS = 12_000;
+
+/** 分页读一条（太长进不了批的）：第一次读就给它单独打租约，读完照样 ack 确认，全文不会在回合结束时再投一遍 */
+async function readPaged(d: InboxDeps, channelId: string, messageId: string, page: number, now: number): Promise<Result> {
+  const it = (d.held.get(channelId) ?? []).find((i) => isAgentMsg(i) && i.env.meta.messageId === messageId);
+  if (!it) return { result: { n: 0, text: `收件箱里没有 message_id=${messageId}（已确认过，或已按普通消息送达）。` } };
+  if (!leaseActive(it, now)) {
+    d.calls.touch(channelId, it.env.from.kind === "local" ? it.env.from.channelId : undefined);
+    it.lease = { batchId: `inbox_${randomUUID().slice(0, 8)}`, at: now };
+    d.held.persist();
+  }
+  const text = await entryText(d, it, now);
+  const pages = Math.max(1, Math.ceil(text.length / PAGE_CHARS));
+  const p = Math.min(Math.max(1, Math.floor(page)), pages);
+  const next = p < pages ? `下一页 check_inbox({ read: "${messageId}", page: ${p + 1} })；` : "";
+  const head = `[📬 message_id=${messageId} 第 ${p}/${pages} 页。${next}读完处理后调 check_inbox({ ack: "${it.lease!.batchId}" }) 确认。]`;
+  return { result: { n: 1, text: `${head}\n\n${text.slice((p - 1) * PAGE_CHARS, p * PAGE_CHARS)}` } };
+}
+
+interface TakeOpts {
+  ack?: string;
+  /** 分页读某一条（message_id） */
+  read?: string;
+  page?: number;
+}
+
+/** bridge ws 请求 → takeInbox 选项（类型不对的字段忽略） */
+export function inboxOpts(msg: { ack?: unknown; read?: unknown; page?: unknown }): TakeOpts {
+  const str = (v: unknown) => (typeof v === "string" && v ? v : undefined);
+  return { ack: str(msg.ack), read: str(msg.read), page: typeof msg.page === "number" ? msg.page : undefined };
+}
+
+export async function takeInbox(ws: ServerWebSocket<unknown>, now = Date.now(), opts: TakeOpts = {}): Promise<Result> {
+  const { ack } = opts;
   if (!deps) return { error: "bridge 还没初始化收件箱" };
   const d = deps;
   const channelId = [...d.clients.entries()].find(([, c]) => c.ws === ws)?.[0];
@@ -64,6 +97,7 @@ export async function takeInbox(ws: ServerWebSocket<unknown>, now = Date.now(), 
     return { result: { n: 0, text: "收件箱正在按普通消息投递给你（这一轮刚结束？），稍后就到，不用再查。" } };
   }
   try {
+    if (opts.read) return await readPaged(d, channelId, opts.read, opts.page ?? 1, now);
     const acked = ack ? ackBatch(d, channelId, ack) : 0;
     const ackNote = ack ? (acked ? `已确认 ${ack}（${acked} 条出队）。` : `${ack} 没有待确认的条目（已确认过，或租约过期后已按普通消息送达）。`) : "";
     const q = d.held.get(channelId) ?? [];
@@ -84,7 +118,8 @@ export async function takeInbox(ws: ServerWebSocket<unknown>, now = Date.now(), 
       const text = await entryText(d, it, now);
       if (text.length > MAX_CHARS) {
         // 太长的不进批（租约只管整条）：先给开头，全文回合结束时按普通消息送达
-        previews.push(`${text.slice(0, PREVIEW_CHARS)}\n…（这条共 ${text.length} 字，这里只给开头；全文在你这一轮结束时送达，不用领）`);
+        const readHint = `要现在看全文用 check_inbox({ read: "${it.env.meta.messageId}" }) 分页读，否则这一轮结束时送达`;
+        previews.push(`${text.slice(0, PREVIEW_CHARS)}\n…（这条共 ${text.length} 字，这里只给开头；${readHint}）`);
         continue;
       }
       if (chars + text.length > MAX_CHARS) continue; // 这批放不下的等下一批（后面短的还能放进来）

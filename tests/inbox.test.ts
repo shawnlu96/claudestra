@@ -80,12 +80,12 @@ describe("takeInbox", () => {
     if ("error" in r1) throw new Error(r1.error);
     const batch = /inbox_\w+/.exec(r1.result.text)![0];
     expect(r1.result.text).toContain("还有 2 条");
-    const r2 = await takeInbox(me, 2000, batch);
+    const r2 = await takeInbox(me, 2000, { ack: batch });
     if ("error" in r2) throw new Error(r2.error);
     expect(r2.result.text).toContain(`已确认 ${batch}（10 条出队）`);
     expect(r2.result.n).toBe(2);
     expect(held.get("c-me")).toHaveLength(2);
-    const r3 = await takeInbox(me, 3000, batch);
+    const r3 = await takeInbox(me, 3000, { ack: batch });
     expect("result" in r3 && r3.result.text).toContain("没有待确认的条目");
   });
 
@@ -101,6 +101,26 @@ describe("takeInbox", () => {
     expect(r.result.n).toBe(1);
     expect(r.result.text).toContain("这条共"); // 超长的给开头预览，全文回合结束送达
     expect(held.get("c-me")!.filter((i) => i.lease).length).toBe(1);
+  });
+
+  test("超长的一条：预览里给 read 入口；分页读（第一次读就打租约），读完 ack 出队", async () => {
+    const big = item("z".repeat(30_000));
+    big.env.meta.messageId = "m-big";
+    const { held } = setup([big]);
+    const r = await takeInbox(me, 1000);
+    expect("result" in r && r.result.text).toContain('check_inbox({ read: "m-big" })');
+    const p1 = await takeInbox(me, 1000, { read: "m-big" });
+    if ("error" in p1) throw new Error(p1.error);
+    expect(p1.result.text).toContain("第 1/3 页");
+    expect(p1.result.text).toContain('page: 2');
+    const batch = held.get("c-me")![0].lease!.batchId;
+    const p3 = await takeInbox(me, 2000, { read: "m-big", page: 9 });
+    expect("result" in p3 && p3.result.text).toContain("第 3/3 页");
+    expect(held.get("c-me")![0].lease!.at).toBe(1000); // 读后面的页不续租
+    await takeInbox(me, 3000, { ack: batch });
+    expect(held.get("c-me") ?? []).toHaveLength(0);
+    const gone = await takeInbox(me, 4000, { read: "m-big" });
+    expect("result" in gone && gone.result.text).toContain("没有 message_id=m-big");
   });
 
   test("空的 / 正在被 Stop 投递（频道锁被占）/ 认不出调用方", async () => {
