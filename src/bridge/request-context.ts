@@ -36,3 +36,9 @@ export function setRequestContext(req: Request, ctx: RequestContext): void {
 export function requestContextOf(req: Request): RequestContext {
   return contexts.get(req) ?? LEAST_PRIVILEGE;
 }
+
+/** 请求是不是经中继来的；没设过上下文（判不出来源）也算——要「不经中继」才放行的判断，一律 fail-closed */
+export function viaRelayOrUnknown(req: Request): boolean {
+  const ctx = contexts.get(req);
+  return !ctx || ctx.source === "relay";
+}

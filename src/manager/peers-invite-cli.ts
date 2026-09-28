@@ -10,7 +10,8 @@ export async function runPeerInviteCommand(cmd: string, args: string[]): Promise
   switch (cmd) {
     case "peer-invite-new": {
       const { rest: afterLegacy, value: allowLegacy } = extractBoolFlag(args, "--allow-legacy"); // 明文邀请：对方是老版本才用
-      const { rest: afterForce, value: force } = extractBoolFlag(afterLegacy, "--force");
+      const { rest: afterPage, value: viaRelayPage } = extractBoolFlag(afterLegacy, "--via-relay-page"); // bridge 内部用：经中继的网页生成
+      const { rest: afterForce, value: force } = extractBoolFlag(afterPage, "--force");
       let agentsCsv = "", myUrl = "";
       for (let i = 0; i < afterForce.length; i++) {
         const a = afterForce[i];
@@ -19,7 +20,7 @@ export async function runPeerInviteCommand(cmd: string, args: string[]): Promise
         else if (a === "--url") myUrl = afterForce[++i] || "";
         else if (a.startsWith("--url=")) myUrl = a.slice(6);
       }
-      await cmdPeerInviteNew(agentsCsv, myUrl, force, allowLegacy);
+      await cmdPeerInviteNew(agentsCsv, myUrl, force, allowLegacy || viaRelayPage, viaRelayPage);
       break;
     }
     case "peer-invite-redeem": {

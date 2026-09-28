@@ -9,6 +9,14 @@ import { recordPeerFp } from "./peer-trust.js";
 import { readPeers, writePeers, type HttpPeer } from "./peers.js";
 import { STATE_DIR } from "./paths.js";
 
+/**
+ * 经中继打开的网页（托管前端）上管理 peer 邀请时给 owner 的话（docs/relay/e2e-design.md §5.1、§6.1 第 12 条）：
+ * 那种页面的邀请原文明文经过中继，中继能换掉里面的公钥，所以只能生成不加密的邀请、不能加入加密邀请。两句话给同一个替代做法。
+ */
+export const RELAY_PAGE_INVITE_WARNING = "这条邀请不加密：经中继打开的页面，中继看得到邀请内容。想要加密，请在本机页面或命令行（peer-invite-new）生成";
+export const RELAY_PAGE_JOIN_REFUSED =
+  "这是加密邀请，经中继打开的页面不能加入：中继看得到邀请内容，还能换掉里面的公钥。请在本机页面或命令行（peer-join-auto）加入；也可以请对方用 --allow-legacy 生成不加密的邀请";
+
 /** P1 不做轮换命令，本机签名块的版本恒为 1（块里留着版本字段给以后换钥匙用） */
 const E2E_KEY_VERSION = 1;
 

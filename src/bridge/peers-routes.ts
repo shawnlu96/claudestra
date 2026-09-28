@@ -4,7 +4,9 @@
  */
 import type { Principal } from "../lib/principals.js";
 import { readPrincipals, tokenIdOf } from "../lib/principals.js";
-import { readPeers } from "../lib/peers.js";
+import { parsePeerInviteV2, readPeers } from "../lib/peers.js";
+import { RELAY_PAGE_JOIN_REFUSED } from "../lib/peer-e2e-local.js";
+import { viaRelayOrUnknown } from "./request-context.js";
 import { readRegistryAgents } from "../lib/registry.js";
 import { recordMetric } from "../lib/metrics.js";
 import { instanceKeySync, keyFingerprint } from "../lib/instance-key.js";
@@ -106,14 +108,17 @@ async function inviteAction(req: Request, path: string, runManager: RunManager):
     ? body.agents.map((s: unknown) => String(s).trim()).filter(Boolean).join(",")
     : "";
   const flags: string[] = body?.force ? ["--force"] : [];
+  // 经中继打开的页面（或判不出来源）：邀请原文明文过中继，中继能换公钥——只生成不加密的邀请，不加入加密邀请（e2e-design §5.1）
+  const viaRelay = viaRelayOrUnknown(req);
   let r: any;
   if (path === "/peers/invite-new") {
     if (!agentsCsv) return apiJson(400, { ok: false, error: '"agents" must be a non-empty array' });
     r = await runManager("peer-invite-new", "--agents", agentsCsv,
-      ...(body?.url ? ["--url", String(body.url)] : []), ...flags);
+      ...(body?.url ? ["--url", String(body.url)] : []), ...flags, ...(viaRelay ? ["--via-relay-page"] : []));
   } else if (path === "/peers/join-auto") {
     const invite = String(body?.invite ?? "").trim();
     if (!invite) return apiJson(400, { ok: false, error: '"invite" required' });
+    if (viaRelay && parsePeerInviteV2(invite)?.ek) return apiJson(400, { ok: false, error: RELAY_PAGE_JOIN_REFUSED });
     r = await runManager("peer-join-auto", invite,
       ...(agentsCsv ? ["--agents", agentsCsv] : []),
       ...(body?.url ? ["--url", String(body.url)] : []), ...flags);

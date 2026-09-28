@@ -17,7 +17,7 @@ import { handlePeerRedeem } from "../src/bridge/peer-redeem-route.ts";
 import { makeInboundHandler } from "../src/bridge/relay-inbound.ts";
 import { keyFingerprint, signedHeaders } from "../src/lib/instance-key.ts";
 import { STATE_DIR } from "../src/lib/paths.ts";
-import { localE2e, pinPeerE2eKey, readHttpPeers, type LocalE2e } from "../src/lib/peer-e2e-local.ts";
+import { localE2e, pinPeerE2eKey, readHttpPeers, RELAY_PAGE_INVITE_WARNING, type LocalE2e } from "../src/lib/peer-e2e-local.ts";
 import { createE2eOutbound } from "../src/lib/peer-e2e-outbound.ts";
 import { openRedeemRequest, readRedeemResponse, sealRedeemRequest, sealRedeemResponse, type SealedRedeem } from "../src/lib/peer-e2e-redeem.ts";
 import { loadRelayPeerView, relayPeerRefusal } from "../src/lib/peer-trust.ts";
@@ -197,6 +197,13 @@ describe("兑换", () => {
     const tok = (await readPrincipals()).principals.find((p) => p.secret === inv.token);
     expect(tok?.disabled).toBe(true);
     expect((await redeem(inv, true)).outcome).toMatchObject({ ok: false }); // 口令已作废，加密兑换也不行了
+  });
+
+  test("经中继的网页生成（--via-relay-page）：不加密，警告写清「中继看得到」和想加密该去哪生成", async () => {
+    const o = await managerInProcess("peer-invite-new", "--agents", "x", "--url", httpBase, "--via-relay-page");
+    expect(o).toMatchObject({ ok: true, e2e: false });
+    expect(o.warnings).toContain(RELAY_PAGE_INVITE_WARNING);
+    expect(parsePeerInviteV2(o.invite)?.ek).toBeUndefined();
   });
 
   test("--allow-legacy：CLI 打警告，明文兑换放行，建出的是 legacy peer（明文请求照旧可用）", async () => {

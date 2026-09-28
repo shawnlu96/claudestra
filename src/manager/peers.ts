@@ -10,7 +10,7 @@ import { resolveMyBridgeUrl } from "./peers-net.js";
 import { inviteLink, isPeerBaseUrl, relayUrlOf } from "../lib/peers.js";
 import { myFingerprint, peerCliFetch, relayStatus } from "./relay.js";
 import type { SignedE2eKey } from "../lib/e2e-machine-key.js";
-import { localE2e } from "../lib/peer-e2e-local.js";
+import { localE2e, RELAY_PAGE_INVITE_WARNING } from "../lib/peer-e2e-local.js";
 
 /** bridge 兑换路由验过签、核过发送方后传来的 --e2e JSON（{idk, ek}）；形状不对当没有 */
 function redeemE2e(raw: string): { idk: string; ek: SignedE2eKey } | null {
@@ -295,7 +295,7 @@ const LEGACY_INVITE_WARNING = "这张邀请不加密（--allow-legacy）：兑�
 const LEGACY_REDEEM_REFUSED = "对方版本太旧，请先升级；确实要连就用 peer-invite-new --allow-legacy 重新生成邀请（这张邀请的兑换口令已明文经过网络，已作废）";
 
 /** 生成一键邀请：预签入站 token + 登记待兑换记录,输出 v2 邀请串。缺省带密钥（兑换走 HPKE、之后整体加密），--allow-legacy 才生成明文邀请 */
-export async function cmdPeerInviteNew(agentsCsv: string, myUrl: string, force: boolean, allowLegacy = false) {
+export async function cmdPeerInviteNew(agentsCsv: string, myUrl: string, force: boolean, allowLegacy = false, viaRelayPage = false) {
   const { addPendingInvite, encodePeerInviteV2, INVITE_TTL_MS } = await import("../lib/peers.js");
   const { randomBytes } = await import("crypto");
   const agents = agentsCsv.split(",").map((s) => s.trim()).filter(Boolean);
@@ -331,7 +331,7 @@ export async function cmdPeerInviteNew(agentsCsv: string, myUrl: string, force: 
   const invite = encodePeerInviteV2({ v: 2, name: selfPeerName(), url: myUrl, token: secret, join: joinSecret, fp: myFingerprint(), ...(keys ?? {}) });
   output({
     ok: true, id, agents, myUrl, expiresAt: new Date(now + INVITE_TTL_MS).toISOString(), e2e: !!keys,
-    warnings: [...check.warnings, ...(resolved.note ? [resolved.note] : []), ...(keys ? [] : [LEGACY_INVITE_WARNING])],
+    warnings: [...check.warnings, ...(resolved.note ? [resolved.note] : []), ...(keys ? [] : [viaRelayPage ? RELAY_PAGE_INVITE_WARNING : LEGACY_INVITE_WARNING])],
     invite, ...(relay?.connected && relay.base ? { link: inviteLink(relay.base, invite), fp: relay.fp } : {}),
     next: relay?.connected ? "把链接发给对方，点开即完成（没装 Claudestra 的人会看到安装指引）。24h 未兑换自动作废。" : "把邀请串发给对方（走任意私聊渠道）→ 对方粘贴即完成。24h 未兑换自动作废。",
   });
