@@ -82,11 +82,19 @@ async function git(d: FactsDeps, repo: string, ...args: string[]) {
 }
 
 /** PR 引用 → gh api 用的 {repo, number}：GitHub 链接带 owner/repo；#12 / 12 用当前仓库（gh 的 {owner}/{repo} 占位） */
+/** 整串锚定：task.pr 执行者能写，前面夹带 `-R evil/x ` 之类的也得认不出，不能被当成那个 PR */
 function parsePrRef(ref: string): { repo: string; number: string } | null {
-  const url = ref.match(/github\.com\/([^/]+\/[^/]+)\/pull\/(\d+)\/?$/);
+  const url = ref.trim().match(/^https:\/\/github\.com\/([\w.-]+\/[\w.-]+)\/pull\/(\d+)\/?$/);
   if (url) return { repo: url[1], number: url[2] };
-  const n = ref.match(/^#?(\d+)$/)?.[1];
+  const n = ref.trim().match(/^#?(\d+)$/)?.[1];
   return n ? { repo: "{owner}/{repo}", number: n } : null;
+}
+
+/** 交给 gh 的 PR 参数：按解析结果重新拼（规范 URL 或纯编号），从不原样转交 task.pr；认不出 → null */
+export function ghPrArg(ref: string): string | null {
+  const id = parsePrRef(ref);
+  if (!id) return null;
+  return id.repo.startsWith("{") ? id.number : `https://github.com/${id.repo}/pull/${id.number}`;
 }
 
 type PrFacts = NonNullable<VerifyFacts["pr"]>;
@@ -95,8 +103,9 @@ type PrFacts = NonNullable<VerifyFacts["pr"]>;
 async function prFacts(d: FactsDeps, ref: string): Promise<PrFacts> {
   const base: PrFacts = { ref, state: null, head: null, branch: null, base: null, mergeCommit: null, mergedAt: null, files: null };
   const id = parsePrRef(ref);
-  if (!id) return { ...base, error: `认不出 PR 编号：${ref}` };
-  const r = await d.run(["gh", "pr", "view", ref, "--json", "state,mergeCommit,mergedAt,headRefOid,headRefName,baseRefOid"]);
+  const arg = ghPrArg(ref);
+  if (!id || !arg) return { ...base, error: `认不出 PR 编号：${ref}` };
+  const r = await d.run(["gh", "pr", "view", arg, "--json", "state,mergeCommit,mergedAt,headRefOid,headRefName,baseRefOid"]);
   if (r.code !== 0) return { ...base, error: firstLine(r.stderr) || `gh 退出码 ${r.code}` };
   let pr: PrFacts;
   try {

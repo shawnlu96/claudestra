@@ -18,7 +18,7 @@ import {
 } from "../lib/ledger-probes.js";
 import { getEventByDedup, LedgerError } from "../lib/ledger-store.js";
 import type { LedgerTask } from "../lib/ledger-stages.js";
-import { collectPrStage, collectVerifyFacts, mainRepoRoot, originRepo, prRepo, realFactsDeps, type FactsDeps } from "../lib/ledger-verify-facts.js";
+import { collectPrStage, collectVerifyFacts, ghPrArg, mainRepoRoot, originRepo, prRepo, realFactsDeps, type FactsDeps } from "../lib/ledger-verify-facts.js";
 import { recordVerify } from "../lib/ledger-write.js";
 import { dirKey } from "../lib/project-dirs.js";
 import { normalizeDir, resolveProjectForRealDir } from "../lib/projects.js";
@@ -97,29 +97,29 @@ async function siblingCounterEvidence(fd: FactsDeps, task: LedgerTask, origin: s
   const branch = task.branch ?? "";
   const params = { branch, origin, task: task.id, link: task.pr ?? "", head: "", pr: "", error: "" };
   if (!branch) return { tpl: "任务没记分支，核对不了本仓库 {origin} 上有没有它的 PR：PM 先 ledger task-set {task} --branch <分支> 再重跑", params };
-  const view = await ghJson(fd, ["pr", "view", params.link, "--json", "headRefName"]);
+  const view = await ghJson(fd, ["pr", "view", ghPrArg(params.link) ?? "", "--json", "headRefName"]); // ownership 已确认认得出
   const head = view.ok ? (view.value as { headRefName?: unknown } | null)?.headRefName : undefined;
   if (typeof head !== "string") return { tpl: "查不了 PR {link} 的分支（{error}），按判断不了处理", params: { ...params, error: view.ok ? "no headRefName" : view.error } };
   if (head !== branch) return { tpl: "PR {link} 的分支是 {head}，任务记的分支是 {branch}：对不上就核不了是不是这个任务的，改对 PR 链接或分支后重跑", params: { ...params, head } };
   const list = await ghJson(fd, ["pr", "list", "--repo", origin, "--head", branch, "--state", "all", "--json", "number", "--limit", "5"]);
-  if (!list.ok || !Array.isArray(list.value)) {
-    return { tpl: "查不了本仓库 {origin} 上有没有分支 {branch} 的 PR（{error}），按判断不了处理", params: { ...params, error: list.ok ? "not an array" : list.error } };
+  const nums = list.ok && Array.isArray(list.value) ? list.value.map((p) => (p as { number?: unknown } | null)?.number) : null;
+  if (!nums || !nums.every((n) => typeof n === "number")) {
+    return { tpl: "查不了本仓库 {origin} 上有没有分支 {branch} 的 PR（{error}），按判断不了处理", params: { ...params, error: list.ok ? "unexpected output" : list.error } };
   }
-  if (!list.value.length) return null;
-  const pr = list.value.map((p) => `#${(p as { number?: unknown } | null)?.number}`).join(" ");
+  if (!nums.length) return null;
+  const pr = nums.map((n) => `#${n}`).join(" ");
   return { tpl: "本仓库 {origin} 上有分支 {branch} 的 PR {pr}：这是本仓库的活，PR 链接应该指向它", params: { ...params, pr } };
 }
 
 /**
  * PR 指向项目里另一个仓库：PM 在 extra.repo 声明过同一个仓库 → no（只核证据，还要过 siblingCounterEvidence）；
- * 没声明 / 声明的不一样 → unknown 并给出原因（项目目录明确不含本仓库时 ownership 照旧按目录判，也要过反证）。
+ * 没声明 → unknown 并提示怎么声明（项目目录明确不含本仓库时 ownership 照旧按目录判，也要过反证）。声明了别的仓库在 ownership 先拦下。
  * 执行者能改 PR 链接、改不了 extra，本仓库的活挂错另一个仓库的 PR 就停在这里。
  */
 function siblingOwnership(task: LedgerTask, pr: string, dir: string): Ownership {
   const declared = asInvalid(() => parseExtraRepo(task.extra.repo));
   const params = { project: task.project, prRepo: pr, dir, task: task.id, declared: declared ?? "" };
   if (declared === pr) return { owns: "no", note: { tpl: "PR 属于项目 {project} 的另一个仓库 {prRepo}（{dir}），本仓库的探针核不了，只核证据文件（--evidence）", params } };
-  if (declared) return { owns: "unknown", note: { tpl: "PR 指向项目 {project} 的另一个仓库 {prRepo}（{dir}），但 PM 声明的仓库是 {declared}：改对 PR 链接或 extra.repo 后重跑", params } };
   const cmd = `ledger task-set ${task.id} --rev <rev> --extra '${JSON.stringify({ ...task.extra, repo: pr })}'`;
   return {
     owns: "unknown",
@@ -136,6 +136,11 @@ async function ownership(c: LedgerCli, fd: FactsDeps, task: LedgerTask): Promise
   const pr = task.pr ? prRepo(task.pr) : null;
   const origin = pr ? await originRepo(fd) : null;
   if (pr && !origin) return { owns: "unknown" };
+  // PM 写了声明就必须和 PR 对得上，哪条路都一样（包括 PR 在本仓库、目录明确不含本仓库），对不上不能静默忽略
+  const declared = asInvalid(() => parseExtraRepo(task.extra.repo));
+  if (pr && declared && declared !== pr) {
+    return { owns: "unknown", note: { tpl: "PR 指向 {prRepo}，但 PM 声明的仓库是 {declared}：改对 PR 链接或 extra.repo 后重跑", params: { prRepo: pr, declared } } };
+  }
   if (pr && origin === pr) return { owns: "yes" };
   const project = task.project;
   const sib = pr ? await siblingRepoDir(c, fd, task, pr) : null;

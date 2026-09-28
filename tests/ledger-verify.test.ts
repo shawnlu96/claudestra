@@ -352,9 +352,11 @@ describe("没 PR 与别的项目", () => {
     expect(await pm("verify", "T38", "--evidence", "docs/r.md")).toMatchObject({ ok: false, result: "unknown", note: expect.stringContaining("HTTP 502") });
     liveTask("T39", { pr: RELAY_PR, branch: null, extra: { repo: "shawnlu96/claudestra-relay" } });
     expect(await pm("verify", "T39", "--evidence", "docs/r.md")).toMatchObject({ ok: false, result: "unknown", note: expect.stringContaining("任务没记分支") });
-    for (const raw of ["{}", '"x"', "null"]) {
+    for (const raw of ["{}", '"x"', "null", "[{}]"]) {
       sc.branchPrs = { raw }; // gh 输出是 JSON 但不是数组：按查不了处理，不当成「没有 PR」
-      expect(await pm("verify", "T38", "--evidence", "docs/r.md")).toMatchObject({ ok: false, result: "unknown", note: expect.stringContaining("查不了本仓库") });
+      const r = await pm("verify", "T38", "--evidence", "docs/r.md");
+      expect(r.error).not.toContain("undefined"); // 先断言：bun 的 toMatchObject 会把 received 里匹配上的字段换成匹配器
+      expect(r).toMatchObject({ ok: false, result: "unknown", note: expect.stringContaining("查不了本仓库") });
     }
     sc.branchPrs = [];
     sc.branch = "task/other"; // relay 那边 PR 的分支和任务记的不一样：核不了是不是这个任务的
@@ -380,6 +382,23 @@ describe("没 PR 与别的项目", () => {
     expect(r.error).toContain("PM 还没声明");
     liveTask("T35", { pr: RELAY_PR, extra: { repo: "shawnlu96/other" } });
     expect(await pm("verify", "T35", "--evidence", "docs/r.md")).toMatchObject({ ok: false, result: "unknown", noteTpl: expect.stringContaining("PM 声明的仓库是 {declared}") });
+    // 声明对不上哪条路都不能静默忽略：M16（目录明确不含本仓库）、PR 就在本仓库，都判断不了
+    sc.projects = [proj(P, ["/relay"])];
+    expect(await pm("verify", "T35", "--evidence", "docs/r.md")).toMatchObject({ ok: false, result: "unknown", noteParams: { declared: "shawnlu96/other" } });
+    liveTask("T40", { extra: { repo: "shawnlu96/claudestra-relay" } });
+    expect(await pm("verify", "T40", "--dry-run")).toMatchObject({ result: "unknown", noteParams: { prRepo: "x/y", declared: "shawnlu96/claudestra-relay" } });
+  });
+  test("PR 链接前后夹带参数（-R evil/x …）认不出，不会原样交给 gh", async () => {
+    relayProject();
+    sc.sizes["docs/r.md"] = 500;
+    for (const [id, pr] of [["T41", `-R evil/x ${RELAY_PR}`], ["T42", "-R evil/x https://github.com/x/y/pull/150"], ["T43", `${RELAY_PR} --repo evil/x`]] as const) {
+      liveTask(id, { pr, extra: { repo: "shawnlu96/claudestra-relay" } });
+      expect((await pm("verify", id, "--evidence", "docs/r.md")).ok).toBe(false);
+    }
+    expect(calls.filter((c) => c.startsWith("gh ") && /evil|-R /.test(c))).toEqual([]);
+    liveTask("T44", { pr: ` ${RELAY_PR} `, extra: { repo: "shawnlu96/claudestra-relay" } }); // 首尾空白照认，拼出规范 URL
+    expect(await pm("verify", "T44", "--evidence", "docs/r.md")).toMatchObject({ ok: true, moved: true });
+    expect(calls).toContain(`gh pr view ${RELAY_PR} --json headRefName`);
   });
   test("M3：本仓库的活，执行者在 build 阶段把 PR 改成 relay 的 → 进不了 verified；执行者也写不了 extra.repo", async () => {
     relayProject();

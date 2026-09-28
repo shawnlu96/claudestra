@@ -123,8 +123,7 @@ export const COLLAB_DICT: Record<string, string> = {
   "PR {link} 的分支是 {head}，任务记的分支是 {branch}：对不上就核不了是不是这个任务的，改对 PR 链接或分支后重跑":
     "PR {link} is from branch {head}, but the task records branch {branch}; without a match we can’t confirm it belongs to this task — fix the PR link or the branch, then rerun",
   "本仓库 {origin} 上有分支 {branch} 的 PR {pr}：这是本仓库的活，PR 链接应该指向它": "{origin} has PR {pr} from branch {branch}: this is this repository’s work, so the PR link should point there",
-  "PR 指向项目 {project} 的另一个仓库 {prRepo}（{dir}），但 PM 声明的仓库是 {declared}：改对 PR 链接或 extra.repo 后重跑":
-    "The PR points to {prRepo} ({dir}), another repository of project {project}, but the PM declared {declared} — fix the PR link or extra.repo, then rerun",
+  "PR 指向 {prRepo}，但 PM 声明的仓库是 {declared}：改对 PR 链接或 extra.repo 后重跑": "The PR points to {prRepo}, but the PM declared {declared} — fix the PR link or extra.repo, then rerun",
   "PR 指向项目 {project} 的另一个仓库 {prRepo}（{dir}），PM 还没声明这个任务属于它：确实是那边的活就由 PM 跑 {cmd}，否则把 PR 改回本仓库的":
     "The PR points to {prRepo} ({dir}), another repository of project {project}, and no PM has declared the task belongs there: if it does, a PM runs {cmd}; otherwise point the PR back",
   "PR 属于项目 {project} 的另一个仓库 {prRepo}（{dir}），本仓库的探针核不了，只核证据文件（--evidence）":
