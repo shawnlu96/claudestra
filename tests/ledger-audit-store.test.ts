@@ -4,7 +4,7 @@ import { describe, expect, test } from "bun:test";
 import type { AuditFinding, AuditRule } from "../src/lib/ledger-audit.js";
 import { ackFindings, openFindings, reconcileFindings } from "../src/lib/ledger-audit-store.js";
 import { LedgerReader, ledgerFeedTicker, projectView } from "../src/lib/ledger-read.js";
-import { closeLedger, LEDGER_SCHEMA_VERSION, listEvents, openLedger } from "../src/lib/ledger-store.js";
+import { AUDIT_SCHEMA_VERSION, closeLedger, listEvents, openLedger } from "../src/lib/ledger-store.js";
 import { seedLedger, tempLedgerPath } from "./ledger-test-helpers.js";
 
 const ALL: AuditRule[] = ["review_no_reviewer", "pm_held", "ship_stalled"];
@@ -64,6 +64,40 @@ describe("reconcileFindings", () => {
     expect(openFindings(db, "p")).toHaveLength(1);
   });
 
+  test("keep 里的 key 这一轮没出现也保持打开（押着的消息在 PM 忙时），不会关了又开再推一次", () => {
+    const { db } = fresh();
+    reconcileFindings(db, "p", [finding("h", "pm_held")], ALL, 100);
+    ackFindings(db, ["p|pm_held|h"], 110);
+    const busy = reconcileFindings(db, "p", [], ALL, 200, { keep: ["p|pm_held|h"] });
+    expect(busy.resolved).toEqual([]);
+    const idle = reconcileFindings(db, "p", [finding("h", "pm_held")], ALL, 300);
+    expect(idle.opened).toEqual([]);
+    expect(idle.pending).toEqual([]);
+  });
+
+  test("押后的通知：--queued 先记 messageId，不算推过也不再进 pending；队里没了才补 notifiedAt", () => {
+    const { db } = fresh();
+    reconcileFindings(db, "p", [finding("a")], ALL, 100);
+    expect(ackFindings(db, ["p|review_no_reviewer|a"], 110, "audit_m1")).toBe(1);
+    const still = reconcileFindings(db, "p", [finding("a")], ALL, 200, { stillQueued: (id) => id === "audit_m1" });
+    expect(still.pending).toEqual([]);
+    expect(openFindings(db, "p")[0]).toMatchObject({ queuedAs: "audit_m1", notifiedAt: null });
+    reconcileFindings(db, "p", [finding("a")], ALL, 300, { stillQueued: () => false });
+    expect(openFindings(db, "p")[0]).toMatchObject({ notifiedAt: 300 });
+  });
+
+  test("押后状态不明（没传 stillQueued）→ 当还在队里，不补 notifiedAt；重开时 queuedAs 清掉", () => {
+    const { db } = fresh();
+    reconcileFindings(db, "p", [finding("a")], ALL, 100);
+    ackFindings(db, ["p|review_no_reviewer|a"], 110, "audit_m1");
+    reconcileFindings(db, "p", [finding("a")], ALL, 200);
+    expect(openFindings(db, "p")[0].notifiedAt).toBeNull();
+    reconcileFindings(db, "p", [], ALL, 300);
+    const r = reconcileFindings(db, "p", [finding("a")], ALL, 400);
+    expect(r.pending).toHaveLength(1);
+    expect(r.pending[0].queuedAs).toBeNull();
+  });
+
   test("解决后同一个 key 又出现 → 重开：firstSeen 取这次、notifiedAt 清空、会再推", () => {
     const { db } = fresh();
     reconcileFindings(db, "p", [finding("a")], ALL, 100);
@@ -105,7 +139,7 @@ describe("读侧", () => {
     const path = tempLedgerPath("ledger-audit-v1-");
     seedLedger(path);
     const raw = new Database(path);
-    raw.exec(`DROP TABLE audit_findings; PRAGMA user_version = ${LEDGER_SCHEMA_VERSION - 1}`);
+    raw.exec(`DROP TABLE audit_findings; PRAGMA user_version = ${AUDIT_SCHEMA_VERSION - 1}`);
     raw.close();
     const reader = new LedgerReader(path);
     const db = reader.get();

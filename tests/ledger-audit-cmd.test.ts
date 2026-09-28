@@ -1,14 +1,15 @@
 /** 台账巡检的取数（lib/ledger-audit-snapshot.ts）、CLI（ledger audit）与 bridge 定时器（bridge/ledger-audit-service.ts） */
-import type { Database } from "bun:sqlite";
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { Database } from "bun:sqlite";
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { mkdirSync, mkdtempSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ledgerAuditTicker, type LedgerAuditDeps } from "../src/bridge/ledger-audit-service.js";
 import type { Envelope } from "../src/bridge/router.js";
 import { projectsSlug } from "../src/lib/jsonl-cost.js";
-import { collectAuditSnapshots, runningReviewers, type SnapshotSources } from "../src/lib/ledger-audit-snapshot.js";
-import { closeLedger, openLedger } from "../src/lib/ledger-store.js";
+import { parseReviewDescription, runningReviewers } from "../src/lib/ledger-audit-reviewers.js";
+import { collectAuditSnapshots, type SnapshotSources } from "../src/lib/ledger-audit-snapshot.js";
+import { AUDIT_SCHEMA_VERSION, closeLedger, LEDGER_MIGRATIONS, openLedger } from "../src/lib/ledger-store.js";
 import { createTask, moveStage, setMeta } from "../src/lib/ledger-write.js";
 import type { RegistryAgent } from "../src/lib/registry.js";
 import type { Registry } from "../src/manager/core.js";
@@ -28,14 +29,14 @@ let path: string;
 
 function sources(over: Partial<SnapshotSources> = {}): SnapshotSources {
   const reg: RegistryAgent[] = [
-    { name: PM, channelId: "c-pm", projectId: P },
-    { name: EXE, channelId: "c-exe", projectId: P },
+    { name: PM, channelId: "c-pm", projectId: P, cwd: dir, sessionId: "s-pm" },
+    { name: EXE, channelId: "c-exe", projectId: P, cwd: dir, sessionId: "s-exe" },
   ];
   return {
     registry: async () => reg,
     windows: async () => ["master", PM, EXE],
     turn: async () => "idle",
-    lastWrite: async () => NOW - 60 * MIN,
+    fileTimes: async () => ({ lastWriteAt: NOW - 60 * MIN, startedAt: 0 }),
     reviewers: () => [],
     heldPath: join(dir, "held-messages.json"),
     ...over,
@@ -105,7 +106,36 @@ describe("取数", () => {
     expect(asked).toEqual([PM]); // T1 在 review，执行者不用抓屏
   });
 
-  describe("审查员（PM 会话的 subagents）", () => {
+  test("审查员扫描：本项目所有 agent 加 PM 名单；PM 读失败 → reviewers 为 null 并写明原因", async () => {
+    const scanned: string[] = [];
+    await collectAuditSnapshots(db, [P], NOW, sources({ reviewers: (a) => (scanned.push(a.name), []) }));
+    expect(scanned.sort()).toEqual([PM, EXE].sort());
+    const [s] = await collectAuditSnapshots(db, [P], NOW, sources({ reviewers: (a) => (a.name === PM ? { error: "读不了" } : []) }));
+    expect(s.reviewers).toBeNull();
+    expect(s.unavailable?.reviewers).toBe("读不了");
+  });
+
+  test("合并队列冻结状态带进快照", async () => {
+    expect((await collectAuditSnapshots(db, [P], NOW, sources()))[0].queueFrozen).toBe(false);
+  });
+
+  describe("审查员 description 的写法", () => {
+    test("约定写法、中文、round N、Recheck、复验、一次审两个；任务号一律小写", () => {
+      expect(parseReviewDescription("Review T29 r1")).toEqual([{ taskId: "t29", round: 1 }]);
+      expect(parseReviewDescription("Adversarial review T13a r3")).toEqual([{ taskId: "t13a", round: 3 }]);
+      expect(parseReviewDescription("审查 T29 r1")).toEqual([{ taskId: "t29", round: 1 }]);
+      expect(parseReviewDescription("Review T12b round 3")).toEqual([{ taskId: "t12b", round: 3 }]);
+      expect(parseReviewDescription("T8G 复验 第2轮").map((r) => r.taskId)).toContain("t8g");
+      expect(parseReviewDescription("Recheck T8b P1 fixes").map((r) => r.taskId)).toEqual(["t8b", "p1"]); // p1 对不上台账 id，规则里自然忽略
+      expect(parseReviewDescription("Review T8h+T11a r1")).toEqual([{ taskId: "t8h", round: 1 }, { taskId: "t11a", round: 1 }]);
+    });
+    test("不像审查的不算：Explore、previews 里的 review", () => {
+      expect(parseReviewDescription("Explore the repo for T29")).toEqual([]);
+      expect(parseReviewDescription("Build previews for T29")).toEqual([]);
+    });
+  });
+
+  describe("审查员（会话的 subagents）", () => {
     const home = process.env.HOME;
     const sid = "sess-1";
     let sub: string;
@@ -132,12 +162,26 @@ describe("取数", () => {
       subagent("c", "Review T30 r1", { content: [{ type: "text", text: "结论" }], stop_reason: "end_turn" });
       subagent("d", "Review T31 r2", running, Date.now() - 31 * MIN);
       subagent("e", "Explore the repo", running);
-      const got = runningReviewers({ name: PM, cwd: dir, sessionId: sid }, Date.now());
-      expect(got.sort((x, y) => x.taskId.localeCompare(y.taskId))).toEqual([{ taskId: "T13a", round: 3 }, { taskId: "T29", round: 1 }]);
+      const got = runningReviewers({ name: PM, cwd: dir, sessionId: sid }, Date.now()) as { taskId: string }[];
+      expect(got.map((x) => x.taskId).sort()).toEqual(["t13a", "t29"]);
     });
-    test("没派过 subagent / registry 缺会话信息 → 空", () => {
+    test("没派过 subagent（目录不存在）→ 空；缺会话信息 → error", () => {
       expect(runningReviewers({ name: PM, cwd: dir, sessionId: "other" }, Date.now())).toEqual([]);
-      expect(runningReviewers({ name: PM }, Date.now())).toEqual([]);
+      expect(runningReviewers({ name: PM }, Date.now())).toEqual({ error: expect.stringContaining("缺 cwd / sessionId") });
+    });
+    test("近期的 subagent 缺 .meta.json 或损坏 → error（判不出是不是审查员，不能当没有）", () => {
+      subagent("a", "Review T29 r1", running);
+      writeFileSync(join(sub, "agent-a.meta.json"), "{坏");
+      expect(runningReviewers({ name: PM, cwd: dir, sessionId: sid }, Date.now())).toEqual({ error: expect.stringContaining("读不了") });
+      writeFileSync(join(sub, "agent-b.jsonl"), "");
+      expect(runningReviewers({ name: PM, cwd: dir, sessionId: sid }, Date.now())).toEqual({ error: expect.any(String) });
+    });
+    test("早就结束的旧 subagent 缺 meta 不影响（不读它的 meta）", () => {
+      const f = join(sub, "agent-old.jsonl");
+      writeFileSync(f, "");
+      const old = (Date.now() - 60 * MIN) / 1000;
+      utimesSync(f, old, old);
+      expect(runningReviewers({ name: PM, cwd: dir, sessionId: sid }, Date.now())).toEqual([]);
     });
   });
 });
@@ -182,54 +226,84 @@ describe("ledger audit", () => {
   });
 });
 
+describe("ledger audit 的权限与只读", () => {
+  test("写巡检结果：执行者不行；PM 只能 --project 自己的项目；owner 随便跑", async () => {
+    expect(await cli(EXE)).toMatchObject({ ok: false, code: "forbidden" });
+    expect(await cli(PM)).toMatchObject({ ok: false, code: "forbidden" });
+    expect(await cli(PM, "--project", P)).toMatchObject({ ok: true });
+    expect(await cli(EXE, "--dry-run")).toMatchObject({ ok: true, dryRun: true });
+  });
+
+  test("真实入口 --dry-run 用只读连接：巡检之前版本的库不被迁移（分支代码不会把线上库版本抬上去）", async () => {
+    const state = mkdtempSync(join(tmpdir(), "ledger-audit-ro-"));
+    const raw = new Database(join(state, "ledger.sqlite"));
+    raw.exec("PRAGMA journal_mode = WAL");
+    raw.exec(LEDGER_MIGRATIONS[0]);
+    raw.exec(`PRAGMA user_version = ${AUDIT_SCHEMA_VERSION - 1}`);
+    raw.close();
+    const env: Record<string, string | undefined> = { ...process.env, CLAUDESTRA_STATE_DIR: state, CLAUDESTRA_RUNTIME_DIR: join(state, "run") };
+    delete env.DISCORD_CHANNEL_ID;
+    const proc = Bun.spawn([process.execPath, join(import.meta.dir, "../src/manager.ts"), "ledger", "audit", "--dry-run"], { env, stdout: "pipe", stderr: "pipe" });
+    const out = JSON.parse((await new Response(proc.stdout).text()).trim().split("\n").at(-1) ?? "");
+    expect(out).toMatchObject({ ok: true, dryRun: true });
+    const check = new Database(join(state, "ledger.sqlite"), { readonly: true });
+    expect(check.query("PRAGMA user_version").get()).toEqual({ user_version: AUDIT_SCHEMA_VERSION - 1 });
+    expect(check.query("SELECT name FROM sqlite_master WHERE name = 'audit_findings'").get()).toBeNull();
+    check.close();
+  }, 30_000);
+});
+
 describe("bridge 定时器", () => {
   type Sent = { kind: "deliver" | "hold"; env: Envelope };
   function deps(over: Partial<LedgerAuditDeps> = {}) {
     const sent: Sent[] = [];
     const acks: string[][] = [];
-    const store = new Map<string, boolean>(); // key → 已 ack
+    const sources: string[] = [];
+    const store = new Map<string, boolean>(); // key → 已 ack（含 --queued）
     const pending = [
-      { key: "k1", project: P, taskId: "T1", rule: "review_no_reviewer", detail: "d1", suggestion: "派审查员", notify: "agent-pm-dispatch" },
+      { key: "k1", project: P, taskId: "T1", rule: "review_no_reviewer", detail: "d1", suggestion: "派审查员", notify: "agent-pm-dispatch", fallback: PM },
       { key: "k2", project: P, taskId: null, rule: "pm_held", detail: "d2", suggestion: "check_inbox 领回并处理", notify: PM },
     ];
     const d: LedgerAuditDeps = {
       clients: new Map([["c-pm", { ws: {} as never, channelId: "c-pm" }], ["c-dis", { ws: {} as never, channelId: "c-dis" }]]),
       deliver: async (env) => (sent.push({ kind: "deliver", env }), { outcome: { kind: "sent" } }),
       hold: (env) => void sent.push({ kind: "hold", env }),
-      lastMessageSource: { set: () => {} },
+      lastMessageSource: { set: (ch) => void sources.push(ch) },
       runManager: async (...args: string[]) => {
         if (args.includes("--ack")) {
-          const keys = args[args.indexOf("--ack") + 1].split(",");
-          acks.push(keys);
-          for (const k of keys) store.set(k, true);
-          return { ok: true, acked: keys.length };
+          acks.push(args.slice(args.indexOf("--ack") + 1));
+          for (const k of args[args.indexOf("--ack") + 1].split(",")) store.set(k, true);
+          return { ok: true };
         }
-        return { ok: true, pending: pending.filter((f) => !store.get(f.key)) };
+        return { ok: true, projects: [], pending: pending.filter((f) => !store.get(f.key)) };
       },
       busy: async () => false,
       channelOf: (a) => ({ [PM]: "c-pm", "agent-pm-dispatch": "c-dis" })[a],
       ...over,
     };
-    return { d, sent, acks };
+    return { d, sent, acks, sources };
   }
+  const who = (s: Sent) => [s.kind, (s.env.to as { agentName?: string }).agentName];
 
-  test("按收件人各合成一条；推出后 ack；再跑一轮不重复推", async () => {
-    const { d, sent, acks } = deps();
+  test("按收件人各合成一条；推出后逐个 ack；再跑一轮不重复推", async () => {
+    const { d, sent, acks, sources } = deps();
     const tick = ledgerAuditTicker(d);
     await tick();
-    expect(sent.map((s) => [s.kind, (s.env.to as { agentName?: string }).agentName])).toEqual([["deliver", "agent-pm-dispatch"], ["deliver", PM]]);
+    expect(sent.map(who)).toEqual([["deliver", "agent-pm-dispatch"], ["deliver", PM]]);
     expect(sent[0].env).toMatchObject({ from: { kind: "bridge", label: "ledger-audit" }, intent: "notification", meta: { triggerKind: "bridge_synth" } });
     expect(String(sent[1].env.content)).toContain("check_inbox");
-    expect(acks).toEqual([["k1", "k2"]]);
+    expect(acks).toEqual([["k1"], ["k2"]]);
+    expect(sources).toEqual(["c-dis", "c-pm"]);
     await tick();
     expect(sent).toHaveLength(2);
   });
 
-  test("收件人在忙 → 放进押后队列（不抢占），也算推出", async () => {
-    const { d, sent, acks } = deps({ busy: async (ch) => ch === "c-pm" });
+  test("收件人在忙 → 进押后队列、ack 带 --queued <messageId>，且不改最后消息来源（owner 的 @ 不丢）", async () => {
+    const { d, sent, acks, sources } = deps({ busy: async (ch) => ch === "c-pm" });
     await ledgerAuditTicker(d)();
     expect(sent.map((s) => s.kind)).toEqual(["deliver", "hold"]);
-    expect(acks).toEqual([["k1", "k2"]]);
+    expect(acks).toEqual([["k1"], ["k2", "--queued", sent[1].env.meta.messageId]]);
+    expect(sources).toEqual(["c-dis"]);
   });
 
   test("收件人不在线 / 投递失败 → 不 ack，下一轮再推", async () => {
@@ -239,6 +313,37 @@ describe("bridge 定时器", () => {
     expect(acks).toEqual([]);
     await tick();
     expect(sent).toHaveLength(2);
+  });
+
+  test("调度助理连续 2 轮不在线 → 第 3 轮审查类改推 PM；它回来后又推回给它", async () => {
+    let dispatcherOnline = false;
+    const { d, sent, acks } = deps({ channelOf: (a) => (a === PM ? "c-pm" : dispatcherOnline ? "c-dis" : undefined) });
+    const tick = ledgerAuditTicker(d);
+    await tick();
+    await tick();
+    expect(sent.map(who)).toEqual([["deliver", PM]]);
+    await tick();
+    expect(sent.map(who)).toEqual([["deliver", PM], ["deliver", PM]]);
+    expect(String(sent[1].env.content)).toContain("派审查员");
+    expect(acks.at(-1)).toEqual(["k1"]);
+    dispatcherOnline = true;
+    await tick(); // 已推过：没有新的
+    expect(sent).toHaveLength(2);
+  });
+
+  test("skipped 变化才打日志", async () => {
+    const logs: string[] = [];
+    const spy = spyOn(console, "log").mockImplementation((m: unknown) => void logs.push(String(m)));
+    try {
+      const skipped = [{ rule: "owner_inbox_stale", reason: "没有 docsDir" }];
+      const { d } = deps({ runManager: async () => ({ ok: true, projects: [{ project: P, skipped }], pending: [] }) });
+      const tick = ledgerAuditTicker(d);
+      await tick();
+      await tick();
+      expect(logs.filter((l) => l.includes("这些规则没跑"))).toHaveLength(1);
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   test("manager 报错 → 只记日志，不推", async () => {

@@ -20,7 +20,16 @@ export interface StoredFinding {
   suggestion: string;
   notify: string | null;
   notifiedAt: number | null;
+  /** 通知押在押后队列里（收件人当时在忙）：那条消息的 messageId；投出去之前不算推过 */
+  queuedAs: string | null;
   changedAt: number;
+}
+
+export interface ReconcileOpts {
+  /** 这一轮判不出、要保持打开的 key（AuditResult.keep） */
+  keep?: readonly string[];
+  /** 押后队列里还在不在（不知道就当还在）；不在了 = 已投出，补记 notifiedAt */
+  stillQueued?: (messageId: string) => boolean;
 }
 
 export interface ReconcileResult {
@@ -39,7 +48,9 @@ function hasAuditTable(db: Database): boolean {
 }
 
 /** 一个项目的一轮结果入库。只关 evaluated 里的规则下这次没出现的：取数失败没跑的规则，旧异常原样留着 */
-export function reconcileFindings(db: Database, project: string, found: readonly AuditFinding[], evaluated: readonly AuditRule[], now: number): ReconcileResult {
+export function reconcileFindings(
+  db: Database, project: string, found: readonly AuditFinding[], evaluated: readonly AuditRule[], now: number, opts: ReconcileOpts = {},
+): ReconcileResult {
   return busyAsLedgerError("巡检写入", () =>
     db.transaction((): ReconcileResult => {
       const opened: string[] = [];
@@ -52,7 +63,7 @@ export function reconcileFindings(db: Database, project: string, found: readonly
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(f.key, project, f.taskId, f.rule, now, now, f.since, f.detail, f.suggestion, f.notify, now);
           opened.push(f.key);
         } else if (cur.resolvedAt !== null) {
-          db.prepare(`UPDATE audit_findings SET firstSeen = ?, lastSeen = ?, resolvedAt = NULL, notifiedAt = NULL, since = ?, detail = ?, suggestion = ?,
+          db.prepare(`UPDATE audit_findings SET firstSeen = ?, lastSeen = ?, resolvedAt = NULL, notifiedAt = NULL, queuedAs = NULL, since = ?, detail = ?, suggestion = ?,
             notify = ?, changedAt = ? WHERE key = ?`).run(now, now, f.since, f.detail, f.suggestion, f.notify, now, f.key);
           opened.push(f.key);
         } else {
@@ -60,27 +71,38 @@ export function reconcileFindings(db: Database, project: string, found: readonly
           db.prepare("UPDATE audit_findings SET lastSeen = ?, detail = ?, suggestion = ?, notify = ? WHERE key = ?").run(now, f.detail, f.suggestion, f.notify, f.key);
         }
       }
-      const seen = new Set(found.map((f) => f.key));
+      const seen = new Set([...found.map((f) => f.key), ...(opts.keep ?? [])]);
       const open = db.prepare("SELECT key, rule FROM audit_findings WHERE project = ? AND resolvedAt IS NULL").all(project) as { key: string; rule: AuditRule }[];
       for (const r of open) {
         if (seen.has(r.key) || !evaluated.includes(r.rule)) continue;
         db.prepare("UPDATE audit_findings SET resolvedAt = ?, changedAt = ? WHERE key = ?").run(now, now, r.key);
         resolved.push(r.key);
       }
-      const pending = (db.prepare("SELECT * FROM audit_findings WHERE project = ? AND resolvedAt IS NULL AND notifiedAt IS NULL AND notify IS NOT NULL ORDER BY firstSeen, key")
+      const queued = db.prepare("SELECT key, queuedAs FROM audit_findings WHERE project = ? AND notifiedAt IS NULL AND queuedAs IS NOT NULL").all(project) as { key: string; queuedAs: string }[];
+      for (const q of queued) {
+        if (opts.stillQueued?.(q.queuedAs) ?? true) continue;
+        db.prepare("UPDATE audit_findings SET notifiedAt = ? WHERE key = ?").run(now, q.key);
+      }
+      const pending = (db.prepare(`SELECT * FROM audit_findings WHERE project = ? AND resolvedAt IS NULL AND notifiedAt IS NULL AND queuedAs IS NULL
+        AND notify IS NOT NULL ORDER BY firstSeen, key`)
         .all(project) as Row[]).map(toFinding);
       return { opened, resolved, pending };
     }).immediate(),
   );
 }
 
-/** 推送成功后标记；已解决的也照标（推的时候还开着），重复 ack 不改时间 */
-export function ackFindings(db: Database, keys: readonly string[], now: number): number {
+/**
+ * 推送成功后标记；已解决的也照标（推的时候还开着），重复 ack 不改时间。
+ * queuedAs = 通知进了押后队列：先记下 messageId，等下一轮对账看到它不在队里了才补 notifiedAt。
+ */
+export function ackFindings(db: Database, keys: readonly string[], now: number, queuedAs?: string): number {
   return busyAsLedgerError("巡检确认", () =>
     db.transaction(() => {
       let n = 0;
-      const upd = db.prepare("UPDATE audit_findings SET notifiedAt = ? WHERE key = ? AND notifiedAt IS NULL");
-      for (const k of keys) n += upd.run(now, k).changes;
+      const upd = queuedAs
+        ? db.prepare("UPDATE audit_findings SET queuedAs = ? WHERE key = ? AND notifiedAt IS NULL")
+        : db.prepare("UPDATE audit_findings SET notifiedAt = ? WHERE key = ? AND notifiedAt IS NULL");
+      for (const k of keys) n += upd.run(queuedAs ?? now, k).changes;
       return n;
     }).immediate(),
   );

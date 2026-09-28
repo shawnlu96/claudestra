@@ -25,6 +25,10 @@ export const AUDIT_THRESHOLDS = {
   reclaimGraceMs: 30 * MIN,
   /** ownerInbox 条目 doing 的时长（从 owner 发话算，条目没记开工时间） */
   ownerInboxDoingMs: 30 * MIN,
+  /** agent-task-* 建出来多久还没挂任务才算孤儿（先建窗口、后 task-set --agent 的间隙） */
+  orphanGraceMs: 15 * MIN,
+  /** 画面认不出时，会话文件这么久内写过就当它在回合中（押后规则不报） */
+  recentWriteMs: 3 * MIN,
 } as const;
 
 const AUDIT_RULES = [
@@ -37,6 +41,8 @@ export type AuditRule = (typeof AUDIT_RULES)[number];
 const DISPATCH_RULES: readonly AuditRule[] = ["review_no_reviewer", "executor_idle", "deliver_not_in_review"];
 /** 执行者窗口的名字前缀：孤儿 / 回收只看这类临时执行者，常驻 agent（codex、relay）不算 */
 const EXECUTOR_PREFIX = "agent-task-";
+/** 执行者还在干活的阶段（「执行者不在 registry」只在这些阶段报） */
+const EXECUTOR_STAGES: readonly LedgerTask["stage"][] = ["restate", "build", "review", "fix"];
 
 export type MainTurn = "busy" | "idle" | "compacting" | "unknown";
 
@@ -49,6 +55,8 @@ export interface AuditAgent {
   turn: MainTurn;
   /** 会话文件最近写入时刻；没有 / 没取 = null */
   lastWriteAt: number | null;
+  /** 会话文件的创建时刻（≈ agent 建出来的时间）；没有 / 没取 = null */
+  startedAt?: number | null;
 }
 
 export interface AuditHeld {
@@ -74,8 +82,10 @@ export interface AuditSnapshot {
   /** 本项目的任务，各自带 target = 任务 id 的事件（seq 升序） */
   tasks: readonly { task: LedgerTask; events: readonly LedgerEvent[] }[];
   agents: readonly AuditAgent[] | null;
-  /** 在跑的审查员（从 PM 名单里各人的 subagents 解析出任务 id） */
+  /** 在跑的审查员审的任务（本项目各 agent 的 subagents 解析出来，任务号一律小写） */
   reviewers: readonly { taskId: string; round: number | null }[] | null;
+  /** 合并队列冻结中（meta.queueFrozen）：merge 停着是预期的 */
+  queueFrozen?: boolean;
   held: readonly AuditHeld[] | null;
   ownerInbox: readonly AuditInboxEntry[] | null;
   /** 为 null 的来源各是为什么取不到（写进 skipped，不悄悄跳过）；windows = tmux 没列出窗口 */
@@ -102,6 +112,8 @@ export interface AuditResult {
   evaluated: AuditRule[];
   /** 没跑的规则和原因 */
   skipped: { rule: AuditRule; reason: string }[];
+  /** 这一轮判不出、但不该当成已解决的 key（押着的消息在 PM 忙时照样押着）：对账时保持打开 */
+  keep: string[];
 }
 
 const isDispatcher = (name: string) => /dispatch/.test(name);
@@ -131,11 +143,12 @@ const lastOf = (events: readonly LedgerEvent[], kinds: readonly string[], after 
   events.findLast((e) => kinds.includes(e.kind) && e.ts >= after);
 
 type Emit = (f: Omit<AuditFinding, "project" | "notify" | "key"> & { keyParts: (string | number)[] }) => void;
+type Keep = (rule: AuditRule, keyParts: (string | number)[]) => void;
 
 function reviewRules(ts: readonly TaskFacts[], reviewers: NonNullable<AuditSnapshot["reviewers"]>, now: number, emit: Emit): void {
-  const reviewing = new Set(reviewers.map((r) => r.taskId));
+  const reviewing = new Set(reviewers.map((r) => r.taskId.toLowerCase()));
   for (const { task, events, stageSince } of ts) {
-    if (reviewing.has(task.id)) continue;
+    if (reviewing.has(task.id.toLowerCase())) continue;
     if (task.stage === "review" && stageSince !== null) {
       const since = Math.max(stageSince, lastOf(events, ["note", "review"], stageSince)?.ts ?? stageSince);
       if (now - since > AUDIT_THRESHOLDS.reviewNoReviewerMs) {
@@ -143,10 +156,11 @@ function reviewRules(ts: readonly TaskFacts[], reviewers: NonNullable<AuditSnaps
           detail: `${task.id} 在 review（第 ${task.round} 轮）已 ${mins(now - since)}，没有审查员在跑，也没有新的 note / review`, suggestion: "派审查员" });
       }
     }
+    // 只管「交付记了、阶段没跟着进 review」：交付晚于进入当前 build / fix。PM 跳过审查直接 merge、退回 fix、blocked 都不算
+    if ((task.stage !== "build" && task.stage !== "fix") || stageSince === null) continue;
     const lastDeliver = lastOf(events, ["deliver"]);
     const reviewedAfter = lastDeliver && lastOf(events, ["review"], lastDeliver.ts);
-    const settled = task.stage === "review" || TERMINAL_STAGES.includes(task.stage);
-    if (lastDeliver && !reviewedAfter && !settled && now - lastDeliver.ts > AUDIT_THRESHOLDS.deliverNoReviewMs) {
+    if (lastDeliver && lastDeliver.ts > stageSince && !reviewedAfter && now - lastDeliver.ts > AUDIT_THRESHOLDS.deliverNoReviewMs) {
       emit({ rule: "deliver_not_in_review", taskId: task.id, since: lastDeliver.ts, keyParts: [task.id, lastDeliver.seq],
         detail: `${task.id} 交付后 ${mins(now - lastDeliver.ts)} 没有审查结论，阶段却是 ${task.stage}（不在 review）`,
         suggestion: "核对阶段：该审的推回 review 并派审查员" });
@@ -167,9 +181,9 @@ function executorIdle(ts: readonly TaskFacts[], agents: ReadonlyMap<string, Audi
   }
 }
 
-function shipStalled(ts: readonly TaskFacts[], now: number, emit: Emit): void {
+function shipStalled(ts: readonly TaskFacts[], frozen: boolean, now: number, emit: Emit): void {
   for (const { task, events, stageSince } of ts) {
-    if ((task.stage !== "merge" && task.stage !== "live") || stageSince === null) continue;
+    if ((task.stage !== "merge" && task.stage !== "live") || stageSince === null || (frozen && task.stage === "merge")) continue;
     const since = Math.max(stageSince, lastOf(events, ["deploy", "verify"], stageSince)?.ts ?? stageSince);
     if (now - since <= AUDIT_THRESHOLDS.shipStallMs) continue;
     const want = task.stage === "merge" ? "合并部署" : "线上验证";
@@ -184,7 +198,8 @@ function registryRules(s: AuditSnapshot, ts: readonly TaskFacts[], agents: Reado
   for (const t of ts) if (t.task.agent) byAgent.set(t.task.agent, [...(byAgent.get(t.task.agent) ?? []), t]);
   for (const t of ts) {
     const agent = t.task.agent;
-    if (!agent || skip(agent) || t.task.stage === "spec" || TERMINAL_STAGES.includes(t.task.stage) || agents.has(agent)) continue;
+    // 只看还要执行者干活的阶段：merge 之后执行者被回收是正常的，spec 时可能还没建
+    if (!agent || skip(agent) || !EXECUTOR_STAGES.includes(t.task.stage) || agents.has(agent)) continue;
     emit({ rule: "task_agent_missing", taskId: t.task.id, since: t.stageSince ?? now, keyParts: [t.task.id, agent],
       detail: `${t.task.id}（${t.task.stage}）的执行者 ${agent} 不在 registry`, suggestion: "核对执行者：改派或 task-set --agent" });
   }
@@ -192,6 +207,8 @@ function registryRules(s: AuditSnapshot, ts: readonly TaskFacts[], agents: Reado
     if (!a.name.startsWith(EXECUTOR_PREFIX) || a.projectId !== s.project || skip(a.name)) continue;
     const own = byAgent.get(a.name) ?? [];
     if (!own.length) {
+      // 建出来的时间取不到（会话文件还没有）= 刚建，先不报
+      if (a.startedAt == null || now - a.startedAt <= AUDIT_THRESHOLDS.orphanGraceMs) continue;
       emit({ rule: "orphan_executor", taskId: null, since: now, keyParts: [a.name],
         detail: `${a.name} 属于本项目，台账里没有它的任务`, suggestion: "补建任务或回收执行者" });
       continue;
@@ -205,16 +222,26 @@ function registryRules(s: AuditSnapshot, ts: readonly TaskFacts[], agents: Reado
   }
 }
 
-function pmHeld(s: AuditSnapshot, held: readonly AuditHeld[], agents: ReadonlyMap<string, AuditAgent>, now: number, emit: Emit): void {
+/** 主回合在跑：画面明说在忙，或画面认不出但会话文件刚写过 */
+function turnBusy(a: AuditAgent | undefined, now: number): boolean {
+  if (!a) return false;
+  if (a.turn === "busy" || a.turn === "compacting") return true;
+  return a.turn === "unknown" && a.lastWriteAt !== null && now - a.lastWriteAt < AUDIT_THRESHOLDS.recentWriteMs;
+}
+
+function pmHeld(s: AuditSnapshot, held: readonly AuditHeld[], agents: ReadonlyMap<string, AuditAgent>, now: number, emit: Emit, keep: Keep): void {
   for (const h of held) {
     if (!s.pms.includes(h.to)) continue;
     const leased = h.leaseAt !== null;
-    // 没领走的只在对方已空闲（或判不出）时才算：回合中押着是正常的，Stop 时会投
-    const turn = agents.get(h.to)?.turn ?? "unknown";
-    if (!leased && (turn === "busy" || turn === "compacting")) continue;
     const since = leased ? (h.leaseAt as number) : h.heldAt;
     if (now - since <= AUDIT_THRESHOLDS.pmHeldMs) continue;
-    emit({ rule: "pm_held", taskId: null, since, keyParts: [h.to, h.messageId, leased ? `lease${since}` : "held"],
+    const keyParts = [h.to, h.messageId, leased ? `lease${since}` : "held"];
+    // 没领走的只在对方空闲时才算：回合中押着是正常的，Stop 时会投。已报过的这时保持打开，免得忙闲交替时关了又开、重复推
+    if (!leased && turnBusy(agents.get(h.to), now)) {
+      keep("pm_held", keyParts);
+      continue;
+    }
+    emit({ rule: "pm_held", taskId: null, since, keyParts,
       detail: leased
         ? `${h.from} 发给 ${h.to} 的消息被 check_inbox 领走 ${mins(now - since)} 还没确认`
         : `${h.from} 发给 ${h.to} 的消息押了 ${mins(now - since)}，${h.to} 已空闲仍没投出`,
@@ -236,10 +263,13 @@ export function auditLedger(s: AuditSnapshot, now: number): AuditResult {
   const findings: AuditFinding[] = [];
   const evaluated: AuditRule[] = [];
   const skipped: AuditResult["skipped"] = [];
+  const kept: string[] = [];
+  const keyOf = (rule: AuditRule, parts: (string | number)[]) => [s.project, rule, ...parts].join("|");
+  const keep: Keep = (rule, parts) => void kept.push(keyOf(rule, parts));
   const why = (src: keyof NonNullable<AuditSnapshot["unavailable"]>) => s.unavailable?.[src] ?? "取不到";
   const skip = (reason: string, ...rs: AuditRule[]) => rs.forEach((rule) => skipped.push({ rule, reason }));
   const emit: Emit = ({ keyParts, ...f }) =>
-    findings.push({ ...f, project: s.project, key: [s.project, f.rule, ...keyParts].join("|"), notify: auditRecipient(f.rule, s.pms) });
+    findings.push({ ...f, project: s.project, key: keyOf(f.rule, keyParts), notify: auditRecipient(f.rule, s.pms) });
   const ts = s.tasks.map((t) => facts(t, now));
   const agents = new Map((s.agents ?? []).map((a) => [a.name, a]));
   if (s.reviewers) {
@@ -253,17 +283,17 @@ export function auditLedger(s: AuditSnapshot, now: number): AuditResult {
     if (s.agents.every((a) => a.windowAlive !== null)) evaluated.push("reclaim_executor");
     else skip(why("windows"), "reclaim_executor");
   } else skip(why("agents"), "executor_idle", "task_agent_missing", "orphan_executor", "reclaim_executor");
-  shipStalled(ts, now, emit);
+  shipStalled(ts, s.queueFrozen === true, now, emit);
   evaluated.push("ship_stalled");
   if (s.held && s.agents) {
-    pmHeld(s, s.held, agents, now, emit);
+    pmHeld(s, s.held, agents, now, emit, keep);
     evaluated.push("pm_held");
   } else skip(why(s.agents ? "held" : "agents"), "pm_held");
   if (s.ownerInbox) {
     ownerInbox(s.ownerInbox, now, emit);
     evaluated.push("owner_inbox_stale");
   } else skip(why("ownerInbox"), "owner_inbox_stale");
-  return { findings, evaluated, skipped };
+  return { findings, evaluated, skipped, keep: kept };
 }
 
 /** 推给 PM / 调度助理的一条通知（bridge/ledger-audit-service.ts 发）：一轮新出现的合成一条，每条一行「对象 · 建议 — 现象」 */
