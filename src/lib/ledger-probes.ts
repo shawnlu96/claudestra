@@ -66,7 +66,7 @@ export type IncompleteReason = "files" | "ownership";
 /** 推断不全的原因（CLI 报错与网页共用字面量，网页按它查英文词条） */
 export const INCOMPLETE_TEXT: Record<IncompleteReason, string> = {
   files: "拿不到 PR 的文件列表，推断不出检查单——gh 恢复后重跑，或在 task extra.checks 里手工指定",
-  ownership: "判断不了任务所属项目是不是本仓库（git 读不到本仓库，或 PR 链接与 origin 对不上），不知道该核什么",
+  ownership: "判断不了任务所属项目是不是本仓库（git 读不到本仓库、项目没登记目录，或 PR 链接和项目对不上），不知道该核什么",
 };
 
 /** extra.checks：不写 → null；写了必须是已知组名的非空数组，否则抛错（打错一个字就少核一项；空数组没有意义） */

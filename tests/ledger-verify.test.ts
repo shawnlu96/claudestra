@@ -7,6 +7,7 @@ import type { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { closeLedger, getTask, listEvents, LedgerError, openLedger } from "../src/lib/ledger-store.js";
 import type { FactsDeps } from "../src/lib/ledger-verify-facts.js";
+import type { ProjectDef } from "../src/lib/projects.js";
 import { createTask, moveStage, recordVerify, setMeta } from "../src/lib/ledger-write.js";
 import type { Registry } from "../src/manager/core.js";
 import { runLedger } from "../src/manager/ledger.js";
@@ -44,10 +45,12 @@ let sc: {
   origin: string | null;
   mainRepoOk: boolean;
   mergeParents: number;
-  projectDirs: string[] | null;
+  mainRepo: string;
+  projects: ProjectDef[];
   sizes: Record<string, number>;
 };
 
+const proj = (id: string, dirs: string[]): ProjectDef => ({ id, name: id, dirs, createdAt: "" });
 const out = (code: number, stdout = "", stderr = "") => Promise.resolve({ code, stdout, stderr });
 const lstart = (ms: number) => new Date(ms).toString(); // 与 LC_ALL=C 的 lstart 一样能被 Date.parse 读（本地时区）
 
@@ -66,7 +69,7 @@ function fakeRun(argv: string[]) {
   if (cmd.startsWith("git -C /repo log -1 --format=%H m1 -- web")) return out(0, "w1\n");
   if (cmd.startsWith("git -C /repo cat-file -e")) return out(["w1^{commit}", "w2^{commit}", "old^{commit}"].includes(argv.at(-1)!) ? 0 : 128);
   if (cmd.startsWith("git -C /repo merge-base --is-ancestor w1 ")) return out(["w1", "w2"].includes(argv.at(-1)!) ? 0 : 1);
-  if (at("/repo", "rev-parse --path-format=absolute --git-common-dir")) return sc.mainRepoOk ? out(0, "/repo/.git\n") : out(128, "", "fatal");
+  if (at("/repo", "rev-parse --path-format=absolute --git-common-dir")) return sc.mainRepoOk ? out(0, `${sc.mainRepo}/.git\n`) : out(128, "", "fatal");
   if (at("/repo", "remote get-url origin")) return sc.origin ? out(0, `${sc.origin}\n`) : out(2, "", "no such remote");
   if (at("/repo", "rev-list --parents -n 1 m1")) return out(0, ["m1", "p0", "p9"].slice(0, sc.mergeParents + 1).join(" ") + "\n");
   if (at("/repo", "diff --name-only m1^1 m1")) return out(0, "src/bridge/x.ts\nweb/a.tsx\n");
@@ -101,7 +104,7 @@ async function run(actor: string, args: string[], facts: Partial<FactsDeps> = {}
   const reg = { socket: "", agents: { [PM]: { status: "active", projectId: P }, [EXE]: { status: "active", projectId: P } } } as unknown as Registry;
   return runLedger(args, {
     db, actor, actorProject: P, projectIds: [P], loadRegistry: async () => reg, saveRegistry: async () => {}, now: () => 5_000,
-    factsDeps: () => fakeDeps(facts), projectDirs: () => sc.projectDirs,
+    factsDeps: () => fakeDeps(facts), projects: () => sc.projects,
   }) as Promise<Record<string, any>>;
 }
 const pm = (...args: string[]) => run(PM, args);
@@ -116,7 +119,7 @@ beforeEach(() => {
   calls = [];
   sc = { files: ["web/a.tsx", "src/bridge/x.ts"], state: "MERGED", branch: "task/t9", ghFails: false, mergeInMain: true, localWeb: "w1",
     relay: { enabled: true, base: "relay.example" }, relayWeb: "w2", bridgeStart: PULLED + 60_000, codeHasMerge: true,
-    cwdIsRepo: true, worktreeClean: true, origin: "git@github.com:x/y.git", mainRepoOk: true, mergeParents: 2, projectDirs: ["/repo"], sizes: {} };
+    cwdIsRepo: true, worktreeClean: true, origin: "git@github.com:x/y.git", mainRepoOk: true, mergeParents: 2, mainRepo: "/repo", projects: [proj(P, ["/repo"])], sizes: {} };
   db = openLedger(":memory:");
   setMeta(db, { actor: "owner" }, { project: P, key: "pms", value: [PM] });
   liveTask();
@@ -144,6 +147,7 @@ describe("ledger verify：全过与没过", () => {
   test("代码目录 HEAD 含合并提交但工作区还是旧文件 → fail；工作目录不是 git 仓库 → unknown 写明原因", async () => {
     sc.worktreeClean = false;
     expect((await pm("verify", "T9", "--dry-run")).blocking).toContain("和 HEAD 不一致");
+    expect(calls).toContain(`git -C ${DAEMON_CWD} diff --quiet HEAD -- :(top)src/bridge/x.ts`); // 路径相对仓库根，不随 daemon 的 cwd 变
     sc.worktreeClean = true;
     sc.cwdIsRepo = false;
     calls = [];
@@ -229,7 +233,7 @@ describe("豁免与角色", () => {
 });
 
 describe("没 PR 与别的项目", () => {
-  test("code 任务没挂 PR → 直接报错；ops 任务没 PR 只核证据文件，不跑 gh / git", async () => {
+  test("属于本仓库的 code 任务没挂 PR → 直接报错；ops 任务没 PR 只核证据文件，不跑 gh / git", async () => {
     liveTask("T11", { pr: null });
     expect(await pm("verify", "T11")).toMatchObject({ ok: false, code: "invalid", error: expect.stringContaining("没挂 PR") });
     liveTask("T14", { pr: null, kind: "ops" });
@@ -239,14 +243,47 @@ describe("没 PR 与别的项目", () => {
     expect(await pm("verify", "T14", "--evidence", "docs/T14.report.md")).toMatchObject({ ok: true, moved: true });
     expect(calls.filter((c) => !c.includes("rev-parse"))).toEqual([]);
   });
-  test("明确不属于本仓库：PR 链接的 owner/repo 与 origin 不同 / ops 任务的项目目录不含本仓库 → 只核证据文件，带可翻译的说明", async () => {
+  test("明确不属于本仓库：项目目录不含本仓库（PR 链接也指向别的仓库）→ 只核证据文件，带可翻译的说明", async () => {
     sc.origin = "https://github.com/other/repo.git";
+    sc.projects = [proj(P, ["/somewhere/else"])];
     const r = await pm("verify", "T9", "--dry-run");
     expect(r).toMatchObject({ checklistSource: "evidence", noteTpl: expect.stringContaining("{prRepo}"), noteParams: { prRepo: "x/y", origin: "other/repo" } });
     expect(r.checks.map((c: any) => c.id)).toEqual(["manual-evidence"]);
     liveTask("T15", { pr: null, kind: "ops" });
-    sc.projectDirs = ["/somewhere/else"];
     expect(await pm("verify", "T15", "--dry-run")).toMatchObject({ checklistSource: "evidence", note: expect.stringContaining("项目 claude-orchestrator") });
+  });
+  test("按目录明确不属于本仓库的 code 任务不强制挂 PR，只核证据", async () => {
+    sc.projects = [proj(P, ["/somewhere/else"])];
+    liveTask("T11", { pr: null });
+    sc.sizes["docs/T11.report.md"] = 800;
+    expect(await pm("verify", "T11", "--evidence", "docs/T11.report.md")).toMatchObject({ ok: true, moved: true, checklistSource: "evidence" });
+    liveTask("T23", { pr: null });
+    sc.projects = [proj(P, [])]; // 判断不了归属：照样要挂 PR
+    expect(await pm("verify", "T23")).toMatchObject({ ok: false, code: "invalid", error: expect.stringContaining("没挂 PR") });
+  });
+  // 7 / 7b / 7c：PR 链接指向别的仓库，但项目目录没说不属于 → 判断不了，证据文件也放不过去
+  const mismatch = async (id: string) => {
+    sc.sizes["/etc/hosts"] = 100;
+    const r = await pm("verify", id, "--evidence", "/etc/hosts");
+    expect(r).toMatchObject({ ok: false, result: "unknown", noteTpl: expect.stringContaining("PR 链接和项目对不上"), task: { stage: "live" } });
+    expect(r.error).toContain("PR 链接和项目对不上");
+    expect(r.event.data).toMatchObject({ incomplete: true, incompleteReason: "ownership" });
+  };
+  test("7：项目目录就是本仓库，PR 填成别的仓库 → unknown", async () => {
+    liveTask("T20", { pr: "https://github.com/someone/other/pull/9" });
+    await mismatch("T20");
+  });
+  test("7b：项目没登记目录（或 projects.json 里没有这个项目），PR 填成别的仓库 → unknown", async () => {
+    liveTask("T21", { pr: "https://github.com/someone/other/pull/9" });
+    sc.projects = [proj(P, [])];
+    await mismatch("T21");
+    sc.projects = [];
+    await mismatch("T21");
+  });
+  test("7c：PR 的 owner 打错一个字 → unknown", async () => {
+    sc.origin = "git@github.com:shawnlu96/claudestra.git";
+    liveTask("T22", { pr: "https://github.com/shawnlu69/claudestra/pull/150" });
+    await mismatch("T22");
   });
   test("判断不了归属（origin 读不到 / git 读不到本仓库）→ 推断不全、不放行，证据文件也救不了", async () => {
     sc.origin = null;
@@ -258,12 +295,22 @@ describe("没 PR 与别的项目", () => {
     sc.mainRepoOk = false;
     expect(await pm("verify", "T16", "--evidence", "/etc/hosts")).toMatchObject({ ok: false, result: "unknown" });
   });
-  test("项目目录登记的是本仓库的上级目录：算拥有，按全套核（不降级）", async () => {
-    liveTask("T17", { pr: null, kind: "ops" });
-    sc.projectDirs = ["/"];
+  test("挂 PR（#N 短引用，只能按目录判）的 code 任务：项目目录是本仓库的上级目录 → 按全套核", async () => {
+    sc.mainRepo = "/w/claudestra";
+    sc.projects = [proj(P, ["/w"])];
+    liveTask("T17", { pr: "#150" });
     const r = await pm("verify", "T17", "--dry-run");
-    expect(r.checklistSource).toBe("evidence"); // ops 无 PR 本来就只核证据；关键是没有降级说明
+    expect(r).toMatchObject({ checklistSource: "files" });
+    expect(r.checks.map((c: any) => c.id)).toEqual(["pr-merged", "web-local", "web-relay", "daemon-bridge"]);
     expect(r.note).toBeUndefined();
+  });
+  test("伞形根只精确匹配、按最具体的目录命中：项目目录是「/」或本仓库归了别的项目 → 不属于，只核证据", async () => {
+    sc.mainRepo = "/w/claudestra";
+    liveTask("T19", { pr: "#150" });
+    sc.projects = [proj(P, ["/"])];
+    expect(await pm("verify", "T19", "--dry-run")).toMatchObject({ checklistSource: "evidence", note: expect.stringContaining("目录里没有本仓库") });
+    sc.projects = [proj(P, ["/w"]), proj("other", ["/w/claudestra"])];
+    expect(await pm("verify", "T19", "--dry-run")).toMatchObject({ checklistSource: "evidence" });
   });
   test("没配中继 → web-relay 不适用算过；本机网页是后代版本也算过", async () => {
     sc.relay = { enabled: false };

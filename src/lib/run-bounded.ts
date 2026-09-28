@@ -3,7 +3,7 @@
  * 为什么不用 quota-keychain 的 runWithTimeout：它杀的是直接子进程、再等 stdout/stderr 读完，git fetch 这类命令的孙进程
  * （ssh / git-remote-https）继承了管道，杀掉父进程后还会拖到自己退出（实测 1 s 超时拖到 8 s）。tests/run-bounded.test.ts。
  * 子进程自己退出后只再等 EXIT_GRACE_MS 收尾输出，留着管道的后台孙进程不算超时、退出码照实返回；
- * 调用方进程退出或收到 SIGINT / SIGTERM 时，还没结束的进程组一并杀掉（detached 的组收不到终端的 Ctrl-C）。
+ * 调用方进程退出或收到 SIGINT / SIGTERM / SIGHUP 时，还没结束的进程组一并杀掉（detached 的组收不到终端的 Ctrl-C）。
  */
 import { spawn } from "node:child_process";
 
@@ -29,16 +29,20 @@ function killGroup(pid: number): void {
   }
 }
 
-/** 只装一次：退出时同步杀掉还登记着的组；收到信号先杀组、再按默认行为以该信号退出 */
+/**
+ * 只装一次：退出时同步杀掉还登记着的组；收到信号先杀组。没有别的监听器时按默认行为以该信号退出（重发一次）；
+ * 调用方自己装了 handler 就只杀组、退不退由它定——重发会让它的 handler 被调两次。
+ */
 function hookParentExit(): void {
   if (hooked) return;
   hooked = true;
   process.on("exit", () => live.forEach(killGroup));
-  for (const sig of ["SIGINT", "SIGTERM"] as const) {
-    process.once(sig, () => {
+  for (const sig of ["SIGINT", "SIGTERM", "SIGHUP"] as const) {
+    const onSig = () => {
       live.forEach(killGroup);
-      process.kill(process.pid, sig);
-    });
+      if (process.listenerCount(sig) === 0) process.kill(process.pid, sig);
+    };
+    process.once(sig, onSig);
   }
 }
 

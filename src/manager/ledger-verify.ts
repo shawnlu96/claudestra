@@ -4,7 +4,6 @@
  * `stage --to verified` 已经堵死（lib/ledger-write.ts VERIFY_HINT），进 verified 只有这一条路。--dry-run 只看结果不写库，执行者也能跑。
  * 探针（PR / 网页 / daemon）只认得本仓库：明确判定任务不属于本仓库时只核证据文件；判断不了按推断不全处理（不放行）。
  */
-import { realpathSync } from "node:fs";
 import { daemonsOfFromRepo } from "../lib/ledger-daemon-map.js";
 import {
   blockingSummary,
@@ -20,6 +19,7 @@ import { getEventByDedup, LedgerError } from "../lib/ledger-store.js";
 import type { LedgerTask } from "../lib/ledger-stages.js";
 import { collectPrStage, collectVerifyFacts, mainRepoRoot, originRepo, prRepo, realFactsDeps, type FactsDeps } from "../lib/ledger-verify-facts.js";
 import { recordVerify } from "../lib/ledger-write.js";
+import { resolveProjectForRealDir } from "../lib/projects.js";
 import { REPO_ROOT } from "../lib/repo-root.js";
 import type { LedgerCli, Result } from "./ledger-context.js";
 import type { CommandSpec } from "./ledger-write-cmds.js";
@@ -45,50 +45,54 @@ function asInvalid<T>(fn: () => T): T {
   }
 }
 
-const real = (p: string) => {
-  try {
-    return realpathSync(p);
-  } catch {
-    return p; // 目录不存在：按原样比（比不上就当不含本仓库）
-  }
-};
-
 type Note = { tpl: string; params: Record<string, string> };
-type Ownership = { owns: "yes" } | { owns: "no"; note: Note } | { owns: "unknown" };
+type Ownership = { owns: "yes" } | { owns: "no"; note: Note } | { owns: "unknown"; note?: Note };
+type Owns = Ownership["owns"];
 
 /**
- * 任务所属项目是不是本仓库：挂了 GitHub PR 链接就拿链接里的 owner/repo 比本仓库 origin；否则看 projects.json 的目录
- * （等于本仓库主树或是它的上级目录都算拥有——宁可多核）。git 读不到 / origin 认不出 → unknown，检查单记推断不全，不放行；
+ * 按 projects.json 的目录：本仓库主树按最具体的目录命中的项目（伞形根只精确匹配，lib/projects.ts）就是任务所属项目 → yes；
+ * 所属项目登记了目录却没命中 → no；没登记目录、git 读不到主树 → unknown。不给项目清单（测试）按拥有算。
+ */
+async function dirOwnership(c: LedgerCli, fd: FactsDeps, task: LedgerTask): Promise<Owns> {
+  const projects = c.deps.projects?.();
+  if (!projects) return "yes";
+  const repo = await mainRepoRoot(fd);
+  if (!repo) return "unknown";
+  if (resolveProjectForRealDir(projects, repo)?.id === task.project) return "yes";
+  return projects.find((p) => p.id === task.project)?.dirs.length ? "no" : "unknown";
+}
+
+/**
+ * 任务所属项目是不是本仓库：PR 链接的 owner/repo 等于本仓库 origin → 拥有；没有可比的链接就按项目目录判。
+ * 链接指向别的仓库时，粘错、打错一个字也长这样，所以只有目录也明确不含本仓库才判不拥有，否则判断不了（不放行）。
  * 只有明确判定不拥有，才降成只核证据文件。
  */
 async function ownership(c: LedgerCli, fd: FactsDeps, task: LedgerTask): Promise<Ownership> {
   const pr = task.pr ? prRepo(task.pr) : null;
-  if (pr) {
-    const origin = await originRepo(fd);
-    if (!origin) return { owns: "unknown" };
-    return origin === pr ? { owns: "yes" } : { owns: "no", note: { tpl: "PR 属于 {prRepo}，不是本仓库 {origin}，只核证据文件（--evidence）", params: { prRepo: pr, origin } } };
+  const origin = pr ? await originRepo(fd) : null;
+  if (pr && !origin) return { owns: "unknown" };
+  if (pr && origin === pr) return { owns: "yes" };
+  const dirs = await dirOwnership(c, fd, task);
+  const project = task.project;
+  if (!pr || !origin) {
+    return dirs === "no" ? { owns: "no", note: { tpl: "项目 {project} 的目录里没有本仓库，只核证据文件（--evidence）", params: { project } } } : { owns: dirs };
   }
-  const dirs = c.deps.projectDirs?.(task.project);
-  if (!dirs) return { owns: "yes" };
-  const repo = await mainRepoRoot(fd);
-  if (!repo) return { owns: "unknown" };
-  const r = real(repo);
-  const within = (d: string) => {
-    const base = real(d).replace(/\/+$/, ""); // 登记成 "/" 或带尾斜杠也按目录前缀比
-    return r === base || r.startsWith(`${base}/`);
-  };
-  if (dirs.some(within)) return { owns: "yes" };
-  return { owns: "no", note: { tpl: "项目 {project} 的目录里没有本仓库，只核证据文件（--evidence）", params: { project: task.project } } };
+  if (dirs === "no") return { owns: "no", note: { tpl: "PR 属于 {prRepo}，不是本仓库 {origin}，只核证据文件（--evidence）", params: { prRepo: pr, origin } } };
+  const params = { prRepo: pr, origin, project };
+  return { owns: "unknown", note: { tpl: "PR 链接和项目对不上：链接指向 {prRepo}，本仓库是 {origin}，项目 {project} 的目录却没排除本仓库——改对链接或登记好项目目录后重跑", params } };
 }
 
 async function plan(c: LedgerCli, fd: FactsDeps, task: LedgerTask) {
   const extraChecks = asInvalid(() => parseExtraChecks(task.extra.checks));
-  if (task.kind === "code" && !task.pr) throw new LedgerError("invalid", `code 任务 ${task.id} 没挂 PR（ledger task-set --pr）：代码改动要按 PR 核对上线`);
   const own = await ownership(c, fd, task);
+  // 按目录明确不属于本仓库的项目（可能根本不在 GitHub 上）不强制挂 PR；属于或判断不了的，代码改动要按 PR 核对上线
+  if (task.kind === "code" && !task.pr && own.owns !== "no") {
+    throw new LedgerError("invalid", `code 任务 ${task.id} 没挂 PR（ledger task-set --pr）：代码改动要按 PR 核对上线`);
+  }
   const none = await collectPrStage(fd, null);
   if (own.owns === "unknown") {
     const p: ChecklistPlan = { probes: [], source: "files", incomplete: true, incompleteReason: "ownership" };
-    return { plan: p, prStage: none, note: null };
+    return { plan: p, prStage: none, note: own.note ?? null };
   }
   if (own.owns === "no") {
     const p: ChecklistPlan = { probes: ["manual-evidence"], source: "evidence", incomplete: false };
@@ -135,7 +139,7 @@ async function verify(c: LedgerCli): Promise<Result> {
   const r = recordVerify(c.db, c.ctx(), { taskId: task.id, result: v.result, data, text: c.p.flags.text });
   if (r.duplicate) return { ok: r.event.data.result === "pass", task: r.row, event: r.event, duplicate: true }; // 并发重放：结论以当时记下的为准
   if (v.result === "pass") return { ok: true, moved: true, task: r.row, event: r.event, ...out };
-  return { ok: false, code: "unverified", error: `检查单没过，任务留在 live：${summary}`, moved: false, task: r.row, event: r.event, ...out };
+  return { ok: false, code: "unverified", error: `检查单没过，任务留在 live：${summary}${note ? `；${fillNote(note)}` : ""}`, moved: false, task: r.row, event: r.event, ...out };
 }
 
 export const VERIFY_CMD: CommandSpec = {

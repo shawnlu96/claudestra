@@ -195,8 +195,9 @@ async function codeFacts(d: FactsDeps, cwd: string, pr: PrFacts): Promise<Pick<D
     ? ancestry((await git(d, cwd, "merge-base", "--is-ancestor", merge, "HEAD")).code)
     : false; // 那边的仓库里还没有这个提交对象：HEAD 不可能包含它
   if (has !== true) return { codeHasMerge: has };
+  // :(top)：PR 的路径相对仓库根，daemon 的 cwd 可能是子目录
   const paths = pr.files?.filter((f) => f.startsWith("src/")).slice(0, 500) ?? [];
-  const diff = await git(d, cwd, "diff", "--quiet", "HEAD", "--", ...(paths.length ? paths : ["src"]));
+  const diff = await git(d, cwd, "diff", "--quiet", "HEAD", "--", ...(paths.length ? paths : ["src"]).map((f) => `:(top)${f}`));
   return { codeHasMerge: true, worktreeClean: ancestry(diff.code), headSince: await headSince(d, cwd, merge, pr.mergedAt as number) };
 }
 
