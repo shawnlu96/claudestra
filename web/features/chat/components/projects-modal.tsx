@@ -182,14 +182,14 @@ function ProjectRow({
                   </button>
                 </>
               ) : (
-                <button className="btn btn-ghost btn-xs text-error/80" onClick={() => setConfirmDel(true)}>
+                <button className="btn btn-ghost btn-xs text-error-soft-80" onClick={() => setConfirmDel(true)}>
                   {t("删除")}
                 </button>
               ))}
             {members.length > 0 && (
               <span className="text-[11px] opacity-40">{t("有成员时不可删除(先转移)")}</span>
             )}
-            {msg && <span className="text-[11px] text-error/80">{msg}</span>}
+            {msg && <span className="text-[11px] text-error-soft-80">{msg}</span>}
           </div>
         </div>
       )}
@@ -280,7 +280,7 @@ function AddProjectForm({ onChanged }: { onChanged: () => void }) {
         <button className="btn btn-ghost btn-xs" onClick={() => setOpen(false)}>
           {t("取消")}
         </button>
-        {msg && <span className="text-[11px] text-error/80">{msg}</span>}
+        {msg && <span className="text-[11px] text-error-soft-80">{msg}</span>}
       </div>
     </div>
   );
@@ -329,7 +329,7 @@ export function ProjectsModal({ open, onClose }: { open: boolean; onClose: () =>
           <p className="text-xs leading-relaxed text-base-content/50">
             {t("project = 一组工作目录 + 一组 agent。每个 agent 必属一个 project;新建 agent 不选时按目录自动归属。")}
           </p>
-          {err && <div className="text-xs text-error/80">{err}</div>}
+          {err && <div className="text-xs text-error-soft-80">{err}</div>}
           {loaded && projects.length === 0 && !err && (
             <div className="py-4 text-center text-xs opacity-40">{t("还没有 project(新建 agent 会自动生成)")}</div>
           )}

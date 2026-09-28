@@ -101,7 +101,7 @@ export function AutoCompactSection({ autoCompact }: { autoCompact: ReturnType<ty
               {t("93% 救命线")}
             </label>
           </div>
-          {acMsg && <div className="mt-2 text-xs text-error/80">{t(acMsg)}</div>}
+          {acMsg && <div className="mt-2 text-xs text-error-soft-80">{t(acMsg)}</div>}
         </Section>
   );
 }

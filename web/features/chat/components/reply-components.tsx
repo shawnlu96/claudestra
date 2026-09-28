@@ -2,7 +2,7 @@
 import { useMemo, useState } from "react";
 import type { ChatMessage } from "../type";
 import type { WebComponentRow } from "@/lib/chat/events";
-import { replyRowKey, deriveClicksFromLegacy } from "@/lib/chat/reply-clicks";
+import { buttonText, replyRowKey, deriveClicksFromLegacy } from "@/lib/chat/reply-clicks";
 import { useChatStoreApi } from "../chat-store";
 import { editComposer, logLocalTick, useFormRowSync } from "../form-sync";
 import { renderFormLine, setFormValues, toggleFormValue } from "@/lib/chat/form-compose";
@@ -58,7 +58,7 @@ export function ReplyComponents({ m }: { m: ChatMessage }) {
           return (
             <div key={ri} className="flex flex-wrap gap-2">
               {row.buttons.map((b) => {
-                const label = `${b.emoji ? `${b.emoji} ` : ""}${b.label}`;
+                const label = buttonText(b);
                 const chosen = clicks[key] === b.id;
                 return (
                   <button
