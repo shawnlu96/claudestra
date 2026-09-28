@@ -13,7 +13,7 @@ import { LedgerError } from "../lib/ledger-store.js";
 import { agentInScope, tokenIdOf, type Principal } from "../lib/principals.js";
 import { apiJson, forbidden } from "./api-respond.js";
 import { initRuntimeAsks } from "./ask-runtime.js";
-import { askDb, askReadDb, commitAnswer, initAsks, ownerPresence, publishAsk, type AsksDeps } from "./asks.js";
+import { answerTarget, askDb, askReadDb, commitAnswer, initAsks, ownerPresence, publishAsk, type AsksDeps } from "./asks.js";
 
 /** 看得见这条 ask：台账的门；大总管的 ask 另要 scope 含 master（「*」不含 master，和 SSE / agent 列表同一口径） */
 export function canSeeAsk(p: Principal, a: Pick<Ask, "fromAgent">): boolean {
@@ -83,6 +83,13 @@ async function commitOr409(run: () => Promise<Ask>, fallback: Ask): Promise<Resp
   }
 }
 
+/** 发起方不在了、答复要改投别人（派发者 / 大总管）：改投目标也得在这个凭据的 scope 里，否则 403——不能借改投把话送进 scope 外的 agent */
+async function redirectForbidden(p: Principal, a: Ask): Promise<Response | null> {
+  const to = await answerTarget(a);
+  if (!to.redirected || agentInScope(p, to.agentName)) return null;
+  return forbidden(t(`${a.fromAgent} 已经不在，答复会改投 ${to.agentName}，这台设备的授权不含它`, `${a.fromAgent} is gone; the answer would go to ${to.agentName}, outside this device's scope`));
+}
+
 const apiFrom = (p: Principal) => ({ kind: "api" as const, tokenId: tokenIdOf(p), name: p.name || tokenIdOf(p) });
 
 /**
@@ -96,6 +103,8 @@ export async function answerFromChat(req: { agent: string; text: string; princip
   const hit = findAskForWires(req.agent, wires, req.askId);
   if (!hit || !canAnswerAsk(p, hit.ask)) return null;
   if (hit.ask.state !== "open") return apiJson(409, closedBody(hit.ask));
+  const blocked = await redirectForbidden(p, hit.ask);
+  if (blocked) return blocked;
   return commitOr409(() => commitAnswer({ ask: hit.ask, picks: hit.picks, text: rest, original: req.text, from: apiFrom(p), principal: p.id, device: p.credential, via: "web_chat" }), hit.ask);
 }
 
@@ -115,6 +124,8 @@ export async function answerFromCard(project: string, id: string, body: { choice
   const picks = picksFor(a, wires);
   if (!picks) return apiJson(400, { ok: false, error: "choice does not match this ask's options" });
   if (!picks.length && !(a.allowText && text)) return apiJson(400, { ok: false, error: "pick an option or write something" });
+  const blocked = await redirectForbidden(p, a);
+  if (blocked) return blocked;
   return commitOr409(() => commitAnswer({ ask: a, picks, text, from: apiFrom(p), principal: p.id, device: p.credential, via: "web_card", final: true }), a);
 }
 

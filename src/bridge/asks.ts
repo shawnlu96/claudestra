@@ -226,7 +226,7 @@ export function answerContent(a: Ask, picks: WireMatch[], text: string, original
  * repointParentRefs 会修正引用）；被 kill 的已经从 registry 删掉了，就按建 ask 时记下的 extra.parentChannelId 找还在的那个频道，
  * 找不到（只记了名字的旧 ask、派发者也没了）落到大总管——不按名字找，同名的可能是后来新建的不相干 agent（设计 §4.6-3）。
  */
-async function answerTarget(a: Ask): Promise<Target> {
+export async function answerTarget(a: Ask): Promise<Target> {
   const d = deps!;
   if (d.clients.has(a.fromChannelId) || a.fromChannelId === d.controlChannelId) return { channelId: a.fromChannelId, agentName: a.fromAgent };
   const regs = await readRegistry();

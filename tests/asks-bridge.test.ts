@@ -23,6 +23,8 @@ const at = "2026-09-28T00:00:00Z";
 const OWNER_BASE: Principal = { id: "owner:self", role: "owner", agents: ["*", "master"], createdAt: at, terminal: true };
 const owner = (grant: Grant = { agents: ["*"], terminal: true, manage: true }) =>
   effectivePrincipal({ principal: OWNER_BASE, credential: { id: "dev_1", v: 1, type: "bearer", hash: "h", deviceName: "d", grant, createdAt: at, expiresAt: "2099-01-01T00:00:00Z" } });
+/** 授权含大总管的 owner 设备：发起方和派发者都不在、答复落到大总管的用例用它 */
+const ownerWithMaster = () => owner({ agents: ["*", "master"], terminal: true, manage: true });
 const PEER: Principal = { id: "token:tok_peer", role: "external", agents: ["*"], peer: "P", createdAt: at };
 const LEGACY_STAR_TOKEN: Principal = { id: "token:tok_int", role: "external", name: "integration", agents: ["*"], createdAt: at };
 
@@ -232,7 +234,7 @@ describe("改投、过期、运行时弹框", () => {
     const b = (await reply())!;
     clients.clear();
     setAsksForTest({ path, deps: mkDeps(), registry: [], ownerChats: ["api:owner:self"] });
-    await answerFromChat({ agent: "agent-x", text: "[button:go]", principal: owner(), askId: b.id });
+    await answerFromChat({ agent: "agent-x", text: "[button:go]", principal: ownerWithMaster(), askId: b.id });
     expect(held.map((e) => e.to)).toMatchObject([{ channelId: "999", agentName: "master" }]);
   });
 
@@ -424,13 +426,24 @@ describe("第二轮审查的复现", () => {
     expect(delivered[0].to).toMatchObject({ channelId: "222", agentName: "agent-pm" });
   });
 
+  test("r3 P2-2 答复要改投到凭据 scope 外（授权不含 master 的设备答无主的 ask）→ 403，不记账、不投递", async () => {
+    const a = (await reply())!;
+    clients.clear();
+    setAsksForTest({ path, deps: mkDeps(), registry: [], ownerChats: ["api:owner:self"] });
+    const noTerm = owner({ agents: ["*"], terminal: false, manage: true });
+    expect((await answerFromChat({ agent: "agent-x", text: "[button:go]\n都发", principal: noTerm, askId: a.id }))!.status).toBe(403);
+    expect((await answerFromCard("p", a.id, { choices: ["[button:go]"] }, noTerm)).status).toBe(403);
+    expect([...delivered, ...held]).toEqual([]);
+    expect(getAsk(openLedger(path), a.id)?.state).toBe("open");
+  });
+
   test("r3 P2-1 派发者按频道认：它也被 kill、旧名被新 agent 占了 → 大总管；它只是改了名 → 投给改名后的它", async () => {
     const a = (await reply())!;
     const b = (await reply())!;
     clients.clear();
     const squatter = { name: "agent-pm", channelId: "555", status: "active", projectId: "q" } as RegistryAgent;
     setAsksForTest({ path, deps: mkDeps(), registry: [squatter], ownerChats: ["api:owner:self"] });
-    await answerFromChat({ agent: "agent-x", text: "[button:go]", principal: owner(), askId: a.id });
+    await answerFromChat({ agent: "agent-x", text: "[button:go]", principal: ownerWithMaster(), askId: a.id });
     expect(held.map((e) => e.to)).toMatchObject([{ channelId: "999", agentName: "master" }]);
     const renamed = { ...REGISTRY[1], name: "agent-pm2" } as RegistryAgent;
     setAsksForTest({ path, deps: mkDeps(), registry: [renamed, { ...squatter, channelId: "666" } as RegistryAgent], ownerChats: ["api:owner:self"] });
