@@ -19,7 +19,7 @@ export function SignatureLine({ sig }: { sig?: PeerSignatureInfo | null }) {
   const r = sig?.lastCheck?.result;
   if (!r) return null;
   const view: Record<string, [string, string]> = {
-    ok: ["text-success/80", `✓ ${t("签名已验证")} · ${sig?.fingerprint ?? ""}`],
+    ok: ["text-success-soft-80", `✓ ${t("签名已验证")} · ${sig?.fingerprint ?? ""}`],
     unsigned: ["text-base-content/40", t("对方版本还不会签名")],
     bad: ["text-error", `⚠ ${t("签名对不上")}`],
     stale: ["text-warning", `⚠ ${t("签名时间戳过期（两边时钟差太多？）")}`],

@@ -1,5 +1,6 @@
 /* 协作视图（T12 v3 原型的样式搬进 App）。语义色四种：进行中 run / 等人 wait / 出问题 bad / 完成 done；accent 只给「刚推进的那一条」。
-   字号四级 16 / 14 / 12.5 / 11。颜色全走本文件的 token；深色为默认，浅色跟 <html data-theme> 与系统偏好（同 lib/theme.ts 的 auto 规则）。 */
+   字号四级 16 / 14 / 12.5 / 11。颜色全走本文件的 token；深色为默认，浅色跟 <html data-theme> 与系统偏好（同 lib/theme.ts 的 auto 规则）；
+   浅色的 ok / warn / err 引用全局状态 token（globals.css 浅色主题已压深到 ≥4.5:1），深色保留原型色板。 */
 .tokens {
   --bg: #131415; --bg-2: #171819; --panel: #1b1d1f; --panel-2: #202224;
   --line: rgba(255, 255, 255, .07); --line-2: rgba(255, 255, 255, .12);
@@ -18,13 +19,13 @@
   :global(html:not([data-theme="dark"])) .tokens {
     --bg: #f4f4f3; --bg-2: #f7f7f7; --panel: #fff; --panel-2: #f7f7f7; --line: rgba(0, 0, 0, .07); --line-2: rgba(0, 0, 0, .12);
     --text: #17181a; --text-2: #3b3e43; --muted: #6d7178; --faint: #a3a6ab; --accent: #c15f3c; --glow: rgba(193, 95, 60, .22);
-    --shadow: 0 1px 2px rgba(0, 0, 0, .04), 0 8px 24px rgba(0, 0, 0, .06); --ok: #23915f; --warn: #b87d12; --err: #cf4a3c; --s-run: #5f7186;
+    --shadow: 0 1px 2px rgba(0, 0, 0, .04), 0 8px 24px rgba(0, 0, 0, .06); --ok: var(--color-success); --warn: var(--color-warning); --err: var(--color-error); --s-run: #5f7186;
   }
 }
 :global(html[data-theme="light"]) .tokens {
   --bg: #f4f4f3; --bg-2: #f7f7f7; --panel: #fff; --panel-2: #f7f7f7; --line: rgba(0, 0, 0, .07); --line-2: rgba(0, 0, 0, .12);
   --text: #17181a; --text-2: #3b3e43; --muted: #6d7178; --faint: #a3a6ab; --accent: #c15f3c; --glow: rgba(193, 95, 60, .22);
-  --shadow: 0 1px 2px rgba(0, 0, 0, .04), 0 8px 24px rgba(0, 0, 0, .06); --ok: #23915f; --warn: #b87d12; --err: #cf4a3c; --s-run: #5f7186;
+  --shadow: 0 1px 2px rgba(0, 0, 0, .04), 0 8px 24px rgba(0, 0, 0, .06); --ok: var(--color-success); --warn: var(--color-warning); --err: var(--color-error); --s-run: #5f7186;
 }
 .neutral { --sc: var(--s-run); } .amber { --sc: var(--warn); } .red { --sc: var(--err); } .green { --sc: var(--ok); }
 
@@ -66,6 +67,9 @@
 .info { padding: 16px 16px 14px 24px; min-width: 0; position: relative; }
 .info::before { content: ""; position: absolute; left: 0; top: 14px; bottom: 14px; width: 2px; border-radius: 2px; background: transparent; transition: background .6s; }
 .row.hot .info::before { background: var(--accent); }
+/* 等你：左侧琥珀竖条 + 细边框，比普通「等待」醒目（它在等的是看这个页面的人） */
+.row.owner .info::before { background: var(--warn); }
+.row.owner { box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--warn) 45%, transparent); }
 .t1 { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .tid { font-family: var(--mono); font-size: var(--fs-3); color: var(--muted); flex: none; }
 .ttl { color: var(--text); font-weight: 600; font-size: var(--fs-1); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }

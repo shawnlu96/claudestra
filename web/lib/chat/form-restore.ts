@@ -24,14 +24,19 @@ export class FormLookup {
   add(g: ChatMessage) {
     if (g.replyComponents?.length && this.anchors[this.anchors.length - 1] !== g) this.anchors.push(g);
   }
-  /** 含该 id 的最近一条，优先还没作答的（同一 id 被多条消息复用时对应最新未答的那条） */
-  find(id: string): ChatMessage | null {
+  /**
+   * 含该 id 的最近一条，优先还没作答的（同一 id 被多条消息复用时对应最新未答的那条）。
+   * answer = 这次回投要写的已答值：已经以同一个值答过的那条直接认它——实时通道先标过已答、差量再解析同一条回投时，
+   * 不能因为「它答过了」就把答案挪到更早一个同 id 的表单上。
+   */
+  find(id: string, answer?: string): ChatMessage | null {
     let fallback: ChatMessage | null = null;
     for (let i = this.anchors.length - 1; i >= 0; i--) {
       const g = this.anchors[i];
       const ri = lastRowOf(g.replyComponents!, id, false);
       if (ri < 0) continue;
-      if (!g.replyClicks?.[replyRowKey(g.replyComponents![ri], ri)]) return g;
+      const done = g.replyClicks?.[replyRowKey(g.replyComponents![ri], ri)];
+      if (!done || (answer !== undefined && done === answer)) return g;
       fallback ??= g;
     }
     return fallback;
@@ -41,8 +46,8 @@ export class FormLookup {
     if (!text.includes("[select:")) return null;
     const rows = this.anchors.flatMap((g) => g.replyComponents!.filter((r): r is MultiRow => r.type === "multiselect"));
     const titles = formTitles(rows);
-    return wireToDisplay(text, (id) => {
-      const g = this.find(id);
+    return wireToDisplay(text, (id, values) => {
+      const g = this.find(id, `${id}:${values.join(",")}`);
       const ri = g ? lastRowOf(g.replyComponents!, id, true) : -1;
       if (!g || ri < 0) return null;
       const row = g.replyComponents![ri] as MultiRow;

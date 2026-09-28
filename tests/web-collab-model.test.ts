@@ -114,3 +114,28 @@ describe("首页排序与一句话状态", () => {
     expect(homeView(overview([], { exists: false }), NOW)).toMatchObject({ lines: [], todayDone: [], headline: { advancing: 0, problem: 0, stuck: 0 } });
   });
 });
+
+describe("等你（T11a：features/asks 的开着的 ask 喂进来）", () => {
+  const wait = (id: string, taskId: string | null, fromAgent: string, title = "发不发") => ({ id, taskId, fromAgent, title });
+
+  test("挂在任务上的、或执行者发的没挂任务的 ask → 这条线归「等你」，排在出问题之后、卡住之前，原因是 ask 标题", () => {
+    const tasks = [
+      task("P", "fix"),
+      task("S", "review", { stageSince: NOW - STUCK_MS - MIN }),
+      task("O", "build"),
+      task("A", "build"),
+    ];
+    const v = homeView(overview(tasks), NOW, undefined, [wait("ask_1", "O", "agent-other", "要不要打 tag"), wait("ask_2", null, "agent-task-a")]);
+    expect(v.lines.map((l) => [l.id, l.attention])).toEqual([["P", "problem"], ["A", "owner"], ["O", "owner"], ["S", "stuck"]]);
+    expect(v.lines.find((l) => l.id === "O")).toMatchObject({ tone: "amber", reason: "等你：要不要打 tag" });
+    expect(v.headline.owner).toBe(2);
+  });
+
+  test("出问题的线不被「等你」盖掉；没有 ask 时和原来一样", () => {
+    const v = homeView(overview([task("P", "fix")]), NOW, undefined, [wait("ask_1", "P", "agent-task-p")]);
+    expect(v.lines[0].attention).toBe("problem");
+    expect(homeView(overview([task("B", "build")]), NOW).headline.owner).toBe(0);
+    // 标题栏数的是归到「等你」的线：挂不到线上的 ask（别的 agent 发的）不算，和各条线对得上
+    expect(homeView(overview([task("B", "build")]), NOW, undefined, [wait("ask_9", null, "agent-other")]).headline.owner).toBe(0);
+  });
+});

@@ -31,6 +31,12 @@ export const TWINS: [string, string][] = [
   ["src/lib/mention-name.ts", "web/lib/chat/mention-name.ts"],
 ];
 
+/**
+ * tests-web-pure 的登记例外：要真挂载 React 组件的测试（happy-dom 只在该文件里注册、afterAll 注销），可以引用带 react 的 web 模块。
+ * React 本身在 web/node_modules，测试用 createRequire 从 web/ 显式加载。新增这类测试前先想能不能只测纯逻辑。
+ */
+export const TESTS_WEB_DOM = /^tests\/web-dom-[\w-]+\.test\.ts$/;
+
 /** bridge 的枢纽模块：只允许 bridge.ts（入口）import。 */
 export const BRIDGE_HUBS = new Set(["api-routes", "management", "web-terminal", "web-gateway"]);
 /** watcher 之间不互相 import：共用的纯函数下沉到 src/lib。 */

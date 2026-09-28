@@ -29,9 +29,10 @@ import { ReloadScroll, reloadKindFor, type ReloadKind } from "./reload-scroll";
 import type { WebStreamEvent, WebComponentRow, BgMeta, BgProgress, BgEndStatus } from "@/lib/chat/events";
 import { getLang, t as tr } from "@/lib/i18n";
 import { postClientLog } from "@/lib/client-log";
-import { restoreUserText } from "@/lib/chat/form-restore";
+import { liveUserText, resolveDeltaClicks, resolvePendingClicks } from "./delta-clicks";
+import { agentsSignature } from "./agents-signature";
 import { ApiError, DeviceInvalidError } from "@/lib/api/client";
-import { agentExtraSig, loadAgents as apiLoadAgents, MASTER_AGENT_NAME } from "@/lib/chat/agents";
+import { loadAgents as apiLoadAgents, MASTER_AGENT_NAME } from "@/lib/chat/agents";
 import { createAgent as apiCreateAgent, lifecycleAction as apiLifecycle } from "@/lib/api/agents";
 import { fetchHistory } from "@/lib/api/history";
 import { openAgentEventStream } from "@/lib/api/stream";
@@ -40,29 +41,12 @@ import { getProfile, putProfile } from "@/lib/api/settings";
 import { projectsList } from "@/lib/api/system";
 import { markRead } from "@/lib/api/push";
 
-/**
- * roster 变化指纹：捕获会影响渲染的字段（成员 + 状态 + 展示名 + 置顶/mock 标记
- * + busy/contextTokens/lastActivityTs）。轮询用它判断列表是否真的变了，只有变了
- * 才更新 state。⚠ 后三个易变字段必须入指纹——contextTokens 不入的话，compact 后
- * 轮询拉回的新值会被「列表没变」挡掉，ctx 徽章/用量面板永远停在压缩前的旧值
- *（2026-07-16 真机实锤）；busy/lastActivityTs 同理（黄点与时间标签靠轮询回落）。
- */
 /** v2.17.2 侧栏最近触碰时刻(pointerdown/滚动)——roster 重排的交互期冻结依据。
  *  sidebar 的容器事件调 noteSidebarInteraction 更新;见 refreshAgents 内注释。 */
 let lastSidebarTouchAt = 0;
 const SIDEBAR_FREEZE_MS = 2_000;
 export function noteSidebarInteraction() {
   lastSidebarTouchAt = Date.now();
-}
-
-function agentsSignature(list: AgentSession[]): string {
-  return list
-    .map(
-      (a) =>
-        `${a.name}${a.status}${a.displayName}${a.pinnedMaster ? 1 : 0}${a.mock ? 1 : 0}` +
-        `${a.busy ? 1 : 0}${a.projectId ?? ""}${a.contextTokens ?? ""}${a.lastActivityTs ?? ""}${a.model ?? ""}${a.effort ?? ""}${a.unread ?? 0}${a.label ?? ""}${a.external ? 1 : 0}${a.sharedPeers ?? 0}${(a.sharedWith ?? []).join(",")}${agentExtraSig(a)}`
-    )
-    .join("");
 }
 
 // 视图合流（入站头剥离 / 乐观消息保全 / 按 ts 插回 / 直播保全）在 view-compose.ts
@@ -680,7 +664,7 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
               ts: msgs[msgs.length - 1]?.ts ?? new Date().toISOString(),
             } as ChatMessage]
           : [];
-        s.messages = [...msgs, ...divider, ...s.messages];
+        s.messages = resolvePendingClicks([...msgs, ...divider, ...s.messages]); // 更早的一页可能正是之前找不到的表单
         s.historyHasMore = !!json.hasMore;
         s.loadingOlder = false;
       });
@@ -766,7 +750,7 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
       if (gen !== this.openGen) return;
       const msgs = hydrateHistoryMessages(json.data ?? []);
       this.produce((s) => {
-        if (msgs.length) s.messages = [...s.messages, ...msgs];
+        if (msgs.length) s.messages = [...s.messages, ...resolveDeltaClicks(s.messages, msgs)];
         s.historyNewerHasMore = msgs.length > 0 && !!json.hasMore;
         s.loadingNewer = false;
       });
@@ -859,7 +843,7 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
         // 用现有视图代替重拉
         const base = s.messages.filter((m) => m.id.startsWith("h"));
         // 同一回合被 7s 差量切成的多段历史气泡拼回一泡(见 live-merge.ts)
-        const history = mergeContiguousAssistant(base, dropCoveredDelta(base, delta));
+        const history = mergeContiguousAssistant(base, resolveDeltaClicks(base, dropCoveredDelta(base, delta)));
         const v = composeView({
           current: s.messages,
           history,
@@ -1532,7 +1516,7 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
       s.messages.push({
         id: `ru_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
         role: "user",
-        content: restoreUserText(text, s.messages, from), // 他端发的：表单回投显示可读行 + 标已答，本人的 @ 委托指令行剥掉
+        ...liveUserText(text, s.messages, from), // 他端发的按钮 / 表单回投：可读文案 + 标已答；本人的 @ 委托指令行剥掉；原文留 wire 给回声对账
         ts: new Date().toISOString(),
         ...(from ? { from } : {}),
         ...(attachments?.length ? { attachments } : {}),
@@ -1631,18 +1615,18 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
     if (!entry) return;
     const { agent, wire, files } = entry;
     const hasFiles = !!files && files.length > 0;
-    const fail = (why: string) => {
+    const fail = (why: string, handled = false) => {
       const errId = this.nextId();
       entry.errId = errId;
       this.produce((s) => {
         s.streaming = false;
         s.awaitingChunk = false;
         const opt = s.messages.find((m) => m.id === optimisticId);
-        if (opt) opt.failed = true; // 气泡标「未送达」+ 重发/删除按钮,别装作已发出
+        if (opt) opt.failed = !handled; // 标「未送达」+ 重发/删除;「待你处理」已在别处答了(409 ask_closed)不算失败,只提示一句
         s.messages.push({
           id: errId,
           role: "assistant",
-          content: `${getLang() === "zh" ? "⚠️ 发送失败：" : "⚠️ Send failed: "}${why}`,
+          content: handled ? why : `${getLang() === "zh" ? "⚠️ 发送失败：" : "⚠️ Send failed: "}${why}`,
           ts: new Date().toISOString(),
         });
       });
@@ -1694,7 +1678,7 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
       }
     } catch (e) {
       const timedOut = (e as Error).name === "TimeoutError";
-      fail(timedOut ? (getLang() === "zh" ? "上传超时（网络不稳）" : "upload timed out") : (e as Error).message);
+      fail(timedOut ? (getLang() === "zh" ? "上传超时（网络不稳）" : "upload timed out") : (e as Error).message, e instanceof ApiError && e.code === "ask_closed");
     }
   }
 

@@ -106,7 +106,6 @@ function isPathSafeName(x: string): boolean {
 // master 不在 registry，从 env 读其控制频道 id（各端点的 master 特判用）
 const CONTROL_CHANNEL_ID = process.env.CONTROL_CHANNEL_ID || "";
 
-
 // ── API 会话状态（v2.6.0+，原 bridge.ts Phase B 区块） ──────────────────
 
 /**
@@ -942,7 +941,7 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
   // GET /api/v1/events —— token 版 SSE（scope 过滤）
   if (path === "/events" && req.method === "GET") {
     // 逐条过滤：agent 事件按 agentInScope（"*" 不含 master、peer 永不含 master、前缀双认），ledger 事件只给 canReadLedger（bridge/ledger-feed.ts）
-    return revocable(deps.handleEventsRequest(req, { allow: sseEventAllow(principal) }), principal); // 设备凭据一撤，这条 SSE 立刻断（credential-revocation.ts）
+    return revocable(deps.handleEventsRequest(req, { allow: sseEventAllow(principal, url.searchParams.get("types")?.split(",")) }), principal); // 凭据一撤就断
   }
 
   // GET /api/v1/whoami —— 调用方自己的 token 身份（web 推送只推自己的对话）；ownerIds = 本人的 Discord 账号（ALLOWED_USER_IDS 第一个 = 装机时填的自己），web 据此把本人从 Discord 发的也放右边；不告诉 peer
@@ -1262,10 +1261,9 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
     } catch {
       return apiJson(400, { ok: false, error: "invalid body (JSON {text, wait?} or multipart with text/files)" });
     }
-    if (!text.trim() && attachments.length === 0) {
-      return apiJson(400, { ok: false, error: "text is required" });
-    }
+    if (!text.trim() && attachments.length === 0) return apiJson(400, { ok: false, error: "text is required" });
     waitSec = Math.min(Math.max(waitSec, 0), 300);
+    if (!attachments.length) { const r = await (await import("./ask-entry.js")).answerFromChat({ agent: agent.name, text, principal, askId: url.searchParams.get("ask") }); if (r) return r; }
 
     // Web slash 直通：文本形如 "/cmd [args]" 且命中注册表 → tmux 字面注入
     // （CC 原生解释，与 Discord slash 同款 tmuxSendLine 路径）。未命中注册表的
@@ -1628,7 +1626,7 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
         } catch { /* non-critical：状态照清 */ }
         clearAuqState(agent.channelId);
         recordMetric("auq_cancel", { channelId: agent.channelId, meta: { trigger: "api" } });
-        emitEvent({ agent: agent.name, chatId: agent.channelId, type: "question_cleared", data: { reason: "cancel", via: "api" } });
+        emitEvent({ agent: agent.name, chatId: agent.channelId, type: "question_cleared", data: { reason: "cancel", via: "api", by: tokenId, credential: principal.credential } });
         return apiJson(200, { ok: true, cancelled: true });
       }
       // submit：body.selections 覆盖状态（web 前端一次性提交所有选择）
@@ -1651,7 +1649,7 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
       const auqParse = auqPane ? parseAuqPane(auqPane) : null;
       if (auqPane && !auqParse) {
         clearAuqState(agent.channelId);
-        emitEvent({ agent: agent.name, chatId: agent.channelId, type: "question_cleared", data: { reason: "stale", via: "api" } });
+        emitEvent({ agent: agent.name, chatId: agent.channelId, type: "question_cleared", data: { reason: "stale", via: "api", by: tokenId, credential: principal.credential } });
         return apiJson(409, { ok: false, error: "AskUserQuestion no longer active (answered elsewhere?)" });
       }
       const keys = buildAuqKeystrokes(state, auqParse);
@@ -1663,17 +1661,13 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
       }
       clearAuqState(agent.channelId);
       recordMetric("auq_submit", { channelId: agent.channelId, meta: { trigger: "api", questions: String(state.questions.length) } });
-      emitEvent({ agent: agent.name, chatId: agent.channelId, type: "question_cleared", data: { reason: "submit", via: "api" } });
+      emitEvent({ agent: agent.name, chatId: agent.channelId, type: "question_cleared", data: { reason: "submit", via: "api", by: tokenId, credential: principal.credential } });
       return apiJson(200, { ok: true, keys: keys.length });
     }
 
     if (kind === "permission") {
       const action = String(body?.action || "");
-      const keySeqMap: Record<string, string[]> = {
-        allow: ["1", "Enter"],
-        allow_session: ["2", "Enter"],
-        deny: ["3", "Enter"],
-      };
+      const keySeqMap: Record<string, string[]> = { allow: ["1", "Enter"], allow_session: ["2", "Enter"], deny: ["3", "Enter"] };
       const keySeq = keySeqMap[action];
       if (!keySeq) return apiJson(400, { ok: false, error: 'action must be "allow" | "allow_session" | "deny"' });
       const targetWindow = agent.name === "master" ? `${MASTER_SESSION}:0` : windowTarget(agent.name);
@@ -1687,6 +1681,8 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
       } catch (e) {
         return apiJson(500, { ok: false, error: `tmux send-keys 失败: ${(e as Error).message}` });
       }
+      // 「待你处理」里对应的权限 ask 记成是谁答的（ask-runtime.ts），不然弹框消失时会被当成撤销——网页里所有权限卡都走这里
+      void import("./ask-runtime.js").then((m) => m.settleRuntimeAsk("permission", agent.channelId, "interact", m.permissionLabel(action), { principal: tokenId, device: principal.credential }));
       return apiJson(200, { ok: true });
     }
 

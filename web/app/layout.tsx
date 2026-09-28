@@ -3,6 +3,7 @@ import "./globals.css";
 // 图片查看器 PhotoSwipe(相册级手势:捏合/双击/下拉关闭)——全局 CSS 只能在根 layout 引
 import "photoswipe/dist/photoswipe.css";
 import { I18nInit } from "@/lib/i18n";
+import { RootBoundary } from "@/components/boundaries";
 
 export const metadata: Metadata = {
   title: "Claudestra",
@@ -55,8 +56,11 @@ export default function RootLayout({
             （暗色用户否则白闪一帧），所以是裸 <script>，不是 next/script。 */}
         {/* eslint-disable-next-line @next/next/no-sync-scripts -- 见上：要在首帧 paint 前执行，next/script 的任何策略都晚 */}
         <script src="/boot.js" />
-        <I18nInit />
-        {children}
+        {/* 根层错误兜底：任何组件渲染抛错都不再整页白屏（components/boundaries.tsx） */}
+        <RootBoundary>
+          <I18nInit />
+          {children}
+        </RootBoundary>
       </body>
     </html>
   );
