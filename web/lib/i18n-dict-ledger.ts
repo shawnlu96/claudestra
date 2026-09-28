@@ -20,6 +20,7 @@ export const LEDGER_DICT: Record<string, string> = {
   "收起原文": "Hide original",
   "看原文": "Show original",
   "这个弹框要到终端里处理": "This dialog has to be handled in the terminal",
+  "这个登录凭据只能看，作答要在 owner 本人的设备上": "This credential can only view; answer from the owner's own device",
   "回到对话": "Back to chat",
   "还剩 {span} 过期": "expires in {span}",
   "想补充什么，写在这里（可选）": "Anything to add? (optional)",

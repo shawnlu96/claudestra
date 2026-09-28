@@ -1,7 +1,7 @@
 /**
  * 「待你处理」的作答入口（docs 13 §4.4 §4.7）：聊天里的按钮 / 表单同步发送（POST /agents/:name/messages）、Discord 交互、网页卡片。
  * 三条路都先认出这是哪条 ask，再交给 asks.ts 的 commitAnswer——答复是 intent=response，不抢占正在干活的 agent。
- * 权限：看 = canReadLedger，大总管的 ask 还要 scope 含 master；答 = 再要 owner 本人的设备凭据（老的「*」Bearer、guest、peer 都不行），
+ * 权限：看 = canReadLedger，大总管的 ask 还要 scope 含 master；答 = 再要是 owner 本人（isOwnerPrincipal；老的「*」集成 Bearer、guest、peer 都不行），
  * Discord 只有 ALLOWED_USER_IDS 点得到。不能答的凭据发 [button:x] 照旧是普通消息。
  * 已结案的 ask 再点：网页带了 askId 才回 409 code=ask_closed（没带的不猜，照常投）；Discord 按原消息 id 认，悄悄告诉点的人「已处理」。
  */
@@ -21,14 +21,12 @@ export function canSeeAsk(p: Principal, a: Pick<Ask, "fromAgent">): boolean {
 }
 
 /**
- * owner 本人的设备凭据：lib/principals.ts isOwnerPrincipal（全仓唯一的 owner 定义）再收窄到 owner:self + 设备凭据——答复以 owner 名义
- * 投给 agent，web-ui 这类集成 token 能看不能答。不看 role：配对时关了终端（--no-terminal）的设备 role 会降成 external，但它仍是 owner 的设备
+ * 能作答：owner 本人（lib/principals.ts isOwnerPrincipal，全仓唯一的 owner 定义：owner:self 的设备凭据，或 web-ui token），且看得见这条。
+ * 答复以 owner 名义投给 agent，集成 token、guest、peer 不行。不看 role：配对时关了终端（--no-terminal）的设备 role 会降成 external，
+ * 但它仍是 owner 的设备。列表接口把这个结论（canAnswer）一并给网页，答不了的凭据卡片上不出选项，不会点了才 403
  */
-export const isOwnerDevice = (p: Principal): boolean => isOwnerPrincipal(p) && p.id === OWNER_PRINCIPAL_ID && !!p.credential;
-
-/** 能作答：owner 本人的设备，且看得见这条 */
 export function canAnswerAsk(p: Principal, a: Pick<Ask, "fromAgent">): boolean {
-  return isOwnerDevice(p) && canSeeAsk(p, a);
+  return isOwnerPrincipal(p) && canSeeAsk(p, a);
 }
 
 /** 每一行 wire 都对得上这条 ask 的选项 → 规范化结果；有一行对不上就不算这条的答复 */
@@ -99,7 +97,7 @@ const apiFrom = (p: Principal) => ({ kind: "api" as const, tokenId: tokenIdOf(p)
  */
 export async function answerFromChat(req: { agent: string; text: string; principal: Principal; askId?: string | null }): Promise<Response | null> {
   const p = req.principal;
-  if (!isOwnerDevice(p) || !canReadLedger(p)) return null;
+  if (!isOwnerPrincipal(p) || !canReadLedger(p)) return null;
   const { wires, rest } = splitWire(req.text);
   const hit = findAskForWires(req.agent, wires, req.askId);
   if (!hit || !canAnswerAsk(p, hit.ask)) return null;
@@ -117,7 +115,7 @@ export async function answerFromCard(project: string, id: string, body: { choice
   const db = askReadDb();
   const a = db ? getAsk(db, id) : null;
   if (!a || a.project !== project || !canSeeAsk(p, a)) return apiJson(404, { ok: false, error: `ask "${id}" not found in "${project}"` });
-  if (!canAnswerAsk(p, a)) return forbidden("answering requires the owner's own device credential");
+  if (!canAnswerAsk(p, a)) return forbidden("answering requires the owner's own credential");
   if (a.state !== "open") return apiJson(409, closedBody(a));
   if (a.source !== "reply") return apiJson(400, { ok: false, error: "runtime dialogs are answered via POST /agents/:name/answer" });
   const wires = Array.isArray(body.choices) ? body.choices.filter((c): c is string => typeof c === "string") : [];

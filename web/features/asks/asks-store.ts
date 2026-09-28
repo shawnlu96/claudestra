@@ -12,6 +12,8 @@ import type { WebAsk } from "./asks-model";
 export interface AsksSnap {
   asks: WebAsk[];
   loaded: boolean;
+  /** 这个凭据能不能作答（bridge 的 canAnswerAsk）：不能的只看不答 */
+  canAnswer: boolean;
   /** 抽屉开着吗；focus = 要滚到的那张卡 */
   open: boolean;
   focus: string | null;
@@ -19,7 +21,7 @@ export interface AsksSnap {
   banner: WebAsk | null;
 }
 
-const EMPTY: AsksSnap = { asks: [], loaded: false, open: false, focus: null, banner: null };
+const EMPTY: AsksSnap = { asks: [], loaded: false, canAnswer: true, open: false, focus: null, banner: null };
 let snap: AsksSnap = EMPTY;
 let machineKey: string | null = null;
 let denied = false;
@@ -41,7 +43,7 @@ async function refresh(): Promise<void> {
     // 第一次拉到的不算「新来的」；之后新来的卡活 ask 在前台就弹横幅
     const bannerAsk = snap.loaded && visible() ? fresh.find((a) => a.blocking === true && a.kind !== "accept") : undefined;
     for (const a of r.asks) seen.add(a.id);
-    set({ asks: r.asks, loaded: true, ...(bannerAsk ? { banner: bannerAsk } : {}) });
+    set({ asks: r.asks, loaded: true, canAnswer: r.canAnswer !== false, ...(bannerAsk ? { banner: bannerAsk } : {}) });
   } catch (e) {
     if (e instanceof ApiError && e.status === 403) {
       denied = true;

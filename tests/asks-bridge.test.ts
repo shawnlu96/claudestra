@@ -436,13 +436,23 @@ describe("第二轮审查的复现", () => {
     expect(getAsk(openLedger(path), a.id)?.state).toBe("open");
   });
 
-  test("r3 P2-8 owner 作答带 owner 标记（@ 委托标记不被中和）；web-ui token 看得见、答不了（聊天照常投递）", async () => {
-    await reply();
+  test("r3 P2-8 作答门 = isOwnerPrincipal：web-ui token 能答、带 owner 标记；看得见却答不了的凭据列表里 canAnswer=false，不会点了才 403", async () => {
+    const list = async (who: Principal) => (await (await handleAsksApi(new Request("http://x/api/v1/asks"), "/asks", who))!.json()) as { asks: Ask[]; canAnswer: boolean };
+    const a = (await reply())!;
     await answerFromChat({ agent: "agent-x", text: "[button:go]", principal: owner() });
     expect(delivered[0].from).toMatchObject({ kind: "api", owner: true });
     const webUi: Principal = { id: "token:tok_web", role: "owner", name: "web-ui", agents: ["*"], createdAt: at };
-    await reply();
-    expect(await answerFromChat({ agent: "agent-x", text: "[button:go]", principal: webUi })).toBeNull();
+    const b = (await reply())!;
+    expect(await list(webUi)).toMatchObject({ canAnswer: true });
+    delivered = [];
+    expect((await answerFromCard("p", b.id, { choices: ["[button:go]"] }, webUi)).status).toBe(202);
+    expect(delivered[0].from).toMatchObject({ kind: "api", owner: true });
+    // 老的「*」集成 Bearer：台账看得见，但不是 owner——列表明说答不了，网页卡片不出选项；聊天里发 wire 照常投递
+    const c = (await reply())!;
+    expect((await list(LEGACY_STAR_TOKEN)).canAnswer).toBe(false);
+    expect((await list(owner())).canAnswer).toBe(true);
+    expect(await answerFromChat({ agent: "agent-x", text: "[button:go]", principal: LEGACY_STAR_TOKEN, askId: c.id })).toBeNull();
+    expect(getAsk(openLedger(path), a.id)?.state).toBe("answered");
   });
 
   test("r3 P2-1 派发者按频道认：它也被 kill、旧名被新 agent 占了 → 大总管；它只是改了名 → 投给改名后的它", async () => {
@@ -486,7 +496,7 @@ describe("第二轮审查的复现", () => {
     expect(delivered[0].content.split("\n")[0]).toContain("还有 1 项 owner 没选");
   });
 
-  test("P2-6 关了终端的 owner 设备（role 降成 external）仍能作答；P2-7 /presence 只认 owner 设备", async () => {
+  test("P2-6 关了终端的 owner 设备（role 降成 external）仍能作答；P2-7 /presence 只认 owner 本人", async () => {
     const noTerm = { ...owner({ agents: ["*"], terminal: false, manage: true }), role: "external" as const };
     const a = (await reply())!;
     expect((await answerFromCard("p", a.id, { choices: ["[button:go]"] }, noTerm)).status).toBe(202);

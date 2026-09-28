@@ -14,7 +14,8 @@ import { ChatIcon, ClockIcon, TerminalIcon } from "./ask-icons";
  * 一张「待你处理」卡（docs 13 §4.4，照 T12 原型右栏的卡）：谁在问、哪个任务、等了多久；标题；背景（owner「不知道上面发生了些什么」）；
  * 可展开原文；选项与文本框；回到对话；还剩多久过期。已结案的只显示结论。
  */
-export function AskCard({ ask, now, focused, onOpenChat }: { ask: WebAsk; now: number; focused: boolean; onOpenChat: (agent: string) => void }) {
+export function AskCard(props: { ask: WebAsk; now: number; focused: boolean; canAnswer: boolean; onOpenChat: (agent: string) => void }) {
+  const { ask, now, focused, canAnswer, onOpenChat } = props;
   const t = useT();
   const [busy, setBusy] = useState(false);
   const [showBody, setShowBody] = useState(false);
@@ -72,7 +73,8 @@ export function AskCard({ ask, now, focused, onOpenChat }: { ask: WebAsk; now: n
 
       {open && (
         <div className="mt-3">
-          {ask.source === "reply" && (
+          {ask.source === "reply" && !canAnswer && <p className="text-[13px] opacity-75">{t("这个登录凭据只能看，作答要在 owner 本人的设备上")}</p>}
+          {ask.source === "reply" && canAnswer && (
             <ReplyChoices rows={rows} allowText={ask.allowText} busy={busy} onAnswer={(choices, text) => run(() => answerAskCard(ask.project, ask.id, { choices, text }))} />
           )}
           {ask.source === "auq" && (
