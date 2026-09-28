@@ -23,7 +23,7 @@ const PRINCIPALS = [
     credentials: [
       device("owner", OWNER_GRANT),
       device("owner_cc", { ...OWNER_GRANT, agents: ["cc"] }),
-      // adv4 P1-1：开了终端的设备 role 仍是 owner，canManage 不看 agents——光靠 isFullScope 挡不住
+      // adv4 P1-1：开了终端的设备 role 仍是 owner，以前 canManage 对 owner 不看 agents，放行了它
       device("owner_cc_term", { ...OWNER_GRANT, agents: ["cc"], terminal: true }),
       device("owner_star", { ...OWNER_GRANT, agents: ["*"], terminal: true }), // "*" 不含 master
     ],
@@ -46,13 +46,12 @@ const CREDS: Record<string, { device?: string; bearer?: string }> = {
 };
 const OWNER_ONLY = "creating or editing cron jobs requires the owner's own credential";
 const FULL_SCOPE = "cron management requires a full-scope token";
-const ALL_AGENTS = "creating or editing cron jobs requires a credential scoped to all agents";
 const EXPECT: Record<string, [number, string?]> = {
   owner: [200],
   "web-ui": [200],
   "legacy-star": [403, OWNER_ONLY],
   "owner-partial": [403, FULL_SCOPE],
-  "owner-partial-terminal": [403, ALL_AGENTS],
+  "owner-partial-terminal": [403, FULL_SCOPE],
   "owner-star-no-master": [200],
   guest: [403, FULL_SCOPE],
   peer: [403, FULL_SCOPE],

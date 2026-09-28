@@ -1,8 +1,8 @@
 /**
  * /api/v1/cron*（从 api-routes 拆出：那个文件只许变小）。列表 / 开关 / 删除：全权凭据（isFullScope）。
  * 新建 / 编辑的 prompt 到点原样敲进目标 agent 的 TUI（src/cron.ts，不带来源头），和斜杠直通同一类，所以要求：
- * owner 本人（isOwnerPrincipal）、scope 含 "*"，有 targetAgent 时它还得在 scope 里——master 要显式列出（agentInScope）。
- * 光看 isFullScope 不够：开了终端的部分 scope owner 设备 role 仍是 owner，canManage 放行。测试见 tests/cron-create-gates.test.ts。
+ * 全权（isFullScope，要求 scope 含 "*"）之外还要 owner 本人（isOwnerPrincipal）；有 targetAgent 时它还得在 scope 里——
+ * "*" 不含 master，要显式列出（agentInScope）。测试见 tests/cron-create-gates.test.ts。
  * runManager / loadJobs 由调用方注入：一个在 management.ts（hub），一个在 src/cron.ts（入口），bridge 模块都不能 import。
  */
 import { agentInScope, isOwnerPrincipal, type Principal } from "../lib/principals.js";
@@ -16,18 +16,11 @@ export interface CronRouteDeps {
 }
 
 const CRON_OWNER_ONLY = "creating or editing cron jobs requires the owner's own credential";
-const CRON_ALL_AGENTS = "creating or editing cron jobs requires a credential scoped to all agents";
 
-/** 新建 / 编辑的身份门（读 body 之前）：不放行 → 403 响应，放行 → null */
-function cronWriterDenied(principal: Principal): Response | null {
-  if (!isOwnerPrincipal(principal)) return forbidden(CRON_OWNER_ONLY);
-  return principal.agents.includes("*") ? null : forbidden(CRON_ALL_AGENTS);
-}
+/** 新建 / 编辑的身份门（读 body 之前；scope 含 "*" 已由外层 isFullScope 保证）：不放行 → 403 响应，放行 → null */
+const cronWriterDenied = (principal: Principal): Response | null => (isOwnerPrincipal(principal) ? null : forbidden(CRON_OWNER_ONLY));
 
-/**
- * prompt 会敲进去的那个 agent（空 = 临时 agent）要在 scope 里："*" 不含 master。按 src/cron.ts 的解析补成 agent-<名> 再判——
- * inScopeEitherName 会再试一次加前缀的写法，"agent-master" 变成 "agent-agent-master" 就不算 master 了
- */
+/** prompt 会敲进去的那个 agent（空 = 临时 agent）要在 scope 里："*" 不含 master。按 src/cron.ts 的解析补成 agent-<名> 再判，与调度器落到的是同一个 agent */
 const targetDenied = (principal: Principal, target: string | null | undefined): Response | null =>
   target && !agentInScope(principal, target.startsWith("agent-") ? target : `agent-${target}`) ? notInScope(target) : null;
 
