@@ -179,4 +179,25 @@ describe("agentListExtras（GET /agents 的附加字段）", () => {
     expect(own("agent-priv", { channelId: "c-priv" }).queued).toBeUndefined();
     expect((await agentListExtras(peerStar, withHeld))("agent-open", { channelId: "c-open" }).queued).toBeUndefined();
   });
+  test("派发关系：parent 输出裸名，大总管输出 master；task 原样给", async () => {
+    const own = await agentListExtras(owner, io);
+    expect(own("agent-t1", { parent: "agent-open", task: "T1 沙箱" })).toMatchObject({ parent: "open", task: "T1 沙箱" });
+    expect(own("agent-t2", { parent: "master" }).parent).toBe("master");
+    const none = own("agent-priv", {});
+    expect("parent" in none || "task" in none).toBe(false); // 普通 agent 不带这两个键
+  });
+  test("parent 只在调用方看得到派发者时下发：scope 外的派发者名不泄露，task 照给", async () => {
+    const x = (await agentListExtras(scoped, io))("agent-open", { parent: "agent-boss", task: "T" });
+    expect(x.parent).toBeUndefined();
+    expect(x.task).toBe("T");
+    expect((await agentListExtras(scoped, io))("agent-open", { parent: "agent-priv" }).parent).toBe("priv");
+    // "*" 不含大总管：scope 里没显式列 master 就不下发 parent=master
+    const star: Principal = { id: "token:tok_star", role: "external", agents: ["*"], createdAt: now };
+    expect((await agentListExtras(star, io))("agent-open", { parent: "master" }).parent).toBeUndefined();
+  });
+  test("peer 拿不到 parent 与 task（即便派发者在它的 scope 里）", async () => {
+    const x = (await agentListExtras(peerStar, io))("agent-open", { parent: "agent-priv", task: "T" });
+    expect(x.parent).toBeUndefined();
+    expect(x.task).toBeUndefined();
+  });
 });

@@ -55,6 +55,10 @@ export interface RegistryAgent {
   runtime?: string;
   /** v2.23+ Pi 能力档案（Pi agent 专用）：带哪些扩展/技能/工具/MCP。缺失 = 继承全局 */
   piEnv?: Record<string, unknown>;
+  /** 派发者的 registry 键（`agent-xxx` 或 `master`）：侧栏把它挂在派发者下面（manager/team.ts 写入）。展示用，不参与授权 */
+  parent?: string;
+  /** 任务短名（≤40 字），侧栏执行者那行的小标 */
+  task?: string;
 }
 
 /** registry.json 的内容 → 规范化后的 agent 列表（纯函数；结构不对返回空数组） */
@@ -92,6 +96,8 @@ function normalizeEntries(agents: Record<string, unknown>): RegistryAgent[] {
       runtime: str("runtime"),
       // 嵌套对象：不是对象就当没有（脏数据不能把 bridge 搞崩）
       piEnv: a.piEnv && typeof a.piEnv === "object" ? (a.piEnv as Record<string, unknown>) : undefined,
+      parent: str("parent"),
+      task: str("task"),
     };
   });
 }

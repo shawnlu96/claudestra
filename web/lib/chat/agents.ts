@@ -72,6 +72,10 @@ export interface AgentSession {
   mission?: MissionInfo | null;
   /** 别的 agent 发来、它还在回合里没收到的消息数（等回合结束或它调 check_inbox）→ 侧栏小标 */
   queued?: number;
+  /** 派发者（前端会话名，大总管 = __master__）：侧栏把它挂在派发者下面（sidebar-entries.ts 构树）；调用方看不到派发者时 bridge 不下发 */
+  parent?: string | null;
+  /** 任务短名（≤40 字）→ 侧栏名字后的压淡小标 */
+  task?: string | null;
 }
 
 interface ApiAgent {
@@ -101,6 +105,9 @@ interface ApiAgent {
   sharedWith?: string[];
   updateHint?: UpdateHint | null;
   mission?: MissionInfo | null;
+  /** 派发者的裸名（大总管 = master）与任务短名（bridge agent-info-routes.ts teamField） */
+  parent?: string | null;
+  task?: string | null;
 }
 
 function mapAgent(a: ApiAgent): AgentSession {
@@ -142,6 +149,7 @@ function mapAgent(a: ApiAgent): AgentSession {
     runtime: a.runtime ?? null,
     effort: a.effort ?? null,
     projectId: a.projectId ?? null,
+    parent: a.parent ? uiAgentName(a.parent) : null,
   };
 }
 
@@ -174,5 +182,5 @@ export async function loadAgents(): Promise<AgentSession[]> {
 export function agentExtraSig(a: AgentSession): string {
   const hint = a.updateHint ? JSON.stringify(a.updateHint) : "";
   const m = a.mission ? `${a.mission.until}|${a.mission.nudges}|${a.mission.resumeAt ?? ""}` : "";
-  return hint + m + (a.queued ? `q${a.queued}` : "");
+  return hint + m + (a.queued ? `q${a.queued}` : "") + `|${a.parent ?? ""}|${a.task ?? ""}`;
 }

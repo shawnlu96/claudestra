@@ -12,7 +12,9 @@ import { useT, getLang } from "@/lib/i18n";
 import { ChatHitRow, type ChatSearchHit } from "./search-hits";
 import { UnmanagedSessions } from "./unmanaged-sessions";
 import { ArchivedSessions } from "./archived-sessions";
-import { buildSidebarEntries, filterAndRankWorkers, splitDormant, type SidebarEntry } from "../sidebar-entries";
+import { buildSidebarEntries, buildTeams, entryMembers, filterAndRankWorkers, splitDormant, splitMasterKids, type SidebarEntry, type TeamNode } from "../sidebar-entries";
+import { MasterTeam, TeamGroup, type RowSlots } from "./team-group";
+import { usePersistedSet } from "../use-persisted-set";
 import { AgentRow } from "./agent-row";
 import { AgentMenu } from "./agent-menu";
 import { ProjectMenu } from "./project-menu";
@@ -172,37 +174,19 @@ export function Sidebar({ onSelect }: { onSelect: () => void }) {
   const masterDraft = useSyncExternalStore(subscribeDrafts, () => (master ? hasDraft(master.name) : false), () => false);
   const workers = agents.filter((a) => !a.pinnedMaster);
   // 只按「置顶」分层,⚠ 未读不参与排序——规则与缘由见 sidebar-entries.ts
-  const filtered = filterAndRankWorkers(workers, q, pinSet);
+  const filtered = filterAndRankWorkers(workers, q, pinSet, master?.name);
   // v2.21+ project 分组(owner 2026-08-28)。搜索时退回平铺(结果直给,不折叠)。
   // 组序 = 组内最近活动(filtered 已按活动排,Map 插入序即组的活动序);未分组沉底。
   const [showProjects, setShowProjects] = useState(false);
-  const [collapsedProjects, setCollapsedProjects] = useState<Set<string>>(() => {
-    if (typeof window === "undefined") return new Set();
-    try {
-      const v = JSON.parse(localStorage.getItem("cstra_proj_collapsed") || "[]");
-      return new Set(Array.isArray(v) ? v.filter((x) => typeof x === "string") : []);
-    } catch {
-      return new Set();
-    }
-  });
+  const [collapsedProjects, toggleProjectCollapse] = usePersistedSet("cstra_proj_collapsed");
+  const [collapsedTeams, toggleTeam] = usePersistedSet("cstra_team_collapsed"); // 派发者（及大总管）下挂的执行者
   // 「💤 沉寂」组的展开态:默认折叠,会话内记忆即可(不持久化——每次进来先收起)
   const [dormantOpen, setDormantOpen] = useState(false);
-  const toggleProjectCollapse = (id: string) =>
-    setCollapsedProjects((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      try {
-        localStorage.setItem("cstra_proj_collapsed", JSON.stringify([...next]));
-      } catch {
-        /* 隐私模式 */
-      }
-      return next;
-    });
   const projMeta = new Map(projects.map((p) => [p.id, p] as const));
   // 单成员 project 不成组;整组全员沉寂才下沉「💤 沉寂」——规则见 sidebar-entries.ts
-  const entries = buildSidebarEntries(filtered, q, projMeta);
-  const { activeEntries, dormantEntries } = splitDormant(entries);
+  const entries = buildSidebarEntries(filtered, q, projMeta, master?.name); // 先按 parent 挂树再分组
+  const { awake: underMaster, dormantRows } = splitMasterKids(q ? [] : buildTeams(filtered, master?.name).underMaster);
+  const { activeEntries, dormantEntries } = splitDormant([...entries, ...dormantRows]);
   // 三处列表（搜索平铺 / 单人行 / 组内行）共用一份行 props
   const rowProps = (a: AgentSession) => ({
     a,
@@ -216,6 +200,12 @@ export function Sidebar({ onSelect }: { onSelect: () => void }) {
     checked: sel.has(a.name),
     onToggleCheck: () => toggleSel(a.name),
   });
+  const busyOf = (i: AgentSession) => i.busy || (active === i.name && streaming);
+  const row = (a: AgentSession, s?: RowSlots & { projEmoji?: string }) => <AgentRow key={a.name} {...rowProps(a)} {...s} />;
+  const team = (n: TeamNode, projEmoji?: string) => (
+    <TeamGroup key={`t:${n.a.name}`} node={n} collapsed={collapsedTeams.has(n.a.name)} busy={n.children.some(busyOf)}
+      onToggle={() => toggleTeam(n.a.name)} row={(a, s) => row(a, a === n.a ? { ...s, projEmoji } : s)} />
+  );
 
   return (
     <aside
@@ -466,6 +456,9 @@ export function Sidebar({ onSelect }: { onSelect: () => void }) {
             )}
           </button>
         )}
+        {master && (
+          <MasterTeam masterName={master.name} kids={underMaster} collapsed={collapsedTeams.has(master.name)} busy={underMaster.some(busyOf)} onToggle={() => toggleTeam(master.name)} row={(a) => row(a)} />
+        )}
         {agents.length > 0 && filtered.length === 0 && (
           <div className="px-2 py-4 text-sm opacity-50">{t("没有匹配「")}{query.trim()}{t("」的会话")}</div>
         )}
@@ -474,9 +467,7 @@ export function Sidebar({ onSelect }: { onSelect: () => void }) {
             行样式本来就是自定义的。 */}
         {q ? (
           <ul className="flex w-full list-none flex-col gap-0.5 p-0">
-            {filtered.map((a) => (
-              <AgentRow key={a.name} {...rowProps(a)} />
-            ))}
+            {filtered.map((a) => row(a))}
           </ul>
         ) : (
           /* v2.21+ 方案 A(owner 2026-08-28):统一两级树——仅 ≥2 成员的 project
@@ -484,27 +475,17 @@ export function Sidebar({ onSelect }: { onSelect: () => void }) {
              >30 天沉寂的整体收进底部默认折叠的「💤 沉寂」 */
           (() => {
             const renderEntry = (e: SidebarEntry) => {
-              if (e.kind === "row") {
-                return (
-                  <AgentRow
-                    key={e.a.name}
-                    {...rowProps(e.a)}
-                    projEmoji={(e.a.projectId && projMeta.get(e.a.projectId)?.emoji) || undefined}
-                  />
-                );
-              }
+              if (e.kind === "row") return team(e, (e.a.projectId && projMeta.get(e.a.projectId)?.emoji) || undefined);
               // 组头 / 组块样式与拖拽放置在 project-group.tsx
               return (
                 <ProjectGroup
                   key={`g:${e.id}`}
                   e={e}
                   collapsed={collapsedProjects.has(e.id)}
-                  groupBusy={e.items.some((i) => i.busy || (active === i.name && streaming))}
+                  groupBusy={e.items.some(busyOf)}
                   onToggle={() => toggleProjectCollapse(e.id)}
                 >
-                  {e.items.map((a) => (
-                    <AgentRow key={a.name} {...rowProps(a)} />
-                  ))}
+                  {e.nodes.map((n) => team(n))}
                 </ProjectGroup>
               );
             };
@@ -521,7 +502,7 @@ export function Sidebar({ onSelect }: { onSelect: () => void }) {
                       <Chevron open={dormantOpen} />
                       <span>💤 {t("沉寂")}</span>
                       <span className="ml-auto shrink-0 text-[11px] font-normal text-base-content/35">
-                        {dormantEntries.reduce((n, e) => n + (e.kind === "row" ? 1 : e.items.length), 0)}
+                        {dormantEntries.reduce((n, e) => n + entryMembers(e).length, 0)}
                       </span>
                     </button>
                     {dormantOpen && (

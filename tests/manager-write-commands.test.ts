@@ -23,6 +23,10 @@ describe("manager 写命令分类", () => {
     }
   });
 
+  test("team-link 写 registry：过命令级写锁（manager/team.ts 不另拿锁）", () => {
+    expect(isWriteInvocation("team-link", ["t1", "--parent", "claudestra"])).toBe(true);
+  });
+
   test("takeover：只列候选是读，带目标或 --all 才是写", () => {
     expect(isWriteInvocation("takeover", [])).toBe(false);
     expect(isWriteInvocation("takeover", ["--force"])).toBe(false);
