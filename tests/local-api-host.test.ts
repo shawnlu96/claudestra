@@ -25,7 +25,10 @@ let dir: string;
 let workerDir: string;
 let masterDir: string;
 const opened: [string, string][] = [];
+// bun test 会自动加载仓库根的 .env：本机装着直托管（BRIDGE_STATIC_DIR 有值）时 relay 回包会多出 localEntry。先清掉，用到的用例自己设
+const staticDirBefore = process.env.BRIDGE_STATIC_DIR;
 beforeAll(() => {
+  delete process.env.BRIDGE_STATIC_DIR;
   dir = mkdtempSync(join(tmpdir(), "local-api-host-"));
   workerDir = join(dir, "repo-a");
   masterDir = join(dir, "master");
@@ -44,6 +47,8 @@ beforeAll(() => {
   });
 });
 afterAll(() => {
+  if (staticDirBefore === undefined) delete process.env.BRIDGE_STATIC_DIR;
+  else process.env.BRIDGE_STATIC_DIR = staticDirBefore;
   setHostDepsForTest(undefined);
   rmSync(dir, { recursive: true, force: true });
 });
