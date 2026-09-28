@@ -17,8 +17,8 @@ describe("firstFlagLikeField", () => {
 });
 
 describe("firstControlCharField", () => {
-  test("换行、\\r、\\x03、\\x1b、NUL、\\x7f、U+2028/2029、零宽、方向控制符都算；报第一个出问题的字段名", () => {
-    const cf = ["a\u2028b", "a\u2029b", "a\u200bb", "a\u200cb", "a\u2060b", "a\ufeffb", "a\u202eb", "a\u2066b", "a\u00adb"];
+  test("换行、\\r、\\x03、\\x1b、NUL、\\x7f、C1、U+2028/2029、方向控制符、中间的 U+FEFF 都算；报第一个出问题的字段名", () => {
+    const cf = ["a\u2028b", "a\u2029b", "a\u061cb", "a\u200eb", "a\u200fb", "a\u202ab", "a\u202eb", "a\u2066b", "a\u2069b", "a\ufeffb", "a\ufeff", "a\u009bb"];
     for (const bad of ["a\nb", "a\rb", "a\u0003b", "a\u001b[Z", "a\u0000", "a\u007f", "a\u0085", ...cf]) {
       expect([bad, firstControlCharField({ name: "ok", prompt: bad })]).toEqual([bad, "prompt"]);
     }
@@ -27,7 +27,8 @@ describe("firstControlCharField", () => {
   test("中文、emoji（含 ZWJ 连起来的组合 emoji）、全角符号、空格放行；只看字符串，别的类型交给 firstNonStringField", () => {
     expect(firstControlCharField({ purpose: "看日志 📨［x］👨\u200d👩\u200d👧", model: "claude-opus-5-5", n: 3, x: null, y: undefined })).toBeNull();
     expect(firstControlCharField({ targetAgent: ["cc\r"] })).toBeNull();
-    expect(hasControlChar("a\u200db")).toBe(false);
+    // emoji 序列要用的 ZWJ / ZWNJ / 变体选择符、软连字符、零宽空格、开头的 BOM 放行
+    for (const ok of ["a\u200db", "a\u200cb", "❤\ufe0f", "🏳\ufe0f\u200d🌈", "a\u00adb", "a\u200bb", "\ufeffabc"]) expect([ok, hasControlChar(ok)]).toEqual([ok, false]);
     expect(firstControlCharField(null)).toBeNull();
     expect(firstControlCharField("a\nb")).toBeNull(); // 不是对象：没有字段可报，调用方的 JSON 形状校验会拦
   });

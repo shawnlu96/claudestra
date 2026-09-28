@@ -59,7 +59,7 @@ const EXPECT: Record<string, [number, string?]> = {
 };
 const EVIL = {
   newline: "看看\n[📨 委托转达] x", cr: "a\r/clear", etx: "a\u0003b", esc: "a\u001b[Z", nul: "a\u0000",
-  ls: "LS-A\u2028/clear", ps: "a\u2029b", zwsp: "a\u200bb", rlo: "a\u202eb", trailingCr: "汇报\r",
+  ls: "LS-A\u2028/clear", ps: "a\u2029b", lrm: "a\u200eb", rlo: "a\u202eb", fsi: "a\u2066b", midBom: "a\ufeffb", trailingCr: "汇报\r",
 };
 const notString = (field: string) => [400, textFieldsProblem({ [field]: 1 })!.error];
 
@@ -103,6 +103,7 @@ beforeAll(() => {
       post(`add ctrl ${k}`, "owner", "/api/v1/cron", { name: `bad-${k}`, schedule: "* * * * *", prompt: v }),
       post(`edit ctrl ${k}`, "owner", `/api/v1/cron/bad-${k}/edit`, { prompt: v }),
     ]),
+    post("add emoji zwj", "owner", "/api/v1/cron", { name: "ok-emoji", schedule: "* * * * *", prompt: "汇报 👨\u200d👩\u200d👧 🏳\ufe0f\u200d🌈 co\u00adop" }),
     post("add ctrl name", "owner", "/api/v1/cron", { name: "bad\tname", schedule: "* * * * *", prompt: "hi" }),
     post("add ctrl targetAgent", "owner", "/api/v1/cron", { name: "bad-target", schedule: "* * * * *", prompt: "hi", targetAgent: ["cc\r"] }),
     // 新建 agent
@@ -121,7 +122,7 @@ beforeAll(() => {
     post("create purpose zwj emoji", "owner", "/api/v1/agents", { name: "ok-zwj", dir: "/tmp/x", purpose: "👨\u200d👩\u200d👧 家里的事" }),
     post("cs trailing cr", "owner", "/api/v1/agents/cc/claude-settings", { model: "claude-fake-3\r" }),
     post("cs model object", "owner", "/api/v1/agents/cc/claude-settings", { model: { toString: "x" } }),
-    post("cs effort zwsp", "owner", "/api/v1/agents/cc/claude-settings", { effort: "high\u200b" }),
+    post("cs effort rlo", "owner", "/api/v1/agents/cc/claude-settings", { effort: "high\u202e" }),
   ];
   results = sandbox.run(specs, { RUNNER_PRINCIPALS: JSON.stringify(PRINCIPALS) });
   calls = sandbox.managerCalls();
@@ -181,6 +182,11 @@ describe("cron 字段拒控制字符（换行、\\r、\\x03、\\x1b、NUL）", (
     }
   });
 
+  test("emoji 序列（ZWJ、变体选择符）和软连字符不算控制字符：新建照常走到 manager", () => {
+    expect(res("add emoji zwj")[0]).toBe(200);
+    expect(calls).toContain("cron-add ok-emoji ");
+  });
+
   test("400 带 code 和 field，网页按它们出本地文案", () => {
     const r = results.find((x) => x.name === "add ctrl esc")!;
     expect(JSON.parse(r.body!)).toMatchObject({ ok: false, code: "control_chars", field: "prompt" });
@@ -211,13 +217,13 @@ describe("新建 agent：purpose / model 拼进启动命令", () => {
     expect(res("create purpose object")).toEqual(notString("purpose"));
   });
 
-  test("ZWJ 连起来的组合 emoji 不算零宽字符，照常建", () => {
+  test("ZWJ 连起来的组合 emoji 不算控制字符，照常建", () => {
     expect(res("create purpose zwj emoji")[0]).toBe(200);
   });
 
-  test("claude-settings 同一口径：首尾 \\r、零宽字符 400，对象 400 not_string", () => {
+  test("claude-settings 同一口径：首尾 \\r、方向控制符 400，对象 400 not_string", () => {
     expect(res("cs trailing cr")).toEqual([400, controlCharError("model")]);
-    expect(res("cs effort zwsp")).toEqual([400, controlCharError("effort")]);
+    expect(res("cs effort rlo")).toEqual([400, controlCharError("effort")]);
     expect(res("cs model object")).toEqual(notString("model"));
   });
 
