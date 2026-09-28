@@ -7,7 +7,7 @@
 import { canReadLedger } from "./devices.js";
 import type { Ask } from "./ledger-asks.js";
 import { agentInScope, isOwnerPrincipal, type Principal } from "./principals.js";
-import { isMasterAgent } from "./registry.js";
+import { isMasterName } from "./registry.js";
 
 type AskWho = Pick<Ask, "fromAgent" | "assignee">;
 
@@ -33,7 +33,7 @@ export function askWhoOf(data: unknown, agent = ""): AskWho {
 export function canSeeAsk(p: Principal, a: AskWho): boolean {
   if (p.disabled) return false;
   if (isAskAssignee(p, a)) return true;
-  return canReadLedger(p) && (!isMasterAgent(a.fromAgent) || agentInScope(p, "master"));
+  return canReadLedger(p) && (!isMasterName(a.fromAgent) || agentInScope(p, "master"));
 }
 
 export function canAnswerAsk(p: Principal, a: AskWho): boolean {

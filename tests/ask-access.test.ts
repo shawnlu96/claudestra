@@ -86,9 +86,11 @@ describe("lib/ask-access.ts 的矩阵", () => {
   }
 });
 
-test("大总管的两种写法（master / agent-master）都要 scope 含 master 才看得见（adv2 附带）", () => {
-  const viaKey = { fromAgent: "agent-master", assignee: null };
-  expect([canSeeAsk(WHO.owner, viaKey), canSeeAsk(WHO.webUi, viaKey), canSeeAsk(WHO.ownerMaster, viaKey)]).toEqual([false, false, true]);
+test("大总管的各种写法（agent-master、大小写、全角、__master__）都要 scope 含 master 才看得见（isMasterName，adv2）", () => {
+  for (const fromAgent of ["agent-master", "Master", "agent-agent-MASTER", "ｍａｓｔｅｒ", "__master__"]) {
+    const a = { fromAgent, assignee: null };
+    expect([fromAgent, canSeeAsk(WHO.owner, a), canSeeAsk(WHO.webUi, a), canSeeAsk(WHO.ownerMaster, a)]).toEqual([fromAgent, false, false, true]);
+  }
 });
 
 describe("四处同一口径", () => {

@@ -1,7 +1,9 @@
 /** 推送订阅（src/lib/push-store.ts）与未读 / 已读（src/lib/unread-store.ts）两个存取模块，:memory: 库 */
 import { afterEach, describe, expect, test } from "bun:test";
 import { closeWebState, openWebState } from "../src/lib/web-state.js";
-import { deleteApnsDevice, deletePushSubscription, dismissSafe, listApnsDevices, listPushSubscriptions, saveApnsDevice, savePushSubscription, setPushSubscriptionKey } from "../src/lib/push-store.js";
+import {
+  deleteApnsDevice, deletePushSubscription, dismissSafe, listApnsDevices, listPushSubscriptions, pruneLegacyApnsDevices, saveApnsDevice, savePushSubscription, setPushSubscriptionKey,
+} from "../src/lib/push-store.js";
 import { bumpUnread, countsUnread, markAgentRead, onAgentRead, pruneUnread, readMarks, totalUnread, unreadCounts, unreadOrphans, type ReadEvent } from "../src/lib/unread-store.js";
 
 const fresh = () => {
@@ -54,6 +56,16 @@ describe("push-store", () => {
     expect(db.prepare("SELECT device, created_at, last_seen FROM apns_devices").get()).toEqual({ device: "iPhone 2", created_at: "2026-01-01T00:00:00.000Z", last_seen: "2026-01-02T00:00:00.000Z" });
     expect(deleteApnsDevice(db, "AB".repeat(32))).toBe(true);
     expect(listApnsDevices(db)).toEqual([]);
+  });
+  test("没记凭据的 APNs 老行超过 7 天没重新登记就清掉；记了凭据的、7 天内的留着（adv2 P2-4）", () => {
+    const db = fresh();
+    const now = new Date("2026-10-10T00:00:00Z");
+    const daysAgo = (n: number) => new Date(now.getTime() - n * 24 * 3600_000);
+    saveApnsDevice(db, "aa".repeat(32), "旧", daysAgo(8));
+    saveApnsDevice(db, "bb".repeat(32), "旧但刚见过", daysAgo(6));
+    saveApnsDevice(db, "cc".repeat(32), "新", daysAgo(30), { audience: "owner", principal: "owner:self", credential: "dev_1" });
+    expect(pruneLegacyApnsDevices(db, now)).toBe(1);
+    expect(listApnsDevices(db).map((r) => r.token).sort()).toEqual(["bb".repeat(32), "cc".repeat(32)]);
   });
 });
 

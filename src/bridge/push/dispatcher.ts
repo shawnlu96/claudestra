@@ -19,7 +19,7 @@ import type { Presence } from "../../lib/owner-presence.js";
 import { OWNER_PRINCIPAL_ID } from "../../lib/devices.js";
 import { isOwnerPrincipal, tokenIdOf, type Principal, type PrincipalsFile } from "../../lib/principals.js";
 import {
-  type ApnsDeviceRow, deleteApnsDevice, deletePushSubscription, dismissSafe, listApnsDevices, listPushSubscriptions, type PushSubscriptionRow, setPushSubscriptionKey,
+  type ApnsDeviceRow, deleteApnsDevice, deletePushSubscription, dismissSafe, listApnsDevices, listPushSubscriptions, pruneLegacyApnsDevices, type PushSubscriptionRow, setPushSubscriptionKey,
 } from "../../lib/push-store.js";
 import { t as tr } from "../../lib/i18n.js";
 import { markdownToPlain } from "../../lib/plain-text.js";
@@ -119,6 +119,8 @@ export function createDispatcher(d: DispatcherDeps): Dispatcher {
 
   async function apnsAll(msg: ApnsMessage, filter?: (r: Registrant) => boolean): Promise<NoticeOutcome> {
     if (!d.sender.config().apns) return NO_SEND;
+    const pruned = pruneLegacyApnsDevices(d.db, new Date(now()));
+    if (pruned) log(`APNs 老设备 ${pruned} 台超过 7 天没重新登记（没记凭据），已清理`);
     const tokens = listApnsDevices(d.db).filter((r) => live(r) && (!filter || filter(r))).map((r) => r.token);
     if (!tokens.length) return NO_SEND;
     return sumOutcomes(await Promise.all(tokens.map(async (t) => {

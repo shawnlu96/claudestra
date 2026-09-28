@@ -91,6 +91,15 @@ export interface ApnsDeviceRow {
   credential: string | null;
 }
 
+/**
+ * 没记登记凭据的老行（T11b 之前登记的）超过 7 天没重新登记就清掉：不知道是谁登记的，留着按 owner:self 全权推，撤了凭据的设备又登记不回来。
+ * 壳每次启动、已授权时都会重新登记，正常在用的手机一周内早补上了 principal
+ */
+export const LEGACY_APNS_MAX_AGE_MS = 7 * 24 * 3600_000;
+export function pruneLegacyApnsDevices(db: Database, now: Date = new Date()): number {
+  return db.prepare("DELETE FROM apns_devices WHERE principal IS NULL AND last_seen < ?").run(new Date(now.getTime() - LEGACY_APNS_MAX_AGE_MS).toISOString()).changes;
+}
+
 export function listApnsDevices(db: Database): ApnsDeviceRow[] {
   return db.prepare("SELECT token, principal, credential FROM apns_devices").all() as ApnsDeviceRow[];
 }
