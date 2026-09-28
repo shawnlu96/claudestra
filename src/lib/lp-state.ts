@@ -29,7 +29,9 @@ export interface LpRead {
   busy: boolean;
   compacting: boolean;
   input: InputState;
-  /** 底部是模态菜单（没有输入框） */
+  /** 底部被模态占着、没有输入框：额度菜单、权限框、AUQ、Rewind、各种确认框，或画面认不出 */
+  modal: boolean;
+  /** 模态里认得出的编号选择菜单（额度菜单等），认不出 = null */
   menu: PaneMenu | null;
   /** unknown 的原因，给界面和拒绝理由用 */
   reason?: string;
@@ -39,6 +41,9 @@ export const LP_MENU_LABEL = "Continue now at lower priority";
 export const LP_WAIT_LABEL = "Wait here, then continue automatically";
 /** runner 在菜单里只许按精确文案选这两项；其余（Switch to usage credits / Upgrade / Team plan / 领 credit）任何情况都不选 */
 const MENU_ALLOWED_LABELS: readonly string[] = [LP_MENU_LABEL, LP_WAIT_LABEL];
+/** 认额度菜单（撞墙后的「What do you want to do?」）：标题是通用的，只能看选项；别的确认框（切模型、bypass 首启）不许当它处理 */
+const RATE_MENU_LABELS: readonly string[] = ["Stop and wait for limit to reset", "Switch to usage credits", ...MENU_ALLOWED_LABELS];
+const isRateMenu = (m: PaneMenu | null) => !!m && m.options.some((o) => RATE_MENU_LABELS.includes(o.label));
 
 const ANSI_RE = /\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g;
 export function stripAnsi(s: string): string {
@@ -72,6 +77,13 @@ function splitPane(ansiLines: string[], plain: string[]): Parts | null {
   }
   return null;
 }
+
+/**
+ * 模态自带的操作提示（权限框「Esc to cancel · Tab to amend」、AUQ「Enter to select · ↑/↓ to navigate」、Rewind「Enter to continue」）。
+ * 大小写敏感：撞墙状态栏里的是小写「esc to cancel」，不算。输入框位置出现编号选项、或框内 / 框下有这些提示 = 找到的「输入框」其实是对话框
+ */
+const MODAL_HINT_RE = /Enter to (?:confirm|select|continue)|Esc to cancel|Tab to amend|↑\/↓ to navigate/;
+const boxIsModal = (p: Parts) => /^\s*❯\s*\d+\.\s/.test(p.inputPlain[0] ?? "") || MODAL_HINT_RE.test([...p.inputPlain, ...p.footer].join("\n"));
 
 /** 底部的编号选择菜单（额度菜单等）：「Enter to confirm · Esc to cancel」往上收编号项，直到标题行 */
 export function parseMenu(plain: string[]): PaneMenu | null {
@@ -132,19 +144,21 @@ function busyAbove(above: string[]): boolean {
 export function readLpPane(raw: string): LpRead {
   const ansiLines = raw.replace(/\s+$/, "").split("\n");
   const plain = ansiLines.map(stripAnsi);
-  const base = { offer: false, walled: false, busy: false, compacting: false } as const;
-  const parts = splitPane(ansiLines, plain);
+  const box = splitPane(ansiLines, plain);
+  const parts = box && !boxIsModal(box) ? box : null;
   if (!parts) {
     const menu = parseMenu(plain);
-    if (menu && menu.options.some((o) => o.label === LP_MENU_LABEL)) return { ...base, lowPriority: "off", offer: true, input: "unknown", menu };
-    return { ...base, lowPriority: "unknown", input: "unknown", menu, reason: menu ? "底部有选项菜单挡着" : "没找到输入框和状态栏" };
+    const base = { offer: false, walled: isRateMenu(menu), busy: false, compacting: false, input: "unknown", modal: true, menu } as const;
+    if (menu && menu.options.some((o) => o.label === LP_MENU_LABEL)) return { ...base, lowPriority: "off", offer: true };
+    const what = base.walled ? "额度菜单" : menu ? "选项菜单" : "对话框（权限框 / AUQ / Rewind 等）或认不出的画面";
+    return { ...base, lowPriority: "unknown", reason: `底部是${what}，没有输入框` };
   }
   const footer = norm(parts.footer.join(" "));
   const busy = busyAbove(parts.above);
   const compacting = /Compacting conversation/.test(parts.above.slice(-6).join("\n"));
   const input = inputStateOf(parts.inputPlain, parts.inputAnsi);
   const walledM = WALLED_RE.exec(footer);
-  const common = { busy, compacting, input, menu: null, walled: !!walledM, offer: OFFER_RE.test(footer) };
+  const common = { busy, compacting, input, modal: false, menu: null, walled: !!walledM, offer: OFFER_RE.test(footer) };
   if (EXHAUSTED_RE.test(footer)) return { ...common, lowPriority: "exhausted", offer: false, reason: "本周 low-priority 额度已用完" };
   const on = LP_ON_RE.exec(footer);
   if (on) {
@@ -211,9 +225,11 @@ export type LpDecision =
   | { kind: "escape-fail"; reason: string };
 
 export function decideLp(want: "on" | "off", r: LpRead): LpDecision {
-  if (r.menu) {
+  if (r.modal) {
+    // 只有额度菜单能按键（Esc 退出无副作用）；别的对话框一个键都不按——bypass 首启框上 Esc 就是退出 CC
+    if (!isRateMenu(r.menu)) return { kind: "refuse", reason: `${r.reason ?? "底部没有输入框"}，没动` };
     if (want === "off") return { kind: "skip", reason: "额度菜单开着，LP 本来就是关的" };
-    return r.menu.options.some((o) => o.label === LP_MENU_LABEL)
+    return r.menu?.options.some((o) => o.label === LP_MENU_LABEL)
       ? { kind: "send", via: "menu" }
       : { kind: "escape-fail", reason: "菜单里没有「Continue now at lower priority」这一项" };
   }
@@ -243,4 +259,22 @@ export function menuKeysTo(menu: PaneMenu, label: string): ("Up" | "Down")[] | n
 
 export function selectedLabel(menu: PaneMenu | null): string | null {
   return menu?.options.find((o) => o.selected)?.label ?? null;
+}
+
+// ── T36 上下文边界的注入闸门用的精简视图（lib/ctx-boundary-decision.ts）：字段或签名要改，先通知 T36 ──
+
+/**
+ * wall = 撞墙等待中（额度菜单开着也算）；exhausted 时 lp 报 off；menu = 底部被任何模态占着（额度菜单、权限框、AUQ、Rewind……）；
+ * draft = 输入框里有正常颜色的字（灰色提示不算），或者看不清输入框——证明不了是空的就当有，tmux 按字面敲字会把草稿连着命令一起提交
+ */
+export type PaneQuotaState = { wall: boolean; lp: "on" | "off" | "unknown"; exhausted: boolean; menu: boolean; compacting: boolean; draft: boolean };
+
+/** plain / escaped 是同一时刻的 `capture-pane -p` 与 `-p -e`：只按 escaped 判（去色就是 plain），escaped 为空才退回 plain */
+export function paneQuotaState(plain: string, escaped: string): PaneQuotaState {
+  const r = readLpPane(escaped.trim() ? escaped : plain);
+  const exhausted = r.lowPriority === "exhausted";
+  return {
+    wall: r.walled, lp: r.lowPriority === "exhausted" ? "off" : r.lowPriority, exhausted,
+    menu: r.modal, compacting: r.compacting, draft: r.input === "draft" || r.input === "unknown",
+  };
 }

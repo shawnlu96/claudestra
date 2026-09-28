@@ -211,3 +211,20 @@ describe("自定义文本走 deliver", () => {
     expect(f.keys).toEqual([]);
   });
 });
+
+describe("权限框 / AUQ / Rewind 挡着：五种按键动作一个键都不按", () => {
+  for (const name of ["modal-permission", "modal-auq", "modal-rewind"]) {
+    test(name, async () => {
+      for (const kind of ["lp-on", "lp-off", "compact", "save-compact", "lp-compact"] as const) {
+        const r = await run({ kind }, [fx(name)]);
+        expect([kind, r.outcome, r.keys]).toEqual([kind, "failed", []]);
+      }
+    });
+  }
+});
+
+test("撞墙等待、LP 没开：/compact 不发（发了也跑不动），与 T36 注入闸门同口径", async () => {
+  const r = await run({ kind: "compact" }, [fx("walled")]);
+  expect(r.outcome).toBe("failed");
+  expect(r.keys).toEqual([]);
+});
