@@ -94,11 +94,14 @@ describe("入站分流（relay-inbound.ts）", () => {
 
   test("隧道：原样打本机 Web，保留 host / x-forwarded-* / accept-encoding（Bun 下 decompress:false 让压缩正文直通）；响应保留 content-encoding、Location 改 https", async () => {
     const h = harness(() => new Response("page", { status: 303, headers: { location: "http://mini.relay.test/login", "content-encoding": "gzip", "x-keep": "1" } }));
-    const headers = { host: "mini.relay.test", "x-forwarded-proto": "https", "accept-encoding": "gzip", connection: "close" };
+    const headers = { host: "mini.relay.test", "x-forwarded-proto": "https", "accept-encoding": "gzip", connection: "close", "x-claudestra-relay-from": "spoof", "x-claudestra-tunnel-mark": "guess" };
     const res = await h.handler({ method: "GET", path: "/chat?x=1", headers, body: bodyStream("") }, ctx("relay"));
     expect(h.calls[0].url).toBe("http://127.0.0.1:2/chat?x=1");
     expect(h.calls[0].init.method).toBe("GET");
-    expect(h.calls[0].init.headers).toEqual({ host: "mini.relay.test", "x-forwarded-proto": "https", "accept-encoding": "gzip", "x-forwarded-for": "unknown" });
+    const { "x-claudestra-tunnel-mark": tunnelMark, ...sentHeaders } = h.calls[0].init.headers as Record<string, string>;
+    expect(sentHeaders).toEqual({ host: "mini.relay.test", "x-forwarded-proto": "https", "accept-encoding": "gzip", "x-forwarded-for": "unknown" }); // 中继塞的 x-claudestra-* 剥掉
+    expect(tunnelMark).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    expect(tunnelMark).not.toBe(relayMark()); // 与 peer 入口的标记不是同一个值
     expect((h.calls[0].init as { decompress?: boolean }).decompress).toBe(false);
     expect(h.calls[0].init.redirect).toBe("manual");
     expect(h.calls[0].init.body).toBeUndefined();
@@ -166,6 +169,37 @@ describe("入站分流（relay-inbound.ts）", () => {
     const get = { method: "GET", path: "/api/v1/agents", headers: signed("GET", "/api/v1/agents"), body: enc("") };
     expect(verifyPeerRequest(myFp, get, cache, NOW)).toBeNull();
     expect(verifyPeerRequest(myFp, get, cache, NOW)).toBeNull();
+  });
+  test("签名的另一种 base64url 写法（补 =、改末字符低位、夹 . 或 !）：验签就不认，缓存按解码字节也认得出是同一个", () => {
+    const cache = new ReplayCache(60_000);
+    const h = signed("POST", "/api/v1/x", "v");
+    const sig = h["x-claudestra-sig"];
+    const B64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    const variants = [
+      `${sig}=`,
+      sig.slice(0, -1) + B64[B64.indexOf(sig.at(-1)!) ^ 1],
+      `${sig.slice(0, 40)}.${sig.slice(40)}`,
+      `${sig.slice(0, 40)}!${sig.slice(40)}`,
+    ];
+    const req = (s: string) => ({ method: "POST", path: "/api/v1/x", headers: { ...h, "x-claudestra-sig": s }, body: enc("v") });
+    expect(verifyPeerRequest(myFp, req(sig), cache, NOW)).toBeNull();
+    for (const v of variants) {
+      expect(Buffer.from(v, "base64url").equals(Buffer.from(sig, "base64url"))).toBe(true); // 确实解出同样的字节
+      expect(verifyPeerRequest(myFp, req(v), cache, NOW)?.code).toBe("bad_signature");
+      expect(cache.seen(v, h["x-claudestra-ts"], NOW)).toBe(true);
+    }
+  });
+  test("ReplayCache：签名时间早于进程启动一律当重放；满了挤掉最老的；按插入顺序过期", () => {
+    const start = Math.floor(NOW / 1000);
+    const c = new ReplayCache(1000, 2, start);
+    const sigOf = (n: number) => Buffer.alloc(64, n).toString("base64url");
+    expect(c.seen(sigOf(1), String(start - 1), NOW)).toBe(true);
+    expect(c.seen(sigOf(1), String(start), NOW)).toBe(false);
+    expect(c.seen(sigOf(2), String(start), NOW)).toBe(false);
+    expect(c.seen(sigOf(3), String(start), NOW)).toBe(false); // 挤掉 1
+    expect(c.seen(sigOf(2), String(start), NOW)).toBe(true);
+    expect(c.seen(sigOf(1), String(start), NOW)).toBe(false);
+    expect(c.seen(sigOf(3), String(start), NOW + 1001)).toBe(false); // 过期后清掉
   });
 });
 

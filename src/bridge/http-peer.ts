@@ -12,6 +12,7 @@ import { newMessageId, newThreadId } from "./router.js";
 import { findHttpPeer, type HttpPeer } from "../lib/peers.js";
 import { handoffEnd, handoffStart } from "../lib/handoff-log.js";
 import { signedFor } from "../lib/instance-key.js";
+import { peerAuthHint } from "../lib/peer-trust.js";
 import { recordMetric } from "../lib/metrics.js";
 import { startPeerPresence } from "./peer-presence.js";
 import { initPush } from "./push/init.js";
@@ -151,9 +152,7 @@ async function runCall(
   peerAgentName: string,
   text: string,
   expecting?: string,
-  // v2.17.2 任务#85:oneShot=fire-and-forget——wait:0 立即 202,不轮询不推回复
-  // 也不报超时(此前 FYI 通知也挂 2h 轮询,超时推回把 caller 的 thinking 点亮,
-  // 是幽灵 thinking 的噪音源头之一)。投递失败仍推回——失败绝不静默。
+  // oneShot = fire-and-forget：wait:0 立即 202，不轮询、不推回复、不报超时；投递失败仍推回（失败绝不静默）
   oneShot = false,
 ) {
   const d = deps;
@@ -167,7 +166,7 @@ async function runCall(
   let res: Response;
   try {
     const url = `${base}/api/v1/agents/${encodeURIComponent(peerAgentName)}/messages`;
-    const body = JSON.stringify({ text, wait: oneShot ? 0 : WAIT_SEC });
+    const body = JSON.stringify({ text, wait: oneShot ? 0 : WAIT_SEC, nonce: crypto.randomUUID() }); // nonce：同一秒同样的正文签名也不同，不会被对方当成重放
     res = await peerFetch(url, {
       method: "POST",
       headers: {
@@ -201,7 +200,7 @@ async function runCall(
   }
 
   if (res.status === 401 || res.status === 403) {
-    await pushToCaller(caller, `[⚠️ peer 调用失败] ${label} 拒绝了请求（${res.status}：${body?.error || "token 无效或 agent 不在授权范围"}）。可能对方已 revoke——联系对方确认或重新握手。`, peer, peerAgentName, false, callId);
+    await pushToCaller(caller, `[⚠️ peer 调用失败] ${label} 拒绝了请求（${res.status}：${body?.error || "token 无效或 agent 不在授权范围"}）。${peerAuthHint(body)}。`, peer, peerAgentName, false, callId);
     settle(callId, caller, "http_peer_out_error", { peer: peer.name, kind: "auth", status: res.status });
     return;
   }
@@ -288,7 +287,8 @@ async function pollThread(callId: string, caller: CallerRef, peer: HttpPeer, rec
         // 鉴权失败不是瞬时故障——对方 revoke/轮换了 token,继续轮只是空转 10 分钟
         // 再误报「超时」(review 2026-07-19 #7)
         if (pr.status === 401 || pr.status === 403) {
-          await pushToCaller(caller, `[⚠️ peer 调用失败] ${label} 在等待回复期间拒绝了鉴权（${pr.status}）——对方可能已 revoke,需要重新握手。`, peer, peerAgentName, false, callId);
+          const why = peerAuthHint(await pr.json().catch(() => null /* 不是 JSON：按 token 问题提示 */));
+          await pushToCaller(caller, `[⚠️ peer 调用失败] ${label} 在等待回复期间拒绝了鉴权（${pr.status}）——${why}。`, peer, peerAgentName, false, callId);
           settle(callId, caller, "http_peer_out_error", { peer: peer.name, kind: "auth_poll", status: pr.status });
           return;
         }

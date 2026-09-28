@@ -11,7 +11,7 @@ import { writeJsonAtomic } from "../lib/state-file.js";
 import { SIG_HEADERS, verifySigned } from "../lib/instance-key.js";
 import { judgeSignature, type PinnedPeerKey } from "../lib/peer-keys.js";
 import { readPeers } from "../lib/peers.js";
-import { peerSigVerdict, recordPeerFp, ReplayCache, type PeerSigVerdict } from "../lib/peer-trust.js";
+import { currentPin, peerSigVerdict, recordPeerFp, ReplayCache, type PeerSigVerdict } from "../lib/peer-trust.js";
 
 const PEER_KEYS_PATH = join(STATE_DIR, "peer-keys.json");
 let keys: Map<string, PinnedPeerKey> | null = null;
@@ -33,8 +33,13 @@ export function peerSignatureState(peer: string): PinnedPeerKey | null {
 
 const LEGACY_WARN_EVERY_MS = 60 * 60_000;
 const legacyWarnedAt = new Map<string, number>();
-/** 所有入口（直连、peer 入口、经中继）的 peer 请求共用：验签通过的非 GET/HEAD 签名窗口内只认一次 */
+/** 所有入口（直连、peer 入口、经中继）的 peer 请求共用；authApi 在限速之后才写，拿不到签名的请求碰不到它 */
 const replays = new ReplayCache();
+
+/** 验签通过的非 GET/HEAD 请求：true = 这个签名已经用过（或早于本进程启动） */
+export function isPeerReplay(once: { sig: string; ts: string }): boolean {
+  return replays.seen(once.sig, once.ts, Date.now());
+}
 
 export async function checkPeerSignature(req: Request, url: URL, peer: string): Promise<PeerSigVerdict> {
   if (!peer || peer.startsWith("invite:")) return { allow: true, legacy: false }; // 未兑换的邀请 token：还没有对方记录可比
@@ -48,19 +53,18 @@ export async function checkPeerSignature(req: Request, url: URL, peer: string): 
     return { allow: false, reason: `body unreadable: ${(e as Error).message}` };
   }
   const path = url.pathname + url.search;
-  const prev = loaded().get(peer);
+  const prev = currentPin(loaded().get(peer), rec);
   const next = judgeSignature(prev, hdr, (pk) => verifySigned(pk, { method: req.method, path, ts: hdr.ts!, sig: hdr.sig!, body }), new Date().toISOString(), recordFp);
   const result = next.lastCheck!.result;
-  let verdict = peerSigVerdict(result, !!(recordFp || prev?.publicKey), Date.now());
-  const idempotent = req.method === "GET" || req.method === "HEAD";
-  if (verdict.allow && result === "ok" && !idempotent && replays.seen(hdr.sig!, Date.now())) verdict = { allow: false, reason: "replay" };
+  const verdict = peerSigVerdict(result, !!(recordFp || prev?.publicKey), Date.now());
   if (!verdict.allow) console.warn(`🚫 [peer-sig] ${peer}: ${verdict.reason}，拒绝`);
   else if (verdict.legacy && Date.now() - (legacyWarnedAt.get(peer) ?? 0) > LEGACY_WARN_EVERY_MS) {
     legacyWarnedAt.set(peer, Date.now());
-    console.warn(`⚠️ [peer-sig] ${peer}: ${result}，没有记录过对方指纹，截止日前放行（lib/peer-trust.ts LEGACY_PEER_DEADLINE）`);
+    console.warn(`⚠️ [peer-sig] ${peer}: ${result}，没有记录过对方指纹，截止日前放行（PEER_LEGACY_DEADLINE，默认见 lib/peer-trust.ts）`);
   }
-  await persist(peer, prev, next);
-  return verdict;
+  await persist(peer, loaded().get(peer), next);
+  const idempotent = req.method === "GET" || req.method === "HEAD";
+  return verdict.allow && result === "ok" && !idempotent ? { ...verdict, once: { sig: hdr.sig!, ts: hdr.ts! } } : verdict;
 }
 
 /** 对方每分钟探测、每 30s 轮询都会进来：结果或钉住的钥匙变了才立刻写，否则一分钟最多写一次；写失败不影响这次判定 */

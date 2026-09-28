@@ -18,7 +18,7 @@ import { peerIngressSyncRoute } from "./peer-ingress.js";
 
 /** bridge.ts 只从这一个模块 import 控制路由相关的东西（它在 guard 基线里只许缩，多一行 import 都不行） */
 export { initPeerIngress } from "./peer-ingress.js";
-export { setRequestContext } from "./request-context.js";
+export { setSocketRequestContext } from "./relay-inbound.js";
 export { localProbeResponse } from "./local-probe.js";
 import { relayClient, relayInfo } from "./relay-link.js";
 import { activePairingCodeList, activePairingCodes, redeemPairingCode } from "./relay-pairing.js";

@@ -10,9 +10,10 @@ import { join } from "node:path";
 import { instanceKeySync, keyFingerprint, signedHeaders } from "../src/lib/instance-key.js";
 import { STATE_DIR } from "../src/lib/paths.js";
 import {
-  expectedPeerFp, frameBearer, LEGACY_PEER_DEADLINE, loadRelayPeerView, peerSigVerdict, recordPeerFp, relayPeerRefusal, type RelayPeerView,
+  currentPin, expectedPeerFp, frameBearer, LEGACY_PEER_DEADLINE, legacyPeerDeadline, loadRelayPeerView, peerAuthHint, peerSigVerdict, recordPeerFp,
+  relayPeerRefusal, type RelayPeerView,
 } from "../src/lib/peer-trust.js";
-import { legacyPeerChecks } from "../src/lib/doctor-peers.js";
+import { failingPeerChecks, legacyPeerChecks } from "../src/lib/doctor-peers.js";
 import { authenticateApi } from "../src/bridge/api-auth.js";
 import { setRequestContext } from "../src/bridge/request-context.js";
 import { dispatchMachineRequest } from "../src/bridge/relay-dispatch.js";
@@ -24,7 +25,7 @@ const newKey = () => instanceKeySync(mkdtempSync(join(tmpdir(), "peer-trust-")))
 const keyA = newKey(), keyB = newKey(), keyX = newKey();
 const fpA = keyFingerprint(keyA.publicKey), fpB = keyFingerprint(keyB.publicKey), fpX = keyFingerprint(keyX.publicKey);
 const TOK = { a: "a".repeat(48), b: "b".repeat(48), old: "c".repeat(48), owner: "d".repeat(48) };
-const beforeDeadline = Date.now() < Date.parse(LEGACY_PEER_DEADLINE);
+const beforeDeadline = Date.now() < Date.parse(legacyPeerDeadline());
 
 describe("期望指纹与裁决（纯逻辑）", () => {
   test("记录的 fp 优先，其次 relay:// 基址，最后钉住的；都没有 = null", () => {
@@ -73,6 +74,34 @@ describe("期望指纹与裁决（纯逻辑）", () => {
     expect(before.detail).toContain("1 个老 peer");
     expect(before.detail).toContain(LEGACY_PEER_DEADLINE.slice(0, 10));
     expect(legacyPeerChecks(["he"], Date.parse(LEGACY_PEER_DEADLINE))[0]!.status).toBe("fail");
+  });
+});
+
+describe("截止日覆盖、钉住记录作废、提示文案、doctor 第二项（纯逻辑）", () => {
+  test("PEER_LEGACY_DEADLINE 可覆盖；解析不了用默认", () => {
+    expect(legacyPeerDeadline("")).toBe(LEGACY_PEER_DEADLINE);
+    expect(legacyPeerDeadline("not a date")).toBe(LEGACY_PEER_DEADLINE);
+    expect(legacyPeerDeadline("2026-12-15")).toBe("2026-12-15T00:00:00.000Z");
+  });
+  test("钉住早于记录建立时间 = 之前同名的对方，不作数；之后钉的照常", () => {
+    const pin = { pinnedAt: "2026-09-24T00:00:00.000Z", publicKey: "k" };
+    expect(currentPin(pin, { addedAt: "2026-09-20T00:00:00.000Z" })).toBe(pin);
+    expect(currentPin(pin, { addedAt: "2026-09-25T00:00:00.000Z" })).toBeUndefined();
+    expect(currentPin(pin, undefined)).toBe(pin);
+    expect(currentPin(undefined, { addedAt: "2026-09-25T00:00:00.000Z" })).toBeUndefined();
+  });
+  test("401 提示：peer_signature 按原因分开说，不再笼统叫人重新握手", () => {
+    expect(peerAuthHint(null)).toMatch(/重新握手/);
+    expect(peerAuthHint({ code: "peer_signature", reason: "replay" })).toMatch(/不要原样重发/);
+    expect(peerAuthHint({ code: "peer_signature", reason: "stale" })).toMatch(/时间/);
+    expect(peerAuthHint({ code: "peer_signature", reason: "key_changed" })).toMatch(/重新给你发一张邀请/);
+    expect(peerAuthHint({ code: "peer_signature", reason: "key_changed" })).not.toMatch(/重新握手/);
+  });
+  test("doctor：有期望指纹但最近验签没通过的列出来，原因带上", () => {
+    expect(failingPeerChecks([])).toEqual([]);
+    const c = failingPeerChecks([{ name: "he", result: "stale" }])[0]!;
+    expect(c).toMatchObject({ status: "warn", name: "peer 验签失败" });
+    expect(c.detail).toContain("he: stale");
   });
 });
 
@@ -131,7 +160,7 @@ describe("接线：authApi / 路径模式 / 中继 peer 帧", () => {
     expect(await status(apiReq(TOK.old))).toBe(beforeDeadline ? 200 : 401);
   });
   test("防重放：同一个签名的 POST 300 秒内再来一次 → 401；GET 不去重", async () => {
-    const t = Date.now() - 1000;
+    const t = Date.now(); // 早于进程启动的签名本来就会被当重放（ReplayCache），这里要的是窗口内的重复
     const body = '{"text":"replay-direct"}';
     expect(await status(apiReq(TOK.a, { key: keyA, method: "POST", body, now: t }))).toBe(200);
     expect(await status(apiReq(TOK.a, { key: keyA, method: "POST", body, now: t }))).toBe(401);

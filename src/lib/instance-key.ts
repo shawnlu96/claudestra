@@ -97,6 +97,17 @@ const MAX_SKEW_S = 300;
 
 export type SigCheck = "ok" | "bad" | "stale";
 
+/** Ed25519 签名 64 字节 = 86 个 base64url 字符（无填充） */
+const SIG_RE = /^[A-Za-z0-9_-]{86}$/;
+
+/**
+ * 签名串必须是规范编码：Node 的 base64url 解码很宽松（补 =、夹非法字符、改末字符里用不到的低位都解出同样的字节），
+ * 不规范的写法一律当 bad——防重放按签名去重（lib/peer-trust.ts ReplayCache），同一签名只能有一种写法。
+ */
+function isCanonicalSig(sig: string): boolean {
+  return SIG_RE.test(sig) && Buffer.from(sig, "base64url").toString("base64url") === sig;
+}
+
 export function verifySigned(
   publicKey: string,
   req: { method: string; path: string; ts: string; sig: string; body: string | Uint8Array },
@@ -104,6 +115,7 @@ export function verifySigned(
 ): SigCheck {
   const ts = Number(req.ts);
   if (!Number.isFinite(ts) || Math.abs(now / 1000 - ts) > MAX_SKEW_S) return "stale";
+  if (!isCanonicalSig(req.sig)) return "bad";
   try {
     const pub = createPublicKey({ key: { kty: "OKP", crv: "Ed25519", x: publicKey }, format: "jwk" });
     return verify(null, canonical(req.method, req.path, req.ts, req.body), pub, Buffer.from(req.sig, "base64url")) ? "ok" : "bad";
