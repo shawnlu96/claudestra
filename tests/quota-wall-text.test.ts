@@ -166,6 +166,19 @@ describe("真实画面样本（T35 2026-09-29 录的 CC 画面，去掉 ANSI：t
     for (const f of ["menu-5-items", "menu-no-lp", "menu-on-credits", "menu-on-lp"]) expect([f, matchLimitMenu(pane(f))]).toEqual([f, true]);
     expect(matchLimitMenu(pane("walled"))).toBe(false); // 状态栏倒计时不是菜单：没东西要关
   });
+  test("对话里贴了一段忙窗口的抓屏（缩进的假输入框 + spinner + 排队提示）：真菜单 / 真倒计时照样认出来（T24 adv1 P1-1，审查员沙箱画面）", () => {
+    for (const f of ["menu-fakebox", "walled-fakebox"]) expect([f, paneShowsWallWait(pane(f))]).toEqual([f, true]);
+  });
+  test("窄窗口：菜单选项折行、状态栏倒计时折行都认得（T24 adv1 P1-2）；折行的菜单不算完整认得，出闸不发 Esc", () => {
+    expect(paneShowsWallWait(pane("menu-narrow60"))).toBe(true);
+    expect(matchLimitMenu(pane("menu-narrow60"))).toBe(false);
+    const border = "─".repeat(58);
+    const foot = ["✻ Worked for 0s · done 1:58 AM", "", border, "❯ ", border, "  ⚠ Usage limit reached · continuing automatically at 3:20am", "  · esc to cancel"];
+    expect(paneShowsWallWait(foot.join("\n"))).toBe(true);
+    expect(paneShowsWallWait(["✻ Pondering… (2m 3s · ↓ 1.2k tokens)", ...foot.slice(1)].join("\n"))).toBe(false); // 顶格 spinner = 真在跑
+    const garbled = ["   What do you want to do?", "   ❯ 1. Stop and wait for limit to reset", "Some prose at column 0", "   Enter to confirm · Esc to cancel"];
+    expect(paneShowsWallWait(garbled.join("\n"))).toBe(false); // 选项之间夹着顶格的别的内容：不是菜单
+  });
   test("回合中弹出的别的对话框（底部也是「Enter to confirm · Esc to cancel」）不算额度菜单（T24 r2 P2-6）", () => {
     const other = ["   Do you want to proceed?", "", "   ❯ 1. Yes", "     2. No", "", "   Enter to confirm · Esc to cancel"].join("\n");
     expect(paneShowsWallWait(other)).toBe(false);

@@ -53,7 +53,7 @@ function harness(runtime?: string, opts: { pushFails?: boolean } = {}) {
     ({ cid, stopChannelId: cid, stopWs: 1, candidateWs: 1, event, runtime, drain, trigger });
   const stop = (event: string, drain: StopTurn["drain"], trigger: TurnTrigger = "insider") => settleStopTurn(deps, turn(event, drain, trigger));
   /** bridge 的真实路径：不给 humanTurn，按 deliverToLocal 送达时 noteDelivered 记下的来源判 */
-  const delivered = (from: { kind: string; owner?: boolean; peer?: string }, at?: number) => noteDelivered(cid, from, at);
+  const delivered = (from: { kind: string; owner?: boolean; peer?: string }, at?: number, idle = false) => noteDelivered(cid, from, at, idle);
   const stopReal = (event: string, drain: StopTurn["drain"]) => settleStopTurn(deps, { ...turn(event, drain), trigger: undefined });
   return { cid, book, pushed, notes, rearmed, nudged: () => nudged, stop, stopReal, delivered, turn, slot: () => book.slot(cid, "c-pm") };
 }
@@ -186,6 +186,43 @@ describe("Claude Code：以 API 错误结束的一轮不结算", () => {
     g.delivered({ kind: "api" }, 1_500); // 一起补投的 guest 消息：这一轮也在答它，不结算
     await g.stopReal("Stop", { text: "混着答的" });
     expect(g.pushed).toEqual([]);
+  });
+
+  test("被打断的续跑没有 Stop：之后 guest 在目标闲着时送到的消息重新记来源，不按旧的 insider 结算（T24 adv1 P1-3）", async () => {
+    const h = harness();
+    await h.stop("StopFailure", { text: "查到根因在 X", apiError: true, error: wallErr });
+    h.delivered({ kind: "bridge" }, 1_000, true); // 续跑开启这一轮
+    h.delivered({ kind: "api" }, 20_000, true); // guest 抢占 C-c 打断它（CC 不发 Stop），打断后目标闲着才送到
+    expect(await h.stopReal("Stop", { text: "（给 guest 的）结论" })).toBe(true);
+    expect(h.pushed).toEqual([]);
+    expect(h.rearmed).toEqual([h.cid]);
+    const g = harness();
+    await g.stop("StopFailure", { text: null, apiError: true, error: wallErr });
+    g.delivered({ kind: "bridge" }, 1_000, true); // owner 在终端按 Esc 打断了续跑，十分钟后 guest 来问
+    g.delivered({ kind: "api" }, 600_000, true);
+    await g.stopReal("Stop", { text: "（给 guest 的）结论" });
+    expect(g.pushed).toEqual([]);
+    const b = harness(); // 同一批里目标还没显出在跑（闲着）：不因此把 guest 降回 insider
+    await b.stop("StopFailure", { text: null, apiError: true, error: wallErr });
+    b.delivered({ kind: "api" }, 1_000, true);
+    b.delivered({ kind: "bridge" }, 2_000, true);
+    await b.stopReal("Stop", { text: "（给 guest 的）结论" });
+    expect(b.pushed).toEqual([]);
+  });
+
+  test("CC 到点自己续跑的那一轮（没有 bridge 投递）按 insider 结算；重启后还没见过 Stop 的频道仍按外人（T24 adv1 P1-4）", async () => {
+    const h = harness();
+    h.delivered({ kind: "local" });
+    await h.stopReal("StopFailure", { text: "查到根因在 X", apiError: true, error: wallErr });
+    expect(await h.stopReal("Stop", { text: "X 修好了" })).toBe(true); // continuing automatically at 3:20am
+    expect(h.pushed).toHaveLength(2);
+    expect(h.pushed[1]).toContain("X 修好了");
+    expect(h.rearmed).toEqual([]);
+    const r = harness(); // 重启后：这一轮是重启前开的，来源不知道
+    r.book.markApiError(r.cid, () => false, "旧的半句");
+    await r.stopReal("Stop", { text: "不知道在答谁" });
+    expect(r.pushed).toEqual([]);
+    expect(r.rearmed).toEqual([r.cid]);
   });
 
   test("真实来源判定：owner 在 Web 上（owner:self 的 api，带 owner 标记）触发的回合结算旧 caller", async () => {

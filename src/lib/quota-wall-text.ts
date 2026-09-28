@@ -88,26 +88,41 @@ export function matchLimitMenu(pane: string): boolean {
   });
 }
 
-/** 撞墙等待的状态行（输入框下沿以下）：自动续跑倒计时、low-priority 入口（T35 实测文案，样本 tests/fixtures/quota-wall/walled*.txt） */
-const WALL_WAIT_LINE = /continuing automatically\b[^\n]*·\s*esc (?:to cancel|or type)|\/low-priority to continue now\b/i;
+/**
+ * 撞墙等待的状态行（只在输入框下沿以下找）：自动续跑倒计时、low-priority 入口（T35 实测文案，样本 tests/fixtures/quota-wall/walled*.txt）。
+ * 窄窗口会把「· esc to cancel」折到下一行，所以不要求它在同一行。
+ */
+const WALL_WAIT_LINE = /Usage limit reached\b|continuing automatically at\b|\/low-priority to continue now\b/i;
 const MENU_HINT_LINE = /^\s*Enter to confirm\s*·\s*Esc to cancel\s*$/i;
 /** 额度菜单里才有的项：新旧版本的文案都算（判「停在额度菜单」要宽，判「能不能发 Esc」用上面严格的 matchLimitMenu） */
 const LIMIT_OPTION_RE = /limit to reset|usage credits|lower priority|continue automatically|Upgrade your plan|Add funds to continue/i;
 
-/** 画面底部是额度菜单（标题 + 编号项 + 提示行，有一项是额度菜单才有的）；不要求每一项都认得 */
+const OPTION_LINE = /^(\s*)(?:❯\s*)?\d+\.\s+\S/;
+const indentOf = (l: string) => /^\s*/.exec(l)![0].length;
+
+/**
+ * 画面底部是额度菜单（标题 + 编号项 + 提示行，有一项是额度菜单才有的）；不要求每一项都认得。
+ * 窄窗口（约 74 列以下）选项会折行：缩进比上一个编号项更深的行算它的续行，拼回去再认。
+ */
 function limitMenuAtBottom(lines: string[]): boolean {
-  const tail = lines.filter((l) => l.trim()).slice(-12);
+  const tail = lines.filter((l) => l.trim()).slice(-20);
   if (!tail.length || !MENU_HINT_LINE.test(tail[tail.length - 1]!)) return false;
-  const opts = tail.slice(0, -1).reverse();
-  const n = opts.findIndex((l) => !/^\s*(?:❯\s*)?\d+\.\s+\S/.test(l));
-  return n > 0 && /What do you want to do\?/.test(opts[n]!) && opts.slice(0, n).some((l) => LIMIT_OPTION_RE.test(l));
+  const head = tail.findLastIndex((l) => /^\s*What do you want to do\?\s*$/.test(l));
+  if (head < 0) return false;
+  const opts: string[] = [];
+  let indent = -1;
+  for (const l of tail.slice(head + 1, -1)) {
+    if (OPTION_LINE.test(l)) { opts.push(l.trim()); indent = indentOf(l); } else if (opts.length && indentOf(l) > indent) opts[opts.length - 1] += ` ${l.trim()}`;
+    else return false;
+  }
+  return opts.some((l) => LIMIT_OPTION_RE.test(l));
 }
 
-/** 输入框下沿以下（状态栏）：最后一对横线边框、上框下一行是 ❯；没有输入框（被菜单占着）= 空 */
+/** 输入框下沿以下（状态栏）：最后一对顶格横线边框、上框下一行是顶格 ❯；没有输入框（被菜单占着）= 空 */
 function footerLines(lines: string[]): string[] {
   for (let i = lines.length - 1; i > 1; i--) {
-    if (!/^\s*─{8,}/.test(lines[i]!)) continue;
-    for (let j = i - 1; j >= Math.max(0, i - 12); j--) if (/^\s*─{8,}/.test(lines[j]!)) return /^\s*❯/.test(lines[j + 1] ?? "") ? lines.slice(i + 1) : [];
+    if (!/^─{8,}/.test(lines[i]!)) continue;
+    for (let j = i - 1; j >= Math.max(0, i - 12); j--) if (/^─{8,}/.test(lines[j]!)) return /^❯/.test(lines[j + 1] ?? "") ? lines.slice(i + 1) : [];
     return [];
   }
   return [];
@@ -117,13 +132,13 @@ function footerLines(lines: string[]): string[] {
  * 撞墙后停在那儿等：底部是额度菜单，或状态栏写着「Usage limit reached · continuing automatically at 3:20am · esc to cancel」
  * （/low-priority 入口同理）。主回合其实没在跑，但菜单的「Esc to cancel」会让 CC_BUSY_RE 判成忙（T35 实测）：额度闸判
  * 「它在不在跑」、投递前判「能不能发键」都先用这个，CC_BUSY_RE 本身不动。对话里的同样字样不算（只看状态栏 / 底部菜单）；
- * 拿掉这些行之后画面上还有 spinner 的，照旧算在跑。
+ * 判「还在跑」只看顶格的行：真 spinner、真输入框的横线和 ❯ 都在第 0 列，对话 / 工具输出里贴进来的忙画面都有缩进，
+ * 不能让它遮住真的菜单（同 T35 lp-state 的做法）。拿掉之后画面上还有 spinner 的，照旧算在跑。
  */
 export function paneShowsWallWait(pane: string): boolean {
   const lines = pane.replace(/\s+$/, "").split("\n");
-  const menu = limitMenuAtBottom(lines);
-  if (!menu && !footerLines(lines).some((l) => WALL_WAIT_LINE.test(l))) return false;
-  return !paneMainTurnBusy(lines.filter((l) => !WALL_WAIT_LINE.test(l) && !(menu && MENU_HINT_LINE.test(l))).join("\n"));
+  if (!limitMenuAtBottom(lines) && !footerLines(lines).some((l) => WALL_WAIT_LINE.test(l))) return false;
+  return !paneMainTurnBusy(lines.filter((l) => !/^\s/.test(l) && !WALL_WAIT_LINE.test(l)).join("\n"));
 }
 
 /** owner 用了重置卡（/limit-reset 成功）时 CC 回显的「Limits reset · your weekly reset day stays … · … left」，不落 jsonl，只能看画面 */

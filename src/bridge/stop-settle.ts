@@ -39,20 +39,26 @@ export interface StopTurn {
  * 回合答的是那个外人，不结算、它说的话也不扣。不看 lastMessageSource：api-routes 投递后会把它改成 "agent"。
  * 开启这一轮的那条说了算：回合进行中送到的（bridge 消息、peer 请求照投不押）不覆盖它（T24 r2 P2-1，PM 09-29）；
  * 开头几秒里一起送到的一批（押后队列补投）取最严的：stranger > owner > insider。这一轮 Stop 时清掉。
- * 进程内：重启后不知道 = 当 stranger（不结算）。
+ * 被打断的回合（抢占 C-c、停止按钮、终端里 Esc）CC 不发 Stop：送到时目标闲着、离上一条又过了一批的时间，就是新一轮，重记。
+ * 没有记录：这一轮不是 bridge 送的消息开的（CC 到点自己续跑、owner 在终端里打字）= insider；但重启后还没见过这个频道的
+ * Stop 时，正跑的那一轮是重启前开的、来源不知道 = stranger（不结算，PM 09-29）。
  */
 export type TurnTrigger = "insider" | "owner" | "stranger";
 const RANK: Record<TurnTrigger, number> = { insider: 0, owner: 1, stranger: 2 };
 /** 同一批：第一条送到后这么久内到的算一起开启这一轮 */
 const TRIGGER_BATCH_MS = 3_000;
 const turnTrigger = new Map<string, { who: TurnTrigger; at: number }>();
-export function noteDelivered(cid: string, from: { kind: string; owner?: boolean; peer?: string }, now = Date.now()): void {
+/** 本进程见过 Stop 的频道：之后没有记录的回合是它自己开的 */
+const stopSeen = new Set<string>();
+export function noteDelivered(cid: string, from: { kind: string; owner?: boolean; peer?: string }, now = Date.now(), idle = false): void {
   const who: TurnTrigger = from.kind !== "user" && from.kind !== "api" ? "insider" : isOwnerSource(from) ? "owner" : "stranger";
   const cur = turnTrigger.get(cid);
-  if (!cur) turnTrigger.set(cid, { who, at: now });
-  else if (now - cur.at <= TRIGGER_BATCH_MS && RANK[who] > RANK[cur.who]) turnTrigger.set(cid, { who, at: cur.at });
+  const batch = !!cur && now - cur.at <= TRIGGER_BATCH_MS;
+  if (!cur || (idle && !batch)) turnTrigger.set(cid, { who, at: now });
+  else if (batch && RANK[who] > RANK[cur.who]) turnTrigger.set(cid, { who, at: cur.at });
 }
-const strangerTurn = (t: StopTurn): boolean => (t.trigger ?? turnTrigger.get(t.cid)?.who ?? "stranger") === "stranger";
+const strangerTurn = (t: StopTurn): boolean =>
+  (t.trigger ?? turnTrigger.get(t.cid)?.who ?? (stopSeen.has(t.cid) ? "insider" : "stranger")) === "stranger";
 
 const ranIntoApiError = (t: StopTurn): boolean =>
   !!t.drain.apiError || (t.event === "StopFailure" && (t.runtime ?? DEFAULT_RUNTIME) === DEFAULT_RUNTIME);
@@ -72,7 +78,7 @@ export async function settleStopTurn(d: CallerSettleDeps, t: StopTurn): Promise<
   try {
     return await settleOwn(d, t, mine);
   } finally {
-    if (mine) turnTrigger.delete(t.cid); // 这一轮结束：下一轮的来源从它的第一条消息重新记
+    if (mine) { turnTrigger.delete(t.cid); stopSeen.add(t.cid); } // 这一轮结束：下一轮的来源从它的第一条消息重新记
   }
 }
 
