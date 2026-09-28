@@ -109,7 +109,7 @@ describe("takeInbox", () => {
     big.env.meta.threadId = "thr-big";
     const { held } = setup([big]);
     const r = await takeInbox(me, 1000);
-    expect("result" in r && r.result.text).toContain('check_inbox({ read: "thr-big" })'); // read 用 thread_id（message_id 会撞）
+    expect("result" in r && r.result.text).toContain('check_inbox({ read: "m-big" })');
     const p1 = await takeInbox(me, 1000, { read: "m-big" });
     if ("error" in p1) throw new Error(p1.error);
     expect(p1.result.text).toContain("第 1/3 页");
@@ -120,8 +120,8 @@ describe("takeInbox", () => {
     expect(held.get("c-me")![0].lease!.at).toBe(1000); // 读后面的页不续租
     await takeInbox(me, 3000, { ack: batch });
     expect(held.get("c-me") ?? []).toHaveLength(0);
-    const gone = await takeInbox(me, 4000, { read: "thr-big" });
-    expect("result" in gone && gone.result.text).toContain("没有 thr-big");
+    const gone = await takeInbox(me, 4000, { read: "m-big" });
+    expect("result" in gone && gone.result.text).toContain("没有 m-big");
   });
 
   test("一队超长消息：预览最多 3 条、计入预算；分页读打了租约后再无参调用也不展开全文", async () => {
@@ -144,18 +144,60 @@ describe("takeInbox", () => {
     expect(again.result.text.length).toBeLessThan(16_000);
   });
 
-  test("两条长消息 message_id 撞了：按 message_id 读不猜、列出 thread_id；按 thread_id 读，翻页提示也带 thread_id", async () => {
-    const dup = (t: string) => {
+  test("两条长消息：按 message_id 各读各的，翻页提示带 message_id；旧版给出的 thread_id 也认", async () => {
+    const long = (m: string, t: string) => {
       const i = item("q".repeat(30_000));
-      i.env.meta.messageId = "m-dup";
+      i.env.meta.messageId = m;
       i.env.meta.threadId = t;
       return i;
     };
-    setup([dup("thr-a"), dup("thr-b")]);
-    const amb = await takeInbox(me, 1000, { read: "m-dup" });
-    expect("result" in amb && amb.result.text).toContain("thr-a、thr-b");
+    setup([long("m-a", "thr-a"), long("m-b", "thr-b")]);
+    const pb = await takeInbox(me, 1000, { read: "m-b" });
+    expect("result" in pb && pb.result.text).toContain('message_id=m-b 第 1/3 页');
+    expect("result" in pb && pb.result.text).toContain('read: "m-b", page: 2');
+    const pa = await takeInbox(me, 1000, { read: "thr-a", page: 2 });
+    expect("result" in pa && pa.result.text).toContain('message_id=m-a 第 2/3 页');
+  });
+
+  test("旧格式 id 撞号的两条长消息：拿 thread_id 读，翻页提示沿用 thread_id，第 2 页不串到另一封", async () => {
+    const dup = (t: string, ch: string) => {
+      const i = item(ch.repeat(30_000));
+      i.env.meta.messageId = "agent_1790591988218";
+      i.env.meta.threadId = t;
+      return i;
+    };
+    const { held } = setup([dup("thr-a", "a"), dup("thr-b", "b")]);
     const p1 = await takeInbox(me, 1000, { read: "thr-b" });
     expect("result" in p1 && p1.result.text).toContain('read: "thr-b", page: 2');
+    const p2 = await takeInbox(me, 1000, { read: "thr-b", page: 2 });
+    if ("error" in p2) throw new Error(p2.error);
+    expect(p2.result.text).toContain("bbbb");
+    expect(p2.result.text).not.toContain("aaaa");
+    const [a, b] = held.get("c-me")!;
+    expect(a.lease).toBeUndefined(); // 租约只打在读的那一封上
+    expect(b.lease).toBeDefined();
+  });
+
+  test("旧格式 message_id（agent_<毫秒>，线上押后队列里已有的）：照常领取、分页读、ack 出队", async () => {
+    const short = item("旧的短消息");
+    short.env.meta.messageId = "agent_1790591988218";
+    const big = item("y".repeat(30_000));
+    big.env.meta.messageId = "agent_1790591988219";
+    big.env.meta.threadId = "thr-old-big";
+    const { held } = setup([short, big]);
+    const r = await takeInbox(me, 1000);
+    if ("error" in r) throw new Error(r.error);
+    expect(r.result.n).toBe(1);
+    expect(r.result.text).toContain("message_id=agent_1790591988218");
+    expect(r.result.text).toContain('read: "agent_1790591988219"');
+    const batch = held.get("c-me")![0].lease!.batchId;
+    const p = await takeInbox(me, 1000, { read: "agent_1790591988219" });
+    if ("error" in p) throw new Error(p.error);
+    expect(p.result.text).toContain("第 1/3 页");
+    const bigBatch = held.get("c-me")!.find((i) => i.env.meta.messageId === "agent_1790591988219")!.lease!.batchId;
+    await takeInbox(me, 2000, { ack: batch });
+    await takeInbox(me, 2000, { ack: bigBatch });
+    expect(held.get("c-me") ?? []).toHaveLength(0);
   });
 
   test("空的 / 正在被 Stop 投递（频道锁被占）/ 认不出调用方", async () => {

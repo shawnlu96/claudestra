@@ -11,7 +11,7 @@ import type { ServerWebSocket } from "bun";
 import type { Client } from "discord.js";
 import { discordReply } from "./discord-api.js";
 import type { Envelope, LocalEndpoint } from "./router.js";
-import { newThreadId } from "./router.js";
+import { newMessageId, newThreadId } from "./router.js";
 import { readRegistryAgents } from "../lib/registry.js";
 import { agentInScope, findByTokenId, readPrincipals } from "../lib/principals.js";
 import { forwardHeader, forwardNotice, forwardVerdict } from "../lib/forward.js";
@@ -79,7 +79,7 @@ export async function handleForward(ws: ServerWebSocket<unknown>, msg: Record<st
     to,
     intent: "request",
     content: `${forwardHeader(short(fromName), String(msg.reason || ""))}\n\n${orig.env.content}`,
-    meta: { ...orig.env.meta, messageId: `fwd_${Date.now()}`, threadId: newThreadId(), ts: new Date().toISOString(), forwarded: true, discordMsg: undefined },
+    meta: { ...orig.env.meta, messageId: newMessageId("fwd"), threadId: newThreadId(), ts: new Date().toISOString(), forwarded: true, discordMsg: undefined },
   };
   if (from.kind === "user" && d.postDiscord) {
     await d.postDiscord(target.channelId, `↪ 由 <#${fromChannelId}> 转来（原本发给 ${short(fromName)}）：\n${orig.env.content}`, orig.env.meta.attachments)

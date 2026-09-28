@@ -32,6 +32,8 @@ export interface ClickedRow {
 /**
  * 历史还原:把一条回投 payload(`[button:X]` / `[select:ID:V]`)映射回它所属的行。
  * 返回 rowKey + 存储值 + 人类可读 label(渲染成用户气泡)。
+ * 从最后一行往前找:一个回合气泡里同一 id 出现在前后两段时认最新那段——与差量续接(live-merge)
+ * 时回投只看得见后一段的结果一致,否则实时标 b1、刷新后标 b0。
  */
 export function matchClickedRow(
   rows: WebComponentRow[] | undefined,
@@ -40,7 +42,7 @@ export function matchClickedRow(
   selValue: string | null,
 ): ClickedRow | null {
   if (!rows) return null;
-  for (let ri = 0; ri < rows.length; ri++) {
+  for (let ri = rows.length - 1; ri >= 0; ri--) {
     const row = rows[ri];
     if (row.type === "buttons" && btnId) {
       const btn = row.buttons.find((b) => b.id === btnId);
