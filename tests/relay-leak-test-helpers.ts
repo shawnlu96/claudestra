@@ -29,7 +29,7 @@ function base64Cores(b: Buffer, enc: "base64" | "base64url"): string[] {
 }
 
 /** 一个 needle 的原文和各种可逆编码形式，[编码名, 字节] */
-export function encodedForms(needle: string): [string, Buffer][] {
+function encodedForms(needle: string): [string, Buffer][] {
   const b = Buffer.from(needle, "utf8");
   const hex = b.toString("hex"), pct = hex.replace(/../g, "%$&");
   const units = Array.from({ length: needle.length }, (_, i) => needle.charCodeAt(i).toString(16).padStart(4, "0"));
