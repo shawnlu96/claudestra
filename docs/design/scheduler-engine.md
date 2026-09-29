@@ -112,6 +112,13 @@ owner 截图 ask 属上线闸。
 - 在自动重试决定的独立入口落地前，已取消的同轮 merge 一律停给 PM 手工核对并接管，调度器与台账写入口都拒绝换 key 重做。UI 合并的第二道写入闸查台账 authorize ask：owner 答复、未过期、非 guest，绑定当前 task/specRev/head/前后截图摘要；产生 ask 和投影视图的适配器仍在 PR E。
 - T69 移除 worker 前的归档会复制 registry 的 kind 到归档标记；默认全文搜索读该标记过滤，显式指定 agent 仍可查。更早已移除且无标记的旧会话只按 `agent-task-*` 命名识别，不猜其他历史目录。
 - 一次派多张卡给 peer 时，并发往对方项目 PM 入口投递，受本项目「对外委托槽」约束，不等待上一张完成。对方实例升级后，有常设授权且 owner 已设并发上限时，每卡自动建立一个执行 session 和一个跨模型审查 session，按本机相同模板推进；超过上限排队，前卡完成即补位。缺授权或上限时只接单排队并提示对方 owner。双实例沙箱验收：A 同时委托五张给 B，B 上限三，先起三组、后补两组。
+- 第四服务默认无配置即空转，`doctor` 明报；配置无效时不部分启动。PR D 的 UI 模板在 owner 截图 ask 与 head/specRev/摘要的真实联动接通前禁止自动合并，避免把口头通过当授权。
+
+### 调度服务配置与部署回执
+
+`statePath("scheduler.json")` 不存在时 `enabled=false`；启用时逐项目填写 `maxActiveWorkers`、非空 `requiredChecks`（完整 CI job 名）和 `deploy`。必过检查缺失、pending、失败或 skipped 均不合并。`deploy.cwd` 是该项目仓库绝对路径，`argv` 是部署命令的字符串数组，`verifyArgv` 是只读部署核证命令；两者都不经 shell 拼接。核证命令输出 JSON：`{"ok":true,"mergeSha":"<完整 SHA>","receipt":"<可核对版本>"}`，合并 SHA 必须与本卡的 merge journal 相同。部署命令以环境变量收到 `CLAUDESTRA_MERGE_SHA`、`CLAUDESTRA_PR_URL`、`CLAUDESTRA_TASK_ID`；可设 `timeoutMs`（1 秒到 1 小时），默认 20 分钟。目标地址与本地凭据只进该机配置，不入仓库。仓库的 launchd 安装/更新使用同一 `DAEMONS` 清单，scheduler 排在 launcher 之前；旧的个人 `deploy-full.sh` 不再是自动合并队列的执行入口。
+
+合并使用 GitHub REST merge 的 `sha` 参数原子锁定已审 head；[GitHub 文档](https://docs.github.com/en/rest/pulls/pulls#merge-a-pull-request)明确 head 不符返回 409。`update-branch` 产生新 head 后，台账同事务改为新轮 review、取消旧 merge intent 并释放项目合并槽。
 
 ## 进度
 
@@ -123,3 +130,5 @@ owner 截图 ask 属上线闸。
   一次性 Codex 自查指出旧轮派单冒认新轮、并行活跃意图两个 P1，以及历史 P1 证据和截图摘要绑定两个 P2；规划器现要求本轮派单回执、等待任何未结意图，并逐轮校验交付 head/计数、绑定截图摘要。
 - PR C：registry 的唯一分类器在新建、保存与幂等迁移时标记 worker；会话列表和默认全文搜索过滤，管理面板保留全部，v4 任务详情从台账 session 绑定直接打开作者或审查员，会话 store 与待你处理直达保留原路。审查 session 在 v8 台账里按卡和角色唯一绑定，跨模型校验并持有同卡复验身份；verified 后先归档回执再停止，未知结果可凭核对回执续走。沙箱 bridge 实测迁移两次为 1/0，API 正确下发 worker/PM/codex kind。
   一次性 Codex 对抗自查找到四个 P2：归档后丢失 worker 标记、无 task.agent 的作者无法从 DAG 进入、绑定未核 intent 收件人、归档后停止前会话过早消失；均已修复并补测试。跨模型复审 r1 又要求本机 session 的家族核对 registry runtime，并让 owner 可撤误标、绑定时统一打标、管理面板可操作 worker。截图改走沙箱 headless 浏览器，不动 owner 屏幕。
+- PR D：独立 scheduler 入口、配置与 doctor 行接到第四个 launchd daemon；v9 台账记合并/部署阶段，项目级合并槽与 CAS、完整 head/跨模型审查重核、防重试的 merging/deploying 状态已落地。gh/部署命令经结构化 argv 调用，外部不明即冻结；本卡 verified 由台账检查单判。沙箱中服务禁用/启用空队列均存活，假卡 CLI journal 的分支更新使 merge→review、新轮 head 入账、旧 intent 取消且项目锁归零；没碰真实 GitHub 或部署目标。
+  一次性 Codex 对抗自查找到两项 P1（merge 未原子锁 head、可被无关/跳过的 CI 检查放行）和一项 P2（update-branch 新 head 永久占项目合并槽）；现用 REST `sha` 锁 head，配置必过检查且只认 pass，并在新 head 回审时原子释放锁。UI 模板仍等真实 owner 截图 ask 适配器，当前 fail-closed。

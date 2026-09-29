@@ -2,6 +2,7 @@
 import { INTENT_ACTIONS, INTENT_STATUSES, WORKFLOW_MODES, WORKFLOW_TEMPLATES, AUTHOR_FAMILIES } from "../lib/ledger-scheduler.js";
 import { planIntent, setWorkflow, settleIntent } from "../lib/ledger-scheduler-write.js";
 import { bindSchedulerSession, recordSessionRetirement, type SessionRole, type SessionTransport } from "../lib/scheduler-sessions.js";
+import { advanceMergeRun, beginMergeRun, type MergePhase } from "../lib/scheduler-merge.js";
 import { LedgerError } from "../lib/ledger-store.js";
 import { intFlag } from "./ledger-identity.js";
 import type { LedgerCli } from "./ledger-context.js";
@@ -94,5 +95,17 @@ export const SCHEDULER_CMDS: Record<string, CommandSpec> = {
         effect: effect as "archive" | "kill", receipt: c.need("receipt"),
       }) };
     },
+  },
+  "scheduler-merge-begin": {
+    valued: ["required-checks"], bools: [], usage: "scheduler-merge-begin <intent-key> --required-checks <name,name>",
+    run(c) { return { ok: true, ...beginMergeRun(c.db, c.ctx(), c.p.pos[1] ?? "", c.need("required-checks").split(",")) }; },
+  },
+  "scheduler-merge-step": {
+    valued: ["from", "to", "rev", "receipt", "merge-sha", "new-head"], bools: [],
+    usage: "scheduler-merge-step <intent-key> --from <phase> --to <phase> --rev N [--receipt <evidence>] [--merge-sha <full SHA>] [--new-head <full SHA>]",
+    run(c) { return { ok: true, run: advanceMergeRun(c.db, c.ctx(), {
+      intentId: c.p.pos[1] ?? "", from: c.need("from") as MergePhase, to: c.need("to") as MergePhase, rev: integer(c, "rev"),
+      receipt: c.p.flags.receipt, mergeSha: c.p.flags["merge-sha"], newHead: c.p.flags["new-head"],
+    }) }; },
   },
 };

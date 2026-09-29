@@ -2,7 +2,7 @@
  * `manager update`：release 通道（切到最新 tag）与 beta 通道（ff 到 origin/main），外加「上次砍在半路」的补完。
  *
  * 两个通道共用切版本之后的尾段（bun install → 渲染 master → web 构建 → migrate → /exit master →
- * 释锁 → reload 三个 daemon）。切版本前写 update-inflight 标记（lib/update-inflight.ts），尾段逐步推进，
+ * 释锁 → reload 四个 daemon）。切版本前写 update-inflight 标记（lib/update-inflight.ts），尾段逐步推进，
  * reload 完才删。再跑时 resumeUpdate 先看标记：HEAD 已是目标 → 从尾段补（「已是最新」不再挡住没 reload 的
  * 情况）；只差 reload → 只补 reload；持有者还在 → 拒绝。
  */
@@ -69,11 +69,11 @@ function rollbackFor(d: UpdateDeps, m: UpdateMarker): () => Promise<string | nul
   };
 }
 
-/** reload 三个 daemon + 装 skills。launcher 在最后，本进程可能在 bootout launcher 时被回收（预期） */
+/** reload 四个 daemon + 装 skills。launcher 在最后，本进程可能在 bootout launcher 时被回收（预期） */
 async function reloadDaemons(m: UpdateMarker) {
   await setStep(m, "reloading");
   await unlock(); // ⚠ 先释锁再 reload：殉锁会把之后 30 分钟的更新全封死
-  console.error(`[update] 临界区完成,即将 reload 3 daemons(本进程可能随 launcher bootout 被回收,属预期)`);
+  console.error(`[update] 临界区完成,即将 reload 4 daemons(本进程可能随 launcher bootout 被回收,属预期)`);
   const { installClaudestraCli } = await import("../lib/cli-install.js");
   const cliInstall = await installClaudestraCli(REPO_ROOT, { skipWebBuild: true }); // 尾段的 maybeBuildWeb 已判过/建过
   const { installRepoSkills } = await import("../lib/skills-install.js");
@@ -141,7 +141,7 @@ async function reattachBranch(d: UpdateDeps, tag: string): Promise<{ ok: boolean
 function releaseOutput(from: string, tag: string, t: TailOk, reattach: { ok: boolean; detail: string }, extra: Record<string, unknown> = {}) {
   const ci = t.cliInstall;
   return {
-    ok: true, from, to: tag, message: `已更新到 ${tag} 并 reload 三个 launchd daemon`, ...extra,
+    ok: true, from, to: tag, message: `已更新到 ${tag} 并 reload 四个 launchd daemon`, ...extra,
     masterReRendered: t.rendered,
     webBuild: t.webBuild, // web 构建结果显式冒泡(skipped 带原因 / ok / error 带尾部日志)——绝不静默
     branch: reattach, // 分支挂回结果——同样绝不静默
