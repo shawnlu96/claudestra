@@ -12,7 +12,9 @@ import { ChatIcon, ClockIcon } from "./ask-icons";
  * 一张「待你处理」卡（docs 13 §4.4，照 T12 原型右栏的卡）：谁在问、哪个任务、等了多久；标题；背景（owner「不知道上面发生了些什么」）；
  * 可展开原文；原消息带的附件；选项与文本框；回到对话（跳到原消息，ask-jump.ts）；还剩多久过期。已结案的只显示结论。
  */
-export function AskCard({ ask, now, focused, onOpenChat }: { ask: WebAsk; now: number; focused: boolean; onOpenChat: (ask: WebAsk) => void }) {
+/** leaving：刚答完、原位淡出中；guard：别的卡刚答完，这张短暂不收点击（answer-cooldown.ts） */
+export function AskCard(props: { ask: WebAsk; now: number; focused: boolean; onOpenChat: (ask: WebAsk) => void; leaving?: boolean; guard?: boolean }) {
+  const { ask, now, focused, onOpenChat, leaving, guard } = props;
   const t = useT();
   const [showBody, setShowBody] = useState(false);
   const note = useAsks().notes[ask.id];
@@ -21,7 +23,12 @@ export function AskCard({ ask, now, focused, onOpenChat }: { ask: WebAsk; now: n
   return (
     <article
       id={`ask-${ask.id}`}
-      className={`rounded-xl border bg-base-100 p-3.5 shadow-sm ${focused ? "border-primary ring-2 ring-primary/30" : "border-base-content/10"} ${open ? "" : "opacity-70"}`}
+      className={[
+        "rounded-xl border bg-base-100 p-3.5 shadow-sm",
+        focused ? "border-primary ring-2 ring-primary/30" : "border-base-content/10",
+        open ? "" : "opacity-70",
+        leaving ? "ask-card-out pointer-events-none" : guard ? "pointer-events-none" : "",
+      ].join(" ")}
     >
       <header className="mb-1.5 flex flex-wrap items-center gap-1.5 text-[11px]">
         <span className="rounded-full bg-primary/15 px-2 py-0.5 font-medium text-primary">{agent}</span>

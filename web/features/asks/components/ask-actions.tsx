@@ -5,6 +5,7 @@ import { answerAuq, answerPermission } from "@/lib/api/chat";
 import { ApiError } from "@/lib/api/client";
 import type { WebComponentRow } from "@/lib/chat/events";
 import { useT } from "@/lib/i18n";
+import { markAnswered } from "../answer-cooldown";
 import { answeredGroups, rowGroup, wireLabels, type WebAsk } from "../asks-model";
 import { asksStore } from "../asks-store";
 import { AuqChoices, PermissionChoices, ReplyChoices } from "./ask-choices";
@@ -38,6 +39,7 @@ export function AskActions({ ask, agent }: { ask: WebAsk; agent: string }) {
   // 乐观作答（T11b 第 8 条）：点下去卡片就移到「最近处理过」、计数减 1；失败回到「等你处理」并显示原因（asks-store.answer）
   const run = async (fn: () => Promise<unknown>, labels: string[], text = "") => {
     setBusy(true);
+    markAnswered(ask.id); // 先让这张原地淡出，再移走（answer-cooldown.ts）
     await asksStore.answer(ask.id, { choices: [], labels, text, via: "web_card", at: Date.now() }, fn, { ok, fail });
     setBusy(false);
   };
