@@ -309,11 +309,13 @@ async function typeAndSubmit(target: string, line: string, deps: InjectDeps): Pr
 /** 全用 strict：tmuxRaw 吞非零退出，窗口不在时会拿到空串、发键也「成功」，后面就对着不存在的窗口报「已发送」 */
 async function capturePane(t: string): Promise<PaneCapture | null> {
   try {
-    const fmt = "#{pane_in_mode}\t#{pane_current_command}\t#{pane_width}\t#{pane_height}";
-    const [mode = "", command = "", w = "", h = ""] = ((await tmuxRawStrict(["list-panes", "-t", t, "-F", fmt])).split("\n")[0] ?? "").split("\t");
+    const fmt = "#{pane_in_mode}\t#{pane_current_command}\t#{pane_width}\t#{pane_height}\t#{alternate_on}";
+    const [mode = "", command = "", w = "", h = "", alt = ""] = ((await tmuxRawStrict(["list-panes", "-t", t, "-F", fmt])).split("\n")[0] ?? "").split("\t");
     const esc = await tmuxRawStrict(["capture-pane", "-t", t, "-p", "-e"]);
     const plain = stripAnsi(esc);
-    const size = Number(w) > 0 && Number(h) > 0 ? { width: Number(w), height: Number(h) } : null;
+    // alternate_on 分得出 CC 的渲染器：fullscreen 用备用屏（1），默认渲染器不用（0）；输入框行数上限只在 fullscreen 下有（ctx-boundary-fit.ts）
+    const fullscreen = alt.trim() === "1" ? true : alt.trim() === "0" ? false : undefined;
+    const size = Number(w) > 0 && Number(h) > 0 ? { width: Number(w), height: Number(h), ...(fullscreen === undefined ? {} : { fullscreen }) } : null;
     return plain.trim() ? { plain, esc, inMode: mode.trim() !== "" && mode.trim() !== "0", command: command.trim(), size } : null;
   } catch {
     return null; // 窗口不在 / tmux 出错：按「读不到画面」跳过，不盲敲

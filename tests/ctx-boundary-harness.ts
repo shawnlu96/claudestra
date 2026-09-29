@@ -30,7 +30,7 @@ function shownBox(w: FakeWin): string {
     if (Bun.stringWidth(rows.at(-1)! + ch) > cols) rows.push("");
     rows[rows.length - 1] += ch;
   }
-  return rows.slice(-inputRowsVisible(w.size.height)).join("\n");
+  return rows.slice(-inputRowsVisible(w.size.height, w.size.fullscreen !== false)).join("\n");
 }
 
 export function harness(

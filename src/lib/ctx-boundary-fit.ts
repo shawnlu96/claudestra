@@ -1,6 +1,6 @@
 /**
- * 压缩命令在 CC 输入框里放不放得下（纯函数，tests/ctx-boundary-fit.test.ts）。输入框有最大显示行数，超出只画末尾几行，
- * 而且第一行照样画「❯」、看不出截断，敲完核对只能读到后半截。所以敲之前按窗口宽高估一下，放不下就退一档（自定清单 →
+ * 压缩命令在 CC 输入框里放不放得下（纯函数，tests/ctx-boundary-fit.test.ts）。fullscreen 渲染器下输入框有最大显示行数，超出只画末尾几行，
+ * 而且第一行照样画「❯」、看不出截断，敲完核对只能读到后半截；默认渲染器没有上限，但长过整屏上沿会滚出去。所以敲之前按窗口宽高和渲染器估一下，放不下就退一档（自定清单 →
  * 默认清单 → 只发 /compact），连 /compact 都放不下就不敲；估少了由敲完的核对兜底（看到的正好是后半截就删掉、退一档）。
  * 数字是私有 tmux 里真 CC 2.1.283 实测的（adv2 P2-1），CC 改版改了输入框要重测。
  */
@@ -9,13 +9,23 @@ import { compactCommand, DEFAULT_KEEP_LIST, type CompactAction, type CompactKeep
 export interface PaneSize {
   width: number;
   height: number;
+  /** CC 用 fullscreen 渲染器（tmux #{alternate_on} = 1）；false = 默认渲染器；不知道（undefined）按 fullscreen 算 */
+  fullscreen?: boolean;
 }
 
 /** 每行放得下的列数：左边「❯ 」或两格缩进，右边留两格（16～200 列逐档实测） */
 export const inputCols = (width: number) => width - 4;
 
-/** 最多显示几行：max(3, ⌊高/2⌋ − 5)（12～60 行高逐档实测）；12 行以下没量，只按 1 行算 */
-export const inputRowsVisible = (height: number) => (height < 12 ? 1 : Math.max(3, Math.floor(height / 2) - 5));
+/** 默认渲染器下输入框之外占的行：上下边框、页脚、状态行（真 CC 52×40 完整显示 34 行） */
+const DEFAULT_RENDERER_CHROME = 6;
+/**
+ * 最多显示几行。CC 只在 fullscreen 渲染器下给输入框设上限：max(3, ⌊高/2⌋ − 5)（12～60 行高逐档实测）；默认渲染器没有上限，
+ * 按整屏减去边框和页脚算。渲染器不明按 fullscreen 算：估少了只是多退一档，估多了默认渲染器的输入框会长出屏幕，画面认不出、字删不掉。
+ * 12 行以下没量，只按 1 行算。
+ */
+export const inputRowsVisible = (height: number, fullscreen = true) =>
+  height < 12 ? 1 : fullscreen ? Math.max(3, Math.floor(height / 2) - 5) : height - DEFAULT_RENDERER_CHROME;
+const rowsVisible = (size: PaneSize) => inputRowsVisible(size.height, size.fullscreen !== false);
 
 /**
  * 这段字在输入框里占几行，照 wrap-ansi（hard、trim、按词折行）数：按空格分词，放不下的词挪到下一行；比一行还长的词
@@ -57,7 +67,7 @@ export function fitsInputBox(line: string, size: PaneSize): boolean {
   const cols = inputCols(size.width);
   if (cols < 2) return false;
   const rows = inputRowsNeeded(line, cols);
-  return (rows === 1 && Bun.stringWidth(line) < cols ? 1 : rows + 1) <= inputRowsVisible(size.height);
+  return (rows === 1 && Bun.stringWidth(line) < cols ? 1 : rows + 1) <= rowsVisible(size);
 }
 
 type CompactTier = "keep" | "default" | "bare" | "save";
@@ -101,7 +111,7 @@ export function describeCompactPlan(action: CompactAction, keep: CompactKeep | n
 export const normBox = (s: string) => s.replace(/\s+/g, ""); // CC 按词折行，折行处的空格会被吃掉：去掉空白再比（09-29 真 CC 实测）
 
 /** 显示区满了：输入框占满最多显示的行数，前面可能还有没画出来的 */
-const boxMayBeCut = (rows: number, size: PaneSize | null | undefined) => !!size && rows >= inputRowsVisible(size.height);
+const boxMayBeCut = (rows: number, size: PaneSize | null | undefined) => !!size && rows >= rowsVisible(size);
 
 /** 框里看到的（去空白后的 got，占 rows 行）是不是正好这段字：显示区没满就得完全一样；满了（可能截断）只要是它的后半截 */
 export function boxShows(got: string, rows: number, text: string, size: PaneSize | null | undefined): boolean {

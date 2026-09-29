@@ -20,7 +20,24 @@ describe("输入框尺寸（真 CC 实测，adv2 P2-1）", () => {
     expect([16, 80, 120, 200].map(inputCols)).toEqual([12, 76, 116, 196]);
     const measured: [number, number][] = [[12, 3], [16, 3], [20, 5], [24, 7], [30, 10], [40, 15], [50, 20], [60, 25]];
     for (const [h, rows] of measured) expect(inputRowsVisible(h)).toBe(rows);
-    expect([8, 10, 11].map(inputRowsVisible)).toEqual([1, 1, 1]);
+    expect([8, 10, 11].map((h) => inputRowsVisible(h))).toEqual([1, 1, 1]);
+  });
+
+  test("行数上限只在 fullscreen 渲染器下有（#171 审查 P2-1）：默认渲染器按整屏减 6 行，渲染器不明按 fullscreen", () => {
+    expect([24, 30, 40].map((h) => inputRowsVisible(h, false))).toEqual([18, 24, 34]); // 真 CC 52×40 默认渲染器完整显示 34 行
+    expect(inputRowsVisible(24, true)).toBe(7);
+    const dflt = (width: number, height: number) => ({ width, height, fullscreen: false });
+    const full = (width: number, height: number) => ({ width, height, fullscreen: true });
+    // 52 列、高不到 30：默认清单（48 列时 9 行）在默认渲染器下放得下，不再退到只发 /compact；fullscreen 下照旧放不下
+    for (const h of [16, 20, 24]) {
+      expect([h, fitsInputBox(DFLT, dflt(52, h))]).toEqual([h, true]);
+      expect([h, fitsInputBox(DFLT, full(52, h))]).toEqual([h, false]);
+    }
+    expect(tiersThatFit("compact", CJK800, dflt(52, 24)).fit.map((t) => t.tier)).toEqual(["default", "bare"]);
+    expect(tiersThatFit("compact", CJK800, { width: 52, height: 24 }).fit.map((t) => t.tier)).toEqual(["bare"]); // 不明 = fullscreen
+    // 默认渲染器下 800 字在 120×24 要 14 行、能显示 18 行：不退档；太长会长出屏幕的照样退
+    expect(fitsInputBox(`/compact ${CJK800}`, dflt(120, 24))).toBe(true);
+    expect(fitsInputBox(`/compact ${CJK800}`, dflt(52, 24))).toBe(false);
   });
 
   test("折行行数和真 CC 逐行一致（24 列默认清单少算一行，所以放不放得下要留一行余量）", () => {

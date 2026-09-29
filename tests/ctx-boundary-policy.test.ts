@@ -100,8 +100,11 @@ describe("resolvePolicies：内置 + 按 id 合并 + 校验", () => {
     expect(keepOf(`${"保".repeat(400)}  \r\n  ${"留".repeat(399)}`)).toHaveLength(800);
     expect(byId(resolvePolicies([{ id: "executor", keep: "保".repeat(800) }]).policies, "executor")!.keep).toHaveLength(800);
     expect(resolvePolicies([{ id: "executor", keep: "保".repeat(801) }]).warnings[0].text).toContain("超过 800 字（这条 801 字）");
-    // 排版用的 ZWNJ / ZWJ / 软连字符放行
-    expect(keepOf("a\u200cb\u200dc\u00add")).toBe("a\u200cb\u200dc\u00add");
+    // 排版用的 ZWNJ / ZWJ 放行；软连字符 CC 会吞掉、核对对不上，拒收（#171 审查 P2-2，真 CC 实测）
+    expect(keepOf("a\u200cb\u200dc")).toBe("a\u200cb\u200dc");
+    expect(normalizeCompactKeep("keep\u00adlist").ok).toBe(false);
+    // NFD 的「e + 组合重音」规范成预组合的 é：CC 画出来的就是它
+    expect(keepOf("cafe\u0301 卡号")).toBe("caf\u00e9 卡号");
   });
 
   test("normalizeCompactKeep 是唯一入口（T35 fleet.compactKeep 也调它）：先换行再判，边上的 U+2028 也拒收，长空格串不卡", () => {

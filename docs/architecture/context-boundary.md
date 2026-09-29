@@ -136,7 +136,7 @@ Where the global path is not identical to the old stats-dashboard code:
 
 ### Fitting the input box (`lib/ctx-boundary-fit.ts`)
 
-CC's input box shows at most `max(3, ⌊height/2⌋ − 5)` rows (12–60 rows high) and `width − 4` columns per row (16–200 wide), measured on CC 2.1.283 in a private tmux. A longer text shows only its last rows, and the first shown row still starts with `❯`, so a truncated box cannot be told from a short one except by its row count.
+CC's input box is `width − 4` columns per row (16–200 wide). Its row cap depends on the renderer, which tmux's `#{alternate_on}` tells apart (1 = fullscreen, 0 = default): **only the fullscreen renderer caps it**, at `max(3, ⌊height/2⌋ − 5)` rows (12–60 rows high, measured on CC 2.1.283 in a private tmux); a longer text shows only its last rows, and the first shown row still starts with `❯`, so a truncated box cannot be told from a short one except by its row count. The default renderer (what agents normally run) has no cap: the box grows until it runs off the top of the screen, so the estimate uses `height − 6` (52×40 shows 34 rows in full). An unknown renderer is estimated as fullscreen: under-estimating only drops a tier, over-estimating lets the box grow off-screen where it can't be read back or erased.
 
 - The row count is estimated by replaying wrap-ansi (hard, trim, word wrap; CJK counts 2 columns). It matched CC row for row from 16 to 120 columns, except once at 24 columns where CC used one more row, so a command must fit with one row to spare.
 - A single-row command only needs a free column for the cursor.
