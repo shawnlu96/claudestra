@@ -1,7 +1,8 @@
 /**
  * 上下文边界的执行：每分钟看一遍在跑的 Claude Code 会话，按 lib/ctx-boundary-decision.ts 的决策表，经 ctx-boundary-inject.ts 注入
  * `/compact <保留清单>` 或 `/save-compact`。不挂在 Discord 看板上（web-only / 沙箱也要跑），bridge 启动时 startCtxBoundary()。
- * 自动注入缺省关（config autoCompact.inject）；`manager ctx-boundary dry-run` 用同一套判定只列结果、不发键。
+ * 开关 config autoCompact.inject 缺省关，只管这次新加的：具名策略和大总管。关着时具名策略覆盖的 agent 按全局线和救命线走（原有行为，
+ * 开关管不着），大总管不自动压。`manager ctx-boundary dry-run` 用同一套判定、按开关关 / 开各列一遍结果，不发键。
  * 设计 docs/architecture/context-boundary.md；单测 tests/ctx-boundary.test.ts（全部依赖可注入）。
  */
 import { existsSync, readFileSync, statSync } from "fs";
@@ -10,7 +11,7 @@ import { readConfigSync } from "../lib/config-store.js";
 import { agentRuntime, isMasterAgent, readRegistryAgents } from "../lib/registry.js";
 import { statePath } from "../lib/paths.js";
 import { readJsonStateSync } from "../lib/state-file.js";
-import { resolveSessionIdForWindow } from "../lib/cc-sessions.js";
+import { resolveSessionIdsForWindows } from "../lib/cc-sessions.js";
 import { findSessionJsonlBySessionId, sessionJsonlPath } from "../lib/session-source.js";
 import { sessionTailInfo } from "../lib/session-tail.js";
 import { readSessionCtx } from "../lib/usage-cache.js";
@@ -22,7 +23,7 @@ import {
   type Boundary, type BoundaryVerdict, type CtxBoundaryView, type GlobalAutoCompact, type SkipReason,
 } from "../lib/ctx-boundary-decision.js";
 import {
-  agentWindowName, compactInjectedRecently, injectCompact, liveInjectDeps, loadInjectGuard, paneGateOf, resetInjectState, sweepPendingEcho,
+  agentWindowName, compactInjectedRecently, injectCompact, liveInjectDeps, loadInjectState, paneGateOf, resetInjectState, sweepPendingEcho,
   type InjectDeps, type InjectResult, type InjectTarget, type PaneCapture,
 } from "./ctx-boundary-inject.js";
 import { windowTarget } from "../lib/tmux-helper.js";
@@ -43,6 +44,7 @@ const ALERT_ON = new Set<SkipReason>(["draft", "queued", "menu", "quota-wall", "
 /** 面板 / agent 列表一次请求里每个 agent 都要看策略：线上依赖读配置、解析一次管 2 秒 */
 const POLICY_CACHE_MS = 2_000;
 const TRIG_FILE = statePath("ctx-boundary-trig.json");
+const OFF_TEXT = "新增的自动压缩关着（config autoCompact.inject）：具名策略的 agent 先按全局线和 93% 救命线走，大总管不自动压";
 
 export interface BoundaryAgent extends InjectTarget {
   projectId: string | null;
@@ -61,13 +63,15 @@ export interface BoundaryAgent extends InjectTarget {
 
 export interface CtxBoundaryDeps extends InjectDeps {
   agents(): Promise<BoundaryAgent[]>;
-  /** 过线的 agent 再核一次窗口里实际在跑的会话（/clear 之后 registry 还指着旧文件），换了就按新会话重读 */
-  liveSession(a: BoundaryAgent): Promise<BoundaryAgent>;
+  /** 按窗口里实际在跑的会话校正（/clear 之后 registry 还指着旧文件），换了的按新会话重读；每轮对全体做一次 */
+  liveSessions(as: BoundaryAgent[]): Promise<BoundaryAgent[]>;
   autoCompact(): (GlobalAutoCompact & { policies?: unknown }) | undefined;
   log(line: string): void;
   alert(a: BoundaryAgent, text: string, data: Record<string, unknown>): void;
-  /** true = 只判定不发键、不写状态（manager ctx-boundary dry-run），也不看 inject 开关 */
+  /** true = 只判定不发键、不写状态、不删字（manager ctx-boundary dry-run） */
   dryRun?: boolean;
+  /** dry-run 用：按开关关 / 开各判一遍，不看 config 里的 inject */
+  injectAs?: boolean;
 }
 
 export interface TickOutcome {
@@ -75,6 +79,8 @@ export interface TickOutcome {
   ctx: number;
   boundary: Boundary;
   verdict: BoundaryVerdict;
+  /** 具名策略或大总管：开关打开才自动压的那部分 */
+  gated: boolean;
   inject?: InjectResult;
   /** dry-run：会发的那一行 */
   would?: string;
@@ -115,11 +121,13 @@ function currentPolicies(deps: Pick<CtxBoundaryDeps, "autoCompact" | "log" | "no
   return policyCache.value;
 }
 
+/** 开关关着时不看具名策略，一律按全局线（原有行为） */
 function boundaryFor(
   a: Pick<BoundaryAgent, "name" | "projectId" | "realWindow" | "executor">,
   p: ReturnType<typeof resolveNow>,
+  on: boolean,
 ): Boundary {
-  const m = matchPolicy(p.policies, a);
+  const m = on ? matchPolicy(p.policies, a) : null;
   const b = m ? policyBoundary(m, a.realWindow) : globalBoundary(p.ac, a.realWindow);
   return { ...b, action: effectiveAction(a.executor, b.action) };
 }
@@ -150,7 +158,7 @@ function alertBlocked(a: BoundaryAgent & { ctx: number }, b: Boundary, reason: S
   maybeAlert(a, now, deps, text, { ctx: a.ctx, cap: b.hardCap, reason });
 }
 
-async function checkOne(a: BoundaryAgent & { ctx: number }, b: Boundary, deps: CtxBoundaryDeps): Promise<TickOutcome> {
+async function checkOne(a: BoundaryAgent & { ctx: number }, b: Boundary, deps: CtxBoundaryDeps): Promise<Omit<TickOutcome, "gated">> {
   const pane = await deps.capture(a.target);
   const now = deps.now();
   const verdict = boundaryDecision({
@@ -186,30 +194,28 @@ async function checkOne(a: BoundaryAgent & { ctx: number }, b: Boundary, deps: C
   return { ...base, inject };
 }
 
-/** 一轮：过线的才读画面、才可能注入；回到线下就清掉冷却（上次注入见效，或者手动压过） */
+/**
+ * 一轮：先删上轮留在框里的字（开关关着也删，手动按钮也会留字）；每个 agent 按窗口里实际在跑的会话算，过线的才读画面、
+ * 才可能注入；回到线下就清掉冷却（上次注入见效，或者手动压过）。开关关着：具名策略不看、大总管跳过，全局线和救命线照旧
+ */
 export async function ctxBoundaryTick(deps: CtxBoundaryDeps = liveDeps): Promise<TickOutcome[]> {
   const p = currentPolicies(deps);
-  if (!deps.dryRun && p.ac?.inject !== true) {
-    if (!offLogged) deps.log("🧭 上下文边界：自动注入关着（config autoCompact.inject），只显示不压缩；先跑 manager ctx-boundary dry-run 看结果");
-    offLogged = true;
-    return [];
+  const on = deps.injectAs ?? p.ac?.inject === true;
+  if (!deps.dryRun) {
+    if (!on && !offLogged) deps.log(`🧭 上下文边界：${OFF_TEXT}；打开前先跑 manager ctx-boundary dry-run`);
+    offLogged = !on;
+    await sweepPendingEcho(deps, deps.log);
   }
-  offLogged = false;
-  if (!deps.dryRun) await sweepPendingEcho(deps, deps.log);
   const out: TickOutcome[] = [];
-  for (const listed of await deps.agents()) {
-    let a = listed;
-    let b = boundaryFor(a, p);
-    if (overLine(a.ctx, b)) {
-      a = await deps.liveSession(a);
-      b = boundaryFor(a, p);
-    }
-    if (a.ctx === null || !overLine(a.ctx, b)) {
+  for (const a of await deps.liveSessions(await deps.agents())) {
+    const master = isMasterAgent(a.name);
+    const b = boundaryFor(a, p, on);
+    if (a.ctx === null || (master && !on) || !overLine(a.ctx, b)) {
       if (!deps.dryRun) lastTrig.delete(a.name);
       lastSkip.delete(a.name);
       continue;
     }
-    out.push(await checkOne({ ...a, ctx: a.ctx }, b, deps));
+    out.push({ ...(await checkOne({ ...a, ctx: a.ctx }, b, deps)), gated: master || b.policy !== "global" });
   }
   return out;
 }
@@ -221,15 +227,17 @@ export function ctxBoundaryViewFor(
 ): CtxBoundaryView | null {
   if (agentRuntime(a) !== "claude-code") return null;
   const p = currentPolicies(liveDeps);
+  const on = p.ac?.inject === true;
+  if (!on && isMasterAgent(a.name)) return null; // 开关关着大总管不自动压，不显示线
   const realWindow = a.sessionId ? readSessionCtx(a.sessionId)?.window ?? null : null;
   const executor = isExecutor({ name: a.name, worktree: isLinkedWorktree(a.cwd) });
-  return boundaryView(boundaryFor({ name: a.name, projectId: a.projectId ?? null, realWindow, executor }, p), ctx, p.warnings);
+  return boundaryView(boundaryFor({ name: a.name, projectId: a.projectId ?? null, realWindow, executor }, p, on), ctx, p.warnings);
 }
 
-/** 当前配置的问题（越界的 ccWindow、写错的字段…），面板顶上列出来；自动注入关着也列一条 */
+/** 当前配置的问题（越界的 ccWindow、写错的字段…），面板顶上列出来；开关关着也列一条 */
 export function ctxBoundaryWarnings(): PolicyWarning[] {
   const p = currentPolicies(liveDeps);
-  return p.ac?.inject === true ? p.warnings : [{ policy: null, text: "自动注入关着（config autoCompact.inject）：只显示边界，不自动压缩" }, ...p.warnings];
+  return p.ac?.inject === true ? p.warnings : [{ policy: null, text: OFF_TEXT }, ...p.warnings];
 }
 
 const worktreeCache = new Map<string, boolean>();
@@ -299,14 +307,18 @@ async function liveAgents(): Promise<BoundaryAgent[]> {
 }
 
 /** CC 在 /clear 时会把 ~/.claude/sessions/<pid>.json 的 sessionId 换成新的（09-29 实测），按它认窗口里实际在跑的会话 */
-async function liveSessionOf(a: BoundaryAgent): Promise<BoundaryAgent> {
-  if (!a.cwd) return a;
-  const hit = await resolveSessionIdForWindow(agentWindowName(a.name), a.cwd, { timeoutMs: 0 }).catch((e) => {
-    console.error(`🧭 上下文边界 查 ${a.name} 的实际会话失败（按 registry 记的算）:`, (e as Error).message);
-    return null;
+async function liveSessionsOf(as: BoundaryAgent[]): Promise<BoundaryAgent[]> {
+  const wins = as.flatMap((a) => (a.cwd ? [{ key: a.name, tmuxName: agentWindowName(a.name), cwd: a.cwd }] : []));
+  const hits = await resolveSessionIdsForWindows(wins).catch((e) => {
+    console.error("🧭 上下文边界 查各窗口的实际会话失败（按 registry 记的算）:", (e as Error).message);
+    return new Map<string, string>();
   });
-  if (!hit || hit.sessionId === a.sessionId) return a;
-  return { ...a, sessionId: hit.sessionId, ...(await sessionStats(undefined, a.cwd, hit.sessionId)) };
+  return Promise.all(
+    as.map(async (a) => {
+      const sid = hits.get(a.name);
+      return !sid || sid === a.sessionId ? a : { ...a, sessionId: sid, ...(await sessionStats(undefined, a.cwd, sid)) };
+    }),
+  );
 }
 
 /** 往 owner 看得到的地方推一条：web 的 session_anomaly（两种模式都有），这个 agent 是 Discord 频道时再发一条 */
@@ -323,7 +335,7 @@ function alertOwner(a: BoundaryAgent, text: string, data: Record<string, unknown
 const liveDeps: CtxBoundaryDeps = {
   ...liveInjectDeps,
   agents: liveAgents,
-  liveSession: liveSessionOf,
+  liveSessions: liveSessionsOf,
   autoCompact: () => readConfigSync().autoCompact,
   log: (l) => console.log(l),
   alert: alertOwner,
@@ -338,20 +350,24 @@ interface MasterDryRun {
   outcome: TickOutcome | null;
 }
 
-/** manager ctx-boundary dry-run：线上的 registry、画面、配置和落盘的冷却 / 守卫照常判定；不发键、不写任何状态、不提醒 */
-export async function ctxBoundaryDryRun(): Promise<{ outcomes: TickOutcome[]; logs: string[]; inject: boolean; master: MasterDryRun | null }> {
-  loadInjectGuard("read-only");
+/**
+ * manager ctx-boundary dry-run：线上的 registry、画面、配置和落盘的冷却 / 守卫照常判定，按开关关（off，原有行为）和开（on）各判一遍；
+ * 不发键、不写任何状态、不删字、不提醒
+ */
+export async function ctxBoundaryDryRun(): Promise<{ off: TickOutcome[]; on: TickOutcome[]; logs: string[]; inject: boolean; master: MasterDryRun | null }> {
+  loadInjectState("read-only");
   const r = readJsonStateSync(TRIG_FILE);
   const trig = r.status === "ok" && r.data && typeof r.data === "object" ? (r.data as Record<string, unknown>) : {};
   lastTrig = new Map(Object.entries(trig).filter((e): e is [string, number] => typeof e[1] === "number"));
   const logs: string[] = [];
   let listed: BoundaryAgent[] = [];
-  const agents = async () => (listed = await liveAgents());
-  const deps: CtxBoundaryDeps = { ...liveDeps, agents, log: (l) => void logs.push(l), alert: () => {}, dryRun: true };
-  const outcomes = await ctxBoundaryTick(deps);
+  const liveSessions = async (as: BoundaryAgent[]) => (listed = await liveSessionsOf(as));
+  const deps: CtxBoundaryDeps = { ...liveDeps, liveSessions, log: (l) => void logs.push(l), alert: () => {}, dryRun: true };
+  const off = await ctxBoundaryTick({ ...deps, injectAs: false });
+  const on = await ctxBoundaryTick({ ...deps, injectAs: true });
   const m = listed.find((a) => isMasterAgent(a.name));
-  const master = m ? { agent: m.name, ctx: m.ctx, boundary: boundaryFor(m, currentPolicies(deps)), outcome: outcomes.find((o) => o.agent === m.name) ?? null } : null;
-  return { outcomes, logs, inject: deps.autoCompact()?.inject === true, master };
+  const master = m ? { agent: m.name, ctx: m.ctx, boundary: boundaryFor(m, currentPolicies(deps), true), outcome: on.find((o) => o.agent === m.name) ?? null } : null;
+  return { off, on, logs: [...new Set(logs)], inject: deps.autoCompact()?.inject === true, master };
 }
 
 let timer: ReturnType<typeof setInterval> | null = null;
@@ -360,7 +376,7 @@ let running = false;
 /** bridge 启动时调一次（幂等）。冷却和注入守卫落盘，bridge 重启不清零。一轮没跑完不叠下一轮。 */
 export function startCtxBoundary(): void {
   if (timer) return;
-  loadInjectGuard("live");
+  loadInjectState("live");
   lastTrig = new PersistedMap<number>(TRIG_FILE, "上下文边界冷却", (v) => typeof v === "number");
   currentPolicies(liveDeps); // 启动时就把配置问题打出来，不等第一个过线的 agent
   timer = setInterval(() => {

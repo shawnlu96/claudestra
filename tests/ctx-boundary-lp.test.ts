@@ -69,7 +69,7 @@ describe("执行器接上真实判定：草稿 / 对话框过硬上限也一个�
       ...liveInjectDeps,
       now: () => 1_000_000_000,
       agents: async () => [a],
-      liveSession: async (x) => x,
+      liveSessions: async (x) => x,
       capture: async () => ({ plain: stripAnsi(frame()), esc: frame(), inMode: false, command: "claude.exe" }),
       type: async (_t, text) => void (typed += text),
       enter: async () => {

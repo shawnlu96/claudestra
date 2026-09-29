@@ -104,19 +104,24 @@ function parseOne(e: Record<string, unknown>, id: string, base: CtxPolicy | null
     const k = e.keep.replace(/\s*\n\s*/g, " ").trim();
     const len = k.length; // okCompactKeep 是类型守卫，else 分支里 k 会被收窄成 never
     if (okCompactKeep(k)) keep = k;
-    else warn(`keep 会原样敲进输入框：不能带控制字符（单独的回车、ESC、Tab 会被当成按键），最长 ${MAX_COMPACT_KEEP} 字；这条（${len} 字）已忽略，用默认保留清单`);
+    else {
+      const why = len > MAX_COMPACT_KEEP ? `超过 ${MAX_COMPACT_KEEP} 字（这条 ${len} 字）` : "带控制字符或不可见的格式字符（单独的回车、ESC、Tab、零宽空格、方向控制符…）";
+      warn(`keep ${why}，已忽略，用默认保留清单：它会原样敲进输入框`);
+    }
   }
   return { id, projects, names, window, idleMinutes, hardCap, action, ccWindow, keep };
 }
 
 /**
- * 保留清单会原样敲进 CC 输入框：只收上限以内、不带控制字符的非空串，否则当没配、用默认清单。
- * 超长时 tmux send-keys 整条失败；单独的回车、ESC 会被 TUI 当成按键，回车会把半截命令提前提交（config.json 是手改的，这里是唯一的闸）。
+ * 保留清单会原样敲进 CC 输入框：只收上限以内、不带控制字符的非空串，否则当没配、用默认清单（config.json 是手改的，这里是唯一的闸）。
+ * 单独的回车会把半截命令提前提交，ESC 会打断回合；零宽 / 方向控制这类格式字符（\p{Cf}）屏上看不见，核对输入框时对不上，只放行
+ * 排版会用到的 ZWNJ / ZWJ / 软连字符。上限 800：真 CC 上 709 字敲进去、删掉都正常，再长 tmux 的 send-keys 就有被拒的风险。
  * 别处要敲保留清单的（例如批量管理的 fleet.compactKeep）也用这一个函数。单测 tests/ctx-boundary-policy.test.ts。
  */
-const MAX_COMPACT_KEEP = 1500;
+const MAX_COMPACT_KEEP = 800;
+const KEEP_BAD_CHAR = /[\x00-\x1f\x7f-\x9f\u2028\u2029]|(?![\u200c\u200d\u00ad])\p{Cf}/u;
 export function okCompactKeep(v: unknown): v is string {
-  return typeof v === "string" && !!v.trim() && v.length <= MAX_COMPACT_KEEP && !/[\x00-\x1f\x7f-\x9f]/.test(v);
+  return typeof v === "string" && !!v.trim() && v.length <= MAX_COMPACT_KEEP && !KEEP_BAD_CHAR.test(v);
 }
 
 /**

@@ -7,6 +7,10 @@ import { getAutoCompact, postAutoCompact } from "@/lib/api/settings";
 
 type AcResp = AutoCompactState & { ok?: boolean; error?: string };
 
+/** 上下文边界开关下面那行说明(字典按整句查,开 / 关各一句) */
+const BOUNDARY_ON = "开着:命中策略的 agent(执行者、协调者…)按各自的线压,不再用上面两条;大总管也纳入自动压缩。";
+const BOUNDARY_OFF = "关着:上面两条管所有 agent(大总管除外)。打开前建议先在电脑上跑 bun src/manager.ts ctx-boundary dry-run,看会压谁。";
+
 /** 自动存记忆+Compact(owner 2026-08-27「设置里看不到」):阈值+闲置门槛,写 config.json */
 export function useAutoCompact(open: boolean) {
   const [ac, setAc] = useState<AutoCompactState | null>(null);
@@ -27,7 +31,7 @@ export function useAutoCompact(open: boolean) {
   }, [open]);
 
   // autoCompact 写入:两个下拉共用一条路,POST 后用 bridge 回读的状态刷新
-  const saveAc = async (patch: { window?: number; idleHours?: number; emergency?: boolean }) => {
+  const saveAc = async (patch: { window?: number; idleHours?: number; emergency?: boolean; inject?: boolean }) => {
     setAcBusy(true);
     setAcMsg("");
     try {
@@ -53,7 +57,7 @@ export function AutoCompactSection({ autoCompact }: { autoCompact: ReturnType<ty
   return (
         <Section
           title={t("自动存记忆 + Compact")}
-          desc={t("常规线:上下文超过阈值且闲置满时长后,先抢救记忆再压缩上下文,对所有 agent 生效;实际触发线取「此阈值」与「该 agent 真实窗口 85%」的较小者。救命线:涨到真实窗口 93%(1M = 930K)时无视闲置门槛强制触发一次——Claude Code 自己在 ~967K 裸压且不存记忆,这是最后一道兜底,常规线关了它也在。")}
+          desc={t("常规线:上下文超过阈值且闲置满时长后,先抢救记忆再压缩上下文;实际触发线取「此阈值」与「该 agent 真实窗口 85%」的较小者。救命线:涨到真实窗口 93%(1M = 930K)时无视闲置门槛强制触发一次——Claude Code 自己在 ~967K 裸压且不存记忆,这是最后一道兜底,常规线关了它也在。")}
         >
           <div className="flex flex-wrap items-center gap-3">
             <label className="flex items-center gap-2 text-[13px]">
@@ -101,6 +105,18 @@ export function AutoCompactSection({ autoCompact }: { autoCompact: ReturnType<ty
               {t("93% 救命线")}
             </label>
           </div>
+          {/* 上下文边界新增的自动压缩(具名策略和大总管),缺省关;关着时上面两条照旧管所有 agent(大总管除外) */}
+          <label className="mt-3 flex items-center gap-2 text-[13px]">
+            <input
+              type="checkbox"
+              className="toggle toggle-sm toggle-primary"
+              checked={ac?.inject === true}
+              disabled={acBusy || !ac}
+              onChange={(e) => void saveAc({ inject: e.target.checked })}
+            />
+            {t("按项目 / 角色的上下文边界")}
+          </label>
+          {ac && <div className="mt-1 text-xs text-base-content/60">{t(ac.inject ? BOUNDARY_ON : BOUNDARY_OFF)}</div>}
           {acMsg && <div className="mt-2 text-xs text-error-soft-80">{t(acMsg)}</div>}
         </Section>
   );

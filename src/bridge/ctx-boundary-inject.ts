@@ -17,12 +17,17 @@ import { PersistedMap } from "./persisted-map.js";
 /** 刚注入过压缩的窗口：15 分钟内谁也不能再注入（手动按钮也不行），看板也不拿它当 /status 抓取源（压缩中 pane 像闲着，抓取会硬中断它） */
 const INJECT_GUARD_MS = 15 * 60_000;
 const GUARD_FILE = statePath("ctx-boundary-injected.json");
+const PENDING_FILE = statePath("ctx-boundary-pending-echo.json");
+/** 留在框里的字等多久还没删成（窗口一直不在 / 对话框一直开着）就不管了，落盘文件不留死条目 */
+const PENDING_TTL_MS = 24 * 3600_000;
 const QUEUED_RE = /Press up to edit queued messages/i;
 /** CC 的前台进程名：npm 装的是 claude.exe（09-29 实测）；node 启动的老装法、原生安装器的版本号文件名也算。其余（zsh…）一律不发 */
 const CC_COMMAND_RE = /^(claude(\.exe)?|node|\d+\.\d+\.\d+)$/;
 /** 敲完字等 CC 画出来：每 200ms 看一次，最多 5 次（186 字的保留清单实测一次就齐） */
 const SETTLE_MS = 200;
 const SETTLE_TRIES = 5;
+/** 退格分批发，每批后核对：一次 send-keys 带上千个 BSpace 会被 tmux 以 command too long 拒掉（1509 字实测删不掉） */
+const ERASE_BATCH = 200;
 
 /** 往哪个窗口注入、按不按执行者对待（执行者不跑 save-compact，见 lib effectiveAction） */
 export interface InjectTarget {
@@ -63,28 +68,37 @@ export type InjectResult =
   | { status: "skipped"; reason: InjectSkip; text: string }
   | { status: "failed"; error: string; leftover?: boolean };
 
+/** 敲了字没提交、还留在框里的：text 是框里还剩的、自己敲的那段 */
+interface Pending {
+  text: string;
+  at: number;
+}
+
 let injectedAt: Map<string, number> = new Map();
-/** 敲了字、因为对话框没按回车的窗口 → 那条命令：之后每轮看一眼，输入框里正好是它就删掉 */
-const pendingEcho = new Map<string, string>();
+/** 窗口 → 自己留在框里的字：之后每轮（自动注入开关关着也跑）看一眼，框里正好是它就删掉 */
+let pendingEcho: Map<string, Pending> = new Map();
 
 /**
- * bridge 启动时 "live"：守卫换成落盘的表。manager 的 dry-run 进程用 "read-only"：只读一份快照，
- * 不写、坏文件也不挪（PersistedMap 读坏文件会把它改名）。测试不调，用内存表。
+ * bridge 启动时 "live"：守卫和待删的字换成落盘的表（bridge 重启不丢）。manager 的 dry-run 进程用 "read-only"：
+ * 只读一份守卫快照，不写、坏文件也不挪（PersistedMap 读坏文件会把它改名）；dry-run 不删字，待删表留空。测试不调，用内存表。
  */
-export function loadInjectGuard(mode: "live" | "read-only"): void {
+export function loadInjectState(mode: "live" | "read-only"): void {
   const isTs = (v: unknown) => typeof v === "number";
   if (mode === "live") {
     injectedAt = new PersistedMap<number>(GUARD_FILE, "上下文边界注入守卫", isTs);
+    const isPending = (v: unknown) => !!v && typeof (v as Pending).text === "string" && typeof (v as Pending).at === "number";
+    pendingEcho = new PersistedMap<Pending>(PENDING_FILE, "上下文边界待删的字", isPending);
     return;
   }
   const r = readJsonStateSync(GUARD_FILE);
   const data = r.status === "ok" && r.data && typeof r.data === "object" ? (r.data as Record<string, unknown>) : {};
   injectedAt = new Map(Object.entries(data).filter((e): e is [string, number] => isTs(e[1])));
+  pendingEcho = new Map();
 }
 
 export function resetInjectState(): void {
   injectedAt = new Map();
-  pendingEcho.clear();
+  pendingEcho = new Map();
 }
 
 export function compactInjectedRecently(target: string, now = Date.now()): boolean {
@@ -136,34 +150,66 @@ async function typedFrame(target: string, line: string, deps: InjectDeps): Promi
   }
 }
 
-/** 输入框里两帧都正好是自己敲的那条，才按退格删；删完再看一眼框是不是空了（T35 清回显同一个做法） */
-async function eraseOwnEcho(target: string, line: string, deps: InjectDeps): Promise<"erased" | "blocked" | "not-ours" | "failed"> {
-  for (let i = 0; i < 2; i++) {
-    if (i) await deps.sleep(300);
-    const p = await deps.capture(target);
-    if (!p) return "blocked";
-    const r = deps.readPane(p.plain, p.esc);
-    if (keysBlocked(paneGateOf(p, r))) return "blocked";
-    if (!r.draft || norm(r.inputText) !== norm(line)) return "not-ours";
-  }
-  try {
-    await deps.erase(target, [...line].length);
-  } catch (e) {
-    console.error(`🧭 上下文边界 删回显失败 ${target}:`, errText(e));
-    return "failed";
-  }
-  await deps.sleep(SETTLE_MS);
+/** 输入框里的字（去掉空白，框空 = ""）；对话框 / copy-mode / 不是 CC / 读不到 → null，一个键都不能再按 */
+async function readBox(target: string, deps: InjectDeps): Promise<string | null> {
   const p = await deps.capture(target);
-  return p && !deps.readPane(p.plain, p.esc).draft ? "erased" : "failed";
+  if (!p) return null;
+  const r = deps.readPane(p.plain, p.esc);
+  if (keysBlocked(paneGateOf(p, r))) return null;
+  return r.draft ? norm(r.inputText) : "";
 }
 
-/** 上次因为对话框没按回车、字还留在框里的窗口：框里正好是那条就删掉；框里换成了别的字（owner 动过）就不管了 */
+type Erased = { r: "erased" | "blocked" | "not-ours" | "failed"; left: string };
+
+/**
+ * 输入框里两帧都正好是自己敲的那条，才按退格删（T35 清回显同一个做法）。退格每批 ≤ERASE_BATCH 个，每批后核对框里剩下的
+ * 正好是前半截（还没画完就再等一帧）：对不上（owner 动了）就停，不多删一个字；被对话框挡住就停，left 是还剩的、之后再删的那段。
+ */
+async function eraseOwnEcho(target: string, line: string, deps: InjectDeps): Promise<Erased> {
+  for (let i = 0; i < 2; i++) {
+    if (i) await deps.sleep(300);
+    const got = await readBox(target, deps);
+    if (got === null) return { r: "blocked", left: line };
+    if (got === "" || got !== norm(line)) return { r: "not-ours", left: line };
+  }
+  let left = [...line];
+  while (left.length) {
+    const n = Math.min(ERASE_BATCH, left.length);
+    try {
+      await deps.erase(target, n);
+    } catch (e) {
+      console.error(`🧭 上下文边界 删回显失败 ${target}:`, errText(e));
+      return { r: "failed", left: left.join("") };
+    }
+    left = left.slice(0, left.length - n);
+    const want = norm(left.join(""));
+    for (let i = 1; ; i++) {
+      await deps.sleep(SETTLE_MS);
+      const got = await readBox(target, deps);
+      if (got === null) return { r: "blocked", left: left.join("") };
+      if (got === want) break;
+      if (i >= SETTLE_TRIES || !(got.length > want.length && norm(line).startsWith(got))) return { r: "failed", left: left.join("") };
+    }
+  }
+  return { r: "erased", left: "" };
+}
+
+function keepPending(target: string, left: string, now: number): void {
+  const had = pendingEcho.get(target);
+  pendingEcho.set(target, { text: left, at: had?.at ?? now });
+}
+
+/** 上次没按回车、字还留在框里的窗口：框里正好是那段就删掉；框里换成了别的字（owner 动过）就不管了；挡了一整天也不管了 */
 export async function sweepPendingEcho(deps: InjectDeps, log: (l: string) => void): Promise<void> {
-  for (const [target, line] of pendingEcho) {
-    const r = await eraseOwnEcho(target, line, deps);
-    if (r === "blocked") continue;
+  for (const [target, p] of [...pendingEcho]) {
+    const e = deps.now() - p.at > PENDING_TTL_MS ? { r: "expired" as const, left: p.text } : await eraseOwnEcho(target, p.text, deps);
+    if (e.r === "blocked") {
+      if (e.left !== p.text) keepPending(target, e.left, deps.now());
+      continue;
+    }
     pendingEcho.delete(target);
-    log(`🧭 上下文边界 ${target} 上次没提交的压缩命令：${r === "erased" ? "已删掉" : r === "not-ours" ? "输入框里已经不是它了，不动" : "删了没删干净，不再管"}`);
+    const what = { erased: "已删掉", "not-ours": "输入框里已经不是它了，不动", failed: "删了没删干净，不再管", expired: "一天都没删成，不再管" }[e.r];
+    log(`🧭 上下文边界 ${target} 上次没提交的压缩命令：${what}`);
   }
 }
 
@@ -192,18 +238,19 @@ export async function injectCompact(
   const typed = await typedFrame(t.target, line, deps);
   if (typed.kind === "mismatch") return { status: "failed", error: "输入框里的字和敲进去的对不上（可能有人同时在打字），没按回车，也没删", leftover: true };
   if (typed.kind === "blocked") {
-    pendingEcho.set(t.target, line);
+    keepPending(t.target, line, deps.now());
     return { status: "failed", error: `敲完字画面变了（${typed.why}），没按回车；字先留在输入框里，对话框关掉后自动删`, leftover: true };
   }
   if (typed.kind === "abort") {
-    if ((await eraseOwnEcho(t.target, line, deps)) === "erased") return skip("compacting");
-    pendingEcho.set(t.target, line);
+    const e = await eraseOwnEcho(t.target, line, deps);
+    if (e.r === "erased") return skip("compacting");
+    keepPending(t.target, e.left, deps.now());
     return { status: "failed", error: "敲完字发现已经在压缩 / 排队，没按回车；删字没删干净，之后再试", leftover: true };
   }
   try {
     await deps.enter(t.target);
   } catch (e) {
-    pendingEcho.set(t.target, line);
+    keepPending(t.target, line, deps.now());
     return { status: "failed", error: errText(e), leftover: true };
   }
   noteCompactInjected(t.target, deps.now());
@@ -230,6 +277,6 @@ export const liveInjectDeps: InjectDeps = {
   readPane: (plain, esc) => ({ ...paneQuotaState(plain, esc), inputText: readLpPane(esc.trim() ? esc : plain).inputText }),
   type: (t, text) => sendKeys(t, ["-l", "--", text]),
   enter: (t) => sendKeys(t, ["Enter"]),
-  erase: (t, n) => sendKeys(t, Array<string>(n).fill("BSpace")),
+  erase: (t, n) => sendKeys(t, Array<string>(n).fill("BSpace")), // 调用方按 ERASE_BATCH 分批
   sleep: (ms) => Bun.sleep(ms),
 };

@@ -96,7 +96,7 @@ export function putArchiveRetention(days: number): Promise<{ days?: number }> {
 export function getAutoCompact<T>(): Promise<T> {
   return api<T>("/auto-compact", { timeoutMs: 8000 });
 }
-export function postAutoCompact<T>(patch: { window?: number; idleHours?: number; emergency?: boolean }): Promise<T> {
+export function postAutoCompact<T>(patch: { window?: number; idleHours?: number; emergency?: boolean; inject?: boolean }): Promise<T> {
   return api<T>("/auto-compact", { method: "POST", json: patch, timeoutMs: 8000 });
 }
 export function getMemoryHygiene<T>(): Promise<T> {

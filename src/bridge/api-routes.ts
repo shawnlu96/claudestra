@@ -43,7 +43,6 @@ import { parseAuqPane } from "../lib/auq-pane.js";
 import { readPeers } from "../lib/peers.js";
 import { loadJobs } from "../cron.js";
 import { HYGIENE_JOB_NAME, HYGIENE_FREQS, freqOfSchedule, hygienePrompt, mem0McpConfigured, type HygieneFreq } from "../lib/memory-hygiene.js";
-import { readConfig as readAppConfig, setAutoCompact } from "../lib/config-store.js";
 import { isMasterName, readRegistryAgents } from "../lib/registry.js";
 import { claudeSwitchInputError, isSafeModelArg, nonClaudeRuntimeError } from "../lib/claude-settings-runtime.js";
 import { collectSessions, visibleSessions } from "./sessions-inventory.js";
@@ -87,6 +86,7 @@ import { sseEventAllow } from "./ledger-feed.js";
 import { firstFlagLikeField, textFieldsProblem } from "../lib/flag-like.js";
 import { handleRuntimeSettingsRoutes } from "./runtime-settings-routes.js";
 import { handleCronRoutes } from "./cron-routes.js";
+import { handleAutoCompactRoute } from "./auto-compact-routes.js";
 import { trackInboundHandoff } from "./handoff-tracker.js";
 import { authenticateApi } from "./api-auth.js";
 import { handleDevicesManaged, handleDevicesPublic } from "./devices.js";
@@ -1772,51 +1772,8 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
   const cronRes = await handleCronRoutes(req, path, principal, { runManager, loadJobs }); // /cron*（bridge/cron-routes.ts）
   if (cronRes) return cronRes;
 
-  // ── v2.20.2+ /auto-compact —— 自动存记忆+compact 的阈值/闲置门槛(owner:
-  // 「设置里看不到」——此前只有配置文件可改)。写入 Claudestra 自己的
-  // config.json(CC 的 settings.json 会拒未知字段,只读兼容不写)。
-  if (path === "/auto-compact") {
-    if (!isFullScope(principal)) return forbidden("auto-compact config requires a full-scope token");
-    const state = async () => {
-      const cfg = await readAppConfig();
-      return {
-        ok: true,
-        // window:0=关闭;undefined=未设(用默认或 settings.json 兼容值)
-        window: cfg.autoCompact?.window ?? null,
-        idleHours: cfg.autoCompact?.idleHours ?? null,
-        // v2.21.3+ 93% 救命线独立开关(缺省开;常规线 window=0 时仍兜底)
-        emergency: cfg.autoCompact?.emergency !== false,
-        defaults: { window: 400_000, idleHours: 3, emergency: true, emergencyRatio: 0.93 },
-      };
-    };
-    if (req.method === "GET") return apiJson(200, await state());
-    if (req.method === "POST") {
-      const body: any = await readJsonBody(req);
-      if (body === INVALID_JSON) return invalidJsonBody();
-      const patch: { window?: number; idleHours?: number; emergency?: boolean } = {};
-      if (body.emergency !== undefined) patch.emergency = Boolean(body.emergency);
-      if (body.window !== undefined) {
-        const w = Number(body.window);
-        if (!Number.isFinite(w) || w < 0 || w > 10_000_000) {
-          return apiJson(400, { ok: false, error: "window must be 0..10000000 tokens" });
-        }
-        patch.window = w;
-      }
-      if (body.idleHours !== undefined) {
-        const h = Number(body.idleHours);
-        if (!Number.isFinite(h) || h < 0 || h > 168) {
-          return apiJson(400, { ok: false, error: "idleHours must be 0..168" });
-        }
-        patch.idleHours = h;
-      }
-      if (patch.window === undefined && patch.idleHours === undefined && patch.emergency === undefined) {
-        return apiJson(400, { ok: false, error: "nothing to set" });
-      }
-      await setAutoCompact(patch);
-      return apiJson(200, await state());
-    }
-    return apiJson(405, { ok: false, error: "method not allowed" });
-  }
+  const acRes = await handleAutoCompactRoute(req, path, principal); // /auto-compact（bridge/auto-compact-routes.ts）
+  if (acRes) return acRes;
 
   // ── v2.21+ /projects —— project 管理面(owner 2026-08-28「加 project 概念」)。
   // 与 /peers 同款:全权 token 门禁,GET 读 projects.json+registry,mutation 全

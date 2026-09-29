@@ -1,7 +1,7 @@
 import { afterAll, beforeEach, describe, expect, test } from "bun:test";
 import { existsSync, readFileSync, rmSync } from "fs";
 import {
-  agentWindowName, compactInjectedRecently, injectCompact, loadInjectGuard, resetInjectState,
+  agentWindowName, compactInjectedRecently, injectCompact, loadInjectState, resetInjectState, sweepPendingEcho,
 } from "../src/bridge/ctx-boundary-inject.js";
 import { resetCtxBoundaryState } from "../src/bridge/ctx-boundary.js";
 import { DEFAULT_KEEP_LIST } from "../src/lib/ctx-boundary-policy.js";
@@ -12,9 +12,13 @@ import { BUSY_PANE, harness, MIN, tgt } from "./ctx-boundary-harness.js";
 
 const EXEC_LINE = `/compact ${DEFAULT_KEEP_LIST}`;
 const GUARD_FILE = statePath("ctx-boundary-injected.json");
+const PENDING_FILE = statePath("ctx-boundary-pending-echo.json");
 
 beforeEach(() => resetCtxBoundaryState());
-afterAll(() => rmSync(GUARD_FILE, { force: true }));
+afterAll(() => {
+  rmSync(GUARD_FILE, { force: true });
+  rmSync(PENDING_FILE, { force: true });
+});
 
 describe("injectCompact：先看画面", () => {
   test("画面状态不允许 → skipped 带原因文字，不敲键", async () => {
@@ -132,16 +136,16 @@ describe("注入守卫（adv1 P2-10 / P2-2）", () => {
 
   test("落盘：bridge 重启后守卫还在；dry-run 只读，不改文件", async () => {
     rmSync(GUARD_FILE, { force: true });
-    loadInjectGuard("live");
+    loadInjectState("live");
     const h = harness([]);
     await injectCompact(tgt("x"), { action: "save-compact" }, h.deps);
     expect(existsSync(GUARD_FILE)).toBe(true);
     const saved = readFileSync(GUARD_FILE, "utf8");
     resetInjectState(); // 进程重启：内存清零
-    loadInjectGuard("live");
+    loadInjectState("live");
     expect(compactInjectedRecently("master:x", h.now + MIN)).toBe(true);
     resetInjectState();
-    loadInjectGuard("read-only");
+    loadInjectState("read-only");
     expect(compactInjectedRecently("master:x", h.now + MIN)).toBe(true);
     expect(readFileSync(GUARD_FILE, "utf8")).toBe(saved);
   });
@@ -151,4 +155,83 @@ test("大总管：registry 名 agent-master 对应窗口 master（adv1 P2-13：�
   expect(agentWindowName("agent-master")).toBe("master");
   expect(windowTarget(agentWindowName("agent-master"))).toBe("master:=master");
   expect(windowTarget(agentWindowName("agent-task-t36"))).toBe("master:=agent-task-t36");
+});
+
+describe("删自己留下的字：退格分批、每批核对（r3 P2-2）、待删的字落盘（r3 P2-3）", () => {
+  const LONG = "保".repeat(800);
+  const LINE = `/compact ${LONG}`;
+  const compactingOnType = (h: ReturnType<typeof harness>) => (h.win("master:x").onType = (win) => void (win.pane = "✻ Compacting conversation…\n"));
+  const countErase = (h: ReturnType<typeof harness>, after?: (i: number) => void) => {
+    const calls: number[] = [];
+    const erase = h.deps.erase;
+    h.deps.erase = async (t, n) => {
+      calls.push(n);
+      await erase(t, n);
+      after?.(calls.length);
+    };
+    return calls;
+  };
+
+  test("800 字的清单：退格每批 ≤200 个，删干净", async () => {
+    const h = harness([]);
+    compactingOnType(h);
+    const calls = countErase(h);
+    expect(await injectCompact(tgt("x"), { action: "compact", keep: LONG }, h.deps)).toMatchObject({ status: "skipped", reason: "compacting" });
+    expect(calls).toEqual([200, 200, 200, 200, 9]);
+    expect([h.win("master:x").box, h.sent.length]).toEqual(["", 0]);
+  });
+
+  test("删到一半弹出对话框：停手，剩下的记着；对话框关掉后下一轮接着删完", async () => {
+    const h = harness([]);
+    const w = h.win("master:x");
+    compactingOnType(h);
+    const calls = countErase(h, (i) => void (i === 1 && (w.pane = "Do you want to proceed?\n[menu]")));
+    expect(await injectCompact(tgt("x"), { action: "compact", keep: LONG }, h.deps)).toMatchObject({ status: "failed", leftover: true });
+    expect([calls, [...w.box].length]).toEqual([[200], 609]);
+    const logs: string[] = [];
+    await sweepPendingEcho(h.deps, (l) => void logs.push(l)); // 对话框还在：不按键
+    expect(calls.length).toBe(1);
+    w.pane = "some output\n❯ \n";
+    await sweepPendingEcho(h.deps, (l) => void logs.push(l));
+    expect([calls, w.box]).toEqual([[200, 200, 200, 200, 9], ""]);
+    expect(logs).toEqual([expect.stringContaining("已删掉")]);
+  });
+
+  test("删到一半 owner 动了输入框：对不上就停，不再多按一个退格", async () => {
+    const h = harness([]);
+    const w = h.win("master:x");
+    compactingOnType(h);
+    const calls = countErase(h, (i) => void (i === 1 && (w.box = "帮" + w.box)));
+    expect(await injectCompact(tgt("x"), { action: "compact", keep: LONG }, h.deps)).toMatchObject({ status: "failed", leftover: true });
+    expect(calls).toEqual([200]);
+    await sweepPendingEcho(h.deps, () => {});
+    expect(calls).toEqual([200]);
+    expect(w.box.startsWith("帮/compact")).toBe(true);
+  });
+
+  test("待删的字落盘：bridge 重启后还记得，照样删；挡了一整天就不管了", async () => {
+    for (const f of [GUARD_FILE, PENDING_FILE]) rmSync(f, { force: true });
+    loadInjectState("live");
+    const h = harness([]);
+    const w = h.win("master:x");
+    w.onType = (win) => void (win.pane = "Do you want to proceed?\n[menu]");
+    await injectCompact(tgt("x"), { action: "save-compact" }, h.deps);
+    expect(JSON.parse(readFileSync(PENDING_FILE, "utf8"))).toEqual({ "master:x": { text: "/save-compact", at: h.now } });
+    resetInjectState(); // 进程重启
+    loadInjectState("live");
+    w.pane = "some output\n❯ \n";
+    await sweepPendingEcho(h.deps, () => {});
+    expect(w.box).toBe("");
+    expect(JSON.parse(readFileSync(PENDING_FILE, "utf8"))).toEqual({});
+
+    w.onType = (win) => void (win.pane = "Do you want to proceed?\n[menu]");
+    h.advance(20 * MIN);
+    await injectCompact(tgt("x"), { action: "save-compact" }, h.deps);
+    h.advance(25 * 60 * MIN);
+    const logs: string[] = [];
+    await sweepPendingEcho(h.deps, (l) => void logs.push(l));
+    expect(logs).toEqual([expect.stringContaining("一天都没删成")]);
+    expect(w.box).toBe("/save-compact");
+    resetInjectState();
+  });
 });

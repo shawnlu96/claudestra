@@ -38,7 +38,7 @@ export function harness(
   const deps: CtxBoundaryDeps = {
     now: () => now,
     agents: async () => agents,
-    liveSession: async (a) => a,
+    liveSessions: async (as) => as,
     capture: async (t) => {
       const w = win(t);
       if (w.pane === null) return null;

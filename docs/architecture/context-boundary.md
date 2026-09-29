@@ -4,7 +4,10 @@ Every turn re-reads the whole context (cache reads still count against the plan)
 
 ## Switch and dry-run (rollout)
 
-Automatic injection is **off by default** (`autoCompact.inject`). While it is off the runner does nothing but log once; the stats embed and the web still show every boundary, the embed lists "自动注入关着" at the top, and the Discord "save + compact" button still works (it is manual).
+The switch `autoCompact.inject` is **off by default** and covers only what this feature adds: the named policies and the master. The existing behaviour — the global auto save-compact line and the 93% safety net — keeps running on its own settings whatever the switch says, so an upgrade never silently drops it.
+
+- **Off**: named policies are ignored; every Claude Code agent except the master is compacted by the global line and safety net (the pre-T36 behaviour, now with the pane gate and typed-then-verify injection). The master is not auto-compacted. The embed lists the switch state at the top; the display shows each agent's effective line (the global one while off). Text left in an input box is still erased every tick.
+- **On**: named policies apply to the agents they match, and the master joins the global path.
 
 ```bash
 bun src/manager.ts ctx-boundary dry-run   # live registry, panes, config, persisted guard/cooldown → who would get what, and why; sends no key, writes nothing
@@ -12,7 +15,9 @@ bun src/manager.ts ctx-boundary on|off    # writes autoCompact.inject via config
 bun src/manager.ts ctx-boundary status
 ```
 
-Dry-run lists only agents over a line, each with `会注入（…）：<the exact line>` or `不动：<reason>`. Turn injection on only after reading it.
+The web settings page (Settings → auto save memory + compact) has the same switch, backed by `GET/POST /api/v1/auto-compact` `{inject}` (full-scope credential; only a real boolean is accepted), so a web-only install can turn it on.
+
+Dry-run evaluates twice and prints two sections, each listing only agents over a line with `会注入（…）：<the exact line>` or `不动：<reason>`: `existing` (the switch off — what runs regardless) and `gated` (named-policy agents and, separately, the master, as they would be with the switch on). Turn the switch on only after reading it.
 
 ## Two layers
 
@@ -46,7 +51,7 @@ Layer 2 is meant to act first; layer 1 is the backstop for a single turn that ru
 - Entries merge onto the built-in with the same `id` (write only what changes); `"enabled": false` turns one off; a new `id` is a new policy. Order: configured entries first (as written), untouched built-ins after.
 - `match` is replaced as a whole, never combined with the inherited one: `{"id":"executor","match":{"projects":["x"]}}` makes executor a project-only policy (not "project x **and** agent-task-*"). An empty `match` drops the entry — for a built-in id that disables the built-in too, so the resolver says so; use `enabled: false` to turn one off on purpose.
 - A broad policy can take executors away from the built-in: a names-only policy listed before it whose pattern may hit `agent-task-*` (`agent-*`, `*`), or any project-only policy (projects outrank names). The resolver warns ("会抢在内置 executor 之前"); the executor then gets that policy's numbers.
-- Fields: `match.projects` (project ids) / `match.names` (glob, `*` and `?`), `window`, `idleMinutes`, `hardCap` (≥ window), `action` (`compact` | `save-compact`), `ccWindow` (100K–1M or omitted), `keep` (one line; replaces the default keep list — line breaks are joined with a space; a keep list with any other control character or longer than 1500 characters is reported and the default list is used, because it is typed into the input box verbatim: a lone carriage return would submit half the command, ESC would interrupt the turn, and an overlong line makes `send-keys` fail. `okCompactKeep()` in `lib/ctx-boundary-policy.ts` is the one check — anything else that types a keep list reuses it).
+- Fields: `match.projects` (project ids) / `match.names` (glob, `*` and `?`), `window`, `idleMinutes`, `hardCap` (≥ window), `action` (`compact` | `save-compact`), `ccWindow` (100K–1M or omitted), `keep` (one line; replaces the default keep list — line breaks are joined with a space; a keep list with any other control character (C0, C1, U+2028 / U+2029), an invisible format character (`\p{Cf}` except ZWNJ, ZWJ and the soft hyphen) or more than 800 characters is reported and the default list is used, because it is typed into the input box verbatim: a lone carriage return would submit half the command, ESC would interrupt the turn, a zero-width or bidi character makes the box check fail, and a much longer line risks tmux rejecting the `send-keys`. `okCompactKeep()` in `lib/ctx-boundary-policy.ts` is the one check — anything else that types a keep list reuses it).
 - Matching priority: a policy with both projects **and** names (both must hit) > projects only > names only; ties go to the first in the list. The master session is only matched by the literal name `master`, never by a wildcard.
 - `config-store` keeps `policies` verbatim; validation happens in the resolver so a hand-written mistake is reported, not erased by the next settings save.
 - Agents that match no policy use the global `window` / `idleHours` / `emergency` exactly as before (85% / 93% of the real window when statusline reports it).
@@ -95,16 +100,17 @@ Where the global path is not identical to the old stats-dashboard code:
 
 - **Scope**: the old code ran only in Discord mode and only for agents with a `channelId`. The runner covers every active Claude Code agent, including agents without a channel and web-only installs, which get automatic compaction for the first time (defaults 400K / 3 h unless configured).
 - **Executor rule**: a personal agent whose working directory is a linked worktree is treated as an executor and gets `/compact` with the keep list instead of `/save-compact` (submodules are not).
-- **Master** is covered now (global path: `/save-compact`, 400K / 3 h idle, 93% lifeline). The old code built its target from the registry key (`master:=agent-master`) while the window is named `master`, so it never read master's pane and master had no lifeline at all.
+- **Master** is covered once the switch is on (global path: `/save-compact`, 400K / 3 h idle, 93% lifeline); while it is off the master is left alone, as before. The old code built its target from the registry key (`master:=agent-master`) while the window is named `master`, so it never read master's pane and master had no lifeline at all.
 - **Idle**: both the new and the old condition must hold, so it fires no more often than before (review r2 compared 3024 cases: every difference was "old fires, new waits").
 
 ## Runner
 
 - `startCtxBoundary()` runs once a minute from `bridge.ts`, in Discord and web-only mode alike (it used to live in the Discord stats dashboard, so web-only installs and the sandbox never auto-compacted).
 - Claude Code agents only (the injected commands and pane parsing are CC's), master included (registry `agent-master` → window `master`, `agentWindowName`).
-- Only agents over a line get their pane captured. Before that, an over-the-line agent is re-checked against the session actually running in its window (`resolveSessionIdForWindow`: CC rewrites `~/.claude/sessions/<pid>.json` on `/clear`, verified 2026-09-29), so a registry still pointing at the pre-`/clear` file does not compact the fresh session every 30 minutes.
+- Every tick each agent is first matched to the session actually running in its window (`resolveSessionIdsForWindows`: one `ps`, one tmux pane listing and one read of `~/.claude/sessions/` for all agents; CC rewrites `~/.claude/sessions/<pid>.json` on `/clear`, verified 2026-09-29). A registry still pointing at the pre-`/clear` file neither compacts the fresh session every 30 minutes nor hides a fresh session that is over the line.
+- Only agents over a line get their pane captured.
 - Skips are logged once per reason change; injections always.
-- The 15-minute injection guard and the 30-minute cooldown are persisted (`state/ctx-boundary-injected.json`, `state/ctx-boundary-trig.json`), so a bridge restart in the middle of a save-compact turn does not queue a second one.
+- The 15-minute injection guard, the 30-minute cooldown and the text left in input boxes are persisted (`state/ctx-boundary-injected.json`, `state/ctx-boundary-trig.json`, `state/ctx-boundary-pending-echo.json`), so a bridge restart in the middle of a save-compact turn does not queue a second one and still erases what an earlier injection left behind.
 - Past the hard cap but blocked by a draft, queued message, menu, quota wall or copy-mode — or an injection left its text in the box — the owner gets one alert per agent per 30 minutes: a `session_anomaly` event (`kind: "ctx_boundary_blocked"`, rendered as a system line in the web chat) and, for a Discord channel, a message there. Blocking is right; staying silent would end in CC's own ~967K compaction.
 
 ## Injection (`injectCompact`)
@@ -116,9 +122,11 @@ Where the global path is not identical to the old stats-dashboard code:
 3. Type the command (`send-keys -l`) **without** Enter, then read the pane again (every 200 ms, up to 5 frames). CC wraps the line at word boundaries and drops the space at each wrap, so the box text is compared with whitespace removed.
    - box equals the command, no dialog → press Enter; record the guard.
    - compacting / API retry / a queued message appeared → erase what we typed (below) and skip.
-   - a dialog / menu / quota wall / copy-mode / non-CC process appeared → press nothing (a key could answer the dialog); remember the text as pending. Every later tick checks pending windows and erases it once the box shows exactly that text again.
+   - a dialog / menu / quota wall / copy-mode / non-CC process appeared → press nothing (a key could answer the dialog); remember the text as pending. Every later tick — switch on or off, so text left by the manual button goes too — checks pending windows and erases it once the box shows exactly that text again; after a day it is dropped.
    - the box holds something else (the owner typing at the same time) → press nothing, erase nothing, alert.
-4. Erasing = two frames 300 ms apart both show exactly our text and no dialog, then one BSpace per character, then check the box is empty (the same rule as T35's echo cleanup).
+4. Erasing = two frames 300 ms apart both show exactly our text and no dialog (the same rule as T35's echo cleanup), then BSpace in batches of at most 200 (tmux rejects one `send-keys` with ~1500 of them as "command too long"). After each batch the box must show exactly the remaining prefix of our text (up to 5 frames while CC catches up): anything else — the owner touched the box — stops with no further key; a dialog stops and keeps the remainder pending.
+
+The box text comes from `lp-state` (`inputText`), which treats U+00A0 as a plain space: real CC draws the prompt as `❯` + NBSP, and T35 compares its own echo character by character.
 
 Every tmux call here uses `tmuxRawStrict`, so a window that vanished between capture and send is a failure (retried after 5 minutes), not a fake "sent".
 - Display calls resolve the policies once per 2 s (one `/api/v1/agents` request or one embed render reads the config once).

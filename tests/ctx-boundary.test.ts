@@ -30,22 +30,52 @@ describe("ctxBoundaryTick", () => {
     expect(h.sent.length).toBe(2);
   });
 
-  test("自动注入缺省关：不读画面、不发键，日志只提示一次；打开后照常", async () => {
-    const h = harness([], { autoCompact: { inject: false } });
-    h.deps.agents = async () => [agent({ ctx: 300_000, convTs: 0 })];
-    expect(await ctxBoundaryTick(h.deps)).toEqual([]);
-    expect(await ctxBoundaryTick(h.deps)).toEqual([]);
-    expect(h.logs.filter((l) => l.includes("自动注入关着")).length).toBe(1);
-    const off = harness([], { autoCompact: null });
-    off.deps.agents = h.deps.agents;
-    expect(await ctxBoundaryTick(off.deps)).toEqual([]);
-    expect(h.sent.length + off.sent.length).toBe(0);
+  test("开关缺省关：只关新增的（具名策略按全局线走、大总管不压），全局线和救命线照旧（r3 P2-4）；日志只提示一次", async () => {
+    const agents = () => [
+      agent({ ctx: 300_000, convTs: 0, mtime: 0 }), // 执行者：策略的硬上限 25 万已过，全局线 40 万没过
+      agent({ name: "agent-pm-x", target: "master:agent-pm-x", ctx: 450_000, convTs: 0, mtime: 0 }), // 协调者：全局线 40 万、闲置满
+      agent({ name: "agent-master", target: "master:master", ctx: 900_000, convTs: 0, mtime: 0 }),
+      agent({ name: "agent-car", projectId: "personal", target: "master:agent-car", ctx: 940_000, convTs: 1e12, realWindow: 1_000_000 }), // 救命线 93 万，忙
+    ];
+    for (const autoCompact of [{ inject: false }, null]) {
+      resetCtxBoundaryState();
+      const h = harness([], { autoCompact, panes: { "master:agent-car": BUSY_PANE } });
+      h.deps.agents = async () => agents();
+      const r = await ctxBoundaryTick(h.deps);
+      expect(r.map((x) => [x.agent, x.boundary.policy, x.verdict, x.gated])).toEqual([
+        ["agent-pm-x", "global", { fire: true, kind: "idle" }, false],
+        ["agent-car", "global", { fire: true, kind: "hard-cap" }, false],
+      ]);
+      expect(h.sent.map((x) => x.line)).toEqual(["/save-compact", "/save-compact"]);
+      await ctxBoundaryTick(h.deps);
+      expect(h.logs.filter((l) => l.includes("新增的自动压缩关着")).length).toBe(1);
+    }
+    const on = harness([], { panes: { "master:agent-car": BUSY_PANE } });
+    on.deps.agents = async () => agents();
+    const r = await ctxBoundaryTick(on.deps);
+    expect(r.map((x) => [x.agent, x.boundary.policy, x.gated])).toEqual([
+      ["agent-task-t1", "executor", true], ["agent-pm-x", "coordinator", true], ["agent-master", "global", true], ["agent-car", "global", false],
+    ]);
+    expect(on.logs.some((l) => l.includes("新增的自动压缩关着"))).toBe(false);
   });
 
-  test("dry-run：开关关着也照常判定，只给出会发的那行，不发键、不记冷却、不提醒", async () => {
+  test("开关关着也删上轮留在框里的字（手动按钮碰上对话框留下的，r3 P2-3）", async () => {
+    const h = harness([], { autoCompact: { inject: false } });
+    const w = h.win("master:x");
+    w.onType = (win) => void (win.pane = "Do you want to proceed?\n[menu]");
+    expect(await injectCompact(tgt("x"), { action: "save-compact" }, h.deps)).toMatchObject({ status: "failed", leftover: true });
+    w.onType = undefined;
+    w.pane = "some output\n❯ \n";
+    await ctxBoundaryTick(h.deps);
+    expect([w.box, h.sent.length]).toEqual(["", 0]);
+    expect(h.logs.some((l) => l.includes("已删掉"))).toBe(true);
+  });
+
+  test("dry-run：按开关开 / 关各判一遍，只给出会发的那行，不发键、不记冷却、不删字、不提醒", async () => {
     const h = harness([], { autoCompact: { inject: false } });
     h.deps.agents = async () => [agent({ ctx: 300_000, convTs: 0 })];
-    const dry = { ...h.deps, dryRun: true };
+    expect(await ctxBoundaryTick({ ...h.deps, dryRun: true, injectAs: false })).toEqual([]); // 关着：执行者按全局线，没过
+    const dry = { ...h.deps, dryRun: true, injectAs: true };
     const r = await ctxBoundaryTick(dry);
     expect(r[0]).toMatchObject({ verdict: { fire: true, kind: "hard-cap" }, would: `/compact ${DEFAULT_KEEP_LIST}` });
     expect(r[0].inject).toBeUndefined();
@@ -111,13 +141,17 @@ describe("ctxBoundaryTick", () => {
     expect(h.sent.length).toBe(1);
   });
 
-  test("/clear 之后 registry 还指着旧会话：按窗口里实际的会话重读，新会话没过线就不压（adv1 P2-12）", async () => {
+  test("/clear 之后 registry 还指着旧会话：每轮都按窗口里实际的会话算，不管旧会话过没过线（adv1 P2-12 / r3 P2-9）", async () => {
     const h = harness([]);
+    let seen = 0;
+    const clear = (ctx: number) => async (as: ReturnType<typeof agent>[]) => (seen++, as.map((a) => ({ ...a, sessionId: "new", ctx, convTs: h.now })));
     h.deps.agents = async () => [agent({ ctx: 300_000, convTs: 0, sessionId: "old" })];
-    h.deps.liveSession = async (a) => ({ ...a, sessionId: "new", ctx: 12_000 });
+    h.deps.liveSessions = clear(12_000); // 旧会话过线、新会话没过
     expect(await ctxBoundaryTick(h.deps)).toEqual([]);
-    h.deps.liveSession = async (a) => ({ ...a, sessionId: "new", ctx: 260_000, convTs: h.now });
+    h.deps.agents = async () => [agent({ ctx: 12_000, convTs: 0, sessionId: "old" })];
+    h.deps.liveSessions = clear(260_000); // 旧会话在线下、新会话过了硬上限：以前永远不认新会话
     expect((await ctxBoundaryTick(h.deps))[0]).toMatchObject({ ctx: 260_000, verdict: { fire: true, kind: "hard-cap" } });
+    expect(seen).toBe(2);
   });
 
   test("没命中策略的个人 agent：走全局（线 / 闲置小时 / save-compact），也过画面判定", async () => {
