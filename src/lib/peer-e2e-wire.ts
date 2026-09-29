@@ -109,7 +109,10 @@ export function parseInnerHead(raw: unknown): InnerHead | null {
   const o = raw as Record<string, unknown> | null;
   if (!o || typeof o !== "object" || typeof o.method !== "string" || typeof o.path !== "string") return null;
   if (!INNER_METHODS.has(o.method) || o.path.length > PATH_MAX || !o.path.startsWith("/api/v1/") || o.path.startsWith("/api/v1/e2e/")) return null;
-  if (o.path.includes("..") || o.path.includes("#") || /[\s\\]/.test(o.path)) return null;
+  if (o.path.includes("..") || o.path.includes("#") || /[\s\\]|%(2e|2f|5c)/i.test(o.path)) return null;
+  // 收方用 new URL(path) 造内层请求，会解掉点段：前缀要在规范化后的 pathname 上再核一遍（tests/peer-e2e-relay.test.ts）
+  const norm = new URL(o.path, "http://inner.invalid").pathname;
+  if (!norm.startsWith("/api/v1/") || norm.startsWith("/api/v1/e2e/")) return null;
   const h = o.headers;
   if (!h || typeof h !== "object" || Object.values(h).some((v) => typeof v !== "string")) return null;
   return { method: o.method, path: o.path, headers: pickHeaders(h as Record<string, string>, INNER_REQ_HEADERS) };
