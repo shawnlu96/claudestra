@@ -74,7 +74,7 @@ export async function handleSlashPassthrough(r: SlashRequest, deps: SlashDeps): 
   if (!owner) return apiJson(403, { ok: false, ...SLASH_OWNER_ONLY });
   const win = agent.name === "master" ? `${MASTER_SESSION}:0` : windowTarget(agent.name);
   // 停在额度菜单 / 撞墙倒计时上不打字（倒计时上一打字就取消自动续跑，菜单上会选项）；原因只告诉能看额度的凭据（canSeeQuota）
-  const wall = await (deps.wallWait ?? windowWallWait)(win);
+  const wall = await (deps.wallWait ?? ((w: string) => windowWallWait(w, rt || undefined)))(win); // Codex 窗口还认选择菜单（T63）
   if (wall) return apiJson(409, { ok: false, error: `${agent.name} ${wallWaitRefusal(wall, canSeeQuota(principal))}，这条命令没有注入` });
   try {
     await deps.sendLine(win, resolved.ccText);
@@ -84,6 +84,8 @@ export async function handleSlashPassthrough(r: SlashRequest, deps: SlashDeps): 
       noteModelSwitchIntent(agent.name, resolveModelAlias(args));
     }
   } catch (e) {
+    // 查过之后、真正发键前 Codex 菜单弹出来了（lib/codex-key-guard.ts）：没注入，同上 409
+    if ((e as Error).name === "KeysBlockedError") return apiJson(409, { ok: false, error: `${agent.name} ${(e as Error).message}，这条命令没有注入` });
     return apiJson(500, { ok: false, error: `tmux 注入失败: ${(e as Error).message}` });
   }
   const tn = principal.name || r.tokenId;

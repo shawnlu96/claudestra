@@ -25,12 +25,13 @@ export interface PaneIO {
 }
 
 /** heldBy：押后原因（额度闸 / 停在额度菜单，bridge/router.ts Delivery）；没有 = 目标在忙 */
-export type TextOutcome = { ok: true; queued: boolean; heldBy?: "quota_wall" | "wall_menu" } | { ok: false; error: string };
+export type TextOutcome = { ok: true; queued: boolean; heldBy?: "quota_wall" | "wall_menu" | "codex_menu" } | { ok: false; error: string };
 
 const QUEUED_DETAIL = {
   busy: "它正在忙，这一轮结束后再投，还没送到",
   quota_wall: "额度闸内（撞墙中），出闸后再投，还没送到",
   wall_menu: "它停在额度菜单 / 撞墙等待上，没发键，之后再投，还没送到",
+  codex_menu: "它停在 Codex 的选择菜单上，没发键，菜单关了再投，还没送到",
 } as const;
 export interface RunCtx {
   io: PaneIO;

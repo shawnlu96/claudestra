@@ -401,7 +401,7 @@ const codexSink = new CodexQueueSink({
   log: (line) => console.error(line),
   typeIn: typeIntoOwnPane, // Codex 被打断后 queue 会卡住，打断后的第一条直接打进自己的 pane
   undelivered: (messageId, notice) => bridgeRequest({ type: "codex_undelivered", channelId: CHANNEL_ID, messageId, reason: notice }).then((r) => (r?.settled ?? 0) > 0),
-  onTypeInFailed: () => void (bridgeWs?.readyState === WebSocket.OPEN && bridgeWs.send(JSON.stringify({ type: "codex_typein_failed", channelId: CHANNEL_ID }))),
+  onTypeInFailed: (info) => void (bridgeWs?.readyState === WebSocket.OPEN && bridgeWs.send(JSON.stringify({ type: "codex_typein_failed", channelId: CHANNEL_ID, ...info }))),
   preamble: IS_CODEX ? decodePreambleEnv(process.env.CLAUDESTRA_CODEX_PREAMBLE) : undefined, // 重启 / 收编后的职责前言
 });
 

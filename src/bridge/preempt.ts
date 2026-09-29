@@ -83,7 +83,9 @@ export async function preemptForHuman(env: Envelope, channelId: string, agent: s
   try {
     r = await interruptGate.preempt(channelId, agent, { stop });
   } catch (e) {
-    console.log(`⚠️ 抢占打断失败,按常规投递: ${(e as Error).message}`);
+    // 等锁 / 节流期间 Codex 菜单弹出来了，Esc 没发（lib/codex-key-guard.ts）：按停在菜单处理，这条押住
+    if ((e as Error).name === "KeysBlockedError") r = { fired: false, why: "wall_wait" };
+    else console.log(`⚠️ 抢占打断失败,按常规投递: ${(e as Error).message}`);
   }
   if (!r.fired && r.why === "wall_wait") return "wall_wait";
   if (!r.fired && !stop) return;
@@ -118,13 +120,16 @@ export async function manualInterrupt(
 ): Promise<StopResult> {
   const tools = toolsAt(agent, runtime);
   if (by.owner) clearAgentPendings(channelId); // 同停字：发键之前清，Pi 停下报的 Stop 不再被看门狗拿去催
-  const r = await interruptGate.manual(channelId, win, runtime);
+  const r = await interruptGate.manual(channelId, win, runtime).catch((e: Error) => {
+    if (e.name === "KeysBlockedError") return { keys: [] as readonly string[], wall: true as const, deduped: undefined }; // 等待期间菜单弹出来了：同停在菜单
+    throw e;
+  });
   if (r.deduped) return { keys: r.keys, deduped: true }; // 刚按过一次停：那一次已经记过、收过尾
   // 停在撞墙画面上：一个键都没发；owner 的停照样记下（Autopilot 让位），回报时说清是哪种画面（再抓一次屏，只为措辞）
   if (r.wall && by.owner) {
     turnCuts.record({ channelId, agent, runtime, cause: "manual", byName: by.name, tools: { inflight: [] }, interrupted: false });
   }
-  if (r.wall) return { keys: [], wall: (await windowWallWait(win)) ?? "countdown" };
+  if (r.wall) return { keys: [], wall: (await windowWallWait(win, runtime)) ?? "countdown" };
   // 空闲也记：owner 按了停，续做提醒和 Autopilot 都该停下
   if (by.owner) turnCuts.record({ channelId, agent, runtime, cause: "manual", byName: by.name, tools: r.keys.length ? tools : { inflight: [] }, interrupted: r.keys.length > 0 });
   else console.log(`⏹ ${by.name ?? "非 owner"} 按停止${r.keys.length ? "打断了" : "（空闲，没发键）"} ${agent}：只打断这一回合，不记成 owner 的「停」、不挂起 Autopilot`);

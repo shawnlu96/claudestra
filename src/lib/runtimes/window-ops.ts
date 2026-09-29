@@ -36,7 +36,7 @@ export function tmuxWindowOps(name: string, target: string = windowTarget(name))
       await noteProgramInput(target);
       await tmuxRaw(["send-keys", "-t", target, key]);
     },
-    sendEscape: () => tmuxSendEscape(target),
+    sendEscape: () => tmuxSendEscape(target, { unguarded: true }), // 只有生命周期退出用：清场本来就要关掉菜单，不走 Codex 菜单闸（T63）
     getOption: (key) => windowOption(target, key),
     setOption: (key, value) => setWindowOption(target, key, value),
     childPids: () => windowChildPids(target),

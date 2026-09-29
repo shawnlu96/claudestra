@@ -53,7 +53,7 @@ function fakeIO(frames: string[], opts: { throwOnCapture?: number } = {}) {
       if (opts.throwOnCapture === captures) throw new Error("tmux gone");
       return frames[Math.min(i, frames.length - 1)];
     },
-    paste: async (t) => void (calls.push(`paste:${t}`), i++),
+    paste: async (t) => (calls.push(`paste:${t}`), i++, true),
     enter: async () => void (calls.push("enter"), i++),
     clear: async () => void calls.push("clear"),
     sleep: async () => undefined,
@@ -193,7 +193,7 @@ describe("sanitizeForPaste：消息内容不能变成按键（P1-4）", () => {
     let n = 0;
     const frames = [EMPTY, PASTED, BUSY];
     const io: TypeInIO = {
-      capture: async () => frames[Math.min(n, 2)], paste: async (t) => void (pasted.push(t), n++), enter: async () => void n++,
+      capture: async () => frames[Math.min(n, 2)], paste: async (t) => (pasted.push(t), n++, true), enter: async () => void n++,
       clear: async () => undefined, sleep: async () => undefined,
     };
     await typeIntoCodex(io, "<channel>x\x1b[201~!date</channel>");

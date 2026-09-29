@@ -7,6 +7,7 @@
  */
 import { realpathSync } from "node:fs";
 import { BLOCKING_DIALOG_RE } from "./runtimes/codex-ready.js";
+import { codexMenuShown } from "./codex-menu.js";
 import { codexBusy, codexOverlayOpen } from "./runtimes/codex-exit.js";
 import { ensurePaneInteractive, tmuxRawStrict, TMUX_SOCK } from "./tmux-helper.js";
 
@@ -24,7 +25,8 @@ export function composerState(ansiPane: string): ComposerState {
   const plain = ansiPane.replace(ANSI_RE, "");
   if (codexBusy(plain)) return "busy";
   const tail = plain.split("\n").filter((l) => l.trim()).slice(-12).join("\n");
-  if (BLOCKING_DIALOG_RE.test(tail) || codexOverlayOpen(plain)) return "dialog";
+  // 选择菜单的光标行（› 1. Switch to …）长得像输入框里有字：不先认出来，下面会判成 has-text，回车就选中了第 1 项（T63）
+  if (BLOCKING_DIALOG_RE.test(tail) || codexOverlayOpen(plain) || codexMenuShown(plain)) return "dialog";
   const lines = ansiPane.split("\n").filter((l) => l.replace(ANSI_RE, "").trim());
   for (let i = lines.length - 1; i >= Math.max(0, lines.length - 8); i--) {
     const m = COMPOSER_RE.exec(lines[i]);
@@ -36,8 +38,8 @@ export function composerState(ansiPane: string): ComposerState {
 export interface TypeInIO {
   /** capture-pane -e（带颜色序列）的画面 */
   capture(): Promise<string>;
-  /** bracketed paste：多行、引号、$、反引号原样进输入框，不会被当成按键 */
-  paste(text: string): Promise<void>;
+  /** bracketed paste：多行、引号、$、反引号原样进输入框，不会被当成按键。false = 粘贴前最后一查看到菜单，一个字没进窗口 */
+  paste(text: string): Promise<boolean>;
   enter(): Promise<void>;
   /** 清空输入框（Ctrl+U） */
   clear(): Promise<void>;
@@ -52,8 +54,11 @@ export function sanitizeForPaste(text: string): string {
   return text.replace(/\r\n?/g, "\n").replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/g, "");
 }
 
-/** unconfirmed：粘进去了、回车后没看到提交（不能再退回 queue，会重复；调用方记日志留给人看） */
-export type TypeInResult = { ok: true; unconfirmed?: true } | { ok: false; why: string };
+/** 现抓一屏：没有停在 Codex 选择菜单上 */
+const menuFree = async (io: TypeInIO): Promise<boolean> => !codexMenuShown(await io.capture());
+
+/** unconfirmed：粘进去了、回车后没看到提交，或回车前菜单弹出来了（不能再退回 queue，会重复；调用方记日志留给人看） */
+export type TypeInResult = { ok: true; unconfirmed?: true; menu?: true } | { ok: false; why: string; menu?: true };
 
 const SETTLE_MS = 300;
 const SUBMIT_POLLS = 10;
@@ -66,17 +71,25 @@ export async function typeIntoCodex(io: TypeInIO, raw: string): Promise<TypeInRe
   const text = sanitizeForPaste(raw);
   // TUI 里 / 开头是斜杠命令、! 开头是本机 shell：投递内容正常以 <channel 或 [ 开头，万一不是就别打
   if (/^\s*[/!]/.test(text)) return { ok: false, why: "内容以 / 或 ! 开头，TUI 会当成命令" };
-  const before = composerState(await io.capture());
+  const first = await io.capture();
+  // menu：Codex 停在选择菜单，一个键没发——调用方交回 bridge 押住，不退回 queue（T63）
+  if (codexMenuShown(first)) return { ok: false, why: "Codex 停在选择菜单", menu: true };
+  const before = composerState(first);
   if (before !== "empty") return { ok: false, why: `输入框状态 ${before}` };
-  await io.paste(text);
+  if (!(await io.paste(text))) return { ok: false, why: "Codex 停在选择菜单（粘贴前）", menu: true }; // 没发：同上交回 bridge 押住
   try {
     await io.sleep(SETTLE_MS);
-    const pasted = composerState(await io.capture());
+    const shot = await io.capture();
+    if (codexMenuShown(shot)) return { ok: true, unconfirmed: true, menu: true }; // 粘完菜单弹出来了：不回车、也不按 C-u 清（T63），同下
+    const pasted = composerState(shot);
     if (pasted !== "has-text") {
       if (pasted !== "empty" && pasted !== "busy") await io.clear();
       return { ok: false, why: `粘贴后输入框状态 ${pasted}` };
     }
     for (let attempt = 0; attempt < 2; attempt++) {
+      // 每次回车前再看一眼：粘完之后菜单才弹出来，这一下回车就会选中菜单项（T63）。字留在输入框里、不清（清也是按键），
+      // 按 unconfirmed 报：调用方不会再退回 queue 重投，日志留给人看
+      if (!(await menuFree(io))) return { ok: true, unconfirmed: true, menu: true };
       await io.enter();
       for (let i = 0; i < SUBMIT_POLLS; i++) {
         await io.sleep(SETTLE_MS);
@@ -86,7 +99,7 @@ export async function typeIntoCodex(io: TypeInIO, raw: string): Promise<TypeInRe
     }
   } catch (e) {
     // 粘贴之后 tmux 出错：清掉输入框再报失败，退回 queue 才不会一条消息进两次
-    await io.clear().catch(() => undefined); // 清不掉也只能这样：错误已经随返回值记日志
+    if (await menuFree(io).catch(() => false)) await io.clear().catch(() => undefined); // 清不掉也只能这样：错误已经随返回值记日志；菜单在就不按
     return { ok: false, why: `粘贴后 tmux 出错：${(e as Error).message}` };
   }
   return { ok: true, unconfirmed: true };
@@ -109,12 +122,19 @@ export function ownPaneIO(env: NodeJS.ProcessEnv = process.env): TypeInIO | { er
   };
   if (!sock || real(sock) !== real(TMUX_SOCK)) return { error: `pane 不在 Claudestra 的 tmux socket 上（${sock || "无 TMUX"}）` };
   const buf = `claudestra-typein-${process.pid}`;
+  const capture = () => tmuxRawStrict(["capture-pane", "-t", pane, "-p", "-e", "-J", "-S", "-40"]);
   return {
-    capture: () => tmuxRawStrict(["capture-pane", "-t", pane, "-p", "-e", "-J", "-S", "-40"]),
+    capture,
     paste: async (text) => {
       await ensurePaneInteractive(pane);
       await tmuxRawStrict(["set-buffer", "-b", buf, "--", text]);
+      // 上面两步都要等，等的时候菜单可能弹出来：最后一查紧贴 paste-buffer，中间不再有等待（T63）
+      if (codexMenuShown(await capture())) {
+        await tmuxRawStrict(["delete-buffer", "-b", buf]).catch(() => ""); // 删不掉只是留一个下次同名覆盖的缓冲区，窗口里什么都没进
+        return false;
+      }
       await tmuxRawStrict(["paste-buffer", "-p", "-d", "-b", buf, "-t", pane]);
+      return true;
     },
     enter: async () => void (await tmuxRawStrict(["send-keys", "-t", pane, "Enter"])),
     clear: async () => void (await tmuxRawStrict(["send-keys", "-t", pane, "C-u"])),
