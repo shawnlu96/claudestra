@@ -16,11 +16,30 @@ export function runtimeFingerprint(source: AskSource, agent: string, rule: strin
   return createHash("sha256").update(JSON.stringify([source, agent.replace(/^agent-/, ""), rule, line.trim()])).digest("hex").slice(0, 32);
 }
 
+/**
+ * AUQ 的身份：各问的问题、单选 / 多选、按顺序的选项文字——网页按下标提交，这几样变了，同一个下标就是另一个操作。
+ * 选项描述不算：pane 和 jsonl 两条检测画出来的描述不一样，算进去同一个弹框会来回换卡，下标的意思却没变
+ */
+export function auqIdentity(qs: unknown): string {
+  const list = (Array.isArray(qs) ? qs : []) as { question?: string; multiSelect?: boolean; options?: { label?: string }[] }[];
+  return JSON.stringify(list.map((q) => [q?.question ?? "", !!q?.multiSelect, (q?.options ?? []).map((o) => o?.label ?? "")]));
+}
+
 /** 同一个频道、同一种来源、同一个指纹的最近一条（任何状态） */
 export function priorByFingerprint(db: Database, source: AskSource, channelId: string, fp: string): Ask | null {
   const r = db.query("SELECT id FROM asks WHERE source = ? AND fromChannelId = ? AND json_extract(extra, '$.fp') = ? ORDER BY createdAt DESC LIMIT 1")
     .get(source, channelId, fp) as { id: string } | null;
   return r ? getAsk(db, r.id) : null;
+}
+
+/**
+ * 重启后第一次确认屏上没有这种弹框时要对账的：还开着的，和会挡住下一次开卡的（删过的、到期的额度卡）——都还没记 clearedAt。
+ * 别的结过的记不记都不影响开卡（reuseOf），不去碰
+ */
+export function unclearedRuntimeAsks(db: Database, source: AskSource, channelId: string): Ask[] {
+  return (db.query(`SELECT id FROM asks WHERE source = ? AND fromChannelId = ? AND json_extract(extra, '$.clearedAt') IS NULL
+    AND (state = 'open' OR json_extract(extra, '$.dismissed') IS NOT NULL OR (state = 'expired' AND source = 'codex'))`)
+    .all(source, channelId) as { id: string }[]).flatMap((r) => getAsk(db, r.id) ?? []);
 }
 
 export type Reuse = "adopt" | "suppress" | "new";

@@ -38,10 +38,19 @@ export async function dismissFromCard(project: string, id: string, p: Principal)
   return apiJson(200, { ok: true, ask: out });
 }
 
-/** 撤掉之后：去掉 Discord 原消息的按钮；agent 发起的告诉发起方（落到大总管的不发，和过期同一个规矩）；指派告诉任务 PM */
+/**
+ * 撤掉之后：去掉 Discord 原消息的按钮；agent 发起的告诉发起方（落到大总管的不发，和过期同一个规矩）；指派告诉任务 PM。
+ * 改 Discord 是展示层，失败（原消息删了、没权限、连不上）只记日志，不能挡住告诉发起方（tests/ask-dismiss.test.ts）
+ */
 async function noticeDismissed(a: Ask): Promise<void> {
   const d = asksDeps();
-  if (a.discordMessageIds.length) await d?.editDiscord?.(a, t("已删除，未作答", "Deleted, unanswered"));
+  if (a.discordMessageIds.length) {
+    try {
+      await d?.editDiscord?.(a, t("已删除，未作答", "Deleted, unanswered"));
+    } catch (e) {
+      console.error(`⚠️ 删卡后改 Discord 原消息失败（${a.id}，通知照发）: ${(e as Error).message}`);
+    }
+  }
   if (a.kind === "assigned") {
     if (!a.taskId) return;
     const text = t(`[🗑 ${a.taskId} 指派给 ${a.assignee} 的事项被 owner 删掉了（${a.id}）]`, `[🗑 ${a.taskId}: the item assigned to ${a.assignee} was deleted by the owner (${a.id})]`);

@@ -9,7 +9,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { answerFromCard } from "../src/bridge/ask-entry.js";
-import { cancelUnadoptedRuntimeAsks } from "../src/bridge/ask-runtime.js";
+import { noteRuntimeDialogs } from "../src/bridge/ask-runtime.js";
 import { sweepExpired } from "../src/bridge/ask-expire.js";
 import { setAsksForTest, setOnAssignedAnswer, setPrepareAssigned, type AsksDeps } from "../src/bridge/asks.js";
 import { initHumanNode } from "../src/bridge/human-node.js";
@@ -87,8 +87,8 @@ describe("接进待你处理", () => {
     expect(theAsk().dedupKey).toBe("assign:T1:0:1:local:guest:aa");
   });
 
-  test("bridge 重启清运行时弹框时不撤指派：撤了同一个 dedupKey 就再也开不出来", () => {
-    expect(cancelUnadoptedRuntimeAsks()).toBe(0);
+  test("运行时弹框对账（确认屏上没有）不撤指派：撤了同一个 dedupKey 就再也开不出来", () => {
+    noteRuntimeDialogs(theAsk().fromChannelId || "111", "agent-x", "pane", null);
     expect(theAsk().state).toBe("open");
   });
 

@@ -55,9 +55,9 @@ export function answerPermission(agent: string, action: string): Promise<{ ok: b
   return api(`/agents/${enc(agent)}/answer`, { method: "POST", json: { kind: "permission", action: mapped }, timeoutMs: 15_000 });
 }
 
-/** 应答 AskUserQuestion：submit(selections[][]) 或 cancel */
-export function answerAuq(agent: string, action: "submit" | "cancel", selections: number[][] = []): Promise<{ ok: boolean }> {
-  return api(`/agents/${enc(agent)}/answer`, { method: "POST", json: { kind: "auq", action, selections }, timeoutMs: 15_000 });
+/** 应答 AskUserQuestion：submit(selections[][]) 或 cancel。askId = 从「待你处理」卡上答：bridge 先核对卡是不是当前这个弹框的（409 ask_stale） */
+export function answerAuq(agent: string, action: "submit" | "cancel", selections: number[][] = [], askId?: string): Promise<{ ok: boolean }> {
+  return api(`/agents/${enc(agent)}/answer`, { method: "POST", json: { kind: "auq", action, selections, askId }, timeoutMs: 15_000 });
 }
 
 export interface SlashCmdInfo {

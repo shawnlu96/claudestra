@@ -5,11 +5,11 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { dismissFromCard } from "../src/bridge/ask-dismiss.js";
 import { sweepExpired } from "../src/bridge/ask-expire.js";
-import { cancelUnadoptedRuntimeAsks, noteRuntimeDialogs, resetRuntimeAsksForTest } from "../src/bridge/ask-runtime.js";
+import { noteRuntimeDialogs, openRuntimeAsk, resetRuntimeAsksForTest, staleAuqCard } from "../src/bridge/ask-runtime.js";
 import { listForWeb, setAsksForTest, type AsksDeps } from "../src/bridge/asks.js";
 import type { Envelope } from "../src/bridge/router.js";
 import { codexExpiry, codexQuotaText, reuseOf, runtimeFingerprint } from "../src/lib/ask-fingerprint.js";
-import { answerAsk, getAsk, listAsks, openAsk, type Ask, type NewAsk } from "../src/lib/ledger-asks.js";
+import { answerAsk, getAsk, listAsks, openAsk, patchAsk, type Ask, type NewAsk } from "../src/lib/ledger-asks.js";
 import { closeLedger, openLedger } from "../src/lib/ledger-store.js";
 import type { RegistryAgent } from "../src/lib/registry.js";
 import { guest, owner } from "./asks-test-kit.js";
@@ -18,14 +18,19 @@ import { tempLedgerPath } from "./ledger-test-helpers.js";
 const REGISTRY = [{ name: "agent-x", channelId: "111", status: "active", projectId: "p" } as RegistryAgent];
 let path = "";
 let delivered: Envelope[] = [];
+let editFails = false;
 
 beforeEach(() => {
   path = tempLedgerPath("ask-dismiss-");
   openLedger(path);
   delivered = [];
+  editFails = false;
   const deps: AsksDeps = {
     clients: new Map([["111", { ws: {} as never }]]), controlChannelId: "999", hold: () => {},
     deliver: async (env) => (delivered.push(env), { envelope: env, outcome: { kind: "sent" } }),
+    editDiscord: async () => {
+      if (editFails) throw new Error("Discord unavailable");
+    },
   };
   setAsksForTest({ path, deps, registry: REGISTRY, ownerChats: ["api:owner:self"] });
   resetRuntimeAsksForTest();
@@ -50,6 +55,11 @@ const tick = async (pane: string | null) => {
   await Bun.sleep(15);
 };
 const codexRows = () => listAsks(db(), { source: "codex" });
+const auqRows = () => listAsks(db(), { source: "auq" });
+const auq = (labels: string[]) => ({
+  source: "auq" as const, channelId: "111", agentName: "agent-x", kind: "decide" as const, title: "Choose action", context: "Choose action",
+  options: [{ question: "Choose action", options: labels.map((label) => ({ label })) }],
+});
 
 describe("三类卡删掉的效果", () => {
   test("agent 发起的：撤销、记 owner 删掉，告诉发起方没作答（不是按未批准的那句）", async () => {
@@ -84,6 +94,15 @@ describe("三类卡删掉的效果", () => {
     expect(delivered).toEqual([]);
   });
 
+  test("改 Discord 原消息失败（原消息删了 / 连不上）不挡通知发起方", async () => {
+    const a = reply();
+    patchAsk(db(), a.id, { discordMessageIds: ["d1"] });
+    editFails = true;
+    expect((await dismiss(getAsk(db(), a.id)!)).status).toBe(200);
+    expect(texts()).toHaveLength(1);
+    expect(texts()[0]).toContain("没作答");
+  });
+
   test("只给 owner 本人的全权设备：guest、没有管理权的设备 403；别的项目 404", async () => {
     const a = reply();
     expect((await dismiss(a, guest("aa"))).status).toBe(403);
@@ -96,12 +115,38 @@ describe("三类卡删掉的效果", () => {
 describe("指纹：同一个弹框重启沿用原卡，删过的不再冒出来", () => {
   const pane = codexPane(limitLine("8:41 AM"));
 
-  test("重启（内存表丢了）后同一个弹框：认回原卡，不撤旧建新；宽限清扫也不撤它", async () => {
+  test("重启（内存表丢了）后同一个弹框：认回原卡，不撤旧建新", async () => {
     await tick(pane);
     resetRuntimeAsksForTest();
     await tick(pane);
-    expect(cancelUnadoptedRuntimeAsks()).toBe(0);
     expect(codexRows().map((a) => a.state)).toEqual(["open"]);
+  });
+
+  test("重启后还没看过屏幕（watcher 没起来 / 抓屏失败）：不撤卡、不记消失；看到弹框还在就认回原卡", async () => {
+    await openRuntimeAsk(auq(["Yes", "No"]));
+    const [a] = auqRows();
+    resetRuntimeAsksForTest();
+    await Bun.sleep(15);
+    expect(getAsk(db(), a!.id)).toMatchObject({ state: "open" });
+    expect(getAsk(db(), a!.id)!.extra.clearedAt).toBeUndefined();
+    await openRuntimeAsk(auq(["Yes", "No"]));
+    expect(auqRows().map((x) => [x.id, x.state])).toEqual([[a!.id, "open"]]);
+  });
+
+  test("重启后第一眼就是空屏：删过的也记上消失，同一行再出现开新卡", async () => {
+    await tick(pane);
+    await dismiss(codexRows()[0]!);
+    resetRuntimeAsksForTest();
+    await tick(null);
+    await tick(pane);
+    expect(codexRows().map((a) => a.state).sort()).toEqual(["cancelled", "open"]);
+  });
+
+  test("进程一直在跑、额度提示中间没空屏就换了一行：按新指纹开新卡，不被旧的占位挡住", async () => {
+    await tick(pane);
+    await dismiss(codexRows()[0]!);
+    await tick(codexPane(limitLine("9:15 PM")));
+    expect(codexRows().map((a) => a.state).sort()).toEqual(["cancelled", "open"]);
   });
 
   test("删过、弹框一直在：重启后不再开；弹框消失后再出现才是新的一次", async () => {
@@ -136,6 +181,29 @@ describe("指纹：同一个弹框重启沿用原卡，删过的不再冒出来"
     expect(reuseOf(row("answered"))).toBe("new");
     expect(runtimeFingerprint("codex", "agent-x", "r", "l")).toBe(runtimeFingerprint("codex", "x", "r", " l "));
     expect(runtimeFingerprint("codex", "x", "r", "l")).not.toBe(runtimeFingerprint("codex", "x", "r", "l2"));
+  });
+});
+
+describe("AUQ 按下标作答：选项换了就是另一个弹框", () => {
+  test("同名问题换了选项顺序：重启后不认回旧卡，旧卡撤掉；拿旧卡的 id 提交被拒", async () => {
+    await openRuntimeAsk(auq(["Cancel", "Delete"]));
+    const [old] = auqRows();
+    resetRuntimeAsksForTest();
+    const now = auq(["Delete", "Cancel"]);
+    await openRuntimeAsk(now);
+    const fresh = auqRows().find((a) => a.id !== old!.id)!;
+    expect(getAsk(db(), old!.id)?.state).toBe("cancelled");
+    expect(fresh.state).toBe("open");
+    expect(staleAuqCard(old!.id, "111", now.options)).toBe(true);
+    expect(staleAuqCard(fresh.id, "111", now.options)).toBe(false);
+    expect(staleAuqCard(fresh.id, "222", now.options)).toBe(true);
+    expect(staleAuqCard(undefined, "111", now.options)).toBe(false); // 聊天里的交互卡不带 askId，不查
+  });
+
+  test("进程一直在跑、换了选项：旧卡结掉、开新卡", async () => {
+    await openRuntimeAsk(auq(["Cancel", "Delete"]));
+    await openRuntimeAsk(auq(["Delete", "Cancel"]));
+    expect(auqRows().map((a) => a.state).sort()).toEqual(["cancelled", "open"]);
   });
 });
 
