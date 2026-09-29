@@ -154,3 +154,29 @@ describe("AgentCallBook", () => {
     expect(new AgentCallBook(p).slot("c-codex", "c-me")?.ts).toBe(1);
   });
 });
+
+describe("撞错后的槽（T24）", () => {
+  test("send_to_agent 投递失败只撤那一条：不是答复，扣下的话不推、等续跑标记不清（adv1 P2-5）", () => {
+    const book = new AgentCallBook(null);
+    const pushed: string[][] = [];
+    book.onWithheld = (p) => void pushed.push(p.withheld ?? []);
+    book.add("c-codex", call(1), "m1");
+    book.markApiError("c-codex", none, "（给我的）半句", "c-me", 5);
+    book.add("c-codex", call(9), "m2");
+    book.dropRequest("c-codex", "c-me", "m2");
+    expect(pushed).toEqual([]);
+    expect(book.slot("c-codex", "c-me")).toMatchObject({ apiErrorAt: 5, withheld: ["（给我的）半句"], messageIds: ["m1"] });
+  });
+
+  test("target 被关掉：等续跑的槽经 onExpired 告诉 caller（附扣下的话），别的槽照旧静默删（wf delivery-hold-8）", () => {
+    const book = new AgentCallBook(null);
+    const gone: string[] = [];
+    book.onExpired = (p, why) => void gone.push(`${p.callerChannelId}:${why}:${p.withheld?.join("") ?? ""}`);
+    book.add("c-codex", call(1), "m1");
+    book.add("c-codex", call(1, "c-b", "agent-b"), "m2");
+    book.markApiError("c-codex", none, "半句", "c-me", 5);
+    book.add("c-codex", call(1, "c-late", "agent-late"), "m3");
+    expect(book.dropChannel("c-codex")).toBe(3);
+    expect(gone).toEqual(["c-me:之后它被关掉了:半句", "c-b:之后它被关掉了:"]);
+  });
+});

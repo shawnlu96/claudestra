@@ -37,18 +37,15 @@ const LEGACY_WARN_EVERY_MS = 60 * 60_000;
 const legacyWarnedAt = new Map<string, number>();
 /** 所有入口（直连、peer 入口、经中继）的 peer 请求共用；只收验签通过的请求，按 peer 分桶（lib/peer-trust.ts） */
 const replays = new ReplayCache();
-/**
- * GET/HEAD 的签名计次：正牌 peer 同一秒对同一路径发两次，签名一模一样，所以重复的不拒，只是第二次起不扣成功限速桶，
- * 重放截获的 GET 就耗不掉对方的额度；同一签名超过 GET_REPEAT_MAX 次才按重放拒。满了挤掉最旧的：丢一条只是那条签名
- * 再出现时多扣一次额度，不会放行任何本该拒的请求。
- */
-const getRepeats = new ReplayCache(undefined, undefined, undefined, undefined, true);
+/** GET/HEAD 同签名最多五次；容量满时拒新签名，不能逐出尚有效的计数让重放重新从一次算。 */
+// GET 签名已验过有效期：从 epoch 起计次，启动前的签名也必须进入重复计数，不能每次重放都扣正常额度。
+const getRepeats = new ReplayCache(undefined, 0);
 const GET_REPEAT_MAX = 5;
 
 /** 验签通过的请求判重放：reject 非 false = 拒（值是原因）；charge = 要不要扣成功限速桶 */
-export function peerReplayVerdict(once: PeerOnce, peer: string): { reject: ReplayVerdict; charge: boolean } {
-  if (!once.idempotent) return { reject: replays.seen(once.sig, once.ts, Date.now(), peer), charge: true };
-  const n = getRepeats.hits(once.sig, once.ts, Date.now(), peer);
+export function peerReplayVerdict(once: PeerOnce, peer: string, record = true): { reject: ReplayVerdict; charge: boolean } {
+  if (!once.idempotent) return { reject: replays.seen(once.sig, once.ts, Date.now(), peer, record), charge: true };
+  const n = getRepeats.hits(once.sig, once.ts, Date.now(), peer, record);
   if (typeof n !== "number") return { reject: n, charge: true };
   return { reject: n > GET_REPEAT_MAX && "replay", charge: n === 1 };
 }

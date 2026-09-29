@@ -1,0 +1,24 @@
+
+
+← claudestra · dev: [🌐 来自 Web 端用户「dev」（HTTP API 接入，非 Discord）。 …
+  ⎿  You've hit your session limit · resets 3:20am (Asia/Tokyo)
+     /usage-credits to finish what you’re working on.
+
+⏺ Usage limit reached · continuing automatically at 3:20am · esc or type
+  to cancel
+
+✻ Worked for 0s · done 2:27 AM
+
+❯ /compact 保留：颜色问答与数数请求。
+  ⎿  Compacted (ctrl+o to see full summary)
+
+❯ /low-priority
+  ⎿  Lower-priority mode is off. New messages wait for your usage limit as
+     usual; run /low-priority again to turn it back on.
+▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔
+   What do you want to do?
+
+   ❯ 1. Stop and wait for limit to reset
+     2. Switch to usage credits
+
+   Enter to confirm · Esc to cancel

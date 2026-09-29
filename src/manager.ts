@@ -1138,7 +1138,6 @@ async function cmdAdopt(name: string, sessionId: string) {
   await cmdRestart(tmuxName);
 }
 
-
 /**
  * 仓库根 .env 里的一个变量（manager 可能从任意 cwd 被调起，Bun 只自动加载 cwd 的
  * .env——所以 env 里没有就直接翻 REPO_ROOT/.env）。
@@ -1250,7 +1249,6 @@ async function cmdRestart(name?: string, opts: { includeMaster?: boolean } = {})
   }
 
   const results: { name: string; ok: boolean; error?: string; recreated?: boolean; note?: string }[] = [];
-
 
   for (const tmuxName of targets) {
     const info = reg.agents[tmuxName];
@@ -2544,6 +2542,7 @@ switch (cmd) {
   case "team-link": case "team": { const m = await import("./manager/team.js"); await (cmd === "team" ? m.cmdTeam(args) : m.cmdTeamLink(args)); break; } // 派发树 / 角色；班子 up·down·status
   case "mission": case "autopilot": await (await import("./manager/mission.js")).cmdMission(args); break; // Autopilot（原名值守，lib/missions.ts）
   case "ledger": await (await import("./manager/ledger.js")).cmdLedger(args); break; // 内置台账（manager/ledger.ts，lib/ledger-*.ts）
+  case "fleet": await (await import("./manager/fleet.js")).cmdFleet(args); break; // 批量管理：LP 开关 / 压缩 / 群发（经 bridge 的 ws fleet_run，bridge/fleet/）
   case "archive-workflows": await (await import("./manager/archive-workflows.js")).cmdArchiveWorkflows(); break; // workflow 记录回填进归档
 
   // v2.4.19+ 给现存 active agent 补发置顶 focus 公告（新建/恢复的自动发，这个
@@ -2701,12 +2700,10 @@ switch (cmd) {
   }
 
   case "cost": await cmdCost(args); break;
+  case "quota-wall": await (await import("./manager/quota-wall.js")).cmdQuotaWall(args); break; // 额度闸 status|clear（T24）
   case "codex-sub-archive": await (await import("./manager/codex-sub-archive.js")).cmdCodexSubArchive(args); break; // Codex 子线程自动归档开关（缺省关）
 
-  case "invite-link": {
-    await cmdInviteLink(args);
-    break;
-  }
+  case "invite-link": await cmdInviteLink(args); break;
 
   // v2.11: Discord peer 已移除，老命令留引导提示（用户手滑打老命令时不至于一脸懵）
   case "peer-expose":
@@ -2948,6 +2945,7 @@ switch (cmd) {
         "auto-update channel beta|release — beta follows every commit on origin/main (default: release)",
         "codex-sub-archive status|on|off — auto-archive Codex sub-threads idle 7 days (default off; the archive retention later deletes them)",
         "cost [--agent <name>] [--today|--week]  — aggregate token usage per agent or overall",
+        "quota-wall status|clear  — usage-limit wall: show state / confirm usage is back (bridge then closes menus, delivers the queue, resumes)",
         "invite-link                     — generate the Discord bot invite URL (owner perms, for your own server)",
         "pair [--json]                   — print a QR code / link / 8-char code so a phone or browser can pair with this machine through the relay (RELAY_URL in .env)",
         "relay-status                    — show the relay connection (address, fingerprint, contacts online)",
@@ -2955,6 +2953,7 @@ switch (cmd) {
         "tmux-screenshot <agent>         — screenshot an agent's tmux window (returns a PNG path)",
         "tmux-send-keys <agent> <keys...>  — send keys/text to an agent (Enter/Escape/Left/C-c …)",
         "tmux-capture <agent> [lines]    — read the last N lines of an agent's pane",
+        "fleet state | fleet <lp-on|lp-off|compact|save-compact|lp-compact> --agents a,b|--project p|--all [--walled] [--ctx-over N] [--dry-run]  — batch ops via the bridge",
         "tmux-wait-idle <agent> [ms]     — block until the agent is idle again (default 30s)",
       ],
     });

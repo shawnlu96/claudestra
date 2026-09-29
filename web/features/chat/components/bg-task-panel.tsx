@@ -5,7 +5,7 @@ import type { BgTaskView } from "../type";
 import { useT, getLang } from "@/lib/i18n";
 
 /**
- * 后台任务（subagent / bg shell）跟踪面板 —— Discord 子区在 web 的对应物。
+ * 后台任务（subagent / bg shell）列表 —— Discord 子区在 web 的对应物，挂在顶栏按钮的弹层里（bg-task-button.tsx）。
  * 任务收在一个框里、每个一行：running 时转圈、done 时 ✓+时长；点开看流式进度行。
  * subagent 行带 markdown 前缀（-# 🔧 / 💬），shell 行是原始输出。
  */
@@ -205,22 +205,17 @@ function TaskRows({ tasks }: { tasks: BgTaskView[] }) {
   );
 }
 
-export function BgTaskPanel() {
+export function BgTaskList() {
   const tr = useT(); // 同上,map 回调里 t 是任务变量
   const tasks = useChatStore((s) => s.state.bgTasks);
-  // 已完成的默认折叠成一行 —— 跑得多了（一次起 5 个 subagent 很常见）它们会把
-  // 输入框上方占满，而完成信息的价值随时间快速衰减，内容在聊天流里也留着。
-  // 展开后仍是原来的完整卡片，不丢任何东西。
+  // 已完成的默认折叠成一行 —— 一次起 5 个 subagent 很常见，完成信息的价值随时间
+  // 快速衰减，内容在聊天流里也留着。展开后仍是原来的完整卡片，不丢任何东西。
   const [showDone, setShowDone] = useState(false);
   if (!tasks.length) return null;
   const running = tasks.filter((t) => t.status === "running");
   const done = tasks.filter((t) => t.status !== "running");
   return (
-    <div className="mb-[22px] flex flex-col gap-1.5">
-      <div className="flex items-center gap-1.5 text-[11px] font-medium uppercase tracking-wide text-base-content/35">
-        <span>{tr("后台任务")}</span>
-        <span className="opacity-60">{tasks.length}</span>
-      </div>
+    <div className="flex flex-col gap-1.5">
       {running.length > 0 && <TaskRows tasks={running} />}
       {done.length > 0 &&
         (showDone ? (

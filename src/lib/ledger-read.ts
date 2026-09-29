@@ -11,7 +11,8 @@ import { blockedBy, depViews, reviewBranches, type DepView, type ReviewBranches 
 import { currentStageMark, stageTimeline, taskMetrics, type StageEntry, type TaskMetrics } from "./ledger-metrics.js";
 import { isAskEvent, TERMINAL_STAGES, type LedgerEvent, type LedgerItem, type LedgerTask, type Stage } from "./ledger-stages.js";
 import { auditChangedProjects, openFindings, type StoredFinding } from "./ledger-audit-store.js";
-import { stepsOf, type TaskStep } from "./ledger-steps.js";
+import { listSteps, stepsByTask, type TaskStep } from "./ledger-steps.js";
+import { stepLineInfo, type StepLineInfo } from "./ledger-step-line.js";
 import { getMeta, LEDGER_PATH, LEDGER_SCHEMA_VERSION, listDeps, listEvents, listItems, listTasks, getTask, toEvent, type LedgerMeta } from "./ledger-store.js";
 
 /** 读连接等锁的上限：WAL 下读不等写，只有写者刚建库、还没切 WAL 的那一瞬会撞上；宁可这一轮报 busy 也不卡住 bridge */
@@ -110,6 +111,8 @@ interface TaskView extends LedgerTask {
   blockedBy: string[];
   /** 不是终态且依赖上不挡（runnableTasks 的口径） */
   runnable: boolean;
+  /** 步骤线（T51，ledger-step-line.ts）：只有总览里带，详情在 TaskDetail.stepLine */
+  stepLine?: StepLineInfo;
 }
 export interface ProjectView {
   meta: LedgerMeta;
@@ -171,10 +174,11 @@ export function projectView(db: Database, project: string, now: number): Project
     .all(project, PROJECT_EVENTS_LIMIT) as Record<string, unknown>[];
   const tasks = listTasks(db, project);
   const deps = depViews(listDeps(db, project), tasks);
+  const rows = stepsByTask(db);
   return {
     meta: getMeta(db, project),
     items: listItems(db, project),
-    tasks: tasks.map((t) => taskView(t, byTarget.get(t.id) ?? [], now, deps)),
+    tasks: tasks.map((t) => ({ ...taskView(t, byTarget.get(t.id) ?? [], now, deps), stepLine: stepLineInfo(t, rows.get(t.id) ?? [], byTarget.get(t.id) ?? []) })),
     deps,
     projectEvents: recent.reverse().map(toEvent),
     audit: openFindings(db, project),
@@ -198,6 +202,8 @@ export interface TaskDetail {
   reviewBranches: ReviewBranches;
   /** 步骤化台账（ledger-steps.ts）：库里的行 + 老字段推出来的 */
   steps: TaskStep[];
+  /** 步骤线（T51）：steps 加当前这一步、是否在等对方 owner */
+  stepLine: StepLineInfo;
 }
 
 /** GET /ledger/:project/tasks/:id：任务不在这个项目下 → null（任务 id 全局唯一，但不许借别的项目名读到） */
@@ -213,7 +219,7 @@ export function taskDetail(db: Database, project: string, id: string, now: numbe
     timeline: stageTimeline(events, now),
     deps: { in: deps.filter((d) => d.to === id), out: deps.filter((d) => d.from === id) },
     reviewBranches: reviewBranches(task, view.lastReview, enteredFrom(task, events)),
-    steps: stepsOf(db, task),
+    ...((line) => ({ steps: line.steps, stepLine: line }))(stepLineInfo(task, listSteps(db, task.id), events)),
   };
 }
 

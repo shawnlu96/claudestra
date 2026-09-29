@@ -7,6 +7,7 @@ import { SearchIcon, SearchOverlay, SessionSearchButton } from "./session-search
 import { TerminalButton, TerminalIcon, useTerminalEntry } from "../../terminal/terminal-button";
 import { AgentActions, MoreMenu, closeDropdown, hasActionMenu } from "./agent-actions";
 import { OpenButton } from "./open-button";
+import { BgTaskButton } from "./bg-task-button";
 import { InfoButton } from "./info-button";
 import { ImagesIcon } from "../../media/media-icons";
 import { MediaPanel } from "../../media/media-panel";
@@ -81,6 +82,8 @@ export function TopBarActions({ agent, busy, onManage }: { agent: AgentSession; 
   // 重启/停止进行中的 busy 与错误提示就丢了
   return (
     <span className="ml-auto flex shrink-0 items-center gap-0.5">
+      {/* 后台任务：状态指示，窄顶栏也不收进 ⋮（收进去就看不到在跑的数字）；没任务时自己不渲染 */}
+      <BgTaskButton />
       {/* 打开目录下拉：本机打开网页时才渲染（组件内判），窄顶栏也不收进 ⋮——只有一个图标 */}
       <OpenButton agent={agent} />
       <InfoButton agent={agent} />

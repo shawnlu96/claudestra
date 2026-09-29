@@ -83,6 +83,14 @@ export function enqueueWake(m: AutopilotFields, t: { source: WakeSource; dueAt: 
   return w;
 }
 
+/** 额度闸出闸：等额度的唤醒马上放行（原来按重置时刻排的；用卡提前恢复时不该再干等到那时）。放行了返回 true */
+export function releaseRateLimitHold(m: AutopilotFields, now: number): boolean {
+  if (m.wake?.hold !== "rate_limit") return false;
+  const { hold: _drop, ...rest } = m.wake;
+  m.wake = { ...rest, dueAt: iso(now) };
+  return true;
+}
+
 /** 领取：没有进行中的 run、有唤醒、到时间了，才把 wake 换成 run；否则 null */
 export function claimWake(m: AutopilotFields, now: number, runId: string): ActiveRun | null {
   const w = m.wake;

@@ -1,0 +1,24 @@
+▝▜██████▀  Opus 5.5 with xhigh effort · Claude Max
+ ▝▝   ▝▝   /private/tmp/cs-t35/work
+
+▎ Channels (experimental) messages from server:claudestra inject directly in 
+▎ this session · restart without --dangerously-load-development-channels to stop
+
+← claudestra · dev: [🌐 来自 Web 端用户「dev」（HTTP API 接入，非 Discord）。 …
+  ⎿  You've hit your session limit · resets 3:20am (Asia/Tokyo)
+     Continuing automatically at 3:20am · esc to cancel
+     /usage-credits to continue now
+
+⏺ Usage limit reached · continuing automatically at 3:20am · esc or type
+  to cancel
+
+✻ Worked for 0s · done 1:58 AM
+▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔
+   What do you want to do?
+
+     1. Stop and wait for limit to reset
+     2. Don’t continue automatically
+   ❯ 3. Continue now at lower priority
+     4. Switch to usage credits
+
+   Enter to confirm · Esc to cancel

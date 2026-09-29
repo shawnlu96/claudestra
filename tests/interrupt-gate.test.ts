@@ -5,10 +5,15 @@
 import { describe, expect, test } from "bun:test";
 import { createInterruptGate, type InterruptGateDeps } from "../src/lib/interrupt-gate.js";
 import type { TurnState } from "../src/lib/turn-state.js";
+import { paneShowsWallWait } from "../src/lib/quota-wall-text.js";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+
+const fixture = (f: string) => readFileSync(join(import.meta.dir, "fixtures/quota-wall", `${f}.txt`), "utf8");
 
 type Main = TurnState["main"];
 
-function harness(opts: { main?: Main; runtime?: string; probeDelayMs?: number; afterKey?: Main; allow?: boolean; noKeys?: boolean } = {}) {
+function harness(opts: { main?: Main; runtime?: string; probeDelayMs?: number; afterKey?: Main; allow?: boolean; noKeys?: boolean; screens?: string[]; probeSeq?: Main[] } = {}) {
   let clock = 1_790_000_000_000;
   const keys: string[] = [];
   const keyAt: number[] = [];
@@ -20,6 +25,7 @@ function harness(opts: { main?: Main; runtime?: string; probeDelayMs?: number; a
     probe: async () => {
       probes++;
       if (opts.probeDelayMs) await new Promise((r) => setTimeout(r, opts.probeDelayMs));
+      if (opts.probeSeq?.length) main = opts.probeSeq.length > 1 ? opts.probeSeq.shift()! : opts.probeSeq[0]!;
       return { main, bg: false };
     },
     interrupt: async (_w, rt) => {
@@ -32,6 +38,7 @@ function harness(opts: { main?: Main; runtime?: string; probeDelayMs?: number; a
     },
     ...(opts.allow === undefined ? {} : { allow: () => opts.allow! }),
     onPreempted: (agent) => void preempted.push(agent),
+    ...(opts.screens ? { wallWait: async () => paneShowsWallWait(opts.screens!.length > 1 ? opts.screens!.shift()! : opts.screens![0]!) } : {}),
     sleep: async (ms) => void (clock += ms),
     now: () => clock,
   };
@@ -196,6 +203,14 @@ describe("manual：停止按钮 / /interrupt / API", () => {
     }
   });
 
+  test("停在额度菜单（含 34 列折行）/ 撞墙倒计时上：谁按停止都一个键不发，回 wall（adv3 P2-4：Esc 会取消 owner 排好的自动续跑）", async () => {
+    for (const f of ["walled", "menu-no-lp", "menu-narrow34", "menu-narrow34-credits-first"]) {
+      const h = harness({ screens: [fixture(f)] });
+      expect([f, await h.gate.manual("ch", "w", undefined)]).toEqual([f, { keys: [], wall: true }]);
+      expect(h.keys).toEqual([]);
+    }
+  });
+
   test("双击：1.5s 内第二下去重，不发键（两次键挨太近：CC 双 Esc 开 Rewind、Codex 双 Esc 回溯遮罩）", async () => {
     const h = harness();
     const r = await Promise.all([h.gate.manual("ch", "w", undefined), h.gate.manual("ch", "w", undefined)]);
@@ -241,3 +256,37 @@ function stubDeps(): InterruptGateDeps {
     onPreempted: () => undefined, sleep: async () => undefined,
   };
 }
+
+describe("preempt：停在额度菜单 / 撞墙倒计时一个键都不发（T24 PM 口径：Discord 入站和 deliverToLocal 共用这一道）", () => {
+  test("真实菜单、倒计时、带假输入框、窄窗口折行的画面：判忙也不发键", async () => {
+    for (const f of ["menu-5-items", "menu-on-credits", "menu-no-lp", "walled", "walled-channel", "menu-fakebox", "walled-fakebox", "menu-narrow60"]) {
+      const h = harness({ main: "busy", screens: [fixture(f)] });
+      expect([f, await h.gate.preempt("ch", "agent-a")]).toEqual([f, { fired: false, why: "wall_wait" }]);
+      expect([f, h.keys]).toEqual([f, []]);
+    }
+  });
+
+  test("判忙那一刻还没有菜单、300ms 后复核时弹出来了：不发键", async () => {
+    const h = harness({ main: "busy", screens: [fixture("busy-queued"), fixture("menu-5-items")] });
+    expect(await h.gate.preempt("ch", "agent-a")).toEqual({ fired: false, why: "wall_wait" });
+    expect(h.keys).toEqual([]);
+  });
+
+  test("判忙之后 300ms 复核时回合已经结束（撞墙那一下 spinner 没了、菜单还没画出来）：不发键（wf2 keys-screens-2 → keys-screens-3）", async () => {
+    const h = harness({ screens: [fixture("busy-queued")], probeSeq: ["busy", "idle"] });
+    expect(await h.gate.preempt("ch", "agent-a")).toEqual({ fired: false, why: "not_busy" });
+    expect(h.keys).toEqual([]);
+  });
+
+  test("停字在额度菜单上也不发键，如实回 wall_wait", async () => {
+    const h = harness({ main: "busy", screens: [fixture("menu-5-items")] });
+    expect(await h.gate.preempt("ch", "agent-a", { stop: true })).toEqual({ fired: false, why: "wall_wait" });
+    expect(h.keys).toEqual([]);
+  });
+
+  test("真在跑的画面照常抢占（复核时仍在跑）", async () => {
+    const h = harness({ main: "busy", screens: [fixture("busy-queued")], probeSeq: ["busy", "busy", "idle"] });
+    expect(await h.gate.preempt("ch", "agent-a")).toEqual({ fired: true });
+    expect(h.keys).toEqual(["C-c"]);
+  });
+});

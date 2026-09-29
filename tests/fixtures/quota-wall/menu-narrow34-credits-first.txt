@@ -1,0 +1,17 @@
+⏺ Usage limit reached · continuing
+  automatically at 3:20am · esc or
+  type to cancel
+
+✻ Worked for 0s · done 1:58 AM
+▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔
+   What do you want to do?
+
+   ❯ 1. Switch to usage credits
+     2. Stop and wait for limit to
+        reset
+     3. Wait here, then continue
+        automatically at Sep 30 at
+        6am
+
+   Enter to confirm · Esc to
+   cancel

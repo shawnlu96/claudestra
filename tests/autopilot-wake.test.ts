@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { AUTOPILOT_TIMING as T, emptyEvidence } from "../src/lib/autopilot-run.js";
 import {
-  claimWake, decideFire, enqueueWake, finishRun, markDelivered, noteLongYield, unclaimRun, type AutopilotFields,
+  claimWake, decideFire, enqueueWake, finishRun, markDelivered, noteLongYield, releaseRateLimitHold, unclaimRun, type AutopilotFields,
 } from "../src/lib/autopilot-wake.js";
 
 const NOW = Date.parse("2026-09-28T11:00:00Z");
@@ -175,5 +175,20 @@ describe("decideFire：到点该做什么（都从落盘字段算，重启后照
     markDelivered(m, "r1", NOW);
     expect(decideFire(m, NOW + 60_000, { turn: "unknown", tracked: false })).toEqual({ kind: "wait", ms: T.runStaleMs - 60_000 });
     expect(decideFire(m, NOW + T.runStaleMs, { turn: "unknown", tracked: false })).toEqual({ kind: "close", lost: true });
+  });
+});
+
+describe("releaseRateLimitHold：额度闸出闸", () => {
+  test("等额度的唤醒马上放行；别的 hold 不动", () => {
+    const m: AutopilotFields = {};
+    enqueueWake(m, { source: "turn_end", dueAt: NOW + 30 * 3_600_000, hold: "rate_limit" }, NOW);
+    expect(releaseRateLimitHold(m, NOW + 60_000)).toBe(true);
+    expect(m.wake!.hold).toBeUndefined();
+    expect(m.wake!.dueAt).toBe(new Date(NOW + 60_000).toISOString());
+    expect(claimWake(m, NOW + 60_000, "run_x")).not.toBeNull();
+    const other: AutopilotFields = {};
+    enqueueWake(other, { source: "turn_end", dueAt: NOW + 900_000, hold: "failed" }, NOW);
+    expect(releaseRateLimitHold(other, NOW)).toBe(false);
+    expect(other.wake!.hold).toBe("failed");
   });
 });
