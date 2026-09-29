@@ -50,6 +50,12 @@ const TAP_INTENT_TTL_MS = 1_200;
  *  否则加一个动作就会把最左边那个按钮挤出可视区（2026-09-14 owner 实报「置顶按钮
  *  怎么搞没了」：容器加宽到 240 而滑动上限还是 160）。 */
 const ACTIONS_W = 240;
+/** 侧栏 ⬆ 的悬停说明（i18n key） */
+const HINT_TITLE: Record<NonNullable<AgentSession["updateHint"]>["kind"], string> = {
+  restart: "重启后生效新版本",
+  "pi-update": "Pi 可更新",
+  "codex-update": "Codex 可更新",
+};
 
 export function AgentRow({
   a,
@@ -321,7 +327,7 @@ export function AgentRow({
             <span className="badge badge-outline badge-warning badge-xs shrink-0 align-middle">{t("草稿")}</span>
           )}
           {a.updateHint && !hintDismissed && (
-            <span className="shrink-0 pl-1 text-[11px] text-info-soft-80" title={t(a.updateHint.kind === "pi-update" ? "Pi 可更新" : a.updateHint.kind === "codex-update" ? "Codex 可更新" : "重启后生效新版本")}>⬆</span>
+            <span className="shrink-0 pl-1 text-[11px] text-info-soft-80" title={t(HINT_TITLE[a.updateHint.kind])}>⬆</span>
           )}
           {/* busy 时不显示过期时间(owner 2026-07-16:「明明在工作却显示 48 分钟前」
               ——lastActivityTs 读 jsonl 最后一条对话,CC 回合内攒内存不落盘,长回合
