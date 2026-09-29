@@ -4,7 +4,9 @@
  */
 import { describe, expect, test } from "bun:test";
 import { AgentCallBook, type PendingAgentCall } from "../src/bridge/agent-calls.js";
-import { noteDelivered, noteTurnCut, settleStopTurn, takeApiWaiters, type ApiWaiter, type CallerSettleDeps, type StopTurn } from "../src/bridge/stop-settle.js";
+import {
+  noteDelivered, noteTurnCut, settleStopTurn, takeApiWaiters, unattributedNotice, type ApiWaiter, type CallerSettleDeps, type StopTurn,
+} from "../src/bridge/stop-settle.js";
 
 const wallErr = { error: "rate_limit", text: "You've hit your weekly limit · resets Sep 30 at 6am (Asia/Tokyo)" };
 const overloaded = { error: "overloaded", text: "API Error: 529 Overloaded" };
@@ -16,6 +18,7 @@ function harness() {
   const book = new AgentCallBook(null);
   const pushed: { to: string; body: string }[] = [];
   const unattributed: string[] = [];
+  const counts: { callers: number; waiting: number; wall: boolean }[] = [];
   const rearmed: string[] = [];
   const deps: CallerSettleDeps = {
     answerable: (c) => book.answerable(c, () => false),
@@ -23,7 +26,7 @@ function harness() {
     rearmResume: (c) => void rearmed.push(c),
     consume: (c, pac) => void book.consume(c, pac.callerChannelId, pac),
     pushBack: async (pac, _c, body) => void pushed.push({ to: pac.callerChannelId, body }),
-    unattributed: (_c, text) => void unattributed.push(text),
+    unattributed: (_c, text, n) => void (unattributed.push(text), counts.push(n)),
     nudgeAmbiguous: () => undefined,
     takeApiErrorNotice: (c) => book.takeApiErrorNotice(c, () => false),
     markApiError: (c, text, caller) => book.markApiError(c, () => false, text, caller),
@@ -34,7 +37,7 @@ function harness() {
   const turn = (event: string, drain: StopTurn["drain"]): StopTurn => ({ cid, stopChannelId: cid, stopWs: 1, candidateWs: 1, event, drain });
   const stop = (event: string, drain: StopTurn["drain"]) => settleStopTurn(deps, turn(event, drain));
   const deliver = (from: Parameters<typeof noteDelivered>[1], at: number, idle = true) => noteDelivered(cid, from, at, idle);
-  return { cid, book, pushed, unattributed, rearmed, stop, turn, deliver };
+  return { cid, book, pushed, unattributed, counts, rearmed, stop, turn, deliver };
 }
 
 describe("delivery-hold-2：扣下的话只归开这一轮的 caller，不按「谁已经扣着」去猜", () => {
@@ -61,6 +64,19 @@ describe("delivery-hold-2：扣下的话只归开这一轮的 caller，不按「
     await h.stop("StopFailure", { text: "给 owner 的半句", apiError: true, error: overloaded });
     expect(h.book.slot(h.cid, "c-b")?.withheld).toBeUndefined();
     expect(h.unattributed).toEqual(["给 owner 的半句"]);
+    expect(h.counts).toEqual([{ callers: 0, waiting: 1, wall: false }]);
+  });
+
+  test("wf3 delivery-hold-5：说明按实际人数写；撞墙的标 wall（bridge 闸内静默）", async () => {
+    expect(unattributedNotice("agent-t", { callers: 0, waiting: 1 })).toContain("不是 agent 开的");
+    expect(unattributedNotice("agent-t", { callers: 0, waiting: 1 })).toContain("在等它的 1 个 caller");
+    expect(unattributedNotice("agent-t", { callers: 2, waiting: 3 })).toContain("是 2 个 agent 的请求一起开的");
+    expect(unattributedNotice("agent-t", { callers: 2, waiting: 3 })).not.toContain("好几个");
+    const h = harness();
+    h.book.add(h.cid, call("c-b"), "mb");
+    h.deliver({ kind: "api", owner: true }, 1_000);
+    await h.stop("StopFailure", { text: "给 owner 的半句", apiError: true, error: wallErr });
+    expect(h.counts).toEqual([{ callers: 0, waiting: 1, wall: true }]);
   });
 });
 
@@ -122,5 +138,56 @@ describe("delivery-hold-1：押着的 API / peer 请求不被别的回合结掉"
     h.deliver({ kind: "bridge", label: "api-error-resume" }, 95_000, false); // guest 那一轮中途
     await h.stop("Stop", { text: "给 guest 的回答" });
     expect(h.pushed).toEqual([]);
+  });
+});
+
+describe("wf3 delivery-hold-1：续跑继承撞错的那一轮，不是「上一轮」——中间插进一轮外人的不影响", () => {
+  for (const label of ["quota-wall", "api-error-resume"]) {
+    test(`PM 那一轮撞错 → guest 那一轮 → ${label} 续跑：答复推给 PM`, async () => {
+      const h = harness();
+      h.book.add(h.cid, call("c-pm"), "m1");
+      h.deliver({ kind: "local", channelId: "c-pm" }, 1_000);
+      await h.stop("StopFailure", { text: "撞墙前给 PM 的前半段", apiError: true, error: wallErr });
+      h.deliver({ kind: "api" }, 100_000); // guest 那一轮（出闸补投 / 60 秒内来的）
+      await h.stop("Stop", { text: "给 guest 的答复" });
+      expect(h.pushed).toEqual([]);
+      h.deliver({ kind: "bridge", label }, 200_000);
+      await h.stop("Stop", { text: "给 PM 的结论" });
+      expect(h.pushed.map((p) => p.to)).toEqual(["c-pm", "c-pm"]);
+      expect(h.pushed[0]!.body).toContain("撞墙前给 PM 的前半段");
+      expect(h.pushed[1]!.body).toContain("给 PM 的结论");
+      expect(h.pushed.some((p) => p.body.includes("给 guest 的答复"))).toBe(false);
+    });
+  }
+
+  test("CC 自己续跑 PM 那一轮时被 guest 抢占（Esc）：guest 那一轮按外人，之后出闸续跑仍结给 PM", async () => {
+    const h = harness();
+    h.book.add(h.cid, call("c-pm"), "m1");
+    h.deliver({ kind: "local", channelId: "c-pm" }, 1_000);
+    await h.stop("StopFailure", { text: null, apiError: true, error: wallErr });
+    noteTurnCut(h.cid, 5_000_000); // CC 到点自己续跑，guest 补投时抢占
+    h.deliver({ kind: "api" }, 5_000_100);
+    await h.stop("Stop", { text: "给 guest 的答复" });
+    expect(h.rearmed).toEqual([h.cid]);
+    h.deliver({ kind: "bridge", label: "quota-wall" }, 5_100_000);
+    await h.stop("Stop", { text: "给 PM 的结论" });
+    expect(h.pushed.map((p) => [p.to, p.body.includes("给 PM 的结论")])).toEqual([["c-pm", true]]);
+  });
+
+  test("后撞错的那一轮说了算：PM 那一轮接着做完后，peer 那一轮又撞错，续跑按 peer（外人）算，不结给 B", async () => {
+    const h = harness();
+    h.book.add(h.cid, call("c-pm"), "m1");
+    h.deliver({ kind: "local", channelId: "c-pm" }, 1_000);
+    await h.stop("StopFailure", { text: null, apiError: true, error: overloaded });
+    h.deliver({ kind: "bridge", label: "api-error-resume" }, 60_000);
+    await h.stop("Stop", { text: "给 PM 的结论" });
+    expect(h.pushed.map((p) => p.to)).toEqual(["c-pm"]);
+    h.book.add(h.cid, call("c-b"), "m2"); // B 的请求押着（T 在 peer 那一轮里）
+    h.deliver({ kind: "api", peer: "sekai" }, 100_000);
+    await h.stop("StopFailure", { text: null, apiError: true, error: overloaded });
+    h.deliver({ kind: "bridge", label: "api-error-resume" }, 160_000);
+    await h.stop("Stop", { text: "给 peer 的答复" });
+    expect(h.pushed.map((p) => p.to)).toEqual(["c-pm"]);
+    expect(h.rearmed).toEqual([h.cid]);
   });
 });

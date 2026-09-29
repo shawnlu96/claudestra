@@ -42,8 +42,9 @@ export interface QuotaWallDeps {
     wallCount(): { human: number; agent: number };
     /** 这个频道还有没投出去的消息 */
     queuedFor(channelId: string): boolean;
-    /** 有额度闸消息的频道，按最早入队排序 */
+    /** 有额度闸消息的频道，按最早入队排序；wakers = 其中有自己人（agent / bridge / owner）消息的，补投它会接着做被打断的事 */
     wallChannels(): string[];
+    wakers(): string[];
     /** 额度闸消息转回普通押后（入队时间重置为现在，免得出闸后立刻按 30 分钟 / 24 小时老化），返回条数 */
     release(now: number): number;
   };
@@ -205,7 +206,8 @@ async function closeMenus(c: Ctx, id: string): Promise<void> {
 async function deliverQueue(c: Ctx, id: string): Promise<void> {
   const channels = c.d.held.wallChannels();
   // 先记账再转回普通押后：中途重启时条数不丢（已记过就不重记，否则重启后记成 0）；转回之后 Stop / 扫描也能投
-  if (c.state.wall!.recovery!.flushedTo === undefined && !patchRecovery(c, id, { flushed: total(c.d.held.wallCount()), flushedTo: channels })) return;
+  const first = { flushed: total(c.d.held.wallCount()), flushedTo: channels, wakers: c.d.held.wakers() };
+  if (c.state.wall!.recovery!.flushedTo === undefined && !patchRecovery(c, id, first)) return;
   c.d.held.release(c.d.now());
   for (const cid of c.state.wall!.recovery!.flushedTo ?? channels) {
     if (!stillRecovering(c, id)) return;
@@ -216,9 +218,10 @@ async function deliverQueue(c: Ctx, id: string): Promise<void> {
 
 async function resumeAgents(c: Ctx, id: string): Promise<void> {
   const w = c.state.wall!;
-  const got = new Set(w.recovery!.flushedTo ?? []);
-  // 补投真送到了（队空了）的不再续跑：那几条消息自会叫醒它。补投了还押着的（它停在撞墙等待画面、被判成忙）照样续跑，
-  // 续跑是 bridge 消息、不因「回合中」押后，它跑完一轮 Stop 时押着的也就投了
+  const got = new Set(w.recovery!.wakers ?? w.recovery!.flushedTo ?? []);
+  // 补投了自己人的消息、真送到了（队空了）的不再续跑：那几条消息自会叫醒它。补投的全是外人（guest / peer）的照样续跑——
+  // 外人那一轮不结算、答的不是撞墙那一轮的 caller（T24 wf3 delivery-hold-2），续跑消息押在外人那一轮后面。补投了还押着的
+  // （停在撞墙等待画面、被判成忙）也照样续跑，它跑完一轮 Stop 时押着的也就投了
   for (const cid of resumeTargets(w, (x) => got.has(x) && !c.d.held.queuedFor(x))) {
     const h = w.hits[cid];
     const busy = await c.d.mainTurnBusy(cid, h.agent).catch(() => true); // 判不出来按在跑：宁可少续一个，也不在它回合里插话

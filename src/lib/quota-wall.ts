@@ -34,6 +34,8 @@ export interface WallRecovery {
   /** 出闸时转回普通押后的「额度闸」消息条数、涉及的频道（这些频道补投的消息自会叫醒它，不再另发续跑） */
   flushed: number;
   flushedTo?: string[];
+  /** flushedTo 里补投了自己人（agent / bridge / owner）消息的频道；只补投了外人消息的照样续跑（没有 = 老状态，按 flushedTo） */
+  wakers?: string[];
   resumed: string[];
   /** 出闸时已经在跑、不续跑的 agent 名 */
   running: string[];

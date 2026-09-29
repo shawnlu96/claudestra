@@ -897,6 +897,7 @@ export const DICT: Record<string, string> = {
   "撤销": "Revoke",
   "有效期至": "Valid until",
   "未送达": "Not delivered",
+  "押着，送达后出现在对话里": "Held — it shows up in the chat once delivered",
   "重新发送": "Resend",
   "iOS 键盘修正（实验）": "iOS keyboard fix (experimental)",
   "开发者模式": "Developer mode",

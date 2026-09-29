@@ -10,7 +10,7 @@
  */
 import { parseResetAt } from "./autopilot-run.js";
 import { limitMenuAtBottom } from "./limit-menu.js";
-import { inputBox, paneMainTurnBusy } from "./turn-state.js";
+import { inputBox, paneSpinnerBusy } from "./turn-state.js";
 
 /** 「hit」是额度窗口，「reached your Fable limit」「Fable 5 limit」是单个模型的额度（本机实录 99 条） */
 const LIMIT_HIT_RE = /^(?:You['’]?ve (?:hit|reached) your (?:[\w.-]+ ){0,3}limit|Hit your (?:rate |usage )?limit)(?=\s*(?:[·.,;:!\n]|$))/i;
@@ -104,13 +104,13 @@ function footerLines(lines: string[]): string[] {
  * 撞墙后停在那儿等：底部是额度菜单，或状态栏写着「Usage limit reached · continuing automatically at 3:20am · esc to cancel」
  * （/low-priority 入口同理）。主回合其实没在跑，但菜单的「Esc to cancel」会让 CC_BUSY_RE 判成忙（T35 实测）：额度闸判
  * 「它在不在跑」、投递前判「能不能发键」都先用这个，CC_BUSY_RE 本身不动。对话里的同样字样不算（只看状态栏 / 底部菜单）；
- * 判「还在跑」只看顶格的行：真 spinner、真输入框的横线和 ❯ 都在第 0 列，对话 / 工具输出里贴进来的忙画面都有缩进，
- * 不能让它遮住真的菜单（同 T35 lp-state 的做法）。拿掉之后画面上还有 spinner 的，照旧算在跑。
+ * 判「其实还在跑」只认 spinner 位置上顶格的 spinner 行（先滤掉缩进行）：对话里贴进来的忙画面有缩进，顶格的用户输入
+ * 「❯ 为什么显示 esc to interrupt」也不是 spinner，都不能遮住真的菜单 / 倒计时（tests/quota-wall-text.test.ts）。
  */
 export function wallWaitKind(pane: string): "menu" | "countdown" | null {
   const lines = pane.replace(/\s+$/, "").split("\n");
   const kind = limitMenuAtBottom(lines) ? "menu" : footerLines(lines).some((l) => WALL_WAIT_LINE.test(l)) ? "countdown" : null;
-  return kind && !paneMainTurnBusy(lines.filter((l) => !/^\s/.test(l) && !WALL_WAIT_LINE.test(l)).join("\n")) ? kind : null;
+  return kind && !paneSpinnerBusy(lines.filter((l) => !/^\s/.test(l) && !WALL_WAIT_LINE.test(l)).join("\n")) ? kind : null;
 }
 export const paneShowsWallWait = (pane: string): boolean => wallWaitKind(pane) !== null;
 

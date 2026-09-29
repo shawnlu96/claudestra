@@ -110,10 +110,10 @@ export class HeldQueue extends PersistedMap<HeldItem[]> {
     return { human, agent: all.length - human };
   }
 
-  /** 有额度闸消息的频道，按各自最早一条的入队时间排（出闸补投的顺序） */
-  wallChannels(): string[] {
+  /** 有额度闸消息（给了 pick = 其中有 pick 命中的）的频道，按各自最早一条的入队时间排（出闸补投的顺序） */
+  wallChannels(pick: (i: HeldItem) => boolean = () => true): string[] {
     const first = (q: HeldItem[]) => Math.min(...q.filter((i) => i.reason === "quota_wall").map((i) => i.heldAt));
-    return [...this.entries()].filter(([, q]) => q.some((i) => i.reason === "quota_wall")).sort((a, b) => first(a[1]) - first(b[1])).map(([c]) => c);
+    return [...this.entries()].filter(([, q]) => q.some((i) => i.reason === "quota_wall" && pick(i))).sort((a, b) => first(a[1]) - first(b[1])).map(([c]) => c);
   }
 
   /** 出闸：额度闸消息转回普通押后，入队时间重置为 now（否则押了一天的立刻被 24 小时放弃），返回条数 */

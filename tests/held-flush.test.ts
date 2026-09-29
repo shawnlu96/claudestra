@@ -203,3 +203,23 @@ describe("叫停和押后（Workflow 复核 wf2）", () => {
     dropHeldOnKill(h.held, "c-me", async () => { throw new Error("不该再调"); });
   });
 });
+
+describe("撞墙等待时押着的人发消息：窗口一动就补投（T24 wf3 delivery-hold-4）", () => {
+  const mk = (from: Envelope["from"], cid: string, id: string): Envelope => ({
+    from, to: { kind: "local", channelId: cid, agentName: "agent-t" }, intent: "request", content: "停",
+    meta: { messageId: id, triggerKind: "api_user", ts: "", threadId: "" },
+  }) as unknown as Envelope;
+  test("队里有人发的：马上 flush，同一频道 5 秒内只一次；只有 agent 消息的不触发", async () => {
+    const { flushHumanSoon } = await import("../src/bridge/quota-wall-wiring.js");
+    const held = new HeldQueue(null);
+    const flushed: string[] = [];
+    const b = { held, flush: async (cid: string) => void flushed.push(cid) } as unknown as Parameters<typeof flushHumanSoon>[0];
+    held.holdEnv(mk({ kind: "api", tokenId: "tok-o", name: "owner", owner: true }, "wf3-h", "m1"));
+    held.holdEnv(mk({ kind: "local", channelId: "c-pm", agentName: "agent-pm", ws: {} as never }, "wf3-a", "m2"));
+    flushHumanSoon(b, "wf3-h", 10_000);
+    flushHumanSoon(b, "wf3-h", 12_000);
+    flushHumanSoon(b, "wf3-a", 12_000);
+    flushHumanSoon(b, "wf3-h", 16_000);
+    expect(flushed).toEqual(["wf3-h", "wf3-h"]);
+  });
+});

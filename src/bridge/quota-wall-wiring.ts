@@ -21,7 +21,8 @@ import { subscribeEvents } from "./event-bus.js";
 import type { HeldQueue } from "./held-queue.js";
 import { createQuotaWall, type QuotaWall, type WallWindow } from "./quota-wall.js";
 import { newMessageId, newThreadId, type Delivery, type Envelope, type LocalEndpoint } from "./router.js";
-import { noteTurnCut } from "./stop-settle.js";
+import { noteHeldStop } from "./preempt.js";
+import { noteTurnCut, senderTrigger } from "./stop-settle.js";
 import { probeTurn, resolveTurnWindow } from "./turn-probe.js";
 
 const TICK_MS = 15_000;
@@ -95,6 +96,7 @@ function productionWall(b: WallBridgeDeps): QuotaWall {
       wallCount: () => b.held.wallCount((e) => isHumanSender(e.from)),
       queuedFor: (cid) => !!b.held.get(cid)?.length,
       wallChannels: () => b.held.wallChannels(),
+      wakers: () => b.held.wallChannels((i) => senderTrigger(i.env.from) !== "stranger"),
       release: (now) => b.held.releaseWall(now),
     },
     flush: (cid) => b.flush(cid, "quota_wall"),
@@ -134,21 +136,23 @@ const firstNoticeFor = noticeOncePerState();
  * 目标窗口停在额度菜单 / 撞墙等待画面（paneShowsWallWait）：这条消息一个键都不发——不抢占、不 C-c（菜单里有「Switch to usage
  * credits」，按错一下就花钱，PM 09-29）——押住：闸开着按额度闸押（出闸关菜单后补投），没闸按普通押后（菜单关了就投）。
  * 人发的在 Discord 频道里说一声（同一条消息、同一个画面状态只说一次：每分钟的补投会反复走到这里），agent / API 调用方从 heldBy
- * 知道。不是这种画面返回 null，照常投。
- * 停止按钮、「停」字两条发键路径不走这里（T41 / T13e 收口）。deliverToLocal 在抢占之前调。
+ * 知道。不是这种画面返回 null，照常投。owner 的停字押住时当场记下「停」（bridge/preempt.ts noteHeldStop）。
+ * deliverToLocal 在抢占之前调；抢占复核时画面刚变成撞墙等待（preemptForHuman 回 wall_wait）再调一次，force = 不再抓屏认画面。
+ * 停止按钮这条发键路径不走这里（T41 收口）。
  */
-export async function holdAtWallWait(env: Envelope, to: LocalEndpoint, agent: string, stillWanted?: () => boolean): Promise<Delivery | null> {
+export async function holdAtWallWait(env: Envelope, to: LocalEndpoint, agent: string, stillWanted?: () => boolean, force = false): Promise<Delivery | null> {
   const b = bridge;
   if (!b) return null;
   const { win, runtime } = await resolveTurnWindow(to.channelId, b.controlChannelId);
   if (!win || (runtime ?? DEFAULT_RUNTIME) !== DEFAULT_RUNTIME) return null;
-  const kind = await windowWallWait(win); // 抓不到画面：认不出，照常投（不因此卡住消息）
+  const kind = (await windowWallWait(win)) ?? (force ? "wait" : null); // 抓不到画面：认不出，照常投（不因此卡住消息）
   if (!kind) return null;
   if (stillWanted && !stillWanted()) return { envelope: env, outcome: { kind: "dropped", reason: "已从押后队列撤下" } }; // 别把撤下的押回来（会复活）
   const walled = !!wall?.active();
   console.log(`⏸ 消息押后(${agent} 停在额度菜单 / 撞墙等待，没发任何键): 队列 ${b.held.holdEnv(env, walled ? "quota_wall" : undefined)} 条`);
+  noteHeldStop(env, to.channelId, agent, runtime);
   if (isHumanSender(env.from) && /^\d+$/.test(to.channelId) && firstNoticeFor(to.channelId, `${kind}:${walled}`, env.meta.messageId)) {
-    const what = kind === "menu" ? "停在额度菜单" : "停在自动续跑倒计时";
+    const what = kind === "menu" ? "停在额度菜单" : kind === "countdown" ? "停在自动续跑倒计时" : "停在撞墙等待画面";
     const when = walled ? "出闸后" : kind === "menu" ? "菜单关掉后" : "它接着跑之后";
     await b.escalate(to.channelId, `⏸ ${agent} ${what}（撞墙等待），bridge 没有发任何键；你的消息先押着，${when}送达。要马上处理请在它的窗口里自己操作。`)
       .catch((e) => console.error("额度菜单押后提示发送失败（消息照样押着）:", (e as Error).message));
@@ -203,8 +207,10 @@ export function startQuotaWall(b: WallBridgeDeps): QuotaWall {
     }
     const gone = countsAsActivity(evt.type, evt.data) ? noteActivity(states, evt.chatId, ts) : undefined;
     if (gone) cancelledResume.set(evt.chatId, { agent: agentOf.get(evt.chatId) ?? evt.agent, error: gone.error });
-    const hit = countsAsWallActivity(evt.type, evt.data as Record<string, unknown>) ? w.noteActivity(evt.chatId, ts) : null;
+    const moved = countsAsWallActivity(evt.type, evt.data as Record<string, unknown>);
+    const hit = moved ? w.noteActivity(evt.chatId, ts) : null;
     if (hit) cancelledResume.set(evt.chatId, hit);
+    if (moved) flushHumanSoon(b, evt.chatId, ts);
   });
   rearm = (cid) => {
     const c = cancelledResume.get(cid);
@@ -223,6 +229,18 @@ export function startQuotaWall(b: WallBridgeDeps): QuotaWall {
     void w.tick();
   }, TICK_MS);
   return w;
+}
+
+const HUMAN_FLUSH_GAP_MS = 5_000;
+const humanFlushAt = new Map<string, number>();
+/**
+ * 窗口又动了（CC 到点自己续跑、owner 自己关了菜单）而队里押着人发的消息（停在撞墙等待画面时押的）：马上投，不等 Stop /
+ * 每分钟扫描——owner 的「停」要在续跑开始几秒内送到并打断（T24 wf3 delivery-hold-4）。同一频道 5 秒内只触发一次。
+ */
+export function flushHumanSoon(b: WallBridgeDeps, cid: string, now: number): void {
+  if (!b.held.get(cid)?.some((i) => isHumanSender(i.env.from)) || now - (humanFlushAt.get(cid) ?? 0) < HUMAN_FLUSH_GAP_MS) return;
+  humanFlushAt.set(cid, now);
+  b.flush(cid, "wall_activity").catch((e) => console.error(`押着的人发消息补投出错（留在队里，Stop / 扫描再投）: ${(e as Error).message}`));
 }
 
 async function resumeDue(b: WallBridgeDeps, w: QuotaWall, states: Map<string, ApiErrorState>, agentOf: Map<string, string>): Promise<void> {

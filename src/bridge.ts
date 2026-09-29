@@ -482,7 +482,7 @@ const stopSettleDeps: import("./bridge/stop-settle.js").CallerSettleDeps = {
   notify: (pac, cid, body) => pushBackToCaller(pac, clients.get(cid)?.ws, pac.originalReplyChannel || cid, body, "agent_apierr", "notification"),
   takeApiErrorNotice: (cid) => pendingAgentCalls.takeApiErrorNotice(cid, stillHeldFor(cid)), waiting: (cid) => pendingAgentCalls.waiting(cid, stillHeldFor(cid)), rearmResume,
   markApiError: (cid, text, caller) => pendingAgentCalls.markApiError(cid, stillHeldFor(cid), text, caller), clearWithheld: (cid, pac) => pendingAgentCalls.clearWithheld(cid, pac.callerChannelId),
-  unattributed: (cid) => void notifyMaster(`ℹ️ ${agentLabelForChannel(cid)} 那一轮以 API 错误结束，好几个 caller 在等、出错前说的话对不上是答谁的：没有转给任何人（在它自己的频道里看得到）`),
+  unattributed: (cid, _t, n) => void (n.wall || quotaWall()?.active() || notifyMaster(unattributedNotice(agentLabelForChannel(cid), n))), // 闸内静默：出闸通知一次说清
   metric: (name, channelId, meta) => recordMetric(name, { channelId, meta }),
 };
 
@@ -557,7 +557,7 @@ import { dropHeldOnKill, flushHeld } from "./bridge/held-flush.js";
 import { probeTurn } from "./bridge/turn-probe.js";
 import { agentMsgMustWait } from "./lib/turn-state.js";
 import { AgentCallBook, ambiguityNotice, expiredNotice, withExpecting, withheldNotice, type PendingAgentCall } from "./bridge/agent-calls.js";
-import { noteDelivered, settleStopTurn, takeApiWaiters } from "./bridge/stop-settle.js";
+import { noteDelivered, settleStopTurn, takeApiWaiters, unattributedNotice } from "./bridge/stop-settle.js";
 import { startCodexTurnFailureWatch } from "./bridge/codex-turn-failure.js";
 // v2.6.0+ C1：出站按 transport 分发（设计 §6）
 import { registerAdapter, adapterFor } from "./bridge/adapters.js";
@@ -837,8 +837,8 @@ async function deliverToLocal(env: RouterEnvelope, to: RouterLocalEndpoint, stil
   // 停在额度菜单 / 撞墙等待:先押住、一个键都不发(菜单里有花钱的选项,停字也不发,bridge/quota-wall-wiring.ts)
   const atWallMenu = await holdAtWallWait(env, to, evAgent, stillWanted); if (atWallMenu) return atWallMenu;
   // 人类 request 到达、目标主回合在跑 → 先打断再投(后一条优先,随时补充);停字三种运行时都打断。记 cut、抬头见 bridge/preempt.ts。
-  // agent↔agent、peer(对方实例的 agent 请求)、bridge 系统消息、response 不抢占
-  if (isHumanRequest(env)) await preemptForHuman(env, to.channelId, evAgent);
+  // agent↔agent、peer(对方实例的 agent 请求)、bridge 系统消息、response 不抢占;复核时画面刚变成撞墙等待(没发键)→ 同样押住
+  if (isHumanRequest(env) && (await preemptForHuman(env, to.channelId, evAgent)) === "wall_wait") { const h = await holdAtWallWait(env, to, evAgent, stillWanted, true); if (h) return h; }
   if (env.meta.interruptNote) meta.interrupt_note = "true"; // 历史只剥真由 bridge 加的抬头(lib/inbound-body.ts),用户手写的同样开头不剥
   const content = await renderContentForLocal(env); // 抢占之后渲染:抬头(env.meta.interruptNote)是抢占时写的
   // agent→agent 目标回合中就不发、押到 Stop(回合中通知有丢弃窗口);人类/API 消息上面已抢占 C-c 不押;压缩中一律押(压缩结束放行)

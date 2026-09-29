@@ -7,6 +7,7 @@ import { describe, expect, test } from "bun:test";
 import { ageHeld, HeldQueue, HELD_GIVE_UP_MS } from "../src/bridge/held-queue.js";
 import { createQuotaWall, type QuotaWallDeps, type WallWindow } from "../src/bridge/quota-wall.js";
 import type { Envelope } from "../src/bridge/router.js";
+import { senderTrigger } from "../src/bridge/stop-settle.js";
 import { emptyWallState, type UsageSignal, type WallState } from "../src/lib/quota-wall.js";
 
 const T0 = Date.parse("2026-09-28T13:19:40Z");
@@ -60,6 +61,7 @@ function rig(opts: RigOpts = {}) {
       wallCount: () => held.wallCount(),
       queuedFor: (cid) => !!held.get(cid)?.length,
       wallChannels: () => held.wallChannels(),
+      wakers: () => held.wallChannels((i) => senderTrigger(i.env.from) !== "stranger"),
       release: (t) => held.releaseWall(t),
     },
     flush: async (cid) => {
@@ -330,6 +332,20 @@ describe("恢复的边角（T24 r1 P2-1/2/3/7/9）", () => {
     await r.wall.tick();
     expect(r.flushed.sort()).toEqual(["a", "b"]);
     expect(r.resumed.map((x) => x.cid)).toEqual(["b"]);
+  });
+
+  test("出闸补投的全是外人（guest / peer）的消息：照样续跑撞墙那一轮；补投了 owner / agent 消息的才算会叫醒它（wf3 delivery-hold-2）", async () => {
+    const r = rig();
+    for (const c of ["a", "b", "c", "pm"]) await hitWall(r, c);
+    r.held.holdEnv(env({ kind: "api", tokenId: "tok-g", name: "guest" }, "a", "guest-a"), "quota_wall");
+    r.held.holdEnv(env({ kind: "api", tokenId: "tok-p", name: "sekai", peer: "sekai" }, "b", "peer-b"), "quota_wall");
+    r.held.holdEnv(env({ kind: "api", tokenId: "tok-o", name: "owner", owner: true }, "c", "owner-c"), "quota_wall");
+    r.held.holdEnv(env(agentFrom("a"), "pm", "a-pm"), "quota_wall");
+    r.wall.clear();
+    await r.wall.tick();
+    expect(r.flushed.sort()).toEqual(["a", "b", "c", "pm"]);
+    expect(r.resumed.map((x) => x.cid).sort()).toEqual(["a", "b"]);
+    expect(r.disk().wall!.recovery!.wakers!.sort()).toEqual(["c", "pm"]);
   });
 
   test("noteActivity 交出从续跑名单拿掉的那条（外人那一轮不算数时 rearmResume 放回去）", async () => {

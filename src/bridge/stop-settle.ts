@@ -42,8 +42,8 @@ export interface StopTurn {
  * 开头几秒里一起送到的一批（押后队列补投）取最严的：stranger > owner > insider。这一轮 Stop 时清掉。
  * 被打断的回合 CC 不发 Stop：送到时目标闲着、离上一条又过了一批的时间，就是新一轮，重记；终端里按 Esc 时事件态还停在 thinking、
  * 判不出闲，靠会话记录里的打断标记（noteTurnCut）收掉这一轮，下一条送到的重记。
- * 没有记录：这一轮不是 bridge 送的消息开的——CC 到点自己接着跑撞墙那一轮（owner 在终端里打字也是这样），继承上一轮的来源
- * 和回程，回合进行中送到的（peer 请求照投不押）不覆盖；bridge 的续跑消息（「接着做」、出闸续跑）开的一轮同样继承上一轮。
+ * 没有记录：这一轮不是 bridge 送的消息开的——CC 到点自己接着跑撞墙那一轮（owner 在终端里打字也是这样），继承撞错那一轮
+ * （没有就上一轮）的来源和回程，回合进行中送到的（peer 请求照投不押）不覆盖；bridge 的续跑消息（「接着做」、出闸续跑）同样。
  * 重启后还没见过这个频道的 Stop，上一轮不知道 = stranger（不结算，PM 09-29）。
  */
 export type TurnTrigger = "insider" | "owner" | "stranger";
@@ -59,11 +59,21 @@ const prevTrigger = new Map<string, TriggerRec>();
 const cutSince = new Set<string>();
 /** bridge 自己的续跑消息：接着做上一轮（撞错 / 撞墙那一轮）的事，来源和 caller 都是上一轮的（quota-wall-wiring 的 label） */
 const RESUME_LABELS = new Set(["api-error-resume", "quota-wall"]);
+/**
+ * 最近一轮以 API 错误结束（撞错 / 撞墙）的那一轮的来源：续跑（CC 到点自己接着跑、bridge 的续跑消息）接着做的是它，
+ * 不是「上一轮」——中间插进一轮外人的（guest 抢占、出闸补投外人消息）不改它（T24 wf3 delivery-hold-1）。
+ * 自己人的一轮正常结束就清掉（错误那一轮的事已经接着做完 / 回程已结算）。
+ */
+const errTrigger = new Map<string, TriggerRec>();
+const resumeRec = (cid: string): TriggerRec | undefined => errTrigger.get(cid) ?? prevTrigger.get(cid);
 type Sender = { kind: string; owner?: boolean; peer?: string; channelId?: string; label?: string };
+/** 发送方按 principal 分成哪一类（见 TurnTrigger）；出闸判「补投会不会接着做被打断的事」也用它（bridge/quota-wall-wiring.ts） */
+export const senderTrigger = (from: Sender): TurnTrigger =>
+  from.kind !== "user" && from.kind !== "api" ? "insider" : isOwnerSource(from) ? "owner" : "stranger";
 export function noteDelivered(cid: string, from: Sender, now = Date.now(), idle = false): void {
-  const who: TurnTrigger = from.kind !== "user" && from.kind !== "api" ? "insider" : isOwnerSource(from) ? "owner" : "stranger";
+  const who = senderTrigger(from);
   const caller = from.kind === "local" && from.channelId ? [from.channelId] : [];
-  const prev = prevTrigger.get(cid);
+  const prev = resumeRec(cid);
   const fresh = (): TriggerRec => (from.kind === "bridge" && RESUME_LABELS.has(from.label ?? "") && prev ? { ...prev, at: now } : { who, at: now, callers: caller });
   if (cutSince.delete(cid)) return void turnTrigger.set(cid, fresh());
   const cur = turnTrigger.get(cid);
@@ -114,7 +124,14 @@ export async function settleStopTurn(d: CallerSettleDeps, t: StopTurn): Promise<
   try {
     return await settleOwn(d, t, mine);
   } finally {
-    if (mine) { prevTrigger.set(t.cid, { at: 0, callers: [], ...recOf(t), who: triggerOf(t) }); turnTrigger.delete(t.cid); cutSince.delete(t.cid); } // 下一轮的来源从它的第一条消息重新记
+    if (mine) {
+      const rec = { at: 0, callers: [], ...recOf(t), who: triggerOf(t) };
+      if (ranIntoApiError(t)) errTrigger.set(t.cid, rec);
+      else if (rec.who !== "stranger") errTrigger.delete(t.cid);
+      prevTrigger.set(t.cid, rec); // 下一轮的来源从它的第一条消息重新记
+      turnTrigger.delete(t.cid);
+      cutSince.delete(t.cid);
+    }
   }
 }
 
@@ -153,10 +170,19 @@ async function pushWithheld(d: CallerSettleDeps, cid: string, pac: PendingAgentC
   }
 }
 
-/** 记上等续跑并把 text 扣到归属确定的那一槽；归属不明（几个 caller 在等）不猜，只告诉 owner 有这么段话没转给任何人 */
+/** 记上等续跑并把 text 扣到归属确定的那一槽；归属不明（几个 caller 一起开的、或不是 agent 开的）不猜，只告诉 owner 有这么段话没转给任何人 */
 function markWithheld(d: CallerSettleDeps, t: StopTurn, text: string | null): void {
   const to = d.markApiError(t.cid, text, callerOf(t));
-  if (text && !to && d.waiting(t.cid).length) d.unattributed?.(t.cid, text);
+  const waiting = d.waiting(t.cid).length;
+  const err = t.drain.error;
+  const wall = !!err && (t.runtime ?? DEFAULT_RUNTIME) === DEFAULT_RUNTIME && !!wallHitOf(err.error, err.text, Date.now());
+  if (text && !to && waiting) d.unattributed?.(t.cid, text, { callers: recOf(t)?.callers.length ?? 0, waiting, wall });
+}
+
+/** unattributed 的说明（发 #control）：按这一轮是谁开的、实际有几个 caller 在等写（T24 wf3 delivery-hold-5） */
+export function unattributedNotice(agent: string, n: { callers: number; waiting: number }): string {
+  const whose = n.callers > 1 ? `是 ${n.callers} 个 agent 的请求一起开的，出错前说的话对不上是答谁的` : `不是 agent 开的（owner / bridge 的消息），出错前说的话不是答 caller 的`;
+  return `ℹ️ ${agent} 那一轮以 API 错误结束，${whose}：没有转给在等它的 ${n.waiting} 个 caller（在它自己的频道里看得到）`;
 }
 
 /**
@@ -219,8 +245,8 @@ export interface CallerSettleDeps {
   nudgeAmbiguous(cid: string): void;
   /** 在等 cid 的槽都记上「以 API 错误结束、等续跑」，withheld 只扣到归属确定的那一槽（回程簿 markApiError，落盘），返回扣到哪一槽 */
   markApiError(cid: string, withheld: string | null, caller?: string | null): string | undefined;
-  /** 以 API 错误结束的一轮说了话、却对不上是答哪个 caller 的：只告诉 owner，不推给任何 caller */
-  unattributed?(cid: string, text: string): void;
+  /** 以 API 错误结束的一轮说了话、却对不上是答哪个 caller 的：只告诉 owner，不推给任何 caller（撞墙的 wall = true，闸内不发） */
+  unattributed?(cid: string, text: string, n: { callers: number; waiting: number; wall: boolean }): void;
   /** 扣下的话已经推给 caller：清掉这一槽的 withheld（等续跑标记随答复一起消化） */
   clearWithheld(cid: string, pac: PendingAgentCall): void;
   /** 在等 cid 的、还没为 API 错误说明过的槽，取出即记下（落盘，回程簿 takeApiErrorNotice） */

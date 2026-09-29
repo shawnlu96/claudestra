@@ -38,11 +38,11 @@ function inject(frame: string, after: RegExp, block: string[]): string {
 }
 
 /** 走真的抢占闸：判忙用 turnState（事件态 done，同审查员探针），撞墙判定用 paneShowsWallWait；返回发出的键 */
-async function keysFor(pane: string): Promise<string[]> {
+async function keysFor(pane: string, status: "done" | "thinking" = "done"): Promise<string[]> {
   const keys: string[] = [];
   const gate = createInterruptGate({
     resolve: async () => ({ win: "master:agent-a" }),
-    probe: async () => turnState({ pane, status: "done" }),
+    probe: async () => turnState({ pane, status }),
     wallWait: async () => paneShowsWallWait(pane),
     interrupt: async () => (keys.push("C-c"), ["C-c"]),
     onPreempted: () => undefined,
@@ -151,7 +151,7 @@ describe("真 CC 画面（wf2 keys-screens-1）：缩进引用的忙页脚「⏵
   });
 });
 
-describe("输入框判定（PM 09-29）：上下两条顶格、整行只有 ─ 的边框夹着顶格 ❯，❯ 后面不是「1.」选项", () => {
+describe("输入框判定（PM 09-29）：按框的形状认——上下两条顶格、整行只有 ─ 的边框夹着顶格 ❯，框里只有缩进续行，框下没有顶格文字", () => {
   const box = (rule: string, prompt = "❯ ") => [rule, prompt, rule, "  ⏵⏵ bypass permissions on (shift+tab to cycle)"];
   test("顶格的「─── 小标题」不算边框", () => {
     expect(inputBox(["✻ Worked for 3s", "─── 小标题", "❯ ", "─── 小标题"])).toBeNull();
@@ -161,9 +161,12 @@ describe("输入框判定（PM 09-29）：上下两条顶格、整行只有 ─ 
     expect(inputBox(box("─────"))).toEqual({ top: 0, bottom: 2 });
     expect(inputBox(box("───   "))).toEqual({ top: 0, bottom: 2 });
   });
-  test("❯ 后面是「1.」选项（弹窗）不算输入框；草稿以数字开头但不是「1.」的照算", () => {
-    expect(inputBox(box("─".repeat(40), "❯ 1. Yes"))).toBeNull();
-    expect(inputBox(box("─".repeat(40), "❯ 2026 年的计划"))).toEqual({ top: 0, bottom: 2 });
+  test("不看 ❯ 后面的字：草稿以「1.」「2.1.283」开头照算；shell 模式的 ! 也算", () => {
+    for (const p of ["❯ 1. 先修测试", "❯ 2.1.283 升级后", "❯ 2026 年的计划", "! ls -la"]) expect(inputBox(box("─".repeat(40), p))).toEqual({ top: 0, bottom: 2 });
+  });
+  test("弹窗的形状不算：选项之间有顶格行、框下有顶格的「Enter to select」提示行", () => {
+    expect(inputBox(["─".repeat(40), "❯ 1. Yes", "2. No", "─".repeat(40)])).toBeNull();
+    expect(inputBox(["─".repeat(40), "❯ 4. Chat about this", "─".repeat(40), "", "Enter to select · Esc to cancel"])).toBeNull();
   });
   test("只有上边框、没有下边框的不算", () => {
     expect(inputBox(["─".repeat(40), "❯ ", "  ⏵⏵ bypass permissions on"])).toBeNull();
@@ -179,5 +182,31 @@ describe("撞墙倒计时窗口里草稿很长（wf2 keys-screens-5）", () => {
     const long = [...lines.slice(0, at), ...draft, ...lines.slice(at + 1)].join("\n");
     expect(long.split("\n").length).toBeGreaterThan(walled.split("\n").length + 10);
     expect(wallWaitKind(long)).toBe("countdown");
+  });
+});
+
+describe("草稿首个可见行以「数字.」开头（wf3 keys-screens-1，真 CC 2.1.283）", () => {
+  test("真输入框认得出：单行编号草稿、13 行编号清单被截成「❯ 4. …」、在跑时带编号草稿", () => {
+    expect(inputBox(fx("cc-draft-num").replace(/\s+$/, "").split("\n"))).not.toBeNull();
+    expect(inputBox(fx("cc-numlist-draft").replace(/\s+$/, "").split("\n"))).not.toBeNull();
+    expect(turnState({ pane: fx("cc-numlist-draft"), status: "done", runtime: "claude" }).main).toBe("idle");
+    expect(turnState({ pane: fx("cc-busy-numlist-vis"), status: "done", runtime: "claude" }).main).toBe("busy");
+  });
+  test("弹窗仍是 null：AskUserQuestion 光标在第 1 项 / 第 4 项（贴着顶格边框）、权限框、6 种额度菜单", () => {
+    for (const f of ["modal-auq", "cc-auq-opt4", "modal-permission", "menu-5-items"]) expect(inputBox(fx(f).replace(/\s+$/, "").split("\n"))).toBeNull();
+    for (const f of ["menu-5-items", "menu-fakebox", "menu-narrow60", "menu-no-lp", "menu-on-credits", "menu-on-lp"]) {
+      const pane = readFileSync(join(import.meta.dir, "fixtures/quota-wall", `${f}.txt`), "utf8");
+      expect(inputBox(pane.replace(/\s+$/, "").split("\n"))).toBeNull();
+      expect(wallWaitKind(pane)).toBe("menu");
+    }
+  });
+  test("撞墙倒计时 + 编号草稿 / 版本号草稿 / shell 模式：仍认成倒计时，抢占 0 键", async () => {
+    const walled = readFileSync(join(import.meta.dir, "fixtures/quota-wall", "walled.txt"), "utf8").split("\n");
+    const at = walled.findIndex((l, i) => l.startsWith("❯") && /^─+$/.test(walled[i - 1] ?? ""));
+    for (const d of ["❯ 1. fix the failing tests first", "❯ 2.1.283 升级后", "! ls", "❯ 4. step 4\n  5. step 5\n  done."]) {
+      const pane = [...walled.slice(0, at), d, ...walled.slice(at + 1)].join("\n");
+      expect(wallWaitKind(pane)).toBe("countdown");
+      expect(await keysFor(pane, "thinking")).toEqual([]);
+    }
   });
 });

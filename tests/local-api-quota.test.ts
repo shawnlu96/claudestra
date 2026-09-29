@@ -5,6 +5,7 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { handleLocalApi, LOCAL_API_FEATURES } from "../src/bridge/local-api/index.js";
 import { createQuotaService, setQuotaServiceForTest } from "../src/bridge/quota-service.js";
+import { heldFields } from "../src/bridge/api-respond.js";
 import { canReadLedger, canSeeQuota, effectivePrincipal, type DeviceCredential, type Grant } from "../src/lib/devices.js";
 import type { Principal } from "../src/lib/principals.js";
 import { confirmCredential, hmacHex, peekAccountKey, readClaudeCredential, readCodexCredential } from "../src/lib/quota-credentials.js";
@@ -74,6 +75,10 @@ describe("权限：canSeeQuota 矩阵（三个端点一致，与 canReadLedger �
       expect((await call("/quota/retry", p, "POST", { provider: "codex" })).status).toBe(ok ? 200 : 403);
     });
   }
+  test("API 202 押住时：queued 给所有人，原因 heldBy 只给能看额度的（api-respond heldFields，与这里同口径）", () => {
+    for (const [, p, ok] of MATRIX) expect(heldFields("wall_menu", p)).toEqual({ queued: true, heldBy: ok ? "wall_menu" : undefined });
+    expect(heldFields(undefined, OWNER)).toEqual({});
+  });
   test("被拒的调用方连开关都改不了", async () => {
     const n = persisted.length;
     expect((await call("/quota/settings", MATRIX[1][1], "PUT", { enabled: false })).status).toBe(403);

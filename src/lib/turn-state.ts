@@ -35,15 +35,17 @@ export interface TurnState {
 const isBoxRule = (l: string | undefined): boolean => l !== undefined && /^─{3,}$/.test(l.replace(/\s+$/, ""));
 
 /**
- * 真输入框在画面里的上下边框行号：上下两条顶格整行边框夹着顶格的 ❯，且 ❯ 后面不是「1.」这种选项（权限框、AskUserQuestion、
- * 额度菜单里的「❯ 1.」是弹窗，不是输入框）。从下往上找，草稿多长都行；找不到 = null（弹窗盖住、窄窗口折行）。
- * 对话 / 工具输出里贴进来的输入框都有缩进，认不成（同 T35 lp-state）。额度画面判定（lib/quota-wall-text.ts）也用它。
+ * 真输入框在画面里的上下边框行号，按框的形状认、不看 ❯ 后面的字（草稿首行可以是「1. 先修测试」「2.1.283 …」）：
+ * 顶格整行边框正下方是顶格的 ❯（shell 模式是 !），到下一条顶格整行边框之间只有缩进的续行或空行，下边框以下没有顶格文字
+ * （状态栏都缩进；权限框、AskUserQuestion 的「Enter to select」提示行、额度菜单都是顶格）。从下往上找，草稿多长都行；
+ * 找不到 = null。对话里贴进来的输入框都有缩进，认不成。90 张真 / 合成画面见 tests/turn-zone.test.ts、额度判定 lib/quota-wall-text.ts。
  */
 export function inputBox(lines: string[]): { top: number; bottom: number } | null {
   for (let i = lines.length - 1; i > 0; i--) {
-    if (!/^❯(?!\s*\d+\.)/.test(lines[i]!) || !isBoxRule(lines[i - 1])) continue;
-    const bottom = lines.findIndex((l, j) => j > i && isBoxRule(l));
-    if (bottom > 0) return { top: i - 1, bottom };
+    if (!/^[❯!](\s|$)/.test(lines[i]!) || !isBoxRule(lines[i - 1])) continue;
+    let j = i + 1;
+    while (j < lines.length && !isBoxRule(lines[j]) && (lines[j] === "" || /^\s/.test(lines[j]!))) j++;
+    if (j < lines.length && isBoxRule(lines[j]) && !lines.slice(j + 1).some((l) => /^\S/.test(l))) return { top: i - 1, bottom: j };
   }
   return null;
 }
@@ -63,6 +65,9 @@ function turnZone(pane: string): { above: string; rest: string; footer: string; 
 
 /** 顶格、spinner 字形开头的行：真 spinner / 压缩行 / 重试横幅都在第 0 列，对话和工具输出里的同样字样都有缩进 */
 const spinnerRows = (zone: string): string[] => zone.split("\n").filter((l) => /^[·✢✳✶✻✽*]\s/.test(l));
+const spinnerBusy = (zone: string): boolean => spinnerRows(zone).some((l) => CC_BUSY_RE.test(l));
+/** spinner 位置（输入框上方，没有输入框 = 尾部 14 行）有顶格的 spinner 在跑：撞墙画面判「其实还在跑」只认这个（lib/quota-wall-text.ts） */
+export const paneSpinnerBusy = (pane: string): boolean => spinnerBusy(turnZone(pane).above);
 
 /**
  * 画面上是否在压缩上下文：spinner 位置那一行是「✻ Compacting conversation…」。锚定 spinner 行形态——正文里提到 compacting
@@ -87,7 +92,7 @@ export function paneShowsApiRetry(pane: string): boolean {
  */
 export function paneMainTurnBusy(pane: string): boolean {
   const z = turnZone(pane);
-  if (spinnerRows(z.above).some((l) => CC_BUSY_RE.test(l))) return true;
+  if (spinnerBusy(z.above)) return true;
   if (`${z.above}\n${z.rest}`.split("\n").some((l) => /^❯ Press up to edit queued messages/.test(l))) return true;
   // 老 TUI 的 esc to interrupt 在页脚（有没有 ⏵⏵、窄窗口折不折行都一样）；输入框上方贴进来的同样字样不算
   return /esc\s+to\s+interrupt/i.test(z.footer);

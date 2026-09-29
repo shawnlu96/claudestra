@@ -26,7 +26,7 @@ import {
   INVALID_JSON,
   readJsonBody,
   invalidJsonBody,
-  liveInteractiveHolder,
+  liveInteractiveHolder, heldFields,
 } from "./api-respond.js";
 import { interruptAgentByName } from "./preempt.js";
 import { existsSync, readdirSync, statSync } from "fs";
@@ -70,7 +70,6 @@ import {
   listWindows,
   MASTER_SESSION,
 } from "../lib/tmux-helper.js";
-import { canSeeQuota } from "../lib/devices.js";
 import { paneLooksWorking } from "../lib/turn-state.js";
 import { recordMetric } from "../lib/metrics.js";
 import { commandsForAgent } from "./slash-registry.js";
@@ -1305,7 +1304,7 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
     deps.lastMessageSource.set(agent.channelId, "agent"); // API 触发的 turn 不发 Stop 完成通知 @ owner（回复走 API 回路 + R2 镜像已可见）
 
     if (waitSec === 0 || delivery.outcome.heldBy) { // heldBy = 押住了（额度闸 / 停在额度菜单，没发键），不干等答复；原因只给能看额度的 owner（canSeeQuota）
-      const held = delivery.outcome.heldBy ? { queued: true, heldBy: canSeeQuota(principal) ? delivery.outcome.heldBy : undefined } : {};
+      const held = heldFields(delivery.outcome.heldBy, principal);
       return apiJson(202, { ok: true, accepted: true, threadId, agent: agent.name, ...held, hint: `poll GET /api/v1/threads/${threadId} or subscribe /api/v1/events` });
     }
 

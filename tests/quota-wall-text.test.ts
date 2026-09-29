@@ -218,3 +218,36 @@ describe("拒绝打字的原因只把额度状态告诉 owner（wf2 notify-web-r
     }
   });
 });
+
+describe("wf3 keys-screens：草稿首行是「数字.」、菜单上方的用户输入里写着 esc to interrupt", () => {
+  const raw = (f: string) => readFileSync(join(import.meta.dir, "fixtures/quota-wall", `${f}.txt`), "utf8");
+  const tz = (f: string) => readFileSync(join(import.meta.dir, "fixtures/turn-zone", `${f}.txt`), "utf8");
+  /** 把真 CC 输入框里的 ❯ 行换成草稿（T35 的 5 种真倒计时 × 编号 / 版本号 / shell 模式 / 截断的编号清单） */
+  const withDraft = (pane: string, draft: string) => {
+    const l = pane.split("\n");
+    const at = l.findIndex((x, i) => x.startsWith("❯") && /^─+$/.test(l[i - 1] ?? ""));
+    return [...l.slice(0, at), draft, ...l.slice(at + 1)].join("\n");
+  };
+  const DRAFTS = ["❯ 1. fix the failing tests first", "❯ 2.1.283 升级后", "❯ 3.5 秒太慢", "! ls", "❯ 4. step 4\n  5. step 5\n  done."];
+  test("倒计时 + 编号草稿仍是 countdown", () => {
+    for (const f of ["walled", "walled-weekly-80col", "walled-when-resets", "walled-shortly", "walled-channel"]) {
+      for (const d of DRAFTS) expect([f, d, wallWaitKind(withDraft(raw(f), d))]).toEqual([f, d, "countdown"]);
+    }
+  });
+  test("lp-on 画面带编号草稿：仍认出 Lower priority（在跑，不是等待）", () => {
+    const p = withDraft(raw("lp-on-autocontinue"), DRAFTS[0]!);
+    expect(paneShowsLowPriority(p)).toBe(true);
+    expect(wallWaitKind(p)).toBeNull();
+  });
+  test("真 CC 编号草稿画面（没撞墙）：不是撞墙等待", () => {
+    for (const f of ["cc-draft-num", "cc-numlist-draft", "cc-busy-numlist-vis"]) expect(wallWaitKind(tz(f))).toBeNull();
+  });
+  test("菜单上方最后一条顶格用户输入写着 esc to interrupt / Press up to edit：仍是 menu", () => {
+    for (const q of ["❯ 为什么页脚一直显示 esc to interrupt", "❯ Press up to edit queued messages 是什么意思"]) {
+      expect(wallWaitKind(raw("menu-no-lp").replace("❯ /low-priority", q))).toBe("menu");
+    }
+  });
+  test("菜单上方还有顶格 spinner 在跑：照旧不算等待", () => {
+    expect(wallWaitKind(raw("menu-no-lp").replace("❯ /low-priority", "✻ Pondering… (2m 23s · ↓ 9.9k tokens)"))).toBeNull();
+  });
+});

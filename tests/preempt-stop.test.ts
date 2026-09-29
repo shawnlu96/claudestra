@@ -9,7 +9,8 @@ import { existsSync, rmSync, writeFileSync } from "node:fs";
 import { REGISTRY_PATH } from "../src/lib/registry.js";
 import { interruptGate } from "../src/bridge/interrupt-gate.js";
 import { holdStopWait, setExtensionSocket, stopWaitIds } from "../src/bridge/pi-abort.js";
-import { manualInterrupt, preemptForHuman, setStopHooks } from "../src/bridge/preempt.js";
+import { manualInterrupt, noteHeldStop, preemptForHuman, setStopHooks } from "../src/bridge/preempt.js";
+import { turnCuts } from "../src/bridge/turn-cuts.js";
 import type { Envelope } from "../src/bridge/router.js";
 
 const CH = "pi-stop-ch";
@@ -118,5 +119,39 @@ describe("停字那一轮迟迟不来：超时结成「已叫停」，不回 nul
     await sleep(80);
     expect(delivered.map((e) => e.meta.inReplyTo)).toEqual(["s-short"]);
     apiQueues.clear();
+  });
+});
+
+describe("停在撞墙等待画面上（T24 wf3 delivery-hold-4 / 执行者主意 2）：一个键都不发，但 owner 的「停」当场记下", () => {
+  const CC = "cc-wall-ch";
+  const env = (id: string, owner: boolean, text = "停"): Envelope => ({ ...stopEnv(id, owner, text), to: { kind: "local", channelId: CC, agentName: "agent-cc" } }) as Envelope;
+  test("owner 的停字被押住：清 agent 间待回账、记叫停（Autopilot 让位），抬头写停在等待画面、没有在跑", () => {
+    log.length = 0;
+    const e = env("held-stop", true);
+    noteHeldStop(e, CC, "agent-cc", "claude-code");
+    expect(log).toEqual([`clear:${CC}`]);
+    expect(turnCuts.stoppedAt(CC)).toBeNumber();
+    expect(e.meta.interruptNote).toContain("撞墙等待画面");
+    expect(e.meta.interruptNote).not.toContain("没能替你打断");
+  });
+  test("非 owner 的停、owner 的普通消息：不记叫停", () => {
+    log.length = 0;
+    for (const e of [env("g-stop", false), env("o-msg", true, "看一下日志")]) {
+      noteHeldStop(e, "cc-other", "agent-cc", "claude-code");
+      expect(e.meta.interruptNote).toBeUndefined();
+    }
+    expect(log).toEqual([]);
+    expect(turnCuts.stoppedAt("cc-other")).toBeUndefined();
+  });
+  test("抢占复核时画面刚变成撞墙等待（闸回 wall_wait）：preemptForHuman 回 wall_wait，不写「没能打断」的抬头，交给调用方押住", async () => {
+    interruptGate.preempt = async () => ({ fired: false, why: "wall_wait" });
+    try {
+      const e = env("race-stop", true);
+      expect(await preemptForHuman(e, CC, "agent-cc")).toBe("wall_wait");
+      expect(e.meta.interruptNote).toBeUndefined();
+      expect(await preemptForHuman(env("race-msg", true, "看一下"), CC, "agent-cc")).toBe("wall_wait");
+    } finally {
+      interruptGate.preempt = async () => (log.push(`abort(skip=${[...stopWaitIds(CH)].join(",")})`), { fired: true });
+    }
   });
 });
