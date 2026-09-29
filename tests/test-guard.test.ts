@@ -9,7 +9,7 @@ import { REPO_ROOT } from "../src/lib/repo-root.js";
 import { assertNoRepoEnvWriteInTest, isRepoEnvFile, isTestProcess, testSafeStateDir } from "../src/lib/test-guard.js";
 import { testChildEnv } from "./test-env.ts";
 
-const KEYS = ["BRIDGE_URL", "BRIDGE_PORT", "CLAUDESTRA_SANDBOX", "CLAUDESTRA_STATE_DIR"] as const;
+const KEYS = ["BRIDGE_URL", "BRIDGE_PORT", "CLAUDESTRA_SANDBOX", "CLAUDESTRA_STATE_DIR", "CONTROL_CHANNEL_ID"] as const;
 const saved = Object.fromEntries(KEYS.map((k) => [k, process.env[k]]));
 afterEach(() => {
   for (const k of KEYS) {
@@ -79,6 +79,7 @@ describe("仓库 .env", () => {
   });
 
   test("测试进程读仓库根的 .env 一律当没有；测试自己造的临时 repoRoot 照读；repoEnvVar 只剩 process.env", () => {
+    delete process.env.CONTROL_CHANNEL_ID; // 没加载 preload 时会话里可能带着
     expect(readDotenvFileSync(join(REPO_ROOT, ".env"))).toBeNull();
     const dir = mkdtempSync(join(tmpdir(), "tg-env-"));
     try {
