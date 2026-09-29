@@ -132,6 +132,11 @@ bun src/manager.ts peer-http-messages-only <peer> on    # off 恢复
 - **peer 请求的注入头**加了一句：首行是 `[协作 …]` 时，先回自家 owner 频道问接不接（附本文档的绝对路径）。首行是 `[协作 <任务号>/<步骤>]` 且本机记过接受（`src/lib/peer-accepted.ts`，状态目录 `peer-accepted.json`）时，改成「已接受卡上的步骤单，不用再问 owner」（`src/bridge/router.ts` collabNote）。
 - **步骤化台账**（T47）：`task_steps` 表（台账迁移 v6）；本机用 `ledger step <task> <步骤> <执行者> [--kind agent|human|peer]` 派步骤、`ledger steps <task>` 看；交付和审查时自动记 head 区间、结论、本机校验（verified）和对方自报（claims）；协作视图的任务详情多了「步骤」段。
 - **peer 台账接口**：`/api/v1/peer-ledger`（`src/bridge/local-api/peer-ledger.ts`、`src/lib/peer-ledger.ts`），写入经 `ledger peer-write`，bridge 仍然只读台账；台账多了一个 `peer` 角色（`src/lib/ledger-stages.ts`），peer 名精确匹配。受托方用 `manager peer-ledger`（`src/manager/peer-ledger-cli.ts`）。`manager token-list` 会显示每枚 peer token 签给了谁、是不是只能投递消息。
+- **双向唤醒**（T49，`src/lib/ledger-wake.ts`，由 `src/bridge/team-router.ts` 的游标驱动，按事件 seq 至多一次）：只有改状态的事件（交付、阶段变化、审查结论）才唤醒，note、pr、accept、步骤派人这些回执不唤醒。
+  - peer 写卡（actor `peer:<名>`）→ 叫醒本机这张卡当前的接手人（`currentHandler`，找不到就 PM）。没开班子的项目也叫；开了班子、班子规则对这条已经发了的，不再重复。
+  - 本机推了一步、那一步的执行者在 peer（`task_steps` 或 `extra.delegate` / `extra.reviewer` 推出来的 `<agent>@<peer>`）→ 以本实例身份给那个 agent 投一条步骤单，首行 `[协作 <任务号>/<步骤>]`，对方接受过这张卡就不会再去问 owner。review 带出来的阶段移动只发一条（带结论）；进 blocked 不发；写卡的 peer 不会被自己叫醒。
+  - 审查结论 → 用 gh 以评论贴到卡上的 PR（`src/bridge/ledger-wake-out.ts`），标审查方、自报模型、台账事件号。只贴本机有写权限的仓库：`task.pr` 执行者和 peer 都能改，不核的话能借本机的 GitHub 身份往任意 PR 发评论。
+  - 发不出去（peer 离线、没配好、gh 失败）只记日志、不重试：接手人照样能在卡上看到，重发两遍比丢一次更糟。
 - **只能投递消息**的 token 范围（`src/lib/peer-scope-gate.ts` 的 `messagesOnlyAllows`，闸门在 `src/bridge/api-auth.ts`）。
 - `send_to_agent` 的工具说明加了发给 peer 前的脱敏提醒；`roles/pm.md` 加了「`extra.delegate` 的任务不在本机派发」。
 
@@ -142,4 +147,5 @@ bun src/manager.ts peer-http-messages-only <peer> on    # off 恢复
 - **经中继时中继看得见明文**（`docs/relay/protocol.md`）：卡的标题、目标、时间线、note 正文都会明文过中继，端到端加密落地前只能接受或改走直连。
 - **本机 agent 能伪造 peer 事件。** 台账身份本来就是自报的：本机 agent 清掉频道号就能以 owner 身份跑 `ledger peer-write`，写出 `peer:<名>` 的事件。防的是对方 peer，它只能经 bridge 的接口写。
 - 「只能投递消息」默认不开，老 token 行为不变。
+- **唤醒 peer 发给那一步的执行者，不是对方的 PM**：执行者就是对方的入口 agent 时（今天是这样）没有区别；等 T48 把「对方项目的 PM」记下来再统一。
 - 台账已有 `peer_agent` 负责人类型（`<实例指纹>/<agent>`），但它要求对方的实例指纹，老握手的 peer 记录里没有指纹，所以这里用 `extra.delegate`。
