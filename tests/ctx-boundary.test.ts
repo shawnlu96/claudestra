@@ -1,44 +1,10 @@
 import { beforeEach, describe, expect, test } from "bun:test";
-import {
-  compactInjectedRecently, ctxBoundaryTick, injectCompact, noteCompactInjected, resetCtxBoundaryState,
-  type BoundaryAgent, type CtxBoundaryDeps,
-} from "../src/bridge/ctx-boundary.js";
+import { mkdirSync, mkdtempSync, writeFileSync } from "fs";
+import { tmpdir } from "os";
+import { join } from "path";
+import { ctxBoundaryTick, injectCompact, isLinkedWorktree, resetCtxBoundaryState } from "../src/bridge/ctx-boundary.js";
 import { DEFAULT_KEEP_LIST } from "../src/lib/ctx-boundary-policy.js";
-import type { PaneQuotaState } from "../src/lib/lp-state.js";
-
-const MIN = 60_000;
-const IDLE_PANE = "some output\n❯ \n";
-const BUSY_PANE = "· Thinking… (esc to interrupt)\n❯ \n";
-
-function harness(
-  agents: BoundaryAgent[],
-  opts: { panes?: Record<string, string | null>; state?: Partial<PaneQuotaState>; autoCompact?: any; gateGlobal?: boolean } = {},
-) {
-  let now = 1_000_000_000;
-  const sent: { target: string; line: string }[] = [];
-  const logs: string[] = [];
-  const state: PaneQuotaState = { wall: false, lp: "off", exhausted: false, menu: false, compacting: false, draft: false, ...opts.state };
-  const deps: CtxBoundaryDeps = {
-    now: () => now,
-    agents: async () => agents,
-    capture: async (t) => {
-      const p = opts.panes && t in opts.panes ? opts.panes[t] : IDLE_PANE;
-      return p === null ? null : { plain: p, esc: p };
-    },
-    paneState: () => state,
-    send: async (target, line) => void sent.push({ target, line }),
-    autoCompact: () => opts.autoCompact,
-    log: (l) => void logs.push(l),
-    gateGlobal: opts.gateGlobal ?? false,
-  };
-  return { deps, sent, logs, state, advance: (ms: number) => (now += ms), get now() { return now; } };
-}
-
-const agent = (o: Partial<BoundaryAgent>): BoundaryAgent => {
-  const name = o.name ?? "agent-task-t1";
-  return { name, projectId: "orch", target: `master:${name}`, executor: name.startsWith("agent-task-"), ctx: 0, convTs: 0, mtime: 0, realWindow: null, ...o };
-};
-const tgt = (name: string, executor = false) => ({ name, target: `master:${name}`, executor });
+import { agent, BUSY_PANE, harness, MIN, tgt } from "./ctx-boundary-harness.js";
 
 beforeEach(() => resetCtxBoundaryState());
 
@@ -62,6 +28,31 @@ describe("ctxBoundaryTick", () => {
     a.convTs = h.now - 5 * MIN;
     expect((await ctxBoundaryTick(h.deps))[0].verdict).toEqual({ fire: true, kind: "idle" });
     expect(h.sent.length).toBe(2);
+  });
+
+  test("自动注入缺省关：不读画面、不发键，日志只提示一次；打开后照常", async () => {
+    const h = harness([], { autoCompact: { inject: false } });
+    h.deps.agents = async () => [agent({ ctx: 300_000, convTs: 0 })];
+    expect(await ctxBoundaryTick(h.deps)).toEqual([]);
+    expect(await ctxBoundaryTick(h.deps)).toEqual([]);
+    expect(h.logs.filter((l) => l.includes("自动注入关着")).length).toBe(1);
+    const off = harness([], { autoCompact: null });
+    off.deps.agents = h.deps.agents;
+    expect(await ctxBoundaryTick(off.deps)).toEqual([]);
+    expect(h.sent.length + off.sent.length).toBe(0);
+  });
+
+  test("dry-run：开关关着也照常判定，只给出会发的那行，不发键、不记冷却、不提醒", async () => {
+    const h = harness([], { autoCompact: { inject: false } });
+    h.deps.agents = async () => [agent({ ctx: 300_000, convTs: 0 })];
+    const dry = { ...h.deps, dryRun: true };
+    const r = await ctxBoundaryTick(dry);
+    expect(r[0]).toMatchObject({ verdict: { fire: true, kind: "hard-cap" }, would: `/compact ${DEFAULT_KEEP_LIST}` });
+    expect(r[0].inject).toBeUndefined();
+    expect((await ctxBoundaryTick(dry))[0].verdict.fire).toBe(true); // 没记冷却
+    h.state.draft = true;
+    expect((await ctxBoundaryTick(dry))[0].verdict).toEqual({ fire: false, reason: "draft" });
+    expect([h.sent.length, h.alerts.length]).toEqual([0, 0]);
   });
 
   test("闲置不到 3 分钟，或画面在忙 → 等", async () => {
@@ -94,14 +85,17 @@ describe("ctxBoundaryTick", () => {
     expect(h.sent.length).toBe(1);
   });
 
-  test("画面上有选择菜单 / 读不到画面 / 已有排队消息 → 不敲键", async () => {
-    for (const [o, reason] of [
+  test("画面上有选择菜单 / 读不到画面 / 已有排队消息 / CC 已退出 / copy-mode → 不敲键", async () => {
+    for (const [o, reason, tweak] of [
       [{ state: { menu: true } }, "menu"],
       [{ panes: { "master:agent-task-t1": null } }, "pane-unknown"],
       [{ panes: { "master:agent-task-t1": "❯ /compact x\n  Press up to edit queued messages\n" } }, "queued"],
+      [{}, "not-cc", { command: "zsh" }],
+      [{}, "copy-mode", { inMode: true }],
     ] as const) {
       resetCtxBoundaryState();
       const h = harness([], o as any);
+      Object.assign(h.win("master:agent-task-t1"), tweak ?? {});
       h.deps.agents = async () => [agent({ ctx: 300_000, convTs: h.now })];
       expect((await ctxBoundaryTick(h.deps))[0].verdict).toEqual({ fire: false, reason });
       expect(h.sent.length).toBe(0);
@@ -111,11 +105,22 @@ describe("ctxBoundaryTick", () => {
   test("手动按钮刚注入过 → 自动这边 15 分钟内不叠一条", async () => {
     const h = harness([]);
     h.deps.agents = async () => [agent({ ctx: 300_000, convTs: h.now })];
-    noteCompactInjected("master:agent-task-t1", h.now - MIN);
-    expect((await ctxBoundaryTick(h.deps))[0].verdict).toEqual({ fire: false, reason: "compacting" });
+    await injectCompact(tgt("agent-task-t1", true), { action: "save-compact" }, h.deps);
+    h.advance(MIN);
+    expect((await ctxBoundaryTick(h.deps))[0].verdict).toEqual({ fire: false, reason: "recent" });
+    expect(h.sent.length).toBe(1);
   });
 
-  test("没命中策略的个人 agent：走全局（线 / 闲置小时 / save-compact），行为不变", async () => {
+  test("/clear 之后 registry 还指着旧会话：按窗口里实际的会话重读，新会话没过线就不压（adv1 P2-12）", async () => {
+    const h = harness([]);
+    h.deps.agents = async () => [agent({ ctx: 300_000, convTs: 0, sessionId: "old" })];
+    h.deps.liveSession = async (a) => ({ ...a, sessionId: "new", ctx: 12_000 });
+    expect(await ctxBoundaryTick(h.deps)).toEqual([]);
+    h.deps.liveSession = async (a) => ({ ...a, sessionId: "new", ctx: 260_000, convTs: h.now });
+    expect((await ctxBoundaryTick(h.deps))[0]).toMatchObject({ ctx: 260_000, verdict: { fire: true, kind: "hard-cap" } });
+  });
+
+  test("没命中策略的个人 agent：走全局（线 / 闲置小时 / save-compact），也过画面判定", async () => {
     const h = harness([], { autoCompact: { window: 450_000, idleHours: 0.2 } });
     const car = agent({ name: "agent-car-talk", projectId: "personal", target: "master:agent-car-talk", ctx: 800_000, convTs: 0 });
     h.deps.agents = async () => [car, agent({ name: "agent-gc-car", projectId: "personal", target: "master:agent-gc-car", ctx: 400_000, convTs: 0 })];
@@ -123,6 +128,9 @@ describe("ctxBoundaryTick", () => {
     const r = await ctxBoundaryTick(h.deps);
     expect(r.map((x) => [x.agent, x.boundary.policy, x.verdict])).toEqual([["agent-car-talk", "global", { fire: false, reason: "busy" }]]);
     h.advance(3 * MIN);
+    h.state.menu = true;
+    expect((await ctxBoundaryTick(h.deps))[0].verdict).toEqual({ fire: false, reason: "menu" });
+    h.state.menu = false;
     await ctxBoundaryTick(h.deps);
     expect(h.sent).toEqual([{ target: "master:agent-car-talk", line: "/save-compact" }]);
   });
@@ -138,6 +146,7 @@ describe("ctxBoundaryTick", () => {
     expect(h.sent).toEqual([{ target: "master:agent-pm-a", line: "/save-compact" }]);
     expect(h.logs.filter((l) => l.includes("ccWindow")).length).toBe(1);
   });
+
   test("执行者：策略配成 save-compact、或者退回全局，都改发带清单的 /compact", async () => {
     for (const autoCompact of [{ policies: [{ id: "executor", action: "save-compact" }] }, { window: 100_000, idleHours: 0, policies: [{ id: "executor", enabled: false }] }]) {
       resetCtxBoundaryState();
@@ -148,28 +157,36 @@ describe("ctxBoundaryTick", () => {
       expect(h.sent).toEqual([{ target: "master:agent-task-t1", line: `/compact ${DEFAULT_KEEP_LIST}` }]);
     }
   });
-  test("输入框有草稿（owner 打了一半）→ 硬上限也不注入，免得把草稿连着 /compact 一起提交", async () => {
+
+  test("输入框有草稿 → 硬上限也不注入；过救命线被挡就提醒 owner，同一个 agent 30 分钟最多一次（adv1 P2-6）", async () => {
     const h = harness([], { state: { draft: true } });
-    h.deps.agents = async () => [agent({ ctx: 400_000, convTs: h.now })];
-    expect((await ctxBoundaryTick(h.deps))[0].verdict).toEqual({ fire: false, reason: "draft" });
-    expect(h.sent.length).toBe(0);
+    h.deps.agents = async () => [agent({ ctx: 400_000, convTs: h.now }), agent({ name: "agent-task-soft", target: "master:agent-task-soft", ctx: 210_000 })];
+    expect((await ctxBoundaryTick(h.deps)).map((x) => x.verdict)).toEqual([{ fire: false, reason: "draft" }, { fire: false, reason: "draft" }]);
+    expect(h.alerts).toEqual([{ agent: "agent-task-t1", text: expect.stringContaining("过了救命线"), data: { ctx: 400_000, cap: 250_000, reason: "draft" } }]);
+    h.advance(10 * MIN);
+    await ctxBoundaryTick(h.deps);
+    expect(h.alerts.length).toBe(1); // 只过软线的那个不提醒；30 分钟内不重复
+    h.advance(21 * MIN);
+    await ctxBoundaryTick(h.deps);
+    expect(h.alerts.length).toBe(2);
     h.state.draft = false; // 发出去了 / 清掉了：下一轮照常
     h.advance(MIN);
-    expect((await ctxBoundaryTick(h.deps))[0].verdict).toEqual({ fire: true, kind: "hard-cap" });
+    expect((await ctxBoundaryTick(h.deps)).map((x) => x.verdict)).toEqual([{ fire: true, kind: "hard-cap" }, { fire: true, kind: "idle" }]);
+    expect(h.sent.map((x) => x.target)).toEqual(["master:agent-task-t1", "master:agent-task-soft"]);
   });
 
   test("发送失败：日志带错误原文，不记注入守卫，5 分钟后重试（不进 30 分钟沉默期）", async () => {
     const h = harness([]);
     h.deps.agents = async () => [agent({ ctx: 300_000, convTs: h.now })];
+    const type = h.deps.type;
     let fail = true;
-    h.deps.send = async (target, line) => {
+    h.deps.type = async (t, text) => {
       if (fail) throw new Error("can't find window");
-      h.sent.push({ target, line });
+      await type(t, text);
     };
     const r = await ctxBoundaryTick(h.deps);
     expect(r[0].inject).toEqual({ status: "failed", error: "can't find window" });
     expect(h.logs.some((l) => l.includes("failed（can't find window）"))).toBe(true);
-    expect(compactInjectedRecently("master:agent-task-t1", h.now)).toBe(false);
     h.advance(4 * MIN);
     expect((await ctxBoundaryTick(h.deps))[0].verdict).toEqual({ fire: false, reason: "retry-wait" });
     fail = false;
@@ -177,21 +194,25 @@ describe("ctxBoundaryTick", () => {
     expect((await ctxBoundaryTick(h.deps))[0].inject?.status).toBe("executed");
     expect(h.sent.length).toBe(1);
   });
-  test("lp-state 到位前（占位判定 = 有菜单 + 草稿）：具名策略不注入；个人 agent 走全局旧口径，过线照样压，93% 救命线照常", async () => {
-    const placeholder = { state: { menu: true, draft: true, lp: "unknown" as const }, autoCompact: { window: 450_000, idleHours: 0.2 } };
-    const h = harness([], placeholder);
-    h.deps.agents = async () => [
-      agent({ ctx: 300_000, convTs: 0 }),
-      agent({ name: "agent-car-talk", projectId: "personal", ctx: 800_000, convTs: 0 }),
-      agent({ name: "agent-gc-car", projectId: "personal", ctx: 935_000, convTs: h.now, mtime: h.now, realWindow: 1_000_000 }),
-    ];
+
+  test("敲完字弹出对话框：不回车、提醒 owner；对话框关掉后下一轮把自己敲的字删掉，再照常注入（adv1 P2-9）", async () => {
+    const h = harness([]);
+    h.deps.agents = async () => [agent({ ctx: 300_000, convTs: h.now })];
+    const w = h.win("master:agent-task-t1");
+    w.onType = (win) => void (win.pane = "Do you want to proceed?\n[menu]");
     const r = await ctxBoundaryTick(h.deps);
-    expect(r.map((x) => [x.agent, x.verdict])).toEqual([
-      ["agent-task-t1", { fire: false, reason: "menu" }],
-      ["agent-car-talk", { fire: true, kind: "idle" }],
-      ["agent-gc-car", { fire: true, kind: "hard-cap" }], // 在忙也照样过救命线
-    ]);
-    expect(h.sent.map((x) => x.line)).toEqual(["/save-compact", "/save-compact"]);
+    expect(r[0].inject).toMatchObject({ status: "failed", leftover: true });
+    expect(h.sent.length).toBe(0);
+    expect(h.alerts[0].data.reason).toBe("leftover");
+    w.onType = undefined;
+    h.advance(MIN);
+    await ctxBoundaryTick(h.deps); // 对话框还在：不动
+    expect(w.box).toBe(`/compact ${DEFAULT_KEEP_LIST}`);
+    w.pane = "some output\n❯ \n"; // owner 答完对话框
+    h.advance(5 * MIN);
+    await ctxBoundaryTick(h.deps);
+    expect(h.logs.some((l) => l.includes("已删掉"))).toBe(true);
+    expect(h.sent).toEqual([{ target: "master:agent-task-t1", line: `/compact ${DEFAULT_KEEP_LIST}` }]); // 同一轮删完就照常注入
   });
 
   test("全局路径的闲置 = 新口径且旧 mtime 口径：最后对话早了但文件刚写过 → 不算闲；具名策略只看新口径", async () => {
@@ -206,65 +227,21 @@ describe("ctxBoundaryTick", () => {
       ["agent-task-t1", { fire: true, kind: "idle" }],
     ]);
   });
-
-  test("gateGlobal 打开（lp-state 合进来之后）：个人 agent 也过画面判定", async () => {
-    const h = harness([], { state: { menu: true }, autoCompact: { window: 450_000, idleHours: 0 }, gateGlobal: true });
-    h.deps.agents = async () => [agent({ name: "agent-car-talk", projectId: "personal", ctx: 800_000 })];
-    expect((await ctxBoundaryTick(h.deps))[0].verdict).toEqual({ fire: false, reason: "menu" });
-  });
 });
 
-describe("injectCompact（T35 批量动作的入口）", () => {
-  test("画面状态不允许 → skipped 带原因文字，不敲键", async () => {
-    for (const [s, reason] of [
-      [{ compacting: true }, "compacting"],
-      [{ wall: true, lp: "unknown" }, "quota-wall"],
-      [{ menu: true }, "menu"],
-      [{ draft: true }, "draft"],
-      [{ exhausted: true, wall: true, lp: "on" }, "quota-wall"],
-    ] as const) {
-      const h = harness([], { state: s as Partial<PaneQuotaState> });
-      const r = await injectCompact(tgt("x"), { action: "compact" }, h.deps);
-      expect(r).toMatchObject({ status: "skipped", reason });
-      expect((r as { text: string }).text.length).toBeGreaterThan(0);
-      expect(h.sent.length).toBe(0);
-    }
-    const h = harness([], { panes: { "master:x": null } });
-    expect(await injectCompact(tgt("x"), { action: "compact" }, h.deps)).toMatchObject({ status: "skipped", reason: "pane-unknown" });
-  });
-
-  test("闲着 = executed，忙 = queued，发送抛错 = failed；成功注入都记守卫", async () => {
-    const h = harness([], { panes: { "master:busy": BUSY_PANE } });
-    expect(await injectCompact(tgt("idle"), { action: "compact", keep: "只留卡号" }, h.deps)).toEqual({ status: "executed", line: "/compact 只留卡号" });
-    expect(await injectCompact(tgt("busy"), { action: "save-compact" }, h.deps)).toEqual({ status: "queued", line: "/save-compact" });
-    // 执行者（名字或 worktree 判定）：save-compact 改成 compact（手动按钮 / 批量动作都走这条）
-    expect(await injectCompact(tgt("agent-foo", true), { action: "save-compact" }, h.deps)).toMatchObject({ line: `/compact ${DEFAULT_KEEP_LIST}` });
-    expect(compactInjectedRecently("master:idle", h.now)).toBe(true);
-    expect(compactInjectedRecently("master:idle", h.now + 16 * MIN)).toBe(false);
-    h.deps.send = async () => {
-      throw new Error("no window");
-    };
-    expect(await injectCompact(tgt("gone"), { action: "compact" }, h.deps)).toEqual({ status: "failed", error: "no window" });
-  });
-
-  test("排队（lp-state 同时报 draft）→ 跳过，原因写「已排队」，和草稿分开", async () => {
-    const h = harness([], { state: { draft: true }, panes: { "master:q": "❯ /compact x\n  Press up to edit queued messages\n" } });
-    expect(await injectCompact(tgt("q"), { action: "compact" }, h.deps)).toMatchObject({ status: "skipped", reason: "queued" });
-    expect(await injectCompact(tgt("d"), { action: "compact" }, h.deps)).toMatchObject({ status: "skipped", reason: "draft" });
-    h.deps.agents = async () => [agent({ name: "q", target: "master:q", ctx: 400_000, convTs: h.now })];
-    expect((await ctxBoundaryTick(h.deps))[0].verdict).toEqual({ fire: false, reason: "queued" });
-    expect(h.sent.length).toBe(0);
-  });
-
-  test("gate:false（Discord 手动按钮，lp-state 到位前）：不看画面照发；执行者照样改 compact", async () => {
-    const h = harness([], { state: { menu: true, draft: true } });
-    expect(await injectCompact(tgt("car"), { action: "save-compact", gate: false }, h.deps)).toEqual({ status: "executed", line: "/save-compact" });
-    expect(await injectCompact(tgt("agent-task-t1", true), { action: "save-compact", gate: false }, h.deps)).toMatchObject({ line: `/compact ${DEFAULT_KEEP_LIST}` });
-  });
-
-  test("读不到画面（窗口不在）：gate:false 也不发，不假报「已开始」", async () => {
-    const h = harness([], { panes: { "master:gone": null } });
-    expect(await injectCompact(tgt("gone"), { action: "save-compact", gate: false }, h.deps)).toMatchObject({ status: "skipped", reason: "pane-unknown" });
-    expect(h.sent.length).toBe(0);
+describe("isLinkedWorktree（执行者认法的 worktree 兜底，adv1 P2-8）", () => {
+  const root = mkdtempSync(join(tmpdir(), "ctxb-wt-"));
+  const repo = (name: string, git: string | null) => {
+    const d = join(root, name, "sub");
+    mkdirSync(d, { recursive: true });
+    if (git === null) mkdirSync(join(root, name, ".git"));
+    else writeFileSync(join(root, name, ".git"), git);
+    return d;
+  };
+  test("gitdir 指向 …/worktrees/<名字> 才算；submodule（…/modules/…）和普通仓库都不算", () => {
+    expect(isLinkedWorktree(repo("wt", "gitdir: /r/.git/worktrees/wt-t36\n"))).toBe(true);
+    expect(isLinkedWorktree(repo("sm", "gitdir: ../.git/modules/vendor/lib\n"))).toBe(false);
+    expect(isLinkedWorktree(repo("plain", null))).toBe(false);
+    expect(isLinkedWorktree(null)).toBe(false);
   });
 });

@@ -25,6 +25,8 @@ export interface GlobalAutoCompact {
   window?: number;
   idleHours?: number;
   emergency?: boolean;
+  /** 自动注入总开关，缺省关：先用 `manager ctx-boundary dry-run` 看会对谁做什么，再 `ctx-boundary on` */
+  inject?: boolean;
 }
 
 // 全局口径（从 stats-dashboard 原样搬来）：缺省 40 万 + 闲置 3 小时；拿得到真实窗口时软线收到 85%、救命线 93%。
@@ -70,16 +72,21 @@ export function policyBoundary(m: PolicyMatch, realWindow: number | null): Bound
 
 // ── 决策表 ─────────────────────────────────────────────────────────────
 
+/**
+ * 注入前要看的窗口状态。前六项来自 lib/lp-state.ts 的 paneQuotaState（T35 与本模块共用一份判定），其余是：
+ * 画面上已有排队消息、spinner 行在报 API 重试（压缩途中也会这样，认不出就会再排一条 /compact）、
+ * tmux 报的 copy-mode（有人在翻历史，发键会把他拽回底部）、前台进程不是 Claude Code（CC 退出了，敲进去的是 shell）。
+ */
+export type PaneGate = PaneQuotaState & { queued: boolean; apiRetry: boolean; copyMode: boolean; notCc: boolean };
+
 export interface BoundaryInput {
   ctx: number;
   window: number;
   hardCap: number | null;
   /** 最后一条真实对话距今满 idleMs，且画面不在忙 */
   idle: boolean;
-  /** null = 读不到画面；来自 lib/lp-state.ts 的 paneQuotaState（T35 与本模块共用一份判定） */
-  pane: PaneQuotaState | null;
-  /** 画面上已有排队消息（「Press up to edit queued messages」） */
-  queued: boolean;
+  /** null = 读不到画面 */
+  pane: PaneGate | null;
   /** bridge 刚注入过压缩（守卫期内） */
   injectedRecently: boolean;
   lastTrig: number;
@@ -87,12 +94,17 @@ export interface BoundaryInput {
   retryMs: number;
 }
 
-export type SkipReason = "under" | "compacting" | "retry-wait" | "pane-unknown" | "quota-wall" | "menu" | "draft" | "queued" | "busy";
+export type PaneBlock = "not-cc" | "copy-mode" | "compacting" | "api-retry" | "quota-wall" | "menu" | "queued" | "draft";
+export type SkipReason = PaneBlock | "under" | "recent" | "retry-wait" | "pane-unknown" | "busy";
 export type BoundaryVerdict = { fire: true; kind: "idle" | "hard-cap" } | { fire: false; reason: SkipReason };
 
 export const SKIP_REASON_TEXT: Record<SkipReason, string> = {
   under: "没过线",
+  recent: "15 分钟内刚注入过压缩",
   compacting: "正在压缩",
+  "api-retry": "API 在重试（可能是压缩在重试）",
+  "not-cc": "窗口里跑的不是 Claude Code（多半已经退出，只剩 shell）",
+  "copy-mode": "有人在翻看终端历史（copy-mode）",
   "retry-wait": "冷却中（注入过还没见效，30 分钟；或刚发送失败，5 分钟）",
   "pane-unknown": "读不到画面",
   "quota-wall": "撞了额度墙又没开 low-priority",
@@ -102,9 +114,23 @@ export const SKIP_REASON_TEXT: Record<SkipReason, string> = {
   busy: "还在忙",
 };
 
+/** 画面挡不挡注入（自动和手动共用）：不是 CC → copy-mode → 正在压缩 → API 重试 → 撞墙且没开 LP → 菜单 → 已排队 → 草稿 */
+export function paneBlock(p: PaneGate): PaneBlock | null {
+  if (p.notCc) return "not-cc";
+  if (p.copyMode) return "copy-mode";
+  if (p.compacting) return "compacting";
+  if (p.apiRetry) return "api-retry";
+  if ((p.wall && p.lp !== "on") || p.exhausted) return "quota-wall";
+  if (p.menu) return "menu";
+  // 排队在草稿之前判：lp-state 把排队也算进 draft（输入框不是确定的空），这里单独报出来，owner 看结果分得清
+  if (p.queued) return "queued";
+  if (p.draft) return "draft";
+  return null;
+}
+
 /**
  * 按顺序判，先命中先返回：
- *   没过线 → 正在压缩 → 30 分钟重试冷却 → 读不到画面 → 撞墙且没开 LP → 画面上有选择菜单 → 已有排队消息 → 输入框有草稿
+ *   没过线 → 刚注入过 → 正在压缩 / API 重试 → 30 分钟重试冷却 → 读不到画面 → paneBlock 的其余各条
  *   → 过硬上限（忙也注入，排队到回合结束） → 过软线且闲置 → 其余（忙）不动。
  * 撞墙那条排在冷却之后、且不开火，所以不占重试计时；菜单那条挡的是「往菜单里敲字」——额度墙菜单第 3 项是花钱的 usage credits；
  * 草稿那条挡的是「把 owner 打了一半的字连着 /compact 一起提交」，硬上限也不能越过它。
@@ -113,14 +139,13 @@ export function boundaryDecision(i: BoundaryInput): BoundaryVerdict {
   const overSoft = i.window > 0 && i.ctx >= i.window;
   const overHard = i.hardCap !== null && i.ctx >= i.hardCap;
   if (!overSoft && !overHard) return { fire: false, reason: "under" };
-  if (i.injectedRecently || i.pane?.compacting) return { fire: false, reason: "compacting" };
+  if (i.injectedRecently) return { fire: false, reason: "recent" };
+  if (i.pane?.compacting) return { fire: false, reason: "compacting" };
+  if (i.pane?.apiRetry) return { fire: false, reason: "api-retry" };
   if (i.lastTrig > 0 && i.now - i.lastTrig <= i.retryMs) return { fire: false, reason: "retry-wait" };
   if (!i.pane) return { fire: false, reason: "pane-unknown" };
-  if ((i.pane.wall && i.pane.lp !== "on") || i.pane.exhausted) return { fire: false, reason: "quota-wall" };
-  if (i.pane.menu) return { fire: false, reason: "menu" };
-  // 排队在草稿之前判：lp-state 把排队也算进 draft（输入框不是确定的空），这里单独报出来，owner 看结果分得清
-  if (i.queued) return { fire: false, reason: "queued" };
-  if (i.pane.draft) return { fire: false, reason: "draft" };
+  const blocked = paneBlock(i.pane);
+  if (blocked) return { fire: false, reason: blocked };
   if (overHard) return { fire: true, kind: "hard-cap" };
   if (i.idle) return { fire: true, kind: "idle" };
   return { fire: false, reason: "busy" };

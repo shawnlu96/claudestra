@@ -35,6 +35,8 @@ export interface AppConfig {
     idleHours?: number;
     window?: number;
     emergency?: boolean;
+    /** 上下文边界自动注入总开关，缺省关（先 manager ctx-boundary dry-run 看结果再 on）；关着时面板照常显示、手动按钮照常能用 */
+    inject?: boolean;
     /** 按项目 / 名字模式的上下文边界（lib/ctx-boundary-policy.ts 解析和校验）。这里原样保留：set* 是读改写，
      *  在这里过滤就会把 owner 写错的条目悄悄抹掉，而不是在面板上报出来 */
     policies?: unknown;
@@ -95,6 +97,7 @@ function mergeAutoCompact(ac: any): AppConfig["autoCompact"] | undefined {
     ...(typeof ac.idleHours === "number" ? { idleHours: ac.idleHours } : {}),
     ...(typeof ac.window === "number" ? { window: ac.window } : {}),
     ...(typeof ac.emergency === "boolean" ? { emergency: ac.emergency } : {}),
+    ...(typeof ac.inject === "boolean" ? { inject: ac.inject } : {}),
     ...(ac.policies !== undefined ? { policies: ac.policies } : {}),
   };
   return Object.keys(out).length ? out : undefined;
@@ -198,13 +201,14 @@ export async function setAutoCompactIdleHours(hours: number): Promise<AppConfig>
 }
 
 /** v2.20.2+ 设置界面写入口:一次可改阈值/闲置时长任意子集。 */
-export async function setAutoCompact(patch: { window?: number; idleHours?: number; emergency?: boolean }): Promise<AppConfig> {
+export async function setAutoCompact(patch: { window?: number; idleHours?: number; emergency?: boolean; inject?: boolean }): Promise<AppConfig> {
   const cfg = await readConfig();
   cfg.autoCompact = {
     ...cfg.autoCompact,
     ...(typeof patch.window === "number" ? { window: patch.window } : {}),
     ...(typeof patch.idleHours === "number" ? { idleHours: patch.idleHours } : {}),
     ...(typeof patch.emergency === "boolean" ? { emergency: patch.emergency } : {}),
+    ...(typeof patch.inject === "boolean" ? { inject: patch.inject } : {}),
   };
   await writeConfig(cfg);
   return cfg;

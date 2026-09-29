@@ -8,6 +8,7 @@ import { readFileSync } from "fs";
 import { join } from "path";
 import { paneQuotaState, stripAnsi } from "../src/lib/lp-state.js";
 import { ctxBoundaryTick, injectCompact, resetCtxBoundaryState, type BoundaryAgent, type CtxBoundaryDeps } from "../src/bridge/ctx-boundary.js";
+import { liveInjectDeps } from "../src/bridge/ctx-boundary-inject.js";
 
 const fx = (n: string) => readFileSync(join(import.meta.dir, "fixtures/lp", `${n}.ansi`), "utf8");
 const state = (raw: string) => paneQuotaState(stripAnsi(raw), raw);
@@ -54,23 +55,36 @@ describe("认不出的输入框一律当草稿", () => {
 });
 
 describe("执行器接上真实判定：草稿 / 对话框过硬上限也一个键都不敲", () => {
-  function run(raw: string) {
+  /** after：敲完字那一刻的画面（缺省 = 空框样本里的输入框换成敲进去的字） */
+  function run(raw: string, after?: string) {
     resetCtxBoundaryState();
     const sent: string[] = [];
-    const a: BoundaryAgent = { name: "agent-task-t1", projectId: null, target: "master:agent-task-t1", executor: true, ctx: 400_000, convTs: 0, mtime: 0, realWindow: null };
+    let typed = "";
+    const a: BoundaryAgent = {
+      name: "agent-task-t1", projectId: null, channelId: null, cwd: null, sessionId: "s1", target: "master:agent-task-t1", executor: true,
+      ctx: 400_000, convTs: 0, mtime: 0, realWindow: null,
+    };
+    const frame = () => (typed ? after ?? withInput([`\x1b[39m❯\xa0${typed}`]) : raw);
     const deps: CtxBoundaryDeps = {
+      ...liveInjectDeps,
       now: () => 1_000_000_000,
       agents: async () => [a],
-      capture: async () => ({ plain: stripAnsi(raw), esc: raw }),
-      paneState: paneQuotaState,
-      send: async (_t, line) => void sent.push(line),
-      autoCompact: () => undefined,
+      liveSession: async (x) => x,
+      capture: async () => ({ plain: stripAnsi(frame()), esc: frame(), inMode: false, command: "claude.exe" }),
+      type: async (_t, text) => void (typed += text),
+      enter: async () => {
+        sent.push(typed);
+        typed = "";
+      },
+      erase: async () => void (typed = ""),
+      sleep: async () => {},
+      autoCompact: () => ({ inject: true }),
       log: () => {},
-      gateGlobal: true,
+      alert: () => {},
     };
-    return { deps, sent, a };
+    return { deps, sent, a, typed: () => typed };
   }
-  test("空框 → 硬上限照常注入", async () => {
+  test("空框 → 硬上限照常注入：敲完读回来的输入框和敲的一致才回车", async () => {
     const { deps, sent } = run(fx("input-suggestion"));
     expect((await ctxBoundaryTick(deps))[0].verdict).toEqual({ fire: true, kind: "hard-cap" });
     expect(sent.length).toBe(1);
@@ -95,5 +109,16 @@ describe("执行器接上真实判定：草稿 / 对话框过硬上限也一个�
       expect(await injectCompact(a, { action: "compact" }, deps)).toMatchObject({ status: "skipped" });
       expect(sent.length).toBe(0);
     }
+  });
+  test("压缩途中 API 在重试（真实样本 compact-api-retry）→ 认成还在压缩，不再排一条（adv1 P2-1）", async () => {
+    const { deps, sent } = run(fx("compact-api-retry"));
+    expect((await ctxBoundaryTick(deps))[0].verdict).toEqual({ fire: false, reason: "api-retry" });
+    expect(sent.length).toBe(0);
+  });
+  test("敲完字弹出权限框（真实样本）→ 不回车", async () => {
+    const { deps, sent, a, typed } = run(fx("input-suggestion"), fx("modal-permission"));
+    expect(await injectCompact(a, { action: "compact" }, deps)).toMatchObject({ status: "failed", leftover: true });
+    expect(sent.length).toBe(0);
+    expect(typed().length).toBeGreaterThan(0);
   });
 });

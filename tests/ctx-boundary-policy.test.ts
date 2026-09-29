@@ -3,8 +3,7 @@ import {
   BUILTIN_POLICIES, ccLaunchSettings, compactCommand, DEFAULT_KEEP_LIST, effectiveAction, globMatch, isExecutor, matchPolicy, resolvePolicies,
   type CtxPolicy,
 } from "../src/lib/ctx-boundary-policy.js";
-import { boundaryDecision, boundaryView, globalBoundary, policyBoundary, type BoundaryInput } from "../src/lib/ctx-boundary-decision.js";
-import type { PaneQuotaState } from "../src/lib/lp-state.js";
+import { boundaryDecision, boundaryView, globalBoundary, policyBoundary, type BoundaryInput, type PaneGate } from "../src/lib/ctx-boundary-decision.js";
 
 const byId = (ps: CtxPolicy[], id: string) => ps.find((p) => p.id === id);
 
@@ -149,9 +148,11 @@ describe("policyBoundary", () => {
 });
 
 describe("boundaryDecision：决策表", () => {
-  const clear: PaneQuotaState = { wall: false, lp: "off", exhausted: false, menu: false, compacting: false, draft: false };
+  const clear: PaneGate = {
+    wall: false, lp: "off", exhausted: false, menu: false, compacting: false, draft: false, queued: false, apiRetry: false, copyMode: false, notCc: false,
+  };
   const base: BoundaryInput = {
-    ctx: 210_000, window: 200_000, hardCap: 250_000, idle: true, pane: clear, queued: false, injectedRecently: false,
+    ctx: 210_000, window: 200_000, hardCap: 250_000, idle: true, pane: clear, injectedRecently: false,
     lastTrig: 0, now: 1_000_000_000, retryMs: 30 * 60_000,
   };
   const d = (o: Partial<BoundaryInput>) => boundaryDecision({ ...base, ...o });
@@ -175,9 +176,15 @@ describe("boundaryDecision：决策表", () => {
     expect(d({ ctx: 900_000, pane: { ...clear, menu: true } })).toEqual({ fire: false, reason: "menu" });
   });
 
-  test("正在压缩：画面显示压缩中，或 bridge 刚注入过", () => {
+  test("正在压缩：画面显示压缩中，或压缩途中 API 在重试（adv1 P2-1）；bridge 刚注入过 → recent", () => {
     expect(d({ pane: { ...clear, compacting: true } })).toEqual({ fire: false, reason: "compacting" });
-    expect(d({ ctx: 900_000, injectedRecently: true })).toEqual({ fire: false, reason: "compacting" });
+    expect(d({ ctx: 900_000, idle: false, pane: { ...clear, apiRetry: true } })).toEqual({ fire: false, reason: "api-retry" });
+    expect(d({ ctx: 900_000, injectedRecently: true })).toEqual({ fire: false, reason: "recent" });
+  });
+
+  test("CC 已退出只剩 shell、有人在 copy-mode 翻历史 → 硬上限也不发键（adv1 P2-3 / P2-4）", () => {
+    expect(d({ ctx: 900_000, pane: { ...clear, notCc: true } })).toEqual({ fire: false, reason: "not-cc" });
+    expect(d({ ctx: 900_000, pane: { ...clear, copyMode: true } })).toEqual({ fire: false, reason: "copy-mode" });
   });
 
   test("30 分钟重试：之内不重复注入（硬上限也遵守），过了再来", () => {
@@ -187,7 +194,7 @@ describe("boundaryDecision：决策表", () => {
 
   test("读不到画面 → 不盲敲；已有排队消息 → 不叠第二条", () => {
     expect(d({ pane: null })).toEqual({ fire: false, reason: "pane-unknown" });
-    expect(d({ ctx: 300_000, queued: true })).toEqual({ fire: false, reason: "queued" });
+    expect(d({ ctx: 300_000, pane: { ...clear, queued: true, draft: true } })).toEqual({ fire: false, reason: "queued" });
   });
 
   // 原 stats-dashboard autoCompactDecision 的用例，换成全局口径（软线 85 万 / 救命线 93 万）
@@ -292,8 +299,10 @@ describe("第 1 轮审查补的：match 替换语义 / 宽模式抢执行者 / �
     expect(resolvePolicies([{ id: "executor", enabled: false }, { id: "x", window: 1, match: { names: ["agent-*"] } }]).warnings).toEqual([]);
   });
   test("决策表：输入框有草稿 → 不注入，硬上限也不例外；LP 余量用完 → 按撞墙处理", () => {
-    const pane: PaneQuotaState = { wall: false, lp: "off", exhausted: false, menu: false, compacting: false, draft: true };
-    const base: BoundaryInput = { ctx: 900_000, window: 200_000, hardCap: 250_000, idle: false, pane, queued: false, injectedRecently: false, lastTrig: 0, now: 1, retryMs: 1 };
+    const pane: PaneGate = {
+      wall: false, lp: "off", exhausted: false, menu: false, compacting: false, draft: true, queued: false, apiRetry: false, copyMode: false, notCc: false,
+    };
+    const base: BoundaryInput = { ctx: 900_000, window: 200_000, hardCap: 250_000, idle: false, pane, injectedRecently: false, lastTrig: 0, now: 1, retryMs: 1 };
     expect(boundaryDecision(base)).toEqual({ fire: false, reason: "draft" });
     expect(boundaryDecision({ ...base, pane: { ...pane, draft: false, wall: true, lp: "on", exhausted: true } })).toEqual({ fire: false, reason: "quota-wall" });
   });
