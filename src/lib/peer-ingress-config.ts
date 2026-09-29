@@ -21,6 +21,13 @@ import { webPortFromStartScript } from "./cli-install.js";
 
 const ENV_HEADER = "# Claudestra 运行时配置 (由 bun run setup 生成)";
 
+/** .env 补 / 改几个键（其余原文逐字节不动）；测试里写仓库根的 .env 直接报错 */
+export async function writeEnvKeys(updates: Record<string, string>, envPath = `${REPO_ROOT}/.env`): Promise<void> {
+  const text = existsSync(envPath) ? await readFile(envPath, "utf8") : null;
+  assertNoRepoEnvWriteInTest(envPath);
+  await writeFile(envPath, mergeEnvContent(text, updates, ENV_HEADER));
+}
+
 /** 同一个 serve 端口上把 /api/v1 挂到 peer 入口（serve 剥不剥挂载前缀，入口都认） */
 function servePeerArgs(httpsPort: number, ingressPort: number): string[] {
   return ["serve", "--bg", `--https=${httpsPort}`, "--set-path", "/api/v1", `http://127.0.0.1:${ingressPort}`];

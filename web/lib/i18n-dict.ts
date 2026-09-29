@@ -694,8 +694,11 @@ export const DICT: Record<string, string> = {
   "读取中继状态失败": "Couldn't read relay status",
   "我的中继地址": "My relay address",
   "手机 / 别的浏览器不装任何东西、不开 Tailscale 就能打开这个地址。": "Phones and other browsers can open this address with nothing installed and no Tailscale.",
-  "出门访问目前要靠 Tailscale；在 .env 里加这两行、重启 bridge，手机不装任何东西就能打开这台机器。":
-    "Remote access currently needs Tailscale. Add these two lines to .env and restart the bridge; phones can then open this machine with nothing installed.",
+  "出门访问目前要靠 Tailscale。接入中继之后，手机不装任何东西就能打开这台机器。":
+    "Remote access currently needs Tailscale. Once the relay is on, phones can open this machine with nothing installed.",
+  "一键接入官方中继": "Connect to the official relay",
+  "接入中继失败": "Couldn't connect the relay",
+  "自建中继：在 .env 里加这两行、重启 bridge。": "Self-hosted relay: add these two lines to .env and restart the bridge.",
   "配对新设备": "Pair a new device",
   "配对码生成失败": "Couldn't create a pairing code",
   "全部会话": "all sessions",

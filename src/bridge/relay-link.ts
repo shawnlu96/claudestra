@@ -14,7 +14,8 @@ import type { RelayLinkInfo } from "../lib/relay-client-types.js";
 import { instanceKeySync, signedHeaders } from "../lib/instance-key.js";
 import { createE2eOutbound, defaultOutboundDeps } from "../lib/peer-e2e-outbound.js";
 import { E2E_RESPONSE_WIRE_MAX } from "../lib/peer-e2e-wire.js";
-import { ensurePeerIngressPort, resolveWebPort } from "../lib/peer-ingress-config.js";
+import { ensurePeerIngressPort, resolveWebPort, writeEnvKeys } from "../lib/peer-ingress-config.js";
+import { DEFAULT_RELAY_URL, normalizeRelayUrl } from "../lib/setup-remote-access.js";
 import { configuredPeerIngressPort, DEFAULT_BRIDGE_PORT } from "../lib/bridge-url.js";
 import { bridgeHttpBase, bridgePortOf } from "../lib/bridge-port.js";
 import { repoEnvVar } from "../lib/env-file.js";
@@ -70,8 +71,12 @@ export async function refreshRelayContacts(): Promise<void> {
   client.setContacts(peers.filter((p) => !p.disabled && p.fp && FP_RE.test(p.fp)).map((p) => p.fp!));
 }
 
+/** 启动时的依赖留着：网页上一键接入中继时（enableRelay）当场连，用同一套 */
+let startDeps: { handleApi?: ApiHandler } = {};
+
 /** bridge 启动时调一次。没配 RELAY_URL 立刻返回；连接失败由客户端库自己退避重连，这里不抛 */
 export async function startRelayLink(deps: { handleApi?: ApiHandler } = {}): Promise<void> {
+  startDeps = deps;
   const relayUrl = repoEnvVar("RELAY_URL").trim();
   if (!relayUrl || client || sandboxDisabled("中继")) return; // 沙箱不用生产实例身份连中继（lib/sandbox.ts）
   const key = instanceKeySync();
@@ -110,6 +115,26 @@ export async function startRelayLink(deps: { handleApi?: ApiHandler } = {}): Pro
     log,
   });
   if (!contactsTimer) contactsTimer = setInterval(() => void refreshRelayContacts(), CONTACTS_EVERY_MS);
+}
+
+export type EnableRelayResult = { ok: true; relayUrl: string } | { ok: false; status: 400 | 409; error: string };
+
+/**
+ * Peer 面板「一键接入中继」：.env 写 RELAY_URL（不给地址 = 官方中继）后当场连上，不用重启 bridge。
+ * 已经配了的不动（换地址改 .env 或重跑 setup）；沙箱不写仓库 .env、也不拿生产身份连中继。RELAY_NAME 不写：没写就按主机名取
+ */
+export async function enableRelay(
+  requested: unknown,
+  d = { current: () => repoEnvVar("RELAY_URL").trim(), write: writeEnvKeys, start: () => startRelayLink(startDeps), sandbox: () => sandboxDisabled("中继") },
+): Promise<EnableRelayResult> {
+  const off = d.sandbox();
+  if (off) return { ok: false, status: 409, error: off };
+  if (d.current()) return { ok: false, status: 409, error: "已经配了 RELAY_URL：要换地址改 .env 或重跑 bun run setup" };
+  const relayUrl = normalizeRelayUrl(typeof requested === "string" && requested.trim() ? requested : DEFAULT_RELAY_URL);
+  if (!relayUrl) return { ok: false, status: 400, error: "中继地址不对：写 wss://<主机> 或主机名" };
+  await d.write({ RELAY_URL: relayUrl });
+  await d.start();
+  return { ok: true, relayUrl };
 }
 
 export interface PeerFetchInit {
