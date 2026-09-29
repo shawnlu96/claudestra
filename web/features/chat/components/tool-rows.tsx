@@ -204,7 +204,7 @@ function ToolDetailView({ name, detail }: { name: string; detail: string }) {
 
 /**
  * 一组连续的工具调用（中间没夹文字）收进一个框：默认只露最新一步，点组头展开全部，再点单张卡看详情。
- * 只有 1～2 步的不收（多点一下反而更麻烦）；有失败的在组头标出来，收起也看得见。导出稿全展开、组头不可点（../tool-group.ts）。
+ * 只有 1 步的不收（框住它只是多一行组头）；有失败的在组头标出来，收起也看得见。导出稿全展开、组头不可点（../tool-group.ts）。
  * open 是本组本地状态：流式期间新工具不断进来，组件按段下标复用，展开态不会被冲掉。
  */
 export function ToolGroup({ tools, streaming, activeLast }: { tools: ToolCallView[]; streaming: boolean; activeLast: boolean }) {

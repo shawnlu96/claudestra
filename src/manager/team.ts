@@ -7,7 +7,10 @@
  */
 import { isMasterAgent } from "../lib/registry.js";
 import { hasUnsafeDisplayChars } from "../lib/display-text.js";
+import { isTeamRole, TEAM_ROLES } from "../lib/team-roles.js";
 import { loadRegistry, saveRegistry, normalizeName, output, type AgentInfo, type Registry } from "./core.js";
+
+export { cmdTeam } from "./team-up.js"; // 编排班子 up / down / status，与 team-link 同一个 manager 入口
 
 export const MASTER_PARENT = "master";
 export const TASK_MAX = 40;
@@ -16,9 +19,11 @@ export const TASK_MAX = 40;
 export interface TeamFlags {
   parent?: string;
   task?: string;
+  /** 编排班子角色（pm / dispatcher / executor）；"none" = 清除 */
+  role?: string;
 }
-/** 最终写进 registry 的两字段（缺 = 不设） */
-export type TeamFields = Pick<AgentInfo, "parent" | "task">;
+/** 最终写进 registry 的字段（缺 = 不设） */
+export type TeamFields = Pick<AgentInfo, "parent" | "task" | "role">;
 type ParentMap = Record<string, { parent?: string; channelId?: string }>;
 
 /**
@@ -31,7 +36,7 @@ export function extractTeamFlags(args: string[]): { rest: string[]; flags: TeamF
   let error: string | undefined;
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
-    const m = a.match(/^--(parent|task)(?:=(.*))?$/s);
+    const m = a.match(/^--(parent|task|role)(?:=(.*))?$/s);
     if (!m) {
       rest.push(a);
       continue;
@@ -86,7 +91,16 @@ export function autoParent(agents: ParentMap, channelId: string | undefined, chi
  * create 前（拉起 agent 之前）定下 parent / task；显式 --parent 不合法返回错误，调用方拒绝 create。
  * 自动反查只在带 --task 时生效（带任务名才算派活，普通建会话不挂）；反查结果同样过校验，不合法就不挂（不拒绝 create）。
  */
+/** --role：没写 / none → 不设；其余必须是班子角色 */
+export function roleField(raw: string | undefined): Pick<TeamFields, "role"> | { error: string } {
+  const r = raw?.trim();
+  if (!r || r === "none") return {};
+  return isTeamRole(r) ? { role: r } : { error: `--role 只能是 ${TEAM_ROLES.join(" / ")} / none` };
+}
+
 export function resolveTeamFields(agents: ParentMap, child: string, flags: TeamFlags, env: { channelId?: string }): TeamFields | { error: string } {
+  const role = roleField(flags.role);
+  if ("error" in role) return role;
   const task = flags.task?.trim() ?? "";
   const taskErr = validateTask(task);
   if (taskErr) return { error: taskErr };
@@ -99,7 +113,7 @@ export function resolveTeamFields(agents: ParentMap, child: string, flags: TeamF
     const err = validateParent(agents, child, parent);
     if (err) return { error: err };
   }
-  return { ...(parent ? { parent } : {}), ...(task ? { task } : {}) };
+  return { ...(parent ? { parent } : {}), ...(task ? { task } : {}), ...role };
 }
 
 /** cmdCreate 用：读 registry + 环境后定派发字段；出错直接 output 并返回 null（manager.ts 一行调用） */
@@ -115,9 +129,9 @@ export async function teamFieldsForCreate(child: string, flags: TeamFlags): Prom
  */
 export function keepOnResume(prior: AgentInfo | undefined, sessionId: string): Partial<AgentInfo> {
   if (!prior) return {};
-  const { parent, task, label } = prior;
+  const { parent, task, label, role } = prior;
   const external = prior.external === true && prior.sessionId === sessionId;
-  return { ...(parent ? { parent } : {}), ...(task ? { task } : {}), ...(label ? { label } : {}), ...(external ? { external } : {}) };
+  return { ...(parent ? { parent } : {}), ...(task ? { task } : {}), ...(label ? { label } : {}), ...(role ? { role } : {}), ...(external ? { external } : {}) };
 }
 
 /**
@@ -132,12 +146,20 @@ export function repointParentRefs(reg: Registry, oldKey: string, newKey?: string
   }
 }
 
-/** `team-link <agent> [--parent <agent|master|none>] [--task "<text>"]`：给已存在的 agent 补挂 / 改挂 / 改任务名 */
+/**
+ * `team-link <agent> [--parent <agent|master|none>] [--task "<text>"] [--role <pm|dispatcher|executor|none>]`：
+ * 给已存在的 agent 补挂 / 改挂 / 改任务名 / 设班子角色（角色下次启动生效，不自动重启）
+ */
 export async function cmdTeamLink(args: string[]) {
   const { rest, flags, error } = extractTeamFlags(args);
   const [name] = rest;
-  if (error || !name || rest.length > 1 || (flags.parent === undefined && flags.task === undefined)) {
-    output({ ok: false, error: error ?? 'usage: team-link <agent> [--parent <agent|master|none>] [--task "<text>"]（--task "" 清除）' });
+  if (error || !name || rest.length > 1 || (flags.parent === undefined && flags.task === undefined && flags.role === undefined)) {
+    output({ ok: false, error: error ?? 'usage: team-link <agent> [--parent <agent|master|none>] [--task "<text>"] [--role <role|none>]（--task "" 清除）' });
+    return;
+  }
+  const role = roleField(flags.role);
+  if ("error" in role) {
+    output({ ok: false, error: role.error });
     return;
   }
   const reg = await loadRegistry();
@@ -159,6 +181,11 @@ export async function cmdTeamLink(args: string[]) {
   else delete info.parent;
   if (task) info.task = task;
   else delete info.task;
+  if (flags.role !== undefined) {
+    if (role.role) info.role = role.role;
+    else delete info.role;
+  }
   await saveRegistry(reg);
-  output({ ok: true, agent: key.replace(/^agent-/, ""), parent: parent ? parent.replace(/^agent-/, "") : null, task: task ?? null });
+  const out = { agent: key.replace(/^agent-/, ""), parent: parent ? parent.replace(/^agent-/, "") : null, task: task ?? null, role: info.role ?? null };
+  output({ ok: true, ...out });
 }

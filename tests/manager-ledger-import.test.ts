@@ -8,6 +8,7 @@ import { join, resolve } from "node:path";
 import { describe, expect, test } from "bun:test";
 import { taskMetrics } from "../src/lib/ledger-metrics.js";
 import { closeLedger, getItem, getMeta, getTask, listEvents, listTasks, openLedger } from "../src/lib/ledger-store.js";
+import { setMeta } from "../src/lib/ledger-write.js";
 import { runLedger } from "../src/manager/ledger.js";
 import { applyImport, parseOwnerField, parseReviewCounts, parseTs, planImport, taskTimes, type ImportMap } from "../src/manager/ledger-import.js";
 
@@ -181,6 +182,21 @@ describe("时间线顺序（审查复验 P2）", () => {
 });
 
 describe("applyImport", () => {
+  test("PM 名单只在为空时写：已有别的名单就整批拒绝，提示走 team-apply；名单相同（重跑）照常幂等", () => {
+    const db = openLedger(":memory:");
+    try {
+      setMeta(db, { actor: "owner", now: 1 }, { project: P, key: "pms", value: ["agent-other"] });
+      const plan = planImport(SRC, MAP, P, NOW);
+      expect(() => applyImport(db, plan)).toThrow("team-apply");
+      expect(getMeta(db, P).pms).toEqual(["agent-other"]);
+      expect(listTasks(db, P)).toEqual([]); // 整批回滚
+      setMeta(db, { actor: "owner", now: 2 }, { project: P, key: "pms", value: ["agent-claudestra"] });
+      expect(applyImport(db, plan).tasks.created).toBe(3);
+    } finally {
+      closeLedger(":memory:");
+    }
+  });
+
   test("写库计数、重跑全部 duplicate；完全相同的两条 log 只记一条；导入的任务指标能算", () => {
     const db = openLedger(":memory:");
     try {

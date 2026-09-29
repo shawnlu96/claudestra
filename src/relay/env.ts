@@ -14,7 +14,8 @@ export interface RelayEnv {
   hostname: string;
   base: string;
   db: string;
-  trustProxy: boolean;
+  /** RELAY_TRUST_PROXY：受信反代层数，0 = 不在反代之后 */
+  trustProxy: number;
   maxFrameBytes: number;
   commit?: string;
   /** RELAY_STATIC_DIR：前端静态导出目录（web/out）；没配就不托管前端 */
@@ -33,6 +34,9 @@ const COMMIT_RE = /^[0-9a-f]{7,40}$/;
 const COMMIT_FILE = ".relay-commit";
 
 const num = (v: string | undefined, d: number): number => (v && Number.isFinite(Number(v)) ? Number(v) : d);
+
+/** RELAY_TRUST_PROXY：非负整数 = 受信反代层数（旧写法 "1" 即一层）；空或认不出的一律 0，不看转发头 */
+const proxyHops = (v: string | undefined): number => (v && /^\d{1,2}$/.test(v.trim()) ? Number(v.trim()) : 0);
 
 /** 数据目录：RELAY_DATA > 仓库根 data；SQLite 与 VAPID 密钥文件都落在这里 */
 const dataDirFromEnv = (env: Record<string, string | undefined>): string => (env.RELAY_DATA ? env.RELAY_DATA.replace(/\/+$/, "") : "data");
@@ -64,7 +68,7 @@ export function relayEnv(env: Record<string, string | undefined> = process.env, 
     hostname: env.RELAY_HOST || "127.0.0.1",
     base,
     db: dbPathFromEnv(env),
-    trustProxy: env.RELAY_TRUST_PROXY === "1",
+    trustProxy: proxyHops(env.RELAY_TRUST_PROXY),
     maxFrameBytes: num(env.RELAY_MAX_FRAME_BYTES, LIMITS.maxFrameBytes),
     commit: env.RELAY_COMMIT?.trim() || readCommit(),
     ...(env.RELAY_STATIC_DIR?.trim() ? { staticDir: env.RELAY_STATIC_DIR.trim() } : {}),

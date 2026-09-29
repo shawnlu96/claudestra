@@ -1,25 +1,52 @@
 import { describe, expect, test } from "bun:test";
-import { configuredPeerIngressPort, ingressApiPath, ingressHost, ingressSecret, ingressVerdict } from "../src/bridge/peer-ingress";
-import { RELAY_MARK_HEADER, relayMark, sanitizeRelayFrom } from "../src/bridge/relay-inbound";
+import { configuredPeerIngressPort, ingressApiPath, ingressHost, ingressSecret, ingressVerdict, ingressRequest } from "../src/bridge/peer-ingress";
+import { RELAY_MARK_HEADER, relayMark, takeRelayFrom } from "../src/bridge/relay-inbound";
+import { relaySenderFp } from "../src/bridge/peer-redeem";
+import { setRequestContext } from "../src/bridge/request-context";
 import { pickIngressPort } from "../src/lib/peer-ingress-config";
 
-describe("来源指纹头只认经中继进来的（relay-inbound 盖进程内标记，peer 入口验）", () => {
+describe("来源指纹只认经中继进来的（relay-inbound 盖进程内标记，peer 入口验，结果只经请求上下文往下传）", () => {
   const FROM = "x-claudestra-relay-from";
-  test("标记对得上：保留指纹头、去掉标记头", () => {
-    const h = new Headers({ [FROM]: "16f9-b5d1-30fb-8923", [RELAY_MARK_HEADER]: "m1", authorization: "Bearer t" });
-    expect(sanitizeRelayFrom(h, "m1")).toBe(true);
-    expect(h.get(FROM)).toBe("16f9-b5d1-30fb-8923");
+  const FP = "16f9-b5d1-30fb-8923";
+  test("标记对得上：返回指纹；两个头都从请求里删掉，其余头不动", () => {
+    const h = new Headers({ [FROM]: FP, [RELAY_MARK_HEADER]: "m1", authorization: "Bearer t" });
+    expect(takeRelayFrom(h, "m1")).toBe(FP);
+    expect(h.get(FROM)).toBeNull();
     expect(h.get(RELAY_MARK_HEADER)).toBeNull();
     expect(h.get("authorization")).toBe("Bearer t");
   });
-  test("没有标记 / 标记不对：直连 peer 伪造的指纹头被剥掉，标记头也不往 API 传", () => {
+  test("没有标记 / 标记不对：直连 peer 伪造的指纹不认，头也剥掉", () => {
     const spoof = new Headers({ [FROM]: "dead-beef-dead-beef" });
-    expect(sanitizeRelayFrom(spoof, "m1")).toBe(false);
+    expect(takeRelayFrom(spoof, "m1")).toBeNull();
     expect(spoof.get(FROM)).toBeNull();
     const wrong = new Headers({ [FROM]: "dead-beef-dead-beef", [RELAY_MARK_HEADER]: "guess" });
-    expect(sanitizeRelayFrom(wrong, "m1")).toBe(false);
+    expect(takeRelayFrom(wrong, "m1")).toBeNull();
     expect(wrong.get(FROM)).toBeNull();
     expect(wrong.get(RELAY_MARK_HEADER)).toBeNull();
+  });
+  test("兑换读发件人只看请求上下文：主端口 / 旧 web 端口进来的请求带着伪造头也读不出来", () => {
+    const forged = new Request("http://127.0.0.1:3847/api/v1/peers/redeem", { method: "POST", headers: { [FROM]: FP } });
+    setRequestContext(forged, { source: "loopback", clientIp: "127.0.0.1", https: false });
+    expect(relaySenderFp(forged)).toBe("");
+    expect(relaySenderFp(new Request("http://x/", { headers: { [FROM]: FP } }))).toBe("");
+    const viaIngress = new Request("http://ingress.local/api/v1/peers/redeem", { method: "POST" });
+    setRequestContext(viaIngress, { source: "lan", clientIp: null, https: false, relayFrom: FP });
+    expect(relaySenderFp(viaIngress)).toBe(FP);
+    const junk = new Request("http://ingress.local/api/v1/peers/redeem", { method: "POST" });
+    setRequestContext(junk, { source: "lan", clientIp: null, https: false, relayFrom: "not-a-fingerprint" });
+    expect(relaySenderFp(junk)).toBe("");
+  });
+  test("peer 入口：带对的标记 → 处理函数从上下文拿到指纹、看不到原始头；伪造的 → 没有指纹", async () => {
+    const seen: { fp: string; raw: string | null; mark: string | null }[] = [];
+    const api = async (req: Request) => {
+      seen.push({ fp: relaySenderFp(req), raw: req.headers.get(FROM), mark: req.headers.get(RELAY_MARK_HEADER) });
+      return new Response("{}");
+    };
+    const post = (headers: Record<string, string>) => ingressRequest(new Request("http://127.0.0.1:1/api/v1/peers/redeem", { method: "POST", headers, body: "{}" }), api);
+    await post({ [FROM]: FP, [RELAY_MARK_HEADER]: relayMark() });
+    await post({ [FROM]: FP });
+    await post({ [FROM]: FP, [RELAY_MARK_HEADER]: "guess" });
+    expect(seen).toEqual([{ fp: FP, raw: null, mark: null }, { fp: "", raw: null, mark: null }, { fp: "", raw: null, mark: null }]);
   });
   test("进程内标记：足够长、进程内稳定", () => {
     expect(relayMark()).toMatch(/^[A-Za-z0-9_-]{43}$/);

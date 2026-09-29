@@ -3,6 +3,8 @@
  * 有实例 id 之前，同一个对方会散成好几条（他兑换我的邀请 → 只有入站；我加入他的邀请撞名 → 只有出站的 -2；
  * 他重新加入 → -3）。按去掉 -数字 后缀的名字分组合成一条：出站多条只在 host 相同时合并（host 不同可能是
  * 两个人，整组不动）；入站 token 留最新签的、更早的吊销；两个方向都没有的记录删掉；停用的记录不动。
+ * 期望指纹（anchorOf，lib/peer-trust.ts peerAnchorOf）不同、或有的有有的没有的整组不动：带后缀的记录可能是
+ * 冒用同名 / 同实例 id 被故意拆开的另一个人，合回去会吊销真人的 token。合并后的记录带上那个指纹（只是钉住的也写成 fp）。
  */
 import type { HttpPeer } from "./peers.js";
 import { tokenIdOf, type Principal } from "./principals.js";
@@ -28,6 +30,9 @@ export interface PeerTidyGroup {
   /** 合并后记录的 addedAt：组里最早的 */
   addedAt: string;
   instanceId?: string;
+  /** 组里共同的期望指纹与完整公钥：合并后的记录带上，验签不退回「老 peer」 */
+  fp?: string;
+  publicKey?: string;
   /** 有值 = 这组不动（原因已写进 desc） */
   skip?: string;
   /** 给人看的一句话 */
@@ -58,7 +63,7 @@ function listNames(base: string, names: string[]): string {
   return names.map((n, i) => (i > 0 && n.startsWith(`${base}-`) ? n.slice(base.length) : n)).join("、");
 }
 
-export function planPeerTidy(peers: HttpPeer[], tokens: PeerTokenRef[]): PeerTidyGroup[] {
+export function planPeerTidy(peers: HttpPeer[], tokens: PeerTokenRef[], anchorOf: (p: HttpPeer) => string | null): PeerTidyGroup[] {
   const groups = new Map<string, HttpPeer[]>();
   for (const p of peers) {
     if (p.disabled) continue;
@@ -68,13 +73,13 @@ export function planPeerTidy(peers: HttpPeer[], tokens: PeerTokenRef[]): PeerTid
   const out: PeerTidyGroup[] = [];
   for (const [base, recs] of groups) {
     recs.sort((a, b) => suffixOf(a.name) - suffixOf(b.name) || a.name.localeCompare(b.name));
-    const g = planGroup(base, recs, peers, tokens);
+    const g = planGroup(base, recs, peers, tokens, anchorOf);
     if (g) out.push(g);
   }
   return out;
 }
 
-function planGroup(base: string, recs: HttpPeer[], all: HttpPeer[], tokens: PeerTokenRef[]): PeerTidyGroup | null {
+function planGroup(base: string, recs: HttpPeer[], all: HttpPeer[], tokens: PeerTokenRef[], anchorOf: (p: HttpPeer) => string | null): PeerTidyGroup | null {
   const names = recs.map((r) => r.name);
   const finalName = all.some((p) => p.name === base && !names.includes(p.name)) ? names[0] : base;
   const toks = tokens.filter((t) => names.includes(t.peer) || t.peer === finalName).sort((a, b) => newestFirst(a.createdAt, b.createdAt));
@@ -95,6 +100,11 @@ function planGroup(base: string, recs: HttpPeer[], all: HttpPeer[], tokens: Peer
     const skip = `${list} 来自不同的 Claudestra 实例，是不同的人，没动`;
     return { ...base0, skip, desc: skip };
   }
+  const identity = sameIdentity(recs, anchorOf);
+  if ("skip" in identity) {
+    const skip = `${list} ${identity.skip}，没动——确认是同一个人就手动移除旧的`;
+    return { ...base0, skip, desc: skip };
+  }
   const outs = recs.filter(hasOut).sort((a, b) => newestFirst(a.addedAt, b.addedAt));
   const keep = toks[0];
   const outFrom = outs[0];
@@ -104,10 +114,22 @@ function planGroup(base: string, recs: HttpPeer[], all: HttpPeer[], tokens: Peer
     ...(keep ? { keepToken: keep.tokenId } : {}),
     revokeTokens: toks.slice(1).map((t) => t.tokenId),
     ...(iids[0] ? { instanceId: iids[0] } : {}),
+    ...identity,
     desc: "",
   };
   g.desc = describe(g, list, outs);
   return g;
+}
+
+/** 组里的记录是不是同一把钥匙：都没有期望指纹（老记录）或都是同一个才算；公钥记了不止一把也不算 */
+function sameIdentity(recs: HttpPeer[], anchorOf: (p: HttpPeer) => string | null): { fp?: string; publicKey?: string } | { skip: string } {
+  const anchors = recs.map(anchorOf);
+  const fps = [...new Set(anchors.filter((a): a is string => !!a))];
+  if (fps.length > 1) return { skip: "签名钥匙不是同一把（指纹不同），是不同的人" };
+  if (fps.length === 1 && anchors.includes(null)) return { skip: "有的记录确认过签名钥匙、有的没有，没法确认是同一个人" };
+  const keys = [...new Set(recs.flatMap((r) => (r.publicKey ? [r.publicKey] : [])))];
+  if (keys.length > 1) return { skip: "记下的公钥不是同一把，是不同的人" };
+  return { ...(fps[0] ? { fp: fps[0] } : {}), ...(keys[0] ? { publicKey: keys[0] } : {}) };
 }
 
 function describe(g: PeerTidyGroup, list: string, outs: HttpPeer[]): string {
@@ -139,6 +161,8 @@ export function mergedPeerRecord(g: PeerTidyGroup, peers: HttpPeer[]): HttpPeer 
     ...(out?.baseUrl && out.outToken ? { baseUrl: out.baseUrl, outToken: out.outToken } : {}),
     ...(g.keepToken ? { inTokenId: g.keepToken } : {}),
     ...(g.instanceId ? { instanceId: g.instanceId } : {}),
+    ...(g.fp ? { fp: g.fp } : {}),
+    ...(g.publicKey ? { publicKey: g.publicKey } : {}),
   };
 }
 
