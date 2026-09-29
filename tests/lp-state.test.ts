@@ -261,6 +261,8 @@ describe("adv1 / r1 的 P2 与 T36 约定", () => {
     const at = (line: string) => readLpPane(fx("lp-on-interrupted").replace(/\x1b\[39m❯[^\S\n]*\n/, `\x1b[39m${line}\n`)).inputText;
     expect(at("❯ /low-priority")).toBe("/low-priority");
     expect(at("❯  /low-priority")).toBe(" /low-priority");
+    // 顺序：先把 NBSP 换成空格，再去提示符后那一个；反过来的话，这条和上面「❯ + NBSP」那条都会多出一个前导空格
+    expect(at("❯\u00a0 /low-priority")).toBe(" /low-priority");
   });
 });
 

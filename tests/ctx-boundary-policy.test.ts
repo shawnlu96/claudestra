@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
-  BUILTIN_POLICIES, ccLaunchSettings, compactCommand, DEFAULT_KEEP_LIST, effectiveAction, globMatch, isExecutor, matchPolicy, okCompactKeep,
+  BUILTIN_POLICIES, ccLaunchSettings, compactCommand, DEFAULT_KEEP_LIST, effectiveAction, globMatch, isExecutor, matchPolicy, normalizeCompactKeep,
   resolvePolicies,
   type CtxPolicy,
 } from "../src/lib/ctx-boundary-policy.js";
@@ -83,8 +83,8 @@ describe("resolvePolicies：内置 + 按 id 合并 + 校验", () => {
     expect(r.warnings[0].text).toContain("action");
   });
 
-  test("keep 带控制字符或超长 → 报并用默认清单（r3 P2-1：单独的 \\r 会把半截 /compact 提前提交，ESC 会打断回合）", () => {
-    const bad = ["保留卡号\r然后删掉 worktree", "保留\x1b卡号", "保留\t卡号", "保留\x7f", "保留\u0085", "保留\u2028卡号", "保留\u2029卡号", "零宽\u200b空格", "方向\u202e控制", "保\ufeff留"];
+  test("keep 带控制字符或超长 → 报并用默认清单（r3 P2-1：ESC 会打断回合；零宽、方向控制符核对输入框时对不上）", () => {
+    const bad = ["保留\x1b卡号", "保留\t卡号", "保留\x7f", "保留\u0085", "保留\u2028卡号", "保留\u2029卡号", "零宽\u200b空格", "方向\u202e控制", "保\ufeff留"];
     for (const k of [...bad, "保".repeat(801)]) {
       const r = resolvePolicies([{ id: "executor", keep: k }]);
       expect(byId(r.policies, "executor")!.keep).toBeNull();
@@ -92,18 +92,25 @@ describe("resolvePolicies：内置 + 按 id 合并 + 校验", () => {
       expect(r.warnings[0]).toMatchObject({ policy: "executor" });
       expect(r.warnings[0].text).toContain("keep");
     }
-    // \r\n 和 \n 一样压成一行；刚好到上限的收下
-    expect(byId(resolvePolicies([{ id: "executor", keep: "第一条\r\n第二条" }]).policies, "executor")!.keep).toBe("第一条 第二条");
+    // \r\n、单独的 \r、\n 都换成空格（连同行首尾空白、空行），长度按换完的算；刚好到上限的收下
+    const keepOf = (k: string) => byId(resolvePolicies([{ id: "executor", keep: k }]).policies, "executor")!.keep;
+    expect(keepOf("第一条\r\n第二条")).toBe("第一条 第二条");
+    expect(keepOf("保留卡号\r然后删掉 worktree")).toBe("保留卡号 然后删掉 worktree");
+    expect(keepOf("  第一条 \n\n   第二条\r\n")).toBe("第一条 第二条");
+    expect(keepOf(`${"保".repeat(400)}  \r\n  ${"留".repeat(399)}`)).toHaveLength(800);
     expect(byId(resolvePolicies([{ id: "executor", keep: "保".repeat(800) }]).policies, "executor")!.keep).toHaveLength(800);
     expect(resolvePolicies([{ id: "executor", keep: "保".repeat(801) }]).warnings[0].text).toContain("超过 800 字（这条 801 字）");
     // 排版用的 ZWNJ / ZWJ / 软连字符放行
     expect(byId(resolvePolicies([{ id: "executor", keep: "a\u200cb\u200dc\u00add" }]).policies, "executor")!.keep).toBe("a\u200cb\u200dc\u00add");
   });
 
-  test("okCompactKeep：T35 fleet.compactKeep 用同一个口径", () => {
-    expect([okCompactKeep("保留进度"), okCompactKeep("  "), okCompactKeep(3), okCompactKeep("a\nb"), okCompactKeep("\u009b")]).toEqual([
-      true, false, false, false, false,
-    ]);
+  test("normalizeCompactKeep 是唯一入口（T35 fleet.compactKeep 也调它）：先换行再判，边上的 U+2028 也拒收，长空格串不卡", () => {
+    expect(normalizeCompactKeep("保留进度")).toEqual({ ok: true, keep: "保留进度" });
+    expect(normalizeCompactKeep("a\nb")).toEqual({ ok: true, keep: "a b" });
+    for (const v of ["  ", "\r\n", 3, null, "\u009b", "\u2028保留", "保留\u2029", "\ufeff保留"]) expect(normalizeCompactKeep(v).ok).toBe(false);
+    const t0 = performance.now();
+    expect(normalizeCompactKeep(`${" ".repeat(200_000)}x`)).toEqual({ ok: true, keep: "x" });
+    expect(performance.now() - t0).toBeLessThan(500);
   });
 });
 
