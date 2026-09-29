@@ -188,7 +188,7 @@ describe("policyBoundary", () => {
 
 describe("boundaryDecision：决策表", () => {
   const clear: PaneGate = {
-    wall: false, lp: "off", exhausted: false, menu: false, compacting: false, draft: false, queued: false, apiRetry: false, copyMode: false, notCc: false,
+    wall: false, lp: "off", exhausted: false, menu: false, compacting: false, draft: false, queued: false, apiRetry: false, copyMode: false, notCc: false, wallWait: false,
   };
   const base: BoundaryInput = {
     ctx: 210_000, window: 200_000, hardCap: 250_000, idle: true, pane: clear, injectedRecently: false,
@@ -205,6 +205,15 @@ describe("boundaryDecision：决策表", () => {
     expect(d({ pane: { ...clear, wall: true, lp: "off" } })).toEqual({ fire: false, reason: "quota-wall" });
     expect(d({ ctx: 300_000, pane: { ...clear, wall: true, lp: "unknown" } })).toEqual({ fire: false, reason: "quota-wall" });
     expect(d({ ctx: 300_000, idle: false, pane: { ...clear, wall: true, lp: "on" } })).toEqual({ fire: true, kind: "hard-cap" });
+  });
+
+  test("停在额度菜单 / 自动续跑倒计时上：开着 LP、过硬上限也不敲（T24：打字会取消续跑）", () => {
+    expect(d({ ctx: 900_000, idle: false, pane: { ...clear, wallWait: true, lp: "on" } })).toEqual({ fire: false, reason: "quota-wall" });
+  });
+
+  test("额度闸关着：软线不敲，硬上限照敲（T24：常规线起的这一轮注定撞墙）", () => {
+    expect(d({ gated: true })).toEqual({ fire: false, reason: "gated" });
+    expect(d({ ctx: 250_000, gated: true })).toEqual({ fire: true, kind: "hard-cap" });
   });
 
   test("撞墙不占重试计时：它排在冷却之后判，且不开火（调用方不记 lastTrig）", () => {
@@ -339,7 +348,7 @@ describe("第 1 轮审查补的：match 替换语义 / 宽模式抢执行者 / �
   });
   test("决策表：输入框有草稿 → 不注入，硬上限也不例外；LP 余量用完 → 按撞墙处理", () => {
     const pane: PaneGate = {
-      wall: false, lp: "off", exhausted: false, menu: false, compacting: false, draft: true, queued: false, apiRetry: false, copyMode: false, notCc: false,
+      wall: false, lp: "off", exhausted: false, menu: false, compacting: false, draft: true, queued: false, apiRetry: false, copyMode: false, notCc: false, wallWait: false,
     };
     const base: BoundaryInput = { ctx: 900_000, window: 200_000, hardCap: 250_000, idle: false, pane, injectedRecently: false, lastTrig: 0, now: 1, retryMs: 1 };
     expect(boundaryDecision(base)).toEqual({ fire: false, reason: "draft" });

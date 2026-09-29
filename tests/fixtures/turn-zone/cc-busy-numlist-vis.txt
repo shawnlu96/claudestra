@@ -1,0 +1,30 @@
+
+ ▐▛███▛█   Claude Code v2.1.283
+▝▜██████▀  Opus 5.5 (1M context) · API Usage Billing
+ ▝▝   ▝▝   /Users/me/work
+
+
+❯ stream please
+
+⏺ streaming words number 0 streaming words number 1 streaming words number 2
+
+
+
+
+
+
+✳ Recombobulating… (5s · ↓ 30 tokens)
+                                                         ctrl+g to edit in Vim
+────────────────────────────────────────────────────────────────────────────────
+❯ 4. step number 4
+  5. step number 5
+  6. step number 6
+  7. step number 7
+  8. step number 8
+  9. step number 9
+  10. step number 10
+  11. step number 11
+  12. step number 12
+  done.
+────────────────────────────────────────────────────────────────────────────────
+  ⏵⏵ bypass permissions on (shift+tab to cycle)
