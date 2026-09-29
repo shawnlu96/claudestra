@@ -419,7 +419,6 @@ const heldLocalMsgs = new HeldQueue();
 setExtensionSocket((ch) => clients.get(ch)?.ws, { deliver, ownerId: primaryOwnerId, books: () => ({ pendingReplies, pendingThreads, pendingInterAgentMsg, pendingAgentCalls, pendingApiRequests }) });
 setStopHooks({ clearAgentPendings: (ch) => clearInterAgentPendingsForChannel(ch) }); // owner 的停：发键之前清 agent 间的待回账（bridge/preempt.ts）
 
-
 /** agent→agent 消息现在要不要押着:只看主回合,只剩后台在跑不算,见 lib/turn-state.ts */
 async function localAgentWorking(channelId: string, evAgent: string): Promise<boolean> {
   return agentMsgMustWait(await probeTurn(channelId, evAgent, CONTROL_CHANNEL_ID));
@@ -2195,6 +2194,7 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
     }
 
     case "abort_ack": onAbortAck(msg, ws); break; // Pi 扩展的中止回执（只认这个频道当前的连接）
+    case "acp_entries": case "acp_config": case "acp_failure": case "acp_permission": case "acp_call_result": await (await import("./bridge/acp-link.js")).onAcpFrame(msg, ws, discord); break;
     case "codex_typein_failed": if (clients.get(msg.channelId)?.ws === ws) turnCuts.rearmAfterInterrupt(msg.channelId); break; // 退回了 queue:下一条再打字
     case "forward_to_agent": ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, ...(await handleForward(ws, msg)) })); break;
     case "fleet_state": case "fleet_run": ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, ...(await (await import("./bridge/fleet/ws.js")).handleFleetWs(msg, ws)) })); break;
@@ -2770,7 +2770,7 @@ async function handleHookRequest(req: Request): Promise<Response> {
           const agent = (listResult.agents || []).find((a: any) => a.channelId === channelId);
           if (agent) {
             const target = windowTarget(agent.name);
-            const pane = await tmuxCapture(target, 30);
+            const pane = (await import("./bridge/acp-state.js")).isAcpChannel(channelId) ? "" : await tmuxCapture(target, 30); // ACP 宿主的窗口只是日志
             if (detectRuntimePermissionPrompt(pane) || detectSessionIdlePrompt(pane)) {
               console.log(`🏁 pane 有弹窗，跳过完成通知: channel=${channelId} agent=${agent.name}`);
               shouldNotify = false;

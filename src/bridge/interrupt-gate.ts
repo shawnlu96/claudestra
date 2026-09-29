@@ -9,6 +9,7 @@ import { interruptWindow } from "../lib/runtimes/window-ops.js";
 import { windowWallWait } from "../lib/wall-screen.js";
 import { emitEvent } from "./event-bus.js";
 import { extensionAbort, setAbortCapable } from "./pi-abort.js";
+import { isAcpChannel, noteAcpChannel } from "./acp-state.js";
 export { onAbortAck, setExtensionSocket, stopAfterAbort, stopWaitIds } from "./pi-abort.js"; // bridge.ts 只从这里接打断相关的线
 export { HTTP_IDLE_TIMEOUT_S } from "../lib/esc-guard.js";
 import { probeTurnAt, resolveTurnWindow } from "./turn-probe.js";
@@ -17,9 +18,10 @@ import { turnCuts } from "./turn-cuts.js";
 const controlChannelId = () => process.env.CONTROL_CHANNEL_ID || "";
 
 /** 注册帧里声明的能力：Codex 会打字投递（老 channel-server 不声明：打断后消息会卡在 queue）、Pi 扩展会中止并回执（老扩展收到 abort 默默忽略） */
-export function noteRuntimeCaps(channelId: string, msg: { typeIn?: unknown; abort?: unknown }): void {
+export function noteRuntimeCaps(channelId: string, msg: { typeIn?: unknown; abort?: unknown; transport?: unknown }): void {
   turnCuts.setCodexTypeIn(channelId, msg.typeIn === true);
   setAbortCapable(channelId, msg.abort === true);
+  noteAcpChannel(channelId, msg.transport); // ACP 宿主（src/acp-host.ts）：打断走 abort 帧 → session/cancel，不发键
 }
 
 export const interruptGate = createInterruptGate({
@@ -28,7 +30,7 @@ export const interruptGate = createInterruptGate({
   wallWait: async (win) => !!(await windowWallWait(win)), // 抓不到屏：交给 probe 按老规矩判（它也抓不到就是 unknown，不发键）
   interrupt: async (win, runtime, ch, kind) => {
     turnCuts.noteKeySent(ch, kind); // 先记：Codex 的打断回报 0.5 秒就到
-    if (controlFor(runtime).abortVia === "extension") return extensionAbort(ch);
+    if (controlFor(runtime, isAcpChannel(ch) ? "acp" : "tmux").abortVia === "extension") return extensionAbort(ch);
     return interruptWindow(win, runtime);
   },
   allow: (ch, runtime, stop) => turnCuts.mayBridgeInterrupt(ch, runtime, stop),

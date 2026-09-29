@@ -329,3 +329,22 @@ describe("AcpTurnLoop · IO 同步抛错 / 提前 reject（审查第 2 轮）", 
     }
   });
 });
+
+describe("AcpTurnLoop · 失败去重键", () => {
+  test("传输层失败按单调序号给键：同一毫秒里两次失败也是两张卡（不能用 Date.now）", async () => {
+    const f = fixture({ noSteer: true });
+    f.io.prompt = () => Promise.reject(new Error("acp 连接断了"));
+    const realNow = Date.now;
+    Date.now = () => 1_790_000_000_000; // 钉死时间：两次失败落在同一毫秒
+    try {
+      await f.loop.submit("a");
+      await tick();
+      await f.loop.submit("b");
+      await tick();
+    } finally {
+      Date.now = realNow;
+    }
+    expect(f.failures.length).toBe(2);
+    expect(new Set(f.failures.map((x) => x.key)).size).toBe(2);
+  });
+});

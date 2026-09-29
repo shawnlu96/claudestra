@@ -24,7 +24,7 @@ export const WRITE_COMMANDS: ReadonlySet<string> = new Set([
   "peer-http-invite", "peer-http-join", "peer-http-accept", "peer-http-scope", "peer-http-remove", "peer-http-tidy", "peer-http-messages-only",
   "peer-invite-new", "peer-join-auto", "peer-invite-revoke",
   "token-add", "token-revoke",
-  "project-add", "project-edit", "project-remove", "project-assign", "project-merge", "project-migrate", "external", "label",
+  "project-add", "project-edit", "project-remove", "project-assign", "project-merge", "project-migrate", "external", "label", "transport",
   "pi-env-set", "team-link", "skill-toggle",
   // 以下原先漏掉：set-session / set-claude / announce-focus 写 registry；migrate 直写 registry.json；
   // peer-invite-redeem 写 principals + peers；peer-invite-list 顺手清扫过期邀请（吊销 token、写 peers）
@@ -79,6 +79,7 @@ function takeoverWrites(args: readonly string[]): boolean {
 /** 要不要拿命令级写锁：写命令里只有只写台账 sqlite 的 ledger 子命令例外（认主守卫照旧按 isWriteInvocation） */
 export function needsWriteLock(cmd: string | undefined, args: readonly string[]): boolean {
   if (cmd === "ledger") return LEDGER_REGISTRY_SUBS.has(args[0] ?? "");
+  if (cmd === "transport") return false; // 自己锁住改 registry 那一下、放锁再重启（manager/acp-lifecycle.ts）；认主守卫照旧
   return isWriteInvocation(cmd, args);
 }
 

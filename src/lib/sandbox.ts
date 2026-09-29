@@ -253,8 +253,13 @@ export function refuseInSandbox(what: string, env: Env = process.env): void {
 }
 
 /** Pi / Codex 的启动链不经本模块的闸门（Codex 给 MCP 的环境是白名单、还会加载用户全局 MCP）：沙箱里直接拒绝 */
-export function assertSandboxRuntime(runtime: string, env: Env = process.env): void {
-  if (isSandbox(env) && runtime !== "claude-code") throw new SandboxViolation([`沙箱只支持 Claude Code agent（收到 runtime=${runtime}）`]);
+/**
+ * 沙箱只起 Claude Code；唯一例外是 T60 的 Codex over ACP 且适配器换成了 stub（CLAUDESTRA_ACP_AGENT）：owner 定的，沙箱不碰真 Codex
+ * 登录和本机的 .codex 目录，stub 只讲协议、不连模型、不读全局 config.toml。tmux 版 Codex（buildCodexCommand 不带 transport）照旧拒。
+ */
+export function assertSandboxRuntime(runtime: string, env: Env = process.env, transport?: string): void {
+  if (!isSandbox(env) || runtime === "claude-code" || (runtime === "codex" && transport === "acp" && env.CLAUDESTRA_ACP_AGENT?.trim())) return;
+  throw new SandboxViolation([`沙箱只支持 Claude Code agent（收到 runtime=${runtime}${transport ? `、transport=${transport}` : ""}；acp 要配 stub）`]);
 }
 
 // ── 出站闸门 ────────────────────────────────────────────────────────────────

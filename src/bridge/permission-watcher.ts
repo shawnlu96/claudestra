@@ -717,7 +717,7 @@ export function startPermissionWatcher(
       const agents = await listAgentsLatched(() => runManager("list"), listLatch);
       if (!agents) return;
       for (const agent of agents) {
-        if (agent.status !== "active" || !agent.channelId) continue;
+        if (agent.status !== "active" || !agent.channelId || (await import("./acp-state.js")).isAcpChannel(agent.channelId)) continue; // ACP 宿主的窗口只是日志：不看屏、不发键
         // 注意：不能根据 idle 字段跳过 — 弹窗界面底部也有 ❯ 会被误判为 idle
         await checkAgent(agent.name, agent.channelId, allowedUserIds, discord).catch(() => {});
       }

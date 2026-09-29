@@ -7,14 +7,14 @@
 
 import { watch, type FSWatcher } from "fs";
 import { stat } from "fs/promises";
-import { existsSync, realpathSync } from "fs";
 import type { Client } from "discord.js";
 import { TextChannel } from "discord.js";
 import { WATCHER_CONFIG, MCP_TOOL_PREFIX } from "./config.js";
 import { discordReply } from "./discord-api.js";
 import { projectJsonlPath } from "../lib/jsonl-cost.js";
-import { findSessionJsonlBySessionId, sessionJsonlPath, translateSessionLine } from "../lib/session-source.js";
-import { DEFAULT_RUNTIME, sourceFor } from "../lib/runtimes/index.js";
+import { findSessionJsonlBySessionId, translateSessionLine } from "../lib/session-source.js";
+import { resolveSessionPath } from "../lib/session-path-resolve.js";
+import { isAcpChannel } from "./acp-state.js";
 import { tmuxCapture, windowTarget } from "../lib/tmux-helper.js";
 import { parseAuqPane } from "../lib/auq-pane.js";
 import { countNewlinesBefore, progressNoteOf } from "../lib/session-history.js";
@@ -56,6 +56,8 @@ interface WatcherState {
   apiErrorTurn?: { error: string; text: string } | false;
   /** 最后一条 assistant 条目的行号：同一轮的 Stop 重复到达时，它没变（bridge/stop-settle.ts markRepeat） */
   lastAssistantSeq?: number;
+  /** ACP 宿主的频道（bridge/acp-state.ts）：条目由宿主推来（pushEntries），不读文件、没有 fs.watch / 轮询 */
+  push?: true;
 }
 
 const watchers = new Map<string, WatcherState>();
@@ -330,7 +332,24 @@ async function followMovedSession(state: WatcherState, discord: Client) {
   return stat(moved);
 }
 
-async function processNewData(state: WatcherState, discord: Client): Promise<void> {
+type Item = { seq: number; line?: string; entry?: any };
+
+/** 文件里新写的行；推送模式不读文件（rollout 仍有人写，但直播只认宿主推来的，免得两份） */
+async function newLines(state: WatcherState, discord: Client): Promise<Item[] | null> {
+  if (state.push) return null;
+  const newStat = await stat(state.jsonlPath).catch(() => followMovedSession(state, discord));
+  if (!newStat || newStat.size <= state.lastSize) return null;
+  const newData = await Bun.file(state.jsonlPath).slice(state.lastSize, newStat.size).text();
+  state.lastSize = newStat.size;
+  // v2.23.2+ 每条记录带全文件行号 seq：前端拿它与历史游标比对，判定「这条直播事件
+  // 的内容是否已经以历史形态在视图里」——按时间戳 ±5s 猜的老办法在流有延迟 /
+  // 两端时钟不齐时会漏（owner 2026-09-17 桌面端「同一回合两份」第二次复现）。
+  const chunk = splitChunkLines(newData, state.lineNo);
+  state.lineNo = chunk.next;
+  return chunk.lines;
+}
+
+async function processNewData(state: WatcherState, discord: Client, pushed?: object[]): Promise<void> {
   // v2.0.18+ race fix: 之前是 `if (state.processing) return` 直接 bail。问题：
   // Claude Code 写入 jsonl → fs.watch fire → 第一次 processNewData 进 await stat /
   // await read 阶段（async I/O，要十几到上百 ms）→ 期间 Stop hook 抵达 →
@@ -354,23 +373,14 @@ async function processNewData(state: WatcherState, discord: Client): Promise<voi
   }
   state.processing = true;
   try {
-    const newStat = await stat(state.jsonlPath).catch(() => followMovedSession(state, discord));
-    if (!newStat || newStat.size <= state.lastSize) return;
-    const newData = await Bun.file(state.jsonlPath).slice(state.lastSize, newStat.size).text();
-    state.lastSize = newStat.size;
-
+    // 宿主推来的条目 seq 用本地序号：sid 带 acp: 前缀，前端不拿它比 rollout 的历史游标，走时间戳规则
+    const items = pushed ? pushed.map((entry) => ({ seq: state.lineNo++, entry })) : await newLines(state, discord);
+    if (!items) return;
     let toolsChanged = false;
-
-    // v2.23.2+ 每条记录带全文件行号 seq：前端拿它与历史游标比对，判定「这条直播事件
-    // 的内容是否已经以历史形态在视图里」——按时间戳 ±5s 猜的老办法在流有延迟 /
-    // 两端时钟不齐时会漏（owner 2026-09-17 桌面端「同一回合两份」第二次复现）。
-    const chunk = splitChunkLines(newData, state.lineNo);
-    state.lineNo = chunk.next;
-    for (const { seq, line } of chunk.lines) {
+    for (const { seq, line, entry: given } of items as Item[]) {
       try {
-        // v2.23+ runtime 感知：Pi 的行在这里翻译成 Claude Code 形状，下面的解析逻辑
-        // （工具摘要/文本/状态/思考时长）一行都不用改
-        const entry = translateSessionLine(state.runtime, line, state);
+        // v2.23+ runtime 感知：Pi 的行在这里翻译成 Claude Code 形状（ACP 宿主推来的已是这个形状），下面的解析逻辑一行都不用改
+        const entry = given ?? translateSessionLine(state.runtime, line!, state);
         if (!entry) continue;
 
         // v2.2.0+: auto-mode classifier 拦截检测。被拦的操作在 jsonl 里是一条
@@ -674,41 +684,15 @@ const PENDING_POLL_MS = 2000;
 // deliverToLocal 的入站自愈兜底,这里只是第一道。poll 是 2s 一次 stat,便宜。
 const PENDING_MAX_WAIT_MS = 600_000;
 
-/**
- * v2.23+ runtime 感知的会话文件定位。
- * Claude Code 的路径可预测（推算即可，文件还没生成也能算出将来在哪）；
- * Pi 的文件名带时间戳前缀，**只能扫目录**，所以这里每次调用都重新解析 ——
- * pending 轮询必须复用这个函数，不能缓存一次路径死等。
- */
-function resolveSessionPath(
-  runtime: string | undefined, cwd: string, sessionId: string, sessionFile?: string,
-): string | null {
-  // ① 真源：Pi 扩展在 register 帧里自报的会话文件（文件名带时间戳，算不出来）
-  if (sessionFile) {
-    // 它是 agent 进程给的值，realpath 后必须落在 Pi 的会话根之下——否则一个失守的 agent
-    // 进程能借它让 bridge 尾读任意 jsonl（比如 master 的会话）流进自己频道。
-    // **只对 Pi 放行**：runtime 也可能来自自报，而 ~/.codex/sessions 里还有用户的私人
-    // 会话——Codex 的 rollout 由 registry 的 sessionId 定位，通道进程也刻意不自报路径。
-    try {
-      const real = realpathSync(sessionFile);
-      if (runtime === "pi" && sourceFor(runtime).ownsPath(real)) return real;
-      console.warn(`⚠ 忽略越界的自报 sessionFile: ${sessionFile}`);
-    } catch { /* 不存在 / 解析失败 → 走常规定位 */ }
-  }
-  const predicted = sessionJsonlPath(runtime, cwd, sessionId);
-  if (predicted && existsSync(predicted)) return predicted;
-  // 推算落空 → 按 sessionId 全库扫一遍兜底（slug/cwd 记录不准时自愈）
-  const found = findSessionJsonlBySessionId(runtime, sessionId);
-  return found && existsSync(found) ? found : null;
-}
 
 export async function startWatching(
   agentName: string, cwd: string, sessionId: string,
   channelId: string, discord: Client,
-  opts: { runtime?: string; sessionFile?: string } = {}
+  opts: { runtime?: string; sessionFile?: string; transport?: string } = {}
 ) {
   const { runtime, sessionFile } = opts;
   stopWatching(agentName);
+  if (opts.transport === "acp" || isAcpChannel(channelId)) return startPushWatcher(agentName, sessionId, channelId, runtime);
   const jsonlPath = resolveSessionPath(runtime, cwd, sessionId, sessionFile);
 
   if (!jsonlPath) {
@@ -788,11 +772,26 @@ export function stopWatching(agentName: string) {
   }
   const state = watchers.get(agentName);
   if (state) {
-    state.watcher.close();
+    state.watcher?.close();
     if (state.textTimer) clearTimeout(state.textTimer);
     if (state.pollInterval) clearInterval(state.pollInterval);
     watchers.delete(agentName);
   }
+}
+
+/** ACP 宿主的频道：只收推送，不碰任何文件（自愈 / 轮转路径不带 transport 调进来也一样，按 acp-state 认） */
+function startPushWatcher(agentName: string, sessionId: string, channelId: string, runtime?: string): void {
+  const state = { watcher: null, jsonlPath: "", lastSize: 0, sessionId: `acp:${sessionId}`, lineNo: 0, channelId, tools: [], toolMsgId: null, textQueue: [],
+    answerParts: [], textTimer: null, agentName, runtime, processing: false, pollInterval: null, rateLimited: false, push: true } as unknown as WatcherState;
+  watchers.set(agentName, state);
+  console.log(`👁 开始接收推送: ${agentName}（ACP 宿主）`);
+}
+
+/** ACP 宿主推来的一批 CC 形状条目（bridge/acp-link.ts）：走和尾读同一条解析，工具 / 正文 / 状态事件照发 */
+export async function pushEntries(channelId: string, entries: object[], discord: Client): Promise<boolean> {
+  const state = [...watchers.values()].find((s) => s.channelId === channelId && s.push);
+  if (state) await processNewData(state, discord, entries);
+  return !!state;
 }
 
 /** v2.6.0+ channelId → agent 名反查（event-bus 埋点用，避免热路径查 registry） */

@@ -74,6 +74,8 @@ interface RuntimeAskInput {
   options: unknown[];
   /** Codex 额度用完：正文换成几点恢复，原文只留在 extra.raw（指纹仍按原文算） */
   quota?: true;
+  /** ACP 宿主的卡（bridge/acp-link.ts）：网页按 extra.acp 出按钮，点了走 POST /agents/:name/answer {kind:"acp"} */
+  acp?: true;
 }
 
 export async function openRuntimeAsk(r: RuntimeAskInput): Promise<void> {
@@ -100,7 +102,7 @@ export async function openRuntimeAsk(r: RuntimeAskInput): Promise<void> {
     const a = openAsk(askDb(), {
       project: who.project, taskId: taskOf(who.name), fromAgent: who.name, fromChannelId: r.channelId, source: r.source, kind: r.kind, blocking: true,
       urgency: urgent ? "urgent" : "normal", title: r.title, context: r.quota ? codexQuotaText(expiresAt, now) : r.context, options: r.options, allowText: false,
-      chatId: r.channelId, expiresAt, extra: { ...parentExtra(who).extra, fp, ...(r.quota ? { quota: true, raw: r.context } : {}) },
+      chatId: r.channelId, expiresAt, extra: { ...parentExtra(who).extra, fp, ...(r.quota ? { quota: true, raw: r.context } : {}), ...(r.acp ? { acp: true } : {}) },
     }, now);
     publishAsk(a);
     // 建的途中弹框已经没了、或换成了另一个（占位被 settle 拿走）：立刻结案，别留一条永远开着的
