@@ -6,13 +6,14 @@
  *   - 按路径认：`sourceForPath(path)`（先按根目录，再按首行嗅探）
  *   - 全部：`allSources()`（会话列表就是把它们的 scanSessions 并起来）
  *   - 要启动 / 退出它：`managedFor(runtime)` / `requireManaged(runtime)`
- *   - bridge 侧策略（打断键、是否抢占、忙闲来源）：`controlFor(runtime)`
+ *   - bridge 侧策略（打断键、是否抢占、忙闲来源）：`controlFor(runtime, transport)`
+ *   - 这个运行时能走哪些 transport：`transportsOf(runtime)`
  */
 import { closeSync, openSync, readSync } from "node:fs";
 import { claudeCodeAdapter } from "./claude-code.js";
 import { codexAdapter } from "./codex.js";
 import { piAdapter } from "./pi.js";
-import { isManaged, type ManagedRuntimeAdapter, type RuntimeControl, type SessionSourceAdapter } from "./types.js";
+import { DEFAULT_TRANSPORT, isManaged, type ManagedRuntimeAdapter, type RuntimeControl, type SessionSourceAdapter, type Transport } from "./types.js";
 
 export * from "./types.js";
 export { claudeCodeAdapter, codexAdapter, piAdapter };
@@ -73,10 +74,19 @@ export function requireManaged(runtime: string | undefined | null): ManagedRunti
 /**
  * 运行时策略。registry 里的 agent 一定是可启动的运行时，所以这里对未知 / 缺省
  * 回退 Claude Code 的策略（历史行为）；只读来源若自己声明了策略就用它的。
+ * transport=acp 且运行时声明了 ACP 段 → 用 acp 的策略；不传 / tmux / 没声明 ACP → 原来那份（缺省行为逐字不变）。
  */
-export function controlFor(runtime: string | undefined | null): RuntimeControl {
+export function controlFor(runtime: string | undefined | null, transport: Transport = DEFAULT_TRANSPORT): RuntimeControl {
   const s = runtime ? SOURCES.find((x) => x.id === runtime) : undefined;
-  return s?.control ?? claudeCodeAdapter.control;
+  const acp = transport === "acp" && s && isManaged(s) ? s.acp : undefined;
+  return acp?.control ?? s?.control ?? claudeCodeAdapter.control;
+}
+
+/** 能以哪些 transport 启动：tmux 人人都有，acp 要运行时声明 ACP 段（manager 切 transport 前据此拒绝） */
+export function transportsOf(runtime: string | undefined | null): Transport[] {
+  const out: Transport[] = [DEFAULT_TRANSPORT];
+  if (managedFor(runtime)?.acp) out.push("acp");
+  return out;
 }
 
 const headSniffCache = new Map<string, string | undefined>();
