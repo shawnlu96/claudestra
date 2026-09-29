@@ -1,6 +1,8 @@
 /**
- * `manager tmux-send-keys <agent> [--force] <keys...>`：大总管 / PM / 管理按钮往 agent 窗口发键。每个键发之前都抓一次屏过画面闸
- * （lib/send-key-guard.ts）：前一个键可能刚把弹窗弹出来（先 Enter 再「1」），只查开头一次挡不住。--force 跳过闸、先写审计再发。
+ * `manager tmux-send-keys <agent> [--force] [--authorized <ref>] <keys...>`：大总管 / PM / 管理按钮往 agent 窗口发键。每个键发之前都抓一次屏
+ * 过画面闸（lib/send-key-guard.ts）：前一个键可能刚把弹窗弹出来（先 Enter 再「1」），只查开头一次挡不住。--force 跳过闸。
+ * --authorized = owner 在界面上点过的按钮 / ask（ref 记进审计）；闸照查：owner 授权的是按钮对应的那个框，框换成了额度菜单就不算数。
+ * 强发、授权发都先写一行审计再发第一个键。
  * 发键方式与改动前一致：特殊键名直发、其余走 -l 字面；Esc 走双击护栏；程序敲的字 / C-c 记下来，bridge 不当成 owner。
  */
 import { readRegistryAgentsSync } from "../lib/registry.js";
@@ -9,6 +11,7 @@ import {
   appendSendKeysAudit, guardedScreenOf, guardedScreenRefusal, sendKeysCaller, type GuardedScreen, type SendKeysAudit,
 } from "../lib/send-key-guard.js";
 import { noteProgramInput, tmuxRaw, tmuxSendEscape, windowTarget } from "../lib/tmux-helper.js";
+import { extractBoolFlag, extractStringFlag } from "./core.js";
 
 export interface SendKeysDeps {
   capture(target: string): Promise<string>;
@@ -26,13 +29,28 @@ export type SendKeysResult =
 const SPECIAL_KEY_RE = /^(Enter|Escape|Esc|Left|Right|Up|Down|Tab|BTab|BSpace|C-[a-z]|M-[a-z]|Space)$/i;
 const ESC_RE = /^(Escape|Esc)$/i;
 
-export async function sendKeysChecked(tmuxName: string, keys: string[], force: boolean, deps: SendKeysDeps): Promise<SendKeysResult> {
+export interface SendKeysOpts {
+  force: boolean;
+  /** 谁授权的（按钮 id / ask id）；null = 程序自己发 */
+  authorizedBy: string | null;
+}
+
+/** argv（命令名之后、agent 之后）→ 选项 + 键；与 lib/send-key-guard.ts authorizedSendKeysArgs 拼的形状对应 */
+export function parseSendKeysArgs(args: string[]): SendKeysOpts & { keys: string[] } {
+  const f = extractBoolFlag(args, "--force");
+  const a = extractStringFlag(f.rest, "--authorized");
+  return { force: f.value, authorizedBy: a.value ?? null, keys: a.rest };
+}
+
+export async function sendKeysChecked(tmuxName: string, keys: string[], opts: SendKeysOpts, deps: SendKeysDeps): Promise<SendKeysResult> {
   const target = windowTarget(tmuxName);
   const screenNow = async () => guardedScreenOf(await deps.capture(target), deps.runtimeOf(target));
-  if (force) {
+  // 审计写失败就不发：强发 / 授权发的前提是留了档（appendSendKeysAudit 会抛）
+  const audit = (screen: GuardedScreen | null) =>
+    deps.audit({ at: deps.now().toISOString(), caller: deps.caller(), ppid: process.ppid, window: tmuxName, keys, screen, authorizedBy: opts.authorizedBy });
+  if (opts.force) {
     const screen = await screenNow();
-    // 审计写失败就不发：强发的前提是留了档（appendSendKeysAudit 会抛）
-    deps.audit({ at: deps.now().toISOString(), caller: deps.caller(), ppid: process.ppid, window: tmuxName, keys, screen });
+    audit(screen);
     for (const k of keys) await deps.sendKey(target, k);
     return { ok: true, keys, forced: true, screen };
   }
@@ -40,6 +58,7 @@ export async function sendKeysChecked(tmuxName: string, keys: string[], force: b
   for (const k of keys) {
     const screen = await screenNow();
     if (screen) return { ok: false, error: guardedScreenRefusal(screen), screen, sent };
+    if (opts.authorizedBy && !sent.length) audit(null);
     await deps.sendKey(target, k);
     sent.push(k);
   }

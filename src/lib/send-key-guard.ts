@@ -60,7 +60,13 @@ export interface SendKeysAudit {
   keys: string[];
   /** --force 时画面命中了什么；null = 画面普通（仍记：强发本身就值得留档） */
   screen: GuardedScreen | null;
+  /** owner 点过的按钮 / ask（--authorized）；null = 没有授权来源（手敲的 --force） */
+  authorizedBy: string | null;
 }
+
+/** owner 在界面上点过才发键的路径（管理按钮等）调 manager 时用这个拼 argv：授权来源进审计，一眼能查到是哪个按钮 */
+export const authorizedSendKeysArgs = (agent: string, ref: string, keys: string[]): string[] =>
+  ["tmux-send-keys", agent, "--authorized", ref, ...keys];
 
 /** 追加一行；写不进去要抛出去——强发的前提是留了档，调用方据此不发键 */
 export function appendSendKeysAudit(entry: SendKeysAudit, path = SEND_KEYS_AUDIT_LOG): void {

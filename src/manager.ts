@@ -104,7 +104,7 @@ import { sandboxManagerRefusal } from "./lib/sandbox-env.js";
 import { assertResumable, assertSandboxSession } from "./lib/sandbox-sessions.js";
 import { loadRegistry, patchRegistryAgent, saveRegistry, normalizeName, assertValidNewAgent, formatAge, output, outputSync, extractPermFlags, extractEffortFlag, extractModeFlag, extractModelFlag, extractBoolFlag, extractMultiFlag, extractStringFlag } from "./manager/core.js";
 import { runProjectCommand } from "./manager/projects.js";
-import { realSendKeysDeps, sendKeysChecked } from "./manager/send-keys.js";
+import { parseSendKeysArgs, realSendKeysDeps, sendKeysChecked } from "./manager/send-keys.js";
 import { cmdCronAdd, cmdCronList, cmdCronEdit, cmdCronRemove, cmdCronToggle, cmdCronHistory } from "./manager/cron.js";
 import { cmdPermissions } from "./manager/permissions.js";
 import { cmdKill, cmdRemove } from "./manager/agent-kill.js"; // 按 registry 补完剩余步骤、重复跑幂等
@@ -2100,8 +2100,8 @@ async function cmdTmuxSendKeys(name: string, args: string[]) {
     output({ ok: false, error: `${tmuxName} 不存在` });
     return;
   }
-  const { value: force, rest: keys } = extractBoolFlag(args, "--force"); // keys 可以是 "Enter" "Escape" "Left" "C-c" 或普通字符串；画面闸见 manager/send-keys.ts
-  output({ agent: tmuxName, ...(await sendKeysChecked(tmuxName, keys, force, realSendKeysDeps())) });
+  const { keys, ...opts } = parseSendKeysArgs(args); // keys 可以是 "Enter" "Escape" "Left" "C-c" 或普通字符串；画面闸见 manager/send-keys.ts
+  output({ agent: tmuxName, ...(await sendKeysChecked(tmuxName, keys, opts, realSendKeysDeps())) });
 }
 
 async function cmdTmuxCapture(name: string, lines: number) {
@@ -2771,7 +2771,7 @@ switch (cmd) {
 
   case "tmux-send-keys": {
     const [name, ...rest] = args;
-    if (!name || extractBoolFlag(rest, "--force").rest.length === 0) { output({ ok: false, error: "usage: tmux-send-keys <agent> [--force] <keys...>" }); break; }
+    if (!name || parseSendKeysArgs(rest).keys.length === 0) { output({ ok: false, error: "usage: tmux-send-keys <agent> [--force] [--authorized <ref>] <keys...>" }); break; }
     await cmdTmuxSendKeys(name, rest);
     break;
   }

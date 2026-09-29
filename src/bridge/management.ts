@@ -15,6 +15,7 @@ import { confirmDeps, handleTeamButton } from "./team-confirm.js";
 import { cleanupBgJob } from "../lib/bg-jobs.js";
 import { emitEvent } from "./event-bus.js";
 import { runManagerProcess } from "../lib/run-manager.js";
+import { handleSwmodelButton, isSwmodelButton } from "./swmodel-button.js";
 
 /**
  * 各 manager 子命令的超时上限（毫秒）。只读类命令必须短 —— 它们坐在热轮询路径上
@@ -232,15 +233,7 @@ async function handleMgmtButton(
     return await buildSessionsPanel();
   }
 
-  // ── v2.16「Switch model?」弹窗代决按钮（permission-watcher 检测到 CC 主动
-  //    提议换模型时发出;Enter=接受切换,Escape=保持现状）──
-  if (id.startsWith("swmodel_yes:") || id.startsWith("swmodel_no:")) {
-    const yes = id.startsWith("swmodel_yes:");
-    const agent = id.slice(id.indexOf(":") + 1);
-    const r = await runManager("tmux-send-keys", agent, yes ? "Enter" : "Escape");
-    if (r.error) return { text: `❌ 发键失败: ${r.error}` };
-    return { text: yes ? `🔁 已替 **${agent}** 确认切换模型` : `🛡 已替 **${agent}** 关闭弹窗、保持当前模型` };
-  }
+  if (isSwmodelButton(id)) return handleSwmodelButton(id, runManager); // 「Switch model?」代决按钮（bridge/swmodel-button.ts）
 
   if (id.startsWith("sess_detail:")) {
     const s = await findBgSession(id.slice("sess_detail:".length));
