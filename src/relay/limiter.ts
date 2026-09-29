@@ -45,24 +45,60 @@ export function forwardedClientIp(xff: string | null | undefined, hops: number):
   return parts.length >= hops ? parts[parts.length - hops] : undefined;
 }
 
+/** 认不出的地址写法共用的限流键 */
+const UNPARSED_IP_KEY = "(unparsed)";
+
+const V4_RE = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/;
+
+function parseV4(s: string): number[] | null {
+  const m = V4_RE.exec(s);
+  const o = m ? m.slice(1).map(Number) : null;
+  return o && o.every((n) => n <= 255) ? o : null;
+}
+
+/** IPv6 文本 → 8 个 16 位组（末尾可带点分 IPv4）；写法不合法返回 null */
+function parseV6(s: string): number[] | null {
+  const halves = s.split("::");
+  if (halves.length > 2) return null;
+  const groups = (h: string): number[] | null => {
+    const out: number[] = [];
+    const parts = h ? h.split(":") : [];
+    for (const [i, g] of parts.entries()) {
+      const v4 = i === parts.length - 1 && g.includes(".") ? parseV4(g) : null;
+      if (v4) out.push((v4[0] << 8) | v4[1], (v4[2] << 8) | v4[3]);
+      else if (/^[0-9a-f]{1,4}$/.test(g)) out.push(parseInt(g, 16));
+      else return null;
+    }
+    return out;
+  };
+  const head = groups(halves[0]), tail = halves.length === 2 ? groups(halves[1]) : [];
+  if (!head || !tail) return null;
+  if (halves.length === 1) return head.length === 8 ? head : null;
+  const fill = 8 - head.length - tail.length;
+  return fill >= 1 ? [...head, ...Array<number>(fill).fill(0), ...tail] : null;
+}
+
+/** 内嵌 IPv4 的 IPv6（::ffff:0:0/96、::ffff:0:0:0/96、64:ff9b::/96、::/96）→ 那个 IPv4；不是返回 null */
+function embeddedV4(g: number[]): string | null {
+  const zero = (from: number, to: number) => g.slice(from, to).every((x) => x === 0);
+  const embedded = (zero(0, 5) && g[5] === 0xffff) || (zero(0, 4) && g[4] === 0xffff && g[5] === 0) ||
+    (g[0] === 0x64 && g[1] === 0xff9b && zero(2, 6)) || zero(0, 6);
+  return embedded ? [g[6] >> 8, g[6] & 0xff, g[7] >> 8, g[7] & 0xff].join(".") : null;
+}
+
 /**
- * 按 IP 计数的配额用的键：IPv6 取前 64 位（一台设备通常分到整段 /64，逐地址计数换个后缀就是新桶），
- * IPv4 与 IPv4 映射地址按原样的 IPv4；反代写成带端口的（`1.2.3.4:5678`、`[v6]:443`）去掉端口，不然每换一个源端口就是新桶。
- * 认不出的写法原样返回，只会更严不会合并别人。
+ * 按 IP 计数的配额用的键：IPv6 取前 64 位（一台设备通常分到整段 /64，逐地址计数换个后缀就是新桶）；
+ * IPv4 与各种内嵌 IPv4 的 IPv6 写法（映射、NAT64、兼容地址）按那个 IPv4，否则 NAT64 后面所有 IPv4 客户端会挤进一个 /64 桶；
+ * 反代写成带端口的（`1.2.3.4:5678`、`[v6]:443`）去掉端口，不然每换一个源端口就是新桶。
+ * 认不出的写法一律归 UNPARSED_IP_KEY 共用一个桶：原样当键的话每换一种写法就是新桶，等于绕开限额。
  */
 export function ipLimitKey(ip: string): string {
   const raw = ip.trim().toLowerCase();
   const withPort = /^(\d{1,3}(?:\.\d{1,3}){3}):\d+$/.exec(raw) ?? /^\[([^\]]+)\](?::\d+)?$/.exec(raw);
   const s = (withPort ? withPort[1] : raw).replace(/%.*$/, "");
-  if (!s.includes(":")) return s;
-  const mapped = /^::ffff:(\d{1,3}(?:\.\d{1,3}){3})$/.exec(s);
-  if (mapped) return mapped[1];
-  const halves = s.split("::");
-  if (halves.length > 2) return s;
-  const groups = (h: string) => (h ? h.split(":").flatMap((g) => (g.includes(".") ? ["0", "0"] : [g])) : []);
-  const head = groups(halves[0]), tail = halves.length === 2 ? groups(halves[1]) : [];
-  const all = halves.length === 2 ? [...head, ...Array(Math.max(0, 8 - head.length - tail.length)).fill("0"), ...tail] : head;
-  const top = all.slice(0, 4);
-  if (all.length !== 8 || top.some((g) => !/^[0-9a-f]{1,4}$/.test(g))) return s;
-  return `${top.map((g) => parseInt(g, 16).toString(16)).join(":")}::/64`;
+  const v4 = parseV4(s);
+  if (v4) return v4.join(".");
+  const g = s.includes(":") ? parseV6(s) : null;
+  if (!g) return UNPARSED_IP_KEY;
+  return embeddedV4(g) ?? `${g.slice(0, 4).map((x) => x.toString(16)).join(":")}::/64`;
 }

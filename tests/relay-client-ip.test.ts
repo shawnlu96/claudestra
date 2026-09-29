@@ -29,15 +29,26 @@ describe("ipLimitKey", () => {
     expect(ipLimitKey("[2001:DB8:1:2::abcd]")).toBe(k);
     expect(ipLimitKey("2001:db8:1:2::1%en0")).toBe(k);
     expect(ipLimitKey("2001:db8:1:3::1")).not.toBe(k);
-    expect(ipLimitKey("::1")).toBe("0:0:0:0::/64");
+    expect(ipLimitKey("2001:db8:1:2:3:4:5:6")).toBe(k);
+    expect(ipLimitKey("2001:db8::")).toBe("2001:db8:0:0::/64");
   });
   test("IPv4 与 IPv4 映射地址按 IPv4；认不出的原样", () => {
     expect(ipLimitKey("198.51.100.1")).toBe("198.51.100.1");
     expect(ipLimitKey("::ffff:198.51.100.1")).toBe("198.51.100.1");
     expect(ipLimitKey("198.51.100.1:5678")).toBe("198.51.100.1");
     expect(ipLimitKey("[2001:db8:1:2::9]:443")).toBe(ipLimitKey("2001:db8:1:2::1"));
-    expect(ipLimitKey("1::2::3")).toBe("1::2::3");
-    expect(ipLimitKey("?")).toBe("?");
+    expect(ipLimitKey("[2001:db8:1:2:3:4:5:6]:443")).toBe(ipLimitKey("[2001:db8:1:2:3:4:5:7]:443"));
+  });
+  test("内嵌 IPv4 的 IPv6 写法按那个 IPv4 计，不同 IPv4 不并桶", () => {
+    for (const w of ["::ffff:c633:6401", "::ffff:0:198.51.100.1", "::ffff:0:c633:6401", "64:ff9b::198.51.100.1", "64:ff9b::c633:6401", "::198.51.100.1",
+      "0:0:0:0:0:ffff:198.51.100.1", "[::ffff:198.51.100.1]:80"]) expect([w, ipLimitKey(w)]).toEqual([w, "198.51.100.1"]);
+    expect(ipLimitKey("64:ff9b::198.51.100.2")).toBe("198.51.100.2");
+    expect(ipLimitKey("::ffff:c633:6402")).toBe("198.51.100.2");
+  });
+  test("认不出的写法共用一个桶（原样当键会让每种写法各一桶）", () => {
+    const bad = ["1::2::3", "?", "unknown", "_hidden", "300.1.1.1", "1:2:3:4:5:6:7:8:9", "gggg::1", "1.2.3.4.5"].map(ipLimitKey);
+    expect(new Set(bad).size).toBe(1);
+    expect(bad[0]).not.toBe("?");
   });
 });
 

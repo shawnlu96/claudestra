@@ -91,6 +91,18 @@ const ENDPOINTS: Record<string, Endpoint> = {
 };
 const allows = (e: Endpoint, cred: string) => (e.owner ? OWNER_ONLY : ALLOWED).has(cred);
 
+/**
+ * 另两行来源（上面的矩阵都按主端口经本机反代 = lan）：peer 入口（中继 peer 帧、对外直连）没有设备身份，设备凭据一律 403，
+ * Bearer 与 lan 同样判；没定来源（unknown，入口漏设）任何凭据都不认。对照 tests/peer-ingress-sources.test.ts。
+ */
+const SOURCES = ["peer-ingress", "unknown"] as const;
+const DEVICE_CREDS = new Set(Object.entries(CREDS).filter(([, c]) => c.auth.device).map(([n]) => n));
+function sourceVerdict(source: (typeof SOURCES)[number], cred: string, e: Endpoint): "allow" | { code?: string; error: string } {
+  if (source === "unknown") return { code: "unknown_source", error: "request source not established" };
+  if (DEVICE_CREDS.has(cred)) return { code: "device_via_peer_entrance", error: "no device credentials on this entrance" };
+  return allows(e, cred) ? "allow" : { error: "" };
+}
+
 // 路径穿越：野生会话（owner 终端里手敲的 CC）和 master 的归档，都不属于任何 scope 内的 agent
 const SID = "11111111-2222-3333-4444-555555555555";
 const SECRET = "OWNER-WILD-SECRET";
@@ -119,10 +131,17 @@ beforeAll(() => {
     mkdirSync(dir, { recursive: true });
     writeFileSync(join(dir, `${SID}.jsonl`), line);
   }
-  const specs: { name: string; method: string; path: string; body?: string; auth: object }[] = [];
+  const specs: { name: string; method: string; path: string; body?: string; auth: object; source?: string }[] = [];
   for (const [cred, { auth }] of Object.entries(CREDS)) {
     for (const [ep, e] of Object.entries(ENDPOINTS)) {
       if (!(e.probes && allows(e, cred))) specs.push({ name: `${cred} ${ep}`, method: e.method, path: e.path, body: e.body, auth });
+    }
+  }
+  for (const source of SOURCES) {
+    for (const [cred, { auth }] of Object.entries(CREDS)) {
+      for (const [ep, e] of Object.entries(ENDPOINTS)) {
+        if (!(e.probes && sourceVerdict(source, cred, e) === "allow")) specs.push({ name: `${source} ${cred} ${ep}`, method: e.method, path: e.path, body: e.body, auth, source });
+      }
     }
   }
   for (const [k, name] of Object.entries(TRAVERSALS(sandbox.home))) {
@@ -155,6 +174,31 @@ describe("权限矩阵：十种凭据 × 会话管理类接口（另加只认 ow
   test("全权门（isFullScope = canManage）逐一对上：只有 owner 全权设备和老的 * Bearer", () => {
     for (const [cred, { p }] of Object.entries(CREDS)) expect([cred, canManage(p)]).toEqual([cred, ALLOWED.has(cred)]);
   });
+});
+
+describe("按来源：peer 入口与没定来源各一行（凭据 × 接口同上）", () => {
+  for (const source of SOURCES) {
+    test(source, () => {
+      for (const cred of Object.keys(CREDS)) {
+        for (const [ep, e] of Object.entries(ENDPOINTS)) {
+          const want = sourceVerdict(source, cred, e);
+          if (e.probes && want === "allow") continue;
+          const r = byName(`${source} ${cred} ${ep}`);
+          const cell = `${source} | ${cred} | ${ep}`;
+          if (want === "allow") {
+            expect([cell, e.ok.includes(r.status!) ? "ok" : `${r.status} ${r.body}`]).toEqual([cell, "ok"]);
+          } else if (want.code) {
+            const b = JSON.parse(r.body!);
+            expect([cell, r.status, b.code, b.error]).toEqual([cell, 403, want.code, want.error]);
+          } else {
+            // 与 lan 同一道全权 / owner 本人门
+            const b = JSON.parse(r.body!);
+            expect([cell, r.status, b.error]).toEqual([cell, 403, e.error ?? `${ep} requires a full-scope token`]);
+          }
+        }
+      }
+    });
+  }
 });
 
 describe("历史接口的路径穿越（agent 名 %2F 解码后会拼进归档路径）", () => {

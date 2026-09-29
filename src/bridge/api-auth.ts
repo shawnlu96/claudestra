@@ -35,6 +35,8 @@ function bearerSecret(req: Request, url: URL): string | null {
 
 /** peers: false = 这条路由不收 peer token（远程终端这类不限速的路由；peer 本来就不该碰终端） */
 export async function authenticateApi(req: Request, url: URL, opts: { rateLimit: boolean; peers?: false }): Promise<Principal | Response> {
+  // 入口漏设来源时不认任何凭据（误拒而不是按某个来源放行）：Bearer 本身不看来源，只靠这一道
+  if (!sourceAllows(req, "api")) return apiJson(403, { ok: false, error: "request source not established", code: "unknown_source" });
   const file = await readPrincipals(principalsPath);
   const secret = bearerSecret(req, url);
   let p: Principal | null;

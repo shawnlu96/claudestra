@@ -34,9 +34,11 @@ const LEAST_PRIVILEGE: RequestContext = { source: "unknown", clientIp: null, htt
  *   device   设备 cookie 与 /api/v1/devices/* 公开端点：peer 入口没有设备身份；
  *   legacy   旧 web 会话换设备凭据：只在直托管同源成立，中继路径与隧道都不算；
  *   peer     peer token：经中继的 peer 请求只走 peer 帧进 peer 入口，路径模式与隧道一律拒；
- *   redeem   兑换邀请：同上，合法兑换只走 peer 帧或直连。
+ *   redeem   兑换邀请：同上，合法兑换只走 peer 帧或直连；
+ *   api      /api/v1 的任何凭据（Bearer、设备 cookie）：四个已知来源都认，只拒没定来源的（unknown）。
  */
 const SOURCE_POLICY = {
+  api: ["loopback", "lan", "relay", "peer-ingress"],
   device: ["loopback", "lan", "relay"],
   legacy: ["loopback", "lan"],
   peer: ["loopback", "lan", "peer-ingress"],

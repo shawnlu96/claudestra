@@ -193,7 +193,8 @@ async function forwardTunnel(req: InboundRequest, ctx: InboundContext, d: Inboun
     redirect: "manual",
     signal: ctx.signal,
     ...TUNNEL_FETCH,
-    ...(hasBody ? { body: req.body, duplex: "half" } : {}),
+    // 带正文的不复用连接：本机 Web 提前回了响应、没读完分块正文时，Bun 会让同一条连接上的下一个隧道请求得 400（bridge/unread-body.ts）
+    ...(hasBody ? { body: req.body, duplex: "half", keepalive: false } : {}),
   };
   let r: Response;
   try {

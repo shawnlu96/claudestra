@@ -16,6 +16,7 @@ import { fallbackStaticRoots, pinnedStaticRoot } from "../lib/web-releases.js";
 /** bridge.ts 只从这一个模块 import 静态托管相关的东西（它在 guard 基线里只许缩，多一行 import 都不行） */
 export { appConfigResponse } from "./local-api/version.js";
 export { startLegacyWebPort } from "./legacy-web-port.js";
+export { drainingFetch } from "./unread-body.js";
 
 /** 常量时间 token 比较(security-audit review nit-a):长度不等直接 false
  *  (长度泄露风险极小,且 timingSafeEqual 要求等长 buffer)。 */

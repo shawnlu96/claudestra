@@ -91,7 +91,7 @@ import { apiErrorResponse } from "./bridge/api-respond.js";
 import { listSessionIdsForCwd, latestSessionIdForCwd } from "./bridge/session-ids.js";
 import {
   corsHeadersFor,
-  serveStaticSite, appConfigResponse, startLegacyWebPort,
+  serveStaticSite, appConfigResponse, startLegacyWebPort, drainingFetch,
   isCrossOrigin,
   isOriginExplicitlyAllowed,
   controlAccessVerdict,
@@ -3447,7 +3447,7 @@ const server = Bun.serve({
   // 默认只绑回环：/hook /stats /skills/rescan 无鉴权，绑 0.0.0.0 等于暴露在内网。peer 走 HTTPS
   // 反代 → 回环上的 peer 专用入口（bridge/peer-ingress.ts），不必对外开放这里。
   hostname: process.env.BRIDGE_BIND || "127.0.0.1",
-  fetch: bridgeFetch,
+  fetch: drainingFetch(bridgeFetch), // 提前拒绝没读的正文读掉再回，不然同一条 keep-alive 连接上的下一个请求得 400（bridge/unread-body.ts）
   idleTimeout: HTTP_IDLE_TIMEOUT_S, // Bun 默认 10 秒：打断请求要等 Esc 窗口锁（最长 12 秒 + 间隔），会先被切断、客户端拿到空响应
   // D5-11 兜底：fetch 里逃逸的异常（/api/v1 以外的路由、终端 API 等）回 JSON，
   // 不再是 Bun 未设 NODE_ENV 时的 67KB HTML 调试页。/api/v1 自己已在 handleApiRequest 里接住。
@@ -3503,7 +3503,7 @@ const server = Bun.serve({
 });
 
 console.log(`🚀 Bridge WebSocket 启动: ws://localhost:${BRIDGE_PORT}`);
-initPeerIngress(serveApiRequest); startLegacyWebPort(bridgeFetch); // 旧 web 端口由 bridge 接管（BRIDGE_LEGACY_WEB_PORT，bridge/legacy-web-port.ts）
+initPeerIngress(serveApiRequest); startLegacyWebPort(drainingFetch(bridgeFetch)); // 旧 web 端口由 bridge 接管（BRIDGE_LEGACY_WEB_PORT，bridge/legacy-web-port.ts）
 initForward({ clients, deliver, pendingReplies, pendingThreads, emitEvent, controlChannelId: CONTROL_CHANNEL_ID, discord: WEB_ONLY ? null : discord });
 initInbox({
   clients, held: heldLocalMsgs, calls: pendingAgentCalls, render: renderContentForLocal,
