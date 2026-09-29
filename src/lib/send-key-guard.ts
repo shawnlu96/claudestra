@@ -47,12 +47,13 @@ export function seenScreenOf(pane: string, runtime: string | undefined): SeenScr
 
 /**
  * 那一张框的指纹：授权绑定到 owner 看到的那张，不是「同一类」——旧的切 Sonnet 按钮不能批准后来的切 effort 框。
- * 切模型 / effort 框取标题到末行，别的画面取最后 12 行非空行；逐行压掉空白后 sha256 取前 12 位。❯ 停在哪一项也算在内（光标挪了，Enter 的意思就变了）
+ * 切模型 / effort 框取标题到末行，别的画面取最后 12 行非空行；去掉全部空白后 sha256 取前 12 位（watcher 抓屏带 -J、宽窄折行不同也算同一张）。
+ * ❯ 停在哪一项也算在内（光标挪了，Enter 的意思就变了）
  */
 export function screenFingerprint(pane: string, screen: AuthorizableScreen): string {
-  const lines = pane.split("\n").map((l) => l.replace(/\s+/g, " ").trim()).filter(Boolean);
+  const lines = pane.split("\n").map((l) => l.trim()).filter(Boolean);
   const title = screen === "switch_confirm" ? lines.findLastIndex((l) => Object.hasOwn(SWITCH_CONFIRM_TITLES, l)) : -1;
-  return createHash("sha256").update(lines.slice(title >= 0 ? title : -12).join("\n")).digest("hex").slice(0, 12);
+  return createHash("sha256").update(lines.slice(title >= 0 ? title : -12).join("").replace(/\s+/g, "")).digest("hex").slice(0, 12);
 }
 
 const SCREEN_TEXT: Record<AuthorizableScreen, string> = {

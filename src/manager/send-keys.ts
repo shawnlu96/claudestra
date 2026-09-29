@@ -135,7 +135,7 @@ export async function runSendKeysCommand(tmuxName: string, args: string[]): Prom
 
 const realSendKeysDeps = (): SendKeysDeps => ({
   // 抓屏在持锁期间：卡住的 tmux 早点放弃（拒发），别让后面排队的发键方干等（锁本身活着就续租，lib/file-lock.ts）
-  capture: (target) => tmuxRawStrict(["capture-pane", "-t", target, "-p"], { timeoutMs: 3_000 }),
+  capture: (target) => tmuxRawStrict(["capture-pane", "-t", target, "-p", "-J"], { timeoutMs: 3_000 }), // -J 同 permission-watcher（tmuxCapture），指纹同源
   runtimeOf: runtimeOfWindow,
   sendKey: sendOneKey,
   audit: (e) => appendSendKeysAudit(e),
