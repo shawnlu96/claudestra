@@ -8,8 +8,9 @@
 import { Database } from "bun:sqlite";
 import { statSync } from "node:fs";
 import { blockedBy, depViews, reviewBranches, type DepView, type ReviewBranches } from "./ledger-deps.js";
-import { stageTimeline, taskMetrics, type StageEntry, type TaskMetrics } from "./ledger-metrics.js";
+import { currentStageMark, stageTimeline, taskMetrics, type StageEntry, type TaskMetrics } from "./ledger-metrics.js";
 import { isAskEvent, TERMINAL_STAGES, type LedgerEvent, type LedgerItem, type LedgerTask, type Stage } from "./ledger-stages.js";
+import { auditChangedProjects, openFindings, type StoredFinding } from "./ledger-audit-store.js";
 import { getMeta, LEDGER_PATH, LEDGER_SCHEMA_VERSION, listDeps, listEvents, listItems, listTasks, getTask, toEvent, type LedgerMeta } from "./ledger-store.js";
 
 /** 读连接等锁的上限：WAL 下读不等写，只有写者刚建库、还没切 WAL 的那一瞬会撞上；宁可这一轮报 busy 也不卡住 bridge */
@@ -117,6 +118,8 @@ export interface ProjectView {
   deps: DepView[];
   /** 最近 PROJECT_EVENTS_LIMIT 条 target 为空的项目级事件，seq 升序 */
   projectEvents: LedgerEvent[];
+  /** 巡检发现、还没解决的「可能漏了」（lib/ledger-audit.ts）；库还没有 audit_findings 表 = 空 */
+  audit: StoredFinding[];
 }
 
 const numOrNull = (v: unknown): number | null => (typeof v === "number" && Number.isFinite(v) ? v : null);
@@ -135,11 +138,6 @@ function reviewSummary(e: LedgerEvent | undefined): ReviewSummary | null {
   const d = e.data;
   const text = clipFirstLine(e.text);
   return { round: numOrNull(d.round), verdict: typeof d.verdict === "string" ? d.verdict : null, p0: numOrNull(d.p0), p1: numOrNull(d.p1), p2: numOrNull(d.p2), text, ts: e.ts };
-}
-
-/** 时间线最后一段是由哪条事件开出来的（建任务或 stage，与 stageTimeline 的取点规则一致）；导入推断的时间带 approxTime */
-function currentStageMark(own: readonly LedgerEvent[]): LedgerEvent | undefined {
-  return own.findLast((e) => e.kind === "stage" || (e.kind === "task" && e.data.op === "new"));
 }
 
 function taskView(task: LedgerTask, own: readonly LedgerEvent[], now: number, deps: readonly DepView[]): TaskView {
@@ -178,6 +176,7 @@ export function projectView(db: Database, project: string, now: number): Project
     tasks: tasks.map((t) => taskView(t, byTarget.get(t.id) ?? [], now, deps)),
     deps,
     projectEvents: recent.reverse().map(toEvent),
+    audit: openFindings(db, project),
   };
 }
 
@@ -239,6 +238,7 @@ export interface FeedDeps {
 
 /**
  * 每秒一次的变更检测：data_version 没变什么都不查；变了就查游标之后的事件属于哪些项目，逐个 emit。
+ * 巡检结果不写事件（audit_findings 表），另用 changedAt 游标查，两边的项目合并后各 emit 一次。
  * 第一次就看到库时游标从当前最大 seq 起（网页连上 SSE 本来就全量重拉，不用补发）；库后来才出现、或文件被换掉，从 0 起。
  * 库不存在不打日志；出错只在状态切换时打一次，并关掉连接下一轮重开。
  */
@@ -247,6 +247,7 @@ export function ledgerFeedTicker(d: FeedDeps): () => void {
   let gen = -1;
   let dv: number | null = null;
   let seq = 0;
+  let auditAt = 0;
   let failing = false;
   return () => {
     const first = firstTick;
@@ -262,6 +263,7 @@ export function ledgerFeedTicker(d: FeedDeps): () => void {
         gen = d.reader.generation;
         baseline = first;
         seq = first ? maxEventSeq(db) : 0;
+        auditAt = first ? auditChangedProjects(db, 0).last : 0;
         dv = null;
       }
       const v = dataVersion(db);
@@ -283,6 +285,8 @@ export function ledgerFeedTicker(d: FeedDeps): () => void {
     if (maxEventSeq(db) < seq) seq = 0; // 库被换成更短的一份（恢复备份）：全部重发一次
     const r = changedProjects(db, seq);
     seq = r.lastSeq;
-    for (const p of r.projects) d.emit(p);
+    const a = auditChangedProjects(db, auditAt);
+    auditAt = a.last;
+    for (const p of new Set([...r.projects, ...a.projects])) d.emit(p);
   }
 }

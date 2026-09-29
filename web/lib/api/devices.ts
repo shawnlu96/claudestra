@@ -3,6 +3,7 @@
  * 中继模式打 `/m/<fp>/api/v1/devices/…`，直托管打同源。成功响应带 Set-Cookie，api() 的 credentials:"include" 让浏览器收下它。
  */
 import { defaultDeviceName } from "@/lib/pairing";
+import type { ShareOpts } from "@/lib/guest-share";
 import { api, apiRaw, apiErrorFrom, type ApiError } from "./client";
 
 export interface PairedInfo {
@@ -111,6 +112,11 @@ export function revokeDevice(id: string): Promise<void> {
   return api(`/devices/${encodeURIComponent(id)}`, { method: "DELETE" }).then(() => undefined);
 }
 
+/** 退出登录：撤这次请求用的那条设备凭据，不用 manage、不用先拉列表（guest 拿不到列表）；bridge 同样回删 cookie */
+export function revokeCurrentDevice(): Promise<void> {
+  return api("/devices/current", { method: "DELETE" }).then(() => undefined);
+}
+
 // ── 在网页里发配对码、批准别的设备（要 manage；bridge/local-api/control.ts 与 devices.ts 的管理端点）──
 
 /** 手输短码等着这台机器点头的设备 */
@@ -144,9 +150,10 @@ export interface ShareCode {
 
 /**
  * 签一个配对码。guest = 给别人的设备（独立身份、只含选中的会话、无终端无管理），不给就是自己的设备（全权）。
+ * guest 的请求体由 guestShareOpts 拼（名字、agents 必须写明，"*" 还要 confirmAllAgents）。
  * link：bridge 知道入口时给（中继首页）；没给就用当前页面的 origin 拼——前端就托管在这个源上。老 bridge 只有 url（子域名）。
  */
-export async function newShareCode(opts: { guest?: string; agents?: string[] } = {}): Promise<ShareCode> {
+export async function newShareCode(opts: ShareOpts = {}): Promise<ShareCode> {
   type R = { ok?: boolean; error?: string; code?: string; display?: string; link?: string | null; fragment?: string; url?: string | null; expiresAt?: string };
   const j = await api<R>("/relay/pair", { method: "POST", json: opts, timeoutMs: 5000 });
   const link = j.link || (j.fragment ? `${window.location.origin}/pair#${j.fragment}` : j.url);

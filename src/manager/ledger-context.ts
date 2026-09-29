@@ -4,6 +4,7 @@
  * 依赖全部注入，测试不碰真实 registry / 状态目录（tests/manager-ledger.test.ts）。
  */
 import type { Database } from "bun:sqlite";
+import type { SnapshotSources } from "../lib/ledger-audit-snapshot.js";
 import { roleOf, type LedgerTask, type Role } from "../lib/ledger-stages.js";
 import { getItem, getMeta, getTask, LedgerError } from "../lib/ledger-store.js";
 import type { FactsDeps } from "../lib/ledger-verify-facts.js";
@@ -29,6 +30,8 @@ export interface LedgerDeps {
   factsDeps?(): FactsDeps;
   /** projects.json 的项目清单（verify 按目录判断任务所属项目是否拥有本仓库）；不给按拥有算 */
   projects?(): ProjectDef[];
+  /** ledger audit 的取数来源；不给 = 真实的 registry / tmux / 文件（测试注入假的） */
+  auditSources?: SnapshotSources;
 }
 
 export type Result = Record<string, unknown>;
