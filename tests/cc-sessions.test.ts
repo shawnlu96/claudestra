@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { parseCcSessionEntry, pickCcSessionForWindow, pickCcSessionUnderPane, procStartMatches, type CcSessionEntry } from "../src/lib/cc-sessions";
+import { panePidsByWindow, parseCcSessionEntry, pickCcSessionForWindow, pickCcSessionUnderPane, procStartMatches, type CcSessionEntry } from "../src/lib/cc-sessions";
+import { windowKey } from "../src/lib/tmux-helper";
 
 const SRC = "32bd5a87-6982-4717-aef2-58d80812935b";
 const FORK = "72aabe18-8395-43ee-a9e0-31abdf8aab4e";
@@ -102,5 +103,20 @@ describe("pickCcSessionUnderPane：批量认会话只认窗格进程的后代（
     const elsewhere = e({ pid: 250, sessionId: FORK, startedAt: 9, cwd: "/tmp/x" });
     expect(pickCcSessionUnderPane([own, elsewhere], 100, ppid, own.cwd)?.sessionId).toBe(SRC);
     expect(pickCcSessionUnderPane([own, { ...elsewhere, cwd: own.cwd }], 100, ppid, own.cwd)?.sessionId).toBe(FORK);
+  });
+});
+
+describe("大总管窗口（T36c 复核）", () => {
+  test("窗格进程是 claude.exe、真正登记会话的 CC 在它下面一层：认下面那个", () => {
+    const ppid = (p: number) => ({ 9254: 1, 68530: 9254 } as Record<number, number>)[p] ?? null;
+    const child = e({ pid: 68530, sessionId: SRC, tmux: "master:@502.%502" });
+    expect(pickCcSessionUnderPane([child], 9254, ppid, child.cwd)?.sessionId).toBe(SRC);
+  });
+
+  test("按 index 0 认：窗口名被改掉（不叫 master）也找得到；别处叫 master 的窗口不算", () => {
+    const panes = panePidsByWindow("0\tclaude.exe\t9254\n3\tmaster\t777\n5\tagent-x\t42\n5\tagent-x\t43\n");
+    expect(panes.get(windowKey("master"))).toBe(9254);
+    expect(panes.get(windowKey("agent-x"))).toBe(42);
+    expect(panes.get(windowKey("agent-y"))).toBeUndefined();
   });
 });

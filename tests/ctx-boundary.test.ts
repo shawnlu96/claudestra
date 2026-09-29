@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { ctxBoundaryTick, injectCompact, masterStandIn, needsMasterStandIn, resetCtxBoundaryState } from "../src/bridge/ctx-boundary.js";
-import { windowTarget } from "../src/lib/tmux-helper.js";
+import { MASTER_WINDOW_TARGET } from "../src/lib/tmux-helper.js";
 import { isLinkedWorktree } from "../src/lib/linked-worktree.js";
 import { DEFAULT_KEEP_LIST } from "../src/lib/ctx-boundary-policy.js";
 import { agent, BUSY_PANE, harness, MIN, tgt } from "./ctx-boundary-harness.js";
@@ -311,9 +311,9 @@ describe("registry 没登记大总管（T36c）", () => {
     expect(needsMasterStandIn([])).toBe(true);
   });
 
-  test("补的那条：大总管窗口、launcher 的目录、会话留空等窗格认", () => {
+  test("补的那条：大总管窗口（index 0，不按名字）、launcher 的目录、会话留空等窗格认", () => {
     const m = masterStandIn("/r/src/../master", "123");
-    expect(m).toMatchObject({ name: "agent-master", target: windowTarget("master"), cwd: "/r/master", sessionId: "", ctx: null, executor: false, channelId: "123" });
+    expect(m).toMatchObject({ name: "agent-master", target: MASTER_WINDOW_TARGET, cwd: "/r/master", sessionId: "", ctx: null, executor: false, channelId: "123" });
   });
 
   test("窗格认到会话 → 按全局线纳入（开关开）；认不到 → 跳过，不发键", async () => {
@@ -324,6 +324,6 @@ describe("registry 没登记大总管（T36c）", () => {
     h.deps.liveSessions = async (as) => as.map((a) => ({ ...a, sessionId: "live", ctx: 900_000, convTs: 0, mtime: 0 }));
     const r = await ctxBoundaryTick(h.deps);
     expect(r.map((x) => [x.agent, x.boundary.policy, x.gated, x.verdict.fire])).toEqual([["agent-master", "global", true, true]]);
-    expect(h.sent).toEqual([{ target: windowTarget("master"), line: "/save-compact" }]);
+    expect(h.sent).toEqual([{ target: MASTER_WINDOW_TARGET, line: "/save-compact" }]);
   });
 });
