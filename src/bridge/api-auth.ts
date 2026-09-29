@@ -53,6 +53,11 @@ export async function authenticateApi(req: Request, url: URL, opts: { rateLimit:
     p = effectivePrincipal(hit);
     void touchLater(hit.credential.id, requestContextOf(req).clientIp);
   }
+  // E2E 会话解开的内层只收 peer token：外层只证明了「是那台 peer 机器」，别的 token 借它的会话就绕过了
+  // peer 入口 / 中继 peer 帧「只认 peer token」的闸（tests/peer-e2e-relay.test.ts）
+  if (requestContextOf(req).e2e && !p.peer) {
+    return apiJson(403, { ok: false, error: "only peer tokens are accepted inside an E2E session", code: "e2e_peer_token_required" });
+  }
   if (p.peer && opts.peers === false) return apiJson(403, { ok: false, error: "peer tokens are not accepted on this route", code: "peer_route_forbidden" });
   // peer 先验签、判重放，再扣限速：拿到 token 却签不了名的人、重放截获请求的人都耗不掉正牌 peer 的额度（失败另有一个桶）
   const sig = p.peer ? await peerGate(req, url, p.peer, opts.rateLimit) : null;
