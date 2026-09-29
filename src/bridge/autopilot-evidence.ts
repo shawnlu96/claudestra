@@ -11,6 +11,7 @@ import { countsAsTool, isMutatingTool } from "../lib/autopilot-tools.js";
 import { parseInlineButtons } from "../lib/inline-buttons.js";
 import type { ActiveRun } from "../lib/autopilot-wake.js";
 import { readPrincipals, tokenIdOf } from "../lib/principals.js";
+import { isQuotaError } from "../lib/api-error-resume.js";
 
 const key = (agent: string) => agent.replace(/^agent-/, "");
 
@@ -183,7 +184,7 @@ function onRunEvent(t: Tracking, type: BridgeEvent["type"], d: Record<string, un
   } else if (type === "api_error_turn") {
     const err = String(d.error ?? "");
     // 新版 Claude Code 撞额度（session / weekly limit）落成 isApiErrorMessage + error:"rate_limit"，文字另起一条 assistant_text
-    if (/rate.?limit|usage.?limit/i.test(err)) {
+    if (isQuotaError(err)) {
       ev.rateLimitText ??= t.lastText && LIMIT_TEXT.test(t.lastText) ? t.lastText : RL_NO_TEXT;
       ev.rateLimitAt ??= now;
     } else ev.failure = `API 报错：${err.slice(0, 140) || "（没有原文）"}`;
@@ -202,7 +203,7 @@ function onLateRunEvent(t: Tracking, type: BridgeEvent["type"], d: Record<string
   const limitText = type === "assistant_text" && (d.rateLimited === true || LIMIT_TEXT.test(String(d.text ?? "")));
   const err = type === "api_error_turn" ? String(d.error ?? "") : "";
   const entryTs = typeof d.ts === "string" ? Date.parse(d.ts) : NaN;
-  const ownError = type === "api_error_turn" && (/rate.?limit|usage.?limit/i.test(err) || entryTs <= (t.endedAt ?? 0));
+  const ownError = type === "api_error_turn" && (isQuotaError(err) || entryTs <= (t.endedAt ?? 0));
   if (!limitText && !ownError) return;
   t.lastEventAt = now;
   onRunEvent(t, type, d, now);

@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
+  isQuotaError,
   ACTIVITY_GRACE_MS, RESUME_DELAY_MS, RESUME_WINDOW_MS, countsAsActivity, dueForResume, markResumed, noteActivity, noteApiError, resumeText,
   type ApiErrorState,
 } from "../src/lib/api-error-resume.js";
@@ -58,5 +59,14 @@ describe("api-error-resume", () => {
     expect(t).toContain("UNKNOWN_CERTIFICATE_VERIFICATION_ERROR");
     expect(t).toContain("end_turn");
     expect(t.startsWith("[⚠️ api-error-resume]")).toBe(true);
+  });
+});
+
+describe("isQuotaError：撞额度不自动续跑（T52 He 审 #208 P2）", () => {
+  test("CC 的 rate_limit、Codex 的 usage limit、带空格 / 连字符的写法都算", () => {
+    for (const e of ["rate_limit", "Rate limit reached", "rate-limit", "You've hit your usage limit", "usage_limit_exceeded"]) expect(isQuotaError(e)).toBe(true);
+  });
+  test("网络 / 证书 / 未知错误照常续跑", () => {
+    for (const e of ["UNKNOWN_CERTIFICATE_VERIFICATION_ERROR", "stream disconnected", "unknown", ""]) expect(isQuotaError(e)).toBe(false);
   });
 });

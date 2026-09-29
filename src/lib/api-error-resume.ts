@@ -21,6 +21,11 @@ export const RESUME_WINDOW_MS = 10 * 60_000;
 
 export type NoteResult = "track" | "escalate";
 
+/** 撞额度的错误（CC 的 error:"rate_limit"、Codex 的 usage limit）：不自动续跑——续了必然再撞，交给额度闸 */
+export function isQuotaError(error: string): boolean {
+  return /rate.?limit|usage.?limit/i.test(error);
+}
+
 export function noteApiError(m: Map<string, ApiErrorState>, cid: string, error: string, now: number): NoteResult {
   const prev = m.get(cid);
   if (prev?.resumedAt !== undefined && now - prev.resumedAt < RESUME_WINDOW_MS) {
