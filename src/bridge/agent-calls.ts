@@ -12,9 +12,10 @@
  * 落盘（~/.claude-orchestrator/pending-agent-calls.json）：bridge 重启后对方照常回复也知道推给谁。不存 caller 的 ws：推回时按
  * callerChannelId 取当前连接。老文件（key = target）启动时迁成新 key。
  */
-import { shouldSweepPac, type HeldFromLike } from "../lib/held-pac.js";
+import { requestExpired, requestStillHeld, type HeldFromLike } from "../lib/held-pac.js";
 import { statePath } from "../lib/paths.js";
 import { PersistedMap } from "./persisted-map.js";
+import type { Envelope } from "./router.js";
 
 export interface PendingAgentCall {
   /** 谁发起的（master 或某个 agent） */
@@ -40,7 +41,7 @@ export interface PendingAgentCall {
   withheld?: string[];
   /** 这一槽的各条请求（老数据没有：整槽当一条） */
   requests?: CallRequest[];
-  /** requests 的 message_id（stale 扫描判「全都还押着」用，lib/held-pac.ts） */
+  /** requests 的 message_id（#116 时期的老槽只有它，requestsOf 据此拆成逐条） */
   messageIds?: string[];
 }
 
@@ -49,6 +50,8 @@ export interface CallRequest {
   expecting?: string;
   originalReplyChannel?: string;
   ts: number;
+  /** 真正送到 target 手上的时刻（失效钟）：记下时先填发出时刻，押后的送达时 touch 改掉；老数据没有，过期时回落槽级 ts */
+  deliveredAt?: number;
 }
 
 /** 这条请求还押在 target 队里（它没看到） */
@@ -70,6 +73,14 @@ const requestsOf = (c?: PendingAgentCall): CallRequest[] => {
   if (c.requests) return c.requests;
   const base = { expecting: c.expecting, originalReplyChannel: c.originalReplyChannel, ts: c.ts };
   return c.messageIds?.length ? c.messageIds.map((messageId) => ({ ...base, messageId })) : [base];
+};
+/** 槽按逐条请求重算冗余字段：messageIds、expecting / 回复频道（取最后一条） */
+const shaped = (target: string, base: PendingAgentCall, reqs: CallRequest[]): PendingAgentCall => {
+  const last = reqs[reqs.length - 1];
+  return {
+    ...base, targetChannelId: target, requests: reqs, messageIds: reqs.map((r) => r.messageId).filter((x): x is string => !!x),
+    expecting: last?.expecting, originalReplyChannel: last?.originalReplyChannel,
+  };
 };
 const keyOf = (target: string, caller: string) => `${target}${SEP}${caller}`;
 const targetOf = (key: string, c: PendingAgentCall) => c.targetChannelId ?? key.split(SEP)[0];
@@ -96,7 +107,7 @@ export class AgentCallBook extends PersistedMap<PendingAgentCall> {
   /** 记一条请求（同一 caller 还没答完的请求留着，新的追加在后面） */
   add(target: string, call: PendingAgentCall, messageId?: string): void {
     const prev = this.slot(target, call.callerChannelId);
-    const req: CallRequest = { messageId, expecting: call.expecting, originalReplyChannel: call.originalReplyChannel, ts: call.ts };
+    const req: CallRequest = { messageId, expecting: call.expecting, originalReplyChannel: call.originalReplyChannel, ts: call.ts, deliveredAt: call.ts };
     this.store(target, { ...(prev ?? call), ...call, ambiguityNotifiedAt: undefined, apiErrorNotifiedAt: undefined }, [...requestsOf(prev), req]);
   }
 
@@ -127,11 +138,7 @@ export class AgentCallBook extends PersistedMap<PendingAgentCall> {
   }
 
   private store(target: string, base: PendingAgentCall, reqs: CallRequest[]): void {
-    const last = reqs[reqs.length - 1];
-    this.set(keyOf(target, base.callerChannelId), {
-      ...base, targetChannelId: target, requests: reqs, messageIds: reqs.map((r) => r.messageId).filter((x): x is string => !!x),
-      expecting: last?.expecting, originalReplyChannel: last?.originalReplyChannel,
-    });
+    this.set(keyOf(target, base.callerChannelId), shaped(target, base, reqs));
   }
 
   /** 视图：只含已送到 target 手上的请求（expecting 合并、回复频道取最后一条）；一条都没送到 = undefined */
@@ -216,28 +223,53 @@ export class AgentCallBook extends PersistedMap<PendingAgentCall> {
     return this.waiting(target, stillHeld).some((c) => c.apiErrorAt);
   }
 
-  /** 失效钟重新起算（押后的消息真正送达时调）：给了 caller 只动那一槽，否则 target 名下全部 */
-  touch(target: string, caller?: string, now = Date.now()): void {
+  /**
+   * 失效钟重新起算：给了 caller 只动那一槽，否则 target 名下全部。给了 messageId（押后的这条真正送达）只动那条请求；
+   * 槽里对不上这个 id（不是请求、或 id 变了）就整槽刷——宁可多留一会儿，别让刚送到的请求拿着发出时的旧钟被扫掉
+   */
+  touch(target: string, caller?: string, now = Date.now(), messageId?: string): void {
     let changed = false;
     for (const [k, c] of [...this.entries()]) {
       if (targetOf(k, c) !== target || (caller && c.callerChannelId !== caller)) continue;
-      this.setQuiet(k, { ...c, ts: now });
+      const reqs = requestsOf(c);
+      const only = messageId && reqs.some((r) => r.messageId === messageId) ? messageId : undefined;
+      const requests = reqs.map((r) => (!only || !r.messageId || r.messageId === only ? { ...r, deliveredAt: now } : r));
+      this.setQuiet(k, { ...c, ts: now, requests });
       changed = true;
     }
     if (changed) this.persist();
   }
 
+  /** 押后的这封（押后投递 / check_inbox 领取）这会儿才送到 target 手上 */
+  touchDelivered(target: string, env: Pick<Envelope, "from" | "meta">, now = Date.now()): void {
+    this.touch(target, env.from.kind === "local" ? env.from.channelId : undefined, now, env.meta.messageId);
+  }
+
   /**
-   * 每分钟扫：送达后 staleMs 还没被消化的槽删掉，返回删掉的（以 API 错误结束、等续跑的经 onExpired 告诉 caller）。
-   * 押在 target 队里（它还没看到）的不删，失效钟从真正送达起算。
+   * 每分钟扫：逐条请求判，送达后 staleMs 还没被消化的删掉，槽里还剩请求就留槽；返回各槽删掉的那几条（requests = 删掉的）。
+   * 押在 target 队里（它还没看到）的不删，失效钟从真正送达起算。以 API 错误结束、等续跑的，删掉的每条经 onExpired 告诉 caller。
    */
   sweepStale(now: number, staleMs: number, heldFrom: (target: string) => HeldFromLike[] | undefined, paused?: (target: string) => boolean): PendingAgentCall[] {
     const out: PendingAgentCall[] = [];
     for (const [k, c] of [...this.entries()]) {
-      if (paused?.(targetOf(k, c)) || !shouldSweepPac(c, heldFrom(targetOf(k, c)), now, staleMs)) continue;
-      this.deleteQuiet(k);
-      out.push(c);
-      if (c.apiErrorAt) this.onExpired?.({ ...c, targetChannelId: targetOf(k, c) }, "之后 2 小时没有接着做完");
+      const target = targetOf(k, c);
+      if (paused?.(target)) continue;
+      const held = heldFrom(target);
+      const reqs = requestsOf(c);
+      const gone = reqs.filter((r) => requestExpired(r, c, held, now, staleMs));
+      if (!gone.length) continue;
+      const left = reqs.filter((r) => !gone.includes(r));
+      // 剩下的有已送到的：还在等它接着做完，等续跑标记和扣下的话留给它们；剩下的全押着（那一轮它们没看到）就一起清掉
+      const keepApiError = left.some((r) => !requestStillHeld({ messageId: r.messageId, callerChannelId: c.callerChannelId }, held));
+      if (!left.length) this.deleteQuiet(k);
+      else this.setQuiet(k, shaped(target, keepApiError ? c : { ...c, apiErrorAt: undefined, withheld: undefined }, left));
+      const pac = { ...c, targetChannelId: target, requests: gone };
+      out.push(pac);
+      if (!c.apiErrorAt) continue;
+      gone.forEach((r, i) => this.onExpired?.({
+        ...pac, requests: [r], expecting: r.expecting, originalReplyChannel: r.originalReplyChannel,
+        withheld: !keepApiError && i === gone.length - 1 ? c.withheld : undefined, // 扣下的话只附一次
+      }, "之后 2 小时没有接着做完"));
     }
     if (out.length) this.persist();
     return out;

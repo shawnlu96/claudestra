@@ -180,3 +180,89 @@ describe("撞错后的槽（T24）", () => {
     expect(gone).toEqual(["c-me:之后它被关掉了:半句", "c-b:之后它被关掉了:"]);
   });
 });
+
+describe("逐条过期（T6c1：同一槽 q1 已送、q2 押着，扫描不能整槽删）", () => {
+  const H = 3_600_000;
+  const STALE = 2 * H;
+  const heldIds = (...ids: string[]) => () => ids.map((messageId) => ({ fromKind: "local", fromChannelId: "c-me", messageId }));
+  const ids = (c?: PendingAgentCall) => c?.requests?.map((r) => r.messageId);
+
+  test("A1 场景：过了 2 小时 q1 过期、q2 的回程保留；q2 送到后能推回，再过 2 小时才过期", () => {
+    const book = new AgentCallBook(null);
+    book.add("c-codex", { ...call(0), expecting: "改设计稿" }, "q1");
+    book.add("c-codex", { ...call(10 * 60_000), expecting: "再跑测试" }, "q2");
+    const gone = book.sweepStale(2 * H + 11 * 60_000, STALE, heldIds("q2"));
+    expect(gone.map(ids)).toEqual([["q1"]]);
+    expect(ids(book.slot("c-codex", "c-me"))).toEqual(["q2"]);
+    expect(book.answerable("c-codex", (r) => r.messageId === "q2")).toBeUndefined(); // 还押着：它没看到
+    // q2 在 3 小时时真正送到（押后投递）
+    book.touchDelivered("c-codex", { from: { kind: "local", channelId: "c-me" }, meta: { messageId: "q2" } } as never, 3 * H);
+    expect(book.sweepStale(3 * H + 60_000, STALE, heldIds())).toEqual([]);
+    const v = book.answerable("c-codex", none)!;
+    expect(v.expecting).toBe("再跑测试");
+    expect(ids(v)).toEqual(["q2"]);
+    expect(book.sweepStale(5 * H + 1, STALE, heldIds()).map(ids)).toEqual([["q2"]]);
+    expect(book.slot("c-codex", "c-me")).toBeUndefined();
+  });
+
+  test("touch 带 message_id 只动那一条；槽里对不上这个 id 就整槽刷（宁可多留）", () => {
+    const book = new AgentCallBook(null);
+    book.add("c-codex", call(0), "q1");
+    book.add("c-codex", call(0), "q2");
+    book.touch("c-codex", "c-me", 5000, "q2");
+    expect(book.slot("c-codex", "c-me")!.requests!.map((r) => r.deliveredAt)).toEqual([0, 5000]);
+    book.touch("c-codex", "c-me", 7000, "reply_fwd_x");
+    expect(book.slot("c-codex", "c-me")!.requests!.map((r) => r.deliveredAt)).toEqual([7000, 7000]);
+  });
+
+  test("老数据兼容：请求没记送达时刻回落槽级 ts；#116 老槽 q2 押着时只删 q1", () => {
+    const p = join(dir, "legacy-sweep.json");
+    writeFileSync(p, JSON.stringify({
+      ["c-codex\u001fc-me"]: { ...call(0), ts: H, targetChannelId: "c-codex", requests: [{ messageId: "q1", ts: 0 }] },
+      ["c-codex\u001fc-pi"]: { ...call(0, "c-pi", "agent-pi"), targetChannelId: "c-codex", messageIds: ["q1", "q2"] },
+    }));
+    const book = new AgentCallBook(p);
+    const heldPi = () => [{ fromKind: "local", fromChannelId: "c-pi", messageId: "q2" }];
+    expect(book.sweepStale(3 * H - 1, STALE, heldPi).map((c) => c.callerChannelId)).toEqual(["c-pi"]); // me 的槽级 ts 是 1h，还没到
+    expect(ids(book.slot("c-codex", "c-pi"))).toEqual(["q2"]);
+    expect(book.sweepStale(3 * H + 1, STALE, heldPi).map((c) => c.callerChannelId)).toEqual(["c-me"]);
+    expect(ids(new AgentCallBook(p).slot("c-codex", "c-pi"))).toEqual(["q2"]); // 落盘
+  });
+
+  test("等续跑的槽整槽过期：每条各发一条通知（各带自己的回复频道），扣下的话只附一次", () => {
+    const book = new AgentCallBook(null);
+    const sent: [string | undefined, string][] = [];
+    book.onExpired = (p) => void sent.push([p.originalReplyChannel, p.withheld?.join("") ?? ""]);
+    book.add("c-codex", { ...call(0), originalReplyChannel: "A" }, "q1");
+    book.add("c-codex", { ...call(0), originalReplyChannel: "B" }, "q2");
+    book.markApiError("c-codex", none, "半句", "c-me", 60_000);
+    book.sweepStale(2 * H + 1, STALE, heldIds());
+    expect(sent).toEqual([["A", ""], ["B", "半句"]]);
+    expect(book.slot("c-codex", "c-me")).toBeUndefined();
+  });
+
+  test("部分过期：剩下的全押着 → 等续跑标记和扣下的话随过期那条推走、从槽上清掉；剩下有已送到的 → 留给它", () => {
+    const book = new AgentCallBook(null);
+    const sent: string[] = [];
+    book.onExpired = (p) => void sent.push(`${ids(p)}:${p.withheld?.join("") ?? ""}`);
+    book.onWithheld = () => void sent.push("withheld-again");
+    book.add("c-codex", call(0), "q1");
+    book.markApiError("c-codex", none, "半句", "c-me", 60_000);
+    book.add("c-codex", call(60_000), "q2");
+    book.sweepStale(2 * H + 1, STALE, heldIds("q2"));
+    expect(sent).toEqual(["q1:半句"]);
+    expect(book.slot("c-codex", "c-me")).toMatchObject({ apiErrorAt: undefined, withheld: undefined, messageIds: ["q2"] });
+    book.consume("c-codex", "c-me", book.exact("c-codex", "c-me", none));
+    expect(sent).toEqual(["q1:半句"]); // q2 答掉时不会把那句话再推一遍
+
+    const b2 = new AgentCallBook(null);
+    const sent2: string[] = [];
+    b2.onExpired = (p) => void sent2.push(`${ids(p)}:${p.withheld?.join("") ?? ""}`);
+    b2.add("c-codex", call(0), "q1");
+    b2.add("c-codex", call(H), "q2");
+    b2.markApiError("c-codex", none, "半句", "c-me", H + 60_000);
+    b2.sweepStale(2 * H + 1, STALE, heldIds());
+    expect(sent2).toEqual(["q1:"]);
+    expect(b2.slot("c-codex", "c-me")).toMatchObject({ apiErrorAt: H + 60_000, withheld: ["半句"], messageIds: ["q2"] });
+  });
+});
