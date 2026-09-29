@@ -116,13 +116,21 @@ describe("switchPromptMatches", () => {
   const model = detectSwitchConfirmPrompt(SWITCH_MODEL)!;
   const effort = detectSwitchConfirmPrompt(CHANGE_EFFORT)!;
 
-  test("model 按家族比：id 对显示名", () => {
+  test("model 比到版本号：id 对显示名", () => {
     expect(switchPromptMatches(model, "model", "claude-sonnet-5")).toBe(true);
     expect(switchPromptMatches(model, "model", "claude-opus-5-5")).toBe(false);
   });
 
-  test("解析不出家族的自定义 id 只认种类", () => {
-    expect(switchPromptMatches(model, "model", "my-proxy-model")).toBe(true);
+  test("T41a r4 P1-2：请求 Sonnet 5，框是同家族的 Sonnet 4.6 → 不认", () => {
+    const older = detectSwitchConfirmPrompt(SWITCH_MODEL.replaceAll("Sonnet 5", "Sonnet 4.6"))!;
+    expect(older.target).toBe("Sonnet 4.6");
+    expect(switchPromptMatches(older, "model", "claude-sonnet-5")).toBe(false);
+    expect(switchPromptMatches(older, "model", "claude-sonnet-4-6")).toBe(true);
+  });
+
+  test("认不出的自定义 id / 裸家族名一律不认（核对不了就不代按）", () => {
+    expect(switchPromptMatches(model, "model", "my-proxy-model")).toBe(false);
+    expect(switchPromptMatches(model, "model", "sonnet")).toBe(false);
   });
 
   test("effort 按档位全等（忽略大小写/空白）", () => {
@@ -302,12 +310,41 @@ describe("runSwitchCommand（假 pane 序列）", () => {
     expect(sent).toEqual(["line:/model claude-sonnet-5"]);
   });
 
-  test("按了框不消失 → 最多按 3 次，timeout 带着框返回", async () => {
+  test("按了框不消失 → 只按一次，timeout 带着框返回", async () => {
     const { io, sent } = fakeIO(IDLE, [SWITCH_MODEL]);
     const r = await runSwitchCommand("w", "model", "claude-sonnet-5", { io });
     expect(r.outcome).toBe("timeout");
     expect(r.prompt?.kind).toBe("model");
-    expect(sent.filter((s) => s === "key:Enter")).toHaveLength(3);
+    expect(r.pressed).toBe(true);
+    expect(sent.filter((s) => s === "key:Enter")).toHaveLength(1);
+  });
+
+  test("T41a r4 P1-3：空闲 → 框 → 同一旧框帧 → 空闲，只发一个 Enter", async () => {
+    const { io, sent } = fakeIO(IDLE, [SWITCH_MODEL, SWITCH_MODEL, IDLE]);
+    const r = await runSwitchCommand("w", "model", "claude-sonnet-5", { io });
+    expect(r.outcome).toBe("confirmed");
+    expect(sent).toEqual(["line:/model claude-sonnet-5", "key:Enter"]);
+  });
+
+  test("T41a r4 P1-2：请求 Sonnet 5，弹出的框是 Sonnet 4.6 → foreign，一个键都不按", async () => {
+    const { io, sent } = fakeIO(IDLE, [SWITCH_MODEL.replaceAll("Sonnet 5", "Sonnet 4.6")]);
+    const r = await runSwitchCommand("w", "model", "claude-sonnet-5", { io });
+    expect(r.outcome).toBe("foreign");
+    expect(r.pressed).toBe(false);
+    expect(sent).toEqual(["line:/model claude-sonnet-5"]);
+  });
+
+  test("注入前就停着一张框（哪怕目标一样）→ 不注入、不按，foreign 返回", async () => {
+    const { io, sent } = fakeIO(SWITCH_MODEL, [SWITCH_MODEL]);
+    const r = await runSwitchCommand("w", "model", "claude-sonnet-5", { io });
+    expect(r.outcome).toBe("foreign");
+    expect(sent).toEqual([]);
+  });
+
+  test("没按过的 timeout 标 pressed=false（调用方据此把迟到的框交给 watcher）", async () => {
+    const { io } = fakeIO(IDLE, [IDLE]);
+    const r = await runSwitchCommand("w", "model", "claude-sonnet-5", { io, ticks: 2 });
+    expect(r).toMatchObject({ outcome: "timeout", pressed: false });
   });
 
   test("最后一拍才按到框：重看一眼，不拿按键前的旧屏报 timeout", async () => {

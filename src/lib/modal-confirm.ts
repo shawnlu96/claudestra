@@ -2,6 +2,7 @@
  * launcher / 就绪轮询自动按 Enter 的判据（纯函数）。单测 tests/modal-confirm.test.ts、tests/modal-parser.test.ts、tests/limit-menu.test.ts。
  * 「底部有带 ❯ 的编号项」也可能是输入框里的多行编号草稿（tests/fixtures/turn-zone/cc-numlist-draft.txt）：所以先按框形状认输入框
  * （lib/input-box.ts，和押后 / 抢占同一套），真输入框还在 = 没有弹窗盖着，一个键都不按。
+ * 切模型 / effort 确认框也不按：launcher、就绪轮询都不是注入方，核对不了框里的目标（tests/modal-confirm.test.ts）。
  */
 import { parseAuqPane } from "./auq-pane.js";
 import { paneShowsLimitMenu } from "./limit-menu.js";
@@ -9,6 +10,7 @@ import {
   detectBypassConsentPrompt,
   detectRuntimePermissionPrompt,
   detectSessionIdlePrompt,
+  detectSwitchConfirmPrompt,
   parseChoicePrompt,
   parseModalOptions,
   trustPromptMoves,
@@ -47,5 +49,14 @@ export function isAutoConfirmableModal(
   if (detectBypassConsentPrompt(pane)) return false;
   // 额度菜单：Enter 会替人选中高亮项（光标可能停在「Switch to usage credits」上），一个键都不发，留给人（T24）
   if (paneShowsLimitMenu(pane)) return false;
+  // 切模型 / effort 确认框：CC 会主动弹同款框提议降级，这里看不出是谁引出的——只有注入方核对过目标才按（runSwitchCommand）
+  if (looksLikeSwitchConfirm(pane)) return false;
   return true;
+}
+
+/** 黑名单宁宽勿窄：严格识别之外，底部出现框标题或「N. Yes, switch to …」选项也算（CC 改了框的排版也不会漏成自动 Enter） */
+export function looksLikeSwitchConfirm(pane: string): boolean {
+  if (detectSwitchConfirmPrompt(pane)) return true;
+  const tail = pane.split("\n").map((l) => l.trim()).filter(Boolean).slice(-12);
+  return tail.some((l) => l === "Switch model?" || l === "Change effort level?" || /^(❯\s*)?\d{1,2}\.\s+Yes, switch to\b/i.test(l));
 }
