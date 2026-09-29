@@ -21,7 +21,7 @@ const OTHER = "019a0000-9999-7222-8333-444455556666";
 
 function deps(over: Partial<CodexAdapterDeps> = {}): Partial<CodexAdapterDeps> {
   return {
-    run: async () => ({ ok: true, out: "", err: "" }),
+    run: async (cmd: string[]) => ({ ok: true, out: cmd[1] === "queue" ? "Usage: codex queue [OPTIONS] --thread <THREAD>" : "", err: "" }),
     resolveBin: async () => "/opt/codex/bin/codex",
     execBootstrap: async () => ({ code: 0, out: `{"type":"thread.started","thread_id":"${SID}"}\n{"type":"turn.completed"}\n`, err: "" }),
     childPids: async () => [4242],

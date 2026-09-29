@@ -12,6 +12,7 @@ import {
   decideDelivery,
   heldThreadIds,
   parseHeldThreadLocks,
+  postUndeliveredStop,
   wrapChannelContent,
   type CmdResult,
 } from "../src/lib/codex-thread.js";
@@ -91,6 +92,7 @@ function harness(initial: { sid?: string; held: string[][]; queueOk?: boolean; q
   const queued: Array<{ sid: string; text: string }> = [];
   const notices: Array<{ chatId?: string; text: string }> = [];
   const switches: string[] = [];
+  let undelivered = 0;
   let qi = 0;
   const sink = new CodexQueueSink({
     source: "claudestra",
@@ -104,8 +106,9 @@ function harness(initial: { sid?: string; held: string[][]; queueOk?: boolean; q
       return initial.queueOk === false ? { ok: false, out: "", err: "Error: boom\n" } : { ok: true, out: "Queued", err: "" };
     },
     notify: async (chatId, text) => { notices.push({ chatId, text }); },
+    onUndelivered: () => { undelivered++; },
   });
-  return { sink, queued, notices, switches, sid: () => sid };
+  return { sink, queued, notices, switches, sid: () => sid, undelivered: () => undelivered };
 }
 
 describe("CodexQueueSink", () => {
@@ -118,6 +121,7 @@ describe("CodexQueueSink", () => {
     }]);
     expect(unwrapChannelMessage(h.queued[0].text)).toEqual({ text: "hi", from: "u" });
     expect(h.notices).toEqual([]);
+    expect(h.undelivered()).toBe(0);
   });
 
   test("离线：不入队（否则离线积压、下次 resume 重放），告诉发消息的人", async () => {
@@ -126,6 +130,7 @@ describe("CodexQueueSink", () => {
     expect(r.ok).toBe(false);
     expect(h.queued).toEqual([]);
     expect(h.notices).toEqual([{ chatId: "api:t", text: OFFLINE_NOTICE }]);
+    expect(h.undelivered()).toBe(1); // 不会有回合：替它收尾，「工作中」才解得掉
   });
 
   test("线程换了：切 sid（触发重报 register）后投到新线程", async () => {
@@ -141,6 +146,7 @@ describe("CodexQueueSink", () => {
     expect(h.queued).toEqual([]);
     expect(h.notices).toEqual([{ chatId: "1", text: AMBIGUOUS_NOTICE }]);
     expect(AMBIGUOUS_NOTICE).not.toContain("不在线");
+    expect(h.undelivered()).toBe(0); // 多半有子 agent 在跑、回合没完：不替它收尾
   });
 
   test("/new 后新线程还没有 rollout：给出「先在终端发一条」的指引，而不是原样甩 stderr", async () => {
@@ -153,6 +159,18 @@ describe("CodexQueueSink", () => {
     const r = await h.sink.deliver("hi", { chat_id: "1" });
     expect(r).toEqual({ ok: false, error: "Error: boom" });
     expect(h.notices[0].text).toContain("Error: boom");
+    expect(h.undelivered()).toBe(1);
+  });
+
+  test("postUndeliveredStop：向 bridge /hook 报 StopFailure", async () => {
+    let got: unknown;
+    const server = Bun.serve({ port: 0, async fetch(req) { got = { path: new URL(req.url).pathname, body: await req.json() }; return new Response("ok"); } });
+    try {
+      await postUndeliveredStop("local-1", `http://127.0.0.1:${server.port}`);
+      expect(got).toEqual({ path: "/hook", body: { channelId: "local-1", event: "StopFailure" } });
+    } finally {
+      server.stop(true);
+    }
   });
 
   test("串行：先到的先投，即使它的 queue 更慢", async () => {
