@@ -35,8 +35,11 @@ const COMMIT_FILE = ".relay-commit";
 
 const num = (v: string | undefined, d: number): number => (v && Number.isFinite(Number(v)) ? Number(v) : d);
 
-/** RELAY_TRUST_PROXY：非负整数 = 受信反代层数（旧写法 "1" 即一层）；空或认不出的一律 0，不看转发头 */
-const proxyHops = (v: string | undefined): number => (v && /^\d{1,2}$/.test(v.trim()) ? Number(v.trim()) : 0);
+/**
+ * RELAY_TRUST_PROXY：受信反代层数 0–5（旧写法 "1" 即一层）；空、认不出、超过 5 的一律 0，不看转发头。
+ * 必须等于实际层数：配多了 XFF 项数不够，只能退回连接对端（限流偏严）；上限挡住 "99" 这种手滑。
+ */
+const proxyHops = (v: string | undefined): number => (v && /^[0-5]$/.test(v.trim()) ? Number(v.trim()) : 0);
 
 /** 数据目录：RELAY_DATA > 仓库根 data；SQLite 与 VAPID 密钥文件都落在这里 */
 const dataDirFromEnv = (env: Record<string, string | undefined>): string => (env.RELAY_DATA ? env.RELAY_DATA.replace(/\/+$/, "") : "data");

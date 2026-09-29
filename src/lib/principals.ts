@@ -19,7 +19,7 @@
 import { acquireLock } from "./file-lock.js";
 import { STATE_DIR } from "./paths.js";
 import { bareCanonicalName, isLiteralMaster, isMasterAgent } from "./registry.js";
-import { OWNER_PRINCIPAL_ID } from "./devices.js";
+import { canReadLedger, OWNER_PRINCIPAL_ID } from "./devices.js";
 import { timingSafeEqual } from "crypto";
 import { readJsonState, readJsonLenient, writeJsonStateGuarded, StateCorruptError } from "./state-file.js";
 import { join } from "path";
@@ -266,6 +266,11 @@ export function terminalAllowed(p: Principal, agentName: string): boolean {
 export function isOwnerPrincipal(p: Pick<Principal, "id" | "name" | "disabled" | "peer">): boolean {
   if (p.peer || p.disabled) return false;
   return p.id === OWNER_PRINCIPAL_ID || (p.name === LEGACY_OWNER_TOKEN_NAME && p.id.startsWith("token:"));
+}
+
+/** 批量管理（bridge/fleet：往一批会话发键、群发）：owner 本人且是全 scope 的 manage 凭据；guest、部分 scope 的设备、peer 一律不给 */
+export function canRunFleet(p: Principal): boolean {
+  return isOwnerPrincipal(p) && canReadLedger(p);
 }
 
 /**

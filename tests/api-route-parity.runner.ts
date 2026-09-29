@@ -24,6 +24,8 @@ interface Spec {
   body?: string;
   /** 在本进程 pid 上伪造一条「活的 interactive Claude Code」登记，sessionId 取这个值 */
   liveSession?: string;
+  /** 请求来源（缺省 lan = 主端口经本机反代）；"unknown" 不设上下文，模拟入口漏设 */
+  source?: "loopback" | "lan" | "relay" | "peer-ingress" | "unknown";
 }
 
 const specs: Spec[] = JSON.parse(process.argv[2] || "[]");
@@ -83,7 +85,9 @@ for (const s of specs) {
   if (s.body !== undefined) headers["Content-Type"] = "application/json";
   const url = `http://127.0.0.1:3847${s.path}`;
   const req = new Request(url, { method: s.method, headers, body: s.body });
-  setRequestContext(req, { source: "lan", clientIp: "127.0.0.1", https: false }); // 当作主端口经本机反代来的；bridge.ts 每个请求都会定来源
+  // 缺省当作主端口经本机反代来的；bridge.ts 每个请求都会定来源
+  const source = s.source ?? "lan";
+  if (source !== "unknown") setRequestContext(req, { source, clientIp: "127.0.0.1", https: false });
   try {
     const res = await Promise.race([
       serveApiRequest(req, new URL(url)),

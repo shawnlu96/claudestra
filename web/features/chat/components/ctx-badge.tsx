@@ -1,14 +1,11 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
-import { useChatStoreApi } from "../chat-store";
 import type { AgentSession } from "../type";
 import { CTX_ADVICE, ctxView, type CtxLevel } from "../ctx-level";
+import { requestCompact } from "@/lib/api/fleet";
+import { useFleetAccess } from "./ctx-warn-banner";
 import { useT } from "@/lib/i18n";
 import { useKeepInViewport } from "@/lib/keep-in-viewport";
-
-/** 请求压缩时发给 agent 的话——与 composer 警示条的按钮同一句(一处改两处同步)。 */
-export const COMPACT_REQUEST_TEXT =
-  "上下文占用已经很高了，请执行 /save-compact：先抢救关键记忆，然后压缩上下文。";
 
 const BADGE: Record<CtxLevel, string> = {
   deep: "bg-error text-error-content",
@@ -29,13 +26,13 @@ const ROW_ON: Record<CtxLevel, string> = {
  * 顶栏上下文徽章(2026-07-14 owner:context 超标 web 端毫无提示)+ v2.21.3+ 点开的
  * 「什么时候压」建议卡(owner 2026-09-03:把 save-compact 时机表做成 UI 提示)。
  * 原则是**按任务边界压,上下文只决定找边界的紧迫程度**——卡片列四档、高亮当前档,
- * 底部一键「存记忆 + Compact」(与 composer 警示条同一条请求)。<200k 不打扰(不显示)。
+ * 底部一键「存记忆 + Compact」(与输入框警示条同走 requestCompact，只压这一个 agent)。<200k 不打扰(不显示)。
  */
 export function CtxBadge({ agent }: { agent: AgentSession }) {
   const t = useT();
-  const store = useChatStoreApi();
   const [open, setOpen] = useState(false);
-  const [sent, setSent] = useState(false);
+  const [res, setRes] = useState<CompactRes>(null);
+  const canCompact = useFleetAccess();
   const wrapRef = useRef<HTMLDivElement>(null);
   const popRef = useRef<HTMLDivElement>(null);
   useKeepInViewport(popRef, open);
@@ -57,11 +54,10 @@ export function CtxBadge({ agent }: { agent: AgentSession }) {
   const { level, pct, window, scaled } = ctxView(tokens, agent.contextWindow);
   if (!scaled && tokens < 200_000) return null;
   const k = Math.round(tokens / 1000);
-  const requestCompact = () => {
-    if (sent) return; // 双击兜底
-    setSent(true);
-    void store.send(COMPACT_REQUEST_TEXT);
-    setOpen(false);
+  const onCompact = () => {
+    if (res === "sending" || res?.ok) return; // 双击兜底；失败了可以再点
+    setRes("sending");
+    void requestCompact(agent.name).then(setRes);
   };
 
   return (
@@ -85,7 +81,7 @@ export function CtxBadge({ agent }: { agent: AgentSession }) {
           {scaled ? (
             <ScaledAdvice />
           ) : (
-            <ClaudeAdvice level={level} sent={sent} compacting={agent.compacting === true} onCompact={requestCompact} />
+            <ClaudeAdvice level={level} res={res} compacting={agent.compacting === true} onCompact={canCompact ? onCompact : null} />
           )}
         </div>
       )}
@@ -103,8 +99,12 @@ function ScaledAdvice() {
   );
 }
 
+/** 按钮状态：null = 没点过；sending = 请求中；其余是 bridge 回的结果（ok=false 可以再点） */
+type CompactRes = null | "sending" | { ok: boolean; text: string };
+
 /** Claude Code：四档建议表 + 一键「存记忆 + Compact」 */
-function ClaudeAdvice(p: { level: CtxLevel; sent: boolean; compacting: boolean; onCompact: () => void }) {
+/** onCompact 为 null = 这台设备没有直接压缩的权限（GET /fleet/access 403）：只给建议表，不给按钮 */
+function ClaudeAdvice(p: { level: CtxLevel; res: CompactRes; compacting: boolean; onCompact: (() => void) | null }) {
   const t = useT();
   const level = p.level;
   return (
@@ -128,14 +128,19 @@ function ClaudeAdvice(p: { level: CtxLevel; sent: boolean; compacting: boolean; 
           );
         })}
       </div>
-      <button
-        type="button"
-        className="btn btn-warning btn-xs mt-2.5 w-full"
-        disabled={p.sent || p.compacting}
-        onClick={p.onCompact}
-      >
-        {p.compacting ? t("压缩中…") : p.sent ? t("已请求") : `🧹 ${t("存记忆 + Compact")}`}
-      </button>
+      {p.onCompact && (
+        <button
+          type="button"
+          className="btn btn-warning btn-xs mt-2.5 w-full"
+          disabled={p.res === "sending" || (!!p.res && p.res.ok) || p.compacting}
+          onClick={p.onCompact}
+        >
+          {p.compacting ? t("压缩中…") : p.res === "sending" ? t("请求中…") : p.res?.ok ? t("已请求") : `🧹 ${t("存记忆 + Compact")}`}
+        </button>
+      )}
+      {p.res && p.res !== "sending" && (
+        <div className={`mt-1.5 text-[11px] leading-snug ${p.res.ok ? "text-base-content/60" : "text-error"}`}>{t(p.res.text)}</div>
+      )}
     </>
   );
 }

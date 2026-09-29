@@ -18,15 +18,19 @@ import { MEDIA_DICT } from "./i18n-dict-media";
 import { QUOTA_DICT } from "./i18n-dict-quota";
 import { CONTACTS_DICT } from "./i18n-dict-contacts";
 import { SESSIONS_DICT } from "./i18n-dict-sessions";
+import { FLEET_DICT } from "./i18n-dict-fleet";
 import { SKILLS_DICT } from "./i18n-dict-skills";
 import { TALK_DICT } from "./i18n-dict-talk";
+import { RELAY_DICT } from "./i18n-dict-relay";
 
 export const DICT: Record<string, string> = {
   ...LEDGER_DICT, ...COLLAB_DICT, ...BOUNDARY_DICT, ...ATTACH_DICT, ...TOOLS_DICT, ...MEDIA_DICT, ...TALK_DICT,
   ...QUOTA_DICT, // 订阅额度卡片组与开关（lib/i18n-dict-quota.ts）
+  ...FLEET_DICT, // 批量管理面板与 low-priority 徽章（lib/i18n-dict-fleet.ts）
   ...CONTACTS_DICT, // 侧栏联系人与输入框 @（lib/i18n-dict-contacts.ts）
   ...SESSIONS_DICT, // 未纳管会话 / 归档（lib/i18n-dict-sessions.ts）
   ...SKILLS_DICT, // 技能库与按会话启停（lib/i18n-dict-skills.ts）
+  ...RELAY_DICT, // Peer 面板的中继卡（lib/i18n-dict-relay.ts）
   // ── 通用 ─────────────────────────────────────────────
   "关闭": "Close",
   "斜杠命令只有 owner 能用，请直接发文字": "Slash commands are owner-only — send it as plain text", // bridge/api-slash.ts 的 slash_owner_only
@@ -694,8 +698,6 @@ export const DICT: Record<string, string> = {
   "读取中继状态失败": "Couldn't read relay status",
   "我的中继地址": "My relay address",
   "手机 / 别的浏览器不装任何东西、不开 Tailscale 就能打开这个地址。": "Phones and other browsers can open this address with nothing installed and no Tailscale.",
-  "出门访问目前要靠 Tailscale；在 .env 里加这两行、重启 bridge，手机不装任何东西就能打开这台机器。":
-    "Remote access currently needs Tailscale. Add these two lines to .env and restart the bridge; phones can then open this machine with nothing installed.",
   "配对新设备": "Pair a new device",
   "配对码生成失败": "Couldn't create a pairing code",
   "全部会话": "all sessions",

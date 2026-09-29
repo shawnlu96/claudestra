@@ -150,4 +150,6 @@ export function parseResponseHead(raw: unknown): { status: number; headers: Reco
 export const INNER_REPLAY_REASONS = { restarted: "before_start", duplicate: "replay" } as const;
 
 /** 收方的明文错误体：只有 code，不带任何细节（中继看得到它，也能伪造它） */
-export const e2eError = (status: number, code: string): Response => Response.json({ ok: false, code }, { status });
+/** 拒收的正文已取消：关闭连接，外层 drainingFetch 同时缩短 Bun 的 socket 超时。 */
+export const e2eError = (status: number, code: string): Response =>
+  Response.json({ ok: false, code }, { status, ...(status === 413 ? { headers: { connection: "close" } } : {}) });
