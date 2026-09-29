@@ -7,7 +7,7 @@
 import { existsSync, readFileSync, statSync } from "fs";
 import { dirname, join } from "path";
 import { readConfigSync } from "../lib/config-store.js";
-import { agentRuntime, readRegistryAgents } from "../lib/registry.js";
+import { agentRuntime, isMasterAgent, readRegistryAgents } from "../lib/registry.js";
 import { statePath } from "../lib/paths.js";
 import { readJsonStateSync } from "../lib/state-file.js";
 import { resolveSessionIdForWindow } from "../lib/cc-sessions.js";
@@ -329,16 +329,29 @@ const liveDeps: CtxBoundaryDeps = {
   alert: alertOwner,
 };
 
+/** dry-run 里单独给大总管的一行：它以前从没被覆盖过（窗口名拼错），要不要自动压由 owner 定 */
+interface MasterDryRun {
+  agent: string;
+  ctx: number | null;
+  boundary: Boundary;
+  /** null = 在线下，这一轮不动 */
+  outcome: TickOutcome | null;
+}
+
 /** manager ctx-boundary dry-run：线上的 registry、画面、配置和落盘的冷却 / 守卫照常判定；不发键、不写任何状态、不提醒 */
-export async function ctxBoundaryDryRun(): Promise<{ outcomes: TickOutcome[]; logs: string[]; inject: boolean }> {
+export async function ctxBoundaryDryRun(): Promise<{ outcomes: TickOutcome[]; logs: string[]; inject: boolean; master: MasterDryRun | null }> {
   loadInjectGuard("read-only");
   const r = readJsonStateSync(TRIG_FILE);
   const trig = r.status === "ok" && r.data && typeof r.data === "object" ? (r.data as Record<string, unknown>) : {};
   lastTrig = new Map(Object.entries(trig).filter((e): e is [string, number] => typeof e[1] === "number"));
   const logs: string[] = [];
-  const deps: CtxBoundaryDeps = { ...liveDeps, log: (l) => void logs.push(l), alert: () => {}, dryRun: true };
+  let listed: BoundaryAgent[] = [];
+  const agents = async () => (listed = await liveAgents());
+  const deps: CtxBoundaryDeps = { ...liveDeps, agents, log: (l) => void logs.push(l), alert: () => {}, dryRun: true };
   const outcomes = await ctxBoundaryTick(deps);
-  return { outcomes, logs, inject: deps.autoCompact()?.inject === true };
+  const m = listed.find((a) => isMasterAgent(a.name));
+  const master = m ? { agent: m.name, ctx: m.ctx, boundary: boundaryFor(m, currentPolicies(deps)), outcome: outcomes.find((o) => o.agent === m.name) ?? null } : null;
+  return { outcomes, logs, inject: deps.autoCompact()?.inject === true, master };
 }
 
 let timer: ReturnType<typeof setInterval> | null = null;

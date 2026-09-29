@@ -121,8 +121,11 @@ describe("注入守卫（adv1 P2-10 / P2-2）", () => {
     const h = harness([]);
     expect((await injectCompact(tgt("x"), { action: "save-compact" }, h.deps)).status).toBe("executed");
     expect(await injectCompact(tgt("x"), { action: "save-compact" }, h.deps)).toMatchObject({ status: "skipped", reason: "recent" });
-    expect(compactInjectedRecently("master:x", h.now + 14 * MIN)).toBe(true);
-    h.advance(16 * MIN);
+    h.advance(4 * MIN + 1);
+    // 手动按钮拿这段文字回给 owner：写明还要等几分钟
+    expect(await injectCompact(tgt("x"), { action: "save-compact" }, h.deps)).toMatchObject({ text: "15 分钟内刚注入过压缩，还要等 11 分钟" });
+    expect(compactInjectedRecently("master:x", h.now + 10 * MIN)).toBe(true);
+    h.advance(12 * MIN);
     expect((await injectCompact(tgt("x"), { action: "save-compact" }, h.deps)).status).toBe("executed");
     expect(h.sent.length).toBe(2);
   });

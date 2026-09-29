@@ -88,8 +88,13 @@ export function resetInjectState(): void {
 }
 
 export function compactInjectedRecently(target: string, now = Date.now()): boolean {
+  return guardLeftMs(target, now) > 0;
+}
+
+/** 守卫还剩多久（0 = 不在守卫期） */
+function guardLeftMs(target: string, now: number): number {
   const ts = injectedAt.get(windowKey(target));
-  return ts !== undefined && now - ts < INJECT_GUARD_MS;
+  return ts === undefined ? 0 : Math.max(0, ts + INJECT_GUARD_MS - now);
 }
 
 function noteCompactInjected(target: string, now: number): void {
@@ -172,7 +177,8 @@ export async function injectCompact(
   opts: { action: CompactAction; keep?: string | null; pane?: PaneCapture | null },
   deps: InjectDeps = liveInjectDeps,
 ): Promise<InjectResult> {
-  if (compactInjectedRecently(t.target, deps.now())) return skip("recent");
+  const left = guardLeftMs(t.target, deps.now());
+  if (left > 0) return { status: "skipped", reason: "recent", text: `${SKIP_REASON_TEXT.recent}，还要等 ${Math.ceil(left / 60_000)} 分钟` };
   const pane = opts.pane !== undefined ? opts.pane : await deps.capture(t.target);
   if (!pane) return skip("pane-unknown"); // 多半是窗口不在：盲敲只会假报「已开始」
   const blocked = paneBlock(paneGateOf(pane, deps.readPane(pane.plain, pane.esc)));
