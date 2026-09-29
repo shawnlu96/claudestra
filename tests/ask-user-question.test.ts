@@ -31,6 +31,7 @@ function mkState(questions: AuqQuestion[], selections: number[][]): AuqState {
     questions,
     selections,
     messageId: "m1",
+    dialogId: "d1",
     tmuxTarget: "master:agent-foo",
     ts: Date.now(),
   };
@@ -102,7 +103,7 @@ describe("detectAskUserQuestion", () => {
     expect(detectAskUserQuestion(content)).toBeNull();
   });
 
-  test("label/description 超长截断", () => {
+  test("label/description 检测时保留原文（作答时要和画面逐项比，截断只在 Discord 渲染时做）", () => {
     const longLabel = "a".repeat(200);
     const content = mkAuqContent([
       {
@@ -114,8 +115,8 @@ describe("detectAskUserQuestion", () => {
       },
     ]);
     const qs = detectAskUserQuestion(content)!;
-    expect(qs[0].options[0].label.length).toBeLessThanOrEqual(100);
-    expect(qs[0].options[0].description!.length).toBeLessThanOrEqual(100);
+    expect(qs[0].options[0].label).toBe(longLabel);
+    expect(qs[0].options[0].description).toBe(longLabel);
   });
 });
 
@@ -144,7 +145,7 @@ describe("buildAuqKeystrokes（CC 2.1.x 键位模型，v2.17.2 实测重校准�
 
   test("单问题单选 pane 光标对账：光标在 2、目标 0 → Up Up Enter", () => {
     const pane = {
-      form: "single" as const, sections: ["S"], question: "S?", multiSelect: false,
+      form: "single" as const, sections: ["S"], question: "S?", questionLines: ["S?"], multiSelect: false,
       options: [
         { label: "a", cursor: false, checked: false },
         { label: "b", cursor: false, checked: false },
@@ -169,7 +170,7 @@ describe("buildAuqKeystrokes（CC 2.1.x 键位模型，v2.17.2 实测重校准�
 
   test("单问题多选 pane 勾选态对账：已勾 {0}、目标 {0,2} → 只补 3", () => {
     const pane = {
-      form: "tabbed" as const, sections: ["Q1"], question: "Q1?", multiSelect: true,
+      form: "tabbed" as const, sections: ["Q1"], question: "Q1?", questionLines: ["Q1?"], multiSelect: true,
       options: [
         { label: "a", cursor: true, checked: true },
         { label: "b", cursor: false, checked: false },
@@ -181,7 +182,7 @@ describe("buildAuqKeystrokes（CC 2.1.x 键位模型，v2.17.2 实测重校准�
 
   test("单问题多选 pane 对账：已勾 {1}、目标 {} → 2 反 toggle 掉", () => {
     const pane = {
-      form: "tabbed" as const, sections: ["Q1"], question: "Q1?", multiSelect: true,
+      form: "tabbed" as const, sections: ["Q1"], question: "Q1?", questionLines: ["Q1?"], multiSelect: true,
       options: [
         { label: "a", cursor: true, checked: false },
         { label: "b", cursor: false, checked: true },

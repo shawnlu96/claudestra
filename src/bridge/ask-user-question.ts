@@ -1,5 +1,6 @@
 /**
  * v2.0.19+ AskUserQuestion (Claude Code 内建工具) Discord 化适配。
+ * 现状：远程作答（Discord / 网页替 owner 按键）停用，只发通知、请到终端作答（auq-answer.ts 文件头）；下面第 2-4 步与键位模型留给重新开启时用。
  *
  * 背景：agent 在运行中调 AskUserQuestion 工具 → Claude Code TUI 弹一个多选 modal
  * （`❯ N. [ ] label` 风格 + 横向 section 切换）。手机用户没法 tmux attach 直接按
@@ -34,6 +35,9 @@
 
 import type { Client, TextChannel } from "discord.js";
 import type { AuqPaneParse } from "../lib/auq-pane.js";
+import { isLocalChannel } from "../lib/pending-ops.js";
+import { windowTarget } from "../lib/tmux-helper.js";
+import { emitEvent } from "./event-bus.js";
 
 export interface AuqOption {
   label: string;
@@ -54,8 +58,10 @@ export interface AuqState {
   questions: AuqQuestion[];
   /** selections[qIdx] = 这个 question 的选项 index 数组（0-based） */
   selections: number[][];
-  /** Discord 那条带 select menu 的消息 id（按 Submit 时编辑掉 components） */
+  /** Discord 那条带 select menu 的消息 id：只认按这一版画的那条（auq-answer.ts 按它判旧消息） */
   messageId: string;
+  /** 代际：jsonl 检测到的是那次 tool_use 的 id，pane 检测每登记一次生成一个新的。提交方看到的不是这一代 = 409 */
+  dialogId: string;
   /** agent 的 tmux 目标（e.g. "master:agent-foo"），按键发这里 */
   tmuxTarget: string;
   ts: number;
@@ -77,12 +83,14 @@ export function registerAuqState(
   tmuxTarget: string,
   questions: AuqQuestion[],
   source: "jsonl" | "pane" = "jsonl",
+  dialogId = `pane-${crypto.randomUUID()}`,
 ): AuqState {
   const state: AuqState = {
     channelId,
     questions,
     selections: questions.map(() => []),
     messageId: "",
+    dialogId,
     tmuxTarget,
     ts: Date.now(),
     source,
@@ -91,10 +99,15 @@ export function registerAuqState(
   return state;
 }
 
+/** 那次 AskUserQuestion tool_use 的 id：jsonl 通路拿它当代际（AuqState.dialogId） */
+export function auqToolUseId(content: any[]): string | undefined {
+  const b = Array.isArray(content) ? content.find((x) => x?.type === "tool_use" && x.name === "AskUserQuestion") : undefined;
+  return typeof b?.id === "string" && b.id ? b.id : undefined;
+}
+
 /**
  * 从 assistant content blocks 里查 AskUserQuestion tool_use。返回 questions
- * 数组，没有返回 null。watcher 拿到 questions 之后调 postAskUserQuestionMessage
- * 渲染 Discord 组件。
+ * 数组，没有返回 null。watcher 拿到 questions 之后调 announceAuq。
  */
 export function detectAskUserQuestion(content: any[]): AuqQuestion[] | null {
   if (!Array.isArray(content)) return null;
@@ -111,8 +124,8 @@ export function detectAskUserQuestion(content: any[]): AuqQuestion[] | null {
         options: (q.options as any[])
           .filter((o) => o && typeof o.label === "string")
           .map((o) => ({
-            label: String(o.label).slice(0, 100),
-            description: o.description ? String(o.description).slice(0, 100) : undefined,
+            label: String(o.label), // 不截：画面上是全文，截了就和画面对不上（auq-answer.ts）；Discord 渲染时再截
+            description: o.description ? String(o.description) : undefined,
             preview: o.preview ? String(o.preview).slice(0, 200) : undefined,
           })),
         multiSelect: !!q.multiSelect,
@@ -124,18 +137,22 @@ export function detectAskUserQuestion(content: any[]): AuqQuestion[] | null {
 }
 
 /**
- * 把 AskUserQuestion 渲染成 Discord 消息 + components。
- * 1-4 个 question 每个一个 select menu（multiSelect 时 max_values=options.length）。
- * 最后一行是 Submit / Cancel 按钮。
- *
- * 返回新建的 message id 给调用方存进 auqStates；失败返回 null。
+ * 检测到一个 AUQ（jsonl / pane 两条通路共用）：登记一个新代际的状态 → 有 Discord 面就为这一版发一条新消息 → 广播 question。
+ * 新一版一定发新消息、换新的 messageId，绝不原地改旧消息去画新一版（旧消息上的选择 / 提交靠 messageId 判旧，tests/auq-answer.test.ts）
  */
-export async function postAskUserQuestionMessage(
-  discord: Client,
-  channelId: string,
-  tmuxTarget: string,
-  questions: AuqQuestion[],
-): Promise<string | null> {
+export function announceAuq(discord: Client, a: { channelId: string; agentName: string; questions: AuqQuestion[]; source: "jsonl" | "pane"; dialogId?: string }): AuqState {
+  const state = registerAuqState(a.channelId, windowTarget(a.agentName), a.questions, a.source, a.dialogId);
+  if (!isLocalChannel(a.channelId)) postAskUserQuestionMessage(discord, state).catch((e) => console.error(`AUQ Discord post 失败（${a.source}）:`, e));
+  emitEvent({ agent: a.agentName, chatId: a.channelId, type: "question", data: { questions: a.questions, dialogId: state.dialogId } });
+  return state;
+}
+
+/**
+ * 把这一版 AskUserQuestion 渲染成一条新的 Discord 通知：列出问题和选项，请到终端作答——远程作答停用（auq-answer.ts），不带选单和按钮。
+ * 发完只把 messageId 记在这一版的状态上：发的途中换了一版，这条就不绑任何状态
+ */
+export async function postAskUserQuestionMessage(discord: Client, state: AuqState): Promise<string | null> {
+  const { channelId, questions } = state;
   try {
     const ch = await discord.channels.fetch(channelId);
     if (!ch || !("send" in ch)) return null;
@@ -153,55 +170,12 @@ export async function postAskUserQuestionMessage(
         return `**Q${i + 1}. ${q.header || q.question}${tag}**\n${q.question}\n${opts}`;
       }),
       ``,
-      `下面每个 Q 用对应的 select menu 选；选完点 ✅ Submit。`,
+      `请到终端作答。`,
     ];
     const body = headerLines.join("\n").slice(0, 1900);
 
-    const rows: any[] = [];
-    // 每个 question 一个 select menu — Discord 最多 5 rows，questions 上限 4，留 1 row 给按钮
-    for (let i = 0; i < questions.length && rows.length < 4; i++) {
-      const q = questions[i];
-      const componentSelect = {
-        type: 3, // STRING_SELECT
-        custom_id: `auq:${channelId}:q${i}`,
-        placeholder: q.multiSelect
-          ? `Q${i + 1} (可多选): ${q.header || q.question}`.slice(0, 150)
-          : `Q${i + 1}: ${q.header || q.question}`.slice(0, 150),
-        min_values: q.multiSelect ? 0 : 1,
-        max_values: q.multiSelect ? q.options.length : 1,
-        options: q.options.map((o, oi) => ({
-          label: `${oi + 1}. ${o.label}`.slice(0, 100),
-          value: String(oi),
-          description: o.description?.slice(0, 100),
-        })),
-      };
-      rows.push({ type: 1, components: [componentSelect] });
-    }
-    rows.push({
-      type: 1,
-      components: [
-        { type: 2, style: 3, label: "✅ Submit", custom_id: `auq:${channelId}:submit` }, // SUCCESS
-        { type: 2, style: 4, label: "❌ Cancel (Esc)", custom_id: `auq:${channelId}:cancel` }, // DANGER
-      ],
-    });
-
-    const msg = await textCh.send({ content: body, components: rows });
-
-    // 状态可能已由 registerAuqState 预注册（web-only 回路），只回填 messageId
-    const existing = auqStates.get(channelId);
-    if (existing) {
-      existing.messageId = msg.id;
-    } else {
-      auqStates.set(channelId, {
-        channelId,
-        questions,
-        selections: questions.map(() => []),
-        messageId: msg.id,
-        tmuxTarget,
-        ts: Date.now(),
-      });
-    }
-
+    const msg = await textCh.send({ content: body });
+    state.messageId = msg.id;
     return msg.id;
   } catch (e) {
     console.error("AskUserQuestion Discord post 失败:", e);
@@ -276,19 +250,4 @@ export function buildAuqKeystrokes(state: AuqState, pane?: AuqPaneParse | null):
 /** 清掉一个 channel 的 AUQ 状态（提交完 / 取消 / stale）。 */
 export function clearAuqState(channelId: string): boolean {
   return auqStates.delete(channelId);
-}
-
-/**
- * 把键序列逐个发给 tmux，键间 120ms。
- *
- * 不能一次 send-keys 批发：CC 2.1.x 的 AUQ 组件对同一读入 burst 里的连续键会
- * 吞掉前面的导航键（2026-08-07 实测：批发 ["Down","Enter"] 落成"光标没动直接
- * 提交"，答错选项；逐键+间隔则全对）。
- */
-export async function sendAuqKeys(tmuxTarget: string, keys: string[]): Promise<void> {
-  const { tmuxRaw } = await import("../lib/tmux-helper.js");
-  for (const key of keys) {
-    await tmuxRaw(["send-keys", "-t", tmuxTarget, key]);
-    await Bun.sleep(120);
-  }
 }

@@ -37,7 +37,7 @@ import { loadAgents as apiLoadAgents, MASTER_AGENT_NAME } from "@/lib/chat/agent
 import { createAgent as apiCreateAgent, lifecycleAction as apiLifecycle } from "@/lib/api/agents";
 import { fetchHistory } from "@/lib/api/history";
 import { openAgentEventStream } from "@/lib/api/stream";
-import { agentTasks, answerAuq, answerPermission, clearAgentSession, interruptAgent, sendErrorText, sendMessage, setHidden, type SendResult } from "@/lib/api/chat";
+import { agentTasks, answerPermission, clearAgentSession, interruptAgent, sendErrorText, sendMessage, setHidden, type SendResult } from "@/lib/api/chat";
 import { getProfile, putProfile } from "@/lib/api/settings";
 import { markRead, projectsList } from "./scoped-requests"; // 非全权设备不发（接口要全权）
 
@@ -2373,28 +2373,6 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
       s.pendingPermission = null;
     });
     return this.postAction(() => answerPermission(agent, action));
-  }
-
-  /** 提交 AskUserQuestion 选择。selections[i]=第 i 题选中的 option index 数组。 */
-  public async submitAsk(
-    selections: number[][]
-  ): Promise<{ ok: boolean; error?: string }> {
-    const agent = this.state.activeAgent;
-    if (!agent) return { ok: false, error: "无活动会话" };
-    this.produce((s) => {
-      s.pendingAsk = null;
-    });
-    return this.postAction(() => answerAuq(agent, "submit", selections));
-  }
-
-  /** 取消 AskUserQuestion（给 agent 发 Esc）。 */
-  public async cancelAsk(): Promise<{ ok: boolean; error?: string }> {
-    const agent = this.state.activeAgent;
-    if (!agent) return { ok: false, error: "无活动会话" };
-    this.produce((s) => {
-      s.pendingAsk = null;
-    });
-    return this.postAction(() => answerAuq(agent, "cancel"));
   }
 }
 

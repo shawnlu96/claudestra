@@ -61,7 +61,7 @@ describe("封装在函数里的前缀也登记了（adv1 P1-2）", () => {
     const dir = join(import.meta.dir, "..", "src");
     const files = [join(dir, "bridge.ts"), ...readdirSync(join(dir, "bridge"), { recursive: true }).map((f) => join(dir, "bridge", String(f)))];
     const built = files.filter((f) => f.endsWith(".ts")).flatMap((f) => [...readFileSync(f, "utf-8").matchAll(/\b(?:id|custom_id|customId): `([a-z_]+:)\$\{/g)].map((m) => m[1]));
-    expect(built).toEqual(expect.arrayContaining(["auto_allow:", "auq:"]));
+    expect(built).toEqual(expect.arrayContaining(["auto_allow:", "perm_allow:"])); // auq: 的选单 / 按钮已不再发（远程作答停用），旧消息的点击仍按保留表认
     for (const p of new Set(built)) expect(isReservedButtonId(`${p}x`)).toBe(true);
   });
 

@@ -32,8 +32,7 @@ import { parseAuqPane } from "../lib/auq-pane.js";
 import {
   auqStates,
   clearAuqState,
-  registerAuqState,
-  postAskUserQuestionMessage,
+  announceAuq,
   type AuqQuestion,
 } from "./ask-user-question.js";
 import { emitEvent } from "./event-bus.js";
@@ -482,22 +481,12 @@ async function maybeHandleAuq(
   const q: AuqQuestion = {
     question: parse.question,
     header: (parse.sections[0] || "").slice(0, 12),
-    options: parse.options.map((o) => ({
-      label: o.label.slice(0, 100),
-      description: o.description ? o.description.slice(0, 100) : undefined,
-    })),
+    options: parse.options.map((o) => ({ label: o.label, description: o.description })), // 不截：作答时要和画面逐项比（auq-answer.ts）
     multiSelect: parse.multiSelect,
   };
-  const tmuxTarget = windowTarget(agentName);
-  registerAuqState(channelId, tmuxTarget, [q], "pane");
-  if (!channelId.startsWith("local-")) {
-    postAskUserQuestionMessage(discord, channelId, tmuxTarget, [q]).catch((e) =>
-      console.error("AUQ pane 检测 Discord post 失败:", e)
-    );
-  }
+  announceAuq(discord, { channelId, agentName, questions: [q], source: "pane" }); // 每次登记一个新代际
   console.log(`🎛 pane 检测到 AskUserQuestion (1 问, ${parse.form}${parse.multiSelect ? ", 多选" : ""}) for ${agentName}`);
   recordMetric("auq_detect", { channelId, meta: { source: "pane", form: parse.form } });
-  emitEvent({ agent: agentName, chatId: channelId, type: "question", data: { questions: [q] } });
   return true;
 }
 

@@ -1439,7 +1439,7 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
   }
 
   // POST /api/v1/agents/:name/answer —— 交互卡回传。只给 owner 本人：批准权限弹框、替 agent 回答 = 以 owner 名义拍板（与 ask-entry.ts canAnswerAsk 同一判定）
-  // body {kind:"auq", action:"submit"|"cancel", selections?: number[][]} 或 {kind:"permission", action:"allow"|"allow_session"|"deny"}
+  // body {kind:"auq", action:"submit"|"cancel", selections?: number[][], questions, askId | dialogId} 或 {kind:"permission", action:"allow"|"allow_session"|"deny"}
   const answerMatch = path.match(/^\/agents\/([^/]+)\/answer$/);
   if (answerMatch && req.method === "POST") {
     const agentParam = decodeURIComponent(answerMatch[1]);
@@ -1452,50 +1452,12 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
     const kind = String(body?.kind || "");
 
     if (kind === "auq") {
-      const { auqStates, buildAuqKeystrokes, clearAuqState, sendAuqKeys } = await import("./ask-user-question.js");
-      const state = auqStates.get(agent.channelId);
-      if (!state) return apiJson(404, { ok: false, error: "no pending AskUserQuestion for this agent" });
-      if ((await import("./ask-runtime.js")).staleAuqCard(body?.askId, agent.channelId, state.questions)) return apiJson(409, { ok: false, code: "ask_stale", error: "card is for an earlier dialog" });
-      const action = String(body?.action || "submit");
-      if (action === "cancel") {
-        const failed = await tmuxSendEscape(state.tmuxTarget, { strict: true }).then(() => null, (e: Error) => e);
-        if (failed) return apiJson(409, { ok: false, error: `取消没生效：${failed.message}` }); // Esc 没发出去：问题还在，状态留着可以再取消
-        clearAuqState(agent.channelId);
-        recordMetric("auq_cancel", { channelId: agent.channelId, meta: { trigger: "api" } });
-        emitEvent({ agent: agent.name, chatId: agent.channelId, type: "question_cleared", data: { reason: "cancel", via: "api" } });
-        return apiJson(200, { ok: true, cancelled: true });
-      }
-      // submit：body.selections 覆盖状态（web 前端一次性提交所有选择）
-      if (Array.isArray(body?.selections)) {
-        state.selections = state.questions.map((q, i) => {
-          const sel = Array.isArray(body.selections[i]) ? body.selections[i] : [];
-          return sel.map((n: unknown) => Number(n)).filter((n: number) => Number.isInteger(n) && n >= 0 && n < q.options.length);
-        });
-      }
-      // M4：发键前重验弹窗还在（同 permission 分支）。AUQ 已在 TUI 侧答掉 / 取消而 AuqState 未清时，
-      // 键（含数字键）会误入 composer 打出字符。判据用 parseAuqPane（弹窗签名不在 = stale，覆盖「已答且
-      // agent 正忙」），解析结果交给 buildAuqKeystrokes 对光标位 / 勾选态。抓不到 pane 才退回盲发。
-      let auqPane = "";
-      try { auqPane = await tmuxCapture(state.tmuxTarget, 40); } catch { /* 跳过重验 */ }
-      const auqParse = auqPane ? parseAuqPane(auqPane) : null;
-      if (auqPane && !auqParse) {
-        clearAuqState(agent.channelId);
-        emitEvent({ agent: agent.name, chatId: agent.channelId, type: "question_cleared", data: { reason: "stale", via: "api" } });
-        return apiJson(409, { ok: false, error: "AskUserQuestion no longer active (answered elsewhere?)" });
-      }
-      const keys = buildAuqKeystrokes(state, auqParse);
-      try {
-        // 逐键分发（sendAuqKeys）：批量 send-keys 会被 AUQ 组件吞导航键，答错选项
-        if (keys.length > 0) await sendAuqKeys(state.tmuxTarget, keys);
-      } catch (e) {
-        return apiJson(500, { ok: false, error: `tmux send-keys 失败: ${(e as Error).message}` });
-      }
-      clearAuqState(agent.channelId);
-      recordMetric("auq_submit", { channelId: agent.channelId, meta: { trigger: "api", questions: String(state.questions.length) } });
-      // 「待你处理」的 AUQ ask 在广播之前记成是谁答的（ask-runtime.ts）：凭据 id 不进 question_cleared，那是发给所有订阅者的
-      (await import("./ask-runtime.js")).settleAuq(agent.channelId, "interact", state, { principal: principal.id, device: principal.credential });
-      emitEvent({ agent: agent.name, chatId: agent.channelId, type: "question_cleared", data: { reason: "submit", via: "api" } });
-      return apiJson(200, { ok: true, keys: keys.length });
+      // 身份核对、窗口锁、画面比对、发键、记账都在 auq-answer.ts（网页卡片 / 聊天卡 / Discord 同一个执行点）
+      const r = await (await import("./auq-answer.js")).answerAuqDialog({
+        channelId: agent.channelId, agentName: agent.name, action: body?.action === "cancel" ? "cancel" : "submit", selections: body?.selections,
+        seen: { askId: body?.askId, dialogId: body?.dialogId, questions: body?.questions }, via: "api", who: { principal: principal.id, device: principal.credential },
+      });
+      return apiJson(r.ok ? 200 : r.status, r);
     }
 
     if (kind === "permission") {

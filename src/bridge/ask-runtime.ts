@@ -74,12 +74,14 @@ interface RuntimeAskInput {
   options: unknown[];
   /** Codex 额度用完：正文换成几点恢复，原文只留在 extra.raw（指纹仍按原文算） */
   quota?: true;
+  /** AUQ 的代际（ask-user-question.ts AuqState.dialogId）：换了一代就是另一个弹框，题面一样也换卡 */
+  dialogId?: string;
 }
 
 export async function openRuntimeAsk(r: RuntimeAskInput): Promise<void> {
   const key = rtKey(r.source, r.channelId);
-  // AUQ 按下标作答：问题 / 选项 / 描述有一处不同就是另一个弹框，换卡（tests/ask-dismiss.test.ts）
-  const fp = runtimeFingerprint(r.source, r.agentName, r.title, r.source === "auq" ? auqIdentity(r.options) : r.context);
+  // AUQ 按下标作答：换了一代、或问题 / 选项 / 描述有一处不同，就是另一个弹框，换卡（tests/ask-dismiss.test.ts）
+  const fp = runtimeFingerprint(r.source, r.agentName, r.title, r.source === "auq" ? `${r.dialogId ?? ""}\n${auqIdentity(r.options)}` : r.context);
   const held = runtimeOpen.get(key);
   if (held?.fp === fp) return;
   if (held) settleRuntimeAsk(r.source, r.channelId); // 同一频道换成了另一个弹框：上一个结掉（记消失）再看这个
@@ -236,7 +238,8 @@ export function initRuntimeAsks(): void {
     if (evt.type === "question") {
       const qs = ((data.questions as unknown[]) ?? []) as { question?: string; header?: string }[];
       const context = qs.map((q) => q.question ?? "").join("\n").slice(0, 300);
-      void openRuntimeAsk({ source: "auq", channelId: evt.chatId, agentName: evt.agent, kind: "decide", title: auqTitle(qs), context, options: qs });
+      const dialogId = typeof data.dialogId === "string" ? data.dialogId : undefined;
+      void openRuntimeAsk({ source: "auq", channelId: evt.chatId, agentName: evt.agent, kind: "decide", title: auqTitle(qs), context, options: qs, dialogId });
     } else if (evt.type === "question_cleared") {
       // 网页 API 的提交端点在广播前已带凭据记过账（这里再结是空操作）；Discord 带 uid；都没有记 unknown
       const who = { principal: typeof data.uid === "string" ? `discord:${data.uid}` : undefined };

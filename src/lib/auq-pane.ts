@@ -25,6 +25,8 @@ export interface AuqPaneOption {
   /** multiSelect 形态下当前是否已勾选（[✔] / [x]） */
   checked: boolean;
   description?: string;
+  /** 描述在画面上的逐行原文（折行前）：和提交方的那一版比对时，只有这些行之间允许「空格或无」（auqPaneMatches） */
+  descLines?: string[];
 }
 
 export interface AuqPaneParse {
@@ -34,6 +36,8 @@ export interface AuqPaneParse {
   sections: string[];
   /** 当前可见 section 的问题文本 */
   question: string;
+  /** 问题在画面上的逐行原文（同 descLines） */
+  questionLines: string[];
   /** 当前可见 section 的真实选项（伪选项已剔除） */
   options: AuqPaneOption[];
   /** 当前可见 section 是否多选（选项带 checkbox） */
@@ -125,21 +129,17 @@ export function parsePiSelectPane(pane: string): AuqPaneParse | null {
   if (optLines.some((l) => BOX_CHARS_RE.test(l))) return null;
   const options: AuqPaneOption[] = optLines.map((l) => {
     const m = l.match(PI_CURSOR_RE);
-    return { label: (m ? m[2] : l.trim()).slice(0, 100), cursor: !!m, checked: false };
+    return { label: m ? m[2] : l.trim(), cursor: !!m, checked: false };
   });
   if (options.filter((o) => o.cursor).length !== 1) return null;
 
   // 问题：再往上取两段（Pi 把 confirm 的 title 和 message 分成两块渲染）。
   const q1 = piBlockAbove(lines, next);
   const q2 = piBlockAbove(lines, q1.next);
-  const text = [...q2.block, ...q1.block]
-    .map((l) => l.trim())
-    .filter((l) => l && !BOX_CHARS_RE.test(l))
-    .join(" ")
-    .slice(0, 300);
-  if (!text) return null;
+  const questionLines = [...q2.block, ...q1.block].map((l) => l.trim()).filter((l) => l && !BOX_CHARS_RE.test(l));
+  if (!questionLines.length) return null;
 
-  return { form: "single", sections: ["Pi 确认"], question: text, options, multiSelect: false };
+  return { form: "single", sections: ["Pi 确认"], question: questionLines.join(" "), questionLines, options, multiSelect: false };
 }
 
 /**
@@ -180,15 +180,15 @@ function parseCodexSelectPane(pane: string): AuqPaneParse | null {
     if (!m) return null; // 选项块里混了别的行 ⇒ 不是这种框，宁可不认
     const [label, ...rest] = m[2].split(/\s{2,}/);
     const description = rest.join(" ").trim();
-    options.push({ label: label.slice(0, 100), cursor: !!m[1], checked: false, ...(description ? { description: description.slice(0, 100) } : {}) });
+    options.push({ label, cursor: !!m[1], checked: false, ...(description ? { description, descLines: [description] } : {}) });
   }
   if (options.filter((o) => o.cursor).length !== 1) return null;
   // 标题紧贴选项（中间最多一个空行）；隔得更远的是上面别的输出（比如「■ You've hit your usage limit」），不当问题
   const gap = lines[next]?.trim() === "" ? 1 : 0;
   if (lines[next - gap]?.trim() === "") return null;
-  const question = piBlockAbove(lines, next).block.map((l) => l.trim()).filter(Boolean).join(" ").slice(0, 300);
-  if (!question) return null;
-  return { form: "single", sections: ["Codex"], question, options, multiSelect: false };
+  const questionLines = piBlockAbove(lines, next).block.map((l) => l.trim()).filter(Boolean);
+  if (!questionLines.length) return null;
+  return { form: "single", sections: ["Codex"], question: questionLines.join(" "), questionLines, options, multiSelect: false };
 }
 
 export function parseAuqPane(pane: string): AuqPaneParse | null {
@@ -275,6 +275,7 @@ export function parseAuqPane(pane: string): AuqPaneParse | null {
     } else if (attachDesc && options.length > 0) {
       const opt = options[options.length - 1];
       opt.description = opt.description ? `${opt.description} ${t}` : t;
+      opt.descLines = [...(opt.descLines ?? []), t];
     }
   }
 
@@ -284,5 +285,49 @@ export function parseAuqPane(pane: string): AuqPaneParse | null {
   const question = qLines.join(" ").trim();
   if (!question) return null;
 
-  return { form, sections, question, options, multiSelect: anyCheckbox };
+  return { form, sections, question, questionLines: qLines, options, multiSelect: anyCheckbox };
 }
+
+export type AuqPaneVerdict = "match" | "mismatch" | "ambiguous";
+
+type SeenQuestion = { question?: string; multiSelect?: boolean; options?: readonly { label?: string; description?: string }[] };
+
+/**
+ * 提交方看到的那一版弹框和画面上的对不对得上（T65，替 owner 按键前最后一道）。先比表单形态：段数等于问题数，单问题单选
+ * 必须是 single、其余是 tabbed（buildAuqKeystrokes 按这个出键：单题单选的 Enter 在两段表单里只是翻页）；再逐项比问题、
+ * 单选 / 多选、选项个数、每个选项的文字和描述。任何一处对不上 = mismatch；都对得上、但有文字折成了多行 = ambiguous（认不出唯一身份）。
+ * 多问题表单画面上只看得见当前一段：当前段必须是第 1 问，其余段核不了（已知边界）。单测 tests/auq-answer.test.ts
+ */
+export function auqPaneVerdict(questions: readonly SeenQuestion[], p: AuqPaneParse): AuqPaneVerdict {
+  const q = questions[0];
+  if (!q || p.sections.length !== questions.length) return "mismatch";
+  if (p.form !== (questions.length === 1 && !q.multiSelect ? "single" : "tabbed")) return "mismatch";
+  const opts = q.options ?? [];
+  if (!!q.multiSelect !== p.multiSelect || opts.length !== p.options.length) return "mismatch";
+  const parts = [
+    textVerdict(q.question ?? "", p.questionLines),
+    ...opts.map((o, i) => ((o.label ?? "").trim() === p.options[i].label ? textVerdict(o.description ?? "", p.options[i].descLines ?? []) : "mismatch")),
+  ];
+  return parts.includes("mismatch") ? "mismatch" : parts.includes("ambiguous") ? "ambiguous" : "match";
+}
+
+/**
+ * 一段原文对画面上的几行：只有一行、且一字不差（只去首尾空白）= match。折成了多行就认不出唯一身份——折行处原来是空格、换行
+ * 还是什么都没有，画面上分不出（「/tmp/reports /tmp/archive」与「/tmp/reports/tmp/archive」在那里折行时一模一样）：
+ * 宽松拼回去（折行处空格或无）对得上 = ambiguous，对不上 = mismatch
+ */
+export function textVerdict(text: string, lines: readonly string[]): AuqPaneVerdict {
+  const shown = lines.map((l) => l.trim()).filter(Boolean);
+  const want = text.trim();
+  if (shown.length <= 1) return (shown[0] ?? "") === want ? "match" : "mismatch";
+  const s = oneSpace(want);
+  let at = 0;
+  for (const [i, part] of shown.map(oneSpace).entries()) {
+    if (!s.startsWith(part, at)) return "mismatch";
+    at += part.length;
+    if (i < shown.length - 1 && s[at] === " ") at++;
+  }
+  return at === s.length ? "ambiguous" : "mismatch";
+}
+
+const oneSpace = (s: string) => s.replace(/\s+/g, " ").trim();
