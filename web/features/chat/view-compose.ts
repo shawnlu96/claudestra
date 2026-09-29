@@ -46,7 +46,7 @@ export function survivingPending(
   const norm = (x: string) => x.replace(/\r\n?/g, "\n").trim();
   return current.filter((m) => {
     if (!m.local || m.role !== "user") return false;
-    if (m.ts && nowMs - Date.parse(m.ts) > PENDING_KEEP_MS) return false;
+    if (m.ts && !m.held && nowMs - Date.parse(m.ts) > PENDING_KEEP_MS) return false;
     const t = norm(m.content);
     // 带头版本也拿来比一次：本地只有正文、历史带注入头时，光比原文匹配不上
     const tBare = norm(stripInboundHeader(m.content));

@@ -213,7 +213,7 @@
     "size:src/bridge/stats-dashboard.ts": 813,
     "size:src/bridge/web-terminal.ts": 548,
     "size:src/channel-server.ts": 814,
-    "size:src/cron.ts": 609,
+    "size:src/cron.ts": 607,
     "size:src/launcher.ts": 1175,
     "size:src/lib/cli-install.ts": 1045,
     "size:src/lib/doctor.ts": 570,
@@ -288,6 +288,12 @@
       "from": 0,
       "to": 0,
       "why": "新增 TESTS_WEB_DOM 例外：tests/web-dom-*.test.ts 要在 happy-dom 里真挂载 React 组件（错误兜底），允许引用带 react 的 web 模块；登记在明处，替代之前用类型查询 + 插值动态 import 绕开 tests-web-pure 的写法（T20 审查 P2-2）"
+    },
+    {
+      "key": "guard:scripts/guard/config.ts",
+      "from": 0,
+      "to": 0,
+      "why": "TWINS 加 src/lib/notice-repeat.ts <-> web/lib/chat/notice-repeat.ts：⛔ API 错误行的 ×N 合并规则历史（src）和直播 / 差量拼接（web）两边都要用，按规矩 5 登记成 twin（T24 wf notify-web-rules-6，PM 09-29 要求）"
     },
     {
       "key": "doc:CLAUDE.md",

@@ -9,6 +9,8 @@ import { isOwnerPrincipal, type Principal } from "../lib/principals.js";
 import { runtimeCommandsFor } from "../lib/runtime-commands.js";
 import { resolveModelAlias } from "../lib/claude-launch.js";
 import { MASTER_SESSION, windowTarget } from "../lib/tmux-helper.js";
+import { canSeeQuota } from "../lib/devices.js";
+import { wallWaitRefusal, windowWallWait, type WallWait } from "../lib/wall-screen.js";
 import { resolveWebInvocation, isProjectSkillForOtherAgent } from "./slash-registry.js";
 import { apiJson } from "./api-respond.js";
 import type { ApiUserEndpoint } from "./router.js";
@@ -33,6 +35,8 @@ export interface SlashDeps {
   /** 技能类命令注入后跑真实回合：点亮 web 的思考徽章 / 侧栏 busy（builtin TUI 命令没有回合，不发） */
   markThinking: (agent: SlashAgent) => void;
   record: (cmd: string, agent: SlashAgent) => void;
+  /** 窗口停在额度菜单 / 撞墙倒计时上（lib/wall-screen.ts）：不注入；不给 = 真抓屏 */
+  wallWait?: (win: string) => Promise<WallWait | null>;
 }
 
 export interface SlashRequest {
@@ -69,6 +73,9 @@ export async function handleSlashPassthrough(r: SlashRequest, deps: SlashDeps): 
   }
   if (!owner) return apiJson(403, { ok: false, ...SLASH_OWNER_ONLY });
   const win = agent.name === "master" ? `${MASTER_SESSION}:0` : windowTarget(agent.name);
+  // 停在额度菜单 / 撞墙倒计时上不打字（倒计时上一打字就取消自动续跑，菜单上会选项）；原因只告诉能看额度的凭据（canSeeQuota）
+  const wall = await (deps.wallWait ?? windowWallWait)(win);
+  if (wall) return apiJson(409, { ok: false, error: `${agent.name} ${wallWaitRefusal(wall, canSeeQuota(principal))}，这条命令没有注入` });
   try {
     await deps.sendLine(win, resolved.ccText);
     // v2.16.2 输入框打 /model 也登记切换意图：slash 直通没有代按逻辑，弹窗迟到 1.5s 无人按，agent 卡死——watcher 兜底代按

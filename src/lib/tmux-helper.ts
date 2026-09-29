@@ -14,6 +14,7 @@ import { RUNTIME_DIR, TMUX_SOCK } from "./paths.js"; export { TMUX_SOCK };
 import { sandboxDisabled } from "./sandbox.js";
 import { sandboxTmuxArgv, sandboxVerifyNewWindow } from "./sandbox-tmux.js"; export { sandboxTmuxArgv };
 import { windowKey } from "./tmux-target.js"; export { windowKey };
+import { paneShowsLimitMenu } from "./limit-menu.js";
 export const MASTER_SESSION = "master";
 /**
  * 大总管窗口（index 0）的显式名字。不命名的话 tmux 按前台进程自动改名（claude / 版本号），
@@ -552,17 +553,9 @@ export function btabStepsTo(current: string, target: string): number {
 }
 
 /**
- * 检测 pane 上是否有"可以安全自动按 Enter 确认"的 modal。
- *
- * 先用 parseModalOptions 做几何识别（必须有 ❯ 标记的选项菜单）。检测到 modal
- * 之后，再用一个**负向 blacklist** 排除"必须用户决定"的弹窗：
- * - 运行时权限弹窗（detectRuntimePermissionPrompt）：edit / run / allow ...
- * - session-idle 弹窗（detectSessionIdlePrompt），除非显式 allowSessionIdle=true
- *   master 启动时允许（默认从摘要恢复），agent 不允许（permission-watcher 会发按钮）
- *
- * 这样 Claude Code 改启动期 modal 文案（dev-channel / trust files / skip
- * permissions ...）不会再让 launcher 卡住 — 只要修结构稳定的 ❯ + Enter to
- * confirm 几何特征还在，自动通过。
+ * pane 上是否有「可以安全自动按 Enter 确认」的 modal：parseModalOptions 几何识别（❯ 标记的选项菜单），再按负向黑名单排除必须人决定的——
+ * 运行时权限弹窗、session-idle（除非 allowSessionIdle：master 启动时允许，agent 由 permission-watcher 发按钮）、信任 / Bypass 首启框、额度菜单。
+ * CC 改启动期 modal 文案（dev-channel / trust files …）也不会让 launcher 卡住：❯ + Enter to confirm 的几何特征还在就自动通过。
  */
 export function isAutoConfirmableModal(
   pane: string,
@@ -585,6 +578,8 @@ export function isAutoConfirmableModal(
   // Bypass 首启确认同样默认高亮「No, exit」，而且接受与否是用户自己的安全决定——
   // 任何自动化都不替用户按（setup 里征得同意后写 skipDangerousModePermissionPrompt）
   if (detectBypassConsentPrompt(pane)) return false;
+  // 额度菜单：Enter 会替人选中高亮项（光标可能停在「Switch to usage credits」上），一个键都不发，留给人（T24）
+  if (paneShowsLimitMenu(pane)) return false;
   return true;
 }
 
