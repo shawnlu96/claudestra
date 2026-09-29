@@ -98,8 +98,10 @@ export class OutboundTable {
     const p = this.pending.get(f.id);
     if (!p || p.sink) return false;
     clearTimeout(p.headTimer);
-    const inline = f.body ? b64.dec(f.body) : null;
-    if (inline && inline.length > p.left) return this.overLimit(p); // 还没建流：按请求失败结掉
+    const inline = f.body ? b64.decStrict(f.body) : null;
+    // 还没建流：按请求失败结掉
+    if (f.body && !inline) return this.abort(p, "bad_frame", "response head carries invalid base64");
+    if (inline && inline.length > p.left) return this.abort(p, "response_too_large", "response body over the caller's limit");
     p.sink = streamSink(() => {
       // 读端不要了（调用方 cancel 了流）：告诉对方别再发，本地清掉
       this.send({ t: "cancel", id: f.id, to: p.to });
@@ -117,20 +119,24 @@ export class OutboundTable {
   onData(f: DataFrame): boolean {
     const p = this.pending.get(f.id);
     if (!p?.sink) return false;
-    this.take(p, b64.dec(f.b64));
+    // 正经的发送方从不发空 data 帧（relay-stream chunkBytes）：空的、解不开的一律当作恶，当场断掉这个请求——
+    // 否则一串 b64:"" 既不占字节上限，又能让读端一直觉得「有动静」
+    const bytes = b64.decStrict(f.b64);
+    if (!bytes?.length) return this.abort(p, "bad_frame", "empty or invalid data frame");
+    this.take(p, bytes);
     return true;
   }
 
-  /** 记账后交给流；超了上限就走 overLimit */
+  /** 记账后交给流；超了上限就断掉 */
   private take(p: Pending, bytes: Uint8Array): void {
-    if ((p.left -= bytes.length) < 0) return void this.overLimit(p);
+    if ((p.left -= bytes.length) < 0) return void this.abort(p, "response_too_large", "response body over the caller's limit");
     p.sink!.push(bytes);
   }
 
-  /** 响应超了调用方给的上限：告诉对方别再发，本地按失败结掉（头没到 reject、头到了让流报错） */
-  private overLimit(p: Pending): boolean {
+  /** 告诉对方别再发，本地按失败结掉（头没到 reject、头到了让流报错） */
+  private abort(p: Pending, code: string, message: string): boolean {
     this.send({ t: "cancel", id: p.id, to: p.to });
-    this.fail(p.id, new RelayError("response_too_large", "client", "response body over the caller's limit"));
+    this.fail(p.id, new RelayError(code, "client", message));
     return true;
   }
 

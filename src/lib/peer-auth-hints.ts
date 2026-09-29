@@ -102,6 +102,18 @@ export function peerCallFailureText(label: string, e: unknown, peerName: string)
   return `[⚠️ peer 调用失败] ${label} 网络不可达：${(e as Error)?.message ?? String(e)}。${online}。`;
 }
 
+/**
+ * 对方响应体里的 error 文字能不能给 agent 看：认证过的（E2E 内层响应，lib/peer-e2e-client.ts isE2eResponse；解开的加密兑换）
+ * 出自对方本人，照原样用；legacy 明文响应中继 / 路上都能伪造，只用本机的 fallback 模板，原文只进日志并标明未经认证
+ */
+export function peerErrorText(authenticated: boolean, body: unknown, fallback: string, peerName: string): string {
+  const err = (body as { error?: unknown } | null)?.error;
+  if (typeof err !== "string" || !err) return fallback;
+  if (authenticated) return err;
+  console.warn(`⚠️ [peer] ${peerName} 明文响应里的 error（未经认证，只供排查）: ${JSON.stringify(err.slice(0, 200))}`);
+  return fallback;
+}
+
 /** 本机拒绝 peer 签名时写进 error 的说明：老版本的调用方只会原样显示 error（它不认 reason），所以要在这里说清楚不是 token 失效 */
 export function peerSigErrorText(reason: string): string {
   const extra = reason === "replay" ? "（老版本同一秒发两条相同的消息也会这样：换个说法或隔一秒再发）" : "";

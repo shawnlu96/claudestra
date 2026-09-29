@@ -4,7 +4,7 @@
  * 目标是 required peer 却走不了加密（本机钥匙读不到、对方记录坏了）→ 抛错，绝不退回明文。
  * 外层传输（中继 / 直连、外层签名）由调用方以 raw 注入；这里只管会话。
  */
-import { E2eInnerError, E2eLocalError, PeerE2eClient } from "./peer-e2e-client.js";
+import { E2eInnerError, E2eLocalError, markE2eResponse, PeerE2eClient } from "./peer-e2e-client.js";
 import { e2ePeerOf, localE2e, peerForUrl, pinPeerE2eKey, readHttpPeers, type LocalE2e } from "./peer-e2e-local.js";
 import type { HttpPeer } from "./peers.js";
 
@@ -71,8 +71,11 @@ export function createE2eOutbound(d: OutboundDeps) {
       return await clientFor(rec, local, base, raw).fetch(init.method ?? "GET", url.slice(base.length), init.headers ?? {}, body);
     } catch (e) {
       if (!(e instanceof E2eInnerError)) throw e;
-      if (e.code === "e2e_peer_restarted") return Response.json({ ok: false, code: "peer_signature", reason: "e2e_peer_restarted", error: e.message.replace(/^\w+: /, "") }, { status: 401 });
-      if (e.code === "e2e_duplicate") return Response.json({ ok: false, error: DUPLICATE_TEXT }, { status: 409 });
+      if (e.code === "e2e_peer_restarted") {
+        const body = { ok: false, code: "peer_signature", reason: "e2e_peer_restarted", error: e.message.replace(/^\w+: /, "") };
+        return markE2eResponse(Response.json(body, { status: 401 }));
+      }
+      if (e.code === "e2e_duplicate") return markE2eResponse(Response.json({ ok: false, error: DUPLICATE_TEXT }, { status: 409 }));
       throw e;
     }
   }

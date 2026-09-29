@@ -59,7 +59,7 @@ function router() {
 
 type Relay = (req: Request, forward: (r: Request) => Promise<Response>) => Promise<Response>;
 
-async function world(opts: { relay?: Relay; limits?: ConstructorParameters<typeof SessionTable>[0]; now?: () => number; idleMs?: number } = {}) {
+async function world(opts: { relay?: Relay; limits?: ConstructorParameters<typeof SessionTable>[0]; now?: () => number; bodyLimits?: { idleMs?: number; totalMs?: number } } = {}) {
   const a = await machine(), b = await machine();
   const r = router();
   let bKnowsA: E2ePeer | null = asPeer(a, "a");
@@ -97,7 +97,7 @@ async function world(opts: { relay?: Relay; limits?: ConstructorParameters<typeo
       return opts.relay ? opts.relay(req, toB) : toB(req);
     },
     ...(opts.now ? { now: opts.now } : {}),
-    ...(opts.idleMs ? { idleMs: opts.idleMs } : {}),
+    ...(opts.bodyLimits ? { bodyLimits: opts.bodyLimits } : {}),
   });
   /** 模拟调用方：内层带 Bearer、一个每次唯一的内层签名和签名时刻（单调时钟） */
   let clock = 0;
@@ -439,9 +439,20 @@ describe("外层响应先封顶、边收边验", () => {
   test("响应头到了正文挂着不动：空闲超时掐断（e2e_idle）", async () => {
     let cancelled = false;
     const stuck = new ReadableStream<Uint8Array>({ pull: () => new Promise(() => {}), cancel: () => void (cancelled = true) });
-    const w = await world({ idleMs: 50, relay: async (req, fwd) => (isHello(req) ? fwd(req) : new Response(stuck, { status: 200, headers: OCTET })) });
+    const w = await world({ bodyLimits: { idleMs: 50 }, relay: async (req, fwd) => (isHello(req) ? fwd(req) : new Response(stuck, { status: 200, headers: OCTET })) });
     await expect(w.call("GET", "/api/v1/agents")).rejects.toMatchObject({ code: "e2e_idle", sent: true });
     expect(cancelled).toBe(true);
+  });
+
+  test("空段洪泛不算动静（e2e_idle）；一字节一字节地喂撑不过总时限（e2e_body_timeout）", async () => {
+    const empties = new ReadableStream<Uint8Array>({ pull: async (c) => { await new Promise((r) => setTimeout(r, 6)); c.enqueue(new Uint8Array(0)); } });
+    const w = await world({ bodyLimits: { idleMs: 10 }, relay: async (req, fwd) => (isHello(req) ? fwd(req) : new Response(empties, { status: 200, headers: OCTET })) });
+    await expect(w.call("GET", "/api/v1/agents")).rejects.toMatchObject({ code: "e2e_idle", sent: true });
+    let i = 0; // 先给一个合法的长度头（64 字节的记录），再 1 字节 1 字节地喂密文
+    const trickle = new ReadableStream<Uint8Array>({ pull: async (c) => { await new Promise((r) => setTimeout(r, 5)); c.enqueue(new Uint8Array([i++ === 3 ? 64 : 0])); } });
+    const w2 = await world({ bodyLimits: { idleMs: 50, totalMs: 120 }, relay: async (req, fwd) => (isHello(req) ? fwd(req) : new Response(trickle, { status: 200, headers: OCTET })) });
+    const err = await w2.call("GET", "/api/v1/agents").catch((e) => e);
+    expect(err).toMatchObject({ code: "e2e_body_timeout", sent: true });
   });
 
   test("认证过的响应也有总量上限：对方回 9 MiB → e2e_record；8 MiB 以内照常", async () => {

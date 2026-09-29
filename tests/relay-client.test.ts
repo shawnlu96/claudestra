@@ -188,6 +188,28 @@ describe("请求往返", () => {
   });
 });
 
+describe("作恶的中继：空 / 非法 base64 的 data 帧", () => {
+  test("空 data 帧、解不开的 base64：当场断掉这个请求（bad_frame）并发 cancel；头里 inline 正文是乱码直接拒", async () => {
+    let head: Record<string, unknown> | undefined;
+    const evil = startFakeRelay({ answerForward: (f) => head && { ...head, id: f.id } });
+    opened.push(evil);
+    const a = client(evil, "EV");
+    await evil.waitOnline(a.fp);
+    await until(() => a.c.state === "online");
+    const target = "1111-2222-3333-4444";
+    for (const bad of ["", "@@@@", "QQ"]) {
+      head = { t: "res", status: 200, headers: {}, more: true };
+      const r = await a.c.request(target, { method: "GET", path: "/api/v1/agents", headers: {} });
+      const req = await evil.waitFor((x) => x.fp === a.fp && x.frame.t === "req" && !evil.received.some((y) => y.frame.t === "cancel" && y.frame.id === x.frame.id));
+      evil.sendTo(a.fp, { t: "data", id: req.frame.id, b64: bad });
+      await expect(collectBody(r.body, 1e6)).rejects.toMatchObject({ code: "bad_frame" });
+      await evil.waitFor((x) => x.fp === a.fp && x.frame.t === "cancel" && x.frame.id === req.frame.id);
+    }
+    head = { t: "res", status: 200, headers: {}, more: false, body: "@@not-base64" };
+    await expect(a.c.request(target, { method: "GET", path: "/api/v1/agents", headers: {} })).rejects.toMatchObject({ code: "bad_frame" });
+  });
+});
+
 describe("推送（push / push-ack）", () => {
   const SUB = { endpoint: "https://web.push.apple.com/x", keys: { p256dh: "p", auth: "a" } };
   test("push 帧带 id 与请求体，ack 按 id 对回：ok / gone；welcome 的 push 能力进 info()", async () => {

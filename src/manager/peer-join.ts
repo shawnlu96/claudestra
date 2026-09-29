@@ -18,6 +18,8 @@ import { fromB64url } from "../lib/e2e/encoding.js";
 import { verifyE2eKey, type SignedE2eKey } from "../lib/e2e-machine-key.js";
 import { localE2e, type LocalE2e } from "../lib/peer-e2e-local.js";
 import { readRedeemResponse, sealRedeemRequest } from "../lib/peer-e2e-redeem.js";
+import { peerErrorText } from "../lib/peer-auth-hints.js";
+import { readJsonCapped } from "../lib/body-reader.js";
 import { checkPeerScope, disableTokenById, issuePeerToken, selfPeerName } from "./peers.js";
 
 export interface RedeemArgs {
@@ -184,11 +186,12 @@ async function postRedeem(hs: PeerInviteV2, rev: Reverse, x: { nonce: string; in
       body: JSON.stringify(sealed ? sealed.body : payload),
       signal: AbortSignal.timeout(10_000),
     });
-    const raw = await r.json().catch(() => null); // 回的不是 JSON（反代错页）→ 按失败处理，状态码照样判
+    const raw = await readJsonCapped(r); // 有上限地读；回的不是 JSON（反代错页）→ 按失败处理，状态码照样判
     const outcome = sealed ? await readRedeemResponse(sealed.session, r.status, raw) : null;
     res = (outcome?.ok ? outcome.value : raw) as RedeemRes;
     if (outcome && !outcome.ok) err = outcome.message;
-    else if (!r.ok || !res?.ok) err = res?.error || `对方返回 ${r.status}`;
+    // 加密兑换解开的失败体出自对方本人；明文兑换的中继能伪造，只用本机的话（lib/peer-auth-hints.ts peerErrorText）
+    else if (!r.ok || !res?.ok) err = peerErrorText(!!sealed, res, `对方返回 ${r.status}`, hs.name);
     if (err && r.status >= 400 && r.status < 500) failKind = "rejected";
   } catch (e) {
     err = `连不上对方 bridge: ${(e as Error).message}`;

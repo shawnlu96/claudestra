@@ -7,7 +7,9 @@ import { repoEnvVar } from "../lib/env-file.js";
 import { hostname } from "os";
 import { loadRegistry, output } from "./core.js";
 import { resolveMyBridgeUrl } from "./peers-net.js";
-import { peerAuthHint } from "../lib/peer-auth-hints.js";
+import { peerAuthHint, peerErrorText } from "../lib/peer-auth-hints.js";
+import { readJsonCapped } from "../lib/body-reader.js";
+import { isE2eResponse } from "../lib/peer-e2e-client.js";
 import { inviteLink, isPeerBaseUrl, relayUrlOf } from "../lib/peers.js";
 import { myFingerprint, peerCliFetch, relayStatus } from "./relay.js";
 import { inviteKeys, plainInviteWarning } from "../lib/peer-e2e-local.js";
@@ -161,9 +163,9 @@ export async function cmdPeerHttpTest(peerName: string) {
       headers: { Authorization: `Bearer ${peer.outToken}` },
       signal: AbortSignal.timeout(10_000),
     });
-    const body: any = await res.json().catch(() => null);
+    const body: any = await readJsonCapped(res); // 有上限地读（lib/body-reader.ts）；非 JSON 为 null
     if (!res.ok) {
-      output({ ok: false, error: `对方返回 ${res.status}: ${body?.error || "未知"}`, hint: [401, 403, 429].includes(res.status) ? peerAuthHint(body) : undefined });
+      output({ ok: false, error: `对方返回 ${res.status}: ${peerErrorText(isE2eResponse(res), body, "未知", peerName)}`, hint: [401, 403, 429].includes(res.status) ? peerAuthHint(body) : undefined });
       return;
     }
     const agents = (body?.agents || []).map((a: any) => ({ name: a.name, status: a.status }));
