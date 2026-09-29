@@ -193,7 +193,7 @@ export function applyMove(
   if (!check.ok) throw new LedgerError(check.code === "forbidden" ? "forbidden" : "invalid", check.reason, { stage: task.stage });
   const next = nextTaskState(task, move.to);
   updateTask(db, ctx, task, next);
-  noteStepDelivered(db, ctx, task, move.to);
+  noteStepDelivered(db, ctx, task, move.to, move.model);
   const data = { from: task.stage, to: move.to, round: next.round, specRev: next.specRev, ...(next.stageBefore ? { stageBefore: next.stageBefore } : {}) };
   const event = insertEvent(db, ctx, { project: task.project, target: task.id, kind: "stage", text, data }, primary);
   return { task: mustTask(db, task.id), event };

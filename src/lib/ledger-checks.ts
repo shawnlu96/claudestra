@@ -223,6 +223,8 @@ export interface StageMove {
   /** 调用方以为的当前阶段（CAS） */
   from: Stage;
   to: Stage;
+  /** 交付（build / fix → review）那一步自报的模型：跨实例只能凭声明，和推阶段同一个事务记进那一步的 claims */
+  model?: string;
 }
 
 const REVIEW_VERDICTS: readonly ReviewVerdict[] = ["pass", "changes", "block"];

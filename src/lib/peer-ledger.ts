@@ -10,7 +10,7 @@ import type { Database } from "bun:sqlite";
 import { resolve } from "node:path";
 import { STAGES, type LedgerEvent, type LedgerTask, type ReviewVerdict, type Stage, type StepName } from "./ledger-stages.js";
 import { getTask, listEvents, toTask } from "./ledger-store.js";
-import { currentStep, derivedSteps, listSteps, stepAtStage, stepPeer, stepsByTask, type TaskStep } from "./ledger-steps.js";
+import { currentReview, listSteps, stepAtStage, stepPeer, stepsByTask, withDerived, type TaskStep } from "./ledger-steps.js";
 import { REPO_ROOT } from "./repo-root.js";
 
 /** 委托约定的绝对路径：peer 请求的注入头里给接收方 agent 看，它的 cwd 一般是自己的项目，相对路径找不到 */
@@ -19,12 +19,6 @@ export const PEER_DELEGATION_DOC = resolve(REPO_ROOT, "docs/team/peer-delegation
 export type PeerLink = "delegate" | "reviewer";
 
 const REVIEW_STEPS: readonly StepName[] = ["review", "final_review"];
-
-/** 这张卡上的全部步骤：库里的行，加上没派过人的步骤按老字段推出来的（同 ledger-steps.ts stepsOf，不用再查库） */
-function withDerived(task: LedgerTask, rows: TaskStep[]): TaskStep[] {
-  const have = new Set(rows.map((s) => s.step));
-  return [...rows, ...derivedSteps(task).filter((s) => !have.has(s.step))];
-}
 
 /** 它在这张卡上接了哪些步骤：审查类算 reviewer，其余算 delegate */
 export function peerLinks(task: LedgerTask, peer: string, rows: TaskStep[] = []): PeerLink[] {
@@ -56,12 +50,16 @@ export interface PeerTaskView {
 
 const str = (v: unknown): string | null => (typeof v === "string" && v ? v : null);
 
+/** 本机校验给 peer 只给结论（审的人不是写的人 / 查不出 + 原因），不给本机作者是谁（T47 复核 P2-2） */
+const verifiedForPeer = (v: Record<string, unknown>): Record<string, unknown> =>
+  Object.fromEntries(Object.entries(v).filter(([k]) => k === "reviewerNotAuthor" || k === "why"));
+
 export function peerTaskView(t: LedgerTask, links: PeerLink[], rows: TaskStep[] = [], peer = ""): PeerTaskView {
   const { id, project, title, kind, stage, stageBefore, round, rev, pr, headSHA, updatedAt } = t;
   const x = t.extra ?? {};
   const steps = withDerived(t, rows).map((s) => {
     const base = { step: s.step, round: s.round, state: s.state, mine: !!peer && stepPeer(s) === peer };
-    return base.mine ? { ...base, executor: s.executor, headFrom: s.headFrom, headTo: s.headTo, verdict: s.verdict, verified: s.verified, claims: s.claims } : base;
+    return base.mine ? { ...base, executor: s.executor, headFrom: s.headFrom, headTo: s.headTo, verdict: s.verdict, verified: verifiedForPeer(s.verified), claims: s.claims } : base;
   });
   return { id, project, title, kind, stage, stageBefore, round, rev, pr, headSHA, updatedAt, goal: str(x.goal), delegate: str(x.delegate), reviewer: str(x.reviewer), links, steps };
 }
@@ -91,9 +89,10 @@ export interface PeerEventView {
  * 受托方自己写的原样；阶段变化只给 from / to；建卡 / 改卡只给 pr / headSHA（都没有就整条不给）；交付只给 head；
  * 审查只给结论（verdict、P 计数、轮次、正文，不给结论文件路径）。其余整条不给。tests/peer-ledger.test.ts。
  */
-function peerEventView(e: LedgerEvent, peer: string): PeerEventView | null {
+export function peerEventView(e: LedgerEvent, peer: string): PeerEventView | null {
   const base = { seq: e.seq, ts: e.ts, kind: e.kind };
-  if (e.actor === `peer:${peer}`) return { ...base, mine: true, text: e.text, data: e.data };
+  // 自己写的审查结论里，本机算的作者名也不给（authorCheck 留着）
+  if (e.actor === `peer:${peer}`) return { ...base, mine: true, text: e.text, data: Object.fromEntries(Object.entries(e.data).filter(([k]) => k !== "author")) };
   const d = e.data;
   if (e.kind === "stage") return { ...base, mine: false, data: { from: d.from, to: d.to } };
   if (e.kind === "deliver") return { ...base, mine: false, data: { headSHA: d.headSHA ?? null } };
@@ -165,7 +164,8 @@ const PEER_PR_STAGES: readonly Stage[] = ["build", "fix"];
 export function peerOpDenied(op: PeerOp, task: LedgerTask, steps: TaskStep[], peer: string): string | null {
   if (op.op === "note" || op.op === "accept") return null;
   if (op.op === "review") {
-    return REVIEW_STEPS.some((n) => { const s = currentStep(steps, n); return !!s && stepPeer(s) === peer; }) ? null : "这一轮的审查那一步不是你";
+    const s = currentReview(steps);
+    return s && stepPeer(s) === peer ? null : "这一轮的审查那一步不是你";
   }
   const stage = task.stage === "blocked" ? task.stageBefore : task.stage;
   const active = stepAtStage(steps, stage === "review" ? { stage: "fix", stageBefore: null } : task);

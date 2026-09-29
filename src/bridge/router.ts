@@ -22,6 +22,7 @@ import type { ServerWebSocket } from "bun";
 import { isOwnerSource, neutralizeDelegateMarker } from "../lib/delegate-marker.js";
 import { PEER_DELEGATION_DOC } from "../lib/peer-ledger.js";
 import { isPeerTaskAccepted } from "../lib/peer-accepted.js";
+import { STEPS, type StepName } from "../lib/ledger-stages.js";
 
 // ============================================================
 // Endpoint：消息发送方 / 接收方的统一地址
@@ -349,10 +350,15 @@ export function inboundBodyForLocal(env: Pick<Envelope, "from" | "content">): st
   return isOwnerSource(env.from) ? env.content : neutralizeDelegateMarker(env.content);
 }
 
-/** 首行 `[协作 <任务号>/<步骤>]` = 已接受卡上的步骤单，`[协作 <任务号>]` = 新委托（docs/team/peer-delegation.md）；别的首行 null */
-export function collabOrder(content: string): { task: string; step: string | null } | null {
-  const m = content.trimStart().split("\n", 1)[0]?.match(/^\[协作 ([\p{L}\p{N}_.:-]{1,64})(?:\/([^\]\s]{1,32}))?\]/u);
-  return m ? { task: m[1]!, step: m[2] ?? null } : null;
+/**
+ * 首行 `[协作 <任务号>/<步骤>]` = 已接受卡上的步骤单，`[协作 <任务号>]` = 新委托（docs/team/peer-delegation.md）；别的首行 null。
+ * 步骤只认台账的步骤名（STEPS）：别的写法一律按新委托——步骤原文会进 bridge 给的抬头，任意文字就能冒充授权（T47 复核 P1-1）
+ */
+export function collabOrder(content: string): { task: string; step: StepName | null } | null {
+  const m = content.trimStart().split("\n", 1)[0]?.match(/^\[协作 ([\p{L}\p{N}_.:-]{1,64})(?:\/([a-z_]{1,16}))?\]/u);
+  if (!m) return null;
+  const step = m[2] && (STEPS as readonly string[]).includes(m[2]) ? (m[2] as StepName) : null;
+  return { task: m[1]!, step };
 }
 
 /**

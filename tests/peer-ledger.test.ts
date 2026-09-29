@@ -4,7 +4,7 @@
  */
 import type { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { closeLedger, getTask, openLedger } from "../src/lib/ledger-store.js";
+import { closeLedger, getTask, listEvents, openLedger } from "../src/lib/ledger-store.js";
 import { canTransition, delegatePeerOf, roleOf, type LedgerTask } from "../src/lib/ledger-stages.js";
 import { derivedSteps } from "../src/lib/ledger-steps.js";
 import { appendEvent, createTask, deliver, moveStage, setMeta, setTask } from "../src/lib/ledger-write.js";
@@ -121,7 +121,8 @@ describe("ledger peer-write", () => {
     const rev = getTask(db, "T46")!.rev;
     const pr = await write("owner", "T46", { op: "pr", rev, pr: "https://github.com/shawnlu96/claudestra/pull/200", head: "df77a244" });
     expect(pr).toMatchObject({ ok: true, task: { pr: "https://github.com/shawnlu96/claudestra/pull/200", headSHA: "df77a244" } });
-    expect(pr.event.actor).toBe("peer:Shawn");
+    expect(pr.event.mine).toBe(true); // 回给 peer 的事件过白名单（不带 actor）；库里的 actor 记 peer:<名>
+    expect(listEvents(db, { project: P, target: "T46" }).at(-1)!.actor).toBe("peer:Shawn");
     expect((await write("owner", "T46", { op: "pr", rev, pr: "#3" })).code).toBe("conflict");
     expect((await write("owner", "T46", { op: "pr", rev: rev + 1, pr: "not-a-pr" })).code).toBe("invalid");
     expect((await write("owner", "T46", { op: "stage", from: "build", to: "review" })).ok).toBe(true);

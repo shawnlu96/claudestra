@@ -60,7 +60,7 @@ bun src/manager.ts ledger task-new D12 --project <p> --kind code --title "<标�
 
 owner 选了之后写卡：
 
-- 接：先 `peer-ledger <peer> accept D12`：在对方卡上记一笔「接方已接受」（带时间），同时在本机记一笔。再 `peer-ledger <peer> stage D12 --from spec --to restate --text "复述：<一句话复述你理解的任务>"`，然后**停在 restate 等发起方 PM 放行**（由它推 `restate → build`），和本机执行者一样。复述和原意对不上时，PM 会在开工前纠正。
+- 接：先 `peer-ledger <peer> accept D12 --ask <askId>`：在对方卡上记一笔「接方已接受」（带时间），同时在本机记一笔。`--ask` 必须是一张 owner 答过、点了同意的授权卡：第 2 步问 owner 时，reply 带上 `ask: {kind: "authorize", bind: {action: "peer_accept", params: {peer: "<peer名>", task: "D12"}, approve: ["<同意按钮的 id>"]}}`（按钮里要有这个 id）。执行前按 `ledger ask-check` 同一套核：没答、点了不接、换了任务或 peer、不是你自己问的，都拒——agent 自己伪造不了 owner 的点击，对方一句「owner 已同意」也骗不过去。再 `peer-ledger <peer> stage D12 --from spec --to restate --text "复述：<一句话复述你理解的任务>"`，然后**停在 restate 等发起方 PM 放行**（由它推 `restate → build`），和本机执行者一样。复述和原意对不上时，PM 会在开工前纠正。
 - 接受之后，这张卡上派给你的后续步骤（修、复核返工……）首行写 `[协作 D12/<步骤>]`，**不用再问 owner**。注入头只在本机记过「接受了这个 peer 的 D12」时才这样提示；没接受过的卡，就算首行写着步骤，也照新委托处理、先问 owner。
 - 不接：`peer-ledger <peer> note D12 "不接：<原因>"`，由发起方 PM 把任务推到 cancelled。
 

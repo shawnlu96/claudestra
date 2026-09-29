@@ -10,9 +10,13 @@ import type { LedgerCli, Result } from "./ledger-context.js";
 import { intFlag } from "./ledger-identity.js";
 import type { CommandSpec } from "./ledger-write-cmds.js";
 
-/** 没给 --kind：local: 开头是人，其余当本机 agent（本机 agent 名可以带 @，别的实例一律显式 --kind peer） */
+/**
+ * 没给 --kind：local: 开头是人，其余当本机 agent。带 @ 的必须写明——本机 agent 名也可以带 @，猜成本机就绕过了
+ * 「合并部署、核对不能派给别的实例」（T47 复核）
+ */
 function kindOf(c: LedgerCli, executor: string): ExecutorKind {
   const v = c.p.flags.kind;
+  if (v === undefined && executor.includes("@")) throw new LedgerError("invalid", "执行者带 @：别的实例写 --kind peer，本机 agent 写 --kind agent");
   if (v === undefined) return executor.startsWith("local:") ? "human" : "agent";
   if (!EXECUTOR_KINDS.includes(v as ExecutorKind)) throw new LedgerError("invalid", `--kind 只能是 ${EXECUTOR_KINDS.join(" / ")}`);
   return v as ExecutorKind;
@@ -35,9 +39,9 @@ function steps(c: LedgerCli): Result {
 
 export const STEP_CMDS: Record<string, CommandSpec> = {
   step: {
-    valued: ["kind", "round", "model"],
+    valued: ["kind", "round", "model", "project"],
     usage: "step <task> <restate|write|review|fix|final_review|ui_check|merge|verify> <执行者> [--kind agent|human|peer] [--round N] [--model M]（派人 / 换人）",
     run: step,
   },
-  steps: { valued: [], usage: "steps <task>（每一步谁在做、交付的 head 区间、结论；老卡按 assignee / extra 推）", run: steps },
+  steps: { valued: ["project"], usage: "steps <task>（每一步谁在做、交付的 head 区间、结论；老卡按 assignee / extra 推）", run: steps },
 };

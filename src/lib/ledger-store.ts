@@ -218,12 +218,14 @@ const REQUIRED_COLUMNS: Record<string, readonly string[]> = {
   task_deps: ["project", "fromTask", "toTask", "kind", "cond", "state", "rev", "createdBy"],
   asks: ASKS_REQUIRED_COLUMNS,
   audit_findings: ["key", "project", "rule", "resolvedAt", "notify", "notifiedAt", "queuedAs", "changedAt"],
+  task_steps: ["taskId", "step", "round", "executor", "executorKind", "state", "headFrom", "headTo", "verdict", "verified", "claims", "rev"],
 };
 /** 迁移完必须在的索引，按所属表：同名索引先建在别的表上时 CREATE INDEX IF NOT EXISTS 会静默跳过，只核名字查不出来 */
 const REQUIRED_INDEXES: Record<string, readonly string[]> = {
   asks: ["asks_state_project", "asks_from_state", "asks_assignee_state", "asks_key_state"],
   task_deps: ["task_deps_to", "task_deps_project"],
   audit_findings: ["audit_findings_open", "audit_findings_changed"],
+  task_steps: ["task_steps_executor"],
 };
 
 const LEDGER_SCHEMA: SchemaSpec = { label: "台账库", migrations: LEDGER_MIGRATIONS, tables: LEDGER_TABLES, columns: REQUIRED_COLUMNS, indexes: REQUIRED_INDEXES };

@@ -8,7 +8,9 @@ import type { Database } from "bun:sqlite";
 import { isManager, mustTask, type WriteCtx, type WriteResult } from "./ledger-checks.js";
 import { STEPS, type LedgerTask, type ReviewVerdict, type Stage, type StepName } from "./ledger-stages.js";
 import { LedgerError } from "./ledger-store.js";
-import { activeOf, authorOf, currentStep, EXECUTOR_KINDS, listSteps, reviewerCheck, stepAtStage, stepPeer, stepsOf, type ExecutorKind, type TaskStep } from "./ledger-steps.js";
+import {
+  activeOf, authorOf, currentReview, EXECUTOR_KINDS, listSteps, reviewerCheck, stepAtStage, stepPeer, stepsOf, withDerived, type ExecutorKind, type TaskStep,
+} from "./ledger-steps.js";
 import { insertEvent, replay, tx } from "./ledger-tx.js";
 
 /** 硬规则 3：合并、部署、核对只由仓库所在实例的 PM 做——这几步不能派给别的实例 */
@@ -54,7 +56,8 @@ export function assignStep(db: Database, ctx: WriteCtx, input: AssignStepInput):
 export function recordAccept(db: Database, ctx: WriteCtx, input: { taskId: string; peer: string }): WriteResult<LedgerTask> {
   return tx(db, () => {
     const task = mustTask(db, input.taskId);
-    const c = { ...ctx, dedupKey: ctx.dedupKey ?? `peer:${input.peer}:accept:${task.id}` };
+    // 去重键只用自己的：对方每次带不同的 dedup 就能记出好几笔「接受」（T47 复核）
+    const c = { ...ctx, dedupKey: `peer:${input.peer}:accept:${task.id}` };
     const dup = replay(db, c, { project: task.project, target: task.id, kind: "accept" }, () => task);
     if (dup) return dup;
     const event = insertEvent(db, c, { project: task.project, target: task.id, kind: "accept", data: { peer: input.peer, at: c.now ?? Date.now() } }, true);
@@ -62,35 +65,38 @@ export function recordAccept(db: Database, ctx: WriteCtx, input: { taskId: strin
   });
 }
 
-/** 交付推进 review（build / fix → review）时：那一步记下交付的 head 区间（上一次交付的 head → 这次的）。库里没有那一步的行就不动 */
-export function noteStepDelivered(db: Database, ctx: WriteCtx, task: LedgerTask, to: Stage): void {
+/**
+ * 交付推进 review（build / fix → review）时：写 / 修那一步记下交付的 head 区间（上一次交付的 head → 这次的）和自报的模型。
+ * 那一步是推出来的、或「修」没单独派人退到了写的人：也记成一行（同一个执行者），作者才查得出——
+ * 否则写的人交完新 head 能审自己（T47 复核 P1-2）；
+ * 已经记过的写那一步不改，它当初交付的区间留着。老卡（一行都没派过）不动。在调用方的事务里跑，推阶段被拒就一起回滚
+ */
+export function noteStepDelivered(db: Database, ctx: WriteCtx, task: LedgerTask, to: Stage, model?: string): void {
   if (to !== "review" || (task.stage !== "build" && task.stage !== "fix")) return;
-  const steps = stepsOf(db, task);
-  const s = stepAtStage(steps, task);
-  if (!s || s.derived) return;
-  const prev = steps.filter((x) => !x.derived && x !== s && (x.step === "write" || x.step === "fix") && x.headTo).sort((a, b) => b.updatedAt - a.updatedAt)[0];
+  const rows = listSteps(db, task.id);
+  const s = rows.length ? stepAtStage(withDerived(task, rows), task) : null;
+  if (!s) return;
+  const name: StepName = task.stage === "build" ? "write" : "fix";
+  const round = s.step === name ? s.round : task.round;
+  const prev = rows.filter((x) => (x.step === "write" || x.step === "fix") && x.headTo && !(x.step === name && x.round === round))
+    .sort((a, b) => b.updatedAt - a.updatedAt)[0];
+  const cur = rows.find((x) => x.step === name && x.round === round);
+  const claims = JSON.stringify(model && MODEL_RE.test(model) ? { ...(cur?.claims ?? {}), model } : (cur?.claims ?? {}));
   const now = ctx.now ?? Date.now();
-  db.prepare("UPDATE task_steps SET state = 'delivered', headFrom = ?, headTo = ?, rev = rev + 1, updatedAt = ? WHERE taskId = ? AND step = ? AND round = ?")
-    .run(prev?.headTo ?? null, task.headSHA, now, task.id, s.step, s.round);
-  const data = { op: "deliver", step: s.step, round: s.round, headFrom: prev?.headTo ?? null, headTo: task.headSHA };
+  db.prepare(
+    `INSERT INTO task_steps (taskId, step, round, executor, executorKind, state, headFrom, headTo, claims, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, 'delivered', ?, ?, ?, ?, ?)
+     ON CONFLICT (taskId, step, round) DO UPDATE SET state = 'delivered', headFrom = excluded.headFrom, headTo = excluded.headTo, claims = excluded.claims,
+     rev = rev + 1, updatedAt = excluded.updatedAt`,
+  ).run(task.id, name, round, s.executor, s.executorKind, prev?.headTo ?? null, task.headSHA, claims, now, now);
+  const data = { op: "deliver", step: name, round, headFrom: prev?.headTo ?? null, headTo: task.headSHA };
   insertEvent(db, ctx, { project: task.project, target: task.id, kind: "step", data }, false);
 }
 
-/** 对方自报的（模型…）并进当前在干活的那一步（库里有那一行时）：跨实例只能凭声明，和本机校验分开放 */
-export function setStepClaims(db: Database, task: LedgerTask, claims: { model: string }): void {
-  const s = stepAtStage(stepsOf(db, task), task);
-  if (!s || s.derived || !MODEL_RE.test(claims.model)) return;
-  db.prepare("UPDATE task_steps SET claims = ? WHERE taskId = ? AND step = ? AND round = ?").run(JSON.stringify({ ...s.claims, ...claims }), task.id, s.step, s.round);
-}
-
-/** 审查人是现在哪一步审查（final_review 优先）：本机 agent 按名字，peer（peer:<名>）按实例 */
+/** 审查人是不是这一轮审查那一步（currentReview：初审 / 终审按轮次取）：本机 agent 按名字，peer（peer:<名>）按实例 */
 function reviewStepOf(steps: TaskStep[], reviewer: string): TaskStep | null {
   const peer = reviewer.startsWith("peer:") ? reviewer.slice(5) : null;
-  for (const name of ["final_review", "review"] as const) {
-    const s = currentStep(steps, name);
-    if (s && (peer ? stepPeer(s) === peer : s.executorKind !== "peer" && s.executor === reviewer)) return s;
-  }
-  return null;
+  const s = currentReview(steps);
+  return s && (peer ? stepPeer(s) === peer : s.executorKind !== "peer" && s.executor === reviewer) ? s : null;
 }
 
 /** explicit = 这张卡派过步骤（库里有行）：只有这种卡才在审查结论里带作者判定，老卡的结论和以前一样 */

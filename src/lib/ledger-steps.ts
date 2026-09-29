@@ -69,14 +69,22 @@ function toStep(r: Record<string, unknown>): TaskStep {
   };
 }
 
+/**
+ * 表在不在：bridge 的只读 Reader 不跑迁移，线上库还是 v5 时没有 task_steps——当成「没有步骤行」，老卡照推出来的读。
+ * 不能报错：任务存在报 500、不存在报 404，peer 就能拿它探测任务号（T47 复核 P1-4）
+ */
+const hasStepsTable = (db: Database): boolean => !!db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'task_steps'").get();
+
 /** 库里的步骤行（按步骤、轮次排） */
 export function listSteps(db: Database, taskId: string): TaskStep[] {
+  if (!hasStepsTable(db)) return [];
   return (db.query("SELECT * FROM task_steps WHERE taskId = ? ORDER BY step, round").all(taskId) as Record<string, unknown>[]).map(toStep);
 }
 
 /** 全部任务的步骤行（peer 列自己的卡用，一次读完） */
 export function stepsByTask(db: Database): Map<string, TaskStep[]> {
   const out = new Map<string, TaskStep[]>();
+  if (!hasStepsTable(db)) return out;
   for (const r of db.query("SELECT * FROM task_steps ORDER BY taskId, step, round").all() as Record<string, unknown>[]) {
     const s = toStep(r);
     out.set(s.taskId, [...(out.get(s.taskId) ?? []), s]);
@@ -109,21 +117,35 @@ export function derivedSteps(task: TaskFields): TaskStep[] {
   ];
 }
 
+/**
+ * 推出来的步骤只补「显式派的那条退路上也没人」的：复述 / 修没派人时本来就退到写的那一步（STAGE_STEPS），显式派了写，
+ * 就不能再用推出来的复述 / 修把它盖掉；审查同理，显式派了初审或终审就不补（T47 复核）
+ */
+const COVERED_BY: Partial<Record<StepName, readonly StepName[]>> = { restate: ["write"], fix: ["write"], review: ["final_review"] };
+
 /** 库里有的步骤以库里为准；没派过人的步骤用推出来的补上（混合卡：只显式派了审查，写的人还是整卡负责人） */
-export function stepsOf(db: Database, task: TaskFields): TaskStep[] {
-  const rows = listSteps(db, task.id);
+export function withDerived(task: TaskFields, rows: TaskStep[]): TaskStep[] {
   const have = new Set(rows.map((s) => s.step));
-  return [...rows, ...derivedSteps(task).filter((s) => !have.has(s.step))];
+  return [...rows, ...derivedSteps(task).filter((s) => !have.has(s.step) && !(COVERED_BY[s.step] ?? []).some((c) => have.has(c)))];
 }
 
+export const stepsOf = (db: Database, task: TaskFields): TaskStep[] => withDerived(task, listSteps(db, task.id));
+
 /** 某一步现在是谁：同一步取轮次最大的那一行 */
-export function currentStep(steps: TaskStep[], step: StepName): TaskStep | null {
+function currentStep(steps: TaskStep[], step: StepName): TaskStep | null {
   return steps.filter((s) => s.step === step).reduce<TaskStep | null>((a, s) => (!a || s.round > a.round ? s : a), null);
 }
 
-/** 这个阶段在干活的那一步（STAGE_STEPS 按顺序取第一个有人的）；blocked 看 stageBefore */
+/** 这一轮的审查那一步：初审、终审里轮次大的那一行（同一轮终审优先）——派过终审之后又派了新一轮初审，就是新一轮的初审 */
+export function currentReview(steps: TaskStep[]): TaskStep | null {
+  const fin = currentStep(steps, "final_review"), rev = currentStep(steps, "review");
+  return fin && (!rev || fin.round >= rev.round) ? fin : rev;
+}
+
+/** 这个阶段在干活的那一步（STAGE_STEPS 按顺序取第一个有人的；review 阶段按轮次取，见 currentReview）；blocked 看 stageBefore */
 export function stepAtStage(steps: TaskStep[], task: Pick<LedgerTask, "stage" | "stageBefore">): TaskStep | null {
   const stage: Stage | null = task.stage === "blocked" ? task.stageBefore : task.stage;
+  if (stage === "review") return currentReview(steps);
   for (const name of (stage && STAGE_STEPS[stage]) || []) {
     const s = currentStep(steps, name);
     if (s) return s;
@@ -136,10 +158,13 @@ export function activeOf(s: TaskStep | null): ActiveStep {
   return { peer: s ? stepPeer(s) : null, agent: s?.executorKind === "agent" ? s.executor : null };
 }
 
-/** 作者：交付了这个 head 的写 / 修那一步（只认库里的行，推出来的没有 head）；查不出 null */
+/**
+ * 作者：真正改出这个 head 的写 / 修那一步（交付区间 headFrom → headTo 且两者不同；只认库里的行，推出来的没有 head）。
+ * 「修」没交新提交（区间是空的）不算改过——不然换个人空交一次，原来写代码的人就能审自己的改动（T47 复核 P1-3）。查不出 null
+ */
 export function authorOf(steps: TaskStep[], head: string | null): TaskStep | null {
   if (!head) return null;
-  const hit = steps.filter((s) => !s.derived && (s.step === "write" || s.step === "fix") && s.headTo === head);
+  const hit = steps.filter((s) => !s.derived && (s.step === "write" || s.step === "fix") && s.headTo === head && s.headFrom !== head);
   return hit.reduce<TaskStep | null>((a, s) => (!a || s.updatedAt > a.updatedAt ? s : a), null);
 }
 
