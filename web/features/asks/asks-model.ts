@@ -33,7 +33,7 @@ export interface WebAsk {
   urgency: "normal" | "urgent";
   state: AskState;
   /** 多行 reply 逐行作答时，state 仍是 open、这里是已答的部分 */
-  answer: { choices: string[]; labels?: string[]; text: string; via: string; at: number } | null;
+  answer: { choices: string[]; labels?: string[]; text: string; via: string; at: number; atts?: WebAskAtt[] } | null;
   createdAt: number;
   updatedAt: number;
   expiresAt: number;
@@ -48,6 +48,14 @@ export interface WebAsk {
 /** 原消息带的附件 → 聊天附件条的形状（卡片上直接点开，走 T37 的预览层） */
 export function askAttachments(a: Pick<WebAsk, "extra">): { name: string; kind: "image" | "file"; url: string }[] {
   return (a.extra?.files ?? []).map((f) => ({ name: f.name, kind: isImageName(f.attachment) ? "image" : "file", url: attachmentUrl(f.attachment) }));
+}
+
+/** 作答附带的附件引用（指派事项「完成」时附的图：kind talk，ref = talk 附件库的 sha256） */
+export interface WebAskAtt {
+  kind: string;
+  ref: string;
+  name?: string;
+  mime?: string;
 }
 
 /** 协作视图的「等你」：开着、非验收、没指给别人的（指给 guest 的指派事项是在等那个 guest，不是等 owner） */

@@ -48,10 +48,10 @@ export async function cmdCtxBoundary(args: string[]): Promise<void> {
       master: m
         ? {
             agent: m.agent, ctx: m.ctx, policy: m.boundary.policy, window: m.boundary.window, hardCap: m.boundary.hardCap, action: m.boundary.action,
-            result: m.outcome ? result(m.outcome) : "在线下，这一轮不动",
+            result: m.ctx === null ? "没认到会话（大总管窗口里没有在跑的 Claude Code，或读不到会话文件），跳过" : m.outcome ? result(m.outcome) : "在线下，这一轮不动",
             note: "大总管这次起才纳入自动压缩（走全局路径）；打开开关前请 owner 决定要不要让它自动压",
           }
-        : "registry 里没有大总管（agent-master）",
+        : "registry 里的大总管条目不在跑或不是 Claude Code，跳过",
     },
     log: r.logs,
   });

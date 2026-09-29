@@ -43,6 +43,23 @@ export const HELD_GIVE_UP_MS = 24 * 3_600_000;
 const HELD_PATH = HELD_MESSAGES_PATH;
 const isQueue = (q: unknown): boolean => Array.isArray(q) && q.every((i) => i && typeof i === "object" && "env" in i && "to" in i);
 
+/** 押后条目的结局：送达 / 押满 24 小时放弃 / 目标被 kill 丢弃。talk 的「丢进工作台」据此同步 drops 的状态（bridge/talk.ts） */
+export type HeldOutcome = "delivered" | "gave-up" | "discarded";
+const settledListeners = new Set<(env: Envelope, outcome: HeldOutcome) => void>();
+export function onHeldSettled(l: (env: Envelope, outcome: HeldOutcome) => void): () => void {
+  settledListeners.add(l);
+  return () => settledListeners.delete(l);
+}
+export function notifyHeldSettled(env: Envelope, outcome: HeldOutcome): void {
+  for (const l of settledListeners) {
+    try {
+      l(env, outcome);
+    } catch (e) {
+      console.error(`⚠️ 押后结局的监听出错（不影响押后队列本身）: ${(e as Error).message}`);
+    }
+  }
+}
+
 /** 一个 Map（bridge.ts 原来的用法不变），set / delete 之后同步落盘；path = null 不落盘（单测） */
 export class HeldQueue extends PersistedMap<HeldItem[]> {
   constructor(path: string | null = HELD_PATH) {
@@ -78,6 +95,12 @@ export class HeldQueue extends PersistedMap<HeldItem[]> {
     const q = [...cur, item];
     this.set(channelId, q);
     return q.length;
+  }
+
+  /** 目标被 kill：整个频道的押后消息丢掉，逐条通知结局 */
+  discard(channelId: string): boolean {
+    for (const i of this.get(channelId) ?? []) notifyHeldSettled(i.env, "discarded");
+    return this.delete(channelId);
   }
 
   /** 按信封的收件方押后，入队时间取现在 */
@@ -169,6 +192,7 @@ export function ageHeld(q: HeldQueue, now: number, paused: boolean | ((item: Hel
       }
       if (now - item.heldAt > HELD_GIVE_UP_MS) {
         out.push({ kind: "gave-up", item, channelId });
+        notifyHeldSettled(item.env, "gave-up");
         changed = true;
         continue;
       }
@@ -196,6 +220,17 @@ export function heldNoticeText(n: HeldNotice, human?: "owner" | "stranger"): str
   return n.kind === "still-queued"
     ? `[⏳ bridge] 你发给 ${who} 的消息已排队 30 分钟：对方一直在一个长回合里，这一轮结束就会送到，不用重发。原文开头: ${head}`
     : `[⚠️ bridge] 你发给 ${who} 的消息排了 24 小时仍没送到（对方一直不空闲或不在线），已放弃。如仍需要，请重发。原文开头: ${head}`;
+}
+
+/** 落盘队列里全部信封的 messageId：bridge 重启后核对「占了位却不在队里」的 drops（lib/talk-drops.ts failOrphanHeld） */
+export function heldMessageIds(path: string = HELD_PATH): Set<string> {
+  const r = readJsonStateSync(path);
+  const out = new Set<string>();
+  if (r.status !== "ok" || !r.data || typeof r.data !== "object") return out;
+  for (const q of Object.values(r.data as Record<string, unknown>)) {
+    if (isQueue(q)) for (const i of q as HeldItem[]) if (i.env?.meta?.messageId) out.add(i.env.meta.messageId);
+  }
+  return out;
 }
 
 /** 各频道排队中的 agent 消息数（网页侧栏「排队 N 条」）：直接读落盘文件——队列每次变动都同步落盘，不用碰 bridge 的内存 */

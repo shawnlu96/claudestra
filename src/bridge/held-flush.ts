@@ -8,7 +8,7 @@ import { isOwnerSource } from "../lib/delegate-marker.js";
 import { tmuxCapture } from "../lib/tmux-helper.js";
 import { inputBox } from "../lib/turn-state.js";
 import { heldAcrossStopNote } from "../lib/turn-cuts.js";
-import { leaseActive, type HeldItem, type HeldQueue } from "./held-queue.js";
+import { leaseActive, notifyHeldSettled, type HeldItem, type HeldQueue } from "./held-queue.js";
 import type { Delivery, Envelope, LocalEndpoint } from "./router.js";
 import { resolveTurnWindow } from "./turn-probe.js";
 import { senderTrigger, turnStartedAt } from "./stop-settle.js";
@@ -147,6 +147,7 @@ export async function flushHeld(d: FlushDeps, channelId: string, reason: string)
         d.touch(channelId, item.env);
         first ??= item;
         openedBy.set(channelId, { who: senderOf(item.env), at: (d.turnAt ?? turnStartedAt)(channelId) });
+        notifyHeldSettled(item.env, "delivered");
         for (const fn of deliveredHooks) fn(channelId, item.env);
       }
       d.held.remove(channelId, item);
@@ -163,7 +164,7 @@ export async function flushHeld(d: FlushDeps, channelId: string, reason: string)
  */
 export function dropHeldOnKill(held: HeldQueue, channelId: string, onDropped: (env: Envelope) => Promise<void> = answerDropped): void {
   const dropped = held.get(channelId) ?? [];
-  if (!held.delete(channelId)) return;
+  if (!held.discard(channelId)) return;
   console.log(`🧹 agent 已 kill,丢掉押给它的 ${dropped.length} 条消息 (channel=${channelId})`);
   for (const i of dropped) void onDropped(i.env).catch((e: Error) => console.error(`⚠️ 被丢的押后消息善后失败: ${e.message}`));
 }
