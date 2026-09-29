@@ -321,7 +321,7 @@ export function AgentRow({
             <span className="badge badge-outline badge-warning badge-xs shrink-0 align-middle">{t("草稿")}</span>
           )}
           {a.updateHint && !hintDismissed && (
-            <span className="shrink-0 pl-1 text-[11px] text-info-soft-80" title={t(a.updateHint.kind === "pi-update" ? "Pi 可更新" : "重启后生效新版本")}>⬆</span>
+            <span className="shrink-0 pl-1 text-[11px] text-info-soft-80" title={t(a.updateHint.kind === "pi-update" ? "Pi 可更新" : a.updateHint.kind === "codex-update" ? "Codex 可更新" : "重启后生效新版本")}>⬆</span>
           )}
           {/* busy 时不显示过期时间(owner 2026-07-16:「明明在工作却显示 48 分钟前」
               ——lastActivityTs 读 jsonl 最后一条对话,CC 回合内攒内存不落盘,长回合

@@ -324,6 +324,8 @@ export const DICT: Record<string, string> = {
   "更新失败": "Update failed",
   "更新中…": "Updating…",
   "Pi 可更新": "Pi update available",
+  "Codex 可更新": "Codex update available",
+  "（不是 npm 全局安装，请用原来的方式更新）": " (not a global npm install — update it the way you installed it)",
   "重启后生效新版本": "Restart to run the new version",
   "这个版本不再提示": "Don't remind me about this version",
   "思考中…": "Thinking…",

@@ -42,10 +42,11 @@ export function uiAgentName(name: string): string {
  * Web 会话 = claudestra 的一个 agent。列表来源是 bridge 的 GET /api/v1/agents（凭据 grant 过滤；
  * master 在 grant 内时由 bridge 置入列表）。此前这段映射在 BFF（lib/chat/agents.ts 的服务端版）——托管前端后搬进浏览器，逻辑原样。
  */
-/** 会话级「该重启 / 该 pi update」提示（bridge lib/update-hints.ts 算好透传） */
+/** 会话级「该重启 / 该更新 Pi·Codex」提示（bridge lib/update-hints.ts 算好透传；codex 的 npm = 能替人 npm 更新） */
 export type UpdateHint =
   | { kind: "restart"; running: string; installed: string }
-  | { kind: "pi-update"; installed: string; latest: string };
+  | { kind: "pi-update"; installed: string; latest: string }
+  | { kind: "codex-update"; installed: string; latest: string; npm: boolean };
 
 export interface AgentSession {
   /** agent 名，作为会话 id（大总管用保留名 __master__） */
