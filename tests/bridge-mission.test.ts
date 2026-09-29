@@ -10,9 +10,10 @@ import { join } from "node:path";
 import { initMission, reconcileMissions, setMissionTestHooks } from "../src/bridge/mission.js";
 import { emitEvent, type BridgeEventType } from "../src/bridge/event-bus.js";
 import { resetAutopilotEvidence } from "../src/bridge/autopilot-evidence.js";
-import { setEvidenceWaitForTest } from "../src/bridge/autopilot-close.js";
+import { pendingCloseOf, setEvidenceWaitForTest } from "../src/bridge/autopilot-close.js";
 import type { Envelope } from "../src/bridge/router.js";
 import { readRunLog } from "../src/lib/autopilot-log.js";
+import { AUTOPILOT_TIMING } from "../src/lib/autopilot-run.js";
 import { newMission, readMissions, updateMissions, type Mission } from "../src/lib/missions.js";
 
 const sent: Envelope[] = [];
@@ -414,7 +415,8 @@ describe("第 3 轮复验补的用例", () => {
       await sleep(100);
       ev("tool_start", { name: "Edit" });
       done(); // run 的回合结束：收尾时锁还被占着
-      await until(async () => !!(await cur()).lastRun, 12_000);
+      // lastRun（missions.json）先落盘、日志紧跟着追加：rename 的 await 续体可能落后别的读好几拍，只等 lastRun 会偶发读到空日志
+      await until(async () => !!(await cur()).lastRun && readRunLog(m.id!).length > 0, 12_000);
       expect(sent.length).toBe(1);
       expect((await cur()).lastRun?.outcome).toBe("action_taken");
       expect((await cur()).nudges).toBe(1);
@@ -423,6 +425,57 @@ describe("第 3 轮复验补的用例", () => {
       setMissionTestHooks({ lockMs: 10_000 });
     }
   }, 20_000);
+  /** 投递后别的进程一直占着写锁 → 收尾写锁超时；放锁的同一拍做 change（acquireLock 第一次 mkdir 是同步的，重试插不进来），再按文件重排 */
+  async function closeStuckThen(change: () => Promise<unknown>): Promise<Mission> {
+    const lock = `${path}.lock`;
+    setMissionTestHooks({ lockMs: 300, lockRetryMs: 200 });
+    let held = false;
+    deliverImpl = async (env) => {
+      const r = await realDeliver(env);
+      if (!held) (held = true), mkdirSync(lock); // 只占第一次：换代后新一代的第一句照常递
+      return r;
+    };
+    const m = await put();
+    turnEnd();
+    await until(() => sent.length === 1);
+    await sleep(100);
+    ev("tool_start", { name: "Edit" });
+    done();
+    const runId = (await cur()).run!.runId;
+    await until(() => !!pendingCloseOf(runId));
+    rmdirSync(lock);
+    await change();
+    await reconcileMissions(); // 文件监听看到变化：mission 的定时器被撤掉 / 改排给新一代，收尾重试不能跟着没了
+    return m;
+  }
+  const restoreLockHooks = () => setMissionTestHooks({ lockMs: 10_000, lockRetryMs: AUTOPILOT_TIMING.lockRetryMs });
+  test("收尾写锁超时、重试之前被 stop：锁放开后照样补收尾、写日志，不再排下一次", async () => {
+    try {
+      const m = await closeStuckThen(() => updateMissions((all) => void Object.assign(all.master, { status: "stopped" }), path));
+      await until(() => readRunLog(m.id!).length > 0);
+      await settle();
+      expect(readRunLog(m.id!)).toHaveLength(1);
+      expect(readRunLog(m.id!)[0]).toMatchObject({ outcome: "action_taken" });
+      expect(readRunLog(m.id!)[0].nextWakeAt).toBeUndefined();
+      expect(await cur()).toMatchObject({ status: "stopped", nudges: 1, lastRun: { outcome: "action_taken" } });
+      expect(sent.length).toBe(1);
+    } finally {
+      restoreLockHooks();
+    }
+  });
+  test("收尾写锁超时、重试之前换了一代：锁放开后给旧一代补一行日志，不记到新一代头上", async () => {
+    try {
+      const m = await closeStuckThen(() => put());
+      await until(() => readRunLog(m.id!).length > 0);
+      await settle();
+      expect(readRunLog(m.id!)).toHaveLength(1);
+      expect(readRunLog(m.id!)[0]).toMatchObject({ outcome: "action_taken" });
+      expect(readRunLog(m.id!)[0].reason).toContain("换了一代");
+      expect((await cur()).lastRun).toBeUndefined();
+    } finally {
+      restoreLockHooks();
+    }
+  });
 });
 
 describe("P2-9：只有人类信号和真实的新回合才放行待命", () => {

@@ -4,7 +4,7 @@
  * 历史记录里只有原始 basename 的出站附件：inbox 落盘时加了 `<时间戳>_` 前缀，按清洗后的后缀匹配、取名字最大（最新）的一个。
  * 安全：只认 basename，目录白名单固定，拼出的路径再钉一次在目录内。
  */
-import { readdirSync, statSync } from "node:fs";
+import { lstatSync, readdirSync, realpathSync, statSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
 import { sanitizeAttachmentBase } from "./attachment-name.js";
 
@@ -68,9 +68,23 @@ function listDir(dir: string): string[] {
   }
 }
 
+/**
+ * 旧上传目录下的日期目录：必须是 uploads 根（realpath）下的真目录，软链一律拒——
+ * 按「日期目录自己的 realpath」核对会被软链带到根外（T22 对抗审查 adv1 P2-3）。媒体索引（media-store）共用。
+ */
+export function uploadDayDir(uploadDir: string, day: string): string | null {
+  if (!DATE_RE.test(day)) return null;
+  try {
+    const dir = join(realpathSync(uploadDir), day);
+    return lstatSync(dir).isDirectory() ? dir : null;
+  } catch {
+    return null; // uploads 根或这一天的目录不存在：这一天没有文件
+  }
+}
+
 function uploadDays(dirs: AttachmentDirs, day: string | null): string[] {
-  if (day) return DATE_RE.test(day) ? [join(dirs.uploadDir, day)] : [];
-  return listDir(dirs.uploadDir).filter((n) => DATE_RE.test(n)).sort().reverse().map((d) => join(dirs.uploadDir, d));
+  const days = day ? [day] : listDir(dirs.uploadDir).filter((n) => DATE_RE.test(n)).sort().reverse();
+  return days.map((d) => uploadDayDir(dirs.uploadDir, d)).filter((d): d is string => d !== null);
 }
 
 export function findAttachment(name: string, day: string | null, dirs: AttachmentDirs): AttachmentHit | null {

@@ -6,12 +6,19 @@
 import { Database } from "bun:sqlite";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
+import { ASKS_REQUIRED_COLUMNS, migrateAsksV2 } from "./ledger-asks-schema.js";
 import type { DepKind, DepState, LedgerDep } from "./ledger-deps.js";
 import type { AssigneeKind, EventKind, LedgerEvent, LedgerItem, LedgerTask } from "./ledger-stages.js";
+import { SCHEMA_AUDIT } from "./ledger-audit-schema.js";
+import { STEPS_SCHEMA } from "./ledger-steps.js";
+import { toTeam, type TeamConfig } from "./ledger-team-config.js";
 import { statePath } from "./paths.js";
+import { runMigrations, type SchemaSpec } from "./sqlite-migrate.js";
+
+export { schemaVersion } from "./sqlite-migrate.js";
 
 export const LEDGER_PATH = statePath("ledger.sqlite");
-export const LEDGER_TABLES = ["items", "tasks", "events", "meta", "asks", "task_deps"] as const;
+export const LEDGER_TABLES = ["items", "tasks", "events", "meta", "asks", "task_deps", "audit_findings", "audit_baseline", "task_steps"] as const;
 /** 另一个进程持有写锁时最多等这么久，再报 SQLITE_BUSY */
 const BUSY_TIMEOUT_MS = 5000;
 /** 切 WAL 时每次尝试只等这么久，总时长由 ensureWal 的退避循环控制在 BUSY_TIMEOUT_MS 内 */
@@ -122,13 +129,12 @@ function migrateDeps(db: Database): void {
   run("CREATE INDEX IF NOT EXISTS task_deps_project ON task_deps(project)");
 }
 
-/** 一步迁移：一组单条 SQL（逐条 prepare().run()），或要先查现状的函数（如加列）。别写成一段多语句字符串交给 exec */
-type Migration = readonly string[] | ((db: Database) => void);
-/** 下标 i 把库从版本 i 升到 i+1；新迁移只往末尾追加（并行分支后合的一方排到后面即可，常量都由下标算） */
-export const LEDGER_MIGRATIONS: readonly Migration[] = [SCHEMA_V1, migrateAsks, migrateDeps];
-const MIGRATIONS = LEDGER_MIGRATIONS;
+/** 下标 i 把库从版本 i 升到 i+1；新迁移只往末尾追加（并行分支后合的一方排到后面即可，常量都由下标算）。执行规矩见 sqlite-migrate.ts */
+export const LEDGER_MIGRATIONS: SchemaSpec["migrations"] = [SCHEMA_V1, migrateAsks, migrateDeps, SCHEMA_AUDIT, migrateAsksV2, STEPS_SCHEMA];
 /** PRAGMA user_version 的最新值 */
-export const LEDGER_SCHEMA_VERSION = MIGRATIONS.length;
+export const LEDGER_SCHEMA_VERSION = LEDGER_MIGRATIONS.length;
+/** 建出 audit_findings 的那一步之后的版本号（单测拿它 - 1 造「巡检之前」的库） */
+export const AUDIT_SCHEMA_VERSION = LEDGER_MIGRATIONS.indexOf(SCHEMA_AUDIT) + 1;
 
 function isBusy(e: unknown): boolean {
   return String((e as { code?: unknown })?.code ?? "").startsWith("SQLITE_BUSY");
@@ -174,7 +180,7 @@ export function openLedger(path: string = LEDGER_PATH): Database {
       ensureWal(db);
       db.exec(`PRAGMA busy_timeout = ${BUSY_TIMEOUT_MS}`);
       db.exec("PRAGMA foreign_keys = ON");
-      migrate(db);
+      runMigrations(db, LEDGER_SCHEMA);
       reconcileAssignees(db);
     });
   } catch (e) {
@@ -206,68 +212,23 @@ export function closeLedger(path: string = LEDGER_PATH): void {
   cache.delete(path);
 }
 
-export function schemaVersion(db: Database): number {
-  return (db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version;
-}
-
 /** 迁移完必须在的列（表由 LEDGER_TABLES 核）：新迁移加了列就补在这里 */
 const REQUIRED_COLUMNS: Record<string, readonly string[]> = {
   tasks: ["assigneeKind", "assignee"],
   task_deps: ["project", "fromTask", "toTask", "kind", "cond", "state", "rev", "createdBy"],
-  asks: ["id", "project", "fromAgent", "source", "kind", "state", "options", "answer", "expiresAt", "extra"],
+  asks: ASKS_REQUIRED_COLUMNS,
+  audit_findings: ["key", "project", "rule", "resolvedAt", "notify", "notifiedAt", "queuedAs", "changedAt"],
+  task_steps: ["taskId", "step", "round", "executor", "executorKind", "state", "headFrom", "headTo", "verdict", "verified", "claims", "rev"],
 };
 /** 迁移完必须在的索引，按所属表：同名索引先建在别的表上时 CREATE INDEX IF NOT EXISTS 会静默跳过，只核名字查不出来 */
 const REQUIRED_INDEXES: Record<string, readonly string[]> = {
-  asks: ["asks_state_project", "asks_from_state"],
+  asks: ["asks_state_project", "asks_from_state", "asks_assignee_state", "asks_key_state"],
   task_deps: ["task_deps_to", "task_deps_project"],
+  audit_findings: ["audit_findings_open", "audit_findings_changed"],
+  task_steps: ["task_steps_executor"],
 };
 
-/** 按 LEDGER_TABLES、REQUIRED_COLUMNS、REQUIRED_INDEXES 找缺的表 / 列 / 索引；空数组 = 完整 */
-function missingSchema(db: Database): string[] {
-  const rows = db.prepare("SELECT type, name, tbl_name FROM sqlite_master WHERE type IN ('table', 'index')").all() as { type: string; name: string; tbl_name: string }[];
-  const tables = new Set(rows.filter((r) => r.type === "table").map((r) => r.name));
-  const indexes = new Set(rows.filter((r) => r.type === "index").map((r) => `${r.tbl_name}.${r.name}`));
-  const missing: string[] = LEDGER_TABLES.filter((t) => !tables.has(t));
-  for (const [table, names] of Object.entries(REQUIRED_INDEXES)) missing.push(...names.filter((n) => !indexes.has(`${table}.${n}`)).map((n) => `index ${table}.${n}`));
-  for (const [table, cols] of Object.entries(REQUIRED_COLUMNS)) {
-    if (!tables.has(table)) continue;
-    const have = new Set((db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[]).map((c) => c.name));
-    missing.push(...cols.filter((c) => !have.has(c)).map((c) => `${table}.${c}`));
-  }
-  return missing;
-}
-
-function runStep(db: Database, step: Migration): void {
-  if (typeof step === "function") step(db);
-  else for (const sql of step) db.prepare(sql).run();
-}
-
-/**
- * IMMEDIATE 事务里先重读版本：两个进程同时首次打开时，后到的看到已迁移就什么都不做。
- * 版本号到了但表 / 列缺（并行分支的代码先打开过库、按下标迁移跳过了别的分支的步骤）：从第 2 步起全部重跑一遍补齐——
- * 所以第 1 步之后的每一步都必须可重跑（IF NOT EXISTS、加列先查列）。补完仍缺就报错，不带着残缺的库往下写。
- */
-function migrate(db: Database): void {
-  const behind = schemaVersion(db) < MIGRATIONS.length;
-  if (!behind && missingSchema(db).length === 0) return;
-  // 报错里的版本号要是回滚后的：事务里的 user_version 已被推过，库文件里还是进事务时读到的那个
-  let from = schemaVersion(db);
-  try {
-    db.transaction(() => {
-      from = schemaVersion(db);
-      for (let v = from; v < MIGRATIONS.length; v++) {
-        runStep(db, MIGRATIONS[v]);
-        db.exec(`PRAGMA user_version = ${v + 1}`);
-      }
-      if (from > 0 && missingSchema(db).length) for (const step of MIGRATIONS.slice(1)) runStep(db, step);
-      const still = missingSchema(db);
-      if (still.length) throw new Error(`迁移后仍缺：${still.join(", ")}`);
-    }).immediate();
-  } catch (e) {
-    if (isBusy(e)) throw e;
-    throw new Error(`台账库迁移失败（${(e as Error).message}），已回滚，库仍是 v${from}`, { cause: e });
-  }
-}
+const LEDGER_SCHEMA: SchemaSpec = { label: "台账库", migrations: LEDGER_MIGRATIONS, tables: LEDGER_TABLES, columns: REQUIRED_COLUMNS, indexes: REQUIRED_INDEXES };
 
 // ── 行映射 ──
 
@@ -374,6 +335,7 @@ export interface LedgerMeta {
   /** 规格卡 / 报告所在目录；只有 owner 能设 */
   docsDir: string | null;
   queueFrozen: QueueFrozen;
+  team: TeamConfig | null;
 }
 
 export function getMeta(db: Database, project: string): LedgerMeta {
@@ -386,6 +348,7 @@ export function getMeta(db: Database, project: string): LedgerMeta {
     pms: Array.isArray(pms) ? pms.filter((p): p is string => typeof p === "string") : [],
     docsDir: typeof docsDir === "string" ? docsDir : null,
     queueFrozen: frozen ?? { frozen: false, reason: "", since: null },
+    team: toTeam(kv.get("team")),
   };
 }
 

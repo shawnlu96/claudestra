@@ -4,7 +4,9 @@
  */
 import type { Principal } from "../lib/principals.js";
 import { readPrincipals, tokenIdOf } from "../lib/principals.js";
-import { readPeers } from "../lib/peers.js";
+import { parsePeerInviteV2, readPeers } from "../lib/peers.js";
+import { RELAY_PAGE_JOIN_REFUSED } from "../lib/peer-e2e-local.js";
+import { sourceAllows } from "./request-context.js";
 import { readRegistryAgents } from "../lib/registry.js";
 import { recordMetric } from "../lib/metrics.js";
 import { instanceKeySync, keyFingerprint } from "../lib/instance-key.js";
@@ -79,14 +81,14 @@ async function listPeers(runManager: RunManager): Promise<Response> {
   // v2.15+ 待兑换的一键邀请（peer-invite-list 顺带清扫过期 + 吊销其 token）
   const invRes: any = await runManager("peer-invite-list");
   const pendingInvites = invRes?.ok ? invRes.invites || [] : [];
-  const { activePeerTokens, planPeerTidy } = await import("../lib/peer-tidy.js"); // 重复 / 没用的旧记录，面板顶部给「整理」
+  const [{ activePeerTokens, planPeerTidy }, { peerAnchorOf }] = await Promise.all([import("../lib/peer-tidy.js"), import("../lib/peer-trust.js")]); // 重复 / 没用的旧记录，面板顶部给「整理」（与 peer-http-tidy 同口径）
   // 近 7 天的交接汇总（lib/handoff-log.ts）：面板顶部一行数字 + 每张卡片自己的次数
   const { readHandoffs, summarizeHandoffs } = await import("../lib/handoff-log.js");
   const since = Date.now() - 7 * 86400_000;
   const handoffs = summarizeHandoffs(await readHandoffs(since), since);
   const me = instanceKeySync();
   const self = me ? { fingerprint: keyFingerprint(me.publicKey) } : null; // 本机指纹：给对方核对用
-  return apiJson(200, { ok: true, peers, localAgents, pendingInvites, handoffs, self, tidy: planPeerTidy(peersData.httpPeers || [], activePeerTokens(pf.principals)) });
+  return apiJson(200, { ok: true, peers, localAgents, pendingInvites, handoffs, self, tidy: planPeerTidy(peersData.httpPeers || [], activePeerTokens(pf.principals), await peerAnchorOf()) });
 }
 
 // GET /peers/contacts —— 现有 presence 的只读重排（lib/peer-contacts.ts），侧栏每分钟拉一次，所以不碰 runManager
@@ -106,14 +108,17 @@ async function inviteAction(req: Request, path: string, runManager: RunManager):
     ? body.agents.map((s: unknown) => String(s).trim()).filter(Boolean).join(",")
     : "";
   const flags: string[] = body?.force ? ["--force"] : [];
+  // 只有本机 / 局域网打开的页面能碰带密钥的邀请（request-context.ts keyedInvite）：经中继的页面中继能换公钥，判不出来源的同样对待
+  const viaRelay = !sourceAllows(req, "keyedInvite");
   let r: any;
   if (path === "/peers/invite-new") {
     if (!agentsCsv) return apiJson(400, { ok: false, error: '"agents" must be a non-empty array' });
     r = await runManager("peer-invite-new", "--agents", agentsCsv,
-      ...(body?.url ? ["--url", String(body.url)] : []), ...flags);
+      ...(body?.url ? ["--url", String(body.url)] : []), ...flags, ...(viaRelay ? ["--via-relay-page"] : []));
   } else if (path === "/peers/join-auto") {
     const invite = String(body?.invite ?? "").trim();
     if (!invite) return apiJson(400, { ok: false, error: '"invite" required' });
+    if (viaRelay && parsePeerInviteV2(invite)?.ek) return apiJson(400, { ok: false, error: RELAY_PAGE_JOIN_REFUSED });
     r = await runManager("peer-join-auto", invite,
       ...(agentsCsv ? ["--agents", agentsCsv] : []),
       ...(body?.url ? ["--url", String(body.url)] : []), ...flags);

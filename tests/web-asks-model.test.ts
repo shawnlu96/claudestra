@@ -1,8 +1,8 @@
 /** web/features/asks/asks-model.ts：分组计数、气泡 ↔ ask 对应、已答回填、答案人话、时间文案、乐观作答；以及 stream-shape 的作答回显只留原文 */
 import { describe, expect, test } from "bun:test";
 import {
-  agentLabel, answeredGroups, answerSummary, applyPending, askCounts, askForReply, clicksFromAnswer, groupAsks,
-  PENDING_MAX_MS, rowGroup, spanText, wireLabels, type PendingAnswer, type WebAsk,
+  agentLabel, answeredGroups, answerSummary, applyPending, askAttachments, askCounts, askForReply, clicksFromAnswer, closedText,
+  groupAsks, PENDING_MAX_MS, rowGroup, spanText, waitsOnOwner, wireLabels, type PendingAnswer, type WebAsk,
 } from "@/features/asks/asks-model";
 import type { WebComponentRow } from "@/lib/chat/events";
 import { translate } from "@/lib/chat/stream-shape";
@@ -54,6 +54,13 @@ describe("气泡 ↔ ask", () => {
     expect(askForReply([ask({ fromAgent: "master" })], "__master__", rows, ts)?.id).toBe("ask_1");
   });
 
+  test("只有行内按钮的气泡也认得出（按 id 对 bridge 合成的最后一行）：点之前才带得上 askId", () => {
+    const inline = ask({ id: "inl", options: [{ type: "buttons", buttons: [{ id: "go", label: "批准", style: "success" }, { id: "no", label: "算了" }] }] });
+    expect(askForReply([inline], "x", [], ts, ["go", "no"])?.id).toBe("inl");
+    expect(askForReply([inline], "x", undefined, ts, ["go"])).toBeNull();
+    expect(askForReply([inline], "x", [], ts)).toBeNull();
+  });
+
   test("字段顺序不同也认（历史接口按 agent 的参数顺序给，ask 里存的是 bridge 收到时的顺序）", () => {
     const shuffled = [rows[0], { options: (rows[1] as { options: unknown[] }).options, id: "f", type: "multiselect" }] as WebComponentRow[];
     expect(askForReply([ask({})], "x", shuffled, ts)?.id).toBe("ask_1");
@@ -92,9 +99,18 @@ test("时间文案", () => {
   expect(spanText(3 * 86400_000, zh)).toBe("3 天");
 });
 
-test("作答回显：去掉给 agent 看的第一行，只留 owner 发的原文（才对得上乐观气泡）", () => {
-  const evt = { seq: 1, ts: "", agent: "agent-x", chatId: "c", type: "chat_message", data: { direction: "in", srcKind: "api", text: "[✅ owner 回复了你 …]\n[button:go]", askId: "ask_1" } };
-  expect(translate(evt as never, "zh", new Set())).toMatchObject({ t: "user-in", text: "[button:go]" });
+test("作答回显：bridge 给了 echo 就显示它（选项人话 + 原话），带上 askId 给引用条；老 bridge 没 echo 的只去掉第一行", () => {
+  const data = { direction: "in", srcKind: "api", text: "[✅ owner 回复了你 …]\n[button:go]", askId: "ask_1" };
+  const evt = (d: Record<string, unknown>) => ({ seq: 1, ts: "", agent: "agent-x", chatId: "c", type: "chat_message", data: d }) as never;
+  expect(translate(evt({ ...data, echo: "发\n只发 Codex" }), "zh", new Set())).toMatchObject({ t: "user-in", text: "发\n只发 Codex", askId: "ask_1" });
+  expect(translate(evt(data), "zh", new Set())).toMatchObject({ t: "user-in", text: "[button:go]", askId: "ask_1" });
+});
+
+test("原消息带的附件 → 卡片上的附件条（图片 / 文件、inbox 的地址）", () => {
+  const files = [{ name: "a.png", attachment: "1_a.png" }, { name: "稿子.md", attachment: "2_稿子.md" }];
+  const got = askAttachments({ extra: { files } }).map((x) => [x.name, x.kind, x.url.endsWith("1_a.png") || x.url.includes(encodeURIComponent("2_稿子.md"))]);
+  expect(got).toEqual([["a.png", "image", true], ["稿子.md", "file", true]]);
+  expect(askAttachments({})).toEqual([]);
 });
 
 describe("乐观作答（T11b 第 8 条）", () => {
@@ -119,7 +135,28 @@ describe("乐观作答（T11b 第 8 条）", () => {
     expect(askCounts(stale.asks).waiting).toBe(1);
   });
 
+  test("请求还在飞的不按时间撤；多行 reply 已答的几行和这次的合在一起显示（PR0 r1 P2-2、P2-5）", () => {
+    const inFlight = new Map([["ask_1", { ...pend().get("ask_1")!, inFlight: true }]]);
+    expect(applyPending([ask({ id: "ask_1" })], inFlight, 5_000 + PENDING_MAX_MS * 3).settled).toEqual([]);
+    const part = ask({ id: "ask_1", answer: { choices: ["[select:f:a]"], labels: ["甲"], text: "", via: "web_chat", at: 4_000 } });
+    expect(applyPending([part], pend(), 5_100).asks[0].answer).toMatchObject({ choices: ["[select:f:a]"], labels: ["甲", "发"] });
+  });
+
   test("wire → 人话：按钮取文字，选单取选中项文字（多选用「、」），对不上的原样", () => {
     expect(wireLabels(rows, ["[button:go]", "[select:f:a,b]", "[button:zz]"])).toEqual(["发", "甲、乙", "[button:zz]"]);
+  });
+});
+
+describe("第二版（T11b PR A）", () => {
+  test("协作视图的「等你」不算指给 guest 的指派事项（r1 P2-2）", () => {
+    expect([ask({}), ask({ assignee: "local:owner:self" }), ask({ assignee: "local:guest:aa11", kind: "assigned" }), ask({ kind: "accept" })].map(waitsOnOwner)).toEqual([true, true, false, false]);
+  });
+
+  test("人 / 系统发起的没有 agent：卡片按类型写「指派」「审核」；聊天气泡永远对不上它；被取代的写「已被新版本取代」", () => {
+    expect(agentLabel(null, (x) => x, "assigned")).toBe("指派");
+    expect(agentLabel(null, (x) => x, "decide")).toBe("审核");
+    expect(askForReply([ask({ fromAgent: null, source: "human" })], "x", rows)).toBeNull();
+    expect(closedText(ask({ state: "superseded" }), (x) => x)).toBe("已被新版本取代");
+    expect(groupAsks([ask({ state: "superseded" })]).recent).toHaveLength(1);
   });
 });

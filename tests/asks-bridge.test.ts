@@ -6,27 +6,21 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { answerDiscordInteraction, answerFromCard, answerFromChat } from "../src/bridge/ask-entry.js";
 import { cancelStaleRuntimeAsks, noteRuntimeDialogs, openRuntimeAsk, permissionLabel, resetRuntimeAsksForTest, settleRuntimeAsk } from "../src/bridge/ask-runtime.js";
-import { deliverReplyWithAsk, ownerPresence, sweepExpired, setAsksForTest, type AsksDeps } from "../src/bridge/asks.js";
+import { sweepExpired } from "../src/bridge/ask-expire.js";
+import { deliverReplyWithAsk } from "../src/bridge/ask-reply.js";
+import { answerDropped, ownerPresence, setAsksForTest, type AsksDeps } from "../src/bridge/asks.js";
 import { subscribeEvents, type BridgeEvent } from "../src/bridge/event-bus.js";
 import { setLedgerFeedForTest, sseEventAllow } from "../src/bridge/ledger-feed.js";
 import { handleAsksApi } from "../src/bridge/local-api/asks.js";
 import type { Delivery, Envelope } from "../src/bridge/router.js";
-import { effectivePrincipal, type Grant } from "../src/lib/devices.js";
 import { getAsk, listAsks, type Ask } from "../src/lib/ledger-asks.js";
 import { closeLedger, listEvents, openLedger } from "../src/lib/ledger-store.js";
 import type { Principal } from "../src/lib/principals.js";
 import type { RegistryAgent } from "../src/lib/registry.js";
 import { unwrapChannelMessage } from "../src/lib/session-history.js";
+import { at, guest, LEGACY_STAR_TOKEN, owner, ownerWithMaster, PEER } from "./asks-test-kit.js";
 import { tempLedgerPath } from "./ledger-test-helpers.js";
 
-const at = "2026-09-28T00:00:00Z";
-const OWNER_BASE: Principal = { id: "owner:self", role: "owner", agents: ["*", "master"], createdAt: at, terminal: true };
-const owner = (grant: Grant = { agents: ["*"], terminal: true, manage: true }) =>
-  effectivePrincipal({ principal: OWNER_BASE, credential: { id: "dev_1", v: 1, type: "bearer", hash: "h", deviceName: "d", grant, createdAt: at, expiresAt: "2099-01-01T00:00:00Z" } });
-/** 授权含大总管的 owner 设备：发起方和派发者都不在、答复落到大总管的用例用它 */
-const ownerWithMaster = () => owner({ agents: ["*", "master"], terminal: true, manage: true });
-const PEER: Principal = { id: "token:tok_peer", role: "external", agents: ["*"], peer: "P", createdAt: at };
-const LEGACY_STAR_TOKEN: Principal = { id: "token:tok_int", role: "external", name: "integration", agents: ["*"], createdAt: at };
 
 const ws = { tag: "ws" } as never;
 const COMPONENTS = [{ type: "buttons", buttons: [{ id: "go", label: "✅ 发" }, { id: "no", label: "取消" }] }];
@@ -132,6 +126,21 @@ describe("作答 → 答复不抢占", () => {
     expect(delivered).toEqual([]);
   });
 
+  test("答不了的凭据（guest、部分 scope 的 owner 设备）带 askId 点已结案的：也回 409、不投，只说「已结案」不带答案（PR B r2 P1-1）", async () => {
+    const a = (await reply())!;
+    expect(await answerFromChat({ agent: "agent-x", text: "[button:no]", principal: guest("ab"), askId: a.id })).toBeNull(); // 还开着：照旧普通消息
+    await answerFromChat({ agent: "agent-x", text: "[button:go]", principal: owner() });
+    for (const p of [guest("ab"), owner({ agents: ["agent-x"], terminal: false, manage: false })]) {
+      const res = (await answerFromChat({ agent: "agent-x", text: "[button:no]", principal: p, askId: a.id }))!;
+      expect(res.status).toBe(409);
+      expect(await res.json()).toEqual({ ok: false, code: "ask_closed", error: "已结案", askId: a.id });
+    }
+    expect(await answerFromChat({ agent: "agent-x", text: "随便说一句", principal: guest("ab"), askId: a.id })).toBeNull(); // 对不上选项：别的消息
+    // 列表带 full：只有完整列表网页才敢按「查不到 = 早已结案」锁旧按钮
+    const full = async (p: Principal) => ((await (await handleAsksApi(new Request("http://x/api/v1/asks"), "/asks", p))!.json()) as { full: boolean }).full;
+    expect([await full(owner()), await full(guest("ab")), await full(owner({ agents: ["agent-x"], terminal: false, manage: false }))]).toEqual([true, false, false]);
+  });
+
   test("表单同步行 + 补充文字：算作答，补充进 answer.text 与正文", async () => {
     await reply("api:owner:self", [{ type: "multiselect", id: "f", options: [{ label: "甲", value: "a" }, { label: "乙", value: "b" }] }]);
     const res = (await answerFromChat({ agent: "agent-x", text: "[select:f:a,b]\n顺便先别发 release", principal: owner() }))!;
@@ -140,10 +149,12 @@ describe("作答 → 答复不抢占", () => {
     expect(delivered[0].content.split("\n").slice(1).join("\n")).toBe("[select:f:a,b]\n顺便先别发 release");
   });
 
-  test("历史里 trigger=ask_answer 的入站只留 owner 原文；别的入站不动", () => {
+  test("历史里 trigger=ask_answer 的入站：去掉说明行、wire 换成选项人话再接原话，带上 askId（引用条用）；别的入站不动", () => {
     const wrap = (trigger: string, body: string) => `<channel source="claudestra" chat_id="api:owner:self" trigger="${trigger}" user="owner">\n${body}\n</channel>`;
-    expect(unwrapChannelMessage(wrap("ask_answer", "[✅ owner 回复了你 …]\n[button:go]"))?.text).toBe("[button:go]");
-    expect(unwrapChannelMessage(wrap("system", "第一行\n第二行"))?.text).toBe("第一行\n第二行");
+    const head = "[✅ owner 回复了你 12:00 的「待你处理」（ask_abc1）：发吗？选择：✅ 发。下面是 owner 发的原文]";
+    expect(unwrapChannelMessage(wrap("ask_answer", `${head}\n[button:go]`))).toMatchObject({ text: "✅ 发", askId: "ask_abc1" });
+    expect(unwrapChannelMessage(wrap("ask_answer", `${head}\n[button:go]\n只发 Codex`))?.text).toBe("✅ 发\n只发 Codex");
+    expect(unwrapChannelMessage(wrap("system", "第一行\n第二行"))).toEqual({ text: "第一行\n第二行", from: "owner", fromId: undefined, askId: undefined });
   });
 
   test("不接管：没 wire 的普通消息、对不上任何 ask 的 wire、非 owner 凭据（peer / 部分 scope）", async () => {
@@ -437,20 +448,20 @@ describe("第二轮审查的复现", () => {
   });
 
   test("r3 P2-8 作答门 = isOwnerPrincipal：web-ui token 能答、带 owner 标记；看得见却答不了的凭据列表里 canAnswer=false，不会点了才 403", async () => {
-    const list = async (who: Principal) => (await (await handleAsksApi(new Request("http://x/api/v1/asks"), "/asks", who))!.json()) as { asks: Ask[]; canAnswer: boolean };
+    const list = async (who: Principal) => (await (await handleAsksApi(new Request("http://x/api/v1/asks"), "/asks", who))!.json()) as { asks: (Ask & { canAnswer: boolean })[] };
     const a = (await reply())!;
     await answerFromChat({ agent: "agent-x", text: "[button:go]", principal: owner() });
     expect(delivered[0].from).toMatchObject({ kind: "api", owner: true });
     const webUi: Principal = { id: "token:tok_web", role: "owner", name: "web-ui", agents: ["*"], createdAt: at };
     const b = (await reply())!;
-    expect(await list(webUi)).toMatchObject({ canAnswer: true });
+    expect((await list(webUi)).asks.every((x) => x.canAnswer)).toBe(true);
     delivered = [];
     expect((await answerFromCard("p", b.id, { choices: ["[button:go]"] }, webUi)).status).toBe(202);
     expect(delivered[0].from).toMatchObject({ kind: "api", owner: true });
     // 老的「*」集成 Bearer：台账看得见，但不是 owner——列表明说答不了，网页卡片不出选项；聊天里发 wire 照常投递
     const c = (await reply())!;
-    expect((await list(LEGACY_STAR_TOKEN)).canAnswer).toBe(false);
-    expect((await list(owner())).canAnswer).toBe(true);
+    expect((await list(LEGACY_STAR_TOKEN)).asks.map((x) => x.canAnswer)).toEqual([false, false, false]);
+    expect((await list(owner())).asks.every((x) => x.canAnswer)).toBe(true);
     expect(await answerFromChat({ agent: "agent-x", text: "[button:go]", principal: LEGACY_STAR_TOKEN, askId: c.id })).toBeNull();
     expect(getAsk(openLedger(path), a.id)?.state).toBe("answered");
   });
@@ -504,5 +515,32 @@ describe("第二轮审查的复现", () => {
     expect((await post(LEGACY_STAR_TOKEN))!.status).toBe(403);
     expect((await post(owner()))!.status).toBe(200);
     ownerPresence.setVisible("dev_1", false);
+  });
+});
+
+describe("押着的答复没送到（Workflow 复核 wf2 classify-merge-8）", () => {
+  test("收件的 agent 被 kill：ask 放回「待你处理」、答案清掉、记一条事件，告诉 owner 再答；再答时重新找收件方", async () => {
+    const a = (await reply())!;
+    expect((await answerFromCard("p", a.id, { choices: ["[button:go]"] }, owner())).status).toBe(202);
+    const answer = delivered.find((e) => e.meta.triggerKind === "ask_answer")!;
+    expect(getAsk(openLedger(path), a.id)?.state).toBe("answered");
+    delivered = [];
+    await answerDropped(answer);
+    expect(getAsk(openLedger(path), a.id)).toMatchObject({ state: "open", answer: null });
+    expect(listEvents(openLedger(path), {}).some((e) => e.kind === "ask_reopen")).toBe(true);
+    expect(events.at(-1)?.data).toMatchObject({ askId: a.id, state: "open" });
+    expect(delivered).toHaveLength(1);
+    expect(delivered[0].to).toMatchObject({ kind: "user", channelId: "999" });
+    expect(delivered[0].content).toContain("没送到");
+    await answerDropped(answer); // 已经放回过：不重复通知
+    expect(delivered).toHaveLength(1);
+    expect((await answerFromCard("p", a.id, { choices: ["[button:go]"] }, owner())).status).toBe(202);
+  });
+
+  test("不是 owner 的答复（过期通知之类）丢了不动 ask", async () => {
+    const a = (await reply())!;
+    await answerDropped({ ...replyEnv("x"), meta: { ...replyEnv("x").meta, askId: a.id, triggerKind: "bridge_synth" } });
+    expect(getAsk(openLedger(path), a.id)?.state).toBe("open");
+    expect(delivered.filter((e) => e.to.kind === "user" && e.to.channelId === "999")).toHaveLength(0);
   });
 });

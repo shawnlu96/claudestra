@@ -4,12 +4,15 @@
  * 依赖全部注入，测试不碰真实 registry / 状态目录（tests/manager-ledger.test.ts）。
  */
 import type { Database } from "bun:sqlite";
-import { roleOf, type LedgerTask, type Role } from "../lib/ledger-stages.js";
+import type { SnapshotSources } from "../lib/ledger-audit-snapshot.js";
+import { isManagerRole, roleOf, type LedgerTask, type Role } from "../lib/ledger-stages.js";
 import { getItem, getMeta, getTask, LedgerError } from "../lib/ledger-store.js";
+import { isRealPmRole } from "../lib/ledger-team-config.js";
 import type { FactsDeps } from "../lib/ledger-verify-facts.js";
 import type { ProjectDef } from "../lib/projects.js";
 import type { WriteCtx } from "../lib/ledger-write.js";
 import type { Registry } from "./core.js";
+import type { ProposeOpts } from "./team-up.js";
 import type { ParsedArgs } from "./ledger-identity.js";
 
 export interface LedgerDeps {
@@ -23,10 +26,16 @@ export interface LedgerDeps {
   loadRegistry(): Promise<Registry>;
   saveRegistry(reg: Registry): Promise<void>;
   now(): number;
+  /** dispatch 核对 head 用；不给 = 真跑 git（单测注入） */
+  gitHead?(dir: string): string | null;
+  /** 班子提案（meta --pms、team-apply）存哪、按钮怎么贴；不给 = 状态目录 + 真贴按钮（单测注入） */
+  proposals?: ProposeOpts;
   /** 完成检查单的事实采集（gh / git / 进程）；不给就用真实的（lib/ledger-verify-facts.ts），测试注入假的 */
   factsDeps?(): FactsDeps;
   /** projects.json 的项目清单（verify 按目录判断任务所属项目是否拥有本仓库）；不给按拥有算 */
   projects?(): ProjectDef[];
+  /** ledger audit 的取数来源；不给 = 真实的 registry / tmux / 文件（测试注入假的） */
+  auditSources?: SnapshotSources;
 }
 
 export type Result = Record<string, unknown>;
@@ -68,7 +77,16 @@ export class LedgerCli {
   /** PM 名单里的人、master、owner */
   requireManager(project: string, what: string): void {
     const r = this.role(project);
-    if (r === null || r === "executor") throw new LedgerError("forbidden", `${what}要项目 ${project} 的 PM / master / owner（你是 ${this.deps.actor}）`);
+    if (!isManagerRole(r)) throw new LedgerError("forbidden", `${what}要项目 ${project} 的 PM / master / owner（你是 ${this.deps.actor}）`);
+  }
+
+  /** 真正的 PM：名单里除了班子调度助理以外的人，或 master / owner（调度助理也在 PM 名单里，PM 专属的出口不能交给它） */
+  isRealPm(project: string): boolean {
+    return isRealPmRole(this.role(project), this.deps.actor, getMeta(this.db, project).team);
+  }
+
+  requireRealPm(project: string, what: string): void {
+    if (!this.isRealPm(project)) throw new LedgerError("forbidden", `${what}只有项目 ${project} 的 PM（调度助理除外）/ master / owner 能做（你是 ${this.deps.actor}）`);
   }
 
   /** 任务的执行者本人，或 PM / master / owner */

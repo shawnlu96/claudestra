@@ -31,10 +31,22 @@ export interface AppConfig {
    *  阈值(tokens,0=关闭常规自动触发;缺省用 stats-dashboard 的默认 400K)。
    *  v2.21.3+ emergency:93% 救命线独立开关(缺省 true)——常规线关了它也在,
    *  只在快撞 CC 的 ~967K 裸压时兜底触发一次(owner 2026-09-03)。 */
-  autoCompact?: { idleHours?: number; window?: number; emergency?: boolean };
+  autoCompact?: {
+    idleHours?: number;
+    window?: number;
+    emergency?: boolean;
+    /** 上下文边界自动注入总开关，缺省关（先 manager ctx-boundary dry-run 看结果再 on）；关着时面板照常显示、手动按钮照常能用 */
+    inject?: boolean;
+    /** 按项目 / 名字模式的上下文边界（lib/ctx-boundary-policy.ts 解析和校验）。这里原样保留：set* 是读改写，
+     *  在这里过滤就会把 owner 写错的条目悄悄抹掉，而不是在面板上报出来 */
+    policies?: unknown;
+  };
   /** v2.23+ 归档保留天数（缺省 90；0 = 永不自动清理）。归档目录里的条目超过
    *  这个天数就由每日兜底清掉——归档是"可找回的过期会话"，不是永久仓库。 */
   archiveRetentionDays?: number;
+  /** Codex 子线程自动归档（缺省关）：开了以后每日扫描把 CODEX_SUB_IDLE_DAYS 天没写的子线程收进 archive/archived/，
+   *  那里的文件到 archiveRetentionDays 就被删掉，等于「7 + 90 天」后永久删除，所以要每家 owner 自己开（lib/unmanaged-archive.ts） */
+  autoArchiveCodexSubs?: boolean;
   /** 语音转写用的 Groq API key（bridge/local-api：PUT /api/v1/settings 写、GET 只回尾四位提示；env GROQ_API_KEY 兜底）。
    *  以前在 web BFF 的 ~/.claude-orchestrator/web/config.json，manager migrate-web-state 搬过来。 */
   groqApiKey?: string;
@@ -46,6 +58,8 @@ export interface AppConfig {
   /** 批量管理（bridge/fleet）：compactKeep 覆盖 /compact 的默认保留清单（lib/fleet-plan.ts DEFAULT_COMPACT_KEEP）；
    *  callers = 除大总管和台账 PM 外还能调 fleet MCP 工具的 agent（管全部，lib/fleet-caller.ts） */
   fleet?: { compactKeep?: string; callers?: string[] };
+  /** 推送不带正文：Web Push / APNs 只发「Claudestra · 有新消息」（lib/push-redact.ts）。缺省关；派发器每条现读，改完不用重启 */
+  pushNoContent?: boolean;
 }
 
 /** 归档保留天数缺省值（设置里可改） */
@@ -76,25 +90,29 @@ function merge(base: AppConfig, raw: any): AppConfig {
             messageId: String(raw.statsDashboard.messageId || ""),
           }
         : base.statsDashboard,
-    autoCompact:
-      raw?.autoCompact &&
-      (typeof raw.autoCompact.idleHours === "number" ||
-        typeof raw.autoCompact.window === "number" ||
-        typeof raw.autoCompact.emergency === "boolean")
-        ? {
-            ...(typeof raw.autoCompact.idleHours === "number" ? { idleHours: raw.autoCompact.idleHours } : {}),
-            ...(typeof raw.autoCompact.window === "number" ? { window: raw.autoCompact.window } : {}),
-            ...(typeof raw.autoCompact.emergency === "boolean" ? { emergency: raw.autoCompact.emergency } : {}),
-          }
-        : base.autoCompact,
+    autoCompact: mergeAutoCompact(raw?.autoCompact) ?? base.autoCompact,
     // 以前漏在这里：任何 set*（读→改→写）都会把磁盘上的 archiveRetentionDays 抹掉
     ...(typeof raw.archiveRetentionDays === "number" ? { archiveRetentionDays: raw.archiveRetentionDays } : {}),
+    ...(typeof raw.autoArchiveCodexSubs === "boolean" ? { autoArchiveCodexSubs: raw.autoArchiveCodexSubs } : {}),
     ...(typeof raw.groqApiKey === "string" && raw.groqApiKey ? { groqApiKey: raw.groqApiKey } : {}),
     ...(typeof raw.quotaLive === "boolean" ? { quotaLive: raw.quotaLive } : {}),
     ...(typeof raw.quotaClaudeBackground === "boolean" ? { quotaClaudeBackground: raw.quotaClaudeBackground } : {}),
+    ...(typeof raw.pushNoContent === "boolean" ? { pushNoContent: raw.pushNoContent } : {}),
     // 批量管理（bridge/fleet）：白名单带 compactKeep 和 callers；漏在这里读不到，任何 set* 还会把它抹掉
     ...fleetOf(raw.fleet),
   };
+}
+
+function mergeAutoCompact(ac: any): AppConfig["autoCompact"] | undefined {
+  if (!ac || typeof ac !== "object") return undefined;
+  const out: NonNullable<AppConfig["autoCompact"]> = {
+    ...(typeof ac.idleHours === "number" ? { idleHours: ac.idleHours } : {}),
+    ...(typeof ac.window === "number" ? { window: ac.window } : {}),
+    ...(typeof ac.emergency === "boolean" ? { emergency: ac.emergency } : {}),
+    ...(typeof ac.inject === "boolean" ? { inject: ac.inject } : {}),
+    ...(ac.policies !== undefined ? { policies: ac.policies } : {}),
+  };
+  return Object.keys(out).length ? out : undefined;
 }
 
 /** 白名单式读 fleet：新加字段要加在这里，否则读出来是 undefined，而且任何 set*（读→改→写）都会把它从磁盘上抹掉 */
@@ -125,8 +143,9 @@ function defaults(): AppConfig {
  * （2026-09 审查 D7-4）。其余字段仍取默认值。
  */
 export function safeConfigOnCorrupt(): AppConfig {
-  // 订阅额度的两个开关同口径：坏文件时不读凭据（owner 关掉的「读 Keychain」不能因为文件坏了被静默打开）
-  return { ...DEFAULT_CONFIG, autoUpdate: { claudestra: false, claudeCode: false }, quotaLive: false, quotaClaudeBackground: false };
+  // 订阅额度的两个开关同口径：坏文件时不读凭据（owner 关掉的「读 Keychain」不能因为文件坏了被静默打开）；
+  // 推送同理取保守的一边：owner 打开的「不带正文」不能因为文件坏了被静默关掉
+  return { ...DEFAULT_CONFIG, autoUpdate: { claudestra: false, claudeCode: false }, quotaLive: false, quotaClaudeBackground: false, pushNoContent: true };
 }
 
 // 常驻进程（bridge / launcher）运行中文件被写坏时，继续用上次成功读到的内容
@@ -177,6 +196,14 @@ export async function setArchiveRetention(days: number): Promise<AppConfig> {
   return cfg;
 }
 
+/** Codex 子线程自动归档开关（manager codex-sub-archive on|off） */
+export async function setAutoArchiveCodexSubs(enabled: boolean): Promise<AppConfig> {
+  const cfg = await readConfig();
+  cfg.autoArchiveCodexSubs = enabled;
+  await writeConfig(cfg);
+  return cfg;
+}
+
 export async function setUpdateChannel(channel: UpdateChannel): Promise<AppConfig> {
   const cfg = await readConfig();
   cfg.autoUpdate.channel = channel;
@@ -213,13 +240,14 @@ export async function setAutoCompactIdleHours(hours: number): Promise<AppConfig>
 }
 
 /** v2.20.2+ 设置界面写入口:一次可改阈值/闲置时长任意子集。 */
-export async function setAutoCompact(patch: { window?: number; idleHours?: number; emergency?: boolean }): Promise<AppConfig> {
+export async function setAutoCompact(patch: { window?: number; idleHours?: number; emergency?: boolean; inject?: boolean }): Promise<AppConfig> {
   const cfg = await readConfig();
   cfg.autoCompact = {
     ...cfg.autoCompact,
     ...(typeof patch.window === "number" ? { window: patch.window } : {}),
     ...(typeof patch.idleHours === "number" ? { idleHours: patch.idleHours } : {}),
     ...(typeof patch.emergency === "boolean" ? { emergency: patch.emergency } : {}),
+    ...(typeof patch.inject === "boolean" ? { inject: patch.inject } : {}),
   };
   await writeConfig(cfg);
   return cfg;
@@ -228,6 +256,13 @@ export async function setAutoCompact(patch: { window?: number; idleHours?: numbe
 export async function setQuotaLive(enabled: boolean): Promise<AppConfig> {
   const cfg = await readConfig();
   cfg.quotaLive = enabled;
+  await writeConfig(cfg);
+  return cfg;
+}
+
+export async function setPushNoContent(enabled: boolean): Promise<AppConfig> {
+  const cfg = await readConfig();
+  cfg.pushNoContent = enabled;
   await writeConfig(cfg);
   return cfg;
 }

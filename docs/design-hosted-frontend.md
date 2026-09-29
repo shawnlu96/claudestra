@@ -44,7 +44,7 @@ bridge 里「你是谁」= principal，聊天身份 `chat_id = api:<principalId>
 
 短码登记给中继、兑换又经中继，所以**中继看得见兑换流量**（它是 TLS 终点），本版不宣称「中继看不到授权」。能做的是让它只当查找线索，把决定权留在 Mac 上：
 
-1. Mac 上 `claudestra pair`（或网页「配对新设备」）→ bridge 生成 **128 位秘密** `S` 与 **8 位短码** `C`，向中继登记 `C → fp`（现有机制），打印二维码 `https://relay.<域名>/pair#<fp>.<S>` 与短码。**生成时明确打印这条凭据的 grant**（默认：所有 agent + master + 终端；`--agents a,b` / `--no-terminal` / `--guest <名字>` 缩小；guest = 独立 principal，无 master 无终端无 manage）。
+1. Mac 上 `claudestra pair`（或网页「配对新设备」）→ bridge 生成 **128 位秘密** `S` 与 **8 位短码** `C`，向中继登记 `C → fp`（现有机制），打印二维码 `https://relay.<域名>/pair#<fp>.<S>` 与短码。**生成时明确打印这条凭据的 grant**（默认：所有 agent + master + 终端；`--agents a,b` / `--no-terminal` / `--guest <名字>` 缩小；guest = 独立 principal，无 master 无终端无 manage，**agents 必须写明**——没写 / 空一律拒，`*` 要二次确认，见 lib/devices.ts `checkGuestAgents`）。
 2. **扫码 / 点链接**：`#` 片段不经中继。前端 `POST /m/<fp>/api/v1/devices/pair {proof: HMAC(S, challenge), deviceName}`（先 `GET …/devices/pair/challenge`）→ bridge 校验 → 签凭据 → `Set-Cookie`。秘密本身不出浏览器。
 3. **手输短码**：前端 `POST /api/v1/codes/lookup {code}`（中继，限流）得 fp → `POST /m/<fp>/api/v1/devices/pair {code, deviceName}` → bridge 记为 **pending**，**Mac 侧确认**：正在跑的 `claudestra pair` 提示「设备 <名字> 请求配对，授予 <grant>，确认？」，网页对话框同样弹确认；确认后签发。短码只是查找与确认线索，穷举无用（codex）。
 4. bridge 自己做：尝试限额（每 fp 每分钟）、10 分钟过期、原子一次性消费；不依赖中继限流（现有 relay-pairing.ts 已有大半）。
@@ -116,7 +116,7 @@ TOTP / passkey 删除后，配对就是唯一验证手段，强度靠：秘密 1
 
 ## 11. 信任边界（写给用户的实话）
 
-- 中继运营方能看到经它的一切（TLS 终点），并且托管的 JS 跑在你的浏览器里——**信任托管中继 = 信任运营方**，与任何 SaaS 相同；本版对恶意运营方没有防线，端到端加密与「打包的可信客户端 + 受控更新」是下一阶段（远程加载 serverURL 的 iOS 壳不算可信客户端）。
+- 中继运营方能看到经它的一切（TLS 终点），并且托管的 JS 跑在你的浏览器里——**信任托管中继 = 信任运营方**，与任何 SaaS 相同；本版对恶意运营方没有防线，端到端加密与「打包的可信客户端 + 受控更新」是下一阶段（远程加载 serverURL 的 iOS 壳不算可信客户端）。设计与分期见 [relay/e2e-design.md](./relay/e2e-design.md)：浏览器端加密挡不住控制中继进程的人，因为 JS 由它提供，所以可信客户端是单独一期。
 - **同一主源上多台机器**：一台机器的输出若突破清洗 / CSP 造成 XSS，能在页面存活期间借用你在这个浏览器里的其它机器的凭据（HttpOnly 让它偷不走，但挡不住借用）。这是相对子域名方案**新增**的攻击面，用 §8.7 的下限对冲；对隔离有更高要求的用户，走直托管 + 自带域名（JS、SW、更新源、TLS 全在自己手里）。
 - 官方 runner（以后若有）改变「永远跑在用户电脑上」的承诺，不能宣称与本方案自然兼容。
 
@@ -139,8 +139,8 @@ TOTP / passkey 删除后，配对就是唯一验证手段，强度靠：秘密 1
 ### 13.1 已实现（纵切，feat/hosted-frontend）
 - 中继：`https://<base>/m/<fp>/api/v1/…`（lib/relay-machine-path.ts 的规范化规则；请求头加 `x-claudestra-relay-mode: api`、`x-claudestra-relay-prefix: /m/<fp>`；响应只放 `cstra_dev` 一个 Set-Cookie 并钉属性）；`POST /api/v1/codes/lookup {code}` → `{ok, fp, name, slug}`；`GET /app-config.json` → `{mode:"relay", relayBase, version, commit?}`；`RELAY_STATIC_DIR` 托管前端静态站（lib/static-site.ts 的导出布局）。
 - bridge 鉴权（bridge/api-auth.ts）：Bearer 或 cookie `cstra_dev`；cookie 路径的非 GET/HEAD 必须带 `x-cstra-device: 1`（否则 403 `{code:"csrf"}`）；凭据无效 / 过期 401 `{code:"device_invalid"}`。经中继的请求在进程内 dispatch（bridge/relay-dispatch.ts），`RequestContext.source = "relay"`，回环豁免只认真实 socket。
-- 设备（bridge/devices.ts）：`GET /api/v1/devices/pair/challenge` → `{challenge, expiresAt, fp, machineName}`；`POST /api/v1/devices/pair {proof:{challenge,hmac}, deviceName}`（hmac = base64url(HMAC-SHA256(base64url 解出的秘密, challenge))）→ 200 + Set-Cookie + `{fp, machineName, principalId, credentialId, grant, expiresAt}`；`POST /api/v1/devices/pair {code, deviceName}` → 202 `{pending:true, approvalId, expiresAt, machineName}`；`GET /api/v1/devices/pair/status?approval=<id>` → 202 pending / 200 + cookie / 410 `{state:"denied"|"expired"}`；`POST /api/v1/devices/local {deviceName}`（只认回环 + `x-cstra-device` + 同源）；`GET /api/v1/devices`（manage）→ `{devices:[{id, deviceName, principal, principalName, grant, createdAt, lastSeenAt, lastIp, expiresAt, current}]}`；`DELETE /api/v1/devices/:id`（manage，或自己那条 = 退出登录，回删 cookie）；`GET /api/v1/devices/approvals`、`POST /api/v1/devices/approvals/:id {approve}`（manage）。
-- CLI：`claudestra pair [--agents a,b|*] [--no-terminal] [--no-manage] [--guest <名字>] [--json]`；回环控制路由 `POST /relay/pair/new {agents?,terminal?,manage?,guest?}` → `{code, display, url(旧子域名), link(https://<base>/pair#<fp>.<secret>), base, slug, fp, grant, guest?, expiresAt}`、`GET /relay/pair/approvals` → `{approvals, activeCodes}`、`POST /relay/pair/approve {id, approve}`。
+- 设备（bridge/devices.ts）：`GET /api/v1/devices/pair/challenge` → `{challenge, expiresAt, fp, machineName}`；`POST /api/v1/devices/pair {proof:{challenge,hmac}, deviceName}`（hmac = base64url(HMAC-SHA256(base64url 解出的秘密, challenge))）→ 200 + Set-Cookie + `{fp, machineName, principalId, credentialId, grant, expiresAt}`；`POST /api/v1/devices/pair {code, deviceName}` → 202 `{pending:true, approvalId, expiresAt, machineName}`；`GET /api/v1/devices/pair/status?approval=<id>` → 202 pending / 200 + cookie / 410 `{state:"denied"|"expired"}`；`POST /api/v1/devices/local {deviceName}`（只认回环 + `x-cstra-device` + 同源）；`GET /api/v1/devices`（manage）→ `{devices:[{id, deviceName, principal, principalName, grant, createdAt, lastSeenAt, lastIp, expiresAt, current}]}`；`DELETE /api/v1/devices/:id`（manage，或自己那条 = 退出登录，回删 cookie）；`DELETE /api/v1/devices/current`（撤这次请求用的那条设备凭据 = 退出登录，不用 manage、不用先拉列表；非设备凭据 404）；`GET /api/v1/devices/approvals`、`POST /api/v1/devices/approvals/:id {approve}`（manage）。
+- CLI：`claudestra pair [--agents a,b|*] [--no-terminal] [--no-manage] [--guest <名字> --agents a,b [--confirm-all]] [--json]`；回环控制路由 `POST /relay/pair/new {agents?,terminal?,manage?,guest?,confirmAllAgents?}` → `{code, display, url(旧子域名), link(https://<base>/pair#<fp>.<secret>), base, slug, fp, grant, guest?, expiresAt}`、`GET /relay/pair/approvals` → `{approvals, activeCodes}`、`POST /relay/pair/approve {id, approve}`。
 - 管理门：`isFullScope(principal)` 现在等于 `canManage`（owner 或过渡期的全 scope 非 peer token；设备凭据看 grant.manage）。
 
 ### 13.2 T4：bridge 本地 API（替代 BFF 的 B 类路由；全部走同一鉴权）

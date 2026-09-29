@@ -1,5 +1,5 @@
 /**
- * "*" 不含 master：凡是按名字解析 agent 的地方，master 判定都走 isMasterName（src/lib/registry.ts：NFKC → 小写 →
+ * "*" 不含 master：凡是按名字解析 agent 的地方，master 判定都走 isMasterName（src/lib/registry.ts：规范名 → 去空白 →
  * 去掉所有层 agent- 前缀 → master，__master__ 也算）。判定只要比路由解析「窄」一处，"*" 就能从那里碰到 master：
  * - 以前 "agent-master" 加前缀成 "agent-agent-master" 就不算 master，guest "*" 能读历史、打断 master（热修 #182）；
  * - "Master" 在 scope 判定里是普通 agent，history 拼出 archive/agent-Master，APFS 不分大小写，读到 master 的归档（HF182-r1 P1-1）；
@@ -19,26 +19,35 @@ import { visibleSessions, type NeutralSessionInfo } from "../src/bridge/sessions
 import { projectsSlug } from "../src/lib/jsonl-cost";
 import { isMasterName } from "../src/lib/registry";
 import type { Principal } from "../src/lib/principals";
+import { testChildEnv } from "./test-env.ts";
 
 const at = "2026-01-01T00:00:00Z";
 const device = (id: string, grant: Grant): DeviceCredential => ({
   id: `dev_${id}`, v: 1, type: "bearer", hash: hashDeviceToken(`dev_${id}`), deviceName: id, grant, createdAt: at, expiresAt: "2099-01-01T00:00:00Z",
 });
 const PRINCIPALS = [
-  { id: "owner:self", role: "owner", name: "owner", agents: ["*", "master"], createdAt: at, credentials: [device("owner", { agents: ["*", "master"], terminal: false, manage: true })] },
+  {
+    id: "owner:self", role: "owner", name: "owner", agents: ["*", "master"], createdAt: at,
+    credentials: [device("owner", { agents: ["*", "master"], terminal: false, manage: true }), device("owner-star", { agents: ["*"], terminal: false, manage: true })],
+  },
   { id: "guest:all", role: "external", name: "friend", agents: ["*"], createdAt: at, credentials: [device("guest", guestGrant(["*"]))] },
   { id: "token:tok_star", role: "external", name: "legacy-star", agents: ["*"], secret: "s-star", createdAt: at },
   { id: "token:tok_cc", role: "external", name: "cc-only", agents: ["cc"], secret: "s-cc", createdAt: at },
+  // 老版本（大总管只认逐字写法）签出的 guest：--agents MASTER,cc 把 MASTER 当普通名字写进了 principal 和 grant（T42-r2 P1）
+  { id: "guest:legacy", role: "external", name: "legacy", agents: ["MASTER", "cc"], createdAt: at, credentials: [device("legacy", { agents: ["MASTER", "cc"], terminal: false, manage: false })] },
 ];
 const OWNER = { device: "dev_owner" };
 const STAR = { bearer: "s-star" };
-const CREDS = { "guest *": { device: "dev_guest" }, "老 * Bearer": STAR, "scoped token": { bearer: "s-cc" } };
+const OWNER_STAR = { device: "dev_owner-star" }; // owner 本人的设备，但 grant 只给了 "*"：特意不让碰大总管
+const CREDS = { "guest *": { device: "dev_guest" }, "老 * Bearer": STAR, "scoped token": { bearer: "s-cc" }, "老 guest [MASTER]": { device: "dev_legacy" } };
 // 全角 ｍ（U+FF4D）、全角大写整词经 NFKC 都变回 master
 const MASTER_NAMES = ["master", "agent-master", "agent-agent-master", "__master__", "Master", "MASTER", "agent-Master", "AGENT-master", "ｍaster", "ＭＡＳＴＥＲ"];
 const SID_AM = "11111111-2222-3333-4444-555555555555"; // archive/agent-master 里的 master 归档
 const SID_G = "22222222-3333-4444-5555-666666666666"; // 被 remove 的 agent-gone 的归档
 const SID_MS = "33333333-4444-5555-6666-777777777777"; // 大总管工作目录下的 CC 会话
 const SID_W = "44444444-5555-6666-7777-888888888888"; // 别处的野生会话
+const SID_MV = "55555555-6666-7777-8888-999999999999"; // 大总管的会话被挪到别的项目目录（开头记录的 cwd 仍是大总管的）
+const SID_WT = "66666666-7777-8888-9999-aaaaaaaaaaaa"; // 大总管 EnterWorktree 后的会话：落在 <MASTER_DIR>/.claude/worktrees/* 的项目目录
 const ENDPOINTS: [string, string, string?][] = [
   ["GET", "history"], ["GET", `history/${SID_AM}`], ["GET", "skills"], ["GET", "pending"],
   ["POST", "interrupt", "{}"], ["POST", "messages", JSON.stringify({ text: "hi" })], ["POST", "notify-read", "{}"],
@@ -72,6 +81,12 @@ beforeAll(() => {
     mkdirSync(dir, { recursive: true });
     writeFileSync(join(dir, `${sid}.jsonl`), line(text));
   }
+  const moved = join(home, ".claude", "projects", projectsSlug("/tmp/elsewhere"));
+  mkdirSync(moved, { recursive: true });
+  writeFileSync(join(moved, `${SID_MV}.jsonl`), JSON.stringify({ type: "user", cwd: masterDir, timestamp: at, message: { role: "user", content: "MASTER-LIVE-SECRET 挪过家" } }) + "\n");
+  const wt = join(home, ".claude", "projects", `${projectsSlug(masterDir)}--claude-worktrees-feat`);
+  mkdirSync(wt, { recursive: true });
+  writeFileSync(join(wt, `${SID_WT}.jsonl`), line("MASTER-LIVE-SECRET 在 worktree 里"));
   const at_ = (name: string) => `/api/v1/agents/${encodeURIComponent(name)}`;
   const req = (name: string, method: string, path: string, auth: object, body?: string) => ({ name, method, path, auth, body });
   const specs = [
@@ -79,6 +94,8 @@ beforeAll(() => {
       MASTER_NAMES.flatMap((n) => ENDPOINTS.map(([method, ep, body]) => req(`${cred} ${n} ${ep}`, method, `${at_(n)}/${ep}`, auth, body))),
     ),
     req("owner agent-master pending", "GET", `${at_("agent-master")}/pending`, OWNER),
+    req("owner master history", "GET", `${at_("master")}/history`, OWNER),
+    req("老 guest [MASTER] cc pending", "GET", `${at_("cc")}/pending`, CREDS["老 guest [MASTER]"]),
     req("guest cc pending", "GET", `${at_("cc")}/pending`, CREDS["guest *"]),
     req("guest agent-cc pending", "GET", `${at_("agent-cc")}/pending`, CREDS["guest *"]),
     // registry 查不到：只认逐字同名的归档目录（被 remove 的 agent 照常读；大小写写法、master 不认）
@@ -102,6 +119,24 @@ beforeAll(() => {
     req("owner master session", "GET", `/api/v1/sessions/${SID_MS}/history`, OWNER),
     req("star wild session", "GET", `/api/v1/sessions/${SID_W}/history`, STAR),
     req("star delete master session", "POST", `/api/v1/sessions/${SID_MS}/manage`, STAR, JSON.stringify({ action: "delete" })),
+    req("star moved master session", "GET", `/api/v1/sessions/${SID_MV}/history`, STAR),
+    req("star worktree master session", "GET", `/api/v1/sessions/${SID_WT}/history`, STAR),
+    // 收编 / 分叉 / 接管大总管的会话（HF182-r2 P2-A）
+    req("star adopt master session", "POST", `/api/v1/sessions/${SID_MS}/adopt`, STAR, JSON.stringify({ agent: "cc" })),
+    req("star adopt moved master session", "POST", `/api/v1/sessions/${SID_MV}/adopt`, STAR, JSON.stringify({ agent: "cc" })),
+    req("star adopt wild session", "POST", `/api/v1/sessions/${SID_W}/adopt`, STAR, JSON.stringify({ agent: "cc" })),
+    ...[{}, { fork: true }, { takeover: true }].map((o) =>
+      req(`star resume master ${JSON.stringify(o)}`, "POST", "/api/v1/agents/resume", STAR, JSON.stringify({ agent: "probe", sessionId: SID_MS, ...o }))),
+    req("star resume worktree master fork", "POST", "/api/v1/agents/resume", STAR, JSON.stringify({ agent: "probe", sessionId: SID_WT, fork: true })),
+    req("owner resume master fork", "POST", "/api/v1/agents/resume", OWNER, JSON.stringify({ agent: "probe2", sessionId: SID_MS, fork: true })),
+    // grant 只有 "*" 的 owner 设备：不因 owner 本人放行（T32 adv6 P2-1）
+    req("owner-star master session", "GET", `/api/v1/sessions/${SID_MS}/history`, OWNER_STAR),
+    req("owner-star adopt master", "POST", `/api/v1/sessions/${SID_MS}/adopt`, OWNER_STAR, JSON.stringify({ agent: "cc" })),
+    ...[{ fork: true }, { takeover: true }].map((o) =>
+      req(`owner-star resume master ${JSON.stringify(o)}`, "POST", "/api/v1/agents/resume", OWNER_STAR, JSON.stringify({ agent: "probe3", sessionId: SID_MS, ...o }))),
+    req("owner-star wild session", "GET", `/api/v1/sessions/${SID_W}/history`, OWNER_STAR),
+    req("owner adopt master", "POST", `/api/v1/sessions/${SID_MS}/adopt`, OWNER, JSON.stringify({ agent: "cc" })),
+    req("owner resume master takeover", "POST", "/api/v1/agents/resume", OWNER, JSON.stringify({ agent: "probe4", sessionId: SID_MS, takeover: true })),
   ];
   results = sandbox.run(specs, { RUNNER_PRINCIPALS: JSON.stringify(PRINCIPALS), MASTER_DIR: masterDir });
 }, 120_000);
@@ -113,14 +148,17 @@ const status = (n: string) => byName(n).status;
 const leaks = (n: string) => /MASTER-(ARCHIVE|LIVE)-SECRET/.test(String(byName(n).body));
 
 describe("master 的各种写法（含大小写、全角）：生产路由 + 假 tmux", () => {
-  test("guest * / 老 * Bearer / scoped token × 10 种写法 × 9 个端点：一律 403，正文不外泄", () => {
-    const matrix = results.filter((r) => MASTER_NAMES.some((n) => r.name.startsWith(`guest * ${n} `) || r.name.startsWith(`老 * Bearer ${n} `) || r.name.startsWith(`scoped token ${n} `)));
-    expect(matrix.length).toBe(3 * MASTER_NAMES.length * ENDPOINTS.length);
+  test("guest * / 老 * Bearer / scoped token / 名单写了 MASTER 的老 guest × 10 种写法 × 9 个端点：一律 403，正文不外泄", () => {
+    const creds = Object.keys(CREDS);
+    const matrix = results.filter((r) => MASTER_NAMES.some((n) => creds.some((c) => r.name.startsWith(`${c} ${n} `))));
+    expect(matrix.length).toBe(creds.length * MASTER_NAMES.length * ENDPOINTS.length);
     expect(matrix.filter((r) => r.status !== 403 || leaks(r.name)).map((r) => `${r.name} → ${r.status}`)).toEqual([]);
   });
 
   test("scope 显式列了 master 的 owner 设备照常能用 agent-master 写法；普通 agent 两种写法照常放行", () => {
     expect(status("owner agent-master pending")).toBe(200);
+    expect(status("owner master history")).toBe(200);
+    expect(status("老 guest [MASTER] cc pending")).toBe(200); // 老 guest 的 MASTER 条目作废（上面矩阵读 master 全 403），开放的 cc 照常
     expect(status("guest cc pending")).toBe(200);
     expect(status("guest agent-cc pending")).toBe(200);
   });
@@ -167,13 +205,40 @@ describe("archive / agent-info", () => {
   });
 });
 
-describe("按会话 id：大总管的会话只给显式列了 master 的凭据或 owner 本人", () => {
+describe("按会话 id：大总管的会话只给生效 scope 里显式有 master 的凭据", () => {
   test("老 * Bearer 读 / 删 master 工作目录下的会话 → 403，文件还在；owner 照读；别处的野生会话照常", () => {
     expect([status("star master session"), leaks("star master session")]).toEqual([403, false]);
     expect(status("star delete master session")).toBe(403);
     expect(existsSync(join(sandbox!.home, ".claude", "projects", projectsSlug(masterDir), `${SID_MS}.jsonl`))).toBe(true);
     expect([status("owner master session"), leaks("owner master session")]).toEqual([200, true]);
     expect(status("star wild session")).toBe(200);
+  });
+
+  test("挪了家的大总管会话也认得出：挪到别的项目目录（按开头记录的 cwd）、EnterWorktree 的项目目录，老 * Bearer 都 403", () => {
+    for (const n of ["star moved master session", "star worktree master session"]) expect([n, status(n), leaks(n)]).toEqual([n, 403, false]);
+  });
+
+  test("收编 / 分叉 / 接管大总管的会话：老 * Bearer 403，manager 没收到；owner 照常；别处的会话照常收编", () => {
+    const denied = ["star adopt master session", "star adopt moved master session", "star resume worktree master fork",
+      ...[{}, { fork: true }, { takeover: true }].map((o) => `star resume master ${JSON.stringify(o)}`)];
+    for (const n of denied) expect([n, status(n)]).toEqual([n, 403]);
+    const calls = sandbox!.managerCalls();
+    for (const sid of [SID_MV, SID_WT]) expect(calls).not.toContain(sid);
+    expect(calls).not.toContain(`probe ${SID_MS}`);
+    expect(status("star adopt wild session")).toBe(202);
+    expect(status("owner resume master fork")).not.toBe(403);
+    expect(calls).toContain(`resume probe2 ${SID_MS}`);
+  });
+
+  test('grant 只有 "*" 的 owner 设备：大总管会话的 history、adopt、fork、takeover 都 403，manager 没收到；["*","master"] 的照常', () => {
+    const denied = ["owner-star master session", "owner-star adopt master",
+      ...[{ fork: true }, { takeover: true }].map((o) => `owner-star resume master ${JSON.stringify(o)}`)];
+    for (const n of denied) expect([n, status(n), leaks(n)]).toEqual([n, 403, false]);
+    expect(sandbox!.managerCalls()).not.toContain("probe3");
+    expect(status("owner-star wild session")).toBe(200);
+    expect([status("owner master session"), status("owner adopt master")]).toEqual([200, 202]);
+    for (const n of ["owner resume master fork", "owner resume master takeover"]) expect([n, status(n) === 403]).toEqual([n, false]);
+    expect(sandbox!.managerCalls()).toContain(`takeover ${SID_MS} --name probe4`);
   });
 
   test("GET /sessions（visibleSessions）：master 的会话不把 id 递给老 * Bearer", () => {
@@ -184,20 +249,22 @@ describe("按会话 id：大总管的会话只给显式列了 master 的凭据�
       { kind: "background", sessionId: "s-dopp", status: "running", doppelgangerOf: "master" },
       { kind: "interactive", sessionId: "s-mdir", status: "running", cwd: "/r/m" },
       { kind: "interactive", sessionId: "s-wild", status: "running", cwd: "/r/other" },
+      { kind: "interactive", sessionId: "s-wt", status: "running", cwd: "/r/m/.claude/worktrees/feat" },
     ];
     const ids = (q: Principal) => visibleSessions(list, q, "/r/m").map((s) => s.sessionId);
     expect(ids(p(["*"]))).toEqual(["s-cc", "s-wild"]);
-    expect(ids(p(["*", "master"]))).toEqual(["s-cc", "s-am", "s-dopp", "s-mdir", "s-wild"]);
-    expect(ids(p(["*"], { id: "owner:self" }))).toEqual(["s-cc", "s-am", "s-dopp", "s-mdir", "s-wild"]);
+    expect(ids(p(["*", "master"]))).toEqual(["s-cc", "s-am", "s-dopp", "s-mdir", "s-wild", "s-wt"]);
+    expect(ids(p(["*"], { id: "owner:self" }))).toEqual(["s-cc", "s-wild"]); // owner 本人但生效 scope 不含 master：同样滤掉
   });
 });
 
 describe("isMasterName / inScopeEitherName / terminalAllowedFor（纯函数）", () => {
   const p = (agents: string[], extra: Partial<Principal> = {}): Principal => ({ id: "token:x", role: "external", name: "x", agents, createdAt: at, secret: "s", ...extra });
-  test("isMasterName：大小写、全角、多层前缀、__master__ 都算；名字里带 master 的普通 agent、零宽写法不算", () => {
+  test("isMasterName：大小写、全角、多层前缀、__master__、夹不可见字符或空白都算；名字里带 master 的普通 agent 不算", () => {
     for (const n of [...MASTER_NAMES, "__MASTER__", "agent-__master__", "Agent-Agent-MASTER"]) expect([n, isMasterName(n)]).toEqual([n, true]);
-    // 零宽写法：NFKC 不删它，路由解析也是逐字比较，落不到 master（HF182-r1 对照表），两边一致
-    for (const n of ["mastermind", "agent-masters", "master2", "m​aster", "", undefined, null]) expect([n, isMasterName(n)]).toEqual([n, false]);
+    // 零宽 / 变体选择符 / 空白：路由按逐字解析落不到 master，但判定只能宽不能窄——宽了只是多挡一个本来就 404 的名字（T42-r2）
+    for (const n of ["m\u200baster", "master\ufe0f", "master\u3164", " master ", "agent- master ", "agent-\u200bmaster"]) expect([n, isMasterName(n)]).toEqual([n, true]);
+    for (const n of ["mastermind", "agent-masters", "master2", "", undefined, null]) expect([n, isMasterName(n)]).toEqual([n, false]);
   });
   test("inScopeEitherName：master 的写法只按 master 判；显式列 master 才放行", () => {
     for (const n of MASTER_NAMES) {
@@ -210,6 +277,7 @@ describe("isMasterName / inScopeEitherName / terminalAllowedFor（纯函数）",
     expect(inScopeEitherName(p(["cc"]), "agent-cc")).toBe(true);
     expect(inScopeEitherName(p(["cc"]), "other")).toBe(false);
     expect(inScopeEitherName(p(["*"]), "mastermind")).toBe(true);
+    for (const n of [" master ", "agent- master ", "m\u200baster"]) expect([n, inScopeEitherName(p(["*"]), n)]).toEqual([n, false]);
   });
   test("terminalAllowedFor：* + 终端权限开不了 master 的任何写法；普通 agent 照常", () => {
     const t = p(["*"], { terminal: true });
@@ -232,7 +300,7 @@ describe("manager restart：--include-master 只认命令行里本来就有的",
   });
   afterAll(() => rmSync(home, { recursive: true, force: true }));
   const manager = (...args: string[]) => {
-    const env = { PATH: `${join(home, "fakebin")}:/usr/bin:/bin`, HOME: home, TMPDIR: home, CLAUDESTRA_RUNTIME_DIR: join(home, "rt"), CONTROL_CHANNEL_ID: "", LANG: "C" };
+    const env = testChildEnv({ PATH: `${join(home, "fakebin")}:/usr/bin:/bin`, HOME: home, TMPDIR: home, CLAUDESTRA_RUNTIME_DIR: join(home, "rt"), CONTROL_CHANNEL_ID: "", LANG: "C" });
     const r = Bun.spawnSync([process.execPath, join(import.meta.dir, "..", "src", "manager.ts"), ...args], { env, stdout: "pipe", stderr: "pipe" });
     return JSON.parse(r.stdout.toString().trim().split("\n").pop() || "{}") as { ok: boolean; error?: string };
   };

@@ -53,6 +53,7 @@ function psLstart(pid: number): string {
 }
 
 const { initApiRoutes, serveApiRequest } = await import("../src/bridge/api-routes.ts");
+const { setRequestContext } = await import("../src/bridge/request-context.ts");
 initApiRoutes({
   clients: new Map(),
   deliver: async () => {
@@ -82,6 +83,7 @@ for (const s of specs) {
   if (s.body !== undefined) headers["Content-Type"] = "application/json";
   const url = `http://127.0.0.1:3847${s.path}`;
   const req = new Request(url, { method: s.method, headers, body: s.body });
+  setRequestContext(req, { source: "lan", clientIp: "127.0.0.1", https: false }); // 当作主端口经本机反代来的；bridge.ts 每个请求都会定来源
   try {
     const res = await Promise.race([
       serveApiRequest(req, new URL(url)),

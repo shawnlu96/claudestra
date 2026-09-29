@@ -4,32 +4,63 @@
  */
 import { uiAgentName } from "@/lib/chat/agents";
 import type { WebComponentRow } from "@/lib/chat/events";
+import { attachmentUrl, isImageName } from "@/lib/chat/attachments";
 import { replyRowKey } from "@/lib/chat/reply-clicks";
+import { isReservedButtonId } from "@/lib/chat/reserved-button-ids";
+import type { ChatMessage } from "@/features/chat/type";
 
-export type AskState = "open" | "answered" | "expired" | "cancelled";
+/** superseded = 同一个 agent 同一件事又问了新的一版（授权参数变了），旧卡片失效 */
+export type AskState = "open" | "answered" | "expired" | "cancelled" | "superseded";
 /** 字段按卡片上的阅读顺序排（谁、问什么、怎么答、什么状态） */
 export interface WebAsk {
   id: string;
-  fromAgent: string;
+  /** 人 / 系统发起的（指派事项、chat 审核）没有发起 agent */
+  fromAgent: string | null;
+  /** 指给谁（local:<principalId>）；指给自己的 guest 也看得到、答得了 */
+  assignee?: string | null;
+  createdBy?: string | null;
   project: string;
   taskId: string | null;
   title: string;
   context: string;
   body: string;
-  kind: "decide" | "authorize" | "owner_action" | "accept";
+  kind: "decide" | "authorize" | "owner_action" | "accept" | "assigned";
   kindHint: string | null;
-  source: "reply" | "auq" | "permission" | "codex";
+  source: "reply" | "auq" | "permission" | "codex" | "human" | "system";
   options: unknown[];
   allowText: boolean;
   blocking: boolean | null;
   urgency: "normal" | "urgent";
   state: AskState;
   /** 多行 reply 逐行作答时，state 仍是 open、这里是已答的部分 */
-  answer: { choices: string[]; labels?: string[]; text: string; via: string; at: number } | null;
+  answer: { choices: string[]; labels?: string[]; text: string; via: string; at: number; atts?: WebAskAtt[] } | null;
   createdAt: number;
   updatedAt: number;
   expiresAt: number;
+  /** 授权类：批的是哪个动作、哪组参数（卡片原样摆出来，owner 看清自己批准的是什么） */
+  bind?: { action: string; params: unknown; version?: string } | null;
+  /** 这个凭据能不能答这一条（bridge lib/ask-access.ts canAnswerAsk，列表逐行给）；老 bridge 不给 = 能答 */
+  canAnswer?: boolean;
+  /** files = 原消息带的附件（bridge 拷进 inbox 后的名字）；loc = 原消息在会话里的位置（定位过才有） */
+  extra?: { files?: { name: string; attachment: string }[] };
 }
+
+/** 原消息带的附件 → 聊天附件条的形状（卡片上直接点开，走 T37 的预览层） */
+export function askAttachments(a: Pick<WebAsk, "extra">): { name: string; kind: "image" | "file"; url: string }[] {
+  return (a.extra?.files ?? []).map((f) => ({ name: f.name, kind: isImageName(f.attachment) ? "image" : "file", url: attachmentUrl(f.attachment) }));
+}
+
+/** 作答附带的附件引用（指派事项「完成」时附的图：kind talk，ref = talk 附件库的 sha256） */
+export interface WebAskAtt {
+  kind: string;
+  ref: string;
+  name?: string;
+  mime?: string;
+}
+
+/** 协作视图的「等你」：开着、非验收、没指给别人的（指给 guest 的指派事项是在等那个 guest，不是等 owner） */
+export const waitsOnOwner = (a: Pick<WebAsk, "state" | "kind" | "assignee">): boolean =>
+  a.state === "open" && a.kind !== "accept" && (!a.assignee || a.assignee === "local:owner:self");
 
 export interface AskGroups {
   /** 等你拍板 / 授权 / 亲自处理的（按等待时长，久的在前） */
@@ -58,8 +89,9 @@ export function askCounts(asks: WebAsk[]): { waiting: number; accept: number } {
   return { waiting: g.waiting.length, accept: g.accept.length };
 }
 
-/** 卡片 / 横幅上给人看的名字：大总管不显示内部名 */
-export function agentLabel(name: string, t: (s: string) => string): string {
+/** 卡片 / 横幅上给人看的名字：大总管不显示内部名；人 / 系统发起的没有 agent，按类型写「指派」「审核」 */
+export function agentLabel(name: string | null, t: (s: string) => string, kind?: WebAsk["kind"]): string {
+  if (!name) return kind === "assigned" ? t("指派") : t("审核");
   return name === "master" ? t("大总管") : uiAgentName(name);
 }
 
@@ -93,23 +125,93 @@ function canon(v: unknown): string {
   return JSON.stringify(v) ?? "null";
 }
 
+const buttonIds = (row: WebComponentRow | undefined) => (row?.type === "buttons" ? row.buttons.map((b) => b.id).join(",") : "");
+
 /**
- * 这个聊天气泡是哪条 ask 建出来的：同一个 agent、ask 的选项以气泡的 components 开头（行内按钮排在后面）；
- * agent 复用同一组按钮时取建立时间离气泡最近的一条（两分钟内），对不上就当没有。
+ * 这个聊天气泡是哪条 ask 建出来的：气泡带 askId（出站事件 / 历史里 reply 的 tool_result）就只按 id 认。
+ * 没带的（老消息、历史尾读跨了窗口）才按形状对：同一个 agent、ask 的选项以气泡的 components 开头，行内按钮合成的那一行排在后面（按 id 对），
+ * 复用同一组按钮时取建立时间离气泡最近的一条（两分钟内）；授权类不这样猜——认错了会带着新参数那条的 id 去批（bridge 同样一律 409）。
  */
-export function askForReply(asks: WebAsk[], agent: string, rows: WebComponentRow[] | undefined, replyTs?: string): WebAsk | null {
-  if (!rows?.length || !agent) return null;
-  const want = canon(rows);
+export function askForReply(asks: WebAsk[], agent: string, rows: WebComponentRow[] | undefined, replyTs?: string, inlineIds: string[] = [], askId?: string): WebAsk | null {
+  const block = rows ?? [];
+  if ((!block.length && !inlineIds.length) || !agent) return null;
+  if (askId) return asks.find((a) => a.id === askId) ?? null;
   const at = replyTs ? Date.parse(replyTs) : NaN;
   let best: WebAsk | null = null;
   for (const a of asks) {
-    if (a.source !== "reply" || !sameAgent(a.fromAgent, agent)) continue;
-    if (canon(a.options.slice(0, rows.length)) !== want) continue;
+    if (a.bind || !sameShape(a, agent, block, inlineIds)) continue;
     if (Number.isFinite(at) && Math.abs(a.createdAt - at) > 120_000) continue;
     if (!best || (Number.isFinite(at) && Math.abs(a.createdAt - at) < Math.abs(best.createdAt - at))) best = a;
     else if (!Number.isFinite(at) && a.createdAt > best.createdAt) best = a;
   }
   return best;
+}
+
+/** 这条 ask 是不是这个 agent 用这组按钮建的：选项以气泡的 components 开头，行内按钮合成的那一行排在后面（按 id 对） */
+function sameShape(a: WebAsk, agent: string, block: WebComponentRow[], inlineIds: string[]): boolean {
+  if (a.source !== "reply" || !a.fromAgent || !sameAgent(a.fromAgent, agent) || canon(a.options.slice(0, block.length)) !== canon(block)) return false;
+  return !inlineIds.length || buttonIds(a.options[block.length] as WebComponentRow | undefined) === inlineIds.join(",");
+}
+
+/**
+ * 气泡没认出 ask（老消息没带 id、带的 id 不在列表里），列表里却有同形状、开着的授权类：按钮锁住、提示去卡片上批（adv3 P2-2）。
+ * 放开的话点下去 bridge 回 409，那一行却先被标成已点、消息标「未送达」，看着像点过了
+ */
+export function unclaimedBindAsk(asks: WebAsk[], agent: string, rows: WebComponentRow[] | undefined, inlineIds: string[] = []): WebAsk | null {
+  if ((!rows?.length && !inlineIds.length) || !agent) return null;
+  return asks.find((a) => a.bind && a.state === "open" && sameShape(a, agent, rows ?? [], inlineIds)) ?? null;
+}
+
+/**
+ * bridge 的免 LLM 管理 / 面板按钮（保留 id 表 lib/chat/reserved-button-ids.ts，src 侧 twin 由 guard 保证一致）：不是 agent 答复用的按钮，
+ * 只豁免「列表没到先不让点」「老气泡按过期锁」，老面板照样能点；agent 用同名 id 发的、认出了 ask 且已结案的照样锁、点击照样带 askId
+ */
+export const isMgmtButtonId = isReservedButtonId;
+/** 整行只有管理按钮 */
+export const isMgmtRow = (row: WebComponentRow): boolean => row.type === "buttons" && row.buttons.length > 0 && row.buttons.every((b) => isMgmtButtonId(b.id));
+
+/** bridge 的「待你处理」列表只带开着的和 3 天内结案的（bridge/asks.ts 列表的 closedSince），两边一致 */
+export const ASK_LIST_CLOSED_MS = 3 * 24 * 3600_000;
+
+/** 列表状态：loading = 还没拉到；full = 完整列表；partial = 过滤过的（guest、部分 scope 只拿到指给自己的，或 403 恒空），不能拿「查不到」当结案 */
+export type AskListState = "loading" | "full" | "partial";
+
+export interface ReplyAskState {
+  ask: WebAsk | null;
+  closed: WebAsk | null;
+  orphan: WebAsk | null;
+  gone: boolean;
+  /** gone 且气泡从没带过 askId（T11 之前的老按钮，不知道有没有人答过）：文案写「已过期」，不写「已结案」 */
+  expired: boolean;
+  /** 列表还没拉到：先不让点，也不先发出去（按钮下面显示「正在核对」） */
+  waiting: boolean;
+  /** 点了也不发：closed / orphan / gone / waiting 任一 */
+  blocked: boolean;
+  /** 管理按钮也要锁的那部分：认出的 ask 已结案、没认出的授权类（有 ask 可依，不是猜的） */
+  settled: boolean;
+  /** 点击带给 bridge 的 askId：认出的 ask，认不出就用气泡自带的——bridge 按 id 找到已结案的回 409，不靠列表全不全 */
+  hintId: string | null;
+}
+
+/**
+ * 一个气泡的按钮对应哪条 ask、锁不锁（use-reply-ask.ts 的纯逻辑）：closed = 认出的 ask 已结案；orphan = 没认出、列表里有同形状开着的授权类；
+ * gone = 完整列表里查不到，且 reply 比列表保留期还旧——开着的 ask 一定在列表里，所以它早已结案、移出了列表（老历史不带 askId 也算）。
+ * 过滤过的列表不按天数锁，只靠点击带的 askId 让 bridge 判（ask-entry staleClick，谁点都 409）。
+ * gone 不锁的话点下去就是一条普通的 [button:…]，decide 类的 agent 会当成新答复（PR B P2-2）；比保留期新的不算（刚建、列表还没刷到）。
+ */
+export function replyAskState(
+  asks: WebAsk[], list: AskListState, agent: string, m: Pick<ChatMessage, "replyComponents" | "replyTs" | "ts" | "replyAskId">, inlineIds: string[], now = Date.now(),
+): ReplyAskState {
+  const rows = m.replyComponents;
+  const ask = askForReply(asks, agent, rows, m.replyTs ?? m.ts, inlineIds, m.replyAskId);
+  const closed = ask && ask.state !== "open" ? ask : null;
+  const orphan = ask ? null : unclaimedBindAsk(asks, agent, rows, inlineIds);
+  const at = Date.parse(m.replyTs ?? m.ts ?? "");
+  const hasButtons = (rows ?? []).some((r) => !isMgmtRow(r)) || inlineIds.some((id) => !isMgmtButtonId(id)); // 只有管理按钮的不算
+  const gone = hasButtons && !ask && list === "full" && Number.isFinite(at) && now - at > ASK_LIST_CLOSED_MS;
+  const waiting = hasButtons && list === "loading";
+  const settled = !!closed || !!orphan;
+  return { ask, closed, orphan, gone, expired: gone && !m.replyAskId, waiting, blocked: settled || gone || waiting, settled, hintId: ask?.id ?? m.replyAskId ?? null };
 }
 
 /** ask 的答案 → 气泡各行的已答值（与 reply-components 的 replyClicks 同形：按钮存 id，选单存 `<id>:<值>`） */
@@ -157,6 +259,7 @@ export function spanText(ms: number, t: (s: string, p?: Record<string, string | 
 export function closedText(a: WebAsk, t: (s: string, p?: Record<string, string | number>) => string): string {
   if (a.state === "answered") return t("已处理");
   if (a.state === "expired") return t("已过期，按未批准处理");
+  if (a.state === "superseded") return t("已被新版本取代");
   return t("已撤销");
 }
 
@@ -172,13 +275,18 @@ export function answerSummary(a: WebAsk): string {
  * 验收要求「另一台设备 2 秒内消失」：经中继的事件延迟 + 这个等待 + 一次拉取要在 2 秒里（tests/asks-relay-stream.test.ts）
  */
 export const ASK_EVENT_REFRESH_MS = 300;
+/** 第一次拉「待你处理」列表最多等这么久；过了还没回，聊天气泡的按钮先按 partial 放开（asks-store start） */
+export const ASK_LIST_WAIT_MS = 4_000;
 
 /** 乐观作答（T11b 第 8 条）：提交时本地先记一笔，服务端确认前盖在拉到的数据上 */
 export interface PendingAnswer {
+  /** 提交返回的时刻（还在飞时是点下去的时刻）：盖多久从这里算 */
   at: number;
   answer: NonNullable<WebAsk["answer"]>;
+  /** 请求还没回来：不管多久都不撤（作答接口超时 60 秒，机器忙时拖过 20 秒也正常） */
+  inFlight?: boolean;
 }
-/** 盖这么久服务端还说开着：以服务端为准（提交其实没成、或 SSE / 拉取一直没回来），卡片回到「等你处理」 */
+/** 提交返回后盖这么久服务端还说开着：以服务端为准（提交其实没成、或 SSE / 拉取一直没回来），卡片回到「等你处理」 */
 export const PENDING_MAX_MS = 20_000;
 
 /**
@@ -190,11 +298,14 @@ export function applyPending(server: WebAsk[], pending: ReadonlyMap<string, Pend
   const asks = server.map((a) => {
     const p = pending.get(a.id);
     if (!p) return a;
-    if (a.state !== "open" || now - p.at > PENDING_MAX_MS) {
+    if (a.state !== "open" || (!p.inFlight && now - p.at > PENDING_MAX_MS)) {
       settled.add(a.id);
       return a;
     }
-    return { ...a, state: "answered" as const, answer: p.answer, updatedAt: p.at };
+    // 多行 reply 已答的那几行留着（聊天气泡的已答高亮从 answer.choices 推导）
+    const had = a.answer;
+    const answer = had ? { ...p.answer, choices: [...had.choices, ...p.answer.choices], labels: [...(had.labels ?? []), ...(p.answer.labels ?? [])] } : p.answer;
+    return { ...a, state: "answered" as const, answer, updatedAt: p.at };
   });
   for (const id of pending.keys()) if (!server.some((a) => a.id === id)) settled.add(id);
   return { asks, settled: [...settled] };

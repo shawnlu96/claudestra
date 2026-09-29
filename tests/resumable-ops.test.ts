@@ -163,6 +163,13 @@ describe("rename：每一步之后被砍", () => {
     expect(await runRename("a", "b", w.deps)).toMatchObject({ ok: false, error: "registry 里没有 agent-a" });
   });
 
+  test("新名跟别的 agent 规范化后撞名 → 拒绝；改成自己的全角写法不算撞（T42-r2）", async () => {
+    const w = makeWorld({ reg: { socket: "s", agents: { "agent-a": LIVE, "agent-cc": OLD } } });
+    expect(await runRename("a", "\uff43\uff43", w.deps)).toMatchObject({ ok: false, error: expect.stringContaining("跟已有的 agent-cc") });
+    expect(Object.keys(w.st.reg.agents)).toEqual(["agent-a", "agent-cc"]);
+    expect((await runRename("cc", "\uff43\uff43", makeWorld({ reg: { socket: "s", agents: { "agent-cc": OLD } } }).deps)).error ?? "").not.toContain("跟已有的");
+  });
+
   test("标记的 from 对不上 → 不认作补跑", async () => {
     const pending = { op: "rename" as const, pid: 1, startedAt: "2026-09-28T11:59:00Z", from: "agent-zzz" };
     const w = makeWorld({ reg: { socket: "s", agents: { "agent-b": { ...LIVE, pending } } } });

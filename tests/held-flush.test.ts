@@ -4,7 +4,7 @@
  * 不在线 / 压缩中 / 别人正在投都不动；投递报错留着下次再投。
  */
 import { describe, expect, test } from "bun:test";
-import { flushHeld, type FlushDeps } from "../src/bridge/held-flush.js";
+import { dropHeldOnKill, flushHeld, onHeldDelivered, type FlushDeps } from "../src/bridge/held-flush.js";
 import { HeldQueue, INBOX_LEASE_MS, type HeldItem } from "../src/bridge/held-queue.js";
 import type { Delivery, Envelope, LocalEndpoint } from "../src/bridge/router.js";
 
@@ -125,6 +125,31 @@ describe("flushHeld", () => {
     }
   });
 
+  test("真正送达才调 onHeldDelivered（押回 queued 的不算）", async () => {
+    const seen: string[] = [];
+    onHeldDelivered((c, env) => void seen.push(`${c}:${String(env.content)}`));
+    const h = harness([item("a"), item("b")]);
+    let n = 0;
+    h.deps.deliver = async (env) => (n++ === 0 ? sent(env) : sent(env, "queued"));
+    await flushHeld(h.deps, "c-me", "stop");
+    expect(seen).toEqual(["c-me:a"]);
+  });
+
+  test("送达日志带来源和 messageId：班子通知记 bridge:ledger，能和 team-router 的 📮 行对上", async () => {
+    const ledger = item("n");
+    ledger.env = { ...ledger.env, from: { kind: "bridge", label: "ledger" }, meta: { ...ledger.env.meta, messageId: "ledger-12-agent-me" } };
+    const h = harness([item("a"), ledger]);
+    const logs: string[] = [];
+    const orig = console.log;
+    console.log = (...a: unknown[]) => void logs.push(a.join(" "));
+    try {
+      await flushHeld(h.deps, "c-me", "stop");
+    } finally {
+      console.log = orig;
+    }
+    expect(logs).toEqual(["▶️ 押后消息投递(stop): agent-codex → agent-me（m-a）", "▶️ 押后消息投递(stop): bridge:ledger → agent-me（ledger-12-agent-me）"]);
+  });
+
   test("投递报错：留在队里、不 touch，后面的照投；结束后释放频道锁", async () => {
     const h = harness([item("bad"), item("good")]);
     h.deps.deliver = async (env) => {
@@ -137,5 +162,38 @@ describe("flushHeld", () => {
     expect(h.touched).toEqual(["c-me"]);
     expect(h.contents()).toEqual(["bad"]);
     expect(h.held.claim("c-me")).toBe(true);
+  });
+});
+
+describe("叫停和押后（Workflow 复核 wf2）", () => {
+  test("classify-merge-1：押在叫停之前、叫停之后才投的（忙时作答的 ask 答复、agent 请求）加抬头；叫停之后才押的不加", async () => {
+    const answer = item("[✅ owner 回复了你 10:00 的「待你处理」]\n选择：部署", "user", 1_000);
+    const later = item("停之后发的", "local", 3_000);
+    const h = harness([answer, later], { stoppedAt: () => 2_000 });
+    const notes: (string | undefined)[] = [];
+    h.deps.deliver = async (env) => (notes.push(env.meta.interruptNote), sent(env));
+    await flushHeld(h.deps, "c-me", "stop");
+    expect(notes[0]).toContain("这条是叫停之前");
+    expect(notes[0]).toContain("先别照做，问用户还要不要");
+    expect(notes[1]).toBeUndefined();
+  });
+
+  test("没叫停过 / bridge 自己的通知：不加", async () => {
+    const bridgeNote = item("收尾提醒", "local", 1_000);
+    bridgeNote.env.from = { kind: "bridge", label: "turn-cuts" };
+    const plain = item("a", "local", 1_000);
+    await flushHeld(harness([plain], { stoppedAt: (c) => (c === "other" ? 2_000 : undefined) }).deps, "c-me", "stop");
+    await flushHeld(harness([bridgeNote], { stoppedAt: () => 2_000 }).deps, "c-me", "stop");
+    expect(plain.env.meta.interruptNote).toBeUndefined();
+    expect(bridgeNote.env.meta.interruptNote).toBeUndefined();
+  });
+
+  test("classify-merge-8：agent 被 kill，押给它的全丢掉，每条都交给善后（ask 答复放回「待你处理」由 asks.ts 做）", async () => {
+    const h = harness([item("a"), item("b")]);
+    const got: string[] = [];
+    dropHeldOnKill(h.held, "c-me", async (env) => void got.push(String(env.content)));
+    expect(h.contents()).toEqual([]);
+    expect(got).toEqual(["a", "b"]);
+    dropHeldOnKill(h.held, "c-me", async () => { throw new Error("不该再调"); });
   });
 });

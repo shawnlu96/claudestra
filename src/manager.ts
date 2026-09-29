@@ -14,7 +14,7 @@
  */
 
 import { writeClaudeSettings } from "./lib/session-recall.js";
-import { DEFAULT_BRIDGE_PORT } from "./lib/bridge-url.js";
+import { configuredBridgePort } from "./lib/bridge-url.js";
 import { repoEnvVar } from "./lib/env-file.js";
 import { RUNTIME_DIR, runtimePath, statePath } from "./lib/paths.js";
 import { resolveBridgeUrl } from "./lib/bridge-url.js";
@@ -31,6 +31,7 @@ import {
   MASTER_SESSION,
   AGENT_PREFIX,
   tmuxRaw,
+  tmuxSendEscape, noteProgramInput,
   tmuxRawStrict,
   sessionTarget,
   windowTarget,
@@ -41,7 +42,6 @@ import {
   ensureSocketDir,
   clearShellInitPrompts,
   isAtShell,
-  probeTuiContract,
   windowHasChildProcess,
   windowChildPids,
   killPidsEscalating,
@@ -61,6 +61,7 @@ import {
 } from "./lib/claude-launch.js";
 import { piAgentDir, piSessionIdFromFilename } from "./lib/pi-session.js";
 import { translateSessionLine } from "./lib/session-source.js";
+import { capSubsPerMain, limitByMainSessions } from "./lib/session-limit.js";
 import { resolveSessionIdForWindow, readLiveCcSessionEntries } from "./lib/cc-sessions.js";
 import { readBypassConsent } from "./lib/bypass-consent.js";
 import { writeMasterResume } from "./lib/master-session.js";
@@ -77,7 +78,7 @@ import {
   type ManagedRuntimeAdapter,
   type ReadyResult,
 } from "./lib/runtimes/index.js";
-import { listSessionJsonls } from "./lib/runtimes/claude-code.js";
+import { listSessionJsonls, readyTimeoutHint } from "./lib/runtimes/claude-code.js";
 import { gracefulExitWindow } from "./lib/runtimes/graceful-exit.js";
 import { tmuxWindowOps } from "./lib/runtimes/window-ops.js";
 import { agentRuntime, isMasterAgent, readRegistryAgents } from "./lib/registry.js";
@@ -102,7 +103,7 @@ import {
 import { isSandbox, refuseInSandbox, sandboxRootOf } from "./lib/sandbox.js";
 import { sandboxManagerRefusal } from "./lib/sandbox-env.js";
 import { assertResumable, assertSandboxSession } from "./lib/sandbox-sessions.js";
-import { loadRegistry, migrateWorkerToAgent, patchRegistryAgent, saveRegistry, normalizeName, assertValidNewName, assertCreatable, formatAge, output, extractPermFlags, extractEffortFlag, extractModeFlag, extractModelFlag, extractBoolFlag, extractMultiFlag, extractStringFlag } from "./manager/core.js";
+import { loadRegistry, migrateWorkerToAgent, patchRegistryAgent, saveRegistry, normalizeName, assertValidNewAgent, assertCreatable, formatAge, output, outputSync, extractPermFlags, extractEffortFlag, extractModeFlag, extractModelFlag, extractBoolFlag, extractMultiFlag, extractStringFlag } from "./manager/core.js";
 import { runProjectCommand } from "./manager/projects.js";
 import { cmdCronAdd, cmdCronList, cmdCronEdit, cmdCronRemove, cmdCronToggle, cmdCronHistory } from "./manager/cron.js";
 import { cmdPermissions } from "./manager/permissions.js";
@@ -110,7 +111,7 @@ import { cmdKill, cmdRemove } from "./manager/agent-kill.js"; // 按 registry �
 import { cmdRename } from "./manager/agent-rename.js";
 import { isRestartInProgress, tryLockRestart, unlockRestart } from "./manager/restart-lock.js";
 import { cmdTokenAdd, cmdTokenList, cmdTokenRevoke } from "./manager/tokens.js";
-import { cmdPeerHttpInvite, cmdPeerHttpJoin, cmdPeerHttpAccept, cmdPeerHttpTest, cmdPeerHttpList, cmdPeerHttpScope, cmdPeerHttpRemove, cmdPeerInviteNew, cmdPeerInviteList, cmdPeerInviteRevoke, cmdPeerInviteRedeem, cmdPeerJoinAuto } from "./manager/peers.js";
+import { cmdPeerHttpInvite, cmdPeerHttpJoin, cmdPeerHttpAccept, cmdPeerHttpTest, cmdPeerHttpList, cmdPeerHttpScopeCli, cmdPeerHttpRemove, cmdPeerInviteList, cmdPeerInviteRevoke } from "./manager/peers.js";
 import { cmdCost, cmdMetrics } from "./manager/cost.js";
 import { cmdAutoUpdate } from "./manager/auto-update.js";
 import { cmdWebRelease } from "./manager/web-release.js";
@@ -241,7 +242,7 @@ async function cmdTakeover(target?: string, opts: { all?: boolean; force?: boole
   }
 
   // SIGTERM 之前的全局预检：这边起不来就一个进程都不动
-  const bridgePort = repoEnvVar("BRIDGE_PORT", REPO_ROOT) || String(DEFAULT_BRIDGE_PORT);
+  const bridgePort = configuredBridgePort();
   const [bypassAccepted, masterSession, bridgeReachable] = await Promise.all([
     readBypassConsent(),
     tmuxRawStrict(["has-session", "-t", sessionTarget(MASTER_SESSION)]).then(() => true, () => false),
@@ -265,7 +266,7 @@ async function cmdTakeover(target?: string, opts: { all?: boolean; force?: boole
     // 逐条预检（名字 / 窗口 / sessionId）——cmdResume 里同样的校验发生在 kill 之后，来不及
     const name = opts.name && picked.length === 1 ? opts.name : agentNameFromDir(c.cwd, taken);
     let preErr = "";
-    try { assertValidNewName(name); } catch (e) { preErr = (e as Error).message; }
+    try { assertValidNewAgent(name); } catch (e) { preErr = (e as Error).message; }
     if (!preErr && taken.has(name.replace(/^agent-/, ""))) preErr = `agent 名 ${name} 已被占用（换一个 --name）`;
     if (!preErr && (await windowExists(normalizeName(name)))) preErr = `${normalizeName(name)} 窗口已存在（换一个 --name）`;
     if (!preErr && !UUID_RE.test(c.sessionId)) preErr = `sessionId 不是 UUID：${c.sessionId}`;
@@ -348,24 +349,6 @@ async function spawnFailure(proc: { exited: Promise<number>; stdout: ReadableStr
 
 // 命令实现
 // ============================================================
-
-/**
- * 启动超时时补一句可操作的诊断。
- *
- * isClaudeReady 完全建立在 TUI 文案上（❯ + 模式 banner）。Claude Code 改了这两处
- * 渲染，症状就是"每次建 agent 都超时"，而错误信息里没有任何线索指向真正的原因 ——
- * 用户只会以为是自己装错了。这里在超时时顺手探一次契约：屏幕上明明有 CC 的界面
- * 却认不出任何标记，就把这条线索直接写进错误里。
- */
-function readyTimeoutHint(pane: string): string {
-  const c = probeTuiContract(pane);
-  if (!c.suspect) return "";
-  return (
-    "。⚠️ 检测到 Claude Code 的界面在屏幕上，但认不出它的状态栏文案 —— " +
-    "如果这是升级 Claude Code 之后才开始出现的，很可能是 TUI 文案变了，" +
-    "需要更新 src/lib/tmux-helper.ts 里的 CC_MODE_BANNER_RE 等匹配规则"
-  );
-}
 
 // ============================================================
 // Projects（v2.21+，owner 2026-08-28「加 project 概念」）
@@ -609,7 +592,7 @@ async function cmdCreate(
       cwd: expandedDir,
       // v2.21+ project 上下文注入:目录 + 同伴花名册
       projectContext: await buildProjectContext(proj, tmuxName),
-      extras: { disallowedPreset: perms.preset, disallowedRaw: perms.disallowedRaw, piEnv },
+      extras: { disallowedPreset: perms.preset, disallowedRaw: perms.disallowedRaw, piEnv, role: team.role },
     };
     if (adapter.prepareSession) spec.sessionId = (await adapter.prepareSession(spec)).sessionId;
     // 按窗口 id 操作，并经 gateOps：信号清理接手后不再往 tmux 发任何东西（按名字发可能落到别的窗口）
@@ -765,7 +748,7 @@ async function cmdResume(
     throw new Error(`非法 sessionId: "${sessionId}"（不是合法的 ${adapter.label} 会话 id；其它运行时的会话请加 --runtime <id>）`);
   }
   assertResumable(sessionId, dir); // 沙箱里不许；生产里不接管沙箱的会话（lib/sandbox-sessions.ts）
-  assertValidNewName(name);
+  assertValidNewAgent(name); // 名字合法、跟已有 agent 规范化后不撞
   const tmuxName = normalizeName(name);
   const channelName = tmuxName.replace(AGENT_PREFIX, "");
 
@@ -883,8 +866,8 @@ async function cmdResume(
       extras: {
         disallowedPreset: perms.preset,
         disallowedRaw: perms.disallowedRaw,
-        // 沿用 registry 里已有的能力档案（resume 不改档案，但必须复现它）
-        piEnv: normalizePiEnvProfile((await loadRegistry()).agents[tmuxName]?.piEnv),
+        // 沿用 registry 里已有的能力档案与班子角色（resume 不改它们，但必须复现）
+        piEnv: normalizePiEnvProfile((await loadRegistry()).agents[tmuxName]?.piEnv), role: (await loadRegistry()).agents[tmuxName]?.role,
       },
     };
     const launched = await launchInWindow(tmuxName, adapter, spec, { cwd: resolvedDir });
@@ -1376,8 +1359,8 @@ async function cmdRestart(name?: string, opts: { includeMaster?: boolean } = {})
       extras: {
         disallowedPreset: info.disallowedPreset,
         disallowedRaw: info.disallowedRaw,
-        // v2.23+ 能力档案随 registry 复现，否则重启后静默变回「继承全局」
-        piEnv: normalizePiEnvProfile(info.piEnv),
+        // v2.23+ 能力档案、编排班子角色（lib/team-roles.ts）随 registry 复现，否则重启后静默变回「继承全局」/ 丢角色
+        piEnv: normalizePiEnvProfile(info.piEnv), role: info.role,
       },
     };
 
@@ -1620,14 +1603,10 @@ async function cmdSessions(search?: string) {
   // 从 registry 建立 sessionId → displayName 映射
   const reg = await loadRegistry();
   const nameMap = new Map<string, string>();
-  for (const info of Object.values(reg.agents)) {
-    if (info.sessionId && info.displayName) {
-      nameMap.set(info.sessionId, info.displayName);
-    }
-  }
+  for (const info of Object.values(reg.agents)) if (info.sessionId && info.displayName) nameMap.set(info.sessionId, info.displayName);
 
-  // 给 web 端留原始字段（ISO 时间、cwd、子会话归属）；上限 100 —— Discord 面板自己 slice(15)，CLI 是人读的。
-  const display = sessions.slice(0, 100).map((s, i) => ({
+  // 给 web 端留原始字段（ISO 时间、cwd、子会话归属）；上限 100 个主会话、每个带最新 50 个子线程（多的只报 moreSubs），Discord 面板自己再截
+  const display = capSubsPerMain(limitByMainSessions(sessions, 100, 50), 50).map((s, i) => ({
     index: i + 1,
     sessionId: s.sessionId,
     name: nameMap.get(s.sessionId) || s.slug || s.sessionId.slice(0, 8),
@@ -1638,10 +1617,10 @@ async function cmdSessions(search?: string) {
     age: formatAge(s.modifiedAt),
     modifiedAt: s.modifiedAt.toISOString(),
     lastMessage: s.lastUserMessage || "",
-    ...(s.sub ? { sub: s.sub } : {}),
+    ...(s.sub ? { sub: s.sub } : {}), ...(s.moreSubs ? { moreSubs: s.moreSubs } : {}), ...(s.oneShot ? { oneShot: true } : {}),
   }));
 
-  output({
+  outputSync({
     ok: true,
     total: sessions.length,
     showing: display.length,
@@ -2125,10 +2104,9 @@ async function cmdTmuxSendKeys(name: string, keys: string[]) {
   // keys 可以是 "Enter" "Escape" "Left" "C-c" 或普通字符串（用 -l 字面模式）
   for (const k of keys) {
     const special = /^(Enter|Escape|Esc|Left|Right|Up|Down|Tab|BTab|BSpace|C-[a-z]|M-[a-z]|Space)$/i.test(k);
-    const args = special
-      ? ["send-keys", "-t", windowTarget(tmuxName), k]
-      : ["send-keys", "-t", windowTarget(tmuxName), "-l", "--", k];
-    await tmuxRaw(args);
+    const args = special ? ["send-keys", "-t", windowTarget(tmuxName), k] : ["send-keys", "-t", windowTarget(tmuxName), "-l", "--", k];
+    if (!/^(Escape|Esc)$/i.test(k)) await noteProgramInput(windowTarget(tmuxName), special ? "" : k); // bridge 别把程序敲的字 / C-c 当成 owner
+    await (/^(Escape|Esc)$/i.test(k) ? tmuxSendEscape(windowTarget(tmuxName), { strict: true }) : tmuxRaw(args)); // Esc 走双击护栏（跨进程也算），没发出去就报错
     await Bun.sleep(50);
   }
   output({ ok: true, agent: tmuxName, keys });
@@ -2561,7 +2539,7 @@ switch (cmd) {
   case "list": await cmdList(); break;
   case "repair": await (await import("./manager/repair.js")).cmdRepair(args); break; // 收拾做到一半的 create / kill / rename 与孤儿窗口、频道（默认只列计划）
   case "label": await (await import("./manager/agent-external.js")).cmdAgentLabel(args[0] || "", args.slice(1).join(" ")); break;
-  case "team-link": await (await import("./manager/team.js")).cmdTeamLink(args); break; // 补挂 / 改挂派发者、任务名（manager/team.ts）
+  case "team-link": case "team": { const m = await import("./manager/team.js"); await (cmd === "team" ? m.cmdTeam(args) : m.cmdTeamLink(args)); break; } // 派发树 / 角色；班子 up·down·status
   case "mission": case "autopilot": await (await import("./manager/mission.js")).cmdMission(args); break; // Autopilot（原名值守，lib/missions.ts）
   case "ledger": await (await import("./manager/ledger.js")).cmdLedger(args); break; // 内置台账（manager/ledger.ts，lib/ledger-*.ts）
   case "fleet": await (await import("./manager/fleet.js")).cmdFleet(args); break; // 批量管理：LP 开关 / 压缩 / 群发（经 bridge 的 ws fleet_run，bridge/fleet/）
@@ -2721,10 +2699,8 @@ switch (cmd) {
     break;
   }
 
-  case "cost": {
-    await cmdCost(args);
-    break;
-  }
+  case "cost": await cmdCost(args); break;
+  case "codex-sub-archive": await (await import("./manager/codex-sub-archive.js")).cmdCodexSubArchive(args); break; // Codex 子线程自动归档开关（缺省关）
 
   case "invite-link": {
     await cmdInviteLink(args);
@@ -2780,71 +2756,16 @@ switch (cmd) {
   // 中继（bridge/relay-link.ts）：配对短码 / 二维码给手机与浏览器，状态查询；实现在 manager/relay.ts
   case "pair": await (await import("./manager/pair.js")).cmdPair(args); break;
   case "relay-status": await (await import("./manager/relay.js")).cmdRelayStatus(); break;
-  case "peer-http-scope": {
-    const { rest: afterForce, value: force } = extractBoolFlag(args, "--force");
-    let agentsCsv = "";
-    const pos: string[] = [];
-    for (let i = 0; i < afterForce.length; i++) {
-      const a = afterForce[i];
-      if (a === "--agents") agentsCsv = afterForce[++i] || "";
-      else if (a.startsWith("--agents=")) agentsCsv = a.slice(9);
-      else pos.push(a);
-    }
-    await cmdPeerHttpScope(pos[0] || "", agentsCsv, force);
-    break;
-  }
+  case "peer-http-scope": await cmdPeerHttpScopeCli(args); break;
   case "peer-http-remove": await cmdPeerHttpRemove(args[0] || ""); break;
+  case "peer-http-messages-only": await (await import("./manager/peers.js")).cmdPeerHttpMessagesOnly(args[0] || "", args[1] || ""); break;
+  case "peer-ledger": await (await import("./manager/peer-ledger-cli.js")).cmdPeerLedger(args); break;
   case "peer-http-tidy": await (await import("./manager/peers-tidy.js")).cmdPeerHttpTidy(args.includes("--apply")); break;
 
   // v2.15+ 一键邀请（免回执自动握手）
-  case "peer-invite-new": {
-    const { rest: afterForce, value: force } = extractBoolFlag(args, "--force");
-    let agentsCsv = "", myUrl = "";
-    for (let i = 0; i < afterForce.length; i++) {
-      const a = afterForce[i];
-      if (a === "--agents") agentsCsv = afterForce[++i] || "";
-      else if (a.startsWith("--agents=")) agentsCsv = a.slice(9);
-      else if (a === "--url") myUrl = afterForce[++i] || "";
-      else if (a.startsWith("--url=")) myUrl = a.slice(6);
-    }
-    await cmdPeerInviteNew(agentsCsv, myUrl, force);
-    break;
-  }
   case "peer-invite-list": await cmdPeerInviteList(); break;
   case "peer-invite-revoke": await cmdPeerInviteRevoke(args[0] || ""); break;
-  case "peer-invite-redeem": {
-    let join = "", name = "", url = "", token = "", iid = "", fp = "";
-    for (let i = 0; i < args.length; i++) {
-      const a = args[i];
-      if (a === "--join") join = args[++i] || "";
-      else if (a === "--name") name = args[++i] || "";
-      else if (a === "--url") url = args[++i] || "";
-      else if (a === "--token") token = args[++i] || "";
-      else if (a === "--iid") iid = args[++i] || "";
-      else if (a === "--fp") fp = args[++i] || ""; // 经中继兑换时 bridge 带上的对方指纹
-    }
-    await cmdPeerInviteRedeem(join, name, url, token, iid, fp);
-    break;
-  }
-  case "peer-join-auto": {
-    const { rest: afterForce, value: force } = extractBoolFlag(args, "--force");
-    let agentsCsv = "", myUrl = "", peerUrl = "";
-    const pos: string[] = [];
-    for (let i = 0; i < afterForce.length; i++) {
-      const a = afterForce[i];
-      if (a === "--agents") agentsCsv = afterForce[++i] || "";
-      else if (a.startsWith("--agents=")) agentsCsv = a.slice(9);
-      else if (a === "--url") myUrl = afterForce[++i] || "";
-      else if (a.startsWith("--url=")) myUrl = a.slice(6);
-      // v2.16.1: 覆盖邀请串里的对方地址(跨 tailnet 共享下串里嵌的是发方
-      // 视角 IP,接方视角是另一个映射地址——2026-07-31 实战踩坑)
-      else if (a === "--peer-url") peerUrl = afterForce[++i] || "";
-      else if (a.startsWith("--peer-url=")) peerUrl = a.slice(11);
-      else pos.push(a);
-    }
-    await cmdPeerJoinAuto(pos[0] || "", agentsCsv, myUrl, force, peerUrl);
-    break;
-  }
+  case "peer-invite-new": case "peer-invite-redeem": case "peer-join-auto": await (await import("./manager/peers-invite-cli.js")).runPeerInviteCommand(cmd, args); break;
   case "metrics": {
     await cmdMetrics(args);
     break;
@@ -2884,7 +2805,7 @@ switch (cmd) {
   case "migrate-web-state": await (await import("./manager/migrate-web-state.js")).cmdMigrateWebState(); break; // 旧 Next BFF 的 settings.db / config.json → bridge（先 tar 备份，幂等）
   case "web-release": await cmdWebRelease(args); break; // 网页版本发布 / 回滚（lib/web-releases.ts）
   case "retire-web": await (await import("./manager/retire-web.js")).cmdRetireWeb(); break; // 卸旧 com.claudestra.web（前端已由 bridge 托管；先验新模式 + 有备份才动手）
-
+  case "ctx-boundary": await (await import("./manager/ctx-boundary.js")).cmdCtxBoundary(args); break; // 上下文边界自动注入：dry-run | status | on | off
   case "permissions":
   case "perm":
   case "perms": {
@@ -2992,7 +2913,7 @@ switch (cmd) {
         "kill <name> [--force]           — destroy an agent (rerun finishes a half-done kill; --force gives up a channel that can't be deleted)",
         "rename <old-name> <new-name>    — rename (tmux window + registry + Discord channel); rerun finishes a half-done rename",
         "repair [--apply]                — clean up half-done create/kill/rename, orphan windows/channels (dry run unless --apply)",
-        'team-link <name> [--parent <agent|master|none>] [--task "<text>"] — attach an agent under its dispatcher (sidebar tree)',
+        'team-link <name> [--parent <a|master|none>] [--task "<t>"] [--role <r|none>] · team up|down|status --project <id> [--dispatcher] — tree / team',
         "restart [name]                  — restart an agent (all agents if omitted)",
         "list                            — list all agents",
         "sessions [search]               — browse past Claude Code sessions",
@@ -3024,6 +2945,7 @@ switch (cmd) {
         "auto-update claudestra on|off   — toggle Claudestra auto-update (default on)",
         "auto-update claude on|off       — toggle Claude Code auto-update (default on)",
         "auto-update channel beta|release — beta follows every commit on origin/main (default: release)",
+        "codex-sub-archive status|on|off — auto-archive Codex sub-threads idle 7 days (default off; the archive retention later deletes them)",
         "cost [--agent <name>] [--today|--week]  — aggregate token usage per agent or overall",
         "invite-link                     — generate the Discord bot invite URL (owner perms, for your own server)",
         "pair [--json]                   — print a QR code / link / 8-char code so a phone or browser can pair with this machine through the relay (RELAY_URL in .env)",

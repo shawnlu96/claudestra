@@ -10,13 +10,13 @@ import { AskQuestionCard } from "./ask-question-card";
 import { ReplyComponents } from "./reply-components";
 import { BgTaskPanel } from "./bg-task-panel";
 import { CcTaskPanel } from "./cc-task-panel";
-import { useT, getLang } from "@/lib/i18n";
+import { useT, getLang, tVerbatim, useLang } from "@/lib/i18n";
 import { BubbleMenu, SelectModeBar, useBubbleMenuTrigger } from "./bubble-menu";
-import { InlineActionContext, type InlineActionCtx } from "@/components/domd/inline-button";
-import { replyEchoMessageIds, isEchoSegment } from "../reply-echo";
-import { plainLabel } from "@/lib/chat/inline-buttons";
-import { agentChipIndex, agentLabelKey, messagePlainText, splitQuoted } from "../message-text";
-import { ActiveToolRow, HistoryToolRow, ToolCallsBlock } from "./tool-rows";
+import { InlineActionContext } from "@/components/domd/inline-button";
+import { replyEchoMessageIds, isEchoSegment, postReplyMessageIds } from "../reply-echo";
+import { useInlineActions } from "./use-inline-actions";
+import { messagePlainText, splitQuoted } from "../message-text";
+import { ToolGroup } from "./tool-rows";
 import { ClaudeHeader, CompactingLine, ReplyingLine, ThinkingDots, TurnMark, WorkingLine } from "./turn-indicators";
 import { QuoteSwipe } from "./quote-swipe";
 import { AttachmentStrip } from "./attachments";
@@ -32,6 +32,7 @@ import { GutterTime, HeaderTime } from "./msg-time";
 import { ReplyDivider, SegGroups } from "./seg-groups";
 import { inRange, selRange } from "../share-mode";
 import { ShareCheck, ShareMask, shareRowClass, useShare } from "./share-ui";
+import { AskQuote } from "@/features/asks/components/ask-quote";
 
 /** 触摸期吸底冻结窗口:抬手后 WebKit 提交合成 click 最长等 ~350ms(双击消歧),留余量 */
 const TOUCH_HOLD_MS = 500;
@@ -46,7 +47,7 @@ const NO_ORDER: string[] = [];
 /** system 级事件（compact / 斜杠命令 / 中断 / 命令输出）的通用居中分隔条。
  *  与消息气泡视觉解耦：无头像无名字，两侧细线 + 小灰字；PC 端时间在左槽（msg-time.tsx）。 */
 const SystemDivider = memo(function SystemDivider({ m }: { m: ChatMessage }) {
-  const t = useT();
+  useLang(); // 切语言即时重渲；文字走 tVerbatim：内容可能是带 | 的命令原文，不能让 t() 当单复数拆掉前半
   // 进场动画只给实时新增(本地 id)——历史加载/对账替换的 h{seq} 节点不播,
   // 否则打开会话/切回对齐时整页一起闪一遍(owner 2026-07-16「更丝滑」)
   const anim = m.id.startsWith("h") ? "" : "chat-msg-in";
@@ -56,8 +57,8 @@ const SystemDivider = memo(function SystemDivider({ m }: { m: ChatMessage }) {
     <div className={`${anim} relative mb-[22px] flex select-none items-center gap-3`}>
       <GutterTime ts={m.ts} side="left" lead="system" />
       <span className="h-px flex-1 bg-base-content/10" />
-      <span className="max-w-[70%] shrink-0 truncate text-[11px] font-medium tracking-wide text-base-content/35">
-        {t(m.content)}
+      <span title={tVerbatim(m.content)} className="max-w-[70%] shrink-0 truncate text-[11px] font-medium tracking-wide text-base-content/35">
+        {tVerbatim(m.content)}
       </span>
       <HeaderTime ts={m.ts} />
       <span className="h-px flex-1 bg-base-content/10" />
@@ -79,11 +80,13 @@ const TextBlock = memo(function TextBlock({
   muted,
   fullText,
   foldKey,
+  postReply,
 }: {
   /** 所属消息 id（长按/右键菜单「删除」用） */
   msgId?: string;
-  /** 旁白的收起 / 展开键（消息 id + 段序），只有 muted 段传；规则见 ../narration-fold.ts */
+  /** 旁白的收起 / 展开键（消息 id + 段序），只有 muted 段传；postReply = 紧跟 reply 的旁白，默认收起（../narration-fold.ts） */
   foldKey?: string;
+  postReply?: boolean;
   text: string;
   ts?: string;
   streamed?: boolean;
@@ -99,7 +102,7 @@ const TextBlock = memo(function TextBlock({
   const bodyRef = useRef<HTMLDivElement>(null);
   const press = useBubbleMenuTrigger(() => ({ text, fullText, ts, messageId: msgId, getEl: () => bodyRef.current }));
   const exporting = useIsExport(); // 导出树里旁白强制展开、不出收起条
-  const folded = useNarrationFold(muted && !exporting ? foldKey : undefined);
+  const folded = useNarrationFold(muted && !exporting ? foldKey : undefined, postReply);
   return (
     <QuoteSwipe quote={text} blockLevel>
       <div
@@ -127,13 +130,13 @@ const TextBlock = memo(function TextBlock({
             // 一次 → 用 key 按内容长度强制重挂,每次 80ms 合批后重新解析整段。段落
             // 级体量解析是亚毫秒级,memo 隔离其它段;未闭合语法(写到一半的 **/```)
             // 期间样式会短暂跳动,属流式渲染的正常代价。
-            <Domd key={text.length} initMd={text} bodyClassName="chat-domd" />
+            <Domd key={text.length} initMd={text} bodyClassName="chat-domd" probe="sync" />
           ) : (
             <Domd initMd={text} bodyClassName="chat-domd" />
           )}
         </div>
         )}
-        {muted && foldKey && !exporting && <NarrationFoldBar foldKey={foldKey} />}
+        {muted && foldKey && !exporting && <NarrationFoldBar foldKey={foldKey} postReply={postReply} />}
       </div>
     </QuoteSwipe>
   );
@@ -144,47 +147,22 @@ const TextBlock = memo(function TextBlock({
  * 有 segments（叙述/工具的真实交错序）时按段渲染——修「工具全堆气泡顶部、
  * 文本全挤底部」的时间线错乱；无 segments（旧缓存快照）回退 content+toolCalls。
  * 流式进行中文本段用纯文本（DOMD 只读一次不适合增量喂字），定稿/历史走 DOMD。
- * agent chip 名单只订阅压成字符串的 agentLabelKey（D8-4，见 message-text.ts）。
  */
 function AssistantBody({
   m,
   liveEmpty,
   streamingLast,
+  postReply,
 }: {
   m: ChatMessage;
   liveEmpty: boolean;
   streamingLast: boolean;
+  /** 整条是紧跟 reply 的旁白（reply-echo.ts postReplyMessageIds） */
+  postReply?: boolean;
 }) {
   const segs = m.segments;
   const full = messagePlainText(m); // 长按菜单的「复制整条」用；只有一段时与本段相同,菜单自动不显示
-  // 行内按钮(v2.20+,`[[{#id .style}label]]`):DOMD 深处的 InlineButton 经
-  // context 拿到本条消息的回投回调;点击复用块级组件的 clickReplyComponent
-  // (同 wire `[button:<id>]`、同 replyClicks 状态,rowKey 前缀 `i:` 区分)。
-  const store = useChatStoreApi();
-  const [inlineBusy, setInlineBusy] = useState(false);
-  // agent chip(`[[{.agent}name]]`)的可跳转名单:name / displayName 都认,
-  // master 别名映射到前端的 __master__(bridge-api 的 apiAgentName 约定)
-  const agentKey = useChatStore((s) => agentLabelKey(s.state.agents));
-  const inlineCtx = useMemo<InlineActionCtx>(() => {
-    const { labels, resolve } = agentChipIndex(agentKey);
-    return {
-      clicks: m.replyClicks ?? {},
-      busy: inlineBusy,
-      onClick: async (id, label) => {
-        setInlineBusy(true);
-        try {
-          await store.clickReplyComponent(m.id, `i:${id}`, id, plainLabel(label), `[button:${id}]`);
-        } finally {
-          setInlineBusy(false);
-        }
-      },
-      agents: labels,
-      openAgent: (label) => {
-        const name = resolve(label);
-        if (name) void store.openAgent(name);
-      },
-    };
-  }, [m.id, m.replyClicks, inlineBusy, store, agentKey]);
+  const inlineCtx = useInlineActions(m); // 行内按钮 / agent chip 的回调，跟着「待你处理」走
   const hasSegs = !!segs && segs.length > 0;
   const hasNarration = hasSegs || !!m.content;
   const hasReply = !!m.replyText;
@@ -201,25 +179,22 @@ function AssistantBody({
     ) : // agent 把自己刚发的 reply 又当普通文本复述了一遍 → 藏掉这份灰的（features/chat/reply-echo.ts）
     seg.kind === "text" && isEchoSegment(m, seg.text) ? null : seg.kind === "text" ? (
       // 只有「最后一段且回合仍在流式」在生长——其余段已封笔,立即富文本
-      <TextBlock msgId={m.id} key={i} text={seg.text} ts={seg.ts ?? m.ts} streamed={m.streamed && i === segs!.length - 1} fullText={full} muted foldKey={`${m.id}:${i}`} />
+      <TextBlock msgId={m.id} key={i} text={seg.text} ts={seg.ts ?? m.ts} streamed={m.streamed && i === segs!.length - 1} fullText={full} muted
+        foldKey={`${m.id}:${i}`} postReply={postReply || segs![i - 1]?.kind === "reply"} />
     ) : seg.kind === "reply" ? (
       // 空 reply 段不渲染（源头在 chat-store.setReplyText 拦截，这里兜历史快照里的旧空段）
       !seg.text?.trim() ? null : (
         <TextBlock key={i} msgId={m.id} text={seg.text} ts={seg.ts ?? m.replyTs ?? m.ts} streamed={false} fullText={full} />
       )
     ) : (
-      <div key={i} className="my-2 space-y-1">
-        {seg.tools.map((t, j) =>
-          streamingLast ? <ActiveToolRow key={j} tool={t} active={i === segs!.length - 1 && j === seg.tools.length - 1} /> : <HistoryToolRow key={j} tool={t} />,
-        )}
-      </div>
+      <ToolGroup key={i} tools={seg.tools} streaming={streamingLast} activeLast={i === segs!.length - 1} />
     );
   const narration = hasSegs ? (
     <SegGroups segs={segs!} ts={m.ts} render={renderSeg} />
   ) : hasNarration && !isEchoSegment(m, m.content) ? (
     <div className="relative">
       <GutterTime ts={m.ts} side="left" lead="narr" />
-      <TextBlock msgId={m.id} text={m.content} ts={m.ts} streamed={m.streamed} fullText={full} muted foldKey={`${m.id}:c`} />
+      <TextBlock msgId={m.id} text={m.content} ts={m.ts} streamed={m.streamed} fullText={full} muted foldKey={`${m.id}:c`} postReply={postReply} />
     </div>
   ) : null;
 
@@ -231,11 +206,11 @@ function AssistantBody({
           {hasNarration && <ReplyDivider />}
           <div className="relative">
             <GutterTime ts={m.replyTs ?? m.ts} side="left" lead="body" />
-            {/* reply 到达即完整,直接富文本 */}
-            <TextBlock msgId={m.id} text={m.replyText!} ts={m.replyTs ?? m.ts} streamed={false} fullText={full} />
+            <TextBlock msgId={m.id} text={m.replyText!} ts={m.replyTs ?? m.ts} streamed={false} fullText={full} /* reply 到达即完整,直接富文本 */ />
           </div>
         </>
       )}
+      {inlineCtx.lockHint && <p className="mt-1 text-[11px] opacity-50">{inlineCtx.lockHint}</p>}
     </InlineActionContext.Provider>
   );
 }
@@ -247,7 +222,7 @@ function AssistantBody({
  * 消息的对象引用稳定，memo 后每事件只有正在流式的最后一个气泡重渲染。移动端
  * 列表页与会话页并排都在 DOM——会话页的重渲染风暴会卡死列表页的滚动。
  */
-export const Message = memo(function Message({ m, streaming, isLast, awaiting }: { m: ChatMessage; streaming: boolean; isLast: boolean; awaiting: boolean }) {
+export const Message = memo(function Message({ m, streaming, isLast, awaiting, postReply }: { m: ChatMessage; streaming: boolean; isLast: boolean; awaiting: boolean; postReply?: boolean }) {
   devCount("bubble-render"); // 开发者面板的「气泡渲染速率」:memo 失效时这里会飙
   /** user 气泡本体 —— 长按菜单里「选择文字」要框住的范围。 */
   const bubbleRef = useRef<HTMLDivElement>(null);
@@ -262,8 +237,7 @@ export const Message = memo(function Message({ m, streaming, isLast, awaiting }:
   }));
   const t = useT();
   const store = useChatStoreApi();
-  // 个人资料：自己的消息(无 from——from 是入站来源标签,别人的消息才带)
-  // 旁显示自定义头像+昵称(owner 2026-07-14)。低频变更,全气泡重渲染可接受。
+  // 个人资料：自己的消息(无 from——入站来源标签,别人的才带)旁显示自定义头像+昵称(owner 2026-07-14)。低频变更,全气泡重渲染可接受。
   const profile = useChatStore((s) => s.state.profile);
   if (m.role === "system") return <SystemDivider m={m} />;
   if (m.role === "user") {
@@ -300,7 +274,7 @@ export const Message = memo(function Message({ m, streaming, isLast, awaiting }:
             </span>
           </div>
         )}
-        {atts.length > 0 && <AttachmentStrip items={atts} />}
+        {atts.length > 0 && <AttachmentStrip items={atts} msg={m} />}
         {m.content && (
           <QuoteSwipe quote={userBody} className="max-w-[85%]">
             <div
@@ -314,7 +288,7 @@ export const Message = memo(function Message({ m, streaming, isLast, awaiting }:
               {...press.handlers}
             >
               <GutterTime ts={m.ts} side={isSelf ? "right" : "left"} lead="user" />
-              {userQuoted && (
+              {m.askId ? <AskQuote id={m.askId} /> : userQuoted && (
                 <div className="mb-2 border-l-2 border-base-content/25 pl-2 text-[12px] leading-snug text-base-content/50">
                   {userQuoted}
                 </div>
@@ -369,14 +343,14 @@ export const Message = memo(function Message({ m, streaming, isLast, awaiting }:
       <div>
         {/* 有 segments（交错序）时工具在段内渲染；旧快照回退整块工具卡 */}
         {!hasSegs && !!m.toolCalls?.length && (
-          <ToolCallsBlock tools={m.toolCalls} streamingLast={streamingLast} />
+          <ToolGroup tools={m.toolCalls} streaming={streamingLast} activeLast />
         )}
-        <AssistantBody m={m} liveEmpty={liveEmpty} streamingLast={streamingLast} />
+        <AssistantBody m={m} liveEmpty={liveEmpty} streamingLast={streamingLast} postReply={postReply} />
       </div>
       {/* agent 出站附件(reply files):图片内联、文件 chip,与 user 气泡同一渲染 */}
       {!!m.attachments?.length && (
         <div className="mt-2">
-          <AttachmentStrip items={m.attachments} />
+          <AttachmentStrip items={m.attachments} msg={m} />
         </div>
       )}
       {!!m.replyComponents?.length && <ReplyComponents m={m} />}
@@ -638,6 +612,7 @@ export function MessageList() {
   // 形态②的复述：历史按 jsonl 记录切段，agent 复述那份会独立成一条纯 text 消息。
   // 整个列表扫一遍（不是 visible——回合边界可能在窗口之外），拿到该藏的 id。
   const echoIds = replyEchoMessageIds(messages);
+  const postReplyIds = postReplyMessageIds(messages); // 紧跟 reply 的旁白消息：默认收起
 
   return (
     // touch-pan-y + overscroll-contain：到边界时滚动链穿透到不可滚的应用壳被
@@ -749,7 +724,7 @@ export function MessageList() {
             {share.on && <ShareMask id={m.id} order={order} />}
             {echoIds.has(m.id) ? null : (
               <BubbleBoundary id={`${m.sid ?? ""}:${m.id}`} resetKey={m}>
-                <Message m={m} streaming={streaming} isLast={i === visible.length - 1} awaiting={awaiting} />
+                <Message m={m} streaming={streaming} isLast={i === visible.length - 1} awaiting={awaiting} postReply={postReplyIds.has(m.id)} />
               </BubbleBoundary>
             )}
           </div>

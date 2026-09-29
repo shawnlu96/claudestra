@@ -296,6 +296,17 @@ export async function collectSessions(opts?: {
   return reconcileSessions(raw, jobStates, registry);
 }
 
+/** bg 会话一行摘要：名字、bgId、状态、分身标记 */
+export function bgSessionLine(s: NeutralSessionInfo): string {
+  const mark = s.doppelgangerOf
+    ? `\n　└ ⚠️ 疑似 **${s.doppelgangerOf}** 的分身（${s.doppelgangerReason === "same-name" ? "同名" : "同目录"}）`
+    : s.registeredAgent
+      ? `\n　└ ✓ 正式会话（${s.registeredAgent}）`
+      : "";
+  const intent = s.intent ? `\n　intent: ${s.intent.slice(0, 80)}` : "";
+  return `**${s.name || "(无名)"}** \`${s.bgId}\` — ${s.status}${mark}${intent}`;
+}
+
 /**
  * GET /sessions 的可见范围：全权凭据（canManage，即 api-respond 的 isFullScope）看全部，含野生会话；其余（包括 scope 为 "*" 的 guest / peer）
  * 只看 scope 内 agent 的正式会话及其分身。会话 id 是 /agents/resume 收编、takeover 的钥匙（tests/session-gates.test.ts）。

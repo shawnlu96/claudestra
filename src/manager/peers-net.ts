@@ -3,7 +3,7 @@
  * 从 manager/peers.ts 原样搬出（给「一个对方一条记录」的合并逻辑腾地方）。
  */
 import { repoEnvVar } from "../lib/env-file.js";
-import { DEFAULT_BRIDGE_PORT } from "../lib/bridge-url.js";
+import { configuredBridgePort, DEFAULT_BRIDGE_PORT } from "../lib/bridge-url.js";
 
 /**
  * peer 握手的 `--url` 没给时自动探测本机对外地址（手抄最容易错：IP 记错、忘带端口、填 127.0.0.1）。
@@ -19,7 +19,7 @@ export async function resolveMyBridgeUrl(myUrl: string): Promise<{ url: string; 
   if (myUrl) return { url: myUrl, note: bindWarn || undefined };
   const https = await (await import("../lib/peer-url.js")).httpsPeerUrl(repoEnvVar("PEER_PUBLIC_URL") || "");
   if (https) return { url: https, note: `用 HTTPS 入口 ${https}（反代 → 本机 peer 专用入口，bridge 端口不必对外开放）` };
-  const port = parseInt(repoEnvVar("BRIDGE_PORT") || String(DEFAULT_BRIDGE_PORT));
+  const port = configuredBridgePort();
   const direct = bindWarn ? await (await import("../lib/peer-ingress-config.js")).openDirectPeerIngress(port) : null;
   if (direct) return direct;
   const cands = (await import("../lib/net-addr.js")).detectBridgeUrls(port);

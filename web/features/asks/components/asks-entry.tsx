@@ -3,9 +3,9 @@ import { useEffect } from "react";
 import { createPortal } from "react-dom";
 import { useChatStoreApi } from "@/features/chat/chat-store";
 import { useChatNav } from "@/features/chat/components/nav-context";
-import { uiAgentName } from "@/lib/chat/agents";
 import { useT } from "@/lib/i18n";
-import { agentLabel, askCounts } from "../asks-model";
+import { jumpToAsk } from "../ask-jump";
+import { agentLabel, askCounts, type WebAsk } from "../asks-model";
 import { asksStore, useAsks } from "../asks-store";
 import { AsksDrawer } from "./asks-drawer";
 import { InboxIcon } from "./ask-icons";
@@ -27,10 +27,11 @@ export function AsksEntry({ machineKey }: { machineKey: string }) {
     return () => clearTimeout(id);
   }, [banner]);
   const c = askCounts(asks);
-  const openChat = (agent: string) => {
+  // 「回到对话」：只收起抽屉、不出栈（asks-store.leaveForChat），打开发起 agent 的对话并跳到原消息（ask-jump.ts；定位不到就只打开对话）
+  const openChat = (ask: WebAsk) => {
     asksStore.leaveForChat();
-    void store.openAgent(uiAgentName(agent));
     nav.toContent();
+    void jumpToAsk(store, ask);
   };
 
   return (
@@ -61,7 +62,7 @@ export function AsksEntry({ machineKey }: { machineKey: string }) {
           >
             <InboxIcon />
             <span className="min-w-0 truncate">
-              <span className="font-semibold">{t("待你处理")} · {agentLabel(banner.fromAgent, t)}</span> {banner.title}
+              <span className="font-semibold">{t("待你处理")} · {agentLabel(banner.fromAgent, t, banner.kind)}</span> {banner.title}
             </span>
           </button>,
           document.body,

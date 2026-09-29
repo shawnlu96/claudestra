@@ -19,8 +19,12 @@ export function forwardHeaders(h: Headers, drop: (k: string) => boolean = () => 
   return out;
 }
 
-/** peer 路径要额外去掉的头（§4.1） */
-export const dropForPeer = (k: string): boolean => k === "host" || k.startsWith("x-forwarded-") || k.startsWith("x-claudestra-relay-");
+/**
+ * peer 路径要额外去掉的头（§4.1）。cookie 与设备头（lib/devices.ts DEVICE_HEADER）也去：peer 只凭 Bearer + 签名进门，
+ * 帧里带着浏览器凭据也不能在本机换成设备身份
+ */
+export const dropForPeer = (k: string): boolean =>
+  k === "host" || k === "cookie" || k === "x-cstra-device" || k.startsWith("x-forwarded-") || k.startsWith("x-claudestra-relay-");
 
 /** set-cookie 是唯一不能用逗号合并的多值头（Expires 里就有逗号）：帧里多条以 \n 连接，recordToHeaders 再拆回去 */
 export const SET_COOKIE_SEP = "\n";
@@ -60,9 +64,13 @@ export function rewriteLocation(headers: Headers, host: string): Headers {
   return headers;
 }
 
+const B64_RE = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
+
 export const b64 = {
   enc: (u: Uint8Array): string => Buffer.from(u).toString("base64"),
   dec: (s: string): Uint8Array => new Uint8Array(Buffer.from(s, "base64")),
+  /** 严格解码：不是规范的 base64（长度、字符、填充）返回 null——Buffer.from 会把乱码默默解成更短甚至空的字节 */
+  decStrict: (s: string): Uint8Array | null => (B64_RE.test(s) ? new Uint8Array(Buffer.from(s, "base64")) : null),
 };
 
 /** 把一段字节切成 ≤ maxChunk 的块（空输入 → 空数组） */

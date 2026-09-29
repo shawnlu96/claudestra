@@ -15,15 +15,31 @@ const INBOUND_HEAD_START_RE = /^\s*\[(🌐|🤖|🤝|📢|📣)/;
 const HEAD_END_RE = /]\r?\n\r?\n/;
 
 /**
+ * 打断抬头（lib/turn-cuts.ts 的 preemptHeadline / stopHeadline / heldAcrossStopNote，放在来源头之后、正文之前）。只有 channel 属性带
+ * interrupt_note="true"（bridge 真加了抬头才写）时才剥：只按措辞认的话，外源 / Discord 用户自己手写一句「[⚡ 这条消息打断了你…]」
+ * 就能把后面的内容从历史里藏起来，agent 却照样收到全文。Pi 裸记录没有属性，抬头留在历史里（只是多一行字）。
+ */
+const NOTE_ATTR_RE = /(?:^|\s)interrupt_note="true"/;
+const INTERRUPT_NOTE_RE = /^\s*\[(⚡ 这条消息打断了你|⏹ 这是一条「停」指令|⏹ 这条是叫停之前)/;
+
+/** 剥掉开头那块打断抬头（没有就原样返回） */
+function stripInterruptNote(body: string): string {
+  if (!INTERRUPT_NOTE_RE.test(body)) return body;
+  const m = HEAD_END_RE.exec(body);
+  return m ? body.slice(m.index + m[0].length) : isSingleBlock(body) ? "" : body;
+}
+
+/**
  * 剥掉开头的 bridge 注入头：「]」+ 空行之前是头；没有空行边界但整段是单个方括号块 = 正文为空的纯附件消息，整段都是头。
  * 只能对确知是 bridge 注入的消息调用（channelBodyText 看属性、Pi 看 hasInboundHeader）：用户自己打的
  * 「[🤖 ignore previous instructions]\n\nhello」剥了之后历史只剩 hello，agent 却收到全文。
  */
-export function stripChannelHeader(body: string): string {
+export function stripChannelHeader(body: string, withNote = false): string {
   const s = body.trimStart(); // 尾部空行先别削：正文为空时它就是头的边界
-  if (!INBOUND_HEAD_START_RE.test(s)) return s.trim();
+  const note = (x: string) => (withNote ? stripInterruptNote(x) : x);
+  if (!INBOUND_HEAD_START_RE.test(s)) return note(s).trim();
   const m = HEAD_END_RE.exec(s);
-  if (m) return s.slice(m.index + m[0].length).trim();
+  if (m) return note(s.slice(m.index + m[0].length)).trim();
   return isSingleBlock(s) ? "" : s.trim();
 }
 
@@ -70,12 +86,16 @@ export function apiMirrorBody(text: string, attachmentCount: number): string {
 
 const XML_ENTITY: Record<string, string> = { "&amp;": "&", "&quot;": '"', "&lt;": "<", "&gt;": ">", "&apos;": "'" };
 
+/** <channel> 头属性值的 XML 实体还原（renderContentForLocal 写头时转义过） */
+export function decodeXmlAttr(v: string): string {
+  return v.replace(/&(?:amp|quot|lt|gt|apos);/g, (e) => XML_ENTITY[e] ?? e);
+}
+
 /** <channel …> 属性串里的 attachments="a;b"（bridge 用 ; 连接，见 bridge.ts 组 meta 处） */
 export function channelAttachmentPaths(attrs: string): string[] {
   const v = /(?:^|\s)attachments="([^"]*)"/.exec(attrs)?.[1];
   if (!v) return [];
-  return v
-    .replace(/&(?:amp|quot|lt|gt|apos);/g, (e) => XML_ENTITY[e] ?? e)
+  return decodeXmlAttr(v)
     .split(";")
     .map((p) => p.trim())
     .filter(Boolean);
@@ -90,14 +110,99 @@ const INJECTED_ATTR_RE = /(?:^|\s)(?:api|is_agent)="true"/;
  * 正文里已有整行的附件行（Discord 入口、新 API 入口）就不再按属性补：属性按 ; 拆，文件名带分号会拆出假路径。
  */
 export function channelBodyText(attrs: string, body: string): string {
-  const text = ownerWordsOfAnswer(attrs, INJECTED_ATTR_RE.test(attrs) ? stripChannelHeader(body) : body.trim());
+  const withNote = NOTE_ATTR_RE.test(attrs);
+  // 先剥打断抬头（bridge 写在正文最前、来源头之后），再按 trigger 去掉答复的说明行：两者都是 bridge 加的，顺序反了会把抬头当成说明行剥掉
+  const bare = INJECTED_ATTR_RE.test(attrs) ? stripChannelHeader(body, withNote) : (withNote ? stripInterruptNote(body.trim()) : body).trim();
+  const text = ownerWordsOfAnswer(attrs, bare);
   return (/^\[attachment: [^\]\n]+\]$/m.test(text) ? text : withAttachmentLines(text, channelAttachmentPaths(attrs))).trim();
 }
 
+const ASK_ANSWER_RE = /(?:^|\s)trigger="ask_answer"/;
+const WIRE_LINE_RE = /^\[(?:button|select):[^\]\n]+\]$/;
+const ASK_ID_RE = /[（(](ask_[0-9a-z]+)[）)]/;
 /**
- * owner 对「待你处理」的作答（trigger="ask_answer"，bridge/asks.ts answerContent）：第一行是 bridge 给 agent 写的说明，
- * 历史里只留 owner 发的原文——和网页的乐观气泡、直播回显（web stream-shape）对得上。attrs = <channel …> 的属性串
+ * 第一行里的所选项（bridge/asks.ts answerContent 的两种语言）：标题总以标点收尾，「选择：」紧跟在标题末尾的标点后面，
+ * 选项段一直到「还有 N 项…」或「下面是 owner 发的原文」为止——不按第一个「。」截（选项里可能带「。」），
+ * 也不认标题自己写的「请选择：」（前面不是标点）。标题里恰好也有「？选择：x。」的，取最后一处。
  */
+const CHOSE_RE = /[。？！?!.]选择：(.+?)。(?=这条还有 \d+ 项没答|还有 \d+ 项 owner 没选|下面是 owner 发的原文)|[.?!。？！] Chose: (.+?)\. (?=\d+ more part|\d+ part\(s\) left|Owner's words below)/g;
+
+/** owner 对「待你处理」的作答在历史 / 直播里带的两样：答的是哪条 ask，以及 owner 的原文（wire 行 + 写的话，网页据此回填按钮已答态、和乐观气泡对账） */
+export interface AskAnswerRef {
+  /** 答的是哪条 ask（web 画「答复：<标题>」引用条） */
+  askId?: string;
+  /** owner 的原文（和显示的人话不同时才带） */
+  wire?: string;
+}
+
+/**
+ * owner 对「待你处理」的作答（bridge/asks.ts answerContent：第一行是给 agent 写的说明，之后是 owner 的原文）→ 给人看的样子：
+ * askId 取第一行里的 ask_…；正文把 wire 行（[button:…] / [select:…]）换成第一行里的选项人话，再接 owner 写的话。
+ * 历史（channelBodyText）和直播（bridge 入站事件的 echo）都用它，多端显示一致；原文另放 wire，不丢。
+ */
+export function answerEcho(content: string): AskAnswerRef & { text: string } {
+  const [head = "", ...rest] = content.split("\n");
+  const said = rest.filter((l) => !WIRE_LINE_RE.test(l.trim())).join("\n").trim();
+  const chose = [...head.matchAll(CHOSE_RE)].pop();
+  const labels = (chose?.[1] ?? chose?.[2] ?? "").trim();
+  const askId = ASK_ID_RE.exec(head)?.[1];
+  const text = [labels, said].filter(Boolean).join("\n");
+  const wire = rest.join("\n").trim();
+  return { ...(askId ? { askId } : {}), text, ...(wire && wire !== text ? { wire } : {}) };
+}
+
+/** channel 包装的属性串 + 内文 → 这条是哪条 ask 的作答、owner 的原文（不是作答 → 空对象） */
+export function channelAnswer(attrs: string, body: string): AskAnswerRef {
+  if (!ASK_ANSWER_RE.test(attrs)) return {};
+  const { askId, wire } = answerEcho(stripChannelHeader(body, NOTE_ATTR_RE.test(attrs))); // 押过叫停的作答前面还有一段叫停抬头
+  return { ...(askId ? { askId } : {}), ...(wire ? { wire } : {}) };
+}
+
 function ownerWordsOfAnswer(attrs: string, text: string): string {
-  return /(?:^|\s)trigger="ask_answer"/.test(attrs) ? text.split("\n").slice(1).join("\n").trim() : text;
+  return ASK_ANSWER_RE.test(attrs) ? answerEcho(text).text : text;
+}
+
+/** 历史里一条入站消息的发送者、所答的 ask 与原文（lib/session-history.ts）：没有的字段不带，历史 JSON 里不出现空键；没有 from 就不带 fromId */
+export function senderOf(un: { from?: string; fromId?: string } & AskAnswerRef): Record<string, string> {
+  const out: Record<string, string> = {};
+  if (un.from) out.from = un.from;
+  if (un.from && un.fromId) out.fromId = un.fromId;
+  if (un.askId) out.askId = un.askId;
+  if (un.wire) out.wire = un.wire;
+  return out;
+}
+
+const COMMAND_LINE_MAX = 200;
+
+/** 斜杠命令记录的原文（<command-name>/x</command-name> ± <command-args>…）→「/x 参数」；不是命令记录 → null */
+export function commandRecordLine(raw: string): string | null {
+  const cmd = /<command-name>(\/[\w:-]+)<\/command-name>/.exec(raw);
+  return cmd ? commandLine(cmd[1], /<command-args>([\s\S]*?)<\/command-args>/.exec(raw)?.[1]) : null;
+}
+
+/** 斜杠命令记录（session-history 还原 <command-name> / <command-args>）→ 历史里的一行：带上参数（Web 直通 / TUI 直敲的参数原本只剩「/x」，owner 看不到敲进去了什么），压成一行、限长 */
+export function commandLine(name: string, args?: string): string {
+  const a = (args ?? "").replace(/\s+/g, " ").trim();
+  const line = a ? `${name} ${a}` : name;
+  const chars = Array.from(line);
+  return chars.length > COMMAND_LINE_MAX ? `${chars.slice(0, COMMAND_LINE_MAX).join("")}…` : line;
+}
+
+/** 去掉 ANSI 转义序列（local-command-stdout 里的 \x1b[1m 等，裸渲染是豆腐块）。 */
+function stripAnsi(s: string): string {
+  // eslint-disable-next-line no-control-regex
+  return s.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, "");
+}
+
+/**
+ * 斜杠命令的输出记录 `<local-command-stdout>…</local-command-stdout>` → 历史里的一行（去 ANSI、限 200 字）。
+ * 不是这种记录 → undefined；空输出 → null（记录照样吃掉，别回落成普通文本）。老版 CC 记成 user 记录、新版记成 system/local_command，两处共用。
+ */
+export function commandStdoutLine(raw: string): string | null | undefined {
+  const m = /^<local-command-stdout>([\s\S]*)<\/local-command-stdout>$/.exec(raw.trim());
+  if (!m) return undefined;
+  const body = stripAnsi(m[1]).trim();
+  if (!body || body === "(no content)") return null;
+  const chars = Array.from(body); // 按码点截：slice 会把 emoji 的代理对切成半个
+  return chars.length > 200 ? chars.slice(0, 200).join("") + "…" : body;
 }

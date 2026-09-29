@@ -42,7 +42,7 @@ type StageOf = Pick<LedgerTask, "kind" | "stage"> & { stageBefore?: Stage | null
 type DepTask = StageOf & Pick<LedgerTask, "id">;
 
 /** blocked 是暂停，不是倒退：上游从 live 进 blocked，下游不该重新被挡；没记 stageBefore 的残缺数据按 blocked 本身算 */
-function workStage(t: StageOf): Stage {
+export function workStage(t: StageOf): Stage {
   return t.stage === "blocked" && t.stageBefore ? t.stageBefore : t.stage;
 }
 

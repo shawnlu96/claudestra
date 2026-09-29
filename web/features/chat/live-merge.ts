@@ -1,4 +1,9 @@
+import { splitsReplyBubble } from "@/lib/chat/history-shape";
 import type { ChatMessage } from "./type";
+
+type Segments = NonNullable<ChatMessage["segments"]>;
+
+export { splitsReplyBubble };
 
 /**
  * v2.23.2+ 直播气泡 ↔ 历史气泡的合流规则（纯函数，tests/web-live-merge.test.ts 覆盖）。
@@ -166,20 +171,22 @@ export function mergeContiguousAssistant(base: ChatMessage[], delta: ChatMessage
     last.sid === first.sid &&
     typeof last.seqEnd === "number" &&
     fs !== null &&
-    fs > last.seqEnd;
+    fs > last.seqEnd &&
+    !splitsReplyBubble(last, first.replyText, first.replyComponents);
   if (!joinable) return [...base, ...delta];
   const toolCalls = [...(last.toolCalls ?? []), ...(first.toolCalls ?? [])];
   const attachments = [...(last.attachments ?? []), ...(first.attachments ?? [])];
   const replyText = [last.replyText, first.replyText].filter(Boolean).join("\n");
   const merged: ChatMessage = {
     ...last,
-    segments: [...(last.segments ?? []), ...(first.segments ?? [])],
+    segments: joinSegments(last.segments ?? [], first.segments ?? []),
     content: [last.content, first.content].filter(Boolean).join("\n\n"),
     ...(toolCalls.length ? { toolCalls } : {}),
     ...(attachments.length ? { attachments } : {}),
     ...(replyText ? { replyText } : {}),
     ...(last.replyTs || first.replyTs ? { replyTs: last.replyTs ?? first.replyTs } : {}),
     ...joinReplyComponents(last, first),
+    ...(first.replyAskId ? { replyAskId: first.replyAskId } : {}),
     ...(typeof first.turnMs === "number" ? { turnMs: first.turnMs } : {}),
     seqEnd: typeof first.seqEnd === "number" ? first.seqEnd : last.seqEnd,
   };
@@ -187,8 +194,19 @@ export function mergeContiguousAssistant(base: ChatMessage[], delta: ChatMessage
 }
 
 /**
- * 两段都带组件时按先后拼起来（与整段拉历史时 lib/chat/history-shape.ts 的 accumulate 拼法一致）——只取一段，另一段的按钮 / 表单
- * 就从气泡里消失了。按钮行的已答键是下标（replyRowKey 的 `b<ri>`），后一段的要平移前一段的行数；
+ * 两段 segments 首尾相接：接缝两侧都是工具段就并成一段。回合进行中差量是逐条追平的，一条记录一个工具段，
+ * 直接拼会把一串连续工具拆成「各 1 步」，ToolGroup 就收不起来（历史一次读出走 history-shape，本来就是并好的）。
+ */
+function joinSegments(a: Segments, b: Segments): Segments {
+  const tail = a[a.length - 1];
+  const head = b[0];
+  if (tail?.kind !== "tools" || head?.kind !== "tools") return [...a, ...b];
+  return [...a.slice(0, -1), { ...tail, tools: [...tail.tools, ...head.tools] }, ...b.slice(1)];
+}
+
+/**
+ * 组件按先后拼起来（与整段拉历史时 lib/chat/history-shape.ts 的 accumulate 拼法一致）——只取一段，另一段的按钮 / 表单
+ * 就从气泡里消失了。两段都带按钮时 joinable 已经不并（splitsReplyBubble），走到这里的实际只有一边有组件。按钮行的已答键是下标（replyRowKey 的 `b<ri>`），后一段的要平移前一段的行数；
  * 选单（m:/s:<id>）与行内按钮（i:<id>）的键不含下标，原样合并。
  */
 function joinReplyComponents(last: ChatMessage, first: ChatMessage): Pick<ChatMessage, "replyComponents" | "replyClicks"> {

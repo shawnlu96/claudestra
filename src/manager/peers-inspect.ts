@@ -8,6 +8,7 @@ import { output } from "./core.js";
 import { classifyJoinError, joinFailureHint, localTailnetAddr, type JoinFailureKind } from "../lib/peer-join-hints.js";
 import { relayPeerFingerprint } from "../lib/peers.js";
 import { relayStatus } from "./relay.js";
+import { readJsonCapped } from "../lib/body-reader.js";
 
 /**
  * 经中继的邀请没法预检对方：对方还没把我列为联系人，中继只放行兑换那一条路（docs/relay/protocol.md §4）。
@@ -30,13 +31,14 @@ export async function cmdPeerInviteInspect(inviteStr: string) {
     return;
   }
   // 已经连着这个对方了：加入会刷新那条记录的地址 / token，确认卡上提一句
-  const existing = (await readPeers()).httpPeers?.find((p) => isSameInviter(p, hs))?.name;
+  const peerTrust = await import("../lib/peer-trust.js"), anchorOf = await peerTrust.peerAnchorOf();
+  const existing = (await readPeers()).httpPeers?.find((p) => isSameInviter(p, hs, anchorOf(p), peerTrust.legacyStillOpen()))?.name;
   const base = { ok: true, name: hs.name, url: hs.url, ...(existing ? { existing } : {}) };
   if (relayPeerFingerprint(hs.url)) return output(await inspectViaRelay(base));
   let failKind: JoinFailureKind = "other";
   try {
     const r = await fetch(`${hs.url}/api/v1/agents`, { headers: { Authorization: `Bearer ${hs.token}` }, signal: AbortSignal.timeout(6000) });
-    const body = (await r.json().catch(() => null)) as { agents?: { name?: string }[] } | null; // 不是 JSON = 地址那头不是 bridge
+    const body = (await readJsonCapped(r)) as { agents?: { name?: string }[] } | null; // 不是 JSON = 地址那头不是 bridge
     if (r.ok) {
       const agents = (body?.agents ?? []).map((a) => String(a?.name ?? "").replace(/^agent-/, "")).filter(Boolean);
       output({ ...base, reachable: true, agents });

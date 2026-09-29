@@ -90,6 +90,7 @@ One line each; full descriptions in [docs/architecture/features.md](./docs/archi
 - **Read-only history API + manual archive category** — `GET /api/v1/agents/:name/history`, archive/restore endpoints, retention prunes only the manual category.
 - **Pi agent sessions** — `runtime: "pi"` agents via the Pi extension, capability profiles (`pi-env`), session records translated to Claude Code shape (`lib/session-source.ts`).
 - **HTTP peers** — cross-instance collaboration over `/api/v1` with scoped tokens and one-click invites; master is never shareable.
+- **Context boundaries** — per-project / name-pattern compaction lines: [context-boundary.md](./docs/architecture/context-boundary.md).
 
 ## Security posture
 
@@ -109,6 +110,7 @@ bun src/manager.ts create   <name> <dir> [purpose]
 bun src/manager.ts resume   <name> <sessionId> [dir] [--fork]   # --fork: adopt a wild/bg-occupied session as a branched copy
 bun src/manager.ts adopt    <name> <sessionId>   # promote a bg doppelganger to the agent's official session + restart
 bun src/manager.ts archive  <name>               # snapshot the agent's current session jsonl to ~/.claude-orchestrator/archive/
+bun src/manager.ts codex-sub-archive status|on|off   # default off; on = Codex sub-threads idle 7 days move to archive/archived/, deleted 90 days later (archive retention)
 bun src/manager.ts kill     <name>
 bun src/manager.ts restart  [name]
 bun src/manager.ts restart  --include-master   # v2.24+ restart every session, master included
@@ -153,7 +155,7 @@ bun src/manager.ts version   # current version + whether an update is available
 bun src/manager.ts update    # git pull + rebuild web/out if stale + reload the 3 launchd daemons
 
 # Hosted frontend (docs/design-hosted-frontend.md): the bridge serves web/out (BRIDGE_STATIC_DIR); browsers pair, no password
-bun src/manager.ts pair [--agents a,b|*] [--no-terminal] [--no-manage] [--guest <name>] [--url <entry>] [--json]  # QR / link / 8-char code
+bun src/manager.ts pair [--agents a,b|*] [--no-terminal] [--no-manage] [--guest <name> --agents a,b [--confirm-all]] [--url <entry>] [--json]  # QR / link / 8-char code; guest '*' needs --confirm-all
 bun src/manager.ts migrate-web-state   # old Next BFF settings.db + groqApiKey → bridge (tar backup first; idempotent)
 bun src/manager.ts retire-web          # unload + back up old com.claudestra.web; refuses until the bridge serves web/out and a backup exists
 
@@ -231,7 +233,6 @@ tmux -S /tmp/claude-orchestrator/master.sock -CC attach
   - **Minor** (`x.Y.0`) — genuinely new user-facing capability that deserves a one-line "现在你可以 ..." headline. Examples: v1.3.0 Claude Code auto-update, v1.5.0 Discord slash autocomplete. Older minors are kept as history.
   - **Major** (`X.0.0`) — breaking change or system-level rearchitecture. Owner bumps these manually; never bump major on your own initiative.
   - Heuristic: if you're writing release notes and catch yourself opening with "修了..." / "加了个..." / "补了测试" / "重构了..." — that's a **patch**. Only headline-worthy new capability = minor.
-- `tmux-helper.ts` and `claude-launch.ts` are the canonical places for tmux commands and Claude Code launch flags. Don't inline these in new files.
 - Admin buttons that should skip the LLM go in `bridge/management.ts`. Add the `id` to both `handleMgmtButton` and the relevant panel builder.
 - Before shipping, run `bun run check` (= `tsc --noEmit` + `bun test` + `scripts/guard`). **`bun build` does not typecheck** — it happily compiles `const x: number = "str"`, so the old advice to rely on it for type errors was wrong. Still build each entry point (`bridge`, `channel-server`, `manager`, `launcher`, `cron`, `setup`) to catch module-resolution errors that typechecking misses. CI runs all three on every push and PR.
 - Test suite (`bun test`) exercises pure logic. `bridge.ts` itself has no isolated unit tests (Discord client + ws + peers.json coupling) — live verification in the isolated dev sandbox (`bun run sandbox up`, [docs/architecture/sandbox.md](./docs/architecture/sandbox.md)) is the coverage there.

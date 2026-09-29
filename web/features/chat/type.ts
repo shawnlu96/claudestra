@@ -1,3 +1,4 @@
+import type { CtxBoundaryInfo } from "./ctx-boundary-view";
 import type { WebPermAction, WebAuqQuestion, WebComponentRow, BgProgress, BgEndStatus } from "@/lib/chat/events";
 import type { UpdateHint } from "@/lib/chat/agents";
 import type { LedgerTaskRef, MissionInfo } from "@/lib/chat/agents";
@@ -102,6 +103,8 @@ export interface ChatMessage {
   replyTs?: string;
   /** reply 附带的交互组件（按钮/选单）。点击回投 [button:<id>] / [select:<id>:<value>]。 */
   replyComponents?: WebComponentRow[];
+  /** 这条 reply 建出的「待你处理」id（直播来自出站事件，历史来自 reply 的 tool_result）：按 id 认领，不按时间猜 */
+  replyAskId?: string;
   /** 已点击的按钮/选项 id —— 点后禁用整组，高亮所选（一条 reply 只作答一次）。 */
   /** @deprecated bug ① 前的消息级单值,仅老快照读;新逻辑用 replyClicks。 */
   replyClickedId?: string;
@@ -133,6 +136,8 @@ export interface ChatMessage {
   attachments?: ChatAttachmentView[];
   /** 入站消息来源标签（Discord 用户名 / 来源 agent；自己发的不带）。 */
   from?: string;
+  /** owner 在「待你处理」卡片上的作答：答的是哪条 ask（气泡上方画「答复：<标题>」引用条，点了跳回原消息） */
+  askId?: string;
   /** 按钮 / 表单回投的原始 payload：所属表单不在同一段历史里、没能还原成可读文案时留着，合进已加载的消息时再往前找（features/chat/delta-clicks.ts） */
   clickRaw?: string;
   /** v2.20.2+ 回合结束但后台任务还在跑——「后台继续中」标记(代替绿勾)。 */
@@ -170,6 +175,8 @@ export interface AgentSession {
   contextTokens?: number | null;
   /** 会话记录自带的上下文窗口（Codex 有；Claude Code 为 null → 按 1M 绝对刻度），见 ctx-level.ctxView */
   contextWindow?: number | null;
+  /** 命中的上下文边界 + 余量（bridge 算；Codex / Pi 为 null），见 ctx-boundary-view.ts */
+  ctxBoundary?: CtxBoundaryInfo | null;
   /** 当前模型 id（jsonl 实测 → registry → 全局默认;null=未知）→ TopBar 徽章。 */
   model?: string | null;
   /** 当前 effort 档位（同上兜底链）→ TopBar 徽章。 */

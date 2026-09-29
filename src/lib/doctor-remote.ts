@@ -12,7 +12,7 @@
  */
 
 import type { Check } from "./doctor.js";
-import { resolveBridgePort } from "./bridge-url.js";
+import { dotenvBridgePort } from "./bridge-url.js";
 import { readDotenvFileSync } from "./env-file.js";
 import { fetchRelayStatus, relayChecks } from "./doctor-relay.js";
 import { collectRelayWeb, relayWebCheck } from "./doctor-relay-web.js";
@@ -111,7 +111,7 @@ export function remoteAccessChecks(r: RemoteAccessReport, relay: RelayLinkState 
 
 /** 前端由 bridge 托管：手机访问的入口端口就是 .env 的 BRIDGE_PORT（web/package.json 的 3333 不再是入口）；bridge 端点也用它 */
 export function readFrontendPort(repoRoot: string): number {
-  return resolveBridgePort(readDotenvFileSync(`${repoRoot}/.env`) ?? {});
+  return dotenvBridgePort(repoRoot, readDotenvFileSync(`${repoRoot}/.env`));
 }
 
 export async function checkRemoteAccess(repoRoot: string): Promise<Check[]> {

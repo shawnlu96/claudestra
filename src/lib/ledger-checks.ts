@@ -7,6 +7,7 @@ import {
   ASSIGNEE_KINDS,
   isStageOfKind,
   ITEM_STATUSES,
+  isManagerRole,
   roleOf,
   STAGES,
   TASK_KINDS,
@@ -215,14 +216,15 @@ export function toColumn(k: string, v: unknown): unknown {
 
 /** actor 在这个任务上是不是 PM / master / owner（项目 PM 名单现查） */
 export function isManager(db: Database, actor: string, task: Pick<LedgerTask, "agent" | "project">): boolean {
-  const role = roleOf(actor, task, getMeta(db, task.project).pms);
-  return role !== null && role !== "executor";
+  return isManagerRole(roleOf(actor, task, getMeta(db, task.project).pms));
 }
 
 export interface StageMove {
   /** 调用方以为的当前阶段（CAS） */
   from: Stage;
   to: Stage;
+  /** 交付（build / fix → review）那一步自报的模型：跨实例只能凭声明，和推阶段同一个事务记进那一步的 claims */
+  model?: string;
 }
 
 const REVIEW_VERDICTS: readonly ReviewVerdict[] = ["pass", "changes", "block"];
@@ -240,6 +242,10 @@ export interface ReviewInput {
   text?: string;
   /** 同一事务推阶段（review → fix / merge / done / spec） */
   move?: StageMove;
+  /** 审查方自报的模型（跨实例只能凭声明，记进那一步的 claims） */
+  model?: string;
+  /** PM 豁免对抗式（review --waive adversarial，权限在 CLI 层判），只对当时的 head 有效（ledger-handler.ts owesAdversarial） */
+  waive?: "adversarial";
 }
 
 export function checkReview(input: ReviewInput, task: LedgerTask): void {
@@ -250,8 +256,11 @@ export function checkReview(input: ReviewInput, task: LedgerTask): void {
   if (task.stage !== "review") throw new LedgerError("invalid", `任务 ${task.id} 在 ${task.stage}，不在 review，不能记审查结论`, { stage: task.stage });
 }
 
-/** 调用方可直接追加的事件；stage / item / task / meta / freeze 由对应写函数产生，verify 只由 recordVerify 写（否则能伪造一条「检查通过」） */
-export const APPENDABLE_KINDS = ["note", "decision", "deploy", "rollback"] as const;
+/**
+ * 调用方可直接追加的事件；stage / item / task / meta / freeze 由对应写函数产生，verify 只由 recordVerify 写（否则能伪造一条「检查通过」）；
+ * dispatch / escalate 由 `ledger dispatch` / `ledger escalate` 追加（编排班子）
+ */
+export const APPENDABLE_KINDS = ["note", "decision", "deploy", "rollback", "dispatch", "escalate"] as const;
 export type AppendableKind = (typeof APPENDABLE_KINDS)[number];
 
 /**

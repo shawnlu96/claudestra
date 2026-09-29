@@ -29,14 +29,43 @@ export function isMasterAgent(name: string | undefined | null): boolean {
 }
 
 /**
- * master 的唯一判定：NFKC → 小写 → 去掉所有层 agent- 前缀 → master，网页的会话名 __master__ 也算。
+ * master 的唯一判定：规范形式（canonicalAgentName）再去掉所有空白 → 去掉所有层 agent- 前缀 → master，网页的会话名 __master__ 也算。
  * 请求里的名字会落到不区分大小写的文件系统（APFS：Master 的归档目录就是 master 的）、会被 manager 转小写，
  * 全角写法经 NFKC 也会变回来——判定只要有一处比路由解析「窄」，"*" 就能从那个缺口碰到 master（tests/api-master-scope.test.ts）。
+ * 只能放宽不能收窄：放宽只会多挡；唯一靠它放行的 devices.intersectAgents 另要逐字写法（tests/guest-pairing.test.ts）。
  */
 export function isMasterName(name: string | undefined | null): boolean {
   if (!name) return false;
-  const n = name.normalize("NFKC").toLowerCase().replace(/^(agent-)+/, "");
+  const n = canonicalAgentName(name).replace(/\s/gu, "").replace(/^(agent-)+/, "");
   return n === "master" || n === "__master__";
+}
+
+/**
+ * agent 名的规范形式：NFKC（全角 → 半角）、去掉零宽等不可见字符（INVISIBLE_NAME_RE 那一套）、去首尾空白、转小写。scope 比对
+ * （principals.agentInScope）与 guest 开放名校验（devices.checkGuestAgents）都按它——否则大小写不敏感的文件系统上，各接口认到的范围会不一致。
+ */
+export function canonicalAgentName(name: string): string {
+  return name.normalize("NFKC").replace(/[\p{Cf}\p{Default_Ignorable_Code_Point}\u2800]/gu, "").trim().toLowerCase();
+}
+
+/** 去掉一层 agent- 前缀的规范名：scope 比对（principals.agentInScope）与撞名检查（canonicalTwinError）共用 */
+export const bareCanonicalName = (name: string): string => canonicalAgentName(name).replace(/^agent-/, "");
+
+/**
+ * 名单里「给出大总管」只认的两种逐字写法。isMasterName 是拒绝侧（宽），放行侧（devices.intersectAgents、principals.agentInScope）
+ * 只认这个：老版本把 MASTER、全角等变体当普通名字落了盘，按宽判定认成大总管就把一条无害的旧数据升成大总管权限（T42-r2）。
+ */
+export const isLiteralMaster = (entry: string): boolean => entry === "master" || entry === "agent-master";
+
+/**
+ * 新名字跟已有 agent 规范化后同名（cc 与全角 ｃｃ）：scope 与 guest 授权按规范名比，两个 agent 会共用授权，新建 / resume / 改名都拒。
+ * 名字本身已在 registry（重建、resume 已有的）不算撞。返回报错文案，没撞为 null。
+ */
+export function canonicalTwinError(name: string, existing: string[]): string | null {
+  if (existing.includes(name)) return null;
+  const want = bareCanonicalName(name);
+  const twin = existing.find((n) => bareCanonicalName(n) === want);
+  return twin ? `${name} 跟已有的 ${twin} 只差大小写 / 全角 / 不可见字符，授权会按同一个名字算，换个名字` : null;
 }
 
 /**
@@ -65,10 +94,10 @@ export function invisibleNameError(name: string): string | null {
  * 保留给身份的名字：台账（lib/ledger-stages.ts roleOf）把 actor "owner" / "master" 直接当角色。
  * registry 键带 agent- 前缀，推导出的 actor 本不会撞上，但 agent-master 在别处（isMasterAgent）已被当成大总管——
  * 新建 / resume / 改名一律不许用这两个名字（manager/core.ts assertValidNewName），doctor 对已有的 agent-owner 报警。
+ * master 直接用 isMasterName，owner 按同一套规范化（canonicalAgentName、去空白、去所有层前缀）：窄了会建出 ｍａｓｔｅｒ 这类被判定当成大总管、却管不了的 agent。
  */
 export function isReservedAgentName(name: string): boolean {
-  const bare = name.trim().toLowerCase().replace(/^agent-/, "");
-  return bare === "owner" || bare === "master";
+  return isMasterName(name) || canonicalAgentName(name).replace(/\s/gu, "").replace(/^(agent-)+/, "") === "owner";
 }
 
 export function agentRuntime(info: { runtime?: string } | undefined | null): AgentRuntime {

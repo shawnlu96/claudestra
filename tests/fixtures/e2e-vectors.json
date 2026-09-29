@@ -1,0 +1,39 @@
+{
+  "note": "自产向量：固定标量（sha256(\"cstra-e2e-vector/<tag>\")）喂 src/lib/e2e，输出冻结在这里；tests/e2e-vectors.test.ts 另用 node:crypto 独立重算一遍。P2 的 web twin 必须算出同样的值。",
+  "label": "cstra-e2e-v1",
+  "fp": "0123-4567-89ab-cdef",
+  "devId": "298099acfab46380ef53c3ba4f04edc4692187bf417ecd23e7c161ca0fde1246",
+  "sid": "d2e4e4dec7c5147200dd2b4a46956455",
+  "D": {
+    "d": "66543f62a9ce3285d98e27792d3d8afa9495c943b50f4618217a7a063ea3b6ac",
+    "pub": "04c4382f4a086119f47be9a9ff585a42afc3d42f8d655f4828d46d8fedfd5b0a5e3ad4a10981c698761af427f9445a7fea328eb4794e2ebc4a137aa734e935ffe2"
+  },
+  "M": {
+    "d": "1bf2971f31ccf516b2fa6b9873270d46884fcbaeacb7cbe5cecfaf31f726d024",
+    "pub": "0441c71194c9a0756c8cb1807c4025bf163ed59875f588bbe02b115d32fb223d574bc95e8e7e8574d618ccd9486f6c69842132725e9de4ef5eb85ff345b7bf918a"
+  },
+  "ce": {
+    "d": "4d4add85b4bdcf40de75341857079f0ebc59937f22647c388f26e2cb5a092ecd",
+    "pub": "0445d76423b8080eaf8cea0173b57a8be882eb1611df811a3e915195531a5d1ea3fe8158dda2475d4634e2fc74bb728427e34e06cae91fbc4f9ac4e4b11098814f"
+  },
+  "be": {
+    "d": "0d1a9cb9d4aeb88fd4233e647ee71fc192eaf58678c8ebbd057fce80c845e701",
+    "pub": "04556b2e7116f0fb3fa5545669b3f69204acfa66a7a06a50d90eb61f9f20f42db592ff635b0ac376be2c0e5a510d17b186a3c67df9aa7b8d670e13a7b3ce86ee11"
+  },
+  "th": "9c5d5fa70a68fbf8e114bafa3f9cb47eba9584f56f84cd173abc5fea66e6f87e",
+  "confirm": "7867eb120a52d500482eb55b12b593d119a7cd7a216cb0685c178d53fb3e2b87",
+  "nonceReq_rid1_i0": "010000000000000100000000",
+  "aadRes_rid1_i1_final": "000c63737472612d6532652d7631d2e4e4dec7c5147200dd2b4a4695645502000000000000010000000101",
+  "request": {
+    "rid": "1",
+    "head": "{\"method\":\"POST\",\"path\":\"/api/v1/agents/demo/messages\",\"headers\":{\"content-type\":\"application/json\"}}",
+    "body": "{\"text\":\"hello\"}",
+    "stream": "0000007506d5f35594b04255965cf956e742715975f4705a014cb794f6b0562234ae03613b3df703ba9509a3805ab53e952d6675fac5e20151dd49b0545f31b08bc5fd07b9ca9901f458268d5145c2194eaea3110cd80beeb337b01efd601c92d7ec321d9d1d9e88e86b8960a01f105f279051f32d57c4f3c400000020db1f0ab42de5209c6cab05c3aaa59be6daccb5e4fb78afcf086ecf26404a9735"
+  },
+  "response": {
+    "rid": "1",
+    "head": "{\"status\":200,\"headers\":{\"content-type\":\"application/json\"}}",
+    "body": "{\"ok\":true}",
+    "stream": "0000004c76ca71817410587083c11bb36ea3dfeb141196908b15b53b850329df369f749d623b56a24ea7ba306b43cbb138d14175541bff3e7beaf12d0d16f8ac8d5726c92889e89bebcae18daf73cf600000001bab258f47df4967d459de953052652aa67f88c5cbce309f7f8f6739"
+  }
+}

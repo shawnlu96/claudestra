@@ -166,6 +166,15 @@ describe("mergeContiguousAssistant — 差量续接同一回合", () => {
     expect(m.toolCalls).toHaveLength(2);
   });
 
+  test("接缝两侧都是工具段 → 并成一段（逐条追平时连续工具不被拆成各 1 步）", () => {
+    const bash = (summary: string) => ({ name: "Bash", summary, state: "done" as const });
+    const base = [hist(2, 9, { segments: [{ kind: "reply", text: "好" }, { kind: "tools", tools: [bash("a")] }] })];
+    const d1 = [hist(10, 10, { segments: [{ kind: "tools", tools: [bash("b")] }] })];
+    const d2 = [hist(11, 11, { segments: [{ kind: "tools", tools: [bash("c")] }, { kind: "text", text: "Now implement:" }] })];
+    const m = mergeContiguousAssistant(mergeContiguousAssistant(base, d1), d2)[0];
+    expect(m.segments!.map((s) => (s.kind === "tools" ? `tools${s.tools.length}` : s.kind))).toEqual(["reply", "tools3", "text"]);
+  });
+
   test("差量首条是 user → 不拼", () => {
     const base = [hist(2, 9)];
     const delta = [{ id: "h10", role: "user" as const, content: "补一句", sid: SID, seqEnd: 10 }, hist(11, 15)];
@@ -178,14 +187,14 @@ describe("mergeContiguousAssistant — 差量续接同一回合", () => {
     expect(mergeContiguousAssistant([hist(2, 30)], [hist(12, 20)])).toHaveLength(2);
   });
 
-  test("两段都带组件 → 按先后拼起来，后一段按钮行的已答键平移（T10b：原先只留后一段，前一段的按钮 / 表单消失）", () => {
+  test("两段都带组件 → 不并（一泡最多一条带按钮的 reply，adv3 P1），两段的组件、已答各留在自己的气泡里", () => {
     const btn = (id: string) => ({ type: "buttons" as const, buttons: [{ id, label: id }] });
     const form = { type: "multiselect" as const, id: "f", options: [{ label: "A", value: "a" }] };
     const base = [hist(2, 9, { replyComponents: [btn("reset_auto"), form], replyClicks: { b0: "reset_auto" } })];
     const delta = [hist(12, 20, { replyComponents: [btn("go")], replyClicks: { b0: "go", "i:x": "x" } })];
-    const m = mergeContiguousAssistant(base, delta)[0];
-    expect(m.replyComponents?.map((r) => (r.type === "buttons" ? r.buttons[0].id : r.id))).toEqual(["reset_auto", "f", "go"]);
-    expect(m.replyClicks).toEqual({ b0: "reset_auto", b2: "go", "i:x": "x" });
+    const out = mergeContiguousAssistant(base, delta);
+    expect(out.map((m) => m.replyComponents?.map((r) => (r.type === "buttons" ? r.buttons[0].id : r.id)))).toEqual([["reset_auto", "f"], ["go"]]);
+    expect(out.map((m) => m.replyClicks)).toEqual([{ b0: "reset_auto" }, { b0: "go", "i:x": "x" }]);
   });
 
   test("空输入原样返回", () => {

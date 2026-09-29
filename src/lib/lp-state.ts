@@ -174,7 +174,9 @@ function busyAbove(above: string[]): boolean {
   return above.some((l) => SPINNER_LINE_RE.test(l) && CC_BUSY_RE.test(l.replace(/esc (?:or type )?to cancel/gi, "")));
 }
 
-const inputTextOf = (lines: string[]) => lines.map((l, i) => (i ? l.replace(/^ {1,2}/, "") : l.slice(1).replace(/^ /, ""))).join("\n").trimEnd();
+/** 真 CC 的提示符是「❯」加 U+00A0：NBSP 一律当普通空格，否则去掉提示符后开头还剩一个 NBSP，逐字比对永远对不上（tests/lp-state.test.ts 真实样本） */
+const inputTextOf = (lines: string[]) =>
+  lines.map((l) => l.replace(/\u00a0/g, " ")).map((l, i) => (i ? l.replace(/^ {1,2}/, "") : l.slice(1).replace(/^ /, ""))).join("\n").trimEnd();
 
 /**
  * 模态时的结果：只有底部真额度菜单（顶格 ▔ 上沿、下面没有输入框）才算撞墙，有 LP 项算「关、能开」（只是 runner 不会去按它）；

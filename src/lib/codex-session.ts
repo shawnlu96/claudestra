@@ -39,7 +39,7 @@ import { existsSync, readdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { SubSessionInfo } from "./runtimes/types.js";
-import { codexSubOf, isCodexSubThread } from "./codex-subthread.js";
+import { codexSubOf, isCodexOneShot, isCodexSubThread } from "./codex-subthread.js";
 
 type AnyRecord = Record<string, any>;
 
@@ -102,14 +102,14 @@ export function findCodexSessionPath(sessionId: string, root: string = codexSess
 const foundPaths = new Map<string, string>();
 
 /**
- * 读完整的第一行（`session_meta`）并取出 sessionId / cwd。
+ * 读完整的第一行（`session_meta`），返回它的 payload；不是 session_meta / 读不到 / 解析不了 = null。
  *
  * ⚠ 不能「截前 N 字节再 JSON.parse」：这一行里塞着 `base_instructions`，实测**单行
  * 超过 8KB**（首个样本 8188 字节还没结束），截断后必然是 `Unterminated string`，
  * cwd 取不到 ⇒ 整个会话被悄悄跳过（第一版就是这么扫出 0 条的）。
  * 这里按需倍增到找到换行为止，封顶 4MB 防着坏文件。
  */
-export async function readCodexMeta(path: string): Promise<{ sessionId: string; cwd: string; sub?: SubSessionInfo } | null> {
+export async function readCodexMetaPayload(path: string): Promise<AnyRecord | null> {
   const MAX = 4 * 1024 * 1024;
   for (let want = 64 * 1024; ; want = Math.min(want * 4, MAX)) {
     let chunk: string;
@@ -121,17 +121,23 @@ export async function readCodexMeta(path: string): Promise<{ sessionId: string; 
     }
     try {
       const obj = JSON.parse(chunk.slice(0, nl));
-      if (obj?.type !== "session_meta") return null;
-      const p = obj?.payload ?? {};
-      const cwd = typeof p.cwd === "string" ? p.cwd : "";
-      // id 是本线程自己的；session_id 是根会话的——子线程两者不同（主会话相同）
-      const sessionId = String(p.id ?? p.session_id ?? "");
-      if (!cwd || !sessionId) return null;
-      return isCodexSubThread(p) ? { sessionId, cwd, sub: codexSubOf(p) } : { sessionId, cwd };
+      return obj?.type === "session_meta" ? (obj?.payload ?? {}) : null;
     } catch {
-      return null;
+      return null; // 首行坏了：当不是 Codex 会话，调用方跳过这个文件
     }
   }
+}
+
+/** 首行 session_meta 里的 sessionId / cwd / 子线程归属（取不到 cwd 或 id = null） */
+export async function readCodexMeta(path: string): Promise<{ sessionId: string; cwd: string; sub?: SubSessionInfo; oneShot?: true } | null> {
+  const p = await readCodexMetaPayload(path);
+  if (!p) return null;
+  const cwd = typeof p.cwd === "string" ? p.cwd : "";
+  // id 是本线程自己的；session_id 是根会话的——子线程两者不同（主会话相同）
+  const sessionId = String(p.id ?? p.session_id ?? "");
+  if (!cwd || !sessionId) return null;
+  if (isCodexSubThread(p)) return { sessionId, cwd, sub: codexSubOf(p) };
+  return isCodexOneShot(p) ? { sessionId, cwd, oneShot: true } : { sessionId, cwd };
 }
 
 /** 按 sessionId 找 Codex 线程的归属（收编前判「是不是子会话」用）；找不到文件 / 不是子线程 = null */
@@ -191,6 +197,15 @@ export function codexCommandText(command: unknown): string {
   const parts = command.map(String);
   if (parts.length >= 3 && /(^|\/)(ba|z)?sh$/.test(parts[0]) && /^-l?c$/.test(parts[1])) return parts.slice(2).join(" ");
   return parts.join(" ");
+}
+
+/**
+ * McpToolCall 的结果和调用在同一行到：跟 tool_use 放进同一条 assistant 记录（session-history 从这里取 reply 建出的 askId）。
+ * 别处（watcher、打断判定）只在 user 记录里认 tool_result，放在 assistant 里不会被当成一次工具结束或人的输入
+ */
+function mcpResultBlock(item: AnyRecord, id: string): AnyRecord[] {
+  const r = item.type === "McpToolCall" && item.result && typeof item.result === "object" ? (item.result as AnyRecord) : null;
+  return r ? [{ type: "tool_result", tool_use_id: id, content: codexTextOf(r.content) }] : [];
 }
 
 /** item_completed 里的结构化工具记录 → tool_use；不是工具（或与 response_item 重复）返回 null */
@@ -314,7 +329,7 @@ export function codexLineToClaudeShape(line: string, state?: CodexTranslateState
     if (state?.bootstrapTurn) return null;
     const tu = codexItemToolUse(p.item as AnyRecord);
     if (!tu) return null;
-    return { type: "assistant", timestamp: ts, message: { content: [{ type: "tool_use", ...tu }] } };
+    return { type: "assistant", timestamp: ts, message: { content: [{ type: "tool_use", ...tu }, ...mcpResultBlock(p.item as AnyRecord, tu.id)] } };
   }
   if (e.type !== "response_item") return null;
 

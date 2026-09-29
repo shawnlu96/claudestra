@@ -5,15 +5,15 @@
  * 生产 PaneIO 全走 tmux-helper：抓屏 capture-pane -p -e，打字 / 退格走 tmuxRawStrict（失败要抛），Esc 走 tmuxSendEscape 的双击护栏。
  */
 import type { ServerWebSocket } from "bun";
-import { statSync } from "node:fs";
-import { dirname, join } from "node:path";
 import { computeAgentStats } from "../../lib/agent-stats.js";
 import { readConfigSync } from "../../lib/config-store.js";
+import { effectiveAction, isExecutor } from "../../lib/ctx-boundary-policy.js";
 import { FleetScopeError, scopeForCaller, visibleToCaller, type FleetCaller } from "../../lib/fleet-caller.js";
 import {
   ACTION_LABEL, bareName, DEFAULT_COMPACT_KEEP, notApplicable, selectTargets, summarizeFleet,
   type Excluded, type FleetAction, type FleetCandidate, type FleetResult, type FleetSelect,
 } from "../../lib/fleet-plan.js";
+import { isLinkedWorktree } from "../../lib/linked-worktree.js";
 import { agentRuntime, readRegistryAgents } from "../../lib/registry.js";
 import { ensurePaneInteractive, tmuxRawStrict, tmuxSendEscape } from "../../lib/tmux-helper.js";
 import type { Envelope } from "../router.js";
@@ -119,21 +119,13 @@ export interface FleetRunReport {
 const CONCURRENCY = 4;
 
 /**
- * 执行者（与 T36 的 isExecutor 同口径）：agent-task-*，或 cwd 在 git linked worktree 里（.git 是文件）。
- * 它的 /save-compact 解析到主仓的 memory 目录，会盖掉 PM 的 HANDOFF，所以 save-compact 对它一律改成 compact
+ * 对这个目标实际要跑的动作：执行者的 save-compact 改成 compact，note 是结果前面要加的说明（没改是空串）。
+ * 执行者的认定和换法用上下文边界那一份（lib/ctx-boundary-policy.ts isExecutor / effectiveAction + lib/linked-worktree.ts），两边不会分叉
  */
-export function isExecutor(c: Pick<Cand, "name" | "cwd">): boolean {
-  if (c.name.startsWith("agent-task-")) return true;
-  for (let d = c.cwd; d && d !== dirname(d); d = dirname(d)) {
-    const git = statSync(join(d, ".git"), { throwIfNoEntry: false });
-    if (git) return git.isFile();
-  }
-  return false;
-}
-
-/** 对这个目标实际要跑的动作：执行者的 save-compact 改成 compact，note 是结果前面要加的说明（没改是空串） */
 export function actionFor(action: FleetAction, t: Pick<Cand, "name" | "cwd">): { action: FleetAction; note: string } {
-  if (action.kind !== "save-compact" || !isExecutor(t)) return { action, note: "" };
+  if (action.kind !== "save-compact") return { action, note: "" };
+  const executor = isExecutor({ name: t.name, worktree: isLinkedWorktree(t.cwd) });
+  if (effectiveAction(executor, "save-compact") === "save-compact") return { action, note: "" };
   return { action: { kind: "compact" }, note: "执行者改成 /compact（save-compact 会盖掉 PM 的 HANDOFF）：" };
 }
 

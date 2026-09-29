@@ -5,21 +5,23 @@
 import { apiAgentName } from "@/lib/chat/agents";
 import { api } from "./client";
 
-// ── 全局设置（语言 / 语音识别 key）：GET 只回是否已配 + 尾四位，完整 key 永不回传 ──
+// ── 全局设置（语言 / 语音识别 key / 推送不带正文）：GET 只回是否已配 + 尾四位，完整 key 永不回传 ──
 export interface GlobalSettings {
   groqApiKeySet: boolean;
   groqApiKeyHint: string;
   lang?: "zh" | "en";
+  /** 这台电脑的推送只写「有新消息」（老 bridge 没这个字段 → false） */
+  pushNoContent: boolean;
 }
-const shapeSettings = (j: { lang?: unknown; groqApiKeyHint?: unknown }): GlobalSettings => {
+const shapeSettings = (j: { lang?: unknown; groqApiKeyHint?: unknown; pushNoContent?: unknown }): GlobalSettings => {
   const hint = typeof j.groqApiKeyHint === "string" ? j.groqApiKeyHint : "";
-  return { groqApiKeySet: !!hint, groqApiKeyHint: hint, ...(j.lang === "en" || j.lang === "zh" ? { lang: j.lang } : {}) };
+  return { groqApiKeySet: !!hint, groqApiKeyHint: hint, pushNoContent: j.pushNoContent === true, ...(j.lang === "en" || j.lang === "zh" ? { lang: j.lang } : {}) };
 };
 export function getSettings(): Promise<GlobalSettings> {
   return api("/settings", { timeoutMs: 8000 }).then(shapeSettings);
 }
 /** 空串 groqApiKey = 清除 */
-export function putSettings(patch: { lang?: "zh" | "en"; groqApiKey?: string }): Promise<GlobalSettings> {
+export function putSettings(patch: { lang?: "zh" | "en"; groqApiKey?: string; pushNoContent?: boolean }): Promise<GlobalSettings> {
   return api("/settings", { method: "PUT", json: patch, timeoutMs: 8000 }).then(shapeSettings);
 }
 
@@ -96,7 +98,7 @@ export function putArchiveRetention(days: number): Promise<{ days?: number }> {
 export function getAutoCompact<T>(): Promise<T> {
   return api<T>("/auto-compact", { timeoutMs: 8000 });
 }
-export function postAutoCompact<T>(patch: { window?: number; idleHours?: number; emergency?: boolean }): Promise<T> {
+export function postAutoCompact<T>(patch: { window?: number; idleHours?: number; emergency?: boolean; inject?: boolean }): Promise<T> {
   return api<T>("/auto-compact", { method: "POST", json: patch, timeoutMs: 8000 });
 }
 export function getMemoryHygiene<T>(): Promise<T> {

@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ledgerNotes } from "../src/bridge/fleet/audit.js";
 import { NEUTRAL_TAG } from "../src/lib/delegate-marker.js";
-import { actionFor, isExecutor } from "../src/bridge/fleet/service.js";
+import { actionFor } from "../src/bridge/fleet/service.js";
 import {
   compactCommand, DEFAULT_COMPACT_KEEP, notApplicable, parseFleetAction, parseFleetSelect, selectTargets, summarizeFleet, type FleetCandidate,
 } from "../src/lib/fleet-plan.js";
@@ -150,16 +150,20 @@ describe("台账 note 按项目分组", () => {
 });
 
 describe("执行者认定（save-compact 对它改成 compact，不许盖掉 PM 的 HANDOFF）", () => {
-  test("agent-task-* 或 cwd 在 linked worktree 里（.git 是文件）；普通仓库、没有 cwd 的不算", () => {
+  test("agent-task-* 或 cwd 在 linked worktree 里（.git 是指向 worktrees/ 的文件）；普通仓库、submodule、没有 cwd 的不算", () => {
     const root = mkdtempSync(join(tmpdir(), "fleet-exec-"));
+    const swaps = (name: string, cwd?: string) => actionFor({ kind: "save-compact" }, { name, cwd }).action.kind === "compact";
     try {
       mkdirSync(join(root, "repo", ".git"), { recursive: true });
       mkdirSync(join(root, "wt", "src", "deep"), { recursive: true });
+      mkdirSync(join(root, "sub"), { recursive: true });
       writeFileSync(join(root, "wt", ".git"), "gitdir: /x/.git/worktrees/wt\n");
-      expect(isExecutor({ name: "agent-task-t35" })).toBe(true);
-      expect(isExecutor({ name: "agent-foo", cwd: join(root, "wt", "src", "deep") })).toBe(true);
-      expect(isExecutor({ name: "agent-foo", cwd: join(root, "repo") })).toBe(false);
-      expect(isExecutor({ name: "master" })).toBe(false);
+      writeFileSync(join(root, "sub", ".git"), "gitdir: /x/.git/modules/sub\n");
+      expect(swaps("agent-task-t35")).toBe(true);
+      expect(swaps("agent-foo", join(root, "wt", "src", "deep"))).toBe(true);
+      expect(swaps("agent-foo", join(root, "repo"))).toBe(false);
+      expect(swaps("agent-foo", join(root, "sub"))).toBe(false);
+      expect(swaps("master")).toBe(false);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

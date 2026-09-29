@@ -9,6 +9,7 @@ import { markAgentRead, unreadCounts } from "../src/lib/unread-store.js";
 import { closeWebState, openWebState } from "../src/lib/web-state.js";
 import { createDispatcher, notificationBody, OWNER_CHAT_ID, ownerChatIds, type Dispatcher } from "../src/bridge/push/dispatcher.js";
 import type { PushSender, SendOutcome } from "../src/bridge/push/sender.js";
+import { owner } from "./asks-test-kit.js";
 
 interface Sent { kind: "web" | "apns"; to: string; payload: Record<string, unknown> }
 const sent: Sent[] = [];
@@ -44,8 +45,9 @@ beforeEach(() => {
   savePushSubscription(db, { endpoint: IOS, keys: { p256dh: "p", auth: "a" } }, "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0)");
   savePushSubscription(db, { endpoint: MAC, keys: { p256dh: "p", auth: "a" } }, "Mozilla/5.0 (Macintosh)");
   savePushSubscription(db, { endpoint: OLD, keys: { p256dh: "p", auth: "a" } }, "");
-  saveApnsDevice(db, TOK, "iPhone");
-  dispatcher = createDispatcher({ db, sender, isOwnerChat: (id) => id === OWNER_CHAT_ID || id === "api:tok_web", now: () => now, log: () => {} });
+  saveApnsDevice(db, TOK, "iPhone", new Date(), { audience: "owner", principal: "owner:self" }); // 没记 principal 的行不推
+  const resolvePrincipal = (pid: string) => (pid === "owner:self" ? owner() : null);
+  dispatcher = createDispatcher({ db, sender, isOwnerChat: (id) => id === OWNER_CHAT_ID || id === "api:tok_web", resolvePrincipal, now: () => now, log: () => {} });
 });
 afterEach(() => dispatcher.stop());
 
@@ -178,6 +180,14 @@ describe("系统提醒（新设备配对）", () => {
   });
 });
 
+test("没记 principal 的 APNs 行（加列前的老行残留、回滚期间旧代码登记的）什么都不推：提醒、回复、待你处理都一样（adv3 P2-1）", async () => {
+  saveApnsDevice(db, "legacy-tok", "iPhone");
+  await dispatcher.notice({ title: "新设备已配对", body: "x" });
+  await dispatcher.onAsk({ id: "ask_l", fromAgent: "agent-alpha", title: "t", state: "open", kind: "decide", blocking: true, urgency: "normal" } as never, "away");
+  const to = sent.filter((s) => s.kind === "apns").map((s) => s.to);
+  expect([to.length > 0, to.includes("legacy-tok")]).toEqual([true, false]);
+});
+
 describe("待你处理 → onAsk（规则表见 tests/ask-push.test.ts，这里只看接线）", () => {
   const ask = (over: Record<string, unknown> = {}) =>
     ({ id: "ask_1", fromAgent: "agent-alpha", title: "发 v2.32.0 吗", state: "open", kind: "decide", blocking: true, urgency: "normal", ...over }) as never;
@@ -186,7 +196,7 @@ describe("待你处理 → onAsk（规则表见 tests/ask-push.test.ts，这里�
     expect(await dispatcher.onAsk(ask(), "away")).toBe("push");
     const web = sent.filter((s) => s.kind === "web");
     expect(web).toHaveLength(3);
-    expect(web[0].payload).toMatchObject({ title: "待你处理 · agent-alpha", body: "发 v2.32.0 吗", url: "/chat?ask=ask_1", agent: "alpha", ask: "ask_1", tag: "cstra-ask-ask_1" });
+    expect(web[0].payload).toMatchObject({ title: "待你处理 · agent-alpha", body: "发 v2.32.0 吗", url: "/chat?ask=ask_1", agent: "alpha", ask: "ask_1", tag: "cstra-ask-ask_1-open" });
     expect(sent.filter((s) => s.kind === "apns")[0].payload).toMatchObject({ url: "/chat?ask=ask_1", agent: "alpha" });
     expect(unreadCounts(db)).toEqual({});
     sent.length = 0;
@@ -201,5 +211,53 @@ describe("待你处理 → onAsk（规则表见 tests/ask-push.test.ts，这里�
     expect(sent).toEqual([]);
     expect(await dispatcher.onAsk(ask({ id: "a5", urgency: "urgent" }), "active")).toBe("push");
     expect(sent.length).toBeGreaterThan(0);
+  });
+});
+
+describe("推送不带正文（lib/push-redact.ts；开关每条现读）", () => {
+  let hide = true;
+  const FP = "9109-17c6-8e77-dfff";
+  beforeEach(() => {
+    hide = true;
+    dispatcher.stop();
+    const resolvePrincipal = (pid: string) => (pid === "owner:self" ? owner() : null); // 同顶部：待你处理只推给看得见这张卡的设备
+    dispatcher = createDispatcher({ db, sender, fp: FP, noContent: () => hide, isOwnerChat: (id) => id === OWNER_CHAT_ID, resolvePrincipal, now: () => now, log: () => {} });
+  });
+  /** 中继和推送服务看得到的全部字节里，不能出现 agent 名、正文、设备名、ask id */
+  const leaks = (words: string[]) => sent.filter((s) => words.some((w) => JSON.stringify(s.payload).includes(w)));
+
+  test("回复：Web Push 和 APNs 都只剩「Claudestra · 有新消息」+ 角标 + 时间（Web Push 另有 fp）", async () => {
+    await dispatcher.onEvent(evt({ agent: "agent-secretproj", data: { direction: "out", text: "机密内容" } }));
+    expect(unreadCounts(db)).toEqual({ secretproj: 1 }); // 未读照计，只是推送不说是谁
+    const web = sent.filter((s) => s.kind === "web");
+    expect(web).toHaveLength(3);
+    for (const w of web) expect(w.payload).toEqual({ fp: FP, title: "Claudestra", body: "有新消息", url: "/chat", tag: `cstra-${now}`, agent: "", ts: now, badge: 1 });
+    expect(sent.find((s) => s.kind === "apns")!.payload).toEqual({ title: "Claudestra", body: "有新消息", agent: "", url: "/chat", ts: now, tag: `cstra-${now}`, badge: 1 });
+    expect(leaks(["secretproj", "机密"])).toEqual([]);
+  });
+
+  test("已读：dismiss 不带 agent，静默 APNs 不带 thread-id", async () => {
+    await dispatcher.onEvent(evt({ agent: "secretproj" }));
+    sent.length = 0;
+    now += 1000;
+    markAgentRead(db, "secretproj", now);
+    await flush();
+    expect(sent.filter((s) => s.kind === "web").map((s) => s.payload)).toEqual([{ fp: FP, type: "dismiss", ts: now, badge: 0 }]);
+    expect(sent.find((s) => s.kind === "apns")!.payload).toEqual({ silent: true, title: "", body: "", agent: "", url: "/chat", ts: now, tag: `cstra-badge-${now}`, badge: 0 });
+    expect(leaks(["secretproj"])).toEqual([]);
+  });
+
+  test("系统提醒与待你处理同样改写：不带设备名、ask id、agent", async () => {
+    await dispatcher.notice({ title: "新设备已配对", body: "「测试机 iPhone」刚配对了这台电脑（给 guest-bob 用）。" });
+    await dispatcher.onAsk({ id: "ask_9", fromAgent: "agent-secretproj", title: "发版吗", state: "open", kind: "decide", blocking: true, urgency: "normal" } as never, "away");
+    expect(sent.length).toBe(8);
+    for (const s of sent) expect(s.payload).toMatchObject({ title: "Claudestra", body: "有新消息", url: "/chat", agent: "" });
+    expect(leaks(["iPhone", "guest-bob", "ask_9", "secretproj", "发版", "配对"])).toEqual([]);
+  });
+
+  test("关掉之后下一条就恢复正文，不用重启", async () => {
+    hide = false;
+    await dispatcher.onEvent(evt({}));
+    expect(sent.find((s) => s.kind === "web")!.payload).toMatchObject({ title: "alpha", body: "hello there", agent: "alpha" });
   });
 });

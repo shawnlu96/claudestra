@@ -7,14 +7,21 @@
  * 控制面和 ws（宿主 RCE）经 443 交给整个 tailnet。这里从结构上断掉：
  *   - 只调 /api/v1 的处理函数（注入的 handleApi），控制面、ws、远程终端根本不在这个入口上；
  *   - 带了凭据就必须是 peer 签的 token（principal.peer），网页用的全权 token 从这里进不来；
- *     没带凭据只剩兑换邀请（凭一次性 join 口令）和 API 自己回 401。
+ *   - 本机反代转来的（网页经 HTTPS 入口）还认设备 cookie；对外直连与中继 peer 帧只认 peer token，
+ *     不带凭据只剩兑换邀请、邀请页和 E2E 的两种帧（见 ingressRequest、ingressPublicRoute）。
  * 有了它，peer 走 HTTPS 443 就行，3847 不必对外开放、也不用给每个 peer 加防火墙白名单。
  * 没有 HTTPS 的机器，它自己对外当直连入口（ingressHost）——同样只有 peer 能用，主端口照旧只听本机。
  */
 import { findByBearer, readPrincipals } from "../lib/principals.js";
 import { configuredPeerIngressPort } from "../lib/bridge-url.js";
 import { repoEnvVar } from "../lib/env-file.js";
-import { relayMark, sanitizeRelayFrom } from "./relay-inbound.js";
+import { relayMark, takeRelayFrom, TUNNEL_MARK_HEADER } from "./relay-inbound.js";
+import { setRequestContext } from "./request-context.js";
+import { isLoopbackAddress } from "../lib/same-host.js";
+import { DEVICE_HEADER } from "../lib/devices.js";
+import { HTTP_IDLE_TIMEOUT_S } from "../lib/esc-guard.js";
+import { E2E_BODY_MAX, isE2eFrame } from "../lib/peer-e2e-wire.js";
+import { readRequestCapped } from "../lib/peer-e2e-serve.js";
 
 export { configuredPeerIngressPort };
 
@@ -47,7 +54,7 @@ type ApiHandler = (req: Request, url: URL) => Promise<Response>;
 /**
  * 纯判定（tests/peer-ingress.test.ts）：入口开在哪。默认只给本机反代用；.env 标了直连
  * （PEER_INGRESS_PUBLIC=1，生成邀请时没有 HTTPS 入口才会标）且确实有 peer（或刚被要求 hold）才对外。
- * 对外也只多出 peer token + 兑换邀请这一小块——主端口的控制面、ws、全权 token 都不在这个入口上。
+ * 对外也只多出 peer token + 兑换邀请 + 邀请页这一小块——主端口的控制面、ws、全权 token、设备凭据都不在这个入口上。
  */
 export function ingressHost(publicFlag: boolean, hasPeers: boolean, holdUntil: number, now: number): Host {
   return publicFlag && (hasPeers || now < holdUntil) ? "0.0.0.0" : "127.0.0.1";
@@ -81,7 +88,7 @@ export async function syncPeerIngress(hold = false): Promise<{ port: number | nu
   if (!port || !host || !handler) return { port, host: null };
   try {
     cur = { srv: serve({ port, host, handleApi: handler }), port, host };
-    const how = host === "0.0.0.0" ? "对外直连，只收 peer token" : "只听本机，供 HTTPS 反代转发";
+    const how = host === "0.0.0.0" ? "对外直连，外来的只收 peer token" : "只听本机，供 HTTPS 反代转发";
     console.log(`🤝 peer 入口: http://${host}:${port}（${how}）`);
     return { port, host };
   } catch (e) {
@@ -103,24 +110,65 @@ export async function peerIngressSyncRoute(req: Request): Promise<Response> {
   return json(200, { ok: true, ...(await syncPeerIngress(body.hold === true)) });
 }
 
+/**
+ * 不带凭据时对外只开这几个口：兑换邀请（凭一次性 join 口令）、邀请落地页，和 E2E 的两种帧（lib/peer-e2e-wire.ts isE2eFrame，
+ * 逐字匹配 path + 查询串）。E2E 帧不带 token 是设计：token 只在密文里（docs/relay/e2e-design.md §5.1）。等价的检查挪到了
+ * bridge/peer-e2e-route.ts，在任何解析和 ECDH 之前：直连的先验外层实例签名、签名方必须是钉了身份钥匙的 E2E 联系人；
+ * 中继帧由 relay-inbound 核过（lib/peer-trust.ts relayPeerRefusal）。解开后内层照旧过 peerGate，外加 token 主人 = 会话发起方。
+ */
+function ingressPublicRoute(method: string, url: URL, rawHref: string): boolean {
+  const pathname = url.pathname;
+  if ((method === "POST" && pathname === "/api/v1/peers/redeem") || (method === "GET" && pathname === "/api/v1/invite")) return true;
+  return isE2eFrame(method, pathname + url.search) && !rawHref.includes("?"); // URL 解析会吞掉空的 "?"，看原串：带查询串的一律不算
+}
+
+/**
+ * 入口收到的一个请求（单测直接调，不开端口），按来源分两种待遇（docs/relay/protocol.md §4.1 的四类来源里，入口只见这两种）：
+ *   - 回环 socket、没有中继标记、也没有隧道标记头 = 本机反代（tailscale serve 把 /api/v1 挂到这里，网页经 HTTPS 入口也走它）：
+ *     与主端口经反代同待遇（来源 lan，设备 cookie 照认）。前提是中继够不到这个端口——隧道与 peer 帧的 path
+ *     都过了同源断言（relay-inbound.ts localUrl），选端口时也避开网页端口；这些松了，这一类就不再成立。
+ *   - 中继转来的 peer 帧（进程内标记核过）与非回环 socket（PEER_INGRESS_PUBLIC=1 直接对外）：来源 peer-ingress，
+ *     删掉 cookie 与设备头；不带凭据只放兑换与邀请页，其余 403。设备端点与设备凭据在这个来源下一律拒。
+ */
+export async function ingressRequest(req: Request, handleApi: ApiHandler, addr: string | null = null): Promise<Response> {
+  if (req.headers.get("upgrade")) return json(400, { ok: false, error: "no websocket on the peer entrance" });
+  const raw = new URL(req.url);
+  const url = new URL(ingressApiPath(raw.pathname) + raw.search, raw.origin);
+  const secret = ingressSecret(req, url);
+  const principal = secret ? findByBearer(await readPrincipals(), secret) : null;
+  if (ingressVerdict(secret, principal) === "not-peer") {
+    return json(403, { ok: false, error: "this entrance only serves peer tokens" });
+  }
+  // 来源指纹只认经中继进来的（relay-inbound.ts 盖了进程内标记），放进请求上下文；原始头一律剥掉
+  const headers = new Headers(req.headers);
+  const relayFrom = takeRelayFrom(headers, relayMark());
+  // 带隧道标记头的（不论值）不算本机反代：隧道只该打网页端口，打到这里说明端口配撞了
+  const tunnelled = headers.has(TUNNEL_MARK_HEADER);
+  headers.delete(TUNNEL_MARK_HEADER);
+  const localProxy = !relayFrom && !tunnelled && isLoopbackAddress(addr);
+  if (!localProxy) {
+    headers.delete("cookie");
+    headers.delete(DEVICE_HEADER);
+    if (!secret && !ingressPublicRoute(req.method, url, req.url)) return json(403, { ok: false, error: "this entrance only serves peer tokens" });
+  }
+  // 读正文时身份还没核的按 E2E 记录流的上限封顶，大正文进不了内存（本机反代转来的也一样）：不带凭据的公开口（兑换、E2E 帧），
+  // 以及 E2E 帧不论带什么头——外层 Bearer 在 E2E 帧上没有意义，一枚泄漏的 peer token 不该换来无上限的缓冲
+  const e2eFrame = isE2eFrame(req.method, url.pathname + url.search);
+  const capped = e2eFrame || (!secret && ingressPublicRoute(req.method, url, req.url));
+  const body = req.method === "GET" || req.method === "HEAD" ? undefined : capped ? await readRequestCapped(req, E2E_BODY_MAX) : await req.arrayBuffer();
+  if (body === null) return json(413, { ok: false, error: "request body too large", code: e2eFrame ? "e2e_too_large" : "body_too_large" });
+  const apiReq = new Request(url.toString(), { method: req.method, headers, body });
+  setRequestContext(apiReq, localProxy
+    ? { source: "lan", clientIp: addr, https: req.headers.get("x-forwarded-proto") === "https" }
+    : { source: "peer-ingress", clientIp: relayFrom ? null : addr, https: false, ...(relayFrom ? { relayFrom } : {}) });
+  return handleApi(apiReq, url);
+}
+
 function serve(opts: { port: number; host: Host; handleApi: ApiHandler }) {
   return Bun.serve({
     port: opts.port,
     hostname: opts.host,
-    async fetch(req) {
-      if (req.headers.get("upgrade")) return json(400, { ok: false, error: "no websocket on the peer entrance" });
-      const raw = new URL(req.url);
-      const url = new URL(ingressApiPath(raw.pathname) + raw.search, raw.origin);
-      const secret = ingressSecret(req, url);
-      const principal = secret ? findByBearer(await readPrincipals(), secret) : null;
-      if (ingressVerdict(secret, principal) === "not-peer") {
-        return json(403, { ok: false, error: "this entrance only serves peer tokens" });
-      }
-      const body = req.method === "GET" || req.method === "HEAD" ? undefined : await req.arrayBuffer();
-      // 来源指纹头只认经中继进来的（relay-inbound.ts 盖了进程内标记）；直连 peer 自带的一律剥掉
-      const headers = new Headers(req.headers);
-      sanitizeRelayFrom(headers, relayMark());
-      return opts.handleApi(new Request(url.toString(), { method: req.method, headers, body }), url);
-    },
+    idleTimeout: HTTP_IDLE_TIMEOUT_S, // peer 的打断请求要等 Esc 窗口锁，Bun 默认 10 秒会先切断（lib/esc-guard.ts）
+    fetch: (req, server) => ingressRequest(req, opts.handleApi, server.requestIP(req)?.address ?? null),
   });
 }

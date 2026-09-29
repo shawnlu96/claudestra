@@ -7,27 +7,38 @@
 import { hostname } from "node:os";
 import { instanceKeySync, keyFingerprint } from "../lib/instance-key.js";
 import {
-  Approvals, attachCredential, canAdministerPairing, canManage, capGrant, ChallengeStore, cookieValueFrom, DEVICE_HEADER, deviceCookieHeader, ensureOwnerPrincipal, fullGrant, guestGrant,
-  newGuestPrincipal, normalizeGrant, type Grant,
+  Approvals, attachCredential, canAdministerPairing, canManage, capGrant, ChallengeStore, checkGuestAgents, cookieValueFrom, DEVICE_HEADER, deviceCookieHeader, ensureOwnerPrincipal,
+  fullGrant, guestGrant, newGuestPrincipal, normalizeGrant, type Grant,
 } from "../lib/devices.js";
 import { LEGACY_SESSION_COOKIE, redeemLegacySession } from "../lib/legacy-web.js";
 import { webDb } from "./local-api/db.js";
-import { readPrincipalsStrict, updatePrincipals, type Principal } from "../lib/principals.js";
+import { readPrincipalsStrict, reservedNameError, updatePrincipals, type Principal } from "../lib/principals.js";
+import { canonicalAgentName, REGISTRY_PATH, readRegistryAgentsSync } from "../lib/registry.js";
 import { formatCode } from "../lib/relay-protocol.js";
 import { apiJson, forbidden, INVALID_JSON, invalidJsonBody, readJsonBody } from "./api-respond.js";
 import { emitCredentialRevoked } from "./credential-revocation.js";
 import { relayClient } from "./relay-link.js";
 import { activePairingCodeList, issuePairingCode, redeemPairingByProof, redeemPairingCode } from "./relay-pairing.js";
-import { requestContextOf, type RequestContext } from "./request-context.js";
+import { requestContextOf, sourceAllows, type RequestContext } from "./request-context.js";
 
 const challenges = new ChallengeStore();
 const approvals = new Approvals();
 const MANAGE_MSG = "device management requires a credential with manage grant";
 const PAIR_ADMIN_MSG = "pairing management requires a device credential with manage grant";
-/** 单测把 principals.json 指到临时目录；生产不调 */
+/** 单测把 principals.json / registry.json 指到临时目录；生产不调 */
 let principalsPath: string | undefined;
+let registryPath = REGISTRY_PATH;
 export function setDevicesPrincipalsPathForTest(path: string | undefined): void {
   principalsPath = path;
+}
+export function setDevicesRegistryPathForTest(path: string | undefined): void {
+  registryPath = path ?? REGISTRY_PATH;
+}
+
+/** guest 能开放的名字：registry 里有的（按规范名比，裸名、agent- 前缀都认，与 agentInScope 同口径） */
+function registryHas(): (canonical: string) => boolean {
+  const names = new Set(readRegistryAgentsSync(registryPath).map((a) => canonicalAgentName(a.name)));
+  return (n) => names.has(n) || names.has(`agent-${n}`);
 }
 
 interface PairOutcome { token: string; principalId: string; credentialId: string; grant: Grant; expiresAt: string }
@@ -85,6 +96,8 @@ function pairFailure(reason: "invalid" | "expired" | "rate_limited"): Response {
 
 export async function handleDevicesPublic(req: Request, url: URL): Promise<Response | null> {
   const p = url.pathname;
+  // 正向白名单：本机、主端口（含本机反代）、中继路径模式才有配对；peer 入口（对外直连 / 中继 peer 帧）一律拒
+  if (p.startsWith("/api/v1/devices/") && !sourceAllows(req, "device")) return forbidden("device endpoints are not available on the peer entrance");
   if (p === "/api/v1/devices/pair/challenge" && req.method === "GET") {
     return apiJson(200, { ok: true, ...challenges.issue(), fp: machineFp(), machineName: hostname() });
   }
@@ -97,14 +110,15 @@ export async function handleDevicesPublic(req: Request, url: URL): Promise<Respo
 
 /**
  * 旧 web 的登录 cookie（cstra_session）→ 一次性换 owner 全权设备凭据（lib/legacy-web.ts）：从旧 web 服务升上来的机器，
- * 已登录的浏览器 / iOS App 不用重新配对。只在直托管同源成立——中继路径模式只放 cstra_dev，旧 cookie 到不了这里。
+ * 已登录的浏览器 / iOS App 不用重新配对。只在直托管同源成立：只认本机与主端口（含本机反代）的来源，其余（中继路径模式、
+ * 子域名隧道、peer 入口）一律 404。
  * 会话 id 是 nanoid(32)（≈190 位）且只能换一次，不另设限流。
  */
 async function legacySession(req: Request): Promise<Response> {
   if (!req.headers.get(DEVICE_HEADER)) return forbidden(`${DEVICE_HEADER} header required`);
   const ctx = requestContextOf(req);
   const sid = cookieValueFrom(req.headers.get("cookie"), LEGACY_SESSION_COOKIE);
-  if (!sid || ctx.source === "relay") return apiJson(404, { ok: false, error: "no legacy session", code: "no_legacy_session" });
+  if (!sid || !sourceAllows(req, "legacy")) return apiJson(404, { ok: false, error: "no legacy session", code: "no_legacy_session" });
   if (!redeemLegacySession(webDb(), sid)) return apiJson(401, { ok: false, error: "legacy session expired or already used", code: "legacy_session_invalid" });
   const body = await readJsonBody(req);
   const deviceName = str((body === INVALID_JSON || !body ? {} : (body as Body)).deviceName) ?? "升级前已登录的浏览器";
@@ -163,6 +177,10 @@ export async function handleDevicesManaged(req: Request, url: URL, principal: Pr
   const p = url.pathname;
   if (!p.startsWith("/api/v1/devices")) return null;
   if (p === "/api/v1/devices" && req.method === "GET") return canManage(principal) ? listDevices(principal) : forbidden(MANAGE_MSG);
+  // 退出登录 = 撤自己这条：不用先拉列表拿 id（guest 没有列表权限）；Bearer / peer token 没有「这条设备凭据」，404
+  if (p === "/api/v1/devices/current" && req.method === "DELETE") {
+    return principal.credential?.startsWith("dev_") ? revokeDevice(req, principal, principal.credential) : apiJson(404, { ok: false, error: "not a device credential" });
+  }
   const del = p.match(/^\/api\/v1\/devices\/(dev_[0-9a-f]+)$/);
   if (del && req.method === "DELETE") return revokeDevice(req, principal, del[1]);
   if (p === "/api/v1/devices/approvals" && req.method === "GET") {
@@ -247,7 +265,7 @@ export async function decideApproval(id: string, approve: boolean, approver?: Pr
 }
 
 /**
- * `claudestra pair` 的签码：grant 由 CLI 给（默认全权；--guest 给别人的设备）；短码给中继（连着的话），秘密只进链接的 # 片段。
+ * `claudestra pair` 的签码：grant 由 CLI 给（默认全权；--guest 给别人的设备，名字和 agents 都必须写明，见 checkGuestAgents）；短码给中继（连着的话），秘密只进链接的 # 片段。
  * 没连中继也能签（直托管入口）：link 要有入口地址才拼得出（CLI 的 --url），否则只给短码与 fragment 让用户手动进配对页。
  */
 export function issuePairing(
@@ -255,10 +273,17 @@ export function issuePairing(
   body: Body,
   issuer?: Principal,
 ): Record<string, unknown> {
+  const guest = str(body.guest);
+  // 带了 guest 字段名字却是空白 / 数字 / null：拒，不能当成没带、退化成给自己签全权码
+  if (body.guest !== undefined && !guest) return { ok: false, code: "guest_name_required", error: "guest 要写这台设备是给谁的（名字不能是空白，也得是文字）" };
+  // guest 的名字会成为它消息的来源名：老记录里「来源 = web-ui」被网页当 owner 本人（web/lib/chat/history-shape.ts）
+  const reserved = guest ? reservedNameError(guest) : null;
+  if (reserved) return { ok: false, error: reserved };
+  const guestAgents = guest ? checkGuestAgents(body.agents, body.confirmAllAgents, registryHas()) : null;
+  if (guestAgents && !guestAgents.ok) return { ok: false, code: guestAgents.code, error: guestAgents.error };
   const fp = i.fp ?? machineFp();
   if (!fp) return { ok: false, error: "本机没有实例密钥（instance-key.pem 读写失败），签不了配对码" };
-  const guest = str(body.guest);
-  const asked = normalizeGrant(body as Partial<{ agents: unknown; terminal: unknown; manage: unknown }>, guest ? guestGrant(["*"]) : fullGrant());
+  const asked = guestAgents?.ok ? guestGrant(guestAgents.agents) : normalizeGrant(body as Partial<{ agents: unknown; terminal: unknown; manage: unknown }>, fullGrant());
   // 网页里发码（issuer = 那台设备）：给出去的不能比它自己的大；本机终端（CLI）不传 issuer，照旧
   const grant = issuer ? capGrant(asked, issuer) : asked;
   if (!grant) return { ok: false, error: "你这台设备能用的会话里没有这些，签不了" };

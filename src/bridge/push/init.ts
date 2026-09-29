@@ -6,11 +6,13 @@
  */
 import { join } from "node:path";
 import { ApnsClient, apnsConfigFromEnv } from "../../lib/apns.js";
+import { readConfigSync } from "../../lib/config-store.js";
 import { repoEnvVar } from "../../lib/env-file.js";
 import { instanceKeySync, keyFingerprint } from "../../lib/instance-key.js";
 import { STATE_DIR } from "../../lib/paths.js";
 import { sandboxDisabled } from "../../lib/sandbox.js";
-import { readPrincipals } from "../../lib/principals.js";
+import { principalView } from "../../lib/devices.js";
+import { readPrincipals, type PrincipalsFile } from "../../lib/principals.js";
 import { readRegistryAgents } from "../../lib/registry.js";
 import { loadOrCreateVapidKeys, readVapidKeys, webPushSender, type VapidIdentity } from "../../lib/web-push.js";
 import { openWebState } from "../../lib/web-state.js";
@@ -24,9 +26,9 @@ import { createPushSender, type DirectBackends } from "./sender.js";
 const PRINCIPALS_REFRESH_MS = 60_000;
 let dispatcherRef: Dispatcher | null = null;
 
-/** 系统提醒推给 owner 的所有设备（推送没起来就什么也不做——提醒丢了不影响功能本身） */
-export function pushOwnerNotice(title: string, body: string): void {
-  dispatcherRef?.notice({ title, body }).catch((e) => console.error(`⚠️ 推送：系统提醒没推出去: ${(e as Error).message}`));
+/** 系统提醒推给 owner 的所有设备（推送没起来就什么也不做——提醒丢了不影响功能本身）；url = 点通知打开哪里，缺省 /chat */
+export function pushOwnerNotice(title: string, body: string, url?: string): void {
+  dispatcherRef?.notice({ title, body, url }).catch((e) => console.error(`⚠️ 推送：系统提醒没推出去: ${(e as Error).message}`));
 }
 /**
  * 要知道送没送到的系统提醒（订阅额度快过期：失败的渠道要单独重试）。推送子系统没起来（沙箱 / 启动前）→ null。
@@ -35,6 +37,7 @@ export async function pushOwnerNoticeTracked(title: string, body: string): Promi
   return dispatcherRef ? dispatcherRef.notice({ title, body }) : null;
 }
 const DEFAULT_VAPID_SUBJECT = "https://github.com/shawnlu96/claudestra";
+
 let started = false;
 
 function directBackends(): DirectBackends {
@@ -58,9 +61,11 @@ export function initPush(deliver?: (env: Envelope) => Promise<Delivery>): void {
   let direct: DirectBackends | null = null;
   const sender = createPushSender({ relay: relayClient, direct: () => (direct ??= directBackends()) });
   let owner = new Set([OWNER_CHAT_ID]);
+  let file: PrincipalsFile | null = null;
   const refresh = async () => {
     try {
-      owner = ownerChatIds(await readPrincipals());
+      file = await readPrincipals();
+      owner = ownerChatIds(file);
     } catch (e) {
       console.error(`⚠️ 推送：读 principals.json 失败，沿用上一份 owner 身份表: ${(e as Error).message}`);
     }
@@ -69,11 +74,19 @@ export function initPush(deliver?: (env: Envelope) => Promise<Delivery>): void {
   setInterval(() => void refresh(), PRINCIPALS_REFRESH_MS).unref();
   configurePushRoutes({ db, sender, liveAgents: async () => (await readRegistryAgents()).map((a) => a.name) });
   const key = instanceKeySync();
-  const dispatcher = createDispatcher({ db, sender, isOwnerChat: (id) => owner.has(id), ...(key ? { fp: keyFingerprint(key.publicKey) } : {}) });
+  // 订阅认人读的是最多 60 s 前的 principals.json
+  const resolvePrincipal = (pid: string, cid: string | null) => (file ? principalView(file, pid, cid) : null);
+  let isQuietReply: (threadId: unknown) => boolean = () => false;
+  const quiet = (threadId: unknown) => isQuietReply(threadId);
+  const noContent = () => readConfigSync().pushNoContent === true;
+  const dispatcher = createDispatcher({
+    db, sender, isOwnerChat: (id) => owner.has(id), resolvePrincipal, isQuietReply: quiet, noContent, ...(key ? { fp: keyFingerprint(key.publicKey) } : {}),
+  });
   dispatcherRef = dispatcher;
   subscribeEvents({}, (evt) => void dispatcher.onEvent(evt).catch((e) => console.error(`⚠️ 推送派发异常（这一条没推出去）: ${(e as Error).message}`)));
   console.log("🔔 推送派发器已启动（进程内订阅 event-bus）");
   // 「待你处理」：动态 import 同额度服务——asks 拖着台账库，推送的单测不该为它付加载代价
+  void import("../ask-reply.js").then((m) => (isQuietReply = m.isQuietReply)).catch((e) => console.error(`⚠️ 知会类回复的免推送没接上（照常推）: ${(e as Error).message}`));
   void import("../asks.js")
     .then((m) => m.onAsk((a) => void dispatcher.onAsk(a, m.ownerPresence.state()).catch((e) => console.error(`⚠️ 待你处理没推出去: ${(e as Error).message}`))))
     .catch((e) => console.error(`⚠️ 待你处理的推送没接上: ${(e as Error).message}`));

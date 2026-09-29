@@ -49,13 +49,15 @@ function chatMessage(d: Record<string, unknown>, selfIds: ReadonlySet<string>): 
     const src = String(d.srcKind ?? "");
     if ((src === "api" || src === "user") && typeof d.text === "string" && d.text.trim()) {
       // 剥附件注入块 → 干净正文 + 附件数组；不剥的话另一端渲染出整块路径文字，本端回声与乐观消息也对不上（双份）
-      // owner 对「待你处理」的作答（bridge/asks.ts）：第一行是给 agent 看的说明，之后才是 owner 发的原文——回显只要原文，才对得上乐观气泡
-      const said = typeof d.askId === "string" ? d.text.split("\n").slice(1).join("\n") : d.text;
+      // owner 对「待你处理」的作答：bridge 给了 echo（选项人话 + 原话，和历史同一个算法，lib/inbound-body.ts answerEcho）；老 bridge 只剥第一行说明
+      const said = typeof d.echo === "string" ? d.echo : typeof d.askId === "string" ? d.text.split("\n").slice(1).join("\n") : d.text;
       const { content, attachments } = extractAttachments(said);
       if (!content && !attachments?.length) return null;
       const from = typeof d.from === "string" && d.from !== "?" ? d.from : undefined;
       const fromLabel = isSelfSource(from, typeof d.fromId === "string" ? d.fromId : undefined, selfIds) ? undefined : from;
-      return { t: "user-in", text: content, ...(fromLabel ? { from: fromLabel } : {}), ...(attachments?.length ? { attachments } : {}) };
+      const wire = typeof d.echo === "string" && typeof d.wire === "string" ? extractAttachments(d.wire).content : ""; // 作答的原文：对账、回填已答态用
+      const ask = { ...(typeof d.askId === "string" ? { askId: d.askId } : {}), ...(wire && wire !== content ? { wire } : {}) };
+      return { t: "user-in", text: content, ...(fromLabel ? { from: fromLabel } : {}), ...(attachments?.length ? { attachments } : {}), ...ask };
     }
     return null;
   }
@@ -71,7 +73,27 @@ function chatMessage(d: Record<string, unknown>, selfIds: ReadonlySet<string>): 
     text: String(d.text ?? ""),
     ...(Array.isArray(d.components) ? { components: d.components as WebComponentRow[] } : {}),
     ...(atts.length ? { attachments: atts } : {}),
+    ...(typeof d.askId === "string" ? { askId: d.askId } : {}),
   };
+}
+
+const CTX_BLOCK_WHY: Record<string, [string, string]> = {
+  draft: ["输入框里有没发出去的字", "there is unsent text in the input box"],
+  queued: ["已经有排队的消息", "a message is already queued"],
+  menu: ["画面上有对话框或菜单", "a dialog or menu is open"],
+  "quota-wall": ["撞了额度墙又没开 low-priority", "it hit the usage wall without low-priority"],
+  "copy-mode": ["有人在翻看终端历史", "someone is scrolling the terminal history"],
+  leftover: ["注入的命令没能提交，还留在输入框里", "the injected command was not submitted and is still in the input box"],
+};
+
+/** 上下文边界：过了救命线却被挡住（bridge/ctx-boundary.ts alertBlocked），不处理就会一直涨到 CC 自己裸压 */
+function ctxBlockedText(d: Record<string, unknown>, lang: Lang): string {
+  const k = (n: unknown) => `${Math.round((Number(n) || 0) / 1000)}K`;
+  const why = CTX_BLOCK_WHY[String(d.reason)] ?? [String(d.reason ?? "?"), String(d.reason ?? "?")];
+  const cap = typeof d.cap === "number" ? d.cap : null;
+  return lang === "en"
+    ? `⚠️ Context is at ${k(d.ctx)}${cap ? `, past the ${k(cap)} safety line,` : ""} but auto-compaction is blocked: ${why[1]}. Please check this window.`
+    : `⚠️ 上下文 ${k(d.ctx)}${cap ? `，过了救命线 ${k(cap)}` : ""}，但自动压缩被挡住：${why[0]}。请去这个窗口处理一下。`;
 }
 
 /** 服务端不再按语言双写文案——带变量串在这里按用户语言生成 */
@@ -99,6 +121,8 @@ function anomalyText(d: Record<string, unknown>, lang: Lang): string | null {
         ? `⚠️ Link down for ${mins} min — Claude Code is running in tmux, but its channel-server is not connected to the bridge, ` +
             "so messages cannot get in or out. Restarting this agent fixes it."
         : `⚠️ 链路已断开 ${mins} 分钟 —— tmux 里 Claude Code 还在跑，但它的 channel-server 没连上 bridge，` + "消息进不来也出不去。重启这个 agent 可修复。";
+    case "ctx_boundary_blocked":
+      return ctxBlockedText(d, lang);
   }
   return null;
 }
@@ -116,7 +140,7 @@ export function translate(evt: BridgeEvent, lang: Lang, selfIds: ReadonlySet<str
         t: "tool",
         name: String(d.name ?? "?"),
         summary: String(d.summary ?? ""),
-        state: "running",
+        state: d.done ? "done" : "running", // AUQ 作答补的卡落地就是完成的（src/lib/auq-echo.ts）
         ...(typeof d.toolId === "string" && d.toolId ? { id: d.toolId } : {}),
         ...(typeof d.detail === "string" && d.detail ? { detail: d.detail } : {}),
         ...recordSrc(d),

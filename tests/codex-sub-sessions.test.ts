@@ -3,8 +3,8 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { codexSubSessionOf, readCodexMeta } from "../src/lib/codex-session";
-import { isCodexSubThread } from "../src/lib/codex-subthread";
-import { nestSubSessions, sessionRowKey } from "../web/lib/session-nesting";
+import { isCodexOneShot, isCodexSubThread } from "../src/lib/codex-subthread";
+import { groupOneShots, ONE_SHOT_GROUP, sessionRowKey, sessionTree, type SubSessionRow } from "../web/lib/session-nesting";
 
 // Codex 的子线程（subagent / 自动审查）与主会话同 cwd，列表里分不出主从；session_meta 里 id≠session_id 就是子线程
 const dir = mkdtempSync(join(tmpdir(), "codex-sub-"));
@@ -83,19 +83,44 @@ describe("sessionRowKey", () => {
   });
 });
 
-describe("nestSubSessions", () => {
+// 全部展开、全部列出时的排序与缩进（折叠 / 已纳管分组头见 tests/session-limit.test.ts）
+const nestAll = <T extends SubSessionRow>(rows: T[]) => sessionTree(rows, () => true, new Set(rows.map(sessionRowKey)));
+
+describe("sessionTree 全展开", () => {
   test("同一个 sessionId 两行（不同 cwd 的 Claude Code 会话）：按行对象去重，两行都在、顺序不变", () => {
     const D1 = { sessionId: "D", name: "w1" };
     const E = { sessionId: "E", name: "w" };
     const D2 = { sessionId: "D", name: "w2" };
-    expect(nestSubSessions([D1, E, D2]).map((r) => r.row)).toEqual([D1, E, D2]);
+    expect(nestAll([D1, E, D2]).map((r) => r.row)).toEqual([D1, E, D2]);
   });
   const row = (sessionId: string, parentId?: string) => ({ sessionId, name: "w", ...(parentId ? { sub: { parentId, kind: "subagent" } } : {}) });
   test("子会话排到父会话下面并缩进，父不在列表里就留原位", () => {
     const rows = [row("C", "B"), row("X"), row("B", "A"), row("A"), row("Z", "gone")];
-    expect(nestSubSessions(rows).map((r) => `${r.row.sessionId}${r.depth}`)).toEqual(["X0", "A0", "B1", "C2", "Z0"]);
+    expect(nestAll(rows).map((r) => `${r.row.sessionId}${r.depth}`)).toEqual(["X0", "A0", "B1", "C2", "Z0"]);
   });
   test("成环也不丢行", () => {
-    expect(nestSubSessions([row("P", "Q"), row("Q", "P")]).map((r) => r.row.sessionId).sort()).toEqual(["P", "Q"]);
+    expect(nestAll([row("P", "Q"), row("Q", "P")]).map((r) => r.row.sessionId).sort()).toEqual(["P", "Q"]);
+  });
+});
+
+describe("codex exec 一次性会话", () => {
+  test("source = exec 且不是子线程才算；readCodexMeta 带 oneShot", async () => {
+    expect(isCodexOneShot({ id: "E", session_id: "E", source: "exec", thread_source: "user" })).toBe(true);
+    expect(isCodexOneShot({ id: "V", session_id: "V", source: "vscode" })).toBe(false);
+    expect(isCodexOneShot({ id: "S", session_id: "P", source: "exec" })).toBe(false); // 子线程另有归属
+    expect(await readCodexMeta(meta("exec.jsonl", { id: "E1", session_id: "E1", source: "exec" }))).toEqual({ sessionId: "E1", cwd: "/w", oneShot: true });
+    expect(await readCodexMeta(meta("cli.jsonl", { id: "C1", session_id: "C1", source: "cli" }))).toEqual({ sessionId: "C1", cwd: "/w" });
+  });
+
+  test("网页把一次性会话收进末尾的合成分组，默认折叠；没有就原样返回", () => {
+    const rows = [{ sessionId: "A", name: "a" }, { sessionId: "X1", name: "x", oneShot: true }, { sessionId: "B", name: "b" }, { sessionId: "X2", name: "x", oneShot: true }];
+    const g = groupOneShots(rows, "Codex 一次性调用");
+    expect(g.at(-1)).toMatchObject({ sessionId: ONE_SHOT_GROUP, group: true });
+    const shown = (r: SubSessionRow) => !r.group;
+    expect(sessionTree(g, shown, new Set()).map((r) => [r.row.sessionId, r.anchor, r.kids])).toEqual([["A", false, 0], ["B", false, 0], [ONE_SHOT_GROUP, true, 2]]);
+    const open = sessionTree(g, shown, new Set([sessionRowKey({ sessionId: ONE_SHOT_GROUP })])).map((r) => r.row.sessionId);
+    expect(open).toEqual(["A", "B", ONE_SHOT_GROUP, "X1", "X2"]);
+    const plain = [{ sessionId: "A", name: "a" }];
+    expect(groupOneShots(plain, "g")).toBe(plain);
   });
 });
