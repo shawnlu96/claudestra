@@ -59,6 +59,28 @@ describe("onAcpFrame", () => {
 describe("流式条目的确认与去重（r4 P1-2）", () => {
   const CH2 = "local-acp-seq";
   const tool = (id: string) => ({ type: "assistant", timestamp: "t", message: { content: [{ type: "tool_use", id, name: "Bash", input: { command: id } }] } });
+  test("毒条目只记一次丢失：前面的正文不重复发，回包丢后重送仍带丢失标记", async () => {
+    const ch = "local-acp-poison";
+    const s = sock(ch);
+    noteAcpChannel(ch, "acp");
+    await startWatching("agent-acp-poison", "/w", "sid", ch, discord, { transport: "acp" });
+    const texts: string[] = [];
+    const unsub = subscribeEvents({}, (e) => void (e.chatId === ch && e.type === "assistant_text" && texts.push(String(e.data.text))));
+    const entries = [
+      { type: "assistant", message: { content: [{ type: "text", text: "好的正文" }] } },
+      { type: "assistant", message: { content: [{ type: "text", text: 42 }] } },
+    ];
+    try {
+      for (const requestId of ["poison-1", "poison-retry"]) {
+        await onAcpFrame({ type: "acp_entries", channelId: ch, hostId: "poison-host", firstSeq: 1, entries, requestId }, s, discord);
+        expect(s.sent.find((f) => f.requestId === requestId)?.result).toMatchObject({ ok: true, lost: 1 });
+      }
+      expect(texts).toEqual(["好的正文"]);
+    } finally {
+      unsub();
+      stopWatching("agent-acp-poison");
+    }
+  });
   test("没 watcher 回 false；同一宿主重送只处理没处理过的；新宿主进程从头算", async () => {
     const s = sock(CH2);
     noteAcpChannel(CH2, "acp");
@@ -74,9 +96,9 @@ describe("流式条目的确认与去重（r4 P1-2）", () => {
       expect(await send("h1", 1, ["a"], "r1")).toBe(true);
       expect(await send("h1", 1, ["a", "b"], "r2")).toBe(true);
       expect(await send("h1", 1, ["a", "b"], "r3")).toBe(true);
-      expect(await send("h1", 4, ["gap"], "r-gap")).toBe(false); // 重放有缺口：不能确认后面的条目
+      expect(await send("h1", 4, ["gap"], "r-gap")).toMatchObject({ ok: true, lost: 1 }); // 缺口明确报丢失，不能永远拒收
       expect(await send("h2", 1, ["c"], "r4")).toBe(true);
-      expect(started).toEqual(["a", "b", "c"]);
+      expect(started).toEqual(["a", "b", "gap", "c"]);
     } finally {
       unsub();
       stopWatching("agent-acp-seq");
@@ -149,11 +171,11 @@ describe("推送 watcher 重建：未 flush 的正文不丢、序号不回退（
     const unsub = subscribeEvents({}, (e) => void (e.chatId === CH3 && e.type === "assistant_text" && seqs.push(Number((e.data as { seq?: unknown }).seq))));
     try {
       await startWatching(AG, "/w", "sid-1", CH3, discord, { transport: "acp" });
-      expect(await pushEntries(CH3, [say("第一段")], discord)).toBe(true);
+      expect(await pushEntries(CH3, [say("第一段")], discord)).toEqual({ ok: true, lost: 0 });
       stopWatchingByChannel(CH3); // ws close
-      expect(await pushEntries(CH3, [say("x")], discord)).toBe(false); // 断着：宿主会留着重送
+      expect(await pushEntries(CH3, [say("x")], discord)).toEqual({ ok: false, lost: 0 }); // 断着：宿主会留着重送
       await startWatching(AG, "/w", "sid-1", CH3, discord, { transport: "acp" });
-      expect(await pushEntries(CH3, [say("第二段")], discord)).toBe(true);
+      expect(await pushEntries(CH3, [say("第二段")], discord)).toEqual({ ok: true, lost: 0 });
       await startWatching(AG, "/w", "sid-1", CH3, discord, { transport: "acp" }); // 被顶替后直接重新登记
       expect((await drainChannelWatcher(CH3, discord)).text).toBe("第一段\n第二段");
       expect(seqs).toHaveLength(2);

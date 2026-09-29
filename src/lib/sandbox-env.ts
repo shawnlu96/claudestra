@@ -142,6 +142,7 @@ const SANDBOX_MANAGER_COMMANDS = new Set([
   "team", // 班子提案只写沙箱状态目录的 team-proposals.json，按钮经沙箱 bridge 贴出
   "skill-toggle", // 只写沙箱状态目录下的 agent-settings（lib/agent-settings.ts），技能目录只读
   "transport", // T60：切 transport 只写沙箱 registry、重启沙箱窗口；acp 那头在沙箱里只能是 stub（assertSandboxRuntime）
+  "migrate", // T60：只改沙箱 registry，重启的 Codex 在沙箱里仍固定走 stub
 ]);
 
 /** 返回拒绝原因；null = 可以跑。agent 目录与 runtime 另由 manager 的 create 入口按 lib/sandbox.ts 再查一遍 */
@@ -152,8 +153,9 @@ export function sandboxManagerRefusal(args: string[]): string | null {
   }
   if (args.includes("--include-master")) return "沙箱没有大总管，不支持 --include-master";
   if (args.includes("--external")) return "沙箱不对外共享 agent（--external）";
+  if (cmd === "transport" && args[2] === "tmux") return "沙箱 Codex 只许 ACP stub，不起真实 TUI";
   const rt = args.indexOf("--runtime");
-  const acp = args[rt + 1] === "codex" && args[args.indexOf("--transport") + 1] === "acp"; // T60：适配器固定是本仓 stub（lib/acp/stub.ts）
+  const acp = args[rt + 1] === "codex" && (args.indexOf("--transport") < 0 || args[args.indexOf("--transport") + 1] === "acp");
   if (rt >= 0 && args[rt + 1] !== "claude-code" && !acp) return "沙箱只支持 Claude Code runtime（Pi / Codex 的启动链不经沙箱闸门；Codex 只许 --transport acp，适配器固定是 stub）";
   return null;
 }

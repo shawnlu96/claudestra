@@ -107,6 +107,19 @@ describe("ACP 宿主整条链（stub）", () => {
     expect(h.stops[0]).toEqual({ channelId: CH, event: "Stop", stopHookActive: false });
   }, 30_000);
 
+  test("忙时人类消息走 steering：原回合不停，补充送进当前回合，最后只报一次 Stop", async () => {
+    const h = start();
+    await until(h.isReady);
+    h.inbound("[stub:pause] 先做任务 A");
+    await until(() => h.entries().some((e) => e.message?.content?.[0]?.name === "Bash"));
+    h.inbound("补充事实 B", { chat_id: "api:owner", message_id: "msg2" });
+    await until(() => h.logs.some((line) => line.includes("msg2") && line.includes("插进当前回合")));
+    await until(() => h.stops.length === 1);
+    expect(h.sent.find((f) => f.type === "reply")?.text).toContain("途中插话 1 条");
+    expect(h.sent.some((f) => f.type === "abort_ack")).toBe(false);
+    expect(h.stops).toEqual([{ channelId: CH, event: "Stop", stopHookActive: false }]);
+  }, 30_000);
+
   test("撞额度（注入）：出 acp_failure quota + ⛔ 条目，StopFailure，同一个失败只出一次", async () => {
     const h = start();
     await until(h.isReady);

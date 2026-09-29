@@ -31,7 +31,8 @@ const authCards = new Set<string>();
 /** 频道 → 排着的权限请求；队首就是卡上显示的那个 */
 const permQueues = new Map<string, Perm[]>();
 /** 频道 → 已处理到的条目序号（按宿主进程区分：宿主重起序号从 1 开始） */
-const entrySeqs = new Map<string, { hostId: string; last: number }>();
+const entrySeqs = new Map<string, { hostId: string; last: number; lost: number }>();
+const bridgeEpoch = randomBytes(6).toString("hex");
 /** 同频道的批次处理完才看下一批的序号；ws 消息处理器本身不会等上一个 async 回调。 */
 const entryTurns = new Map<string, Promise<void>>();
 const calls = new Map<string, { resolve: (r: { ok: boolean; error?: string }) => void; timer: ReturnType<typeof setTimeout> }>();
@@ -89,7 +90,7 @@ export async function onAcpFrame(msg: Record<string, any>, ws: Socket, discord: 
 }
 
 /** 一批条目：跳过这个宿主已经处理过的前缀（上次回包丢了、宿主重送），剩下的交 watcher；watcher 不在回 false，宿主会重送 */
-async function acceptEntries(channelId: string, msg: Record<string, any>, discord: Client): Promise<boolean> {
+async function acceptEntries(channelId: string, msg: Record<string, any>, discord: Client): Promise<boolean | { ok: true; lost: number; bridgeEpoch: string }> {
   const entries: object[] = Array.isArray(msg.entries) ? msg.entries : [];
   const hostId = typeof msg.hostId === "string" ? msg.hostId : "";
   const first = Number(msg.firstSeq);
@@ -97,15 +98,15 @@ async function acceptEntries(channelId: string, msg: Record<string, any>, discor
   const seen = entrySeqs.get(channelId);
   // bridge 重启后去重表是空的，但仍在跑的宿主会从未确认的较大序号接着送；这一轮由宿主标记为不确定收尾。
   const last = seen?.hostId === hostId ? seen.last : first - 1;
-  if (first > last + 1) {
-    console.warn(`⚠️ ACP 条目缺口：${channelId} 宿主 ${hostId} 已收至 ${last}，重送从 ${first} 开始；拒绝确认`);
-    return false;
-  }
+  const gap = first > last + 1 ? first - last - 1 : 0;
+  if (gap) console.warn(`⚠️ ACP 条目缺口：${channelId} 宿主 ${hostId} 已收至 ${last}，重送从 ${first} 开始；按丢失确认`);
   const fresh = entries.slice(Math.max(0, last - first + 1));
-  if (!fresh.length) return true;
-  const ok = await pushEntries(channelId, fresh, discord);
-  if (ok) entrySeqs.set(channelId, { hostId, last: first + entries.length - 1 });
-  return ok;
+  if (!fresh.length) return seen?.lost ? { ok: true, lost: seen.lost, bridgeEpoch } : true;
+  const result = await pushEntries(channelId, fresh, discord);
+  if (!result.ok) return false;
+  const lost = (seen?.hostId === hostId ? seen.lost : 0) + gap + result.lost;
+  entrySeqs.set(channelId, { hostId, last: first + entries.length - 1, lost });
+  return lost ? { ok: true, lost, bridgeEpoch } : true;
 }
 
 function onFailure(channelId: string, f: AcpFailure, rawConfig: unknown): void {
@@ -177,7 +178,7 @@ export function onAcpHostGone(channelId: string, ws: Socket): void {
 /** 经宿主调 session/set_config_option（设置页的模型 / 推理强度、额度卡的「切到 X」）：不重启 */
 export const acpSetConfig = (channelId: string, configId: string, value: string) => acpCall(channelId, { op: "set_config", configId, value });
 
-/** 斜杠命令（/compact 等）原样当一轮 prompt 交给宿主：不包 <channel>，适配器自己认（lib/runtimes/codex.ts CODEX_ACP_CONTROL.slashAsPrompt） */
+/** 斜杠命令（/compact 等）原样当一轮 prompt 交给宿主：不包 <channel>，适配器自己认（lib/runtimes/codex-control.ts） */
 export const acpSlash = (channelId: string, text: string) => acpCall(channelId, { op: "slash", text });
 
 function acpCall(channelId: string, body: Record<string, unknown>): Promise<{ ok: boolean; error?: string }> {

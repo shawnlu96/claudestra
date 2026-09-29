@@ -6,7 +6,7 @@
  */
 
 import { enableTimestampLogs } from "./lib/log-timestamp.js";
-import { requestStillHeld, shouldSweepPac } from "./lib/held-pac.js";
+import { requestStillHeld } from "./lib/held-pac.js";
 import { copyOutboundToInbox } from "./bridge/local-api/media-refresh.js";
 import { splitInlineButtons, toButtonRows, inlineChipsToText } from "./lib/inline-buttons.js";
 import { isTargetsOwnReply } from "./lib/pushback-scope.js";
@@ -430,7 +430,7 @@ async function localAgentWorking(channelId: string, evAgent: string): Promise<bo
 function flushHeldLocalMsgs(channelId: string, reason: string): Promise<void> {
   return flushHeld({
     held: heldLocalMsgs, compacting: (a) => getAgentStatus(a) === "compacting", working: localAgentWorking, isHumanRequest, walled: async (c) => !!(await quotaWall()?.gates(c)),
-    client: (c) => clients.get(c), deliver: deliverLocalInOrder, touch: (c, env) => pendingAgentCalls.touch(c, env.from.kind === "local" ? env.from.channelId : undefined),
+    client: (c) => clients.get(c), deliver: deliverLocalInOrder, touch: (c, env) => pendingAgentCalls.touchDelivered(c, env),
     stoppedAt: (c) => turnCuts.stoppedAt(c),
   }, channelId, reason);
 }
@@ -481,7 +481,7 @@ const stopSettleDeps: import("./bridge/stop-settle.js").CallerSettleDeps = {
   pushBack: (pac, cid, body) => pushBackToCaller(pac, clients.get(cid)?.ws, pac.originalReplyChannel || cid, body, "agent_drain"),
   notify: (pac, cid, body) => pushBackToCaller(pac, clients.get(cid)?.ws, pac.originalReplyChannel || cid, body, "agent_apierr", "notification"),
   takeApiErrorNotice: (cid) => pendingAgentCalls.takeApiErrorNotice(cid, stillHeldFor(cid)), waiting: (cid) => pendingAgentCalls.waiting(cid, stillHeldFor(cid)), rearmResume,
-  markApiError: (cid, text, caller) => pendingAgentCalls.markApiError(cid, stillHeldFor(cid), text, caller), clearWithheld: (cid, pac) => pendingAgentCalls.clearWithheld(cid, pac.callerChannelId),
+  markApiError: (cid, text, caller) => pendingAgentCalls.markApiError(cid, stillHeldFor(cid), text, caller), clearWithheld: (cid, pac) => pendingAgentCalls.clearWithheld(cid, pac),
   unattributed: (cid, _t, n) => void (n.wall || quotaWall()?.active() || notifyMaster(unattributedNotice(agentLabelForChannel(cid), n))), // 闸内静默：出闸通知一次说清
   metric: (name, channelId, meta) => recordMetric(name, { channelId, meta }),
 };
@@ -2714,7 +2714,7 @@ async function handleHookRequest(req: Request): Promise<Response> {
         // 轮转（不经 clear 端点）自愈。后台异步，不阻塞 Stop 主流程。
         void maybeHealRotatedSession(channelId);
         // 插话那一回合结束、被打断的事还没续上 → 打断收尾提醒进押后队列,和押后消息一起由同一个投递者投(lib/turn-cuts.ts)
-        const cutNotice = turnCuts.onStop(channelId, event === "stop" ? "Stop" : event, evAgent);
+        const cutNotice = turnCuts.onStop(channelId, event === "stop" ? "Stop" : event, evAgent, afterAbort); // 叫停中止引起的 Stop 不清送达记录（⏹ 抬头要列）
         if (cutNotice) heldLocalMsgs.holdEnv(cutNotice);
         // v2.21.1+ 回合结束 → 投递押后的 agent→agent 消息(2s 让 TUI 回到提示符)
         if (heldLocalMsgs.get(channelId)?.length) {
@@ -2732,7 +2732,7 @@ async function handleHookRequest(req: Request): Promise<Response> {
 
       // 只有 Stop / StopFailure 触发完成通知，Notification 不触发（避免 Stop+Notification 连发两次）
       // 同时 10 秒内去抖，防止 Claude Code 重复 fire Stop 事件
-      let shouldNotify = event === "Stop" || event === "StopFailure" || event === "stop";
+      let shouldNotify = (event === "Stop" || event === "StopFailure" || event === "stop") && !afterAbort; // 叫停引起的 Stop 不是做完：不 @，也不占掉停字那一轮的去抖
       const now = Date.now();
       const last = lastCompletionSent.get(channelId) || 0;
       if (shouldNotify && now - last < COMPLETION_DEDUPE_MS) {
@@ -3413,14 +3413,7 @@ void import("./bridge/ledger-audit-service.js").then((m) => m.startLedgerAudit({
 // 清扫上次崩溃 / 被杀残留的 webterm-* viewer session（grouped session 视图，kill 不伤 master 本体）；Discord 与 Web-only 模式都要
 sweepStaleTerminalSessions().catch(() => {});
 
-// 存量 agent 的 project 归属补齐(「每个 agent 必属一个 project」对老数据成立)。委托 manager(写锁+原子写),幂等——没缺的直接 migrated:0 返回。
-setTimeout(() => {
-  runManager("project-migrate")
-    .then((r: any) => {
-      if (r?.ok && r.migrated > 0) console.log(`📁 project 迁移:${r.migrated} 个 agent 已按目录归组`);
-    })
-    .catch(() => {});
-}, 3_000);
+void import("./bridge/startup-migrations.js").then((m) => m.startStartupMigrations(runManager));
 void import("./bridge/ctx-boundary.js").then((m) => m.startCtxBoundary()); // 上下文边界自动压缩：每分钟一轮，Discord / web-only 都跑
 
 // Web-only: 无 DISCORD_BOT_TOKEN → Web-only 模式：不连 Discord，只跑与平台无关的初始化子集。HTTP/ws/api/事件流在上面 Bun.serve 时已就绪。

@@ -27,7 +27,7 @@ manager archive <名称>                  # 手动归档当前 session jsonl
 manager doctor [--json]                # 出问题第一个跑（只读体检）
 manager tmux-screenshot <agent>        # 截图 → PNG 路径，用 Read 看
 manager tmux-capture <agent> [行数]     # 读 pane 文本
-manager tmux-send-keys <agent> <键...>  # 发键（Enter/Escape/方向键/C-c/文本）
+manager tmux-send-keys <agent> [--force] <键...>  # 发键（Enter/Escape/方向键/C-c/文本）；额度菜单 / 撞墙倒计时 / 权限框 / AskUserQuestion 上会拒发
 manager tmux-wait-idle <agent> [ms]
 
 # Project 归组（v2.21+，每个 agent 必属一个 project；create 缺省按目录自动归属/建组）
@@ -105,6 +105,7 @@ manager peer-http-list / peer-http-test <名称> / peer-http-scope <名称> --ag
 3. **每步操作后再截图确认**，可能要多轮
 4. 完成后用 `reply` 发到**用户的原频道**（chat_id = 消息里的 channel_id），不是 #control
 5. 不确定就回 #control 问用户想选哪个；不乱按键、不在无 modal 时发无意义键
+6. 发键被拒（窗口停在额度菜单 / 倒计时 / 权限框 / AskUserQuestion 上）= 这一步要人拍板：用户明确说了选哪个才加 `--force` 重发，每次强发都记审计
 
 ## 版本与更新
 

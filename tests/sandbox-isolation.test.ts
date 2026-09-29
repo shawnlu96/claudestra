@@ -203,10 +203,10 @@ async function agentSide(): Promise<void> {
   // statusLine 的用量缓存落在沙箱状态目录，生产的没出现
   expect(existsSync(join(root, "state", "usage-cache.json"))).toBe(true);
   expect(existsSync(join(home, ".claude-orchestrator", "usage-cache.json"))).toBe(false);
-  // 沙箱根目录外、目录不存在（tmux 会回落到 $HOME）、非 Claude Code runtime：拒绝；API 建 agent 同样经 manager create
+  // 沙箱根目录外、目录不存在（tmux 会回落到 $HOME）、Codex 真 TUI：拒绝；API 建 agent 同样经 manager create
   expect(sandbox("manager", "create", "bad", tmp).out).toContain("沙箱 agent 必须建在");
   expect(sandbox("manager", "create", "typo", join(root, "work", "typo")).out).toContain("不存在");
-  expect(sandbox("manager", "create", "bad2", join(root, "work"), "--runtime", "codex").code).not.toBe(0);
+  expect(sandbox("manager", "create", "bad2", join(root, "work"), "--runtime", "codex", "--transport", "tmux").code).not.toBe(0);
   const api = await fetch(`http://127.0.0.1:${port}/api/v1/agents`, {
     method: "POST", headers: { Authorization: `Bearer ${secret}`, "Content-Type": "application/json" },
     body: JSON.stringify({ name: "typo2", dir: join(root, "work", "typo2") }),
