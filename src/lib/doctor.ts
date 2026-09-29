@@ -536,6 +536,7 @@ export async function runDoctor(repoRoot: string): Promise<Check[]> {
     checkBridge(repoRoot),
     checkIntegration(repoRoot),
     checkAgents(), import("./doctor-pending.js").then((m) => m.checkPendingOps(repoRoot)), // 做到一半的 create / kill / rename / update 与孤儿窗口、频道
+    import("./doctor-acp.js").then((m) => m.checkCodexAcp()),
     checkGitHead(repoRoot),
     checkWorktreeClean(repoRoot),
     checkWebBuild(repoRoot),
@@ -545,7 +546,6 @@ export async function runDoctor(repoRoot: string): Promise<Check[]> {
   ]);
   return groups.flat();
 }
-
 const ICON: Record<CheckStatus, string> = { ok: "✅", warn: "⚠️ ", fail: "❌" };
 
 /** 人类可读输出 —— 这个命令的产物是给人截图发给维护者的，不是给程序解析的 */

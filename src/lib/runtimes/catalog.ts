@@ -6,6 +6,7 @@
  * 路径——端点只给全权 token，BFF 也只往浏览器转 id / label / available。
  */
 import { managedFor, manageableRuntimeIds } from "./index.js";
+import { probeAcpCli } from "../acp/readiness.js";
 
 export interface RuntimeCatalogEntry {
   id: string;
@@ -19,7 +20,8 @@ export async function runtimeCatalog(): Promise<RuntimeCatalogEntry[]> {
   return Promise.all(
     manageableRuntimeIds().map(async (id) => {
       const a = managedFor(id)!;
-      const r = await a.available().catch((e) => ({ ok: false as const, hint: (e as Error).message }));
+      const acp = id === "codex" ? await probeAcpCli() : null;
+      const r = acp?.ok ? { ok: true as const } : await a.available().catch((e) => ({ ok: false as const, hint: (e as Error).message }));
       return { id, label: a.label, manageable: true as const, available: r.ok, ...(r.ok ? {} : { hint: r.hint }) };
     }),
   );

@@ -91,6 +91,20 @@ describe("AcpSession · prompt 结果", () => {
 });
 
 describe("AcpSession · 外部回合的结束（按序号关联，Shawn 复审要求 1、2）", () => {
+  test("steer 不设局部超时：结果未明时不能把同一消息再当 prompt 投递", async () => {
+    const f = fakeAdapter();
+    await attached(f);
+    const request = f.session.rpc.request.bind(f.session.rpc);
+    let timeout: number | undefined = -1;
+    (f.session.rpc as any).request = (method: string, params: unknown, opts: { timeoutMs?: number }) => {
+      if (method === "_session/steering") timeout = opts.timeoutMs;
+      return request(method, params, opts);
+    };
+    const pending = f.session.steer("late reply");
+    expect(timeout).toBeUndefined();
+    f.reply("_session/steering", { outcome: "injected" });
+    expect(await pending).toEqual({ outcome: "injected" });
+  });
   test("startedNewTurn 的回包和那一轮的 idle 同一个 chunk 到：不漏等", async () => {
     const f = fakeAdapter();
     await attached(f);

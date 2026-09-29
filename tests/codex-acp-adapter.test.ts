@@ -71,6 +71,8 @@ describe("transport 命令的检查", () => {
     expect(transportRefusal(undefined, "ghost", "acp")).toContain("不存在");
     expect(transportRefusal({ runtime: "codex" }, "x", "tmux")).toBeNull();
     expect(transportRefusal({ runtime: "codex" }, "x", "acp", { CLAUDESTRA_ACP_AGENT: "[\"stub\"]" })).toBeNull();
+    expect(transportRefusal({ runtime: "codex" }, "x", "acp", { CLAUDESTRA_SANDBOX: "1", CLAUDESTRA_ACP_AGENT: "[\"evil\"]" })).toContain("沙箱里不认");
+    expect(transportRefusal({ runtime: "codex" }, "x", "tmux", { CLAUDESTRA_SANDBOX: "1" })).toContain("只许 ACP stub");
   });
 });
 
@@ -86,8 +88,10 @@ describe("create --transport 与沙箱闸门", () => {
     expect(() => assertSandboxRuntime("codex", sandbox)).toThrow("只支持 Claude Code");
     expect(() => assertSandboxRuntime("claude-code", sandbox)).not.toThrow();
     expect(sandboxManagerRefusal(["create", "cx", "/w", "--runtime", "codex", "--transport", "acp"])).toBeNull();
-    expect(sandboxManagerRefusal(["create", "cx", "/w", "--runtime", "codex"])).toContain("只支持 Claude Code runtime");
+    expect(sandboxManagerRefusal(["create", "cx", "/w", "--runtime", "codex"])).toBeNull(); // 缺省 ACP，在 manager 入口选 stub
+    expect(sandboxManagerRefusal(["create", "cx", "/w", "--runtime", "codex", "--transport", "tmux"])).toContain("只支持 Claude Code runtime");
     expect(sandboxManagerRefusal(["transport", "cx", "acp"])).toBeNull();
+    expect(sandboxManagerRefusal(["transport", "cx", "tmux"])).toContain("只许 ACP stub");
   });
 });
 
