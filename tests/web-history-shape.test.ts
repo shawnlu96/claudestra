@@ -53,7 +53,7 @@ describe("toChatMessages（历史记录 → 气泡）", () => {
       a(7, { text: "c" }),
     ];
     const out = toChatMessages(items);
-    expect(out.map((m) => `${m.role}:${m.content}`)).toEqual(["assistant:a", "system:已被用户中断", "assistant:b", "system:/clear", "system:上下文已压缩", "assistant:c"]);
+    expect(out.map((m) => `${m.role}:${m.content}`)).toEqual(["assistant:a", "system:回合已中断", "assistant:b", "system:/clear", "system:上下文已压缩", "assistant:c"]);
   });
   test("按钮点击的机器 payload 还原成组件 label，并回填锚点气泡的 replyClicks（已答态跨刷新持久）", () => {
     const comps = [{ type: "buttons" as const, buttons: [{ id: "go", label: "✅ 发版" }] }];

@@ -31,7 +31,7 @@ export interface StreamSink {
   setStatus(status: "running" | "done" | "compacting"): void;
   /** v2.20.2+「✍️ 正在回复…」——watcher 见到 reply 工具调用。 */
   setReplying(): void;
-  endTurn(interrupted?: boolean, bgPending?: boolean): void;
+  endTurn(interrupted?: boolean, bgPending?: boolean, preempted?: boolean): void;
   /** 回合耗时——补到最后一条 assistant 气泡的完成标记上。 */
   turnDuration(ms: number): void;
   /** 回合出错——最后一条 assistant 气泡标红色「✕ 出错」。 */
@@ -78,7 +78,7 @@ export function processStreamEvent(sink: StreamSink, evt: WebStreamEvent) {
       sink.setStatus(evt.status);
       break;
     case "done":
-      sink.endTurn(evt.interrupted, evt.bgPending);
+      sink.endTurn(evt.interrupted, evt.bgPending, evt.preempted);
       break;
     case "replying":
       sink.setReplying();

@@ -178,9 +178,12 @@ export interface CodexQueueSinkDeps {
    * 打断之后的第一条（bridge 在 meta.after_interrupt 标出）改成粘进 TUI 回车：Esc 之后 queue 会一直卡住（lib/codex-tui-submit.ts）。
    * ok:false = 没打进去、输入框也没留下它，照常走 queue
    */
-  typeIn?(text: string): Promise<{ ok: true; unconfirmed?: true } | { ok: false; why: string }>;
-  /** 打字投递没做成、退回了 queue：告诉 bridge 下一条再打字（否则这条和后面的都卡在暂停的队列里） */
-  onTypeInFailed?(): void;
+  typeIn?(text: string): Promise<{ ok: true; unconfirmed?: true; menu?: true } | { ok: false; why: string; menu?: true }>;
+  /**
+   * 打字投递没做成：告诉 bridge 下一条再打字（否则这条和后面的都卡在暂停的队列里）。menu = Codex 停在选择菜单、一个键没发，
+   * 这条不退回 queue、交回 bridge 按 id 押回队首；unknown = 粘完菜单才弹出来、没按回车，结果未知（bridge 只记日志，不重投）
+   */
+  onTypeInFailed?(info?: { menu?: true; unknown?: true; messageId?: string }): void;
   /**
    * 消息没进 Codex（不在线 / 认不准线程 / queue 报错）：交给 bridge 只了结这一条（bridge/pi-abort.ts onCodexUndelivered）——
    * 按 messageId 告诉发送方、销账，只结这一条消息；「工作中」不在这里收，等真实的 Stop / StopFailure。返回 true = bridge 已告诉发送方；false / 没接这个依赖 = 自己 notify
@@ -247,6 +250,12 @@ export class CodexQueueSink implements InboundSink {
       const preamble = this.preamblePending;
       const text = preamble ? `${preamble}\n\n${wrapped}` : wrapped;
       const typed = afterInterrupt === "true" && d.typeIn ? await d.typeIn(text) : undefined;
+      if (typed && !typed.ok && typed.menu) {
+        d.log?.("⏸ 打断后要打字投递，但 Codex 停在选择菜单：一个键没发，交回 bridge 押住（不走 queue）");
+        d.onTypeInFailed?.({ menu: true, messageId: meta?.message_id });
+        return { ok: true };
+      }
+      if (typed?.ok && typed.unconfirmed && typed.menu) d.onTypeInFailed?.({ unknown: true, messageId: meta?.message_id });
       if (typed && !typed.ok) {
         d.log?.(`⌨️ 打断后改打字投递没做成（${typed.why}），退回 codex queue`);
         d.onTypeInFailed?.();

@@ -30,7 +30,7 @@ import {
   windowTarget,
 } from "../lib/tmux-helper.js";
 import { readConfig, setStatsDashboard, isConfigCorrupt } from "../lib/config-store.js";
-import { readRegistryAgents } from "../lib/registry.js";
+import { readRegistryAgents, readRegistryAgentsSync } from "../lib/registry.js";
 import { readUsageCache, readUsageCacheStale, deriveStaleUsage } from "../lib/usage-cache.js";
 import { compactInjectedRecently, ctxBoundaryViewFor, ctxBoundaryWarnings } from "./ctx-boundary.js";
 import { boundaryLabel, type CtxBoundaryView } from "../lib/ctx-boundary-decision.js";
@@ -189,10 +189,10 @@ export function panelResidue(pane: string): boolean {
  */
 async function findIdleScrapeTarget(): Promise<string | null> {
   // agent 窗口优先,master 垫底:master 是消息最密的窗口,排第一时吃下绝大多数抓取,TOCTOU 撞上刚开的回合就把大总管打断。
-  // gauge 是账号全局的,谁的窗口都一样。
+  // gauge 是账号全局的,谁的窗口都一样；Codex 窗口不算（T63：它的 /status 不是 CC 的额度表，停在选择菜单上回车还会选项）。
+  const codex = new Set(readRegistryAgentsSync().filter((a) => a.runtime === "codex").map((a) => a.name));
   const wins = (await tmuxRaw(["list-windows", "-t", MASTER_SESSION, "-F", "#{window_name}"]).catch(() => ""))
-    .split("\n")
-    .filter((w) => w.startsWith("agent-"));
+    .split("\n").filter((w) => w.startsWith("agent-") && !codex.has(w));
   const candidates: string[] = wins.map((w) => windowTarget(w));
   candidates.push(`${MASTER_SESSION}:0`);
   for (const t of candidates) {

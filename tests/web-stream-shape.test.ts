@@ -9,6 +9,7 @@ describe("translate（bridge 事件 → 协议 v1）", () => {
     expect(translate(ev("agent_status", { status: "thinking" }), "zh", self)).toEqual({ t: "status", status: "running" });
     expect(translate(ev("agent_status", { status: "compacting" }), "zh", self)).toEqual({ t: "status", status: "compacting" });
     expect(translate(ev("agent_status", { status: "done", trigger: "interrupt", bgPending: true }), "zh", self)).toEqual({ t: "done", interrupted: true, bgPending: true });
+    expect(translate(ev("agent_status", { status: "done", trigger: "interrupt", cause: "preempt" }), "zh", self)).toEqual({ t: "done", interrupted: true, preempted: true });
   });
   test("工具：tool_start 带 id / detail / 记录坐标；tool_done → tool-state；没 toolId 不发", () => {
     const tool = translate(ev("tool_start", { name: "Read", summary: "a.ts", toolId: "tu1", detail: "d", seq: 40, sid: "s" }), "zh", self);

@@ -354,7 +354,7 @@ export const DICT: Record<string, string> = {
   // ── 消息流（message-list / chat）─────────────────────
   "已打断": "Interrupted",
   "出错": "Error",
-  "已被用户中断": "Interrupted by user",
+  "已被用户中断": "Interrupted by user", "回合已中断": "Turn interrupted", "新消息触发自动中断": "Interrupted for new message",
   "📦 上下文已压缩": "📦 Context compacted",
   "上下文已压缩": "Context compacted", // history route 的 system 行 fallback(不带 📦)
   "📦 压缩摘要": "📦 Compact summary",
