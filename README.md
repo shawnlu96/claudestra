@@ -255,7 +255,7 @@ bun src/manager.ts peer-http-remove <peer>        # delete peer + revoke the tok
 # Low-level tmux control (for master to handle TUI modals bridge can't parse)
 bun src/manager.ts tmux-screenshot <agent>
 bun src/manager.ts tmux-capture <agent> [lines]
-bun src/manager.ts tmux-send-keys <agent> <keys...>
+bun src/manager.ts tmux-send-keys <agent> [--force] <keys...>   # refused on limit menu / countdown / permission / AskUserQuestion; --force is audited
 bun src/manager.ts tmux-wait-idle <agent> [ms]
 ```
 
