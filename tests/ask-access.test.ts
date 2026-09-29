@@ -138,7 +138,7 @@ describe("四处同一口径", () => {
       ["otherGuest", { audience: "guest", principal: "guest:bb22", credential: "dev_bb22" }],
     ];
     for (const [name, who] of subs) savePushSubscription(db, { endpoint: `https://push.example/${name}`, keys: { p256dh: "p", auth: "a" } }, "Mac", "K", new Date(), who);
-    // APNs（owner 的 App）同一个判定：按登记时的凭据收窄；凭据撤了的什么都不推；老行没记 principal 的按 owner:self
+    // APNs（owner 的 App）同一个判定：按登记时的凭据收窄；凭据撤了的、老行没记 principal 的什么都不推
     const devices: [string, PushSubscriber | undefined][] = [
       ["owner", subs[0][1]], ["scopedowner", subs[1][1]], ["revoked", { audience: "owner", principal: "owner:self", credential: "dev_gone" }], ["legacy", undefined],
     ];
@@ -158,8 +158,9 @@ describe("四处同一口径", () => {
       if (asks[k].assignee) expect(names).toContain("assigneeGuest");
       expect(names).not.toContain("otherGuest");
       // owner 自己一定收到（卡活 + 不在）；部分 scope 的 owner 设备看不见就收不到
-      if (k === "agent") expect([names.sort(), apns.sort()]).toEqual([["owner"], ["legacy", "owner"]]);
-      if (k === "master") expect(apns).toEqual(["legacy"]); // 部分 scope 的 owner 设备收不到大总管的
+      expect(apns).not.toContain("legacy"); // 没记 principal 的老行残留（崩在删除前、回滚期间登记的）一律不推（adv3 P2-1）
+      if (k === "agent") expect([names.sort(), apns.sort()]).toEqual([["owner"], ["owner"]]);
+      if (k === "master") expect(apns).toEqual([]); // 部分 scope 的 owner 设备收不到大总管的
     }
     d.stop();
     closeWebState(wsPath);

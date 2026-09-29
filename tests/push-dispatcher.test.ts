@@ -9,6 +9,7 @@ import { markAgentRead, unreadCounts } from "../src/lib/unread-store.js";
 import { closeWebState, openWebState } from "../src/lib/web-state.js";
 import { createDispatcher, notificationBody, OWNER_CHAT_ID, ownerChatIds, type Dispatcher } from "../src/bridge/push/dispatcher.js";
 import type { PushSender, SendOutcome } from "../src/bridge/push/sender.js";
+import { owner } from "./asks-test-kit.js";
 
 interface Sent { kind: "web" | "apns"; to: string; payload: Record<string, unknown> }
 const sent: Sent[] = [];
@@ -44,8 +45,9 @@ beforeEach(() => {
   savePushSubscription(db, { endpoint: IOS, keys: { p256dh: "p", auth: "a" } }, "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0)");
   savePushSubscription(db, { endpoint: MAC, keys: { p256dh: "p", auth: "a" } }, "Mozilla/5.0 (Macintosh)");
   savePushSubscription(db, { endpoint: OLD, keys: { p256dh: "p", auth: "a" } }, "");
-  saveApnsDevice(db, TOK, "iPhone");
-  dispatcher = createDispatcher({ db, sender, isOwnerChat: (id) => id === OWNER_CHAT_ID || id === "api:tok_web", now: () => now, log: () => {} });
+  saveApnsDevice(db, TOK, "iPhone", new Date(), { audience: "owner", principal: "owner:self" }); // 没记 principal 的行不推
+  const resolvePrincipal = (pid: string) => (pid === "owner:self" ? owner() : null);
+  dispatcher = createDispatcher({ db, sender, isOwnerChat: (id) => id === OWNER_CHAT_ID || id === "api:tok_web", resolvePrincipal, now: () => now, log: () => {} });
 });
 afterEach(() => dispatcher.stop());
 
@@ -176,6 +178,14 @@ describe("系统提醒（新设备配对）", () => {
     expect(web[0].payload).toMatchObject({ title: "新设备已配对", body: "「iPhone」刚配对了这台电脑。", agent: "", url: "/chat", tag: `cstra-notice-${now}` });
     expect(sent.filter((s) => s.kind === "apns")).toHaveLength(1);
   });
+});
+
+test("没记 principal 的 APNs 行（加列前的老行残留、回滚期间旧代码登记的）什么都不推：提醒、回复、待你处理都一样（adv3 P2-1）", async () => {
+  saveApnsDevice(db, "legacy-tok", "iPhone");
+  await dispatcher.notice({ title: "新设备已配对", body: "x" });
+  await dispatcher.onAsk({ id: "ask_l", fromAgent: "agent-alpha", title: "t", state: "open", kind: "decide", blocking: true, urgency: "normal" } as never, "away");
+  const to = sent.filter((s) => s.kind === "apns").map((s) => s.to);
+  expect([to.length > 0, to.includes("legacy-tok")]).toEqual([true, false]);
 });
 
 describe("待你处理 → onAsk（规则表见 tests/ask-push.test.ts，这里只看接线）", () => {
