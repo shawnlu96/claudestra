@@ -15,6 +15,8 @@ export type AskKind = "decide" | "authorize" | "owner_action" | "accept" | "assi
 type AskState = "open" | "answered" | "expired" | "cancelled" | "superseded";
 /** human / system = 人或系统发起的（chat 审核、409 转人工、指派）：没有发起 agent，fromAgent 为空 */
 export type AskSource = "reply" | "auq" | "permission" | "codex" | "human" | "system";
+/** 运行时卡住的镜像（AUQ / 权限 / Codex 弹框）：只活在 bridge 内存里，作答走原有的按键端点，bridge 重启时撤掉重建 */
+export const isRuntimeAsk = (a: { source: AskSource }): boolean => a.source === "auq" || a.source === "permission" || a.source === "codex";
 /** 大总管不属于任何项目，它发的 ask 记在这个 project 下，只从跨项目的 /api/v1/asks 读 */
 export const MASTER_PROJECT = "master";
 

@@ -7,7 +7,7 @@
  * 「每个频道每种来源一条开着的」只记在内存：bridge 启动时先把上次留下还开着的全部撤掉，弹框还在就由 watcher 重建。
  */
 import { t } from "../lib/i18n.js";
-import { answerAsk, closeAsk, hasAsksTable, listAsks, MASTER_PROJECT, openAsk, type AskSource, type AskVia, type NewAsk } from "../lib/ledger-asks.js";
+import { answerAsk, closeAsk, hasAsksTable, isRuntimeAsk, listAsks, MASTER_PROJECT, openAsk, type AskSource, type AskVia, type NewAsk } from "../lib/ledger-asks.js";
 import { detectCodexRuntimeDialog } from "../lib/runtime-dialogs.js";
 import { askDb, askDbIfExists, notePresenceFromEvent, parentExtra, publishAsk, registry, taskOf, whoIs } from "./asks.js";
 import { subscribeEvents } from "./event-bus.js";
@@ -117,11 +117,14 @@ export function noteRuntimeDialogs(channelId: string, agentName: string, pane: s
   void openRuntimeAsk({ source: "permission", channelId, agentName, kind: "authorize", title, context: permissionDesc, options: PERMISSION_ASK_OPTIONS, replace: true });
 }
 
-/** 上次 bridge 留下、还开着的运行时 ask：内存表丢了，谁也结不了它 → 全部撤掉，弹框还在的由 watcher / AUQ 事件重建 */
+/**
+ * 上次 bridge 留下、还开着的运行时 ask：内存表丢了，谁也结不了它 → 全部撤掉，弹框还在的由 watcher / AUQ 事件重建。
+ * 只撤运行时的：agent 的 reply、人 / 系统发起的（指派、审核）重启后照样能答，撤了也不会有人重开
+ */
 export function cancelStaleRuntimeAsks(): number {
   const db = askDbIfExists();
   if (!db || !hasAsksTable(db)) return 0;
-  const stale = listAsks(db, { states: ["open"] }).filter((a) => a.source !== "reply");
+  const stale = listAsks(db, { states: ["open"] }).filter(isRuntimeAsk);
   for (const a of stale) {
     const c = closeAsk(db, a.id, "cancelled", t("bridge 重启，弹框还在会重新开一条", "bridge restarted; reopened if the dialog is still up"));
     if (c) publishAsk(c);

@@ -8,7 +8,7 @@
 import { matchWire, splitWire, type AskRow, type WireMatch } from "../lib/ask-options.js";
 import { canReadLedger, OWNER_PRINCIPAL_ID } from "../lib/devices.js";
 import { t } from "../lib/i18n.js";
-import { findAskByDiscordMessage, getAsk, listAsks, type Ask, type AskAtt } from "../lib/ledger-asks.js";
+import { findAskByDiscordMessage, getAsk, isRuntimeAsk, listAsks, type Ask, type AskAtt } from "../lib/ledger-asks.js";
 import { LedgerError } from "../lib/ledger-store.js";
 import { canAnswerAsk, canSeeAsk } from "../lib/ask-access.js";
 import { agentInScope, isOwnerPrincipal, tokenIdOf, type Principal } from "../lib/principals.js";
@@ -136,8 +136,6 @@ export async function answerFromCard(project: string, id: string, body: { choice
   return commitOr409(() => commitNoticing({ ask: a, picks, text, from: apiFrom(p), principal: p.id, device: p.credential, via: "web_card", final: true, atts }), a);
 }
 
-/** 运行时弹框镜像出来的（AUQ / 权限 / Codex）：按键走它们原有的端点，卡片端点不收 */
-const isRuntimeAsk = (a: Pick<Ask, "source">) => a.source === "auq" || a.source === "permission" || a.source === "codex";
 
 /** 作答附带的附件引用（T28a 的 talk 附件库）：只做形状校验、原样存；不合格 → null（400） */
 function attsOf(raw: unknown): AskAtt[] | null {

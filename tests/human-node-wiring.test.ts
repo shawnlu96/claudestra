@@ -1,6 +1,6 @@
 /**
  * human 节点接进「待你处理」（bridge/human-node.ts initHumanNode）：进 build 的 human 任务当场开 assigned ask；合并过的另一台设备看得见、
- * 答得了；作答经卡片端点 → onAssignedAnswer → 写台账、给 PM 发固定模板；同一条 ask 再答是 409，不重复通知；PM 不在线不投。
+ * 答得了；bridge 重启清弹框时不撤它；作答经卡片端点 → onAssignedAnswer → 写台账、给 PM 发固定模板；同一条 ask 再答是 409，不重复通知；PM 不在线不投。
  */
 import type { Database } from "bun:sqlite";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -8,6 +8,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { answerFromCard } from "../src/bridge/ask-entry.js";
+import { cancelStaleRuntimeAsks } from "../src/bridge/ask-runtime.js";
 import { setAsksForTest, setOnAssignedAnswer, type AsksDeps } from "../src/bridge/asks.js";
 import { initHumanNode } from "../src/bridge/human-node.js";
 import { handleAsksApi } from "../src/bridge/local-api/asks.js";
@@ -73,6 +74,11 @@ describe("接进待你处理", () => {
   test("起来就给进 build 的 human 任务开一条：指给任务上的人、卡活、能写字、带两个按钮", () => {
     expect(listAsks(db, {})).toHaveLength(1);
     expect(theAsk()).toMatchObject({ kind: "assigned", source: "system", taskId: "T1", project: "p", assignee: "local:guest:aa", dedupKey: "assign:T1:0:1", blocking: true, allowText: true });
+  });
+
+  test("bridge 重启清运行时弹框时不撤指派：撤了同一个 dedupKey 就再也开不出来", () => {
+    expect(cancelStaleRuntimeAsks()).toBe(0);
+    expect(theAsk().state).toBe("open");
   });
 
   test("合并过的另一台设备看得见、答得了；别的 guest 看不见", async () => {
