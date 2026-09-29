@@ -307,21 +307,32 @@ export function setFrozen(db: Database, ctx: WriteCtx, input: { project: string;
   });
 }
 
-/** PM 名单与文档目录只有 owner（终端）能设 */
-export function setMeta(
-  db: Database,
-  ctx: WriteCtx,
-  input: { project: string; key: "pms"; value: string[] } | { project: string; key: "docsDir"; value: string },
-): WriteResult<LedgerMeta> {
+/** 班子配置的输入：null = 关掉班子（停止事件路由） */
+export type TeamInput = { dispatcher: string | null; audit: boolean } | null;
+
+function metaValueOk(input: MetaInput): boolean {
+  if (input.key === "pms") return Array.isArray(input.value) && input.value.every((p) => typeof p === "string" && p);
+  if (input.key === "docsDir") return typeof input.value === "string";
+  const v = input.value;
+  return v === null || ((v.dispatcher === null || (typeof v.dispatcher === "string" && !!v.dispatcher)) && typeof v.audit === "boolean");
+}
+
+type MetaInput =
+  | { project: string; key: "pms"; value: string[] }
+  | { project: string; key: "docsDir"; value: string }
+  | { project: string; key: "team"; value: TeamInput };
+
+/** PM 名单、文档目录、班子配置只有 owner 能设；班子的 sinceSeq 取这条 meta 事件自己的 seq（之前的历史不路由） */
+export function setMeta(db: Database, ctx: WriteCtx, input: MetaInput): WriteResult<LedgerMeta> {
   return tx(db, () => {
     const key = { project: input.project, target: "", kind: "meta" as const };
     const dup = replay(db, ctx, key, () => getMeta(db, input.project));
     if (dup) return dup;
     if (!isOwnerLike(ctx.actor)) throw new LedgerError("forbidden", `只有 owner 能设项目的 ${input.key}`);
-    const ok = input.key === "pms" ? Array.isArray(input.value) && input.value.every((p) => typeof p === "string" && p) : typeof input.value === "string";
-    if (!ok) throw new LedgerError("invalid", input.key === "pms" ? "pms 要是非空字符串数组" : "docsDir 要是字符串");
-    putMeta(db, input.project, input.key, input.value);
+    if (!metaValueOk(input)) throw new LedgerError("invalid", `${input.key} 的值不合法`);
     const event = insertEvent(db, ctx, { ...key, data: { op: "set", patch: { [input.key]: input.value } } }, true);
+    const value = input.key === "team" && input.value ? { ...input.value, sinceSeq: event.seq } : input.value;
+    putMeta(db, input.project, input.key, value);
     return { row: getMeta(db, input.project), event, duplicate: false };
   });
 }
@@ -350,6 +361,13 @@ export function renameAgentRefs(db: Database, ctx: WriteCtx, from: string, to: s
       putMeta(db, project, "pms", next);
       insertEvent(db, ctx, { project, target: "", kind: "meta", data: { op: "set", patch: { pms: next }, rename: { from, to } } }, false);
       projects.push(project);
+    }
+    for (const { project } of db.prepare("SELECT project FROM meta WHERE key = 'team' ORDER BY project").all() as { project: string }[]) {
+      const team = getMeta(db, project).team;
+      if (team?.dispatcher !== from) continue;
+      putMeta(db, project, "team", { ...team, dispatcher: to });
+      insertEvent(db, ctx, { project, target: "", kind: "meta", data: { op: "set", patch: { team: { ...team, dispatcher: to } }, rename: { from, to } } }, false);
+      if (!projects.includes(project)) projects.push(project);
     }
     return { tasks, projects };
   });
