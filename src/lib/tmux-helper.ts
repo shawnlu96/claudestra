@@ -822,7 +822,7 @@ export interface SwitchConfirmPrompt {
   keys: string[];
 }
 
-export const SWITCH_CONFIRM_TITLES: Record<string, SwitchConfirmKind> = {
+const SWITCH_CONFIRM_TITLES: Record<string, SwitchConfirmKind> = {
   "Switch model?": "model",
   "Change effort level?": "effort",
 };

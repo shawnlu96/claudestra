@@ -97,7 +97,7 @@ export async function sendKeysChecked(tmuxName: string, keys: string[], opts: Se
         if (opts.force && first !== undefined) return; // 强发只看第一眼（记审计用），后面的键不再抓屏
         const [seen, detail, pane] = await look();
         const refusal = opts.force ? null
-          : (sendKeyRefusal(seen, opts.expect, detail) ?? (opts.expect && screenFingerprint(pane, opts.expect) !== opts.box ? BOX_CHANGED : null));
+          : (sendKeyRefusal(seen, opts.expect, detail) ?? (opts.expect && screenFingerprint(pane) !== opts.box ? BOX_CHANGED : null));
         if (refusal) throw new Refused(seen, refusal);
         if (first === undefined && (opts.force || opts.authorizedBy)) audit(seen);
         first ??= seen;

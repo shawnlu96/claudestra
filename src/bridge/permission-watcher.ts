@@ -27,8 +27,6 @@ import {
 import { tmuxScreenshot } from "./screenshot.js";
 import { buildComponents } from "./components.js";
 import { runManager } from "./management.js";
-import { forgetSwitchPrompt, switchPromptButtons } from "./swmodel-button.js";
-import { screenFingerprint } from "../lib/send-key-guard.js";
 import { listAgentsLatched, createFailureLatch } from "../lib/run-manager.js";
 import { parseAuqPane } from "../lib/auq-pane.js";
 import {
@@ -223,7 +221,7 @@ function pressSwitchYes(agentName: string, p: SwitchConfirmPrompt): Promise<void
  * - registry 钉了模型，且弹窗块**只**涉及钉的家族 → 这是钉模型流程自己的
  *   迟到确认框（2026-07-28 实锤场景），代按 Yes 无害；
  * - 弹窗涉及其他家族（CC 主动提议降级）或根本没钉模型 → **绝不代按**，
- *   发通知带 按/不按 按钮，用户拍板。
+ *   只发通知（不带代按按钮），owner 到终端或网页终端里自己按。
  */
 async function maybeConfirmSwitchModel(
   agentName: string,
@@ -232,10 +230,10 @@ async function maybeConfirmSwitchModel(
   allowedUserIds: string[],
   discord: Client
 ): Promise<boolean> {
-  // 只认底部真框（detectSwitchConfirmPrompt）；框不在了，发过的按钮就作废（swmodel-button 按「那一张框」授权）
-  const found = detectSwitchConfirmPrompt(pane);
-  if (!found) return forgetSwitchPrompt(agentName);
-  const p = { ...found, box: screenFingerprint(pane, "switch_confirm") };
+  // 识别收敛到 detectSwitchConfirmPrompt：只认底部真框（标题独占一行 + Yes/No 两项、看不到真输入框），
+  // 旧的 pane.includes 会被 scrollback 里的字样误导，也不认 effort 框
+  const p = detectSwitchConfirmPrompt(pane);
+  if (!p) return false;
 
   if (p.kind === "effort") {
     if (consumeEffortIntent(agentName, p.target)) {
@@ -282,14 +280,14 @@ async function maybeConfirmSwitchModel(
 async function notifySwitchPrompt(
   agentName: string,
   channelId: string,
-  p: SwitchConfirmPrompt & { box: string },
+  p: SwitchConfirmPrompt,
   families: string[],
   pinnedFamily: string | null,
   allowedUserIds: string[],
   discord: Client
 ): Promise<void> {
   const isModel = p.kind === "model";
-  const key = `${isModel ? `swmodel|${[...families].sort().join(",")}` : `sweffort|${p.target.toLowerCase()}`}|${p.box}`; // 换了一张框就重发（旧按钮已作废）
+  const key = isModel ? `swmodel|${[...families].sort().join(",")}` : `sweffort|${p.target.toLowerCase()}`;
   if (lastNotified.get(channelId) === key) return;
   lastNotified.set(channelId, key);
   console.log(
@@ -320,12 +318,11 @@ async function notifySwitchPrompt(
           ? `🎛 **${agentName}** 弹出「Switch model?」——像是 Claude Code 主动提议换模型（常见于用量保护降级）。`
           : `🎛 **${agentName}** 弹出「Change effort level?」（切到 ${p.target}，会让 prompt cache 失效）——不是经模型/effort 下拉发起的。`,
         isModel
-          ? `我没有代按。要切就点「切换」，想保住当前模型点「不切」。`
-          : `我没有代按。要切就点「切换」，不切点「不切」。`,
+          ? `我没有代按。请到终端或网页终端里自己按：选「1. Yes」回车 = 切换，按 Esc = 保住当前模型。`
+          : `我没有代按。请到终端或网页终端里自己按：选「1. Yes」回车 = 切换，按 Esc = 不切。`,
         mention,
       ].join("\n"),
-      // 两种框都是「1. Yes / 2. No」：swmodel_* 按钮发 Enter / Escape，同样适用；按钮绑定这一张框
-      components: buildComponents([switchPromptButtons(agentName, p.box)]),
+      // 不带代按按钮：点下去到发键之间框可能已换成内容相同的新框，按钮批不准「这一张」（bridge/swmodel-button.ts）
       files: pngPath ? [{ attachment: pngPath }] : undefined,
     });
     permissionMessages.set(channelId, msg.id);

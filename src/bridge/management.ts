@@ -233,7 +233,7 @@ async function handleMgmtButton(
     return await buildSessionsPanel();
   }
 
-  if (isSwmodelButton(id)) return handleSwmodelButton(id, runManager); // 「Switch model?」代决按钮（bridge/swmodel-button.ts）
+  if (isSwmodelButton(id)) return handleSwmodelButton(); // 「Switch model?」旧代决按钮已停用，只回话不发键（bridge/swmodel-button.ts）
 
   if (id.startsWith("sess_detail:")) {
     const s = await findBgSession(id.slice("sess_detail:".length));

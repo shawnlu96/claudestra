@@ -10,7 +10,7 @@ import {
   appendSendKeysAudit, authorizedSendKeysArgs, guardedScreenOf, screenFingerprint, seenScreenOf, sendKeysCaller, type SendKeysAudit,
 } from "../src/lib/send-key-guard.js";
 import { parseSendKeysArgs, sendKeysChecked, type SendKeysDeps } from "../src/manager/send-keys.js";
-import { forgetSwitchPrompt, handleSwmodelButton, switchPromptButtons } from "../src/bridge/swmodel-button.js";
+import { handleSwmodelButton, isSwmodelButton, SWMODEL_RETIRED } from "../src/bridge/swmodel-button.js";
 
 const fx = (f: string): string => readFileSync(join(import.meta.dir, "fixtures", f), "utf8").replace(/\x1b\[[0-9;?]*[A-Za-z]/g, "");
 
@@ -35,10 +35,10 @@ describe("guardedScreenOf", () => {
   test("额度菜单 / 撞墙倒计时（含 80 列截断）/ 权限框 / AUQ / Bypass 首启框 → 命中", () => {
     for (const [f, kind] of Object.entries(GUARDED)) expect([f, guardedScreenOf(fx(f), undefined)]).toEqual([f, kind]);
   });
-  test("草稿、回合中、LP 在跑、切模型确认框（管理按钮要能按）→ 不拦", () => {
+  test("草稿、回合中、LP 在跑、切模型确认框（程序自发不拦）→ 不拦", () => {
     for (const f of PLAIN) expect([f, guardedScreenOf(fx(f), undefined)]).toEqual([f, null]);
   });
-  test("seenScreenOf：切模型 / effort 确认框单独认出来（按钮授权要认准它）；空屏 = unreadable；草稿 = 普通画面", () => {
+  test("seenScreenOf：切模型 / effort 确认框单独认出来（授权发一律不发）；空屏 = unreadable；草稿 = 普通画面", () => {
     for (const f of ["cc2.1.280-switch-model.txt", "cc2.1.280-change-effort.txt"]) expect([f, seenScreenOf(fx(`switch-confirm/${f}`), undefined)]).toEqual([f, "switch_confirm"]);
     expect([seenScreenOf("", undefined), seenScreenOf(" \n\n  \n", undefined)]).toEqual(["unreadable", "unreadable"]);
     expect(seenScreenOf(fx("turn-zone/cc-numlist-draft.txt"), undefined)).toBeNull();
@@ -50,7 +50,9 @@ const PROG = { force: false, authorizedBy: null, expect: null, box: null };
 const FORCE = { force: true, authorizedBy: null, expect: null, box: null };
 const MODEL_BOX = fx("switch-confirm/cc2.1.280-switch-model.txt");
 const EFFORT_BOX = fx("switch-confirm/cc2.1.280-change-effort.txt");
-const SWMODEL = { force: false, authorizedBy: "button:swmodel_yes:agent-x", expect: "switch_confirm" as const, box: screenFingerprint(MODEL_BOX, "switch_confirm") };
+const MENU = fx("quota-wall/menu-on-credits.txt");
+/** owner 在额度菜单上授权过的选择（将来的额度菜单按钮 / ask） */
+const AUTH_MENU = { force: false, authorizedBy: "ask:ask_123", expect: "limit_menu" as const, box: screenFingerprint(MENU) };
 
 /** screens：依次抓到的画面；Error = 这一次抓屏失败。sendKey 照真实实现的约定：先过 gate，过了才算发出 */
 function harness(screens: (string | Error)[]) {
@@ -117,7 +119,7 @@ describe("sendKeysChecked", () => {
 
   test("抓屏失败 / 超时 / 空屏：一个键都不发，报 unreadable 和抓屏的报错；--force 照发，审计记 unreadable", async () => {
     for (const s of [new Error("tmux capture-pane 超时"), "", "  \n \n"]) {
-      for (const opts of [PROG, SWMODEL]) {
+      for (const opts of [PROG, AUTH_MENU]) {
         const h = harness([s]);
         const r = await sendKeysChecked("agent-x", ["Enter"], opts, h.deps);
         expect([r.ok, r.ok ? null : r.screen, h.sent, h.audits]).toEqual([false, "unreadable", [], []]);
@@ -141,11 +143,11 @@ describe("sendKeysChecked", () => {
       inGate = false;
       h.sent.push(k);
     };
-    for (const opts of [PROG, FORCE, SWMODEL]) await sendKeysChecked("agent-x", ["C-u", "hi", "Enter"], opts, h.deps);
+    for (const opts of [PROG, FORCE, AUTH_MENU]) await sendKeysChecked("agent-x", ["C-u", "hi", "Enter"], opts, h.deps);
     expect(outside).toEqual([]);
   });
 
-  test("管理按钮代决切模型（swmodel_yes / no 发 Enter / Escape）不受影响", async () => {
+  test("程序自发（没有授权）在切模型确认框上发 Enter / Escape：不在拦截名单，照旧放行", async () => {
     for (const k of ["Enter", "Escape"]) {
       const h = harness([fx("switch-confirm/cc2.1.280-switch-model.txt")]);
       expect((await sendKeysChecked("agent-x", [k], PROG, h.deps)).ok).toBe(true);
@@ -156,9 +158,9 @@ describe("sendKeysChecked", () => {
 
 describe("owner 点过才发键的路径（--authorized）", () => {
   test("argv 形状：authorizedSendKeysArgs 拼的，manager 解析回来是同一组选项和键", () => {
-    const argv = authorizedSendKeysArgs("agent-x", "button:swmodel_yes:agent-x", "switch_confirm", SWMODEL.box, ["Enter"]);
+    const argv = authorizedSendKeysArgs("agent-x", "ask:ask_123", "limit_menu", AUTH_MENU.box, ["2"]);
     expect(argv.slice(0, 2)).toEqual(["tmux-send-keys", "agent-x"]);
-    expect(parseSendKeysArgs(argv.slice(2))).toEqual({ ...SWMODEL, keys: ["Enter"] });
+    expect(parseSendKeysArgs(argv.slice(2))).toEqual({ ...AUTH_MENU, keys: ["2"] });
     expect(parseSendKeysArgs(["--force", "1"])).toEqual({ ...FORCE, keys: ["1"] });
   });
 
@@ -167,58 +169,68 @@ describe("owner 点过才发键的路径（--authorized）", () => {
     const auth = ["--authorized", "b", "--expect", "limit_menu", "--box", "abcdef012345"];
     expect(parseSendKeysArgs([...auth, "2"])).toEqual({ force: false, authorizedBy: "b", expect: "limit_menu", box: "abcdef012345", keys: ["2"] });
     for (const bad of [["--authorized", "button:x", "Enter"], ["--expect", "limit_menu", "1"], ["--authorized", "b", "--expect", "limit_menu", "1"],
-      ["--authorized", "b", "--expect", "input_box", "--box", "x", "1"], ["--force"], ["--authorized"], [...auth, "Down", "Enter"]]) {
+      ["--authorized", "b", "--expect", "input_box", "--box", "x", "1"], ["--authorized", "b", "--expect", "switch_confirm", "--box", "x", "Enter"],
+      ["--force"], ["--authorized"], [...auth, "Down", "Enter"]]) {
       expect([bad, "error" in parseSendKeysArgs(bad)]).toEqual([bad, true]);
     }
   });
 
-  test("授权发：切模型框上照发，审计记上是哪个按钮授权的", async () => {
-    const h = harness([MODEL_BOX]);
-    const r = await sendKeysChecked("agent-x", ["Enter"], SWMODEL, h.deps);
-    expect([r.ok, h.sent]).toEqual([true, ["Enter"]]);
-    expect(h.audits.map((a) => [a.authorizedBy, a.screen, a.keys])).toEqual([["button:swmodel_yes:agent-x", "switch_confirm", ["Enter"]]]);
+  test("switch_confirm 一律拒绝授权发键（r3 收口）：参数解析不认 --expect switch_confirm；绕过解析硬塞也不发、不记", async () => {
+    expect(parseSendKeysArgs(["--authorized", "b", "--expect", "switch_confirm", "--box", screenFingerprint(MODEL_BOX), "Enter"])).toHaveProperty("error");
+    for (const pane of [MODEL_BOX, EFFORT_BOX]) {
+      const forged = { ...AUTH_MENU, expect: "switch_confirm" as never, box: screenFingerprint(pane) };
+      for (const opts of [forged, AUTH_MENU]) {
+        for (const k of ["Enter", "Escape"]) {
+          const h = harness([pane]);
+          const r = await sendKeysChecked("agent-x", [k], opts, h.deps);
+          expect([r.ok, h.sent, h.audits]).toEqual([false, [], []]);
+          if (!r.ok) expect([r.screen, r.error.includes("自己按")]).toEqual(["switch_confirm", true]);
+        }
+      }
+    }
   });
 
-  test("按钮点得晚、框已经关了回到输入框（草稿在框里）/ 换成额度菜单 / 权限框：授权不算数，不发、不记，说「框已经变了」", async () => {
+  test("授权过的菜单点得晚、回到输入框（草稿在框里）/ 换成权限框 / 倒计时：授权不算数，不发、不记，说「框已经变了」", async () => {
     for (const f of ["turn-zone/cc-numlist-draft.txt", "turn-zone/cc-draft-num.txt", "lp/input-draft-multiline.ansi", "turn-zone/busy-queued.txt",
-      "quota-wall/menu-on-credits.txt", "turn-zone/modal-permission.txt"]) {
-      for (const k of ["Enter", "Escape"]) {
+      "quota-wall/walled.txt", "turn-zone/modal-permission.txt"]) {
+      for (const k of ["2", "Enter", "Escape"]) {
         const h = harness([fx(f)]);
-        const r = await sendKeysChecked("agent-x", [k], SWMODEL, h.deps);
+        const r = await sendKeysChecked("agent-x", [k], AUTH_MENU, h.deps);
         expect([f, k, r.ok, h.sent, h.audits]).toEqual([f, k, false, [], []]);
         if (!r.ok) expect(r.error).toContain("框已经变了");
       }
     }
   });
 
-  test("同类不等于同一张（r2 P1-1）：旧的切 Sonnet 按钮遇上后来的 effort 框、换了目标的切模型框、光标挪到 No 的同一张框 → 不发，说「换了一张」", async () => {
-    const other = [EFFORT_BOX, MODEL_BOX.replace(/Sonnet 5/g, "Haiku 4.5"), MODEL_BOX.replace("❯ 1. Yes", "  1. Yes").replace("  2. No", "❯ 2. No")];
+  test("同类不等于同一张：换了选项的额度菜单、光标挪了的同一张菜单 → 不发，说「换了一张」；上方对话滚动不影响", async () => {
+    const other = [fx("quota-wall/menu-no-lp.txt"), MENU.replace("❯ 4. Switch", "  4. Switch").replace("     3. Continue", "   ❯ 3. Continue")];
     for (const pane of other) {
-      expect(seenScreenOf(pane, undefined)).toBe("switch_confirm");
+      expect(seenScreenOf(pane, undefined)).toBe("limit_menu");
       const h = harness([pane]);
-      const r = await sendKeysChecked("agent-x", ["Enter"], SWMODEL, h.deps);
+      const r = await sendKeysChecked("agent-x", ["Enter"], AUTH_MENU, h.deps);
       expect([r.ok, h.sent, h.audits]).toEqual([false, [], []]);
       if (!r.ok) expect(r.error).toContain("换了一张");
     }
-    expect(new Set(other.map((p) => screenFingerprint(p, "switch_confirm"))).size).toBe(3);
-    // 同一张框：上方对话往上滚了几行（框本身没变）→ 指纹不变，照发
-    const scrolled = `新的一行对话\n${MODEL_BOX}`;
-    expect(screenFingerprint(scrolled, "switch_confirm")).toBe(SWMODEL.box);
+    expect(new Set([MENU, ...other].map(screenFingerprint)).size).toBe(3);
+    expect(screenFingerprint(`新的一行对话\n${MENU}`)).toBe(AUTH_MENU.box);
   });
 
-  test("旧框文字还显示在屏上、下面是真输入框（草稿在框里，default 模式没有 banner）→ 不认成切换框，授权 Enter 不发（r2 P1-2）", async () => {
+  test("指纹：连续空白压成一个、不删（r3 P2：「Sonnet 5」≠「Sonnet5」）；行尾空白、缩进宽度、-J 拼行留下的多余空格不影响", () => {
+    expect(screenFingerprint(MODEL_BOX.replace(/Sonnet 5/g, "Sonnet5"))).not.toBe(screenFingerprint(MODEL_BOX));
+    expect(screenFingerprint(MODEL_BOX.replace(/\n/g, "   \n").replace(/  +/g, "    "))).toBe(screenFingerprint(MODEL_BOX));
+    expect(new Set([MODEL_BOX, EFFORT_BOX, MODEL_BOX.replace(/Sonnet 5/g, "Haiku 4.5")].map(screenFingerprint)).size).toBe(3);
+  });
+
+  test("旧框文字还显示在屏上、下面是真输入框（草稿在框里，default 模式没有 banner）→ 不认成切换框（r2 P1-2；watcher 自己代按也靠它）", () => {
     const rule = "─".repeat(80);
     const stale = `${MODEL_BOX.replace(/\s+$/, "")}\n\n${rule}\n❯ unfinished owner draft\n${rule}\n  ? for shortcuts`;
     expect(seenScreenOf(stale, undefined)).toBeNull();
-    const h = harness([stale]);
-    expect([(await sendKeysChecked("agent-x", ["Enter"], SWMODEL, h.deps)).ok, h.sent]).toEqual([false, []]);
     // 框下面还有别的顶格文字（不是最底下的元素）也不认
     expect(seenScreenOf(`${MODEL_BOX.replace(/\s+$/, "")}\nsome later output`, undefined)).toBeNull();
   });
 
   test("owner 在受保护画面上做的选择（如额度菜单点了某个选项）：--expect 那种画面、指纹对得上就放行，不用 --force；画面不对照样不发", async () => {
-    const MENU = fx("quota-wall/menu-on-credits.txt");
-    const menu = { force: false, authorizedBy: "ask:ask_123", expect: "limit_menu" as const, box: screenFingerprint(MENU, "limit_menu") };
+    const menu = AUTH_MENU;
     const ok = harness([MENU]);
     expect((await sendKeysChecked("agent-x", ["2"], menu, ok.deps)).ok).toBe(true);
     expect([ok.sent, ok.audits.map((a) => [a.authorizedBy, a.screen])]).toEqual([["2"], [["ask:ask_123", "limit_menu"]]]);
@@ -228,37 +240,14 @@ describe("owner 点过才发键的路径（--authorized）", () => {
     }
   });
 
-  test("swmodel 按钮（Discord 与网页同一个处理）：id 带这张框的指纹和代次，授权发 Enter / Escape；被拒时把原因告诉点按钮的人", async () => {
-    const box = screenFingerprint(MODEL_BOX, "switch_confirm");
-    const g = switchPromptButtons("agent-x", box, 1_000);
-    const [no, yes] = g.buttons.map((b) => b.id) as [string, string];
-    expect([no, yes]).toEqual([`swmodel_no:#${box}.rs:agent-x`, `swmodel_yes:#${box}.rs:agent-x`]);
-    expect(Math.max(yes.replace("agent-x", "a".repeat(64)).length, no.length)).toBeLessThanOrEqual(100); // Discord custom_id 上限
-    const calls: string[][] = [];
-    const rm = async (...a: string[]) => (calls.push(a), {});
-    expect((await handleSwmodelButton(yes, rm)).text).toContain("确认切换");
-    expect((await handleSwmodelButton(no, rm)).text).toContain("保持现状");
-    expect(calls).toEqual([
-      ["tmux-send-keys", "agent-x", "--authorized", `button:${yes}`, "--expect", "switch_confirm", "--box", box, "Enter"],
-      ["tmux-send-keys", "agent-x", "--authorized", `button:${no}`, "--expect", "switch_confirm", "--box", box, "Escape"],
-    ]);
-    expect((await handleSwmodelButton(yes, async () => ({ error: "框已经换了一张" }))).text).toBe("❌ 发键失败: 框已经换了一张");
-  });
-
-  test("swmodel 按钮失效：旧版本 id、框关过（watcher 作废）、又发了新一张框的通知 → bridge 这边就不调 manager", async () => {
-    const calls: string[][] = [];
-    const rm = async (...a: string[]) => (calls.push(a), {});
-    expect((await handleSwmodelButton("swmodel_yes:agent-x", rm)).text).toContain("旧版本");
-    const first = switchPromptButtons("agent-x", screenFingerprint(MODEL_BOX, "switch_confirm"), 1_000).buttons[1]!.id;
-    forgetSwitchPrompt("agent-x");
-    expect((await handleSwmodelButton(first, rm)).text).toContain("已经关了或换了一张");
-    const again = switchPromptButtons("agent-x", screenFingerprint(MODEL_BOX, "switch_confirm"), 2_000).buttons[1]!.id; // 同一内容的框再出现一次 = 新一代
-    expect((await handleSwmodelButton(first, rm)).text).toContain("已经关了或换了一张");
-    switchPromptButtons("agent-y", screenFingerprint(EFFORT_BOX, "switch_confirm"), 3_000);
-    expect((await handleSwmodelButton(first.replace("agent-x", "agent-y"), rm)).text).toContain("已经关了或换了一张");
-    expect(calls).toEqual([]);
-    await handleSwmodelButton(again, rm);
-    expect(calls.length).toBe(1);
+  test("swmodel 按钮已停用（r3 收口）：聊天记录里的旧按钮（任何形状的 id）点了只回话、不调 manager；watcher 不再发这组按钮", async () => {
+    for (const id of ["swmodel_yes:agent-x", "swmodel_no:agent-x", "swmodel_yes:#4656539ea32e.rs:agent-x"]) {
+      expect(isSwmodelButton(id)).toBe(true); // management.ts 先认出来，再交给不带 runManager 的 handleSwmodelButton
+    }
+    expect((await handleSwmodelButton()).text).toBe(SWMODEL_RETIRED);
+    expect(SWMODEL_RETIRED).toContain("终端");
+    const watcher = readFileSync(join(import.meta.dir, "../src/bridge/permission-watcher.ts"), "utf8");
+    expect([watcher.includes("swmodel_"), watcher.includes('from "./swmodel-button')]).toEqual([false, false]);
   });
 
   test("调 manager tmux-send-keys 的地方只有这几处：新调用方先想清楚是程序自发（吃画面闸）还是 owner 授权（走 authorizedSendKeysArgs）", () => {
