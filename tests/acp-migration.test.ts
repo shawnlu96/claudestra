@@ -3,9 +3,10 @@ import { migrateCodexTransports, type MigratingAgent } from "../src/lib/acp/migr
 import { checkAcpReady, type AcpReadyDeps } from "../src/lib/acp/readiness.ts";
 import { acpDoctorChecks } from "../src/lib/doctor-acp.ts";
 import { restartMigrated, runMigrateMode } from "../src/manager/acp-migration.ts";
-import { chooseCreateTransport, chooseResumeTransport, persistManualTmux, recoverFailedAcpLaunch } from "../src/manager/acp-lifecycle.ts";
+import { chooseCreateTransport, chooseResumeTransport, persistManualTmux, prepareAcpFork, recoverFailedAcpLaunch } from "../src/manager/acp-lifecycle.ts";
 import { managedFor } from "../src/lib/runtimes/index.ts";
 import type { RegistryAgent } from "../src/lib/registry.ts";
+import type { LaunchSpec } from "../src/lib/runtimes/types.ts";
 
 const healthy: AcpReadyDeps = {
   env: {}, resolveBin: async () => "/usr/bin/codex",
@@ -144,15 +145,26 @@ test("旧记录缺 transport 时 owner 选 tmux 会落成显式值，后续迁�
   expect(pending).toEqual({ runtime: "codex", transport: "tmux" });
 });
 
-test("新建显式 --transport tmux 会记成人工选择，fork 的临时 tmux 则仍待迁移", async () => {
+test("新建显式 --transport tmux 会记成人工选择", async () => {
   expect(await chooseCreateTransport("codex", "tmux")).toEqual({ transport: "tmux", manualTmux: true });
-  expect(await chooseCreateTransport("codex", undefined, true)).toEqual({ transport: "tmux", acpPending: true });
+});
+
+test("ACP fork 在启动前换成新线程 id；相同或非法 id 不能落 registry", async () => {
+  const source = "019a0000-0000-7000-8000-000000000001";
+  const fresh = "019a0000-0000-7000-8000-000000000002";
+  const spec: LaunchSpec = { mode: "fork", sessionId: source, cwd: "/w", channelId: "ch", bridgeUrl: "ws://localhost:3847" };
+  const base = managedFor("codex", "acp")!;
+  expect(await prepareAcpFork(spec, { ...base, prepareSession: async () => ({ sessionId: fresh }) }, "acp"))
+    .toEqual({ ...spec, mode: "resume", sessionId: fresh });
+  expect(await prepareAcpFork(spec, base, "tmux")).toBe(spec);
+  await expect(prepareAcpFork(spec, { ...base, prepareSession: async () => ({ sessionId: source }) }, "acp"))
+    .rejects.toThrow("新的合法 sessionId");
+  await expect(prepareAcpFork(spec, { ...base, prepareSession: async () => ({ sessionId: "bad" }) }, "acp"))
+    .rejects.toThrow("新的合法 sessionId");
 });
 
 test("resume 同名人工 tmux 不被 ACP 默认值冲掉；暂退 tmux 可以重试 ACP", async () => {
   expect(await chooseResumeTransport("codex", { transport: "tmux" })).toEqual({ transport: "tmux", manualTmux: true });
-  expect(await chooseResumeTransport("codex", { transport: "tmux" }, true)).toEqual({ transport: "tmux", manualTmux: true });
-  expect(await chooseResumeTransport("codex", { transport: "tmux", acpPending: true }, true)).toEqual({ transport: "tmux", acpPending: true });
 });
 
 test("普通 restart 自己完成 tmux 回退时，迁移输出也如实标记", async () => {

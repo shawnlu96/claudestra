@@ -114,10 +114,14 @@ async function handle(m: Rec): Promise<Rec | undefined> {
       return {
         protocolVersion: 1,
         agentInfo: { name: "acp-stub", version: "0" },
-        agentCapabilities: { loadSession: true, sessionCapabilities: { resume: {} } },
+        agentCapabilities: { loadSession: true, sessionCapabilities: { resume: {}, fork: {} } },
         _meta: { steering: { supported: true } },
       };
     case "session/new":
+      sessionId = randomUUID();
+      return { sessionId, configOptions: config };
+    case "session/fork":
+      if (typeof p.sessionId !== "string" || !p.sessionId) throw { code: -32602, message: "Missing source sessionId" };
       sessionId = randomUUID();
       return { sessionId, configOptions: config };
     case "session/resume":

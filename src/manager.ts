@@ -736,7 +736,7 @@ async function cmdResume(
   forkSession = false,
   runtimeFlag?: string,
 ) {
-  const selected = await (await import("./manager/acp-lifecycle.js")).chooseResumeTransport(runtimeFlag, (await loadRegistry()).agents[normalizeName(name)], forkSession);
+  const selected = await (await import("./manager/acp-lifecycle.js")).chooseResumeTransport(runtimeFlag, (await loadRegistry()).agents[normalizeName(name)]);
   const adapter = requireManaged(runtimeFlag, selected.transport);
   const avail = await adapter.available();
   if (!avail.ok) throw new Error(`无法用 --runtime ${adapter.id} 收编会话：${avail.hint}`);
@@ -867,6 +867,7 @@ async function cmdResume(
         piEnv: normalizePiEnvProfile((await loadRegistry()).agents[tmuxName]?.piEnv), role: (await loadRegistry()).agents[tmuxName]?.role,
       },
     };
+    if (forkSession) spec = await (await import("./manager/acp-lifecycle.js")).prepareAcpFork(spec, adapter, selected.transport);
     const launched = await launchInWindow(tmuxName, adapter, spec, { cwd: resolvedDir });
     ready = launched.result.ready;
     baseline = launched.baseline;
@@ -882,9 +883,8 @@ async function cmdResume(
 
   // v2.5.4: 会话内补发 /model —— resume 是 --model 失效的重灾区（session 保留原模型）。
   if (adapter.control.modelEnforcement === "in-session") await enforceSessionModel(tmuxName, model);
-
-  // v2.7+ fork 模式：registry 必须记 fork 出的实际新 session id，不是源 id
-  let actualSessionId = sessionId;
+  // ACP fork 已在启动前拿到新 id；tmux fork 仍需窗口探测。
+  let actualSessionId = spec.sessionId;
   if (forkSession && adapter.discoverSessionId) {
     const found = await adapter
       .discoverSessionId({ windowName: tmuxName, cwd: resolvedDir, exclude: sessionId, baseline })

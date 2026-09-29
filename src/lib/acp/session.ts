@@ -59,11 +59,11 @@ export class AcpSession {
     this.rpc.onClosed((why) => this.endAll(why));
   }
 
-  /** initialize，返回适配器是否支持 session/resume（不回放历史） */
-  async initialize(): Promise<{ resume: boolean }> {
+  /** initialize，返回适配器声明的会话能力 */
+  async initialize(): Promise<{ resume: boolean; fork: boolean }> {
     const r = await this.rpc.request("initialize", { protocolVersion: 1, clientCapabilities: CLIENT_CAPABILITIES, clientInfo: { name: "claudestra-acp-host", version: "1" } }, { timeoutMs: 60_000 });
     this.steering = r?._meta?.steering?.supported === true;
-    return { resume: !!r?.agentCapabilities?.sessionCapabilities?.resume };
+    return { resume: !!r?.agentCapabilities?.sessionCapabilities?.resume, fork: !!r?.agentCapabilities?.sessionCapabilities?.fork };
   }
 
   /** 接上已有线程：支持 resume 就用它（不回放历史），否则 session/load（回放的历史更新宿主不需要，照样只进 onUpdate） */
@@ -77,6 +77,15 @@ export class AcpSession {
   async create(cwd: string): Promise<string> {
     const r = await this.rpc.request("session/new", { cwd, mcpServers: [] }, { timeoutMs: 120_000 });
     if (typeof r?.sessionId !== "string" || !r.sessionId) throw new Error("session/new 没返回 sessionId");
+    this.sessionId = r.sessionId;
+    this.configOptions = parseConfigOptions(r?.configOptions);
+    return this.sessionId;
+  }
+
+  /** 分叉已持久化的线程；调用方须在短命引导进程退出前接上并跑一轮。 */
+  async fork(sessionId: string, cwd: string): Promise<string> {
+    const r = await this.rpc.request("session/fork", { sessionId, cwd, mcpServers: [] }, { timeoutMs: 120_000 });
+    if (typeof r?.sessionId !== "string" || !r.sessionId || r.sessionId === sessionId) throw new Error("session/fork 没返回新的 sessionId");
     this.sessionId = r.sessionId;
     this.configOptions = parseConfigOptions(r?.configOptions);
     return this.sessionId;

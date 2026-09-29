@@ -63,8 +63,7 @@ describe("适配器选择（managedFor / requireManaged 带 transport）", () =>
     expect(() => requireManaged("pi", "acp")).toThrow("不支持 transport=acp");
   });
 
-  test("fork 在 acp 试点里直接拒；resume 原样返回 thread id", async () => {
-    await expect(codexAcpAdapter.prepareSession!({ ...SPEC, mode: "fork" })).rejects.toThrow("不支持 fork");
+  test("resume 原样返回 thread id", async () => {
     expect(await codexAcpAdapter.prepareSession!(SPEC)).toEqual({ sessionId: "019a-sid" });
   });
 });
