@@ -9,7 +9,7 @@ import { useCollabT } from "./collab-i18n";
 import { isWorking, type ActionMap, type AgentAction } from "./collab-action";
 import { useChatStore } from "../chat/chat-store";
 import type { AgentSession } from "@/lib/chat/agents";
-import type { LineAction } from "./collab-line";
+import type { LineAction } from "./collab-action";
 import { fmtEventTime, participants, recentThree, reviewRows, stageSegments, type Participant, type TaskDetail } from "./collab-detail-model";
 import { STEP_STATE, stepRows } from "./collab-steps";
 import { Icon, type IconName } from "./collab-icons";
@@ -23,7 +23,7 @@ import { useTaskDetail } from "./use-collab";
 import s from "./collab.module.css";
 
 const NARROW = "(max-width: 639.98px)";
-function useNarrow(): boolean {
+export function useNarrow(): boolean {
   return useSyncExternalStore(
     (cb) => {
       const m = window.matchMedia(NARROW);
@@ -228,7 +228,9 @@ function PeopleSec(props: { d: TaskDetail; exec: AgentSession | undefined; actio
   );
 }
 
-function Body(props: { d: TaskDetail; line: LineView; action: LineAction; stream: AgentAction | undefined; running: readonly RunningReviewer[]; now: number; tr: Tr }) {
+function Body(props: {
+  d: TaskDetail; line: LineView; action: LineAction; stream: AgentAction | undefined; running: readonly RunningReviewer[]; now: number; tr: Tr; extra?: React.ReactNode;
+}) {
   const { d, line, action, stream, running, now, tr } = props;
   const agents = useChatStore((st) => st.state.agents);
   const exec = line.agent ? agents.find((a) => a.name === line.agent) : undefined;
@@ -238,6 +240,7 @@ function Body(props: { d: TaskDetail; line: LineView; action: LineAction; stream
     <div className={s.pb}>
       <NowSec line={line} total={d.task.metrics.totalMs} tr={tr} />
       <StagesSec d={d} line={line} tr={tr} />
+      {props.extra}
       <ChecklistSec d={d} tr={tr} />
       <RecentSec d={d} tr={tr} />
       <CollabReplay d={d} tr={tr} />
@@ -275,6 +278,8 @@ export function CollabDetail(props: {
   /** 这条任务上在跑的审查员（T12c） */
   reviewers: readonly RunningReviewer[];
   onClose: () => void;
+  /** v4 属性区多挂的段（它的因果线），排在阶段与用时之后 */
+  extra?: React.ReactNode;
 }) {
   const { project, id, rev, now, ov, onClose } = props;
   const tr = useCollabT();
@@ -306,7 +311,7 @@ export function CollabDetail(props: {
       </div>
       {load.status === "ok" && line ? (
         <Body d={load.d} line={line} action={props.action(line)} stream={line.agent ? props.actions.get(line.agent) : undefined}
-          running={props.reviewers} now={now} tr={tr} />
+          running={props.reviewers} now={now} tr={tr} extra={props.extra} />
       ) : (
         <div className={s.pb}>{load.status === "error" ? tr("读详情失败：{m}", { m: load.message }) : tr("正在读取…")}</div>
       )}

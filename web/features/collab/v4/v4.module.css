@@ -1,0 +1,107 @@
+/* 协作视图 v4：颜色全用 collab.module.css 的 .tokens（深浅色在那边切）；语义色 --ok 已成立 / --warn 判定中与等人 / --err 出问题，
+   --accent 只给刚推进的那一个节点。 */
+.v4 { flex-direction: column; }
+.top { display: flex; align-items: center; gap: 12px; padding: 10px 16px; border-bottom: 1px solid var(--line); min-width: 0; }
+.back { display: none; }
+.ttl { color: var(--text); font-weight: 600; font-size: var(--fs-1); white-space: nowrap; }
+.metrics { display: flex; align-items: center; gap: 18px; margin-left: auto; overflow-x: auto; white-space: nowrap; }
+.metric { display: inline-flex; align-items: baseline; gap: 5px; color: var(--muted); font-size: var(--fs-3); }
+.metric b { color: var(--text); font-size: var(--fs-1); font-weight: 600; font-family: var(--mono); }
+.main { flex: 1; min-height: 0; display: flex; }
+
+/* 左：大纲 */
+.outline { width: 236px; flex: none; border-right: 1px solid var(--line); overflow-y: auto; padding: 10px 8px 24px; display: flex; flex-direction: column; gap: 10px; background: var(--bg-2); }
+.waits, .waitsM { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 8px 10px; border-radius: 8px; background: var(--panel);
+  border: 1px solid var(--line); color: var(--text-2); font-size: var(--fs-2); }
+.waits b, .waitsM b { font-family: var(--mono); }
+.hasWaits { border-color: var(--warn); color: var(--text); }
+.hasWaits b { color: var(--warn); }
+.waitsM { margin-left: auto; padding: 4px 8px; }
+.filters { display: flex; flex-wrap: wrap; gap: 4px; }
+.chip { padding: 3px 8px; border-radius: 999px; border: 1px solid var(--line); color: var(--muted); font-size: var(--fs-3); }
+.chipOn { background: var(--panel-2); color: var(--text); border-color: var(--line-2); }
+.cnt { color: var(--faint); font-family: var(--mono); margin-left: 2px; }
+.og { display: flex; flex-direction: column; gap: 1px; }
+.ogt { color: var(--faint); font-size: var(--fs-3); padding: 4px 6px; }
+.ot { display: grid; grid-template-columns: 8px auto minmax(0, 1fr); grid-template-rows: auto auto; column-gap: 6px; align-items: center; text-align: left;
+  padding: 5px 6px; border-radius: 6px; color: var(--text-2); font-size: var(--fs-2); }
+.ot:hover { background: var(--panel); }
+.otSel { background: var(--panel-2); color: var(--text); }
+.ott { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ost { grid-column: 2 / 4; color: var(--muted); font-size: var(--fs-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dot { width: 7px; height: 7px; border-radius: 50%; background: var(--sc, var(--faint)); }
+.none { color: var(--faint); font-size: var(--fs-3); padding: 6px; }
+
+/* 中：画布 */
+.center { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.tabs { display: flex; gap: 2px; padding: 8px 12px 0; border-bottom: 1px solid var(--line); }
+.tab { padding: 6px 12px; color: var(--muted); font-size: var(--fs-2); border-bottom: 2px solid transparent; margin-bottom: -1px; }
+.tabOn { color: var(--text); border-bottom-color: var(--text-2); }
+.canvas { position: relative; flex: 1; min-height: 0; overflow: hidden; cursor: grab; touch-action: none;
+  background-image: radial-gradient(var(--line) 1px, transparent 1px); background-size: 20px 20px; }
+.canvas:active { cursor: grabbing; }
+.world { position: absolute; left: 0; top: 0; transform-origin: 0 0; }
+.group { position: absolute; border: 1px solid var(--line-2); border-radius: 10px; background: color-mix(in srgb, var(--panel) 55%, transparent); }
+.gt { position: absolute; left: 12px; top: 7px; color: var(--muted); font-size: var(--fs-3); font-weight: 500; }
+.gdone { position: absolute; right: 12px; top: 7px; color: var(--ok); font-size: var(--fs-3); font-family: var(--mono); }
+.edges { position: absolute; left: 0; top: 0; overflow: visible; pointer-events: none; }
+.eLine { fill: none; stroke-width: 1.6; }
+.eHit { fill: none; stroke: transparent; stroke-width: 12; pointer-events: stroke; cursor: pointer; }
+.eSolid .eLine { stroke: var(--ok); }
+.eFlow .eLine { stroke: var(--warn); stroke-dasharray: 6 5; animation: flow 1.2s linear infinite; }
+.eDotted .eLine { stroke: var(--faint); stroke-dasharray: 1.5 5; stroke-linecap: round; }
+.eSel .eLine { stroke-width: 2.8; }
+@keyframes flow { to { stroke-dashoffset: -22; } }
+.elabel { position: absolute; transform: translate(-50%, -50%); max-width: 150px; padding: 1px 6px; border-radius: 6px; background: var(--bg); border: 1px solid var(--line);
+  color: var(--muted); font-size: 10.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.elabel.eSel { color: var(--text); border-color: var(--line-2); }
+.node { position: absolute; display: flex; flex-direction: column; gap: 5px; padding: 7px 9px; border-radius: 9px; background: var(--panel); border: 1px solid var(--line-2);
+  box-shadow: var(--shadow); text-align: left; color: var(--text-2); font-size: var(--fs-3); }
+.node::before { content: ""; position: absolute; left: 0; top: 8px; bottom: 8px; width: 2px; border-radius: 2px; background: var(--sc, var(--faint)); }
+.mini { flex-direction: row; align-items: center; padding: 4px 9px; box-shadow: none; background: var(--bg-2); }
+.sel { border-color: var(--text-2); }
+.hot { border-color: var(--accent); box-shadow: 0 0 0 3px var(--glow); }
+.fold { color: var(--muted); border-style: dashed; justify-content: center; }
+.nh { display: flex; gap: 6px; align-items: baseline; min-width: 0; }
+.tid { font-family: var(--mono); color: var(--muted); font-size: var(--fs-3); flex: none; }
+.nt { color: var(--text); font-size: var(--fs-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.nf { display: flex; gap: 6px; min-width: 0; color: var(--muted); }
+.who { color: var(--text-2); flex: none; }
+.act { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--mono); }
+.bar { display: flex; gap: 2px; }
+.seg { flex: 1; height: 3px; border-radius: 2px; background: var(--line-2); }
+.past { background: var(--muted); }
+.cur { background: var(--sc, var(--text-2)); }
+.skip { background: transparent; border: 1px dashed var(--line); height: 1px; }
+.neutral { --sc: var(--s-run); } .amber { --sc: var(--warn); } .red { --sc: var(--err); } .green { --sc: var(--ok); }
+.tools { position: absolute; right: 12px; bottom: 12px; display: flex; gap: 6px; }
+.tool { padding: 5px 10px; border-radius: 7px; background: var(--panel); border: 1px solid var(--line-2); color: var(--text-2); font-size: var(--fs-3); }
+.blank { flex: 1; display: grid; place-items: center; color: var(--faint); font-size: var(--fs-2); padding: 24px; }
+
+/* 右：属性里的小件 */
+.kv { color: var(--text); font-size: var(--fs-2); line-height: 1.6; }
+.muted { color: var(--muted); font-size: var(--fs-3); line-height: 1.6; }
+.bad { color: var(--err); } .warn { color: var(--warn); }
+.quote { color: var(--text); font-size: var(--fs-1); line-height: 1.6; padding: 8px 10px; border-left: 2px solid var(--line-2); background: var(--bg-2); border-radius: 0 6px 6px 0; }
+.row { display: flex; flex-direction: column; gap: 2px; padding: 6px 0; border-bottom: 1px solid var(--line); font-size: var(--fs-2); }
+.link { display: flex; gap: 6px; align-items: baseline; text-align: left; padding: 4px 0; color: var(--text-2); font-size: var(--fs-2); }
+.link:hover { color: var(--text); }
+.counts { display: flex; flex-wrap: wrap; gap: 6px 14px; }
+.count { color: var(--muted); font-size: var(--fs-3); }
+.count b { color: var(--text); font-size: var(--fs-1); font-family: var(--mono); margin-right: 3px; }
+.st_done { color: var(--ok); } .st_active { color: var(--warn); } .st_waiting { color: var(--muted); }
+
+/* 手机 */
+.mlist { flex: 1; overflow-y: auto; padding: 8px 12px max(env(safe-area-inset-bottom), 16px); display: flex; flex-direction: column; gap: 16px; }
+.msec h5 { margin: 4px 2px 8px; color: var(--faint); font-size: var(--fs-3); font-weight: 500; }
+.mcard { position: relative; width: 100%; display: flex; flex-direction: column; gap: 6px; padding: 10px 12px; margin-bottom: 8px; border-radius: 10px;
+  background: var(--panel); border: 1px solid var(--line); text-align: left; font-size: var(--fs-3); color: var(--text-2); }
+.mcard::before { content: ""; position: absolute; left: 0; top: 10px; bottom: 10px; width: 2px; border-radius: 2px; background: var(--sc, var(--faint)); }
+.blk { color: var(--warn); font-size: var(--fs-3); }
+.sheet { position: fixed; inset: 0; z-index: 60; display: flex; }
+.sheet > aside { width: 100%; }
+@media (max-width: 639.98px) {
+  .top { padding: max(env(safe-area-inset-top), 10px) 12px 10px; }
+  .back { display: inline-flex; }
+}
+@media (prefers-reduced-motion: reduce) { .eFlow .eLine { animation: none; } }

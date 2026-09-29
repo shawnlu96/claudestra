@@ -1,0 +1,143 @@
+"use client";
+/**
+ * v4 右区「属性」：选中任务时是现成的任务详情（collab-detail.tsx，多挂一段「它的因果线」）；其余几页在这里——
+ * 没选中 = 项目概览，边 = 条件原文与判定依据，折叠组 = 成员，「待你处理」= 挂在这个项目上的那几条。
+ */
+import type { HomeView, LedgerDepView, LedgerOverview, OwnerWait, Tr } from "../collab-model";
+import { Icon } from "../collab-icons";
+import s from "../collab.module.css";
+import type { CFold } from "./causal-model";
+import { causeOf, edgeBasis, STATE_WORD, stageCounts } from "./v4-model";
+import v from "./v4.module.css";
+
+const hhmm = (ms: number) => new Date(ms).toLocaleString([], { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit", hour12: false });
+
+function Shell({ title, sub, onClose, children, tr }: { title: string; sub?: string; onClose?: () => void; children: React.ReactNode; tr: Tr }) {
+  return (
+    <aside className={`${s.tokens} ${s.panel}`}>
+      <div className={s.ph}>
+        <div className={s.tt}>
+          <div className={s.a}>{title}</div>
+          {sub && <div className={s.b}>{sub}</div>}
+        </div>
+        {onClose && (
+          <button type="button" className={s.ib} aria-label={tr("关闭")} onClick={onClose}>
+            <Icon name="x" size={15} />
+          </button>
+        )}
+      </div>
+      <div className={s.pb}>{children}</div>
+    </aside>
+  );
+}
+
+function Sec({ title, children }: { title: string; children: React.ReactNode }) {
+  return (
+    <section className={s.sec}>
+      <h5>{title}</h5>
+      {children}
+    </section>
+  );
+}
+
+function TaskLink({ id, ov, onPick }: { id: string; ov: LedgerOverview; onPick: (id: string) => void }) {
+  const t = ov.tasks.find((x) => x.id === id);
+  return (
+    <button type="button" className={v.link} onClick={() => onPick(id)}>
+      <span className={v.tid}>{id}</span> {t?.title ?? ""}
+    </button>
+  );
+}
+
+export function Overview(props: {
+  ov: LedgerOverview; view: HomeView; waits: readonly OwnerWait[]; projectName: string; onPick: (id: string) => void; tr: Tr;
+  /** 「上次来之后」（collab-since-card.tsx），没有上次记录时不给 */
+  since?: React.ReactNode;
+}) {
+  const { ov, view, waits, projectName, onPick, tr } = props;
+  const h = view.headline;
+  return (
+    <Shell title={projectName} sub={tr("项目概览")} tr={tr}>
+      {props.since}
+      <Sec title={tr("现在")}>
+        <div className={v.kv}>
+          {tr("{n} 条在推进", { n: h.advancing })}
+          {h.problem > 0 && <span className={v.bad}> · {tr("{n} 条出问题", { n: h.problem })}</span>}
+          {h.stuck > 0 && <span className={v.warn}> · {tr("{n} 条卡住", { n: h.stuck })}</span>}
+          {view.pm.frozen && <span className={v.warn}> · {tr("合并队列冻结：{r}", { r: view.pm.frozen })}</span>}
+        </div>
+      </Sec>
+      <Sec title={tr("要你定的")}>
+        {waits.length ? waits.map((w) => (
+          <div key={w.id} className={v.row}>{w.taskId ? <TaskLink id={w.taskId} ov={ov} onPick={onPick} /> : null} {w.title}</div>
+        )) : <div className={v.muted}>{tr("没有")}</div>}
+      </Sec>
+      <Sec title={tr("各阶段")}>
+        <div className={v.counts}>
+          {stageCounts(ov).map((c) => (
+            <span key={c.label} className={v.count}><b>{c.n}</b> {tr(c.label)}</span>
+          ))}
+        </div>
+      </Sec>
+      {view.pm.pm && <Sec title="PM"><div className={v.kv}>{view.pm.pm} · {tr("在管")} {view.pm.managing} · {tr("排队")} {view.pm.queued.length}</div></Sec>}
+    </Shell>
+  );
+}
+
+export function EdgePage({ dep, ov, onPick, onClose, tr }: { dep: LedgerDepView; ov: LedgerOverview; onPick: (id: string) => void; onClose: () => void; tr: Tr }) {
+  return (
+    <Shell title={`${dep.from} → ${dep.to}`} sub={tr(dep.kind === "branch" ? "分支依赖" : "前置依赖")} onClose={onClose} tr={tr}>
+      <Sec title={tr("条件原文")}><div className={v.quote}>{dep.when || tr("（没写条件）")}</div></Sec>
+      <Sec title={tr("现在")}>
+        <div className={`${v.kv} ${v[`st_${dep.effective}`] ?? ""}`}>{tr(STATE_WORD[dep.effective])}</div>
+        <div className={v.muted}>{edgeBasis(dep, tr)}</div>
+        {dep.fromCancelled && <div className={v.warn}>{tr("前置已取消：这条边永远到不了「已成立」，请 PM 删边或改指向")}</div>}
+      </Sec>
+      <Sec title={tr("判定依据")}>
+        <div className={v.muted}>{tr("{who} 建于 {t}，最后改于 {u}", { who: dep.createdBy, t: hhmm(dep.createdAt), u: hhmm(dep.updatedAt) })}</div>
+      </Sec>
+      <Sec title={tr("两端")}>
+        <TaskLink id={dep.from} ov={ov} onPick={onPick} />
+        <TaskLink id={dep.to} ov={ov} onPick={onPick} />
+      </Sec>
+    </Shell>
+  );
+}
+
+export function FoldPage({ fold, ov, onPick, onClose, tr }: { fold: CFold; ov: LedgerOverview; onPick: (id: string) => void; onClose: () => void; tr: Tr }) {
+  return (
+    <Shell title={tr("{n} 件在等 {x}", { n: fold.members.length, x: fold.waitFor })} onClose={onClose} tr={tr}>
+      <Sec title={tr("在等")}><TaskLink id={fold.waitFor} ov={ov} onPick={onPick} /></Sec>
+      <Sec title={tr("成员")}>{fold.members.map((id) => <TaskLink key={id} id={id} ov={ov} onPick={onPick} />)}</Sec>
+    </Shell>
+  );
+}
+
+export function WaitsPage({ waits, ov, onPick, onClose, tr }: { waits: readonly OwnerWait[]; ov: LedgerOverview; onPick: (id: string) => void; onClose: () => void; tr: Tr }) {
+  return (
+    <Shell title={tr("待你处理")} sub={tr("这个项目上开着、等你的")} onClose={onClose} tr={tr}>
+      {waits.length ? waits.map((w) => (
+        <div key={w.id} className={v.row}>{w.taskId && <TaskLink id={w.taskId} ov={ov} onPick={onPick} />}<div>{w.title}</div></div>
+      )) : <div className={v.muted}>{tr("没有")}</div>}
+    </Shell>
+  );
+}
+
+/** 任务详情里多挂的一段：它在等什么、谁在等它（点一条看边） */
+export function CauseSec({ id, deps, onEdge, tr }: { id: string; deps: readonly LedgerDepView[]; onEdge: (d: LedgerDepView) => void; tr: Tr }) {
+  const { incoming, outgoing } = causeOf(id, deps);
+  if (!incoming.length && !outgoing.length) return null;
+  const row = (d: LedgerDepView, other: string) => (
+    <button key={`${d.from}>${d.to}`} type="button" className={`${v.link} ${v[`st_${d.effective}`] ?? ""}`} onClick={() => onEdge(d)}>
+      <span className={v.tid}>{other}</span> {d.when || "—"} · {tr(STATE_WORD[d.effective])}
+    </button>
+  );
+  return (
+    <Sec title={tr("它的因果线")}>
+      {incoming.length > 0 && <div className={v.muted}>{tr("在等")}</div>}
+      {incoming.map((d) => row(d, d.from))}
+      {outgoing.length > 0 && <div className={v.muted}>{tr("谁在等它")}</div>}
+      {outgoing.map((d) => row(d, d.to))}
+    </Sec>
+  );
+}

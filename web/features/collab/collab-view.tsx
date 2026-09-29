@@ -1,117 +1,39 @@
 "use client";
 /**
- * 协作视图首页（第一屏，ux.md §3）：一句话状态 → 上次来之后（T12c）→ PM 调度窄条 → 按关注度排好的任务线 → 今日完成一行。
- * 任务线叠加审查员信号（collab-reviewers.ts）与「上次来之后变过」的小圆点。
- * 点一条线在右侧开详情（手机全屏，collab-detail.tsx），首页不被替换。
+ * 协作视图 v4（docs/team/collab-view-v4.md）：顶上指标条；左大纲（待你处理、筛选、事项 → 任务）；中间画布两个标签——
+ * 「因果线」（v4/causal-canvas.tsx，布局在 v4/causal-model.ts）和「团队」（T55 的组件，合并前是占位）；右属性（没选中 = 项目概览，
+ * 任务 = 任务详情 + 它的因果线，边 / 折叠组 / 待你处理各一页）。手机没有画布：分组卡片，点开是全屏详情。
+ * 底部时间轴放第二期。数据只用总览（tasks / items / deps）和任务详情，没有来源的指标标「暂无」。
  */
 import { useMemo, useState } from "react";
 import { useCollabT } from "./collab-i18n";
 import { useChatStore } from "../chat/chat-store";
 import { useChatNav } from "../chat/components/nav-context";
 import { actionLine } from "./collab-action";
-import { CollabDetail } from "./collab-detail";
+import { CollabDetail, useNarrow } from "./collab-detail";
 import { Icon } from "./collab-icons";
-import { CollabLine, LineHeaderCols } from "./collab-line";
 import { waitsOnOwner } from "../asks/asks-model";
 import { useAsks } from "../asks/asks-store";
-import { columnOf, homeView, type HomeView, type LedgerOverview, type LineView, type Tr } from "./collab-model";
+import { fmtDuration, homeView, type LineView, type Tr } from "./collab-model";
 import { openCollabTask, useCollabNav } from "./collab-nav";
-import { useCollab, type Advance } from "./use-collab";
+import { useCollab } from "./use-collab";
 import { cachedOverview } from "./collab-cache";
 import { applyReviewers, reviewersByTask, type RunningReviewer } from "./collab-reviewers";
 import { sinceDigest } from "./collab-since";
 import { SinceCard } from "./collab-since-card";
 import { useLastSeen } from "./use-collab-extra";
+import { causalCanvas } from "./v4/causal-model";
+import { CausalCanvas, type Selection } from "./v4/causal-canvas";
+import { MobileList } from "./v4/v4-mobile";
+import { Outline } from "./v4/v4-outline";
+import { CauseSec, EdgePage, FoldPage, Overview, WaitsPage } from "./v4/v4-props";
+import { metricsOf, type Filter, type Metrics } from "./v4/v4-model";
 import s from "./collab.module.css";
+import v from "./v4/v4.module.css";
 
 /** 模块级稳定引用：详情里的 effect 依赖它，每次渲染换新函数会白跑 */
 const closeTask = () => openCollabTask(null);
 const NO_REVIEWERS: readonly RunningReviewer[] = [];
-
-const hhmm = (ms: number) => new Date(ms).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false });
-
-function Headline({ v, tr, connected, now, projectName }: { v: HomeView; tr: Tr; connected: boolean; now: number; projectName: string }) {
-  const parts: { cls?: string; text: string }[] = [{ text: tr("{n} 条在推进", { n: v.headline.advancing }) }];
-  if (v.headline.problem) parts.push({ cls: s.bad, text: tr("{n} 条出问题", { n: v.headline.problem }) });
-  if (v.headline.owner) parts.push({ cls: s.stuck, text: tr("{n} 条等你", { n: v.headline.owner }) });
-  if (v.headline.stuck) parts.push({ cls: s.stuck, text: tr("{n} 条卡住", { n: v.headline.stuck }) });
-  return (
-    <div className={s.top}>
-      <div className={s.status}>
-        <div className={s.s1}>
-          {parts.map((p, i) => (
-            <span key={p.text} style={{ display: "contents" }}>
-              {i > 0 && <span className={s.sep}>·</span>}
-              <span className={p.cls}>{p.text}</span>
-            </span>
-          ))}
-          {v.todayDone.length > 0 && <span className={s.dim}>· {tr("今日完成 {n}", { n: v.todayDone.length })}</span>}
-        </div>
-        <div className={s.s2}>
-          <span className={s.clk}>
-            <span className={`${s.live} ${connected ? "" : s.off}`} />
-            <b>{hhmm(now)}</b>
-            {connected ? tr("实时") : tr("重连中")}
-          </span>
-          <span>· {projectName}</span>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function PmStrip({ v, action, tr }: { v: HomeView; action: string; tr: Tr }) {
-  if (!v.pm.pm) return null;
-  return (
-    <div className={s.pmstrip}>
-      <span className={s.who}>
-        <Icon name="clipboard" size={14} />
-        <b>PM · {v.pm.pm}</b>
-        <span>{tr("调度")}</span>
-      </span>
-      <span className={s.vsep} />
-      <span className={s.d}>{action}</span>
-      <span className={s.vsep} />
-      <span className={s.kv}>
-        {tr("在管")} <b>{v.pm.managing}</b> · {tr("在审")} <b>{v.pm.reviewing}</b> · {tr("排队")} <b>{v.pm.queued.length}</b>
-        {v.pm.queued.length > 0 && ` (${v.pm.queued.slice(0, 3).join(" ")})`}
-      </span>
-      {v.pm.frozen && (
-        <>
-          <span className={s.vsep} />
-          <span className={s.warnText}>{tr("合并队列冻结：{r}", { r: v.pm.frozen })}</span>
-        </>
-      )}
-    </div>
-  );
-}
-
-function DoneRow({ ov, ids, tr, onOpen }: { ov: LedgerOverview; ids: string[]; tr: Tr; onOpen: (id: string) => void }) {
-  const [open, setOpen] = useState(false);
-  if (!ids.length) return null;
-  const byId = new Map(ov.tasks.map((t) => [t.id, t]));
-  return (
-    <div className={s.done}>
-      <button type="button" className={s.tg} onClick={() => setOpen((o) => !o)}>
-        <Icon name="circleCheck" size={14} />
-        {tr("今日完成")} <b>{ids.length}</b>
-        <span className={s.ids}>{ids.map((id) => <span key={id}>{id}</span>)}</span>
-        <Icon name="chevronRight" size={12} className={open ? "rotate-90" : ""} />
-      </button>
-      {open &&
-        ids.map((id) => {
-          const t = byId.get(id);
-          return (
-            <div key={id} className={s.dl} onClick={() => onOpen(id)}>
-              <span className={s.tid}>{id}</span>
-              <span>{t?.title}</span>
-              <span className={s.x}>{t?.metrics.endTs ? hhmm(t.metrics.endTs) : ""}</span>
-            </div>
-          );
-        })}
-    </div>
-  );
-}
 
 function Empty({ icon, title, children }: { icon: "listTree" | "clock" | "circleCheck"; title: string; children?: React.ReactNode }) {
   return (
@@ -125,52 +47,27 @@ function Empty({ icon, title, children }: { icon: "listTree" | "clock" | "circle
   );
 }
 
-/** 刚推进的那一条；没有实时推进时，取最近进入当前阶段的那条（首屏也有一条亮着，和原型一致） */
-function hotOf(lines: LineView[], adv: Advance | null): { id: string | null; from: number | null } {
-  if (adv && lines.some((l) => l.id === adv.id)) return { id: adv.id, from: columnOf(adv.from) };
-  const fresh = lines.filter((l) => l.dwellMs !== null).sort((a, b) => a.dwellMs! - b.dwellMs!)[0];
-  return { id: fresh?.id ?? null, from: null };
+function MetricsBar({ m, connected, tr }: { m: Metrics; connected: boolean; tr: Tr }) {
+  const cells: [string, string, string?][] = [
+    ["在场 agent", String(m.present)], ["进行中", String(m.active)], ["今日完成", String(m.todayDone)], ["审查轮次", String(m.reviewRounds)],
+    ["P0/P1 修掉", String(m.fixed)], ["平均等复核", m.avgReviewWaitMs === null ? "—" : fmtDuration(m.avgReviewWaitMs, tr)],
+    ["周额度", "—", "暂无数据来源"], ["协作消息", "—", "暂无数据来源"],
+  ];
+  return (
+    <div className={v.metrics}>
+      {cells.map(([k, val, hint]) => (
+        <span key={k} className={v.metric} title={hint ? tr(hint) : undefined}>
+          <b>{val}</b>
+          <span>{tr(k)}</span>
+        </span>
+      ))}
+      <span className={`${s.live} ${connected ? "" : s.off}`} title={tr(connected ? "实时" : "重连中")} />
+    </div>
+  );
 }
 
-export function CollabView({ project }: { project: string }) {
-  const tr = useCollabT();
-  const nav = useChatNav();
-  const { task: openTask } = useCollabNav();
-  const agents = useChatStore((st) => st.state.agents);
-  const projects = useChatStore((st) => st.state.projects);
-  // 本项目的 agent：registry 里归这个项目的，加上台账任务挂着的执行者 / PM（缓存的总览里有）
-  const members = useMemo(() => {
-    const set = new Set(agents.filter((a) => a.projectId === project).map((a) => a.name));
-    for (const t of cachedOverview(project)?.ov.tasks ?? []) for (const n of [t.agent, t.pm]) if (n) set.add(n.replace(/^agent-/, ""));
-    return set;
-  }, [agents, project]);
-  const { load, now, actions, connected, rev, advance, refetch, reviewers } = useCollab(project, members);
-  const lastSeen = useLastSeen(project);
-  const busy = useMemo(() => new Map(agents.map((a) => [a.name, a.busy])), [agents]);
-  const ov = load.status === "ok" ? load.ov : null;
-  // 「等你」：侧栏「待你处理」同一份数据（features/asks），只取这个项目开着的、非验收、没指给别人的
-  const { asks } = useAsks();
-  const waits = useMemo(() => asks.filter((a) => a.project === project && waitsOnOwner(a)), [asks, project]);
-  const byTask = useMemo(() => reviewersByTask(reviewers), [reviewers]);
-  const view = useMemo(() => {
-    if (!ov) return null;
-    const v = homeView(ov, now, tr, waits);
-    return { ...v, ...applyReviewers(v, byTask, tr) };
-  }, [ov, now, tr, waits, byTask]);
-  const digest = useMemo(() => sinceDigest(lastSeen.state.events, ov?.tasks ?? [], tr), [lastSeen.state.events, ov, tr]);
-  const projectName = projects.find((p) => p.id === project)?.name || project;
-
-  const lineAction = (l: LineView) => {
-    const waitLabel = l.attention === "waiting" || l.attention === "stuck" ? l.stageLabel : null;
-    return l.agent ? actionLine(actions.get(l.agent), busy.get(l.agent), waitLabel) : { kind: "idle" as const, text: "" };
-  };
-  const pmAction = (() => {
-    if (!view?.pm.pm) return "";
-    const a = actionLine(actions.get(view.pm.pm), busy.get(view.pm.pm), null);
-    return a.text ? `${tr("运行工具")} · ${a.text}` : tr(a.kind === "thinking" ? "思考中" : "空闲");
-  })();
-  const hot = view ? hotOf(view.lines, advance) : { id: null, from: null };
-
+/** 台账没读到 / 没权限 / 读失败 / 还没有任务时整页一个空状态 */
+function LoadState({ load, refetch, tr }: { load: ReturnType<typeof useCollab>["load"]; refetch: () => void | Promise<void>; tr: Tr }) {
   let body: React.ReactNode;
   if (load.status === "loading") body = <Empty icon="clock" title={tr("正在读取台账…")} />;
   else if (load.status === "forbidden") body = <Empty icon="listTree" title={tr("这台设备没有读台账的权限")}>{tr("需要全部 agent 范围、带管理权限的设备。")}</Empty>;
@@ -181,47 +78,127 @@ export function CollabView({ project }: { project: string }) {
         <button type="button" className={s.ib} style={{ marginTop: 12 }} onClick={() => void refetch()}>{tr("重试")}</button>
       </Empty>
     );
-  else if (!ov!.exists || ov!.tasks.length === 0)
+  else
     body = (
       <Empty icon="listTree" title={tr("这个项目还没有台账")}>
         {tr("PM 派发任务后，这里会按关注度列出每条任务线。已有旧台账可以导入：")}
         <div style={{ marginTop: 8 }}><code>bun src/manager.ts ledger import &lt;ledger.json&gt; --map &lt;map.json&gt;</code></div>
       </Empty>
     );
-  else
-    body = (
-      <>
-        <Headline v={view!} tr={tr} connected={connected} now={now} projectName={projectName} />
-        {lastSeen.state.since !== null && (
-          <SinceCard digest={digest} since={lastSeen.state.since} truncated={lastSeen.state.truncated} now={now} tr={tr} onOpen={(id) => openCollabTask(id)} onDismiss={lastSeen.dismiss} />
-        )}
-        <PmStrip v={view!} action={pmAction} tr={tr} />
-        <div className={s.lines}>
-          {view!.lines.length > 0 ? <LineHeaderCols tr={tr} /> : <Empty icon="circleCheck" title={tr("没有进行中的任务")} />}
-          {view!.lines.map((l) => (
-            <CollabLine key={l.id} line={l} action={lineAction(l)} hot={hot.id === l.id} hotFrom={hot.id === l.id ? hot.from : null}
-              selected={openTask === l.id} onOpen={() => openCollabTask(l.id)} tr={tr}
-              changed={digest.changed.has(l.id)} reviewing={byTask.has(l.id)} reviewerTag={l.reviewerTag} />
-          ))}
-          <DoneRow ov={ov!} ids={view!.todayDone} tr={tr} onOpen={(id) => openCollabTask(id)} />
-        </div>
-      </>
-    );
+  return <div className={`${s.tokens} ${s.root}`}><div className={s.home}>{body}</div></div>;
+}
+
+/** 中区：「因果线」画布和「团队」（T55 的组件，合并前是占位）两个标签 */
+function CenterPane(props: React.ComponentProps<typeof CausalCanvas>) {
+  const [tab, setTab] = useState<"causal" | "team">("causal");
+  const { tr } = props;
+  return (
+    <div className={v.center}>
+      <div className={v.tabs} role="tablist">
+        {(["causal", "team"] as const).map((k) => (
+          <button key={k} type="button" role="tab" aria-selected={tab === k} className={`${v.tab} ${tab === k ? v.tabOn : ""}`} onClick={() => setTab(k)}>
+            {tr(k === "causal" ? "因果线" : "团队")}
+          </button>
+        ))}
+      </div>
+      {tab === "causal" ? <CausalCanvas {...props} /> : <div className={v.blank}>{tr("团队视图（T55）合并后接到这里")}</div>}
+    </div>
+  );
+}
+
+export function CollabView({ project }: { project: string }) {
+  const tr = useCollabT();
+  const nav = useChatNav();
+  const narrow = useNarrow();
+  const { task: openTask } = useCollabNav();
+  const agents = useChatStore((st) => st.state.agents);
+  const projects = useChatStore((st) => st.state.projects);
+  // 本项目的 agent：registry 里归这个项目的，加上台账任务挂着的执行者 / PM（缓存的总览里有）
+  const members = useMemo(() => {
+    const set = new Set(agents.filter((a) => a.projectId === project).map((a) => a.name));
+    for (const t of cachedOverview(project)?.ov.tasks ?? []) for (const n of [t.agent, t.pm]) if (n) set.add(n.replace(/^agent-/, ""));
+    return set;
+  }, [agents, project]);
+  const { load, now, actions, connected, rev, advance, refetch, reviewers } = useCollab(project, members);
+  const busy = useMemo(() => new Map(agents.map((a) => [a.name, a.busy])), [agents]);
+  const lastSeen = useLastSeen(project);
+  const ov = load.status === "ok" ? load.ov : null;
+  const { asks } = useAsks();
+  const waits = useMemo(() => asks.filter((a) => a.project === project && waitsOnOwner(a)), [asks, project]);
+  const byTask = useMemo(() => reviewersByTask(reviewers), [reviewers]);
+  const view = useMemo(() => {
+    if (!ov) return null;
+    const hv = homeView(ov, now, tr, waits);
+    return { ...hv, ...applyReviewers(hv, byTask, tr) };
+  }, [ov, now, tr, waits, byTask]);
+  const lines = useMemo(() => new Map((view?.lines ?? []).map((l) => [l.id, l])), [view]);
+  const digest = useMemo(() => sinceDigest(lastSeen.state.events, ov?.tasks ?? [], tr), [lastSeen.state.events, ov, tr]);
+  const canvas = useMemo(() => causalCanvas(ov ?? { tasks: [], items: [], deps: [] }), [ov]);
+  const [filter, setFilter] = useState<Filter>("all");
+  const [sel, setSel] = useState<Selection>(null);
+  const [focus, setFocus] = useState<string | null>(null);
+  const projectName = projects.find((p) => p.id === project)?.name || project;
+
+  const lineAction = (l: LineView) => {
+    const waitLabel = l.attention === "waiting" || l.attention === "stuck" ? l.stageLabel : null;
+    return l.agent ? actionLine(actions.get(l.agent), busy.get(l.agent), waitLabel) : { kind: "idle" as const, text: "" };
+  };
+  const actionText = (id: string) => {
+    const l = lines.get(id);
+    return l ? lineAction(l).text : "";
+  };
+  const pickTask = (id: string) => {
+    setSel(null);
+    setFocus(id);
+    openCollabTask(id);
+  };
+  const select = (x: Selection) => {
+    if (x?.kind === "task") return pickTask(x.id);
+    openCollabTask(null);
+    setSel(x);
+  };
+
+  if (load.status !== "ok" || !ov!.exists || ov!.tasks.length === 0) return <LoadState load={load} refetch={refetch} tr={tr} />;
+
+  const o = ov!, hv = view!;
+  const m = metricsOf(o, hv.todayDone.length, agents.filter((a) => members.has(a.name) && a.status === "active").length);
+  const detail = openTask && (
+    <CollabDetail project={project} id={openTask} rev={rev} now={now} ov={o} line={lines.get(openTask) ?? null}
+      action={(l) => lineAction(l)} actions={actions} reviewers={byTask.get(openTask) ?? NO_REVIEWERS} onClose={closeTask}
+      extra={<CauseSec id={openTask} deps={o.deps ?? []} onEdge={(dep) => select({ kind: "edge", dep })} tr={tr} />} />
+  );
+  const right = detail
+    || (sel?.kind === "edge" && <EdgePage dep={sel.dep} ov={o} onPick={pickTask} onClose={() => setSel(null)} tr={tr} />)
+    || (sel?.kind === "fold" && <FoldPage fold={sel.fold} ov={o} onPick={pickTask} onClose={() => setSel(null)} tr={tr} />)
+    || (sel?.kind === "waits" && <WaitsPage waits={waits} ov={o} onPick={pickTask} onClose={() => setSel(null)} tr={tr} />)
+    || <Overview ov={o} view={hv} waits={waits} projectName={projectName} onPick={pickTask} tr={tr} since={lastSeen.state.since !== null && (
+      <SinceCard digest={digest} since={lastSeen.state.since} truncated={lastSeen.state.truncated} now={now} tr={tr} onOpen={pickTask} onDismiss={lastSeen.dismiss} />
+    )} />;
 
   return (
-    <div className={`${s.tokens} ${s.root} ${openTask ? s.panelOn : ""}`}>
-      <div className={s.home}>
-        <div className={s.mtop}>
-          <button type="button" className={s.ib} aria-label={tr("返回")} onClick={nav.toList}>
-            <Icon name="arrowLeft" size={16} />
-          </button>
-          <span className={s.ttl2}>{tr("协作视图")}</span>
-        </div>
-        {body}
+    <div className={`${s.tokens} ${s.root} ${v.v4}`}>
+      <div className={v.top}>
+        <button type="button" className={`${s.ib} ${v.back}`} aria-label={tr("返回")} onClick={nav.toList}>
+          <Icon name="arrowLeft" size={16} />
+        </button>
+        <span className={v.ttl}>{projectName}</span>
+        {narrow && <button type="button" className={v.waitsM} onClick={() => select({ kind: "waits" })}>{tr("待你处理")} <b>{waits.length}</b></button>}
+        {!narrow && <MetricsBar m={m} connected={connected} tr={tr} />}
       </div>
-      {openTask && ov && (
-        <CollabDetail project={project} id={openTask} rev={rev} now={now} ov={ov} line={view?.lines.find((l) => l.id === openTask) ?? null}
-          action={(l) => lineAction(l)} actions={actions} reviewers={byTask.get(openTask) ?? NO_REVIEWERS} onClose={closeTask} />
+      {narrow ? (
+        <>
+          <MobileList ov={o} lines={lines} todayDone={hv.todayDone} now={now} actionText={actionText} onPick={pickTask} tr={tr} />
+          {detail}
+          {sel?.kind === "waits" && <div className={v.sheet}><WaitsPage waits={waits} ov={o} onPick={pickTask} onClose={() => setSel(null)} tr={tr} /></div>}
+        </>
+      ) : (
+        <div className={v.main}>
+          <Outline ov={o} lines={lines} filter={filter} onFilter={setFilter} waits={waits} onWaits={() => select({ kind: "waits" })}
+            selected={openTask} onPick={pickTask} tr={tr} />
+          <CenterPane canvas={canvas} lines={lines} actionText={actionText} hot={advance?.id ?? null}
+            selection={openTask ? { kind: "task", id: openTask } : sel} focus={focus} onSelect={select} tr={tr} />
+          {right}
+        </div>
       )}
     </div>
   );
