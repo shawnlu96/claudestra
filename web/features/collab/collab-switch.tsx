@@ -4,9 +4,10 @@
  * 关掉就是原来的会话、不用重载。点侧栏任何会话都先关掉它（closingCollab 包住 Sidebar 的 onSelect）。
  */
 import { useEffect, useRef, useSyncExternalStore } from "react";
-import { markRead } from "@/lib/api/push";
+import { markRead } from "../chat/scoped-requests";
 import { machines } from "@/lib/machines";
 import { useChatStore, useChatStoreApi } from "../chat/chat-store";
+import { CollabPaneBoundary } from "@/components/boundaries";
 import { CollabView } from "./collab-view";
 import { closeCollab, takeReleasedReads, useCollabNav } from "./collab-nav";
 
@@ -48,7 +49,9 @@ export function CollabSwitch() {
   if (!project) return null;
   return (
     <div className="absolute inset-0 z-[45] flex bg-base-100">
-      <CollabView key={project} project={project} />
+      <CollabPaneBoundary key={project} onClose={closeCollab}>
+        <CollabView project={project} />
+      </CollabPaneBoundary>
     </div>
   );
 }

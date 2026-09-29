@@ -149,7 +149,7 @@ async function bringUpClaudeInMasterWindow(): Promise<boolean> {
     channelId: CONTROL_CHANNEL_ID,
     bridgeUrl: BRIDGE_URL,
     effort: MASTER_EFFORT,
-    resumeId: resume?.sessionId,
+    resumeId: resume?.sessionId, settingsAgent: "master", // 大总管也能按 agent 关技能（manager skill-toggle master …）
   });
   // shell init 阶段的 Y/n（oh-my-zsh / homebrew）会吞掉首字符，先清掉。
   await clearShellInitPrompts(MASTER_WINDOW);
@@ -162,7 +162,7 @@ async function bringUpClaudeInMasterWindow(): Promise<boolean> {
 
     if (await isIdle()) {
       console.log(`✅ 大总管已就绪${MASTER_EFFORT && MASTER_EFFORT !== "default" ? `（effort=${MASTER_EFFORT}）` : ""}`);
-      return true;
+      (await import("./lib/agent-settings.js")).dropLaunchSettings("master"); return true; // 超长设置落的启动快照：就绪 = CC 已读过
     }
 
     if (masterShouldAutoConfirm(pane)) {

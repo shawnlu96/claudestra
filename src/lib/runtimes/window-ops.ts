@@ -6,6 +6,8 @@
  */
 import {
   setWindowOption,
+  ensurePaneInteractive,
+  noteProgramInput,
   tmuxCapture,
   tmuxRaw,
   tmuxRawStrict,
@@ -19,17 +21,19 @@ import { codexBusy } from "./codex-exit.js";
 import { controlFor } from "./index.js";
 import type { WindowOps } from "./types.js";
 
-export function tmuxWindowOps(name: string): WindowOps {
-  const target = windowTarget(name);
+/** target 缺省按名字精确匹配；create 传刚建窗口的 `@id`，窗口一旦被关，后续按键不会落到任何别的窗口 */
+export function tmuxWindowOps(name: string, target: string = windowTarget(name)): WindowOps {
   return {
     name,
     target,
     capture: (lines = 40) => tmuxCapture(target, lines),
-    sendLine: (text) => tmuxSendLine(target, text),
+    sendLine: (text) => tmuxSendLine(target, text, 100, true), // 启动命令：没发出去就抛（lib/tmux-helper.ts）
     sendLiteral: async (text) => {
+      await noteProgramInput(target, text);
       await tmuxRaw(["send-keys", "-t", target, "-l", "--", text]);
     },
-    sendKey: async (key) => {
+    sendKey: async (key) => { // 清场的 C-c 等：记下是程序发的，bridge 别记成 owner 在终端里叫停
+      await noteProgramInput(target);
       await tmuxRaw(["send-keys", "-t", target, key]);
     },
     sendEscape: () => tmuxSendEscape(target),
@@ -64,12 +68,12 @@ export async function interruptVia(io: InterruptIO, runtime: string | undefined 
 
 /** interruptVia 的 tmux 版 */
 export async function interruptWindow(target: string, runtime: string | undefined | null): Promise<readonly string[]> {
+  await ensurePaneInteractive(target); // pane 在 copy-mode 时键会被 tmux 自己吃掉（发了也打断不了）
   return interruptVia(
     {
       capture: (lines) => tmuxCapture(target, lines),
-      sendKey: async (key) => {
-        await tmuxRawStrict(["send-keys", "-t", target, key]);
-      },
+      // Esc 也走双击护栏：和 watcher / 面板清场的 Esc 挨得太近会打开 CC 的 Rewind
+      sendKey: (key) => (key === "Escape" ? tmuxSendEscape(target, { strict: true }) : tmuxRawStrict(["send-keys", "-t", target, key]).then(() => undefined)),
     },
     runtime,
   );
@@ -85,5 +89,5 @@ export function stopNeedsPaneRecheck(runtime: string | undefined | null): boolea
 
 /** 给人看的按键名（"C-c" → "Ctrl+C"），打断回执里用 */
 export function describeKeys(keys: readonly string[]): string {
-  return keys.map((k) => (k === "C-c" ? "Ctrl+C" : k === "Escape" ? "Esc" : k)).join(" ");
+  return keys.map((k) => (k === "C-c" ? "Ctrl+C" : k === "Escape" ? "Esc" : k === "abort" ? "中止请求" : k)).join(" ");
 }

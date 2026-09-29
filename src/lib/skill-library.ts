@@ -13,7 +13,10 @@
  */
 import { existsSync, lstatSync, readdirSync, readFileSync, realpathSync } from "node:fs";
 import { join } from "node:path";
-import type { AgentRuntime } from "./registry.js";
+import { homedir } from "node:os";
+import { readPiGlobalEnv } from "./pi-env.js";
+import { agentRuntime, readActiveAgents, type AgentRuntime } from "./registry.js";
+import { REPO_ROOT } from "./repo-root.js";
 import { readSkillMd } from "./skills.js";
 
 type SkillRuntime = AgentRuntime;
@@ -174,7 +177,7 @@ export async function buildSkillLibrary(env: RootEnv, repoSkillsDir: string): Pr
 }
 
 /** 从 Claude Code 的 installed_plugins.json 读已装插件（读不到 = 没插件） */
-export function readInstalledPlugins(home: string): RootEnv["plugins"] {
+function readInstalledPlugins(home: string): RootEnv["plugins"] {
   try {
     const idx = JSON.parse(readFileSync(join(home, ".claude", "plugins", "installed_plugins.json"), "utf8"));
     const out: RootEnv["plugins"] = [];
@@ -187,4 +190,23 @@ export function readInstalledPlugins(home: string): RootEnv["plugins"] {
   } catch {
     return []; // 没装过插件时文件不存在；坏了也只是少列插件技能，不挡别的
   }
+}
+
+/** registry 里的 cwd 可能写成 ~/…，与技能库里的项目根比较前展开 */
+export const expandHome = (p: string, home = homedir()) => p.replace(/^~(?=$|\/)/, home);
+
+/**
+ * 本机现状建一份技能库（设置 · 技能页、会话详情的技能开关、manager skill-toggle 共用）。
+ * include：额外要扫项目技能的 agent（已停止的 agent 不在 active 列表里，看它自己的技能时要带上）。
+ */
+export async function localSkillLibrary(include?: { cwd: string; runtime: AgentRuntime }): Promise<Awaited<ReturnType<typeof buildSkillLibrary>>> {
+  const home = homedir();
+  const agents = (await readActiveAgents()).filter((a) => a.cwd).map((a) => ({ cwd: expandHome(a.cwd!, home), runtime: agentRuntime(a) }));
+  if (include) agents.push(include); // skillRoots 按 runtime|目录去重，重复没关系
+  return buildSkillLibrary({ home, agents, plugins: readInstalledPlugins(home), piSkillPaths: readPiGlobalEnv().skillPaths }, `${REPO_ROOT}/skills`);
+}
+
+/** 只留这些工作目录下的项目技能 / 项目搜索根（个人、插件、同步等不是项目的原样保留）：按凭据 scope 裁剪用 */
+export function onlyProjects<T extends { scope: string; project?: string }>(items: T[], cwds: Set<string>): T[] {
+  return items.filter((x) => x.scope !== "project" || (!!x.project && cwds.has(x.project)));
 }

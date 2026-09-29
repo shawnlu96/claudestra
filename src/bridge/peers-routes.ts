@@ -21,6 +21,7 @@ export async function handlePeersRoutes(req: Request, path: string, principal: P
   if (path !== "/peers" && !path.startsWith("/peers/")) return null;
   if (!isFullScope(principal)) return forbidden("peers management requires a full-scope token");
   if (path === "/peers" && req.method === "GET") return listPeers(runManager);
+  if (path === "/peers/contacts" && req.method === "GET") return listPeerContacts(); // 侧栏联系人 / @ 候选：只读内存，不起子进程
   // POST /peers/tidy —— 把同一个对方散成的多条旧记录合成一条（lib/peer-tidy.ts；GET /peers 的 tidy 字段是预览）
   if (path === "/peers/tidy" && req.method === "POST") {
     const r = await runManager("peer-http-tidy", "--apply");
@@ -86,6 +87,14 @@ async function listPeers(runManager: RunManager): Promise<Response> {
   const me = instanceKeySync();
   const self = me ? { fingerprint: keyFingerprint(me.publicKey) } : null; // 本机指纹：给对方核对用
   return apiJson(200, { ok: true, peers, localAgents, pendingInvites, handoffs, self, tidy: planPeerTidy(peersData.httpPeers || [], activePeerTokens(pf.principals), await peerAnchorOf()) });
+}
+
+// GET /peers/contacts —— 现有 presence 的只读重排（lib/peer-contacts.ts），侧栏每分钟拉一次，所以不碰 runManager
+async function listPeerContacts(): Promise<Response> {
+  const { peerPresence } = await import("./peer-presence.js");
+  const { listContacts } = await import("../lib/peer-contacts.js");
+  const peers = (await readPeers()).httpPeers || [];
+  return apiJson(200, { ok: true, contacts: listContacts(peers, (p) => peerPresence(p.name, p), Date.now()) });
 }
 
 // v2.15+ POST /peers/invite-new | /peers/join-auto | /peers/invite-revoke

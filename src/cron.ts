@@ -18,12 +18,13 @@ import { existsSync, watchFile } from "fs";
 import { notify } from "./lib/notify.js";
 import { runManagerProcess, agentsFromList } from "./lib/run-manager.js";
 import { tempAgentCleanupFailure } from "./lib/restart-result.js";
+import { CRON_PROMPT_REFUSED, hasControlChar } from "./lib/flag-like.js";
 import { readJsonLenient, writeJsonAtomic, writeJsonStateGuarded } from "./lib/state-file.js";
 import { projectJsonlPath, findJsonlBySessionId } from "./lib/jsonl-cost.js";
 import {
   tmuxSendLine,
   tmuxCapture,
-  isIdle as tmuxIsIdle,
+  isIdle as tmuxIsIdle, windowTarget, tmuxRawStrict,
 } from "./lib/tmux-helper.js";
 
 // ============================================================
@@ -53,40 +54,8 @@ const TICK_INTERVAL_MS = 30_000; // 每 30 秒检查一次
 // 类型定义
 // ============================================================
 
-export interface CronJob {
-  id: string;
-  name: string;
-  schedule: string;         // cron 表达式 (分 时 日 月 周)
-  prompt: string;           // 发给 agent 的指令
-  dir: string;              // 工作目录（targetAgent 模式下未使用，为向后兼容保留字段）
-  enabled: boolean;
-  reportChannelId?: string; // 结果通知频道（默认用 CONTROL_CHANNEL_ID）
-  maxRuntime?: number;      // 最大运行时间（分钟，默认 30）
-  lastRun?: string;         // ISO timestamp
-  nextRun?: string;         // ISO timestamp
-  createdAt: string;        // ISO timestamp
-  /**
-   * v2.4.18+ 定向到已存在的 agent。设了这个字段就不 spawn 临时 agent，直接把
-   * prompt 发到目标 agent 的 tmux window（等同用户在 Discord 里给它敲字）。
-   * agent 在自己 session 里回答，完整继承对话历史 / 上下文 / mem0 记忆访问。
-   * 不设 = 老行为（每次建临时 agent、跑完销毁）。
-   *
-   * 值是 agent 短名（不带 "agent-" 前缀，跟 CLI 一致）。
-   */
-  targetAgent?: string;
-  /**
-   * v2.21.3+ 临时 agent 的 effort 档(low|medium|high|xhigh|max)。缺省 medium——
-   * Fable 5.1 文档:medium ≈ Fable 5 且更便宜;无人值守批处理不值得 xhigh 的
-   * 额度与时延。targetAgent 模式下无意义(用目标 agent 自己的档),不传。
-   */
-  effort?: string;
-  /**
-   * v2.21.4+ 临时 agent 的归属 project id。不设 = create 按 dir 自动解析——dir 为
-   * 家目录时会落进「家目录杂项」这种傘形组(owner 2026-09-04:「你不应该把这个
-   * cron job 归到家目录杂项里」)。targetAgent 模式下无意义(目标 agent 自有归属)。
-   */
-  project?: string;
-}
+export type { CronJob } from "./lib/cron-job.js";
+import type { CronJob } from "./lib/cron-job.js";
 
 /** cron 临时 agent 缺省 effort(交互 agent 不受影响——它们走全局/registry 档)。 */
 export const CRON_DEFAULT_EFFORT = "medium";
@@ -331,7 +300,7 @@ async function executeOnTempAgent(
     const tmpSessionId = createResult.sessionId as string | undefined;
     await Bun.sleep(3000); // 等 agent 就绪
 
-    const tmuxTarget = `master:agent-${agentName}`;
+    const tmuxTarget = windowTarget(`agent-${agentName}`);
     await tmuxSendLine(tmuxTarget, job.prompt);
 
     // 等完成 —— 15s 冷启动 + 10s 轮询 idle
@@ -409,14 +378,14 @@ async function executeOnExistingAgent(
 ): Promise<void> {
   const agentShort = job.targetAgent!;
   const tmuxName = agentShort.startsWith("agent-") ? agentShort : `agent-${agentShort}`;
-  const tmuxTarget = `master:${tmuxName}`;
+  const tmuxTarget = windowTarget(tmuxName); // 精确匹配：目标不在时别把提示词打进前缀同名的别的 agent
 
   console.log(`🚀 执行 cron 任务（打到现存 agent）: "${job.name}" → ${tmuxName}`);
 
   // 存在性校验：window 不存在（agent 被 kill / registry 名不对）就报 error，
   // 这种情况用户需要知道。但"agent 忙"不算错，照发。
   try {
-    await tmuxIsIdle(tmuxTarget); // 只测能不能访问 window，不管返回值
+    await tmuxRawStrict(["list-panes", "-t", tmuxTarget, "-F", "#{pane_id}"]); // 窗口不在会抛（isIdle 走 tmuxRaw 从不抛，display-message 会退回当前窗口）
   } catch {
     throw new Error(`目标 agent 不存在或未运行: ${tmuxName}`);
   }
@@ -482,7 +451,7 @@ async function lookupAgentChannelId(tmuxName: string): Promise<string | undefine
   }
 }
 
-async function executeJob(job: CronJob): Promise<void> {
+export async function executeJob(job: CronJob): Promise<void> { // export 给 tests/cron-prompt-refuse.test.ts
   if (runningJobs.has(job.id)) {
     console.log(`⏭ 跳过 "${job.name}" — 上一次执行尚未完成`);
     return;
@@ -493,16 +462,10 @@ async function executeJob(job: CronJob): Promise<void> {
   const reportChannel = job.reportChannelId || REPORT_CHANNEL_ID;
   const maxRuntime = (job.maxRuntime || 30) * 60 * 1000;
 
-  // 记录开始
-  await appendHistory({
-    id: historyId,
-    jobId: job.id,
-    jobName: job.name,
-    startedAt: new Date().toISOString(),
-    status: "running",
-  });
+  await appendHistory({ id: historyId, jobId: job.id, jobName: job.name, startedAt: new Date().toISOString(), status: "running" }); // 记录开始
 
   try {
+    if (hasControlChar(job.prompt)) throw new Error(CRON_PROMPT_REFUSED); // 入口拦之前写进去的旧任务：\x1b[Z 会切掉权限模式
     if (job.targetAgent) {
       await executeOnExistingAgent(job, historyId, reportChannel, maxRuntime);
     } else {

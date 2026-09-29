@@ -2,7 +2,7 @@
 import { useEffect, useSyncExternalStore } from "react";
 // 字典集中在 lib/i18n-dict.ts（纯数据，中文原文 → 英文）
 import { DICT } from "./i18n-dict";
-import { fillParams, type I18nParams } from "./i18n-fill";
+import { fillParams, fillVerbatim, type I18nParams } from "./i18n-fill";
 
 /**
  * 轻量 i18n（owner 2026-07-18「英文版 + 切换语言」）。
@@ -79,6 +79,11 @@ export function t(s: string, params?: I18nParams): string {
 /** 指定语言翻译（不看全局语言）：导出文件的抬头等「界面之外」的文案按用户选的语言出。 */
 export function tIn(l: Lang, s: string, params?: I18nParams): string {
   return fillParams(l === "zh" ? s : (DICT[s] ?? s), params);
+}
+
+/** 可能是用户原文的整段（system 分隔条：命令行、命令输出、注入提示）：字典有就翻，没有原样显示，不按 | 拆单复数 */
+export function tVerbatim(s: string): string {
+  return fillVerbatim(s, lang === "zh" ? undefined : DICT[s]);
 }
 
 /** 组件用：订阅语言变化 + 返回 t。 */

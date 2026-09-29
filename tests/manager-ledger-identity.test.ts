@@ -2,7 +2,7 @@
 import { describe, expect, test } from "bun:test";
 import { reservedAgentNameChecks } from "../src/lib/doctor-state.js";
 import { isReservedAgentName } from "../src/lib/registry.js";
-import { assertValidNewName } from "../src/manager/core.js";
+import { assertValidNewAgent, assertValidNewName } from "../src/manager/core.js";
 import { agentKey, intFlag, jsonObjectFlag, parseLedgerArgs, resolveActor, type ParsedArgs } from "../src/manager/ledger-identity.js";
 import { isWriteInvocation, needsWriteLock } from "../src/manager/write-commands.js";
 
@@ -56,12 +56,35 @@ describe("参数解析", () => {
 describe("保留名 owner / master", () => {
   test("isReservedAgentName 认裸名与 agent- 前缀、不分大小写", () => {
     for (const n of ["owner", "Owner", "agent-owner", "master", "agent-MASTER"]) expect(isReservedAgentName(n)).toBe(true);
+    // 与 isMasterName 同一口径：全角、长 s、多层前缀、__master__ 也是保留名（HF182-r2 P2-C）
+    for (const n of ["ｍａｓｔｅｒ", "ＭＡＳＴＥＲ", "maſter", "agent-agent-master", "__master__", "ｏｗｎｅｒ", "agent-agent-owner"]) expect([n, isReservedAgentName(n)]).toEqual([n, true]);
     for (const n of ["owners", "agent-task-owner", "masterful"]) expect(isReservedAgentName(n)).toBe(false);
+  });
+  test("新建 / resume / 收编：跟已有 agent 规范化后撞名就拒（cc 与全角 ｃｃ 会共用授权，T42-r2）；已有的同名照旧", () => {
+    const reg = ["agent-cc", "agent-data"];
+    expect(() => assertValidNewAgent("\uff43\uff43", reg)).toThrow("跟已有的 agent-cc");
+    expect(() => assertValidNewAgent("cc", reg)).not.toThrow();
+    expect(() => assertValidNewAgent("cc2", reg)).not.toThrow();
   });
   test("新建 / resume / 改名共用的 assertValidNewName 拒绝保留名", () => {
     expect(() => assertValidNewName("owner")).toThrow("保留名");
     expect(() => assertValidNewName("agent-master")).toThrow("保留名");
     expect(() => assertValidNewName("task-t8b")).not.toThrow();
+  });
+  test("名字字符黑名单与台账负责人校验共用（lib/registry.ts）：@ 与 CJK 允许，零宽 / 方向控制等不可见字符拒绝", () => {
+    expect(() => assertValidNewName("a@b")).not.toThrow();
+    expect(() => assertValidNewName("数据")).not.toThrow();
+    const cases: [string, string][] = [
+      ["a\u200bb", "U+200B"], ["a\u202eb", "U+202E"], ["a\u2060b", "U+2060"], ["a\u200db", "U+200D"],
+      // 不在 \p{Cf} 里的：变体选择符（Mn）、韩文填充符（Lo）、CGJ、高棉文不发音元音、盲文空格
+      ["dev\u2764\ufe0f", "U+FE0F"], ["a\u3164b", "U+3164"], ["a\u115fb", "U+115F"], ["a\u034fb", "U+034F"], ["a\u17b4b", "U+17B4"], ["a\u2800b", "U+2800"],
+    ];
+    for (const [bad, code] of cases) {
+      expect(() => assertValidNewName(bad)).toThrow("名字不能含不可见字符（零宽连接符等）");
+      expect(() => assertValidNewName(bad)).toThrow(`这里有 ${code}，请换一个名字`);
+    }
+    expect(() => assertValidNewName("dev\u2764\ufe0f")).toThrow("变体选择符 U+FE0F，去掉再试");
+    expect(() => assertValidNewName("dev\u2764")).not.toThrow();
   });
   test("doctor：已有 agent-owner 报 warn；agent-master 是大总管自己的条目不算", () => {
     expect(reservedAgentNameChecks(["agent-claudestra", "agent-master"])).toEqual([]);

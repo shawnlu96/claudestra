@@ -101,6 +101,8 @@ export interface ChatMessage {
   replyTs?: string;
   /** reply 附带的交互组件（按钮/选单）。点击回投 [button:<id>] / [select:<id>:<value>]。 */
   replyComponents?: WebComponentRow[];
+  /** 这条 reply 建出的「待你处理」id（直播来自出站事件，历史来自 reply 的 tool_result）：按 id 认领，不按时间猜 */
+  replyAskId?: string;
   /** 已点击的按钮/选项 id —— 点后禁用整组，高亮所选（一条 reply 只作答一次）。 */
   /** @deprecated bug ① 前的消息级单值,仅老快照读;新逻辑用 replyClicks。 */
   replyClickedId?: string;
@@ -132,11 +134,17 @@ export interface ChatMessage {
   attachments?: ChatAttachmentView[];
   /** 入站消息来源标签（Discord 用户名 / 来源 agent；自己发的不带）。 */
   from?: string;
+  /** 按钮 / 表单回投的原始 payload：所属表单不在同一段历史里、没能还原成可读文案时留着，合进已加载的消息时再往前找（features/chat/delta-clicks.ts） */
+  clickRaw?: string;
   /** v2.20.2+ 回合结束但后台任务还在跑——「后台继续中」标记(代替绿勾)。 */
   turnBgPending?: boolean;
   /** 本端乐观发送、尚未在历史(jsonl)中确认——历史重拉时保留不吞
    *  （agent 忙时消息在服务端排队,送达前不进 jsonl）。 */
   local?: boolean;
+  /** 乐观消息发出时视图里的历史游标（view-compose 的 sendCursor）：纯附件消息据此只和之后落盘的记录对账 */
+  sentAfter?: { seq: number; sid?: string };
+  /** 乐观消息已认领的他端回声指纹（view-compose 的 echoKeyOf）：之后只认同一条回声，别人同名的图不再被吞 */
+  echoKey?: string;
   /** v2.15+ 发送失败（超时/网络/服务端拒绝）——气泡标「未送达」,别装作已发出 */
   failed?: boolean;
 }
@@ -146,7 +154,8 @@ export interface AgentSession {
   displayName: string;
   purpose: string;
   cwd: string;
-  status: "active" | "stopped";
+  /** creating = create 进行中 / 砍在半路的占位：显示「创建中」、不能发消息 */
+  status: "active" | "stopped" | "creating";
   mock?: boolean;
   /** 大总管置顶入口——不显示 kill/restart，列表第一位。 */
   pinnedMaster?: boolean;

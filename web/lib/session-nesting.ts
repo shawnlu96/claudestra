@@ -9,28 +9,71 @@ export interface SubSessionRow {
   sessionId: string;
   name: string;
   sub?: SubSessionInfo;
+  /** bridge 每个主会话只带最新 50 个子线程，省掉的个数记在主会话行上（src/lib/session-limit.ts capSubsPerMain） */
+  moreSubs?: number;
 }
 
 /**
- * 子会话排到父会话下面，缩进一级；父会话不在列表里（已纳管 / 被截在 100 条外）就留在原位，只靠徽章区分。
- * Codex 一个主会话常带一串 subagent + 自动审查线程，cwd 相同、名字相同，平铺时分不出谁是主会话。
+ * 列表行的唯一键：同一个 sessionId 可能在不同 cwd（甚至不同运行时）下各有一行，只用 sessionId 当 React key
+ * 会撞键，删除确认也会把两行一起带上（tests/codex-sub-sessions.test.ts）。
  */
-export function nestSubSessions<T extends SubSessionRow>(rows: T[]): { row: T; depth: number }[] {
-  const ids = new Set(rows.map((r) => r.sessionId));
-  const kids = new Map<string, T[]>();
-  for (const r of rows) {
-    const p = r.sub?.parentId;
-    if (p && p !== r.sessionId && ids.has(p)) kids.set(p, [...(kids.get(p) ?? []), r]);
+export function sessionRowKey(r: { runtime?: string; cwd?: string; sessionId: string }): string {
+  return `${r.runtime ?? ""}:${r.cwd ?? ""}:${r.sessionId}`;
+}
+
+/** 分组头上要标「已纳管」的 agent 短名；没有 agentName（例如临时目录里没纳管的主会话）返回 null，只给中性分组头 */
+export function managedAgentOf(r: { agentName?: string | null }): string | null {
+  return r.agentName ? r.agentName.replace(/^agent-/, "") : null;
+}
+
+export interface TreeRow<T> {
+  row: T;
+  depth: number;
+  /** 这一行下面（含孙辈）要显示的子会话数；> 0 才给折叠开关 */
+  kids: number;
+  /** 行本身不列（已纳管，或在临时目录里的主会话），只当分组头挂它的子会话；「已纳管」徽章要另看 agentName */
+  anchor: boolean;
+  /** 后端省掉、没带过来的子线程数（只有主会话行可能 > 0），展开时报个数 */
+  more: number;
+}
+
+/**
+ * 子会话收到父会话下面，默认折叠（expanded 里有行键才展开）。父会话按全部会话找——主会话收编成 agent 后
+ * 不在「未纳管」里了，它的子会话仍要挂在一个分组头下，不能又平铺开；shown 决定哪些行本身要列出。
+ * 追不到父会话的子会话留在顶层；成环的各自当顶层，不丢行（tests/codex-sub-sessions.test.ts）。
+ */
+export function sessionTree<T extends SubSessionRow>(all: T[], shown: (r: T) => boolean, expanded: ReadonlySet<string>): TreeRow<T>[] {
+  const byId = new Map(all.map((r) => [r.sessionId, r]));
+  const kids = new Map<T, T[]>();
+  for (const r of all) {
+    const p = r.sub ? byId.get(r.sub.parentId) : undefined;
+    if (p && p !== r) kids.set(p, [...(kids.get(p) ?? []), r]);
   }
-  const out: { row: T; depth: number }[] = [];
-  const seen = new Set<string>();
-  const walk = (r: T, depth: number) => {
-    if (seen.has(r.sessionId)) return;
-    seen.add(r.sessionId);
-    out.push({ row: r, depth });
-    for (const k of kids.get(r.sessionId) ?? []) walk(k, depth + 1);
+  const reached = new Set<T>();
+  const reach = (r: T) => {
+    if (reached.has(r)) return;
+    reached.add(r);
+    for (const k of kids.get(r) ?? []) reach(k);
   };
-  for (const r of rows) if (!r.sub || !ids.has(r.sub.parentId)) walk(r, 0);
-  for (const r of rows) walk(r, 0); // 成环的父子关系：兜底原样列出，不丢行
+  const roots = all.filter((r) => !r.sub || !byId.has(r.sub.parentId) || byId.get(r.sub.parentId) === r);
+  roots.forEach(reach);
+  for (const r of all) {
+    if (reached.has(r)) continue;
+    roots.push(r);
+    reach(r);
+  }
+  const count = (r: T, seen: Set<T>): number =>
+    (kids.get(r) ?? []).reduce((n, k) => (seen.has(k) ? n : (seen.add(k), n + (shown(k) ? 1 : 0) + count(k, seen))), 0);
+  const out: TreeRow<T>[] = [];
+  const done = new Set<T>();
+  const walk = (r: T, depth: number) => {
+    if (done.has(r)) return;
+    done.add(r);
+    const n = count(r, new Set([r]));
+    if (!shown(r) && n === 0) return;
+    out.push({ row: r, depth, kids: n, anchor: !shown(r), more: r.moreSubs ?? 0 });
+    if (n > 0 && expanded.has(sessionRowKey(r))) for (const k of kids.get(r) ?? []) walk(k, depth + 1);
+  };
+  for (const r of roots) walk(r, 0);
   return out;
 }

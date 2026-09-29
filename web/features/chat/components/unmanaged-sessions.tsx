@@ -1,11 +1,13 @@
 "use client";
-import { useCallback, useEffect, useState, useRef } from "react";
+import { Fragment, useCallback, useEffect, useState, useRef } from "react";
 import { fmtAgo } from "../fmt-time";
 import { getLang, useT } from "@/lib/i18n";
-import { resumeSession } from "@/lib/api/agents";
 import { sessionHistory, sessionHistoryError, sessionList, sessionManage } from "@/lib/api/system";
 import { RuntimeBadge } from "./runtime-badge";
-import { nestSubSessions, SessionName, type SubSessionInfo } from "./session-nesting";
+import { SidebarSectionHeader } from "./sidebar-section-header";
+import { AdoptPanel } from "./adopt-panel";
+import type { SubSessionRow } from "@/lib/session-nesting";
+import { FoldToggle, GroupAnchor, MoreSubsNote, SessionName, sessionRowKey, sessionTree, useFold } from "./session-name";
 
 /**
  * 侧栏「未纳管会话」分区（v2.23+）。
@@ -19,9 +21,8 @@ import { nestSubSessions, SessionName, type SubSessionInfo } from "./session-nes
  * 两种 runtime 合并、按最近活动排序）。
  */
 
-interface SessionRow {
-  sessionId: string;
-  name: string;
+/** sessionId / name / sub（子会话归属）/ moreSubs（后端省掉的子线程数）见 lib/session-nesting.ts */
+interface SessionRow extends SubSessionRow {
   slug: string;
   project: string;
   cwd: string;
@@ -31,7 +32,6 @@ interface SessionRow {
   lastMessage: string;
   agentName: string | null;
   manageable?: boolean; // v2.24+ bridge 按运行时适配器给出（老 bridge 不带）
-  sub?: SubSessionInfo; // 子会话归属（lib/session-nesting.ts）
 }
 
 interface HistoryTool {
@@ -57,6 +57,8 @@ interface HistoryMsg {
 function isTempSession(cwd: string): boolean {
   return /^(\/tmp|\/private\/tmp|\/var\/folders|\/private\/var\/folders)\//.test(cwd || "");
 }
+// 临时目录（测试遗留 / 子代理 scratchpad）的会话是噪声，不列（真想看有 CLI `manager sessions`）；组头计数也按它
+const isUnmanaged = (s: SessionRow) => !s.agentName && !isTempSession(s.cwd);
 
 /** 能不能收编成可对话的 agent：以 bridge 的 manageable 为准（加运行时前端不用改）；老 bridge 按旧规则 */
 export function canAdoptSession(s: { runtime: string; manageable?: boolean }): boolean {
@@ -191,9 +193,10 @@ export function UnmanagedSessions() {
     };
   }, [fetchSessions]);
 
-  const count = sessions.filter((s) => s.agentName === null && !isTempSession(s.cwd)).length;
+  // 与列表同一口径：只数顶层的行（父文件已删的孤儿子会话也在顶层），收在分组头下的子会话不算
+  const count = sessionTree(sessions, isUnmanaged, new Set()).filter((r) => !r.anchor).length;
 
-  const [confirming, setConfirming] = useState<string | null>(null);
+  const [confirming, setConfirming] = useState<string | null>(null); // 行键（sessionRowKey），不是 sessionId
 
   /** 列表里左滑直接处置（不必点进抽屉）；成功后重拉列表 */
   const manageFromList = async (s: SessionRow, action: "archive" | "delete") => {
@@ -212,11 +215,7 @@ export function UnmanagedSessions() {
     if (next) void load();
   };
 
-  // 未纳管会话里塞着大量**测试遗留**（dailies 探针 / spike / 子代理 scratchpad）：
-  // 它们的 cwd 在临时目录下，列出来只是噪声（owner 2026-09-14 实测：20 个未纳管 Pi
-  // 会话里 8+ 个是 /tmp 下的）。临时目录的会话不进列表——真想看还有 CLI
-  // `manager sessions`（isTempSession 见组件上方，与组头计数同一判据）。
-  const unmanaged = sessions.filter((s) => !s.agentName && !isTempSession(s.cwd));
+  const fold = useFold();
 
   // 「刚刚活跃」= 会话文件 2 分钟内还在写（真在跑的会话持续落盘）。
   // ⚠ 这是**启发式**，不是进程检测：Pi 进程的命令行被 setproctitle 盖成 `pi`，
@@ -229,53 +228,7 @@ export function UnmanagedSessions() {
 
   return (
     <li className="mx-2 mt-1 rounded-xl bg-base-300/25 p-1 list-none">
-      <div className="flex w-full items-center">
-        <button
-          type="button"
-          className="flex w-full items-center gap-1.5 rounded-lg px-1.5 py-1 text-left text-[12px] font-medium tracking-wide text-base-content/55 transition-colors hover:text-base-content/85"
-          onClick={toggle}
-          aria-expanded={open}
-        >
-          <svg
-            width="12"
-            height="12"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="2.5"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-            className={`shrink-0 text-base-content/40 transition-transform ${open ? "" : "-rotate-90"}`}
-          >
-            <path d="m6 9 6 6 6-6" />
-          </svg>
-          <span className="shrink-0 text-[13px] opacity-80">{open ? "🗂" : "🗂"}</span>
-          <span className="truncate">{t("未纳管会话")}</span>
-          {/* 折叠态也给计数：不给条数用户没有点开的动机（视觉审查 P1） */}
-          {count !== null ? (
-            <span className="ml-auto shrink-0 text-[11px] font-normal text-base-content/40">{count}</span>
-          ) : loading ? (
-            <span className="ml-auto loading loading-spinner loading-xs" />
-          ) : null}
-        </button>
-        {/* 触摸目标：原先只有 px-1.5 的裸字符（≈14×20px），手机上点不中 ——
-            而且紧挨折叠按钮，手指落点全被邻居吃掉（owner 2026-09-14 实报）。
-            给 36×36 的格子（iOS 建议 44，列表头里 36 是合理折中）+ touch-manipulation */}
-        {open ? (
-          <button
-            type="button"
-            className="grid size-9 shrink-0 touch-manipulation place-items-center rounded-md text-base text-base-content/45 transition-colors hover:text-base-content/80 active:bg-base-200/70"
-            title={t("刷新")}
-            disabled={loading}
-            onClick={(e) => {
-              e.stopPropagation();
-              void load();
-            }}
-          >
-            ⟳
-          </button>
-        ) : null}
-      </div>
+      <SidebarSectionHeader icon="🗂" label={t("未纳管会话")} open={open} onToggle={toggle} count={count} loading={loading} onRefresh={() => void load()} />
       {open ? (
         <div className="pb-1">
           {error ? (
@@ -283,15 +236,16 @@ export function UnmanagedSessions() {
               {t("读取失败")}: {error}
             </div>
           ) : null}
-          {!loading && !error && unmanaged.length === 0 ? (
-            <div className="px-1.5 py-2 text-xs text-base-content/40">
-              {t("没有未纳管的会话")}
-            </div>
+          {!loading && !error && !sessions.some(isUnmanaged) ? (
+            <div className="px-1.5 py-2 text-xs text-base-content/40">{t("没有未纳管的会话")}</div>
           ) : null}
           <ul className="max-h-64 overflow-y-auto">
-            {nestSubSessions(unmanaged).map(({ row: s, depth }) => (
-              <li key={s.sessionId} style={{ paddingLeft: Math.min(depth, 3) * 14 }}>
-                <SwipeActions
+            {sessionTree(sessions, isUnmanaged, fold.open).map(({ row: s, depth, kids, anchor, more }) => <Fragment key={sessionRowKey(s)}>{anchor ? (
+              <li><GroupAnchor s={s} kids={kids} open={fold.open.has(sessionRowKey(s))} onToggle={() => fold.toggle(sessionRowKey(s))} /></li>
+            ) : (
+              <li className="flex" style={{ paddingLeft: Math.min(depth, 3) * 14 }}>
+                <FoldToggle kids={kids} open={fold.open.has(sessionRowKey(s))} onToggle={() => fold.toggle(sessionRowKey(s))} />
+                <div className="min-w-0 flex-1"><SwipeActions
                   actions={[
                     {
                       label: t("归档"),
@@ -299,12 +253,12 @@ export function UnmanagedSessions() {
                       onClick: () => void manageFromList(s, "archive"),
                     },
                     {
-                      label: confirming === s.sessionId ? t("确认删除") : t("删除"),
+                      label: confirming === sessionRowKey(s) ? t("确认删除") : t("删除"),
                       className: "bg-error/80 text-error-content",
                       onClick: () =>
-                        confirming === s.sessionId
+                        confirming === sessionRowKey(s)
                           ? void manageFromList(s, "delete")
-                          : setConfirming(s.sessionId),
+                          : setConfirming(sessionRowKey(s)),
                     },
                   ]}
                 >
@@ -336,9 +290,9 @@ export function UnmanagedSessions() {
                     </span>
                   ) : null}
                 </button>
-                </SwipeActions>
+                </SwipeActions></div>
               </li>
-            ))}
+            )}{more > 0 && fold.open.has(sessionRowKey(s)) ? <MoreSubsNote n={more} depth={depth} /> : null}</Fragment>)}
           </ul>
         </div>
       ) : null}
@@ -346,6 +300,7 @@ export function UnmanagedSessions() {
       {viewing ? (
         <SessionViewer
           session={viewing}
+          parentName={viewing.sub ? sessions.find((x) => x.sessionId === viewing.sub?.parentId)?.name : undefined}
           onClose={() => setViewing(null)}
           onAdopted={() => {
             setViewing(null);
@@ -360,10 +315,12 @@ export function UnmanagedSessions() {
 /** 只读会话视图：看历史 + 收编成 agent（收编后才可对话） */
 function SessionViewer({
   session,
+  parentName,
   onClose,
   onAdopted,
 }: {
   session: SessionRow;
+  parentName?: string;
   onClose: () => void;
   onAdopted: () => void;
 }) {
@@ -372,7 +329,6 @@ function SessionViewer({
   const [error, setError] = useState("");
   const [adopting, setAdopting] = useState(false);
   const [confirmDel, setConfirmDel] = useState(false);
-  const [name, setName] = useState(session.slug || session.sessionId.slice(0, 8));
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState("");
 
@@ -414,25 +370,6 @@ function SessionViewer({
     }
   };
 
-  const adopt = async () => {
-    const n = name.trim();
-    if (!n) return;
-    setBusy(true);
-    try {
-      const json = (await resumeSession({ agent: n, sessionId: session.sessionId, runtime: session.runtime, cwd: session.cwd })) as { hint?: string };
-      setNotice(
-        json.hint ||
-          t("已受理，正在后台收编（约 10-40 秒），完成后会出现在 agent 列表里。")
-      );
-      setTimeout(onAdopted, 1500);
-    } catch (e) {
-      setNotice("");
-      setError((e as Error).message);
-    } finally {
-      setBusy(false);
-    }
-  };
-
   return (
     <div className="fixed inset-0 z-50 flex justify-end">
       <div className="absolute inset-0 bg-black/40" onClick={onClose} />
@@ -440,9 +377,8 @@ function SessionViewer({
         <header className="flex items-center gap-2 border-b border-base-300 px-4 py-3">
           <RuntimeBadge runtime={session.runtime} />
           <div className="min-w-0">
-            <div className="truncate text-sm font-medium">
-              {session.name || session.sessionId.slice(0, 8)}
-            </div>
+            {/* 子会话在标题上也挂「↳ 昵称 / 自动审查」徽章：点进来之后同样看得出不是主会话 */}
+            <div className="flex min-w-0 items-center gap-1.5 text-sm font-medium"><SessionName s={session} /></div>
             <div className="truncate font-mono text-[11px] text-base-content/50">
               {session.cwd}
             </div>
@@ -494,30 +430,19 @@ function SessionViewer({
             <div className="mb-2 text-xs text-success break-words">{notice}</div>
           ) : null}
           {adopting ? (
-            <div className="flex items-center gap-2">
-              <input
-                className="input input-bordered input-sm flex-1"
-                placeholder={t("agent 名字")}
-                value={name}
-                disabled={busy}
-                autoFocus
-                onChange={(e) => setName(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") void adopt();
-                }}
-              />
-              <button className="btn btn-primary btn-sm" disabled={busy} onClick={() => void adopt()}>
-                {busy ? <span className="loading loading-spinner loading-xs" /> : null}
-                {t("收编")}
-              </button>
-              <button
-                className="btn btn-ghost btn-sm"
-                disabled={busy}
-                onClick={() => setAdopting(false)}
-              >
-                {t("取消")}
-              </button>
-            </div>
+            <AdoptPanel
+              session={session}
+              parentName={parentName}
+              onCancel={() => setAdopting(false)}
+              onAccepted={(hint) => {
+                setNotice(hint);
+                setTimeout(onAdopted, 1500);
+              }}
+              onError={(msg) => {
+                setNotice("");
+                setError(msg);
+              }}
+            />
           ) : (
             <div className="flex flex-wrap items-center gap-2">
               {/* 手机上没有返回按钮可点：抽屉右上那个 ✕ 会被刘海/状态栏压住（owner

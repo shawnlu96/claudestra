@@ -150,6 +150,8 @@ export interface LaunchSpec {
   sessionId: string;
   /** 注入给会话的自称（registry 名）。不传 = 不注入 */
   agentName?: string;
+  /** 按哪个名字找 agent 设置文件（lib/agent-settings.ts）；launchInWindow 统一填 tmux 名，resume 也带（与 agentName 不同） */
+  settingsName?: string;
   /**
    * 会话的工作目录（tmux 窗口的 -c）。CC / Pi 不读它（窗口 cwd 即会话 cwd）；Codex 要拿它
    * 跑 exec 引导（-C）并写目录信任。不传时 Codex 从 rollout 首行的 session_meta 取。
@@ -179,7 +181,7 @@ export type ReadyResult =
 export interface RuntimeControl {
   /** 打断当前回合发什么键。CC / Pi 是 C-c；空闲 Codex 收到 C-c 会直接退出 */
   interruptKeys: readonly string[];
-  /** 人类消息到达且目标在忙时，是否先打断再投递（Pi 能 steer 进回合，不打断） */
+  /** 人类消息到达且目标在忙时，是否先打断再投递（Pi 能 steer 进回合，不打断；停字不看这个，三种运行时都打断） */
   preemptOnHumanMessage: boolean;
   /** 忙闲信号从哪来：pane = 看屏幕文案；hook = 只信回合结束上报（isAgentIdle 恒答空闲） */
   idleSource: "pane" | "hook";
@@ -193,6 +195,12 @@ export interface RuntimeControl {
    * window-ops 的 interruptWindow 读它：空闲时一个键都不发，调用方回报「当前空闲，无需打断」。
    */
   interruptOnlyWhenBusy?: boolean;
+  /**
+   * 打断不靠按键、靠运行时里的扩展：Pi 的 C-c 只清空输入框（从不中止回合），真正的中止是扩展上下文的 abort()，
+   * bridge 经 ws 发 {type:"abort", id} 给 Claudestra 扩展（src/pi/claudestra-extension.ts），扩展回 {type:"abort_ack", id, result}。
+   * 扩展在注册帧里声明 abort:true 才发（老扩展会默默忽略）；接线见 bridge/interrupt-gate.ts。
+   */
+  abortVia?: "extension";
 }
 
 /** fork 后探测真实会话 id 的上下文 */

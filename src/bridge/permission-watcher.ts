@@ -37,6 +37,7 @@ import {
   type AuqQuestion,
 } from "./ask-user-question.js";
 import { emitEvent } from "./event-bus.js";
+import { noteRuntimeDialogs } from "./ask-runtime.js";
 import { recordMetric } from "../lib/metrics.js";
 import { readRegistryAgents } from "../lib/registry.js";
 import { controlFor } from "../lib/runtimes/index.js";
@@ -592,7 +593,7 @@ async function checkAgent(
   // 场景(iTerm -CC 原生滚动不进 copy-mode;web 终端滚轮是已知触发源)——
   // 持续 3 分钟就 cancel。短暂停留放过:可能是 owner 恰好在裸 tmux 里选文本。
   try {
-    const inMode = (await tmuxRaw(["display-message", "-p", "-t", windowTarget(agentName), "#{pane_in_mode}"])).trim();
+    const inMode = (await tmuxRaw(["list-panes", "-t", windowTarget(agentName), "-F", "#{pane_in_mode}"])).trim().split("\n")[0] ?? ""; // 窗口不在 = 空，不退回当前窗口
     if (inMode !== "" && inMode !== "0") {
       const first = copyModeFirstSeen.get(channelId);
       if (first === undefined) {
@@ -642,6 +643,7 @@ async function checkAgent(
   }
 
   const key = computeModalKey(sessionIdleDesc, permissionDesc);
+  noteRuntimeDialogs(channelId, agentName, pane, key ? permissionDesc : null); // Codex / 权限弹框 →「待你处理」，没了就结案
   if (!key) {
     lastNotified.delete(channelId);
     return;
@@ -660,11 +662,7 @@ async function checkAgent(
     let logLabel: string;
 
     if (sessionIdleDesc) {
-      text = [
-        `💤 **${agentName}** session 已闲置，Claude Code 询问如何继续`,
-        sessionIdleDesc,
-        mention,
-      ].filter(Boolean).join("\n");
+      text = [`💤 **${agentName}** session 已闲置，Claude Code 询问如何继续`, sessionIdleDesc, mention].filter(Boolean).join("\n");
       components = buildComponents([
         {
           type: "buttons",
@@ -677,11 +675,7 @@ async function checkAgent(
       ]);
       logLabel = `session-idle desc="${sessionIdleDesc}"`;
     } else {
-      text = [
-        `🔔 **${agentName}** 需要授权`,
-        permissionDesc,
-        mention,
-      ].filter(Boolean).join("\n");
+      text = [`🔔 **${agentName}** 需要授权`, permissionDesc, mention].filter(Boolean).join("\n");
       components = buildComponents([
         {
           type: "buttons",

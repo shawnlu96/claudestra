@@ -29,7 +29,7 @@
  */
 
 import { randomBytes } from "node:crypto";
-import { TMUX_SOCK, MASTER_SESSION, sandboxTmuxArgv } from "../lib/tmux-helper.js";
+import { TMUX_SOCK, MASTER_SESSION, sandboxTmuxArgv, windowTarget } from "../lib/tmux-helper.js";
 import type { Principal } from "../lib/principals.js";
 import { terminalAllowedFor, terminalIoDenied, terminalOwnerKey } from "./terminal-auth.js";
 import { authenticateApi } from "./api-auth.js";
@@ -148,7 +148,7 @@ async function liftControlClamp(
   origRows: number,
 ): Promise<ClampLift | null> {
   const idRes = await tmuxRun([
-    "display-message", "-p", "-t", `${MASTER_SESSION}:${windowRef}`, "#{window_id}",
+    "display-message", "-p", "-t", windowTarget(windowRef), "#{window_id}",
   ]);
   const wid = idRes.out.trim();
   if (idRes.code !== 0 || !/^@\d+$/.test(wid)) return null;
@@ -376,7 +376,7 @@ async function openTerminal(req: Request, url: URL, agentParam: string): Promise
     return json(500, { ok: false, error: `tmux new-session failed: ${created.err}` });
   }
   const linked = await tmuxRun([
-    "link-window", "-s", `${MASTER_SESSION}:${windowRef}`, "-t", `${viewerSession}:9`,
+    "link-window", "-s", windowTarget(windowRef), "-t", `${viewerSession}:9`,
   ]);
   if (linked.code !== 0) {
     await tmuxRun(["kill-session", "-t", viewerSession]);
@@ -420,12 +420,12 @@ async function openTerminal(req: Request, url: URL, agentParam: string): Promise
         // mouse,滚轮会让**共享的 pane** 进 copy-mode;viewer 死了 copy-mode
         // 留在 pane 上,之后所有 send-keys 注入被 tmux 吞掉不报错。断开时
         // 无条件 cancel(不在模式时报错无害)。
-        tmuxRun(["send-keys", "-t", `${MASTER_SESSION}:${windowRef}`, "-X", "cancel"]).catch(() => {});
+        tmuxRun(["send-keys", "-t", windowTarget(windowRef), "-X", "cancel"]).catch(() => {});
         // 解除过 iTerm 钳制 → 申报尺寸改写回原值，桌面端恢复原状
         restoreControlClamp(sess.lift);
         // 把 window 尺寸决定权还回去（resize-window 置了 manual;不恢复的话
         // master/iTerm 里这个窗口会一直钉在手机尺寸）
-        tmuxRun(["set-option", "-w", "-t", `${MASTER_SESSION}:${windowRef}`, "window-size", "latest"]).catch(() => {});
+        tmuxRun(["set-option", "-w", "-t", windowTarget(windowRef), "window-size", "latest"]).catch(() => {});
         try { controller.close(); } catch { /* 已关闭 */ }
         console.log(`🖥️ [term] closed id=${termId.slice(0, 8)} agent=${agentParam}`);
       };
@@ -459,7 +459,7 @@ async function openTerminal(req: Request, url: URL, agentParam: string): Promise
         restoreControlClamp(fitted.lift); // 已解除钳制但 session 没建成 → 就地还原
         // fitWindow 已把 master window 置为 manual + viewer 尺寸——失败路径同样要
         // 把决定权还回去，否则桌面端这个窗口钉死在手机尺寸（destroy 走不到这里）
-        tmuxRun(["set-option", "-w", "-t", `${MASTER_SESSION}:${windowRef}`, "window-size", "latest"]).catch(() => {});
+        tmuxRun(["set-option", "-w", "-t", windowTarget(windowRef), "window-size", "latest"]).catch(() => {});
         try { controller.error(e); } catch { /* 已关闭 */ }
         console.error(`🖥️ [term] spawn failed id=${termId.slice(0, 8)} agent=${agentParam}:`, e);
         return;

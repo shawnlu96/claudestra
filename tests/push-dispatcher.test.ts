@@ -9,6 +9,7 @@ import { markAgentRead, unreadCounts } from "../src/lib/unread-store.js";
 import { closeWebState, openWebState } from "../src/lib/web-state.js";
 import { createDispatcher, notificationBody, OWNER_CHAT_ID, ownerChatIds, type Dispatcher } from "../src/bridge/push/dispatcher.js";
 import type { PushSender, SendOutcome } from "../src/bridge/push/sender.js";
+import { owner } from "./asks-test-kit.js";
 
 interface Sent { kind: "web" | "apns"; to: string; payload: Record<string, unknown> }
 const sent: Sent[] = [];
@@ -44,8 +45,9 @@ beforeEach(() => {
   savePushSubscription(db, { endpoint: IOS, keys: { p256dh: "p", auth: "a" } }, "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0)");
   savePushSubscription(db, { endpoint: MAC, keys: { p256dh: "p", auth: "a" } }, "Mozilla/5.0 (Macintosh)");
   savePushSubscription(db, { endpoint: OLD, keys: { p256dh: "p", auth: "a" } }, "");
-  saveApnsDevice(db, TOK, "iPhone");
-  dispatcher = createDispatcher({ db, sender, isOwnerChat: (id) => id === OWNER_CHAT_ID || id === "api:tok_web", now: () => now, log: () => {} });
+  saveApnsDevice(db, TOK, "iPhone", new Date(), { audience: "owner", principal: "owner:self" }); // 没记 principal 的行不推
+  const resolvePrincipal = (pid: string) => (pid === "owner:self" ? owner() : null);
+  dispatcher = createDispatcher({ db, sender, isOwnerChat: (id) => id === OWNER_CHAT_ID || id === "api:tok_web", resolvePrincipal, now: () => now, log: () => {} });
 });
 afterEach(() => dispatcher.stop());
 
@@ -175,5 +177,39 @@ describe("系统提醒（新设备配对）", () => {
     expect(web.map((s) => s.to).sort()).toEqual([IOS, MAC, OLD].sort());
     expect(web[0].payload).toMatchObject({ title: "新设备已配对", body: "「iPhone」刚配对了这台电脑。", agent: "", url: "/chat", tag: `cstra-notice-${now}` });
     expect(sent.filter((s) => s.kind === "apns")).toHaveLength(1);
+  });
+});
+
+test("没记 principal 的 APNs 行（加列前的老行残留、回滚期间旧代码登记的）什么都不推：提醒、回复、待你处理都一样（adv3 P2-1）", async () => {
+  saveApnsDevice(db, "legacy-tok", "iPhone");
+  await dispatcher.notice({ title: "新设备已配对", body: "x" });
+  await dispatcher.onAsk({ id: "ask_l", fromAgent: "agent-alpha", title: "t", state: "open", kind: "decide", blocking: true, urgency: "normal" } as never, "away");
+  const to = sent.filter((s) => s.kind === "apns").map((s) => s.to);
+  expect([to.length > 0, to.includes("legacy-tok")]).toEqual([true, false]);
+});
+
+describe("待你处理 → onAsk（规则表见 tests/ask-push.test.ts，这里只看接线）", () => {
+  const ask = (over: Record<string, unknown> = {}) =>
+    ({ id: "ask_1", fromAgent: "agent-alpha", title: "发 v2.32.0 吗", state: "open", kind: "decide", blocking: true, urgency: "normal", ...over }) as never;
+
+  test("卡活 + owner 不在：推一次（Web Push 带 ask、点开直达卡片；APNs 靠 url），不计未读；同一条再来不重推", async () => {
+    expect(await dispatcher.onAsk(ask(), "away")).toBe("push");
+    const web = sent.filter((s) => s.kind === "web");
+    expect(web).toHaveLength(3);
+    expect(web[0].payload).toMatchObject({ title: "待你处理 · agent-alpha", body: "发 v2.32.0 吗", url: "/chat?ask=ask_1", agent: "alpha", ask: "ask_1", tag: "cstra-ask-ask_1-open" });
+    expect(sent.filter((s) => s.kind === "apns")[0].payload).toMatchObject({ url: "/chat?ask=ask_1", agent: "alpha" });
+    expect(unreadCounts(db)).toEqual({});
+    sent.length = 0;
+    expect(await dispatcher.onAsk(ask(), "away")).toBe("push");
+    expect(sent).toEqual([]);
+  });
+
+  test("owner 正在用 → 不推（网页横幅）；验收类 / 自动建的（不知道卡不卡活）→ 不推；急的在用也推", async () => {
+    expect(await dispatcher.onAsk(ask({ id: "a2" }), "active")).toBe("banner");
+    expect(await dispatcher.onAsk(ask({ id: "a3", kind: "accept" }), "away")).toBe("none");
+    expect(await dispatcher.onAsk(ask({ id: "a4", blocking: null }), "away")).toBe("none");
+    expect(sent).toEqual([]);
+    expect(await dispatcher.onAsk(ask({ id: "a5", urgency: "urgent" }), "active")).toBe("push");
+    expect(sent.length).toBeGreaterThan(0);
   });
 });

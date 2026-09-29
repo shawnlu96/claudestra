@@ -1,34 +1,18 @@
 /**
- * Claudestra 的 Pi 侧通道（Pi extension）。
- *
- * 作用：让一个跑在 tmux 里的 Pi 会话跟 Claude Code 会话一样成为 Claudestra agent ——
- * 收得到 Discord/Web/API 来的消息、能 reply 回话、能被别的 agent send_to_agent 找到、
- * 回合结束时告诉 bridge「我好了」。
- *
- * 为什么是扩展而不是 MCP：Claude Code 侧靠官方 channel 协议
- * （`notifications/claude/channel`）把消息**推进模型上下文**；Pi 核心不含 MCP
- * （要外挂 pi-mcp-adapter），而且 stdio MCP 子进程拿不到会话身份（PI_SESSION_ID
- * 只注入给 bash 工具）、也无法主动开一轮。Pi 扩展活在 Pi 进程里，天然握有
- * session id / 会话文件 / 注入 API，是唯一能双向闭链的位置。
- *
- * 与 channel-server.ts 的关系：说的是**同一套 bridge WebSocket 协议**
- * （register / registered / response / message / replaced + ping），所以 bridge 侧
- * 零改动即可收发。唯一不同的地方是「消息怎么进模型上下文」：
- *   Claude Code → MCP channel 通知；Pi → `pi.sendUserMessage()`。
- * 同理，Claude Code 的 Stop hook 在这里由 `agent_settled` 事件顶替
- * （比 Stop 更准：Pi 会先跑完自动重试/压缩重试才算 settled）。
- *
- * 环境变量（由 lib/pi-launch.ts 注入）：
- *   DISCORD_CHANNEL_ID —— 该 agent 的频道 id；缺失即认为不是 Claudestra 起的会话，
- *                          整个扩展退化为惰性（用户自己开的 pi 完全不受影响）
- *   CLAUDESTRA_AGENT   —— registry 里的 agent 名（日志/注册用）
- *   BRIDGE_URL         —— bridge 地址，默认 ws://localhost:3847
+ * Claudestra 的 Pi 侧通道（Pi extension）：让 tmux 里的 Pi 会话和 Claude Code 会话一样成为 Claudestra agent（收消息、reply、
+ * 被 send_to_agent 找到、回合结束报「我好了」）。不用 MCP：Pi 核心不含 MCP，stdio 子进程也拿不到会话身份、不能主动开一轮；
+ * 扩展活在 Pi 进程里，握有 session id / 会话文件 / 注入 API。和 channel-server.ts 说同一套 bridge ws 协议
+ * （register / registered / response / message / replaced / abort + ping），只是消息进上下文靠 `pi.sendUserMessage()`，
+ * Stop hook 由 `agent_settled` 顶替（Pi 跑完自动重试 / 压缩重试才算 settled，比 Stop 准）。
+ * 环境变量（lib/pi-launch.ts 注入）：DISCORD_CHANNEL_ID（缺失 = 不是 Claudestra 起的会话，整个扩展惰性）、
+ * CLAUDESTRA_AGENT（registry 里的名字）、BRIDGE_URL（默认 ws://localhost:3847）。
  */
 
 import { execFile } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { createAbortControl } from "./abort-control.js";
 
 const CHANNEL_ID = (process.env.DISCORD_CHANNEL_ID ?? "").trim();
 const AGENT_NAME = (process.env.CLAUDESTRA_AGENT ?? "").trim();
@@ -50,11 +34,8 @@ const RECONNECT_MAX_MS = 60_000;
 /** 就绪标记写在 tmux window 上，manager 创建 agent 时轮询它判断「起来了」 */
 const READY_OPTION = "@claudestra_ready";
 
-// ────────────────────────────────────────────────────────────
-// Pi 扩展 API 的最小结构化类型（本仓库不依赖 pi 包，避免为一个 type import
-// 拖进整套依赖；字段与 @earendil-works/pi-coding-agent 0.85.x 的
-// dist/core/extensions/types.d.ts 对齐，运行时由 Pi 自己提供实现）
-// ────────────────────────────────────────────────────────────
+// ── Pi 扩展 API 的最小结构化类型（不依赖 pi 包，免得为一个 type import 拖进整套依赖；
+//    字段与 @earendil-works/pi-coding-agent 0.85.x 的 dist/core/extensions/types.d.ts 对齐，运行时由 Pi 提供实现） ──
 
 interface PiToolResult {
   content: Array<{ type: "text"; text: string }>;
@@ -65,6 +46,7 @@ interface PiToolResult {
 interface PiUi {
   notify?(message: string, level?: "info" | "warning" | "error"): void;
   setStatus?(key: string, text: string | undefined): void;
+  getEditorText?(): string;
 }
 
 interface PiModelLike {
@@ -84,10 +66,11 @@ interface PiContext {
   modelRegistry?: PiModelRegistryLike;
   /** 当前模型（可能为空）。取 name/id 写进能力快照 */
   model?: { id?: string; name?: string } | undefined;
-  sessionManager?: {
-    getSessionId?(): string | undefined;
-    getSessionFile?(): string | undefined;
-  };
+  sessionManager?: { getSessionId?(): string | undefined; getSessionFile?(): string | undefined };
+  /** 中止当前回合（Pi 的 C-c 只清空输入框，真正的中止是这个；bridge 的停字 / 停止按钮经 ws 的 abort 走到这里） */
+  abort?(): void;
+  isIdle?(): boolean;
+  hasPendingMessages?(): boolean;
 }
 
 interface PiToolDefinition {
@@ -106,11 +89,7 @@ interface PiExtensionApi {
     content: string,
     options?: { deliverAs?: "steer" | "followUp"; expandPromptTemplates?: boolean },
   ): Promise<void>;
-  /**
-   * 注册斜杠命令（v2.23+）：web 端切模型/思考档位走它 —— 不依赖 Pi 自带
-   * `/model`（那是打开选择器的交互语义，未验证是否收参数），而是我们自己的
-   * 确定性入口，直接调 setModel/setThinkingLevel。
-   */
+  /** 注册斜杠命令：web 端切模型 / 思考档位走它（Pi 自带的 `/model` 是开选择器，不收参数），直接调 setModel / setThinkingLevel */
   registerCommand?(
     name: string,
     options: { description?: string; handler: (args: string, ctx: PiContext) => Promise<void> | void },
@@ -125,9 +104,7 @@ interface PiExtensionApi {
   getModel?(): { id?: string; name?: string } | undefined;
 }
 
-// ────────────────────────────────────────────────────────────
-// 扩展主体
-// ────────────────────────────────────────────────────────────
+// ── 扩展主体 ──
 
 export default function claudestraChannel(pi: PiExtensionApi): void {
   // 不是 Claudestra 起的会话 ⇒ 一行工具都不注册，彻底不影响用户自己的 pi。
@@ -147,6 +124,7 @@ export default function claudestraChannel(pi: PiExtensionApi): void {
   let pingTimer: ReturnType<typeof setInterval> | null = null;
   /** Pi 是否在一轮当中——决定注入用不用 deliverAs（流式中必须给） */
   let streaming = false;
+  const aborts = createAbortControl();
   /** 最近一次入站消息的 chat_id：reply 不传 chat_id 时的默认去处 */
   let lastChatId = "";
   const pending = new Map<string, { resolve: (v: any) => void; reject: (e: Error) => void; timer: ReturnType<typeof setTimeout> }>();
@@ -169,11 +147,8 @@ export default function claudestraChannel(pi: PiExtensionApi): void {
   }
 
   /**
-   * 把「这个会话实际加载了什么」写成快照（manager pi-env / 网页端读）。
-   * 为什么要落文件而不是发 bridge：bridge 对 registry 只读（唯一写者是 manager），
-   * 而这份快照需要在 bridge 挂了、会话已死之后仍然可读（排查用）。落点与 registry 同
-   * 目录家族，0600。
-   * 记的是**实况**而不是配置：`--no-extensions` 到底关掉了什么，只有这里看得见。
+   * 把「这个会话实际加载了什么」写成快照（manager pi-env / 网页端读），记实况而不是配置（`--no-extensions` 到底关掉了什么只有这里看得见）。
+   * 落文件（0600，和 registry 同目录家族）而不是发 bridge：bridge 挂了、会话死了之后仍要可读（排查用）。
    */
   async function writeEnvSnapshot(ctx?: PiContext) {
     if (!AGENT_NAME) return;
@@ -292,6 +267,7 @@ export default function claudestraChannel(pi: PiExtensionApi): void {
           sessionId: sessionId || undefined,
           sessionFile: sessionFile || undefined,
           cwd: process.cwd(),
+          abort: true, // 会按 bridge 的 {type:"abort"} 中止并回 abort_ack（老扩展不声明：bridge 不当它能停）
         }));
       } catch { /* onclose 会兜重连 */ }
       startPing();
@@ -326,8 +302,14 @@ export default function claudestraChannel(pi: PiExtensionApi): void {
         case "message":
           // bridge 已经把 header（[🤖 来自 X] 等）渲染好，原样注入即可
           if (msg.meta?.chat_id) lastChatId = String(msg.meta.chat_id);
+          if (aborts.onBridgeMessage({ text: String(msg.content ?? ""), messageId: msg.meta?.message_id }, streaming)) return; // 叫停中：settle 后再投
           void inject(String(msg.content ?? ""));
           return;
+        case "abort": { // 回执照实写，并列出作废的消息（停之前 steer 进去、还没执行的），bridge 逐条告诉发送方
+          let r: ReturnType<typeof aborts.abort> = { result: "idle", voided: [], inEditor: 0 };
+          try { r = aborts.abort(); } catch (e) { console.error(`claudestra: abort 失败: ${(e as Error).message}`); }
+          return void ws.send(JSON.stringify({ type: "abort_ack", id: msg.id, ...r }));
+        }
         case "replaced":
           // 同一个频道被另一条连接顶替。Claude Code 侧的判据是「MCP stdio 还在 ⇒ 绝不死」；
           // 这里等价：会话还活着 ⇒ 不当致命错误，退避后把频道抢回来。
@@ -404,14 +386,9 @@ export default function claudestraChannel(pi: PiExtensionApi): void {
   }
 
   /**
-   * 回合结束 → 让 bridge 把状态翻成「完成」（等价 Claude Code 的 Stop hook），
-   * 并处理它的反向指令：这回合有投递给它却没回的请求时，bridge 会回
-   * {block:true, reason}（v2.22.x 的补 reply 拦截）。Claude Code 侧把 block 翻成
-   * hook 的 decision=block 让模型续跑一轮；这里等价地注入一条提醒再开一轮。
-   *
-   * 实测触发场景：弱模型会把结论写在正文里而不调 reply 工具 —— 对端收不到任何
-   * 东西（web 只有零散过程文本、Discord 一条回复都没有）。与 CC 一致：同一条
-   * 挂起请求只提醒一次（bridge 侧 nudgedAt 去重）。
+   * 回合结束 → 让 bridge 把状态翻成「完成」（等价 Claude Code 的 Stop hook）。这回合有投递给它却没回的请求时 bridge 回
+   * {block:true, reason}（补 reply 拦截：弱模型会把结论写在正文里不调 reply，对端什么都收不到）；CC 侧翻成 decision=block 续跑一轮，
+   * 这里等价地注入一条提醒再开一轮。同一条挂起请求只提醒一次（bridge 侧 nudgedAt 去重）。
    */
   function reportSettled(): void {
     void (async () => {
@@ -449,10 +426,16 @@ export default function claudestraChannel(pi: PiExtensionApi): void {
   // 模型换了就重写快照（档案里钉的模型/用户手动切换都走这里）
   pi.on("model_select", (_event, ctx) => writeEnvSnapshot(ctx));
 
-  pi.on("agent_start", () => { streaming = true; });
+  pi.on("agent_start", (_event, ctx) => {
+    streaming = true;
+    aborts.onRunStart(ctx);
+  });
+  pi.on("message_start", (event) => aborts.onMessageStart(event?.message));
   pi.on("agent_settled", () => {
     streaming = false;
+    const late = aborts.onSettled();
     reportSettled();
+    for (const text of late) void inject(text);
   });
 
   pi.on("session_shutdown", () => {
@@ -578,11 +561,7 @@ export default function claudestraChannel(pi: PiExtensionApi): void {
     },
   });
 
-  /**
-   * web 端切模型/思考档位（v2.23+）：`/claudestra-model <provider/id>`、
-   * `/claudestra-thinking <level>`。由 bridge 用 tmux send-keys 注入本命令，
-   * 效果与在 TUI 里手动切一致（Pi 的模型表 / 思考档位都是会话级状态）。
-   */
+  /** web 端切模型 / 思考档位：bridge 用 tmux send-keys 注入 `/claudestra-model <provider/id>`、`/claudestra-thinking <level>`，效果同在 TUI 里手动切 */
   pi.registerCommand?.("claudestra-model", {
     description: "Claudestra: 切换本会话模型（参数：provider/model）",
     handler: async (args, ctx) => {

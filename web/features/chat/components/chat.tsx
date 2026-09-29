@@ -6,6 +6,8 @@ import { ChatStoreProvider, useChatStore, useChatStoreApi } from "../chat-store"
 import { ChatNavContext, useChatNav, type ChatNav } from "./nav-context";
 import { Sidebar } from "./sidebar";
 import { MessageList } from "./message-list";
+import { SyncBanner } from "./sync-banner";
+import { ChatPaneBoundary, SidebarBoundary } from "@/components/boundaries";
 import { UpdateToast } from "./update-toast";
 import { ComposerOrDock } from "./share-dock";
 import { Splash } from "./splash";
@@ -20,7 +22,12 @@ import { isNativeShell, installNativeKeyboardPadding, installNativeStatusBarSync
 import { hopThenOpen } from "@/features/machines/notification-hop";
 import { installTapRescue } from "@/lib/tap-rescue";
 import { postClientLog } from "@/lib/client-log";
+import { reportRuntimeError } from "@/lib/runtime-error";
 import { DevToolsMount } from "../../devtools/dev-mount";
+import { leavePlan } from "@/lib/hash-nav";
+import { backGuard, isNarrow, stripHash } from "@/lib/hash-nav-browser";
+import { useBackSwipe } from "@/lib/use-back-swipe";
+import { asksStore } from "@/features/asks/asks-store";
 
 /** 壳内排障打点 → /api/client-log(仅原生壳;PWA/桌面不发)。 */
 const shellLog = (msg: string) => postClientLog(`[shell] ${msg}`);
@@ -69,37 +76,6 @@ function endSlideProbe(how: string) {
   const msgs = document.querySelectorAll("[data-mid]").length;
   const streaming = document.documentElement.getAttribute("data-streaming") || "?";
   shellLog(`[slide] ${sp.dir} total=${Math.round(total)}ms anim=${Math.round(anim)}ms firstFrame=${Math.round(sp.firstFrame)}ms maxGap=${Math.round(sp.maxGap)}ms frames=${sp.frames} end=${how} msgs=${msgs} streaming=${streaming}`);
-}
-/**
- * v2.21.3+ 运行时错误上报(壳 + PWA 都记,此前只有壳且只记文件名+行号——生产 chunk
- * 全在第 1 行,等于没记)。带完整 JS 栈(含列号):配合 next.config 的
- * productionBrowserSourceMaps,用 `node scripts/resolve-stack.mjs` 还原到源码位置。
- * 背景:壳里两天抓到 18 次 React #185(渲染死循环),光凭 @chunk:1 定位不了。
- * 5 分钟最多 8 条,防死循环类错误刷爆日志。
- */
-const errLogWindow: number[] = [];
-function reportRuntimeError(kind: string, err: unknown, fallback: string) {
-  const now = Date.now();
-  while (errLogWindow.length && now - errLogWindow[0] > 5 * 60_000) errLogWindow.shift();
-  if (errLogWindow.length >= 8) return;
-  errLogWindow.push(now);
-  const e = err instanceof Error ? err : null;
-  // 20 帧:React 自己的 8 帧(throwIfInfiniteUpdateLoopDetected → dispatchSetState)之后
-  // 才轮到我们的调用方——2026-09-03 抓到 24 条 #185 全卡在第 8 帧 dispatchSetState 上
-  const stack = (e?.stack || "").split("\n").slice(0, 20).join("\n");
-  // 浏览器扩展注入的脚本报错不是我们的(2026-09-09 一条 Windows 上的
-  // chrome-extension://…/inpage.js "func sseError not found")——它照样占 8 条/5 分钟
-  // 的上报额度、还会惊动监视器。整条(含栈)只要指向扩展协议就丢弃。
-  const text = `${stack} ${e?.message || fallback}`;
-  // ResizeObserver loop completed with undelivered notifications:浏览器的良性警告
-  // (RO 回调里改了布局,同帧后续通知被丢弃),不是错误,历史上 7 天两条,不占额度
-  if (/\b(chrome|moz|safari-web)-extension:\/\//.test(text) || /ResizeObserver loop (completed|limit)/.test(text)) {
-    errLogWindow.pop();
-    return;
-  }
-  const msg = `${kind} ${e?.message || fallback}${stack ? `\nstack: ${stack}` : ""}`;
-  const tag = isNativeShell() ? "[shell]" : "[pwa]";
-  postClientLog(`${tag} ${msg}`);
 }
 /**
  * v2.21.4 React 提交突发上报(追 #185)。layout.tsx 里的内联钩子在同一个宏任务里
@@ -154,83 +130,12 @@ const CONTENT_HASH = "#chat";
 const isContentHash = () =>
   typeof window !== "undefined" &&
   window.location.hash.split("?")[0] === CONTENT_HASH;
-/** 仅移动端（< sm 640px）走 hash 横滑；桌面双栏并存 */
-const isNarrow = () =>
-  typeof window !== "undefined" &&
-  window.matchMedia("(max-width: 639.98px)").matches;
 
 /** Agent 管理页 hash（窄屏伪路由,左滑/返回键退出,同 #terminal 一套导航栈） */
 const MANAGE_HASH = "#manage";
 const isManageHash = () =>
   typeof window !== "undefined" &&
   window.location.hash.split("?")[0] === MANAGE_HASH;
-
-/** 最短亮灯:active 变 truthy 立即亮,变 null 后至少亮满 minMs 才熄——
- *  秒级完成的同步不再「一闪而过等于没亮」(owner 2026-08-08)。 */
-function useMinVisible<T>(active: T | null, minMs = 1200): T | null {
-  const [shown, setShown] = useState<T | null>(active);
-  const litAtRef = useRef(0);
-  useEffect(() => {
-    if (active !== null) {
-      if (litAtRef.current === 0) litAtRef.current = Date.now();
-      setShown(active);
-      return;
-    }
-    const lit = litAtRef.current;
-    if (lit === 0) { setShown(null); return; }
-    const remain = minMs - (Date.now() - lit);
-    if (remain <= 0) { litAtRef.current = 0; setShown(null); return; }
-    const t = setTimeout(() => { litAtRef.current = 0; setShown(null); }, remain);
-    return () => clearTimeout(t);
-  }, [active, minMs]);
-  return shown;
-}
-
-/** v2.17.2 对齐/连接横幅(owner 2026-08-08:「小徽章太隐蔽,要让用户知道系统
- *  在努力」)。消息区顶部居中的实色浮动 chip,零布局位移;严重度取一:
- *  同步失败(可点重试) > 同步中 > 重连中;最短亮 1.2s,消失 = 已是最新。
- *  空视图(骨架屏/全屏错误态)与历史现场不亮。 */
-function SyncBanner() {
-  const t = useT();
-  const syncState = useChatStore((s) => s.state.syncState);
-  const streamDown = useChatStore((s) => s.state.streamDown);
-  const loadingHistory = useChatStore((s) => s.state.loadingHistory);
-  const historyError = useChatStore((s) => s.state.historyError);
-  const browsing = useChatStore((s) => s.state.browsing);
-  const active = useChatStore((s) => s.state.activeAgent);
-  const store = useChatStoreApi();
-  const raw =
-    !active || loadingHistory || historyError || browsing
-      ? null
-      : syncState === "error"
-        ? "error"
-        : syncState === "syncing"
-          ? "syncing"
-          : streamDown
-            ? "streamDown"
-            : null;
-  // error 不吃最短亮灯(它本来就常驻到重试);syncing/streamDown 保底 1.2s
-  const held = useMinVisible(raw === "error" ? null : raw);
-  const kind = raw === "error" ? "error" : held;
-  if (!kind) return null;
-  return (
-    <div className="pointer-events-none absolute inset-x-0 top-2 z-30 flex justify-center">
-      {kind === "error" ? (
-        <button
-          className="pointer-events-auto flex items-center gap-2 rounded-full bg-warning px-4 py-1.5 text-[12.5px] font-semibold text-warning-content shadow-lg"
-          onClick={() => store.retrySync()}
-        >
-          ⚠️ {t("同步失败 · 点按重试")}
-        </button>
-      ) : (
-        <span className="pointer-events-auto flex items-center gap-2 rounded-full border border-base-300/70 bg-base-100/85 px-4 py-1.5 text-[12.5px] font-medium text-base-content/80 shadow-lg backdrop-blur-md">
-          <span className="loading loading-spinner w-3.5 text-primary" />
-          {kind === "syncing" ? t("正在同步最新消息…") : t("连接断开 · 重连中…")}
-        </span>
-      )}
-    </div>
-  );
-}
 
 function TopBar() {
   const t = useT();
@@ -309,6 +214,24 @@ function TopBar() {
       {info && <TopBarActions agent={info} busy={busy} onManage={openManage} />}
       <ManagePanel open={showManage} onClose={closeManage} />
     </header>
+  );
+}
+
+/** 聊天主区（顶栏 + 对齐横幅 + 消息 + 输入框）套一层错误兜底：切会话即重试（components/boundaries.tsx） */
+function ChatMain() {
+  const active = useChatStore((s) => s.state.activeAgent);
+  const { toList } = useChatNav();
+  return (
+    <ChatPaneBoundary resetKey={active} onBack={toList}>
+      <TopBar />
+      {/* 对齐横幅锚点:零高度 relative 壳,chip 绝对定位悬浮在消息区顶部,不产生布局位移。⚠ 不能 fixed——本容器在横滑 transform 内(规则 5b) */}
+      <div className="relative">
+        <SyncBanner />
+        <UpdateToast />
+      </div>
+      <MessageList />
+      <ComposerOrDock />
+    </ChatPaneBoundary>
   );
 }
 
@@ -392,37 +315,23 @@ function ChatInner() {
     setShowContent(true);
   }, []);
 
-  // v2.21.3+ 快速返回白屏(owner 2026-09-02):history.back() 的 popstate 是异步的,
-  // 连点两下返回 / 连续左滑时第二次仍看到 hash 在 → 再 back 一次 → 出栈到 PWA 之前
-  // 的空白页,只能重开 app。两道闸:① back 在途期间忽略重复触发;② 只对我们自己
-  // pushState 打过标的条目 back——刷新/深链带 #chat 进来的基础条目没有标,直接
-  // replaceState 摘掉 hash,不动栈。
-  const backInFlightRef = useRef(false);
+  // 快速返回白屏的两道闸(back 在途忽略重复触发 / 只 back 自己打过标的条目)在 lib/hash-nav.ts,
+  // 与「待你处理」抽屉共用一份;连点返回等回归场景见 tests/web-hash-nav.test.ts
   const toList = useCallback(() => {
     // 壳内排障打点(owner 2026-09-03「返回失效」,iOS 上看不到 console):记走了哪个分支
     if (isNativeShell()) {
       const st0 = window.history.state as { cstra?: string } | null;
-      shellLog(`toList hash=${window.location.hash} state=${JSON.stringify(st0)} inflight=${backInFlightRef.current} len=${window.history.length}`);
+      shellLog(`toList hash=${window.location.hash} state=${JSON.stringify(st0)} inflight=${backGuard.busy()} len=${window.history.length}`);
     }
-    if (isContentHash()) {
-      if (backInFlightRef.current) return;
-      const st = window.history.state as { cstra?: string } | null;
-      if (st?.cstra === "chat") {
-        backInFlightRef.current = true;
-        skipDisableRef.current = true; // 主动返回：保留滑动动画
-        // 一次性监听:这次 back 的 popstate 到达即解锁(不放进共享的 popstate effect——
-        // React Compiler 不允许 effect 用过的 ref 再被后定义的回调改写)
-        window.addEventListener("popstate", () => { backInFlightRef.current = false; }, { once: true });
-        window.history.back();
-        // popstate 没来(极端情况)也别永久锁死
-        setTimeout(() => { backInFlightRef.current = false; }, 800);
-      } else {
-        window.history.replaceState(null, "", window.location.pathname + window.location.search);
-        setShowContent(false);
-      }
-    } else {
-      setShowContent(false);
+    const plan = leavePlan(window.location.hash, CONTENT_HASH, window.history.state, "chat", backGuard.busy());
+    if (plan === "wait") return;
+    if (plan === "back") {
+      skipDisableRef.current = true; // 主动返回：保留滑动动画
+      backGuard.back();
+      return;
     }
+    if (plan === "strip") stripHash();
+    setShowContent(false);
   }, []);
 
   // ── v2.15+ iOS 几何 bug 根治（2026-07-27 用户双截图:输入光标画到卡片
@@ -472,40 +381,13 @@ function ChatInner() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [slideAnim?.running]);
 
-  // ── 移动端横滑手势（2026-07-13 owner）：会话页右滑 → 回列表；列表页左滑 →
-  //    进入已选会话（未选过不动）。起点在横向可滚容器内（代码块等）不启用，
-  //    避免劫持其滚动；纵向为主的手势（滚消息列表）用比例阈值排除。
-  const swipeRef = useRef<{ x: number; y: number; hscroll: boolean } | null>(null);
-  const onShellTouchStart = (e: React.TouchEvent) => {
-    if (!isNarrow() || e.touches.length !== 1) {
-      swipeRef.current = null;
-      return;
-    }
-    let el = e.target as HTMLElement | null;
-    let hscroll = false;
-    while (el && el !== e.currentTarget) {
-      if (el.scrollWidth - el.clientWidth > 4) {
-        hscroll = true;
-        break;
-      }
-      el = el.parentElement;
-    }
-    const t = e.touches[0];
-    swipeRef.current = { x: t.clientX, y: t.clientY, hscroll };
-  };
-  const onShellTouchEnd = (e: React.TouchEvent) => {
-    const s = swipeRef.current;
-    swipeRef.current = null;
-    if (!s || s.hscroll) return;
-    const t = e.changedTouches[0];
-    const dx = t.clientX - s.x;
-    const dy = t.clientY - s.y;
-    if (Math.abs(dx) < 70 || Math.abs(dx) < Math.abs(dy) * 1.6) return;
-    // 原生壳里右滑返回交给 WKWebView 的系统手势(AppDelegate 已开启)——JS 再做一次
-    // 就是双重后退,会退过基础页到白屏
-    if (dx > 0 && showContent) { if (!isNativeShell()) toList(); }
-    else if (dx < 0 && !showContent && activeAgent) toContent();
-  };
+  // ── 移动端横滑手势（2026-07-13 owner）：会话页右滑 → 回列表；列表页左滑 → 进入已选会话（未选过不动）。
+  //    阈值与横向可滚容器的排除在 lib/use-back-swipe.ts。原生壳里右滑返回交给 WKWebView 的系统手势
+  //    (AppDelegate 已开启)——JS 再做一次就是双重后退,会退过基础页到白屏
+  const swipe = useBackSwipe({
+    back: () => { if (showContent && !isNativeShell()) toList(); },
+    forward: () => { if (!showContent && activeAgent) toContent(); },
+  });
 
   const nav = useMemo<ChatNav>(
     () => ({ showContent, toContent, toList }),
@@ -533,11 +415,11 @@ function ChatInner() {
     }
     // v2.22+ 原生壳:绑定 APNs 插件事件(token 登记 / 点通知直达),已授权则静默刷新 token
     if (isNativeShell()) {
-      void import("@/lib/push/native").then((m) => {
+      void Promise.all([import("@/lib/push/native"), import("../scoped-requests")]).then(([m, scoped]) => {
         m.bindNativePushListeners((agent) => {
           closingCollab(toContent)(); // 通知直达：先收起协作视图（恢复已读回执），再开会话
           void store.openAgent(agent);
-        });
+        }, (ask) => asksStore.openDrawer(ask), scoped.markRead); // 「待你处理」推送：打开抽屉定位那张卡；已读回执非全权设备不发
         void m.refreshNativeRegistration();
       });
     }
@@ -697,8 +579,8 @@ function ChatInner() {
           if (el.scrollLeft !== 0) el.scrollLeft = 0;
           if (el.scrollTop !== 0) el.scrollTop = 0;
         }}
-        onTouchStart={onShellTouchStart}
-        onTouchEnd={onShellTouchEnd}
+        onTouchStart={swipe.onTouchStart}
+        onTouchEnd={swipe.onTouchEnd}
       >
         {/* 内容层:两种模式都是铺满根的 flex 行(kb 钉扎已随 flow 模式废弃) */}
         <div className="absolute inset-0 flex overflow-hidden">
@@ -727,18 +609,11 @@ function ChatInner() {
               : `relative transition-none ${showContent ? "left-[-100%] sm:left-0" : "left-0"}`
           }`}
         >
-          <Sidebar onSelect={closingCollab(toContent)} />
+          <SidebarBoundary><Sidebar onSelect={closingCollab(toContent)} /></SidebarBoundary>
 
           <main className="relative flex w-full min-w-0 shrink-0 flex-col bg-base-100 sm:w-0 sm:flex-1">
             <CollabSwitch />
-            <TopBar />
-            {/* 对齐横幅锚点:零高度 relative 壳,chip 绝对定位悬浮在消息区顶部,不产生布局位移。⚠ 不能 fixed——本容器在横滑 transform 内(规则 5b) */}
-            <div className="relative">
-              <SyncBanner />
-              <UpdateToast />
-            </div>
-            <MessageList />
-            <ComposerOrDock />
+            <ChatMain />
           </main>
         </div>
         </div>

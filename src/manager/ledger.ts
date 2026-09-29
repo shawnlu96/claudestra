@@ -6,14 +6,18 @@
  */
 import { existsSync } from "node:fs";
 import { repoEnvVar } from "../lib/env-file.js";
+import { LedgerReader } from "../lib/ledger-read.js";
 import { LedgerError, LEDGER_PATH, openLedger } from "../lib/ledger-store.js";
 import { renameAgentRefs } from "../lib/ledger-write.js";
 import { readProjects } from "../lib/projects.js";
 import { readRegistryAgents } from "../lib/registry.js";
 import { loadRegistry, output, saveRegistry } from "./core.js";
 import { LedgerCli, type LedgerDeps, type Result } from "./ledger-context.js";
+import { DEP_CMDS } from "./ledger-dep-cmds.js";
 import { parseLedgerArgs, resolveActor } from "./ledger-identity.js";
+import { AUDIT_CMDS } from "./ledger-audit-cmd.js";
 import { importCmd } from "./ledger-import.js";
+import { VERIFY_CMD } from "./ledger-verify.js";
 import { READ_CMDS } from "./ledger-read-cmds.js";
 import { WRITE_CMDS, type CommandSpec } from "./ledger-write-cmds.js";
 import { isWriteInvocation } from "./write-commands.js";
@@ -23,7 +27,10 @@ export const UNKNOWN_ACTOR = "unknown";
 
 const COMMANDS: Record<string, CommandSpec> = {
   ...WRITE_CMDS,
+  ...DEP_CMDS,
   ...READ_CMDS,
+  verify: VERIFY_CMD,
+  ...AUDIT_CMDS,
   import: { valued: ["map", "project"], bools: ["dry-run"], usage: "import <ledger.json> --map <map.json> [--project <id>] [--dry-run]", run: importCmd },
 };
 
@@ -56,11 +63,15 @@ async function realDeps(args: string[]): Promise<LedgerDeps | { error: string }>
   if (!who.ok && isWriteInvocation("ledger", args)) return { error: who.error };
   const actor = who.ok ? who.actor : UNKNOWN_ACTOR;
   const projects = await readProjects();
+  // ledger audit --dry-run 只读：不走 openLedger（它会建表 / 迁移，分支代码对线上库跑一次就把版本号抬上去）
+  const readOnly = args[0] === "audit" && args.includes("--dry-run") ? new LedgerReader().get() : undefined;
+  if (readOnly === null) return { error: "台账库还不存在（或正在建），--dry-run 没东西可看" };
   return {
-    db: openLedger(),
+    db: readOnly ?? openLedger(),
     actor,
     actorProject: reg.agents[actor]?.projectId,
     projectIds: projects.projects.map((x) => x.id),
+    projects: () => projects.projects,
     loadRegistry,
     saveRegistry,
     now: () => Date.now(),

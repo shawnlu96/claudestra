@@ -8,6 +8,11 @@ export const SESSIONS_DICT: Record<string, string> = {
   "活跃": "Active",
   "子会话": "Sub-session",
   "自动审查": "Auto review",
+  "已纳管": "Managed",
+  "{n} 个子会话": "{n} sub-session|{n} sub-sessions",
+  "展开子会话": "Show sub-sessions",
+  "收起子会话": "Hide sub-sessions",
+  "另有 {n} 个较早的子会话未列出": "{n} older sub-session not listed|{n} older sub-sessions not listed",
   "已归档并从列表移除（内容留在归档目录，可找回）": "Archived and removed from the list (the content stays in the archive and can be restored)",
   "已受理，正在后台收编（约 10-40 秒），完成后会出现在 agent 列表里。":
     "Accepted — adopting in the background (about 10–40 s). It will show up in the agent list when done.",
@@ -29,4 +34,12 @@ export const SESSIONS_DICT: Record<string, string> = {
   "{n} 个会话": "{n} session|{n} sessions",
   "归档失败:": "Archive failed: ", // 值尾带空格
   "沉寂": "Dormant",
+  // 子会话收编确认（components/adopt-panel.tsx）
+  "另一个会话": "another session",
+  "确认收编子会话": "Confirm adopting a sub-session",
+  "这是「{parent}」的自动审查线程，通常不需要单独收编——它会跟着主会话走。确定要把它单独收编成 agent 吗？":
+    "This is an auto-review thread of “{parent}” and usually doesn't need adopting on its own — it follows the main session. Adopt it as a separate agent anyway?",
+  "这是「{parent}」的子会话，通常不需要单独收编——它会跟着主会话走。确定要把它单独收编成 agent 吗？":
+    "This is a sub-session of “{parent}” and usually doesn't need adopting on its own — it follows the main session. Adopt it as a separate agent anyway?",
+  "仍然收编": "Adopt anyway",
 };

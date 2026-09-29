@@ -21,6 +21,8 @@ import { resolveLogPath } from "./log-paths.js";
 import { existsSync, statSync } from "fs";
 import { readFile, stat } from "fs/promises";
 import { resolveBunPath } from "./bun-path.js";
+import { DAEMONS } from "./cli-install.js";
+import { daemonState } from "./launchd-status.js";
 import { readRegistryAgents, isMasterAgent } from "./registry.js";
 import { legacyWebDaemonCheck, legacyWebPlistPath, staticIndexExists, webStaticChecks, webStaticState } from "./web-static.js";
 
@@ -67,7 +69,7 @@ function firstLine(s: string): string {
 // 各分区
 // ────────────────────────────────────────────
 
-async function checkRuntime(): Promise<Check[]> {
+export async function checkRuntime(): Promise<Check[]> {
   const out: Check[] = [];
   const g = "运行时";
 
@@ -164,51 +166,19 @@ async function checkConfig(repoRoot: string): Promise<Check[]> {
   return out;
 }
 
-/**
- * `launchctl list` 一行里的 (pid, last exit status) → 结论。
- *
- * 关键在于**负数不等于崩溃**：负数是「被信号终止」，而 -15(SIGTERM) 正是
- * `launchctl kickstart -k` 和正常 stop 的结果。曾经把它一律报成「崩过」，
- * 于是每次重启 bridge 之后 doctor 都亮黄灯 —— 几次之后人就不看警告了，
- * 这比不报警更糟。只有进程自己 exit 非 0、或 -9(SIGKILL，多半 OOM 或被强杀)
- * 才值得提。
- */
-export function classifyDaemonExit(pid: string, exit: string): { status: CheckStatus; detail: string } {
-  const code = parseInt(exit) || 0;
-  if (pid === "-") return { status: "fail", detail: `没在跑（上次退出状态 ${exit}）` };
-  if (code === 0) return { status: "ok", detail: `pid ${pid}` };
-  if (code === -15 || code === -2 || code === -1) return { status: "ok", detail: `pid ${pid}` };
-  if (code === -9) return { status: "warn", detail: `pid ${pid} 在跑，但上次是被 SIGKILL 强杀的（OOM？）` };
-  return { status: "warn", detail: `pid ${pid} 在跑，但上次异常退出（code ${exit}）` };
-}
-
 async function checkDaemons(): Promise<Check[]> {
   const out: Check[] = [];
   const g = "launchd daemon";
   if (process.platform !== "darwin") return out;
 
   const list = await sh(["launchctl", "list"]);
-  for (const label of ["com.claudestra.bridge", "com.claudestra.launcher", "com.claudestra.cron"]) {
-    const plist = `${HOME}/Library/LaunchAgents/${label}.plist`;
-    const line = list.out.split("\n").find((l) => l.endsWith(label) || l.includes(`\t${label}`));
-    if (!line) {
-      out.push({ group: g, name: label, status: existsSync(plist) ? "fail" : "warn",
-        detail: existsSync(plist) ? "plist 在，但没 load" : "没装",
-        fix: "bun src/manager.ts install-cli" });
-      continue;
-    }
-    // launchctl list 输出：<pid>\t<last exit status>\t<label>
-    const [pidRaw, exitRaw] = line.split("\t");
-    const pid = (pidRaw || "").trim();
-    const exit = (exitRaw || "").trim();
-    const v = classifyDaemonExit(pid, exit);
-    const logFile = resolveLogPath(String(label.split(".").pop()), "err");
-    out.push({
-      group: g, name: label, status: v.status, detail: v.detail,
-      fix: v.status === "fail"
-        ? `launchctl kickstart -k gui/$(id -u)/${label}，起不来就看日志 ${logFile}`
-        : v.status === "warn" ? `看日志 ${logFile}` : undefined,
-    });
+  for (const { label } of DAEMONS) {
+    const d = daemonState(list.out, label, existsSync(`${HOME}/Library/LaunchAgents/${label}.plist`));
+    const logFile = resolveLogPath(d.name, "err");
+    const fix = !d.loaded ? "bun src/manager.ts install-cli"
+      : d.status === "fail" ? `launchctl kickstart -k gui/$(id -u)/${label}，起不来就看日志 ${logFile}`
+      : d.status === "warn" ? `看日志 ${logFile}` : undefined;
+    out.push({ group: g, name: label, status: d.status, detail: d.detail, fix });
   }
   // 旧 web 服务（v2.24–v2.28 的 next start）：前端现由 bridge 托管，它的 plist 还在就提醒退场（lib/web-static.ts）
   const legacy = legacyWebDaemonCheck(existsSync(legacyWebPlistPath()), g);
@@ -565,7 +535,7 @@ export async function runDoctor(repoRoot: string): Promise<Check[]> {
     checkUndeliveredAlerts(), checkStateFiles(), import("./doctor-peers.js").then((m) => m.checkLegacyPeers()), // 截止日前还没签名记录的老 peer
     checkBridge(repoRoot),
     checkIntegration(repoRoot),
-    checkAgents(),
+    checkAgents(), import("./doctor-pending.js").then((m) => m.checkPendingOps(repoRoot)), // 做到一半的 create / kill / rename / update 与孤儿窗口、频道
     checkGitHead(repoRoot),
     checkWorktreeClean(repoRoot),
     checkWebBuild(repoRoot),

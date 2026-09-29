@@ -4,15 +4,16 @@
  * 用 master（频道取 controlChannelId，不读真实 registry）+ 临时状态文件 + 缩短的宽限期；日志落在 preload 隔离的状态目录。
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtempSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { initMission, reconcileMissions, setMissionTestHooks } from "../src/bridge/mission.js";
 import { emitEvent, type BridgeEventType } from "../src/bridge/event-bus.js";
 import { resetAutopilotEvidence } from "../src/bridge/autopilot-evidence.js";
-import { setEvidenceWaitForTest } from "../src/bridge/autopilot-close.js";
+import { pendingCloseOf, setEvidenceWaitForTest } from "../src/bridge/autopilot-close.js";
 import type { Envelope } from "../src/bridge/router.js";
 import { readRunLog } from "../src/lib/autopilot-log.js";
+import { AUTOPILOT_TIMING } from "../src/lib/autopilot-run.js";
 import { newMission, readMissions, updateMissions, type Mission } from "../src/lib/missions.js";
 
 const sent: Envelope[] = [];
@@ -21,6 +22,8 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const ev = (type: BridgeEventType, data: Record<string, unknown>) => emitEvent({ agent: "master", chatId: "ctl", type, data });
 const done = () => ev("agent_status", { status: "done" });
 const thinking = () => ev("agent_status", { status: "thinking" });
+/** 一个真实回合的结束（先 thinking 再 done）；光秃秃的 done() 是重复 Stop / 补发的 done，不放行待命（P2-9） */
+const turnEnd = () => (thinking(), done());
 const cur = async () => (await readMissions(path)).master;
 /** 等条件成立：两处同时改 missions.json 时文件锁每 250ms 重试一次，固定 sleep 会偶发不够 */
 async function until(cond: () => boolean | Promise<boolean>, ms = 3000): Promise<void> {
@@ -41,7 +44,7 @@ async function put(over: Partial<Mission> = {}): Promise<Mission> {
 /** 开一条 Autopilot，走完第一次投递（回合结束 → 宽限期 → 递出），返回它 */
 async function startAndNudge(): Promise<Mission> {
   const m = await put();
-  done();
+  turnEnd();
   await until(async () => sent.length === 1 && !!(await cur()).run?.deliveredAt);
   return m;
 }
@@ -137,7 +140,7 @@ describe("推进与 run", () => {
 describe("让位（人优先）", () => {
   test("宽限期里人来说话（转忙）→ 不递", async () => {
     await put();
-    done();
+    turnEnd();
     thinking();
     await settle();
     expect(sent.length).toBe(0);
@@ -145,7 +148,7 @@ describe("让位（人优先）", () => {
   test("画面还在忙（bridge 刚重启、状态表是空的）→ 不递，唤醒留在队列里", async () => {
     await put();
     paneBusy = true;
-    done();
+    turnEnd();
     await settle();
     expect(sent.length).toBe(0);
     expect((await cur()).wake).toBeTruthy();
@@ -163,7 +166,7 @@ describe("让位（人优先）", () => {
 describe("到点", () => {
   test("过了截止时间 → 递收尾、变 expired", async () => {
     await put({ until: new Date(Date.now() - 1000).toISOString() });
-    done();
+    turnEnd();
     await until(() => sent.length === 1);
     expect(sent[0].content).toContain("Autopilot 已关闭");
     expect((await cur()).status).toBe("expired");
@@ -171,7 +174,7 @@ describe("到点", () => {
   test("到点时 agent 正忙：照样立刻 expired（不再续跑），收尾那句等它这一轮结束再递", async () => {
     await put({ until: new Date(Date.now() - 1000).toISOString() });
     paneBusy = true;
-    done();
+    turnEnd();
     await settle();
     expect(sent.length).toBe(0);
     expect((await cur()).status).toBe("expired");
@@ -182,7 +185,7 @@ describe("到点", () => {
   });
   test("不在进行中的不管", async () => {
     await put({ status: "done" });
-    done();
+    turnEnd();
     await settle();
     expect(sent.length).toBe(0);
   });
@@ -248,7 +251,7 @@ describe("对抗式审查补的用例", () => {
       return { envelope: env, outcome: { kind: "error", error: new Error("ws closed") } };
     };
     await put();
-    done();
+    turnEnd();
     await until(() => sent.length === 1);
     await settle();
     const m = await cur();
@@ -263,7 +266,7 @@ describe("对抗式审查补的用例", () => {
       return realDeliver(env);
     };
     await put();
-    done();
+    turnEnd();
     await until(async () => !!(await cur()).run?.deliveredAt);
     await settle();
     const m = await cur();
@@ -296,7 +299,7 @@ describe("对抗式审查补的用例", () => {
   test("旧一代欠着的到点收尾：新一代开始就作废，不吞新一代的 done、不把「已关闭」发给新一代", async () => {
     await put({ until: new Date(Date.now() - 1000).toISOString() });
     paneBusy = true;
-    done();
+    turnEnd();
     await until(async () => (await cur()).status === "expired");
     await settle();
     expect(sent.length).toBe(0);
@@ -320,6 +323,7 @@ describe("对抗式审查补的用例", () => {
   });
   test("事件的 agent 字段是频道 id（bridge 补发类事件）也按频道认到 master", async () => {
     await put();
+    emitEvent({ agent: "ctl", chatId: "ctl", type: "agent_status", data: { status: "thinking" } });
     emitEvent({ agent: "ctl", chatId: "ctl", type: "agent_status", data: { status: "done" } });
     await until(() => sent.length === 1);
   });
@@ -337,5 +341,207 @@ describe("对抗式审查补的用例", () => {
     await settle();
     expect((await cur()).run?.runId).toBe("run_x");
     expect(sent.length).toBe(0);
+  });
+});
+
+describe("第 3 轮复验补的用例", () => {
+  test("迟到的 Stop 紧贴在 thinking 之前到：事件到达那一刻还没开始 → 不算这个 run 的结束", async () => {
+    deliverImpl = async (env) => {
+      done(); // 同一拍：先 Stop 后 thinking
+      return realDeliver(env);
+    };
+    await put();
+    turnEnd();
+    await until(async () => !!(await cur()).run?.deliveredAt);
+    await settle();
+    expect((await cur()).lastRun).toBeUndefined();
+    ev("tool_start", { name: "Edit" });
+    done();
+    await until(async () => !!(await cur()).lastRun);
+    expect((await cur()).lastRun?.outcome).toBe("action_taken");
+  });
+  test("watcher 缺位：thinking 挂在「?」名下也认得出，run 的回合结束照常收尾", async () => {
+    deliverImpl = async (env) => {
+      sent.push(env);
+      emitEvent({ agent: "?", chatId: "ctl", type: "agent_status", data: { status: "thinking" } });
+      return { envelope: env, outcome: { kind: "sent" } };
+    };
+    await put();
+    turnEnd();
+    await until(async () => !!(await cur()).run?.deliveredAt);
+    ev("tool_start", { name: "Edit" });
+    done();
+    await until(async () => !!(await cur()).lastRun);
+    expect((await cur()).lastRun?.outcome).toBe("action_taken");
+  });
+  test("收尾等证据的那几秒里 stop + start：旧一代照样补一行日志", async () => {
+    setEvidenceWaitForTest({ minMs: 400, quietMs: 50, maxMs: 2000 });
+    const a = await startAndNudge();
+    ev("tool_start", { name: "Edit" });
+    done();
+    await sleep(100);
+    await updateMissions((all) => void Object.assign(all.master, { status: "stopped" }), path);
+    await put(); // 新一代
+    await until(() => readRunLog(a.id!).length === 1);
+    expect(readRunLog(a.id!)[0].reason).toContain("换了一代");
+    setEvidenceWaitForTest({ minMs: 30, quietMs: 20, maxMs: 300 });
+  });
+  test("收尾窗口里开的下一个回合（押后消息放出）：它的工具不算进这一轮", async () => {
+    setEvidenceWaitForTest({ minMs: 300, quietMs: 100, maxMs: 2000 });
+    await startAndNudge();
+    ev("tool_start", { name: "Read" });
+    done();
+    await sleep(100);
+    ev("chat_message", { direction: "in", srcKind: "local", text: "peer 的消息" });
+    thinking();
+    ev("tool_start", { name: "Edit" });
+    await until(async () => !!(await cur()).lastRun);
+    expect((await cur()).lastRun?.outcome).toBe("normal");
+    setEvidenceWaitForTest({ minMs: 30, quietMs: 20, maxMs: 300 });
+  });
+  test("「标已投递」和收尾连着两次写锁超时：不重投，锁放开后用留下的证据补收尾", async () => {
+    const lock = `${path}.lock`;
+    setMissionTestHooks({ lockMs: 300 });
+    deliverImpl = async (env) => {
+      const r = await realDeliver(env);
+      mkdirSync(lock); // 别的进程占着锁 1.2 秒
+      setTimeout(() => rmdirSync(lock), 1200);
+      return r;
+    };
+    try {
+      const m = await put();
+      turnEnd();
+      await until(() => sent.length === 1);
+      await sleep(100);
+      ev("tool_start", { name: "Edit" });
+      done(); // run 的回合结束：收尾时锁还被占着
+      // lastRun（missions.json）先落盘、日志紧跟着追加：rename 的 await 续体可能落后别的读好几拍，只等 lastRun 会偶发读到空日志
+      await until(async () => !!(await cur()).lastRun && readRunLog(m.id!).length > 0, 12_000);
+      expect(sent.length).toBe(1);
+      expect((await cur()).lastRun?.outcome).toBe("action_taken");
+      expect((await cur()).nudges).toBe(1);
+      expect(readRunLog(m.id!)).toHaveLength(1);
+    } finally {
+      setMissionTestHooks({ lockMs: 10_000 });
+    }
+  }, 20_000);
+  /** 投递后别的进程一直占着写锁 → 收尾写锁超时；放锁的同一拍做 change（acquireLock 第一次 mkdir 是同步的，重试插不进来），再按文件重排 */
+  async function closeStuckThen(change: () => Promise<unknown>): Promise<Mission> {
+    const lock = `${path}.lock`;
+    setMissionTestHooks({ lockMs: 300, lockRetryMs: 200 });
+    let held = false;
+    deliverImpl = async (env) => {
+      const r = await realDeliver(env);
+      if (!held) (held = true), mkdirSync(lock); // 只占第一次：换代后新一代的第一句照常递
+      return r;
+    };
+    const m = await put();
+    turnEnd();
+    await until(() => sent.length === 1);
+    await sleep(100);
+    ev("tool_start", { name: "Edit" });
+    done();
+    const runId = (await cur()).run!.runId;
+    await until(() => !!pendingCloseOf(runId));
+    rmdirSync(lock);
+    await change();
+    await reconcileMissions(); // 文件监听看到变化：mission 的定时器被撤掉 / 改排给新一代，收尾重试不能跟着没了
+    return m;
+  }
+  const restoreLockHooks = () => setMissionTestHooks({ lockMs: 10_000, lockRetryMs: AUTOPILOT_TIMING.lockRetryMs });
+  test("收尾写锁超时、重试之前被 stop：锁放开后照样补收尾、写日志，不再排下一次", async () => {
+    try {
+      const m = await closeStuckThen(() => updateMissions((all) => void Object.assign(all.master, { status: "stopped" }), path));
+      await until(() => readRunLog(m.id!).length > 0);
+      await settle();
+      expect(readRunLog(m.id!)).toHaveLength(1);
+      expect(readRunLog(m.id!)[0]).toMatchObject({ outcome: "action_taken" });
+      expect(readRunLog(m.id!)[0].nextWakeAt).toBeUndefined();
+      expect(await cur()).toMatchObject({ status: "stopped", nudges: 1, lastRun: { outcome: "action_taken" } });
+      expect(sent.length).toBe(1);
+    } finally {
+      restoreLockHooks();
+    }
+  });
+  test("收尾写锁超时、重试之前换了一代：锁放开后给旧一代补一行日志，不记到新一代头上", async () => {
+    try {
+      const m = await closeStuckThen(() => put());
+      await until(() => readRunLog(m.id!).length > 0);
+      await settle();
+      expect(readRunLog(m.id!)).toHaveLength(1);
+      expect(readRunLog(m.id!)[0]).toMatchObject({ outcome: "action_taken" });
+      expect(readRunLog(m.id!)[0].reason).toContain("换了一代");
+      expect((await cur()).lastRun).toBeUndefined();
+    } finally {
+      restoreLockHooks();
+    }
+  });
+});
+
+describe("P2-9：只有人类信号和真实的新回合才放行待命", () => {
+  /** 连续第 3 轮没进展 → 这一轮收尾后进待命 5 分钟 */
+  async function intoStandby(): Promise<void> {
+    await put({ lastRun: { runId: "p", outcome: "normal", endedAt: new Date(Date.now() - 60_000).toISOString(), streaks: { idle: 2, fail: 0 } } });
+    turnEnd();
+    await until(async () => !!(await cur()).run?.deliveredAt);
+    done(); // run 的回合结束（投递时已发过 thinking）
+    await until(async () => (await cur()).wake?.hold === "standby");
+  }
+  test("同一回合重复的 Stop 不放行", async () => {
+    await intoStandby();
+    done();
+    await settle();
+    expect((await cur()).wake?.hold).toBe("standby");
+  });
+  test("Stop 之后才读到的本回合最后几行（reply 工具、最后一句话）不会重新点亮，随后的重复 done 不放行", async () => {
+    await intoStandby();
+    ev("tool_start", { name: "mcp__claudestra__reply", detail: "{}" });
+    ev("reply_pending", {});
+    ev("assistant_text", { text: "查完了，没有要推进的。" });
+    done();
+    await settle();
+    expect((await cur()).wake?.hold).toBe("standby");
+  });
+  test("reconcile 补发的 done：生产里只在 thinking 卡住时补发（一个真实回合没收到 Stop），放行", async () => {
+    await intoStandby();
+    thinking(); // jsonl_activity：终端里直接开了个回合
+    ev("agent_status", { status: "done", trigger: "reconcile" });
+    await until(async () => (await cur()).wake?.hold === undefined);
+  });
+  test("人类消息之后的回合结束放行", async () => {
+    await intoStandby();
+    ev("chat_message", { direction: "in", srcKind: "user", text: "有新活了" });
+    done();
+    await until(async () => (await cur()).wake?.hold === undefined);
+  });
+  test("待命期间 watcher 缺位：人类消息挂在「?」名下，照样让位", async () => {
+    await intoStandby();
+    emitEvent({ agent: "?", chatId: "ctl", type: "chat_message", data: { direction: "in", srcKind: "user", text: "我来了" } });
+    thinking();
+    done();
+    await until(async () => (await cur()).wake?.hold === undefined);
+    await settle();
+    expect(sent.length).toBe(1); // 放行了，但人刚说过话 → 让位，不立刻递
+  });
+  test("真实的新回合（有 thinking / 工具活动）结束放行", async () => {
+    await intoStandby();
+    thinking();
+    ev("tool_start", { name: "Read" });
+    done();
+    await until(async () => (await cur()).wake?.hold === undefined);
+  });
+});
+
+describe("T14f 第 1 轮审查补的流程用例", () => {
+  test("run 结束后下一回合的 thinking 先到、本回合的撞额度后到：仍判 rate_limited，按额度挂起", async () => {
+    await startAndNudge();
+    done(); // run 的回合结束
+    thinking(); // 押后的 agent 消息紧跟着开了新回合
+    await sleep(5);
+    ev("api_error_turn", { error: "rate_limit" });
+    ev("assistant_text", { text: "You've hit your limit · resets 3am (Asia/Tokyo)" });
+    await until(async () => !!(await cur()).lastRun);
+    expect((await cur()).lastRun?.outcome).toBe("rate_limited");
+    expect((await cur()).wake?.hold).toBe("rate_limit");
   });
 });

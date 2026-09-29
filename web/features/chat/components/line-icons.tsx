@@ -28,6 +28,21 @@ export const MoonIcon = (p: IconProps) => (
   </Svg>
 );
 
+/** lucide bot 的路径（外源消息头 source-header.tsx 也用它，放进自己的 svg 里） */
+export const BOT_PATHS = (
+  <>
+    <path d="M12 8V4H8" />
+    <rect width="16" height="12" x="4" y="8" rx="2" />
+    <path d="M2 14h2" />
+    <path d="M20 14h2" />
+    <path d="M15 13v2" />
+    <path d="M9 13v2" />
+  </>
+);
+
+/** lucide bot */
+export const BotIcon = (p: IconProps) => <Svg {...p}>{BOT_PATHS}</Svg>;
+
 /** lucide folder-open */
 export const FolderOpenIcon = (p: IconProps) => (
   <Svg {...p}>
@@ -39,6 +54,69 @@ export const FolderOpenIcon = (p: IconProps) => (
 export const FolderIcon = (p: IconProps) => (
   <Svg {...p}>
     <path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z" />
+  </Svg>
+);
+
+/** lucide paperclip */
+export const PaperclipIcon = (p: IconProps) => (
+  <Svg {...p}>
+    <path d="m16 6-8.414 8.586a2 2 0 0 0 2.829 2.829l8.414-8.586a4 4 0 1 0-5.657-5.657l-8.379 8.551a6 6 0 1 0 8.485 8.485l8.379-8.551" />
+  </Svg>
+);
+
+/** lucide x */
+export const XIcon = (p: IconProps) => (
+  <Svg {...p}>
+    <path d="M18 6 6 18" />
+    <path d="m6 6 12 12" />
+  </Svg>
+);
+
+/** lucide copy */
+export const CopyIcon = (p: IconProps) => (
+  <Svg {...p}>
+    <rect width="14" height="14" x="8" y="8" rx="2" ry="2" />
+    <path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2" />
+  </Svg>
+);
+
+/** lucide check */
+export const CheckIcon = (p: IconProps) => (
+  <Svg {...p}>
+    <path d="M20 6 9 17l-5-5" />
+  </Svg>
+);
+
+/** lucide share */
+export const ShareIcon = (p: IconProps) => (
+  <Svg {...p}>
+    <path d="M12 2v13" />
+    <path d="m16 6-4-4-4 4" />
+    <path d="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8" />
+  </Svg>
+);
+
+/** lucide file */
+export const FileIcon = (p: IconProps) => (
+  <Svg {...p}>
+    <path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z" />
+    <path d="M14 2v4a2 2 0 0 0 2 2h4" />
+  </Svg>
+);
+
+/** lucide chevron-right（展开态由调用方 rotate-90） */
+export const ChevronRightIcon = (p: IconProps) => (
+  <Svg {...p}>
+    <path d="m9 18 6-6-6-6" />
+  </Svg>
+);
+
+/** lucide triangle-alert */
+export const TriangleAlertIcon = (p: IconProps) => (
+  <Svg {...p}>
+    <path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3" />
+    <path d="M12 9v4" />
+    <path d="M12 17h.01" />
   </Svg>
 );
 

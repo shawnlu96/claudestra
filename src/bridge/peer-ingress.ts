@@ -19,6 +19,7 @@ import { relayMark, takeRelayFrom } from "./relay-inbound.js";
 import { setRequestContext } from "./request-context.js";
 import { isLoopbackAddress } from "../lib/same-host.js";
 import { DEVICE_HEADER } from "../lib/devices.js";
+import { HTTP_IDLE_TIMEOUT_S } from "../lib/esc-guard.js";
 
 export { configuredPeerIngressPort };
 
@@ -147,5 +148,10 @@ export async function ingressRequest(req: Request, handleApi: ApiHandler, addr: 
 }
 
 function serve(opts: { port: number; host: Host; handleApi: ApiHandler }) {
-  return Bun.serve({ port: opts.port, hostname: opts.host, fetch: (req, server) => ingressRequest(req, opts.handleApi, server.requestIP(req)?.address ?? null) });
+  return Bun.serve({
+    port: opts.port,
+    hostname: opts.host,
+    idleTimeout: HTTP_IDLE_TIMEOUT_S, // peer 的打断请求要等 Esc 窗口锁，Bun 默认 10 秒会先切断（lib/esc-guard.ts）
+    fetch: (req, server) => ingressRequest(req, opts.handleApi, server.requestIP(req)?.address ?? null),
+  });
 }

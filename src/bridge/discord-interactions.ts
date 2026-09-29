@@ -23,7 +23,7 @@ import { forceRefreshStatsDashboard, noteSaveCompactInjected } from "./stats-das
 import { parseAuqPane } from "../lib/auq-pane.js";
 import { recordMetric } from "../lib/metrics.js";
 import { describeKeys } from "../lib/runtimes/window-ops.js";
-import { interruptGate } from "./interrupt-gate.js";
+import { manualInterrupt } from "./preempt.js";
 import {
   tmuxCapture,
   windowTarget,
@@ -206,7 +206,7 @@ async function handleModalInteraction(
     };
     const tmuxKey = keyMap[key] ?? key; // 数字键保持原样
     // Esc 走带双击护栏的 tmuxSendEscape：两次 Esc 挨得太近会打开 CC 的 Rewind 回溯菜单
-    await (tmuxKey === "Escape" ? tmuxSendEscape(targetWindow) : tmuxRaw(["send-keys", "-t", targetWindow, tmuxKey]));
+    await (tmuxKey === "Escape" ? tmuxSendEscape(targetWindow, { strict: true }) : tmuxRaw(["send-keys", "-t", targetWindow, tmuxKey])); // Esc 没发出去要报失败
     await Bun.sleep(1500);
     const pane = await tmuxCapture(targetWindow, 40);
     const options = parseModalOptions(pane);
@@ -273,7 +273,7 @@ async function focusITermTab(targetChannelId: string, controlId: string, runMana
     if (!agent) {
       return { ok: false, found: false, label: "?", note: "❌ 找不到对应 agent（可能已被 kill）" };
     }
-    targetWindow = `${MASTER_SESSION}:${agent.name}`;
+    targetWindow = windowTarget(agent.name);
     label = agent.name;
   }
 
@@ -385,8 +385,8 @@ async function triggerSaveCompact(interaction: any, targetChannelId: string, run
       await interaction.followUp({ content: "❌ 找不到对应 agent（可能已被 kill）", ephemeral: true }).catch(() => {});
       return;
     }
-    noteSaveCompactInjected(`master:${agent.name}`);
-    await tmuxSendLine(`master:${agent.name}`, "/save-compact");
+    noteSaveCompactInjected(windowTarget(agent.name));
+    await tmuxSendLine(windowTarget(agent.name), "/save-compact");
     console.log(`🧹 save-compact 已发送: ${agent.name} (channel=${targetChannelId})`);
     await interaction
       .followUp({
@@ -466,14 +466,10 @@ async function handleInteraction(discord: Client, deps: InteractionDeps, interac
         const listResult = await runManager("list");
         const agent = (listResult.agents || []).find((a: any) => a.channelId === channelId);
         if (agent) {
-          const r = await interruptGate.manual(channelId, `master:${agent.name}`, agent.runtime).catch((e: Error) => e);
+          const r = await manualInterrupt(channelId, windowTarget(agent.name), agent.runtime, agent.name, "slash").catch((e: Error) => e);
           if (r instanceof Error) return void (await interaction.reply(`❌ 发送打断键失败: ${r.message}`));
           const keys = r.keys;
           if (!keys.length) return void (await interaction.reply(r.deduped ? `⏳ ${agent.name} 刚被打断过` : `💤 ${agent.name} 当前空闲，无需打断`));
-          stopTyping(channelId);
-          clearSafetyTimer(channelId);
-          // 同打断按钮：被打断的回合没有 Stop hook，主动收尾 done
-          emitEvent({ agent: agent.name, chatId: channelId, type: "agent_status", data: { status: "done", trigger: "interrupt" } });
           await finishStatusMessage(discord, channelId, t("⚡ 已打断", "⚡ Interrupted"));
           await interaction.reply(`⚡ 已发送 ${describeKeys(keys)}`);
         } else {
@@ -549,7 +545,7 @@ async function handleInteraction(discord: Client, deps: InteractionDeps, interac
         } catch { /* non-critical */ }
 
         // 如果没找到 agent，就是 master channel（control channel）
-        const targetWindow = agentName ? `master:${agentName}` : `master:0`;
+        const targetWindow = agentName ? windowTarget(agentName) : `master:0`;
         const targetLabel = agentName || "master";
 
         // 收集 option 值
@@ -675,7 +671,7 @@ async function handleInteraction(discord: Client, deps: InteractionDeps, interac
       if (id.startsWith("wedge_esc:")) {
         const agentName = id.slice("wedge_esc:".length);
         try {
-          await tmuxSendEscape(`master:${agentName}`);
+          await tmuxSendEscape(windowTarget(agentName), { strict: true });
           clearWedgeState(agentName);
           await interaction.followUp({ content: `✅ 已发 Esc 到 ${agentName}`, ephemeral: true }).catch(() => {});
         } catch (e) {
@@ -713,7 +709,7 @@ async function handleInteraction(discord: Client, deps: InteractionDeps, interac
             await interaction.followUp({ content: "❌ 找不到对应 agent", ephemeral: true }).catch(() => {});
             return;
           }
-          const win = `master:${agent.name}`;
+          const win = windowTarget(agent.name);
           const pane = await tmuxCapture(windowTarget(agent.name), 12);
           const cur = detectPermissionMode(pane);
           if (!cur) {
@@ -819,13 +815,13 @@ async function handleInteraction(discord: Client, deps: InteractionDeps, interac
               await interaction.followUp({ content: "❌ 打断失败：找不到对应 agent", ephemeral: true }).catch(() => {});
               return;
             }
-            targetWindow = `master:${agent.name}`;
+            targetWindow = windowTarget(agent.name);
             agentLabel = agent.name;
             targetRuntime = agent.runtime;
           }
 
           console.log(`⚡ 打断 tmux window: ${targetWindow}`);
-          const r = await interruptGate.manual(targetChannelId, targetWindow, targetRuntime).catch((e: Error) => e);
+          const r = await manualInterrupt(targetChannelId, targetWindow, targetRuntime, agentLabel, "button").catch((e: Error) => e);
           if (r instanceof Error) {
             console.error(`⚡ tmux send-keys 失败: ${r.message}`);
             return void (await interaction.followUp({ content: `❌ tmux 发送打断键失败: ${r.message}`, ephemeral: true }).catch(() => {})); // 回执发不出无妨：错误已记日志
@@ -834,14 +830,7 @@ async function handleInteraction(discord: Client, deps: InteractionDeps, interac
           const idle = { content: r.deduped ? `⏳ ${agentLabel} 刚被打断过` : `💤 ${agentLabel} 当前空闲，无需打断`, ephemeral: true };
           if (!keys.length) return void (await interaction.followUp(idle).catch(() => {})); // 回执发不出无妨：本就什么键都没按
           console.log(`⚡ ${describeKeys(keys)} 已发送给 ${agentLabel}`);
-          recordMetric("agent_interrupt", { channelId: targetChannelId, agent: agentLabel, meta: { trigger: "button" } });
-
           await finishStatusMessage(discord, targetChannelId, t("⚡ 已打断", "⚡ Interrupted"));
-          stopTyping(targetChannelId);
-          clearSafetyTimer(targetChannelId);
-          // 被打断的回合没有 Stop hook —— 主动把回合状态收尾成 done，
-          // 否则 agentStatuses 卡 thinking（web 黄点常驻 / busy 补锁复活）
-          emitEvent({ agent: agentLabel, chatId: targetChannelId, type: "agent_status", data: { status: "done", trigger: "interrupt" } });
         } catch (e) {
           console.error(`⚡ 打断流程异常:`, e);
         }
@@ -868,9 +857,7 @@ async function handleInteraction(discord: Client, deps: InteractionDeps, interac
           session_noask: ["Down", "Down", "Enter"],// ↓↓ 到 option 3
         };
         const labelMap: Record<string, string> = {
-          perm_allow: "✅ 已允许",
-          perm_allow_session: "✅ 已允许（本会话不再问）",
-          perm_deny: "❌ 已拒绝",
+          perm_allow: "✅ 已允许", perm_allow_session: "✅ 已允许（本会话不再问）", perm_deny: "❌ 已拒绝",
           session_summary: "✨ 从摘要恢复",
           session_full: "📜 恢复完整会话",
           session_noask: "🔕 不再询问",
@@ -908,7 +895,7 @@ async function handleInteraction(discord: Client, deps: InteractionDeps, interac
           }
 
           const proc = Bun.spawn(
-            ["tmux", "-S", TMUX_SOCK, "send-keys", "-t", `master:${agent.name}`, ...keySeq],
+            ["tmux", "-S", TMUX_SOCK, "send-keys", "-t", windowTarget(agent.name), ...keySeq],
             { stdout: "pipe", stderr: "pipe" }
           );
           await proc.exited;
@@ -927,6 +914,8 @@ async function handleInteraction(discord: Client, deps: InteractionDeps, interac
             } catch { /* non-critical */ }
             permissionMessages.delete(targetChannelId);
           }
+          // 「待你处理」里对应的权限 ask 记成 answered（ask-runtime.ts），不然弹框消失时会被当成撤销
+          if (isPermBtn) void import("./ask-runtime.js").then((m) => m.settleRuntimeAsk("permission", targetChannelId, "discord", labelMap[action], { principal: `discord:${interaction.user.id}` }));
         } catch (e) {
           console.error(`🔔 权限响应流程异常:`, e);
         }
@@ -954,7 +943,7 @@ async function handleInteraction(discord: Client, deps: InteractionDeps, interac
             const auqParse = auqPane ? parseAuqPane(auqPane) : null;
             if (auqPane && !auqParse) {
               clearAuqState(auqChannel);
-              emitEvent({ agent: agentNameForChannel(auqChannel) || "master", chatId: auqChannel, type: "question_cleared", data: { reason: "stale", via: "discord" } });
+              emitEvent({ agent: agentNameForChannel(auqChannel) || "master", chatId: auqChannel, type: "question_cleared", data: { reason: "stale", via: "discord", uid: interaction.user.id } });
               await interaction.editReply({ content: `⚠️ 弹窗已在终端侧被应答/关闭，本次提交作废。`, components: [] }).catch(() => {});
               return;
             }
@@ -975,9 +964,10 @@ async function handleInteraction(discord: Client, deps: InteractionDeps, interac
             recordMetric("auq_submit", { channelId: auqChannel, meta: { questions: String(state.questions.length) } });
             clearAuqState(auqChannel);
             // 同步收掉 web 端的交互卡
-            emitEvent({ agent: agentNameForChannel(auqChannel) || "master", chatId: auqChannel, type: "question_cleared", data: { reason: "submit", via: "discord" } });
+            emitEvent({ agent: agentNameForChannel(auqChannel) || "master", chatId: auqChannel, type: "question_cleared", data: { reason: "submit", via: "discord", uid: interaction.user.id } });
           } else if (action === "cancel") {
-            await tmuxSendEscape(state.tmuxTarget);
+            const failed = await tmuxSendEscape(state.tmuxTarget, { strict: true }).then(() => null, (e: Error) => e);
+            if (failed) return void (await interaction.editReply({ content: `❌ 取消没生效：${failed.message}` }).catch(() => {})); // 状态留着可以再按
             await interaction.editReply({
               content: `❌ 已取消 AskUserQuestion（发了 Esc 给 agent）`,
               components: [],
@@ -985,7 +975,7 @@ async function handleInteraction(discord: Client, deps: InteractionDeps, interac
             recordMetric("auq_cancel", { channelId: auqChannel });
             clearAuqState(auqChannel);
             // 同步收掉 web 端的交互卡
-            emitEvent({ agent: agentNameForChannel(auqChannel) || "master", chatId: auqChannel, type: "question_cleared", data: { reason: "cancel", via: "discord" } });
+            emitEvent({ agent: agentNameForChannel(auqChannel) || "master", chatId: auqChannel, type: "question_cleared", data: { reason: "cancel", via: "discord", uid: interaction.user.id } });
           }
         } catch (e) {
           console.error("AUQ button 处理异常:", e);
@@ -1017,7 +1007,7 @@ async function handleInteraction(discord: Client, deps: InteractionDeps, interac
 
       // 未知按钮 → 走 deliver 转发给 LLM，agent 看到 content="[button:<id>]"
       const client = clients.get(channelId);
-      if (!client) return;
+      if ((await (await import("./ask-entry.js")).answerDiscordInteraction(interaction, channelId, `[button:${id}]`, () => startTypingWithSafety(channelId))) || !client) return;
 
       // v2.4.15+ UX：点击后清掉原按钮 + 标注"已点击"，**并在底下保留一个"打断"
       // 按钮**，让用户在 agent 处理过程中能随时中断（之前点完按钮就没打断按钮、
@@ -1127,7 +1117,7 @@ async function handleInteraction(discord: Client, deps: InteractionDeps, interac
       // v2.14+ 多选：Discord 的 max_values>1 会一次交回多个值，全部带上（逗号分隔）。
       // 单选保持原样 `[select:id:value]`，agent 侧的老分支不受影响。
       const client = clients.get(channelId);
-      if (!client) return;
+      if ((await (await import("./ask-entry.js")).answerDiscordSelect(interaction, channelId, id, () => startTypingWithSafety(channelId))) || !client) return;
       startTypingWithSafety(channelId);
       const picked = interaction.values.length > 1
         ? interaction.values.join(",")

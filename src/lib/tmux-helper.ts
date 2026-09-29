@@ -5,9 +5,15 @@
  * 统一走私有 socket 避免和用户的其他 tmux 混在一起。
  */
 
+import { readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { createEscGuard, ESC_LOCK_WAIT_MS } from "./esc-guard.js"; export { ESC_DOUBLE_TAP_MS } from "./esc-guard.js";
+import { acquireLock } from "./file-lock.js";
+import { readProgramInputs, recordProgramInput, type ProgramInput } from "./program-input.js";
 import { RUNTIME_DIR, TMUX_SOCK } from "./paths.js"; export { TMUX_SOCK };
 import { sandboxDisabled } from "./sandbox.js";
 import { sandboxTmuxArgv, sandboxVerifyNewWindow } from "./sandbox-tmux.js"; export { sandboxTmuxArgv };
+import { windowKey } from "./tmux-target.js"; export { windowKey };
 export const MASTER_SESSION = "master";
 /**
  * 大总管窗口（index 0）的显式名字。不命名的话 tmux 按前台进程自动改名（claude / 版本号），
@@ -150,9 +156,9 @@ export async function setWindowOption(target: string, option: string, value: str
   }
 }
 
-/** tmux window target: `master:agent-xxx` */
+/** `master:=agent-xxx`：`=` 精确匹配，否则窗口不在时 tmux 按前缀落到 agent-xxxbar。⚠ display-message 例外：窗口不在时不报错、退回当前窗口，要核存在用 list-panes */
 export function windowTarget(name: string): string {
-  return `${MASTER_SESSION}:${name}`;
+  return `${MASTER_SESSION}:=${name}`;
 }
 
 /** 发送文本到窗口（literal 模式 + 单独的 Enter） */
@@ -165,7 +171,7 @@ export function windowTarget(name: string): string {
  */
 export async function ensurePaneInteractive(target: string): Promise<boolean> {
   try {
-    const inMode = (await tmuxRaw(["display-message", "-p", "-t", target, "#{pane_in_mode}"])).trim();
+    const inMode = (await tmuxRaw(["list-panes", "-t", target, "-F", "#{pane_in_mode}"])).trim().split("\n")[0] ?? ""; // 窗口不在 = 空（display-message 会退回当前窗口）
     if (inMode !== "" && inMode !== "0") {
       await tmuxRaw(["send-keys", "-t", target, "-X", "cancel"]);
       await Bun.sleep(120);
@@ -175,17 +181,15 @@ export async function ensurePaneInteractive(target: string): Promise<boolean> {
   return false;
 }
 
-export async function tmuxSendLine(
-  target: string,
-  text: string,
-  delayMs = 100
-): Promise<void> {
+/** strict：文字没发出去（如超过 tmux 单条命令约 16KB 上限）就抛、不补回车——启动命令用，免得等满就绪超时；其余注入路径照旧吞错 */
+export async function tmuxSendLine(target: string, text: string, delayMs = 100, strict = false): Promise<void> {
   // copy-mode 守卫:见 ensurePaneInteractive——共享层一次加,所有命令注入路径
   // (save-compact / /model / slash 透传 / cron 指令…)全部受益
   if (await ensurePaneInteractive(target)) {
     console.log(`⌨️ ${target} 卡在 copy-mode,已 cancel 后注入`);
   }
-  await tmuxRaw(["send-keys", "-t", target, "-l", "--", text]);
+  await noteProgramInput(target, text);
+  await (strict ? tmuxRawStrict : tmuxRaw)(["send-keys", "-t", target, "-l", "--", text]);
   await Bun.sleep(delayMs);
   await tmuxRaw(["send-keys", "-t", target, "Enter"]);
 }
@@ -195,31 +199,25 @@ export function tmuxInterrupt(target: string): void {
   tmuxFire(["send-keys", "-t", target, "C-c"]);
 }
 
-/**
- * v2.19.0 双 Esc 护栏（2026-08-11 事故：一夜之间 8 个 agent 逐个卡死）。
- *
- * Claude Code 2.1.x 把**连按两次 Esc** 当作 Rewind 手势 —— 弹出「Restore the
- * code and/or conversation to the point before…」检查点对话框，窗口从此被模态
- * 挡住：收不了消息、pane 永远非 idle。实测阈值（agent-temp 真机二分）：
- * 间隔 ≤600ms 必开，≥700ms 不开。而用量抓取的收尾是「发 Esc → 等 350ms →
- * 没关掉再发」，正好落在窗口内；每被毒一个窗口就永远不 idle，抓取只好换下
- * 一个窗口下手，于是一小时毒一个，像瘟疫一样扩散。
- *
- * 所以**所有 Esc 都必须走这里**：同一 window 两次 Esc 之间强制 ≥1200ms
- * （对 700ms 阈值留一倍余量），不够就先等。跨模块的巧合双发（watcher 与抓取
- * 同时对同一窗口发 Esc）也一并挡住——这正是裸 tmuxRaw 挡不住的那类。
- *
- * 局限：节流表是进程内的，manager.ts 子进程与 bridge 各有一份。跨进程双发只
- * 在「restart 正在退出旧会话」这类场景出现，那时窗口本就要被换掉，可接受。
- */
-export const ESC_DOUBLE_TAP_MS = 1200;
-const lastEscapeAt = new Map<string, number>();
-export async function tmuxSendEscape(target: string): Promise<void> {
-  const wait = ESC_DOUBLE_TAP_MS - (Date.now() - (lastEscapeAt.get(target) ?? 0));
-  if (wait > 0) await Bun.sleep(wait);
-  await tmuxRaw(["send-keys", "-t", target, "Escape"]);
-  lastEscapeAt.set(target, Date.now());
-}
+/** 双 Esc 护栏（CC 连按两次 Esc = Rewind）：所有 Esc 都必须走这里。规则、窗口身份、跨进程锁见 lib/esc-guard.ts */
+const escFile = (key: string, ext: string) => join(RUNTIME_DIR, `esc-${key.replace(/[^\w.-]/g, "_")}.${ext}`);
+export const tmuxSendEscape = createEscGuard({
+  windowId: async (t) => (await tmuxRaw(["list-panes", "-t", t, "-F", "#{window_id}"])).split("\n")[0] || null,
+  lock: (key) => acquireLock(escFile(key, "lock"), ESC_LOCK_WAIT_MS, 5_000), // 等锁 > 过期：持锁进程崩了也等得到回收；等不到就不发（esc-guard）
+  readShared: (key) => {
+    try { return Number(readFileSync(escFile(key, "at"), "utf8")) || 0; } catch { return 0; /* 还没有人给这个窗口发过 Esc */ }
+  },
+  writeShared: (key, at) => {
+    try { writeFileSync(escFile(key, "at"), String(at)); } catch { /* 写不了只丢跨进程共享，本进程的记时照样挡双击 */ }
+  },
+  send: async (t, strict) => void (await (strict ? tmuxRawStrict : tmuxRaw)(["send-keys", "-t", t, "Escape"])), // strict：打断键发不出去要报给按按钮的人
+  sleep: (ms) => Bun.sleep(ms),
+  now: () => Date.now(),
+});
+
+/** 程序敲进 agent 窗口的字 / 按键：发之前记一笔（按窗口、跨进程），bridge 据此认出会话记录里不是 owner 在终端里打的（lib/program-input.ts） */
+export const noteProgramInput = async (target: string, text = ""): Promise<void> => recordProgramInput(escFile(await tmuxSendEscape.keyOf(target), "input"), text);
+export const programInputsOf = async (target: string): Promise<ProgramInput[]> => readProgramInputs(escFile(await tmuxSendEscape.keyOf(target), "input"));
 
 /**
  * CC 2.1.x 的 Rewind 检查点对话框——**不是我们的面板，永远不要盲发 Esc**。
@@ -407,7 +405,6 @@ export async function isIdle(target: string): Promise<boolean> {
  * 由调用点决定往哪边倒。
  */
 export type IdleVerdict = "idle" | "busy" | "unknown";
-
 
 /**
  * v2.23+ Pi 窗口的忙闲判据。

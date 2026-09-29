@@ -515,7 +515,7 @@ export async function handleMgmtButton(
   if (id === "browse_sessions") {
     const result = await runManager("sessions");
     if (!result.ok) return { text: `❌ ${result.error}` };
-    const sessions = (result.sessions || []).slice(0, 15);
+    const sessions = (result.sessions || []).filter((s: any) => !s.sub).slice(0, 15); // 子线程不单独列，收编要选主会话
     if (sessions.length === 0) return { text: "📭 没有找到历史会话。" };
     const lines = sessions.map(
       (s: any) =>

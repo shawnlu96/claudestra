@@ -17,6 +17,9 @@ import { useAgentMenuTrigger } from "./agent-menu";
 import { dragAllowed, dragHandlers, useAgentDrop } from "./agent-dnd";
 import { MissionBadge } from "./mission-ui";
 import { LedgerStageChip } from "./ledger-stage-chip";
+import { useFullScope } from "../contacts-data";
+import { TapHint } from "./tap-hint";
+import { InboxIcon } from "../../asks/components/ask-icons";
 import type { RowSlots } from "./team-group"; // lead = 行按钮前的开合控件，tail = 名字后的小标（派出 N 个 / 下一期的阶段）
 
 /* 侧栏的会话行（从 sidebar.tsx 原样搬出，D8-9）：AgentRow + 左滑动作 + 点击串台守卫。
@@ -87,9 +90,9 @@ export function AgentRow({
   const draft = useSyncExternalStore(subscribeDrafts, () => hasDraft(a.name), () => false);
   // 左滑删除(owner 2026-07-14:「临时起的 agent 污染列表,永久删除」):
   // 横滑露出红色删除钮,二次点击确认后 removeAgent(kill + registry 条目删,
-  // 归档保留)。纵向意图让路给列表滚动;master/mock 不可删。
+  // 归档保留)。纵向意图让路给列表滚动;master/mock 不可删;删除与拖进别的 project 要全权凭据,guest 等设备不给手势。
   const canRemove = !a.pinnedMaster && !a.mock;
-  const swipeEnabled = canRemove && !manage; // 多选模式下手势让位
+  const swipeEnabled = useFullScope() === true && canRemove && !manage; // 多选模式下手势让位;拖拽同一条件
   const [swipeX, setSwipeX] = useState(0);
   // v2.21.3+ 拖动期间不再每帧 setState(整行 + 订阅链重渲,owner「左滑特别卡」):
   // 手指跟随直接写 style.transform,dragging 只在识别到滑动/松手时各切一次
@@ -132,7 +135,7 @@ export function AgentRow({
   // 本行也是放置目标 = 它所属的 project（单人 project 没有组头，拖到它的 agent 上就是进那个 project）。
   const menu = useAgentMenuTrigger(() => a, canRemove && !manage);
   const drop = useAgentDrop({ projectId: dropProjectId === undefined ? a.projectId : dropProjectId, agentName: a.name }); // 执行者行按派发者的组算
-  const drag = canRemove && !manage && dragAllowed() ? dragHandlers({ name: a.name, projectId: a.projectId ?? null }) : {};
+  const drag = swipeEnabled && dragAllowed() ? dragHandlers({ name: a.name, projectId: a.projectId ?? null }) : {};
 
   /** 点行的实际动作。触摸丢 click 的兜底在列表容器上统一做(lib/tap-rescue.ts 派发合成 click),行不用管。 */
   const activate = (intended: string) => {
@@ -317,7 +320,7 @@ export function AgentRow({
             <span className="badge badge-outline badge-warning badge-xs shrink-0 align-middle">{t("草稿")}</span>
           )}
           {a.updateHint && !hintDismissed && (
-            <span className="shrink-0 pl-1 text-[11px] text-info/80" title={t(a.updateHint.kind === "pi-update" ? "Pi 可更新" : "重启后生效新版本")}>⬆</span>
+            <span className="shrink-0 pl-1 text-[11px] text-info-soft-80" title={t(a.updateHint.kind === "pi-update" ? "Pi 可更新" : "重启后生效新版本")}>⬆</span>
           )}
           {/* busy 时不显示过期时间(owner 2026-07-16:「明明在工作却显示 48 分钟前」
               ——lastActivityTs 读 jsonl 最后一条对话,CC 回合内攒内存不落盘,长回合
@@ -329,10 +332,10 @@ export function AgentRow({
               {a.unread > 99 ? "99+" : a.unread}
             </span>
           )}
-          {compacting ? (
-            <span className="shrink-0 pl-1 text-[11px] text-info/80">{t("压缩中")}</span>
+          {a.status === "creating" ? <span className="shrink-0 pl-1 text-[11px] text-info-soft-80">{t("创建中")}</span> : compacting ? (
+            <span className="shrink-0 pl-1 text-[11px] text-info-soft-80">{t("压缩中")}</span>
           ) : (a.busy || busyLive) ? (
-            <span className="shrink-0 pl-1 text-[11px] text-warning/80">{t("工作中")}</span>
+            <span className="shrink-0 pl-1 text-[11px] text-warning-soft-80">{t("工作中")}</span>
           ) : (
             lastAt && (
               <span className="shrink-0 pl-1 font-mono text-[11px] tabular-nums text-base-content/35">
@@ -370,21 +373,11 @@ function RepoTag({ a }: { a: AgentSession }) {
     <>
       {showRepo && <span className="min-w-0 max-w-[40%] shrink-[4] truncate font-mono text-[11px] text-base-content/40" title={repo}>{repo}</span>}
       {!!a.queued && (
-        <span className="flex shrink-0 items-center gap-0.5 text-[11px] text-info/80" title={t("{n} 条别的 agent 发来的消息在排队（它这一轮结束或调 check_inbox 时收到）", { n: a.queued })}>
-          <InboxIcon />
+        <TapHint className="flex shrink-0 items-center gap-0.5 text-[11px] text-info-soft-80" text={t("{n} 条别的 agent 发来的消息在排队（它这一轮结束或调 check_inbox 时收到）", { n: a.queued })}>
+          <InboxIcon size={12} />
           {a.queued}
-        </span>
+        </TapHint>
       )}
     </>
-  );
-}
-
-/** lucide inbox（线条图标，不用 emoji） */
-function InboxIcon() {
-  return (
-    <svg viewBox="0 0 24 24" className="size-3" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-      <polyline points="22 12 16 12 14 15 10 15 8 12 2 12" />
-      <path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z" />
-    </svg>
   );
 }

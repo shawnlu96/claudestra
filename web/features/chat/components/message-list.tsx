@@ -4,18 +4,19 @@ import { createPortal } from "react-dom";
 import { useChatStore, useChatStoreApi } from "../chat-store";
 import type { ChatMessage, AssistantSegment } from "../type";
 import { Domd } from "@/components/domd";
+import { BubbleBoundary } from "@/components/boundaries";
 import { PermissionCard } from "./permission-card";
 import { AskQuestionCard } from "./ask-question-card";
 import { ReplyComponents } from "./reply-components";
 import { BgTaskPanel } from "./bg-task-panel";
 import { CcTaskPanel } from "./cc-task-panel";
-import { useT, getLang } from "@/lib/i18n";
+import { useT, getLang, tVerbatim, useLang } from "@/lib/i18n";
 import { BubbleMenu, SelectModeBar, useBubbleMenuTrigger } from "./bubble-menu";
-import { InlineActionContext, type InlineActionCtx } from "@/components/domd/inline-button";
+import { InlineActionContext } from "@/components/domd/inline-button";
 import { replyEchoMessageIds, isEchoSegment } from "../reply-echo";
-import { plainLabel } from "@/lib/chat/inline-buttons";
-import { agentChipIndex, agentLabelKey, messagePlainText, splitQuoted } from "../message-text";
-import { ActiveToolRow, HistoryToolRow, ToolCallsBlock } from "./tool-rows";
+import { useInlineActions } from "./use-inline-actions";
+import { messagePlainText, splitQuoted } from "../message-text";
+import { ToolGroup } from "./tool-rows";
 import { ClaudeHeader, CompactingLine, ReplyingLine, ThinkingDots, TurnMark, WorkingLine } from "./turn-indicators";
 import { QuoteSwipe } from "./quote-swipe";
 import { AttachmentStrip } from "./attachments";
@@ -45,7 +46,7 @@ const NO_ORDER: string[] = [];
 /** system 级事件（compact / 斜杠命令 / 中断 / 命令输出）的通用居中分隔条。
  *  与消息气泡视觉解耦：无头像无名字，两侧细线 + 小灰字；PC 端时间在左槽（msg-time.tsx）。 */
 const SystemDivider = memo(function SystemDivider({ m }: { m: ChatMessage }) {
-  const t = useT();
+  useLang(); // 切语言即时重渲；文字走 tVerbatim：内容可能是带 | 的命令原文，不能让 t() 当单复数拆掉前半
   // 进场动画只给实时新增(本地 id)——历史加载/对账替换的 h{seq} 节点不播,
   // 否则打开会话/切回对齐时整页一起闪一遍(owner 2026-07-16「更丝滑」)
   const anim = m.id.startsWith("h") ? "" : "chat-msg-in";
@@ -55,8 +56,8 @@ const SystemDivider = memo(function SystemDivider({ m }: { m: ChatMessage }) {
     <div className={`${anim} relative mb-[22px] flex select-none items-center gap-3`}>
       <GutterTime ts={m.ts} side="left" lead="system" />
       <span className="h-px flex-1 bg-base-content/10" />
-      <span className="max-w-[70%] shrink-0 truncate text-[11px] font-medium tracking-wide text-base-content/35">
-        {t(m.content)}
+      <span title={tVerbatim(m.content)} className="max-w-[70%] shrink-0 truncate text-[11px] font-medium tracking-wide text-base-content/35">
+        {tVerbatim(m.content)}
       </span>
       <HeaderTime ts={m.ts} />
       <span className="h-px flex-1 bg-base-content/10" />
@@ -143,7 +144,6 @@ const TextBlock = memo(function TextBlock({
  * 有 segments（叙述/工具的真实交错序）时按段渲染——修「工具全堆气泡顶部、
  * 文本全挤底部」的时间线错乱；无 segments（旧缓存快照）回退 content+toolCalls。
  * 流式进行中文本段用纯文本（DOMD 只读一次不适合增量喂字），定稿/历史走 DOMD。
- * agent chip 名单只订阅压成字符串的 agentLabelKey（D8-4，见 message-text.ts）。
  */
 function AssistantBody({
   m,
@@ -156,34 +156,7 @@ function AssistantBody({
 }) {
   const segs = m.segments;
   const full = messagePlainText(m); // 长按菜单的「复制整条」用；只有一段时与本段相同,菜单自动不显示
-  // 行内按钮(v2.20+,`[[{#id .style}label]]`):DOMD 深处的 InlineButton 经
-  // context 拿到本条消息的回投回调;点击复用块级组件的 clickReplyComponent
-  // (同 wire `[button:<id>]`、同 replyClicks 状态,rowKey 前缀 `i:` 区分)。
-  const store = useChatStoreApi();
-  const [inlineBusy, setInlineBusy] = useState(false);
-  // agent chip(`[[{.agent}name]]`)的可跳转名单:name / displayName 都认,
-  // master 别名映射到前端的 __master__(bridge-api 的 apiAgentName 约定)
-  const agentKey = useChatStore((s) => agentLabelKey(s.state.agents));
-  const inlineCtx = useMemo<InlineActionCtx>(() => {
-    const { labels, resolve } = agentChipIndex(agentKey);
-    return {
-      clicks: m.replyClicks ?? {},
-      busy: inlineBusy,
-      onClick: async (id, label) => {
-        setInlineBusy(true);
-        try {
-          await store.clickReplyComponent(m.id, `i:${id}`, id, plainLabel(label), `[button:${id}]`);
-        } finally {
-          setInlineBusy(false);
-        }
-      },
-      agents: labels,
-      openAgent: (label) => {
-        const name = resolve(label);
-        if (name) void store.openAgent(name);
-      },
-    };
-  }, [m.id, m.replyClicks, inlineBusy, store, agentKey]);
+  const inlineCtx = useInlineActions(m); // 行内按钮 / agent chip 的回调，跟着「待你处理」走
   const hasSegs = !!segs && segs.length > 0;
   const hasNarration = hasSegs || !!m.content;
   const hasReply = !!m.replyText;
@@ -207,11 +180,7 @@ function AssistantBody({
         <TextBlock key={i} msgId={m.id} text={seg.text} ts={seg.ts ?? m.replyTs ?? m.ts} streamed={false} fullText={full} />
       )
     ) : (
-      <div key={i} className="my-2 space-y-1">
-        {seg.tools.map((t, j) =>
-          streamingLast ? <ActiveToolRow key={j} tool={t} active={i === segs!.length - 1 && j === seg.tools.length - 1} /> : <HistoryToolRow key={j} tool={t} />,
-        )}
-      </div>
+      <ToolGroup key={i} tools={seg.tools} streaming={streamingLast} activeLast={i === segs!.length - 1} />
     );
   const narration = hasSegs ? (
     <SegGroups segs={segs!} ts={m.ts} render={renderSeg} />
@@ -230,11 +199,11 @@ function AssistantBody({
           {hasNarration && <ReplyDivider />}
           <div className="relative">
             <GutterTime ts={m.replyTs ?? m.ts} side="left" lead="body" />
-            {/* reply 到达即完整,直接富文本 */}
-            <TextBlock msgId={m.id} text={m.replyText!} ts={m.replyTs ?? m.ts} streamed={false} fullText={full} />
+            <TextBlock msgId={m.id} text={m.replyText!} ts={m.replyTs ?? m.ts} streamed={false} fullText={full} /* reply 到达即完整,直接富文本 */ />
           </div>
         </>
       )}
+      {inlineCtx.lockHint && <p className="mt-1 text-[11px] opacity-50">{inlineCtx.lockHint}</p>}
     </InlineActionContext.Provider>
   );
 }
@@ -299,7 +268,7 @@ export const Message = memo(function Message({ m, streaming, isLast, awaiting }:
             </span>
           </div>
         )}
-        {atts.length > 0 && <AttachmentStrip items={atts} />}
+        {atts.length > 0 && <AttachmentStrip items={atts} msg={m} />}
         {m.content && (
           <QuoteSwipe quote={userBody} className="max-w-[85%]">
             <div
@@ -368,14 +337,14 @@ export const Message = memo(function Message({ m, streaming, isLast, awaiting }:
       <div>
         {/* 有 segments（交错序）时工具在段内渲染；旧快照回退整块工具卡 */}
         {!hasSegs && !!m.toolCalls?.length && (
-          <ToolCallsBlock tools={m.toolCalls} streamingLast={streamingLast} />
+          <ToolGroup tools={m.toolCalls} streaming={streamingLast} activeLast />
         )}
         <AssistantBody m={m} liveEmpty={liveEmpty} streamingLast={streamingLast} />
       </div>
       {/* agent 出站附件(reply files):图片内联、文件 chip,与 user 气泡同一渲染 */}
       {!!m.attachments?.length && (
         <div className="mt-2">
-          <AttachmentStrip items={m.attachments} />
+          <AttachmentStrip items={m.attachments} msg={m} />
         </div>
       )}
       {!!m.replyComponents?.length && <ReplyComponents m={m} />}
@@ -747,12 +716,9 @@ export function MessageList() {
             )}
             {share.on && <ShareMask id={m.id} order={order} />}
             {echoIds.has(m.id) ? null : (
-              <Message
-                m={m}
-                streaming={streaming}
-                isLast={i === visible.length - 1}
-                awaiting={awaiting}
-              />
+              <BubbleBoundary id={`${m.sid ?? ""}:${m.id}`} resetKey={m}>
+                <Message m={m} streaming={streaming} isLast={i === visible.length - 1} awaiting={awaiting} />
+              </BubbleBoundary>
             )}
           </div>
         ))}
