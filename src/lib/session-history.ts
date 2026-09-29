@@ -648,6 +648,7 @@ function parseHistoryLines(
       if (tools.length) msg.tools = tools;
       if (typeof rec.message?.model === "string") msg.model = rec.message.model;
       for (const id of replyIds) replyById.set(id, msg);
+      for (const b of content) if (b?.type === "tool_result" && replyIds.includes(b.tool_use_id)) msg.replyAskId = askIdOfReplyResult(b) ?? msg.replyAskId; // Codex：结果和调用同一条
       all.push(msg);
     }
   }

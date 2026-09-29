@@ -18,7 +18,7 @@ import { closeLedger, listEvents, openLedger } from "../src/lib/ledger-store.js"
 import type { Principal } from "../src/lib/principals.js";
 import type { RegistryAgent } from "../src/lib/registry.js";
 import { unwrapChannelMessage } from "../src/lib/session-history.js";
-import { at, LEGACY_STAR_TOKEN, owner, ownerWithMaster, PEER } from "./asks-test-kit.js";
+import { at, guest, LEGACY_STAR_TOKEN, owner, ownerWithMaster, PEER } from "./asks-test-kit.js";
 import { tempLedgerPath } from "./ledger-test-helpers.js";
 
 
@@ -124,6 +124,21 @@ describe("作答 → 答复不抢占", () => {
     expect(await res.json()).toMatchObject({ code: "ask_closed", state: "answered", error: "已处理：✅ 发" });
     expect(await answerFromChat({ agent: "agent-x", text: "[button:no]", principal: owner() })).toBeNull();
     expect(delivered).toEqual([]);
+  });
+
+  test("答不了的凭据（guest、部分 scope 的 owner 设备）带 askId 点已结案的：也回 409、不投，只说「已结案」不带答案（PR B r2 P1-1）", async () => {
+    const a = (await reply())!;
+    expect(await answerFromChat({ agent: "agent-x", text: "[button:no]", principal: guest("ab"), askId: a.id })).toBeNull(); // 还开着：照旧普通消息
+    await answerFromChat({ agent: "agent-x", text: "[button:go]", principal: owner() });
+    for (const p of [guest("ab"), owner({ agents: ["agent-x"], terminal: false, manage: false })]) {
+      const res = (await answerFromChat({ agent: "agent-x", text: "[button:no]", principal: p, askId: a.id }))!;
+      expect(res.status).toBe(409);
+      expect(await res.json()).toEqual({ ok: false, code: "ask_closed", error: "已结案", askId: a.id });
+    }
+    expect(await answerFromChat({ agent: "agent-x", text: "随便说一句", principal: guest("ab"), askId: a.id })).toBeNull(); // 对不上选项：别的消息
+    // 列表带 full：只有完整列表网页才敢按「查不到 = 早已结案」锁旧按钮
+    const full = async (p: Principal) => ((await (await handleAsksApi(new Request("http://x/api/v1/asks"), "/asks", p))!.json()) as { full: boolean }).full;
+    expect([await full(owner()), await full(guest("ab")), await full(owner({ agents: ["agent-x"], terminal: false, manage: false }))]).toEqual([true, false, false]);
   });
 
   test("表单同步行 + 补充文字：算作答，补充进 answer.text 与正文", async () => {

@@ -70,7 +70,8 @@ export async function handleAsksApi(req: Request, path: string, principal: Princ
     // 台账读不了的（guest）只查指给自己的，别让别人的 200 条把它挤掉
     const rows = listForWeb((a) => canSeeAsk(principal, a), project, ledger ? undefined : humanAssignee(principal.id));
     const asks = rows.map((a): Ask & { canAnswer: boolean } => ({ ...a, canAnswer: canAnswerAsk(principal, a) }));
-    return apiJson(200, { ok: true, asks, presence: ownerPresence.state(), now: Date.now() });
+    // full：拿到的是完整列表（台账读得了）——网页据此才敢把「列表里查不到」当成早已结案（asks-model replyAskState）
+    return apiJson(200, { ok: true, asks, full: ledger, presence: ownerPresence.state(), now: Date.now() });
   } catch (e) {
     return apiJson(503, { ok: false, error: `ledger unavailable: ${(e as Error).message}` });
   }

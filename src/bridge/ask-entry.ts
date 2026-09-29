@@ -3,7 +3,7 @@
  * 三条路都先认出这是哪条 ask，再交给 asks.ts 的 commitAnswer——答复是 intent=response，不抢占正在干活的 agent。
  * 权限：谁能看 / 答在 lib/ask-access.ts（列表、SSE、推送同一个判定）——指给自己的 assignee 本人；其余看 = canReadLedger（大总管的另要 scope 含 master），
  * 答 = owner 本人（isOwnerPrincipal；老的「*」集成 Bearer、guest、peer 都不行）。Discord 只有 ALLOWED_USER_IDS 点得到。不能答的凭据发 [button:x] 照旧是普通消息。
- * 已结案的 ask 再点：网页带了 askId 才回 409 code=ask_closed（没带的不猜，照常投）；Discord 按原消息 id 认，悄悄告诉点的人「已处理」。
+ * 已结案的 ask 再点：网页带了 askId 才回 409 code=ask_closed（没带的不猜，照常投；带了的不管凭据能不能答都拦）；Discord 按原消息 id 认，悄悄告诉点的人「已处理」。
  */
 import { matchWire, splitWire, type AskRow, type WireMatch } from "../lib/ask-options.js";
 import { canReadLedger, OWNER_PRINCIPAL_ID } from "../lib/devices.js";
@@ -102,8 +102,9 @@ const apiFrom = (p: Principal) => ({ kind: "api" as const, tokenId: tokenIdOf(p)
  */
 export async function answerFromChat(req: { agent: string; text: string; principal: Principal; askId?: string | null }): Promise<Response | null> {
   const p = req.principal;
-  if (!isOwnerPrincipal(p) || !canReadLedger(p)) return null;
   const { wires, rest } = splitWire(req.text);
+  const stale = staleClick(req.agent, wires, p, req.askId);
+  if (stale || !isOwnerPrincipal(p) || !canReadLedger(p)) return stale;
   const hit = findAskForWires(req.agent, wires, req.askId);
   if (!hit || !canAnswerAsk(p, hit.ask)) return null;
   if (hit.ask.state !== "open") return apiJson(409, closedBody(hit.ask));
@@ -111,6 +112,17 @@ export async function answerFromChat(req: { agent: string; text: string; princip
   const blocked = await redirectForbidden(p, hit.ask);
   if (blocked) return blocked;
   return commitOr409(() => commitNoticing({ ask: hit.ask, picks: hit.picks, text: rest, original: req.text, from: apiFrom(p), principal: p.id, device: p.credential, via: "web_chat" }), hit.ask);
+}
+
+/**
+ * 带 askId 点的是已结案的那条：谁点都回 409、不投给 agent——guest、部分 scope 的设备答不了，放过去就是一条旧点击原样重发（PR B r2 P1-1）。
+ * 看不见这条 ask 的凭据只回一句「已结案」，不带当时选了什么；wire 对不上这条的选项不算（那是别的消息，照常走）
+ */
+function staleClick(agent: string, wires: string[], p: Principal, askId?: string | null): Response | null {
+  const db = askId && wires.length ? askReadDb() : null;
+  const a = db && askId ? getAsk(db, askId) : null;
+  if (!a || a.state === "open" || a.fromAgent !== agent || !picksFor(a, wires)) return null;
+  return apiJson(409, canSeeAsk(p, a) ? closedBody(a) : { ok: false, code: "ask_closed", error: t("已结案", "Closed"), askId: a.id });
 }
 
 /**

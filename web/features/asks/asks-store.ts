@@ -16,8 +16,8 @@ import { applyPending, ASK_EVENT_REFRESH_MS, PENDING_MAX_MS, type PendingAnswer,
 export interface AsksSnap {
   asks: WebAsk[];
   loaded: boolean;
-  /** 403：这个 principal 看不了台账，列表恒空（聊天气泡不能拿「查不到」当结案，asks-model replyAskState） */
-  denied?: boolean;
+  /** bridge 给的是完整列表（台账读得了）；guest、部分 scope、403 都是 false——聊天气泡不能拿「查不到」当结案（asks-model replyAskState） */
+  full?: boolean;
   /** 抽屉开着吗；focus = 要滚到的那张卡 */
   open: boolean;
   focus: string | null;
@@ -110,12 +110,12 @@ async function refresh(): Promise<void> {
     const bannerAsk = snap.loaded && visible() ? fresh.find((a) => a.blocking === true && a.kind !== "accept") : undefined;
     for (const a of r.asks) seen.add(a.id);
     server = r.asks;
-    show({ loaded: true, ...(bannerAsk ? { banner: bannerAsk } : {}) });
+    show({ loaded: true, full: r.full === true, ...(bannerAsk ? { banner: bannerAsk } : {}) });
   } catch (e) {
     if (e instanceof ApiError && e.status === 403) {
       denied = true;
       server = [];
-      show({ loaded: true, denied: true });
+      show({ loaded: true, full: false });
     }
     // 其余（断网、切机器中止）：保留上一份，下次刷新再来
   }

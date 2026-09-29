@@ -10,8 +10,8 @@ import { followEventStream } from "./ledger";
  * 每行带 canAnswer（这个凭据能不能答这一条）；guest 只拿得到指给自己的。
  * 老 bridge 只给顶层一个 canAnswer：行上没有就用它（托管前端先升级时，guest 不该看到一点就 403 的按钮）
  */
-export async function fetchAsks(signal?: AbortSignal): Promise<{ ok: boolean; asks: WebAsk[]; presence?: string; now: number }> {
-  const r = await api<{ ok: boolean; asks: WebAsk[]; presence?: string; now: number; canAnswer?: boolean }>("/asks", { signal, timeoutMs: 10_000 });
+export async function fetchAsks(signal?: AbortSignal): Promise<{ ok: boolean; asks: WebAsk[]; full?: boolean; presence?: string; now: number }> {
+  const r = await api<{ ok: boolean; asks: WebAsk[]; full?: boolean; presence?: string; now: number; canAnswer?: boolean }>("/asks", { signal, timeoutMs: 10_000 });
   return typeof r.canAnswer === "boolean" ? { ...r, asks: r.asks.map((a) => ({ ...a, canAnswer: a.canAnswer ?? r.canAnswer })) } : r;
 }
 
