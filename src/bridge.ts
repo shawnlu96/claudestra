@@ -3415,14 +3415,7 @@ void import("./bridge/ledger-audit-service.js").then((m) => m.startLedgerAudit({
 // 清扫上次崩溃 / 被杀残留的 webterm-* viewer session（grouped session 视图，kill 不伤 master 本体）；Discord 与 Web-only 模式都要
 sweepStaleTerminalSessions().catch(() => {});
 
-// 存量 agent 的 project 归属补齐(「每个 agent 必属一个 project」对老数据成立)。委托 manager(写锁+原子写),幂等——没缺的直接 migrated:0 返回。
-setTimeout(() => {
-  runManager("project-migrate")
-    .then((r: any) => {
-      if (r?.ok && r.migrated > 0) console.log(`📁 project 迁移:${r.migrated} 个 agent 已按目录归组`);
-    })
-    .catch(() => {});
-}, 3_000);
+void import("./bridge/startup-migrations.js").then((m) => m.startStartupMigrations(runManager));
 void import("./bridge/ctx-boundary.js").then((m) => m.startCtxBoundary()); // 上下文边界自动压缩：每分钟一轮，Discord / web-only 都跑
 
 // Web-only: 无 DISCORD_BOT_TOKEN → Web-only 模式：不连 Discord，只跑与平台无关的初始化子集。HTTP/ws/api/事件流在上面 Bun.serve 时已就绪。

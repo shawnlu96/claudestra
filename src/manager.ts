@@ -103,7 +103,7 @@ import {
 import { isSandbox, refuseInSandbox, sandboxRootOf } from "./lib/sandbox.js";
 import { sandboxManagerRefusal } from "./lib/sandbox-env.js";
 import { assertResumable, assertSandboxSession } from "./lib/sandbox-sessions.js";
-import { loadRegistry, migrateWorkerToAgent, patchRegistryAgent, saveRegistry, normalizeName, assertValidNewAgent, assertCreatable, formatAge, output, outputSync, extractPermFlags, extractEffortFlag, extractModeFlag, extractModelFlag, extractBoolFlag, extractMultiFlag, extractStringFlag } from "./manager/core.js";
+import { loadRegistry, patchRegistryAgent, saveRegistry, normalizeName, assertValidNewAgent, formatAge, output, outputSync, extractPermFlags, extractEffortFlag, extractModeFlag, extractModelFlag, extractBoolFlag, extractMultiFlag, extractStringFlag } from "./manager/core.js";
 import { runProjectCommand } from "./manager/projects.js";
 import { cmdCronAdd, cmdCronList, cmdCronEdit, cmdCronRemove, cmdCronToggle, cmdCronHistory } from "./manager/cron.js";
 import { cmdPermissions } from "./manager/permissions.js";
@@ -463,16 +463,10 @@ async function cmdCreate(
   piBaseFlag?: string,
   teamFlags: import("./manager/team.js").TeamFlags = {},
 ) {
-  dir = assertCreatable(name, dir, runtimeFlag, transportFlag); // 名字合法；沙箱 / 生产各自的目录闸与 runtime 闸（manager/core.ts）
-  // runtime 只决定「用哪个适配器」（启动命令 / 就绪判据 / registry 字段），
-  // 其余（频道 / 窗口 / project / registry 形状）各运行时完全一致。
-  let adapter: ManagedRuntimeAdapter;
-  try {
-    adapter = requireManaged(runtimeFlag, transportFlag);
-  } catch (e) {
-    output({ ok: false, error: (e as Error).message });
-    return;
-  }
+  const selected = await (await import("./manager/acp-lifecycle.js")).prepareCreateRuntime(name, dir, runtimeFlag, transportFlag);
+  if (!selected.ok) return output({ ok: false, error: selected.error });
+  dir = selected.dir;
+  const adapter = selected.adapter;
   if (piBaseFlag && piBaseFlag !== "minimal" && piBaseFlag !== "inherit") {
     output({ ok: false, error: `未知的 --pi-base: "${piBaseFlag}"。可用: inherit, minimal` });
     return;
@@ -635,6 +629,7 @@ async function cmdCreate(
     ...team,
     // 运行时字段由适配器给：Claude Code 返回 {}，老 agent 的 registry 逐字节不变
     ...adapter.registryFields(spec),
+    ...(selected.acpPending || selected.manualTmux ? { transport: "tmux" as const, ...(selected.acpPending ? { acpPending: true } : {}) } : {}),
   }, realOpsDeps, run);
   unguard();
   if (committed === "lost") { // 占位被别的进程当残留接手（本进程被挂起超过 10 分钟？）：只按本次自己的 id 收拾
@@ -653,6 +648,7 @@ async function cmdCreate(
     channelName,
     sessionId,
     ready,
+    transport: (adapter.registryFields(spec) as { transport?: string }).transport ?? "tmux",
     project: proj.id,
     ...(projRes.created ? { projectCreated: true } : {}),
     ...(begun.recovered ? { recoveredResidue: begun.recovered.steps } : {}), // 上次砍在半路的残留，这次先清掉了
@@ -740,7 +736,8 @@ async function cmdResume(
   forkSession = false,
   runtimeFlag?: string,
 ) {
-  const adapter = requireManaged(runtimeFlag);
+  const selected = await (await import("./manager/acp-lifecycle.js")).chooseCreateTransport(runtimeFlag, undefined, forkSession);
+  const adapter = requireManaged(runtimeFlag, selected.transport);
   const avail = await adapter.available();
   if (!avail.ok) throw new Error(`无法用 --runtime ${adapter.id} 收编会话：${avail.hint}`);
   // 会话 id 格式各家不同（Claude Code 是 UUID，Pi 收任意自造 id）
@@ -925,6 +922,7 @@ async function cmdResume(
     ...(model ? { model } : {}),
     // resume 不提供档案编辑，但**不能把已有的档案弄丢**（丢了下次 restart 就变回继承全局）
     ...adapter.registryFields({ ...spec, extras: { piEnv: prior?.piEnv } }),
+    ...(selected.acpPending ? { transport: "tmux" as const, acpPending: true } : {}),
     ...(await import("./manager/team.js")).keepOnResume(prior, actualSessionId), // 派发关系 / 显示名；external 只在同一会话时保留
   };
   await saveRegistry(reg); if (!prior) (await import("./lib/agent-settings.js")).releaseNameForFreshAgent(tmuxName, reg.agents); // 新名字 = 全新 agent，旧设置此时才清
@@ -1276,7 +1274,7 @@ async function cmdRestart(name?: string, opts: { includeMaster?: boolean } = {})
       continue;
     }
     // 运行时由 registry 决定；只读来源 / 认不出的 runtime 不能由我们拉起
-    const adapter = managedFor(info.runtime, (info as { transport?: string }).transport); // transport=acp → 窗口里跑 ACP 宿主
+    let adapter = await (await import("./manager/acp-lifecycle.js")).managedForRestart(tmuxName, info as { runtime?: string; transport?: string });
     if (!adapter) {
       results.push({ name: tmuxName, ok: false, error: `runtime "${info.runtime}" 不能由 Claudestra 启动` });
       continue;
@@ -1294,7 +1292,8 @@ async function cmdRestart(name?: string, opts: { includeMaster?: boolean } = {})
       recreated = true;
     } else if (dupIds.length === 1) {
       // 正常一份 —— 优雅退出，失败 by-id kill 这一份再 new
-      const exited = await gracefulExit(tmuxName, adapter);
+      const priorTransport = (info as { acpRestartFrom?: string; transport?: string }).acpRestartFrom ?? (info as { transport?: string }).transport;
+      const exited = await gracefulExit(tmuxName, managedFor(info.runtime, priorTransport) ?? adapter);
       if (!exited) {
         // v2.21.1+ 死锁进程按键杀不动(peer 2026-08-30 真实救援):kill-window 的
         // SIGHUP 它也可能无视,孤儿继续占着 session → 新实例必「启动超时」且错因
@@ -1365,7 +1364,8 @@ async function cmdRestart(name?: string, opts: { includeMaster?: boolean } = {})
     };
 
     let started = (await launchInWindow(tmuxName, adapter, spec, { waitShell: true })).result;
-
+    ({ adapter, started } = await (await import("./manager/acp-lifecycle.js")).recoverFailedAcpLaunch(tmuxName, info as any, adapter, started,
+      (a) => launchInWindow(tmuxName, a, spec, { waitShell: true }).then((r) => r.result)));
     // v2.7+ 自愈：会话被占用（CC 的 bg agent）→ fork 一份副本重试，就绪后探测
     // 新 session id 回写 registry（否则 watcher / 下次 restart 又会盯回被占用的旧 id）。
     if (!started.ready && started.reason === "occupied") {
@@ -2799,7 +2799,7 @@ switch (cmd) {
     break;
   }
 
-  case "migrate": output({ ok: true, ...(await migrateWorkerToAgent()) }); break;
+  case "migrate": await (await import("./manager/acp-migration.js")).cmdMigrate(args[0]); break;
   case "migrate-web-state": await (await import("./manager/migrate-web-state.js")).cmdMigrateWebState(); break; // 旧 Next BFF 的 settings.db / config.json → bridge（先 tar 备份，幂等）
   case "web-release": await cmdWebRelease(args); break; // 网页版本发布 / 回滚（lib/web-releases.ts）
   case "retire-web": await (await import("./manager/retire-web.js")).cmdRetireWeb(); break; // 卸旧 com.claudestra.web（前端已由 bridge 托管；先验新模式 + 有备份才动手）

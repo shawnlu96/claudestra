@@ -80,6 +80,7 @@ function takeoverWrites(args: readonly string[]): boolean {
 export function needsWriteLock(cmd: string | undefined, args: readonly string[]): boolean {
   if (cmd === "ledger") return LEDGER_REGISTRY_SUBS.has(args[0] ?? "");
   if (cmd === "transport") return false; // 自己锁住改 registry 那一下、放锁再重启（manager/acp-lifecycle.ts）；认主守卫照旧
+  if (cmd === "migrate") return false; // ACP 迁移也短锁改 registry，放锁后子进程逐个 restart
   return isWriteInvocation(cmd, args);
 }
 
