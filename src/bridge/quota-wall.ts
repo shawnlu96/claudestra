@@ -6,7 +6,7 @@
  * 收 quota-wall clear 的请求；出闸后按「关菜单 → 补投 → 续跑」三步恢复，每步落盘，bridge 重启后从当前那步接着做。
  */
 import {
-  enterFromUsage, isHumanSender, exitVia, observeCache, wallUntil, markExit, noteOtherError, noteWallActivity, noteWallHit, notifyDue, probeDue, resumeTargets, wallActive,
+  enterFromUsage, gatesAsHuman, exitVia, observeCache, wallUntil, markExit, noteOtherError, noteWallActivity, noteWallHit, notifyDue, probeDue, resumeTargets, wallActive,
   type UsageSignal, type Wall, type WallExitVia, type WallRecovery, type WallState,
 } from "../lib/quota-wall.js";
 import { recoveredNotice, wallNotice, wallResumeText } from "../lib/quota-wall-notice.js";
@@ -320,9 +320,9 @@ export function createQuotaWall(d: QuotaWallDeps) {
     /** 这个频道此刻在闸里：闸开着、是 Claude Code agent、没开 low-priority（开了的照常在跑）。Autopilot 据此让位、flush 据此只投人的 */
     gates: (channelId: string): Promise<boolean> => gatedNow(c, channelId),
 
-    /** 这条消息此刻要不要押住：闸开着、收件方在闸里（gates）、不是人发的 */
+    /** 这条消息此刻要不要押住：闸开着、收件方在闸里（gates）、不算人发的（gatesAsHuman：fleet 群发文字按非人） */
     async holds(env: Envelope, channelId: string): Promise<boolean> {
-      return !isHumanSender(env.from) && (await gatedNow(c, channelId));
+      return !gatesAsHuman(env) && (await gatedNow(c, channelId));
     },
 
     noteApiError: (e: { channelId: string; agent: string; at: number; error: string; text: string }): Promise<boolean> => noteApiErrorIn(c, e),
