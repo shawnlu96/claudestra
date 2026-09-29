@@ -122,15 +122,17 @@ export function withheldParts(view: PendingAgentCall): PendingAgentCall[] {
 }
 
 /**
- * 老格式：等续跑 / 扣下的话存在槽上。摊到归属的请求上——记了 apiErrorFor 按它，没记就算槽里全部请求的；扣下的话只有恰好
- * 一条归属时才挂上，归属不清就不推（宁可少发，不错投），只在那几条的过期通知里说一句。返回摊好的槽；没有老字段 = undefined
+ * 老格式：等续跑 / 扣下的话存在槽上。摊到归属的请求上——记了 apiErrorFor 只认它点名、还在槽里的那几条，没记才算槽里全部；
+ * 扣下的话只有归属恰好一条、且点名的都还在时才挂上，否则丢掉不推（宁可少发，不错投），只在归属那几条的过期通知里说一句；
+ * 点名的一条都不在了就谁也不挂（绝不改挂到别的请求上），只留日志。返回摊好的槽；没有老字段 = undefined
  */
 function foldLegacyApiError(c: PendingAgentCall): PendingAgentCall | undefined {
   if (!c.apiErrorAt && !c.withheld?.length && !c.apiErrorFor) return undefined;
   const reqs = requestsOf(c);
-  const mine = c.apiErrorFor ? reqs.filter((r) => r.messageId && c.apiErrorFor!.includes(r.messageId)) : reqs;
-  const owners = mine.length ? mine : reqs;
-  const clear = owners.length === 1;
+  const named = c.apiErrorFor;
+  const owners = named ? reqs.filter((r) => r.messageId && named.includes(r.messageId)) : reqs;
+  const clear = owners.length === 1 && (!named || named.length === 1);
+  if (!owners.length && c.withheld?.length) console.warn(`⚠️ 回程簿老数据：${c.targetName} 扣下的 ${c.withheld.length} 段回复归属的请求已不在，丢弃不转发`);
   const requests = reqs.map((r) => {
     if (!owners.includes(r)) return r;
     const at = c.apiErrorAt ? { apiErrorAt: r.apiErrorAt ?? c.apiErrorAt } : {};
@@ -259,15 +261,15 @@ export class AgentCallBook extends PersistedMap<PendingAgentCall> {
 
   /**
    * target 这一轮以 API 错误结束：在等它的槽都记上等续跑（第一次的时刻）；withheld 只挂在归属确定的那一槽：caller 给了就是它
-   * （null = 确定不了），没给就要恰好一个在等。多个 caller 不猜、不广播，也不按「谁已经扣着话」猜（A 的话推给 B 是串话）。
+   * （null = 确定不了），没给就要恰好一个在等，且那一槽只看到一条请求。多个 caller 不猜、不广播，也不按「谁已经扣着话」猜。
    * 返回扣到了哪一槽（没扣 = undefined）；落盘
    */
   markApiError(target: string, stillHeld: StillHeld, withheld: string | null, caller?: string | null, now = Date.now()): string | undefined {
     const w = this.waiting(target, stillHeld);
     const owner = caller !== undefined ? caller : w.length === 1 ? w[0]!.callerChannelId : null;
     const mine = withheld && owner ? w.find((c) => c.callerChannelId === owner) : undefined;
-    // 扣到那一槽已看到的最后一条；看到的几条回复频道不一样就对不上是答哪条的，不扣（stop-settle 告诉 owner），免得 q1 的话推到 q2 的频道
-    const into = mine && new Set(mine.requests!.map((r) => r.originalReplyChannel ?? "")).size === 1 ? mine.requests!.at(-1) : undefined;
+    // 那一槽只看到一条才扣给它；看到多条就分不清在接着答哪条（同频道也一样：q1 的续答挂到 q2 会随 q2 发走），不扣，stop-settle 告诉 owner
+    const into = mine?.requests?.length === 1 ? mine.requests[0] : undefined;
     for (const c of w) {
       const raw = this.slot(target, c.callerChannelId);
       if (!raw) continue;

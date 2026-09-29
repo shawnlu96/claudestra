@@ -249,15 +249,15 @@ describe("逐条过期（T6c1：同一槽 q1 已送、q2 押着，扫描不能�
     expect(ids(new AgentCallBook(p).slot("c-codex", "c-pi"))).toEqual(["q2"]); // 落盘
   });
 
-  test("撞错时看到的几条回复频道相同：扣到最后一条；整槽过期每条各发一条通知，扣下的话只随它自己那条", () => {
+  test("撞错时看到多条（回复频道相同也一样）：分不清在答哪条，不扣（交给 stop-settle 告诉 owner）；过期各发一条空通知", () => {
     const book = new AgentCallBook(null);
     const sent: [string | undefined, string][] = [];
     book.onExpired = (p) => void sent.push([p.originalReplyChannel, p.withheld?.join("") ?? ""]);
     book.add("c-codex", { ...call(0), originalReplyChannel: "A" }, "q1");
     book.add("c-codex", { ...call(0), originalReplyChannel: "A" }, "q2");
-    expect(book.markApiError("c-codex", none, "半句", "c-me", 60_000)).toBe("c-me");
+    expect(book.markApiError("c-codex", none, "半句", "c-me", 60_000)).toBeUndefined();
     book.sweepStale(2 * H + 1, STALE, heldIds());
-    expect(sent).toEqual([["A", ""], ["A", "半句"]]);
+    expect(sent).toEqual([["A", ""], ["A", ""]]);
     expect(book.slot("c-codex", "c-me")).toBeUndefined();
   });
 
@@ -292,10 +292,10 @@ describe("逐条过期（T6c1：同一槽 q1 已送、q2 押着，扫描不能�
     b2.onExpired = (p) => void sent2.push(`${ids(p)}:${p.withheld?.join("") ?? ""}`);
     b2.add("c-codex", call(0), "q1");
     b2.add("c-codex", call(H), "q2");
-    b2.markApiError("c-codex", none, "半句", "c-me", H + 60_000); // 同一回复频道：扣到看到的最后一条 q2
+    expect(b2.markApiError("c-codex", none, "半句", "c-me", H + 60_000)).toBeUndefined(); // 看到两条：等续跑逐条记，话不扣
     b2.sweepStale(2 * H + 1, STALE, heldIds());
     expect(sent2).toEqual(["q1:"]);
-    expect(b2.slot("c-codex", "c-me")!.requests).toMatchObject([{ messageId: "q2", apiErrorAt: H + 60_000, withheld: ["半句"] }]);
+    expect(b2.slot("c-codex", "c-me")!.requests!.map((r) => [r.messageId, r.apiErrorAt, r.withheld])).toEqual([["q2", H + 60_000, undefined]]);
   });
 
   test("r1 P1-2：q1 撞错扣下的话、q2 后送到（不同回复频道）、q1 单独过期 → 那句话随 q1 的通知发到 q1 的频道，不留给 q2", () => {
@@ -373,5 +373,38 @@ describe("逐条过期（T6c1：同一槽 q1 已送、q2 押着，扫描不能�
     expect(pi).toHaveLength(2);
     expect(sent.join("\n")).not.toContain("谁的半句");
     expect(new AgentCallBook(p).size).toBe(0);
+  });
+
+  test("r3：同一回复频道 q1、q2 先后撞错，第二次的话（可能是 q1 的续答）不挂到 q2；q1 过期只带 q1 的，q2 被答不推", () => {
+    const book = new AgentCallBook(null);
+    const sent: string[] = [];
+    book.onExpired = (p) => void sent.push(`expired:${ids(p)}:${p.originalReplyChannel}:${p.withheld?.join("|") ?? ""}`);
+    book.onWithheld = (p) => void sent.push(`withheld:${ids(p)}:${p.originalReplyChannel}:${p.withheld?.join("|") ?? ""}`);
+    book.add("c-codex", { ...call(1), originalReplyChannel: "X" }, "q1");
+    expect(book.markApiError("c-codex", none, "q1 text", "c-me", 1_000)).toBe("c-me");
+    book.add("c-codex", { ...call(H), originalReplyChannel: "X" }, "q2");
+    expect(book.markApiError("c-codex", none, "q1 continuation", "c-me", H + 1_000)).toBeUndefined();
+    book.sweepStale(2 * H + 2, STALE, heldIds());
+    book.consume("c-codex", "c-me", book.exact("c-codex", "c-me", none));
+    expect(sent).toEqual(["expired:q1:X:q1 text"]);
+  });
+
+  test("r3：老盘 apiErrorFor 点名的请求已不在（只剩 q2）→ 丢掉那段话，不改挂到 q2；点名的只剩一部分 → 不推，通知里说一句", () => {
+    const p = join(dir, "legacy-orphan.json");
+    writeFileSync(p, JSON.stringify({
+      ["c-codex\u001fc-me"]: { ...call(1), targetChannelId: "c-codex", apiErrorAt: 1_000, withheld: ["q1 secret"], apiErrorFor: ["q1"],
+        requests: [{ messageId: "q2", ts: H, originalReplyChannel: "Y" }] },
+      ["c-codex\u001fc-pi"]: { ...call(1, "c-pi", "agent-pi"), targetChannelId: "c-codex", apiErrorAt: 1_000, withheld: ["p1 secret"], apiErrorFor: ["p1", "p2"],
+        requests: [{ messageId: "p2", ts: H, originalReplyChannel: "Y" }] },
+    }));
+    const book = new AgentCallBook(p);
+    expect(book.slot("c-codex", "c-me")!.requests!.map((r) => [r.messageId, r.apiErrorAt, r.withheld, r.withheldUnclear])).toEqual([["q2", undefined, undefined, undefined]]);
+    const sent: string[] = [];
+    book.onExpired = (x) => void sent.push(`${x.callerChannelId}:${x.originalReplyChannel}:${expiredNotice(x)}`);
+    book.sweepStale(3 * H + 1, STALE, () => []);
+    expect(sent.join("\n")).not.toContain("secret");
+    expect(sent).toHaveLength(1); // q2 不是撞错的那条，过期不发 API 错误通知；p2 是点名的之一，发一条说归属不明
+    expect(sent[0]).toStartWith("c-pi:Y:");
+    expect(sent[0]).toContain("归属不明");
   });
 });
