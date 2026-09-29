@@ -1,11 +1,11 @@
 /** 本地 API：GET /api/v1/attachments/:name——manage 专用；上传目录（按天）→ inbox → inbox 后缀匹配；只认 basename，穿越拒 */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { closeSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setAttachmentDirsForTest } from "../src/bridge/local-api/attachments.js";
 import { handleLocalApi } from "../src/bridge/local-api/index.js";
-import { attachmentMime, findAttachment, safeAttachmentName } from "../src/lib/attachment-lookup.js";
+import { attachmentMime, findAttachment, openAttachment, safeAttachmentName, type AttachmentDirs } from "../src/lib/attachment-lookup.js";
 import type { Principal } from "../src/lib/principals.js";
 
 const OWNER: Principal = { id: "owner:self", role: "owner", agents: ["*", "master"], createdAt: "2026-01-01T00:00:00Z", manage: true, credential: "dev_o1" };
@@ -117,5 +117,38 @@ describe("lib/attachment-lookup 纯函数", () => {
   test("findAttachment：目录不存在时安静地空手而归", () => {
     expect(findAttachment("x.png", null, { uploadDir: join(dir, "nope"), inboxDirs: [join(dir, "nope2")] })).toBeNull();
     expect(findAttachment("x.png", "2026-01-01", { uploadDir, inboxDirs: [] })).toBeNull();
+  });
+  test("openAttachment（T31c r1 P2）：查找之后把文件换成软链、把目录换成软链，都读不到外面；正常命中读完 / 取消都关 fd", async () => {
+    const t = mkdtempSync(join(tmpdir(), "att-toctou-"));
+    const box = join(t, "inbox");
+    const d: AttachmentDirs = { uploadDir: join(t, "uploads"), inboxDirs: [box] };
+    mkdirSync(box);
+    writeFileSync(join(t, "outside.txt"), "OUTSIDE");
+    writeFileSync(join(box, "a.txt"), "inside");
+    const hit = findAttachment("a.txt", null, d)!;
+    const ok = openAttachment(hit.path, d)!;
+    expect(readFileSync(ok.fd, "utf8")).toBe("inside");
+    closeSync(ok.fd);
+    renameSync(join(box, "a.txt"), join(t, "moved.txt"));
+    symlinkSync(join(t, "outside.txt"), join(box, "a.txt")); // 最后一级换成软链
+    expect(openAttachment(hit.path, d)).toBeNull();
+    const outDir = join(t, "evil");
+    mkdirSync(outDir);
+    writeFileSync(join(outDir, "a.txt"), "OUTSIDE");
+    rmSync(box, { recursive: true });
+    symlinkSync(outDir, box); // 整个目录换成指向外面的软链：最后一级是普通文件，但真实路径不在白名单里
+    expect(openAttachment(hit.path, d)).toBeNull();
+    rmSync(t, { recursive: true, force: true });
+    // 路由读完响应体、或调用方中途取消，fd 都会关掉（数 /dev/fd，20 次之后不增加）
+    const fds = () => readdirSync("/dev/fd").length;
+    const before = fds();
+    for (let i = 0; i < 20; i++) {
+      const res = await get("/api/v1/attachments/api_1700000000000_report.pdf");
+      expect(res.headers.get("Content-Length")).toBe("3");
+      if (i % 2) await res.body?.cancel();
+      else expect(await res.text()).toBe("PDF");
+    }
+    await Bun.sleep(20);
+    expect(fds()).toBeLessThanOrEqual(before); // 泄漏会多出 20 个；别的句柄关掉只会更少
   });
 });

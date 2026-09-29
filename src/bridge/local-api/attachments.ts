@@ -3,8 +3,10 @@
  * 来源目录固定：旧 web 上传目录 → bridge inbox（现址 + /tmp 旧址）→ inbox 后缀匹配；只认 basename。manage grant 专用：
  * inbox 里是 owner 与 agent 之间的全部附件，不按 agent 分目录，给不了按 scope 的裁剪。
  */
+import { createReadStream } from "node:fs";
 import { join } from "node:path";
-import { attachmentMime, findAttachment, safeAttachmentName, type AttachmentDirs } from "../../lib/attachment-lookup.js";
+import { Readable } from "node:stream";
+import { attachmentMime, findAttachment, openAttachment, safeAttachmentName, type AttachmentDirs } from "../../lib/attachment-lookup.js";
 import { canManage } from "../../lib/devices.js";
 import { INBOX_DIR, RUNTIME_DIR, statePath } from "../../lib/paths.js";
 import type { Principal } from "../../lib/principals.js";
@@ -29,15 +31,18 @@ export function handleAttachments(req: Request, path: string, principal: Princip
   const name = safeAttachmentName(m[1]);
   if (!name) return apiJson(400, { ok: false, error: "bad attachment name" });
   const hit = findAttachment(name, url.searchParams.get("d"), dirs);
-  if (!hit) return apiJson(404, { ok: false, error: "attachment not found" });
+  const file = hit ? openAttachment(hit.path, dirs) : null; // 按 fd 读：查找之后换软链也读不到目录外
+  if (!hit || !file) return apiJson(404, { ok: false, error: "attachment not found" });
   const mime = attachmentMime(hit.filename);
   const headers: Record<string, string> = {
     "Content-Type": mime,
+    "Content-Length": String(file.size),
     // 文件名带时间戳 / uuid 前缀，内容不可变 → 放心长缓存
     "Cache-Control": "private, max-age=604800, immutable",
     "Content-Disposition": `inline; filename*=UTF-8''${encodeURIComponent(hit.filename)}`,
     "X-Content-Type-Options": "nosniff",
     ...(mime === "image/svg+xml" ? { "Content-Security-Policy": SVG_CSP } : {}),
   };
-  return new Response(Bun.file(hit.path), { headers });
+  const body = Readable.toWeb(createReadStream("", { fd: file.fd, autoClose: true })) as ReadableStream; // 读完 / 客户端断开都会关 fd
+  return new Response(body, { headers });
 }
