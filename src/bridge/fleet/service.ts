@@ -2,10 +2,9 @@
  * 批量管理的服务层：收候选（registry + 大总管）、刷新 LP 状态、选人、并发跑、留痕。
  * HTTP（routes.ts）和 CLI 的 ws 请求（ws.ts）都只调 runFleet / fleetState，权限在它们各自入口判。
  * 生产 PaneIO 全走 tmux-helper：抓屏 capture-pane -p -e，打字 / 退格走 tmuxRawStrict（失败要抛），Esc 走 tmuxSendEscape 的双击护栏。
+ * 压缩走 T36 的 injectCompact（ctx-boundary.ts）：执行者的 save-compact 在那里改成 compact，这里不再另判。
  */
 import type { ServerWebSocket } from "bun";
-import { statSync } from "node:fs";
-import { dirname, join } from "node:path";
 import { computeAgentStats } from "../../lib/agent-stats.js";
 import { readConfigSync } from "../../lib/config-store.js";
 import {
@@ -14,6 +13,7 @@ import {
 } from "../../lib/fleet-plan.js";
 import { agentRuntime, readRegistryAgents } from "../../lib/registry.js";
 import { ensurePaneInteractive, tmuxRawStrict, tmuxSendEscape } from "../../lib/tmux-helper.js";
+import { compactInjectedRecently, injectCompact, injectTargetFor } from "../ctx-boundary.js";
 import type { Envelope } from "../router.js";
 import { newMessageId, newThreadId } from "../router.js";
 import { auditFleet } from "./audit.js";
@@ -100,31 +100,10 @@ export interface FleetRunReport {
 
 const CONCURRENCY = 4;
 
-/**
- * 执行者（与 T36 的 isExecutor 同口径）：agent-task-*，或 cwd 在 git linked worktree 里（.git 是文件）。
- * 它的 /save-compact 解析到主仓的 memory 目录，会盖掉 PM 的 HANDOFF，所以 save-compact 对它一律改成 compact
- */
-export function isExecutor(c: Pick<Cand, "name" | "cwd">): boolean {
-  if (c.name.startsWith("agent-task-")) return true;
-  for (let d = c.cwd; d && d !== dirname(d); d = dirname(d)) {
-    const git = statSync(join(d, ".git"), { throwIfNoEntry: false });
-    if (git) return git.isFile();
-  }
-  return false;
-}
-
-/** 对这个目标实际要跑的动作：执行者的 save-compact 改成 compact，note 是结果前面要加的说明（没改是空串） */
-export function actionFor(action: FleetAction, t: Pick<Cand, "name" | "cwd">): { action: FleetAction; note: string } {
-  if (action.kind !== "save-compact" || !isExecutor(t)) return { action, note: "" };
-  return { action: { kind: "compact" }, note: "执行者改成 /compact（save-compact 会盖掉 PM 的 HANDOFF）：" };
-}
-
 async function runTarget(req: FleetRunRequest, t: Cand, ctx: RunCtx): Promise<FleetResult> {
   const na = notApplicable(req.action, t);
   if (na) return { agent: t.name, outcome: "skipped", detail: na }; // 离线 / 运行时不支持：没发键，算跳过（「全部」里常有停掉的旧条目）
-  const { action, note } = actionFor(req.action, t);
-  const r = await runOne(action, t.name, t.runtime === "claude-code" ? lpWindowOf(t.name) : null, ctx);
-  return note ? { ...r, detail: note + r.detail } : r;
+  return runOne(req.action, t.name, t.runtime === "claude-code" ? lpWindowOf(t.name) : null, ctx);
 }
 
 async function pool<T, R>(items: T[], n: number, fn: (t: T) => Promise<R>): Promise<R[]> {
@@ -168,7 +147,13 @@ export async function runFleet(req: FleetRunRequest, io: PaneIO = tmuxPaneIO): P
   if (req.dryRun) {
     return { runId, dryRun: true, action: req.action, targets: names, results: [], excluded, summary: `预演：会对 ${names.length} 个 agent 执行（${names.map(bareName).join("、") || "无"}）` };
   }
-  const ctx: RunCtx = { io, keep: compactKeep(), deliverText: textSender(req.actor, req.via, targets.length) };
+  const ctx: RunCtx = {
+    io,
+    keep: compactKeep(),
+    deliverText: textSender(req.actor, req.via, targets.length),
+    compact: async (agent, action, keep) => injectCompact(await injectTargetFor(agent), { action, keep }),
+    compactedRecently: async (agent) => compactInjectedRecently((await injectTargetFor(agent)).target),
+  };
   const results = await pool(targets, CONCURRENCY, (t) => runTarget(req, t, ctx));
   void refreshLp(targets.filter((t) => t.runtime === "claude-code").map((t) => ({ name: t.name, channelId: t.channelId })));
   const projectOf = new Map(targets.filter((t) => t.project).map((t) => [bareName(t.name), t.project!]));

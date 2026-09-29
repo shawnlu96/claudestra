@@ -1,12 +1,15 @@
 /**
  * 批量管理的发键执行器：一个 agent 一个动作，每一步发完都重抓画面复核，结果归成 已执行 / 已排队 / 已跳过 / 失败。
  * 发键只经注入的 PaneIO（生产实现在 service.ts，全走 tmux-helper），判态全在 lib/lp-state.ts；这里只排步骤。
+ * 压缩（compact / save-compact / 开 LP 再压缩的最后一步）交给 T36 的 injectCompact，和自动压缩、手动按钮同一套闸门与 15 分钟守卫。
  * 安全边界：画面上有任何菜单 / 对话框一个键都不按（含 Esc）；输入框里有别人的字就不动、绝不清；
  * 发键前隔一小段再抓一次屏，两次都过才发，按键只看这两帧；Esc 只在两帧都确认有回合在跑时才按（空闲时按两下会弹 Rewind）。
  * 用例见 tests/fleet-runner.test.ts。
  */
-import { ccOnly, compactCommand, type FleetAction, type FleetResult } from "../../lib/fleet-plan.js";
+import type { CompactAction } from "../../lib/ctx-boundary-policy.js";
+import { ccOnly, type FleetAction, type FleetResult } from "../../lib/fleet-plan.js";
 import { decideLp, lastLpEcho, readLpPane, stripAnsi, type LpRead } from "../../lib/lp-state.js";
+import type { InjectResult } from "../ctx-boundary-inject.js";
 
 export interface PaneIO {
   /** capture-pane -p -e */
@@ -25,6 +28,10 @@ export interface RunCtx {
   io: PaneIO;
   keep: string;
   deliverText: (agent: string, text: string) => Promise<TextOutcome>;
+  /** 生产是 injectCompact(await injectTargetFor(agent), { action, keep })：画面判定、守卫、执行者不跑 save-compact 都在它里面 */
+  compact: (agent: string, action: CompactAction, keep: string) => Promise<InjectResult>;
+  /** 15 分钟注入守卫还在不在（compactInjectedRecently） */
+  compactedRecently: (agent: string) => Promise<boolean>;
 }
 
 type Step = Omit<FleetResult, "agent">;
@@ -97,7 +104,10 @@ function afterCommand(raw: string, prefix: string): string {
   return "";
 }
 
-/** 能不能往输入框敲一条斜杠命令（回合在跑、输入框是空的可以，会排队）：null = 能 */
+/**
+ * 能不能往输入框敲压缩命令（回合在跑、输入框是空的可以，会排队）：null = 能。injectCompact 敲之前只抓一帧，这里先隔 RECHECK_MS
+ * 抓两帧都过才交给它（r2 P2-6：两帧之间有人开始打字就不敲）；copy-mode、不是 CC、API 重试、15 分钟守卫由它再判
+ */
 function slashBlock(r: LpRead): Step | null {
   if (r.modal) return failed(`${r.reason ?? "底部没有输入框"}，没按任何键`);
   if (r.compacting) return skipped("正在压缩");
@@ -110,43 +120,39 @@ function slashBlock(r: LpRead): Step | null {
   return null;
 }
 
-/** 往输入框提交一条斜杠命令：忙就排队，空闲就等它真的开始（spinner，或这次新命令下面出现 echoRe） */
-async function slash(io: PaneIO, win: string, cmd: string, echoRe: RegExp | null, what: string): Promise<Step> {
-  const { block, x: x0 } = await gateTwice(io, win, slashBlock);
+const EXECUTOR_NOTE = "执行者改成 /compact（save-compact 会盖掉 PM 的 HANDOFF）：";
+
+/** injectCompact 没敲 / 没提交：正在压缩、15 分钟内刚压过算跳过（不用做），其余被挡算失败（想做没做成）；字还留在输入框里的写明 */
+function notInjected(r: Extract<InjectResult, { status: "skipped" | "failed" }>): Step {
+  if (r.status === "failed") return failed(r.leftover && !/留在输入框/.test(r.error) ? `${r.error}；敲进去的字（或其中一段）还留在输入框里，请看一眼` : r.error);
+  return r.reason === "compacting" || r.reason === "recent" ? skipped(r.text) : failed(`${r.text}，没发`);
+}
+
+/**
+ * 压缩交给 injectCompact；它说已执行之后，这边再等压缩真的开始：回合 spinner（low-priority 下会先显示「Working at lower priority」），
+ * 或这次新命令下面出现 Compacting / 太短 / 不认识。只认发之后多出来的那条命令行，scrollback 里更早的不算
+ */
+async function compact(ctx: RunCtx, agent: string, win: string, action: CompactAction, keep: string): Promise<Step> {
+  const { block, x: x0 } = await gateTwice(ctx.io, win, slashBlock);
   if (block) return block;
-  const name = cmd.split(" ")[0]!;
+  const r = await ctx.compact(agent, action, keep);
+  if (r.status === "skipped" || r.status === "failed") return notInjected(r);
+  const name = r.line.split(" ")[0]!;
+  const note = action === "save-compact" && name === "/compact" ? EXECUTOR_NOTE : "";
+  if (r.status === "queued") return { outcome: "queued", detail: `${note}忙，已排队，回合结束后执行` };
   const before = cmdCount(x0.raw, name);
-  await io.sendLine(win, cmd);
-  if (x0.r.busy) {
-    const q = await waitFor(io, win, 3000, (x) => x.r.input === "queued");
-    return { outcome: "queued", detail: q.ok ? "忙，已排队，回合结束后执行" : "忙，已发进输入框（没看到排队提示）" };
-  }
-  // 发之前验过是空闲的，所以发完出现回合 spinner 就是这条命令在跑（low-priority 下压缩会先显示「Working at lower priority」排队）
   const echo = (x: Frame) => (cmdCount(x.raw, name) > before ? afterCommand(x.raw, name) : "");
-  const fin = /Not enough messages to compact|Unknown (?:skill|command)/;
-  const started = (x: Frame) => x.r.compacting || x.r.busy || (!!echoRe && echoRe.test(echo(x)));
-  const end = await waitFor(io, win, 10000, (x) => started(x) || fin.test(echo(x)));
+  const started = (x: Frame) => x.r.compacting || x.r.busy || /Compacting conversation|Compacted/.test(echo(x));
+  const end = await waitFor(ctx.io, win, 10000, (x) => started(x) || /Not enough messages to compact|Unknown (?:skill|command)/.test(echo(x)));
   const tail = echo(end);
-  if (/Not enough messages to compact/.test(tail)) return skipped("对话太短，不用压缩");
+  if (/Not enough messages to compact/.test(tail)) return skipped(`${note}对话太短，不用压缩`);
   if (/Unknown (?:skill|command)/.test(tail)) return failed(`CC 不认识 ${name}`);
-  return end.ok ? done(what) : failed(`发了 ${name}，10 秒内没看到开始，需要人工看`);
-}
-
-function compact(io: PaneIO, win: string, keep: string): Promise<Step> {
-  return slash(io, win, compactCommand(keep), /Compacting conversation|Compacted/, "已开始压缩");
-}
-
-function saveCompact(io: PaneIO, win: string): Promise<Step> {
-  return slash(io, win, "/save-compact", null, "已开始（先存记忆再压缩）");
+  if (!end.ok) return failed(`发了 ${name}，10 秒内没看到开始，需要人工看`);
+  return done(`${note}${name === "/compact" ? "已开始压缩" : "已开始（先存记忆再压缩）"}`);
 }
 
 const OWN_ECHO = "/low-priority";
 const OTHER_TEXT = "LP 已开；输入框里有别的内容，没清也没压缩";
-/**
- * 输入框里的字，去掉提示符后面那个分隔符：真 CC 的输入框是 `❯` + NBSP（历史行才是普通空格），lp-state 只去一个普通空格。
- * 只去一个 NBSP、不把 NBSP 整体换成空格：用户多敲的空格还得算「不一样」（adv3 P2-1）。lp-state 自己规范掉之后这里是空操作
- */
-const shownInput = (r: LpRead) => r.inputText.replace(/^\u00a0/, "");
 
 /**
  * 打断自动续跑后，Esc 可能把我们敲的 /low-priority 放回输入框：两帧都正好是这几个字，才按同样多的退格（不用 C-u 清整行）；
@@ -158,8 +164,8 @@ async function clearOwnEcho(io: PaneIO, win: string): Promise<Step | null> {
   const { block, x } = await gateTwice(io, win, (r): Step | null => {
     if (r.modal) return failed(`LP 已开，但${r.reason ?? "底部没有输入框"}，没按任何键、没压缩`);
     if (r.input === "queued") return failed("LP 已开；输入框里已有排队的消息，没清也没压缩");
-    const own = r.input === "draft" && shownInput(r) === OWN_ECHO;
-    if (r.input !== "empty" && !own) return failed(`${OTHER_TEXT}（看到的是「${shownInput(r).slice(0, 40) || "看不清"}」）`);
+    const own = r.input === "draft" && r.inputText === OWN_ECHO;
+    if (r.input !== "empty" && !own) return failed(`${OTHER_TEXT}（看到的是「${r.inputText.slice(0, 40) || "看不清"}」）`);
     // 第一帧空、第二帧才冒出这几个字：不是两帧都看到，照样不按
     if (own && sawEmpty) return failed(`${OTHER_TEXT}（两次抓屏之间输入框变了）`);
     sawEmpty = r.input === "empty";
@@ -170,7 +176,7 @@ async function clearOwnEcho(io: PaneIO, win: string): Promise<Step | null> {
   await io.erase(win, OWN_ECHO.length);
   const end = await waitFor(io, win, 2000, (y) => y.r.input === "empty");
   if (end.ok) return null;
-  return failed(`LP 已开；按了 ${OWN_ECHO.length} 次退格清 /low-priority，输入框里还剩「${shownInput(end.r).slice(0, 40) || "看不清"}」，没压缩（可能有人同时在打字，请看一眼）`);
+  return failed(`LP 已开；按了 ${OWN_ECHO.length} 次退格清 /low-priority，输入框里还剩「${end.r.inputText.slice(0, 40) || "看不清"}」，没压缩（可能有人同时在打字，请看一眼）`);
 }
 
 /**
@@ -178,11 +184,14 @@ async function clearOwnEcho(io: PaneIO, win: string): Promise<Step | null> {
  * 这次确实把 LP 打开了：压缩不用做（对话太短 / 正在压缩）算已执行；被人的字、排队消息、对话框挡住算失败（活没干完，要人看），
  * 和单独压缩同一口径；detail 都以「LP 已开」开头，看得出 LP 那步成了
  */
-async function lpThenCompact(io: PaneIO, win: string, keep: string): Promise<Step> {
+async function lpThenCompact(ctx: RunCtx, agent: string, win: string, keep: string): Promise<Step> {
+  const io = ctx.io;
   const before = (await read(io, win)).r;
   if (before.lowPriority !== "on") {
     const lp = await setLp(io, win, "on");
     if (lp.outcome !== "done") return { ...lp, detail: `开 LP：${lp.detail}` };
+    // 15 分钟内刚注入过压缩，这次压不了：那就别打断 LP 自动开的续跑，打断了又不压，agent 会停在那儿干等
+    if (await ctx.compactedRecently(agent)) return done(`LP ${lp.detail}；15 分钟内刚注入过压缩，这次不压，也没打断它自动开的续跑`);
     const turn = await waitFor(io, win, 3000, (x) => x.r.busy);
     // 空闲窗口上一个键都不按：隔一小段再看一次，两帧都在忙才按 Esc
     if (turn.ok && !(await gateTwice(io, win, (r) => (r.busy && !r.modal ? null : "idle"))).block) {
@@ -194,7 +203,7 @@ async function lpThenCompact(io: PaneIO, win: string, keep: string): Promise<Ste
     if (bad) return bad;
     if ((await read(io, win)).r.lowPriority !== "on") return failed("打断后 LP 不在了，没压缩");
   }
-  const c = await compact(io, win, keep);
+  const c = await compact(ctx, agent, win, "compact", keep);
   if (before.lowPriority !== "on") return { ...c, outcome: c.outcome === "skipped" ? "done" : c.outcome, detail: `LP 已开，${c.detail}` };
   return { ...c, detail: `LP 开着，${c.detail}` };
 }
@@ -220,9 +229,9 @@ async function runAction(action: FleetAction, agent: string, w: string, ctx: Run
     switch (action.kind) {
       case "lp-on": return out(await setLp(ctx.io, w, "on"));
       case "lp-off": return out(await setLp(ctx.io, w, "off"));
-      case "compact": return out(await compact(ctx.io, w, action.keep ?? ctx.keep));
-      case "save-compact": return out(await saveCompact(ctx.io, w));
-      case "lp-compact": return out(await lpThenCompact(ctx.io, w, action.keep ?? ctx.keep));
+      case "compact": return out(await compact(ctx, agent, w, "compact", action.keep ?? ctx.keep));
+      case "save-compact": return out(await compact(ctx, agent, w, "save-compact", ctx.keep));
+      case "lp-compact": return out(await lpThenCompact(ctx, agent, w, action.keep ?? ctx.keep));
       case "text": {
         const r = await ctx.deliverText(agent, action.text ?? "");
         return out(r.ok ? (r.queued ? { outcome: "queued", detail: "忙，消息已排队" } : done("已送达")) : failed(r.error));

@@ -35,25 +35,15 @@ export const DEFAULT_COMPACT_KEEP =
 
 const MAX_TEXT = 4000;
 
-/**
- * 保留清单是用 send-keys -l 原样敲进输入框的：换行等于回车（半截清单会被当成命令提交），ESC 等控制字符会被 TUI 当成按键。
- * 所以控制字符一律换成空格、压成一行。
- */
-function oneLine(s: string): string {
-  return s.replace(/[\x00-\x1f\x7f]+/g, " ").replace(/\s{2,}/g, " ").trim();
-}
-
 /** text 与 keep 都会进 agent 的上下文：里面的委托标记（[📨 委托转达] 及变体）一律中和，不许冒充 owner 委托 */
 const clean = (s: string) => neutralizeDelegateMarker(s);
 
-/** 要敲进输入框的保留清单：中和委托标记后走上下文边界同一个入口 normalizeCompactKeep（换行换成空格、800 字、不带控制 / 格式字符） */
+/**
+ * 要敲进输入框的保留清单：中和委托标记后走上下文边界同一个入口 normalizeCompactKeep（换行换成空格、800 字、不带控制 / 格式字符）。
+ * 敲进去是 injectCompact 的事（/compact + 这一行）；换行等于回车、ESC 会被 TUI 当成按键，所以这道闸不能省
+ */
 export function fleetKeep(raw: unknown): CompactKeep {
   return normalizeCompactKeep(typeof raw === "string" ? clean(raw) : raw);
-}
-
-export function compactCommand(keep: string): string {
-  const k = oneLine(clean(keep));
-  return k ? `/compact ${k}` : "/compact";
 }
 
 export function parseFleetAction(input: unknown): { ok: true; action: FleetAction } | { ok: false; error: string } {
