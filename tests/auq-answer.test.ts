@@ -133,6 +133,29 @@ describe("网页入口：带上看到的那一版", () => {
     expect(sent).toEqual(["Down"]);
   });
 
+  test("最后一个 await（Esc / 最后一个键 / 间隔）期间换了一代：回 409，新的一代原样留着、不清不记账", async () => {
+    const a = register(q(["Proceed", "Cancel"]));
+    screen = ccPane(a.questions[0]);
+    let next: AuqState | undefined;
+    setAuqAnswerDepsForTest({ capture: async () => screen, sendEscape: async () => void (next = register(q(["New", "Cancel"]))) });
+    expect(await answerAuqDialog(web(a, { action: "cancel" }))).toMatchObject({ ok: false, status: 409, code: "dialog_changed" });
+    expect(auqStates.get(CH)).toBe(next);
+    const b = register(q(["Proceed", "Cancel"]));
+    screen = ccPane(b.questions[0]);
+    setAuqAnswerDepsForTest({ capture: async () => screen, sendKey: async () => {}, sleep: async () => void (next = register(q(["New", "Cancel"]))) });
+    expect(await answerAuqDialog(web(b, { selections: [[0]] }))).toMatchObject({ ok: false, status: 409, code: "dialog_changed" });
+    expect(auqStates.get(CH)).toBe(next);
+  });
+
+  test("单问题旧卡不认两段式弹框：第 1 段一模一样也 409（单题的 Enter 在两段表单里只是翻页）", async () => {
+    const st = register(q(["Proceed", "Cancel"]));
+    const opts = st.questions[0].options.flatMap((o, i) => [`${i ? " " : "❯"} ${i + 1}. ${o.label}`, `     ${o.description}`]);
+    screen = ["←  ☐ Action  ☐ Other  ✔ Submit  →", "", "Choose action", "", ...opts, "", "Enter to select · ↑/↓ to navigate · Esc to cancel"].join("\n");
+    expect(parseAuqPane(screen)).toMatchObject({ form: "tabbed", sections: ["Action", "Other"] });
+    expect(await answerAuqDialog(web(st, { selections: [[0]] }))).toMatchObject({ ok: false, status: 409, code: "screen_mismatch" });
+    expect(sent).toEqual([]);
+  });
+
   test("取消也核画面：对不上 409 不发 Esc；对上才发", async () => {
     const st = register(q(["Cancel", "Delete"]));
     screen = ccPane(q(["Delete", "Cancel"]));
@@ -206,6 +229,9 @@ describe("画面比对（lib/auq-pane.ts auqPaneMatches / textMatchesLines）", 
     expect(auqPaneMatches([{ ...qq, multiSelect: true }], p)).toBe(false);
     expect(auqPaneMatches([q(["Cancel", "Delete", "Keep"])], p)).toBe(false);
     expect(auqPaneMatches([qq, q(["X", "Y"])], p)).toBe(false); // 画面上只有一段
-    expect(auqPaneMatches([qq, q(["X", "Y"])], { ...p, sections: ["Action", "Other"] })).toBe(true);
+    expect(auqPaneMatches([qq, q(["X", "Y"])], { ...p, form: "tabbed", sections: ["Action", "Other"] })).toBe(true);
+    expect(auqPaneMatches([qq], { ...p, form: "tabbed", sections: ["Action", "Other"] })).toBe(false); // 单题卡不认两段表单
+    expect(auqPaneMatches([qq], { ...p, form: "tabbed" })).toBe(false); // 单题单选只认 single
+    expect(auqPaneMatches([{ ...qq, multiSelect: true }], { ...p, form: "tabbed", multiSelect: true })).toBe(true);
   });
 });

@@ -289,16 +289,17 @@ export function parseAuqPane(pane: string): AuqPaneParse | null {
 }
 
 /**
- * 提交方看到的那一版弹框和画面上的对不对得上（T65，替 owner 按键前最后一道）。逐项比：问题、单选 / 多选、选项个数、
- * 每个选项的文字和描述。多问题表单画面上只看得见当前一段：要求段数等于问题数、当前段就是第 1 问
- * （buildAuqKeystrokes 本来就假定从第 1 段起步），其余段看不见、核不了（已知边界）。单测 tests/auq-answer.test.ts
+ * 提交方看到的那一版弹框和画面上的对不对得上（T65，替 owner 按键前最后一道）。先比表单形态：段数等于问题数，单问题单选
+ * 必须是 single、其余是 tabbed（buildAuqKeystrokes 按这个出键：单题单选的 Enter 在两段表单里只是翻页）；再逐项比问题、
+ * 单选 / 多选、选项个数、每个选项的文字和描述。多问题表单画面上只看得见当前一段：当前段必须是第 1 问，其余段核不了（已知边界）
  */
 export function auqPaneMatches(
   questions: readonly { question?: string; multiSelect?: boolean; options?: readonly { label?: string; description?: string }[] }[],
   p: AuqPaneParse,
 ): boolean {
   const q = questions[0];
-  if (!q || (questions.length > 1 && p.sections.length !== questions.length)) return false;
+  if (!q || p.sections.length !== questions.length) return false;
+  if (p.form !== (questions.length === 1 && !q.multiSelect ? "single" : "tabbed")) return false;
   const opts = q.options ?? [];
   if (!!q.multiSelect !== p.multiSelect || opts.length !== p.options.length) return false;
   if (!textMatchesLines(q.question ?? "", p.questionLines)) return false;

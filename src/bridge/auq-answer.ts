@@ -67,6 +67,8 @@ const KEY_GAP_MS = 120;
 const refuse = (status: number, code: string, error: string): AuqAnswerResult => ({ ok: false, status, code, error });
 const stale = () => refuse(409, "auq_stale", t("弹框已经换了，刷新后按新的作答（这次没有按键）", "The dialog changed — refresh and answer the new one (no keys sent)"));
 const str = (v: unknown) => (typeof v === "string" && v ? v : undefined);
+/** 发键途中换了一代：停下、报发了几个，新的那一代原样留着（不清、不记账，tests/auq-answer.test.ts） */
+const changed = (n: number) => refuse(409, "dialog_changed", t(`作答途中弹框变了，已停下（发了 ${n} 个键）`, `The dialog changed mid-way — stopped after ${n} keys`));
 
 /** 提交方看到的是不是当前这一版：Discord 按消息 id（那条消息就是按这一版画的）；网页按 dialogId / askId + 题面精确比 */
 function seenRefusal(state: AuqState, i: AuqAnswerInput): AuqAnswerResult | null {
@@ -122,18 +124,20 @@ async function answerHeld(state: AuqState, i: AuqAnswerInput, selections: number
     } catch (e) {
       return refuse(409, "send_failed", t(`取消没生效：${(e as Error).message}`, `Cancel failed: ${(e as Error).message}`)); // Esc 没发出去：弹框还在，可以再取消
     }
+    if (!live()) return changed(1);
     finish(state, i, "cancel", []);
     return { ok: true, cancelled: true, keys: 1, summary: [] };
   }
   const keys = buildAuqKeystrokes({ ...state, selections }, parse);
   for (const [n, key] of keys.entries()) {
-    if (!live()) return refuse(409, "dialog_changed", t(`发键途中弹框变了，已停下（发了 ${n} 个键）`, `The dialog changed mid-way — stopped after ${n} keys`));
     try {
       await deps.sendKey(state.tmuxTarget, key);
     } catch (e) {
       return refuse(500, "send_failed", t(`发键失败（发了 ${n} 个键）：${(e as Error).message}`, `Sending keys failed after ${n}: ${(e as Error).message}`));
     }
+    if (!live()) return changed(n + 1);
     await deps.sleep(KEY_GAP_MS);
+    if (!live()) return changed(n + 1);
   }
   finish(state, i, "submit", selections);
   return { ok: true, keys: keys.length, summary: summaryOf(state, selections) };
@@ -141,6 +145,7 @@ async function answerHeld(state: AuqState, i: AuqAnswerInput, selections: number
 
 /** 收尾：清状态、记指标；提交的在广播之前把选了什么、谁选的记进「待你处理」（ask-runtime.ts），再广播收掉各端的卡 */
 function finish(state: AuqState, i: AuqAnswerInput, reason: "submit" | "cancel" | "stale", selections: number[][]): void {
+  if (auqStates.get(i.channelId) !== state) return; // 已换成新的一代：那是别人的，不清
   clearAuqState(i.channelId);
   if (reason !== "stale") recordMetric(reason === "submit" ? "auq_submit" : "auq_cancel", { channelId: i.channelId, meta: { trigger: i.via, questions: String(state.questions.length) } });
   if (reason === "submit") settleAuq(i.channelId, i.via === "discord" ? "discord" : "interact", { questions: state.questions, selections }, i.who);
