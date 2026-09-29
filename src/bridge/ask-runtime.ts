@@ -120,8 +120,8 @@ export function settleRuntimeAsk(source: RuntimeSource, channelId: string, answe
  * - Codex 运行中的弹框（lib/runtime-dialogs.ts 的规则表）在就开、没了就结；
  * - 权限弹框：desc 变了就开新的（先结旧的），没了（null，含换成 session-idle 那种）就结。
  */
-export function noteRuntimeDialogs(channelId: string, agentName: string, pane: string, permissionDesc: string | null): void {
-  const d = detectCodexRuntimeDialog(pane);
+export function noteRuntimeDialogs(channelId: string, agentName: string, pane: string, permissionDesc: string | null, runtime?: string): void {
+  const d = detectCodexRuntimeDialog(pane, runtime);
   if (d) void openRuntimeAsk({ source: "codex", channelId, agentName, kind: "owner_action", ...d, options: [] });
   else settleRuntimeAsk("codex", channelId);
   if (permSeen.get(channelId) === (permissionDesc ?? undefined)) return;
