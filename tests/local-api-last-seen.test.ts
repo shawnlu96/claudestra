@@ -17,7 +17,7 @@ import { closeLedger, openLedger } from "../src/lib/ledger-store.js";
 import { appendEvent, createTask } from "../src/lib/ledger-write.js";
 import type { Principal } from "../src/lib/principals.js";
 import { closeWebState, openWebState } from "../src/lib/web-state.js";
-import { seedLedger, tempLedgerPath } from "./ledger-test-helpers.js";
+import { seedLedger, tempLedgerPath, verifyEvent } from "./ledger-test-helpers.js";
 
 const at = "2026-09-28T00:00:00Z";
 const cred = (id: string, grant: Grant): DeviceCredential => ({ id, v: 1, type: "bearer", hash: "h", deviceName: "d", grant, createdAt: at, expiresAt: "2099-01-01T00:00:00Z" });
@@ -45,8 +45,8 @@ beforeAll(() => {
   seedLedger(ledgerPath);
   const db = openLedger(ledgerPath);
   // 导入回填的事件（approxTime）不算「离开期间发生的」；非建任务的 task 事件不上摘要
-  appendEvent(db, { actor: "import", now: 1000, approxTime: true }, { project: "p", target: "T1", kind: "verify", text: "回填", data: { result: "pass" } });
-  appendEvent(db, { actor: "agent-pm", now: 1100 }, { project: "p", target: "T1", kind: "verify", text: "\n  线上验证失败：首屏白屏\n第二行不下发", data: { result: "fail", secret: "x" } });
+  verifyEvent(db, { actor: "import", now: 1000, approxTime: true }, { project: "p", target: "T1", text: "回填", data: { result: "pass" } });
+  verifyEvent(db, { actor: "agent-pm", now: 1100 }, { project: "p", target: "T1", text: "\n  线上验证失败：首屏白屏\n第二行不下发", data: { result: "fail", secret: "x" } });
   appendEvent(db, { actor: "agent-pm", now: 1200 }, { project: "p", target: "", kind: "note", text: "项目级的不算" });
   createTask(db, { actor: "owner", now: 1300 }, { project: "p", id: "T9", title: "新派", kind: "code", agent: "agent-x" });
   closeLedger(ledgerPath);
@@ -151,14 +151,14 @@ describe("GET /me/last-seen/:project?events=1 与 lib/ledger-since", () => {
     const db = openLedger(path);
     try {
       createTask(db, { actor: "owner", now: 1 }, { project: "p", id: "T1", title: "t", kind: "code", agent: "a" });
-      appendEvent(db, { actor: "a", now: 5 }, { project: "p", target: "T1", kind: "verify", data: { result: "pass" } });
+      verifyEvent(db, { actor: "a", now: 5 }, { project: "p", target: "T1", data: { result: "pass" } });
       for (let i = 0; i < SINCE_EVENTS_LIMIT * 3; i++) {
-        appendEvent(db, { actor: "import", now: 6 + i, approxTime: true }, { project: "p", target: "T1", kind: "verify", data: { result: "pass" } });
+        verifyEvent(db, { actor: "import", now: 6 + i, approxTime: true }, { project: "p", target: "T1", data: { result: "pass" } });
       }
       const few = sinceEvents(db, "p", 0);
       expect(few.events.map((e) => e.ts)).toEqual([1, 5]);
       expect(few.truncated).toBe(false);
-      for (let i = 0; i < SINCE_EVENTS_LIMIT + 30; i++) appendEvent(db, { actor: "a", now: 10_000 + i }, { project: "p", target: "T1", kind: "verify", data: { result: "pass" } });
+      for (let i = 0; i < SINCE_EVENTS_LIMIT + 30; i++) verifyEvent(db, { actor: "a", now: 10_000 + i }, { project: "p", target: "T1", data: { result: "pass" } });
       const got = sinceEvents(db, "p", 0);
       expect(got.events.length).toBe(SINCE_EVENTS_LIMIT);
       expect(got.truncated).toBe(true);

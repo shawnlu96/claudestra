@@ -2,7 +2,7 @@
 import type { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { closeLedger, getItem, getMeta, getTask, LedgerError, listEvents, openLedger } from "../src/lib/ledger-store.js";
-import { appendEvent, createItem, createTask, deliver, importTask, moveStage, recordReview, renameAgentRefs, setFrozen, setItem, setMeta, setTask } from "../src/lib/ledger-write.js";
+import { appendEvent, createItem, createTask, deliver, importTask, moveStage, recordReview, recordVerify, renameAgentRefs, setFrozen, setItem, setMeta, setTask } from "../src/lib/ledger-write.js";
 import { taskMetrics } from "../src/lib/ledger-metrics.js";
 
 const P = "claude-orchestrator";
@@ -92,7 +92,11 @@ describe("moveStage", () => {
       ["fix", "review", EXE.actor], ["review", "merge", PM.actor], ["merge", "live", PM.actor], ["live", "verified", PM.actor],
       ["verified", "done", PM.actor],
     ];
-    for (const [from, to, actor] of path) moveStage(db, { actor }, { taskId: "T8a", from: from as never, to: to as never });
+    for (const [from, to, actor] of path) {
+      // 进 verified 只经完成检查单（recordVerify）；它推阶段时同样记一条 stage 事件
+      if (to === "verified") recordVerify(db, { actor }, { taskId: "T8a", result: "pass", data: { checks: [{ id: "pr-merged", status: "pass" }] } });
+      else moveStage(db, { actor }, { taskId: "T8a", from: from as never, to: to as never });
+    }
     expect(getTask(db, "T8a")).toMatchObject({ stage: "done", round: 4, specRev: 2 });
     const stages = events().filter((e) => e.kind === "stage");
     expect(stages).toHaveLength(path.length);
@@ -172,9 +176,10 @@ describe("项目级与追加事件", () => {
     setFrozen(db, PM, { project: P, frozen: false });
     expect(listEvents(db, { project: P, target: "" }).map((e) => e.kind)).toEqual(["meta", "freeze", "unfreeze"]);
   });
-  test("appendEvent 只接受 note / decision / deploy / verify / rollback；目标要在本项目里", () => {
+  test("appendEvent 只接受 note / decision / deploy / rollback（verify 只经 recordVerify）；目标要在本项目里", () => {
     expect(appendEvent(db, { ...OWNER, now: 7 }, { project: P, target: "i10", kind: "decision", text: "你开工吧" }).event).toMatchObject({ ts: 7, actor: "owner" });
     expect(errOf(() => appendEvent(db, PM, { project: P, target: "T8a", kind: "stage" as never })).code).toBe("invalid");
+    expect(errOf(() => appendEvent(db, PM, { project: P, target: "T8a", kind: "verify" as never })).code).toBe("invalid");
     expect(errOf(() => appendEvent(db, PM, { project: "other", target: "T8a", kind: "note" })).code).toBe("not_found");
   });
 });

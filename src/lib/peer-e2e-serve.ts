@@ -41,9 +41,12 @@ export interface ServeDeps {
   dispatch: (inner: Request, peerFp: string) => Promise<Response>;
 }
 
-/** 中继路径上可信的发送方指纹（ingress 按中继盖的章取出，lib/request-context 的 relayFrom）；直连为 undefined */
+/**
+ * 外层已认出的发件人指纹：中继帧取中继入站验过签的 from（request-context 的 relayFrom），直连取 bridge/peer-e2e-route.ts
+ * 验过的外层签名钥匙。有值时 hello 的 from、记录所属会话的发起方都必须是它；undefined 只在进程内单测
+ */
 export interface ServeContext {
-  relayFrom?: string;
+  sender?: string;
 }
 
 const HELLO_MAX = 4096;
@@ -75,7 +78,7 @@ async function hello(req: Request, d: ServeDeps, ctx: ServeContext): Promise<Res
   const h = parseHello(raw);
   if ("error" in h) return e2eError(400, h.error);
   if (h.to !== d.myFp) return e2eError(400, "e2e_wrong_target");
-  if (ctx.relayFrom !== undefined && ctx.relayFrom !== h.from) return e2eError(403, "e2e_peer_mismatch");
+  if (ctx.sender !== undefined && ctx.sender !== h.from) return e2eError(403, "e2e_peer_mismatch");
   const peer = d.peerByFp(h.from);
   if (!peer) return e2eError(403, "e2e_unknown_peer");
   if (!d.outerSigned(req, body, peer.idk)) return e2eError(401, "e2e_signature");
@@ -98,7 +101,7 @@ async function record(req: Request, sid: Uint8Array, rid: bigint, d: ServeDeps, 
   // 1. 找会话
   const s = d.sessions.get(sid);
   if (!s) return e2eError(401, "e2e_session");
-  if (ctx.relayFrom !== undefined && ctx.relayFrom !== s.peerFp) return e2eError(403, "e2e_peer_mismatch");
+  if (ctx.sender !== undefined && ctx.sender !== s.peerFp) return e2eError(403, "e2e_peer_mismatch");
   const body = await readCapped(req, BODY_MAX);
   if (!body) return e2eError(413, "e2e_too_large");
   // 2. 解密全部记录（验 tag、要求见到 final）；失败窗口不动，伪造的大 rid 推不动窗口

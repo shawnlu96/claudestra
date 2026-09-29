@@ -1,6 +1,6 @@
 /**
  * peer 整体加密在本机的那一半（docs/relay/e2e-design.md §5.1）：本机身份与 E2E 钥、按记录 / 地址找 required peer、
- * 明文入站要不要拒。bridge（收发两头）和 manager（peer-http-test、兑换）共用；纯判定函数不碰磁盘，单测在 tests/peer-e2e-link.test.ts。
+ * 明文入站要不要拒。bridge（收发两头）和 manager（peer-http-test、兑换）共用；纯判定函数不碰磁盘，单测在 tests/peer-e2e-gates.test.ts。
  */
 import { machineE2eKey, signE2eKey, type MachineE2eKey, type SignedE2eKey } from "./e2e-machine-key.js";
 import { instanceKeySync, keyFingerprint, type InstanceKey } from "./instance-key.js";
@@ -16,6 +16,10 @@ import { STATE_DIR } from "./paths.js";
 export const RELAY_PAGE_INVITE_WARNING = "这条邀请不加密：经中继打开的页面，中继看得到邀请内容。想要加密，请在本机页面或命令行（peer-invite-new）生成";
 export const RELAY_PAGE_JOIN_REFUSED =
   "这是加密邀请，经中继打开的页面不能加入：中继看得到邀请内容，还能换掉里面的公钥。请在本机页面或命令行（peer-join-auto）加入；也可以请对方用 --allow-legacy 生成不加密的邀请";
+
+/** CLI --allow-legacy 生成的明文邀请给 owner 的警告；经中继的网页生成的另有一句（说清楚为什么、怎么才能加密） */
+const LEGACY_INVITE_WARNING = "这张邀请不加密（--allow-legacy）：兑换和之后的协作经中继都是明文，中继看得到内容";
+export const plainInviteWarning = (viaRelayPage: boolean): string => (viaRelayPage ? RELAY_PAGE_INVITE_WARNING : LEGACY_INVITE_WARNING);
 
 /** P1 不做轮换命令，本机签名块的版本恒为 1（块里留着版本字段给以后换钥匙用） */
 const E2E_KEY_VERSION = 1;
@@ -68,6 +72,12 @@ export async function localE2e(dir: string = STATE_DIR): Promise<LocalE2e | null
   const local = { key, fp: keyFingerprint(key.publicKey), machine, signed: signE2eKey(key, machine.pair.pub, E2E_KEY_VERSION, machine.ts) };
   localCache.set(dir, local);
   return local;
+}
+
+/** 生成邀请时带的密钥（manager peer-invite-new / -list）：本机身份公钥 + 签名 E2E 公钥块；读不到返回 null，调用方拒绝生成加密邀请 */
+export async function inviteKeys(): Promise<{ idk: string; ek: SignedE2eKey } | null> {
+  const l = await localE2e();
+  return l ? { idk: l.key.publicKey, ek: l.signed } : null;
 }
 
 /** 对方在 hello 里拿出了版本更高、验过签的块：换掉 peers.json 里钉住的那块 */

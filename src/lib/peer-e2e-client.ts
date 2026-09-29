@@ -55,7 +55,10 @@ async function codeOf(res: Response): Promise<string> {
   return typeof j?.code === "string" ? j.code : `e2e_http_${res.status}`;
 }
 
-/** 内层响应已认证，reason 可信：对方重启过（没处理，可重发）与已处理过（不能重发）分开报，调用方把这句话原样回给发消息的一方 */
+/**
+ * 重握手后原样重发的那一次才调：内层响应已认证，reason 可信，对方重启过（没处理，可重发）与已处理过（不能重发）分开报，
+ * 调用方把这句话原样回给发消息的一方。第一次发就被拒的不走这里：那是时钟慢了、同一秒发了两条一样的，照原响应交给 peerAuthHint
+ */
 function throwIfInnerReplay(payload: Uint8Array): void {
   let j: { code?: unknown; reason?: unknown } | null = null;
   try {
@@ -114,7 +117,7 @@ export class PeerE2eClient {
     }
     if (!rh) throw new E2eError("e2e_record", "malformed response head");
     const payload = NO_BODY_STATUS.has(rh.status) ? null : concat(...parts.slice(1));
-    if (rh.status === 401 && payload) throwIfInnerReplay(payload);
+    if (isRetry && rh.status === 401 && payload) throwIfInnerReplay(payload);
     return new Response(payload, { status: rh.status, headers: rh.headers });
   }
 

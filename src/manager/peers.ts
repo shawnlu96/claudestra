@@ -1,5 +1,5 @@
 /**
- * HTTP peer 握手与管理命令（peer-http-* / peer-invite-* / peer-join-auto）。
+ * HTTP peer 握手与管理命令（peer-http-* / peer-invite-*；兑换与一键加入在 manager/peer-join.ts）。
  *
  * 从 manager.ts 逐字搬出（函数体未改，只加 export / 改相对路径）。
  */
@@ -7,20 +7,10 @@ import { repoEnvVar } from "../lib/env-file.js";
 import { hostname } from "os";
 import { loadRegistry, output } from "./core.js";
 import { resolveMyBridgeUrl } from "./peers-net.js";
+import { peerAuthHint } from "../lib/peer-auth-hints.js";
 import { inviteLink, isPeerBaseUrl, relayUrlOf } from "../lib/peers.js";
 import { myFingerprint, peerCliFetch, relayStatus } from "./relay.js";
-import type { SignedE2eKey } from "../lib/e2e-machine-key.js";
-import { localE2e, RELAY_PAGE_INVITE_WARNING } from "../lib/peer-e2e-local.js";
-
-/** bridge 兑换路由验过签、核过发送方后传来的 --e2e JSON（{idk, ek}）；形状不对当没有 */
-function redeemE2e(raw: string): { idk: string; ek: SignedE2eKey } | null {
-  try {
-    const o = raw ? JSON.parse(raw) : null;
-    return o && typeof o.idk === "string" && o.ek && typeof o.ek.pub === "string" && typeof o.ek.sig === "string" ? { idk: o.idk, ek: o.ek } : null;
-  } catch {
-    return null; // 解析不了按没带处理：带密钥的邀请会因此被拒，不会降级成明文 peer
-  }
-}
+import { inviteKeys, plainInviteWarning } from "../lib/peer-e2e-local.js";
 
 // ── v2.11+ HTTP peer 握手（docs/design-http-peers.md §3）─────────────────
 
@@ -173,7 +163,7 @@ export async function cmdPeerHttpTest(peerName: string) {
     });
     const body: any = await res.json().catch(() => null);
     if (!res.ok) {
-      output({ ok: false, error: `对方返回 ${res.status}: ${body?.error || "未知"}`, hint: res.status === 401 ? (await import("../lib/peer-trust.js")).peerAuthHint(body) : undefined });
+      output({ ok: false, error: `对方返回 ${res.status}: ${body?.error || "未知"}`, hint: [401, 403, 429].includes(res.status) ? peerAuthHint(body) : undefined });
       return;
     }
     const agents = (body?.agents || []).map((a: any) => ({ name: a.name, status: a.status }));
@@ -264,36 +254,6 @@ async function sweepExpiredInvites(): Promise<number> {
   return expired.length;
 }
 
-/** 自报名净化 + 撞名后缀。对方的名字是自报的——撞上已有 peer 时必须换名,
- *  否则一张新邀请就能顶掉既有 peer 的 baseUrl/outToken(peer 劫持)。
- *  sameAs 命中的记录不论叫什么都直接沿用它的名字(一个对方一条记录,lib/peers.ts 的 isSame*)。 */
-export async function uniquePeerName(
-  rawName: string,
-  sameAs: (existing: import("../lib/peers.js").HttpPeer) => boolean,
-): Promise<string> {
-  const { readPeers } = await import("../lib/peers.js");
-  const base = rawName.trim().replace(/[^\w-]/g, "").slice(0, 24) || "peer";
-  const data = await readPeers();
-  const all = data.httpPeers || [];
-  const same = all.find(sameAs);
-  if (same) return same.name;
-  let name = base;
-  for (let n = 2; n < 100; n++) {
-    if (!all.some((p) => p.name === name)) return name;
-    name = `${base}-${n}`;
-  }
-  return `${base}-${Date.now() % 10000}`;
-}
-
-/** 邀请里带的密钥：本机身份公钥 + 签名 E2E 公钥块；读不到返回 null */
-async function inviteKeys(): Promise<{ idk: string; ek: SignedE2eKey } | null> {
-  const l = await localE2e();
-  return l ? { idk: l.key.publicKey, ek: l.signed } : null;
-}
-
-const LEGACY_INVITE_WARNING = "这张邀请不加密（--allow-legacy）：兑换和之后的协作经中继都是明文，中继看得到内容";
-const LEGACY_REDEEM_REFUSED = "对方版本太旧，请先升级；确实要连就用 peer-invite-new --allow-legacy 重新生成邀请（这张邀请的兑换口令已明文经过网络，已作废）";
-
 /** 生成一键邀请：预签入站 token + 登记待兑换记录,输出 v2 邀请串。缺省带密钥（兑换走 HPKE、之后整体加密），--allow-legacy 才生成明文邀请 */
 export async function cmdPeerInviteNew(agentsCsv: string, myUrl: string, force: boolean, allowLegacy = false, viaRelayPage = false) {
   const { addPendingInvite, encodePeerInviteV2, INVITE_TTL_MS } = await import("../lib/peers.js");
@@ -312,10 +272,8 @@ export async function cmdPeerInviteNew(agentsCsv: string, myUrl: string, force: 
     output({ ok: false, error: `--url 必须是 http(s):// 开头的对外可达地址或 relay://<本机指纹>` });
     return;
   }
-  const check = await checkPeerScope(agents, force);
-  if (check.error) { output({ ok: false, error: check.error }); return; }
-  const keys = allowLegacy ? null : await inviteKeys();
-  if (!allowLegacy && !keys) { output({ ok: false, error: "本机 E2E 密钥读不到，生成不了加密邀请；确实要连就加 --allow-legacy（明文）" }); return; }
+  const check = await checkPeerScope(agents, force), keys = allowLegacy ? null : await inviteKeys();
+  if (check.error || (!allowLegacy && !keys)) { output({ ok: false, error: check.error ?? "本机 E2E 密钥读不到，生成不了加密邀请；确实要连就加 --allow-legacy（明文）" }); return; }
   const id = `inv_${randomBytes(4).toString("hex")}`;
   const joinSecret = randomBytes(24).toString("hex");
   // 占位 peer 名 "invite:<id>"——兑换时改成对方自报名。占位前缀同时是
@@ -325,13 +283,12 @@ export async function cmdPeerInviteNew(agentsCsv: string, myUrl: string, force: 
   await addPendingInvite({
     id, joinSecret, inTokenId: tokenId, agents, url: myUrl,
     createdAt: new Date(now).toISOString(),
-    expiresAt: new Date(now + INVITE_TTL_MS).toISOString(),
-    ...(keys ? { e2e: true } : {}),
+    expiresAt: new Date(now + INVITE_TTL_MS).toISOString(), ...(keys ? { e2e: true } : {}),
   });
   const invite = encodePeerInviteV2({ v: 2, name: selfPeerName(), url: myUrl, token: secret, join: joinSecret, fp: myFingerprint(), ...(keys ?? {}) });
   output({
     ok: true, id, agents, myUrl, expiresAt: new Date(now + INVITE_TTL_MS).toISOString(), e2e: !!keys,
-    warnings: [...check.warnings, ...(resolved.note ? [resolved.note] : []), ...(keys ? [] : [viaRelayPage ? RELAY_PAGE_INVITE_WARNING : LEGACY_INVITE_WARNING])],
+    warnings: [...check.warnings, ...(resolved.note ? [resolved.note] : []), ...(keys ? [] : [plainInviteWarning(viaRelayPage)])],
     invite, ...(relay?.connected && relay.base ? { link: inviteLink(relay.base, invite), fp: relay.fp } : {}),
     next: relay?.connected ? "把链接发给对方，点开即完成（没装 Claudestra 的人会看到安装指引）。24h 未兑换自动作废。" : "把邀请串发给对方（走任意私聊渠道）→ 对方粘贴即完成。24h 未兑换自动作废。",
   });
@@ -348,8 +305,7 @@ export async function cmdPeerInviteList() {
       id: i.id, agents: i.agents, createdAt: i.createdAt, expiresAt: i.expiresAt,
       // token secret 还在才拼得出完整串（供「再复制一次」;secret 本就落在本机文件里）
       invite: tok?.secret && (!i.e2e || keys)
-        ? encodePeerInviteV2({ v: 2, name: selfPeerName(), url: i.url, token: tok.secret, join: i.joinSecret, fp: myFingerprint(), ...(i.e2e ? keys : {}) })
-        : null,
+        ? encodePeerInviteV2({ v: 2, name: selfPeerName(), url: i.url, token: tok.secret, join: i.joinSecret, fp: myFingerprint(), ...(i.e2e ? keys : {}) }) : null,
     };
   });
   output({ ok: true, count: invites.length, invites, ...(swept ? { sweptExpired: swept } : {}) });
@@ -362,57 +318,4 @@ export async function cmdPeerInviteRevoke(id: string) {
   if (!inv) { output({ ok: false, error: `邀请 "${id}" 不存在（可能已兑换或已过期清扫）` }); return; }
   const revoked = await disableTokenById(inv.inTokenId, true);
   output({ ok: true, revoked: id, tokenDisabled: revoked, note: "邀请串已作废，其内嵌 token 已吊销" });
-}
-
-/** 兑换（我是邀请方,bridge /api/v1/peers/redeem 委托进来）。对方自报 name/url/token/iid——
- *  url+token 可缺:缺 = 这次没给我反方向。iid 命中已有记录 = 同一个对方,合进那条。 */
-export async function cmdPeerInviteRedeem(joinSecret: string, peerName: string, peerUrl: string, peerToken: string, iid = "", fp = "", e2eJson = "") {
-  const { findPendingInviteByJoinSecret, removePendingInvite, upsertHttpPeer, inviteExpired, isSameRedeemer } = await import("../lib/peers.js");
-  const { readPrincipals, writePrincipals, tokenIdOf } = await import("../lib/principals.js");
-  if (!joinSecret || !peerName) { output({ ok: false, error: "peer-invite-redeem --join <secret> --name <对方名> [--url <对方地址>] [--token <对方token>]" }); return; }
-  const inv = await findPendingInviteByJoinSecret(joinSecret);
-  if (!inv) { output({ ok: false, error: "邀请无效或已被使用" }); return; }
-  if (inviteExpired(inv)) {
-    await removePendingInvite(inv.id);
-    await disableTokenById(inv.inTokenId, true);
-    output({ ok: false, error: "邀请已过期（24h）——请对方重新生成" });
-    return;
-  }
-  // 带密钥的邀请只收加密兑换：明文来的说明口令已明文过了网络，作废这张邀请（中继拿着口令也兑换不了）
-  const e2e = redeemE2e(e2eJson);
-  if (inv.e2e && !e2e) {
-    await removePendingInvite(inv.id);
-    await disableTokenById(inv.inTokenId, true);
-    output({ ok: false, code: "e2e_required", error: LEGACY_REDEEM_REFUSED });
-    return;
-  }
-  if (!inv.e2e && e2eJson) { output({ ok: false, error: "这张邀请不加密（--allow-legacy 生成），却收到了加密兑换" }); return; }
-  if (peerUrl && !isPeerBaseUrl(peerUrl)) { output({ ok: false, error: "对方 url 必须是 http(s):// 开头或 relay://<对方指纹>" }); return; }
-  const url = peerUrl.replace(/\/+$/, "");
-  const finalName = await uniquePeerName(peerName, (p) => isSameRedeemer(p, { inTokenId: inv.inTokenId, iid, url }));
-  // 预签 token 的占位 peer 名改成对方真名——GET /peers 的 principals ⋈ 靠它
-  const file = await readPrincipals();
-  const tok = file.principals.find((x) => x.id === `token:${inv.inTokenId}`);
-  if (!tok || tok.disabled) {
-    await removePendingInvite(inv.id);
-    output({ ok: false, error: "邀请对应的 token 已被吊销" });
-    return;
-  }
-  tok.peer = finalName;
-  tok.name = `peer-${finalName}`;
-  // 一个对方只留一张有效入站 token：同一个人重新加入过，之前那张已被这张取代
-  const superseded = file.principals.filter((x) => x !== tok && x.peer === finalName && !x.disabled);
-  for (const x of superseded) x.disabled = true;
-  await writePrincipals(file);
-  const rec = await upsertHttpPeer({
-    name: finalName, inTokenId: inv.inTokenId,
-    ...(url ? { baseUrl: url } : {}),
-    ...(peerToken ? { outToken: peerToken } : {}),
-    ...(iid ? { instanceId: iid } : {}), ...(fp ? { fp } : {}), ...(e2e ? { e2e } : {}),
-  });
-  await removePendingInvite(inv.id);
-  output({
-    ok: true, peer: finalName, agents: inv.agents, oneWay: !rec.outToken, inviteId: inv.id,
-    ...(superseded.length ? { revokedTokens: superseded.map(tokenIdOf) } : {}),
-  });
 }

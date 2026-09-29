@@ -2,7 +2,7 @@
  * 旧 Next BFF 的数据 → bridge（docs/design-hosted-frontend.md §10 ②）。`manager migrate-web-state` 与 install-cli 的自动迁移
  * （lib/legacy-web.ts）都走 migrateWebState：
  *   1. 先把 ~/.claude-orchestrator/web/ 整目录 tar 进 backups/web-<时间戳>.tgz（回滚 = 还原它）
- *   2. settings.db 的 8 张表按列名 INSERT OR IGNORE 进 web-state.sqlite（可重复执行）；登录会话只搬 sha256（legacy_sessions）
+ *   2. settings.db 的 7 张表（apns_devices 不搬）按列名 INSERT OR IGNORE 进 web-state.sqlite（可重复执行）；登录会话只搬 sha256（legacy_sessions）
  *   3. web/config.json 的 groqApiKey / lang 补进 bridge 的 config.json（已设过的不覆盖）
  *   4. 仓库 web/.env.local 的 APNS_* / PUSH_VAPID_SUBJECT 补进仓库根 .env（bridge/push/init.ts 只读根 .env）
  * 旧数据只作废不删（tests/migrate-web-state.test.ts）。
@@ -27,11 +27,14 @@ const columnsOf = (db: Database, table: string): string[] => (db.prepare(`PRAGMA
 const tablesOf = (db: Database): Set<string> =>
   new Set((db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as { name: string }[]).map((r) => r.name));
 
-/** 只复制两边都有的列（旧库缺列 = 那列没数据；新库缺列 = 登录体系那类不搬的表根本不在清单里） */
+/**
+ * 只复制两边都有的列（旧库缺列 = 那列没数据；新库缺列 = 登录体系那类不搬的表根本不在清单里）。
+ * apns_devices 不搬：旧库的行没记登记凭据，搬进来推送端没法按凭据收窄；壳下次启动会自己重新登记
+ */
 export function copyWebStateTables(src: Database, dst: Database): Record<string, TableCopy> {
   const srcTables = tablesOf(src);
   const out: Record<string, TableCopy> = {};
-  for (const table of WEB_STATE_TABLES) {
+  for (const table of WEB_STATE_TABLES.filter((t) => t !== "apns_devices")) {
     if (!srcTables.has(table)) {
       out[table] = { rows: null, inserted: 0 };
       continue;

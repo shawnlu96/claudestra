@@ -24,6 +24,10 @@ import { installTapRescue } from "@/lib/tap-rescue";
 import { postClientLog } from "@/lib/client-log";
 import { reportRuntimeError } from "@/lib/runtime-error";
 import { DevToolsMount } from "../../devtools/dev-mount";
+import { leavePlan } from "@/lib/hash-nav";
+import { backGuard, isNarrow, stripHash } from "@/lib/hash-nav-browser";
+import { useBackSwipe } from "@/lib/use-back-swipe";
+import { asksStore } from "@/features/asks/asks-store";
 
 /** 壳内排障打点 → /api/client-log(仅原生壳;PWA/桌面不发)。 */
 const shellLog = (msg: string) => postClientLog(`[shell] ${msg}`);
@@ -126,10 +130,6 @@ const CONTENT_HASH = "#chat";
 const isContentHash = () =>
   typeof window !== "undefined" &&
   window.location.hash.split("?")[0] === CONTENT_HASH;
-/** 仅移动端（< sm 640px）走 hash 横滑；桌面双栏并存 */
-const isNarrow = () =>
-  typeof window !== "undefined" &&
-  window.matchMedia("(max-width: 639.98px)").matches;
 
 /** Agent 管理页 hash（窄屏伪路由,左滑/返回键退出,同 #terminal 一套导航栈） */
 const MANAGE_HASH = "#manage";
@@ -315,37 +315,23 @@ function ChatInner() {
     setShowContent(true);
   }, []);
 
-  // v2.21.3+ 快速返回白屏(owner 2026-09-02):history.back() 的 popstate 是异步的,
-  // 连点两下返回 / 连续左滑时第二次仍看到 hash 在 → 再 back 一次 → 出栈到 PWA 之前
-  // 的空白页,只能重开 app。两道闸:① back 在途期间忽略重复触发;② 只对我们自己
-  // pushState 打过标的条目 back——刷新/深链带 #chat 进来的基础条目没有标,直接
-  // replaceState 摘掉 hash,不动栈。
-  const backInFlightRef = useRef(false);
+  // 快速返回白屏的两道闸(back 在途忽略重复触发 / 只 back 自己打过标的条目)在 lib/hash-nav.ts,
+  // 与「待你处理」抽屉共用一份;连点返回等回归场景见 tests/web-hash-nav.test.ts
   const toList = useCallback(() => {
     // 壳内排障打点(owner 2026-09-03「返回失效」,iOS 上看不到 console):记走了哪个分支
     if (isNativeShell()) {
       const st0 = window.history.state as { cstra?: string } | null;
-      shellLog(`toList hash=${window.location.hash} state=${JSON.stringify(st0)} inflight=${backInFlightRef.current} len=${window.history.length}`);
+      shellLog(`toList hash=${window.location.hash} state=${JSON.stringify(st0)} inflight=${backGuard.busy()} len=${window.history.length}`);
     }
-    if (isContentHash()) {
-      if (backInFlightRef.current) return;
-      const st = window.history.state as { cstra?: string } | null;
-      if (st?.cstra === "chat") {
-        backInFlightRef.current = true;
-        skipDisableRef.current = true; // 主动返回：保留滑动动画
-        // 一次性监听:这次 back 的 popstate 到达即解锁(不放进共享的 popstate effect——
-        // React Compiler 不允许 effect 用过的 ref 再被后定义的回调改写)
-        window.addEventListener("popstate", () => { backInFlightRef.current = false; }, { once: true });
-        window.history.back();
-        // popstate 没来(极端情况)也别永久锁死
-        setTimeout(() => { backInFlightRef.current = false; }, 800);
-      } else {
-        window.history.replaceState(null, "", window.location.pathname + window.location.search);
-        setShowContent(false);
-      }
-    } else {
-      setShowContent(false);
+    const plan = leavePlan(window.location.hash, CONTENT_HASH, window.history.state, "chat", backGuard.busy());
+    if (plan === "wait") return;
+    if (plan === "back") {
+      skipDisableRef.current = true; // 主动返回：保留滑动动画
+      backGuard.back();
+      return;
     }
+    if (plan === "strip") stripHash();
+    setShowContent(false);
   }, []);
 
   // ── v2.15+ iOS 几何 bug 根治（2026-07-27 用户双截图:输入光标画到卡片
@@ -395,40 +381,13 @@ function ChatInner() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [slideAnim?.running]);
 
-  // ── 移动端横滑手势（2026-07-13 owner）：会话页右滑 → 回列表；列表页左滑 →
-  //    进入已选会话（未选过不动）。起点在横向可滚容器内（代码块等）不启用，
-  //    避免劫持其滚动；纵向为主的手势（滚消息列表）用比例阈值排除。
-  const swipeRef = useRef<{ x: number; y: number; hscroll: boolean } | null>(null);
-  const onShellTouchStart = (e: React.TouchEvent) => {
-    if (!isNarrow() || e.touches.length !== 1) {
-      swipeRef.current = null;
-      return;
-    }
-    let el = e.target as HTMLElement | null;
-    let hscroll = false;
-    while (el && el !== e.currentTarget) {
-      if (el.scrollWidth - el.clientWidth > 4) {
-        hscroll = true;
-        break;
-      }
-      el = el.parentElement;
-    }
-    const t = e.touches[0];
-    swipeRef.current = { x: t.clientX, y: t.clientY, hscroll };
-  };
-  const onShellTouchEnd = (e: React.TouchEvent) => {
-    const s = swipeRef.current;
-    swipeRef.current = null;
-    if (!s || s.hscroll) return;
-    const t = e.changedTouches[0];
-    const dx = t.clientX - s.x;
-    const dy = t.clientY - s.y;
-    if (Math.abs(dx) < 70 || Math.abs(dx) < Math.abs(dy) * 1.6) return;
-    // 原生壳里右滑返回交给 WKWebView 的系统手势(AppDelegate 已开启)——JS 再做一次
-    // 就是双重后退,会退过基础页到白屏
-    if (dx > 0 && showContent) { if (!isNativeShell()) toList(); }
-    else if (dx < 0 && !showContent && activeAgent) toContent();
-  };
+  // ── 移动端横滑手势（2026-07-13 owner）：会话页右滑 → 回列表；列表页左滑 → 进入已选会话（未选过不动）。
+  //    阈值与横向可滚容器的排除在 lib/use-back-swipe.ts。原生壳里右滑返回交给 WKWebView 的系统手势
+  //    (AppDelegate 已开启)——JS 再做一次就是双重后退,会退过基础页到白屏
+  const swipe = useBackSwipe({
+    back: () => { if (showContent && !isNativeShell()) toList(); },
+    forward: () => { if (!showContent && activeAgent) toContent(); },
+  });
 
   const nav = useMemo<ChatNav>(
     () => ({ showContent, toContent, toList }),
@@ -456,11 +415,11 @@ function ChatInner() {
     }
     // v2.22+ 原生壳:绑定 APNs 插件事件(token 登记 / 点通知直达),已授权则静默刷新 token
     if (isNativeShell()) {
-      void import("@/lib/push/native").then((m) => {
+      void Promise.all([import("@/lib/push/native"), import("../scoped-requests")]).then(([m, scoped]) => {
         m.bindNativePushListeners((agent) => {
           closingCollab(toContent)(); // 通知直达：先收起协作视图（恢复已读回执），再开会话
           void store.openAgent(agent);
-        });
+        }, (ask) => asksStore.openDrawer(ask), scoped.markRead); // 「待你处理」推送：打开抽屉定位那张卡；已读回执非全权设备不发
         void m.refreshNativeRegistration();
       });
     }
@@ -620,8 +579,8 @@ function ChatInner() {
           if (el.scrollLeft !== 0) el.scrollLeft = 0;
           if (el.scrollTop !== 0) el.scrollTop = 0;
         }}
-        onTouchStart={onShellTouchStart}
-        onTouchEnd={onShellTouchEnd}
+        onTouchStart={swipe.onTouchStart}
+        onTouchEnd={swipe.onTouchEnd}
       >
         {/* 内容层:两种模式都是铺满根的 flex 行(kb 钉扎已随 flow 模式废弃) */}
         <div className="absolute inset-0 flex overflow-hidden">

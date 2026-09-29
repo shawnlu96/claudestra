@@ -35,6 +35,9 @@ export interface AppConfig {
   /** v2.23+ 归档保留天数（缺省 90；0 = 永不自动清理）。归档目录里的条目超过
    *  这个天数就由每日兜底清掉——归档是"可找回的过期会话"，不是永久仓库。 */
   archiveRetentionDays?: number;
+  /** Codex 子线程自动归档（缺省关）：开了以后每日扫描把 CODEX_SUB_IDLE_DAYS 天没写的子线程收进 archive/archived/，
+   *  那里的文件到 archiveRetentionDays 就被删掉，等于「7 + 90 天」后永久删除，所以要每家 owner 自己开（lib/unmanaged-archive.ts） */
+  autoArchiveCodexSubs?: boolean;
   /** 语音转写用的 Groq API key（bridge/local-api：PUT /api/v1/settings 写、GET 只回尾四位提示；env GROQ_API_KEY 兜底）。
    *  以前在 web BFF 的 ~/.claude-orchestrator/web/config.json，manager migrate-web-state 搬过来。 */
   groqApiKey?: string;
@@ -88,6 +91,7 @@ function merge(base: AppConfig, raw: any): AppConfig {
         : base.autoCompact,
     // 以前漏在这里：任何 set*（读→改→写）都会把磁盘上的 archiveRetentionDays 抹掉
     ...(typeof raw.archiveRetentionDays === "number" ? { archiveRetentionDays: raw.archiveRetentionDays } : {}),
+    ...(typeof raw.autoArchiveCodexSubs === "boolean" ? { autoArchiveCodexSubs: raw.autoArchiveCodexSubs } : {}),
     ...(typeof raw.groqApiKey === "string" && raw.groqApiKey ? { groqApiKey: raw.groqApiKey } : {}),
     ...(typeof raw.quotaLive === "boolean" ? { quotaLive: raw.quotaLive } : {}),
     ...(typeof raw.quotaClaudeBackground === "boolean" ? { quotaClaudeBackground: raw.quotaClaudeBackground } : {}),
@@ -154,6 +158,14 @@ export async function setArchiveRetention(days: number): Promise<AppConfig> {
   const cfg = await readConfig();
   const n = Number.isFinite(days) && days >= 0 ? Math.floor(days) : DEFAULT_ARCHIVE_RETENTION_DAYS;
   cfg.archiveRetentionDays = n;
+  await writeConfig(cfg);
+  return cfg;
+}
+
+/** Codex 子线程自动归档开关（manager codex-sub-archive on|off） */
+export async function setAutoArchiveCodexSubs(enabled: boolean): Promise<AppConfig> {
+  const cfg = await readConfig();
+  cfg.autoArchiveCodexSubs = enabled;
   await writeConfig(cfg);
   return cfg;
 }

@@ -1,10 +1,10 @@
 /**
  * peer-invite-new / peer-invite-redeem / peer-join-auto 的参数解析，从 manager.ts 逐字搬出（manager.ts 没有行数余量，
- * E2E 要加 --allow-legacy 与 --e2e，docs/relay/e2e-design.md §5.1）。
+ * E2E 要加 --allow-legacy 与 --via-relay-page，docs/relay/e2e-design.md §5.1；兑换的 --e2e 在 peer-join.ts parseRedeemArgs）。
  */
 import { extractBoolFlag } from "./core.js";
-import { cmdPeerInviteNew, cmdPeerInviteRedeem } from "./peers.js";
-import { cmdPeerJoinAuto } from "./peers-join.js";
+import { cmdPeerInviteNew } from "./peers.js";
+import { cmdPeerInviteRedeem, cmdPeerJoinAuto, parseRedeemArgs } from "./peer-join.js";
 
 export async function runPeerInviteCommand(cmd: string, args: string[]): Promise<void> {
   switch (cmd) {
@@ -23,21 +23,7 @@ export async function runPeerInviteCommand(cmd: string, args: string[]): Promise
       await cmdPeerInviteNew(agentsCsv, myUrl, force, allowLegacy || viaRelayPage, viaRelayPage);
       break;
     }
-    case "peer-invite-redeem": {
-      let join = "", name = "", url = "", token = "", iid = "", fp = "", e2e = "";
-      for (let i = 0; i < args.length; i++) {
-        const a = args[i];
-        if (a === "--join") join = args[++i] || "";
-        else if (a === "--name") name = args[++i] || "";
-        else if (a === "--url") url = args[++i] || "";
-        else if (a === "--token") token = args[++i] || "";
-        else if (a === "--iid") iid = args[++i] || "";
-        else if (a === "--fp") fp = args[++i] || ""; // 经中继兑换时 bridge 带上的对方指纹
-        else if (a === "--e2e") e2e = args[++i] || ""; // 加密兑换：bridge 验过签的对方 {idk, ek}（bridge/peer-redeem-route.ts）
-      }
-      await cmdPeerInviteRedeem(join, name, url, token, iid, fp, e2e);
-      break;
-    }
+    case "peer-invite-redeem": await cmdPeerInviteRedeem(parseRedeemArgs(args)); break;
     case "peer-join-auto": {
       const { rest: afterForce, value: force } = extractBoolFlag(args, "--force");
       let agentsCsv = "", myUrl = "", peerUrl = "";

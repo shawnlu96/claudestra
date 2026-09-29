@@ -70,7 +70,7 @@ export function createE2eOutbound(d: OutboundDeps) {
       return await clientFor(rec, local, base, raw).fetch(init.method ?? "GET", url.slice(base.length), init.headers ?? {}, body);
     } catch (e) {
       if (!(e instanceof E2eError)) throw e;
-      if (e.code === "e2e_peer_restarted") return Response.json({ ok: false, code: "peer_signature", reason: "replay_before_restart", error: e.message.replace(/^\w+: /, "") }, { status: 401 });
+      if (e.code === "e2e_peer_restarted") return Response.json({ ok: false, code: "peer_signature", reason: "e2e_peer_restarted", error: e.message.replace(/^\w+: /, "") }, { status: 401 });
       if (e.code === "e2e_duplicate") return Response.json({ ok: false, error: DUPLICATE_TEXT }, { status: 409 });
       throw e;
     }

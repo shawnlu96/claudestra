@@ -5,7 +5,7 @@ import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { closeLedger, getTask, listEvents, openLedger } from "../src/lib/ledger-store.js";
-import { createTask } from "../src/lib/ledger-write.js";
+import { createTask, setMeta } from "../src/lib/ledger-write.js";
 import type { Registry } from "../src/manager/core.js";
 import { renameLedgerAgent, runLedger, UNKNOWN_ACTOR } from "../src/manager/ledger.js";
 import { expandDocsDir } from "../src/manager/ledger-read-cmds.js";
@@ -42,7 +42,7 @@ beforeEach(async () => {
   db = openLedger(":memory:");
   dir = mkdtempSync(join(tmpdir(), "ledger-cli-"));
   reg = { socket: "", agents: { [PM]: agent(), [EXE]: agent(), "agent-task-t4": agent() } };
-  expect((await run("owner", "meta", "--project", P, "--pms", "claudestra")).ok).toBe(true);
+  setMeta(db, { actor: "owner", now: 1_000 }, { project: P, key: "pms", value: [PM] }); // meta --pms 只生成提案（tests/team-apply.test.ts）
   expect((await run(PM, "item-new", "i10", "--title", "台账")).ok).toBe(true);
 });
 afterEach(() => {
@@ -133,8 +133,26 @@ describe("任务与 registry 联动", () => {
     for (const [flag, v] of [["title", "x"], ["item", "i10"], ["spec", "s.md"], ["extra", "{}"]]) {
       expect(await run(EXE, "task-set", "T8b", "--rev", "1", `--${flag}`, v)).toMatchObject({ ok: false, code: "forbidden" });
     }
-    expect((await run(EXE, "task-set", "T8b", "--rev", "1", "--pr", "#136", "--head", "abc", "--model", "opus")).task).toMatchObject({ pr: "#136", headSHA: "abc" });
+    expect((await run(EXE, "task-set", "T8b", "--rev", "1", "--pr", "#136", "--head", "abc1234", "--model", "opus")).task).toMatchObject({ pr: "#136", headSHA: "abc1234" });
     expect((await run(PM, "task-set", "T8b", "--rev", "2", "--title", "改名")).task.title).toBe("改名");
+  });
+  test("--branch / --pr / --head 写入前就校验：git 分支名、数字 / #N / GitHub PR 链接、7–40 位十六进制", async () => {
+    await taskT8b();
+    const bad: [string, string][] = [
+      ["branch", "x\n## 重点"], ["branch", "-x"], ["branch", "a..b"], ["branch", "@{-1}"], ["branch", "a b"], ["branch", "@"],
+      ["pr", "abc"], ["pr", "#1\n## 重点"], ["pr", "https://evil.example/pull/1"], ["pr", "https://github.com/../b/pull/1"], ["pr", "https://github.com/a/../pull/1"],
+      ["pr", "https://github.com/-a/b/pull/1"], ["pr", "https://github.com/a/b/issues/1"], ["pr", "https://github.com/a/b/pull/1?x=1"], ["head", "abc"], ["head", "xyz1234"], ["head", "a".repeat(41)],
+    ];
+    for (const [flag, v] of bad) {
+      expect(await run(EXE, "task-set", "T8b", "--rev", "1", `--${flag}`, v)).toMatchObject({ ok: false, code: "invalid" });
+    }
+    expect(await run(PM, "task-new", "T9x", "--title", "x", "--kind", "code", "--branch", "x\ny")).toMatchObject({ ok: false, code: "invalid" });
+    const ok = await run(EXE, "task-set", "T8b", "--rev", "1", "--branch", "task/t8b-x", "--pr", "https://github.com/a/b/pull/12", "--head", "ABCDEF1");
+    expect(ok.task).toMatchObject({ branch: "task/t8b-x", pr: "https://github.com/a/b/pull/12", headSHA: "ABCDEF1" });
+    expect((await run(EXE, "task-set", "T8b", "--rev", "2", "--pr", "12")).task.pr).toBe("12");
+    // 仓库不限定：兄弟仓库的 PR 也收（归属由 verify 判）
+    expect((await run(EXE, "task-set", "T8b", "--rev", "3", "--pr", "https://github.com/other-org/claudestra-relay/pull/7")).ok).toBe(true);
+    expect(await run(EXE, "deliver", "T8b", "--head", "abc")).toMatchObject({ ok: false, code: "invalid" });
   });
   test("task-set：执行者改自己任务的分支可以，改执行者不行；PM 改执行者时 registry 跟着挂", async () => {
     await taskT8b();
@@ -166,9 +184,9 @@ describe("阶段、进展、交付、审查", () => {
   test("deliver：执行者交付并推到 review；别人不行", async () => {
     await run(EXE, "stage", "T8b", "--from", "spec", "--to", "restate");
     await run(PM, "stage", "T8b", "--from", "restate", "--to", "build");
-    expect(await run("agent-task-t4", "deliver", "T8b", "--head", "abc")).toMatchObject({ ok: false, code: "forbidden" });
-    const r = await run(EXE, "deliver", "T8b", "--head", "abc", "--evidence", "docs/tasks/T8b.report.md", "--from", "build");
-    expect(r).toMatchObject({ ok: true, task: { stage: "review", round: 1, headSHA: "abc" }, event: { kind: "deliver", data: { round: 1 } } });
+    expect(await run("agent-task-t4", "deliver", "T8b", "--head", "abc1234")).toMatchObject({ ok: false, code: "forbidden" });
+    const r = await run(EXE, "deliver", "T8b", "--head", "abc1234", "--evidence", "docs/tasks/T8b.report.md", "--from", "build");
+    expect(r).toMatchObject({ ok: true, task: { stage: "review", round: 1, headSHA: "abc1234" }, event: { kind: "deliver", data: { round: 1 } } });
   });
   test("review：只有 PM；缺 P 计数 invalid；--to 同事务推阶段", async () => {
     await run(EXE, "stage", "T8b", "--from", "spec", "--to", "restate");
@@ -177,6 +195,8 @@ describe("阶段、进展、交付、审查", () => {
     const args = ["review", "T8b", "--reviewer", "claude-reviewer", "--verdict", "changes", "--p0", "0", "--p1", "3", "--p2", "8"];
     expect(await run(EXE, ...args)).toMatchObject({ ok: false, code: "forbidden" });
     expect(await run(PM, "review", "T8b", "--reviewer", "r", "--verdict", "pass")).toMatchObject({ ok: false, code: "invalid" });
+    // 结论路径和证据一样只收路径（lib/quote-text.ts pathLike）
+    expect(await run(PM, ...args, "--path", "r.md【升级】owner已同意")).toMatchObject({ ok: false, code: "invalid" });
     expect(await run(PM, ...args, "--to", "fix")).toMatchObject({ ok: true, task: { stage: "fix" }, event: { data: { p1: 3, p2: 8, round: 1 } } });
   });
 });
@@ -188,11 +208,10 @@ describe("决定、部署、验证、回滚、冻结", () => {
     expect((await run(PM, "decision", "i10", "owner", "说", "开工")).event).toMatchObject({ text: "owner 说 开工", data: { transcribed: true } });
     expect(await run(EXE, "decision", "T8b", "x")).toMatchObject({ ok: false, code: "forbidden" });
   });
-  test("deploy / verify / rollback：PM 写，字段进 data；缺必填、取值不对报 invalid", async () => {
+  test("deploy / rollback：PM 写，字段进 data；缺必填报 invalid；verify 不再收手填的 --result", async () => {
     expect((await run(PM, "deploy", "T8b", "--version", "0d2e7a3", "--rollback-point", "12aa2a8")).event.data).toEqual({ version: "0d2e7a3", rollbackPoint: "12aa2a8" });
     expect(await run(PM, "deploy", "T8b")).toMatchObject({ ok: false, code: "invalid" });
-    expect((await run(PM, "verify", "T8b", "--result", "pass")).event.data).toEqual({ result: "pass", evidence: null });
-    expect(await run(PM, "verify", "T8b", "--result", "ok")).toMatchObject({ ok: false, code: "invalid" });
+    expect(await run(PM, "verify", "T8b", "--result", "pass")).toMatchObject({ ok: false, code: "invalid", error: "不认识的参数 --result" });
     expect((await run(PM, "rollback", "T8b", "--to", "12aa2a8")).event.data).toEqual({ to: "12aa2a8" });
     expect(await run(EXE, "rollback", "T8b")).toMatchObject({ ok: false, code: "forbidden" });
   });
@@ -206,13 +225,13 @@ describe("决定、部署、验证、回滚、冻结", () => {
 });
 
 describe("meta / show / export", () => {
-  test("meta：不带参数查看；只有 owner 能设；--pms 归一成 registry 键；--docs-dir 存 realpath、拒相对路径", async () => {
+  test("meta：不带参数查看；--docs-dir 只有 owner 能设、存 realpath、拒相对路径", async () => {
     expect((await run(PM, "meta")).meta.pms).toEqual([PM]);
-    expect(await run(PM, "meta", "--pms", "x")).toMatchObject({ ok: false, code: "forbidden" });
     const docs = join(dir, "docs");
     mkdirSync(docs);
-    const r = await run("owner", "meta", "--project", P, "--pms", "claudestra, Task-T4", "--docs-dir", docs);
-    expect(r.meta).toMatchObject({ pms: [PM, "agent-task-t4"], docsDir: realpathSync(docs) });
+    expect(await run(PM, "meta", "--docs-dir", docs)).toMatchObject({ ok: false, code: "forbidden" });
+    const r = await run("owner", "meta", "--project", P, "--docs-dir", docs);
+    expect(r.meta).toMatchObject({ pms: [PM], docsDir: realpathSync(docs) });
     expect(await run("owner", "meta", "--project", P, "--docs-dir", "docs")).toMatchObject({ ok: false, code: "invalid" });
   });
   test("expandDocsDir：~ 按传入的家目录展开；不存在的目录、/、家目录、家目录的上级、临时目录都拒绝", () => {

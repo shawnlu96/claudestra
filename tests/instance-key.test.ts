@@ -72,4 +72,15 @@ describe("judgeSignature（TOFU）", () => {
     expect(repinned).toMatchObject({ publicKey: key.publicKey, fingerprint: fp, lastCheck: { result: "ok" } });
     expect(judgeSignature(repinned, hdr, () => "stale", T, fp).lastCheck?.result).toBe("stale");
   });
+  test("记录里有完整公钥：只认这一把（不只比 64 位指纹）；公钥的非规范写法一律 bad", () => {
+    const fp = keyFingerprint(key.publicKey);
+    const other = instanceKeySync(mkdtempSync(join(tmpdir(), "ikey5-")))!.publicKey;
+    expect(judgeSignature(undefined, hdr, () => "ok", T, fp, other).lastCheck?.result).toBe("key_changed"); // 指纹相同也不行
+    expect(judgeSignature(undefined, hdr, () => "ok", T, fp, key.publicKey).lastCheck?.result).toBe("ok");
+    const B64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    const pk = key.publicKey, variant = pk.slice(0, -1) + B64[B64.indexOf(pk.at(-1)!) ^ 1];
+    expect(Buffer.from(variant, "base64url").equals(Buffer.from(pk, "base64url"))).toBe(true); // 解出同样的 32 字节
+    expect(isPublicKey(variant)).toBe(false);
+    expect(judgeSignature(undefined, { ...hdr, key: variant }, () => "ok", T).lastCheck?.result).toBe("bad");
+  });
 });

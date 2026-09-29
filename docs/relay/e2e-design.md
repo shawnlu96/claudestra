@@ -323,7 +323,7 @@ AAD = "cstra-e2e-v1"（按长度前缀编码）后接定长字段：sid(16 字�
 两端都是 bridge，代码都可信，没有 A3 那种「换 JS」的问题。但能防到哪一步，取决于公钥怎么分发。
 
 - **范围**：只覆盖 **P1 之后新建**、「邀请由 CLI 生成，再经带外渠道（聊天软件、当面）交给对方」的 peer。以下两类不覆盖，P1 的对外说法要把它们排除：
-  - 经托管网页生成或加入的邀请：`web/lib/api/system.ts` 的 invite-new / join-auto 走路径模式，P2 之前邀请载荷是明文经过中继的，A2 及以上能替换其中的公钥。实现（`bridge/peers-routes.ts`）：请求经中继（T25 的 `source=relay`）或判不出来源时（fail-closed），生成的邀请一律不加密，并警告「这条邀请不加密：经中继打开的页面，中继看得到邀请内容。想要加密，请在本机页面或命令行生成」；加入加密邀请直接拒，给同样的替代做法。回环、局域网、Tailscale 直连的页面与 CLI 一样（§7.4）；
+  - 经托管网页生成或加入的邀请：`web/lib/api/system.ts` 的 invite-new / join-auto 走路径模式，P2 之前邀请载荷是明文经过中继的，A2 及以上能替换其中的公钥。实现（`bridge/peers-routes.ts`）：请求来源不在 `keyedInvite` 白名单里时（白名单只有回环、局域网，`bridge/request-context.ts`；经中继的 `source=relay`、peer 入口、判不出来源都算不在，fail-closed），生成的邀请一律不加密，并警告「这条邀请不加密：经中继打开的页面，中继看得到邀请内容。想要加密，请在本机页面或命令行生成」；加入加密邀请直接拒，给同样的替代做法。回环、局域网、Tailscale 直连的页面与 CLI 一样（§7.4）；
   - `url` 填的是 `<slug>.<base>` 的 http peer：整条走子域名隧道，全程明文。
 - **签名 E2E 公钥块**：`{v, ts, pub, sig}`。`pub` 是机器 E2E 公钥（P-256，`STATE_DIR/e2e-key.pem`），`sig` 是身份密钥对 `lp("peer-e2e-key", u32 版本号, u64 生成时间秒, 公钥)` 的 Ed25519 签名（编码规则同 §4.1.1）。P1 版本号固定为 1，不做轮换命令；实现 `src/lib/e2e-machine-key.ts`。
 - **公钥怎么交换**（兑换 HPKE 之前就要有邀请方的 E2E 公钥，所以不能等到第一次握手）：
@@ -343,17 +343,19 @@ AAD = "cstra-e2e-v1"（按长度前缀编码）后接定长字段：sid(16 字�
     - `ttl` 不在 th 里，中继能改，发起方把它夹在 60 秒到 24 小时之间，最多只影响换会话的频率。
   - **重发只有一种**：收到明文 `401 e2e_session`，就重新握手，把**同一份内层字节**（同一个内层签名）再发一次，最多一次。这个 401 中继也能伪造，但如果原请求其实已被处理，收方的内层重放缓存会认出同一个签名，拒掉重发，不会处理两次。安全比顺手重要：不接受任何能让中继造成重复处理的方案，比如重发时重新签名。
   - **已知代价**：收方真的重启过时，重启前签的非 GET 请求会被当成重放拒掉。内层响应是认证过的，所以收方的拒绝理由可信，发起方按理由分两种报错，send_to_agent 要把报错原样回给发消息的 agent，不能静默丢掉：
-    - `replay_before_restart` → `e2e_peer_restarted`「对方重启过，请重发」：请求没被处理，可以重发；
+    - `before_start` → `e2e_peer_restarted`「对方重启过，请重发」：请求没被处理，可以重发；
     - `replay` → `e2e_duplicate`「对方已经处理过这条（回复在路上丢了），不要重发」：多半是中继伪造了 401。
+    - 这两种报法只用在重发的那一次。第一次发就被内层拒的（本机时钟慢、同一个签名发了两次），照原响应交给调用方，由 T25 的提示说明原因（`lib/peer-auth-hints.ts`）。
     - peer 在线探测是 GET、每分钟一次，通常会先把会话换新，所以这种失败不常见。残余情况：中继伪造 401，并且对方恰好在原请求被处理之后、重发到达之前重启，这时会报成「对方重启过」，用户重发就会重复。前提是中继伪造 401 与对方重启同时发生，而签名本身 300 秒就过期，这个窗口很窄。
   - 收方和发方都有进程内的端到端测试（`tests/peer-e2e.test.ts`），中间的「中继」会录下、重放、并发重复投递、篡改、伪造错误、冒充应答。
   - **接线**：
     - 出站只有一个出口：bridge 的 `peerFetch`（`bridge/relay-link.ts`）和 manager 的 `peerCliFetch`（`manager/relay.ts`）都先问 `lib/peer-e2e-outbound.ts`，目标是 required peer 就走会话。所以任何调用方都绕不过去。
     - 入站：`serveApiRequest` 最先把 `/api/v1/e2e/*` 交给 `bridge/peer-e2e-route.ts`；解开的内层请求带着会话发起方，从头走一遍原路由。
     - `peerGate` 拒两种请求：required peer 的明文请求（`e2e_required`），以及会话发起方和 token 主人对不上的请求（`e2e_peer_mismatch`）。
-    - 兑换在 `bridge/peer-redeem-route.ts` 和 `manager/peers-join.ts`。
+    - 兑换在 `bridge/peer-redeem.ts`（`redeemPrecheck` 先认出发件人再解信封，之后口令、限速照 T25）和 `manager/peer-join.ts`（两边的 T25 持钥证明照旧：证明放在加密响应里，加入方两道都要过）。
+    - T25 有两道「不带凭据只放兑换」的闸：peer 入口（`bridge/peer-ingress.ts`）和中继入站的发件人核对（`lib/peer-trust.ts` `relayPeerRefusal`）。E2E 帧外层不带 token，两道闸只给 `POST /api/v1/e2e/hello` 和 `POST /api/v1/e2e/<sid>/<rid>` 开口子，逐字匹配（`isE2eFrame`；方法、尾斜杠、大小写、编码、查询串都不放宽）。外层身份不变弱：中继帧照旧核联系人、记下的钥匙、防重放；直连的在 `bridge/peer-e2e-route.ts` 最先验外层实例签名，签名方必须是钉了身份钥匙的 E2E 联系人，失败计入 `peerGate` 的验签失败桶。这些都在任何 ECDH 之前；hello 另按发件人限速（每分钟 20 次）。单测在 `tests/peer-e2e-gates.test.ts`。
     - 进程内集成测试是 `tests/peer-e2e-relay.test.ts`：真中继，B 侧全链路，relay:// 与直连 http 各跑一遍。
-  - **分层**：中继路径上外层实例签名盖住了记录流，中继改帧或重放帧，会先被 relay-inbound 的验签和重放缓存拦下，轮不到 E2E 层；直连路径没有外层验签，由 E2E 层回 `400 e2e_record` / `409 e2e_replay`。两条路的结论一样：不处理，也不回退明文。
+  - **分层**：外层实例签名盖住了记录流。中继路径上改帧或重放帧，先被 relay-inbound 的验签和重放缓存拦下；直连路径上改帧先被 `peer-e2e-route` 的外层验签拦下（`401 e2e_signature`），原样重放的帧签名是对的，由 E2E 层的窗口回 `409 e2e_replay`，AEAD 不过的回 `400 e2e_record`。两条路的结论一样：不处理，也不回退明文。
 - **兑换邀请**：
   - 请求：用 HPKE（RFC 9180 base 模式，DHKEM(P-256, HKDF-SHA256) + HKDF-SHA256 + AES-256-GCM）封装给邀请方的 E2E 公钥，内容是 join 口令，以及兑换方自己的身份公钥和签名 E2E 公钥块。实现 `src/lib/e2e/hpke.ts`，用 CFRG 官方同套件向量钉住。
   - 路径照旧是 `POST /api/v1/peers/redeem`，中继只放行非联系人发这一个路径，所以中继不用改。请求体从明文 `{join, …}` 换成 `{v:1, suite, enc, ct}`，`info = lp("cstra-peer-redeem-v1", 邀请方指纹)`（`src/lib/peer-e2e-redeem.ts`）。
@@ -439,8 +441,9 @@ P1 不做 sealed 推送，理由是：
 9. 请求处理照 §4.1.4 第 1 到 5 步：解密失败不动窗口；重放回 409；查窗口和查会话、查撤销在同一段同步代码里；内层照旧验 Bearer 和签名。
 10. 轮换规则：hello 里只收版本更高的签名块，旧块重放不被采纳。P1 版本恒为 1，测的是规则本身。
 11. peer 被删除或禁用时，它的会话立即作废。
-12. 不覆盖的两类走老路径，不标 `required`：经中继（`source=relay`）或判不出来源的网页上生成的邀请一律不加密并带警告，在这种页面上加入加密邀请被拒并给出替代做法（本机页面或命令行）；`<slug>.<base>` 地址的 peer 走隧道，来源算中继，兑换本来就被拒。回环、局域网的网页与 CLI 一样。三类来源（中继、回环、判不出）各有单测。
+12. 不覆盖的两类走老路径，不标 `required`：不在 `keyedInvite` 白名单里的网页（经中继的 `source=relay`、peer 入口、判不出来源）上生成的邀请一律不加密并带警告，在这种页面上加入加密邀请被拒并给出替代做法（本机页面或命令行）；`<slug>.<base>` 地址的 peer 走隧道，来源算中继，兑换本来就被拒。回环、局域网的网页与 CLI 一样。五类来源（中继、peer 入口、判不出、回环、局域网）各有单测。
 13. 实测 relay:// 和 http 各一次。
+14. T25 两道闸的口子（peer 入口、中继入站的发件人核对）：只给两种 E2E 帧开，逐字匹配，差一点的写法（方法、尾斜杠、大小写、编码、查询串、非规范的 sid / rid）照旧 403 / `sender_forbidden`；中继帧照旧核联系人与记下的钥匙；直连的先验外层签名，签名方必须是钉了身份钥匙的 E2E 联系人；签名不对时一次 ECDH 都不做（数 `deriveBits` 的调用次数），加密兑换认不出发件人也不解信封；验签失败计入 `peerGate` 的失败桶，hello 按发件人限速；解密后内层照旧过 `peerGate`，token 的主人必须是会话发起方（`e2e_peer_mismatch`）。
 
 ## 7. 迁移与兼容
 

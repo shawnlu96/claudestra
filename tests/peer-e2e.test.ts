@@ -32,7 +32,7 @@ async function machine(v = 1): Promise<Machine> {
 const asPeer = (x: Machine, name: string): E2ePeer => ({ name, fp: x.fp, idk: x.id.publicKey, ek: x.blob });
 
 /**
- * B 的内层路由替身：记下处理过的请求；非 GET 按 T25 authApi 的样子查内层签名——签名时间早于本次启动 → replay_before_restart，
+ * B 的内层路由替身：记下处理过的请求；非 GET 按 T25 authApi 的样子查内层签名——签名时间早于本次启动 → before_start，
  * 见过 → replay（401 {code:"peer_signature", reason}）。restart() = 进程重启：去重表清空、启动时刻前移。
  */
 function router() {
@@ -42,7 +42,7 @@ function router() {
   const reject = (reason: string) => Response.json({ ok: false, code: "peer_signature", reason }, { status: 401 });
   const dispatch = async (req: Request) => {
     const sig = req.headers.get(SIG_HEADERS.sig) ?? "";
-    if (req.method !== "GET" && Number(req.headers.get(SIG_HEADERS.ts)) < startedAt) return reject("replay_before_restart");
+    if (req.method !== "GET" && Number(req.headers.get(SIG_HEADERS.ts)) < startedAt) return reject("before_start");
     if (req.method !== "GET" && seenSig.has(sig)) return reject("replay");
     seenSig.add(sig);
     const body = req.method === "GET" ? "" : await req.text();
@@ -80,7 +80,7 @@ async function world(opts: { relay?: Relay; limits?: ConstructorParameters<typeo
     },
     dispatch: (inner) => r.dispatch(inner),
   };
-  const toB = async (req: Request) => (await serveE2e(req, new URL(req.url).pathname, bDeps, { relayFrom: a.fp })) ?? new Response("not found", { status: 404 });
+  const toB = async (req: Request) => (await serveE2e(req, new URL(req.url).pathname, bDeps, { sender: a.fp })) ?? new Response("not found", { status: 404 });
   const posted: string[] = [];
   const client = new PeerE2eClient({
     myFp: a.fp,
@@ -154,7 +154,7 @@ describe("peer E2E：重放与重复投递", () => {
       return fwd(req);
     } });
     await w.call("POST", "/api/v1/agents/x/messages", "once");
-    const again = (await serveE2e(captured!, new URL(captured!.url).pathname, w.bDeps, { relayFrom: w.a.fp }))!;
+    const again = (await serveE2e(captured!, new URL(captured!.url).pathname, w.bDeps, { sender: w.a.fp }))!;
     expect(again.status).toBe(409);
     expect(((await again.json()) as { code: string }).code).toBe("e2e_replay");
     expect(w.r.handled).toHaveLength(1);
@@ -209,6 +209,21 @@ describe("peer E2E：重放与重复投递", () => {
     expect((err as Error).message).toContain("对方重启过，请重发");
     expect(w.r.handled.filter((h) => h.method === "POST")).toHaveLength(0);
     expect((await w.call("POST", "/api/v1/x", "resent")).status).toBe(201);
+  });
+
+  test("第一次发就被内层拒（本机时钟慢、同一签名发了两次）：原样交回 401 给 peerAuthHint，不报成「重启过」「已处理过」", async () => {
+    const w = await world();
+    await w.call("GET", "/api/v1/agents");
+    w.r.restart(1_000); // 会话还在：签名时间早于对方启动只可能是本机时钟慢
+    const slow = await w.call("POST", "/api/v1/x", "slow clock");
+    expect(slow.status).toBe(401);
+    expect(await slow.json()).toMatchObject({ code: "peer_signature", reason: "before_start" });
+    const same = { authorization: "Bearer tok", [SIG_HEADERS.sig]: randomUUID(), [SIG_HEADERS.ts]: "2000" };
+    expect((await w.client.fetch("POST", "/api/v1/x", same, utf8("once"))).status).toBe(201);
+    const twice = await w.client.fetch("POST", "/api/v1/x", same, utf8("once"));
+    expect(twice.status).toBe(401);
+    expect(await twice.json()).toMatchObject({ code: "peer_signature", reason: "replay" });
+    expect(w.r.handled.filter((h) => h.method === "POST")).toHaveLength(1);
   });
 });
 
@@ -277,10 +292,10 @@ describe("peer E2E：篡改与降级", () => {
 describe("peer E2E：hello 的准入", () => {
   test("未知 peer 403、发给别人 400、套件不认识 400、外层没签名 401、中继盖的发送方对不上 403", async () => {
     const w = await world();
-    const hello = async (body: Record<string, unknown>, signed = true, relayFrom = w.a.fp) => {
+    const hello = async (body: Record<string, unknown>, signed = true, sender = w.a.fp) => {
       const raw = utf8(JSON.stringify(body));
       const req = new Request("http://b.local/api/v1/e2e/hello", { method: "POST", body: raw, headers: signed ? signedHeaders("POST", "/api/v1/e2e/hello", raw, w.a.id) : {} });
-      const res = (await serveE2e(req, "/api/v1/e2e/hello", w.bDeps, { relayFrom }))!;
+      const res = (await serveE2e(req, "/api/v1/e2e/hello", w.bDeps, { sender }))!;
       return [res.status, ((await res.json()) as { code: string }).code];
     };
     const base = { v: 1, suite: { kem: 16, kdf: 1, aead: 2 }, from: w.a.fp, to: w.b.fp, ce: toB64url((await generateEcdh()).pub), key: w.a.blob };

@@ -9,20 +9,26 @@
  * - 英文要分单复数的写成「单数|复数」，按 {n} 选（lib/i18n-fill.ts）；中文原文里别用 |。
  * - 品牌名（Claudestra）、模型名、工具名（Read/Edit/Bash）、agent 名不进字典。
  */
+import { ATTACH_DICT } from "./i18n-dict-attach";
+import { TOOLS_DICT } from "./i18n-dict-tools";
 import { BOUNDARY_DICT } from "./i18n-dict-boundary";
 import { COLLAB_DICT } from "./i18n-dict-collab";
 import { LEDGER_DICT } from "./i18n-dict-ledger";
+import { MEDIA_DICT } from "./i18n-dict-media";
 import { QUOTA_DICT } from "./i18n-dict-quota";
 import { CONTACTS_DICT } from "./i18n-dict-contacts";
 import { SESSIONS_DICT } from "./i18n-dict-sessions";
+import { SKILLS_DICT } from "./i18n-dict-skills";
 
 export const DICT: Record<string, string> = {
-  ...LEDGER_DICT, ...COLLAB_DICT, ...BOUNDARY_DICT,
+  ...LEDGER_DICT, ...COLLAB_DICT, ...BOUNDARY_DICT, ...ATTACH_DICT, ...TOOLS_DICT, ...MEDIA_DICT,
   ...QUOTA_DICT, // 订阅额度卡片组与开关（lib/i18n-dict-quota.ts）
   ...CONTACTS_DICT, // 侧栏联系人与输入框 @（lib/i18n-dict-contacts.ts）
   ...SESSIONS_DICT, // 未纳管会话 / 归档（lib/i18n-dict-sessions.ts）
+  ...SKILLS_DICT, // 技能库与按会话启停（lib/i18n-dict-skills.ts）
   // ── 通用 ─────────────────────────────────────────────
   "关闭": "Close",
+  "斜杠命令只有 owner 能用，请直接发文字": "Slash commands are owner-only — send it as plain text", // bridge/api-slash.ts 的 slash_owner_only
   "正在回复…": "Replying…",
   "仍在工作…": "Still working…",
   "正在压缩上下文…": "Compacting context…",
@@ -161,6 +167,7 @@ export const DICT: Record<string, string> = {
   "最近": "Last seen",
   "确定？": "Sure?",
   "退出登录": "Sign out",
+  "这台设备只能用分享给它的会话，看不到、也管不了别的设备": "This device can only use the sessions shared with it; it can't see or manage other devices",
   "这个浏览器里的机器": "Machines in this browser",
   "添加另一台机器": "Add another machine",
   "切换机器": "Switch machine",
@@ -171,24 +178,6 @@ export const DICT: Record<string, string> = {
   "手机怎么连到这台电脑": "How your phone reaches this computer",
   "{n} 条别的 agent 发来的消息在排队（它这一轮结束或调 check_inbox 时收到）":
     "{n} message from other agents queued (arrives when its turn ends or it calls check_inbox)|{n} messages from other agents queued (arrive when its turn ends or it calls check_inbox)",
-  // ── 设置 · 技能 ──
-  "技能库": "Skills",
-  "这台电脑上的技能": "Skills on this computer",
-  "各 runtime 能用哪些技能、从哪来、同名时谁生效。现在只能看，启用 / 停用和安装后面做。":
-    "Which skills each runtime can use, where they come from, and which one wins on a name clash. Read-only for now; enabling, disabling and installing come later.",
-  "全部": "All",
-  "搜索技能": "Search skills",
-  "没有匹配的技能": "No matching skills",
-  "个人": "personal",
-  "claude.ai 同步": "synced from claude.ai",
-  "自带": "built-in",
-  "共享目录": "shared folder",
-  "被{scope}的同名技能盖过": "overridden by a {scope} skill of the same name",
-  "同名还有 {n} 处": "{n} more with this name",
-  "不在 / 菜单": "hidden from / menu",
-  "只能手动调用": "manual only",
-  "找了哪些目录（{n} 个，{m} 个存在）": "Folders searched ({n}, {m} exist)",
-  "不存在": "missing",
   "这几条路可以同时开着，想用哪个用哪个。每个地址第一次打开都要配对一次：设置 · 设备 → 添加设备。": "These paths can all be on at once; use whichever you like. Each address needs pairing the first time: Settings · Devices → Add device.",
   "局域网": "LAN",
   "自己的域名": "Your own domain",
@@ -482,7 +471,18 @@ export const DICT: Record<string, string> = {
   "新建 project": "New project",
   "id(小写)": "id (lowercase)",
   "显示名(可中文)": "Display name (any language)",
-  "工作目录,一行一个,如 ~/repos/qingniao/miniapp": "Working directories, one per line, e.g. ~/repos/acme/app",
+  "工作目录(绝对路径),一行一个,如 /Users/you/repos/qingniao/miniapp": "Working directories (absolute paths), one per line, e.g. /Users/you/repos/acme/app",
+  // 项目目录校验与改目录的角色校验（模板与 src/lib/project-dirs.ts、src/manager/project-guard.ts 同一份字面量，tests/project-dirs.test.ts 对账）
+  "项目目录要写绝对路径：「{dir}」里的 ~ 不会被展开，请写成「{fix}」": "Project directories must be absolute: “~” in “{dir}” isn’t expanded — write “{fix}”",
+  "项目目录要写绝对路径：「{dir}」里的 $HOME 不会被展开，请写成「{fix}」": "Project directories must be absolute: “$HOME” in “{dir}” isn’t expanded — write “{fix}”",
+  "项目目录要写绝对路径：「{dir}」里的 ~用户名 或环境变量不会被展开，请写成展开后的绝对路径":
+    "Project directories must be absolute: “~user” or environment variables in “{dir}” aren’t expanded — write the expanded absolute path",
+  "项目目录要写绝对路径：「{dir}」是相对路径，请写成绝对路径，例如「{fix}」": "Project directories must be absolute: “{dir}” is relative — write an absolute path, e.g. “{fix}”",
+  "目录「{dir}」已登记在项目 {project} 下：一个目录只能属于一个项目（要合并两个项目用 project-merge <src> <dst>）":
+    "“{dir}” is already registered under project {project}: a directory can belong to one project only (to combine two projects use project-merge <src> <dst>)",
+  "认不出调用方的身份：改项目目录要找 PM 或 owner（网页 / master）": "Caller identity not recognized: ask a PM or the owner (web / master) to change project directories",
+  "{actor} 不是项目 {projects} 的 PM，不能改项目目录：改项目目录要找 PM 或 owner（网页 / master）":
+    "{actor} isn’t a PM of project {projects} and can’t change its directories: ask a PM or the owner (web / master)",
   "工作目录(一行一个,可多仓)": "Working directories (one per line, several repos OK)",
   "项目说明(可选,会注入新建 agent 的上下文)": "Project description (optional, added to new agents' context)",
   "至少要一个工作目录": "At least one working directory is required",
@@ -508,6 +508,11 @@ export const DICT: Record<string, string> = {
   "任务指令:到点起一个临时 agent 执行,完成后自动清理并报告": "Prompt: a temporary agent runs it on schedule, reports back and is cleaned up",
   "表达式": "Expression",
   "任务指令": "Prompt",
+  "任务名": "Task name",
+  "定时任务的 prompt 只能一行": "A scheduled task's prompt must be a single line",
+  "任务指令里有看不见的控制字符（比如 Tab），请删掉": "The prompt contains an invisible control character (such as Tab) — please remove it",
+  "「{field}」里有换行或看不见的控制字符。到点会原样敲进终端，换行会让它提前提交，所以只能写成一行":
+    "\"{field}\" contains a line break or an invisible control character. It is typed into the terminal as-is at run time, where a line break submits early, so it must be a single line",
   "目录": "Directory",
   "下次": "Next run:", // 后接时间或「已停用」
   "上次": "Last run:",
@@ -699,6 +704,11 @@ export const DICT: Record<string, string> = {
   "我自己的设备": "My own device",
   "给别人": "Someone else",
   "只能用你选的会话；不含大总管，没有终端和管理": "Only the sessions you pick; no master, no terminal, no management",
+  "全部会话（不含大总管）": "All sessions (except master)",
+  "默认一个都不开放：至少选一个会话": "Nothing is shared by default — pick at least one session",
+  "这等于开放全部非大总管 agent，以后新建的也算": "This shares every agent except master, including ones created later",
+  "只想给几个就逐个勾选；确定要全部就再点一次下面的按钮。": "To share just a few, pick them one by one; to share everything, press the button below again.",
+  "确定开放全部": "Yes, share all",
   "给谁，比如「Alex 的手机」": "Who is it for, e.g. \"Alex's phone\"",
   "生成配对码": "Create pairing code",
   "添加设备": "Add device",
@@ -814,6 +824,7 @@ export const DICT: Record<string, string> = {
 
   // ── 会话级模型/effort 切换器 ─────────────────────────
   "当前模型与 effort，点击切换": "Current model & effort — tap to switch",
+  "当前模型与 effort": "Current model & effort",
   // ── Pi 会话的模型/思考档位切换器（v2.23+） ─────────────
   "Pi 会话：当前模型与思考档位，点击切换": "Pi session: current model & thinking level — tap to switch",
   "Codex 会话：当前模型与推理档位，点击切换": "Codex session: current model & reasoning level — tap to switch",

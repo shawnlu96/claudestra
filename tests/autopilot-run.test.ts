@@ -94,6 +94,12 @@ describe("yieldReason：人优先", () => {
     expect(yieldReason({ online: true, turnBusy: false, lastHumanAt: NOW - T.humanQuietMs }, NOW)).toBeNull();
     expect(yieldReason({ online: true, turnBusy: false }, NOW)).toBeNull();
   });
+  test("人叫停了（之后没再说别的）→ 不推进，哪怕已经安静很久；打断收尾提醒还没投 → 先等它（T13a）", () => {
+    expect(yieldReason({ online: true, turnBusy: false, interruptHold: "stopped" }, NOW)).toBe("human_stopped");
+    expect(yieldReason({ online: true, turnBusy: false, lastHumanAt: NOW - T.humanQuietMs * 10, interruptHold: "stopped" }, NOW)).toBe("human_stopped");
+    expect(yieldReason({ online: true, turnBusy: false, interruptHold: "notice" }, NOW)).toBe("cut_notice");
+    expect(yieldReason({ online: true, turnBusy: false, interruptHold: null }, NOW)).toBeNull();
+  });
 });
 
 describe("parseResetAt", () => {
@@ -136,6 +142,12 @@ describe("parseResetAt", () => {
   });
   test("新版 CC 的 session / weekly limit 文案照样解析", () => {
     expect(parseResetAt("You've hit your session limit · resets 4:30pm (Asia/Tokyo)", Date.parse("2026-09-28T03:00:00Z"))).toBe(Date.parse("2026-09-28T07:30:00Z"));
+  });
+  test("带星期：resets Fri 9am → 下一个周五；今天就是那天且已过 → 下周", () => {
+    const mon = Date.parse("2026-09-28T03:00:00Z"); // 周一，东京 12:00
+    expect(parseResetAt("You've hit your weekly limit · resets Fri 9am (Asia/Tokyo)", mon)).toBe(Date.parse("2026-10-02T00:00:00Z"));
+    expect(parseResetAt("resets Mon 1pm (Asia/Tokyo)", mon)).toBe(Date.parse("2026-09-28T04:00:00Z"));
+    expect(parseResetAt("resets Mon 11am (Asia/Tokyo)", mon)).toBe(Date.parse("2026-10-05T02:00:00Z"));
   });
   test("认不出 / 太远 → null", () => {
     expect(parseResetAt("You've hit your usage limit", NOW)).toBeNull();

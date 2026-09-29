@@ -162,6 +162,17 @@
 .vd.pass { color: var(--ok); background: color-mix(in srgb, var(--ok) 12%, transparent); }
 .vd.changes, .vd.block { color: var(--err); background: color-mix(in srgb, var(--err) 12%, transparent); }
 .rr .tx { color: var(--muted); font-size: var(--fs-3); margin-top: 3px; }
+.ckHead { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; }
+.ckMeta { font-size: var(--fs-3); color: var(--muted); margin: -4px 0 8px; }
+.ckFailText { color: var(--err); }
+.ckHead .tm { color: var(--faint); font-family: var(--mono); font-size: var(--fs-3); }
+.ck { display: grid; grid-template-columns: 16px 1fr; gap: 8px; font-size: var(--fs-2); color: var(--text-2); margin-bottom: 8px; line-height: 1.45; }
+.ck .ic { color: var(--ck); margin-top: 2px; }
+.ck .cl { color: var(--text); }
+.ck .cw { color: var(--warn); font-size: var(--fs-3); }
+.ck .cd { color: var(--muted); font-size: var(--fs-3); overflow-wrap: anywhere; }
+.ckPass { --ck: var(--ok); } .ckFail { --ck: var(--err); } .ckUnknown { --ck: var(--muted); } .ckWaived { --ck: var(--warn); }
+.vd.ckPass, .vd.ckFail, .vd.ckUnknown, .vd.ckWaived { color: var(--ck); background: color-mix(in srgb, var(--ck) 12%, transparent); }
 .ppl { display: flex; flex-direction: column; gap: 10px; }
 .pp { display: grid; grid-template-columns: 28px 1fr; gap: 10px; align-items: start; }
 .pp .av { width: 28px; height: 28px; border-radius: 50%; display: grid; place-items: center; background: var(--panel-2); border: 1px solid var(--line-2); color: var(--text-2); }

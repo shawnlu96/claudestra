@@ -8,18 +8,15 @@
  * 标准 Response 后那两处各改一行；中继错误映射成同名异常（超时类 name=TimeoutError），结局分类照用。
  */
 import { hostname } from "node:os";
-import { readFileSync } from "node:fs";
 import { connect, RelayError, type RelayClient } from "../lib/relay-client.js";
 import type { RelayLinkInfo } from "../lib/relay-client-types.js";
 import { instanceKeySync, signedHeaders } from "../lib/instance-key.js";
 import { createE2eOutbound, defaultOutboundDeps } from "../lib/peer-e2e-outbound.js";
-import { ensurePeerIngressPort } from "../lib/peer-ingress-config.js";
+import { ensurePeerIngressPort, resolveWebPort } from "../lib/peer-ingress-config.js";
 import { configuredPeerIngressPort, DEFAULT_BRIDGE_PORT } from "../lib/bridge-url.js";
 import { bridgeHttpBase, bridgePortOf } from "../lib/bridge-port.js";
 import { repoEnvVar } from "../lib/env-file.js";
 import { sandboxDisabled } from "../lib/sandbox.js";
-import { REPO_ROOT } from "../lib/repo-root.js";
-import { webPortFromStartScript } from "../lib/cli-install.js";
 import { readPeers } from "../lib/peers.js";
 import { loadRelayPeerView, relayPeerRefusal } from "../lib/peer-trust.js";
 import { FP_RE, slugify, type PeerRecord } from "../lib/relay-protocol.js";
@@ -71,18 +68,6 @@ export async function refreshRelayContacts(): Promise<void> {
   client.setContacts(peers.filter((p) => !p.disabled && p.fp && FP_RE.test(p.fp)).map((p) => p.fp!));
 }
 
-/** Web 的端口：WEB_PORT 显式配置 > web/package.json 的 start 脚本 > 默认 */
-function resolveWebPort(): number {
-  const env = Number(repoEnvVar("WEB_PORT"));
-  if (Number.isInteger(env) && env > 0) return env;
-  try {
-    const pkg = JSON.parse(readFileSync(`${REPO_ROOT}/web/package.json`, "utf8")) as { scripts?: { start?: string } };
-    return webPortFromStartScript(pkg.scripts?.start);
-  } catch {
-    return webPortFromStartScript(undefined); // web 没装：用默认端口，隧道请求会得到 local_unreachable，日志里看得到
-  }
-}
-
 /** bridge 启动时调一次。没配 RELAY_URL 立刻返回；连接失败由客户端库自己退避重连，这里不抛 */
 export async function startRelayLink(deps: { handleApi?: ApiHandler } = {}): Promise<void> {
   const relayUrl = repoEnvVar("RELAY_URL").trim();
@@ -95,12 +80,14 @@ export async function startRelayLink(deps: { handleApi?: ApiHandler } = {}): Pro
   let port = configuredPeerIngressPort({ PEER_INGRESS_PORT: repoEnvVar("PEER_INGRESS_PORT") });
   if (!port) {
     // 没做过 HTTPS 步骤的机器还没有 peer 入口端口：现在挑一个写进 .env，再让入口立刻开起来
-    port = await ensurePeerIngressPort(bridgePortOf(bridgeHttpBase()) ?? DEFAULT_BRIDGE_PORT);
+    port = await ensurePeerIngressPort(bridgePortOf(bridgeHttpBase()) ?? DEFAULT_BRIDGE_PORT, resolveWebPort());
     if (port) await syncPeerIngress();
     else console.error("⚠️ 中继：附近端口全被占，peer 入口开不出来——对方经中继调我会得到 local_unreachable");
   }
   const ingressPort = port;
-  const webBase = `http://127.0.0.1:${resolveWebPort()}`;
+  const webPort = resolveWebPort();
+  const webBase = `http://127.0.0.1:${webPort}`;
+  if (ingressPort === webPort) console.error(`⚠️ 中继：peer 入口端口和网页端口都是 ${webPort}，子域名隧道一律拒绝（local_unreachable）——改 .env 的 PEER_INGRESS_PORT 或 WEB_PORT`);
   const log = (level: "info" | "warn" | "error", msg: string) => (level === "info" ? console.log : console.error)(`🛰 中继: ${msg}`);
   client = connect({
     relayUrl,

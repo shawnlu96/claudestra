@@ -20,8 +20,11 @@ import { existsSync } from "fs";
 import { readFile, readdir } from "fs/promises";
 import { homedir } from "os";
 import { join } from "path";
-import { readRegistryAgents, REGISTRY_PATH } from "../lib/registry.js";
+import { isMasterName, readRegistryAgents, REGISTRY_PATH } from "../lib/registry.js";
 import { resolveClaudeBinary, type Runner } from "../lib/claude-binary.js";
+import { agentInScope, type Principal } from "../lib/principals.js";
+import { canManage } from "../lib/devices.js";
+import { isMasterCwd, masterSessionsAllowed } from "./session-file.js";
 
 // ============================================================
 // 类型
@@ -291,4 +294,31 @@ export async function collectSessions(opts?: {
     readRegistryLite(opts?.registryPath),
   ]);
   return reconcileSessions(raw, jobStates, registry);
+}
+
+/** bg 会话一行摘要：名字、bgId、状态、分身标记 */
+export function bgSessionLine(s: NeutralSessionInfo): string {
+  const mark = s.doppelgangerOf
+    ? `\n　└ ⚠️ 疑似 **${s.doppelgangerOf}** 的分身（${s.doppelgangerReason === "same-name" ? "同名" : "同目录"}）`
+    : s.registeredAgent
+      ? `\n　└ ✓ 正式会话（${s.registeredAgent}）`
+      : "";
+  const intent = s.intent ? `\n　intent: ${s.intent.slice(0, 80)}` : "";
+  return `**${s.name || "(无名)"}** \`${s.bgId}\` — ${s.status}${mark}${intent}`;
+}
+
+/**
+ * GET /sessions 的可见范围：全权凭据（canManage，即 api-respond 的 isFullScope）看全部，含野生会话；其余（包括 scope 为 "*" 的 guest / peer）
+ * 只看 scope 内 agent 的正式会话及其分身。会话 id 是 /agents/resume 收编、takeover 的钥匙（tests/session-gates.test.ts）。
+ * 大总管的会话（名字按 isMasterName，或 cwd 是它的工作目录）只给 masterSessionsAllowed：/sessions/:sid/history 按这个 id 就能读全文。
+ */
+export function visibleSessions(list: NeutralSessionInfo[], principal: Principal, masterDir?: string): NeutralSessionInfo[] {
+  if (canManage(principal)) {
+    if (masterSessionsAllowed(principal)) return list;
+    return list.filter((s) => !isMasterName(s.registeredAgent ?? s.doppelgangerOf) && !(masterDir && isMasterCwd(s.cwd, masterDir)));
+  }
+  return list.filter((s) => {
+    const owner = s.registeredAgent ?? s.doppelgangerOf;
+    return owner ? agentInScope(principal, owner) : false;
+  });
 }

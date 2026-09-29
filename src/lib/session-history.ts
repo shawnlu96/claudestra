@@ -17,8 +17,10 @@ import { existsSync, readdirSync, statSync } from "fs";
 import { open as fsOpen } from "fs/promises";
 import { join } from "path";
 import { projectJsonlPath, findJsonlBySessionId } from "./jsonl-cost.js";
-import { ARCHIVE_ROOT } from "./session-archive.js";
-import { channelBodyText } from "./inbound-body.js";
+import { agentArchiveDir, ARCHIVE_ROOT, realpathWithin } from "./session-archive.js";
+import { channelBodyText, commandRecordLine, commandStdoutLine } from "./inbound-body.js";
+import { dropFailedReplyRows, keepReplyRows, sanitizeComponents } from "./history-components.js";
+import { askIdOfReplyResult } from "./reply-ask-schema.js";
 
 /** 超过此字节数的 session jsonl 走尾读(见 readSessionHistory)。与搜索同阈值。 */
 const MAX_HISTORY_FULL_READ_BYTES = 16 * 1024 * 1024;
@@ -125,6 +127,8 @@ export interface HistoryMessage {
   replyComponents?: ReplyComponentRow[];
   /** reply() 附带的出站附件文件名（basename;取回走 inbox 后缀匹配兜底） */
   replyFiles?: string[];
+  /** 这条 reply 建出的「待你处理」（从 reply 的 tool_result 解析）：网页按 id 认领，不按时间猜 */
+  replyAskId?: string;
   /** 回合耗时 ms(system/turn_duration 回填)——只有正常收尾的回合才有 */
   turnMs?: number;
   /** compact 产生的摘要条目（不是真实用户输入） */
@@ -168,63 +172,9 @@ export function progressNoteOf(block: any): string | null {
  *
  * jsonl-watcher 的 HIDDEN_TOOLS 与 reply_pending 早就认裸名了，这里是漏网的两处。
  */
-function isReplyTool(name: string): boolean {
+export function isReplyTool(name: string): boolean {
   if (name === "reply") return true; // Pi 侧裸名
   return name.startsWith("mcp__") && name.endsWith("__reply");
-}
-
-/** 去掉 ANSI 转义序列（local-command-stdout 里的 \x1b[1m 等，裸渲染是豆腐块）。 */
-function stripAnsi(s: string): string {
-  // eslint-disable-next-line no-control-regex
-  return s.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, "");
-}
-
-/** jsonl 里的 components 不可信——只放行结构完整的按钮行/选单行，其余丢弃。 */
-function sanitizeComponents(raw: unknown): ReplyComponentRow[] {
-  if (!Array.isArray(raw)) return [];
-  const out: ReplyComponentRow[] = [];
-  for (const row of raw) {
-    if (!row || typeof row !== "object") continue;
-    const r = row as Record<string, unknown>;
-    if (r.type === "buttons" && Array.isArray(r.buttons)) {
-      const buttons = r.buttons
-        .filter((b): b is Record<string, unknown> => !!b && typeof b === "object")
-        .filter((b) => typeof b.id === "string" && typeof b.label === "string")
-        .map((b) => ({
-          id: b.id as string,
-          label: b.label as string,
-          ...(typeof b.style === "string" ? { style: b.style } : {}),
-          ...(typeof b.emoji === "string" ? { emoji: b.emoji } : {}),
-        }));
-      if (buttons.length) out.push({ type: "buttons", buttons });
-    } else if ((r.type === "select" || r.type === "multiselect") && typeof r.id === "string" && Array.isArray(r.options)) {
-      const options = r.options
-        .filter((o): o is Record<string, unknown> => !!o && typeof o === "object")
-        .filter((o) => typeof o.label === "string" && typeof o.value === "string")
-        .map((o) => ({
-          label: o.label as string,
-          value: o.value as string,
-          ...(typeof o.description === "string" ? { description: o.description } : {}),
-        }));
-      if (options.length) {
-        // v2.14+ multiselect 与 select 同构，只多 min/max/submitLabel 三个可选字段。
-        // ⚠ 这里漏认一种类型的后果不是「样式不对」而是**整组交互从历史里消失**——
-        // 刷新页面后按钮就没了（owner 2026-07-25 实报「哪有多选按钮」）。
-        out.push({
-          type: r.type as "select" | "multiselect",
-          id: r.id,
-          ...(typeof r.placeholder === "string" ? { placeholder: r.placeholder } : {}),
-          ...(r.type === "multiselect" && typeof r.min === "number" ? { min: r.min } : {}),
-          ...(r.type === "multiselect" && typeof r.max === "number" ? { max: r.max } : {}),
-          ...(r.type === "multiselect" && typeof r.submitLabel === "string"
-            ? { submitLabel: r.submitLabel }
-            : {}),
-          options,
-        });
-      }
-    }
-  }
-  return out;
 }
 
 export interface HistoryPage {
@@ -365,11 +315,11 @@ export async function listAgentSessions(
       sessionJsonlPath(opts.runtime, cwd, sessionId) ?? projectJsonlPath(cwd, sessionId));
   const byId = new Map<string, SessionSummary>();
 
-  const archiveDir = join(opts.archiveRoot ?? ARCHIVE_ROOT, agentName);
-  if (existsSync(archiveDir)) {
+  const archiveDir = agentArchiveDir(agentName, opts.archiveRoot ?? ARCHIVE_ROOT);
+  if (archiveDir && existsSync(archiveDir)) {
     try {
       for (const f of readdirSync(archiveDir)) {
-        if (!f.endsWith(".jsonl")) continue;
+        if (!f.endsWith(".jsonl") || !realpathWithin(join(archiveDir, f), archiveDir)) continue; // 指到目录外的符号链接不读
         const sid = f.replace(/\.jsonl$/, "");
         const s = summarize(sid, "archive", join(archiveDir, f));
         if (s) byId.set(sid, s);
@@ -502,6 +452,40 @@ export async function readSessionHistory(
   }
 }
 
+/** system 类记录（parseHistoryLines 用）：压缩分界线、斜杠命令、回合耗时回填。处理了返回 true，其它 system 记录不进历史 */
+function applySystemRecord(rec: any, seq: number, ts: string | null, all: HistoryMessage[]): boolean {
+  if (rec.type !== "system") return false;
+  if (rec.subtype === "compact_boundary") {
+    // 纯文本不带装饰——system 条目的分隔线样式由各前端自己渲染
+    all.push({ seq, ts, role: "system", text: "上下文已压缩（compact）" });
+    return true;
+  }
+
+  // 新版 CC 把斜杠命令和它的输出记成成对的 system/local_command（<command-name>… 一条、<local-command-stdout>… 一条），不认就整条从历史里消失
+  if (rec.subtype === "local_command") {
+    const raw = typeof rec.content === "string" ? rec.content : "";
+    const out = commandStdoutLine(raw); // 先认输出：命令的输出里可能恰好印着 <command-name>…
+    const text = out === undefined ? commandRecordLine(raw) : out;
+    if (text) all.push({ seq, ts, role: "system", text });
+    return true;
+  }
+
+  // turn_duration → 回填到刚结束的那轮 assistant 的 turnMs。
+  // 只有正常收尾的回合才有这条(被打断的没有),前端据此给历史尾轮
+  // 渲染「✓ 完成 · 12.3s」——切后台错过 done 事件后刷新也能看到完成态。
+  if (rec.subtype === "turn_duration" && typeof rec.durationMs === "number") {
+    for (let j = all.length - 1; j >= 0; j--) {
+      if (all[j].role === "assistant") {
+        all[j].turnMs = rec.durationMs;
+        break;
+      }
+      if (all[j].role === "user") break; // 中间隔了用户消息就不回填
+    }
+    return true;
+  }
+  return false;
+}
+
 /**
  * 解析一段 jsonl 行为历史消息。seq = lineOffset + 行内下标,维持「全文件行号」
  * 坐标系(全读时 lineOffset=0;尾读时为窗口前缀的换行数)——与 searchSessionHistory
@@ -521,8 +505,9 @@ function parseHistoryLines(
   runtime?: string,
 ): HistoryMessage[] {
   const all: HistoryMessage[] = [];
-  // tool_use id → 工具卡：后续 user 记录里的 tool_result(is_error) 回填失败态
+  // tool_use id → 工具卡 / reply 气泡：后续 user 记录里的 tool_result 回填失败态、建出的 askId
   const toolById = new Map<string, HistoryToolCall>();
+  const replyById = new Map<string, HistoryMessage>(), replyRows = new Map<string, ReplyComponentRow[]>();
   // v2.21.4 队列附件去重:同一条入站消息若另有 user(isMeta) 记录,以 user 记录为准
   const seenChannelIds = collectChannelMessageIds(lines);
 
@@ -533,11 +518,7 @@ function parseHistoryLines(
     if (!rec) continue;
     const ts = typeof rec.timestamp === "string" ? rec.timestamp : null;
 
-    if (rec.type === "system" && rec.subtype === "compact_boundary") {
-      // 纯文本不带装饰——system 条目的分隔线样式由各前端自己渲染
-      all.push({ seq, ts, role: "system", text: "上下文已压缩（compact）" });
-      continue;
-    }
+    if (applySystemRecord(rec, seq, ts, all)) continue; // 压缩分界 / 斜杠命令 / 回合耗时
 
     if (rec.type === "attachment") {
       // v2.21.4 被队列吸收的入站消息:agent 忙时 channel 送达的消息先进 CC 队列,随后
@@ -561,31 +542,15 @@ function parseHistoryLines(
       continue;
     }
 
-    // turn_duration → 回填到刚结束的那轮 assistant 的 turnMs。
-    // 只有正常收尾的回合才有这条(被打断的没有),前端据此给历史尾轮
-    // 渲染「✓ 完成 · 12.3s」——切后台错过 done 事件后刷新也能看到完成态。
-    if (rec.type === "system" && rec.subtype === "turn_duration" && typeof rec.durationMs === "number") {
-      for (let j = all.length - 1; j >= 0; j--) {
-        if (all[j].role === "assistant") {
-          all[j].turnMs = rec.durationMs;
-          break;
-        }
-        if (all[j].role === "user") break; // 中间隔了用户消息就不回填
-      }
-      continue;
-    }
-
     if (rec.type === "user") {
       const c = rec.message?.content;
-      // tool_result 的 is_error 回填到对应工具卡（web 标红失败的调用）。
-      // 回填不影响本条 user 记录自身的过滤逻辑，继续走原流程。
-      if (Array.isArray(c)) {
-        for (const b of c) {
-          if (b?.type === "tool_result" && b.tool_use_id && b.is_error === true) {
-            const tc = toolById.get(b.tool_use_id);
-            if (tc) tc.error = true;
-          }
-        }
+      // tool_result 回填：is_error → 工具卡标红；reply 的 → 气泡记下建出的 askId。不影响本条 user 记录自身的过滤，继续走原流程
+      for (const b of Array.isArray(c) ? c : []) {
+        const tc = b?.type === "tool_result" ? toolById.get(b.tool_use_id) : undefined;
+        if (tc && b.is_error === true) tc.error = true;
+        const rm = b?.type === "tool_result" ? replyById.get(b.tool_use_id) : undefined;
+        if (rm) rm.replyAskId = askIdOfReplyResult(b) ?? rm.replyAskId;
+        if (rm && b.is_error === true) dropFailedReplyRows(rm, replyRows.get(b.tool_use_id)); // 被 bridge 拒发的 reply，按钮不进历史
       }
       const text =
         typeof c === "string"
@@ -607,7 +572,7 @@ function parseHistoryLines(
       }
       if (!text.trim()) continue; // 纯 tool_result 载荷
       // TUI 斜杠命令记录（不带 isMeta 的裸 user 条目）不是用户打的字：
-      //   <command-name>/x</command-name> ± <command-message>…（顺序不定）→ system 轻条目「/x」
+      //   <command-name>/x</command-name> ± <command-message>… ± <command-args>…（顺序不定）→ system 轻条目「/x 参数」
       //   <local-command-stdout>输出</local-command-stdout> → system 轻条目（去 ANSI、截断）
       //   Pi 技能调用 <skill name="x" …>整份 SKILL.md</skill>[参数] → system 轻条目「/x 参数」
       // 不处理会把原始标签 / 整篇技能说明裸渲染成用户气泡。
@@ -620,17 +585,12 @@ function parseHistoryLines(
         continue;
       }
       if (/^<command-(name|message)>/.test(trimmed)) {
-        const cmd = /<command-name>(\/[\w:-]+)<\/command-name>/.exec(trimmed);
-        if (cmd) all.push({ seq, ts, role: "system", text: cmd[1] });
+        const cmd = commandRecordLine(trimmed);
+        if (cmd) all.push({ seq, ts, role: "system", text: cmd });
         continue; // 无 command-name 的畸形命令记录直接丢
       }
-      const stdout = /^<local-command-stdout>([\s\S]*)<\/local-command-stdout>$/.exec(trimmed);
-      if (stdout) {
-        const body = stripAnsi(stdout[1]).trim();
-        if (!body || body === "(no content)") continue;
-        all.push({ seq, ts, role: "system", text: body.length > 200 ? body.slice(0, 200) + "…" : body });
-        continue;
-      }
+      const stdout = commandStdoutLine(trimmed);
+      if (stdout !== undefined) { if (stdout) all.push({ seq, ts, role: "system", text: stdout }); continue; }
       const skill = /^<skill name="([^"]+)"[^>]*>[\s\S]*<\/skill>([\s\S]*)$/.exec(trimmed);
       if (skill) { all.push({ seq, ts, role: "system", text: `/${skill[1]} ${skill[2].trim()}`.trim() }); continue; }
       // 队列回放的裸斜杠命令：tmux 注入的 /compact 等经 CC 队列会额外落一条纯文本 user 记录，紧接着还有
@@ -649,6 +609,7 @@ function parseHistoryLines(
       const replyTexts: string[] = [];
       const replyComponents: ReplyComponentRow[] = [];
       const replyFiles: string[] = [];
+      const replyIds: string[] = [];
       const tools: HistoryToolCall[] = [];
       const progress: string[] = [];
       for (const b of content) {
@@ -661,17 +622,13 @@ function parseHistoryLines(
           // 直播能看到、进历史就没了）。这样历史与直播都渲染同一份 reply。
           if (isReplyTool(b.name) && typeof b.input?.text === "string" && b.input.text.trim()) {
             replyTexts.push(b.input.text);
+            if (typeof b.id === "string" && b.id) replyIds.push(b.id);
             // reply 附带的按钮/选单也进历史（否则用户不在直播那刻就看不到按钮）
-            replyComponents.push(...sanitizeComponents(b.input?.components));
-            // 出站附件（agent 发给用户的图/文件）：jsonl 里是绝对路径,取 basename
-            // ——bridge 投递时已拷贝到 inbox（时间戳前缀）,取回走后缀匹配兜底
-            if (Array.isArray(b.input?.files)) {
-              for (const f of b.input.files) {
-                if (typeof f === "string" && f.trim()) {
-                  const base = f.trim().split("/").pop();
-                  if (base) replyFiles.push(base);
-                }
-              }
+            replyComponents.push(...keepReplyRows(replyRows, b.id, sanitizeComponents(b.input?.components)));
+            // 出站附件（agent 发给用户的图/文件）：jsonl 里是绝对路径,取 basename——bridge 投递时已拷贝到 inbox（时间戳前缀）,取回走后缀匹配兜底
+            for (const f of Array.isArray(b.input?.files) ? b.input.files : []) {
+              const base = typeof f === "string" ? f.trim().split("/").pop() : "";
+              if (base) replyFiles.push(base);
             }
           } else {
             const tc: HistoryToolCall = { name: b.name, summary: fmt(b.name, b.input) };
@@ -692,6 +649,7 @@ function parseHistoryLines(
       if (replyFiles.length) msg.replyFiles = replyFiles;
       if (tools.length) msg.tools = tools;
       if (typeof rec.message?.model === "string") msg.model = rec.message.model;
+      for (const id of replyIds) replyById.set(id, msg);
       all.push(msg);
     }
   }

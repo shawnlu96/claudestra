@@ -1,6 +1,7 @@
 /**
  * 网页上的邀请生成 / 加入按请求来源分流（bridge/peers-routes.ts；docs/relay/e2e-design.md §5.1、§6.1 第 12 条）：
- * 经中继（source=relay）或判不出来源 → 只生成不加密的邀请（--via-relay-page）、拒绝加入加密邀请；回环 / 局域网与 CLI 一样。
+ * 只有回环 / 局域网（request-context.ts keyedInvite 白名单）与 CLI 一样；经中继（source=relay）、peer 入口、判不出来源
+ * → 只生成不加密的邀请（--via-relay-page）、拒绝加入加密邀请。
  */
 import { describe, expect, test } from "bun:test";
 import { createPublicKey, generateKeyPairSync } from "node:crypto";
@@ -19,7 +20,9 @@ const SOURCES: Record<string, RequestContext | null> = {
   unknown: null,
   loopback: { source: "loopback", clientIp: "127.0.0.1", https: false },
   lan: { source: "lan", clientIp: "100.64.0.9", https: false },
+  "peer-ingress": { source: "peer-ingress", clientIp: null, https: false },
 };
+const LOCAL = new Set(["loopback", "lan"]);
 
 function post(path: string, body: unknown, ctx: RequestContext | null): Request {
   const req = new Request(`http://bridge.local/api/v1${path}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
@@ -42,23 +45,23 @@ async function keyedInvite(): Promise<string> {
 const legacyInvite = encodePeerInviteV2({ v: 2, name: "dave", url: "http://100.64.0.7:3847", token: "t".repeat(40), join: "j".repeat(40), iid: "d0d0d0d0d0d0d0d0d0d0d0d0" });
 
 describe("网页生成邀请", () => {
-  test("经中继、判不出来源 → 带 --via-relay-page（不加密 + 警告）；回环、局域网 → 与 CLI 一样", async () => {
+  test("经中继、peer 入口、判不出来源 → 带 --via-relay-page（不加密 + 警告）；回环、局域网 → 与 CLI 一样", async () => {
     for (const [name, ctx] of Object.entries(SOURCES)) {
       const m = recorder();
       const res = (await handlePeersRoutes(post("/peers/invite-new", { agents: ["x"] }, ctx), "/peers/invite-new", OWNER, m.run))!;
       expect(res.status).toBe(200);
-      expect(m.calls[0].includes("--via-relay-page")).toBe(name === "relay" || name === "unknown");
+      expect(m.calls[0].includes("--via-relay-page")).toBe(!LOCAL.has(name));
     }
   });
 });
 
 describe("网页加入邀请", () => {
-  test("加密邀请：经中继、判不出来源 → 400 并给替代做法，manager 不被调用；回环、局域网 → 照常加入", async () => {
+  test("加密邀请：经中继、peer 入口、判不出来源 → 400 并给替代做法，manager 不被调用；回环、局域网 → 照常加入", async () => {
     const invite = await keyedInvite();
     for (const [name, ctx] of Object.entries(SOURCES)) {
       const m = recorder();
       const res = (await handlePeersRoutes(post("/peers/join-auto", { invite }, ctx), "/peers/join-auto", OWNER, m.run))!;
-      if (name === "relay" || name === "unknown") {
+      if (!LOCAL.has(name)) {
         expect(res.status).toBe(400);
         expect(await res.json()).toEqual({ ok: false, error: RELAY_PAGE_JOIN_REFUSED });
         expect(m.calls).toEqual([]);

@@ -18,7 +18,7 @@ import { peerIngressSyncRoute } from "./peer-ingress.js";
 
 /** bridge.ts 只从这一个模块 import 控制路由相关的东西（它在 guard 基线里只许缩，多一行 import 都不行） */
 export { initPeerIngress } from "./peer-ingress.js";
-export { setSocketRequestContext } from "./relay-inbound.js";
+export { socketTrust } from "./relay-inbound.js";
 export { localProbeResponse } from "./local-probe.js";
 import { relayClient, relayInfo } from "./relay-link.js";
 import { activePairingCodeList, activePairingCodes, redeemPairingCode } from "./relay-pairing.js";
@@ -52,7 +52,7 @@ export async function pairNew(req: Request, issuer?: Principal): Promise<Respons
   const i = relayInfo();
   const body = await readJson(req);
   const r = relayClient() && i.connected ? issuePairing({ url: i.url, base: i.base, slug: i.slug, fp: i.fp }, body, issuer) : issuePairing({}, body, issuer);
-  return json(r.ok ? 200 : issuer ? 403 : 500, r);
+  return json(r.ok ? 200 : typeof r.code === "string" ? 400 : issuer ? 403 : 500, r); // 带 code 的是请求体校验失败（guest 没写 agents 等）
 }
 
 async function pairRedeem(req: Request): Promise<Response> {

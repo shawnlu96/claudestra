@@ -1,7 +1,7 @@
 /**
  * peer 整体加密的进程内集成测试（T21a 验收口径：进程内集成 + owner 真机检查单；docs/relay/e2e-design.md §6.1 P1b）。
  * B 全用真件：真中继（src/relay）、真 relay 客户端、真 relay-inbound → 真 peer 入口（ingressRequest）→ 真 E2E 路由
- * （bridge/peer-e2e-route.ts）→ 真兑换路由（bridge/peer-redeem-route.ts）+ 真 manager 邀请 / 兑换命令 → 真 authenticateApi。
+ * （bridge/peer-e2e-route.ts）→ 真兑换路由（bridge/peer-redeem.ts）+ 真 manager 邀请 / 兑换命令 → 真 authenticateApi。
  * B 的状态就是测试进程的 STATE_DIR（tests/preload.ts 给的临时目录）；A 的钥匙与 peer 表全部注入（lib/peer-e2e-outbound.ts）。
  * A 的传输里夹一个可作恶的「中继」钩子：篡改、截断、重放、伪造错误、降级成明文，relay:// 与直连 http 各走一遍。
  */
@@ -13,14 +13,16 @@ import type { Server } from "bun";
 import { authenticateApi } from "../src/bridge/api-auth.ts";
 import { createE2eRoute } from "../src/bridge/peer-e2e-route.ts";
 import { ingressRequest } from "../src/bridge/peer-ingress.ts";
-import { handlePeerRedeem } from "../src/bridge/peer-redeem-route.ts";
+import { handlePeerRedeem } from "../src/bridge/peer-redeem.ts";
 import { makeInboundHandler } from "../src/bridge/relay-inbound.ts";
+import { setRequestContext } from "../src/bridge/request-context.ts";
 import { keyFingerprint, signedHeaders } from "../src/lib/instance-key.ts";
 import { STATE_DIR } from "../src/lib/paths.ts";
 import { localE2e, pinPeerE2eKey, readHttpPeers, RELAY_PAGE_INVITE_WARNING, type LocalE2e } from "../src/lib/peer-e2e-local.ts";
 import { createE2eOutbound } from "../src/lib/peer-e2e-outbound.ts";
 import { openRedeemRequest, readRedeemResponse, sealRedeemRequest, sealRedeemResponse, type SealedRedeem } from "../src/lib/peer-e2e-redeem.ts";
 import { loadRelayPeerView, relayPeerRefusal } from "../src/lib/peer-trust.ts";
+import { signInviteProof } from "../src/lib/invite-proof.ts";
 import { encodePeerInviteV2, parsePeerInviteV2, readPeers, type HttpPeer, type PeerInviteV2 } from "../src/lib/peers.ts";
 import { readPrincipals } from "../src/lib/principals.ts";
 import { connect, type RelayClient } from "../src/lib/relay-client.ts";
@@ -125,7 +127,8 @@ beforeAll(async () => {
   localB = (await localE2e())!;
   const relayUrl = `ws://127.0.0.1:${relay.port}/v1/ws`;
   const refusePeer: Parameters<typeof makeInboundHandler>[0]["refusePeer"] = async (from, req) => relayPeerRefusal(from, req as never, await loadRelayPeerView()); // 同 relay-link.ts
-  b = connect({ relayUrl, key: localB.key, name: "Bob", slug: "bob", log: quiet, onInbound: makeInboundHandler({ webBase: "http://127.0.0.1:9", ingressBase: () => `http://127.0.0.1:${ingress.port}`, refusePeer }) });
+  const onInbound = makeInboundHandler({ webBase: "http://127.0.0.1:9", ingressBase: () => `http://127.0.0.1:${ingress.port}`, refusePeer });
+  b = connect({ relayUrl, key: localB.key, name: "Bob", slug: "bob", log: quiet, onInbound });
   a = connect({ relayUrl, key: localA.key, name: "Alice", slug: "alice", log: quiet });
   for (let t = 0; !(a.info().connected && b.info().connected); t++) {
     if (t > 200) throw new Error("relay clients did not connect");
@@ -217,6 +220,17 @@ describe("兑换", () => {
   });
 });
 
+describe("解开的内层照旧过 peerGate", () => {
+  test("会话发起方拿着别的 peer 的 token：403 e2e_peer_mismatch，签名都不用看", async () => {
+    const req = new Request("http://b.local/api/v1/agents", { headers: { authorization: `Bearer ${tokenForA}` } });
+    setRequestContext(req, { source: "peer-ingress", clientIp: null, https: false, e2e: { peerFp: "aaaa-bbbb-cccc-dddd" } });
+    const res = await authenticateApi(req, new URL(req.url), { rateLimit: false });
+    expect(res).toBeInstanceOf(Response);
+    expect((res as Response).status).toBe(403);
+    expect(await (res as Response).json()).toMatchObject({ code: "e2e_peer_mismatch" });
+  });
+});
+
 for (const [label, base] of [["relay://", () => relayBase], ["直连 http", () => httpBase]] as const) {
   describe(`${label}：往返、降级、作恶的中继`, () => {
     test("加密往返：B 按 alice 的 token 与签名认出人；中继看不到路径、token、正文", async () => {
@@ -237,7 +251,7 @@ for (const [label, base] of [["relay://", () => relayBase], ["直连 http", () =
       expect(handled.length).toBe(n);
     });
 
-    // 中继路径上外层签名盖住正文，改帧先被 relay-inbound 拒（signature mismatch）；直连没有外层签名，E2E 层回 400 e2e_record
+    // 外层签名盖住正文：中继路径上改帧先被 relay-inbound 拒（signature mismatch），直连的先被 peer-e2e-route 拒（401 e2e_signature）
     test("篡改请求、截掉最后一条（final）：都被拒，没被处理，也没退回明文", async () => {
       const n = handled.length;
       for (const cut of [(b: Uint8Array) => b.map((x, i) => (i === b.length - 1 ? x ^ 1 : x)), (b: Uint8Array) => b.subarray(0, b.length - 20)]) {
@@ -245,7 +259,7 @@ for (const [label, base] of [["relay://", () => relayBase], ["直连 http", () =
         hook = async (w, s) => (sent.push(w.url), w.url.endsWith("/hello") ? s(w) : s({ ...w, body: cut(w.body) }));
         const err = await call(base(), "POST", "/api/v1/agents/x/messages", "x").catch((e) => e);
         expect(err).toBeInstanceOf(Error);
-        if (label === "直连 http") expect(err).toMatchObject({ code: "e2e_record" });
+        if (label === "直连 http") expect(err).toMatchObject({ code: "e2e_signature" });
         expect(sent.every((u) => u.includes("/api/v1/e2e/"))).toBe(true);
       }
       hook = null;
@@ -332,11 +346,12 @@ describe("会话与 peer 生命期", () => {
 });
 
 describe("兑换方（B 加入 carol 的邀请）：失败响应中继能伪造，本地状态一概不动", () => {
-  type Mode = "fail" | "plain-ok" | "tampered" | "sealed-ok";
+  type Mode = "fail" | "plain-ok" | "tampered" | "no-proof" | "sealed-ok";
   let mode: Mode = "fail";
   let carol: LocalE2e;
   let srv: Server<undefined>;
   const dirC = mkdtempSync(join(tmpdir(), "peer-e2e-c-"));
+  const CAROL_IID = "c0c0c0c0c0c0c0c0c0c0c0c0";
 
   beforeAll(async () => {
     carol = (await localE2e(dirC))!;
@@ -347,7 +362,10 @@ describe("兑换方（B 加入 carol 的邀请）：失败响应中继能伪造�
         if (mode === "fail") return Response.json({ ok: false, error: "邀请无效或已被使用" }, { status: 400 });
         if (mode === "plain-ok") return Response.json({ ok: true, peer: "b", agents: ["x"], token: "relay-token" });
         const opened = (await openRedeemRequest(carol.machine.pair, carol.fp, body))!;
-        const sealed = await sealRedeemResponse(opened.session, { ok: true, peer: "b", agents: ["x"] });
+        const p = opened.payload as { nonce: string; join: string; inviteUrl: string; idk: string };
+        const fields = { nonce: p.nonce, join: p.join, redeemerFp: keyFingerprint(p.idk), inviterIid: CAROL_IID, inviteUrl: p.inviteUrl };
+        const proof = mode === "no-proof" ? {} : { proof: signInviteProof(fields, carol.key), iid: CAROL_IID }; // T25 的持钥证明，放在加密响应里
+        const sealed = await sealRedeemResponse(opened.session, { ok: true, peer: "b", agents: ["x"], ...proof });
         if (mode === "tampered") sealed.ct = Buffer.from(Buffer.from(sealed.ct, "base64url").map((x, i) => (i === 0 ? x ^ 1 : x))).toString("base64url");
         return Response.json(sealed);
       },
@@ -359,12 +377,12 @@ describe("兑换方（B 加入 carol 的邀请）：失败响应中继能伪造�
   });
 
   const invite = (over: Partial<PeerInviteV2> = {}) => encodePeerInviteV2({
-    v: 2, name: "carol", url: `http://127.0.0.1:${srv.port}`, token: "t".repeat(40), join: "j".repeat(40), iid: "c0c0c0c0c0c0c0c0c0c0c0c0",
+    v: 2, name: "carol", url: `http://127.0.0.1:${srv.port}`, token: "t".repeat(40), join: "j".repeat(40), iid: CAROL_IID,
     fp: carol.fp, idk: carol.key.publicKey, ek: carol.signed, ...over,
   });
 
-  test("伪造的明文失败、伪造的明文「成功」、改过的密文：都只报错，peers.json 与 principals 一个字节都不变", async () => {
-    for (const m of ["fail", "plain-ok", "tampered"] as Mode[]) {
+  test("伪造的明文失败、伪造的明文「成功」、改过的密文、解得开却没有持钥证明：都只报错，peers.json 与 principals 一个字节都不变", async () => {
+    for (const m of ["fail", "plain-ok", "tampered", "no-proof"] as Mode[]) {
       mode = m;
       const before = [readFileSync(join(STATE_DIR, "peers.json"), "utf8"), JSON.stringify(await readPrincipals())];
       const o = await managerInProcess("peer-join-auto", invite());
@@ -387,6 +405,8 @@ describe("兑换方（B 加入 carol 的邀请）：失败响应中继能伪造�
     expect(o).toMatchObject({ ok: true, peer: "carol", remoteAgents: ["x"] });
     const rec = (await bRecord("carol"))!;
     expect(rec.fp).toBe(carol.fp);
+    expect(rec.publicKey).toBe(carol.key.publicKey);
+    expect(rec.instanceId).toBe(CAROL_IID);
     expect(rec.e2e).toEqual({ idk: carol.key.publicKey, ek: carol.signed });
   });
 });

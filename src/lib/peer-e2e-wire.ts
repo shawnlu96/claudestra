@@ -79,6 +79,15 @@ export function parseRecordPath(path: string): { sid: Uint8Array; rid: bigint } 
   return sid && sid.length === 16 && rid < RID_LIMIT ? { sid, rid } : null;
 }
 
+/**
+ * E2E 的两种外层帧，逐字匹配（参数是 path + 查询串）：POST，路径就是 hello 或规范的记录路径，不带查询串；尾斜杠、大小写、
+ * 百分号编码、别的方法一律不算。「不带凭据只放兑换」的两道闸（bridge/peer-ingress.ts、lib/peer-trust.ts relayPeerRefusal）
+ * 只给它们开口子：token 在密文里，外层身份另行核对（bridge/peer-e2e-route.ts）。放宽这里等于放宽那两道闸。
+ */
+export function isE2eFrame(method: string, pathAndQuery: string): boolean {
+  return method === "POST" && (pathAndQuery === E2E_HELLO_PATH || parseRecordPath(pathAndQuery) !== null);
+}
+
 export interface InnerHead {
   method: string;
   path: string;
@@ -118,11 +127,11 @@ export function parseResponseHead(raw: unknown): { status: number; headers: Reco
 }
 
 /**
- * 内层验签被当成重放时，收方 authApi 在（加密、认证过的）内层响应里给的 reason：401 {code:"peer_signature", reason}。
- * 两种要分开报：签名早于对方这次启动 = 对方重启过、请求没被处理，可以重发；签名已见过 = 已经处理过（回复在路上丢了，
- * 多半是中继伪造了 401），不能重发，否则就是处理两次。
+ * 内层验签被当成重放时，收方 authApi 在（加密、认证过的）内层响应里给的 reason：401 {code:"peer_signature", reason}（lib/peer-trust.ts ReplayVerdict）。
+ * 重握手后原样重发撞上它们，两种要分开报：签名早于对方这次启动 = 对方重启过、请求没被处理，可以重发；签名已见过 = 已经处理过
+ * （回复在路上丢了，多半是中继伪造了 401），不能重发，否则就是处理两次。
  */
-export const INNER_REPLAY_REASONS = { restarted: "replay_before_restart", duplicate: "replay" } as const;
+export const INNER_REPLAY_REASONS = { restarted: "before_start", duplicate: "replay" } as const;
 
 /** 收方的明文错误体：只有 code，不带任何细节（中继看得到它，也能伪造它） */
 export const e2eError = (status: number, code: string): Response => Response.json({ ok: false, code }, { status });

@@ -125,15 +125,15 @@ export interface Headline {
 export interface OwnerWait {
   id: string;
   taskId: string | null;
-  /** bridge 名（agent-xxx / master） */
-  fromAgent: string;
+  /** bridge 名（agent-xxx / master）；人 / 系统发起的为 null（只按任务号挂线） */
+  fromAgent: string | null;
   title: string;
 }
 
 /** 这条线在等 owner 的哪件事：挂在这个任务上的优先，其次是这条线的执行者发的、没挂任务的 */
 export function waitFor(t: Pick<LedgerTaskView, "id" | "agent">, waits: readonly OwnerWait[]): OwnerWait | null {
   const agent = bareAgent(t.agent);
-  return waits.find((w) => w.taskId === t.id) ?? waits.find((w) => !w.taskId && agent !== null && bareAgent(w.fromAgent) === agent) ?? null;
+  return waits.find((w) => w.taskId === t.id) ?? waits.find((w) => !w.taskId && agent !== null && !!w.fromAgent && bareAgent(w.fromAgent) === agent) ?? null;
 }
 
 export interface PmStrip {
@@ -176,7 +176,8 @@ export function isStuck(t: LedgerTaskView, now: number): boolean {
 function isProblem(t: LedgerTaskView): boolean {
   if (t.stage === "fix" || t.stage === "blocked") return true;
   const e = t.lastEvent;
-  return !!e && (e.kind === "rollback" || (e.kind === "verify" && e.data.result === "fail"));
+  // 检查单没过（fail）或有项查不到（unknown）都要人看：任务卡在 live，不会自己往前走
+  return !!e && (e.kind === "rollback" || (e.kind === "verify" && e.data.result !== "pass"));
 }
 
 export function attentionOf(t: LedgerTaskView, now: number): Attention {
@@ -225,7 +226,8 @@ export function stageLabel(t: LedgerTaskView, all: readonly LedgerTaskView[], fr
     case "merge":
       return frozen ? tr("合并队列冻结") : tr("等合并 · 队列第 {n} 位", { n: mergeQueuePos(t, all) });
     case "live":
-      return t.lastEvent?.kind === "verify" && t.lastEvent.data.result === "fail" ? tr("线上验证失败") : tr("已上线 · 等验证");
+      if (t.lastEvent?.kind !== "verify" || t.lastEvent.data.result === "pass") return tr("已上线 · 等验证");
+      return tr(t.lastEvent.data.result === "unknown" ? "线上验证查不到结果" : "线上验证失败");
     case "blocked":
       return tr("受阻");
     case "verified":

@@ -7,7 +7,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { closeWebState, openWebState, WEB_STATE_TABLES } from "../src/lib/web-state.js";
+import { closeWebState, openWebState } from "../src/lib/web-state.js";
 import { copyWebStateTables, migrateWebState, type MigrateResult } from "../src/lib/web-state-migrate.js";
 
 let root: string;
@@ -65,7 +65,7 @@ afterAll(() => {
 });
 
 describe("migrateWebState", () => {
-  test("备份 → 复制 8 张表（apns_devices 旧库没有 → rows null）→ 设置补缺；登录体系的表不搬", async () => {
+  test("备份 → 复制 7 张表（apns_devices 不搬：老行没记凭据，壳会重新登记）→ 设置补缺；登录体系的表不搬", async () => {
     const now = new Date("2026-09-27T08:09:10.123Z");
     const r = (await migrateWebState({ webDir, backupDir: join(root, "backups"), targetDb, adopt: fakeAdopt, now })) as MigrateResult;
     expect(r.ok).toBe(true);
@@ -79,7 +79,7 @@ describe("migrateWebState", () => {
     expect(r.tables).toEqual({
       agent_settings: { rows: 1, inserted: 1 }, user_profile: { rows: 1, inserted: 1 }, skill_prefs: { rows: 1, inserted: 1 },
       push_subscriptions: { rows: 1, inserted: 1 }, push_read: { rows: 1, inserted: 1 }, hidden_messages: { rows: 1, inserted: 1 },
-      agent_unread: { rows: 1, inserted: 1 }, apns_devices: { rows: null, inserted: 0 },
+      agent_unread: { rows: 1, inserted: 1 },
     });
     expect(r.config).toEqual({ groqApiKey: true, lang: true });
     expect(adopted).toEqual([{ groqApiKey: "gsk_legacy_key_00000000000", lang: "en" }]);
@@ -98,7 +98,7 @@ describe("migrateWebState", () => {
     db.prepare("UPDATE agent_settings SET init_message = ? WHERE agent = ?").run("新指令", "agent-worker");
     closeWebState(targetDb);
     const r = (await migrateWebState({ webDir, backupDir: join(root, "backups"), targetDb, adopt: fakeAdopt, now: new Date("2026-09-28T00:00:00Z") })) as MigrateResult;
-    for (const t of WEB_STATE_TABLES) expect(r.tables![t].inserted).toBe(0);
+    for (const t of Object.values(r.tables!)) expect(t.inserted).toBe(0);
     expect(existsSync(r.backup)).toBe(true);
     expect(openWebState(targetDb).prepare("SELECT init_message FROM agent_settings WHERE agent = ?").get("agent-worker")).toEqual({ init_message: "新指令" });
     closeWebState(targetDb);
@@ -138,12 +138,16 @@ describe("copyWebStateTables", () => {
     src.prepare("INSERT INTO skill_prefs VALUES (?, ?, ?, ?, ?)").run("run", 0, 3, "t", "junk");
     src.exec("CREATE TABLE user_profile (id INTEGER PRIMARY KEY, nickname TEXT, avatar TEXT, updated_at TEXT)");
     src.prepare("INSERT INTO user_profile VALUES (1, ?, ?, ?)").run("Old", "", "t");
+    src.exec("CREATE TABLE apns_devices (token TEXT PRIMARY KEY, device TEXT, created_at TEXT, last_seen TEXT)");
+    src.prepare("INSERT INTO apns_devices VALUES (?, ?, ?, ?)").run("e5e5", "iPhone", "t", "t");
     const dstPath = join(root, "copy-target.sqlite");
     const dst = openWebState(dstPath);
     const r = copyWebStateTables(src, dst);
     expect(r.skill_prefs).toEqual({ rows: 1, inserted: 1 });
     expect(r.user_profile).toEqual({ rows: 1, inserted: 1 });
     expect(r.agent_settings).toEqual({ rows: null, inserted: 0 });
+    // APNs 设备不搬：旧库的行没记登记凭据，搬进来就是按全权推的无主行（adv3 P2-1）；壳下次启动自己重新登记
+    expect([r.apns_devices, dst.prepare("SELECT COUNT(*) AS n FROM apns_devices").get()]).toEqual([undefined, { n: 0 }]);
     expect(dst.prepare("SELECT name, used_count FROM skill_prefs").get()).toEqual({ name: "run", used_count: 3 });
     expect(dst.prepare("SELECT nickname, claude_nickname FROM user_profile").get()).toEqual({ nickname: "Old", claude_nickname: "" });
     closeWebState(dstPath);
