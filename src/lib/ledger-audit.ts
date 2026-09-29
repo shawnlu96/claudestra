@@ -4,6 +4,7 @@
  * 快照里某个来源为 null = 这一轮没取到（tmux 出错、文件坏了）：依赖它的规则不跑、也不列进 evaluated，
  * 这样取数失败不会把上一轮还开着的异常误标成「已解决」。
  */
+import { owesAdversarial, type SpecPolicy } from "./ledger-handler.js";
 import { currentStageMark, stageTimeline } from "./ledger-metrics.js";
 import { TERMINAL_STAGES, type LedgerEvent, type LedgerTask } from "./ledger-stages.js";
 
@@ -88,6 +89,8 @@ export interface AuditSnapshot {
   agents: readonly AuditAgent[] | null;
   /** 在跑的审查员审的任务（本项目各 agent 的 subagents 解析出来，任务号一律小写） */
   reviewers: readonly { taskId: string; round: number | null }[] | null;
+  /** 编排班子（meta.team，T30）：开了才按规格卡判「还欠对抗式」；dispatcher 有值就用它认调度助理，不再按名字猜 */
+  team?: { dispatcher: string | null } | null;
   /** 合并队列冻结中（meta.queueFrozen）：merge 停着是预期的 */
   queueFrozen?: boolean;
   /** 最近一次解冻（unfreeze 事件）的时刻：merge 停滞从它之后算 */
@@ -122,9 +125,11 @@ export interface AuditResult {
   keep: string[];
 }
 
-const isDispatcher = (name: string) => /dispatch/.test(name);
+const byName = (name: string) => /dispatch/.test(name);
 
-export function auditRecipient(rule: AuditRule, pms: readonly string[]): string | null {
+/** dispatcher = meta.team.dispatcher：有就只认它；没配班子 / 没设调度助理才退回按名字里的 dispatch 猜 */
+export function auditRecipient(rule: AuditRule, pms: readonly string[], teamDispatcher?: string | null): string | null {
+  const isDispatcher = teamDispatcher ? (p: string) => p === teamDispatcher : byName;
   const pm = pms.find((p) => !isDispatcher(p)) ?? null;
   const dispatcher = pms.find(isDispatcher) ?? null;
   return DISPATCH_RULES.includes(rule) ? (dispatcher ?? pm) : (pm ?? dispatcher);
@@ -132,8 +137,11 @@ export function auditRecipient(rule: AuditRule, pms: readonly string[]): string 
 
 const mins = (ms: number) => `${Math.floor(ms / MIN)} 分钟`;
 
-/** blockedBy = 依赖上还挡着它的前置任务；unblockedAt = 依赖最后一次放行的时刻（merge 停滞从它之后算） */
-type AuditTask = { task: LedgerTask; events: readonly LedgerEvent[]; blockedBy?: readonly string[]; unblockedAt?: number | null };
+/**
+ * blockedBy = 依赖上还挡着它的前置任务；unblockedAt = 依赖最后一次放行的时刻（merge 停滞从它之后算）；
+ * specPolicy = 规格卡的审查策略（task-spec.ts specPolicyOf），只在开了班子的项目里取，找不到规格卡记 null（与合并闸门一样不拦）
+ */
+type AuditTask = { task: LedgerTask; events: readonly LedgerEvent[]; blockedBy?: readonly string[]; unblockedAt?: number | null; specPolicy?: SpecPolicy };
 
 interface TaskFacts extends AuditTask {
   /** 进入当前阶段的时刻；导入推断的近似时间 = null（不拿它判超时） */
@@ -152,12 +160,25 @@ const lastOf = (events: readonly LedgerEvent[], kinds: readonly string[], after 
 type Emit = (f: Omit<AuditFinding, "project" | "notify" | "key"> & { keyParts: (string | number)[] }) => void;
 type Keep = (rule: AuditRule, keyParts: (string | number)[]) => void;
 
-function reviewRules(ts: readonly TaskFacts[], reviewers: NonNullable<AuditSnapshot["reviewers"]>, now: number, emit: Emit): void {
+/** 判了通过、但这一轮还欠对抗式（或说不清）：不是等推 merge，而是交调度助理派对抗式（与 review --to merge 闸门同一判定） */
+function owedAfterPass(t: TaskFacts, pass: LedgerEvent, now: number, emit: Emit): void {
+  const owes = owesAdversarial(t.specPolicy, t.events, t.task.round);
+  if (owes === false || now - pass.ts <= AUDIT_THRESHOLDS.reviewNoReviewerMs) return;
+  const { id, round } = t.task;
+  emit({ rule: "review_no_reviewer", taskId: id, since: pass.ts, keyParts: [id, `r${round}`, "adversarial", pass.seq],
+    detail: `${id} 第 ${round} 轮审查判了通过 ${mins(now - pass.ts)}，规格卡要求对抗式，${owes === true ? "这一轮、当前 head 上还没有对抗式通过" : "但说不清还欠不欠"}`,
+    suggestion: owes === true ? "还欠对抗式，派对抗式" : "按规格卡核对还欠不欠对抗式，欠就派对抗式" });
+}
+
+function reviewRules(ts: readonly TaskFacts[], reviewers: NonNullable<AuditSnapshot["reviewers"]>, team: boolean, now: number, emit: Emit): void {
   const reviewing = new Set(reviewers.map((r) => r.taskId.toLowerCase()));
-  for (const { task, events, stageSince } of ts) {
+  for (const t of ts) {
+    const { task, events, stageSince } = t;
     if (reviewing.has(task.id.toLowerCase())) continue;
     const lastReview = task.stage === "review" && stageSince !== null ? lastOf(events, ["review"], stageSince) : undefined;
-    if (lastReview?.data.verdict === "pass") {
+    if (lastReview?.data.verdict === "pass" && team && owesAdversarial(t.specPolicy, events, task.round) !== false) {
+      owedAfterPass(t, lastReview, now, emit);
+    } else if (lastReview?.data.verdict === "pass") {
       // 审查已通过：该推 merge 或等 owner 拍板，不是再派审查员；从 pass 算起，PM 写 note 不重开
       if (now - lastReview.ts > AUDIT_THRESHOLDS.reviewPassedIdleMs) {
         emit({ rule: "review_passed_idle", taskId: task.id, since: lastReview.ts, keyParts: [task.id, `r${task.round}`, lastReview.seq],
@@ -287,11 +308,11 @@ export function auditLedger(s: AuditSnapshot, now: number): AuditResult {
   const why = (src: keyof NonNullable<AuditSnapshot["unavailable"]>) => s.unavailable?.[src] ?? "取不到";
   const skip = (reason: string, ...rs: AuditRule[]) => rs.forEach((rule) => skipped.push({ rule, reason }));
   const emit: Emit = ({ keyParts, ...f }) =>
-    findings.push({ ...f, project: s.project, key: keyOf(f.rule, keyParts), notify: auditRecipient(f.rule, s.pms) });
+    findings.push({ ...f, project: s.project, key: keyOf(f.rule, keyParts), notify: auditRecipient(f.rule, s.pms, s.team?.dispatcher) });
   const ts = s.tasks.map((t) => facts(t, now));
   const agents = new Map((s.agents ?? []).map((a) => [a.name, a]));
   if (s.reviewers) {
-    reviewRules(ts, s.reviewers, now, emit);
+    reviewRules(ts, s.reviewers, !!s.team, now, emit);
     evaluated.push("review_no_reviewer", "review_passed_idle", "deliver_not_in_review");
   } else skip(why(s.agents ? "reviewers" : "agents"), "review_no_reviewer", "review_passed_idle", "deliver_not_in_review");
   if (s.agents) {

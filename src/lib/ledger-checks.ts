@@ -240,6 +240,8 @@ export interface ReviewInput {
   text?: string;
   /** 同一事务推阶段（review → fix / merge / done / spec） */
   move?: StageMove;
+  /** PM 豁免对抗式（review --waive adversarial，权限在 CLI 层判），只对当时的 head 有效（ledger-handler.ts owesAdversarial） */
+  waive?: "adversarial";
 }
 
 export function checkReview(input: ReviewInput, task: LedgerTask): void {
@@ -250,8 +252,11 @@ export function checkReview(input: ReviewInput, task: LedgerTask): void {
   if (task.stage !== "review") throw new LedgerError("invalid", `任务 ${task.id} 在 ${task.stage}，不在 review，不能记审查结论`, { stage: task.stage });
 }
 
-/** 调用方可直接追加的事件；stage / item / task / meta / freeze 由对应写函数产生，verify 只由 recordVerify 写（否则能伪造一条「检查通过」） */
-export const APPENDABLE_KINDS = ["note", "decision", "deploy", "rollback"] as const;
+/**
+ * 调用方可直接追加的事件；stage / item / task / meta / freeze 由对应写函数产生，verify 只由 recordVerify 写（否则能伪造一条「检查通过」）；
+ * dispatch / escalate 由 `ledger dispatch` / `ledger escalate` 追加（编排班子）
+ */
+export const APPENDABLE_KINDS = ["note", "decision", "deploy", "rollback", "dispatch", "escalate"] as const;
 export type AppendableKind = (typeof APPENDABLE_KINDS)[number];
 
 /**

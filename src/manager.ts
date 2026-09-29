@@ -42,7 +42,6 @@ import {
   ensureSocketDir,
   clearShellInitPrompts,
   isAtShell,
-  probeTuiContract,
   windowHasChildProcess,
   windowChildPids,
   killPidsEscalating,
@@ -79,7 +78,7 @@ import {
   type ManagedRuntimeAdapter,
   type ReadyResult,
 } from "./lib/runtimes/index.js";
-import { listSessionJsonls } from "./lib/runtimes/claude-code.js";
+import { listSessionJsonls, readyTimeoutHint } from "./lib/runtimes/claude-code.js";
 import { gracefulExitWindow } from "./lib/runtimes/graceful-exit.js";
 import { tmuxWindowOps } from "./lib/runtimes/window-ops.js";
 import { agentRuntime, isMasterAgent, readRegistryAgents } from "./lib/registry.js";
@@ -352,24 +351,6 @@ async function spawnFailure(proc: { exited: Promise<number>; stdout: ReadableStr
 // 命令实现
 // ============================================================
 
-/**
- * 启动超时时补一句可操作的诊断。
- *
- * isClaudeReady 完全建立在 TUI 文案上（❯ + 模式 banner）。Claude Code 改了这两处
- * 渲染，症状就是"每次建 agent 都超时"，而错误信息里没有任何线索指向真正的原因 ——
- * 用户只会以为是自己装错了。这里在超时时顺手探一次契约：屏幕上明明有 CC 的界面
- * 却认不出任何标记，就把这条线索直接写进错误里。
- */
-function readyTimeoutHint(pane: string): string {
-  const c = probeTuiContract(pane);
-  if (!c.suspect) return "";
-  return (
-    "。⚠️ 检测到 Claude Code 的界面在屏幕上，但认不出它的状态栏文案 —— " +
-    "如果这是升级 Claude Code 之后才开始出现的，很可能是 TUI 文案变了，" +
-    "需要更新 src/lib/tmux-helper.ts 里的 CC_MODE_BANNER_RE 等匹配规则"
-  );
-}
-
 // ============================================================
 // Projects（v2.21+，owner 2026-08-28「加 project 概念」）
 // ============================================================
@@ -612,7 +593,7 @@ async function cmdCreate(
       cwd: expandedDir,
       // v2.21+ project 上下文注入:目录 + 同伴花名册
       projectContext: await buildProjectContext(proj, tmuxName),
-      extras: { disallowedPreset: perms.preset, disallowedRaw: perms.disallowedRaw, piEnv },
+      extras: { disallowedPreset: perms.preset, disallowedRaw: perms.disallowedRaw, piEnv, role: team.role },
     };
     if (adapter.prepareSession) spec.sessionId = (await adapter.prepareSession(spec)).sessionId;
     // 按窗口 id 操作，并经 gateOps：信号清理接手后不再往 tmux 发任何东西（按名字发可能落到别的窗口）
@@ -886,8 +867,8 @@ async function cmdResume(
       extras: {
         disallowedPreset: perms.preset,
         disallowedRaw: perms.disallowedRaw,
-        // 沿用 registry 里已有的能力档案（resume 不改档案，但必须复现它）
-        piEnv: normalizePiEnvProfile((await loadRegistry()).agents[tmuxName]?.piEnv),
+        // 沿用 registry 里已有的能力档案与班子角色（resume 不改它们，但必须复现）
+        piEnv: normalizePiEnvProfile((await loadRegistry()).agents[tmuxName]?.piEnv), role: (await loadRegistry()).agents[tmuxName]?.role,
       },
     };
     const launched = await launchInWindow(tmuxName, adapter, spec, { cwd: resolvedDir });
@@ -1381,8 +1362,8 @@ async function cmdRestart(name?: string, opts: { includeMaster?: boolean } = {})
       extras: {
         disallowedPreset: info.disallowedPreset,
         disallowedRaw: info.disallowedRaw,
-        // v2.23+ 能力档案随 registry 复现，否则重启后静默变回「继承全局」
-        piEnv: normalizePiEnvProfile(info.piEnv),
+        // v2.23+ 能力档案、编排班子角色（lib/team-roles.ts）随 registry 复现，否则重启后静默变回「继承全局」/ 丢角色
+        piEnv: normalizePiEnvProfile(info.piEnv), role: info.role,
       },
     };
 
@@ -2561,7 +2542,7 @@ switch (cmd) {
   case "list": await cmdList(); break;
   case "repair": await (await import("./manager/repair.js")).cmdRepair(args); break; // 收拾做到一半的 create / kill / rename 与孤儿窗口、频道（默认只列计划）
   case "label": await (await import("./manager/agent-external.js")).cmdAgentLabel(args[0] || "", args.slice(1).join(" ")); break;
-  case "team-link": await (await import("./manager/team.js")).cmdTeamLink(args); break; // 补挂 / 改挂派发者、任务名（manager/team.ts）
+  case "team-link": case "team": { const m = await import("./manager/team.js"); await (cmd === "team" ? m.cmdTeam(args) : m.cmdTeamLink(args)); break; } // 派发树 / 角色；班子 up·down·status
   case "mission": case "autopilot": await (await import("./manager/mission.js")).cmdMission(args); break; // Autopilot（原名值守，lib/missions.ts）
   case "ledger": await (await import("./manager/ledger.js")).cmdLedger(args); break; // 内置台账（manager/ledger.ts，lib/ledger-*.ts）
   case "archive-workflows": await (await import("./manager/archive-workflows.js")).cmdArchiveWorkflows(); break; // workflow 记录回填进归档
@@ -2976,7 +2957,7 @@ switch (cmd) {
         "kill <name> [--force]           — destroy an agent (rerun finishes a half-done kill; --force gives up a channel that can't be deleted)",
         "rename <old-name> <new-name>    — rename (tmux window + registry + Discord channel); rerun finishes a half-done rename",
         "repair [--apply]                — clean up half-done create/kill/rename, orphan windows/channels (dry run unless --apply)",
-        'team-link <name> [--parent <agent|master|none>] [--task "<text>"] — attach an agent under its dispatcher (sidebar tree)',
+        'team-link <name> [--parent <a|master|none>] [--task "<t>"] [--role <r|none>] · team up|down|status --project <id> [--dispatcher] — tree / team',
         "restart [name]                  — restart an agent (all agents if omitted)",
         "list                            — list all agents",
         "sessions [search]               — browse past Claude Code sessions",

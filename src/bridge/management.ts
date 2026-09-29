@@ -10,10 +10,8 @@ import { buildComponents } from "./components.js";
 import { discordReply } from "./discord-api.js";
 // v2.7+ Claude Code agents 模式适配：会话总览面板（Discord 是 SessionsInventory
 // 的渲染器之一，HTTP GET /api/v1/sessions 与本面板共用同一数据源）
-import {
-  collectSessions,
-  type NeutralSessionInfo,
-} from "./sessions-inventory.js";
+import { bgSessionLine, collectSessions, type NeutralSessionInfo } from "./sessions-inventory.js";
+import { confirmDeps, handleTeamButton } from "./team-confirm.js";
 import { cleanupBgJob } from "../lib/bg-jobs.js";
 import { emitEvent } from "./event-bus.js";
 import { runManagerProcess } from "../lib/run-manager.js";
@@ -157,17 +155,6 @@ export async function buildStatusPanel(): Promise<{
 // v2.7+ Claude 会话总览面板（agents 模式适配）
 // ============================================================
 
-/** bg 会话一行摘要：名字、bgId、状态、分身标记 */
-function bgSessionLine(s: NeutralSessionInfo): string {
-  const mark = s.doppelgangerOf
-    ? `\n　└ ⚠️ 疑似 **${s.doppelgangerOf}** 的分身（${s.doppelgangerReason === "same-name" ? "同名" : "同目录"}）`
-    : s.registeredAgent
-      ? `\n　└ ✓ 正式会话（${s.registeredAgent}）`
-      : "";
-  const intent = s.intent ? `\n　intent: ${s.intent.slice(0, 80)}` : "";
-  return `**${s.name || "(无名)"}** \`${s.bgId}\` — ${s.status}${mark}${intent}`;
-}
-
 export async function buildSessionsPanel(): Promise<{ text: string; components: any[] }> {
   const list = await collectSessions();
   if (list === null) {
@@ -224,7 +211,13 @@ async function findBgSession(bgId: string): Promise<NeutralSessionInfo | null> {
   return list?.find((s) => s.kind === "background" && s.bgId === bgId) ?? null;
 }
 
-export async function handleMgmtButton(
+/** 编排班子提案的 owner 确认先截下（bridge/team-confirm.ts；Discord 交互已按 ALLOWED_USER_IDS 拦过），其余按钮照旧 */
+export async function handleMgmtOrTeamButton(id: string, chatId: string, messageId?: string, discord?: Client): Promise<{ text: string; components?: any[] } | null> {
+  const team = await handleTeamButton(id, "Discord", { chatId, messageId: messageId ?? "" }, confirmDeps());
+  return team ? { text: team } : handleMgmtButton(id, chatId, messageId, discord);
+}
+
+async function handleMgmtButton(
   id: string,
   chatId: string,
   messageId?: string,
