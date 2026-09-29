@@ -18,7 +18,7 @@ import { isLinkedWorktree } from "../../lib/linked-worktree.js";
 import { agentRuntime, readRegistryAgents } from "../../lib/registry.js";
 import { ensurePaneInteractive, tmuxRawStrict, tmuxSendEscape } from "../../lib/tmux-helper.js";
 import { compactInjectedRecently, injectCompact, injectTargetFor } from "../ctx-boundary.js";
-import type { Envelope } from "../router.js";
+import type { ApiUserEndpoint, Delivery, Envelope } from "../router.js";
 import { newMessageId, newThreadId } from "../router.js";
 import { auditFleet } from "./audit.js";
 import { lpWindowOf, refreshLp, startLpMonitor, type LpSnapshot } from "./lp-monitor.js";
@@ -112,8 +112,10 @@ export interface FleetRunRequest {
   actor: string;
   via: string;
   allowed: FleetAllowed;
-  /** MCP 工具的调用方（bridge 按连接认出）：按它收窄范围、报越界，下发文本用 notification */
+  /** MCP 工具的调用方（bridge 按连接认出）：按它收窄范围、报越界 */
   caller?: FleetCaller;
+  /** 群发文字的回信地址（网页 owner 那台设备的会话，local-api/fleet.ts 按请求认出的 principal 给）；没有 = 发知会，不挂回信 */
+  replyTo?: ApiUserEndpoint;
 }
 export interface FleetRunReport {
   runId: string;
@@ -159,24 +161,27 @@ async function pool<T, R>(items: T[], n: number, fn: (t: T) => Promise<R>): Prom
   return out;
 }
 
-function textSender(actor: string, via: string, count: number, intent: "request" | "notification") {
+type HeldBy = Extract<Delivery["outcome"], { kind: "sent" }>["heldBy"];
+
+function textSender(actor: string, via: string, count: number, replyTo: ApiUserEndpoint | undefined) {
   return async (agent: string, text: string): Promise<TextOutcome> => {
     const cid = agent === "master" ? deps?.controlChannelId : (await readRegistryAgents()).find((r) => r.name === agent)?.channelId;
     const c = cid ? deps?.clients.get(cid) : undefined;
     if (!deps || !cid || !c) return { ok: false, error: "不在线" };
-    // 网页 owner 的 request 和 MCP 的知会都带 waitForIdle：目标主回合在跑就进押后队列、Stop 后再投，结果报 queued（lib/turn-state.ts
-    // holdsUntilIdle）；不带的话 bridge 来源的消息照样直接 ws.send，回合开头那段会被 CC 静默丢掉，这里却记成已送达。意图不变，request 的补答账在真投出去时才挂
+    // 有回信地址（网页 owner）：from 是 owner 的会话、request，目标 reply 到 api:<tokenId>，落回它自己那段对话，和 owner 直发一样；
+    // 没有（MCP 调用方）就是知会，不留空地址。一律 waitForIdle：主回合在跑就押、Stop 后再投，报 queued，也不算人类请求、不抢占
+    // （lib/turn-state.ts holdsUntilIdle）；quotaGated：额度闸按非人押到出闸（lib/quota-wall.ts gatesAsHuman）
     const r = (await deps.deliver({
-      from: { kind: "bridge", label: "fleet" },
+      from: replyTo ?? { kind: "bridge", label: "fleet" },
       to: { kind: "local", agentName: agent, channelId: cid, ws: c.ws as never, cwd: c.cwd },
-      intent,
+      intent: replyTo ? "request" : "notification",
       content: `[📣 批量指令 · 来自 ${actor}（${via}）· 同时发给 ${count} 个 agent]\n${text}`,
       meta: {
-        messageId: newMessageId("fleet"), triggerKind: "bridge_synth", ts: new Date().toISOString(), threadId: newThreadId(), waitForIdle: true,
+        messageId: newMessageId("fleet"), triggerKind: "bridge_synth", ts: new Date().toISOString(), threadId: newThreadId(), waitForIdle: true, quotaGated: true,
       },
-    })) as { outcome?: { kind?: string; note?: string; reason?: string; error?: Error } } | undefined;
+    })) as { outcome?: { kind?: string; note?: string; heldBy?: HeldBy; reason?: string; error?: Error } } | undefined;
     const o = r?.outcome;
-    if (o?.kind === "sent") return { ok: true, queued: o.note === "queued" };
+    if (o?.kind === "sent") return { ok: true, queued: o.note === "queued", heldBy: o.heldBy };
     return { ok: false, error: o?.kind === "dropped" ? `没送达：${o.reason}` : `投递出错：${o?.error?.message ?? "未知"}` };
   };
 }
@@ -215,8 +220,7 @@ export async function runFleet(req: FleetRunRequest, io: PaneIO = tmuxPaneIO): P
   const ctx: RunCtx = {
     io,
     keep: compactKeep(),
-    // MCP 的调用方是 agent：它下发的文本是知会，不挂 pending、不要求回复；网页 / CLI 是 owner 本人，照旧 request
-    deliverText: textSender(req.actor, req.via, targets.length, req.caller ? "notification" : "request"),
+    deliverText: textSender(req.actor, req.via, targets.length, req.replyTo),
     compact: async (agent, action, keep) => injectCompact(await injectTargetFor(agent), { action, keep }),
     compactedRecently: async (agent) => compactInjectedRecently((await injectTargetFor(agent)).target),
   };

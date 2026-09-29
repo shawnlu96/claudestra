@@ -256,6 +256,13 @@ describe("自定义文本走 deliver", () => {
     expect(f.keys).toEqual([]);
   });
 
+  test("排队的说明按押后原因写：在忙 / 额度闸 / 停在额度菜单，都写明还没送到", async () => {
+    const queued = async (heldBy?: "quota_wall" | "wall_menu") => (await run({ kind: "text", text: "hi" }, [""], async () => ({ ok: true, queued: true, heldBy }))).detail;
+    expect(await queued()).toBe("它正在忙，这一轮结束后再投，还没送到");
+    expect(await queued("quota_wall")).toBe("额度闸内（撞墙中），出闸后再投，还没送到");
+    expect(await queued("wall_menu")).toBe("它停在额度菜单 / 撞墙等待上，没发键，之后再投，还没送到");
+  });
+
   test("窗口不在时 CC 动作直接失败", async () => {
     const f = fakeIO([fx("walled")]);
     const r = await runOne({ kind: "lp-on" }, "agent-x", null, ctxOf(f));
