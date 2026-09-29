@@ -52,6 +52,10 @@ describe("manager 写命令分类", () => {
     expect(isWriteInvocation("auto-update", ["status"])).toBe(false);
     expect(isWriteInvocation("auto-update", ["claude", "off"])).toBe(true);
     expect(isWriteInvocation("auto-update", ["channel", "beta"])).toBe(true);
+    expect(isWriteInvocation("codex-sub-archive", [])).toBe(false);
+    expect(isWriteInvocation("codex-sub-archive", ["status"])).toBe(false);
+    expect(isWriteInvocation("codex-sub-archive", ["on"])).toBe(true);
+    expect(isWriteInvocation("codex-sub-archive", ["off"])).toBe(true);
   });
 
   test("读命令放行（备机排障要能看）", () => {
@@ -64,7 +68,7 @@ describe("manager 写命令分类", () => {
 
   // 表里的每个名字都得在 manager.ts 的 switch 里真有 case——防 "clear" 那种死条目
   test("每个写命令在 manager.ts 都有对应 case", () => {
-    for (const c of [...WRITE_COMMANDS, "takeover", "permissions", "effort", "mode", "model", "auto-update"]) {
+    for (const c of [...WRITE_COMMANDS, "takeover", "permissions", "effort", "mode", "model", "auto-update", "codex-sub-archive"]) {
       expect(MANAGER_SRC.includes(`case "${c}":`)).toBe(true);
     }
   });

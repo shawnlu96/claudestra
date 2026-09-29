@@ -14,6 +14,7 @@ import { fmtAgo } from "../fmt-time";
 import { useT } from "@/lib/i18n";
 import { SwipeActions } from "./unmanaged-sessions";
 import { archivedList, archivedRestore } from "@/lib/api/system";
+import { SidebarSectionHeader } from "./sidebar-section-header";
 
 interface ArchivedEntry {
   /** agent 名或会话 id（「归档」区里的目录名） */
@@ -78,46 +79,7 @@ export function ArchivedSessions() {
 
   return (
     <li className="mx-2 mt-1 rounded-xl bg-base-300/25 p-1 list-none">
-      <div className="flex w-full items-center">
-        <button
-          type="button"
-          className="flex flex-1 items-center gap-2 rounded-lg px-1.5 py-1.5 text-left text-sm font-medium"
-          onClick={() => setOpen((v) => !v)}
-        >
-          <svg
-            width="12"
-            height="12"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="2.5"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-            className={`shrink-0 text-base-content/40 transition-transform ${open ? "" : "-rotate-90"}`}
-          >
-            <path d="m6 9 6 6 6-6" />
-          </svg>
-          <span className="shrink-0 text-[13px] opacity-80">🗄</span>
-          <span className="truncate">{t("归档")}</span>
-          <span className="ml-auto shrink-0 text-[11px] font-normal text-base-content/40">
-            {count}
-          </span>
-        </button>
-        {open ? (
-          <button
-            type="button"
-            className="grid size-9 shrink-0 touch-manipulation place-items-center rounded-md text-base text-base-content/45"
-            title={t("刷新")}
-            disabled={loading}
-            onClick={(e) => {
-              e.stopPropagation();
-              void load();
-            }}
-          >
-            ⟳
-          </button>
-        ) : null}
-      </div>
+      <SidebarSectionHeader icon="🗄" label={t("归档")} open={open} onToggle={() => setOpen((v) => !v)} count={count} loading={loading} onRefresh={() => void load()} />
       {open ? (
         <div className="pb-1">
           {error ? (

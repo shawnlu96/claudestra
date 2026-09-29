@@ -7,6 +7,7 @@
  */
 
 import { existsSync, readdirSync, realpathSync } from "fs";
+import { dirname, join } from "path";
 import { runtimeForSessionPath, translateSessionLine } from "./session-source.js";
 
 export interface Usage {
@@ -158,6 +159,11 @@ export function projectJsonlPath(cwd: string, sessionId: string): string {
   // 会话搬家了：Claude Code 的 EnterWorktree 把整个会话文件挪进 worktree 的项目目录（记录里一条 relocated），
   // registry 的 cwd 还是原目录。按 id 找新家；哪都没有（还没生成）才返回推算路径
   return findJsonlBySessionId(sessionId) ?? primary;
+}
+
+/** 会话的 subagent 记录目录：跟着会话文件走（进了 worktree 的会话整个搬进新的项目目录，见 projectJsonlPath） */
+export function subagentsDir(cwd: string, sessionId: string): string {
+  return join(dirname(projectJsonlPath(cwd, sessionId)), sessionId, "subagents");
 }
 
 /** 兜底：如果上面的路径不存在，遍历 projects 子目录找 session */

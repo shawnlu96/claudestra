@@ -17,9 +17,11 @@ import { decideAfterReplaced } from "./lib/link-policy.js";
 import { channelServerMode, mcpCapabilities, shouldConnectBridge } from "./lib/channel-mode.js";
 import { REPO_ROOT } from "./lib/repo-root.js";
 import { channelInstructions } from "./lib/channel-instructions.js";
+import { typeIntoOwnPane } from "./lib/codex-tui-submit.js";
 import { CodexQueueSink, decodePreambleEnv, codexParentGone, codexQueueArgs, defaultRunner, heldThreadIds, isPidAlive, type InboundSink } from "./lib/codex-thread.js";
 import { FORWARD_TO_AGENT_DESCRIPTION, SEND_TO_AGENT_DESCRIPTION } from "./lib/agent-tool-docs.js";
 import { CHECK_INBOX_TOOL, checkInboxTool, forwardTool, sendToAgentTool } from "./lib/agent-tool-calls.js";
+import { REPLY_ASK_PROPERTY, replyResultText } from "./lib/reply-ask-schema.js";
 
 // 进程级异常兜底。**故意不退出**：本进程没有任何守护者（Claude Code 不 respawn
 // MCP server），退出 = 该 agent 永久失联、只能人工 /mcp。记录死因就够了。
@@ -142,18 +144,17 @@ function registerFrame(): string {
     type: "register",
     channelId: CHANNEL_ID,
     cwd: process.cwd(),
-    // 自报进程身份：bridge 靠它区分「Claude Code 重启了 MCP server」（每个新
-    // pid 只出现一次）和「两个活实例在对抢」（同一个 pid 被顶掉又抢回来），
-    // 也让告警能直接给出可 ps 的 pid，不必再翻环境变量考古。
+    // 自报进程身份：bridge 靠它区分「Claude Code 重启了 MCP server」（每个新 pid 只出现一次）和「两个活实例在对抢」
+    // （同一个 pid 被顶掉又抢回来），也让告警能直接给出可 ps 的 pid，不必再翻环境变量考古。
     pid: process.pid,
     ppid: process.ppid,
   };
-  // Codex：自报运行时与当前线程 id（fork / /new 之后只有这里知道新 id）。刻意**不报**
-  // sessionFile：自报路径只对 Pi 放行，Codex 的 rollout 由 bridge 按 registry 的 sessionId
-  // 自己定位（~/.codex/sessions 里还有用户的私人会话，不能让自报路径指过去）。
+  // Codex：自报运行时与当前线程 id（fork / /new 之后只有这里知道新 id）。刻意**不报** sessionFile：自报路径只对 Pi 放行，
+  // Codex 的 rollout 由 bridge 按 registry 的 sessionId 自己定位（~/.codex/sessions 里还有用户的私人会话，不能让自报路径指过去）。
   // CC 模式不加字段，帧逐字不变。
   if (IS_CODEX) {
     frame.runtime = "codex";
+    frame.typeIn = true; // 被打断后的第一条会打进 TUI（lib/codex-tui-submit.ts）；bridge 只对声明过的 Codex 频道抢占
     frame.agentName = AGENT_NAME || undefined;
     frame.sessionId = codexSessionId;
   }
@@ -395,10 +396,10 @@ const codexSink = new CodexQueueSink({
     }
   },
   queue: (sid, text) => defaultRunner(codexQueueArgs(CODEX_BIN, sid, text), 30_000),
-  notify: async (chatId, text) => {
-    await bridgeRequest({ type: "reply", chatId: chatId || CHANNEL_ID, text });
-  },
+  notify: (chatId, text, fyi) => bridgeRequest(fyi ? { type: "notify", source: "codex", chatId: CHANNEL_ID, text } : { type: "reply", chatId: chatId || CHANNEL_ID, text }).then(() => undefined),
   log: (line) => console.error(line),
+  typeIn: typeIntoOwnPane, // Codex 被打断后 queue 会卡住，打断后的第一条直接打进自己的 pane
+  onTypeInFailed: () => void (bridgeWs?.readyState === WebSocket.OPEN && bridgeWs.send(JSON.stringify({ type: "codex_typein_failed", channelId: CHANNEL_ID }))),
   preamble: IS_CODEX ? decodePreambleEnv(process.env.CLAUDESTRA_CODEX_PREAMBLE) : undefined, // 重启 / 收编后的职责前言
 });
 
@@ -475,10 +476,8 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => INERT ? { tools: [] } 
 - Badge \`[[{.badge .success}deployed]]\` — status pill (tones: success|warning|error|info); plain text on Discord.
 Use inline buttons when ONE action belongs inside a sentence; for several non-exclusive choices use a components multiselect (never a row of single-choice buttons); for standalone option lists use components.`,
           },
-          reply_to: {
-            type: "string",
-            description: "Message ID to reply to (optional, for threading)",
-          },
+          reply_to: { type: "string", description: "Message ID to reply to (optional, for threading)" },
+          ask: REPLY_ASK_PROPERTY,
           components: {
             type: "array",
             description: `Optional UI components (rendered on both Discord and the Web client). Each item is a row:
@@ -657,12 +656,13 @@ mcp.setRequestHandler(CallToolRequestSchema, async (request) => {
         replyTo: args?.reply_to,
         components: args?.components,
         files: args?.files,
+        ask: args?.ask,
       });
       return {
         content: [
           {
             type: "text" as const,
-            text: `Sent message(s): ${JSON.stringify(result.messageIds)}`,
+            text: replyResultText(result),
           },
         ],
       };

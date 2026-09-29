@@ -1,6 +1,7 @@
 "use client";
 import { useT } from "@/lib/i18n";
 import { parseSource, type SourceKind } from "../source-label";
+import { BOT_PATHS } from "./line-icons";
 
 /**
  * 外源入站消息（peer / 其它 agent / 别的用户）的头行：圆形 icon + [badge] + 名字，
@@ -19,16 +20,7 @@ const ICONS: Record<SourceKind, React.ReactNode> = {
     </>
   ),
   "peer-reply": null, // 与 peer-notify 同图（owner:「跟上一个一样」）
-  agent: (
-    <>
-      <path d="M12 8V4H8" />
-      <rect width="16" height="12" x="4" y="8" rx="2" />
-      <path d="M2 14h2" />
-      <path d="M20 14h2" />
-      <path d="M15 13v2" />
-      <path d="M9 13v2" />
-    </>
-  ),
+  agent: BOT_PATHS,
   user: (
     <>
       <path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2" />

@@ -11,6 +11,18 @@ export interface PushSubscriptionRow extends WebPushSubscription {
   ua: string;
   /** 订阅用的 VAPID 公钥；null = 不知道（换钥匙前的老订阅），投递时两把都试、成功的那把记回来 */
   vapidKey: string | null;
+  /** owner = 收全部推送（聊天、提醒、待你处理）；guest = 只收指派给自己的「待你处理」（T11b） */
+  audience: PushAudience;
+  /** 订阅时的 principal 与设备凭据 id（老订阅没有）：guest 的推送按它认人、凭据撤了就不再推 */
+  principal: string | null;
+  credential: string | null;
+}
+
+type PushAudience = "owner" | "guest";
+export interface PushSubscriber {
+  audience: PushAudience;
+  principal: string;
+  credential?: string;
 }
 
 /** iOS 对「push 到达不展示」有惩罚：dismiss 型静默 push 不能发给它们（iOS 靠打开 App 时按 push_read 补清） */
@@ -31,21 +43,28 @@ function parseKeys(raw: string): WebPushSubscription["keys"] | null {
 const keysJson = (k: WebPushSubscription["keys"]) => JSON.stringify({ p256dh: k.p256dh, auth: k.auth });
 
 export function listPushSubscriptions(db: Database): PushSubscriptionRow[] {
-  const rows = db.prepare("SELECT endpoint, keys, ua, vapid_key FROM push_subscriptions").all() as { endpoint: string; keys: string; ua: string; vapid_key: string | null }[];
+  type R = { endpoint: string; keys: string; ua: string; vapid_key: string | null; audience: string; principal: string | null; credential: string | null };
+  const rows = db.prepare("SELECT endpoint, keys, ua, vapid_key, audience, principal, credential FROM push_subscriptions").all() as R[];
   const out: PushSubscriptionRow[] = [];
   for (const r of rows) {
     const keys = parseKeys(r.keys);
-    if (keys) out.push({ endpoint: r.endpoint, keys, ua: r.ua, vapidKey: r.vapid_key });
+    const audience: PushAudience = r.audience === "guest" ? "guest" : "owner";
+    if (keys) out.push({ endpoint: r.endpoint, keys, ua: r.ua, vapidKey: r.vapid_key, audience, principal: r.principal, credential: r.credential });
   }
   return out;
 }
 
-/** endpoint 主键 upsert：同一浏览器重新订阅会换密钥（也可能换了 VAPID 公钥），UA 也顺手刷新 */
-export function savePushSubscription(db: Database, sub: WebPushSubscription, ua: string, vapidKey: string | null = null, now: Date = new Date()): void {
+/**
+ * endpoint 主键 upsert：同一浏览器重新订阅会换密钥（也可能换了 VAPID 公钥），UA 与订阅者也顺手刷新（不给 = owner，老调用方）。
+ * guest 的登记盖不掉已有的 owner 订阅（否则拿到 owner 的 endpoint 就能把 owner 的推送改成只收 ask）
+ */
+export function savePushSubscription(db: Database, sub: WebPushSubscription, ua: string, vapidKey: string | null = null, now: Date = new Date(), who?: PushSubscriber): void {
   db.prepare(
-    `INSERT INTO push_subscriptions (endpoint, keys, ua, created_at, vapid_key) VALUES (?, ?, ?, ?, ?)
-     ON CONFLICT(endpoint) DO UPDATE SET keys = excluded.keys, ua = excluded.ua, vapid_key = excluded.vapid_key`,
-  ).run(sub.endpoint, keysJson(sub.keys), ua.slice(0, 300), now.toISOString(), vapidKey);
+    `INSERT INTO push_subscriptions (endpoint, keys, ua, created_at, vapid_key, audience, principal, credential) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(endpoint) DO UPDATE SET keys = excluded.keys, ua = excluded.ua, vapid_key = excluded.vapid_key,
+       audience = excluded.audience, principal = excluded.principal, credential = excluded.credential
+     WHERE excluded.audience = 'owner' OR push_subscriptions.audience = 'guest'`,
+  ).run(sub.endpoint, keysJson(sub.keys), ua.slice(0, 300), now.toISOString(), vapidKey, who?.audience ?? "owner", who?.principal ?? null, who?.credential ?? null);
 }
 
 /**
@@ -59,21 +78,30 @@ export function setPushSubscriptionKey(db: Database, sub: WebPushSubscription, v
   ).run(vapidKey, sub.endpoint, sub.keys.p256dh, sub.keys.auth);
 }
 
-export function deletePushSubscription(db: Database, endpoint: string): boolean {
+/** principal 给了就只删它自己的（guest 退订不能顺手删掉 owner 的订阅） */
+export function deletePushSubscription(db: Database, endpoint: string, principal?: string): boolean {
+  if (principal !== undefined) return db.prepare("DELETE FROM push_subscriptions WHERE endpoint = ? AND principal = ?").run(endpoint, principal).changes > 0;
   return db.prepare("DELETE FROM push_subscriptions WHERE endpoint = ?").run(endpoint).changes > 0;
 }
 
-export function listApnsDevices(db: Database): string[] {
-  return (db.prepare("SELECT token FROM apns_devices").all() as { token: string }[]).map((r) => r.token);
+/** APNs 设备（owner 的 App）；principal / credential 是登记时的凭据（老行没有，按 owner:self 算，App 下次启动重新登记时补上） */
+export interface ApnsDeviceRow {
+  token: string;
+  principal: string | null;
+  credential: string | null;
 }
 
-/** App 每次启动都会重新登记（APNs token 会变）：upsert 刷新 last_seen */
-export function saveApnsDevice(db: Database, token: string, device: string, now: Date = new Date()): void {
+export function listApnsDevices(db: Database): ApnsDeviceRow[] {
+  return db.prepare("SELECT token, principal, credential FROM apns_devices").all() as ApnsDeviceRow[];
+}
+
+/** App 每次启动都会重新登记（APNs token 会变）：upsert 刷新 last_seen 与登记凭据（换了配对就换成新凭据） */
+export function saveApnsDevice(db: Database, token: string, device: string, now: Date = new Date(), who?: PushSubscriber): void {
   const iso = now.toISOString();
   db.prepare(
-    `INSERT INTO apns_devices (token, device, created_at, last_seen) VALUES (?, ?, ?, ?)
-     ON CONFLICT(token) DO UPDATE SET device = excluded.device, last_seen = excluded.last_seen`,
-  ).run(token.toLowerCase(), device.slice(0, 80), iso, iso);
+    `INSERT INTO apns_devices (token, device, created_at, last_seen, principal, credential) VALUES (?, ?, ?, ?, ?, ?)
+     ON CONFLICT(token) DO UPDATE SET device = excluded.device, last_seen = excluded.last_seen, principal = excluded.principal, credential = excluded.credential`,
+  ).run(token.toLowerCase(), device.slice(0, 80), iso, iso, who?.principal ?? null, who?.credential ?? null);
 }
 
 export function deleteApnsDevice(db: Database, token: string): boolean {

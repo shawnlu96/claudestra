@@ -28,6 +28,21 @@ export const MoonIcon = (p: IconProps) => (
   </Svg>
 );
 
+/** lucide bot 的路径（外源消息头 source-header.tsx 也用它，放进自己的 svg 里） */
+export const BOT_PATHS = (
+  <>
+    <path d="M12 8V4H8" />
+    <rect width="16" height="12" x="4" y="8" rx="2" />
+    <path d="M2 14h2" />
+    <path d="M20 14h2" />
+    <path d="M15 13v2" />
+    <path d="M9 13v2" />
+  </>
+);
+
+/** lucide bot */
+export const BotIcon = (p: IconProps) => <Svg {...p}>{BOT_PATHS}</Svg>;
+
 /** lucide folder-open */
 export const FolderOpenIcon = (p: IconProps) => (
   <Svg {...p}>
@@ -86,6 +101,22 @@ export const FileIcon = (p: IconProps) => (
   <Svg {...p}>
     <path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z" />
     <path d="M14 2v4a2 2 0 0 0 2 2h4" />
+  </Svg>
+);
+
+/** lucide chevron-right（展开态由调用方 rotate-90） */
+export const ChevronRightIcon = (p: IconProps) => (
+  <Svg {...p}>
+    <path d="m9 18 6-6-6-6" />
+  </Svg>
+);
+
+/** lucide triangle-alert */
+export const TriangleAlertIcon = (p: IconProps) => (
+  <Svg {...p}>
+    <path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3" />
+    <path d="M12 9v4" />
+    <path d="M12 17h.01" />
   </Svg>
 );
 

@@ -7,7 +7,7 @@
  *   3. 投出之后才出队：投递中途崩溃，重启后会再投一次（至少一次；收件方看 message_id 去重）；每个频道只有一个投递者
  */
 import type { Envelope, LocalEndpoint } from "./router.js";
-import { statePath } from "../lib/paths.js";
+import { HELD_MESSAGES_PATH } from "../lib/paths.js";
 import { PersistedMap } from "./persisted-map.js";
 import { readJsonStateSync } from "../lib/state-file.js";
 
@@ -38,7 +38,7 @@ export function unseenFrom(q: HeldQueue, target: string): { fromKind: string; fr
 export const HELD_NOTIFY_MS = 30 * 60_000;
 export const HELD_GIVE_UP_MS = 24 * 3_600_000;
 
-const HELD_PATH = statePath("held-messages.json");
+const HELD_PATH = HELD_MESSAGES_PATH;
 const isQueue = (q: unknown): boolean => Array.isArray(q) && q.every((i) => i && typeof i === "object" && "env" in i && "to" in i);
 
 /** 一个 Map（bridge.ts 原来的用法不变），set / delete 之后同步落盘；path = null 不落盘（单测） */

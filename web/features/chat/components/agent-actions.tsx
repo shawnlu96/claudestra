@@ -6,6 +6,7 @@ import { useT } from "@/lib/i18n";
 import { ClearAgentModal } from "./clear-agent-modal";
 import { stopMission } from "@/lib/api/agents";
 import { MissionIcon, MissionStopIcon, openMissionModal } from "./mission-ui";
+import { useFullScope } from "../contacts-data";
 
 /** 清空：橡皮擦（lucide eraser，比扫帚干净利落） */
 function EraserIcon() {
@@ -120,13 +121,14 @@ export function MoreMenu({ busy = false, children }: { busy?: boolean; children:
 }
 
 /** AgentActions 会不会渲染 ⋮ 下拉——必须与下面组件里的分支一致，顶栏据此决定把次要操作并进来还是另起菜单 */
-export function hasActionMenu(agent: AgentSession): boolean {
-  return !agent.pinnedMaster && !agent.mock && agent.status === "active";
+export function hasActionMenu(agent: AgentSession, full: boolean): boolean {
+  return full && !agent.pinnedMaster && !agent.mock && agent.status === "active";
 }
 
 /**
  * 会话详情顶栏右侧的操作区。
  * - 大总管不渲染任何操作（clear 底层能力保留，UI 不放；生命周期归 launcher）。
+ * - 非全权设备（guest / 部分 scope）也不渲染：Autopilot、重启、停止、清空的接口都要全权，点了只会 403。
  * - active：清空/重启/停止收进一个 ⋮ 下拉（owner 2026-07-11：顶栏按钮太多）。
  *   menuLead = 顶栏窄屏时并进来的次要操作（分享/搜索/终端），排在最上面。
  * - 非 active：保持原样——只有恒显的重启按钮（menuLead 不用，顶栏会另起菜单）。
@@ -138,7 +140,7 @@ export function AgentActions({ agent, menuLead }: { agent: AgentSession; menuLea
   const [error, setError] = useState("");
   const [showClear, setShowClear] = useState(false);
 
-  if (agent.pinnedMaster || agent.mock) return null;
+  if (useFullScope() !== true || agent.pinnedMaster || agent.mock) return null;
 
   const act = async (action: "kill" | "restart") => {
     if (busy) return;

@@ -11,7 +11,9 @@ import { usePushToggle } from "./settings/push-section";
 import { useMemoryHygiene } from "./settings/memory-hygiene-section";
 import { useAutoCompact } from "./settings/auto-compact-section";
 import { useKbFixToggle } from "./settings/interface-sections";
-import { SettingsNav, type SettingsPageId } from "./settings/nav";
+import { SettingsNav, settingsPagesFor, type SettingsPageId } from "./settings/nav";
+import { useFullScope } from "../contacts-data";
+import { isNativeShell } from "@/lib/native";
 import { SettingsPage } from "./settings/pages";
 
 /**
@@ -26,6 +28,7 @@ import { SettingsPage } from "./settings/pages";
  * 请求顺序，别随手调换。
  *
  * initialPage：外部入口直达某一页(侧栏 Peer 按钮 → "peers")；用户在弹窗里切页后以切的为准，关闭即忘。
+ * 非全权设备（guest / 部分 scope）：只列纯本地的页和分区（settingsPagesFor、SettingsState.full），要全权的接口一个都不打。
  */
 export function SettingsModal({
   open,
@@ -43,18 +46,21 @@ export function SettingsModal({
   const shared = { busy, setBusy };
   // iOS 键盘修正实验开关(use-keyboard-viewport):挂载时读 localStorage
   const kbFix = useKbFixToggle();
-  // 以下每个 hook 在 open 变真时重置 + 拉取（顺序同拆分前）
-  const profile = useProfileDraft(open, shared);
-  const groq = useGroqKey(open, shared);
-  const defaults = useClaudeDefaults(open);
-  const push = usePushToggle(open);
-  const hygiene = useMemoryHygiene(open);
-  const autoCompact = useAutoCompact(open);
+  const full = useFullScope() === true;
+  // 以下每个 hook 在 open 变真时重置 + 拉取（顺序同拆分前）；这些分区只给全权设备，别的设备不拉
+  const load = open && full;
+  const profile = useProfileDraft(load, shared);
+  const groq = useGroqKey(load, shared);
+  const defaults = useClaudeDefaults(load);
+  const push = usePushToggle(load);
+  const hygiene = useMemoryHygiene(load);
+  const autoCompact = useAutoCompact(load);
   // 定时任务管理(owner 2026-08-26):独立弹窗
   const [showCron, setShowCron] = useState(false);
   // null = 还没在弹窗里切过页 → 显示入口指定的 initialPage；关闭清掉，下次打开重新听入口的
   const [picked, setPicked] = useState<SettingsPageId | null>(null);
-  const page = picked ?? initialPage;
+  const pages = settingsPagesFor(full, { native: isNativeShell() });
+  const page = pages.includes(picked ?? initialPage) ? (picked ?? initialPage) : "general";
   const close = () => {
     onClose();
     setPicked(null);
@@ -63,7 +69,7 @@ export function SettingsModal({
   if (!open) return null;
 
   const state = {
-    busy, profile, groq, defaults, modelOptions, push, hygiene, autoCompact, kbFix,
+    busy, full, profile, groq, defaults, modelOptions, push, hygiene, autoCompact, kbFix,
     openCron: () => setShowCron(true),
   };
 
@@ -78,7 +84,7 @@ export function SettingsModal({
           </button>
         </div>
         <div className="flex min-h-0 flex-1 flex-col sm:flex-row">
-          <SettingsNav page={page} onSelect={setPicked} />
+          <SettingsNav page={page} pages={pages} onSelect={setPicked} />
           <div className="min-h-0 flex-1 space-y-3 overflow-y-auto overscroll-contain px-5 pb-5 pt-3">
             <SettingsPage page={page} s={state} />
           </div>

@@ -4,6 +4,7 @@ import type { AgentSession, ProjectMeta } from "./type";
  * 侧栏会话右键 / 长按菜单的**内容**（纯函数，无 React；渲染在 components/agent-menu.tsx）。
  * 菜单项随会话状态切换：运行中 = 详情 / Autopilot / 重启 / 停止 / 清空 / 移动到 / 归档；已停止 = 详情 / 启动 / 移动到 / 归档。
  * Autopilot 项：没开 Autopilot =「开启 Autopilot…」（弹框填目标与截止时间），Autopilot 中 =「关闭 Autopilot」。大总管也能开 Autopilot。
+ * 非全权设备（guest / 部分 scope，full=false）只剩打开目录：详情、Autopilot、生命周期、清空、移动、归档的接口都要全权，给了也是 403。
  * 本机打开时（/api/host 报 local 且探测到程序）末尾再接「在 Finder 中显示 / 在终端打开 / 用 IDE 打开」，
  * project 菜单复用同一段 openItems。单测见 tests/web-agent-menu.test.ts。
  */
@@ -50,11 +51,12 @@ export function openItems(openers: MenuOpener[], platform: string): AgentMenuIte
 }
 
 /** mock 行没有菜单；大总管只有「打开目录」类（生命周期归 launcher）→ 没有可打开的程序时也是 null。 */
-export function buildAgentMenu(a: AgentSession, openers: MenuOpener[] = [], platform = "darwin"): AgentMenuItem[] | null {
+export function buildAgentMenu(a: AgentSession, openers: MenuOpener[] = [], platform = "darwin", full = true): AgentMenuItem[] | null {
   if (a.mock) return null;
   const open = openItems(openers, platform);
   const mission: AgentMenuItem = a.mission ? { id: "mission", label: "关闭 Autopilot", icon: "" } : { id: "mission", label: "开启 Autopilot…", icon: "" };
-  if (a.pinnedMaster) return a.status === "active" ? [mission, ...open] : open.length ? open : null;
+  if (a.pinnedMaster) return a.status === "active" && full ? [mission, ...open] : open.length ? open : null;
+  if (!full) return open.length ? open : null;
   const info: AgentMenuItem = { id: "info", label: "详情", icon: "ⓘ" };
   const move: AgentMenuItem = { id: "move", label: "移动到", icon: "", lineIcon: "folder-input", submenu: true };
   const archive: AgentMenuItem = { id: "archive", label: "归档", icon: "", lineIcon: "archive" };

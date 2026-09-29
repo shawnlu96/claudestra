@@ -22,6 +22,7 @@ import { ARCHIVE_ROOT, USER_ARCHIVE_ROOT } from "../lib/session-archive.js";
 import { DEFAULT_ARCHIVE_RETENTION_DAYS, readConfigSync } from "../lib/config-store.js";
 import { readRegistryAgents } from "../lib/registry.js";
 import { archiveSession } from "../lib/session-archive.js";
+import { CODEX_SUB_IDLE_DAYS, sweepIdleCodexSubSessions } from "../lib/unmanaged-archive.js";
 import { projectsSlug } from "../lib/jsonl-cost.js";
 import { tmuxRaw, MASTER_SESSION } from "../lib/tmux-helper.js";
 import { MASTER_DIR } from "./config.js";
@@ -74,6 +75,28 @@ export function pruneArchives(days: number, now = Date.now(), root: string = USE
   return removed;
 }
 
+/**
+ * Codex 子线程结束 N 天收进归档。缺省关：收进 archived/ 的到归档保留期就被删，等于永久删除，要 owner 自己开
+ * （manager codex-sub-archive on）。registry 里全部 agent（含大总管）挂着的会话都算 keep。返回归档条数，没开 = null；
+ * 失败只记日志，不挡后面的快照。tests/unmanaged-archive.test.ts。
+ */
+export async function sweepCodexSubsIfEnabled(
+  agents: Array<{ sessionId?: string }>,
+  cfg: { autoArchiveCodexSubs?: boolean } = readConfigSync(),
+  sweep: typeof sweepIdleCodexSubSessions = sweepIdleCodexSubSessions,
+): Promise<number | null> {
+  if (cfg.autoArchiveCodexSubs !== true) return null;
+  try {
+    const r = await sweep({ keep: new Set(agents.map((a) => a.sessionId).filter((s): s is string => !!s)) });
+    const mb = (r.bytes / 1048576).toFixed(1);
+    if (r.archived > 0) console.log(`🗄 Codex 子会话：${r.archived} 个（${mb}MB）超过 ${CODEX_SUB_IDLE_DAYS} 天没写，收进归档区(archived/)`);
+    return r.archived;
+  } catch (e) {
+    console.log(`⚠️ Codex 子会话归档扫描失败: ${(e as Error).message}`);
+    return 0;
+  }
+}
+
 export async function sweepArchives(): Promise<{ agents: number; archived: number }> {
   // 超期清理（默认 90 天，设置里可改；0=不清理）—— 只清 archived/ 手动归档区，快照不碰
   try {
@@ -85,6 +108,8 @@ export async function sweepArchives(): Promise<{ agents: number; archived: numbe
   }
 
   const agents = await readRegistryAgents();
+
+  await sweepCodexSubsIfEnabled(agents);
 
   // tmux 实际存在的 agent 窗口（P2：registry 标 stopped 但窗口还活着的也要归档）
   const liveWindows = new Set<string>();
