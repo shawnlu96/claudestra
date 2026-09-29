@@ -4,17 +4,19 @@
  * - AUQ：订阅 question / question_cleared 事件；从网页 / Discord 提交的记 answered，其余记 cancelled；
  * - 权限 / Codex：permission-watcher 每轮一行 noteRuntimeDialogs；Discord 按钮答了记 answered（discord-interactions 一行），
  *   网页按键端点发完键当场记（api-routes.ts 一行）；其余（终端里答了、回合结束）弹框消失时记 cancelled。
- * 「每个频道每种来源一条开着的」只记在内存：bridge 启动时先把上次留下还开着的全部撤掉，弹框还在就由 watcher 重建。
+ * 「每个频道每种来源一条开着的」记在内存；每条带指纹（lib/ask-fingerprint.ts，落在 extra.fp）：bridge 重启后同一个弹框沿用原卡、
+ * owner 删过的（ask-dismiss.ts）只要弹框一直没消失就不再开；启动宽限 RESTART_GRACE_MS 之后还没被认回去的才撤（弹框已经不在了）。
  */
 import { t } from "../lib/i18n.js";
-import { answerAsk, closeAsk, hasAsksTable, isRuntimeAsk, listAsks, MASTER_PROJECT, openAsk, type AskSource, type AskVia, type NewAsk } from "../lib/ledger-asks.js";
+import { answerAsk, closeAsk, hasAsksTable, isRuntimeAsk, listAsks, MASTER_PROJECT, openAsk, patchAsk, type AskSource, type AskVia, type NewAsk } from "../lib/ledger-asks.js";
 import { detectCodexRuntimeDialog } from "../lib/runtime-dialogs.js";
+import { codexExpiry, priorByFingerprint, reuseOf, runtimeFingerprint } from "../lib/ask-fingerprint.js";
 import { askDb, askDbIfExists, notePresenceFromEvent, parentExtra, publishAsk, registry, taskOf, whoIs } from "./asks.js";
 import { subscribeEvents } from "./event-bus.js";
 
 type RuntimeSource = Exclude<AskSource, "reply">;
 
-/** 每个频道每种来源同时只有一条开着的；值是 askId（"" = 正在建） */
+/** 每个频道每种来源同时只有一条开着的；值是 askId（"" = 正在建，"~<id>" = 同指纹删过、弹框还在，不开） */
 const runtimeOpen = new Map<string, string>();
 const rtKey = (source: AskSource, channelId: string) => `${source}:${channelId}`;
 /** 上一轮看到的权限弹框描述（按频道）：同一个弹框每 8 秒扫到一次，只有变了才开 / 结 */
@@ -69,20 +71,25 @@ export async function openRuntimeAsk(r: RuntimeAskInput): Promise<void> {
   const key = rtKey(r.source, r.channelId);
   if (r.replace) settleRuntimeAsk(r.source, r.channelId);
   if (runtimeOpen.has(key)) return;
+  const fp = runtimeFingerprint(r.source, r.agentName, r.title, r.context);
   runtimeOpen.set(key, "");
   try {
+    const prior = priorByFingerprint(askDb(), r.source, r.channelId, fp);
+    const reuse = reuseOf(prior);
+    if (reuse !== "new") return void runtimeOpen.set(key, reuse === "adopt" ? prior!.id : `~${prior!.id}`);
     const who = (await whoIs(r.channelId)) ?? { name: r.agentName, project: MASTER_PROJECT, channelId: r.channelId };
     // 卡住的是整个回合；有下游挂在它名下（registry parent）就算急
     const urgent = (await registry()).some((x) => x.parent === who.name && x.status === "active");
+    const now = Date.now();
     const a = openAsk(askDb(), {
       project: who.project, taskId: taskOf(who.name), fromAgent: who.name, fromChannelId: r.channelId, source: r.source, kind: r.kind, blocking: true,
       urgency: urgent ? "urgent" : "normal", title: r.title, context: r.context, options: r.options, allowText: false, chatId: r.channelId,
-      ...parentExtra(who),
-    });
+      expiresAt: r.source === "codex" ? codexExpiry(r.context, now) : undefined, extra: { ...parentExtra(who).extra, fp },
+    }, now);
     publishAsk(a);
     // 建的途中弹框已经没了（settle 先到、删了占位）：立刻结案，别留一条永远开着的
     if (runtimeOpen.get(key) !== "") {
-      const c = closeAsk(askDb(), a.id, "cancelled", t("弹框已关闭", "dialog closed"));
+      const c = closeAsk(askDb(), a.id, "cancelled", t("弹框已关闭", "dialog closed"), Date.now(), { clearedAt: Date.now() });
       if (c) publishAsk(c);
       return;
     }
@@ -99,19 +106,30 @@ export async function openRuntimeAsk(r: RuntimeAskInput): Promise<void> {
  */
 export function settleRuntimeAsk(source: RuntimeSource, channelId: string, answeredVia?: AskVia, label?: string | string[], who?: { principal?: string; device?: string }): void {
   const key = rtKey(source, channelId);
-  const id = runtimeOpen.get(key);
-  if (id === undefined) return;
+  const held = runtimeOpen.get(key);
+  if (held === undefined) return;
   runtimeOpen.delete(key);
-  if (!id) return;
+  if (!held) return;
+  const id = held.replace(/^~/, "");
   try {
     const db = askDb();
-    const a = answeredVia
+    const a = held.startsWith("~") ? null : answeredVia
       ? answerAsk(db, id, { choices: [], labels: [label ?? []].flat().filter(Boolean), text: "", principal: who?.principal || "unknown", device: who?.device, via: answeredVia, at: Date.now() })
       : closeAsk(db, id, "cancelled", t("弹框已关闭", "dialog closed"));
     if (a) publishAsk(a);
   } catch (e) {
-    // 已被卡片端点先记成 answered，或者到点过期了：这一笔就不用再记
+    // 已被卡片端点先记成 answered，或者到点过期了、owner 删了：这一笔就不用再记
     console.log(`ask ${id} 结案跳过（已结案或已过期）: ${(e as Error).message}`);
+  }
+  markCleared(id);
+}
+
+/** 弹框从屏幕上消失了：记在这条上，同一个弹框以后再出现就是新的一次（删过的、到期的也会重新开） */
+function markCleared(id: string): void {
+  try {
+    patchAsk(askDb(), id, { extra: { clearedAt: Date.now() } });
+  } catch (e) {
+    console.error(`⚠️ 记弹框消失失败（${id}，同一个弹框再出现时可能不开卡）: ${(e as Error).message}`);
   }
 }
 
@@ -134,16 +152,20 @@ export function noteRuntimeDialogs(channelId: string, agentName: string, pane: s
   void openRuntimeAsk({ source: "permission", channelId, agentName, kind: "authorize", title, context: permissionDesc, options: PERMISSION_ASK_OPTIONS, replace: true });
 }
 
+/** 重启后等这么久（permission-watcher 8 秒一轮，给足三轮）再撤没被认回去的 */
+export const RESTART_GRACE_MS = 30_000;
+
 /**
- * 上次 bridge 留下、还开着的运行时 ask：内存表丢了，谁也结不了它 → 全部撤掉，弹框还在的由 watcher / AUQ 事件重建。
- * 只撤运行时的：agent 的 reply、人 / 系统发起的（指派、审核）重启后照样能答，撤了也不会有人重开
+ * 上次 bridge 留下、还开着的运行时 ask：弹框还在的，watcher / AUQ 事件按指纹认回去（openRuntimeAsk 的 adopt）；
+ * 宽限过后还没被认回去的 = 弹框已经不在了，撤掉。只撤运行时的：agent 的 reply、人 / 系统发起的重启后照样能答
  */
-export function cancelStaleRuntimeAsks(): number {
+export function cancelUnadoptedRuntimeAsks(): number {
   const db = askDbIfExists();
   if (!db || !hasAsksTable(db)) return 0;
-  const stale = listAsks(db, { states: ["open"] }).filter(isRuntimeAsk);
+  const held = new Set([...runtimeOpen.values()].map((v) => v.replace(/^~/, "")));
+  const stale = listAsks(db, { states: ["open"] }).filter((a) => isRuntimeAsk(a) && !held.has(a.id));
   for (const a of stale) {
-    const c = closeAsk(db, a.id, "cancelled", t("bridge 重启，弹框还在会重新开一条", "bridge restarted; reopened if the dialog is still up"));
+    const c = closeAsk(db, a.id, "cancelled", t("bridge 重启后弹框已不在", "dialog gone after bridge restart"), Date.now(), { clearedAt: Date.now() });
     if (c) publishAsk(c);
   }
   return stale.length;
@@ -156,14 +178,16 @@ function auqTitle(qs: { question?: string; header?: string }[]): string {
   return qs.length > 1 ? t(`${first}（共 ${qs.length} 问）`, `${first} (${qs.length} questions)`) : first;
 }
 
-/** bridge 启动：撤掉上次留下的，再订阅 AUQ 事件（顺带记 owner 在不在） */
+/** bridge 启动：订阅 AUQ 事件（顺带记 owner 在不在），宽限过后撤掉上次留下、没被认回去的 */
 export function initRuntimeAsks(): void {
-  try {
-    const n = cancelStaleRuntimeAsks();
-    if (n) console.log(`🧹 撤掉上次 bridge 留下的运行时「待你处理」${n} 条`);
-  } catch (e) {
-    console.error(`⚠️ 清理上次留下的运行时 ask 失败（到期会自己过期）: ${(e as Error).message}`);
-  }
+  setTimeout(() => {
+    try {
+      const n = cancelUnadoptedRuntimeAsks();
+      if (n) console.log(`🧹 撤掉上次 bridge 留下、弹框已不在的运行时「待你处理」${n} 条`);
+    } catch (e) {
+      console.error(`⚠️ 清理上次留下的运行时 ask 失败（到期会自己过期）: ${(e as Error).message}`);
+    }
+  }, RESTART_GRACE_MS).unref?.();
   subscribeEvents({}, (evt) => {
     const data = (evt.data ?? {}) as Record<string, unknown>;
     notePresenceFromEvent(evt.type, data);

@@ -5,7 +5,7 @@
  */
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { answerDiscordInteraction, answerFromCard, answerFromChat } from "../src/bridge/ask-entry.js";
-import { cancelStaleRuntimeAsks, noteRuntimeDialogs, openRuntimeAsk, permissionLabel, resetRuntimeAsksForTest, settleRuntimeAsk } from "../src/bridge/ask-runtime.js";
+import { cancelUnadoptedRuntimeAsks, noteRuntimeDialogs, openRuntimeAsk, permissionLabel, resetRuntimeAsksForTest, settleRuntimeAsk } from "../src/bridge/ask-runtime.js";
 import { sweepExpired } from "../src/bridge/ask-expire.js";
 import { deliverReplyWithAsk } from "../src/bridge/ask-reply.js";
 import { answerDropped, ownerPresence, setAsksForTest, type AsksDeps } from "../src/bridge/asks.js";
@@ -362,15 +362,17 @@ describe("第一轮审查的复现", () => {
     expect(getAsk(openLedger(path), a.id)?.state).toBe("open");
   });
 
-  test("P1-4 bridge 重启：上次留下还开着的运行时 ask 全部撤掉，reply 类不动；弹框还在的由 watcher 重建", async () => {
+  test("P1-4 bridge 重启：弹框还在的按指纹认回原卡（不撤旧建新）；宽限后没认回去的才撤，reply 类不动", async () => {
     const x = (await reply())!;
-    await openRuntimeAsk({ source: "permission", channelId: "111", agentName: "agent-x", kind: "authorize", title: "t", context: "Bash(rm x)", options: [] });
-    resetRuntimeAsksForTest(); // 内存表丢了
-    expect(cancelStaleRuntimeAsks()).toBe(1);
     noteRuntimeDialogs("111", "agent-x", "pane", "Bash(rm x)");
+    await openRuntimeAsk({ source: "permission", channelId: "222", agentName: "agent-y", kind: "authorize", title: "t", context: "Bash(ls)", options: [] });
     await Bun.sleep(20);
+    resetRuntimeAsksForTest(); // 内存表丢了
+    noteRuntimeDialogs("111", "agent-x", "pane", "Bash(rm x)"); // 还在：认回去
+    await Bun.sleep(20);
+    expect(cancelUnadoptedRuntimeAsks()).toBe(1); // 222 那个弹框没再出现
     const db = openLedger(path);
-    expect(listAsks(db, { source: "permission" }).map((a) => a.state).sort()).toEqual(["cancelled", "open"]);
+    expect(listAsks(db, { source: "permission" }).map((a) => [a.context, a.state]).sort()).toEqual([["Bash(ls)", "cancelled"], ["Bash(rm x)", "open"]]);
     expect(getAsk(db, x.id)?.state).toBe("open");
   });
 

@@ -9,7 +9,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { answerFromCard } from "../src/bridge/ask-entry.js";
-import { cancelStaleRuntimeAsks } from "../src/bridge/ask-runtime.js";
+import { cancelUnadoptedRuntimeAsks } from "../src/bridge/ask-runtime.js";
 import { sweepExpired } from "../src/bridge/ask-expire.js";
 import { setAsksForTest, setOnAssignedAnswer, setPrepareAssigned, type AsksDeps } from "../src/bridge/asks.js";
 import { initHumanNode } from "../src/bridge/human-node.js";
@@ -88,7 +88,7 @@ describe("接进待你处理", () => {
   });
 
   test("bridge 重启清运行时弹框时不撤指派：撤了同一个 dedupKey 就再也开不出来", () => {
-    expect(cancelStaleRuntimeAsks()).toBe(0);
+    expect(cancelUnadoptedRuntimeAsks()).toBe(0);
     expect(theAsk().state).toBe("open");
   });
 

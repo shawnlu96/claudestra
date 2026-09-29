@@ -282,14 +282,18 @@ export function answerAsk(db: Database, id: string, answer: AskAnswer, within?: 
   return r.ask;
 }
 
-/** open → expired / cancelled；已不是 open 的返回 null（重复触发无害） */
-export function closeAsk(db: Database, id: string, state: "expired" | "cancelled", reason = "", now = Date.now()): Ask | null {
+/**
+ * open → expired / cancelled；已不是 open 的返回 null（重复触发无害）。extra 与撤销同一事务并进 ask 的 extra（owner 删卡记 dismissed：
+ * 分两笔写的话中间崩了，重启后这条就认不出是删过的，又冒出来），也记进 ask_cancel 事件
+ */
+export function closeAsk(db: Database, id: string, state: "expired" | "cancelled", reason = "", now = Date.now(), extra?: Record<string, unknown>): Ask | null {
   return tx(db, () => {
     const a = getAsk(db, id);
     if (!a || a.state !== "open") return null;
     if (state === "expired") return expireRow(db, a, now);
+    if (extra) db.prepare("UPDATE asks SET extra = ? WHERE id = ?").run(JSON.stringify({ ...a.extra, ...extra }), id);
     const out = setState(db, id, "cancelled", now);
-    addEvent(db, out, "ask_cancel", "bridge", reason || a.title, { reason }, now);
+    addEvent(db, out, "ask_cancel", "bridge", reason || a.title, { reason, ...(extra ? { extra } : {}) }, now);
     return out;
   });
 }

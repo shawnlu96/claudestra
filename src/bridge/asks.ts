@@ -358,8 +358,8 @@ export function initAsks(d: AsksDeps): void {
   deps = d;
 }
 
-/** 网页列表：开着的全给，已结案的只给最近 3 天；visible 是调用方的权限过滤（大总管的 ask 要 scope 含 master） */
+/** 网页列表：开着的全给，已结案的只给最近 3 天、owner 删掉的不给（ask-dismiss.ts）；visible 是调用方的权限过滤（大总管的 ask 要 scope 含 master） */
 export function listForWeb(visible: (a: Ask) => boolean, project?: string, assignee?: string | readonly string[]): Ask[] {
   const db = askReadDb();
-  return db ? listAsks(db, { project, assignee, closedSince: Date.now() - 3 * 24 * 3600_000, limit: 200 }).filter(visible) : [];
+  return db ? listAsks(db, { project, assignee, closedSince: Date.now() - 3 * 24 * 3600_000, limit: 200 }).filter((a) => !a.extra.hidden && visible(a)) : [];
 }
