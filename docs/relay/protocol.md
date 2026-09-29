@@ -366,4 +366,4 @@ slug   macbook-a
 sig    JaWyysd1-D9wa1rQt94MjYMgmNzu1vEboFjmBzHR78LpfcOwEBJrYlb-MJvt4dt6LRCSRfvq6eyaTawFj5x4Ag
 ```
 
-peer 入口预读正文同样有 1 秒绝对期限，超时 408、超大 413 并关闭连接；peer / 兑换正文上限 2MiB。HTTP listener 明确封顶 32MiB（网页语音上传需要 20MiB）；本机反代的设备 cookie 兼容请求采用该上限，仍受绝对期限限制。无凭据的反代 POST 除兑换与配对/旧会话迁移外，读正文前即拒绝。
+peer 入口预读正文同样有 1 秒绝对期限，超时 408、超大 413 并关闭连接；peer / 兑换正文上限 2MiB。HTTP listener 明确封顶 32MiB（网页语音上传需要 20MiB）；本机反代受保护路由的设备 cookie 请求原样传递正文流，由 API 先认证再读取，不受 peer 的预读期限影响；假 cookie 被拒后由 drainingFetch 限时排空。公开兑换/配对仍限时预读，不能靠附带 cookie 绕过。无凭据的反代 POST 除兑换与配对/旧会话迁移外，读正文前即拒绝。

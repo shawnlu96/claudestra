@@ -149,9 +149,11 @@ export async function ingressRequest(req: Request, handleApi: ApiHandler, addr: 
   const publicDevice = localProxy && ["/api/v1/devices/pair", "/api/v1/devices/legacy-session"].includes(url.pathname);
   if (hasBody && !secret && !headers.has("cookie") && !ingressPublicRoute(req.method, url.pathname) && !publicDevice) return json(403, PEER_ENTRANCE_ONLY);
   const browserUpload = localProxy && !secret && headers.has("cookie") && !publicDevice && !ingressPublicRoute(req.method, url.pathname);
-  let body: Uint8Array | undefined;
+  // 设备上传先交 API 鉴权再读流；不能把 peer 验签的 1 秒预读期限用在手机语音上传上。
+  // 假 cookie 不读正文就被拒，外层 drainingFetch 仍负责限时排空并关闭连接。
+  let body: Uint8Array | ReadableStream<Uint8Array> | undefined = browserUpload ? req.body ?? undefined : undefined;
   try {
-    if (hasBody) body = await readBoundedRequestBody(req, browserUpload ? MAX_HTTP_BODY : MAX_PEER_BODY);
+    if (hasBody && !browserUpload) body = await readBoundedRequestBody(req, MAX_PEER_BODY);
   } catch (e) {
     if (!(e instanceof RequestBodyError)) throw e;
     const res = json(e.status, { ok: false, error: e.code, code: e.code });
