@@ -308,6 +308,36 @@ describe("押着的人类消息一轮只投一个发送人（adv3 P2-1 升 P1：
     expect(o.delivered).toEqual(["owner"]);
   });
 
+  test("出闸补投：不同 peer 的请求各开一轮，本机 agent 的也不和 peer 混（T24 审查 P1-1）", async () => {
+    const peer = (content: string, name: string): HeldItem => {
+      const i = api(content, `tok-${name}`);
+      return { ...i, env: { ...i.env, from: { ...i.env.from, peer: name } } as Envelope };
+    };
+    const h = harness([peer("peerA-q", "a"), peer("peerB-q", "b")], humanApi);
+    await flushHeld(h.deps, "c-me", "quota_wall");
+    expect(h.delivered).toEqual(["peerA-q"]);
+    const m = harness([item("pm-internal"), peer("peerA-q", "a")], humanApi);
+    await flushHeld(m.deps, "c-me", "quota_wall");
+    expect(m.delivered).toEqual(["pm-internal"]);
+    const same = harness([peer("q1", "a"), peer("q2", "a")], humanApi);
+    await flushHeld(same.deps, "c-me", "quota_wall");
+    expect(same.delivered).toEqual(["q1", "q2"]); // 同一个 peer 连着的照旧一轮
+  });
+
+  test("遗留的补投记录：那一轮 Stop 后开了别的一轮（owner 直接开 / CC 自己续跑），guest 押着的不塞进去（T24 审查 P2-1）", async () => {
+    let working = false;
+    let turn: number | undefined = 5;
+    const h = harness([api("g1", "tok-g")], { ...humanApi, working: async () => working, turnAt: () => turn });
+    await flushHeld(h.deps, "c-me", "stop"); // g1 开了第 5 轮；那一轮 Stop 时队列已空，flush 提前返回，记录留着
+    h.held.set("c-me", [api("g2", "tok-g")]);
+    [working, turn] = [true, 9]; // owner 直接开了第 9 轮
+    await flushHeld(h.deps, "c-me", "sweep");
+    expect(h.contents()).toEqual(["g2"]);
+    turn = 5; // 对照：还是 g1 开的那一轮 → 同一个人的接着进
+    await flushHeld(h.deps, "c-me", "sweep");
+    expect(h.contents()).toEqual([]);
+  });
+
   test("只有 agent 消息的一趟照旧一起投（不涉及人，行为不变）", async () => {
     const other = item("b");
     const h = harness([item("a"), { ...other, env: { ...other.env, from: { kind: "local", agentName: "agent-pm", channelId: "c-pm", ws } } as Envelope }], humanApi);

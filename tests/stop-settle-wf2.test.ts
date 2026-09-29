@@ -160,6 +160,19 @@ describe("wf3 delivery-hold-1：续跑继承撞错的那一轮，不是「上一
     });
   }
 
+  test("PM 那一轮撞墙 → guest 那一轮 → CC 到点自己续跑（bridge 一条都没送）：仍结给 PM（T24 审查 P2-3）", async () => {
+    const h = harness();
+    h.book.add(h.cid, call("c-pm"), "m1");
+    h.deliver({ kind: "local", channelId: "c-pm" }, 1_000);
+    await h.stop("StopFailure", { text: "撞墙前给 PM 的前半段", apiError: true, error: wallErr });
+    h.deliver({ kind: "api" }, 100_000);
+    await h.stop("Stop", { text: "给 guest 的答复" });
+    await h.stop("Stop", { text: "给 PM 的结论" });
+    expect(h.pushed.map((p) => p.to)).toEqual(["c-pm", "c-pm"]);
+    expect(h.pushed[1]!.body).toContain("给 PM 的结论");
+    expect(h.pushed.some((p) => p.body.includes("给 guest 的答复"))).toBe(false);
+  });
+
   test("重启后没有撞错那一轮的记录：续跑消息开的一轮来源未知，按外人算，不把它的话结给在等的 PM（adv3 P2-8）", async () => {
     const h = harness();
     h.book.add(h.cid, call("c-pm"), "m1");

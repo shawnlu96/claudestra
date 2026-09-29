@@ -44,12 +44,14 @@ const VARIANTS: Record<string, string[]> = {
   "usage_based：Stop / Switch to usage": ["Stop", "Switch to usage"],
   "usage_based + 花钱项第 1": ["Switch to usage", "Stop"],
   "usage_based：Stop / Add funds": ["Stop", "Add funds to continue with usage"],
+  "5 项（T35 实录那一版）": [...STD, "Switch to lower priority", "Upgrade your plan"],
+  "6 项、花钱项第 1": ["Switch to usage credits", ...STD.slice(0, 2), "Switch to lower priority", "Upgrade your plan", "Stop"],
 };
 
 describe("窄窗口、别的计费方式下的额度菜单：打字 / 回车 / Esc 类入口一律 0 键（adv3 P2-2）", () => {
-  test("6 种选项排列 × 80~24 列：都认成菜单（斜杠直通、cron、save-compact、人类消息、停字、停止按钮都据此不发键），launcher 不自动确认", () => {
+  test("8 种选项排列 × 80~16 列：都认成菜单（斜杠直通、cron、save-compact、人类消息、停字、停止按钮都据此不发键），launcher 不自动确认", () => {
     for (const [name, opts] of Object.entries(VARIANTS)) {
-      for (const w of [80, 60, 48, 40, 36, 34, 32, 30, 28, 26, 24]) {
+      for (const w of [80, 60, 48, 40, 36, 34, 32, 30, 28, 26, 24, 22, 20, 18, 16]) { // ≤20 列折成几十行，标题在最后 24 行之外（T24 审查 P2-4）
         const p = menu(w, opts);
         expect([name, w, wallWaitKind(p), isAutoConfirmableModal(p), isAutoConfirmableModal(p, { allowSessionIdle: true })]).toEqual([name, w, "menu", false, false]);
       }

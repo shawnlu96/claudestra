@@ -144,6 +144,8 @@ export interface Envelope {
     forwarded?: boolean;
     /** 打断抬头（bridge/preempt.ts 写入，renderContentForLocal 放在正文最前）：这条消息打断了什么 / 这是一条「停」 */
     interruptNote?: string;
+    /** owner 的「停」押在撞墙等待画面上时已当场记过（bridge/preempt.ts noteHeldStop）：每次重投又押回来不再记，免得清掉停之后才来的回程槽 */
+    heldStopNoted?: boolean;
     /**
      * 只在目标主回合空闲时投（与 agent→agent 同规则），语义固定、别的任务直接复用（打断收尾提醒、T11a 的答复）：
      * - 主回合忙或正在压缩 → 进押后队列，Stop / 压缩结束 / 每分钟扫描时 flush 再投；

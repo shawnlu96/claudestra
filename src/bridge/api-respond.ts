@@ -28,9 +28,12 @@ export function heldFields(heldBy: unknown, principal: Principal): { queued?: tr
   return typeof heldBy === "string" && heldBy ? { queued: true, heldBy: canSeeQuota(principal) ? heldBy : undefined } : {};
 }
 
-/** POST /interrupt 没发键时的回执：停在撞墙画面上 → wallWait + 如实的原因（额度状态只告诉 canSeeQuota 的）；否则空闲 */
+/** POST /interrupt 没发键时的回执：停在撞墙画面上 → 能看额度的（canSeeQuota）给 wallWait + 如实的原因，别人只拿中性的 refused；否则空闲 */
 export function stopExtra(r: { keys: readonly string[]; wall?: WallWait }, principal: Principal): Record<string, unknown> {
-  return r.keys.length ? {} : r.wall ? { wallWait: true, note: wallWaitRefusal(r.wall, canSeeQuota(principal)) } : { idle: true };
+  if (r.keys.length) return {};
+  if (!r.wall) return { idle: true };
+  const see = canSeeQuota(principal);
+  return { [see ? "wallWait" : "refused"]: true, note: wallWaitRefusal(r.wall, see) };
 }
 
 /** 403 + 调用方给的文案（各端点「xxx requires a full-scope token」文案各不相同）。 */

@@ -39,7 +39,8 @@ const toolsAt = (agent: string, runtime: string | undefined) => inflightTools(ag
  * 再按那一刻的画面判一次（到点自动续跑了就打断），抬头随之改写（T24 wf3 delivery-hold-4）。
  */
 export function noteHeldStop(env: Envelope, channelId: string, agent: string, runtime?: string): void {
-  if (!ownerStopOf(env).stop) return;
+  if (!ownerStopOf(env).stop || env.meta.heldStopNoted) return;
+  env.meta.heldStopNoted = true;
   clearAgentPendings(channelId);
   const cut = turnCuts.record({
     channelId, agent, runtime, cause: "stopword", byMessageId: env.meta.messageId, byName: senderName(env), tools: { inflight: [] }, interrupted: false,

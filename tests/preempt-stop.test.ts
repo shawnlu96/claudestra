@@ -133,6 +133,14 @@ describe("停在撞墙等待画面上（T24 wf3 delivery-hold-4 / 执行者主�
     expect(e.meta.interruptNote).toContain("撞墙等待画面");
     expect(e.meta.interruptNote).not.toContain("没能替你打断");
   });
+  test("同一条停字每分钟重投又押回来：只记第一次，停之后才来的 agent 回程槽不被清掉（T24 审查 P2-2）", () => {
+    log.length = 0;
+    const e = env("held-stop-again", true);
+    noteHeldStop(e, CC, "agent-cc", "claude-code");
+    noteHeldStop(e, CC, "agent-cc", "claude-code");
+    noteHeldStop(e, CC, "agent-cc", "claude-code");
+    expect(log).toEqual([`clear:${CC}`]);
+  });
   test("非 owner 的停、owner 的普通消息：不记叫停", () => {
     log.length = 0;
     for (const e of [env("g-stop", false), env("o-msg", true, "看一下日志")]) {

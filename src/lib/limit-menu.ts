@@ -7,7 +7,17 @@ const MENU_HINT = /^Enter to confirm\s*·\s*Esc to cancel$/i;
 const MENU_TITLE = "What do you want to do?";
 /** 额度菜单里才有的项：新旧版本的文案都算；usage_based 计费时是「Stop」「Switch to usage」（CC 2.1.283 源码，adv3 P2-2） */
 const LIMIT_OPTION_RE = /limit to reset|usage credits|Switch to usage|lower priority|continue automatically|Upgrade your plan|Add funds to continue/i;
-const tailOf = (lines: string[]): string[] => lines.filter((l) => l.trim()).slice(-24);
+/**
+ * 最后一条顶格边框（菜单顶上的 ▔▔▔、输入框的 ───）以下的非空行：≤20 列时菜单折成几十行，按固定行数截会把标题截掉、认不出菜单又去发键
+ * （T24 审查 P2-4）。没有边框才退回最后 24 行
+ */
+const BORDER_RE = /^(?:▔{3,}|─{3,})\s*$/;
+function tailOf(lines: string[]): string[] {
+  let b = lines.length - 1;
+  while (b >= 0 && !BORDER_RE.test(lines[b]!)) b--;
+  const rest = lines.slice(b + 1).filter((l) => l.trim());
+  return b >= 0 ? rest : rest.slice(-24);
+}
 /** 最后 1~3 行拼起来是提示行（≤34 列时「Enter to confirm · Esc to cancel」会折行）→ 占几行；不是 → 0 */
 function hintRows(tail: string[]): number {
   for (let k = 1; k <= Math.min(3, tail.length); k++) if (MENU_HINT.test(tail.slice(-k).map((l) => l.trim()).join(" "))) return k;
@@ -23,7 +33,7 @@ function titleAt(tail: string[]): [number, number] | null {
 }
 
 /**
- * 画面底部是额度菜单：最后 1~3 行是提示行，往上 24 行内有标题，两者之间有一项是额度菜单才有的选项（按编号拆开逐项比，
+ * 画面底部是额度菜单：最后 1~3 行是提示行，最后一条顶格边框以下有标题，两者之间有一项是额度菜单才有的选项（按编号拆开逐项比，
  * 窄窗口的 Ink 折行、促销说明行都不影响）。不要求每一项都认得；中间夹着顶格的行就不是（菜单整块缩进）。
  */
 export function limitMenuAtBottom(lines: string[]): boolean {
