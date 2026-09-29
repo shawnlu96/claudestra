@@ -55,7 +55,8 @@ function chatMessage(d: Record<string, unknown>, selfIds: ReadonlySet<string>): 
       if (!content && !attachments?.length) return null;
       const from = typeof d.from === "string" && d.from !== "?" ? d.from : undefined;
       const fromLabel = isSelfSource(from, typeof d.fromId === "string" ? d.fromId : undefined, selfIds) ? undefined : from;
-      const ask = typeof d.askId === "string" ? { askId: d.askId } : {};
+      const wire = typeof d.echo === "string" && typeof d.wire === "string" ? extractAttachments(d.wire).content : ""; // 作答的原文：对账、回填已答态用
+      const ask = { ...(typeof d.askId === "string" ? { askId: d.askId } : {}), ...(wire && wire !== content ? { wire } : {}) };
       return { t: "user-in", text: content, ...(fromLabel ? { from: fromLabel } : {}), ...(attachments?.length ? { attachments } : {}), ...ask };
     }
     return null;

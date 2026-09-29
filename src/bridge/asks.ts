@@ -203,6 +203,9 @@ export async function answerTarget(a: Ask): Promise<Target> {
   return { channelId: d.controlChannelId, agentName: "master", redirected: "master" };
 }
 
+/** 答复的入站事件带的回显：人话 echo 给气泡显示，原文 wire 给网页和乐观气泡对账、回填按钮已答态 */
+const echoOf = (askId: string, e: { text: string; wire?: string }) => ({ askId, echo: e.text, ...(e.wire ? { wire: e.wire } : {}) });
+
 /** bridge 发给 agent 的一封不抢占的消息：在线就 deliver，不在线或出错进押后队列。trigger：owner 的答复是 ask_answer，其余是 bridge_synth */
 export async function sendCalm(from: Endpoint, to: Target, intent: Envelope["intent"], content: string, askId: string, trigger: TriggerKind): Promise<string> {
   const d = deps!;
@@ -213,7 +216,7 @@ export async function sendCalm(from: Endpoint, to: Target, intent: Envelope["int
     intent,
     content,
     meta: { messageId: newMessageId("ask"), triggerKind: trigger, ts: new Date().toISOString(), threadId: newThreadId(), waitForIdle: true, askId, skipInterAgentWatchdog: true,
-      ...(trigger === "ask_answer" ? { askEcho: { askId, echo: answerEcho(content).text } } : {}) },
+      ...(trigger === "ask_answer" ? { askEcho: echoOf(askId, answerEcho(content)) } : {}) },
   };
   if (live) {
     const r = await d.deliver(env);

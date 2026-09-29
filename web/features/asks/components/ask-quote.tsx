@@ -4,20 +4,13 @@ import { useChatStoreApi } from "@/features/chat/chat-store";
 import { useChatNav } from "@/features/chat/components/nav-context";
 import { fetchAsk } from "@/lib/api/asks";
 import { useT } from "@/lib/i18n";
+import { askByIdCache } from "../ask-by-id";
 import { jumpToAsk } from "../ask-jump";
 import { asksStore, useAsks } from "../asks-store";
 import type { WebAsk } from "../asks-model";
 
-/** 抽屉列表里没有的（结案超过 3 天、别的机器）按 id 单独取一次；进程内记住，同一条不重复取 */
-const fetched = new Map<string, Promise<WebAsk | null>>();
-function askById(id: string): Promise<WebAsk | null> {
-  let p = fetched.get(id);
-  if (!p) {
-    p = fetchAsk(id).then((r) => r.ask).catch(() => null); // 看不见 / 已删：引用条只写「答复」不带标题
-    fetched.set(id, p);
-  }
-  return p;
-}
+/** 抽屉列表里没有的按 id 单独取（进程内缓存，失败的不记，见 ask-by-id.ts） */
+const askById = askByIdCache(fetchAsk);
 
 const TITLE_MAX = 40;
 

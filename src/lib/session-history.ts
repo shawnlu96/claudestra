@@ -18,7 +18,7 @@ import { open as fsOpen } from "fs/promises";
 import { join } from "path";
 import { projectJsonlPath, findJsonlBySessionId } from "./jsonl-cost.js";
 import { agentArchiveDir, ARCHIVE_ROOT, realpathWithin } from "./session-archive.js";
-import { channelAskId, channelBodyText, commandRecordLine, commandStdoutLine, senderOf } from "./inbound-body.js";
+import { channelAnswer, channelBodyText, commandRecordLine, commandStdoutLine, senderOf, type AskAnswerRef } from "./inbound-body.js";
 import { settleToolCard } from "./auq-echo.js";
 import { sanitizeComponents } from "./history-components.js";
 import { askIdOfReplyResult } from "./reply-ask-schema.js";
@@ -115,7 +115,8 @@ export type ReplyComponentRow =
   | { type: "select"; id: string; placeholder?: string; options: { label: string; value: string; description?: string }[] }
   | { type: "multiselect"; id: string; placeholder?: string; min?: number; max?: number; submitLabel?: string; options: { label: string; value: string; description?: string }[] };
 
-export interface HistoryMessage {
+/** askId / wire：owner 对「待你处理」的作答（lib/inbound-body.ts answerEcho） */
+export interface HistoryMessage extends AskAnswerRef {
   /** jsonl 行号（0-based），分页锚点，同一文件内稳定 */
   seq: number;
   ts: string | null;
@@ -141,8 +142,6 @@ export interface HistoryMessage {
   from?: string;
   /** 发送者 id（user_id 属性：api:<tokenId> / Discord 用户 id）——web 据此认出「本人的所有来源」 */
   fromId?: string;
-  /** owner 对「待你处理」的作答：答的是哪条 ask（web 画「答复：<标题>」引用条，lib/inbound-body.ts answerEcho） */
-  askId?: string;
 }
 
 /**
@@ -261,14 +260,14 @@ function collectChannelMessageIds(lines: string[]): Set<string> {
  * 解包一条 <channel> 入站消息：返回 { text, from }；不是 channel 包装
  * （caveat / local-command 等真 meta）返回 null。
  */
-export function unwrapChannelMessage(raw: string): { text: string; from?: string; fromId?: string; askId?: string } | null {
+export function unwrapChannelMessage(raw: string): ({ text: string; from?: string; fromId?: string } & AskAnswerRef) | null {
   const m = raw.match(CHANNEL_WRAP_RE);
   if (!m) return null;
   const from = /(?:^|\s)user="([^"]*)"/.exec(m[1])?.[1] || undefined;
   const fromId = /(?:^|\s)user_id="([^"]*)"/.exec(m[1])?.[1] || undefined;
   const text = channelBodyText(m[1], m[2]); // 剥注入头 + 补附件行（lib/inbound-body.ts）
   if (!text) return null;
-  return { text, from, fromId, askId: channelAskId(m[1], m[2]) };
+  return { text, from, fromId, ...channelAnswer(m[1], m[2]) };
 }
 
 function summarize(sessionId: string, source: "live" | "archive", path: string): SessionSummary | null {

@@ -21,7 +21,7 @@ export interface StreamSink {
   appendAssistantText(text: string, progress?: boolean, src?: RecordSrc): void;
   /** 另一端用户的发言(user-in)——对账去重后画成用户气泡(附件已由 BFF 解析)。
    *  from:非本人的来源标签(peer/其它用户),UI 据此区分气泡样式。 */
-  addRemoteUserMessage(text: string, attachments?: { name: string; kind: "image" | "file"; url?: string }[], from?: string, askId?: string): void;
+  addRemoteUserMessage(text: string, attachments?: { name: string; kind: "image" | "file"; url?: string }[], from?: string, askId?: string, shown?: string): void;
   /** reply() 的最终回复：挂到当前 assistant 气泡的 replyText（回合外到达也定稿）。
    *  components：reply 附带的按钮/选单，挂到同一气泡供渲染。
    *  attachments：agent 出站附件（图片/文件），挂到气泡尾部渲染。 */
@@ -64,7 +64,7 @@ export function processStreamEvent(sink: StreamSink, evt: WebStreamEvent) {
       sink.appendAssistantText(evt.text, evt.progress, { seq: evt.seq, sid: evt.sid });
       break;
     case "user-in":
-      sink.addRemoteUserMessage(evt.text, evt.attachments, evt.from, evt.askId);
+      sink.addRemoteUserMessage(evt.wire ?? evt.text, evt.attachments, evt.from, evt.askId, evt.wire === undefined ? undefined : evt.text); // 作答：按原文对账，显示人话
       break;
     case "reply":
       sink.setReplyText(evt.text, evt.components, evt.attachments, evt.askId);

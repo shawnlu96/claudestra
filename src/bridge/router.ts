@@ -155,7 +155,7 @@ export interface Envelope {
     /** 这条 reply 建出的授权类 ask 的参数哈希（lib/ask-bind.ts）：随 reply 结果回给 agent，执行前 ledger ask-check 用 */
     askHash?: string;
     /** owner 作答的答复消息（bridge/asks.ts sendCalm）：入站事件带上，网页气泡显示 echo（选项人话 + 原话）和「答复：<标题>」引用条 */
-    askEcho?: { askId: string; echo: string };
+    askEcho?: { askId: string; echo: string; wire?: string };
     /** api 目的地的出站附件拷进 inbox 后的名字（bridge.ts deliverToApi 回填）：reply 建的 ask 记下来，卡片上列出、点开走附件预览 */
     sentFiles?: { name: string; attachment: string }[];
   };

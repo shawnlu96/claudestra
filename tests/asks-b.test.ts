@@ -1,6 +1,6 @@
 /**
  * 「待你处理」第二版 B（T11b PR B）：作答回显（选项人话 + askId，历史 / 直播同一个算法）、原消息定位（locate）、单条接口、
- * 回复附件记进 ask、AUQ 所选项进 decision（多问标「共 N 问」）、#control 授权摘要置顶、Codex 弹框扩展规则。库、状态文件都是临时的。
+ * 回复附件记进 ask、AUQ 所选项进 decision（多问标「共 N 问」）、#control 授权摘要置顶（Codex 弹框规则在 tests/runtime-dialogs.test.ts）。库、状态文件都是临时的。
  */
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
@@ -10,16 +10,15 @@ import { locateInLines } from "../src/bridge/ask-locate.js";
 import { pinText, refreshAskPin } from "../src/bridge/ask-pin.js";
 import { deliverReplyWithAsk } from "../src/bridge/ask-reply.js";
 import { openRuntimeAsk, resetRuntimeAsksForTest, settleAuq } from "../src/bridge/ask-runtime.js";
-import { setAsksForTest } from "../src/bridge/asks.js";
+import { onAsk, setAsksForTest } from "../src/bridge/asks.js";
 import { handleAsksApi } from "../src/bridge/local-api/asks.js";
 import type { Envelope } from "../src/bridge/router.js";
 import { auqAnswerSummary, auqEchoCard } from "../src/lib/auq-echo.js";
-import { answerEcho, channelAskId } from "../src/lib/inbound-body.js";
+import { answerEcho, channelAnswer } from "../src/lib/inbound-body.js";
 import { getAsk, listAsks, openAsk, patchAsk, type NewAsk } from "../src/lib/ledger-asks.js";
 import { readSessionHistory } from "../src/lib/session-history.js";
 import { closeLedger, listEvents, openLedger } from "../src/lib/ledger-store.js";
 import type { RegistryAgent } from "../src/lib/registry.js";
-import { detectCodexRuntimeDialog, parseDialogRules } from "../src/lib/runtime-dialogs.js";
 import { at, guest, owner } from "./asks-test-kit.js";
 import { tempLedgerPath } from "./ledger-test-helpers.js";
 
@@ -43,14 +42,24 @@ const base: NewAsk = { project: "p", fromAgent: "agent-x", fromChannelId: "111",
 describe("作答回显（第 7 条）", () => {
   const zh = "[✅ owner 回复了你 12:00 的「待你处理」（ask_q1）：发吗？选择：发；只发 Codex。下面是 owner 发的原文]";
   const en = "[✅ owner answered the 12:00 ask (ask_q2): Ship? Chose: Ship; Codex only. Owner's words below]";
-  test("去掉说明行、wire 行换成选项人话、再接原话；只写了话的只有原话；中英两种说明行都认", () => {
-    expect(answerEcho(`${zh}\n[button:go]\n[select:who:codex]`)).toEqual({ askId: "ask_q1", text: "发；只发 Codex" });
-    expect(answerEcho(`${en}\n[button:go]\nlater`)).toEqual({ askId: "ask_q2", text: "Ship; Codex only\nlater" });
-    expect(answerEcho("[✅ owner 回复了你 12:00 的「待你处理」（ask_q3）：发吗？下面是 owner 发的原文]\n都同意吧").text).toBe("都同意吧");
+  test("去掉说明行、wire 行换成选项人话、再接原话；只写了话的只有原话；中英两种说明行都认；原文另放 wire", () => {
+    expect(answerEcho(`${zh}\n[button:go]\n[select:who:codex]`)).toEqual({ askId: "ask_q1", text: "发；只发 Codex", wire: "[button:go]\n[select:who:codex]" });
+    expect(answerEcho(`${en}\n[button:go]\nlater`)).toEqual({ askId: "ask_q2", text: "Ship; Codex only\nlater", wire: "[button:go]\nlater" });
+    expect(answerEcho("[✅ owner 回复了你 12:00 的「待你处理」（ask_q3）：发吗？下面是 owner 发的原文]\n都同意吧")).toEqual({ askId: "ask_q3", text: "都同意吧" });
   });
-  test("channelAskId 只认 trigger=ask_answer 的；带注入头的也剥得掉", () => {
-    expect(channelAskId(' trigger="ask_answer" api="true"', `[🌐 来自 Web 端用户「owner」]\n\n${zh}\n[button:go]`)).toBe("ask_q1");
-    expect(channelAskId(' trigger="user_message"', `${zh}\n[button:go]`)).toBeUndefined();
+  test("「选择：」只认标题标点后面、到固定措辞为止的那段：标题里的「请选择：」不算，选项里的「。」不截断，还有 N 项没答的也认", () => {
+    const head = (mid: string) => `[✅ owner 回复了你 09:00 的「待你处理」（ask_2）：${mid}下面是 owner 发的原文]`;
+    expect(answerEcho(`${head("请选择：先合 A 还是先合 B？选择：先合 B。")}\n[button:b]`).text).toBe("先合 B");
+    expect(answerEcho(`${head("请选择：A。")}\n都行`).text).toBe("都行");
+    expect(answerEcho(`${head("发吗？选择：发。然后通知。")}\n[button:go]`).text).toBe("发。然后通知");
+    expect(answerEcho(`${head("发吗？选择：发。这条还有 1 项没答，答了会再发给你。")}\n[button:go]`).text).toBe("发");
+    expect(answerEcho(`${head("发吗？选择：发。还有 2 项 owner 没选（从卡片一次提交，没选的就是不选）。")}\n[button:go]`).text).toBe("发");
+    const en = "[✅ owner answered the 12:00 ask (ask_q2): Pick: A or B? Chose: B. 1 more part(s) still unanswered. Owner's words below]";
+    expect(answerEcho(`${en}\n[button:b]`).text).toBe("B");
+  });
+  test("channelAnswer 只认 trigger=ask_answer 的；带注入头的也剥得掉", () => {
+    expect(channelAnswer(' trigger="ask_answer" api="true"', `[🌐 来自 Web 端用户「owner」]\n\n${zh}\n[button:go]`)).toEqual({ askId: "ask_q1", wire: "[button:go]" });
+    expect(channelAnswer(' trigger="user_message"', `${zh}\n[button:go]`)).toEqual({});
   });
 });
 
@@ -93,6 +102,22 @@ test("回复附件记进 ask（api 目的地拷进 inbox 后的名字），卡�
     return { envelope: e, outcome: { kind: "sent" } };
   });
   expect(getAsk(openLedger(path), env.meta.askId!)?.extra.files).toEqual([{ name: "design.md", attachment: "1790_design.md" }]);
+});
+
+test("投到 Discord 频道的 reply：附件只上传给 Discord，这里补拷进 inbox 再记进 ask；记上之后再推一次", async () => {
+  const env: Envelope = {
+    from: { kind: "local", channelId: "111", ws: {} as never }, to: { kind: "user", userId: "", channelId: "111" }, intent: "response", content: "看下截图，发吗？",
+    meta: { messageId: "r2", triggerKind: "agent_tool", ts: at, threadId: "t2", components: [{ type: "buttons", buttons: [{ id: "go", label: "发" }] }], files: ["/tmp/x/shot.png"] },
+  };
+  const copied: [string[], string][] = [];
+  const copy = async (paths: string[], agent: string) => (copied.push([paths, agent]), [{ name: "shot.png", attachment: "1790_shot.png" }]);
+  const published: unknown[] = [];
+  const stop = onAsk((a) => void published.push(a.extra));
+  await deliverReplyWithAsk(env, "111", "111", async (e) => ({ envelope: e, outcome: { kind: "sent", discordMessageIds: ["m9"] } }), undefined, copy);
+  stop();
+  expect(copied).toEqual([[["/tmp/x/shot.png"], "agent-x"]]);
+  expect(getAsk(openLedger(path), env.meta.askId!)?.extra.files).toEqual([{ name: "shot.png", attachment: "1790_shot.png" }]);
+  expect(published.at(-1)).toMatchObject({ files: [{ attachment: "1790_shot.png" }] });
 });
 
 describe("AUQ", () => {
@@ -159,15 +184,14 @@ describe("#control 授权摘要置顶（第 5 条）", () => {
     await refreshAskPin(discord, "999", last, file);
     expect([sent.length, edits.length]).toEqual([1, 1]);
     expect(pinText([])).toContain("没有");
-  });
-});
-
-describe("Codex 运行中弹框的扩展规则", () => {
-  test("状态目录的 codex-dialogs.json：合格的行生效，坏行（不是对象 / 正则编不过 / 没标题）跳过；文件改了下次就生效", () => {
-    expect(parseDialogRules([{ pattern: "usage limit", title: "Codex 额度用完" }, { pattern: "(", title: "坏正则" }, { pattern: "x" }, "nope"]).map((r) => r.title)).toEqual(["Codex 额度用完"]);
-    const file = join(dir, "codex-dialogs.json");
-    expect(detectCodexRuntimeDialog("You've hit your usage limit", file)).toBeNull();
-    writeFileSync(file, JSON.stringify([{ pattern: "hit your usage limit", title: "Codex 额度用完" }]));
-    expect(detectCodexRuntimeDialog("You've hit your usage limit", file)).toEqual({ title: "Codex 额度用完", context: "hit your usage limit" });
+    // 取消息失败：网络抖动 / 429 / 5xx 不重发（频道里会留两条置顶），抛给调用方、正文不记，下次再试；Discord 说 Unknown Message 才重发
+    let fail: unknown = Object.assign(new Error("Service Unavailable"), { status: 503 });
+    ch.messages.fetch = async () => Promise.reject(fail);
+    last.text = "";
+    await expect(refreshAskPin(discord, "999", last, file)).rejects.toThrow("Service Unavailable");
+    expect([sent.length, last.text]).toEqual([1, ""]);
+    fail = Object.assign(new Error("Unknown Message"), { code: 10008 });
+    await refreshAskPin(discord, "999", last, file);
+    expect([sent.length, pinned]).toEqual([2, 2]);
   });
 });

@@ -120,38 +120,55 @@ export function channelBodyText(attrs: string, body: string): string {
 const ASK_ANSWER_RE = /(?:^|\s)trigger="ask_answer"/;
 const WIRE_LINE_RE = /^\[(?:button|select):[^\]\n]+\]$/;
 const ASK_ID_RE = /[（(](ask_[0-9a-z]+)[）)]/;
-/** 第一行里「选择：a；b。」/「Chose: a; b. 」（bridge/asks.ts answerContent 的两种语言） */
-const CHOSE_RE = /选择：(.+?)。|Chose: (.+?)\. /;
+/**
+ * 第一行里的所选项（bridge/asks.ts answerContent 的两种语言）：标题总以标点收尾，「选择：」紧跟在标题末尾的标点后面，
+ * 选项段一直到「还有 N 项…」或「下面是 owner 发的原文」为止——不按第一个「。」截（选项里可能带「。」），
+ * 也不认标题自己写的「请选择：」（前面不是标点）。标题里恰好也有「？选择：x。」的，取最后一处。
+ */
+const CHOSE_RE = /[。？！?!.]选择：(.+?)。(?=这条还有 \d+ 项没答|还有 \d+ 项 owner 没选|下面是 owner 发的原文)|[.?!。？！] Chose: (.+?)\. (?=\d+ more part|\d+ part\(s\) left|Owner's words below)/g;
+
+/** owner 对「待你处理」的作答在历史 / 直播里带的两样：答的是哪条 ask，以及 owner 的原文（wire 行 + 写的话，网页据此回填按钮已答态、和乐观气泡对账） */
+export interface AskAnswerRef {
+  /** 答的是哪条 ask（web 画「答复：<标题>」引用条） */
+  askId?: string;
+  /** owner 的原文（和显示的人话不同时才带） */
+  wire?: string;
+}
 
 /**
  * owner 对「待你处理」的作答（bridge/asks.ts answerContent：第一行是给 agent 写的说明，之后是 owner 的原文）→ 给人看的样子：
- * askId 取第一行里的 ask_…（网页据此画「答复：<标题>」引用条、点了跳回原消息）；正文把 wire 行（[button:…] / [select:…]）换成
- * 第一行里的选项人话，再接 owner 写的话。历史（channelBodyText）和直播（bridge 入站事件的 echo）都用它，多端显示一致。
+ * askId 取第一行里的 ask_…；正文把 wire 行（[button:…] / [select:…]）换成第一行里的选项人话，再接 owner 写的话。
+ * 历史（channelBodyText）和直播（bridge 入站事件的 echo）都用它，多端显示一致；原文另放 wire，不丢。
  */
-export function answerEcho(content: string): { askId?: string; text: string } {
+export function answerEcho(content: string): AskAnswerRef & { text: string } {
   const [head = "", ...rest] = content.split("\n");
   const said = rest.filter((l) => !WIRE_LINE_RE.test(l.trim())).join("\n").trim();
-  const chose = CHOSE_RE.exec(head);
+  const chose = [...head.matchAll(CHOSE_RE)].pop();
   const labels = (chose?.[1] ?? chose?.[2] ?? "").trim();
   const askId = ASK_ID_RE.exec(head)?.[1];
-  return { ...(askId ? { askId } : {}), text: [labels, said].filter(Boolean).join("\n") };
+  const text = [labels, said].filter(Boolean).join("\n");
+  const wire = rest.join("\n").trim();
+  return { ...(askId ? { askId } : {}), text, ...(wire && wire !== text ? { wire } : {}) };
 }
 
-/** channel 包装的属性串 + 内文 → 这条是哪条 ask 的作答（不是作答 → undefined） */
-export function channelAskId(attrs: string, body: string): string | undefined {
-  return ASK_ANSWER_RE.test(attrs) ? answerEcho(stripChannelHeader(body)).askId : undefined;
+/** channel 包装的属性串 + 内文 → 这条是哪条 ask 的作答、owner 的原文（不是作答 → 空对象） */
+export function channelAnswer(attrs: string, body: string): AskAnswerRef {
+  if (!ASK_ANSWER_RE.test(attrs)) return {};
+  const { askId, wire } = answerEcho(stripChannelHeader(body));
+  return { ...(askId ? { askId } : {}), ...(wire ? { wire } : {}) };
 }
 
 function ownerWordsOfAnswer(attrs: string, text: string): string {
   return ASK_ANSWER_RE.test(attrs) ? answerEcho(text).text : text;
 }
 
-/** 历史里一条入站消息的发送者与所答的 ask（lib/session-history.ts）：没有的字段不带，历史 JSON 里不出现空键；没有 from 就不带 fromId */
-export function senderOf(un: { from?: string; fromId?: string; askId?: string }): Record<string, string> {
+/** 历史里一条入站消息的发送者、所答的 ask 与原文（lib/session-history.ts）：没有的字段不带，历史 JSON 里不出现空键；没有 from 就不带 fromId */
+export function senderOf(un: { from?: string; fromId?: string } & AskAnswerRef): Record<string, string> {
   const out: Record<string, string> = {};
   if (un.from) out.from = un.from;
   if (un.from && un.fromId) out.fromId = un.fromId;
   if (un.askId) out.askId = un.askId;
+  if (un.wire) out.wire = un.wire;
   return out;
 }
 
