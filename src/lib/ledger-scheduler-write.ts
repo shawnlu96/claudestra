@@ -1,0 +1,182 @@
+/** Scheduler-only ledger writes: every decision and resource claim is one compare-and-swap transaction. */
+import type { Database } from "bun:sqlite";
+import { isManager, mustTask, type WriteCtx } from "./ledger-checks.js";
+import { blockedBy, depViews } from "./ledger-deps.js";
+import {
+  activationSeq, AUTHOR_FAMILIES, getIntent, getWorkflow, INTENT_ACTIONS, INTENT_STATUSES, resourceKey, resourcesOverlap, taskCreationSeq,
+  WORKFLOW_MODES, WORKFLOW_TEMPLATES, type AuthorFamily, type IntentAction, type IntentStatus, type SchedulerIntent,
+  type TaskWorkflow, type WorkflowMode, type WorkflowTemplate,
+} from "./ledger-scheduler.js";
+import { getEventByDedup, getMeta, LedgerError, listDeps, listTasks } from "./ledger-store.js";
+import { insertEvent, tx } from "./ledger-tx.js";
+
+const textOneLine = (value: string, label: string, max: number): string => {
+  const out = value.trim();
+  if (!out || out.length > max || /[\p{Cc}\p{Cf}\u2028\u2029]/u.test(out)) throw new LedgerError("invalid", `${label}要是 1–${max} 字的单行文字`);
+  return out;
+};
+const projectSeq = (db: Database, project: string): number =>
+  (db.query("SELECT COALESCE(MAX(seq), 0) AS seq FROM events WHERE project = ?").get(project) as { seq: number }).seq;
+const actorMayConfigure = (db: Database, actor: string, project: string): boolean => {
+  const meta = getMeta(db, project);
+  return actor !== meta.team?.dispatcher && isManager(db, actor, { project, agent: null });
+};
+
+export interface WorkflowInput {
+  taskId: string;
+  taskRev: number;
+  workflowRev?: number;
+  template: WorkflowTemplate;
+  templateVersion: number;
+  mode: WorkflowMode;
+  authorFamily: AuthorFamily;
+  fallback: string;
+}
+
+/** Historical cards are excluded by the migration watermark, even when still sitting in spec. */
+export function setWorkflow(db: Database, ctx: WriteCtx, input: WorkflowInput): { workflow: TaskWorkflow; duplicate: boolean } {
+  return tx(db, () => {
+    const task = mustTask(db, input.taskId);
+    if (!actorMayConfigure(db, ctx.actor, task.project)) throw new LedgerError("forbidden", "只有项目 PM / master / owner 能配置自动任务");
+    if (task.kind !== "code") throw new LedgerError("invalid", "自动流程只接 code 任务");
+    const existing = getWorkflow(db, task.id);
+    if (!existing) {
+      const born = taskCreationSeq(db, task.id);
+      if (task.stage !== "spec" || born === null || born <= activationSeq(db)) {
+        throw new LedgerError("invalid", "只给迁移后新建、尚在 spec 的任务启用自动流程");
+      }
+    } else if (task.stage !== "spec" && input.mode !== "manual") {
+      throw new LedgerError("invalid", "已开工的任务可暂停为 manual；重新自动接管须先核对并另走恢复入口");
+    }
+    if (!WORKFLOW_TEMPLATES.includes(input.template) || !WORKFLOW_MODES.includes(input.mode)) throw new LedgerError("invalid", "流程模板或模式不认识");
+    if (!AUTHOR_FAMILIES.includes(input.authorFamily)) throw new LedgerError("invalid", "作者模型家族只认 claude / codex");
+    if (input.templateVersion !== 2) throw new LedgerError("invalid", "当前只认模板版本 2");
+    const fallback = textOneLine(input.fallback, "退路方案", 600);
+    const data = { template: input.template, templateVersion: input.templateVersion, mode: input.mode, authorFamily: input.authorFamily, fallback };
+    const unchanged = existing && existing.specRev === task.specRev && Object.entries(data).every(([k, v]) => existing[k as keyof TaskWorkflow] === v);
+    if (unchanged) return { workflow: existing, duplicate: true };
+    if (task.rev !== input.taskRev || (existing?.rev ?? 0) !== (input.workflowRev ?? 0)) {
+      throw new LedgerError("conflict", "任务或流程已被改过，先重读再设置", { taskRev: task.rev, workflowRev: existing?.rev ?? 0 });
+    }
+    const now = ctx.now ?? Date.now();
+    const pending = existing && input.mode === "manual"
+      ? db.query("SELECT id FROM scheduler_intents WHERE taskId = ? AND status = 'pending'").all(task.id) as { id: string }[] : [];
+    if (pending.length) {
+      db.query("UPDATE scheduler_intents SET status = 'cancelled', updatedAt = ? WHERE taskId = ? AND status = 'pending'").run(now, task.id);
+      for (const row of pending) db.query("DELETE FROM scheduler_resources WHERE intentId = ?").run(row.id);
+    }
+    db.prepare(`INSERT INTO task_workflows (taskId, project, template, templateVersion, mode, authorFamily, fallback, specRev, createdAt, updatedAt)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT (taskId) DO UPDATE SET template=excluded.template, templateVersion=excluded.templateVersion,
+      mode=excluded.mode, authorFamily=excluded.authorFamily, fallback=excluded.fallback, specRev=excluded.specRev,
+      rev=task_workflows.rev+1, updatedAt=excluded.updatedAt`).run(
+      task.id, task.project, input.template, input.templateVersion, input.mode, input.authorFamily, fallback, task.specRev, now, now,
+    );
+    const workflow = getWorkflow(db, task.id) as TaskWorkflow;
+    insertEvent(db, { actor: ctx.actor, now }, {
+      project: task.project, target: task.id, kind: "scheduler", text: `流程设为 ${input.mode}`,
+      data: { op: "workflow", ...data, workflowRev: workflow.rev, specRev: task.specRev, cancelledIntents: pending.map((p) => p.id) },
+    }, false);
+    return { workflow, duplicate: false };
+  });
+}
+
+export interface PlanIntentInput {
+  id: string;
+  taskId: string;
+  taskRev: number;
+  workflowRev: number;
+  causalSeq: number;
+  node: string;
+  action: IntentAction;
+  recipient?: string;
+  reason: string;
+  resources?: string[];
+}
+
+/** The caller proposes an action; all guards and uniqueness are checked again under BEGIN IMMEDIATE. */
+export function planIntent(db: Database, ctx: WriteCtx, input: PlanIntentInput): { intent: SchedulerIntent; duplicate: boolean } {
+  return tx(db, () => {
+    const task = mustTask(db, input.taskId);
+    if (!actorMayConfigure(db, ctx.actor, task.project)) throw new LedgerError("forbidden", "只有项目 PM / master / owner 能提交调度意图");
+    const id = textOneLine(input.id, "intent key", 160);
+    if (!/^[\w:.-]+$/.test(id)) throw new LedgerError("invalid", "intent key 只能含字母数字及 _ : . -");
+    const node = textOneLine(input.node, "节点", 80);
+    const reason = textOneLine(input.reason, "决定理由", 600);
+    const recipient = input.recipient ? textOneLine(input.recipient, "收件人", 200) : null;
+    const resources = [...new Set((input.resources ?? []).map(resourceKey))].sort();
+    if (resources.length > 32 || resources.includes(null)) throw new LedgerError("invalid", "资源名不合法或一次超过 32 个");
+    const previous = getIntent(db, id);
+    if (previous) {
+      const event = getEventByDedup(db, `scheduler:${id}`);
+      const was = event?.data.resources;
+      if (previous.taskId !== task.id || previous.node !== node || previous.action !== input.action ||
+        previous.recipient !== recipient || previous.reason !== reason ||
+        previous.causalSeq !== input.causalSeq || previous.taskRev !== input.taskRev ||
+        !Array.isArray(was) || JSON.stringify(was) !== JSON.stringify(resources)) {
+        throw new LedgerError("dedup_mismatch", "intent key 已用于另一项调度决定");
+      }
+      return { intent: previous, duplicate: true };
+    }
+    const workflow = getWorkflow(db, task.id);
+    if (!workflow || workflow.mode !== "auto") throw new LedgerError("invalid", "任务未启用自动流程");
+    if (workflow.specRev !== task.specRev) throw new LedgerError("conflict", "规格版本变了，自动流程先停下重核");
+    if (task.rev !== input.taskRev || workflow.rev !== input.workflowRev || projectSeq(db, task.project) !== input.causalSeq) {
+      throw new LedgerError("conflict", "任务、流程或项目事件已前进，丢弃旧计划重新计算");
+    }
+    if (getMeta(db, task.project).queueFrozen.frozen) throw new LedgerError("conflict", "项目合并队列已冻结");
+    const blocked = blockedBy(task.id, depViews(listDeps(db, task.project), listTasks(db, task.project)));
+    if (blocked.length) throw new LedgerError("conflict", `任务被前置挡住：${blocked.map((d) => d.from).join("、")}`);
+    if (!INTENT_ACTIONS.includes(input.action)) throw new LedgerError("invalid", "调度动作不认识");
+    const live = db.query("SELECT id FROM scheduler_intents WHERE taskId = ? AND status IN ('pending','submitted','unknown') LIMIT 1")
+      .get(task.id) as { id: string } | null;
+    if (live) throw new LedgerError("conflict", `任务已有未结调度意图 ${live.id}`);
+    const held = db.query("SELECT resource, taskId FROM scheduler_resources WHERE project = ?").all(task.project) as { resource: string; taskId: string }[];
+    for (const resource of resources) {
+      const used = held.find((row) => resourcesOverlap(resource as string, row.resource));
+      if (used) throw new LedgerError("conflict", `资源 ${resource} 与 ${used.resource} 重叠（${used.taskId} 占用）`);
+    }
+    const now = ctx.now ?? Date.now();
+    db.prepare(`INSERT INTO scheduler_intents (id, taskId, project, node, action, recipient, causalSeq, taskRev, specRev, head,
+      templateVersion, status, reason, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)`).run(
+      id, task.id, task.project, node, input.action, recipient, input.causalSeq, task.rev, task.specRev, task.headSHA,
+      workflow.templateVersion, reason, now, now,
+    );
+    for (const resource of resources) db.prepare("INSERT INTO scheduler_resources (project, resource, taskId, intentId, acquiredAt) VALUES (?, ?, ?, ?, ?)")
+      .run(task.project, resource, task.id, id, now);
+    const event = insertEvent(db, { actor: "scheduler", now, dedupKey: `scheduler:${id}` }, {
+      project: task.project, target: task.id, kind: "scheduler", text: reason,
+      data: { op: "plan", id, node, action: input.action, recipient, resources, causalSeq: input.causalSeq,
+        taskRev: task.rev, specRev: task.specRev, head: task.headSHA, template: workflow.template, version: workflow.templateVersion },
+    }, true);
+    db.prepare("UPDATE scheduler_intents SET eventSeq = ? WHERE id = ?").run(event.seq, id);
+    return { intent: getIntent(db, id) as SchedulerIntent, duplicate: false };
+  });
+}
+
+const NEXT: Record<IntentStatus, readonly IntentStatus[]> = {
+  pending: ["submitted", "cancelled", "unknown"], submitted: ["done", "unknown", "cancelled"],
+  done: [], unknown: ["done", "cancelled"], cancelled: [],
+};
+
+/** A timeout only marks unknown; resources stay claimed until reconciliation or explicit cancellation. */
+export function settleIntent(db: Database, ctx: WriteCtx, input: { id: string; from: IntentStatus; to: IntentStatus; receipt?: string }): SchedulerIntent {
+  return tx(db, () => {
+    const intent = getIntent(db, input.id);
+    if (!intent) throw new LedgerError("not_found", "没有这个调度意图");
+    if (!actorMayConfigure(db, ctx.actor, intent.project)) throw new LedgerError("forbidden", "只有项目 PM / master / owner 能结算调度意图");
+    if (!INTENT_STATUSES.includes(input.to) || !NEXT[input.from]?.includes(input.to) || intent.status !== input.from) {
+      throw new LedgerError("conflict", `调度意图当前是 ${intent.status}，不能 ${input.from}→${input.to}`);
+    }
+    const now = ctx.now ?? Date.now();
+    const receipt = input.receipt ? textOneLine(input.receipt, "回执", 600) : intent.receipt;
+    db.prepare("UPDATE scheduler_intents SET status = ?, receipt = ?, attempts = attempts + ?, updatedAt = ? WHERE id = ?")
+      .run(input.to, receipt, input.to === "submitted" ? 1 : 0, now, input.id);
+    if (input.to === "done" || input.to === "cancelled") db.prepare("DELETE FROM scheduler_resources WHERE intentId = ?").run(input.id);
+    insertEvent(db, { actor: "scheduler", now, dedupKey: `scheduler:${input.id}:${input.to}` }, {
+      project: intent.project, target: intent.taskId, kind: "scheduler", text: `调度意图 ${input.to}`,
+      data: { op: "settle", id: input.id, from: input.from, to: input.to, receipt },
+    }, true);
+    return getIntent(db, input.id) as SchedulerIntent;
+  });
+}
