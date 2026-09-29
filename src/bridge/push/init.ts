@@ -6,6 +6,7 @@
  */
 import { join } from "node:path";
 import { ApnsClient, apnsConfigFromEnv } from "../../lib/apns.js";
+import { readConfigSync } from "../../lib/config-store.js";
 import { repoEnvVar } from "../../lib/env-file.js";
 import { instanceKeySync, keyFingerprint } from "../../lib/instance-key.js";
 import { STATE_DIR } from "../../lib/paths.js";
@@ -77,7 +78,10 @@ export function initPush(deliver?: (env: Envelope) => Promise<Delivery>): void {
   const resolvePrincipal = (pid: string, cid: string | null) => (file ? principalView(file, pid, cid) : null);
   let isQuietReply: (threadId: unknown) => boolean = () => false;
   const quiet = (threadId: unknown) => isQuietReply(threadId);
-  const dispatcher = createDispatcher({ db, sender, isOwnerChat: (id) => owner.has(id), resolvePrincipal, isQuietReply: quiet, ...(key ? { fp: keyFingerprint(key.publicKey) } : {}) });
+  const noContent = () => readConfigSync().pushNoContent === true;
+  const dispatcher = createDispatcher({
+    db, sender, isOwnerChat: (id) => owner.has(id), resolvePrincipal, isQuietReply: quiet, noContent, ...(key ? { fp: keyFingerprint(key.publicKey) } : {}),
+  });
   dispatcherRef = dispatcher;
   subscribeEvents({}, (evt) => void dispatcher.onEvent(evt).catch((e) => console.error(`⚠️ 推送派发异常（这一条没推出去）: ${(e as Error).message}`)));
   console.log("🔔 推送派发器已启动（进程内订阅 event-bus）");

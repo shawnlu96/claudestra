@@ -64,9 +64,13 @@ export function rewriteLocation(headers: Headers, host: string): Headers {
   return headers;
 }
 
+const B64_RE = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
+
 export const b64 = {
   enc: (u: Uint8Array): string => Buffer.from(u).toString("base64"),
   dec: (s: string): Uint8Array => new Uint8Array(Buffer.from(s, "base64")),
+  /** 严格解码：不是规范的 base64（长度、字符、填充）返回 null——Buffer.from 会把乱码默默解成更短甚至空的字节 */
+  decStrict: (s: string): Uint8Array | null => (B64_RE.test(s) ? new Uint8Array(Buffer.from(s, "base64")) : null),
 };
 
 /** 把一段字节切成 ≤ maxChunk 的块（空输入 → 空数组） */
