@@ -2716,7 +2716,7 @@ async function handleHookRequest(req: Request): Promise<Response> {
         // 轮转（不经 clear 端点）自愈。后台异步，不阻塞 Stop 主流程。
         void maybeHealRotatedSession(channelId);
         // 插话那一回合结束、被打断的事还没续上 → 打断收尾提醒进押后队列,和押后消息一起由同一个投递者投(lib/turn-cuts.ts)
-        const cutNotice = turnCuts.onStop(channelId, event === "stop" ? "Stop" : event, evAgent);
+        const cutNotice = turnCuts.onStop(channelId, event === "stop" ? "Stop" : event, evAgent, afterAbort); // 叫停中止引起的 Stop 不清送达记录（⏹ 抬头要列）
         if (cutNotice) heldLocalMsgs.holdEnv(cutNotice);
         // v2.21.1+ 回合结束 → 投递押后的 agent→agent 消息(2s 让 TUI 回到提示符)
         if (heldLocalMsgs.get(channelId)?.length) {
@@ -2734,7 +2734,7 @@ async function handleHookRequest(req: Request): Promise<Response> {
 
       // 只有 Stop / StopFailure 触发完成通知，Notification 不触发（避免 Stop+Notification 连发两次）
       // 同时 10 秒内去抖，防止 Claude Code 重复 fire Stop 事件
-      let shouldNotify = event === "Stop" || event === "StopFailure" || event === "stop";
+      let shouldNotify = (event === "Stop" || event === "StopFailure" || event === "stop") && !afterAbort; // 叫停引起的 Stop 不是做完：不 @，也不占掉停字那一轮的去抖
       const now = Date.now();
       const last = lastCompletionSent.get(channelId) || 0;
       if (shouldNotify && now - last < COMPLETION_DEDUPE_MS) {

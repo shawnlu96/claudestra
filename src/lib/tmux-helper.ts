@@ -200,7 +200,7 @@ export function tmuxInterrupt(target: string): void {
 /** 双 Esc 护栏（CC 连按两次 Esc = Rewind）：所有 Esc 都必须走这里。规则、窗口身份、跨进程锁见 lib/esc-guard.ts */
 const escFile = (key: string, ext: string) => join(RUNTIME_DIR, `esc-${key.replace(/[^\w.-]/g, "_")}.${ext}`);
 export const tmuxSendEscape = createEscGuard({
-  windowId: async (t) => (await tmuxRaw(["list-panes", "-t", t, "-F", "#{window_id}"])).split("\n")[0] || null,
+  windowId: async (t) => (await tmuxRawStrict(["list-panes", "-t", t, "-F", "#{window_id}"])).split("\n")[0] || null, // 出错就抛：Esc 不发（esc-guard）
   lock: (key) => acquireLock(escFile(key, "lock"), ESC_LOCK_WAIT_MS, 5_000), // 等锁 > 过期：持锁进程崩了也等得到回收；等不到就不发（esc-guard）
   readShared: (key) => {
     try { return Number(readFileSync(escFile(key, "at"), "utf8")) || 0; } catch { return 0; /* 还没有人给这个窗口发过 Esc */ }
