@@ -2,10 +2,10 @@
 import { useEffect, useState } from "react";
 import { api } from "@/lib/api/client";
 import { useMachineFp } from "../talk/use-talk";
-import type { TeamAgent, TeamPeer, TeamQuota } from "./team-panel-model";
+import type { TeamPeer, TeamQuota } from "./team-panel-model";
 
-interface TeamData { agents: TeamAgent[] | null; peers: TeamPeer[] | null; quotas: TeamQuota[] | null }
-const EMPTY: TeamData = { agents: null, peers: null, quotas: null };
+interface TeamData { peers: TeamPeer[] | null; quotas: TeamQuota[] | null }
+const EMPTY: TeamData = { peers: null, quotas: null };
 
 /** Sources fail independently. Machine changes hide the old snapshot synchronously. */
 export function useTeamPanel() {
@@ -20,13 +20,11 @@ export function useTeamPanel() {
       loading = true;
       const opt = { signal: ctrl.signal, timeoutMs: 8000 };
       const results = await Promise.allSettled([
-        api<{ agents?: TeamAgent[] }>("/agents?include=stopped", opt),
         api<{ contacts?: TeamPeer[] }>("/peers/contacts", opt),
         api<{ providers?: TeamQuota[] }>("/team/quota", opt),
       ]);
-      const [a, p, q] = results;
+      const [p, q] = results;
       if (live) setState({ fp, data: {
-        agents: a.status === "fulfilled" && Array.isArray(a.value.agents) ? a.value.agents : null,
         peers: p.status === "fulfilled" && Array.isArray(p.value.contacts) ? p.value.contacts : null,
         quotas: q.status === "fulfilled" && Array.isArray(q.value.providers) ? q.value.providers : null,
       } });

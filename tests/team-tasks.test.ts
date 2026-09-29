@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { closeLedger, openLedger } from "../src/lib/ledger-store";
 import { createTask } from "../src/lib/ledger-write";
 import { assignStep } from "../src/lib/ledger-steps-write";
-import { teamTasks } from "../src/lib/team-tasks";
+import { activeTeamTask, teamTasks } from "../src/lib/team-tasks";
 
 test("team cards use current explicit step, exact peer and project, with legacy fallback", () => {
   const db = openLedger(":memory:");
@@ -22,4 +22,9 @@ test("team cards use current explicit step, exact peer and project, with legacy 
     db.run("UPDATE tasks SET stage='done' WHERE id='T1'");
     expect(teamTasks(db, "P", "B", "r")).toEqual([]);
   } finally { closeLedger(":memory:"); }
+});
+
+test("roles and member cards share the same active task filter", () => {
+  expect(["done", "verified", "cancelled"].map((stage) => activeTeamTask({ stage }))).toEqual([false, false, false]);
+  expect(["build", "fix", "review", "blocked"].every((stage) => activeTeamTask({ stage }))).toBe(true);
 });

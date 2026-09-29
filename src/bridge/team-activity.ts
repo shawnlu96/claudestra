@@ -2,9 +2,10 @@
 import { readRegistryAgents } from "../lib/registry.js";
 import { getMeta, listTasks, toEvent } from "../lib/ledger-store.js";
 import { stepAtStage, stepsOf } from "../lib/ledger-steps.js";
-import { ledgerInteractions, messageInteractions, teamIdentity, TEAM_WINDOW_MS } from "../lib/team-activity.js";
+import { ledgerInteractions, messageInteractions, teamIdentity, teamRingTruncated, TEAM_WINDOW_MS } from "../lib/team-activity.js";
+import { activeTeamTask } from "../lib/team-tasks.js";
 import { ledgerDb } from "./ledger-feed.js";
-import { replayEventsSince } from "./event-bus.js";
+import { replayEventsSince, RING_LIMIT } from "./event-bus.js";
 
 export async function readTeamActivity(project: string) {
   const now = Date.now();
@@ -18,7 +19,7 @@ export async function readTeamActivity(project: string) {
       const id = teamIdentity(pm, names);
       if (id) roles.push({ id, role: "PM" });
     }
-    for (const task of listTasks(db, project)) {
+    for (const task of listTasks(db, project).filter(activeTeamTask)) {
       const step = stepAtStage(stepsOf(db, task), task);
       const id = step && teamIdentity(step.executor, names);
       if (id) roles.push({ id, role: step!.step.includes("review") ? "审查员" : "执行者" });
@@ -27,8 +28,10 @@ export async function readTeamActivity(project: string) {
   const rows = db?.query("SELECT * FROM events WHERE project = ? AND ts > ? AND ts <= ? ORDER BY seq DESC LIMIT 201")
     .all(project, now - TEAM_WINDOW_MS, now) as Record<string, unknown>[] | undefined;
   const ledger = ledgerInteractions((rows ?? []).slice(0, 200).map(toEvent), names, now);
-  const messages = messageInteractions(replayEventsSince(0, { allow: (e) => e.type === "chat_message" }), names, members, now);
+  const ring = replayEventsSince(0);
+  const messages = messageInteractions(ring, names, members, now);
   const all = [...ledger, ...messages].sort((a, b) => b.at - a.at || a.id.localeCompare(b.id));
-  return { now, roles, interactions: all.slice(0, 200), truncated: (rows?.length ?? 0) > 200 || all.length > 200,
+  return { now, roles, interactions: all.slice(0, 200),
+    truncated: (rows?.length ?? 0) > 200 || all.length > 200 || teamRingTruncated(ring, members, now, RING_LIMIT),
     gaps: ["recipient_missing", "peer_actor_instance_only", "delivery_ring_not_persistent"] };
 }

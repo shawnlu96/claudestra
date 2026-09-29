@@ -2,6 +2,7 @@
 import { useLang } from "@/lib/i18n";
 
 const WORDS: Record<string, string> = {
+  "消息记录仅保留本次启动后的有限窗口。": "Messages cover a limited window since this bridge started.",
   "你": "You", "大总管": "Coordinator", "成员": "Members", "派活": "Assigned", "派审": "Review requested", "交付": "Delivered",
   "审查员": "Reviewer", "执行者": "Executor",
   "审查结论": "Review", "消息": "Message", "最近往来": "Recent interactions", "收件人未知": "Recipient unknown", "打开会话": "Open chat",
