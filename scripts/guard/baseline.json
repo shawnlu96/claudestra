@@ -129,7 +129,7 @@
     "doc:web/CLAUDE.en.md": 6532,
     "doc:web/CLAUDE.md": 5810,
     "dup:total": 1039,
-    "fn:overflow": 9007,
+    "fn:overflow": 8966,
     "fnLong:AgentActions": 1,
     "fnLong:AgentRow": 1,
     "fnLong:AskQuestionCard": 1,
