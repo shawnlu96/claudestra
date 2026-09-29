@@ -96,6 +96,13 @@ export const WALL_TIMING = {
 /** 人发的消息（Discord 用户 / 非 peer 的 API 用户）闸内照投：owner 可能正要去那个窗口 /limit-reset。按钮点击也算人 */
 export const isHumanSender = (from: { kind: string; peer?: unknown }): boolean => from.kind === "user" || (from.kind === "api" && !from.peer);
 
+/**
+ * 过闸时这一封算不算人发的：人发的、且没打 meta.quotaGated。只有 fleet 群发文字打它：owner 直发给一个 agent 是明知它的状态，群发一次发一批、
+ * 不清楚里面谁撞了墙，穿闸投进去只会白触发一轮报错（和批量压缩「撞墙没开 LP 的不发」同一口径）。ask 答复同样来自 owner、带 waitForIdle，不打它，照旧穿闸
+ */
+export const gatesAsHuman = (env: { from: { kind: string; peer?: unknown }; meta: { quotaGated?: boolean } }): boolean =>
+  isHumanSender(env.from) && !env.meta.quotaGated;
+
 export const emptyWallState = (): WallState => ({ v: 1, wall: null });
 
 export function isWallState(x: unknown): boolean {

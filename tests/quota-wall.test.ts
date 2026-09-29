@@ -4,7 +4,7 @@
  */
 import { describe, expect, test } from "bun:test";
 import {
-  countsAsWallActivity, emptyWallState, enterFromUsage, exitVia, isHumanSender, observeCache, markExit, noteOtherError, noteWallActivity, noteWallHit, notifyDue, probeDue,
+  countsAsWallActivity, emptyWallState, enterFromUsage, exitVia, gatesAsHuman, isHumanSender, observeCache, markExit, noteOtherError, noteWallActivity, noteWallHit, notifyDue, probeDue,
   resumeTargets, wallActive, WALL_TIMING, type UsageSignal, type WallState,
 } from "../src/lib/quota-wall.js";
 import { noticeOncePerState, recoveredNotice, wallNotice, wallResumeText } from "../src/lib/quota-wall-notice.js";
@@ -206,6 +206,13 @@ describe("恢复名单", () => {
     expect(isHumanSender({ kind: "api", peer: "sekai" })).toBe(false);
     expect(isHumanSender({ kind: "local" })).toBe(false);
     expect(isHumanSender({ kind: "bridge" })).toBe(false);
+  });
+  test("过闸算不算人：打了 quotaGated 的（fleet 群发文字）来源是 owner 也不算；只带 waitForIdle 的（ask 答复）照旧算", () => {
+    const owner = { kind: "api", owner: true };
+    expect(gatesAsHuman({ from: owner, meta: {} })).toBe(true);
+    expect(gatesAsHuman({ from: owner, meta: { quotaGated: true } })).toBe(false);
+    expect(gatesAsHuman({ from: { kind: "user" }, meta: { quotaGated: true } })).toBe(false);
+    expect(gatesAsHuman({ from: { kind: "bridge" }, meta: {} })).toBe(false);
   });
 });
 

@@ -56,8 +56,9 @@ export interface AppConfig {
   /** 没人看看板时也在后台读 Claude 的 Keychain、查 Claude 额度与重置卡（6 小时一次），让 Claude 的快过期提醒也能后台触发。
    *  缺省开（owner 09-28 批准；设计稿 T2b §3 / §5 原定只在看板打开时读）；false 单独关掉。每个 tick 现读，改完不用重启 */
   quotaClaudeBackground?: boolean;
-  /** 批量管理（bridge/fleet）：compactKeep 覆盖 /compact 的默认保留清单（lib/fleet-plan.ts DEFAULT_COMPACT_KEEP） */
-  fleet?: { compactKeep?: string };
+  /** 批量管理（bridge/fleet）：compactKeep 覆盖 /compact 的默认保留清单（lib/fleet-plan.ts DEFAULT_COMPACT_KEEP）；
+   *  callers = 除大总管和台账 PM 外还能调 fleet MCP 工具的 agent（管全部，lib/fleet-caller.ts） */
+  fleet?: { compactKeep?: string; callers?: string[] };
   /** 推送不带正文：Web Push / APNs 只发「Claudestra · 有新消息」（lib/push-redact.ts）。缺省关；派发器每条现读，改完不用重启 */
   pushNoContent?: boolean;
   /** 网页的 Chat（人与人，/talk）入口：缺省关——侧栏不出「工作台 | Chat」切换，/talk 跳回 /chat。只收界面，talk API 与数据照旧（T50） */
@@ -100,9 +101,8 @@ function merge(base: AppConfig, raw: any): AppConfig {
     ...(typeof raw.quotaLive === "boolean" ? { quotaLive: raw.quotaLive } : {}),
     ...(typeof raw.quotaClaudeBackground === "boolean" ? { quotaClaudeBackground: raw.quotaClaudeBackground } : {}),
     ...(typeof raw.pushNoContent === "boolean" ? { pushNoContent: raw.pushNoContent } : {}),
-    // 批量管理的保留清单（bridge/fleet 的 compactKeep()）：白名单只带 compactKeep；漏在这里读不到，任何 set* 还会把它抹掉。
-    // 和上下文边界的 keep 同一个入口 normalizeCompactKeep，不合格当没配；存原文（多行照收），敲之前再取它规范好的那一行
-    ...(normalizeCompactKeep(raw.fleet?.compactKeep).ok ? { fleet: { compactKeep: raw.fleet.compactKeep } } : {}),
+    // 批量管理（bridge/fleet）：白名单带 compactKeep 和 callers；漏在这里读不到，任何 set* 还会把它抹掉
+    ...fleetOf(raw.fleet),
     ...(typeof raw.talkEnabled === "boolean" ? { talkEnabled: raw.talkEnabled } : {}),
   };
 }
@@ -117,6 +117,19 @@ function mergeAutoCompact(ac: any): AppConfig["autoCompact"] | undefined {
     ...(ac.policies !== undefined ? { policies: ac.policies } : {}),
   };
   return Object.keys(out).length ? out : undefined;
+}
+
+/**
+ * 白名单式读 fleet：新加字段要加在这里，否则读出来是 undefined，而且任何 set*（读→改→写）都会把它从磁盘上抹掉。
+ * compactKeep 和上下文边界的 keep 同一个入口 normalizeCompactKeep，不合格当没配；存原文（多行照收），敲之前再取它规范好的那一行
+ */
+function fleetOf(f: unknown): Pick<AppConfig, "fleet"> {
+  if (!f || typeof f !== "object") return {};
+  const { compactKeep, callers } = f as Record<string, unknown>;
+  const list = Array.isArray(callers) ? callers.filter((c): c is string => typeof c === "string" && c.trim() !== "") : null;
+  const keepOk = typeof compactKeep === "string" && normalizeCompactKeep(compactKeep).ok;
+  const fleet = { ...(keepOk ? { compactKeep } : {}), ...(list ? { callers: list } : {}) };
+  return Object.keys(fleet).length ? { fleet } : {};
 }
 
 function defaults(): AppConfig {

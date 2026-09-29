@@ -3,7 +3,7 @@ import { describe, expect, test } from "bun:test";
 import type { LedgerDepView, LedgerTaskView, Stage } from "../web/features/collab/collab-model";
 import { blockLine, causeOf, edgeBasis, matchFilter, metricsOf, mobileSections, outlineOf, stageCounts } from "../web/features/collab/v4/v4-model";
 import { causalCanvas } from "../web/features/collab/v4/causal-model";
-import { edgeSel, narrowPane, resolveSelection } from "../web/features/collab/v4/v4-selection";
+import { edgeSel, memberSel, narrowPane, resolveSelection } from "../web/features/collab/v4/v4-selection";
 
 const metrics = { startTs: null, endTs: null, stageMs: {}, reviewRounds: 0, reviewWaitPendingMs: null, p0: 0, p1: 0, p2: 0 };
 function task(id: string, stage: Stage, over: Partial<LedgerTaskView> = {}): LedgerTaskView {
@@ -92,5 +92,18 @@ describe("选中存稳定键、每次从当前数据解析（v4-selection.ts）"
     expect(narrowPane("A", r)).toBe("detail");
     expect(narrowPane(null, r)).toBe("edge");
     expect(narrowPane(null, null)).toBe("list");
+  });
+});
+
+describe("团队标签接线：成员选中与手机入口", () => {
+  test("成员只记身份（节点 id、名字、实例、本机 agent 名），原样解析；手机上成员 / 团队各是整屏一页", () => {
+    const local = memberSel({ id: "local:writer", name: "writer", role: "agent", agent: { name: "agent-writer" } });
+    const remote = memberSel({ id: "peer:Sekai/outer", name: "outer", role: "agent", peer: "Sekai" });
+    expect(local).toEqual({ kind: "member", id: "local:writer", name: "writer", peer: null, agent: "agent-writer" });
+    expect(remote).toMatchObject({ peer: "Sekai", agent: null });
+    expect(resolveSelection(local, { deps: [] }, { groups: [] })).toBe(local);
+    expect(narrowPane(null, local)).toBe("member");
+    expect(narrowPane(null, resolveSelection({ kind: "team" }, { deps: [] }, { groups: [] }))).toBe("team");
+    expect(narrowPane("T1", local)).toBe("detail");
   });
 });
