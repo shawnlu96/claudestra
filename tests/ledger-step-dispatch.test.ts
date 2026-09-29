@@ -13,6 +13,9 @@ import { bindHash } from "../src/lib/ask-bind.js";
 import { isTaskDelegatedToPeer } from "../src/lib/peer-delegated.js";
 import { checkAcceptAsk } from "../src/manager/peer-ledger-cli.js";
 import { runLedger } from "../src/manager/ledger.js";
+import { sendKeyOf } from "../src/manager/ledger-step-dispatch.js";
+import { dispatchToAgent } from "../src/bridge/dispatch-route.js";
+import { withDeliveryDedup } from "../src/bridge/api-dedup.js";
 import { isWriteInvocation } from "../src/manager/write-commands.js";
 import { tempLedgerPath } from "./ledger-test-helpers.js";
 
@@ -20,6 +23,7 @@ const P = "proj";
 let db: Database;
 let now: number;
 let sent: { channel: string; target: string; text: string }[];
+let keys: string[];
 let sendOk: boolean;
 
 function run(actor: string, ...args: string[]) {
@@ -28,6 +32,7 @@ function run(actor: string, ...args: string[]) {
     loadRegistry: async () => ({ socket: "s", agents: {} }), saveRegistry: async () => {},
     dispatchSend: async (row, text) => {
       sent.push({ channel: row.channel, target: row.target, text });
+      keys.push(sendKeyOf(row));
       return sendOk ? { ok: true } : { ok: false, error: "对方离线" };
     },
   }) as Promise<Record<string, any>>;
@@ -37,6 +42,7 @@ beforeEach(() => {
   db = openLedger(tempLedgerPath("ledger-step-dispatch-"));
   now = 10_000;
   sent = [];
+  keys = [];
   sendOk = true;
   const o = { actor: "owner", now: 1 };
   setMeta(db, o, { project: P, key: "pms", value: ["agent-pm"] });
@@ -74,8 +80,10 @@ describe("派单与通道", () => {
     expect(a.text).toContain("bun src/manager.ts peer-ledger <发起方> pr T1");
     expect(a.text).toEndWith(`本单脱敏 ${a.redactions} 处。`);
     recordAccept(db, { actor: "peer:Shawn", now: 11_000 }, { taskId: "T1", peer: "Shawn" });
-    const b = await run("agent-pm", "dispatch", "T1", "--step", "write", "--to", "agent-codex@Shawn", "--kind", "peer");
-    expect(b.text.split("\n")[0]).toBe("[协作 T1/write]");
+    // 同一步同一人重派是重复（P2-2）；接受之后派下一步（修）才是步骤单
+    expect((await run("agent-pm", "dispatch", "T1", "--step", "write", "--to", "agent-codex@Shawn", "--kind", "peer")).duplicate).toBe(true);
+    const b = await run("agent-pm", "dispatch", "T1", "--step", "fix", "--to", "agent-codex@Shawn", "--kind", "peer");
+    expect(b.text.split("\n")[0]).toBe("[协作 T1/fix]");
     expect((await run("agent-pm", "team-set", "--peer-pm", "Shawn=")).peerPms).toEqual({});
   });
 
@@ -204,5 +212,73 @@ describe("常设授权与注入头", () => {
     expect(isTaskDelegatedToPeer("He", "T2", db)).toBe(false);
     expect(isTaskDelegatedToPeer("Shawn", "T404", db)).toBe(false);
     expect(isTaskDelegatedToPeer("Shawn", "T2", null)).toBe(false);
+  });
+});
+
+describe("复审修复（T48 round 1）", () => {
+  test("P1-1：kind=agent 的执行者带 @ 或 peer: 一律拒，不经本机通道发到远端", async () => {
+    for (const to of ["agent-codex@Shawn", "peer:Shawn.agent-codex"]) {
+      const r = await run("agent-pm", "dispatch", "T1", "--step", "write", "--to", to, "--kind", "agent");
+      expect(r).toMatchObject({ ok: false, code: "invalid" });
+      expect(r.error).toContain("--kind peer");
+    }
+    expect(sent).toEqual([]);
+    expect(listEvents(db, { project: P, target: "T1" }).some((e) => e.kind === "dispatch" || e.kind === "step")).toBe(false);
+  });
+
+  test("P1-1：本机派单入口不认 x@peer / peer:，也不做远程转换", async () => {
+    let delivered = 0;
+    const deliver = async () => (delivered++, { outcome: { kind: "sent" } });
+    const deps = { clients: new Map([["c1", { ws: {} as never }]]), deliver, lastMessageSource: { set: () => {} }, channelOf: () => "c1" };
+    for (const name of ["agent-x@Shawn", "peer:Shawn.agent-x"]) {
+      expect(await dispatchToAgent({ targetName: name, text: "x" }, {} as never, deps)).toMatchObject({ error: expect.stringContaining("本机派单只收本机 agent 名") });
+    }
+    expect(delivered).toBe(0);
+  });
+
+  test("P2-1：发送标识 = 派单编号 + 轮次，重发不变；本机入口与 messages API 按它只投一次", async () => {
+    sendOk = false;
+    const r = await run("agent-pm", "dispatch", "T1", "--step", "restate", "--to", "agent-exec");
+    now += 60_000;
+    await run("owner", "dispatch-sweep");
+    expect(keys).toEqual([`dispatch:D${r.event.seq}:r0`, `dispatch:D${r.event.seq}:r0`]);
+
+    let delivered = 0;
+    const deliver = async () => (delivered++, { outcome: { kind: "sent" } });
+    const deps = { clients: new Map([["c1", { ws: {} as never }]]), deliver, lastMessageSource: { set: () => {} }, channelOf: () => "c1" };
+    const a = await dispatchToAgent({ targetName: "agent-exec", text: "单子", dedup: "dispatch:D9:r0" }, {} as never, deps);
+    const b = await dispatchToAgent({ targetName: "agent-exec", text: "单子", dedup: "dispatch:D9:r0" }, {} as never, deps);
+    expect(delivered).toBe(1);
+    expect(b).toEqual({ result: { targetName: "agent-exec", threadId: (a as { result: { threadId: string } }).result.threadId, duplicate: true } });
+
+    let handled = 0;
+    const handler = async () => (handled++, Response.json({ ok: true, accepted: true, threadId: `thr_${handled}` }, { status: 202 }));
+    const headers = (bearer: string) => ({ authorization: `Bearer ${bearer}`, "content-type": "application/json" });
+    const post = (bearer: string, dedup?: string) => withDeliveryDedup(
+      new Request("http://x/api/v1/agents/agent-pm/messages", { method: "POST", headers: headers(bearer), body: JSON.stringify({ text: "单子", ...(dedup ? { dedup } : {}) }) }),
+      new URL("http://x/api/v1/agents/agent-pm/messages"), handler,
+    );
+    expect(await (await post("peer-tok", "dispatch:D9:r0")).json()).toMatchObject({ threadId: "thr_1" });
+    expect(await (await post("peer-tok", "dispatch:D9:r0")).json()).toMatchObject({ duplicate: true, threadId: "thr_1" });
+    expect(await (await post("other-tok", "dispatch:D9:r0")).json()).toMatchObject({ threadId: "thr_2" }); // 别的发送方不串
+    await post("peer-tok");
+    await post("peer-tok");
+    expect(handled).toBe(4); // 没带 dedup 的照常每次都投
+  });
+
+  test("P2-2：同卡 / 步骤 / 执行者 / 轮次重跑默认去重，判在派人之前，不重置步骤结果、不再发；改派别人再改回来算新的一次", async () => {
+    const first = await run("agent-pm", "dispatch", "T1", "--step", "restate", "--to", "agent-exec");
+    db.run("UPDATE task_steps SET state = 'delivered', headTo = 'abc1234' WHERE taskId = 'T1' AND step = 'restate'");
+    const again = await run("agent-pm", "dispatch", "T1", "--step", "restate", "--to", "agent-exec");
+    expect(again).toMatchObject({ ok: true, duplicate: true, event: { seq: first.event.seq } });
+    expect(sent.length).toBe(1);
+    const row = db.query("SELECT state, headTo FROM task_steps WHERE taskId = 'T1' AND step = 'restate'").get();
+    expect(row).toEqual({ state: "delivered", headTo: "abc1234" });
+    await run("agent-pm", "dispatch", "T1", "--step", "restate", "--to", "agent-other");
+    const back = await run("agent-pm", "dispatch", "T1", "--step", "restate", "--to", "agent-exec");
+    expect(back.duplicate).toBeUndefined();
+    expect(sent.length).toBe(3);
+    const explicit = await run("agent-pm", "dispatch", "T1", "--step", "restate", "--to", "agent-exec", "--dedup", "k1");
+    expect((await run("agent-pm", "dispatch", "T1", "--step", "write", "--to", "agent-exec", "--dedup", "k1")).event.seq).toBe(explicit.event.seq);
   });
 });

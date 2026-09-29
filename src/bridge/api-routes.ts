@@ -97,6 +97,7 @@ import { pickSwitchOverride, rememberSwitchOverride } from "./switch-override.js
 import { displayModelEffort } from "../lib/display-model.js";
 import { cachedCodexCatalog, readCodexConfigDefaults } from "../lib/codex-catalog.js";
 import { invitePageResponse } from "./invite-page.js";
+import { withDeliveryDedup } from "./api-dedup.js";
 import { saveUploadToInbox } from "./local-api/media-refresh.js";
 import { archiveUnmanagedFile, restoreUnmanagedArchive } from "../lib/unmanaged-archive.js";
 
@@ -279,7 +280,7 @@ async function findHistoryAgent(
  */
 export async function serveApiRequest(req: Request, url: URL): Promise<Response> {
   try {
-    return await handleApiRequest(req, url);
+    return await withDeliveryDedup(req, url, () => handleApiRequest(req, url)); // 带 dedup 的投递只投一次（bridge/api-dedup.ts）
   } catch (e) {
     return apiErrorResponse(e);
   }

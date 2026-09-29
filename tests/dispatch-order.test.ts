@@ -69,7 +69,8 @@ describe("步骤模板", () => {
 
 describe("脱敏", () => {
   const hits: [string, string][] = [
-    ["Authorization: Bearer a71f92b770352ec96e3670a9f9e27dcb", `Authorization: Bearer ${REDACTED.secret}`],
+    ["Authorization: Bearer a71f92b770352ec96e3670a9f9e27dcb", `Authorization: ${REDACTED.secret}`],
+    ["curl -H \"x\" Bearer a71f92b770352ec96e3670a9f9e27dcb", `curl -H \"x\" Bearer ${REDACTED.secret}`],
     ["curl 'http://x/api?token=abc123&x=1'", `curl 'http://x/api?token=${REDACTED.secret}&x=1'`],
     ["key sk-ant-api03-abcdefghijklmnop done", `key ${REDACTED.secret} done`],
     ["ghp_abcdefghijklmnopqrstuvwxyz0123", REDACTED.secret],
@@ -102,5 +103,31 @@ describe("脱敏", () => {
     const withSecret = { ...base, spec: "token=abc123secret 在 /Users/alex/x" };
     expect(buildDispatchOrder({ ...withSecret, toPeer: true }).text).toEndWith("本单脱敏 2 处。");
     expect(buildDispatchOrder(withSecret).text).toContain("/Users/alex/x");
+  });
+});
+
+describe("脱敏：按敏感字段名遮整段值（T48 P1-2）", () => {
+  const S = REDACTED.secret;
+  const hex32 = "0123456789abcdef0123456789abcdef";
+  const sha = "fa0a1bf93378cf882b7565cd6b02413b67b68cd5";
+  const cases: [string, string, string][] = [
+    ["JSON 字段里的 32 位十六进制；sha 不带敏感字段名不动", `{"token": "${hex32}", "head": "${sha}"}`, `{"token": "${S}", "head": "${sha}"}`],
+    ["一行 JSON 多个敏感字段", `{"apiKey":"x1y2z3","password":"hunter2","ok":1}`, `{"apiKey":"${S}","password":"${S}","ok":1}`],
+    ["YAML / key: value，驼峰前缀也算；ctxTokens / maxTokens 不算", `outToken: ${hex32}\nctxTokens: 22000\nmaxTokens: 5`, `outToken: ${S}\nctxTokens: 22000\nmaxTokens: 5`],
+    ["环境变量写法，同一行别的字段不动", `BRIDGE_CONTROL_TOKEN=${hex32} BRIDGE_PORT=3847`, `BRIDGE_CONTROL_TOKEN=${S} BRIDGE_PORT=3847`],
+    ["HTTP 头", `X-Api-Key: ${hex32}`, `X-Api-Key: ${S}`],
+    ["引号里的值跨行", `"password": "abc\ndef"\nnext: 1`, `"password": "${S}\n"\nnext: 1`],
+    ["YAML 块标量整段", `secret: |\n  line-one\n  line-two\nnext: ok`, `secret: |\n  ${S}\n  ${S}\nnext: ok`],
+    ["值被折到下一行（更深缩进）", `api_key: abcd1234\n    efgh5678\nother: 1`, `api_key: ${S}\n    ${S}\nother: 1`],
+    ["命令行参数", `claudestra pair --token abcdef123`, `claudestra pair --token ${S}`],
+  ];
+  test.each(cases)("%s", (_name, input, out) => {
+    const r = redactForPeer(input);
+    expect(r.text).toBe(out);
+    expect(r.count).toBeGreaterThan(0);
+  });
+  test("跑两遍结果不变（占位符不会被再遮一次、计数不虚增）", () => {
+    const once = redactForPeer(`token: ${hex32}`);
+    expect(redactForPeer(once.text)).toEqual({ text: once.text, count: 0 });
   });
 });

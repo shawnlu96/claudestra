@@ -71,6 +71,7 @@ import { cleanupBgJob } from "./lib/bg-jobs.js";
 import { startSessionReconciler } from "./bridge/session-reconciler.js";
 import { initPeerIngress, localProbeResponse, relayControlRoutes, socketTrust } from "./bridge/relay-routes.js";
 import { handleForward, initForward, rememberInbound } from "./bridge/forward.js";
+import { dispatchToAgent } from "./bridge/dispatch-route.js"; // 统一派单的本机入口（ws dispatch_to_agent），不做 peer 转换
 import { initInbox, takeInbox, inboxOpts } from "./bridge/inbox.js";
 import { startArchiveSweeper } from "./bridge/archive-sweeper.js";
 // Web 远程终端（PTY attach → SSE；见 web-terminal.ts 头注释）
@@ -2197,6 +2198,7 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
     case "abort_ack": onAbortAck(msg, ws); break; // Pi 扩展的中止回执（只认这个频道当前的连接）
     case "codex_typein_failed": if (clients.get(msg.channelId)?.ws === ws) turnCuts.rearmAfterInterrupt(msg.channelId); break; // 退回了 queue:下一条再打字
     case "forward_to_agent": ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, ...(await handleForward(ws, msg)) })); break;
+    case "dispatch_to_agent": ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, ...(await dispatchToAgent(msg, ws, { clients, deliver, lastMessageSource })) })); break;
     case "route_to_agent": {
       try {
         // 找发送方的 channelId

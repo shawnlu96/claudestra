@@ -4,14 +4,15 @@
  * 宁可多遮：遮错一段只是对方少看一点，漏遮一枚 token 就收不回来。普通 git sha（7–40 位十六进制）不遮——审查要对 head。
  */
 
+import { redactFields } from "./redact-fields.js";
+
 export const REDACTED = { secret: "[已脱敏:密钥]", addr: "[已脱敏:内网地址]", personal: "[已脱敏:个人信息]" } as const;
 
 type Rule = { re: RegExp; to: string | ((m: string, ...g: string[]) => string) };
 
 const RULES: readonly Rule[] = [
-  // Authorization 头与 URL 参数里的值
-  { re: /\b(Bearer\s+)[A-Za-z0-9._~+/=-]{8,}/gi, to: (_m, p) => `${p}${REDACTED.secret}` },
-  { re: /((?:^|[?&\s])(?:token|secret|key|password|api_key|access_token|control_token)=)[^&\s#]+/gim, to: (_m, p) => `${p}${REDACTED.secret}` },
+  // 按字段名遮整段值（JSON / YAML / key=value / --flag，跨行也算）在 redact-fields.ts，先跑；这里补字段名之外的写法
+  { re: /\b(Bearer\s+)(?!\[已脱敏)[A-Za-z0-9._~+/=-]{8,}/gi, to: (_m, p) => `${p}${REDACTED.secret}` },
   // 常见前缀的密钥
   { re: /\b(?:sk-[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9]{20,}|xox[abprs]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16}|tok_[A-Za-z0-9]{8,})\b/g, to: REDACTED.secret },
   // PEM 私钥块
@@ -32,8 +33,9 @@ const RULES: readonly Rule[] = [
 
 /** 脱敏后的正文 + 命中次数（任务单末尾写「本单脱敏 N 处」） */
 export function redactForPeer(text: string): { text: string; count: number } {
-  let count = 0;
-  let out = text;
+  const fields = redactFields(text, REDACTED.secret);
+  let count = fields.count;
+  let out = fields.text;
   for (const r of RULES) {
     out = out.replace(r.re, (...args: unknown[]) => {
       count++;

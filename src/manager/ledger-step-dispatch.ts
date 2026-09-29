@@ -16,7 +16,7 @@ import { strictPolicy } from "../lib/ledger-handler.js";
 import { TERMINAL_STAGES, type LedgerEvent, type LedgerTask } from "../lib/ledger-stages.js";
 import { stepPeer } from "../lib/ledger-steps.js";
 import { assignStep } from "../lib/ledger-steps-write.js";
-import { getMeta, getTask, LedgerError, listEvents } from "../lib/ledger-store.js";
+import { getEventByDedup, getMeta, getTask, LedgerError, listEvents } from "../lib/ledger-store.js";
 import { appendEvent, setPeerPms } from "../lib/ledger-write.js";
 import { reviewPolicy } from "../lib/review-pack.js";
 import { readTextSoft, specPathFor } from "../lib/task-spec.js";
@@ -26,16 +26,25 @@ import { kindOf } from "./ledger-step-cmds.js";
 import type { CommandSpec } from "./ledger-write-cmds.js";
 
 /** 投递一张单子：ok = 对方 bridge / 本机 bridge 收下了（不等于执行者看了，那是回执） */
-export type DispatchSend = (row: Pick<DispatchRow, "channel" | "target">, text: string) => Promise<{ ok: boolean; error?: string }>;
+export type DispatchSend = (row: Pick<DispatchRow, "channel" | "target" | "seq" | "round">, text: string) => Promise<{ ok: boolean; error?: string }>;
+
+/** 一张单子的稳定发送标识（派单编号 + 轮次）：重发不变，接收端按它只投一次（lib/delivery-dedup.ts） */
+export const sendKeyOf = (row: Pick<DispatchRow, "seq" | "round">): string => `dispatch:D${row.seq}:r${row.round}`;
+
+/** 本机执行者的名字不能带 @、不能以 peer: 开头：那是别的实例的写法，必须走 --kind peer（先脱敏、只发对方项目 PM） */
+const isRemoteSpelling = (executor: string): boolean => executor.includes("@") || executor.startsWith("peer:");
 
 /** 规则类写入（提醒 note）的记账身份，同 escalate --auto */
 const RULE_ACTOR = "bridge-rule";
 
-async function realSend(row: Pick<DispatchRow, "channel" | "target">, text: string): Promise<{ ok: boolean; error?: string }> {
+async function realSend(row: Pick<DispatchRow, "channel" | "target" | "seq" | "round">, text: string): Promise<{ ok: boolean; error?: string }> {
+  const dedup = sendKeyOf(row);
   try {
     if (row.channel === "local") {
+      if (isRemoteSpelling(row.target)) return { ok: false, error: `本机通道不收 ${row.target}：别的实例的执行者要走 peer 通道` };
+      // 本机专用入口：不像 route_to_agent 那样把 x@peer 转成远程投递（bridge/dispatch-route.ts）
       const { bridgeRequest } = await import("../lib/bridge-client.js");
-      await bridgeRequest({ type: "route_to_agent", targetName: row.target, text, fromName: "ledger-dispatch", oneShot: true });
+      await bridgeRequest({ type: "dispatch_to_agent", targetName: row.target, text, dedup });
       return { ok: true };
     }
     const at = row.target.lastIndexOf("@");
@@ -45,7 +54,8 @@ async function realSend(row: Pick<DispatchRow, "channel" | "target">, text: stri
     if (!peer?.outToken || !peer.baseUrl) return { ok: false, error: `peer ${peerName} 不存在或握手未完成` };
     const { peerCliFetch } = await import("./relay.js");
     const url = `${peer.baseUrl.replace(/\/+$/, "")}/api/v1/agents/${encodeURIComponent(agent)}/messages`;
-    const body = JSON.stringify({ text, wait: 0, nonce: crypto.randomUUID() }); // nonce：重发同一张单子时签名也不同，对方不当重放
+    // nonce：重发同一张单子时签名也不同，对方不当重放；dedup：稳定标识，对方按它只投一次（bridge/api-dedup.ts）
+    const body = JSON.stringify({ text, wait: 0, nonce: crypto.randomUUID(), dedup });
     const res = await peerCliFetch(url, { method: "POST", headers: { Authorization: `Bearer ${peer.outToken}`, "Content-Type": "application/json" }, body, signal: AbortSignal.timeout(20_000) });
     return res.ok ? { ok: true } : { ok: false, error: `对方回 ${res.status}` };
   } catch (e) {
@@ -80,6 +90,20 @@ function channelFor(c: LedgerCli, task: LedgerTask, executor: string, kind: "age
   return { channel: "peer", target: `${pm.agent}@${peer}` };
 }
 
+/**
+ * --step 派单的去重键（同 ledger-dispatch-cmds.ts dispatchKey 的思路）：默认「卡 / 步骤 / 执行者 / 轮次」，--dedup 可覆盖。
+ * 这一步最近一次派单就是这个键（含改派回来加的 :s 后缀）→ 重复；键用过、但之后改派过别人 → 另起 `:s<上一次 seq>`，算新的一次。
+ * 显式 --dedup 用过就是重复（调用方明说是同一次）。在派人之前判，重复时步骤结果一概不动（T48 P2-2）
+ */
+function stepDispatchKey(c: LedgerCli, events: readonly LedgerEvent[], taskId: string, step: string, to: string, round: number): { key: string } | { duplicate: LedgerEvent } {
+  const base = c.p.flags.dedup ?? `step-dispatch:${taskId}:${step}:${to}:r${round}`;
+  const last = events.findLast((e) => e.kind === "dispatch" && e.data.step === step);
+  if (last?.dedupKey && (last.dedupKey === base || last.dedupKey.startsWith(`${base}:s`))) return { duplicate: last };
+  const used = getEventByDedup(c.db, base);
+  if (used && c.p.flags.dedup !== undefined) return { duplicate: used };
+  return { key: used ? `${base}:s${last?.seq ?? 0}` : base };
+}
+
 async function stepDispatch(c: LedgerCli): Promise<Result> {
   const task = c.task(c.p.pos[1]);
   const step = c.p.flags.step ?? "";
@@ -89,11 +113,16 @@ async function stepDispatch(c: LedgerCli): Promise<Result> {
   c.requireManager(task.project, "派单");
   const kind = kindOf(c, to);
   if (kind === "human") throw new LedgerError("invalid", "人不收步骤单：派给 agent 或别的实例");
+  if (kind === "agent" && isRemoteSpelling(to)) throw new LedgerError("invalid", `本机执行者不能写成 ${to}：别的实例写 <agent>@<peer> 并带 --kind peer`);
   const route = channelFor(c, task, to, kind);
   const now = c.deps.now();
   const round = intFlag(c.p, "round") ?? task.round;
+  let events = listEvents(c.db, { project: task.project, target: task.id });
+  // 去重先于派人：同一张卡、同一步、同一个执行者、同一轮重跑，原样返回上一次，不重置步骤结果、不再发
+  const key = stepDispatchKey(c, events, task.id, step, to, round);
+  if ("duplicate" in key) return { ok: true, duplicate: true, event: key.duplicate, log: getDispatch(c.db, key.duplicate.seq) };
   assignStep(c.db, { actor: c.deps.actor, now }, { taskId: task.id, step, executor: to, executorKind: kind, round });
-  const events = listEvents(c.db, { project: task.project, target: task.id });
+  events = listEvents(c.db, { project: task.project, target: task.id });
   const peer = kind === "peer" ? stepPeer({ executor: to, executorKind: "peer" }) : null;
   const accepted = !peer || events.some((e) => e.kind === "accept" && e.data.peer === peer);
   const specText = readTextSoft(specPathFor(task, getMeta(c.db, task.project).docsDir));
@@ -101,14 +130,13 @@ async function stepDispatch(c: LedgerCli): Promise<Result> {
   // 审查类派单沿用派审事件的字段（reviewer / round / head / policy）：合并门与「下一轮是什么」按最近一条 dispatch 判（ledger-handler.ts）
   const reviewData = review ? { reviewer: step === "final_review" ? "adversarial" : "regular", policy: strictPolicy(reviewPolicy(specText), events) } : {};
   const data = { step, to, channel: route.channel, target: route.target, round, head: task.headSHA, ...reviewData };
-  const ev = appendEvent(c.db, { ...c.ctx(), now }, { project: task.project, target: task.id, kind: "dispatch", text: `派单：${step} → ${to}`, data });
-  if (ev.duplicate) return { ok: true, duplicate: true, event: ev.event, log: getDispatch(c.db, ev.event.seq) };
+  const ev = appendEvent(c.db, { ...c.ctx(), now, dedupKey: key.key }, { project: task.project, target: task.id, kind: "dispatch", text: `派单：${step} → ${to}`, data });
   const order = buildDispatchOrder({
     task: { id: task.id, title: task.title, pr: task.pr, headSHA: task.headSHA }, step, dispatchId: ev.event.seq, round,
     toPeer: route.channel === "peer", accepted, spec: specText, report: step === "fix" || review ? roundReport(events) : null,
   });
   insertDispatch(c.db, { seq: ev.event.seq, taskId: task.id, project: task.project, step, round, executor: to, ...route, text: order.text, createdAt: now });
-  const sent = await sendOf(c)(route, order.text);
+  const sent = await sendOf(c)({ ...route, seq: ev.event.seq, round }, order.text);
   noteAttempt(c.db, ev.event.seq, c.deps.now(), sent.ok, sent.error ?? null);
   return { ok: true, event: ev.event, delivered: sent.ok, ...(sent.error ? { error: sent.error } : {}), redactions: order.redactions, text: order.text };
 }
