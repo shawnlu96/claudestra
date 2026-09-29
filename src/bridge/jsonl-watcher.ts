@@ -474,8 +474,7 @@ async function processNewData(state: WatcherState, discord: Client): Promise<voi
           // permission-watcher 的 pane 侧检测；这里只兜底旧版 CC 的即时落盘：
           // pane 上弹窗还在才走注册+发卡，否则静默吞掉 entry。
           try {
-            const { detectAskUserQuestion, postAskUserQuestionMessage, registerAuqState, auqStates } =
-              await import("./ask-user-question.js");
+            const { announceAuq, auqStates, auqToolUseId, detectAskUserQuestion } = await import("./ask-user-question.js");
             const questions = detectAskUserQuestion(content);
             if (questions) {
               if (!auqStates.has(state.channelId)) {
@@ -485,18 +484,9 @@ async function processNewData(state: WatcherState, discord: Client): Promise<voi
                   modalStillUp = parseAuqPane(pane) !== null;
                 } catch { /* 抓不到 pane 按弹窗不在处理 */ }
                 if (modalStillUp) {
-                  const tmuxTarget = windowTarget(state.agentName);
-                  // 先注册状态（与 Discord 渲染解耦）：web-only / Discord post 失败时
-                  // /api/v1 answer 端点也能拿到 AuqState 下键。post 成功只回填 messageId。
-                  registerAuqState(state.channelId, tmuxTarget, questions);
-                  // M6：local-* 频道没有 Discord 面，跳过 post（event-bus 的 question 事件仍发，
-                  // web 前端靠它渲染交互卡）。
-                  if (!isLocalChannel(state.channelId)) {
-                    postAskUserQuestionMessage(discord, state.channelId, tmuxTarget, questions)
-                      .catch((e) => console.error("AUQ post 失败:", e));
-                  }
+                  // 登记（代际 = 这次 tool_use 的 id）+ 有 Discord 面就发卡 + 广播 question（web 靠它渲染交互卡）
+                  announceAuq(discord, { channelId: state.channelId, agentName: state.agentName, questions, source: "jsonl", dialogId: auqToolUseId(content) });
                   console.log(`🎛 检测到 AskUserQuestion (${questions.length} 问) for ${state.agentName}`);
-                  emitEvent({ agent: state.agentName, chatId: state.channelId, type: "question", data: { questions } });
                 } else {
                   console.log(`🎛 AUQ tool_use 落盘时弹窗已不在（已被应答）→ 跳过发卡 for ${state.agentName}`);
                 }

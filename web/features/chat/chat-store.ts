@@ -2376,25 +2376,24 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
   }
 
   /** 提交 AskUserQuestion 选择。selections[i]=第 i 题选中的 option index 数组。 */
-  public async submitAsk(
-    selections: number[][]
-  ): Promise<{ ok: boolean; error?: string }> {
-    const agent = this.state.activeAgent;
-    if (!agent) return { ok: false, error: "无活动会话" };
-    this.produce((s) => {
-      s.pendingAsk = null;
-    });
-    return this.postAction(() => answerAuq(agent, "submit", selections));
+  public submitAsk(selections: number[][]): Promise<{ ok: boolean; error?: string }> {
+    return this.answerAsk("submit", selections);
   }
 
   /** 取消 AskUserQuestion（给 agent 发 Esc）。 */
-  public async cancelAsk(): Promise<{ ok: boolean; error?: string }> {
+  public cancelAsk(): Promise<{ ok: boolean; error?: string }> {
+    return this.answerAsk("cancel", []);
+  }
+
+  /** 带上这张卡的那一版（代际 + 题面原样）：bridge 核对它和终端画面都对得上才按键，对不上 409 且不按（bridge/auq-answer.ts） */
+  private async answerAsk(action: "submit" | "cancel", selections: number[][]): Promise<{ ok: boolean; error?: string }> {
     const agent = this.state.activeAgent;
+    const ask = this.state.pendingAsk;
     if (!agent) return { ok: false, error: "无活动会话" };
     this.produce((s) => {
       s.pendingAsk = null;
     });
-    return this.postAction(() => answerAuq(agent, "cancel"));
+    return this.postAction(() => answerAuq(agent, action, selections, { dialogId: ask?.dialogId, questions: ask?.questions }));
   }
 }
 

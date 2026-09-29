@@ -24,8 +24,8 @@ export function AskActions({ ask, agent }: { ask: WebAsk; agent: string }) {
   const dialogAgent = ask.fromAgent ?? "";
   const runtime = ask.source === "auq" || ask.source === "permission" || ask.source === "codex";
 
-  // 指派门拒掉的按 code 说（assignedRejectText）。409 另分两种：多行里这一项刚在聊天 / Discord 里答过（其余行还能答，重拉后卡片会收掉它），其余都当整条已结案——
-  // 弹框端点的 409（弹框已经没了）不带 code，也归这一类，别把英文原文露给 owner
+  // 指派门拒掉的按 code 说（assignedRejectText）。409 另分几种：多行里这一项刚在聊天 / Discord 里答过（其余行还能答，重拉后卡片会收掉它）；
+  // AUQ 作答被拒（画面对不上 / 窗口忙 / 看不到画面，bridge/auq-answer.ts）带 code 和人话原因，照原因说；其余都当整条已结案
   // 没到 bridge（断网、中继断了）：别把浏览器的英文原文露给 owner
   const fail = (e: unknown) => {
     if (!(e instanceof ApiError)) return t("没发出去（连不上），再点一次");
@@ -33,6 +33,7 @@ export function AskActions({ ask, agent }: { ask: WebAsk; agent: string }) {
     if (assigned) return assigned;
     if (e.status !== 409) return e.message;
     if (e.code === "ask_stale") return t("弹框已经换了，这张作废，答新的那张");
+    if (ask.source === "auq" && e.code) return e.message;
     return e.code === "ask_part_answered" ? t("这一项刚在别处答过了，已刷新，剩下的还能答") : t("这件已经处理过了（或已过期）");
   };
   // 人 / 系统发起的（指派、审核）没有 agent 可投：只记账
@@ -72,8 +73,8 @@ export function AskActions({ ask, agent }: { ask: WebAsk; agent: string }) {
         <AuqChoices
           questions={ask.options as never[]}
           busy={busy}
-          onSubmit={(sel) => run(() => answerAuq(dialogAgent, "submit", sel, ask.id), auqLabels(sel))}
-          onCancel={() => run(() => answerAuq(dialogAgent, "cancel", [], ask.id), [t("取消")])}
+          onSubmit={(sel) => run(() => answerAuq(dialogAgent, "submit", sel, { askId: ask.id, questions: ask.options }), auqLabels(sel))}
+          onCancel={() => run(() => answerAuq(dialogAgent, "cancel", [], { askId: ask.id, questions: ask.options }), [t("取消")])}
         />
       )}
       {ask.source === "permission" && (
