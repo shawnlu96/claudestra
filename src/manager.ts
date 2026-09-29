@@ -62,6 +62,7 @@ import {
 } from "./lib/claude-launch.js";
 import { piAgentDir, piSessionIdFromFilename } from "./lib/pi-session.js";
 import { translateSessionLine } from "./lib/session-source.js";
+import { capSubsPerMain, limitByMainSessions } from "./lib/session-limit.js";
 import { resolveSessionIdForWindow, readLiveCcSessionEntries } from "./lib/cc-sessions.js";
 import { readBypassConsent } from "./lib/bypass-consent.js";
 import { writeMasterResume } from "./lib/master-session.js";
@@ -103,7 +104,7 @@ import {
 import { isSandbox, refuseInSandbox, sandboxRootOf } from "./lib/sandbox.js";
 import { sandboxManagerRefusal } from "./lib/sandbox-env.js";
 import { assertResumable, assertSandboxSession } from "./lib/sandbox-sessions.js";
-import { loadRegistry, migrateWorkerToAgent, patchRegistryAgent, saveRegistry, normalizeName, assertValidNewAgent, assertCreatable, formatAge, output, extractPermFlags, extractEffortFlag, extractModeFlag, extractModelFlag, extractBoolFlag, extractMultiFlag, extractStringFlag } from "./manager/core.js";
+import { loadRegistry, migrateWorkerToAgent, patchRegistryAgent, saveRegistry, normalizeName, assertValidNewAgent, assertCreatable, formatAge, output, outputSync, extractPermFlags, extractEffortFlag, extractModeFlag, extractModelFlag, extractBoolFlag, extractMultiFlag, extractStringFlag } from "./manager/core.js";
 import { runProjectCommand } from "./manager/projects.js";
 import { cmdCronAdd, cmdCronList, cmdCronEdit, cmdCronRemove, cmdCronToggle, cmdCronHistory } from "./manager/cron.js";
 import { cmdPermissions } from "./manager/permissions.js";
@@ -1623,14 +1624,10 @@ async function cmdSessions(search?: string) {
   // 从 registry 建立 sessionId → displayName 映射
   const reg = await loadRegistry();
   const nameMap = new Map<string, string>();
-  for (const info of Object.values(reg.agents)) {
-    if (info.sessionId && info.displayName) {
-      nameMap.set(info.sessionId, info.displayName);
-    }
-  }
+  for (const info of Object.values(reg.agents)) if (info.sessionId && info.displayName) nameMap.set(info.sessionId, info.displayName);
 
-  // 给 web 端留原始字段（ISO 时间、cwd、子会话归属）；上限 100 —— Discord 面板自己 slice(15)，CLI 是人读的。
-  const display = sessions.slice(0, 100).map((s, i) => ({
+  // 给 web 端留原始字段（ISO 时间、cwd、子会话归属）；上限 100 个主会话、每个带最新 50 个子线程（多的只报 moreSubs），Discord 面板自己再截
+  const display = capSubsPerMain(limitByMainSessions(sessions, 100), 50).map((s, i) => ({
     index: i + 1,
     sessionId: s.sessionId,
     name: nameMap.get(s.sessionId) || s.slug || s.sessionId.slice(0, 8),
@@ -1641,10 +1638,10 @@ async function cmdSessions(search?: string) {
     age: formatAge(s.modifiedAt),
     modifiedAt: s.modifiedAt.toISOString(),
     lastMessage: s.lastUserMessage || "",
-    ...(s.sub ? { sub: s.sub } : {}),
+    ...(s.sub ? { sub: s.sub } : {}), ...(s.moreSubs ? { moreSubs: s.moreSubs } : {}),
   }));
 
-  output({
+  outputSync({
     ok: true,
     total: sessions.length,
     showing: display.length,
@@ -2722,10 +2719,8 @@ switch (cmd) {
     break;
   }
 
-  case "cost": {
-    await cmdCost(args);
-    break;
-  }
+  case "cost": await cmdCost(args); break;
+  case "codex-sub-archive": await (await import("./manager/codex-sub-archive.js")).cmdCodexSubArchive(args); break; // Codex 子线程自动归档开关（缺省关）
 
   case "invite-link": {
     await cmdInviteLink(args);
@@ -3025,6 +3020,7 @@ switch (cmd) {
         "auto-update claudestra on|off   — toggle Claudestra auto-update (default on)",
         "auto-update claude on|off       — toggle Claude Code auto-update (default on)",
         "auto-update channel beta|release — beta follows every commit on origin/main (default: release)",
+        "codex-sub-archive status|on|off — auto-archive Codex sub-threads idle 7 days (default off; the archive retention later deletes them)",
         "cost [--agent <name>] [--today|--week]  — aggregate token usage per agent or overall",
         "invite-link                     — generate the Discord bot invite URL (owner perms, for your own server)",
         "pair [--json]                   — print a QR code / link / 8-char code so a phone or browser can pair with this machine through the relay (RELAY_URL in .env)",

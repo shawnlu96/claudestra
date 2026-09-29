@@ -125,12 +125,12 @@
     "deps:watcher-no-watcher: src/bridge/model-drift.ts -> src/bridge/permission-watcher.ts": 1,
     "deps:watcher-no-watcher: src/bridge/permission-watcher.ts -> src/bridge/bg-activity-watcher.ts": 1,
     "deps:web-src-split: web/scripts/tls-proxy.ts -> src/lib/tailscale.ts": 1,
-    "doc:CLAUDE.md": 24452,
-    "doc:CLAUDE.zh-CN.md": 22154,
+    "doc:CLAUDE.md": 24624,
+    "doc:CLAUDE.zh-CN.md": 22328,
     "doc:web/CLAUDE.en.md": 6532,
     "doc:web/CLAUDE.md": 5810,
     "dup:total": 1039,
-    "fn:overflow": 9098,
+    "fn:overflow": 9066,
     "fnLong:AgentActions": 1,
     "fnLong:AgentRow": 1,
     "fnLong:AskQuestionCard": 1,
@@ -204,8 +204,8 @@
     "pattern:raw-tmux-spawn": 11,
     "pattern:registry-path-literal": 2,
     "pattern:tmux-target-literal": 2,
-    "size:src/bridge.ts": 3624,
-    "size:src/bridge/api-routes.ts": 2029,
+    "size:src/bridge.ts": 3606,
+    "size:src/bridge/api-routes.ts": 2006,
     "size:src/bridge/bg-activity-watcher.ts": 467,
     "size:src/bridge/discord-interactions.ts": 1135,
     "size:src/bridge/jsonl-watcher.ts": 841,
@@ -221,7 +221,7 @@
     "size:src/lib/session-history.ts": 962,
     "size:src/lib/tailscale.ts": 623,
     "size:src/lib/tmux-helper.ts": 1335,
-    "size:src/manager.ts": 3045,
+    "size:src/manager.ts": 3041,
     "size:src/manager/peers.ts": 491,
     "size:src/pi/claudestra-extension.ts": 618,
     "size:src/setup.ts": 2042,
@@ -233,7 +233,7 @@
     "size:web/features/chat/components/message-list.tsx": 833,
     "size:web/features/chat/components/peers-modal.tsx": 450,
     "size:web/features/chat/components/sidebar.tsx": 533,
-    "size:web/features/chat/components/unmanaged-sessions.tsx": 496,
+    "size:web/features/chat/components/unmanaged-sessions.tsx": 495,
     "size:web/features/terminal/terminal-view.tsx": 668
   },
   "raised": [
@@ -290,6 +290,18 @@
       "from": 0,
       "to": 0,
       "why": "新增 TESTS_WEB_DOM 例外：tests/web-dom-*.test.ts 要在 happy-dom 里真挂载 React 组件（错误兜底），允许引用带 react 的 web 模块；登记在明处，替代之前用类型查询 + 插值动态 import 绕开 tests-web-pure 的写法（T20 审查 P2-2）"
+    },
+    {
+      "key": "doc:CLAUDE.md",
+      "from": 24452,
+      "to": 24624,
+      "why": "PR #186 审查 P2：Codex 子线程自动归档开关 codex-sub-archive 要在命令清单里写明一行（缺省关；开了 7 天没写的子线程归档、90 天后删除），owner 指定写进 CLAUDE.md，细节在 docs/architecture/features.md"
+    },
+    {
+      "key": "doc:CLAUDE.zh-CN.md",
+      "from": 22154,
+      "to": 22328,
+      "why": "同上（PR #186 审查 P2）：中文版命令清单同步加 codex-sub-archive 一行，细节在 docs/architecture/features.zh-CN.md"
     }
   ]
 }
