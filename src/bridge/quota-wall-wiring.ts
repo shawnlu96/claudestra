@@ -17,7 +17,7 @@ import { ensurePaneInteractive, tmuxCapture, tmuxSendEscape, windowTarget } from
 import { agentMsgMustWait } from "../lib/turn-state.js";
 import { readUsageCache } from "../lib/usage-cache.js";
 import type { AgentCallBook } from "./agent-calls.js";
-import { subscribeEvents } from "./event-bus.js";
+import { emitEvent, subscribeEvents } from "./event-bus.js";
 import type { HeldQueue } from "./held-queue.js";
 import { createQuotaWall, type QuotaWall, type WallWindow } from "./quota-wall.js";
 import { newMessageId, newThreadId, type Delivery, type Envelope, type LocalEndpoint } from "./router.js";
@@ -159,6 +159,27 @@ export async function holdAtWallWait(env: Envelope, to: LocalEndpoint, agent: st
   return { envelope: env, outcome: { kind: "sent", note: "queued", heldBy: "wall_menu" } };
 }
 
+const RESUME_LABEL = "api-error-resume";
+/** 频道 → 续跑计划被撤的时刻（撞额度 / 模型额度）：撤之前已经交给投递、之后才被押进队里的「继续」，投递返回时再撤一次 */
+const resumeCancelledAt = new Map<string, number>();
+
+/**
+ * 撤掉押在队里、还没发出的「继续」（目标压缩中 / 回合中时续跑被押后）：只删计划不撤它，出队照样发，续了必然再撞
+ * （T52 Codex 复审 #208 P2）。held-flush 发前最后一刻核对「还在队里」，撤掉的不会再发；已经 ws.send 的不追。
+ */
+export function dropHeldResume(held: HeldQueue, cid: string): number {
+  const mine = (held.get(cid) ?? []).filter((i) => i.env.from.kind === "bridge" && i.env.from.label === RESUME_LABEL);
+  for (const i of mine) held.remove(cid, i);
+  return mine.length;
+}
+
+function cancelResume(b: WallBridgeDeps, states: Map<string, ApiErrorState>, cid: string, now: number): void {
+  states.delete(cid);
+  resumeCancelledAt.set(cid, now);
+  const n = dropHeldResume(b.held, cid);
+  if (n) console.log(`⏸ ${cid}：撞额度，撤掉押在队里的 ${n} 条「继续」`);
+}
+
 /** 被「它又动了」取消掉的续跑（60 秒续跑 / 闸的续跑名单）：那一轮要是外人触发的、不算接着做，stop-settle 调 rearmResume 放回去 */
 const cancelledResume = new Map<string, { agent: string; error: string }>();
 let rearm: ((cid: string) => void) | null = null;
@@ -186,20 +207,22 @@ export function startQuotaWall(b: WallBridgeDeps): QuotaWall {
       const r = noteApiError(states, evt.chatId, err, ts); // 同步先记：之后几毫秒内的活动事件要能对上它
       void (async () => {
         if (await w.noteApiError({ channelId: evt.chatId, agent: evt.agent, at: ts, error: err, text: String(data.text ?? "") })) {
-          states.delete(evt.chatId);
+          cancelResume(b, states, evt.chatId, Date.now());
           recordMetric("api_error_turn", { agent: evt.agent, meta: { error: err, action: "quota_wall" } });
           return;
         }
         const model = isModelLimitHit(err, String(data.text ?? "")); // 模型额度：续跑只会再撞，直接告诉人换模型
-        if (model) states.delete(evt.chatId);
+        if (model) cancelResume(b, states, evt.chatId, Date.now());
         const act = model ? "model_limit" : r;
         console.log(`⚠️ 回合以 API 错误结束: ${evt.agent}（${err || "API Error"}）→ ${act === "track" ? "60s 后自动续跑" : act === "model_limit" ? "模型额度，不续跑" : "续跑后再撞，升级到频道"}`);
         recordMetric("api_error_turn", { agent: evt.agent, meta: { error: err, action: act } });
         const why = model
           ? `撞了单个模型的额度（${String(data.text ?? "").split("\n")[0].slice(0, 120)}），bridge 不自动续跑。在它的窗口里用 /model 换个模型（或 /usage-credits）后发一句继续。`
           : `连续两次因 API 错误中断（自动续跑一次已用完，不再续）：${err || "API Error"}。需要人看一眼网络/代理后手动发一句继续。`;
-        if (act !== "track" && /^\d+$/.test(evt.chatId)) {
-          await b.escalate(evt.chatId, `⛔ ${evt.agent} ${why}`).catch((e) => console.error("api-error 升级通知失败:", (e as Error).message));
+        if (act !== "track") {
+          // 频道里一条 bridge 通知（web 看得到，web-only 的 local-* 频道以前没人知道），Discord 频道另外发一条
+          emitEvent({ agent: evt.agent, chatId: evt.chatId, type: "chat_message", data: { direction: "out", from: "bridge", text: `⛔ ${evt.agent} ${why}`, notice: true } });
+          if (/^\d+$/.test(evt.chatId)) await b.escalate(evt.chatId, `⛔ ${evt.agent} ${why}`).catch((e) => console.error("api-error 升级通知失败:", (e as Error).message));
         }
       })();
       return;
@@ -256,12 +279,14 @@ async function resumeDue(b: WallBridgeDeps, w: QuotaWall, states: Map<string, Ap
     markResumed(states, cid, now);
     b.markAgentSource(cid);
     void b.deliver({
-      from: { kind: "bridge", label: "api-error-resume" },
+      from: { kind: "bridge", label: RESUME_LABEL },
       to: { kind: "local", channelId: cid, ws: target.ws, cwd: target.cwd },
       intent: "notification",
       content: resumeText(st.error, st.errorAt),
       meta: { messageId: newMessageId("api_resume"), triggerKind: "bridge_synth", ts: new Date(now).toISOString(), threadId: newThreadId() },
     }).then(() => {
+      // 投递途中（等发送顺序 / 判忙）撞了额度、这条随后才被押进队里：撤掉
+      if ((resumeCancelledAt.get(cid) ?? 0) >= now && dropHeldResume(b.held, cid)) return void console.log(`⏸ ${cid}：续跑刚押进队就撞额度，撤掉`);
       console.log(`🔁 api-error-resume → ${cid}`);
       recordMetric("api_error_resume", { channelId: cid, meta: { error: st.error } });
     }).catch((e) => console.error("api-error-resume 投递失败:", (e as Error).message));
