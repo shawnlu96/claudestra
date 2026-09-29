@@ -82,9 +82,17 @@ export function createInterruptGate(deps: InterruptGateDeps, cooldownMs = 4_000)
           if (!shouldFire((await deps.probe(win, runtime, agent, channelId)).main)) return { fired: false, why: "not_busy" };
         }
         if (opts.wanted && !opts.wanted()) return { fired: false, why: "withdrawn" }; // 等的这段时间里不需要了；发键那一刻 interrupt 自己再问一次
+        const prev = { at: lastKeyAt.get(channelId), manual: lastManual.has(channelId) };
         lastKeyAt.set(channelId, now());
         lastManual.delete(channelId);
-        const keys = await deps.interrupt(win, runtime, channelId, "preempt", opts.wanted);
+        const keys = await deps.interrupt(win, runtime, channelId, "preempt", opts.wanted).catch((e: Error) => {
+          if (e.name !== "KeyWithdrawnError") throw e;
+          // 发键处撤回 = 一个键都没发：冷却 / 间隔还原，不然下一条普通消息碰上假冷却、不抢占
+          prev.at === undefined ? lastKeyAt.delete(channelId) : lastKeyAt.set(channelId, prev.at);
+          if (prev.manual) lastManual.add(channelId);
+          return null;
+        });
+        if (!keys) return { fired: false, why: "withdrawn" };
         if (!keys.length) return { fired: false, why: "no_keys" };
         deps.onPreempted(agent, channelId);
         await deps.sleep(SETTLE_MS);

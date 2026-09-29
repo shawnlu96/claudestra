@@ -204,10 +204,10 @@ export class TurnCuts {
     return cut;
   }
 
-  /** 叫停记录：owner 在「停」之后已经又开过口（记得晚了），直接带上 goAt */
+  /** 叫停记录：owner 在「停」之后已经又开过口（记得晚了），直接带上 goAt。同一毫秒算 owner 在后，和 noteHuman 解除的口径一致 */
   private stopRec(channelId: string, stopAt: number): { at: number; goAt?: number } {
     const spoke = this.lastSpokeAt(channelId);
-    return spoke > stopAt ? { at: stopAt, goAt: spoke } : { at: stopAt };
+    return spoke >= stopAt ? { at: stopAt, goAt: spoke } : { at: stopAt };
   }
 
   /** owner 最近一次开口（不算「停」）的时刻；叫停记录上的解除时刻落盘了，bridge 重启后也认得（押着的旧「停」晚投，preempt.ts） */

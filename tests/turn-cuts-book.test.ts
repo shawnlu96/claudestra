@@ -113,6 +113,7 @@ describe("「停」与 Autopilot（P2-8）", () => {
     for (const cause of ["stopword", "manual", "terminal", "codex_interrupt"] as const) {
       const { b, tick } = book();
       b.noteHuman("ch", cause === "stopword");
+      tick(1); // 同一毫秒算 owner 在后（T13e r3）：停要晚于上一句
       b.record({ channelId: "ch", agent: "a", cause, tools: { inflight: [] } });
       expect(b.interruptHold("ch")).toBe("stopped");
       tick(1_000);
@@ -482,6 +483,13 @@ describe("停之后马上开口（wf2 stop-semantics-4）", () => {
     expect(again.lastSpokeAt("ch")).toBe(at());
     again.record({ channelId: "ch", agent: "a", cause: "stopword", tools: { inflight: [] }, stopAt: heldAt });
     expect(again.interruptHold("ch")).toBeNull();
+  });
+  test("owner 和「停」同一毫秒开口：算 owner 在后，记停时直接带上解除（和 noteHuman 解除同一口径，T13e r3 P2-2）", () => {
+    const { b } = book();
+    const heard = b.noteHuman("ch", true);
+    b.noteHuman("ch", false, heard);
+    b.record({ channelId: "ch", agent: "a", cause: "stopword", tools: { inflight: [] }, stopAt: heard });
+    expect(b.interruptHold("ch")).toBeNull();
   });
   test("带 dropIfStopped 的（Autopilot 到点收尾）：ws.send 前那一查，叫停中不投、解除了照投（T13e r2 P2）", () => {
     const { b, tick } = book();

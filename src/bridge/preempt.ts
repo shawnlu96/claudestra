@@ -75,31 +75,33 @@ export function noteHeldStop(env: Envelope, channelId: string, agent: string, ru
  */
 export async function preemptForHuman(env: Envelope, channelId: string, agent: string): Promise<"wall_wait" | void> {
   const { owner, stop } = env.meta.forwarded ? { owner: false, stop: false } : ownerStopOf(env);
-  // 押过的「停」按当时的时刻排（不再算一次开口）；那之后 owner 又开过口（答卡片、说话）= 作废：不打断、不重新挂起（T13e r1 P1-1）
-  const heldAt = stop && env.meta.heldStopNoted ? (env.meta.heldStopAt ?? turnCuts.stoppedAt(channelId) ?? turnCuts.noteHuman(channelId, true)) : undefined;
-  const stale = () => heldAt !== undefined && turnCuts.lastSpokeAt(channelId) > heldAt;
-  if (stale()) return void (env.meta.interruptNote = staleStopNote(heldAt!, false));
-  const heardAt = heldAt ?? (owner ? turnCuts.noteHuman(channelId, stop) : undefined); // 「停」的时刻：收尾一拍里 owner 又开口，记停时带上解除
+  // 每条「停」都带它发生的时刻：押过的按押下那刻（不再算一次开口），新来的按到达那刻。owner 在它之后（同一毫秒也算）又开过口
+  // （答卡片、说话）= 作废：不发键、不重新挂起，只给 agent 一句提示。发键那一刻各处同步再问（wanted），拿不准就不发（T13e r3 保守收口）
+  const held = stop && env.meta.heldStopNoted === true;
+  const heardAt = held ? (env.meta.heldStopAt ?? turnCuts.stoppedAt(channelId) ?? turnCuts.noteHuman(channelId, true))
+    : owner ? turnCuts.noteHuman(channelId, stop) : undefined; // 「停」的时刻：收尾一拍里 owner 又开口，记停时带上解除
+  const stopAt = stop ? heardAt : undefined;
+  const stale = () => stopAt !== undefined && turnCuts.lastSpokeAt(channelId) >= stopAt;
+  if (stale()) return void (env.meta.interruptNote = staleStopNote(stopAt!, false, held));
   // owner 的停 = 接管：发键之前就清 agent 间的待回账。Pi 停下马上报 Stop，等打断返回再清就晚了，看门狗已拿旧账把它催起一轮（adv5 P1）。
   // 押在撞墙画面上时已经清过（noteHeldStop）：最终送达不再清，否则停之后才来的回程槽也一起没了
-  if (stop && !env.meta.heldStopNoted) clearAgentPendings(channelId);
+  if (stop && !held) clearAgentPendings(channelId);
   const { runtime, transport } = await resolveTurnWindow(channelId, controlChannelId());
   const stopWait = stop && runtime === "pi" ? holdStopWait(env, channelId, agent) : undefined;
   const tools = toolsAt(agent, runtime);
   const queuedBefore = stop && runtime === "codex" ? turnCuts.codexQueuedBefore(channelId) : [];
   let r: PreemptResult = { fired: false, why: "not_allowed" };
   try {
-    // 押过的停：等锁、等间隔的途中 owner 又开了口就不发——发键那一刻同步再问一次（esc-guard / pi-abort 的 wanted，T13e r2 P1）
-    r = await interruptGate.preempt(channelId, agent, { stop, wanted: heldAt === undefined ? undefined : () => !stale() });
+    // 等锁、等间隔的途中 owner 又开了口就不发——发键那一刻同步再问一次（esc-guard / pi-abort 的 wanted；撤回时闸回 withdrawn）
+    r = await interruptGate.preempt(channelId, agent, { stop, wanted: stopAt === undefined ? undefined : () => !stale() });
   } catch (e) {
     // 等锁 / 节流期间 Codex 菜单弹出来了，Esc 没发（lib/codex-key-guard.ts）：按停在菜单处理，这条押住
     if ((e as Error).name === "KeysBlockedError") r = { fired: false, why: "wall_wait" };
-    else if ((e as Error).name === "KeyWithdrawnError") r = { fired: false, why: "withdrawn" };
     else console.log(`⚠️ 抢占打断失败,按常规投递: ${(e as Error).message}`);
   }
   if (!r.fired && r.why === "wall_wait") return "wall_wait";
   // 作废的判断和下面记叫停之间没有 await：键发出之后 owner 才开口的，也不再挂起，抬头照实写打断了没有
-  if (stale()) return void (stopWait?.(staleStopReply(agent, r.fired)), (env.meta.interruptNote = staleStopNote(heldAt!, r.fired)));
+  if (stale()) return void (stopWait?.(staleStopReply(agent, r.fired)), (env.meta.interruptNote = staleStopNote(stopAt!, r.fired, held)));
   if (!r.fired && !stop) return;
   const cut = turnCuts.record({
     channelId, agent, runtime, cause: stop ? "stopword" : "preempt",

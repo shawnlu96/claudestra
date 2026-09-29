@@ -265,6 +265,39 @@ describe("押住的旧「停」晚投：按它当时的时刻排，不按投递�
     expect(e.meta.interruptNote).toContain("打断了当时在跑的回合");
     expect(e.meta.interruptNote).toContain("已作废");
   });
+  test("owner 和押住的停同一毫秒作答：算 owner 在后，作废（T13e r3 P2-2）", async () => {
+    turnCuts.forget(CC);
+    log.length = 0;
+    const e = env("same-ms");
+    noteHeldStop(e, CC, "agent-cc", "claude-code");
+    turnCuts.noteHuman(CC, false, e.meta.heldStopAt!);
+    await preemptForHuman(e, CC, "agent-cc");
+    expect(log.some((l) => l.startsWith("abort"))).toBe(false);
+    expect(turnCuts.interruptHold(CC)).toBeNull();
+    expect(e.meta.interruptNote).toContain("已作废");
+  });
+  test("新来的停（没押过）在 gate 的 await 里 owner 答卡片：同样带 wanted，不发键、不挂起，抬头不写「已替你打断」（T13e r3 P1）", async () => {
+    turnCuts.forget(CC);
+    log.length = 0;
+    const e = env("fresh-mid-await");
+    let hasWanted = false;
+    interruptGate.preempt = async (_ch, _a, opts) => {
+      hasWanted = !!opts?.wanted;
+      turnCuts.noteHuman(CC, false); // gate 的 await 途中 owner 答了卡片 / 说了继续
+      if (opts?.wanted && !opts.wanted()) return { fired: false, why: "withdrawn" };
+      return log.push("abort"), { fired: true };
+    };
+    try {
+      await preemptForHuman(e, CC, "agent-cc");
+    } finally {
+      interruptGate.preempt = async () => (log.push(`abort(skip=${[...stopWaitIds(CH)].join(",")})`), { fired: true });
+    }
+    expect(hasWanted).toBe(true);
+    expect(log).not.toContain("abort");
+    expect(turnCuts.interruptHold(CC)).toBeNull();
+    expect(e.meta.interruptNote).toContain("已作废");
+    expect(e.meta.interruptNote).not.toContain("打断");
+  });
   test("owner 在押住之前开的口不作废它：出队照常打断、仍是叫停", async () => {
     turnCuts.forget(CC);
     log.length = 0;
