@@ -23,6 +23,7 @@ import { sinceDigest } from "./collab-since";
 import { SinceCard } from "./collab-since-card";
 import { useLastSeen } from "./use-collab-extra";
 import s from "./collab.module.css";
+import { TeamPanel } from "./team-panel";
 
 /** 模块级稳定引用：详情里的 effect 依赖它，每次渲染换新函数会白跑 */
 const closeTask = () => openCollabTask(null);
@@ -217,7 +218,7 @@ export function CollabView({ project }: { project: string }) {
           </button>
           <span className={s.ttl2}>{tr("协作视图")}</span>
         </div>
-        {body}
+        <TeamPanel ov={ov} project={project} />{body}
       </div>
       {openTask && ov && (
         <CollabDetail project={project} id={openTask} rev={rev} now={now} ov={ov} line={view?.lines.find((l) => l.id === openTask) ?? null}
