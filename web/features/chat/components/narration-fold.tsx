@@ -14,12 +14,12 @@ import { useT } from "@/lib/i18n";
  * 几百个旁白块全部重渲，iPhone 上长对话一点就卡。现在只有值翻转的块才重渲。
  */
 
-/** 本块是否收起——只在这个 boolean 翻转时重渲 */
-export function useNarrationFold(key?: string): boolean {
+/** 本块是否收起——只在这个 boolean 翻转时重渲。postReply：紧跟 reply 的旁白（默认收起） */
+export function useNarrationFold(key?: string, postReply = false): boolean {
   const agent = useChatStore((s) => s.state.activeAgent);
   return useSyncExternalStore(
     subscribeFold,
-    () => (key ? isFolded(getFold(agent), key) : false),
+    () => (key ? isFolded(getFold(agent), key, postReply) : false),
     () => false,
   );
 }
@@ -30,11 +30,11 @@ const SCROLLER_ID = "cstra-msgs";
 
 /** 绝对定位钉在块右下角、不占行高（owner 2026-09-24「否则会多出一行」），hover 才显；
  *  无 hover 的触摸设备常显（否则永远点不到）。父块要有 relative + group。 */
-export function NarrationFoldBar({ foldKey }: { foldKey: string }) {
+export function NarrationFoldBar({ foldKey, postReply }: { foldKey: string; postReply?: boolean }) {
   const t = useT();
   const agent = useChatStore((s) => s.state.activeAgent);
-  const folded = useNarrationFold(foldKey);
-  const all = useSyncExternalStore(subscribeFold, () => getFold(agent).all, () => false);
+  const folded = useNarrationFold(foldKey, postReply);
+  const all = useSyncExternalStore(subscribeFold, () => getFold(agent).all === true, () => false);
   const ref = useRef<HTMLDivElement>(null);
   // 「收起 / 展开全部」会让上方的块一起变高矮，iOS Safari 没有滚动锚定，阅读位置
   // 会跳走（peer review #40）：点击前记下本块的视口 top，提交后在 layout effect 里把
