@@ -9,7 +9,7 @@
  */
 import { bgEndStatusOf, bgMetaOf, bgProgressOf, type WebAuqQuestion, type WebComponentRow, type WebStreamEvent } from "./events";
 import { attachmentUrl, extractAttachments, isImageName } from "./attachments";
-import { isSelfSource } from "./history-shape";
+import { foreignAware, isSelfSource } from "./history-shape";
 
 export interface BridgeEvent {
   seq: number;
@@ -48,14 +48,15 @@ function chatMessage(d: Record<string, unknown>, selfIds: ReadonlySet<string>): 
     // 只有用户来源（Web / Discord user）才是 user-in：agent / bridge 注入不算；本端自己的回声由前端对账去重
     const src = String(d.srcKind ?? "");
     if ((src === "api" || src === "user") && typeof d.text === "string" && d.text.trim()) {
-      // 剥附件注入块 → 干净正文 + 附件数组；不剥的话另一端渲染出整块路径文字，本端回声与乐观消息也对不上（双份）
-      // owner 对「待你处理」的作答：bridge 给了 echo（选项人话 + 原话，和历史同一个算法，lib/inbound-body.ts answerEcho）；老 bridge 只剥第一行说明
-      const said = typeof d.echo === "string" ? d.echo : typeof d.askId === "string" ? d.text.split("\n").slice(1).join("\n") : d.text;
-      const { content, attachments } = extractAttachments(said);
-      if (!content && !attachments?.length) return null;
       const from = typeof d.from === "string" && d.from !== "?" ? d.from : undefined;
       const fromLabel = isSelfSource(from, typeof d.fromId === "string" ? d.fromId : undefined, selfIds) ? undefined : from;
-      const wire = typeof d.echo === "string" && typeof d.wire === "string" ? extractAttachments(d.wire).content : ""; // 作答的原文：对账、回填已答态用
+      // owner 对「待你处理」的作答：bridge 给了 echo（选项人话 + 原话，和历史同一个算法，lib/inbound-body.ts answerEcho）；老 bridge 只剥第一行说明。
+      // 外源不做这些按文本的改写，原文照显（history-shape userMessage 同一口径）
+      const said = fromLabel ? d.text : typeof d.echo === "string" ? d.echo : typeof d.askId === "string" ? d.text.split("\n").slice(1).join("\n") : d.text;
+      // 本人的剥附件注入块 → 干净正文 + 附件数组（不剥另一端渲染出整块路径文字，回声与乐观消息也对不上）；外源的附件行留在正文里
+      const { content, attachments } = foreignAware(said, fromLabel);
+      if (!content && !attachments?.length) return null;
+      const wire = !fromLabel && typeof d.echo === "string" && typeof d.wire === "string" ? extractAttachments(d.wire).content : ""; // 作答的原文：对账、回填已答态用
       const ask = { ...(typeof d.askId === "string" ? { askId: d.askId } : {}), ...(wire && wire !== content ? { wire } : {}) };
       return { t: "user-in", text: content, ...(fromLabel ? { from: fromLabel } : {}), ...(attachments?.length ? { attachments } : {}), ...ask };
     }
