@@ -1,12 +1,13 @@
 "use client";
-import { useCallback, useEffect, useState, useRef } from "react";
+import { Fragment, useCallback, useEffect, useState, useRef } from "react";
 import { fmtAgo } from "../fmt-time";
 import { getLang, useT } from "@/lib/i18n";
 import { sessionHistory, sessionHistoryError, sessionList, sessionManage } from "@/lib/api/system";
 import { RuntimeBadge } from "./runtime-badge";
 import { SidebarSectionHeader } from "./sidebar-section-header";
 import { AdoptPanel } from "./adopt-panel";
-import { nestSubSessions, SessionName, sessionRowKey, type SubSessionInfo } from "./session-name";
+import type { SubSessionRow } from "@/lib/session-nesting";
+import { FoldToggle, GroupAnchor, MoreSubsNote, SessionName, sessionRowKey, sessionTree, useFold } from "./session-name";
 
 /**
  * 侧栏「未纳管会话」分区（v2.23+）。
@@ -20,9 +21,8 @@ import { nestSubSessions, SessionName, sessionRowKey, type SubSessionInfo } from
  * 两种 runtime 合并、按最近活动排序）。
  */
 
-interface SessionRow {
-  sessionId: string;
-  name: string;
+/** sessionId / name / sub（子会话归属）/ moreSubs（后端省掉的子线程数）见 lib/session-nesting.ts */
+interface SessionRow extends SubSessionRow {
   slug: string;
   project: string;
   cwd: string;
@@ -32,7 +32,6 @@ interface SessionRow {
   lastMessage: string;
   agentName: string | null;
   manageable?: boolean; // v2.24+ bridge 按运行时适配器给出（老 bridge 不带）
-  sub?: SubSessionInfo; // 子会话归属（lib/session-nesting.ts）
 }
 
 interface HistoryTool {
@@ -58,6 +57,8 @@ interface HistoryMsg {
 function isTempSession(cwd: string): boolean {
   return /^(\/tmp|\/private\/tmp|\/var\/folders|\/private\/var\/folders)\//.test(cwd || "");
 }
+// 临时目录（测试遗留 / 子代理 scratchpad）的会话是噪声，不列（真想看有 CLI `manager sessions`）；组头计数也按它
+const isUnmanaged = (s: SessionRow) => !s.agentName && !isTempSession(s.cwd);
 
 /** 能不能收编成可对话的 agent：以 bridge 的 manageable 为准（加运行时前端不用改）；老 bridge 按旧规则 */
 export function canAdoptSession(s: { runtime: string; manageable?: boolean }): boolean {
@@ -192,7 +193,8 @@ export function UnmanagedSessions() {
     };
   }, [fetchSessions]);
 
-  const count = sessions.filter((s) => s.agentName === null && !isTempSession(s.cwd)).length;
+  // 与列表同一口径：只数顶层的行（父文件已删的孤儿子会话也在顶层），收在分组头下的子会话不算
+  const count = sessionTree(sessions, isUnmanaged, new Set()).filter((r) => !r.anchor).length;
 
   const [confirming, setConfirming] = useState<string | null>(null); // 行键（sessionRowKey），不是 sessionId
 
@@ -213,11 +215,7 @@ export function UnmanagedSessions() {
     if (next) void load();
   };
 
-  // 未纳管会话里塞着大量**测试遗留**（dailies 探针 / spike / 子代理 scratchpad）：
-  // 它们的 cwd 在临时目录下，列出来只是噪声（owner 2026-09-14 实测：20 个未纳管 Pi
-  // 会话里 8+ 个是 /tmp 下的）。临时目录的会话不进列表——真想看还有 CLI
-  // `manager sessions`（isTempSession 见组件上方，与组头计数同一判据）。
-  const unmanaged = sessions.filter((s) => !s.agentName && !isTempSession(s.cwd));
+  const fold = useFold();
 
   // 「刚刚活跃」= 会话文件 2 分钟内还在写（真在跑的会话持续落盘）。
   // ⚠ 这是**启发式**，不是进程检测：Pi 进程的命令行被 setproctitle 盖成 `pi`，
@@ -238,15 +236,16 @@ export function UnmanagedSessions() {
               {t("读取失败")}: {error}
             </div>
           ) : null}
-          {!loading && !error && unmanaged.length === 0 ? (
-            <div className="px-1.5 py-2 text-xs text-base-content/40">
-              {t("没有未纳管的会话")}
-            </div>
+          {!loading && !error && !sessions.some(isUnmanaged) ? (
+            <div className="px-1.5 py-2 text-xs text-base-content/40">{t("没有未纳管的会话")}</div>
           ) : null}
           <ul className="max-h-64 overflow-y-auto">
-            {nestSubSessions(unmanaged).map(({ row: s, depth }) => (
-              <li key={sessionRowKey(s)} style={{ paddingLeft: Math.min(depth, 3) * 14 }}>
-                <SwipeActions
+            {sessionTree(sessions, isUnmanaged, fold.open).map(({ row: s, depth, kids, anchor, more }) => <Fragment key={sessionRowKey(s)}>{anchor ? (
+              <li><GroupAnchor s={s} kids={kids} open={fold.open.has(sessionRowKey(s))} onToggle={() => fold.toggle(sessionRowKey(s))} /></li>
+            ) : (
+              <li className="flex" style={{ paddingLeft: Math.min(depth, 3) * 14 }}>
+                <FoldToggle kids={kids} open={fold.open.has(sessionRowKey(s))} onToggle={() => fold.toggle(sessionRowKey(s))} />
+                <div className="min-w-0 flex-1"><SwipeActions
                   actions={[
                     {
                       label: t("归档"),
@@ -291,9 +290,9 @@ export function UnmanagedSessions() {
                     </span>
                   ) : null}
                 </button>
-                </SwipeActions>
+                </SwipeActions></div>
               </li>
-            ))}
+            )}{more > 0 && fold.open.has(sessionRowKey(s)) ? <MoreSubsNote n={more} depth={depth} /> : null}</Fragment>)}
           </ul>
         </div>
       ) : null}

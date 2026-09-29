@@ -8,7 +8,7 @@ import { STATE_DIR } from "../lib/paths.js";
 import { AGENT_NAME_BLOCKLIST_RE, canonicalTwinError, invisibleNameError, isReservedAgentName, readRegistryAgentsSync, REGISTRY_PATH as STATE_REGISTRY_PATH } from "../lib/registry.js";
 import { readFile, writeFile, mkdir, rename } from "fs/promises";
 import { writeJsonAtomic } from "../lib/state-file.js";
-import { existsSync } from "fs";
+import { existsSync, writeSync } from "fs";
 import { TMUX_SOCK as SOCK, AGENT_PREFIX, tmuxRaw, windowTarget } from "../lib/tmux-helper.js";
 import { type PiEnvProfile } from "../lib/pi-env.js";
 import { type PendingOp } from "../lib/pending-ops.js";
@@ -224,6 +224,19 @@ export function formatAge(date: Date): string {
 
 export function output(data: Record<string, unknown>) {
   console.log(JSON.stringify(data));
+}
+
+/** 大输出用这个：同步写完才返回。console.log 写非阻塞管道会截断（见 tests/manager-output.test.ts）；output() 不直接改成这样：takeover 靠替换 console.log 截 cmdResume 的输出 */
+export function outputSync(data: Record<string, unknown>) {
+  const buf = Buffer.from(JSON.stringify(data) + "\n");
+  for (let off = 0; off < buf.length; ) {
+    try {
+      off += writeSync(1, buf, off);
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== "EAGAIN") throw e;
+      Bun.sleepSync(2); // 管道满：等读方取走一些再写
+    }
+  }
 }
 
 /**

@@ -11,6 +11,7 @@ import { readProjects } from "../lib/projects.js";
 import { loadJobs, saveJobs, parseCronExpression, nextCronTime, CRON_DEFAULT_EFFORT, type CronJob } from "../cron.js";
 import { output } from "./core.js";
 import { refuseSandboxDirInProduction } from "../lib/sandbox.js";
+import { controlCharError, firstControlCharField } from "../lib/flag-like.js";
 
 // ============================================================
 // Cron 管理命令
@@ -27,6 +28,9 @@ async function checkCronProject(project: string | undefined): Promise<string | n
 
 export async function cmdCronAdd(name: string, schedule: string, dir: string, prompt: string, reportChannelId?: string, targetAgent?: string, effort?: string, project?: string) {
   refuseSandboxDirInProduction(dir, "建 cron 任务"); // 生产的定时 agent 不建在沙箱目录里（lib/sandbox.ts）
+  // prompt 到点原样敲进 TUI：控制字符会被当成按键（API 入口同一道，bridge/cron-routes.ts）
+  const ctrl = firstControlCharField({ name, schedule, dir, prompt, reportChannelId, targetAgent, effort, project });
+  if (ctrl) return output({ ok: false, error: controlCharError(ctrl) });
   // 验证 cron 表达式
   try {
     parseCronExpression(schedule);
@@ -109,6 +113,8 @@ export async function cmdCronEdit(
   nameOrId: string,
   patch: { schedule?: string; prompt?: string; name?: string; dir?: string; effort?: string; project?: string }
 ) {
+  const ctrl = firstControlCharField(patch);
+  if (ctrl) return output({ ok: false, error: controlCharError(ctrl) });
   if (patch.schedule) {
     try {
       parseCronExpression(patch.schedule);

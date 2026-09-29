@@ -13,7 +13,9 @@ import { mkdirSync, mkdtempSync, rmSync, readFileSync, writeFileSync } from "fs"
 import { tmpdir } from "os";
 import { join } from "path";
 
-type Spec = { name: string; method: string; path: string; token?: "full" | "scoped" | "bogus"; body?: string; liveSession?: string };
+type Spec = { name: string; method: string; path: string; token?: "full" | "scoped" | "bogus"; auth?: { bearer: string }; body?: string; liveSession?: string };
+/** cron 的新建 / 编辑只认 owner 本人：runner 自带的 "full" 全权但不是 owner，这两条换成过渡期算 owner 的老 web-ui token */
+const WEB_UI = { id: "token:tok_webui", role: "external", name: "web-ui", agents: ["*"], secret: "s-webui", createdAt: "2026-01-01T00:00:00Z" };
 
 const BAD = "{";
 const specs: Spec[] = [
@@ -80,7 +82,9 @@ const specs: Spec[] = [
     ["POST", "/api/v1/peers/x/scope"],
     ["POST", "/api/v1/agents"],
     ["POST", "/api/v1/agents/resume"],
-  ] as const).map(([method, path]) => ({ name: `json-400 ${method} ${path}`, method, path, token: "full" as const, body: BAD })),
+  ] as const).map(([method, path]) => ({
+    name: `json-400 ${method} ${path}`, method, path, token: "full" as const, body: BAD, ...(path.startsWith("/api/v1/cron") ? { auth: { bearer: "s-webui" } } : {}),
+  })),
   // ── D5-11：非法百分号编码（decodeURIComponent 抛 URIError）→ 400 JSON，不是 Bun 的 HTML 500 ──
   { name: "bad-encoding skills", method: "GET", path: "/api/v1/agents/%E0%A4%A/skills", token: "full" },
   { name: "bad-encoding history", method: "GET", path: "/api/v1/agents/%E0%A4%A/history", token: "full" },
@@ -107,7 +111,7 @@ test("早退分支响应逐字节不变（golden）", () => {
     writeFileSync(join(fakeBin, "bun"), `#!/bin/sh\necho '{"ok":false,"error":"manager blocked in parity runner"}'\n`, { mode: 0o755 });
     writeFileSync(join(fakeBin, "tmux"), "#!/bin/sh\nexit 1\n", { mode: 0o755 });
     const r = Bun.spawnSync([process.execPath, join(import.meta.dir, "api-route-parity.runner.ts"), JSON.stringify(specs)], {
-      env: { PATH: `${fakeBin}:/usr/bin:/bin`, HOME: home, TMPDIR: home, CONTROL_CHANNEL_ID: "", LANG: "C" },
+      env: { PATH: `${fakeBin}:/usr/bin:/bin`, HOME: home, TMPDIR: home, CONTROL_CHANNEL_ID: "", LANG: "C", RUNNER_PRINCIPALS: JSON.stringify([WEB_UI]) },
       stdout: "pipe",
       stderr: "pipe",
     });
