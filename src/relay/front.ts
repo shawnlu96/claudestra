@@ -15,7 +15,7 @@ import {
 } from "../lib/relay-machine-path.js";
 import { readBuildInfo, resolveExportedPath, staticResponse } from "../lib/static-site.js";
 import type { InstanceRecord } from "./directory.js";
-import { KeyedWindows } from "./limiter.js";
+import { forwardedClientIp, ipLimitKey, KeyedWindows } from "./limiter.js";
 import { homePage, invitePage, offlinePage, tooManyPage } from "./pages.js";
 import type { Router } from "./router.js";
 import type { Conn, ConnData, Logger } from "./types.js";
@@ -29,7 +29,8 @@ interface FrontLimits {
 
 export interface FrontDeps {
   base: string;
-  trustProxy: boolean;
+  /** 受信反代层数（0 = 不在反代之后，不看 X-Forwarded-*） */
+  trustProxy: number;
   version: string;
   commit?: string;
   /** 中继模式的浏览器用它订阅 Web Push（/app-config.json）；中继没配 VAPID 就不带 */
@@ -95,12 +96,12 @@ export class Front {
 
   /** 请求来自哪个主机名：反代之后认 X-Forwarded-Host；去端口、小写 */
   private hostOf(req: Request): string {
-    const raw = (this.d.trustProxy && req.headers.get("x-forwarded-host")) || req.headers.get("host") || "";
+    const raw = (this.d.trustProxy > 0 && req.headers.get("x-forwarded-host")) || req.headers.get("host") || "";
     return raw.split(",")[0].trim().toLowerCase().replace(/:\d+$/, "");
   }
 
   private clientIp(req: Request, srv: Server<ConnData>): string {
-    const fwd = this.d.trustProxy ? req.headers.get("x-forwarded-for")?.split(",")[0].trim() : undefined;
+    const fwd = forwardedClientIp(req.headers.get("x-forwarded-for"), this.d.trustProxy);
     // 反代前面还有一层四层分流（nginx stream 按 SNI 转发）又没开 PROXY protocol 时，反代看到的客户端全是回环地址，
     // 按 IP 的限流就悄悄变成全局限流。只提醒一次，修法在 docs/relay/self-host.md §4
     if (fwd && !this.warnedSharedIp && /^(127\.|::1$|::ffff:127\.)/.test(fwd)) {
@@ -168,7 +169,7 @@ export class Front {
 
   /** POST /api/v1/codes/lookup {code} → 这个短码属于哪台机器（新前端的配对页用）；与 /c/ 共用一个限流窗口 */
   private async codeLookup(req: Request, ip: string): Promise<Response> {
-    if (!this.codeWindows.tryAcquire(ip)) return json(429, { ok: false, error: "rate_limited" }, { "retry-after": "60" });
+    if (!this.codeWindows.tryAcquire(ipLimitKey(ip))) return json(429, { ok: false, error: "rate_limited" }, { "retry-after": "60" });
     const body = (await req.json().catch(() => null)) as { code?: unknown } | null; // 坏 JSON 按没带码处理，下面回 404
     const code = typeof body?.code === "string" ? normalizeCode(body.code) : null;
     const rec = code ? this.d.lookupCode(code) : null;
@@ -186,7 +187,7 @@ export class Front {
 
   /** 短码 → 实例网页的 /pair#<code>。302 的 Location 带 fragment，浏览器会原样保留。同一地址每分钟只能查几十次：短码 40 位，别让人枚举 */
   private byCode(raw: string, ip: string): Response {
-    if (!this.codeWindows.tryAcquire(ip)) {
+    if (!this.codeWindows.tryAcquire(ipLimitKey(ip))) {
       this.d.log("info", `short code lookup rate limited ip=${ip}`);
       return html(429, tooManyPage(this.d.base));
     }
@@ -203,7 +204,7 @@ export class Front {
 
   /** 隧道请求进门前的三道闸（§6.1）：每 IP 限流、目标登记且在线、每实例在途上限。返回 Response 就是被挡下了；路径模式的错误是 JSON */
   private admit(target: { record: InstanceRecord | null; conn: Conn | null }, label: string, ip: string, api: boolean): Response | { record: InstanceRecord; conn: Conn } {
-    if (!this.tunnelWindows.tryAcquire(ip)) {
+    if (!this.tunnelWindows.tryAcquire(ipLimitKey(ip))) {
       this.d.log("info", `tunnel ${label} rate limited ip=${ip}`);
       const headers = { "retry-after": "60", "content-type": "text/plain; charset=utf-8" };
       return withHsts(new Response("too many requests from this address", { status: 429, headers }));
