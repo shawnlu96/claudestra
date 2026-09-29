@@ -11,13 +11,11 @@ import { ApiError } from "@/lib/api/client";
 import { fetchAsks, followAskEvents, postPresence } from "@/lib/api/asks";
 import { askFromLink, hashBase, leavePlan, shouldPush } from "@/lib/hash-nav";
 import { backGuard, isNarrow, stripHash } from "@/lib/hash-nav-browser";
-import { applyPending, ASK_EVENT_REFRESH_MS, type PendingAnswer, type WebAsk } from "./asks-model";
+import { applyPending, ASK_EVENT_REFRESH_MS, PENDING_MAX_MS, type PendingAnswer, type WebAsk } from "./asks-model";
 
 export interface AsksSnap {
   asks: WebAsk[];
   loaded: boolean;
-  /** 这个凭据能不能作答（bridge 的 canAnswerAsk）：不能的只看不答 */
-  canAnswer: boolean;
   /** 抽屉开着吗；focus = 要滚到的那张卡 */
   open: boolean;
   focus: string | null;
@@ -32,7 +30,7 @@ export interface AskNote {
   text: string;
 }
 
-const EMPTY: AsksSnap = { asks: [], loaded: false, canAnswer: true, open: false, focus: null, banner: null, notes: {} };
+const EMPTY: AsksSnap = { asks: [], loaded: false, open: false, focus: null, banner: null, notes: {} };
 let snap: AsksSnap = EMPTY;
 /** 服务端最近一次给的列表；显示的是它盖上待确认的作答（applyPending） */
 let server: WebAsk[] = [];
@@ -49,11 +47,17 @@ function set(p: Partial<AsksSnap>): void {
 
 const visible = () => typeof document === "undefined" || document.visibilityState === "visible";
 
-/** 服务端列表 + 待确认的作答 → 显示用的列表；已确认 / 盖太久的从待确认表里删掉 */
+/**
+ * 服务端列表 + 待确认的作答 → 显示用的列表；已确认 / 盖太久的从待确认表里删掉。
+ * 失败的那句（断网没发出去）在服务端结案后清掉：这件在别处答了，红字再挂着就是误导
+ */
 function show(extra: Partial<AsksSnap> = {}): void {
   const v = applyPending(server, pending, Date.now());
   for (const id of v.settled) pending.delete(id);
-  set({ asks: v.asks, ...extra });
+  const notes = extra.notes ?? snap.notes;
+  const stale = Object.keys(notes).filter((id) => !notes[id].ok && server.some((a) => a.id === id && a.state !== "open"));
+  const kept = stale.length ? Object.fromEntries(Object.entries(notes).filter(([id]) => !stale.includes(id))) : notes;
+  set({ asks: v.asks, ...extra, notes: kept });
 }
 
 const note = (id: string, n: AskNote | null) => {
@@ -68,14 +72,19 @@ const note = (id: string, n: AskNote | null) => {
  * 出错不再往外抛：原因记在 notes 里由卡片显示；返回成没成
  */
 async function answer(id: string, shown: PendingAnswer["answer"], submit: () => Promise<unknown>, words: { ok: string; fail: (e: unknown) => string }): Promise<boolean> {
-  pending.set(id, { at: Date.now(), answer: shown });
+  const mine: PendingAnswer = { at: Date.now(), answer: shown, inFlight: true };
+  pending.set(id, mine);
   show({ notes: note(id, null) });
   try {
     await submit();
+    // 盖多久从请求回来算；到点自己撤（不等下一次拉取），服务端还说开着就回到「等你处理」
+    if (pending.get(id) === mine) pending.set(id, { at: Date.now(), answer: shown });
+    setTimeout(() => show(), PENDING_MAX_MS + 1);
     set({ notes: note(id, { ok: true, text: words.ok }) });
     return true;
   } catch (e) {
-    pending.delete(id);
+    // 只撤自己这一笔：请求在飞时又点了一次，那一笔的覆盖不能被这次的失败带走
+    if (pending.get(id) === mine) pending.delete(id);
     show({ notes: note(id, { ok: false, text: words.fail(e) }) });
     return false;
   } finally {
@@ -83,16 +92,23 @@ async function answer(id: string, shown: PendingAnswer["answer"], submit: () => 
   }
 }
 
+/** 拉取序号：先发后到的旧结果（例如写库前发出的 30 秒轮询）不能盖掉后发先到的新结果 */
+let fetchSeq = 0;
+let appliedSeq = 0;
+
 async function refresh(): Promise<void> {
   if (denied) return;
+  const my = ++fetchSeq;
   try {
     const r = await fetchAsks();
+    if (my < appliedSeq) return;
+    appliedSeq = my;
     const fresh = r.asks.filter((a) => a.state === "open" && !seen.has(a.id));
     // 第一次拉到的不算「新来的」；之后新来的卡活 ask 在前台就弹横幅
     const bannerAsk = snap.loaded && visible() ? fresh.find((a) => a.blocking === true && a.kind !== "accept") : undefined;
     for (const a of r.asks) seen.add(a.id);
     server = r.asks;
-    show({ loaded: true, canAnswer: r.canAnswer !== false, ...(bannerAsk ? { banner: bannerAsk } : {}) });
+    show({ loaded: true, ...(bannerAsk ? { banner: bannerAsk } : {}) });
   } catch (e) {
     if (e instanceof ApiError && e.status === 403) {
       denied = true;
@@ -144,6 +160,7 @@ export const asksStore = {
   start(key: string): () => void {
     if (key !== machineKey) {
       machineKey = key;
+      appliedSeq = fetchSeq; // 上一台机器还在飞的拉取回来也不认
       denied = false;
       seen.clear();
       pending.clear();
@@ -205,6 +222,13 @@ export const asksStore = {
   },
 };
 
+const none = (): AsksSnap => EMPTY;
 export function useAsks(): AsksSnap {
-  return useSyncExternalStore(asksStore.subscribe, asksStore.get, () => EMPTY);
+  return useSyncExternalStore(asksStore.subscribe, asksStore.get, none);
+}
+
+const noSubscribe = () => () => undefined;
+/** 只在 on 时订阅：每条助手消息都挂着 useReplyAsk，没有按钮的气泡不订阅、快照恒为 EMPTY，ask 事件来了也不重算不重渲染 */
+export function useAsksIf(on: boolean): AsksSnap {
+  return useSyncExternalStore(on ? asksStore.subscribe : noSubscribe, on ? asksStore.get : none, none);
 }

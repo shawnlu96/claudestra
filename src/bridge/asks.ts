@@ -1,18 +1,19 @@
 /**
- * 「待你处理」在 bridge 里的接线（docs 13 §4.3 §4.6）：带选项的 reply 自动建 ask；owner 作答后生成答复消息投回发起方；每分钟扫过期。
- * 运行时卡住的镜像 ask（AUQ / 权限 / Codex 弹框）在 ask-runtime.ts；各作答入口与权限门在 ask-entry.ts、local-api/asks.ts。
+ * 「待你处理」在 bridge 里的接线（docs 13 §4.3 §4.6）：owner 作答后生成答复消息投回发起方；人 / 系统发起的 ask（createAsk）作答只记账。
+ * reply 建 ask 在 ask-reply.ts，过期在 ask-expire.ts（每分钟扫一次由 ask-entry.ts initAskWiring 起），运行时卡住的镜像 ask（AUQ / 权限 / Codex 弹框）在 ask-runtime.ts；
+ * 各作答入口在 ask-entry.ts、local-api/asks.ts，谁能看 / 答在 lib/ask-access.ts。
  * 答复与过期通知一律不抢占（intent=response / notification），并打 meta.waitForIdle 标记：「目标主回合在忙就押后、Stop 后再投」
  * 由 T13a 接进 deliverToLocal；在那之前 response 照常直投（本来就不抢占）。库的读写在 lib/ledger-asks.ts。
  */
 import { existsSync } from "node:fs";
 import type { Database } from "bun:sqlite";
 import type { ServerWebSocket } from "bun";
-import { draftFromReply, groupsLeft, type AskRow, type WireMatch } from "../lib/ask-options.js";
+import { groupsLeft, type AskRow, type WireMatch } from "../lib/ask-options.js";
 import { OWNER_PRINCIPAL_ID } from "../lib/devices.js";
 import { t } from "../lib/i18n.js";
-import { answerAsk, closeAsk, dueAsks, getAsk, hasAsksTable, listAsks, MASTER_PROJECT, openAsk, patchAsk, reopenAsk, type Ask, type AskVia } from "../lib/ledger-asks.js";
+import { answerAsk, hasAsksTable, listAsks, MASTER_PROJECT, openAskFull, patchAsk, reopenAsk, type Ask, type AskAnswer, type AskAtt, type AskVia, type NewAsk } from "../lib/ledger-asks.js";
 import { activeTasksByAgent } from "../lib/ledger-read.js";
-import { LEDGER_PATH, LedgerError, openLedger } from "../lib/ledger-store.js";
+import { LEDGER_PATH, openLedger } from "../lib/ledger-store.js";
 import { OwnerPresence } from "../lib/owner-presence.js";
 import { readPrincipals } from "../lib/principals.js";
 import { readRegistryAgents, type RegistryAgent } from "../lib/registry.js";
@@ -78,9 +79,10 @@ export function setAsksForTest(o: { path: string; deps?: AsksDeps; registry?: Re
   ownerChats = o?.ownerChats ? async () => new Set(o.ownerChats) : async () => ownerChatIds(await readPrincipals());
 }
 
-/** ask 状态变了：发 SSE（网页重拉），再通知推送等订阅者 */
+/** ask 状态变了：发 SSE（网页重拉；fromAgent / assignee 给 ledger-feed 按 lib/ask-access.ts 过滤），再通知推送等订阅者 */
 export function publishAsk(a: Ask): void {
-  emitEvent({ agent: a.fromAgent, chatId: a.chatId || a.fromChannelId, type: "ask", data: { project: a.project, askId: a.id, state: a.state } }, { transient: true });
+  const data = { project: a.project, askId: a.id, state: a.state, fromAgent: a.fromAgent, assignee: a.assignee };
+  emitEvent({ agent: a.fromAgent ?? "", chatId: a.chatId || a.fromChannelId || "", type: "ask", data }, { transient: true });
   for (const l of listeners) {
     try {
       l(a);
@@ -139,58 +141,16 @@ export function taskOf(name: string): string | null {
 }
 
 /** 发给 owner 的才建 ask：Discord 频道（只有 ALLOWED_USER_IDS 能在里面点），或 owner 本人的网页身份；peer / 其它 token 的对话不算 */
-async function toOwner(chatId: string): Promise<boolean> {
+export async function toOwner(chatId: string): Promise<boolean> {
   const p = parseChatId(chatId);
   if (p.transport === "discord") return /^\d+$/.test(p.id);
   if (p.transport !== "api") return false;
   return (await ownerChats()).has(chatId);
 }
 
-// ── reply → ask ──
-
-async function openAskForReply(env: Envelope, chatId: string, fromChannelId: string): Promise<Ask | null> {
-  const draft = draftFromReply(env.content, env.meta.components);
-  if (!draft || !(await toOwner(chatId))) return null;
-  const who = await whoIs(fromChannelId);
-  if (!who) return null;
-  const a = openAsk(askDb(), {
-    project: who.project, taskId: taskOf(who.name), fromAgent: who.name, fromChannelId, source: "reply", kind: "decide", blocking: null,
-    title: draft.title, context: draft.context, body: env.content, options: draft.options, kindHint: draft.kindHint, chatId, threadId: env.meta.threadId,
-    ...parentExtra(who),
-  });
-  publishAsk(a);
-  return a;
-}
-
-/**
- * agent 的 reply 出站（bridge.ts 的 ws reply 处理只调这一个）：带选项、发给 owner 的先建 ask，askId 进 env.meta 随出站事件带给网页；
- * 投递成功补记 Discord 消息 id，失败把 ask 撤掉。建 ask 出错不挡回复本身。
- */
-export async function deliverReplyWithAsk(env: Envelope, chatId: string, fromChannelId: string, send: (e: Envelope) => Promise<Delivery>): Promise<Delivery> {
-  let a: Ask | null = null;
-  try {
-    a = await openAskForReply(env, chatId, fromChannelId);
-  } catch (e) {
-    console.error(`⚠️ reply 自动建 ask 失败（回复照发）: ${(e as Error).message}`);
-  }
-  if (a) env.meta.askId = a.id;
-  const d = await send(env);
-  if (!a) return d;
-  try {
-    if (d.outcome.kind === "sent") patchAsk(askDb(), a.id, { discordMessageIds: d.outcome.discordMessageIds ?? [] });
-    else {
-      const c = closeAsk(askDb(), a.id, "cancelled", "reply 没发出去");
-      if (c) publishAsk(c);
-    }
-  } catch (e) {
-    console.error(`⚠️ 补记 ask ${a.id} 的投递结果失败: ${(e as Error).message}`);
-  }
-  return d;
-}
-
 // ── 作答 → 答复消息 ──
 
-const hhmm = (ms: number) => new Date(ms).toTimeString().slice(0, 5);
+export const hhmm = (ms: number) => new Date(ms).toTimeString().slice(0, 5);
 
 interface Target {
   channelId: string;
@@ -228,10 +188,12 @@ export function answerContent(a: Ask, picks: WireMatch[], text: string, original
  */
 export async function answerTarget(a: Ask): Promise<Target> {
   const d = deps!;
-  if (d.clients.has(a.fromChannelId) || a.fromChannelId === d.controlChannelId) return { channelId: a.fromChannelId, agentName: a.fromAgent };
+  const from = a.fromChannelId ?? "";
+  const name = a.fromAgent ?? "master";
+  if (d.clients.has(from) || from === d.controlChannelId) return { channelId: from, agentName: name };
   const regs = await readRegistry();
-  const self = regs.find((r) => r.channelId === a.fromChannelId);
-  if (self?.status === "active") return { channelId: a.fromChannelId, agentName: a.fromAgent };
+  const self = regs.find((r) => r.channelId === from);
+  if (self?.status === "active") return { channelId: from, agentName: name };
   const snap = typeof a.extra.parentChannelId === "string" ? a.extra.parentChannelId : undefined;
   const parent = self
     ? self.parent ? regs.find((r) => r.name === self.parent && r.status === "active" && r.channelId) : undefined
@@ -241,7 +203,7 @@ export async function answerTarget(a: Ask): Promise<Target> {
 }
 
 /** bridge 发给 agent 的一封不抢占的消息：在线就 deliver，不在线或出错进押后队列。trigger：owner 的答复是 ask_answer，其余是 bridge_synth */
-async function sendCalm(from: Endpoint, to: Target, intent: Envelope["intent"], content: string, askId: string, trigger: TriggerKind): Promise<string> {
+export async function sendCalm(from: Endpoint, to: Target, intent: Envelope["intent"], content: string, askId: string, trigger: TriggerKind): Promise<string> {
   const d = deps!;
   const live = d.clients.get(to.channelId);
   const env: Envelope = {
@@ -265,33 +227,43 @@ export interface AnswerInput {
   text: string;
   /** owner 在聊天里发的那条原文（答复正文原样带上）；卡片 / Discord 没有 */
   original?: string;
-  /** 已验证的 owner：网页的 owner 设备凭据，或 Discord 的 ALLOWED_USER_IDS 用户 */
+  /** 作答的人：网页的设备凭据（owner 的带 owner 标记；指给自己的 guest 没有），或 Discord 的 ALLOWED_USER_IDS 用户 */
   from: Endpoint;
   principal: string;
   device?: string;
   via: AskVia;
   /** 卡片一次提交：不管多行 reply 还有没有没答的组都结案 */
   final?: boolean;
+  /** 附件引用（指派事项「完成」时附的说明图等），原样存进答案 */
+  atts?: AskAtt[];
+}
+
+/** 作答后要不要回投给某个 agent：只有 agent 发起的才回投；人 / 系统发起的、指派事项只记账（T28 §2.5 第 5、6 行） */
+export const answersGoToAgent = (a: Pick<Ask, "fromAgent" | "kind">): boolean => !!a.fromAgent && a.kind !== "assigned";
+
+/** 指派事项被作答（T28a 注册：写交付、推阶段、通知 PM）。没注册或抛错，答案照样记下 */
+let onAssigned: ((ask: Ask, answer: AskAnswer) => void | Promise<void>) | null = null;
+export function setOnAssignedAnswer(fn: typeof onAssigned): void {
+  onAssigned = fn;
 }
 
 /**
  * 作答（事务里写 answer + decision 事件）→ 投答复。多行 reply 逐行点时每行都投一次，ask 到所有组答完才结案。
- * 已结案 / 这组答过 / 过期抛 LedgerError("conflict")，调用方回「已处理」；刚在这里被判过期的，顺带给发起方补发「按未批准处理」。
+ * 已结案 / 这组答过 / 过期抛 LedgerError("conflict")，调用方回「已处理」；刚在这里被判过期的（current.expiredNow），
+ * 由调用方（ask-entry.ts commitNoticing）补发过期通知——过期那套在 ask-expire.ts，这里不反向依赖它。
  */
 export async function commitAnswer(i: AnswerInput): Promise<Ask> {
   if (!deps) throw new Error("asks 未初始化");
-  let a: Ask;
-  try {
-    const labels = i.picks.map((p) => p.label);
-    a = answerAsk(askDb(), i.ask.id, { choices: i.picks.map((p) => p.wire), labels, text: i.text, principal: i.principal, device: i.device, via: i.via, at: Date.now(), final: i.final });
-  } catch (e) {
-    const cur = e instanceof LedgerError ? e.current : undefined;
-    const expired = cur?.expiredNow ? getAsk(askDb(), i.ask.id) : null;
-    if (expired) await noticeExpired(expired);
-    throw e;
-  }
-  ownerPresence.touch();
+  const labels = i.picks.map((p) => p.label);
+  const answer = { choices: i.picks.map((p) => p.wire), labels, text: i.text, principal: i.principal, device: i.device, via: i.via, at: Date.now(), final: i.final };
+  const a = answerAsk(askDb(), i.ask.id, i.atts?.length ? { ...answer, atts: i.atts } : answer);
+  // 只有 owner 本人作答才算「在」（Discord 只有 ALLOWED_USER_IDS；网页看 owner 标记）：guest 答指给自己的不算，否则 owner 卡活的 ask 5 分钟内只弹横幅
+  if (i.from.kind !== "api" || i.from.owner) ownerPresence.touch();
   publishAsk(a);
+  if (!answersGoToAgent(a)) {
+    if (a.kind === "assigned" && a.state === "answered" && a.answer) await runAssignedHook(a, a.answer);
+    return a;
+  }
   const to = await answerTarget(a);
   const outbox = await sendCalm(i.from, to, "response", answerContent(a, i.picks, i.text, i.original, to), a.id, "ask_answer");
   patchAsk(askDb(), a.id, { outboxMessageId: outbox, ...(to.redirected ? { extra: { redirectedTo: to.redirected } } : {}) });
@@ -300,6 +272,15 @@ export async function commitAnswer(i: AnswerInput): Promise<Ask> {
     void deps.editDiscord(a, (a.answer?.labels ?? []).join("、") || i.text).catch((e) => console.error(`⚠️ 改 Discord 原消息为已处理失败: ${(e as Error).message}`));
   }
   return a;
+}
+
+async function runAssignedHook(a: Ask, answer: AskAnswer): Promise<void> {
+  if (!onAssigned) return console.log(`指派事项 ${a.id} 已作答，没有注册 onAssignedAnswer（只记账）`);
+  try {
+    await onAssigned(a, answer);
+  } catch (e) {
+    console.error(`⚠️ onAssignedAnswer 出错（答案已记下）: ${(e as Error).message}`);
+  }
 }
 
 /**
@@ -326,46 +307,31 @@ export async function answerDropped(env: Envelope): Promise<void> {
   }
 }
 
-// ── 过期 ──
+// ── 人 / 系统发起的 ask ──
+
+export type CreateAskInput = Omit<NewAsk, "source" | "fromAgent" | "fromChannelId"> & { source: "human" | "system"; createdBy: string };
 
 /**
- * 刚结成 expired 的一条：发 SSE；reply 类再通知发起方「没人批，按未批准处理」（没人点 ≠ 同意；部分答了的说清哪些答了）。
- * 发起方不在了：改投派发者时写明原发起方；连派发者也没有、只能落到大总管的不发（被 kill 的 agent 留下的一堆过期 ask 不该刷大总管）。
+ * 人 / 系统发起的 ask（chat 审核、409 转人工、指派事项；T28a 复用）：没有发起 agent，作答只记账（指派事项另调 onAssignedAnswer）。
+ * 带 dedupKey 撞上已有的就返回那条、不重复发 SSE / 推送
  */
-async function noticeExpired(a: Ask): Promise<void> {
-  publishAsk(a);
-  if (a.source !== "reply" || !deps) return;
-  const to = await answerTarget(a);
-  if (to.redirected === "master") return;
-  const got = a.answer?.labels.length ? t(`其中已答：${a.answer.labels.join("；")}；没答的部分`, `Answered so far: ${a.answer.labels.join("; ")}; the rest`) : "";
-  const whose = to.redirected ? t(`${a.fromAgent}（已不在，改投给你）`, `${a.fromAgent} (gone — redirected to you)`) : t("你", "Your");
-  const text = t(
-    `[⌛ ${whose} ${hhmm(a.createdAt)} 发的「待你处理」（${a.id}）：${a.title} —— 到期没人处理。${got}按未批准处理，不要当成同意。还需要就重新问。]`,
-    `[⌛ ${whose} ${hhmm(a.createdAt)} ask (${a.id}): ${a.title} expired. ${got} treat as NOT approved. Ask again if still needed.]`,
-  );
-  await sendCalm({ kind: "bridge", label: "ask-expire" }, to, "notification", text, a.id, "bridge_synth");
+export function createAsk(input: CreateAskInput): Ask {
+  return createAskFull(input).ask;
 }
 
-/** 到期的一律 expired；库还不存在就什么都不做（不建库） */
-export async function sweepExpired(now = Date.now()): Promise<number> {
-  const db = askDbIfExists();
-  if (!db || !hasAsksTable(db)) return 0;
-  const due = dueAsks(db, now);
-  for (const a0 of due) {
-    const a = closeAsk(db, a0.id, "expired", "", now);
-    if (a) await noticeExpired(a);
-  }
-  return due.length;
+/** 同上，另告诉调用方是不是撞上了已有的（POST 接口要据此决定能不能把那条给出去） */
+export function createAskFull(input: CreateAskInput): { ask: Ask; existed: boolean } {
+  const r = openAskFull(askDb(), input);
+  if (!r.existed) publishAsk(r.ask);
+  return r;
 }
 
 export function initAsks(d: AsksDeps): void {
   deps = d;
-  const tick = () => void sweepExpired().catch((e) => console.error(`⚠️ ask 过期扫描失败: ${(e as Error).message}`));
-  setInterval(tick, 60_000).unref?.();
 }
 
 /** 网页列表：开着的全给，已结案的只给最近 3 天；visible 是调用方的权限过滤（大总管的 ask 要 scope 含 master） */
-export function listForWeb(visible: (a: Ask) => boolean, project?: string): Ask[] {
+export function listForWeb(visible: (a: Ask) => boolean, project?: string, assignee?: string): Ask[] {
   const db = askReadDb();
-  return db ? listAsks(db, { project, closedSince: Date.now() - 3 * 24 * 3600_000, limit: 200 }).filter(visible) : [];
+  return db ? listAsks(db, { project, assignee, closedSince: Date.now() - 3 * 24 * 3600_000, limit: 200 }).filter(visible) : [];
 }

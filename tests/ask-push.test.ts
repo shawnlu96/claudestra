@@ -18,6 +18,6 @@ describe("askPushDecision", () => {
   for (const [name, ask, presence, want] of TABLE) test(name, () => expect(askPushDecision(ask, presence)).toBe(want));
 });
 
-test("推送内容：点开直达卡片，tag 一条 ask 一个", () => {
-  expect(askPushMessage({ id: "ask_1", fromAgent: "agent-x", title: "发吗" })).toMatchObject({ body: "发吗", url: "/chat?ask=ask_1", tag: "cstra-ask-ask_1" });
+test("推送内容：点开直达卡片，tag 一条 ask 每个状态一个", () => {
+  expect(askPushMessage({ id: "ask_1", fromAgent: "agent-x", title: "发吗", state: "open", kind: "decide" })).toMatchObject({ body: "发吗", url: "/chat?ask=ask_1", tag: "cstra-ask-ask_1-open" });
 });
