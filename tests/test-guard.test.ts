@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
-import { DEFAULT_BRIDGE_PORT, resolveBridgePort, resolveBridgeUrl, testBridgeProblem } from "../src/lib/bridge-url.js";
+import { configuredBridgePort, DEFAULT_BRIDGE_PORT, dotenvBridgePort, resolveBridgePort, resolveBridgeUrl, testBridgeProblem } from "../src/lib/bridge-url.js";
 import { readDotenvFileSync, repoEnvVar } from "../src/lib/env-file.js";
 import { REPO_ROOT } from "../src/lib/repo-root.js";
 import { assertNoRepoEnvWriteInTest, isRepoEnvFile, isTestProcess, testSafeStateDir } from "../src/lib/test-guard.js";
@@ -55,6 +55,22 @@ describe("bridge 地址", () => {
     expect(resolveBridgePort({ BRIDGE_PORT: String(DEFAULT_BRIDGE_PORT) })).toBe(DEFAULT_BRIDGE_PORT);
   });
 
+  test("按 .env 推端口去探活的（doctor / manager / peer 握手）：仓库根 .env 读不到时拒，不回落默认端口；临时 repoRoot 照推", () => {
+    expect(() => dotenvBridgePort(REPO_ROOT, null)).toThrow("回落到默认端口");
+    const dir = mkdtempSync(join(tmpdir(), "tg-port-"));
+    try {
+      expect(dotenvBridgePort(dir, { BRIDGE_PORT: "13847" })).toBe(13847);
+      delete process.env.BRIDGE_PORT;
+      expect(() => configuredBridgePort()).toThrow("回落到默认端口");
+      writeFileSync(join(dir, ".env"), "BRIDGE_PORT=23902\n");
+      expect(configuredBridgePort(dir)).toBe(23902);
+      process.env.BRIDGE_PORT = "9";
+      expect(configuredBridgePort()).toBe(9);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   test("沙箱进程归沙箱的闸管（口径不动）：非生产端口放行", () => {
     process.env.CLAUDESTRA_SANDBOX = "1";
     delete process.env.BRIDGE_URL;
@@ -72,8 +88,13 @@ describe("仓库 .env", () => {
       symlinkSync(dir, `${dir}-link`);
       expect(isRepoEnvFile(join(`${dir}-link`, ".env"), dir)).toBe(true);
       expect(isRepoEnvFile(join(dir, ".env"))).toBe(false);
+      // 别处指向它的文件软链、大小写变体（APFS 不分大小写）也认得
+      writeFileSync(join(dir, ".env"), "");
+      symlinkSync(join(dir, ".env"), `${dir}-x.env`);
+      expect([isRepoEnvFile(`${dir}-x.env`, dir), isRepoEnvFile(join(dir, ".ENV"), dir)]).toEqual([true, true]);
     } finally {
       rmSync(`${dir}-link`, { force: true });
+      rmSync(`${dir}-x.env`, { force: true });
       rmSync(dir, { recursive: true, force: true });
     }
   });

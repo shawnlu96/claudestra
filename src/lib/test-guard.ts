@@ -5,6 +5,7 @@
  * 认测试进程有两条路：tests/preload.ts 设的 CLAUDESTRA_TEST=1（最小 env 的子进程经 tests/test-env.ts 带上），
  * 或 bun test 自己设的 NODE_ENV=test（不在仓库根跑、preload 没加载时兜底）。生产的 bridge / cron / launcher
  * 与 agent 会话都不带 NODE_ENV（T45 PR 里有实测），没有标记时这里全是空操作。
+ * 剩余风险：bun test 不覆盖外部预设的 NODE_ENV——不经 preload、又带着 NODE_ENV=development 之类跑时，两条都认不出，闸不生效。
  */
 import { mkdtempSync } from "fs";
 import { tmpdir } from "os";
@@ -30,9 +31,15 @@ export class TestIsolationViolation extends Error {
 /** Bun 启动时从 cwd 自动加载的 env 文件（.env.local 在 NODE_ENV=test 时不加载，照样挡） */
 export const AUTOLOADED_ENV_FILES = [".env", ".env.local", ".env.test"] as const;
 
-/** path 是不是仓库根（或 root 指定的目录）下 Bun 会自动加载的 env 文件；按解析软链后的路径比（macOS 的 /tmp ↔ /private/tmp） */
+/**
+ * path 是不是仓库根（或 root 指定的目录）下 Bun 会自动加载的 env 文件。按文件本身解析软链后的路径比（别处指向仓库 .env
+ * 的软链、macOS 的 /tmp ↔ /private/tmp），且不分大小写（APFS 上 `.ENV` 就是 `.env`；Linux 上只会多拦、不会漏拦）。
+ */
 export function isRepoEnvFile(path: string, root: string = REPO_ROOT): boolean {
-  return (AUTOLOADED_ENV_FILES as readonly string[]).includes(basename(path)) && canonical(dirname(path)) === canonical(root);
+  const key = (p: string) => canonical(p).toLowerCase();
+  const names = AUTOLOADED_ENV_FILES as readonly string[];
+  if (names.includes(basename(path).toLowerCase()) && key(dirname(path)) === key(root)) return true; // 仓库 .env 本身是软链也算
+  return names.some((n) => key(join(root, n)) === key(path));
 }
 
 /**

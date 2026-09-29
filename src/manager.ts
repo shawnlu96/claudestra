@@ -14,7 +14,7 @@
  */
 
 import { writeClaudeSettings } from "./lib/session-recall.js";
-import { DEFAULT_BRIDGE_PORT } from "./lib/bridge-url.js";
+import { configuredBridgePort } from "./lib/bridge-url.js";
 import { repoEnvVar } from "./lib/env-file.js";
 import { RUNTIME_DIR, runtimePath, statePath } from "./lib/paths.js";
 import { resolveBridgeUrl } from "./lib/bridge-url.js";
@@ -243,7 +243,7 @@ async function cmdTakeover(target?: string, opts: { all?: boolean; force?: boole
   }
 
   // SIGTERM 之前的全局预检：这边起不来就一个进程都不动
-  const bridgePort = repoEnvVar("BRIDGE_PORT", REPO_ROOT) || String(DEFAULT_BRIDGE_PORT);
+  const bridgePort = configuredBridgePort();
   const [bypassAccepted, masterSession, bridgeReachable] = await Promise.all([
     readBypassConsent(),
     tmuxRawStrict(["has-session", "-t", sessionTarget(MASTER_SESSION)]).then(() => true, () => false),

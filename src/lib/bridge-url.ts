@@ -18,10 +18,11 @@
  * `BRIDGE_PORT` 推**，两者都没有才回默认端口。
  */
 
-import { readAutoloadedEnvUnguarded } from "./env-file.js";
+import { join } from "path";
+import { readAutoloadedEnvUnguarded, repoEnvVar } from "./env-file.js";
 import { REPO_ROOT } from "./repo-root.js";
 import { enforceSandboxBridgeUrl, isSandbox, sandboxBridgeUrlProblem } from "./sandbox.js";
-import { isTestProcess, TestIsolationViolation } from "./test-guard.js";
+import { isRepoEnvFile, isTestProcess, TestIsolationViolation } from "./test-guard.js";
 
 export const DEFAULT_BRIDGE_PORT = 3847;
 
@@ -37,7 +38,7 @@ export function testBridgeProblem(url: string | null, repoEnv: Record<string, st
 
 /**
  * 测试进程从 process.env 取 bridge 地址时的闸（lib/test-guard.ts）：有问题就抛错，而不是悄悄连上线上 bridge。
- * 显式传 env 参数的调用（bridge-url 自己的单测、doctor 按 .env 内容推端口）不管——它们只算地址不连。
+ * 显式传 env 参数的调用不管（bridge-url 自己的单测只算地址）；按仓库 .env 推端口去探活的走下面两个函数，另有闸。
  * 沙箱进程也不管：由更严的 enforceSandboxBridgeUrl 管（口径不动）。
  */
 function enforceTestBridge(url: string | null, env: Record<string, string | undefined>): void {
@@ -52,6 +53,24 @@ export function resolveBridgePort(env: Record<string, string | undefined> = proc
   const valid = !!env.BRIDGE_PORT && Number.isInteger(n) && n > 0 && n < 65536;
   enforceTestBridge(valid ? `ws://localhost:${n}` : null, env);
   return valid ? n : DEFAULT_BRIDGE_PORT;
+}
+
+/**
+ * 按 repoRoot/.env 的内容推 bridge 端口（doctor / desktop-cli 看 daemon 实际读到的配置，不看调用方终端）。测试进程里
+ * 仓库根 .env 被读闸挡住、看起来是空的，照推会悄悄回落到默认端口再去探活 → 直接拒；测试自己造的临时 repoRoot 照常推。
+ */
+export function dotenvBridgePort(repoRoot: string, dotenv: Record<string, string> | null): number {
+  if (isTestProcess() && !isSandbox() && isRepoEnvFile(join(repoRoot, ".env"))) {
+    throw new TestIsolationViolation(`按仓库根 .env 推 bridge 端口（测试进程读不到它，会回落到默认端口 ${DEFAULT_BRIDGE_PORT}）`);
+  }
+  return resolveBridgePort(dotenv ?? {});
+}
+
+/** process.env 优先、其次仓库 .env 的 BRIDGE_PORT（manager / peer 握手探本机 bridge）；测试进程两边都没配时拒，不回落默认端口 */
+export function configuredBridgePort(repoRoot: string = REPO_ROOT): number {
+  const v = repoEnvVar("BRIDGE_PORT", repoRoot);
+  enforceTestBridge(v ? `ws://localhost:${v}` : null, process.env);
+  return resolveBridgePort({ BRIDGE_PORT: v });
 }
 
 export function resolveBridgeUrl(env: Record<string, string | undefined> = process.env): string {

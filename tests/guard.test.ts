@@ -264,6 +264,17 @@ describe("testenv（测试子进程的最小 env 必须经 testChildEnv）", () 
     expect(count(`const env = { PATH: "/bin" };\nBun.spawnSync(["a"], { env, stdout: "pipe" });`)).toBe(1);
     expect(count(`let e: Record<string, string> = {};\nbeforeAll(() => { e = { PATH: "/bin" }; });\nBun.spawnSync(["a"], { env: e });`)).toBe(1);
   });
+  test("取 process.env 的单个值不算继承；exec、别名导入、解构、带引号的键、Bun $ 的 .env() 都认得", () => {
+    expect(count(`Bun.spawnSync(["a"], { env: { PATH: process.env.PATH, HOME: h } });`)).toBe(1);
+    expect(count(`cp.exec("ls", { env: { PATH: "/bin" } });`)).toBe(1);
+    expect(count(`import { spawnSync as run } from "node:child_process";\nrun("a", [], { env: { PATH: "/bin" } });`)).toBe(1);
+    expect(count(`const { spawnSync: sp } = Bun;\nsp(["a"], { env: { PATH: "/bin" } });`)).toBe(1);
+    expect(count(`Bun.spawnSync(["a"], { "env": { PATH: "/bin" } });`)).toBe(1);
+    expect(count("await $`ls`.env({ PATH: \"/bin\" });")).toBe(1);
+    expect(count("await $`ls`.env(testChildEnv());")).toBe(0);
+    expect(count(`Bun.spawn(["b"], { env: process.env });\nconst m = /x/.exec(s);`)).toBe(0);
+    expect(count(`const E = { ...(process.env as Record<string, string>), A: "1" };\nBun.spawn(["b"], { env: E });`)).toBe(0);
+  });
   test("继承当前环境、经 testChildEnv、认不出来源的参数不算；tests 以外的文件、字符串里的写法不算", () => {
     expect(count(`Bun.spawn(["b"], { env: { ...process.env, A: "1" } });`)).toBe(0);
     expect(count(`Bun.spawn(["c"], { env: testChildEnv({ A: "1" }) });`)).toBe(0);
