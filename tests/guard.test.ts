@@ -10,6 +10,7 @@ import { measureFn, type SpanParser } from "../scripts/guard/rules/fn.ts";
 import { commentExplains, measurePatterns } from "../scripts/guard/rules/patterns.ts";
 import { lineCount, measureSize } from "../scripts/guard/rules/size.ts";
 import { maskStrings } from "../scripts/guard/rules/lex.ts";
+import { measureTestEnv } from "../scripts/guard/rules/test-env.ts";
 import { measureTwins } from "../scripts/guard/rules/twins.ts";
 import { checkSelfRaised, checkWiring, guardSelfFiles, isStrict } from "../scripts/guard/self.ts";
 import type { Baseline } from "../scripts/guard/types.ts";
@@ -252,6 +253,24 @@ describe("patterns", () => {
     const r = measurePatterns(files({ "src/x.ts": src }));
     expect(r.counts["catch:empty-block"]).toBe(2);
     expect(r.counts["catch:silent-promise"]).toBe(6);
+  });
+});
+
+describe("testenv（测试子进程的最小 env 必须经 testChildEnv）", () => {
+  const count = (src: string, f = "tests/x.test.ts") => measureTestEnv(new Map([[f, src]])).counts["testenv:bare-spawn-env"];
+  test("手写最小 env（字面量、变量、先占位 {} 后在 beforeAll 里赋值）计数", () => {
+    expect(count(`Bun.spawnSync(["a"], { env: { PATH: "/bin", HOME: h } });`)).toBe(1);
+    expect(count(`spawnSync(process.execPath, ["-e", s], { env: {} });`)).toBe(1);
+    expect(count(`const env = { PATH: "/bin" };\nBun.spawnSync(["a"], { env, stdout: "pipe" });`)).toBe(1);
+    expect(count(`let e: Record<string, string> = {};\nbeforeAll(() => { e = { PATH: "/bin" }; });\nBun.spawnSync(["a"], { env: e });`)).toBe(1);
+  });
+  test("继承当前环境、经 testChildEnv、认不出来源的参数不算；tests 以外的文件、字符串里的写法不算", () => {
+    expect(count(`Bun.spawn(["b"], { env: { ...process.env, A: "1" } });`)).toBe(0);
+    expect(count(`Bun.spawn(["c"], { env: testChildEnv({ A: "1" }) });`)).toBe(0);
+    expect(count(`let e: Record<string, string> = {};\nbeforeAll(() => { e = testChildEnv({}); });\nBun.spawnSync(["a"], { env: e });`)).toBe(0);
+    expect(count(`function run(env: Record<string, string>) { return Bun.spawnSync(["a"], { env }); }`)).toBe(0);
+    expect(count(`Bun.spawnSync(["a"], { env: {} });`, "src/x.ts")).toBe(0);
+    expect(count(`const s = 'Bun.spawnSync(["a"], { env: {} })';`)).toBe(0);
   });
 });
 

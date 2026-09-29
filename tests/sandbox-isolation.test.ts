@@ -20,6 +20,7 @@ import { join, resolve } from "path";
 import { DEFAULT_BRIDGE_PORT } from "../src/lib/bridge-url.js";
 import { OUTBOUND_BLOCKED_MARK } from "../src/lib/sandbox.js";
 import { fakeClaudeSource } from "./sandbox-fake-claude.js";
+import { testChildEnv } from "./test-env.ts";
 
 const REPO = resolve(import.meta.dir, "..");
 const SCRIPT = join(REPO, "scripts", "sandbox.ts");
@@ -252,11 +253,11 @@ async function agentSide(): Promise<void> {
 function productionManager(...args: string[]): { code: number; out: string } {
   const r = Bun.spawnSync([BUN, "--no-env-file", join(REPO, "src", "manager.ts"), ...args], {
     cwd: tmp, stdout: "pipe", stderr: "pipe", timeout: 30_000,
-    env: {
+    env: testChildEnv({
       PATH: `${join(tmp, "shim")}:${process.env.PATH}`, HOME: home, BUN_RUNTIME_TRANSPILER_CACHE_PATH: "0",
       CLAUDESTRA_STATE_DIR: join(tmp, "prodmgr", "state"), CLAUDESTRA_RUNTIME_DIR: join(tmp, "prodmgr", "run"),
       BRIDGE_URL: `ws://127.0.0.1:${decoy!.port}`, BRIDGE_PORT: String(decoy!.port),
-    },
+    }),
   });
   return { code: r.exitCode ?? 1, out: r.stdout.toString() + r.stderr.toString() };
 }
@@ -351,7 +352,7 @@ describe("沙箱 bridge 无副作用", () => {
     ];
     for (const [want, extra] of cases) {
       const r = Bun.spawnSync([BUN, "--no-env-file", join(REPO, "src", "bridge.ts")], {
-        cwd: tmp, env: { ...base, ...extra }, stdout: "pipe", stderr: "pipe", timeout: 20_000,
+        cwd: tmp, env: testChildEnv({ ...base, BRIDGE_URL: undefined, ...extra }), stdout: "pipe", stderr: "pipe", timeout: 20_000,
       });
       const out = r.stdout.toString() + r.stderr.toString();
       expect(r.exitCode, out).not.toBe(0);

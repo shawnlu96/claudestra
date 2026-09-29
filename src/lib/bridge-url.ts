@@ -18,18 +18,45 @@
  * `BRIDGE_PORT` 推**，两者都没有才回默认端口。
  */
 
-import { enforceSandboxBridgeUrl } from "./sandbox.js";
+import { readAutoloadedEnvUnguarded } from "./env-file.js";
+import { REPO_ROOT } from "./repo-root.js";
+import { enforceSandboxBridgeUrl, isSandbox, sandboxBridgeUrlProblem } from "./sandbox.js";
+import { isTestProcess, TestIsolationViolation } from "./test-guard.js";
 
 export const DEFAULT_BRIDGE_PORT = 3847;
+
+/**
+ * 测试进程里这个 bridge 地址有什么问题（纯函数）：没显式配（url 为 null，会回落到默认端口）、默认端口、
+ * 仓库 .env 里配的 bridge / peer 端口、非回环地址。repoEnv = 仓库根 .env 系列的内容。
+ */
+export function testBridgeProblem(url: string | null, repoEnv: Record<string, string>): string | null {
+  if (url === null) return `没设 BRIDGE_URL / BRIDGE_PORT，会回落到默认端口 ${DEFAULT_BRIDGE_PORT}`;
+  const deny = ["BRIDGE_PORT", "PEER_INGRESS_PORT"].map((k) => Number(repoEnv[k])).filter((n) => Number.isInteger(n) && n > 0);
+  return sandboxBridgeUrlProblem(url, DEFAULT_BRIDGE_PORT, deny)?.replace("生产端口", "默认端口或仓库 .env 里配的端口") ?? null;
+}
+
+/**
+ * 测试进程从 process.env 取 bridge 地址时的闸（lib/test-guard.ts）：有问题就抛错，而不是悄悄连上线上 bridge。
+ * 显式传 env 参数的调用（bridge-url 自己的单测、doctor 按 .env 内容推端口）不管——它们只算地址不连。
+ * 沙箱进程也不管：由更严的 enforceSandboxBridgeUrl 管（口径不动）。
+ */
+function enforceTestBridge(url: string | null, env: Record<string, string | undefined>): void {
+  if (env !== process.env || !isTestProcess(env) || isSandbox(env)) return;
+  const problem = testBridgeProblem(url, readAutoloadedEnvUnguarded(REPO_ROOT));
+  if (problem) throw new TestIsolationViolation(problem);
+}
 
 /** BRIDGE_PORT → 端口号；没设 / 不是 1-65535 的整数 → 默认端口（与 resolveBridgeUrl 同一口径） */
 export function resolveBridgePort(env: Record<string, string | undefined> = process.env): number {
   const n = Number(env.BRIDGE_PORT);
-  return env.BRIDGE_PORT && Number.isInteger(n) && n > 0 && n < 65536 ? n : DEFAULT_BRIDGE_PORT;
+  const valid = !!env.BRIDGE_PORT && Number.isInteger(n) && n > 0 && n < 65536;
+  enforceTestBridge(valid ? `ws://localhost:${n}` : null, env);
+  return valid ? n : DEFAULT_BRIDGE_PORT;
 }
 
 export function resolveBridgeUrl(env: Record<string, string | undefined> = process.env): string {
   const explicit = (env.BRIDGE_URL || "").trim();
+  if (explicit) enforceTestBridge(explicit, env);
   const url = explicit || `ws://localhost:${resolveBridgePort(env)}`;
   // 沙箱进程（hook / channel-server / manager）拿到生产地址就抛错，而不是悄悄连上生产 bridge
   enforceSandboxBridgeUrl(url, DEFAULT_BRIDGE_PORT, env);

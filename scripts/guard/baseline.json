@@ -302,6 +302,18 @@
       "from": 22154,
       "to": 22328,
       "why": "同上（PR #186 审查 P2）：中文版命令清单同步加 codex-sub-archive 一行，细节在 docs/architecture/features.zh-CN.md"
+    },
+    {
+      "key": "guard:scripts/guard/rules/test-env.ts",
+      "from": 0,
+      "to": 0,
+      "why": "T45 测试隔离二期新增规则 testenv：tests/ 里 spawn 的最小 env（没带 ...process.env、没经 tests/test-env.ts 的 testChildEnv）计数，默认上限 0；手写 env 会丢测试标记，子进程里 lib/test-guard.ts 的闸失效、漏配 BRIDGE_URL 回落线上 3847（09-29 两次事故）"
+    },
+    {
+      "key": "guard:scripts/guard/index.ts",
+      "from": 0,
+      "to": 0,
+      "why": "T45：RULES 注册 testenv 规则（一行），其余不动；package.json 的 check / guard 脚本与 CI Guard 步骤不变"
     }
   ]
 }
