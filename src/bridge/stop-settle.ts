@@ -27,7 +27,9 @@ export interface StopTurn {
   /** cid 这个 agent 的 runtime（ClientInfo.runtime；master / 老连接没有 = Claude Code） */
   runtime?: string;
   /** drainChannelWatcher 的结果：text 是兜底要转的答复文字（不含错误原文），apiError / error = 最后一条 assistant 是 API 错误 */
-  drain: { text: string | null; apiError?: boolean; error?: { error: string; text: string } };
+  drain: { text: string | null; apiError?: boolean; error?: { error: string; text: string }; turnMark?: string };
+  /** 同一轮的 Stop 又来了一次（markRepeat）：什么都不结、不动来源记录 */
+  repeated?: boolean;
   /** 触发这一轮的是谁；不给 = 按 noteDelivered 记下的来源判 */
   trigger?: TurnTrigger;
 }
@@ -123,8 +125,24 @@ export function settlesOwnTurn(t: StopTurn): boolean {
   return !ranIntoApiError(t) && isOwnStopChannel(t.cid, t.stopChannelId, t.stopWs, t.candidateWs);
 }
 
+/**
+ * 回合级幂等：同一轮的 Stop 会重复到达（hook 配了两处、CC 重发），而 API / peer 开的回合不写 lastCompletionSent、去抖拦不住。
+ * 第二次要是照常拍快照结算，那一刻刚送到的 B（已经开了下一轮）会被结成 null、waiter 被摘掉。判据是会话记录：上次结算之后
+ * 没有新的 assistant 条目 = 还是那一轮（drain 的 turnMark）。只记自己频道的（别人的频道结不结不归这次 Stop 管）；没有 watcher 判不了，照旧结算。
+ * tests/stop-settle-wf2.test.ts「回合级幂等」
+ */
+const settledMark = new Map<string, string>();
+export function markRepeat<T extends StopTurn>(t: T): T {
+  const mark = t.drain.turnMark;
+  if (!mark || !isOwnStopChannel(t.cid, t.stopChannelId, t.stopWs, t.candidateWs)) return t;
+  if (settledMark.get(t.cid) === mark) return { ...t, repeated: true };
+  settledMark.set(t.cid, mark);
+  return t;
+}
+
 /** bridge 的 Stop 处理每个频道调一次：判这一轮算不算 cid 答完、算就结算回程簿。返回判定，看门狗照它走 */
 export async function settleStopTurn(d: CallerSettleDeps, t: StopTurn): Promise<boolean> {
+  if (t.repeated) return false;
   const mine = isOwnStopChannel(t.cid, t.stopChannelId, t.stopWs, t.candidateWs);
   try {
     return await settleOwn(d, t, mine);
@@ -232,7 +250,7 @@ export function takeApiWaiters<W extends ApiWaiter>(
   queues: Map<string, W[]>, t: StopTurn, own: boolean, stopWait: ReadonlySet<string> = new Set(), held: ReadonlySet<string> = new Set(), atStop?: ReadonlySet<W>,
 ): { waiter: W; result: ApiWaiterResult }[] {
   const apiErr = !own && ranIntoApiError(t) && isOwnStopChannel(t.cid, t.stopChannelId, t.stopWs, t.candidateWs);
-  if (!own && !apiErr) return [];
+  if (t.repeated || (!own && !apiErr)) return [];
   const skip = new Set([...stopWait, ...held]);
   const out: { waiter: W; result: ApiWaiterResult }[] = [];
   for (const [key, queue] of [...queues.entries()]) {

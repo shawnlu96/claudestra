@@ -556,7 +556,7 @@ import { dropHeldOnKill, flushHeld } from "./bridge/held-flush.js";
 import { probeTurn } from "./bridge/turn-probe.js";
 import { agentMsgMustWait } from "./lib/turn-state.js";
 import { AgentCallBook, ambiguityNotice, expiredNotice, withExpecting, withheldNotice, type PendingAgentCall } from "./bridge/agent-calls.js";
-import { noteDelivered, settleStopTurn, stopSnapshot, takeApiWaiters, unattributedNotice } from "./bridge/stop-settle.js";
+import { markRepeat, noteDelivered, settleStopTurn, stopSnapshot, takeApiWaiters, unattributedNotice } from "./bridge/stop-settle.js";
 import { startCodexTurnFailureWatch } from "./bridge/codex-turn-failure.js";
 // v2.6.0+ C1：出站按 transport 分发（设计 §6）
 import { registerAdapter, adapterFor } from "./bridge/adapters.js";
@@ -2824,9 +2824,9 @@ async function handleHookRequest(req: Request): Promise<Response> {
             const drainedText = drainResult.text;
             // 下面三个消费点（回程簿、API 请求、看门狗）都在回答「cid 欠谁一个回应」：只有 cid 自己正常结束的一轮才结算，
             // 别人的频道、以 API 错误结束的一轮（那句错误不是答复，回程留着等真实答复）都不动（bridge/stop-settle.ts）
-            const turn = {
+            const turn = markRepeat({
               cid, stopChannelId: channelId, stopWs: thisClientForStatus?.ws, candidateWs: clients.get(cid)?.ws, event, runtime: clients.get(cid)?.runtime, drain: drainResult,
-            };
+            });
             const ownTurn = await settleStopTurn(stopSettleDeps, turn);
             // v2.6.0+ R3: API waiter 兜底——agent end_turn 没 reply() 时这一轮就结掉挂着的 API 请求，wait 调用方不必干等到超时
             const held = new Set([...heldLocalMsgs.ids(cid), ...atStop.held]);

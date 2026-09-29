@@ -456,38 +456,42 @@ describe("jsonl-watcher 的 apiError 标记 → settleStopTurn（真实 drain �
     line(errEntry);
     line({ type: "system", subtype: "turn_duration", durationMs: 800 });
     const r1 = await drain();
-    expect(r1).toEqual({ drained: true, text: "先看下代码", apiError: true, error: { error: "rate_limit", text: LIMIT } });
+    expect(r1).toEqual({ drained: true, text: "先看下代码", apiError: true, error: { error: "rate_limit", text: LIMIT }, turnMark: expect.any(String) });
     expect(await h.stop("Stop", r1)).toBe(false);
     expect(h.pushed).toEqual([]);
     prompt("接着做");
     line(asst("做完了"));
     const r2 = await drain();
-    expect(r2).toEqual({ drained: true, text: "做完了", apiError: false });
+    expect(r2).toEqual({ drained: true, text: "做完了", apiError: false, turnMark: expect.any(String) });
     await h.stop("Stop", r2);
     expect(h.pushed).toHaveLength(2);
     expect(h.pushed[0]).toContain("撞墙前扣下的答复");
     expect(h.pushed[0]).toContain("先看下代码");
     expect(h.pushed[1]).toContain("做完了");
+    // 回合级幂等的判据（stop-settle markRepeat）：这一轮又来一次 Stop，会话记录里没有新的 assistant 条目，turnMark 不变
+    expect(r2.turnMark).not.toBe(r1.turnMark);
+    prompt("晚到的 B");
+    expect((await drain()).turnMark).toBe(r2.turnMark);
   });
 
   test("同一批里先错误后正常（CC 内部重试成功）：apiError=false，答复里不夹报错原文", async () => {
     prompt("下一个问题");
     line(synth("API Error: 529 Overloaded", "overloaded"));
     line(asst("真答复"));
-    expect(await drain()).toEqual({ drained: true, text: "真答复", apiError: false });
+    expect(await drain()).toEqual({ drained: true, text: "真答复", apiError: false, turnMark: expect.any(String) });
   });
 
   test("只认合成条目：agent 自己的话以「You've hit your … limit」开头照常是答复", async () => {
     prompt("GitHub 那边怎样");
     line(asst("You've hit your API limit on GitHub, so I paused the sync."));
     line(asst(LIMIT));
-    expect(await drain()).toEqual({ drained: true, text: `You've hit your API limit on GitHub, so I paused the sync.\n${LIMIT}`, apiError: false });
+    expect(await drain()).toEqual({ drained: true, text: `You've hit your API limit on GitHub, so I paused the sync.\n${LIMIT}`, apiError: false, turnMark: expect.any(String) });
   });
 
   test("Codex 的额度条目（不带 isApiErrorMessage、带 error）：⛔ 那句算答复，要推给 caller", async () => {
     prompt("跑一下");
     line(asst(CODEX_LIMIT, { error: CODEX_LIMIT }));
-    expect(await drain()).toEqual({ drained: true, text: CODEX_LIMIT, apiError: false });
+    expect(await drain()).toEqual({ drained: true, text: CODEX_LIMIT, apiError: false, turnMark: expect.any(String) });
   });
 
   test("新一轮的用户提示就复位标记：Stop 先到、新一轮的 assistant 条目还没读到，也不会带着上一轮的错误跳过结算", async () => {

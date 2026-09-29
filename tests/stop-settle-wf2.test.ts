@@ -5,7 +5,7 @@
 import { describe, expect, test } from "bun:test";
 import { AgentCallBook, type PendingAgentCall } from "../src/bridge/agent-calls.js";
 import {
-  noteDelivered, noteTurnCut, settleStopTurn, takeApiWaiters, unattributedNotice, type ApiWaiter, type CallerSettleDeps, type StopTurn,
+  markRepeat, noteDelivered, noteTurnCut, settleStopTurn, takeApiWaiters, turnStartedAt, unattributedNotice, type ApiWaiter, type CallerSettleDeps, type StopTurn,
 } from "../src/bridge/stop-settle.js";
 
 const wallErr = { error: "rate_limit", text: "You've hit your weekly limit · resets Sep 30 at 6am (Asia/Tokyo)" };
@@ -212,5 +212,53 @@ describe("wf3 delivery-hold-1：续跑继承撞错的那一轮，不是「上一
     await h.stop("Stop", { text: "给 peer 的答复" });
     expect(h.pushed.map((p) => p.to)).toEqual(["c-pm"]);
     expect(h.rearmed).toEqual([h.cid]);
+  });
+});
+
+describe("回合级幂等（T24 r7 P2）：同一轮的 Stop 重复到达", () => {
+  const w = (cid: string, n: number): ApiWaiter => ({ agentChannelId: cid, agentName: "agent-t", threadId: `thr-${n}`, tokenId: "tok", messageId: `m-${n}` });
+  test("第二次 Stop（会话记录里没有新的 assistant 条目）不结晚到的 B、不摘它的 waiter、不抹掉 B 那一轮的来源；B 那一轮自己的 Stop 才结", async () => {
+    const h = harness();
+    h.deliver({ kind: "api", owner: true }, 1_000);
+    const q = new Map([["tok", [w(h.cid, 1)]]]);
+    const first = markRepeat(h.turn("Stop", { text: "答 A", turnMark: "s:10" }));
+    expect(takeApiWaiters(q, first, true).map((x) => x.result.reply)).toEqual(["答 A"]);
+    // B 在两次 Stop 之间送到，开了下一轮
+    q.set("tok", [w(h.cid, 2)]);
+    h.deliver({ kind: "api", owner: true }, 20_000);
+    const again = markRepeat(h.turn("Stop", { text: null, turnMark: "s:10" }));
+    expect(again.repeated).toBe(true);
+    expect(await settleStopTurn({} as CallerSettleDeps, again)).toBe(false);
+    expect(turnStartedAt(h.cid)).toBe(20_000);
+    expect(takeApiWaiters(q, again, true)).toEqual([]);
+    expect(q.get("tok")!.map((x) => x.messageId)).toEqual(["m-2"]);
+    const bTurn = markRepeat(h.turn("Stop", { text: "答 B", turnMark: "s:14" }));
+    expect(bTurn.repeated).toBeUndefined();
+    expect(takeApiWaiters(q, bTurn, true).map((x) => x.result.reply)).toEqual(["答 B"]);
+  });
+  test("重复的 Stop 不动这一轮的来源记录（settleStopTurn 直接返回，不走收尾）", async () => {
+    const h = harness();
+    await h.stop("Stop", { text: "x", turnMark: "s:3" });
+    markRepeat(h.turn("Stop", { text: "x", turnMark: "s:3" }));
+    h.deliver({ kind: "api", owner: true }, 50_000);
+    const dup = markRepeat(h.turn("Stop", { text: null, turnMark: "s:3" }));
+    expect(await settleStopTurn({} as CallerSettleDeps, dup)).toBe(false);
+    expect(turnStartedAt(h.cid)).toBe(50_000);
+  });
+  test("以 API 错误结束的那一轮 Stop 重复到达：第二次也不把晚到的请求结成 apiError", () => {
+    const h = harness();
+    const q = new Map([["tok", [w(h.cid, 1)]]]);
+    const drain = { text: null, apiError: true, error: overloaded, turnMark: "s:7" };
+    expect(takeApiWaiters(q, markRepeat(h.turn("StopFailure", drain)), false)).toHaveLength(1);
+    q.set("tok", [w(h.cid, 2)]);
+    expect(takeApiWaiters(q, markRepeat(h.turn("StopFailure", drain)), false)).toEqual([]);
+  });
+  test("没有 watcher（turnMark 缺）判不了，照旧结算；别人的频道不记", () => {
+    const h = harness();
+    expect(markRepeat(h.turn("Stop", { text: null })).repeated).toBeUndefined();
+    expect(markRepeat(h.turn("Stop", { text: null })).repeated).toBeUndefined();
+    const other = { ...h.turn("Stop", { text: null, turnMark: "s:1" }), stopChannelId: "someone-else", stopWs: 2 };
+    expect(markRepeat(other).repeated).toBeUndefined();
+    expect(markRepeat(other).repeated).toBeUndefined();
   });
 });

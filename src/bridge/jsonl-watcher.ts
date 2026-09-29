@@ -54,6 +54,8 @@ interface WatcherState {
   rateLimited: boolean;
   /** 最后一条 assistant 条目是 API 错误（额度 / 网络…）：error 字段 + 原文；Stop 时 drain 兜底据此不把错误文字当答复（bridge/stop-settle.ts） */
   apiErrorTurn?: { error: string; text: string } | false;
+  /** 最后一条 assistant 条目的行号：同一轮的 Stop 重复到达时，它没变（bridge/stop-settle.ts markRepeat） */
+  lastAssistantSeq?: number;
 }
 
 const watchers = new Map<string, WatcherState>();
@@ -454,6 +456,7 @@ async function processNewData(state: WatcherState, discord: Client): Promise<voi
         }
 
         if (entry.type === "assistant") {
+          state.lastAssistantSeq = seq;
           // 回合被 API 错误终止（assistant 条目 + isApiErrorMessage，紧跟 turn_duration）→ bridge 续跑 / 额度闸（text 给闸认撞墙原文）
           state.apiErrorTurn = entry.isApiErrorMessage === true && { error: String(entry.error ?? ""), text: String(entry.message?.content?.[0]?.text ?? "").slice(0, 300) };
           if (state.apiErrorTurn) emitEvent({ agent: state.agentName, chatId: state.channelId, type: "api_error_turn", data: { ...state.apiErrorTurn, ts: entry.timestamp ?? null } });
@@ -635,7 +638,7 @@ async function processNewData(state: WatcherState, discord: Client): Promise<voi
 export async function drainChannelWatcher(
   channelId: string,
   discord: Client,
-): Promise<{ drained: boolean; text: string | null; apiError?: boolean; error?: { error: string; text: string } }> {
+): Promise<{ drained: boolean; text: string | null; apiError?: boolean; error?: { error: string; text: string }; turnMark?: string }> {
   for (const state of watchers.values()) {
     if (state.channelId !== channelId) continue;
     try {
@@ -650,7 +653,8 @@ export async function drainChannelWatcher(
     if (state.textQueue.length > 0) {
       try { await flushText(state, discord); } catch { /* non-critical */ }
     }
-    return { drained: true, text: captured, apiError: !!state.apiErrorTurn, ...(state.apiErrorTurn ? { error: state.apiErrorTurn } : {}) };
+    const turnMark = state.lastAssistantSeq === undefined ? undefined : `${state.sessionId}:${state.lastAssistantSeq}`;
+    return { drained: true, text: captured, apiError: !!state.apiErrorTurn, ...(state.apiErrorTurn ? { error: state.apiErrorTurn } : {}), turnMark };
   }
   return { drained: false, text: null };
 }
