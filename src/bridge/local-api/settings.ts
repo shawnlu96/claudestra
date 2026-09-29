@@ -1,11 +1,11 @@
 /**
  * 全局设置与个人资料（原 web BFF 的 settings / profile 路由）：
- *   GET/PUT /api/v1/settings  { lang, groqApiKeyHint, pushNoContent }；PUT 体 { lang?, groqApiKey?, pushNoContent? }（key 空串 = 清除）
+ *   GET/PUT /api/v1/settings  { lang, groqApiKeyHint, pushNoContent, talkEnabled }；PUT 体 { lang?, groqApiKey?, pushNoContent?, talkEnabled? }（key 空串 = 清除）
  *     → ~/.claude-orchestrator/config.json
  *   GET/PUT /api/v1/profile   { user:{nickname, avatar}, claude:{nickname, avatar} }（avatar 是 data:image/* ≤ 256 KB）→ user_profile 表
  * 读任何凭据都行（提示只有尾四位，头像是展示层）；写是全局状态，要 manage grant。
  */
-import { readConfig, setGroqApiKey, setLang, setPushNoContent, type AppConfig, type AppLang } from "../../lib/config-store.js";
+import { readConfig, setGroqApiKey, setLang, setPushNoContent, setTalkEnabled, type AppConfig, type AppLang } from "../../lib/config-store.js";
 import { canManage } from "../../lib/devices.js";
 import { setLangInMemory } from "../../lib/i18n.js";
 import type { Principal } from "../../lib/principals.js";
@@ -23,6 +23,7 @@ interface Store {
   setLang: (lang: AppLang) => Promise<unknown>;
   setGroqApiKey: (key: string) => Promise<unknown>;
   setPushNoContent: (on: boolean) => Promise<unknown>;
+  setTalkEnabled: (on: boolean) => Promise<unknown>;
 }
 // 写完文件立刻刷 bridge 内存：lib/i18n 只在启动时 initLang 读一次，不刷的话 Discord 上「思考中 / 完成 / 打断」
 // 要等 bridge 重启才换语言。launcher / cron 是别的进程，仍要重启才跟上。
@@ -30,7 +31,7 @@ const persistLang = async (lang: AppLang) => {
   await setLang(lang);
   setLangInMemory(lang);
 };
-const realStore: Store = { read: readConfig, setLang: persistLang, setGroqApiKey, setPushNoContent };
+const realStore: Store = { read: readConfig, setLang: persistLang, setGroqApiKey, setPushNoContent, setTalkEnabled };
 let store = realStore;
 /** 单测换成内存实现；生产不调 */
 export function setSettingsStoreForTest(s: Store | undefined): void {
@@ -38,7 +39,9 @@ export function setSettingsStoreForTest(s: Store | undefined): void {
 }
 
 export const groqKeyHint = (key: string | undefined): string | null => (key ? `····${key.slice(-4)}` : null);
-const settingsBody = (cfg: AppConfig) => ({ ok: true, lang: cfg.lang, groqApiKeyHint: groqKeyHint(cfg.groqApiKey), pushNoContent: cfg.pushNoContent === true });
+const settingsBody = (cfg: AppConfig) => ({
+  ok: true, lang: cfg.lang, groqApiKeyHint: groqKeyHint(cfg.groqApiKey), pushNoContent: cfg.pushNoContent === true, talkEnabled: cfg.talkEnabled === true,
+});
 
 export async function handleSettings(req: Request, path: string, principal: Principal): Promise<Response | null> {
   if (path === "/settings" && req.method === "GET") return apiJson(200, settingsBody(await store.read()));
@@ -52,15 +55,18 @@ async function putSettings(req: Request, principal: Principal): Promise<Response
   if (!canManage(principal)) return forbidden(MANAGE_MSG);
   const body = await readJsonBody(req);
   if (body === INVALID_JSON) return invalidJsonBody();
-  const b = (body ?? {}) as { lang?: unknown; groqApiKey?: unknown; pushNoContent?: unknown };
+  const b = (body ?? {}) as { lang?: unknown; groqApiKey?: unknown; pushNoContent?: unknown; talkEnabled?: unknown };
   if (b.lang !== undefined && b.lang !== "zh" && b.lang !== "en") return apiJson(400, { ok: false, error: 'lang must be "zh" or "en"' });
   if (b.groqApiKey !== undefined && typeof b.groqApiKey !== "string") return apiJson(400, { ok: false, error: "groqApiKey must be a string (empty = clear)" });
-  if (b.pushNoContent !== undefined && typeof b.pushNoContent !== "boolean") return apiJson(400, { ok: false, error: "pushNoContent must be a boolean" });
+  for (const k of ["pushNoContent", "talkEnabled"] as const) {
+    if (b[k] !== undefined && typeof b[k] !== "boolean") return apiJson(400, { ok: false, error: `${k} must be a boolean` });
+  }
   const key = typeof b.groqApiKey === "string" ? b.groqApiKey.trim() : undefined;
   if (key && !KEY_RE.test(key)) return apiJson(400, { ok: false, error: "groqApiKey does not look like an API key" });
   if (b.lang !== undefined) await store.setLang(b.lang);
   if (key !== undefined) await store.setGroqApiKey(key);
   if (typeof b.pushNoContent === "boolean") await store.setPushNoContent(b.pushNoContent);
+  if (typeof b.talkEnabled === "boolean") await store.setTalkEnabled(b.talkEnabled);
   return apiJson(200, settingsBody(await store.read()));
 }
 
