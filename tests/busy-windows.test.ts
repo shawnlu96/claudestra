@@ -3,6 +3,8 @@
  * 样本同 tests/pi-idle-verdict.test.ts（真实 capture-pane 抄的）。
  */
 import { describe, test, expect } from "bun:test";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { paneLooksIdle } from "../src/lib/tmux-helper.js";
 import { windowLooksIdle } from "../src/lib/busy-windows.js";
 
@@ -39,3 +41,20 @@ describe("windowLooksIdle", () => {
     expect(windowLooksIdle("claude-code", CC_BUSY)).toBe(false);
   });
 });
+
+const wallFx = (f: string): string => readFileSync(join(import.meta.dir, "fixtures/quota-wall", `${f}.txt`), "utf8");
+
+describe("撞墙等待不算空闲（T41a：升级会重启全员，CC 排好的自动续跑跟着丢）", () => {
+  test("80 列周额度倒计时被截成「esc to ca…」：paneLooksIdle 判空闲，升级闸判忙", () => {
+    const p = wallFx("walled-weekly-80col");
+    expect(paneLooksIdle(p)).toBe(true);
+    expect(windowLooksIdle(undefined, p)).toBe(false);
+  });
+  test("其余倒计时、额度菜单 → 忙；LP 在跑、普通草稿照旧按 CC 判据", () => {
+    for (const f of ["walled", "walled-when-resets", "walled-shortly", "lp-off-offer", "menu-no-lp", "menu-on-credits"]) {
+      expect([f, windowLooksIdle("claude-code", wallFx(f))]).toEqual([f, false]);
+    }
+    expect(windowLooksIdle(undefined, wallFx("draft"))).toBe(paneLooksIdle(wallFx("draft")));
+  });
+});
+
