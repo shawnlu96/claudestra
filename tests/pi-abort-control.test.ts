@@ -242,11 +242,11 @@ describe("bridge 侧（Workflow 复核 wf2）", () => {
     const statusEvents = () => calls.filter((c) => c.startsWith("typing:"));
     const reply = () => JSON.parse(sent.at(-1) ?? "{}");
 
-    test("P1：同一回合里已经送到过别的消息（回合开着）——只回显这一条（inReplyTo），状态不动、不结别人的等待", () => {
+    test("P1：同一回合里已经送到过别的消息（回合开着）——只回显这一条（inReplyTo），状态不动、不结别人的等待", async () => {
       cx("run1", { kind: "api", tokenId: "tok_a", name: "peer-a" } as Envelope["from"]);
       cx("bad1", { kind: "api", tokenId: "tok_b", name: "peer-b" } as Envelope["from"]);
       delivered.length = 0; calls.length = 0;
-      onCodexUndelivered({ requestId: "r1", channelId: "cx", messageId: "bad1", reason: "⚠️ 消息投递到 Codex 失败：boom" }, sock, true, deps);
+      await onCodexUndelivered({ requestId: "r1", channelId: "cx", messageId: "bad1", reason: "⚠️ 消息投递到 Codex 失败：boom" }, sock, true, deps);
       expect(delivered).toHaveLength(1);
       expect(delivered[0]).toMatchObject({ intent: "response", to: { kind: "api", tokenId: "tok_b" }, content: "⚠️ 消息投递到 Codex 失败：boom" });
       expect(delivered[0].meta.inReplyTo).toBe("bad1");
@@ -256,84 +256,110 @@ describe("bridge 侧（Workflow 复核 wf2）", () => {
       expect(turnCuts.deliveredMessage("cx", "bad1")).toBeUndefined();
     });
 
-    test("P2：这一回合只有没投进去的这一条——收掉「工作中」（不走 Stop 收尾，不发完成通知）", () => {
+    test("P2：空闲时投的最后一条没投进去——收掉「工作中」（不走 Stop 收尾，不发完成通知）", async () => {
       turnCuts.dropUndelivered("cx", "run1");
-      cx("bad2", { kind: "user", userId: "u", username: "alex", channelId: "dc-7" } as Envelope["from"]);
+      cx("bad2", { kind: "user", userId: "u", username: "alex", channelId: "dc-7" } as Envelope["from"], false);
       delivered.length = 0; calls.length = 0;
-      onCodexUndelivered({ requestId: "r2", channelId: "cx", messageId: "bad2", reason: "⚠️ Codex 会话不在线，消息未投递" }, sock, true, deps);
+      await onCodexUndelivered({ requestId: "r2", channelId: "cx", messageId: "bad2", reason: "⚠️ Codex 会话不在线，消息未投递" }, sock, true, deps);
       expect(delivered.map((e) => e.to)).toEqual([expect.objectContaining({ kind: "user", channelId: "dc-7" })]);
       expect(calls).toEqual(["typing:cx", "timer:cx"]);
     });
 
-    test("不是这个频道当前的连接 / 认不出这条：什么都不动，settled 0（channel-server 自己兜底说）", () => {
+    test("不是这个频道当前的连接 / 认不出这条：什么都不动，settled 0（channel-server 自己兜底说）", async () => {
       cx("bad3", { kind: "api", tokenId: "tok_c", name: "c" } as Envelope["from"]);
       delivered.length = 0; calls.length = 0;
-      onCodexUndelivered({ requestId: "r3", channelId: "cx", messageId: "bad3", reason: "x" }, sock, false, deps);
+      await onCodexUndelivered({ requestId: "r3", channelId: "cx", messageId: "bad3", reason: "x" }, sock, false, deps);
       expect(reply().result).toEqual({ settled: 0 });
-      onCodexUndelivered({ requestId: "r4", channelId: "cx", messageId: "nope", reason: "x" }, sock, true, deps);
+      await onCodexUndelivered({ requestId: "r4", channelId: "cx", messageId: "nope", reason: "x" }, sock, true, deps);
       expect(reply().result).toEqual({ settled: 0 });
       expect(delivered).toEqual([]);
       expect(turnCuts.deliveredMessage("cx", "bad3")).toBeDefined();
     });
   });
 
-  describe("Codex 投递失败：回合在不在跑按代记，不看展示用的历史（T52 复审 #204）", () => {
+  describe("Codex 投递失败：只有「空闲时投的最后一条」没投进去才收 done，不按消息推算哪一回合在跑（T52 复审 #204）", () => {
     const calls: string[] = [];
     const deps = { stopTyping: (c: string) => void calls.push(`typing:${c}`), clearSafetyTimer: (c: string) => void calls.push(`timer:${c}`) };
-    const send = (ch: string, id: string, busy: boolean) => turnCuts.noteDelivered({
-      from: { kind: "api", tokenId: `tok_${id}`, name: id }, to: { kind: "local", channelId: ch, agentName: "agent-cx" }, intent: "request",
+    const send = (ch: string, id: string, busy: boolean, from?: Envelope["from"]) => turnCuts.noteDelivered({
+      from: from ?? { kind: "api", tokenId: `tok_${id}`, name: id }, to: { kind: "local", channelId: ch, agentName: "agent-cx" }, intent: "request",
       content: id, meta: { messageId: id, triggerKind: "api_user", ts: "", threadId: "t" },
     } as unknown as Envelope, ch, false, busy);
-    const fail = (ch: string, id: string) => onCodexUndelivered({ requestId: id, channelId: ch, messageId: id, reason: "x" }, { send() {} }, true, deps);
+    const out: string[] = [];
+    const cs = { send: (d: string) => void out.push(d) };
+    const fail = (ch: string, id: string) => onCodexUndelivered({ requestId: id, channelId: ch, messageId: id, reason: "x" }, cs, true, deps);
+    const settled = () => JSON.parse(out.at(-1)!).result.settled;
 
-    test("P1 复现①：A 经 StopFailure 结束，B 再投失败——收成 done（不因为 A 还留在历史里卡着 thinking）", () => {
+    test("复现①：A 经 StopFailure 结束，B 空闲时投、投失败——收成 done", async () => {
       send("cx1", "A", false);
       turnCuts.onStop("cx1", "StopFailure", "agent-cx");
       send("cx1", "B", false);
       calls.length = 0;
-      fail("cx1", "B");
+      await fail("cx1", "B");
       expect(calls).toEqual(["typing:cx1", "timer:cx1"]);
     });
 
-    test("P1 复现②：A 在跑，后面 8 条排队的全失败——A 被历史挤掉也不收 done", () => {
+    test("复现②：A 在跑，后面 8 条排队的全失败——不收 done", async () => {
       send("cx2", "A", false);
       for (let i = 0; i < 8; i++) send("cx2", `q${i}`, true);
       calls.length = 0;
-      for (let i = 0; i < 8; i++) fail("cx2", `q${i}`);
+      for (let i = 0; i < 8; i++) await fail("cx2", `q${i}`);
       expect(calls).toEqual([]);
     });
 
-    test("排在 queue 里的带进下一回合：A 结束后 B 在跑，C 投失败不收 done；B 的回合结束后才没有在跑的", () => {
+    test("复现③（第 3 轮）：A 空闲开跑、B/C 进 queue，A、B 先后 Stop、C 在跑，D 投失败——不收 done", async () => {
       send("cx3", "A", false);
       send("cx3", "B", true);
-      turnCuts.onStop("cx3", "Stop", "agent-cx");
       send("cx3", "C", true);
-      calls.length = 0;
-      fail("cx3", "C");
-      expect(calls).toEqual([]);
       turnCuts.onStop("cx3", "Stop", "agent-cx");
-      send("cx3", "D", false);
-      fail("cx3", "D");
-      expect(calls).toEqual(["typing:cx3", "timer:cx3"]);
+      turnCuts.onStop("cx3", "Stop", "agent-cx");
+      send("cx3", "D", true); // C 在跑：投 D 时回合态是忙
+      calls.length = 0;
+      await fail("cx3", "D");
+      expect(calls).toEqual([]);
     });
 
-    test("P2：发送方 agent 暂时断线——回显押进队列才算告诉到（settled 1）；bridge 自己的通知没有回信地址，settled 0 交给 channel-server 兜底", () => {
-      const out: string[] = [];
-      const cs = { send: (d: string) => void out.push(d) };
-      turnCuts.noteDelivered({
-        from: { kind: "local", channelId: "ag-off", agentName: "agent-off" }, to: { kind: "local", channelId: "cx4", agentName: "agent-cx" },
-        intent: "request", content: "x", meta: { messageId: "off1", triggerKind: "agent", ts: "", threadId: "t" },
-      } as unknown as Envelope, "cx4");
+    test("空闲时投的那条之后又投了别的：拿不准，不收 done", async () => {
+      send("cx5", "E", false);
+      send("cx5", "F", true);
+      calls.length = 0;
+      await fail("cx5", "E");
+      expect(calls).toEqual([]);
+    });
+
+    test("P2：发送方 agent 断线——回显押进队列才算告诉到（settled 1）；bridge 自己的通知没有回信地址，settled 0", async () => {
+      send("cx4", "off1", false, { kind: "local", channelId: "ag-off", agentName: "agent-off" } as Envelope["from"]);
       held.length = 0;
-      onCodexUndelivered({ requestId: "o1", channelId: "cx4", messageId: "off1", reason: "x" }, cs, true, deps);
+      await fail("cx4", "off1");
       expect(held.map((e) => [e.to.kind, e.meta.inReplyTo])).toEqual([["local", "off1"]]);
-      expect(JSON.parse(out.at(-1)!).result).toEqual({ settled: 1 });
-      turnCuts.noteDelivered({
-        from: { kind: "bridge", label: "cron" }, to: { kind: "local", channelId: "cx4", agentName: "agent-cx" },
-        intent: "notification", content: "y", meta: { messageId: "br1", triggerKind: "bridge_synth", ts: "", threadId: "t" },
-      } as unknown as Envelope, "cx4");
-      onCodexUndelivered({ requestId: "o2", channelId: "cx4", messageId: "br1", reason: "x" }, cs, true, deps);
-      expect(JSON.parse(out.at(-1)!).result).toEqual({ settled: 0 });
+      expect(settled()).toBe(1);
+      send("cx4", "br1", false, { kind: "bridge", label: "cron" } as Envelope["from"]);
+      await fail("cx4", "br1");
+      expect(settled()).toBe(0);
+    });
+
+    test("P2（第 3 轮）：发送方在线、回显投递报错 / 被丢 / 抛错——押进队列（不带旧连接）才算告诉到；API 发送方送不到不算", async () => {
+      const wire = (mode: string) => setExtensionSocket((ch) => (ch === "pi" || ch === "caller" ? sock : undefined), {
+        deliver: async () => {
+          if (mode === "reject") throw new Error("socket closed during send");
+          return { outcome: mode === "error" ? { kind: "error", error: new Error("socket closed") } : { kind: "dropped", reason: "offline" } };
+        },
+        ownerId: () => "owner", books: () => books, hold: (e) => void held.push(e),
+      });
+      try {
+        for (const mode of ["error", "dropped", "reject"]) {
+          wire(mode);
+          held.length = 0;
+          send("cx6", `on-${mode}`, false, { kind: "local", channelId: "caller", agentName: "caller" } as Envelope["from"]);
+          await fail("cx6", `on-${mode}`);
+          expect(held.map((e) => [e.to.kind, e.meta.inReplyTo, (e.to as { ws?: unknown }).ws])).toEqual([["local", `on-${mode}`, undefined]]);
+          expect(settled()).toBe(1);
+        }
+        send("cx6", "api-err", false);
+        await fail("cx6", "api-err");
+        expect(settled()).toBe(0);
+      } finally {
+        setExtensionSocket((ch) => (ch === "pi" ? sock : undefined), { deliver: async (e) => void delivered.push(e), ownerId: () => "owner", books: () => books, hold: (e) => void held.push(e) });
+      }
     });
   });
 

@@ -52,11 +52,11 @@ export class TurnCuts {
   /** Codex 频道：上次 Stop 之后经 codex queue（不是打进 TUI）投的消息摘录——Esc 之后它们会排在停字后面才跑 */
   private readonly codexQueued = new Map<string, string[]>();
   /**
-   * 频道 → 上次回合结束之后 ws.send 出去的消息（值 = 送达时主回合在跑、排在 queue 里）：Codex 投递失败时判「还有没有回合在跑」。
-   * 不拿 inbound 判：那是展示用的最近 8 条，StopFailure 不清、满了会挤掉还在跑的那条（T52 复审 #204 P1）。回合结束换代，
-   * 排着的是下一回合要跑的、带进下一代，其余清掉。tests/turn-cuts-book.test.ts
+   * 频道 → 最后 ws.send 的那条、送达时回合态是不是空闲（Codex 空闲时经 queue 投的、打断后打进 TUI 的都算空闲时开跑）。
+   * Codex 投递失败时据此判能不能收成 done：只有「空闲时投的最后一条」没投进去，才确定没有回合在跑。不按消息推算哪一回合在跑——
+   * queue 里排几条、各自何时开跑，bridge 拿不到信号，推算的账三次都错过（T52 复审 #204，tests/pi-abort-control.test.ts）
    */
-  private readonly live = new Map<string, Map<string, boolean>>();
+  private readonly lastSent = new Map<string, { messageId: string; idle: boolean }>();
   /** 频道 → 最后一次 ws.send 投递的时刻（终端打断之后有没有新消息进来） */
   private readonly deliveredAt = new Map<string, number>();
   /** `${channelId}\n${chatId}` → agent 往这个地址 reply 的时刻（最近几次） */
@@ -94,7 +94,7 @@ export class TurnCuts {
   noteDelivered(env: Envelope, channelId: string, typed = false, busy = true): void {
     const at = this.now();
     this.deliveredAt.set(channelId, at);
-    this.live.set(channelId, (this.live.get(channelId) ?? new Map()).set(env.meta.messageId, busy && !typed));
+    this.lastSent.set(channelId, { messageId: env.meta.messageId, idle: typed || !busy });
     const cut = this.cuts.get(channelId);
     if (cut && cut.byMessageId === env.meta.messageId && cut.deliveredAt === undefined) this.cuts.set(channelId, { ...cut, deliveredAt: at });
     if (isCutNotice(env)) return void this.noticePending.delete(channelId);
@@ -115,12 +115,15 @@ export class TurnCuts {
     return t && { ...t, agent: this.agentOf.get(channelId) };
   }
 
-  /** 这条其实没投进去（Codex 投递失败）：从送达记录里拿掉，返回上次回合结束之后还有几条送进去了——0 = 没有回合在跑 */
-  dropUndelivered(channelId: string, messageId: string): number {
+  /**
+   * 这条其实没投进去（Codex 投递失败）：从送达记录里拿掉。返回 true = 它是空闲时投的、之后没再投过别的，没投进去就确定没有回合在跑。
+   * 拿不准（投它时回合在跑、之后又投了别的）返回 false：不收尾，交给 30 分钟安全计时；空闲判错了（比如 queue 里的刚要开跑），
+   * jsonl-watcher 看到 done 之后的新活动会把 thinking 重新点亮
+   */
+  dropUndelivered(channelId: string, messageId: string): boolean {
     this.inbound.set(channelId, (this.inbound.get(channelId) ?? []).filter((x) => x.messageId !== messageId));
-    const live = this.live.get(channelId);
-    live?.delete(messageId);
-    return live?.size ?? 0;
+    const last = this.lastSent.get(channelId);
+    return !!last && last.messageId === messageId && last.idle;
   }
 
   /** 这个频道最后一次投递是给哪个 agent 的（送达记录里的那条被挤掉了也查得到） */
@@ -151,7 +154,7 @@ export class TurnCuts {
    * 不删的话叫停记录一直留在盘上，日后复用这个频道的新 agent 还会被当成「owner 叫停了」，Autopilot 不推进。
    */
   forget(channelId: string): void {
-    for (const m of [this.cuts, this.stops, this.inbound, this.agentOf, this.codexQueued, this.live, this.deliveredAt, this.keySentAt]) m.delete(channelId);
+    for (const m of [this.cuts, this.stops, this.inbound, this.agentOf, this.codexQueued, this.lastSent, this.deliveredAt, this.keySentAt]) m.delete(channelId);
     for (const s of [this.noticePending, this.codexTypeIn, this.codexPaused, this.codexCutSinceStop]) s.delete(channelId);
     for (const k of [...this.replies.keys()]) if (k.startsWith(`${channelId}\n`)) this.replies.delete(k);
   }
@@ -234,10 +237,6 @@ export class TurnCuts {
 
   /** 回合结束：该提醒就返回提醒的信封（押后队列投，只提醒一次），否则 null */
   onStop(channelId: string, event: string, agent: string): Envelope | null {
-    if (event === "Stop" || event === "StopFailure") {
-      const queued = [...(this.live.get(channelId) ?? [])].filter(([, q]) => q).map(([id]) => [id, false] as const);
-      this.live.set(channelId, new Map(queued));
-    }
     if (event === "Stop") {
       // 回合正常结束：Codex 的队列恢复了、排着的也会依次跑完（打断回报是 StopFailure，不算）；下一回合的消息从头记
       for (const m of [this.codexPaused, this.codexCutSinceStop]) m.delete(channelId);
