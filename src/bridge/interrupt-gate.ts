@@ -29,9 +29,10 @@ export const interruptGate = createInterruptGate({
   probe: probeTurnAt,
   wallWait: async (win) => !!(await windowWallWait(win)), // 抓不到屏：交给 probe 按老规矩判（它也抓不到就是 unknown，不发键）
   interrupt: async (win, runtime, ch, kind, wanted) => {
-    turnCuts.noteKeySent(ch, kind); // 先记：Codex 的打断回报 0.5 秒就到
-    if (controlFor(runtime, isAcpChannel(ch) ? "acp" : "tmux").abortVia === "extension") return extensionAbort(ch, wanted);
-    return interruptWindow(win, runtime, wanted);
+    const undo = turnCuts.noteKeySent(ch, kind); // 先记：Codex 的打断回报 0.5 秒就到
+    const send = () => (controlFor(runtime, isAcpChannel(ch) ? "acp" : "tmux").abortVia === "extension" ? extensionAbort(ch, wanted) : interruptWindow(win, runtime, wanted));
+    // 撤回（一个键都没发）要还原：不然几秒内真人在终端按的打断会被认成 bridge 发的键，owner 的「停」记不下
+    return send().catch((e: Error) => { if (e.name === "KeyWithdrawnError") undo(); throw e; });
   },
   allow: (ch, runtime, stop) => turnCuts.mayBridgeInterrupt(ch, runtime, stop),
   onPreempted: (agent, channelId) => {

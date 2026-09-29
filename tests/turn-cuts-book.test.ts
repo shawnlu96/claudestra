@@ -142,6 +142,14 @@ describe("终端里自己按的打断（P1-1 第二条）", () => {
     expect(b.get("ch")?.cause).toBe("terminal");
     expect(b.interruptHold("ch")).toBe("stopped");
   });
+  test("bridge 记了要发键、最后撤回没发（T13e r2）：还原，随后终端里真人的打断照样记成 owner 的停", async () => {
+    const { b, at, tick } = book();
+    b.noteKeySent("ch", "preempt")();
+    tick(400);
+    b.onEvent(interrupted(at()));
+    await flush();
+    expect(b.interruptHold("ch")).toBe("stopped");
+  });
   test("bridge 刚发过键 → 是自己的回声，不记", async () => {
     const { b, at, tick } = book();
     b.noteKeySent("ch", "preempt");

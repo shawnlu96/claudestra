@@ -167,9 +167,12 @@ export class TurnCuts {
     return this.stops.get(channelId)?.at;
   }
 
-  /** bridge 要发打断键了（发之前记：Codex 的打断回报 0.5 秒就到）。preempt = 后面紧跟着要投一条新消息 */
-  noteKeySent(channelId: string, kind: "preempt" | "manual"): void {
-    this.keySentAt.set(channelId, { at: this.now(), kind });
+  /** bridge 要发打断键了（发之前记：Codex 的打断回报 0.5 秒就到）。preempt = 后面紧跟着要投一条新消息。返回撤销：键最后没发（撤回）就还原 */
+  noteKeySent(channelId: string, kind: "preempt" | "manual"): () => void {
+    const prev = this.keySentAt.get(channelId);
+    const mine = { at: this.now(), kind };
+    this.keySentAt.set(channelId, mine);
+    return () => void (this.keySentAt.get(channelId) === mine && (prev ? this.keySentAt.set(channelId, prev) : this.keySentAt.delete(channelId)));
   }
 
   /** 记一次打断。被打断的回合在处理的是打断之前最后送达的那条（打断它的这条此刻还没送达） */
