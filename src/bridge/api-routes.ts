@@ -1359,7 +1359,7 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
       if (leftover) {
         const want = leftover.kind === "model" ? model : effort;
         if (!want || !switchPromptMatches(leftover, leftover.kind, want)) {
-          return apiJson(409, { ok: false, error: `会话停在「${promptTitle(leftover.kind)}」确认框上(切到 ${leftover.target}),与本次选择不符,请到终端或 Discord 按钮处理` });
+          return apiJson(409, { ok: false, error: `会话停在「${promptTitle(leftover.kind)}」确认框上(切到 ${leftover.target}),与本次选择不符,请到终端或网页终端里自己按` });
         }
         await pressSwitchConfirm(targetWindow, leftover);
         await Bun.sleep(800);
@@ -1389,9 +1389,9 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
         }
         const stuck = detectSwitchConfirmPrompt(r.pane);
         if (r.outcome === "foreign" && stuck) {
-          return `会话停在「${promptTitle(stuck.kind)}」确认框上(切到 ${stuck.target}),与本次选择不符,请到终端或 Discord 按钮处理`;
+          return `会话停在「${promptTitle(stuck.kind)}」确认框上(切到 ${stuck.target}),与本次选择不符,请到终端或网页终端里自己按`;
         }
-        if (stuck) return `切${label}的确认框没能自动确认,请到终端或 Discord 按钮处理`;
+        if (stuck) return `切${label}的确认框没能自动确认,请到终端或网页终端里自己按`;
         return null;
       };
       if (model) {
