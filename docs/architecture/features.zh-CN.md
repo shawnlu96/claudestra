@@ -15,6 +15,7 @@
 - **打断** — 人类消息打断在忙的 agent（Claude Code 和 Codex 发 Esc——CC 不用 C-c，免得停掉后台子 agent；Pi 插进当前回合），停字三种运行时都立即停；每次打断留一条记录，agent 会收到「砍在哪」的抬头和插话之后一次性的续做提醒——详见 [interrupts.md](./interrupts.md)。
 - **Agent 间通信** — `send_to_agent(target, text)` MCP 工具通过 Bridge 直接向另一个 agent 的上下文注入消息。目标在忙时消息落盘排队，`check_inbox` 可在回合中领取（租约 + 确认），答复按 (target, caller) 的每条请求推回——详见 [agent-messaging.md](./agent-messaging.md)。
 - **定时任务** — cron 表达式拉起临时 agent、执行 prompt、汇报、清理。
+- **批量管理（T35）** — 只给 owner：看每个会话是否在 low-priority 下运行（读 pane 状态栏，statusLine JSON 里没有这个字段）、「设成开 / 设成关」不盲切，以及 fan-out 动作（LP 开关、带保留清单的 `/compact`、`/save-compact`、开 LP 再压缩、自定义文本），每个 agent 各自回报结果；网页面板、`manager fleet`、`/api/v1/fleet/*`，详见 [fleet-ops.md](./fleet-ops.md)。
 - **额度闸（2026-09-28，[quota-wall.md](./quota-wall.md)）** — 本机所有 Claude Code agent 共用一个订阅账号，一个撞周额度 / 5 小时额度就是全部撞墙。bridge 此时进入整机唯一的「额度闸」：发往 Claude Code agent 的 agent 消息和 bridge 合成消息押后（人类消息照投），API 错误自动续跑暂停，只通知 owner 一次（#control + 网页顶部横幅）；恢复（到点 / 用重置卡后的「Limits reset」回显 / 只读用量探测 / 状态栏缓存 / `manager quota-wall clear`）时 bridge 对完整认得的撞墙菜单发一次 Esc、按序补投、续跑中断的 agent。Codex / Pi 不闸。以 API 错误结束的一轮不再算答复（send_to_agent 回程留着等真实答复）。
 - **Discord UI** — 按钮、下拉菜单、slash 命令（`/status`、`/screenshot`、`/interrupt`、`/cron`）。
 - **`reply()` 的交互组件** — 按钮行、单选下拉，以及 v2.14+ 的 `multiselect`：勾若干项一次提交。Discord 用原生 `max_values`（选完即交），web 端渲染成 checkbox + 提交按钮。两端回投同一种格式 `[select:<id>:<v1>,<v2>]`（值逗号分隔），agent 侧一套解析吃两端。选项之间不互斥时优先用多选，一个来回胜过好几轮。
