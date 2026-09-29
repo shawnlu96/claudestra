@@ -12,3 +12,10 @@ export const showWorkspaceSwitch = (on: boolean | null): boolean => on === true;
 
 /** /talk 该不该跳走：读到「关」才跳（还没读到时不跳，免得开着的人被弹回工作台） */
 export const talkRedirect = (on: boolean | null): "/chat" | null => (on === false ? "/chat" : null);
+
+/**
+ * 读回来的开关只对读它的那台机器有效：从开着 Chat 的 A 切到 B，B 的设置回来之前不能沿用 A 的 true（会先把 Chat 挂出来）。
+ * 记录的机器不是当前这台 = 还没读到（null）
+ */
+export const talkOnFor = (rec: { fp: string | null; on: boolean } | null, fp: string | null): boolean | null =>
+  rec && rec.fp === fp ? rec.on : null;
