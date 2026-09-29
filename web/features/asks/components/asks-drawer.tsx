@@ -4,7 +4,7 @@ import { createPortal } from "react-dom";
 import { useT } from "@/lib/i18n";
 import { isNativeShell } from "@/lib/native";
 import { useBackSwipe } from "@/lib/use-back-swipe";
-import { groupAsks } from "../asks-model";
+import { groupAsks, type WebAsk } from "../asks-model";
 import { asksStore, useAsks } from "../asks-store";
 import { AskCard } from "./ask-card";
 import { BackIcon, CloseIcon } from "./ask-icons";
@@ -18,7 +18,7 @@ const RECENT_PREVIEW = 5;
  * 手机上是一页 #asks（asks-store 的 enter / leave）：左上角「‹」、右滑、系统返回都是出栈。原生壳的右滑交给 WKWebView
  * 系统手势（JS 再退一次就是双重后退）；触摸事件截住不冒到会话壳，否则在这里左滑会把背后切到会话页。
  */
-export function AsksDrawer({ onOpenChat }: { onOpenChat: (agent: string) => void }) {
+export function AsksDrawer({ onOpenChat }: { onOpenChat: (ask: WebAsk) => void }) {
   const t = useT();
   const { asks, focus } = useAsks();
   const [now, setNow] = useState(() => Date.now());
