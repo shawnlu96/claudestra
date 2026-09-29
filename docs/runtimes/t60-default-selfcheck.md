@@ -47,3 +47,11 @@ Follow-up inspection also found that a new agent created with explicit
 `--transport tmux` needs the same sticky registry value as a manual rollback;
 the create path now writes it. A failed ACP launch in the sandbox cannot fall
 back to a real Codex TUI, and the sandbox command gate rejects that switch.
+
+An isolated bridge restart also exercised the automatic peer upgrade path:
+after removing `transport` from a sandbox Codex record, the restarted bridge
+restored `acp` with the same sessionId, and the API returned another stub
+reply. The sandbox and its temporary token were removed. A later audit found
+that a thrown restart subprocess error would have stopped migration before
+later agents; the migration now records that agent as failed, keeps its retry
+marker, and continues. A regression covers the sequence.

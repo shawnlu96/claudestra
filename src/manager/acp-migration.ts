@@ -60,8 +60,15 @@ export async function restartMigrated(
   targets: Map<string, string>, run: (name: string) => Promise<any>, patch: typeof patchRegistryAgent,
 ): Promise<{ restarted: string[]; fellBack: string[]; failed: string[] }> {
   const restarted: string[] = [], fellBack: string[] = [], failed: string[] = [];
+  const safeRun = async (name: string) => {
+    try { return await run(name); }
+    catch (e) {
+      console.error(`[migrate] ${name} 的 restart 子进程异常: ${String(e)}`);
+      return { ok: false, error: String(e) };
+    }
+  };
   for (const name of targets.keys()) {
-    let r = await run(name);
+    let r = await safeRun(name);
     let bad = r?.ok === false || (Array.isArray(r?.results) && r.results.some((x: { ok?: boolean }) => x.ok === false));
     if (bad && targets.get(name) === "acp" && !isSandbox()) {
       // 旧线程若被适配器拒绝，不能把升级前能用的 tmux 窗口留成死窗口；先回退，再记录待迁移供重试。
@@ -70,7 +77,7 @@ export async function restartMigrated(
         if (state.transport === "acp") { state.transport = "tmux"; state.acpPending = true; state.acpRestartFrom = "acp"; }
       });
       targets.set(name, "tmux");
-      r = await run(name);
+      r = await safeRun(name);
       bad = r?.ok === false || (Array.isArray(r?.results) && r.results.some((x: { ok?: boolean }) => x.ok === false));
       if (!bad) fellBack.push(name);
     }

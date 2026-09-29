@@ -91,6 +91,23 @@ test("自动迁移接旧线程失败会重起 tmux；两次都失败就保留待
   expect(agents.broken).toMatchObject({ transport: "tmux", acpPending: true, acpRestartPending: true, acpRestartFrom: "acp" });
 });
 
+test("一个 restart 子进程抛错不挡住后续 Codex 迁移，失败者保留重试标记", async () => {
+  const agents: Record<string, MigratingAgent> = {
+    broken: { runtime: "codex", transport: "acp", acpRestartPending: true },
+    good: { runtime: "codex", transport: "acp", acpRestartPending: true },
+  };
+  const calls: string[] = [];
+  const result = await restartMigrated(new Map([["broken", "acp"], ["good", "acp"]]), async (name) => {
+    calls.push(name);
+    if (name === "broken") throw new Error("spawn failed");
+    return { ok: true };
+  }, async (name, mutate) => { mutate(agents[name] as any); return true; });
+  expect(calls).toEqual(["broken", "broken", "good"]);
+  expect(result).toEqual({ restarted: ["good"], fellBack: [], failed: ["broken"] });
+  expect(agents.broken).toMatchObject({ transport: "tmux", acpPending: true, acpRestartPending: true });
+  expect(agents.good.acpRestartPending).toBeUndefined();
+});
+
 test("旧记录缺 transport 时 owner 选 tmux 会落成显式值，后续迁移不覆盖", () => {
   const old: MigratingAgent = { runtime: "codex", status: "active" };
   expect(persistManualTmux(old)).toBe(true);
