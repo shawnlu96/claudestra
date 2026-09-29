@@ -57,9 +57,9 @@ async function bridgeProbe() {
     const before = resumeStillWanted(oldPlan as never);
     const asks: unknown[] = [];
     const unsubAsk = onAsk((ask) => { if (ask.fromChannelId === a.channelId) asks.push(ask); });
-    await onAcpFrame({ type: "acp_entries", channelId: a.channelId, entries: [entry] }, ws, {} as never);
+    await onAcpFrame({ type: "acp_entries", channelId: a.channelId, hostId: a.name, firstSeq: 1, entries: [entry] }, ws, {} as never);
     // Also prove explicit false wins when the body itself exactly matches the legacy quota regex.
-    if (i === 1) await onAcpFrame({ type: "acp_entries", channelId: a.channelId,
+    if (i === 1) await onAcpFrame({ type: "acp_entries", channelId: a.channelId, hostId: a.name, firstSeq: 2,
       entries: [{ ...entry, message: { content: [{ type: "text", text: message }] } }] }, ws, {} as never);
     await onAcpFrame({ type: "acp_failure", channelId: a.channelId, failure, configOptions }, ws, {} as never);
     // The injected registry is promise-based; drain its continuations before inspecting the real ledger.

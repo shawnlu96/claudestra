@@ -77,18 +77,18 @@ describe("流式条目：没确认就不算送到（r4 P1-2）", () => {
     u.flushing("final answer");
     await u.h.reportStop(STOP);
     expect(u.events).not.toContain("Stop");
-    expect(u.stops).toEqual([{ channelId: "acp-unit", event: "StopFailure", stopHookActive: false }]);
+    expect(u.stops).toEqual([{ channelId: "acp-unit", event: "StopFailure", stopHookActive: false, acpDeliveryWarning: true }]);
     expect(u.events.filter((e) => e === "rejected:1:final answer").length).toBeGreaterThan(0);
   });
 
-  test("bridge 重启：断线期间的条目留着，重新登记后按原序号接着送、确认后才报 Stop；回包丢了按同一序号重送", async () => {
-    const u = unitHost((_f, n) => (n === 2 ? "throw" : true));
+  test("bridge 重启：断线期间的条目重送；旧 watcher 已失去已确认的正文，保守报可能丢失", async () => {
+    const u = unitHost(() => true);
     u.link().onRegistered();
     u.h.pushEntries([text("a")]);
     await new Promise((r) => setTimeout(r, 20));
-    u.link().onDown("bridge 重启");
     u.setUp(false);
     u.h.pushEntries([text("b")]);
+    u.link().onDown("bridge 重启");
     u.flushing("c");
     const stop = u.h.reportStop(STOP);
     await new Promise((r) => setTimeout(r, 30));
@@ -96,7 +96,17 @@ describe("流式条目：没确认就不算送到（r4 P1-2）", () => {
     u.setUp(true);
     u.link().onRegistered();
     await stop;
-    expect(u.events).toEqual(["accepted:1:a", "rejected:2:b,c", "accepted:2:b,c", "Stop"]);
+    expect(u.events).toEqual(["accepted:1:a", "accepted:2:b,c", "StopFailure"]);
+    expect(u.stops[0]).toMatchObject({ acpDeliveryWarning: true });
+  });
+
+  test("队列溢出：即使剩余条目后来都确认了，这轮也按可能丢失报 StopFailure", async () => {
+    const u = unitHost(() => true);
+    u.h.pushEntries(Array.from({ length: 5_001 }, (_, i) => text(String(i))));
+    u.link().onRegistered();
+    await u.h.reportStop(STOP);
+    expect(u.events).not.toContain("Stop");
+    expect(u.stops).toEqual([{ channelId: "acp-unit", event: "StopFailure", stopHookActive: false, acpDeliveryWarning: true }]);
   });
 });
 
@@ -155,5 +165,17 @@ describe("权限请求：按 permId、宿主确认还在等（r4 P1-1 / P2）", 
     expect(again[1].permId).toBe(first.permId);
     call(u, "k4", first.permId);
     expect(await answer).toBe("allow_once");
+  });
+
+  test("打断立刻撤权限卡：旧批准即使在 StopFailure 之前到也不能落地", async () => {
+    const u = unitHost(() => true);
+    u.link().onRegistered();
+    const answer = u.h.askPermission(card);
+    const { permId } = u.sent.find((f) => f.type === "acp_permission");
+    u.link().onFrame({ type: "abort", id: "cut-1" });
+    expect(await answer).toBeNull();
+    expect(u.sent.find((f) => f.permId === permId && f.gone)).toMatchObject({ gone: "回合已打断" });
+    call(u, "stale-cut", permId);
+    expect(result(u, "stale-cut")).toMatchObject({ ok: false });
   });
 });

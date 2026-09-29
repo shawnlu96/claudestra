@@ -2663,7 +2663,7 @@ function sameWsChannels(channelId: string): string[] {
 
 async function handleHookRequest(req: Request): Promise<Response> {
   try {
-    const body = await req.json() as { channelId: string; event: string; stopHookActive?: boolean; interrupt?: boolean };
+    const body = await req.json() as { channelId: string; event: string; stopHookActive?: boolean; interrupt?: boolean; acpDeliveryWarning?: boolean };
     const { channelId, event } = body;
     if (!channelId || !event) {
       return new Response("Missing channelId or event", { status: 400 });
@@ -2698,10 +2698,10 @@ async function handleHookRequest(req: Request): Promise<Response> {
       }
     }
 
-    // 所有 hook 事件都停 typing / 清 safety timer
     // 兼容旧版 hook 发的 "stop"
     if (event === "Stop" || event === "StopFailure" || event === "Notification" || event === "stop") {
       console.log(`🏁 Hook 收到 ${event}: channel=${channelId}`);
+      if (body.acpDeliveryWarning) await (await import("./bridge/acp-delivery-warning.js")).notifyAcpDeliveryLoss(channelId, deliver);
       // v2.4.25+ 对话完成 → 刷用量看板（防抖合并，内部惰性缓存 /status）
       if (event === "Stop" || event === "StopFailure" || event === "stop") {
         updateStatsDashboard(discord);
@@ -2912,7 +2912,7 @@ async function handleHookRequest(req: Request): Promise<Response> {
       // v2.4.22+ 去掉 interrupt（活干完了），但**保留 focus + screenshot 按钮** ——
       // 这条消息永远在频道底部附近，用户随手能点跳 tab / 截图，不用翻 pin 或打命令。
       for (const cid of channelsToClear) {
-        await finishStatusMessage(discord, cid, t("✅ 完成", "✅ Done"), agentActionButtons(cid, false));
+        await finishStatusMessage(discord, cid, body.acpDeliveryWarning ? "⚠️ 可能丢了条目" : t("✅ 完成", "✅ Done"), agentActionButtons(cid, false));
       }
 
       // 发完成通知 @ user（仅 Stop/StopFailure）。watcher 已经把 agent 的消息推

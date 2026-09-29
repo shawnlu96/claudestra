@@ -79,6 +79,7 @@ export class AcpHost {
   private outbox: { seq: number; entry: Record<string, unknown> }[] = [];
   private entrySeq = 0;
   private droppedEntries = 0;
+  private deliveryUncertain = false;
   private pumping = false;
   private retryTimer: ReturnType<typeof setTimeout> | null = null;
   private retries = 0;
@@ -101,7 +102,11 @@ export class AcpHost {
       }),
       onFrame: (m) => this.onFrame(m),
       onRegistered: () => ((this.registered = true), deps.log("已在 bridge 登记"), this.resync(), void this.maybeReady()),
-      onDown: (why) => ((this.registered = false), this.proxy.failInFlight(`宿主和 bridge 的连接断了（${why}）`)),
+      onDown: (why) => {
+        if (this.loop.busy || this.outbox.length) this.deliveryUncertain = true; // bridge 重启可能丢掉已经确认、但还没 drain 的正文
+        this.registered = false;
+        this.proxy.failInFlight(`宿主和 bridge 的连接断了（${why}）`);
+      },
       log: deps.log,
     });
     this.loop = new AcpTurnLoop({
@@ -265,16 +270,19 @@ export class AcpHost {
   }
 
   private async reportStop(r: StopReport): Promise<{ block?: boolean; reason?: string }> {
+    for (const id of [...this.permits.keys()]) this.endPermission(id, null, "回合已结束");
     const rest = this.translator.flush();
     if (rest.length) this.pushEntries(rest);
     // 这一轮的条目 bridge 全部确认处理完才报 Stop：Stop 的 drain 要看到收尾文字（ws 与 HTTP 两条路没有先后保证）。
     // 等不到确认、或 bridge 太久不在丢过条目：不能当成功报，按 StopFailure 报；没确认的留在队列里，连上了照样补送
     const ok = await this.drained(this.timing("drainMs"));
     const lost = this.droppedEntries;
+    const uncertain = this.deliveryUncertain;
     this.droppedEntries = 0;
-    if (ok && !lost) return this.deps.postHook({ channelId: this.cfg.channelId, ...r });
-    this.deps.log(ok ? `这一轮 bridge 不在时丢了 ${lost} 条流式条目：按 StopFailure 报` : "回合末的条目等不到 bridge 确认：按 StopFailure 报");
-    return this.deps.postHook({ channelId: this.cfg.channelId, ...r, event: "StopFailure" });
+    this.deliveryUncertain = false;
+    if (ok && !lost && !uncertain) return this.deps.postHook({ channelId: this.cfg.channelId, ...r });
+    this.deps.log(!ok ? "回合末的条目等不到 bridge 确认：按 StopFailure 报" : `bridge 重连后这轮的条目可能缺失（溢出 ${lost} 条）：按 StopFailure 报`);
+    return this.deps.postHook({ channelId: this.cfg.channelId, ...r, event: "StopFailure", acpDeliveryWarning: true });
   }
 
   private fail(f: AcpFailure): void {
@@ -330,6 +338,7 @@ export class AcpHost {
   private abort(id: string): void {
     const busy = this.loop.busy && !!this.session;
     if (busy) this.session!.cancel();
+    for (const permId of [...this.permits.keys()]) this.endPermission(permId, null, "回合已打断");
     this.link.send({ type: "abort_ack", id, result: busy ? "aborted" : "idle", voided: [], inEditor: 0 });
     this.deps.log(busy ? "收到停止：已调 session/cancel" : "收到停止：当前空闲");
   }

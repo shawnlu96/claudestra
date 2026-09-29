@@ -23,7 +23,7 @@ type Socket = { send(data: string): void };
 type Who = { principal?: string; device?: string };
 type Answer = { status: number; body: Record<string, unknown> };
 type Perm = { gen: string; permId: string; ws: Socket; card: PermissionCard; claimed?: true };
-type Quota = { gen: string; message: string; choices: QuotaChoice[]; claimed?: true };
+type Quota = { gen: string; failureKey: string; message: string; choices: QuotaChoice[]; claimed?: true };
 
 const configs = new Map<string, ConfigOption[]>();
 const quotaCards = new Map<string, Quota>();
@@ -32,6 +32,8 @@ const authCards = new Set<string>();
 const permQueues = new Map<string, Perm[]>();
 /** 频道 → 已处理到的条目序号（按宿主进程区分：宿主重起序号从 1 开始） */
 const entrySeqs = new Map<string, { hostId: string; last: number }>();
+/** 同频道的批次处理完才看下一批的序号；ws 消息处理器本身不会等上一个 async 回调。 */
+const entryTurns = new Map<string, Promise<void>>();
 const calls = new Map<string, { resolve: (r: { ok: boolean; error?: string }) => void; timer: ReturnType<typeof setTimeout> }>();
 let nextCall = 0;
 const CALL_TIMEOUT_MS = 15_000;
@@ -60,7 +62,12 @@ export async function onAcpFrame(msg: Record<string, any>, ws: Socket, discord: 
   if (!channelId || extensionSocketOf(channelId) !== ws) return void console.warn(`⚠️ 丢掉一帧 ${msg.type}：不是频道 ${channelId || "?"} 当前登记的宿主发的`);
   switch (msg.type) {
     case "acp_entries": {
-      const ok = await acceptEntries(channelId, msg, discord);
+      const previous = entryTurns.get(channelId) ?? Promise.resolve();
+      const current = previous.then(() => extensionSocketOf(channelId) === ws && acceptEntries(channelId, msg, discord));
+      const settled = current.then(() => {}, () => {});
+      entryTurns.set(channelId, settled);
+      void settled.then(() => { if (entryTurns.get(channelId) === settled) entryTurns.delete(channelId); });
+      const ok = await current;
       if (typeof msg.requestId === "string") ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, result: ok }));
       return;
     }
@@ -86,9 +93,14 @@ async function acceptEntries(channelId: string, msg: Record<string, any>, discor
   const entries: object[] = Array.isArray(msg.entries) ? msg.entries : [];
   const hostId = typeof msg.hostId === "string" ? msg.hostId : "";
   const first = Number(msg.firstSeq);
-  if (!hostId || !Number.isInteger(first)) return pushEntries(channelId, entries, discord);
+  if (!hostId || !Number.isInteger(first) || first < 1 || !entries.length) return false;
   const seen = entrySeqs.get(channelId);
-  const last = seen?.hostId === hostId ? seen.last : 0;
+  // bridge 重启后去重表是空的，但仍在跑的宿主会从未确认的较大序号接着送；这一轮由宿主标记为不确定收尾。
+  const last = seen?.hostId === hostId ? seen.last : first - 1;
+  if (first > last + 1) {
+    console.warn(`⚠️ ACP 条目缺口：${channelId} 宿主 ${hostId} 已收至 ${last}，重送从 ${first} 开始；拒绝确认`);
+    return false;
+  }
   const fresh = entries.slice(Math.max(0, last - first + 1));
   if (!fresh.length) return true;
   const ok = await pushEntries(channelId, fresh, discord);
@@ -103,8 +115,8 @@ function onFailure(channelId: string, f: AcpFailure, rawConfig: unknown): void {
     const choices = quotaCardChoices(opts.length ? opts : acpConfigOf(channelId));
     // 同一个失败又报一次（选项、原文都没变、卡还没人答）：沿用这张卡和它的代际；否则是新卡，旧卡的按钮作废
     const prev = quotaCards.get(channelId);
-    const same = prev && !prev.claimed && prev.message === f.message && JSON.stringify(prev.choices) === JSON.stringify(choices);
-    const q: Quota = same ? prev : { gen: newGen(), message: f.message, choices };
+    const same = prev && !prev.claimed && prev.failureKey === f.key && prev.message === f.message && JSON.stringify(prev.choices) === JSON.stringify(choices);
+    const q: Quota = same ? prev : { gen: newGen(), failureKey: f.key, message: f.message, choices };
     quotaCards.set(channelId, q);
     const buttons = choices.map((c, i) => ({ id: `${QUOTA_PREFIX}${q.gen}_${i}`, label: c.label, style: c.value === null ? "secondary" : "primary" }));
     void openRuntimeAsk({
@@ -183,6 +195,29 @@ function acpCall(channelId: string, body: Record<string, unknown>): Promise<{ ok
 export async function answerAcpResponse(channelId: string, body: any, principal: { id: string; credential?: string }): Promise<Response> {
   const r = await answerAcp(channelId, String(body?.action || ""), { principal: principal.id, device: principal.credential });
   return apiJson(r.status, r.body);
+}
+
+/** Discord 的原按钮直接走同一条代际 / 宿主确认闸；不能转成一条发给 agent 的普通消息。 */
+export async function answerAcpDiscord(
+  channelId: string, action: string, userId: string,
+  ui: { edit(content: string): Promise<unknown>; whisper(content: string): Promise<unknown> }, original: string,
+): Promise<Answer> {
+  const r = await answerAcp(channelId, action, { principal: `discord:${userId}` });
+  if (r.status === 200) await ui.edit(`${original}\n\n✅ 已处理`);
+  else await ui.whisper(String(r.body.error ?? "这张卡已经不能作答了"));
+  return r;
+}
+
+/** discord-interactions.ts 只留一行调用；UI 回执也在这里完成，避免旧按钮落进普通投递。 */
+export async function answerAcpDiscordInteraction(i: {
+  customId: string; user: { id: string }; message?: { content?: string } | null;
+  editReply(o: { content: string; components: never[] }): Promise<unknown>;
+  followUp(o: { content: string; ephemeral: boolean }): Promise<unknown>;
+}, channelId: string): Promise<void> {
+  await answerAcpDiscord(channelId, i.customId, i.user.id, {
+    edit: (content) => i.editReply({ content, components: [] }),
+    whisper: (content) => i.followUp({ content, ephemeral: true }),
+  }, i.message?.content || "");
 }
 
 /** 卡上的按钮（id 里带卡的代际）：返回 HTTP 状态 + 响应体 */

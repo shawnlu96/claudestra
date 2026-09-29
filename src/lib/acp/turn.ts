@@ -20,6 +20,7 @@ export interface StopReport {
   event: "Stop" | "StopFailure";
   stopHookActive: boolean;
   interrupt?: boolean;
+  acpDeliveryWarning?: true;
 }
 
 /**
