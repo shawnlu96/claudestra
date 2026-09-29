@@ -9,7 +9,8 @@
  *   escalate               → PM
  * 硬规则（review 出 P0，或第 HARD_ROUND 轮还不通过）写死在 autoEscalations：bridge 据此调 `ledger escalate --auto` 记一条升级，
  * 不靠调度助理判断；那条 escalate 事件下一轮照上面的规则通知 PM。
- * 收件人就是写这条事件的人时不发；没开班子的项目、开班子之前的事件一律不管；该发却找不到 PM 时经 ctx.warn 留日志。
+ * 收件人就是写这条事件的人时不发；没开班子的项目、开班子之前的事件一律不管（peer 写卡除外：lib/ledger-wake.ts 叫本机接手人）；
+ * 该发却找不到 PM 时经 ctx.warn 留日志。
  * 标题行与【升级】这类判定词只由代码按事件类型 / verdict 生成；台账里的自由文本（交付说明、升级原因、审查要点）只进固定标题的
  * 引用框（quoteExternal 单行引用），证据 / 结论路径同样进引用框：通知以 bridge 身份送达，不能让原文伪造指令。
  */
@@ -17,11 +18,13 @@ import { nextAfterReview, pmOf, type SpecPolicy } from "./ledger-handler.js";
 import { pathLike, pathQuote, quoteExternal, refLike } from "./quote-text.js";
 import type { LedgerEvent, LedgerTask, Stage } from "./ledger-stages.js";
 import type { TeamConfig } from "./ledger-team-config.js";
+import { peerWriteWake } from "./ledger-wake.js";
 
 /** 同一任务审到第几轮还不通过就自动升级给 PM（07c 第 1 节） */
 const HARD_ROUND = 3;
 
-type NoticeKind = "deliver" | "review-fix" | "review-pm" | "review-next" | "escalate";
+/** peer-write：peer 写卡后叫本机接手人（lib/ledger-wake.ts），班子规则对那条没发时才有 */
+type NoticeKind = "deliver" | "review-fix" | "review-pm" | "review-next" | "escalate" | "peer-write";
 
 export interface RouteNotice {
   seq: number;
@@ -159,7 +162,9 @@ function draftsFor(e: LedgerEvent, batch: readonly LedgerEvent[], ctx: RouteCtx)
 export function routeEvents(batch: readonly LedgerEvent[], ctx: RouteCtx): RouteNotice[] {
   const out: RouteNotice[] = [];
   for (const e of batch) {
-    for (const d of draftsFor(e, batch, ctx)) {
+    const drafts = draftsFor(e, batch, ctx);
+    const wake = drafts.length ? null : peerWriteWake(e, ctx);
+    for (const d of wake ? [{ ...wake, kind: "peer-write" as const }] : drafts) {
       if (d.to === e.actor) continue;
       out.push({ ...d, seq: e.seq, project: e.project, taskId: e.target, messageId: `ledger-${e.seq}-${d.to}` });
     }

@@ -9,6 +9,7 @@
  * 不抢占：目标在回合中 / 压缩中 / 不在线就进押后队列（落盘，回合结束或连上后再投），和 agent→agent 消息同一条路；
  * 消息来源（回合结束 @ 不 @ owner）只在真正送达时才标。
  * 硬规则（P0、第 3 轮不通过）：用 runManager 调 `ledger escalate --auto` 由 CLI 记账（dedup 按 review 的 seq），PM 下一轮经 escalate 收到。
+ * 同一批里还有双向唤醒（lib/ledger-wake.ts）：本机推到 peer 那一步 → 发给 peer；审查结论 → 贴 PR（出站在 ledger-wake-out.ts）。
  */
 import type { ServerWebSocket } from "bun";
 import { LedgerReader } from "../lib/ledger-read.js";
@@ -19,6 +20,9 @@ import { readRegistryAgentsSync } from "../lib/registry.js";
 import { readJsonStateSync, writeJsonAtomicSync } from "../lib/state-file.js";
 import { runManagerProcess } from "../lib/run-manager.js";
 import { autoEscalations, routeEvents, type AutoEscalation, type RouteCtx, type RouteNotice } from "../lib/team-route.js";
+import { peerWakes, prComments, type PeerWake, type PrComment } from "../lib/ledger-wake.js";
+import { stepsOf } from "../lib/ledger-steps.js";
+import { postPrComment, sendPeerWake } from "./ledger-wake-out.js";
 import { BUN_PATH, ENV_WITH_BUN, MANAGER_PATH } from "./config.js";
 import { onHeldDelivered } from "./held-flush.js";
 import { newThreadId, type Delivery, type Envelope } from "./router.js";
@@ -56,6 +60,10 @@ export interface TickerDeps {
   send(n: RouteNotice, channelId: string): Promise<string>;
   /** 记一条硬规则升级（CLI 写台账）；失败返回原因 */
   escalate(a: AutoEscalation): Promise<string | null>;
+  /** 本机推到 peer 那一步时发给 peer（lib/ledger-wake.ts）；不给 = 不发 */
+  sendPeer?(w: PeerWake): Promise<string>;
+  /** 审查结论贴 PR；不给 = 不贴 */
+  postPr?(c: PrComment): Promise<string>;
   log(msg: string): void;
 }
 
@@ -96,6 +104,17 @@ async function sendAll(d: TickerDeps, notices: RouteNotice[]): Promise<void> {
       d.log(`📮 ${what}：${await d.send(n, ch)}`);
     } catch (e) {
       d.log(`⚠️ 班子路由：${what}投递出错，这一条没投：${(e as Error).message}`);
+    }
+  }
+}
+
+/** peer 唤醒、贴 PR：逐条发，一条出错不连累别的，结果进日志 */
+async function outEach<T>(d: TickerDeps, list: T[], what: (x: T) => string, send: (x: T) => Promise<string>): Promise<void> {
+  for (const x of list) {
+    try {
+      d.log(`📮 ${what(x)}：${await send(x)}`);
+    } catch (e) {
+      d.log(`⚠️ 班子路由：${what(x)}出错，这一条没发：${(e as Error).message}`);
     }
   }
 }
@@ -151,9 +170,13 @@ export function teamRouterTicker(d: TickerDeps): () => Promise<void> {
       };
       const notices = routeEvents(batch, ctx);
       const escalations = autoEscalations(batch, ctx);
+      const wakes = d.sendPeer ? peerWakes(batch, { ...ctx, steps: (t) => stepsOf(db, t) }) : [];
+      const comments = d.postPr ? prComments(batch, ctx) : [];
       writeJsonAtomicSync(d.cursorPath, { seq: batch.at(-1)?.seq ?? cursor, file });
       await escalateAll(d, escalations);
       await sendAll(d, notices);
+      if (d.sendPeer) await outEach(d, wakes, (w) => `${w.taskId} 唤醒 peer ${w.peer}/${w.agent}（seq ${w.seq}）`, d.sendPeer);
+      if (d.postPr) await outEach(d, comments, (c) => `${c.taskId} 审查结论贴 PR（seq ${c.seq}）`, d.postPr);
       if (failing) d.log("📮 班子路由恢复");
       failing = false;
     } catch (e) {
@@ -214,6 +237,8 @@ export function initTeamRouter(deps: TeamRouterDeps): void {
     cursorPath: CURSOR_PATH,
     channelOf: (agent) => readRegistryAgentsSync().find((a) => a.name === agent && a.status === "active")?.channelId ?? null,
     send: makeSender(deps),
+    sendPeer: sendPeerWake,
+    postPr: (c) => postPrComment(c),
     escalate: async (a) => {
       const args = ["ledger", "escalate", a.taskId, "--reason", a.reason, "--auto", "--dedup", a.dedup];
       const r = await runManagerProcess(args, { bunPath: BUN_PATH, managerPath: MANAGER_PATH, env: ENV_WITH_BUN, timeoutMs: 30_000 }).catch((e: Error) => ({ ok: false, error: e.message }));
