@@ -66,7 +66,7 @@ function fakeIO(screens: string[]) {
   let i = 0;
   const io: TypeInIO = {
     capture: async () => screens[Math.min(i++, screens.length - 1)]!,
-    paste: async () => void keys.push("paste"),
+    paste: async () => (keys.push("paste"), true),
     enter: async () => void keys.push("Enter"),
     clear: async () => void keys.push("C-u"),
     sleep: async () => {},
@@ -254,5 +254,81 @@ describe("复审 P2：押住的顺序、误判、第二道闸退回", () => {
     expect((q.get("c9") ?? []).map((i) => i.env.meta.messageId)).toEqual(["L"]);
     onCodexTypeInFailed({ channelId: "c9", menu: true, messageId: "m7" }, q, cuts);
     expect((q.get("c9") ?? []).map((i) => i.env.meta.messageId)).toEqual(["m7", "L"]);
+  });
+});
+
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { testChildEnv } from "./test-env.ts";
+
+describe("复验 P1：最后一次菜单检查紧贴真正发送，中间没有等待（真 tmuxSendLine / ownPaneIO，假 tmux）", () => {
+  const home = mkdtempSync(join(tmpdir(), "t63-send-"));
+  const bin = join(home, "bin");
+  afterAll(() => rmSync(home, { recursive: true, force: true }));
+  beforeAll(() => {
+    mkdirSync(bin);
+    mkdirSync(join(home, "state"));
+    mkdirSync(join(home, "rt"));
+    writeFileSync(join(home, "state", "registry.json"), JSON.stringify({ socket: "s", agents: { "agent-c": { runtime: "codex", channelId: "c1", status: "active" } } }));
+    writeFileSync(join(home, "menu.txt"), MENU);
+    writeFileSync(join(home, "composer.txt"), COMPOSER);
+    // 假 tmux：每条命令记一行；命令里带 FLIP_ON 的那一步起画面换成菜单（模拟「等的时候菜单弹出来」）
+    writeFileSync(join(bin, "tmux"), [
+      "#!/bin/sh",
+      `d='${home}'`,
+      `printf '%s\\n' "$*" >> "$d/calls.log"`,
+      `case " $* " in *" $FLIP_ON "*) : > "$d/menu" ;; esac`,
+      `case " $* " in`,
+      `  *" capture-pane "*) if [ -f "$d/menu" ]; then cat "$d/menu.txt"; else cat "$d/composer.txt"; fi ;;`,
+      `  *"#{window_id}"*) echo @7 ;;`,
+      `  *"#{pane_in_mode}"*) echo 0 ;;`,
+      "esac",
+    ].join("\n"), { mode: 0o755 });
+  });
+  // 子进程里跑真的 tmuxSendLine、真的 ownPaneIO + typeIntoCodex（生产里的全部等待都在）：路径在 import 时就落进临时目录，也不改测试进程的 PATH
+  const lib = join(import.meta.dir, "..", "src", "lib");
+  const script = (mode: "line" | "paste") => mode === "line"
+    ? `const { tmuxSendLine } = await import(${JSON.stringify(join(lib, "tmux-helper.ts"))});
+       console.log(JSON.stringify(await tmuxSendLine("master:=agent-c", "/clear").then(() => "sent", (e) => "blocked:" + e.name)));`
+    : `const { TMUX_SOCK } = await import(${JSON.stringify(join(lib, "tmux-helper.ts"))});
+       const { ownPaneIO, typeIntoCodex } = await import(${JSON.stringify(join(lib, "codex-tui-submit.ts"))});
+       console.log(JSON.stringify(await typeIntoCodex(ownPaneIO({ TMUX_PANE: "%5", TMUX: TMUX_SOCK + ",1,0" }), "<channel>hi</channel>")));`;
+  const run = (mode: "line" | "paste", flipOn: string) => {
+    rmSync(join(home, "menu"), { force: true });
+    writeFileSync(join(home, "calls.log"), "");
+    const p = Bun.spawnSync([process.execPath, "-e", script(mode)], {
+      env: testChildEnv({
+        PATH: `${bin}:/usr/bin:/bin`, HOME: home, TMPDIR: home, FLIP_ON: flipOn,
+        CLAUDESTRA_STATE_DIR: join(home, "state"), CLAUDESTRA_RUNTIME_DIR: join(home, "rt"),
+      }),
+      stdout: "pipe", stderr: "pipe",
+    });
+    const out = p.stdout.toString().trim().split("\n").pop() ?? "";
+    if (p.exitCode !== 0 || !out) throw new Error(`runner 失败：${p.stderr.toString().slice(-800)}`);
+    const calls = readFileSync(join(home, "calls.log"), "utf8").trim().split("\n").map((l) => l.replace(/^-f \/dev\/null -S \S+ /, ""));
+    return { result: JSON.parse(out), calls };
+  };
+
+  test("tmuxSendLine：查窗口 id（记程序敲键要用）的等待里菜单弹出来 → 文字和回车都不发", () => {
+    const { result, calls } = run("line", "#{window_id}");
+    expect(result).toBe("blocked:KeysBlockedError");
+    expect(calls.filter((c) => c.startsWith("send-keys"))).toEqual([]);
+    // 顺序：先等完查窗口 id，再抓屏判定
+    expect(calls.findIndex((c) => c.includes("#{window_id}"))).toBeLessThan(calls.findIndex((c) => c.startsWith("capture-pane")));
+  });
+
+  test("ownPaneIO.paste：set-buffer 的等待里菜单弹出来 → 不 paste-buffer，报「没发 / menu」（不是「粘了、结果未知」）", () => {
+    const { result, calls } = run("paste", "set-buffer");
+    expect(result).toEqual({ ok: false, why: "Codex 停在选择菜单（粘贴前）", menu: true });
+    expect(calls.filter((c) => /^(paste-buffer|send-keys)/.test(c))).toEqual([]);
+    expect(calls.slice(-3).map((c) => c.split(" ")[0])).toEqual(["set-buffer", "capture-pane", "delete-buffer"]);
+  });
+
+  test("对照：一直没有菜单 → 照常发字、回车、粘贴", () => {
+    const line = run("line", "never");
+    expect(line.result).toBe("sent");
+    expect(line.calls.filter((c) => c.startsWith("send-keys"))).toEqual(["send-keys -t master:=agent-c -l -- /clear", "send-keys -t master:=agent-c Enter"]);
+    expect(run("paste", "never").calls.some((c) => c.startsWith("paste-buffer"))).toBe(true);
   });
 });

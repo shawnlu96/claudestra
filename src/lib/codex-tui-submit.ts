@@ -38,8 +38,8 @@ export function composerState(ansiPane: string): ComposerState {
 export interface TypeInIO {
   /** capture-pane -e（带颜色序列）的画面 */
   capture(): Promise<string>;
-  /** bracketed paste：多行、引号、$、反引号原样进输入框，不会被当成按键 */
-  paste(text: string): Promise<void>;
+  /** bracketed paste：多行、引号、$、反引号原样进输入框，不会被当成按键。false = 粘贴前最后一查看到菜单，一个字没进窗口 */
+  paste(text: string): Promise<boolean>;
   enter(): Promise<void>;
   /** 清空输入框（Ctrl+U） */
   clear(): Promise<void>;
@@ -76,7 +76,7 @@ export async function typeIntoCodex(io: TypeInIO, raw: string): Promise<TypeInRe
   if (codexMenuShown(first)) return { ok: false, why: "Codex 停在选择菜单", menu: true };
   const before = composerState(first);
   if (before !== "empty") return { ok: false, why: `输入框状态 ${before}` };
-  await io.paste(text);
+  if (!(await io.paste(text))) return { ok: false, why: "Codex 停在选择菜单（粘贴前）", menu: true }; // 没发：同上交回 bridge 押住
   try {
     await io.sleep(SETTLE_MS);
     const shot = await io.capture();
@@ -122,12 +122,19 @@ export function ownPaneIO(env: NodeJS.ProcessEnv = process.env): TypeInIO | { er
   };
   if (!sock || real(sock) !== real(TMUX_SOCK)) return { error: `pane 不在 Claudestra 的 tmux socket 上（${sock || "无 TMUX"}）` };
   const buf = `claudestra-typein-${process.pid}`;
+  const capture = () => tmuxRawStrict(["capture-pane", "-t", pane, "-p", "-e", "-J", "-S", "-40"]);
   return {
-    capture: () => tmuxRawStrict(["capture-pane", "-t", pane, "-p", "-e", "-J", "-S", "-40"]),
+    capture,
     paste: async (text) => {
       await ensurePaneInteractive(pane);
       await tmuxRawStrict(["set-buffer", "-b", buf, "--", text]);
+      // 上面两步都要等，等的时候菜单可能弹出来：最后一查紧贴 paste-buffer，中间不再有等待（T63）
+      if (codexMenuShown(await capture())) {
+        await tmuxRawStrict(["delete-buffer", "-b", buf]).catch(() => ""); // 删不掉只是留一个下次同名覆盖的缓冲区，窗口里什么都没进
+        return false;
+      }
       await tmuxRawStrict(["paste-buffer", "-p", "-d", "-b", buf, "-t", pane]);
+      return true;
     },
     enter: async () => void (await tmuxRawStrict(["send-keys", "-t", pane, "Enter"])),
     clear: async () => void (await tmuxRawStrict(["send-keys", "-t", pane, "C-u"])),
