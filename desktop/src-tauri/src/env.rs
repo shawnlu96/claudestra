@@ -62,25 +62,41 @@ fn drain<R: Read + Send + 'static>(r: Option<R>) -> std::thread::JoinHandle<Stri
     })
 }
 
+/// Why a run produced no exit status. The split matters to restart: a child that never started
+/// kicked nothing, while one that timed out may have done part of its work.
+#[derive(Debug)]
+pub enum RunError {
+    NotStarted(String),
+    Started(String),
+}
+
+impl From<RunError> for String {
+    fn from(e: RunError) -> String {
+        match e {
+            RunError::NotStarted(m) | RunError::Started(m) => m,
+        }
+    }
+}
+
 /// Run a command with a deadline; returns (exit ok, stdout, stderr). A hung child is killed.
 /// Output is drained on threads so a child writing more than the pipe buffer can't stall.
-pub fn run_with_timeout(cmd: &mut Command, timeout: Duration) -> Result<(bool, String, String), String> {
+pub fn run_with_timeout(cmd: &mut Command, timeout: Duration) -> Result<(bool, String, String), RunError> {
     let mut child = cmd
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| RunError::NotStarted(e.to_string()))?;
     let (out, err) = (drain(child.stdout.take()), drain(child.stderr.take()));
     let started = Instant::now();
     let status = loop {
-        match child.try_wait().map_err(|e| e.to_string())? {
+        match child.try_wait().map_err(|e| RunError::Started(e.to_string()))? {
             Some(s) => break s,
             None if started.elapsed() > timeout => {
                 // kill() only fails when the child already exited, which is the outcome we want anyway
                 let _ = child.kill();
                 let _ = child.wait();
-                return Err(format!("timed out after {}s", timeout.as_secs()));
+                return Err(RunError::Started(format!("timed out after {}s", timeout.as_secs())));
             }
             None => std::thread::sleep(Duration::from_millis(50)),
         }
@@ -124,7 +140,16 @@ fn read_login_shell_path() -> Option<String> {
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
     let mut cmd = Command::new(shell);
     cmd.args(["-ilc", "printf '\\n__CSPATH__%s__CSPATH__\\n' \"$PATH\""]);
-    let (_, out, _) = run_with_timeout(&mut cmd, Duration::from_secs(5)).ok()?;
+    login_path_from(run_with_timeout(&mut cmd, Duration::from_secs(5)))
+}
+
+/// A non-zero exit is a failure even when the markers were printed: an rc error or exit trap can
+/// fire after the printf, and the PATH it saw may be half-built. Caching that would stick for good.
+fn login_path_from(run: Result<(bool, String, String), RunError>) -> Option<String> {
+    let (ok, out, _) = run.ok()?;
+    if !ok {
+        return None;
+    }
     let start = out.find("__CSPATH__")? + "__CSPATH__".len();
     let len = out[start..].find("__CSPATH__")?;
     Some(out[start..start + len].to_string())
@@ -183,6 +208,42 @@ mod tests {
         assert_eq!(c.get(t0 + Duration::from_secs(10), || panic!("retried too soon")), None);
         assert_eq!(c.get(t0 + LOGIN_PATH_RETRY, || Some("/a:/b".into())).as_deref(), Some("/a:/b"));
         assert_eq!(c.get(t0 + LOGIN_PATH_RETRY * 5, || panic!("success is cached")).as_deref(), Some("/a:/b"));
+    }
+
+    #[test]
+    fn login_path_needs_a_clean_exit_and_both_markers() {
+        let out = "motd\n__CSPATH__/bad/path__CSPATH__\n".to_string();
+        assert_eq!(login_path_from(Ok((true, out.clone(), String::new()))).as_deref(), Some("/bad/path"));
+        assert_eq!(login_path_from(Ok((false, out, "rc error".into()))), None, "markers printed, then exit 7");
+        assert_eq!(login_path_from(Ok((true, "__CSPATH__/cut".into(), String::new()))), None);
+        assert_eq!(login_path_from(Err(RunError::Started("timed out after 5s".into()))), None);
+    }
+
+    #[test]
+    fn failed_login_shell_exit_is_not_cached() {
+        let t0 = Instant::now();
+        let mut c = LoginPathCache { value: None, failed_at: None };
+        let marked = || "__CSPATH__/half:/built__CSPATH__".to_string();
+        assert_eq!(c.get(t0, || login_path_from(Ok((false, marked(), String::new())))), None);
+        let good = c.get(t0 + LOGIN_PATH_RETRY, || login_path_from(Ok((true, marked(), String::new()))));
+        assert_eq!(good.as_deref(), Some("/half:/built"), "retried after the back-off");
+    }
+
+    /// Through a real child process: a throwaway script stands in for the login shell (setting
+    /// SHELL would race other tests), so the exit status really comes from run_with_timeout.
+    #[test]
+    fn real_shell_printing_markers_then_failing_is_rejected() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("cs-t18b-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let sh = dir.join("fake-shell");
+        std::fs::write(&sh, "#!/bin/sh\nprintf '\\n__CSPATH__/bad/path__CSPATH__\\n'\nexit 7\n").unwrap();
+        std::fs::set_permissions(&sh, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let r = run_with_timeout(&mut Command::new(&sh), Duration::from_secs(5));
+        // best-effort: a leftover dir in the per-user temp folder is harmless
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(matches!(&r, Ok((false, out, _)) if out.contains("__CSPATH__/bad/path")), "{r:?}");
+        assert_eq!(login_path_from(r), None);
     }
 
     #[test]

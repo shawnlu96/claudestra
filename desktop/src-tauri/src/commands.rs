@@ -1,7 +1,7 @@
 //! The fixed set of calls the bundled window may make. Each one runs off the main thread
 //! (desktop-cli / doctor can take seconds) and returns JSON or an error string.
 
-use crate::{cli, tray, AppState};
+use crate::{cli, env::RunError, tray, AppState};
 use serde_json::{json, Value};
 use tauri::{AppHandle, Manager};
 
@@ -51,19 +51,24 @@ pub fn restart_now(app: &AppHandle) -> Result<Value, String> {
     let raw = {
         let mut guard = state.begin_restart()?;
         let raw = cli::desktop_cli_raw(&inst, "restart");
-        guard.kicked = kick_attempted(inst.cli_available, &raw);
+        guard.kicked = kick_attempted(&raw);
         raw
     };
     let status = tray::refresh(app);
     tray::apply(app, &status);
-    raw.and_then(cli::check_error)
+    raw.map_err(String::from).and_then(cli::check_error)
 }
 
 /// Did kickstart (maybe only partly) run? `results` present = yes; a JSON refusal without it
-/// (auto-update running) = no, the light stays as is. No JSON at all (timeout, crash) = unknown,
-/// so settle grey: a false "healthy" right after a half-done restart is the worse mistake.
-fn kick_attempted(cli_available: bool, raw: &Result<Value, String>) -> bool {
-    cli_available && raw.as_ref().map_or(true, |v| v["results"].is_array())
+/// (auto-update running) or a desktop-cli that never started (bun missing) = no, the light stays
+/// as is. Started but no JSON (timeout, crash) = unknown, so settle grey: a false "healthy" right
+/// after a half-done restart is the worse mistake.
+fn kick_attempted(raw: &Result<Value, RunError>) -> bool {
+    match raw {
+        Ok(v) => v["results"].is_array(),
+        Err(RunError::NotStarted(_)) => false,
+        Err(RunError::Started(_)) => true,
+    }
 }
 
 #[tauri::command]
@@ -92,9 +97,24 @@ mod tests {
 
     #[test]
     fn kick_attempted_only_when_kickstart_may_have_run() {
-        assert!(kick_attempted(true, &Ok(json!({ "ok": false, "results": [], "error": "x" }))));
-        assert!(!kick_attempted(true, &Ok(json!({ "ok": false, "error": "auto-update running" }))));
-        assert!(kick_attempted(true, &Err("timed out after 90s".into())), "unknown outcome settles grey");
-        assert!(!kick_attempted(false, &Err("not set up".into())), "never spawned");
+        assert!(kick_attempted(&Ok(json!({ "ok": false, "results": [], "error": "x" }))));
+        assert!(!kick_attempted(&Ok(json!({ "ok": false, "error": "auto-update running" }))));
+        assert!(kick_attempted(&Err(RunError::Started("timed out after 90s".into()))), "unknown outcome settles grey");
+        assert!(!kick_attempted(&Err(RunError::NotStarted("not set up".into()))), "no checkout");
+    }
+
+    #[test]
+    fn restart_with_a_missing_bun_does_not_grey_out() {
+        let inst = crate::env::Install {
+            repo: std::env::temp_dir(),
+            bun: "/nonexistent/t18b/bun".into(),
+            path: String::new(),
+            daemons_installed: true,
+            has_checkout: true,
+            cli_available: true,
+        };
+        let raw = cli::desktop_cli_raw(&inst, "restart");
+        assert!(matches!(raw, Err(RunError::NotStarted(_))), "{raw:?}");
+        assert!(!kick_attempted(&raw));
     }
 }
