@@ -1,7 +1,7 @@
 /** Pure T68 interpreter: ledger snapshot in, one deterministic decision out, never I/O. */
 import type { LedgerEvent, LedgerTask, Stage } from "./ledger-stages.js";
 import { resourceKey, resourcesOverlap, type AuthorFamily, type SchedulerIntent, type TaskWorkflow } from "./ledger-scheduler.js";
-import { currentReviewFacts, p1FamilyStreak, type ReviewFacts, type ReviewFinding } from "./scheduler-review.js";
+import { currentReviewFacts, p1AnyStreak, p1FindingStreak, type ReviewFacts, type ReviewFinding } from "./scheduler-review.js";
 import { FLOW_TEMPLATES, nodeAt, type FlowNode } from "./scheduler-template.js";
 
 export interface WorkerRef {
@@ -72,6 +72,11 @@ const latestSeq = (events: readonly LedgerEvent[], task: LedgerTask): number =>
   events.findLast((e) => e.kind === "stage" && e.data.to === task.stage)?.seq ?? events.find((e) => e.kind === "task")?.seq ?? 0;
 const taskResource = (s: PlannerSnapshot): string => `task:s${s.events.find((e) => e.kind === "task")?.seq ?? 0}`;
 const familyOtherThan = (family: AuthorFamily): AuthorFamily => family === "claude" ? "codex" : "claude";
+const reviewStartRound = (s: PlannerSnapshot): number => {
+  const configured = s.events.findLast((e) => e.kind === "scheduler" && e.data.op === "workflow" &&
+    e.data.specRev === s.task.specRev)?.seq ?? 0;
+  return (s.events.find((e) => e.kind === "review" && e.seq > configured && typeof e.data.round === "number")?.data.round as number | undefined) ?? 1;
+};
 
 function makeIntent(s: PlannerSnapshot, node: FlowNode, action: PlannedIntent["action"], reason: string, resources: string[],
   extra: Partial<PlannedIntent> = {}): PlannedIntent {
@@ -146,12 +151,16 @@ function dispatchWork(s: PlannerSnapshot, node: FlowNode): PlannerDecision {
 function fixPackage(s: PlannerSnapshot): WorkOrderFacts | PlannerDecision {
   const read = currentReviewFacts(s.task, s.events);
   if (read.kind !== "facts") return escalate("fix_report", "修复阶段缺上一轮完整审查报告");
-  const families = [...new Set(read.facts.findings.filter((f) => f.severity === "P1").map((f) => f.family))];
-  if (!families.length) return escalate("fix_report", "修复阶段没有 P1，需 PM 核对为什么退回");
-  const streaks = families.map((f) => p1FamilyStreak(s.events, f, read.facts.round));
-  if (streaks.includes(null) || streaks.some((n) => (n as number) >= 3)) return escalate("fix_history", "同类 P1 轮次无法自动续派", read.facts.eventSeq);
+  const p1 = read.facts.findings.filter((f) => f.severity === "P1");
+  if (!p1.length) return escalate("fix_report", "修复阶段没有 P1，需 PM 核对为什么退回");
+  const minRound = reviewStartRound(s);
+  const streaks = p1.map((f) => p1FindingStreak(s.events, f, read.facts.round, minRound));
+  const total = p1AnyStreak(s.events, read.facts.round, minRound);
+  if (total === null || streaks.includes(null) || total >= 4 || streaks.some((n) => (n as number) >= 3)) {
+    return escalate("fix_history", "P1 轮次无法自动续派", read.facts.eventSeq);
+  }
   return { reportPath: read.facts.reportPath, findings: read.facts.findings,
-    fallbackWarning: streaks.some((n) => n === 2) ? `再不行退到：${s.workflow!.fallback}` : null };
+    fallbackWarning: total === 3 || streaks.some((n) => n === 2) ? `再不行退到：${s.workflow!.fallback}` : null };
 }
 
 function reviewDispatch(s: PlannerSnapshot, node: FlowNode): PlannerDecision {
@@ -168,22 +177,26 @@ function reviewDispatch(s: PlannerSnapshot, node: FlowNode): PlannerDecision {
     { recipient: reviewer.agent, reviewMode: FLOW_TEMPLATES[s.workflow!.template].reviewMode });
 }
 
-function reviewHistory(s: PlannerSnapshot, facts: ReviewFacts, families: readonly string[]): ReviewFinding[][] {
-  return s.events.filter((e) => e.kind === "review" && typeof e.data.round === "number" && e.data.round <= facts.round)
-    .slice(-3).map((e) => (Array.isArray(e.data.findings) ? e.data.findings as ReviewFinding[] : []))
-    .map((rows) => rows.filter((f) => families.includes(f.family)));
+function reviewHistory(s: PlannerSnapshot, facts: ReviewFacts): ReviewFinding[][] {
+  const byRound = new Map<number, ReviewFinding[]>();
+  for (const e of s.events) if (e.kind === "review" && typeof e.data.round === "number" && e.data.round <= facts.round) {
+    byRound.set(e.data.round, Array.isArray(e.data.findings) ? e.data.findings as ReviewFinding[] : []);
+  }
+  return [...byRound.entries()].sort(([a], [b]) => a - b).slice(-4).map(([, rows]) => rows);
 }
 
 function fixDecision(s: PlannerSnapshot, node: FlowNode, facts: ReviewFacts): PlannerDecision {
   const p1 = facts.findings.filter((f) => f.severity === "P1");
-  const families = [...new Set(p1.map((f) => f.family))];
-  const streaks = families.map((f) => p1FamilyStreak(s.events, f, facts.round));
-  if (streaks.includes(null)) return escalate("review_history", "历轮结构化结论不完整，无法判断同类 P1", facts.eventSeq);
-  if (streaks.some((n) => (n as number) >= 3)) return {
-    kind: "escalate", code: "three_p1_rounds", reason: `同类 P1 连续三轮；按规格退到：${s.workflow!.fallback}`,
-    reviewSeq: facts.eventSeq, history: reviewHistory(s, facts, families),
+  const minRound = reviewStartRound(s);
+  const streaks = p1.map((f) => p1FindingStreak(s.events, f, facts.round, minRound));
+  const total = p1AnyStreak(s.events, facts.round, minRound);
+  if (total === null || streaks.includes(null)) return escalate("review_history", "历轮结构化结论不完整，无法判断 P1 连续轮次", facts.eventSeq);
+  if (total >= 4 || streaks.some((n) => (n as number) >= 3)) return {
+    kind: "escalate", code: total >= 4 ? "four_p1_rounds" : "three_p1_rounds",
+    reason: `P1 连续轮次达到升级上限；按规格退到：${s.workflow!.fallback}`,
+    reviewSeq: facts.eventSeq, history: reviewHistory(s, facts),
   };
-  const warning = streaks.some((n) => n === 2) ? `再不行退到：${s.workflow!.fallback}` : null;
+  const warning = total === 3 || streaks.some((n) => n === 2) ? `再不行退到：${s.workflow!.fallback}` : null;
   return makeIntent(s, node, "stage", `P1 ${p1.length} 项，自动进入 fix`, [taskResource(s)], {
     targetStage: "fix", workOrder: { reportPath: facts.reportPath, findings: facts.findings, fallbackWarning: warning },
   });
@@ -202,13 +215,55 @@ function reviewPass(s: PlannerSnapshot, node: FlowNode, facts: ReviewFacts): Pla
     }
     if (gate.state === "open") return wait("owner_screenshot", "等待 owner 看前后截图");
     if (gate.state === "approved" && !gate.ownerVerified) return escalate("ui_unverified", "截图许可缺已认证的 owner 答复", facts.eventSeq);
-    if (gate.state === "none") return makeIntent(s, node, "ask", "请 owner 看前后截图", [taskResource(s)], {
-      askBind: { task: s.task.id, specRev: s.task.specRev, head: s.task.headSHA as string, screenshotsDigest: s.screenshotsDigest },
-    });
+    if (gate.state === "none") {
+      const sent = s.intents.findLast((i) => i.node === node.id && i.action === "ask" && i.causalSeq >= facts.eventSeq);
+      if (sent?.status === "done") return wait("owner_screenshot", "截图 ask 已发，等待 owner 答复入账");
+      return makeIntent(s, node, "ask", "请 owner 看前后截图", [taskResource(s)], {
+        askBind: { task: s.task.id, specRev: s.task.specRev, head: s.task.headSHA as string, screenshotsDigest: s.screenshotsDigest },
+      });
+    }
   }
   return makeIntent(s, node, "stage", "审查通过，进入合并队列", [taskResource(s)], {
     targetStage: "merge", pmDiffNotice: facts.findings.some((f) => f.severity === "P2"),
   });
+}
+
+function hasReviewDispatchProof(s: PlannerSnapshot, facts: ReviewFacts): boolean {
+  const entered = s.events.findLast((e) => e.kind === "stage" && e.data.to === "review" && e.data.round === facts.round)?.seq ?? 0;
+  const dispatched = s.intents.findLast((i) => i.node === "adversarial_review" && i.action === "review" &&
+    i.eventSeq > entered && i.eventSeq < facts.eventSeq &&
+    i.head === facts.head && i.recipient === facts.reviewer && (i.status === "submitted" || i.status === "done"));
+  return !!dispatched && s.reviewDispatches.some((p) => p.intentId === dispatched.id && p.round === facts.round &&
+    p.head === facts.head && p.reviewer === facts.reviewer && p.reviewerSessionId === facts.reviewerSessionId &&
+    p.ackSeq > dispatched.eventSeq && p.ackSeq < facts.eventSeq);
+}
+
+function reviewerMatches(s: PlannerSnapshot, facts: ReviewFacts): boolean {
+  return !!s.reviewer && facts.reviewer === s.reviewer.agent && facts.reviewerSessionId === s.reviewer.sessionId &&
+    facts.reviewerFamily === s.reviewer.family && facts.reviewerFamily !== s.workflow?.authorFamily &&
+    !(s.workflow?.template === "security" && s.reviewer.source !== "local");
+}
+
+function mergeReviewGate(s: PlannerSnapshot): PlannerDecision | null {
+  const found = currentReviewFacts(s.task, s.events);
+  if (found.kind !== "facts") return escalate("merge_review_missing", "合并前缺本轮同 head 的结构化审查结论");
+  const facts = found.facts;
+  if (!hasReviewDispatchProof(s, facts) || !reviewerMatches(s, facts)) {
+    return escalate("merge_review_unproven", "合并前缺本轮跨模型审查 session 与派单回执", facts.eventSeq);
+  }
+  if (facts.verdict === "block" || facts.findings.some((f) => f.severity === "P0" || f.severity === "P1") ||
+    (facts.verdict === "changes" && !facts.findings.some((f) => f.severity === "P2"))) {
+    return escalate("merge_review_changes", "审查结论尚未通过合并闸", facts.eventSeq);
+  }
+  if (s.workflow?.template === "ui") {
+    const gate = s.uiGate;
+    if (gate.state !== "approved" || gate.ownerVerified !== true || !s.screenshotsDigest ||
+      !/^[a-f0-9]{64}$/i.test(s.screenshotsDigest) || gate.head !== s.task.headSHA ||
+      gate.specRev !== s.task.specRev || gate.screenshotsDigest !== s.screenshotsDigest) {
+      return escalate("merge_ui_unapproved", "前后截图许可未由 owner 核实，或与当前 head/specRev/摘要不符", facts.eventSeq);
+    }
+  }
+  return null;
 }
 
 function reviewStep(s: PlannerSnapshot, node: FlowNode): PlannerDecision {
@@ -216,18 +271,11 @@ function reviewStep(s: PlannerSnapshot, node: FlowNode): PlannerDecision {
   if (found.kind === "invalid") return escalate("review_invalid", found.reason);
   if (found.kind === "none") return reviewDispatch(s, node);
   const f = found.facts;
-  const dispatched = s.intents.findLast((i) => i.node === node.id && i.action === "review" &&
-    i.causalSeq >= latestSeq(s.events, s.task) && i.eventSeq < f.eventSeq &&
-    i.head === f.head && i.recipient === f.reviewer && (i.status === "submitted" || i.status === "done"));
-  const proof = s.reviewDispatches.find((p) => p.intentId === dispatched?.id && p.round === f.round && p.head === f.head &&
-    p.reviewer === f.reviewer && p.reviewerSessionId === f.reviewerSessionId && p.ackSeq > (dispatched?.eventSeq ?? 0) && p.ackSeq < f.eventSeq);
-  if (!dispatched || !proof) return escalate("review_unsolicited", "审查结论找不到本轮、同 head 与 session 的派单回执", f.eventSeq);
+  if (!hasReviewDispatchProof(s, f)) return escalate("review_unsolicited", "审查结论找不到本轮、同 head 与 session 的派单回执", f.eventSeq);
   const transition = s.intents.filter((i) => i.node === node.id && i.causalSeq >= f.eventSeq &&
-    (i.action === "stage" || i.action === "ask")).at(-1);
+    i.action === "stage").at(-1);
   if (transition && transition.status !== "cancelled") return wait("review_transition", `审查结论的后续动作仍在 ${transition.status}`);
-  if (!s.reviewer || f.reviewer !== s.reviewer.agent || f.reviewerSessionId !== s.reviewer.sessionId ||
-    f.reviewerFamily !== s.reviewer.family || f.reviewerFamily === s.workflow?.authorFamily ||
-    (s.workflow?.template === "security" && s.reviewer.source !== "local")) {
+  if (!reviewerMatches(s, f)) {
     return escalate("reviewer_mismatch", "审查结论不是本卡跨模型家族 reviewer session 的产物", f.eventSeq);
   }
   if (f.findings.some((x) => x.severity === "P0") || f.verdict === "block") return escalate("review_block", "P0 或审查阻塞，交 PM", f.eventSeq);
@@ -238,6 +286,16 @@ function reviewStep(s: PlannerSnapshot, node: FlowNode): PlannerDecision {
 }
 
 function stageStep(s: PlannerSnapshot, node: FlowNode): PlannerDecision {
+  if (node.gate === "ci_and_review") {
+    const inFlight = liveIntent(s, node, "merge");
+    if (inFlight) return inFlight;
+    const since = latestSeq(s.events, s.task);
+    const cancelled = s.intents.findLast((i) => i.node === node.id && i.action === "merge" &&
+      i.causalSeq >= since && i.status === "cancelled");
+    if (cancelled) return escalate("merge_retry_requires_pm", `合并意图 ${cancelled.id} 已取消，先由 PM 核对外部结果`, cancelled.eventSeq);
+    const proof = mergeReviewGate(s);
+    if (proof) return proof;
+  }
   if (node.gate === "pm_restate") {
     const approved = s.events.findLast((e) => e.kind === "decision" && e.seq > latestSeq(s.events, s.task) &&
       e.data.op === "restate_approved" && e.data.specRev === s.task.specRev);

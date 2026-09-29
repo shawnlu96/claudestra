@@ -112,7 +112,7 @@ describe("T68 data workflow planner", () => {
     s.reviewDispatches = [...s.reviewDispatches, proof(3, 35)];
     expect(planScheduler(s)).toMatchObject({ kind: "escalate", code: "three_p1_rounds", reviewSeq: 40 });
     s.events = s.events.map((e) => e.kind === "review" && e.data.round === 2 ? review(30, 2, [finding("different")]) : e);
-    expect(planScheduler(s)).toMatchObject({ kind: "intent", workOrder: { fallbackWarning: null } });
+    expect(planScheduler(s)).toMatchObject({ kind: "intent", workOrder: { fallbackWarning: "再不行退到：收窄为只报错" } });
   });
 
   test("P2-only review proceeds without re-review; UI approval is bound to head and spec", () => {
@@ -129,6 +129,16 @@ describe("T68 data workflow planner", () => {
     expect(planScheduler(s)).toMatchObject({ kind: "escalate", code: "ui_unverified" });
     s.uiGate = { state: "approved", head: HEAD, specRev: 1, screenshotsDigest: digest, ownerVerified: true };
     expect(planScheduler(s)).toMatchObject({ kind: "intent", action: "stage", targetStage: "merge", pmDiffNotice: true });
+    s.intents = [...s.intents, { ...intent("adversarial_review", "ask", "done", 21), id: "screenshot-ask" }];
+    s.uiGate = { state: "none" };
+    expect(planScheduler(s)).toMatchObject({ kind: "wait", code: "owner_screenshot" });
+    s.uiGate = { state: "approved", head: HEAD, specRev: 1, screenshotsDigest: digest, ownerVerified: true };
+    expect(planScheduler(s)).toMatchObject({ kind: "intent", action: "stage", targetStage: "merge" });
+    s.uiGate = { state: "open", head: HEAD, specRev: 1, screenshotsDigest: digest };
+    expect(planScheduler(s)).toMatchObject({ kind: "wait", code: "owner_screenshot" });
+    s.uiGate = { state: "rejected", head: HEAD, specRev: 1, screenshotsDigest: digest };
+    expect(planScheduler(s)).toMatchObject({ kind: "escalate", code: "ui_rejected" });
+    s.uiGate = { state: "approved", head: HEAD, specRev: 1, screenshotsDigest: digest, ownerVerified: true };
     s.screenshotsDigest = "e".repeat(64);
     expect(planScheduler(s)).toMatchObject({ kind: "escalate", code: "ui_stale" });
     s.screenshotsDigest = digest;
@@ -165,8 +175,90 @@ describe("T68 data workflow planner", () => {
     expect(planScheduler(s)).toMatchObject({ kind: "escalate", code: "review_invalid" });
     s.task = task("merge", 1);
     s.events = [event(1, "task", { op: "new" }), entry("merge", 1)];
+    expect(planScheduler(s)).toMatchObject({ kind: "escalate", code: "merge_review_missing" });
+    s.events = [event(1, "task", { op: "new" }), entry("review", 1), delivery(19, 1), review(20, 1, [], "pass"),
+      event(31, "stage", { from: "review", to: "merge", round: 1 })];
     expect(planScheduler(s)).toMatchObject({ kind: "intent", action: "merge" });
+    s.intents = [...s.intents, intent("merge_deploy", "merge", "cancelled", 32)];
+    expect(planScheduler(s)).toMatchObject({ kind: "escalate", code: "merge_retry_requires_pm" });
+    s.intents = s.intents.slice(0, -1);
     s.queueFrozen = true;
     expect(planScheduler(s)).toMatchObject({ kind: "wait", code: "queue_frozen" });
+  });
+
+  test("renaming every P1 family cannot evade the fourth-round hard stop", () => {
+    const s = snapshot("review", 1);
+    s.events = [event(1, "task", { op: "new" })];
+    const names = ["auth", "Auth", "auth-gate", "permission"];
+    for (let round = 1; round <= names.length; round++) {
+      const base = round * 100;
+      s.task = task("review", round);
+      s.events = [...s.events, event(base, "stage", { to: "review", round }), delivery(base + 9, round),
+        review(base + 20, round, [finding(names[round - 1])])];
+      s.intents = [...s.intents, sentReview(round, base + 5)];
+      s.reviewDispatches = [...s.reviewDispatches, proof(round, base + 5)];
+      const result = planScheduler(s);
+      expect(result.kind).toBe(round === 4 ? "escalate" : "intent");
+      if (round === 4) expect(result).toMatchObject({ kind: "escalate", code: "four_p1_rounds" });
+    }
+  });
+
+  test("a persistent findingId reaches the third-round gate even when family names change", () => {
+    const s = snapshot("review", 1);
+    s.events = [event(1, "task", { op: "new" })];
+    for (let round = 1; round <= 3; round++) {
+      const base = round * 100;
+      s.task = task("review", round);
+      s.events = [...s.events, event(base, "stage", { to: "review", round }), delivery(base + 9, round),
+        review(base + 20, round, [{ ...finding(`renamed-${round}`), findingId: "stable-auth" }])];
+      s.intents = [...s.intents, sentReview(round, base + 5)];
+      s.reviewDispatches = [...s.reviewDispatches, proof(round, base + 5)];
+    }
+    expect(planScheduler(s)).toMatchObject({ kind: "escalate", code: "three_p1_rounds" });
+  });
+
+  test("a new spec revision starts a fresh P1 escalation count", () => {
+    const s = snapshot("review", 1);
+    s.events = [event(1, "task", { op: "new" })];
+    for (let round = 1; round <= 4; round++) {
+      const base = round * 100;
+      s.task = { ...task("review", round), specRev: round === 4 ? 2 : 1 };
+      s.workflow = { ...workflow(), specRev: s.task.specRev };
+      if (round === 4) s.events = [...s.events, event(base - 2, "scheduler", { op: "workflow", specRev: 2 })];
+      s.events = [...s.events, event(base, "stage", { to: "review", round }), delivery(base + 9, round),
+        review(base + 20, round, [finding("same")])];
+      s.intents = [...s.intents, sentReview(round, base + 5)];
+      s.reviewDispatches = [...s.reviewDispatches, proof(round, base + 5)];
+    }
+    expect(planScheduler(s)).toMatchObject({ kind: "intent", action: "stage", targetStage: "fix",
+      workOrder: { fallbackWarning: null } });
+  });
+
+  test("a card in review keeps its file lease so a second card waits for the hot file", () => {
+    const s = snapshot("build", 1);
+    s.task = { ...task("build", 1), id: "T2" };
+    s.author = { ...author, taskId: "T2" };
+    s.workflow = { ...workflow(), taskId: "T2" };
+    s.fileGlobs = ["src/bridge.ts"];
+    s.heldResources = [{ taskId: "T1", resource: "src/bridge.ts" }];
+    expect(planScheduler(s)).toMatchObject({ kind: "wait", code: "resource_busy" });
+  });
+
+  test("merge stage rechecks reviewed head and the owner screenshot binding", () => {
+    const s = snapshot("merge", 1, "ui");
+    const digest = "d".repeat(64);
+    s.screenshotsDigest = digest;
+    s.events = [event(1, "task", { op: "new" }), entry("review", 1), delivery(19, 1), review(20, 1, [], "pass"),
+      event(31, "stage", { from: "review", to: "merge", round: 1 })];
+    s.intents = [sentReview(1, 15)];
+    s.reviewDispatches = [proof(1, 15)];
+    expect(planScheduler(s)).toMatchObject({ kind: "escalate", code: "merge_ui_unapproved" });
+    s.uiGate = { state: "approved", ownerVerified: true, head: HEAD, specRev: 1, screenshotsDigest: digest };
+    expect(planScheduler(s)).toMatchObject({ kind: "intent", action: "merge" });
+    s.task = { ...s.task, headSHA: "f".repeat(40) };
+    expect(planScheduler(s)).toMatchObject({ kind: "escalate", code: "merge_review_missing" });
+    s.task = task("merge", 1);
+    s.uiGate = { state: "approved", ownerVerified: true, head: HEAD, specRev: 2, screenshotsDigest: digest };
+    expect(planScheduler(s)).toMatchObject({ kind: "escalate", code: "merge_ui_unapproved" });
   });
 });

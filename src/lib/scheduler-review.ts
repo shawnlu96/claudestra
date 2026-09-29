@@ -59,21 +59,50 @@ export function currentReviewFacts(task: Pick<LedgerTask, "round" | "headSHA">, 
   };
 }
 
-/** Consecutive review rounds containing the same P1 family; another family or a clean round resets it. */
-export function p1FamilyStreak(events: readonly LedgerEvent[], family: string, currentRound: number): number | null {
+const normalizedFamily = (family: string): string => family.normalize("NFKC").toLowerCase().replace(/[-_.]/g, "");
+
+function p1RowsByRound(events: readonly LedgerEvent[], currentRound: number, minRound: number): Map<number, ReviewFinding[] | null> {
   const byRound = new Map<number, LedgerEvent>();
   for (const e of events) if (e.kind === "review" && typeof e.data.round === "number" && e.data.round <= currentRound) byRound.set(e.data.round, e);
-  let streak = 0;
-  for (let round = currentRound; round > 0; round--) {
+  const rowsByRound = new Map<number, ReviewFinding[] | null>();
+  for (let round = minRound; round <= currentRound; round++) {
     const e = byRound.get(round);
     const rows = findingsOf(e?.data.findings);
-    if (!e || !rows) return null;
+    if (!e || !rows) { rowsByRound.set(round, null); continue; }
     const head = str(e.data.head);
     const delivered = events.filter((x) => x.kind === "deliver" && x.seq < e.seq).sort((a, b) => a.seq - b.seq).at(-1);
     if (!head || !/^[a-f0-9]{40}$/i.test(head) || delivered?.data.headSHA !== head ||
-      ["P0", "P1", "P2"].some((p) => count(e.data[p.toLowerCase()]) !== rows.filter((f) => f.severity === p).length)) return null;
-    if (!rows?.some((f) => f.severity === "P1" && f.family === family)) break;
+      ["P0", "P1", "P2"].some((p) => count(e.data[p.toLowerCase()]) !== rows.filter((f) => f.severity === p).length)) {
+      rowsByRound.set(round, null);
+      continue;
+    }
+    rowsByRound.set(round, rows);
+  }
+  return rowsByRound;
+}
+
+function consecutiveP1(events: readonly LedgerEvent[], currentRound: number, minRound: number,
+  match: (finding: ReviewFinding) => boolean): number | null {
+  const byRound = p1RowsByRound(events, currentRound, minRound);
+  let streak = 0;
+  for (let round = currentRound; round >= minRound; round--) {
+    const rows = byRound.get(round);
+    if (!rows) return null;
+    if (!rows.some((f) => f.severity === "P1" && match(f))) break;
     streak++;
   }
   return streak;
+}
+
+/** A finding keeps its identity across a renamed family; normalized family is the fallback match. */
+export function p1FindingStreak(events: readonly LedgerEvent[], finding: Pick<ReviewFinding, "findingId" | "family">,
+  currentRound: number, minRound = 1): number | null {
+  const family = normalizedFamily(finding.family);
+  return consecutiveP1(events, currentRound, minRound,
+    (row) => row.findingId === finding.findingId || normalizedFamily(row.family) === family);
+}
+
+/** Any P1 across four consecutive rounds is a hard stop even if every label is renamed. */
+export function p1AnyStreak(events: readonly LedgerEvent[], currentRound: number, minRound = 1): number | null {
+  return consecutiveP1(events, currentRound, minRound, () => true);
 }
