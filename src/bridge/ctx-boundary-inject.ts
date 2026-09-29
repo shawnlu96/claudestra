@@ -174,7 +174,8 @@ async function eraseOwnEcho(target: string, line: string, deps: InjectDeps): Pro
   }
   let left = [...line];
   while (left.length) {
-    const n = Math.min(ERASE_BATCH, left.length);
+    // 先删零头：之后每批剩下的都是 ERASE_BATCH 的整数倍，中途框里不会只剩「/compact 」——那时 CC 会在后面画灰色参数提示，核对对不上（真 CC 实测）
+    const n = left.length % ERASE_BATCH || ERASE_BATCH;
     try {
       await deps.erase(target, n);
     } catch (e) {

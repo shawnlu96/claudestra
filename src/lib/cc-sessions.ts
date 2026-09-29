@@ -185,8 +185,8 @@ export async function resolveSessionIdForWindow(
 }
 
 /**
- * 一批窗口各自在跑的 CC 会话（key → sessionId），找不到的不在表里。算法同 resolveSessionIdForWindow，
- * 但 ps、tmux 窗格表、会话登记整批只读一次：每分钟扫全体 agent 用，逐个调要 N 倍子进程。
+ * 一批窗口各自在跑的 CC 会话（key → sessionId），找不到的不在表里。算法同 resolveSessionIdForWindow，另把窗格进程本身也算上
+ * （CC 直接当窗格进程起、没有 shell 父进程时 pid 就是它）；ps、tmux 窗格表、会话登记整批只读一次：每分钟扫全体 agent 用，逐个调要 N 倍子进程。
  */
 export async function resolveSessionIdsForWindows(wins: { key: string; tmuxName: string; cwd: string }[]): Promise<Map<string, string>> {
   const out = new Map<string, string>();
@@ -204,7 +204,8 @@ export async function resolveSessionIdsForWindows(wins: { key: string; tmuxName:
   const entries = (await readCcSessionEntries()).filter((e) => pidAlive(e.pid)).map((e) => ({ ...e, cwd: safeRealpath(e.cwd) }));
   for (const w of wins) {
     const p = panes.get(w.tmuxName);
-    const hit = p && pickCcSessionForWindow(entries, { childPids: childPidsInPsOutput(ps, p.pid), paneId: p.paneId, cwd: safeRealpath(w.cwd) });
+    const childPids = p ? [p.pid, ...childPidsInPsOutput(ps, p.pid)] : [];
+    const hit = p && pickCcSessionForWindow(entries, { childPids, paneId: p.paneId, cwd: safeRealpath(w.cwd) });
     if (hit) out.set(w.key, hit.sessionId);
   }
   return out;

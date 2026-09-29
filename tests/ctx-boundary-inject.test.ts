@@ -172,12 +172,17 @@ describe("删自己留下的字：退格分批、每批核对（r3 P2-2）、待
     return calls;
   };
 
-  test("800 字的清单：退格每批 ≤200 个，删干净", async () => {
+  test("800 字的清单：退格每批 ≤200 个、先删零头，删干净；中途框里不会只剩「/compact 」（CC 会在后面画灰色参数提示）", async () => {
     const h = harness([]);
     compactingOnType(h);
+    const readPane = h.deps.readPane;
+    h.deps.readPane = (plain, esc) => {
+      const r = readPane(plain, esc);
+      return r.inputText.trim() === "/compact" ? { ...r, inputText: "/compact  <optional custom summarization instructions>" } : r;
+    };
     const calls = countErase(h);
     expect(await injectCompact(tgt("x"), { action: "compact", keep: LONG }, h.deps)).toMatchObject({ status: "skipped", reason: "compacting" });
-    expect(calls).toEqual([200, 200, 200, 200, 9]);
+    expect(calls).toEqual([9, 200, 200, 200, 200]);
     expect([h.win("master:x").box, h.sent.length]).toEqual(["", 0]);
   });
 
@@ -187,13 +192,13 @@ describe("删自己留下的字：退格分批、每批核对（r3 P2-2）、待
     compactingOnType(h);
     const calls = countErase(h, (i) => void (i === 1 && (w.pane = "Do you want to proceed?\n[menu]")));
     expect(await injectCompact(tgt("x"), { action: "compact", keep: LONG }, h.deps)).toMatchObject({ status: "failed", leftover: true });
-    expect([calls, [...w.box].length]).toEqual([[200], 609]);
+    expect([calls, [...w.box].length]).toEqual([[9], 800]);
     const logs: string[] = [];
     await sweepPendingEcho(h.deps, (l) => void logs.push(l)); // 对话框还在：不按键
     expect(calls.length).toBe(1);
     w.pane = "some output\n❯ \n";
     await sweepPendingEcho(h.deps, (l) => void logs.push(l));
-    expect([calls, w.box]).toEqual([[200, 200, 200, 200, 9], ""]);
+    expect([calls, w.box]).toEqual([[9, 200, 200, 200, 200], ""]);
     expect(logs).toEqual([expect.stringContaining("已删掉")]);
   });
 
@@ -203,9 +208,9 @@ describe("删自己留下的字：退格分批、每批核对（r3 P2-2）、待
     compactingOnType(h);
     const calls = countErase(h, (i) => void (i === 1 && (w.box = "帮" + w.box)));
     expect(await injectCompact(tgt("x"), { action: "compact", keep: LONG }, h.deps)).toMatchObject({ status: "failed", leftover: true });
-    expect(calls).toEqual([200]);
+    expect(calls).toEqual([9]);
     await sweepPendingEcho(h.deps, () => {});
-    expect(calls).toEqual([200]);
+    expect(calls).toEqual([9]);
     expect(w.box.startsWith("帮/compact")).toBe(true);
   });
 
