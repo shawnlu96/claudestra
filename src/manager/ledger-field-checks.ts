@@ -45,20 +45,16 @@ function adversarialDebt(c: LedgerCli, task: LedgerTask, pending?: PendingReview
     : `${task.id} 的规格卡提到对抗式，但读不出「审查：」那一行，说不清还欠不欠`;
 }
 
-export function checkMergeGate(c: LedgerCli, task: LedgerTask, pending: PendingReview): void {
+/**
+ * 进 merge 的闸门：review --to merge（pending = 正要记的这条结论）和 PM 手动 stage review → merge（不带 pending）都过它；
+ * 真要跳过对抗式统一走 review --waive adversarial --text <理由>，理由记进事件
+ */
+export function checkMergeGate(c: LedgerCli, task: LedgerTask, pending?: PendingReview): void {
   const why = adversarialDebt(c, task, pending);
   if (!why) return;
+  const waive = pending ? "带 --waive adversarial --text <理由>" : `ledger review ${task.id} … --verdict pass --to merge --waive adversarial --text <理由>（理由会记进事件）`;
   const out = c.isRealPm(task.project)
-    ? "PM 核对后确实不需要再审，可以带 --waive adversarial --text <理由>"
+    ? `PM 核对后确实不需要再审，可以${waive}`
     : `把这件事升级给 PM（ledger escalate ${task.id} --reason …）`;
-  throw new LedgerError("conflict", `${why}：先 ledger dispatch ${task.id}（会按规格卡选对抗式）派审，通过后再 --to merge；${out}`);
-}
-
-/** PM 手动 stage review → merge 不拦（可能有意用豁免以外的方式推进），还欠对抗式时回一行告警 */
-export function mergeStageWarning(c: LedgerCli, task: LedgerTask): string | null {
-  const why = adversarialDebt(c, task);
-  return why
-    ? `⚠️ ${why}。要补：ledger dispatch ${task.id}（会按规格卡选对抗式）派审，通过后 review --to merge；` +
-      `确定不需要：ledger review ${task.id} … --verdict pass --to merge --waive adversarial --text <理由>，理由会记进事件`
-    : null;
+  throw new LedgerError("conflict", `${why}：先 ledger dispatch ${task.id}（会按规格卡选对抗式）派审，通过后 review --to merge；${out}`);
 }

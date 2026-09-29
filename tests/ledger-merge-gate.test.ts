@@ -275,21 +275,40 @@ describe("一次派审只算一次（dispatchKindFor）", () => {
   });
 });
 
-describe("PM 手动 stage review → merge：不拦，还欠对抗式时回告警", () => {
-  test("常规 pass 后手动推 merge：照推，带告警（怎么补对抗式、怎么 --waive）；还清了就不带", async () => {
+describe("PM 手动 stage review → merge 也过合并闸门", () => {
+  const stageMerge = () => run("agent-pm", "stage", "T1", "--from", "review", "--to", "merge");
+  const regularPass = async () => {
     ship("aaaa1111", "build");
     await run("agent-disp", "dispatch", "T1");
     await run("agent-disp", ...verdict("pass"));
-    const r = await run("agent-pm", "stage", "T1", "--from", "review", "--to", "merge");
-    expect(r.task.stage).toBe("merge");
-    expect(r.warning).toContain("ledger dispatch T1");
-    expect(r.warning).toContain("--waive adversarial --text <理由>");
-    moveStage(db, o, { taskId: "T1", from: "merge", to: "review" });
+  };
+
+  test("还欠对抗式：被拦，报错里写明怎么补对抗式、怎么 --waive", async () => {
+    await regularPass();
+    const r = await stageMerge();
+    expect(r).toMatchObject({ ok: false, code: "conflict" });
+    expect(r.error).toContain("ledger dispatch T1");
+    expect(r.error).toContain("ledger review T1 … --verdict pass --to merge --waive adversarial --text <理由>");
+    expect(getTask(db, "T1")?.stage).toBe("review");
+  });
+
+  test("判不清（规格卡提到对抗式但读不出「审查：」）：被拦", async () => {
+    spec("# T1\n最后要对抗式过一遍\n");
+    await regularPass();
+    expect(await stageMerge()).toMatchObject({ ok: false, code: "conflict" });
+  });
+
+  test("PM 豁免之后（review --waive 不推阶段）：stage 放行", async () => {
+    await regularPass();
+    await run("agent-pm", ...verdict("pass", undefined, "--waive", "adversarial", "--text", "增量只改了注释"));
+    expect((await stageMerge()).task.stage).toBe("merge");
+  });
+
+  test("对抗式通过还清之后：stage 照常放行", async () => {
+    await regularPass();
     await run("agent-disp", "dispatch", "T1", "--adversarial");
     await run("agent-disp", ...verdict("pass"));
-    const ok = await run("agent-pm", "stage", "T1", "--from", "review", "--to", "merge");
-    expect(ok.task.stage).toBe("merge");
-    expect(ok.warning).toBeUndefined();
+    expect((await stageMerge()).task.stage).toBe("merge");
   });
 });
 

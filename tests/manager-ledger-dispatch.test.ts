@@ -149,7 +149,8 @@ describe("review --to merge：规格卡还欠对抗式就拒绝（开了班子�
     expect(d.error).not.toContain("stage");
     expect(d.error).not.toContain("--waive");
     expect((await run("agent-disp", "stage", "T1", "--from", "review", "--to", "merge")).code).toBe("forbidden");
-    expect((await run("agent-pm", "stage", "T1", "--from", "review", "--to", "merge")).task.stage).toBe("merge");
+    // PM 手动推也过闸门：还欠就拦，跳过对抗式统一走 review --waive（tests/ledger-merge-gate.test.ts）
+    expect((await run("agent-pm", "stage", "T1", "--from", "review", "--to", "merge")).code).toBe("conflict");
   });
 
   test("没开班子、读不到规格卡：照旧放行", async () => {
