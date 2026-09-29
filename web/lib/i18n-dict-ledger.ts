@@ -31,6 +31,7 @@ export const LEDGER_DICT: Record<string, string> = {
   "已处理": "Handled",
   "已过期，按未批准处理": "Expired — treated as not approved",
   "已撤销": "Withdrawn",
+  "已结案": "Closed",
   "已被新版本取代": "Superseded by a newer version",
   "指派": "Assigned",
   "已记下": "Recorded",

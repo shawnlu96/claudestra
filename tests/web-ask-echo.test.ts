@@ -1,6 +1,6 @@
 /**
  * owner 对「待你处理」的作答在网页上的样子（T11b PR B r1 的 P2-1 / P2-2）：bridge 把 wire 行换成了选项人话（lib/inbound-body.ts answerEcho），
- * 原文另放 wire——直播回声按原文和乐观气泡对账（不再闪两个气泡），历史 / 直播都按原文回填所答气泡的已答态（ask 移出列表后按钮也不会又能点）。
+ * 原文另放 wire——直播回声按原文和乐观气泡对账（不再闪两个气泡），历史 / 直播都按原文回填所答气泡的已答态；只写了字答的，ask 移出列表后按已结案锁住——都不会把旧点击再发给 agent。
  */
 import { describe, expect, test } from "bun:test";
 import { answerEcho } from "../src/lib/inbound-body.js";
@@ -10,6 +10,7 @@ import { translate } from "@/lib/chat/stream-shape";
 import { isUserEcho } from "@/features/chat/view-compose";
 import { liveAnswerText } from "@/features/chat/delta-clicks";
 import type { ChatMessage } from "@/features/chat/type";
+import { replyAskState, type WebAsk } from "@/features/asks/asks-model";
 
 const SELF = new Set(["api:owner:self"]);
 const comps = [{ type: "buttons" as const, buttons: [{ id: "deploy", label: "部署" }, { id: "hold", label: "先不" }] }];
@@ -72,5 +73,28 @@ describe("直播：回声和本端乐观气泡对得上（R4），他端作答�
     const msgs = [{ id: "a1", role: "assistant", content: "", replyText: "要部署吗？", replyComponents: comps, replyAskId: "ask_1" }] as ChatMessage[];
     expect(liveAnswerText(ev.wire!, ev.text, "ask_1", msgs)).toEqual({ content: "部署", wire: "[button:deploy]" });
     expect(msgs[0].replyClicks).toEqual({ b0: "deploy" });
+  });
+});
+
+describe("ask 移出列表后（结案超过 3 天）点旧按钮不会发出 [button:…]（PM 定的 P2-2 锁定用例）", () => {
+  const NOW = Date.parse("2026-10-05T00:00:00Z");
+  const old = { replyText: "要部署吗？", replyComponents: comps, replyTs: "2026-09-29T00:00:01Z", ts: "2026-09-29T00:00:01Z", replyAskId: "ask_1" };
+
+  test("按按钮答的：历史按原文回填了已答态，那一行本来就点不了（reply-components 的 clicks[rowKey] 已有值）", () => {
+    const out = toChatMessages([{ seq: 1, role: "assistant", ...old }, { seq: 2, role: "user", text: "部署", askId: "ask_1", wire: "[button:deploy]" }], { selfIds: SELF });
+    expect(out[0].replyClicks?.b0).toBe("deploy");
+  });
+
+  test("只写了字答的（没有可回填的按钮）：列表已加载却查不到、气泡比保留期旧 → 按已结案锁住，beforeSend 不发", () => {
+    const s = replyAskState([], true, "agent-x", old, [], NOW);
+    expect([s.gone, s.blocked]).toEqual([true, true]);
+  });
+
+  test("不误锁：列表还没加载、气泡在保留期内（刚建还没刷到）、老消息没带 askId、ask 还在列表里开着", () => {
+    expect(replyAskState([], false, "agent-x", old, [], NOW).blocked).toBe(false);
+    expect(replyAskState([], true, "agent-x", { ...old, replyTs: "2026-10-04T12:00:00Z" }, [], NOW).blocked).toBe(false);
+    expect(replyAskState([], true, "agent-x", { ...old, replyAskId: undefined }, [], NOW).blocked).toBe(false);
+    const open = { id: "ask_1", state: "open", source: "reply", fromAgent: "agent-x", options: comps, createdAt: Date.parse(old.replyTs) } as unknown as WebAsk;
+    expect(replyAskState([open], true, "agent-x", old, [], NOW)).toMatchObject({ gone: false, blocked: false, ask: { id: "ask_1" } });
   });
 });
