@@ -1,7 +1,9 @@
 "use client";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useState, type KeyboardEvent } from "react";
 import { CenteredModal } from "./centered-modal";
-import { useT } from "@/lib/i18n";
+import { t as translate, useT } from "@/lib/i18n";
+import { ApiError } from "@/lib/api/client";
+import { promptProblem } from "@/lib/cron-prompt";
 import { useChatStore } from "../chat-store";
 import { cronAction as cronApiAction, cronList } from "@/lib/api/system";
 
@@ -54,12 +56,43 @@ function ProjectSelect({ value, onChange, className }: { value: string; onChange
 /** 临时 agent 的档位选项(缺省 medium:Fable 5.1 文档说 medium ≈ Fable 5 且更省额度) */
 const EFFORT_CHOICES = ["medium", "low", "high", "xhigh", "max"] as const;
 
+/** 服务端 400 control_chars 里的字段名 → 表单上的叫法 */
+const FIELD_LABEL: Record<string, string> = { prompt: "任务指令", name: "任务名", schedule: "表达式", dir: "工作目录" };
+
 async function cronAction(body: Record<string, unknown>): Promise<{ ok?: boolean; error?: string }> {
   try {
     return await cronApiAction<{ ok?: boolean; error?: string }>(body);
   } catch (e) {
+    if (e instanceof ApiError && e.code === "control_chars") {
+      const f = String(e.body.field ?? "");
+      const field = translate(FIELD_LABEL[f] ?? f);
+      return { ok: false, error: translate("「{field}」里有换行或看不见的控制字符。到点会原样敲进终端，换行会让它提前提交，所以只能写成一行", { field }) };
+    }
     return { ok: false, error: (e as Error).message };
   }
+}
+
+/** 输入框里按回车不换行（输入法选词时的回车照常） */
+const blockEnter = (e: KeyboardEvent) => {
+  if (e.key === "Enter" && !e.nativeEvent.isComposing) e.preventDefault();
+};
+
+/** 任务指令输入框：回车不换行，下方显示 promptProblem 的提示（lib/cron-prompt.ts） */
+function PromptInput(p: { value: string; onChange: (v: string) => void; problem: string; rows: number; className?: string; placeholder?: string }) {
+  const t = useT();
+  return (
+    <>
+      <textarea
+        className={`textarea textarea-bordered w-full text-[12.5px] ${p.className ?? ""}`}
+        rows={p.rows}
+        placeholder={p.placeholder}
+        value={p.value}
+        onKeyDown={blockEnter}
+        onChange={(e) => p.onChange(e.target.value)}
+      />
+      {p.problem && <span className="mt-1 block text-[11px] text-error-soft-80">{t(p.problem)}</span>}
+    </>
+  );
 }
 
 const fmtTime = (iso: string | null) => (iso ? new Date(iso).toLocaleString() : "—");
@@ -89,6 +122,7 @@ function JobRow({ job, onChanged }: { job: CronJobView; onChanged: () => void })
 
   const projectDirty = !job.targetAgent && project !== (job.project ?? "");
   const dirty = schedule.trim() !== job.schedule || prompt.trim() !== job.prompt || projectDirty;
+  const promptBad = prompt.trim() !== job.prompt ? promptProblem(prompt.trim()) : "";
 
   return (
     <div className="rounded-xl border border-base-content/10 bg-base-200/40 p-3">
@@ -138,12 +172,7 @@ function JobRow({ job, onChanged }: { job: CronJobView; onChanged: () => void })
           </label>
           <label className="block text-[12.5px]">
             <span className="opacity-60">{t("任务指令")}</span>
-            <textarea
-              className="textarea textarea-bordered mt-1 w-full text-[12.5px] leading-relaxed"
-              rows={4}
-              value={prompt}
-              onChange={(e) => setPrompt(e.target.value)}
-            />
+            <PromptInput value={prompt} onChange={setPrompt} problem={promptBad} rows={4} className="mt-1 leading-relaxed" />
           </label>
           <div className="flex items-center gap-2 text-[11px] opacity-40">
             <span className="min-w-0 flex-1 truncate">
@@ -155,7 +184,7 @@ function JobRow({ job, onChanged }: { job: CronJobView; onChanged: () => void })
           <div className="flex items-center gap-2">
             <button
               className="btn btn-primary btn-xs"
-              disabled={busy || !dirty || !schedule.trim() || !prompt.trim()}
+              disabled={busy || !dirty || !schedule.trim() || !prompt.trim() || !!promptBad}
               onClick={() =>
                 void run({
                   action: "edit",
@@ -253,17 +282,17 @@ function AddJobForm({ onChanged }: { onChanged: () => void }) {
       </div>
       {/* 归属 project:不选就按目录解析——dir 留 ~ 会落进「家目录杂项」,要归别处就选 */}
       <ProjectSelect value={project} onChange={setProject} className="w-full" />
-      <textarea
-        className="textarea textarea-bordered w-full text-[12.5px]"
+      <PromptInput
+        value={prompt}
+        onChange={setPrompt}
+        problem={promptProblem(prompt.trim())}
         rows={3}
         placeholder={t("任务指令:到点起一个临时 agent 执行,完成后自动清理并报告")}
-        value={prompt}
-        onChange={(e) => setPrompt(e.target.value)}
       />
       <div className="flex items-center gap-2">
         <button
           className="btn btn-primary btn-xs"
-          disabled={busy || !name.trim() || !schedule.trim() || !prompt.trim()}
+          disabled={busy || !name.trim() || !schedule.trim() || !prompt.trim() || !!promptProblem(prompt.trim())}
           onClick={async () => {
             setBusy(true);
             setMsg("");

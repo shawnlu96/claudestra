@@ -25,11 +25,8 @@ export function resolveAuthUrl(url: string): Promise<string> {
   return p;
 }
 
-/** 已解析的 object URL（渲染期同步取，PhotoSwipe 要现成的 src）；没解析过就是原地址 */
+/** 已解析的 object URL：重挂载时同步拿到，不闪一下空白 */
 const resolved = new Map<string, string>();
-export function resolvedAuthUrl(url: string): string {
-  return resolved.get(url) ?? url;
-}
 
 export function useAuthUrl(url: string | undefined): { src: string | null; error: boolean } {
   const [state, setState] = useState<{ src: string | null; error: boolean }>(() => ({ src: url && !isApiUrl(url) ? url : (url && resolved.get(url)) || null, error: false }));

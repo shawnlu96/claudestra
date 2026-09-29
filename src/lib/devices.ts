@@ -200,19 +200,25 @@ export function effectivePrincipal(hit: CredentialHit): Principal {
   return { ...p, agents: intersectAgents(p.agents, c.grant.agents), terminal, role: terminal ? p.role : "external", manage: c.grant.manage && p.role === "owner", credential: c.id };
 }
 
-/** 管理端点的门：设备凭据看 grant.manage；老的全 scope 非 peer token 过渡期仍放行（T6 退场时收紧为只认 owner） */
+/**
+ * 管理端点的门：scope 含 "*"、非 peer，设备凭据另看 grant.manage；老的全 scope 非 peer token 过渡期仍放行（T6 退场时收紧为只认 owner）。
+ * 不能因 role=owner 免掉 "*"：开了终端的设备 role 仍是 owner（effectivePrincipal），部分 scope 的也一样，
+ * 会借管理端点（restart-all、建 agent、cron）碰到 scope 外的 agent。owner 本人的凭据本来就是 "*"。见 tests/session-gates.test.ts。
+ */
 export function canManage(p: Principal): boolean {
-  if (p.manage === false) return false;
-  return p.role === "owner" || (p.agents.includes("*") && !p.peer);
+  return p.manage !== false && p.agents.includes("*") && !p.peer;
 }
+
+/** 按 scope 过滤后只读返回的管理信息（技能库、按 agent 的技能视图）：全权凭据，或 grant 明确带 manage 的设备（部分 scope 也算），peer 除外。写一律走 canManage */
+export const canReadScopedManage = (p: Principal): boolean => canManage(p) || (p.manage === true && !p.peer);
 
 /**
  * 内置台账（docs 10-ledger §4）的唯一读门，API / SSE ledger 事件 / GET /agents 的 ledgerTask 三处共用。
- * 台账横跨整个项目的任务、执行者与 owner 原话，所以比 canManage 多要「全 scope、非 peer」：
- * 部分 scope 的 owner 设备、guest、peer（含历史上签过 "*" 的）一律不给；老的全 scope Bearer 随 canManage 过渡期放行。
+ * 台账横跨整个项目的任务、执行者与 owner 原话：部分 scope 的 owner 设备、guest、peer 一律不给——canManage 已经要求「全 scope、非 peer」，
+ * 单列一个名字是为了以后两道门分开收紧时不用改调用方；老的全 scope Bearer 随 canManage 过渡期放行。
  */
 export function canReadLedger(p: Principal): boolean {
-  return canManage(p) && p.agents.includes("*") && !p.peer;
+  return canManage(p);
 }
 
 /** 订阅额度（账户用量、重置次数、读凭据的开关）只给本机 owner，与台账同一道门（设计稿 T2b §5） */

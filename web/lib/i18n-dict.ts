@@ -14,19 +14,21 @@ import { TOOLS_DICT } from "./i18n-dict-tools";
 import { BOUNDARY_DICT } from "./i18n-dict-boundary";
 import { COLLAB_DICT } from "./i18n-dict-collab";
 import { LEDGER_DICT } from "./i18n-dict-ledger";
+import { MEDIA_DICT } from "./i18n-dict-media";
 import { QUOTA_DICT } from "./i18n-dict-quota";
 import { CONTACTS_DICT } from "./i18n-dict-contacts";
 import { SESSIONS_DICT } from "./i18n-dict-sessions";
 import { SKILLS_DICT } from "./i18n-dict-skills";
 
 export const DICT: Record<string, string> = {
-  ...LEDGER_DICT, ...COLLAB_DICT, ...BOUNDARY_DICT, ...ATTACH_DICT, ...TOOLS_DICT,
+  ...LEDGER_DICT, ...COLLAB_DICT, ...BOUNDARY_DICT, ...ATTACH_DICT, ...TOOLS_DICT, ...MEDIA_DICT,
   ...QUOTA_DICT, // 订阅额度卡片组与开关（lib/i18n-dict-quota.ts）
   ...CONTACTS_DICT, // 侧栏联系人与输入框 @（lib/i18n-dict-contacts.ts）
   ...SESSIONS_DICT, // 未纳管会话 / 归档（lib/i18n-dict-sessions.ts）
   ...SKILLS_DICT, // 技能库与按会话启停（lib/i18n-dict-skills.ts）
   // ── 通用 ─────────────────────────────────────────────
   "关闭": "Close",
+  "斜杠命令只有 owner 能用，请直接发文字": "Slash commands are owner-only — send it as plain text", // bridge/api-slash.ts 的 slash_owner_only
   "正在回复…": "Replying…",
   "仍在工作…": "Still working…",
   "正在压缩上下文…": "Compacting context…",
@@ -501,6 +503,11 @@ export const DICT: Record<string, string> = {
   "任务指令:到点起一个临时 agent 执行,完成后自动清理并报告": "Prompt: a temporary agent runs it on schedule, reports back and is cleaned up",
   "表达式": "Expression",
   "任务指令": "Prompt",
+  "任务名": "Task name",
+  "定时任务的 prompt 只能一行": "A scheduled task's prompt must be a single line",
+  "任务指令里有看不见的控制字符（比如 Tab），请删掉": "The prompt contains an invisible control character (such as Tab) — please remove it",
+  "「{field}」里有换行或看不见的控制字符。到点会原样敲进终端，换行会让它提前提交，所以只能写成一行":
+    "\"{field}\" contains a line break or an invisible control character. It is typed into the terminal as-is at run time, where a line break submits early, so it must be a single line",
   "目录": "Directory",
   "下次": "Next run:", // 后接时间或「已停用」
   "上次": "Last run:",

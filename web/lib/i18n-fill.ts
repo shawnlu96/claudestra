@@ -12,3 +12,11 @@ export function fillParams(s: string, params?: I18nParams): string {
   if (!params) return picked;
   return picked.replace(/\{(\w+)\}/g, (m, k: string) => (params[k] === undefined ? m : String(params[k])));
 }
+
+/**
+ * 整段原文（历史里的命令行、命令输出）：字典里有译文才走 fillParams，没有就原样返回。
+ * 不能直接过 fillParams——原文恰好带一个 |（`/review a | b`）会被当成「单数|复数」只剩后半段。
+ */
+export function fillVerbatim(s: string, translated: string | undefined): string {
+  return translated === undefined ? s : fillParams(translated);
+}
