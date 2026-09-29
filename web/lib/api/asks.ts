@@ -6,9 +6,13 @@ import type { WebAsk } from "@/features/asks/asks-model";
 import { api } from "./client";
 import { followEventStream } from "./ledger";
 
-/** canAnswer：这个凭据能不能作答（owner 本人）；看得见、答不了的卡片上不出选项。老 bridge 不给就当能答 */
-export function fetchAsks(signal?: AbortSignal): Promise<{ ok: boolean; asks: WebAsk[]; canAnswer?: boolean; presence?: string; now: number }> {
-  return api("/asks", { signal, timeoutMs: 10_000 });
+/**
+ * 每行带 canAnswer（这个凭据能不能答这一条）；guest 只拿得到指给自己的。
+ * 老 bridge 只给顶层一个 canAnswer：行上没有就用它（托管前端先升级时，guest 不该看到一点就 403 的按钮）
+ */
+export async function fetchAsks(signal?: AbortSignal): Promise<{ ok: boolean; asks: WebAsk[]; presence?: string; now: number }> {
+  const r = await api<{ ok: boolean; asks: WebAsk[]; presence?: string; now: number; canAnswer?: boolean }>("/asks", { signal, timeoutMs: 10_000 });
+  return typeof r.canAnswer === "boolean" ? { ...r, asks: r.asks.map((a) => ({ ...a, canAnswer: a.canAnswer ?? r.canAnswer })) } : r;
 }
 
 /**
