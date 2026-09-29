@@ -6,14 +6,12 @@
  * - 图片：外链（可能来自网页、peer、guest）是追踪信标，先占位、点了才加载且不带 Referer；本机附件带凭据取
  *   （内核直接 <img src="/api/v1/…"> 经中继少了机器前缀会 404）；data: / blob: 照常。
  */
-import { createContext, useContext, useState, type SyntheticEvent } from "react";
-import { getRenderElementProps, MarkdownType, RenderChildren, type RenderElementProps } from "@do-md/core-react";
-import { imageHost, imageSrcKind, safeLinkHref } from "@/lib/chat/md-guard";
+import { useState, type SyntheticEvent } from "react";
+import { getRenderElementProps, MarkdownType, RenderChildren, useRenderData, type RenderElementProps } from "@do-md/core-react";
+import { imageHost, imageSrcKind, imageSrcOf, safeLinkHref } from "@/lib/chat/md-guard";
 import { useT } from "@/lib/i18n";
 import { AuthImg } from "@/features/chat/components/auth-img";
-
-/** src → alt（Domd 从原文 `![alt](src)` 里取）：do-md 的 Img 节点只带 src，拦下的图片和外链占位靠它显示 alt */
-export const ImgAltContext = createContext<ReadonlyMap<string, string>>(new Map());
+import { imageAltOf } from "./img-alt";
 
 function SafeLink({ parsedData }: RenderElementProps) {
   const props: Record<string, unknown> = { ...getRenderElementProps(parsedData) };
@@ -49,9 +47,10 @@ function SafeImg({ parsedData }: RenderElementProps) {
   const t = useT();
   const [load, setLoad] = useState(false);
   const { src, alt, ...props } = getRenderElementProps(parsedData) as Record<string, unknown>;
-  const alts = useContext(ImgAltContext);
-  const url = typeof src === "string" ? src.trim() : "";
-  const label = (typeof alt === "string" && alt) || alts.get(url) || "";
+  const root = useRenderData();
+  const url = imageSrcOf(src);
+  // do-md 的 Img 节点只带 src：拦下的图片和外链占位要显示 alt，得回原文取（./img-alt）
+  const label = (typeof alt === "string" && alt) || imageAltOf(root, parsedData);
   const kind = imageSrcKind(url);
   if (kind === "attachment") return <AuthImg {...props} src={url} alt={label} />;
   // eslint-disable-next-line @next/next/no-img-element

@@ -125,7 +125,7 @@ function TextBody({ flavor, text }: { flavor: TextFlavor; text: string }) {
       <div className="min-h-0 flex-1 overflow-auto overscroll-contain">
         {flavor === "markdown" ? (
           // 只留默认行内规则：附件是外来内容，`[[{#id}…]]` 不能变成会替用户回投给 agent 的按钮
-          <Domd initMd={shown} inlineRules={defaultInlineRules} bodyClassName="chat-domd px-4 py-3" onPlain={onPlain} />
+          <Domd initMd={shown} inlineRules={defaultInlineRules} bodyClassName="chat-domd px-4 py-3" onPlain={onPlain} probe="worker" />
         ) : (
           <pre className="whitespace-pre-wrap break-words px-4 py-3 font-mono text-[12.5px] leading-relaxed text-base-content">{breakLongRuns(shown)}</pre>
         )}

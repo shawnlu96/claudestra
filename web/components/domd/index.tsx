@@ -18,10 +18,9 @@ import "@do-md/core-react/style.css";
 import { tokenize, subscribeGrammarLoad, getGrammarVersion } from "./prism";
 import { padTableBlocks } from "./normalize-md";
 import { InlineButton, CopyChip, AgentChip, BadgeChip } from "./inline-button";
-import { ImgAltContext, SAFE_NODES } from "./safe-nodes";
-import { domdSafe } from "./probe";
+import { SAFE_NODES } from "./safe-nodes";
+import { usePlainReason, type PlainReason, type ProbeMode } from "./use-plain-reason";
 import { breakLongRuns } from "./long-runs";
-import { imageAlts, mdTooHeavy } from "@/lib/chat/md-guard";
 import { useT } from "@/lib/i18n";
 import { ErrorBoundary } from "@/lib/error-boundary";
 import { reportBoundaryError } from "@/lib/runtime-error";
@@ -60,22 +59,25 @@ export type DomdProps = Omit<ProviderProps, "children"> & {
   children?: ReactNode;
   /** 退回纯文本时通知调用方（附件预览在顶部显示提示条）；不传就在正文上方显示一行提示 */
   onPlain?: (reason: PlainReason) => void;
+  /** 试解析放哪：auto = 超过 4 KB 进 Worker（带时间预算）；流式中的消息每 80 ms 重挂一次，用 sync 免得反复闪纯文本 */
+  probe?: ProbeMode;
 };
 
-/** heavy = 护栏按大小 / 定界符 / 嵌套判定；complex = 试解析出错、树太深或渲染出错 */
-export type PlainReason = "heavy" | "complex";
+export type { PlainReason };
 
 export const PLAIN_NOTICE: Record<PlainReason, string> = {
   heavy: "内容较大，按纯文本显示",
   complex: "内容结构太复杂，按纯文本显示",
+  slow: "内容解析太慢，按纯文本显示",
 };
 
-function PlainBody({ className, text, reason, onPlain }: { className?: string; text: ReactNode; reason: PlainReason; onPlain?: (r: PlainReason) => void }) {
+/** reason 为空 = 等试解析结论，先显示纯文本、不提示 */
+function PlainBody({ className, text, reason, onPlain }: { className?: string; text: ReactNode; reason?: PlainReason; onPlain?: (r: PlainReason) => void }) {
   const t = useT();
-  useEffect(() => onPlain?.(reason), [onPlain, reason]);
+  useEffect(() => void (reason && onPlain?.(reason)), [onPlain, reason]);
   return (
     <div className={className}>
-      {!onPlain && <div className="mb-1 text-xs text-base-content/50">{t(PLAIN_NOTICE[reason])}</div>}
+      {reason && !onPlain && <div className="mb-1 text-xs text-base-content/50">{t(PLAIN_NOTICE[reason])}</div>}
       <div className="whitespace-pre-wrap break-words">{typeof text === "string" ? breakLongRuns(text) : text}</div>
     </div>
   );
@@ -86,7 +88,7 @@ function PlainBody({ className, text, reason, onPlain }: { className?: string; t
  * initMd 是初始 markdown（挂载时读一次）——所以调用方对「流式进行中」的消息
  * 先用纯文本渲染，定稿后再挂 Domd（一次性拿全量 content），见 message-list。
  */
-export function Domd({ bodyClassName, children, onPlain, ...provider }: DomdProps) {
+export function Domd({ bodyClassName, children, onPlain, probe = "auto", ...provider }: DomdProps) {
   // 表格紧贴上一行时 do-md 认不出来（它要求表格自成块）——渲染前补上那个空行。
   // 见 ./normalize-md：0.2.10 与最新 0.11.2 行为一致，升级救不了，只能归一化。
   const initMd = useMemo(
@@ -106,30 +108,23 @@ export function Domd({ bodyClassName, children, onPlain, ...provider }: DomdProp
     ...provider,
     initMd,
   };
-  // 段内定界符过多 / 嵌套过深的 md 交给 do-md 会卡死或栈溢出（lib/chat/md-guard.ts 有实测数字）；护栏认不出的再试解析一遍（./probe）
-  const reason = useMemo((): PlainReason | null => {
-    if (typeof initMd !== "string") return null;
-    if (mdTooHeavy(initMd)) return "heavy";
-    return domdSafe(opts) ? null : "complex";
-  }, [initMd]); // eslint-disable-line react-hooks/exhaustive-deps -- 解析结果只随 initMd 变（其余参数挂载后不变，DOMD 本身也只读一次）
-  const alts = useMemo(() => (typeof initMd === "string" && !reason ? imageAlts(initMd) : new Map<string, string>()), [initMd, reason]);
-  const plain = (r: PlainReason) => <PlainBody className={bodyClassName} text={initMd} reason={r} onPlain={onPlain} />;
-  if (reason) return plain(reason);
+  // 交给 do-md 会卡死或栈溢出的 md 退回纯文本：护栏 + 试解析（./use-plain-reason）
+  const reason = usePlainReason(opts, probe);
+  const plain = (r?: PlainReason) => <PlainBody className={bodyClassName} text={initMd} reason={r} onPlain={onPlain} />;
+  if (reason) return plain(reason === "pending" ? undefined : reason);
   // 渲染里抛的错（栈溢出等）也退回纯文本，并上报一次好补阈值
   return (
     <ErrorBoundary fallback={() => plain("complex")} onError={DOMD_ERR} resetKey={initMd}>
-      <ImgAltContext.Provider value={alts}>
-        <DOMDProvider key={grammarV} {...opts}>
-          {bodyClassName ? (
-            <div className={bodyClassName}>
-              <DOMD />
-            </div>
-          ) : (
+      <DOMDProvider key={grammarV} {...opts}>
+        {bodyClassName ? (
+          <div className={bodyClassName}>
             <DOMD />
-          )}
-          {children}
-        </DOMDProvider>
-      </ImgAltContext.Provider>
+          </div>
+        ) : (
+          <DOMD />
+        )}
+        {children}
+      </DOMDProvider>
     </ErrorBoundary>
   );
 }

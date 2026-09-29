@@ -10,7 +10,7 @@ import { EditorStore } from "@do-md/core-react";
 export const MD_MAX_TREE_DEPTH = 160;
 
 type Node = { children_?: Node[] };
-type StoreProps = ConstructorParameters<typeof EditorStore>[0];
+export type StoreProps = ConstructorParameters<typeof EditorStore>[0];
 
 function treeDepth(root: Node): number {
   let max = 0;
@@ -24,10 +24,15 @@ function treeDepth(root: Node): number {
   return max;
 }
 
+/** do-md 的解析树（和 DOMDProvider 里的一样），可能栈溢出 / 抛错 */
+export function parseMd(props: StoreProps): unknown {
+  return new EditorStore(props).renderData_;
+}
+
 /** 这段 md 交给 do-md 能不能安全渲染；参数和 DOMDProvider 的一样（解析结果只取决于它们） */
 export function domdSafe(props: StoreProps): boolean {
   try {
-    return treeDepth(new EditorStore(props).renderData_ as Node) <= MD_MAX_TREE_DEPTH;
+    return treeDepth(parseMd(props) as Node) <= MD_MAX_TREE_DEPTH;
   } catch {
     return false; // 解析就栈溢出 / 抛错：调用方退回纯文本并提示，错误本身没有别的用处
   }

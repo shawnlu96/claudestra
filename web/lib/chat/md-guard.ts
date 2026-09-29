@@ -5,7 +5,8 @@
  *   行首 `- ` / `1. ` 约 400 层、同段裸链接约 1250 个栈溢出；表格 100 列 × 400 行 2 s（贵在列数 × 行数，3 列 3 万行只要 0.07 s）。
  *   do-md 的图片 / HTML 块正则会回溯：`![a](` 后接一串 `"`、`<a` 后接一串字母，单行 20 KB 1.4 s、60 KB 超过 30 s。
  *   真实文档单段定界符最多 1454。阈值内的最坏构造 ≤ 0.45 s。
- *   护栏只挡已知形状；漏网的由 components/domd 兜底（先试解析 + 查树深，渲染出错退回纯文本）。
+ *   护栏只挡已知形状，却是短消息和 Worker 用不了时唯一的防线；长消息、附件另有 Worker 试解析的时间预算兜底，
+ *   栈溢出 / 树太深由试解析接住（components/domd/use-plain-reason.ts）。渲染慢（嵌套总量、表格）只能靠这里。
  * - 链接只放行 http / https / mailto；图片分本机附件 / 内联 / 外链 / 其他，外链点了才加载（防追踪信标）。
  */
 
@@ -14,14 +15,19 @@ export const MD_MAX_BLOCK_DELIMS = 2000;
 export const MD_MAX_TOTAL_DELIMS = 16000;
 export const MD_MAX_INDENT = 80;
 export const MD_MAX_NEST = 50;
-/** 一段 / 全文里 `|` 的个数（≈ 表格列数 × 行数） */
-export const MD_MAX_TABLE_CELLS = 10000;
-export const MD_MAX_TOTAL_CELLS = 20000;
+/** 全文 `|` 的个数（≈ 表格格数）：贵在 React 渲染，Worker 兜不住；1 万格 0.4–1.2 s，真实文档最多 2235 */
+export const MD_MAX_TABLE_CELLS = 5000;
 /** 行首由空白、`>`、列表 / 序号 / 任务框标记连成的一串的长度（嵌套写法五花八门，按长度兜底） */
 export const MD_MAX_PREFIX = 100;
 /** 任意一行的长度；含 `![` 或以 `<字母` 开头的正文行（会触发 do-md 回溯的两个正则）更短 */
 export const MD_MAX_LINE = 8 * 1024;
 export const MD_MAX_REGEX_LINE = 4 * 1024;
+/** 去掉行首前缀后以 `<字母` 开头的行，全文累计长度（HTML 块正则的回溯随整篇超线性增长，单行限长挡不住多行；真实文档最多 449） */
+export const MD_MAX_HTML_TOTAL = 4 * 1024;
+/** `](` 到 `)` 之间的连续空白（图片 / 链接正则在这里是三次方级：1 KB 空白 2.7 s） */
+export const MD_MAX_SRC_SPACE = 64;
+/** 全文各行嵌套层数之和（每行都不超限、行数一多，React 渲染和排版照样卡：`- `×50 × 400 行 1–2 s） */
+export const MD_MAX_NEST_TOTAL = 2000;
 
 const DELIM = /[[\]()*_`~<!=\\]/g;
 /** 裸链接（do-md 自动识别成链接）：一个比一个定界符贵得多，按 LINK_WEIGHT 个计 */
@@ -30,10 +36,9 @@ const LINK_WEIGHT = 8;
 /** 行首连续的引用 / 列表标记（`> - 1. - [ ] x`）：每个是一层嵌套。和 do-md 一样按 `\s` 认空白（含 nbsp、全角空格、\f） */
 const NEST_MARK = /\s*(?:>|[-*+](?=\s|$)|\d+[.)](?=\s|$))(?:\s+\[[ xX]\](?=\s|$))?/y;
 const PREFIX = /^(?:\s|>|(?:[-*+]|\d+[.)]|\[[ xX]\])(?=\s|$))*/;
-/** do-md 图片正则 / HTML 块正则会回溯的行 */
-const REGEX_LINE = /!\[|^\s*<[a-zA-Z]/;
+const HTML_START = /^<[a-zA-Z]/;
 
-function utf8Over(s: string, limit: number): boolean {
+export function utf8Over(s: string, limit: number): boolean {
   if (s.length > limit) return true; // 每个 UTF-16 单元至少 1 字节
   if (s.length * 3 <= limit) return false;
   return new TextEncoder().encode(s).length > limit;
@@ -92,12 +97,26 @@ function proseOnly(md: string): string {
   return out;
 }
 
-/** 这一行本身就会让 do-md 卡住 / 栈溢出：太长、会回溯、行首嵌套太深 */
-function lineTooHeavy(line: string): boolean {
+/** `](` 到下一个 `)`（没有就到行尾）之间最长的一串空白；逐字扫一遍，线性 */
+function srcSpaceRun(line: string): number {
+  let max = 0;
+  for (let i = line.indexOf("]("); i >= 0; i = line.indexOf("](", i)) {
+    let run = 0;
+    for (i += 2; i < line.length && line[i] !== ")"; i++) {
+      run = /\s/.test(line[i]) ? run + 1 : 0;
+      if (run > max) max = run;
+    }
+  }
+  return max;
+}
+
+/** 这一行本身就会让 do-md 卡住 / 栈溢出：太长、会回溯、行首嵌套太深。body = 去掉行首空白 / 列表 / 引用前缀后的部分 */
+function lineTooHeavy(line: string, prefix: number): boolean {
   if (line.length > MD_MAX_LINE) return true;
-  if (line.length > MD_MAX_REGEX_LINE && REGEX_LINE.test(line)) return true;
-  if (indentOf(line) > MD_MAX_INDENT || nestOf(line) > MD_MAX_NEST) return true;
-  return (PREFIX.exec(line)?.[0].length ?? 0) > MD_MAX_PREFIX;
+  if (prefix > MD_MAX_PREFIX || indentOf(line) > MD_MAX_INDENT || nestOf(line) > MD_MAX_NEST) return true;
+  const regexLine = line.includes("![") || HTML_START.test(line.slice(prefix));
+  if (regexLine && line.length > MD_MAX_REGEX_LINE) return true;
+  return line.includes("](") && srcSpaceRun(line) > MD_MAX_SRC_SPACE;
 }
 
 /** 交给 do-md 会卡住或栈溢出 → 调用方按纯文本显示 */
@@ -107,17 +126,18 @@ export function mdTooHeavy(md: string): boolean {
   let block = 0;
   let total = 0;
   let cells = 0;
-  let allCells = 0;
+  let html = 0;
+  let nest = 0;
   for (const line of proseOnly(md).split("\n")) {
-    if (!line.trim()) {
-      block = cells = 0;
+    if (line === "") {
+      block = 0; // 只认真正的空行：只含空白的行、CRLF 空行（"\r"）do-md 都不分段
       continue;
     }
-    if (lineTooHeavy(line)) return true;
-    const pipes = line.split("|").length - 1;
-    cells += pipes;
-    allCells += pipes;
-    if (cells > MD_MAX_TABLE_CELLS || allCells > MD_MAX_TOTAL_CELLS) return true;
+    const prefix = PREFIX.exec(line)?.[0].length ?? 0;
+    if (lineTooHeavy(line, prefix)) return true;
+    if (HTML_START.test(line.slice(prefix)) && (html += line.length - prefix) > MD_MAX_HTML_TOTAL) return true;
+    if ((nest += nestOf(line)) > MD_MAX_NEST_TOTAL) return true;
+    if ((cells += line.split("|").length - 1) > MD_MAX_TABLE_CELLS) return true;
     const n = (line.match(DELIM)?.length ?? 0) + (line.match(AUTOLINK)?.length ?? 0) * LINK_WEIGHT;
     block += n;
     total += n;
@@ -126,17 +146,20 @@ export function mdTooHeavy(md: string): boolean {
   return false;
 }
 
-/** alt / src 都不跨过下一个 `[` / `(`：每次尝试最多扫到下一处 `![`，`![` 连一行也是线性的 */
-const IMAGE_MD = /!\[([^[\]\n]{0,500})\]\(([^()\n]{0,2048})\)/g;
+/** 去掉 src 末尾的 `"title"` / `'title'`：用 lastIndexOf 不用正则（`\s+"…"\s*$` 遇到长空白是平方级） */
+function stripTitle(raw: string): string {
+  const s = raw.trimEnd();
+  const q = s[s.length - 1];
+  if (q !== '"' && q !== "'") return s.trim();
+  const open = s.lastIndexOf(q, s.length - 2);
+  return open > 0 && /\s/.test(s[open - 1]) ? s.slice(0, open).trim() : s.trim();
+}
 
-/** `![alt](src)` 里的 alt，按 src 查（do-md 的 Img 节点只带 src，拦下的图片要显示 alt 得回原文找）；同一 src 取第一个 */
-export function imageAlts(md: string): Map<string, string> {
-  const alts = new Map<string, string>();
-  for (const m of md.matchAll(IMAGE_MD)) {
-    const src = m[2].replace(/\s+"[^"]*"\s*$/, "").trim();
-    if (!alts.has(src)) alts.set(src, m[1]);
-  }
-  return alts;
+/** do-md 图片节点的 src 原样带着 title、尖括号（`x.png "t"`、`<x y.png>`）：取出真正的地址 */
+export function imageSrcOf(raw: unknown): string {
+  if (typeof raw !== "string") return "";
+  const s = stripTitle(raw);
+  return s.length > 1 && s.startsWith("<") && s.endsWith(">") ? s.slice(1, -1).trim() : s;
 }
 
 /** 链接只放行这三种协议；javascript: / data: / file: / 相对路径都按纯文本显示 */

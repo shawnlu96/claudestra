@@ -127,7 +127,7 @@ const TextBlock = memo(function TextBlock({
             // 一次 → 用 key 按内容长度强制重挂,每次 80ms 合批后重新解析整段。段落
             // 级体量解析是亚毫秒级,memo 隔离其它段;未闭合语法(写到一半的 **/```)
             // 期间样式会短暂跳动,属流式渲染的正常代价。
-            <Domd key={text.length} initMd={text} bodyClassName="chat-domd" />
+            <Domd key={text.length} initMd={text} bodyClassName="chat-domd" probe="sync" />
           ) : (
             <Domd initMd={text} bodyClassName="chat-domd" />
           )}

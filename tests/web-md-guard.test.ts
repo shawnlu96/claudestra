@@ -10,7 +10,7 @@ import {
   MD_MAX_INDENT,
   MD_MAX_NEST,
   MD_MAX_LINE,
-  imageAlts,
+  imageSrcOf,
   MD_MAX_TOTAL_DELIMS,
   imageHost,
   imageSrcKind,
@@ -118,13 +118,13 @@ describe("mdTooHeavy", () => {
     expect(mdTooHeavy("www.a.b ".repeat(300))).toBe(true);
     expect(mdTooHeavy(Array(8).fill(urls(200, " ")).join("\n\n"))).toBe(false);
   });
-  test("一段里的表格单元格（`|` 个数）超过 10000 降级：超宽表格贵在列数 × 行数", () => {
+  test("全文表格单元格（`|` 个数）超过 5000 降级：贵在 React 渲染（Worker 兜不住），真实文档最多 2235", () => {
     const table = (cols: number, rows: number) => ("|" + "a|".repeat(cols) + "\n").repeat(rows);
-    expect(mdTooHeavy(table(99, 100))).toBe(false);
+    expect(mdTooHeavy(table(49, 100))).toBe(false);
+    expect(mdTooHeavy(table(50, 100))).toBe(true);
     expect(mdTooHeavy(table(47000, 2))).toBe(true);
-    expect(mdTooHeavy(table(100, 101))).toBe(true);
-    expect(mdTooHeavy(Array(3).fill(table(50, 100)).join("\n"))).toBe(false); // 空行分开的各算各的
-    expect(mdTooHeavy(Array(8).fill(table(50, 100)).join("\n"))).toBe(true); // 全文超过 2 万格
+    expect(mdTooHeavy(Array(2).fill(table(24, 100)).join("\n"))).toBe(false);
+    expect(mdTooHeavy(Array(3).fill(table(24, 100)).join("\n"))).toBe(true); // 空行分开也按全文累计
     expect(mdTooHeavy("```\n" + table(200, 100) + "```")).toBe(false);
   });
   test("缩进超过 80 列降级（深层嵌套列表会栈溢出）；tab 按 4 列", () => {
@@ -185,19 +185,15 @@ describe("imageSrcKind：图片来源", () => {
     expect(imageSrcKind("/api/v1/attachments/a%E0%A4%A.png")).toBe("blocked"); // 非法 % 序列一律拒
     expect(imageSrcKind("/api/v1/attachments/a%7F.png")).toBe("blocked"); // DEL 和服务端一样算控制字符
   });
-  test("imageAlts：拦下的图片按 src 回原文取 alt", () => {
-    const alts = imageAlts('x ![截图 1](javascript:x) ![b]( https://t.example/p.png "title") ![c](https://t.example/p.png)');
-    expect(alts.get("javascript:x")).toBe("截图 1");
-    expect(alts.get("https://t.example/p.png")).toBe("b");
-    expect(imageAlts("![](a.png)").get("a.png")).toBe("");
-  });
-  test("imageAlts：`![` / `![a](` 连一长串是线性的（alt / src 不跨过下一个 `[` `(`）", () => {
-    for (const md of ["![".repeat(95000), "![a](".repeat(38000), "![a](" + '"'.repeat(190000)]) {
-      const t = performance.now();
-      imageAlts(md);
-      expect(performance.now() - t).toBeLessThan(200);
-    }
-    expect(imageAlts("![![a](b.png)").get("b.png")).toBe("a");
+  test("imageSrcOf：do-md 给的 src 带着 title / 尖括号，取出真正的地址", () => {
+    expect(imageSrcOf('https://t.example/p.png "title"')).toBe("https://t.example/p.png");
+    expect(imageSrcOf("x.png  't'")).toBe("x.png");
+    expect(imageSrcOf("  <x y.png> ")).toBe("x y.png");
+    expect(imageSrcOf('a"b.png')).toBe('a"b.png'); // 引号前不是空白：不是 title
+    expect(imageSrcOf(undefined)).toBe("");
+    const t = performance.now();
+    imageSrcOf("x" + " ".repeat(190000) + '"' + " ".repeat(190000) + '"');
+    expect(performance.now() - t).toBeLessThan(50);
   });
   test("imageHost：占位上显示的域名", () => {
     expect(imageHost("https://tracker.example:8443/p.gif?id=1")).toBe("tracker.example:8443");
