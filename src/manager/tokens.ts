@@ -106,6 +106,7 @@ export async function cmdTokenList() {
       agents: p.agents,
       disabled: !!p.disabled,
       mirror: p.mirror !== false,
+      ...(p.peer ? { peer: p.peer, messagesOnly: !!p.messagesOnly } : {}),
       createdAt: p.createdAt,
       secretPreview: p.secret ? `${p.secret.slice(0, 8)}…` : "",
     }));

@@ -21,7 +21,7 @@ export const WRITE_COMMANDS: ReadonlySet<string> = new Set([
   "create", "resume", "adopt", "kill", "remove", "restart", "rename", "archive",
   "cron-add", "cron-remove", "cron-toggle", "cron-edit",
   "install-hooks",
-  "peer-http-invite", "peer-http-join", "peer-http-accept", "peer-http-scope", "peer-http-remove", "peer-http-tidy",
+  "peer-http-invite", "peer-http-join", "peer-http-accept", "peer-http-scope", "peer-http-remove", "peer-http-tidy", "peer-http-messages-only",
   "peer-invite-new", "peer-join-auto", "peer-invite-revoke",
   "token-add", "token-revoke",
   "project-add", "project-edit", "project-remove", "project-assign", "project-merge", "project-migrate", "external", "label",
@@ -36,7 +36,7 @@ export const WRITE_COMMANDS: ReadonlySet<string> = new Set([
  * 续期 / 配对 / 撤销（updatePrincipals）互斥——否则 bridge 拿旧副本写回会把 token-revoke / peer 撤销吃掉。
  */
 export const PRINCIPALS_WRITE_COMMANDS: ReadonlySet<string> = new Set([
-  "peer-http-invite", "peer-http-join", "peer-http-accept", "peer-http-scope", "peer-http-remove", "peer-http-tidy",
+  "peer-http-invite", "peer-http-join", "peer-http-accept", "peer-http-scope", "peer-http-remove", "peer-http-tidy", "peer-http-messages-only",
   "peer-invite-new", "peer-join-auto", "peer-invite-revoke", "peer-invite-redeem", "peer-invite-list",
   "token-add", "token-revoke", "external",
 ]);
