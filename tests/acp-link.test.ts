@@ -1,5 +1,5 @@
 import { beforeAll, describe, expect, test } from "bun:test";
-import { acpConfigOf, acpSetConfig, answerAcp, onAcpFrame } from "../src/bridge/acp-link.ts";
+import { acpConfigOf, acpSetConfig, answerAcp, liveAcpButtons, onAcpFrame, onAcpHostGone } from "../src/bridge/acp-link.ts";
 import { noteAcpChannel } from "../src/bridge/acp-state.ts";
 import { subscribeEvents } from "../src/bridge/event-bus.ts";
 import { startWatching, stopWatching } from "../src/bridge/jsonl-watcher.ts";
@@ -54,45 +54,184 @@ describe("onAcpFrame", () => {
   });
 });
 
+// Shawn 本机 Codex r4 P1-2 的 bridge 一侧：watcher 还没挂好（注册后要查 registry）回 false，宿主据此重送、不当成功；
+// 重送的批次按 hostId + 条目序号跳过已经处理过的前缀（上次处理完、回包却丢了），换了宿主进程序号重来
+describe("流式条目的确认与去重（r4 P1-2）", () => {
+  const CH2 = "local-acp-seq";
+  const tool = (id: string) => ({ type: "assistant", timestamp: "t", message: { content: [{ type: "tool_use", id, name: "Bash", input: { command: id } }] } });
+  test("没 watcher 回 false；同一宿主重送只处理没处理过的；新宿主进程从头算", async () => {
+    const s = sock(CH2);
+    noteAcpChannel(CH2, "acp");
+    const send = async (hostId: string, firstSeq: number, ids: string[], rid: string) => {
+      await onAcpFrame({ type: "acp_entries", channelId: CH2, hostId, firstSeq, entries: ids.map(tool), requestId: rid }, s, discord);
+      return s.sent.find((f) => f.requestId === rid)?.result;
+    };
+    expect(await send("h1", 1, ["a"], "r0")).toBe(false);
+    await startWatching("agent-acp-seq", "/w", "019a-seq", CH2, discord, { runtime: "codex" });
+    const started: string[] = [];
+    const unsub = subscribeEvents({}, (e) => void (e.chatId === CH2 && e.type === "tool_start" && started.push(String((e.data as { toolId?: unknown }).toolId))));
+    try {
+      expect(await send("h1", 1, ["a"], "r1")).toBe(true);
+      expect(await send("h1", 1, ["a", "b"], "r2")).toBe(true);
+      expect(await send("h1", 1, ["a", "b"], "r3")).toBe(true);
+      expect(await send("h2", 1, ["c"], "r4")).toBe(true);
+      expect(started).toEqual(["a", "b", "c"]);
+    } finally {
+      unsub();
+      stopWatching("agent-acp-seq");
+    }
+  });
+});
+
 describe("额度卡：先「等重置」、只列其它模型、owner 点了才经宿主改", () => {
-  test("切到某模型 → 宿主收到 set_config_option；等重置 → 什么都不改；过期的按钮 409", async () => {
+  const quota = (key: string, message: string) => ({ type: "acp_failure", channelId: CH, failure: { kind: "quota", key, message }, configOptions: CONFIG });
+  test("切到某模型 → 宿主收到 set_config_option；等重置 → 什么都不改；答过的按钮 409", async () => {
     const s = sock(CH);
-    await onAcpFrame({ type: "acp_failure", channelId: CH, failure: { kind: "quota", key: "air:t1", message: "You've hit your usage limit." }, configOptions: CONFIG }, s, discord);
-    const pending = answerAcp(CH, "acp_quota_1", who);
+    await onAcpFrame(quota("air:t1", "You've hit your usage limit."), s, discord);
+    const [, luna] = liveAcpButtons(CH).quota;
+    await onAcpFrame(quota("air:t1", "You've hit your usage limit."), s, discord);
+    expect(liveAcpButtons(CH).quota[1]).toBe(luna!); // 同一个失败又报一次：沿用这张卡，按钮不变
+    const pending = answerAcp(CH, luna!, who);
     await new Promise((r) => setTimeout(r, 0));
     const call = s.sent.find((f) => f.type === "acp_call");
     expect(call).toMatchObject({ op: "set_config", configId: "model", value: "gpt-5.6-luna" });
     await onAcpFrame({ type: "acp_call_result", channelId: CH, id: call.id, ok: true, configOptions: CONFIG }, s, discord);
     expect(await pending).toEqual({ status: 200, body: { ok: true, model: "gpt-5.6-luna" } });
-    expect((await answerAcp(CH, "acp_quota_1", who)).status).toBe(409);
+    expect((await answerAcp(CH, luna!, who)).status).toBe(409);
 
-    await onAcpFrame({ type: "acp_failure", channelId: CH, failure: { kind: "quota", key: "air:t2", message: "limit" }, configOptions: CONFIG }, s, discord);
+    await onAcpFrame(quota("air:t2", "limit"), s, discord);
     const before = s.sent.length;
-    expect(await answerAcp(CH, "acp_quota_0", who)).toEqual({ status: 200, body: { ok: true, model: null } });
+    expect(await answerAcp(CH, liveAcpButtons(CH).quota[0]!, who)).toEqual({ status: 200, body: { ok: true, model: null } });
     expect(s.sent.length).toBe(before);
   });
 
-  test("宿主拒了（选项不对等）→ 409 带原因，卡不结", async () => {
+  test("宿主拒了（选项不对等）→ 409 带原因，卡不结、按钮还能用", async () => {
     const s = sock(CH);
-    await onAcpFrame({ type: "acp_failure", channelId: CH, failure: { kind: "quota", key: "air:t3", message: "limit" }, configOptions: CONFIG }, s, discord);
-    const pending = answerAcp(CH, "acp_quota_1", who);
+    await onAcpFrame(quota("air:t3", "limit"), s, discord);
+    const luna = liveAcpButtons(CH).quota[1]!;
+    const pending = answerAcp(CH, luna, who);
     await new Promise((r) => setTimeout(r, 0));
     const call = s.sent.filter((f) => f.type === "acp_call").at(-1);
     await onAcpFrame({ type: "acp_call_result", channelId: CH, id: call.id, ok: false, error: "Invalid params" }, s, discord);
     expect(await pending).toMatchObject({ status: 409, body: { error: expect.stringContaining("Invalid params") } });
+    expect(liveAcpButtons(CH).quota[1]).toBe(luna);
+    await answerAcp(CH, liveAcpButtons(CH).quota[0]!, who); // 收尾：等重置，结掉这张
+  });
+
+  // Shawn 本机 Codex r4 P1-1（额度卡按索引复用）：旧卡的第 i 个按钮不能落到新卡的第 i 个选项上
+  test("换了一次失败就是新卡：旧卡的按钮 409、零调用；认领在第一个 await 之前，连点两下只算一下", async () => {
+    const s = sock(CH);
+    await onAcpFrame(quota("air:t4", "limit A"), s, discord);
+    const old = liveAcpButtons(CH).quota;
+    await onAcpFrame(quota("air:t5", "limit B"), s, discord);
+    const fresh = liveAcpButtons(CH).quota;
+    expect(fresh[1]).not.toBe(old[1]!);
+    const calls = () => s.sent.filter((f) => f.type === "acp_call").length;
+    const n = calls();
+    expect(await answerAcp(CH, old[1]!, who)).toMatchObject({ status: 409, body: { code: "ask_stale" } });
+    expect(await answerAcp(CH, "acp_quota_1", who)).toMatchObject({ status: 409 }); // 不带代际的老按钮
+    expect(calls()).toBe(n);
+    const first = answerAcp(CH, fresh[1]!, who);
+    expect(await answerAcp(CH, fresh[1]!, who)).toMatchObject({ status: 409 });
+    await new Promise((r) => setTimeout(r, 0));
+    expect(calls()).toBe(n + 1);
+    await onAcpFrame({ type: "acp_call_result", channelId: CH, id: s.sent.filter((f) => f.type === "acp_call").at(-1).id, ok: true }, s, discord);
+    expect((await first).status).toBe(200);
   });
 });
 
-describe("权限卡与离线", () => {
-  test("点了卡上的选项 → 按 requestId 回给宿主；不在卡上的 → 409", async () => {
+const OPTIONS = [{ id: "allow_once", label: "Allow", style: "success" }, { id: "decline", label: "Decline", style: "danger" }];
+const permCard = (id: string, title = "Codex 请求授权", detail = "rm -rf x") => ({ toolCallId: id, title, detail, mcp: false, options: OPTIONS });
+const hostCalls = (s: { sent: any[] }) => s.sent.filter((f) => f.type === "acp_call" || f.type === "response");
+/** 模拟宿主回 acp_call 的结果（还在等 = ok） */
+async function hostAnswers(s: { sent: any[] }, ok: boolean) {
+  await new Promise((r) => setTimeout(r, 0));
+  const call = s.sent.filter((f) => f.type === "acp_call").at(-1);
+  await onAcpFrame({ type: "acp_call_result", channelId: CH, id: call.id, ...(ok ? { ok: true } : { ok: false, error: "这个权限请求已经不在等了" }) }, s as any, discord);
+  return call;
+}
+
+describe("权限卡：按钮带代际、排队、经宿主确认（r4 P1-1 / P2）", () => {
+  test("点了卡上的选项 → acp_call 带 permId 交宿主，宿主确认还在等才 200；不在卡上的 → 409", async () => {
     const s = sock(CH);
-    const options = [{ id: "allow_once", label: "Allow", style: "success" }, { id: "decline", label: "Decline", style: "danger" }];
-    const card = { toolCallId: "c9", title: "Codex 请求授权：rm", detail: "rm -rf x", mcp: false, options };
-    await onAcpFrame({ type: "acp_permission", channelId: CH, requestId: "acphost_9", card }, s, discord);
-    expect((await answerAcp(CH, "acp_perm_bogus", who)).status).toBe(409);
-    expect(await answerAcp(CH, "acp_perm_decline", who)).toEqual({ status: 200, body: { ok: true } });
-    expect(s.sent.find((f) => f.requestId === "acphost_9")).toEqual({ type: "response", requestId: "acphost_9", result: { optionId: "decline" } });
-    expect((await answerAcp(CH, "acp_perm_decline", who)).status).toBe(409);
+    await onAcpFrame({ type: "acp_permission", channelId: CH, permId: "h1-1", card: permCard("c9") }, s, discord);
+    const [, decline] = liveAcpButtons(CH).permission;
+    expect((await answerAcp(CH, decline!.replace(/_decline$/, "_bogus"), who)).status).toBe(409);
+    const pending = answerAcp(CH, decline!, who);
+    expect(await hostAnswers(s, true)).toMatchObject({ op: "permission", permId: "h1-1", optionId: "decline" });
+    expect(await pending).toEqual({ status: 200, body: { ok: true } });
+    expect((await answerAcp(CH, decline!, who)).status).toBe(409);
+    expect(liveAcpButtons(CH).permission).toEqual([]);
+  });
+
+  // 原探针：A（读）出卡，B（删）到了，拿 A 的按钮作答——不能落到 B 上
+  test("旧卡的按钮批准不了新请求：不带代际的 409 零回包；A 的按钮只作用于 A，B 排在后面、另起新代际", async () => {
+    const s = sock(CH);
+    await onAcpFrame({ type: "acp_permission", channelId: CH, permId: "old", card: permCard("old-read", "Read file", "Read public file") }, s, discord);
+    const aAllow = liveAcpButtons(CH).permission[0]!;
+    await onAcpFrame({ type: "acp_permission", channelId: CH, permId: "new", card: permCard("new-delete", "Delete file", "Delete private file") }, s, discord);
+    const n = hostCalls(s).length;
+    expect(await answerAcp(CH, "acp_perm_allow_once", who)).toMatchObject({ status: 409 });
+    expect(hostCalls(s).length).toBe(n);
+    expect(liveAcpButtons(CH).permission[0]).toBe(aAllow); // 卡上还是 A
+    const pending = answerAcp(CH, aAllow, who);
+    expect(await hostAnswers(s, true)).toMatchObject({ permId: "old", optionId: "allow_once" });
+    expect((await pending).status).toBe(200);
+    const bAllow = liveAcpButtons(CH).permission[0]!;
+    expect(bAllow).not.toBe(aAllow);
+    const again = hostCalls(s).length;
+    expect(await answerAcp(CH, aAllow, who)).toMatchObject({ status: 409, body: { code: "ask_stale" } });
+    expect(hostCalls(s).length).toBe(again); // A 的按钮再点：零调用，B 没被批准
+    const decline = answerAcp(CH, liveAcpButtons(CH).permission[1]!, who);
+    expect(await hostAnswers(s, true)).toMatchObject({ permId: "new", optionId: "decline" });
+    await decline;
+  });
+
+  test("题面一模一样的两个请求：代际不同，前一个答完它的按钮对后一个无效", async () => {
+    const s = sock(CH);
+    await onAcpFrame({ type: "acp_permission", channelId: CH, permId: "same-1", card: permCard("s1") }, s, discord);
+    const first = liveAcpButtons(CH).permission[0]!;
+    const p = answerAcp(CH, first, who);
+    await hostAnswers(s, true);
+    await p;
+    await onAcpFrame({ type: "acp_permission", channelId: CH, permId: "same-2", card: permCard("s2") }, s, discord);
+    const n = hostCalls(s).length;
+    expect((await answerAcp(CH, first, who)).status).toBe(409);
+    expect(hostCalls(s).length).toBe(n);
+    await onAcpFrame({ type: "acp_permission", channelId: CH, permId: "same-2", gone: "测试收尾" }, s, discord);
+  });
+
+  test("宿主超时 / 适配器退出发 gone：撤卡，之后点 409 零调用；宿主答「不在等了」→ 409、不记已答", async () => {
+    const s = sock(CH);
+    await onAcpFrame({ type: "acp_permission", channelId: CH, permId: "t-1", card: permCard("t1") }, s, discord);
+    const allow = liveAcpButtons(CH).permission[0]!;
+    await onAcpFrame({ type: "acp_permission", channelId: CH, permId: "t-1", gone: "等太久没人答" }, s, discord);
+    expect(liveAcpButtons(CH).permission).toEqual([]);
+    const n = hostCalls(s).length;
+    expect((await answerAcp(CH, allow, who)).status).toBe(409);
+    expect(hostCalls(s).length).toBe(n);
+
+    await onAcpFrame({ type: "acp_permission", channelId: CH, permId: "t-2", card: permCard("t2") }, s, discord);
+    const pending = answerAcp(CH, liveAcpButtons(CH).permission[0]!, who);
+    await hostAnswers(s, false);
+    expect(await pending).toMatchObject({ status: 409, body: { code: "ask_stale" } });
+    expect(liveAcpButtons(CH).permission).toEqual([]);
+  });
+
+  test("宿主断线：它挂着的卡撤掉；重连后补发同一个 permId 出新卡（新代际），旧按钮 409", async () => {
+    const s = sock(CH);
+    await onAcpFrame({ type: "acp_permission", channelId: CH, permId: "d-1", card: permCard("d1") }, s, discord);
+    const before = liveAcpButtons(CH).permission[0]!;
+    onAcpHostGone(CH, s);
+    expect(liveAcpButtons(CH).permission).toEqual([]);
+    const s2 = sock(CH); // 重连：新连接登记为这个频道的宿主
+    await onAcpFrame({ type: "acp_permission", channelId: CH, permId: "d-1", card: permCard("d1") }, s2, discord);
+    const after = liveAcpButtons(CH).permission[0]!;
+    expect(after).not.toBe(before);
+    expect((await answerAcp(CH, before, who)).status).toBe(409);
+    const pending = answerAcp(CH, after, who);
+    expect(await hostAnswers(s2, true)).toMatchObject({ permId: "d-1" });
+    expect((await pending).status).toBe(200);
   });
 
   test("宿主不在线：改配置直接失败，不挂着", async () => {

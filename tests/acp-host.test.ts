@@ -63,7 +63,7 @@ function start(extraEnv: Record<string, string> = {}) {
             if (f.type === "reply") setTimeout(() => link.onFrame({ type: "response", requestId: f.requestId, result: { messageIds: ["m1"] } }), 0);
             return true;
           },
-          request: async (f: any) => (requests.push(f), null),
+          request: async (f: any) => (requests.push(f), f.type === "acp_entries" ? true : null), // 像 bridge 一样确认收下了条目
           close: () => {},
           up: true,
         } as any;

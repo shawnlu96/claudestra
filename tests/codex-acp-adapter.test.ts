@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { describe, expect, test } from "bun:test";
 import { buildAcpHostCommand, codexAcpAdapter } from "../src/lib/runtimes/codex-acp.ts";
 import { codexAdapter, controlFor, managedFor, requireManaged } from "../src/lib/runtimes/index.ts";
 import { CODEX_ACP_CONTROL } from "../src/lib/runtimes/codex.ts";
@@ -6,7 +6,9 @@ import { decodePreambleEnv } from "../src/lib/codex-thread.ts";
 import { transportRefusal } from "../src/manager/acp-lifecycle.ts";
 import { parseCreateArgs } from "../src/manager/create-args.ts";
 import { assertSandboxRuntime } from "../src/lib/sandbox.ts";
-import { sandboxManagerRefusal } from "../src/lib/sandbox-env.ts";
+import { sandboxEnv, sandboxLayout, sandboxManagerRefusal } from "../src/lib/sandbox-env.ts";
+import { acpAgentCommand, adapterEnv } from "../src/lib/acp/adapter-proc.ts";
+import { isRepoStub, repoStubPath } from "../src/lib/acp/stub.ts";
 import type { LaunchSpec } from "../src/lib/runtimes/types.ts";
 
 const SPEC: LaunchSpec = { mode: "resume", channelId: "123", bridgeUrl: "ws://localhost:3847", sessionId: "019a-sid", agentName: "agent-cx", purpose: "写代码" };
@@ -73,28 +75,60 @@ describe("transport 命令的检查", () => {
 });
 
 describe("create --transport 与沙箱闸门", () => {
-  const saved = process.env.CLAUDESTRA_ACP_AGENT;
-  afterEach(() => {
-    if (saved === undefined) delete process.env.CLAUDESTRA_ACP_AGENT;
-    else process.env.CLAUDESTRA_ACP_AGENT = saved;
-  });
-
   test("--transport 只收 tmux / acp", () => {
     expect(parseCreateArgs(["cx", "/w", "--runtime", "codex", "--transport", "acp"])).toMatchObject({ runtimeFlag: "codex", transportFlag: "acp" });
     expect(parseCreateArgs(["cx", "/w", "--transport", "ssh"])).toMatchObject({ error: expect.stringContaining("tmux 或 acp") });
   });
 
-  test("沙箱只放 codex + acp + stub；tmux 版 Codex、没配 stub 的 acp 照旧拒", () => {
+  test("沙箱只放 codex + acp（适配器固定是 stub）；tmux 版 Codex 照旧拒", () => {
     const sandbox = { CLAUDESTRA_SANDBOX: "1", CLAUDESTRA_SANDBOX_ROOT: "/tmp/sb" };
-    expect(() => assertSandboxRuntime("codex", { ...sandbox, CLAUDESTRA_ACP_AGENT: "[\"stub\"]" }, "acp")).not.toThrow();
-    expect(() => assertSandboxRuntime("codex", { ...sandbox, CLAUDESTRA_ACP_AGENT: "[\"stub\"]" })).toThrow();
-    expect(() => assertSandboxRuntime("codex", sandbox, "acp")).toThrow("acp 要配 stub");
+    expect(() => assertSandboxRuntime("codex", sandbox, "acp")).not.toThrow();
+    expect(() => assertSandboxRuntime("codex", sandbox)).toThrow("只支持 Claude Code");
     expect(() => assertSandboxRuntime("claude-code", sandbox)).not.toThrow();
-    process.env.CLAUDESTRA_ACP_AGENT = "[\"stub\"]";
     expect(sandboxManagerRefusal(["create", "cx", "/w", "--runtime", "codex", "--transport", "acp"])).toBeNull();
     expect(sandboxManagerRefusal(["create", "cx", "/w", "--runtime", "codex"])).toContain("只支持 Claude Code runtime");
-    delete process.env.CLAUDESTRA_ACP_AGENT;
-    expect(sandboxManagerRefusal(["create", "cx", "/w", "--runtime", "codex", "--transport", "acp"])).toContain("只支持 Claude Code runtime");
     expect(sandboxManagerRefusal(["transport", "cx", "acp"])).toBeNull();
+  });
+});
+
+// Shawn 本机 Codex r4 P1-3 的探针改成的回归：沙箱只准本仓的协议 stub，外部 override 不继承、不认、带着就拒；ACP 这条链的 HOME 隔离
+describe("沙箱：CLAUDESTRA_ACP_AGENT 冒充不了 stub（r4 P1-3）", () => {
+  const arbitrary = '["bun","/tmp/fake-real-codex-acp.js"]';
+  const layout = sandboxLayout("/tmp/acp-sandbox-probe");
+  const env = sandboxEnv({ PATH: "/usr/bin", HOME: "/tmp/fake-owner-home", CLAUDESTRA_ACP_AGENT: arbitrary }, {
+    layout, port: 25001, deny: { ports: [3847], dirs: ["/tmp/fake-production-state"] },
+  });
+  const stub = repoStubPath()!;
+
+  test("本仓 stub 按真实路径认；沙箱不继承外部的 override", () => {
+    expect(stub).toEndWith("/scripts/acp-stub.ts");
+    expect(isRepoStub(["bun", stub])).toBe(true);
+    expect(isRepoStub(["bun", "/tmp/fake-real-codex-acp.js"])).toBe(false);
+    expect(env.CLAUDESTRA_ACP_AGENT).toBeUndefined();
+  });
+
+  test("沙箱里任意 argv 的 override：起适配器时不认（固定起本仓 stub），建 / 切 acp 时直接拒", () => {
+    const smuggled = { ...env, CLAUDESTRA_ACP_AGENT: arbitrary };
+    expect(acpAgentCommand(smuggled, "bun")).toEqual({ cmd: ["bun", stub], stub: true });
+    expect(acpAgentCommand(env, "bun")).toEqual({ cmd: ["bun", stub], stub: true });
+    expect(() => assertSandboxRuntime("codex", smuggled, "acp")).toThrow("不认 CLAUDESTRA_ACP_AGENT");
+    expect(buildAcpHostCommand(SPEC, { ...O, env: smuggled })).not.toContain("CLAUDESTRA_ACP_AGENT");
+  });
+
+  test("沙箱外的 override 照旧可用，但只有本仓 stub 才算 stub（别的 argv 按真适配器对待）", () => {
+    expect(acpAgentCommand({ CLAUDESTRA_ACP_AGENT: arbitrary }, "bun")).toEqual({ cmd: ["bun", "/tmp/fake-real-codex-acp.js"], stub: false });
+    expect(acpAgentCommand({ CLAUDESTRA_ACP_AGENT: JSON.stringify(["bun", stub]) }, "bun")).toEqual({ cmd: ["bun", stub], stub: true });
+  });
+
+  test("ACP 这条链的 HOME / CODEX_HOME 在沙箱根下：宿主命令、适配器环境（含 create 引导）都是", () => {
+    const home = `${layout.root}/acp-home`;
+    const aenv = adapterEnv({ base: env, bunBin: "bun", channelServer: "/x/channel-server.ts", mcpName: "claudestra", logsDir: "/tmp/l" });
+    expect(aenv.HOME).toBe(home);
+    expect(aenv.CODEX_HOME).toBe(`${home}/.codex`);
+    expect(aenv.CLAUDESTRA_ACP_AGENT).toBeUndefined();
+    const cmd = buildAcpHostCommand(SPEC, { ...O, env });
+    expect(cmd).toContain(`HOME=${home} `);
+    expect(cmd).toContain(`CODEX_HOME=${home}/.codex `);
+    expect(adapterEnv({ base: { HOME: "/Users/me" }, bunBin: "bun", channelServer: "x", mcpName: "m", logsDir: "/l" }).HOME).toBe("/Users/me");
   });
 });

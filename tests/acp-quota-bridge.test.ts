@@ -94,7 +94,7 @@ test("usageLimitExceeded / Quota depleted crosses ACP watcher, cancels old resum
     const ask = quota.storedAsks[0];
     expect(ask).toMatchObject({ state: "open", extra: { quota: true, acp: true, raw: "Quota depleted" } });
     expect(ask.answer).toBeNull();
-    expect(ask.options[0].buttons[0]).toMatchObject({ id: "acp_quota_0", label: "等重置" });
+    expect(ask.options[0].buttons[0]).toMatchObject({ id: expect.stringMatching(/^acp_quota_[0-9a-f]{12}_0$/), label: "等重置" }); // 按钮带卡的代际（acp-link.ts）
     expect(ask.options[0].buttons.every((b: any) => !b.selected && !b.default)).toBe(true);
     expect(result.sent).toEqual([]); // No model switch, answer or automatic choice was sent.
     expect(result.stopFailures).toEqual(["local-tmux-control"]); // ACP failures are settled only by their host.

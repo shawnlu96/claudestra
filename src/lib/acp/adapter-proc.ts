@@ -1,6 +1,7 @@
 /**
  * 起 ACP agent 子进程（codex-acp，或沙箱 / 单测里的 stub）并把它的 stdio 接成 RpcWire。
- * - 起哪个：CLAUDESTRA_ACP_AGENT（JSON 字符串数组）优先——沙箱只用 stub（owner 定的：不碰真 Codex 登录和 ~/.codex）；
+ * - 起哪个：沙箱里固定是本仓的 stub，外部覆盖一律不认（stub.ts；owner 定的：不碰真 Codex 登录和 ~/.codex）；
+ *   沙箱外 CLAUDESTRA_ACP_AGENT（JSON 字符串数组）优先（单测 / 手工排查用），
  *   否则是 `manager acp-install` 装好的 codex-acp 入口，用我们自己的 bun 跑，入口被改过就拒起（install.ts 校验哈希）。
  * - 环境：CODEX_PATH 锁本机的 codex；INITIAL_AGENT_MODE=agent-full-access（= tmux 下的 bypassPermissions）；
  *   CODEX_CONFIG 把 claudestra 的 channel-server 以 mcp_servers.<MCP_NAME>.* 深合并进去（同名 server 走 ACP 的 mcpServers
@@ -9,21 +10,26 @@
  * tests/acp-adapter-proc.test.ts。
  */
 import type { Subprocess } from "bun";
+import { mkdirSync } from "node:fs";
 import { CODEX_MCP_ENV_VARS } from "../codex-launch.js";
+import { isSandbox, SANDBOX_ROOT_ENV } from "../sandbox.js";
 import { codexAcpInstalled } from "./install.js";
 import type { RpcWire } from "./rpc.js";
-
-export const ACP_AGENT_ENV = "CLAUDESTRA_ACP_AGENT";
+import { ACP_AGENT_ENV, isRepoStub, repoStubPath, sandboxAcpHome } from "./stub.js";
 
 /** 给 channel-server 的环境白名单：去掉只有 tmux 模式才用得上的（窗口就绪 / 打字投递 / 重启前言） */
 const ACP_MCP_ENV_VARS = CODEX_MCP_ENV_VARS.filter((k) => k !== "TMUX" && k !== "TMUX_PANE" && k !== "CLAUDESTRA_CODEX_PREAMBLE");
 
 export function acpAgentCommand(env: Record<string, string | undefined>, bunBin: string, root?: string): { cmd: string[]; stub: boolean } | { error: string } {
+  if (isSandbox(env)) {
+    const stub = repoStubPath();
+    return stub ? { cmd: [bunBin, stub], stub: true } : { error: "沙箱里找不到本仓的 scripts/acp-stub.ts（或它的真实路径不在本仓里），不起 ACP 适配器" };
+  }
   const override = env[ACP_AGENT_ENV]?.trim();
   if (override) {
     try {
       const cmd = JSON.parse(override);
-      if (Array.isArray(cmd) && cmd.length && cmd.every((x) => typeof x === "string" && x)) return { cmd, stub: true };
+      if (Array.isArray(cmd) && cmd.length && cmd.every((x) => typeof x === "string" && x)) return { cmd, stub: isRepoStub(cmd) };
     } catch {
       /* 不是 JSON：落到下面报错，不猜着拆空格 */
     }
@@ -64,6 +70,7 @@ export function adapterEnv(s: AdapterEnvSpec): Record<string, string> {
     });
   }
   if (s.codexPath) env.CODEX_PATH = s.codexPath;
+  if (isSandbox(s.base)) Object.assign(env, sandboxAcpHome(s.base[SANDBOX_ROOT_ENV])); // 沙箱：适配器和它起的 channel-server 碰不到 owner 的家目录
   env.INITIAL_AGENT_MODE = "agent-full-access";
   env.APP_SERVER_LOGS = s.logsDir;
   env.CODEX_CONFIG = JSON.stringify(config);
@@ -79,6 +86,7 @@ export interface AdapterProc {
 
 /** 起子进程；stderr 按行交给 log（适配器自己的详细日志另在 APP_SERVER_LOGS） */
 export function spawnAdapter(cmd: string[], env: Record<string, string>, cwd: string, log: (msg: string) => void): AdapterProc {
+  if (isSandbox(env) && env.HOME) mkdirSync(env.HOME, { recursive: true }); // 沙箱里隔离出来的 HOME（adapterEnv）第一次用时还不存在
   const proc: Subprocess<"pipe", "pipe", "pipe"> = Bun.spawn(cmd, { cwd, env, stdin: "pipe", stdout: "pipe", stderr: "pipe" });
   const closeCbs: ((why: string) => void)[] = [];
   const pump = async (stream: ReadableStream<Uint8Array>, cb: (c: Uint8Array) => void) => {

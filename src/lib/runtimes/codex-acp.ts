@@ -15,7 +15,9 @@ import { shellEscape } from "../claude-launch.js";
 import { BOOTSTRAP_PROMPT, codexContextPreamble, codexDeveloperInstructions, codexEffort, codexModel } from "../codex-launch.js";
 import { encodePreambleEnv } from "../codex-thread.js";
 import { pathOverrideAssignments, statePath } from "../paths.js";
-import { ACP_AGENT_ENV, acpAgentCommand, adapterEnv, spawnAdapter } from "../acp/adapter-proc.js";
+import { isSandbox, SANDBOX_ROOT_ENV } from "../sandbox.js";
+import { acpAgentCommand, adapterEnv, spawnAdapter } from "../acp/adapter-proc.js";
+import { ACP_AGENT_ENV, sandboxAcpHome } from "../acp/stub.js";
 import { AcpSession } from "../acp/session.js";
 import { CODEX_ACP_CONTROL, codexAdapter } from "./codex.js";
 import { defaultCodexDeps, type CodexAdapterDeps } from "./codex-deps.js";
@@ -32,6 +34,7 @@ export function buildAcpHostCommand(spec: LaunchSpec, o: { bunBin: string; repoR
   if (!agent) throw new Error("ACP 宿主需要 agent 名（LaunchSpec.agentName / settingsName）");
   if (!spec.sessionId) throw new Error("ACP 宿主需要 thread id（new 先经 prepareSession 引导）");
   const env = o.env ?? process.env;
+  const sandbox = isSandbox(env);
   const pairs: [string, string | undefined][] = [
     ["DISCORD_CHANNEL_ID", spec.channelId],
     ["BRIDGE_URL", spec.bridgeUrl],
@@ -43,8 +46,9 @@ export function buildAcpHostCommand(spec: LaunchSpec, o: { bunBin: string; repoR
     ["CLAUDESTRA_ACP_EFFORT", codexEffort(spec.effort) ?? undefined],
     // 重启 / 收编：developer_instructions 只在建线程那一轮生效，首条入站附前言（与 tmux 同一份文字）
     ["CLAUDESTRA_CODEX_PREAMBLE", spec.mode === "new" ? undefined : encodePreambleEnv(codexContextPreamble({ agentName: agent, purpose: spec.purpose, projectContext: spec.projectContext }))],
-    // 沙箱里换成 stub（owner 定的：沙箱不碰真 Codex 登录）；生产不设
-    [ACP_AGENT_ENV, env[ACP_AGENT_ENV]?.trim() || undefined],
+    // 沙箱外的手工覆盖（单测 / 排查）照带；沙箱里不带：适配器固定是本仓 stub，宿主这条链的 HOME 挪进沙箱根（lib/acp/stub.ts）
+    [ACP_AGENT_ENV, sandbox ? undefined : env[ACP_AGENT_ENV]?.trim() || undefined],
+    ...(sandbox ? Object.entries(sandboxAcpHome(env[SANDBOX_ROOT_ENV])) : []),
   ];
   const prefix = pairs.filter(([, v]) => v).map(([k, v]) => `${k}=${shellEscape(v!)}`).join(" ");
   return `${prefix}${pathOverrideAssignments(shellEscape, env)} ${shellEscape(o.bunBin)} ${shellEscape(join(o.repoRoot, "src/acp-host.ts"))}`;

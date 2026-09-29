@@ -4,8 +4,9 @@
  * - 流式：正文增量、一个命令工具调用（带终端输出增量）、用量、线程状态（active / idle）；
  * - steering：有回合在跑就 injected，没有就自己另起一轮、答 startedNewTurn（结束只靠线程状态 idle，和真适配器一样）；
  * - 注入：正文带 [stub:slow] = 慢回合（等 session/cancel），[stub:quota] = 撞额度（声明了 AIR 给 sessionFailure，没声明给
- *   legacy 的 usageLimitExceeded 错误）；环境变量 STUB_AUTH_REQUIRED=1 = 没登录（接线程时回 -32000）。
- * 用法：CLAUDESTRA_ACP_AGENT='["bun","<repo>/scripts/acp-stub.ts"]'（见 docs/runtimes/codex-acp.md 沙箱实测）。
+ *   legacy 的 usageLimitExceeded 错误），[stub:perm] = 跑命令前向宿主要权限（session/request_permission，答案写进回复）；
+ *   环境变量 STUB_AUTH_REQUIRED=1 = 没登录（接线程时回 -32000）。
+ * 沙箱里 acp 固定起它（lib/acp/stub.ts，不用也不认 CLAUDESTRA_ACP_AGENT）；沙箱外单测 / 排查可用 CLAUDESTRA_ACP_AGENT='["bun","<repo>/scripts/acp-stub.ts"]'。
  */
 import { randomUUID } from "node:crypto";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -23,6 +24,15 @@ const config: Rec[] = [
   { id: "model", name: "Model", category: "model", type: "select", currentValue: "stub-sol", options: [{ value: "stub-sol", name: "stub-sol" }, { value: "stub-luna", name: "stub-luna" }] },
   { id: "reasoning_effort", name: "Reasoning Effort", type: "select", currentValue: "medium", options: ["low", "medium", "high"].map((v) => ({ value: v, name: v })) },
 ];
+
+/** 向宿主发的请求（只有权限请求）：按 id 等回包 */
+const waiting = new Map<number, (r: Rec) => void>();
+let nextReq = 0;
+const requestHost = (method: string, params: Rec) => new Promise<Rec>((resolve) => {
+  const id = 900_000 + ++nextReq;
+  waiting.set(id, resolve);
+  out({ id, method, params });
+});
 
 const update = (u: Rec) => out({ method: "session/update", params: { sessionId, update: u } });
 const status = (type: string) => update({ sessionUpdate: "session_info_update", _meta: { codex: { threadStatus: { type, ...(type === "active" ? { activeFlags: [] } : {}) } } } });
@@ -73,13 +83,19 @@ async function turn(text: string): Promise<Rec> {
     const cid = `call-${randomUUID().slice(0, 8)}`;
     const rawInput = { command: "/bin/zsh -lc 'echo stub'", cwd: process.cwd() };
     update({ sessionUpdate: "tool_call", toolCallId: cid, kind: "execute", title: "echo stub", status: "in_progress", rawInput, content: [{ type: "terminal", terminalId: cid }] });
+    let perm = "";
+    if (text.includes("[stub:perm]")) {
+      const options = [{ optionId: "allow_once", name: "Allow", kind: "allow_once" }, { optionId: "reject_once", name: "Reject", kind: "reject_once" }];
+      const r = await requestHost("session/request_permission", { sessionId, toolCall: { toolCallId: cid, title: "echo stub", kind: "execute", rawInput }, options });
+      perm = `（权限：${r?.outcome?.outcome === "selected" ? r.outcome.optionId : "cancelled"}）`;
+    }
     update({ sessionUpdate: "tool_call_update", toolCallId: cid, _meta: { terminal_output_delta: { data: "stub\n", terminal_id: cid } } });
     update({ sessionUpdate: "tool_call_update", toolCallId: cid, status: "completed", _meta: { terminal_exit: { exit_code: 0, terminal_id: cid } } });
     if (text.includes("[stub:slow]")) for (let i = 0; i < 300 && !running.cancelled; i++) await sleep(100);
     if (running.cancelled) return { stopReason: "cancelled" };
     const chatId = /chat_id="([^"]+)"/.exec(text)?.[1];
     const model = config[0].currentValue;
-    const extra = running.steered.length ? `（途中插话 ${running.steered.length} 条）` : "";
+    const extra = `${perm}${running.steered.length ? `（途中插话 ${running.steered.length} 条）` : ""}`;
     if (chatId && !text.includes("[stub:noreply]")) await callReply(chatId, `stub 回复（${model} / ${config[1].currentValue}）${extra}：${text.replace(/<[^>]+>/g, "").trim().slice(0, 80)}`);
     update({ sessionUpdate: "usage_update", used: 1234 + text.length, size: 272000 });
     return { stopReason: "end_turn" };
@@ -140,7 +156,11 @@ process.stdin.on("data", (d) => {
     buf = buf.slice(i + 1);
     if (!line) continue;
     const m = JSON.parse(line) as Rec;
-    if (!m.method) continue; // 我们不向宿主发请求，没有回包要收
+    if (!m.method) {
+      waiting.get(m.id)?.(m.result ?? {}); // 宿主对权限请求的回包；出错按空结果（= cancelled）算
+      waiting.delete(m.id);
+      continue;
+    }
     void handle(m).then(
       (result) => m.id !== undefined && out({ id: m.id, result: result ?? null }),
       (e) => m.id !== undefined && out({ id: m.id, error: { code: e?.code ?? -32603, message: e?.message ?? String(e), ...(e?.data ? { data: e.data } : {}) } }),

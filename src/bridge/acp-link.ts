@@ -1,13 +1,15 @@
 /**
  * bridge 这一头的 ACP 宿主接线（T60，宿主在 src/acp-host.ts）。宿主发来的帧（bridge.ts 一行分派到 onAcpFrame）：
- * - acp_entries：CC 形状的流式条目 → jsonl-watcher 的推送模式，工具 / 正文 / 状态事件和尾读 rollout 时一样发；带 requestId 的
- *   （回合末最后一批）处理完再回包，宿主等到回包才报 Stop，Stop 的 drain 就看得到收尾文字；
+ * - acp_entries：CC 形状的流式条目 → jsonl-watcher 的推送模式，工具 / 正文 / 状态事件和尾读 rollout 时一样发。每批带 hostId +
+ *   条目序号，处理完回 true 宿主才出队；watcher 还没挂好（注册后要查 registry）回 false，宿主退避重送，这里按序号跳过处理过的前缀；
  * - acp_config：会话的 configOptions，存一份给设置页（不重启切模型 / 推理强度）和额度卡用；
  * - acp_failure：额度 → 「待你处理」卡，第一个选项是「等重置」，后面只列 configOptions 里的其它模型，不推荐（owner 的规矩），
  *   点了才经宿主调 set_config_option，绝不自动选；没登录 → 「需要 owner 登录」卡，宿主接上线程后自动结掉；其它失败只有条目；
- * - acp_permission：权限请求 → 卡，owner 点了按 requestId 回给宿主（取消 / 超时由宿主按 cancelled 回适配器）。
- * 只认这个频道当前登记的那条连接发来的帧。tests/acp-link.test.ts。
+ * - acp_permission：权限请求按频道排队，一次出一张卡。宿主超时 / 适配器退出发 gone 撤卡，宿主断线（onAcpHostGone）撤它挂着的。
+ * 权限卡、额度卡的按钮都带这张卡的代际（每张新卡新生成，不复用）：作答先按代际原子认领，旧卡、认领过的一律 409、零授权；
+ * 权限还要经宿主确认它仍在等才算答上。只认这个频道当前登记的那条连接发来的帧。tests/acp-link.test.ts。
  */
+import { randomBytes } from "node:crypto";
 import type { Client } from "discord.js";
 import { parseConfigOptions, quotaCardChoices, type ConfigOption, type QuotaChoice } from "../lib/acp/config.js";
 import type { AcpFailure } from "../lib/acp/failures.js";
@@ -19,26 +21,46 @@ import { extensionSocketOf } from "./pi-abort.js";
 
 type Socket = { send(data: string): void };
 type Who = { principal?: string; device?: string };
+type Answer = { status: number; body: Record<string, unknown> };
+type Perm = { gen: string; permId: string; ws: Socket; card: PermissionCard; claimed?: true };
+type Quota = { gen: string; message: string; choices: QuotaChoice[]; claimed?: true };
 
 const configs = new Map<string, ConfigOption[]>();
-const quotaCards = new Map<string, QuotaChoice[]>();
+const quotaCards = new Map<string, Quota>();
 const authCards = new Set<string>();
-const permissionCards = new Map<string, { requestId: string; ws: Socket; card: PermissionCard }>();
+/** 频道 → 排着的权限请求；队首就是卡上显示的那个 */
+const permQueues = new Map<string, Perm[]>();
+/** 频道 → 已处理到的条目序号（按宿主进程区分：宿主重起序号从 1 开始） */
+const entrySeqs = new Map<string, { hostId: string; last: number }>();
 const calls = new Map<string, { resolve: (r: { ok: boolean; error?: string }) => void; timer: ReturnType<typeof setTimeout> }>();
 let nextCall = 0;
 const CALL_TIMEOUT_MS = 15_000;
 
 const QUOTA_PREFIX = "acp_quota_";
 const PERM_PREFIX = "acp_perm_";
+const QUOTA_RE = /^acp_quota_([0-9a-f]{12})_(\d+)$/;
+const PERM_RE = /^acp_perm_([0-9a-f]{12})_(.+)$/;
+const newGen = () => randomBytes(6).toString("hex");
+const stale = (error: string): Answer => ({ status: 409, body: { ok: false, code: "ask_stale", error } });
 
 export const acpConfigOf = (channelId: string): ConfigOption[] => configs.get(channelId) ?? [];
+
+/** 这个频道此刻还开着的额度卡 / 权限卡（队首）的按钮 id：排查用，单测拿它按真实代际作答 */
+export function liveAcpButtons(channelId: string): { quota: string[]; permission: string[] } {
+  const q = quotaCards.get(channelId);
+  const p = permQueues.get(channelId)?.[0];
+  return {
+    quota: q && !q.claimed ? q.choices.map((_, i) => `${QUOTA_PREFIX}${q.gen}_${i}`) : [],
+    permission: p && !p.claimed ? p.card.options.map((o) => `${PERM_PREFIX}${p.gen}_${o.id}`) : [],
+  };
+}
 
 export async function onAcpFrame(msg: Record<string, any>, ws: Socket, discord: Client): Promise<void> {
   const channelId = String(msg.channelId ?? "");
   if (!channelId || extensionSocketOf(channelId) !== ws) return void console.warn(`⚠️ 丢掉一帧 ${msg.type}：不是频道 ${channelId || "?"} 当前登记的宿主发的`);
   switch (msg.type) {
     case "acp_entries": {
-      const ok = await pushEntries(channelId, Array.isArray(msg.entries) ? msg.entries : [], discord);
+      const ok = await acceptEntries(channelId, msg, discord);
       if (typeof msg.requestId === "string") ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, result: ok }));
       return;
     }
@@ -49,7 +71,7 @@ export async function onAcpFrame(msg: Record<string, any>, ws: Socket, discord: 
     case "acp_failure":
       return onFailure(channelId, msg.failure as AcpFailure, msg.configOptions);
     case "acp_permission":
-      return onPermission(channelId, ws, String(msg.requestId ?? ""), msg.card as PermissionCard);
+      return onPermission(channelId, ws, msg);
     case "acp_call_result": {
       const c = calls.get(String(msg.id));
       if (c) calls.delete(String(msg.id)), clearTimeout(c.timer), c.resolve(msg.ok ? { ok: true } : { ok: false, error: String(msg.error ?? "宿主拒绝") });
@@ -59,14 +81,36 @@ export async function onAcpFrame(msg: Record<string, any>, ws: Socket, discord: 
   }
 }
 
+/** 一批条目：跳过这个宿主已经处理过的前缀（上次回包丢了、宿主重送），剩下的交 watcher；watcher 不在回 false，宿主会重送 */
+async function acceptEntries(channelId: string, msg: Record<string, any>, discord: Client): Promise<boolean> {
+  const entries: object[] = Array.isArray(msg.entries) ? msg.entries : [];
+  const hostId = typeof msg.hostId === "string" ? msg.hostId : "";
+  const first = Number(msg.firstSeq);
+  if (!hostId || !Number.isInteger(first)) return pushEntries(channelId, entries, discord);
+  const seen = entrySeqs.get(channelId);
+  const last = seen?.hostId === hostId ? seen.last : 0;
+  const fresh = entries.slice(Math.max(0, last - first + 1));
+  if (!fresh.length) return true;
+  const ok = await pushEntries(channelId, fresh, discord);
+  if (ok) entrySeqs.set(channelId, { hostId, last: first + entries.length - 1 });
+  return ok;
+}
+
 function onFailure(channelId: string, f: AcpFailure, rawConfig: unknown): void {
   const agentName = agentNameForChannel(channelId) ?? channelId;
   if (f?.kind === "quota") {
     const opts = parseConfigOptions(rawConfig);
     const choices = quotaCardChoices(opts.length ? opts : acpConfigOf(channelId));
-    quotaCards.set(channelId, choices);
-    const buttons = choices.map((c, i) => ({ id: `${QUOTA_PREFIX}${i}`, label: c.label, style: c.value === null ? "secondary" : "primary" }));
-    void openRuntimeAsk({ source: "codex", channelId, agentName, kind: "decide", title: "Codex 额度用完了", context: f.message, quota: true, acp: true, options: [{ type: "buttons", buttons }] });
+    // 同一个失败又报一次（选项、原文都没变、卡还没人答）：沿用这张卡和它的代际；否则是新卡，旧卡的按钮作废
+    const prev = quotaCards.get(channelId);
+    const same = prev && !prev.claimed && prev.message === f.message && JSON.stringify(prev.choices) === JSON.stringify(choices);
+    const q: Quota = same ? prev : { gen: newGen(), message: f.message, choices };
+    quotaCards.set(channelId, q);
+    const buttons = choices.map((c, i) => ({ id: `${QUOTA_PREFIX}${q.gen}_${i}`, label: c.label, style: c.value === null ? "secondary" : "primary" }));
+    void openRuntimeAsk({
+      source: "codex", channelId, agentName, kind: "decide", title: "Codex 额度用完了", context: f.message, quota: true, acp: true, instance: q.gen,
+      options: [{ type: "buttons", buttons }],
+    });
   } else if (f?.kind === "auth") {
     authCards.add(channelId);
     const context = "在这台机器的终端里跑一次 `codex login`（或设好 API key）。登好之后宿主每分钟自动重试，接上线程后这张卡自己结掉。";
@@ -74,12 +118,48 @@ function onFailure(channelId: string, f: AcpFailure, rawConfig: unknown): void {
   }
 }
 
-function onPermission(channelId: string, ws: Socket, requestId: string, card: PermissionCard): void {
-  if (!requestId || !card?.options?.length) return;
-  permissionCards.set(channelId, { requestId, ws, card });
-  const buttons = card.options.map((o) => ({ id: `${PERM_PREFIX}${o.id}`, label: o.label, style: o.style }));
+/** 宿主的权限帧：新请求排队（队首出卡）；同一个 permId 重发 = 宿主重连后补发，卡和按钮不变；gone = 宿主那边不等了，撤卡 */
+function onPermission(channelId: string, ws: Socket, msg: Record<string, any>): void {
+  const permId = String(msg.permId ?? "");
+  if (!permId) return;
+  const q = permQueues.get(channelId) ?? [];
+  const known = q.find((p) => p.permId === permId);
+  if (msg.gone) return void (known && dropPerm(channelId, known, `宿主撤回：${String(msg.gone)}`));
+  if (known) return void (known.ws = ws);
+  const card = msg.card as PermissionCard;
+  if (!card?.options?.length) return;
+  q.push({ gen: newGen(), permId, ws, card });
+  permQueues.set(channelId, q);
+  if (q.length === 1) showPerm(channelId);
+}
+
+function showPerm(channelId: string): void {
+  const head = permQueues.get(channelId)?.[0];
+  if (!head) return;
+  const buttons = head.card.options.map((o) => ({ id: `${PERM_PREFIX}${head.gen}_${o.id}`, label: o.label, style: o.style }));
   const agentName = agentNameForChannel(channelId) ?? channelId;
-  void openRuntimeAsk({ source: "permission", channelId, agentName, kind: "authorize", title: card.title, context: card.detail, acp: true, options: [{ type: "buttons", buttons }] });
+  void openRuntimeAsk({
+    source: "permission", channelId, agentName, kind: "authorize", title: head.card.title, context: head.card.detail, acp: true, instance: head.gen,
+    options: [{ type: "buttons", buttons }],
+  });
+}
+
+/** 一个权限请求结束（答了 / 宿主撤回 / 断线）：出队；是卡上那张就结卡（答了记作答人），再出下一张 */
+function dropPerm(channelId: string, p: Perm, why: string, answered?: { label: string; who: Who }): void {
+  const q = permQueues.get(channelId) ?? [];
+  const i = q.indexOf(p);
+  if (i < 0) return;
+  q.splice(i, 1);
+  if (!q.length) permQueues.delete(channelId);
+  if (i !== 0) return;
+  if (answered) settleRuntimeAsk("permission", channelId, "interact", answered.label, answered.who);
+  else console.log(`🔐 撤掉 ${channelId} 的权限卡：${why}`), settleRuntimeAsk("permission", channelId);
+  showPerm(channelId);
+}
+
+/** 宿主的连接断了（bridge.ts 的 ws close）：它挂着的权限卡撤掉；宿主重连后会把还在等的补发上来，出新卡 */
+export function onAcpHostGone(channelId: string, ws: Socket): void {
+  for (const p of [...(permQueues.get(channelId) ?? [])]) if (p.ws === ws && !p.claimed) dropPerm(channelId, p, "宿主断线");
 }
 
 /** 经宿主调 session/set_config_option（设置页的模型 / 推理强度、额度卡的「切到 X」）：不重启 */
@@ -105,28 +185,38 @@ export async function answerAcpResponse(channelId: string, body: any, principal:
   return apiJson(r.status, r.body);
 }
 
-/** 卡上的按钮：返回 HTTP 状态 + 响应体 */
-export async function answerAcp(channelId: string, action: string, who: Who): Promise<{ status: number; body: Record<string, unknown> }> {
-  if (action.startsWith(QUOTA_PREFIX)) {
-    const choice = quotaCards.get(channelId)?.[Number(action.slice(QUOTA_PREFIX.length))];
-    if (!choice) return { status: 409, body: { ok: false, code: "ask_stale", error: "这张额度卡已经处理过或过期了" } };
-    if (choice.value !== null) {
-      const r = await acpSetConfig(channelId, "model", choice.value);
-      if (!r.ok) return { status: 409, body: { ok: false, error: `没切成：${r.error}` } };
-    }
-    quotaCards.delete(channelId);
-    settleRuntimeAsk("codex", channelId, "interact", choice.label, who);
-    return { status: 200, body: { ok: true, model: choice.value } };
-  }
-  if (action.startsWith(PERM_PREFIX)) {
-    const p = permissionCards.get(channelId);
-    const optionId = action.slice(PERM_PREFIX.length);
-    const opt = p?.card.options.find((o) => o.id === optionId);
-    if (!p || !opt) return { status: 409, body: { ok: false, code: "ask_stale", error: "这个权限请求已经不在了" } };
-    permissionCards.delete(channelId);
-    p.ws.send(JSON.stringify({ type: "response", requestId: p.requestId, result: { optionId } }));
-    settleRuntimeAsk("permission", channelId, "interact", opt.label, who);
-    return { status: 200, body: { ok: true } };
-  }
+/** 卡上的按钮（id 里带卡的代际）：返回 HTTP 状态 + 响应体 */
+export async function answerAcp(channelId: string, action: string, who: Who): Promise<Answer> {
+  const qm = QUOTA_RE.exec(action);
+  if (qm) return answerQuota(channelId, qm[1]!, Number(qm[2]), who);
+  const pm = PERM_RE.exec(action);
+  if (pm) return answerPermission(channelId, pm[1]!, pm[2]!, who);
+  if (action.startsWith(QUOTA_PREFIX) || action.startsWith(PERM_PREFIX)) return stale("按钮不属于任何一张还开着的卡");
   return { status: 400, body: { ok: false, error: `不认识的操作 ${action}` } };
+}
+
+async function answerQuota(channelId: string, gen: string, idx: number, who: Who): Promise<Answer> {
+  const q = quotaCards.get(channelId);
+  const choice = q?.choices[idx];
+  if (!q || q.gen !== gen || q.claimed || !choice) return stale("这张额度卡已经处理过或过期了");
+  q.claimed = true; // 认领在第一个 await 之前：同一张卡的第二下、旧卡都到不了下面
+  if (choice.value !== null) {
+    const r = await acpSetConfig(channelId, "model", choice.value);
+    if (!r.ok) return delete q.claimed, { status: 409, body: { ok: false, error: `没切成：${r.error}` } };
+  }
+  // 等宿主的时候又来了一次失败、出了新卡：旧卡已被新卡顶掉结案，不能把作答记到新卡上
+  if (quotaCards.get(channelId) === q) quotaCards.delete(channelId), settleRuntimeAsk("codex", channelId, "interact", choice.label, who);
+  return { status: 200, body: { ok: true, model: choice.value } };
+}
+
+async function answerPermission(channelId: string, gen: string, optionId: string, who: Who): Promise<Answer> {
+  const p = permQueues.get(channelId)?.[0];
+  const opt = p?.card.options.find((o) => o.id === optionId);
+  if (!p || p.gen !== gen || p.claimed || !opt) return stale("这个权限请求已经不在了（或已经答过）");
+  if (extensionSocketOf(channelId) !== p.ws) return dropPerm(channelId, p, "宿主换了连接"), stale("出这张卡的宿主连接已经断了");
+  p.claimed = true; // 认领在第一个 await 之前；等宿主确认期间新来的请求排在它后面
+  const r = await acpCall(channelId, { op: "permission", permId: p.permId, optionId });
+  if (!r.ok) return dropPerm(channelId, p, `宿主不认：${r.error}`), stale(`宿主那边这个请求已经不在等了：${r.error}`);
+  dropPerm(channelId, p, "已作答", { label: opt.label, who });
+  return { status: 200, body: { ok: true } };
 }

@@ -7,13 +7,14 @@
  * - `acp-install`：下载并校验 codex-acp（lib/acp/install.ts：版本钉死、sha256 写死，校验不过拒装，不走 npm）。
  * 生命周期本身（create / restart / resume / kill）走 manager 的通用流程，transport=acp 时选 lib/runtimes/codex-acp.ts。
  */
-import { ACP_AGENT_ENV } from "../lib/acp/adapter-proc.js";
 import { CODEX_ACP_VERSION, codexAcpInstalled, installCodexAcp } from "../lib/acp/install.js";
+import { ACP_AGENT_ENV } from "../lib/acp/stub.js";
 import { resolveBunPath } from "../lib/bun-path.js";
 import { acquireLock } from "../lib/file-lock.js";
 import { statePath } from "../lib/paths.js";
 import { SRC_DIR } from "../lib/repo-root.js";
 import { runManagerProcess } from "../lib/run-manager.js";
+import { isSandbox } from "../lib/sandbox.js";
 import { normalizeTransport, transportsOf, type Transport } from "../lib/runtimes/index.js";
 import { loadRegistry, output, saveRegistry } from "./core.js";
 
@@ -33,7 +34,7 @@ export function transportRefusal(info: { runtime?: string } | undefined, bare: s
   if (!info) return `agent "${bare}" 不存在`;
   const runtime = info.runtime || "claude-code";
   if (!transportsOf(runtime).includes(to)) return `runtime "${runtime}" 不支持 transport=${to}（目前只有 codex 能走 acp）`;
-  if (to === "acp" && !env[ACP_AGENT_ENV]?.trim()) {
+  if (to === "acp" && !isSandbox(env) && !env[ACP_AGENT_ENV]?.trim()) { // 沙箱里适配器固定是本仓 stub，不用装
     const inst = codexAcpInstalled();
     if (!inst.ok) return inst.hint;
   }

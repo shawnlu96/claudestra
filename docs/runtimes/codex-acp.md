@@ -72,8 +72,8 @@ Codex 的 ACP 策略（`CODEX_ACP_CONTROL`）：
 | `config.ts` | configOptions 的解析和本地校验，顶栏要的 `model_state`，额度卡的选项 |
 | `permissions.ts` | `session/request_permission` ↔「待你处理」卡。fail closed：取消、超时、答了不认识的 id，一律回 cancelled |
 | `session.ts` | 一条 ACP 会话：initialize（声明 AIR + 终端输出）、接线程、prompt / steer / cancel / 改配置、权限请求转宿主。线程状态按序号缓存，steer 回包那一刻（rpc 同步钩子）登记外部回合的结束；适配器退出时所有等待以失败结束 |
-| `host.ts` | 宿主本体：连 bridge、起适配器（退出就退避重起、接回同一个线程）、入站渲染（与 CodexQueueSink 同款）、流式推送、回合末先推完再报 Stop、失败 / 权限转卡、改配置 |
-| `adapter-proc.ts` | 起哪个 ACP agent（codex-acp / 沙箱的 stub）、它的环境（CODEX_PATH、full access、CODEX_CONFIG 挂 channel-server）、stdio 接成线路 |
+| `host.ts` | 宿主本体：连 bridge、起适配器（退出就退避重起、接回同一个线程）、入站渲染（与 CodexQueueSink 同款）、流式条目按序号送（确认才出队）、回合末全部确认才报 Stop、失败 / 权限转卡、改配置 |
+| `adapter-proc.ts` | 起哪个 ACP agent（codex-acp / 沙箱里固定的本仓 stub，见 `stub.ts`）、它的环境（CODEX_PATH、full access、CODEX_CONFIG 挂 channel-server）、stdio 接成线路 |
 | `bridge-link.ts` | 宿主到 bridge 的 ws：register 带 transport=acp、abort:true；断了退避重连，被顶替也不退出 |
 | `tool-proxy.ts` | 回环工具代理：127.0.0.1 随机端口 + 一次性 token（在 BRIDGE_URL 里），吞 register、只转白名单请求类型，requestId 按连接改写 |
 | `install.ts` | 适配器安装：npm registry 包文件、版本钉死、sha256 写死，校验不过拒装 |
@@ -90,7 +90,7 @@ bridge 那头：`bridge/acp-link.ts`（宿主的帧 → watcher 推送 / 卡片 
 ## 已知边界与限制
 
 - **claudestra MCP 的接法。** ACP `mcpServers` 里的同名 server，如果 `~/.codex/config.toml` 已经定义了，会被适配器**静默丢掉**（`CodexAcpClient.ts`），本机的 config.toml 恰好有 `claudestra`。所以 channel-server 经 `CODEX_CONFIG` 的 `mcp_servers.claudestra.*` 传入（`lib/acp/adapter-proc.ts`），和 tmux 下 `-c mcp_servers.claudestra.*` 覆盖是同一个语义（Codex 把它深合并到 config.toml 之上）。环境白名单去掉了 `TMUX` / `TMUX_PANE` / 前言：标就绪、打字投递、前言在 acp 下都归宿主。
-- **沙箱只用 stub（owner 定的）。** 沙箱端到端不碰真 Codex 的登录和 `~/.codex`，用 `scripts/acp-stub.ts` 这个假的 ACP agent（只讲协议、不连模型，但会像 Codex 一样按 `CODEX_CONFIG` 起 channel-server、真的调 reply），把宿主、代理、bridge、网页整条链路测通。真模型只在合并后切 Shawn 本机的 agent-codex 时跑。沙箱闸门只放「codex + `--transport acp` + 设了 `CLAUDESTRA_ACP_AGENT`」，tmux 版 Codex 照旧拒（`lib/sandbox.ts assertSandboxRuntime`）。
+- **沙箱只用 stub（owner 定的）。** 沙箱端到端不碰真 Codex 的登录和 `~/.codex`，用 `scripts/acp-stub.ts` 这个假的 ACP agent（只讲协议、不连模型，但会像 Codex 一样按 `CODEX_CONFIG` 起 channel-server、真的调 reply），把宿主、代理、bridge、网页整条链路测通。真模型只在合并后切 Shawn 本机的 agent-codex 时跑。沙箱闸门放「codex + `--transport acp`」，适配器固定起本仓的 `scripts/acp-stub.ts`（真实路径要在本仓里，`lib/acp/stub.ts`）；外部的 `CLAUDESTRA_ACP_AGENT` 是任意 argv，沙箱不继承、不认，带着它建 / 切 acp 直接拒。ACP 这条链（宿主、适配器、它起的 channel-server）的 `HOME` / `CODEX_HOME` 挪到沙箱根下的 `acp-home`；沙箱里的 Claude Code agent 仍用真 HOME（登录在那里）。tmux 版 Codex 照旧拒（`lib/sandbox.ts assertSandboxRuntime`）。
   - **不许**用软链或复制 `auth.json`：ChatGPT 登录的 refresh token 会轮换，一边刷新，另一边就失效。
   - `~/.codex/sessions` 是共享的，和 `~/.claude` 一样。
 - **AIR 与终端输出。** 宿主声明了 AIR `sessionFailure`（所有回合失败都结构化，不只是额度），同时声明 `clientCapabilities._meta.terminal_output_delta: true`——声明 AIR 而不声明它，命令输出就收不到了。
@@ -99,7 +99,8 @@ bridge 那头：`bridge/acp-link.ts`（宿主的帧 → watcher 推送 / 卡片 
 - **新建要跑一轮引导。** 新线程在第一轮之前不落盘，所以 create 时起一个短命的适配器，`session/new` 后跑一轮 `[claudestra:bootstrap]`（和 tmux 下 `codex exec` 引导同一个做法，历史里整轮丢掉），职责与频道规则经 `developer_instructions` 在这一轮写进线程。宿主之后一律接已有线程：适配器声明了 `session/resume` 就用它（不回放历史），否则 `session/load`；首条入站附职责前言（与 tmux 同一份）。
 - **不支持**：`fork`（试点直接拒，先切回 tmux）；`/clear`（会轮转会话，同上）。其它斜杠命令（`/compact` 等）原样当一轮 prompt 交给宿主，由适配器自己认。
 - **网页直播的 seq。** 宿主推上来的条目没有 rollout 行号：watcher 给它们本地序号、sid 带 `acp:` 前缀，前端据此不拿它们跟 rollout 的历史游标比，退回按时间戳合并（bridge 直投的 reply 本来就这样）。代价：回合中途刷新网页时，直播气泡的剔重没有按行号那么精确。以后要补，可以让宿主读 rollout 对齐行号。
-- **bridge 重启。** 回合在适配器里接着跑；宿主按 channel-server 的退避重连，重连后接着推新的流式条目，断开期间的条目不补发（历史照旧从 rollout 读）。回合末那批条目要等 bridge 回包才报 Stop，所以收尾文字不会被 Stop 的 drain 漏掉。
+- **流式条目不丢、没确认不报成功。** 宿主的条目进出站队列，按序号一批批送，bridge 回 true 才出队；bridge 重启、刚登记还没挂好 watcher（要查 registry）时回 false 或断线，条目留着退避重送，重新登记后接着送，bridge 按 hostId + 序号跳过已经处理过的前缀。回合末等队列全部被确认才报 Stop（收尾文字不会被 Stop 的 drain 漏掉）；90 秒等不到确认，或 bridge 太久不在、队列超过 5000 条丢过最老的，按 StopFailure 报。回合在适配器里接着跑，宿主按 channel-server 的退避重连。
+- **权限卡、额度卡的按钮带卡的代际。** 权限请求按频道排队、一次出一张；每张卡新生成代际，旧卡、答过的一律 409、不授权。作答先原子认领，再经宿主确认它还在等才算答上。宿主等 10 分钟没人答、适配器退出时按取消回适配器并撤卡；宿主断线撤卡，重连后把还在等的补发上来（新卡、新代际）。额度卡同理：同一个失败又报一次沿用这张卡，换了一次失败就是新卡，旧卡的按钮作废。
 - **排障。** 没有 TUI 可看了：看 agent 的 tmux 窗口（宿主日志：收到的消息、接上哪个线程、回合失败、适配器重起）和 `APP_SERVER_LOGS`（状态目录 `logs/acp/<agent>/`）。
 
 ## 用法
@@ -117,7 +118,6 @@ bun src/manager.ts transport <agent> tmux                        # 一键回退�
 
 ```bash
 bun run sandbox up --port <N> --static web/out
-export CLAUDESTRA_ACP_AGENT='["<bun 的绝对路径>","<仓库>/scripts/acp-stub.ts"]'
 bun scripts/sandbox.ts manager create acpx <沙箱里的目录> 测试 --runtime codex --transport acp --port <N>
 ```
 

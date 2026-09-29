@@ -16,8 +16,7 @@ const INHERITED_KEYS = [
   "PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "LC_ALL", "LC_CTYPE", "TERM", "TMPDIR",
   // 代理配置只影响「怎么出网」，不带身份；测试靠它把漏网的出站请求引到计数替身上
   "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "all_proxy", "no_proxy",
-  // T60：Codex over ACP 在沙箱里只许用 stub（scripts/acp-stub.ts），经它指定；不设就起不了 acp 的 agent
-  "CLAUDESTRA_ACP_AGENT",
+  // CLAUDESTRA_ACP_AGENT 刻意不继承：沙箱里 acp 固定起本仓的 stub（lib/acp/stub.ts），外部 argv 一律不认
 ] as const;
 
 export interface SandboxLayout {
@@ -154,7 +153,7 @@ export function sandboxManagerRefusal(args: string[]): string | null {
   if (args.includes("--include-master")) return "沙箱没有大总管，不支持 --include-master";
   if (args.includes("--external")) return "沙箱不对外共享 agent（--external）";
   const rt = args.indexOf("--runtime");
-  const acpStub = args[rt + 1] === "codex" && args[args.indexOf("--transport") + 1] === "acp" && !!process.env.CLAUDESTRA_ACP_AGENT?.trim(); // T60：只许 stub
-  if (rt >= 0 && args[rt + 1] !== "claude-code" && !acpStub) return "沙箱只支持 Claude Code runtime（Pi / Codex 的启动链不经沙箱闸门；Codex 只许 --transport acp 配 stub）";
+  const acp = args[rt + 1] === "codex" && args[args.indexOf("--transport") + 1] === "acp"; // T60：适配器固定是本仓 stub（lib/acp/stub.ts）
+  if (rt >= 0 && args[rt + 1] !== "claude-code" && !acp) return "沙箱只支持 Claude Code runtime（Pi / Codex 的启动链不经沙箱闸门；Codex 只许 --transport acp，适配器固定是 stub）";
   return null;
 }

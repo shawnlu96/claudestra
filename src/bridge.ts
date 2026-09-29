@@ -1166,7 +1166,6 @@ discord.once("ready", async () => {
   // v2.7+ 注入链路查询做「窗口活着但 channel-server 掉线」哨兵
   startWedgeWatcher(discord, (channelId) => clients.has(channelId));
 
-
   // v2.16+ 模型漂移告警——CC 用量保护静默降级不再无感（2026-07-30 外部用户
   // 报「莫名其妙被切到 Sonnet 4.6」）。Discord 告警 + session_anomaly SSE。
   {
@@ -3371,6 +3370,7 @@ const server = Bun.serve({
           const replaced = beingReplaced.delete(ws as unknown as object);
           if (!replaced) contention.forget(channelId);
           if (!replaced) stopWatchingByChannel(channelId); // 同步兜底：直接按 channelId 在 watcher Map 中查，避免依赖异步 runManager
+          void import("./bridge/acp-link.js").then((m) => m.onAcpHostGone(channelId, ws)); // ACP 宿主断线：撤它挂着的权限卡（重连后宿主补发）
           console.log(`🔌 断开: 频道 ${channelId} (剩余 ${clients.size} 个)`);
         }
       }
