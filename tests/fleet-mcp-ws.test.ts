@@ -1,11 +1,12 @@
 /**
- * fleet MCP 工具在 bridge 侧的入口（bridge/fleet/ws.ts）：按 ws 连接上注册的频道认调用方、按调用方收窄、下发文本走 notification。
+ * fleet MCP 工具在 bridge 侧的入口（bridge/fleet/ws.ts）：按 ws 连接上注册的频道认调用方、按调用方收窄、下发文本走 notification；
+ * 群发文字忙时押后那组也跑网页 owner 的 request 路径（local-api/fleet.ts 调的同一个 runFleet）。
  * 状态目录由 tests/preload.ts 隔离；这里写的 registry / 台账 meta / config 在 afterAll 还原。
  * 不碰真实 tmux：会被抓屏的只有「在线的 Claude Code」候选，所以在线的 agent 一律标成 pi，CC 的都不在线。
  */
 import { afterAll, beforeAll, describe, expect, spyOn, test } from "bun:test";
 import { existsSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
-import { initFleet, type FleetDeps } from "../src/bridge/fleet/service.js";
+import { initFleet, runFleet, type FleetDeps } from "../src/bridge/fleet/service.js";
 import { handleFleetWs } from "../src/bridge/fleet/ws.js";
 import { flushHeld } from "../src/bridge/held-flush.js";
 import { HeldQueue } from "../src/bridge/held-queue.js";
@@ -148,8 +149,20 @@ describe("真执行一次下发文本", () => {
   });
 });
 
-describe("目标主回合在跑时的 MCP 知会（codex r1 P1）", () => {
-  test("忙 → queued、ws 上什么都没有；还忙时 flush 不投；空闲后才投出去，发送者和内容不变", async () => {
+describe("目标主回合在跑时的群发文字：MCP 知会（codex r1 P1）和网页 owner 的 request 一样押到空闲", () => {
+  type Report = { results: { agent: string; outcome: string; detail: string }[] };
+  const PATHS: { path: string; intent: string; head: string; send: (text: string) => Promise<Report> }[] = [
+    {
+      path: "MCP 知会", intent: "notification", head: "来自 agent-pm1（mcp）",
+      send: async (text) => reportOf(await mcp("pm", run({ action: { kind: "text", text }, select: { agents: ["w1"] }, dryRun: false }))),
+    },
+    {
+      // 和 local-api/fleet.ts 一样调服务层：owner、不带 caller，走 request
+      path: "网页 owner（T35 request）", intent: "request", head: "来自 owner（web:phone）",
+      send: (text) => runFleet({ action: { kind: "text", text }, select: { agents: ["agent-w1"] }, dryRun: false, actor: "owner", via: "web:phone", allowed: (n) => n !== "master" }),
+    },
+  ];
+  for (const p of PATHS) test(`${p.path}：忙 → queued、ws 上什么都没有；还忙时 flush 不投；空闲后才投出去，发送者、意图和内容不变`, async () => {
     const held = new HeldQueue(null);
     const onWire: Envelope[] = [];
     let turn: TurnState = { main: "busy", bg: false };
@@ -164,8 +177,8 @@ describe("目标主回合在跑时的 MCP 知会（codex r1 P1）", () => {
     }, "ch-w1", "test");
     initFleet({ ...DEPS, deliver: deliverLocal }, { lpMonitor: false });
     try {
-      const r = reportOf(await mcp("pm", run({ action: { kind: "text", text: "接着处理这项" }, select: { agents: ["w1"] }, dryRun: false })));
-      expect(r.results).toEqual([{ agent: "agent-w1", outcome: "queued", detail: expect.stringContaining("排队") }]);
+      const r = await p.send("接着处理这项");
+      expect(r.results).toEqual([{ agent: "agent-w1", outcome: "queued", detail: expect.stringContaining("还没送到") }]);
       expect(onWire).toEqual([]);
       expect(held.get("ch-w1")).toHaveLength(1);
       await flush();
@@ -173,8 +186,8 @@ describe("目标主回合在跑时的 MCP 知会（codex r1 P1）", () => {
       turn = { main: "idle", bg: false };
       await flush();
       expect(onWire).toHaveLength(1);
-      expect(onWire[0]).toMatchObject({ from: { kind: "bridge", label: "fleet" }, intent: "notification", to: { agentName: "agent-w1", channelId: "ch-w1" }, meta: { waitForIdle: true } });
-      expect(onWire[0]!.content).toStartWith("[📣 批量指令 · 来自 agent-pm1（mcp）· 同时发给 1 个 agent]\n接着处理这项");
+      expect(onWire[0]).toMatchObject({ from: { kind: "bridge", label: "fleet" }, intent: p.intent, to: { agentName: "agent-w1", channelId: "ch-w1" }, meta: { waitForIdle: true } });
+      expect(onWire[0]!.content).toStartWith(`[📣 批量指令 · ${p.head}· 同时发给 1 个 agent]\n接着处理这项`);
       expect(held.get("ch-w1") ?? []).toEqual([]);
     } finally {
       initFleet(DEPS, { lpMonitor: false });

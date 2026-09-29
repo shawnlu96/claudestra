@@ -26,7 +26,7 @@ export const FLEET_DICT: Record<string, string> = {
   "带保留清单发 /compact；忙的排队，撞墙没开 LP 的不发。": "Sends /compact with the keep list; busy ones queue it, ones at the limit without LP are skipped.",
   "只对撞墙中的会话；开着的跳过，忙的不发。": "Sessions at the limit only; ones already on are skipped, busy ones are left alone.",
   "先存记忆再压缩；worktree 里的执行者改发 /compact。": "Saves memory, then compacts; executors in a worktree get a plain /compact.",
-  "逐个投递，开头带「批量指令」来源头。": "Delivered one by one with a “batch” source header.",
+  "逐个投递，开头带「批量指令」来源头；正忙的先排队，这一轮结束再投。": "Delivered one by one with a “batch” source header; busy ones queue it until their turn ends.",
   "要发给它们的话（会带「批量指令」来源头）": "What to tell them (sent with a “batch” source header)",
   "高级": "Advanced",
   "默认保留清单": "Default keep list",

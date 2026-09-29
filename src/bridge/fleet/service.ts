@@ -164,16 +164,15 @@ function textSender(actor: string, via: string, count: number, intent: "request"
     const cid = agent === "master" ? deps?.controlChannelId : (await readRegistryAgents()).find((r) => r.name === agent)?.channelId;
     const c = cid ? deps?.clients.get(cid) : undefined;
     if (!deps || !cid || !c) return { ok: false, error: "不在线" };
-    // MCP 的知会带 waitForIdle：目标主回合在跑就进押后队列、Stop 后再投，结果报 queued（lib/turn-state.ts holdsUntilIdle）；
-    // 不带的话 bridge 来源的消息照样直接 ws.send，回合开头那段会被 CC 静默丢掉，这里却记成已送达
+    // 网页 owner 的 request 和 MCP 的知会都带 waitForIdle：目标主回合在跑就进押后队列、Stop 后再投，结果报 queued（lib/turn-state.ts
+    // holdsUntilIdle）；不带的话 bridge 来源的消息照样直接 ws.send，回合开头那段会被 CC 静默丢掉，这里却记成已送达。意图不变，request 的补答账在真投出去时才挂
     const r = (await deps.deliver({
       from: { kind: "bridge", label: "fleet" },
       to: { kind: "local", agentName: agent, channelId: cid, ws: c.ws as never, cwd: c.cwd },
       intent,
       content: `[📣 批量指令 · 来自 ${actor}（${via}）· 同时发给 ${count} 个 agent]\n${text}`,
       meta: {
-        messageId: newMessageId("fleet"), triggerKind: "bridge_synth", ts: new Date().toISOString(), threadId: newThreadId(),
-        ...(intent === "notification" ? { waitForIdle: true } : {}),
+        messageId: newMessageId("fleet"), triggerKind: "bridge_synth", ts: new Date().toISOString(), threadId: newThreadId(), waitForIdle: true,
       },
     })) as { outcome?: { kind?: string; note?: string; reason?: string; error?: Error } } | undefined;
     const o = r?.outcome;

@@ -162,7 +162,7 @@ export function agentMsgMustWait(s: TurnState): boolean {
 
 /**
  * deliverToLocal（bridge.ts）这一封现在要不要押：压缩中一律押；agent→agent（fromKind local）和带 waitForIdle 的
- * （bridge 通知、fleet MCP 下发）主回合在跑也押，Stop / 扫描时再投。人类 / API 消息不在这里押（它们走抢占）。
+ * （bridge 通知、fleet 群发文字）主回合在跑也押，Stop / 扫描时再投。人类 / API 消息不在这里押（它们走抢占）。
  * 抽成纯函数是为了让 tests/fleet-mcp-ws.test.ts 拿同一条规则跑「忙 → queued、闲了才投」
  */
 export function holdsUntilIdle(fromKind: string, waitForIdle: boolean | undefined, s: TurnState): boolean {
