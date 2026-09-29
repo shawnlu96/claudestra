@@ -9,6 +9,7 @@ import { fromB64url, lp, toB64url, utf8 } from "./e2e/encoding.js";
 import { HpkeContext, setupBaseR, setupBaseS } from "./e2e/hpke.js";
 import { aesKey, gcmOpen, gcmSeal, randomBytes, type EcdhPair } from "./e2e/primitives.js";
 import { PEER_E2E_SUITE } from "./peer-e2e-wire.js";
+import { remoteDetail } from "./remote-text.js";
 
 const REDEEM_LABEL = "cstra-peer-redeem-v1";
 const RESPONSE_LABEL = "cstra-peer-redeem-response-v1";
@@ -93,6 +94,6 @@ export async function readRedeemResponse(s: RedeemSession, status: number, body:
   }
   if (status === 200) return { ok: false, code: "redeem_unsealed", message: "inviter answered without encryption; refusing (retry, or ask for a new invite)" };
   const err = (body as { error?: unknown } | null)?.error;
-  const shown = typeof err === "string" ? err.replace(/[^\p{L}\p{N} .,:;_()'/-]/gu, "").slice(0, 200) : "";
+  const shown = remoteDetail(err);
   return { ok: false, code: "redeem_failed", message: `inviter refused (${status})${shown ? `: ${shown}` : ""}; retry` };
 }

@@ -7,6 +7,7 @@
 import { LIMITS, apiPathOk, newRequestId, type DataFrame, type EndFrame, type ErrorFrame, type ResFrame } from "./relay-protocol.js";
 import { b64, pumpBody, streamSink, type StreamSink } from "./relay-stream.js";
 import { RelayError, type RelayRequest, type RelayResponse } from "./relay-client-types.js";
+import { remoteCode, remoteDetail } from "./remote-text.js";
 
 interface Pending {
   id: string;
@@ -125,7 +126,9 @@ export class OutboundTable {
   /** 带 id 的 error：头没到就 reject，头到了就让流报错 */
   onError(f: ErrorFrame & { id: string }): boolean {
     if (!this.pending.has(f.id)) return false;
-    this.fail(f.id, new RelayError(f.code, f.origin, f.message));
+    // error 帧中继能伪造，code / message 最后会进调用方 agent 的上下文（bridge/relay-link.ts → http-peer）：先清洗
+    const origin = f.origin === "peer" || f.origin === "client" ? f.origin : "relay";
+    this.fail(f.id, new RelayError(remoteCode(f.code, "relay_error"), origin, remoteDetail(f.message) || undefined));
     return true;
   }
 

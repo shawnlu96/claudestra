@@ -9,6 +9,7 @@
  */
 import { hostname } from "node:os";
 import { connect, RelayError, type RelayClient } from "../lib/relay-client.js";
+import { remoteCode, remoteDetail } from "../lib/remote-text.js";
 import type { RelayLinkInfo } from "../lib/relay-client-types.js";
 import { instanceKeySync, signedHeaders } from "../lib/instance-key.js";
 import { createE2eOutbound, defaultOutboundDeps } from "../lib/peer-e2e-outbound.js";
@@ -120,9 +121,13 @@ export interface PeerFetchInit {
 /** 超时类的中继错误按 TimeoutError 抛：http-peer 的结局分类靠 name 认「可能已送达，别重发」 */
 const TIMEOUT_CODES = new Set(["timeout", "local_timeout", "peer_disconnected", "connection_lost", "stream_idle"]);
 
+/**
+ * 这段话经 http-peer peerCallFailureText 进调用方 agent 的上下文；code 与说明都可能出自中继（error 帧、ws 关闭原因），
+ * 在这一个出口统一清洗（lib/remote-text.ts），relayRefusalHint 认的几个说明（300 s、started…）清洗后照样在
+ */
 function relayFetchError(e: unknown): Error {
   if (!(e instanceof RelayError)) return e instanceof Error ? e : new Error(String(e));
-  const err = new Error(`relay ${e.code}: ${e.message}`);
+  const err = new Error(`relay ${remoteCode(e.code, "relay_error")}: ${remoteDetail(e.message)}`);
   if (TIMEOUT_CODES.has(e.code)) err.name = "TimeoutError";
   return err;
 }
