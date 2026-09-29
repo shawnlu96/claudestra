@@ -39,6 +39,8 @@ export interface NeutralMessage {
   askId?: string;
   /** 同上，owner 的原文（text 已换成选项人话；原文用来回填按钮已答态、和乐观气泡对账） */
   wire?: string;
+  /** bridge 真收下的附件路径（服务端只取 channel 头属性，lib/inbound-body.ts channelAttachments）：外源的附件卡片只认它 */
+  attachments?: string[];
 }
 
 /** owner 设备的聊天身份（§3：owner 的所有设备共享 chat_id = api:owner:self） */
@@ -145,10 +147,14 @@ export function askAnchor(messages: readonly ChatMessage[], askId: string | unde
   return null;
 }
 
-/** 用户正文 → 显示正文 + 附件卡片：本人的剥掉附件行；外源（from 有值）原文照显、卡片另加（stream-shape 直播同一口径） */
-export function foreignAware(text: string, from: string | undefined): { content: string; attachments?: ChatAttachmentView[] } {
-  const x = extractAttachments(text);
-  return from ? { content: text.trim(), ...(x.attachments ? { attachments: x.attachments } : {}) } : x;
+/**
+ * 用户正文 → 显示正文 + 附件卡片：本人的剥掉附件行；外源（from 有值）原文照显，卡片只按服务端给的真附件路径 trusted 画（stream-shape 直播同一口径）。
+ * 外源正文里的 [attachment: …] 只当文字：外人写一行 [attachment: /not-an-upload/id_rsa]，owner 会看到一张像是对方真发了文件的卡片
+ */
+export function foreignAware(text: string, from: string | undefined, trusted?: readonly string[]): { content: string; attachments?: ChatAttachmentView[] } {
+  if (!from) return extractAttachments(text);
+  const atts = (trusted ?? []).map((p) => attachmentFromPath(p)).filter((a): a is ChatAttachmentView => !!a);
+  return { content: text.trim(), ...(atts.length ? { attachments: atts } : {}) };
 }
 
 function userMessage(m: NeutralMessage, anchor: ChatMessage | null, opts: ShapeOpts, forms: FormLookup): ChatMessage {
@@ -166,7 +172,7 @@ function userMessage(m: NeutralMessage, anchor: ChatMessage | null, opts: ShapeO
   const click = m.wire || from ? null : resolveUserClick(own, anchor, forms);
   // bridge 注入的来源头只由服务端按 channel 属性剥（lib/inbound-body.ts channelBodyText）；网页对外源正文不做任何按文本的剥除，
   // 附件行也留在正文里、卡片只是附加预览——否则外人写一行 [attachment: 任意路径]，owner 只看到一个文件名，agent 拿到的是路径
-  const { content, attachments } = foreignAware(click?.text ?? own, from);
+  const { content, attachments } = foreignAware(click?.text ?? own, from, m.attachments);
   const pending = click && !click.resolved ? { clickRaw: own } : {}; // 存剥过指令行的：翻页补解析时不能把指令行带回气泡
   const ask = { ...(m.askId ? { askId: m.askId } : {}), ...(m.wire ? { wire: m.wire } : {}) };
   return { id: `h${m.seq}`, role: "user", content, ts: m.ts, from, sid: opts.sid, seqEnd: m.seq, ...(attachments ? { attachments } : {}), ...pending, ...ask };

@@ -19,7 +19,7 @@ import { open as fsOpen } from "fs/promises";
 import { join } from "path";
 import { projectJsonlPath, findJsonlBySessionId } from "./jsonl-cost.js";
 import { agentArchiveDir, ARCHIVE_ROOT, realpathWithin } from "./session-archive.js";
-import { channelAnswer, channelBodyText, commandRecordLine, commandStdoutLine, senderOf, type AskAnswerRef } from "./inbound-body.js";
+import { channelAnswer, channelAttachments, channelBodyText, commandRecordLine, commandStdoutLine, senderOf, type AskAnswerRef, type InboundAttachmentsRef } from "./inbound-body.js";
 import { settleToolCard } from "./auq-echo.js";
 import { dropFailedReplyRows, keepReplyRows, sanitizeComponents } from "./history-components.js";
 import { askIdOfReplyResult } from "./reply-ask-schema.js";
@@ -117,7 +117,7 @@ export type ReplyComponentRow =
   | { type: "multiselect"; id: string; placeholder?: string; min?: number; max?: number; submitLabel?: string; options: { label: string; value: string; description?: string }[] };
 
 /** askId / wire：owner 对「待你处理」的作答（lib/inbound-body.ts answerEcho） */
-export interface HistoryMessage extends AskAnswerRef {
+export interface HistoryMessage extends AskAnswerRef, InboundAttachmentsRef {
   /** jsonl 行号（0-based），分页锚点，同一文件内稳定 */
   seq: number;
   ts: string | null;
@@ -261,14 +261,14 @@ function collectChannelMessageIds(lines: string[]): Set<string> {
  * 解包一条 <channel> 入站消息：返回 { text, from }；不是 channel 包装
  * （caveat / local-command 等真 meta）返回 null。
  */
-export function unwrapChannelMessage(raw: string): ({ text: string; from?: string; fromId?: string } & AskAnswerRef) | null {
+export function unwrapChannelMessage(raw: string): ({ text: string; from?: string; fromId?: string } & AskAnswerRef & InboundAttachmentsRef) | null {
   const m = raw.match(CHANNEL_WRAP_RE);
   if (!m) return null;
   const from = /(?:^|\s)user="([^"]*)"/.exec(m[1])?.[1] || undefined;
   const fromId = /(?:^|\s)user_id="([^"]*)"/.exec(m[1])?.[1] || undefined;
   const text = channelBodyText(m[1], m[2]); // 剥注入头 + 补附件行（lib/inbound-body.ts）
   if (!text) return null;
-  return { text, from, fromId, ...channelAnswer(m[1], m[2]) };
+  return { text, from, fromId, ...channelAnswer(m[1], m[2]), ...channelAttachments(m[1]) }; // 附件只取头属性：正文里的附件行不可信
 }
 
 function summarize(sessionId: string, source: "live" | "archive", path: string): SessionSummary | null {

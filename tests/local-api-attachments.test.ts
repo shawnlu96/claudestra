@@ -1,6 +1,6 @@
 /** 本地 API：GET /api/v1/attachments/:name——manage 专用；上传目录（按天）→ inbox → inbox 后缀匹配；只认 basename，穿越拒 */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setAttachmentDirsForTest } from "../src/bridge/local-api/attachments.js";
@@ -32,6 +32,8 @@ beforeAll(() => {
   writeFileSync(join(inbox, "1700000000005_logo.svg"), "<svg/>");
   writeFileSync(join(oldInbox, "legacy.txt"), "legacy");
   writeFileSync(join(dir, "secret.txt"), "nope");
+  writeFileSync(join(dir, "id_rsa"), "PRIVATE");
+  symlinkSync(join(dir, "id_rsa"), join(inbox, "1700000000010_key.txt")); // 目录里指向外面的软链
   setAttachmentDirsForTest({ uploadDir, inboxDirs: [inbox, oldInbox] });
 });
 afterAll(() => {
@@ -86,6 +88,14 @@ describe("GET /api/v1/attachments/:name", () => {
     expect((await get("/api/v1/attachments/missing.png")).status).toBe(404);
     const r = new Request("http://bridge.local/api/v1/attachments/legacy.txt", { method: "POST" });
     expect(await handleLocalApi(r, new URL(r.url), OWNER)).toBeNull();
+  });
+  test("T31c：卡片里的任意路径发不出去——整条路径 400，只剩 basename 时只在白名单目录找；目录里的软链不跟", async () => {
+    // 外源正文 [attachment: /not-an-upload/id_rsa] 若被画成卡片，url 只会是 basename；整条路径编码进来被拒
+    for (const bad of ["%2Fnot-an-upload%2Fid_rsa", encodeURIComponent(join(dir, "id_rsa"))]) expect((await get(`/api/v1/attachments/${bad}`)).status).toBe(400);
+    expect((await get("/api/v1/attachments/id_rsa")).status).toBe(404); // 目录外同名文件不算
+    expect((await get("/api/v1/attachments/1700000000010_key.txt")).status).toBe(404); // 精确名命中的是软链
+    expect((await get("/api/v1/attachments/key.txt")).status).toBe(404); // 后缀匹配命中的也是软链
+    expect(findAttachment("1700000000010_key.txt", null, { uploadDir, inboxDirs: [inbox] })).toBeNull();
   });
 });
 

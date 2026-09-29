@@ -4,7 +4,7 @@
  * 历史记录里只有原始 basename 的出站附件：inbox 落盘时加了 `<时间戳>_` 前缀，按清洗后的后缀匹配、取名字最大（最新）的一个。
  * 安全：只认 basename，目录白名单固定，拼出的路径再钉一次在目录内。
  */
-import { lstatSync, readdirSync, realpathSync, statSync } from "node:fs";
+import { lstatSync, readdirSync, realpathSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
 import { sanitizeAttachmentBase } from "./attachment-name.js";
 
@@ -48,13 +48,13 @@ export interface AttachmentHit {
   filename: string;
 }
 
-/** dir/name 存在且是普通文件、且真的在 dir 里面 → 绝对路径 */
+/** dir/name 存在且是普通文件、且真的在 dir 里面 → 绝对路径。lstat 不跟软链：目录里一个指向 ~/.ssh/id_rsa 的软链会让接口发出目录外的文件 */
 function fileUnder(dir: string, name: string): string | null {
   const root = resolve(dir);
   const abs = resolve(root, name);
   if (!abs.startsWith(`${root}/`)) return null;
   try {
-    return statSync(abs).isFile() ? abs : null;
+    return lstatSync(abs).isFile() ? abs : null;
   } catch {
     return null; // 不存在 / 无权限：试下一个目录
   }

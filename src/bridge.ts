@@ -72,6 +72,7 @@ import { startSessionReconciler } from "./bridge/session-reconciler.js";
 import { initPeerIngress, localProbeResponse, relayControlRoutes, requestContextOf, socketTrust } from "./bridge/relay-routes.js";
 import { handleForward, initForward, rememberInbound } from "./bridge/forward.js";
 import { initInbox, takeInbox, inboxOpts } from "./bridge/inbox.js";
+import { inboundEventData } from "./bridge/inbound-event.js";
 import { startArchiveSweeper } from "./bridge/archive-sweeper.js";
 // Web 远程终端（PTY attach → SSE；见 web-terminal.ts 头注释）
 import { handleTerminalApi, sweepStaleTerminalSessions } from "./bridge/web-terminal.js";
@@ -861,10 +862,7 @@ async function deliverToLocal(env: RouterEnvelope, to: RouterLocalEndpoint, stil
     to.ws.send(JSON.stringify({ type: "message", content, meta }));
     noteDelivered(to.channelId, env.from, Date.now(), turn.main === "idle"); // 触发这一轮的是谁（撞错后回程只让「接着做」那一轮结算，bridge/stop-settle.ts）
     turnCuts.noteDelivered(env, to.channelId, meta.after_interrupt === "true", turn.main === "busy");
-    // 入站消息镜像：srcKind(user=Discord 人类/api=Web 用户/local=agent/bridge)让 web 把他端用户发言实时画成气泡、
-    // 排除 agent/bridge 注入；fromId(user_id)让 web 认出哪些是本人的其它来源(自己的 Discord 也靠右)
-    const inData = { direction: "in", from: meta.user || "?", fromId: meta.user_id, srcKind: env.from.kind, text: env.content, threadId: env.meta.threadId, ...env.meta.askEcho };
-    emitEvent({ agent: evAgent, chatId: to.channelId, type: "chat_message", data: inData });
+    emitEvent({ agent: evAgent, chatId: to.channelId, type: "chat_message", data: inboundEventData(env, meta) }); // 入站镜像给网页（bridge/inbound-event.ts）
     // watcher 入站自愈(2026-07-24 wechat-bot:创建后 >60s 才来首条消息,pending-start 已放弃 → watcher
     // 永久缺位,工具/文本不直播、Stop done 挂 '?' 名下卡「工作中」)。每条入站核对 watcher 在位,缺位按
     // registry 重建;jsonl 还没出现会重新 pending-wait。同步 map 查询,常态零开销。
