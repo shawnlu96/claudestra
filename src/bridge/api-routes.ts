@@ -26,7 +26,7 @@ import {
   INVALID_JSON,
   readJsonBody,
   invalidJsonBody,
-  liveInteractiveHolder,
+  liveInteractiveHolder, heldFields, stopExtra,
 } from "./api-respond.js";
 import { interruptAgentByName } from "./preempt.js";
 import { existsSync, readdirSync } from "fs";
@@ -138,8 +138,8 @@ export interface ApiReplyResult {
   files?: { name: string; url: string }[];
   threadId: string;
   agent: string;
-  /** true = agent 没调 reply()，文本来自 Stop-hook drain 兜底（R3） */
-  viaFallback?: boolean;
+  /** true = agent 没调 reply()，文本来自 Stop-hook drain 兜底（R3）；apiError = 那一轮以 API 错误结束、reply 为 null，error = 错误类型 */
+  viaFallback?: boolean; apiError?: boolean; error?: string;
 }
 
 export const pendingApiRequests = new Map<string, PendingApiRequest[]>();
@@ -1208,12 +1208,12 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
     if (principal.peer) trackInboundHandoff(threadId, principal.peer, agent.name, text.length); // 交接记录（bridge/handoff-tracker.ts）
     // R2 入站镜像：只是 Discord 抄送，失败不影响已完成的投递；mirrorApiExchange 内部已 try/catch 记日志，这里的 catch 只防未来改动漏抛
     deps.mirrorApiExchange({ kind: "api", tokenId, name: tokenName }, agent.channelId, `[🌐 API←${tokenName}] ${apiMirrorBody(text, attachments.length)}`).catch(() => {});
-    deps.startTypingWithSafety(agent.channelId);
-    // API 触发的 turn 不发 Stop 完成通知 @ owner（回复走 API 回路 + R2 镜像已可见）
-    deps.lastMessageSource.set(agent.channelId, "agent");
+    if (!delivery.outcome.heldBy) deps.startTypingWithSafety(agent.channelId); // 押住了就没有回合，别亮「正在输入」
+    deps.lastMessageSource.set(agent.channelId, "agent"); // API 触发的 turn 不发 Stop 完成通知 @ owner（回复走 API 回路 + R2 镜像已可见）
 
-    if (waitSec === 0) {
-      return apiJson(202, { ok: true, accepted: true, threadId, agent: agent.name, hint: `poll GET /api/v1/threads/${threadId} or subscribe /api/v1/events` });
+    if (waitSec === 0 || delivery.outcome.heldBy) { // heldBy = 押住了（额度闸 / 停在额度菜单，没发键），不干等答复；原因只给能看额度的 owner（canSeeQuota）
+      const held = heldFields(delivery.outcome.heldBy, principal);
+      return apiJson(202, { ok: true, accepted: true, threadId, agent: agent.name, ...held, hint: `poll GET /api/v1/threads/${threadId} or subscribe /api/v1/events` });
     }
 
     const result = await new Promise<ApiReplyResult | null>((resolve) => {
@@ -1271,8 +1271,8 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
     if (r instanceof Error) return apiJson(500, { ok: false, error: `tmux send-keys 失败: ${r.message}` });
     if (r.deduped) return apiJson(200, { ok: true, deduped: true });
     const sent = r.keys;
-    console.log(`⚡ [api] ${sent.length ? "打断键已发送" : "当前空闲，未发打断键"}：${agent.name} (token=${tokenId})`);
-    return apiJson(200, { ok: true, agent: agent.name, ...(sent.length ? {} : { idle: true }) }); // done 照发：前端误判忙时借此解锁
+    console.log(`⚡ [api] ${sent.length ? "打断键已发送" : r.wall ? "停在撞墙画面上，没发键" : "当前空闲，未发打断键"}：${agent.name} (token=${tokenId})`);
+    return apiJson(200, { ok: true, agent: agent.name, ...stopExtra(r, principal) }); // done 照发：前端误判忙时借此解锁
   }
 
   // POST /api/v1/agents/:name/clear —— 远程调用 CC 原生 /clear（清上下文）。

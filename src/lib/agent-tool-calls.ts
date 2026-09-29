@@ -12,6 +12,12 @@ export async function forwardTool(bridgeRequest: BridgeRequest, args: any) {
   return { content: [{ type: "text" as const, text: `已转给 ${r.target}，它会直接回答用户。**不要再 reply**，结束本轮即可。` }] };
 }
 
+/** 押后的原因（bridge 的 Delivery.heldBy）：如实告诉发送方，别让它以为对方只是在忙 */
+const heldText: Record<string, (target: string) => string> = {
+  quota_wall: () => "整机撞了额度（额度闸开着），消息已押住（bridge 重启也不丢），出闸后按序送达，不用重发。",
+  wall_menu: (target) => `${target} 停在额度菜单（撞墙等待），bridge 没有发任何键；消息已押住，出闸 / 菜单关掉后送达，不用重发。`,
+};
+
 /** send_to_agent：从工具分发里原样搬出（分发函数太长） */
 export async function sendToAgentTool(bridgeRequest: BridgeRequest, args: any) {
   const oneShot = args?.oneShot === true;
@@ -23,7 +29,7 @@ export async function sendToAgentTool(bridgeRequest: BridgeRequest, args: any) {
     oneShot,
   });
   // bridge 会把对方的下一条 reply push 回来（oneShot 不会）；queued = 对方在回合中、已排队落盘，这一轮结束才收到（它也可以用 check_inbox 提前取），别当成没发出去重发
-  const sent = result.queued ? `${result.targetName} 正在忙，消息已排队（bridge 重启也不丢），它这一轮结束就会收到。` : "";
+  const sent = result.queued ? (heldText[result.heldBy as string]?.(result.targetName) ?? `${result.targetName} 正在忙，消息已排队（bridge 重启也不丢），它这一轮结束就会收到。`) : "";
   const advice = oneShot
     ? `${sent}消息已 fire-and-forget 发给 ${result.targetName}。**不期待任何 push-back**。对方收到会自己判断要不要回，可能直接 end_turn。end_turn 等用户下一步指示即可。`
     : result.pushBack

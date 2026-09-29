@@ -1,0 +1,24 @@
+ ▝▝   ▝▝   /private/tmp/cs-t35/work
+
+▎ Channels (experimental) messages from server:claudestra inject directly in 
+▎ this session · restart without --dangerously-load-development-channels to stop
+
+← claudestra · dev: [🌐 来自 Web 端用户「dev」（HTTP API 接入，非 Discord）。 …
+  ⎿  You've hit your session limit · resets 3:20am (Asia/Tokyo)
+     Continuing automatically at 3:20am · esc to cancel
+     /usage-credits to continue now
+
+⏺ Usage limit reached · continuing automatically at 3:20am · esc or type
+  to cancel
+
+✻ Worked for 0s · done 1:58 AM
+
+────────────────────────────────────────────────────────────────────────────────
+❯ 
+────────────────────────────────────────────────────────────────────────────────
+  ⚠ Usage limit reached · continuing automatically at 3:20am · esc to cancel
+  ⚠ /usage-credits to continue now
+  ⚠ /low-priority to continue now at lower priority · uses your weekly limit
+  ⚠ While you wait, start a new cloud session by claiming a $250 credit
+  Opus 5.5 · 5h 101% · 7d 29%
+  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents

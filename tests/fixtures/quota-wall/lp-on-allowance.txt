@@ -1,0 +1,24 @@
+
+  ⎿  You've hit your session limit · resets 3:20am (Asia/Tokyo)
+     /usage-credits to finish what you’re working on.
+
+⏺ Usage limit reached · continuing automatically at 3:20am · esc or type
+  to cancel
+
+✻ Sautéed for 0s · done 1:57 AM
+
+❯ /low-priority
+  ⎿  Continuing now at lower priority until your limit resets at 3:20am. Your
+     weekly limit still applies, and responses may pause while waiting for spare
+     capacity. Run /low-priority to stop.
+
+⏺ hi
+
+✻ Sautéed for 6s · done 1:59 AM
+
+────────────────────────────────────────────────────────────────────────────────
+❯ 
+────────────────────────────────────────────────────────────────────────────────
+  ⚠ Lower priority until 3:20am · 91% allowance left · /low-priority to stop
+  Opus 5.5 · ctx 96% · 5h 101% · 7d 29%
+  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents

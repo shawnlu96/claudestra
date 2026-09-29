@@ -6,6 +6,8 @@ import { isNativeShell } from "@/lib/native";
 import { useBackSwipe } from "@/lib/use-back-swipe";
 import { groupAsks, type WebAsk } from "../asks-model";
 import { asksStore, useAsks } from "../asks-store";
+import { cooldownView } from "../answer-cooldown";
+import { useJustAnswered } from "../use-just-answered";
 import { AskCard } from "./ask-card";
 import { BackIcon, CloseIcon } from "./ask-icons";
 
@@ -31,9 +33,21 @@ export function AsksDrawer({ onOpenChat }: { onOpenChat: (ask: WebAsk) => void }
     if (focus) document.getElementById(`ask-${focus}`)?.scrollIntoView({ block: "center", behavior: "smooth" });
   }, [focus, asks.length]);
   const swipe = useBackSwipe({ back: () => { if (!isNativeShell()) asksStore.closeDrawer(); } }, true);
-  const g = groupAsks(asks);
+  // 刚答的那张淡出期间还留在原位（按开着的排），淡完才移到「最近处理过」
+  const { fadingId, guard } = cooldownView(useJustAnswered(), asks);
+  const g = groupAsks(fadingId ? asks.map((a) => (a.id === fadingId ? { ...a, state: "open" as const } : a)) : asks);
   const recent = moreRecent ? g.recent : g.recent.slice(0, RECENT_PREVIEW);
-  const card = (a: (typeof asks)[number]) => <AskCard key={a.id} ask={a} now={now} focused={a.id === focus} onOpenChat={onOpenChat} />;
+  const card = (a: (typeof asks)[number]) => (
+    <AskCard
+      key={a.id}
+      ask={a}
+      now={now}
+      focused={a.id === focus}
+      onOpenChat={onOpenChat}
+      leaving={a.id === fadingId}
+      guard={guard && a.id !== fadingId && a.state === "open"}
+    />
+  );
   const section = (title: string, list: typeof asks) =>
     list.length > 0 && (
       <section className="flex flex-col gap-2.5">

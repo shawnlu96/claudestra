@@ -5,7 +5,8 @@
  * 叶子模块：只依赖 src/lib，import 时零副作用；api-routes（hub）与 bridge.ts 从这里取。
  */
 import { agentInScope, type Principal } from "../lib/principals.js";
-import { canManage } from "../lib/devices.js";
+import { canManage, canSeeQuota } from "../lib/devices.js";
+import { wallWaitRefusal, type WallWait } from "../lib/wall-screen.js";
 import { readLiveCcSessionEntries, type CcSessionEntry } from "../lib/cc-sessions.js";
 import { isMasterName, readRegistryAgents } from "../lib/registry.js";
 
@@ -20,6 +21,19 @@ export function apiJson(status: number, body: unknown): Response {
 /** 管理类端点的门（peers / cron / projects / update / 会话管理…）：owner 设备凭据看 grant.manage；老的全 scope 非 peer token 过渡期放行（lib/devices.ts canManage） */
 export function isFullScope(principal: Principal): boolean {
   return canManage(principal);
+}
+
+/** 投递被押住（额度闸 / 停在额度菜单，没发键）时 202 里多带的：queued 给所有人，原因 heldBy 只给能看额度的 owner（canSeeQuota） */
+export function heldFields(heldBy: unknown, principal: Principal): { queued?: true; heldBy?: string } {
+  return typeof heldBy === "string" && heldBy ? { queued: true, heldBy: canSeeQuota(principal) ? heldBy : undefined } : {};
+}
+
+/** POST /interrupt 没发键时的回执：停在撞墙画面上 → 能看额度的（canSeeQuota）给 wallWait + 如实的原因，别人只拿中性的 refused；否则空闲 */
+export function stopExtra(r: { keys: readonly string[]; wall?: WallWait }, principal: Principal): Record<string, unknown> {
+  if (r.keys.length) return {};
+  if (!r.wall) return { idle: true };
+  const see = canSeeQuota(principal);
+  return { [see ? "wallWait" : "refused"]: true, note: wallWaitRefusal(r.wall, see) };
 }
 
 /** 403 + 调用方给的文案（各端点「xxx requires a full-scope token」文案各不相同）。 */
