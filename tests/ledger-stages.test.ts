@@ -78,17 +78,18 @@ describe("canTransition 全表", () => {
     }
   });
 
-  test("blocked 只能回 stageBefore 或 cancelled；执行者不能进出 blocked", () => {
+  test("blocked 只能回 stageBefore 或 cancelled，之前在 merge 的还能退回 review；执行者不能进出 blocked", () => {
     for (const kind of TASK_KINDS) {
       for (const before of Object.keys(EXPECTED[kind]) as Stage[]) {
         const t = task(kind, "blocked", before);
         for (const to of STAGES) {
-          const ok = to === before || to === "cancelled";
+          const ok = to === before || to === "cancelled" || (before === "merge" && to === "review");
           expect({ kind, before, to, ok: canTransition(t, to, "pm").ok }).toEqual({ kind, before, to, ok });
         }
         expect(canTransition(t, before, "executor")).toMatchObject({ ok: false, code: "forbidden" });
       }
     }
+    expect(canTransition(task("code", "blocked", "merge"), "review", "executor")).toMatchObject({ ok: false, code: "forbidden" });
     expect(canTransition(task("code", "build"), "blocked", "executor")).toMatchObject({ ok: false, code: "forbidden" });
   });
 });
@@ -105,6 +106,9 @@ describe("nextTaskState", () => {
     const into = nextTaskState({ ...base, stage: "review", round: 2 }, "blocked");
     expect(into).toEqual({ stage: "blocked", stageBefore: "review", round: 2, specRev: 1 });
     expect(nextTaskState({ ...base, ...into }, "review")).toEqual({ stage: "review", stageBefore: null, round: 2, specRev: 1 });
+  });
+  test("之前在 merge 的 blocked 退回 review：和 merge → review 一样 round+1", () => {
+    expect(nextTaskState({ ...base, stage: "blocked", stageBefore: "merge", round: 2 }, "review")).toEqual({ stage: "review", stageBefore: null, round: 3, specRev: 1 });
   });
   test("review→spec、restate→spec 让 specRev+1，round 不清零；从 blocked 回 spec 不加 specRev", () => {
     expect(nextTaskState({ ...base, stage: "review", round: 3 }, "spec")).toEqual({ stage: "spec", stageBefore: null, round: 3, specRev: 2 });

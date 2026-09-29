@@ -136,8 +136,9 @@ const SANDBOX_MANAGER_COMMANDS = new Set([
   "project-migrate", "sessions", "set-session", "label", "cron-add", "cron-edit", "cron-remove", "cron-toggle", "cron-history",
   "tmux-send-keys", "team-link", // team-link 只改沙箱 registry 的 parent / task（manager/team.ts），同 label
   "rename", "repair", // 只动沙箱 registry / tmux / bridge（manager/agent-rename.ts、manager/repair.ts）；doctor 读生产 launchd，仍不开放
+  "ledger", // 台账只写沙箱状态目录里的 ledger.sqlite 与沙箱 registry；班子的事件路由、沙箱 bridge 经 runManager 跑的定时巡检都要在沙箱里实测
+  "team", // 班子提案只写沙箱状态目录的 team-proposals.json，按钮经沙箱 bridge 贴出
   "skill-toggle", // 只写沙箱状态目录下的 agent-settings（lib/agent-settings.ts），技能目录只读
-  "ledger", // 台账只写沙箱状态目录里的 ledger.sqlite；沙箱 bridge 的定时巡检经 runManager 跑 ledger audit、编排班子的事件路由要在沙箱里实测
 ]);
 
 /** 返回拒绝原因；null = 可以跑。agent 目录与 runtime 另由 manager 的 create 入口按 lib/sandbox.ts 再查一遍 */

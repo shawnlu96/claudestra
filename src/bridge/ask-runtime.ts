@@ -26,6 +26,23 @@ export function resetRuntimeAsksForTest(): void {
   permSeen.clear();
 }
 
+interface AuqPicked {
+  questions: { question?: string; header?: string; options: { label?: string }[] }[];
+  selections: number[][];
+}
+
+/**
+ * AUQ 提交后记账（网页按键端点、Discord 提交各一行，在广播 question_cleared 之前）：所选项换成人话写进 decision——
+ * 一问的就是选项文字，多问的每问一段「问题：选项」；凭据只进 ask 的答案，不进广播
+ */
+export function settleAuq(channelId: string, via: AskVia, s: AuqPicked, who: { principal: string; device?: string }): void {
+  const labels = s.questions.map((q, i) => {
+    const picked = (s.selections[i] ?? []).map((oi) => q.options[oi]?.label ?? `?${oi}`).join("、");
+    return s.questions.length > 1 && picked ? `${q.header || q.question || `Q${i + 1}`}：${picked}` : picked;
+  });
+  settleRuntimeAsk("auq", channelId, via, labels, who);
+}
+
 /** 权限弹框卡片上的三个选项：id 就是 POST /agents/:name/answer {kind:"permission", action} 的 action */
 const PERMISSION_ASK_OPTIONS = [{ type: "buttons", buttons: [
   { id: "allow", label: t("允许", "Allow"), style: "success" },
@@ -80,7 +97,7 @@ export async function openRuntimeAsk(r: RuntimeAskInput): Promise<void> {
  * 弹框没了 / 答了：带 answeredVia 的记 answered（label = 选的是哪个，who = 作答的凭据 / Discord 用户，取不到记 unknown——
  * 按键端点只查 scope，guest、部分 scope 的设备也能答，不能一律记成 owner），其余（终端里答了、取消、回合结束）记 cancelled
  */
-export function settleRuntimeAsk(source: RuntimeSource, channelId: string, answeredVia?: AskVia, label?: string, who?: { principal?: string; device?: string }): void {
+export function settleRuntimeAsk(source: RuntimeSource, channelId: string, answeredVia?: AskVia, label?: string | string[], who?: { principal?: string; device?: string }): void {
   const key = rtKey(source, channelId);
   const id = runtimeOpen.get(key);
   if (id === undefined) return;
@@ -89,7 +106,7 @@ export function settleRuntimeAsk(source: RuntimeSource, channelId: string, answe
   try {
     const db = askDb();
     const a = answeredVia
-      ? answerAsk(db, id, { choices: [], labels: label ? [label] : [], text: "", principal: who?.principal || "unknown", device: who?.device, via: answeredVia, at: Date.now() })
+      ? answerAsk(db, id, { choices: [], labels: [label ?? []].flat().filter(Boolean), text: "", principal: who?.principal || "unknown", device: who?.device, via: answeredVia, at: Date.now() })
       : closeAsk(db, id, "cancelled", t("弹框已关闭", "dialog closed"));
     if (a) publishAsk(a);
   } catch (e) {
@@ -103,8 +120,8 @@ export function settleRuntimeAsk(source: RuntimeSource, channelId: string, answe
  * - Codex 运行中的弹框（lib/runtime-dialogs.ts 的规则表）在就开、没了就结；
  * - 权限弹框：desc 变了就开新的（先结旧的），没了（null，含换成 session-idle 那种）就结。
  */
-export function noteRuntimeDialogs(channelId: string, agentName: string, pane: string, permissionDesc: string | null): void {
-  const d = detectCodexRuntimeDialog(pane);
+export function noteRuntimeDialogs(channelId: string, agentName: string, pane: string, permissionDesc: string | null, runtime?: string): void {
+  const d = detectCodexRuntimeDialog(pane, runtime);
   if (d) void openRuntimeAsk({ source: "codex", channelId, agentName, kind: "owner_action", ...d, options: [] });
   else settleRuntimeAsk("codex", channelId);
   if (permSeen.get(channelId) === (permissionDesc ?? undefined)) return;
@@ -132,9 +149,11 @@ export function cancelStaleRuntimeAsks(): number {
   return stale.length;
 }
 
+/** 标题取第一问；多问的标上一共几问（卡片里每问都能答） */
 function auqTitle(qs: { question?: string; header?: string }[]): string {
   const q = qs[0];
-  return (q?.question || q?.header || "AskUserQuestion").slice(0, 40);
+  const first = (q?.question || q?.header || "AskUserQuestion").slice(0, 32);
+  return qs.length > 1 ? t(`${first}（共 ${qs.length} 问）`, `${first} (${qs.length} questions)`) : first;
 }
 
 /** bridge 启动：撤掉上次留下的，再订阅 AUQ 事件（顺带记 owner 在不在） */
@@ -153,9 +172,8 @@ export function initRuntimeAsks(): void {
       const context = qs.map((q) => q.question ?? "").join("\n").slice(0, 300);
       void openRuntimeAsk({ source: "auq", channelId: evt.chatId, agentName: evt.agent, kind: "decide", title: auqTitle(qs), context, options: qs });
     } else if (evt.type === "question_cleared") {
-      // 谁答的：网页 API 带 by（凭据）/ credential，Discord 带 uid；都没有记 unknown
-      const by = typeof data.by === "string" ? data.by : typeof data.uid === "string" ? `discord:${data.uid}` : undefined;
-      const who = { principal: by, device: typeof data.credential === "string" ? data.credential : undefined };
+      // 网页 API 的提交端点在广播前已带凭据记过账（这里再结是空操作）；Discord 带 uid；都没有记 unknown
+      const who = { principal: typeof data.uid === "string" ? `discord:${data.uid}` : undefined };
       settleRuntimeAsk("auq", evt.chatId, data.reason === "submit" ? (data.via === "discord" ? "discord" : "interact") : undefined, undefined, who);
     }
   });

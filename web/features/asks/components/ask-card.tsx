@@ -1,7 +1,8 @@
 "use client";
 import { useState } from "react";
 import { useT } from "@/lib/i18n";
-import { agentLabel, answerSummary, closedText, spanText, type WebAsk } from "../asks-model";
+import { AttachmentStrip } from "@/features/chat/components/attachments";
+import { agentLabel, answerSummary, askAttachments, closedText, spanText, type WebAsk } from "../asks-model";
 import { useAsks } from "../asks-store";
 import { AskActions } from "./ask-actions";
 import { AnswerImages } from "./assigned-choices";
@@ -9,17 +10,14 @@ import { ChatIcon, ClockIcon } from "./ask-icons";
 
 /**
  * 一张「待你处理」卡（docs 13 §4.4，照 T12 原型右栏的卡）：谁在问、哪个任务、等了多久；标题；背景（owner「不知道上面发生了些什么」）；
- * 可展开原文；选项与文本框；回到对话；还剩多久过期。已结案的只显示结论。
+ * 可展开原文；原消息带的附件；选项与文本框；回到对话（跳到原消息，ask-jump.ts）；还剩多久过期。已结案的只显示结论。
  */
-export function AskCard({ ask, now, focused, onOpenChat }: { ask: WebAsk; now: number; focused: boolean; onOpenChat: (agent: string) => void }) {
+export function AskCard({ ask, now, focused, onOpenChat }: { ask: WebAsk; now: number; focused: boolean; onOpenChat: (ask: WebAsk) => void }) {
   const t = useT();
   const [showBody, setShowBody] = useState(false);
   const note = useAsks().notes[ask.id];
   const open = ask.state === "open";
   const agent = agentLabel(ask.fromAgent, t, ask.kind);
-  // 运行时弹框（AUQ / 权限）一定是某个 agent 卡住的：回到对话按 agent 名走
-  const dialogAgent = ask.fromAgent ?? "";
-
   return (
     <article
       id={`ask-${ask.id}`}
@@ -42,6 +40,11 @@ export function AskCard({ ask, now, focused, onOpenChat }: { ask: WebAsk; now: n
           {showBody ? t("收起原文") : t("看原文")}
         </button>
       )}
+      {askAttachments(ask).length > 0 && (
+        <div className="mt-2">
+          <AttachmentStrip items={askAttachments(ask)} align="start" />
+        </div>
+      )}
       {showBody && <pre className="mt-1.5 max-h-60 overflow-auto whitespace-pre-wrap rounded-lg bg-base-200 p-2.5 font-sans text-[12.5px]">{ask.body}</pre>}
       {ask.bind && (
         <div className="mt-2 rounded-lg border border-warning/30 bg-warning/5 p-2.5 text-[12px]">
@@ -57,7 +60,7 @@ export function AskCard({ ask, now, focused, onOpenChat }: { ask: WebAsk; now: n
 
       <footer className="mt-3 flex items-center gap-2 text-[12px]">
         {ask.fromAgent && (
-          <button type="button" className="btn btn-ghost btn-xs gap-1 px-1.5" onClick={() => onOpenChat(dialogAgent)}>
+          <button type="button" className="btn btn-ghost btn-xs gap-1 px-1.5" onClick={() => onOpenChat(ask)}>
             <ChatIcon />
             {t("回到对话")}
           </button>

@@ -18,11 +18,12 @@ export type ItemStatus = (typeof ITEM_STATUSES)[number];
 
 /**
  * stage / item / task / meta / dep 由写入函数自动产生；ask / ask_expire / ask_cancel / ask_reopen（与作答的 decision）只由 bridge 的 ledger-asks.ts 写；
- * assign_reopen 只由 ledger-human.ts 写（PM 重开指给人的 ask）；其余由调用方显式追加
+ * assign_reopen 只由 ledger-human.ts 写（PM 重开指给人的 ask）；其余由调用方显式追加。
+ * dispatch = 派出审查员（reviewer / round / head）、escalate = 升级给 PM（或 owner），编排班子的「现在谁在接」靠它们推导（ledger-handler.ts）。
  */
 const EVENT_KINDS = [
   "stage", "item", "task", "meta", "dep", "note", "deliver", "review", "decision", "deploy", "verify", "rollback", "freeze", "unfreeze",
-  "ask", "ask_expire", "ask_cancel", "ask_reopen", "assign_reopen",
+  "ask", "ask_expire", "ask_cancel", "ask_reopen", "assign_reopen", "dispatch", "escalate",
 ] as const;
 export type EventKind = (typeof EVENT_KINDS)[number];
 
@@ -144,9 +145,11 @@ function legality(task: TransitionTask, to: Stage): TransitionCheck {
   if (to === "cancelled") return { ok: true };
   if (to === "blocked") return { ok: true };
   if (stage === "blocked") {
-    return to === task.stageBefore
+    // 之前在 merge 的还能直接退回 review（等同 merge → review）：blocked 期间欠了对抗式时回 merge 被合并门拦，这是唯一出口
+    const unship = task.stageBefore === "merge" && to === "review" && (TRANSITIONS[task.kind]?.merge ?? []).includes("review");
+    return to === task.stageBefore || unship
       ? { ok: true }
-      : { ok: false, code: "illegal", reason: `blocked 只能回原阶段 ${task.stageBefore ?? "(未记录)"}，不能去 ${to}` };
+      : { ok: false, code: "illegal", reason: `blocked 只能回原阶段 ${task.stageBefore ?? "(未记录)"}${task.stageBefore === "merge" ? " 或退回 review" : ""}，不能去 ${to}` };
   }
   const next = TRANSITIONS[task.kind]?.[stage] ?? [];
   return next.includes(to) ? { ok: true } : { ok: false, code: "illegal", reason: `${task.kind} 任务不能从 ${stage} 推到 ${to}` };
@@ -165,15 +168,16 @@ export type TaskStageState = Pick<LedgerTask, "kind" | "stage" | "stageBefore" |
 
 /**
  * 推阶段的副作用集中在这里（调用方已用 canTransition 判过合法）：
- * 进 review 时 round+1（从 blocked 回来不加，review→spec 之后不清零）；回退到 spec 时 specRev+1；进 blocked 记 stageBefore，出来清空。
+ * 进 review 时 round+1（从 blocked 回原阶段不加，blocked(merge) 退回 review 照加，review→spec 之后不清零）；回退到 spec 时 specRev+1；
+ * 进 blocked 记 stageBefore，出来清空。
  */
 export function nextTaskState(task: TaskStageState, to: Stage): Pick<LedgerTask, "stage" | "stageBefore" | "round" | "specRev"> {
-  const fromBlocked = task.stage === "blocked";
+  const resume = task.stage === "blocked" && to === task.stageBefore;
   return {
     stage: to,
     stageBefore: to === "blocked" ? task.stage : null,
-    round: to === "review" && !fromBlocked ? task.round + 1 : task.round,
-    specRev: to === "spec" && !fromBlocked ? task.specRev + 1 : task.specRev,
+    round: to === "review" && !resume ? task.round + 1 : task.round,
+    specRev: to === "spec" && !resume ? task.specRev + 1 : task.specRev,
   };
 }
 

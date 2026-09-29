@@ -53,7 +53,7 @@ journalctl -u claudestra-relay -n 20
 | `RELAY_STATIC_DIR` | — | 前端静态导出目录（deploy.sh 同步到 `<远端目录>/web/out`）；不配就只有中继自己的页面（输短码、邀请落地） |
 | `RELAY_HOST` / `RELAY_PORT` | `127.0.0.1` / `8787` | 只听本机，TLS 交给 nginx |
 | `RELAY_DATA` | — | 数据目录，SQLite 在其下 `relay.sqlite`；或 `RELAY_DB` 直接指定文件 |
-| `RELAY_TRUST_PROXY` | `0` | 反代之后设 `1`：客户端地址与主机名按 `X-Forwarded-*` 算。直接对外时别开 |
+| `RELAY_TRUST_PROXY` | `0` | 反代之后设受信反代的层数（一层 nginx 就是 `1`）：主机名按 `X-Forwarded-Host`，客户端地址取 `X-Forwarded-For` 从右数第这么多项（左边的客户端能自己写，不认）。直接对外时别开 |
 | `RELAY_MAX_FRAME_BYTES` | 262144 | 单帧上限；正文按块走，一般不用改 |
 | `RELAY_COMMIT` | — | 写进 `/healthz`，方便核对线上跑的是哪个版本；没设就读仓库根 `.relay-commit`（deploy.sh 每次部署写入） |
 | `RELAY_VAPID_KEYS` | `<数据目录>/vapid.json` | 推送网关（protocol.md §3.5）的 VAPID 密钥对文件；不存在就首次启动生成（0600）。**别换、别丢**：换钥匙 = 所有浏览器的推送订阅作废 |

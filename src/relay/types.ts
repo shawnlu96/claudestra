@@ -18,8 +18,8 @@ export interface RelayOptions {
   hostname?: string;
   /** SQLite 路径；测试用 ":memory:" */
   db?: string;
-  /** 反代之后才开：用 X-Forwarded-* 当客户端地址与主机名。直接对外时开了等于限流可绕 */
-  trustProxy?: boolean;
+  /** 反代之后才开：用 X-Forwarded-* 当客户端地址与主机名；数字 = 受信反代层数（true = 1）。直接对外时开了等于限流可绕 */
+  trustProxy?: boolean | number;
   version?: string;
   commit?: string;
   limits?: Partial<Limits>;

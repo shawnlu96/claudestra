@@ -86,6 +86,7 @@ export interface AgentInfo {
   /** 派发者的 registry 键（`agent-xxx` / `master`）与任务短名——manager/team.ts 写入，侧栏据此挂树 */
   parent?: string;
   task?: string;
+  role?: import("../lib/team-roles.js").TeamRole; // 编排班子角色：启动时按它注入角色提示（lib/team-roles.ts）；只有 Claude Code runtime 生效
 }
 
 export interface Registry {
@@ -195,9 +196,7 @@ export function assertValidNewName(raw: string): void {
   const invisible = invisibleNameError(cleaned);
   if (invisible) throw new Error(`${invisible}: ${JSON.stringify(raw)}`);
   if (NAME_BLOCKLIST_RE.test(cleaned)) {
-    throw new Error(
-      `agent 名称含非法字符: "${raw}"（不能包含空白、点号 .、路径分隔符 / \\ : ~、shell 元字符 " ' \` $ ; & | < > ( ) * ? { }）`
-    );
+    throw new Error(`agent 名称含非法字符: "${raw}"（不能包含空白、点号 .、路径分隔符 / \\ : ~、shell 元字符 " ' \` $ ; & | < > ( ) * ? { }）`);
   }
   if (NAME_TRAVERSAL_RE.test(cleaned)) {
     throw new Error(`agent 名称不能包含 ".."：${JSON.stringify(raw)}`);

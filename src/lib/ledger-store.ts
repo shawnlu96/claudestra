@@ -10,6 +10,7 @@ import { ASKS_REQUIRED_COLUMNS, migrateAsksV2 } from "./ledger-asks-schema.js";
 import type { DepKind, DepState, LedgerDep } from "./ledger-deps.js";
 import type { AssigneeKind, EventKind, LedgerEvent, LedgerItem, LedgerTask } from "./ledger-stages.js";
 import { SCHEMA_AUDIT } from "./ledger-audit-schema.js";
+import { toTeam, type TeamConfig } from "./ledger-team-config.js";
 import { statePath } from "./paths.js";
 import { runMigrations, type SchemaSpec } from "./sqlite-migrate.js";
 
@@ -331,6 +332,7 @@ export interface LedgerMeta {
   /** 规格卡 / 报告所在目录；只有 owner 能设 */
   docsDir: string | null;
   queueFrozen: QueueFrozen;
+  team: TeamConfig | null;
 }
 
 export function getMeta(db: Database, project: string): LedgerMeta {
@@ -343,5 +345,6 @@ export function getMeta(db: Database, project: string): LedgerMeta {
     pms: Array.isArray(pms) ? pms.filter((p): p is string => typeof p === "string") : [],
     docsDir: typeof docsDir === "string" ? docsDir : null,
     queueFrozen: frozen ?? { frozen: false, reason: "", since: null },
+    team: toTeam(kv.get("team")),
   };
 }

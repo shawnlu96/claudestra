@@ -104,8 +104,8 @@ function json(status: number, body: unknown): Response {
   });
 }
 
-/** 鉴权同 /api/v1（Bearer 或设备 cookie，api-auth.ts）但不限流——终端输入逐键回传，按分钟限次会秒超 */
-const authNoLimit = (req: Request): Promise<Principal | Response> => authenticateApi(req, new URL(req.url), { rateLimit: false });
+/** 鉴权同 /api/v1（Bearer 或设备 cookie，api-auth.ts）但不限流——终端输入逐键回传，按分钟限次会秒超；所以也不收 peer token */
+const authNoLimit = (req: Request): Promise<Principal | Response> => authenticateApi(req, new URL(req.url), { rateLimit: false, peers: false });
 
 /**
  * agent 名 → master session 里的 window 引用。

@@ -32,6 +32,17 @@ function markIfHeldAcrossStop(item: HeldItem, stopAt: number | undefined): void 
   if (stopAt && item.heldAt < stopAt && item.env.from.kind !== "bridge" && !m.interruptNote) m.interruptNote = heldAcrossStopNote(item.heldAt, stopAt);
 }
 
+/** 押后日志里的来源：agent 名、bridge:<label>（班子通知是 bridge:ledger），其余照 kind */
+const fromLabel = (env: Envelope): string => (env.from.kind === "local" ? (env.from.agentName ?? "?") : env.from.kind === "bridge" ? `bridge:${env.from.label ?? "?"}` : env.from.kind);
+
+type DeliveredHook = (channelId: string, env: Envelope) => void;
+const deliveredHooks: DeliveredHook[] = [];
+
+/** 押后消息真正送达（sent 且不是又押回）之后的回调：班子通知这时才标消息来源（bridge/team-router.ts） */
+export function onHeldDelivered(fn: DeliveredHook): void {
+  deliveredHooks.push(fn);
+}
+
 export async function flushHeld(d: FlushDeps, channelId: string, reason: string): Promise<void> {
   const q = d.held.get(channelId);
   if (!q || q.length === 0) return;
@@ -60,9 +71,10 @@ export async function flushHeld(d: FlushDeps, channelId: string, reason: string)
       if (r.outcome.kind === "sent") {
         d.touch(channelId, item.env);
         notifyHeldSettled(item.env, "delivered");
+        for (const fn of deliveredHooks) fn(channelId, item.env);
       }
       d.held.remove(channelId, item);
-      if (r.outcome.kind === "sent") console.log(`▶️ 押后消息投递(${reason}): ${item.env.from.kind === "local" ? item.env.from.agentName : "?"} → ${to.agentName || channelId}`);
+      if (r.outcome.kind === "sent") console.log(`▶️ 押后消息投递(${reason}): ${fromLabel(item.env)} → ${to.agentName || channelId}（${item.env.meta.messageId}）`);
     }
   } finally {
     d.held.release(channelId);

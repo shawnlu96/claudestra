@@ -7,9 +7,10 @@
  */
 import { bindHash, missingApprove, parseReplyAsk, type ReplyAsk } from "../lib/ask-bind.js";
 import { draftFromReply, type AskRow, type ReplyAskDraft } from "../lib/ask-options.js";
-import { closeAsk, openAskFull, patchAsk, supersedeOlder, type Ask, type NewAsk } from "../lib/ledger-asks.js";
+import { closeAsk, getAsk, openAskFull, patchAsk, supersedeOlder, type Ask, type NewAsk } from "../lib/ledger-asks.js";
 import { markdownToPlain } from "../lib/plain-text.js";
 import { askDb, parentExtra, publishAsk, taskOf, toOwner, whoIs } from "./asks.js";
+import { copyOutboundToInbox } from "./local-api/media-refresh.js";
 import type { Delivery, Envelope } from "./router.js";
 
 /** 知会类回复的 threadId：推送派发器据此不推（push/init.ts 接 isQuietReply）。只记最近的，10 分钟后忘掉 */
@@ -84,11 +85,24 @@ async function openAskForReply(env: Envelope, chatId: string, fromChannelId: str
   return { ask: r.ask };
 }
 
+type CopyFiles = (paths: string[], agent: string) => Promise<{ name: string; attachment: string }[]>;
+
+/**
+ * 卡片上列的附件（inbox 里的副本名）：投给网页的 reply 已由 bridge.ts 拷好（sentFiles）；投到 Discord 频道的只上传给 Discord、
+ * 不进 inbox，这里补拷一份，卡片才打得开。拷失败的那个跳过（copyOutboundFiles 自己记日志）
+ */
+async function cardFiles(env: Envelope, agent: string, copy: CopyFiles): Promise<{ name: string; attachment: string }[]> {
+  if (env.meta.sentFiles) return env.meta.sentFiles;
+  return env.meta.files?.length ? copy(env.meta.files, agent) : [];
+}
+
 /**
  * 带选项（或显式 ask）、发给 owner 的先建 ask，askId / 参数哈希进 env.meta（出站事件带给网页，reply 结果回给 agent）；
  * 投递成功补记 Discord 消息 id、作废同 key 的旧 ask；失败把新的撤掉（旧的不动）。
  */
-export async function deliverReplyWithAsk(env: Envelope, chatId: string, fromChannelId: string, send: (e: Envelope) => Promise<Delivery>, rawAsk?: unknown): Promise<Delivery> {
+export async function deliverReplyWithAsk(
+  env: Envelope, chatId: string, fromChannelId: string, send: (e: Envelope) => Promise<Delivery>, rawAsk?: unknown, copy: CopyFiles = copyOutboundToInbox,
+): Promise<Delivery> {
   let a: Ask | null = null;
   try {
     const o = await openAskForReply(env, chatId, fromChannelId, rawAsk);
@@ -105,7 +119,10 @@ export async function deliverReplyWithAsk(env: Envelope, chatId: string, fromCha
   if (!a) return d;
   try {
     if (d.outcome.kind === "sent") {
-      patchAsk(askDb(), a.id, { discordMessageIds: d.outcome.discordMessageIds ?? [] });
+      const files = await cardFiles(env, a.fromAgent ?? "?", copy);
+      patchAsk(askDb(), a.id, { discordMessageIds: d.outcome.discordMessageIds ?? [], ...(files.length ? { extra: { files } } : {}) });
+      const withFiles = files.length ? getAsk(askDb(), a.id) : null;
+      if (withFiles) publishAsk(withFiles); // 建的时候推过一次还没有附件：网页收到 ask 事件就刷新，别让它等 30 秒轮询
       for (const old of supersedeOlder(askDb(), a)) publishAsk(old); // 发出去了才作废同 key 的旧的：发失败时旧的仍有效
     } else {
       const c = closeAsk(askDb(), a.id, "cancelled", "reply 没发出去");
