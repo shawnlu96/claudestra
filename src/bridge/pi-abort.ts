@@ -6,7 +6,8 @@
  * 扩展在注册帧里声明 abort:true 才发（老扩展收到会默默忽略）；gate 接线在 bridge/interrupt-gate.ts。
  */
 import type { ServerWebSocket } from "bun";
-import { emitEvent } from "./event-bus.js";
+import { emitEvent, getAgentStatus } from "./event-bus.js";
+import { readRegistryAgents } from "../lib/registry.js";
 import { newMessageId, newThreadId, type Endpoint, type Envelope } from "./router.js";
 import { turnCuts } from "./turn-cuts.js";
 import type { TurnTrigger } from "../lib/turn-cuts.js";
@@ -19,6 +20,8 @@ interface EchoDeps {
   ownerId(): string;
   /** bridge.ts 的几本欠账（取时才读：接线时它们还没初始化） */
   books(): VoidableBooks;
+  /** 发送方 agent 暂时不在线：回显进押后队列（落盘），它连回来时按频道取最新连接投（held-flush） */
+  hold(env: Envelope): void;
 }
 
 let socketOf: (channelId: string) => Socket | undefined = () => undefined;
@@ -57,7 +60,7 @@ export function onAbortAck(msg: { id?: unknown; result?: unknown; voided?: unkno
   w.done = undefined;
   const ids = Array.isArray(msg.voided) ? [...new Set(msg.voided.filter((x): x is string => typeof x === "string"))] : [];
   // 先回显再放行：放行之后停字那条会 record() 一条 cut、清掉「这一回合送到了哪些」，就查不到发送方了
-  if (ids.length) settleVoided(w.channelId, ids, w.at);
+  if (ids.length) void settleVoided(w.channelId, ids, w.at);
   if (!done) return; // 迟到的回执：只补回显
   lastAbort.set(w.channelId, { result: msg.result === "aborted" ? "aborted" : "idle", inEditor: Number(msg.inEditor) || 0 });
   done(msg.result === "aborted" ? "aborted" : "idle");
@@ -150,36 +153,98 @@ export function voidedEchoTo(t: TurnTrigger): { kind: "user" | "api" | "local"; 
   return null;
 }
 
-/** 作废的消息：先销账（找不到发送方的也按 id 销），再逐条告诉发送方 */
-function settleVoided(channelId: string, ids: readonly string[], abortAt: number): void {
+/** 回显的文案 + 日志里怎么称呼这些消息（Pi 作废 / Codex 没投进去） */
+type Notice = { text(agent: string, t: TurnTrigger, toSender: boolean): string; what: string };
+const piVoided: Notice = { text: (agent, t, toSender) => voidedNotice(agent, [t], toSender), what: "停之前 steer 进去、还没执行的" };
+
+/** 作废的消息：先销账（找不到发送方的也按 id 销），再逐条告诉发送方。发送方的查找同步做完（调用方随后会清送达记录）；返回真告诉到的条数 */
+function settleVoided(channelId: string, ids: readonly string[], abortAt: number, notice: Notice = piVoided): Promise<number> {
   const found = ids.map((id) => turnCuts.deliveredMessage(channelId, id)).filter((t): t is NonNullable<typeof t> => !!t);
-  if (!echo) return;
+  if (!echo) return Promise.resolve(0);
   const agentOf = new Map(found.filter((t) => t.fromKind === "local" && t.replyTo).map((t) => [t.messageId, t.replyTo]));
   const voided = ids.map((messageId) => ({ messageId, agentChannel: agentOf.get(messageId) }));
   const n = dropVoidedPendings(echo.books(), channelId, voided, abortAt);
   if (n) console.log(`⏹ 作废的 ${ids.length} 条消息从补答账 / 看门狗销掉 ${n} 条`);
-  if (found.length) echoVoided(echo, channelId, found);
+  return found.length ? echoVoided(echo, channelId, found, notice) : Promise.resolve(0);
 }
 
-function echoVoided(d: EchoDeps, channelId: string, found: readonly (TurnTrigger & { agent?: string })[]): void {
+/** deliver 的结果是不是没送到（错误 / 丢弃）；测试替身返回 undefined 算送到 */
+const notSent = (r: unknown): boolean => ["error", "dropped"].includes(String((r as { outcome?: { kind?: string } } | undefined)?.outcome?.kind));
+
+/**
+ * 逐条回显，等投递结果再数：送到了，或者发给本机 agent 的押进了押后队列（落盘，它连回来 / 空闲时按频道取最新连接投）才算告诉到。
+ * 本机 agent 不在线、投递报错 / 被丢 / 抛错都押进队列；API / 用户没有队列，没送到就不算——settled 少报，channel-server 自己兜底说
+ * （T52 复审 #204 P2：删了回程却没告诉，还报 settled=1）
+ */
+async function echoVoided(d: EchoDeps, channelId: string, found: readonly (TurnTrigger & { agent?: string })[], notice: Notice): Promise<number> {
   const agent = found.find((t) => t.agent)?.agent ?? "这个 agent";
-  let sent = 0;
+  const jobs: Promise<boolean>[] = [];
   for (const t of found) {
     const dest = voidedEchoTo(t);
     let to: Endpoint | undefined;
     if (dest?.kind === "user") to = { kind: "user", userId: d.ownerId(), channelId: dest.address };
     if (dest?.kind === "api") to = { kind: "api", tokenId: dest.address, name: t.fromName };
     const ws = dest?.kind === "local" ? socketOf(dest.address) : undefined;
-    if (ws) to = { kind: "local", channelId: dest!.address, agentName: t.fromName, ws: ws as ServerWebSocket<unknown> };
-    if (!to) continue; // bridge 自己的通知、发送方 agent 不在线：没法告诉它，它的消息反正没执行
-    const text = voidedNotice(agent, [t], to.kind !== "user");
+    if (dest?.kind === "local") to = { kind: "local", channelId: dest.address, agentName: t.fromName, ws: ws as ServerWebSocket<unknown> };
+    if (!to) continue; // bridge 自己的通知：没有回信地址，它的消息反正没执行
+    const text = notice.text(agent, t, to.kind !== "user");
     // response + inReplyTo：那条请求就此了结（不再算「还没回复」、API / peer 的等待拿到这句）；API 回程按 agent 频道认，from 记成这个 agent
     const from: Endpoint = to.kind === "api" ? { kind: "local", channelId, agentName: agent, ws: socketOf(channelId) as ServerWebSocket<unknown> } : { kind: "bridge", label: "pi-abort" };
     const meta = { messageId: newMessageId("voided"), triggerKind: "bridge_synth" as const, ts: new Date().toISOString(), threadId: newThreadId(), inReplyTo: t.messageId };
-    void d.deliver({ from, to, intent: "response", content: text, meta: to.kind === "local" ? { ...meta, waitForIdle: true } : meta })
-      .catch((e: Error) => console.error(`⚠️ 作废回显发给 ${t.fromName} 失败: ${e.message}`));
+    const env: Envelope = { from, to, intent: "response", content: text, meta: to.kind === "local" ? { ...meta, waitForIdle: true } : meta };
+    const local = to.kind === "local" ? to : null;
+    const hold = () => (local ? (d.hold({ ...env, to: { ...local, ws: undefined as never } }), true) : false);
+    if (local && !ws) { jobs.push(Promise.resolve(hold())); continue; }
+    jobs.push(d.deliver(env).then((r) => !notSent(r) || hold(), (e: Error) => (console.error(`⚠️ 作废回显发给 ${t.fromName} 失败: ${e.message}`), hold())));
     if (to.kind === "user") emitEvent({ agent, chatId: to.channelId, type: "chat_message", data: { direction: "out", from: "bridge", text, notice: true } });
-    sent++;
   }
-  console.log(`⏹ ${agent}：停之前 steer 进去、还没执行的 ${found.length} 条已作废，告诉了发送方 ${sent} 条${sent < found.length ? `（${found.length - sent} 条没法告诉：bridge 通知 / 发送方不在线）` : ""}`);
+  const told = (await Promise.all(jobs)).filter(Boolean).length;
+  console.log(`⏹ ${agent}：${notice.what} ${found.length} 条已作废，告诉了发送方 ${told} 条${told < found.length ? `（${found.length - told} 条没告诉到：bridge 通知没有回信地址 / 送不到）` : ""}`);
+  return told;
+}
+
+/**
+ * Codex 投递失败（channel-server 的 codex_undelivered：不在线 / 认不准线程 / codex queue 报错）：消息没进 Codex，不会有回合、也不会有 hook。
+ * 走和 Pi 作废消息同一套——只了结这一条（按 messageId 销补答账、回程槽，回信地址收到一条带 inReplyTo 的 response，API / peer 的等待拿到这句），
+ * 不补整轮的 StopFailure：同一个 agent 可能正在跑上一条，整轮收尾会把它的等待、状态一起结掉（T52 He 审 #204 P1）。
+ * 也不替它宣告完成：Codex 空不空闲 bridge 推不准（按消息推算、事件环、原生回合账九轮复审都找得出漏洞），「工作中」只等真实的
+ * Stop / StopFailure 来收；还挂着 thinking 就在频道里标一句。已知残留：失败且确实没有回合时会一直挂到下一次真实收尾，结构上的
+ * 解法在 T60 ACP（prompt 有没有返回就是忙闲）。返回 settled = 告诉了几条发送方，0 = channel-server 自己兜底说。
+ */
+export async function onCodexUndelivered(
+  msg: { requestId?: unknown; channelId?: unknown; messageId?: unknown; reason?: unknown }, ws: Socket, own: boolean, d: UndeliveredDeps = {},
+): Promise<void> {
+  const channelId = typeof msg.channelId === "string" ? msg.channelId : "";
+  const messageId = typeof msg.messageId === "string" ? msg.messageId : "";
+  const reason = typeof msg.reason === "string" && msg.reason.trim() ? msg.reason.trim().slice(0, 400) : "⚠️ 消息没能投进 Codex";
+  let settled = 0;
+  if (own && channelId && messageId) {
+    const known = turnCuts.deliveredMessage(channelId, messageId)?.agent ?? turnCuts.agentOn(channelId);
+    const told = settleVoided(channelId, [messageId], Date.now(), { text: () => reason, what: "没投进 Codex 的" }); // 先查发送方，再清送达记录
+    turnCuts.dropUndelivered(channelId, messageId);
+    settled = await told;
+    // bridge 重启后投递记录是空的：agent 按频道从 registry 查
+    const agent = known ?? (await (d.agentOf ?? agentFromRegistry)(channelId));
+    if (agent) noteStuck(agent, channelId);
+  }
+  ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, result: { settled } }));
+}
+
+type UndeliveredDeps = {
+  /** 投递记录里查不到时按频道找 agent（测试注入；默认读 registry） */
+  agentOf?(channelId: string): Promise<string | undefined>;
+};
+
+/** registry 读不到就当查无此 agent：最坏这次不在频道里标那一句，发送方照样收到了失败回显 */
+const agentFromRegistry = async (channelId: string): Promise<string | undefined> =>
+  (await readRegistryAgents().catch((e: Error) => (console.warn(`⚠️ 投递失败读 registry 失败: ${e.message}`), []))).find((a) => a.channelId === channelId)?.name;
+
+const namesOf = (agent: string) => [agent, agent.replace(/^agent-/, ""), `agent-${agent.replace(/^agent-/, "")}`];
+
+/** 还挂着「工作中」：在频道里标一句投递失败、没替它宣告完成（不动状态） */
+function noteStuck(agent: string, channelId: string): void {
+  const who = namesOf(agent).find((n) => getAgentStatus(n) === "thinking");
+  if (!who) return;
+  const text = "⚠️ 有消息没投进 Codex，这一回合是否还在跑拿不准，bridge 没有替它宣告完成；卡住的话打断一下或重发。";
+  emitEvent({ agent: who, chatId: channelId, type: "chat_message", data: { direction: "out", from: "bridge", text, notice: true } });
 }

@@ -203,9 +203,16 @@ describe("resolveCodexBinary", () => {
   });
 });
 
-test("probeCodexQueue：按绝对路径跑 queue --help，exit 0 才算可用", async () => {
+test("probeCodexQueue：按绝对路径跑 queue --help，exit 0 且帮助里有 --thread 才算可用", async () => {
   let seen: string[] = [];
-  expect(await probeCodexQueue(async (cmd) => { seen = cmd; return { ok: true, out: "", err: "" }; }, "/c")).toBe(true);
+  const queueHelp = "Queue a message for an existing session\n\nUsage: codex queue [OPTIONS] --thread <THREAD> --message <TEXT>\n";
+  expect(await probeCodexQueue(async (cmd) => { seen = cmd; return { ok: true, out: queueHelp, err: "" }; }, "/c")).toBe(true);
   expect(seen).toEqual(["/c", "queue", "--help"]);
   expect(await probeCodexQueue(async () => ({ ok: false, out: "", err: "unknown subcommand" }), "/c")).toBe(false);
+});
+
+test("probeCodexQueue：旧版把 queue 当提示词、打印顶层帮助 exit 0——不算可用", async () => {
+  const topHelp = "Codex CLI\n\nIf no subcommand is specified, options will be forwarded to the interactive CLI.\n\n"
+    + "Usage: codex [OPTIONS] [PROMPT]\n       codex [OPTIONS] <COMMAND> [ARGS]\n\nCommands:\n  exec  Run Codex non-interactively\n";
+  expect(await probeCodexQueue(async () => ({ ok: true, out: topHelp, err: "" }), "/c")).toBe(false);
 });

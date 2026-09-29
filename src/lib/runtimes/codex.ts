@@ -179,7 +179,7 @@ async function checkAvailable(ctx: CodexCtx): Promise<Availability> {
   } else if (!(await probeCodexQueue(ctx.deps.run, found).catch(() => false))) { // 探测进程起不来 = 当作不支持
     result = {
       ok: false,
-      hint: `${found} 没有 \`codex queue\` 子命令（版本太旧）：Claudestra 靠它往会话里投消息。升级：npm i -g @openai/codex@latest`,
+      hint: `${found} 没有 \`codex queue\` 子命令（版本太旧，需要 ≥ 0.153）：Claudestra 靠它往会话里投消息。升级：npm i -g @openai/codex@latest`,
     };
   } else {
     ctx.bin = found;

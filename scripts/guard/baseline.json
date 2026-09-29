@@ -7,7 +7,7 @@
   },
   "limits": {
     "catch:empty-block": 150,
-    "catch:silent-promise": 233,
+    "catch:silent-promise": 231,
     "comments:blocks": 49,
     "dead:scripts/codex-adapter-e2e.ts#<file>": 1,
     "dead:scripts/codex-e2e.ts#<file>": 1,
@@ -212,7 +212,7 @@
     "size:src/bridge/permission-watcher.ts": 737,
     "size:src/bridge/stats-dashboard.ts": 811,
     "size:src/bridge/web-terminal.ts": 548,
-    "size:src/channel-server.ts": 814,
+    "size:src/channel-server.ts": 812,
     "size:src/cron.ts": 607,
     "size:src/launcher.ts": 1175,
     "size:src/lib/cli-install.ts": 1045,
