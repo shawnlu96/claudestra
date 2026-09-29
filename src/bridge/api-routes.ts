@@ -97,6 +97,7 @@ import { displayModelEffort } from "../lib/display-model.js";
 import { cachedCodexCatalog, readCodexConfigDefaults } from "../lib/codex-catalog.js";
 import { invitePageResponse } from "./invite-page.js";
 import { saveUploadToInbox } from "./local-api/media-refresh.js";
+import { archiveUnmanagedFile, restoreUnmanagedArchive } from "../lib/unmanaged-archive.js";
 
 /**
  * 只允许当作**单层目录名**用的标识（归档区 archived/<name>）：拒绝路径分隔符、相对段、NUL。
@@ -746,20 +747,8 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
       return apiJson(400, { ok: false, error: "这条归档没有记录原始位置（老条目），只能手动恢复" });
     }
     try {
-      await fsp.mkdir(original.split("/").slice(0, -1).join("/"), { recursive: true });
-      const files = (await fsp.readdir(dir)).filter((f) => f !== ".meta.json");
-      for (const f of files) {
-        // 单个会话文件 → 直接搬回原始路径；其余（子会话目录等）→ 放在原文件同级的同名目录下
-        const direct = files.length === 1 ? original : "";
-        if (direct) {
-          await fsp.rename(`${dir}/${f}`, direct);
-        } else {
-          const target = `${original.replace(/\.jsonl$/, "")}/${f}`;
-          await fsp.mkdir(target.split("/").slice(0, -1).join("/"), { recursive: true });
-          await fsp.rename(`${dir}/${f}`, target);
-        }
-      }
-      await fsp.rm(dir, { recursive: true, force: true });
+      // 搬回原路径、mtime 改成现在、记进「用户恢复过」——否则下一轮 Codex 子线程自动归档又把它收走
+      await restoreUnmanagedArchive(dir, { originalPath: original, sessionId: String(meta?.sessionId || rid) });
       return apiJson(200, { ok: true, kind: "unmanaged", restoredTo: original });
     } catch (e) {
       return apiJson(500, { ok: false, error: (e as Error).message });
@@ -850,18 +839,8 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
     } catch {
       /* stat 失败就照常走 */
     }
-    if (action === "archive") {
-      const { USER_ARCHIVE_ROOT } = await import("../lib/session-archive.js");
-      const dest = `${USER_ARCHIVE_ROOT}/${sid}`;
-      await fsp.mkdir(dest, { recursive: true });
-      await fsp.copyFile(mfile, `${dest}/${mfile.split("/").pop()}`);
-      // 记一份 meta：恢复时要知道它原来在哪个目录（cwd 编码不可逆）
-      await fsp.writeFile(
-        `${dest}/.meta.json`,
-        JSON.stringify({ kind: "unmanaged", originalPath: mfile, runtime: mRuntime ?? null, cwd: mCwd ?? null, sessionId: sid }, null, 2),
-      );
-    }
-    await fsp.rm(mfile, { force: true });
+    if (action === "archive") await archiveUnmanagedFile(mfile, { sessionId: sid, runtime: mRuntime, cwd: mCwd }); // 快照 + meta + 删原件
+    else await fsp.rm(mfile, { force: true });
     console.log(`🗂 会话处置: ${action} ${sid} (${mfile})`);
     return apiJson(200, { ok: true, action, sessionId: sid, archived: action === "archive" });
   }

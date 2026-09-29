@@ -124,12 +124,12 @@
     "deps:watcher-no-watcher: src/bridge/model-drift.ts -> src/bridge/permission-watcher.ts": 1,
     "deps:watcher-no-watcher: src/bridge/permission-watcher.ts -> src/bridge/bg-activity-watcher.ts": 1,
     "deps:web-src-split: web/scripts/tls-proxy.ts -> src/lib/tailscale.ts": 1,
-    "doc:CLAUDE.md": 24590,
-    "doc:CLAUDE.zh-CN.md": 22285,
+    "doc:CLAUDE.md": 24762,
+    "doc:CLAUDE.zh-CN.md": 22459,
     "doc:web/CLAUDE.en.md": 6532,
     "doc:web/CLAUDE.md": 5810,
     "dup:total": 1039,
-    "fn:overflow": 9085,
+    "fn:overflow": 9063,
     "fnLong:AgentActions": 1,
     "fnLong:AgentRow": 1,
     "fnLong:AskQuestionCard": 1,
@@ -204,7 +204,7 @@
     "pattern:registry-path-literal": 2,
     "pattern:tmux-target-literal": 2,
     "size:src/bridge.ts": 3606,
-    "size:src/bridge/api-routes.ts": 1990,
+    "size:src/bridge/api-routes.ts": 1969,
     "size:src/bridge/bg-activity-watcher.ts": 467,
     "size:src/bridge/discord-interactions.ts": 1133,
     "size:src/bridge/jsonl-watcher.ts": 841,
@@ -220,7 +220,7 @@
     "size:src/lib/session-history.ts": 962,
     "size:src/lib/tailscale.ts": 623,
     "size:src/lib/tmux-helper.ts": 1335,
-    "size:src/manager.ts": 3042,
+    "size:src/manager.ts": 3041,
     "size:src/manager/peers.ts": 491,
     "size:src/pi/claudestra-extension.ts": 618,
     "size:src/setup.ts": 2042,
@@ -293,13 +293,25 @@
     {
       "key": "doc:CLAUDE.md",
       "from": 24452,
-      "to": 24590,
-      "why": "T36 上下文边界按防腐规则 9 在 CLAUDE.md / CLAUDE.zh-CN.md 加一行文档指针（→ docs/architecture/context-boundary.md）；原先用来抵消的那行重复提示 main 已经删了，没有别的可删"
+      "to": 24624,
+      "why": "PR #186 审查 P2：Codex 子线程自动归档开关 codex-sub-archive 要在命令清单里写明一行（缺省关；开了 7 天没写的子线程归档、90 天后删除），owner 指定写进 CLAUDE.md，细节在 docs/architecture/features.md"
     },
     {
       "key": "doc:CLAUDE.zh-CN.md",
       "from": 22154,
-      "to": 22285,
+      "to": 22328,
+      "why": "同上（PR #186 审查 P2）：中文版命令清单同步加 codex-sub-archive 一行，细节在 docs/architecture/features.zh-CN.md"
+    },
+    {
+      "key": "doc:CLAUDE.md",
+      "from": 24624,
+      "to": 24762,
+      "why": "T36 上下文边界按防腐规则 9 在 CLAUDE.md / CLAUDE.zh-CN.md 加一行文档指针（→ docs/architecture/context-boundary.md）；原先用来抵消的那行重复提示 main 已经删了，没有别的可删"
+    },
+    {
+      "key": "doc:CLAUDE.zh-CN.md",
+      "from": 22328,
+      "to": 22459,
       "why": "T36 上下文边界按防腐规则 9 在 CLAUDE.md / CLAUDE.zh-CN.md 加一行文档指针（→ docs/architecture/context-boundary.md）；原先用来抵消的那行重复提示 main 已经删了，没有别的可删"
     }
   ]

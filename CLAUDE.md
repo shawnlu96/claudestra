@@ -110,6 +110,7 @@ bun src/manager.ts create   <name> <dir> [purpose]
 bun src/manager.ts resume   <name> <sessionId> [dir] [--fork]   # --fork: adopt a wild/bg-occupied session as a branched copy
 bun src/manager.ts adopt    <name> <sessionId>   # promote a bg doppelganger to the agent's official session + restart
 bun src/manager.ts archive  <name>               # snapshot the agent's current session jsonl to ~/.claude-orchestrator/archive/
+bun src/manager.ts codex-sub-archive status|on|off   # default off; on = Codex sub-threads idle 7 days move to archive/archived/, deleted 90 days later (archive retention)
 bun src/manager.ts kill     <name>
 bun src/manager.ts restart  [name]
 bun src/manager.ts restart  --include-master   # v2.24+ restart every session, master included

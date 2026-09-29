@@ -88,6 +88,7 @@ export function isWriteInvocation(cmd: string | undefined, args: readonly string
   if (cmd === "takeover") return takeoverWrites(args);
   if (cmd === "repair") return args.includes("--apply"); // 不带 --apply 只列计划
   const sub = args[0] ?? "";
+  if (cmd === "codex-sub-archive") return sub === "on" || sub === "off"; // 写 config.json；status 是读
   const subs = WRITE_SUBCOMMANDS[cmd];
   if (subs) return subs.has(sub);
   if (cmd === "auto-update") return !AUTO_UPDATE_READ_SUBS.has(sub);
