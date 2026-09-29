@@ -4,20 +4,34 @@
  */
 import { createInterruptGate } from "../lib/interrupt-gate.js";
 import { recordMetric } from "../lib/metrics.js";
-import { readRegistryAgents } from "../lib/registry.js";
+import { controlFor } from "../lib/runtimes/index.js";
 import { interruptWindow } from "../lib/runtimes/window-ops.js";
-import { MASTER_SESSION, windowTarget } from "../lib/tmux-helper.js";
 import { windowWallWait } from "../lib/wall-screen.js";
 import { emitEvent } from "./event-bus.js";
+import { extensionAbort, setAbortCapable } from "./pi-abort.js";
+export { onAbortAck, setExtensionSocket, stopAfterAbort, stopWaitIds } from "./pi-abort.js"; // bridge.ts 只从这里接打断相关的线
+export { HTTP_IDLE_TIMEOUT_S } from "../lib/esc-guard.js";
 import { probeTurnAt, resolveTurnWindow } from "./turn-probe.js";
+import { turnCuts } from "./turn-cuts.js";
 
 const controlChannelId = () => process.env.CONTROL_CHANNEL_ID || "";
+
+/** 注册帧里声明的能力：Codex 会打字投递（老 channel-server 不声明：打断后消息会卡在 queue）、Pi 扩展会中止并回执（老扩展收到 abort 默默忽略） */
+export function noteRuntimeCaps(channelId: string, msg: { typeIn?: unknown; abort?: unknown }): void {
+  turnCuts.setCodexTypeIn(channelId, msg.typeIn === true);
+  setAbortCapable(channelId, msg.abort === true);
+}
 
 export const interruptGate = createInterruptGate({
   resolve: (ch) => resolveTurnWindow(ch, controlChannelId()),
   probe: probeTurnAt,
   wallWait: async (win) => !!(await windowWallWait(win)), // 抓不到屏：交给 probe 按老规矩判（它也抓不到就是 unknown，不发键）
-  interrupt: interruptWindow,
+  interrupt: async (win, runtime, ch, kind) => {
+    turnCuts.noteKeySent(ch, kind); // 先记：Codex 的打断回报 0.5 秒就到
+    if (controlFor(runtime).abortVia === "extension") return extensionAbort(ch);
+    return interruptWindow(win, runtime);
+  },
+  allow: (ch, runtime, stop) => turnCuts.mayBridgeInterrupt(ch, runtime, stop),
   onPreempted: (agent, channelId) => {
     recordMetric("agent_interrupt", { channelId, agent, meta: { trigger: "preempt" } });
     // 让前端给被掐的回合标「已打断」(与手动停止同一事件形状)
@@ -26,11 +40,3 @@ export const interruptGate = createInterruptGate({
   },
   sleep: (ms) => Bun.sleep(ms),
 });
-
-/** 按 agent 名手动打断（API 端点）：大总管（"master" / "0"）不在 registry 的普通条目里，按 Claude Code 的 master:0 处理 */
-export async function interruptAgentByName(name: string, channelId: string): Promise<{ keys: readonly string[]; deduped?: true }> {
-  const isMaster = name === "master" || name === "0";
-  const regs = isMaster ? [] : await readRegistryAgents().catch(() => []); // 读不到就当 CC 发 C-c：人要停，宁可发
-  const runtime = regs.find((a) => a.name === name)?.runtime;
-  return interruptGate.manual(channelId, isMaster ? `${MASTER_SESSION}:0` : windowTarget(name), runtime);
-}

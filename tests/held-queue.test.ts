@@ -7,6 +7,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { sweepHeldAges } from "../src/bridge/held-age.js";
+import type { Envelope } from "../src/bridge/router.js";
 import { ageHeld, HELD_GIVE_UP_MS, HELD_NOTIFY_MS, heldAgentCounts, heldNoticeText, HeldQueue, type HeldItem } from "../src/bridge/held-queue.js";
 
 const dir = mkdtempSync(join(tmpdir(), "held-queue-"));
@@ -136,23 +137,33 @@ describe("heldAgentCounts（侧栏「排队 N 条」读落盘文件）", () => {
 });
 
 describe("押后老化按发送方分（T24 wf gate-state-5 / delivery-hold-6）", () => {
-  test("闸只停 Claude Code 发送方的提醒；人发的 24 小时放弃时发到目标频道、附原文", () => {
+  test("闸只停 Claude Code 发送方的提醒；人发的 24 小时放弃时发回原发送者的地址、附原文（wf2 delivery-hold-5 / notify-web-rules-3）", async () => {
     const q = new HeldQueue(null);
     const human = item("你先停一下", 1000);
-    human.env = { ...human.env, from: { kind: "user", userId: "u1", channelId: "c-me" } } as HeldItem["env"];
+    human.env = { ...human.env, from: { kind: "user", userId: "u1", channelId: "c-discord" } } as HeldItem["env"];
+    const guest = item("访客的问题", 1000);
+    guest.env = { ...guest.env, from: { kind: "api", tokenId: "tok_g", name: "guest-1" } } as HeldItem["env"];
+    const peer = item("peer 的请求", 1000);
+    peer.env = { ...peer.env, from: { kind: "api", tokenId: "tok_p", name: "bob", peer: "sekai", owner: true } } as HeldItem["env"];
     const codex = item("codex 的请求", 1000);
-    q.set("c-me", [item("cc 的请求", 1000), codex, human]);
+    q.set("c-me", [item("cc 的请求", 1000), codex, human, guest, peer]);
     const sent: string[] = [];
-    const humans: string[] = [];
+    const out: Envelope[] = [];
     sweepHeldAges({
       held: q, paused: (it) => it.env.content === "cc 的请求", wsOf: () => ({ send: (s: string) => void sent.push(JSON.parse(s).content) }),
-      notifyHuman: (cid, text) => void humans.push(`${cid}:${text}`),
+      deliver: async (e) => (out.push(e), { envelope: e, outcome: { kind: "sent" } }),
     }, 1000 + HELD_GIVE_UP_MS + 1);
+    await Promise.resolve();
     expect(q.get("c-me")!.map((i) => i.env.content)).toEqual(["cc 的请求"]);
     expect(sent).toHaveLength(1);
     expect(sent[0]).toContain("codex 的请求");
-    expect(humans).toHaveLength(1);
-    expect(humans[0]).toStartWith("c-me:⚠️");
-    expect(humans[0]).toContain("原文：\n你先停一下");
+    expect(out.map((e) => (e.to.kind === "api" ? `api:${e.to.tokenId}` : e.to.kind === "user" ? `user:${e.to.channelId}` : e.to.kind))).toEqual(["user:c-discord", "api:tok_g", "api:tok_p"]);
+    expect(out[0]!.content).toContain("原文：\n你先停一下");
+    expect(out[0]!.content).toContain("额度菜单"); // Discord 上的人 = owner 这一侧：写明原因
+    for (const e of out.slice(1)) {
+      expect(e.content).not.toContain("额度"); // 外人 / peer 不知道 owner 撞了额度
+      expect(e.meta.inReplyTo).toBe(e === out[1] ? guest.env.meta.messageId : peer.env.meta.messageId); // 结掉挂在那条消息上的等待
+      expect(e.from).toMatchObject({ kind: "local", channelId: "c-me" }); // 按目标 agent 的会话发回
+    }
   });
 });

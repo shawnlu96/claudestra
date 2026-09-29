@@ -39,8 +39,7 @@ import { fetchHistory } from "@/lib/api/history";
 import { openAgentEventStream } from "@/lib/api/stream";
 import { agentTasks, answerAuq, answerPermission, clearAgentSession, interruptAgent, sendMessage, setHidden, type SendResult } from "@/lib/api/chat";
 import { getProfile, putProfile } from "@/lib/api/settings";
-import { projectsList } from "@/lib/api/system";
-import { markRead } from "@/lib/api/push";
+import { markRead, projectsList } from "./scoped-requests"; // 非全权设备不发（接口要全权）
 
 /** v2.17.2 侧栏最近触碰时刻(pointerdown/滚动)——roster 重排的交互期冻结依据。
  *  sidebar 的容器事件调 noteSidebarInteraction 更新;见 refreshAgents 内注释。 */
@@ -1651,7 +1650,7 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
         }
       }
       this.pendingSends.delete(optimisticId); // 送达了,不再需要重发载荷(File 对象随之释放)
-      if (result?.heldBy) this.produce((s) => markHeldSend(s, optimisticId, result!.heldBy!, this.nextId(), getLang() === "zh")); // 押住了：没有回合
+      if (result?.heldBy || result?.queued) this.produce((s) => markHeldSend(s, optimisticId, result!.heldBy ?? "queued", this.nextId(), getLang() === "zh")); // 押住了：没有回合
       // slash 直通（/compact、/context 这类 CC 原生命令走 tmux 注入）：没有常规
       // 回合,不会有 done 事件——立即解除「正在回复」,并插一条系统线告知已注入。
       // 普通消息：输出经已打开的持久流回来。

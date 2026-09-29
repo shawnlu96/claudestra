@@ -31,6 +31,7 @@ import {
   MASTER_SESSION,
   AGENT_PREFIX,
   tmuxRaw,
+  tmuxSendEscape, noteProgramInput,
   tmuxRawStrict,
   sessionTarget,
   windowTarget,
@@ -102,7 +103,7 @@ import {
 import { isSandbox, refuseInSandbox, sandboxRootOf } from "./lib/sandbox.js";
 import { sandboxManagerRefusal } from "./lib/sandbox-env.js";
 import { assertResumable, assertSandboxSession } from "./lib/sandbox-sessions.js";
-import { loadRegistry, migrateWorkerToAgent, patchRegistryAgent, saveRegistry, normalizeName, assertValidNewName, assertCreatable, formatAge, output, extractPermFlags, extractEffortFlag, extractModeFlag, extractModelFlag, extractBoolFlag, extractMultiFlag, extractStringFlag } from "./manager/core.js";
+import { loadRegistry, migrateWorkerToAgent, patchRegistryAgent, saveRegistry, normalizeName, assertValidNewAgent, assertCreatable, formatAge, output, extractPermFlags, extractEffortFlag, extractModeFlag, extractModelFlag, extractBoolFlag, extractMultiFlag, extractStringFlag } from "./manager/core.js";
 import { runProjectCommand } from "./manager/projects.js";
 import { cmdCronAdd, cmdCronList, cmdCronEdit, cmdCronRemove, cmdCronToggle, cmdCronHistory } from "./manager/cron.js";
 import { cmdPermissions } from "./manager/permissions.js";
@@ -265,7 +266,7 @@ async function cmdTakeover(target?: string, opts: { all?: boolean; force?: boole
     // 逐条预检（名字 / 窗口 / sessionId）——cmdResume 里同样的校验发生在 kill 之后，来不及
     const name = opts.name && picked.length === 1 ? opts.name : agentNameFromDir(c.cwd, taken);
     let preErr = "";
-    try { assertValidNewName(name); } catch (e) { preErr = (e as Error).message; }
+    try { assertValidNewAgent(name); } catch (e) { preErr = (e as Error).message; }
     if (!preErr && taken.has(name.replace(/^agent-/, ""))) preErr = `agent 名 ${name} 已被占用（换一个 --name）`;
     if (!preErr && (await windowExists(normalizeName(name)))) preErr = `${normalizeName(name)} 窗口已存在（换一个 --name）`;
     if (!preErr && !UUID_RE.test(c.sessionId)) preErr = `sessionId 不是 UUID：${c.sessionId}`;
@@ -765,7 +766,7 @@ async function cmdResume(
     throw new Error(`非法 sessionId: "${sessionId}"（不是合法的 ${adapter.label} 会话 id；其它运行时的会话请加 --runtime <id>）`);
   }
   assertResumable(sessionId, dir); // 沙箱里不许；生产里不接管沙箱的会话（lib/sandbox-sessions.ts）
-  assertValidNewName(name);
+  assertValidNewAgent(name); // 名字合法、跟已有 agent 规范化后不撞
   const tmuxName = normalizeName(name);
   const channelName = tmuxName.replace(AGENT_PREFIX, "");
 
@@ -1256,7 +1257,7 @@ async function cmdRestart(name?: string, opts: { includeMaster?: boolean } = {})
     targets = [tmuxName];
   } else {
     const deadButInReg = Object.keys(reg.agents).filter(
-      (n) => reg.agents[n].status === "active" && !liveWindows.includes(n)
+      (n) => reg.agents[n].status === "active" && !liveWindows.includes(n) && !isMasterAgent(n)
     );
     targets = [...liveWindows, ...deadButInReg];
   }
@@ -2127,10 +2128,9 @@ async function cmdTmuxSendKeys(name: string, keys: string[]) {
   // keys 可以是 "Enter" "Escape" "Left" "C-c" 或普通字符串（用 -l 字面模式）
   for (const k of keys) {
     const special = /^(Enter|Escape|Esc|Left|Right|Up|Down|Tab|BTab|BSpace|C-[a-z]|M-[a-z]|Space)$/i.test(k);
-    const args = special
-      ? ["send-keys", "-t", windowTarget(tmuxName), k]
-      : ["send-keys", "-t", windowTarget(tmuxName), "-l", "--", k];
-    await tmuxRaw(args);
+    const args = special ? ["send-keys", "-t", windowTarget(tmuxName), k] : ["send-keys", "-t", windowTarget(tmuxName), "-l", "--", k];
+    if (!/^(Escape|Esc)$/i.test(k)) await noteProgramInput(windowTarget(tmuxName), special ? "" : k); // bridge 别把程序敲的字 / C-c 当成 owner
+    await (/^(Escape|Esc)$/i.test(k) ? tmuxSendEscape(windowTarget(tmuxName), { strict: true }) : tmuxRaw(args)); // Esc 走双击护栏（跨进程也算），没发出去就报错
     await Bun.sleep(50);
   }
   output({ ok: true, agent: tmuxName, keys });
@@ -2593,13 +2593,13 @@ switch (cmd) {
     break;
 
   case "restart": {
-    // --include-master：连大总管一起重启（Claude Code 重新登录后让所有会话认新凭证）。
-    // 只在「全体重启」时有意义——指名道姓重启某个 agent 时带它是自相矛盾的。
-    const rest = args.filter((a) => a !== "--include-master");
-    const includeMaster = args.length !== rest.length;
-    const [name] = rest;
-    if (name && includeMaster) {
-      output({ ok: false, error: "--include-master 只能用于全体重启（不要同时指定 agent 名）" });
+    // --include-master：连大总管一起重启（CC 重新登录后让所有会话认新凭证），只在「全体重启」时有意义。只认 `--` 之前的：
+    // bridge 按名字重启传 `restart -- <名>`，名字长得像开关也只是名字。大总管由 launcher 守护，不许按名字重启（历史条目 agent-master 会被拉成分身）
+    const dd = args.indexOf("--");
+    const includeMaster = (dd < 0 ? args : args.slice(0, dd)).includes("--include-master");
+    const [name] = dd < 0 ? args.filter((a) => a !== "--include-master") : args.slice(dd + 1);
+    if (name && (includeMaster || isMasterAgent(name))) {
+      output({ ok: false, error: includeMaster ? "--include-master 只能用于全体重启（不要同时指定 agent 名）" : "大总管由 launcher 守护：要重启它用 restart --include-master" });
       break;
     }
     await cmdRestart(name || undefined, { includeMaster });

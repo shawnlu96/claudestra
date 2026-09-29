@@ -138,6 +138,7 @@ const SANDBOX_MANAGER_COMMANDS = new Set([
   "rename", "repair", // 只动沙箱 registry / tmux / bridge（manager/agent-rename.ts、manager/repair.ts）；doctor 读生产 launchd，仍不开放
   "quota-wall", // 额度闸 status|clear：只读写沙箱状态目录下的 quota-wall.json / 请求文件（manager/quota-wall.ts）
   "skill-toggle", // 只写沙箱状态目录下的 agent-settings（lib/agent-settings.ts），技能目录只读
+  "ledger", // 台账只写沙箱状态目录里的 ledger.sqlite；沙箱 bridge 的定时巡检经 runManager 跑 ledger audit
 ]);
 
 /** 返回拒绝原因；null = 可以跑。agent 目录与 runtime 另由 manager 的 create 入口按 lib/sandbox.ts 再查一遍 */

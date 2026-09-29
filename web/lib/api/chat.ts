@@ -15,6 +15,8 @@ export interface SendResult {
   ccText?: string;
   /** bridge 押住了、没有回合（额度闸 / 目标停在额度菜单，只给全权 owner 设备；别人只拿到 queued） */
   heldBy?: "quota_wall" | "wall_menu";
+  /** 押住了但不告诉原因（非全权设备 / guest：额度是 owner 的事）：同样没有回合 */
+  queued?: boolean;
 }
 
 /** 投递一条用户消息（fire-and-forget，wait=0）。带附件走 multipart（text + files[]，bridge 落 inbox 并注入路径）。 */
@@ -30,9 +32,12 @@ export function sendMessage(agent: string, text: string, files: File[] | undefin
   return api<SendResult>(`/agents/${enc(agent)}/messages${ask ? `?ask=${encodeURIComponent(ask)}` : ""}`, { method: "POST", json: { text, wait: 0 }, signal, timeoutMs: 0 });
 }
 
-/** 一键中断：tmux C-c（master → master:0） */
+/**
+ * 一键中断。bridge 最坏要等约 16 秒（打断间隔 + Esc 窗口锁 12 秒 + 锁内 1.2 秒）才回结果，等不到锁会如实回失败；
+ * 这里要等得比它久、又短于 bridge 的 HTTP 空闲上限 30 秒（src/lib/esc-guard.ts HTTP_IDLE_TIMEOUT_S），不然只能看到超时
+ */
 export function interruptAgent(agent: string): Promise<{ ok: boolean; agent?: string }> {
-  return api(`/agents/${enc(agent)}/interrupt`, { method: "POST", json: {}, timeoutMs: 10_000 });
+  return api(`/agents/${enc(agent)}/interrupt`, { method: "POST", json: {}, timeoutMs: 20_000 });
 }
 
 /** 清空会话：bridge 打原生 /clear + 后台轮转；回合进行中 409 */

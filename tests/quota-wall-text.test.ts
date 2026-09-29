@@ -5,7 +5,7 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { isLimitHitText, isModelLimitHit, matchLimitMenu, paneShowsLowPriority, paneShowsWallWait, parseWallText, wallHitOf } from "../src/lib/quota-wall-text.js";
+import { isLimitHitText, isModelLimitHit, matchLimitMenu, paneShowsLowPriority, paneShowsWallWait, parseWallText, wallHitOf, wallWaitKind } from "../src/lib/quota-wall-text.js";
 import { paneMainTurnBusy } from "../src/lib/turn-state.js";
 
 const at = (iso: string) => Date.parse(iso);
@@ -198,5 +198,23 @@ describe("真实画面样本（T35 2026-09-29 录的 CC 画面，去掉 ANSI：t
   test("回合中弹出的别的对话框（底部也是「Enter to confirm · Esc to cancel」）不算额度菜单（T24 r2 P2-6）", () => {
     const other = ["   Do you want to proceed?", "", "   ❯ 1. Yes", "     2. No", "", "   Enter to confirm · Esc to cancel"].join("\n");
     expect(paneShowsWallWait(other)).toBe(false);
+  });
+});
+
+describe("拒绝打字的原因只把额度状态告诉 owner（wf2 notify-web-rules-1）", () => {
+  test("受限 token / guest 在菜单、倒计时画面上拿到的 409 原文不含「额度」", async () => {
+    const { wallWaitRefusal } = await import("../src/lib/wall-screen.js");
+    for (const k of ["menu", "countdown"] as const) {
+      expect(wallWaitRefusal(k, false)).not.toMatch(/额度|撞墙|续跑/);
+      expect(wallWaitRefusal(k, false)).toContain("没发任何键");
+    }
+    expect(wallWaitRefusal("menu")).toContain("额度菜单");
+  });
+  test("/status 抓取选窗排除的截断倒计时（80 列周额度、when it resets）：paneLooksIdle 判闲，但 wallWaitKind 认得（wf2 keys-screens-2）", async () => {
+    const { paneLooksIdle } = await import("../src/lib/tmux-helper.js");
+    for (const f of ["walled-weekly-80col", "walled-when-resets"]) {
+      const p = readFileSync(join(import.meta.dir, "fixtures/quota-wall", `${f}.txt`), "utf8");
+      expect([f, paneLooksIdle(p), wallWaitKind(p)]).toEqual([f, true, "countdown"]);
+    }
   });
 });

@@ -95,3 +95,4 @@ xterm 再自适应字号）、`{t:"o", d:base64}` → `term.write`、`{t:"resize
 `GET /devices`（要 `grant.manage`，否则 403 只看自己）列这台机器上所有已配对设备，本浏览器那条 `current:true`。`DELETE /devices/:id`：撤别人 = 那台设备
 下线；撤自己 = 退出登录，bridge 回删 cookie，前端 `machines.remove(fp)` 摘掉机器记录，还有别的机器就切过去，否则去 `/pair`。「这个浏览器里的机器」
 （relay 才显示）只删 IndexedDB 记录，不动 bridge 侧凭据；`MachineSwitcher` 的「添加另一台机器」回 `/pair`。
+非全权设备（guest / 部分 scope）不拉列表，只给「本设备 + 退出登录」：`DELETE /devices/current` 撤这次请求用的那条，同样回删 cookie、摘机器、去 `/pair`。

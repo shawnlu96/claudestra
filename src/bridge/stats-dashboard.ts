@@ -36,6 +36,8 @@ import { readRegistryAgents } from "../lib/registry.js";
 import { readUsageCache, readUsageCacheStale, deriveStaleUsage, readSessionCtx } from "../lib/usage-cache.js";
 import { discordCreateChannel } from "./discord-api.js";
 import { windowWallWait } from "../lib/wall-screen.js";
+import { wallWaitKind } from "../lib/quota-wall-text.js";
+import { quotaWall } from "./quota-wall-wiring.js";
 import { computeAgentStats, formatTokens, type AgentStat } from "../lib/agent-stats.js";
 import { currentUsageWindow, noteWeekResetText, type UsageWindowBounds } from "../lib/usage-window.js";
 import { fmtAge, machineFooter, machineUsage, type MachineSlot } from "./machine-usage.js";
@@ -187,9 +189,8 @@ export function panelResidue(pane: string): boolean {
  * 它忙就退回任意 idle agent 窗口（通常刚跑完 hook 的那个就是 idle 的）。
  */
 async function findIdleScrapeTarget(): Promise<string | null> {
-  // v2.16.1: agent 窗口优先,master 垫底(原来 master 排第一,吃下绝大多数抓取,
-  // 而 master 是消息最密的窗口——TOCTOU 撞上刚开的回合就把大总管打断,外部
-  // 用户实报「检查用量经常打断大总管」)。gauge 是账号全局的,谁的窗口都一样。
+  // agent 窗口优先,master 垫底:master 是消息最密的窗口,排第一时吃下绝大多数抓取,TOCTOU 撞上刚开的回合就把大总管打断。
+  // gauge 是账号全局的,谁的窗口都一样。
   const wins = (await tmuxRaw(["list-windows", "-t", MASTER_SESSION, "-F", "#{window_name}"]).catch(() => ""))
     .split("\n")
     .filter((w) => w.startsWith("agent-"));
@@ -197,8 +198,9 @@ async function findIdleScrapeTarget(): Promise<string | null> {
   candidates.push(`${MASTER_SESSION}:0`);
   for (const t of candidates) {
     const pane = await tmuxRaw(["capture-pane", "-t", t, "-p"]).catch(() => "");
-    // v2.17.1 清场(peer 报告:遗留面板会让后续每轮抓取假命中冻结帧且 pane 假忙
-    // 数小时):见面板痕迹先补一个 Esc,本轮跳过该窗,下轮它就干净可用了
+    // 停在额度菜单 / 撞墙倒计时上的窗口不碰：/status 的第一个字就会取消自动续跑，菜单上的键会选项（截断的倒计时 paneLooksIdle 判成闲）
+    if (wallWaitKind(pane)) continue;
+    // v2.17.1 清场(peer 报告:遗留面板会让后续每轮抓取假命中冻结帧且 pane 假忙数小时):见面板痕迹先补一个 Esc,本轮跳过该窗,下轮它就干净可用了
     if (panelResidue(pane) && paneLooksIdle(pane.replace(/Esc to cancel|Settings\s+Status\s+Config\s+Usage|Settings dialog/g, ""))) {
       console.log(`📊 清场: ${t} 残留 TUI 面板,补发 Esc`);
       await tmuxSendEscape(t).catch(() => {});
@@ -211,10 +213,8 @@ async function findIdleScrapeTarget(): Promise<string | null> {
       await tmuxSendEscape(t).catch(() => {});
       continue;
     }
-    // compact 盲区双守卫(peer 2026-08-27:compact 中的 pane 判 idle → 被抓取
-    // 硬中断,自激拖长)。①bridge 自有状态:刚注入过 /save-compact 的窗口
-    // 15min 内不当抓取源(不依赖 TUI 文案);②文案识别:兜住用户手动 /compact
-    // 与超时后仍在跑的超长 compact。
+    // compact 盲区双守卫(peer 2026-08-27:compact 中的 pane 判 idle → 被抓取硬中断,自激拖长)。①bridge 自有状态:刚注入过
+    // /save-compact 的窗口 15min 内不当抓取源(不依赖 TUI 文案);②文案识别:兜住用户手动 /compact 与超时后仍在跑的超长 compact。
     const scTs = recentSaveCompact.get(windowKey(t)); // 记账与查询都按窗口身份（写法不同也对得上）
     if (scTs && Date.now() - scTs < SAVE_COMPACT_GUARD_MS) {
       continue;
@@ -861,9 +861,9 @@ async function checkContextTiers(discord: Client, agents: AgentStat[]): Promise<
         now: Date.now(),
         retryMs: AUTO_COMPACT_RETRY_MS,
       });
-      // 直接敲进窗口的 /save-compact 不经过 deliver：停在额度菜单 / 撞墙倒计时上的窗口不敲（打字会取消自动续跑、菜单上会选项），
-      // 下一轮扫描再看；闸开着但开了 low-priority 在跑的照常触发（救命线也是：再等就被 CC 裸压）
-      if (d.fire && !(await windowWallWait(winOf(a)))) {
+      // 直接敲进窗口的 /save-compact 不经过 deliver：停在额度菜单 / 撞墙倒计时上的窗口一律不敲（打字会取消自动续跑、菜单上会选项）。
+      // 在闸里（闸开着、没开 low-priority）只让救命线敲：常规线起的这一轮注定撞墙，等于绕过了闸；救命线再等就被 CC 裸压
+      if (d.fire && !(await windowWallWait(winOf(a))) && (d.emergency || !(await quotaWall()?.gates(a.channelId)))) {
         autoCompactTriggered.set(a.channelId, Date.now());
         if (d.emergency) console.log(`🚨 救命线触发(${formatTokens(a.contextTokens)} ≥ ${formatTokens(emergency!)},CC 随时裸压):${a.name} 无视闲置门槛`);
         await triggerAutoSaveCompact(a, d.emergency ? emergency! : eff);

@@ -27,6 +27,7 @@ import {
 import { closeRun, logOrphanRun, pendingCloseOf } from "./autopilot-close.js";
 import { newMessageId, newThreadId, type Envelope } from "./router.js";
 import { onQuotaWallExit, quotaWall } from "./quota-wall-wiring.js";
+import { turnCuts } from "./turn-cuts.js";
 
 /** 回合结束后等多久再递：让人有机会先开口，也躲开 Stop 之后的收尾（排队消息、typing 清理） */
 let GRACE_MS = 45_000;
@@ -170,9 +171,10 @@ async function deliverWrapup(agent: string, m: Mission, now: number): Promise<vo
 
 /** 让位：主回合在跑、人刚说过话（含点了打断）、agent 不在线。排太久记一行「未推进」（每条唤醒只记一次） */
 async function yieldIfNeeded(agent: string, m: Mission, now: number): Promise<boolean> {
-  const walled = !!(await quotaWall()?.gates(channelOf(agent) ?? ""));
-  const lastHumanAt = lastHumanMessageAt(agent, channelOf(agent) ?? undefined);
-  const why = yieldReason({ online: !!clientOf(agent), turnBusy: await busyNow(agent), lastHumanAt, walled }, now);
+  const ch = channelOf(agent) ?? undefined;
+  const hold = ch ? turnCuts.interruptHold(ch) : null; // 「停」之后不替人续上（bridge/turn-cuts.ts）
+  const walled = !!(await quotaWall()?.gates(ch ?? ""));
+  const why = yieldReason({ online: !!clientOf(agent), turnBusy: await busyNow(agent), lastHumanAt: lastHumanMessageAt(agent, ch), interruptHold: hold, walled }, now);
   if (!why) return false;
   const logged = await upd((all) => {
     const cur = all[agent];
@@ -343,14 +345,22 @@ export function initMission(d: MissionDeps): void {
   watchFile(path, { interval: 5_000 }, rerun("重排"));
   setTimeout(rerun("启动重排"), 20_000).unref?.();
   setInterval(rerun("巡检"), 60_000).unref?.();
-  onQuotaWallExit(releaseWallHoldsSoon);
+  onQuotaWallExit(() => releaseWallHoldsSoon());
 }
 
+/** 出闸放行写锁超时的重试：同一时刻只有一条重试链，最多试这么多次（约 1 分钟），又进闸了就不放 */
+const RELEASE_RETRIES = 12;
+let releaseRetry: ReturnType<typeof setTimeout> | null = null;
+
 /** 写锁超时就过一会儿再放：出闸只通知一次，丢了这次，等额度的唤醒要白等到原定的重置时刻 */
-function releaseWallHoldsSoon(): void {
+function releaseWallHoldsSoon(attempt = 0): void {
+  if (releaseRetry) clearTimeout(releaseRetry), (releaseRetry = null); // 又出了一次闸：接着这次的放，旧链不再跑
+  if (quotaWall()?.active()) return; // 重试落在新闸里：等额度的唤醒归新闸管，不放
   releaseWallHolds().catch((e) => {
+    if (attempt + 1 >= RELEASE_RETRIES) return console.error(`⏱ Autopilot 出闸放行失败 ${RELEASE_RETRIES} 次，放弃（唤醒到原定重置时刻照常醒）:`, (e as Error).message);
     console.error("⏱ Autopilot 出闸放行失败，稍后重试:", (e as Error).message);
-    setTimeout(releaseWallHoldsSoon, AUTOPILOT_TIMING.lockRetryMs).unref?.();
+    releaseRetry = setTimeout(() => releaseWallHoldsSoon(attempt + 1), AUTOPILOT_TIMING.lockRetryMs);
+    releaseRetry.unref?.();
   });
 }
 

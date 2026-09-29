@@ -123,21 +123,29 @@ export function nextWake(outcome: RunOutcome, streaks: RunStreaks, ev: RunEviden
 
 // ── 让位（人优先） ──
 
-export type YieldReason = "quota_wall" | "turn_busy" | "human_recent" | "agent_offline";
+export type YieldReason = "quota_wall" | "turn_busy" | "human_recent" | "agent_offline" | "human_stopped" | "cut_notice";
 export const YIELD_TEXT: Record<YieldReason, string> = {
   quota_wall: "额度闸开着（整机撞额度），出闸后再推进",
   turn_busy: "主回合在跑（有人在对话，或它自己还在干）",
   human_recent: "刚收到人类消息",
   agent_offline: "agent 不在线",
+  human_stopped: "人叫停了（停字 / 停止按钮 / 终端里打断），等人再开口",
+  cut_notice: "还有一条打断收尾提醒没投，先让它处理",
 };
 
-/** 该不该先不推进：额度闸开着、主回合在跑、人刚说过话、agent 不在线，任一条都排队等；null = 可以推进 */
-export function yieldReason(s: { turnBusy: boolean; online: boolean; lastHumanAt?: number; walled?: boolean }, now: number): YieldReason | null {
+/**
+ * 该不该先不推进：额度闸开着、主回合在跑、人刚说过话、agent 不在线、人叫停了（之后没再说别的）、打断收尾提醒还没投，任一条都排队等；
+ * null = 可以推进。interruptHold 来自 bridge/turn-cuts.ts（「停」之后 Autopilot 不能替人续上）。
+ */
+export function yieldReason(
+  s: { turnBusy: boolean; online: boolean; lastHumanAt?: number; interruptHold?: "stopped" | "notice" | null; walled?: boolean }, now: number,
+): YieldReason | null {
   if (s.walled) return "quota_wall"; // 推进消息投过去也只会被闸押住，还白占一个 run
   if (!s.online) return "agent_offline";
+  if (s.interruptHold === "stopped") return "human_stopped";
   if (s.turnBusy) return "turn_busy";
   if (s.lastHumanAt !== undefined && now - s.lastHumanAt < AUTOPILOT_TIMING.humanQuietMs) return "human_recent";
-  return null;
+  return s.interruptHold === "notice" ? "cut_notice" : null;
 }
 
 // ── 额度重置时间 ──

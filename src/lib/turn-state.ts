@@ -6,7 +6,7 @@
  * bg 只给显示用（侧栏黄点仍是 paneLooksWorking，语义 = main 非 idle 或 bg）。
  */
 import { controlFor } from "./runtimes/index.js";
-import { CC_BUSY_RE, probeTuiContract } from "./tmux-helper.js";
+import { CC_BUSY_RE, paneIdleVerdict, probeTuiContract } from "./tmux-helper.js";
 
 type MainTurn = "busy" | "idle" | "compacting" | "unknown";
 
@@ -20,6 +20,10 @@ export interface TurnInput {
   runtime?: string | null;
   /** bg-activity 里还有没结束的 subagent / bg shell */
   bgActive?: boolean;
+  /** 事件态 thinking、画面却空闲时，约 1 秒后再抓的一帧（见 stuckThinkingIdle） */
+  paneAgain?: string | null;
+  /** 这个 agent 多久没有活动了：会话记录没有新写入、bridge 也没投过消息（毫秒） */
+  quietMs?: number;
 }
 
 export interface TurnState {
@@ -27,27 +31,34 @@ export interface TurnState {
   bg: boolean;
 }
 
+/** 输入框边框：顶格、整行只有 ─（去掉行尾空白后至少 3 个）。对话里「─── 小标题」这类混了文字的行不算，窄窗口里短的整行边框算 */
+const isBoxRule = (l: string | undefined): boolean => l !== undefined && /^─{3,}$/.test(l.replace(/\s+$/, ""));
+
+/**
+ * 真输入框在画面里的上下边框行号：上下两条顶格整行边框夹着顶格的 ❯，且 ❯ 后面不是「1.」这种选项（权限框、AskUserQuestion、
+ * 额度菜单里的「❯ 1.」是弹窗，不是输入框）。从下往上找，草稿多长都行；找不到 = null（弹窗盖住、窄窗口折行）。
+ * 对话 / 工具输出里贴进来的输入框都有缩进，认不成（同 T35 lp-state）。额度画面判定（lib/quota-wall-text.ts）也用它。
+ */
+export function inputBox(lines: string[]): { top: number; bottom: number } | null {
+  for (let i = lines.length - 1; i > 0; i--) {
+    if (!/^❯(?!\s*\d+\.)/.test(lines[i]!) || !isBoxRule(lines[i - 1])) continue;
+    const bottom = lines.findIndex((l, j) => j > i && isBoxRule(l));
+    if (bottom > 0) return { top: i - 1, bottom };
+  }
+  return null;
+}
+
 /**
  * 主回合信号所在的区域，按输入框定位、不按固定尾部行数：底栏的后台 agent 行一多（80 列约 4 行、272 列约 6 行）
  * 就把 spinner 挤出「尾部 14 行」。above = 输入框上边框往上 12 行（spinner / 压缩行 / Tip / 任务列表最多 5 行 + 「… +N」
- * + 排队消息预览），rest = 边框到底（❯ 行、页脚）。真输入框的边框和 ❯ 都顶格（第 0 列），对话 / 工具输出里贴进来的
- * 输入框都有缩进，不能被当成输入框（同 T35 lp-state 的做法）。找不到输入框（窄窗口折行、弹窗盖住）退回尾部 14 行。
+ * + 排队消息预览），rest = 上边框到底（❯ 行、草稿、页脚），footer = 下边框以下（状态栏、页脚）。
+ * 找不到输入框退回尾部 14 行，footer 只取最后 3 行。
  */
-function turnZone(pane: string): { above: string; rest: string; box: boolean } {
+function turnZone(pane: string): { above: string; rest: string; footer: string; box: boolean } {
   const lines = pane.replace(/\s+$/, "").split("\n");
-  for (let i = lines.length - 1; i > 0; i--) {
-    if (/^❯/.test(lines[i]!) && /^─{3,}/.test(lines[i - 1]!)) {
-      return { above: lines.slice(Math.max(0, i - 13), i - 1).join("\n"), rest: lines.slice(i - 1).join("\n"), box: true };
-    }
-  }
-  return { above: lines.slice(-14).join("\n"), rest: "", box: false };
-}
-
-/** 输入框下边框（❯ 之后第一条顶格横线）以下的页脚；草稿在两条边框之间，不算页脚 */
-function footerOf(rest: string): string {
-  const lines = rest.split("\n");
-  const end = lines.findIndex((l, i) => i > 0 && /^─{3,}/.test(l));
-  return end < 0 ? "" : lines.slice(end + 1).join("\n");
+  const b = inputBox(lines);
+  if (!b) return { above: lines.slice(-14).join("\n"), rest: "", footer: lines.slice(-3).join("\n"), box: false };
+  return { above: lines.slice(Math.max(0, b.top - 12), b.top).join("\n"), rest: lines.slice(b.top).join("\n"), footer: lines.slice(b.bottom + 1).join("\n"), box: true };
 }
 
 /** 顶格、spinner 字形开头的行：真 spinner / 压缩行 / 重试横幅都在第 0 列，对话和工具输出里的同样字样都有缩进 */
@@ -79,7 +90,7 @@ export function paneMainTurnBusy(pane: string): boolean {
   if (spinnerRows(z.above).some((l) => CC_BUSY_RE.test(l))) return true;
   if (`${z.above}\n${z.rest}`.split("\n").some((l) => /^❯ Press up to edit queued messages/.test(l))) return true;
   // 老 TUI 的 esc to interrupt 在页脚（有没有 ⏵⏵、窄窗口折不折行都一样）；输入框上方贴进来的同样字样不算
-  return /esc\s+to\s+interrupt/i.test(footerOf(z.rest));
+  return /esc\s+to\s+interrupt/i.test(z.footer);
 }
 
 /**
@@ -97,7 +108,7 @@ function mainTurn(i: TurnInput): MainTurn {
   // 压缩先于 thinking 判：回合中途的自动压缩事件态还是 thinking，手动 /compact 到 watcher 置态之间事件态是 done——
   // 这两段只有画面知道；判成 busy 的话人类消息会 C-c 掉压缩
   if (cc && i.pane !== null && paneShowsCompacting(i.pane)) return "compacting";
-  if (i.status === "thinking") return "busy";
+  if (i.status === "thinking") return cc && stuckThinkingIdle(i) ? "idle" : "busy";
   // Codex / Pi 的忙闲靠 hook 上报；它们的窗口套 CC 的屏幕正则会误命中（Pi 恒判忙），只看事件态
   if (!cc) return "idle";
   if (i.pane === null) return "unknown";
@@ -106,10 +117,28 @@ function mainTurn(i: TurnInput): MainTurn {
   return probeTuiContract(i.pane).suspect ? "unknown" : "idle";
 }
 
+/** 画面明确显示主回合空闲：输入框在、没有 spinner / 压缩 / API 重试横幅，而且 TUI 契约没失效（认不出不算空闲） */
+export function paneClearlyIdle(pane: string | null | undefined): boolean {
+  if (!pane?.trim()) return false;
+  return paneIdleVerdict(pane) === "idle" && !paneMainTurnBusy(pane) && !paneShowsCompacting(pane) && !paneShowsApiRetry(pane);
+}
+
+/** 两帧都空闲之外，还要这么久没有任何活动：回合刚开始的几百毫秒里 spinner 还没出来，但消息刚投、会话记录刚写 */
+export const STUCK_THINKING_QUIET_MS = 8_000;
+
+/**
+ * 事件态卡在 thinking（从终端打断不发 Stop、回合结束后又被点亮）而画面明确空闲：以画面为准。
+ * 条件全要：相隔约 1 秒的两帧都明确空闲，且这段时间足够安静。压缩中、重试中、认不出画面一律不算，保持判忙。
+ * 只对 CC（画面判据）有效，Codex / Pi 的忙闲只看事件态。单测 tests/turn-state.test.ts。
+ */
+function stuckThinkingIdle(i: Pick<TurnInput, "pane" | "paneAgain" | "quietMs">): boolean {
+  return paneClearlyIdle(i.pane) && paneClearlyIdle(i.paneAgain) && (i.quietMs ?? 0) >= STUCK_THINKING_QUIET_MS;
+}
+
 export function turnState(input: TurnInput): TurnState {
   // capture-pane 在窗口 resize 后会带出成片尾部空行，把 spinner 挤出「尾部 14 行」（见 tmux-helper trimTrailingBlank）；
   // 剪完是空串 = 没抓到画面（tmuxRaw 出错也返回空串），按 null 算，否则会被判成 idle
-  const i = { ...input, pane: input.pane?.replace(/\s+$/, "") || null };
+  const i = { ...input, pane: input.pane?.replace(/\s+$/, "") || null, paneAgain: input.paneAgain?.replace(/\s+$/, "") || null };
   const main = mainTurn(i);
   const paneBg = controlFor(i.runtime).paneHeuristics && i.pane !== null && main !== "busy" && paneLooksWorking(i.pane);
   return { main, bg: paneBg || !!i.bgActive };

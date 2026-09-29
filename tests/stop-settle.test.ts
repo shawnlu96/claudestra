@@ -24,10 +24,12 @@ const call: PendingAgentCall = { callerChannelId: "c-pm", callerName: "agent-cla
 
 let seq = 0;
 /** 每个 harness 一个频道：「等续跑」标记是模块级的，共用频道会串到别的用例 */
-function harness(runtime?: string, opts: { pushFails?: boolean } = {}) {
+function harness(runtime?: string, opts: { pushFails?: boolean; restarted?: boolean } = {}) {
   const cid = `c-t18-${++seq}`;
   const book = new AgentCallBook(null);
   book.add(cid, { ...call }, "m1");
+  // PM 的请求送到、开了这一轮（扣下的话只归开这一轮的 caller）；restarted = 重启后没见过这个频道的投递和 Stop
+  if (!opts.restarted) noteDelivered(cid, { kind: "local", channelId: "c-pm" }, 1000, true);
   const pushed: string[] = [];
   const to: string[] = [];
   const notes: string[] = [];
@@ -56,8 +58,8 @@ function harness(runtime?: string, opts: { pushFails?: boolean } = {}) {
   const turn = (event: string, drain: StopTurn["drain"], trigger: TurnTrigger = "insider"): StopTurn =>
     ({ cid, stopChannelId: cid, stopWs: 1, candidateWs: 1, event, runtime, drain, trigger });
   const stop = (event: string, drain: StopTurn["drain"], trigger: TurnTrigger = "insider") => settleStopTurn(deps, turn(event, drain, trigger));
-  /** bridge 的真实路径：不给 humanTurn，按 deliverToLocal 送达时 noteDelivered 记下的来源判 */
-  const delivered = (from: { kind: string; owner?: boolean; peer?: string; channelId?: string }, at?: number, idle = false) => noteDelivered(cid, from, at, idle);
+  /** bridge 的真实路径：不给 humanTurn，按 deliverToLocal 送达时 noteDelivered 记下的来源判；idle = 送到时目标闲着（开新一轮），回合中途送到的传 false */
+  const delivered = (from: { kind: string; owner?: boolean; peer?: string; channelId?: string; label?: string }, at?: number, idle = true) => noteDelivered(cid, from, at, idle);
   const stopReal = (event: string, drain: StopTurn["drain"]) => settleStopTurn(deps, { ...turn(event, drain), trigger: undefined });
   return { cid, book, deps, pushed, to, notes, rearmed, unattributed, nudged: () => nudged, stop, stopReal, delivered, turn, slot: () => book.slot(cid, "c-pm") };
 }
@@ -151,7 +153,7 @@ describe("Claude Code：以 API 错误结束的一轮不结算", () => {
   test("真实来源判定：撞错后 guest / peer token 触发的回合不结算、它说的话不扣也不外推；bridge 续跑那轮结算，扣下的话单独一条（T24 r1 P1-2）", async () => {
     const h = harness();
     const overloaded = { error: "overloaded", text: "API Error: 529 Overloaded" };
-    h.delivered({ kind: "local" }); // PM 的 send_to_agent
+    h.delivered({ kind: "local", channelId: "c-pm" }); // PM 的 send_to_agent
     await h.stopReal("StopFailure", { text: "查到根因在 X", apiError: true, error: overloaded });
     h.delivered({ kind: "api" }); // guest token B 问了件别的事（没有 owner 标记）
     await h.stopReal("StopFailure", { text: "（答 B 的）半句", apiError: true, error: overloaded });
@@ -171,7 +173,7 @@ describe("Claude Code：以 API 错误结束的一轮不结算", () => {
     const h = harness();
     await h.stop("StopFailure", { text: null, apiError: true, error: wallErr });
     h.delivered({ kind: "api" }, 1_000); // guest 开启这一轮
-    h.delivered({ kind: "bridge" }, 60_000); // 回合中途的 ask 过期通知
+    h.delivered({ kind: "bridge" }, 60_000, false); // 回合中途的 ask 过期通知
     expect(await h.stopReal("Stop", { text: "（给 guest 的）结论" })).toBe(true);
     expect(h.pushed).toEqual([]);
     expect(h.rearmed).toEqual([h.cid]);
@@ -181,12 +183,12 @@ describe("Claude Code：以 API 错误结束的一轮不结算", () => {
     const h = harness();
     await h.stop("StopFailure", { text: null, apiError: true, error: wallErr });
     h.delivered({ kind: "bridge" }, 1_000); // 续跑开启这一轮
-    h.delivered({ kind: "api", peer: "sekai" }, 60_000);
+    h.delivered({ kind: "api", peer: "sekai" }, 60_000, false);
     expect(await h.stopReal("Stop", { text: "PM 要的结论" })).toBe(true);
     expect(h.pushed).toHaveLength(1);
     const g = harness();
     await g.stop("StopFailure", { text: null, apiError: true, error: wallErr });
-    g.delivered({ kind: "local" }, 1_000);
+    g.delivered({ kind: "local", channelId: "c-pm" }, 1_000);
     g.delivered({ kind: "api" }, 1_500); // 一起补投的 guest 消息：这一轮也在答它，不结算
     await g.stopReal("Stop", { text: "混着答的" });
     expect(g.pushed).toEqual([]);
@@ -216,7 +218,7 @@ describe("Claude Code：以 API 错误结束的一轮不结算", () => {
 
   test("CC 到点自己续跑的那一轮（没有 bridge 投递）继承撞墙那一轮的来源：PM 的照样结算、guest 的不结算；重启后没见过 Stop 的仍按外人（T24 adv1 P1-4）", async () => {
     const h = harness();
-    h.delivered({ kind: "local" });
+    h.delivered({ kind: "local", channelId: "c-pm" });
     await h.stopReal("StopFailure", { text: "查到根因在 X", apiError: true, error: wallErr });
     expect(await h.stopReal("Stop", { text: "X 修好了" })).toBe(true); // continuing automatically at 3:20am
     expect(h.pushed).toHaveLength(2);
@@ -227,7 +229,7 @@ describe("Claude Code：以 API 错误结束的一轮不结算", () => {
     await g.stopReal("StopFailure", { text: "（给 guest 的）半句", apiError: true, error: wallErr });
     await g.stopReal("Stop", { text: "（给 guest 的）结论" });
     expect(g.pushed).toEqual([]);
-    const r = harness(); // 重启后：这一轮是重启前开的，来源不知道
+    const r = harness(undefined, { restarted: true }); // 重启后：这一轮是重启前开的，来源不知道
     r.book.markApiError(r.cid, () => false, "旧的半句");
     await r.stopReal("Stop", { text: "不知道在答谁" });
     expect(r.pushed).toEqual([]);
@@ -236,7 +238,7 @@ describe("Claude Code：以 API 错误结束的一轮不结算", () => {
 
   test("真实来源判定：owner 在 Web 上（owner:self 的 api，带 owner 标记）触发的回合结算旧 caller", async () => {
     const h = harness();
-    h.delivered({ kind: "local" });
+    h.delivered({ kind: "local", channelId: "c-pm" });
     await h.stopReal("StopFailure", { text: null, apiError: true, error: wallErr });
     h.delivered({ kind: "api", owner: true });
     expect(await h.stopReal("Stop", { text: "接着做完了" })).toBe(true);

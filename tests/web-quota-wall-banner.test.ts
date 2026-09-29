@@ -32,6 +32,11 @@ describe("wallBanner", () => {
 
   test("session 墙、重置时间未知、不到一小时", () => {
     expect(wallBanner({ active: true, wall: { ...wall, kind: "session" } }, NOW)!.title).toBe("Claude Code 5 小时额度已用完");
+    // 人发的押着的消息单独一行、不算进「agent 消息」；探测不可用提醒一行（wf2 notify-web-rules-2 / gate-state-4）
+    const both = wallBanner({ active: true, queued: 2, queuedHuman: 1, wall: { ...wall, probeDown: true } }, NOW)!.detail.map((d) => d.text);
+    expect(both).toContain("排队 {n} 条 agent 消息，恢复后自动送达");
+    expect(both).toContain("人发的消息 {n} 条押在停着菜单 / 倒计时的窗口上，恢复后送达");
+    expect(both).toContain("用量探测不可用：只能等重置回显、到点，或点「已恢复」");
     expect(wallBanner({ active: true, wall: { ...wall, resetsAt: null } }, NOW)!.detail[0]).toEqual({ text: "重置时间未知", vars: {} });
     expect(wallBanner({ active: true, wall: { ...wall, resetsAt: NOW + 20 * 60_000 } }, NOW)!.detail[1]).toEqual({ text: "约 {m} 分钟后", vars: { m: 20 } });
   });

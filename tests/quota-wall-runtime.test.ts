@@ -25,7 +25,8 @@ function env(from: Envelope["from"], to: string, id: string): Envelope {
 }
 const agentFrom = (cid: string): Envelope["from"] => ({ kind: "local", agentName: `agent-${cid}`, channelId: cid, ws: {} as never });
 
-function rig(opts: { disk?: WallState; panes?: Record<string, string>; busy?: string[]; codex?: string[]; stuck?: string[]; heldResume?: string[]; lp?: string[] } = {}) {
+interface RigOpts { disk?: WallState; panes?: Record<string, string>; busy?: string[]; codex?: string[]; stuck?: string[]; heldResume?: string[]; lp?: string[]; deep?: Record<string, string> }
+function rig(opts: RigOpts = {}) {
   let now = T0;
   let disk: WallState = opts.disk ?? emptyWallState();
   const held = new HeldQueue(null);
@@ -48,7 +49,7 @@ function rig(opts: { disk?: WallState; panes?: Record<string, string>; busy?: st
     isClaudeCode: async (cid) => !(opts.codex ?? []).includes(cid),
     lowPriority: async (cid) => (opts.lp ?? []).includes(cid),
     windows: async () => windows,
-    capture: async (win) => panes[win] ?? "",
+    capture: async (win, history = 30) => (history > 30 && opts.deep?.[win]) || panes[win] || "", // deep = 往上翻得到的整段历史
     prepare: async (win) => void prepared.push(win),
     sendEsc: async (win) => {
       esc.push(win);
@@ -158,6 +159,26 @@ describe("出闸三个来源", () => {
     r.advance(15_000);
     await r.wall.tick();
     expect(r.wall.active()).toBe(false);
+    expect(r.disk().wall!.exit!.via).toBe("limits_reset");
+  });
+
+  test("闸内重启：基线按 2000 行重取、这一拍不判；之后窗口变高露出的旧回显不算，新回显照算（T24 wf2 gate-state-1）", async () => {
+    const old = "❯ /limit-reset\n  ⎿  Limits reset · your weekly reset day stays Wed · 2 resets left\n";
+    const first = rig();
+    await hitWall(first, "a");
+    await first.wall.tick();
+    // 重启：同一份落盘状态，进程内基线没了；旧回显在 30 行之外，只有往上翻 2000 行才看得到
+    const r = rig({ disk: first.disk(), panes: { "master:agent-b": "❯ " }, deep: { "master:agent-b": `${old}\n❯ ` } });
+    r.advance(15_000);
+    await r.wall.tick();
+    expect(r.wall.active()).toBe(true);
+    r.panes["master:agent-b"] = `${old}\n❯ `; // owner 挂上来窗口变高，旧回显露出来
+    r.advance(15_000);
+    await r.wall.tick();
+    expect(r.wall.active()).toBe(true);
+    r.panes["master:agent-b"] = `${old}\n❯ /limit-reset\n  ⎿  Limits reset · your weekly reset day stays Wed · 1 resets left\n`;
+    r.advance(15_000);
+    await r.wall.tick();
     expect(r.disk().wall!.exit!.via).toBe("limits_reset");
   });
 
@@ -290,7 +311,7 @@ describe("恢复的边角（T24 r1 P2-1/2/3/7/9）", () => {
     expect(w.id).toBe("wall_2");
     expect(w.exit).toBeUndefined();
     expect(w.recovery).toBeUndefined();
-    expect(r.held.wallCount()).toBe(1);
+    expect(r.held.wallCount()).toEqual({ human: 0, agent: 1 });
     expect(r.flushed).toEqual([]);
     expect(r.notices.filter((n) => n.startsWith("✅"))).toEqual([]);
   });
@@ -367,6 +388,23 @@ describe("恢复的边角（T24 r1 P2-1/2/3/7/9）", () => {
   });
 });
 
+describe("恢复做到一半重启（T24 wf2 gate-state-2）", () => {
+  test("续跑那一步：押着续跑消息的、出闸时在跑的都算处理过，重启后不再续跑、名单不重复", async () => {
+    const first = rig({ heldResume: ["a"] });
+    for (const c of ["a", "b", "c"]) await hitWall(first, c);
+    first.clear.req = true;
+    await first.wall.tick();
+    const w = first.disk().wall!;
+    expect(w.recovery).toMatchObject({ step: "done", held: ["agent-a"], resumed: ["agent-b", "agent-c"] });
+    // 回到「续跑做了一半」：a 押着、b 出闸时在跑、c 还没轮到
+    const disk = { v: 1 as const, wall: { ...w, recoveredNotifiedAt: undefined, recovery: { ...w.recovery!, step: "resume" as const, resumed: [], running: ["agent-b"] } } };
+    const r = rig({ disk });
+    await r.wall.tick();
+    expect(r.resumed.map((x) => x.cid)).toEqual(["c"]);
+    expect(r.disk().wall!.recovery).toMatchObject({ held: ["agent-a"], running: ["agent-b"], resumed: ["agent-c"] });
+  });
+});
+
 describe("押后队列的额度闸部分", () => {
   const e = (id: string) => env(agentFrom("x"), "t", id);
   test("闸内押的不老化；闸前押的被再押一次改记成额度闸；出闸转回普通押后、入队时间重置", () => {
@@ -375,11 +413,12 @@ describe("押后队列的额度闸部分", () => {
     q.holdEnv(before);
     q.holdEnv(e("wall"), "quota_wall");
     q.holdEnv(before, "quota_wall");
-    expect(q.wallCount()).toBe(2);
+    expect(q.wallCount()).toEqual({ human: 0, agent: 2 });
+    expect(q.wallCount((x) => x.meta.messageId === "wall")).toEqual({ human: 1, agent: 1 }); // 人发的和 agent 消息分开数（横幅、进闸通知分开写）
     for (const i of q.get("t")!) i.heldAt = 0;
     expect(ageHeld(q, HELD_GIVE_UP_MS + 1)).toEqual([]);
     expect(q.releaseWall(123)).toBe(2);
     expect(q.get("t")!.map((i) => [i.reason, i.heldAt])).toEqual([[undefined, 123], [undefined, 123]]);
-    expect(q.wallCount()).toBe(0);
+    expect(q.wallCount()).toEqual({ human: 0, agent: 0 });
   });
 });

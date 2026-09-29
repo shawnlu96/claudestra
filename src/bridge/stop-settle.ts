@@ -10,6 +10,7 @@
  */
 import type { MetricEvent } from "../lib/metrics.js";
 import { isOwnerSource } from "../lib/delegate-marker.js";
+import { apiQueueToSettle } from "../lib/pending-reply-scope.js";
 import { isOwnStopChannel } from "../lib/pushback-scope.js";
 import { isModelLimitHit, wallHitOf } from "../lib/quota-wall-text.js";
 import { DEFAULT_RUNTIME } from "../lib/runtimes/index.js";
@@ -39,9 +40,11 @@ export interface StopTurn {
  * 回合答的是那个外人，不结算、它说的话也不扣。不看 lastMessageSource：api-routes 投递后会把它改成 "agent"。
  * 开启这一轮的那条说了算：回合进行中送到的（bridge 消息、peer 请求照投不押）不覆盖它（T24 r2 P2-1，PM 09-29）；
  * 开头几秒里一起送到的一批（押后队列补投）取最严的：stranger > owner > insider。这一轮 Stop 时清掉。
- * 被打断的回合（抢占 C-c、停止按钮、终端里 Esc）CC 不发 Stop：送到时目标闲着、离上一条又过了一批的时间，就是新一轮，重记。
+ * 被打断的回合 CC 不发 Stop：送到时目标闲着、离上一条又过了一批的时间，就是新一轮，重记；终端里按 Esc 时事件态还停在 thinking、
+ * 判不出闲，靠会话记录里的打断标记（noteTurnCut）收掉这一轮，下一条送到的重记。
  * 没有记录：这一轮不是 bridge 送的消息开的——CC 到点自己接着跑撞墙那一轮（owner 在终端里打字也是这样），继承上一轮的来源
- * 和回程；重启后还没见过这个频道的 Stop，上一轮不知道 = stranger（不结算，PM 09-29）。
+ * 和回程，回合进行中送到的（peer 请求照投不押）不覆盖；bridge 的续跑消息（「接着做」、出闸续跑）开的一轮同样继承上一轮。
+ * 重启后还没见过这个频道的 Stop，上一轮不知道 = stranger（不结算，PM 09-29）。
  */
 export type TurnTrigger = "insider" | "owner" | "stranger";
 const RANK: Record<TurnTrigger, number> = { insider: 0, owner: 1, stranger: 2 };
@@ -52,22 +55,45 @@ interface TriggerRec { who: TurnTrigger; at: number; callers: string[] }
 const turnTrigger = new Map<string, TriggerRec>();
 /** 上一轮（本进程见过它的 Stop）按什么来源结的：没有投递记录的下一轮继承它 */
 const prevTrigger = new Map<string, TriggerRec>();
-type Sender = { kind: string; owner?: boolean; peer?: string; channelId?: string };
+/** 被打断、没有 Stop 的频道：下一条送到的消息开新一轮 */
+const cutSince = new Set<string>();
+/** bridge 自己的续跑消息：接着做上一轮（撞错 / 撞墙那一轮）的事，来源和 caller 都是上一轮的（quota-wall-wiring 的 label） */
+const RESUME_LABELS = new Set(["api-error-resume", "quota-wall"]);
+type Sender = { kind: string; owner?: boolean; peer?: string; channelId?: string; label?: string };
 export function noteDelivered(cid: string, from: Sender, now = Date.now(), idle = false): void {
   const who: TurnTrigger = from.kind !== "user" && from.kind !== "api" ? "insider" : isOwnerSource(from) ? "owner" : "stranger";
   const caller = from.kind === "local" && from.channelId ? [from.channelId] : [];
+  const prev = prevTrigger.get(cid);
+  const fresh = (): TriggerRec => (from.kind === "bridge" && RESUME_LABELS.has(from.label ?? "") && prev ? { ...prev, at: now } : { who, at: now, callers: caller });
+  if (cutSince.delete(cid)) return void turnTrigger.set(cid, fresh());
   const cur = turnTrigger.get(cid);
   const batch = !!cur && now - cur.at <= TRIGGER_BATCH_MS;
-  if (!cur || (idle && !batch)) turnTrigger.set(cid, { who, at: now, callers: caller });
+  // 回合进行中、这一轮不是 bridge 送的消息开的（CC 到点自己续跑）：先按上一轮建出这一轮，中途送到的不覆盖（T24 wf2 delivery-hold-3）
+  if (!cur && !idle && prev) turnTrigger.set(cid, { ...prev, at: -Infinity });
+  else if (!cur || (idle && !batch)) turnTrigger.set(cid, fresh());
   else if (batch) turnTrigger.set(cid, { who: RANK[who] > RANK[cur.who] ? who : cur.who, at: cur.at, callers: [...new Set([...cur.callers, ...caller])] });
+}
+/**
+ * 会话记录里出现打断标记（终端里 Esc、抢占）：这一轮到此为止，下一条送到的开新一轮（T24 wf2 delivery-hold-4）。
+ * at = 标记写下的时刻：抢占时插话那条比标记晚送到、已经记成新一轮，标记晚到不能把它收掉。
+ */
+export function noteTurnCut(cid: string, at = Date.now()): void {
+  const cur = turnTrigger.get(cid);
+  if (cur && cur.at >= at) return;
+  if (cur) prevTrigger.set(cid, cur);
+  turnTrigger.delete(cid);
+  cutSince.add(cid);
 }
 const recOf = (t: StopTurn): TriggerRec | undefined => turnTrigger.get(t.cid) ?? prevTrigger.get(t.cid);
 const triggerOf = (t: StopTurn): TurnTrigger => t.trigger ?? recOf(t)?.who ?? "stranger";
 const strangerTurn = (t: StopTurn): boolean => triggerOf(t) === "stranger";
-/** 这一轮答的是哪个 caller：恰好一个 agent 开的就是它；好几个 = null（不猜）；不是 agent 开的 = undefined（回程簿按在等的唯一一槽） */
-const callerOf = (t: StopTurn): string | null | undefined => {
+/**
+ * 这一轮答的是哪个 caller：恰好一个 agent 开的就是它；好几个、或不是 agent 开的（owner / bridge 自己，callers 为空）= null，
+ * 不猜、不扣进任何一槽，只告诉 owner（T24 wf2 delivery-hold-2，PM 09-29）。续跑消息开的一轮继承上一轮的 callers（noteDelivered）。
+ */
+const callerOf = (t: StopTurn): string | null => {
   const c = recOf(t)?.callers ?? [];
-  return c.length === 1 ? c[0] : c.length > 1 ? null : undefined;
+  return c.length === 1 ? c[0]! : null;
 };
 
 const ranIntoApiError = (t: StopTurn): boolean =>
@@ -88,7 +114,7 @@ export async function settleStopTurn(d: CallerSettleDeps, t: StopTurn): Promise<
   try {
     return await settleOwn(d, t, mine);
   } finally {
-    if (mine) { prevTrigger.set(t.cid, { at: 0, callers: [], ...recOf(t), who: triggerOf(t) }); turnTrigger.delete(t.cid); } // 下一轮的来源从它的第一条消息重新记
+    if (mine) { prevTrigger.set(t.cid, { at: 0, callers: [], ...recOf(t), who: triggerOf(t) }); turnTrigger.delete(t.cid); cutSince.delete(t.cid); } // 下一轮的来源从它的第一条消息重新记
   }
 }
 
@@ -153,22 +179,26 @@ async function onApiErrorTurn(d: CallerSettleDeps, t: StopTurn): Promise<void> {
 }
 
 /** 挂着的 API 请求（bridge 的 pendingApiRequests 条目；这里不 import api-routes，按形状收） */
-export interface ApiWaiter { agentChannelId: string; agentName: string; threadId: string; tokenId: string }
+export interface ApiWaiter { agentChannelId: string; agentName: string; threadId: string; tokenId: string; messageId?: string }
 export interface ApiWaiterResult { reply: string | null; threadId: string; agent: string; viaFallback: true; apiError?: boolean; error?: string }
 
 /**
  * cid 这一轮收尾时结掉它名下的 API 请求（wait 调用方不必干等超时）：正常结束 → drain 文字（没有 = reply:null）；
  * 以 API 错误结束 → reply:null + apiError、error = 错误类型。不能挂着等下一轮：之后随便哪一轮（比如 owner 在 Discord 上聊的）
  * 都会被当成答复发给那个 token，重试的请求还会错位；Bun 对一个字节都没写的 HTTP 请求约 10 秒就掐断。返回结掉的请求。
+ * 留在队里不结的：Pi 叫停那次 Stop 里停字自己的等待（stopWait，留给停字那一轮答）；消息还押着、没送到 cid 手上的（held）——
+ * 这一轮根本不是答它的，拿这一轮的话结它就是把答 PM / owner 的内容交给了别人（撞墙时押几个小时，TTL 2 小时）。
  */
-export function takeApiWaiters<W extends ApiWaiter>(queues: Map<string, W[]>, t: StopTurn, own: boolean): { waiter: W; result: ApiWaiterResult }[] {
+export function takeApiWaiters<W extends ApiWaiter>(
+  queues: Map<string, W[]>, t: StopTurn, own: boolean, stopWait: ReadonlySet<string> = new Set(), held: ReadonlySet<string> = new Set(),
+): { waiter: W; result: ApiWaiterResult }[] {
   const apiErr = !own && ranIntoApiError(t) && isOwnStopChannel(t.cid, t.stopChannelId, t.stopWs, t.candidateWs);
   if (!own && !apiErr) return [];
+  const skip = new Set([...stopWait, ...held]);
   const out: { waiter: W; result: ApiWaiterResult }[] = [];
   for (const [key, queue] of [...queues.entries()]) {
     if (!queue.length || queue[0].agentChannelId !== t.cid) continue;
-    queues.delete(key);
-    for (const w of queue) {
+    for (const w of apiQueueToSettle(queues, key, skip)) {
       const base = { threadId: w.threadId, agent: w.agentName, viaFallback: true as const };
       out.push({ waiter: w, result: apiErr ? { ...base, reply: null, apiError: true, error: t.drain.error?.error || t.event } : { ...base, reply: t.drain.text || null } });
     }

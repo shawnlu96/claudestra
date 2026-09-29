@@ -57,9 +57,13 @@ export async function closeRun(
     if (opts.afterDone !== undefined) await settle(agent, opts.afterDone);
     const meta = peekTracked(agent, runId);
     const ev = opts.ev ?? pendingClose.get(runId) ?? takeEvidence(agent, runId);
-    // 每次尝试都按当下重算：写锁超时重试时闸可能已经开了，沿用上次的时刻会把唤醒白押到重置点
-    const wallUntil = missionOnClaudeCode(agent) ? quotaWall()?.until() : undefined; // CC 撞墙：下次唤醒按闸的重置时刻排（出闸时 mission.ts 另行放行）
+    // CC 撞墙：下次唤醒按闸的重置时刻排（出闸时 mission.ts 另行放行）。每次尝试都按当下重算：写锁超时重试时闸可能已经开了。
+    // 闸在这一轮撞额度之后已经提前开了（用卡 / clear / 探测）：按出闸时刻排，别退回原文的重置时刻白押（T24 adv2 P2-5）
+    const wall = missionOnClaudeCode(agent) ? quotaWall() : null;
+    const wallUntil = wall?.until();
+    const exitAt = wall?.snapshot().wall?.exit?.at;
     if (wallUntil) ev.wallUntil = wallUntil;
+    else if (ev.rateLimitText && exitAt !== undefined && exitAt >= (ev.rateLimitAt ?? 0)) ev.wallUntil = exitAt;
     else delete ev.wallUntil;
     const now = Date.now();
     const cls = classifyRun(ev);

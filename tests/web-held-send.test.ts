@@ -19,6 +19,14 @@ describe("押住的发送", () => {
     expect(heldSendNotice("quota_wall", true)).toContain("出闸后");
   });
 
+  test("非全权设备 / guest 只拿到 queued：同样解除「正在回复」、气泡标 held，说明不提额度（wf2 notify-web-rules-2）", () => {
+    const s = { messages: [{ id: "l1", role: "user", content: "hi", local: true, ts: "t0" } as ChatMessage], streaming: true, awaitingChunk: true };
+    markHeldSend(s, "l1", "queued", "n1", true, "t");
+    expect(s.streaming).toBe(false);
+    expect(s.messages[0]!.held).toBe(true);
+    for (const zh of [true, false]) expect(heldSendNotice("queued", zh)).not.toMatch(/额度|usage|limit/i);
+  });
+
   test("押住的乐观气泡过了 30 分钟还在视图里；普通的照旧按 30 分钟放手", () => {
     const at = Date.parse("2026-09-29T00:00:00Z");
     const held: ChatMessage = { id: "l1", role: "user", content: "押着的", local: true, held: true, ts: new Date(at).toISOString() };

@@ -38,8 +38,8 @@ export interface QuotaWallDeps {
   sendEsc(win: string): Promise<void>;
   mainTurnBusy(channelId: string, agent: string): Promise<boolean>;
   held: {
-    /** 押着、原因是额度闸的条数 */
-    wallCount(): number;
+    /** 押着、原因是额度闸的条数：人发的（停在菜单 / 倒计时上的窗口）和 agent / bridge 消息分开 */
+    wallCount(): { human: number; agent: number };
     /** 这个频道还有没投出去的消息 */
     queuedFor(channelId: string): boolean;
     /** 有额度闸消息的频道，按最早入队排序 */
@@ -111,8 +111,11 @@ async function sawLimitsReset(c: Ctx): Promise<boolean> {
   for (const w of await c.d.windows()) {
     const now = limitsResetEchoes(await c.d.capture(w.win).catch(() => "")); // 抓屏失败当画面空：这一拍看不到回显，下一拍再看
     const base = c.echoBase.get(w.win);
-    if (base === undefined) c.echoBase.set(w.win, new Set(now));
-    else if (now.some((e) => !base.has(e))) {
+    if (base === undefined) {
+      // 闸内重启（基线只在进程内）或新开的窗口：按进闸时的 2000 行取基线，这一拍不判——只抓 30 行的话，窗口之后变高露出的旧回显会被当成用了卡
+      const deep = await c.d.capture(w.win, ECHO_BASE_HISTORY).catch(() => ""); // 抓不到当没有：之后真有回显只会更早出闸
+      c.echoBase.set(w.win, new Set([...limitsResetEchoes(deep), ...now]));
+    } else if (now.some((e) => !base.has(e))) {
       c.d.log(`🎟 ${w.agent} 窗口出现「Limits reset」回显（用了重置卡）`);
       seen = true;
     }
@@ -125,7 +128,8 @@ async function watchWall(c: Ctx, now: number): Promise<void> {
   const w = c.state.wall!;
   if (notifyDue(w, now)) {
     const credits = await c.d.credits().catch(() => null); // 读不到卡数：通知里不写重置卡那行，别的照发
-    const text = wallNotice(w, { now, queued: c.d.held.wallCount(), credits });
+    const n = c.d.held.wallCount();
+    const text = wallNotice(w, { now, queued: n.agent, queuedHuman: n.human, credits, probeDown: !!w.probeDown });
     c.d.log(`📣 额度闸通知 owner：${text.split("\n").join(" / ")}`);
     if (await c.d.notifyOwner(text).catch(() => false)) patchWall(c, { notifiedAt: now }); // 没发出去就不记，下一拍重发
   }
@@ -133,6 +137,11 @@ async function watchWall(c: Ctx, now: number): Promise<void> {
   if (probeDue(c.state.wall!, now)) {
     patchWall(c, { lastProbeAt: now }); // 先记时刻：探失败也等下一个 5 分钟，退避交给 T2b-2 的调度器
     probe = await c.d.probe().catch(() => null); // 探失败 = 这次没有这个信号，别的出闸来源照常
+    const down = !probe || probe.pct === null;
+    if (down !== !!c.state.wall!.probeDown) {
+      patchWall(c, { probeDown: down });
+      c.d.log(down ? "🔎 额度闸：只读用量探测不可用（关着 / 凭据失败 / 退避中），只能等「Limits reset」回显、到点，或人点「已恢复」" : "🔎 额度闸：只读用量探测恢复了");
+    }
   }
   const cache = c.d.readCache();
   const seen = observeCache(c.state, cache);
@@ -151,6 +160,7 @@ function patchRecovery(c: Ctx, id: string, p: Partial<WallRecovery>): boolean {
 }
 
 const ESC_RECHECK_MS = 300;
+const total = (n: { human: number; agent: number }): number => n.human + n.agent;
 
 async function gatedNow(c: Ctx, channelId: string): Promise<boolean> {
   return wallActive(c.state) && (await c.d.isClaudeCode(channelId)) && !(await c.d.lowPriority?.(channelId));
@@ -195,7 +205,7 @@ async function closeMenus(c: Ctx, id: string): Promise<void> {
 async function deliverQueue(c: Ctx, id: string): Promise<void> {
   const channels = c.d.held.wallChannels();
   // 先记账再转回普通押后：中途重启时条数不丢（已记过就不重记，否则重启后记成 0）；转回之后 Stop / 扫描也能投
-  if (c.state.wall!.recovery!.flushedTo === undefined && !patchRecovery(c, id, { flushed: c.d.held.wallCount(), flushedTo: channels })) return;
+  if (c.state.wall!.recovery!.flushedTo === undefined && !patchRecovery(c, id, { flushed: total(c.d.held.wallCount()), flushedTo: channels })) return;
   c.d.held.release(c.d.now());
   for (const cid of c.state.wall!.recovery!.flushedTo ?? channels) {
     if (!stillRecovering(c, id)) return;
@@ -215,9 +225,10 @@ async function resumeAgents(c: Ctx, id: string): Promise<void> {
     if (!stillRecovering(c, id)) return;
     const r = structuredClone(c.state.wall!.recovery!);
     const got = busy ? null : await c.d.resume(cid, h.agent, wallResumeText(h.at, h.error));
-    if (busy) r.running.push(h.agent);
-    else if (got === "held") r.held = [...(r.held ?? []), h.agent];
-    else if (got) r.resumed.push(h.agent);
+    const add = (list: string[] = []) => (list.includes(h.agent) ? list : [...list, h.agent]);
+    if (busy) r.running = add(r.running);
+    else if (got === "held") r.held = add(r.held);
+    else if (got) r.resumed = add(r.resumed);
     if (!patchRecovery(c, id, r)) return;
   }
   patchRecovery(c, id, { step: "done" });
@@ -290,7 +301,10 @@ export function createQuotaWall(d: QuotaWallDeps) {
     onExit(cb: (via: WallExitVia) => void): void {
       c.exitListeners.push(cb);
     },
-    snapshot: (): { active: boolean; wall: Wall | null; queued: number } => ({ active: wallActive(c.state), wall: c.state.wall, queued: d.held.wallCount() }),
+    snapshot: (): { active: boolean; wall: Wall | null; queued: number; queuedHuman: number } => {
+      const n = d.held.wallCount();
+      return { active: wallActive(c.state), wall: c.state.wall, queued: n.agent, queuedHuman: n.human };
+    },
 
     /** 这个频道此刻在闸里：闸开着、是 Claude Code agent、没开 low-priority（开了的照常在跑）。Autopilot 据此让位、flush 据此只投人的 */
     gates: (channelId: string): Promise<boolean> => gatedNow(c, channelId),

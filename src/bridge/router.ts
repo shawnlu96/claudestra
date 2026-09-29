@@ -142,11 +142,12 @@ export interface Envelope {
     skipInterAgentWatchdog?: boolean;
     /** 这条是「转交」过来的用户消息（bridge/forward.ts）：接手方不能再转，防来回踢皮球 */
     forwarded?: boolean;
+    /** 打断抬头（bridge/preempt.ts 写入，renderContentForLocal 放在正文最前）：这条消息打断了什么 / 这是一条「停」 */
+    interruptNote?: string;
     /**
      * 只在目标主回合空闲时投（与 agent→agent 同规则），语义固定、别的任务直接复用（打断收尾提醒、T11a 的答复）：
      * - 主回合忙或正在压缩 → 进押后队列，Stop / 压缩结束 / 每分钟扫描时 flush 再投；
      * - 永远不触发抢占：即使 from 是人类、intent 是 request，也不算 isHumanRequest（不打断、flush 时也不插队）。
-     * 押后判断由 T13a（task/t13a-interrupt-cleanup）接进 deliverToLocal；它合并之前这个字段只是标记，答复照常直投（response 本来就不抢占）。
      */
     waitForIdle?: boolean;
     /** 这条 reply 建出的 / 这条答复所答的「待你处理」id（bridge/asks.ts）；出站 chat_message 事件带上，网页据此把气泡和 ask 对上 */
@@ -327,6 +328,14 @@ export function newMessageId(prefix: string): string {
   return `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
 }
 
+/**
+ * 人类 request（Discord 用户 / 非 peer 的 API 用户）——抢占与押后规则的分野：它会打断在忙的目标，押后队列里也不等空闲。
+ * 带 waitForIdle 的不算（永远不抢占），见 Envelope.meta.waitForIdle。单测 tests/turn-cuts.test.ts。
+ */
+export function isHumanRequest(env: Envelope): boolean {
+  if (env.meta.waitForIdle) return false;
+  return (env.from.kind === "user" || (env.from.kind === "api" && !env.from.peer)) && env.intent === "request";
+}
 
 /** 注入本地 agent 的正文：非 owner 来源里的 `[📨` 中和掉——@ 委托标记只有 owner 本人能发（lib/delegate-marker.ts） */
 export function inboundBodyForLocal(env: Pick<Envelope, "from" | "content">): string {

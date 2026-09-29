@@ -189,13 +189,12 @@ export class AgentCallBook extends PersistedMap<PendingAgentCall> {
 
   /**
    * target 这一轮以 API 错误结束：在等它的槽都记上等续跑（第一次的时刻）；withheld 只挂在归属确定的那一槽：caller 给了就是它
-   * （null = 确定不了），没给就要恰好一个在等、或恰好一槽已经扣着话。多个 caller 不猜、不广播（A 的话推给 B 是串话）。
+   * （null = 确定不了），没给就要恰好一个在等。多个 caller 不猜、不广播，也不按「谁已经扣着话」猜（A 的话推给 B 是串话）。
    * 返回扣到了哪一槽（没扣 = undefined）；落盘
    */
   markApiError(target: string, stillHeld: StillHeld, withheld: string | null, caller?: string | null, now = Date.now()): string | undefined {
     const w = this.waiting(target, stillHeld);
-    const held = w.filter((c) => c.withheld?.length);
-    const owner = caller !== undefined ? caller : w.length === 1 ? w[0]!.callerChannelId : held.length === 1 ? held[0]!.callerChannelId : null;
+    const owner = caller !== undefined ? caller : w.length === 1 ? w[0]!.callerChannelId : null;
     const to = withheld && owner && w.some((c) => c.callerChannelId === owner) ? owner : undefined;
     for (const c of w) {
       const raw = this.slot(target, c.callerChannelId);

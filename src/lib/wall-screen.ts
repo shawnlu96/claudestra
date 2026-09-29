@@ -12,6 +12,7 @@ export async function windowWallWait(win: string): Promise<WallWait | null> {
   return wallWaitKind(await tmuxCapture(win, 30).catch(() => "")); // 抓不到：认不出，按调用方原来的逻辑走
 }
 
-/** 拒绝打字时给人 / 调用方看的原因 */
-export const wallWaitRefusal = (kind: WallWait): string =>
-  kind === "menu" ? "它停在额度菜单上，没发任何键（菜单里有花钱的选项）" : "它停在撞墙后的自动续跑倒计时上，没发任何键（一打字就会取消 CC 的自动续跑）";
+/** 拒绝打字时给人 / 调用方看的原因。额度状态只告诉 owner（canSeeQuota）：别人只知道「现在收不了」 */
+export const wallWaitRefusal = (kind: WallWait, canSeeQuota = true): string =>
+  !canSeeQuota ? "此刻不能接收命令（窗口在等待画面上，没发任何键），稍后再试"
+    : kind === "menu" ? "它停在额度菜单上，没发任何键（菜单里有花钱的选项）" : "它停在撞墙后的自动续跑倒计时上，没发任何键（一打字就会取消 CC 的自动续跑）";

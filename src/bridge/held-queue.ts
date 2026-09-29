@@ -7,7 +7,7 @@
  *   3. 投出之后才出队：投递中途崩溃，重启后会再投一次（至少一次；收件方看 message_id 去重）；每个频道只有一个投递者
  */
 import type { Envelope, LocalEndpoint } from "./router.js";
-import { statePath } from "../lib/paths.js";
+import { HELD_MESSAGES_PATH } from "../lib/paths.js";
 import { PersistedMap } from "./persisted-map.js";
 import { readJsonStateSync } from "../lib/state-file.js";
 
@@ -40,7 +40,7 @@ export function unseenFrom(q: HeldQueue, target: string): { fromKind: string; fr
 export const HELD_NOTIFY_MS = 30 * 60_000;
 export const HELD_GIVE_UP_MS = 24 * 3_600_000;
 
-const HELD_PATH = statePath("held-messages.json");
+const HELD_PATH = HELD_MESSAGES_PATH;
 const isQueue = (q: unknown): boolean => Array.isArray(q) && q.every((i) => i && typeof i === "object" && "env" in i && "to" in i);
 
 /** 一个 Map（bridge.ts 原来的用法不变），set / delete 之后同步落盘；path = null 不落盘（单测） */
@@ -98,9 +98,16 @@ export class HeldQueue extends PersistedMap<HeldItem[]> {
     return hit.length;
   }
 
-  /** 额度闸押着的条数 */
-  wallCount(): number {
-    return [...this.values()].reduce((n, q) => n + q.filter((i) => i.reason === "quota_wall").length, 0);
+  /** 这个频道还押着（没送到 agent 手上）的消息 id：挂在它们上的 API 请求不能被别的回合结掉（bridge/stop-settle.ts takeApiWaiters） */
+  ids(channelId: string): Set<string> {
+    return new Set((this.get(channelId) ?? []).map((i) => i.env.meta.messageId));
+  }
+
+  /** 额度闸押着的条数，人发的和 agent / bridge 消息分开数（横幅和进闸通知分开写） */
+  wallCount(isHuman: (env: Envelope) => boolean = () => false): { human: number; agent: number } {
+    const all = [...this.values()].flat().filter((i) => i.reason === "quota_wall");
+    const human = all.filter((i) => isHuman(i.env)).length;
+    return { human, agent: all.length - human };
   }
 
   /** 有额度闸消息的频道，按各自最早一条的入队时间排（出闸补投的顺序） */
@@ -178,10 +185,11 @@ export function ageHeld(q: HeldQueue, now: number, paused: boolean | ((item: Hel
 }
 
 /** 通知发送方的话（bridge.ts 包成 system notification 发到发送方的 ws） */
-export function heldNoticeText(n: HeldNotice, human = false): string {
+export function heldNoticeText(n: HeldNotice, human?: "owner" | "stranger"): string {
   const who = n.item.to.agentName || n.channelId;
   if (human) {
-    return `⚠️ 你发给 ${who} 的消息排了 24 小时仍没送到（它一直不空闲、停在额度菜单 / 自动续跑倒计时上，或不在线），已放弃，没有发任何键。`
+    const why = human === "owner" ? "它一直不空闲、停在额度菜单 / 自动续跑倒计时上，或不在线" : "对方一直无法接收"; // 额度状态只告诉 owner（canSeeQuota 同口径）
+    return `⚠️ [bridge] 你发给 ${who} 的消息排了 24 小时仍没送到（${why}），已放弃，没有发任何键。`
       + `如仍需要请重发。原文：\n${String(n.item.env.content).slice(0, 1500)}`;
   }
   const head = String(n.item.env.content).slice(0, 150);

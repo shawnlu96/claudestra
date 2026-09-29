@@ -119,17 +119,27 @@ describe("出闸（任一来源）", () => {
     expect(exitVia(obsAll(full, rolled), { now: T0 + 10, cache: rolled, probe: { pct: 100, observedAt: T0 + 9 } })).toBeNull(); // 同一拍探测说还满
     expect(observeCache({ v: 1, wall: full }, { ...c, scrapedAt: T0 + 9 })).toBeNull(); // 记下的样子没变：不落盘
   });
-  test("session 墙：5h 见过满后 <100 或 5h 重置前进就出；周重置前进不算（T24 wf gate-state-1 反方向）", () => {
+  test("session 墙：只认 5h 重置前进 + 5h <100；周重置前进不算（T24 wf gate-state-1 反方向）", () => {
     const sw = hit(emptyWallState(), "a", T0, SESSION).state.wall!;
     const c = { sessionPct: 101, weekPct: 40, sessionResetsAtMs: 5e12, weekResetsAtMs: 6e12, scrapedAt: T0 + 5 };
     const weekRolled = { ...c, weekPct: 0, weekResetsAtMs: 7e12, scrapedAt: T0 + 9 };
     expect(exitVia(obsAll(sw, c, weekRolled), { now: T0 + 10, cache: weekRolled })).toBeNull();
-    const down = { ...c, sessionPct: 3, scrapedAt: T0 + 9 };
+    const down = { ...c, sessionPct: 3, sessionResetsAtMs: 5e12 + 18e6, scrapedAt: T0 + 9 };
     expect(exitVia(obsAll(sw, c, down), { now: T0 + 10, cache: down })).toBe("usage_cache");
     const at99 = { ...c, sessionPct: 99 }; // 撞墙时停在 99% 的旧值：没见过满、也没滚
     expect(exitVia(obsAll(sw, at99), { now: T0 + 10, cache: at99 })).toBeNull();
     const rolled = { ...at99, sessionPct: 0, sessionResetsAtMs: 5e12 + 18e6, scrapedAt: T0 + 9 };
     expect(exitVia(obsAll(sw, at99, rolled), { now: T0 + 10, cache: rolled })).toBe("usage_cache");
+  });
+  test("session 墙被陈旧写入放行不了：见过 5h 满之后，旧会话写回上一周期（更早的 reset）的 5h 40%（T24 adv2 ④）", () => {
+    const sw = hit(emptyWallState(), "a", T0, SESSION).state.wall!;
+    const c = { sessionPct: 100, weekPct: 40, sessionResetsAtMs: 5e12, weekResetsAtMs: 6e12, scrapedAt: T0 + 5 };
+    const stale = { ...c, sessionPct: 40, sessionResetsAtMs: 5e12 - 18e6, scrapedAt: T0 + 9 };
+    expect(exitVia(obsAll(sw, c, stale), { now: T0 + 10, cache: stale })).toBeNull();
+    const sameReset = { ...c, sessionPct: 40, scrapedAt: T0 + 9 }; // 同一个 reset 下从 ≥100 回落：也是陈旧写者
+    expect(exitVia(obsAll(sw, c, sameReset), { now: T0 + 10, cache: sameReset })).toBeNull();
+    const rolled = { ...c, sessionPct: 2, sessionResetsAtMs: 5e12 + 18e6, scrapedAt: T0 + 9 };
+    expect(exitVia(obsAll(sw, c, stale, rolled), { now: T0 + 10, cache: rolled })).toBe("usage_cache");
   });
   test("重置时刻只认前进：空闲会话写回上一周期的旧 reset（不相等但更早）不算窗口滚过去（T24 r2 P2-3）", () => {
     const c = { sessionPct: 0, weekPct: 99, sessionResetsAtMs: 5e12, weekResetsAtMs: 6e12, scrapedAt: T0 + 5 };
@@ -271,5 +281,13 @@ describe("押在额度菜单上的提示（T24 wf delivery-hold-5 / notify-web-r
     expect(due("c1", "countdown:false", "m1")).toBe(false);
     expect(due("c1", "countdown:false", "m2")).toBe(true);
     expect(due("c2", "countdown:false", "m1")).toBe(true);
+  });
+  test("4 条押着的消息，画面状态来回变：每次变只提示一次，不是每条各一次（T24 adv2 P2-7）", () => {
+    const due = noticeOncePerState();
+    const ids = ["m1", "m2", "m3", "m4"];
+    expect(ids.filter((id) => due("c1", "menu:false", id))).toEqual(ids); // 新消息各提示一次
+    let n = 0;
+    for (const state of ["menu:true", "countdown:true", "menu:true", "countdown:true"]) for (let k = 0; k < 3; k++) for (const id of ids) if (due("c1", state, id)) n++;
+    expect(n).toBe(4);
   });
 });

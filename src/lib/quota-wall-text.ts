@@ -10,7 +10,7 @@
  */
 import { parseResetAt } from "./autopilot-run.js";
 import { limitMenuAtBottom } from "./limit-menu.js";
-import { paneMainTurnBusy } from "./turn-state.js";
+import { inputBox, paneMainTurnBusy } from "./turn-state.js";
 
 /** 「hit」是额度窗口，「reached your Fable limit」「Fable 5 limit」是单个模型的额度（本机实录 99 条） */
 const LIMIT_HIT_RE = /^(?:You['’]?ve (?:hit|reached) your (?:[\w.-]+ ){0,3}limit|Hit your (?:rate |usage )?limit)(?=\s*(?:[·.,;:!\n]|$))/i;
@@ -94,14 +94,10 @@ export function matchLimitMenu(pane: string): boolean {
  * 窄窗口会把「· esc to cancel」折到下一行，所以不要求它在同一行。
  */
 const WALL_WAIT_LINE = /Usage limit reached\b|continuing automatically at\b|\/low-priority to continue now\b/i;
-/** 输入框下沿以下（状态栏）：最后一对顶格横线边框、上框下一行是顶格 ❯；没有输入框（被菜单占着）= 空 */
+/** 输入框下沿以下（状态栏）：按 lib/turn-state.ts inputBox 找真输入框，草稿多长都行；没有输入框（被菜单占着）= 空 */
 function footerLines(lines: string[]): string[] {
-  for (let i = lines.length - 1; i > 1; i--) {
-    if (!/^─{8,}/.test(lines[i]!)) continue;
-    for (let j = i - 1; j >= Math.max(0, i - 12); j--) if (/^─{8,}/.test(lines[j]!)) return /^❯/.test(lines[j + 1] ?? "") ? lines.slice(i + 1) : [];
-    return [];
-  }
-  return [];
+  const b = inputBox(lines);
+  return b ? lines.slice(b.bottom + 1) : [];
 }
 
 /**

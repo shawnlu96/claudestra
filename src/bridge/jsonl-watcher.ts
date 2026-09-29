@@ -19,6 +19,7 @@ import { tmuxCapture, windowTarget } from "../lib/tmux-helper.js";
 import { parseAuqPane } from "../lib/auq-pane.js";
 import { countNewlinesBefore, progressNoteOf } from "../lib/session-history.js";
 import { splitChunkLines } from "../lib/jsonl-lines.js";
+import { transcriptUserEvent } from "../lib/turn-cuts.js";
 // v2.6.0+ 旁路事件埋点（设计 D1：只 emit 不改渲染管线）
 import { emitEvent, getAgentStatus, isPostTurnActivity } from "./event-bus.js";
 import { isForwardTool } from "../lib/forward.js";
@@ -268,9 +269,7 @@ export async function hasRecentScheduleWakeup(
       if (d.type === "assistant") {
         const content = d.message?.content || [];
         for (const item of content) {
-          if (item?.type === "tool_use" && item?.name === "ScheduleWakeup") {
-            return true;
-          }
+          if (item?.type === "tool_use" && item?.name === "ScheduleWakeup") return true;
         }
       }
     }
@@ -593,16 +592,17 @@ async function processNewData(state: WatcherState, discord: Client): Promise<voi
           const content = entry.message?.content;
           // 新一轮的用户提示（不是 tool_result）：上一轮的 API 错误标记作废，否则正常结束的这一轮会被当成出错不结算
           if (!Array.isArray(content) || !content.some((b) => b?.type === "tool_result")) state.apiErrorTurn = false;
+          // 打断标记 / 人在终端里敲的新输入：打断记录据此认出「人在终端里叫停」和「叫停之后又开口了」（lib/turn-cuts.ts transcriptUserEvent）
+          const ue = transcriptUserEvent(entry, state.runtime);
+          if (ue) emitEvent({ agent: state.agentName, chatId: state.channelId, type: ue.type, data: { ts: entry.timestamp, ...ue.data } }, ue);
           if (!Array.isArray(content)) continue;
           for (const block of content) {
             if (block.type === "tool_result" && block.tool_use_id) {
+              // 并行 tool_use 各占一条 jsonl、新一条会清空 state.tools：前面几个的结果这里找不到，但 tool_start 发过了，tool_done 照发
               const tool = state.tools.find((t) => t.id === block.tool_use_id);
-              if (tool && !tool.done) {
-                tool.done = true;
-                tool.error = !!block.is_error;
-                toolsChanged = true;
-                emitEvent({ agent: state.agentName, chatId: state.channelId, type: "tool_done", data: { toolId: block.tool_use_id, error: tool.error } });
-              }
+              if (tool?.done) continue;
+              if (tool) [tool.done, tool.error, toolsChanged] = [true, !!block.is_error, true];
+              emitEvent({ agent: state.agentName, chatId: state.channelId, type: "tool_done", data: { toolId: block.tool_use_id, error: !!block.is_error } });
             }
           }
         }

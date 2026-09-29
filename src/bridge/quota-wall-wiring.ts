@@ -21,6 +21,7 @@ import { subscribeEvents } from "./event-bus.js";
 import type { HeldQueue } from "./held-queue.js";
 import { createQuotaWall, type QuotaWall, type WallWindow } from "./quota-wall.js";
 import { newMessageId, newThreadId, type Delivery, type Envelope, type LocalEndpoint } from "./router.js";
+import { noteTurnCut } from "./stop-settle.js";
 import { probeTurn, resolveTurnWindow } from "./turn-probe.js";
 
 const TICK_MS = 15_000;
@@ -91,7 +92,7 @@ function productionWall(b: WallBridgeDeps): QuotaWall {
       return agentMsgMustWait(await probeTurn(cid, agent, b.controlChannelId));
     },
     held: {
-      wallCount: () => b.held.wallCount(),
+      wallCount: () => b.held.wallCount((e) => isHumanSender(e.from)),
       queuedFor: (cid) => !!b.held.get(cid)?.length,
       wallChannels: () => b.held.wallChannels(),
       release: (now) => b.held.releaseWall(now),
@@ -173,6 +174,7 @@ export function startQuotaWall(b: WallBridgeDeps): QuotaWall {
   const agentOf = new Map<string, string>(); // 到期续跑时交给闸要带名字
   subscribeEvents({}, (evt) => {
     const ts = Date.parse(evt.ts) || Date.now();
+    if (evt.type === "turn_interrupted") noteTurnCut(evt.chatId, Date.parse(String((evt.data as { ts?: unknown }).ts ?? "")) || ts); // 终端里 Esc / 抢占：这一轮没有 Stop，下一条送到的开新一轮（bridge/stop-settle.ts）
     if (evt.type === "api_error_turn") {
       const data = evt.data as { error?: unknown; text?: unknown };
       const err = String(data.error ?? "");

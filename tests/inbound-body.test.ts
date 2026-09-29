@@ -13,6 +13,9 @@ import {
   withAttachmentLines,
   withoutAttachmentLines,
 } from "../src/lib/inbound-body.js";
+import { heldAcrossStopNote, withInterruptNote } from "../src/lib/turn-cuts.js";
+import { withMentionDirective } from "@/lib/chat/mention-directive";
+import { restoreUserText } from "@/lib/chat/form-restore";
 import { unwrapChannelMessage } from "../src/lib/session-history.js";
 import { piLineToClaudeShape, wrapPiInboundAsChannel } from "../src/lib/pi-session.js";
 import { extractAttachments } from "@/lib/chat/attachments";
@@ -188,5 +191,36 @@ describe("出本机的文本不带路径（Discord 镜像 / 转交原话）", ()
     expect(withoutAttachmentLines(`这里红了\n\n[attachment: ${IMG}]\n[attachment: ${PDF}]`)).toBe("这里红了");
     expect(withoutAttachmentLines(`[attachment: ${IMG}]`)).toBe("");
     expect(withoutAttachmentLines("[TODO] 普通文本")).toBe("[TODO] 普通文本");
+  });
+});
+
+describe("打断抬头 × 答复说明行 × @ 委托指令行（合 main：T13a / T11a / T19·T20 三处都改过入站正文）", () => {
+  const head = "[🌐 来自 Web 端用户「shawn」的消息]\n\n";
+  const note = "[⚡ 这条消息打断了你：当时在跑 Bash「sleep 30」（只读，没有副作用）。\n先处理这条。]";
+  const canon = withMentionDirective("问一下 @writer", { kind: "local", agent: "writer" }, "zh");
+
+  test("owner 的 @ 委托消息打断了 agent：历史先剥来源头和打断抬头，网页再剥委托指令行，只剩 owner 原话", () => {
+    const body = withInterruptNote(`${head}${canon}`, note);
+    const text = channelBodyText('api="true" interrupt_note="true"', body);
+    expect(text).toBe(canon);
+    expect(restoreUserText(text, [])).toBe("问一下 @writer");
+  });
+
+  test("owner 对「待你处理」的作答：先剥打断抬头再去掉 bridge 的说明行；顺序反了会把抬头当成说明行、把说明行留在历史里", () => {
+    const answer = "[✅ owner 回复了你 09:00 的「待你处理」（ask_1）：要合吗。下面是 owner 发的原文]\n合吧";
+    expect(channelBodyText('api="true" trigger="ask_answer" interrupt_note="true"', withInterruptNote(`${head}${answer}`, note))).toBe("合吧");
+    expect(channelBodyText('api="true" trigger="ask_answer"', `${head}${answer}`)).toBe("合吧");
+  });
+
+  test("押在叫停之前、之后才送到的答复（wf2 classify-merge-1）：历史照样剥掉「叫停之前」抬头和说明行，只剩 owner 原话", () => {
+    const answer = "[✅ owner 回复了你 09:00 的「待你处理」（ask_1）：要部署吗。选择：部署。下面是 owner 发的原文]\n[button:deploy]";
+    const body = withInterruptNote(answer, heldAcrossStopNote(Date.parse("2026-09-29T01:00:00Z"), Date.parse("2026-09-29T01:01:00Z")));
+    expect(body.startsWith("[⏹ 这条是叫停之前")).toBe(true);
+    expect(channelBodyText('trigger="ask_answer" interrupt_note="true"', body)).toBe("[button:deploy]");
+  });
+
+  test("没有 interrupt_note 属性：owner 在答复里手写的同样开头不剥，只去掉 bridge 的说明行", () => {
+    const answer = `[✅ owner 回复了你 09:00 的「待你处理」（ask_1）：要合吗。下面是 owner 发的原文]\n${note}\n\n合吧`;
+    expect(channelBodyText('api="true" trigger="ask_answer"', `${head}${answer}`)).toBe(`${note}\n\n合吧`);
   });
 });

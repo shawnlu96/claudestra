@@ -62,6 +62,8 @@ export const QUOTA_DICT: Record<string, string> = {
   "约 {h} 小时后": "in about {h} h",
   "重置时间未知": "reset time unknown",
   "排队 {n} 条 agent 消息，恢复后自动送达": "{n} agent message(s) queued, delivered automatically on recovery",
+  "人发的消息 {n} 条押在停着菜单 / 倒计时的窗口上，恢复后送达": "{n} message(s) from people held at windows on the menu / countdown, delivered on recovery",
+  "用量探测不可用：只能等重置回显、到点，或点「已恢复」": "Usage probe unavailable: waits for a reset echo, the reset time, or \"It's back\"",
   "有 {n} 次重置可用：在撞墙窗口里 /limit-reset": "{n} reset(s) available: run /limit-reset in a walled window",
   "已恢复": "It's back",
   "确认已恢复？": "Confirm restored?",

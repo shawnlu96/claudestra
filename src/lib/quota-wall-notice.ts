@@ -33,8 +33,12 @@ function resetLine(w: Wall, now: number): string {
 
 export interface WallNoticeCtx {
   now: number;
-  /** 押在队里、等出闸补投的消息条数 */
+  /** 押在队里、等出闸补投的 agent / bridge 消息条数 */
   queued: number;
+  /** 停在菜单 / 倒计时上的窗口押着的人发的消息条数 */
+  queuedHuman?: number;
+  /** 只读用量探测此刻不可用：出闸只能等回显、到点或人点「已恢复」 */
+  probeDown?: boolean;
   /** T2b-2 用量数据里此刻能用的重置卡张数；拿不到 = null */
   credits: number | null;
 }
@@ -57,9 +61,19 @@ export function wallNotice(w: Wall, c: WallNoticeCtx): string {
     `- ${t(`排队中的 agent 消息 ${c.queued} 条，恢复后自动送达，不用手动催`,
       `${c.queued} agent message(s) queued; delivered automatically after recovery — no need to nudge`)}`,
   ];
+  if (c.queuedHuman) {
+    lines.push(`- ${t(`人发的消息 ${c.queuedHuman} 条押在停着菜单 / 倒计时的窗口上，恢复后一起送达`,
+      `${c.queuedHuman} message(s) from people held at windows on the menu / countdown; delivered on recovery`)}`);
+  }
   if (c.credits !== null && c.credits > 0) {
     lines.push(`- ${t(`有 ${c.credits} 次重置可用：在任一撞墙窗口里 /limit-reset（bridge 不会自动用卡）`,
       `${c.credits} reset(s) available: run /limit-reset in any walled window (the bridge never uses one on its own)`)}`);
+  }
+  lines.push(`- ${t("在别处用了重置（裸终端、别的设备）、或者状态栏已经恢复：点「已恢复」或跑 manager quota-wall clear 放行",
+    "Used a reset elsewhere (a bare terminal, another device) or the status line shows capacity again: press \"It's back\" in the web app or run manager quota-wall clear")}`);
+  if (c.probeDown) {
+    lines.push(`- ${t("只读用量探测不可用：这道闸只能等「Limits reset」回显、到点，或你手动放行",
+      "The read-only usage probe is unavailable: this wall only lifts on a \"Limits reset\" echo, at reset time, or when you clear it")}`);
   }
   lines.push(`- ${t("你直接发的消息照常送达，但停在额度菜单 / 自动续跑倒计时上的窗口除外：先押着、不发键。恢复后 bridge 自动关菜单、补投、续跑",
     "Your own messages still go through, except to windows on the limit menu / auto-continue countdown (held, no key sent). "
@@ -113,16 +127,19 @@ export function wallResumeText(hitAt: number, error: string): string {
 }
 
 /**
- * 押在额度菜单上的人类消息给频道的提示：同一条消息、同一个画面状态（菜单 / 倒计时 × 闸开没开）只提示一次，状态变了才再提示。
- * 每分钟的押后补投会让同一条反复走到提示那一步（周墙一押一两天），按时间限频照样刷屏。
+ * 押在额度菜单上的人类消息给频道的提示：每条新消息提示一次；画面状态（菜单 / 倒计时 × 闸开没开）变了，这个频道再提示一次——
+ * 只由第一条走到的消息提示，别的押着的不再各发一遍（T24 adv2 P2-7）。每分钟的押后补投会让同一条反复走到提示那一步
+ * （周墙一押一两天），按时间限频照样刷屏。
  */
 export function noticeOncePerState(): (channelId: string, state: string, messageId: string) => boolean {
-  const seen = new Map<string, { state: string; ids: Set<string> }>();
+  const seen = new Map<string, { state: string; announced: boolean; ids: Set<string> }>();
   return (cid, state, messageId) => {
-    const cur = seen.get(cid);
-    const ids = cur?.state === state ? cur.ids : new Set<string>();
-    if (ids.has(messageId)) return false;
-    seen.set(cid, { state, ids: ids.add(messageId) });
-    return true;
+    const cur = seen.get(cid) ?? { state, announced: false, ids: new Set<string>() };
+    if (cur.state !== state) Object.assign(cur, { state, announced: false });
+    const due = !cur.ids.has(messageId) || !cur.announced;
+    cur.ids.add(messageId);
+    if (due) cur.announced = true;
+    seen.set(cid, cur);
+    return due;
   };
 }

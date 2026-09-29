@@ -6,6 +6,8 @@
 export interface WallResponse {
   active?: boolean;
   queued?: number;
+  /** 停在菜单 / 倒计时上的窗口押着的人发的消息 */
+  queuedHuman?: number;
   /** 持有的重置次数（owner 自己在撞墙窗口里 /limit-reset 用；bridge 不自动用） */
   credits?: number | null;
   wall?: {
@@ -15,6 +17,8 @@ export interface WallResponse {
     agents?: string[];
     enteredAt?: number;
     recovering?: boolean;
+    /** 只读用量探测不可用：只能等回显、到点或点「已恢复」 */
+    probeDown?: boolean;
   } | null;
 }
 
@@ -58,6 +62,8 @@ export function wallBanner(r: WallResponse | null, now: number): WallBanner | nu
     detail.push({ text: "重置时间未知", vars: {} });
   }
   detail.push({ text: "排队 {n} 条 agent 消息，恢复后自动送达", vars: { n: r.queued ?? 0 } });
+  if (r.queuedHuman) detail.push({ text: "人发的消息 {n} 条押在停着菜单 / 倒计时的窗口上，恢复后送达", vars: { n: r.queuedHuman } });
+  if (w.probeDown) detail.push({ text: "用量探测不可用：只能等重置回显、到点，或点「已恢复」", vars: {} });
   if (r.credits) detail.push({ text: "有 {n} 次重置可用：在撞墙窗口里 /limit-reset", vars: { n: r.credits } });
   return { key: `${id}:active`, tone: "warning", title, detail, canClear: true };
 }

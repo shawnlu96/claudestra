@@ -4,7 +4,7 @@
  * 不在线 / 压缩中 / 别人正在投都不动；投递报错留着下次再投。
  */
 import { describe, expect, test } from "bun:test";
-import { flushHeld, type FlushDeps } from "../src/bridge/held-flush.js";
+import { dropHeldOnKill, flushHeld, type FlushDeps } from "../src/bridge/held-flush.js";
 import { ageHeld, HELD_GIVE_UP_MS, HELD_NOTIFY_MS, HeldQueue, INBOX_LEASE_MS, type HeldItem } from "../src/bridge/held-queue.js";
 import type { Delivery, Envelope, LocalEndpoint } from "../src/bridge/router.js";
 
@@ -122,7 +122,7 @@ describe("flushHeld", () => {
     const h = harness([item("busy-held", "local", 1000), item("human", "user", 1000)], { walled: async () => true, working: async () => true });
     await flushHeld(h.deps, "c-me", "sweep");
     expect(h.held.get("c-me")!.map((i) => [i.env.content, i.reason])).toEqual([["busy-held", "quota_wall"]]);
-    expect(h.held.wallCount()).toBe(1);
+    expect(h.held.wallCount()).toEqual({ human: 0, agent: 1 });
     expect(ageHeld(h.held, 1000 + HELD_GIVE_UP_MS + 1)).toEqual([]); // 32 小时的墙也不丢
     expect(h.held.releaseWall(5000)).toBe(1);
     expect(h.held.get("c-me")![0]).toMatchObject({ heldAt: 5000 });
@@ -131,7 +131,7 @@ describe("flushHeld", () => {
   test("目标一直在压缩：也先改记成额度闸再返回，闸开超过 24 小时也不会出闸后立刻被放弃（T24 r2 P2-8）", async () => {
     const h = harness([item("agent-msg", "local", 1000)], { walled: async () => true, compacting: () => true });
     await flushHeld(h.deps, "c-me", "sweep");
-    expect(h.held.wallCount()).toBe(1);
+    expect(h.held.wallCount()).toEqual({ human: 0, agent: 1 });
     expect(h.delivered).toEqual([]);
   });
 
@@ -168,5 +168,38 @@ describe("flushHeld", () => {
     expect(h.touched).toEqual(["c-me"]);
     expect(h.contents()).toEqual(["bad"]);
     expect(h.held.claim("c-me")).toBe(true);
+  });
+});
+
+describe("叫停和押后（Workflow 复核 wf2）", () => {
+  test("classify-merge-1：押在叫停之前、叫停之后才投的（忙时作答的 ask 答复、agent 请求）加抬头；叫停之后才押的不加", async () => {
+    const answer = item("[✅ owner 回复了你 10:00 的「待你处理」]\n选择：部署", "user", 1_000);
+    const later = item("停之后发的", "local", 3_000);
+    const h = harness([answer, later], { stoppedAt: () => 2_000 });
+    const notes: (string | undefined)[] = [];
+    h.deps.deliver = async (env) => (notes.push(env.meta.interruptNote), sent(env));
+    await flushHeld(h.deps, "c-me", "stop");
+    expect(notes[0]).toContain("这条是叫停之前");
+    expect(notes[0]).toContain("先别照做，问用户还要不要");
+    expect(notes[1]).toBeUndefined();
+  });
+
+  test("没叫停过 / bridge 自己的通知：不加", async () => {
+    const bridgeNote = item("收尾提醒", "local", 1_000);
+    bridgeNote.env.from = { kind: "bridge", label: "turn-cuts" };
+    const plain = item("a", "local", 1_000);
+    await flushHeld(harness([plain], { stoppedAt: (c) => (c === "other" ? 2_000 : undefined) }).deps, "c-me", "stop");
+    await flushHeld(harness([bridgeNote], { stoppedAt: () => 2_000 }).deps, "c-me", "stop");
+    expect(plain.env.meta.interruptNote).toBeUndefined();
+    expect(bridgeNote.env.meta.interruptNote).toBeUndefined();
+  });
+
+  test("classify-merge-8：agent 被 kill，押给它的全丢掉，每条都交给善后（ask 答复放回「待你处理」由 asks.ts 做）", async () => {
+    const h = harness([item("a"), item("b")]);
+    const got: string[] = [];
+    dropHeldOnKill(h.held, "c-me", async (env) => void got.push(String(env.content)));
+    expect(h.contents()).toEqual([]);
+    expect(got).toEqual(["a", "b"]);
+    dropHeldOnKill(h.held, "c-me", async () => { throw new Error("不该再调"); });
   });
 });

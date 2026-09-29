@@ -53,13 +53,13 @@ async function handleWall(req: Request, path: string): Promise<Response> {
     return apiJson(200, { ok: true, cleared: wall.clear() });
   }
   if (req.method !== "GET") return apiJson(405, { ok: false, error: "method not allowed" });
-  const { active, wall: w, queued } = wall.snapshot();
+  const { active, wall: w, queued, queuedHuman } = wall.snapshot();
   const credits = active ? ((await (await import("../quota-service.js")).quotaService()?.claudeWall(false))?.credits ?? null) : null; // 只读快照，不触发查询
   return apiJson(200, {
-    ok: true, active, queued, credits,
+    ok: true, active, queued, queuedHuman, credits,
     wall: w && {
       kind: w.kind, enteredAt: w.enteredAt, resetsAt: w.resetsAt, resetsText: w.resetsText, agents: Object.values(w.hits).map((h) => h.agent),
-      exit: w.exit ?? null, recovering: !!w.exit && w.recovery?.step !== "done",
+      probeDown: !!w.probeDown, exit: w.exit ?? null, recovering: !!w.exit && w.recovery?.step !== "done",
     },
   });
 }

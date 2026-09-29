@@ -53,6 +53,8 @@ export interface Wall {
   hits: Record<string, WallAgentHit>;
   notifiedAt?: number;
   lastProbeAt?: number;
+  /** 上一次到点探用量没探成（关着 / 凭据失败 / 退避中）：闸只能等回显、到点或人点「已恢复」，横幅和通知据此提醒 */
+  probeDown?: boolean;
   exit?: { at: number; via: WallExitVia };
   recovery?: WallRecovery;
   recoveredNotifiedAt?: number;
@@ -261,14 +263,15 @@ export function exitVia(w: Wall, sig: ExitSignals): WallExitVia | null {
 
 /**
  * 缓存说撞墙的那个窗口下来了。按窗口看：周墙只看 7d、session 墙只看 5h，另一个窗口滚动不算；那个窗口读不到（null）= 不知道。
- * 周墙只认周重置时刻前进：写入脚本允许带 five_hour 的写者把 7d 往下写，「见过满后来降了」对周不可信。unknown 墙看闸里见过满的窗口。
+ * 两种墙都只认那个窗口的重置时刻前进、且百分比已经 <100：旧会话的写者会把上一周期的低百分比写回来，「见过满后来降了」不可信。
+ * unknown 墙看闸里见过满的窗口。
  */
 function cacheSaysBelow(kind: WallKind, c: UsageSignal, k: WallCacheSeen): boolean {
   const week = kind === "weekly" || k.fullWeek;
   const session = kind === "session" || k.fullSession;
   if (!week && !session) return false;
   if (week && !(c.weekPct !== null && c.weekPct < 100 && k.rolledWeek)) return false;
-  return !session || (c.sessionPct !== null && c.sessionPct < 100 && (k.fullSession || k.rolledSession));
+  return !session || (c.sessionPct !== null && c.sessionPct < 100 && k.rolledSession);
 }
 
 export function markExit(s: WallState, via: WallExitVia, now: number): WallState {
@@ -285,7 +288,9 @@ export const notifyDue = (w: Wall, now: number): boolean => !w.exit && w.notifie
 
 /** 出闸时要续跑谁：名单里、队里没有待投给它的消息（补投的消息自会叫醒它）、此刻主回合不在跑（菜单关掉后自己接着跑了的不打扰） */
 export function resumeTargets(w: Wall, hasQueued: (channelId: string) => boolean): string[] {
-  const done = new Set(w.recovery?.resumed ?? []);
+  // 续跑过、押着续跑消息、出闸那一刻在跑的都算处理过：恢复做到一半重启后再走一遍，会给同一个 agent 再押一条续跑、多跑一轮
+  const r = w.recovery;
+  const done = new Set([...(r?.resumed ?? []), ...(r?.held ?? []), ...(r?.running ?? [])]);
   return Object.entries(w.hits)
     .filter(([cid, h]) => !done.has(h.agent) && !hasQueued(cid))
     .sort((a, b) => a[1].at - b[1].at)
