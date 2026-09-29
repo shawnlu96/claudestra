@@ -76,6 +76,23 @@ const COLLAB_WORDS: Record<string, string> = {
   "已交付": "delivered",
   "别的实例": "other instance",
   "作者未知": "author unknown",
+  "待你处理": "For you",
+  "在等": "Waiting on",
+  "进行中": "Active",
+  "全部": "All",
+  "可执行": "Ready",
+  "团队": "Team",
+  "没有": "None",
+  "大纲": "Outline",
+  "未派": "Unassigned",
+  "两端": "Ends",
+  "因果线": "Causality",
+  "周额度": "Weekly quota",
+  "已成立": "Met",
+  "判定中": "Judging",
+  "还没到": "Not yet",
+  "各阶段": "By stage",
+  "成员": "Members",
 };
 
 export function useCollabT(): Tr {
