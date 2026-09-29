@@ -13,7 +13,6 @@ import {
   type Cut, type CutCause, type CutEvent, type CutTool, type ReplyState, type TurnTrigger,
 } from "../lib/turn-cuts.js";
 import { emitEvent, inflightTools, subscribeEvents } from "./event-bus.js";
-import { forgetCodexTurns, noteCodexSent } from "../lib/codex-turn-book.js";
 import { HELD_GIVE_UP_MS } from "./held-queue.js";
 import { PersistedMap } from "./persisted-map.js";
 import { newMessageId, newThreadId, type Envelope, type LocalEndpoint } from "./router.js";
@@ -89,7 +88,6 @@ export class TurnCuts {
   noteDelivered(env: Envelope, channelId: string, typed = false, busy = true): void {
     const at = this.now();
     this.deliveredAt.set(channelId, at);
-    noteCodexSent(channelId, env.meta.messageId); // Codex 原生回合账：上次确认空闲之后投了哪些（lib/codex-turn-book.ts）
     const cut = this.cuts.get(channelId);
     if (cut && cut.byMessageId === env.meta.messageId && cut.deliveredAt === undefined) this.cuts.set(channelId, { ...cut, deliveredAt: at });
     if (isCutNotice(env)) return void this.noticePending.delete(channelId);
@@ -110,7 +108,7 @@ export class TurnCuts {
     return t && { ...t, agent: this.agentOf.get(channelId) };
   }
 
-  /** 这条其实没投进去（Codex 投递失败）：从送达记录里拿掉（回合在不在跑不在这里判，见 lib/codex-turn-book.ts） */
+  /** 这条其实没投进去（Codex 投递失败）：从送达记录里拿掉。回合在不在跑不在这里判（bridge/pi-abort.ts onCodexUndelivered 不替它宣告完成） */
   dropUndelivered(channelId: string, messageId: string): void {
     this.inbound.set(channelId, (this.inbound.get(channelId) ?? []).filter((x) => x.messageId !== messageId));
   }
@@ -146,7 +144,6 @@ export class TurnCuts {
     for (const m of [this.cuts, this.stops, this.inbound, this.agentOf, this.codexQueued, this.deliveredAt, this.keySentAt]) m.delete(channelId);
     for (const s of [this.noticePending, this.codexTypeIn, this.codexPaused, this.codexCutSinceStop]) s.delete(channelId);
     for (const k of [...this.replies.keys()]) if (k.startsWith(`${channelId}\n`)) this.replies.delete(k);
-    forgetCodexTurns(channelId);
   }
 
   /** owner 最近一次叫停这个频道的时刻（解除了也还在）：押在它之前、之后才投出去的消息要加抬头（bridge/held-flush.ts） */

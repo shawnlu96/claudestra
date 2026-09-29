@@ -2194,7 +2194,7 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
     }
 
     case "abort_ack": onAbortAck(msg, ws); break; // Pi 扩展的中止回执（只认这个频道当前的连接）
-    case "codex_undelivered": void onCodexUndelivered(msg, ws, clients.get(msg.channelId)?.ws === ws, { stopTyping, clearSafetyTimer }); break; // 只了结没投进 Codex 的这一条
+    case "codex_undelivered": void onCodexUndelivered(msg, ws, clients.get(msg.channelId)?.ws === ws); break; // 只了结没投进 Codex 的这一条，不替它宣告完成
     case "codex_typein_failed": if (clients.get(msg.channelId)?.ws === ws) turnCuts.rearmAfterInterrupt(msg.channelId); break; // 退回了 queue:下一条再打字
     case "forward_to_agent": ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, ...(await handleForward(ws, msg)) })); break;
     case "fleet_state": case "fleet_run": ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, ...(await (await import("./bridge/fleet/ws.js")).handleFleetWs(msg, ws)) })); break;

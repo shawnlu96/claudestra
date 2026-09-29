@@ -19,7 +19,6 @@ import { tmuxCapture, windowTarget } from "../lib/tmux-helper.js";
 import { parseAuqPane } from "../lib/auq-pane.js";
 import { countNewlinesBefore, progressNoteOf } from "../lib/session-history.js";
 import { splitChunkLines } from "../lib/jsonl-lines.js";
-import { attachCodexTurns, noteCodexTurnLine } from "../lib/codex-turn-book.js";
 import { transcriptUserEvent } from "../lib/turn-cuts.js";
 // v2.6.0+ 旁路事件埋点（设计 D1：只 emit 不改渲染管线）
 import { emitEvent, getAgentStatus, isPostTurnActivity } from "./event-bus.js";
@@ -367,8 +366,7 @@ async function processNewData(state: WatcherState, discord: Client): Promise<voi
     state.lineNo = chunk.next;
     for (const { seq, line } of chunk.lines) {
       try {
-        // runtime 感知：Pi / Codex 的行在这里翻译成 Claude Code 形状，下面的解析逻辑一行都不用改；Codex 的原生回合边界另记一本（lib/codex-turn-book.ts）
-        noteCodexTurnLine(state.runtime, state.channelId, line, state);
+        // runtime 感知：Pi / Codex 的行在这里翻译成 Claude Code 形状，下面的解析逻辑一行都不用改
         const entry = translateSessionLine(state.runtime, line, state);
         if (!entry) continue;
 
@@ -760,7 +758,6 @@ export async function startWatching(
     pollInterval: null,
     rateLimited: false,
   };
-  attachCodexTurns(runtime, channelId, sessionId, state); // 新一代从 EOF 读：Codex 原生回合账先算拿不准（lib/codex-turn-book.ts）
 
   // fs.watch 主监听
   state.watcher = watch(jsonlPath, (eventType) => {
