@@ -2063,7 +2063,7 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
     });
   }
 
-  public endTurn(interrupted?: boolean, bgPending?: boolean) {
+  public endTurn(interrupted?: boolean, bgPending?: boolean, preempted?: boolean) {
     this.flushPendingText(); // 定稿前落掉缓冲文本
     this.produce((s) => {
       s.telemetry = null;
@@ -2080,7 +2080,7 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
         // 定稿 + 完成/打断标记(owner 2026-07-14):气泡底部绿色「✓ 完成」或
         // 琥珀「⊘ 已打断」行;仅直播回合,历史消息不带(历史有中断系统线)
         if (m.streamed) {
-          if (interrupted) m.turnInterrupted = true;
+          if (interrupted) { m.turnInterrupted = true; m.turnPreempted = preempted; }
           // v2.20.2+ 回合结束但后台任务还在跑 → 「后台继续中」,不标绿勾
           // (owner 实报「长任务经常提前变成完成」——完成跟的是回合边界)
           else if (bgPending) m.turnBgPending = true;
@@ -2097,7 +2097,7 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
       // - 手动「■ 停止」:末尾 user 是被打断回合的发起者(更早发出),线落它
       //   **后面**——一刀切跳过会把线错插到发起消息之前(2026-07-15 真机:
       //   发一句→按停止→补一句,线跑到第一句上面,timeline 错乱)。
-      // 两种 done(interrupt) 事件形状相同,用「末尾 user 的新鲜度」区分。
+      // 新旧 bridge 的 done(interrupt) 都靠末尾 user 的新鲜度定位，新 bridge 另带 cause 区分文案。
       if (interrupted && !marked) {
         let idx = s.messages.length;
         const tail = s.messages[idx - 1];
@@ -2108,7 +2108,7 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
         ) {
           idx--;
         }
-        s.messages.splice(idx, 0, { id: this.nextId(), role: "system", content: "已被用户中断", ts: new Date().toISOString() });
+        s.messages.splice(idx, 0, { id: this.nextId(), role: "system", content: preempted ? "新消息触发自动中断" : "回合已中断", ts: new Date().toISOString() });
       }
       s.streaming = false;
       s.awaitingChunk = false;

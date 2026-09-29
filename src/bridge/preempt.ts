@@ -137,7 +137,7 @@ export async function manualInterrupt(
   stopTyping(channelId);
   clearSafetyTimer(channelId);
   // 空闲时也发 done：前端误判忙时借此解锁
-  emitEvent({ agent, chatId: channelId, type: "agent_status", data: { status: "done", trigger: "interrupt", ...(by.peer ? { peer: by.peer } : {}) } });
+  emitEvent({ agent, chatId: channelId, type: "agent_status", data: { status: "done", trigger: "interrupt", cause: "manual", ...(by.peer ? { peer: by.peer } : {}) } });
   return { keys: r.keys };
 }
 

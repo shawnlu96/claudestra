@@ -133,7 +133,7 @@ export function translate(evt: BridgeEvent, lang: Lang, selfIds: ReadonlySet<str
   switch (evt.type) {
     case "agent_status":
       return d.status === "done"
-        ? { t: "done", ...(d.trigger === "interrupt" ? { interrupted: true } : {}), ...(d.bgPending ? { bgPending: true } : {}) }
+        ? { t: "done", ...(d.trigger === "interrupt" ? { interrupted: true, ...(d.cause === "preempt" ? { preempted: true } : {}) } : {}), ...(d.bgPending ? { bgPending: true } : {}) }
         : { t: "status", status: d.status === "compacting" ? "compacting" : "running" };
     case "tool_start":
       return {
