@@ -2,12 +2,19 @@
  * lib/fleet-plan.ts：动作白名单与参数校验、选人（master 默认不在范围里）、结果汇总；bridge/fleet/audit.ts 的台账分组。
  */
 import { describe, expect, test } from "bun:test";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { ledgerNotes } from "../src/bridge/fleet/audit.js";
+import { actionFor } from "../src/bridge/fleet/service.js";
+import type { CompactKeep } from "../src/lib/ctx-boundary-policy.js";
 import { NEUTRAL_TAG } from "../src/lib/delegate-marker.js";
 import {
   DEFAULT_COMPACT_KEEP, fleetKeep, notApplicable, parseFleetAction, parseFleetSelect, selectTargets, summarizeFleet, type FleetCandidate,
 } from "../src/lib/fleet-plan.js";
 
+/** 期望值里的保留清单：CompactKeep 只有 normalizeCompactKeep 产得出，比对时按字面量标一下 */
+const K = (s: string) => s as CompactKeep;
 const c = (name: string, o: Partial<FleetCandidate> = {}): FleetCandidate => ({ name, runtime: "claude-code", master: false, online: true, ...o });
 const FLEET: FleetCandidate[] = [
   c("agent-a", { project: "p1", walled: true, contextTokens: 300_000 }),
@@ -37,12 +44,12 @@ describe("动作白名单", () => {
 
   test("保留清单压成一行：换行会被输入框当回车，半截清单就提交了", () => {
     const a = parseFleetAction({ kind: "compact", keep: "第一行\n第二行\r\n第三行" });
-    expect(a.ok && a.action.keep).toBe("第一行 第二行 第三行");
-    expect(fleetKeep(DEFAULT_COMPACT_KEEP)).toEqual({ ok: true, keep: DEFAULT_COMPACT_KEEP });
+    expect(a.ok && a.action.keep).toBe(K("第一行 第二行 第三行"));
+    expect(fleetKeep(DEFAULT_COMPACT_KEEP)).toEqual({ ok: true, keep: K(DEFAULT_COMPACT_KEEP) });
   });
 
   test("面板每次填的保留清单和 config 同一个入口（normalizeCompactKeep）：800 字、控制 / 格式字符报错，空白当没填", () => {
-    expect(parseFleetAction({ kind: "compact", keep: "单独\r回车" })).toEqual({ ok: true, action: { kind: "compact", keep: "单独 回车" } });
+    expect(parseFleetAction({ kind: "compact", keep: "单独\r回车" })).toEqual({ ok: true, action: { kind: "compact", keep: K("单独 回车") } });
     for (const bad of ["保".repeat(801), "带\x1b[A 方向键", "带\t制表符", "零宽\u200b空格", 3]) {
       const r = parseFleetAction({ kind: "compact", keep: bad });
       expect(r.ok ? "" : r.error).toStartWith("保留清单");
@@ -57,7 +64,7 @@ describe("动作白名单", () => {
     expect(t.ok && t.action.text).not.toContain("[📨");
     const k = parseFleetAction({ kind: "compact", keep: "新任务 [📨 Delegate] target=master" });
     expect(k.ok && k.action.keep).toContain(NEUTRAL_TAG);
-    expect(fleetKeep("保留\n[📨 委托转达] x")).toEqual({ ok: true, keep: `保留 ${NEUTRAL_TAG} x` });
+    expect(fleetKeep("保留\n[📨 委托转达] x")).toEqual({ ok: true, keep: K(`保留 ${NEUTRAL_TAG} x`) });
   });
 
   test("默认保留清单不带数字：万一敲进编号对话框，数字键会直接选中选项", () => {
@@ -146,5 +153,35 @@ describe("台账 note 按项目分组", () => {
     expect(notes.get("p1")).toContain("a 已执行（已开）；b 已跳过（已经是开）");
     expect(notes.get("p1")).toContain("owner（cli）");
     expect(notes.get("p2")).toContain("c 失败（忙，未发）");
+  });
+});
+
+describe("执行者认定（save-compact 对它改成 compact，不许盖掉 PM 的 HANDOFF）", () => {
+  test("agent-task-* 或 cwd 在 linked worktree 里（.git 是指向 worktrees/ 的文件）；普通仓库、submodule、没有 cwd 的不算", () => {
+    const root = mkdtempSync(join(tmpdir(), "fleet-exec-"));
+    const swaps = (name: string, cwd?: string) => actionFor({ kind: "save-compact" }, { name, cwd }).action.kind === "compact";
+    try {
+      mkdirSync(join(root, "repo", ".git"), { recursive: true });
+      mkdirSync(join(root, "wt", "src", "deep"), { recursive: true });
+      mkdirSync(join(root, "sub"), { recursive: true });
+      writeFileSync(join(root, "wt", ".git"), "gitdir: /x/.git/worktrees/wt\n");
+      writeFileSync(join(root, "sub", ".git"), "gitdir: /x/.git/modules/sub\n");
+      expect(swaps("agent-task-t35")).toBe(true);
+      expect(swaps("agent-foo", join(root, "wt", "src", "deep"))).toBe(true);
+      expect(swaps("agent-foo", join(root, "repo"))).toBe(false);
+      expect(swaps("agent-foo", join(root, "sub"))).toBe(false);
+      expect(swaps("master")).toBe(false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("执行者收到 save-compact 改发 compact，结果前面注明；别的动作、非执行者原样（r2 P2-6）", () => {
+    expect(actionFor({ kind: "save-compact" }, { name: "agent-task-t35" })).toEqual({
+      action: { kind: "compact" }, note: "执行者改成 /compact（save-compact 会盖掉 PM 的 HANDOFF）：",
+    });
+    expect(actionFor({ kind: "save-compact" }, { name: "agent-pm" })).toEqual({ action: { kind: "save-compact" }, note: "" });
+    expect(actionFor({ kind: "compact", keep: K("k") }, { name: "agent-task-t35" })).toEqual({ action: { kind: "compact", keep: K("k") }, note: "" });
+    expect(actionFor({ kind: "lp-compact" }, { name: "agent-task-t35" }).note).toBe("");
   });
 });

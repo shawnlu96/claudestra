@@ -1,12 +1,12 @@
 /**
  * 批量管理的发键执行器：一个 agent 一个动作，每一步发完都重抓画面复核，结果归成 已执行 / 已排队 / 已跳过 / 失败。
  * 发键只经注入的 PaneIO（生产实现在 service.ts，全走 tmux-helper），判态全在 lib/lp-state.ts；这里只排步骤。
- * 压缩（compact / save-compact / 开 LP 再压缩的最后一步）交给 T36 的 injectCompact，和自动压缩、手动按钮同一套闸门与 15 分钟守卫。
+ * 压缩（compact / save-compact / 开 LP 再压缩的最后一步）交给 T36 的 injectCompact，和自动压缩、手动按钮同一套闸门、15 分钟守卫与长短档。
  * 安全边界：画面上有任何菜单 / 对话框一个键都不按（含 Esc）；输入框里有别人的字就不动、绝不清；
  * 发键前隔一小段再抓一次屏，两次都过才发，按键只看这两帧；Esc 只在两帧都确认有回合在跑时才按（空闲时按两下会弹 Rewind）。
  * 用例见 tests/fleet-runner.test.ts。
  */
-import type { CompactAction } from "../../lib/ctx-boundary-policy.js";
+import type { CompactAction, CompactKeep } from "../../lib/ctx-boundary-policy.js";
 import { ccOnly, type FleetAction, type FleetResult } from "../../lib/fleet-plan.js";
 import { decideLp, lastLpEcho, readLpPane, stripAnsi, type LpRead } from "../../lib/lp-state.js";
 import type { InjectResult } from "../ctx-boundary-inject.js";
@@ -26,10 +26,11 @@ export interface PaneIO {
 export type TextOutcome = { ok: true; queued: boolean } | { ok: false; error: string };
 export interface RunCtx {
   io: PaneIO;
-  keep: string;
+  /** null：默认清单也不合格（单测保证走不到），交给 injectCompact 退到它自己的默认档 */
+  keep: CompactKeep | null;
   deliverText: (agent: string, text: string) => Promise<TextOutcome>;
-  /** 生产是 injectCompact(await injectTargetFor(agent), { action, keep })：画面判定、守卫、执行者不跑 save-compact 都在它里面 */
-  compact: (agent: string, action: CompactAction, keep: string) => Promise<InjectResult>;
+  /** 生产是 injectCompact(await injectTargetFor(agent), { action, keep })：画面判定、守卫、按窗口大小挑长短档都在它里面 */
+  compact: (agent: string, action: CompactAction, keep: CompactKeep | null) => Promise<InjectResult>;
   /** 15 分钟注入守卫还在不在（compactInjectedRecently） */
   compactedRecently: (agent: string) => Promise<boolean>;
 }
@@ -120,25 +121,26 @@ function slashBlock(r: LpRead): Step | null {
   return null;
 }
 
-const EXECUTOR_NOTE = "执行者改成 /compact（save-compact 会盖掉 PM 的 HANDOFF）：";
-
-/** injectCompact 没敲 / 没提交：正在压缩、15 分钟内刚压过算跳过（不用做），其余被挡算失败（想做没做成）；字还留在输入框里的写明 */
+/**
+ * injectCompact 没敲 / 没提交：正在压缩、15 分钟内刚压过算跳过（不用做），窗口小到连 /compact 都放不下也算跳过（它的说明里写了拉大窗口）；
+ * 其余被挡算失败（想做没做成）；字还留在输入框里的写明
+ */
 function notInjected(r: Extract<InjectResult, { status: "skipped" | "failed" }>): Step {
   if (r.status === "failed") return failed(r.leftover && !/留在输入框/.test(r.error) ? `${r.error}；敲进去的字（或其中一段）还留在输入框里，请看一眼` : r.error);
-  return r.reason === "compacting" || r.reason === "recent" ? skipped(r.text) : failed(`${r.text}，没发`);
+  return r.reason === "compacting" || r.reason === "recent" || r.reason === "window-small" ? skipped(r.text) : failed(`${r.text}，没发`);
 }
 
 /**
  * 压缩交给 injectCompact；它说已执行之后，这边再等压缩真的开始：回合 spinner（low-priority 下会先显示「Working at lower priority」），
  * 或这次新命令下面出现 Compacting / 太短 / 不认识。只认发之后多出来的那条命令行，scrollback 里更早的不算
  */
-async function compact(ctx: RunCtx, agent: string, win: string, action: CompactAction, keep: string): Promise<Step> {
+async function compact(ctx: RunCtx, agent: string, win: string, action: CompactAction, keep: CompactKeep | null): Promise<Step> {
   const { block, x: x0 } = await gateTwice(ctx.io, win, slashBlock);
   if (block) return block;
   const r = await ctx.compact(agent, action, keep);
   if (r.status === "skipped" || r.status === "failed") return notInjected(r);
   const name = r.line.split(" ")[0]!;
-  const note = action === "save-compact" && name === "/compact" ? EXECUTOR_NOTE : "";
+  const note = r.note ? `${r.note}；` : ""; // 窗口放不下自定清单、退了档：写明敲的是哪一档
   if (r.status === "queued") return { outcome: "queued", detail: `${note}忙，已排队，回合结束后执行` };
   const before = cmdCount(x0.raw, name);
   const echo = (x: Frame) => (cmdCount(x.raw, name) > before ? afterCommand(x.raw, name) : "");
@@ -184,7 +186,7 @@ async function clearOwnEcho(io: PaneIO, win: string): Promise<Step | null> {
  * 这次确实把 LP 打开了：压缩不用做（对话太短 / 正在压缩）算已执行；被人的字、排队消息、对话框挡住算失败（活没干完，要人看），
  * 和单独压缩同一口径；detail 都以「LP 已开」开头，看得出 LP 那步成了
  */
-async function lpThenCompact(ctx: RunCtx, agent: string, win: string, keep: string): Promise<Step> {
+async function lpThenCompact(ctx: RunCtx, agent: string, win: string, keep: CompactKeep | null): Promise<Step> {
   const io = ctx.io;
   const before = (await read(io, win)).r;
   if (before.lowPriority !== "on") {

@@ -2,15 +2,17 @@
  * 批量管理的服务层：收候选（registry + 大总管）、刷新 LP 状态、选人、并发跑、留痕。
  * HTTP（routes.ts）和 CLI 的 ws 请求（ws.ts）都只调 runFleet / fleetState，权限在它们各自入口判。
  * 生产 PaneIO 全走 tmux-helper：抓屏 capture-pane -p -e，打字 / 退格走 tmuxRawStrict（失败要抛），Esc 走 tmuxSendEscape 的双击护栏。
- * 压缩走 T36 的 injectCompact（ctx-boundary.ts）：执行者的 save-compact 在那里改成 compact，这里不再另判。
+ * 压缩走 T36 的 injectCompact（ctx-boundary.ts）；执行者的 save-compact 由 actionFor 先改成 compact，认法和它是同一份。
  */
 import type { ServerWebSocket } from "bun";
 import { computeAgentStats } from "../../lib/agent-stats.js";
 import { readConfigSync } from "../../lib/config-store.js";
+import { effectiveAction, isExecutor, type CompactKeep } from "../../lib/ctx-boundary-policy.js";
 import {
   bareName, DEFAULT_COMPACT_KEEP, fleetKeep, notApplicable, selectTargets, summarizeFleet,
   type Excluded, type FleetAction, type FleetCandidate, type FleetResult, type FleetSelect,
 } from "../../lib/fleet-plan.js";
+import { isLinkedWorktree } from "../../lib/linked-worktree.js";
 import { agentRuntime, readRegistryAgents } from "../../lib/registry.js";
 import { ensurePaneInteractive, tmuxRawStrict, tmuxSendEscape } from "../../lib/tmux-helper.js";
 import { compactInjectedRecently, injectCompact, injectTargetFor } from "../ctx-boundary.js";
@@ -49,9 +51,13 @@ const tmuxPaneIO: PaneIO = {
   sleep: (ms) => Bun.sleep(ms),
 };
 
-function compactKeep(): string {
-  const k = fleetKeep(readConfigSync().fleet?.compactKeep);
-  return k.ok ? k.keep : DEFAULT_COMPACT_KEEP;
+/** config 里的合格就用它，否则用默认清单；默认清单也不合格（单测保证走不到）给 null，injectCompact 退到它自己的默认档 */
+function compactKeep(): CompactKeep | null {
+  for (const v of [readConfigSync().fleet?.compactKeep, DEFAULT_COMPACT_KEEP]) {
+    const k = fleetKeep(v);
+    if (k.ok) return k.keep;
+  }
+  return null;
 }
 
 type Cand = FleetCandidate & { channelId?: string; cwd?: string };
@@ -84,7 +90,7 @@ export async function fleetState(): Promise<{ agents: (Cand & { lp?: LpSnapshot 
   const list = await candidates();
   const lp = await refreshLp(list.filter((c) => c.runtime === "claude-code" && c.online));
   const agents = (await withContext(list)).map((c) => ({ ...withLp(c, lp), lp: lp.get(bareName(c.name)) }));
-  return { agents, compactKeep: compactKeep() };
+  return { agents, compactKeep: compactKeep() ?? DEFAULT_COMPACT_KEEP };
 }
 
 export interface FleetRunRequest { action: FleetAction; select: FleetSelect; dryRun?: boolean; actor: string; via: string }
@@ -100,10 +106,23 @@ export interface FleetRunReport {
 
 const CONCURRENCY = 4;
 
+/**
+ * 对这个目标实际要跑的动作：执行者的 save-compact 改成 compact，note 是结果前面要加的说明（没改是空串）。
+ * 执行者的认定和换法用上下文边界那一份（lib/ctx-boundary-policy.ts isExecutor / effectiveAction + lib/linked-worktree.ts），两边不会分叉
+ */
+export function actionFor(action: FleetAction, t: Pick<Cand, "name" | "cwd">): { action: FleetAction; note: string } {
+  if (action.kind !== "save-compact") return { action, note: "" };
+  const executor = isExecutor({ name: t.name, worktree: isLinkedWorktree(t.cwd) });
+  if (effectiveAction(executor, "save-compact") === "save-compact") return { action, note: "" };
+  return { action: { kind: "compact" }, note: "执行者改成 /compact（save-compact 会盖掉 PM 的 HANDOFF）：" };
+}
+
 async function runTarget(req: FleetRunRequest, t: Cand, ctx: RunCtx): Promise<FleetResult> {
   const na = notApplicable(req.action, t);
   if (na) return { agent: t.name, outcome: "skipped", detail: na }; // 离线 / 运行时不支持：没发键，算跳过（「全部」里常有停掉的旧条目）
-  return runOne(req.action, t.name, t.runtime === "claude-code" ? lpWindowOf(t.name) : null, ctx);
+  const { action, note } = actionFor(req.action, t);
+  const r = await runOne(action, t.name, t.runtime === "claude-code" ? lpWindowOf(t.name) : null, ctx);
+  return note ? { ...r, detail: note + r.detail } : r;
 }
 
 async function pool<T, R>(items: T[], n: number, fn: (t: T) => Promise<R>): Promise<R[]> {

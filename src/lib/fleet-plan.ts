@@ -3,7 +3,7 @@
  * 大总管默认不在批量范围里：只有 includeMaster 或在 agents 里点名 master 才算「单独勾选」。
  * 用例见 tests/fleet-plan.test.ts。
  */
-import { normalizeCompactKeep, type CompactKeep } from "./ctx-boundary-policy.js";
+import { normalizeCompactKeep, type CompactKeep, type CompactKeepResult } from "./ctx-boundary-policy.js";
 import { neutralizeDelegateMarker } from "./delegate-marker.js";
 import type { LpMode } from "./lp-state.js";
 
@@ -12,8 +12,8 @@ export const FLEET_ACTIONS: readonly FleetActionKind[] = ["lp-on", "lp-off", "co
 
 export interface FleetAction {
   kind: FleetActionKind;
-  /** compact / lp-compact 的保留清单；缺省用 compactKeep() */
-  keep?: string;
+  /** compact / lp-compact 的保留清单（只有 fleetKeep 产得出）；缺省用 compactKeep() */
+  keep?: CompactKeep;
   /** text 动作的正文（走 deliver，带来源头） */
   text?: string;
 }
@@ -42,7 +42,7 @@ const clean = (s: string) => neutralizeDelegateMarker(s);
  * 要敲进输入框的保留清单：中和委托标记后走上下文边界同一个入口 normalizeCompactKeep（换行换成空格、800 字、不带控制 / 格式字符）。
  * 敲进去是 injectCompact 的事（/compact + 这一行）；换行等于回车、ESC 会被 TUI 当成按键，所以这道闸不能省
  */
-export function fleetKeep(raw: unknown): CompactKeep {
+export function fleetKeep(raw: unknown): CompactKeepResult {
   return normalizeCompactKeep(typeof raw === "string" ? clean(raw) : raw);
 }
 

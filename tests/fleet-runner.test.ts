@@ -8,6 +8,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { injectCompact, liveInjectDeps, resetInjectState, type InjectDeps } from "../src/bridge/ctx-boundary-inject.js";
 import { runOne, type PaneIO, type RunCtx } from "../src/bridge/fleet/runner.js";
+import type { CompactKeep } from "../src/lib/ctx-boundary-policy.js";
 import type { FleetAction } from "../src/lib/fleet-plan.js";
 import { stripAnsi } from "../src/lib/lp-state.js";
 
@@ -54,11 +55,13 @@ function fakeIO(frames: (string | string[])[]) {
 }
 
 type Fake = { io: PaneIO; deps: InjectDeps };
+/** CompactKeep 只有 normalizeCompactKeep 产得出：测试里的字面量按它标一下 */
+const K = (s: string) => s as CompactKeep;
 function ctxOf(f: Fake, text: RunCtx["deliverText"] = async () => ({ ok: true, queued: false }), over: Partial<RunCtx> = {}): RunCtx {
   const target = (agent: string) => ({ name: agent, target: `master:=${agent}`, executor: agent.startsWith("agent-task-") });
   return {
     io: f.io,
-    keep: "保留测试",
+    keep: K("保留测试"),
     deliverText: text,
     compact: (agent, action, keep) => injectCompact(target(agent), { action, keep }, f.deps),
     compactedRecently: async () => false,
@@ -291,7 +294,7 @@ describe("可见区里有一段像输入框的文字（adv1 P0-1）：底部的�
         expect(raw).toContain("▔");
         expect(raw).toContain(box[1]!);
         for (const kind of ["compact", "save-compact", "lp-on", "lp-compact"] as const) {
-          const r = await run({ kind, keep: "保留 T35 的进度 3" }, [raw]);
+          const r = await run({ kind, keep: K("保留 T35 的进度 3") }, [raw]);
           expect([kind, r.outcome, r.keys]).toEqual([kind, "failed", []]);
         }
       });
@@ -396,12 +399,29 @@ test("scrollback 里更早那条 /compact 的「Compacted」不能冒充这次�
   expect(r).toMatchObject({ outcome: "failed", detail: "发了 /compact，10 秒内没看到开始，需要人工看" });
 });
 
-describe("压缩走 T36 的 injectCompact：执行者、15 分钟守卫、字留在输入框", () => {
+describe("压缩走 T36 的 injectCompact：执行者、15 分钟守卫、长短档、字留在输入框", () => {
   const idle = fx("lp-on-interrupted");
 
-  test("执行者的 save-compact 在 injectCompact 里改成带清单的 /compact，结果前面注明", async () => {
+  test("执行者的 save-compact 漏到这里也不会发：injectCompact 兜底改成带清单的 /compact（说明由 service 的 actionFor 加，见 fleet-plan.test.ts）", async () => {
     const r = await run({ kind: "save-compact" }, [idle, typed(KEEP_LINE), fx("compacting")], undefined, "agent-task-x");
-    expect(r).toMatchObject({ outcome: "done", detail: "执行者改成 /compact（save-compact 会盖掉 PM 的 HANDOFF）：已开始压缩", keys: ["type:/compact", "enter"] });
+    expect(r).toMatchObject({ outcome: "done", detail: "已开始压缩", keys: ["type:/compact", "enter"] });
+  });
+
+  test("窗口小到连 /compact 都放不下 → 跳过，一个键都不按，说明里写了拉大窗口", async () => {
+    const f = fakeIO([idle]);
+    const cap = f.deps.capture;
+    f.deps.capture = async (t) => ({ ...(await cap(t))!, size: { width: 8, height: 3 } });
+    const r = await runOne({ kind: "compact" }, "agent-x", "master:=agent-x", ctxOf(f));
+    expect(r).toMatchObject({ outcome: "skipped", detail: "窗口 8×3太小，连 /compact 都放不下，已跳过（把窗口拉大就行）" });
+    expect(f.keys).toEqual([]);
+  });
+
+  test("injectCompact 退了档（窗口放不下自定清单）：结果前面写明敲的是哪一档", async () => {
+    const note = "窗口 60×10 放不下自定保留清单，退到默认保留清单";
+    const r = await run({ kind: "compact" }, [[idle, idle, fx("compacting")]], undefined, "agent-x", {
+      compact: async () => ({ status: "executed", line: "/compact 默认清单", note }),
+    });
+    expect(r).toMatchObject({ outcome: "done", detail: `${note}；已开始压缩`, keys: [] });
   });
 
   test("不是执行者：照发 /save-compact", async () => {
