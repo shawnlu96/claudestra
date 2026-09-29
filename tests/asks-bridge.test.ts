@@ -20,6 +20,7 @@ import type { RegistryAgent } from "../src/lib/registry.js";
 import { unwrapChannelMessage } from "../src/lib/session-history.js";
 import { at, guest, LEGACY_STAR_TOKEN, owner, ownerWithMaster, PEER } from "./asks-test-kit.js";
 import { tempLedgerPath } from "./ledger-test-helpers.js";
+import { turnCuts } from "../src/bridge/turn-cuts.js";
 
 
 const ws = { tag: "ws" } as never;
@@ -113,6 +114,18 @@ describe("作答 → 答复不抢占", () => {
     const after = getAsk(openLedger(path), a.id)!;
     expect(after).toMatchObject({ state: "answered", outboxMessageId: env.meta.messageId, answer: { via: "web_chat", choices: ["[button:go]"] } });
     expect(listEvents(openLedger(path), { project: "p" }).map((e) => e.kind)).toEqual(["ask", "decision"]);
+  });
+
+  test("owner 叫停后在卡片上作答也算又开口了：解除这个 agent 的「停」（wf2 classify-merge-9）", async () => {
+    turnCuts.record({ channelId: "111", agent: "agent-x", cause: "manual", tools: { inflight: [] } });
+    try {
+      await reply();
+      expect(turnCuts.interruptHold("111")).toBe("stopped");
+      await answerFromChat({ agent: "agent-x", text: "[button:go]", principal: owner() });
+      expect(turnCuts.interruptHold("111")).toBeNull();
+    } finally {
+      turnCuts.forget("111");
+    }
   });
 
   test("旧按钮再点：网页带了 askId → 409 ask_closed（提示是人话），不再投；没带 askId 不猜，照常当普通消息（不吞掉新按钮）", async () => {

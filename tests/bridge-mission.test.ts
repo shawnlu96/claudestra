@@ -15,6 +15,7 @@ import type { Envelope } from "../src/bridge/router.js";
 import { readRunLog } from "../src/lib/autopilot-log.js";
 import { AUTOPILOT_TIMING } from "../src/lib/autopilot-run.js";
 import { newMission, readMissions, updateMissions, type Mission } from "../src/lib/missions.js";
+import { turnCuts } from "../src/bridge/turn-cuts.js";
 
 const sent: Envelope[] = [];
 const path = join(mkdtempSync(join(tmpdir(), "bridge-mission-")), "missions.json");
@@ -182,6 +183,22 @@ describe("到点", () => {
     done();
     await until(() => sent.length === 1);
     expect(sent[0].content).toContain("Autopilot 已关闭");
+  });
+  test("到点时 owner 叫停中：不递收尾（不让它叫停后又写台账、发总结），只记一行日志（wf2 stop-semantics-7）", async () => {
+    turnCuts.record({ channelId: "ctl", agent: "master", cause: "manual", tools: { inflight: [] } });
+    try {
+      const m = await put({ until: new Date(Date.now() - 1000).toISOString() });
+      turnEnd();
+      await until(async () => (await cur()).status === "expired");
+      await settle();
+      expect(sent.length).toBe(0);
+      expect(readRunLog(m.id!).map((l) => l.reason)).toContain("到点已关闭（owner 叫停中，没有递收尾那句）");
+      done(); // 欠着的收尾也不补投
+      await settle();
+      expect(sent.length).toBe(0);
+    } finally {
+      turnCuts.forget("ctl");
+    }
   });
   test("不在进行中的不管", async () => {
     await put({ status: "done" });

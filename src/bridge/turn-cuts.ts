@@ -38,6 +38,8 @@ export interface RecordCutInput {
   tools: { inflight: CutTool[]; lastDone?: { name: string; summary: string } };
   /** 这次真的打断了回合（发出了键）；停字 / 停止按钮没发键时 false（只留档、压提醒） */
   interrupted?: boolean;
+  /** 「停」真正发生的时刻（终端里按的：会话记录那一行；停字：owner 开口那一刻）。不给 = 记下的这一刻 */
+  stopAt?: number;
 }
 
 export class TurnCuts {
@@ -47,6 +49,11 @@ export class TurnCuts {
    * 不跟着「最新一条 cut」走：外源消息的抢占会记一条新 cut 盖掉那条停，却不能替 owner 解除（wf2 stop-semantics-1）。落盘、不设期限
    */
   private readonly stops: PersistedMap<{ at: number; goAt?: number }>;
+  /**
+   * 频道 → owner 最近一次说「不是停」的话的时刻（终端输入按会话记录的时刻）。记「停」可能晚于 owner 再开口
+   * （终端打断要先查程序发键、停字要等收尾一拍）：那时带上 goAt，不然挂起卡到 owner 再说一句（wf2 stop-semantics-4）
+   */
+  private readonly ownerSpokeAt = new Map<string, number>();
   /** 频道 → 这一回合（上次 Stop / 打断之后）送到的消息，按先后；被打断时它们就是「在处理的」 */
   private readonly inbound = new Map<string, TurnTrigger[]>();
   private readonly agentOf = new Map<string, string>();
@@ -132,11 +139,17 @@ export class TurnCuts {
     this.replies.set(k, [...(this.replies.get(k) ?? []), this.now()].slice(-REPLY_KEEP));
   }
 
-  /** owner 的消息到达（抢占判断之前）：不是「停」就解除「已叫停」。外源（非 owner 的 API 用户）不调：他们不能替 owner 叫停或解除 */
-  noteHuman(channelId: string, isStop: boolean): void {
+  /**
+   * owner 开口（抢占判断之前 / 终端里敲字 / 答卡片）：不是「停」就解除「已叫停」——只解除在 at 之前的叫停（终端输入晚两秒才读到，
+   * 不能解开它之后才叫的停）。外源（非 owner 的 API 用户）不调：他们不能替 owner 叫停或解除。返回 at（停字拿它当「停」的时刻）
+   */
+  noteHuman(channelId: string, isStop: boolean, at = this.now()): number {
     this.prune(this.now()); // 不只在记新 cut 时清：很少被打断的实例，解除过的叫停记录也要按时清掉
+    if (isStop) return at;
+    this.ownerSpokeAt.set(channelId, Math.max(at, this.ownerSpokeAt.get(channelId) ?? 0));
     const s = this.stops.get(channelId);
-    if (!isStop && s && s.goAt === undefined) this.stops.set(channelId, { ...s, goAt: this.now() });
+    if (s && s.goAt === undefined && at >= s.at) this.stops.set(channelId, { ...s, goAt: at });
+    return at;
   }
 
   /**
@@ -144,7 +157,7 @@ export class TurnCuts {
    * 不删的话叫停记录一直留在盘上，日后复用这个频道的新 agent 还会被当成「owner 叫停了」，Autopilot 不推进。
    */
   forget(channelId: string): void {
-    for (const m of [this.cuts, this.stops, this.inbound, this.agentOf, this.codexQueued, this.deliveredAt, this.keySentAt]) m.delete(channelId);
+    for (const m of [this.cuts, this.stops, this.inbound, this.agentOf, this.codexQueued, this.deliveredAt, this.keySentAt, this.ownerSpokeAt]) m.delete(channelId);
     for (const s of [this.noticePending, this.codexTypeIn, this.codexPaused, this.codexCutSinceStop]) s.delete(channelId);
     for (const k of [...this.replies.keys()]) if (k.startsWith(`${channelId}\n`)) this.replies.delete(k);
   }
@@ -181,11 +194,17 @@ export class TurnCuts {
       chainable,
     );
     this.cuts.set(i.channelId, cut);
-    if (cut.state === "stopped") this.stops.set(i.channelId, { at }); // 「停」类只由 owner 记（停字认 owner、非 owner 的停止按钮不记）
+    if (cut.state === "stopped") this.stops.set(i.channelId, this.stopRec(i.channelId, i.stopAt ?? at)); // 「停」类只由 owner 记（停字认 owner、非 owner 的停止按钮不记）
     this.noticePending.delete(i.channelId);
     // 真打断了 Codex 才会卡 queue：停字没发出键（空闲 / 被拦）时下一条照常走 queue，不去打字
     if (i.runtime === "codex" && i.interrupted !== false) this.codexPaused.add(i.channelId), this.codexCutSinceStop.add(i.channelId);
     return cut;
+  }
+
+  /** 叫停记录：owner 在「停」之后已经又开过口（记得晚了），直接带上 goAt */
+  private stopRec(channelId: string, stopAt: number): { at: number; goAt?: number } {
+    const spoke = this.ownerSpokeAt.get(channelId);
+    return spoke !== undefined && spoke > stopAt ? { at: stopAt, goAt: spoke } : { at: stopAt };
   }
 
   /** 投递前调：Codex 上次 Stop 之后被打断过 → 这一条标 after_interrupt（只标一条：它打出的那一轮结束后队列就恢复了） */
@@ -233,16 +252,21 @@ export class TurnCuts {
     return this.noticePending.has(channelId) ? "notice" : null;
   }
 
-  /** 回合结束：该提醒就返回提醒的信封（押后队列投，只提醒一次），否则 null */
-  onStop(channelId: string, event: string, agent: string): Envelope | null {
+  /**
+   * 回合结束：该提醒就返回提醒的信封（押后队列投，只提醒一次），否则 null。
+   * afterAbort = 叫停发出中止之后 Pi / ACP 马上报的那次 Stop（bridge/pi-abort.ts stopAfterAbort）：是打断不是做完，
+   * 「这一回合送到了哪些」留给随后记的「停」（⏹ 抬头要列停之前送来的），也不按做完提醒续做（wf2 pi-4）
+   */
+  onStop(channelId: string, event: string, agent: string, afterAbort = false): Envelope | null {
     if (event === "Stop") {
       // 回合正常结束：Codex 的队列恢复了、排着的也会依次跑完（打断回报是 StopFailure，不算）；下一回合的消息从头记
       for (const m of [this.codexPaused, this.codexCutSinceStop]) m.delete(channelId);
-      this.codexQueued.delete(channelId), this.inbound.delete(channelId);
+      this.codexQueued.delete(channelId);
+      if (!afterAbort) this.inbound.delete(channelId);
     }
     const cut = this.cuts.get(channelId);
     if (!cut) return null;
-    const d = onStop(cut, event, this.now());
+    const d = onStop(cut, afterAbort ? "StopFailure" : event, this.now());
     if (d === "expire") this.cuts.set(channelId, { ...cut, state: "expired" });
     if (d !== "hint") return null;
     this.cuts.set(channelId, { ...cut, state: "hinted" });
@@ -296,7 +320,7 @@ export class TurnCuts {
     if (this.keySentWithin(e.chatId, at)) return;
     if (await this.programKeyNear(e.agent, at)) return;
     console.log(`⏹ ${e.agent} 在终端里被人打断（bridge 没发键）：记为叫停`);
-    this.record({ channelId: e.chatId, agent: e.agent, cause: "terminal", tools: inflightTools(e.agent) });
+    this.record({ channelId: e.chatId, agent: e.agent, cause: "terminal", tools: inflightTools(e.agent), stopAt: at });
     if ((this.deliveredAt.get(e.chatId) ?? 0) <= at) emitEvent({ agent: e.agent, chatId: e.chatId, type: "agent_status", data: { status: "done", trigger: "terminal_interrupt" } });
   }
 
@@ -309,7 +333,7 @@ export class TurnCuts {
   private async onTerminalInput(e: CutEvent & { chatId: string; agent: string }): Promise<void> {
     const at = Date.parse(String(e.data.ts ?? "")) || Date.parse(e.ts) || this.now();
     if (isProgramText(await this.programKeys(e.agent).catch(() => []), at, String(e.data.h ?? ""))) return; // 读不到就当人打的
-    this.noteHuman(e.chatId, e.data.stop === true);
+    this.noteHuman(e.chatId, e.data.stop === true, at);
   }
 
   /**

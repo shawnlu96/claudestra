@@ -433,3 +433,75 @@ describe("Workflow 复核 wf2（@2968ec7f）", () => {
     expect(b.interruptHold("ch")).toBeNull();
   });
 });
+
+describe("停之后马上开口（wf2 stop-semantics-4）", () => {
+  const interrupted = (at: number) => ({ type: "turn_interrupted", ts: iso(at + 2_000), data: { ts: iso(at) }, chatId: "ch", agent: "a" });
+  const typed = (at: number, stop = false) => ({ type: "terminal_input", ts: iso(at + 2_000), data: { stop, ts: iso(at) }, chatId: "ch", agent: "a" });
+  test("终端 Esc 的 cut 晚于随后的终端输入才记下：记停时直接带上解除，不卡到 owner 再说一句", async () => {
+    const t0 = T0;
+    // 查程序发键（tmux list-panes）负载高时要几百毫秒：这期间 owner 在终端里敲的新指令先处理完了
+    const slowKeys = async (): Promise<ProgramInput[]> => (await new Promise((r) => setTimeout(r, 20)), []);
+    const late = new TurnCuts(null, () => t0 + 3_000, slowKeys);
+    late.onEvent(interrupted(t0));
+    late.noteHuman("ch", false, t0 + 1_500);
+    await new Promise((r) => setTimeout(r, 40));
+    expect(late.get("ch")?.cause).toBe("terminal");
+    expect(late.interruptHold("ch")).toBeNull();
+    // 对照：没有再开口 → 停着
+    const { b } = book();
+    b.onEvent(interrupted(t0));
+    await flush();
+    expect(b.interruptHold("ch")).toBe("stopped");
+  });
+  test("停字收尾一拍里 owner 又发了别的：按停字到达的时刻比，解除", () => {
+    const { b, tick } = book();
+    const heard = b.noteHuman("ch", true);
+    tick(500);
+    b.noteHuman("ch", false); // 收尾一拍（1.2 秒）里 owner 又说了一句
+    tick(700);
+    b.record({ channelId: "ch", agent: "a", cause: "stopword", tools: { inflight: [] }, stopAt: heard });
+    expect(b.interruptHold("ch")).toBeNull();
+    expect(b.stoppedAt("ch")).toBe(heard);
+  });
+  test("「停」之前的终端输入晚读到，不能解开之后才叫的停", async () => {
+    const { b, at, tick } = book();
+    const typedAt = at();
+    tick(1_000);
+    b.noteHuman("ch", true);
+    b.record({ channelId: "ch", agent: "a", cause: "stopword", tools: { inflight: [] } });
+    tick(1_500);
+    b.onEvent(typed(typedAt));
+    await flush();
+    expect(b.interruptHold("ch")).toBe("stopped");
+  });
+});
+
+describe("叫停中止引起的 Stop（wf2 pi-4）", () => {
+  test("不清「这一回合送到了哪些」：随后记的停仍列出停之前 steer 进去的", () => {
+    const { b, tick } = book();
+    b.noteDelivered(env("m1", "部署 X"), "ch");
+    b.noteDelivered(env("m2", "顺便把 Y 也部署了"), "ch");
+    tick(1_000);
+    expect(b.onStop("ch", "Stop", "a", true)).toBeNull();
+    tick(1_200);
+    const cut = b.record({ channelId: "ch", agent: "a", runtime: "pi", cause: "stopword", byMessageId: "m3", tools: { inflight: [] } });
+    expect(cut.turnTrigger?.messageId).toBe("m1");
+    expect(stopHeadline(cut, "fired")).toContain("顺便把 Y 也部署了");
+  });
+  test("对照：正常 Stop 清掉，下一回合从头记", () => {
+    const { b } = book();
+    b.noteDelivered(env("m1", "部署 X"), "ch");
+    b.onStop("ch", "Stop", "a");
+    expect(b.record({ channelId: "ch", agent: "a", cause: "stopword", tools: { inflight: [] } }).turnTrigger).toBeUndefined();
+  });
+  test("插话回合被叫停中止：不按做完提醒续做", () => {
+    const { b, tick } = book();
+    b.noteDelivered(env("m1", "合并 T3"), "ch");
+    preempt(b, "m2");
+    tick(1_200);
+    b.noteDelivered(env("m2", "x"), "ch");
+    tick(5_000);
+    expect(b.onStop("ch", "Stop", "a", true)).toBeNull();
+    expect(b.onStop("ch", "Stop", "a")).not.toBeNull(); // 真正做完的那次照常提醒
+  });
+});
