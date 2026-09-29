@@ -29,6 +29,7 @@ import { isWriteInvocation } from "./write-commands.js";
 
 /** 认不出身份时读命令用的 actor：不是 registry 键、不在任何 PM 名单里，roleOf 恒为 null */
 export const UNKNOWN_ACTOR = "unknown";
+const SCHEDULER_SERVICE_COMMANDS = new Set(["scheduler-plan", "scheduler-settle", "scheduler-merge-begin", "scheduler-merge-step"]);
 
 const COMMANDS: Record<string, CommandSpec> = {
   ...WRITE_CMDS,
@@ -51,6 +52,9 @@ export function ledgerUsage(): string {
 /** 解析 → 执行 → 结果对象；不打印，测试直接断言返回值 */
 export async function runLedger(args: string[], deps: LedgerDeps): Promise<Result> {
   const sub = args[0] ?? "";
+  if (deps.actor === "scheduler" && !SCHEDULER_SERVICE_COMMANDS.has(sub)) {
+    return { ok: false, code: "forbidden", error: "调度服务身份只能运行调度专用命令" };
+  }
   const spec = COMMANDS[sub];
   if (!spec) return { ok: sub === "" || sub === "help", usage: ledgerUsage(), ...(sub && sub !== "help" ? { error: `未知子命令 ${sub}` } : {}) };
   const p = parseLedgerArgs(args, spec.valued, spec.bools);
@@ -69,7 +73,13 @@ export async function runLedger(args: string[], deps: LedgerDeps): Promise<Resul
  */
 async function realDeps(args: string[]): Promise<LedgerDeps | { error: string }> {
   const reg = await loadRegistry();
-  const who = resolveActor({ channelId: process.env.DISCORD_CHANNEL_ID, controlChannelId: repoEnvVar("CONTROL_CHANNEL_ID") }, reg.agents);
+  const service = process.env.CLAUDESTRA_SCHEDULER_SERVICE === "1";
+  if (service && process.env.DISCORD_CHANNEL_ID) return { error: "agent 频道不能冒用调度服务身份" };
+  if (service && !SCHEDULER_SERVICE_COMMANDS.has(args[0] ?? "")) {
+    return { error: "调度服务身份只能运行调度专用命令" };
+  }
+  const who = service ? { ok: true as const, actor: "scheduler" }
+    : resolveActor({ channelId: process.env.DISCORD_CHANNEL_ID, controlChannelId: repoEnvVar("CONTROL_CHANNEL_ID") }, reg.agents);
   if (!who.ok && isWriteInvocation("ledger", args)) return { error: who.error };
   const actor = who.ok ? who.actor : UNKNOWN_ACTOR;
   const projects = await readProjects();

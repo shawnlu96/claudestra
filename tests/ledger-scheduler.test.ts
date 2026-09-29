@@ -68,6 +68,25 @@ describe("T68 durable scheduler facts", () => {
     } finally { f.close(); }
   });
 
+  test("migration turns an existing dispatch file claim into a card lease", () => {
+    const f = fixture();
+    try {
+      const w = f.workflow("T1");
+      planIntent(f.db, f.owner, { id: "old-dispatch", taskId: "T1", taskRev: 1, workflowRev: w.rev,
+        causalSeq: f.seq(), node: "write", action: "dispatch", reason: "legacy", resources: ["task:t1", "src/bridge.ts"] });
+      f.db.exec(`CREATE TABLE legacy_resources (project TEXT NOT NULL, resource TEXT NOT NULL,
+        taskId TEXT NOT NULL REFERENCES tasks(id), intentId TEXT NOT NULL REFERENCES scheduler_intents(id),
+        acquiredAt INTEGER NOT NULL, PRIMARY KEY (project, resource));
+        INSERT INTO legacy_resources SELECT project, resource, taskId, intentId, acquiredAt FROM scheduler_resources;
+        DROP TABLE scheduler_resources;
+        ALTER TABLE legacy_resources RENAME TO scheduler_resources;`);
+      closeLedger(f.path);
+      const repaired = openLedger(f.path);
+      expect(repaired.query("SELECT resource, scope FROM scheduler_resources WHERE intentId = 'old-dispatch' ORDER BY resource").all())
+        .toEqual([{ resource: "src/bridge.ts", scope: "card" }, { resource: "task:t1", scope: "intent" }]);
+    } finally { f.close(); }
+  });
+
   test("decision, intent and resource claim are atomic; replay does not write another event", () => {
     const f = fixture();
     try {
@@ -86,6 +105,83 @@ describe("T68 durable scheduler facts", () => {
       expect(() => planIntent(f.db, f.owner, { ...input, id: "t68:T2:write:1", taskId: "T2", workflowRev: other.rev,
         causalSeq: f.seq(), recipient: "agent-two" })).toThrow(/T1 占用/);
       expect(getIntent(f.db, "t68:T2:write:1")).toBeNull();
+    } finally { f.close(); }
+  });
+
+  test("scheduler identity is narrow and PM decisions keep their real actor", () => {
+    const f = fixture();
+    try {
+      const a = f.workflow("T1"), b = f.workflow("T2");
+      planIntent(f.db, f.owner, { id: "manual:T1", taskId: "T1", taskRev: 1, workflowRev: a.rev,
+        causalSeq: f.seq(), node: "write", action: "dispatch", reason: "PM manual plan" });
+      expect(f.db.query("SELECT actor, json_extract(data, '$.manual') AS manual FROM events WHERE dedupKey = 'scheduler:manual:T1'").get())
+        .toEqual({ actor: "owner", manual: 1 });
+      planIntent(f.db, { actor: "scheduler" }, { id: "auto:T2", taskId: "T2", taskRev: 1, workflowRev: b.rev,
+        causalSeq: f.seq(), node: "write", action: "dispatch", reason: "automatic plan" });
+      expect(f.db.query("SELECT actor, json_extract(data, '$.manual') AS manual FROM events WHERE dedupKey = 'scheduler:auto:T2'").get())
+        .toEqual({ actor: "scheduler", manual: null });
+      expect(() => setWorkflow(f.db, { actor: "scheduler" }, { taskId: "T1", taskRev: 1, workflowRev: a.rev,
+        template: "code", templateVersion: 2, mode: "manual", authorFamily: "claude", fallback: "stop" })).toThrow(/只有项目 PM/);
+      settleIntent(f.db, { actor: "scheduler" }, { id: "auto:T2", from: "pending", to: "submitted" });
+      expect(f.db.query("SELECT actor FROM events WHERE dedupKey = 'scheduler:auto:T2:submitted'").get()).toEqual({ actor: "scheduler" });
+    } finally { f.close(); }
+  });
+
+  test("dispatch file and worker slot leases survive receipt and review until the card reaches live", () => {
+    const f = fixture();
+    try {
+      const a = f.workflow("T1"), b = f.workflow("T2");
+      planIntent(f.db, { actor: "scheduler" }, { id: "lease:T1", taskId: "T1", taskRev: 1, workflowRev: a.rev,
+        causalSeq: f.seq(), node: "write", action: "dispatch", reason: "write",
+        resources: ["task:t1", "slot:p:0", "src/bridge.ts"] });
+      settleIntent(f.db, { actor: "scheduler" }, { id: "lease:T1", from: "pending", to: "submitted" });
+      settleIntent(f.db, { actor: "scheduler" }, { id: "lease:T1", from: "submitted", to: "done", receipt: "派单回执" });
+      expect(f.db.query("SELECT resource FROM scheduler_resources WHERE taskId = 'T1' ORDER BY resource").all())
+        .toEqual([{ resource: "slot:p:0" }, { resource: "src/bridge.ts" }]);
+      expect(() => planIntent(f.db, { actor: "scheduler" }, { id: "lease:T2", taskId: "T2", taskRev: 1,
+        workflowRev: b.rev, causalSeq: f.seq(), node: "write", action: "dispatch", reason: "write",
+        resources: ["slot:p:0", "src/bridge.ts"] })).toThrow(/T1 占用/);
+      f.db.query("UPDATE tasks SET stage = 'merge' WHERE id = 'T1'").run();
+      moveStage(f.db, f.owner, { taskId: "T1", from: "merge", to: "live" });
+      expect(f.db.query("SELECT COUNT(*) AS n FROM scheduler_resources WHERE taskId = 'T1'").get()).toEqual({ n: 0 });
+      expect(planIntent(f.db, { actor: "scheduler" }, { id: "lease:T2", taskId: "T2", taskRev: 1,
+        workflowRev: b.rev, causalSeq: f.seq(), node: "write", action: "dispatch", reason: "write",
+        resources: ["slot:p:0", "src/bridge.ts"] }).intent.status).toBe("pending");
+    } finally { f.close(); }
+  });
+
+  test("an unknown external effect keeps the card lease even if PM advances the stage", () => {
+    const f = fixture();
+    try {
+      const w = f.workflow("T1");
+      planIntent(f.db, { actor: "scheduler" }, { id: "uncertain:T1", taskId: "T1", taskRev: 1,
+        workflowRev: w.rev, causalSeq: f.seq(), node: "write", action: "dispatch", reason: "write", resources: ["src/bridge.ts"] });
+      settleIntent(f.db, { actor: "scheduler" }, { id: "uncertain:T1", from: "pending", to: "unknown", receipt: "投递结果不明" });
+      f.db.query("UPDATE tasks SET stage = 'merge' WHERE id = 'T1'").run();
+      moveStage(f.db, f.owner, { taskId: "T1", from: "merge", to: "live" });
+      expect(f.db.query("SELECT resource FROM scheduler_resources WHERE taskId = 'T1'").all()).toEqual([{ resource: "src/bridge.ts" }]);
+      expect(() => settleIntent(f.db, { actor: "scheduler" }, { id: "uncertain:T1", from: "unknown", to: "done", receipt: "x" }))
+        .toThrow(/只有 PM/);
+      settleIntent(f.db, f.owner, { id: "uncertain:T1", from: "unknown", to: "done", receipt: "核对：已交付" });
+      expect(f.db.query("SELECT COUNT(*) AS n FROM scheduler_resources WHERE taskId = 'T1'").get()).toEqual({ n: 0 });
+    } finally { f.close(); }
+  });
+
+  test("switching an in-progress card to manual does not silently lend out its pending dispatch file claim", () => {
+    const f = fixture();
+    try {
+      const a = f.workflow("T1"), b = f.workflow("T2");
+      planIntent(f.db, { actor: "scheduler" }, { id: "pending:T1", taskId: "T1", taskRev: 1, workflowRev: a.rev,
+        causalSeq: f.seq(), node: "write", action: "dispatch", reason: "pending",
+        resources: ["task:t1", "slot:p:0", "src/bridge.ts"] });
+      const moved = moveStage(f.db, f.owner, { taskId: "T1", from: "spec", to: "restate" }).row;
+      setWorkflow(f.db, f.owner, { taskId: "T1", taskRev: moved.rev, workflowRev: a.rev,
+        template: "code", templateVersion: 2, mode: "manual", authorFamily: "claude", fallback: "PM 接手" });
+      expect(f.db.query("SELECT resource FROM scheduler_resources WHERE taskId = 'T1' ORDER BY resource").all())
+        .toEqual([{ resource: "slot:p:0" }, { resource: "src/bridge.ts" }]);
+      expect(() => planIntent(f.db, { actor: "scheduler" }, { id: "pending:T2", taskId: "T2", taskRev: 1,
+        workflowRev: b.rev, causalSeq: f.seq(), node: "write", action: "dispatch", reason: "pending",
+        resources: ["src/bridge.ts"] })).toThrow(/T1 占用/);
     } finally { f.close(); }
   });
 

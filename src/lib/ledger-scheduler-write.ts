@@ -9,6 +9,7 @@ import {
 } from "./ledger-scheduler.js";
 import { getEventByDedup, getMeta, LedgerError, listDeps, listTasks } from "./ledger-store.js";
 import { insertEvent, tx } from "./ledger-tx.js";
+import { releaseFinishedCardLeases } from "./ledger-scheduler-lease.js";
 
 const textOneLine = (value: string, label: string, max: number): string => {
   const out = value.trim();
@@ -21,6 +22,9 @@ const actorMayConfigure = (db: Database, actor: string, project: string): boolea
   const meta = getMeta(db, project);
   return actor !== meta.team?.dispatcher && isManager(db, actor, { project, agent: null });
 };
+const actorMaySchedule = (db: Database, actor: string, project: string): boolean =>
+  actor === "scheduler" || actorMayConfigure(db, actor, project);
+const cardResource = (action: IntentAction, resource: string): boolean => action === "dispatch" && !resource.startsWith("task:");
 
 export interface WorkflowInput {
   taskId: string;
@@ -63,7 +67,7 @@ export function setWorkflow(db: Database, ctx: WriteCtx, input: WorkflowInput): 
       ? db.query("SELECT id FROM scheduler_intents WHERE taskId = ? AND status = 'pending'").all(task.id) as { id: string }[] : [];
     if (pending.length) {
       db.query("UPDATE scheduler_intents SET status = 'cancelled', updatedAt = ? WHERE taskId = ? AND status = 'pending'").run(now, task.id);
-      for (const row of pending) db.query("DELETE FROM scheduler_resources WHERE intentId = ?").run(row.id);
+      for (const row of pending) db.query("DELETE FROM scheduler_resources WHERE intentId = ? AND scope = 'intent'").run(row.id);
     }
     db.prepare(`INSERT INTO task_workflows (taskId, project, template, templateVersion, mode, authorFamily, fallback, specRev, createdAt, updatedAt)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -98,7 +102,7 @@ export interface PlanIntentInput {
 export function planIntent(db: Database, ctx: WriteCtx, input: PlanIntentInput): { intent: SchedulerIntent; duplicate: boolean } {
   return tx(db, () => {
     const task = mustTask(db, input.taskId);
-    if (!actorMayConfigure(db, ctx.actor, task.project)) throw new LedgerError("forbidden", "只有项目 PM / master / owner 能提交调度意图");
+    if (!actorMaySchedule(db, ctx.actor, task.project)) throw new LedgerError("forbidden", "只有调度服务或项目 PM / master / owner 能提交调度意图");
     const id = textOneLine(input.id, "intent key", 160);
     if (!/^[\w:.-]+$/.test(id)) throw new LedgerError("invalid", "intent key 只能含字母数字及 _ : . -");
     const node = textOneLine(input.node, "节点", 80);
@@ -133,7 +137,7 @@ export function planIntent(db: Database, ctx: WriteCtx, input: PlanIntentInput):
     if (live) throw new LedgerError("conflict", `任务已有未结调度意图 ${live.id}`);
     const held = db.query("SELECT resource, taskId FROM scheduler_resources WHERE project = ?").all(task.project) as { resource: string; taskId: string }[];
     for (const resource of resources) {
-      const used = held.find((row) => resourcesOverlap(resource as string, row.resource));
+      const used = held.find((row) => row.taskId !== task.id && resourcesOverlap(resource as string, row.resource));
       if (used) throw new LedgerError("conflict", `资源 ${resource} 与 ${used.resource} 重叠（${used.taskId} 占用）`);
     }
     const now = ctx.now ?? Date.now();
@@ -142,12 +146,16 @@ export function planIntent(db: Database, ctx: WriteCtx, input: PlanIntentInput):
       id, task.id, task.project, node, input.action, recipient, input.causalSeq, task.rev, task.specRev, task.headSHA,
       workflow.templateVersion, reason, now, now,
     );
-    for (const resource of resources) db.prepare("INSERT INTO scheduler_resources (project, resource, taskId, intentId, acquiredAt) VALUES (?, ?, ?, ?, ?)")
-      .run(task.project, resource, task.id, id, now);
-    const event = insertEvent(db, { actor: "scheduler", now, dedupKey: `scheduler:${id}` }, {
+    for (const resource of resources) {
+      if (held.some((row) => row.taskId === task.id && row.resource === resource)) continue;
+      db.prepare("INSERT INTO scheduler_resources (project, resource, taskId, intentId, acquiredAt, scope) VALUES (?, ?, ?, ?, ?, ?)")
+        .run(task.project, resource, task.id, id, now, cardResource(input.action, resource as string) ? "card" : "intent");
+    }
+    const event = insertEvent(db, { actor: ctx.actor, now, dedupKey: `scheduler:${id}` }, {
       project: task.project, target: task.id, kind: "scheduler", text: reason,
       data: { op: "plan", id, node, action: input.action, recipient, resources, causalSeq: input.causalSeq,
-        taskRev: task.rev, specRev: task.specRev, head: task.headSHA, template: workflow.template, version: workflow.templateVersion },
+        taskRev: task.rev, specRev: task.specRev, head: task.headSHA, template: workflow.template, version: workflow.templateVersion,
+        ...(ctx.actor === "scheduler" ? {} : { manual: true }) },
     }, true);
     db.prepare("UPDATE scheduler_intents SET eventSeq = ? WHERE id = ?").run(event.seq, id);
     return { intent: getIntent(db, id) as SchedulerIntent, duplicate: false };
@@ -164,7 +172,10 @@ export function settleIntent(db: Database, ctx: WriteCtx, input: { id: string; f
   return tx(db, () => {
     const intent = getIntent(db, input.id);
     if (!intent) throw new LedgerError("not_found", "没有这个调度意图");
-    if (!actorMayConfigure(db, ctx.actor, intent.project)) throw new LedgerError("forbidden", "只有项目 PM / master / owner 能结算调度意图");
+    if (!actorMaySchedule(db, ctx.actor, intent.project)) throw new LedgerError("forbidden", "只有调度服务或项目 PM / master / owner 能结算调度意图");
+    if (input.from === "unknown" && (ctx.actor === "scheduler" || !input.receipt?.trim())) {
+      throw new LedgerError("forbidden", "结果不明的意图只有 PM 凭外部核对回执能结算");
+    }
     if (!INTENT_STATUSES.includes(input.to) || !NEXT[input.from]?.includes(input.to) || intent.status !== input.from) {
       throw new LedgerError("conflict", `调度意图当前是 ${intent.status}，不能 ${input.from}→${input.to}`);
     }
@@ -172,10 +183,12 @@ export function settleIntent(db: Database, ctx: WriteCtx, input: { id: string; f
     const receipt = input.receipt ? textOneLine(input.receipt, "回执", 600) : intent.receipt;
     db.prepare("UPDATE scheduler_intents SET status = ?, receipt = ?, attempts = attempts + ?, updatedAt = ? WHERE id = ?")
       .run(input.to, receipt, input.to === "submitted" ? 1 : 0, now, input.id);
-    if (input.to === "done" || input.to === "cancelled") db.prepare("DELETE FROM scheduler_resources WHERE intentId = ?").run(input.id);
-    insertEvent(db, { actor: "scheduler", now, dedupKey: `scheduler:${input.id}:${input.to}` }, {
+    if (input.to === "done" || input.to === "cancelled") db.prepare("DELETE FROM scheduler_resources WHERE intentId = ? AND scope = 'intent'").run(input.id);
+    releaseFinishedCardLeases(db, intent.taskId);
+    insertEvent(db, { actor: ctx.actor, now, dedupKey: `scheduler:${input.id}:${input.to}` }, {
       project: intent.project, target: intent.taskId, kind: "scheduler", text: `调度意图 ${input.to}`,
-      data: { op: "settle", id: input.id, from: input.from, to: input.to, receipt },
+      data: { op: "settle", id: input.id, from: input.from, to: input.to, receipt,
+        ...(ctx.actor === "scheduler" ? {} : { manual: true }) },
     }, true);
     return getIntent(db, input.id) as SchedulerIntent;
   });

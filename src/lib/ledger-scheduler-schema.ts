@@ -29,6 +29,7 @@ const SCHEDULER_SQL: readonly string[] = [
   `CREATE TABLE IF NOT EXISTS scheduler_resources (
     project TEXT NOT NULL, resource TEXT NOT NULL, taskId TEXT NOT NULL REFERENCES tasks(id),
     intentId TEXT NOT NULL REFERENCES scheduler_intents(id), acquiredAt INTEGER NOT NULL,
+    scope TEXT NOT NULL DEFAULT 'intent' CHECK (scope IN ('intent','card')),
     PRIMARY KEY (project, resource)
   )`,
 ];
@@ -38,6 +39,10 @@ export function SCHEDULER_SCHEMA(db: Database): void {
   for (const sql of SCHEDULER_SQL) db.prepare(sql).run();
   const columns = db.prepare("PRAGMA table_info(scheduler_intents)").all() as { name: string }[];
   if (!columns.some((c) => c.name === "eventSeq")) db.prepare("ALTER TABLE scheduler_intents ADD COLUMN eventSeq INTEGER NOT NULL DEFAULT 0").run();
+  const resourceColumns = db.prepare("PRAGMA table_info(scheduler_resources)").all() as { name: string }[];
+  if (!resourceColumns.some((c) => c.name === "scope")) db.prepare("ALTER TABLE scheduler_resources ADD COLUMN scope TEXT NOT NULL DEFAULT 'intent'").run();
+  db.prepare(`UPDATE scheduler_resources SET scope = 'card' WHERE scope = 'intent' AND resource NOT LIKE 'task:%'
+    AND intentId IN (SELECT id FROM scheduler_intents WHERE action = 'dispatch')`).run();
   db.prepare("UPDATE scheduler_intents SET eventSeq = COALESCE((SELECT seq FROM events WHERE dedupKey = 'scheduler:' || scheduler_intents.id), 0) WHERE eventSeq = 0").run();
   db.prepare("CREATE INDEX IF NOT EXISTS scheduler_intents_task ON scheduler_intents(taskId, eventSeq)").run();
   db.prepare("CREATE INDEX IF NOT EXISTS scheduler_intents_project_status ON scheduler_intents(project, status)").run();
@@ -49,7 +54,7 @@ export const SCHEDULER_COLUMNS = {
   scheduler_meta: ["key", "value"],
   task_workflows: ["taskId", "project", "template", "templateVersion", "mode", "authorFamily", "fallback", "specRev", "rev"],
   scheduler_intents: ["id", "taskId", "project", "node", "action", "causalSeq", "eventSeq", "taskRev", "specRev", "status", "reason", "receipt"],
-  scheduler_resources: ["project", "resource", "taskId", "intentId", "acquiredAt"],
+  scheduler_resources: ["project", "resource", "taskId", "intentId", "acquiredAt", "scope"],
 } as const;
 export const SCHEDULER_INDEXES = {
   task_workflows: ["task_workflows_project"],
