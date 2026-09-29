@@ -16,7 +16,9 @@
 .waits b, .waitsM b { font-family: var(--mono); }
 .hasWaits { border-color: var(--warn); color: var(--text); }
 .hasWaits b { color: var(--warn); }
-.waitsM { margin-left: auto; padding: 4px 8px; }
+.waitsM { padding: 4px 8px; }
+.teamM { margin-left: auto; padding: 4px 10px; border-radius: 8px; background: var(--panel); border: 1px solid var(--line); color: var(--text-2); font-size: var(--fs-2); }
+.teamPane { flex: 1; min-height: 0; overflow: auto; }
 .filters { display: flex; flex-wrap: wrap; gap: 4px; }
 .chip { padding: 3px 8px; border-radius: 999px; border: 1px solid var(--line); color: var(--muted); font-size: var(--fs-3); }
 .chipOn { background: var(--panel-2); color: var(--text); border-color: var(--line-2); }

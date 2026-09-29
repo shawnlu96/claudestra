@@ -25,10 +25,11 @@ import { useLastSeen } from "./use-collab-extra";
 import { causalCanvas } from "./v4/causal-model";
 import { CausalCanvas } from "./v4/causal-canvas";
 import type { Focus } from "./v4/canvas-view";
-import { edgeSel, narrowPane, resolveSelection, type Selection } from "./v4/v4-selection";
+import { edgeSel, memberSel, narrowPane, resolveSelection, type Selection } from "./v4/v4-selection";
 import { MobileList } from "./v4/v4-mobile";
 import { Outline } from "./v4/v4-outline";
-import { CauseSec, EdgePage, FoldPage, Overview, WaitsPage } from "./v4/v4-props";
+import { CauseSec, EdgePage, FoldPage, MemberPage, Overview, TeamPage, WaitsPage } from "./v4/v4-props";
+import { TeamPanel } from "./team-panel";
 import { metricsOf, type Filter, type Metrics } from "./v4/v4-model";
 import s from "./collab.module.css";
 import v from "./v4/v4.module.css";
@@ -90,8 +91,8 @@ function LoadState({ load, refetch, tr }: { load: ReturnType<typeof useCollab>["
   return <div className={`${s.tokens} ${s.root}`}><div className={s.home}>{body}</div></div>;
 }
 
-/** 中区：「因果线」画布和「团队」（T55 的组件，合并前是占位）两个标签 */
-function CenterPane(props: React.ComponentProps<typeof CausalCanvas>) {
+/** 中区：「因果线」画布和「团队」（T55 的 TeamPanel，嵌入模式：选中成员交给右侧属性页）两个标签 */
+function CenterPane({ team, ...props }: React.ComponentProps<typeof CausalCanvas> & { team: React.ReactNode }) {
   const [tab, setTab] = useState<"causal" | "team">("causal");
   const { tr } = props;
   return (
@@ -103,18 +104,19 @@ function CenterPane(props: React.ComponentProps<typeof CausalCanvas>) {
           </button>
         ))}
       </div>
-      {tab === "causal" ? <CausalCanvas {...props} /> : <div className={v.blank}>{tr("团队视图（T55）合并后接到这里")}</div>}
+      {tab === "causal" ? <CausalCanvas {...props} /> : <div className={v.teamPane}>{team}</div>}
     </div>
   );
 }
 
 /**
  * 选中与居中：任务走 openCollabTask（右侧 / 全屏详情），其余存稳定键（v4-selection.ts）；只有明确点了任务才发 Focus 让画布居中。
- * 从任务详情点进边 / 折叠组的，关掉回到那个任务（手机上不然就直接掉回列表）
+ * 从任务详情点进边 / 折叠组的，关掉回到那个任务（手机上不然就直接掉回列表）；从团队整屏点进成员的，关掉回到团队
  */
 function useSelection(openTask: string | null) {
   const [sel, setSel] = useState<Selection>(null);
   const [back, setBack] = useState<string | null>(null);
+  const [backSel, setBackSel] = useState<Selection>(null);
   const [focus, setFocus] = useState<Focus | null>(null);
   const pickTask = (id: string) => {
     setSel(null);
@@ -124,12 +126,14 @@ function useSelection(openTask: string | null) {
   };
   const select = (x: Selection) => {
     if (x?.kind === "task") return pickTask(x.id);
-    setBack(x && x.kind !== "waits" ? openTask : null);
+    setBack(x && x.kind !== "waits" && x.kind !== "team" ? openTask : null);
+    setBackSel(x?.kind === "member" && sel?.kind === "team" ? sel : null);
     openCollabTask(null);
     setSel(x);
   };
   const close = () => {
-    setSel(null);
+    setSel(backSel);
+    setBackSel(null);
     setBack(null);
     if (back) openCollabTask(back);
   };
@@ -184,6 +188,8 @@ export function CollabView({ project }: { project: string }) {
   const resolved = resolveSelection(sel, o, canvas);
   if (sel && sel.kind !== "task" && !resolved) setSel(null); // 边 / 折叠组在这次刷新里没了：清掉，属性页回概览
   const pane = narrowPane(openTask, resolved);
+  const team = <TeamPanel embedded ov={o} project={project} agents={agents} now={o.now} selected={sel?.kind === "member" ? sel.id : null}
+    onSelect={(n) => select(memberSel(n))} />;
   const detail = openTask && (
     <CollabDetail project={project} id={openTask} rev={rev} now={now} ov={o} line={lines.get(openTask) ?? null}
       action={(l) => lineAction(l)} actions={actions} reviewers={byTask.get(openTask) ?? NO_REVIEWERS} onClose={closeTask}
@@ -191,7 +197,9 @@ export function CollabView({ project }: { project: string }) {
   );
   const page = (resolved?.kind === "edge" && <EdgePage deps={resolved.deps} ov={o} onPick={pickTask} onClose={close} tr={tr} />)
     || (resolved?.kind === "fold" && <FoldPage fold={resolved.fold} ov={o} onPick={pickTask} onClose={close} tr={tr} />)
-    || (resolved?.kind === "waits" && <WaitsPage waits={waits} ov={o} onPick={pickTask} onClose={close} tr={tr} />);
+    || (resolved?.kind === "waits" && <WaitsPage waits={waits} ov={o} onPick={pickTask} onClose={close} tr={tr} />)
+    || (resolved?.kind === "member" && <MemberPage m={resolved} project={project} onClose={close} tr={tr} />)
+    || (resolved?.kind === "team" && <TeamPage onClose={close} tr={tr}>{team}</TeamPage>);
   const right = detail || page || <Overview ov={o} view={hv} waits={waits} projectName={projectName} onPick={pickTask} tr={tr} since={lastSeen.state.since !== null && (
     <SinceCard digest={digest} since={lastSeen.state.since} truncated={lastSeen.state.truncated} now={now} tr={tr} onOpen={pickTask} onDismiss={lastSeen.dismiss} />
   )} />;
@@ -203,6 +211,7 @@ export function CollabView({ project }: { project: string }) {
           <Icon name="arrowLeft" size={16} />
         </button>
         <span className={v.ttl}>{projectName}</span>
+        {narrow && <button type="button" className={v.teamM} onClick={() => select({ kind: "team" })}>{tr("团队")}</button>}
         {narrow && <button type="button" className={v.waitsM} onClick={() => select({ kind: "waits" })}>{tr("待你处理")} <b>{waits.length}</b></button>}
         {!narrow && <MetricsBar m={m} connected={connected} tr={tr} />}
       </div>
@@ -216,7 +225,7 @@ export function CollabView({ project }: { project: string }) {
         <div className={v.main}>
           <Outline ov={o} lines={lines} filter={filter} onFilter={setFilter} waits={waits} onWaits={() => select({ kind: "waits" })}
             selected={openTask} onPick={pickTask} tr={tr} />
-          <CenterPane canvas={canvas} lines={lines} actionText={actionText} hot={advance?.id ?? null}
+          <CenterPane team={team} canvas={canvas} lines={lines} actionText={actionText} hot={advance?.id ?? null}
             selection={openTask ? { kind: "task", id: openTask } : sel} focus={focus} onSelect={select} tr={tr} />
           {right}
         </div>
