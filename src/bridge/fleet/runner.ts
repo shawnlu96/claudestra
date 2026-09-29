@@ -238,7 +238,7 @@ async function runAction(action: FleetAction, agent: string, w: string, ctx: Run
       case "lp-compact": return out(await lpThenCompact(ctx, agent, w, action.keep ?? ctx.keep));
       case "text": {
         const r = await ctx.deliverText(agent, action.text ?? "");
-        return out(r.ok ? (r.queued ? { outcome: "queued", detail: "忙，消息已排队" } : done("已送达")) : failed(r.error));
+        return out(r.ok ? (r.queued ? { outcome: "queued", detail: "它正在忙，这一轮结束后再投，还没送到" } : done("已送达")) : failed(r.error));
       }
     }
   } catch (e) {
