@@ -273,13 +273,13 @@ export function issuePairing(
   const guest = str(body.guest);
   // 带了 guest 字段名字却是空白 / 数字 / null：拒，不能当成没带、退化成给自己签全权码
   if (body.guest !== undefined && !guest) return { ok: false, code: "guest_name_required", error: "guest 要写这台设备是给谁的（名字不能是空白，也得是文字）" };
+  // guest 的名字会成为它消息的来源名：老记录里「来源 = web-ui」被网页当 owner 本人（web/lib/chat/history-shape.ts）
+  const reserved = guest ? reservedNameError(guest) : null;
+  if (reserved) return { ok: false, error: reserved };
   const guestAgents = guest ? checkGuestAgents(body.agents, body.confirmAllAgents, registryHas()) : null;
   if (guestAgents && !guestAgents.ok) return { ok: false, code: guestAgents.code, error: guestAgents.error };
   const fp = i.fp ?? machineFp();
   if (!fp) return { ok: false, error: "本机没有实例密钥（instance-key.pem 读写失败），签不了配对码" };
-  // guest 的名字会成为它消息的来源名：老记录里「来源 = web-ui」被网页当 owner 本人（web/lib/chat/history-shape.ts）
-  const reserved = guest ? reservedNameError(guest) : null;
-  if (reserved) return { ok: false, error: reserved };
   const asked = guestAgents?.ok ? guestGrant(guestAgents.agents) : normalizeGrant(body as Partial<{ agents: unknown; terminal: unknown; manage: unknown }>, fullGrant());
   // 网页里发码（issuer = 那台设备）：给出去的不能比它自己的大；本机终端（CLI）不传 issuer，照旧
   const grant = issuer ? capGrant(asked, issuer) : asked;

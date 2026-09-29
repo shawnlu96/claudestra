@@ -63,7 +63,7 @@ describe("guest 配对码的名字", () => {
       const info = issuePairing(machine, { guest });
       expect([guest, info.ok, String(info.error)]).toEqual([guest, false, expect.stringContaining("保留名")]);
     }
-    expect(issuePairing(machine, { guest: "friend" }).ok).toBe(true);
+    expect(issuePairing(machine, { guest: "friend", agents: ["worker-a"] }).ok).toBe(true);
   });
 });
 
