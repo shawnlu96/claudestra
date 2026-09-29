@@ -8,15 +8,17 @@ import { resolveLogPath } from "./log-paths.js";
 
 const BRIDGE_URL = resolveBridgeUrl();
 
-export async function bridgeRequest(msg: Record<string, unknown>): Promise<any> {
+/** timeoutMs：缺省 10s；批量管理（manager fleet）这类要逐个 agent 发键复核的请求自己给更长的 */
+export async function bridgeRequest(msg: Record<string, unknown>, opts?: { timeoutMs?: number }): Promise<any> {
+  const timeoutMs = opts?.timeoutMs ?? 10000;
   return new Promise((resolve, reject) => {
     const ws = new WebSocket(BRIDGE_URL);
     const requestId = `req_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 
     const timer = setTimeout(() => {
       ws.close();
-      reject(new Error("Bridge 请求超时 (10s)"));
-    }, 10000);
+      reject(new Error(`Bridge 请求超时 (${Math.round(timeoutMs / 1000)}s)`));
+    }, timeoutMs);
 
     ws.onopen = () => {
       ws.send(JSON.stringify({ ...msg, requestId }));

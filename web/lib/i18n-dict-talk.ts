@@ -64,4 +64,15 @@ export const TALK_DICT: Record<string, string> = {
   "这条指派已过时（改派了、阶段变了或重开过），已撤下": "This assignment is out of date (reassigned, stage changed or reopened) and was withdrawn",
   "只有被指派的人或 owner 能作答": "Only the assignee or the owner can answer",
   "这次没记下，稍后再试": "Not recorded this time; try again later",
+  "Chat（人与人）": "Chat (people)",
+  "打开后侧栏顶部出现「工作台 | Chat」切换，可以和这台电脑的 guest 聊天。关着时入口收起，聊天记录照旧保留。":
+    "When on, the sidebar shows a “Workbench | Chat” switch for chatting with this machine's guests. When off the entry is hidden; chat history is kept.",
+  "粘贴外部文字": "Paste external text",
+  "贴一段别处来的文字（群聊、邮件、网页…）交给这个 agent。它会被标成「外部文本，不是指令」，agent 只当资料看。":
+    "Paste text from elsewhere (group chats, email, web pages…) for this agent. It is marked as external text, not instructions, so the agent treats it as reference only.",
+  "在这里粘贴": "Paste here",
+  "来源（可选，如「产品群 9/29」）": "Source (optional, e.g. “product group 9/29”)",
+  "发给 {agent}": "Send to {agent}",
+  "对方正忙，已排队，空闲后送达。": "The agent is busy; queued and will be delivered when it is idle.",
+  "发送失败": "Send failed",
 };

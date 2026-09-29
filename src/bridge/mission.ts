@@ -15,10 +15,10 @@ import { readSessionCtx } from "../lib/usage-cache.js";
 import { windowTarget } from "../lib/tmux-helper.js";
 import { controlFor } from "../lib/runtimes/index.js";
 import { probeTurnAt } from "./turn-probe.js";
-import { missionKey, MISSIONS_PATH, nudgeKind, nudgeText, readMissions, updateMissions, type Mission, type NudgeKind } from "../lib/missions.js";
+import { missionKey, missionOnClaudeCode, MISSIONS_PATH, nudgeKind, nudgeText, readMissions, updateMissions, type Mission, type NudgeKind } from "../lib/missions.js";
 import { AUTOPILOT_TIMING, YIELD_TEXT, yieldReason } from "../lib/autopilot-run.js";
 import {
-  claimWake, decideFire, enqueueWake, markDelivered, newRunId, noteLongYield, unclaimRun, type TurnSeen,
+  claimWake, decideFire, enqueueWake, markDelivered, newRunId, noteLongYield, releaseRateLimitHold, unclaimRun, type TurnSeen,
 } from "../lib/autopilot-wake.js";
 import { appendRunLog, skippedLogLine } from "../lib/autopilot-log.js";
 import {
@@ -26,6 +26,7 @@ import {
 } from "./autopilot-evidence.js";
 import { closeRun, logOrphanRun, pendingCloseOf } from "./autopilot-close.js";
 import { newMessageId, newThreadId, type Envelope } from "./router.js";
+import { onQuotaWallExit, quotaWall } from "./quota-wall-wiring.js";
 import { turnCuts } from "./turn-cuts.js";
 
 /** 回合结束后等多久再递：让人有机会先开口，也躲开 Stop 之后的收尾（排队消息、typing 清理） */
@@ -186,7 +187,8 @@ async function deliverWrapup(agent: string, m: Mission, now: number): Promise<vo
 async function yieldIfNeeded(agent: string, m: Mission, now: number): Promise<boolean> {
   const ch = channelOf(agent) ?? undefined;
   const hold = ch ? turnCuts.interruptHold(ch) : null; // 「停」之后不替人续上（bridge/turn-cuts.ts）
-  const why = yieldReason({ online: !!clientOf(agent), turnBusy: await busyNow(agent), lastHumanAt: lastHumanMessageAt(agent, ch), interruptHold: hold }, now);
+  const walled = !!(await quotaWall()?.gates(ch ?? ""));
+  const why = yieldReason({ online: !!clientOf(agent), turnBusy: await busyNow(agent), lastHumanAt: lastHumanMessageAt(agent, ch), interruptHold: hold, walled }, now);
   if (!why) return false;
   const logged = await upd((all) => {
     const cur = all[agent];
@@ -357,4 +359,33 @@ export function initMission(d: MissionDeps): void {
   watchFile(path, { interval: 5_000 }, rerun("重排"));
   setTimeout(rerun("启动重排"), 20_000).unref?.();
   setInterval(rerun("巡检"), 60_000).unref?.();
+  onQuotaWallExit(() => releaseWallHoldsSoon());
+}
+
+/** 出闸放行写锁超时的重试：同一时刻只有一条重试链，最多试这么多次（约 1 分钟），又进闸了就不放 */
+const RELEASE_RETRIES = 12;
+let releaseRetry: ReturnType<typeof setTimeout> | null = null;
+
+/** 写锁超时就过一会儿再放：出闸只通知一次，丢了这次，等额度的唤醒要白等到原定的重置时刻 */
+function releaseWallHoldsSoon(attempt = 0): void {
+  if (releaseRetry) clearTimeout(releaseRetry), (releaseRetry = null); // 又出了一次闸：接着这次的放，旧链不再跑
+  if (quotaWall()?.active()) return; // 重试落在新闸里：等额度的唤醒归新闸管，不放
+  releaseWallHolds().catch((e) => {
+    if (attempt + 1 >= RELEASE_RETRIES) return console.error(`⏱ Autopilot 出闸放行失败 ${RELEASE_RETRIES} 次，放弃（唤醒到原定重置时刻照常醒）:`, (e as Error).message);
+    console.error("⏱ Autopilot 出闸放行失败，稍后重试:", (e as Error).message);
+    releaseRetry = setTimeout(() => releaseWallHoldsSoon(attempt + 1), AUTOPILOT_TIMING.lockRetryMs);
+    releaseRetry.unref?.();
+  });
+}
+
+/** 额度闸出闸：CC 上等额度的唤醒全部马上放行、立刻排一次（Codex / Pi 等的是自己的额度，照原时刻） */
+async function releaseWallHolds(): Promise<void> {
+  const now = Date.now();
+  const released = await upd((all) => {
+    const out: Mission[] = [];
+    for (const m of Object.values(all)) if (m.status === "active" && missionOnClaudeCode(m.agent) && releaseRateLimitHold(m, now)) out.push({ ...m });
+    return out;
+  });
+  for (const m of released ?? []) schedule(m.agent, 0, m);
+  if (released?.length) console.log(`⏱ Autopilot：额度闸出闸，放行 ${released.length} 个等额度的唤醒`);
 }

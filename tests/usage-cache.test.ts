@@ -31,13 +31,17 @@ describe("parseUsageCache", () => {
     expect(parseUsageCache('{"scrapedAt":' + NOW + "}", NOW)).toBeNull();
     expect(parseUsageCache('{"sessionPct":22}', NOW)).toBeNull();
   });
-  test("脏 pct(越界/非数)拒收单字段,另一字段仍可用", () => {
-    const r = parseUsageCache(
-      JSON.stringify({ sessionPct: 150, weekPct: 77, scrapedAt: NOW }),
-      NOW
-    );
+  test("99.5% 不凑成 100（额度闸会当成撞墙、把全机 agent 消息押住）；真到 100 才是 100（T24 r2 P2-9）", () => {
+    const at = 1_000_000;
+    expect(parseUsageCache(JSON.stringify({ scrapedAt: at, sessionPct: 99.5, weekPct: 100 }), at)).toMatchObject({ sessionPct: 99, weekPct: 100 });
+    expect(parseUsageCache(JSON.stringify({ scrapedAt: at, sessionPct: 42.5, weekPct: 0.4 }), at)).toMatchObject({ sessionPct: 43, weekPct: 0 });
+  });
+
+  test("脏 pct(负数/非数)拒收单字段,另一字段仍可用;超过 100 截成 100(CC 状态栏会报 101%)", () => {
+    const r = parseUsageCache(JSON.stringify({ sessionPct: -3, weekPct: 77, scrapedAt: NOW }), NOW);
     expect(r!.sessionPct).toBeNull();
     expect(r!.weekPct).toBe(77);
+    expect(parseUsageCache(JSON.stringify({ sessionPct: 101, weekPct: "x", scrapedAt: NOW }), NOW)).toMatchObject({ sessionPct: 100, weekPct: null });
   });
 });
 

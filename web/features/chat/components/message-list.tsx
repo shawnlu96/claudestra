@@ -27,6 +27,7 @@ import { ProgressNote } from "./progress-note";
 import { NarrationFoldBar, NarrationFolded, useNarrationFold } from "./narration-fold";
 import { SourceHeader } from "./source-header";
 import { useIsExport } from "../export-context";
+import { HeldMark } from "../../quota-wall/held-mark";
 import { GutterTime, HeaderTime } from "./msg-time";
 import { ReplyDivider, SegGroups } from "./seg-groups";
 import { inRange, selRange } from "../share-mode";
@@ -296,9 +297,8 @@ export const Message = memo(function Message({ m, streaming, isLast, awaiting, p
             </div>
           </QuoteSwipe>
         )}
-        {/* v2.15+ 发送失败标记:乐观气泡不能装作已送达(2026-07-27 用户丢消息实锤)。
-            v2.21.5+ 带「重新发送 / 删除」按钮(owner 2026-09-06:网络不好时点一下就重发,
-            含图片附件)——载荷留在 store 的 pendingSends 里,同一气泡原地重发。 */}
+        {/* 乐观气泡不装作已送达:失败的带「重新发送 / 删除」(载荷在 store 的 pendingSends,原地重发);bridge 押住的另有标记,说明行对齐后没了也看得出 */}
+        {m.held && !m.failed && <HeldMark />}
         {m.failed && (
           <div className="flex items-center gap-2 pr-1 text-[11px] font-medium text-error">
             <span>⚠️ {t("未送达")}</span>

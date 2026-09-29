@@ -9,7 +9,7 @@
 import { existsSync } from "node:fs";
 import { USER_ARCHIVE_ROOT } from "../lib/session-archive.js";
 import type { Principal, PrincipalsFile } from "../lib/principals.js";
-import { agentInScope, readPrincipals } from "../lib/principals.js";
+import { agentInScope, canRunFleet, readPrincipals } from "../lib/principals.js";
 import { isMasterName, readRegistryAgents, type RegistryAgent } from "../lib/registry.js";
 import { missionKey, readMissions, type MissionMap } from "../lib/missions.js";
 import { peersSharingAgent } from "../lib/peer-scope-gate.js";
@@ -17,6 +17,7 @@ import { heldAgentCounts } from "./held-queue.js";
 import { canReadLedger } from "../lib/devices.js";
 import { activeTasksByAgent, type LedgerTaskRef } from "../lib/ledger-read.js";
 import { ledgerDb } from "./ledger-feed.js";
+import { lpField } from "./fleet/lp-monitor.js";
 import { apiJson, forbidden, isFullScope, readJsonBody, INVALID_JSON, invalidJsonBody } from "./api-respond.js";
 
 type RunManager = (...args: string[]) => Promise<any>;
@@ -66,6 +67,7 @@ export async function agentListExtras(principal: Principal, io: Pick<AgentInfoIo
       ...(r?.channelId && held[r.channelId] ? { queued: held[r.channelId] } : {}),
       ...teamField(principal, r),
       ...ledgerField(ledger, name),
+      ...(canRunFleet(principal) ? lpField(name) : {}), // low-priority 状态（fleet/lp-monitor.ts 的缓存）：和批量管理同一道门，只给 owner 的全权设备
     };
   };
 }

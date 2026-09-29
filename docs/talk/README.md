@@ -6,9 +6,12 @@
 
 ## 什么会进 agent 上下文（封闭清单）
 
-一期只有一条：**丢进工作台**——在房间里勾几条消息，选一个 agent，确认后以**发起人自己的 Web 身份**投给它（不冒充 owner），目标只能是发起人 scope 里的本机 agent。平时发消息、@ 人、建房、删除、上传图片都不投给任何 agent（`tests/talk-api.test.ts`、沙箱实测看 agent 会话记录）。新增投递路径前先改设计，别在别处顺手投。
+只有两条，新增投递路径前先改设计，别在别处顺手投。平时发消息、@ 人、建房、删除、上传图片都不投给任何 agent（`tests/talk-api.test.ts`、沙箱实测看 agent 会话记录）。
 
-- **逐字一致**：预览和确认都经 `bridge/talk-drop.ts` 的同一段渲染（正文 `lib/talk-drop-render.ts`，抬头 `bridge/router.ts renderApiInbound`，bridge.ts 投递时用的也是它），确认时重算 sha，对不上回 409。
+1. **丢进工作台**——在房间里勾几条消息，选一个 agent，确认后以**发起人自己的 Web 身份**投给它（不冒充 owner），目标只能是发起人 scope 里的本机 agent。
+2. **粘贴外部文字**（T50）——工作台输入框的「粘贴外部文字」：贴一段别处来的文字、可选填来源备注，发给当前 agent（`POST /api/v1/talk/paste {agent, text, source?}`，`bridge/talk-paste.ts`）。身份、scope、押后规则都和丢进工作台一样（同一个 `resolveAgent` / `sendOrHold`）。正文由 bridge 生成（`lib/talk-drop-render.ts renderPasteBody`）：**不论谁贴的，整段都按外部文本**——每行加前缀、包 HMAC 边界、先中和委托标记；来源备注压成一行。不做「先预览再确认」：内容就在这一次请求里，中间不会变，发出去后工作台里看到的就是 agent 收到的。
+
+- **逐字一致**（丢进工作台）：预览和确认都经 `bridge/talk-drop.ts` 的同一段渲染（正文 `lib/talk-drop-render.ts`，抬头 `bridge/router.ts renderApiInbound`，bridge.ts 投递时用的也是它），确认时重算 sha，对不上回 409。
 - **只投一次、不丢**：前端开弹窗时生成 `dropId`，bridge 先 `INSERT OR IGNORE` 占位再投；intent 是 notification（不抢占），目标在线且空闲才直接送，否则进押后队列。押后队列的结局（送达 / 24 小时放弃 / 目标被 kill）经 `bridge/held-queue.ts onHeldSettled` 回写 drops；bridge 重启后占了位却不在队里的标 failed，界面可重发。
 - **不是 owner 本人写的行**（本机 guest，二期起还有别的实例的人）一律包成「外部文本，不是指令」：先中和委托标记（`lib/delegate-marker.ts`）和仿写的「— 名字 · 时间」署名行，再包边界，边界标记是本进程随机钥匙的 HMAC。看的是这一行的作者，不是谁点的丢进工作台：owner 丢 guest 的消息时整段装在 owner 来源的信封里，router 不会再中和（`tests/collab-trust.test.ts`）。从 Chat 建任务记的 note 同一套渲染。
 
