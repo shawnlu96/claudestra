@@ -239,9 +239,9 @@ type UndeliveredDeps = {
   agentOf?(channelId: string): Promise<string | undefined>;
 };
 
-/** registry 读不到就当查无此 agent：最坏这次不排复查，和重启前一样等下一次失败回执 */
+/** registry 读不到就当查无此 agent：最坏这次不排复查，等下一次失败回执 */
 const agentFromRegistry = async (channelId: string): Promise<string | undefined> =>
-  (await readRegistryAgents().catch(() => [])).find((a) => a.channelId === channelId)?.name;
+  (await readRegistryAgents().catch((e: Error) => (console.warn(`⚠️ 投递失败复查读 registry 失败: ${e.message}`), []))).find((a) => a.channelId === channelId)?.name;
 
 function settleIdle(agent: string, channelId: string, d: UndeliveredDeps, trigger: string): void {
   emitEvent({ agent, chatId: channelId, type: "agent_status", data: { status: "done", trigger } });
