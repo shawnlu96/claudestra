@@ -6,6 +6,8 @@
 import type { ActionKind } from "./collab-action";
 import { COLUMNS, dwellText, skippedColumns, type LineView, type Tr } from "./collab-model";
 import { Icon } from "./collab-icons";
+import { StepDots } from "./collab-step-line";
+import { stepLineView } from "./collab-step-line-model";
 import s from "./collab.module.css";
 import v2 from "./collab-v2.module.css";
 
@@ -43,6 +45,12 @@ function stageIcon(l: LineView, reviewing: boolean) {
   if (l.attention === "problem") return "rotateCcw" as const;
   if (l.attention === "progress") return "zap" as const;
   return "hourglass" as const;
+}
+
+/** 列表那一行的步骤小圆点（T51）：派过人的卡才画 */
+function LineSteps({ l, tr }: { l: LineView; tr: Tr }) {
+  const v = stepLineView(l.stepLine, l.stage);
+  return v && v.slots.some((x) => x.filled) ? <StepDots v={v} tr={tr} /> : null;
 }
 
 export function CollabLine(props: {
@@ -96,6 +104,7 @@ export function CollabLine(props: {
           </div>
         )}
         {l.reason && <div className={s.why}>{l.reason}</div>}
+        <LineSteps l={l} tr={tr} />
       </div>
       <div className={s.track}>
         <i className={s.rlBase} />

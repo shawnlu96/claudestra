@@ -1,0 +1,49 @@
+/* 步骤线（T51）。颜色全用 collab.module.css .tokens 上的变量（本组件总是挂在 .tokens 里面），深色 / 浅色跟着它走。
+   状态：done = ok 实心，delivered = s-run 实心，assigned = 空心描边，没派 = 虚线空位；当前这一步外圈 accent。
+   三种等待各一种样式：卡住 err、等对方 owner warn、等审查 s-run（色 + 图标 + 文案，不只靠颜色）。 */
+.line { list-style: none; margin: 0; padding: 0; }
+.slot { position: relative; display: grid; grid-template-columns: 18px minmax(0, 1fr); gap: 0 10px; padding: 0 0 12px; }
+.slot:last-child { padding-bottom: 0; }
+/* 竖轨：每格的圆点往下接一段线，最后一格不画 */
+.slot::before { content: ""; position: absolute; left: 8px; top: 16px; bottom: -2px; width: 2px; background: var(--line-2); }
+.slot:last-child::before { display: none; }
+.dot { position: relative; z-index: 1; width: 12px; height: 12px; margin: 3px 0 0 3px; border-radius: 50%; box-sizing: border-box; }
+.sDone { background: var(--ok); }
+.sDelivered { background: var(--s-run); }
+.sAssigned { border: 2px solid var(--muted); background: var(--panel); }
+.sEmpty { border: 1.5px dashed var(--faint); background: transparent; }
+.cur .dot { box-shadow: 0 0 0 3px var(--panel), 0 0 0 5px var(--accent); }
+
+.body { min-width: 0; border-radius: 8px; padding: 0 0 0 2px; }
+.cur .body { background: color-mix(in srgb, var(--accent) 8%, transparent); outline: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
+  padding: 6px 8px; margin: -4px 0 0 -6px; }
+.h { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; min-width: 0; }
+.lb { color: var(--text); font-weight: 500; font-size: var(--fs-2); }
+.empty .lb { color: var(--faint); font-weight: 400; }
+.who { display: inline-flex; align-items: center; gap: 4px; min-width: 0; color: var(--text-2); overflow-wrap: anywhere; }
+.inst { font-size: var(--fs-3); line-height: 16px; padding: 0 5px; border-radius: 4px; color: var(--accent);
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent); white-space: nowrap; }
+.tag { font-size: var(--fs-3); line-height: 16px; padding: 0 5px; border-radius: 4px; color: var(--muted); background: var(--panel-2); white-space: nowrap; }
+.curTag { color: var(--accent); background: color-mix(in srgb, var(--accent) 14%, transparent); font-weight: 500; }
+.meta { margin-top: 3px; display: flex; flex-wrap: wrap; gap: 2px 10px; color: var(--muted); font-size: var(--fs-3); }
+.mono { font-family: var(--mono); }
+.pass { color: var(--ok); } .changes, .block { color: var(--err); }
+/* 本机真校验 vs 凭对方声明：前者实线 ok 色，后者虚线 muted，一眼分得开 */
+.checked { display: inline-flex; align-items: center; gap: 3px; color: var(--ok); }
+.claimed { display: inline-flex; align-items: center; gap: 3px; color: var(--muted); border-bottom: 1px dashed var(--faint); }
+
+.wait { display: inline-flex; align-items: center; gap: 4px; font-size: var(--fs-3); line-height: 18px; padding: 0 6px; border-radius: 9px; white-space: nowrap; font-weight: 500; }
+.wBlocked { color: var(--err); background: color-mix(in srgb, var(--err) 13%, transparent); }
+.wOwner { color: var(--warn); background: color-mix(in srgb, var(--warn) 14%, transparent); border: 1px dashed color-mix(in srgb, var(--warn) 60%, transparent); }
+.wReview { color: var(--s-run); background: color-mix(in srgb, var(--s-run) 15%, transparent); }
+.inferred { margin: 0 0 8px; color: var(--faint); font-size: var(--fs-3); }
+
+/* 列表里的一行简版：一排小圆点 + 当前步骤名和接手人，控制在一行（窄了省略号） */
+.mini { display: flex; align-items: center; gap: 8px; min-width: 0; margin-top: 5px; font-size: var(--fs-3); color: var(--muted); }
+.dots { display: inline-flex; align-items: center; gap: 4px; flex: none; }
+.dots .dot { width: 7px; height: 7px; margin: 0; }
+.dots .sAssigned { border-width: 1.5px; }
+.dots .sEmpty { border-width: 1px; }
+.dots .curDot { width: 9px; height: 9px; box-shadow: 0 0 0 1.5px var(--panel), 0 0 0 3px var(--accent); }
+.miniText { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.miniText b { color: var(--text-2); font-weight: 500; }

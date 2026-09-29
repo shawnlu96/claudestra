@@ -1,5 +1,8 @@
 /** 协作视图（web/features/collab）的字典条目，规则同 lib/i18n-dict.ts；单独成文件是因为主字典顶在行数上限 */
 export const COLLAB_DICT: Record<string, string> = {
+  "等对方 owner 同意": "Awaiting their owner’s OK",
+  "老卡没有逐步记录，下面是按负责人推断的": "This older card has no per-step records; the steps below are inferred from its assignee",
+  "对方自报，本机核不了": "Self-reported by the other side; can’t be verified here",
   "阶段与用时": "Stages & time",
   "最近 3 件事": "Last 3 events",
   "合并队列冻结": "Merge queue frozen",

@@ -58,6 +58,8 @@ export interface LedgerTaskView {
   stageSinceApprox?: boolean;
   lastReview?: ReviewSummaryView | null;
   metrics: TaskMetricsView;
+  /** 步骤线（T51，collab-step-line-model.ts 解析）；老 bridge 没有 */
+  stepLine?: unknown;
 }
 
 export interface LedgerOverview {
@@ -113,6 +115,8 @@ export interface LineView {
   pm: string | null;
   round: number;
   pr: string | null;
+  /** 步骤线的原始数据（T51），列表那一行的小圆点从这里画 */
+  stepLine?: unknown;
 }
 
 export interface Headline {
@@ -311,6 +315,7 @@ export function lineOf(
     pm: bareAgent(t.pm),
     round: t.round,
     pr: t.pr,
+    stepLine: t.stepLine,
   };
 }
 
