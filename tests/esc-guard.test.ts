@@ -155,6 +155,13 @@ describe("查窗口 id 出错（wf2 esc-keys-1）", () => {
     const esc = createEscGuard(w.deps);
     expect(await esc.keyOf("master:=a")).toBe(windowKey("master:=a"));
   });
+  test("locked（非 Esc 的受闸发键）同一个开头：查不到窗口 id 就抛错，gate 和 send 都不跑（T41a × T13e 合并）", async () => {
+    const w = world({ idError: true });
+    const ran: string[] = [];
+    const locked = createEscGuard(w.deps).locked("master:=a", async () => void ran.push("gate"), async () => void ran.push("send"));
+    await expect(locked).rejects.toThrow(/查不到窗口 id/);
+    expect(ran).toEqual([]);
+  });
 });
 
 describe("持锁进程被暂停过、锁已被回收（T13e r1 P1-2）", () => {
@@ -193,14 +200,30 @@ describe("调用方的画面闸（gate）与非 Esc 键的同一把锁（T41a �
     const order: string[] = [];
     await Promise.all([
       esc("a", { gate: async () => void order.push("esc-gate") }).then(() => order.push("esc-sent")),
-      esc.locked("b", async () => void order.push("key")),
+      esc.locked("b", async () => void order.push("key-gate"), async () => void order.push("key-sent")),
     ]);
-    expect(order).toEqual(["esc-gate", "esc-sent", "key"]);
+    expect(order).toEqual(["esc-gate", "esc-sent", "key-gate", "key-sent"]);
   });
-  test("locked 拿不到锁：fn 不跑，抛错", async () => {
+  test("locked 拿不到锁：gate、send 都不跑，抛错；gate 抛错：不发", async () => {
     const w = world({ ids: { t: "@1" }, noLock: true });
     let ran = false;
-    await expect(createEscGuard(w.deps).locked("t", async () => void (ran = true))).rejects.toThrow("等不到窗口锁");
+    await expect(createEscGuard(w.deps).locked("t", async () => void (ran = true), async () => void (ran = true))).rejects.toThrow("等不到窗口锁");
     expect(ran).toBe(false);
+    const ok = createEscGuard(world({ ids: { t: "@1" } }).deps);
+    await expect(ok.locked("t", async () => { throw new Error("额度菜单"); }, async () => void (ran = true))).rejects.toThrow("额度菜单");
+    expect(ran).toBe(false);
+  });
+  test("锁在 gate 期间被当过期回收了（r2 P1-3：持锁进程卡住 / 被暂停）：Esc 和普通键都不发", async () => {
+    const w = world({ ids: { t: "@1" } });
+    let held = true;
+    const lock = w.deps.lock;
+    w.deps.lock = async (k) => ({ ...(await lock(k))!, held: () => held });
+    const esc = createEscGuard(w.deps);
+    const lose = async () => void (held = false);
+    await expect(esc("t", { strict: true, gate: lose })).rejects.toThrow("被当过期回收");
+    held = true;
+    let sent = false;
+    await expect(esc.locked("t", lose, async () => void (sent = true))).rejects.toThrow("被当过期回收");
+    expect([w.sent.length, sent]).toEqual([0, false]);
   });
 });

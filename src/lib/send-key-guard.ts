@@ -2,17 +2,18 @@
  * `manager tmux-send-keys` 发键前的画面闸（T41a）：窗口停在要人决定的画面上就一个键都不发，除非调用方显式 --force。
  * 数字 / Enter 会替人选中高亮项（额度菜单里有花钱的选项、权限框等于替人批准），Esc / C-c 等于替人拒绝或取消，
  * 撞墙倒计时上随便敲一个字就取消 CC 排好的自动续跑——所以拦的是整个画面，不挑键。抓不到屏 / 空屏同样不发（认不出 ≠ 安全）。
- * owner 点过的按钮带「授权的画面」（--expect）：画面正是那种才发，换成别的（含普通输入框）就不发。
+ * owner 点过的按钮带「授权的画面」（--expect）和那一张框的指纹（--box）：画面是那种、而且还是那一张才发，换了就不发。
  * 强发、授权发每次追加一行审计（send-keys-audit.jsonl）；caller、authorizedBy 是调用方声明的，不是身份认证。
  * 单测 tests/send-key-guard.test.ts（真实画面 fixture）。
  */
+import { createHash } from "node:crypto";
 import { appendFileSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { parseAuqPane } from "./auq-pane.js";
 import { LOG_DIR } from "./paths.js";
 import type { RegistryAgent } from "./registry.js";
 import {
-  detectBypassConsentPrompt, detectRuntimePermissionPrompt, detectSessionIdlePrompt, detectSwitchConfirmPrompt, trustPromptMoves,
+  detectBypassConsentPrompt, detectRuntimePermissionPrompt, detectSessionIdlePrompt, detectSwitchConfirmPrompt, SWITCH_CONFIRM_TITLES, trustPromptMoves,
 } from "./tmux-helper.js";
 import { wallWaitOf } from "./wall-screen.js";
 
@@ -42,6 +43,16 @@ export type SeenScreen = AuthorizableScreen | "unreadable" | null;
 export function seenScreenOf(pane: string, runtime: string | undefined): SeenScreen {
   if (!pane.trim()) return "unreadable";
   return guardedScreenOf(pane, runtime) ?? (detectSwitchConfirmPrompt(pane) ? "switch_confirm" : null);
+}
+
+/**
+ * 那一张框的指纹：授权绑定到 owner 看到的那张，不是「同一类」——旧的切 Sonnet 按钮不能批准后来的切 effort 框。
+ * 切模型 / effort 框取标题到末行，别的画面取最后 12 行非空行；逐行压掉空白后 sha256 取前 12 位。❯ 停在哪一项也算在内（光标挪了，Enter 的意思就变了）
+ */
+export function screenFingerprint(pane: string, screen: AuthorizableScreen): string {
+  const lines = pane.split("\n").map((l) => l.replace(/\s+/g, " ").trim()).filter(Boolean);
+  const title = screen === "switch_confirm" ? lines.findLastIndex((l) => Object.hasOwn(SWITCH_CONFIRM_TITLES, l)) : -1;
+  return createHash("sha256").update(lines.slice(title >= 0 ? title : -12).join("\n")).digest("hex").slice(0, 12);
 }
 
 const SCREEN_TEXT: Record<AuthorizableScreen, string> = {
@@ -91,9 +102,12 @@ export interface SendKeysAudit {
   authorizedBy: string | null;
 }
 
-/** owner 在界面上点过才发键的路径（管理按钮等）调 manager 时用这个拼 argv：授权来源进审计；expect = 按钮对应的那种框，画面不是它就不发 */
-export const authorizedSendKeysArgs = (agent: string, ref: string, expect: AuthorizableScreen, keys: string[]): string[] =>
-  ["tmux-send-keys", agent, "--authorized", ref, "--expect", expect, ...keys];
+/**
+ * owner 在界面上点过才发键的路径（管理按钮等）调 manager 时用这个拼 argv：授权来源进审计；expect = 按钮对应的那种框，
+ * box = 发按钮时那一张框的 screenFingerprint：发键前重新抓屏，画面不是那种、或者指纹对不上（换了一张）就不发
+ */
+export const authorizedSendKeysArgs = (agent: string, ref: string, expect: AuthorizableScreen, box: string, keys: string[]): string[] =>
+  ["tmux-send-keys", agent, "--authorized", ref, "--expect", expect, "--box", box, ...keys];
 
 /** 追加一行；写不进去要抛出去——强发的前提是留了档，调用方据此不发键 */
 export function appendSendKeysAudit(entry: SendKeysAudit, path = SEND_KEYS_AUDIT_LOG): void {

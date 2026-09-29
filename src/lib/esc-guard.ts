@@ -46,14 +46,20 @@ export function createEscGuard(deps: EscGuardDeps) {
     console.warn(`⚠️ ${msg}`);
     if (strict) throw new Error(msg);
   };
+  const lockLost = (target: string) => `没发（${target}）：等的这段时间窗口锁被当过期回收了，别的进程可能刚发过`;
+  /** 发键用的锁键（Esc 和 locked 同一个开头）：查窗口 id 出错 = 不发（refuse 后返回 undefined）；窗口不在退回 windowKey */
+  const lockKeyOf = async (target: string, strict: boolean, label: string): Promise<string | undefined> => {
+    const id = await deps.windowId(target).then((x) => ({ x }), (e: Error) => ({ err: e }));
+    if ("err" in id) return void refuse(`${label}（${target}）：查不到窗口 id（${id.err.message}），换个键互斥不住别的发送方`, strict);
+    return id.x ?? windowKey(target);
+  };
   /**
    * unguarded：生命周期退出（kill / restart 清场）要关掉菜单本身，不走 blocked 那一查（runtimes/window-ops.ts）。
    * gate：调用方自己的画面闸，放在所有等待（锁、节流、blocked）之后、发之前；抛错 = 不发（manager/send-keys.ts）
    */
   async function sendEscape(target: string, opts: { strict?: boolean; unguarded?: boolean; gate?: () => Promise<void> } = {}): Promise<void> {
-    const id = await deps.windowId(target).then((x) => ({ x }), (e: Error) => ({ err: e }));
-    if ("err" in id) return refuse(`Esc 没发（${target}）：查不到窗口 id（${id.err.message}），换个键互斥不住别的发送方`, !!opts.strict);
-    const key = id.x ?? windowKey(target);
+    const key = await lockKeyOf(target, !!opts.strict, "Esc 没发");
+    if (key === undefined) return;
     return serial(key, () => sendLocked(key, target, !!opts.strict, !!opts.unguarded, opts.gate));
   }
   async function sendLocked(key: string, target: string, strict: boolean, unguarded: boolean, gate?: () => Promise<void>): Promise<void> {
@@ -69,7 +75,7 @@ export function createEscGuard(deps: EscGuardDeps) {
         return void console.warn(`⚠️ Esc 没发: ${blocked.message}`);
       }
       await gate?.();
-      if (lock.held && !lock.held()) return refuse(`Esc 没发（${target}）：等的这段时间窗口锁被当过期回收了，别的进程可能刚发过`, strict);
+      if (lock.held && !lock.held()) return refuse(`Esc ${lockLost(target)}`, strict);
       sent = true; // 从这里起键可能已经落地（send 抛错也可能发出去了）：记时刻，下一发照样隔开
       await deps.send(target, strict);
     } finally {
@@ -83,14 +89,19 @@ export function createEscGuard(deps: EscGuardDeps) {
   sendEscape.lastSentAt = async (target: string): Promise<number> => lastAt(await keyOf(target));
   /** 窗口的钥匙（tmux #{window_id}，解析不出退回 windowKey）：别的「按窗口跨进程记」的东西也用它（lib/program-input.ts） */
   sendEscape.keyOf = keyOf;
-  /** 非 Esc 的键拿同一把窗口锁跑 fn（不节流）：查画面到发键之间，别的进程的 Esc / 受闸发键插不进来；拿不到锁就抛、不跑 */
-  sendEscape.locked = async <T>(target: string, fn: () => Promise<T>): Promise<T> => {
-    const key = await keyOf(target);
+  /**
+   * 非 Esc 的键拿同一把窗口锁发（不节流）：拿到锁 → gate（调用方的画面闸，抛错 = 不发）→ 核对锁还是自己的 → send。
+   * 查画面到发键之间，别的进程的 Esc / 受闸发键插不进来；查不到窗口 id、拿不到锁、锁被回收过都抛错、不发（manager/send-keys.ts）
+   */
+  sendEscape.locked = async (target: string, gate: () => Promise<void>, send: () => Promise<void>): Promise<void> => {
+    const key = (await lockKeyOf(target, true, "没发"))!; // strict：出错已经抛了
     return serial(key, async () => {
       const lock = await deps.lock(key);
       if (!lock) throw new Error(`没发（${target}）：等不到窗口锁`);
       try {
-        return await fn();
+        await gate();
+        if (lock.held && !lock.held()) throw new Error(lockLost(target));
+        await send();
       } finally {
         lock.release();
       }

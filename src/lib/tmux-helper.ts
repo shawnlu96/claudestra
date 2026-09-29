@@ -16,6 +16,7 @@ import { RUNTIME_DIR, TMUX_SOCK } from "./paths.js"; export { TMUX_SOCK };
 import { sandboxDisabled } from "./sandbox.js";
 import { sandboxTmuxArgv, sandboxVerifyNewWindow } from "./sandbox-tmux.js"; export { sandboxTmuxArgv };
 import { windowKey } from "./tmux-target.js"; export { windowKey };
+import { inputBox } from "./input-box.js";
 export const MASTER_SESSION = "master";
 /**
  * 大总管窗口（index 0）的显式名字。不命名的话 tmux 按前台进程自动改名（claude / 版本号），
@@ -821,18 +822,19 @@ export interface SwitchConfirmPrompt {
   keys: string[];
 }
 
-const SWITCH_CONFIRM_TITLES: Record<string, SwitchConfirmKind> = {
+export const SWITCH_CONFIRM_TITLES: Record<string, SwitchConfirmKind> = {
   "Switch model?": "model",
   "Change effort level?": "effort",
 };
 
 /**
  * 认出切模型/effort 确认框并算出「选 Yes」的按键；别的框一律 null。
- * 只认底部：标题行必须独占一行、下面恰好是「Yes, switch to …」+「No …」两个编号项、
- * 且下面没有输入框页脚（真框盖住输入框；页脚还在 = 那段字只是屏幕上显示的内容）。
+ * 只认底部：标题行必须独占一行、下面恰好是「Yes, switch to …」+「No …」两个编号项、第 2 项就是最后一行，
+ * 且看不到真输入框、下面没有输入框页脚（真框盖住输入框；输入框 / 页脚还在 = 那段字只是屏上残留，Enter 会提交草稿）。
  */
 export function detectSwitchConfirmPrompt(pane: string): SwitchConfirmPrompt | null {
   const lines = trimTrailingBlank(pane.split("\n")).slice(-20);
+  if (inputBox(lines)) return null;
   let titleIdx = -1;
   let kind: SwitchConfirmKind | null = null;
   for (let i = lines.length - 1; i >= 0; i--) {
@@ -847,7 +849,7 @@ export function detectSwitchConfirmPrompt(pane: string): SwitchConfirmPrompt | n
     const m = raw.match(/^\s*(❯)?\s*\d{1,2}\.\s+(.+?)\s*$/);
     if (m) opts.push({ selected: !!m[1], label: m[2]! });
   }
-  if (opts.length !== 2) return null;
+  if (opts.length !== 2 || !/^\s*(❯)?\s*\d{1,2}\.\s/.test(below.at(-1)!)) return null;
   const yesM = opts[0]!.label.match(/^Yes, switch to (.+)$/i);
   if (!yesM || !/^No\b/i.test(opts[1]!.label)) return null;
   const sel = opts.findIndex((o) => o.selected);

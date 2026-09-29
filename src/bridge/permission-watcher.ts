@@ -27,6 +27,8 @@ import {
 import { tmuxScreenshot } from "./screenshot.js";
 import { buildComponents } from "./components.js";
 import { runManager } from "./management.js";
+import { forgetSwitchPrompt, switchPromptButtons } from "./swmodel-button.js";
+import { screenFingerprint } from "../lib/send-key-guard.js";
 import { listAgentsLatched, createFailureLatch } from "../lib/run-manager.js";
 import { parseAuqPane } from "../lib/auq-pane.js";
 import {
@@ -230,10 +232,10 @@ async function maybeConfirmSwitchModel(
   allowedUserIds: string[],
   discord: Client
 ): Promise<boolean> {
-  // 识别收敛到 detectSwitchConfirmPrompt：只认底部真框（标题独占一行 + Yes/No 两项），
-  // 旧的 pane.includes 会被 scrollback 里的字样误导，也不认 effort 框
-  const p = detectSwitchConfirmPrompt(pane);
-  if (!p) return false;
+  // 只认底部真框（detectSwitchConfirmPrompt）；框不在了，发过的按钮就作废（swmodel-button 按「那一张框」授权）
+  const found = detectSwitchConfirmPrompt(pane);
+  if (!found) return forgetSwitchPrompt(agentName);
+  const p = { ...found, box: screenFingerprint(pane, "switch_confirm") };
 
   if (p.kind === "effort") {
     if (consumeEffortIntent(agentName, p.target)) {
@@ -280,14 +282,14 @@ async function maybeConfirmSwitchModel(
 async function notifySwitchPrompt(
   agentName: string,
   channelId: string,
-  p: SwitchConfirmPrompt,
+  p: SwitchConfirmPrompt & { box: string },
   families: string[],
   pinnedFamily: string | null,
   allowedUserIds: string[],
   discord: Client
 ): Promise<void> {
   const isModel = p.kind === "model";
-  const key = isModel ? `swmodel|${[...families].sort().join(",")}` : `sweffort|${p.target.toLowerCase()}`;
+  const key = `${isModel ? `swmodel|${[...families].sort().join(",")}` : `sweffort|${p.target.toLowerCase()}`}|${p.box}`; // 换了一张框就重发（旧按钮已作废）
   if (lastNotified.get(channelId) === key) return;
   lastNotified.set(channelId, key);
   console.log(
@@ -322,16 +324,8 @@ async function notifySwitchPrompt(
           : `我没有代按。要切就点「切换」，不切点「不切」。`,
         mention,
       ].join("\n"),
-      // 两种框都是「1. Yes / 2. No」：swmodel_* 按钮发 Enter / Escape，同样适用
-      components: buildComponents([
-        {
-          type: "buttons",
-          buttons: [
-            { id: `swmodel_no:${agentName}`, label: "不切,保持现状", emoji: "🛡", style: "primary" },
-            { id: `swmodel_yes:${agentName}`, label: "切换", emoji: "🔁", style: "secondary" },
-          ],
-        },
-      ]),
+      // 两种框都是「1. Yes / 2. No」：swmodel_* 按钮发 Enter / Escape，同样适用；按钮绑定这一张框
+      components: buildComponents([switchPromptButtons(agentName, p.box)]),
       files: pngPath ? [{ attachment: pngPath }] : undefined,
     });
     permissionMessages.set(channelId, msg.id);
