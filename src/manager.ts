@@ -2700,10 +2700,8 @@ switch (cmd) {
     break;
   }
 
-  case "cost": {
-    await cmdCost(args);
-    break;
-  }
+  case "cost": await cmdCost(args); break;
+  case "codex-sub-archive": await (await import("./manager/codex-sub-archive.js")).cmdCodexSubArchive(args); break; // Codex 子线程自动归档开关（缺省关）
 
   case "invite-link": {
     await cmdInviteLink(args);
@@ -3003,6 +3001,7 @@ switch (cmd) {
         "auto-update claudestra on|off   — toggle Claudestra auto-update (default on)",
         "auto-update claude on|off       — toggle Claude Code auto-update (default on)",
         "auto-update channel beta|release — beta follows every commit on origin/main (default: release)",
+        "codex-sub-archive status|on|off — auto-archive Codex sub-threads idle 7 days (default off; the archive retention later deletes them)",
         "cost [--agent <name>] [--today|--week]  — aggregate token usage per agent or overall",
         "invite-link                     — generate the Discord bot invite URL (owner perms, for your own server)",
         "pair [--json]                   — print a QR code / link / 8-char code so a phone or browser can pair with this machine through the relay (RELAY_URL in .env)",
