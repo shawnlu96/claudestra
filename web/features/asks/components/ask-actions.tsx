@@ -8,6 +8,7 @@ import { useT } from "@/lib/i18n";
 import { answeredGroups, rowGroup, wireLabels, type WebAsk } from "../asks-model";
 import { asksStore } from "../asks-store";
 import { AuqChoices, PermissionChoices, ReplyChoices } from "./ask-choices";
+import { AssignedChoices, assignedRejectText, isHumanNodeAsk } from "./assigned-choices";
 import { TerminalIcon } from "./ask-icons";
 
 /**
@@ -22,11 +23,13 @@ export function AskActions({ ask, agent }: { ask: WebAsk; agent: string }) {
   const dialogAgent = ask.fromAgent ?? "";
   const runtime = ask.source === "auq" || ask.source === "permission" || ask.source === "codex";
 
-  // 409 分两种：多行里这一项刚在聊天 / Discord 里答过（其余行还能答，重拉后卡片会收掉它），其余都当整条已结案——
+  // 指派门拒掉的按 code 说（assignedRejectText）。409 另分两种：多行里这一项刚在聊天 / Discord 里答过（其余行还能答，重拉后卡片会收掉它），其余都当整条已结案——
   // 弹框端点的 409（弹框已经没了）不带 code，也归这一类，别把英文原文露给 owner
   // 没到 bridge（断网、中继断了）：别把浏览器的英文原文露给 owner
   const fail = (e: unknown) => {
     if (!(e instanceof ApiError)) return t("没发出去（连不上），再点一次");
+    const assigned = assignedRejectText(e.code, t);
+    if (assigned) return assigned;
     if (e.status !== 409) return e.message;
     return e.code === "ask_part_answered" ? t("这一项刚在别处答过了，已刷新，剩下的还能答") : t("这件已经处理过了（或已过期）");
   };
@@ -49,7 +52,10 @@ export function AskActions({ ask, agent }: { ask: WebAsk; agent: string }) {
   return (
     <div className="mt-3">
       {!runtime && !canAnswer && <p className="text-[13px] opacity-75">{t("这个登录凭据只能看，作答要在 owner 本人的设备上")}</p>}
-      {!runtime && canAnswer && (
+      {!runtime && canAnswer && isHumanNodeAsk(ask) && (
+        <AssignedChoices busy={busy} onAnswer={(wire, text, atts) => run(() => answerAskCard(ask.project, ask.id, { choices: [wire], text, atts }), wireLabels(rows, [wire]), text)} />
+      )}
+      {!runtime && canAnswer && !isHumanNodeAsk(ask) && (
         <ReplyChoices
           rows={rows}
           allowText={ask.allowText}
