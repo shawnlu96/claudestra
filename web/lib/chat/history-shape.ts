@@ -147,19 +147,18 @@ export function askAnchor(messages: readonly ChatMessage[], askId: string | unde
 
 function userMessage(m: NeutralMessage, anchor: ChatMessage | null, opts: ShapeOpts, forms: FormLookup): ChatMessage {
   const text = m.text || "";
-  // CC 写入的中断标记 / TUI 斜杠命令记录不是用户打的字 → 轻分隔线
-  if (/^\[Request interrupted/.test(text)) return systemDivider(m, "回合已中断", opts.sid);
-  const cmd = text.match(/^<command-name>(\/[\w-]+)<\/command-name>/);
-  if (cmd) return systemDivider(m, cmd[1], opts.sid);
   const from = isSelfSource(m.from, m.fromId, opts.selfIds ?? new Set()) ? undefined : m.from; // 本人的所有来源都不标
+  // CC 写入的中断标记 / TUI 斜杠命令记录不是用户打的字 → 轻分隔线。只认非外源：外源正文写这两种开头，
+  // 气泡会变成一条分隔线、正文全藏，agent 却收到全文（tests/web-history-shape.test.ts「外源开头」）
+  if (!from && /^\[Request interrupted/.test(text)) return systemDivider(m, "回合已中断", opts.sid);
+  const cmd = from ? null : text.match(/^<command-name>(\/[\w-]+)<\/command-name>/);
+  if (cmd) return systemDivider(m, cmd[1], opts.sid);
   const own = from ? text : stripMentionDirective(text); // @ 委托指令行只给 agent 看；只剥本人的（外源的末行照原样给 owner 看）
   if (m.wire) markAnswerClicks(m.wire, anchor, forms); // 作答：正文已是人话，原文只用来回填已答态
   const click = m.wire ? null : resolveUserClick(own, anchor, forms);
-  let raw = click?.text ?? own;
-  // 外源入站剥掉 bridge 注入的来源头（[🤝 来自 peer…] 多行方括号块）——UI 用来源 chip 展示，留着就是双份说明。
-  // 纯附件消息正文以 [attachment: …] 开头，那不是来源头：剥了图就没了
-  if (from) raw = raw.replace(/^\[(?!attachment: )[^\]]{0,800}\]\s*\n*/, "");
-  const { content, attachments } = extractAttachments(raw);
+  // bridge 注入的来源头只由服务端按 channel 属性剥（lib/inbound-body.ts channelBodyText）；这里再按文本剥开头的 […]，
+  // 外源写在开头的方括号块 owner 就看不到、agent 却照收，所以正文原样显示
+  const { content, attachments } = extractAttachments(click?.text ?? own);
   const pending = click && !click.resolved ? { clickRaw: own } : {}; // 存剥过指令行的：翻页补解析时不能把指令行带回气泡
   const ask = { ...(m.askId ? { askId: m.askId } : {}), ...(m.wire ? { wire: m.wire } : {}) };
   return { id: `h${m.seq}`, role: "user", content, ts: m.ts, from, sid: opts.sid, seqEnd: m.seq, ...(attachments ? { attachments } : {}), ...pending, ...ask };
