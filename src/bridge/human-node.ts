@@ -200,7 +200,9 @@ export function initHumanNode(): () => void {
       }),
     cancelAsk: (id, reason) => {
       const a = closeAsk(askDb(), id, "cancelled", reason);
-      if (a) publishAsk(a);
+      if (!a) return;
+      publishAsk(a);
+      console.log(`🧹 撤掉过时的指派 ${a.id}（${a.taskId} → ${a.assignee}）`);
     },
     notifyPm: (task, text, askId) => notifyTaskPm(task, task.project, text, askId, "human-node"),
   };
