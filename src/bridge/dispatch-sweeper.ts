@@ -45,7 +45,7 @@ async function notifyPm(d: DispatchSweepDeps, n: Notice): Promise<void> {
 }
 
 /** 跑一轮；出错只记日志（下一分钟再来） */
-export async function sweepOnce(d: DispatchSweepDeps): Promise<void> {
+async function sweepOnce(d: DispatchSweepDeps): Promise<void> {
   if (!(d.hasOpen ?? hasOpenDispatches)()) return;
   try {
     const r = await d.runManager("ledger", "dispatch-sweep");

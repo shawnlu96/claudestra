@@ -1167,7 +1167,6 @@ discord.once("ready", async () => {
   // v2.7+ 注入链路查询做「窗口活着但 channel-server 掉线」哨兵
   startWedgeWatcher(discord, (channelId) => clients.has(channelId));
 
-
   // v2.16+ 模型漂移告警——CC 用量保护静默降级不再无感（2026-07-30 外部用户
   // 报「莫名其妙被切到 Sonnet 4.6」）。Discord 告警 + session_anomaly SSE。
   {
@@ -3412,7 +3411,6 @@ void import("./bridge/ask-entry.js").then((m) => m.initAskWiring({ // 待你处�
 }));
 void import("./bridge/fleet/service.js").then((m) => m.initFleet({ clients, deliver, controlChannelId: CONTROL_CHANNEL_ID })); // 批量管理：LP 状态轮询 + fleet 动作（bridge/fleet/）
 void import("./bridge/ledger-audit-service.js").then((m) => m.startLedgerAudit({ clients, deliver, hold: (e) => void heldLocalMsgs.holdEnv(e), lastMessageSource, runManager })); // 台账巡检
-void import("./bridge/dispatch-sweeper.js").then((m) => m.startDispatchSweeper({ clients, deliver, runManager })); // 统一派单：重发、回执、超时提醒
 
 // 清扫上次崩溃 / 被杀残留的 webterm-* viewer session（grouped session 视图，kill 不伤 master 本体）；Discord 与 Web-only 模式都要
 sweepStaleTerminalSessions().catch(() => {});
