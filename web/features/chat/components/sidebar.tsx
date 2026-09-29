@@ -235,7 +235,6 @@ export function Sidebar({ onSelect }: { onSelect: () => void }) {
             onPeers={() => setSettingsPage("peers")}
             onStats={() => setShowStats(true)}
           />
-          {/* 图片与文件：guest 也能用（/media 按 scope 过滤、非全权只给可信文件），不藏 */}
           <SidebarMediaButton />
           <button
             className="flex size-7 items-center justify-center rounded-lg text-base-content/50 transition-colors hover:bg-base-300 hover:text-base-content"

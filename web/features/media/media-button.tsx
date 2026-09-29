@@ -6,7 +6,10 @@ import { MediaPanel } from "./media-panel";
 
 const SIDEBAR_ICON_BTN = "flex size-7 items-center justify-center rounded-lg text-base-content/50 transition-colors hover:bg-base-300 hover:text-base-content";
 
-/** 侧栏头部的「图片与文件」入口：全部会话（可在面板里再按会话筛），样式与旁边的用量 / 设置按钮一致 */
+/**
+ * 侧栏头部的「图片与文件」入口：全部会话（可在面板里再按会话筛），样式与旁边的用量 / 设置按钮一致。
+ * 不像旁边的管理按钮那样只给全权设备（useFullScope）：/media 按 scope 过滤、非全权只给可信文件，guest 也能用。
+ */
 export function SidebarMediaButton() {
   const t = useT();
   const [open, setOpen] = useState(false);
