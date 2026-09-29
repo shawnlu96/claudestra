@@ -45,6 +45,11 @@ export function relayStatus<T>(): Promise<T> {
   return api<T>("/relay/status", { timeoutMs: 5000 });
 }
 
+/** 一键接入中继：bridge 写 .env 的 RELAY_URL 并当场连（不给地址 = 官方中继） */
+export function relaySetup<T>(): Promise<T> {
+  return api<T>("/relay/setup", { method: "POST", json: {}, timeoutMs: 15_000 });
+}
+
 // ── 「访问」页总览：中继 + 局域网（便宜；Tailscale 那半走下面的 remote-access）──
 export function accessPaths<T>(): Promise<T> {
   return api<T>("/access-paths", { timeoutMs: 5000 });

@@ -6,8 +6,9 @@
 import { classifyRun, type RunEvidence } from "../lib/autopilot-run.js";
 import { finishRun, type ActiveRun } from "../lib/autopilot-wake.js";
 import { appendRunLog, runLogLine } from "../lib/autopilot-log.js";
-import { updateMissions, type Mission } from "../lib/missions.js";
+import { missionOnClaudeCode, updateMissions, type Mission } from "../lib/missions.js";
 import { lastEvidenceAt, peekTracked, takeEvidence, takeOrphan } from "./autopilot-evidence.js";
+import { quotaWall } from "./quota-wall-wiring.js";
 
 /** done 之后至少等这么久、且最后一条事件之后安静这么久才取证；最多等 EVIDENCE_MAX_MS（watcher 另有 2s 轮询兜底） */
 let EVIDENCE = { minMs: 2_000, quietMs: 1_000, maxMs: 10_000 };
@@ -60,6 +61,14 @@ export async function closeRun(
     const pending = pendingClose.get(runId);
     const meta = peekTracked(agent, runId) ?? pending?.meta ?? null;
     const ev = opts.ev ?? pending?.ev ?? takeEvidence(agent, runId);
+    // CC 撞墙：下次唤醒按闸的重置时刻排（出闸时 mission.ts 另行放行）。每次尝试都按当下重算：写锁超时重试时闸可能已经开了。
+    // 闸在这一轮撞额度之后已经提前开了（用卡 / clear / 探测）：按出闸时刻排，别退回原文的重置时刻白押（T24 adv2 P2-5）
+    const wall = missionOnClaudeCode(agent) ? quotaWall() : null;
+    const wallUntil = wall?.until();
+    const exitAt = wall?.snapshot().wall?.exit?.at;
+    if (wallUntil) ev.wallUntil = wallUntil;
+    else if (ev.rateLimitText && exitAt !== undefined && exitAt >= (ev.rateLimitAt ?? 0)) ev.wallUntil = exitAt;
+    else delete ev.wallUntil;
     const now = Date.now();
     const cls = classifyRun(ev);
     const out = await updateMissions((all) => {

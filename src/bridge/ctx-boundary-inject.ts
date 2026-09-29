@@ -11,6 +11,7 @@ import { statePath } from "../lib/paths.js";
 import { readJsonStateSync } from "../lib/state-file.js";
 import { MASTER_WINDOW_NAME, MASTER_WINDOW_TARGET, tmuxRawStrict, windowKey, windowTarget } from "../lib/tmux-helper.js";
 import { paneLooksWorking, paneShowsApiRetry } from "../lib/turn-state.js";
+import { wallWaitKind } from "../lib/quota-wall-text.js";
 import { effectiveAction, normalizeCompactKeep, type CompactAction, type CompactKeep } from "../lib/ctx-boundary-policy.js";
 import { boxShows, normBox, ourRemainder, sizeText, tierNote, tiersThatFit, type PaneSize } from "../lib/ctx-boundary-fit.js";
 import { paneQuotaState, readLpPane, stripAnsi, type PaneQuotaState } from "../lib/lp-state.js";
@@ -158,7 +159,7 @@ function noteCompactInjected(target: string, now: number): void {
 }
 
 export function paneGateOf(p: PaneCapture, r: PaneQuotaState): PaneGate {
-  return { ...r, queued: QUEUED_RE.test(p.plain), apiRetry: paneShowsApiRetry(p.plain), copyMode: p.inMode, notCc: !CC_COMMAND_RE.test(p.command) };
+  return { ...r, queued: QUEUED_RE.test(p.plain), apiRetry: paneShowsApiRetry(p.plain), copyMode: p.inMode, notCc: !CC_COMMAND_RE.test(p.command), wallWait: wallWaitKind(p.plain) !== null };
 }
 
 /** 敲字之后还能不能按键：不是 CC、copy-mode、对话框 / 菜单、撞墙没开 LP 时一个键都不按 */

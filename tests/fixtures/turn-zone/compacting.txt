@@ -1,0 +1,24 @@
+
+
+✻ Baked for 12s · done 2:01 AM
+
+❯ Count from 1 to 5, one per line.
+
+⏺ 1
+  2
+  3
+  4
+  5
+
+✻ Cooked for 4s · done 2:01 AM
+
+❯ /compact 保留：颜色问答与数数结果。
+
+✻ Compacting conversation… (0s)
+
+────────────────────────────────────────────────────────────────────────────────
+❯
+────────────────────────────────────────────────────────────────────────────────
+  ⚠ Lower priority until 3:20am · 90% allowance left · /low-priority to stop
+  Opus 5.5 · ctx 96% · 5h 101% · 7d 29%
+  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents

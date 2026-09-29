@@ -6,6 +6,7 @@ import { CtxWarnBanner } from "./ctx-warn-banner";
 import { SkillsSheet } from "./skills-sheet";
 import { matchSlashCommands, slashQuery, type SlashCmd } from "../slash-match";
 import { MicIcon, PaperclipIcon, SendIcon } from "./composer-icons";
+import { PasteExternalButton } from "./paste-external";
 import { UpdateHintBanner } from "./update-hint-banner";
 import { clearDraft, loadDraft, saveDraft } from "../drafts";
 import { agentSkills } from "@/lib/api/chat";
@@ -633,12 +634,9 @@ export function Composer() {
               className="relative flex size-8 items-center justify-center overflow-hidden rounded-[9px] text-base-content/60 transition-colors hover:bg-base-content/[0.06] hover:text-base-content disabled:opacity-30 disabled:hover:bg-transparent"
             >
               <PaperclipIcon />
-              {/* 原生 input 透明铺满按钮:点击直达 input(无 .click() 转发),
-                  iOS 把文件菜单锚在这个真实矩形上——位置就是按钮本身。
-                  ⚠ overflow-hidden + text-[0] 缺一不可:iOS 的 file input 内部
-                  原生控件有固有宽度,会从 32px 盒子向右透明溢出,把旁边的 /
-                  (Skills)按钮整个盖住——点 Skills 弹出的全是文件菜单
-                  (2026-07-28 用户实锤)。溢出被父级剪掉后不再参与命中。 */}
+              {/* 原生 input 透明铺满按钮:点击直达 input(无 .click() 转发),iOS 把文件菜单锚在这个真实矩形上。
+                  ⚠ overflow-hidden + text-[0] 缺一不可:iOS 的 file input 原生控件有固有宽度,会从 32px 盒子向右透明溢出,
+                  盖住旁边的 /(Skills)按钮——点 Skills 弹出的全是文件菜单。溢出被父级剪掉后不再参与命中。 */}
               {!(disabled || files.length >= MAX_FILES) && (
                 <input
                   ref={fileRef}
@@ -660,6 +658,7 @@ export function Composer() {
             >
               /
             </button>
+            <PasteExternalButton agent={active} disabled={disabled} />
             <button
               // 走 pointerdown/up 的按住手势,pointerdown 里 preventDefault ⇒ 系统
               // 不会派发合成 click。data-hold 让 [tap-lost] 探针知道这里没有 click

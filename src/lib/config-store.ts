@@ -60,6 +60,8 @@ export interface AppConfig {
   fleet?: { compactKeep?: string };
   /** 推送不带正文：Web Push / APNs 只发「Claudestra · 有新消息」（lib/push-redact.ts）。缺省关；派发器每条现读，改完不用重启 */
   pushNoContent?: boolean;
+  /** 网页的 Chat（人与人，/talk）入口：缺省关——侧栏不出「工作台 | Chat」切换，/talk 跳回 /chat。只收界面，talk API 与数据照旧（T50） */
+  talkEnabled?: boolean;
 }
 
 /** 归档保留天数缺省值（设置里可改） */
@@ -101,6 +103,7 @@ function merge(base: AppConfig, raw: any): AppConfig {
     // 批量管理的保留清单（bridge/fleet 的 compactKeep()）：白名单只带 compactKeep；漏在这里读不到，任何 set* 还会把它抹掉。
     // 和上下文边界的 keep 同一个入口 normalizeCompactKeep，不合格当没配；存原文（多行照收），敲之前再取它规范好的那一行
     ...(normalizeCompactKeep(raw.fleet?.compactKeep).ok ? { fleet: { compactKeep: raw.fleet.compactKeep } } : {}),
+    ...(typeof raw.talkEnabled === "boolean" ? { talkEnabled: raw.talkEnabled } : {}),
   };
 }
 
@@ -246,6 +249,12 @@ export async function setQuotaLive(enabled: boolean): Promise<AppConfig> {
 export async function setPushNoContent(enabled: boolean): Promise<AppConfig> {
   const cfg = await readConfig();
   cfg.pushNoContent = enabled;
+  await writeConfig(cfg);
+  return cfg;
+}
+
+export async function setTalkEnabled(enabled: boolean): Promise<AppConfig> {
+  const cfg = { ...(await readConfig()), talkEnabled: enabled };
   await writeConfig(cfg);
   return cfg;
 }

@@ -267,7 +267,7 @@ export function preemptHeadline(c: Cut): string {
   ].join("\n");
 }
 
-export type StopOutcome = "fired" | "requested" | "not_busy" | "failed";
+export type StopOutcome = "fired" | "requested" | "not_busy" | "failed" | "wall_wait";
 
 /**
  * 停字消息的抬头：不续做。fired = 已替你打断；requested = 已请运行时中止、没有回执（Pi）；not_busy = 本来就没有在跑的回合；
@@ -281,6 +281,7 @@ export function stopHeadline(c: Cut | undefined, outcome: StopOutcome, queuedBef
   const what = outcome === "fired" && c ? `已替你打断（${doingText(c)}）`
     : outcome === "requested" ? "已请运行时中止当前回合（没有回执：如果还在跑，你自己马上停下）"
     : outcome === "not_busy" ? "你刚才没有在跑的回合（如果这是在回答你刚问的问题，就按回答处理，不是叫停）"
+    : outcome === "wall_wait" ? "你停在撞墙等待画面（额度菜单 / 自动续跑倒计时）上，没有在跑，bridge 没发任何键；到点自动续跑的那一轮也别接着做"
     : "bridge 没能替你打断，请你自己马上停下手上的事";
   const queued = queuedBefore.length
     ? `\n停之前还有 ${queuedBefore.length} 条消息排在队列里、会在这条之后送到（${queuedBefore.map((q) => `「${clip(norm(q), 30)}」`).join("、")}）：它们是停之前发的，送到时先别照做，问用户还要不要。`
@@ -297,6 +298,7 @@ export function stopWaitReply(agent: string, outcome: StopOutcome): string {
   const what = outcome === "fired" ? "Pi 回执：已中止当前回合"
     : outcome === "requested" ? "已请 Pi 中止当前回合，没等到回执"
     : outcome === "not_busy" ? "它本来就空闲，没有在跑的回合"
+    : outcome === "wall_wait" ? "它停在撞墙等待画面上，没有在跑，没发键"
     : "中止没发出去，它可能还在跑";
   return `[⏹ bridge] 已叫停 ${agent}：${what}。它还没回这条「停」，之后的回复见对话。`;
 }
