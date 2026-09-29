@@ -1,42 +1,13 @@
 "use client";
 import { useEffect, useState } from "react";
 import { enablePush, disablePush, getPushSubscription } from "@/lib/push/client";
-import { getSettings, putSettings } from "@/lib/api/settings";
 import { useT } from "@/lib/i18n";
 import { Section } from "./section";
-
-/**
- * 「推送不带正文」：整台电脑的开关（bridge 的 config.json，每条推送现读；src/lib/push-redact.ts），不是本设备的。
- * 写要 manage 权限，guest 点了拿到 403 就把错误显示出来。
- */
-function usePushNoContent(open: boolean) {
-  const [on, setOn] = useState<boolean | null>(null);
-  const [busy, setBusy] = useState(false);
-  const [err, setErr] = useState("");
-  useEffect(() => {
-    if (!open) return;
-    getSettings()
-      .then((j) => setOn(j.pushNoContent))
-      .catch((e: Error) => setErr(e.message));
-  }, [open]);
-  const toggle = async () => {
-    if (on === null) return;
-    setBusy(true);
-    setErr("");
-    try {
-      setOn((await putSettings({ pushNoContent: !on })).pushNoContent);
-    } catch (e) {
-      setErr((e as Error).message);
-    } finally {
-      setBusy(false);
-    }
-  };
-  return { on, busy, err, toggle };
-}
+import { useSettingsFlag } from "./settings-flag";
 
 /** Web Push(owner 2026-07-16):本设备订阅状态 + 这台电脑的「不带正文」开关 */
 export function usePushToggle(open: boolean) {
-  const noContent = usePushNoContent(open);
+  const noContent = useSettingsFlag("pushNoContent", open); // 整台电脑的「推送不带正文」（src/lib/push-redact.ts）
   const [pushOn, setPushOn] = useState(false);
   const [pushMsg, setPushMsg] = useState("");
   const [pushBusy, setPushBusy] = useState(false);

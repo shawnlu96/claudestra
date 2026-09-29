@@ -57,6 +57,8 @@ export interface AppConfig {
   quotaClaudeBackground?: boolean;
   /** 推送不带正文：Web Push / APNs 只发「Claudestra · 有新消息」（lib/push-redact.ts）。缺省关；派发器每条现读，改完不用重启 */
   pushNoContent?: boolean;
+  /** 网页的 Chat（人与人，/talk）入口：缺省关——侧栏不出「工作台 | Chat」切换，/talk 跳回 /chat。只收界面，talk API 与数据照旧（T50） */
+  talkEnabled?: boolean;
 }
 
 /** 归档保留天数缺省值（设置里可改） */
@@ -95,6 +97,7 @@ function merge(base: AppConfig, raw: any): AppConfig {
     ...(typeof raw.quotaLive === "boolean" ? { quotaLive: raw.quotaLive } : {}),
     ...(typeof raw.quotaClaudeBackground === "boolean" ? { quotaClaudeBackground: raw.quotaClaudeBackground } : {}),
     ...(typeof raw.pushNoContent === "boolean" ? { pushNoContent: raw.pushNoContent } : {}),
+    ...(typeof raw.talkEnabled === "boolean" ? { talkEnabled: raw.talkEnabled } : {}),
   };
 }
 
@@ -240,6 +243,12 @@ export async function setQuotaLive(enabled: boolean): Promise<AppConfig> {
 export async function setPushNoContent(enabled: boolean): Promise<AppConfig> {
   const cfg = await readConfig();
   cfg.pushNoContent = enabled;
+  await writeConfig(cfg);
+  return cfg;
+}
+
+export async function setTalkEnabled(enabled: boolean): Promise<AppConfig> {
+  const cfg = { ...(await readConfig()), talkEnabled: enabled };
   await writeConfig(cfg);
   return cfg;
 }

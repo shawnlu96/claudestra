@@ -4,7 +4,9 @@
  * 只有勾选后「丢进工作台」才会交给 agent。侧栏顶部的「工作台 | Chat」和 /chat 共用同一个切换组件。
  * 壳子照 /chat 的 PWA 不变式：根 fixed inset-0 overflow-hidden，安全区由各面板自己垫。
  */
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { useRouter } from "next/navigation";
+import { talkRedirect } from "@/lib/talk-gate";
 import { useT } from "@/lib/i18n";
 import { NewRoomModal } from "./new-room-modal";
 import { RoomView } from "./room-view";
@@ -12,6 +14,7 @@ import { TalkComposer } from "./talk-composer";
 import { PlusIcon } from "./talk-icons";
 import { useMachineFp, useTalk } from "./use-talk";
 import { WorkspaceSwitch } from "./workspace-switch";
+import { useTalkEnabled } from "./use-talk-enabled";
 
 const pad = (n: number) => String(n).padStart(2, "0");
 const short = (ts: number) => {
@@ -19,10 +22,16 @@ const short = (ts: number) => {
   return new Date().toDateString() === d.toDateString() ? `${pad(d.getHours())}:${pad(d.getMinutes())}` : `${d.getMonth() + 1}/${d.getDate()}`;
 };
 
-/** 切机器 = 按新 fp 重挂整页（房间、目录、事件流都属于上一台机器） */
+/** 切机器 = 按新 fp 重挂整页（房间、目录、事件流都属于上一台机器）；Chat 入口关着（缺省）就跳回工作台（lib/talk-gate.ts） */
 export function TalkApp() {
   const fp = useMachineFp();
-  return <TalkPage key={fp ?? "none"} />;
+  const on = useTalkEnabled();
+  const router = useRouter();
+  const to = talkRedirect(on);
+  useEffect(() => {
+    if (to) router.replace(to);
+  }, [to, router]);
+  return on ? <TalkPage key={fp ?? "none"} /> : null;
 }
 
 function TalkPage() {

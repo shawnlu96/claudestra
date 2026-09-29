@@ -31,7 +31,7 @@ interface Built {
   sha: string;
 }
 
-async function resolveAgent(principal: Principal, raw: unknown): Promise<{ name: string; channelId: string } | DropError> {
+export async function resolveAgent(principal: Principal, raw: unknown): Promise<{ name: string; channelId: string } | DropError> {
   if (typeof raw !== "string" || !raw) return { status: 400, error: "agent required" };
   const bare = raw.replace(/^agent-/, "");
   const d = asksDeps();
@@ -95,7 +95,7 @@ async function buildDrop(me: Me, principal: Principal, b: Record<string, unknown
   return { room: lines.room, msgs: lines.picked, agent, from, body, content, sha: contentSha(content) };
 }
 
-async function sendOrHold(env: Envelope, agent: { name: string; channelId: string }): Promise<"sent" | "held"> {
+async function trySend(env: Envelope, agent: { name: string; channelId: string }): Promise<"sent" | "held"> {
   const d = asksDeps()!;
   const live = d.clients.get(agent.channelId);
   if (live) {
@@ -111,6 +111,17 @@ async function sendOrHold(env: Envelope, agent: { name: string; channelId: strin
   }
   d.hold(env);
   return "held";
+}
+
+/** 在线且空闲才直接送，否则进押后队列；投递本身出错也进押后队列（丢进工作台与粘贴外部文字共用，what 只进日志） */
+export async function sendOrHold(env: Envelope, agent: { name: string; channelId: string }, what: string): Promise<"sent" | "held"> {
+  try {
+    return await trySend(env, agent);
+  } catch (e) {
+    console.error(`⚠️ ${what}投递出错，进押后队列: ${(e as Error).message}`);
+    asksDeps()?.hold(env);
+    return "held";
+  }
 }
 
 /**
@@ -138,14 +149,7 @@ export async function commitDrop(me: Me, principal: Principal, b: Record<string,
     content: built.body,
     meta: { messageId, triggerKind: "system", ts: new Date(now).toISOString(), threadId: newThreadId(), skipInterAgentWatchdog: true },
   };
-  let state: "sent" | "held";
-  try {
-    state = await sendOrHold(env, built.agent);
-  } catch (e) {
-    console.error(`⚠️ 丢进工作台投递出错，进押后队列: ${(e as Error).message}`);
-    asksDeps()?.hold(env);
-    state = "held";
-  }
+  const state = await sendOrHold(env, built.agent, "丢进工作台");
   if (state === "sent") settleDrop(messageId, "sent");
   else publishTalk(built.room, "drop", { dropId: b.dropId, state });
   console.log(`📥 丢进工作台 ${b.dropId}：${me.personId} → ${built.agent.name}（${built.msgs.length} 条，${state}）`);
