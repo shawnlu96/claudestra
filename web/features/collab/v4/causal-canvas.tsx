@@ -6,9 +6,9 @@
  * 标签避让、视口规则、「还有 N 件在右边」在 canvas-view.ts；选中状态的形状在 v4-selection.ts。
  */
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { LineView, Tr } from "../collab-model";
-import type { Box, Canvas, CEdge, CNode } from "./causal-model";
-import { edgePath, fitAllView, MAX_K, MIN_K, offscreen, placeLabels, reconcileView, VIEW_PAD, type Focus, type View, type ViewState } from "./canvas-view";
+import type { LedgerOverview, LineView, Tr } from "../collab-model";
+import { causalCanvas, VIEW_PAD, type Box, type Canvas, type CEdge, type CNode } from "./causal-model";
+import { edgePath, fitAllView, MAX_K, MIN_K, offscreen, placeLabels, reconcileView, type Focus, type View, type ViewState } from "./canvas-view";
 import { depKey, edgeSel, type Selection } from "./v4-selection";
 import { StageBar } from "./stage-bar";
 import v from "./v4.module.css";
@@ -39,11 +39,9 @@ function NodeCard(props: { n: CNode; line: LineView | undefined; act: string; se
   );
 }
 
-/** 视口：平移缩放、打开时摆一次、「适配全部」、Focus 变了才居中（canvas-view.ts reconcileView）、视口外还剩几件；点空白 = onBackground */
-function useViewport(canvas: Canvas, focus: Focus | null, onBackground: () => void) {
+/** 画布视口的尺寸；布局按它排（causal-model.ts），没量到之前是 0 */
+function useBoxSize() {
   const box = useRef<HTMLDivElement>(null);
-  const drag = useRef<{ x: number; y: number; vx: number; vy: number; moved: boolean } | null>(null);
-  const [st, setSt] = useState<ViewState>(INITIAL);
   const [size, setSize] = useState({ w: 0, h: 0 });
   useEffect(() => {
     const el = box.current;
@@ -52,13 +50,18 @@ function useViewport(canvas: Canvas, focus: Focus | null, onBackground: () => vo
     ro.observe(el);
     return () => ro.disconnect();
   }, []);
+  return { box, size };
+}
+
+/** 视口：平移缩放、打开时摆一次、「适配全部」、Focus 变了才居中（canvas-view.ts reconcileView）、视口外还剩几件；点空白 = onBackground */
+function useViewport(canvas: Canvas, size: { w: number; h: number }, box: React.RefObject<HTMLDivElement | null>, focus: Focus | null, onBackground: () => void) {
+  const drag = useRef<{ x: number; y: number; vx: number; vy: number; moved: boolean } | null>(null);
+  const [st, setSt] = useState<ViewState>(INITIAL);
   // 渲染时对齐（不走 effect）：reconcileView 没事可做时原样返回同一个对象，所以这里不会来回触发
   const next = reconcileView(st, canvas, size.w, size.h, focus);
   if (next !== st) setSt(next);
   const view = next.view;
   const setView = (f: (cur: View) => View) => setSt((cur) => ({ ...cur, view: f(cur.view) }));
-  // 「适配全部」可以缩到比滚轮下限更小；那之后滚轮的下限跟着放低，不然往外滚一下反而跳大
-  const minK = Math.min(MIN_K, size.w ? fitAllView(canvas, size.w, size.h).k : MIN_K);
   const fitAll = () => size.w && setView(() => fitAllView(canvas, size.w, size.h));
   const off = size.w ? offscreen(canvas, view, size.w, size.h) : null;
 
@@ -66,7 +69,7 @@ function useViewport(canvas: Canvas, focus: Focus | null, onBackground: () => vo
     const r = box.current!.getBoundingClientRect();
     const px = e.clientX - r.left, py = e.clientY - r.top;
     setView((cur) => {
-      const k = Math.min(MAX_K, Math.max(minK, cur.k * (e.deltaY < 0 ? 1.1 : 0.9)));
+      const k = Math.min(MAX_K, Math.max(MIN_K, cur.k * (e.deltaY < 0 ? 1.1 : 0.9)));
       return { k, x: px - ((px - cur.x) * k) / cur.k, y: py - ((py - cur.y) * k) / cur.k };
     });
   };
@@ -87,7 +90,7 @@ function useViewport(canvas: Canvas, focus: Focus | null, onBackground: () => vo
   };
 
   const handlers = { onWheel, onPointerDown: onDown, onPointerMove: onMove, onPointerUp: onUp, onPointerCancel: onUp };
-  return { box, view, fitAll, off, handlers };
+  return { view, fitAll, off, handlers };
 }
 
 /** 这根线里有没有被选中的依赖（任务详情点进来的是单条，画布上点的是整根线的全部） */
@@ -107,7 +110,7 @@ function EdgeLabels({ canvas, selection, onSelect }: { canvas: Canvas; selection
 }
 
 export function CausalCanvas(props: {
-  canvas: Canvas;
+  ov: Pick<LedgerOverview, "tasks" | "items" | "deps">;
   lines: ReadonlyMap<string, LineView>;
   actionText: (id: string) => string;
   selection: Selection;
@@ -117,13 +120,15 @@ export function CausalCanvas(props: {
   onSelect: (s: Selection) => void;
   tr: Tr;
 }) {
-  const { canvas, lines, selection, focus, onSelect, tr } = props;
-  const { box, view, fitAll, off, handlers } = useViewport(canvas, focus, () => onSelect(null));
+  const { ov, lines, selection, focus, onSelect, tr } = props;
+  const { box, size } = useBoxSize();
+  const canvas = useMemo(() => causalCanvas(ov, { width: size.w, height: size.h }), [ov, size.w, size.h]);
+  const { view, fitAll, off, handlers } = useViewport(canvas, size, box, focus, () => onSelect(null));
 
   const selId = selection?.kind === "task" ? selection.id : null;
   return (
     <div ref={box} className={v.canvas} {...handlers}>
-      <div className={v.world} style={{ transform: `translate(${view.x}px, ${view.y}px) scale(${view.k})` }}>
+      {size.w > 0 && <div className={v.world} style={{ transform: `translate(${view.x}px, ${view.y}px) scale(${view.k})` }}>
         {canvas.groups.map((g) => (
           <div key={g.id} className={v.group} style={{ left: g.x, top: g.y, width: g.w, height: g.h }}>
             <span className={v.gt}>{g.title || tr("未归事项")}</span>
@@ -149,7 +154,7 @@ export function CausalCanvas(props: {
             {tr("{n} 件在等 {x}", { n: f.members.length, x: f.waitFor })}
           </button>
         ))}
-      </div>
+      </div>}
       <div className={v.tools}>
         <button type="button" className={v.tool} onClick={fitAll}>{tr("适配全部")}</button>
       </div>

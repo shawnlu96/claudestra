@@ -2,7 +2,7 @@
 import { describe, expect, test } from "bun:test";
 import type { LedgerDepView, LedgerTaskView, Stage } from "../web/features/collab/collab-model";
 import { causalCanvas, COL_GAP, edgeStyle, LOOSE_GROUP, type Box, type CEdge } from "../web/features/collab/v4/causal-model";
-import { fitAllView, initialView, labelWidth, MIN_K, offscreen, placeLabels, READABLE_K, reconcileView, type ViewState } from "../web/features/collab/v4/canvas-view";
+import { fitAllView, initialView, labelWidth, MIN_K, offscreen, placeLabels, reconcileView, type ViewState } from "../web/features/collab/v4/canvas-view";
 
 function task(id: string, stage: Stage, over: Partial<LedgerTaskView> = {}): LedgerTaskView {
   return {
@@ -28,7 +28,8 @@ describe("分组", () => {
     expect(nodeIds(c, "I1")).toEqual(["A"]);
     expect(nodeIds(c, LOOSE_GROUP).sort()).toEqual(["C", "H"]);
     expect(c.boxOf.has("F")).toBe(false);
-    expect(c.groups[1]!.y).toBeGreaterThan(c.groups[0]!.y + c.groups[0]!.h - 1);
+    const [g0, g1] = [c.groups[0]!, c.groups[1]!];
+    expect(g1.x >= g0.x + g0.w || g1.y >= g0.y + g0.h).toBe(true); // 框按行排，彼此不重叠
   });
   test("在跑的展开成大节点；没开工 / 上线 / 验证中的收成小节点", () => {
     const c = causalCanvas({ items, deps: [], tasks: [task("A", "fix"), task("B", "spec"), task("C", "live"), task("D", "verified"), task("E", "blocked", { stageBefore: "build" })] });
@@ -49,7 +50,8 @@ describe("按依赖从左往右", () => {
     const x = (id: string) => g.nodes.find((n) => n.id === id)!.x;
     expect(x("A")).toBeLessThan(x("B"));
     expect(x("B")).toBeLessThan(x("C"));
-    expect(c.groups[1]!.nodes[0]!.x).toBe(x("A")); // 跨事项的依赖不把后面的框撑出空列
+    const g1 = c.groups[1]!;
+    expect(g1.nodes[0]!.x - g1.x).toBe(x("A") - g.x); // 跨事项的依赖不把后面的框撑出空列
   });
   test("有环不死循环", () => {
     const c = causalCanvas({ items, tasks: [task("A", "build"), task("B", "build")], deps: [dep("A", "B", "waiting"), dep("B", "A", "waiting")] });
@@ -122,10 +124,10 @@ describe("边标签避让与打开时的视口（canvas-view.ts）", () => {
     expect(labelWidth("合并后")).toBeGreaterThan(labelWidth("abc"));
     expect(labelWidth("很".repeat(40))).toBe(COL_GAP - 6);
   });
-  test("整张在 0.8 以上放得下就整张放；放不下用 0.8、在跑的对齐左上，视口外的件数按方向报", () => {
+  test("整张在文字下限（MIN_K）以上放得下就整张放；放不下用 MIN_K、在跑的对齐左上，视口外的件数按方向报", () => {
     const small = causalCanvas({ items, deps: [], tasks: [task("A", "build")] });
     const v0 = initialView(small, 800, 600);
-    expect(v0.k).toBeGreaterThanOrEqual(READABLE_K);
+    expect(v0.k).toBeGreaterThanOrEqual(MIN_K);
     expect(offscreen(small, v0, 800, 600)).toEqual({ right: 0, down: 0, left: 0, up: 0 });
     const chain = ["A", "B", "C", "D", "E"];
     const wide = causalCanvas({
@@ -133,7 +135,7 @@ describe("边标签避让与打开时的视口（canvas-view.ts）", () => {
       deps: chain.slice(1).map((id, i) => dep(chain[i]!, id, "waiting")).concat([dep("E", "F", "waiting"), dep("E", "G", "waiting")]),
     });
     const v1 = initialView(wide, 540, 800);
-    expect(v1.k).toBe(READABLE_K);
+    expect(v1.k).toBe(MIN_K);
     const a = wide.groups[0]!.nodes.find((n) => n.id === "A")!;
     expect(v1.x + a.x * v1.k).toBeGreaterThanOrEqual(0);
     // 540 宽放下前两列；第三列起出框：C、D、E 三个节点 + 折叠组按件数算的 F、G
@@ -174,11 +176,48 @@ describe("审查修复轮（T58 P2）", () => {
     expect(gone.centered).toBe(2);
   });
 
-  test("「适配全部」十列的链在 800 宽里整张放得下（缩放可以低于滚轮下限）；打开时仍不低于 0.8", () => {
+  test("「适配全部」不低于文字下限：十列的链在 800 宽里放不下就从左上角看起，右边的由提示和拖拽补；小图照常整张放下", () => {
     const c = chain(10);
     const v = fitAllView(c, 800, 600);
-    expect(v.k).toBeLessThan(MIN_K);
-    expect(offscreen(c, v, 800, 600)).toEqual({ right: 0, down: 0, left: 0, up: 0 });
-    expect(initialView(c, 800, 600).k).toBe(READABLE_K);
+    expect(v).toEqual({ x: 24, y: 24, k: MIN_K });
+    expect(offscreen(c, v, 800, 600).right).toBeGreaterThan(0);
+    expect(MIN_K * 12.5).toBeGreaterThanOrEqual(12); // 节点标题基准 --fs-2 = 12.5px
+    expect(fitAllView(chain(2), 1200, 800).k).toBe(1);
+  });
+});
+
+describe("按视口宽高重排（T67）", () => {
+  const loose = (n: number, item = "I1") => Array.from({ length: n }, (_, i) => task(`${item}-${i}`, "build", { itemId: item }));
+  const xs = (c: ReturnType<typeof causalCanvas>) => new Set(c.groups.flatMap((g) => g.nodes.map((n) => n.x)));
+  const inside = (c: ReturnType<typeof causalCanvas>, w: number) => c.groups.every((g) => g.x + g.w <= w);
+
+  test("8 件互不依赖不再排成一整列：宽屏拆成并排小列、框宽不超过视口；窄屏列数少一些", () => {
+    const wide = causalCanvas({ items, deps: [], tasks: loose(8) }, { width: 1440, height: 900 });
+    expect(xs(wide).size).toBeGreaterThan(1);
+    expect(inside(wide, 1440)).toBe(true);
+    const narrow = causalCanvas({ items, deps: [], tasks: loose(8) }, { width: 400, height: 900 });
+    expect(xs(narrow).size).toBeLessThan(xs(wide).size);
+    expect(narrow.h).toBeGreaterThan(wide.h);
+  });
+
+  test("事项框按行排：宽屏上两个小框并排，窄到放不下才换行", () => {
+    const tasks = [...loose(2), ...loose(2, "I2")];
+    const wide = causalCanvas({ items, deps: [], tasks }, { width: 1440, height: 900 });
+    expect(wide.groups[1]!.y).toBe(wide.groups[0]!.y);
+    expect(wide.groups[1]!.x).toBeGreaterThan(wide.groups[0]!.x + wide.groups[0]!.w - 1);
+    const narrow = causalCanvas({ items, deps: [], tasks }, { width: 480, height: 900 });
+    expect(narrow.groups[1]!.y).toBeGreaterThan(narrow.groups[0]!.y + narrow.groups[0]!.h - 1);
+  });
+
+  test("拆出来的小列都在下一深度左边，有往外连线的落在最右那条小列；宽度按 80px 分桶", () => {
+    const tasks = [task("A", "build"), task("B", "build"), ...loose(9)];
+    const size = { width: 1440, height: 700 };
+    const c = causalCanvas({ items, deps: [dep("A", "B", "active")], tasks }, size);
+    const g = c.groups[0]!, at = (id: string) => g.nodes.find((n) => n.id === id)!;
+    const rank0 = g.nodes.filter((n) => n.id !== "B");
+    expect(new Set(rank0.map((n) => n.x)).size).toBeGreaterThan(1);
+    for (const n of rank0) expect(n.x + n.w).toBeLessThan(at("B").x);
+    expect(at("A").x).toBe(Math.max(...rank0.map((n) => n.x)));
+    expect(causalCanvas({ items, deps: [dep("A", "B", "active")], tasks }, { width: 1450, height: 700 })).toEqual(c);
   });
 });

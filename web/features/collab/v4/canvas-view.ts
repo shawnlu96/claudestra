@@ -4,7 +4,7 @@
  * 标签放在列缝里（出发节点右边那道缝、到达节点左边那道缝，都不行再沿曲线试），每处再上下错开几档；压到节点或别的标签就换，
  * 全都压到就退成一个点（悬停看全文，点开右侧属性页）。宽度按字数估、以列缝为上限，放不全的省略号截断、悬停看全文。
  */
-import { COL_GAP, type Box, type Canvas, type CEdge } from "./causal-model";
+import { COL_GAP, VIEW_PAD, type Box, type Canvas, type CEdge } from "./causal-model";
 
 export interface View { x: number; y: number; k: number }
 /** 外面要求居中到某个任务；seq 每次点都 +1，同一个任务再点一次也会再居中 */
@@ -13,11 +13,11 @@ export interface Focus { id: string; seq: number }
 export interface ViewState { view: View; placed: boolean; centered: number }
 export interface EdgeLabel { id: string; x: number; y: number; w: number; h: number; dot: boolean }
 
-export const VIEW_PAD = 24;
-/** 打开时缩放不低于它：再小字就认不出，宁可有几件在视口外（给出提示），整张看点「适配全部」 */
-export const READABLE_K = 0.8;
-/** 滚轮缩放的范围；「适配全部」要放得下时可以比下限更小（十列的链要 0.25 左右） */
-export const MIN_K = 0.3, MAX_K = 1.6, FIT_FLOOR_K = 0.05;
+/**
+ * 缩放下限：节点标题基准 12.5px（--fs-2），乘 0.96 正好 12px，再小就认不出。打开时、「适配全部」、滚轮缩小共用它，
+ * 放不下就平移（拖拽）；布局已经按视口宽度排过（causal-model.ts），大多数项目在这个比例下一屏放得下
+ */
+export const MIN_K = 0.96, MAX_K = 1.6;
 const LABEL_H = 18, GAP = 3, LABEL_MAX_W = COL_GAP - 2 * GAP;
 const TRY_T = [0.5, 0.35, 0.65];
 const TRY_DY = [0, -1, 1, -2, 2].map((n) => n * (LABEL_H + GAP));
@@ -80,20 +80,20 @@ export function placeLabels(edges: readonly CEdge[], obstacles: readonly Box[]):
   });
 }
 
-const boxesOf = (c: Canvas) => c.groups.flatMap((g) => [...g.nodes.map((n) => ({ id: n.id, box: n as Box, n: 1, hot: n.kind === "full" })),
-  ...g.folds.map((f) => ({ id: f.id, box: f as Box, n: f.members.length, hot: false }))]);
+const boxesOf = (c: Canvas) => c.groups.flatMap((g) => [...g.nodes.map((n) => ({ id: n.id, box: n as Box, n: 1 })),
+  ...g.folds.map((f) => ({ id: f.id, box: f as Box, n: f.members.length }))]);
 
 /**
- * 打开时的视口：整张能在 READABLE_K 以上放下就整张放下；放不下就用 READABLE_K，
- * 把在跑的节点（full）那一块对齐到左上角——它们是打开这页最想看的，剩下的由 offscreen 提示
+ * 打开时的视口：整张能在 MIN_K 以上放下就整张放下；放不下就用 MIN_K，
+ * 把有在跑节点（full）的那几个框对齐到左上角——它们是打开这页最想看的，剩下的由 offscreen 提示
  */
 export function initialView(c: Canvas, vw: number, vh: number): View {
   const fit = Math.min(1, (vw - VIEW_PAD * 2) / c.w, (vh - VIEW_PAD * 2) / c.h);
-  if (!c.w || fit >= READABLE_K) return { x: VIEW_PAD, y: VIEW_PAD, k: fit || 1 };
-  const all = boxesOf(c);
-  const hot = all.some((b) => b.hot) ? all.filter((b) => b.hot) : all;
-  const x0 = Math.min(...hot.map((b) => b.box.x)), y0 = Math.min(...hot.map((b) => b.box.y));
-  return { x: VIEW_PAD - x0 * READABLE_K, y: VIEW_PAD - y0 * READABLE_K, k: READABLE_K };
+  if (!c.w || fit >= MIN_K) return { x: VIEW_PAD, y: VIEW_PAD, k: fit || 1 };
+  const live = c.groups.filter((g) => g.nodes.some((n) => n.kind === "full"));
+  const hot = live.length ? live : c.groups; // 对齐到框的左上角，框标题和边框不被切掉
+  const x0 = Math.min(...hot.map((g) => g.x)), y0 = Math.min(...hot.map((g) => g.y));
+  return { x: VIEW_PAD - x0 * MIN_K, y: VIEW_PAD - y0 * MIN_K, k: MIN_K };
 }
 
 /** 视口外（含被截掉一截）的任务数，按方向；折叠组按里面的件数算 */
@@ -109,11 +109,11 @@ export function offscreen(c: Canvas, v: View, vw: number, vh: number): { right: 
   return out;
 }
 
-/** 「适配全部」：整张放进视口，缩到真正放得下为止（不设 MIN_K），最大 1 */
+/** 「适配全部」：整张放进视口，最大 1、最小 MIN_K；到下限还放不下就从左上角看起，其余靠拖 */
 export function fitAllView(c: Canvas, vw: number, vh: number): View {
   if (!c.w || !c.h) return { x: VIEW_PAD, y: VIEW_PAD, k: 1 };
   const k = Math.min(1, (vw - VIEW_PAD * 2) / c.w, (vh - VIEW_PAD * 2) / c.h);
-  return { x: VIEW_PAD, y: VIEW_PAD, k: Math.max(FIT_FLOOR_K, k) };
+  return { x: VIEW_PAD, y: VIEW_PAD, k: Math.max(MIN_K, k) };
 }
 
 /** 任务所在的框（自己的节点，或折叠它的那一组）平移到视口中间，缩放不变 */
