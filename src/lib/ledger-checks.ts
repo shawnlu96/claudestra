@@ -223,6 +223,8 @@ export interface StageMove {
   /** 调用方以为的当前阶段（CAS） */
   from: Stage;
   to: Stage;
+  /** 交付（build / fix → review）那一步自报的模型：跨实例只能凭声明，和推阶段同一个事务记进那一步的 claims */
+  model?: string;
 }
 
 const REVIEW_VERDICTS: readonly ReviewVerdict[] = ["pass", "changes", "block"];
@@ -240,6 +242,8 @@ export interface ReviewInput {
   text?: string;
   /** 同一事务推阶段（review → fix / merge / done / spec） */
   move?: StageMove;
+  /** 审查方自报的模型（跨实例只能凭声明，记进那一步的 claims） */
+  model?: string;
   /** PM 豁免对抗式（review --waive adversarial，权限在 CLI 层判），只对当时的 head 有效（ledger-handler.ts owesAdversarial） */
   waive?: "adversarial";
 }
