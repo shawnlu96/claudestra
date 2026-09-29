@@ -150,18 +150,23 @@ export function voidedEchoTo(t: TurnTrigger): { kind: "user" | "api" | "local"; 
   return null;
 }
 
-/** 作废的消息：先销账（找不到发送方的也按 id 销），再逐条告诉发送方 */
-function settleVoided(channelId: string, ids: readonly string[], abortAt: number): void {
+/** 回显的文案 + 日志里怎么称呼这些消息（Pi 作废 / Codex 没投进去） */
+type Notice = { text(agent: string, t: TurnTrigger, toSender: boolean): string; what: string };
+const piVoided: Notice = { text: (agent, t, toSender) => voidedNotice(agent, [t], toSender), what: "停之前 steer 进去、还没执行的" };
+
+/** 作废的消息：先销账（找不到发送方的也按 id 销），再逐条告诉发送方。返回告诉了几个发送方的消息数（找得到发送方的条数） */
+function settleVoided(channelId: string, ids: readonly string[], abortAt: number, notice: Notice = piVoided): number {
   const found = ids.map((id) => turnCuts.deliveredMessage(channelId, id)).filter((t): t is NonNullable<typeof t> => !!t);
-  if (!echo) return;
+  if (!echo) return 0;
   const agentOf = new Map(found.filter((t) => t.fromKind === "local" && t.replyTo).map((t) => [t.messageId, t.replyTo]));
   const voided = ids.map((messageId) => ({ messageId, agentChannel: agentOf.get(messageId) }));
   const n = dropVoidedPendings(echo.books(), channelId, voided, abortAt);
   if (n) console.log(`⏹ 作废的 ${ids.length} 条消息从补答账 / 看门狗销掉 ${n} 条`);
-  if (found.length) echoVoided(echo, channelId, found);
+  if (found.length) echoVoided(echo, channelId, found, notice);
+  return found.length;
 }
 
-function echoVoided(d: EchoDeps, channelId: string, found: readonly (TurnTrigger & { agent?: string })[]): void {
+function echoVoided(d: EchoDeps, channelId: string, found: readonly (TurnTrigger & { agent?: string })[], notice: Notice): void {
   const agent = found.find((t) => t.agent)?.agent ?? "这个 agent";
   let sent = 0;
   for (const t of found) {
@@ -172,7 +177,7 @@ function echoVoided(d: EchoDeps, channelId: string, found: readonly (TurnTrigger
     const ws = dest?.kind === "local" ? socketOf(dest.address) : undefined;
     if (ws) to = { kind: "local", channelId: dest!.address, agentName: t.fromName, ws: ws as ServerWebSocket<unknown> };
     if (!to) continue; // bridge 自己的通知、发送方 agent 不在线：没法告诉它，它的消息反正没执行
-    const text = voidedNotice(agent, [t], to.kind !== "user");
+    const text = notice.text(agent, t, to.kind !== "user");
     // response + inReplyTo：那条请求就此了结（不再算「还没回复」、API / peer 的等待拿到这句）；API 回程按 agent 频道认，from 记成这个 agent
     const from: Endpoint = to.kind === "api" ? { kind: "local", channelId, agentName: agent, ws: socketOf(channelId) as ServerWebSocket<unknown> } : { kind: "bridge", label: "pi-abort" };
     const meta = { messageId: newMessageId("voided"), triggerKind: "bridge_synth" as const, ts: new Date().toISOString(), threadId: newThreadId(), inReplyTo: t.messageId };
@@ -181,5 +186,31 @@ function echoVoided(d: EchoDeps, channelId: string, found: readonly (TurnTrigger
     if (to.kind === "user") emitEvent({ agent, chatId: to.channelId, type: "chat_message", data: { direction: "out", from: "bridge", text, notice: true } });
     sent++;
   }
-  console.log(`⏹ ${agent}：停之前 steer 进去、还没执行的 ${found.length} 条已作废，告诉了发送方 ${sent} 条${sent < found.length ? `（${found.length - sent} 条没法告诉：bridge 通知 / 发送方不在线）` : ""}`);
+  console.log(`⏹ ${agent}：${notice.what} ${found.length} 条已作废，告诉了发送方 ${sent} 条${sent < found.length ? `（${found.length - sent} 条没法告诉：bridge 通知 / 发送方不在线）` : ""}`);
+}
+
+/**
+ * Codex 投递失败（channel-server 的 codex_undelivered：不在线 / 认不准线程 / codex queue 报错）：消息没进 Codex，不会有回合、也不会有 hook。
+ * 走和 Pi 作废消息同一套——只了结这一条（按 messageId 销补答账、回程槽，回信地址收到一条带 inReplyTo 的 response，API / peer 的等待拿到这句），
+ * 不补整轮的 StopFailure：同一个 agent 可能正在跑上一条，整轮收尾会把它的等待、状态一起结掉（T52 He 审 #204 P1）。
+ * 这一回合没有别的送达时才把状态收成 done，不发完成通知（P2：先报失败又报完成）。返回 settled = 告诉了几条发送方，0 = channel-server 自己兜底说。
+ */
+export function onCodexUndelivered(
+  msg: { requestId?: unknown; channelId?: unknown; messageId?: unknown; reason?: unknown }, ws: Socket, own: boolean,
+  d: { stopTyping(channelId: string): void; clearSafetyTimer(channelId: string): void },
+): void {
+  const channelId = typeof msg.channelId === "string" ? msg.channelId : "";
+  const messageId = typeof msg.messageId === "string" ? msg.messageId : "";
+  const reason = typeof msg.reason === "string" && msg.reason.trim() ? msg.reason.trim().slice(0, 400) : "⚠️ 消息没能投进 Codex";
+  let settled = 0;
+  if (own && channelId && messageId) {
+    const agent = turnCuts.deliveredMessage(channelId, messageId)?.agent;
+    settled = settleVoided(channelId, [messageId], Date.now(), { text: () => reason, what: "没投进 Codex 的" });
+    if (turnCuts.dropUndelivered(channelId, messageId) === 0 && agent) {
+      emitEvent({ agent, chatId: channelId, type: "agent_status", data: { status: "done", trigger: "undelivered" } });
+      d.stopTyping(channelId);
+      d.clearSafetyTimer(channelId);
+    }
+  }
+  ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, result: { settled } }));
 }

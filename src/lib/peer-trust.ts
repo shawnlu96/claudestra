@@ -16,6 +16,7 @@ import { readJsonLenient } from "./state-file.js";
 import { findByBearer, readPrincipals } from "./principals.js";
 import { repoEnvVar } from "./env-file.js";
 import { isRedeemRequest } from "./relay-protocol.js";
+import { isE2eFrame } from "./peer-e2e-wire.js";
 
 /** 条目上限：只收验签通过的请求（authApi 那份还在限速之后），满了拒新请求而不是挤掉旧的 */
 const REPLAY_MAX_ENTRIES = 50_000;
@@ -218,6 +219,9 @@ export interface RelayPeerView {
  * 经中继进来、验签已过的 peer 请求还要满足：兑换邀请之外，from 必须是本机联系人、必须带 peer token（不认浏览器凭据），
  * 记了完整公钥的联系人签名钥匙必须就是那把（指纹只有 64 位）；token 的主人的期望指纹必须就是 from——
  * 签名只证明「from 本人发的」，不证明 token 是他的。返回拒绝原因或 null。
+ * 口子：E2E 的两种帧（lib/peer-e2e-wire.ts isE2eFrame，逐字匹配）外层不带 token——token 只在密文里，不给中继看
+ * （docs/relay/e2e-design.md §5.1）。联系人、记下的钥匙照样核，防重放照旧（调用方在这之后记）；「token 属于发件人」挪到解密之后：
+ * 内层完整过 peerGate（token、验签、重放），再核 token 的主人 = 会话发起方（lib/peer-e2e-local.ts peerE2eRefusal，e2e_peer_mismatch）。
  */
 export function relayPeerRefusal(from: string, req: { method: string; path: string; headers: Record<string, string> }, view: RelayPeerView): string | null {
   const redeem = isRedeemRequest(req.method, req.path);
@@ -225,7 +229,7 @@ export function relayPeerRefusal(from: string, req: { method: string; path: stri
   const recorded = view.keyOf?.(from);
   if (recorded && req.headers[SIG_HEADERS.key] !== recorded) return "signing key is not the one recorded for this contact";
   const secret = frameBearer(req.method, req.path, req.headers);
-  if (!secret) return redeem ? null : "peer requests must carry the peer's token";
+  if (!secret) return redeem || isE2eFrame(req.method, req.path) ? null : "peer requests must carry the peer's token";
   const owner = view.bearerOwner(secret);
   if (!owner) return "token is not a peer token of this instance";
   return owner.fp === from ? null : "token does not belong to the sender";

@@ -90,10 +90,12 @@ describe("ledger review-pack / dispatch", () => {
     expect(r2.reviewPath).toMatch(/T1-r1-adv\.md$/);
   });
 
-  test("同一轮重新交付了新 head：再派是新的一次，记新 head", async () => {
+  test("同一轮里 head 换了（老数据）：再派是新的一次，记新 head", async () => {
     toReview();
     await run("agent-disp", "dispatch", "T1");
-    deliver(db, { actor: "agent-exec", now: 4 }, { taskId: "T1", headSHA: "bcd2345" });
+    // review 里交付新 head 现在会被拒（ledger-steps-write.ts checkReviewHead）；直接改库模拟修之前留下的数据，钉住派审按 head 去重这层
+    expect(() => deliver(db, { actor: "agent-exec", now: 4 }, { taskId: "T1", headSHA: "bcd2345" })).toThrow();
+    db.prepare("UPDATE tasks SET headSHA = 'bcd2345' WHERE id = 'T1'").run();
     head = "bcd2345ffff";
     const r = await run("agent-disp", "dispatch", "T1");
     expect(r).toMatchObject({ duplicate: false, event: { data: { head: "bcd2345", round: 1 } } });

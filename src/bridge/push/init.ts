@@ -6,12 +6,13 @@
  */
 import { join } from "node:path";
 import { ApnsClient, apnsConfigFromEnv } from "../../lib/apns.js";
+import { readConfigSync } from "../../lib/config-store.js";
 import { repoEnvVar } from "../../lib/env-file.js";
 import { instanceKeySync, keyFingerprint } from "../../lib/instance-key.js";
 import { STATE_DIR } from "../../lib/paths.js";
 import { sandboxDisabled } from "../../lib/sandbox.js";
-import { effectivePrincipal } from "../../lib/devices.js";
-import { readPrincipals, type Principal, type PrincipalsFile } from "../../lib/principals.js";
+import { principalView } from "../../lib/devices.js";
+import { readPrincipals, type PrincipalsFile } from "../../lib/principals.js";
 import { readRegistryAgents } from "../../lib/registry.js";
 import { loadOrCreateVapidKeys, readVapidKeys, webPushSender, type VapidIdentity } from "../../lib/web-push.js";
 import { openWebState } from "../../lib/web-state.js";
@@ -25,9 +26,9 @@ import { createPushSender, type DirectBackends } from "./sender.js";
 const PRINCIPALS_REFRESH_MS = 60_000;
 let dispatcherRef: Dispatcher | null = null;
 
-/** 系统提醒推给 owner 的所有设备（推送没起来就什么也不做——提醒丢了不影响功能本身） */
-export function pushOwnerNotice(title: string, body: string): void {
-  dispatcherRef?.notice({ title, body }).catch((e) => console.error(`⚠️ 推送：系统提醒没推出去: ${(e as Error).message}`));
+/** 系统提醒推给 owner 的所有设备（推送没起来就什么也不做——提醒丢了不影响功能本身）；url = 点通知打开哪里，缺省 /chat */
+export function pushOwnerNotice(title: string, body: string, url?: string): void {
+  dispatcherRef?.notice({ title, body, url }).catch((e) => console.error(`⚠️ 推送：系统提醒没推出去: ${(e as Error).message}`));
 }
 /**
  * 要知道送没送到的系统提醒（订阅额度快过期：失败的渠道要单独重试）。推送子系统没起来（沙箱 / 启动前）→ null。
@@ -37,17 +38,6 @@ export async function pushOwnerNoticeTracked(title: string, body: string): Promi
 }
 const DEFAULT_VAPID_SUBJECT = "https://github.com/shawnlu96/claudestra";
 
-/**
- * 订阅认人：principal 还在、没禁用；订阅时带着设备凭据的，凭据也得还在、没禁用、没过期（按凭据收窄 scope）。
- * 没带凭据的是 token 订的（web-ui token 等），按 principal 本身算。读的是最多 60 s 前的 principals.json
- */
-export function subscriberPrincipal(file: PrincipalsFile, pid: string, cid: string | null, now = Date.now()): Principal | null {
-  const principal = file.principals.find((p) => p.id === pid && !p.disabled);
-  if (!principal) return null;
-  if (!cid) return principal;
-  const credential = principal.credentials?.find((c) => c.id === cid && !c.disabled && Date.parse(c.expiresAt) > now);
-  return credential ? effectivePrincipal({ principal, credential }) : null;
-}
 let started = false;
 
 function directBackends(): DirectBackends {
@@ -84,10 +74,14 @@ export function initPush(deliver?: (env: Envelope) => Promise<Delivery>): void {
   setInterval(() => void refresh(), PRINCIPALS_REFRESH_MS).unref();
   configurePushRoutes({ db, sender, liveAgents: async () => (await readRegistryAgents()).map((a) => a.name) });
   const key = instanceKeySync();
-  const resolvePrincipal = (pid: string, cid: string | null) => (file ? subscriberPrincipal(file, pid, cid) : null);
+  // 订阅认人读的是最多 60 s 前的 principals.json
+  const resolvePrincipal = (pid: string, cid: string | null) => (file ? principalView(file, pid, cid) : null);
   let isQuietReply: (threadId: unknown) => boolean = () => false;
   const quiet = (threadId: unknown) => isQuietReply(threadId);
-  const dispatcher = createDispatcher({ db, sender, isOwnerChat: (id) => owner.has(id), resolvePrincipal, isQuietReply: quiet, ...(key ? { fp: keyFingerprint(key.publicKey) } : {}) });
+  const noContent = () => readConfigSync().pushNoContent === true;
+  const dispatcher = createDispatcher({
+    db, sender, isOwnerChat: (id) => owner.has(id), resolvePrincipal, isQuietReply: quiet, noContent, ...(key ? { fp: keyFingerprint(key.publicKey) } : {}),
+  });
   dispatcherRef = dispatcher;
   subscribeEvents({}, (evt) => void dispatcher.onEvent(evt).catch((e) => console.error(`⚠️ 推送派发异常（这一条没推出去）: ${(e as Error).message}`)));
   console.log("🔔 推送派发器已启动（进程内订阅 event-bus）");

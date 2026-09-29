@@ -6,7 +6,6 @@
  */
 
 import { enableTimestampLogs } from "./lib/log-timestamp.js";
-import { PEER_DELEGATION_DOC } from "./lib/peer-ledger.js";
 import { requestStillHeld, shouldSweepPac } from "./lib/held-pac.js";
 import { copyOutboundToInbox } from "./bridge/local-api/media-refresh.js";
 import { splitInlineButtons, toButtonRows, inlineChipsToText } from "./lib/inline-buttons.js";
@@ -176,7 +175,7 @@ import { statePath } from "./lib/paths.js";
 import { controlFor, managedFor } from "./lib/runtimes/index.js";
 import { stopNeedsPaneRecheck } from "./lib/runtimes/window-ops.js";
 import { onCodexInterrupt, preemptForHuman, setStopHooks } from "./bridge/preempt.js";
-import { HTTP_IDLE_TIMEOUT_S, noteRuntimeCaps, onAbortAck, setExtensionSocket, stopAfterAbort, stopWaitIds } from "./bridge/interrupt-gate.js";
+import { HTTP_IDLE_TIMEOUT_S, noteRuntimeCaps, onAbortAck, onCodexUndelivered, setExtensionSocket, stopAfterAbort, stopWaitIds } from "./bridge/interrupt-gate.js";
 import { isCutNotice, turnCuts } from "./bridge/turn-cuts.js";
 import { withInterruptNote } from "./lib/turn-cuts.js";
 import { createKeyedSerial } from "./lib/keyed-serial.js";
@@ -542,7 +541,7 @@ import type {
   Envelope as RouterEnvelope,
   Delivery as RouterDelivery,
 } from "./bridge/router.js";
-import { endpointLabel, envelopeLabel, inboundBodyForLocal, isHumanRequest, newMessageId, newThreadId, parseChatId } from "./bridge/router.js";
+import { endpointLabel, envelopeLabel, inboundBodyForLocal, isHumanRequest, newMessageId, newThreadId, parseChatId, renderApiInbound } from "./bridge/router.js";
 import { ageHeld, heldNoticeText, HeldQueue, unseenFrom } from "./bridge/held-queue.js";
 import { dropHeldOnKill, flushHeld } from "./bridge/held-flush.js";
 import { probeTurn } from "./bridge/turn-probe.js";
@@ -1053,30 +1052,8 @@ async function renderContentForLocal(env: RouterEnvelope): Promise<string> {
     return env.content;
   }
 
-  // v2.6.0+ HTTP API 用户（设计 §5.2）：header 明示对话方经 Web/API 接入 ——
-  // 没有 @mention/push 语义，且这是外部 principal（R1 纵深防御：agent 可据此
-  // 对上下文里的敏感内容保持沉默）。reply 直接回 meta.chat_id（api:<tokenId>）。
-  // v2.10+ 措辞修正(owner 2026-07-16):旧文案「对方看不到本频道历史」在 Web
-  // 客户端出现后已失真——Web 有完整聊天记录(history API),agent 被误导后会
-  // 重复复述用户已看到的上下文。
-  if (from.kind === "api") {
-    // v2.11+ HTTP peer 入站:token 带 peer 标记 → 这是另一个 Claudestra 实例的
-    // 跨机请求(通常由对方 agent 的 send_to_agent 发起),不是本机 Web 用户
-    if (from.peer) {
-      return [
-        `[🤝 来自 peer 实例「${from.peer}」的跨机请求（HTTP API，对方是另一个 Claudestra 的 agent/用户）。`,
-        `用 reply() 回答——回复会自动转交对方的调用方。回答实质内容,保持精简;超出你职责范围的请求可以礼貌说明并拒绝。首行是 [协作 …] 时先按 ${PEER_DELEGATION_DOC} 回自家 owner 频道问接不接，owner 同意前不动手。]`,
-        ``,
-        inboundBodyForLocal(env),
-      ].join("\n");
-    }
-    return [
-      `[🌐 来自 Web 端用户「${from.name}」（HTTP API 接入，非 Discord）。`,
-      `用 reply() 回答到本 chat_id。对方界面完整渲染 Markdown（表格可用），且能看到本频道完整聊天记录——不要复述上下文；也不要引用与本请求无关的内容。]`,
-      ``,
-      inboundBodyForLocal(env),
-    ].join("\n");
-  }
+  // HTTP API 用户 / HTTP peer 入站的抬头（router.ts renderApiInbound；「丢进工作台」的预览也调它，保证逐字一致）
+  if (from.kind === "api") return renderApiInbound({ from, content: env.content });
 
   // 本地 agent → agent 转发（send_to_agent / pushback / reply→别agent forward）。
   // v2.0.17 引入了 imperative framing 强迫 agent 处理；v2.4.16 又往回收了一段 ——
@@ -2197,6 +2174,7 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
     }
 
     case "abort_ack": onAbortAck(msg, ws); break; // Pi 扩展的中止回执（只认这个频道当前的连接）
+    case "codex_undelivered": onCodexUndelivered(msg, ws, clients.get(msg.channelId)?.ws === ws, { stopTyping, clearSafetyTimer }); break; // 只了结没投进 Codex 的这一条
     case "codex_typein_failed": if (clients.get(msg.channelId)?.ws === ws) turnCuts.rearmAfterInterrupt(msg.channelId); break; // 退回了 queue:下一条再打字
     case "forward_to_agent": ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, ...(await handleForward(ws, msg)) })); break;
     case "route_to_agent": {

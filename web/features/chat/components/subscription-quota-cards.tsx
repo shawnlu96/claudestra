@@ -3,7 +3,7 @@ import { useT } from "@/lib/i18n";
 import { fmtTok, type QuotaView } from "../usage-view";
 import type { useSubscriptionQuota } from "../use-subscription-quota";
 import {
-  canRetry, entryRuntime, expiryParts, fmtAt, identityNote, layerLabel, meterLabel, reasonText,
+  balanceText, canRetry, entryRuntime, expiryParts, fmtAt, identityNote, layerLabel, meterLabel, reasonText,
   type EntryView, type MeterView, type QuotaPanelData,
 } from "../quota-view";
 import { CardTitle, ClaudeQuotaCard, CodexQuotaCard, fmtAge, GaugeRow, WarnIcon, type GlobalStats } from "./quota-cards";
@@ -96,7 +96,13 @@ function EntryCard({ e, onRetry, retrying }: { e: EntryView; onRetry: (p: "claud
           <ValueRow key={m.id} m={m} />
         ),
       )}
-      {e.meters.length === 0 && e.kind === "subscription" && <div className="text-xs text-base-content/45">{t("暂无数据")}</div>}
+      {e.balance && (
+        <div className="flex justify-between gap-2 text-xs">
+          <span className="text-base-content/60">{t("余额")}</span>
+          <span className="font-mono tabular-nums">{balanceText(e.balance)}</span>
+        </div>
+      )}
+      {e.meters.length === 0 && !e.balance && e.kind === "subscription" && <div className="text-xs text-base-content/45">{t("暂无数据")}</div>}
       {e.resetCredits && <ResetCredits c={e.resetCredits} claude={e.id === "claude"} />}
       <SourceRow e={e} onRetry={onRetry} retrying={retrying} />
     </div>

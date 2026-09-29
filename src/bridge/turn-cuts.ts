@@ -108,6 +108,13 @@ export class TurnCuts {
     return t && { ...t, agent: this.agentOf.get(channelId) };
   }
 
+  /** 这条其实没投进去（Codex 投递失败）：从「这一回合送到过的」里拿掉，返回剩下几条——0 = 这一回合没有别的送达，没有回合在跑 */
+  dropUndelivered(channelId: string, messageId: string): number {
+    const rest = (this.inbound.get(channelId) ?? []).filter((x) => x.messageId !== messageId);
+    this.inbound.set(channelId, rest);
+    return rest.length;
+  }
+
   /** Codex 停字用：上次 Stop 之后排进 codex queue、还没轮到的人类消息（停之后会先跑它们） */
   codexQueuedBefore(channelId: string): string[] {
     return this.codexQueued.get(channelId) ?? [];

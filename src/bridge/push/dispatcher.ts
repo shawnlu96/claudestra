@@ -23,6 +23,7 @@ import {
 } from "../../lib/push-store.js";
 import { t as tr } from "../../lib/i18n.js";
 import { markdownToPlain } from "../../lib/plain-text.js";
+import { redactApns, redactWebPush } from "../../lib/push-redact.js";
 import { bareAgent, bumpUnread, countsUnread, markAgentRead, onAgentRead, totalUnread, type ReadEvent } from "../../lib/unread-store.js";
 import type { PushSender } from "./sender.js";
 
@@ -41,6 +42,8 @@ export interface DispatcherDeps {
   isOwnerChat: (chatId: string) => boolean;
   /** 本机实例指纹；没有实例密钥时不带（SW 退回「当前机器」） */
   fp?: string;
+  /** 「推送不带正文」开着没有（每条现读）；不给 = 关 */
+  noContent?: () => boolean;
   now?: () => number;
   log?: (msg: string) => void;
   /** guest 订阅认人：订阅时记下的 principal + 设备凭据 → 此刻生效的 principal（凭据撤了 / 过期 → null，不再推）。不给 = guest 一律不推 */
@@ -105,7 +108,8 @@ export function createDispatcher(d: DispatcherDeps): Dispatcher {
 
   async function sendRows(subs: PushSubscriptionRow[], payload: Record<string, unknown>): Promise<NoticeOutcome> {
     if (!subs.length) return NO_SEND;
-    const json = JSON.stringify(d.fp ? { fp: d.fp, ...payload } : payload);
+    const body = d.noContent?.() ? redactWebPush(payload) : payload;
+    const json = JSON.stringify(d.fp ? { fp: d.fp, ...body } : body);
     return sumOutcomes(await Promise.all(subs.map(async (s) => {
       const r = await d.sender.sendWebPush(s, json);
       if (r.ok && r.vapidKey && r.vapidKey !== s.vapidKey) setPushSubscriptionKey(d.db, s, r.vapidKey);
@@ -117,10 +121,11 @@ export function createDispatcher(d: DispatcherDeps): Dispatcher {
     })));
   }
 
-  async function apnsAll(msg: ApnsMessage, filter?: (r: Registrant) => boolean): Promise<NoticeOutcome> {
+  async function apnsAll(raw: ApnsMessage, filter?: (r: Registrant) => boolean): Promise<NoticeOutcome> {
     if (!d.sender.config().apns) return NO_SEND;
     const tokens = listApnsDevices(d.db).filter((r) => live(r) && (!filter || filter(r))).map((r) => r.token);
     if (!tokens.length) return NO_SEND;
+    const msg = d.noContent?.() ? redactApns(raw) : raw;
     return sumOutcomes(await Promise.all(tokens.map(async (t) => {
       const r = await d.sender.sendApns(t, msg);
       if (r.gone) {

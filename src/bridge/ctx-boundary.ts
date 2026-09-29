@@ -6,6 +6,7 @@
  * 设计 docs/architecture/context-boundary.md；单测 tests/ctx-boundary.test.ts（全部依赖可注入）。
  */
 import { statSync } from "fs";
+import { resolve } from "path";
 import { readConfigSync } from "../lib/config-store.js";
 import { agentRuntime, isMasterAgent, readRegistryAgents } from "../lib/registry.js";
 import { statePath } from "../lib/paths.js";
@@ -24,10 +25,10 @@ import {
   type Boundary, type BoundaryVerdict, type CtxBoundaryView, type GlobalAutoCompact, type SkipReason,
 } from "../lib/ctx-boundary-decision.js";
 import {
-  agentWindowName, compactInjectedRecently, injectCompact, liveInjectDeps, loadInjectState, paneGateOf, resetInjectState, sweepPendingEcho,
+  agentTarget, agentWindowName, compactInjectedRecently, injectCompact, liveInjectDeps, loadInjectState, paneGateOf, resetInjectState, sweepPendingEcho,
   type InjectDeps, type InjectResult, type InjectTarget, type PaneCapture,
 } from "./ctx-boundary-inject.js";
-import { windowTarget } from "../lib/tmux-helper.js";
+import { MASTER_DIR } from "./config.js";
 export { compactInjectedRecently, injectCompact } from "./ctx-boundary-inject.js"; // 看板 / 手动按钮原来从这里拿
 import { PersistedMap } from "./persisted-map.js";
 import { adapterFor } from "./adapters.js";
@@ -247,7 +248,7 @@ export function ctxBoundaryWarnings(): PolicyWarning[] {
 /** 按 registry 名字拼注入对象（Discord 手动按钮、T35 的批量动作用） */
 export async function injectTargetFor(name: string): Promise<InjectTarget> {
   const r = (await readRegistryAgents()).find((x) => x.name === name);
-  return { name, target: windowTarget(agentWindowName(name)), executor: isExecutor({ name, worktree: isLinkedWorktree(r?.cwd) }) };
+  return { name, target: agentTarget(name), executor: isExecutor({ name, worktree: isLinkedWorktree(r?.cwd) }) };
 }
 
 async function sessionStats(runtime: string | undefined, cwd: string | null, sessionId: string) {
@@ -264,9 +265,25 @@ async function sessionStats(runtime: string | undefined, cwd: string | null, ses
   return { ctx: info?.ctxTokens ?? null, convTs: info?.convTs ?? null, mtime, realWindow };
 }
 
+/**
+ * registry.json 不一定登记大总管（launcher 起它不写 registry）：没有 isMasterAgent 的条目就补这一条。窗口、cwd 同 launcher，
+ * 会话留空交给 liveSessionsOf 从窗格里的 CC 认；认不到 ctx 就是 null，这一轮跳过。registry 有条目时不补（哪怕那条被过滤掉）
+ */
+export function masterStandIn(masterDir: string, channelId: string | null): BoundaryAgent {
+  const name = "agent-master";
+  return {
+    name, projectId: null, channelId, cwd: resolve(masterDir), sessionId: "", target: agentTarget(name), executor: false,
+    ctx: null, convTs: null, mtime: null, realWindow: null,
+  };
+}
+
+export const needsMasterStandIn = (rows: { name: string }[]): boolean => !rows.some((r) => isMasterAgent(r.name));
+
 async function liveAgents(): Promise<BoundaryAgent[]> {
   const out: BoundaryAgent[] = [];
-  for (const r of await readRegistryAgents()) {
+  const rows = await readRegistryAgents();
+  if (needsMasterStandIn(rows)) out.push(masterStandIn(MASTER_DIR, process.env.CONTROL_CHANNEL_ID || null));
+  for (const r of rows) {
     // 只管 Claude Code：注入的是 CC 的斜杠命令，画面判定也是 CC 的；Codex / Pi 有各自的压缩
     if ((r.status && r.status !== "active") || agentRuntime(r) !== "claude-code" || !r.sessionId) continue;
     const cwd = r.cwd ? r.cwd.replace(/^~/, process.env.HOME || "~") : null;
@@ -276,7 +293,7 @@ async function liveAgents(): Promise<BoundaryAgent[]> {
       channelId: r.channelId ?? null,
       cwd,
       sessionId: r.sessionId,
-      target: windowTarget(agentWindowName(r.name)),
+      target: agentTarget(r.name),
       executor: isExecutor({ name: r.name, worktree: isLinkedWorktree(cwd) }),
       ...(await sessionStats(r.runtime, cwd, r.sessionId)),
     });

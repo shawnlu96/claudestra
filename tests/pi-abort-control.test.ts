@@ -7,7 +7,7 @@
 import { describe, expect, test } from "bun:test";
 import { createAbortControl, type AbortableCtx } from "../src/pi/abort-control.js";
 import {
-  extensionAbort, onAbortAck, setAbortCapable, setExtensionSocket, stopAfterAbort, voidedEchoTo, voidedNotice,
+  extensionAbort, onAbortAck, onCodexUndelivered, setAbortCapable, setExtensionSocket, stopAfterAbort, voidedEchoTo, voidedNotice,
 } from "../src/bridge/pi-abort.js";
 import type { Envelope } from "../src/bridge/router.js";
 import { turnCuts } from "../src/bridge/turn-cuts.js";
@@ -228,6 +228,51 @@ describe("bridge 侧（Workflow 复核 wf2）", () => {
     await q;
     expect(books.pendingInterAgentMsg.has("pi")).toBe(true);
     stopAfterAbort("pi");
+  });
+
+  describe("Codex 投递失败：只了结没投进去的这一条（T52 He 审 #204）", () => {
+    const cx = (id: string, from: Envelope["from"]) => turnCuts.noteDelivered({
+      from, to: { kind: "local", channelId: "cx", agentName: "agent-cx" }, intent: "request", content: `请求 ${id}`,
+      meta: { messageId: id, triggerKind: "api_user", ts: "", threadId: "t" },
+    } as unknown as Envelope, "cx");
+    const calls: string[] = [];
+    const deps = { stopTyping: (c: string) => void calls.push(`typing:${c}`), clearSafetyTimer: (c: string) => void calls.push(`timer:${c}`) };
+    const statusEvents = () => calls.filter((c) => c.startsWith("typing:"));
+    const reply = () => JSON.parse(sent.at(-1) ?? "{}");
+
+    test("P1：同一回合里已经送到过别的消息（回合开着）——只回显这一条（inReplyTo），状态不动、不结别人的等待", () => {
+      cx("run1", { kind: "api", tokenId: "tok_a", name: "peer-a" } as Envelope["from"]);
+      cx("bad1", { kind: "api", tokenId: "tok_b", name: "peer-b" } as Envelope["from"]);
+      delivered.length = 0; calls.length = 0;
+      onCodexUndelivered({ requestId: "r1", channelId: "cx", messageId: "bad1", reason: "⚠️ 消息投递到 Codex 失败：boom" }, sock, true, deps);
+      expect(delivered).toHaveLength(1);
+      expect(delivered[0]).toMatchObject({ intent: "response", to: { kind: "api", tokenId: "tok_b" }, content: "⚠️ 消息投递到 Codex 失败：boom" });
+      expect(delivered[0].meta.inReplyTo).toBe("bad1");
+      expect(statusEvents()).toEqual([]); // run1 还在跑：不收成 done
+      expect(reply()).toEqual({ type: "response", requestId: "r1", result: { settled: 1 } });
+      expect(turnCuts.deliveredMessage("cx", "run1")).toBeDefined();
+      expect(turnCuts.deliveredMessage("cx", "bad1")).toBeUndefined();
+    });
+
+    test("P2：这一回合只有没投进去的这一条——收掉「工作中」（不走 Stop 收尾，不发完成通知）", () => {
+      turnCuts.dropUndelivered("cx", "run1");
+      cx("bad2", { kind: "user", userId: "u", username: "alex", channelId: "dc-7" } as Envelope["from"]);
+      delivered.length = 0; calls.length = 0;
+      onCodexUndelivered({ requestId: "r2", channelId: "cx", messageId: "bad2", reason: "⚠️ Codex 会话不在线，消息未投递" }, sock, true, deps);
+      expect(delivered.map((e) => e.to)).toEqual([expect.objectContaining({ kind: "user", channelId: "dc-7" })]);
+      expect(calls).toEqual(["typing:cx", "timer:cx"]);
+    });
+
+    test("不是这个频道当前的连接 / 认不出这条：什么都不动，settled 0（channel-server 自己兜底说）", () => {
+      cx("bad3", { kind: "api", tokenId: "tok_c", name: "c" } as Envelope["from"]);
+      delivered.length = 0; calls.length = 0;
+      onCodexUndelivered({ requestId: "r3", channelId: "cx", messageId: "bad3", reason: "x" }, sock, false, deps);
+      expect(reply().result).toEqual({ settled: 0 });
+      onCodexUndelivered({ requestId: "r4", channelId: "cx", messageId: "nope", reason: "x" }, sock, true, deps);
+      expect(reply().result).toEqual({ settled: 0 });
+      expect(delivered).toEqual([]);
+      expect(turnCuts.deliveredMessage("cx", "bad3")).toBeDefined();
+    });
   });
 
   test("回显地址：Discord 人 → 他发消息的频道；agent → 它自己；bridge 自己的通知不回显", () => {

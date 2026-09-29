@@ -7,7 +7,7 @@
   },
   "limits": {
     "catch:empty-block": 150,
-    "catch:silent-promise": 236,
+    "catch:silent-promise": 231,
     "comments:blocks": 50,
     "dead:scripts/codex-adapter-e2e.ts#<file>": 1,
     "dead:scripts/codex-e2e.ts#<file>": 1,
@@ -128,8 +128,8 @@
     "doc:CLAUDE.zh-CN.md": 22459,
     "doc:web/CLAUDE.en.md": 6532,
     "doc:web/CLAUDE.md": 5810,
-    "dup:total": 1039,
-    "fn:overflow": 8966,
+    "dup:total": 1038,
+    "fn:overflow": 9003,
     "fnLong:AgentActions": 1,
     "fnLong:AgentRow": 1,
     "fnLong:AskQuestionCard": 1,
@@ -203,8 +203,8 @@
     "pattern:raw-tmux-spawn": 11,
     "pattern:registry-path-literal": 2,
     "pattern:tmux-target-literal": 2,
-    "size:src/bridge.ts": 3598,
-    "size:src/bridge/api-routes.ts": 1912,
+    "size:src/bridge.ts": 3576,
+    "size:src/bridge/api-routes.ts": 1892,
     "size:src/bridge/bg-activity-watcher.ts": 467,
     "size:src/bridge/discord-interactions.ts": 1133,
     "size:src/bridge/jsonl-watcher.ts": 839,
@@ -219,8 +219,8 @@
     "size:src/lib/doctor.ts": 570,
     "size:src/lib/session-history.ts": 962,
     "size:src/lib/tailscale.ts": 623,
-    "size:src/lib/tmux-helper.ts": 1335,
-    "size:src/manager.ts": 3000,
+    "size:src/lib/tmux-helper.ts": 1334,
+    "size:src/manager.ts": 2967,
     "size:src/pi/claudestra-extension.ts": 615,
     "size:src/setup.ts": 2042,
     "size:tests/modal-parser.test.ts": 1116,
@@ -230,7 +230,7 @@
     "size:web/features/chat/components/composer.tsx": 787,
     "size:web/features/chat/components/message-list.tsx": 812,
     "size:web/features/chat/components/peers-modal.tsx": 450,
-    "size:web/features/chat/components/sidebar.tsx": 533,
+    "size:web/features/chat/components/sidebar.tsx": 531,
     "size:web/features/chat/components/unmanaged-sessions.tsx": 492,
     "size:web/features/terminal/terminal-view.tsx": 668
   },
@@ -302,6 +302,12 @@
       "why": "同上（PR #186 审查 P2）：中文版命令清单同步加 codex-sub-archive 一行，细节在 docs/architecture/features.zh-CN.md"
     },
     {
+      "key": "guard:scripts/guard/config.ts",
+      "from": 0,
+      "to": 0,
+      "why": "TWINS 加 src/lib/reserved-button-ids.ts ↔ web/lib/chat/reserved-button-ids.ts：网页「待你处理」要认出 bridge 自己的管理 / 面板按钮（老面板不按过期锁），保留 id 表两边由 guard 保证一致（T11b PR B 第 3 轮 P2-2）"
+    },
+    {
       "key": "doc:CLAUDE.md",
       "from": 24624,
       "to": 24762,
@@ -324,12 +330,6 @@
       "from": 0,
       "to": 0,
       "why": "T45：RULES 注册 testenv 规则（一行），其余不动；package.json 的 check / guard 脚本与 CI Guard 步骤不变"
-    },
-    {
-      "key": "guard:scripts/guard/config.ts",
-      "from": 0,
-      "to": 0,
-      "why": "TWINS 加 src/lib/reserved-button-ids.ts ↔ web/lib/chat/reserved-button-ids.ts：网页「待你处理」要认出 bridge 自己的管理 / 面板按钮（老面板不按过期锁），保留 id 表两边由 guard 保证一致（T11b PR B 第 3 轮 P2-2）"
     }
   ]
 }
