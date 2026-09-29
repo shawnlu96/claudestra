@@ -7,6 +7,7 @@
 import type { Database } from "bun:sqlite";
 import { isManager, mustTask, type WriteCtx, type WriteResult } from "./ledger-checks.js";
 import { STEPS, type LedgerTask, type ReviewVerdict, type Stage, type StepName } from "./ledger-stages.js";
+import { workStage } from "./ledger-deps.js";
 import { LedgerError } from "./ledger-store.js";
 import {
   activeOf, authorOf, currentReview, EXECUTOR_KINDS, listSteps, reviewerCheck, stepAtStage, stepPeer, stepsOf, withDerived, type ExecutorKind, type TaskStep,
@@ -90,6 +91,21 @@ export function noteStepDelivered(db: Database, ctx: WriteCtx, task: LedgerTask,
   ).run(task.id, name, round, s.executor, s.executorKind, prev?.headTo ?? null, task.headSHA, claims, now, now);
   const data = { op: "deliver", step: name, round, headFrom: prev?.headTo ?? null, headTo: task.headSHA };
   insertEvent(db, ctx, { project: task.project, target: task.id, kind: "step", data }, false);
+}
+
+/**
+ * review（含从 review 进的 blocked）期间不许换 head：作者按写 / 修那一步交付的 head 认（ledger-steps.ts authorOf），这时换了 head
+ * 作者就对不上，硬规则 1 退成「作者未知」放行（T47 复核 P1）。deliver / task-set 都在事务里调；相同的 head 照常放行。
+ * 要换：PM 先退回 fix，再带 --from fix 交付，这一轮的作者才记得上（tests/ledger-steps.test.ts）
+ */
+export function checkReviewHead(task: LedgerTask, head: unknown): void {
+  if (head === undefined || head === task.headSHA || workStage(task) !== "review") return;
+  const back = task.stage === "blocked" ? "stage --from blocked --to review，再 stage --from review --to fix" : "stage --from review --to fix";
+  throw new LedgerError(
+    "conflict",
+    `任务 ${task.id} 在审查中，head 不能从 ${task.headSHA ?? "（空）"} 换成 ${String(head)}：先由 PM 退回 fix（${back}），再 deliver ${task.id} --from fix --head ${String(head)}`,
+    { stage: task.stage },
+  );
 }
 
 /** 审查人是不是这一轮审查那一步（currentReview：初审 / 终审按轮次取）：本机 agent 按名字，peer（peer:<名>）按实例 */

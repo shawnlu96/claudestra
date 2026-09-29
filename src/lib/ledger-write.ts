@@ -38,7 +38,7 @@ import { canTransition, nextTaskState, roleOf, TERMINAL_STAGES, type EventKind, 
 import { checksAllClear } from "./ledger-probes.js";
 import { getItem, getMeta, LedgerError, type LedgerMeta } from "./ledger-store.js";
 import { insertEvent, replay, tx } from "./ledger-tx.js";
-import { activeStepFor, checkReviewStep, noteStepDelivered, noteStepReview } from "./ledger-steps-write.js";
+import { activeStepFor, checkReviewHead, checkReviewStep, noteStepDelivered, noteStepReview } from "./ledger-steps-write.js";
 
 export type { AppendableKind, ImportTaskInput, NewItem, NewTask, ReviewInput, StageMove, WriteCtx, WriteResult };
 
@@ -155,6 +155,7 @@ export function setTask(db: Database, ctx: WriteCtx, input: { id: string; rev: n
     const people = ["agent", "assigneeKind", "assignee", "pm"].filter((k) => k in patch);
     if (people.length && !isManager(db, ctx.actor, cur)) throw new LedgerError("forbidden", `只有 PM / master / owner 能改任务 ${cur.id} 的 ${people.join(" / ")}`);
     if ("itemId" in patch) checkItemRef(db, cur.project, patch.itemId);
+    checkReviewHead(cur, patch.headSHA);
     const full = { ...patch, ...resolveAssignee(cur, patch) };
     const rev = updateTask(db, ctx, cur, full);
     const event = insertEvent(db, ctx, { ...key, data: { op: "set", patch: full, rev } }, true);
@@ -226,6 +227,7 @@ export function deliver(
     if (TERMINAL_STAGES.includes(task.stage)) throw new LedgerError("invalid", `任务 ${task.id} 已是终态 ${task.stage}，不能再交付`, { stage: task.stage });
     // 先换 head 再推阶段（那一步记的交付 head 要是新的，ledger-steps-write.ts），再记交付：deliver 的 round 与同一轮的 review 事件一致
     if (input.headSHA) {
+      checkReviewHead(task, input.headSHA);
       updateTask(db, ctx, task, { headSHA: input.headSHA });
       task = mustTask(db, task.id);
     }

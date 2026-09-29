@@ -199,6 +199,61 @@ describe("T47 复核回归", () => {
   });
 });
 
+describe("review 阶段不许换 head（T47 复核 P1：换了 head 作者就对不上，写的人能审自己的代码）", () => {
+  const H1 = "aaaa111", H2 = "bbbb222";
+  const input = { taskId: "T50", verdict: "pass" as const, p0: 0, p1: 0, p2: 0 };
+  const cli = (actor: string) => (...args: string[]) =>
+    runLedger(args, { db, actor, projectIds: [P], loadRegistry: async () => ({ socket: "", agents: {} }), saveRegistry: async () => {}, now: () => 2_000 }) as Promise<Record<string, any>>;
+  const writerBlocked = () => expect(errOf(() => recordReview(db, PM, { ...input, reviewer: "agent-x" })).code).toBe("forbidden");
+  beforeEach(() => {
+    setTask(db, OWNER, { id: "T50", rev: 1, patch: { agent: "agent-x" } });
+    assignStep(db, PM, { taskId: "T50", step: "write", executor: "agent-x", executorKind: "agent" });
+    toStage("T50", "build");
+    deliver(db, { actor: "agent-x", now: 1_200 }, { taskId: "T50", headSHA: H1, moveFrom: "build" });
+  });
+
+  test("入口 1：执行者 deliver --head（不带 --from）：拒，head 不动；前后写的人都审不了", async () => {
+    writerBlocked();
+    const r = await cli("agent-x")("deliver", "T50", "--head", H2);
+    expect(r).toMatchObject({ ok: false, code: "conflict" });
+    expect(r.error).toContain(`deliver T50 --from fix --head ${H2}`);
+    expect(getTask(db, "T50")!.headSHA).toBe(H1);
+    writerBlocked();
+    expect(await cli("agent-x")("deliver", "T50", "--head", H1, "--text", "补证据")).toMatchObject({ ok: true }); // 同一个 head 照常
+  });
+
+  test("入口 2：task-set --head（PM、执行者都一样）：拒，head 不动；前后写的人都审不了", async () => {
+    writerBlocked();
+    const rev = String(getTask(db, "T50")!.rev);
+    expect(await cli("agent-pm")("task-set", "T50", "--rev", rev, "--head", H2)).toMatchObject({ ok: false, code: "conflict" });
+    expect(await cli("agent-x")("task-set", "T50", "--rev", rev, "--head", H2)).toMatchObject({ ok: false, code: "conflict" });
+    expect(getTask(db, "T50")!.headSHA).toBe(H1);
+    writerBlocked();
+  });
+
+  test("review 进 blocked 也拒，报错写明先回 review 再退 fix", async () => {
+    moveStage(db, PM, { taskId: "T50", from: "review", to: "blocked" });
+    const r = await cli("agent-x")("deliver", "T50", "--head", H2);
+    expect(r).toMatchObject({ ok: false, code: "conflict" });
+    expect(r.error).toContain("--from blocked --to review");
+    expect(await cli("agent-pm")("task-set", "T50", "--rev", String(getTask(db, "T50")!.rev), "--head", H2)).toMatchObject({ ok: false, code: "conflict" });
+  });
+
+  test("正路：PM 退回 fix，再 deliver --from fix（PM 替补挂也行）：新 head 记成修的那一步，写的人照样审不了", async () => {
+    expect(await cli("agent-pm")("stage", "T50", "--from", "review", "--to", "fix")).toMatchObject({ ok: true });
+    expect(await cli("agent-pm")("deliver", "T50", "--from", "fix", "--head", H2)).toMatchObject({ ok: true });
+    const fix = listSteps(db, "T50").find((s) => s.step === "fix")!;
+    expect([fix.executor, fix.headFrom, fix.headTo]).toEqual(["agent-x", H1, H2]);
+    writerBlocked();
+    expect(recordReview(db, PM, { ...input, reviewer: "agent-y" }).event.data).toMatchObject({ author: "agent-x", authorCheck: true });
+  });
+
+  test("合并之后 PM 用 task-set --branch --head 记下合进去的 head：不挡", async () => {
+    toStage("T50", "merge");
+    expect(await cli("agent-pm")("task-set", "T50", "--rev", String(getTask(db, "T50")!.rev), "--branch", "main", "--head", H1)).toMatchObject({ ok: true });
+  });
+});
+
 describe("跨实例复核回归", () => {
   beforeEach(() => {
     assignStep(db, PM, { taskId: "T50", step: "write", executor: "agent-a@A", executorKind: "peer" });

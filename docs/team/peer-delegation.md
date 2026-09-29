@@ -94,7 +94,7 @@ bun src/manager.ts peer-ledger <peer> accept D12                  # owner 同意
 - 权限全在发起方的 bridge 判：只认请求用的 token 对应哪个 peer，认不出你这边是哪个 agent；请求体里写的名字一概不信。
 - **权限按步骤判**（T47，`src/lib/ledger-steps.ts`）：卡拆成复述、写、初审、修、终审、看界面、合并部署、核对，每一步单独记执行者。你只能动**当前阶段那一步派给你的**：复述那一步（`spec→restate`）、写那一步（`build→review`）、修那一步（`fix→review`，没单独派「修」就还是写的人修），以及合并前的阶段进出 `blocked`。review 阶段能进出 blocked 的是交付的那一方。放行复述（`restate→build`）、merge、deploy、verified、cancelled、回退改规格，都只能由发起方 PM 做；合并部署、核对这两步不能派给别的实例。
 - 老卡没有步骤记录，按 `extra.delegate`（执行方）/ `extra.reviewer`（审查方）推出来，和以前一样。
-- 只在 build / fix 阶段能挂 PR 和 head：进了 review 再换，发起方审过的就不是现在这份了。审查结论只有这一轮审查那一步的实例能写，不带阶段跳转。
+- 只在 build / fix 阶段能挂 PR 和 head：进了 review 再换，发起方审过的就不是现在这份了。发起方本机也一样：review（含从 review 进的 blocked）期间 `deliver` / `task-set` 换 head 一律拒，PM 替你补挂也要先退回 fix、再 `deliver --from fix --head`，这一轮的作者才记得上；合并之后 PM 用 `task-set --head` 记同一个 head 不受影响。审查结论只有这一轮审查那一步的实例能写，不带阶段跳转。
 - **作者按步骤算**：写或修那一步的执行者，加上它交付的 head 区间。审查结论写进来时按这个查「审的人不能是写的人」：查得出且相同就拒；查不出（没交付过 head）放行，结论里标「作者未知」。两边是同一个实例时只能凭对方声明。
 - 时间线是白名单：阶段变化只给 from / to；建卡、改卡只给 PR 和 head；交付只给 head；审查只给结论（verdict、P 计数、轮次、正文）；你自己写的事件原样给。建卡时的 `extra`、分支名、规格卡路径、发起方 PM 的 note、owner 原话、派审、部署这些都不给。
 - 负责人、规格卡、`extra`、别的任务、事项都碰不到。事件的 actor 记成 `peer:<名>`。
