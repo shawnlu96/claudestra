@@ -12,6 +12,7 @@
  * 落盘（~/.claude-orchestrator/pending-agent-calls.json）：bridge 重启后对方照常回复也知道推给谁。不存 caller 的 ws：推回时按
  * callerChannelId 取当前连接。老文件（key = target）启动时迁成新 key。
  */
+import { shouldSweepPac, type HeldFromLike } from "../lib/held-pac.js";
 import { statePath } from "../lib/paths.js";
 import { PersistedMap } from "./persisted-map.js";
 
@@ -32,6 +33,11 @@ export interface PendingAgentCall {
   ts: number;
   /** 已经提醒过 target「好几个人在等你，分别回」的时刻（同一批只提醒一次） */
   ambiguityNotifiedAt?: number;
+  /** 已经告诉过 caller「它这轮以 API 错误结束、回程保留」的时刻（每槽一次，bridge/stop-settle.ts） */
+  apiErrorNotifiedAt?: number;
+  /** target 以 API 错误结束、这一槽在等它接着做完的那一轮（bridge/stop-settle.ts）；withheld = 错误前它已经说了的话 */
+  apiErrorAt?: number;
+  withheld?: string[];
   /** 这一槽的各条请求（老数据没有：整槽当一条） */
   requests?: CallRequest[];
   /** requests 的 message_id（stale 扫描判「全都还押着」用，lib/held-pac.ts） */
@@ -82,11 +88,16 @@ export class AgentCallBook extends PersistedMap<PendingAgentCall> {
     if (this.size) console.log(`♻️ 恢复待回程的 send_to_agent ${this.size} 条（对方的答复仍会推回发起方）`);
   }
 
+  /** 带着扣下的话（stop-settle 的 withheld）的槽被 reply / send_to_agent 直接答掉时调，bridge 接成推给 caller */
+  onWithheld?: (pac: PendingAgentCall) => void;
+  /** 以 API 错误结束、等续跑的槽没等到就被删了（过期 / target 被关掉）：bridge 接成 expiredNotice 推给 caller，不静默丢 */
+  onExpired?: (pac: PendingAgentCall, why: string) => void;
+
   /** 记一条请求（同一 caller 还没答完的请求留着，新的追加在后面） */
   add(target: string, call: PendingAgentCall, messageId?: string): void {
     const prev = this.slot(target, call.callerChannelId);
     const req: CallRequest = { messageId, expecting: call.expecting, originalReplyChannel: call.originalReplyChannel, ts: call.ts };
-    this.store(target, { ...(prev ?? call), ...call, ambiguityNotifiedAt: undefined }, [...requestsOf(prev), req]);
+    this.store(target, { ...(prev ?? call), ...call, ambiguityNotifiedAt: undefined, apiErrorNotifiedAt: undefined }, [...requestsOf(prev), req]);
   }
 
   slot(target: string, caller: string): PendingAgentCall | undefined {
@@ -97,18 +108,22 @@ export class AgentCallBook extends PersistedMap<PendingAgentCall> {
   consume(target: string, caller: string, answered?: PendingAgentCall): boolean {
     const cur = this.slot(target, caller);
     if (!cur) return false;
+    if (cur.withheld?.length) this.onWithheld?.(cur); // 它直接答了：扣下的话推给 caller，不跟着槽悄悄清掉
     if (!answered?.requests) return this.delete(keyOf(target, caller));
     const done = new Set(answered.requests.map((r) => r.messageId));
     const left = requestsOf(cur).filter((r) => !done.has(r.messageId));
     if (!left.length) return this.delete(keyOf(target, caller));
-    this.store(target, cur, left);
+    this.store(target, { ...cur, apiErrorAt: undefined, withheld: undefined }, left); // 扣下的话已随答复推走
     return true;
   }
 
-  /** send_to_agent 投递失败：只撤这一条请求 */
+  /** send_to_agent 投递失败：只撤这一条请求。不是答复，不走 consume——槽上的等续跑标记和扣下的话都是前面几条请求的，原样留着 */
   dropRequest(target: string, caller: string, messageId: string): void {
     const cur = this.slot(target, caller);
-    if (cur) this.consume(target, caller, { ...cur, requests: [{ messageId, ts: 0 }] });
+    if (!cur) return;
+    const left = requestsOf(cur).filter((r) => r.messageId !== messageId);
+    if (left.length) this.store(target, cur, left);
+    else this.delete(keyOf(target, caller));
   }
 
   private store(target: string, base: PendingAgentCall, reqs: CallRequest[]): void {
@@ -161,6 +176,46 @@ export class AgentCallBook extends PersistedMap<PendingAgentCall> {
     return w;
   }
 
+  /** 在等 target、还没收到过 API 错误说明的槽：返回并记下已说明（落盘）。caller 再发一条请求会重新计（add） */
+  takeApiErrorNotice(target: string, stillHeld: StillHeld, now = Date.now()): PendingAgentCall[] {
+    const w = this.waiting(target, stillHeld).filter((c) => !c.apiErrorNotifiedAt);
+    for (const c of w) {
+      const raw = this.slot(target, c.callerChannelId);
+      if (raw) this.setQuiet(keyOf(target, c.callerChannelId), { ...raw, apiErrorNotifiedAt: now });
+    }
+    if (w.length) this.persist();
+    return w;
+  }
+
+  /**
+   * target 这一轮以 API 错误结束：在等它的槽都记上等续跑（第一次的时刻）；withheld 只挂在归属确定的那一槽：caller 给了就是它
+   * （null = 确定不了），没给就要恰好一个在等。多个 caller 不猜、不广播，也不按「谁已经扣着话」猜（A 的话推给 B 是串话）。
+   * 返回扣到了哪一槽（没扣 = undefined）；落盘
+   */
+  markApiError(target: string, stillHeld: StillHeld, withheld: string | null, caller?: string | null, now = Date.now()): string | undefined {
+    const w = this.waiting(target, stillHeld);
+    const owner = caller !== undefined ? caller : w.length === 1 ? w[0]!.callerChannelId : null;
+    const to = withheld && owner && w.some((c) => c.callerChannelId === owner) ? owner : undefined;
+    for (const c of w) {
+      const raw = this.slot(target, c.callerChannelId);
+      const add = c.callerChannelId === to ? { withheld: [...(raw?.withheld ?? []), withheld!] } : {};
+      if (raw) this.setQuiet(keyOf(target, c.callerChannelId), { ...raw, apiErrorAt: raw.apiErrorAt ?? now, ...add });
+    }
+    if (w.length) this.persist();
+    return to;
+  }
+
+  /** 扣下的话已经推给 caller 了：只清那一槽的 withheld */
+  clearWithheld(target: string, caller: string): void {
+    const raw = this.slot(target, caller);
+    if (raw?.withheld) this.set(keyOf(target, caller), { ...raw, withheld: undefined });
+  }
+
+  /** 有 caller 在等 target 接着做完（它上一轮以 API 错误结束）：这时 owner 在 Discord 打字不算接管 */
+  awaitingResume(target: string, stillHeld: StillHeld): boolean {
+    return this.waiting(target, stillHeld).some((c) => c.apiErrorAt);
+  }
+
   /** 失效钟重新起算（押后的消息真正送达时调）：给了 caller 只动那一槽，否则 target 名下全部 */
   touch(target: string, caller?: string, now = Date.now()): void {
     let changed = false;
@@ -172,6 +227,22 @@ export class AgentCallBook extends PersistedMap<PendingAgentCall> {
     if (changed) this.persist();
   }
 
+  /**
+   * 每分钟扫：送达后 staleMs 还没被消化的槽删掉，返回删掉的（以 API 错误结束、等续跑的经 onExpired 告诉 caller）。
+   * 押在 target 队里（它还没看到）的不删，失效钟从真正送达起算。
+   */
+  sweepStale(now: number, staleMs: number, heldFrom: (target: string) => HeldFromLike[] | undefined, paused?: (target: string) => boolean): PendingAgentCall[] {
+    const out: PendingAgentCall[] = [];
+    for (const [k, c] of [...this.entries()]) {
+      if (paused?.(targetOf(k, c)) || !shouldSweepPac(c, heldFrom(targetOf(k, c)), now, staleMs)) continue;
+      this.deleteQuiet(k);
+      out.push(c);
+      if (c.apiErrorAt) this.onExpired?.({ ...c, targetChannelId: targetOf(k, c) }, "之后 2 小时没有接着做完");
+    }
+    if (out.length) this.persist();
+    return out;
+  }
+
   /** 这个频道作为 target 或 caller 的槽全清掉（用户接管 / agent 被 kill），返回清掉几条 */
   dropChannel(channelId: string): number {
     let n = 0;
@@ -179,6 +250,7 @@ export class AgentCallBook extends PersistedMap<PendingAgentCall> {
       if (targetOf(k, c) !== channelId && c.callerChannelId !== channelId) continue;
       this.deleteQuiet(k);
       n++;
+      if (c.apiErrorAt && targetOf(k, c) === channelId) this.onExpired?.({ ...c, targetChannelId: channelId }, "之后它被关掉了");
     }
     if (n) this.persist();
     return n;
@@ -190,4 +262,23 @@ export function ambiguityNotice(waiting: PendingAgentCall[]): string {
   const who = waiting.map((c) => c.callerName).join("、");
   return `[ℹ️ 现在有 ${waiting.length} 个 agent 同时在等你的答复：${who}。你没用 send_to_agent 指明答给谁的回复，bridge 分不清归谁，`
     + `所以没有转给任何一方（免得把 A 的内容给了 B）。请用 send_to_agent 分别回复每个发起方（target 填它的名字）。]`;
+}
+
+/** caller 当时填的 expecting 放在答复最前面，caller 不靠自己记得也能接着干 */
+export function withExpecting(pac: PendingAgentCall, reply: string): string {
+  return pac.expecting
+    ? `[💡 你之前 send_to_agent 给 ${pac.targetName} 时填的期望：${pac.expecting}\n对方答复如下，请按计划继续，不要只 relay 给用户。]\n\n${reply}`
+    : reply;
+}
+
+/** 撞错后扣下的话（stop-settle 的 withheld）单独推给 caller 时的抬头：别和不相干那一轮的正文拼在一起 */
+export function withheldNotice(pac: PendingAgentCall): string {
+  return `[ℹ️ ${pac.targetName} 撞墙前扣下的答复（那一轮以 API 错误结束，下面是出错前它已经说了的话）：]\n\n${(pac.withheld ?? []).join("\n\n")}`;
+}
+
+/** 以 API 错误结束、等续跑的回程没了（2 小时没接着做完 / target 被关掉）：不静默删，固定模板告诉 caller，扣下的话附后 */
+export function expiredNotice(pac: PendingAgentCall, why = "之后 2 小时没有接着做完"): string {
+  const at = new Date(pac.apiErrorAt ?? pac.ts).toTimeString().slice(0, 5);
+  const head = `[ℹ️ ${pac.targetName} 没有给出答复（原因：它 ${at} 那一轮以 API 错误结束，${why}），扣下的话附后，请重发或换人]`;
+  return pac.withheld?.length ? `${head}\n\n${pac.withheld.join("\n\n")}` : head;
 }

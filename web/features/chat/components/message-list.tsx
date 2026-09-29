@@ -8,7 +8,6 @@ import { BubbleBoundary } from "@/components/boundaries";
 import { PermissionCard } from "./permission-card";
 import { AskQuestionCard } from "./ask-question-card";
 import { ReplyComponents } from "./reply-components";
-import { BgTaskPanel } from "./bg-task-panel";
 import { CcTaskPanel } from "./cc-task-panel";
 import { useT, getLang, tVerbatim, useLang } from "@/lib/i18n";
 import { BubbleMenu, SelectModeBar, useBubbleMenuTrigger } from "./bubble-menu";
@@ -28,6 +27,7 @@ import { ProgressNote } from "./progress-note";
 import { NarrationFoldBar, NarrationFolded, useNarrationFold } from "./narration-fold";
 import { SourceHeader } from "./source-header";
 import { useIsExport } from "../export-context";
+import { HeldMark } from "../../quota-wall/held-mark";
 import { GutterTime, HeaderTime } from "./msg-time";
 import { ReplyDivider, SegGroups } from "./seg-groups";
 import { inRange, selRange } from "../share-mode";
@@ -297,9 +297,8 @@ export const Message = memo(function Message({ m, streaming, isLast, awaiting, p
             </div>
           </QuoteSwipe>
         )}
-        {/* v2.15+ 发送失败标记:乐观气泡不能装作已送达(2026-07-27 用户丢消息实锤)。
-            v2.21.5+ 带「重新发送 / 删除」按钮(owner 2026-09-06:网络不好时点一下就重发,
-            含图片附件)——载荷留在 store 的 pendingSends 里,同一气泡原地重发。 */}
+        {/* 乐观气泡不装作已送达:失败的带「重新发送 / 删除」(载荷在 store 的 pendingSends,原地重发);bridge 押住的另有标记,说明行对齐后没了也看得出 */}
+        {m.held && !m.failed && <HeldMark />}
         {m.failed && (
           <div className="flex items-center gap-2 pr-1 text-[11px] font-medium text-error">
             <span>⚠️ {t("未送达")}</span>
@@ -385,7 +384,6 @@ export function MessageList() {
   const store = useChatStoreApi();
   const pendingPermission = useChatStore((s) => s.state.pendingPermission);
   const pendingAsk = useChatStore((s) => s.state.pendingAsk);
-  const bgTaskCount = useChatStore((s) => s.state.bgTasks.length);
   const browsing = useChatStore((s) => s.state.browsing);
   const scrollerRef = useRef<HTMLDivElement>(null);
   const followRef = useRef(true);
@@ -553,7 +551,7 @@ export function MessageList() {
     if (Date.now() < touchHoldRef.current) return; // 抬手后 releaseTouchHold 补吸底
     const el = scrollerRef.current;
     if (el) el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
-  }, [messages.length, pendingPermission, pendingAsk, bgTaskCount]);
+  }, [messages.length, pendingPermission, pendingAsk]);
 
   /* 自己发送 / 重发 → 无条件回到底部（即便此刻正在上面看历史）。 */
   useEffect(() => {
@@ -742,7 +740,6 @@ export function MessageList() {
         )}
         {/* 活跃会话的面板/交互卡不属于历史现场——浏览模式只藏不清,回来原样恢复 */}
         {!browsing && <CcTaskPanel />}
-        {!browsing && <BgTaskPanel />}
         {!browsing && pendingPermission && <PermissionCard p={pendingPermission} />}
         {!browsing && pendingAsk && <AskQuestionCard a={pendingAsk} />}
         {standaloneThinking && !browsing && (

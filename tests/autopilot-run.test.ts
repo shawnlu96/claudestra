@@ -155,3 +155,15 @@ describe("parseResetAt", () => {
     expect(parseResetAt("try again at Jan 5th, 2027 8:41 AM", NOW)).toBeNull();
   });
 });
+
+describe("额度闸（bridge/quota-wall.ts）接线", () => {
+  test("整机撞墙：下次唤醒按闸给的重置时刻排，优先于这一轮原文", () => {
+    const until = NOW + 5 * 3_600_000;
+    const w = nextWake("rate_limited", { idle: 0, fail: 0 }, ev({ rateLimitText: "resets 11pm (Asia/Tokyo)", wallUntil: until }), NOW, GRACE);
+    expect(w).toMatchObject({ hold: "rate_limit", delayMs: until - NOW + T.rateLimitSlackMs });
+  });
+  test("闸开着就让位（排在最前：不在线也是等出闸）", () => {
+    expect(yieldReason({ online: false, turnBusy: true, walled: true }, NOW)).toBe("quota_wall");
+    expect(yieldReason({ online: true, turnBusy: false, walled: false }, NOW)).toBeNull();
+  });
+});

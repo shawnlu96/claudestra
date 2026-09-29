@@ -6,6 +6,7 @@ import { createInterruptGate } from "../lib/interrupt-gate.js";
 import { recordMetric } from "../lib/metrics.js";
 import { controlFor } from "../lib/runtimes/index.js";
 import { interruptWindow } from "../lib/runtimes/window-ops.js";
+import { windowWallWait } from "../lib/wall-screen.js";
 import { emitEvent } from "./event-bus.js";
 import { extensionAbort, setAbortCapable } from "./pi-abort.js";
 export { onAbortAck, onCodexUndelivered, setExtensionSocket, stopAfterAbort, stopWaitIds } from "./pi-abort.js"; // bridge.ts 只从这里接打断相关的线
@@ -24,6 +25,7 @@ export function noteRuntimeCaps(channelId: string, msg: { typeIn?: unknown; abor
 export const interruptGate = createInterruptGate({
   resolve: (ch) => resolveTurnWindow(ch, controlChannelId()),
   probe: probeTurnAt,
+  wallWait: async (win) => !!(await windowWallWait(win)), // 抓不到屏：交给 probe 按老规矩判（它也抓不到就是 unknown，不发键）
   interrupt: async (win, runtime, ch, kind) => {
     turnCuts.noteKeySent(ch, kind); // 先记：Codex 的打断回报 0.5 秒就到
     if (controlFor(runtime).abortVia === "extension") return extensionAbort(ch);

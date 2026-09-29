@@ -21,6 +21,7 @@ import { typeIntoOwnPane } from "./lib/codex-tui-submit.js";
 import { CodexQueueSink, decodePreambleEnv, codexParentGone, codexQueueArgs, defaultRunner, heldThreadIds, isPidAlive, type InboundSink } from "./lib/codex-thread.js";
 import { FORWARD_TO_AGENT_DESCRIPTION, SEND_TO_AGENT_DESCRIPTION } from "./lib/agent-tool-docs.js";
 import { CHECK_INBOX_TOOL, checkInboxTool, forwardTool, sendToAgentTool } from "./lib/agent-tool-calls.js";
+import { FLEET_TOOL, fleetTool } from "./lib/fleet-tool.js";
 import { REPLY_ASK_PROPERTY, replyResultText } from "./lib/reply-ask-schema.js";
 
 // 进程级异常兜底。**故意不退出**：本进程没有任何守护者（Claude Code 不 respawn
@@ -601,6 +602,7 @@ one round trip instead of many.`,
       },
     },
     CHECK_INBOX_TOOL,
+    FLEET_TOOL,
     {
       name: "ask_codex",
       description: `Ask the local OpenAI Codex agent (runs on this machine via ChatGPT.app's CLI, owner's subscription quota — use deliberately, never in loops).
@@ -743,12 +745,10 @@ mcp.setRequestHandler(CallToolRequestSchema, async (request) => {
       };
     }
 
-    case "forward_to_agent":
-      return forwardTool(bridgeRequest, args);
-    case "send_to_agent":
-      return sendToAgentTool(bridgeRequest, args);
-    case "check_inbox":
-      return checkInboxTool(bridgeRequest, args);
+    case "forward_to_agent": return forwardTool(bridgeRequest, args);
+    case "send_to_agent": return sendToAgentTool(bridgeRequest, args);
+    case "check_inbox": return checkInboxTool(bridgeRequest, args);
+    case "fleet": return fleetTool(bridgeRequest, args); // 批量管理：谁能调由 bridge 按本连接注册的频道判（lib/fleet-caller.ts）
 
     default:
       throw new Error(`Unknown tool: ${name}`);

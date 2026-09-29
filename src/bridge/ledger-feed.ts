@@ -7,7 +7,7 @@
 import { askWhoOf, canSeeAsk } from "../lib/ask-access.js";
 import { canReadLedger } from "../lib/devices.js";
 import { LedgerReader, ledgerFeedTicker } from "../lib/ledger-read.js";
-import { agentInScope, type Principal } from "../lib/principals.js";
+import { agentInScope, canRunFleet, type Principal } from "../lib/principals.js";
 import { emitEvent, type BridgeEvent } from "./event-bus.js";
 import { talkEventAllowed } from "./talk.js";
 
@@ -48,6 +48,7 @@ export function sseEventAllow(principal: Principal, types?: string[]): (evt: Bri
   return (evt) => {
     if (onlyTypes && !onlyTypes.has(evt.type)) return false;
     if (evt.type === "ledger") return ledger;
+    if (evt.type === "low_priority") return canRunFleet(principal); // 和 /agents 的 lowPriority 字段、批量管理同一道门：只给 owner 的全权设备
     if (evt.type === "talk") return talkEventAllowed(principal, evt.data);
     if (evt.type === "ask") return canSeeAsk(principal, askWhoOf(evt.data, evt.agent));
     return agentInScope(principal, evt.agent);

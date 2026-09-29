@@ -25,12 +25,13 @@ import {
   type Boundary, type BoundaryVerdict, type CtxBoundaryView, type GlobalAutoCompact, type SkipReason,
 } from "../lib/ctx-boundary-decision.js";
 import {
-  agentTarget, agentWindowName, compactInjectedRecently, injectCompact, liveInjectDeps, loadInjectState, paneGateOf, resetInjectState, sweepPendingEcho,
+  agentTarget, agentWindowName, compactInjectedRecently, injectCompact, liveInjectDeps, loadInjectState, paneGateOf, resetInjectState, sweepPendingEcho, withWindow,
   type InjectDeps, type InjectResult, type InjectTarget, type PaneCapture,
 } from "./ctx-boundary-inject.js";
 import { MASTER_DIR } from "./config.js";
 export { compactInjectedRecently, injectCompact } from "./ctx-boundary-inject.js"; // 看板 / 手动按钮原来从这里拿
 import { PersistedMap } from "./persisted-map.js";
+import { quotaWall } from "./quota-wall-wiring.js";
 import { adapterFor } from "./adapters.js";
 import { emitEvent } from "./event-bus.js";
 import { parseChatId } from "./router.js";
@@ -70,6 +71,8 @@ export interface CtxBoundaryDeps extends InjectDeps {
   autoCompact(): (GlobalAutoCompact & { policies?: unknown }) | undefined;
   log(line: string): void;
   alert(a: BoundaryAgent, text: string, data: Record<string, unknown>): void;
+  /** 这个频道此刻在额度闸里（撞墙、没开 LP）；缺省 = 不在 */
+  gated?(channelId: string | null): Promise<boolean>;
   /** true = 只判定不发键、不写状态、不删字（manager ctx-boundary dry-run） */
   dryRun?: boolean;
   /** dry-run 用：按开关关 / 开各判一遍，不看 config 里的 inject */
@@ -170,6 +173,7 @@ async function checkOne(a: BoundaryAgent & { ctx: number }, b: Boundary, deps: C
     idle: idleEnough(a, b, pane, now),
     pane: pane === null ? null : paneGateOf(pane, deps.readPane(pane.plain, pane.esc)),
     injectedRecently: compactInjectedRecently(a.target, now),
+    gated: (await deps.gated?.(a.channelId)) === true,
     lastTrig: lastTrig.get(a.name) ?? 0,
     now,
     retryMs: RETRY_MS,
@@ -215,12 +219,16 @@ export async function ctxBoundaryTick(deps: CtxBoundaryDeps = liveDeps): Promise
   for (const a of await deps.liveSessions(await deps.agents())) {
     const master = isMasterAgent(a.name);
     const b = boundaryFor(a, p, on);
-    if (a.ctx === null || (master && !on) || !overLine(a.ctx, b)) {
+    const ctx = a.ctx;
+    if (ctx === null || (master && !on) || !overLine(ctx, b)) {
       if (!deps.dryRun) lastTrig.delete(a.name);
       lastSkip.delete(a.name);
       continue;
     }
-    out.push({ ...(await checkOne({ ...a, ctx: a.ctx }, b, deps)), gated: master || b.policy !== "global" });
+    // 抓屏、判定、注入都在窗口执行权里：批量动作 / 手动按钮正在这个窗口发键就这轮不看，下一分钟再来
+    const busy = (who: string) => void deps.log(`🧭 上下文边界 跳过 ${a.name}：${who}正在操作这个窗口`);
+    const r = await withWindow(a.target, "自动压缩", () => checkOne({ ...a, ctx }, b, deps), busy);
+    if (r) out.push({ ...r, gated: master || b.policy !== "global" });
   }
   return out;
 }
@@ -334,6 +342,7 @@ const liveDeps: CtxBoundaryDeps = {
   autoCompact: () => readConfigSync().autoCompact,
   log: (l) => console.log(l),
   alert: alertOwner,
+  gated: async (cid) => !!cid && (await quotaWall()?.gates(cid)) === true, // 闸没起（manager dry-run）= 不在闸里
 };
 
 /** dry-run 里单独给大总管的一行：它以前从没被覆盖过（窗口名拼错），要不要自动压由 owner 定 */

@@ -174,9 +174,10 @@ type ApiWait = { messageId?: string; waitUntil?: number; resolve?: unknown };
  * Stop 兜底收尾要结掉的 API 请求（从账上拿走），skip 里的留在队里：Pi 叫停引起的那次 Stop 不结停字自己的同步等待，
  * 留给停字那一轮去答（adv5 P2-1，bridge/pi-abort.ts stopWaitIds）。
  */
-export function apiQueueToSettle<T extends ApiWait>(queues: Map<string, T[]>, key: string, skip: ReadonlySet<string>): T[] {
+export function apiQueueToSettle<T extends ApiWait>(queues: Map<string, T[]>, key: string, skip: ReadonlySet<string>, only?: ReadonlySet<T>): T[] {
   const q = queues.get(key) ?? [];
-  const keep = q.filter((p) => !!p.messageId && skip.has(p.messageId));
+  // only：这一回合开始收尾时就在的那批（bridge Stop 开头拍的快照）；之后才挂上的请求不是这一回合的，留着
+  const keep = q.filter((p) => (!!p.messageId && skip.has(p.messageId)) || (only !== undefined && !only.has(p)));
   if (keep.length) queues.set(key, keep);
   else queues.delete(key);
   return q.filter((p) => !keep.includes(p));

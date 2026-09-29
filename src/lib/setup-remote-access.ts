@@ -37,7 +37,7 @@ export type RemoteAccessChoice =
 
 // ── 纯函数 ────────────────────────────────────────────────────────────────
 
-/** 用户输入 → .env 里的 RELAY_URL：裸主机名补 wss://，https/http 换成 wss/ws，去掉引号、查询串与末尾的 /；不像地址的返回 null */
+/** 用户输入 → .env 里的 RELAY_URL：裸主机名补 wss://，https/http 换成 wss/ws，去掉引号、查询串与末尾的 /；不像地址、含 $ 的返回 null */
 export function normalizeRelayUrl(input: string): string | null {
   let s = input.trim().replace(/^["']|["']$/g, "");
   if (!s || /\s/.test(s)) return null;
@@ -51,7 +51,9 @@ export function normalizeRelayUrl(input: string): string | null {
   }
   if ((u.protocol !== "wss:" && u.protocol !== "ws:") || !u.hostname) return null;
   const path = u.pathname.replace(/\/+$/, "");
-  return `${u.protocol}//${u.host}${path}`;
+  const out = `${u.protocol}//${u.host}${path}`;
+  // .env 里的 $X / ${X} 会被 Bun 读 .env 时展开成环境变量（写进去的地址被换掉，还能把别的变量带进连接串）：一律不收
+  return out.includes("$") ? null : out;
 }
 
 /** 中继的 HTTPS 基址（healthz、首页）：wss → https、ws → http，同主机同端口 */

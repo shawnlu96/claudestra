@@ -21,11 +21,6 @@ export const RESUME_WINDOW_MS = 10 * 60_000;
 
 export type NoteResult = "track" | "escalate";
 
-/** 撞额度的错误（CC 的 error:"rate_limit"、Codex 的 usage limit）：不自动续跑——续了必然再撞，交给额度闸 */
-export function isQuotaError(error: string): boolean {
-  return /rate.?limit|usage.?limit/i.test(error);
-}
-
 export function noteApiError(m: Map<string, ApiErrorState>, cid: string, error: string, now: number): NoteResult {
   const prev = m.get(cid);
   if (prev?.resumedAt !== undefined && now - prev.resumedAt < RESUME_WINDOW_MS) {
@@ -44,18 +39,19 @@ export function noteApiError(m: Map<string, ApiErrorState>, cid: string, error: 
  */
 export const ACTIVITY_GRACE_MS = 3_000;
 
-/** 该 agent 有了错误之后的新活动 ⇒ 不用续（还没续过才删；续过的留到窗口过期以便判「又撞」） */
-export function noteActivity(m: Map<string, ApiErrorState>, cid: string, ts: number): void {
+/** 该 agent 有了错误之后的新活动 ⇒ 不用续（还没续过才删；续过的留到窗口过期以便判「又撞」）。返回被取消的那条（没取消 = undefined） */
+export function noteActivity(m: Map<string, ApiErrorState>, cid: string, ts: number): ApiErrorState | undefined {
   const s = m.get(cid);
-  if (!s) return;
-  if (s.resumedAt === undefined && ts > s.errorAt + ACTIVITY_GRACE_MS) m.delete(cid);
+  if (!s || s.resumedAt !== undefined || ts <= s.errorAt + ACTIVITY_GRACE_MS) return undefined;
+  m.delete(cid);
+  return s;
 }
 
-/** 哪些事件算「它又动了」：错误条目自己的那句 "API Error: …" 文本不算 */
+/** 哪些事件算「它又动了」：错误条目自己的那句 "API Error: …" / 撞额度原文（rateLimited）不算 */
 export function countsAsActivity(type: string, data: Record<string, unknown>): boolean {
   if (type === "tool_start" || type === "chat_message") return true;
   if (type === "agent_status") return (data as { status?: unknown }).status === "thinking";
-  if (type === "assistant_text") return !String((data as { text?: unknown }).text ?? "").startsWith("API Error");
+  if (type === "assistant_text") return data.rateLimited !== true && !String((data as { text?: unknown }).text ?? "").startsWith("API Error");
   return false;
 }
 

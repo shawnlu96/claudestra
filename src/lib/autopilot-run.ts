@@ -3,6 +3,8 @@
  * 证据来自事件总线（bridge/autopilot-evidence.ts），不靠模型自报：撞额度、API 报错、本轮发出的按钮 / 没答完的提问都是事件。
  * 取代旧的「提醒后 90 秒内结束就算空转 → 5/15/30/60 分钟退避」：那条把额度用尽、在等人、正常很短的一轮混成一类。
  */
+import { parseResetText } from "./usage-window.js";
+
 const MINUTE_MS = 60_000;
 
 export type RunOutcome = "normal" | "action_taken" | "blocked_approval" | "rate_limited" | "failed";
@@ -16,6 +18,8 @@ export interface RunEvidence {
   rateLimitText?: string;
   /** 看到那句话的时刻（重置时间按它解析） */
   rateLimitAt?: number;
+  /** 额度闸（bridge/quota-wall.ts）给的重置时刻：整机撞墙时以它为准，比这一轮自己的原文全（几个 agent 的撞墙并过） */
+  wallUntil?: number;
   /** API 报错原文，或 bridge 判定的失败原因（超时、agent 掉线） */
   failure?: string;
   /** 本轮发出的带按钮消息数：只认 run 开始之后 agent 自己发的，owner 早先没答的按钮不算 */
@@ -100,7 +104,7 @@ export interface NextWake {
 export function nextWake(outcome: RunOutcome, streaks: RunStreaks, ev: RunEvidence, now: number, graceMs: number): NextWake {
   const T = AUTOPILOT_TIMING;
   if (outcome === "rate_limited") {
-    const at = ev.rateLimitText ? parseResetAt(ev.rateLimitText, ev.rateLimitAt ?? now) : null;
+    const at = ev.wallUntil ?? (ev.rateLimitText ? parseResetAt(ev.rateLimitText, ev.rateLimitAt ?? now) : null);
     if (at === null) return { delayMs: T.rateLimitFallbackMs, hold: "rate_limit", why: "撞额度，没解析出重置时间" };
     return { delayMs: Math.max(at - now, 0) + T.rateLimitSlackMs, hold: "rate_limit", why: `撞额度，${new Date(at).toISOString()} 重置` };
   }
@@ -119,8 +123,9 @@ export function nextWake(outcome: RunOutcome, streaks: RunStreaks, ev: RunEviden
 
 // ── 让位（人优先） ──
 
-export type YieldReason = "turn_busy" | "human_recent" | "agent_offline" | "human_stopped" | "cut_notice";
+export type YieldReason = "quota_wall" | "turn_busy" | "human_recent" | "agent_offline" | "human_stopped" | "cut_notice";
 export const YIELD_TEXT: Record<YieldReason, string> = {
+  quota_wall: "额度闸开着（整机撞额度），出闸后再推进",
   turn_busy: "主回合在跑（有人在对话，或它自己还在干）",
   human_recent: "刚收到人类消息",
   agent_offline: "agent 不在线",
@@ -129,12 +134,13 @@ export const YIELD_TEXT: Record<YieldReason, string> = {
 };
 
 /**
- * 该不该先不推进：主回合在跑、人刚说过话、agent 不在线、人叫停了（之后没再说别的）、打断收尾提醒还没投，任一条都排队等；null = 可以推进。
- * interruptHold 来自 bridge/turn-cuts.ts（「停」之后 Autopilot 不能替人续上）。
+ * 该不该先不推进：额度闸开着、主回合在跑、人刚说过话、agent 不在线、人叫停了（之后没再说别的）、打断收尾提醒还没投，任一条都排队等；
+ * null = 可以推进。interruptHold 来自 bridge/turn-cuts.ts（「停」之后 Autopilot 不能替人续上）。
  */
 export function yieldReason(
-  s: { turnBusy: boolean; online: boolean; lastHumanAt?: number; interruptHold?: "stopped" | "notice" | null }, now: number,
+  s: { turnBusy: boolean; online: boolean; lastHumanAt?: number; interruptHold?: "stopped" | "notice" | null; walled?: boolean }, now: number,
 ): YieldReason | null {
+  if (s.walled) return "quota_wall"; // 推进消息投过去也只会被闸押住，还白占一个 run
   if (!s.online) return "agent_offline";
   if (s.interruptHold === "stopped") return "human_stopped";
   if (s.turnBusy) return "turn_busy";
@@ -143,13 +149,13 @@ export function yieldReason(
 }
 
 // ── 额度重置时间 ──
+// 墙上时间 → 时间戳（时区、跨年、夏令时、只有时刻时取哪一天）统一走 lib/usage-window.ts 的 parseResetText，
+// 额度闸（lib/quota-wall-text.ts）用的也是它；这里只负责从原文里找出那段时间。
 
 const MONTHS = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
 const MONTH_RE = "(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\\.?";
 /** Claude Code：「resets 2am (Asia/Shanghai)」「resets 4:40pm (Asia/Tokyo)」「resets Oct 3, 2am (Asia/Tokyo)」「resets Fri 9am (…)」 */
-const DOW = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"];
-const CC_DAY = `(?:(sun|mon|tue|wed|thu|fri|sat)[a-z]*\\.?,?\\s+)?(?:${MONTH_RE}\\s+(\\d{1,2}),?\\s+(?:at\\s+)?)?`;
-const CC_RESET = new RegExp(`resets\\s+${CC_DAY}(\\d{1,2})(?::(\\d{2}))?\\s*(am|pm)\\s*(?:\\(([^)]+)\\))?`, "i");
+const CC_RESET = /\bresets\s+(.+)/i;
 /** Codex：「try again at 8:41 AM」「try again at Sep 29th, 2026 8:41 AM」（本机时区） */
 const CODEX_AT = new RegExp(`try again at\\s+(?:${MONTH_RE}\\s+(\\d{1,2})(?:st|nd|rd|th)?,?\\s+(\\d{4})\\s+)?(\\d{1,2}):(\\d{2})\\s*(am|pm)`, "i");
 /** Codex 旧写法：「try again in 2 hours 13 minutes」「try again in 3 days 1 hour」 */
@@ -157,87 +163,25 @@ const CODEX_IN = /try again in\s+((?:\d+\s+(?:days?|hours?|minutes?|mins?|second
 const UNIT_MS: Record<string, number> = { d: 86_400_000, h: 3_600_000, m: MINUTE_MS, s: 1000 };
 /** 重置时间只信 8 天以内：周额度最长一周，更远的多半是解析错 */
 const RESET_HORIZON_MS = 8 * 86_400_000;
+/** 刚过去几分钟的重置照样算（马上就该醒，按余量等），更早的是认错了 */
+const RESET_PAST_SLACK_MS = 5 * MINUTE_MS;
 
-/** 某时区的「墙上时间」→ 时间戳；tz 为空 = 本机时区。时区名认不出（RangeError）同样按本机算，差几个小时也比退回 30 分钟准 */
-function wallToEpoch(y: number, mo: number, d: number, h: number, mi: number, tz?: string): number {
-  if (!tz) return new Date(y, mo, d, h, mi).getTime();
-  try {
-    const guess = Date.UTC(y, mo, d, h, mi);
-    const t = guess - tzOffsetMs(guess, tz);
-    return guess - tzOffsetMs(t, tz); // 用目标时刻的偏移再校一次，跨夏令时那天不差一小时
-  } catch {
-    return new Date(y, mo, d, h, mi).getTime();
-  }
-}
-
-function tzParts(epoch: number, tz: string): { y: number; mo: number; d: number; h: number; mi: number } {
-  const f = new Intl.DateTimeFormat("en-US", { timeZone: tz, hourCycle: "h23", year: "numeric", month: "numeric", day: "numeric", hour: "numeric", minute: "numeric" });
-  const p = Object.fromEntries(f.formatToParts(new Date(epoch)).map((x) => [x.type, Number(x.value)]));
-  return { y: p.year, mo: p.month - 1, d: p.day, h: p.hour, mi: p.minute };
-}
-
-function tzOffsetMs(epoch: number, tz: string): number {
-  const p = tzParts(epoch, tz);
-  return Date.UTC(p.y, p.mo, p.d, p.h, p.mi) - Math.floor(epoch / MINUTE_MS) * MINUTE_MS;
-}
-
-/** 该时区里「今天」的年月日；tz 认不出同样退回本机 */
-function todayIn(now: number, tz?: string): { y: number; mo: number; d: number } {
-  if (tz) {
-    try {
-      return tzParts(now, tz);
-    } catch {
-      // 时区名认不出：和 wallToEpoch 一样按本机算
-    }
-  }
-  const n = new Date(now);
-  return { y: n.getFullYear(), mo: n.getMonth(), d: n.getDate() };
-}
-
-const to24 = (h: number, ap: string): number => (h % 12) + (ap.toLowerCase() === "pm" ? 12 : 0);
+const plausible = (t: number | null, now: number): number | null =>
+  t !== null && t >= now - RESET_PAST_SLACK_MS && t - now <= RESET_HORIZON_MS ? t : null;
 
 /**
- * 只有时刻没有日期：取该时区今天的这个时刻，已过就算明天。有月日没有年：今年的这天已过就算明年。
- * now 要传「看到那句话的时刻」，不是收尾时刻：收尾晚了几分钟，按收尾时刻算会把刚过去的重置滚到明天。
- * 结果不在 (now-1 分钟, now+8 天) 之内 → null，调用方退回固定等待。
+ * 撞额度那句话里的重置时刻（时间戳）；CC 和 Codex 的几种写法都认，全都认不出 → null。
+ * now 要传「看到那句话的时刻」，不是收尾时刻：收尾晚了几分钟，按收尾时刻算会把刚过去的重置当成认错。
  */
-function resolveWall(now: number, h: number, mi: number, tz: string | undefined, md?: { mo: number; d: number; y?: number }): number | null {
-  let t: number;
-  if (md) {
-    const y = md.y ?? todayIn(now, tz).y;
-    t = wallToEpoch(y, md.mo, md.d, h, mi, tz);
-    if (md.y === undefined && t < now - MINUTE_MS) t = wallToEpoch(y + 1, md.mo, md.d, h, mi, tz);
-  } else {
-    const td = todayIn(now, tz);
-    t = wallToEpoch(td.y, td.mo, td.d, h, mi, tz);
-    if (t < now - MINUTE_MS) t = wallToEpoch(td.y, td.mo, td.d + 1, h, mi, tz);
-  }
-  return t > now - MINUTE_MS && t - now <= RESET_HORIZON_MS ? t : null;
-}
-
-/** 「resets Fri 9am」：该时区里下一个周五的这个时刻（今天就是周五且已过 → 下周） */
-function resolveWeekday(now: number, dow: number, h: number, mi: number, tz: string | undefined): number | null {
-  const td = todayIn(now, tz);
-  const ahead = (dow - new Date(Date.UTC(td.y, td.mo, td.d)).getUTCDay() + 7) % 7;
-  let t = wallToEpoch(td.y, td.mo, td.d + ahead, h, mi, tz);
-  if (t < now - MINUTE_MS) t = wallToEpoch(td.y, td.mo, td.d + ahead + 7, h, mi, tz);
-  return t - now <= RESET_HORIZON_MS ? t : null;
-}
-
-/** 撞额度那句话里的重置时刻（时间戳）；CC 和 Codex 的几种写法都认，全都认不出 → null */
 export function parseResetAt(text: string, now: number): number | null {
   const cc = CC_RESET.exec(text);
-  if (cc) {
-    const [, dow, mon, day, hh, mm, ap, tz] = cc;
-    const md = mon ? { mo: MONTHS.indexOf(mon.toLowerCase().slice(0, 3)), d: Number(day) } : undefined;
-    if (dow && !md) return resolveWeekday(now, DOW.indexOf(dow.toLowerCase()), to24(Number(hh), ap), Number(mm ?? 0), tz?.trim());
-    return resolveWall(now, to24(Number(hh), ap), Number(mm ?? 0), tz?.trim(), md);
-  }
+  if (cc) return plausible(parseResetText(cc[1], now), now);
   const at = CODEX_AT.exec(text);
   if (at) {
     const [, mon, day, year, hh, mm, ap] = at;
-    const md = mon ? { mo: MONTHS.indexOf(mon.toLowerCase().slice(0, 3)), d: Number(day), y: Number(year) } : undefined;
-    return resolveWall(now, to24(Number(hh), ap), Number(mm), undefined, md);
+    if (!mon) return plausible(parseResetText(`${hh}:${mm}${ap}`, now), now); // 只有时刻：本机时区，取将来最近的那次
+    const h = (Number(hh) % 12) + (ap.toLowerCase() === "pm" ? 12 : 0);
+    return plausible(new Date(Number(year), MONTHS.indexOf(mon.toLowerCase().slice(0, 3)), Number(day), h, Number(mm)).getTime(), now);
   }
   const rel = CODEX_IN.exec(text);
   if (rel) {

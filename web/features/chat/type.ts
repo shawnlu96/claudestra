@@ -2,6 +2,7 @@ import type { CtxBoundaryInfo } from "./ctx-boundary-view";
 import type { WebPermAction, WebAuqQuestion, WebComponentRow, BgProgress, BgEndStatus } from "@/lib/chat/events";
 import type { UpdateHint } from "@/lib/chat/agents";
 import type { LedgerTaskRef, MissionInfo } from "@/lib/chat/agents";
+import type { LpState } from "@/lib/api/fleet";
 
 export interface ToolCallView {
   /** tool_use id——直播里 tool-state（失败标红）按它找回这张卡。 */
@@ -150,6 +151,8 @@ export interface ChatMessage {
   echoKey?: string;
   /** v2.15+ 发送失败（超时/网络/服务端拒绝）——气泡标「未送达」,别装作已发出 */
   failed?: boolean;
+  /** bridge 押住了（额度闸 / 目标停在额度菜单，features/quota-wall/held-send.ts）：一押可能一两天，保全不按 30 分钟丢 */
+  held?: boolean;
 }
 
 export interface AgentSession {
@@ -207,6 +210,8 @@ export interface AgentSession {
   task?: string | null;
   /** 台账里它正在执行的任务 → 侧栏行尾阶段小标（ledger-stage.ts）；没挂任务 / 凭据读不了台账时 bridge 不下发 */
   ledgerTask?: LedgerTaskRef | null;
+  /** low-priority 状态（bridge/fleet/lp-monitor.ts）：侧栏徽章 */
+  lowPriority?: LpState | null;
 }
 
 /** v2.21+ project 元数据（GET /api/projects）→ 侧栏组头 + 项目管理弹窗。 */

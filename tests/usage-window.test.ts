@@ -63,6 +63,9 @@ describe("parseResetText（/status 面板文字，没配 statusline 时的次来
   test("跨年：12 月底看到 Jan 2 → 取下一年", () => {
     const now = Date.parse("2026-12-30T12:00:00Z");
     expect(parseResetText("Jan 2, 6am (UTC)", now)).toBe(Date.parse("2027-01-02T06:00:00Z"));
+    // CC 2.1.28x 年份不同时会带上年份（toLocaleString en-US）：撞墙原文「resets Jan 2, 2027 at 6am (Asia/Tokyo)」（T24 wf gate-state-3）
+    expect(parseResetText("Jan 2, 2027 at 6am (Asia/Tokyo)", now)).toBe(Date.parse("2027-01-02T06:00:00+09:00"));
+    expect(parseResetText("Jan 2, 2027, 6:30am (UTC)", now)).toBe(Date.parse("2027-01-02T06:30:00Z"));
   });
 
   test("只有时刻：取将来最近的那次，不选已经过去的昨天同一时刻", () => {

@@ -2,10 +2,11 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useChatStore, useChatStoreApi } from "../chat-store";
 import { useT } from "@/lib/i18n";
-import { COMPACT_REQUEST_TEXT } from "./ctx-badge";
+import { CtxWarnBanner } from "./ctx-warn-banner";
 import { SkillsSheet } from "./skills-sheet";
 import { matchSlashCommands, slashQuery, type SlashCmd } from "../slash-match";
 import { MicIcon, PaperclipIcon, SendIcon } from "./composer-icons";
+import { PasteExternalButton } from "./paste-external";
 import { UpdateHintBanner } from "./update-hint-banner";
 import { clearDraft, loadDraft, saveDraft } from "../drafts";
 import { agentSkills } from "@/lib/api/chat";
@@ -82,26 +83,8 @@ export function Composer() {
   const quoteDraft = useChatStore((s) => s.state.quoteDraft);
   const agents = useChatStore((s) => s.state.agents);
   const store = useChatStoreApi();
-  const [ctxDismissedFor, setCtxDismissedFor] = useState(""); // 上下文超标警示,每会话可关闭
-  // 「请求压缩」一次性:点完整条警示立即消失,不给点第二次的机会(owner 2026-07-14
-  // 连点两下发了两条)。压缩成功 → compact_done 把 ctxTokens 打回低位,条自然不再出;
-  // agent 没执行的兜底:10 分钟后 ctx 仍超标才重新亮出来。按 agent 记。
-  const [compactReqAt, setCompactReqAt] = useState<Record<string, number>>({});
   const agentInfo = agents.find((a) => a.name === active);
   const mention = useMention({ text, setText, taRef, active, agents }); // 输入框 @ 另一个 agent = 委托当前 agent 去找它
-  const ctxTokens = typeof agentInfo?.contextTokens === "number" ? agentInfo.contextTokens : 0;
-  const reqAt = compactReqAt[active] || 0;
-  // 阈值对齐 ctx-level 深红档(1M 窗的 75%)——此前按 200k 窗的 170k,1M 模型
-  // 才用 17% 就催压缩,太吵(owner 2026-07-14 更正窗口口径)
-  // 只给 Claude Code：一键请求的是它的 save-compact 技能；Codex 快满时自己压（见 ctx-badge 的 ScaledAdvice）
-  const showCtxWarn =
-    (agentInfo?.runtime ?? "claude-code") === "claude-code" &&
-    ctxTokens >= 750_000 &&
-    ctxDismissedFor !== active &&
-    // 读当前时间决定要不要提示压缩。改成定时 tick 驱动才算"纯"，但那是为一个提示
-    // 横幅常驻一个定时器；这里读到的值最坏就是横幅晚一轮渲染才出现/消失。
-    // eslint-disable-next-line react-hooks/purity
-    (!reqAt || Date.now() - reqAt > 10 * 60_000);
 
   // ── Slash 命令面板（owner 2026-07-14:skills 适配 web,比 Discord 强——
   // 全量列表+即时模糊搜索+描述全文+按 agent 精准过滤）。输入以 "/" 开头
@@ -478,30 +461,7 @@ export function Composer() {
     >
       <div className="mx-auto w-full max-w-3xl lg:max-w-[min(92%,1600px)]">{/* 限宽与 message-list 同步,输入框与消息列对齐 */}
         <UpdateHintBanner agent={agentInfo} />
-        {showCtxWarn && (
-          <div className="mb-1.5 flex items-center gap-2 rounded-xl border border-warning/30 bg-warning/10 px-3 py-1.5 text-xs">
-            <span className="min-w-0 truncate">
-              ⚠️ {t("上下文已 {n}k——别等了,找个句号就存记忆 + Compact", { n: Math.round(ctxTokens / 1000) })}
-            </span>
-            <button
-              className="btn btn-warning btn-xs ml-auto shrink-0"
-              onClick={() => {
-                if (reqAt) return; // 双击竞态兜底(rerender 前的第二击)
-                setCompactReqAt((m) => ({ ...m, [active]: Date.now() }));
-                void store.send(COMPACT_REQUEST_TEXT);
-              }}
-            >
-              {t("请求压缩")}
-            </button>
-            <button
-              className="shrink-0 px-1 opacity-40 hover:opacity-80"
-              aria-label={t("本会话不再提示")}
-              onClick={() => setCtxDismissedFor(active)}
-            >
-              ✕
-            </button>
-          </div>
-        )}
+        <CtxWarnBanner agent={agentInfo} />
 
         <MentionLayer m={mention} active={active} />
         {/* Slash 命令面板:输入 / 即弹,即时模糊过滤。onPointerDown preventDefault
@@ -674,12 +634,9 @@ export function Composer() {
               className="relative flex size-8 items-center justify-center overflow-hidden rounded-[9px] text-base-content/60 transition-colors hover:bg-base-content/[0.06] hover:text-base-content disabled:opacity-30 disabled:hover:bg-transparent"
             >
               <PaperclipIcon />
-              {/* 原生 input 透明铺满按钮:点击直达 input(无 .click() 转发),
-                  iOS 把文件菜单锚在这个真实矩形上——位置就是按钮本身。
-                  ⚠ overflow-hidden + text-[0] 缺一不可:iOS 的 file input 内部
-                  原生控件有固有宽度,会从 32px 盒子向右透明溢出,把旁边的 /
-                  (Skills)按钮整个盖住——点 Skills 弹出的全是文件菜单
-                  (2026-07-28 用户实锤)。溢出被父级剪掉后不再参与命中。 */}
+              {/* 原生 input 透明铺满按钮:点击直达 input(无 .click() 转发),iOS 把文件菜单锚在这个真实矩形上。
+                  ⚠ overflow-hidden + text-[0] 缺一不可:iOS 的 file input 原生控件有固有宽度,会从 32px 盒子向右透明溢出,
+                  盖住旁边的 /(Skills)按钮——点 Skills 弹出的全是文件菜单。溢出被父级剪掉后不再参与命中。 */}
               {!(disabled || files.length >= MAX_FILES) && (
                 <input
                   ref={fileRef}
@@ -701,6 +658,7 @@ export function Composer() {
             >
               /
             </button>
+            <PasteExternalButton agent={active} disabled={disabled} />
             <button
               // 走 pointerdown/up 的按住手势,pointerdown 里 preventDefault ⇒ 系统
               // 不会派发合成 click。data-hold 让 [tap-lost] 探针知道这里没有 click

@@ -140,9 +140,8 @@ export function createQuotaService(d: QuotaServiceDeps) {
   }
 
   return {
-    snapshot,
-    retry,
-    setEnabled,
+    snapshot, retry, setEnabled,
+    claudeWall: (refresh: boolean) => (syncEnabled(), claudeWallView(scheduler, enabled, d.now(), refresh)),
     isEnabled: () => enabled,
     isViewing: viewing,
     start(): void {
@@ -159,6 +158,24 @@ export function createQuotaService(d: QuotaServiceDeps) {
 }
 
 export type QuotaService = ReturnType<typeof createQuotaService>;
+
+/**
+ * 额度闸（bridge/quota-wall.ts）用：Claude 两个窗口里较高的百分比（只认实时层）+ 持有的重置次数（held：默认的卡要撞到限额才算
+ * usableNow，撞墙前的快照里 applicableNow 几乎总是 0，拿它判「有没有卡」进闸通知那一行就永远不出现）。
+ * refresh = 先按后台节奏查一次（沿用调度器的间隔、退避与 quotaClaudeBackground 开关；只读接口，不碰 consume / reset）。
+ */
+async function claudeWallView(
+  scheduler: SchedulerApi, enabled: boolean, now: number, refresh: boolean,
+): Promise<{ pct: number | null; observedAt: number; credits: number | null } | null> {
+  if (!enabled) return null;
+  if (refresh) await scheduler.refresh("claude", "background");
+  const snap = selectQuotaLayers({ now, enabled, remote: await scheduler.view(), local: { claudeCache: null, codexRollout: null }, extra: [] });
+  const p = snap.providers.find((x) => x.id === "claude");
+  if (!p) return null;
+  const pcts = p.meters.filter((m) => m.unit === "pct" && (m.kind === "session" || m.kind === "weekly") && m.used !== null).map((m) => m.used as number);
+  const live = p.source.layer === "live" && pcts.length > 0;
+  return { pct: live ? Math.max(...pcts) : null, observedAt: p.source.observedAt ?? 0, credits: p.resetCredits?.held ?? null };
+}
 
 /**
  * 本机实际装的 Claude Code 版本（按登录 shell 的 PATH 解析，与 agent 跑的是同一个 claude；launcher 体检同口径）：
