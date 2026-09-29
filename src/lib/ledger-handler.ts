@@ -167,7 +167,8 @@ function roleAfter(e: LedgerEvent, cur: HandlerRole, events: readonly LedgerEven
     case "deliver":
       return "dispatcher";
     case "dispatch":
-      return "reviewer";
+      // 步骤单（T48）派的是复述 / 写 / 修 / 看界面时接手的还是那一步的执行者，不是审查员
+      return typeof e.data.step === "string" && e.data.step !== "review" && e.data.step !== "final_review" ? null : "reviewer";
     case "review":
       return e.data.verdict === "pass" && nextAfterReview(e, events, specPolicy) === null ? "pm" : "dispatcher";
     case "escalate":

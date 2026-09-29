@@ -6,6 +6,7 @@ import {
 } from "../src/lib/ledger-asks.js";
 import { migrateAsksV2 } from "../src/lib/ledger-asks-schema.js";
 import { STEPS_SCHEMA } from "../src/lib/ledger-steps.js";
+import { DISPATCH_LOG_SCHEMA } from "../src/lib/ledger-dispatch-log.js";
 import { projectView } from "../src/lib/ledger-read.js";
 import { closeLedger, LEDGER_MIGRATIONS, LEDGER_SCHEMA_VERSION, LedgerError, listEvents, openLedger, schemaVersion } from "../src/lib/ledger-store.js";
 import { appendEvent, createItem, createTask } from "../src/lib/ledger-write.js";
@@ -242,10 +243,11 @@ function rawAt(steps: readonly (typeof LEDGER_MIGRATIONS)[number][], version: nu
 const tableExists = (d: Database, name: string) => !!d.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(name);
 
 describe("迁移到第二版", () => {
-  test("顺序：v1 → asks → T8h 的依赖边 → T29 的巡检表 → asks 第二版（v5）→ T47 的步骤表（v6）", () => {
-    expect(LEDGER_MIGRATIONS.length).toBe(6);
+  test("顺序：v1 → asks → T8h 的依赖边 → T29 的巡检表 → asks 第二版（v5）→ T47 的步骤表（v6）→ T48 的派单表（v7）", () => {
+    expect(LEDGER_MIGRATIONS.length).toBe(7);
     expect(LEDGER_MIGRATIONS[4]).toBe(migrateAsksV2);
     expect(LEDGER_MIGRATIONS[5]).toBe(STEPS_SCHEMA);
+    expect(LEDGER_MIGRATIONS[6]).toBe(DISPATCH_LOG_SCHEMA);
   });
 
   test("线上的 v3（T8h）、v4（T29，audit_baseline 里有数据）都升到 v5：asks 重建、task_deps / 巡检表 / 任务负责人列都在", () => {

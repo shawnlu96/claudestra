@@ -97,6 +97,7 @@ import { pickSwitchOverride, rememberSwitchOverride } from "./switch-override.js
 import { displayModelEffort } from "../lib/display-model.js";
 import { cachedCodexCatalog, readCodexConfigDefaults } from "../lib/codex-catalog.js";
 import { invitePageResponse } from "./invite-page.js";
+import { withDeliveryDedup } from "./api-dedup.js";
 import { saveUploadToInbox } from "./local-api/media-refresh.js";
 import { archiveUnmanagedFile, restoreUnmanagedArchive } from "../lib/unmanaged-archive.js";
 
@@ -278,11 +279,8 @@ async function findHistoryAgent(
  * 那是请求的错，回 400；其余回 500，body 都是 {ok:false,error}。
  */
 export async function serveApiRequest(req: Request, url: URL): Promise<Response> {
-  try {
-    return await handleApiRequest(req, url);
-  } catch (e) {
-    return apiErrorResponse(e);
-  }
+  // 带 dedup 的投递只投一次（bridge/api-dedup.ts）；包装与路由本体抛的都进 catch（async 函数里的同步 throw 也变成 reject）
+  return withDeliveryDedup(req, url, () => handleApiRequest(req, url)).catch(apiErrorResponse);
 }
 
 // 路由本体保持原名：防腐闸门按函数名给超长函数记账（fnLong:handleApiRequest）

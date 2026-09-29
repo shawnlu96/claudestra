@@ -14,7 +14,7 @@ import type { CommandSpec } from "./ledger-write-cmds.js";
  * 没给 --kind：local: 开头是人，其余当本机 agent。带 @ 的必须写明——本机 agent 名也可以带 @，猜成本机就绕过了
  * 「合并部署、核对不能派给别的实例」（T47 复核）
  */
-function kindOf(c: LedgerCli, executor: string): ExecutorKind {
+export function kindOf(c: LedgerCli, executor: string): ExecutorKind {
   const v = c.p.flags.kind;
   if (v === undefined && executor.includes("@")) throw new LedgerError("invalid", "执行者带 @：别的实例写 --kind peer，本机 agent 写 --kind agent");
   if (v === undefined) return executor.startsWith("local:") ? "human" : "agent";

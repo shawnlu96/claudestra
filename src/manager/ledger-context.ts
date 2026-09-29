@@ -14,6 +14,7 @@ import type { WriteCtx } from "../lib/ledger-write.js";
 import type { Registry } from "./core.js";
 import type { ProposeOpts } from "./team-up.js";
 import type { ParsedArgs } from "./ledger-identity.js";
+import type { DispatchSend } from "./ledger-step-dispatch.js";
 
 export interface LedgerDeps {
   db: Database;
@@ -36,6 +37,8 @@ export interface LedgerDeps {
   projects?(): ProjectDef[];
   /** ledger audit 的取数来源；不给 = 真实的 registry / tmux / 文件（测试注入假的） */
   auditSources?: SnapshotSources;
+  /** 统一派单的投递；不给 = 真投（bridge / peer），测试注入假的 */
+  dispatchSend?: DispatchSend;
 }
 
 export type Result = Record<string, unknown>;

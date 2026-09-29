@@ -13,6 +13,7 @@ import { REPO_ROOT } from "../lib/repo-root.js";
 import { agentMsgMustWait } from "../lib/turn-state.js";
 import { newMessageId, newThreadId, type Envelope } from "./router.js";
 import { probeTurn } from "./turn-probe.js";
+import { startDispatchSweeper } from "./dispatch-sweeper.js";
 
 const INTERVAL_MS = 15 * 60_000;
 /** 启动后多久跑第一轮：给 channel-server 重连留时间，否则收件人都算不在线 */
@@ -136,6 +137,7 @@ let started = false;
 export function startLedgerAudit(d: LedgerAuditDeps): void {
   if (started) return;
   started = true;
+  startDispatchSweeper(d); // 统一派单（T48）的重发 / 回执 / 超时提醒：同是台账定时任务、同一组依赖，跟巡检一起起
   const tick = ledgerAuditTicker(d);
   setTimeout(() => {
     void tick();

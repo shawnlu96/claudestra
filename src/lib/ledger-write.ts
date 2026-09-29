@@ -36,6 +36,7 @@ import {
 } from "./ledger-checks.js";
 import { canTransition, nextTaskState, roleOf, TERMINAL_STAGES, type EventKind, type LedgerEvent, type LedgerItem, type LedgerTask, type Role, type Stage } from "./ledger-stages.js";
 import { checksAllClear } from "./ledger-probes.js";
+import type { PeerPm } from "./ledger-peer-pms.js";
 import { getItem, getMeta, LedgerError, pmsByProject, type LedgerMeta } from "./ledger-store.js";
 import { insertEvent, replay, tx } from "./ledger-tx.js";
 import { activeStepFor, checkReviewHead, checkReviewStep, noteStepDelivered, noteStepReview } from "./ledger-steps-write.js";
@@ -316,6 +317,18 @@ export function setFrozen(db: Database, ctx: WriteCtx, input: { project: string;
     putMeta(db, input.project, "queueFrozen", { frozen: input.frozen, reason: input.reason ?? "", since: input.frozen ? now : null });
     const event = insertEvent(db, ctx, { ...key, text: input.reason }, true);
     return { row: getMeta(db, input.project), event, duplicate: false };
+  });
+}
+
+/** 对方项目 PM 的目录整张写入（lib/ledger-peer-pms.ts；T48）：项目 PM / master / owner 能改，权限由调用方判 */
+export function setPeerPms(db: Database, ctx: WriteCtx, project: string, value: Record<string, PeerPm>): WriteResult<Record<string, PeerPm>> {
+  return tx(db, () => {
+    const key = { project, target: "", kind: "meta" as const };
+    const dup = replay(db, ctx, key, () => getMeta(db, project).peerPms);
+    if (dup) return dup;
+    const event = insertEvent(db, ctx, { ...key, data: { op: "set", patch: { peerPms: value } } }, true);
+    putMeta(db, project, "peerPms", value);
+    return { row: getMeta(db, project).peerPms, event, duplicate: false };
   });
 }
 
