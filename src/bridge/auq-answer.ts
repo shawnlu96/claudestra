@@ -2,12 +2,12 @@
  * AskUserQuestion 作答的唯一执行点（T65）：网页「待你处理」卡、聊天卡、Discord 三个入口都到这里，替 owner 按键，按安全类对待：
  * 1. 提交方必须带上它看到的那一版（网页：题面 + askId / dialogId；Discord：消息 id），和当前状态对上才往下走，缺了一律 409；
  * 2. 拿窗口执行权（ctx-boundary-inject.ts withWindow）→ 抓屏 → 画面上的问题 / 选项 / 描述和这一版逐项对上（lib/auq-pane.ts
- *    auqPaneMatches）才发键；抓屏失败、画面读不全、对不上一律 409，零发键；
- * 3. 每个 await 之后核代际（auqStates 里还是同一个状态对象），变了就停，剩下的键不发。
- * 已知边界见 PR：终端里有人手动按键、不走 withWindow 的消息注入、恰好在两个词之间折行。单测 tests/auq-answer.test.ts
+ *    auqPaneVerdict）才发键；抓屏失败、画面读不全、对不上、文字折成多行认不出唯一身份，一律 409，零发键；
+ * 3. 锁内、每个 await 之后都重核：还是同一代状态、提交方看到的那一版仍然有效（卡没被删 / 换掉），不然就停，剩下的键不发。
+ * 已知边界见 PR：终端里有人手动按键、不走 withWindow 的消息注入。单测 tests/auq-answer.test.ts
  */
 import { auqIdentity } from "../lib/ask-fingerprint.js";
-import { auqPaneMatches, parseAuqPane } from "../lib/auq-pane.js";
+import { auqPaneVerdict, parseAuqPane } from "../lib/auq-pane.js";
 import { t } from "../lib/i18n.js";
 import { recordMetric } from "../lib/metrics.js";
 import { tmuxCapture, tmuxRawStrict, tmuxSendEscape } from "../lib/tmux-helper.js";
@@ -67,8 +67,15 @@ const KEY_GAP_MS = 120;
 const refuse = (status: number, code: string, error: string): AuqAnswerResult => ({ ok: false, status, code, error });
 const stale = () => refuse(409, "auq_stale", t("弹框已经换了，刷新后按新的作答（这次没有按键）", "The dialog changed — refresh and answer the new one (no keys sent)"));
 const str = (v: unknown) => (typeof v === "string" && v ? v : undefined);
-/** 发键途中换了一代：停下、报发了几个，新的那一代原样留着（不清、不记账，tests/auq-answer.test.ts） */
-const changed = (n: number) => refuse(409, "dialog_changed", t(`作答途中弹框变了，已停下（发了 ${n} 个键）`, `The dialog changed mid-way — stopped after ${n} keys`));
+/** 作答途中换了一代、或卡被删 / 换掉：停下、报发了几个，新的那一代原样留着（不清、不记账，tests/auq-answer.test.ts） */
+const changed = (n: number) => refuse(409, "dialog_changed", t(`作答途中弹框变了或这张卡作废了，已停下（发了 ${n} 个键）`, `The dialog or card changed mid-way — stopped after ${n} keys`));
+
+/** 重核（锁内、每个 await 之后）：还是同一代、提交方看到的那一版仍然有效。没问题回 null */
+function recheck(state: AuqState, i: AuqAnswerInput, sent: number): AuqAnswerResult | null {
+  if (auqStates.get(i.channelId) !== state) return sent ? changed(sent) : stale();
+  const bad = seenRefusal(state, i);
+  return bad && sent ? changed(sent) : bad;
+}
 
 /** 提交方看到的是不是当前这一版：Discord 按消息 id（那条消息就是按这一版画的）；网页按 dialogId / askId + 题面精确比 */
 function seenRefusal(state: AuqState, i: AuqAnswerInput): AuqAnswerResult | null {
@@ -100,18 +107,26 @@ export async function answerAuqDialog(i: AuqAnswerInput): Promise<AuqAnswerResul
     (holder) => refuse(409, "window_busy", t(`这个窗口正在做「${holder}」，这次没有按键，稍后再试`, `The window is busy with "${holder}" — no keys sent, try again`)));
 }
 
-/** 拿着窗口执行权：抓屏 → 比对 → 发键。每个 await 之后核一次代际 */
+/** 拿着窗口执行权：重核 → 抓屏 → 比对 → 发键，每个 await 之后再重核 */
 async function answerHeld(state: AuqState, i: AuqAnswerInput, selections: number[][]): Promise<AuqAnswerResult> {
-  const live = () => auqStates.get(i.channelId) === state;
+  const before = recheck(state, i, 0);
+  if (before) return before;
   let pane: string;
   try {
     pane = await deps.capture(state.tmuxTarget);
   } catch (e) {
     return refuse(409, "capture_failed", t(`看不到终端画面，这次没有按键：${(e as Error).message}`, `Can't read the terminal — no keys sent: ${(e as Error).message}`));
   }
-  if (!live()) return stale();
+  const afterCapture = recheck(state, i, 0);
+  if (afterCapture) return afterCapture;
   const parse = parseAuqPane(pane);
-  if (!parse || !auqPaneMatches(state.questions, parse)) {
+  const verdict = parse ? auqPaneVerdict(state.questions, parse) : "mismatch";
+  if (verdict === "ambiguous") {
+    // 画面对得上但认不出唯一身份（折行处原来有没有空格 / 换行分不出）：不按，也不作废——弹框可能正是这一个，只是没法证明
+    return refuse(409, "screen_ambiguous", t("终端里这个弹框的文字折成了多行，没法确认和你看到的是同一个，这次没有按键：请到终端里作答",
+      "The dialog text wraps in the terminal, so it can't be confirmed as the one you saw — no keys sent; answer it in the terminal"));
+  }
+  if (!parse || verdict === "mismatch") {
     // 画面上已经没有这个弹框（终端里答掉了）或换成了别的：这一版作废，pane 通路下一轮按画面重新登记
     finish(state, i, "stale", []);
     return parse
@@ -124,7 +139,8 @@ async function answerHeld(state: AuqState, i: AuqAnswerInput, selections: number
     } catch (e) {
       return refuse(409, "send_failed", t(`取消没生效：${(e as Error).message}`, `Cancel failed: ${(e as Error).message}`)); // Esc 没发出去：弹框还在，可以再取消
     }
-    if (!live()) return changed(1);
+    const afterEsc = recheck(state, i, 1);
+    if (afterEsc) return afterEsc;
     finish(state, i, "cancel", []);
     return { ok: true, cancelled: true, keys: 1, summary: [] };
   }
@@ -135,9 +151,11 @@ async function answerHeld(state: AuqState, i: AuqAnswerInput, selections: number
     } catch (e) {
       return refuse(500, "send_failed", t(`发键失败（发了 ${n} 个键）：${(e as Error).message}`, `Sending keys failed after ${n}: ${(e as Error).message}`));
     }
-    if (!live()) return changed(n + 1);
+    const afterKey = recheck(state, i, n + 1);
+    if (afterKey) return afterKey;
     await deps.sleep(KEY_GAP_MS);
-    if (!live()) return changed(n + 1);
+    const afterGap = recheck(state, i, n + 1);
+    if (afterGap) return afterGap;
   }
   finish(state, i, "submit", selections);
   return { ok: true, keys: keys.length, summary: summaryOf(state, selections) };

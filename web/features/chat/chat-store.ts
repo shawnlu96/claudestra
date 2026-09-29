@@ -2385,15 +2385,15 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
     return this.answerAsk("cancel", []);
   }
 
-  /** 带上这张卡的那一版（代际 + 题面原样）：bridge 核对它和终端画面都对得上才按键，对不上 409 且不按（bridge/auq-answer.ts） */
+  /** 带上这张卡的那一版（代际 + 题面原样），bridge 核对画面对得上才按键（bridge/auq-answer.ts）。成功才收卡：失败留着显示原因、能重试；
+   *  弹框换了的由 bridge 的 question_cleared / 新 question 事件换掉，旧卡不会复活 */
   private async answerAsk(action: "submit" | "cancel", selections: number[][]): Promise<{ ok: boolean; error?: string }> {
     const agent = this.state.activeAgent;
     const ask = this.state.pendingAsk;
     if (!agent) return { ok: false, error: "无活动会话" };
-    this.produce((s) => {
-      s.pendingAsk = null;
-    });
-    return this.postAction(() => answerAuq(agent, action, selections, { dialogId: ask?.dialogId, questions: ask?.questions }));
+    const r = await this.postAction(() => answerAuq(agent, action, selections, { dialogId: ask?.dialogId, questions: ask?.questions }));
+    if (r.ok && this.state.pendingAsk?.id === ask?.id) this.produce((s) => void (s.pendingAsk = null));
+    return r;
   }
 }
 

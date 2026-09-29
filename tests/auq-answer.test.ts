@@ -8,9 +8,9 @@ import { openRuntimeAsk, resetRuntimeAsksForTest } from "../src/bridge/ask-runti
 import { auqStates, clearAuqState, postAskUserQuestionMessage, registerAuqState, type AuqQuestion, type AuqState } from "../src/bridge/ask-user-question.js";
 import { setAsksForTest, type AsksDeps } from "../src/bridge/asks.js";
 import { answerAuqDialog, auqDiscordSelect, setAuqAnswerDepsForTest, type AuqAnswerInput } from "../src/bridge/auq-answer.js";
-import { listAsks } from "../src/lib/ledger-asks.js";
+import { closeAsk, listAsks } from "../src/lib/ledger-asks.js";
 import { closeLedger, openLedger } from "../src/lib/ledger-store.js";
-import { auqPaneMatches, parseAuqPane, textMatchesLines } from "../src/lib/auq-pane.js";
+import { auqPaneVerdict, parseAuqPane, textVerdict } from "../src/lib/auq-pane.js";
 import type { RegistryAgent } from "../src/lib/registry.js";
 import { tempLedgerPath } from "./ledger-test-helpers.js";
 
@@ -156,6 +156,45 @@ describe("网页入口：带上看到的那一版", () => {
     expect(sent).toEqual([]);
   });
 
+  test("抓屏期间 owner 删了这张卡：首键都不发，回 409", async () => {
+    const st = register(q(["Cancel", "Delete"]));
+    await openRuntimeAsk({ source: "auq", channelId: CH, agentName: "agent-x", kind: "decide", title: "Choose action", context: "", options: st.questions, dialogId: st.dialogId });
+    const [card] = listAsks(openLedger(path), { source: "auq" });
+    setAuqAnswerDepsForTest({
+      capture: async () => {
+        closeAsk(openLedger(path), card!.id, "cancelled", "owner 删掉，未作答", Date.now(), { dismissed: { by: "owner:self", at: Date.now() } });
+        return ccPane(st.questions[0]);
+      },
+      sendKey: async (_t, k) => void sent.push(k),
+      sendEscape: async () => void sent.push("Escape"),
+    });
+    expect(await answerAuqDialog(web(st, { seen: { askId: card!.id, questions: card!.options } }))).toMatchObject({ ok: false, status: 409, code: "ask_stale" });
+    expect(await answerAuqDialog(web(st, { action: "cancel", seen: { askId: card!.id, questions: card!.options } }))).toMatchObject({ ok: false, status: 409 });
+    expect(sent).toEqual([]);
+  });
+
+  test("发键途中 owner 删了这张卡：余下的键不发", async () => {
+    const st = register(q(["A", "B", "C"]));
+    await openRuntimeAsk({ source: "auq", channelId: CH, agentName: "agent-x", kind: "decide", title: "Choose action", context: "", options: st.questions, dialogId: st.dialogId });
+    const [card] = listAsks(openLedger(path), { source: "auq" });
+    screen = ccPane(st.questions[0]);
+    setAuqAnswerDepsForTest({
+      capture: async () => screen,
+      sendKey: async (_t, k) => void (sent.push(k), closeAsk(openLedger(path), card!.id, "cancelled", "owner 删掉，未作答", Date.now())),
+    });
+    expect(await answerAuqDialog(web(st, { selections: [[2]], seen: { askId: card!.id, questions: card!.options } }))).toMatchObject({ ok: false, code: "dialog_changed" });
+    expect(sent).toEqual(["Down"]);
+  });
+
+  test("文字在终端里折成多行：认不出唯一身份，409 零发键，这一版不作废（弹框可能正是它，只能到终端里答）", async () => {
+    const st = register(q(["Proceed", "Cancel"], (l) => (l === "Proceed" ? "Delete /tmp/reports /tmp/archive" : "Do nothing")));
+    screen = [" ☐ Action", "", "Choose action", "", "❯ 1. Proceed", "     Delete /tmp/reports", "     /tmp/archive", "  2. Cancel", "     Do nothing", "",
+      "Enter to select · ↑/↓ to navigate · Esc to cancel"].join("\n");
+    expect(await answerAuqDialog(web(st, { selections: [[0]] }))).toMatchObject({ ok: false, status: 409, code: "screen_ambiguous" });
+    expect(sent).toEqual([]);
+    expect(auqStates.get(CH)).toBe(st);
+  });
+
   test("取消也核画面：对不上 409 不发 Esc；对上才发", async () => {
     const st = register(q(["Cancel", "Delete"]));
     screen = ccPane(q(["Delete", "Cancel"]));
@@ -211,27 +250,32 @@ describe("Discord：按消息 id 认这一版，新一版一定是新消息", ()
   });
 });
 
-describe("画面比对（lib/auq-pane.ts auqPaneMatches / textMatchesLines）", () => {
-  test("真实折行处允许空格或无；行内多一个、少一个空格都算不同", () => {
-    expect(textMatchesLines("删除 /tmp/reports 和 /tmp/archive 两个目录", ["删除 /tmp/reports 和", "/tmp/archive 两个目录"])).toBe(true);
-    expect(textMatchesLines("只读检查，不改任何东西", ["只读检查，不改", "任何东西"])).toBe(true);
-    expect(textMatchesLines("Delete /tmp/reports /tmp/archive", ["Delete /tmp/reports/tmp/archive"])).toBe(false);
-    expect(textMatchesLines("Delete /tmp/reports/tmp/archive", ["Delete /tmp/reports /tmp/archive"])).toBe(false);
-    expect(textMatchesLines("说明", [])).toBe(false);
-    expect(textMatchesLines("", [])).toBe(true);
+describe("画面比对（lib/auq-pane.ts auqPaneVerdict / textVerdict）", () => {
+  test("只有一行、一字不差才算对上；折成多行认不出唯一身份（ambiguous），拼不回去才是 mismatch", () => {
+    expect(textVerdict("Delete /tmp/reports", ["Delete /tmp/reports"])).toBe("match");
+    expect(textVerdict("Delete /tmp/reports /tmp/archive", ["Delete /tmp/reports/tmp/archive"])).toBe("mismatch");
+    expect(textVerdict("Delete /tmp/reports  /tmp/archive", ["Delete /tmp/reports /tmp/archive"])).toBe("mismatch"); // 行内空格数也算
+    expect(textVerdict("Delete /tmp/reports /tmp/archive", ["Delete /tmp/reports", "/tmp/archive"])).toBe("ambiguous");
+    expect(textVerdict("Delete /tmp/reports/tmp/archive", ["Delete /tmp/reports", "/tmp/archive"])).toBe("ambiguous");
+    expect(textVerdict("只读检查，不改任何东西", ["只读检查，不改", "任何东西"])).toBe("ambiguous");
+    expect(textVerdict("Delete /tmp/x", ["Delete /tmp/reports", "/tmp/archive"])).toBe("mismatch");
+    expect(textVerdict("说明", [])).toBe("mismatch");
+    expect(textVerdict("", [])).toBe("match");
   });
 
   test("逐项：问题、选项个数、文字、描述、单选 / 多选；多问题只核段数和第 1 段", () => {
     const qq = q(["Cancel", "Delete"]);
     const p = parseAuqPane(ccPane(qq))!;
-    expect(auqPaneMatches([qq], p)).toBe(true);
-    expect(auqPaneMatches([{ ...qq, question: "Choose another" }], p)).toBe(false);
-    expect(auqPaneMatches([{ ...qq, multiSelect: true }], p)).toBe(false);
-    expect(auqPaneMatches([q(["Cancel", "Delete", "Keep"])], p)).toBe(false);
-    expect(auqPaneMatches([qq, q(["X", "Y"])], p)).toBe(false); // 画面上只有一段
-    expect(auqPaneMatches([qq, q(["X", "Y"])], { ...p, form: "tabbed", sections: ["Action", "Other"] })).toBe(true);
-    expect(auqPaneMatches([qq], { ...p, form: "tabbed", sections: ["Action", "Other"] })).toBe(false); // 单题卡不认两段表单
-    expect(auqPaneMatches([qq], { ...p, form: "tabbed" })).toBe(false); // 单题单选只认 single
-    expect(auqPaneMatches([{ ...qq, multiSelect: true }], { ...p, form: "tabbed", multiSelect: true })).toBe(true);
+    expect(auqPaneVerdict([qq], p)).toBe("match");
+    expect(auqPaneVerdict([{ ...qq, question: "Choose another" }], p)).toBe("mismatch");
+    expect(auqPaneVerdict([{ ...qq, multiSelect: true }], p)).toBe("mismatch");
+    expect(auqPaneVerdict([q(["Cancel", "Delete", "Keep"])], p)).toBe("mismatch");
+    expect(auqPaneVerdict([qq, q(["X", "Y"])], p)).toBe("mismatch"); // 画面上只有一段
+    expect(auqPaneVerdict([qq, q(["X", "Y"])], { ...p, form: "tabbed", sections: ["Action", "Other"] })).toBe("match");
+    expect(auqPaneVerdict([qq], { ...p, form: "tabbed", sections: ["Action", "Other"] })).toBe("mismatch"); // 单题卡不认两段表单
+    expect(auqPaneVerdict([qq], { ...p, form: "tabbed" })).toBe("mismatch"); // 单题单选只认 single
+    expect(auqPaneVerdict([{ ...qq, multiSelect: true }], { ...p, form: "tabbed", multiSelect: true })).toBe("match");
+    const wrapped = { ...p, options: p.options.map((o, i) => (i ? o : { ...o, descLines: ["Cancel 的", "说明"] })) };
+    expect(auqPaneVerdict([qq], wrapped)).toBe("ambiguous");
   });
 });

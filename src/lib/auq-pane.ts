@@ -288,39 +288,46 @@ export function parseAuqPane(pane: string): AuqPaneParse | null {
   return { form, sections, question, questionLines: qLines, options, multiSelect: anyCheckbox };
 }
 
+export type AuqPaneVerdict = "match" | "mismatch" | "ambiguous";
+
+type SeenQuestion = { question?: string; multiSelect?: boolean; options?: readonly { label?: string; description?: string }[] };
+
 /**
  * 提交方看到的那一版弹框和画面上的对不对得上（T65，替 owner 按键前最后一道）。先比表单形态：段数等于问题数，单问题单选
  * 必须是 single、其余是 tabbed（buildAuqKeystrokes 按这个出键：单题单选的 Enter 在两段表单里只是翻页）；再逐项比问题、
- * 单选 / 多选、选项个数、每个选项的文字和描述。多问题表单画面上只看得见当前一段：当前段必须是第 1 问，其余段核不了（已知边界）
+ * 单选 / 多选、选项个数、每个选项的文字和描述。任何一处对不上 = mismatch；都对得上、但有文字折成了多行 = ambiguous（认不出唯一身份）。
+ * 多问题表单画面上只看得见当前一段：当前段必须是第 1 问，其余段核不了（已知边界）。单测 tests/auq-answer.test.ts
  */
-export function auqPaneMatches(
-  questions: readonly { question?: string; multiSelect?: boolean; options?: readonly { label?: string; description?: string }[] }[],
-  p: AuqPaneParse,
-): boolean {
+export function auqPaneVerdict(questions: readonly SeenQuestion[], p: AuqPaneParse): AuqPaneVerdict {
   const q = questions[0];
-  if (!q || p.sections.length !== questions.length) return false;
-  if (p.form !== (questions.length === 1 && !q.multiSelect ? "single" : "tabbed")) return false;
+  if (!q || p.sections.length !== questions.length) return "mismatch";
+  if (p.form !== (questions.length === 1 && !q.multiSelect ? "single" : "tabbed")) return "mismatch";
   const opts = q.options ?? [];
-  if (!!q.multiSelect !== p.multiSelect || opts.length !== p.options.length) return false;
-  if (!textMatchesLines(q.question ?? "", p.questionLines)) return false;
-  return opts.every((o, i) => oneSpace(o.label ?? "") === oneSpace(p.options[i].label) && textMatchesLines(o.description ?? "", p.options[i].descLines ?? []));
+  if (!!q.multiSelect !== p.multiSelect || opts.length !== p.options.length) return "mismatch";
+  const parts = [
+    textVerdict(q.question ?? "", p.questionLines),
+    ...opts.map((o, i) => ((o.label ?? "").trim() === p.options[i].label ? textVerdict(o.description ?? "", p.options[i].descLines ?? []) : "mismatch")),
+  ];
+  return parts.includes("mismatch") ? "mismatch" : parts.includes("ambiguous") ? "ambiguous" : "match";
+}
+
+/**
+ * 一段原文对画面上的几行：只有一行、且一字不差（只去首尾空白）= match。折成了多行就认不出唯一身份——折行处原来是空格、换行
+ * 还是什么都没有，画面上分不出（「/tmp/reports /tmp/archive」与「/tmp/reports/tmp/archive」在那里折行时一模一样）：
+ * 宽松拼回去（折行处空格或无）对得上 = ambiguous，对不上 = mismatch
+ */
+export function textVerdict(text: string, lines: readonly string[]): AuqPaneVerdict {
+  const shown = lines.map((l) => l.trim()).filter(Boolean);
+  const want = text.trim();
+  if (shown.length <= 1) return (shown[0] ?? "") === want ? "match" : "mismatch";
+  const s = oneSpace(want);
+  let at = 0;
+  for (const [i, part] of shown.map(oneSpace).entries()) {
+    if (!s.startsWith(part, at)) return "mismatch";
+    at += part.length;
+    if (i < shown.length - 1 && s[at] === " ") at++;
+  }
+  return at === s.length ? "ambiguous" : "mismatch";
 }
 
 const oneSpace = (s: string) => s.replace(/\s+/g, " ").trim();
-
-/**
- * 一段原文和画面上的几行对不对得上：每一行都得原样出现（连续空白算一个空格），行与行之间只允许「一个空格或什么都没有」——
- * 画面折行时吃掉了空格还是在字中间折的分不出来，只在真实折行处放宽；行内多一个、少一个空格都算不同的东西
- * （「/tmp/reports /tmp/archive」≠「/tmp/reports/tmp/archive」，除非恰好在那里折行——已知边界）
- */
-export function textMatchesLines(text: string, lines: readonly string[]): boolean {
-  const s = oneSpace(text);
-  const parts = lines.map(oneSpace).filter(Boolean);
-  let at = 0;
-  for (const [i, part] of parts.entries()) {
-    if (!s.startsWith(part, at)) return false;
-    at += part.length;
-    if (i < parts.length - 1 && s[at] === " ") at++;
-  }
-  return at === s.length;
-}
