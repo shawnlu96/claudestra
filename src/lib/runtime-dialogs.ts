@@ -13,6 +13,8 @@ import { DIALOG_SHAPE_RE, nonEmptyTail, VERDICT_TAIL_LINES } from "./runtimes/co
 export interface RuntimeDialog {
   title: string;
   context: string;
+  /** 额度用完：卡片只说几点恢复，不给原文、不叫人去终端（bridge/ask-runtime.ts） */
+  quota?: true;
 }
 
 interface Rule {
@@ -20,11 +22,12 @@ interface Rule {
   title: string;
   /** 只认「■ 」报错行：额度这句 Codex 只画成报错行，正文编号列表里引用它不算（tests/runtime-dialogs.test.ts） */
   errorLine?: true;
+  quota?: true;
 }
 
 const CODEX_RUNTIME_DIALOGS: Rule[] = [
   // 额度用完：rollout 里是 task_complete.error（codex_error_info usage_limit_exceeded），TUI 把原文画成「■ You've hit…」一行
-  { re: /You've hit your usage limit[^\n]*/i, title: t("Codex 额度用完了", "Codex usage limit reached"), errorLine: true },
+  { re: /You've hit your usage limit[^\n]*/i, title: t("Codex 额度用完了", "Codex usage limit reached"), errorLine: true, quota: true },
 ];
 
 /** Codex TUI 的报错行记号 */
@@ -78,7 +81,7 @@ export function detectCodexRuntimeDialog(pane: string, runtime: string | undefin
     if (!m) continue;
     const at = tail.slice(0, m.index).split("\n").length - 1;
     const below = lines.slice(at + 1, at + 1 + DIALOG_BELOW_LINES).join("\n");
-    if (ERROR_MARK_RE.test(lines[at]) || (!d.errorLine && DIALOG_SHAPE_RE.test(below))) return { title: d.title, context: m[0].slice(0, 300) };
+    if (ERROR_MARK_RE.test(lines[at]) || (!d.errorLine && DIALOG_SHAPE_RE.test(below))) return { title: d.title, context: m[0].slice(0, 300), ...(d.quota ? { quota: d.quota } : {}) };
   }
   return null;
 }

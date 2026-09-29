@@ -10,7 +10,7 @@
 import { t } from "../lib/i18n.js";
 import { answerAsk, closeAsk, hasAsksTable, isRuntimeAsk, listAsks, MASTER_PROJECT, openAsk, patchAsk, type AskSource, type AskVia, type NewAsk } from "../lib/ledger-asks.js";
 import { detectCodexRuntimeDialog } from "../lib/runtime-dialogs.js";
-import { codexExpiry, priorByFingerprint, reuseOf, runtimeFingerprint } from "../lib/ask-fingerprint.js";
+import { codexExpiry, codexQuotaText, priorByFingerprint, reuseOf, runtimeFingerprint } from "../lib/ask-fingerprint.js";
 import { askDb, askDbIfExists, notePresenceFromEvent, parentExtra, publishAsk, registry, taskOf, whoIs } from "./asks.js";
 import { subscribeEvents } from "./event-bus.js";
 
@@ -65,6 +65,8 @@ interface RuntimeAskInput {
   options: unknown[];
   /** 同一频道换了一个新弹框：先把旧的结案再开新的 */
   replace?: boolean;
+  /** Codex 额度用完：正文换成几点恢复，原文只留在 extra.raw（指纹仍按原文算） */
+  quota?: true;
 }
 
 export async function openRuntimeAsk(r: RuntimeAskInput): Promise<void> {
@@ -81,10 +83,11 @@ export async function openRuntimeAsk(r: RuntimeAskInput): Promise<void> {
     // 卡住的是整个回合；有下游挂在它名下（registry parent）就算急
     const urgent = (await registry()).some((x) => x.parent === who.name && x.status === "active");
     const now = Date.now();
+    const expiresAt = r.source === "codex" ? codexExpiry(r.context, now) : undefined;
     const a = openAsk(askDb(), {
       project: who.project, taskId: taskOf(who.name), fromAgent: who.name, fromChannelId: r.channelId, source: r.source, kind: r.kind, blocking: true,
-      urgency: urgent ? "urgent" : "normal", title: r.title, context: r.context, options: r.options, allowText: false, chatId: r.channelId,
-      expiresAt: r.source === "codex" ? codexExpiry(r.context, now) : undefined, extra: { ...parentExtra(who).extra, fp },
+      urgency: urgent ? "urgent" : "normal", title: r.title, context: r.quota ? codexQuotaText(expiresAt, now) : r.context, options: r.options, allowText: false,
+      chatId: r.channelId, expiresAt, extra: { ...parentExtra(who).extra, fp, ...(r.quota ? { quota: true, raw: r.context } : {}) },
     }, now);
     publishAsk(a);
     // 建的途中弹框已经没了（settle 先到、删了占位）：立刻结案，别留一条永远开着的

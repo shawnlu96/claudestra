@@ -8,7 +8,7 @@ import { sweepExpired } from "../src/bridge/ask-expire.js";
 import { cancelUnadoptedRuntimeAsks, noteRuntimeDialogs, resetRuntimeAsksForTest } from "../src/bridge/ask-runtime.js";
 import { listForWeb, setAsksForTest, type AsksDeps } from "../src/bridge/asks.js";
 import type { Envelope } from "../src/bridge/router.js";
-import { codexExpiry, reuseOf, runtimeFingerprint } from "../src/lib/ask-fingerprint.js";
+import { codexExpiry, codexQuotaText, reuseOf, runtimeFingerprint } from "../src/lib/ask-fingerprint.js";
 import { answerAsk, getAsk, listAsks, openAsk, type Ask, type NewAsk } from "../src/lib/ledger-asks.js";
 import { closeLedger, openLedger } from "../src/lib/ledger-store.js";
 import type { RegistryAgent } from "../src/lib/registry.js";
@@ -146,6 +146,24 @@ describe("Codex 额度卡按重置时间收起", () => {
     expect(codexExpiry(limitLine("8:41 AM"), now)! - now).toBeGreaterThan(12 * 3600_000);
     expect(new Date(codexExpiry(limitLine("Sep 30th, 2026 9:05 AM"), now)!).getDate()).toBe(30);
     expect(codexExpiry("You've hit your usage limit. Upgrade to Pro.", now)).toBeUndefined();
+  });
+
+  test("额度卡正文只说几点恢复：原文（Upgrade 链接那行）只留在 extra.raw，解析不出就写「额度用完」", async () => {
+    await tick(codexPane(limitLine("8:41 AM")));
+    const [c] = codexRows();
+    expect(c!.title).toBe("Codex 额度用完了");
+    expect(c!.context).toMatch(/^(\d+月\d+日 )?08:41 恢复$/);
+    expect(c!.extra).toMatchObject({ quota: true, raw: limitLine("8:41 AM") });
+    resetRuntimeAsksForTest();
+    await tick(codexPane("You've hit your usage limit. Upgrade to Pro (https://chatgpt.com/explore/pro)."));
+    expect(codexRows().find((a) => a.id !== c!.id)?.context).toBe("额度用完");
+  });
+
+  test("恢复时间的写法：今天的只写时刻，别的日子带日期", () => {
+    const now = new Date(2026, 8, 29, 20, 0).getTime();
+    expect(codexQuotaText(new Date(2026, 8, 29, 23, 59).getTime(), now)).toBe("23:59 恢复");
+    expect(codexQuotaText(new Date(2026, 8, 30, 9, 5).getTime(), now)).toBe("9月30日 09:05 恢复");
+    expect(codexQuotaText(undefined, now)).toBe("额度用完");
   });
 
   test("到点由过期清扫收起、不通知 agent；弹框还挂着时重启不再开", async () => {

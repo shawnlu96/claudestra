@@ -9,6 +9,7 @@
 import { createHash } from "node:crypto";
 import type { Database } from "bun:sqlite";
 import { parseResetAt } from "./autopilot-run.js";
+import { t } from "./i18n.js";
 import { getAsk, type Ask, type AskSource } from "./ledger-asks.js";
 
 export function runtimeFingerprint(source: AskSource, agent: string, rule: string, line: string): string {
@@ -40,4 +41,15 @@ export function reuseOf(prior: Pick<Ask, "state" | "source" | "extra"> | null): 
 export function codexExpiry(line: string, now: number): number | undefined {
   const at = parseResetAt(line, now);
   return at !== null && at > now ? at : undefined;
+}
+
+const pad = (n: number) => String(n).padStart(2, "0");
+
+/** 额度卡正文（T61）：只一句几点恢复（不是今天的带上日期）；解析不出重置时间就只说额度用完 */
+export function codexQuotaText(at: number | undefined, now: number): string {
+  if (at === undefined) return t("额度用完", "Usage limit reached");
+  const d = new Date(at);
+  const hm = `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  if (d.toDateString() === new Date(now).toDateString()) return t(`${hm} 恢复`, `Back at ${hm}`);
+  return t(`${d.getMonth() + 1}月${d.getDate()}日 ${hm} 恢复`, `Back ${d.toLocaleDateString("en-US", { month: "short", day: "numeric" })} ${hm}`);
 }

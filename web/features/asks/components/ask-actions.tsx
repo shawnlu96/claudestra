@@ -14,7 +14,7 @@ import { TerminalIcon } from "./ask-icons";
 
 /**
  * 一张开着的「待你处理」卡的作答区（ask-card.tsx）：reply / 人发起的是按钮行 + 文本框（答不了的凭据只给一句说明），
- * AUQ / 权限走原有的按键端点，Codex 弹框只能去终端。作答一律乐观（asks-store.answer）。
+ * AUQ / 权限走原有的按键端点，Codex 弹框只能去终端（额度用完的只是告知几点恢复，不叫人去终端）。作答一律乐观（asks-store.answer）。
  */
 export function AskActions({ ask, agent }: { ask: WebAsk; agent: string }) {
   const t = useT();
@@ -78,7 +78,7 @@ export function AskActions({ ask, agent }: { ask: WebAsk; agent: string }) {
       {ask.source === "permission" && (
         <PermissionChoices rows={rows} busy={busy} onPick={pickPermission} />
       )}
-      {ask.source === "codex" && (
+      {ask.source === "codex" && !ask.extra?.quota && (
         <p className="flex items-center gap-1.5 text-[13px] opacity-75">
           <TerminalIcon />
           {t("这个弹框要到终端里处理")}
