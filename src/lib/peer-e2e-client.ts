@@ -51,6 +51,9 @@ const AUTHENTICATED = new WeakSet<Response>();
 export const isE2eResponse = (r: Response): boolean => AUTHENTICATED.has(r);
 export const markE2eResponse = (r: Response): Response => (AUTHENTICATED.add(r), r);
 
+/** 外层传输：path 是 /api/v1/e2e/…，调用方负责基址、外层实例签名和中继 / 直连；总时限由调用方的 signal 管 */
+export type E2ePost = (path: string, body: Uint8Array, contentType: string) => Promise<Response>;
+
 export interface ClientDeps {
   myFp: string;
   /** 现在钉着的对方记录（每次握手现读，轮换后能拿到新块） */
@@ -58,8 +61,8 @@ export interface ClientDeps {
   machine: () => Promise<MachineE2eKey | null>;
   mySignedKey: () => Promise<SignedE2eKey | null>;
   pinNewer: (peer: E2ePeer, key: SignedE2eKey) => Promise<void>;
-  /** 外层传输：path 是 /api/v1/e2e/…，调用方负责基址、外层实例签名和中继 / 直连；总时限由调用方的 signal 管 */
-  post: (path: string, body: Uint8Array, contentType: string) => Promise<Response>;
+  /** 默认外层传输（单测用）；生产由 fetch 每次传自己的 post——会话按 peer 缓存，传输与 signal 属于这一次请求（T59） */
+  post?: E2ePost;
   now?: () => number;
   /** 读响应正文的空闲 / 总时限（lib/body-reader.ts），测试调小 */
   bodyLimits?: BodyLimits;
@@ -88,8 +91,9 @@ async function codeOf(res: Response, limits: BodyLimits): Promise<string> {
 }
 
 /**
- * 重握手后原样重发的那一次才调：内层响应已认证，reason 可信，对方重启过（没处理，可重发）与已处理过（不能重发）分开报，
- * 调用方把这句话原样回给发消息的一方。第一次发就被拒的不走这里：那是时钟慢了、同一秒发了两条一样的，照原响应交给 peerAuthHint
+ * 重握手后原样重发的那一次才调：内层响应已认证、reason 可信。已处理过（replay）→ 不能重发。早于对方启动（before_start）只证明
+ * 「这次重试被拒」：第一次的记录帧已经发出，对方可能在重启前执行过、只是回执丢了，所以报结果未知、不诱导重发（T59）。
+ * 第一次发就被拒的不走这里：那是时钟慢了、同一秒发了两条一样的，照原响应交给 peerAuthHint
  */
 function throwIfInnerReplay(payload: Uint8Array): void {
   let j: { code?: unknown; reason?: unknown } | null = null;
@@ -99,7 +103,9 @@ function throwIfInnerReplay(payload: Uint8Array): void {
     return; // 不是 JSON 的 401：不是验签拒绝，原样交给调用方
   }
   if (j?.code !== "peer_signature") return;
-  if (j.reason === INNER_REPLAY_REASONS.restarted) throw new E2eInnerError("e2e_peer_restarted", "对方重启过，请重发");
+  if (j.reason === INNER_REPLAY_REASONS.restarted) {
+    throw new E2eOuterError("e2e_outcome_unknown", "peer restarted after the first attempt was sent; it may have been processed before the restart", true);
+  }
   if (j.reason === INNER_REPLAY_REASONS.duplicate) throw new E2eInnerError("e2e_duplicate", "对方已经处理过这条（回复在路上丢了），不要重发");
 }
 
@@ -114,12 +120,14 @@ export class PeerE2eClient {
   }
 
   /** 发一个内层请求；返回的是解开后的内层响应 */
-  async fetch(method: string, path: string, headers: Headers | Record<string, string>, body: Uint8Array = new Uint8Array(0)): Promise<Response> {
+  async fetch(method: string, path: string, headers: Headers | Record<string, string>, body: Uint8Array = new Uint8Array(0), post?: E2ePost): Promise<Response> {
+    const tx = post ?? this.d.post;
+    if (!tx) throw new E2eLocalError("e2e_unavailable", "no transport for this request");
     const head = utf8(encodeInnerHead(method, path, headers));
-    const first = await this.send(head, body, false);
+    const first = await this.send(head, body, false, tx);
     if (first !== RETRY) return first;
     try {
-      return (await this.send(head, body, true)) as Response;
+      return (await this.send(head, body, true, tx)) as Response;
     } catch (e) {
       // 第一次的记录帧已经发出去了：重握手失败、本机钥匙读不到这些「没发出」类的失败，到这里都只能算投递状态未知
       if (e instanceof E2eInnerError || (e instanceof E2eOuterError && e.sent)) throw e;
@@ -132,15 +140,15 @@ export class PeerE2eClient {
     this.session = null;
   }
 
-  private async send(head: Uint8Array, body: Uint8Array, isRetry: boolean): Promise<Response | typeof RETRY> {
-    const s = await this.ensure();
+  private async send(head: Uint8Array, body: Uint8Array, isRetry: boolean, post: E2ePost): Promise<Response | typeof RETRY> {
+    const s = await this.ensure(post);
     const rid = s.nextRid++;
     const stream = await sealMessage({ key: s.keys.c2b, sid: s.sid, dir: DIR_REQ, rid, label: PEER_E2E_LABEL }, head, body);
     // 跳过的 rid 不碍事：收方的窗口只拒重复与过旧的
     if (stream.length > E2E_BODY_MAX) throw new E2eLocalError("e2e_too_large", `request is ${stream.length} bytes, over the peer's ${E2E_BODY_MAX}-byte limit; not sent`);
     let res: Response;
     try {
-      res = await this.d.post(recordPath(s.sid, rid), stream, E2E_CONTENT_TYPE);
+      res = await post(recordPath(s.sid, rid), stream, E2E_CONTENT_TYPE);
     } catch (e) {
       throw new E2eOuterError("e2e_transport", "record frame sent, transport failed before an authenticated answer", true, { cause: e });
     }
@@ -185,23 +193,38 @@ export class PeerE2eClient {
     return parts;
   }
 
-  private ensure(): Promise<ClientSession> {
+  /**
+   * 同一时刻只握一次手，别的请求等它。等的是别人发起的握手（用的是别人的传输和 signal）而它失败了——比如发起的那个请求被取消——
+   * 就用自己的传输再握一次，不陪着一起失败（T59）
+   */
+  private async ensure(post: E2ePost): Promise<ClientSession> {
     const s = this.session;
-    if (s && s.expiresAt > this.now() && s.nextRid < RID_CAP) return Promise.resolve(s);
+    if (s && s.expiresAt > this.now() && s.nextRid < RID_CAP) return s;
     this.session = null;
-    this.pending ??= this.handshake().finally(() => {
-      this.pending = null;
-    });
+    const shared = this.pending;
+    if (shared) {
+      try {
+        return await shared;
+      } catch (e) {
+        console.warn(`[peer-e2e] 别的请求发起的握手失败（${(e as Error).message}），用本次请求自己的传输重握`);
+      }
+    }
+    if (!this.pending || this.pending === shared) {
+      const mine = this.handshake(post).finally(() => {
+        if (this.pending === mine) this.pending = null;
+      });
+      this.pending = mine;
+    }
     return this.pending;
   }
 
   /** 握手阶段这个请求的记录帧还没发：失败都是 sent=false（重握手那一次由 fetch 改判成状态未知） */
-  private async handshake(): Promise<ClientSession> {
+  private async handshake(post: E2ePost): Promise<ClientSession> {
     const peer = this.d.peer();
     const [m, mine] = await Promise.all([this.d.machine(), this.d.mySignedKey()]);
     if (!m || !mine) throw new E2eLocalError("e2e_unavailable", "local E2E key unavailable");
     const eph = await generateEcdh();
-    const res = await this.d.post(E2E_HELLO_PATH, utf8(encodeHello({ from: this.d.myFp, to: peer.fp, ce: eph.pub, key: mine })), "application/json");
+    const res = await post(E2E_HELLO_PATH, utf8(encodeHello({ from: this.d.myFp, to: peer.fp, ce: eph.pub, key: mine })), "application/json");
     if (res.status !== 200) throw new E2eOuterError(await codeOf(res, this.limits), "handshake refused", false);
     const r = parseHelloReply(await readJsonCapped(res, PLAIN_MAX, this.limits)); // 超限、不是 JSON 都是 null，下一行统一抛 e2e_bad_reply
     if (!r) throw new E2eOuterError("e2e_bad_reply", "malformed handshake reply", false);
