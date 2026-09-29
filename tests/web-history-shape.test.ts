@@ -72,13 +72,13 @@ describe("toChatMessages（历史记录 → 气泡）", () => {
     const peerMsg = u(1, "看这个\n[attachment: /tmp/inbox/123_pic.png]", { from: "peer-Sekai", fromId: "api:peer" });
     const ext = toChatMessages([peerMsg], { selfIds: new Set(["api:owner:self"]) });
     expect(ext[0].from).toBe("peer-Sekai");
-    expect(ext[0].content).toBe("看这个");
+    expect(ext[0].content).toBe("看这个\n[attachment: /tmp/inbox/123_pic.png]"); // 外源的附件行留在正文里，卡片是附加预览（T31 r2）
     expect(ext[0].attachments?.[0]).toMatchObject({ name: "pic.png", kind: "image", url: "/api/v1/attachments/123_pic.png" });
   });
-  test("外源的纯附件消息（T23）：正文以 [attachment: …] 开头，不能当来源头剥掉", () => {
-    const pure = u(1, "[attachment: /x/inbox/api_1790603315324_pic.png]\n[attachment: /x/inbox/api_1790603315400_a.pdf]", { from: "dev", fromId: "api:tok_1" });
-    const out = toChatMessages([pure], { selfIds: new Set(["api:owner:self"]) });
-    expect(out[0].content).toBe("");
+  test("外源的纯附件消息（T23）：正文以 [attachment: …] 开头，不能当来源头剥掉；附件行照原文显示（T31 r2）", () => {
+    const text = "[attachment: /x/inbox/api_1790603315324_pic.png]\n[attachment: /x/inbox/api_1790603315400_a.pdf]";
+    const out = toChatMessages([u(1, text, { from: "dev", fromId: "api:tok_1" })], { selfIds: new Set(["api:owner:self"]) });
+    expect(out[0].content).toBe(text);
     expect(out[0].attachments?.map((x) => [x.name, x.kind])).toEqual([["pic.png", "image"], ["a.pdf", "file"]]);
   });
   test("CRLF 归一 + 进度句自成一段不进 content", () => {
@@ -138,10 +138,10 @@ describe("外源开头的方括号块：网页显示 = agent 收到的正文（T
   test("别人的 Discord 账号（没有注入头）：原文照显", () => {
     for (const p of PAYLOADS) expect(shown('user="friend" user_id="222222222222222222"', p).content).toBe(p.trim());
   });
-  test("外源正文带附件行：方括号正文保留，附件照常拆出", () => {
+  test("外源正文带附件行：正文原样（含附件行），附件另给预览卡片", () => {
     const delivered = renderApiInbound({ from: guest, content: "[注意] 看图\n[attachment: /tmp/inbox/9_pic.png]" }, () => false);
     const out = shown('user="dev" user_id="api:tok_dev" api="true"', delivered);
-    expect(out.content).toBe("[注意] 看图");
+    expect(out.content).toBe("[注意] 看图\n[attachment: /tmp/inbox/9_pic.png]");
     expect(out.attachments?.map((x) => x.name)).toEqual(["pic.png"]);
   });
   test("真正的中断标记 / 命令记录（CC 自己写的，没有 from）仍是分隔线；本人发的也照旧", () => {
