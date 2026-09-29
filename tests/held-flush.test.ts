@@ -5,6 +5,7 @@
  */
 import { beforeEach, describe, expect, test } from "bun:test";
 import { clearOpenedBy, dropHeldOnKill, flushHeld, onHeldDelivered, type FlushDeps } from "../src/bridge/held-flush.js";
+import { takeApiWaiters } from "../src/bridge/stop-settle.js";
 import { ageHeld, HELD_GIVE_UP_MS, HELD_NOTIFY_MS, HeldQueue, INBOX_LEASE_MS, type HeldItem } from "../src/bridge/held-queue.js";
 import type { Delivery, Envelope, LocalEndpoint } from "../src/bridge/router.js";
 
@@ -322,6 +323,19 @@ describe("押着的人类消息一轮只投一个发送人（adv3 P2-1 升 P1：
     const same = harness([peer("q1", "a"), peer("q2", "a")], humanApi);
     await flushHeld(same.deps, "c-me", "quota_wall");
     expect(same.delivered).toEqual(["q1", "q2"]); // 同一个 peer 连着的照旧一轮
+  });
+
+  test("慢 drain 竞态：Stop 时还押着的 peer B，在 drain 期间被补投出去；这一轮 Stop 仍不拿 A 的正文结 B（T24 复核 P1）", async () => {
+    const b = api("peerB-q", "tok-b");
+    const h = harness([{ ...b, env: { ...b.env, from: { ...b.env.from, peer: "b" } } as Envelope }], humanApi);
+    const heldAtStop = h.held.ids("c-me"); // bridge.ts：Stop 一进来就拍的快照
+    await flushHeld(h.deps, "c-me", "stop"); // drain 慢，2 秒的补投定时器先跑完：B 已送达、出队
+    expect(h.contents()).toEqual([]);
+    const waiter = { agentChannelId: "c-me", agentName: "agent-me", threadId: "thr-b", tokenId: "tok-b", messageId: "m-peerB-q" };
+    const turn = { cid: "c-me", stopChannelId: "c-me", stopWs: 1, candidateWs: 1, event: "Stop", drain: { text: "answer for peer A" } };
+    const q = new Map([["tok-b", [waiter]]]);
+    expect(takeApiWaiters(q, turn, true, new Set(), new Set([...h.held.ids("c-me"), ...heldAtStop]))).toEqual([]);
+    expect(takeApiWaiters(q, turn, true, new Set(), h.held.ids("c-me")).map((x) => x.result.reply)).toEqual(["answer for peer A"]); // 对照：不带快照就串了
   });
 
   test("遗留的补投记录：那一轮 Stop 后开了别的一轮（owner 直接开 / CC 自己续跑），guest 押着的不塞进去（T24 审查 P2-1）", async () => {

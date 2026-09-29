@@ -2675,6 +2675,7 @@ async function handleHookRequest(req: Request): Promise<Response> {
     // (done / 停 typing / 完成 ping / drain / 清 pending)之前返回——回合还没完(lib/reply-nudge.ts)。Pi 叫停之后的第一次 Stop
     // 这里和下面的 inter-agent 看门狗都不催:催了等于 bridge 把刚停住的 Pi 又拉起一轮(bridge/pi-abort.ts)
     const afterAbort = event === "Stop" && stopAfterAbort(channelId);
+    const heldAtStop = heldLocalMsgs.ids(channelId); // Stop 时还押着的：之后几秒里被补投出去的也不拿这一轮的话结（tests/stop-settle-wf2.test.ts）
     if (event === "Stop" && !afterAbort) {
       const ws = clients.get(channelId)?.ws;
       if (ws) {
@@ -2813,12 +2814,8 @@ async function handleHookRequest(req: Request): Promise<Response> {
         }
       }
 
-      // v1.9.37+: 在"改 ✅ / 发完成通知"前，强制让 watcher 把这条 channel 的
-      // jsonl 读干净 + flush pending textQueue。这样 turn 结束的"agent 只打字
-      // 不 reply" 场景里，watcher debounce 还没 fire 的 `💬 text` 不会丢，也不
-      // 需要再跑一份 rescue 从 jsonl 另外抽一遍（双发源头）。
-      // channelsToClear 里每个 channel 都 drain —— ws 与 intendedReplyChannel
-      // 可能不同。
+      // 在"改 ✅ / 发完成通知"前让 watcher 把 jsonl 读干净 + flush textQueue：「只打字不 reply」时 debounce 还没 fire 的 `💬 text` 不会丢，
+      // 也不用另跑一份 rescue 从 jsonl 再抽一遍（双发源头）。channelsToClear 里每个都 drain：ws 与 intendedReplyChannel 可能不同。
       if (event === "Stop" || event === "StopFailure" || event === "stop") {
         const { drainChannelWatcher } = await import("./bridge/jsonl-watcher.js");
         for (const cid of channelsToClear) {
@@ -2832,7 +2829,8 @@ async function handleHookRequest(req: Request): Promise<Response> {
             };
             const ownTurn = await settleStopTurn(stopSettleDeps, turn);
             // v2.6.0+ R3: API waiter 兜底——agent end_turn 没 reply() 时这一轮就结掉挂着的 API 请求，wait 调用方不必干等到超时
-            for (const { waiter: p, result } of takeApiWaiters(pendingApiRequests, turn, ownTurn, afterAbort ? stopWaitIds(cid) : new Set(), heldLocalMsgs.ids(cid))) {
+            const held = new Set([...heldLocalMsgs.ids(cid), ...heldAtStop]);
+            for (const { waiter: p, result } of takeApiWaiters(pendingApiRequests, turn, ownTurn, afterAbort ? stopWaitIds(cid) : new Set(), held)) {
               apiThreadResults.set(p.threadId, { result, ts: Date.now(), tokenId: p.tokenId });
               p.resolve?.(result);
               const data = { direction: "out", from: p.agentName, text: result.reply || "", threadId: p.threadId, api: true, viaFallback: true, ...(result.apiError ? { apiError: true } : {}) };

@@ -21,7 +21,7 @@ import { subscribeEvents } from "./event-bus.js";
 import type { HeldQueue } from "./held-queue.js";
 import { createQuotaWall, type QuotaWall, type WallWindow } from "./quota-wall.js";
 import { newMessageId, newThreadId, type Delivery, type Envelope, type LocalEndpoint } from "./router.js";
-import { noteHeldStop } from "./preempt.js";
+import { holdNotingStop } from "./preempt.js";
 import { noteTurnCut, senderTrigger } from "./stop-settle.js";
 import { probeTurn, resolveTurnWindow } from "./turn-probe.js";
 
@@ -149,8 +149,7 @@ export async function holdAtWallWait(env: Envelope, to: LocalEndpoint, agent: st
   if (!kind) return null;
   if (stillWanted && !stillWanted()) return { envelope: env, outcome: { kind: "dropped", reason: "已从押后队列撤下" } }; // 别把撤下的押回来（会复活）
   const walled = !!wall?.active();
-  console.log(`⏸ 消息押后(${agent} 停在额度菜单 / 撞墙等待，没发任何键): 队列 ${b.held.holdEnv(env, walled ? "quota_wall" : undefined)} 条`);
-  noteHeldStop(env, to.channelId, agent, runtime);
+  console.log(`⏸ 消息押后(${agent} 停在额度菜单 / 撞墙等待，没发任何键): 队列 ${holdNotingStop(b.held, env, to, agent, runtime, walled ? "quota_wall" : undefined)} 条`);
   if (isHumanSender(env.from) && /^\d+$/.test(to.channelId) && firstNoticeFor(to.channelId, `${kind}:${walled}`, env.meta.messageId)) {
     const what = kind === "menu" ? "停在额度菜单" : kind === "countdown" ? "停在自动续跑倒计时" : "停在撞墙等待画面";
     const when = walled ? "出闸后" : kind === "menu" ? "菜单关掉后" : "它接着跑之后";

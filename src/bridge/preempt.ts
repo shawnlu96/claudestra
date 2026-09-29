@@ -14,6 +14,7 @@ import { emitEvent, inflightTools } from "./event-bus.js";
 import type { PreemptResult } from "../lib/interrupt-gate.js";
 import { interruptGate } from "./interrupt-gate.js";
 import { holdStopWait, lastAbortResult } from "./pi-abort.js";
+import type { HeldItem, HeldQueue } from "./held-queue.js";
 import type { Envelope } from "./router.js";
 import { resolveTurnWindow } from "./turn-probe.js";
 import { agentWindow, turnCuts } from "./turn-cuts.js";
@@ -38,6 +39,12 @@ const toolsAt = (agent: string, runtime: string | undefined) => inflightTools(ag
  * 待回账、记「停」类 cut（Autopilot 让位、不提醒续做），抬头照实写「停在等待画面、没有在跑」。之后投出去时 preemptForHuman
  * 再按那一刻的画面判一次（到点自动续跑了就打断），抬头随之改写（T24 wf3 delivery-hold-4）。
  */
+/** 先记停（在 envelope 上打标）再入队：标记跟着落盘，bridge 重启后同一条停字不会再记一遍、再清一次槽（tests/preempt-stop.test.ts） */
+export function holdNotingStop(held: Pick<HeldQueue, "holdEnv">, env: Envelope, to: { channelId: string }, agent: string, runtime: string | undefined, reason?: HeldItem["reason"]): number {
+  noteHeldStop(env, to.channelId, agent, runtime);
+  return held.holdEnv(env, reason);
+}
+
 export function noteHeldStop(env: Envelope, channelId: string, agent: string, runtime?: string): void {
   if (!ownerStopOf(env).stop || env.meta.heldStopNoted) return;
   env.meta.heldStopNoted = true;
@@ -59,8 +66,9 @@ export function noteHeldStop(env: Envelope, channelId: string, agent: string, ru
 export async function preemptForHuman(env: Envelope, channelId: string, agent: string): Promise<"wall_wait" | void> {
   const { owner, stop } = ownerStopOf(env);
   if (owner) turnCuts.noteHuman(channelId, stop);
-  // owner 的停 = 接管：发键之前就清 agent 间的待回账。Pi 停下马上报 Stop，等打断返回再清就晚了，看门狗已拿旧账把它催起一轮（adv5 P1）
-  if (stop) clearAgentPendings(channelId);
+  // owner 的停 = 接管：发键之前就清 agent 间的待回账。Pi 停下马上报 Stop，等打断返回再清就晚了，看门狗已拿旧账把它催起一轮（adv5 P1）。
+  // 押在撞墙画面上时已经清过（noteHeldStop）：最终送达不再清，否则停之后才来的回程槽也一起没了
+  if (stop && !env.meta.heldStopNoted) clearAgentPendings(channelId);
   const { runtime } = await resolveTurnWindow(channelId, controlChannelId());
   const stopWait = stop && runtime === "pi" ? holdStopWait(env, channelId, agent) : undefined;
   const tools = toolsAt(agent, runtime);
