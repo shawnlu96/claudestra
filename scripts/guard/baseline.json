@@ -314,6 +314,18 @@
       "why": "T36 上下文边界按防腐规则 9 在 CLAUDE.md / CLAUDE.zh-CN.md 加一行文档指针（→ docs/architecture/context-boundary.md）；原先用来抵消的那行重复提示 main 已经删了，没有别的可删"
     },
     {
+      "key": "guard:scripts/guard/rules/test-env.ts",
+      "from": 0,
+      "to": 0,
+      "why": "T45 测试隔离二期新增规则 testenv：tests/ 里 spawn 的最小 env（没带 ...process.env、没经 tests/test-env.ts 的 testChildEnv）计数，默认上限 0；手写 env 会丢测试标记，子进程里 lib/test-guard.ts 的闸失效、漏配 BRIDGE_URL 回落线上 3847（09-29 两次事故）"
+    },
+    {
+      "key": "guard:scripts/guard/index.ts",
+      "from": 0,
+      "to": 0,
+      "why": "T45：RULES 注册 testenv 规则（一行），其余不动；package.json 的 check / guard 脚本与 CI Guard 步骤不变"
+    },
+    {
       "key": "guard:scripts/guard/config.ts",
       "from": 0,
       "to": 0,

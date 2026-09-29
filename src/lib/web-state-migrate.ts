@@ -13,6 +13,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { adoptWebSettings } from "./config-store.js";
 import { mergeEnvContent, readDotenvFileSync } from "./env-file.js";
+import { assertNoRepoEnvWriteInTest } from "./test-guard.js";
 import { STATE_DIR } from "./paths.js";
 import { closeWebState, openWebState, WEB_STATE_TABLES } from "./web-state.js";
 
@@ -101,6 +102,7 @@ function carryPushEnv(webEnvLocal: string, envFile: string): string[] {
   const updates = Object.fromEntries(Object.entries(src).filter(([k, v]) => PUSH_ENV_RE.test(k) && v && !(k in have)));
   const keys = Object.keys(updates);
   if (!keys.length) return [];
+  assertNoRepoEnvWriteInTest(envFile);
   writeFileSync(envFile, mergeEnvContent(existsSync(envFile) ? readFileSync(envFile, "utf8") : null, updates, "# Claudestra"));
   return keys;
 }

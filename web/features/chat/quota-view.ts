@@ -150,9 +150,9 @@ export function reasonText(code: string | null): string | null {
 
 /**
  * 只有「用户主动重试」才解除的状态：以 bridge 给的 needsUserRetry 为准；老 bridge 没这个字段时按原因码兜底
- * （Keychain 被拒 / 超时 / 出错、端点暂停）。
+ * （Keychain 被拒 / 超时 / 出错、端点暂停）；403 虽然自己退避重试，也给按钮，省得干等。
  */
-const RETRY_CODES = new Set(["keychain_denied", "keychain_timeout", "keychain_error", "http_404", "http_4xx", "bad_shape", "bad_json", "redirect", "too_large"]);
+const RETRY_CODES = new Set(["http_403", "keychain_denied", "keychain_timeout", "keychain_error", "http_404", "http_4xx", "bad_shape", "bad_json", "redirect", "too_large"]);
 export function canRetry(e: EntryView): "claude" | "codex" | null {
   if (e.id !== "claude" && e.id !== "codex") return null;
   return e.source.needsUserRetry || (e.source.reason && RETRY_CODES.has(e.source.reason)) ? e.id : null;

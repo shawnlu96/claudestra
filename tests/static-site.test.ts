@@ -64,9 +64,22 @@ describe("CSP：内联脚本哈希", () => {
   test("staticSiteCsp：哈希追加在 script-src 'self' 后；其余指令不变", () => {
     expect(staticSiteCsp()).toContain("script-src 'self'; style-src");
     expect(staticSiteCsp([sha("x")])).toContain(`script-src 'self' ${sha("x")}; style-src`);
-    for (const d of ["default-src 'self'", "connect-src 'self' blob: http://127.0.0.1:*", "worker-src 'self'", "object-src 'none'", "base-uri 'none'", "frame-ancestors 'none'"]) {
+    for (const d of ["default-src 'self'", "connect-src 'self' blob: http://127.0.0.1:*", "worker-src 'self' blob:", "object-src 'none'", "base-uri 'none'", "frame-ancestors 'none'"]) {
       expect(staticSiteCsp()).toContain(d);
     }
+  });
+  test("staticSiteCsp 整条：worker-src 只多 blob:（Turbopack 的 Worker 入口），脚本仍只许同源 + 哈希，没有 unsafe-eval / unsafe-inline", () => {
+    expect(staticSiteCsp([sha("x")])).toBe(
+      [
+        "default-src 'self'", `script-src 'self' ${sha("x")}`, "style-src 'self' 'unsafe-inline'", "img-src 'self' data: blob: https:",
+        "font-src 'self' data:", "connect-src 'self' blob: http://127.0.0.1:*", "worker-src 'self' blob:", "manifest-src 'self'",
+        "object-src 'none'", "base-uri 'none'", "frame-ancestors 'none'", "form-action 'self'",
+      ].join("; ")
+    );
+    const script = staticSiteCsp().split("; ").find((d) => d.startsWith("script-src"));
+    expect(script).toBe("script-src 'self'");
+    expect(staticSiteCsp()).not.toContain("unsafe-eval");
+    expect(staticSiteCsp().replace("style-src 'self' 'unsafe-inline'", "")).not.toContain("unsafe-inline");
   });
   test("htmlCsp / staticResponse 读真文件：HTML 带哈希，改文件后重算；资源不带 CSP、一律 nosniff", async () => {
     const root = mkdtempSync(join(tmpdir(), "static-csp-"));

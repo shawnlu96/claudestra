@@ -11,6 +11,7 @@ import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { mergeEnvContent, readDotenvFileSync } from "./env-file.js";
+import { assertNoRepoEnvWriteInTest } from "./test-guard.js";
 import { STATE_DIR } from "./paths.js";
 import { LEGACY_WEB_DAEMON, legacyWebPlistPath } from "./web-static.js";
 import { migrateWebState, sessionIdHash } from "./web-state-migrate.js";
@@ -57,6 +58,7 @@ function addMissingEnv(envFile: string, updates: Record<string, string>): string
   const have = readDotenvFileSync(envFile) ?? {};
   const missing = Object.fromEntries(Object.entries(updates).filter(([k]) => !have[k]));
   if (!Object.keys(missing).length) return [];
+  assertNoRepoEnvWriteInTest(envFile);
   writeFileSync(envFile, mergeEnvContent(existsSync(envFile) ? readFileSync(envFile, "utf8") : null, missing, "# Claudestra"));
   return Object.keys(missing);
 }
