@@ -143,3 +143,5 @@ bun src/manager.ts peer-http-messages-only <peer> on    # off 恢复
 - **本机 agent 能伪造 peer 事件。** 台账身份本来就是自报的：本机 agent 清掉频道号就能以 owner 身份跑 `ledger peer-write`，写出 `peer:<名>` 的事件。防的是对方 peer，它只能经 bridge 的接口写。
 - 「只能投递消息」默认不开，老 token 行为不变。
 - 台账已有 `peer_agent` 负责人类型（`<实例指纹>/<agent>`），但它要求对方的实例指纹，老握手的 peer 记录里没有指纹，所以这里用 `extra.delegate`。
+
+统一派单（生成步骤单、选通道、脱敏、回执与重试）见 [dispatch.md](./dispatch.md)。

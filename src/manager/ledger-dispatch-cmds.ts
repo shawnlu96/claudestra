@@ -19,6 +19,7 @@ import { REVIEWER_AGENT } from "../lib/team-roles.js";
 import type { LedgerCli, Result } from "./ledger-context.js";
 import { intFlag } from "./ledger-identity.js";
 import type { CommandSpec } from "./ledger-write-cmds.js";
+import { stepDispatchOf } from "./ledger-step-dispatch.js";
 
 /** 审查结论统一落在这里：<T>-r<N>.md（对抗式 <T>-r<N>-adv.md），临时文件 <T>-r<N>[-adv]-work/ */
 const REVIEWS_DIR = statePath("ledger", "reviews");
@@ -130,6 +131,8 @@ function dispatchKey(c: LedgerCli, p: PackPlan, reviewer: string): string {
 }
 
 async function dispatch(c: LedgerCli): Promise<Result> {
+  const byStep = stepDispatchOf(c); // --step：统一派单（T48）；不带仍是派审查员
+  if (byStep) return byStep;
   const p = await plan(c);
   c.requireManager(p.task.project, "派审查员");
   if (p.task.stage !== "review") throw new LedgerError("invalid", `任务 ${p.task.id} 在 ${p.task.stage}，不在 review，不派审查员`, { stage: p.task.stage });
@@ -163,6 +166,10 @@ function escalate(c: LedgerCli): Result {
 
 export const DISPATCH_CMDS: Record<string, CommandSpec> = {
   "review-pack": { valued: ["round"], bools: ["adversarial"], usage: "review-pack <task> [--adversarial] [--round N]（只读：打印审查员 prompt）", run: reviewPack },
-  dispatch: { valued: ["round", "dedup"], bools: ["adversarial"], usage: "dispatch <task> [--adversarial] [--round N]（核对 head、记派审、打印 prompt）", run: dispatch },
+  dispatch: {
+    valued: ["round", "dedup", "step", "to", "kind"], bools: ["adversarial"],
+    usage: "dispatch <task> [--adversarial] [--round N]（核对 head、记派审、打印 prompt）｜dispatch <task> --step <步骤> --to <执行者> [--kind agent|peer]（统一派单）",
+    run: dispatch,
+  },
   escalate: { valued: ["reason", "to", "project", "dedup"], bools: ["auto"], usage: "escalate <task|-> --reason <原因> [--to pm|owner]", run: escalate },
 };

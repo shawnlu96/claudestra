@@ -40,7 +40,7 @@ function peerWrite(c: LedgerCli): Result {
     return { ok: true, event: peerEventView(r.event, peer), duplicate: r.duplicate };
   }
   if (op.op === "accept") {
-    const r = recordAccept(c.db, ctx, { taskId: task.id, peer });
+    const r = recordAccept(c.db, ctx, { taskId: task.id, peer, text: op.text });
     return { ok: true, event: peerEventView(r.event, peer), duplicate: r.duplicate };
   }
   let r: ReturnType<typeof setTask>;

@@ -3413,6 +3413,7 @@ void import("./bridge/ask-entry.js").then((m) => m.initAskWiring({ // 待你处�
   clients, deliver, hold: (e) => void heldLocalMsgs.holdEnv(e), controlChannelId: CONTROL_CHANNEL_ID, discord: WEB_ONLY ? null : discord,
 }));
 void import("./bridge/ledger-audit-service.js").then((m) => m.startLedgerAudit({ clients, deliver, hold: (e) => void heldLocalMsgs.holdEnv(e), lastMessageSource, runManager })); // 台账巡检
+void import("./bridge/dispatch-sweeper.js").then((m) => m.startDispatchSweeper({ clients, deliver, runManager })); // 统一派单：重发、回执、超时提醒
 
 // 清扫上次崩溃 / 被杀残留的 webterm-* viewer session（grouped session 视图，kill 不伤 master 本体）；Discord 与 Web-only 模式都要
 sweepStaleTerminalSessions().catch(() => {});

@@ -54,14 +54,14 @@ export function assignStep(db: Database, ctx: WriteCtx, input: AssignStepInput):
  * 接方 owner 同意接这张卡（peer 经 peer-ledger accept 写）：之后同一张卡派给同一个 peer 的步骤单不再先问接方 owner——
  * 那一侧靠接方本机的「已接受」记录判（lib/peer-accepted.ts）；这里只留痕（带时间），同一个 peer 重复接受算同一笔
  */
-export function recordAccept(db: Database, ctx: WriteCtx, input: { taskId: string; peer: string }): WriteResult<LedgerTask> {
+export function recordAccept(db: Database, ctx: WriteCtx, input: { taskId: string; peer: string; text?: string }): WriteResult<LedgerTask> {
   return tx(db, () => {
     const task = mustTask(db, input.taskId);
     // 去重键只用自己的：对方每次带不同的 dedup 就能记出好几笔「接受」（T47 复核）
     const c = { ...ctx, dedupKey: `peer:${input.peer}:accept:${task.id}` };
     const dup = replay(db, c, { project: task.project, target: task.id, kind: "accept" }, () => task);
     if (dup) return dup;
-    const event = insertEvent(db, c, { project: task.project, target: task.id, kind: "accept", data: { peer: input.peer, at: c.now ?? Date.now() } }, true);
+    const event = insertEvent(db, c, { project: task.project, target: task.id, kind: "accept", text: input.text, data: { peer: input.peer, at: c.now ?? Date.now() } }, true); // text：接方引用的授权卡（常设或逐张）
     return { row: task, event, duplicate: false };
   });
 }

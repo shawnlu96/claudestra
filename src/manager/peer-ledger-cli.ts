@@ -14,18 +14,23 @@ import { peerCliFetch } from "./relay.js";
  * accept 要绑一张 owner 答过的授权卡（同 `ledger ask-check`）：action peer_accept、params {peer, task}、问的就是调用者本人。
  * agent 自己跑得了这条命令，对方一句「owner 已同意」就可能骗它跑——有这张卡，agent 伪造不了 owner 的点击（tests/ledger-steps.test.ts）
  */
-export function checkAcceptAsk(db: Database, askId: string, peer: string, task: string, caller: string, now: number): AskCheckResult {
+export function checkAcceptAsk(db: Database, askId: string, peer: string, task: string, caller: string, now: number, project?: string): AskCheckResult {
   const a = hasAsksTable(db) ? getAsk(db, askId) : null;
-  if (a?.bind && a.bind.action !== "peer_accept") return { ok: false, reason: `${askId} 授权的是 ${a.bind.action}，不是 peer_accept` };
+  // 常设授权（T48）：owner 对「这个 peer 的这个项目」签一次，之后该项目的新委托由 PM 直接接——只比 peer 和项目（对方卡上的 project）
+  if (a?.bind?.action === "peer_accept_standing") {
+    if (!project) return { ok: false, reason: "读不到对方卡上的项目，核不了常设授权" };
+    return checkAsk(a, bindHash({ ...a.bind, params: { peer, project } }, caller), caller, now);
+  }
+  if (a?.bind && a.bind.action !== "peer_accept") return { ok: false, reason: `${askId} 授权的是 ${a.bind.action}，不是 peer_accept / peer_accept_standing` };
   return checkAsk(a, a?.bind ? bindHash({ ...a.bind, params: { peer, task } }, caller) : "", caller, now);
 }
 
-async function acceptApproved(askId: string | undefined, peer: string, task: string): Promise<string | null> {
+async function acceptApproved(askId: string | undefined, peer: string, task: string, project?: string): Promise<string | null> {
   if (!askId) return "accept 要带 --ask <askId>：先用 reply 的 ask（kind authorize，bind.action peer_accept，params {peer, task}）问 owner，owner 点了同意再跑";
   const who = resolveActor({ channelId: process.env.DISCORD_CHANNEL_ID, controlChannelId: repoEnvVar("CONTROL_CHANNEL_ID") }, (await loadRegistry()).agents);
   if (!who.ok) return who.error;
   const { openLedger } = await import("../lib/ledger-store.js");
-  const r = checkAcceptAsk(openLedger(), askId, peer, task, who.actor, Date.now());
+  const r = checkAcceptAsk(openLedger(), askId, peer, task, who.actor, Date.now(), project);
   return r.ok ? null : `owner 的授权没核过：${r.reason}`;
 }
 
@@ -59,9 +64,10 @@ export async function cmdPeerLedger(args: string[]): Promise<void> {
   let body: Json;
   if (sub === "note") body = { op: "note", text: p.pos.join(" ") };
   else if (sub === "accept") {
-    const denied = await acceptApproved(f.ask, peerName!, id);
+    const cur = await call(card); // 常设授权按对方卡上的项目核，先读卡
+    const denied = await acceptApproved(f.ask, peerName!, id, typeof cur.task?.project === "string" ? cur.task.project : undefined);
     if (denied) return output({ ok: false, code: "forbidden", error: denied, usage: USAGE });
-    const r = await call(card, { op: "accept" });
+    const r = await call(card, { op: "accept", text: `owner 授权卡 ${f.ask}` });
     // 对方卡上记下了才在本机记：注入头按本机这一笔放行步骤单（lib/peer-accepted.ts）
     if (r.ok) (await import("../lib/peer-accepted.js")).markPeerTaskAccepted(peerName!, id);
     return output(r);
