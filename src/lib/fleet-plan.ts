@@ -119,8 +119,13 @@ export function parseFleetSelect(input: unknown): { ok: true; select: FleetSelec
 
 export interface Excluded { name: string; reason: string }
 
-/** 先定范围（点名 / 全部 / 项目，三者取并集），再按条件过滤（撞墙中、上下文超线，取交集） */
-export function selectTargets<T extends FleetCandidate>(cands: T[], sel: FleetSelect): { targets: T[]; excluded: Excluded[] } {
+export const NO_GRANT = "这个凭据没有它的权限";
+
+/**
+ * 先定范围（点名 / 全部 / 项目，三者取并集），再按条件过滤（撞墙中、上下文超线，取交集）。allowed 是这次调用的凭据能动谁
+ * （网页按设备凭据的 agentInScope，没授大总管的设备点了 master 也不算；CLI 不含大总管），不能动的列进 excluded
+ */
+export function selectTargets<T extends FleetCandidate>(cands: T[], sel: FleetSelect, allowed: (name: string) => boolean): { targets: T[]; excluded: Excluded[] } {
   const byName = new Map(cands.map((c) => [bareName(c.name), c]));
   const named = new Set((sel.agents ?? []).map(bareName));
   const excluded: Excluded[] = [];
@@ -130,6 +135,7 @@ export function selectTargets<T extends FleetCandidate>(cands: T[], sel: FleetSe
   const targets: T[] = [];
   for (const c of cands) {
     if (!inScope(c)) continue;
+    if (!allowed(c.name)) { excluded.push({ name: bareName(c.name), reason: NO_GRANT }); continue; }
     if (sel.walled && !c.walled) { excluded.push({ name: bareName(c.name), reason: "没在撞墙等待" }); continue; }
     if (sel.ctxOver !== undefined && !((c.contextTokens ?? 0) > sel.ctxOver)) {
       excluded.push({ name: bareName(c.name), reason: `上下文没超过 ${sel.ctxOver}` });

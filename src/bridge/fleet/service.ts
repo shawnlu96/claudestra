@@ -1,6 +1,7 @@
 /**
  * 批量管理的服务层：收候选（registry + 大总管）、刷新 LP 状态、选人、并发跑、留痕。
- * HTTP（routes.ts）和 CLI 的 ws 请求（ws.ts）都只调 runFleet / fleetState，权限在它们各自入口判。
+ * HTTP（local-api/fleet.ts）和 CLI 的 ws 请求（ws.ts）都只调 runFleet / fleetState：能不能用在入口判，能动哪些 agent（allowed）由入口传进来，
+ * 列状态、选目标、执行前逐个再查一遍。
  * 生产 PaneIO 全走 tmux-helper：抓屏 capture-pane -p -e，打字 / 退格走 tmuxRawStrict（失败要抛），Esc 走 tmuxSendEscape 的双击护栏。
  * 压缩走 T36 的 injectCompact（ctx-boundary.ts）；执行者的 save-compact 由 actionFor 先改成 compact，认法和它是同一份。
  */
@@ -9,7 +10,7 @@ import { computeAgentStats } from "../../lib/agent-stats.js";
 import { readConfigSync } from "../../lib/config-store.js";
 import { effectiveAction, isExecutor, type CompactKeep } from "../../lib/ctx-boundary-policy.js";
 import {
-  bareName, DEFAULT_COMPACT_KEEP, fleetKeep, notApplicable, selectTargets, summarizeFleet,
+  bareName, DEFAULT_COMPACT_KEEP, fleetKeep, NO_GRANT, notApplicable, selectTargets, summarizeFleet,
   type Excluded, type FleetAction, type FleetCandidate, type FleetResult, type FleetSelect,
 } from "../../lib/fleet-plan.js";
 import { isLinkedWorktree } from "../../lib/linked-worktree.js";
@@ -85,15 +86,18 @@ async function withContext(list: Cand[]): Promise<Cand[]> {
   return list.map((c) => ({ ...c, contextTokens: ctx.get(bareName(c.name)) }));
 }
 
-/** 面板用：每个候选的最新 LP 状态（现抓一遍） */
-export async function fleetState(): Promise<{ agents: (Cand & { lp?: LpSnapshot })[]; compactKeep: string }> {
-  const list = await candidates();
+/** 这次调用的凭据能动哪些 agent（名字按 registry / "master"） */
+export type FleetAllowed = (name: string) => boolean;
+
+/** 面板用：凭据能动的每个候选的最新 LP 状态（现抓一遍；不能动的不抓也不列） */
+export async function fleetState(allowed: FleetAllowed): Promise<{ agents: (Cand & { lp?: LpSnapshot })[]; compactKeep: string }> {
+  const list = (await candidates()).filter((c) => allowed(c.name));
   const lp = await refreshLp(list.filter((c) => c.runtime === "claude-code" && c.online));
   const agents = (await withContext(list)).map((c) => ({ ...withLp(c, lp), lp: lp.get(bareName(c.name)) }));
   return { agents, compactKeep: compactKeep() ?? DEFAULT_COMPACT_KEEP };
 }
 
-export interface FleetRunRequest { action: FleetAction; select: FleetSelect; dryRun?: boolean; actor: string; via: string }
+export interface FleetRunRequest { action: FleetAction; select: FleetSelect; dryRun?: boolean; actor: string; via: string; allowed: FleetAllowed }
 export interface FleetRunReport {
   runId: string;
   dryRun: boolean;
@@ -118,6 +122,7 @@ export function actionFor(action: FleetAction, t: Pick<Cand, "name" | "cwd">): {
 }
 
 async function runTarget(req: FleetRunRequest, t: Cand, ctx: RunCtx): Promise<FleetResult> {
+  if (!req.allowed(t.name)) return { agent: t.name, outcome: "skipped", detail: NO_GRANT }; // selectTargets 已筛过，发键前按凭据再查一遍
   const na = notApplicable(req.action, t);
   if (na) return { agent: t.name, outcome: "skipped", detail: na }; // 离线 / 运行时不支持：没发键，算跳过（「全部」里常有停掉的旧条目）
   const { action, note } = actionFor(req.action, t);
@@ -161,7 +166,7 @@ export async function runFleet(req: FleetRunRequest, io: PaneIO = tmuxPaneIO): P
   const lp = await refreshLp(list.filter((c) => c.runtime === "claude-code" && c.online));
   list = list.map((c) => withLp(c, lp));
   if (req.select.ctxOver !== undefined) list = await withContext(list);
-  const { targets, excluded } = selectTargets(list, req.select);
+  const { targets, excluded } = selectTargets(list, req.select, req.allowed);
   const names = targets.map((t) => t.name);
   if (req.dryRun) {
     return { runId, dryRun: true, action: req.action, targets: names, results: [], excluded, summary: `预演：会对 ${names.length} 个 agent 执行（${names.map(bareName).join("、") || "无"}）` };

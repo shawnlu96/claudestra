@@ -10,8 +10,10 @@ import { actionFor } from "../src/bridge/fleet/service.js";
 import type { CompactKeep } from "../src/lib/ctx-boundary-policy.js";
 import { NEUTRAL_TAG } from "../src/lib/delegate-marker.js";
 import {
-  DEFAULT_COMPACT_KEEP, fleetKeep, notApplicable, parseFleetAction, parseFleetSelect, selectTargets, summarizeFleet, type FleetCandidate,
+  DEFAULT_COMPACT_KEEP, fleetKeep, NO_GRANT, notApplicable, parseFleetAction, parseFleetSelect, selectTargets, summarizeFleet, type FleetCandidate,
 } from "../src/lib/fleet-plan.js";
+import { effectivePrincipal } from "../src/lib/devices.js";
+import { agentInScope, type Principal } from "../src/lib/principals.js";
 
 /** 期望值里的保留清单：CompactKeep 只有 normalizeCompactKeep 产得出，比对时按字面量标一下 */
 const K = (s: string) => s as CompactKeep;
@@ -23,11 +25,13 @@ const FLEET: FleetCandidate[] = [
   c("agent-pi", { project: "p2", runtime: "pi" }),
   c("master", { master: true, walled: true, contextTokens: 900_000 }),
 ];
-const names = (sel: Parameters<typeof parseFleetSelect>[0]) => {
+const ALL = () => true;
+const pick = (sel: Parameters<typeof parseFleetSelect>[0], allowed: (name: string) => boolean = ALL) => {
   const s = parseFleetSelect(sel);
   if (!s.ok) throw new Error(s.error);
-  return selectTargets(FLEET, s.select).targets.map((t) => t.name);
+  return selectTargets(FLEET, s.select, allowed);
 };
+const names = (sel: Parameters<typeof parseFleetSelect>[0]) => pick(sel).targets.map((t) => t.name);
 
 describe("动作白名单", () => {
   test("只收六种动作", () => {
@@ -94,6 +98,23 @@ describe("选人", () => {
     expect(names({ project: "p1", includeMaster: true })).toContain("master");
   });
 
+  test("凭据没授大总管：点名 / includeMaster 都选不中，记进 excluded（codex r4 P1-2）", () => {
+    const at = "2026-09-29T00:00:00Z";
+    const owner: Principal = { id: "owner:self", role: "owner", agents: ["*", "master"], createdAt: at };
+    const device = (agents: string[]) =>
+      effectivePrincipal({
+        principal: owner,
+        credential: { id: "dev_x", v: 1, type: "bearer", hash: "h", deviceName: "d", grant: { agents, terminal: false, manage: true }, createdAt: at, expiresAt: "2099-01-01T00:00:00Z" },
+      });
+    const noMaster = device(["*"]);
+    for (const sel of [{ agents: ["master"] }, { agents: ["agent-master", "a"] }, { all: true, includeMaster: true }]) {
+      const r = pick(sel, (n) => agentInScope(noMaster, n));
+      expect(r.targets.map((t) => t.name)).not.toContain("master");
+      expect(r.excluded).toContainEqual({ name: "master", reason: NO_GRANT });
+    }
+    expect(pick({ agents: ["master"] }, (n) => agentInScope(device(["*", "master"]), n)).targets.map((t) => t.name)).toEqual(["master"]);
+  });
+
   test("按项目 / 点名（带不带 agent- 前缀都行）", () => {
     expect(names({ project: "p1" })).toEqual(["agent-a", "agent-b"]);
     expect(names({ agents: ["a", "agent-c"] })).toEqual(["agent-a", "agent-c"]);
@@ -105,8 +126,7 @@ describe("选人", () => {
   });
 
   test("点名了不存在的 agent → 记进 excluded", () => {
-    const s = parseFleetSelect({ agents: ["nope", "a"] });
-    const r = selectTargets(FLEET, s.ok ? s.select : {});
+    const r = pick({ agents: ["nope", "a"] });
     expect(r.targets.map((t) => t.name)).toEqual(["agent-a"]);
     expect(r.excluded).toContainEqual({ name: "nope", reason: "没有这个 agent" });
   });

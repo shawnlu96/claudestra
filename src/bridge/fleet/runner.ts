@@ -2,6 +2,7 @@
  * 批量管理的发键执行器：一个 agent 一个动作，每一步发完都重抓画面复核，结果归成 已执行 / 已排队 / 已跳过 / 失败。
  * 发键只经注入的 PaneIO（生产实现在 service.ts，全走 tmux-helper），判态全在 lib/lp-state.ts；这里只排步骤。
  * 压缩（compact / save-compact / 开 LP 再压缩的最后一步）交给 T36 的 injectCompact，和自动压缩、手动按钮同一套闸门、15 分钟守卫与长短档。
+ * 发键的动作整串（开 LP → Esc → 清字 → 压缩）都拿着窗口执行权（ctx-boundary-inject.ts withWindow），自动压缩和手动按钮插不进来。
  * 安全边界：画面上有任何菜单 / 对话框一个键都不按（含 Esc）；输入框里有别人的字就不动、绝不清；
  * 发键前隔一小段再抓一次屏，两次都过才发，按键只看这两帧；Esc 只在两帧都确认有回合在跑时才按（空闲时按两下会弹 Rewind）。
  * 用例见 tests/fleet-runner.test.ts。
@@ -9,7 +10,7 @@
 import type { CompactAction, CompactKeep } from "../../lib/ctx-boundary-policy.js";
 import { ccOnly, type FleetAction, type FleetResult } from "../../lib/fleet-plan.js";
 import { decideLp, lastLpEcho, readLpPane, stripAnsi, type LpRead } from "../../lib/lp-state.js";
-import type { InjectResult } from "../ctx-boundary-inject.js";
+import { withWindow, type InjectResult } from "../ctx-boundary-inject.js";
 
 export interface PaneIO {
   /** capture-pane -p -e */
@@ -213,14 +214,15 @@ async function lpThenCompact(ctx: RunCtx, agent: string, win: string, keep: Comp
 /** 正在被批量动作处理的 agent：网页和 CLI 同时对同一个窗口发，两串按键会交错（半截命令、Esc 打到别人的回合上） */
 const inFlight = new Set<string>();
 
-/** 单个 agent 跑一个动作；win 为 null（窗口不在）只允许 text */
+/** 单个 agent 跑一个动作；win 为 null（窗口不在）只允许 text。发键的动作先拿窗口执行权，自动压缩 / 手动按钮正拿着就跳过 */
 export async function runOne(action: FleetAction, agent: string, win: string | null, ctx: RunCtx): Promise<FleetResult> {
   const out = (s: Step): FleetResult => ({ agent, ...s });
   if (ccOnly(action.kind) && !win) return out(failed("找不到它的 tmux 窗口"));
   if (inFlight.has(agent)) return out({ outcome: "skipped", detail: "另一个批量动作正在处理它" });
   inFlight.add(agent);
   try {
-    return await runAction(action, agent, win ?? "", ctx, out);
+    if (!win || !ccOnly(action.kind)) return await runAction(action, agent, win ?? "", ctx, out);
+    return await withWindow(win, "批量动作", () => runAction(action, agent, win, ctx, out), (who) => out(skipped(`${who}正在操作这个窗口，没发`)));
   } finally {
     inFlight.delete(agent);
   }
