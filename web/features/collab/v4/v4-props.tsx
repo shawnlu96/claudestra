@@ -84,9 +84,9 @@ export function Overview(props: {
   );
 }
 
-export function EdgePage({ dep, ov, onPick, onClose, tr }: { dep: LedgerDepView; ov: LedgerOverview; onPick: (id: string) => void; onClose: () => void; tr: Tr }) {
+function DepBody({ dep, ov, onPick, tr }: { dep: LedgerDepView; ov: LedgerOverview; onPick: (id: string) => void; tr: Tr }) {
   return (
-    <Shell title={`${dep.from} → ${dep.to}`} sub={tr(dep.kind === "branch" ? "分支依赖" : "前置依赖")} onClose={onClose} tr={tr}>
+    <>
       <Sec title={tr("条件原文")}><div className={v.quote}>{dep.when || tr("（没写条件）")}</div></Sec>
       <Sec title={tr("现在")}>
         <div className={`${v.kv} ${v[`st_${dep.effective}`] ?? ""}`}>{tr(STATE_WORD[dep.effective])}</div>
@@ -100,6 +100,22 @@ export function EdgePage({ dep, ov, onPick, onClose, tr }: { dep: LedgerDepView;
         <TaskLink id={dep.from} ov={ov} onPick={onPick} />
         <TaskLink id={dep.to} ov={ov} onPick={onPick} />
       </Sec>
+    </>
+  );
+}
+
+/** 一条依赖，或画布上合成一根线的几条（指向折叠组时）：逐条列出，各自的状态和条件都看得到 */
+export function EdgePage({ deps, ov, onPick, onClose, tr }: { deps: readonly LedgerDepView[]; ov: LedgerOverview; onPick: (id: string) => void; onClose: () => void; tr: Tr }) {
+  const one = deps.length === 1 ? deps[0]! : null;
+  const title = one ? `${one.from} → ${one.to}` : tr("{n} 条依赖", { n: deps.length });
+  return (
+    <Shell title={title} sub={one ? tr(one.kind === "branch" ? "分支依赖" : "前置依赖") : tr("画布上合成一根线")} onClose={onClose} tr={tr}>
+      {one ? <DepBody dep={one} ov={ov} onPick={onPick} tr={tr} /> : deps.map((d) => (
+        <div key={`${d.from}>${d.to}`} className={v.depItem}>
+          <div className={v.depHead}>{d.from} → {d.to}</div>
+          <DepBody dep={d} ov={ov} onPick={onPick} tr={tr} />
+        </div>
+      ))}
     </Shell>
   );
 }

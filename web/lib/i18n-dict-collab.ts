@@ -172,6 +172,8 @@ export const COLLAB_DICT: Record<string, string> = {
   "未归事项": "No item",
   "{n} 件在等 {x}": "{n} waiting on {x}",
   "适配全部": "Fit all",
+  "{n} 条依赖": "{n} dependencies",
+  "画布上合成一根线": "Drawn as one line on the canvas",
   "还有 {n} 件在右边 →": "{n} more to the right →",
   "下面还有 {n} 件 ↓": "{n} more below ↓",
   "← 左边还有 {n} 件": "← {n} more to the left",

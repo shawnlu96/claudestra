@@ -4,7 +4,8 @@
  *   - 事项是分组框，框里按依赖从左往右排（列 = 沿依赖的最长路径），没归事项的任务进「未归事项」框；
  *   - 在跑的任务展开成节点（full），上线 / 验证中和还没开工的收成小节点（mini），被挡住、还没开工的按「挡着它的第一个」
  *     折叠成「N 件在等 X」，已完成的只在框角记 ✓ N；ops（PM 自做）不进画布，完成了也记进 ✓ N；
- *   - 边来自 deps，effective 定线型：done 实线、active 流动虚线、waiting 灰点线；两端都画在画布上才画，同一对框只画一根。
+ *   - 边来自 deps，effective 定线型：done 实线、active 流动虚线、waiting 灰点线；两端都画在画布上才画，同一对框只画一根——
+ *     指向折叠组的往往是好几条依赖，合成一根：线型取最「活」的（active > waiting > done），代表边按固定顺序挑，deps 里留全部。
  */
 import type { LedgerDepView, LedgerOverview, LedgerTaskView, Stage } from "../collab-model";
 
@@ -14,7 +15,13 @@ export interface Box { x: number; y: number; w: number; h: number }
 export interface CNode extends Box { id: string; kind: NodeKind; task: LedgerTaskView }
 export interface CFold extends Box { id: string; waitFor: string; members: string[] }
 export interface CGroup extends Box { id: string; title: string; nodes: CNode[]; folds: CFold[]; done: number }
-export interface CEdge { id: string; from: string; to: string; style: EdgeStyle; dep: LedgerDepView; x1: number; y1: number; x2: number; y2: number }
+export interface CEdge {
+  /** 框对（`框>框`），刷新之间稳定 */
+  id: string; from: string; to: string; style: EdgeStyle;
+  /** 代表边（最活的那条）与合进这根线的全部依赖；label = 条件原文，多条且条件不同时带「+N」 */
+  dep: LedgerDepView; deps: LedgerDepView[]; label: string;
+  x1: number; y1: number; x2: number; y2: number;
+}
 export interface Canvas {
   groups: CGroup[];
   edges: CEdge[];
@@ -33,6 +40,8 @@ const NOT_STARTED: ReadonlySet<Stage> = new Set(["spec", "restate"]);
 const TERMINAL: ReadonlySet<Stage> = new Set(["done", "cancelled"]);
 
 export const edgeStyle = (effective: LedgerDepView["effective"]): EdgeStyle => (effective === "done" ? "solid" : effective === "active" ? "flow" : "dotted");
+const ALIVE: Record<LedgerDepView["effective"], number> = { active: 0, waiting: 1, done: 2 };
+const byAlive = (a: LedgerDepView, b: LedgerDepView) => ALIVE[a.effective] - ALIVE[b.effective] || a.from.localeCompare(b.from) || a.to.localeCompare(b.to);
 
 /** 列 = 沿依赖的最长路径（只算画在画布上的任务之间的边）；有环就在环上停，不死循环 */
 function ranks(ids: readonly string[], deps: readonly LedgerDepView[]): Map<string, number> {
@@ -60,7 +69,7 @@ const byStage = (a: LedgerTaskView, b: LedgerTaskView) => STAGE_ORDER.indexOf(a.
 interface Slot { id: string; kind: NodeKind | "fold"; rank: number; task?: LedgerTaskView; waitFor?: string; members?: string[] }
 
 /** 一个事项框里的格子：节点、小节点、折叠组，各带列号 */
-function slotsOf(tasks: LedgerTaskView[], rank: Map<string, number>): Slot[] {
+function slotsOf(group: string, tasks: LedgerTaskView[], rank: Map<string, number>): Slot[] {
   const folds = new Map<string, LedgerTaskView[]>();
   const slots: Slot[] = [];
   for (const t of [...tasks].sort(byStage)) {
@@ -69,7 +78,7 @@ function slotsOf(tasks: LedgerTaskView[], rank: Map<string, number>): Slot[] {
     else slots.push({ id: t.id, kind: FULL.has(t.stage) ? "full" : "mini", rank: rank.get(t.id) ?? 0, task: t });
   }
   for (const [waitFor, members] of folds) {
-    slots.push({ id: `fold:${waitFor}:${members[0]!.id}`, kind: "fold", rank: Math.min(...members.map((m) => rank.get(m.id) ?? 0)), waitFor, members: members.map((m) => m.id) });
+    slots.push({ id: `fold:${group}:${waitFor}`, kind: "fold", rank: Math.min(...members.map((m) => rank.get(m.id) ?? 0)), waitFor, members: members.map((m) => m.id) });
   }
   return slots;
 }
@@ -109,7 +118,7 @@ export function causalCanvas(ov: Pick<LedgerOverview, "tasks" | "items" | "deps"
     const mine = drawn.filter((t) => groupOf(t) === g.id);
     const done = ov.tasks.filter((t) => groupOf(t) === g.id && t.stage === "done").length;
     if (!mine.length && !done) continue;
-    const group = placeGroup(g.id, g.title, slotsOf(mine, rank), done, top);
+    const group = placeGroup(g.id, g.title, slotsOf(g.id, mine, rank), done, top);
     groups.push(group);
     top += group.h + GROUP_GAP;
   }
@@ -125,14 +134,19 @@ export function causalCanvas(ov: Pick<LedgerOverview, "tasks" | "items" | "deps"
       for (const m of f.members) boxOf.set(m, f.id);
     }
   }
-  const edges: CEdge[] = [];
-  const seen = new Set<string>();
+  const pairs = new Map<string, LedgerDepView[]>();
   for (const d of deps) {
     const a = boxOf.get(d.from), b = boxOf.get(d.to);
-    if (!a || !b || a === b || seen.has(`${a}>${b}`)) continue;
-    seen.add(`${a}>${b}`);
-    const p = boxes.get(a)!, q = boxes.get(b)!;
-    edges.push({ id: `${d.from}>${d.to}`, from: a, to: b, style: edgeStyle(d.effective), dep: d, x1: p.x + p.w, y1: p.y + p.h / 2, x2: q.x, y2: q.y + q.h / 2 });
+    if (!a || !b || a === b) continue;
+    pairs.set(`${a}>${b}`, [...(pairs.get(`${a}>${b}`) ?? []), d]);
   }
+  const edges: CEdge[] = [...pairs].map(([id, list]) => {
+    const all = [...list].sort(byAlive), dep = all[0]!;
+    const [a, b] = id.split(">") as [string, string];
+    const p = boxes.get(a)!, q = boxes.get(b)!;
+    const same = all.every((d) => d.when === dep.when);
+    const label = same || !dep.when ? dep.when : `${dep.when} +${all.length - 1}`;
+    return { id, from: a, to: b, style: edgeStyle(dep.effective), dep, deps: all, label, x1: p.x + p.w, y1: p.y + p.h / 2, x2: q.x, y2: q.y + q.h / 2 };
+  });
   return { groups, edges, w: Math.max(0, ...groups.map((g) => g.w)), h: Math.max(0, top - GROUP_GAP), boxOf };
 }

@@ -2,7 +2,7 @@
 import { describe, expect, test } from "bun:test";
 import type { LedgerDepView, LedgerTaskView, Stage } from "../web/features/collab/collab-model";
 import { causalCanvas, COL_GAP, edgeStyle, LOOSE_GROUP, type Box, type CEdge } from "../web/features/collab/v4/causal-model";
-import { initialView, labelWidth, offscreen, placeLabels, READABLE_K } from "../web/features/collab/v4/canvas-view";
+import { fitAllView, initialView, labelWidth, MIN_K, offscreen, placeLabels, READABLE_K, reconcileView, type ViewState } from "../web/features/collab/v4/canvas-view";
 
 function task(id: string, stage: Stage, over: Partial<LedgerTaskView> = {}): LedgerTaskView {
   return {
@@ -97,8 +97,10 @@ describe("边状态映射", () => {
 });
 
 describe("边标签避让与打开时的视口（canvas-view.ts）", () => {
-  const edge = (id: string, when: string, x1 = 0, y1 = 100, x2 = 300, y2 = 100): CEdge =>
-    ({ id, from: "a", to: "b", style: "flow", dep: dep("a", "b", "active", { when }), x1, y1, x2, y2 });
+  const edge = (id: string, when: string, x1 = 0, y1 = 100, x2 = 300, y2 = 100): CEdge => {
+    const d = dep("a", "b", "active", { when });
+    return { id, from: "a", to: "b", style: "flow", dep: d, deps: [d], label: when, x1, y1, x2, y2 };
+  };
   const overlap = (a: Box, b: Box) => a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h;
   const rect = (l: { x: number; y: number; w: number; h: number }) => ({ x: l.x - l.w / 2, y: l.y - l.h / 2, w: l.w, h: l.h });
 
@@ -136,5 +138,47 @@ describe("边标签避让与打开时的视口（canvas-view.ts）", () => {
     expect(v1.x + a.x * v1.k).toBeGreaterThanOrEqual(0);
     // 540 宽放下前两列；第三列起出框：C、D、E 三个节点 + 折叠组按件数算的 F、G
     expect(offscreen(wide, v1, 540, 800)).toEqual({ right: 5, down: 0, left: 0, up: 0 });
+  });
+});
+
+describe("审查修复轮（T58 P2）", () => {
+  const chain = (n: number, ids = Array.from({ length: n }, (_, i) => `C${i}`)) => causalCanvas({
+    items, tasks: ids.map((id) => task(id, "build")), deps: ids.slice(1).map((id, i) => dep(ids[i]!, id, "waiting")),
+  });
+
+  test("折叠边合成一根：线型取最活的，全部依赖都留着，和事件先后无关；条件不同带 +N", () => {
+    const deps = [dep("X", "F", "waiting", { when: "条件乙" }), dep("X", "G", "active", { when: "条件甲" }), dep("X", "H", "done", { when: "条件丙" })];
+    const tasks = [task("X", "build"), ...["F", "G", "H"].map((id) => task(id, "spec", { blockedBy: ["X"] }))];
+    const a = causalCanvas({ items, tasks, deps }), b = causalCanvas({ items, tasks, deps: [...deps].reverse() });
+    for (const c of [a, b]) {
+      expect(c.edges).toHaveLength(1);
+      expect(c.edges[0]).toMatchObject({ style: "flow", label: "条件甲 +2" });
+      expect(c.edges[0]!.deps.map((d) => d.to)).toEqual(["G", "F", "H"]);
+    }
+    expect(a.groups[0]!.folds[0]!.id).toBe("fold:I1:X"); // 折叠组 id 只看事项和挡着它的那个，成员变了也不变
+  });
+
+  test("视口：打开时摆一次；数据刷新（新对象、尺寸也变了）不动用户拖好的位置；只有新的 Focus 才居中，同一个 seq 不重复", () => {
+    const c = chain(3);
+    let st: ViewState = { view: { x: 0, y: 0, k: 1 }, placed: false, centered: 0 };
+    st = reconcileView(st, c, 900, 600, null);
+    expect(st.placed).toBe(true);
+    const dragged = { ...st, view: { ...st.view, x: -333, y: 44 } };
+    expect(reconcileView(dragged, chain(5), 900, 600, null)).toBe(dragged);
+    const focused = reconcileView(dragged, chain(5), 900, 600, { id: "C2", seq: 1 });
+    expect(focused.view).not.toEqual(dragged.view);
+    const again = { ...focused, view: { ...focused.view, x: 10 } };
+    expect(reconcileView(again, chain(5), 900, 600, { id: "C2", seq: 1 })).toBe(again);
+    const gone = reconcileView(again, chain(5), 900, 600, { id: "不在画布上", seq: 2 });
+    expect(gone.view).toEqual(again.view);
+    expect(gone.centered).toBe(2);
+  });
+
+  test("「适配全部」十列的链在 800 宽里整张放得下（缩放可以低于滚轮下限）；打开时仍不低于 0.8", () => {
+    const c = chain(10);
+    const v = fitAllView(c, 800, 600);
+    expect(v.k).toBeLessThan(MIN_K);
+    expect(offscreen(c, v, 800, 600)).toEqual({ right: 0, down: 0, left: 0, up: 0 });
+    expect(initialView(c, 800, 600).k).toBe(READABLE_K);
   });
 });

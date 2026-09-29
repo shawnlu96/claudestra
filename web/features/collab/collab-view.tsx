@@ -23,7 +23,9 @@ import { sinceDigest } from "./collab-since";
 import { SinceCard } from "./collab-since-card";
 import { useLastSeen } from "./use-collab-extra";
 import { causalCanvas } from "./v4/causal-model";
-import { CausalCanvas, type Selection } from "./v4/causal-canvas";
+import { CausalCanvas } from "./v4/causal-canvas";
+import type { Focus } from "./v4/canvas-view";
+import { edgeSel, narrowPane, resolveSelection, type Selection } from "./v4/v4-selection";
 import { MobileList } from "./v4/v4-mobile";
 import { Outline } from "./v4/v4-outline";
 import { CauseSec, EdgePage, FoldPage, Overview, WaitsPage } from "./v4/v4-props";
@@ -106,6 +108,34 @@ function CenterPane(props: React.ComponentProps<typeof CausalCanvas>) {
   );
 }
 
+/**
+ * 选中与居中：任务走 openCollabTask（右侧 / 全屏详情），其余存稳定键（v4-selection.ts）；只有明确点了任务才发 Focus 让画布居中。
+ * 从任务详情点进边 / 折叠组的，关掉回到那个任务（手机上不然就直接掉回列表）
+ */
+function useSelection(openTask: string | null) {
+  const [sel, setSel] = useState<Selection>(null);
+  const [back, setBack] = useState<string | null>(null);
+  const [focus, setFocus] = useState<Focus | null>(null);
+  const pickTask = (id: string) => {
+    setSel(null);
+    setBack(null);
+    setFocus((f) => ({ id, seq: (f?.seq ?? 0) + 1 }));
+    openCollabTask(id);
+  };
+  const select = (x: Selection) => {
+    if (x?.kind === "task") return pickTask(x.id);
+    setBack(x && x.kind !== "waits" ? openTask : null);
+    openCollabTask(null);
+    setSel(x);
+  };
+  const close = () => {
+    setSel(null);
+    setBack(null);
+    if (back) openCollabTask(back);
+  };
+  return { sel, setSel, focus, pickTask, select, close };
+}
+
 export function CollabView({ project }: { project: string }) {
   const tr = useCollabT();
   const nav = useChatNav();
@@ -135,8 +165,7 @@ export function CollabView({ project }: { project: string }) {
   const digest = useMemo(() => sinceDigest(lastSeen.state.events, ov?.tasks ?? [], tr), [lastSeen.state.events, ov, tr]);
   const canvas = useMemo(() => causalCanvas(ov ?? { tasks: [], items: [], deps: [] }), [ov]);
   const [filter, setFilter] = useState<Filter>("all");
-  const [sel, setSel] = useState<Selection>(null);
-  const [focus, setFocus] = useState<string | null>(null);
+  const { sel, setSel, focus, pickTask, select, close } = useSelection(openTask);
   const projectName = projects.find((p) => p.id === project)?.name || project;
 
   const lineAction = (l: LineView) => {
@@ -147,33 +176,25 @@ export function CollabView({ project }: { project: string }) {
     const l = lines.get(id);
     return l ? lineAction(l).text : "";
   };
-  const pickTask = (id: string) => {
-    setSel(null);
-    setFocus(id);
-    openCollabTask(id);
-  };
-  const select = (x: Selection) => {
-    if (x?.kind === "task") return pickTask(x.id);
-    openCollabTask(null);
-    setSel(x);
-  };
 
   if (load.status !== "ok" || !ov!.exists || ov!.tasks.length === 0) return <LoadState load={load} refetch={refetch} tr={tr} />;
 
   const o = ov!, hv = view!;
   const m = metricsOf(o, hv.todayDone.length, agents.filter((a) => members.has(a.name) && a.status === "active").length);
+  const resolved = resolveSelection(sel, o, canvas);
+  if (sel && sel.kind !== "task" && !resolved) setSel(null); // 边 / 折叠组在这次刷新里没了：清掉，属性页回概览
+  const pane = narrowPane(openTask, resolved);
   const detail = openTask && (
     <CollabDetail project={project} id={openTask} rev={rev} now={now} ov={o} line={lines.get(openTask) ?? null}
       action={(l) => lineAction(l)} actions={actions} reviewers={byTask.get(openTask) ?? NO_REVIEWERS} onClose={closeTask}
-      extra={<CauseSec id={openTask} deps={o.deps ?? []} onEdge={(dep) => select({ kind: "edge", dep })} tr={tr} />} />
+      extra={<CauseSec id={openTask} deps={o.deps ?? []} onEdge={(dep) => select(edgeSel([dep]))} tr={tr} />} />
   );
-  const right = detail
-    || (sel?.kind === "edge" && <EdgePage dep={sel.dep} ov={o} onPick={pickTask} onClose={() => setSel(null)} tr={tr} />)
-    || (sel?.kind === "fold" && <FoldPage fold={sel.fold} ov={o} onPick={pickTask} onClose={() => setSel(null)} tr={tr} />)
-    || (sel?.kind === "waits" && <WaitsPage waits={waits} ov={o} onPick={pickTask} onClose={() => setSel(null)} tr={tr} />)
-    || <Overview ov={o} view={hv} waits={waits} projectName={projectName} onPick={pickTask} tr={tr} since={lastSeen.state.since !== null && (
-      <SinceCard digest={digest} since={lastSeen.state.since} truncated={lastSeen.state.truncated} now={now} tr={tr} onOpen={pickTask} onDismiss={lastSeen.dismiss} />
-    )} />;
+  const page = (resolved?.kind === "edge" && <EdgePage deps={resolved.deps} ov={o} onPick={pickTask} onClose={close} tr={tr} />)
+    || (resolved?.kind === "fold" && <FoldPage fold={resolved.fold} ov={o} onPick={pickTask} onClose={close} tr={tr} />)
+    || (resolved?.kind === "waits" && <WaitsPage waits={waits} ov={o} onPick={pickTask} onClose={close} tr={tr} />);
+  const right = detail || page || <Overview ov={o} view={hv} waits={waits} projectName={projectName} onPick={pickTask} tr={tr} since={lastSeen.state.since !== null && (
+    <SinceCard digest={digest} since={lastSeen.state.since} truncated={lastSeen.state.truncated} now={now} tr={tr} onOpen={pickTask} onDismiss={lastSeen.dismiss} />
+  )} />;
 
   return (
     <div className={`${s.tokens} ${s.root} ${v.v4}`}>
@@ -188,8 +209,8 @@ export function CollabView({ project }: { project: string }) {
       {narrow ? (
         <>
           <MobileList ov={o} lines={lines} todayDone={hv.todayDone} now={now} actionText={actionText} onPick={pickTask} tr={tr} />
-          {detail}
-          {sel?.kind === "waits" && <div className={v.sheet}><WaitsPage waits={waits} ov={o} onPick={pickTask} onClose={() => setSel(null)} tr={tr} /></div>}
+          {pane === "detail" && detail}
+          {pane !== "detail" && page && <div className={v.sheet}>{page}</div>}
         </>
       ) : (
         <div className={v.main}>

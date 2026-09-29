@@ -2,6 +2,8 @@
 import { describe, expect, test } from "bun:test";
 import type { LedgerDepView, LedgerTaskView, Stage } from "../web/features/collab/collab-model";
 import { blockLine, causeOf, edgeBasis, matchFilter, metricsOf, mobileSections, outlineOf, stageCounts } from "../web/features/collab/v4/v4-model";
+import { causalCanvas } from "../web/features/collab/v4/causal-model";
+import { edgeSel, narrowPane, resolveSelection } from "../web/features/collab/v4/v4-selection";
 
 const metrics = { startTs: null, endTs: null, stageMs: {}, reviewRounds: 0, reviewWaitPendingMs: null, p0: 0, p1: 0, p2: 0 };
 function task(id: string, stage: Stage, over: Partial<LedgerTaskView> = {}): LedgerTaskView {
@@ -64,5 +66,31 @@ describe("手机分组与因果线", () => {
   });
   test("项目概览的阶段计数：审查和返工同一列，只出有数的", () => {
     expect(stageCounts({ tasks: [task("A", "review"), task("B", "fix"), task("C", "build"), task("D", "done")] })).toEqual([{ label: "开发", n: 1 }, { label: "审查 ⇄ 返工", n: 2 }]);
+  });
+});
+
+describe("选中存稳定键、每次从当前数据解析（v4-selection.ts）", () => {
+  const items = [{ id: "I1", title: "事项", oneLine: "" }];
+  const tasks = [task("A", "build"), task("B", "spec", { blockedBy: ["A"] }), task("C", "build")];
+  test("边按依赖的键解析：刷新后拿到的是新状态；依赖删了就解析不到（调用方清掉选择）", () => {
+    const sel = edgeSel([dep("A", "C")]);
+    const fresh = dep("A", "C", { effective: "done", when: "改过的条件" });
+    expect(resolveSelection(sel, { deps: [fresh] }, { groups: [] })).toEqual({ kind: "edge", deps: [fresh] });
+    expect(resolveSelection(sel, { deps: [] }, { groups: [] })).toBeNull();
+  });
+  test("折叠组按稳定 id 解析，成员取当前的；组没了就 null；待你处理原样；任务不归这里", () => {
+    const c = causalCanvas({ tasks, items, deps: [dep("A", "B")] });
+    const id = c.groups[0]!.folds[0]!.id;
+    expect(resolveSelection({ kind: "fold", id }, { deps: [] }, c)).toMatchObject({ kind: "fold", fold: { members: ["B"] } });
+    const after = causalCanvas({ tasks: [task("A", "build"), task("B", "build")], items, deps: [] });
+    expect(resolveSelection({ kind: "fold", id }, { deps: [] }, after)).toBeNull();
+    expect(resolveSelection({ kind: "waits" }, { deps: [] }, c)).toEqual({ kind: "waits" });
+    expect(resolveSelection({ kind: "task", id: "A" }, { deps: [] }, c)).toBeNull();
+  });
+  test("手机：任务详情优先；从详情点进依赖（详情关掉、选中边）整屏是边详情，不是掉回列表", () => {
+    const r = resolveSelection(edgeSel([dep("A", "C")]), { deps: [dep("A", "C")] }, { groups: [] });
+    expect(narrowPane("A", r)).toBe("detail");
+    expect(narrowPane(null, r)).toBe("edge");
+    expect(narrowPane(null, null)).toBe("list");
   });
 });
