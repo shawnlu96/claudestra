@@ -57,6 +57,16 @@ async function auth(cookie: string, ctx: RequestContext, method = "GET", extra: 
   return authenticateApi(r, new URL(r.url), { rateLimit: false });
 }
 
+describe("guest 配对码的名字", () => {
+  test("不许叫保留名 web-ui（它的消息来源名会被网页当成 owner 本人）", () => {
+    for (const guest of ["web-ui", "WEB-UI "]) {
+      const info = issuePairing(machine, { guest });
+      expect([guest, info.ok, String(info.error)]).toEqual([guest, false, expect.stringContaining("保留名")]);
+    }
+    expect(issuePairing(machine, { guest: "friend", agents: ["worker-a"] }).ok).toBe(true);
+  });
+});
+
 describe("二维码配对（挑战应答）", () => {
   test("秘密只在链接的 # 里；挑战一次性；配对成功签 owner:self 的凭据，cookie Path 带机器前缀、Secure", async () => {
     const info = issuePairing(machine, {});

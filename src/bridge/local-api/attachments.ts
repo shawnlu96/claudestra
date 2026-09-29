@@ -16,6 +16,8 @@ let dirs = DEFAULT_DIRS;
 export function setAttachmentDirsForTest(d: AttachmentDirs | undefined): void {
   dirs = d ?? DEFAULT_DIRS;
 }
+/** 媒体索引（local-api/media.ts）解析附件用同一套目录 */
+export const attachmentDirs = (): AttachmentDirs => dirs;
 
 /** SVG 直出会执行内嵌脚本：同源下等于 XSS，禁脚本只留样式 */
 const SVG_CSP = "default-src 'none'; style-src 'unsafe-inline'";

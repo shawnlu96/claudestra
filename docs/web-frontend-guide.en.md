@@ -40,7 +40,7 @@ Storage design (owner's call — don't propose adding a database): **conversatio
 - Every `/api/v1/*` endpoint uses a Bearer token: `Authorization: Bearer <secret>`.
 - Tokens are issued from the CLI (there is no management UI yet):
   ```bash
-  bun src/manager.ts token-add web-ui --agents '*'        # all non-master agents
+  bun src/manager.ts token-add my-client --agents '*'     # all non-master agents (web-ui is a reserved name)
   bun src/manager.ts token-add limited --agents alpha,bravo
   bun src/manager.ts token-list / token-revoke <name>
   ```
