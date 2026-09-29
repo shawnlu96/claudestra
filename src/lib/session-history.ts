@@ -20,6 +20,7 @@ import { join } from "path";
 import { projectJsonlPath, findJsonlBySessionId } from "./jsonl-cost.js";
 import { agentArchiveDir, ARCHIVE_ROOT, realpathWithin } from "./session-archive.js";
 import { channelAnswer, channelAttachments, channelBodyText, commandRecordLine, commandStdoutLine, senderOf, type AskAnswerRef, type InboundAttachmentsRef } from "./inbound-body.js";
+import { ccOwnRecord } from "./cc-own-records.js";
 import { settleToolCard } from "./auq-echo.js";
 import { dropFailedReplyRows, keepReplyRows, sanitizeComponents } from "./history-components.js";
 import { askIdOfReplyResult } from "./reply-ask-schema.js";
@@ -571,31 +572,13 @@ function parseHistoryLines(
         continue;
       }
       if (!text.trim()) continue; // 纯 tool_result 载荷
-      // TUI 斜杠命令记录（不带 isMeta 的裸 user 条目）不是用户打的字：
-      //   <command-name>/x</command-name> ± <command-message>… ± <command-args>…（顺序不定）→ system 轻条目「/x 参数」
-      //   <local-command-stdout>输出</local-command-stdout> → system 轻条目（去 ANSI、截断）
-      //   Pi 技能调用 <skill name="x" …>整份 SKILL.md</skill>[参数] → system 轻条目「/x 参数」
-      // 不处理会把原始标签 / 整篇技能说明裸渲染成用户气泡。
+      // CC 自己写的斜杠命令 / 命令输出 / 后台通知 / 中断标记不是用户打的字，只在 CC 会话里认（lib/cc-own-records.ts）；
+      // Pi 技能调用 <skill name="x" …>整份 SKILL.md</skill>[参数] → system 轻条目「/x 参数」。不处理会把原始标签 / 整篇技能说明裸渲染成用户气泡
       const trimmed = text.trim();
-      // harness 注入的后台任务完成通知(<task-notification>,裸 user 记录不带 isMeta)同理,取 summary 转 system 轻条目。
-      if (/^<task-notification>/.test(trimmed)) {
-        const sum = /<summary>([\s\S]*?)<\/summary>/.exec(trimmed);
-        const body = sum?.[1]?.trim();
-        all.push({ seq, ts, role: "system", text: body ? `⚙️ ${body}` : "⚙️ 后台任务通知" });
-        continue;
-      }
-      if (/^<command-(name|message)>/.test(trimmed)) {
-        const cmd = commandRecordLine(trimmed);
-        if (cmd) all.push({ seq, ts, role: "system", text: cmd });
-        continue; // 无 command-name 的畸形命令记录直接丢
-      }
-      const stdout = commandStdoutLine(trimmed);
-      if (stdout !== undefined) { if (stdout) all.push({ seq, ts, role: "system", text: stdout }); continue; }
+      const own = ccOwnRecord(trimmed, runtime);
+      if (own) { if ("system" in own) all.push({ seq, ts, role: "system", text: own.system }); continue; }
       const skill = /^<skill name="([^"]+)"[^>]*>[\s\S]*<\/skill>([\s\S]*)$/.exec(trimmed);
       if (skill) { all.push({ seq, ts, role: "system", text: `/${skill[1]} ${skill[2].trim()}`.trim() }); continue; }
-      // 队列回放的裸斜杠命令：tmux 注入的 /compact 等经 CC 队列会额外落一条纯文本 user 记录，紧接着还有
-      // <command-name> 记录 → 不跳过就渲染成双份。channel 入站是 isMeta 包装、TUI 直敲只落 <command-name>，都不走这里。
-      if (/^\/[\w:-]+$/.test(trimmed)) continue;
       const msg: HistoryMessage = { seq, ts, role: "user", text };
       if (rec.isCompactSummary === true) msg.compactSummary = true;
       all.push(msg);
@@ -929,8 +912,7 @@ export async function searchSessionHistory(
         const trimmed = text.trim();
         // 与 readSessionHistory 同规则：机器产物不当用户消息搜
         if (!trimmed) continue;
-        if (/^<(task-notification|command-name|command-message|local-command-stdout)>|^<skill name="/.test(trimmed)) continue;
-        if (/^\/[\w:-]+$/.test(trimmed)) continue;
+        if (ccOwnRecord(trimmed, runtimeForSessionPath(filePath)) || /^<skill name="/.test(trimmed)) continue;
       }
       const lower = body.toLowerCase();
       if (!lower.includes(q)) continue;

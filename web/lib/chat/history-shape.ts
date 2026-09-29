@@ -160,13 +160,9 @@ export function foreignAware(text: string, untrusted: boolean, verified?: readon
 function userMessage(m: NeutralMessage, anchor: ChatMessage | null, opts: ShapeOpts, forms: FormLookup): ChatMessage {
   const text = m.text || "";
   const from = isSelfSource(m.from, m.fromId, opts.selfIds ?? new Set()) ? undefined : m.from; // 本人的所有来源都不标
-  // CC 写入的中断标记 / TUI 斜杠命令记录不是用户打的字 → 轻分隔线。只认非外源：外源正文写这两种开头，
-  // 气泡会变成一条分隔线、正文全藏，agent 却收到全文（tests/web-history-shape.test.ts「外源开头」）
-  if (!from && /^\[Request interrupted/.test(text)) return systemDivider(m, "回合已中断", opts.sid);
-  const cmd = from ? null : text.match(/^<command-name>(\/[\w-]+)<\/command-name>/);
-  if (cmd) return systemDivider(m, cmd[1], opts.sid);
+  // CC 自己写的中断标记 / 斜杠命令记录由服务端按会话类型认成 system 条目（lib/cc-own-records.ts），网页不再按文本认：
+  // Pi 裸记录里写这两种开头的是用户正文，按文本认会变成一条分隔线、正文全藏（tests/pi-foreign-attachments.test.ts）
   // 不可信 = 外源，或记录里没有来源（Pi 裸记录：Discord 用户直发 Pi 的原文，本人和外人分不出）。下面按文本的还原 / 剥除只对认定是本人的做
-  // （tests/pi-foreign-attachments.test.ts）；上面两种分隔线是 CC 自己写的无来源记录，不在此列
   const untrusted = !!from || !m.from;
   const own = untrusted ? text : stripMentionDirective(text); // @ 委托指令行只给 agent 看；只剥本人的（外源的末行照原样给 owner 看）
   // 按钮 / 选单回投只认本人：外源正文里写一行 [button:go] / [select:…]，owner 会看到「✅ 发版」、表单被标已答，agent 收到的却是原文
