@@ -2,7 +2,7 @@
  * 有上限地读对方的响应正文（src/lib/body-reader.ts）：空段不算动静、一字节一字节地喂撑不过总时限、超限当场掐断并 cancel。
  */
 import { describe, expect, test } from "bun:test";
-import { BodyTimeoutError, drainBody, readJsonCapped } from "../src/lib/body-reader.ts";
+import { BodyTimeoutError, CappedBytes, drainBody, readJsonCapped } from "../src/lib/body-reader.ts";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const enc = (s: string) => new TextEncoder().encode(s);
@@ -46,6 +46,25 @@ describe("drainBody / readJsonCapped", () => {
     expect(await readJsonCapped(res, 10_000)).toBeNull();
     expect(st.cancelled).toBe(true);
     expect(st.i).toBeLessThan(6);
+  });
+
+  test("单字节分片灌满：不按分片留对象，扩容次数只随 log(总字节) 增长；超上限当场拒", () => {
+    const acc = new CappedBytes(1 << 20);
+    const one = new Uint8Array([0x61]);
+    for (let i = 0; i < 300_000; i++) acc.push(one);
+    expect(acc.bytes().length).toBe(300_000);
+    expect(acc.allocs).toBeLessThanOrEqual(6); // 16 KiB → 32 → … → 512 KiB，不是 30 万个分片对象
+    const tiny = new CappedBytes(3);
+    tiny.push(enc("ab"));
+    expect(() => tiny.push(enc("cd"))).toThrow(RangeError);
+    expect(new TextDecoder().decode(tiny.bytes())).toBe("ab");
+  });
+
+  test("流式单字节分片的合法 JSON 照样读对（跨分片的多字节 UTF-8 也拼得回来）", async () => {
+    const bytes = enc(JSON.stringify({ ok: true, text: "中文 é ✓".repeat(50) }));
+    let i = 0;
+    const stream = new ReadableStream<Uint8Array>({ pull: (c) => (i < bytes.length ? c.enqueue(bytes.subarray(i, ++i)) : c.close()) });
+    expect(await readJsonCapped(new Response(stream))).toEqual({ ok: true, text: "中文 é ✓".repeat(50) });
   });
 
   test("正常的 JSON 照读；不是 JSON 返回 null", async () => {
