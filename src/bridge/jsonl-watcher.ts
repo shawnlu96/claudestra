@@ -19,7 +19,7 @@ import { tmuxCapture, windowTarget } from "../lib/tmux-helper.js";
 import { parseAuqPane } from "../lib/auq-pane.js";
 import { countNewlinesBefore, progressNoteOf } from "../lib/session-history.js";
 import { splitChunkLines } from "../lib/jsonl-lines.js";
-import { noteCodexTurnLine } from "../lib/codex-turn-book.js";
+import { attachCodexTurns, noteCodexTurnLine } from "../lib/codex-turn-book.js";
 import { transcriptUserEvent } from "../lib/turn-cuts.js";
 // v2.6.0+ 旁路事件埋点（设计 D1：只 emit 不改渲染管线）
 import { emitEvent, getAgentStatus, isPostTurnActivity } from "./event-bus.js";
@@ -336,8 +336,7 @@ async function processNewData(state: WatcherState, discord: Client): Promise<voi
   // Claude Code 写入 jsonl → fs.watch fire → 第一次 processNewData 进 await stat /
   // await read 阶段（async I/O，要十几到上百 ms）→ 期间 Stop hook 抵达 →
   // drainChannelWatcher 调 processNewData 看到 state.processing=true 立刻 return →
-  // drain 跑到 flushText 时 textQueue 还是空（第一次 push 还没发生）→ 用户只看到
-  // 「✅ 完成」空通知。
+  // drain 跑到 flushText 时 textQueue 还是空（第一次 push 还没发生）→ 用户只看到「✅ 完成」空通知。
   //
   // 改成"等上一次跑完再做"。两路 processNewData 序列化：第一次 push 完了第二次
   // 才进，第二次的 newStat 看到 lastSize 已被更新，没新数据，直接退出 —— 但此时
@@ -369,7 +368,7 @@ async function processNewData(state: WatcherState, discord: Client): Promise<voi
     for (const { seq, line } of chunk.lines) {
       try {
         // runtime 感知：Pi / Codex 的行在这里翻译成 Claude Code 形状，下面的解析逻辑一行都不用改；Codex 的原生回合边界另记一本（lib/codex-turn-book.ts）
-        noteCodexTurnLine(state.runtime, state.channelId, line);
+        noteCodexTurnLine(state.runtime, state.channelId, line, state);
         const entry = translateSessionLine(state.runtime, line, state);
         if (!entry) continue;
 
@@ -761,6 +760,7 @@ export async function startWatching(
     pollInterval: null,
     rateLimited: false,
   };
+  attachCodexTurns(runtime, channelId, sessionId, state); // 新一代从 EOF 读：Codex 原生回合账先算拿不准（lib/codex-turn-book.ts）
 
   // fs.watch 主监听
   state.watcher = watch(jsonlPath, (eventType) => {
