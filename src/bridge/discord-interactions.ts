@@ -896,9 +896,10 @@ async function handleInteraction(discord: Client, deps: InteractionDeps, interac
             { stdout: "pipe", stderr: "pipe" }
           );
           await proc.exited;
-          if (proc.exitCode !== 0) {
-            const stderr = await new Response(proc.stderr).text();
-            console.error(`🔔 tmux send-keys 失败: ${stderr}`);
+          if (proc.exitCode !== 0) console.error(`🔔 tmux send-keys 失败: ${await new Response(proc.stderr).text()}`);
+          // 发键成功当场把「待你处理」里的权限 ask 记成 answered（ask-runtime.ts）；等改完 Discord 消息再记，watcher 可能先看到弹框没了记成撤销。发键失败不记
+          else if (isPermBtn) {
+            void import("./ask-runtime.js").then((m) => m.settleRuntimeAsk("permission", targetChannelId, "discord", labelMap[action], { principal: `discord:${interaction.user.id}` }));
           }
 
           // 编辑原消息显示已处理（保留指纹让下次 poll 自然清理，避免竞争条件）
@@ -911,8 +912,6 @@ async function handleInteraction(discord: Client, deps: InteractionDeps, interac
             } catch { /* non-critical */ }
             permissionMessages.delete(targetChannelId);
           }
-          // 「待你处理」里对应的权限 ask 记成 answered（ask-runtime.ts），不然弹框消失时会被当成撤销
-          if (isPermBtn) void import("./ask-runtime.js").then((m) => m.settleRuntimeAsk("permission", targetChannelId, "discord", labelMap[action], { principal: `discord:${interaction.user.id}` }));
         } catch (e) {
           console.error(`🔔 权限响应流程异常:`, e);
         }
@@ -960,7 +959,8 @@ async function handleInteraction(discord: Client, deps: InteractionDeps, interac
             }).catch(() => {});
             recordMetric("auq_submit", { channelId: auqChannel, meta: { questions: String(state.questions.length) } });
             clearAuqState(auqChannel);
-            // 同步收掉 web 端的交互卡
+            // 「待你处理」记下选了什么、谁选的（ask-runtime.ts，要在广播之前）；再同步收掉 web 端的交互卡
+            (await import("./ask-runtime.js")).settleAuq(auqChannel, "discord", state, { principal: `discord:${interaction.user.id}` });
             emitEvent({ agent: agentNameForChannel(auqChannel) || "master", chatId: auqChannel, type: "question_cleared", data: { reason: "submit", via: "discord", uid: interaction.user.id } });
           } else if (action === "cancel") {
             const failed = await tmuxSendEscape(state.tmuxTarget, { strict: true }).then(() => null, (e: Error) => e);

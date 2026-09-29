@@ -1,6 +1,6 @@
 /**
  * 「这个请求是不是这台机器自己的浏览器发的」——给本机打开目录这类只对本机有意义、又低危的功能用（bridge/local-api/host.ts）。
- * 配对、控制面豁免这类信任判定不用它，仍只认真实回环（bridge/web-gateway.ts isDirectLoopback）。
+ * 配对、控制面豁免这类信任判定不用它，仍只认真实回环（下面的 isDirectLoopback）。
  * 来源地址：对端是回环且带 X-Forwarded-For = 本机反代（Caddy / tailscale serve）转来的，取最右一跳（反代追加的真实客户端；
  * 客户端自己写在左边的伪造值够不着）；对端不是回环 = 直连，XFF 是客户端自己写的，只认对端。
  * 地址属于本机任一网卡（回环 / 局域网 / tailnet）就算本机：在这台电脑上用 localhost、局域网 IP、自己的 tailnet 域名打开都算，
@@ -17,6 +17,32 @@ export function normalizeIp(ip: string): string {
   if (zone > 0) v = v.slice(0, zone);
   if (v.startsWith("::ffff:") && v.includes(".")) v = v.slice(7);
   return v;
+}
+
+/** 对端地址是不是回环（控制面闸门 bridge/web-gateway.ts 与 peer 入口 bridge/peer-ingress.ts 共用） */
+export function isLoopbackAddress(addr: string | null | undefined): boolean {
+  if (!addr) return false;
+  // normalize(review nit-c):大写/十六进制压缩形态也归一。miss 方向本就是
+  // 误拒不是误放(安全无洞),补齐只为不误伤边角形态。Bun requestIP 规范化
+  // 输出下只会是 127.x / ::1 / ::ffff:127.x,后两条是防御性冗余。
+  const a = addr.toLowerCase();
+  return (
+    a === "::1" ||
+    a === "::ffff:127.0.0.1" ||
+    a === "::ffff:7f00:1" ||
+    a === "0:0:0:0:0:ffff:7f00:1" ||
+    a.startsWith("127.") ||
+    a.startsWith("::ffff:127.")
+  );
+}
+
+/**
+ * 「真本机」= 回环 socket 且没有 X-Forwarded-For。本机反代（Caddy / tailscale serve / 中继子域名隧道）转进来的请求
+ * socket 也是 127.0.0.1，但它们一定带 XFF——按回环算的话，控制面豁免（/hook、/relay/pair/approve、ws route_to_agent）
+ * 就对反代后面的所有人敞开了。控制面闸门与请求来源（/devices/local）都用它（tests/web-gateway.test.ts）。
+ */
+export function isDirectLoopback(addr: string | null | undefined, forwardedFor: string | null | undefined): boolean {
+  return isLoopbackAddress(addr) && !forwardedFor;
 }
 
 const isLoopbackIp = (ip: string): boolean => ip === "::1" || ip.startsWith("127.");

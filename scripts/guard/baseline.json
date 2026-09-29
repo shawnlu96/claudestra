@@ -313,6 +313,12 @@
       "from": 22328,
       "to": 22459,
       "why": "T36 上下文边界按防腐规则 9 在 CLAUDE.md / CLAUDE.zh-CN.md 加一行文档指针（→ docs/architecture/context-boundary.md）；原先用来抵消的那行重复提示 main 已经删了，没有别的可删"
+    },
+    {
+      "key": "guard:scripts/guard/config.ts",
+      "from": 0,
+      "to": 0,
+      "why": "TWINS 加 src/lib/reserved-button-ids.ts ↔ web/lib/chat/reserved-button-ids.ts：网页「待你处理」要认出 bridge 自己的管理 / 面板按钮（老面板不按过期锁），保留 id 表两边由 guard 保证一致（T11b PR B 第 3 轮 P2-2）"
     }
   ]
 }

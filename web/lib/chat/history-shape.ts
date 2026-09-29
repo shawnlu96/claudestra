@@ -35,6 +35,10 @@ export interface NeutralMessage {
   from?: string;
   /** 发送者 id（user_id）：认本人的所有来源 */
   fromId?: string;
+  /** owner 对「待你处理」的作答：答的是哪条 ask（bridge 从答复第一行解析，lib/inbound-body.ts answerEcho） */
+  askId?: string;
+  /** 同上，owner 的原文（text 已换成选项人话；原文用来回填按钮已答态、和乐观气泡对账） */
+  wire?: string;
 }
 
 /** owner 设备的聊天身份（§3：owner 的所有设备共享 chat_id = api:owner:self） */
@@ -124,6 +128,23 @@ export function splitsReplyBubble(bubble: Pick<ChatMessage, "replyText" | "reply
   return hasClickTargets(bubble.replyText, undefined, bubble.replyComponents) && hasClickTargets(replyText, undefined, components);
 }
 
+const WIRE_LINE = /^\[(?:button|select):[^\]\n]+\]$/;
+
+/**
+ * owner 对「待你处理」的作答：原文里每一行按钮 / 选单回投都回填所答气泡的已答态，正文照旧显示 bridge 给的人话。
+ * 所答气泡按 replyAskId 认（卡片上答的可能是很早的一条），认不到退回最近的锚点；刷新（这里）和直播（delta-clicks）同一套
+ */
+export function markAnswerClicks(wire: string, anchor: ChatMessage | null, forms: FormLookup): void {
+  for (const l of wire.split("\n")) if (WIRE_LINE.test(l.trim())) resolveUserClick(l.trim(), anchor, forms);
+}
+
+/** 建出这条 ask 的 reply 气泡（最近的那个）；没有 askId / 不在已加载的消息里 → null */
+export function askAnchor(messages: readonly ChatMessage[], askId: string | undefined): ChatMessage | null {
+  if (!askId) return null;
+  for (let i = messages.length - 1; i >= 0; i--) if (messages[i].role === "assistant" && messages[i].replyAskId === askId) return messages[i];
+  return null;
+}
+
 function userMessage(m: NeutralMessage, anchor: ChatMessage | null, opts: ShapeOpts, forms: FormLookup): ChatMessage {
   const text = m.text || "";
   // CC 写入的中断标记 / TUI 斜杠命令记录不是用户打的字 → 轻分隔线
@@ -132,14 +153,16 @@ function userMessage(m: NeutralMessage, anchor: ChatMessage | null, opts: ShapeO
   if (cmd) return systemDivider(m, cmd[1], opts.sid);
   const from = isSelfSource(m.from, m.fromId, opts.selfIds ?? new Set()) ? undefined : m.from; // 本人的所有来源都不标
   const own = from ? text : stripMentionDirective(text); // @ 委托指令行只给 agent 看；只剥本人的（外源的末行照原样给 owner 看）
-  const click = resolveUserClick(own, anchor, forms);
+  if (m.wire) markAnswerClicks(m.wire, anchor, forms); // 作答：正文已是人话，原文只用来回填已答态
+  const click = m.wire ? null : resolveUserClick(own, anchor, forms);
   let raw = click?.text ?? own;
   // 外源入站剥掉 bridge 注入的来源头（[🤝 来自 peer…] 多行方括号块）——UI 用来源 chip 展示，留着就是双份说明。
   // 纯附件消息正文以 [attachment: …] 开头，那不是来源头：剥了图就没了
   if (from) raw = raw.replace(/^\[(?!attachment: )[^\]]{0,800}\]\s*\n*/, "");
   const { content, attachments } = extractAttachments(raw);
   const pending = click && !click.resolved ? { clickRaw: own } : {}; // 存剥过指令行的：翻页补解析时不能把指令行带回气泡
-  return { id: `h${m.seq}`, role: "user", content, ts: m.ts, from, sid: opts.sid, seqEnd: m.seq, ...(attachments ? { attachments } : {}), ...pending };
+  const ask = { ...(m.askId ? { askId: m.askId } : {}), ...(m.wire ? { wire: m.wire } : {}) };
+  return { id: `h${m.seq}`, role: "user", content, ts: m.ts, from, sid: opts.sid, seqEnd: m.seq, ...(attachments ? { attachments } : {}), ...pending, ...ask };
 }
 
 /** assistant 记录并进当前回合气泡（首条建组）；segments 保留叙述 / 工具 / 回复的真实交错序 */
@@ -208,7 +231,7 @@ export function toChatMessages(items: NeutralMessage[], opts: ShapeOpts = {}): C
 
     if (m.role === "user") {
       group = null;
-      out.push(userMessage(m, anchor, opts, forms));
+      out.push(userMessage(m, askAnchor(out, m.askId) ?? anchor, opts, forms));
       continue;
     }
     if (group && splitsReplyBubble(group, m.replyText, m.replyComponents)) group = null;

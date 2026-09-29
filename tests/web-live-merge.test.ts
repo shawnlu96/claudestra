@@ -166,6 +166,15 @@ describe("mergeContiguousAssistant — 差量续接同一回合", () => {
     expect(m.toolCalls).toHaveLength(2);
   });
 
+  test("接缝两侧都是工具段 → 并成一段（逐条追平时连续工具不被拆成各 1 步）", () => {
+    const bash = (summary: string) => ({ name: "Bash", summary, state: "done" as const });
+    const base = [hist(2, 9, { segments: [{ kind: "reply", text: "好" }, { kind: "tools", tools: [bash("a")] }] })];
+    const d1 = [hist(10, 10, { segments: [{ kind: "tools", tools: [bash("b")] }] })];
+    const d2 = [hist(11, 11, { segments: [{ kind: "tools", tools: [bash("c")] }, { kind: "text", text: "Now implement:" }] })];
+    const m = mergeContiguousAssistant(mergeContiguousAssistant(base, d1), d2)[0];
+    expect(m.segments!.map((s) => (s.kind === "tools" ? `tools${s.tools.length}` : s.kind))).toEqual(["reply", "tools3", "text"]);
+  });
+
   test("差量首条是 user → 不拼", () => {
     const base = [hist(2, 9)];
     const delta = [{ id: "h10", role: "user" as const, content: "补一句", sid: SID, seqEnd: 10 }, hist(11, 15)];
