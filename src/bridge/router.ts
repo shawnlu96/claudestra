@@ -170,7 +170,7 @@ export interface Envelope {
 // ============================================================
 
 export type DeliveryOutcome =
-  | { kind: "sent"; discordMessageIds?: string[]; note?: string; heldBy?: "quota_wall" | "wall_menu" }   // 成功投递；heldBy = 押后原因（额度闸 / 停在额度菜单，没发键，bridge/quota-wall-wiring.ts）
+  | { kind: "sent"; discordMessageIds?: string[]; note?: string; heldBy?: "quota_wall" | "wall_menu" | "codex_menu" }   // 成功投递；heldBy = 押后原因（额度闸 / 停在额度菜单，没发键，bridge/quota-wall-wiring.ts）
   | { kind: "dropped"; reason: string }                               // 主动丢弃（信任检查 / 目标离线等）
   | { kind: "error"; error: Error };                                  // 失败
 

@@ -68,6 +68,7 @@ import {
   listWindows,
   MASTER_SESSION,
 } from "../lib/tmux-helper.js";
+import { clearRefusal, runtimeOfWindow } from "../lib/wall-screen.js";
 import { paneLooksWorking } from "../lib/turn-state.js";
 import { recordMetric } from "../lib/metrics.js";
 import { commandsForAgent } from "./slash-registry.js";
@@ -1295,9 +1296,8 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
     } catch (e) {
       return apiJson(502, { ok: false, error: `tmux 不可达: ${(e as Error).message}` });
     }
-    if (!paneLooksIdle(pane)) {
-      return apiJson(409, { ok: false, error: "agent 正在回合中，先停止（interrupt）再 clear" });
-    }
+    const refusal = clearRefusal(pane, runtimeOfWindow(targetWindow));
+    if (refusal) return apiJson(409, { ok: false, error: refusal }); // 额度菜单 / Codex 选择菜单 / 回合中（lib/wall-screen.ts）
     try {
       await tmuxSendLine(targetWindow, "/clear");
     } catch (e) {

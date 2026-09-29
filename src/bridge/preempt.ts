@@ -124,7 +124,7 @@ export async function manualInterrupt(
   if (r.wall && by.owner) {
     turnCuts.record({ channelId, agent, runtime, cause: "manual", byName: by.name, tools: { inflight: [] }, interrupted: false });
   }
-  if (r.wall) return { keys: [], wall: (await windowWallWait(win)) ?? "countdown" };
+  if (r.wall) return { keys: [], wall: (await windowWallWait(win, runtime)) ?? "countdown" };
   // 空闲也记：owner 按了停，续做提醒和 Autopilot 都该停下
   if (by.owner) turnCuts.record({ channelId, agent, runtime, cause: "manual", byName: by.name, tools: r.keys.length ? tools : { inflight: [] }, interrupted: r.keys.length > 0 });
   else console.log(`⏹ ${by.name ?? "非 owner"} 按停止${r.keys.length ? "打断了" : "（空闲，没发键）"} ${agent}：只打断这一回合，不记成 owner 的「停」、不挂起 Autopilot`);

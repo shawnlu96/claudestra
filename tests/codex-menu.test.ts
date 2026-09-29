@@ -1,0 +1,150 @@
+/**
+ * T63 Codex 选择菜单护栏：菜单在屏上时，程序化的路径一个键都不发（不回车、不按 Esc / 数字 / 方向键 / C-u），消息押住、命令拒绝。
+ * 画面用 2026-09-28 codex 额度用完那晚的真实原屏（tests/auq-pane.test.ts 同一份）。
+ */
+import { describe, expect, test } from "bun:test";
+import { codexMenuShown, codexMenuState } from "../src/lib/codex-menu.js";
+import { clearRefusal, wallWaitOf } from "../src/lib/wall-screen.js";
+import { detectCodexRuntimeDialog } from "../src/lib/runtime-dialogs.js";
+import { composerState, typeIntoCodex, type TypeInIO } from "../src/lib/codex-tui-submit.js";
+import { createInterruptGate, type InterruptGateDeps } from "../src/lib/interrupt-gate.js";
+import { handleSlashPassthrough, type SlashDeps } from "../src/bridge/api-slash.js";
+import { holdAtCodexMenu } from "../src/bridge/codex-menu-hold.js";
+import { injectCompact } from "../src/bridge/ctx-boundary-inject.js";
+import { harness as boundaryHarness, tgt } from "./ctx-boundary-harness.js";
+import type { Envelope, LocalEndpoint } from "../src/bridge/router.js";
+
+const MENU = [
+  "■ You've hit your usage limit. Upgrade to Pro (https://chatgpt.com/explore/pro) or try again at 8:41 AM.",
+  "",
+  "  Approaching rate limits",
+  "  Switch to gpt-5.6-luna for lower credit usage?",
+  "",
+  "› 1. Switch to gpt-5.6-luna                 Older fast and efficient model.",
+  "  2. Keep current model",
+  "  3. Keep current model (never show again)  Hide future rate limit reminders about switching models.",
+  "",
+  "  Press enter to confirm or esc to go back",
+  "",
+].join("\n");
+/** AUQ 认不出的菜单（选项行里混了一行说明）：只有页脚认得出 */
+const ODD_MENU = ["  Pick a sandbox", "", "› 1. read-only", "     (recommended)", "  2. workspace-write", "", "  Press enter to confirm or esc to cancel"].join("\n");
+const COMPOSER = "• Done.\n\n\x1b[1m›\x1b[0m \x1b[2mAsk Codex to do anything\x1b[0m\n\n  gpt-5.6-sol medium · ~/w\n";
+const HISTORY = ["  Press enter to confirm or esc to go back", "(上面是我在解释 Codex 菜单长什么样)", "a", "b", "c", "d", "e", "f", "› "].join("\n");
+
+describe("判定", () => {
+  test("真实原屏：菜单在（AUQ 认得出）；认不出选项的菜单也算在；输入框、历史里提到这句都不算", () => {
+    expect(codexMenuState(MENU)).toBe("parsed");
+    expect(codexMenuState(`\x1b[2m${MENU}\x1b[0m`)).toBe("parsed");
+    expect(codexMenuState(ODD_MENU)).toBe("unparsed");
+    expect(codexMenuShown(COMPOSER)).toBe(false);
+    expect(codexMenuShown(HISTORY)).toBe(false);
+  });
+
+  test("只对 Codex 窗口认：CC 窗口画面里有这句不算 Codex 菜单", () => {
+    expect(wallWaitOf(MENU, "codex")).toBe("codex_menu");
+    expect(wallWaitOf(COMPOSER, "codex")).toBeNull();
+    expect(wallWaitOf(MENU, "claude-code")).not.toBe("codex_menu");
+  });
+
+  test("⑤ /clear：菜单在 → 拒绝并说明；空闲 → 放行", () => {
+    expect(clearRefusal(MENU, "codex")).toContain("Codex 的选择菜单");
+    expect(clearRefusal("done\n❯ \n", "claude-code")).toBeNull();
+  });
+
+  test("卡片：AUQ 认得出的菜单不另出运行时卡（真实原屏上那张是额度用完的卡）；认不出的兜底出「Codex 停在选择菜单」", () => {
+    expect(detectCodexRuntimeDialog(MENU, "codex", "/nonexistent")?.title).not.toContain("选择菜单");
+    expect(detectCodexRuntimeDialog(MENU.replace(/^■.*\n/, ""), "codex", "/nonexistent")).toBeNull();
+    expect(detectCodexRuntimeDialog(ODD_MENU, "codex", "/nonexistent")?.title).toContain("选择菜单");
+    expect(detectCodexRuntimeDialog(ODD_MENU, "claude-code", "/nonexistent")).toBeNull();
+  });
+});
+
+/** 假 pane：screens 依次出现（capture 一次推进一帧，到最后一帧停住），记下每个按键 */
+function fakeIO(screens: string[]) {
+  const keys: string[] = [];
+  let i = 0;
+  const io: TypeInIO = {
+    capture: async () => screens[Math.min(i++, screens.length - 1)]!,
+    paste: async () => void keys.push("paste"),
+    enter: async () => void keys.push("Enter"),
+    clear: async () => void keys.push("C-u"),
+    sleep: async () => {},
+  };
+  return { io, keys };
+}
+
+describe("② 打断后粘进 TUI（codex-tui-submit）", () => {
+  test("菜单的光标行不算输入框有字", () => expect(composerState(MENU)).toBe("dialog"));
+
+  test("粘之前菜单就在：一个键都不发", async () => {
+    const f = fakeIO([MENU]);
+    expect((await typeIntoCodex(f.io, "<channel>hi</channel>")).ok).toBe(false);
+    expect(f.keys).toEqual([]);
+  });
+
+  test("粘完菜单才弹出来：不回车、不按 C-u 清，报 unconfirmed（调用方不再退回 queue 重投）", async () => {
+    const f = fakeIO([COMPOSER, MENU]);
+    expect(await typeIntoCodex(f.io, "<channel>hi</channel>")).toEqual({ ok: true, unconfirmed: true });
+    expect(f.keys).toEqual(["paste"]);
+  });
+});
+
+describe("③ 打断（interrupt-gate 的 wallWait 对 Codex 窗口认菜单）", () => {
+  test("抢占与手动停止都不发键，手动停止回报 wall", async () => {
+    const keys: string[] = [];
+    const deps: InterruptGateDeps = {
+      resolve: async () => ({ win: "master:=agent-c", runtime: "codex" }),
+      probe: async () => ({ main: "busy", bg: false }),
+      wallWait: async () => wallWaitOf(MENU, "codex") !== null,
+      interrupt: async () => (keys.push("Escape"), ["Escape"]),
+      onPreempted: () => {},
+      sleep: async () => {},
+    };
+    const gate = createInterruptGate(deps);
+    expect(await gate.preempt("c1", "agent-c")).toEqual({ fired: false, why: "wall_wait" });
+    expect(await gate.manual("c1", "master:=agent-c", "codex")).toEqual({ keys: [], wall: true });
+    expect(keys).toEqual([]);
+  });
+});
+
+describe("④ 斜杠直通（api-slash）", () => {
+  test("Codex 停在菜单：409 拒绝、不注入", async () => {
+    const sent: string[] = [];
+    const deps: SlashDeps = {
+      sendLine: async (_w, t) => void sent.push(t), mirror: async () => {}, scheduleClearRotation: () => {}, markThinking: () => {}, record: () => {},
+      wallWait: async () => wallWaitOf(MENU, "codex"),
+    };
+    const owner = { id: "owner:self", name: "owner", agents: ["*"], role: "owner" } as never;
+    const agent = { name: "agent-c", channelId: "c1", cwd: "/w", runtime: "codex" } as never;
+    const res = await handleSlashPassthrough({ principal: owner, tokenId: "self", agent, text: "/compact", hasAttachments: false }, deps);
+    expect(res?.status).toBe(409);
+    expect(((await res!.json()) as { error: string }).error).toContain("Codex 的选择菜单");
+    expect(sent).toEqual([]);
+  });
+});
+
+describe("① 投递押住（codex-menu-hold）", () => {
+  const meta = { messageId: "m1", triggerKind: "discord", ts: "", threadId: "t" };
+  const env = { from: { kind: "user", userId: "u", name: "owner" }, to: {}, intent: "request", content: "hi", meta } as unknown as Envelope;
+  const to = { kind: "local", channelId: "c1", agentName: "agent-c" } as unknown as LocalEndpoint;
+  test("菜单在：进押后队列、heldBy=codex_menu；菜单关了：照常投（返回 null）", async () => {
+    const held: Envelope[] = [];
+    const queue = { holdEnv: (e: Envelope) => (held.push(e), held.length), rewrite: () => {} };
+    const r = await holdAtCodexMenu(env, to, "agent-c", "master:=agent-c", queue, undefined, async () => "codex_menu");
+    expect(r?.outcome).toEqual({ kind: "sent", note: "queued", heldBy: "codex_menu" });
+    expect(held.length).toBe(1);
+    expect(await holdAtCodexMenu(env, to, "agent-c", "master:=agent-c", queue, undefined, async () => null)).toBeNull();
+    expect(held.length).toBe(1);
+  });
+});
+
+describe("⑦ 压缩注入（ctx-boundary / fleet / 手动压缩按钮）", () => {
+  test("Codex 窗口在敲字前就被 not-cc 挡住，菜单画面下一个键都没发", async () => {
+    const h = boundaryHarness([], { panes: { "master:c": MENU } });
+    h.win("master:c").command = "codex";
+    expect(await injectCompact(tgt("c"), { action: "compact" }, h.deps)).toMatchObject({ status: "skipped", reason: "not-cc" });
+    expect(h.win("master:c").box).toBe("");
+    expect(h.sent).toEqual([]);
+  });
+});

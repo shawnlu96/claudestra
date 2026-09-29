@@ -7,6 +7,7 @@
  */
 import { realpathSync } from "node:fs";
 import { BLOCKING_DIALOG_RE } from "./runtimes/codex-ready.js";
+import { codexMenuShown } from "./codex-menu.js";
 import { codexBusy, codexOverlayOpen } from "./runtimes/codex-exit.js";
 import { ensurePaneInteractive, tmuxRawStrict, TMUX_SOCK } from "./tmux-helper.js";
 
@@ -24,7 +25,8 @@ export function composerState(ansiPane: string): ComposerState {
   const plain = ansiPane.replace(ANSI_RE, "");
   if (codexBusy(plain)) return "busy";
   const tail = plain.split("\n").filter((l) => l.trim()).slice(-12).join("\n");
-  if (BLOCKING_DIALOG_RE.test(tail) || codexOverlayOpen(plain)) return "dialog";
+  // 选择菜单的光标行（› 1. Switch to …）长得像输入框里有字：不先认出来，下面会判成 has-text，回车就选中了第 1 项（T63）
+  if (BLOCKING_DIALOG_RE.test(tail) || codexOverlayOpen(plain) || codexMenuShown(plain)) return "dialog";
   const lines = ansiPane.split("\n").filter((l) => l.replace(ANSI_RE, "").trim());
   for (let i = lines.length - 1; i >= Math.max(0, lines.length - 8); i--) {
     const m = COMPOSER_RE.exec(lines[i]);
@@ -52,7 +54,10 @@ export function sanitizeForPaste(text: string): string {
   return text.replace(/\r\n?/g, "\n").replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/g, "");
 }
 
-/** unconfirmed：粘进去了、回车后没看到提交（不能再退回 queue，会重复；调用方记日志留给人看） */
+/** 现抓一屏：没有停在 Codex 选择菜单上 */
+const menuFree = async (io: TypeInIO): Promise<boolean> => !codexMenuShown(await io.capture());
+
+/** unconfirmed：粘进去了、回车后没看到提交，或回车前菜单弹出来了（不能再退回 queue，会重复；调用方记日志留给人看） */
 export type TypeInResult = { ok: true; unconfirmed?: true } | { ok: false; why: string };
 
 const SETTLE_MS = 300;
@@ -71,12 +76,17 @@ export async function typeIntoCodex(io: TypeInIO, raw: string): Promise<TypeInRe
   await io.paste(text);
   try {
     await io.sleep(SETTLE_MS);
-    const pasted = composerState(await io.capture());
+    const shot = await io.capture();
+    if (codexMenuShown(shot)) return { ok: true, unconfirmed: true }; // 粘完菜单弹出来了：不回车、也不按 C-u 清（T63），同下
+    const pasted = composerState(shot);
     if (pasted !== "has-text") {
       if (pasted !== "empty" && pasted !== "busy") await io.clear();
       return { ok: false, why: `粘贴后输入框状态 ${pasted}` };
     }
     for (let attempt = 0; attempt < 2; attempt++) {
+      // 每次回车前再看一眼：粘完之后菜单才弹出来，这一下回车就会选中菜单项（T63）。字留在输入框里、不清（清也是按键），
+      // 按 unconfirmed 报：调用方不会再退回 queue 重投，日志留给人看
+      if (!(await menuFree(io))) return { ok: true, unconfirmed: true };
       await io.enter();
       for (let i = 0; i < SUBMIT_POLLS; i++) {
         await io.sleep(SETTLE_MS);
@@ -86,7 +96,7 @@ export async function typeIntoCodex(io: TypeInIO, raw: string): Promise<TypeInRe
     }
   } catch (e) {
     // 粘贴之后 tmux 出错：清掉输入框再报失败，退回 queue 才不会一条消息进两次
-    await io.clear().catch(() => undefined); // 清不掉也只能这样：错误已经随返回值记日志
+    if (await menuFree(io).catch(() => false)) await io.clear().catch(() => undefined); // 清不掉也只能这样：错误已经随返回值记日志；菜单在就不按
     return { ok: false, why: `粘贴后 tmux 出错：${(e as Error).message}` };
   }
   return { ok: true, unconfirmed: true };

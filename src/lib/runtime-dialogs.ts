@@ -7,6 +7,7 @@
  */
 import { readFileSync, statSync } from "node:fs";
 import { t } from "./i18n.js";
+import { codexMenuState } from "./codex-menu.js";
 import { statePath } from "./paths.js";
 import { DIALOG_SHAPE_RE, nonEmptyTail, VERDICT_TAIL_LINES } from "./runtimes/codex-ready.js";
 
@@ -80,5 +81,7 @@ export function detectCodexRuntimeDialog(pane: string, runtime: string | undefin
     const below = lines.slice(at + 1, at + 1 + DIALOG_BELOW_LINES).join("\n");
     if (ERROR_MARK_RE.test(lines[at]) || (!d.errorLine && DIALOG_SHAPE_RE.test(below))) return { title: d.title, context: m[0].slice(0, 300) };
   }
+  // 选择菜单：AUQ 认得出的（parsed）已有选择卡，这里不再出第二张；认不出的兜底出一张运行时卡，不放选项按钮（T63）
+  if (codexMenuState(pane) === "unparsed") return { title: t("Codex 停在选择菜单", "Codex is waiting on a selection menu"), context: lines.slice(-6).join(" ").slice(0, 300) };
   return null;
 }

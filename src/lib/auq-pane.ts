@@ -159,10 +159,10 @@ export function parsePiSelectPane(pane: string): AuqPaneParse | null {
  * 选项行是「编号. 名字  两个以上空格  说明」，光标 `›` 只在一行上；键位与 Pi 相同（↑↓ + Enter，Esc 取消），
  * 翻译成 AuqPaneParse 后下游不用改。
  */
-const CODEX_FOOTER_RE = /^\s*Press enter to confirm or esc to (go back|cancel)\b/i;
+export const CODEX_FOOTER_RE = /^\s*Press enter to confirm or esc to (go back|cancel)\b/i;
 const CODEX_OPTION_RE = /^\s*(›\s+)?\d+\.\s+(.*\S)\s*$/;
 
-function parseCodexSelectPane(pane: string): AuqPaneParse | null {
+export function parseCodexSelectPane(pane: string): AuqPaneParse | null {
   const lines = pane.split("\n");
   let footerIdx = -1;
   for (let i = lines.length - 1; i >= 0 && lines.length - i <= MAX_SCAN_LINES; i--) {
