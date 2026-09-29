@@ -78,11 +78,17 @@ pub struct AppState {
 }
 
 impl AppState {
-    /// Cached until everything is in place; before that, look again (setup may have just finished).
     pub fn install(&self) -> env::Install {
+        self.install_with(env::locate)
+    }
+
+    /// Cached once everything is in place and the PATH is a real one; before that, look again on
+    /// each call (setup may have just finished, or the background login-shell read just landed).
+    /// Freezing a `Default` PATH would hide the user's tool dirs until the app is restarted.
+    fn install_with(&self, locate: impl FnOnce() -> env::Install) -> env::Install {
         let mut cur = self.install.lock().unwrap();
-        if !(cur.daemons_installed && cur.cli_available) {
-            *cur = env::locate();
+        if !(cur.daemons_installed && cur.cli_available && cur.path_source != env::PathSource::Default) {
+            *cur = locate();
         }
         cur.clone()
     }
@@ -197,6 +203,7 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
 
     #[test]
     fn restart_gate_blocks_reentry_and_settles() {
@@ -232,6 +239,71 @@ mod tests {
         let t = Instant::now();
         assert!(lock(&gate).busy(t), "kicked before the panic: still settles grey");
         assert!(!lock(&gate).busy(t + RESTART_SETTLE), "but never stays stuck");
+    }
+
+    /// A checkout with the desktop entry point, and a bridge plist whose `EnvironmentVariables`
+    /// are `env_xml` (empty = no PATH at all). Lives under the test's own temp dir.
+    fn fake_install(name: &str, env_xml: &str) -> (PathBuf, PathBuf) {
+        let dir = std::env::temp_dir().join(format!("t18b-{name}-{}", std::process::id()));
+        let repo = dir.join("repo");
+        std::fs::create_dir_all(repo.join("src")).unwrap();
+        for f in ["src/setup.ts", "src/desktop-cli.ts"] {
+            std::fs::write(repo.join(f), "").unwrap();
+        }
+        let plist = dir.join("bridge.plist");
+        let body = format!(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<plist version=\"1.0\"><dict><key>Label</key><string>{}</string>\
+             <key>WorkingDirectory</key><string>{}</string>{env_xml}</dict></plist>\n",
+            env::BRIDGE_LABEL,
+            repo.display()
+        );
+        std::fs::write(&plist, body).unwrap();
+        (dir, plist)
+    }
+
+    fn state_with(install: env::Install) -> AppState {
+        AppState {
+            install: Mutex::new(install),
+            tray: Mutex::new(None),
+            last_status: Mutex::new(None),
+            restart: Mutex::new(RestartGate::default()),
+        }
+    }
+
+    #[test]
+    fn default_path_is_replaced_once_the_login_shell_read_lands() {
+        let (dir, plist) = fake_install("appstate", "");
+        let cache = Mutex::new(env::LoginPathCache::new());
+        let login = || cache.lock().unwrap().poll(Instant::now()).0;
+        let calls = std::cell::Cell::new(0);
+        let relocate = || {
+            calls.set(calls.get() + 1);
+            env::locate_with(&plist, login)
+        };
+        let state = state_with(relocate());
+        let first = state.install_with(relocate);
+        assert!(first.daemons_installed && first.cli_available, "installed: the old code froze here");
+        assert_eq!(first.path_source, env::PathSource::Default, "read still in flight");
+        cache.lock().unwrap().finish(Instant::now(), Some("/t18b-custom-bin:/usr/bin".into()));
+        let got = state.install_with(relocate);
+        assert_eq!(got.path_source, env::PathSource::LoginShell);
+        assert!(got.path.starts_with("/t18b-custom-bin:"), "{}", got.path);
+        assert_eq!(calls.get(), 3);
+        let kept = state.install_with(|| panic!("a real PATH is cached, no more lookups"));
+        assert_eq!(kept.path, got.path);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn plist_path_wins_and_skips_the_login_shell() {
+        let env_xml = "<key>EnvironmentVariables</key><dict><key>PATH</key><string>/t18b-plist-bin</string></dict>";
+        let (dir, plist) = fake_install("plist", env_xml);
+        let inst = env::locate_with(&plist, || panic!("plist has a PATH"));
+        assert_eq!(inst.path_source, env::PathSource::Plist);
+        assert!(inst.path.starts_with("/t18b-plist-bin:"), "{}", inst.path);
+        let missing = env::locate_with(&dir.join("absent.plist"), || None);
+        assert_eq!((missing.daemons_installed, missing.path_source), (false, env::PathSource::Default));
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

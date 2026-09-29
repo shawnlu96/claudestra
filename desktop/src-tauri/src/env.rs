@@ -24,12 +24,23 @@ pub struct Install {
     pub repo: PathBuf,
     pub bun: String,
     pub path: String,
+    pub path_source: PathSource,
     /// launchd plist for the bridge exists (install-cli has run at least once)
     pub daemons_installed: bool,
     /// a Claudestra checkout exists at `repo` (setup can run; otherwise the wizard runs install.sh)
     pub has_checkout: bool,
     /// the checkout has the desktop entry point, so status/doctor/restart can run
     pub cli_available: bool,
+}
+
+/// Where `Install.path` came from. `Default` is a stand-in while the login shell is still being
+/// read (or keeps failing), so AppState must not cache an Install that carries it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PathSource {
+    Plist,
+    LoginShell,
+    Default,
 }
 
 pub fn home() -> PathBuf {
@@ -141,7 +152,7 @@ pub fn run_with_timeout(cmd: &mut Command, timeout: Duration) -> Result<(bool, S
 const LOGIN_PATH_RETRY: Duration = Duration::from_secs(60);
 
 /// Only a successful read is kept. Reads run on a background thread; callers never wait for one.
-struct LoginPathCache {
+pub(crate) struct LoginPathCache {
     value: Option<String>,
     failed_at: Option<Instant>,
     reading: bool,
@@ -151,7 +162,7 @@ impl LoginPathCache {
     /// The PATH if known, and whether the caller should start a read now: none in flight, and not
     /// within LOGIN_PATH_RETRY of a failure (before setup this runs on every 8 s poll, and an
     /// interactive shell each time would re-run the user's whole rc stack).
-    fn poll(&mut self, now: Instant) -> (Option<String>, bool) {
+    pub(crate) fn poll(&mut self, now: Instant) -> (Option<String>, bool) {
         let start = self.value.is_none()
             && !self.reading
             && self.failed_at.map_or(true, |t| now.duration_since(t) >= LOGIN_PATH_RETRY);
@@ -159,20 +170,25 @@ impl LoginPathCache {
         (self.value.clone(), start)
     }
 
-    fn finish(&mut self, now: Instant, got: Option<String>) {
+    pub(crate) fn finish(&mut self, now: Instant, got: Option<String>) {
         self.reading = false;
         self.failed_at = got.is_none().then_some(now);
         if got.is_some() {
             self.value = got;
         }
     }
+
+    pub(crate) const fn new() -> Self {
+        LoginPathCache { value: None, failed_at: None, reading: false }
+    }
 }
 
-static LOGIN_PATH: Mutex<LoginPathCache> = Mutex::new(LoginPathCache { value: None, failed_at: None, reading: false });
+static LOGIN_PATH: Mutex<LoginPathCache> = Mutex::new(LoginPathCache::new());
 
 /// PATH from an interactive login shell (bun's installer writes to .zshrc, not .zprofile), or None
 /// while it isn't known yet: the caller goes on with the default dirs and a later poll picks the
-/// value up. The read itself is bounded by run_with_timeout's 5 s.
+/// value up (AppState keeps re-locating while the PATH is `Default`). The read itself is bounded
+/// by run_with_timeout's 5 s.
 fn login_shell_path() -> Option<String> {
     // the cache's fields are updated together, so a poisoned lock still holds a usable value
     let lock = || LOGIN_PATH.lock().unwrap_or_else(|e| e.into_inner());
@@ -220,21 +236,27 @@ fn with_extra_dirs(path: &str) -> String {
 }
 
 pub fn locate() -> Install {
-    let plist = bridge_plist();
+    locate_with(&bridge_plist(), login_shell_path)
+}
+
+/// `locate` with the plist and the login-shell lookup passed in, so tests need neither a real
+/// LaunchAgent nor the process-wide LOGIN_PATH cache.
+pub(crate) fn locate_with(plist: &Path, login_path: impl FnOnce() -> Option<String>) -> Install {
     let daemons_installed = plist.exists();
     let repo = std::env::var(REPO_ENV)
         .ok()
         .filter(|s| !s.is_empty())
         .map(PathBuf::from)
-        .or_else(|| plist_value(&plist, "WorkingDirectory").map(PathBuf::from))
+        .or_else(|| plist_value(plist, "WorkingDirectory").map(PathBuf::from))
         .unwrap_or_else(|| home().join(DEFAULT_REPO));
-    let path = plist_value(&plist, "EnvironmentVariables.PATH")
-        .or_else(login_shell_path)
-        .unwrap_or_default();
-    let bun = plist_value(&plist, "ProgramArguments.0").unwrap_or_else(|| "bun".into());
+    let (path, path_source) = match plist_value(plist, "EnvironmentVariables.PATH") {
+        Some(p) => (p, PathSource::Plist),
+        None => login_path().map_or((String::new(), PathSource::Default), |p| (p, PathSource::LoginShell)),
+    };
+    let bun = plist_value(plist, "ProgramArguments.0").unwrap_or_else(|| "bun".into());
     let has_checkout = repo.join("src/setup.ts").exists();
     let cli_available = repo.join("src/desktop-cli.ts").exists();
-    Install { repo, bun, path: with_extra_dirs(&path), daemons_installed, has_checkout, cli_available }
+    Install { repo, bun, path: with_extra_dirs(&path), path_source, daemons_installed, has_checkout, cli_available }
 }
 
 /// POSIX single-quote a value for the generated .command script.
@@ -256,7 +278,7 @@ mod tests {
     }
 
     fn fresh() -> LoginPathCache {
-        LoginPathCache { value: None, failed_at: None, reading: false }
+        LoginPathCache::new()
     }
 
     #[test]

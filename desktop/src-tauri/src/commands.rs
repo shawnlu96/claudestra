@@ -109,6 +109,7 @@ mod tests {
             repo: std::env::temp_dir(),
             bun: "/nonexistent/t18b/bun".into(),
             path: String::new(),
+            path_source: crate::env::PathSource::Default,
             daemons_installed: true,
             has_checkout: true,
             cli_available: true,
