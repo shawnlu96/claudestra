@@ -6,7 +6,7 @@
  * 扩展在注册帧里声明 abort:true 才发（老扩展收到会默默忽略）；gate 接线在 bridge/interrupt-gate.ts。
  */
 import type { ServerWebSocket } from "bun";
-import { emitEvent } from "./event-bus.js";
+import { emitEvent, getAgentStatus, lastActivityAt } from "./event-bus.js";
 import { newMessageId, newThreadId, type Endpoint, type Envelope } from "./router.js";
 import { turnCuts } from "./turn-cuts.js";
 import type { TurnTrigger } from "../lib/turn-cuts.js";
@@ -206,11 +206,11 @@ async function echoVoided(d: EchoDeps, channelId: string, found: readonly (TurnT
  * Codex 投递失败（channel-server 的 codex_undelivered：不在线 / 认不准线程 / codex queue 报错）：消息没进 Codex，不会有回合、也不会有 hook。
  * 走和 Pi 作废消息同一套——只了结这一条（按 messageId 销补答账、回程槽，回信地址收到一条带 inReplyTo 的 response，API / peer 的等待拿到这句），
  * 不补整轮的 StopFailure：同一个 agent 可能正在跑上一条，整轮收尾会把它的等待、状态一起结掉（T52 He 审 #204 P1）。
- * 只有它是空闲时投的最后一条（turnCuts.dropUndelivered）才把状态收成 done，拿不准就不动；不发完成通知（P2：先报失败又报完成）。返回 settled = 告诉了几条发送方，0 = channel-server 自己兜底说。
+ * 它是空闲时投的最后一条（turnCuts.dropUndelivered）就马上收成 done；拿不准就排一次有界复查（recheckIdle），不发完成通知（P2：先报失败又报完成）。
+ * 返回 settled = 告诉了几条发送方，0 = channel-server 自己兜底说。
  */
 export async function onCodexUndelivered(
-  msg: { requestId?: unknown; channelId?: unknown; messageId?: unknown; reason?: unknown }, ws: Socket, own: boolean,
-  d: { stopTyping(channelId: string): void; clearSafetyTimer(channelId: string): void },
+  msg: { requestId?: unknown; channelId?: unknown; messageId?: unknown; reason?: unknown }, ws: Socket, own: boolean, d: UndeliveredDeps,
 ): Promise<void> {
   const channelId = typeof msg.channelId === "string" ? msg.channelId : "";
   const messageId = typeof msg.messageId === "string" ? msg.messageId : "";
@@ -219,12 +219,50 @@ export async function onCodexUndelivered(
   if (own && channelId && messageId) {
     const agent = turnCuts.deliveredMessage(channelId, messageId)?.agent ?? turnCuts.agentOn(channelId);
     const told = settleVoided(channelId, [messageId], Date.now(), { text: () => reason, what: "没投进 Codex 的" }); // 先查发送方，再清送达记录
-    if (turnCuts.dropUndelivered(channelId, messageId) && agent) {
-      emitEvent({ agent, chatId: channelId, type: "agent_status", data: { status: "done", trigger: "undelivered" } });
-      d.stopTyping(channelId);
-      d.clearSafetyTimer(channelId);
-    }
+    const idle = turnCuts.dropUndelivered(channelId, messageId);
+    if (idle && agent) settleIdle(agent, channelId, d, "undelivered");
     settled = await told;
+    if (!idle && agent) recheckIdle(agent, channelId, Date.now(), d); // 回显投完再记时刻：回显自己的事件不算「之后的动静」
   }
   ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, result: { settled } }));
+}
+
+type UndeliveredDeps = {
+  stopTyping(channelId: string): void;
+  clearSafetyTimer(channelId: string): void;
+  /** 测试注入；默认 setTimeout */
+  later?(fn: () => void, ms: number): void;
+};
+
+function settleIdle(agent: string, channelId: string, d: UndeliveredDeps, trigger: string): void {
+  emitEvent({ agent, chatId: channelId, type: "agent_status", data: { status: "done", trigger } });
+  d.stopTyping(channelId);
+  d.clearSafetyTimer(channelId);
+}
+
+/** 拿不准时隔多久再看一眼：30 分钟安全计时只停 Discord typing、不发 done，网页的「工作中」收不掉（T52 复审 #204 第 4 轮） */
+const UNDELIVERED_RECHECK_MS = 90_000;
+const rechecks = new Map<string, ReturnType<typeof setTimeout>>();
+const namesOf = (agent: string) => [agent, agent.replace(/^agent-/, ""), `agent-${agent.replace(/^agent-/, "")}`];
+
+/**
+ * 投递失败而拿不准有没有回合在跑（投它时回合态在忙、之后又投了别的、bridge 重启后没有投递记录）：过 90 秒复查一次。
+ * 失败之后没有任何新动静（新投递、会话记录活动、hook 收尾都会记进事件环）且还挂着 thinking，才收成 done；
+ * 有动静就不动，等下一次失败或活动再判——不对所有失败一律发 done，那样会误收真在跑的回合。同一频道只留最后一次复查
+ */
+function recheckIdle(agent: string, channelId: string, since: number, d: UndeliveredDeps): void {
+  const run = () => {
+    rechecks.delete(channelId);
+    const names = namesOf(agent);
+    const thinking = names.some((n) => getAgentStatus(n) === "thinking");
+    if (!thinking || Math.max(...names.map(lastActivityAt)) > since) return;
+    console.log(`🩹 ${agent}：投递失败后 ${UNDELIVERED_RECHECK_MS / 1000}s 没有任何动静，收掉「工作中」`);
+    settleIdle(names.find((n) => getAgentStatus(n) === "thinking") ?? agent, channelId, d, "undelivered_recheck");
+  };
+  if (d.later) return d.later(run, UNDELIVERED_RECHECK_MS);
+  const prev = rechecks.get(channelId);
+  if (prev) clearTimeout(prev);
+  const t = setTimeout(run, UNDELIVERED_RECHECK_MS);
+  t.unref?.();
+  rechecks.set(channelId, t);
 }
