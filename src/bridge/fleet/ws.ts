@@ -74,6 +74,9 @@ export async function handleFleetWs(msg: Record<string, unknown>, ws: unknown, r
     }
     return { result: await run({ action: a.action, select: s.select, dryRun: msg.dryRun === true, actor: "local-cli", via: "ws", allowed: LOCAL_CLI }) };
   } catch (e) {
-    return { error: e instanceof FleetScopeError ? e.message : `批量管理出错：${(e as Error).message}` };
+    if (!(e instanceof FleetScopeError)) return { error: `批量管理出错：${(e as Error).message}` };
+    // 越界（点名大总管、压自己、别的项目）是拒绝不是故障：原样报给调用方，bridge 日志也留一条
+    console.warn(`🛰 [fleet] 拒绝 ${String(msg.type)}（${connectionOf(ws).channels.join(",") || "未注册连接"}）：${e.message}`);
+    return { error: e.message };
   }
 }

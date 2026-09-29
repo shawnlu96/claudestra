@@ -161,6 +161,15 @@ export function agentMsgMustWait(s: TurnState): boolean {
 }
 
 /**
+ * deliverToLocal（bridge.ts）这一封现在要不要押：压缩中一律押；agent→agent（fromKind local）和带 waitForIdle 的
+ * （bridge 通知、fleet MCP 下发）主回合在跑也押，Stop / 扫描时再投。人类 / API 消息不在这里押（它们走抢占）。
+ * 抽成纯函数是为了让 tests/fleet-mcp-ws.test.ts 拿同一条规则跑「忙 → queued、闲了才投」
+ */
+export function holdsUntilIdle(fromKind: string, waitForIdle: boolean | undefined, s: TurnState): boolean {
+  return s.main === "compacting" || ((fromKind === "local" || !!waitForIdle) && agentMsgMustWait(s));
+}
+
+/**
  * thinking 反向对账（permission-watcher）的单帧判据：事件态 thinking、顶格的真输入框在、主回合空闲、不是 bridge 经手的长 MCP 调用。
  * 只剩后台在跑不豁免——否则事件态卡在 thinking，上面的 main 一直是 busy，押后闸又回到「后台在跑就押」。
  * 权限框 / AskUserQuestion / 额度菜单里的「❯ 1.」不是输入框：认成输入框，弹窗开 2 分钟就会被收成 done。

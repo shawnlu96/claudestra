@@ -164,12 +164,17 @@ function textSender(actor: string, via: string, count: number, intent: "request"
     const cid = agent === "master" ? deps?.controlChannelId : (await readRegistryAgents()).find((r) => r.name === agent)?.channelId;
     const c = cid ? deps?.clients.get(cid) : undefined;
     if (!deps || !cid || !c) return { ok: false, error: "不在线" };
+    // MCP 的知会带 waitForIdle：目标主回合在跑就进押后队列、Stop 后再投，结果报 queued（lib/turn-state.ts holdsUntilIdle）；
+    // 不带的话 bridge 来源的消息照样直接 ws.send，回合开头那段会被 CC 静默丢掉，这里却记成已送达
     const r = (await deps.deliver({
       from: { kind: "bridge", label: "fleet" },
-      to: { kind: "local", channelId: cid, ws: c.ws as never, cwd: c.cwd },
+      to: { kind: "local", agentName: agent, channelId: cid, ws: c.ws as never, cwd: c.cwd },
       intent,
       content: `[📣 批量指令 · 来自 ${actor}（${via}）· 同时发给 ${count} 个 agent]\n${text}`,
-      meta: { messageId: newMessageId("fleet"), triggerKind: "bridge_synth", ts: new Date().toISOString(), threadId: newThreadId() },
+      meta: {
+        messageId: newMessageId("fleet"), triggerKind: "bridge_synth", ts: new Date().toISOString(), threadId: newThreadId(),
+        ...(intent === "notification" ? { waitForIdle: true } : {}),
+      },
     })) as { outcome?: { kind?: string; note?: string; reason?: string; error?: Error } } | undefined;
     const o = r?.outcome;
     if (o?.kind === "sent") return { ok: true, queued: o.note === "queued" };
@@ -201,7 +206,13 @@ export async function runFleet(req: FleetRunRequest, io: PaneIO = tmuxPaneIO): P
   const { targets } = picked;
   const excluded = [...scoped.excluded, ...picked.excluded];
   const names = targets.map((t) => t.name);
-  if (req.dryRun) return { runId, dryRun: true, action: req.action, targets: names, results: [], excluded, summary: dryRunSummary(req.action, targets) };
+  // 留痕按全部候选归项目（没选中的也要能归到它的项目）；预演、没选中任何人也记，只是标明没发键
+  const projectOf = new Map(all.filter((c) => c.project).map((c) => [bareName(c.name), c.project!]));
+  const audit = { runId, action: req.action, actor: req.actor, via: req.via, excluded, projectOf, fallbackProjects: req.caller?.projects ?? [] };
+  if (req.dryRun) {
+    auditFleet({ ...audit, at: Date.now(), dryRun: true, targets: names, results: [] });
+    return { runId, dryRun: true, action: req.action, targets: names, results: [], excluded, summary: dryRunSummary(req.action, targets) };
+  }
   const ctx: RunCtx = {
     io,
     keep: compactKeep(),
@@ -212,7 +223,6 @@ export async function runFleet(req: FleetRunRequest, io: PaneIO = tmuxPaneIO): P
   };
   const results = await pool(targets, CONCURRENCY, (t) => runTarget(req, t, ctx));
   void refreshLp(targets.filter((t) => t.runtime === "claude-code").map((t) => ({ name: t.name, channelId: t.channelId })));
-  const projectOf = new Map(targets.filter((t) => t.project).map((t) => [bareName(t.name), t.project!]));
-  auditFleet({ runId, action: req.action, actor: req.actor, via: req.via, at: Date.now(), results, projectOf });
+  auditFleet({ ...audit, at: Date.now(), results });
   return { runId, dryRun: false, action: req.action, targets: names, results, excluded, summary: summarizeFleet(req.action, results, excluded).text };
 }
