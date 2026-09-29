@@ -6,7 +6,7 @@
  */
 
 import { enableTimestampLogs } from "./lib/log-timestamp.js";
-import { requestStillHeld, shouldSweepPac } from "./lib/held-pac.js";
+import { requestStillHeld } from "./lib/held-pac.js";
 import { copyOutboundToInbox } from "./bridge/local-api/media-refresh.js";
 import { splitInlineButtons, toButtonRows, inlineChipsToText } from "./lib/inline-buttons.js";
 import { isTargetsOwnReply } from "./lib/pushback-scope.js";
@@ -429,7 +429,7 @@ async function localAgentWorking(channelId: string, evAgent: string): Promise<bo
 function flushHeldLocalMsgs(channelId: string, reason: string): Promise<void> {
   return flushHeld({
     held: heldLocalMsgs, compacting: (a) => getAgentStatus(a) === "compacting", working: localAgentWorking, isHumanRequest, walled: async (c) => !!(await quotaWall()?.gates(c)),
-    client: (c) => clients.get(c), deliver: deliverLocalInOrder, touch: (c, env) => pendingAgentCalls.touch(c, env.from.kind === "local" ? env.from.channelId : undefined),
+    client: (c) => clients.get(c), deliver: deliverLocalInOrder, touch: (c, env) => pendingAgentCalls.touchDelivered(c, env),
     stoppedAt: (c) => turnCuts.stoppedAt(c),
   }, channelId, reason);
 }
@@ -480,7 +480,7 @@ const stopSettleDeps: import("./bridge/stop-settle.js").CallerSettleDeps = {
   pushBack: (pac, cid, body) => pushBackToCaller(pac, clients.get(cid)?.ws, pac.originalReplyChannel || cid, body, "agent_drain"),
   notify: (pac, cid, body) => pushBackToCaller(pac, clients.get(cid)?.ws, pac.originalReplyChannel || cid, body, "agent_apierr", "notification"),
   takeApiErrorNotice: (cid) => pendingAgentCalls.takeApiErrorNotice(cid, stillHeldFor(cid)), waiting: (cid) => pendingAgentCalls.waiting(cid, stillHeldFor(cid)), rearmResume,
-  markApiError: (cid, text, caller) => pendingAgentCalls.markApiError(cid, stillHeldFor(cid), text, caller), clearWithheld: (cid, pac) => pendingAgentCalls.clearWithheld(cid, pac.callerChannelId),
+  markApiError: (cid, text, caller) => pendingAgentCalls.markApiError(cid, stillHeldFor(cid), text, caller), clearWithheld: (cid, pac) => pendingAgentCalls.clearWithheld(cid, pac),
   unattributed: (cid, _t, n) => void (n.wall || quotaWall()?.active() || notifyMaster(unattributedNotice(agentLabelForChannel(cid), n))), // 闸内静默：出闸通知一次说清
   metric: (name, channelId, meta) => recordMetric(name, { channelId, meta }),
 };
