@@ -103,6 +103,13 @@ export class HeldQueue extends PersistedMap<HeldItem[]> {
     return this.delete(channelId);
   }
 
+  /** 已在队里的这一封改过 meta（如停字的已记标记）：整队重写一次盘。hold 认出同一封时不落盘，改动不写回就会在重启后丢 */
+  rewrite(env: Envelope): void {
+    const ch = (env.to as LocalEndpoint).channelId;
+    const q = this.get(ch);
+    if (q?.some((i) => i.env === env)) this.set(ch, [...q]);
+  }
+
   /** 按信封的收件方押后，入队时间取现在 */
   holdEnv(env: Envelope, reason?: HeldItem["reason"]): number {
     const to = env.to as LocalEndpoint;

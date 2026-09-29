@@ -5,7 +5,7 @@
  */
 import { beforeEach, describe, expect, test } from "bun:test";
 import { clearOpenedBy, dropHeldOnKill, flushHeld, onHeldDelivered, type FlushDeps } from "../src/bridge/held-flush.js";
-import { takeApiWaiters } from "../src/bridge/stop-settle.js";
+import { stopSnapshot, takeApiWaiters } from "../src/bridge/stop-settle.js";
 import { ageHeld, HELD_GIVE_UP_MS, HELD_NOTIFY_MS, HeldQueue, INBOX_LEASE_MS, type HeldItem } from "../src/bridge/held-queue.js";
 import type { Delivery, Envelope, LocalEndpoint } from "../src/bridge/router.js";
 
@@ -336,6 +336,21 @@ describe("押着的人类消息一轮只投一个发送人（adv3 P2-1 升 P1：
     const q = new Map([["tok-b", [waiter]]]);
     expect(takeApiWaiters(q, turn, true, new Set(), new Set([...h.held.ids("c-me"), ...heldAtStop]))).toEqual([]);
     expect(takeApiWaiters(q, turn, true, new Set(), h.held.ids("c-me")).map((x) => x.result.reply)).toEqual(["answer for peer A"]); // 对照：不带快照就串了
+  });
+
+  test("Stop 快照之后才挂上的 peer 请求：补投出去了也不拿这一回合的正文结它（T24 复核 P1）", async () => {
+    const h = harness([], humanApi);
+    const a = { agentChannelId: "c-me", agentName: "agent-me", threadId: "thr-a", tokenId: "tok-a", messageId: "m-a" };
+    const q = new Map([["tok-a", [a]]]);
+    const snap = stopSnapshot(h.held.ids("c-me"), q); // Stop 一进来：只有 A 的请求挂着，队里是空的
+    const b = api("peerB-late", "tok-b");
+    h.held.set("c-me", [{ ...b, env: { ...b.env, from: { ...b.env.from, peer: "b" } } as Envelope }]); // 之后 B 才到、被押
+    q.set("tok-b", [{ agentChannelId: "c-me", agentName: "agent-me", threadId: "thr-b", tokenId: "tok-b", messageId: "m-peerB-late" }]);
+    await flushHeld(h.deps, "c-me", "sweep"); // 结算之前又被补投出去：队里又空了
+    const turn = { cid: "c-me", stopChannelId: "c-me", stopWs: 1, candidateWs: 1, event: "Stop", drain: { text: "answer for peer A" } };
+    const held = new Set([...h.held.ids("c-me"), ...snap.held]);
+    expect(takeApiWaiters(q, turn, true, new Set(), held, snap.waiters).map((x) => x.waiter.threadId)).toEqual(["thr-a"]);
+    expect(q.get("tok-b")!.map((w) => w.threadId)).toEqual(["thr-b"]); // 留给 B 自己那一回合
   });
 
   test("遗留的补投记录：那一轮 Stop 后开了别的一轮（owner 直接开 / CC 自己续跑），guest 押着的不塞进去（T24 审查 P2-1）", async () => {

@@ -173,6 +173,17 @@ describe("停在撞墙等待画面上（T24 wf3 delivery-hold-4 / 执行者主�
     noteHeldStop(back, CC, "agent-cc", "claude-code");
     expect(log).toEqual([`clear:${CC}`]);
   });
+  test("老版本落盘、没打标的停字：重启后再押一次，标记要写回盘，再重启也不丢（T24 复核 P2）", () => {
+    log.length = 0;
+    const p = join(mkdtempSync(join(tmpdir(), "held-old-")), "held.json");
+    const e = { ...env("old-stop", true), to: { kind: "local", channelId: CC, agentName: "agent-cc" } } as Envelope;
+    new HeldQueue(p).holdEnv(e); // 老版本：押住了但没有 heldStopNoted
+    const q = new HeldQueue(p);
+    const restored = q.get(CC)![0]!.env;
+    holdNotingStop(q, restored, { channelId: CC }, "agent-cc", "claude-code"); // 重启后的扫描再押一次（同一封）
+    expect(new HeldQueue(p).get(CC)![0]!.env.meta.heldStopNoted).toBe(true);
+    expect(new HeldQueue(p).get(CC)!.length).toBe(1);
+  });
   test("抢占复核时画面刚变成撞墙等待（闸回 wall_wait）：preemptForHuman 回 wall_wait，不写「没能打断」的抬头，交给调用方押住", async () => {
     interruptGate.preempt = async () => ({ fired: false, why: "wall_wait" });
     try {

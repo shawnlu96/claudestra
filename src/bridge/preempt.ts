@@ -40,9 +40,15 @@ const toolsAt = (agent: string, runtime: string | undefined) => inflightTools(ag
  * 再按那一刻的画面判一次（到点自动续跑了就打断），抬头随之改写（T24 wf3 delivery-hold-4）。
  */
 /** 先记停（在 envelope 上打标）再入队：标记跟着落盘，bridge 重启后同一条停字不会再记一遍、再清一次槽（tests/preempt-stop.test.ts） */
-export function holdNotingStop(held: Pick<HeldQueue, "holdEnv">, env: Envelope, to: { channelId: string }, agent: string, runtime: string | undefined, reason?: HeldItem["reason"]): number {
+export function holdNotingStop(
+  held: Pick<HeldQueue, "holdEnv" | "rewrite">, env: Envelope, to: { channelId: string }, agent: string, runtime: string | undefined, reason?: HeldItem["reason"],
+): number {
+  const was = env.meta.heldStopNoted === true;
   noteHeldStop(env, to.channelId, agent, runtime);
-  return held.holdEnv(env, reason);
+  const n = held.holdEnv(env, reason);
+  // 老版本落盘、没打标的那一条已在队里：holdEnv 认出同一封不落盘，新打的标要单独写回，不然再重启又丢（T24 复核 P2）
+  if (!was && env.meta.heldStopNoted) held.rewrite(env);
+  return n;
 }
 
 export function noteHeldStop(env: Envelope, channelId: string, agent: string, runtime?: string): void {

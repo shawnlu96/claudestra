@@ -556,7 +556,7 @@ import { dropHeldOnKill, flushHeld } from "./bridge/held-flush.js";
 import { probeTurn } from "./bridge/turn-probe.js";
 import { agentMsgMustWait } from "./lib/turn-state.js";
 import { AgentCallBook, ambiguityNotice, expiredNotice, withExpecting, withheldNotice, type PendingAgentCall } from "./bridge/agent-calls.js";
-import { noteDelivered, settleStopTurn, takeApiWaiters, unattributedNotice } from "./bridge/stop-settle.js";
+import { noteDelivered, settleStopTurn, stopSnapshot, takeApiWaiters, unattributedNotice } from "./bridge/stop-settle.js";
 import { startCodexTurnFailureWatch } from "./bridge/codex-turn-failure.js";
 // v2.6.0+ C1：出站按 transport 分发（设计 §6）
 import { registerAdapter, adapterFor } from "./bridge/adapters.js";
@@ -2675,7 +2675,7 @@ async function handleHookRequest(req: Request): Promise<Response> {
     // (done / 停 typing / 完成 ping / drain / 清 pending)之前返回——回合还没完(lib/reply-nudge.ts)。Pi 叫停之后的第一次 Stop
     // 这里和下面的 inter-agent 看门狗都不催:催了等于 bridge 把刚停住的 Pi 又拉起一轮(bridge/pi-abort.ts)
     const afterAbort = event === "Stop" && stopAfterAbort(channelId);
-    const heldAtStop = heldLocalMsgs.ids(channelId); // Stop 时还押着的：之后几秒里被补投出去的也不拿这一轮的话结（tests/stop-settle-wf2.test.ts）
+    const atStop = stopSnapshot(heldLocalMsgs.ids(channelId), pendingApiRequests); // 只结这一刻就挂着、没押着的（bridge/stop-settle.ts stopSnapshot）
     if (event === "Stop" && !afterAbort) {
       const ws = clients.get(channelId)?.ws;
       if (ws) {
@@ -2829,8 +2829,8 @@ async function handleHookRequest(req: Request): Promise<Response> {
             };
             const ownTurn = await settleStopTurn(stopSettleDeps, turn);
             // v2.6.0+ R3: API waiter 兜底——agent end_turn 没 reply() 时这一轮就结掉挂着的 API 请求，wait 调用方不必干等到超时
-            const held = new Set([...heldLocalMsgs.ids(cid), ...heldAtStop]);
-            for (const { waiter: p, result } of takeApiWaiters(pendingApiRequests, turn, ownTurn, afterAbort ? stopWaitIds(cid) : new Set(), held)) {
+            const held = new Set([...heldLocalMsgs.ids(cid), ...atStop.held]);
+            for (const { waiter: p, result } of takeApiWaiters(pendingApiRequests, turn, ownTurn, afterAbort ? stopWaitIds(cid) : new Set(), held, atStop.waiters)) {
               apiThreadResults.set(p.threadId, { result, ts: Date.now(), tokenId: p.tokenId });
               p.resolve?.(result);
               const data = { direction: "out", from: p.agentName, text: result.reply || "", threadId: p.threadId, api: true, viaFallback: true, ...(result.apiError ? { apiError: true } : {}) };

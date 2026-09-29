@@ -220,8 +220,16 @@ export interface ApiWaiterResult { reply: string | null; threadId: string; agent
  * 留在队里不结的：Pi 叫停那次 Stop 里停字自己的等待（stopWait，留给停字那一轮答）；消息还押着、没送到 cid 手上的（held）——
  * 这一轮根本不是答它的，拿这一轮的话结它就是把答 PM / owner 的内容交给了别人（撞墙时押几个小时，TTL 2 小时）。
  */
+/**
+ * Stop 一进来就拍的快照：那一刻还押着的消息 id、那一刻就挂着的 API 请求。收尾 drain 慢的时候，补投（2 秒定时器 / 扫描 / 窗口活动）可能先把
+ * 外人的消息送进新一轮、它的请求也可能是之后才挂上的——只结快照里的、没押着的，这一回合的话才不会结给别人（tests/held-flush.test.ts）
+ */
+export function stopSnapshot<W>(held: Set<string>, queues: Map<string, W[]>): { held: Set<string>; waiters: Set<W> } {
+  return { held, waiters: new Set([...queues.values()].flat()) };
+}
+
 export function takeApiWaiters<W extends ApiWaiter>(
-  queues: Map<string, W[]>, t: StopTurn, own: boolean, stopWait: ReadonlySet<string> = new Set(), held: ReadonlySet<string> = new Set(),
+  queues: Map<string, W[]>, t: StopTurn, own: boolean, stopWait: ReadonlySet<string> = new Set(), held: ReadonlySet<string> = new Set(), atStop?: ReadonlySet<W>,
 ): { waiter: W; result: ApiWaiterResult }[] {
   const apiErr = !own && ranIntoApiError(t) && isOwnStopChannel(t.cid, t.stopChannelId, t.stopWs, t.candidateWs);
   if (!own && !apiErr) return [];
@@ -229,7 +237,7 @@ export function takeApiWaiters<W extends ApiWaiter>(
   const out: { waiter: W; result: ApiWaiterResult }[] = [];
   for (const [key, queue] of [...queues.entries()]) {
     if (!queue.length || queue[0].agentChannelId !== t.cid) continue;
-    for (const w of apiQueueToSettle(queues, key, skip)) {
+    for (const w of apiQueueToSettle(queues, key, skip, atStop)) {
       const base = { threadId: w.threadId, agent: w.agentName, viaFallback: true as const };
       out.push({ waiter: w, result: apiErr ? { ...base, reply: null, apiError: true, error: t.drain.error?.error || t.event } : { ...base, reply: t.drain.text || null } });
     }
