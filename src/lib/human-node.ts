@@ -47,23 +47,21 @@ export interface AskPlan {
   dedupKey: string;
   assignee: string;
   title: string;
-  /** 卡片上直接显示的背景：第几轮返工、PM 写的 brief */
+  /** 卡片上直接显示的背景：第几轮返工、PM 写的 brief（不另存正文，卡片上就不会多一个内容重复的「看原文」） */
   context: string;
-  body: string;
   options: unknown[];
 }
 
 /**
- * 任务在 build / fix、负责人是人 → 该有一条指给他的 assigned ask（dedupKey 撞上 = 这一轮这次已经开过，调用方拿回原来那条）。
- * 正文只放任务号、标题和 PM 写的背景（extra.brief）；规格卡原文不截取。
+ * 任务在 build / fix、负责人是人 → 该有一条指给这个人的 assigned ask（dedupKey 撞上 = 这一轮这次已经开过，调用方拿回原来那条）。
+ * 只放任务号、标题和 PM 写的背景（extra.brief）；规格卡原文不截取。
  */
 export function askPlanFor(task: HumanTaskView, attempt: number): AskPlan | null {
   if (task.assigneeKind !== "human" || !task.assignee || !isWorkStage(task.stage)) return null;
   const brief = typeof task.extra.brief === "string" && task.extra.brief.trim() ? task.extra.brief.trim() : "";
   const rework = task.stage === "fix" ? [`第 ${task.round} 轮返工`] : [];
   const title = `${task.id} ${task.title}`;
-  const body = [title, ...rework, ...(brief ? ["", brief] : [])].join("\n");
-  return { dedupKey: assignDedupKey(task.id, task.round, attempt), assignee: task.assignee, title, context: [...rework, brief].filter(Boolean).join("\n"), body, options: assignOptions() };
+  return { dedupKey: assignDedupKey(task.id, task.round, attempt), assignee: task.assignee, title, context: [...rework, brief].filter(Boolean).join("\n"), options: assignOptions() };
 }
 
 /** 拒绝的 code 同 LedgerError：阶段不对、ask 过时 = conflict（库里已变），不是这个人 = forbidden */

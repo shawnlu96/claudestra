@@ -10,19 +10,18 @@ const task = (over: Partial<HumanTaskView> = {}): HumanTaskView => ({
 });
 
 describe("开 assigned ask", () => {
-  test("只在 human 节点进入 build / fix 时开；正文是任务号、标题和 PM 写的背景，卡片直接显示的背景是返工轮次与 brief", () => {
+  test("只在 human 节点进入 build / fix 时开；标题是任务号加标题，背景是返工轮次与 PM 写的 brief", () => {
     const plan = askPlanFor(task(), 1)!;
-    expect(plan).toMatchObject({ dedupKey: "assign:T123:0:1", assignee: "local:guest:ab12", title: "T123 登录页改文案", body: "T123 登录页改文案\n\n背景一。背景二。背景三。" });
+    expect(plan).toMatchObject({ dedupKey: "assign:T123:0:1", assignee: "local:guest:ab12", title: "T123 登录页改文案", context: "背景一。背景二。背景三。" });
     const ids = (plan.options as { buttons: { id: string }[] }[]).flatMap((r) => r.buttons.map((b) => b.id));
     expect(ids).toEqual(["assign_done", "assign_cant"]);
     expect(resultOfChoices(["[button:assign_done]"])).toBe("done");
     expect(resultOfChoices(["[button:assign_cant]"])).toBe("cant");
     expect(resultOfChoices(["[button:other]"])).toBeNull();
-    expect(plan.context).toBe("背景一。背景二。背景三。");
-    expect(askPlanFor(task({ stage: "fix", round: 2 }), 1)!).toMatchObject({ body: expect.stringContaining("第 2 轮返工"), context: "第 2 轮返工\n背景一。背景二。背景三。" });
+    expect(askPlanFor(task({ stage: "fix", round: 2 }), 1)!.context).toBe("第 2 轮返工\n背景一。背景二。背景三。");
     for (const stage of ["spec", "restate", "review", "merge", "done", "blocked"]) expect(askPlanFor(task({ stage }), 1)).toBeNull();
     expect(askPlanFor(task({ assigneeKind: "agent", assignee: "agent-x" }), 1)).toBeNull();
-    expect(askPlanFor(task({ extra: {} }), 1)).toMatchObject({ body: "T123 登录页改文案", context: "" });
+    expect(askPlanFor(task({ extra: {} }), 1)!.context).toBe("");
   });
   test("attempt = 1 + 本轮 assign_reopen 次数；别的轮、别的任务不算", () => {
     const ev = (target: string, round: number) => ({ kind: "assign_reopen", target, data: { round } });
