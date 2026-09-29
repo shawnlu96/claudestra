@@ -6,7 +6,8 @@
  * 扩展在注册帧里声明 abort:true 才发（老扩展收到会默默忽略）；gate 接线在 bridge/interrupt-gate.ts。
  */
 import type { ServerWebSocket } from "bun";
-import { emitEvent, getAgentStatus, inflightTools, lastActivityAt, sessionActiveSinceDone } from "./event-bus.js";
+import { emitEvent, getAgentStatus } from "./event-bus.js";
+import { codexConfirmedIdle, noteCodexFailed } from "../lib/codex-turn-book.js";
 import { readRegistryAgents } from "../lib/registry.js";
 import { newMessageId, newThreadId, type Endpoint, type Envelope } from "./router.js";
 import { turnCuts } from "./turn-cuts.js";
@@ -207,7 +208,7 @@ async function echoVoided(d: EchoDeps, channelId: string, found: readonly (TurnT
  * Codex 投递失败（channel-server 的 codex_undelivered：不在线 / 认不准线程 / codex queue 报错）：消息没进 Codex，不会有回合、也不会有 hook。
  * 走和 Pi 作废消息同一套——只了结这一条（按 messageId 销补答账、回程槽，回信地址收到一条带 inReplyTo 的 response，API / peer 的等待拿到这句），
  * 不补整轮的 StopFailure：同一个 agent 可能正在跑上一条，整轮收尾会把它的等待、状态一起结掉（T52 He 审 #204 P1）。
- * 它是空闲时投的最后一条（turnCuts.dropUndelivered）就马上收成 done；拿不准就排一次有界复查（recheckIdle），不发完成通知（P2：先报失败又报完成）。
+ * Codex 原生回合账确认空闲（lib/codex-turn-book.ts）就马上收成 done，否则排一次有界复查（recheckIdle）；不发完成通知（P2：先报失败又报完成）。
  * 返回 settled = 告诉了几条发送方，0 = channel-server 自己兜底说。
  */
 export async function onCodexUndelivered(
@@ -220,12 +221,14 @@ export async function onCodexUndelivered(
   if (own && channelId && messageId) {
     const known = turnCuts.deliveredMessage(channelId, messageId)?.agent ?? turnCuts.agentOn(channelId);
     const told = settleVoided(channelId, [messageId], Date.now(), { text: () => reason, what: "没投进 Codex 的" }); // 先查发送方，再清送达记录
-    const idle = turnCuts.dropUndelivered(channelId, messageId);
+    turnCuts.dropUndelivered(channelId, messageId);
+    noteCodexFailed(channelId, messageId);
+    const idle = codexConfirmedIdle(channelId);
     if (idle && known) settleIdle(known, channelId, d, "undelivered");
     settled = await told;
     // bridge 重启后投递记录是空的：agent 按频道从 registry 查（复查不落盘，按新到的失败回执重新排）
     const agent = known ?? (await (d.agentOf ?? agentFromRegistry)(channelId));
-    if (!idle && agent) recheckIdle(agent, channelId, Date.now(), d); // 回显投完再记时刻：回显自己的事件不算「之后的动静」
+    if (!idle && agent) recheckIdle(agent, channelId, d);
   }
   ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, result: { settled } }));
 }
@@ -255,22 +258,21 @@ const rechecks = new Map<string, ReturnType<typeof setTimeout>>();
 const namesOf = (agent: string) => [agent, agent.replace(/^agent-/, ""), `agent-${agent.replace(/^agent-/, "")}`];
 
 /**
- * 投递失败而拿不准有没有回合在跑（投它时回合态在忙、之后又投了别的、bridge 重启后没有投递记录）：过 90 秒复查一次。
- * 三条都成立才收成 done：①上次回合结束（done）之后会话自己没动过——Codex 的 probeTurn 只看事件态，thinking 恒判忙，
- * 用它等于永远不收；②事件环里没有开了没收的工具；③失败之后没有任何新动静。静默不等于空闲（长工具不发心跳），
- * 拿不准就只在频道里标一句「投递失败」，不宣告完成（T52 复审 #204 第 5 轮）。同一频道只留最后一次复查
+ * 投递失败时原生回合账还没确认空闲（回合开着、上次空闲后投的有没失败的、bridge 重启后还没见过原生边界）：过 90 秒复查一次。
+ * 那时确认空闲（见过边界、没开着的回合、上次空闲后投的每一条都明确失败）才收成 done；否则只在频道里标一句「投递失败」，
+ * 不宣告完成——从「没看到活动」反推空闲靠不住（静默思考不出事件、事件环会被挤掉、重启后没历史，T52 复审 #204 第 6 轮）。
+ * 同一频道只留最后一次复查
  */
-function recheckIdle(agent: string, channelId: string, since: number, d: UndeliveredDeps): void {
+function recheckIdle(agent: string, channelId: string, d: UndeliveredDeps): void {
   const run = () => {
     rechecks.delete(channelId);
-    const names = namesOf(agent);
-    const who = names.find((n) => getAgentStatus(n) === "thinking");
-    if (!who || Math.max(...names.map(lastActivityAt)) > since) return; // 已经收尾了 / 失败之后又有动静：下一次再判
-    if (names.some(sessionActiveSinceDone) || names.some((n) => inflightTools(n).inflight.length > 0)) {
-      const text = `⚠️ 有消息没投进 Codex，但这一回合可能还在跑，bridge 没有替它宣告完成；卡住的话打断一下或重发。`;
+    const who = namesOf(agent).find((n) => getAgentStatus(n) === "thinking");
+    if (!who) return; // 已经收尾了
+    if (!codexConfirmedIdle(channelId)) {
+      const text = `⚠️ 有消息没投进 Codex，这一回合是否还在跑拿不准，bridge 没有替它宣告完成；卡住的话打断一下或重发。`;
       return void emitEvent({ agent: who, chatId: channelId, type: "chat_message", data: { direction: "out", from: "bridge", text, notice: true } });
     }
-    console.log(`🩹 ${agent}：投递失败后 ${UNDELIVERED_RECHECK_MS / 1000}s 没有任何动静、上次收尾后也没真开过回合，收掉「工作中」`);
+    console.log(`🩹 ${agent}：投递失败后原生回合账确认空闲，收掉「工作中」`);
     settleIdle(who, channelId, d, "undelivered_recheck");
   };
   if (d.later) return d.later(run, UNDELIVERED_RECHECK_MS);

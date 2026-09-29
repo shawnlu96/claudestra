@@ -19,6 +19,7 @@ import { tmuxCapture, windowTarget } from "../lib/tmux-helper.js";
 import { parseAuqPane } from "../lib/auq-pane.js";
 import { countNewlinesBefore, progressNoteOf } from "../lib/session-history.js";
 import { splitChunkLines } from "../lib/jsonl-lines.js";
+import { noteCodexTurnLine } from "../lib/codex-turn-book.js";
 import { transcriptUserEvent } from "../lib/turn-cuts.js";
 // v2.6.0+ 旁路事件埋点（设计 D1：只 emit 不改渲染管线）
 import { emitEvent, getAgentStatus, isPostTurnActivity } from "./event-bus.js";
@@ -342,8 +343,7 @@ async function processNewData(state: WatcherState, discord: Client): Promise<voi
   // 才进，第二次的 newStat 看到 lastSize 已被更新，没新数据，直接退出 —— 但此时
   // textQueue 已经被第一次填好了，drain 后续的 flush 就能拿到。
   //
-  // 锁等待带 5s 上限防 hang（理论上不应该；processNewData 内部 await 都是 fs / parse，
-  // 不会卡住）。
+  // 锁等待带 5s 上限防 hang（理论上不应该；processNewData 内部 await 都是 fs / parse，不会卡住）。
   const lockWaitStart = Date.now();
   while (state.processing) {
     if (Date.now() - lockWaitStart > 5000) {
@@ -368,8 +368,8 @@ async function processNewData(state: WatcherState, discord: Client): Promise<voi
     state.lineNo = chunk.next;
     for (const { seq, line } of chunk.lines) {
       try {
-        // v2.23+ runtime 感知：Pi 的行在这里翻译成 Claude Code 形状，下面的解析逻辑
-        // （工具摘要/文本/状态/思考时长）一行都不用改
+        // runtime 感知：Pi / Codex 的行在这里翻译成 Claude Code 形状，下面的解析逻辑一行都不用改；Codex 的原生回合边界另记一本（lib/codex-turn-book.ts）
+        noteCodexTurnLine(state.runtime, state.channelId, line);
         const entry = translateSessionLine(state.runtime, line, state);
         if (!entry) continue;
 

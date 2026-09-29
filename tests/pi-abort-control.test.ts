@@ -11,7 +11,12 @@ import {
 } from "../src/bridge/pi-abort.js";
 import type { Envelope } from "../src/bridge/router.js";
 import { turnCuts } from "../src/bridge/turn-cuts.js";
-import { emitEvent, getAgentStatus } from "../src/bridge/event-bus.js";
+import { emitEvent, getAgentStatus, RING_LIMIT } from "../src/bridge/event-bus.js";
+import { codexTurnMark, noteCodexTurnLine } from "../src/lib/codex-turn-book.js";
+
+/** 喂一行 Codex rollout 的原生回合边界（watcher 读到时调的就是它） */
+const codexMark = (ch: string, type: "task_started" | "task_complete" | "turn_aborted", turnId: string) =>
+  noteCodexTurnLine("codex", ch, JSON.stringify({ type: "event_msg", payload: { type, turn_id: turnId } }));
 import { stopHeadline } from "../src/lib/turn-cuts.js";
 
 /** 模拟 Pi：queue = 排队的 steer 消息；tui = 有中止处理（把排队的退回输入框），否则队列留着、中止后会拿它们续跑 */
@@ -257,8 +262,8 @@ describe("bridge 侧（Workflow 复核 wf2）", () => {
       expect(turnCuts.deliveredMessage("cx", "bad1")).toBeUndefined();
     });
 
-    test("P2：空闲时投的最后一条没投进去——收掉「工作中」（不走 Stop 收尾，不发完成通知）", async () => {
-      turnCuts.dropUndelivered("cx", "run1");
+    test("P2：原生回合账确认空闲、之后投的只有这一条且没投进去——收掉「工作中」（不走 Stop 收尾，不发完成通知）", async () => {
+      codexMark("cx", "task_complete", "prev"); // 已知空闲的基线：上一回合收了
       cx("bad2", { kind: "user", userId: "u", username: "alex", channelId: "dc-7" } as Envelope["from"], false);
       delivered.length = 0; calls.length = 0;
       await onCodexUndelivered({ requestId: "r2", channelId: "cx", messageId: "bad2", reason: "⚠️ Codex 会话不在线，消息未投递" }, sock, true, deps);
@@ -278,139 +283,112 @@ describe("bridge 侧（Workflow 复核 wf2）", () => {
     });
   });
 
-  describe("Codex 投递失败：只有「空闲时投的最后一条」没投进去才收 done，不按消息推算哪一回合在跑（T52 复审 #204）", () => {
+  describe("Codex 投递失败：收不收 done 只看原生回合账（T52 复审 #204 第 6 轮）", () => {
     const calls: string[] = [];
     const later: (() => void)[] = [];
     const deps = {
       stopTyping: (c: string) => void calls.push(`typing:${c}`), clearSafetyTimer: (c: string) => void calls.push(`timer:${c}`),
       later: (fn: () => void) => void later.push(fn),
-      agentOf: async (c: string) => (c === "after-restart" ? "agent-after-restart" : undefined),
+      agentOf: async (c: string) => (c === "r6-restart" ? "agent-r6-restart" : undefined),
     };
     const send = (ch: string, id: string, busy: boolean, from?: Envelope["from"]) => turnCuts.noteDelivered({
-      from: from ?? { kind: "api", tokenId: `tok_${id}`, name: id }, to: { kind: "local", channelId: ch, agentName: "agent-cx" }, intent: "request",
+      from: from ?? { kind: "api", tokenId: `tok_${id}`, name: id }, to: { kind: "local", channelId: ch, agentName: `agent-${ch}` }, intent: "request",
       content: id, meta: { messageId: id, triggerKind: "api_user", ts: "", threadId: "t" },
     } as unknown as Envelope, ch, false, busy);
     const out: string[] = [];
     const cs = { send: (d: string) => void out.push(d) };
     const fail = (ch: string, id: string) => onCodexUndelivered({ requestId: id, channelId: ch, messageId: id, reason: "x" }, cs, true, deps);
     const settled = () => JSON.parse(out.at(-1)!).result.settled;
+    const thinking = (ch: string) => emitEvent({ agent: `agent-${ch}`, chatId: ch, type: "agent_status", data: { status: "thinking" } });
+    const reset = () => { calls.length = 0; later.length = 0; };
 
-    test("复现①：A 经 StopFailure 结束，B 空闲时投、投失败——收成 done", async () => {
-      send("cx1", "A", false);
-      turnCuts.onStop("cx1", "StopFailure", "agent-cx");
-      send("cx1", "B", false);
-      calls.length = 0;
-      await fail("cx1", "B");
-      expect(calls).toEqual(["typing:cx1", "timer:cx1"]);
+    test("codexTurnMark 只认 event_msg 的 task_started / task_complete / turn_aborted", () => {
+      const line = (type: string) => JSON.stringify({ type: "event_msg", payload: { type, turn_id: "t1" } });
+      expect(codexTurnMark(line("task_started"))).toEqual({ kind: "start", turnId: "t1" });
+      expect(codexTurnMark(line("task_complete"))).toEqual({ kind: "end", turnId: "t1" });
+      expect(codexTurnMark(line("turn_aborted"))).toEqual({ kind: "end", turnId: "t1" });
+      expect(codexTurnMark(line("token_count"))).toBeNull();
+      expect(codexTurnMark(JSON.stringify({ type: "response_item", payload: { type: "reasoning" } }))).toBeNull();
+      expect(codexTurnMark("{半行")).toBeNull();
     });
 
-    test("复现②：A 在跑，后面 8 条排队的全失败——不收 done", async () => {
-      send("cx2", "A", false);
-      for (let i = 0; i < 8; i++) send("cx2", `q${i}`, true);
-      calls.length = 0;
-      for (let i = 0; i < 8; i++) await fail("cx2", `q${i}`);
-      expect(calls).toEqual([]);
-    });
-
-    test("复现③（第 3 轮）：A 空闲开跑、B/C 进 queue，A、B 先后 Stop、C 在跑，D 投失败——不收 done", async () => {
-      send("cx3", "A", false);
-      send("cx3", "B", true);
-      send("cx3", "C", true);
-      turnCuts.onStop("cx3", "Stop", "agent-cx");
-      turnCuts.onStop("cx3", "Stop", "agent-cx");
-      send("cx3", "D", true); // C 在跑：投 D 时回合态是忙
-      calls.length = 0;
-      await fail("cx3", "D");
-      expect(calls).toEqual([]);
-    });
-
-    test("空闲时投的那条之后又投了别的：拿不准，不收 done", async () => {
-      send("cx5", "E", false);
-      send("cx5", "F", true);
-      calls.length = 0;
-      await fail("cx5", "E");
-      expect(calls).toEqual([]);
-    });
-
-    test("第 4 轮 P1：空闲时投 A、忙时投 B，两条都失败——当场拿不准不动；90 秒复查时没有任何动静，收掉网页的「工作中」", async () => {
-      const ch = "cx7", agent = "agent-cx7";
-      const sendTo = (id: string, busy: boolean) => turnCuts.noteDelivered({
-        from: { kind: "api", tokenId: `tok_${id}`, name: id }, to: { kind: "local", channelId: ch, agentName: agent }, intent: "request",
-        content: id, meta: { messageId: id, triggerKind: "api_user", ts: "", threadId: "t" },
-      } as unknown as Envelope, ch, false, busy);
-      sendTo("A", false);
-      emitEvent({ agent, chatId: ch, type: "agent_status", data: { status: "thinking" } });
-      sendTo("B", true);
-      calls.length = 0; later.length = 0;
+    test("已知空闲的基线上，两条都没投进去、没有真回合——第二条失败时就收 done", async () => {
+      const ch = "r6-both";
+      codexMark(ch, "task_complete", "prev");
+      send(ch, "A", false); thinking(ch); send(ch, "B", true);
+      reset();
       await fail(ch, "A");
+      expect(calls).toEqual([]); // B 还没结论
       await fail(ch, "B");
-      expect(calls).toEqual([]);
-      expect(later).toHaveLength(2);
-      await Bun.sleep(2); // 复查时刻晚于失败
-      later.at(-1)!();
       expect(calls).toEqual([`typing:${ch}`, `timer:${ch}`]);
-      expect(getAgentStatus(agent)).toBe("done");
+      expect(getAgentStatus(`agent-${ch}`)).toBe("done");
     });
 
-    test("复查前又有动静（会话记录活动 / 新投递）：不收 done", async () => {
-      const ch = "cx8", agent = "agent-cx8";
-      turnCuts.noteDelivered({
-        from: { kind: "api", tokenId: "tok_x", name: "x" }, to: { kind: "local", channelId: ch, agentName: agent }, intent: "request",
-        content: "x", meta: { messageId: "X", triggerKind: "api_user", ts: "", threadId: "t" },
-      } as unknown as Envelope, ch, false, true);
-      emitEvent({ agent, chatId: ch, type: "agent_status", data: { status: "thinking" } });
-      calls.length = 0; later.length = 0;
-      await fail(ch, "X");
-      await Bun.sleep(2);
-      emitEvent({ agent, chatId: ch, type: "tool_start", data: { toolId: "t1", name: "Bash" } });
+    test("静默思考：A 的回合已经 task_started、没有任何输出，B 投失败——保持 thinking，复查只标一句", async () => {
+      const ch = "r6-reasoning";
+      codexMark(ch, "task_complete", "prev");
+      send(ch, "A", false); thinking(ch); codexMark(ch, "task_started", "A-turn");
+      send(ch, "B", true);
+      reset();
+      await fail(ch, "B");
       later.at(-1)!();
       expect(calls).toEqual([]);
-      expect(getAgentStatus(agent)).toBe("thinking");
+      expect(getAgentStatus(`agent-${ch}`)).toBe("thinking");
     });
 
-    test("第 5 轮 P1：失败之前就开始、还没结束的长工具（有 tool_start 没 tool_done）——90 秒复查不收 done，只标一句投递失败", async () => {
-      const ch = "cx9", agent = "agent-cx9";
-      const sendTo = (id: string, busy: boolean) => turnCuts.noteDelivered({
-        from: { kind: "api", tokenId: `tok_${id}`, name: id }, to: { kind: "local", channelId: ch, agentName: agent }, intent: "request",
-        content: id, meta: { messageId: id, triggerKind: "api_user", ts: "", threadId: "t" },
-      } as unknown as Envelope, ch, false, busy);
-      sendTo("real-turn", false);
-      emitEvent({ agent, chatId: ch, type: "agent_status", data: { status: "thinking" } });
-      emitEvent({ agent, chatId: ch, type: "tool_start", data: { toolId: "long-shell", name: "exec_command" } });
-      await Bun.sleep(2);
-      sendTo("queue-failed", true);
-      calls.length = 0; later.length = 0;
-      await fail(ch, "queue-failed");
-      await Bun.sleep(2);
+    test("长工具 + 事件环被 bg_task 挤掉：原生回合还开着——保持 thinking", async () => {
+      const ch = "r6-evicted";
+      codexMark(ch, "task_complete", "prev");
+      send(ch, "A", false); thinking(ch); codexMark(ch, "task_started", "A-turn");
+      emitEvent({ agent: `agent-${ch}`, chatId: ch, type: "tool_start", data: { toolId: "long-shell", name: "exec_command" } });
+      for (let i = 0; i < RING_LIMIT; i++) emitEvent({ agent: `agent-${ch}`, chatId: ch, type: "bg_task_update", data: { id: "bg", progress: i } });
+      send(ch, "B", true);
+      reset();
+      await fail(ch, "B");
       later.at(-1)!();
-      expect(calls).toEqual([]);
-      expect(getAgentStatus(agent)).toBe("thinking");
+      expect(getAgentStatus(`agent-${ch}`)).toBe("thinking");
     });
 
-    test("上次收尾后会话真开过回合（有文字输出、工具已收）——同样不收 done", async () => {
-      const ch = "cx10", agent = "agent-cx10";
-      turnCuts.noteDelivered({
-        from: { kind: "api", tokenId: "tok_y", name: "y" }, to: { kind: "local", channelId: ch, agentName: agent }, intent: "request",
-        content: "y", meta: { messageId: "Y", triggerKind: "api_user", ts: "", threadId: "t" },
-      } as unknown as Envelope, ch, false, true);
-      emitEvent({ agent, chatId: ch, type: "agent_status", data: { status: "thinking" } });
-      emitEvent({ agent, chatId: ch, type: "assistant_text", data: { text: "在想" } });
-      await Bun.sleep(2);
-      calls.length = 0; later.length = 0;
-      await fail(ch, "Y");
-      await Bun.sleep(2);
+    test("没见过任何原生边界（没有基线）：算拿不准——保持 thinking", async () => {
+      const ch = "r6-tool";
+      send(ch, "A", false); thinking(ch);
+      emitEvent({ agent: `agent-${ch}`, chatId: ch, type: "tool_start", data: { toolId: "long-shell", name: "exec_command" } });
+      send(ch, "B", true);
+      reset();
+      await fail(ch, "B");
       later.at(-1)!();
-      expect(calls).toEqual([]);
+      expect(getAgentStatus(`agent-${ch}`)).toBe("thinking");
     });
 
-    test("第 5 轮 P2：bridge 重启后投递记录是空的——agent 按频道查到，照样排上复查；没有动静就收 done", async () => {
-      emitEvent({ agent: "agent-after-restart", chatId: "after-restart", type: "agent_status", data: { status: "thinking" } });
-      calls.length = 0; later.length = 0;
-      await fail("after-restart", "pre-restart-message");
+    test("bridge 重启后没有历史：按频道查到 agent、排上复查，但拿不准——保持 thinking", async () => {
+      emitEvent({ agent: "agent-r6-restart", chatId: "r6-restart", type: "agent_status", data: { status: "thinking" } });
+      reset();
+      await fail("r6-restart", "pre-restart-message");
       expect(later).toHaveLength(1);
-      await Bun.sleep(2);
       later[0]();
-      expect(getAgentStatus("agent-after-restart")).toBe("done");
+      expect(getAgentStatus("agent-r6-restart")).toBe("thinking");
+    });
+
+    test("排在 queue 里的在 A 收尾后开跑（task_started）：D 投失败不收 done", async () => {
+      const ch = "r6-queued";
+      codexMark(ch, "task_complete", "prev");
+      send(ch, "A", false); thinking(ch); codexMark(ch, "task_started", "A-turn");
+      send(ch, "C", true);
+      codexMark(ch, "task_complete", "A-turn"); codexMark(ch, "task_started", "C-turn");
+      send(ch, "D", true);
+      reset();
+      await fail(ch, "D");
+      later.at(-1)!();
+      expect(calls).toEqual([]);
+    });
+
+    test("回合打断（turn_aborted）也算收尾：之后投的唯一一条没投进去——收 done", async () => {
+      const ch = "r6-aborted";
+      codexMark(ch, "task_started", "A-turn"); codexMark(ch, "turn_aborted", "A-turn");
+      send(ch, "E", false); thinking(ch);
+      reset();
+      await fail(ch, "E");
+      expect(calls).toEqual([`typing:${ch}`, `timer:${ch}`]);
     });
 
     test("P2：发送方 agent 断线——回显押进队列才算告诉到（settled 1）；bridge 自己的通知没有回信地址，settled 0", async () => {
