@@ -68,6 +68,7 @@ import {
   listWindows,
   MASTER_SESSION,
 } from "../lib/tmux-helper.js";
+import { clearRefusal, runtimeOfWindow } from "../lib/wall-screen.js";
 import { paneLooksWorking } from "../lib/turn-state.js";
 import { recordMetric } from "../lib/metrics.js";
 import { commandsForAgent } from "./slash-registry.js";
@@ -1295,13 +1296,12 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
     } catch (e) {
       return apiJson(502, { ok: false, error: `tmux 不可达: ${(e as Error).message}` });
     }
-    if (!paneLooksIdle(pane)) {
-      return apiJson(409, { ok: false, error: "agent 正在回合中，先停止（interrupt）再 clear" });
-    }
+    const refusal = clearRefusal(pane, runtimeOfWindow(targetWindow));
+    if (refusal) return apiJson(409, { ok: false, error: refusal }); // 额度菜单 / Codex 选择菜单 / 回合中（lib/wall-screen.ts）
     try {
       await tmuxSendLine(targetWindow, "/clear");
     } catch (e) {
-      return apiJson(500, { ok: false, error: `tmux 发送失败: ${(e as Error).message}` });
+      return apiJson((e as Error).name === "KeysBlockedError" ? 409 : 500, { ok: false, error: `tmux 发送失败: ${(e as Error).message}` });
     }
     recordMetric("agent_clear", { channelId: agent.channelId, agent: agent.name, meta: { trigger: "api" } });
     console.log(`🧹 [api] /clear 已发送给 ${agent.name} (token=${tokenId})`);
@@ -1417,7 +1417,7 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
         if (r.outcome === "timeout") warnings.push("没等到 /effort 落地,以会话实际显示为准");
       }
     } catch (e) {
-      return apiJson(500, { ok: false, error: `tmux 发送失败: ${(e as Error).message}` });
+      return apiJson((e as Error).name === "KeysBlockedError" ? 409 : 500, { ok: false, error: `tmux 发送失败: ${(e as Error).message}` });
     }
     {
       // 乐观显示:注入已成功,列表立即按新值显示;jsonl 实测追上后自动接管

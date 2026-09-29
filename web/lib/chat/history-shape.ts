@@ -148,7 +148,7 @@ export function askAnchor(messages: readonly ChatMessage[], askId: string | unde
 function userMessage(m: NeutralMessage, anchor: ChatMessage | null, opts: ShapeOpts, forms: FormLookup): ChatMessage {
   const text = m.text || "";
   // CC 写入的中断标记 / TUI 斜杠命令记录不是用户打的字 → 轻分隔线
-  if (/^\[Request interrupted/.test(text)) return systemDivider(m, "已被用户中断", opts.sid);
+  if (/^\[Request interrupted/.test(text)) return systemDivider(m, "回合已中断", opts.sid);
   const cmd = text.match(/^<command-name>(\/[\w-]+)<\/command-name>/);
   if (cmd) return systemDivider(m, cmd[1], opts.sid);
   const from = isSelfSource(m.from, m.fromId, opts.selfIds ?? new Set()) ? undefined : m.from; // 本人的所有来源都不标

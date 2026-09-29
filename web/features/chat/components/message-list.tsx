@@ -52,7 +52,7 @@ const SystemDivider = memo(function SystemDivider({ m }: { m: ChatMessage }) {
   // 否则打开会话/切回对齐时整页一起闪一遍(owner 2026-07-16「更丝滑」)
   const anim = m.id.startsWith("h") ? "" : "chat-msg-in";
   // 历史里的中断记录统一成 TurnMark 同款黄色分隔线(直播/历史视觉一致)
-  if (/^已被用户中断/.test(m.content)) return <TurnMark kind="interrupted" animate={!m.id.startsWith("h")} />;
+  if (/^(已被用户中断|回合已中断|新消息触发)/.test(m.content)) return <TurnMark kind={m.content[0] === "新" ? "preempted" : "interrupted"} animate={!m.id.startsWith("h")} />;
   return (
     <div className={`${anim} relative mb-[22px] flex select-none items-center gap-3`}>
       <GutterTime ts={m.ts} side="left" lead="system" />
@@ -357,7 +357,7 @@ export const Message = memo(function Message({ m, streaming, isLast, awaiting, p
           ——小字行跟着本回合气泡走;历史消息不渲染完成(本来就都完成了)。 */}
       {!streamingLast && (m.turnError || m.turnInterrupted || m.turnDone || m.turnBgPending) && (
         <TurnMark
-          kind={m.turnError ? "error" : m.turnInterrupted ? "interrupted" : m.turnBgPending ? "bg" : "done"}
+          kind={m.turnError ? "error" : m.turnPreempted ? "preempted" : m.turnInterrupted ? "interrupted" : m.turnBgPending ? "bg" : "done"}
           ms={m.turnMs}
           animate={!m.id.startsWith("h")}
         />

@@ -36,8 +36,8 @@ export const interruptGate = createInterruptGate({
   allow: (ch, runtime, stop) => turnCuts.mayBridgeInterrupt(ch, runtime, stop),
   onPreempted: (agent, channelId) => {
     recordMetric("agent_interrupt", { channelId, agent, meta: { trigger: "preempt" } });
-    // 让前端给被掐的回合标「已打断」(与手动停止同一事件形状)
-    emitEvent({ agent, chatId: channelId, type: "agent_status", data: { status: "done", trigger: "interrupt" } });
+    // 保持 interrupt 触发语义供旧客户端识别，cause 让新客户端说清这是新消息自动抢占。
+    emitEvent({ agent, chatId: channelId, type: "agent_status", data: { status: "done", trigger: "interrupt", cause: "preempt" } });
     console.log(`⚡ 抢占打断 ${agent}（人类补充消息优先处理）`);
   },
   sleep: (ms) => Bun.sleep(ms),

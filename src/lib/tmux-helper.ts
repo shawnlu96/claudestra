@@ -7,6 +7,8 @@
 
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { assertKeysAllowed, keysBlockedAt } from "./codex-key-guard.js";
+import { formatTmuxFailure } from "./tmux-failure.js"; export { formatTmuxFailure } from "./tmux-failure.js";
 import { createEscGuard, ESC_LOCK_WAIT_MS } from "./esc-guard.js"; export { ESC_DOUBLE_TAP_MS } from "./esc-guard.js";
 import { acquireLock } from "./file-lock.js";
 import { readProgramInputs, recordProgramInput, type ProgramInput } from "./program-input.js";
@@ -68,13 +70,6 @@ async function runTmux(
   } finally {
     clearTimeout(killer);
   }
-}
-
-/** 单行的失败说明（纯函数，便于单测）。 */
-export function formatTmuxFailure(args: string[], code: number | null, err: string): string {
-  const cmd = `tmux ${args.join(" ")}`;
-  const why = err || (code === null ? "（超时被杀，无输出）" : "（无 stderr 输出）");
-  return `${cmd} 失败（exit ${code ?? "null"}）：${why}`;
 }
 
 /**
@@ -188,9 +183,12 @@ export async function tmuxSendLine(target: string, text: string, delayMs = 100, 
   if (await ensurePaneInteractive(target)) {
     console.log(`⌨️ ${target} 卡在 copy-mode,已 cancel 后注入`);
   }
-  await noteProgramInput(target, text);
+  const inputLog = escFile(await tmuxSendEscape.keyOf(target), "input"); // 要等的（查窗口 id）先等完：最后一次菜单检查和发字之间不能再有等待（T63）
+  await assertKeysAllowed(target, (t) => tmuxCapture(t, 30)); // Codex 停在选择菜单：一个键都不发（lib/codex-key-guard.ts）
+  recordProgramInput(inputLog, text);
   await (strict ? tmuxRawStrict : tmuxRaw)(["send-keys", "-t", target, "-l", "--", text]);
   await Bun.sleep(delayMs);
+  await assertKeysAllowed(target, (t) => tmuxCapture(t, 30)); // 等的这 100ms 里菜单弹出来了：字留在框里，回车不按
   await tmuxRaw(["send-keys", "-t", target, "Enter"]);
 }
 
@@ -211,6 +209,7 @@ export const tmuxSendEscape = createEscGuard({
     try { writeFileSync(escFile(key, "at"), String(at)); } catch { /* 写不了只丢跨进程共享，本进程的记时照样挡双击 */ }
   },
   send: async (t, strict) => void (await (strict ? tmuxRawStrict : tmuxRaw)(["send-keys", "-t", t, "Escape"])), // strict：打断键发不出去要报给按按钮的人
+  blocked: (t) => keysBlockedAt(t, (x) => tmuxCapture(x, 30)), // 等锁、等节流之后再看一眼 Codex 菜单（T63）
   sleep: (ms) => Bun.sleep(ms),
   now: () => Date.now(),
 });

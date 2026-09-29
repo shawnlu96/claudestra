@@ -16,6 +16,7 @@ export async function forwardTool(bridgeRequest: BridgeRequest, args: any) {
 const heldText: Record<string, (target: string) => string> = {
   quota_wall: () => "整机撞了额度（额度闸开着），消息已押住（bridge 重启也不丢），出闸后按序送达，不用重发。",
   wall_menu: (target) => `${target} 停在额度菜单（撞墙等待），bridge 没有发任何键；消息已押住，出闸 / 菜单关掉后送达，不用重发。`,
+  codex_menu: (target) => `${target} 停在 Codex 的选择菜单上，bridge 没有发任何键；消息已押住（bridge 重启也不丢），菜单关掉后按顺序送达，不用重发。`,
 };
 
 /** send_to_agent：从工具分发里原样搬出（分发函数太长） */

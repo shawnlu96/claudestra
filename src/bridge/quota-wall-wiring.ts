@@ -22,6 +22,7 @@ import type { HeldQueue } from "./held-queue.js";
 import { createQuotaWall, type QuotaWall, type WallWindow } from "./quota-wall.js";
 import { newMessageId, newThreadId, type Delivery, type Envelope, type LocalEndpoint } from "./router.js";
 import { holdNotingStop } from "./preempt.js";
+import { holdAtCodexMenu } from "./codex-menu-hold.js";
 import { noteTurnCut, senderTrigger } from "./stop-settle.js";
 import { probeTurn, resolveTurnWindow } from "./turn-probe.js";
 
@@ -144,8 +145,9 @@ export async function holdAtWallWait(env: Envelope, to: LocalEndpoint, agent: st
   const b = bridge;
   if (!b) return null;
   const { win, runtime } = await resolveTurnWindow(to.channelId, b.controlChannelId);
-  if (!win || (runtime ?? DEFAULT_RUNTIME) !== DEFAULT_RUNTIME) return null;
-  const kind = (await windowWallWait(win)) ?? (force ? "wait" : null); // 抓不到画面：认不出，照常投（不因此卡住消息）
+  if (!win) return null;
+  if ((runtime ?? DEFAULT_RUNTIME) !== DEFAULT_RUNTIME) return runtime === "codex" ? holdAtCodexMenu(env, to, agent, win, b.held, stillWanted) : null;
+  const kind = (await windowWallWait(win, runtime)) ?? (force ? "wait" : null); // 抓不到画面：认不出，照常投（不因此卡住消息）
   if (!kind) return null;
   if (stillWanted && !stillWanted()) return { envelope: env, outcome: { kind: "dropped", reason: "已从押后队列撤下" } }; // 别把撤下的押回来（会复活）
   const walled = !!wall?.active();

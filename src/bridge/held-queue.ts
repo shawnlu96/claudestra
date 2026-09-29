@@ -110,6 +110,16 @@ export class HeldQueue extends PersistedMap<HeldItem[]> {
     if (q?.some((i) => i.env === env)) this.set(ch, [...q]);
   }
 
+  /** 放到队首（T63：channel-server 的第二道闸退回的那条，它本该最早送达）；同一封已在队里就不动 */
+  holdFirst(env: Envelope): number {
+    const to = env.to as LocalEndpoint;
+    const cur = this.get(to.channelId) ?? [];
+    if (cur.some((i) => i.env === env)) return cur.length;
+    const q = [{ env, to, heldAt: Date.now() }, ...cur];
+    this.set(to.channelId, q);
+    return q.length;
+  }
+
   /** 按信封的收件方押后，入队时间取现在 */
   holdEnv(env: Envelope, reason?: HeldItem["reason"]): number {
     const to = env.to as LocalEndpoint;
