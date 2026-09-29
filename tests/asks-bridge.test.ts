@@ -18,7 +18,7 @@ import { closeLedger, listEvents, openLedger } from "../src/lib/ledger-store.js"
 import type { Principal } from "../src/lib/principals.js";
 import type { RegistryAgent } from "../src/lib/registry.js";
 import { unwrapChannelMessage } from "../src/lib/session-history.js";
-import { at, LEGACY_STAR_TOKEN, owner, ownerWithMaster, PEER } from "./asks-test-kit.js";
+import { at, guest, LEGACY_STAR_TOKEN, owner, ownerWithMaster, PEER } from "./asks-test-kit.js";
 import { tempLedgerPath } from "./ledger-test-helpers.js";
 
 
@@ -126,6 +126,21 @@ describe("作答 → 答复不抢占", () => {
     expect(delivered).toEqual([]);
   });
 
+  test("答不了的凭据（guest、部分 scope 的 owner 设备）带 askId 点已结案的：也回 409、不投，只说「已结案」不带答案（PR B r2 P1-1）", async () => {
+    const a = (await reply())!;
+    expect(await answerFromChat({ agent: "agent-x", text: "[button:no]", principal: guest("ab"), askId: a.id })).toBeNull(); // 还开着：照旧普通消息
+    await answerFromChat({ agent: "agent-x", text: "[button:go]", principal: owner() });
+    for (const p of [guest("ab"), owner({ agents: ["agent-x"], terminal: false, manage: false })]) {
+      const res = (await answerFromChat({ agent: "agent-x", text: "[button:no]", principal: p, askId: a.id }))!;
+      expect(res.status).toBe(409);
+      expect(await res.json()).toEqual({ ok: false, code: "ask_closed", error: "已结案", askId: a.id });
+    }
+    expect(await answerFromChat({ agent: "agent-x", text: "随便说一句", principal: guest("ab"), askId: a.id })).toBeNull(); // 对不上选项：别的消息
+    // 列表带 full：只有完整列表网页才敢按「查不到 = 早已结案」锁旧按钮
+    const full = async (p: Principal) => ((await (await handleAsksApi(new Request("http://x/api/v1/asks"), "/asks", p))!.json()) as { full: boolean }).full;
+    expect([await full(owner()), await full(guest("ab")), await full(owner({ agents: ["agent-x"], terminal: false, manage: false }))]).toEqual([true, false, false]);
+  });
+
   test("表单同步行 + 补充文字：算作答，补充进 answer.text 与正文", async () => {
     await reply("api:owner:self", [{ type: "multiselect", id: "f", options: [{ label: "甲", value: "a" }, { label: "乙", value: "b" }] }]);
     const res = (await answerFromChat({ agent: "agent-x", text: "[select:f:a,b]\n顺便先别发 release", principal: owner() }))!;
@@ -134,10 +149,12 @@ describe("作答 → 答复不抢占", () => {
     expect(delivered[0].content.split("\n").slice(1).join("\n")).toBe("[select:f:a,b]\n顺便先别发 release");
   });
 
-  test("历史里 trigger=ask_answer 的入站只留 owner 原文；别的入站不动", () => {
+  test("历史里 trigger=ask_answer 的入站：去掉说明行、wire 换成选项人话再接原话，带上 askId（引用条用）；别的入站不动", () => {
     const wrap = (trigger: string, body: string) => `<channel source="claudestra" chat_id="api:owner:self" trigger="${trigger}" user="owner">\n${body}\n</channel>`;
-    expect(unwrapChannelMessage(wrap("ask_answer", "[✅ owner 回复了你 …]\n[button:go]"))?.text).toBe("[button:go]");
-    expect(unwrapChannelMessage(wrap("system", "第一行\n第二行"))?.text).toBe("第一行\n第二行");
+    const head = "[✅ owner 回复了你 12:00 的「待你处理」（ask_abc1）：发吗？选择：✅ 发。下面是 owner 发的原文]";
+    expect(unwrapChannelMessage(wrap("ask_answer", `${head}\n[button:go]`))).toMatchObject({ text: "✅ 发", askId: "ask_abc1" });
+    expect(unwrapChannelMessage(wrap("ask_answer", `${head}\n[button:go]\n只发 Codex`))?.text).toBe("✅ 发\n只发 Codex");
+    expect(unwrapChannelMessage(wrap("system", "第一行\n第二行"))).toEqual({ text: "第一行\n第二行", from: "owner", fromId: undefined, askId: undefined });
   });
 
   test("不接管：没 wire 的普通消息、对不上任何 ask 的 wire、非 owner 凭据（peer / 部分 scope）", async () => {
