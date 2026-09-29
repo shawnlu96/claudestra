@@ -33,7 +33,7 @@ const REDEEM_REPLAY_PER_SENDER = 60;
 const refusalLog = new LogThrottle();
 
 /** peer 请求正文上限：验签要整读，别让对方灌满内存（peer 路径的正文都是小 JSON） */
-const MAX_PEER_BODY = 2 * 1024 * 1024;
+import { MAX_PEER_BODY } from "../lib/request-body.js";
 
 /**
  * 只有经中继进来的 peer 请求才带的标记头。peer 入口靠它决定要不要相信 x-claudestra-relay-from：
@@ -194,7 +194,8 @@ async function forwardTunnel(req: InboundRequest, ctx: InboundContext, d: Inboun
     redirect: "manual",
     signal: ctx.signal,
     ...TUNNEL_FETCH,
-    ...(hasBody ? { body: req.body, duplex: "half" } : {}),
+    // 带正文的不复用连接：本机 Web 提前回了响应、没读完分块正文时，Bun 会让同一条连接上的下一个隧道请求得 400（bridge/unread-body.ts）
+    ...(hasBody ? { body: req.body, duplex: "half", keepalive: false } : {}),
   };
   let r: Response;
   try {

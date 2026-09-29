@@ -25,7 +25,7 @@ import {
   type Boundary, type BoundaryVerdict, type CtxBoundaryView, type GlobalAutoCompact, type SkipReason,
 } from "../lib/ctx-boundary-decision.js";
 import {
-  agentTarget, agentWindowName, compactInjectedRecently, injectCompact, liveInjectDeps, loadInjectState, paneGateOf, resetInjectState, sweepPendingEcho,
+  agentTarget, agentWindowName, compactInjectedRecently, injectCompact, liveInjectDeps, loadInjectState, paneGateOf, resetInjectState, sweepPendingEcho, withWindow,
   type InjectDeps, type InjectResult, type InjectTarget, type PaneCapture,
 } from "./ctx-boundary-inject.js";
 import { MASTER_DIR } from "./config.js";
@@ -219,12 +219,16 @@ export async function ctxBoundaryTick(deps: CtxBoundaryDeps = liveDeps): Promise
   for (const a of await deps.liveSessions(await deps.agents())) {
     const master = isMasterAgent(a.name);
     const b = boundaryFor(a, p, on);
-    if (a.ctx === null || (master && !on) || !overLine(a.ctx, b)) {
+    const ctx = a.ctx;
+    if (ctx === null || (master && !on) || !overLine(ctx, b)) {
       if (!deps.dryRun) lastTrig.delete(a.name);
       lastSkip.delete(a.name);
       continue;
     }
-    out.push({ ...(await checkOne({ ...a, ctx: a.ctx }, b, deps)), gated: master || b.policy !== "global" });
+    // 抓屏、判定、注入都在窗口执行权里：批量动作 / 手动按钮正在这个窗口发键就这轮不看，下一分钟再来
+    const busy = (who: string) => void deps.log(`🧭 上下文边界 跳过 ${a.name}：${who}正在操作这个窗口`);
+    const r = await withWindow(a.target, "自动压缩", () => checkOne({ ...a, ctx }, b, deps), busy);
+    if (r) out.push({ ...r, gated: master || b.policy !== "global" });
   }
   return out;
 }

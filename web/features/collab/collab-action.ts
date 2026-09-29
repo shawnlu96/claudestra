@@ -172,3 +172,9 @@ export function liveIdle(pending: { thinking?: boolean; compacting?: boolean } |
 export function sayGate(working: boolean, text: string, sending: boolean): { canSend: boolean; blockedByWork: boolean } {
   return { canSend: !working && !sending && text.trim().length > 0, blockedByWork: working };
 }
+
+/** 一条任务此刻的动作（节点、手机卡片、详情「参与者」共用） */
+export interface LineAction {
+  kind: ActionKind | "waiting";
+  text: string;
+}
