@@ -95,31 +95,21 @@ interface AuqQuestion {
   options?: { label: string; description?: string }[];
 }
 
-/** AskUserQuestion：每题选一个（多选题可多个），一次提交；也可以取消（等于在终端按 Esc） */
-export function AuqChoices({ questions, busy, onSubmit, onCancel }: { questions: AuqQuestion[]; busy: boolean; onSubmit: (sel: number[][]) => void; onCancel: () => void }) {
-  const t = useT();
-  const [sel, setSel] = useState<number[][]>(() => questions.map(() => []));
-  const pick = (qi: number, oi: number, multi: boolean) =>
-    setSel((s) => s.map((cur, i) => (i !== qi ? cur : multi ? (cur.includes(oi) ? cur.filter((x) => x !== oi) : [...cur, oi]) : [oi])));
-  const ready = !busy && sel.every((s) => s.length > 0);
+/** AskUserQuestion：只读列出问题和选项，作答请到终端（远程提交停用：画面身份核对还证明不了旧卡的下标落在同一个弹框上，bridge/auq-answer.ts） */
+export function AuqOptions({ questions }: { questions: AuqQuestion[] }) {
   return (
     <div className="flex flex-col gap-3">
       {questions.map((q, qi) => (
         <div key={qi} className="flex flex-col gap-1">
           <span className="text-[13px] font-medium">{q.question || q.header}</span>
           {(q.options ?? []).map((o, oi) => (
-            <OptionChip key={oi} on={sel[qi].includes(oi)} label={o.label} description={o.description} disabled={busy} onClick={() => pick(qi, oi, !!q.multiSelect)} />
+            <div key={oi} className="rounded-lg border border-base-content/10 px-2.5 py-1.5 text-[13px]">
+              <span className="font-medium">{oi + 1}. {o.label}</span>
+              {o.description && <span className="ml-1 opacity-60">{o.description}</span>}
+            </div>
           ))}
         </div>
       ))}
-      <div className="flex gap-2">
-        <button type="button" disabled={!ready} className="btn btn-primary btn-sm" onClick={() => onSubmit(sel)}>
-          {t("提交")}
-        </button>
-        <button type="button" disabled={busy} className="btn btn-ghost btn-sm" onClick={onCancel}>
-          {t("取消")}
-        </button>
-      </div>
     </div>
   );
 }

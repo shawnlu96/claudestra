@@ -37,7 +37,7 @@ import { loadAgents as apiLoadAgents, MASTER_AGENT_NAME } from "@/lib/chat/agent
 import { createAgent as apiCreateAgent, lifecycleAction as apiLifecycle } from "@/lib/api/agents";
 import { fetchHistory } from "@/lib/api/history";
 import { openAgentEventStream } from "@/lib/api/stream";
-import { agentTasks, answerAuq, answerPermission, clearAgentSession, interruptAgent, sendErrorText, sendMessage, setHidden, type SendResult } from "@/lib/api/chat";
+import { agentTasks, answerPermission, clearAgentSession, interruptAgent, sendErrorText, sendMessage, setHidden, type SendResult } from "@/lib/api/chat";
 import { getProfile, putProfile } from "@/lib/api/settings";
 import { markRead, projectsList } from "./scoped-requests"; // 非全权设备不发（接口要全权）
 
@@ -2373,27 +2373,6 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
       s.pendingPermission = null;
     });
     return this.postAction(() => answerPermission(agent, action));
-  }
-
-  /** 提交 AskUserQuestion 选择。selections[i]=第 i 题选中的 option index 数组。 */
-  public submitAsk(selections: number[][]): Promise<{ ok: boolean; error?: string }> {
-    return this.answerAsk("submit", selections);
-  }
-
-  /** 取消 AskUserQuestion（给 agent 发 Esc）。 */
-  public cancelAsk(): Promise<{ ok: boolean; error?: string }> {
-    return this.answerAsk("cancel", []);
-  }
-
-  /** 带上这张卡的那一版（代际 + 题面原样），bridge 核对画面对得上才按键（bridge/auq-answer.ts）。成功才收卡：失败留着显示原因、能重试；
-   *  弹框换了的由 bridge 的 question_cleared / 新 question 事件换掉，旧卡不会复活 */
-  private async answerAsk(action: "submit" | "cancel", selections: number[][]): Promise<{ ok: boolean; error?: string }> {
-    const agent = this.state.activeAgent;
-    const ask = this.state.pendingAsk;
-    if (!agent) return { ok: false, error: "无活动会话" };
-    const r = await this.postAction(() => answerAuq(agent, action, selections, { dialogId: ask?.dialogId, questions: ask?.questions }));
-    if (r.ok && this.state.pendingAsk?.id === ask?.id) this.produce((s) => void (s.pendingAsk = null));
-    return r;
   }
 }
 

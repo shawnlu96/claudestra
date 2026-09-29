@@ -11,7 +11,7 @@ import { api, apiStream } from "./client";
 import { selfIds } from "./history";
 
 interface Pending {
-  question: { questions: unknown; ts: number; dialogId?: unknown } | null;
+  question: { questions: unknown; ts: number } | null;
   thinking?: boolean;
   compacting?: boolean;
 }

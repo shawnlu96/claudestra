@@ -1012,12 +1012,12 @@ async function handleInteraction(discord: Client, deps: InteractionDeps, interac
         return;
       }
 
-      // AskUserQuestion 的 select：攒到状态上等 Submit。只认按当前这一版画的那条消息，旧消息上的选择不动状态、把旧消息收掉
+      // AskUserQuestion 的 select（远程作答停用后只剩旧消息会点到）：不动状态、把旧消息收掉，见 auq-answer.ts
       if (free && id.startsWith("auq:") && /:q\d+$/.test(id)) {
         try {
           const [, auqChannel, q] = id.split(":");
           if (!(await import("./auq-answer.js")).auqDiscordSelect(auqChannel, interaction.message.id, parseInt(q.slice(1), 10), interaction.values)) {
-            await interaction.editReply({ content: "⚠️ 这条是上一个弹框的，已作废", components: [] }).catch(() => {}); // 收不掉也无害：它上面的提交同样会被拒
+            await interaction.editReply({ content: "⚠️ 选择框请到终端作答，这条消息上的选择不生效", components: [] }).catch(() => {}); // 收不掉也无害：它上面的提交同样会被拒
           }
         } catch (e) {
           console.error("AUQ select 处理异常:", e);

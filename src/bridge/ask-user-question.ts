@@ -1,5 +1,6 @@
 /**
  * v2.0.19+ AskUserQuestion (Claude Code 内建工具) Discord 化适配。
+ * 现状：远程作答（Discord / 网页替 owner 按键）停用，只发通知、请到终端作答（auq-answer.ts 文件头）；下面第 2-4 步与键位模型留给重新开启时用。
  *
  * 背景：agent 在运行中调 AskUserQuestion 工具 → Claude Code TUI 弹一个多选 modal
  * （`❯ N. [ ] label` 风格 + 横向 section 切换）。手机用户没法 tmux attach 直接按
@@ -147,9 +148,8 @@ export function announceAuq(discord: Client, a: { channelId: string; agentName: 
 }
 
 /**
- * 把这一版 AskUserQuestion 渲染成一条新的 Discord 消息 + components。
- * 1-4 个 question 每个一个 select menu（multiSelect 时 max_values=options.length），最后一行是 Submit / Cancel 按钮。
- * 发完只把 messageId 记在这一版的状态上：发的途中换了一版，这条就不绑任何状态（上面的按钮一律判旧）
+ * 把这一版 AskUserQuestion 渲染成一条新的 Discord 通知：列出问题和选项，请到终端作答——远程作答停用（auq-answer.ts），不带选单和按钮。
+ * 发完只把 messageId 记在这一版的状态上：发的途中换了一版，这条就不绑任何状态
  */
 export async function postAskUserQuestionMessage(discord: Client, state: AuqState): Promise<string | null> {
   const { channelId, questions } = state;
@@ -170,39 +170,11 @@ export async function postAskUserQuestionMessage(discord: Client, state: AuqStat
         return `**Q${i + 1}. ${q.header || q.question}${tag}**\n${q.question}\n${opts}`;
       }),
       ``,
-      `下面每个 Q 用对应的 select menu 选；选完点 ✅ Submit。`,
+      `请到终端作答。`,
     ];
     const body = headerLines.join("\n").slice(0, 1900);
 
-    const rows: any[] = [];
-    // 每个 question 一个 select menu — Discord 最多 5 rows，questions 上限 4，留 1 row 给按钮
-    for (let i = 0; i < questions.length && rows.length < 4; i++) {
-      const q = questions[i];
-      const componentSelect = {
-        type: 3, // STRING_SELECT
-        custom_id: `auq:${channelId}:q${i}`,
-        placeholder: q.multiSelect
-          ? `Q${i + 1} (可多选): ${q.header || q.question}`.slice(0, 150)
-          : `Q${i + 1}: ${q.header || q.question}`.slice(0, 150),
-        min_values: q.multiSelect ? 0 : 1,
-        max_values: q.multiSelect ? q.options.length : 1,
-        options: q.options.map((o, oi) => ({
-          label: `${oi + 1}. ${o.label}`.slice(0, 100),
-          value: String(oi),
-          description: o.description?.slice(0, 100),
-        })),
-      };
-      rows.push({ type: 1, components: [componentSelect] });
-    }
-    rows.push({
-      type: 1,
-      components: [
-        { type: 2, style: 3, label: "✅ Submit", custom_id: `auq:${channelId}:submit` }, // SUCCESS
-        { type: 2, style: 4, label: "❌ Cancel (Esc)", custom_id: `auq:${channelId}:cancel` }, // DANGER
-      ],
-    });
-
-    const msg = await textCh.send({ content: body, components: rows });
+    const msg = await textCh.send({ content: body });
     state.messageId = msg.id;
     return msg.id;
   } catch (e) {

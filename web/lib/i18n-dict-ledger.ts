@@ -15,6 +15,7 @@ export const LEDGER_DICT: Record<string, string> = {
   "已发给 {agent}，它忙完手上这一步就会看到": "Sent to {agent} — it will see it once the current step is done",
   "这件已经处理过了（或已过期）": "Already handled (or expired)",
   "弹框已经换了，这张作废，答新的那张": "The dialog changed — this card is void, answer the new one",
+  "请到终端作答": "Answer in the terminal",
   "没发出去（连不上），再点一次": "Couldn't send (no connection) — tap again",
   "急": "Urgent",
   "可能是授权": "Possibly an authorization",

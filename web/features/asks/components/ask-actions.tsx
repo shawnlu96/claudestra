@@ -1,20 +1,20 @@
 "use client";
 import { useState } from "react";
 import { answerAskCard } from "@/lib/api/asks";
-import { answerAuq, answerPermission } from "@/lib/api/chat";
+import { answerPermission } from "@/lib/api/chat";
 import { ApiError } from "@/lib/api/client";
 import type { WebComponentRow } from "@/lib/chat/events";
 import { useT } from "@/lib/i18n";
 import { activeAnswered, clearAnswered, markAnswered } from "../answer-cooldown";
 import { answeredGroups, rowGroup, wireLabels, type WebAsk } from "../asks-model";
 import { asksStore } from "../asks-store";
-import { AuqChoices, PermissionChoices, ReplyChoices } from "./ask-choices";
+import { AuqOptions, PermissionChoices, ReplyChoices } from "./ask-choices";
 import { AssignedChoices, assignedRejectText, isHumanNodeAsk } from "./assigned-choices";
 import { TerminalIcon } from "./ask-icons";
 
 /**
  * 一张开着的「待你处理」卡的作答区（ask-card.tsx）：reply / 人发起的是按钮行 + 文本框（答不了的凭据只给一句说明），
- * AUQ / 权限走原有的按键端点，Codex 弹框只能去终端（额度用完的只是告知几点恢复，不叫人去终端）。作答一律乐观（asks-store.answer）。
+ * 权限走原有的按键端点；AUQ 只读列出选项、请到终端作答（远程提交停用，bridge/auq-answer.ts），Codex 弹框只能去终端（额度用完的只是告知几点恢复，不叫人去终端）。作答一律乐观（asks-store.answer）。
  */
 export function AskActions({ ask, agent }: { ask: WebAsk; agent: string }) {
   const t = useT();
@@ -24,8 +24,8 @@ export function AskActions({ ask, agent }: { ask: WebAsk; agent: string }) {
   const dialogAgent = ask.fromAgent ?? "";
   const runtime = ask.source === "auq" || ask.source === "permission" || ask.source === "codex";
 
-  // 指派门拒掉的按 code 说（assignedRejectText）。409 另分几种：多行里这一项刚在聊天 / Discord 里答过（其余行还能答，重拉后卡片会收掉它）；
-  // AUQ 作答被拒（画面对不上 / 窗口忙 / 看不到画面，bridge/auq-answer.ts）带 code 和人话原因，照原因说；其余都当整条已结案
+  // 指派门拒掉的按 code 说（assignedRejectText）。409 另分两种：多行里这一项刚在聊天 / Discord 里答过（其余行还能答，重拉后卡片会收掉它），其余都当整条已结案——
+  // 弹框端点的 409（弹框已经没了）不带 code，也归这一类，别把英文原文露给 owner
   // 没到 bridge（断网、中继断了）：别把浏览器的英文原文露给 owner
   const fail = (e: unknown) => {
     if (!(e instanceof ApiError)) return t("没发出去（连不上），再点一次");
@@ -33,7 +33,6 @@ export function AskActions({ ask, agent }: { ask: WebAsk; agent: string }) {
     if (assigned) return assigned;
     if (e.status !== 409) return e.message;
     if (e.code === "ask_stale") return t("弹框已经换了，这张作废，答新的那张");
-    if (ask.source === "auq" && e.code) return e.message;
     return e.code === "ask_part_answered" ? t("这一项刚在别处答过了，已刷新，剩下的还能答") : t("这件已经处理过了（或已过期）");
   };
   // 人 / 系统发起的（指派、审核）没有 agent 可投：只记账
@@ -53,7 +52,6 @@ export function AskActions({ ask, agent }: { ask: WebAsk; agent: string }) {
   const rows = all.filter((r, ri) => !done.has(rowGroup(r, ri)));
   // 权限弹框：按原有端点发键，是谁、选了什么由那个端点当场记进这条 ask
   const pickPermission = (action: string) => run(() => answerPermission(dialogAgent, action), wireLabels(rows, [`[button:${action}]`]));
-  const auqLabels = (sel: number[][]) => (ask.options as { options?: { label: string }[] }[]).flatMap((q, qi) => sel[qi]?.map((oi) => q.options?.[oi]?.label ?? "") ?? []).filter(Boolean);
 
   return (
     <div className="mt-3">
@@ -70,12 +68,13 @@ export function AskActions({ ask, agent }: { ask: WebAsk; agent: string }) {
         />
       )}
       {ask.source === "auq" && (
-        <AuqChoices
-          questions={ask.options as never[]}
-          busy={busy}
-          onSubmit={(sel) => run(() => answerAuq(dialogAgent, "submit", sel, { askId: ask.id, questions: ask.options }), auqLabels(sel))}
-          onCancel={() => run(() => answerAuq(dialogAgent, "cancel", [], { askId: ask.id, questions: ask.options }), [t("取消")])}
-        />
+        <>
+          <AuqOptions questions={ask.options as never[]} />
+          <p className="mt-2 flex items-center gap-1.5 text-[13px] font-medium text-warning">
+            <TerminalIcon />
+            {t("请到终端作答")}
+          </p>
+        </>
       )}
       {ask.source === "permission" && (
         <PermissionChoices rows={rows} busy={busy} onPick={pickPermission} />

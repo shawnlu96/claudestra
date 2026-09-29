@@ -105,7 +105,7 @@ export type WebStreamEvent =
       actions: WebPermAction[];
     }
   | { t: "permission-cleared" }
-  | { t: "ask"; id: string; questions: WebAuqQuestion[]; dialogId?: string }
+  | { t: "ask"; id: string; questions: WebAuqQuestion[] }
   | { t: "ask-cleared" }
   // 后台任务（subagent / bg shell）子会话跟踪：Discord 侧开子区，web 侧渲染折叠面板。
   | ({ t: "bg-start"; id: string; kind: "subagent" | "shell"; title: string } & BgMeta)

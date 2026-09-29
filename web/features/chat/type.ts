@@ -48,8 +48,6 @@ export interface PendingPermission {
 export interface PendingAsk {
   id: string;
   questions: WebAuqQuestion[];
-  /** 这一版弹框的代际：作答时原样带回（没有 = 旧 bridge，作答会被 409 要求刷新） */
-  dialogId?: string;
 }
 
 /** 后台任务（subagent / bg shell）跟踪视图 —— Discord 子区在 web 的对应物。 */

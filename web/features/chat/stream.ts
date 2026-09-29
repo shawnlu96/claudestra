@@ -103,7 +103,7 @@ export function processStreamEvent(sink: StreamSink, evt: WebStreamEvent) {
       sink.setPermission(null);
       break;
     case "ask":
-      sink.setAsk({ id: evt.id, questions: evt.questions, dialogId: evt.dialogId });
+      sink.setAsk({ id: evt.id, questions: evt.questions });
       break;
     case "ask-cleared":
       sink.setAsk(null);

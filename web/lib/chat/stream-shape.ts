@@ -33,11 +33,6 @@ export function mapAuqQuestions(raw: unknown): WebAuqQuestion[] {
   }));
 }
 
-/** AUQ 的代际（bridge AuqState.dialogId）：作答时原样带回，bridge 核对是不是当前这一版（auq-answer.ts） */
-function dialogOf(d: { dialogId?: unknown }): { dialogId?: string } {
-  return typeof d.dialogId === "string" && d.dialogId ? { dialogId: d.dialogId } : {};
-}
-
 /** watcher 事件带的记录坐标（jsonl 行号 seq + 会话 sid）原样透传：前端拿它与历史游标比对判重 */
 function recordSrc(d: Record<string, unknown>): { seq?: number; sid?: string } {
   return { ...(typeof d.seq === "number" ? { seq: d.seq } : {}), ...(typeof d.sid === "string" && d.sid ? { sid: d.sid } : {}) };
@@ -160,7 +155,7 @@ export function translate(evt: BridgeEvent, lang: Lang, selfIds: ReadonlySet<str
     case "chat_message":
       return chatMessage(d, selfIds);
     case "question":
-      return { t: "ask", id: `auq-${evt.seq}`, questions: mapAuqQuestions(d.questions), ...dialogOf(d) };
+      return { t: "ask", id: `auq-${evt.seq}`, questions: mapAuqQuestions(d.questions) };
     case "question_cleared":
       return { t: "ask-cleared" };
     case "auto_deny": {
@@ -197,11 +192,11 @@ export function translate(evt: BridgeEvent, lang: Lang, selfIds: ReadonlySet<str
 }
 
 /** 连流即补发的挂起态：thinking / compacting → status；未答的 AUQ → ask（question 事件可能发生在订阅之前） */
-export function pendingEvents(p: { question?: { questions: unknown; ts: number; dialogId?: unknown } | null; thinking?: boolean; compacting?: boolean }): WebStreamEvent[] {
+export function pendingEvents(p: { question?: { questions: unknown; ts: number } | null; thinking?: boolean; compacting?: boolean }): WebStreamEvent[] {
   const out: WebStreamEvent[] = [];
   if (p.compacting) out.push({ t: "status", status: "compacting" });
   else if (p.thinking) out.push({ t: "status", status: "running" });
-  if (p.question) out.push({ t: "ask", id: `auq-pending-${p.question.ts}`, questions: mapAuqQuestions(p.question.questions), ...dialogOf(p.question) });
+  if (p.question) out.push({ t: "ask", id: `auq-pending-${p.question.ts}`, questions: mapAuqQuestions(p.question.questions) });
   return out;
 }
 

@@ -1503,7 +1503,7 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
     return apiJson(200, {
       ok: true,
       agent: agent.name,
-      question: auq ? { questions: auq.questions, ts: auq.ts, dialogId: auq.dialogId } : null,
+      question: auq ? { questions: auq.questions, ts: auq.ts } : null,
       // thinking 保持「忙」语义(压缩中也算),compacting 单独给出让前端显示「正在压缩上下文」
       thinking: isBusyStatus(status),
       compacting: status === "compacting",

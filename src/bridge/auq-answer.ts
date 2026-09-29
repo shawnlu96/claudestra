@@ -1,5 +1,7 @@
 /**
- * AskUserQuestion 作答的唯一执行点（T65）：网页「待你处理」卡、聊天卡、Discord 三个入口都到这里，替 owner 按键，按安全类对待：
+ * AskUserQuestion 作答的唯一执行点（T65）：网页「待你处理」卡、聊天卡、Discord 三个入口都到这里，替 owner 按键，按安全类对待。
+ * **远程作答现在停用**（answerAuqDialog 第一行就拒、零发键，auqDiscordSelect 也不改状态），只在终端里答：画面身份核对连审三轮都还找得到
+ * 旧卡的下标落到另一个弹框上的路子（最后一条是标题没进身份）。下面整条核对 + 发键链路保留、单测照跑，重新打开要过新一轮安全审查：
  * 1. 提交方必须带上它看到的那一版（网页：题面 + askId / dialogId；Discord：消息 id），和当前状态对上才往下走，缺了一律 409；
  * 2. 拿窗口执行权（ctx-boundary-inject.ts withWindow）→ 抓屏 → 画面上的问题 / 选项 / 描述和这一版逐项对上（lib/auq-pane.ts
  *    auqPaneVerdict）才发键；抓屏失败、画面读不全、对不上、文字折成多行认不出唯一身份，一律 409，零发键；
@@ -61,6 +63,13 @@ export function setAuqAnswerDepsForTest(d?: Partial<AuqAnswerDeps>): void {
   deps = d ? { ...liveDeps, ...d } : liveDeps;
 }
 
+/** 远程作答开关：生产里恒为关（见文件头），只有单测打开它来跑下面的核对链路 */
+let remoteAnswer = false;
+export function setAuqRemoteAnswerForTest(on: boolean): void {
+  remoteAnswer = on;
+}
+const terminalOnly = () => refuse(409, "auq_terminal_only", t("请到终端作答（这次没有按键）", "Answer in the terminal (no keys sent)"));
+
 /** 逐键间隔：批量 send-keys 会被 AUQ 组件吞掉前面的导航键（2026-08-07 实测，答错选项） */
 const KEY_GAP_MS = 120;
 
@@ -98,6 +107,7 @@ function pickSelections(state: AuqState, raw: unknown): number[][] {
 }
 
 export async function answerAuqDialog(i: AuqAnswerInput): Promise<AuqAnswerResult> {
+  if (!remoteAnswer) return terminalOnly(); // 旧客户端、缓存的页面、Discord 旧消息上的按钮也到这里：一律拒
   const state = auqStates.get(i.channelId);
   if (!state) return refuse(404, "auq_gone", t("没有待答的选择框（已经答过、取消了或过期了）", "No pending choice dialog (answered, cancelled or expired)"));
   const bad = seenRefusal(state, i);
@@ -179,6 +189,7 @@ function summaryOf(state: AuqState, selections: number[][]): string[] {
 
 /** Discord 上一个 Q 的 select：只认按当前这一版画的那条消息，旧消息上的选择不动状态（返回 false） */
 export function auqDiscordSelect(channelId: string, messageId: string, qIdx: number, values: readonly string[]): boolean {
+  if (!remoteAnswer) return false;
   const state = auqStates.get(channelId);
   if (!state || !messageId || state.messageId !== messageId || !Number.isInteger(qIdx) || qIdx < 0 || qIdx >= state.questions.length) return false;
   const picked = values.map((v) => parseInt(v, 10)).filter((n) => Number.isInteger(n) && n >= 0 && n < state.questions[qIdx].options.length);

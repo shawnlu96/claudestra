@@ -7,7 +7,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { openRuntimeAsk, resetRuntimeAsksForTest } from "../src/bridge/ask-runtime.js";
 import { auqStates, clearAuqState, postAskUserQuestionMessage, registerAuqState, type AuqQuestion, type AuqState } from "../src/bridge/ask-user-question.js";
 import { setAsksForTest, type AsksDeps } from "../src/bridge/asks.js";
-import { answerAuqDialog, auqDiscordSelect, setAuqAnswerDepsForTest, type AuqAnswerInput } from "../src/bridge/auq-answer.js";
+import { answerAuqDialog, auqDiscordSelect, setAuqAnswerDepsForTest, setAuqRemoteAnswerForTest, type AuqAnswerInput } from "../src/bridge/auq-answer.js";
 import { closeAsk, listAsks } from "../src/lib/ledger-asks.js";
 import { closeLedger, openLedger } from "../src/lib/ledger-store.js";
 import { auqPaneVerdict, parseAuqPane, textVerdict } from "../src/lib/auq-pane.js";
@@ -41,6 +41,7 @@ beforeEach(() => {
   const deps: AsksDeps = { clients: new Map(), controlChannelId: "999", hold: () => {}, deliver: async (env) => ({ envelope: env, outcome: { kind: "sent" } }) };
   setAsksForTest({ path, deps, registry: [{ name: "agent-x", channelId: CH, status: "active", projectId: "p" } as RegistryAgent], ownerChats: ["api:owner:self"] });
   resetRuntimeAsksForTest();
+  setAuqRemoteAnswerForTest(true); // 下面测的是核对链路本身；生产里远程作答是关的（最后一组）
   sent = [];
   gate = null;
   setAuqAnswerDepsForTest({
@@ -51,6 +52,7 @@ beforeEach(() => {
   });
 });
 afterEach(() => {
+  setAuqRemoteAnswerForTest(false);
   clearAuqState(CH);
   setAuqAnswerDepsForTest();
   setAsksForTest(undefined);
@@ -277,5 +279,36 @@ describe("画面比对（lib/auq-pane.ts auqPaneVerdict / textVerdict）", () =>
     expect(auqPaneVerdict([{ ...qq, multiSelect: true }], { ...p, form: "tabbed", multiSelect: true })).toBe("match");
     const wrapped = { ...p, options: p.options.map((o, i) => (i ? o : { ...o, descLines: ["Cancel 的", "说明"] })) };
     expect(auqPaneVerdict([qq], wrapped)).toBe("ambiguous");
+  });
+});
+
+describe("远程作答停用（生产默认）：三个入口都拒、零发键、不改状态", () => {
+  const header = (h: string): AuqQuestion => ({
+    question: "Proceed with this operation?", header: h, multiSelect: false, options: [{ label: "Yes", description: "Continue" }, { label: "No", description: "Stop" }],
+  });
+  const destroyPane = [" ☐ Destroy", "", "Proceed with this operation?", "", "❯ 1. Yes", "     Continue", "  2. No", "     Stop", "", "Enter to select · ↑/↓ to navigate · Esc to cancel"].join("\n");
+
+  test("聊天卡（dialogId）、「待你处理」卡（askId）、Discord（消息 id）的提交和取消：一律 409 auq_terminal_only，零发键", async () => {
+    setAuqRemoteAnswerForTest(false);
+    const st = register(header("Preview"));
+    st.messageId = "m-preview";
+    await openRuntimeAsk({ source: "auq", channelId: CH, agentName: "agent-x", kind: "decide", title: "Proceed", context: "", options: st.questions, dialogId: st.dialogId });
+    const [card] = listAsks(openLedger(path), { source: "auq" });
+    screen = destroyPane; // 换了标题的新弹框（最后一轮对抗审查的反例）
+    const tries: AuqAnswerInput[] = [
+      web(st, { selections: [[0]] }),
+      web(st, { action: "cancel" }),
+      web(st, { selections: [[0]], seen: { askId: card!.id, questions: card!.options } }),
+      web(st, { action: "cancel", seen: { askId: card!.id, questions: card!.options } }),
+      { channelId: CH, agentName: "agent-x", action: "submit", via: "discord", who: { principal: "discord:u1" }, seen: { messageId: "m-preview" } },
+      { channelId: CH, agentName: "agent-x", action: "cancel", via: "discord", who: { principal: "discord:u1" }, seen: { messageId: "m-preview" } },
+      { ...web(st), seen: {} }, // 旧客户端什么都不带
+    ];
+    for (const i of tries) expect(await answerAuqDialog(i)).toMatchObject({ ok: false, status: 409, code: "auq_terminal_only" });
+    expect(auqDiscordSelect(CH, "m-preview", 0, ["0"])).toBe(false);
+    expect(sent).toEqual([]);
+    expect(auqStates.get(CH)).toBe(st);
+    expect(st.selections).toEqual([[]]);
+    expect(listAsks(openLedger(path), { source: "auq" })[0]!.state).toBe("open");
   });
 });
