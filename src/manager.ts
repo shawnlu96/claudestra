@@ -107,7 +107,8 @@ import { runProjectCommand } from "./manager/projects.js";
 import { cmdCronAdd, cmdCronList, cmdCronEdit, cmdCronRemove, cmdCronToggle, cmdCronHistory } from "./manager/cron.js";
 import { cmdPermissions } from "./manager/permissions.js";
 import { cmdTokenAdd, cmdTokenList, cmdTokenRevoke } from "./manager/tokens.js";
-import { cmdPeerHttpInvite, cmdPeerHttpJoin, cmdPeerHttpAccept, cmdPeerHttpTest, cmdPeerHttpList, cmdPeerHttpScope, cmdPeerHttpRemove, cmdPeerInviteNew, cmdPeerInviteList, cmdPeerInviteRevoke, cmdPeerInviteRedeem, cmdPeerJoinAuto } from "./manager/peers.js";
+import { cmdPeerHttpInvite, cmdPeerHttpJoin, cmdPeerHttpAccept, cmdPeerHttpTest, cmdPeerHttpList, cmdPeerHttpScope, cmdPeerHttpRemove, cmdPeerInviteNew, cmdPeerInviteList, cmdPeerInviteRevoke } from "./manager/peers.js";
+import { cmdPeerInviteRedeem, cmdPeerJoinAuto, parseRedeemArgs } from "./manager/peer-join.js";
 import { cmdCost, cmdMetrics } from "./manager/cost.js";
 import { cmdAutoUpdate } from "./manager/auto-update.js";
 import { cmdWebRelease, maybeBuildWeb } from "./manager/web-release.js";
@@ -3321,20 +3322,7 @@ switch (cmd) {
   }
   case "peer-invite-list": await cmdPeerInviteList(); break;
   case "peer-invite-revoke": await cmdPeerInviteRevoke(args[0] || ""); break;
-  case "peer-invite-redeem": {
-    let join = "", name = "", url = "", token = "", iid = "", fp = "";
-    for (let i = 0; i < args.length; i++) {
-      const a = args[i];
-      if (a === "--join") join = args[++i] || "";
-      else if (a === "--name") name = args[++i] || "";
-      else if (a === "--url") url = args[++i] || "";
-      else if (a === "--token") token = args[++i] || "";
-      else if (a === "--iid") iid = args[++i] || "";
-      else if (a === "--fp") fp = args[++i] || ""; // 经中继兑换时 bridge 带上的对方指纹
-    }
-    await cmdPeerInviteRedeem(join, name, url, token, iid, fp);
-    break;
-  }
+  case "peer-invite-redeem": await cmdPeerInviteRedeem(parseRedeemArgs(args)); break;
   case "peer-join-auto": {
     const { rest: afterForce, value: force } = extractBoolFlag(args, "--force");
     let agentsCsv = "", myUrl = "", peerUrl = "";

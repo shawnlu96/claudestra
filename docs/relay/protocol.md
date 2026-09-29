@@ -179,14 +179,35 @@ claudestra-relay-auth-v2
 
 1. `x-claudestra-key` 形状合法，且 `keyFingerprint(key) === from`；否则 `error bad_signature`。`from` 由中继按握手结果盖章，别的实例顶不了 A 的钥匙，中继虽能盖任意 `from` 却签不出 A 的签名。
 2. 按 `instance-key.ts` 的 canonical 验：`claudestra-req-v1\n<METHOD>\n<path>\n<ts>\n<sha256(body) hex>`，body 是完整请求正文的原始字节（流式正文先收齐再验——peer 路径的正文都是小 JSON）；偏差 ±300 秒。`x-claudestra-sig` MUST 是规范的无填充 base64url（86 个字符，解码再编码与原串一致），否则同一个签名能写成多种串。不过 → `bad_signature`。
-3. 防重放：非 GET / HEAD 的签名（按解码后的字节比较）在它的有效期内（签名时间 + 300 秒）见过，→ `error replay`；时间戳早于本进程启动（缓存不落盘）→ `error bad_signature`，message 提示发起方时钟慢、先对时。缓存只收验签通过的签名，按发件人分桶：一个发件人 2000 条、整体 5 万条未过期，满了拒新请求（`error replay_full`）并告警，不挤掉未过期的条目；一个发件人灌满只拒它自己。
-4. 核发件人（`lib/peer-trust.ts` `relayPeerRefusal`）：兑换邀请之外，`from` MUST 是本机联系人（peers.json 里未禁用、记有指纹的对方）；带了 peer token（Bearer 或 events 的 `?token=`）的，token 所属 peer 的期望指纹 MUST 等于 `from`。否则 `error sender_forbidden`。签名只证明请求出自 `from`，这一步才证明 token 是 `from` 的。
+3. 核发件人（`lib/peer-trust.ts` `relayPeerRefusal`）：兑换邀请之外，`from` MUST 是本机联系人（peers.json 里未禁用、记有指纹的对方），而且 MUST 带 peer token（Bearer 或 events 的 `?token=`）；token 所属 peer 的期望指纹 MUST 等于 `from`；记录里存了对方完整公钥的，`x-claudestra-key` MUST 就是那一把（不只比 64 位指纹）。否则 `error sender_forbidden`。签名只证明请求出自 `from`，这一步才证明 token 是 `from` 的。
+4. 防重放：非 GET / HEAD 的签名（按解码后的字节比较）在它的有效期内（签名时间 + 300 秒）见过，→ `error replay`；时间戳早于本进程启动（缓存不落盘）→ `error bad_signature`，message 提示发起方时钟慢、先对时。**只在第 3 步通过后才写缓存**：被拒的请求一条都不进，非联系人签名再合法也占不到位置。兑换帧（非联系人也能发）记在单独的小缓存里（整体 500 条、每个发件人 60 条），满了只拒兑换。联系人的缓存按发件人分桶：一个发件人 2000 条、整体 5 万条未过期，满了拒新请求（`error replay_full`）并告警，不挤掉未过期的条目；一个发件人灌满只拒它自己。
 
-验过后打到本机 **peer 专用回环入口**（`src/bridge/peer-ingress.ts`，端口 `.env` 的 `PEER_INGRESS_PORT`），头里去掉 hop-by-hop、`host`、`content-length`、`x-forwarded-*` 与发起方自带的 `x-claudestra-relay-*`，加 `x-claudestra-relay-from: <from>` 与只有本进程知道的标记头；peer 入口核对标记后把 `from` 放进请求上下文、两个头一律剥掉，bridge 只从上下文读来源指纹（主端口、旧 web 端口带来的同名头不起作用）。bridge 再按 peer token 与 scope 放行，并对 peer token 强制验签：签名钥匙的指纹 MUST 等于这个 peer 的期望指纹（peers.json 的 `fp` → `relay://<fp>` 基址 → 首次签名时钉住的指纹），不签、签错、过期、换了钥匙都 401；直连（不经中继）的 peer 请求同样如此。验签通过的非 GET / HEAD 签名在有效期内只认一次（与第 3 步同一个 `ReplayCache` 实现，按 peer 分桶；bridge 另持一份，所有入口共用，在限速之后才写），重放 → 401。peer 先验签再扣限速；验签失败另有一个每 peer 每分钟 120 次的桶，超了 429（`reason: sig_rate_limited`，`cause` 是这次失败的原因；不占成功请求的额度）。不限速的路由（远程终端）不收 peer token，一律 403。三样都没有的老 peer 在截止日（默认 2026-11-01，`PEER_LEGACY_DEADLINE` 可覆盖）前放行并告警（doctor 会列出来）。经中继来的请求（路径模式 §6 与 §4.2 的隧道，bridge 里来源都是 relay）不收 peer token，也不接兑换邀请，一律 403。直连兑换时，bridge 用兑换请求自带签名的钥匙指纹作为这个 peer 的 `fp`（经中继兑换用 `from`），之后按它验签。兑换带来的实例 id 命中已有记录时，只有这个指纹等于那条记录的期望指纹才合并；对不上（含没签名、那条记录没有期望指纹）则拒绝兑换（`code: iid_taken`），不建第二条同实例 id 的记录，原记录与它的 token 不动（实例 id 是自报的，不能凭它改掉别人的指纹）。
+目标地址用 `new URL(path, 入口基址)` 构造并断言与基址同源（`relay-inbound.ts` `localUrl`）：`path` MUST 以单个 `/` 开头（`//`、`/\`、`@host`、不带斜杠的一律 `error path_forbidden`），帧里的 `path` 改不了目标主机。隧道请求（§4.2）同样如此。
+
+验过后打到本机 **peer 专用回环入口**（`src/bridge/peer-ingress.ts`，端口 `.env` 的 `PEER_INGRESS_PORT`），头里去掉 hop-by-hop、`host`、`content-length`、`cookie`、设备头 `x-cstra-device`、`x-forwarded-*` 与发起方自带的 `x-claudestra-relay-*`，加 `x-claudestra-relay-from: <from>` 与只有本进程知道的标记头；peer 入口核对标记后把 `from` 放进请求上下文、两个头一律剥掉，bridge 只从上下文读来源指纹（主端口、旧 web 端口带来的同名头不起作用）。
+
+peer 入口按 socket 来源分四类：回环 socket、没有中继标记 = 本机反代（`tailscale serve` 把 `/api/v1` 挂在这里，网页经 HTTPS 入口也走它），按主端口经反代对待（来源 `lan`，设备 cookie 照认——这一类成立的前提是上面的同源断言）；中继 peer 帧与非回环 socket（`PEER_INGRESS_PUBLIC=1` 对外直连）来源是 `peer-ingress`，删掉 cookie 与设备头，不带凭据只放兑换（`POST /api/v1/peers/redeem`）与邀请页（`GET /api/v1/invite`），设备端点与设备凭据一律 403；`legacy-session` 只认本机与主端口。
+
+bridge 再按 peer token 与 scope 放行，并对 peer token 强制验签：签名钥匙的指纹 MUST 等于这个 peer 的期望指纹（peers.json 的 `fp` → `relay://<fp>` 基址 → 首次签名时钉住的指纹；记了完整公钥 `publicKey` 的只认这一把），不签、签错、过期、换了钥匙都 401；公钥与签名都只认规范的无填充 base64url。直连（不经中继）的 peer 请求同样如此。顺序是：验签 → 防重放（非 GET / HEAD 的签名在有效期内只认一次；bridge 另持一份 `ReplayCache`，所有入口共用）→ 记下验签结果 → 扣成功请求的限速额度；重放 401，不扣额度、不写 `peer-keys.json`。验签失败另有一个每 peer 每分钟 120 次的桶，超了 429（`reason: sig_rate_limited`，`cause` 是这次失败的原因）；失败只记在内存，由定时器每分钟最多补写一次，钉住的钥匙不动。不限速的路由（远程终端）不收 peer token，一律 403。三样都没有的老 peer 在截止日（默认 2026-11-01，`PEER_LEGACY_DEADLINE` 可覆盖）前放行并告警（doctor 会列出来）；截止日之后一律拒（`reason: unanchored`），签名对得上也不再现钉。邀请里带的 token 在兑换之前只能读（`invite_read_only`），邀请过期或撤销即失效（`invite_expired`，不等清扫）。经中继来的请求（路径模式 §6 与 §4.2 的隧道，bridge 里来源都是 relay）不收 peer token，也不接兑换邀请，一律 403；控制面闸门看到隧道标记就不当本机，不单靠 XFF。
+
+直连兑换时，bridge 用兑换请求自带签名的钥匙（指纹与完整公钥）记下这个 peer（经中继兑换用 `from` 与已核过的签名钥匙）。兑换带来的实例 id 命中已有记录时，只有这把钥匙等于那条记录的期望钥匙才合并；对不上（含没签名、那条记录没有期望指纹）则拒绝兑换（`code: iid_taken`），不建第二条同实例 id 的记录，原记录与它的 token 不动；同一张邀请被这样拒满 3 次就作废并吊销内嵌 token。兑换端点的限速先核 join 口令再计数：口令不对的按来源（中继发件人指纹 / socket 地址）分桶，每个来源每分钟 10 次；口令对的进全局桶（每分钟 30 次）。
 
 ### 4.2 隧道请求（`from: "relay"`）
 
 实例把它原样重放到本机 Web（`http://127.0.0.1:<WEB_PORT>`，默认 3333），路径不限、不验签（浏览器没有实例密钥；身份由 Web 自己的会话 cookie 决定，与今天 Tailscale 直连一样）。头里 `host` 设为中继盖的 `x-forwarded-host`（= `<slug>.<base>`，front 已剥掉浏览器自带的 `x-forwarded-*`），保留 `x-forwarded-*`，且 `x-forwarded-for` MUST 非空（中继没给或给了空值就写 `unknown`：本机 Web 端口可能由 bridge 接管，bridge 只把「回环且无 XFF」认作本机进程，隧道请求绝不能落进这一档），去掉帧里除 `x-claudestra-relay-base` 之外的 `x-claudestra-*` 头，再加上只有本进程知道的隧道标记头（bridge 主端口 / 接管的旧 web 端口认出它就把来源定成 relay，与路径模式同等对待：peer token 403、不算本机、不算同机），去掉 hop-by-hop、`content-length` 与 `accept-encoding`（让 Web 回未压缩正文：实例侧 fetch 会解码，再带着 `content-encoding` 浏览器会解两次）。响应去掉 `content-encoding`；`location` 若以 `http://<slug>.<base>` 或 `http://127.0.0.1:<WEB_PORT>` 开头 MUST 改写为 `https://<slug>.<base>`（Web 在明文端口上算出的绝对地址，浏览器连不到）。
+
+### 4.3 一键邀请的持钥证明（协议新增字段）
+
+邀请串里的 `fp`、`iid` 是邀请方自报的，谁都能抄进自己的邀请。加入方要把新联系人合进已有记录、或记下对方的指纹 / 实例 id，凭的是邀请方的**持钥证明**（`lib/invite-proof.ts`）：
+
+| 位置 | 字段 | 规定 |
+|---|---|---|
+| 兑换请求正文 | `nonce` | 加入方每次兑换现生成的 128 位随机数（base64url，≥ 22 个字符），只在这一次兑换里认 |
+| 兑换回复 | `proof: { key, sig }` | 邀请方的实例公钥与签名。签的是 `claudestra-invite-pop-v1\n<nonce>\n<join 口令>\n<兑换方指纹>\n<邀请方实例 id>`；用途前缀让它挪不成请求签名（请求签名第一行是 `claudestra-req-v1`），也挪不到别的用途 |
+| 兑换回复 | `iid` | 邀请方实例 id（签在证明里） |
+| peers.json 记录 | `publicKey` | 对方完整公钥（兑换签名或持钥证明得来）；有它验签只认这一把 |
+
+邀请方只在兑换成功、知道兑换方是谁（签名核过）且请求带了 `nonce` 时签。加入方核对：证明签名对得上本次的 `nonce`、口令、自己的指纹；签名钥匙的指纹 MUST 等于邀请里写的 `fp`（和 `relay://` 地址里的指纹）。合进已有记录、那条记录有期望指纹时，证明的钥匙 MUST 就是它（记了公钥的比公钥），或者 `relay://` 地址里的指纹就是它；否则拒绝加入并回滚本机记录（老版本邀请方给不出证明也在这里：「对方升级后重新发一张邀请，或者删掉旧联系人再加入」）。指纹、公钥、实例 id 只从证明里取；证明里的实例 id 已属于另一条记录时同样拒绝。没有证明时 `relay://` 地址记地址里的指纹，http 地址什么都不记（按老 peer 验签，截止日后拒）。
 
 ## 5. 目录、slug、配对短码
 
@@ -288,8 +309,8 @@ IP 的取法与握手限流相同：`RELAY_TRUST_PROXY=1` 时取 `X-Forwarded-Fo
 | `stream_idle` / `stream_max` | relay | 流态空闲超时 / 总时长超限 | 不重试 |
 | `peer_disconnected` | relay | 等待期间对方断线 | 不重试 POST |
 | `unknown_request` | relay | `res` / `data` / `end` / `cancel` 对不上 pending（已超时、发起方已断、或 `to` 填错） | 记日志 |
-| `bad_signature` / `replay` / `path_forbidden` / `sender_forbidden` | peer | §4.1 | 不重试 |
-| `replay_full` | peer | §4.1 第 3 步防重放缓存已满 | 稍后重试 |
+| `bad_signature` / `replay` / `path_forbidden` / `sender_forbidden` | peer | §4.1（`path_forbidden` 也用于隧道路径不是本机绝对路径） | 不重试；发起方按原因提示（`lib/peer-auth-hints.ts`），不说成网络不可达 |
+| `replay_full` | peer | §4.1 第 4 步防重放缓存已满（兑换帧另有一份小缓存） | 稍后重试 |
 | `payload_too_large` | peer | peer 请求正文超过接收方上限（bridge 侧 2 MiB；正文要收齐验签，不能无限收） | 不重试 |
 | `local_unreachable` / `local_timeout` | peer | 接收方连不上 / 等不到本机入口 | 不重试 |
 

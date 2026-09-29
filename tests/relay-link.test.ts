@@ -3,15 +3,17 @@
  * 隧道 → 本机 Web、peer → 验签 → peer 入口）、peers.json 里的中继地址与邀请载荷的指纹。
  */
 import { describe, expect, test } from "bun:test";
+import { createPublicKey, generateKeyPairSync } from "node:crypto";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { instanceKeySync, keyFingerprint, signedHeaders } from "../src/lib/instance-key.js";
 import { peerFetch, relayInfo, setRelayClientForTest } from "../src/bridge/relay-link.js";
-import { makeInboundHandler, relayMark, ReplayCache, verifyPeerRequest } from "../src/bridge/relay-inbound.js";
+import { localUrl, makeInboundHandler, recordPeerReplay, relayMark, ReplayCache, verifyPeerSignature } from "../src/bridge/relay-inbound.js";
 import { RelayError, type RelayClient, type RelayRequest, type RelayResponse } from "../src/lib/relay-client.js";
 import { encodePeerInviteV2, inviteLink, isPeerBaseUrl, parsePeerInviteV2, relayPeerFingerprint, relayUrlOf } from "../src/lib/peers.js";
 import { collectBody } from "../src/lib/relay-stream.js";
+import { relayPeerRefusal } from "../src/lib/peer-trust.js";
 import { requestContextOf } from "../src/bridge/request-context.js";
 import { RELAY_MODE_HEADER, RELAY_PREFIX_HEADER } from "../src/lib/relay-machine-path.js";
 import { isDirectLoopback } from "../src/bridge/web-gateway.js";
@@ -124,6 +126,22 @@ describe("入站分流（relay-inbound.ts）", () => {
     expect(isDirectLoopback("127.0.0.1", null)).toBe(true);
     expect(isDirectLoopback("127.0.0.1", "203.0.113.9")).toBe(false);
   });
+  test("隧道路径改不了目标主机：userinfo 形式、无前导斜杠、反斜杠、双斜杠一律 path_forbidden，fetch 一次都不调", async () => {
+    const h = harness(() => new Response("ok"));
+    // 第一条是「隧道改写 path 打到本机 peer 入口」：peer 入口把回环、无中继标记的请求当本机反代（bridge/peer-ingress.ts），靠这里挡住
+    const bad = ["@127.0.0.1:1/api/v1/agents", "@evil.example/x", "evil.example/x", "/\\evil.example/x", "//evil.example/x", "\\\\evil.example/x", ""];
+    for (const path of bad) {
+      await expect(h.handler({ method: "GET", path, headers: {}, body: bodyStream("") }, ctx("relay"))).rejects.toMatchObject({ code: "path_forbidden" });
+    }
+    expect(h.calls).toHaveLength(0);
+    await h.handler({ method: "GET", path: "/a/b?c=//d", headers: {}, body: bodyStream("") }, ctx("relay"));
+    expect(h.calls.map((c) => c.url)).toEqual(["http://127.0.0.1:2/a/b?c=//d"]);
+  });
+  test("localUrl：结果必须与基址同源（peer 入口同样走它）", () => {
+    expect(localUrl("http://127.0.0.1:1", "/api/v1/agents?x=1")).toBe("http://127.0.0.1:1/api/v1/agents?x=1");
+    expect(localUrl("http://127.0.0.1:1/", "/api/v1/../v1/agents")).toBe("http://127.0.0.1:1/api/v1/agents");
+    for (const p of ["@h/api/v1/x", "api/v1/x", "//h/api/v1/x", "/\\h/api/v1/x"]) expect(() => localUrl("http://127.0.0.1:1", p)).toThrow(/absolute path/);
+  });
   test("隧道 POST 带正文流；Web 连不上 → local_unreachable；被取消 → local_timeout", async () => {
     const h = harness((c) => new Response(`got:${c.init.body ? "body" : "none"}`));
     const res = await h.handler({ method: "POST", path: "/api/x", headers: {}, body: bodyStream("payload") }, ctx("relay"));
@@ -154,6 +172,33 @@ describe("入站分流（relay-inbound.ts）", () => {
     const noIngress = harness(() => new Response("x"), null);
     const probe = { method: "GET", path: "/api/v1/agents", headers: signed("GET", "/api/v1/agents"), body: bodyStream("") };
     await expect(noIngress.handler(probe, ctx(myFp))).rejects.toMatchObject({ code: "local_unreachable" });
+  });
+  type PeerReq = { method: string; path: string; headers: Record<string, string>; body: Uint8Array };
+  /** forwardPeer 里的顺序：先验签，（核对联系人之后）再记防重放 */
+  const verifyPeerRequest = (from: string, r: PeerReq, cache: ReplayCache, now: number) => verifyPeerSignature(from, r, now) ?? recordPeerReplay(from, r, cache, now);
+  test("不变量：非联系人发签名合法的 POST，共享缓存条目数不增加；灌满之后联系人照常", async () => {
+    const tempKey = () => {
+      const privateKey = generateKeyPairSync("ed25519").privateKey;
+      return { privateKey, publicKey: String(createPublicKey(privateKey).export({ format: "jwk" }).x) };
+    };
+    const contact = tempKey(), contactFp = keyFingerprint(contact.publicKey);
+    const caches = { peer: new ReplayCache(20), redeem: new ReplayCache(5, undefined, undefined, 2) };
+    const refusePeer = async (from: string, r: { method: string; path: string; headers: Record<string, string> }) =>
+      relayPeerRefusal(from, r, { contacts: new Set([contactFp]), bearerOwner: (t) => (t === "tok" ? { peer: "c", fp: contactFp } : null) });
+    const handler = makeInboundHandler({ webBase: "http://127.0.0.1:2", refusePeer, ingressBase: () => "http://127.0.0.1:1", caches,
+      fetchImpl: (async () => new Response("ok")) as unknown as typeof fetch, now: () => NOW });
+    const post = (k: ReturnType<typeof tempKey>, path: string, body: string, extra: Record<string, string> = {}) =>
+      handler({ method: "POST", path, headers: { ...signedHeaders("POST", path, body, k, NOW), ...extra }, body: bodyStream(body) }, ctx(keyFingerprint(k.publicKey)));
+    for (let i = 0; i < 60; i++) {
+      await expect(post(tempKey(), "/api/v1/agents/a/messages", `{"n":${i}}`, { authorization: "Bearer tok" })).rejects.toMatchObject({ code: "sender_forbidden" });
+    }
+    expect(caches.peer.size).toBe(0);
+    // 兑换帧单独一个小桶：灌满只拒兑换
+    for (let i = 0; i < 5; i++) expect((await post(tempKey(), "/api/v1/peers/redeem", `{"join":"${i}"}`)).status).toBe(200);
+    await expect(post(tempKey(), "/api/v1/peers/redeem", '{"join":"x"}')).rejects.toMatchObject({ code: "replay_full" });
+    expect(caches.peer.size).toBe(0);
+    expect((await post(contact, "/api/v1/agents/a/messages", "{}", { authorization: "Bearer tok" })).status).toBe(200);
+    expect(caches.peer.size).toBe(1);
   });
   test("verifyPeerRequest：缺头 / 指纹不符 / 签名不对 / 过期 / 重放", () => {
     const cache = new ReplayCache();

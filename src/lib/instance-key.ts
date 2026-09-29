@@ -17,9 +17,12 @@ export interface InstanceKey {
   privateKey: KeyObject;
 }
 
-/** 协议里收到的公钥只认这种形状 */
+/**
+ * 协议里收到的公钥只认这种形状，而且只认规范编码：末字符有两位不参与解码，一把钥匙本来能写成四种串，
+ * 钉住、比对都按原串做，多种写法会被当成换了钥匙（与签名同口径，见 isCanonicalSig）
+ */
 export function isPublicKey(v: unknown): v is string {
-  return typeof v === "string" && /^[A-Za-z0-9_-]{43}$/.test(v) && Buffer.from(v, "base64url").length === 32;
+  return typeof v === "string" && /^[A-Za-z0-9_-]{43}$/.test(v) && Buffer.from(v, "base64url").toString("base64url") === v;
 }
 
 /** 给人核对用的指纹：公钥 sha256 的前 16 位十六进制，四位一组 */
@@ -89,6 +92,30 @@ export function signedFor(method: string, url: string, body: string | Uint8Array
     return signedHeaders(method, u.pathname + u.search, body);
   } catch {
     return {}; // 地址本身有问题，请求自己会失败并按原逻辑报错；签名不是这里该报的事
+  }
+}
+
+/**
+ * 按用途签一段文本（不是 HTTP 请求）：第一行是用途前缀，签给一种用途的签名挪不到另一种用途、也挪不成请求签名
+ * （请求签名的第一行固定是 claudestra-req-v1）。字段里不许有换行，否则字段边界能被挪动。
+ */
+function purposeMessage(purpose: string, fields: string[]): Buffer | null {
+  if (!/^claudestra-[a-z-]+-v\d+$/.test(purpose) || purpose === "claudestra-req-v1" || fields.some((f) => /[\r\n]/.test(f))) return null;
+  return Buffer.from([purpose, ...fields].join("\n"));
+}
+
+export function signPurpose(purpose: string, fields: string[], key = instanceKeySync()): { key: string; sig: string } | null {
+  const msg = purposeMessage(purpose, fields);
+  return key && msg ? { key: key.publicKey, sig: sign(null, msg, key.privateKey).toString("base64url") } : null;
+}
+
+export function verifyPurpose(publicKey: string, purpose: string, fields: string[], sig: string): boolean {
+  const msg = purposeMessage(purpose, fields);
+  if (!msg || !isPublicKey(publicKey) || !isCanonicalSig(sig)) return false;
+  try {
+    return verify(null, msg, createPublicKey({ key: { kty: "OKP", crv: "Ed25519", x: publicKey }, format: "jwk" }), Buffer.from(sig, "base64url"));
+  } catch {
+    return false; // 公钥解析不了：和签名对不上是一回事
   }
 }
 

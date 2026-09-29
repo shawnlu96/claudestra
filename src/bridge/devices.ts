@@ -85,6 +85,8 @@ function pairFailure(reason: "invalid" | "expired" | "rate_limited"): Response {
 
 export async function handleDevicesPublic(req: Request, url: URL): Promise<Response | null> {
   const p = url.pathname;
+  // 正向白名单：本机、主端口（含本机反代）、中继路径模式才有配对；peer 入口（对外直连 / 中继 peer 帧）一律拒
+  if (p.startsWith("/api/v1/devices/") && !DEVICE_SOURCES.has(requestContextOf(req).source)) return forbidden("device endpoints are not available on the peer entrance");
   if (p === "/api/v1/devices/pair/challenge" && req.method === "GET") {
     return apiJson(200, { ok: true, ...challenges.issue(), fp: machineFp(), machineName: hostname() });
   }
@@ -95,16 +97,19 @@ export async function handleDevicesPublic(req: Request, url: URL): Promise<Respo
   return null;
 }
 
+const DEVICE_SOURCES: ReadonlySet<string> = new Set(["loopback", "lan", "relay"]);
+
 /**
  * 旧 web 的登录 cookie（cstra_session）→ 一次性换 owner 全权设备凭据（lib/legacy-web.ts）：从旧 web 服务升上来的机器，
- * 已登录的浏览器 / iOS App 不用重新配对。只在直托管同源成立——经中继来的（路径模式只放 cstra_dev、子域名隧道来源是 relay）一律 404。
+ * 已登录的浏览器 / iOS App 不用重新配对。只在直托管同源成立：只认本机与主端口（含本机反代）的来源，其余（中继路径模式、
+ * 子域名隧道、peer 入口）一律 404。
  * 会话 id 是 nanoid(32)（≈190 位）且只能换一次，不另设限流。
  */
 async function legacySession(req: Request): Promise<Response> {
   if (!req.headers.get(DEVICE_HEADER)) return forbidden(`${DEVICE_HEADER} header required`);
   const ctx = requestContextOf(req);
   const sid = cookieValueFrom(req.headers.get("cookie"), LEGACY_SESSION_COOKIE);
-  if (!sid || ctx.source === "relay") return apiJson(404, { ok: false, error: "no legacy session", code: "no_legacy_session" });
+  if (!sid || (ctx.source !== "loopback" && ctx.source !== "lan")) return apiJson(404, { ok: false, error: "no legacy session", code: "no_legacy_session" });
   if (!redeemLegacySession(webDb(), sid)) return apiJson(401, { ok: false, error: "legacy session expired or already used", code: "legacy_session_invalid" });
   const body = await readJsonBody(req);
   const deviceName = str((body === INVALID_JSON || !body ? {} : (body as Body)).deviceName) ?? "升级前已登录的浏览器";

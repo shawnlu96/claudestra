@@ -9,8 +9,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { instanceKeySync, keyFingerprint, signedHeaders } from "../src/lib/instance-key.js";
 import { STATE_DIR } from "../src/lib/paths.js";
-import { authenticateApi, redeemRefusal, redeemSenderFp, relaySenderFp } from "../src/bridge/api-auth.js";
-import { peerAuthHint } from "../src/lib/peer-trust.js";
+import { authenticateApi } from "../src/bridge/api-auth.js";
+import { redeemRefusal, redeemSender, relaySenderFp } from "../src/bridge/peer-redeem.js";
+import { peerAuthHint } from "../src/lib/peer-auth-hints.js";
 import { makeInboundHandler, setSocketRequestContext } from "../src/bridge/relay-inbound.js";
 import { dispatchMachineRequest } from "../src/bridge/relay-dispatch.js";
 import { requestContextOf, setRequestContext } from "../src/bridge/request-context.js";
@@ -102,13 +103,13 @@ describe("兑换邀请：来源与发件人指纹", () => {
   test("直连兑换：签名对得上取签名钥匙指纹；不签 / 正文被换 / 伪造来源头都拿不到；读完正文仍可用", async () => {
     const body = '{"join":"j","name":"n"}';
     const signed = redeem(signedHeaders("POST", "/api/v1/peers/redeem", body, keyQ2), body);
-    expect(await redeemSenderFp(signed)).toBe(fpQ2);
+    expect(await redeemSender(signed)).toEqual({ fp: fpQ2, pk: keyQ2.publicKey });
     expect(await signed.json()).toEqual({ join: "j", name: "n" });
-    expect(await redeemSenderFp(redeem({ "x-claudestra-relay-from": fpP }))).toBe("");
-    expect(await redeemSenderFp(redeem(signedHeaders("POST", "/api/v1/peers/redeem", body, keyQ2), '{"join":"j","name":"other"}'))).toBe("");
+    expect((await redeemSender(redeem({ "x-claudestra-relay-from": fpP }))).fp).toBe("");
+    expect((await redeemSender(redeem(signedHeaders("POST", "/api/v1/peers/redeem", body, keyQ2), '{"join":"j","name":"other"}'))).fp).toBe("");
     const relayed = redeem({});
     setRequestContext(relayed, { source: "lan", clientIp: null, https: false, relayFrom: fpP });
-    expect(await redeemSenderFp(relayed)).toBe(fpP);
+    expect((await redeemSender(relayed)).fp).toBe(fpP);
   });
   test("路径模式 dispatch 出来的请求读不到来源指纹（即使中继在帧里写了）", async () => {
     let fp = "x";

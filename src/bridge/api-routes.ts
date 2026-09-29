@@ -34,7 +34,6 @@ import {
   readPrincipals,
   agentInScope,
   tokenIdOf,
-  SlidingWindowLimiter,
   type Principal,
 } from "../lib/principals.js";
 import { runManager } from "./management.js";
@@ -83,7 +82,8 @@ import { sseEventAllow } from "./ledger-feed.js";
 import { firstFlagLikeField } from "../lib/flag-like.js";
 import { handleRuntimeSettingsRoutes } from "./runtime-settings-routes.js";
 import { trackInboundHandoff } from "./handoff-tracker.js";
-import { authenticateApi, redeemRefusal, redeemSenderFp } from "./api-auth.js";
+import { authenticateApi } from "./api-auth.js";
+import { redeemArgs, redeemPrecheck } from "./peer-redeem.js";
 import { handleDevicesManaged, handleDevicesPublic } from "./devices.js";
 import { apiFeatures, handleExtensionRoutes } from "./api-extensions.js";
 import { revocable } from "./credential-revocation.js";
@@ -290,23 +290,10 @@ export async function sessionTailInfo(path: string): Promise<SessionTailInfo | n
 
 // ── v2.15+ 一键邀请兑换（无 Bearer 的公开端点，见 handleApiRequest 顶部）──
 
-const redeemLimiter = new SlidingWindowLimiter(10, 60_000);
-
 async function handlePeerRedeem(req: Request): Promise<Response> {
-  const refused = redeemRefusal(req); // 经中继隧道 / 路径模式来的兑换一律 403（bridge/api-auth.ts）
-  if (refused || !redeemLimiter.tryAcquire()) return refused ?? apiJson(429, { ok: false, error: "rate limited" });
-  const fromFp = await redeemSenderFp(req); // 对方指纹：经中继的取 peer 入口核过的发件人，直连的取兑换请求的签名钥匙（bridge/api-auth.ts）
-  const body: any = await readJsonBody(req);
-  if (body === INVALID_JSON) return invalidJsonBody();
-  const join = typeof body?.join === "string" ? body.join.trim() : "";
-  const name = typeof body?.name === "string" ? body.name.trim() : "";
-  const peerUrl = typeof body?.url === "string" ? body.url.trim() : "", token = typeof body?.token === "string" ? body.token.trim() : "";
-  const iid = typeof body?.iid === "string" && /^[\w-]{1,64}$/.test(body.iid) ? body.iid : ""; // 对方实例 id：同一对方合进同一条记录
-  if (!join || !name) return apiJson(400, { ok: false, error: '"join" and "name" required' });
-  const r: any = await runManager(
-    "peer-invite-redeem", "--join", join, "--name", name,
-    ...(peerUrl ? ["--url", peerUrl] : []), ...(token ? ["--token", token] : []), ...(iid ? ["--iid", iid] : []), ...(fromFp ? ["--fp", fromFp] : []),
-  );
+  const input = await redeemPrecheck(req); // 来源、口令、按来源限流、对方指纹与公钥（bridge/peer-redeem.ts）
+  if (input instanceof Response) return input;
+  const r: any = await runManager("peer-invite-redeem", ...redeemArgs(input));
   if (r?.ok) {
     recordMetric("peer_managed", { meta: { action: "redeem", peer: r.peer } });
     console.log(`🤝 [api] peer 邀请已兑换: ${r.peer}（scope: ${(r.agents || []).join(",")}）`);

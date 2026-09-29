@@ -37,32 +37,40 @@ export interface HttpPeer {
   instanceId?: string;
   /** 对方实例指纹（lib/instance-key.ts keyFingerprint）：中继的联系人门控与在线状态按它认人；老记录没有 */
   fp?: string;
+  /** 对方完整公钥（签名兑换 / 加入时的持钥证明得来）：有它验签就只认这把钥匙，指纹只作展示与中继寻址 */
+  publicKey?: string;
 }
 
 /**
- * 加入别人的邀请时：这条既有记录是不是邀请方本人。同一出站地址 = 同一个对方（重新加入 / 换 token）；
- * 同一实例 id 且这条还没有「我→他」= 他先连过我，现在补上反方向。已有别的出站地址就不合并：
- * 实例 id 是自报的，一张邀请不能把既有 peer 的流量改道到新地址。两边实例 id 都有却不同 = 不同实例。
- * anchor 是这条记录现在的期望指纹（lib/peer-trust.ts peerAnchorOf）：有就必须等于邀请里的 fp，否则合并会改掉它。
+ * 加入别人的邀请时：这条既有记录是不是邀请方本人（候选；兑换后还要持钥证明确认，lib/invite-proof.ts judgeJoin）。
+ * 同一出站地址 = 同一个对方（重新加入 / 换 token）；这条还没有「我→他」、期望指纹（anchor）等于邀请里的指纹 = 他先连过我，
+ * 现在补上反方向。已有别的出站地址就不合并：一张邀请不能把既有 peer 的流量改道到新地址。
+ * 没有 anchor 的老记录只凭邀请里自报的实例 id 合并（legacyIid，截止日前）；两边实例 id 都有却不同 = 不同实例。
  */
-export function isSameInviter(p: HttpPeer, inv: { url: string; iid?: string; fp?: string }, anchor: string | null): boolean {
+export function isSameInviter(p: HttpPeer, inv: { url: string; iid?: string; fp?: string }, anchor: string | null, legacyIid: boolean): boolean {
   if (p.disabled) return false;
-  if (anchor && anchor !== inv.fp?.toLowerCase()) return false;
+  const claimed = inv.fp?.toLowerCase() || relayPeerFingerprint(inv.url);
+  if (anchor && anchor !== claimed) return false;
   if (inv.iid && p.instanceId && p.instanceId !== inv.iid) return false;
   if (p.baseUrl) return p.baseUrl === inv.url;
-  return !!inv.iid && p.instanceId === inv.iid;
+  if (anchor) return true;
+  return legacyIid && !!inv.iid && p.instanceId === inv.iid;
 }
+
+/** 兑换方的自报与签名核过的身份：fp / pk 来自兑换请求的签名（bridge/peer-redeem.ts redeemSender） */
+type RedeemerClaim = { inTokenId: string; iid?: string; url?: string; fp?: string; pk?: string };
 
 /**
  * 对方兑换我的邀请时：这条既有记录是不是他。同一张邀请 token = 重放（幂等）；同一实例 id 且兑换签名的指纹（fp）
- * 等于这条记录的期望指纹（anchor）= 他重新加入过（旧入站 token 由调用方吊销）。实例 id 谁都能自报，只凭它合并
+ * 等于这条记录的期望指纹（anchor，记了完整公钥的还要公钥相同）= 他重新加入过（旧入站 token 由调用方吊销）。实例 id 谁都能自报，只凭它合并
  * 就能顶掉别人的记录；没有 anchor 或没签名的也不合并（另建一条），换了钥匙只能删掉再邀请。
  * 他带来的地址跟记录里已有的出站地址不同则不合并——理由同上，防改道。
  */
-export function isSameRedeemer(p: HttpPeer, r: { inTokenId: string; iid?: string; url?: string; fp?: string }, anchor: string | null): boolean {
+export function isSameRedeemer(p: HttpPeer, r: RedeemerClaim, anchor: string | null): boolean {
   if (p.inTokenId === r.inTokenId) return true;
   if (p.disabled || !r.iid || p.instanceId !== r.iid) return false;
   if (!anchor || anchor !== r.fp?.toLowerCase()) return false;
+  if (p.publicKey && p.publicKey !== r.pk) return false; // 记了完整公钥的比完整公钥，不只比 64 位指纹
   return !r.url || !p.baseUrl || p.baseUrl === r.url;
 }
 
@@ -70,7 +78,7 @@ export function isSameRedeemer(p: HttpPeer, r: { inTokenId: string; iid?: string
  * 兑换方自报的实例 id 已经属于别的记录、指纹却对不上（没有一条 isSameRedeemer 成立）：拒绝兑换，
  * 不建第二条同实例 id 的记录——之后按实例 id 办事的功能就不必各自防冒名。换了钥匙的本人要删掉旧联系人再重新邀请。
  */
-export function redeemIidTaken(all: HttpPeer[], r: { inTokenId: string; iid?: string; url?: string; fp?: string }, anchorOf: (p: HttpPeer) => string | null): boolean {
+export function redeemIidTaken(all: HttpPeer[], r: RedeemerClaim, anchorOf: (p: HttpPeer) => string | null): boolean {
   if (!r.iid || all.some((p) => isSameRedeemer(p, r, anchorOf(p)))) return false;
   return all.some((p) => !p.disabled && p.instanceId === r.iid);
 }
@@ -95,7 +103,11 @@ export interface PendingInvite {
   url: string;
   createdAt: string;
   expiresAt: string;
+  /** 兑换被拒（实例 id 已绑定别的钥匙）的次数：到 INVITE_MAX_REFUSALS 就作废，一张邀请不能拿来反复试探 */
+  refusals?: number;
 }
+
+export const INVITE_MAX_REFUSALS = 3;
 
 export const INVITE_TTL_MS = 24 * 60 * 60 * 1000;
 

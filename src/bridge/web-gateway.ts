@@ -9,6 +9,7 @@
  */
 
 import { timingSafeEqual } from "crypto";
+import { isLoopbackAddress } from "../lib/same-host.js";
 import { resolveExportedPath, staticResponse, type StaticHit } from "../lib/static-site.js";
 import { fallbackStaticRoots, pinnedStaticRoot } from "../lib/web-releases.js";
 
@@ -123,21 +124,7 @@ export function isOriginExplicitlyAllowed(
  * 合法流量,零影响;要开放远程直连裸路由再设 token)。requestIP 取不到地址(null)
  * 按非回环处理——实测本机回环的 http/ws-upgrade 都稳定返回 127.0.0.1,不会误伤。
  */
-export function isLoopbackAddress(addr: string | null | undefined): boolean {
-  if (!addr) return false;
-  // normalize(review nit-c):大写/十六进制压缩形态也归一。miss 方向本就是
-  // 误拒不是误放(安全无洞),补齐只为不误伤边角形态。Bun requestIP 规范化
-  // 输出下只会是 127.x / ::1 / ::ffff:127.x,后两条是防御性冗余。
-  const a = addr.toLowerCase();
-  return (
-    a === "::1" ||
-    a === "::ffff:127.0.0.1" ||
-    a === "::ffff:7f00:1" ||
-    a === "0:0:0:0:0:ffff:7f00:1" ||
-    a.startsWith("127.") ||
-    a.startsWith("::ffff:127.")
-  );
-}
+export { isLoopbackAddress };
 
 /**
  * 「真本机」= 回环 socket 且没有 X-Forwarded-For。本机反代（Caddy / tailscale serve / 中继子域名隧道）转进来的请求

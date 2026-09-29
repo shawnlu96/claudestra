@@ -1,16 +1,14 @@
 /**
- * HTTP peer 握手与管理命令（peer-http-* / peer-invite-* / peer-join-auto）。
+ * HTTP peer 握手与管理命令（peer-http-* / peer-invite-*；兑换与一键加入在 manager/peer-join.ts）。
  *
  * 从 manager.ts 逐字搬出（函数体未改，只加 export / 改相对路径）。
  */
 import { repoEnvVar } from "../lib/env-file.js";
 import { hostname } from "os";
 import { loadRegistry, output } from "./core.js";
-import { classifyJoinError, joinFailureHint, localTailnetAddr, type JoinFailureKind } from "../lib/peer-join-hints.js";
-import { resolveMyBridgeUrl, scanTailnetBridges } from "./peers-net.js";
-import { instanceIdSync } from "../lib/instance-id.js";
-import { inviteLink, isPeerBaseUrl, relayUrlOf, type PeerInviteV2 } from "../lib/peers.js";
-import { uniquePeerName } from "./peer-names.js";
+import { resolveMyBridgeUrl } from "./peers-net.js";
+import { peerAuthHint } from "../lib/peer-auth-hints.js";
+import { inviteLink, isPeerBaseUrl, relayUrlOf } from "../lib/peers.js";
 import { myFingerprint, peerCliFetch, relayStatus } from "./relay.js";
 
 // ── v2.11+ HTTP peer 握手（docs/design-http-peers.md §3）─────────────────
@@ -22,13 +20,13 @@ function validPeerName(name: string): boolean {
 }
 
 /** 握手串自报名:对方界面上「谁邀请的我」。USER_NAME 是 setup 时配置的称呼。 */
-function selfPeerName(): string {
+export function selfPeerName(): string {
   return repoEnvVar("USER_NAME").trim().replace(/[^\w-]/g, "") || hostname().split(".")[0];
 }
 
 /** invite/join/scope 共用的 scope 校验。external 是正式闸门（owner 2026-09-27）：未开闸的 agent、"*"、master
  *  一律拦。--force 对这些命令已无作用（flag 仍被接受，旧脚本不报错）；规则本体在 lib/peer-scope-gate.ts（有单测）。 */
-async function checkPeerScope(agents: string[], _force: boolean): Promise<{ error?: string; warnings: string[] }> {
+export async function checkPeerScope(agents: string[], _force: boolean): Promise<{ error?: string; warnings: string[] }> {
   const { scopeGateError } = await import("../lib/peer-scope-gate.js");
   const reg = await loadRegistry();
   const error = scopeGateError(agents, reg.agents as Record<string, { external?: boolean | null } | undefined>);
@@ -36,7 +34,7 @@ async function checkPeerScope(agents: string[], _force: boolean): Promise<{ erro
 }
 
 /** 为 peer 签 token 并登记 principal。返回 {tokenId, secret} */
-async function issuePeerToken(peerName: string, agents: string[]): Promise<{ tokenId: string; secret: string }> {
+export async function issuePeerToken(peerName: string, agents: string[]): Promise<{ tokenId: string; secret: string }> {
   const { readPrincipals, writePrincipals, newTokenPrincipal, tokenIdOf } = await import("../lib/principals.js");
   const file = await readPrincipals();
   // 同名 peer 的旧 token 先禁用（重跑握手不留悬空凭据）
@@ -164,7 +162,7 @@ export async function cmdPeerHttpTest(peerName: string) {
     });
     const body: any = await res.json().catch(() => null);
     if (!res.ok) {
-      output({ ok: false, error: `对方返回 ${res.status}: ${body?.error || "未知"}`, hint: res.status === 401 ? (await import("../lib/peer-trust.js")).peerAuthHint(body) : undefined });
+      output({ ok: false, error: `对方返回 ${res.status}: ${body?.error || "未知"}`, hint: [401, 403, 429].includes(res.status) ? peerAuthHint(body) : undefined });
       return;
     }
     const agents = (body?.agents || []).map((a: any) => ({ name: a.name, status: a.status }));
@@ -231,7 +229,7 @@ export async function cmdPeerHttpRemove(peerName: string) {
 
 /** 按 token 短 id 禁用 principal。onlyUnredeemed=true 时仅动 peer 字段仍是
  *  "invite:*" 占位的（已兑换的 token 归 peer 管理面管,不在这里误伤）。 */
-async function disableTokenById(tokenId: string, onlyUnredeemed: boolean): Promise<boolean> {
+export async function disableTokenById(tokenId: string, onlyUnredeemed: boolean): Promise<boolean> {
   const { readPrincipals, writePrincipals } = await import("../lib/principals.js");
   const file = await readPrincipals();
   const p = file.principals.find((x) => x.id === `token:${tokenId}`);
@@ -318,156 +316,4 @@ export async function cmdPeerInviteRevoke(id: string) {
   if (!inv) { output({ ok: false, error: `邀请 "${id}" 不存在（可能已兑换或已过期清扫）` }); return; }
   const revoked = await disableTokenById(inv.inTokenId, true);
   output({ ok: true, revoked: id, tokenDisabled: revoked, note: "邀请串已作废，其内嵌 token 已吊销" });
-}
-
-/** 兑换（我是邀请方,bridge /api/v1/peers/redeem 委托进来）。对方自报 name/url/token/iid——
- *  url+token 可缺:缺 = 这次没给我反方向。iid 命中已有记录、且签名指纹 fp 对得上那条的期望指纹 = 同一个对方,合进那条。 */
-export async function cmdPeerInviteRedeem(joinSecret: string, peerName: string, peerUrl: string, peerToken: string, iid = "", fp = "") {
-  const { findPendingInviteByJoinSecret, removePendingInvite, upsertHttpPeer, inviteExpired, isSameRedeemer, redeemIidTaken } = await import("../lib/peers.js");
-  const { readPrincipals, writePrincipals, tokenIdOf } = await import("../lib/principals.js");
-  if (!joinSecret || !peerName) { output({ ok: false, error: "peer-invite-redeem --join <secret> --name <对方名> [--url <对方地址>] [--token <对方token>]" }); return; }
-  const inv = await findPendingInviteByJoinSecret(joinSecret);
-  if (!inv) { output({ ok: false, error: "邀请无效或已被使用" }); return; }
-  if (inviteExpired(inv)) {
-    await removePendingInvite(inv.id);
-    await disableTokenById(inv.inTokenId, true);
-    output({ ok: false, error: "邀请已过期（24h）——请对方重新生成" });
-    return;
-  }
-  if (peerUrl && !isPeerBaseUrl(peerUrl)) { output({ ok: false, error: "对方 url 必须是 http(s):// 开头或 relay://<对方指纹>" }); return; }
-  const url = peerUrl.replace(/\/+$/, "");
-  const who = { inTokenId: inv.inTokenId, iid, url, fp };
-  const finalName = await uniquePeerName(peerName, (p, anchor) => isSameRedeemer(p, who, anchor), (all, anchorOf) => redeemIidTaken(all, who, anchorOf));
-  if (!finalName) return output({ ok: false, error: "这个实例 id 已绑定另一把钥匙：删掉旧联系人再重新邀请", code: "iid_taken" });
-  // 预签 token 的占位 peer 名改成对方真名——GET /peers 的 principals ⋈ 靠它
-  const file = await readPrincipals();
-  const tok = file.principals.find((x) => x.id === `token:${inv.inTokenId}`);
-  if (!tok || tok.disabled) {
-    await removePendingInvite(inv.id);
-    output({ ok: false, error: "邀请对应的 token 已被吊销" });
-    return;
-  }
-  tok.peer = finalName;
-  tok.name = `peer-${finalName}`;
-  // 一个对方只留一张有效入站 token：同一个人重新加入过，之前那张已被这张取代
-  const superseded = file.principals.filter((x) => x !== tok && x.peer === finalName && !x.disabled);
-  for (const x of superseded) x.disabled = true;
-  await writePrincipals(file);
-  const rec = await upsertHttpPeer({
-    name: finalName, inTokenId: inv.inTokenId,
-    ...(url ? { baseUrl: url } : {}),
-    ...(peerToken ? { outToken: peerToken } : {}),
-    ...(iid ? { instanceId: iid } : {}), ...(fp ? { fp } : {}),
-  });
-  await removePendingInvite(inv.id);
-  output({
-    ok: true, peer: finalName, agents: inv.agents, oneWay: !rec.outToken, inviteId: inv.id,
-    ...(superseded.length ? { revokedTokens: superseded.map(tokenIdOf) } : {}),
-  });
-}
-
-type Reverse = { tokenId: string; secret: string; url: string; note: string; kept?: string[] };
-
-/** 加入时的反向开放（我→他之外再给他一张 token）。这条记录已有有效入站 token 时不重签：
- *  issuePeerToken 会禁用同名旧 token，兑换一旦失败回滚，对方就两头落空；要改范围去卡片里改。 */
-async function prepareReverse(name: string, agents: string[], myUrl: string, force: boolean): Promise<Reverse | { error: string }> {
-  const { readPrincipals } = await import("../lib/principals.js");
-  const cur = (await readPrincipals()).principals.find((x) => x.peer === name && !x.disabled);
-  const none: Reverse = { tokenId: "", secret: "", url: "", note: "" };
-  if (cur) return { ...none, kept: cur.agents, note: agents.length ? "对方本来就能访问你（范围不变，要改在卡片里改）" : "" };
-  if (agents.length === 0) return none;
-  const check = await checkPeerScope(agents, force);
-  if (check.error) return { error: check.error };
-  const relay = myUrl ? null : await relayStatus(), resolved = relay?.connected && relay.fp ? { url: relayUrlOf(relay.fp) } : await resolveMyBridgeUrl(myUrl); // 同 invite-new：连着中继就让对方经中继找我
-  if (!resolved) return { error: "反向开放需要我方对外地址,探测失败——请给 --url" };
-  const issued = await issuePeerToken(name, agents);
-  return { ...issued, url: resolved.url.replace(/\/+$/, ""), note: resolved.note ?? "" };
-}
-
-type RedeemRes = { ok?: boolean; error?: string; agents?: string[]; peer?: string } | null;
-
-/** 回调对方 /peers/redeem。带上本机实例 id：对方据此把我合进他已有的那条记录 */
-async function postRedeem(hs: PeerInviteV2, rev: Reverse): Promise<{ res: RedeemRes; err: string; failKind: JoinFailureKind }> {
-  let res: RedeemRes = null;
-  let err = "", failKind: JoinFailureKind = "other";
-  const iid = instanceIdSync();
-  try {
-    const r = await peerCliFetch(`${hs.url}/api/v1/peers/redeem`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        join: hs.join, name: selfPeerName(),
-        ...(iid ? { iid } : {}),
-        ...(rev.secret ? { url: rev.url, token: rev.secret } : {}),
-      }),
-      signal: AbortSignal.timeout(10_000),
-    });
-    res = (await r.json().catch(() => null)) as RedeemRes; // 回的不是 JSON（反代错页）→ 按失败处理，状态码照样判
-    if (!r.ok || !res?.ok) err = res?.error || `对方返回 ${r.status}`;
-    if (err && r.status >= 400 && r.status < 500) failKind = "rejected";
-  } catch (e) {
-    err = `连不上对方 bridge: ${(e as Error).message}`;
-    failKind = classifyJoinError(e as Error & { code?: unknown });
-  }
-  return { res, err, failKind };
-}
-
-/** 加入（我是被邀方）：粘贴 v2 邀请串一步完成。默认不向对方开放任何 agent
- *  （--agents 显式给才反向开放）——对称访问 = 对方也生成一张邀请给我。 */
-export async function cmdPeerJoinAuto(inviteStr: string, agentsCsv: string, myUrl: string, force: boolean, peerUrlOverride = "") {
-  const { parsePeerInviteV2, parsePeerHandshake, upsertHttpPeer, removeHttpPeer, readPeers, writePeers, findHttpPeer, isSameInviter } =
-    await import("../lib/peers.js");
-  if (!inviteStr) { output({ ok: false, error: "peer-join-auto '<邀请串>' [--agents <a,b>] [--url <我方地址>] [--peer-url <对方地址覆盖>]" }); return; }
-  const hs = parsePeerInviteV2(inviteStr);
-  // v2.16.1 跨 tailnet 纠偏:邀请串嵌的是**发方视角**的 tailscale IP,跨 tailnet
-  // 设备共享下接方看到的是映射地址(2026-07-31 实战:串里 .46,我方视角 .45)。
-  // --peer-url 显式覆盖;连不上时下方兜底扫描会给出候选提示。
-  if (hs && peerUrlOverride.trim()) hs.url = peerUrlOverride.trim().replace(/\/+$/, "");
-  if (!hs) {
-    output({
-      ok: false,
-      error: parsePeerHandshake(inviteStr)
-        ? "这是旧版三步握手的邀请串——用 peer-http-join 走旧流程，或让对方升级后重新生成一键邀请"
-        : "邀请串无法解析（应为 peer-invite-new 输出的 base64 串）",
-    });
-    return;
-  }
-  const agents = agentsCsv.split(",").map((s) => s.trim()).filter(Boolean);
-  // 同地址 / 同实例 id（他先连过我）→ 合进那条；否则撞名后缀防覆盖
-  const finalName = (await uniquePeerName(hs.name, (p, anchor) => isSameInviter(p, hs, anchor)))!; // 没给 refuse，不会是 null
-  const before = structuredClone(await findHttpPeer(finalName));
-  const rev = await prepareReverse(finalName, agents, myUrl, force);
-  if ("error" in rev) { output({ ok: false, error: rev.error }); return; }
-  await upsertHttpPeer({
-    name: finalName, baseUrl: hs.url, outToken: hs.token,
-    ...(hs.iid ? { instanceId: hs.iid } : {}), ...(hs.fp ? { fp: hs.fp } : {}),
-    ...(rev.tokenId ? { inTokenId: rev.tokenId } : {}),
-  });
-  // 回调对方 redeem——失败必须回滚:半截 peer 会在列表里装成能用的样子
-  const { res: redeemRes, err: redeemErr, failKind } = await postRedeem(hs, rev);
-  if (redeemErr) {
-    if (before) {
-      const data = await readPeers();
-      data.httpPeers = (data.httpPeers || []).map((p) => (p.name === finalName ? before : p));
-      await writePeers(data);
-    } else {
-      await removeHttpPeer(finalName);
-    }
-    if (rev.tokenId) await disableTokenById(rev.tokenId, false);
-    // 连接类失败 → 扫 tailnet 同端口找可达的 bridge 候选(只做无凭据的 GET 探测,
-    // 兑换凭据绝不往未确认的地址发)。跨 tailnet 共享的映射地址错位就靠这提示自救。
-    const net = failKind === "timeout" || failKind === "refused";
-    const candidates = net ? await scanTailnetBridges(hs.url).catch(() => [] as string[]) : [];
-    output({ ok: false, error: `加入失败（已回滚）: ${redeemErr}`, failKind,
-      hint: joinFailureHint(failKind, { peerUrl: hs.url, myAddr: net ? await localTailnetAddr() : undefined, candidates }) });
-    return;
-  }
-  output({
-    ok: true, peer: finalName, peerUrl: hs.url,
-    remoteAgents: redeemRes?.agents ?? [],
-    exposedAgents: rev.kept ?? agents,
-    note: `已接入。send_to_agent 目标写法: "<对方agent>@${finalName}"` +
-      (!rev.kept && agents.length === 0 ? "。当前未向对方开放任何 agent——需要对称访问就生成一张自己的邀请发回去。" : ""),
-    ...(rev.note ? { warnings: [rev.note] } : {}),
-  });
 }

@@ -7,7 +7,8 @@
  * 控制面和 ws（宿主 RCE）经 443 交给整个 tailnet。这里从结构上断掉：
  *   - 只调 /api/v1 的处理函数（注入的 handleApi），控制面、ws、远程终端根本不在这个入口上；
  *   - 带了凭据就必须是 peer 签的 token（principal.peer），网页用的全权 token 从这里进不来；
- *     没带凭据只剩兑换邀请（凭一次性 join 口令）和 API 自己回 401。
+ *   - 本机反代转来的（网页经 HTTPS 入口）还认设备 cookie；对外直连与中继 peer 帧只认 peer token，
+ *     不带凭据只剩兑换邀请和邀请页（见 ingressRequest）。
  * 有了它，peer 走 HTTPS 443 就行，3847 不必对外开放、也不用给每个 peer 加防火墙白名单。
  * 没有 HTTPS 的机器，它自己对外当直连入口（ingressHost）——同样只有 peer 能用，主端口照旧只听本机。
  */
@@ -16,6 +17,8 @@ import { configuredPeerIngressPort } from "../lib/bridge-url.js";
 import { repoEnvVar } from "../lib/env-file.js";
 import { relayMark, takeRelayFrom } from "./relay-inbound.js";
 import { setRequestContext } from "./request-context.js";
+import { isLoopbackAddress } from "../lib/same-host.js";
+import { DEVICE_HEADER } from "../lib/devices.js";
 
 export { configuredPeerIngressPort };
 
@@ -48,7 +51,7 @@ type ApiHandler = (req: Request, url: URL) => Promise<Response>;
 /**
  * 纯判定（tests/peer-ingress.test.ts）：入口开在哪。默认只给本机反代用；.env 标了直连
  * （PEER_INGRESS_PUBLIC=1，生成邀请时没有 HTTPS 入口才会标）且确实有 peer（或刚被要求 hold）才对外。
- * 对外也只多出 peer token + 兑换邀请这一小块——主端口的控制面、ws、全权 token 都不在这个入口上。
+ * 对外也只多出 peer token + 兑换邀请 + 邀请页这一小块——主端口的控制面、ws、全权 token、设备凭据都不在这个入口上。
  */
 export function ingressHost(publicFlag: boolean, hasPeers: boolean, holdUntil: number, now: number): Host {
   return publicFlag && (hasPeers || now < holdUntil) ? "0.0.0.0" : "127.0.0.1";
@@ -82,7 +85,7 @@ export async function syncPeerIngress(hold = false): Promise<{ port: number | nu
   if (!port || !host || !handler) return { port, host: null };
   try {
     cur = { srv: serve({ port, host, handleApi: handler }), port, host };
-    const how = host === "0.0.0.0" ? "对外直连，只收 peer token" : "只听本机，供 HTTPS 反代转发";
+    const how = host === "0.0.0.0" ? "对外直连，外来的只收 peer token" : "只听本机，供 HTTPS 反代转发";
     console.log(`🤝 peer 入口: http://${host}:${port}（${how}）`);
     return { port, host };
   } catch (e) {
@@ -104,8 +107,20 @@ export async function peerIngressSyncRoute(req: Request): Promise<Response> {
   return json(200, { ok: true, ...(await syncPeerIngress(body.hold === true)) });
 }
 
-/** 入口收到的一个请求（单测直接调，不开端口） */
-export async function ingressRequest(req: Request, handleApi: ApiHandler): Promise<Response> {
+/** 不带凭据时对外只开这两个口：兑换邀请（凭一次性 join 口令）和邀请落地页 */
+function ingressPublicRoute(method: string, pathname: string): boolean {
+  return (method === "POST" && pathname === "/api/v1/peers/redeem") || (method === "GET" && pathname === "/api/v1/invite");
+}
+
+/**
+ * 入口收到的一个请求（单测直接调，不开端口）。按 socket 来源分三类：
+ *   - 回环 socket、没有中继标记 = 本机反代（tailscale serve 把 /api/v1 挂到这里，网页经 HTTPS 入口也走它）：
+ *     与主端口经反代同待遇（来源 lan，设备 cookie 照认）。前提是中继够不到这个端口——隧道与 peer 帧的 path
+ *     都过了同源断言（relay-inbound.ts localUrl），改不了目标主机；那条断言松了，这一类就不再成立。
+ *   - 中继转来的 peer 帧（进程内标记核过）与非回环 socket（PEER_INGRESS_PUBLIC=1 直接对外）：来源 peer-ingress，
+ *     删掉 cookie 与设备头；不带凭据只放兑换与邀请页，其余 403。设备端点与设备凭据在这个来源下一律拒。
+ */
+export async function ingressRequest(req: Request, handleApi: ApiHandler, addr: string | null = null): Promise<Response> {
   if (req.headers.get("upgrade")) return json(400, { ok: false, error: "no websocket on the peer entrance" });
   const raw = new URL(req.url);
   const url = new URL(ingressApiPath(raw.pathname) + raw.search, raw.origin);
@@ -114,15 +129,23 @@ export async function ingressRequest(req: Request, handleApi: ApiHandler): Promi
   if (ingressVerdict(secret, principal) === "not-peer") {
     return json(403, { ok: false, error: "this entrance only serves peer tokens" });
   }
-  const body = req.method === "GET" || req.method === "HEAD" ? undefined : await req.arrayBuffer();
   // 来源指纹只认经中继进来的（relay-inbound.ts 盖了进程内标记），放进请求上下文；原始头一律剥掉
   const headers = new Headers(req.headers);
   const relayFrom = takeRelayFrom(headers, relayMark());
+  const localProxy = !relayFrom && isLoopbackAddress(addr);
+  if (!localProxy) {
+    headers.delete("cookie");
+    headers.delete(DEVICE_HEADER);
+    if (!secret && !ingressPublicRoute(req.method, url.pathname)) return json(403, { ok: false, error: "this entrance only serves peer tokens" });
+  }
+  const body = req.method === "GET" || req.method === "HEAD" ? undefined : await req.arrayBuffer();
   const apiReq = new Request(url.toString(), { method: req.method, headers, body });
-  setRequestContext(apiReq, { source: "lan", clientIp: null, https: false, ...(relayFrom ? { relayFrom } : {}) });
+  setRequestContext(apiReq, localProxy
+    ? { source: "lan", clientIp: addr, https: req.headers.get("x-forwarded-proto") === "https" }
+    : { source: "peer-ingress", clientIp: relayFrom ? null : addr, https: false, ...(relayFrom ? { relayFrom } : {}) });
   return handleApi(apiReq, url);
 }
 
 function serve(opts: { port: number; host: Host; handleApi: ApiHandler }) {
-  return Bun.serve({ port: opts.port, hostname: opts.host, fetch: (req) => ingressRequest(req, opts.handleApi) });
+  return Bun.serve({ port: opts.port, hostname: opts.host, fetch: (req, server) => ingressRequest(req, opts.handleApi, server.requestIP(req)?.address ?? null) });
 }

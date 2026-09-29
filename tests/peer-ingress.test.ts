@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { configuredPeerIngressPort, ingressApiPath, ingressHost, ingressSecret, ingressVerdict, ingressRequest } from "../src/bridge/peer-ingress";
 import { RELAY_MARK_HEADER, relayMark, takeRelayFrom } from "../src/bridge/relay-inbound";
-import { relaySenderFp } from "../src/bridge/api-auth";
+import { relaySenderFp } from "../src/bridge/peer-redeem";
 import { setRequestContext } from "../src/bridge/request-context";
 import { pickIngressPort } from "../src/lib/peer-ingress-config";
 

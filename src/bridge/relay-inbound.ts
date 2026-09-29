@@ -19,6 +19,10 @@ import { setRequestContext } from "./request-context.js";
 
 export { ReplayCache };
 
+/** 兑换帧的防重放缓存：中继对每个发件人每分钟只放 6 条兑换，一个发件人在签名有效期内最多约 60 条；总量满了只拒兑换 */
+const REDEEM_REPLAY_MAX = 500;
+const REDEEM_REPLAY_PER_SENDER = 60;
+
 /** peer 请求正文上限：验签要整读，别让对方灌满内存（peer 路径的正文都是小 JSON） */
 const MAX_PEER_BODY = 2 * 1024 * 1024;
 
@@ -49,13 +53,17 @@ const TUNNEL_MARK_HEADER = "x-claudestra-tunnel-mark";
 let tunnelMarkValue: string | null = null;
 const tunnelMark = (): string => (tunnelMarkValue ??= randomBytes(32).toString("base64url"));
 
-/** bridge 主端口与接管的旧 web 端口给每个请求定来源（bridge.ts bridgeFetch）；标记头核完就删，不往后传 */
-export function setSocketRequestContext(req: Request, addr: string | null, loopback: boolean): void {
+/**
+ * bridge 主端口与接管的旧 web 端口给每个请求定来源（bridge.ts bridgeFetch）；标记头核完就删，不往后传。
+ * 返回是不是隧道请求：控制面闸门据此把它排除在回环之外，不单靠隧道写的那个非空 XFF。
+ */
+export function setSocketRequestContext(req: Request, addr: string | null, loopback: boolean): boolean {
   const tunnel = markEquals(req.headers.get(TUNNEL_MARK_HEADER), tunnelMark());
   req.headers.delete(TUNNEL_MARK_HEADER);
   const https = req.headers.get("x-forwarded-proto") === "https";
-  if (!tunnel) return setRequestContext(req, { source: loopback ? "loopback" : "lan", clientIp: addr, https });
-  setRequestContext(req, { source: "relay", clientIp: req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() || null, https: true });
+  if (!tunnel) setRequestContext(req, { source: loopback ? "loopback" : "lan", clientIp: addr, https });
+  else setRequestContext(req, { source: "relay", clientIp: req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() || null, https: true });
+  return tunnel;
 }
 
 /**
@@ -82,15 +90,12 @@ export interface InboundDeps {
   handleApi?: ApiHandler;
   /** 验签之后的发件人核对（联系人、token 归属，lib/peer-trust.ts relayPeerRefusal）：返回拒绝原因或 null */
   refusePeer: (from: string, req: { method: string; path: string; headers: Headers }) => Promise<string | null>;
+  /** 防重放缓存（测试注入小容量的）；不给就按默认容量新建 */
+  caches?: Caches;
 }
 
-/** §4.1：签名头公钥的指纹必须等于中继盖的 from，签名必须对得上，非 GET/HEAD 不许重放 */
-export function verifyPeerRequest(
-  from: string,
-  req: { method: string; path: string; headers: Headers; body: Uint8Array },
-  cache: ReplayCache,
-  now: number,
-): RelayError | null {
+/** §4.1 第 1、2 步：签名头公钥的指纹必须等于中继盖的 from，签名必须对得上。只验不记，防重放在核过发件人之后（recordPeerReplay） */
+export function verifyPeerSignature(from: string, req: { method: string; path: string; headers: Headers; body: Uint8Array }, now: number): RelayError | null {
   const key = req.headers[SIG_HEADERS.key];
   const ts = req.headers[SIG_HEADERS.ts];
   const sig = req.headers[SIG_HEADERS.sig];
@@ -98,12 +103,37 @@ export function verifyPeerRequest(
   if (!isPublicKey(key) || keyFingerprint(key) !== from) return new RelayError("bad_signature", "peer", "signing key does not match sender");
   const r = verifySigned(key, { method: req.method, path: req.path, ts, sig, body: req.body }, now);
   if (r !== "ok") return new RelayError("bad_signature", "peer", r === "stale" ? "timestamp outside ±300 s" : "signature mismatch");
-  const idempotent = req.method === "GET" || req.method === "HEAD";
-  const seen = idempotent ? false : cache.seen(sig, ts, now, from);
+  return null;
+}
+
+/**
+ * §4.1 第 4 步：非 GET/HEAD 的签名只认一次。只在发件人核过之后调——被拒的请求一条都不进缓存，
+ * 非联系人进不来；兑换帧（非联系人也能发）记在单独的小缓存里，满了只拒兑换，联系人的额度不受影响。
+ */
+export function recordPeerReplay(from: string, req: { method: string; headers: Headers }, cache: ReplayCache, now: number): RelayError | null {
+  if (req.method === "GET" || req.method === "HEAD") return null;
+  const seen = cache.seen(req.headers[SIG_HEADERS.sig]!, req.headers[SIG_HEADERS.ts]!, now, from);
   if (seen === "full") return new RelayError("replay_full", "peer", "replay cache full, retry later");
   if (seen === "before_start") return new RelayError("bad_signature", "peer", "signed before the receiver started: your clock is behind, sync it and resend");
   if (seen) return new RelayError("replay", "peer", "signature already used");
   return null;
+}
+
+/**
+ * 帧里的 path 拼到本机地址上：必须以 / 开头、不以 // 开头，拼出来的 origin 还得是 base 的——不这样卡，
+ * path 就能改写目标主机，让 bridge 替中继去请求别的地址（tests/relay-link.test.ts）。
+ */
+export function localUrl(base: string, path: string): string {
+  const bad = (): RelayError => new RelayError("path_forbidden", "peer", "path must be an absolute path on this instance");
+  if (!path.startsWith("/") || path.startsWith("//") || path.startsWith("/\\")) throw bad();
+  let u: URL;
+  try {
+    u = new URL(path, base);
+  } catch {
+    throw bad(); // 拼不成合法 URL：同样不是本机上的路径
+  }
+  if (u.origin !== new URL(base).origin) throw bad();
+  return u.toString();
 }
 
 /** fetch 抛出来的错 → 协议错误码：被 abort 的算超时，其余算连不上本机 */
@@ -130,6 +160,7 @@ function rewriteLocalLocation(headers: Headers, webBase: string, publicHost: str
 
 async function forwardTunnel(req: InboundRequest, ctx: InboundContext, d: InboundDeps): Promise<InboundResponse> {
   const fetchImpl = d.fetchImpl ?? fetch;
+  const target = localUrl(d.webBase, req.path);
   const hasBody = req.method !== "GET" && req.method !== "HEAD";
   // 浏览器看到的主机名以中继盖的 x-forwarded-host 为准（front 已剥掉客户端自带的）；Host 也改成它，
   // 本机 Web 才会按公网地址算相对跳转，而不是按它自己的回环监听地址
@@ -153,7 +184,7 @@ async function forwardTunnel(req: InboundRequest, ctx: InboundContext, d: Inboun
   };
   let r: Response;
   try {
-    r = await fetchImpl(`${d.webBase}${req.path}`, init);
+    r = await fetchImpl(target, init);
   } catch (e) {
     throw localError(e, ctx.signal);
   }
@@ -161,7 +192,9 @@ async function forwardTunnel(req: InboundRequest, ctx: InboundContext, d: Inboun
   return { status: r.status, headers: rewriteLocalLocation(out, d.webBase, publicHost), body: r.body };
 }
 
-async function forwardPeer(from: string, req: InboundRequest, ctx: InboundContext, d: InboundDeps, cache: ReplayCache): Promise<InboundResponse> {
+type Caches = { peer: ReplayCache; redeem: ReplayCache };
+
+async function forwardPeer(from: string, req: InboundRequest, ctx: InboundContext, d: InboundDeps, caches: Caches): Promise<InboundResponse> {
   if (!apiPathOk(req.path)) throw new RelayError("path_forbidden", "peer", `${req.path} is not under /api/v1`);
   let body: Uint8Array;
   try {
@@ -169,13 +202,16 @@ async function forwardPeer(from: string, req: InboundRequest, ctx: InboundContex
   } catch (e) {
     throw new RelayError("payload_too_large", "peer", (e as Error).message);
   }
-  const bad = verifyPeerRequest(from, { method: req.method, path: req.path, headers: req.headers, body }, cache, (d.now ?? Date.now)());
+  const now = (d.now ?? Date.now)();
+  const bad = verifyPeerSignature(from, { method: req.method, path: req.path, headers: req.headers, body }, now);
   if (bad) throw bad;
   const refused = await d.refusePeer(from, req);
   if (refused) {
     console.warn(`🚫 [relay] ${from} ${req.method} ${req.path.split("?")[0]}: ${refused}`); // 细节只进本机日志：对外同一句，不让联系人借此试探 token
     throw new RelayError("sender_forbidden", "peer", "sender is not allowed to make this request");
   }
+  const replay = recordPeerReplay(from, req, isRedeemRequest(req.method, req.path) ? caches.redeem : caches.peer, now);
+  if (replay) throw replay;
   const base = d.ingressBase();
   if (!base) throw new RelayError("local_unreachable", "peer", "peer ingress port not configured on this instance");
   const headers = forwardHeaders(req.headers, dropForPeer);
@@ -184,7 +220,7 @@ async function forwardPeer(from: string, req: InboundRequest, ctx: InboundContex
   const hasBody = req.method !== "GET" && req.method !== "HEAD";
   let r: Response;
   try {
-    r = await (d.fetchImpl ?? fetch)(`${base}${req.path}`, { method: req.method, headers, redirect: "manual", signal: ctx.signal, ...(hasBody ? { body } : {}) });
+    r = await (d.fetchImpl ?? fetch)(localUrl(base, req.path), { method: req.method, headers, redirect: "manual", signal: ctx.signal, ...(hasBody ? { body } : {}) });
   } catch (e) {
     throw localError(e, ctx.signal);
   }
@@ -193,9 +229,9 @@ async function forwardPeer(from: string, req: InboundRequest, ctx: InboundContex
 }
 
 export function makeInboundHandler(d: InboundDeps): InboundHandler {
-  const cache = new ReplayCache();
+  const caches: Caches = d.caches ?? { peer: new ReplayCache(), redeem: new ReplayCache(REDEEM_REPLAY_MAX, undefined, undefined, REDEEM_REPLAY_PER_SENDER) };
   return (req, ctx) => {
-    if (ctx.from !== RELAY_FROM) return forwardPeer(ctx.from, req, ctx, d, cache);
+    if (ctx.from !== RELAY_FROM) return forwardPeer(ctx.from, req, ctx, d, caches);
     const pathMode = req.headers[RELAY_MODE_HEADER] === RELAY_MODE_API;
     return pathMode && d.handleApi ? dispatchMachineRequest(req, ctx, d.handleApi) : forwardTunnel(req, ctx, d);
   };

@@ -10,11 +10,13 @@ import { join } from "node:path";
 import { instanceKeySync, keyFingerprint, signedHeaders } from "../src/lib/instance-key.js";
 import { STATE_DIR } from "../src/lib/paths.js";
 import {
-  currentPin, expectedPeerFp, frameBearer, LEGACY_PEER_DEADLINE, legacyPeerDeadline, loadRelayPeerView, peerAnchorOf, peerAuthHint, peerSigVerdict, recordPeerFp,
+  currentPin, expectedPeerFp, frameBearer, inviteTokenVerdict, LEGACY_PEER_DEADLINE, legacyPeerDeadline, loadRelayPeerView, peerAnchorOf, peerSigVerdict, recordPeerFp,
   relayPeerRefusal, type RelayPeerView,
 } from "../src/lib/peer-trust.js";
+import { peerAuthHint, peerSigErrorText, relayRefusalHint } from "../src/lib/peer-auth-hints.js";
 import { failingPeerChecks, legacyPeerChecks, orphanPeerChecks, persistentlyFailing } from "../src/lib/doctor-peers.js";
 import { authenticateApi } from "../src/bridge/api-auth.js";
+import { peerSignatureState } from "../src/bridge/peer-signature.js";
 import { setRequestContext } from "../src/bridge/request-context.js";
 import { dispatchMachineRequest } from "../src/bridge/relay-dispatch.js";
 import { makeInboundHandler } from "../src/bridge/relay-inbound.js";
@@ -24,7 +26,7 @@ import { collectBody } from "../src/lib/relay-stream.js";
 const newKey = () => instanceKeySync(mkdtempSync(join(tmpdir(), "peer-trust-")))!;
 const keyA = newKey(), keyB = newKey(), keyX = newKey();
 const fpA = keyFingerprint(keyA.publicKey), fpB = keyFingerprint(keyB.publicKey), fpX = keyFingerprint(keyX.publicKey);
-const TOK = { a: "a".repeat(48), b: "b".repeat(48), old: "c".repeat(48), owner: "d".repeat(48) };
+const TOK = { a: "a".repeat(48), b: "b".repeat(48), old: "c".repeat(48), owner: "d".repeat(48), inv: "e".repeat(48), invx: "f".repeat(48) };
 const beforeDeadline = Date.now() < Date.parse(legacyPeerDeadline());
 
 describe("期望指纹与裁决（纯逻辑）", () => {
@@ -40,10 +42,20 @@ describe("期望指纹与裁决（纯逻辑）", () => {
     const before = Date.parse(LEGACY_PEER_DEADLINE) - 1, after = Date.parse(LEGACY_PEER_DEADLINE);
     for (const r of ["unsigned", "bad", "stale", "key_changed"]) expect(peerSigVerdict(r, true, before)).toEqual({ allow: false, reason: r });
     expect(peerSigVerdict("ok", true, after)).toEqual({ allow: true, legacy: false });
-    expect(peerSigVerdict("ok", false, after)).toEqual({ allow: true, legacy: false });
+    expect(peerSigVerdict("ok", false, before)).toEqual({ allow: true, legacy: false });
     expect(peerSigVerdict("unsigned", false, before)).toEqual({ allow: true, legacy: true });
     expect(peerSigVerdict("bad", false, before)).toEqual({ allow: true, legacy: true });
-    expect(peerSigVerdict("unsigned", false, after)).toEqual({ allow: false, reason: "unanchored" });
+    // 截止日后没有期望指纹：签名再合法也拒（不拿请求方带来的钥匙现钉）
+    for (const r of ["ok", "unsigned", "bad"]) expect(peerSigVerdict(r, false, after)).toEqual({ allow: false, reason: "unanchored" });
+  });
+  test("邀请里内嵌的 token：邀请过期（不等清扫）或不存在即失效；兑换前只读", () => {
+    const now = Date.parse("2026-09-01T00:00:00Z");
+    const inv = (id: string, expiresAt: string) => ({ id, joinSecret: "j", inTokenId: "t", agents: ["*"], url: "", createdAt: "", expiresAt });
+    const invites = [inv("inv_live", "2026-09-02T00:00:00Z"), inv("inv_old", "2026-08-31T00:00:00Z")];
+    expect(inviteTokenVerdict("GET", "inv_live", invites, now)).toEqual({ allow: true, legacy: false });
+    expect(inviteTokenVerdict("POST", "inv_live", invites, now)).toEqual({ allow: false, reason: "invite_read_only" });
+    expect(inviteTokenVerdict("GET", "inv_old", invites, now)).toEqual({ allow: false, reason: "invite_expired" });
+    expect(inviteTokenVerdict("GET", "inv_gone", invites, now)).toEqual({ allow: false, reason: "invite_expired" });
   });
   test("帧里的凭据：Bearer，或 GET /api/v1/events 的 ?token=", () => {
     expect(frameBearer("GET", "/api/v1/agents", { authorization: "Bearer  xyz " })).toBe("xyz");
@@ -59,13 +71,17 @@ describe("期望指纹与裁决（纯逻辑）", () => {
     const get = (headers: Record<string, string> = {}, path = "/api/v1/agents") => ({ method: "GET", path, headers });
     const auth = (t: string) => ({ authorization: `Bearer ${t}` });
     expect(relayPeerRefusal(fpA, get(auth(TOK.a)), view)).toBeNull();
-    expect(relayPeerRefusal(fpA, get(), view)).toBeNull();
+    expect(relayPeerRefusal(fpA, get(), view)).toMatch(/must carry/); // 联系人的非兑换帧也必须带 token
     expect(relayPeerRefusal(fpX, get(auth(TOK.a)), view)).toMatch(/not a contact/);
     expect(relayPeerRefusal(fpX, { method: "POST", path: "/api/v1/peers/redeem", headers: {} }, view)).toBeNull();
     expect(relayPeerRefusal(fpX, { method: "POST", path: "/api/v1/peers/redeem", headers: auth(TOK.a) }, view)).toMatch(/does not belong/);
     expect(relayPeerRefusal(fpA, get(auth(TOK.old)), view)).toMatch(/does not belong/);
     expect(relayPeerRefusal(fpA, get(auth("nope")), view)).toMatch(/not a peer token/);
     expect(relayPeerRefusal(fpX, get({}, `/api/v1/events?token=${TOK.a}`), { ...view, contacts: new Set([fpX]) })).toMatch(/does not belong/);
+    // 记了完整公钥的联系人：签名钥匙必须就是那一把（不只比 64 位指纹）
+    const keyed = { ...view, keyOf: (fp: string) => (fp === fpA ? keyA.publicKey : null) };
+    expect(relayPeerRefusal(fpA, get({ ...auth(TOK.a), "x-claudestra-key": keyA.publicKey }), keyed)).toBeNull();
+    expect(relayPeerRefusal(fpA, get({ ...auth(TOK.a), "x-claudestra-key": keyX.publicKey }), keyed)).toMatch(/not the one recorded/);
   });
   test("doctor：没有老 peer 不出行；截止日前 warn，之后 fail", () => {
     expect(legacyPeerChecks([])).toEqual([]);
@@ -97,6 +113,23 @@ describe("截止日覆盖、钉住记录作废、提示文案、doctor、合并�
     expect(peerAuthHint({ code: "peer_signature", reason: "before_start" })).toMatch(/刚重启.*校准本机时间/);
     expect(peerAuthHint({ code: "peer_signature", reason: "key_changed" })).toMatch(/重新给你发一张邀请/);
     expect(peerAuthHint({ code: "peer_signature", reason: "key_changed" })).not.toMatch(/重新握手/);
+    expect(peerAuthHint({ code: "peer_signature", reason: "bad" })).toMatch(/反代/);
+    expect(peerAuthHint({ code: "peer_signature", reason: "unanchored" })).toMatch(/截止日/);
+    expect(peerAuthHint({ code: "peer_signature", reason: "invite_expired" })).toMatch(/过期/);
+    expect(peerAuthHint({ code: "peer_signature", reason: "invite_read_only" })).toMatch(/只能读/);
+    expect(peerAuthHint({ code: "rate_limited" })).toMatch(/请求太多/);
+  });
+  test("中继入站的拒绝：按 code 与说明分开说；连不上 / 超时类返回 null", () => {
+    expect(relayRefusalHint("relay replay: signature already used")).toMatch(/不要原样重发/);
+    expect(relayRefusalHint("relay sender_forbidden: sender is not allowed to make this request")).toMatch(/重新给你发一张邀请/);
+    expect(relayRefusalHint("relay bad_signature: signing key does not match sender")).toMatch(/认不出本机的签名钥匙/);
+    expect(relayRefusalHint("relay peer_offline: peer_offline")).toBeNull();
+    expect(relayRefusalHint("fetch failed")).toBeNull();
+  });
+  test("本机拒签时的 error：老版本调用方只显示它，要说清楚不是 token 失效；重放提到同一秒重复发", () => {
+    expect(peerSigErrorText("replay")).toMatch(/^peer request signature rejected: replay — 签名问题，不是 token 失效/);
+    expect(peerSigErrorText("replay")).toContain("同一秒");
+    expect(peerSigErrorText("stale")).not.toContain("同一秒");
   });
   test("doctor：有期望指纹但最近验签没通过的列出来，原因带上", () => {
     expect(failingPeerChecks([])).toEqual([]);
@@ -138,11 +171,15 @@ describe("接线：authApi / 路径模式 / 中继 peer 帧", () => {
   beforeAll(() => {
     writeFileSync(join(STATE_DIR, "principals.json"), JSON.stringify({ principals: [
       principal("tok_pt_a", TOK.a, "pt-alpha"), principal("tok_pt_b", TOK.b, "pt-bravo"), principal("tok_pt_old", TOK.old, "pt-old"), principal("tok_pt_owner", TOK.owner),
+      principal("tok_pt_inv", TOK.inv, "invite:inv_pt_live"), principal("tok_pt_invx", TOK.invx, "invite:inv_pt_old"),
     ] }));
     writeFileSync(join(STATE_DIR, "peers.json"), JSON.stringify({ httpPeers: [
       { name: "pt-alpha", fp: fpA, inTokenId: "tok_pt_a", addedAt: "2026-09-01T00:00:00Z" },
       { name: "pt-bravo", baseUrl: "https://bravo.example", inTokenId: "tok_pt_b", addedAt: "2026-09-01T00:00:00Z" },
       { name: "pt-old", baseUrl: "https://old.example", inTokenId: "tok_pt_old", addedAt: "2026-09-01T00:00:00Z" },
+    ], pendingInvites: [
+      { id: "inv_pt_live", joinSecret: "j".repeat(48), inTokenId: "tok_pt_inv", agents: ["*"], url: "", createdAt: "", expiresAt: new Date(Date.now() + 3600_000).toISOString() },
+      { id: "inv_pt_old", joinSecret: "k".repeat(48), inTokenId: "tok_pt_invx", agents: ["*"], url: "", createdAt: "", expiresAt: new Date(Date.now() - 1000).toISOString() },
     ] }));
   });
   afterAll(() => {
@@ -181,6 +218,31 @@ describe("接线：authApi / 路径模式 / 中继 peer 帧", () => {
     expect(await status(apiReq(TOK.b, { key: keyB }))).toBe(200);
     expect(await status(apiReq(TOK.b, { key: keyX }))).toBe(401);
     expect(await status(apiReq(TOK.b))).toBe(401);
+  });
+  test("验签失败不改钉：钉住的仍是原钥匙；公钥的非规范写法当 bad", async () => {
+    expect(await status(apiReq(TOK.b, { key: keyX }))).toBe(401);
+    expect(peerSignatureState("pt-bravo")?.publicKey).toBe(keyB.publicKey);
+    const B64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    const r = apiReq(TOK.b, { key: keyB });
+    const pk = keyB.publicKey;
+    r.headers.set("x-claudestra-key", pk.slice(0, -1) + B64[B64.indexOf(pk.at(-1)!) ^ 1]);
+    expect(await status(r)).toBe(401);
+    expect(peerSignatureState("pt-bravo")).toMatchObject({ publicKey: keyB.publicKey, lastCheck: { result: "bad" } });
+  });
+  test("邀请里带的 token（还没兑换）：邀请在就只读，过期立刻失效（不等清扫）", async () => {
+    expect(await status(apiReq(TOK.inv))).toBe(200);
+    expect(await status(apiReq(TOK.inv, { method: "POST", body: "{}" }))).toBe(401);
+    expect(await status(apiReq(TOK.invx))).toBe(401);
+  });
+  test("重放不扣成功请求的限速额度", async () => {
+    const t = Date.now(), body = '{"text":"bucket"}';
+    const limited = async (r: Request) => {
+      const p = await authenticateApi(r, new URL(r.url), { rateLimit: true });
+      return p instanceof Response ? p.status : 200;
+    };
+    expect(await limited(apiReq(TOK.a, { key: keyA, method: "POST", body, now: t }))).toBe(200);
+    for (let i = 0; i < 130; i++) expect(await limited(apiReq(TOK.a, { key: keyA, method: "POST", body, now: t }))).toBe(401);
+    expect(await limited(apiReq(TOK.a, { key: keyA, method: "POST", body: '{"text":"fresh"}', now: t }))).toBe(200);
   });
   test("没有任何期望指纹的老 peer：截止日前不签名也放行（告警），之后拒", async () => {
     expect(await status(apiReq(TOK.old))).toBe(beforeDeadline ? 200 : 401);

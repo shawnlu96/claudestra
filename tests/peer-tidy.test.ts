@@ -4,6 +4,8 @@ import type { HttpPeer } from "../src/lib/peers";
 import type { Principal } from "../src/lib/principals";
 
 const OUT = "o".repeat(64);
+/** 期望指纹：这些用例只看记录自带的 fp（生产里还有钉住的，lib/peer-trust.ts peerAnchorOf） */
+const byFp = (p: HttpPeer) => p.fp ?? null;
 
 /** owner 机器上 2026-09-24 的真实形态（token secret / outToken 换成占位） */
 function ownerData(): { peers: HttpPeer[]; principals: Principal[] } {
@@ -39,7 +41,7 @@ describe("activePeerTokens", () => {
 
 describe("planPeerTidy：owner 的真实数据", () => {
   const { peers, principals } = ownerData();
-  const plan = planPeerTidy(peers, activePeerTokens(principals));
+  const plan = planPeerTidy(peers, activePeerTokens(principals), byFp);
 
   test("两组：HedeMacBook-Pro 三条合一、Sekai 两条合一", () => {
     expect(plan.map((g) => g.finalName)).toEqual(["HedeMacBook-Pro", "Sekai"]);
@@ -93,7 +95,7 @@ describe("planPeerTidy：owner 的真实数据", () => {
       },
     ]);
     // 整理完再算一次：没有要做的了
-    expect(planPeerTidy(r.httpPeers, activePeerTokens(d.principals))).toEqual([]);
+    expect(planPeerTidy(r.httpPeers, activePeerTokens(d.principals), byFp)).toEqual([]);
   });
 });
 
@@ -106,7 +108,7 @@ describe("planPeerTidy：边界", () => {
       { name: "Alex", addedAt: at("01"), baseUrl: "http://100.1.1.1:3847", outToken: OUT, inTokenId: "tok_a" },
       { name: "macmini-2", addedAt: at("01"), baseUrl: "http://100.2.2.2:3847", outToken: OUT },
     ];
-    expect(planPeerTidy(peers, [tok("tok_a", "Alex", "01")])).toEqual([]);
+    expect(planPeerTidy(peers, [tok("tok_a", "Alex", "01")], byFp)).toEqual([]);
   });
 
   test("出站在两台不同机器 → 可能是两个人，整组不动", () => {
@@ -114,7 +116,7 @@ describe("planPeerTidy：边界", () => {
       { name: "Bob", addedAt: at("01"), baseUrl: "http://100.1.1.1:3847", outToken: OUT, inTokenId: "tok_b1" },
       { name: "Bob-2", addedAt: at("02"), baseUrl: "http://100.9.9.9:3847", outToken: OUT, inTokenId: "tok_b2" },
     ];
-    const plan = planPeerTidy(peers, [tok("tok_b1", "Bob", "01"), tok("tok_b2", "Bob-2", "02")]);
+    const plan = planPeerTidy(peers, [tok("tok_b1", "Bob", "01"), tok("tok_b2", "Bob-2", "02")], byFp);
     expect(plan).toHaveLength(1);
     expect(plan[0].skip).toContain("100.1.1.1 / 100.9.9.9");
     expect(plan[0].revokeTokens).toEqual([]);
@@ -133,7 +135,7 @@ describe("planPeerTidy：边界", () => {
       { name: "Cat", addedAt: at("01"), baseUrl: "http://100.3.3.3:3847", outToken: "old".padEnd(32, "x") },
       { name: "Cat-2", addedAt: at("05"), baseUrl: "http://100.3.3.3:13847", outToken: OUT },
     ];
-    const [g] = planPeerTidy(peers, []);
+    const [g] = planPeerTidy(peers, [], byFp);
     expect(g.skip).toBeUndefined();
     expect(g.outboundFrom).toBe("Cat-2");
     expect(g.desc).toContain("旧地址 http://100.3.3.3:3847 不再用");
@@ -145,9 +147,9 @@ describe("planPeerTidy：边界", () => {
       { name: "Dan", addedAt: at("01"), inTokenId: "tok_d1", instanceId: "iid1" },
       { name: "Dan-2", addedAt: at("02"), inTokenId: "tok_d2", instanceId: "iid2" },
     ];
-    expect(planPeerTidy(two, [tok("tok_d1", "Dan", "01"), tok("tok_d2", "Dan-2", "02")])[0].skip).toContain("不同的 Claudestra 实例");
+    expect(planPeerTidy(two, [tok("tok_d1", "Dan", "01"), tok("tok_d2", "Dan-2", "02")], byFp)[0].skip).toContain("不同的 Claudestra 实例");
     const one: HttpPeer[] = [two[0], { ...two[1], instanceId: undefined }];
-    const [g] = planPeerTidy(one, [tok("tok_d1", "Dan", "01"), tok("tok_d2", "Dan-2", "02")]);
+    const [g] = planPeerTidy(one, [tok("tok_d1", "Dan", "01"), tok("tok_d2", "Dan-2", "02")], byFp);
     expect(g.instanceId).toBe("iid1");
     expect(g.keepToken).toBe("tok_d2");
     expect(g.revokeTokens).toEqual(["tok_d1"]);
@@ -158,7 +160,7 @@ describe("planPeerTidy：边界", () => {
       { name: "Eve", addedAt: at("01"), inTokenId: "tok_revoked" },
       { name: "Fay", addedAt: at("01"), baseUrl: "http://100.4.4.4:3847", outToken: OUT },
     ];
-    const plan = planPeerTidy(peers, []);
+    const plan = planPeerTidy(peers, [], byFp);
     expect(plan).toHaveLength(1);
     expect(plan[0]).toMatchObject({ finalName: "Eve", records: ["Eve"], revokeTokens: [] });
     expect(plan[0].desc).toBe("「Eve」两个方向都不通（他连不上你，你也连不上他），删掉");
@@ -171,7 +173,7 @@ describe("planPeerTidy：边界", () => {
       { name: "Gus", addedAt: at("01") },
       { name: "Gus-2", addedAt: at("02"), baseUrl: "http://100.5.5.5:3847", outToken: OUT },
     ];
-    const [g] = planPeerTidy(peers, []);
+    const [g] = planPeerTidy(peers, [], byFp);
     expect(g).toMatchObject({ finalName: "Gus", records: ["Gus", "Gus-2"], outboundFrom: "Gus-2" });
     expect(applyPeerTidy(peers, [], [g]).httpPeers).toEqual([
       { name: "Gus", addedAt: at("01"), baseUrl: "http://100.5.5.5:3847", outToken: OUT },
@@ -184,7 +186,7 @@ describe("planPeerTidy：边界", () => {
       { name: "Hal-2", addedAt: at("02"), inTokenId: "tok_h2" },
       { name: "Hal-3", addedAt: at("03"), baseUrl: "http://100.6.6.6:3847", outToken: OUT },
     ];
-    const [g] = planPeerTidy(peers, [tok("tok_h2", "Hal-2", "02")]);
+    const [g] = planPeerTidy(peers, [tok("tok_h2", "Hal-2", "02")], byFp);
     expect(g).toMatchObject({ finalName: "Hal-2", records: ["Hal-2", "Hal-3"], keepToken: "tok_h2" });
     const r = applyPeerTidy(peers, [], [g]);
     expect(r.httpPeers.map((p) => p.name)).toEqual(["Hal", "Hal-2"]);
@@ -196,8 +198,44 @@ describe("planPeerTidy：边界", () => {
       { name: "Ivy-10", addedAt: at("03"), inTokenId: "tok_i10" },
       { name: "Ivy-9", addedAt: at("02"), baseUrl: "http://100.7.7.7:3847", outToken: OUT },
     ];
-    const [g] = planPeerTidy(peers, [tok("tok_i10", "Ivy-10", "03")]);
+    const [g] = planPeerTidy(peers, [tok("tok_i10", "Ivy-10", "03")], byFp);
     expect(g.records).toEqual(["Ivy-9", "Ivy-10"]);
     expect(g.desc).toStartWith("Ivy-9、-10 合成一张「Ivy」");
+  });
+
+  test("指纹不同 → 整组不动（冒用同名被拆开的 -2 不合回去、不吊销真人的 token）", () => {
+    const peers: HttpPeer[] = [
+      { name: "Vic", addedAt: at("01"), inTokenId: "tok_v", fp: "aaaa-aaaa-aaaa-aaaa" },
+      { name: "Vic-2", addedAt: at("02"), inTokenId: "tok_m", fp: "bbbb-bbbb-bbbb-bbbb" },
+    ];
+    const [g] = planPeerTidy(peers, [tok("tok_v", "Vic", "01"), tok("tok_m", "Vic-2", "02")], byFp);
+    expect(g.skip).toContain("指纹不同");
+    expect(g.revokeTokens).toEqual([]);
+    expect(applyPeerTidy(peers, [], [g]).httpPeers).toEqual(peers);
+  });
+  test("有的有指纹、有的没有 → 整组不动（没签名的那条可能是别人）", () => {
+    const peers: HttpPeer[] = [
+      { name: "Vic", addedAt: at("01"), inTokenId: "tok_v", fp: "aaaa-aaaa-aaaa-aaaa" },
+      { name: "Vic-2", addedAt: at("02"), inTokenId: "tok_m" },
+    ];
+    expect(planPeerTidy(peers, [tok("tok_v", "Vic", "01"), tok("tok_m", "Vic-2", "02")], byFp)[0].skip).toContain("没法确认");
+  });
+  test("同一个指纹 → 合并，合并后的记录带上指纹与公钥（只是钉住的也写成 fp）", () => {
+    const peers: HttpPeer[] = [
+      { name: "Kay", addedAt: at("01"), inTokenId: "tok_k1", fp: "cccc-cccc-cccc-cccc", publicKey: "K".repeat(43) },
+      { name: "Kay-2", addedAt: at("02"), baseUrl: "http://100.8.8.8:3847", outToken: OUT },
+    ];
+    const pinned = (p: HttpPeer) => p.fp ?? (p.name === "Kay-2" ? "cccc-cccc-cccc-cccc" : null);
+    const [g] = planPeerTidy(peers, [tok("tok_k1", "Kay", "01")], pinned);
+    expect(g.skip).toBeUndefined();
+    expect(mergedPeerRecord(g, peers)).toMatchObject({ name: "Kay", fp: "cccc-cccc-cccc-cccc", publicKey: "K".repeat(43), inTokenId: "tok_k1" });
+    expect(planPeerTidy(peers, [tok("tok_k1", "Kay", "01")], byFp)[0].skip).toContain("没法确认"); // 不认钉住的就是混合
+  });
+  test("记下的公钥不止一把 → 不动", () => {
+    const peers: HttpPeer[] = [
+      { name: "Lu", addedAt: at("01"), inTokenId: "tok_l1", fp: "dddd-dddd-dddd-dddd", publicKey: "K".repeat(43) },
+      { name: "Lu-2", addedAt: at("02"), inTokenId: "tok_l2", fp: "dddd-dddd-dddd-dddd", publicKey: "L".repeat(43) },
+    ];
+    expect(planPeerTidy(peers, [tok("tok_l1", "Lu", "01"), tok("tok_l2", "Lu-2", "02")], byFp)[0].skip).toContain("公钥");
   });
 });

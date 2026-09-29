@@ -12,9 +12,10 @@ import { instanceKeySync, keyFingerprint, signedHeaders } from "../src/lib/insta
 import { STATE_DIR } from "../src/lib/paths.js";
 import { readPeers } from "../src/lib/peers.js";
 import { readPrincipals } from "../src/lib/principals.js";
+import { checkInviteProof } from "../src/lib/invite-proof.js";
 import { authenticateApi } from "../src/bridge/api-auth.js";
 import { setRequestContext } from "../src/bridge/request-context.js";
-import { cmdPeerInviteRedeem } from "../src/manager/peers.js";
+import { cmdPeerInviteRedeem } from "../src/manager/peer-join.js";
 
 const newKey = () => instanceKeySync(mkdtempSync(join(tmpdir(), "redeem-merge-")))!;
 const keyV = newKey(), keyM = newKey();
@@ -41,10 +42,10 @@ afterAll(() => {
 });
 
 /** 跑一次兑换，返回 manager 打出的 JSON */
-async function redeem(join: string, name: string, iid: string, fp: string): Promise<Record<string, unknown>> {
+async function redeem(join: string, name: string, iid: string, fp: string, pk = "", nonce = ""): Promise<Record<string, unknown>> {
   const log = spyOn(console, "log").mockImplementation(() => {});
   try {
-    await cmdPeerInviteRedeem(join, name, "", "", iid, fp);
+    await cmdPeerInviteRedeem({ join, name, url: "", token: "", iid, fp, pk, nonce });
     return JSON.parse(String(log.mock.calls.at(-1)?.[0]));
   } finally {
     log.mockRestore();
@@ -83,14 +84,30 @@ describe("按实例 id 合并：签名指纹对不上就拒绝兑换", () => {
     expect(await redeem("join-secret-rm-2", "rm-victim", IID_V, "")).toMatchObject({ ok: false, code: "iid_taken" });
     expect(await tokenDisabled("tok_rm_v")).toBe(false);
   });
+  test("同一张邀请因实例 id 冲突被拒满 3 次 → 作废并吊销内嵌 token，之后连正常兑换也不行", async () => {
+    // 上一条用例已经在 inv_rm2 上被拒过一次
+    expect(await redeem("join-secret-rm-2", "x", IID_V, fpM)).toMatchObject({ ok: false, code: "iid_taken" });
+    expect(await pending("inv_rm2")).toBe(true);
+    const third = await redeem("join-secret-rm-2", "x", IID_V, fpM);
+    expect(third).toMatchObject({ ok: false, code: "iid_taken" });
+    expect(String(third.error)).toContain("这张邀请已作废");
+    expect(await pending("inv_rm2")).toBe(false);
+    expect(await tokenDisabled("tok_rm_i2")).toBe(true);
+    expect(await redeem("join-secret-rm-2", "x", "", fpM)).toMatchObject({ ok: false });
+  });
   test("M 不冒用实例 id 兑换 → 以自己的新名字加入，不碰 V", async () => {
     expect(await redeem("join-secret-rm-1", "rm-victim", "", fpM)).toMatchObject({ ok: true, peer: "rm-victim-2" });
     expect(await call(SECRET.i1, keyM)).toBe("rm-victim-2");
     expect((await rec("rm-victim"))?.fp).toBe(fpV);
   });
   test("V 本人重新加入（签名指纹对得上）→ 合进原记录，吊销被取代的旧 token", async () => {
-    const out = await redeem("join-secret-rm-3", "anything", IID_V, fpV);
+    const nonce = "n".repeat(22);
+    const out = await redeem("join-secret-rm-3", "anything", IID_V, fpV, keyV.publicKey, nonce);
     expect(out).toMatchObject({ ok: true, peer: "rm-victim", revokedTokens: ["tok_rm_v"] });
+    // 带了 nonce：回一份本机的持钥证明，覆盖 nonce、口令、兑换方指纹、本机实例 id
+    const mine = instanceKeySync()!;
+    expect(checkInviteProof(out.proof, { nonce, join: "join-secret-rm-3", myFp: fpV, inviterIid: String(out.iid) })).toEqual({ key: mine.publicKey, fp: keyFingerprint(mine.publicKey) });
+    expect((await rec("rm-victim"))?.publicKey).toBe(keyV.publicKey);
     expect((await rec("rm-victim"))?.fp).toBe(fpV);
     expect(await call(SECRET.i3, keyV)).toBe("rm-victim");
     expect(await call(SECRET.v, keyV)).toBe(401);

@@ -63,5 +63,6 @@ export async function checkLegacyPeers(): Promise<Check[]> {
     else if (!recordPeerFp(recs.get(name)) && !pin?.publicKey) legacy.push(name);
     else if (bad) failing.push({ name, result: bad });
   }
-  return [...legacyPeerChecks(legacy), ...failingPeerChecks(failing), ...orphanPeerChecks(orphans)];
+  const records = await (await import("./doctor-peer-records.js")).checkPeerRecords(); // 记录自相矛盾、升级后会被拒的
+  return [...legacyPeerChecks(legacy), ...failingPeerChecks(failing), ...orphanPeerChecks(orphans), ...records];
 }

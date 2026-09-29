@@ -3436,8 +3436,8 @@ async function bridgeFetch(req: Request, server: { requestIP(r: Request): { addr
     {
       const ip = server.requestIP(req);
       // 本机反代转进来的（带 XFF）不算回环：控制面豁免与请求来源（/devices/local）同一口径（web-gateway.ts isDirectLoopback）
-      const loopback = isDirectLoopback(ip?.address, req.headers.get("x-forwarded-for"));
-      setSocketRequestContext(req, ip?.address ?? null, loopback); // 带隧道标记的（中继子域名隧道）来源定成 relay（bridge/relay-inbound.ts）
+      const direct = isDirectLoopback(ip?.address, req.headers.get("x-forwarded-for"));
+      const loopback = direct && !setSocketRequestContext(req, ip?.address ?? null, direct); // 隧道请求（来源 relay）XFF 缺了也不算回环（bridge/relay-inbound.ts）
       const verdict = controlAccessVerdict({
         loopback, method: req.method, staticHosting: !!STATIC_DIR, websocket: !!req.headers.get("upgrade"), // ws 升级在 API 鉴权之前：/api/v1 与静态的放行都不覆盖它
         pathname: url0.pathname,

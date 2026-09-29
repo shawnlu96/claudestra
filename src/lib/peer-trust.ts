@@ -7,9 +7,9 @@
  */
 import { statSync } from "node:fs";
 import { join } from "node:path";
-import { MAX_SKEW_S } from "./instance-key.js";
+import { MAX_SKEW_S, SIG_HEADERS } from "./instance-key.js";
 import { REPO_ROOT } from "./repo-root.js";
-import { readPeers, relayPeerFingerprint, type HttpPeer } from "./peers.js";
+import { inviteExpired, readPeers, relayPeerFingerprint, type HttpPeer, type PendingInvite } from "./peers.js";
 import type { PinnedPeerKey } from "./peer-keys.js";
 import { STATE_DIR } from "./paths.js";
 import { readJsonLenient } from "./state-file.js";
@@ -47,6 +47,10 @@ export class ReplayCache {
     private readonly validMs = (MAX_SKEW_S + 1) * 1000,
     private readonly maxPerPeer = REPLAY_MAX_PER_PEER,
   ) {}
+
+  get size(): number {
+    return this.entries.size;
+  }
 
   seen(sig: string, ts: string, now: number, peer: string): ReplayVerdict {
     const t = Number(ts);
@@ -99,6 +103,11 @@ function currentLegacyDeadline(): string {
   return deadlineMemo.value;
 }
 
+/** 截止日还没到：没有期望指纹的老 peer 仍放行、加入邀请时仍可按自报实例 id 合并 */
+export function legacyStillOpen(now = Date.now()): boolean {
+  return now < Date.parse(currentLegacyDeadline());
+}
+
 type PeerAnchorRecord = { fp?: string; baseUrl?: string };
 
 /** peers.json 这条记录自带的指纹（邀请 / 兑换记下的 fp，或 relay:// 基址里的）；都没有返回 null */
@@ -136,13 +145,25 @@ export async function peerAnchorOf(): Promise<(p: HttpPeer) => string | null> {
 export type PeerSigVerdict = { allow: true; legacy: boolean; once?: { sig: string; ts: string } } | { allow: false; reason: string };
 
 /**
- * 验签结果 → 放不放行。有期望指纹（anchored）时只认 ok；没有时截止日前一律放行（legacy，调用方告警），
- * 截止日后按 unanchored 拒——那时还没签过名的 peer 要重新邀请。
+ * 验签结果 → 放不放行。有期望指纹（anchored）时只认 ok；没有时截止日前一律放行（签名对得上就由调用方钉住，
+ * 不签名的算 legacy、调用方告警），截止日后一律按 unanchored 拒——连签名对得上的也拒：那时还没钉住的 peer，
+ * 谁先拿着 token 签名谁就会被钉成它，只能重新邀请。
  */
 export function peerSigVerdict(result: string, anchored: boolean, now: number, deadline?: string): PeerSigVerdict {
   if (anchored) return result === "ok" ? { allow: true, legacy: false } : { allow: false, reason: result };
-  if (result === "ok") return { allow: true, legacy: false };
-  return now < Date.parse(deadline ?? currentLegacyDeadline()) ? { allow: true, legacy: true } : { allow: false, reason: "unanchored" };
+  if (now >= Date.parse(deadline ?? currentLegacyDeadline())) return { allow: false, reason: "unanchored" };
+  return { allow: true, legacy: result !== "ok" };
+}
+
+/**
+ * 兑换前的邀请 token（principal.peer = invite:<邀请 id>）：邀请必须还在、没过期（用时就判，不等清扫），
+ * 而且只许 GET/HEAD——加入前的预览只读 agent 列表，正式调用要等兑换后换成对方的名字、验签。
+ */
+export function inviteTokenVerdict(method: string, inviteId: string, invites: PendingInvite[], now: number): PeerSigVerdict {
+  const inv = invites.find((i) => i.id === inviteId);
+  if (!inv || inviteExpired(inv, now)) return { allow: false, reason: "invite_expired" };
+  const m = method.toUpperCase();
+  return m === "GET" || m === "HEAD" ? { allow: true, legacy: false } : { allow: false, reason: "invite_read_only" };
 }
 
 /** 中继 req 帧里的 peer 凭据：Bearer，或（与 authApi 同口径）GET /api/v1/events 的 ?token= */
@@ -160,19 +181,24 @@ export function frameBearer(method: string, path: string, headers: Record<string
 export interface RelayPeerView {
   /** 本机联系人：peers.json 里未禁用且有期望指纹的记录 */
   contacts: ReadonlySet<string>;
+  /** 这个联系人记下的完整公钥（签名兑换 / 持钥证明得来）；没记返回 null，只按指纹认 */
+  keyOf?(fp: string): string | null;
   /** 这个 Bearer 属于哪个 peer、那个 peer 的期望指纹；不是有效 peer token 返回 null */
   bearerOwner(secret: string): { peer: string; fp: string | null } | null;
 }
 
 /**
- * 经中继进来、验签已过的 peer 请求还要满足：兑换邀请之外，from 必须是本机联系人；带了 token 的，
- * token 的主人的期望指纹必须就是 from——签名只证明「from 本人发的」，不证明 token 是他的。返回拒绝原因或 null。
+ * 经中继进来、验签已过的 peer 请求还要满足：兑换邀请之外，from 必须是本机联系人、必须带 peer token（不认浏览器凭据），
+ * 记了完整公钥的联系人签名钥匙必须就是那把（指纹只有 64 位）；token 的主人的期望指纹必须就是 from——
+ * 签名只证明「from 本人发的」，不证明 token 是他的。返回拒绝原因或 null。
  */
 export function relayPeerRefusal(from: string, req: { method: string; path: string; headers: Record<string, string> }, view: RelayPeerView): string | null {
   const redeem = isRedeemRequest(req.method, req.path);
   if (!redeem && !view.contacts.has(from)) return "sender is not a contact of this instance";
+  const recorded = view.keyOf?.(from);
+  if (recorded && req.headers[SIG_HEADERS.key] !== recorded) return "signing key is not the one recorded for this contact";
   const secret = frameBearer(req.method, req.path, req.headers);
-  if (!secret) return null;
+  if (!secret) return redeem ? null : "peer requests must carry the peer's token";
   const owner = view.bearerOwner(secret);
   if (!owner) return "token is not a peer token of this instance";
   return owner.fp === from ? null : "token does not belong to the sender";
@@ -183,26 +209,13 @@ export async function loadRelayPeerView(): Promise<RelayPeerView> {
   const [peers, file] = await Promise.all([readPeers(), readPrincipals()]);
   const live = (peers.httpPeers ?? []).filter((p) => !p.disabled);
   const fpOf = new Map(live.map((p) => [p.name, recordPeerFp(p)]));
+  const keys = new Map(live.filter((p) => p.publicKey).map((p) => [recordPeerFp(p), p.publicKey!]));
   return {
     contacts: new Set(live.map(recordPeerFp).filter((fp): fp is string => !!fp)),
+    keyOf: (fp) => keys.get(fp) ?? null,
     bearerOwner: (secret) => {
       const p = findByBearer(file, secret);
       return p?.peer ? { peer: p.peer, fp: fpOf.get(p.peer) ?? null } : null;
     },
   };
-}
-
-/**
- * 对方回 401/403 时给调用方的一句提示。code=peer_signature 是「对方不认本机的签名」，重新握手（换 token）解决不了，
- * 按 reason 分开说；其余仍是 token / scope 问题。body 是对方回的 JSON（可能为空）。
- */
-export function peerAuthHint(raw: unknown): string {
-  const body = (raw && typeof raw === "object" ? raw : {}) as { code?: unknown; reason?: unknown };
-  if (body.code !== "peer_signature") return "token 无效或已被对方 revoke——联系对方确认，或重新握手";
-  if (body.reason === "replay") return "这条请求被对方当成了重放（同一个签名用了两次）——不要原样重发，稍后重新发一条即可";
-  if (body.reason === "full") return "对方的防重放缓存满了，暂时不收新的请求——稍后再发";
-  if (body.reason === "sig_rate_limited") return `一分钟里验签失败太多次，对方暂时限流（最近一次失败原因：${String((body as { cause?: unknown }).cause ?? "未知")}）——先按原因修好再发`;
-  if (body.reason === "before_start") return "对方 bridge 刚重启，这条请求的签名时间早于它启动（本机时钟比对方慢）——先校准本机时间，再重新发";
-  if (body.reason === "stale") return "两台机器时钟差超过 5 分钟，签名被判过期——先校准两边的系统时间";
-  return "对方认不出本机的签名钥匙（本机重装过，或对方记下的指纹不是本机）——请对方删掉这个 peer 后重新给你发一张邀请";
 }

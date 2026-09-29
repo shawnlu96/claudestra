@@ -7,11 +7,9 @@
 import { findByBearer, readPrincipals, SlidingWindowLimiter, tokenIdOf, updatePrincipals, type Principal } from "../lib/principals.js";
 import { cookieValueFrom, csrfOk, DEVICE_HEADER, effectivePrincipal, findCredential, touchCredential } from "../lib/devices.js";
 import { apiJson } from "./api-respond.js";
-import { checkPeerSignature, isPeerReplay } from "./peer-signature.js";
-import { isPublicKey, keyFingerprint, SIG_HEADERS, verifySigned } from "../lib/instance-key.js";
-import type { PeerSigVerdict } from "../lib/peer-trust.js";
+import { checkPeerSignature, isPeerReplay, type PeerCheck } from "./peer-signature.js";
 import { requestContextOf } from "./request-context.js";
-import { FP_RE } from "../lib/relay-protocol.js";
+import { peerSigErrorText } from "../lib/peer-auth-hints.js";
 
 // 120/min：默认 30 在 web 重度使用下会被打爆——SSE 重连风暴循环触发 429 → 直播流死掉（2026-07-14 真机）。owner 再放大 5 倍：
 // 手机 + 电脑 + 侧栏轮询共用一个身份
@@ -45,6 +43,7 @@ export async function authenticateApi(req: Request, url: URL, opts: { rateLimit:
     if (!p) return apiJson(401, { ok: false, error: "invalid or revoked token" });
   } else {
     const token = cookieValueFrom(req.headers.get("cookie"));
+    if (token && requestContextOf(req).source === "peer-ingress") return apiJson(403, { ok: false, error: "no device credentials on the peer entrance", code: "device_via_peer_entrance" });
     if (!token) return apiJson(401, { ok: false, error: "missing Authorization: Bearer <secret> or device cookie (only GET /events may use ?token=)" });
     const hit = findCredential(file, token);
     if (!hit) return apiJson(401, { ok: false, error: "device credential invalid, revoked or expired", code: "device_invalid" });
@@ -53,18 +52,19 @@ export async function authenticateApi(req: Request, url: URL, opts: { rateLimit:
     void touchLater(hit.credential.id, requestContextOf(req).clientIp);
   }
   if (p.peer && opts.peers === false) return apiJson(403, { ok: false, error: "peer tokens are not accepted on this route", code: "peer_route_forbidden" });
-  // peer 先验签再扣限速：拿到 token 却签不了名的人耗不掉正牌 peer 的额度（失败另有一个桶）
+  // peer 先验签、判重放，再扣限速：拿到 token 却签不了名的人、重放截获请求的人都耗不掉正牌 peer 的额度（失败另有一个桶）
   const sig = p.peer ? await peerGate(req, url, p.peer, opts.rateLimit) : null;
   if (sig instanceof Response) return sig;
+  const replay = sig?.once ? isPeerReplay(sig.once, p.peer!) : false;
+  if (replay) return peerSigRejected(replay);
+  await sig?.commit();
   if (opts.rateLimit) {
     const limit = p.role === "owner" ? OWNER_RATE_LIMIT_PER_MIN : API_RATE_LIMIT_PER_MIN;
     const key = tokenIdOf(p);
     let limiter = limiters.get(key);
     if (!limiter) limiters.set(key, (limiter = new SlidingWindowLimiter(limit)));
-    if (!limiter.tryAcquire()) return apiJson(429, { ok: false, error: `rate limit exceeded (${limit} req/min)` });
+    if (!limiter.tryAcquire()) return apiJson(429, { ok: false, error: `rate limit exceeded (${limit} req/min)`, code: "rate_limited", reason: "rate_limited" });
   }
-  const replay = sig?.once ? isPeerReplay(sig.once, p.peer!) : false;
-  if (replay) return peerSigRejected(replay);
   if (p.peer) {
     const peer = p.peer;
     void import("./peer-presence.js").then((m) => m.notePeerInbound(peer)); // 在线 peer 列表的「最近来访」
@@ -77,7 +77,7 @@ export async function authenticateApi(req: Request, url: URL, opts: { rateLimit:
  * 验签失败也限流（每个 peer 每分钟 120 次，超了回 429），但用单独的桶：和成功请求共用一个桶的话，
  * 拿着 token 却签不了名的人就能把正牌 peer 挡在外面。
  */
-async function peerGate(req: Request, url: URL, peer: string, rateLimit: boolean): Promise<Extract<PeerSigVerdict, { allow: true }> | Response> {
+async function peerGate(req: Request, url: URL, peer: string, rateLimit: boolean): Promise<Extract<PeerCheck, { allow: true }> | Response> {
   if (requestContextOf(req).source === "relay") return apiJson(403, { ok: false, error: "peer tokens are not accepted on the relay path", code: "peer_via_relay_path" });
   const v = await checkPeerSignature(req, url, peer);
   if (v.allow) return v;
@@ -92,33 +92,7 @@ async function peerGate(req: Request, url: URL, peer: string, rateLimit: boolean
 
 /** reason 单独给出：调用方据此提示「对时 / 重新邀请 / 别原样重发」，而不是笼统的「token 失效」 */
 function peerSigRejected(reason: string): Response {
-  return apiJson(401, { ok: false, error: `peer request signature rejected: ${reason}`, code: "peer_signature", reason });
-}
-
-/** 经中继来的兑换（隧道或路径模式）一律 403：合法的兑换只走 peer 帧（进 peer 入口）或直连 */
-export function redeemRefusal(req: Request): Response | null {
-  if (requestContextOf(req).source !== "relay") return null;
-  return apiJson(403, { ok: false, error: "invites are not redeemed on the relay path", code: "redeem_via_relay_path" });
-}
-
-/**
- * 兑换请求的对方指纹（写进 peers.json 的 fp）：经中继来的取 peer 入口核过的发件人；直连的取请求自带签名的钥匙指纹
- * （签名对得上才算）。有了它，直连加入的 peer 重装后重新邀请也能改钉。都没有返回 ""。要在读正文之前调。
- */
-export async function redeemSenderFp(req: Request): Promise<string> {
-  const relayed = relaySenderFp(req);
-  if (relayed) return relayed;
-  const key = req.headers.get(SIG_HEADERS.key), ts = req.headers.get(SIG_HEADERS.ts), sig = req.headers.get(SIG_HEADERS.sig);
-  if (!key || !ts || !sig || !isPublicKey(key)) return "";
-  const u = new URL(req.url);
-  const body = new Uint8Array(await req.clone().arrayBuffer());
-  return verifySigned(key, { method: req.method, path: u.pathname + u.search, ts, sig, body }) === "ok" ? keyFingerprint(key) : "";
-}
-
-/** 经中继来的请求的发件人指纹：只认 peer 入口核过进程内标记后放进请求上下文的（peer-ingress.ts），原始头一律不信；没有返回 "" */
-export function relaySenderFp(req: Request): string {
-  const fp = requestContextOf(req).relayFrom ?? "";
-  return FP_RE.test(fp) ? fp : "";
+  return apiJson(401, { ok: false, error: peerSigErrorText(reason), code: "peer_signature", reason });
 }
 
 /** 凭据的 lastSeenAt / 到期滑动：内存里先节流，10 分钟内不碰 principals.json；写失败只记日志（鉴权已经通过） */

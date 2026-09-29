@@ -26,6 +26,8 @@ export interface HintCtx {
   myAddr?: string;
   /** 扫 tailnet 找到的同端口 bridge 候选（跨 tailnet 共享时邀请里的 IP 可能是对方视角） */
   candidates?: string[];
+  /** 对方拒绝时回的 code（兑换端点，manager/peer-join.ts） */
+  code?: string;
 }
 
 export function joinFailureHint(kind: JoinFailureKind, ctx: HintCtx): string {
@@ -42,6 +44,9 @@ export function joinFailureHint(kind: JoinFailureKind, ctx: HintCtx): string {
         (ctx.myAddr ? `（把你的地址 ${ctx.myAddr} 发给对方，让他放行）` : "") +
         `，或者对方的 bridge 只监听本机（.env 的 BRIDGE_BIND）。对方处理好后原样再粘贴一次即可。${cand}`;
     case "rejected":
+      if (ctx.code === "iid_taken") {
+        return "对方那边已有一个同实例 id 的联系人，但钥匙对不上：请对方先删掉旧联系人再发邀请；你这边如果是老版本，先升级（claudestra update）。";
+      }
       return "对方收到了请求，但拒绝了这张邀请：可能已过期（24 小时）、已经用过或被撤销——请对方重新生成一张。";
     default:
       return "确认对方 bridge 在线、地址对外可达、邀请未过期未撤销。";

@@ -19,6 +19,23 @@ export function normalizeIp(ip: string): string {
   return v;
 }
 
+/** 对端地址是不是回环（控制面闸门 bridge/web-gateway.ts 与 peer 入口 bridge/peer-ingress.ts 共用） */
+export function isLoopbackAddress(addr: string | null | undefined): boolean {
+  if (!addr) return false;
+  // normalize(review nit-c):大写/十六进制压缩形态也归一。miss 方向本就是
+  // 误拒不是误放(安全无洞),补齐只为不误伤边角形态。Bun requestIP 规范化
+  // 输出下只会是 127.x / ::1 / ::ffff:127.x,后两条是防御性冗余。
+  const a = addr.toLowerCase();
+  return (
+    a === "::1" ||
+    a === "::ffff:127.0.0.1" ||
+    a === "::ffff:7f00:1" ||
+    a === "0:0:0:0:0:ffff:7f00:1" ||
+    a.startsWith("127.") ||
+    a.startsWith("::ffff:127.")
+  );
+}
+
 const isLoopbackIp = (ip: string): boolean => ip === "::1" || ip.startsWith("127.");
 
 /** 这次请求的真实来源地址（见文件头的口径）；拿不到对端 → null */

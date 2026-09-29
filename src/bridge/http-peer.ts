@@ -12,7 +12,7 @@ import { newMessageId, newThreadId } from "./router.js";
 import { findHttpPeer, type HttpPeer } from "../lib/peers.js";
 import { handoffEnd, handoffStart } from "../lib/handoff-log.js";
 import { signedFor } from "../lib/instance-key.js";
-import { peerAuthHint } from "../lib/peer-trust.js";
+import { peerAuthHint, peerCallFailureText } from "../lib/peer-auth-hints.js";
 import { recordMetric } from "../lib/metrics.js";
 import { startPeerPresence } from "./peer-presence.js";
 import { initPush } from "./push/init.js";
@@ -178,14 +178,13 @@ async function runCall(
       signal: AbortSignal.timeout(postTimeoutMs),
     }, { fetchImpl: f, timeoutMs: postTimeoutMs }); // relay:// 的 peer 经中继（relay-link.ts），其余原样 fetch
   } catch (e) {
-    // v2.17.2 结局分类(peer 报告:超时被统一说成「网络不可达」,而消息多半已
-    // 送达——误导性文案诱发整个 peer 网络的重复投递)
+    // 结局分类：超时时消息多半已送达，统一说成「网络不可达」会诱发重复投递；中继入站的拒绝按原因说（lib/peer-auth-hints.ts）
     const isTimeout = (e as Error).name === "TimeoutError" || /timed?\s*out/i.test((e as Error).message || "");
     await pushToCaller(
       caller,
       isTimeout
         ? `[⚠️ peer 调用超时] ${label} 在 ${Math.round(postTimeoutMs / 1000)}s 内没返回回执。消息**可能已送达**但未取得回执线程,回复无法自动取回——不要立刻重发,对方在线的话稍后重问一次即可。`
-        : `[⚠️ peer 调用失败] ${label} 网络不可达：${(e as Error).message}。请确认对方实例在线（peer-http-test ${peer.name}）。`,
+        : peerCallFailureText(label, (e as Error).message, peer.name),
       peer, peerAgentName, false, callId,
     );
     settle(callId, caller, "http_peer_out_error", { peer: peer.name, kind: isTimeout ? "post_timeout" : "network" });
@@ -199,7 +198,7 @@ async function runCall(
     /* 非 JSON 响应按状态码兜底 */
   }
 
-  if (res.status === 401 || res.status === 403) {
+  if (res.status === 401 || res.status === 403 || res.status === 429) {
     await pushToCaller(caller, `[⚠️ peer 调用失败] ${label} 拒绝了请求（${res.status}：${body?.error || "token 无效或 agent 不在授权范围"}）。${peerAuthHint(body)}。`, peer, peerAgentName, false, callId);
     settle(callId, caller, "http_peer_out_error", { peer: peer.name, kind: "auth", status: res.status });
     return;
