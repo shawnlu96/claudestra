@@ -52,7 +52,8 @@ const RETRY = Symbol("retry");
 
 async function codeOf(res: Response): Promise<string> {
   const j = (await res.json().catch(() => null)) as { code?: unknown } | null; // 错误体不是 JSON（中继或老版本的错误页）：按状态码报
-  return typeof j?.code === "string" ? j.code : `e2e_http_${res.status}`;
+  // 明文错误体中继能伪造，code 会进调用方 agent 的上下文：只认短的机器码，别的按状态码报
+  return typeof j?.code === "string" && /^[a-z0-9_]{1,40}$/.test(j.code) ? j.code : `e2e_http_${res.status}`;
 }
 
 /**
