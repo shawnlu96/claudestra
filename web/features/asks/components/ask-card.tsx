@@ -61,9 +61,9 @@ export function AskCard(props: { ask: WebAsk; now: number; focused: boolean; onO
       )}
 
       {open && <AskActions ask={ask} agent={agent} />}
-      {answerSummary(ask) && <p className="mt-2 text-[12.5px] opacity-75">{open ? t("已答：{s}", { s: answerSummary(ask) }) : answerSummary(ask)}</p>}
+      {!leaving && answerSummary(ask) && <p className="mt-2 text-[12.5px] opacity-75">{open ? t("已答：{s}", { s: answerSummary(ask) }) : answerSummary(ask)}</p>}
       <AnswerImages atts={ask.answer?.atts} />
-      {note && <p className={`mt-2 text-[12.5px] ${note.ok ? "text-success" : "text-error"}`}>{note.text}</p>}
+      {!leaving && note && <p className={`mt-2 text-[12.5px] ${note.ok ? "text-success" : "text-error"}`}>{note.text}</p>}
 
       <footer className="mt-3 flex items-center gap-2 text-[12px]">
         {ask.fromAgent && (

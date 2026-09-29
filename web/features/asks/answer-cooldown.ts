@@ -26,6 +26,23 @@ export function markAnswered(id: string): void {
   set({ id, phase: "fading" });
 }
 
+/** 作答失败（asks-store 已回滚）：当场结束过渡，这张照常显示失败原因、马上能重答 */
+export function clearAnswered(id: string): void {
+  if (active?.id !== id) return;
+  timers.forEach(clearTimeout);
+  timers = [];
+  set(null);
+}
+
+/**
+ * 抽屉怎么用这一笔：淡出中的那张（按开着的排、留在原位），以及别的开着的卡要不要暂不收点击。
+ * store 里这张又是 open = 作答已失败回滚（或还没生效），不淡出也不挡别的，免得失败原因跟着淡没
+ */
+export function cooldownView(just: Answered | null, asks: readonly { id: string; state: string }[]): { fadingId: string | null; guard: boolean } {
+  if (!just || asks.find((a) => a.id === just.id)?.state === "open") return { fadingId: null, guard: false };
+  return { fadingId: just.phase === "fading" ? just.id : null, guard: true };
+}
+
 export function subscribeAnswered(f: () => void): () => void {
   subs.add(f);
   return () => subs.delete(f);
