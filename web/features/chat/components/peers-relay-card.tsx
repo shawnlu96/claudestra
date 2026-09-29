@@ -35,6 +35,7 @@ function OffBlock({ status, onEnabled }: { status: RelayStatusView; onEnabled: (
       <button className="btn btn-primary btn-sm" disabled={busy} onClick={() => void enable()}>
         {busy ? <span className="loading loading-spinner loading-xs" /> : t("一键接入官方中继")}
       </button>
+      <p className="leading-relaxed text-warning">{t("官方中继目前能看到经隧道的内容，敏感内容请用自建中继。")}</p>
       {err && <div className="text-error">{err}</div>}
       <p className="pt-1 leading-relaxed text-base-content/55">{t("自建中继：在 .env 里加这两行、重启 bridge。")}</p>
       <div className="flex items-start gap-2">

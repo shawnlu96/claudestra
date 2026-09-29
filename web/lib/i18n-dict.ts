@@ -20,6 +20,7 @@ import { CONTACTS_DICT } from "./i18n-dict-contacts";
 import { SESSIONS_DICT } from "./i18n-dict-sessions";
 import { SKILLS_DICT } from "./i18n-dict-skills";
 import { TALK_DICT } from "./i18n-dict-talk";
+import { RELAY_DICT } from "./i18n-dict-relay";
 
 export const DICT: Record<string, string> = {
   ...LEDGER_DICT, ...COLLAB_DICT, ...BOUNDARY_DICT, ...ATTACH_DICT, ...TOOLS_DICT, ...MEDIA_DICT, ...TALK_DICT,
@@ -27,6 +28,7 @@ export const DICT: Record<string, string> = {
   ...CONTACTS_DICT, // 侧栏联系人与输入框 @（lib/i18n-dict-contacts.ts）
   ...SESSIONS_DICT, // 未纳管会话 / 归档（lib/i18n-dict-sessions.ts）
   ...SKILLS_DICT, // 技能库与按会话启停（lib/i18n-dict-skills.ts）
+  ...RELAY_DICT, // Peer 面板的中继卡（lib/i18n-dict-relay.ts）
   // ── 通用 ─────────────────────────────────────────────
   "关闭": "Close",
   "斜杠命令只有 owner 能用，请直接发文字": "Slash commands are owner-only — send it as plain text", // bridge/api-slash.ts 的 slash_owner_only
@@ -694,11 +696,6 @@ export const DICT: Record<string, string> = {
   "读取中继状态失败": "Couldn't read relay status",
   "我的中继地址": "My relay address",
   "手机 / 别的浏览器不装任何东西、不开 Tailscale 就能打开这个地址。": "Phones and other browsers can open this address with nothing installed and no Tailscale.",
-  "出门访问目前要靠 Tailscale。接入中继之后，手机不装任何东西就能打开这台机器。":
-    "Remote access currently needs Tailscale. Once the relay is on, phones can open this machine with nothing installed.",
-  "一键接入官方中继": "Connect to the official relay",
-  "接入中继失败": "Couldn't connect the relay",
-  "自建中继：在 .env 里加这两行、重启 bridge。": "Self-hosted relay: add these two lines to .env and restart the bridge.",
   "配对新设备": "Pair a new device",
   "配对码生成失败": "Couldn't create a pairing code",
   "全部会话": "all sessions",
