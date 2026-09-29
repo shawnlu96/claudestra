@@ -16,6 +16,8 @@ import { applyPending, ASK_EVENT_REFRESH_MS, PENDING_MAX_MS, type PendingAnswer,
 export interface AsksSnap {
   asks: WebAsk[];
   loaded: boolean;
+  /** 403：这个 principal 看不了台账，列表恒空（聊天气泡不能拿「查不到」当结案，asks-model replyAskState） */
+  denied?: boolean;
   /** 抽屉开着吗；focus = 要滚到的那张卡 */
   open: boolean;
   focus: string | null;
@@ -113,7 +115,7 @@ async function refresh(): Promise<void> {
     if (e instanceof ApiError && e.status === 403) {
       denied = true;
       server = [];
-      show({ loaded: true });
+      show({ loaded: true, denied: true });
     }
     // 其余（断网、切机器中止）：保留上一份，下次刷新再来
   }

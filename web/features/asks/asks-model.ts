@@ -156,30 +156,38 @@ export function unclaimedBindAsk(asks: WebAsk[], agent: string, rows: WebCompone
 /** bridge 的「待你处理」列表只带开着的和 3 天内结案的（bridge/asks.ts 列表的 closedSince），两边一致 */
 export const ASK_LIST_CLOSED_MS = 3 * 24 * 3600_000;
 
+/** 列表状态：loading = 还没拉到；denied = 这个 principal 没有台账权限（403，列表恒空，不能拿「查不到」当结案） */
+export type AskListState = "loading" | "ok" | "denied";
+
 export interface ReplyAskState {
   ask: WebAsk | null;
   closed: WebAsk | null;
   orphan: WebAsk | null;
   gone: boolean;
-  /** 点了也不发：closed / orphan / gone 任一 */
+  /** 点了也不发：closed / orphan / gone 任一，或列表还没到、气泡又没带 askId（没法让 bridge 按 id 判） */
   blocked: boolean;
+  /** 点击带给 bridge 的 askId：认出的 ask，认不出就用气泡自带的——bridge 按 id 找到已结案的回 409，不靠列表全不全 */
+  hintId: string | null;
 }
 
 /**
  * 一个气泡的按钮对应哪条 ask、锁不锁（use-reply-ask.ts 的纯逻辑）：closed = 认出的 ask 已结案；orphan = 没认出、列表里有同形状开着的授权类；
- * gone = 气泡带 askId、列表已加载却查不到，且 reply 比列表保留期还旧——开着的 ask 一定在列表里，所以它早已结案、移出了列表。
- * gone 不锁的话点下去就是一条普通的 [button:…]，decide 类的 agent 会当成新答复（PR B r1 P2-2）；比保留期新的不算（刚建、列表还没刷到）。
+ * gone = 列表可信却查不到，且 reply 比列表保留期还旧——开着的 ask 一定在列表里，所以它早已结案、移出了列表（Pi / Codex / 老历史不带 askId 也算）。
+ * gone 不锁的话点下去就是一条普通的 [button:…]，decide 类的 agent 会当成新答复（PR B P2-2）；比保留期新的不算（刚建、列表还没刷到）。
  */
 export function replyAskState(
-  asks: WebAsk[], loaded: boolean, agent: string, m: Pick<ChatMessage, "replyComponents" | "replyTs" | "ts" | "replyAskId">, inlineIds: string[], now = Date.now(),
+  asks: WebAsk[], list: AskListState, agent: string, m: Pick<ChatMessage, "replyComponents" | "replyTs" | "ts" | "replyAskId">, inlineIds: string[], now = Date.now(),
 ): ReplyAskState {
   const rows = m.replyComponents;
   const ask = askForReply(asks, agent, rows, m.replyTs ?? m.ts, inlineIds, m.replyAskId);
   const closed = ask && ask.state !== "open" ? ask : null;
   const orphan = ask ? null : unclaimedBindAsk(asks, agent, rows, inlineIds);
   const at = Date.parse(m.replyTs ?? m.ts ?? "");
-  const gone = !!m.replyAskId && !ask && loaded && Number.isFinite(at) && now - at > ASK_LIST_CLOSED_MS;
-  return { ask, closed, orphan, gone, blocked: !!closed || !!orphan || gone };
+  const hasButtons = !!rows?.length || inlineIds.length > 0;
+  const gone = hasButtons && !ask && list === "ok" && Number.isFinite(at) && now - at > ASK_LIST_CLOSED_MS;
+  const hintId = ask?.id ?? m.replyAskId ?? null;
+  const waiting = hasButtons && list === "loading" && !hintId;
+  return { ask, closed, orphan, gone, blocked: !!closed || !!orphan || gone || waiting, hintId };
 }
 
 /** ask 的答案 → 气泡各行的已答值（与 reply-components 的 replyClicks 同形：按钮存 id，选单存 `<id>:<值>`） */

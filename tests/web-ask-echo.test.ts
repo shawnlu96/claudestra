@@ -86,15 +86,28 @@ describe("ask 移出列表后（结案超过 3 天）点旧按钮不会发出 [b
   });
 
   test("只写了字答的（没有可回填的按钮）：列表已加载却查不到、气泡比保留期旧 → 按已结案锁住，beforeSend 不发", () => {
-    const s = replyAskState([], true, "agent-x", old, [], NOW);
+    const s = replyAskState([], "ok", "agent-x", old, [], NOW);
     expect([s.gone, s.blocked]).toEqual([true, true]);
   });
 
-  test("不误锁：列表还没加载、气泡在保留期内（刚建还没刷到）、老消息没带 askId、ask 还在列表里开着", () => {
-    expect(replyAskState([], false, "agent-x", old, [], NOW).blocked).toBe(false);
-    expect(replyAskState([], true, "agent-x", { ...old, replyTs: "2026-10-04T12:00:00Z" }, [], NOW).blocked).toBe(false);
-    expect(replyAskState([], true, "agent-x", { ...old, replyAskId: undefined }, [], NOW).blocked).toBe(false);
+  test("Pi / Codex / 老历史的气泡不带 askId：同样按已结案锁住", () => {
+    expect(replyAskState([], "ok", "agent-x", { ...old, replyAskId: undefined }, [], NOW)).toMatchObject({ gone: true, blocked: true, hintId: null });
+  });
+
+  test("列表靠不住时不按天数猜，改让 bridge 按气泡自带的 askId 判（已结案回 409）", () => {
+    // 还在加载 / 没有台账权限（403，列表恒空）/ 列表只取 200 条、3 天内结案的被挤出去
+    for (const list of ["loading", "denied"] as const) expect(replyAskState([], list, "agent-x", old, [], NOW)).toMatchObject({ gone: false, blocked: false, hintId: "ask_1" });
+    const fresh = { ...old, replyTs: "2026-10-04T12:00:00Z" };
+    expect(replyAskState([], "ok", "agent-x", fresh, [], NOW)).toMatchObject({ blocked: false, hintId: "ask_1" });
+    // 还在加载、气泡又没带 askId：没法让 bridge 判，先不让发
+    expect(replyAskState([], "loading", "agent-x", { ...old, replyAskId: undefined }, [], NOW).blocked).toBe(true);
+    expect(replyAskState([], "denied", "agent-x", { ...old, replyAskId: undefined }, [], NOW).blocked).toBe(false);
+  });
+
+  test("不误锁：气泡在保留期内（刚建还没刷到）、ask 还在列表里开着、没有按钮的气泡", () => {
+    expect(replyAskState([], "ok", "agent-x", { ...old, replyAskId: undefined, replyTs: "2026-10-04T12:00:00Z" }, [], NOW).blocked).toBe(false);
     const open = { id: "ask_1", state: "open", source: "reply", fromAgent: "agent-x", options: comps, createdAt: Date.parse(old.replyTs) } as unknown as WebAsk;
-    expect(replyAskState([open], true, "agent-x", old, [], NOW)).toMatchObject({ gone: false, blocked: false, ask: { id: "ask_1" } });
+    expect(replyAskState([open], "ok", "agent-x", old, [], NOW)).toMatchObject({ gone: false, blocked: false, ask: { id: "ask_1" }, hintId: "ask_1" });
+    expect(replyAskState([], "ok", "agent-x", { ...old, replyComponents: undefined }, [], NOW).blocked).toBe(false);
   });
 });
