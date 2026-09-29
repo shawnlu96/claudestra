@@ -118,6 +118,14 @@ export function hasClickTargets(replyText: string | undefined, text: string | un
   return !!components?.length || parseInlineButtons(`${replyText ?? ""}\n${text ?? ""}`).length > 0;
 }
 
+/**
+ * 一个气泡最多一条带按钮的 reply：两条都带就另起气泡（直播 setReplyText、整段 toChatMessages、差量 mergeContiguousAssistant 同一口径）。
+ * 气泡按 replyAskId 整泡认领（use-reply-ask），两条带 ask 的 reply 并成一泡时，前一段的「批准」会带着后一条的 id 批新参数（adv3 P1）
+ */
+export function splitsReplyBubble(bubble: Pick<ChatMessage, "replyText" | "replyComponents">, replyText?: string, components?: WebComponentRow[]): boolean {
+  return hasClickTargets(bubble.replyText, undefined, bubble.replyComponents) && hasClickTargets(replyText, undefined, components);
+}
+
 function userMessage(m: NeutralMessage, anchor: ChatMessage | null, opts: ShapeOpts, forms: FormLookup): ChatMessage {
   const text = m.text || "";
   // CC 写入的中断标记 / TUI 斜杠命令记录不是用户打的字 → 轻分隔线
@@ -153,7 +161,7 @@ function accumulate(group: ChatMessage | null, m: NeutralMessage, toolCalls: Too
     if (toolCalls) g.toolCalls = [...(g.toolCalls ?? []), ...toolCalls];
     if (m.replyText) g.replyText = g.replyText ? `${g.replyText}\n${m.replyText}` : m.replyText;
     if (m.replyComponents?.length) g.replyComponents = [...(g.replyComponents ?? []), ...m.replyComponents];
-    if (m.replyAskId) g.replyAskId = m.replyAskId; // 一个气泡并了几条 reply 时认最后建的那条
+    if (m.replyAskId) g.replyAskId = m.replyAskId; // 带按钮的 reply 一泡只有一条（splitsReplyBubble），这里是唯一那条的
     if (replyAtts.length) g.attachments = [...(g.attachments ?? []), ...replyAtts];
   }
   if (typeof m.turnMs === "number") g.turnMs = m.turnMs;
@@ -206,6 +214,7 @@ export function toChatMessages(items: NeutralMessage[], opts: ShapeOpts = {}): C
       out.push(userMessage(m, anchor, opts, forms));
       continue;
     }
+    if (group && splitsReplyBubble(group, m.replyText, m.replyComponents)) group = null;
     const g = accumulate(group, m, toolCalls, opts.sid);
     if (!group) out.push(g);
     group = g;

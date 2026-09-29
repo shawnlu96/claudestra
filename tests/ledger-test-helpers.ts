@@ -3,6 +3,8 @@ import type { Database } from "bun:sqlite";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { auditLedger } from "../src/lib/ledger-audit.js";
+import { reconcileFindings } from "../src/lib/ledger-audit-store.js";
 import { closeLedger, openLedger } from "../src/lib/ledger-store.js";
 import { createItem, createTask, deliver, moveStage, recordReview, setFrozen, setMeta } from "../src/lib/ledger-write.js";
 
@@ -68,4 +70,10 @@ export function ledgerScript(path: string, body: string): Bun.Subprocess<"ignore
 export async function runLedgerScript(path: string, body: string): Promise<void> {
   const p = ledgerScript(path, body);
   if ((await p.exited) !== 0) throw new Error(`ledger script failed: ${await new Response(p.stderr).text()}`);
+}
+
+/** 让项目的每条巡检规则都「跑过一次」（写 audit_baseline）：之后的发现照常进 pending，不被首轮静默吞掉 */
+export function baselineAudit(db: Database, project: string): void {
+  const all = auditLedger({ project, pms: [], tasks: [], agents: [], reviewers: [], held: [], ownerInbox: [] }, 0).evaluated;
+  reconcileFindings(db, project, [], all, 0);
 }

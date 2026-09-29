@@ -6,6 +6,7 @@
  *    之前每隔几天提醒一次（owner 2026-09-24：更新后用户没允许，也要记得弹框让他允许）。
  * 2. 剪贴板：浏览器已授权读剪贴板时，回到前台顺手看一眼，有新邀请就提示；没授权不主动要权限。
  * 3. 在任何地方粘贴带邀请的文字 → 不当成普通文字，直接弹加入确认。
+ * 加入 peer（/peers/*）要全权凭据：guest、部分 scope 的设备整个不挂，粘贴也不拦。
  */
 import { useEffect, useState, useSyncExternalStore } from "react";
 import { createPortal } from "react-dom";
@@ -15,11 +16,16 @@ import { CenteredModal } from "./centered-modal";
 import { JoinConfirm } from "./peers-join-confirm";
 import { decodeInvite, findInviteCode } from "../invite-link";
 import { firstSeen, INVITE_PROTOCOL, setHandlerState, shouldAskHandler } from "../invite-intake";
+import { useFullScope } from "../contacts-data";
 
 const noopSubscribe = () => () => {};
 const handlerSupported = () => "registerProtocolHandler" in navigator && !isNativeShell();
 
 export function InviteIntake() {
+  return useFullScope() === true ? <Intake /> : null;
+}
+
+function Intake() {
   const t = useT();
   const supported = useSyncExternalStore(noopSubscribe, handlerSupported, () => false);
   const [hideAsk, setHideAsk] = useState(false);

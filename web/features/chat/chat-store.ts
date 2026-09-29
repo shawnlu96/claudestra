@@ -17,7 +17,7 @@ import { isDuplicateSend, type LastSend } from "./send-dedupe";
 import {
   isHistoryBubble,
   coveredByCursor,
-  mergeContiguousAssistant, dropCoveredDelta,
+  mergeContiguousAssistant, dropCoveredDelta, splitsReplyBubble,
   historyHasReply,
   type RecordSrc,
 } from "./live-merge";
@@ -35,10 +35,9 @@ import { loadAgents as apiLoadAgents, MASTER_AGENT_NAME } from "@/lib/chat/agent
 import { createAgent as apiCreateAgent, lifecycleAction as apiLifecycle } from "@/lib/api/agents";
 import { fetchHistory } from "@/lib/api/history";
 import { openAgentEventStream } from "@/lib/api/stream";
-import { agentTasks, answerAuq, answerPermission, clearAgentSession, interruptAgent, sendMessage, setHidden, type SendResult } from "@/lib/api/chat";
+import { agentTasks, answerAuq, answerPermission, clearAgentSession, interruptAgent, sendErrorText, sendMessage, setHidden, type SendResult } from "@/lib/api/chat";
 import { getProfile, putProfile } from "@/lib/api/settings";
-import { projectsList } from "@/lib/api/system";
-import { markRead } from "@/lib/api/push";
+import { markRead, projectsList } from "./scoped-requests"; // 非全权设备不发（接口要全权）
 
 /** v2.17.2 侧栏最近触碰时刻(pointerdown/滚动)——roster 重排的交互期冻结依据。
  *  sidebar 的容器事件调 noteSidebarInteraction 更新;见 refreshAgents 内注释。 */
@@ -1677,7 +1676,7 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
       }
     } catch (e) {
       const timedOut = (e as Error).name === "TimeoutError";
-      fail(timedOut ? (getLang() === "zh" ? "上传超时（网络不稳）" : "upload timed out") : (e as Error).message, e instanceof ApiError && e.code === "ask_closed");
+      fail(timedOut ? (getLang() === "zh" ? "上传超时（网络不稳）" : "upload timed out") : sendErrorText(e), e instanceof ApiError && e.code === "ask_closed");
     }
   }
 
@@ -1939,9 +1938,9 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
       if (this.state.replying) this.produce((s) => { s.replying = false; });
       return;
     }
-    // 回合边界上的 reply（他端触发、纯 reply 无叙述）另起气泡，不并进上一回合；
-    // 历史气泡（h 前缀）同样不并——理由见 ensureLiveAssistant
-    if (last && last.role === "assistant" && !isHistoryBubble(last) && !this.nextBubbleBoundary) {
+    // 回合边界上的 reply（他端触发、纯 reply 无叙述）另起气泡，不并进上一回合；历史气泡（h 前缀）同样不并——理由见 ensureLiveAssistant；
+    // 带按钮的 reply 一泡只放一条（splitsReplyBubble）
+    if (last && last.role === "assistant" && !isHistoryBubble(last) && !this.nextBubbleBoundary && !splitsReplyBubble(last, text, components)) {
       this.produce((s) => {
         s.replying = false; // 回复已到,「正在回复…」收场
         const m = s.messages[s.messages.length - 1];
@@ -1950,9 +1949,9 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
         // reply 作为段按时间序入列（reply 后叙述可能还在继续，钉底会时间倒挂）
         m.segments = m.segments ?? [];
         m.segments.push({ kind: "reply", text, ts: new Date().toISOString() });
-        // 组件挂到承载 reply 的气泡；一条 reply 多段拼接时后到的组件覆盖（通常只一组）
+        // 组件挂到承载 reply 的气泡（带按钮的 reply 一泡只有一条，见上）；askId = 它建出的「待你处理」，气泡按它认领（use-reply-ask）
         if (hasComp) m.replyComponents = components;
-        if (askId) m.replyAskId = askId; // 这条 reply 建出的「待你处理」，气泡按它认领（use-reply-ask）
+        if (askId) m.replyAskId = askId;
         // agent 出站附件（发图给用户）——多段 reply 各自的附件累积
         if (hasAtts) m.attachments = [...(m.attachments ?? []), ...attachments!];
         s.awaitingChunk = false;

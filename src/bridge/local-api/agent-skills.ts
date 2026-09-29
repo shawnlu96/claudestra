@@ -2,12 +2,13 @@
  * 会话详情 ·「技能」栏：按 agent 启停技能（台账 i03 第一期）。
  *   GET  /api/v1/agents/:name/skill-settings → { agent, runtime, view: AgentSkillView }（lib/agent-skills.ts）
  *   POST /api/v1/agents/:name/skill-settings {skill, state} → manager skill-toggle 的输出（manager 是唯一写者）
- * 要 manage，且 agent 在凭据 scope 内（同目录按 agent 的写端点同一口径）；master 单独判，"*" 不含 master。
+ * 读：canReadScopedManage 且 agent 在 scope 内；写（改开关）只给全权凭据（canManage），和 claude-settings 同一类管理操作。
+ * master 单独判，"*" 不含 master。
  * 改完不自动重启：CC 会话运行中不重读 --settings（lib/agent-settings.ts 顶部的实测），由界面提示「重启后生效」。
  */
 import { isSkillName, isSkillState, outsideSkillOverrides, readAgentSettings, skillTableOf } from "../../lib/agent-settings.js";
 import { agentSkillView } from "../../lib/agent-skills.js";
-import { canManage } from "../../lib/devices.js";
+import { canManage, canReadScopedManage } from "../../lib/devices.js";
 import { normalizePiEnvProfile } from "../../lib/pi-env.js";
 import type { Principal } from "../../lib/principals.js";
 import { agentRuntime, isMasterAgent, readRegistryAgents, type RegistryAgent } from "../../lib/registry.js";
@@ -28,7 +29,8 @@ async function resolveAgent(param: string): Promise<RegistryAgent | null> {
 export async function handleAgentSkills(req: Request, path: string, principal: Principal): Promise<Response | null> {
   const m = path.match(PATH_RE);
   if (!m || (req.method !== "GET" && req.method !== "POST")) return null;
-  if (!canManage(principal)) return forbidden("skill-settings requires a credential with manage grant");
+  if (!canReadScopedManage(principal)) return forbidden("skill-settings requires a credential with manage grant");
+  if (req.method === "POST" && !canManage(principal)) return forbidden("changing skill settings requires a full-scope token");
   const raw = decodeURIComponent(m[1]);
   const param = isMasterAgent(raw) ? "master" : raw; // agent-master 之类的写法先归一，免得绕过「"*" 不含 master」
   if (!inScopeEitherName(principal, param)) return notInScope(param);

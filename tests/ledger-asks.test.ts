@@ -241,23 +241,42 @@ function rawAt(steps: readonly (typeof LEDGER_MIGRATIONS)[number][], version: nu
 const tableExists = (d: Database, name: string) => !!d.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(name);
 
 describe("迁移到第二版", () => {
-  test("顺序：v1 → asks → T8h 的依赖边 → asks 第二版（v4）", () => {
-    expect(LEDGER_MIGRATIONS.length).toBe(4);
-    expect(LEDGER_MIGRATIONS[3]).toBe(migrateAsksV2);
+  test("顺序：v1 → asks → T8h 的依赖边 → T29 的巡检表 → asks 第二版（v5）", () => {
+    expect(LEDGER_MIGRATIONS.length).toBe(5);
+    expect(LEDGER_MIGRATIONS[4]).toBe(migrateAsksV2);
   });
 
-  test("T8h 的 v3（线上那版 + 依赖边）升到 v4：asks 重建、task_deps 和任务负责人列都在", () => {
-    rawAt(LEDGER_MIGRATIONS.slice(0, 3), 3).close();
-    const d = openLedger(path);
-    expect([schemaVersion(d), tableExists(d, "task_deps"), getAsk(d, "ask_old")?.assignee]).toEqual([4, true, null]);
-    closeLedger(path);
+  test("线上的 v3（T8h）、v4（T29，audit_baseline 里有数据）都升到 v5：asks 重建、task_deps / 巡检表 / 任务负责人列都在", () => {
+    for (const v of [3, 4]) {
+      const raw = rawAt(LEDGER_MIGRATIONS.slice(0, v), v);
+      if (v === 4) raw.exec("INSERT INTO audit_baseline (project, rule, since) VALUES ('p', 'review_no_reviewer', 123)");
+      raw.close();
+      const d = openLedger(path);
+      expect([schemaVersion(d), tableExists(d, "task_deps"), tableExists(d, "audit_findings"), getAsk(d, "ask_old")?.assignee]).toEqual([5, true, true, null]);
+      if (v === 4) expect(d.query("SELECT since FROM audit_baseline").all()).toEqual([{ since: 123 }]);
+      closeLedger(path);
+    }
   });
 
-  test("分支上提前开过的 v3（asks 第二版、没有 task_deps）：合并后的代码打开会自愈出 task_deps，asks 不再重建、数据都在", () => {
-    rawAt([...LEDGER_MIGRATIONS.slice(0, 2), migrateAsksV2], 3).close();
-    const d = openLedger(path);
-    expect([schemaVersion(d), tableExists(d, "task_deps"), getAsk(d, "ask_old")?.title]).toEqual([4, true, "老的"]);
-    closeLedger(path);
+  test("v4 → v5 中途失败（asks 的索引名被占）：打开报错、整笔回滚，库仍是 v4，asks 还是旧表、巡检数据都在", () => {
+    const raw = rawAt(LEDGER_MIGRATIONS.slice(0, 4), 4);
+    raw.exec("INSERT INTO audit_baseline (project, rule, since) VALUES ('p', 'r', 1)");
+    raw.exec("CREATE TABLE asks_key_state (x)");
+    raw.close();
+    expect(() => openLedger(path)).toThrow(/asks_key_state.*已回滚，库仍是 v4/);
+    const check = new Database(path, { readonly: true });
+    const cols = (check.query("PRAGMA table_info(asks)").all() as { name: string }[]).map((c) => c.name);
+    expect([schemaVersion(check), cols.includes("assignee"), check.query("SELECT COUNT(*) AS n FROM audit_baseline").get()]).toEqual([4, false, { n: 1 }]);
+    check.close();
+  });
+
+  test("分支上提前开过的库（asks 第二版占了 v3 / v4 的号）：合并后的代码打开会自愈出缺的表，asks 不再重建、数据都在", () => {
+    for (const steps of [[...LEDGER_MIGRATIONS.slice(0, 2), migrateAsksV2], [...LEDGER_MIGRATIONS.slice(0, 3), migrateAsksV2]]) {
+      rawAt(steps, steps.length).close();
+      const d = openLedger(path);
+      expect([schemaVersion(d), tableExists(d, "task_deps"), tableExists(d, "audit_findings"), getAsk(d, "ask_old")?.title]).toEqual([5, true, true, "老的"]);
+      closeLedger(path);
+    }
   });
 
   test("v2 的库（T11a 线上那版）：重建后旧数据、索引都在，fromAgent 可空、新的 kind / state / source 写得进；重跑不再重建", () => {

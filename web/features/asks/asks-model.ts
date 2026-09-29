@@ -126,19 +126,30 @@ export function askForReply(asks: WebAsk[], agent: string, rows: WebComponentRow
   const block = rows ?? [];
   if ((!block.length && !inlineIds.length) || !agent) return null;
   if (askId) return asks.find((a) => a.id === askId) ?? null;
-  const want = canon(block);
-  const wantInline = inlineIds.join(",");
   const at = replyTs ? Date.parse(replyTs) : NaN;
   let best: WebAsk | null = null;
   for (const a of asks) {
-    if (a.source !== "reply" || a.bind || !a.fromAgent || !sameAgent(a.fromAgent, agent)) continue;
-    if (canon(a.options.slice(0, block.length)) !== want) continue;
-    if (wantInline && buttonIds(a.options[block.length] as WebComponentRow | undefined) !== wantInline) continue;
+    if (a.bind || !sameShape(a, agent, block, inlineIds)) continue;
     if (Number.isFinite(at) && Math.abs(a.createdAt - at) > 120_000) continue;
     if (!best || (Number.isFinite(at) && Math.abs(a.createdAt - at) < Math.abs(best.createdAt - at))) best = a;
     else if (!Number.isFinite(at) && a.createdAt > best.createdAt) best = a;
   }
   return best;
+}
+
+/** 这条 ask 是不是这个 agent 用这组按钮建的：选项以气泡的 components 开头，行内按钮合成的那一行排在后面（按 id 对） */
+function sameShape(a: WebAsk, agent: string, block: WebComponentRow[], inlineIds: string[]): boolean {
+  if (a.source !== "reply" || !a.fromAgent || !sameAgent(a.fromAgent, agent) || canon(a.options.slice(0, block.length)) !== canon(block)) return false;
+  return !inlineIds.length || buttonIds(a.options[block.length] as WebComponentRow | undefined) === inlineIds.join(",");
+}
+
+/**
+ * 气泡没认出 ask（老消息没带 id、带的 id 不在列表里），列表里却有同形状、开着的授权类：按钮锁住、提示去卡片上批（adv3 P2-2）。
+ * 放开的话点下去 bridge 回 409，那一行却先被标成已点、消息标「未送达」，看着像点过了
+ */
+export function unclaimedBindAsk(asks: WebAsk[], agent: string, rows: WebComponentRow[] | undefined, inlineIds: string[] = []): WebAsk | null {
+  if ((!rows?.length && !inlineIds.length) || !agent) return null;
+  return asks.find((a) => a.bind && a.state === "open" && sameShape(a, agent, rows ?? [], inlineIds)) ?? null;
 }
 
 /** ask 的答案 → 气泡各行的已答值（与 reply-components 的 replyClicks 同形：按钮存 id，选单存 `<id>:<值>`） */

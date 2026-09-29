@@ -7,7 +7,7 @@
  */
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import type { Principal, PrincipalsFile } from "./principals.js";
-import { isMasterAgent } from "./registry.js";
+import { canonicalAgentName, isLiteralMaster, isMasterAgent } from "./registry.js";
 
 export const OWNER_PRINCIPAL_ID = "owner:self";
 export const DEVICE_COOKIE = "cstra_dev";
@@ -65,6 +65,27 @@ export function normalizeGrant(input: Partial<{ agents: unknown; terminal: unkno
 
 /** guest 的默认：不碰 master、不开终端、不管理 */
 export const guestGrant = (agents: string[]): Grant => ({ agents: agents.filter((a) => !isMasterAgent(a)), terminal: false, manage: false });
+
+type GuestAgentsCode = "guest_agents_required" | "guest_agent_wildcard" | "guest_agent_unknown" | "guest_all_needs_confirm";
+export type GuestAgentsCheck = { ok: true; agents: string[] } | { ok: false; code: GuestAgentsCode; error: string };
+
+/**
+ * guest 开放哪些 agent 必须写明：没给、空、去掉 master（含 MASTER、全角等变体）后没剩的一律拒，不再隐式给 "*"（tests/guest-pairing.test.ts）。
+ * 名字先转规范形式（canonicalAgentName）再校验、按规范形式存：除了恰好是 "*"，带 * 的一律拒，其余必须是 registry 里有的 agent（known 收规范名）——
+ * 写个还不存在的名字等于预先授权了以后同名的 agent。
+ * "*" 仍可给，但要调用方带 confirmAll=true——服务端也卡，老网页或直接调 API 都绕不过 CLI / 网页的二次确认。
+ */
+export function checkGuestAgents(input: unknown, confirmAll: unknown, known: (canonical: string) => boolean): GuestAgentsCheck {
+  const agents = Array.isArray(input) ? [...new Set(input.map((a) => canonicalAgentName(String(a))).filter((a) => a && !isMasterAgent(a)))] : [];
+  if (!agents.length) return { ok: false, code: "guest_agents_required", error: "guest 要指定开放哪些 agent（大总管不能开放给 guest）" };
+  const wild = agents.find((a) => a !== "*" && a.includes("*"));
+  if (wild) return { ok: false, code: "guest_agent_wildcard", error: `「${wild}」不是 agent 名：要开放全部只能单写 "*"，否则逐个写名字` };
+  const unknown = agents.find((a) => a !== "*" && !known(a));
+  if (unknown) return { ok: false, code: "guest_agent_unknown", error: `没有叫「${unknown}」的 agent：名字要和 claudestra list 里的一致` };
+  if (!agents.includes("*")) return { ok: true, agents };
+  if (confirmAll === true) return { ok: true, agents: ["*"] };
+  return { ok: false, code: "guest_all_needs_confirm", error: '给 guest 开放 "*" 等于开放全部非大总管 agent（包括以后新建的），需要明确确认' };
+}
 
 function newDeviceToken(random: Random = defaultRandom): string {
   return `dev_${Buffer.from(random(32)).toString("base64url")}`;
@@ -158,9 +179,10 @@ export function intersectAgents(principalAgents: string[], grantAgents: string[]
   if (pAll && gAll) out.add("*");
   for (const a of grantAgents) {
     if (a === "*") continue;
-    // master 的两种写法都只能来自 principal 显式列的 master——"*" 不含它，别让 "agent-master" 借 pAll 混进去
+    // master 只能来自两边都逐字写的 master / agent-master（isLiteralMaster，与 agentInScope 同口径）——"*" 不含它；
+    // MASTER、全角等变体不给任何权限，也不当普通名字留下（等于无效条目）
     if (isMasterAgent(a)) {
-      if (principalAgents.some(isMasterAgent)) out.add("master");
+      if (isLiteralMaster(a) && principalAgents.some(isLiteralMaster)) out.add("master");
     } else if (pAll || principalAgents.includes(a)) out.add(a);
   }
   if (gAll) for (const a of principalAgents) if (a !== "*" && !isMasterAgent(a)) out.add(a);
@@ -178,19 +200,25 @@ export function effectivePrincipal(hit: CredentialHit): Principal {
   return { ...p, agents: intersectAgents(p.agents, c.grant.agents), terminal, role: terminal ? p.role : "external", manage: c.grant.manage && p.role === "owner", credential: c.id };
 }
 
-/** 管理端点的门：设备凭据看 grant.manage；老的全 scope 非 peer token 过渡期仍放行（T6 退场时收紧为只认 owner） */
+/**
+ * 管理端点的门：scope 含 "*"、非 peer，设备凭据另看 grant.manage；老的全 scope 非 peer token 过渡期仍放行（T6 退场时收紧为只认 owner）。
+ * 不能因 role=owner 免掉 "*"：开了终端的设备 role 仍是 owner（effectivePrincipal），部分 scope 的也一样，
+ * 会借管理端点（restart-all、建 agent、cron）碰到 scope 外的 agent。owner 本人的凭据本来就是 "*"。见 tests/session-gates.test.ts。
+ */
 export function canManage(p: Principal): boolean {
-  if (p.manage === false) return false;
-  return p.role === "owner" || (p.agents.includes("*") && !p.peer);
+  return p.manage !== false && p.agents.includes("*") && !p.peer;
 }
+
+/** 按 scope 过滤后只读返回的管理信息（技能库、按 agent 的技能视图）：全权凭据，或 grant 明确带 manage 的设备（部分 scope 也算），peer 除外。写一律走 canManage */
+export const canReadScopedManage = (p: Principal): boolean => canManage(p) || (p.manage === true && !p.peer);
 
 /**
  * 内置台账（docs 10-ledger §4）的唯一读门，API / SSE ledger 事件 / GET /agents 的 ledgerTask 三处共用。
- * 台账横跨整个项目的任务、执行者与 owner 原话，所以比 canManage 多要「全 scope、非 peer」：
- * 部分 scope 的 owner 设备、guest、peer（含历史上签过 "*" 的）一律不给；老的全 scope Bearer 随 canManage 过渡期放行。
+ * 台账横跨整个项目的任务、执行者与 owner 原话：部分 scope 的 owner 设备、guest、peer 一律不给——canManage 已经要求「全 scope、非 peer」，
+ * 单列一个名字是为了以后两道门分开收紧时不用改调用方；老的全 scope Bearer 随 canManage 过渡期放行。
  */
 export function canReadLedger(p: Principal): boolean {
-  return canManage(p) && p.agents.includes("*") && !p.peer;
+  return canManage(p);
 }
 
 /** 订阅额度（账户用量、重置次数、读凭据的开关）只给本机 owner，与台账同一道门（设计稿 T2b §5） */

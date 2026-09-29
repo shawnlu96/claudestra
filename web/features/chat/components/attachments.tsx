@@ -1,14 +1,16 @@
 "use client";
 import { useRef, useState } from "react";
-import type { ChatAttachmentView } from "../type";
+import type { ChatAttachmentView, ChatMessage } from "../type";
+import type { MediaItem } from "@/lib/api/media";
 import { useT } from "@/lib/i18n";
-import { isApiUrl } from "@/lib/chat/attachments";
-import { AuthImg, fetchAuthBlob, resolvedAuthUrl, saveBlob } from "./auth-img";
+import { ATTACHMENT_API, isApiUrl } from "@/lib/chat/attachments";
+import { useChatStoreApi } from "../chat-store";
+import { openMediaViewer, openStaticViewer } from "../../media/media-viewer";
+import { AuthImg } from "./auth-img";
 import { AttachmentPreview, openAttachment, type PreviewState } from "./attachment-preview";
-import { shareFile } from "../attachment-share";
 import { PaperclipIcon } from "./line-icons";
 
-/* 用户气泡里的附件回显：图片缩略图 + PhotoSwipe 全屏预览 / 文件 chip（文本预览、手机分享、桌面下载）/ iOS 分享保存。
+/* 气泡里的附件回显：图片缩略图（点开进大图查看器）/ 文件 chip（文本预览、手机分享、桌面下载）。
    附件在 bridge 的 /api/v1/attachments/<name>，要带设备凭据取（AuthImg 先 fetch 成 blob 再渲染；下载同理），token 永不进 URL。 */
 
 /** 附件文件 chip（非图片 / 图片加载失败的降级）。有 url 可点开：怎么打开见 ./attachment-preview.tsx */
@@ -51,12 +53,11 @@ function FileChip({ a }: { a: ChatAttachmentView }) {
 }
 
 /** 图片附件：内联缩略图,点击全屏预览;加载失败(旧文件被清)降级为文件 chip。 */
-function AttachedImage({ a, onPreview, imgRef }: { a: ChatAttachmentView; onPreview: () => void; imgRef: (el: HTMLImageElement | null) => void }) {
+function AttachedImage({ a, onPreview }: { a: ChatAttachmentView; onPreview: () => void }) {
   const [err, setErr] = useState(false);
   if (err || !a.url) return <FileChip a={a} />;
   return (
     <AuthImg
-      ref={imgRef}
       src={a.url}
       alt={a.name}
       onClick={onPreview}
@@ -66,72 +67,42 @@ function AttachedImage({ a, onPreview, imgRef }: { a: ChatAttachmentView; onPrev
   );
 }
 
-/** 把当前图片分享/保存：iOS 上走系统分享面板(可存相册),不支持时下载原图。 */
-async function shareImage(url: string, name: string): Promise<void> {
+/** 气泡里的附件地址 → 文件名（/api/v1/attachments/<name>?d=…）；媒体索引按它找到这张图 */
+function fileNameOf(url: string): string | undefined {
+  if (!url.startsWith(ATTACHMENT_API)) return undefined;
   try {
-    const blob = await fetchAuthBlob(url);
-    if ((await shareFile(blob, name || "image.png")) === "unsupported") saveBlob(blob, name || "image.png");
+    return decodeURIComponent(url.slice(ATTACHMENT_API.length).split("?")[0]);
   } catch {
-    /* 取不到图就什么都不做：图正显示在 lightbox 里，多半是缓存被清，关掉重开即可 */
+    return undefined; // 编码坏了：退回只看气泡里这几张
   }
 }
 
-/** align：聊天里的用户气泡靠右（默认）；「待你处理」卡片里靠左 */
-export function AttachmentStrip({ items, align = "end" }: { items: ChatAttachmentView[]; align?: "start" | "end" }) {
+/** msg：所在气泡（有 sid 的历史气泡能精确到那一条；直播气泡按名字找最新的一张）；align：聊天里的用户气泡靠右（默认），「待你处理」卡片里靠左 */
+export function AttachmentStrip({ items, msg, align = "end" }: { items: ChatAttachmentView[]; msg?: ChatMessage; align?: "start" | "end" }) {
   const t = useT();
+  const store = useChatStoreApi();
   const images = items.filter((a) => a.kind === "image" && a.url);
-  const imgEls = useRef(new Map<string, HTMLImageElement>());
 
-  // PhotoSwipe(2026-07-14 owner 对上一个库的裁决:「太垃圾了」×3):相册级手势——捏合/双击缩放、拖拽平移、下拉关闭。
-  // 需要原图尺寸 → 从已加载的缩略图 naturalWidth/Height 取；src 用已解析的 object URL（凭据已在取 blob 时带过）。
+  // 大图查看器（features/media/media-viewer.ts）：从这张图起，左右翻本会话全部图片、翻到头自动往前加载；
+  // 媒体索引里找不到（旧 bridge / 刚发还没进 jsonl）就只翻气泡里这几张
   const openViewer = async (index: number) => {
-    const { default: PhotoSwipe } = await import("photoswipe");
-    const pswp = new PhotoSwipe({
-      dataSource: images.map((a) => {
-        const el = imgEls.current.get(a.url!);
-        return { src: resolvedAuthUrl(a.url!), width: el?.naturalWidth || 1600, height: el?.naturalHeight || 1200, alt: a.name, pid: a.url };
-      }),
-      index,
-      bgOpacity: 0.95,
-      arrowPrev: images.length > 1,
-      arrowNext: images.length > 1,
-      zoom: false, // 手势缩放为主，按钮占位
-      pinchToClose: true,
-      closeOnVerticalDrag: true,
-      // 单击即关(owner 2026-07-14:「单击一下也关闭」)——手机上关图片只能下拉不顺手
-      tapAction: "close",
-      imageClickAction: "close",
-      bgClickAction: "close",
-    });
-    // 自定义「保存」按钮:iOS PWA 里 lightbox 的图长按不出系统菜单,Web Share API 的分享面板才有「存储图像」到相册
-    pswp.on("uiRegister", () => {
-      pswp.ui?.registerElement({
-        name: "save-btn",
-        order: 8,
-        isButton: true,
-        tagName: "button",
-        html: t("保存"),
-        onClick: () => {
-          const slide = pswp.currSlide?.data as { pid?: string; alt?: string } | undefined;
-          if (slide?.pid) void shareImage(slide.pid, String(slide.alt || "image.png"));
-        },
-      });
-    });
-    pswp.init();
+    const a = images[index];
+    const agent = store.state.activeAgent;
+    // 历史气泡（id = h<首 seq>，seqEnd = 尾 seq）按区间精确找；区间里没有就 404、退回只翻这几张，不会打开同名旧图
+    const seqFrom = msg ? Number(/^h(\d+)/.exec(msg.id)?.[1]) : NaN;
+    const seq = msg?.seqEnd ?? seqFrom;
+    const anchor = { name: fileNameOf(a.url!), ...(msg?.sid && Number.isFinite(seqFrom) && Number.isFinite(seq) ? { session: msg.sid, seqFrom, seq } : {}) };
+    const text = { t, onLocate: (it: MediaItem) => void store.jumpToContext(it.sessionId, it.seq) };
+    if (agent && anchor.name && (await openMediaViewer({ agent }, anchor, text))) return;
+    const slides = images.map((x) => ({ key: x.url!, url: x.url!, saveUrl: x.url!, name: x.name }));
+    await openStaticViewer(slides, index, { t });
   };
 
   return (
     <div className={`flex max-w-[85%] flex-wrap gap-2 ${align === "start" ? "justify-start" : "justify-end"}`}>
       {items.map((a, i) =>
         a.kind === "image" ? (
-          <AttachedImage
-            key={i}
-            a={a}
-            imgRef={(el) => {
-              if (el && a.url) imgEls.current.set(a.url, el);
-            }}
-            onPreview={() => void openViewer(images.indexOf(a))}
-          />
+          <AttachedImage key={i} a={a} onPreview={() => void openViewer(images.indexOf(a))} />
         ) : (
           <FileChip key={i} a={a} />
         ),

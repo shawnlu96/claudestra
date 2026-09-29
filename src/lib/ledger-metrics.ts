@@ -60,6 +60,11 @@ export function stageTimeline(events: readonly LedgerEvent[], now: number): Stag
   });
 }
 
+/** 时间线最后一段是由哪条事件开出来的（建任务或 stage，与 stageTimeline 的取点规则一致）；导入推断的时间带 approxTime */
+export function currentStageMark(own: readonly LedgerEvent[]): LedgerEvent | undefined {
+  return own.findLast((e) => e.kind === "stage" || (e.kind === "task" && e.data.op === "new"));
+}
+
 /** 停在这些阶段不算开工：spec→blocked 不是开工，导入后 review→spec→restate 也不能把起点挪到后面那次 restate */
 const NOT_STARTED: readonly Stage[] = ["spec", "blocked", "cancelled"];
 

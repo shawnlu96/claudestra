@@ -86,12 +86,16 @@ export function apiMirrorBody(text: string, attachmentCount: number): string {
 
 const XML_ENTITY: Record<string, string> = { "&amp;": "&", "&quot;": '"', "&lt;": "<", "&gt;": ">", "&apos;": "'" };
 
+/** <channel> 头属性值的 XML 实体还原（renderContentForLocal 写头时转义过） */
+export function decodeXmlAttr(v: string): string {
+  return v.replace(/&(?:amp|quot|lt|gt|apos);/g, (e) => XML_ENTITY[e] ?? e);
+}
+
 /** <channel …> 属性串里的 attachments="a;b"（bridge 用 ; 连接，见 bridge.ts 组 meta 处） */
 export function channelAttachmentPaths(attrs: string): string[] {
   const v = /(?:^|\s)attachments="([^"]*)"/.exec(attrs)?.[1];
   if (!v) return [];
-  return v
-    .replace(/&(?:amp|quot|lt|gt|apos);/g, (e) => XML_ENTITY[e] ?? e)
+  return decodeXmlAttr(v)
     .split(";")
     .map((p) => p.trim())
     .filter(Boolean);
@@ -149,4 +153,39 @@ export function senderOf(un: { from?: string; fromId?: string; askId?: string })
   if (un.from && un.fromId) out.fromId = un.fromId;
   if (un.askId) out.askId = un.askId;
   return out;
+}
+
+const COMMAND_LINE_MAX = 200;
+
+/** 斜杠命令记录的原文（<command-name>/x</command-name> ± <command-args>…）→「/x 参数」；不是命令记录 → null */
+export function commandRecordLine(raw: string): string | null {
+  const cmd = /<command-name>(\/[\w:-]+)<\/command-name>/.exec(raw);
+  return cmd ? commandLine(cmd[1], /<command-args>([\s\S]*?)<\/command-args>/.exec(raw)?.[1]) : null;
+}
+
+/** 斜杠命令记录（session-history 还原 <command-name> / <command-args>）→ 历史里的一行：带上参数（Web 直通 / TUI 直敲的参数原本只剩「/x」，owner 看不到敲进去了什么），压成一行、限长 */
+export function commandLine(name: string, args?: string): string {
+  const a = (args ?? "").replace(/\s+/g, " ").trim();
+  const line = a ? `${name} ${a}` : name;
+  const chars = Array.from(line);
+  return chars.length > COMMAND_LINE_MAX ? `${chars.slice(0, COMMAND_LINE_MAX).join("")}…` : line;
+}
+
+/** 去掉 ANSI 转义序列（local-command-stdout 里的 \x1b[1m 等，裸渲染是豆腐块）。 */
+function stripAnsi(s: string): string {
+  // eslint-disable-next-line no-control-regex
+  return s.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, "");
+}
+
+/**
+ * 斜杠命令的输出记录 `<local-command-stdout>…</local-command-stdout>` → 历史里的一行（去 ANSI、限 200 字）。
+ * 不是这种记录 → undefined；空输出 → null（记录照样吃掉，别回落成普通文本）。老版 CC 记成 user 记录、新版记成 system/local_command，两处共用。
+ */
+export function commandStdoutLine(raw: string): string | null | undefined {
+  const m = /^<local-command-stdout>([\s\S]*)<\/local-command-stdout>$/.exec(raw.trim());
+  if (!m) return undefined;
+  const body = stripAnsi(m[1]).trim();
+  if (!body || body === "(no content)") return null;
+  const chars = Array.from(body); // 按码点截：slice 会把 emoji 的代理对切成半个
+  return chars.length > 200 ? chars.slice(0, 200).join("") + "…" : body;
 }

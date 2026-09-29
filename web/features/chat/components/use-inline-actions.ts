@@ -23,6 +23,7 @@ export function useInlineActions(m: ChatMessage): InlineActionCtx {
       clicks: { ...inline.clicks, ...m.replyClicks },
       busy,
       locked: inline.locked,
+      lockHint: inline.lockHint,
       onClick: async (id, label) => {
         const wire = `[button:${id}]`;
         if (!beforeSend(wire)) return;

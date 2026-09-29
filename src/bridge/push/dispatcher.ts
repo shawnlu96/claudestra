@@ -93,10 +93,10 @@ export function createDispatcher(d: DispatcherDeps): Dispatcher {
   const log = d.log ?? ((m: string) => console.log(`🔔 ${m}`));
 
   /**
-   * APNs 设备登记时的凭据还有效（撤了 / 禁用 / 过期的设备什么都不推）；老行没记 principal 的按 owner:self 算。
+   * APNs 设备登记时的凭据还有效（撤了 / 禁用 / 过期的设备什么都不推）；没记 principal 的行不推（合法登记都带，空的只可能是加列前的老行残留）。
    * 只管 APNs：壳每次启动都重新登记、凭据跟着换新；网页的订阅只在手动开启时登记，按它判会让重新配对过的浏览器连聊天推送一起静默停掉
    */
-  const live = (r: Registrant): boolean => !r.principal || !d.resolvePrincipal || !!d.resolvePrincipal(r.principal, r.credential);
+  const live = (r: Registrant): boolean => !!r.principal && (!d.resolvePrincipal || !!d.resolvePrincipal(r.principal, r.credential));
 
   /** 发给 owner 的订阅（guest 的订阅只收指给自己的 ask，走 sendRows） */
   async function webPushAll(payload: Record<string, unknown>, filter?: (s: PushSubscriptionRow) => boolean): Promise<NoticeOutcome> {
@@ -204,7 +204,7 @@ function askPusher(d: DispatcherDeps, io: PushIo): Dispatcher["onAsk"] {
     const p = s.audience === "guest" && s.principal ? d.resolvePrincipal?.(s.principal, s.credential) : null;
     return !!p && isAskAssignee(p, a);
   };
-  /** owner 那一路（Web Push 与 APNs 同一个判定）也要看得见这条（部分 scope 的 owner 设备、不含 master 的设备）：老行没记 principal 的按 owner:self 算 */
+  /** owner 那一路（Web Push 与 APNs 同一个判定）也要看得见这条（部分 scope 的 owner 设备、不含 master 的设备）：没记 principal 的 Web Push 老订阅按 owner:self 算（APNs 的这种行 live 已先筛掉） */
   const ownerRowSees = (s: Registrant, a: Pick<Ask, "fromAgent" | "assignee">): boolean => {
     if (!s.principal) return true;
     const p = d.resolvePrincipal?.(s.principal, s.credential);

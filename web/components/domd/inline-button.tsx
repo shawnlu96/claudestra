@@ -26,6 +26,8 @@ export interface InlineActionCtx {
   busy: boolean;
   /** 对应的「待你处理」已结案 / 这一行答过了 → 全部禁点（旧消息的按钮批不了新参数）。 */
   locked?: boolean;
+  /** 锁住的原因要告诉人时（没认出的授权类：去卡片上批），气泡在回复下面显示这行小字；有块级按钮的由 ReplyComponents 显示，这里不给 */
+  lockHint?: string;
   onClick: (id: string, label: string) => void;
   /** agent 跳转 chip(`[[{.agent}name]]`)用:已知 agent 名单 + 切换回调。
    *  缺省 → chip 只展示不导航。 */
