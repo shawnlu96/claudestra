@@ -567,10 +567,9 @@ async function processNewData(state: WatcherState, discord: Client, pushed?: obj
               // "收到" 这种合法短回复也吞掉。现在 rescue 删了 → watcher 是唯一
               // 文字出口，任何 trim 后非空的 text 都要推出来。
               const t = block.text.trim();
-              // 撞额度的提示（"You've hit your limit · resets 2am (Asia/Shanghai)"）按 ⛔ 发、不按 💬（会像 agent 的正常输出），
-              // 置 flag 让后面那条 turn_duration 也跳过。
-              // 只在 CC / Codex 合成的错误条目上认（Codex 的额度条目不带 isApiErrorMessage、带 error，lib/codex-session.ts）
-              if ((state.apiErrorTurn || entry.error != null) && isLimitHitText(t)) {
+              // ACP 显式分类优先（false 禁止正文翻案）；老 CC / Codex 合成错误没这个字段，才按原文兼容识别。
+              // ⛔ 与事件标记共用这一判定，额度闸据此撤掉旧续跑，后续 turn_duration 也不算思考时长。
+              if (typeof entry.rateLimited === "boolean" ? entry.rateLimited : (state.apiErrorTurn || entry.error != null) && isLimitHitText(t)) {
                 state.textQueue.push(`⛔ ${t}`);
                 state.rateLimited = true;
                 emitEvent({ agent: state.agentName, chatId: state.channelId, type: "assistant_text", data: { text: t, rateLimited: true, apiError: !!state.apiErrorTurn, seq, sid: state.sessionId } });

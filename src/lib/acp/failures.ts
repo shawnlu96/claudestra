@@ -84,7 +84,8 @@ export class FailureDedup {
 
 /**
  * 失败 → Claude Code 形状的错误条目（与 codex-session.ts codexTurnError 同形）：额度原文照登、不标 API 错误（watcher 走 ⛔、
- * 不自动续跑）；其它文字带 "API Error: "，适配器没说不能重试的才标 isApiErrorMessage（它会触发 60s 后自动续跑一次，
+ * 不自动续跑）；rateLimited 显式携带分类（false 也保留），避免下游从措辞重新猜额度。其它文字带 "API Error: "，
+ * 适配器没说不能重试的才标 isApiErrorMessage（它会触发 60s 后自动续跑一次，
  * 策略拒绝 / 请求错误续跑了也是白跑）。没登录不出条目：那一张卡就够了，正文里再来一条只是重复。
  */
 export function failureEntry(f: AcpFailure, ts: string): Record<string, unknown> | null {
@@ -93,6 +94,7 @@ export function failureEntry(f: AcpFailure, ts: string): Record<string, unknown>
   return {
     type: "assistant",
     timestamp: ts,
+    rateLimited: quota,
     isApiErrorMessage: f.kind === "error" && f.retry !== false,
     error: f.message,
     message: { content: [{ type: "text", text: quota ? f.message : `API Error: ${f.message}` }] },
