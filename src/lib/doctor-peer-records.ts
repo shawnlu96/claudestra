@@ -27,8 +27,10 @@ function urlPrefix(baseUrl: string): string | null {
 function recordIssues(r: HttpPeer, pinned: PinnedPeerKey | undefined): string[] {
   const out: string[] = [];
   const relayFp = r.baseUrl ? relayPeerFingerprint(r.baseUrl) : null;
-  if (r.fp !== undefined && !(typeof r.fp === "string" && FP_RE.test(r.fp.toLowerCase()))) out.push("fp 格式不对（所有请求都会按换了钥匙拒绝）");
-  if (r.fp && relayFp && r.fp.toLowerCase() !== relayFp) out.push("fp 和 relay:// 地址里的指纹不一致（以 fp 为准）");
+  const fpStr = typeof r.fp === "string" ? r.fp : null;
+  if (r.fp !== undefined && fpStr === null) out.push("fp 不是字符串（按没有 fp 处理，期望指纹改从地址或钉住的钥匙来；截止日后可能被拒）");
+  else if (fpStr !== null && !FP_RE.test(fpStr.toLowerCase())) out.push("fp 格式不对（所有请求都会按换了钥匙拒绝）");
+  if (fpStr && relayFp && fpStr.toLowerCase() !== relayFp) out.push("fp 和 relay:// 地址里的指纹不一致（以 fp 为准）");
   if (r.baseUrl && !relayFp && urlPrefix(r.baseUrl)) out.push(`对方地址带路径前缀 ${urlPrefix(r.baseUrl)}（反代剥掉前缀的话签名路径对不上，会报 bad）`);
   if (!Number.isFinite(Date.parse(String(r.addedAt)))) out.push("addedAt 缺失或不是时间（钉住的钥匙判不了新旧）");
   const pin = currentPin(pinned, r);
@@ -70,7 +72,7 @@ export async function checkPeerRecords(): Promise<Check[]> {
 /** 每条记录一行：期望指纹从哪来、上一次验签结果（单独跑时打印） */
 export function peerRecordSummary(r: HttpPeer, pinned: PinnedPeerKey | undefined): string {
   const pin = currentPin(pinned, r);
-  const from = r.fp ? "记录的 fp" : r.baseUrl && relayPeerFingerprint(r.baseUrl) ? "relay:// 地址" : pin?.publicKey ? "钉住的钥匙" : "无（老 peer，截止日后拒）";
+  const from = recordPeerFp({ fp: r.fp }) ? "记录的 fp" : r.baseUrl && relayPeerFingerprint(r.baseUrl) ? "relay:// 地址" : pin?.publicKey ? "钉住的钥匙" : "无（老 peer，截止日后拒）";
   return `${r.name}${r.disabled ? "（停用）" : ""} | 期望指纹：${from}${r.publicKey ? "，记了完整公钥" : ""} | 上一次验签：${pin?.lastCheck?.result ?? "没有记录"}`;
 }
 

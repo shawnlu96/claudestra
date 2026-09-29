@@ -109,13 +109,17 @@ describe("持钥证明（纯逻辑）", () => {
   test("judgeJoin：合进有期望指纹的记录必须有对得上的证明（记了公钥的比公钥）；relay:// 地址里的指纹等于期望指纹也算", () => {
     const before = { name: "victim", publicKey: keyV.publicKey };
     const pv = { key: keyV.publicKey, fp: fpV };
-    expect(judgeJoin({ before, anchor: fpV, relayFp: null, proof: pv, inviterIid: "i" })).toEqual({ fields: { fp: fpV, publicKey: keyV.publicKey, instanceId: "i" } });
-    expect(judgeJoin({ before, anchor: fpV, relayFp: null, proof: null, inviterIid: "" })).toMatchObject({ error: expect.stringContaining("没法确认") });
-    expect(judgeJoin({ before: { name: "victim", publicKey: keyN.publicKey }, anchor: fpV, relayFp: null, proof: pv, inviterIid: "" })).toHaveProperty("error");
-    expect(judgeJoin({ before, anchor: fpV, relayFp: fpV, proof: null, inviterIid: "" })).toEqual({ fields: { fp: fpV } });
-    expect(judgeJoin({ before: null, anchor: null, claimedFp: fpV, relayFp: null, proof: { key: keyM.publicKey, fp: fpM }, inviterIid: "" })).toHaveProperty("error");
-    expect(judgeJoin({ before: null, anchor: null, relayFp: null, proof: null, inviterIid: "" })).toEqual({ fields: {} });
-    expect(judgeJoin({ before: null, anchor: null, relayFp: null, proof: "bad", inviterIid: "" })).toHaveProperty("error");
+    expect(judgeJoin({ before, anchor: fpV, relayFp: null, proof: pv, inviterIid: "i", legacyOpen: true })).toEqual({ fields: { fp: fpV, publicKey: keyV.publicKey, instanceId: "i" } });
+    expect(judgeJoin({ before, anchor: fpV, relayFp: null, proof: null, inviterIid: "", legacyOpen: true })).toMatchObject({ error: expect.stringContaining("没法确认") });
+    expect(judgeJoin({ before: { name: "victim", publicKey: keyN.publicKey }, anchor: fpV, relayFp: null, proof: pv, inviterIid: "", legacyOpen: true })).toHaveProperty("error");
+    expect(judgeJoin({ before, anchor: fpV, relayFp: fpV, proof: null, inviterIid: "", legacyOpen: true })).toEqual({ fields: { fp: fpV } });
+    expect(judgeJoin({ before: null, anchor: null, claimedFp: fpV, relayFp: null, proof: { key: keyM.publicKey, fp: fpM }, inviterIid: "", legacyOpen: true })).toHaveProperty("error");
+    expect(judgeJoin({ before: null, anchor: null, relayFp: null, proof: null, inviterIid: "", legacyOpen: true })).toEqual({ fields: {} });
+    expect(judgeJoin({ before: null, anchor: null, relayFp: null, proof: "bad", inviterIid: "", legacyOpen: true })).toHaveProperty("error");
+    // 截止日后：给不出证明的 http 邀请方直接拒（记下来也永远进不来）；relay:// 地址自带指纹、有证明的照常
+    expect(judgeJoin({ before: null, anchor: null, relayFp: null, proof: null, inviterIid: "", legacyOpen: false })).toMatchObject({ error: "对方版本过旧，请先升级" });
+    expect(judgeJoin({ before: null, anchor: null, relayFp: fpV, proof: null, inviterIid: "", legacyOpen: false })).toEqual({ fields: { fp: fpV } });
+    expect(judgeJoin({ before: null, anchor: null, relayFp: null, proof: { key: keyV.publicKey, fp: fpV }, inviterIid: "", legacyOpen: false })).toHaveProperty("fields");
   });
 });
 
@@ -151,6 +155,17 @@ describe("加入邀请：自报的指纹 / 实例 id 不能冒名合并", () => 
     const r = await rec("fresh");
     expect(r?.fp).toBeUndefined();
     expect(r?.instanceId).toBeUndefined();
+  });
+  test("截止日后老版本邀请方 → 拒绝并回滚，提示对方先升级，不留下进不来的记录", async () => {
+    const clock = spyOn(Date, "now").mockReturnValue(Date.parse("2099-01-01T00:00:00Z"));
+    try {
+      const out = await joinWith({ key: null }, invite("stale-inviter"));
+      expect(out.ok).toBe(false);
+      expect(String(out.error)).toContain("对方版本过旧，请先升级");
+      expect(await rec("stale-inviter")).toBeUndefined();
+    } finally {
+      clock.mockRestore();
+    }
   });
   test("邀请地址被改成中间人、中间人把兑换原样转给真邀请方 → 邀请方比对地址拒绝，victim 记录不动", async () => {
     const out = await joinWith({ key: keyV, iid: IID_V }, invite("victim", fpV, IID_V, `http://127.0.0.1:${relayServer.port}`));

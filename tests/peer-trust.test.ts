@@ -34,6 +34,8 @@ describe("期望指纹与裁决（纯逻辑）", () => {
     expect(recordPeerFp({ fp: fpA.toUpperCase() })).toBe(fpA);
     expect(recordPeerFp({ baseUrl: `relay://${fpB}` })).toBe(fpB);
     expect(recordPeerFp({ baseUrl: "https://he.example" })).toBeNull();
+    expect(recordPeerFp({ fp: 12345, baseUrl: `relay://${fpB}` })).toBe(fpB); // 手改坏的 fp 当没有，不抛
+    expect(recordPeerFp({ fp: { x: 1 }, baseUrl: 7 })).toBeNull();
     expect(expectedPeerFp({ fp: fpA, baseUrl: `relay://${fpB}` }, fpX)).toBe(fpA);
     expect(expectedPeerFp({ baseUrl: "https://he.example" }, fpX)).toBe(fpX);
     expect(expectedPeerFp(undefined, null)).toBeNull();
@@ -177,6 +179,7 @@ describe("接线：authApi / 路径模式 / 中继 peer 帧", () => {
       { name: "pt-alpha", fp: fpA, inTokenId: "tok_pt_a", addedAt: "2026-09-01T00:00:00Z" },
       { name: "pt-bravo", baseUrl: "https://bravo.example", inTokenId: "tok_pt_b", addedAt: "2026-09-01T00:00:00Z" },
       { name: "pt-old", baseUrl: "https://old.example", inTokenId: "tok_pt_old", addedAt: "2026-09-01T00:00:00Z" },
+      { name: "pt-numfp", fp: 12345, addedAt: "2026-09-01T00:00:00Z" },
     ], pendingInvites: [
       { id: "inv_pt_live", joinSecret: "j".repeat(48), inTokenId: "tok_pt_inv", agents: ["*"], url: "", createdAt: "", expiresAt: new Date(Date.now() + 3600_000).toISOString() },
       { id: "inv_pt_old", joinSecret: "k".repeat(48), inTokenId: "tok_pt_invx", agents: ["*"], url: "", createdAt: "", expiresAt: new Date(Date.now() - 1000).toISOString() },
@@ -184,6 +187,12 @@ describe("接线：authApi / 路径模式 / 中继 peer 帧", () => {
   });
   afterAll(() => {
     for (const f of ["principals.json", "peers.json", "peer-keys.json"]) rmSync(join(STATE_DIR, f), { force: true });
+  });
+
+  test("peers.json 里有 fp 不是字符串的记录：中继核发件人的视图照常拼出来，那条当没有指纹", async () => {
+    const view = await loadRelayPeerView();
+    expect(view.contacts.has(fpA)).toBe(true);
+    expect([...view.contacts].every((fp) => typeof fp === "string")).toBe(true);
   });
 
   const PATH = "/api/v1/agents";

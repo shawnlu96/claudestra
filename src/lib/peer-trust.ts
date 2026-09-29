@@ -131,12 +131,15 @@ export function legacyStillOpen(now = Date.now()): boolean {
   return now < Date.parse(currentLegacyDeadline());
 }
 
-type PeerAnchorRecord = { fp?: string; baseUrl?: string };
+type PeerAnchorRecord = { fp?: unknown; baseUrl?: unknown };
 
-/** peers.json 这条记录自带的指纹（邀请 / 兑换记下的 fp，或 relay:// 基址里的）；都没有返回 null */
+/**
+ * peers.json 这条记录自带的指纹（邀请 / 兑换记下的 fp，或 relay:// 基址里的）；都没有返回 null。
+ * 手改坏的记录（fp 不是字符串）当没有 fp，不抛：验签、中继核发件人、doctor 都走这里，一抛就全挂；doctor 另报这条记录。
+ */
 export function recordPeerFp(rec: PeerAnchorRecord | null | undefined): string | null {
-  const fp = rec?.fp?.trim().toLowerCase() || (rec?.baseUrl ? relayPeerFingerprint(rec.baseUrl) : null);
-  return fp || null;
+  const own = typeof rec?.fp === "string" ? rec.fp.trim().toLowerCase() : "";
+  return own || (typeof rec?.baseUrl === "string" ? relayPeerFingerprint(rec.baseUrl) : null) || null;
 }
 
 /**

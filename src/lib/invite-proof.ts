@@ -74,7 +74,8 @@ const REDO = "对方升级后重新发一张邀请，或者删掉旧联系人再
  *   - 证明签名不对、或签名的钥匙和邀请里写的指纹 / relay:// 地址里的指纹不是同一把 → 拒；
  *   - 合进已有记录、那条记录有期望指纹（anchor）：要么证明的钥匙就是它（记了完整公钥的比完整公钥），
  *     要么 relay:// 地址里的指纹就是它（中继按指纹投递）；都不成立 → 拒，老版本邀请方给不出证明也在这里；
- *   - 指纹、公钥、实例 id 只从证明里取；没有证明时 relay:// 地址记地址里的指纹，http 地址什么都不记（验签按老 peer 处理）。
+ *   - 指纹、公钥、实例 id 只从证明里取；没有证明时 relay:// 地址记地址里的指纹，http 地址什么都不记（验签按老 peer 处理）；
+ *     截止日后（legacyOpen 为假）老 peer 一律被拒，这样的记录对方永远进不来，直接拒绝加入、提示对方升级。
  * 调用方拒绝时要回滚本机记录（对方那边已经兑换成功，提示里说明）。
  */
 export function judgeJoin(x: {
@@ -84,6 +85,7 @@ export function judgeJoin(x: {
   relayFp: string | null;
   proof: { key: string; fp: string } | "bad" | null;
   inviterIid: string;
+  legacyOpen: boolean;
 }): JoinVerdict {
   const p = x.proof;
   if (p === "bad") return { error: "对方回复里的持钥证明对不上", hint: "回复在路上被改过，或者回你的不是邀请里那台机器。确认邀请来源后请对方重新生成一张。" };
@@ -95,5 +97,7 @@ export function judgeJoin(x: {
     if (!byProof && x.relayFp !== x.anchor) return { error: `没法确认对方就是已有联系人「${x.before.name}」`, hint: REDO };
   }
   if (p) return { fields: { fp: p.fp, publicKey: p.key, ...(x.inviterIid ? { instanceId: x.inviterIid } : {}) } };
-  return { fields: x.relayFp ? { fp: x.relayFp } : {} };
+  if (x.relayFp) return { fields: { fp: x.relayFp } };
+  if (!x.legacyOpen) return { error: "对方版本过旧，请先升级", hint: "对方的 Claudestra 给不出持钥证明，这样加上的联系人发来的请求都会被拒。请对方先升级（claudestra update）再重新生成一张邀请" };
+  return { fields: {} };
 }

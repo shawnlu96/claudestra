@@ -170,7 +170,7 @@ async function settleJoin(hs: PeerInviteV2, name: string, before: { name: string
   const { readPeers } = await import("../lib/peers.js");
   const inviterIid = isInstanceId(res?.iid) ? res.iid : "";
   const proof = checkInviteProof(res?.proof, { ...x, join: hs.join, redeemerFp: myFingerprint() ?? "", inviterIid });
-  const v = judgeJoin({ before, anchor, claimedFp: hs.fp, relayFp: relayPeerFingerprint(hs.url), proof, inviterIid });
+  const v = judgeJoin({ before, anchor, claimedFp: hs.fp, relayFp: relayPeerFingerprint(hs.url), proof, inviterIid, legacyOpen: legacyStillOpen() });
   if ("error" in v) return v;
   const iid = v.fields.instanceId;
   const other = iid && (await readPeers()).httpPeers?.find((p) => !p.disabled && p.name !== name && p.instanceId === iid);

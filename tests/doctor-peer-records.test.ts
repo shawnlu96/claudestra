@@ -29,6 +29,12 @@ describe("peer 记录核对", () => {
     ], { d: pin(FB, "ok"), e: pin(FA, "ok", AT) }).join("\n");
     for (const want of ["a:fp 格式不对", "b:fp 和 relay://", "c:对方地址带路径前缀 /claudestra", "d:记录的指纹和钉住的钥匙不是同一把", "e:钉住的钥匙早于这条记录建立"]) expect(all).toContain(want);
   });
+  test("fp 不是字符串：不崩，单独报一条，汇总行按没有 fp", () => {
+    const bad = { name: "n", fp: 12345, baseUrl: `relay://${FB}`, addedAt: AT } as unknown as HttpPeer;
+    expect(issuesOf([bad])).toEqual([expect.stringMatching(/^n:fp 不是字符串/)]);
+    expect(peerRecordSummary(bad, undefined)).toContain("relay:// 地址");
+    expect(peerRecordChecks(peerRecordIssues([bad], {}))[0].status).toBe("warn");
+  });
   test("同一个实例 id 多条记录；停用的不算", () => {
     const recs: HttpPeer[] = [
       { name: "v", instanceId: "i1", fp: FA, addedAt: AT }, { name: "v-2", instanceId: "i1", fp: FB, addedAt: AT },
