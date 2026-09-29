@@ -1609,7 +1609,7 @@ async function cmdSessions(search?: string) {
   for (const info of Object.values(reg.agents)) if (info.sessionId && info.displayName) nameMap.set(info.sessionId, info.displayName);
 
   // 给 web 端留原始字段（ISO 时间、cwd、子会话归属）；上限 100 个主会话、每个带最新 50 个子线程（多的只报 moreSubs），Discord 面板自己再截
-  const display = capSubsPerMain(limitByMainSessions(sessions, 100), 50).map((s, i) => ({
+  const display = capSubsPerMain(limitByMainSessions(sessions, 100, 50), 50).map((s, i) => ({
     index: i + 1,
     sessionId: s.sessionId,
     name: nameMap.get(s.sessionId) || s.slug || s.sessionId.slice(0, 8),
@@ -1620,7 +1620,7 @@ async function cmdSessions(search?: string) {
     age: formatAge(s.modifiedAt),
     modifiedAt: s.modifiedAt.toISOString(),
     lastMessage: s.lastUserMessage || "",
-    ...(s.sub ? { sub: s.sub } : {}), ...(s.moreSubs ? { moreSubs: s.moreSubs } : {}),
+    ...(s.sub ? { sub: s.sub } : {}), ...(s.moreSubs ? { moreSubs: s.moreSubs } : {}), ...(s.oneShot ? { oneShot: true } : {}),
   }));
 
   outputSync({

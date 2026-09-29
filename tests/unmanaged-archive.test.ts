@@ -50,6 +50,17 @@ describe("sweepIdleCodexSubSessions：挑哪些收", () => {
     expect(meta).toEqual({ kind: "unmanaged", originalPath: oldSub, runtime: "codex", cwd: "/w", sessionId: id(2), reason: "codex-sub-idle" });
   });
 
+  test("codex exec 一次性会话闲置满天数也收；人开的主会话（cli / vscode）不动", async () => {
+    const w = world();
+    const oldShot = w.write(1, { id: id(1), session_id: id(1), source: "exec" }, 8);
+    const freshShot = w.write(2, { id: id(2), session_id: id(2), source: "exec" }, 2);
+    const human = w.write(3, { id: id(3), session_id: id(3), source: "vscode" }, 30);
+    const r = await sweepIdleCodexSubSessions({ keep: new Set(), now: NOW, ...w.opts });
+    expect(r.archived).toBe(1);
+    expect(existsSync(oldShot)).toBe(false);
+    for (const p of [freshShot, human]) expect(existsSync(p)).toBe(true);
+  });
+
   test("审查复现：已纳管 agent 的主会话今天还在写，它 8 天前开的 subagent 不动", async () => {
     const w = world();
     w.write(1, { id: id(1), session_id: id(1) }, 0);

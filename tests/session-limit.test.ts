@@ -9,6 +9,12 @@ describe("limitByMainSessions：上限只数主会话，子线程跟着主会话
     const rows = [row("s1", "A"), row("s2", "s1"), row("A"), row("s3", "A"), row("B"), row("b1", "B"), row("C")];
     expect(limitByMainSessions(rows, 2).map((r) => r.sessionId)).toEqual(["s1", "s2", "A", "s3", "B", "b1"]);
   });
+  test("codex exec 一次性会话另算名额，不挤占人开的主会话", () => {
+    const shot = (id: string) => ({ ...row(id), oneShot: true as const });
+    const rows = [shot("x1"), row("A"), shot("x2"), shot("x3"), row("B"), row("C")];
+    expect(limitByMainSessions(rows, 2, 1).map((r) => r.sessionId)).toEqual(["x1", "A", "B"]);
+    expect(limitByMainSessions(rows, 2).map((r) => r.sessionId)).toEqual(["x1", "A", "x2", "B"]);
+  });
   test("追不到主会话（父文件已删）、成环：各自按主会话算，不丢行", () => {
     const rows = [row("x", "gone"), row("p", "q"), row("q", "p")];
     expect(limitByMainSessions(rows, 10).map((r) => r.sessionId)).toEqual(["x", "p", "q"]);

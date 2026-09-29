@@ -94,6 +94,7 @@ async function scanCodexSessions(search?: string): Promise<DiscoveredSession[]> 
       lastUserMessage: await lastUserTextOf(filePath, fileStat.size, codexLineToClaudeShape),
       runtime: "codex",
       ...(meta.sub ? { sub: meta.sub } : {}),
+      ...(meta.oneShot ? { oneShot: true as const } : {}),
     });
   }
   return out;
