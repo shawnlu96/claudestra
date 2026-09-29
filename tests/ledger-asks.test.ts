@@ -246,13 +246,28 @@ describe("迁移到第二版", () => {
     expect(LEDGER_MIGRATIONS[4]).toBe(migrateAsksV2);
   });
 
-  test("线上的 v3（T8h）、v4（T29）都升到 v5：asks 重建、task_deps / 巡检表 / 任务负责人列都在", () => {
+  test("线上的 v3（T8h）、v4（T29，audit_baseline 里有数据）都升到 v5：asks 重建、task_deps / 巡检表 / 任务负责人列都在", () => {
     for (const v of [3, 4]) {
-      rawAt(LEDGER_MIGRATIONS.slice(0, v), v).close();
+      const raw = rawAt(LEDGER_MIGRATIONS.slice(0, v), v);
+      if (v === 4) raw.exec("INSERT INTO audit_baseline (project, rule, since) VALUES ('p', 'review_no_reviewer', 123)");
+      raw.close();
       const d = openLedger(path);
       expect([schemaVersion(d), tableExists(d, "task_deps"), tableExists(d, "audit_findings"), getAsk(d, "ask_old")?.assignee]).toEqual([5, true, true, null]);
+      if (v === 4) expect(d.query("SELECT since FROM audit_baseline").all()).toEqual([{ since: 123 }]);
       closeLedger(path);
     }
+  });
+
+  test("v4 → v5 中途失败（asks 的索引名被占）：打开报错、整笔回滚，库仍是 v4，asks 还是旧表、巡检数据都在", () => {
+    const raw = rawAt(LEDGER_MIGRATIONS.slice(0, 4), 4);
+    raw.exec("INSERT INTO audit_baseline (project, rule, since) VALUES ('p', 'r', 1)");
+    raw.exec("CREATE TABLE asks_key_state (x)");
+    raw.close();
+    expect(() => openLedger(path)).toThrow(/asks_key_state.*已回滚，库仍是 v4/);
+    const check = new Database(path, { readonly: true });
+    const cols = (check.query("PRAGMA table_info(asks)").all() as { name: string }[]).map((c) => c.name);
+    expect([schemaVersion(check), cols.includes("assignee"), check.query("SELECT COUNT(*) AS n FROM audit_baseline").get()]).toEqual([4, false, { n: 1 }]);
+    check.close();
   });
 
   test("分支上提前开过的库（asks 第二版占了 v3 / v4 的号）：合并后的代码打开会自愈出缺的表，asks 不再重建、数据都在", () => {
