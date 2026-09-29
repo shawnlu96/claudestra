@@ -3,16 +3,19 @@
  * - 定时扫台账：进入 build / fix 的 human 任务按 askPlanFor 开一条 assigned ask（dedupKey 撞上 = 这一轮这次开过了，不重复）；
  * - 指派 ask 被作答：「完成」经 ledger-human.ts 写交付并同事务推 review，「做不了」只结 ask；算数的作答给 task.pm 发固定模板，
  *   开了班子的「完成」由班子路由通知，这里不发（同一件事只发一次）。
- * 开 ask、给 PM 投递由「待你处理」注入，这里不碰 asks 表。人写的说明只进台账 data.note，发给 agent 的只有任务号和结果。
+ * 开 ask、给 PM 投递经依赖注入（initHumanNode 接「待你处理」的实现），这里不碰 asks 表。人写的说明只进台账 data.note，发给 agent 的只有任务号和结果。
  */
 import type { Database } from "bun:sqlite";
+import { setAskAssigneesOf } from "../lib/ask-access.js";
 import { pmNotice, resultOfChoices, type AskPlan, type HumanResult } from "../lib/human-node.js";
 import { checkHumanCant, HUMAN_ATTS_MAX, humanDeliver, pendingAssignments, projectHasTeam, type HumanDeliverInput } from "../lib/ledger-human.js";
 import type { LedgerTask } from "../lib/ledger-stages.js";
-import { LedgerError } from "../lib/ledger-store.js";
+import { getTask, LedgerError } from "../lib/ledger-store.js";
 import { attsUsableBy, refAttsFromAsk } from "../lib/talk-atts.js";
-import { OWNER_PRINCIPAL, personAliases, personIdOf } from "../lib/talk-people.js";
+import { isGuestPrincipal, OWNER_PRINCIPAL, personAliases, personIdOf } from "../lib/talk-people.js";
 import { memberKey } from "../lib/talk-rooms.js";
+import { notifyTaskPm } from "./ask-expire.js";
+import { askDbIfExists, createAsk, setOnAssignedAnswer } from "./asks.js";
 import { meOf, selfFp, talkDb, talkPrincipals } from "./talk.js";
 
 const TICK_MS = 5000;
@@ -20,6 +23,7 @@ const TICK_MS = 5000;
 /** 用得到的 ask / 作答字段（与「待你处理」的 Ask / AskAnswer 结构兼容） */
 export interface AssignedAsk {
   id: string;
+  project: string;
   taskId: string | null;
   kind: string;
   dedupKey: string | null;
@@ -121,6 +125,7 @@ export async function handleAssignedAnswer(d: HumanNodeDeps, ask: AssignedAsk, a
   const result = resultOfChoices(answer.choices);
   const db = d.db();
   if (ask.kind !== "assigned" || !ask.taskId || !result || !db) return fail("不是指派事项，或没点「完成 / 做不了」");
+  if (getTask(db, ask.taskId)?.project !== ask.project) return fail(`任务 ${ask.taskId} 不在项目 ${ask.project} 里`);
   const who = await (d.answerer ?? answererFromTalk)(answer.principal);
   if (!who) return fail(`认不出作答人 ${answer.principal}`);
   const input: HumanDeliverInput = { taskId: ask.taskId, askId: ask.id, ask, answerer: who, note: answer.text, atts: linkAtts(ask, who, answer.atts) };
@@ -142,4 +147,32 @@ export async function handleAssignedAnswer(d: HumanNodeDeps, ask: AssignedAsk, a
   if (result === "done" && projectHasTeam(db, task.project)) return { ok: true, result, notified: false };
   await d.notifyPm(task, pmNotice(task, result), ask.id);
   return { ok: true, result, notified: true };
+}
+
+/** 凭据算作哪些 assignee：本机 guest → 名下全部 person id（合并过的设备都看得见、答得了指给这个人的 ask）；其余只认本人 */
+function assigneesOfPrincipal(principalId: string): string[] {
+  const self = personIdOf(principalId);
+  if (!isGuestPrincipal(principalId)) return [self];
+  try {
+    return personAliases(talkDb(), self);
+  } catch (e) {
+    console.error(`⚠️ 读 talk 的 people 表失败，指派只认这台设备本身: ${(e as Error).message}`);
+    return [self];
+  }
+}
+
+/** 接进 bridge（ask-entry.ts initAskWiring 调一次）：开 ask 走 createAsk（dedupKey 撞上返回已有的），作答走 onAssignedAnswer，通知走 notifyTaskPm */
+export function initHumanNode(): () => void {
+  setAskAssigneesOf(assigneesOfPrincipal);
+  const deps: HumanNodeDeps = {
+    db: askDbIfExists,
+    openAsk: (task, p) =>
+      void createAsk({
+        source: "system", createdBy: "system:human-node", kind: "assigned", project: task.project, taskId: task.id, title: p.title, body: p.body,
+        options: p.options, allowText: true, assignee: p.assignee, dedupKey: p.dedupKey, blocking: true,
+      }),
+    notifyPm: (task, text, askId) => notifyTaskPm(task, task.project, text, askId, "human-node"),
+  };
+  setOnAssignedAnswer(async (a, answer) => void (await handleAssignedAnswer(deps, a, answer)));
+  return startHumanNode(deps);
 }

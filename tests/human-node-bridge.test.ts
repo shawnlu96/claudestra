@@ -37,7 +37,7 @@ const deps = (over: Partial<HumanNodeDeps> = {}): HumanNodeDeps => ({
   notifyPm: async (task, text, askId) => void notices.push({ pm: task.pm, text, askId }),
   ...over,
 });
-const ask = (id: string, dedupKey = "assign:T1:0:1") => ({ id, taskId: "T1", kind: "assigned", dedupKey });
+const ask = (id: string, dedupKey = "assign:T1:0:1") => ({ id, project: P, taskId: "T1", kind: "assigned", dedupKey });
 const answer = (button: string, principal: string, over: Partial<AssignedAnswer> = {}): AssignedAnswer => ({
   choices: [`[button:${button}]`], text: "改好了，别让 PM 看到这句", principal, ...over,
 });
@@ -115,11 +115,12 @@ describe("作答", () => {
     expect(listEvents(db, { target: "T1" }).some((e) => e.kind === "deliver")).toBe(false);
     expect(notices.map((n) => n.text)).toEqual(["[台账] T1 指派给 local:guest:aa 的事项做不了，原因记在台账里。"]);
   });
-  test("不算数的作答只记日志：别的 guest、过时的 ask、认不出的凭据、没点按钮", async () => {
+  test("不算数的作答只记日志：别的 guest、过时的 ask、认不出的凭据、没点按钮、ask 和任务不在同一个项目", async () => {
     expect(await handleAssignedAnswer(deps(), ask("a1"), answer("assign_done", "guest:bb"))).toMatchObject({ ok: false });
     expect(await handleAssignedAnswer(deps(), ask("a2", "assign:T1:0:2"), answer("assign_done", "guest:aa"))).toMatchObject({ ok: false });
     expect(await handleAssignedAnswer(deps(), ask("a3"), answer("assign_cant", "token:tok_int"))).toMatchObject({ ok: false });
     expect(await handleAssignedAnswer(deps(), ask("a4"), { choices: [], text: "", principal: "guest:aa" })).toMatchObject({ ok: false });
+    expect(await handleAssignedAnswer(deps(), { ...ask("a6"), project: "q" }, answer("assign_done", "guest:aa"))).toMatchObject({ ok: false });
     expect(getTask(db, "T1")!.stage).toBe("build");
     expect(notices).toEqual([]);
   });

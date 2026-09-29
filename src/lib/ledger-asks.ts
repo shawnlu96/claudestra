@@ -322,7 +322,8 @@ export interface AskQuery {
   states?: AskState[];
   fromAgent?: string;
   source?: AskSource;
-  assignee?: string;
+  /** 给数组 = 其中任一（合并过设备的人名下有多个 person id） */
+  assignee?: string | readonly string[];
   /** 已结案的只要 updatedAt 晚于它的（「最近处理过」） */
   closedSince?: number;
   limit?: number;
@@ -339,7 +340,10 @@ export function listAsks(db: Database, q: AskQuery = {}): Ask[] {
   if (q.project !== undefined) add("project = ?", q.project);
   if (q.fromAgent !== undefined) add("fromAgent = ?", q.fromAgent);
   if (q.source !== undefined) add("source = ?", q.source);
-  if (q.assignee !== undefined) add("assignee = ?", q.assignee);
+  if (q.assignee !== undefined) {
+    const who = typeof q.assignee === "string" ? [q.assignee] : q.assignee;
+    add(`assignee IN (${who.map(() => "?").join(",") || "NULL"})`, ...who);
+  }
   if (q.states?.length) add(`state IN (${q.states.map(() => "?").join(",")})`, ...q.states);
   if (q.closedSince !== undefined) add("(state = 'open' OR updatedAt > ?)", q.closedSince);
   const sql = `SELECT * FROM asks${conds.length ? ` WHERE ${conds.join(" AND ")}` : ""}
