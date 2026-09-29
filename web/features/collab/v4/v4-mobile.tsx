@@ -41,7 +41,7 @@ export function MobileList(props: {
                   <span>{l.stageLabel}</span>
                   {l.dwellMs !== null && <span className={v.muted}>{dwellText(l, tr)}</span>}
                 </span>
-                {act && <span className={v.act}>{act}</span>}
+                {act && act !== l.stageLabel && <span className={v.act}>{act}</span>}
                 {block && <span className={v.blk}>{block}</span>}
               </button>
             );

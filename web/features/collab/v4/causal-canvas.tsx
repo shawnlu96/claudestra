@@ -16,6 +16,8 @@ export type Selection = { kind: "task"; id: string } | { kind: "edge"; dep: Ledg
 interface View { x: number; y: number; k: number }
 const PAD = 24;
 const clampK = (k: number) => Math.min(1.6, Math.max(0.3, k));
+/** 打开时缩放不低于它：四列的图塞进 1440 宽下约 540px 的中区只剩一半大小，字认不出；宁可右侧出框靠拖动，整张看点「适配全部」 */
+const READABLE_K = 0.8;
 const STYLE_CLASS = { solid: v.eSolid, flow: v.eFlow, dotted: v.eDotted } as const;
 
 function edgePath(e: CEdge): string {
@@ -61,13 +63,13 @@ export function CausalCanvas(props: {
   const drag = useRef<{ x: number; y: number; vx: number; vy: number; moved: boolean } | null>(null);
   const [view, setView] = useState<View>({ x: PAD, y: PAD, k: 1 });
 
-  const fit = useCallback(() => {
+  const fitTo = useCallback((floor: number) => {
     const el = box.current;
     if (!el || !canvas.w) return;
-    const k = clampK(Math.min(1, (el.clientWidth - PAD * 2) / canvas.w, (el.clientHeight - PAD * 2) / canvas.h));
-    setView({ x: PAD, y: PAD, k });
+    const k = Math.min(1, (el.clientWidth - PAD * 2) / canvas.w, (el.clientHeight - PAD * 2) / canvas.h);
+    setView({ x: PAD, y: PAD, k: clampK(Math.max(floor, k)) });
   }, [canvas.w, canvas.h]);
-  useEffect(fit, [fit]);
+  useEffect(() => fitTo(READABLE_K), [fitTo]);
 
   // 从大纲点任务：把它的框平移到视口中间（折叠在组里的就平移到那一组）
   useEffect(() => {
@@ -139,7 +141,7 @@ export function CausalCanvas(props: {
         ))}
       </div>
       <div className={v.tools}>
-        <button type="button" className={v.tool} onClick={fit}>{tr("适配全部")}</button>
+        <button type="button" className={v.tool} onClick={() => fitTo(0)}>{tr("适配全部")}</button>
       </div>
       {canvas.groups.length === 0 && <div className={v.blank}>{tr("没有可画的任务")}</div>}
     </div>
