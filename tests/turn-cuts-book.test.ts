@@ -463,6 +463,18 @@ describe("停之后马上开口（wf2 stop-semantics-4）", () => {
     expect(b.interruptHold("ch")).toBeNull();
     expect(b.stoppedAt("ch")).toBe(heard);
   });
+  test("bridge 重启后：owner 解除叫停的时刻从盘上认得，押着的旧「停」晚投不重新挂起（T13e r1 P1-1）", () => {
+    const path = join(mkdtempSync(join(tmpdir(), "cuts-restart-")), "cuts.json");
+    const { b, tick, at } = book({ path });
+    const heldAt = b.noteHuman("ch", true);
+    b.record({ channelId: "ch", agent: "a", cause: "stopword", tools: { inflight: [] }, stopAt: heldAt });
+    tick(1_000);
+    b.noteHuman("ch", false); // 答卡片
+    const again = new TurnCuts(path, () => at() + 5_000, async () => []);
+    expect(again.lastSpokeAt("ch")).toBe(at());
+    again.record({ channelId: "ch", agent: "a", cause: "stopword", tools: { inflight: [] }, stopAt: heldAt });
+    expect(again.interruptHold("ch")).toBeNull();
+  });
   test("「停」之前的终端输入晚读到，不能解开之后才叫的停", async () => {
     const { b, at, tick } = book();
     const typedAt = at();

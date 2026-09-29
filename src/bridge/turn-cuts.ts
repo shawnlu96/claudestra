@@ -203,8 +203,13 @@ export class TurnCuts {
 
   /** 叫停记录：owner 在「停」之后已经又开过口（记得晚了），直接带上 goAt */
   private stopRec(channelId: string, stopAt: number): { at: number; goAt?: number } {
-    const spoke = this.ownerSpokeAt.get(channelId);
-    return spoke !== undefined && spoke > stopAt ? { at: stopAt, goAt: spoke } : { at: stopAt };
+    const spoke = this.lastSpokeAt(channelId);
+    return spoke > stopAt ? { at: stopAt, goAt: spoke } : { at: stopAt };
+  }
+
+  /** owner 最近一次开口（不算「停」）的时刻；叫停记录上的解除时刻落盘了，bridge 重启后也认得（押着的旧「停」晚投，preempt.ts） */
+  lastSpokeAt(channelId: string): number {
+    return Math.max(this.ownerSpokeAt.get(channelId) ?? 0, this.stops.get(channelId)?.goAt ?? 0);
   }
 
   /** 投递前调：Codex 上次 Stop 之后被打断过 → 这一条标 after_interrupt（只标一条：它打出的那一轮结束后队列就恢复了） */

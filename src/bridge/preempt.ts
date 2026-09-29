@@ -8,7 +8,7 @@ import { controlFor } from "../lib/runtimes/index.js";
 import { readRegistryAgents } from "../lib/registry.js";
 import { ownerStopOf } from "../lib/stop-words.js";
 import { windowWallWait, type WallWait } from "../lib/wall-screen.js";
-import { preemptHeadline, stopHeadline, stopWaitReply } from "../lib/turn-cuts.js";
+import { preemptHeadline, staleStopNote, stopHeadline, stopWaitReply } from "../lib/turn-cuts.js";
 import { stopTyping } from "./components.js";
 import { clearSafetyTimer } from "./discord-adapter.js";
 import { emitEvent, inflightTools } from "./event-bus.js";
@@ -55,9 +55,11 @@ export function holdNotingStop(
 export function noteHeldStop(env: Envelope, channelId: string, agent: string, runtime?: string): void {
   if (env.meta.forwarded || !ownerStopOf(env).stop || env.meta.heldStopNoted) return; // 转交来的停字不算 owner 在这里叫停（见 preemptForHuman）
   env.meta.heldStopNoted = true;
+  env.meta.heldStopAt = turnCuts.noteHuman(channelId, true);
   clearAgentPendings(channelId);
   const cut = turnCuts.record({
     channelId, agent, runtime, cause: "stopword", byMessageId: env.meta.messageId, byName: senderName(env), tools: { inflight: [] }, interrupted: false,
+    stopAt: env.meta.heldStopAt,
   });
   env.meta.interruptNote = stopHeadline(cut, "wall_wait");
   console.log(`⏹ 停字押在撞墙等待画面上（没发键）：${agent} 已记叫停`);
@@ -73,7 +75,10 @@ export function noteHeldStop(env: Envelope, channelId: string, agent: string, ru
  */
 export async function preemptForHuman(env: Envelope, channelId: string, agent: string): Promise<"wall_wait" | void> {
   const { owner, stop } = env.meta.forwarded ? { owner: false, stop: false } : ownerStopOf(env);
-  const heardAt = owner ? turnCuts.noteHuman(channelId, stop) : undefined; // 「停」的时刻：收尾一拍里 owner 又开口，记停时带上解除
+  // 押过的「停」按当时的时刻排（不再算一次开口）；那之后 owner 又开过口（答卡片、说话）= 作废：不打断、不重新挂起（T13e r1 P1-1）
+  const heldAt = stop && env.meta.heldStopNoted ? (env.meta.heldStopAt ?? turnCuts.stoppedAt(channelId) ?? turnCuts.noteHuman(channelId, true)) : undefined;
+  if (heldAt !== undefined && turnCuts.lastSpokeAt(channelId) > heldAt) return void (env.meta.interruptNote = staleStopNote(heldAt));
+  const heardAt = heldAt ?? (owner ? turnCuts.noteHuman(channelId, stop) : undefined); // 「停」的时刻：收尾一拍里 owner 又开口，记停时带上解除
   // owner 的停 = 接管：发键之前就清 agent 间的待回账。Pi 停下马上报 Stop，等打断返回再清就晚了，看门狗已拿旧账把它催起一轮（adv5 P1）。
   // 押在撞墙画面上时已经清过（noteHeldStop）：最终送达不再清，否则停之后才来的回程槽也一起没了
   if (stop && !env.meta.heldStopNoted) clearAgentPendings(channelId);

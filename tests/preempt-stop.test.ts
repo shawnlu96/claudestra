@@ -211,3 +211,35 @@ describe("停在撞墙等待画面上（T24 wf3 delivery-hold-4 / 执行者主�
     }
   });
 });
+
+describe("押住的旧「停」晚投：按它当时的时刻排，不按投递时刻（T13e r1 P1-1）", () => {
+  const CC = "cc-stale-stop-ch";
+  const env = (id: string): Envelope => ({ ...stopEnv(id, true), to: { kind: "local", channelId: CC, agentName: "agent-cc" } }) as Envelope;
+  test("押住停 → owner 答卡片 → 停出队：作废，不打断、不重新挂起，抬头写明", async () => {
+    turnCuts.forget(CC);
+    log.length = 0;
+    const e = env("stale-stop");
+    noteHeldStop(e, CC, "agent-cc", "claude-code");
+    expect(turnCuts.interruptHold(CC)).toBe("stopped");
+    await sleep(5);
+    turnCuts.noteHuman(CC, false); // 答卡片（asks.ts commitAnswer）：答复走 waitForIdle，不经 preemptForHuman
+    expect(turnCuts.interruptHold(CC)).toBeNull();
+    await preemptForHuman(e, CC, "agent-cc");
+    expect(turnCuts.interruptHold(CC)).toBeNull();
+    expect(log.some((l) => l.startsWith("abort"))).toBe(false);
+    expect(e.meta.interruptNote).toContain("已作废");
+  });
+  test("owner 在押住之前开的口不作废它：出队照常打断、仍是叫停", async () => {
+    turnCuts.forget(CC);
+    log.length = 0;
+    turnCuts.noteHuman(CC, false);
+    await sleep(5);
+    const e = env("fresh-held-stop");
+    noteHeldStop(e, CC, "agent-cc", "claude-code");
+    await sleep(5);
+    await preemptForHuman(e, CC, "agent-cc");
+    expect(turnCuts.interruptHold(CC)).toBe("stopped");
+    expect(turnCuts.stoppedAt(CC)).toBe(e.meta.heldStopAt!); // 叫停时刻是押住那一刻，不是投递时刻
+    expect(log.some((l) => l.startsWith("abort"))).toBe(true);
+  });
+});
