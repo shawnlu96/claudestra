@@ -13,6 +13,7 @@ import {
   type Cut, type CutCause, type CutEvent, type CutTool, type ReplyState, type TurnTrigger,
 } from "../lib/turn-cuts.js";
 import { emitEvent, inflightTools, subscribeEvents } from "./event-bus.js";
+import { forgetCodexTurns, noteCodexSent } from "../lib/codex-turn-book.js";
 import { HELD_GIVE_UP_MS } from "./held-queue.js";
 import { PersistedMap } from "./persisted-map.js";
 import { newMessageId, newThreadId, type Envelope, type LocalEndpoint } from "./router.js";
@@ -51,12 +52,6 @@ export class TurnCuts {
   private readonly agentOf = new Map<string, string>();
   /** Codex 频道：上次 Stop 之后经 codex queue（不是打进 TUI）投的消息摘录——Esc 之后它们会排在停字后面才跑 */
   private readonly codexQueued = new Map<string, string[]>();
-  /**
-   * 频道 → 最后 ws.send 的那条、送达时回合态是不是空闲（Codex 空闲时经 queue 投的、打断后打进 TUI 的都算空闲时开跑）。
-   * Codex 投递失败时据此判能不能收成 done：只有「空闲时投的最后一条」没投进去，才确定没有回合在跑。不按消息推算哪一回合在跑——
-   * queue 里排几条、各自何时开跑，bridge 拿不到信号，推算的账三次都错过（T52 复审 #204，tests/pi-abort-control.test.ts）
-   */
-  private readonly lastSent = new Map<string, { messageId: string; idle: boolean }>();
   /** 频道 → 最后一次 ws.send 投递的时刻（终端打断之后有没有新消息进来） */
   private readonly deliveredAt = new Map<string, number>();
   /** `${channelId}\n${chatId}` → agent 往这个地址 reply 的时刻（最近几次） */
@@ -94,7 +89,7 @@ export class TurnCuts {
   noteDelivered(env: Envelope, channelId: string, typed = false, busy = true): void {
     const at = this.now();
     this.deliveredAt.set(channelId, at);
-    this.lastSent.set(channelId, { messageId: env.meta.messageId, idle: typed || !busy });
+    noteCodexSent(channelId, env.meta.messageId); // Codex 原生回合账：上次确认空闲之后投了哪些（lib/codex-turn-book.ts）
     const cut = this.cuts.get(channelId);
     if (cut && cut.byMessageId === env.meta.messageId && cut.deliveredAt === undefined) this.cuts.set(channelId, { ...cut, deliveredAt: at });
     if (isCutNotice(env)) return void this.noticePending.delete(channelId);
@@ -115,15 +110,9 @@ export class TurnCuts {
     return t && { ...t, agent: this.agentOf.get(channelId) };
   }
 
-  /**
-   * 这条其实没投进去（Codex 投递失败）：从送达记录里拿掉。返回 true = 它是空闲时投的、之后没再投过别的，没投进去就确定没有回合在跑。
-   * 拿不准（投它时回合在跑、之后又投了别的）返回 false：不收尾，交给 30 分钟安全计时；空闲判错了（比如 queue 里的刚要开跑），
-   * jsonl-watcher 看到 done 之后的新活动会把 thinking 重新点亮
-   */
-  dropUndelivered(channelId: string, messageId: string): boolean {
+  /** 这条其实没投进去（Codex 投递失败）：从送达记录里拿掉（回合在不在跑不在这里判，见 lib/codex-turn-book.ts） */
+  dropUndelivered(channelId: string, messageId: string): void {
     this.inbound.set(channelId, (this.inbound.get(channelId) ?? []).filter((x) => x.messageId !== messageId));
-    const last = this.lastSent.get(channelId);
-    return !!last && last.messageId === messageId && last.idle;
   }
 
   /** 这个频道最后一次投递是给哪个 agent 的（送达记录里的那条被挤掉了也查得到） */
@@ -154,9 +143,10 @@ export class TurnCuts {
    * 不删的话叫停记录一直留在盘上，日后复用这个频道的新 agent 还会被当成「owner 叫停了」，Autopilot 不推进。
    */
   forget(channelId: string): void {
-    for (const m of [this.cuts, this.stops, this.inbound, this.agentOf, this.codexQueued, this.lastSent, this.deliveredAt, this.keySentAt]) m.delete(channelId);
+    for (const m of [this.cuts, this.stops, this.inbound, this.agentOf, this.codexQueued, this.deliveredAt, this.keySentAt]) m.delete(channelId);
     for (const s of [this.noticePending, this.codexTypeIn, this.codexPaused, this.codexCutSinceStop]) s.delete(channelId);
     for (const k of [...this.replies.keys()]) if (k.startsWith(`${channelId}\n`)) this.replies.delete(k);
+    forgetCodexTurns(channelId);
   }
 
   /** owner 最近一次叫停这个频道的时刻（解除了也还在）：押在它之前、之后才投出去的消息要加抬头（bridge/held-flush.ts） */

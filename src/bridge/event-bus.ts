@@ -231,23 +231,6 @@ export function inflightTools(agent: string, completedOnly = false): ReturnType<
   return completedOnly ? completedOnlyFrom(ring) : inflightFrom(ring);
 }
 
-/** 会话自己产生的事件（watcher 读会话记录发的、agent 调 reply）；bridge 投递的入站镜像、回显通知、状态事件都不算 */
-const SESSION_EVENTS = new Set(["tool_start", "tool_done", "assistant_text", "turn_duration", "reply_pending", "question", "buttons", "api_error_turn", "compact_done", "auto_deny"]);
-
-/**
- * 最近一次 done 之后，会话本身有没有动过（真有回合开跑的证据）。只看事件环：bridge 投递时点亮的 thinking 不算回合在跑。
- * Codex 投递失败的有界复查用（bridge/pi-abort.ts recheckIdle）
- */
-export function sessionActiveSinceDone(agent: string): boolean {
-  const ring = rings.get(agent) ?? [];
-  for (let i = ring.length - 1; i >= 0; i--) {
-    const e = ring[i];
-    if (e.type === "agent_status" && (e.data as { status?: unknown }).status === "done") return false;
-    if (SESSION_EVENTS.has(e.type)) return true;
-  }
-  return false;
-}
-
 /**
  * 这个 agent 最近一次主会话活动的时刻（环形缓冲里最后一条事件；bg_task_* 不算——后台 subagent 一直在报进度，
  * 会让「主回合其实早停了」永远显得不安静）。没有事件 = 0。turn-probe 判「事件态卡 thinking」用。
