@@ -115,3 +115,7 @@ shell。不要把 Codex agent 指向你不信任的仓库。
 
 - 单测：`tests/codex-runtime.test.ts` 用注入依赖加假窗口覆盖适配器，`tests/codex-exit.test.ts` 钉住退出按键序列（Codex 绝不连发 Esc，CC / Pi 的默认序列不变）以及只看 pane 尾部的就绪判据，`tests/codex-launch.test.ts` 覆盖启动命令，`tests/codex-thread.test.ts` 覆盖投递与查活，`tests/codex-session*.test.ts` 覆盖翻译。
 - 端到端：`bun scripts/codex-adapter-e2e.ts --dir <scratch>`。它使用独立的 tmux socket 和一个只绑 127.0.0.1 的假 bridge，走适配器本身，依次验证：引导 → 就绪 → 投递 → reply → Stop → 空闲退出 → resume 同一线程 → 前言送达 → 上下文还在 → 回合进行中退出。两次退出都调用生产的 `gracefulExitWindow`，并断言三件事：回到 shell、不超过 20s（没有走到强杀）、rollout 里没有多出一轮。会真实消耗 Codex 额度，并在 `~/.codex` 留下一个会话。
+
+## ACP transport（试点）
+
+另一条经 Agent Client Protocol 驱动 Codex 的 transport（按 agent 切换，缺省仍是本篇的 tmux）：见 [codex-acp.md](./codex-acp.md)。

@@ -14,7 +14,7 @@
 import { statSync } from "fs";
 import { isMasterAgent } from "./registry.js";
 import { projectJsonlPath } from "./jsonl-cost.js";
-import type { ReadyResult } from "./runtimes/types.js";
+import type { ReadyResult, RuntimeControl } from "./runtimes/types.js";
 
 export interface RestartRunOutcome {
   /** 进程退出码是否为 0 */
@@ -165,6 +165,8 @@ export function readyFailureText(r: Extract<ReadyResult, { ready: false }>): str
   }
 }
 
+type Enforcement = RuntimeControl["modelEnforcement"];
+
 /**
  * `manager.ts model all` 的目标筛选：只有 modelEnforcement === "in-session" 的运行时（CC）
  * 才能被钉模型 / 在会话里注入 /model。
@@ -176,7 +178,7 @@ export function readyFailureText(r: Extract<ReadyResult, { ready: false }>): str
  */
 export function modelPinPlan(
   agents: Record<string, { status?: string; runtime?: string }>,
-  enforcementOf: (runtime: string | undefined) => "in-session" | "launch-flag" | undefined,
+  enforcementOf: (runtime: string | undefined) => Enforcement | undefined,
 ): { pin: string[]; skipped: { name: string; reason: string }[] } {
   const pin: string[] = [];
   const skipped: { name: string; reason: string }[] = [];
@@ -190,8 +192,9 @@ export function modelPinPlan(
 }
 
 /** 单个 agent 不接受会话内钉模型时的说明（`model <agent> <model>` 直接拒绝时也用它）。 */
-export function modelPinRefusal(runtime: string | undefined, enforcement: "in-session" | "launch-flag" | undefined): string {
+export function modelPinRefusal(runtime: string | undefined, enforcement: Enforcement | undefined): string {
   const rt = runtime || "claude-code";
+  if (enforcement === "config-option") return `runtime "${rt}" 走 ACP：模型在会话设置里切、不用重启，不走 model 命令钉模型`;
   return enforcement === "launch-flag"
     ? `runtime "${rt}" 的模型由启动参数决定，不支持 model 命令钉模型（在 create 时用 --model 指定）`
     : `runtime "${rt}" 不能由 Claudestra 启动，不支持钉模型`;
