@@ -125,8 +125,8 @@ export function CollabLine(props: {
           <div className={s.card}>
             <div className={s.cwho}>
               <Icon name="code" size={12} />
-              <span>{tr("执行者")}</span>
-              <span className={s.nm}>{l.agent ?? l.delegate ?? tr("未派人")}</span>
+              <span className={s.who}>{tr("执行者")}</span>
+              <span className={s.nm} title={l.agent ?? l.delegate ?? undefined}>{l.agent ?? l.delegate?.replace(/^agent-/, "") ?? tr("未派人")}</span>
               <span className={s.stg}>{tr(COLUMNS[col])}</span>
             </div>
             <div className={s.act}>
