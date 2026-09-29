@@ -166,7 +166,7 @@ import { updateStatsDashboard, initStatsDashboard, handleStatsRequest } from "./
 import { recordMetric } from "./lib/metrics.js";
 import { nudgeReason, pickUnrepliedForNudge } from "./lib/reply-nudge.js";
 import { dropPendingsForChannel, hangsInterAgentWatchdog, hangsPendingReply, nudgesForOrigin, pendingKeysOwedBy, takeApiPending } from "./lib/pending-reply-scope.js";
-import { holdAtWallWait, quotaWall, rearmResume, startQuotaWall } from "./bridge/quota-wall-wiring.js";
+import { holdAtWallWait, quotaWall, rearmResume, resumeStillWanted, startQuotaWall } from "./bridge/quota-wall-wiring.js";
 import { initHttpPeer, cancelHttpPeerCallsForChannel } from "./bridge/http-peer.js";
 import { extractControlToken } from "./bridge/api-auth.js";
 import { initTeamRouter } from "./bridge/team-router.js";
@@ -847,8 +847,8 @@ async function deliverToLocal(env: RouterEnvelope, to: RouterLocalEndpoint, stil
   const busy = holdsUntilIdle(env.from.kind, env.meta.waitForIdle, turn);
   // flush 投递途中(上面几处 await)这条已被别处从押后队列摘掉(kill 清理 / 24 小时放弃):既不押回(会复活)也不发
   // 押着的打断收尾提醒:之后又被打断 / 叫停过、那件事已续上、过了 30 分钟,就不投了(turnCuts.noticeWanted)
-  if ((stillWanted && !stillWanted()) || !turnCuts.noticeWanted(env)) return { envelope: env, outcome: { kind: "dropped", reason: "已从押后队列撤下" } };
   const wallHold = await quotaWall()?.holds(env, to.channelId); // 额度闸：agent / bridge 消息押到出闸
+  if ((stillWanted && !stillWanted()) || !turnCuts.noticeWanted(env) || !resumeStillWanted(env)) return { envelope: env, outcome: { kind: "dropped", reason: "已从押后队列撤下" } };
   if (!busy && wallHold) return holdForQuotaWall(env, evAgent, meta.user);
   if (busy) {
     const n = heldLocalMsgs.holdEnv(env, wallHold ? "quota_wall" : undefined); // 从 flush 来的是队里那个 env 本身,不会重复入队
