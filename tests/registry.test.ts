@@ -6,7 +6,7 @@ import { describe, test, expect } from "bun:test";
 import { mkdtempSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
-import { readRegistryAgents, readActiveAgents, isMasterAgent } from "../src/lib/registry.js";
+import { readRegistryAgents, readActiveAgents, isMasterAgent, canonicalTwinError, isLiteralMaster } from "../src/lib/registry.js";
 
 function writeRegistry(obj: unknown): string {
   const dir = mkdtempSync(join(tmpdir(), "registry-test-"));
@@ -84,6 +84,19 @@ describe("readRegistryAgents", () => {
 // 于是 `agent-master` 永远不在集合里 → 恒判 dead → launcher 每分钟 restart 一次
 // → 而 master 的 channelId 按设计为空、restart 硬要求它 ⇒ 永远失败。
 // 实测 3678 次空转后才被发现。
+describe("canonicalTwinError / isLiteralMaster（T42-r2）", () => {
+  test("跟已有 agent 规范化后同名（全角、夹不可见字符、大小写）就报出撞的是谁；自己已在 registry、真不同名都不算", () => {
+    const reg = ["agent-cc", "agent-data", "master"];
+    for (const n of ["agent-\uff43\uff43", "agent-c\u200bc", "agent-CC", "cc"]) expect([n, canonicalTwinError(n, reg)]).toEqual([n, expect.stringContaining("agent-cc")]);
+    expect(canonicalTwinError("agent-cc", reg)).toBeNull();
+    expect(canonicalTwinError("agent-cc2", reg)).toBeNull();
+  });
+  test("isLiteralMaster：只认逐字的 master / agent-master", () => {
+    expect(["master", "agent-master"].every(isLiteralMaster)).toBe(true);
+    expect(["MASTER", "\uff4daster", "agent-agent-master", "__master__", " master"].some(isLiteralMaster)).toBe(false);
+  });
+});
+
 describe("isMasterAgent", () => {
   test("两种写法都认（这正是本 bug 的成因）", () => {
     expect(isMasterAgent("master")).toBe(true);
@@ -93,6 +106,12 @@ describe("isMasterAgent", () => {
   test("普通 agent 不认", () => {
     expect(isMasterAgent("agent-market-maker")).toBe(false);
     expect(isMasterAgent("market-maker")).toBe(false);
+  });
+
+  test("大小写、全角、零宽字符变体也是大总管（T42：guest / scope 按规范名比，变体不能绕过排除）", () => {
+    for (const n of ["MASTER", "Master", "agent-MASTER", "Agent-Master", "\uff4daster", "master\u200b", " master ", "agent-agent-master"]) expect(isMasterAgent(n)).toBe(true);
+    expect(isMasterAgent("")).toBe(false);
+    expect(isMasterAgent(undefined)).toBe(false);
   });
 
   test("名字里含 master 但不是大总管 → 不认（别写成 includes）", () => {

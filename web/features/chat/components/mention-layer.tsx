@@ -8,7 +8,7 @@ import { useT } from "@/lib/i18n";
 import { mentionLabel } from "@/lib/chat/mention-directive";
 import type { MentionCandidate } from "../mention";
 import type { MentionState } from "../use-mention";
-import { presenceTone } from "./contacts-group";
+import { presenceTone } from "./contacts-lines";
 
 /** lucide at-sign */
 function AtIcon({ size = 13 }: { size?: number }) {

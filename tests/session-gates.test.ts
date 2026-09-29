@@ -6,6 +6,8 @@
  * - /agents/:name/history(/:sid) 的 agent 名会拼进归档路径：%2F 解码后就是 /，能读到任意目录下的会话正文。
  *
  * 全部走真实鉴权（api-auth：Bearer / 设备 cookie），沙箱见 tests/api-runner-harness.ts，不连任何端口。
+ * 开了终端的设备 role 仍是 owner（effectivePrincipal）：canManage 以前对 owner 不看 agents，部分 scope 的这种设备能 restart-all、
+ * 建 agent、改 cron（T32 adv4 / T42 对抗式），所以矩阵里单列一格，并带上这几个管理端点。
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { mkdirSync, writeFileSync } from "fs";
@@ -30,6 +32,7 @@ const OWNER = {
     device("owner", OWNER_GRANT),
     device("owner_nomanage", { ...OWNER_GRANT, manage: false }),
     device("owner_cc", { agents: ["cc"], terminal: false, manage: true }),
+    device("owner_cc_term", { agents: ["cc"], terminal: true, manage: true }),
   ],
 } as Principal;
 const GUEST_ALL = { id: "guest:all", role: "external", name: "friend", agents: ["*"], createdAt: at, credentials: [device("guest_all", guestGrant(["*"]))] } as Principal;
@@ -47,6 +50,7 @@ const CREDS: Record<string, { auth: { device?: string; bearer?: string }; p: Pri
   "owner 设备": { auth: { device: "dev_owner" }, p: viaDevice(OWNER, 0) },
   "owner 设备 manage=false": { auth: { device: "dev_owner_nomanage" }, p: viaDevice(OWNER, 1) },
   "owner 设备 部分 scope（manage=true）": { auth: { device: "dev_owner_cc" }, p: viaDevice(OWNER, 2) },
+  "owner 设备 部分 scope（manage=true，开终端）": { auth: { device: "dev_owner_cc_term" }, p: viaDevice(OWNER, 3) },
   "guest *": { auth: { device: "dev_guest_all" }, p: viaDevice(GUEST_ALL, 0) },
   "guest 部分 scope": { auth: { device: "dev_guest_cc" }, p: viaDevice(GUEST_CC, 0) },
   "老的 * Bearer（web-ui）": { auth: { bearer: "s-webui" }, p: WEBUI },
@@ -57,7 +61,9 @@ const CREDS: Record<string, { auth: { device?: string; bearer?: string }; p: Pri
 /** 全权（isFullScope）：会话管理类接口只放这两种 */
 const ALLOWED = new Set(["owner 设备", "老的 * Bearer（web-ui）"]);
 /** 以 owner 名义拍板的接口（/answer）只认 owner 本人（isOwnerPrincipal）：owner 的其它设备也算，老 web-ui token 过渡期也算 */
-const OWNER_ONLY = new Set(["owner 设备", "owner 设备 manage=false", "owner 设备 部分 scope（manage=true）", "老的 * Bearer（web-ui）"]);
+const OWNER_ONLY = new Set([
+  "owner 设备", "owner 设备 manage=false", "owner 设备 部分 scope（manage=true）", "owner 设备 部分 scope（manage=true，开终端）", "老的 * Bearer（web-ui）",
+]);
 
 type Endpoint = { method: string; path: string; body?: string; ok: number[]; owner?: true; error?: string; probes?: true };
 const ENDPOINTS: Record<string, Endpoint> = {
@@ -71,6 +77,12 @@ const ENDPOINTS: Record<string, Endpoint> = {
   "claude-settings": { method: "POST", path: "/api/v1/agents/cc/claude-settings", body: JSON.stringify({ effort: "high" }), ok: [409] },
   // 过了门就会真去探本机网络（fetch 3847、tailscale status、lsof）：放行的格子不发请求，只断言门的判定（见纯函数用例）
   "remote-access": { method: "GET", path: "/api/v1/remote-access", ok: [], probes: true },
+  // 过了门就真去起 manager restart-all 后台任务：放行的格子不发请求（同 remote-access）
+  "restart-all": { method: "POST", path: "/api/v1/restart-all", body: "{}", ok: [], probes: true },
+  create: { method: "POST", path: "/api/v1/agents", body: "{}", ok: [400] },
+  // 新建 / 编辑还要 owner 本人、目标在 scope 内（tests/cron-create-gates.test.ts）；这里只看外层全权门
+  "cron-create": { method: "POST", path: "/api/v1/cron", body: "{}", ok: [400], error: "cron management requires a full-scope token" },
+  "cron-edit": { method: "POST", path: "/api/v1/cron/nope/edit", body: "{}", ok: [400], error: "cron management requires a full-scope token" },
   // 替 agent 批准权限弹框：过了门以后假 tmux 抓不到弹框 → 409「permission dialog no longer active」
   answer: {
     method: "POST", path: "/api/v1/agents/cc/answer", body: JSON.stringify({ kind: "permission", action: "allow" }), ok: [409],
@@ -125,7 +137,7 @@ beforeAll(() => {
 
 afterAll(() => sandbox?.cleanup());
 
-describe("权限矩阵：九种凭据 × 会话管理类接口（另加只认 owner 本人的 /answer）", () => {
+describe("权限矩阵：十种凭据 × 会话管理类接口（另加只认 owner 本人的 /answer）", () => {
   for (const cred of Object.keys(CREDS)) {
     test(cred, () => {
       for (const [ep, e] of Object.entries(ENDPOINTS)) {

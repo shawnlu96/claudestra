@@ -14,6 +14,7 @@ import { apiJson, forbidden, isFullScope, readJsonBody, INVALID_JSON, invalidJso
 import { getAgentStatus, isBusyStatus } from "./event-bus.js";
 import { rememberSwitchOverride } from "./switch-override.js";
 import { handlePiUpdate, PI_UPDATE_PATH } from "./pi-update.js";
+import { isSafeModelArg } from "../lib/claude-settings-runtime.js";
 
 type RunManager = (...args: string[]) => Promise<any>;
 
@@ -87,7 +88,7 @@ async function piModels(principal: Principal): Promise<Response> {
 async function piSettings(canonical: string, model: string, effort: string): Promise<Response> {
   // effort 原样进 tmux send-keys -l：不校验 = 换行即可向 agent TUI 注入第二行任意输入
   if (effort && !isPiThinkingLevel(effort)) return apiJson(400, { ok: false, error: `未知的 thinking 档位：${effort}` });
-  if (model && !/^[A-Za-z0-9._\/@:-]+$/.test(model)) return apiJson(400, { ok: false, error: "model 含非法字符" });
+  if (model && !isSafeModelArg(model)) return apiJson(400, { ok: false, error: "model 含非法字符" });
   // 模型 id 先对着 models.json 校验：扩展内部解析不到会拒绝，而这边的乐观显示没法知道注入的结果
   // ⇒ 假 id 会在顶栏显示一个根本不存在的模型（实测踩过）
   if (model) {

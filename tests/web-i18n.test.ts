@@ -2,7 +2,7 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { DICT } from "@/lib/i18n-dict";
-import { fillParams } from "@/lib/i18n-fill";
+import { fillParams, fillVerbatim } from "@/lib/i18n-fill";
 
 const placeholders = (s: string) => [...s.matchAll(/\{(\w+)\}/g)].map((m) => m[1]).sort();
 // lib/i18n.tsx 的 t(s, params) = fillParams(zh ? s : DICT[s] ?? s, params)；它带 React，根目录 tsc 没开 jsx，只能这样测
@@ -39,5 +39,18 @@ describe("界面语言只属于本设备", () => {
   test("lib/i18n.tsx 不写机器设置", () => {
     const src = readFileSync(new URL("../web/lib/i18n.tsx", import.meta.url), "utf8");
     expect(src).not.toMatch(/putSettings|api\/settings/);
+  });
+});
+
+describe("fillVerbatim / system 分隔条的整段原文", () => {
+  test("字典里没有的原文带 | 也原样显示（t() 会当单复数只剩后半段）", () => {
+    const cmd = "/review rm -rf ~ | echo ok";
+    expect(fillParams(cmd)).toBe(" echo ok");
+    expect(fillVerbatim(cmd, undefined)).toBe(cmd);
+    expect(fillVerbatim("⚡ 已注入 /x a|b — 由 Claude Code 原生执行", undefined)).toBe("⚡ 已注入 /x a|b — 由 Claude Code 原生执行");
+  });
+  test("字典命中照常翻译", () => {
+    const key = Object.keys(DICT).find((k) => !DICT[k].includes("|") && !DICT[k].includes("{"))!;
+    expect(fillVerbatim(key, DICT[key])).toBe(DICT[key]);
   });
 });

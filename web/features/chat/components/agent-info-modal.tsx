@@ -4,6 +4,7 @@ import { useT } from "@/lib/i18n";
 import { useChatStore, useChatStoreApi } from "../chat-store";
 import { closeAgentInfo, fetchAgentInfo, setAgentExternal, setAgentLabel, useAgentInfoTarget, type AgentInfo } from "../agent-info";
 import { fmtTs } from "../fmt-time";
+import { AgentSkillsSection } from "./agent-skills-section";
 import { CenteredModal } from "./centered-modal";
 
 /**
@@ -184,6 +185,7 @@ function InfoBody({ name, onClose }: { name: string; onClose: () => void }) {
           {note && <div className="mt-2 text-[12px] text-success">{note}</div>}
           {warn && <div className="mt-2 text-[12px] text-warning">{warn}</div>}
         </div>
+        <AgentSkillsSection name={name} />
       </div>
       {confirm && (
         <ConfirmOff name={name} peers={confirm} busy={busy} onCancel={() => setConfirm(null)} onConfirm={(typed) => void apply(false, typed)} />

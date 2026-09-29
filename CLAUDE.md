@@ -154,7 +154,7 @@ bun src/manager.ts version   # current version + whether an update is available
 bun src/manager.ts update    # git pull + rebuild web/out if stale + reload the 3 launchd daemons
 
 # Hosted frontend (docs/design-hosted-frontend.md): the bridge serves web/out (BRIDGE_STATIC_DIR); browsers pair, no password
-bun src/manager.ts pair [--agents a,b|*] [--no-terminal] [--no-manage] [--guest <name>] [--url <entry>] [--json]  # QR / link / 8-char code
+bun src/manager.ts pair [--agents a,b|*] [--no-terminal] [--no-manage] [--guest <name> --agents a,b [--confirm-all]] [--url <entry>] [--json]  # QR / link / 8-char code; guest '*' needs --confirm-all
 bun src/manager.ts migrate-web-state   # old Next BFF settings.db + groqApiKey → bridge (tar backup first; idempotent)
 bun src/manager.ts retire-web          # unload + back up old com.claudestra.web; refuses until the bridge serves web/out and a backup exists
 

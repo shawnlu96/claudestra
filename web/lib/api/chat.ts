@@ -4,7 +4,8 @@
  */
 import { apiAgentName, uiAgentName } from "@/lib/chat/agents";
 import { takeAskHint } from "./asks";
-import { api } from "./client";
+import { api, ApiError } from "./client";
+import { t } from "@/lib/i18n";
 import { invalidateHidden } from "./history";
 
 const enc = (agent: string) => encodeURIComponent(apiAgentName(agent));
@@ -28,9 +29,12 @@ export function sendMessage(agent: string, text: string, files: File[] | undefin
   return api<SendResult>(`/agents/${enc(agent)}/messages${ask ? `?ask=${encodeURIComponent(ask)}` : ""}`, { method: "POST", json: { text, wait: 0 }, signal, timeoutMs: 0 });
 }
 
-/** 一键中断：tmux C-c（master → master:0） */
+/**
+ * 一键中断。bridge 最坏要等约 16 秒（打断间隔 + Esc 窗口锁 12 秒 + 锁内 1.2 秒）才回结果，等不到锁会如实回失败；
+ * 这里要等得比它久、又短于 bridge 的 HTTP 空闲上限 30 秒（src/lib/esc-guard.ts HTTP_IDLE_TIMEOUT_S），不然只能看到超时
+ */
 export function interruptAgent(agent: string): Promise<{ ok: boolean; agent?: string }> {
-  return api(`/agents/${enc(agent)}/interrupt`, { method: "POST", json: {}, timeoutMs: 10_000 });
+  return api(`/agents/${enc(agent)}/interrupt`, { method: "POST", json: {}, timeoutMs: 20_000 });
 }
 
 /** 清空会话：bridge 打原生 /clear + 后台轮转；回合进行中 409 */
@@ -91,4 +95,14 @@ export async function searchHistory(q: string, agent?: string): Promise<SearchHi
 export async function setHidden(agent: string, sessionId: string, fromSeq: number, toSeq: number, hide: boolean): Promise<void> {
   await api(`/agents/${enc(agent)}/hidden`, { method: "POST", json: { sessionId, fromSeq, toSeq, hide }, timeoutMs: 10_000 });
   invalidateHidden(agent);
+}
+
+/** bridge 带了已知 code 的发送失败，按当前界面语言说（字典在 lib/i18n-dict.ts）；其余用 bridge 的原始 error */
+const SEND_ERROR_TEXT: Record<string, string> = {
+  slash_owner_only: "斜杠命令只有 owner 能用，请直接发文字", // bridge/api-slash.ts：guest / scoped token 发了会直通的斜杠命令
+};
+
+export function sendErrorText(e: unknown): string {
+  const zh = e instanceof ApiError && e.code ? SEND_ERROR_TEXT[e.code] : undefined;
+  return zh ? t(zh) : (e as Error).message;
 }

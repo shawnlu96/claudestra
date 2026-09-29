@@ -149,7 +149,7 @@ bun src/manager.ts version   # 当前版本 + 是否有更新
 bun src/manager.ts update    # git pull + 重建过期的 web/out + 重载 3 个 daemon
 
 # 托管前端（docs/design-hosted-frontend.md）：bridge 托管 web/out（BRIDGE_STATIC_DIR）；浏览器配对即进
-bun src/manager.ts pair [--agents a,b|*] [--no-terminal] [--no-manage] [--guest <名字>] [--url <入口>] [--json]  # 二维码 / 链接 / 8 位码
+bun src/manager.ts pair [--agents a,b|*] [--no-terminal] [--no-manage] [--guest <名字> --agents a,b [--confirm-all]] [--url <入口>] [--json]  # 二维码 / 链接 / 8 位码；guest 给 '*' 要 --confirm-all
 bun src/manager.ts migrate-web-state   # 旧 Next BFF 的 settings.db + groqApiKey → bridge（先备份，幂等）
 bun src/manager.ts retire-web          # 卸旧 com.claudestra.web、备份 plist；bridge 没托管 web/out 或没备份就拒绝
 
