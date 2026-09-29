@@ -699,14 +699,13 @@ function resolveSessionPath(
   return found && existsSync(found) ? found : null;
 }
 
-export async function startWatching(
-  agentName: string, cwd: string, sessionId: string,
-  channelId: string, discord: Client,
-  opts: { runtime?: string; sessionFile?: string } = {}
-) {
+export async function startWatching(agentName: string, cwd: string, sessionId: string, channelId: string, discord: Client, opts: { runtime?: string; sessionFile?: string } = {}) {
   const { runtime, sessionFile } = opts;
-  stopWatching(agentName);
   const jsonlPath = resolveSessionPath(runtime, cwd, sessionId, sessionFile);
+  // 同一会话文件重新注册（两份 channel-server 对抢、bridge 重连）不重启：新 watcher 从文件末尾起读，两次之间写的行会丢（对抢时每几秒一次）
+  const cur = watchers.get(agentName);
+  if (jsonlPath && cur?.jsonlPath === jsonlPath && cur.channelId === channelId && cur.sessionId === sessionId) return void console.log(`👁 监听沿用: ${agentName}`);
+  stopWatching(agentName);
 
   if (!jsonlPath) {
     const startedAt = Date.now();

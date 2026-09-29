@@ -183,7 +183,7 @@ export interface CodexQueueSinkDeps {
   onTypeInFailed?(): void;
   /**
    * 消息没进 Codex（不在线 / 认不准线程 / queue 报错）：交给 bridge 只了结这一条（bridge/pi-abort.ts onCodexUndelivered）——
-   * 按 messageId 告诉发送方、销账，这一回合没别的送达才把「工作中」收掉。返回 true = bridge 已告诉发送方；false / 没接这个依赖 = 自己 notify
+   * 按 messageId 告诉发送方、销账，只结这一条消息；「工作中」不在这里收，等真实的 Stop / StopFailure。返回 true = bridge 已告诉发送方；false / 没接这个依赖 = 自己 notify
    */
   undelivered?(messageId: string, notice: string): Promise<boolean>;
   /**

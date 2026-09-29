@@ -166,7 +166,7 @@ import { updateStatsDashboard, initStatsDashboard, handleStatsRequest } from "./
 import { recordMetric } from "./lib/metrics.js";
 import { nudgeReason, pickUnrepliedForNudge } from "./lib/reply-nudge.js";
 import { dropPendingsForChannel, hangsInterAgentWatchdog, hangsPendingReply, nudgesForOrigin, pendingKeysOwedBy, takeApiPending } from "./lib/pending-reply-scope.js";
-import { holdAtWallWait, quotaWall, rearmResume, startQuotaWall } from "./bridge/quota-wall-wiring.js";
+import { holdAtWallWait, quotaWall, rearmResume, resumeStillWanted, startQuotaWall } from "./bridge/quota-wall-wiring.js";
 import { initHttpPeer, cancelHttpPeerCallsForChannel } from "./bridge/http-peer.js";
 import { extractControlToken } from "./bridge/api-auth.js";
 import { initTeamRouter } from "./bridge/team-router.js";
@@ -846,8 +846,8 @@ async function deliverToLocal(env: RouterEnvelope, to: RouterLocalEndpoint, stil
   const busy = holdsUntilIdle(env.from.kind, env.meta.waitForIdle, turn);
   // flush 投递途中(上面几处 await)这条已被别处从押后队列摘掉(kill 清理 / 24 小时放弃):既不押回(会复活)也不发
   // 押着的打断收尾提醒:之后又被打断 / 叫停过、那件事已续上、过了 30 分钟,就不投了(turnCuts.noticeWanted)
-  if ((stillWanted && !stillWanted()) || !turnCuts.noticeWanted(env)) return { envelope: env, outcome: { kind: "dropped", reason: "已从押后队列撤下" } };
   const wallHold = await quotaWall()?.holds(env, to.channelId); // 额度闸：agent / bridge 消息押到出闸
+  if ((stillWanted && !stillWanted()) || !turnCuts.noticeWanted(env) || !resumeStillWanted(env)) return { envelope: env, outcome: { kind: "dropped", reason: "已从押后队列撤下" } };
   if (!busy && wallHold) return holdForQuotaWall(env, evAgent, meta.user);
   if (busy) {
     const n = heldLocalMsgs.holdEnv(env, wallHold ? "quota_wall" : undefined); // 从 flush 来的是队里那个 env 本身,不会重复入队
@@ -1122,6 +1122,10 @@ registerAdapter(createDiscordChatAdapter(discord));
 // Web-only: local adapter 常驻注册：Discord 模式下没有 local-* 地址流通，
 // 不会被命中；Web-only 模式下承接会话地址供给（create_channel）与出站落空。
 registerAdapter(createLocalChatAdapter());
+// Codex 回合失败时不发 hook ⇒ 替它补 StopFailure（bridge/codex-turn-failure.ts）。不放 Discord ready 里：web-only 永远等不到 ready
+startCodexTurnFailureWatch(async (channelId) => {
+  await fetch(`http://127.0.0.1:${BRIDGE_PORT}/hook`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ channelId, event: "StopFailure" }) });
+});
 
 discord.once("ready", async () => {
   setBotUserId(discord.user?.id || "");
@@ -1162,10 +1166,7 @@ discord.once("ready", async () => {
   // v2.7+ 注入链路查询做「窗口活着但 channel-server 掉线」哨兵
   startWedgeWatcher(discord, (channelId) => clients.has(channelId));
 
-  // Codex 回合失败时不发 hook ⇒ 替它补 StopFailure（bridge/codex-turn-failure.ts）
-  startCodexTurnFailureWatch(async (channelId) => {
-    await fetch(`http://127.0.0.1:${BRIDGE_PORT}/hook`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ channelId, event: "StopFailure" }) });
-  });
+
   // v2.16+ 模型漂移告警——CC 用量保护静默降级不再无感（2026-07-30 外部用户
   // 报「莫名其妙被切到 Sonnet 4.6」）。Discord 告警 + session_anomaly SSE。
   {
@@ -3364,15 +3365,11 @@ const server = Bun.serve({
       for (const [channelId, info] of clients.entries()) {
         if (info.ws === ws) {
           clients.delete(channelId);
-          // 频道真的空了才清对抢记账（免得几小时后的零星重连跟旧记录凑成误报）。
-          // 「被顶替」不算空——见 beingReplaced 的注释：那条 close 也会走到这里。
-          if (beingReplaced.has(ws as unknown as object)) {
-            beingReplaced.delete(ws as unknown as object);
-          } else {
-            contention.forget(channelId);
-          }
-          // 同步兜底：直接按 channelId 在 watcher Map 中查，避免依赖异步 runManager
-          stopWatchingByChannel(channelId);
+          // 频道真的空了才清对抢记账（免得几小时后的零星重连跟旧记录凑成误报）；「被顶替」不算空，见 beingReplaced 的注释
+          // 被顶替的不停 watcher：新连接沿用它（jsonl-watcher startWatching），停了再起会从文件末尾读、漏行
+          const replaced = beingReplaced.delete(ws as unknown as object);
+          if (!replaced) contention.forget(channelId);
+          if (!replaced) stopWatchingByChannel(channelId); // 同步兜底：直接按 channelId 在 watcher Map 中查，避免依赖异步 runManager
           console.log(`🔌 断开: 频道 ${channelId} (剩余 ${clients.size} 个)`);
         }
       }
