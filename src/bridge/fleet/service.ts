@@ -1,21 +1,23 @@
 /**
  * 批量管理的服务层：收候选（registry + 大总管）、刷新 LP 状态、选人、并发跑、留痕。
- * HTTP（routes.ts）和 ws 请求（ws.ts：CLI 与 MCP 工具）都只调 runFleet / fleetState，权限在它们各自入口判；
- * 带 caller（MCP 工具，lib/fleet-caller.ts）时再按调用方收窄范围。
+ * HTTP（local-api/fleet.ts）和 ws 请求（ws.ts：CLI 与 MCP 工具）都只调 runFleet / fleetState：能不能用在入口判，能动哪些 agent（allowed）由入口传进来，
+ * 列状态、选目标、执行前逐个再查一遍。带 caller（MCP 工具，lib/fleet-caller.ts）时先按调用方收窄范围，越界的点名报错或记进 excluded。
  * 生产 PaneIO 全走 tmux-helper：抓屏 capture-pane -p -e，打字 / 退格走 tmuxRawStrict（失败要抛），Esc 走 tmuxSendEscape 的双击护栏。
+ * 压缩走 T36 的 injectCompact（ctx-boundary.ts）；执行者的 save-compact 由 actionFor 先改成 compact，认法和它是同一份。
  */
 import type { ServerWebSocket } from "bun";
 import { computeAgentStats } from "../../lib/agent-stats.js";
 import { readConfigSync } from "../../lib/config-store.js";
-import { effectiveAction, isExecutor } from "../../lib/ctx-boundary-policy.js";
-import { FleetScopeError, scopeForCaller, visibleToCaller, type FleetCaller } from "../../lib/fleet-caller.js";
+import { effectiveAction, isExecutor, type CompactKeep } from "../../lib/ctx-boundary-policy.js";
+import { FleetScopeError, scopeForCaller, type FleetCaller } from "../../lib/fleet-caller.js";
 import {
-  ACTION_LABEL, bareName, DEFAULT_COMPACT_KEEP, notApplicable, selectTargets, summarizeFleet,
+  ACTION_LABEL, bareName, DEFAULT_COMPACT_KEEP, fleetKeep, NO_GRANT, notApplicable, selectTargets, summarizeFleet,
   type Excluded, type FleetAction, type FleetCandidate, type FleetResult, type FleetSelect,
 } from "../../lib/fleet-plan.js";
 import { isLinkedWorktree } from "../../lib/linked-worktree.js";
 import { agentRuntime, readRegistryAgents } from "../../lib/registry.js";
 import { ensurePaneInteractive, tmuxRawStrict, tmuxSendEscape } from "../../lib/tmux-helper.js";
+import { compactInjectedRecently, injectCompact, injectTargetFor } from "../ctx-boundary.js";
 import type { Envelope } from "../router.js";
 import { newMessageId, newThreadId } from "../router.js";
 import { auditFleet } from "./audit.js";
@@ -58,9 +60,13 @@ const tmuxPaneIO: PaneIO = {
   sleep: (ms) => Bun.sleep(ms),
 };
 
-function compactKeep(): string {
-  const k = readConfigSync().fleet?.compactKeep;
-  return typeof k === "string" && k.trim() ? k : DEFAULT_COMPACT_KEEP;
+/** config 里的合格就用它，否则用默认清单；默认清单也不合格（单测保证走不到）给 null，injectCompact 退到它自己的默认档 */
+function compactKeep(): CompactKeep | null {
+  for (const v of [readConfigSync().fleet?.compactKeep, DEFAULT_COMPACT_KEEP]) {
+    const k = fleetKeep(v);
+    if (k.ok) return k.keep;
+  }
+  return null;
 }
 
 type Cand = FleetCandidate & { channelId?: string; cwd?: string };
@@ -88,13 +94,15 @@ async function withContext(list: Cand[]): Promise<Cand[]> {
   return list.map((c) => ({ ...c, contextTokens: ctx.get(bareName(c.name)) }));
 }
 
-/** 面板用：每个候选的最新 LP 状态（现抓一遍）；带 caller 只给它能操作的那些 */
-export async function fleetState(caller?: FleetCaller): Promise<{ agents: (Cand & { lp?: LpSnapshot })[]; compactKeep: string }> {
-  const all = await candidates();
-  const list = caller ? visibleToCaller(caller, all) : all;
+/** 这次调用的凭据能动哪些 agent（名字按 registry / "master"）；MCP 调用方的由 lib/fleet-caller.ts allowedForCaller 给 */
+export type FleetAllowed = (name: string) => boolean;
+
+/** 面板用：凭据能动的每个候选的最新 LP 状态（现抓一遍；不能动的不抓也不列） */
+export async function fleetState(allowed: FleetAllowed): Promise<{ agents: (Cand & { lp?: LpSnapshot })[]; compactKeep: string }> {
+  const list = (await candidates()).filter((c) => allowed(c.name));
   const lp = await refreshLp(list.filter((c) => c.runtime === "claude-code" && c.online));
   const agents = (await withContext(list)).map((c) => ({ ...withLp(c, lp), lp: lp.get(bareName(c.name)) }));
-  return { agents, compactKeep: compactKeep() };
+  return { agents, compactKeep: compactKeep() ?? DEFAULT_COMPACT_KEEP };
 }
 
 export interface FleetRunRequest {
@@ -103,7 +111,8 @@ export interface FleetRunRequest {
   dryRun?: boolean;
   actor: string;
   via: string;
-  /** MCP 工具的调用方（bridge 按连接认出）：按它收窄范围，下发文本用 notification */
+  allowed: FleetAllowed;
+  /** MCP 工具的调用方（bridge 按连接认出）：按它收窄范围、报越界，下发文本用 notification */
   caller?: FleetCaller;
 }
 export interface FleetRunReport {
@@ -130,6 +139,7 @@ export function actionFor(action: FleetAction, t: Pick<Cand, "name" | "cwd">): {
 }
 
 async function runTarget(req: FleetRunRequest, t: Cand, ctx: RunCtx): Promise<FleetResult> {
+  if (!req.allowed(t.name)) return { agent: t.name, outcome: "skipped", detail: NO_GRANT }; // selectTargets 已筛过，发键前按凭据再查一遍
   const na = notApplicable(req.action, t);
   if (na) return { agent: t.name, outcome: "skipped", detail: na }; // 离线 / 运行时不支持：没发键，算跳过（「全部」里常有停掉的旧条目）
   const { action, note } = actionFor(req.action, t);
@@ -187,13 +197,19 @@ export async function runFleet(req: FleetRunRequest, io: PaneIO = tmuxPaneIO): P
   const lp = await refreshLp(scoped.cands.filter((c) => c.runtime === "claude-code" && c.online));
   let list = scoped.cands.map((c) => withLp(c, lp));
   if (req.select.ctxOver !== undefined) list = await withContext(list);
-  const picked = selectTargets(list, scoped.select);
+  const picked = selectTargets(list, scoped.select, req.allowed);
   const { targets } = picked;
   const excluded = [...scoped.excluded, ...picked.excluded];
   const names = targets.map((t) => t.name);
   if (req.dryRun) return { runId, dryRun: true, action: req.action, targets: names, results: [], excluded, summary: dryRunSummary(req.action, targets) };
-  // MCP 的调用方是 agent：它下发的文本是知会，不挂 pending、不要求回复；网页 / CLI 是 owner 本人，照旧 request
-  const ctx: RunCtx = { io, keep: compactKeep(), deliverText: textSender(req.actor, req.via, targets.length, req.caller ? "notification" : "request") };
+  const ctx: RunCtx = {
+    io,
+    keep: compactKeep(),
+    // MCP 的调用方是 agent：它下发的文本是知会，不挂 pending、不要求回复；网页 / CLI 是 owner 本人，照旧 request
+    deliverText: textSender(req.actor, req.via, targets.length, req.caller ? "notification" : "request"),
+    compact: async (agent, action, keep) => injectCompact(await injectTargetFor(agent), { action, keep }),
+    compactedRecently: async (agent) => compactInjectedRecently((await injectTargetFor(agent)).target),
+  };
   const results = await pool(targets, CONCURRENCY, (t) => runTarget(req, t, ctx));
   void refreshLp(targets.filter((t) => t.runtime === "claude-code").map((t) => ({ name: t.name, channelId: t.channelId })));
   const projectOf = new Map(targets.filter((t) => t.project).map((t) => [bareName(t.name), t.project!]));

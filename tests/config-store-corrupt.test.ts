@@ -127,13 +127,18 @@ describe("config-store 的 fleet 段（批量管理的保留清单、fleet 工�
     expect(JSON.parse(run(dir, `console.log(JSON.stringify(c.readConfigSync().fleet ?? null));`).out)).toEqual({ compactKeep: "保留进度与决定", callers: ["x"] });
     writeFileSync(join(dir, "config.json"), JSON.stringify({ fleet: { compactKeep: 3, callers: "x" } }));
     expect(run(dir, `console.log(JSON.stringify(c.readConfigSync().fleet ?? null));`).out).toBe("null");
-    // 不是字符串、空白、超过 1500 字、带控制字符（换行 / ESC 敲进输入框就是按键）→ 当没配（adv2 P2-4、r2 P2-6）
-    for (const bad of [3, "   ", "保".repeat(1501), "第一行\n第二行", "带\x1b[2J 控制符", "C1\x9b 控制符"]) {
+    // 不是字符串、空白、超过 800 字、带控制字符（ESC 敲进输入框就是按键）→ 当没配（和上下文边界的 keep 同一个入口 normalizeCompactKeep）
+    for (const bad of [3, "   ", "保".repeat(801), "带\x1b[2J 控制符", "C1\x9b 控制符", "带\t制表符"]) {
       writeFileSync(join(dir, "config.json"), JSON.stringify({ fleet: { compactKeep: bad } }));
       expect(run(dir, `console.log(JSON.stringify(c.readConfigSync().fleet ?? null));`).out).toBe("null");
     }
-    writeFileSync(join(dir, "config.json"), JSON.stringify({ fleet: { compactKeep: "保".repeat(1500) } }));
-    expect(JSON.parse(run(dir, `console.log(JSON.stringify(c.readConfigSync().fleet ?? null));`).out).compactKeep).toHaveLength(1500);
+    writeFileSync(join(dir, "config.json"), JSON.stringify({ fleet: { compactKeep: "保".repeat(800) } }));
+    expect(JSON.parse(run(dir, `console.log(JSON.stringify(c.readConfigSync().fleet ?? null));`).out).compactKeep).toHaveLength(800);
+    // 多行照收（\r\n、单独的 \r、\n 敲之前才换成空格），存的是原文
+    for (const multi of ["第一行\n第二行", "第一行\r\n第二行", "第一行\r第二行"]) {
+      writeFileSync(join(dir, "config.json"), JSON.stringify({ fleet: { compactKeep: multi } }));
+      expect(JSON.parse(run(dir, `console.log(JSON.stringify(c.readConfigSync().fleet ?? null));`).out)).toEqual({ compactKeep: multi });
+    }
   });
 
   test("写别的配置（set*：读 → 改 → 写）不会抹掉磁盘上的 fleet 段（compactKeep、callers 都在）", () => {

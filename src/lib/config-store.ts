@@ -5,6 +5,7 @@
  * 区别于 .env（安装期常量）：这里放运行时可变的开关。
  */
 
+import { normalizeCompactKeep } from "./ctx-boundary-policy.js";
 import { STATE_DIR, CONFIG_PATH as STATE_CONFIG_PATH } from "./paths.js";
 import { readJsonState, readJsonStateSync, reportCorrupt, writeJsonStateGuarded, type StateRead } from "./state-file.js";
 
@@ -60,6 +61,8 @@ export interface AppConfig {
   fleet?: { compactKeep?: string; callers?: string[] };
   /** 推送不带正文：Web Push / APNs 只发「Claudestra · 有新消息」（lib/push-redact.ts）。缺省关；派发器每条现读，改完不用重启 */
   pushNoContent?: boolean;
+  /** 网页的 Chat（人与人，/talk）入口：缺省关——侧栏不出「工作台 | Chat」切换，/talk 跳回 /chat。只收界面，talk API 与数据照旧（T50） */
+  talkEnabled?: boolean;
 }
 
 /** 归档保留天数缺省值（设置里可改） */
@@ -100,6 +103,7 @@ function merge(base: AppConfig, raw: any): AppConfig {
     ...(typeof raw.pushNoContent === "boolean" ? { pushNoContent: raw.pushNoContent } : {}),
     // 批量管理（bridge/fleet）：白名单带 compactKeep 和 callers；漏在这里读不到，任何 set* 还会把它抹掉
     ...fleetOf(raw.fleet),
+    ...(typeof raw.talkEnabled === "boolean" ? { talkEnabled: raw.talkEnabled } : {}),
   };
 }
 
@@ -115,22 +119,17 @@ function mergeAutoCompact(ac: any): AppConfig["autoCompact"] | undefined {
   return Object.keys(out).length ? out : undefined;
 }
 
-/** 白名单式读 fleet：新加字段要加在这里，否则读出来是 undefined，而且任何 set*（读→改→写）都会把它从磁盘上抹掉 */
+/**
+ * 白名单式读 fleet：新加字段要加在这里，否则读出来是 undefined，而且任何 set*（读→改→写）都会把它从磁盘上抹掉。
+ * compactKeep 和上下文边界的 keep 同一个入口 normalizeCompactKeep，不合格当没配；存原文（多行照收），敲之前再取它规范好的那一行
+ */
 function fleetOf(f: unknown): Pick<AppConfig, "fleet"> {
   if (!f || typeof f !== "object") return {};
   const { compactKeep, callers } = f as Record<string, unknown>;
   const list = Array.isArray(callers) ? callers.filter((c): c is string => typeof c === "string" && c.trim() !== "") : null;
-  const fleet = { ...(okCompactKeep(compactKeep) ? { compactKeep } : {}), ...(list ? { callers: list } : {}) };
+  const keepOk = typeof compactKeep === "string" && normalizeCompactKeep(compactKeep).ok;
+  const fleet = { ...(keepOk ? { compactKeep } : {}), ...(list ? { callers: list } : {}) };
   return Object.keys(fleet).length ? { fleet } : {};
-}
-
-/**
- * 保留清单会原样敲进 CC 输入框：只收 1500 字以内、不带控制字符的非空串，否则当没配、用默认清单。
- * 超长时 tmux send-keys 整条失败；换行、ESC 等会被 TUI 当成按键（config.json 是手改的，这里是唯一的闸）
- */
-const MAX_COMPACT_KEEP = 1500;
-function okCompactKeep(v: unknown): v is string {
-  return typeof v === "string" && !!v.trim() && v.length <= MAX_COMPACT_KEEP && !/[\x00-\x1f\x7f-\x9f]/.test(v);
 }
 
 function defaults(): AppConfig {
@@ -263,6 +262,12 @@ export async function setQuotaLive(enabled: boolean): Promise<AppConfig> {
 export async function setPushNoContent(enabled: boolean): Promise<AppConfig> {
   const cfg = await readConfig();
   cfg.pushNoContent = enabled;
+  await writeConfig(cfg);
+  return cfg;
+}
+
+export async function setTalkEnabled(enabled: boolean): Promise<AppConfig> {
+  const cfg = { ...(await readConfig()), talkEnabled: enabled };
   await writeConfig(cfg);
   return cfg;
 }

@@ -1,0 +1,30 @@
+
+ ▐▛███▛█   Claude Code v2.1.283
+▝▜██████▀  Opus 5.5 (1M context) · API Usage Billing
+ ▝▝   ▝▝   /Users/me/work
+
+
+❯ ask me                                                                        
+────────────────────────────────────────────────────────────────────────────────
+ ☐ Approach 
+
+Which approach should we take?
+
+  1. Option A
+     first
+  2. Option B
+     second
+  3. Type something.
+────────────────────────────────────────────────────────────────────────────────
+❯ 4. Chat about this
+
+Enter to select · ↑/↓ to navigate · ctrl+g to edit in Vim · Esc to cancel
+
+
+
+
+                                                                              
+
+
+
+                                                                              

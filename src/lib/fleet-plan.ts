@@ -3,6 +3,7 @@
  * 大总管默认不在批量范围里：只有 includeMaster 或在 agents 里点名 master 才算「单独勾选」。
  * 用例见 tests/fleet-plan.test.ts。
  */
+import { normalizeCompactKeep, type CompactKeep, type CompactKeepResult } from "./ctx-boundary-policy.js";
 import { neutralizeDelegateMarker } from "./delegate-marker.js";
 import type { LpMode } from "./lp-state.js";
 
@@ -11,8 +12,8 @@ export const FLEET_ACTIONS: readonly FleetActionKind[] = ["lp-on", "lp-off", "co
 
 export interface FleetAction {
   kind: FleetActionKind;
-  /** compact / lp-compact 的保留清单；缺省用 compactKeep() */
-  keep?: string;
+  /** compact / lp-compact 的保留清单（只有 fleetKeep 产得出）；缺省用 compactKeep() */
+  keep?: CompactKeep;
   /** text 动作的正文（走 deliver，带来源头） */
   text?: string;
 }
@@ -32,23 +33,17 @@ export const DEFAULT_COMPACT_KEEP =
   "未了、未决、已承诺、预期接下来发生的事,以及被额度打断时正在做的那一步;难以重建的细节——名字、数字、日期、原话、路径、命令、链接——原样保留。" +
   "以上宁长勿缺,其余从简。";
 
-const MAX_KEEP = 2000;
 const MAX_TEXT = 4000;
-
-/**
- * 保留清单是用 send-keys -l 原样敲进输入框的：换行等于回车（半截清单会被当成命令提交），ESC 等控制字符会被 TUI 当成按键。
- * 所以控制字符一律换成空格、压成一行。
- */
-function oneLine(s: string): string {
-  return s.replace(/[\x00-\x1f\x7f]+/g, " ").replace(/\s{2,}/g, " ").trim();
-}
 
 /** text 与 keep 都会进 agent 的上下文：里面的委托标记（[📨 委托转达] 及变体）一律中和，不许冒充 owner 委托 */
 const clean = (s: string) => neutralizeDelegateMarker(s);
 
-export function compactCommand(keep: string): string {
-  const k = oneLine(clean(keep));
-  return k ? `/compact ${k}` : "/compact";
+/**
+ * 要敲进输入框的保留清单：中和委托标记后走上下文边界同一个入口 normalizeCompactKeep（换行换成空格、800 字、不带控制 / 格式字符）。
+ * 敲进去是 injectCompact 的事（/compact + 这一行）；换行等于回车、ESC 会被 TUI 当成按键，所以这道闸不能省
+ */
+export function fleetKeep(raw: unknown): CompactKeepResult {
+  return normalizeCompactKeep(typeof raw === "string" ? clean(raw) : raw);
 }
 
 export function parseFleetAction(input: unknown): { ok: true; action: FleetAction } | { ok: false; error: string } {
@@ -58,9 +53,11 @@ export function parseFleetAction(input: unknown): { ok: true; action: FleetActio
     return { ok: false, error: `动作只能是 ${FLEET_ACTIONS.join(" / ")}` };
   }
   const action: FleetAction = { kind: kind as FleetActionKind };
-  if (o.keep !== undefined) {
-    if (typeof o.keep !== "string" || o.keep.length > MAX_KEEP) return { ok: false, error: `keep 要是不超过 ${MAX_KEEP} 字的字符串` };
-    if (kind === "compact" || kind === "lp-compact") action.keep = oneLine(clean(o.keep));
+  // 空白的 keep 当没填（用默认清单）：只敲「/compact 」时 CC 会在后面画灰色参数提示，敲完核对输入框对不上
+  if (o.keep !== undefined && (typeof o.keep !== "string" || o.keep.trim())) {
+    const k = fleetKeep(o.keep);
+    if (!k.ok) return { ok: false, error: `保留清单${k.why}` };
+    if (kind === "compact" || kind === "lp-compact") action.keep = k.keep;
   }
   if (kind === "text") {
     if (typeof o.text !== "string" || !o.text.trim()) return { ok: false, error: "text 动作要带非空的 text" };
@@ -122,8 +119,13 @@ export function parseFleetSelect(input: unknown): { ok: true; select: FleetSelec
 
 export interface Excluded { name: string; reason: string }
 
-/** 先定范围（点名 / 全部 / 项目，三者取并集），再按条件过滤（撞墙中、上下文超线，取交集） */
-export function selectTargets<T extends FleetCandidate>(cands: T[], sel: FleetSelect): { targets: T[]; excluded: Excluded[] } {
+export const NO_GRANT = "这个凭据没有它的权限";
+
+/**
+ * 先定范围（点名 / 全部 / 项目，三者取并集），再按条件过滤（撞墙中、上下文超线，取交集）。allowed 是这次调用的凭据能动谁
+ * （网页按设备凭据的 agentInScope，没授大总管的设备点了 master 也不算；CLI 不含大总管），不能动的列进 excluded
+ */
+export function selectTargets<T extends FleetCandidate>(cands: T[], sel: FleetSelect, allowed: (name: string) => boolean): { targets: T[]; excluded: Excluded[] } {
   const byName = new Map(cands.map((c) => [bareName(c.name), c]));
   const named = new Set((sel.agents ?? []).map(bareName));
   const excluded: Excluded[] = [];
@@ -133,6 +135,7 @@ export function selectTargets<T extends FleetCandidate>(cands: T[], sel: FleetSe
   const targets: T[] = [];
   for (const c of cands) {
     if (!inScope(c)) continue;
+    if (!allowed(c.name)) { excluded.push({ name: bareName(c.name), reason: NO_GRANT }); continue; }
     if (sel.walled && !c.walled) { excluded.push({ name: bareName(c.name), reason: "没在撞墙等待" }); continue; }
     if (sel.ctxOver !== undefined && !((c.contextTokens ?? 0) > sel.ctxOver)) {
       excluded.push({ name: bareName(c.name), reason: `上下文没超过 ${sel.ctxOver}` });

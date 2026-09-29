@@ -7,6 +7,7 @@ import { handleFleetWs } from "../src/bridge/fleet/ws.js";
 import { sseEventAllow } from "../src/bridge/ledger-feed.js";
 import { handleLocalApi, LOCAL_API_FEATURES } from "../src/bridge/local-api/index.js";
 import { effectivePrincipal, type DeviceCredential, type Grant } from "../src/lib/devices.js";
+import { NO_GRANT } from "../src/lib/fleet-plan.js";
 import { canRunFleet, type Principal } from "../src/lib/principals.js";
 
 const at = "2026-09-29T00:00:00Z";
@@ -64,6 +65,38 @@ describe("HTTP 参数校验（owner）", () => {
   });
 });
 
+describe("凭据 scope 传到服务层：全 scope 不含大总管，没授 master 的 owner 设备列不出、选不中它（codex r4 P1-2）", () => {
+  const noMaster = device({ agents: ["*"], terminal: false, manage: true });
+  const withMaster = device({ agents: ["*", "master"], terminal: true, manage: true });
+  const run = async (p: Principal, select: unknown, dryRun = true) => {
+    const r = await call(p, "/fleet/run", post({ action: { kind: "text", text: "review-only" }, select, dryRun }));
+    expect(r?.status).toBe(200);
+    return ((await r!.json()) as { report: { targets: string[]; results: unknown[]; excluded: unknown[] } }).report;
+  };
+
+  test("点名 master / includeMaster：200，但不当目标，excluded 写明没权限；非预演也一个都不发", async () => {
+    expect(canRunFleet(noMaster)).toBe(true);
+    for (const select of [{ agents: ["master"] }, { agents: ["agent-master"] }, { all: true, includeMaster: true }]) {
+      const report = await run(noMaster, select);
+      expect(report.targets).toEqual([]);
+      expect(report.excluded).toContainEqual({ name: "master", reason: NO_GRANT });
+    }
+    const real = await run(noMaster, { agents: ["master"] }, false);
+    expect(real.targets).toEqual([]);
+    expect(real.results).toEqual([]);
+  });
+
+  test("授了大总管的设备照常选得中", async () => {
+    expect((await run(withMaster, { agents: ["master"] })).targets).toEqual(["master"]);
+  });
+
+  test("/fleet/state 只列凭据能动的", async () => {
+    const listed = async (p: Principal) => ((await (await call(p, "/fleet/state"))!.json()) as { agents: { name: string }[] }).agents.map((a) => a.name);
+    expect(await listed(noMaster)).not.toContain("master");
+    expect(await listed(withMaster)).toContain("master");
+  });
+});
+
 describe("ws：只收直连回环", () => {
   test("升级时没标 loopback（非回环 / 带 XFF 的反代）→ 拒绝", async () => {
     for (const data of [undefined, {}, { loopback: false }, { loopback: "true" }]) {
@@ -98,7 +131,15 @@ describe("ws：认不出调用方是不是 owner，只给最低权限（adv1 P1-
     const fake = async (req: unknown) => (seen.push(req), { ok: true }) as never;
     const msg = { type: "fleet_run", action: { kind: "lp-on" }, select: { all: true }, actor: "owner", via: "web" };
     expect(await handleFleetWs(msg, { data: { loopback: true } }, fake)).toEqual({ result: { ok: true } });
-    expect(seen).toEqual([{ action: { kind: "lp-on" }, select: { all: true }, dryRun: false, actor: "local-cli", via: "ws" }]);
+    expect(seen).toMatchObject([{ action: { kind: "lp-on" }, select: { all: true }, dryRun: false, actor: "local-cli", via: "ws" }]);
+    // 能动谁也按 local-cli 最低权限：大总管不在里面（进门时已拒掉点名和 includeMaster，这里是服务层那道）
+    const allowed = (seen[0] as { allowed: (n: string) => boolean }).allowed;
+    expect(["worker", "agent-task-t1", "master", "agent-master"].map(allowed)).toEqual([true, true, false, false]);
+  });
+
+  test("状态里不列大总管", async () => {
+    const r = (await handleFleetWs({ type: "fleet_state" }, { data: { loopback: true } })) as { result: { agents: { name: string }[] } };
+    expect(r.result.agents.map((a) => a.name)).not.toContain("master");
   });
 });
 

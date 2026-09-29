@@ -1,4 +1,4 @@
-/** 本地 API：GET/PUT /api/v1/settings（config.json 里的 lang / groqApiKey / pushNoContent）与 GET/PUT /api/v1/profile（user_profile 表） */
+/** 本地 API：GET/PUT /api/v1/settings（config.json 里的 lang / groqApiKey / pushNoContent / talkEnabled）与 GET/PUT /api/v1/profile（user_profile 表） */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -30,6 +30,7 @@ beforeAll(() => {
       else delete cfg.groqApiKey;
     },
     setPushNoContent: async (on) => { cfg = { ...cfg, pushNoContent: on }; },
+    setTalkEnabled: async (on) => { cfg = { ...cfg, talkEnabled: on }; },
   });
 });
 afterAll(() => {
@@ -52,7 +53,7 @@ describe("/api/v1/settings", () => {
   test("GET 任何凭据都行；没配 key 时 hint 是 null", async () => {
     const res = await call("GET", "/api/v1/settings", GUEST);
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ ok: true, lang: "zh", groqApiKeyHint: null, pushNoContent: false });
+    expect(await res.json()).toEqual({ ok: true, lang: "zh", groqApiKeyHint: null, pushNoContent: false, talkEnabled: false });
   });
   test("PUT 要 manage grant：guest 403，什么都没改", async () => {
     expect((await call("PUT", "/api/v1/settings", GUEST, { lang: "en" })).status).toBe(403);
@@ -69,10 +70,10 @@ describe("/api/v1/settings", () => {
   test("PUT lang + key：回体只带尾四位提示；空串清除 key；lang 可单独提交", async () => {
     const key = "gsk_abcdefghijklmnopqrstuvwxyz1234";
     const res = await call("PUT", "/api/v1/settings", OWNER, { lang: "en", groqApiKey: key });
-    expect(await res.json()).toEqual({ ok: true, lang: "en", groqApiKeyHint: "····1234", pushNoContent: false });
+    expect(await res.json()).toEqual({ ok: true, lang: "en", groqApiKeyHint: "····1234", pushNoContent: false, talkEnabled: false });
     expect(cfg.groqApiKey).toBe(key);
     expect(JSON.stringify(await (await call("GET", "/api/v1/settings", GUEST)).json())).not.toContain("gsk_");
-    expect(await (await call("PUT", "/api/v1/settings", OWNER, { groqApiKey: "" })).json()).toEqual({ ok: true, lang: "en", groqApiKeyHint: null, pushNoContent: false });
+    expect(await (await call("PUT", "/api/v1/settings", OWNER, { groqApiKey: "" })).json()).toEqual({ ok: true, lang: "en", groqApiKeyHint: null, pushNoContent: false, talkEnabled: false });
     expect(cfg.groqApiKey).toBeUndefined();
     expect(await (await call("PUT", "/api/v1/settings", OWNER, { lang: "zh" })).json()).toMatchObject({ lang: "zh" });
   });
@@ -81,7 +82,16 @@ describe("/api/v1/settings", () => {
     expect(cfg.pushNoContent).toBeUndefined();
     expect(await (await call("PUT", "/api/v1/settings", OWNER, { pushNoContent: true })).json()).toMatchObject({ pushNoContent: true });
     expect(await (await call("GET", "/api/v1/settings", GUEST)).json()).toMatchObject({ pushNoContent: true });
-    expect(await (await call("PUT", "/api/v1/settings", OWNER, { pushNoContent: false })).json()).toMatchObject({ pushNoContent: false });
+    expect(await (await call("PUT", "/api/v1/settings", OWNER, { pushNoContent: false })).json()).toMatchObject({ pushNoContent: false, talkEnabled: false });
+  });
+  test("Chat 入口（T50）：缺省关，guest 改不了也读得到；owner 打开 / 关上；不是布尔 400", async () => {
+    expect(await (await call("GET", "/api/v1/settings", GUEST)).json()).toMatchObject({ talkEnabled: false });
+    expect((await call("PUT", "/api/v1/settings", GUEST, { talkEnabled: true })).status).toBe(403);
+    expect((await call("PUT", "/api/v1/settings", OWNER, { talkEnabled: "on" })).status).toBe(400);
+    expect(cfg.talkEnabled).toBeUndefined();
+    expect(await (await call("PUT", "/api/v1/settings", OWNER, { talkEnabled: true })).json()).toMatchObject({ talkEnabled: true });
+    expect(await (await call("GET", "/api/v1/settings", GUEST)).json()).toMatchObject({ talkEnabled: true });
+    expect(await (await call("PUT", "/api/v1/settings", OWNER, { talkEnabled: false })).json()).toMatchObject({ talkEnabled: false });
   });
   test("groqKeyHint", () => {
     expect(groqKeyHint(undefined)).toBeNull();

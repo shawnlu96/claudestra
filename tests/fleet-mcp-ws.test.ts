@@ -81,9 +81,19 @@ describe("谁能调（按连接认，不按参数）", () => {
 });
 
 describe("能动谁", () => {
-  test("PM 的 state 只有自己项目的 agent，没有大总管", async () => {
+  test("PM 的 state 只列它能动的：自己项目里的 agent，没有大总管、没有自己", async () => {
     const r = (await mcp("pm", STATE)).result as { agents: { name: string }[] };
-    expect(r.agents.map((a) => a.name).sort()).toEqual(["agent-ext", "agent-pm1", "agent-task-x1", "agent-w1"]);
+    expect(r.agents.map((a) => a.name).sort()).toEqual(["agent-ext", "agent-task-x1", "agent-w1"]);
+  });
+  test("传给服务层的 allowed 按调用方自己的身份算，不是全权", async () => {
+    const seen: { allowed: (n: string) => boolean }[] = [];
+    const fake = async (req: unknown) => (seen.push(req as never), {}) as never;
+    const body = { via: "mcp", ...run({ action: { kind: "lp-off" }, select: { all: true } }) };
+    for (const ws of ["pm", "master", "ops"] as const) await handleFleetWs(body, WS[ws], fake);
+    const names = ["agent-pm1", "agent-w1", "agent-w2", "agent-plain", "agent-ops", "master"];
+    expect(names.map(seen[0]!.allowed)).toEqual([false, true, false, false, false, false]); // PM：只到自己的项目，不含自己
+    expect(names.map(seen[1]!.allowed)).toEqual([true, true, true, true, true, false]); // 大总管：除了自己（master）都能动
+    expect(names.map(seen[2]!.allowed)).toEqual([true, true, true, true, false, false]); // fleet.callers：全部，除了大总管和自己
   });
   test("PM：dryRun 不传就是预演；all 只到自己的项目，自己进 excluded", async () => {
     const r = reportOf(await mcp("pm", run({ action: { kind: "lp-off" }, select: { all: true } })));

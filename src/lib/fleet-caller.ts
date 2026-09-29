@@ -104,7 +104,13 @@ export function scopeForCaller<T extends FleetCandidate>(caller: FleetCaller, ac
   return { ok: true, cands: out, select, excluded };
 }
 
-/** fleet state 给调用方看的范围：和 run 能动到的一致（不含大总管；PM 只看自己的项目） */
-export function visibleToCaller<T extends FleetCandidate>(caller: FleetCaller, cands: T[]): T[] {
-  return cands.filter((c) => !c.master && (!caller.projects || (!!c.project && caller.projects.includes(c.project))));
+/**
+ * 调用方凭据能动谁，传给服务层当 allowed（列状态、选目标、发键前各查一遍）：不含大总管和调用方自己，PM 只到它管的项目。
+ * 和 scopeForCaller 是同一条线：那边负责报错、写 excluded 原因，这个是服务层最后一道闸，两边任一放宽都还有另一边挡着
+ */
+export function allowedForCaller(caller: FleetCaller, agents: readonly Pick<FleetCandidate, "name" | "project">[]): (name: string) => boolean {
+  const me = bareName(caller.name);
+  const mine = (p?: string) => !caller.projects || (!!p && caller.projects.includes(p));
+  const ok = new Set(agents.filter((a) => !isMasterName(a.name) && bareName(a.name) !== me && mine(a.project)).map((a) => a.name));
+  return (name) => ok.has(name);
 }

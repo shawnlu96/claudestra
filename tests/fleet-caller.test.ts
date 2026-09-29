@@ -2,8 +2,8 @@
  * lib/fleet-caller.ts：ws 调 fleet 时的调用方判定矩阵，以及按调用方收窄候选（PM 只管自己的项目、不动大总管、不动自己）。
  */
 import { describe, expect, test } from "bun:test";
-import { FLEET_DENIED, identifyFleetCaller, scopeForCaller, visibleToCaller, type CallerInput, type FleetCaller } from "../src/lib/fleet-caller.js";
-import { selectTargets, type Excluded, type FleetCandidate, type FleetSelect } from "../src/lib/fleet-plan.js";
+import { allowedForCaller, FLEET_DENIED, identifyFleetCaller, scopeForCaller, type CallerInput, type FleetCaller } from "../src/lib/fleet-caller.js";
+import { NO_GRANT, selectTargets, type Excluded, type FleetCandidate, type FleetSelect } from "../src/lib/fleet-plan.js";
 
 const CONTROL = "ctl-1";
 const PMS = new Map<string, string[]>([
@@ -86,7 +86,7 @@ const OPS: FleetCaller = { kind: "caller", name: "agent-ops", projects: null };
 function run(caller: FleetCaller, sel: FleetSelect, action: Parameters<typeof scopeForCaller>[1] = "lp-off"): { error?: string; targets: string[]; excluded: Excluded[] } {
   const s = scopeForCaller(caller, action, sel, FLEET);
   if (!s.ok) return { error: s.error, targets: [], excluded: [] };
-  const r = selectTargets(s.cands, s.select);
+  const r = selectTargets(s.cands, s.select, allowedForCaller(caller, FLEET));
   return { targets: r.targets.map((t) => t.name), excluded: [...s.excluded, ...r.excluded] };
 }
 
@@ -148,8 +148,20 @@ describe("按调用方收窄", () => {
     expect(r.excluded.map((e) => e.name).sort()).toEqual(["loose", "other"]);
   });
 
-  test("state 的可见范围和 run 一致", () => {
-    expect(visibleToCaller(PM, FLEET).map((x) => x.name)).toEqual(["agent-claudestra", "agent-task-t43", "agent-task-t35"]);
-    expect(visibleToCaller(MASTER, FLEET).map((x) => x.name)).not.toContain("master");
+  test("凭据能动谁（allowed）：按各自身份算，不含大总管和自己，PM 只到自己的项目", () => {
+    const can = (caller: FleetCaller) => FLEET.map((x) => x.name).filter(allowedForCaller(caller, FLEET));
+    expect(can(PM)).toEqual(["agent-task-t43", "agent-task-t35"]);
+    expect(can(MASTER)).toEqual(["agent-claudestra", "agent-task-t43", "agent-task-t35", "agent-other", "agent-loose"]);
+    expect(can(OPS)).toEqual(["agent-claudestra", "agent-task-t43", "agent-task-t35", "agent-other", "agent-loose"]);
+    // 大总管的任何拼写都不在里面（registry 里万一混进一个叫 agent-MASTER 的条目也一样）
+    expect(allowedForCaller(OPS, [c("agent-MASTER"), c("ｍａｓｔｅｒ")])("agent-MASTER")).toBe(false);
+  });
+
+  test("凭据兜底：scopeForCaller 放过去的，allowed 不给也选不中（服务层最后一道闸）", () => {
+    const s = scopeForCaller(MASTER, "lp-off", { all: true }, FLEET);
+    if (!s.ok) throw new Error(s.error);
+    const r = selectTargets(s.cands, s.select, allowedForCaller(PM, FLEET));
+    expect(r.targets.map((t) => t.name)).toEqual(["agent-task-t43", "agent-task-t35"]);
+    expect(r.excluded).toContainEqual({ name: "other", reason: NO_GRANT });
   });
 });

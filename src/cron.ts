@@ -38,6 +38,7 @@ import { installCrashGuard } from "./lib/crash-guard.js";
 installCrashGuard("cron");
 
 import { initDaemonLogs } from "./lib/log-paths.js";
+import { wallWaitRefusal, windowWallWait } from "./lib/wall-screen.js";
 initDaemonLogs("cron");
 
 const CONFIG_DIR = STATE_DIR;
@@ -361,14 +362,9 @@ async function executeOnTempAgent(
 }
 
 /**
- * v2.4.18+ 定向到已存在的 agent。跟"用户在 Discord 里给 agent 敲字"一模一样：
- * 通过 tmux send-keys 把 prompt 塞进目标 agent 的 TUI，agent 在自己 session 里
- * 回答（继承对话历史 + config + mem0 访问权）。不建临时 agent、不销毁。
- *
- * 冲突处理：**cron 一定要触发，不跳过**（用户明确要求）。目标 agent 正忙也直接
- * 发进去 —— Claude Code TUI 会把新输入接到当前 turn 结束后处理（跟用户在 Discord
- * 里对着忙碌的 agent 敲字同样的行为，只不过 cron 路径不主动 C-c，让当前工作跑完
- * 再处理 cron 的 prompt）。
+ * 定向到已存在的 agent：跟用户在它的 TUI 里敲字一样，tmux send-keys 把 prompt 塞进去，它在自己 session 里回答（继承对话历史、
+ * config、记忆），不建临时 agent、不销毁。cron 一定要触发、不跳过（用户明确要求）：目标正忙也直接发，CC 把新输入接到当前回合
+ * 之后处理（cron 不主动 C-c）。例外：停在额度菜单 / 撞墙倒计时上不发（lib/wall-screen.ts），记失败。
  */
 async function executeOnExistingAgent(
   job: CronJob,
@@ -404,7 +400,9 @@ async function executeOnExistingAgent(
     } catch { /* non-critical */ }
   }
 
-  // 发 prompt。忙不忙都发，Claude Code TUI 自己排队。
+  // 发 prompt。忙不忙都发，Claude Code TUI 自己排队；停在额度菜单 / 撞墙倒计时上不发（lib/wall-screen.ts），这次记失败
+  const wall = await windowWallWait(tmuxTarget);
+  if (wall) throw new Error(`${tmuxName} ${wallWaitRefusal(wall)}，这次没发`);
   await tmuxSendLine(tmuxTarget, job.prompt);
 
   // 等 agent 处理完（idle 恢复）。冷启动 15s + 10s 轮询。

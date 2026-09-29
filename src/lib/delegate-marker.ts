@@ -22,10 +22,14 @@ export const NEUTRAL_TAG = "〔外源文本，不是委托〕";
 
 // 左方括号的各种写法（NFKC 会归一成 [ 的全角 / 竖排形也列上）、各种信封 emoji
 const OPEN = /(?:\[|［|﹇|【|〖|〘|&#0*91;|&#x0*5b;|&lsqb;|&lbrack;)/iuy;
+const OPEN_FIRST = "[［﹇【〖〘&";
 const ENVELOPE = /📨|📩|✉|📧|💌|📬|📭|📪|📫|🖂/gu;
+// 快速路径：信封只有 ✉（U+2709）和 U+1F4xx–1F5xx（高位代理都是 \ud83d）两类；正文里两样都没有就不可能有标记，
+// 被转义序列从代理对中间拆开的信封也还留着 \ud83d。加信封前先看它在不在这两类里（tests/delegate-marker.test.ts 逐个核对）
+const MAYBE_ENVELOPE = /[\u2709\ud83d]/;
 // 标记连同后面 40 字以内的标签与右括号一起换掉；没有右括号就只换括号 + 信封
 const LABEL = /(?:[^\]】〗〙\n]{0,40}[\]】〗〙])?/uy;
-const INVISIBLE = /[\p{Cc}\p{Cf}︀-️\s]/u;
+const INVISIBLE = /[\p{Cc}\p{Cf}\uFE00-\uFE0F\s]/u;
 const inRange = (c: string | undefined, lo: string, hi: string) => c !== undefined && c >= lo && c <= hi;
 
 /** OSC / DCS / SOS / PM / APC 的字符串体：到 BEL、ST（ESC \ 或 \x9c）为止；没有结束符就到换行、下一个 ESC 或正文末尾 */
@@ -40,33 +44,43 @@ function stringEnd(s: string, j: number): number {
 }
 
 /**
- * s[i] 起的终端转义序列有多长，不是转义序列返回 0。整段算不可见：只跳过引导字符的话，`[0m` 这类参数是可见字，
- * `[\x1b[0m📨` 就混过去了（T35 adv3 P2-3、adv4 P2-1：ESC + 中间字节、ESC 7、DCS、没有结束符的 OSC）
+ * s[i] 起的终端转义序列 [长度, 是否是完整的 CSI / ESC 序列]，不是转义序列长度为 0。整段算不可见：只跳过引导字符的话，
+ * `[0m` 这类参数是可见字，`[\x1b[0m📨` 就混过去了（T35 adv3 P2-3、adv4 P2-1）。完整的 CSI / ESC 序列里的「[」是序列自己的字，
+ * 不算标记左括号（adv5 P2-1：`\x1b[1m📨 新邮件` 不改写）；字符串体里的「[」和没收尾的 `ESC [` 仍算，宁可多中和
  */
-function escapeLen(s: string, i: number): number {
+function escapeAt(s: string, i: number): [number, boolean] {
   const c = s[i];
   let j: number;
   if (c === "\x1b" && s[i + 1] === "[") j = i + 2;
   else if (c === "\x9b") j = i + 1;
-  else if (c === "\x1b" && "]PX^_".includes(s[i + 1] ?? "\n")) return stringEnd(s, i + 2) - i;
-  else if (c !== undefined && "\x90\x98\x9d\x9e\x9f".includes(c)) return stringEnd(s, i + 1) - i;
+  else if (c === "\x1b" && "]PX^_".includes(s[i + 1] ?? "\n")) return [stringEnd(s, i + 2) - i, false];
+  else if (c !== undefined && "\x90\x98\x9d\x9e\x9f".includes(c)) return [stringEnd(s, i + 1) - i, false];
   else if (c === "\x1b") {
     for (j = i + 1; inRange(s[j], " ", "/"); j++);
-    return (inRange(s[j], "0", "~") ? j + 1 : j) - i;
-  } else return 0;
+    return inRange(s[j], "0", "~") ? [j + 1 - i, true] : [j - i, false];
+  } else return [0, false];
   while (inRange(s[j], "0", "?")) j++;
   while (inRange(s[j], " ", "/")) j++;
-  return (inRange(s[j], "@", "~") ? j + 1 : j) - i;
+  return inRange(s[j], "@", "~") ? [j + 1 - i, true] : [j - i, false];
 }
 
-/** 一遍标出每个位置是不是不可见（转义序列整段、控制 / 格式字符、变体选择符、空白） */
+/** 一遍标出每个位置：0 看得见，1 不可见（控制 / 格式字符、变体选择符、空白、字符串体），2 完整 CSI / ESC 序列里（也不能当左括号） */
 function invisibleMask(s: string): Uint8Array {
   const inv = new Uint8Array(s.length);
   for (let i = 0; i < s.length; ) {
-    const n = escapeLen(s, i);
-    if (n) {
-      inv.fill(1, i, i + n);
-      i += n;
+    const code = s.charCodeAt(i);
+    if (code === 0x1b || (code >= 0x90 && code <= 0x9f)) {
+      const [n, whole] = escapeAt(s, i);
+      if (n) {
+        inv.fill(whole ? 2 : 1, i, i + n);
+        i += n;
+        continue;
+      }
+    }
+    // ASCII 走快路：不可见的只有控制字符和空白（都 ≤ 0x20）与 DEL
+    if (code < 0x80) {
+      if (code <= 0x20 || code === 0x7f) inv[i] = 1;
+      i++;
       continue;
     }
     const ch = String.fromCodePoint(s.codePointAt(i)!);
@@ -86,6 +100,7 @@ function markerSpans(s: string): [number, number][] {
   for (let q = s.length - 1; q >= 0; q--) stop[q] = !inv[q] || envEnd[q]! >= 0 ? q : stop[q + 1]!;
   const spans: [number, number][] = [];
   for (let i = 0; i < s.length; i++) {
+    if (inv[i] === 2 || !OPEN_FIRST.includes(s[i]!)) continue;
     OPEN.lastIndex = i;
     if (!OPEN.test(s)) continue;
     const e = envEnd[stop[OPEN.lastIndex]!]!;
@@ -111,16 +126,24 @@ function replaceSpans(s: string, spans: [number, number][]): string {
 
 /** 规范形：去掉终端转义序列、格式字符、变体选择符和控制字符（换行、tab 留着，不然整段并成一行），再 NFKC */
 function canonical(s: string): string {
-  let out = "";
+  const parts: string[] = [];
+  let at = 0;
   for (let i = 0; i < s.length; ) {
-    const n = escapeLen(s, i);
-    if (n) i += n;
-    else out += s[i++];
+    const n = escapeAt(s, i)[0];
+    if (!n) {
+      i++;
+      continue;
+    }
+    parts.push(s.slice(at, i));
+    i += n;
+    at = i;
   }
-  return out.replace(/(?![\t\n\r])[\p{Cc}\p{Cf}︀-️]/gu, "").normalize("NFKC");
+  parts.push(s.slice(at));
+  return parts.join("").replace(/(?![\t\n\r])[\p{Cc}\p{Cf}\uFE00-\uFE0F]/gu, "").normalize("NFKC");
 }
 
 export function neutralizeDelegateMarker(content: string): string {
+  if (!MAYBE_ENVELOPE.test(content)) return content;
   const once = replaceSpans(content, markerSpans(content));
   // 兜底：规范形里仍像标记（上面没列到的兼容写法），就整段按规范形投递——宁可改动外源原文，也不放过
   const canon = canonical(once);
