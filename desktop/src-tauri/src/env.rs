@@ -7,8 +7,9 @@
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::os::unix::process::CommandExt;
 use std::process::{Command, Stdio};
-use std::sync::Mutex;
+use std::sync::{mpsc, Mutex};
 use std::time::{Duration, Instant};
 
 pub const BRIDGE_LABEL: &str = "com.claudestra.bridge";
@@ -51,15 +52,24 @@ fn plist_value(plist: &Path, key: &str) -> Option<String> {
     (out.status.success() && !v.is_empty()).then_some(v)
 }
 
-fn drain<R: Read + Send + 'static>(r: Option<R>) -> std::thread::JoinHandle<String> {
+/// Read a pipe to EOF on its own thread and send `(slot, text)`; the caller decides how long to
+/// wait. A send after the caller gave up fails, which is fine: nobody wants that text any more.
+fn drain<R: Read + Send + 'static>(r: Option<R>, slot: usize, tx: mpsc::Sender<(usize, String)>) {
     std::thread::spawn(move || {
         let mut buf = Vec::new();
         if let Some(mut r) = r {
             // a read error just truncates the captured text; the exit status still tells success
             let _ = r.read_to_end(&mut buf);
         }
-        String::from_utf8_lossy(&buf).to_string()
-    })
+        let _ = tx.send((slot, String::from_utf8_lossy(&buf).to_string()));
+    });
+}
+
+/// SIGKILL the child's whole session/group: descendants holding our pipes go too. ESRCH (all gone)
+/// is the outcome we want anyway.
+fn kill_group(pgid: u32) {
+    // SAFETY: plain syscall with a pid we spawned; no memory is touched.
+    unsafe { libc::killpg(pgid as libc::pid_t, libc::SIGKILL) };
 }
 
 /// Why a run produced no exit status. The split matters to restart: a child that never started
@@ -78,30 +88,51 @@ impl From<RunError> for String {
     }
 }
 
-/// Run a command with a deadline; returns (exit ok, stdout, stderr). A hung child is killed.
-/// Output is drained on threads so a child writing more than the pipe buffer can't stall.
+/// Run a command with a deadline; returns (exit ok, stdout, stderr). The deadline covers both
+/// the child's exit and draining its pipes: a descendant it left behind (an rc file's background
+/// job) keeps the pipes open after the child exits, and waiting on that would hang the caller
+/// while it holds a lock or the restart gate. At the deadline the child's whole group is killed
+/// and the pipes are abandoned. tests: env::tests::descendant_holding_the_pipe_*.
 pub fn run_with_timeout(cmd: &mut Command, timeout: Duration) -> Result<(bool, String, String), RunError> {
+    // Own session = own process group (so kill_group reaches descendants) and no controlling
+    // terminal, which is also what a Finder-launched app gives the login shell.
+    // SAFETY: setsid is async-signal-safe and touches no memory of the parent.
+    unsafe { cmd.pre_exec(|| if libc::setsid() < 0 { Err(std::io::Error::last_os_error()) } else { Ok(()) }) };
     let mut child = cmd
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| RunError::NotStarted(e.to_string()))?;
-    let (out, err) = (drain(child.stdout.take()), drain(child.stderr.take()));
-    let started = Instant::now();
+    let pgid = child.id();
+    let deadline = Instant::now() + timeout;
+    let timed_out = || RunError::Started(format!("timed out after {:.1}s", timeout.as_secs_f32()));
+    let (tx, rx) = mpsc::channel();
+    drain(child.stdout.take(), 0, tx.clone());
+    drain(child.stderr.take(), 1, tx);
     let status = loop {
         match child.try_wait().map_err(|e| RunError::Started(e.to_string()))? {
             Some(s) => break s,
-            None if started.elapsed() > timeout => {
-                // kill() only fails when the child already exited, which is the outcome we want anyway
-                let _ = child.kill();
+            None if Instant::now() >= deadline => {
+                kill_group(pgid);
+                // reaps the killed child; fails only if it is already reaped
                 let _ = child.wait();
-                return Err(RunError::Started(format!("timed out after {}s", timeout.as_secs())));
+                return Err(timed_out());
             }
             None => std::thread::sleep(Duration::from_millis(50)),
         }
     };
-    let (out, err) = (out.join().unwrap_or_default(), err.join().unwrap_or_default());
+    let mut text = [String::new(), String::new()];
+    for _ in 0..2 {
+        match rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+            Ok((slot, t)) => text[slot] = t,
+            Err(_) => {
+                kill_group(pgid);
+                return Err(timed_out());
+            }
+        }
+    }
+    let [out, err] = text;
     Ok((status.success(), out, err))
 }
 
@@ -244,6 +275,57 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         assert!(matches!(&r, Ok((false, out, _)) if out.contains("__CSPATH__/bad/path")), "{r:?}");
         assert_eq!(login_path_from(r), None);
+    }
+
+    fn alive(pid: i32) -> bool {
+        // SAFETY: signal 0 only checks existence
+        unsafe { libc::kill(pid, 0) == 0 }
+    }
+
+    /// The child exits at once, its background job keeps stdout open. The deadline must still
+    /// hold, and the job must be killed rather than left holding the pipe.
+    #[test]
+    fn descendant_holding_the_pipe_does_not_outlive_the_deadline() {
+        let pidfile = std::env::temp_dir().join(format!("cs-t18b-bg-{}", std::process::id()));
+        let script = format!("sleep 30 & echo $! > '{}'; exit 0", pidfile.display());
+        let t0 = Instant::now();
+        let r = run_with_timeout(Command::new("/bin/sh").args(["-c", &script]), Duration::from_millis(300));
+        let took = t0.elapsed();
+        assert!(matches!(r, Err(RunError::Started(_))), "{r:?}");
+        assert!(took < Duration::from_secs(2), "took {took:?}");
+        let pid: i32 = std::fs::read_to_string(&pidfile).unwrap().trim().parse().unwrap();
+        // best-effort cleanup of the pid file in the per-user temp folder
+        let _ = std::fs::remove_file(&pidfile);
+        let gone = (0..20).any(|_| {
+            std::thread::sleep(Duration::from_millis(50));
+            !alive(pid)
+        });
+        assert!(gone, "background job {pid} still holds the pipe");
+    }
+
+    #[test]
+    fn descendant_holding_the_pipe_is_killed_on_a_hung_child_too() {
+        let t0 = Instant::now();
+        let r = run_with_timeout(Command::new("/bin/sh").args(["-c", "sleep 30 & sleep 30"]), Duration::from_millis(300));
+        assert!(matches!(r, Err(RunError::Started(_))), "{r:?}");
+        assert!(t0.elapsed() < Duration::from_secs(2));
+    }
+
+    #[test]
+    fn normal_run_still_returns_output_and_status() {
+        let r = run_with_timeout(Command::new("/bin/sh").args(["-c", "echo out; echo err >&2; exit 3"]), Duration::from_secs(5));
+        let (ok, out, err) = r.expect("ran");
+        assert!(!ok);
+        assert_eq!((out.trim(), err.trim()), ("out", "err"));
+    }
+
+    /// Runs the user's real interactive login shell (reads their rc files), so not by default:
+    /// `cargo test -- --ignored real_login_shell`. Checks setsid (no controlling tty) still works.
+    #[test]
+    #[ignore]
+    fn real_login_shell_path_is_read() {
+        let p = read_login_shell_path().expect("login shell PATH");
+        assert!(p.contains("/usr/bin"), "{p}");
     }
 
     #[test]
