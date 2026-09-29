@@ -2,6 +2,7 @@
  * 菜单栏小程序（desktop/）调用的命令入口，每个子命令往 stdout 打一行 JSON。
  * app 的 Rust 外壳不做判断，只转发这里的结果——逻辑留在 TS，和 doctor / install-cli 共用一套口径。
  * 约定：命令本身失败 → `{ok:false, error}`（外壳转成报错）；doctor 的 ok:false 只表示有失败项，不带 error。
+ * 这里自己产出的文案（error、服务行 detail）用英文：菜单栏按系统语言切中英，TS 侧只给一种，英文两边都看得懂。
  *
  *   bun src/desktop-cli.ts status    三个 daemon 的状态 + 本机网页地址 + 日志目录（毫秒级，菜单栏轮询用）
  *   bun src/desktop-cli.ts deps      运行时依赖（bun / claude 版本与登录 / tmux），即 doctor 的「运行时」分区
@@ -15,7 +16,7 @@ import { dotenvBridgePort } from "./lib/bridge-url.js";
 import { desktopLabels, LABELS_ENV, labelsOverrideFiles, overallStatus, updateHolder } from "./lib/desktop-status.js";
 import { checkRuntime, runDoctor } from "./lib/doctor.js";
 import { readDotenvFileSync } from "./lib/env-file.js";
-import { daemonState } from "./lib/launchd-status.js";
+import { daemonDetail, daemonState } from "./lib/launchd-status.js";
 import { LOG_DIR } from "./lib/log-paths.js";
 import { UPDATE_LOCK } from "./lib/paths.js";
 import { REPO_ROOT } from "./lib/repo-root.js";
@@ -32,16 +33,18 @@ async function run(cmd: string[]): Promise<{ code: number; out: string; err: str
 /** Bun 会自动加载仓库里的 env 文件：label 覆盖写进去就会长期生效、悄悄改掉线上行为，所以只认进程环境 */
 function labels(): string[] {
   const files = labelsOverrideFiles((f) => readDotenvFileSync(`${REPO_ROOT}/${f}`));
-  if (files.length) throw new Error(`${LABELS_ENV} 不能写在 ${files.join(" / ")} 里（只给开发时临时 export）`);
+  if (files.length) throw new Error(`${LABELS_ENV} must not be set in ${files.join(" / ")} (export it for a dev run only)`);
   return desktopLabels();
 }
 
 async function status() {
   const dotenv = readDotenvFileSync(`${REPO_ROOT}/.env`);
   const list = await run(["launchctl", "list"]);
-  if (list.code !== 0) return { ok: false, error: `launchctl list 失败：${list.err}` };
-  const daemons = labels().map((label) =>
-    daemonState(list.out, label, existsSync(`${HOME}/Library/LaunchAgents/${label}.plist`)));
+  if (list.code !== 0) return { ok: false, error: `launchctl list failed: ${list.err}` };
+  const daemons = labels().map((label) => {
+    const d = daemonState(list.out, label, existsSync(`${HOME}/Library/LaunchAgents/${label}.plist`));
+    return { ...d, detail: daemonDetail(d.reason, "en") };
+  });
   return {
     ok: true,
     overall: overallStatus(daemons),
@@ -75,7 +78,7 @@ async function restart() {
   refuseInSandbox("重启 launchd 服务");
   const targets = labels();
   const holder = updateHolder(readUpdateLock(), Date.now(), pidAlive);
-  if (holder) return { ok: false, error: `自动更新正在进行（pid ${holder}），等它跑完再重启，否则会把更新砍在半路` };
+  if (holder) return { ok: false, error: `an auto-update is running (pid ${holder}); restart after it finishes, or it would be cut off halfway` };
   const uid = process.getuid?.() ?? 0;
   const results = [];
   for (const label of targets) {
@@ -99,7 +102,7 @@ async function main(sub: string | undefined): Promise<Result> {
       return { ok: checks.every((c) => c.status !== "fail"), checks };
     }
     case "restart": return restart();
-    default: return { ok: false, error: `未知子命令：${sub ?? "(空)"}（status / deps / doctor / restart）` };
+    default: return { ok: false, error: `unknown subcommand: ${sub ?? "(none)"} (status / deps / doctor / restart)` };
   }
 }
 
