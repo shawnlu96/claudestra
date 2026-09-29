@@ -18,7 +18,7 @@ import { makeInboundHandler } from "../src/bridge/relay-inbound.ts";
 import { setRequestContext } from "../src/bridge/request-context.ts";
 import { keyFingerprint, signedHeaders } from "../src/lib/instance-key.ts";
 import { STATE_DIR } from "../src/lib/paths.ts";
-import { leakedIn, mark, relayBytes } from "./relay-leak-test-helpers.ts";
+import { leakedIn, mark, relayBytes, relayView } from "./relay-leak-test-helpers.ts";
 import { localE2e, pinPeerE2eKey, readHttpPeers, RELAY_PAGE_INVITE_WARNING, type LocalE2e } from "../src/lib/peer-e2e-local.ts";
 import { createE2eOutbound } from "../src/lib/peer-e2e-outbound.ts";
 import { openRedeemRequest, readRedeemResponse, sealRedeemRequest, sealRedeemResponse, type SealedRedeem } from "../src/lib/peer-e2e-redeem.ts";
@@ -82,7 +82,11 @@ const PEER = mark("a").slice(0, 24);
 
 async function send(w: Wire): Promise<Response> {
   seen.push(...relayBytes(w.url, w.headers, w.body));
-  if (!w.url.startsWith("relay://")) return fetch(w.url, { method: w.method, headers: w.headers, ...(w.body.length ? { body: w.body } : {}) });
+  if (!w.url.startsWith("relay://")) {
+    const res = await fetch(w.url, { method: w.method, headers: w.headers, ...(w.body.length ? { body: w.body } : {}) });
+    seen.push(...(await relayView(res)));
+    return res;
+  }
   const u = new URL(w.url);
   const r = await a.request(u.hostname, { method: w.method, path: u.pathname + u.search, headers: w.headers, body: w.body.length ? w.body : null }, { timeoutMs: 5000 });
   const res = new Response(NULL_BODY_STATUS.has(r.status) ? null : r.body, { status: r.status, headers: recordToHeaders(r.headers) });
