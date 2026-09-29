@@ -59,7 +59,7 @@ export function onAbortAck(msg: { id?: unknown; result?: unknown; voided?: unkno
   w.done = undefined;
   const ids = Array.isArray(msg.voided) ? [...new Set(msg.voided.filter((x): x is string => typeof x === "string"))] : [];
   // 先回显再放行：放行之后停字那条会 record() 一条 cut、清掉「这一回合送到了哪些」，就查不到发送方了
-  if (ids.length) settleVoided(w.channelId, ids, w.at);
+  if (ids.length) void settleVoided(w.channelId, ids, w.at);
   if (!done) return; // 迟到的回执：只补回显
   lastAbort.set(w.channelId, { result: msg.result === "aborted" ? "aborted" : "idle", inEditor: Number(msg.inEditor) || 0 });
   done(msg.result === "aborted" ? "aborted" : "idle");
@@ -156,21 +156,28 @@ export function voidedEchoTo(t: TurnTrigger): { kind: "user" | "api" | "local"; 
 type Notice = { text(agent: string, t: TurnTrigger, toSender: boolean): string; what: string };
 const piVoided: Notice = { text: (agent, t, toSender) => voidedNotice(agent, [t], toSender), what: "停之前 steer 进去、还没执行的" };
 
-/** 作废的消息：先销账（找不到发送方的也按 id 销），再逐条告诉发送方。返回真告诉到（发出或押进队列）的条数 */
-function settleVoided(channelId: string, ids: readonly string[], abortAt: number, notice: Notice = piVoided): number {
+/** 作废的消息：先销账（找不到发送方的也按 id 销），再逐条告诉发送方。发送方的查找同步做完（调用方随后会清送达记录）；返回真告诉到的条数 */
+function settleVoided(channelId: string, ids: readonly string[], abortAt: number, notice: Notice = piVoided): Promise<number> {
   const found = ids.map((id) => turnCuts.deliveredMessage(channelId, id)).filter((t): t is NonNullable<typeof t> => !!t);
-  if (!echo) return 0;
+  if (!echo) return Promise.resolve(0);
   const agentOf = new Map(found.filter((t) => t.fromKind === "local" && t.replyTo).map((t) => [t.messageId, t.replyTo]));
   const voided = ids.map((messageId) => ({ messageId, agentChannel: agentOf.get(messageId) }));
   const n = dropVoidedPendings(echo.books(), channelId, voided, abortAt);
   if (n) console.log(`⏹ 作废的 ${ids.length} 条消息从补答账 / 看门狗销掉 ${n} 条`);
-  return found.length ? echoVoided(echo, channelId, found, notice) : 0;
+  return found.length ? echoVoided(echo, channelId, found, notice) : Promise.resolve(0);
 }
 
-/** 返回告诉到的条数：发送方 agent 不在线的押进队列也算（T52 复审 #204 P2：删了回程却没告诉，还报 settled=1，channel-server 就不兜底） */
-function echoVoided(d: EchoDeps, channelId: string, found: readonly (TurnTrigger & { agent?: string })[], notice: Notice): number {
+/** deliver 的结果是不是没送到（错误 / 丢弃）；测试替身返回 undefined 算送到 */
+const notSent = (r: unknown): boolean => ["error", "dropped"].includes(String((r as { outcome?: { kind?: string } } | undefined)?.outcome?.kind));
+
+/**
+ * 逐条回显，等投递结果再数：送到了，或者发给本机 agent 的押进了押后队列（落盘，它连回来 / 空闲时按频道取最新连接投）才算告诉到。
+ * 本机 agent 不在线、投递报错 / 被丢 / 抛错都押进队列；API / 用户没有队列，没送到就不算——settled 少报，channel-server 自己兜底说
+ * （T52 复审 #204 P2：删了回程却没告诉，还报 settled=1）
+ */
+async function echoVoided(d: EchoDeps, channelId: string, found: readonly (TurnTrigger & { agent?: string })[], notice: Notice): Promise<number> {
   const agent = found.find((t) => t.agent)?.agent ?? "这个 agent";
-  let sent = 0;
+  const jobs: Promise<boolean>[] = [];
   for (const t of found) {
     const dest = voidedEchoTo(t);
     let to: Endpoint | undefined;
@@ -184,37 +191,40 @@ function echoVoided(d: EchoDeps, channelId: string, found: readonly (TurnTrigger
     const from: Endpoint = to.kind === "api" ? { kind: "local", channelId, agentName: agent, ws: socketOf(channelId) as ServerWebSocket<unknown> } : { kind: "bridge", label: "pi-abort" };
     const meta = { messageId: newMessageId("voided"), triggerKind: "bridge_synth" as const, ts: new Date().toISOString(), threadId: newThreadId(), inReplyTo: t.messageId };
     const env: Envelope = { from, to, intent: "response", content: text, meta: to.kind === "local" ? { ...meta, waitForIdle: true } : meta };
-    if (to.kind === "local" && !ws) d.hold(env); // 不在线：押着等它连回来，不当场丢
-    else void d.deliver(env).catch((e: Error) => console.error(`⚠️ 作废回显发给 ${t.fromName} 失败: ${e.message}`));
+    const local = to.kind === "local" ? to : null;
+    const hold = () => (local ? (d.hold({ ...env, to: { ...local, ws: undefined as never } }), true) : false);
+    if (local && !ws) { jobs.push(Promise.resolve(hold())); continue; }
+    jobs.push(d.deliver(env).then((r) => !notSent(r) || hold(), (e: Error) => (console.error(`⚠️ 作废回显发给 ${t.fromName} 失败: ${e.message}`), hold())));
     if (to.kind === "user") emitEvent({ agent, chatId: to.channelId, type: "chat_message", data: { direction: "out", from: "bridge", text, notice: true } });
-    sent++;
   }
-  console.log(`⏹ ${agent}：${notice.what} ${found.length} 条已作废，告诉了发送方 ${sent} 条${sent < found.length ? `（${found.length - sent} 条是 bridge 通知，没有回信地址）` : ""}`);
-  return sent;
+  const told = (await Promise.all(jobs)).filter(Boolean).length;
+  console.log(`⏹ ${agent}：${notice.what} ${found.length} 条已作废，告诉了发送方 ${told} 条${told < found.length ? `（${found.length - told} 条没告诉到：bridge 通知没有回信地址 / 送不到）` : ""}`);
+  return told;
 }
 
 /**
  * Codex 投递失败（channel-server 的 codex_undelivered：不在线 / 认不准线程 / codex queue 报错）：消息没进 Codex，不会有回合、也不会有 hook。
  * 走和 Pi 作废消息同一套——只了结这一条（按 messageId 销补答账、回程槽，回信地址收到一条带 inReplyTo 的 response，API / peer 的等待拿到这句），
  * 不补整轮的 StopFailure：同一个 agent 可能正在跑上一条，整轮收尾会把它的等待、状态一起结掉（T52 He 审 #204 P1）。
- * 上次回合结束之后没有别的送达（turnCuts 按代记，不看展示用的历史）才把状态收成 done，不发完成通知（P2：先报失败又报完成）。返回 settled = 告诉了几条发送方，0 = channel-server 自己兜底说。
+ * 只有它是空闲时投的最后一条（turnCuts.dropUndelivered）才把状态收成 done，拿不准就不动；不发完成通知（P2：先报失败又报完成）。返回 settled = 告诉了几条发送方，0 = channel-server 自己兜底说。
  */
-export function onCodexUndelivered(
+export async function onCodexUndelivered(
   msg: { requestId?: unknown; channelId?: unknown; messageId?: unknown; reason?: unknown }, ws: Socket, own: boolean,
   d: { stopTyping(channelId: string): void; clearSafetyTimer(channelId: string): void },
-): void {
+): Promise<void> {
   const channelId = typeof msg.channelId === "string" ? msg.channelId : "";
   const messageId = typeof msg.messageId === "string" ? msg.messageId : "";
   const reason = typeof msg.reason === "string" && msg.reason.trim() ? msg.reason.trim().slice(0, 400) : "⚠️ 消息没能投进 Codex";
   let settled = 0;
   if (own && channelId && messageId) {
     const agent = turnCuts.deliveredMessage(channelId, messageId)?.agent ?? turnCuts.agentOn(channelId);
-    settled = settleVoided(channelId, [messageId], Date.now(), { text: () => reason, what: "没投进 Codex 的" });
-    if (turnCuts.dropUndelivered(channelId, messageId) === 0 && agent) {
+    const told = settleVoided(channelId, [messageId], Date.now(), { text: () => reason, what: "没投进 Codex 的" }); // 先查发送方，再清送达记录
+    if (turnCuts.dropUndelivered(channelId, messageId) && agent) {
       emitEvent({ agent, chatId: channelId, type: "agent_status", data: { status: "done", trigger: "undelivered" } });
       d.stopTyping(channelId);
       d.clearSafetyTimer(channelId);
     }
+    settled = await told;
   }
   ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, result: { settled } }));
 }
