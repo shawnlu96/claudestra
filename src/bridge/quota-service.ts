@@ -16,7 +16,8 @@ import {
   confirmCredential, defaultCredDeps, hmacHex, peekAccountKey, readClaudeCredential, readCodexCredential, type QuotaProvider,
 } from "../lib/quota-credentials.js";
 import { selectQuotaLayers, type LayerInput, type ProviderEntry, type QuotaSnapshot } from "../lib/quota-layers.js";
-import { piProviderEntries } from "../lib/quota-pi.js";
+import { mergePiEntries, piProviderEntries } from "../lib/quota-pi.js";
+import { piPlanEntries } from "../lib/quota-pi-plans.js";
 import { QuotaScheduler, type RefreshResult } from "../lib/quota-scheduler.js";
 import { fileQuotaStore } from "../lib/quota-state.js";
 import { readUsageCacheStale } from "../lib/usage-cache.js";
@@ -43,7 +44,8 @@ export interface QuotaServiceDeps {
   makeScheduler(isEnabled: () => boolean): SchedulerApi;
   readEnabled(): boolean;
   writeEnabled(v: boolean): Promise<void>;
-  local(): Promise<{ claudeCache: LayerInput["local"]["claudeCache"]; codexRollout: LayerInput["local"]["codexRollout"]; extra: ProviderEntry[] }>;
+  /** live = 实时读取开着：Pi 接入商的套餐 / 余额也只在这时去查（lib/quota-pi-plans.ts） */
+  local(live: boolean): Promise<{ claudeCache: LayerInput["local"]["claudeCache"]; codexRollout: LayerInput["local"]["codexRollout"]; extra: ProviderEntry[] }>;
   /** 每个 tick 之后跑一次提醒（quota-reminders.ts）；开关关着时不跑 */
   afterTick(scheduler: SchedulerApi): Promise<void>;
   setTimer(fn: () => void, ms: number): unknown;
@@ -110,7 +112,7 @@ export function createQuotaService(d: QuotaServiceDeps) {
     }
     const [remote, local, health] = await Promise.all([
       enabled ? scheduler.view() : Promise.resolve(null),
-      d.local(),
+      d.local(enabled),
       enabled ? scheduler.health() : Promise.resolve({}),
     ]);
     const now = d.now();
@@ -209,13 +211,14 @@ function productionScheduler(isEnabled: () => boolean): QuotaScheduler {
   });
 }
 
-async function productionLocal() {
-  const [rollout, machine] = await Promise.all([
+async function productionLocal(live: boolean) {
+  const [rollout, machine, plans] = await Promise.all([
     withCodexQuota({ agents: [] }).then((s) => s.quotas[0] ?? null),
     machineUsage(currentUsageWindow()),
+    live ? piPlanEntries({ fetch: (url, init) => fetch(url, init), now: Date.now }) : Promise.resolve([]),
   ]);
   const m = machine && !("unavailable" in machine) ? machine : null;
-  return { claudeCache: readUsageCacheStale(), codexRollout: rollout, extra: piProviderEntries(m) };
+  return { claudeCache: readUsageCacheStale(), codexRollout: rollout, extra: mergePiEntries(plans, piProviderEntries(m)) };
 }
 
 let service: QuotaService | null = null;

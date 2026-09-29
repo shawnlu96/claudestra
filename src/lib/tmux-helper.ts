@@ -157,18 +157,17 @@ export async function setWindowOption(target: string, option: string, value: str
   }
 }
 
+/** 大总管窗口按 index 0 认（它的不变式），不按名字：窗口名会被改掉（rename、allow-rename），master:=master 就抓不到它 */
+export const MASTER_WINDOW_TARGET = `${MASTER_SESSION}:0`;
+
 /** `master:=agent-xxx`：`=` 精确匹配，否则窗口不在时 tmux 按前缀落到 agent-xxxbar。⚠ display-message 例外：窗口不在时不报错、退回当前窗口，要核存在用 list-panes */
 export function windowTarget(name: string): string {
   return `${MASTER_SESSION}:=${name}`;
 }
 
-/** 发送文本到窗口（literal 模式 + 单独的 Enter） */
 /**
- * v2.21.1+ copy-mode 逃逸(peer 2026-08-30 实证的最阴险静默失败):pane 一旦进
- * copy-mode(web 终端滚轮/手动翻屏都能触发),**所有 send-keys 被 tmux 自己的
- * 键绑定吃掉**,一个字符也到不了 Claude Code——而 send-keys 照样成功返回、
- * capture-pane 照常有内容、日志里还有一行漂亮的 "triggered",所有常规判据全绿。
- * 注入前查 #{pane_in_mode},在模式里就先 -X cancel。返回是否做了取消。
+ * copy-mode 逃逸：pane 进了 copy-mode（web 终端滚轮 / 手动翻屏），所有 send-keys 被 tmux 自己的键绑定吃掉，一个字也到不了 CC，
+ * send-keys 却照样成功返回，常规判据全绿。注入前查 #{pane_in_mode}，在模式里先 -X cancel。返回是否做了取消。
  */
 export async function ensurePaneInteractive(target: string): Promise<boolean> {
   try {
@@ -182,7 +181,7 @@ export async function ensurePaneInteractive(target: string): Promise<boolean> {
   return false;
 }
 
-/** strict：文字没发出去（如超过 tmux 单条命令约 16KB 上限）就抛、不补回车——启动命令用，免得等满就绪超时；其余注入路径照旧吞错 */
+/** 发送文本到窗口（literal + 单独的 Enter）。strict：文字没发出去（如超过 tmux 单条命令约 16KB 上限）就抛、不补回车——启动命令用，免得等满就绪超时；其余注入路径照旧吞错 */
 export async function tmuxSendLine(target: string, text: string, delayMs = 100, strict = false): Promise<void> {
   // copy-mode 守卫:见 ensurePaneInteractive——共享层一次加,所有命令注入路径
   // (save-compact / /model / slash 透传 / cron 指令…)全部受益

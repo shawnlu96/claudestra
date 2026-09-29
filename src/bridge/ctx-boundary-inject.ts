@@ -8,7 +8,7 @@
 import { isMasterAgent } from "../lib/registry.js";
 import { statePath } from "../lib/paths.js";
 import { readJsonStateSync } from "../lib/state-file.js";
-import { MASTER_WINDOW_NAME, tmuxRawStrict, windowKey } from "../lib/tmux-helper.js";
+import { MASTER_WINDOW_NAME, MASTER_WINDOW_TARGET, tmuxRawStrict, windowKey, windowTarget } from "../lib/tmux-helper.js";
 import { paneLooksWorking, paneShowsApiRetry } from "../lib/turn-state.js";
 import { wallWaitKind } from "../lib/quota-wall-text.js";
 import { effectiveAction, normalizeCompactKeep, type CompactAction, type CompactKeep } from "../lib/ctx-boundary-policy.js";
@@ -43,6 +43,9 @@ export interface InjectTarget {
 export function agentWindowName(name: string): string {
   return isMasterAgent(name) ? MASTER_WINDOW_NAME : name;
 }
+
+/** 注入 / 抓屏目标：大总管走 window 0（窗口名不一定还叫 master），其余按窗口名精确匹配 */
+export const agentTarget = (name: string): string => (isMasterAgent(name) ? MASTER_WINDOW_TARGET : windowTarget(name));
 
 /** 一次抓屏：`capture-pane -p -e`（esc 给画面判定，plain 是去色后的），加 tmux 报的 copy-mode、前台进程名和窗格宽高 */
 export interface PaneCapture {
