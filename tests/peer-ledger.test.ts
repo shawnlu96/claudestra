@@ -4,8 +4,9 @@
  */
 import type { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { closeLedger, getTask, openLedger } from "../src/lib/ledger-store.js";
-import { canTransition, delegatePeerOf, roleOf } from "../src/lib/ledger-stages.js";
+import { closeLedger, getTask, listEvents, openLedger } from "../src/lib/ledger-store.js";
+import { canTransition, delegatePeerOf, roleOf, type LedgerTask } from "../src/lib/ledger-stages.js";
+import { derivedSteps } from "../src/lib/ledger-steps.js";
 import { appendEvent, createTask, deliver, moveStage, setMeta, setTask } from "../src/lib/ledger-write.js";
 import { parsePeerOp, peerLinks, peerOpDenied, peerTaskDetail, peerTasks } from "../src/lib/peer-ledger.js";
 import { runLedger } from "../src/manager/ledger.js";
@@ -95,13 +96,16 @@ describe("请求解析与操作判定", () => {
     expect(typeof parsePeerOp({ op: "review", verdict: "ok", p0: 0, p1: 0, p2: 0 })).toBe("string");
     expect(typeof parsePeerOp({ op: "delete" })).toBe("string");
   });
-  test("审查方只能记审查和 note；执行方只在 build / fix 挂 PR", () => {
-    const at = (stage: string) => ({ stage: stage as any });
-    expect(peerOpDenied({ op: "review", verdict: "pass", p0: 0, p1: 0, p2: 0 }, at("review"), ["delegate"])).not.toBeNull();
-    expect(peerOpDenied({ op: "stage", from: "build", to: "review" }, at("build"), ["reviewer"])).not.toBeNull();
-    expect(peerOpDenied({ op: "note", text: "x" }, at("build"), ["reviewer"])).toBeNull();
-    for (const s of ["build", "fix"]) expect(peerOpDenied({ op: "pr", rev: 1, pr: "#2" }, at(s), ["delegate"])).toBeNull();
-    for (const s of ["spec", "restate", "review", "merge", "blocked"]) expect(peerOpDenied({ op: "pr", rev: 1, pr: "#2" }, at(s), ["delegate"])).not.toBeNull();
+  test("老卡（按 extra 推的步骤）：审查方只能记审查和 note；执行方只在 build / fix 挂 PR", () => {
+    const card = (stage: string) => ({ id: "T1", stage, stageBefore: null, round: 0, agent: null, assignee: null, assigneeKind: null, createdAt: 1, updatedAt: 1,
+      extra: { delegate: "agent-d@A", reviewer: "agent-r@B" } }) as unknown as LedgerTask;
+    const deny = (op: Parameters<typeof peerOpDenied>[0], stage: string, peer: string) => peerOpDenied(op, card(stage), derivedSteps(card(stage)), peer);
+    expect(deny({ op: "review", verdict: "pass", p0: 0, p1: 0, p2: 0 }, "review", "A")).not.toBeNull();
+    expect(deny({ op: "review", verdict: "pass", p0: 0, p1: 0, p2: 0 }, "review", "B")).toBeNull();
+    expect(deny({ op: "stage", from: "build", to: "review" }, "build", "B")).not.toBeNull();
+    expect(deny({ op: "note", text: "x" }, "build", "B")).toBeNull();
+    for (const s of ["build", "fix"]) expect(deny({ op: "pr", rev: 1, pr: "#2" }, s, "A")).toBeNull();
+    for (const s of ["spec", "restate", "review", "merge", "blocked"]) expect(deny({ op: "pr", rev: 1, pr: "#2" }, s, "A")).not.toBeNull();
   });
 });
 
@@ -117,7 +121,8 @@ describe("ledger peer-write", () => {
     const rev = getTask(db, "T46")!.rev;
     const pr = await write("owner", "T46", { op: "pr", rev, pr: "https://github.com/shawnlu96/claudestra/pull/200", head: "df77a244" });
     expect(pr).toMatchObject({ ok: true, task: { pr: "https://github.com/shawnlu96/claudestra/pull/200", headSHA: "df77a244" } });
-    expect(pr.event.actor).toBe("peer:Shawn");
+    expect(pr.event.mine).toBe(true); // 回给 peer 的事件过白名单（不带 actor）；库里的 actor 记 peer:<名>
+    expect(listEvents(db, { project: P, target: "T46" }).at(-1)!.actor).toBe("peer:Shawn");
     expect((await write("owner", "T46", { op: "pr", rev, pr: "#3" })).code).toBe("conflict");
     expect((await write("owner", "T46", { op: "pr", rev: rev + 1, pr: "not-a-pr" })).code).toBe("invalid");
     expect((await write("owner", "T46", { op: "stage", from: "build", to: "review" })).ok).toBe(true);

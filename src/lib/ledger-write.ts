@@ -38,6 +38,7 @@ import { canTransition, nextTaskState, roleOf, TERMINAL_STAGES, type EventKind, 
 import { checksAllClear } from "./ledger-probes.js";
 import { getItem, getMeta, LedgerError, type LedgerMeta } from "./ledger-store.js";
 import { insertEvent, replay, tx } from "./ledger-tx.js";
+import { activeStepFor, checkReviewHead, checkReviewStep, noteStepDelivered, noteStepReview } from "./ledger-steps-write.js";
 
 export type { AppendableKind, ImportTaskInput, NewItem, NewTask, ReviewInput, StageMove, WriteCtx, WriteResult };
 
@@ -154,6 +155,7 @@ export function setTask(db: Database, ctx: WriteCtx, input: { id: string; rev: n
     const people = ["agent", "assigneeKind", "assignee", "pm"].filter((k) => k in patch);
     if (people.length && !isManager(db, ctx.actor, cur)) throw new LedgerError("forbidden", `只有 PM / master / owner 能改任务 ${cur.id} 的 ${people.join(" / ")}`);
     if ("itemId" in patch) checkItemRef(db, cur.project, patch.itemId);
+    checkReviewHead(cur, patch.headSHA);
     const full = { ...patch, ...resolveAssignee(cur, patch) };
     const rev = updateTask(db, ctx, cur, full);
     const event = insertEvent(db, ctx, { ...key, data: { op: "set", patch: full, rev } }, true);
@@ -186,12 +188,13 @@ export function applyMove(
   if (task.stage !== move.from) {
     throw new LedgerError("conflict", `任务 ${task.id} 当前阶段是 ${task.stage}，不是 ${move.from}`, { stage: task.stage, rev: task.rev });
   }
-  const role = asRole ?? roleOf(ctx.actor, task, getMeta(db, task.project).pms);
+  const role = asRole ?? roleOf(ctx.actor, task, getMeta(db, task.project).pms, activeStepFor(db, task));
   if (!role) throw new LedgerError("forbidden", `${ctx.actor} 不是任务 ${task.id} 的执行者，也不在项目 ${task.project} 的 PM 名单里`);
   const check = canTransition(task, move.to, role);
   if (!check.ok) throw new LedgerError(check.code === "forbidden" ? "forbidden" : "invalid", check.reason, { stage: task.stage });
   const next = nextTaskState(task, move.to);
   updateTask(db, ctx, task, next);
+  noteStepDelivered(db, ctx, task, move.to, move.model);
   const data = { from: task.stage, to: move.to, round: next.round, specRev: next.specRev, ...(next.stageBefore ? { stageBefore: next.stageBefore } : {}) };
   const event = insertEvent(db, ctx, { project: task.project, target: task.id, kind: "stage", text, data }, primary);
   return { task: mustTask(db, task.id), event };
@@ -222,12 +225,13 @@ export function deliver(
     const dup = replay(db, ctx, { project: task.project, target: task.id, kind: "deliver" }, () => task);
     if (dup) return dup;
     if (TERMINAL_STAGES.includes(task.stage)) throw new LedgerError("invalid", `任务 ${task.id} 已是终态 ${task.stage}，不能再交付`, { stage: task.stage });
-    // 先推阶段再记交付：deliver 记的 round 与同一轮的 review 事件一致（推之前记会差一位）
-    if (input.moveFrom) task = applyMove(db, ctx, task, { from: input.moveFrom, to: "review" }, false).task;
+    // 先换 head 再推阶段（那一步记的交付 head 要是新的，ledger-steps-write.ts），再记交付：deliver 的 round 与同一轮的 review 事件一致
     if (input.headSHA) {
+      checkReviewHead(task, input.headSHA);
       updateTask(db, ctx, task, { headSHA: input.headSHA });
       task = mustTask(db, task.id);
     }
+    if (input.moveFrom) task = applyMove(db, ctx, task, { from: input.moveFrom, to: "review" }, false).task;
     const data = { round: task.round, headSHA: input.headSHA ?? null, evidence: input.evidence ?? null };
     const event = insertEvent(db, ctx, { project: task.project, target: task.id, kind: "deliver", text: input.text, data }, true);
     return { row: task, event, duplicate: false };
@@ -240,9 +244,11 @@ export function recordReview(db: Database, ctx: WriteCtx, input: ReviewInput): W
     const dup = replay(db, ctx, { project: task.project, target: task.id, kind: "review" }, () => task);
     if (dup) return dup;
     checkReview(input, task);
+    const rc = checkReviewStep(db, task, input.reviewer);
     const { taskId: _t, text, move: _m, ...rest } = input;
-    const data = { round: task.round, ...rest, path: input.path ?? null };
+    const data = { round: task.round, ...rest, path: input.path ?? null, ...(rc.explicit ? { author: rc.author, authorCheck: rc.authorCheck } : {}) };
     const event = insertEvent(db, ctx, { project: task.project, target: task.id, kind: "review", text, data }, true);
+    noteStepReview(db, ctx, rc, input.verdict, input.model);
     if (input.move) task = applyMove(db, ctx, task, input.move, false).task;
     return { row: task, event, duplicate: false };
   });

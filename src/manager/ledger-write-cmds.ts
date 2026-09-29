@@ -168,8 +168,9 @@ const shipped = (t: LedgerTask) => SHIPPED.includes(workStage(t));
 function checkShippedHead(task: LedgerTask, head: string | undefined): void {
   if (!shipped(task) || head === undefined || head === task.headSHA) return;
   const at = task.stage === "blocked" ? `blocked（之前在 ${task.stageBefore}）` : task.stage;
-  const how = workStage(task) === "merge" ? `（stage --from ${task.stage} --to review）` : "";
-  throw new LedgerError("conflict", `任务 ${task.id} 已在 ${at}，head ${head} 跟台账的 ${task.headSHA ?? "（空）"} 不一样：先由 PM 退回 review${how}，再交付、派审`);
+  // 退回 review 换不了 head（ledger-steps-write.ts checkReviewHead），要退到 fix 再带 --from fix 交付；blocked(merge) 只能先回 review
+  const how = task.stage === "blocked" ? `（stage --from blocked --to review，再 --from review --to fix）` : workStage(task) === "merge" ? `（stage --from merge --to fix）` : "";
+  throw new LedgerError("conflict", `任务 ${task.id} 已在 ${at}，head ${head} 跟台账的 ${task.headSHA ?? "（空）"} 不一样：先由 PM 退回 fix${how}，再 deliver --from fix --head ${head}、派审`);
 }
 
 /** 执行者只能改自己任务的这几项；标题、事项、规格、extra、执行者、PM 要 PM / master / owner */
