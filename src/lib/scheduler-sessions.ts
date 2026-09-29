@@ -4,6 +4,7 @@ import { isManager, mustTask, type WriteCtx } from "./ledger-checks.js";
 import { getIntent, getWorkflow, type AuthorFamily } from "./ledger-scheduler.js";
 import { getMeta, LedgerError } from "./ledger-store.js";
 import { insertEvent, tx } from "./ledger-tx.js";
+import { readRegistryAgentsSync } from "./registry.js";
 import type { WorkerRef } from "./scheduler-plan.js";
 
 export type SessionRole = "author" | "reviewer";
@@ -30,7 +31,7 @@ const field = (v: string, what: string, max = 200): string => {
   return t;
 };
 const mayWrite = (db: Database, ctx: WriteCtx, project: string): boolean =>
-  ctx.actor !== getMeta(db, project).team?.dispatcher && isManager(db, ctx.actor, { project, agent: null });
+  ctx.actor === "scheduler" || (ctx.actor !== getMeta(db, project).team?.dispatcher && isManager(db, ctx.actor, { project, agent: null }));
 
 export function getSchedulerSession(db: Database, taskId: string, role: SessionRole): SchedulerSession | null {
   if (!db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'scheduler_sessions'").get()) return null;
@@ -66,6 +67,8 @@ export interface BindSessionInput {
   sessionId: string;
   family: AuthorFamily;
   transport: SessionTransport;
+  /** Test injection only; production reads the canonical registry path inside the ledger write transaction. */
+  registryPath?: string;
 }
 
 /** A dispatched ensure_session intent is the only authority; unknown effects can bind after reconciliation. */
@@ -79,6 +82,12 @@ export function bindSchedulerSession(db: Database, ctx: WriteCtx, input: BindSes
     if (input.family !== "claude" && input.family !== "codex") throw new LedgerError("invalid", "模型家族不认识");
     if (input.transport !== "acp" && input.transport !== "tmux" && input.transport !== "peer") throw new LedgerError("invalid", "transport 不认识");
     const agent = field(input.agent, "agent"), sessionId = field(input.sessionId, "sessionId");
+    if (input.transport !== "peer") {
+      const local = readRegistryAgentsSync(input.registryPath).find((row) => row.name === agent);
+      const actualFamily = local?.runtime === "codex" ? "codex" :
+        local && (local.runtime === undefined || local.runtime === "claude-code") ? "claude" : null;
+      if (!actualFamily || actualFamily !== input.family) throw new LedgerError("invalid", "本机 session 模型家族与 registry runtime 不符");
+    }
     const prior = getSchedulerSession(db, task.id, input.role);
     if (prior) {
       if (prior.agent !== agent || prior.sessionId !== sessionId || prior.family !== input.family || prior.transport !== input.transport ||
@@ -104,9 +113,11 @@ export function bindSchedulerSession(db: Database, ctx: WriteCtx, input: BindSes
       if (String(e).includes("UNIQUE constraint failed")) throw new LedgerError("conflict", "session 已属于另一张卡");
       throw e;
     }
-    insertEvent(db, { actor: "scheduler", now, dedupKey: `scheduler:${input.intentId}:bind` }, {
+    insertEvent(db, { actor: ctx.actor, now, dedupKey: `scheduler:${input.intentId}:bind` }, {
       project: task.project, target: task.id, kind: "scheduler", text: `绑定 ${input.role} session`,
-      data: { op: "session_bind", role: input.role, agent, sessionId, family: input.family, transport: input.transport, intentId: input.intentId },
+      data: { op: "session_bind", role: input.role, agent, sessionId, family: input.family, transport: input.transport,
+        source: input.transport === "peer" ? "peer_claim" : "registry_runtime", intentId: input.intentId,
+        ...(ctx.actor === "scheduler" ? {} : { manual: true }) },
     }, true);
     return { session: getSchedulerSession(db, task.id, input.role) as SchedulerSession, duplicate: false };
   });
@@ -138,9 +149,10 @@ export function recordSessionRetirement(db: Database, ctx: WriteCtx, input: {
     const now = ctx.now ?? Date.now();
     db.prepare(`UPDATE scheduler_sessions SET ${col} = ?, retireIntentId = ?, state = ?, updatedAt = ? WHERE taskId = ? AND role = ?`)
       .run(receipt, input.intentId, col === "killReceipt" ? "retired" : "retiring", now, task.id, input.role);
-    insertEvent(db, { actor: "scheduler", now, dedupKey: `scheduler:${input.intentId}:${input.role}:${input.effect}` }, {
+    insertEvent(db, { actor: ctx.actor, now, dedupKey: `scheduler:${input.intentId}:${input.role}:${input.effect}` }, {
       project: task.project, target: task.id, kind: "scheduler", text: `${input.role} session ${input.effect} 已确认`,
-      data: { op: "session_retire", role: input.role, effect: input.effect, intentId: input.intentId, receipt },
+      data: { op: "session_retire", role: input.role, effect: input.effect, intentId: input.intentId, receipt,
+        ...(ctx.actor === "scheduler" ? {} : { manual: true }) },
     }, true);
     return getSchedulerSession(db, task.id, input.role) as SchedulerSession;
   });

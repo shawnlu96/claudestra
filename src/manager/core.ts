@@ -21,7 +21,7 @@ export const REGISTRY_PATH = STATE_REGISTRY_PATH;
 
 export interface AgentInfo {
   project: string;
-  kind?: "worker";
+  kind?: "worker" | "main";
   purpose: string;
   created: string;
   /** creating = create 的占位（pending.op=create），成功后被正式条目整条覆盖 */

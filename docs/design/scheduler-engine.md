@@ -86,8 +86,8 @@ auto 卡不再发旧的 deliver/review 指令，避免双派；`ledger-audit` �
 intent 给当前动作/排队与具体原因；ask 给等 owner；audit finding 给异常。API 提供同一事务版本的投影与 `asOfSeq`，避免节点已前进而边仍是旧快照。回放按事件 seq 重建投影，不用临时内存游标。审查分叉只从 review 事件和实际阶段推，边仍只画任务依赖，不画派单消息；
 派单/交付在团队区和时间轴显示。移动卡片或改变视图形态不在 T68。
 
-T69 在 registry 明确标 `kind: "worker"`，用一个 manager 创建/标记入口服务手动创建、每卡 reviewer、调度助理和引擎创建的 worker。历史迁移只对白名单证据（任务关联、角色、已知 `agent-task-*`）幂等补标，不能凭模糊名字隐藏 PM、主 agent、agent-codex 或
-master。会话 API 输出 kind，Web 侧栏/会话列表/搜索默认过滤 worker；直接 URL 与消息路由仍可访问。v4 DAG 节点和团队栏点击 worker 打开同一个会话，可看、插话、打断。待你处理的 ask 不经过该过滤，卡片点击照样进入 worker 会话。Discord 频道不变。UI PR 附前后截图，
+T69 在 registry 明确标 `kind: "worker"`，用一个 manager 创建/标记入口服务手动创建、每卡 reviewer、调度助理和引擎创建的 worker。历史迁移只认明确的执行/调度角色或 `agent-task-*` 名称；单独的 `--task` 标签和 parent 不足以隐藏长驻主 agent。`kind: "main"` 是 owner 可设的显式撤标覆盖，后续 registry 写入与迁移不得重新打回。
+master、PM、agent-codex 受保护。会话 API 输出 kind，Web 侧栏/会话列表/搜索默认过滤 worker，管理面板保留全部；直接 URL 与消息路由仍可访问。v4 DAG 节点和团队栏点击 worker 打开同一个会话，可看、插话、打断。待你处理的 ask 不经过该过滤，卡片点击照样进入 worker 会话。Discord 频道不变。UI PR 附前后截图，
 owner 截图 ask 属上线闸。
 
 ## 分期、验收与切换
@@ -121,5 +121,5 @@ owner 截图 ask 属上线闸。
 - PR B：写入 v2 数据模板与纯规划器；新卡执行/复述/审查/修复/合并/核证/退役的每一步输出稳定意图或明确等待原因。
   审查必须绑定本卡 reviewer session、完整 head 和先前派单；P1 同类计数、第三轮升级、P2 通知 PM 后继续、UI ask 绑定及旧结果失效已做分支测试。
   一次性 Codex 自查指出旧轮派单冒认新轮、并行活跃意图两个 P1，以及历史 P1 证据和截图摘要绑定两个 P2；规划器现要求本轮派单回执、等待任何未结意图，并逐轮校验交付 head/计数、绑定截图摘要。
-- PR C：registry 的唯一分类器在新建、保存与幂等迁移时标记 worker；会话列表、管理页和默认全文搜索过滤，v4 任务详情从台账 session 绑定直接打开作者或审查员，会话 store 与待你处理直达保留原路。审查 session 在 v8 台账里按卡和角色唯一绑定，跨模型校验并持有同卡复验身份；verified 后先归档回执再停止，未知结果可凭核对回执续走。沙箱 bridge 实测迁移两次为 1/0，API 正确下发 worker/PM/codex kind。
-  一次性 Codex 对抗自查找到四个 P2：归档后丢失 worker 标记、无 task.agent 的作者无法从 DAG 进入、绑定未核 intent 收件人、归档后停止前会话过早消失；均已修复并补测试。UI 截图仍待图形界面权限恢复后补入本 draft PR，不据此越过 owner 截图闸。
+- PR C：registry 的唯一分类器在新建、保存与幂等迁移时标记 worker；会话列表和默认全文搜索过滤，管理面板保留全部，v4 任务详情从台账 session 绑定直接打开作者或审查员，会话 store 与待你处理直达保留原路。审查 session 在 v8 台账里按卡和角色唯一绑定，跨模型校验并持有同卡复验身份；verified 后先归档回执再停止，未知结果可凭核对回执续走。沙箱 bridge 实测迁移两次为 1/0，API 正确下发 worker/PM/codex kind。
+  一次性 Codex 对抗自查找到四个 P2：归档后丢失 worker 标记、无 task.agent 的作者无法从 DAG 进入、绑定未核 intent 收件人、归档后停止前会话过早消失；均已修复并补测试。跨模型复审 r1 又要求本机 session 的家族核对 registry runtime，并让 owner 可撤误标、绑定时统一打标、管理面板可操作 worker。截图改走沙箱 headless 浏览器，不动 owner 屏幕。

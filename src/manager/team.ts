@@ -121,7 +121,7 @@ export function resolveTeamFields(agents: ParentMap, child: string, flags: TeamF
 export async function teamFieldsForCreate(child: string, flags: TeamFlags): Promise<TeamFields | null> {
   const r = resolveTeamFields((await loadRegistry()).agents, child, flags, { channelId: process.env.DISCORD_CHANNEL_ID });
   if ("error" in r) output({ ok: false, error: r.error });
-  return "error" in r ? null : { ...r, ...(workerKind(child, r, true) ? { kind: "worker" as const } : {}) };
+  return "error" in r ? null : { ...r, ...(workerKind(child, r) === "worker" ? { kind: "worker" as const } : {}) };
 }
 
 /**
@@ -192,9 +192,13 @@ export async function cmdTeamLink(args: string[]) {
 }
 
 /** Startup migration: only explicit evidence is tagged; repeat runs do not rewrite registry. */
-export async function cmdWorkerKindMigrate(): Promise<void> {
+export async function cmdWorkerKindMigrate(args: string[] = []): Promise<void> {
+  if (args.some((arg) => arg !== "--dry-run")) { output({ ok: false, error: "worker-kind-migrate [--dry-run]" }); return; }
   const reg = await loadRegistry();
+  const wouldTag = Object.entries(reg.agents).filter(([name, info]) => info.kind !== "worker" && workerKind(name, info) === "worker")
+    .map(([name]) => name);
+  if (args.includes("--dry-run")) { output({ ok: true, dryRun: true, wouldTag }); return; }
   const marked = markWorkerKinds(reg.agents);
   if (marked) await saveRegistry(reg);
-  output({ ok: true, marked });
+  output({ ok: true, marked, wouldTag });
 }

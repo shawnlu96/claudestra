@@ -6,6 +6,7 @@ import { LedgerError } from "../lib/ledger-store.js";
 import { intFlag } from "./ledger-identity.js";
 import type { LedgerCli } from "./ledger-context.js";
 import type { CommandSpec } from "./ledger-write-cmds.js";
+import { setWorkerKind } from "../lib/worker-kind.js";
 
 const integer = (c: LedgerCli, flag: string): number => {
   const n = intFlag(c.p, flag);
@@ -62,15 +63,24 @@ export const SCHEDULER_CMDS: Record<string, CommandSpec> = {
   "scheduler-session-bind": {
     valued: ["role", "intent", "agent", "session", "family", "transport"], bools: [],
     usage: "scheduler-session-bind <task> --role author|reviewer --intent <key> --agent <name> --session <id> --family claude|codex --transport acp|tmux|peer",
-    run(c) {
+    async run(c) {
       const role = c.need("role"), family = c.need("family"), transport = c.need("transport");
       if (!["author", "reviewer"].includes(role) || !AUTHOR_FAMILIES.includes(family as never) || !["acp", "tmux", "peer"].includes(transport)) {
         throw new LedgerError("invalid", "session 角色、模型家族或 transport 不认识");
       }
-      return { ok: true, ...bindSchedulerSession(c.db, c.ctx(), {
-        taskId: c.p.pos[1] ?? "", role: role as SessionRole, intentId: c.need("intent"), agent: c.need("agent"),
+      const agent = c.need("agent");
+      const bound = bindSchedulerSession(c.db, c.ctx(), {
+        taskId: c.p.pos[1] ?? "", role: role as SessionRole, intentId: c.need("intent"), agent,
         sessionId: c.need("session"), family: family as "claude" | "codex", transport: transport as SessionTransport,
-      }) };
+        registryPath: c.deps.registryPath,
+      });
+      if (transport !== "peer") {
+        const reg = await c.deps.loadRegistry();
+        const priorKind = reg.agents[agent]?.kind;
+        if (!setWorkerKind(reg.agents, agent, "worker")) throw new LedgerError("conflict", "本机 session 已绑定但 registry 中无可标记的 worker；重跑绑定以补标");
+        if (priorKind !== reg.agents[agent].kind) await c.deps.saveRegistry(reg);
+      }
+      return { ok: true, ...bound };
     },
   },
   "scheduler-session-retire": {

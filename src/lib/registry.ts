@@ -110,7 +110,7 @@ export interface RegistryAgent {
   /** tmux 名（registry key，"agent-xxx"） */
   name: string;
   /** T69: work sessions stay addressable but are hidden from the ordinary conversation roster. */
-  kind?: "worker";
+  kind?: "worker" | "main";
   status?: string;
   channelId?: string;
   sessionId?: string;
@@ -155,7 +155,7 @@ function normalizeEntries(agents: Record<string, unknown>): RegistryAgent[] {
     const str = (k: string) => (typeof a[k] === "string" ? (a[k] as string) : undefined);
     return {
       name,
-      kind: a.kind === "worker" ? "worker" : undefined,
+      kind: a.kind === "worker" || a.kind === "main" ? a.kind : undefined,
       status: str("status"),
       channelId: str("channelId"),
       sessionId: str("sessionId"),

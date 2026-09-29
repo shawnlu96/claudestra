@@ -50,7 +50,7 @@ export type UpdateHint =
 export interface AgentSession {
   /** agent 名，作为会话 id（大总管用保留名 __master__） */
   name: string;
-  kind?: "worker" | null;
+  kind?: "worker" | "main" | null;
   displayName: string;
   purpose: string;
   cwd: string;
@@ -101,7 +101,7 @@ export interface AgentSession {
 
 interface ApiAgent {
   name: string;
-  kind?: "worker" | null;
+  kind?: "worker" | "main" | null;
   status?: string;
   /** 工作目录（registry.cwd）：侧栏标「所在仓」用（features/chat/agent-repo.ts） */
   cwd?: string;
