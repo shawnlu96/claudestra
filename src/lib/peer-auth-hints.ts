@@ -3,6 +3,9 @@
  * 原则：按原因说清楚该谁做什么；签名类的问题重新握手（换 token）解决不了，不能说成「token 失效」。
  * 单测在 tests/peer-trust.test.ts。
  */
+import { E2eError, E2eLocalError, E2eOuterError } from "./peer-e2e-client.js";
+import type { RelayError } from "./relay-client-types.js";
+import { remoteCode } from "./remote-text.js";
 
 const SIG_HINTS: Record<string, string> = {
   replay: "这条请求被对方当成了重放（同一个签名用了两次）——不要原样重发，稍后重新发一条即可",
@@ -24,22 +27,35 @@ export function peerAuthHint(raw: unknown): string {
   const body = (raw && typeof raw === "object" ? raw : {}) as { code?: unknown; reason?: unknown; cause?: unknown };
   if (body.code === "rate_limited") return "对方限流：一分钟里请求太多——稍后再发";
   if (body.code !== "peer_signature") return "token 无效或已被对方 revoke——联系对方确认，或重新握手";
-  if (body.reason === "sig_rate_limited") return `一分钟里验签失败太多次，对方暂时限流（最近一次失败原因：${String(body.cause ?? "未知")}）——先按原因修好再发`;
-  return SIG_HINTS[String(body.reason)] ?? KEY_HINT;
+  if (body.reason === "sig_rate_limited") return `一分钟里验签失败太多次，对方暂时限流（最近一次失败原因：${typeof body.cause === "string" && Object.hasOwn(SIG_HINTS, body.cause) ? body.cause : "未知"}）——先按原因修好再发`;
+  const reason = String(body.reason);
+  return Object.hasOwn(SIG_HINTS, reason) ? SIG_HINTS[reason]! : KEY_HINT; // 只认本机的表，原型上的键不算
 }
 
 /**
- * 经中继的 peer 请求被对方的中继入站拒绝（bridge/relay-inbound.ts，经 bridge/relay-link.ts 变成 "relay <code>: <说明>" 的异常）：
- * 返回准确的一句；不是这类（真连不上、超时）返回 null，调用方照旧按网络问题说。
+ * 对方中继入站（bridge/relay-inbound.ts）拒绝验签时的说明原文。它经中继传回，中继能改，所以发起方只拿收到的说明跟这几条逐字比，
+ * 挑出本机的提示，说明本身从不展示（tests/peer-trust.test.ts）
  */
-export function relayRefusalHint(message: string): string | null {
-  const m = /^relay (\w+): (.*)$/s.exec(message);
-  if (!m) return null;
-  const [, code, detail] = m;
+export const RELAY_SIG_DETAIL = {
+  missing: "signature headers missing",
+  foreignKey: "signing key does not match sender",
+  stale: "timestamp outside ±300 s",
+  mismatch: "signature mismatch",
+  beforeStart: "signed before the receiver started: your clock is behind, sync it and resend",
+} as const;
+
+/** 超时类的中继错误：按 TimeoutError 抛，http-peer 据此说「可能已送达，别重发」 */
+const RELAY_TIMEOUT_CODES = new Set(["timeout", "local_timeout", "peer_disconnected", "connection_lost", "stream_idle"]);
+
+/**
+ * 经中继的 peer 请求被拒（对方中继入站或中继本身）时的准确一句；不是这类（真连不上、超时）返回 null，调用方照旧按网络问题说。
+ * 只看 code 与逐字比对的说明（RELAY_SIG_DETAIL），不把远端文字放进返回值
+ */
+export function relayRefusalHint(code: string, detail?: string): string | null {
   if (code === "bad_signature") {
-    if (/started/.test(detail!)) return SIG_HINTS.before_start!;
-    if (/300 s/.test(detail!)) return SIG_HINTS.stale!;
-    return /does not match sender|missing/.test(detail!) ? KEY_HINT : SIG_HINTS.bad!;
+    if (detail === RELAY_SIG_DETAIL.beforeStart) return SIG_HINTS.before_start!;
+    if (detail === RELAY_SIG_DETAIL.stale) return SIG_HINTS.stale!;
+    return detail === RELAY_SIG_DETAIL.missing || detail === RELAY_SIG_DETAIL.foreignKey ? KEY_HINT : SIG_HINTS.bad!;
   }
   if (code === "replay") return SIG_HINTS.replay!;
   if (code === "replay_full") return SIG_HINTS.full!;
@@ -47,13 +63,43 @@ export function relayRefusalHint(message: string): string | null {
   return null;
 }
 
-/** 发 peer 请求抛了异常（不是超时）时给调用方的话：中继入站的拒绝按原因说，其余才是连不上 */
-export function peerCallFailureText(label: string, message: string, peerName: string): string {
-  // 本机 E2E 出站封好超了上限就不发（lib/peer-e2e-client.ts）：不是网络问题，也确定没送到
-  if (message.startsWith("e2e_too_large:")) return `[⚠️ peer 调用失败] ${label} 没有发出：加密后超过对方的单条上限（2 MiB），消息没送到——缩短或拆成几条再发。`;
-  const refused = relayRefusalHint(message);
-  if (refused) return `[⚠️ peer 调用失败] ${label} 被对方拒绝（${message}）：${refused}。`;
-  return `[⚠️ peer 调用失败] ${label} 网络不可达：${message}。请确认对方实例在线（peer-http-test ${peerName}）。`;
+/** 经中继调用失败：只带清洗过的 code 与本机的提示（bridge/relay-link.ts、relay-routes.ts 造）；中继 / 对方给的说明文字只进日志 */
+export class RelayCallError extends Error {
+  readonly hint: string | null;
+  constructor(readonly code: string, remoteDetail?: string) {
+    super(`relay ${code}`);
+    this.name = RELAY_TIMEOUT_CODES.has(code) ? "TimeoutError" : "RelayCallError";
+    this.hint = relayRefusalHint(code, remoteDetail);
+  }
+}
+
+export const relayCallError = (e: RelayError): RelayCallError => new RelayCallError(remoteCode(e.code, "relay_error"), e.message);
+
+/** 这次失败按「超时 = 可能已送达」报吗：E2E 的错误另有自己的结局（看类型），不从它的文字里猜 */
+export function peerCallIsTimeout(e: unknown): boolean {
+  if (e instanceof E2eError) return false;
+  return (e as Error)?.name === "TimeoutError" || /timed?\s*out/i.test((e as Error)?.message || "");
+}
+
+/**
+ * 发 peer 请求抛了异常（不是超时）时给调用方 agent 的话：只用本机的固定模板，按失败来源（lib/peer-e2e-client.ts 三类、中继、本机网络）分。
+ * 投递结局只按本机知道的事实说：本机没发出 → 没送到；加密请求已发出却没拿到认证过的回执 → 状态未知，不许说「没送到」或「请重发」
+ */
+export function peerCallFailureText(label: string, e: unknown, peerName: string): string {
+  const online = `请确认对方实例在线（peer-http-test ${peerName}）`;
+  if (e instanceof E2eLocalError) {
+    if (e.code === "e2e_too_large") return `[⚠️ peer 调用失败] ${label} 没有发出：加密后超过对方的单条上限（2 MiB），消息没送到——缩短或拆成几条再发。`;
+    return `[⚠️ peer 调用失败] ${label} 没有发出：本机的端到端加密不可用（${e.code}），消息没送到。`;
+  }
+  if (e instanceof E2eOuterError) {
+    if (!e.sent) return `[⚠️ peer 调用失败] ${label} 没有发出：和对方建立加密会话失败，消息没送到。${online}。`;
+    return `[⚠️ peer 调用结果未知] ${label}：请求已加密发出，但没收到对方认证过的回执，可能已被处理——不要原样重发，稍后向对方确认。`;
+  }
+  if (e instanceof RelayCallError) {
+    if (e.hint) return `[⚠️ peer 调用失败] ${label} 经中继被对方拒绝（${e.code}）：${e.hint}。`;
+    return `[⚠️ peer 调用失败] ${label} 经中继没能送达（中继或对方给的原因未经认证，已记入日志）。${online}。`;
+  }
+  return `[⚠️ peer 调用失败] ${label} 网络不可达：${(e as Error)?.message ?? String(e)}。${online}。`;
 }
 
 /** 本机拒绝 peer 签名时写进 error 的说明：老版本的调用方只会原样显示 error（它不认 reason），所以要在这里说清楚不是 token 失效 */

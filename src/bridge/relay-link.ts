@@ -9,10 +9,11 @@
  */
 import { hostname } from "node:os";
 import { connect, RelayError, type RelayClient } from "../lib/relay-client.js";
-import { remoteCode, remoteDetail } from "../lib/remote-text.js";
+import { relayCallError } from "../lib/peer-auth-hints.js";
 import type { RelayLinkInfo } from "../lib/relay-client-types.js";
 import { instanceKeySync, signedHeaders } from "../lib/instance-key.js";
 import { createE2eOutbound, defaultOutboundDeps } from "../lib/peer-e2e-outbound.js";
+import { E2E_RESPONSE_WIRE_MAX } from "../lib/peer-e2e-wire.js";
 import { ensurePeerIngressPort, resolveWebPort } from "../lib/peer-ingress-config.js";
 import { configuredPeerIngressPort, DEFAULT_BRIDGE_PORT } from "../lib/bridge-url.js";
 import { bridgeHttpBase, bridgePortOf } from "../lib/bridge-port.js";
@@ -118,17 +119,14 @@ export interface PeerFetchInit {
   signal?: AbortSignal;
 }
 
-/** 超时类的中继错误按 TimeoutError 抛：http-peer 的结局分类靠 name 认「可能已送达，别重发」 */
-const TIMEOUT_CODES = new Set(["timeout", "local_timeout", "peer_disconnected", "connection_lost", "stream_idle"]);
-
 /**
- * 这段话经 http-peer peerCallFailureText 进调用方 agent 的上下文；code 与说明都可能出自中继（error 帧、ws 关闭原因），
- * 在这一个出口统一清洗（lib/remote-text.ts），relayRefusalHint 认的几个说明（300 s、started…）清洗后照样在
+ * 中继报的错（error 帧、ws 关闭原因）code 与说明都可能出自中继：给调用方的只有清洗过的 code 与本机的提示（lib/peer-auth-hints.ts），
+ * 说明原文只进日志，并标明未经认证
  */
 function relayFetchError(e: unknown): Error {
   if (!(e instanceof RelayError)) return e instanceof Error ? e : new Error(String(e));
-  const err = new Error(`relay ${remoteCode(e.code, "relay_error")}: ${remoteDetail(e.message)}`);
-  if (TIMEOUT_CODES.has(e.code)) err.name = "TimeoutError";
+  const err = relayCallError(e);
+  console.warn(`⚠️ [relay] peer 调用失败 ${err.code}；未经认证的说明（只供排查）: ${JSON.stringify(String(e.message).slice(0, 200))}`);
   return err;
 }
 
@@ -158,7 +156,8 @@ async function rawPeerFetch(url: string, init: PeerFetchInit, opts: PeerFetchOpt
   const body = !init.body ? null : typeof init.body === "string" ? new TextEncoder().encode(init.body) : init.body;
   let r;
   try {
-    r = await client.request(u.hostname, { method: (init.method ?? "GET").toUpperCase(), path: u.pathname + u.search, headers, body }, { timeoutMs: opts.timeoutMs, signal: init.signal });
+    const limits = { timeoutMs: opts.timeoutMs, signal: init.signal, maxResponseBytes: E2E_RESPONSE_WIRE_MAX }; // 响应总量封顶：中继能灌无限的 data 帧
+    r = await client.request(u.hostname, { method: (init.method ?? "GET").toUpperCase(), path: u.pathname + u.search, headers, body }, limits);
   } catch (e) {
     throw relayFetchError(e);
   }

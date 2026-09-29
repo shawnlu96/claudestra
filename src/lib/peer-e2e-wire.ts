@@ -6,6 +6,7 @@
  * 会影响「请求从哪来」判定的头——那些只由外层连接决定（lib/request-context 由调用方从外层复制）。
  */
 import { fromB64url, toB64url } from "./e2e/encoding.js";
+import { RECORD_MAX } from "./e2e/records.js";
 
 export const PEER_E2E_LABEL = "cstra-peer-e2e-v1";
 /** 套件编号，记法同 HPKE：DHKEM(P-256) / HKDF-SHA256 / AES-256-GCM。换套件就换标签版本，所以它也绑进了 th */
@@ -19,6 +20,13 @@ export const E2E_SESSION_TTL_S = 24 * 3600;
  * （lib/peer-e2e-client.ts）——收方在上传途中早回 413，发方的 keep-alive 连接会卡住下一条
  */
 export const E2E_BODY_MAX = 2 * 1024 * 1024;
+/**
+ * 一个响应解开后的上限（发起方边收边验时数）：peer 能调的 API 只回 JSON（消息回执、线程轮询、agents 列表），没有文件或长流，
+ * 8 MiB 与 CLI 经中继代调的上限（bridge/relay-routes.ts MAX_CLI_RESPONSE）同一口径。将来开放文件下载要另定，别直接调大这里
+ */
+export const E2E_RESPONSE_MAX = 8 * 1024 * 1024;
+/** 同一个响应封成记录流后的上限（中继路径按它掐总量，bridge/relay-link.ts）：每条记录 ≤ 64 KiB 明文，外加 4 字节长度与 16 字节 tag */
+export const E2E_RESPONSE_WIRE_MAX = E2E_RESPONSE_MAX + (E2E_RESPONSE_MAX / RECORD_MAX + 2) * 20;
 
 const FP_RE = /^[0-9a-f]{4}(-[0-9a-f]{4}){3}$/;
 const RECORD_PATH_RE = /^\/api\/v1\/e2e\/([A-Za-z0-9_-]{22})\/([1-9]\d{0,16})$/;

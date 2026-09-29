@@ -12,7 +12,7 @@ import { newMessageId, newThreadId } from "./router.js";
 import { findHttpPeer, type HttpPeer } from "../lib/peers.js";
 import { handoffEnd, handoffStart } from "../lib/handoff-log.js";
 import { signedFor } from "../lib/instance-key.js";
-import { peerAuthHint, peerCallFailureText } from "../lib/peer-auth-hints.js";
+import { peerAuthHint, peerCallFailureText, peerCallIsTimeout } from "../lib/peer-auth-hints.js";
 import { recordMetric } from "../lib/metrics.js";
 import { startPeerPresence } from "./peer-presence.js";
 import { initPush } from "./push/init.js";
@@ -179,12 +179,12 @@ async function runCall(
     }, { fetchImpl: f, timeoutMs: postTimeoutMs }); // relay:// 的 peer 经中继（relay-link.ts），其余原样 fetch
   } catch (e) {
     // 结局分类：超时时消息多半已送达，统一说成「网络不可达」会诱发重复投递；中继入站的拒绝按原因说（lib/peer-auth-hints.ts）
-    const isTimeout = (e as Error).name === "TimeoutError" || /timed?\s*out/i.test((e as Error).message || "");
+    const isTimeout = peerCallIsTimeout(e);
     await pushToCaller(
       caller,
       isTimeout
         ? `[⚠️ peer 调用超时] ${label} 在 ${Math.round(postTimeoutMs / 1000)}s 内没返回回执。消息**可能已送达**但未取得回执线程,回复无法自动取回——不要立刻重发,对方在线的话稍后重问一次即可。`
-        : peerCallFailureText(label, (e as Error).message, peer.name),
+        : peerCallFailureText(label, e, peer.name),
       peer, peerAgentName, false, callId,
     );
     settle(callId, caller, "http_peer_out_error", { peer: peer.name, kind: isTimeout ? "post_timeout" : "network" });

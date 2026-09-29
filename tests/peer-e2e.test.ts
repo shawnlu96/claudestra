@@ -9,7 +9,8 @@ import { respond } from "../src/lib/e2e/handshake.ts";
 import { generateEcdh } from "../src/lib/e2e/primitives.ts";
 import { signE2eKey, type MachineE2eKey, type SignedE2eKey } from "../src/lib/e2e-machine-key.ts";
 import { keyFingerprint, SIG_HEADERS, signedHeaders, verifySigned, type InstanceKey } from "../src/lib/instance-key.ts";
-import { E2eError, PeerE2eClient } from "../src/lib/peer-e2e-client.ts";
+import { E2eError, E2eInnerError, E2eLocalError, E2eOuterError, PeerE2eClient } from "../src/lib/peer-e2e-client.ts";
+import { peerCallFailureText } from "../src/lib/peer-auth-hints.ts";
 import { serveE2e, type E2ePeer, type ServeDeps } from "../src/lib/peer-e2e-serve.ts";
 import { SessionTable } from "../src/lib/peer-e2e-sessions.ts";
 import { encodeHelloReply, PEER_E2E_LABEL } from "../src/lib/peer-e2e-wire.ts";
@@ -58,7 +59,7 @@ function router() {
 
 type Relay = (req: Request, forward: (r: Request) => Promise<Response>) => Promise<Response>;
 
-async function world(opts: { relay?: Relay; limits?: ConstructorParameters<typeof SessionTable>[0]; now?: () => number } = {}) {
+async function world(opts: { relay?: Relay; limits?: ConstructorParameters<typeof SessionTable>[0]; now?: () => number; idleMs?: number } = {}) {
   const a = await machine(), b = await machine();
   const r = router();
   let bKnowsA: E2ePeer | null = asPeer(a, "a");
@@ -96,6 +97,7 @@ async function world(opts: { relay?: Relay; limits?: ConstructorParameters<typeo
       return opts.relay ? opts.relay(req, toB) : toB(req);
     },
     ...(opts.now ? { now: opts.now } : {}),
+    ...(opts.idleMs ? { idleMs: opts.idleMs } : {}),
   });
   /** 模拟调用方：内层带 Bearer、一个每次唯一的内层签名和签名时刻（单调时钟） */
   let clock = 0;
@@ -322,11 +324,11 @@ describe("peer E2E：hello 的准入", () => {
 });
 
 describe("peer E2E：会话生命期", () => {
-  test("peer 在会话期间被删：下一条 401，重握手被拒 → e2e_unknown_peer，路由没处理", async () => {
+  test("peer 在会话期间被删：下一条 401，重握手被拒 → 状态未知（原因 e2e_unknown_peer），路由没处理", async () => {
     const w = await world();
     await w.call("GET", "/api/v1/agents");
     w.setBKnowsA(null);
-    await expect(w.call("POST", "/api/v1/x", "late")).rejects.toMatchObject({ code: "e2e_unknown_peer" });
+    await expect(w.call("POST", "/api/v1/x", "late")).rejects.toMatchObject({ code: "e2e_retry_failed", sent: true, cause: { code: "e2e_unknown_peer" } }); // 第一次的记录帧已发出：只能报状态未知
     expect(w.r.handled).toHaveLength(1);
   });
 
@@ -339,7 +341,7 @@ describe("peer E2E：会话生命期", () => {
     } });
     await w.call("GET", "/api/v1/agents");
     kill = () => w.setBKnowsA(null);
-    await expect(w.call("POST", "/api/v1/x", "race")).rejects.toMatchObject({ code: "e2e_unknown_peer" });
+    await expect(w.call("POST", "/api/v1/x", "race")).rejects.toMatchObject({ code: "e2e_retry_failed", sent: true, cause: { code: "e2e_unknown_peer" } }); // 第一次的记录帧已发出：只能报状态未知
     expect(w.r.handled).toHaveLength(1);
   });
 
@@ -364,5 +366,89 @@ describe("peer E2E：会话生命期", () => {
     expect((await w.client.fetch("GET", "/api/v1/e2e/hello", {})).status).toBe(400);
     expect((await w.client.fetch("GET", "/admin", {})).status).toBe(400);
     expect(w.r.handled).toHaveLength(0);
+  });
+});
+
+const isHello = (req: Request) => new URL(req.url).pathname === "/api/v1/e2e/hello";
+
+describe("外层明文伪造不出可信的投递结局", () => {
+  // 本机 / 认证过的内层才有资格用的 code：中继写进明文错误体，也只能换来「已发出、状态未知」
+  const RESERVED = ["e2e_peer_restarted", "e2e_duplicate", "e2e_too_large", "e2e_unavailable", "e2e_bad_peer", "e2e_session"];
+  test("收方已处理后，中继把响应换成带保留 code 的明文：一律是 sent 的外层错误，话术是「结果未知」，不说没送到 / 请重发 / 重启过", async () => {
+    for (const code of RESERVED) {
+      for (const status of [401, 413, 500]) {
+        const w = await world({ relay: async (req, fwd) => {
+          const res = await fwd(req);
+          return isHello(req) ? res : Response.json({ ok: false, code }, { status });
+        } });
+        const err = await w.call("POST", "/api/v1/x", "pay once").catch((e) => e);
+        expect(err).toBeInstanceOf(E2eOuterError);
+        expect(err).not.toBeInstanceOf(E2eInnerError);
+        expect(err).not.toBeInstanceOf(E2eLocalError);
+        expect(err.sent).toBe(true);
+        expect(w.r.handled).toHaveLength(1); // 确实已经处理过
+        const text = peerCallFailureText("x@b", err, "b");
+        expect(text).toContain("结果未知");
+        expect(text).not.toMatch(/没送到|没有发出|请重发|重启过/);
+      }
+    }
+  });
+
+  test("对照：发出之前本机就拒的（加密后超限）是 E2eLocalError，话术「没送到」，一个记录帧都没发", async () => {
+    const w = await world();
+    const err = await w.call("POST", "/api/v1/x", "x".repeat(3 * 1024 * 1024)).catch((e) => e);
+    expect(err).toBeInstanceOf(E2eLocalError);
+    expect(peerCallFailureText("x@b", err, "b")).toContain("消息没送到");
+    expect(w.posted.filter((p) => !p.endsWith("/hello"))).toEqual([]);
+  });
+});
+
+describe("外层响应先封顶、边收边验", () => {
+  /** 一个数着被拉了几段、被没被 cancel 的流 */
+  const counted = (chunk: Uint8Array, max = Infinity) => {
+    const st = { pulled: 0, cancelled: false };
+    const stream = new ReadableStream<Uint8Array>({
+      pull: (c) => void (++st.pulled > max ? c.close() : c.enqueue(chunk)),
+      cancel: () => void (st.cancelled = true),
+    });
+    return { st, stream };
+  };
+  const OCTET = { "content-type": "application/octet-stream" };
+
+  test("记录响应换成 128 × 64 KiB 的零：第一条长度就不对，读一两段就掐断，e2e_record（sent）", async () => {
+    const { st, stream } = counted(new Uint8Array(64 * 1024), 128);
+    const w = await world({ relay: async (req, fwd) => (isHello(req) ? fwd(req) : new Response(stream, { status: 200, headers: OCTET })) });
+    const err = await w.call("GET", "/api/v1/agents").catch((e) => e);
+    expect(err).toMatchObject({ code: "e2e_record", sent: true });
+    expect(st.pulled).toBeLessThan(4);
+    expect(st.cancelled).toBe(true);
+  });
+
+  test("hello 回复、错误体灌无限的明文：读过 8 KiB 就掐断，按坏回复报", async () => {
+    const hello = counted(utf8("{" + " ".repeat(4095)));
+    const w = await world({ relay: async (req, fwd) => (isHello(req) ? new Response(hello.stream, { status: 200 }) : fwd(req)) });
+    await expect(w.call("GET", "/api/v1/agents")).rejects.toMatchObject({ code: "e2e_bad_reply", sent: false });
+    expect(hello.st.pulled).toBeLessThan(5);
+    expect(hello.st.cancelled).toBe(true);
+    const errBody = counted(utf8(" ".repeat(4096)));
+    const w2 = await world({ relay: async (req, fwd) => (isHello(req) ? fwd(req) : new Response(errBody.stream, { status: 502 })) });
+    await expect(w2.call("GET", "/api/v1/agents")).rejects.toMatchObject({ code: "e2e_http_502", sent: true });
+    expect(errBody.st.pulled).toBeLessThan(5);
+  });
+
+  test("响应头到了正文挂着不动：空闲超时掐断（e2e_idle）", async () => {
+    let cancelled = false;
+    const stuck = new ReadableStream<Uint8Array>({ pull: () => new Promise(() => {}), cancel: () => void (cancelled = true) });
+    const w = await world({ idleMs: 50, relay: async (req, fwd) => (isHello(req) ? fwd(req) : new Response(stuck, { status: 200, headers: OCTET })) });
+    await expect(w.call("GET", "/api/v1/agents")).rejects.toMatchObject({ code: "e2e_idle", sent: true });
+    expect(cancelled).toBe(true);
+  });
+
+  test("认证过的响应也有总量上限：对方回 9 MiB → e2e_record；8 MiB 以内照常", async () => {
+    const w = await world();
+    w.bDeps.dispatch = async () => new Response(new Uint8Array(9 * 1024 * 1024));
+    await expect(w.call("GET", "/api/v1/agents")).rejects.toMatchObject({ code: "e2e_record", sent: true });
+    w.bDeps.dispatch = async () => new Response(new Uint8Array(1024 * 1024));
+    expect((await w.call("GET", "/api/v1/agents")).status).toBe(200);
   });
 });

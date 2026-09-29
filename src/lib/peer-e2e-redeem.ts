@@ -9,7 +9,7 @@ import { fromB64url, lp, toB64url, utf8 } from "./e2e/encoding.js";
 import { HpkeContext, setupBaseR, setupBaseS } from "./e2e/hpke.js";
 import { aesKey, gcmOpen, gcmSeal, randomBytes, type EcdhPair } from "./e2e/primitives.js";
 import { PEER_E2E_SUITE } from "./peer-e2e-wire.js";
-import { remoteDetail } from "./remote-text.js";
+import { remoteCode } from "./remote-text.js";
 
 const REDEEM_LABEL = "cstra-peer-redeem-v1";
 const RESPONSE_LABEL = "cstra-peer-redeem-response-v1";
@@ -93,7 +93,7 @@ export async function readRedeemResponse(s: RedeemSession, status: number, body:
     return value === null ? { ok: false, code: "redeem_tampered", message: "invite response failed authentication; retry" } : { ok: true, value };
   }
   if (status === 200) return { ok: false, code: "redeem_unsealed", message: "inviter answered without encryption; refusing (retry, or ask for a new invite)" };
-  const err = (body as { error?: unknown } | null)?.error;
-  const shown = remoteDetail(err);
-  return { ok: false, code: "redeem_failed", message: `inviter refused (${status})${shown ? `: ${shown}` : ""}; retry` };
+  // 失败体中继能伪造：只带清洗过的 code（lib/remote-text.ts），对方写的 error 文字不进给人看的话
+  const code = remoteCode((body as { code?: unknown } | null)?.code, "");
+  return { ok: false, code: "redeem_failed", message: `inviter refused (${status}${code ? `, ${code}` : ""}); retry` };
 }

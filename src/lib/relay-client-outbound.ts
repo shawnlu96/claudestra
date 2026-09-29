@@ -7,7 +7,7 @@
 import { LIMITS, apiPathOk, newRequestId, type DataFrame, type EndFrame, type ErrorFrame, type ResFrame } from "./relay-protocol.js";
 import { b64, pumpBody, streamSink, type StreamSink } from "./relay-stream.js";
 import { RelayError, type RelayRequest, type RelayResponse } from "./relay-client-types.js";
-import { remoteCode, remoteDetail } from "./remote-text.js";
+import { remoteCode } from "./remote-text.js";
 
 interface Pending {
   id: string;
@@ -15,6 +15,8 @@ interface Pending {
   resolve: (r: RelayResponse) => void;
   reject: (e: Error) => void;
   sink: StreamSink | null;
+  /** 响应正文还能收多少字节；超了就发 cancel、让流报错（中继能灌无限的 data 帧） */
+  left: number;
   headTimer: ReturnType<typeof setTimeout>;
   cleanup: () => void;
 }
@@ -23,6 +25,8 @@ export interface RequestOptions {
   /** 等响应头的时长；中继按它超时，本地再多等 headGraceMs 兜底 */
   timeoutMs?: number;
   signal?: AbortSignal;
+  /** 响应正文总量上限（字节），不给就不限 */
+  maxResponseBytes?: number;
 }
 
 export type SendFrame = (frame: object) => boolean;
@@ -60,7 +64,7 @@ export class OutboundTable {
       };
       opts.signal?.addEventListener("abort", onAbort, { once: true });
       const p: Pending = {
-        id, to, resolve, reject, sink: null,
+        id, to, resolve, reject, sink: null, left: opts.maxResponseBytes ?? Infinity,
         headTimer: setTimeout(() => this.fail(id, new RelayError("timeout", "client", `no response head within ${timeoutMs + this.headGraceMs} ms`)), timeoutMs + this.headGraceMs),
         cleanup: () => opts.signal?.removeEventListener("abort", onAbort),
       };
@@ -94,12 +98,14 @@ export class OutboundTable {
     const p = this.pending.get(f.id);
     if (!p || p.sink) return false;
     clearTimeout(p.headTimer);
+    const inline = f.body ? b64.dec(f.body) : null;
+    if (inline && inline.length > p.left) return this.overLimit(p); // 还没建流：按请求失败结掉
     p.sink = streamSink(() => {
       // 读端不要了（调用方 cancel 了流）：告诉对方别再发，本地清掉
       this.send({ t: "cancel", id: f.id, to: p.to });
       this.drop(f.id);
     });
-    if (f.body) p.sink.push(b64.dec(f.body));
+    if (inline) this.take(p, inline);
     if (!f.more) {
       p.sink.end();
       this.drop(f.id);
@@ -111,7 +117,20 @@ export class OutboundTable {
   onData(f: DataFrame): boolean {
     const p = this.pending.get(f.id);
     if (!p?.sink) return false;
-    p.sink.push(b64.dec(f.b64));
+    this.take(p, b64.dec(f.b64));
+    return true;
+  }
+
+  /** 记账后交给流；超了上限就走 overLimit */
+  private take(p: Pending, bytes: Uint8Array): void {
+    if ((p.left -= bytes.length) < 0) return void this.overLimit(p);
+    p.sink!.push(bytes);
+  }
+
+  /** 响应超了调用方给的上限：告诉对方别再发，本地按失败结掉（头没到 reject、头到了让流报错） */
+  private overLimit(p: Pending): boolean {
+    this.send({ t: "cancel", id: p.id, to: p.to });
+    this.fail(p.id, new RelayError("response_too_large", "client", "response body over the caller's limit"));
     return true;
   }
 
@@ -126,9 +145,10 @@ export class OutboundTable {
   /** 带 id 的 error：头没到就 reject，头到了就让流报错 */
   onError(f: ErrorFrame & { id: string }): boolean {
     if (!this.pending.has(f.id)) return false;
-    // error 帧中继能伪造，code / message 最后会进调用方 agent 的上下文（bridge/relay-link.ts → http-peer）：先清洗
+    // error 帧中继能伪造：code 只收短机器码；说明原样留着（截到 200 字）只供逐字比对与日志，展示给 agent 的话另由本机模板给
+    // （lib/peer-auth-hints.ts RelayCallError）
     const origin = f.origin === "peer" || f.origin === "client" ? f.origin : "relay";
-    this.fail(f.id, new RelayError(remoteCode(f.code, "relay_error"), origin, remoteDetail(f.message) || undefined));
+    this.fail(f.id, new RelayError(remoteCode(f.code, "relay_error"), origin, typeof f.message === "string" ? f.message.slice(0, 200) : undefined));
     return true;
   }
 

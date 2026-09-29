@@ -26,6 +26,7 @@ import { signInviteProof } from "../src/lib/invite-proof.ts";
 import { encodePeerInviteV2, parsePeerInviteV2, readPeers, type HttpPeer, type PeerInviteV2 } from "../src/lib/peers.ts";
 import { newTokenPrincipal, readPrincipals, updatePrincipals } from "../src/lib/principals.ts";
 import { peerCallFailureText } from "../src/lib/peer-auth-hints.ts";
+import { E2eOuterError } from "../src/lib/peer-e2e-client.ts";
 import { connect, type RelayClient } from "../src/lib/relay-client.ts";
 import { NULL_BODY_STATUS, recordToHeaders } from "../src/lib/relay-stream.ts";
 import { fromB64url, utf8 } from "../src/lib/e2e/encoding.ts";
@@ -360,6 +361,22 @@ for (const [label, base] of [["relay://", () => relayBase], ["直连 http", () =
       expect((await call(base(), "GET", "/api/v1/agents")).status).toBe(201);
     });
 
+    test("已处理后中继伪造明文 e2e_peer_restarted / e2e_duplicate：出站不换成 401 / 409，按「结果未知」报，只处理一次", async () => {
+      for (const code of ["e2e_peer_restarted", "e2e_duplicate"]) {
+        hook = async (w, s) => {
+          const r = await s(w);
+          return w.url.endsWith("/hello") ? r : Response.json({ ok: false, code }, { status: 500 });
+        };
+        const n = handled.length;
+        const err = await call(base(), "POST", "/api/v1/agents/x/messages", "pay once").catch((e) => e);
+        hook = null;
+        expect(err).toBeInstanceOf(E2eOuterError);
+        expect(err.sent).toBe(true);
+        expect(handled.length).toBe(n + 1);
+        expect(peerCallFailureText("x@bob", err, "bob")).toContain("结果未知");
+      }
+    });
+
     // 发方走生产的 keep-alive 传输：收方上传途中早回 413 的话，同一连接上的下一条会卡到超时、还被报成「可能已送达」
     test("加密后超过 2 MiB：发方本地拒发（e2e_too_large、说清没发出），一个记录帧都不上线；下一条照常", async () => {
       const posted: string[] = [];
@@ -368,7 +385,7 @@ for (const [label, base] of [["relay://", () => relayBase], ["直连 http", () =
       const err = await call(base(), "POST", "/api/v1/agents/x/messages", "x".repeat(3 * 1024 * 1024)).catch((e) => e);
       hook = null;
       expect(err).toMatchObject({ code: "e2e_too_large" });
-      expect(peerCallFailureText("x@bob", err.message, "bob")).toContain("消息没送到");
+      expect(peerCallFailureText("x@bob", err, "bob")).toContain("消息没送到");
       expect(posted.filter((u) => !u.endsWith("/hello"))).toEqual([]);
       expect(handled.length).toBe(n);
       expect((await call(base(), "GET", "/api/v1/agents")).status).toBe(201);

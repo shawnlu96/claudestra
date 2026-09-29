@@ -4,7 +4,7 @@
  * 目标是 required peer 却走不了加密（本机钥匙读不到、对方记录坏了）→ 抛错，绝不退回明文。
  * 外层传输（中继 / 直连、外层签名）由调用方以 raw 注入；这里只管会话。
  */
-import { E2eError, PeerE2eClient } from "./peer-e2e-client.js";
+import { E2eInnerError, E2eLocalError, PeerE2eClient } from "./peer-e2e-client.js";
 import { e2ePeerOf, localE2e, peerForUrl, pinPeerE2eKey, readHttpPeers, type LocalE2e } from "./peer-e2e-local.js";
 import type { HttpPeer } from "./peers.js";
 
@@ -57,19 +57,20 @@ export function createE2eOutbound(d: OutboundDeps) {
   /**
    * 目标不是 required peer → null（调用方照旧明文发）；是 → 走会话，返回解开后的内层响应。
    * 两种重放拒绝换成调用方已有分支认得的响应：「对方重启过」→ 401 peer_signature（peerAuthHint 给话术），「已处理过」→ 409。
+   * 只认 E2eInnerError（认证过的内层给的）：外层明文里写着同样 code 的是中继能伪造的，照原样抛给调用方按「状态未知」报。
    */
   async function fetch(url: string, init: OutboundInit, raw: RawPost): Promise<Response | null> {
     const rec = peerForUrl(url, await d.peers());
     if (!rec?.e2e) return null;
     const base = (rec.baseUrl || "").replace(/\/+$/, "");
-    if (!e2ePeerOf(rec) || !base) throw new E2eError("e2e_bad_peer", `peer ${rec.name} is marked end-to-end but its record lacks an address or fingerprint`);
+    if (!e2ePeerOf(rec) || !base) throw new E2eLocalError("e2e_bad_peer", `peer ${rec.name} is marked end-to-end but its record lacks an address or fingerprint`);
     const local = await d.local();
-    if (!local) throw new E2eError("e2e_unavailable", "local E2E key unavailable; refusing to fall back to plaintext");
+    if (!local) throw new E2eLocalError("e2e_unavailable", "local E2E key unavailable; refusing to fall back to plaintext");
     const body = typeof init.body === "string" ? new TextEncoder().encode(init.body) : (init.body ?? new Uint8Array(0));
     try {
       return await clientFor(rec, local, base, raw).fetch(init.method ?? "GET", url.slice(base.length), init.headers ?? {}, body);
     } catch (e) {
-      if (!(e instanceof E2eError)) throw e;
+      if (!(e instanceof E2eInnerError)) throw e;
       if (e.code === "e2e_peer_restarted") return Response.json({ ok: false, code: "peer_signature", reason: "e2e_peer_restarted", error: e.message.replace(/^\w+: /, "") }, { status: 401 });
       if (e.code === "e2e_duplicate") return Response.json({ ok: false, error: DUPLICATE_TEXT }, { status: 409 });
       throw e;
