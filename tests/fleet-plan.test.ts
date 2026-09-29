@@ -47,6 +47,16 @@ describe("动作白名单", () => {
     expect(compactCommand("")).toBe("/compact");
   });
 
+  test("面板每次填的保留清单和 config 同一个入口（normalizeCompactKeep）：800 字、控制 / 格式字符报错，空白当没填", () => {
+    expect(parseFleetAction({ kind: "compact", keep: "单独\r回车" })).toEqual({ ok: true, action: { kind: "compact", keep: "单独 回车" } });
+    for (const bad of ["保".repeat(801), "带\x1b[A 方向键", "带\t制表符", "零宽\u200b空格", 3]) {
+      const r = parseFleetAction({ kind: "compact", keep: bad });
+      expect(r.ok ? "" : r.error).toStartWith("保留清单");
+    }
+    expect(parseFleetAction({ kind: "compact", keep: "保".repeat(801) })).toEqual({ ok: false, error: "保留清单超过 800 字（这条 801 字）" });
+    expect(parseFleetAction({ kind: "lp-compact", keep: "  \n " })).toEqual({ ok: true, action: { kind: "lp-compact" } });
+  });
+
   test("控制字符（ESC / Ctrl+C / Tab）不许原样敲进输入框", () => {
     expect(compactCommand("保留\x1b[A\x03清单\t尾")).toBe("/compact 保留 [A 清单 尾");
   });

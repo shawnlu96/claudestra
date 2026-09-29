@@ -3,6 +3,7 @@
  * 大总管默认不在批量范围里：只有 includeMaster 或在 agents 里点名 master 才算「单独勾选」。
  * 用例见 tests/fleet-plan.test.ts。
  */
+import { normalizeCompactKeep, type CompactKeep } from "./ctx-boundary-policy.js";
 import { neutralizeDelegateMarker } from "./delegate-marker.js";
 import type { LpMode } from "./lp-state.js";
 
@@ -32,7 +33,6 @@ export const DEFAULT_COMPACT_KEEP =
   "未了、未决、已承诺、预期接下来发生的事,以及被额度打断时正在做的那一步;难以重建的细节——名字、数字、日期、原话、路径、命令、链接——原样保留。" +
   "以上宁长勿缺,其余从简。";
 
-const MAX_KEEP = 2000;
 const MAX_TEXT = 4000;
 
 /**
@@ -46,6 +46,11 @@ function oneLine(s: string): string {
 /** text 与 keep 都会进 agent 的上下文：里面的委托标记（[📨 委托转达] 及变体）一律中和，不许冒充 owner 委托 */
 const clean = (s: string) => neutralizeDelegateMarker(s);
 
+/** 要敲进输入框的保留清单：中和委托标记后走上下文边界同一个入口 normalizeCompactKeep（换行换成空格、800 字、不带控制 / 格式字符） */
+export function fleetKeep(raw: unknown): CompactKeep {
+  return normalizeCompactKeep(typeof raw === "string" ? clean(raw) : raw);
+}
+
 export function compactCommand(keep: string): string {
   const k = oneLine(clean(keep));
   return k ? `/compact ${k}` : "/compact";
@@ -58,9 +63,11 @@ export function parseFleetAction(input: unknown): { ok: true; action: FleetActio
     return { ok: false, error: `动作只能是 ${FLEET_ACTIONS.join(" / ")}` };
   }
   const action: FleetAction = { kind: kind as FleetActionKind };
-  if (o.keep !== undefined) {
-    if (typeof o.keep !== "string" || o.keep.length > MAX_KEEP) return { ok: false, error: `keep 要是不超过 ${MAX_KEEP} 字的字符串` };
-    if (kind === "compact" || kind === "lp-compact") action.keep = oneLine(clean(o.keep));
+  // 空白的 keep 当没填（用默认清单）：只敲「/compact 」时 CC 会在后面画灰色参数提示，敲完核对输入框对不上
+  if (o.keep !== undefined && (typeof o.keep !== "string" || o.keep.trim())) {
+    const k = fleetKeep(o.keep);
+    if (!k.ok) return { ok: false, error: `保留清单${k.why}` };
+    if (kind === "compact" || kind === "lp-compact") action.keep = k.keep;
   }
   if (kind === "text") {
     if (typeof o.text !== "string" || !o.text.trim()) return { ok: false, error: "text 动作要带非空的 text" };

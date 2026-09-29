@@ -9,7 +9,7 @@ import { dirname, join } from "node:path";
 import { computeAgentStats } from "../../lib/agent-stats.js";
 import { readConfigSync } from "../../lib/config-store.js";
 import {
-  bareName, DEFAULT_COMPACT_KEEP, notApplicable, selectTargets, summarizeFleet,
+  bareName, DEFAULT_COMPACT_KEEP, fleetKeep, notApplicable, selectTargets, summarizeFleet,
   type Excluded, type FleetAction, type FleetCandidate, type FleetResult, type FleetSelect,
 } from "../../lib/fleet-plan.js";
 import { agentRuntime, readRegistryAgents } from "../../lib/registry.js";
@@ -50,8 +50,8 @@ const tmuxPaneIO: PaneIO = {
 };
 
 function compactKeep(): string {
-  const k = readConfigSync().fleet?.compactKeep;
-  return typeof k === "string" && k.trim() ? k : DEFAULT_COMPACT_KEEP;
+  const k = fleetKeep(readConfigSync().fleet?.compactKeep);
+  return k.ok ? k.keep : DEFAULT_COMPACT_KEEP;
 }
 
 type Cand = FleetCandidate & { channelId?: string; cwd?: string };
