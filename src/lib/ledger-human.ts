@@ -9,7 +9,7 @@ import { askPlanFor, assignSeqOf, checkHumanDeliver, humanDeliverText, isHumanNo
 import { hasAsksTable, listAsks, type Ask } from "./ledger-asks.js";
 import { isManager, mustTask, type WriteCtx, type WriteResult } from "./ledger-checks.js";
 import type { LedgerEvent, LedgerTask } from "./ledger-stages.js";
-import { getTask, LedgerError, listEvents, toTask } from "./ledger-store.js";
+import { getMeta, getTask, LedgerError, listEvents, toTask } from "./ledger-store.js";
 import { insertEvent, replay, tx } from "./ledger-tx.js";
 import { applyMove } from "./ledger-write.js";
 
@@ -121,13 +121,7 @@ export function staleAssignments(db: Database, due = pendingAssignments(db)): As
   return listAsks(db, { states: ["open"], source: "system" }).filter((a) => isHumanNodeAsk(a) && !want.has(`${a.project}\n${a.dedupKey}`));
 }
 
-/**
- * 项目开没开班子（meta team，值带 sinceSeq 才算开）：开了，人工交付和执行者交付一样由班子路由通知，这里不再给 PM 发。
- * 班子的读法以 ledger-store 的 getMeta 为准，这里只看开没开（班子那边的 toTeam 同一判据）。
- */
+/** 项目开没开班子（getMeta().team，和班子路由同一读法）：开了，人工交付和执行者交付一样由班子路由通知，这里不再给 PM 发 */
 export function projectHasTeam(db: Database, project: string): boolean {
-  const r = db.prepare("SELECT value FROM meta WHERE project = ? AND key = 'team'").get(project) as { value: string } | null;
-  if (!r) return false;
-  const v = JSON.parse(r.value) as unknown;
-  return !!v && typeof v === "object" && typeof (v as { sinceSeq?: unknown }).sinceSeq === "number";
+  return getMeta(db, project).team !== null;
 }
