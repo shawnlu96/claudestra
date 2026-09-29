@@ -2,7 +2,7 @@ import { beforeAll, describe, expect, test } from "bun:test";
 import { acpConfigOf, acpSetConfig, answerAcp, liveAcpButtons, onAcpFrame, onAcpHostGone } from "../src/bridge/acp-link.ts";
 import { noteAcpChannel } from "../src/bridge/acp-state.ts";
 import { subscribeEvents } from "../src/bridge/event-bus.ts";
-import { startWatching, stopWatching } from "../src/bridge/jsonl-watcher.ts";
+import { drainChannelWatcher, pushEntries, startWatching, stopWatching, stopWatchingByChannel } from "../src/bridge/jsonl-watcher.ts";
 import { setExtensionSocket } from "../src/bridge/pi-abort.ts";
 
 // bridge 这一头：只认当前登记的那条连接；流式条目进 watcher 的推送模式；额度卡 / 权限卡的答案经宿主落地（不发键）
@@ -79,6 +79,38 @@ describe("流式条目的确认与去重（r4 P1-2）", () => {
     } finally {
       unsub();
       stopWatching("agent-acp-seq");
+    }
+  });
+});
+
+// outer-codex 合并时的探针（T60 r4 P1-2 补充）：宿主断线重连 / 重新登记会重建推送 watcher，没 flush 的正文跟着旧的丢了
+// （drain 出来 text=null），序号也从 0 重来。现在同一会话沿用停下时收着的那份；换了会话才是新的
+describe("推送 watcher 重建：未 flush 的正文不丢、序号不回退（r4 P1-2 补充）", () => {
+  const CH3 = "local-acp-rebuild";
+  const AG = "agent-acp-rebuild";
+  const say = (t: string) => ({ type: "assistant", timestamp: new Date().toISOString(), message: { content: [{ type: "text", text: t }] } });
+  test("断线后重新登记、直接重新登记：drain 拿得到正文，序号接着涨；换会话才从头", async () => {
+    noteAcpChannel(CH3, "acp");
+    const seqs: number[] = [];
+    const unsub = subscribeEvents({}, (e) => void (e.chatId === CH3 && e.type === "assistant_text" && seqs.push(Number((e.data as { seq?: unknown }).seq))));
+    try {
+      await startWatching(AG, "/w", "sid-1", CH3, discord, { transport: "acp" });
+      expect(await pushEntries(CH3, [say("第一段")], discord)).toBe(true);
+      stopWatchingByChannel(CH3); // ws close
+      expect(await pushEntries(CH3, [say("x")], discord)).toBe(false); // 断着：宿主会留着重送
+      await startWatching(AG, "/w", "sid-1", CH3, discord, { transport: "acp" });
+      expect(await pushEntries(CH3, [say("第二段")], discord)).toBe(true);
+      await startWatching(AG, "/w", "sid-1", CH3, discord, { transport: "acp" }); // 被顶替后直接重新登记
+      expect((await drainChannelWatcher(CH3, discord)).text).toBe("第一段\n第二段");
+      expect(seqs).toHaveLength(2);
+      expect(seqs[1]!).toBeGreaterThan(seqs[0]!);
+      await pushEntries(CH3, [say("第三段")], discord);
+      expect(seqs[2]!).toBeGreaterThan(seqs[1]!);
+      await startWatching(AG, "/w", "sid-2", CH3, discord, { transport: "acp" }); // 换了会话：不沿用
+      expect((await drainChannelWatcher(CH3, discord)).text).toBeNull();
+    } finally {
+      unsub();
+      stopWatching(AG);
     }
   });
 });

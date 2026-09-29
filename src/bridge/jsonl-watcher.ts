@@ -61,6 +61,7 @@ interface WatcherState {
 }
 
 const watchers = new Map<string, WatcherState>();
+const parkedPush = new Map<string, WatcherState>(); // 停下的 ACP 推送 watcher（startPushWatcher 同一会话沿用）
 
 const HIDDEN_TOOLS = new Set([
   "reply", "react", "edit_message", "fetch_messages", "download_attachment",
@@ -681,7 +682,6 @@ const PENDING_POLL_MS = 2000;
 // deliverToLocal 的入站自愈兜底,这里只是第一道。poll 是 2s 一次 stat,便宜。
 const PENDING_MAX_WAIT_MS = 600_000;
 
-
 export async function startWatching(agentName: string, cwd: string, sessionId: string, channelId: string, discord: Client, opts: { runtime?: string; sessionFile?: string; transport?: string } = {}) {
   const { runtime, sessionFile } = opts;
   if (opts.transport === "acp" || isAcpChannel(channelId)) { stopWatching(agentName); return startPushWatcher(agentName, sessionId, channelId, runtime); }
@@ -769,15 +769,19 @@ export function stopWatching(agentName: string) {
   const state = watchers.get(agentName);
   if (state) {
     state.watcher?.close();
-    if (state.textTimer) clearTimeout(state.textTimer);
+    if (state.push) parkedPush.set(agentName, state); // 推送 watcher 先收着（定时 flush 照跑），同一会话再登记接着用
+    else if (state.textTimer) clearTimeout(state.textTimer);
     if (state.pollInterval) clearInterval(state.pollInterval);
     watchers.delete(agentName);
   }
 }
 
-/** ACP 宿主的频道：只收推送，不碰任何文件（自愈 / 轮转路径不带 transport 调进来也一样，按 acp-state 认） */
+/** ACP 宿主的频道：只推送、不碰文件（按 acp-state 认）。同一会话重新登记沿用收着的那份（未 flush 的正文、答复、序号）；新建的序号从当前毫秒起，bridge 重启也不回退 */
 function startPushWatcher(agentName: string, sessionId: string, channelId: string, runtime?: string): void {
-  const state = { watcher: null, jsonlPath: "", lastSize: 0, sessionId: `acp:${sessionId}`, lineNo: 0, channelId, tools: [], toolMsgId: null, textQueue: [],
+  const parked = parkedPush.get(agentName);
+  parkedPush.delete(agentName);
+  if (parked?.sessionId === `acp:${sessionId}` && parked.channelId === channelId) return void (watchers.set(agentName, parked), console.log(`👁 推送沿用: ${agentName}`));
+  const state = { watcher: null, jsonlPath: "", lastSize: 0, sessionId: `acp:${sessionId}`, lineNo: Date.now(), channelId, tools: [], toolMsgId: null, textQueue: [],
     answerParts: [], textTimer: null, agentName, runtime, processing: false, pollInterval: null, rateLimited: false, push: true } as unknown as WatcherState;
   watchers.set(agentName, state);
   console.log(`👁 开始接收推送: ${agentName}（ACP 宿主）`);
