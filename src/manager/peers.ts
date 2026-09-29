@@ -210,6 +210,22 @@ export async function cmdPeerHttpScope(peerName: string, agentsCsv: string, forc
   output({ ok: true, peer: peerName, exposedAgents: agents, tokenId: tokenIdOf(p), warnings: check.warnings, note: "入站 scope 已更新，立即生效（token 不变）" });
 }
 
+/** 签给该 peer 的 token 只能投递消息（on）/ 恢复原样（off）：token 不换、立即生效，对方互发不受影响（docs/team/peer-delegation.md） */
+export async function cmdPeerHttpMessagesOnly(peerName: string, mode: string) {
+  if (!peerName || (mode !== "on" && mode !== "off")) return output({ ok: false, error: "peer-http-messages-only <peerName> on|off" });
+  // 整条命令已持 principals 锁（write-commands.ts PRINCIPALS_WRITE_COMMANDS），这里直接读写，不能再 updatePrincipals
+  const { readPrincipals, writePrincipals } = await import("../lib/principals.js");
+  const { setMessagesOnly } = await import("../lib/peer-scope-gate.js");
+  const on = mode === "on";
+  const file = await readPrincipals();
+  if (!file.principals.some((p) => p.peer === peerName && !p.disabled)) {
+    return output({ ok: false, error: `peer "${peerName}" 没有有效 token——先完成握手（invite/join）` });
+  }
+  const changed = setMessagesOnly(file.principals, peerName, on);
+  if (changed) await writePrincipals(file);
+  output({ ok: true, peer: peerName, messagesOnly: on, changed, note: on ? "对方只能投递消息：读历史、事件流、打断都会 403" : "已恢复原来的权限" });
+}
+
 export async function cmdPeerHttpRemove(peerName: string) {
   const { removeHttpPeer } = await import("../lib/peers.js");
   const { readPrincipals, writePrincipals } = await import("../lib/principals.js");
