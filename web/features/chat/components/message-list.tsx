@@ -199,11 +199,11 @@ function AssistantBody({
           {hasNarration && <ReplyDivider />}
           <div className="relative">
             <GutterTime ts={m.replyTs ?? m.ts} side="left" lead="body" />
-            {/* reply 到达即完整,直接富文本 */}
-            <TextBlock msgId={m.id} text={m.replyText!} ts={m.replyTs ?? m.ts} streamed={false} fullText={full} />
+            <TextBlock msgId={m.id} text={m.replyText!} ts={m.replyTs ?? m.ts} streamed={false} fullText={full} /* reply 到达即完整,直接富文本 */ />
           </div>
         </>
       )}
+      {inlineCtx.lockHint && <p className="mt-1 text-[11px] opacity-50">{inlineCtx.lockHint}</p>}
     </InlineActionContext.Provider>
   );
 }
