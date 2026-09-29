@@ -51,6 +51,12 @@ export class TurnCuts {
   private readonly agentOf = new Map<string, string>();
   /** Codex 频道：上次 Stop 之后经 codex queue（不是打进 TUI）投的消息摘录——Esc 之后它们会排在停字后面才跑 */
   private readonly codexQueued = new Map<string, string[]>();
+  /**
+   * 频道 → 上次回合结束之后 ws.send 出去的消息（值 = 送达时主回合在跑、排在 queue 里）：Codex 投递失败时判「还有没有回合在跑」。
+   * 不拿 inbound 判：那是展示用的最近 8 条，StopFailure 不清、满了会挤掉还在跑的那条（T52 复审 #204 P1）。回合结束换代，
+   * 排着的是下一回合要跑的、带进下一代，其余清掉。tests/turn-cuts-book.test.ts
+   */
+  private readonly live = new Map<string, Map<string, boolean>>();
   /** 频道 → 最后一次 ws.send 投递的时刻（终端打断之后有没有新消息进来） */
   private readonly deliveredAt = new Map<string, number>();
   /** `${channelId}\n${chatId}` → agent 往这个地址 reply 的时刻（最近几次） */
@@ -88,6 +94,7 @@ export class TurnCuts {
   noteDelivered(env: Envelope, channelId: string, typed = false, busy = true): void {
     const at = this.now();
     this.deliveredAt.set(channelId, at);
+    this.live.set(channelId, (this.live.get(channelId) ?? new Map()).set(env.meta.messageId, busy && !typed));
     const cut = this.cuts.get(channelId);
     if (cut && cut.byMessageId === env.meta.messageId && cut.deliveredAt === undefined) this.cuts.set(channelId, { ...cut, deliveredAt: at });
     if (isCutNotice(env)) return void this.noticePending.delete(channelId);
@@ -108,11 +115,17 @@ export class TurnCuts {
     return t && { ...t, agent: this.agentOf.get(channelId) };
   }
 
-  /** 这条其实没投进去（Codex 投递失败）：从「这一回合送到过的」里拿掉，返回剩下几条——0 = 这一回合没有别的送达，没有回合在跑 */
+  /** 这条其实没投进去（Codex 投递失败）：从送达记录里拿掉，返回上次回合结束之后还有几条送进去了——0 = 没有回合在跑 */
   dropUndelivered(channelId: string, messageId: string): number {
-    const rest = (this.inbound.get(channelId) ?? []).filter((x) => x.messageId !== messageId);
-    this.inbound.set(channelId, rest);
-    return rest.length;
+    this.inbound.set(channelId, (this.inbound.get(channelId) ?? []).filter((x) => x.messageId !== messageId));
+    const live = this.live.get(channelId);
+    live?.delete(messageId);
+    return live?.size ?? 0;
+  }
+
+  /** 这个频道最后一次投递是给哪个 agent 的（送达记录里的那条被挤掉了也查得到） */
+  agentOn(channelId: string): string | undefined {
+    return this.agentOf.get(channelId);
   }
 
   /** Codex 停字用：上次 Stop 之后排进 codex queue、还没轮到的人类消息（停之后会先跑它们） */
@@ -138,7 +151,7 @@ export class TurnCuts {
    * 不删的话叫停记录一直留在盘上，日后复用这个频道的新 agent 还会被当成「owner 叫停了」，Autopilot 不推进。
    */
   forget(channelId: string): void {
-    for (const m of [this.cuts, this.stops, this.inbound, this.agentOf, this.codexQueued, this.deliveredAt, this.keySentAt]) m.delete(channelId);
+    for (const m of [this.cuts, this.stops, this.inbound, this.agentOf, this.codexQueued, this.live, this.deliveredAt, this.keySentAt]) m.delete(channelId);
     for (const s of [this.noticePending, this.codexTypeIn, this.codexPaused, this.codexCutSinceStop]) s.delete(channelId);
     for (const k of [...this.replies.keys()]) if (k.startsWith(`${channelId}\n`)) this.replies.delete(k);
   }
@@ -221,6 +234,10 @@ export class TurnCuts {
 
   /** 回合结束：该提醒就返回提醒的信封（押后队列投，只提醒一次），否则 null */
   onStop(channelId: string, event: string, agent: string): Envelope | null {
+    if (event === "Stop" || event === "StopFailure") {
+      const queued = [...(this.live.get(channelId) ?? [])].filter(([, q]) => q).map(([id]) => [id, false] as const);
+      this.live.set(channelId, new Map(queued));
+    }
     if (event === "Stop") {
       // 回合正常结束：Codex 的队列恢复了、排着的也会依次跑完（打断回报是 StopFailure，不算）；下一回合的消息从头记
       for (const m of [this.codexPaused, this.codexCutSinceStop]) m.delete(channelId);
