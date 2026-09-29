@@ -32,6 +32,7 @@ export const LEDGER_DICT: Record<string, string> = {
   "已过期，按未批准处理": "Expired — treated as not approved",
   "已撤销": "Withdrawn",
   "已结案": "Closed",
+  "已过期": "Expired",
   "正在核对这条是否已处理…": "Checking whether this was already handled…",
   "已被新版本取代": "Superseded by a newer version",
   "指派": "Assigned",

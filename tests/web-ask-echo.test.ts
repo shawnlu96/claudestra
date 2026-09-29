@@ -10,7 +10,9 @@ import { translate } from "@/lib/chat/stream-shape";
 import { isUserEcho } from "@/features/chat/view-compose";
 import { liveAnswerText } from "@/features/chat/delta-clicks";
 import type { ChatMessage } from "@/features/chat/type";
-import { replyAskState, type WebAsk } from "@/features/asks/asks-model";
+import { isMgmtButtonId, MGMT_BUTTON_IDS, MGMT_BUTTON_PREFIXES, replyAskState, type WebAsk } from "@/features/asks/asks-model";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 
 const SELF = new Set(["api:owner:self"]);
 const comps = [{ type: "buttons" as const, buttons: [{ id: "deploy", label: "部署" }, { id: "hold", label: "先不" }] }];
@@ -90,8 +92,27 @@ describe("ask 移出列表后（结案超过 3 天）点旧按钮不会发出 [b
     expect([s.gone, s.blocked]).toEqual([true, true]);
   });
 
-  test("老历史的气泡不带 askId：同样按已结案锁住", () => {
-    expect(replyAskState([], "full", "agent-x", { ...old, replyAskId: undefined }, [], NOW)).toMatchObject({ gone: true, blocked: true, hintId: null });
+  test("老历史的气泡不带 askId：同样锁住，文案是「已过期」（从没建过 ask，不能说成有人答过）；带 askId 的是「已结案」", () => {
+    expect(replyAskState([], "full", "agent-x", { ...old, replyAskId: undefined }, [], NOW)).toMatchObject({ gone: true, expired: true, blocked: true, hintId: null });
+    expect(replyAskState([], "full", "agent-x", old, [], NOW)).toMatchObject({ gone: true, expired: false });
+  });
+
+  test("bridge 的管理 / 面板按钮不锁：老面板照样能点，列表没到也能点", () => {
+    const panel = { ...old, replyAskId: undefined, replyComponents: [{ type: "buttons" as const, buttons: [{ id: "list_agents", label: "列表" }, { id: "sess_detail:abc", label: "详情" }] }] };
+    for (const list of ["full", "loading"] as const) expect(replyAskState([], list, "agent-x", panel, [], NOW).blocked).toBe(false);
+    expect(replyAskState([], "full", "agent-x", { ...panel, replyComponents: undefined }, ["show_cron_menu"], NOW).blocked).toBe(false); // 行内按钮
+    // 管理按钮混着 agent 的按钮：还是锁（锁的是 agent 那一行，管理那一行 use-reply-ask 的 rowLocked 放开）
+    const mixed = { ...panel, replyComponents: [...panel.replyComponents, ...comps] };
+    expect(replyAskState([], "full", "agent-x", mixed, [], NOW).blocked).toBe(true);
+  });
+
+  test("管理按钮清单与 bridge 的 handleMgmtButton 逐个对得上", () => {
+    const src = readFileSync(join(import.meta.dir, "../src/bridge/management.ts"), "utf8");
+    const ids = [...src.matchAll(/\bid === "([\w:-]+)"/g)].map((m) => m[1]);
+    const prefixes = [...src.matchAll(/\bid\.startsWith\("([\w:-]+)"\)/g)].map((m) => m[1]);
+    expect([...new Set(ids)].sort()).toEqual([...MGMT_BUTTON_IDS].sort());
+    expect([...new Set(prefixes)].sort()).toEqual([...MGMT_BUTTON_PREFIXES].sort());
+    expect([isMgmtButtonId("swmodel_yes:gpt"), isMgmtButtonId("deploy")]).toEqual([true, false]);
   });
 
   test("列表还没拉到：带不带 askId 都先不让点（不先发出去再说），按钮下面显示「正在核对」", () => {

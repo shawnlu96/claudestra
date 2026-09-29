@@ -153,6 +153,17 @@ export function unclaimedBindAsk(asks: WebAsk[], agent: string, rows: WebCompone
   return asks.find((a) => a.bind && a.state === "open" && sameShape(a, agent, rows ?? [], inlineIds)) ?? null;
 }
 
+/**
+ * bridge 的免 LLM 管理 / 面板按钮（src/bridge/management.ts 的 handleMgmtButton 认的 id）：不是 agent 答复用的按钮，
+ * 「列表没到先不让点」「老气泡按过期锁」都不碰它们，老面板照样能点。清单由 tests/web-ask-echo.test.ts 对着 management.ts 逐个核
+ */
+export const MGMT_BUTTON_IDS = ["browse_sessions", "cron_history", "cron_remove", "cron_toggle", "kill_agent", "list_agents", "peek_agent",
+  "refresh_status", "restart_all", "show_cron_menu", "show_kill_menu", "show_peek_menu", "show_sessions_panel"];
+export const MGMT_BUTTON_PREFIXES = ["sess_adopt:", "sess_cleanup:", "sess_detail:", "swmodel_no:", "swmodel_yes:"];
+export const isMgmtButtonId = (id: string): boolean => MGMT_BUTTON_IDS.includes(id) || MGMT_BUTTON_PREFIXES.some((p) => id.startsWith(p));
+/** 整行只有管理按钮 */
+export const isMgmtRow = (row: WebComponentRow): boolean => row.type === "buttons" && row.buttons.length > 0 && row.buttons.every((b) => isMgmtButtonId(b.id));
+
 /** bridge 的「待你处理」列表只带开着的和 3 天内结案的（bridge/asks.ts 列表的 closedSince），两边一致 */
 export const ASK_LIST_CLOSED_MS = 3 * 24 * 3600_000;
 
@@ -164,6 +175,8 @@ export interface ReplyAskState {
   closed: WebAsk | null;
   orphan: WebAsk | null;
   gone: boolean;
+  /** gone 且气泡从没带过 askId（T11 之前的老按钮，不知道有没有人答过）：文案写「已过期」，不写「已结案」 */
+  expired: boolean;
   /** 列表还没拉到：先不让点，也不先发出去（按钮下面显示「正在核对」） */
   waiting: boolean;
   /** 点了也不发：closed / orphan / gone / waiting 任一 */
@@ -186,10 +199,11 @@ export function replyAskState(
   const closed = ask && ask.state !== "open" ? ask : null;
   const orphan = ask ? null : unclaimedBindAsk(asks, agent, rows, inlineIds);
   const at = Date.parse(m.replyTs ?? m.ts ?? "");
-  const hasButtons = !!rows?.length || inlineIds.length > 0;
+  const hasButtons = (rows ?? []).some((r) => !isMgmtRow(r)) || inlineIds.some((id) => !isMgmtButtonId(id)); // 只有管理按钮的不算
   const gone = hasButtons && !ask && list === "full" && Number.isFinite(at) && now - at > ASK_LIST_CLOSED_MS;
   const waiting = hasButtons && list === "loading";
-  return { ask, closed, orphan, gone, waiting, blocked: !!closed || !!orphan || gone || waiting, hintId: ask?.id ?? m.replyAskId ?? null };
+  const blocked = !!closed || !!orphan || gone || waiting;
+  return { ask, closed, orphan, gone, expired: gone && !m.replyAskId, waiting, blocked, hintId: ask?.id ?? m.replyAskId ?? null };
 }
 
 /** ask 的答案 → 气泡各行的已答值（与 reply-components 的 replyClicks 同形：按钮存 id，选单存 `<id>:<值>`） */

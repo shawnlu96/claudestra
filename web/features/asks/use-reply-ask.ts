@@ -7,7 +7,7 @@ import type { WebComponentRow } from "@/lib/chat/events";
 import { parseInlineButtons } from "@/lib/chat/inline-buttons";
 import { deriveClicksFromLegacy } from "@/lib/chat/reply-clicks";
 import { useT } from "@/lib/i18n";
-import { answeredGroups, clicksFromAnswer, closedText, replyAskState, rowGroup } from "./asks-model";
+import { answeredGroups, clicksFromAnswer, closedText, isMgmtButtonId, isMgmtRow, replyAskState, rowGroup } from "./asks-model";
 import { useAsksIf } from "./asks-store";
 
 /**
@@ -28,7 +28,7 @@ export function useReplyAsk(m: ChatMessage) {
   // 认没认出 ask、锁不锁（没认出的授权类去卡片上批；早已移出列表的按已结案锁；列表没到先不让点）：asks-model.ts replyAskState
   const list = !loaded ? "loading" : full ? "full" : "partial";
   const s = useMemo(() => replyAskState(asks, list, agent, { replyComponents: rows, replyTs, ts, replyAskId }, inlineIds), [asks, list, agent, rows, replyTs, ts, replyAskId, inlineIds]);
-  const { ask, closed, orphan, gone, waiting, blocked, hintId } = s;
+  const { ask, closed, orphan, gone, expired, waiting, blocked, hintId } = s;
   const lockHint = waiting ? t("正在核对这条是否已处理…") : orphan ? t("授权类请到「待你处理」卡片上批") : undefined;
   const done = useMemo(() => (ask?.answer && rows ? answeredGroups(rows, ask.answer.choices) : new Set<string>()), [ask, rows]);
   // 老快照只有单值 replyClickedId 时退化推导（bug ①，deriveClicksFromLegacy）
@@ -40,15 +40,17 @@ export function useReplyAsk(m: ChatMessage) {
     const picked = inlineIds.find((id) => ask?.answer?.choices.includes(`[button:${id}]`));
     return { locked: blocked || !!picked, clicks: picked ? { [`i:${picked}`]: picked } : {}, lockHint: rows?.length ? undefined : lockHint };
   }, [inlineIds, ask, blocked, lockHint, rows]);
-  const rowLocked = (row: WebComponentRow, ri: number) => blocked || done.has(rowGroup(row, ri));
+  // 管理 / 面板按钮行不跟 ask 锁（asks-model isMgmtRow）
+  const rowLocked = (row: WebComponentRow, ri: number) => (blocked && !isMgmtRow(row)) || done.has(rowGroup(row, ri));
   const beforeSend = useCallback(
     (wire: string): boolean => {
+      if (isMgmtButtonId(/^\[button:(.+)\]$/.exec(wire)?.[1] ?? "")) return true;
       if (blocked) return false;
       if (hintId) hintAskForWire(agent, wire, hintId);
       return true;
     },
     [blocked, hintId, agent],
   );
-  const status = closed ? closedText(closed, t) : gone ? t("已结案") : waiting || orphan ? lockHint : ask ? (done.size ? t("待你处理 · 已答 {n} 项", { n: done.size }) : t("待你处理")) : null;
+  const status = closed ? closedText(closed, t) : gone ? (expired ? t("已过期") : t("已结案")) : waiting || orphan ? lockHint : ask ? (done.size ? t("待你处理 · 已答 {n} 项", { n: done.size }) : t("待你处理")) : null;
   return { clicks, rowLocked, status, beforeSend, inline };
 }
