@@ -283,9 +283,9 @@ describe("manageable 适配器契约", () => {
 });
 
 describe("control 声明", () => {
-  test("CC：C-c 打断、人类消息抢占、看 pane、会话内补 /model", () => {
+  test("CC：Esc 打断（C-c 在主回合空闲时会停掉后台 agent）、人类消息抢占、看 pane、会话内补 /model", () => {
     expect(controlFor("claude-code")).toEqual({
-      interruptKeys: ["C-c"],
+      interruptKeys: ["Escape"],
       preemptOnHumanMessage: true,
       idleSource: "pane",
       modelEnforcement: "in-session",
@@ -293,13 +293,14 @@ describe("control 声明", () => {
     });
   });
 
-  test("Pi：维持 C-c，不抢占、忙闲只信 hook、模型以启动参数为准（restart 不再补发 /model）", () => {
+  test("Pi：不抢占、停经扩展 abort（C-c 只清空输入框）、忙闲只信 hook、模型以启动参数为准（restart 不再补发 /model）", () => {
     expect(controlFor("pi")).toEqual({
       interruptKeys: ["C-c"],
       preemptOnHumanMessage: false,
       idleSource: "hook",
       modelEnforcement: "launch-flag",
       paneHeuristics: false,
+      abortVia: "extension",
     });
   });
 
@@ -314,7 +315,8 @@ describe("control 声明", () => {
   });
 
   test("打断回执里的按键名给人看", () => {
-    expect(describeKeys(controlFor(undefined).interruptKeys)).toBe("Ctrl+C");
+    expect(describeKeys(controlFor(undefined).interruptKeys)).toBe("Esc");
+    expect(describeKeys(controlFor("pi").interruptKeys)).toBe("Ctrl+C");
     expect(describeKeys(controlFor("codex").interruptKeys)).toBe("Esc");
   });
 });

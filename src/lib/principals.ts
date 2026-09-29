@@ -18,7 +18,7 @@
 
 import { acquireLock } from "./file-lock.js";
 import { STATE_DIR } from "./paths.js";
-import { isMasterAgent } from "./registry.js";
+import { bareCanonicalName, isLiteralMaster, isMasterAgent } from "./registry.js";
 import { canReadLedger, OWNER_PRINCIPAL_ID } from "./devices.js";
 import { timingSafeEqual } from "crypto";
 import { readJsonState, readJsonLenient, writeJsonStateGuarded, StateCorruptError } from "./state-file.js";
@@ -76,7 +76,26 @@ const isPrincipalsFile = (d: unknown): boolean =>
  * 确认磁盘上的文件不是坏的。
  */
 export async function readPrincipals(path = PRINCIPALS_PATH): Promise<PrincipalsFile> {
-  return readJsonLenient<PrincipalsFile>(path, { principals: [] }, { validate: isPrincipalsFile, who: "principals" });
+  const file = await readJsonLenient<PrincipalsFile>(path, { principals: [] }, { validate: isPrincipalsFile, who: "principals" });
+  warnMasterVariants(file);
+  return file;
+}
+
+/** 已报过的「principal + 写法」：每个进程只报一次，别让每次鉴权都刷一行 */
+const warnedVariants = new Set<string>();
+
+/**
+ * 名单（principal 的 agents 与各凭据的 grant）里的大总管变体：老版本签码时把 MASTER、全角等当普通名字落了盘，现在不给任何权限。
+ * 只告警、不改盘（principals.json 由 owner 处置），写明是哪个 principal（T42-r2）。
+ */
+export function warnMasterVariants(file: PrincipalsFile, warn: (msg: string) => void = console.warn): void {
+  for (const p of file.principals) {
+    for (const a of new Set([...(p.agents ?? []), ...(p.credentials ?? []).flatMap((c) => c.grant?.agents ?? [])])) {
+      if (!isMasterAgent(a) || isLiteralMaster(a) || warnedVariants.has(`${p.id}\0${a}`)) continue;
+      warnedVariants.add(`${p.id}\0${a}`);
+      warn(`⚠️ [principals] ${p.id}（${p.name}）的名单里有大总管的变体写法 ${JSON.stringify(a)}：不给任何权限，按无效条目处理；要开放大总管请写逐字的 master`);
+    }
+  }
 }
 
 /** 写者用：损坏时抛 StateCorruptError，而不是返回空。 */
@@ -120,12 +139,23 @@ export async function writePrincipals(data: PrincipalsFile, path = PRINCIPALS_PA
   await writeJsonStateGuarded(path, data, { mode: 0o600, validate: isPrincipalsFile });
 }
 
-/** 生成一个新 token principal（不落盘，调用方决定何时 write） */
+/** 老 Next 前端替 owner 持有的 token 名：isOwnerPrincipal 凭它认 owner，所以新签的凭据（token、guest）一律不许再叫这个 */
+const LEGACY_OWNER_TOKEN_NAME = "web-ui";
+
+/** 名字撞上保留名 → 给人看的拒绝原因，否则 null。大小写、首尾空白都不算区别 */
+export function reservedNameError(name: string): string | null {
+  if (name.trim().toLowerCase() !== LEGACY_OWNER_TOKEN_NAME) return null;
+  return `"${LEGACY_OWNER_TOKEN_NAME}" 是保留名（老 web 前端的 owner 凭据靠这个名字认 owner 身份），请换一个名字`;
+}
+
+/** 生成一个新 token principal（不落盘，调用方决定何时 write）。保留名直接抛：签发路径漏查也签不出冒认 owner 的 token */
 export function newTokenPrincipal(
   name: string,
   agents: string[],
   opts?: { terminal?: boolean; peer?: string },
 ): Principal {
+  const reserved = reservedNameError(name);
+  if (reserved) throw new Error(reserved);
   const tokenId = `tok_${randomBytes(4).toString("hex")}`;
   return {
     id: `token:${tokenId}`,
@@ -202,12 +232,15 @@ export function agentInScope(p: Principal, agentName: string): boolean {
   // 分享出去」）。历史 token 显式列了 master（老版本 --force 能签出）也在
   // 这里截断——签发侧和消费侧双闸。
   if (p.peer && isMaster) return false;
+  const want = bareCanonicalName(agentName);
   for (const a of p.agents) {
     if (a === "*") {
       if (!isMaster) return true;
       continue;
     }
-    if (a === agentName || `agent-${a}` === agentName || a === `agent-${agentName}`) return true;
+    // 普通 agent 按规范名比（CC / 全角 / 零宽变体 = 同一个）；大总管只认逐字列出的 master / agent-master，老条目里的 MASTER 之类
+    // 变体不给任何权限（等于无效条目，readPrincipals 告警）——请求里的名字是哪种写法都一样，isMasterAgent 已认作大总管
+    if (isMaster ? isLiteralMaster(a) : bareCanonicalName(a) === want) return true;
   }
   return false;
 }
@@ -230,7 +263,7 @@ export function terminalAllowed(p: Principal, agentName: string): boolean {
  */
 export function isOwnerPrincipal(p: Pick<Principal, "id" | "name" | "disabled" | "peer">): boolean {
   if (p.peer || p.disabled) return false;
-  return p.id === OWNER_PRINCIPAL_ID || (p.name === "web-ui" && p.id.startsWith("token:"));
+  return p.id === OWNER_PRINCIPAL_ID || (p.name === LEGACY_OWNER_TOKEN_NAME && p.id.startsWith("token:"));
 }
 
 /** 批量管理（bridge/fleet：往一批会话发键、群发）：owner 本人且是全 scope 的 manage 凭据；guest、部分 scope 的设备、peer 一律不给 */

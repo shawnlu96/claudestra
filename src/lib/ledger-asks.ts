@@ -9,15 +9,18 @@ import type { EventKind } from "./ledger-stages.js";
 import { answerGroups, matchWire, type AskRow } from "./ask-options.js";
 import { busyAsLedgerError, LedgerError } from "./ledger-store.js";
 
-export type AskKind = "decide" | "authorize" | "owner_action" | "accept";
-type AskState = "open" | "answered" | "expired" | "cancelled";
-export type AskSource = "reply" | "auq" | "permission" | "codex";
+/** assigned = 指派给某个人的事项（T28 的 human 节点）：assignee 本人或 owner 作答，作答不回投任何 agent */
+export type AskKind = "decide" | "authorize" | "owner_action" | "accept" | "assigned";
+/** superseded = 同一个 agent 用同一个 key 开了新的一条（授权参数变了），旧按钮失效 */
+type AskState = "open" | "answered" | "expired" | "cancelled" | "superseded";
+/** human / system = 人或系统发起的（chat 审核、409 转人工、指派）：没有发起 agent，fromAgent 为空 */
+export type AskSource = "reply" | "auq" | "permission" | "codex" | "human" | "system";
 /** 大总管不属于任何项目，它发的 ask 记在这个 project 下，只从跨项目的 /api/v1/asks 读 */
 export const MASTER_PROJECT = "master";
 
 const HOUR = 3600_000;
 /** 默认有效期（docs 13 §4.2）；没人点 ≠ 同意，到期按未批准处理 */
-export const ASK_TTL_MS: Record<AskKind, number> = { decide: 24 * HOUR, authorize: 4 * HOUR, owner_action: 24 * HOUR, accept: 7 * 24 * HOUR };
+export const ASK_TTL_MS: Record<AskKind, number> = { decide: 24 * HOUR, authorize: 4 * HOUR, owner_action: 24 * HOUR, accept: 7 * 24 * HOUR, assigned: 72 * HOUR };
 
 /** 作答是从哪条路来的：卡片 / 聊天里的按钮或表单 / Discord / 运行时弹框的交互端点 / 终端里自己答了 */
 export type AskVia = "web_card" | "web_chat" | "discord" | "interact" | "terminal";
@@ -35,6 +38,27 @@ export interface AskAnswer {
   at: number;
   /** 卡片一次提交 = 这就是全部答案：不管还有没有没答的组都结案 */
   final?: boolean;
+  /** 作答附带的附件引用（指派事项「完成」时的说明图等，T28a 存在 talk 附件库）：这里只原样存 */
+  atts?: AskAtt[];
+}
+
+export interface AskAtt {
+  kind: string;
+  ref: string;
+  name?: string;
+  mime?: string;
+}
+
+/**
+ * 授权绑定（docs 13 §4.7）：agent 执行前跑 `ledger ask-check <id> --hash <h>`，参数对不上就重新问。approve = 表示「批准」的按钮 id。
+ * bypass 模式下这是产品约束，不是安全边界
+ */
+export interface AskBind {
+  action: string;
+  params: unknown;
+  paramsHash: string;
+  approve: string[];
+  version?: string;
 }
 
 export interface Ask {
@@ -42,8 +66,9 @@ export interface Ask {
   project: string;
   itemId: string | null;
   taskId: string | null;
-  fromAgent: string;
-  fromChannelId: string;
+  /** 人 / 系统发起的为 null */
+  fromAgent: string | null;
+  fromChannelId: string | null;
   source: AskSource;
   kind: AskKind;
   /** null = 自动建的，不知道卡不卡活 */
@@ -66,10 +91,22 @@ export interface Ask {
   extra: Record<string, unknown>;
   createdAt: number;
   updatedAt: number;
+  /** 指给谁（T8h 的 assignee 格式）：人是 `local:<principalId>`，本机 agent 是 agent 名；null = 没指派，按台账的门看 */
+  assignee: string | null;
+  /** 人 / 系统发起的：发起的 principal（或 "system:<来由>"） */
+  createdBy: string | null;
+  /** 取代键：同一个 agent 同一个 key 再开一条，旧的记 superseded */
+  askKey: string | null;
+  bind: AskBind | null;
+  /** 这一条取代了哪一条 */
+  supersedes: string | null;
+  /** 去重键：同一个键只会有一条（T28a 的 assign:<taskId>:<round>:<attempt>），撞上时返回已有的 */
+  dedupKey: string | null;
 }
 
-export type NewAsk = Pick<Ask, "project" | "fromAgent" | "fromChannelId" | "source" | "kind" | "title"> &
-  Partial<Pick<Ask, "itemId" | "taskId" | "blocking" | "urgency" | "context" | "body" | "options" | "allowText" | "kindHint" | "chatId" | "threadId" | "expiresAt" | "extra">>;
+export type NewAsk = Pick<Ask, "project" | "source" | "kind" | "title"> &
+  Partial<Pick<Ask, "fromAgent" | "fromChannelId" | "itemId" | "taskId" | "blocking" | "urgency" | "context" | "body" | "options" | "allowText" | "kindHint" |
+    "chatId" | "threadId" | "expiresAt" | "extra" | "assignee" | "createdBy" | "askKey" | "bind" | "dedupKey">>;
 
 type Row = Record<string, unknown>;
 
@@ -87,6 +124,7 @@ function toAsk(r: Row): Ask {
     discordMessageIds: json(r.discordMessageIds, [] as string[]),
     answer: json(r.answer, null as AskAnswer | null),
     extra: json(r.extra, {} as Record<string, unknown>),
+    bind: json(r.bind, null as AskBind | null),
   };
 }
 
@@ -112,27 +150,72 @@ export function getAsk(db: Database, id: string): Ask | null {
   return r ? toAsk(r) : null;
 }
 
-export function openAsk(db: Database, input: NewAsk, now = Date.now()): Ask {
+/** openAsk 的完整结果：existed = 撞了去重键、返回的是已有那条（没写库）；superseded = 被这条取代的旧 ask */
+export interface OpenedAsk {
+  ask: Ask;
+  existed: boolean;
+  superseded: Ask[];
+}
+
+/**
+ * 开一条 ask，同一事务里追加 ask 事件（actor = 发起 agent，人 / 系统发起的记 createdBy）。
+ * 带 dedupKey 且撞上已有的：返回那条、不写库（T28a 的指派按轮次去重，重复触发无害）。
+ * 带 askKey 且有发起 agent：它同 key 还开着的旧 ask 记 superseded（supersedeIn），新的 supersedes 指向最近那条。
+ * deferSupersede：先只记指向、不动旧的——reply 路径投递成功后才调 supersedeOlder，发失败时旧的仍然有效（不会两条都失效）
+ */
+export function openAskFull(db: Database, input: NewAsk, now = Date.now(), opts: { deferSupersede?: boolean } = {}): OpenedAsk {
   const id = newAskId();
-  return tx(db, () => {
+  return tx(db, (): OpenedAsk => {
+    if (input.dedupKey) {
+      const hit = db.query("SELECT * FROM asks WHERE dedupKey = ?").get(input.dedupKey) as Row | null;
+      if (hit) return { ask: toAsk(hit), existed: true, superseded: [] };
+    }
+    const old = input.askKey && input.fromAgent
+      ? listAsks(db, { fromAgent: input.fromAgent, states: ["open"] }).filter((x) => x.askKey === input.askKey)
+      : [];
     db.prepare(`INSERT INTO asks (id, project, itemId, taskId, fromAgent, fromChannelId, source, kind, blocking, urgency, title, context, body,
-      options, allowText, kindHint, chatId, threadId, expiresAt, state, extra, createdAt, updatedAt)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?)`).run(
-      id, input.project, input.itemId ?? null, input.taskId ?? null, input.fromAgent, input.fromChannelId, input.source, input.kind,
+      options, allowText, kindHint, chatId, threadId, expiresAt, state, extra, createdAt, updatedAt, assignee, createdBy, askKey, bind, supersedes, dedupKey)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+      id, input.project, input.itemId ?? null, input.taskId ?? null, input.fromAgent ?? null, input.fromChannelId ?? null, input.source, input.kind,
       input.blocking === undefined || input.blocking === null ? null : input.blocking ? 1 : 0, input.urgency ?? "normal",
       input.title, input.context ?? "", input.body ?? "", JSON.stringify(input.options ?? []), input.allowText === false ? 0 : 1,
       input.kindHint ?? null, input.chatId ?? "", input.threadId ?? null, input.expiresAt ?? now + ASK_TTL_MS[input.kind],
-      JSON.stringify(input.extra ?? {}), now, now,
+      JSON.stringify(input.extra ?? {}), now, now, input.assignee ?? null, input.createdBy ?? null, input.askKey ?? null,
+      input.bind ? JSON.stringify(input.bind) : null, old.at(-1)?.id ?? null, input.dedupKey ?? null,
     );
     const a = getAsk(db, id) as Ask;
-    addEvent(db, a, "ask", a.fromAgent, a.title, { source: a.source, kind: a.kind, blocking: a.blocking }, now);
-    return a;
+    const superseded = opts.deferSupersede ? [] : supersedeIn(db, a, now);
+    const data = { source: a.source, kind: a.kind, blocking: a.blocking, ...(a.assignee ? { assignee: a.assignee } : {}), ...(a.dedupKey ? { dedupKey: a.dedupKey } : {}) };
+    addEvent(db, a, "ask", askActor(a), a.title, data, now);
+    return { ask: a, existed: false, superseded };
   });
 }
 
+/** a 同一个 agent、同一个 key、比它早还开着的 → superseded（ask_cancel 事件，data.supersededBy） */
+function supersedeIn(db: Database, a: Ask, now: number): Ask[] {
+  if (!a.askKey || !a.fromAgent) return [];
+  const old = listAsks(db, { fromAgent: a.fromAgent, states: ["open"] }).filter((x) => x.askKey === a.askKey && x.id !== a.id && x.createdAt <= a.createdAt);
+  return old.map((o) => {
+    const out = setState(db, o.id, "superseded", now);
+    addEvent(db, out, "ask_cancel", askActor(out), o.title, { reason: "superseded", supersededBy: a.id }, now);
+    return out;
+  });
+}
+
+export function supersedeOlder(db: Database, a: Ask, now = Date.now()): Ask[] {
+  return tx(db, () => supersedeIn(db, a, now));
+}
+
+export function openAsk(db: Database, input: NewAsk, now = Date.now()): Ask {
+  return openAskFull(db, input, now).ask;
+}
+
+/** 事件的 actor：发起 agent；人 / 系统发起的记 createdBy */
+const askActor = (a: Ask): string => a.fromAgent ?? a.createdBy ?? "system";
+
 /** 已结案 → conflict，current 带上库里的状态与答案（调用方据此回「已处理」） */
 function closedError(a: Ask): LedgerError {
-  const word = a.state === "answered" ? "处理" : a.state === "expired" ? "过期" : "撤销";
+  const word = a.state === "answered" ? "处理" : a.state === "expired" ? "过期" : a.state === "superseded" ? "被新版本取代" : "撤销";
   return new LedgerError("conflict", `ask ${a.id} 已${word}`, { state: a.state, answer: a.answer });
 }
 
@@ -149,9 +232,9 @@ function expireRow(db: Database, a: Ask, now: number): Ask {
 
 type AnswerOutcome = { ask: Ask; err?: "closed" | "expired_now" | "dup" };
 
-/** reply 类的逐行作答：并进已有的部分答案；这组答过了 → dup；所有组都答完（或卡片一次提交 / 只写了话）才算结案 */
+/** reply 类（和人 / 系统发起、带按钮行的）逐行作答：并进已有的部分答案；这组答过了 → dup；所有组都答完（或卡片一次提交 / 只写了话）才算结案 */
 function mergeAnswer(a: Ask, next: AskAnswer): { merged: AskAnswer; done: boolean } | null {
-  if (a.source !== "reply") return { merged: next, done: true };
+  if (a.source === "auq" || a.source === "permission" || a.source === "codex") return { merged: next, done: true };
   const rows = a.options as AskRow[];
   const groupOf = (w: string) => matchWire(rows, w)?.group ?? w;
   const prev = a.answer;
@@ -205,6 +288,23 @@ export function closeAsk(db: Database, id: string, state: "expired" | "cancelled
   });
 }
 
+/**
+ * 答复没送到（押着等目标空闲时收件的 agent 被 kill 了）：已答 / 答了一部分 → 回到 open、清掉答案，owner 再答一次时重新找收件方。
+ * 到期时间至少再给 REOPEN_MS，否则过期扫描会马上把它结掉。没答过的、已结成别的状态的返回 null。
+ */
+export function reopenAsk(db: Database, id: string, reason: string, now = Date.now()): Ask | null {
+  return tx(db, () => {
+    const a = getAsk(db, id);
+    if (!a || !a.answer || (a.state !== "answered" && a.state !== "open")) return null;
+    db.prepare("UPDATE asks SET state = 'open', answer = NULL, outboxMessageId = NULL, expiresAt = MAX(expiresAt, ?), updatedAt = ? WHERE id = ?")
+      .run(now + REOPEN_MS, now, id);
+    const out = getAsk(db, id) as Ask;
+    addEvent(db, out, "ask_reopen", "bridge", reason, { reason }, now);
+    return out;
+  });
+}
+const REOPEN_MS = 24 * 3_600_000;
+
 /** 投递信息补记（Discord 消息 id、答复消息 id、改投记录）：不改状态、不记事件 */
 export function patchAsk(db: Database, id: string, p: { discordMessageIds?: string[]; outboxMessageId?: string; extra?: Record<string, unknown> }, now = Date.now()): void {
   tx(db, () => {
@@ -222,6 +322,7 @@ export interface AskQuery {
   states?: AskState[];
   fromAgent?: string;
   source?: AskSource;
+  assignee?: string;
   /** 已结案的只要 updatedAt 晚于它的（「最近处理过」） */
   closedSince?: number;
   limit?: number;
@@ -238,6 +339,7 @@ export function listAsks(db: Database, q: AskQuery = {}): Ask[] {
   if (q.project !== undefined) add("project = ?", q.project);
   if (q.fromAgent !== undefined) add("fromAgent = ?", q.fromAgent);
   if (q.source !== undefined) add("source = ?", q.source);
+  if (q.assignee !== undefined) add("assignee = ?", q.assignee);
   if (q.states?.length) add(`state IN (${q.states.map(() => "?").join(",")})`, ...q.states);
   if (q.closedSince !== undefined) add("(state = 'open' OR updatedAt > ?)", q.closedSince);
   const sql = `SELECT * FROM asks${conds.length ? ` WHERE ${conds.join(" AND ")}` : ""}

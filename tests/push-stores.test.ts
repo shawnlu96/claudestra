@@ -1,7 +1,9 @@
 /** 推送订阅（src/lib/push-store.ts）与未读 / 已读（src/lib/unread-store.ts）两个存取模块，:memory: 库 */
 import { afterEach, describe, expect, test } from "bun:test";
 import { closeWebState, openWebState } from "../src/lib/web-state.js";
-import { deleteApnsDevice, deletePushSubscription, dismissSafe, listApnsDevices, listPushSubscriptions, saveApnsDevice, savePushSubscription, setPushSubscriptionKey } from "../src/lib/push-store.js";
+import {
+  deleteApnsDevice, deletePushSubscription, dismissSafe, listApnsDevices, listPushSubscriptions, saveApnsDevice, savePushSubscription, setPushSubscriptionKey,
+} from "../src/lib/push-store.js";
 import { bumpUnread, countsUnread, markAgentRead, onAgentRead, pruneUnread, readMarks, totalUnread, unreadCounts, unreadOrphans, type ReadEvent } from "../src/lib/unread-store.js";
 
 const fresh = () => {
@@ -20,7 +22,9 @@ describe("push-store", () => {
     db.prepare("INSERT INTO push_subscriptions (endpoint, keys, ua, created_at) VALUES (?, ?, ?, ?)").run("https://x/bad", "{not json", "", "");
     const rows = listPushSubscriptions(db);
     expect(rows).toHaveLength(2);
-    expect(rows.find((r) => r.endpoint.endsWith("/a"))).toEqual({ endpoint: "https://push.example/a", keys: { p256dh: "new", auth: "new" }, ua: "Mozilla Mac", vapidKey: null });
+    expect(rows.find((r) => r.endpoint.endsWith("/a"))).toEqual({
+      endpoint: "https://push.example/a", keys: { p256dh: "new", auth: "new" }, ua: "Mozilla Mac", vapidKey: null, audience: "owner", principal: null, credential: null,
+    });
     expect(deletePushSubscription(db, "https://push.example/a")).toBe(true);
     expect(deletePushSubscription(db, "https://push.example/a")).toBe(false);
     expect(listPushSubscriptions(db)).toHaveLength(1);
@@ -39,16 +43,16 @@ describe("push-store", () => {
     expect(listPushSubscriptions(db)[0].vapidKey).toBe("OWN");
   });
   test("dismissSafe：UA 为空或 iOS 的不发 dismiss", () => {
-    expect(dismissSafe({ ...sub("x"), ua: "", vapidKey: null })).toBe(false);
-    expect(dismissSafe({ ...sub("x"), ua: "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0)", vapidKey: null })).toBe(false);
-    expect(dismissSafe({ ...sub("x"), ua: "Mozilla/5.0 (iPad; CPU OS 17_0)", vapidKey: null })).toBe(false);
-    expect(dismissSafe({ ...sub("x"), ua: "Mozilla/5.0 (Macintosh)", vapidKey: null })).toBe(true);
+    expect(dismissSafe({ ...sub("x"), ua: "", vapidKey: null, audience: "owner", principal: null, credential: null })).toBe(false);
+    expect(dismissSafe({ ...sub("x"), ua: "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0)", vapidKey: null, audience: "owner", principal: null, credential: null })).toBe(false);
+    expect(dismissSafe({ ...sub("x"), ua: "Mozilla/5.0 (iPad; CPU OS 17_0)", vapidKey: null, audience: "owner", principal: null, credential: null })).toBe(false);
+    expect(dismissSafe({ ...sub("x"), ua: "Mozilla/5.0 (Macintosh)", vapidKey: null, audience: "owner", principal: null, credential: null })).toBe(true);
   });
   test("APNs 设备：token 小写存、upsert 刷 last_seen、删除", () => {
     const db = fresh();
     saveApnsDevice(db, "AB".repeat(32), "iPhone", new Date("2026-01-01T00:00:00Z"));
     saveApnsDevice(db, "ab".repeat(32), "iPhone 2", new Date("2026-01-02T00:00:00Z"));
-    expect(listApnsDevices(db)).toEqual(["ab".repeat(32)]);
+    expect(listApnsDevices(db)).toEqual([{ token: "ab".repeat(32), principal: null, credential: null }]);
     expect(db.prepare("SELECT device, created_at, last_seen FROM apns_devices").get()).toEqual({ device: "iPhone 2", created_at: "2026-01-01T00:00:00.000Z", last_seen: "2026-01-02T00:00:00.000Z" });
     expect(deleteApnsDevice(db, "AB".repeat(32))).toBe(true);
     expect(listApnsDevices(db)).toEqual([]);

@@ -252,6 +252,18 @@ describe("adv1 / r1 的 P2 与 T36 约定", () => {
     expect(at("❯ /low-priority")).toBe("/low-priority");
     expect(at("❯  /low-priority")).toBe(" /low-priority");
   });
+
+  test("真 CC 的提示符后面是 NBSP（U+00A0）：当普通空格去掉，开头不留 NBSP（T36 r3 P2-5：不然 T35 逐字比回显永远对不上）", () => {
+    expect(fx("input-draft")).toContain("❯ ");
+    expect(readLpPane(fx("input-draft")).inputText).toBe("owner half typed msg");
+    expect(readLpPane(fx("input-draft-multiline")).inputText).toBe("line one\nline two");
+    expect(readLpPane(fx("walled-typing")).inputText).toBe("/rate-limit-options");
+    const at = (line: string) => readLpPane(fx("lp-on-interrupted").replace(/\x1b\[39m❯[^\S\n]*\n/, `\x1b[39m${line}\n`)).inputText;
+    expect(at("❯ /low-priority")).toBe("/low-priority");
+    expect(at("❯  /low-priority")).toBe(" /low-priority");
+    // 顺序：先把 NBSP 换成空格，再去提示符后那一个；反过来的话，这条和上面「❯ + NBSP」那条都会多出一个前导空格
+    expect(at("❯\u00a0 /low-priority")).toBe(" /low-priority");
+  });
 });
 
 describe("adv2 / r2：对话里的字不能冒充底部状态", () => {

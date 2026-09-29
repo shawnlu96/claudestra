@@ -15,7 +15,7 @@
 import { readdir, readFile } from "fs/promises";
 import { realpathSync } from "fs";
 import { join } from "path";
-import { tmuxRaw, windowTarget, windowChildPids, pidAlive } from "./tmux-helper.js";
+import { childPidsInPsOutput, MASTER_SESSION, tmuxRaw, windowTarget, windowChildPids, pidAlive } from "./tmux-helper.js";
 import { isSandbox } from "./sandbox.js";
 
 export interface CcSessionEntry {
@@ -182,4 +182,31 @@ export async function resolveSessionIdForWindow(
     if (Date.now() >= deadline) return null;
     await Bun.sleep(500);
   }
+}
+
+/**
+ * 一批窗口各自在跑的 CC 会话（key → sessionId），找不到的不在表里。算法同 resolveSessionIdForWindow，另把窗格进程本身也算上
+ * （CC 直接当窗格进程起、没有 shell 父进程时 pid 就是它）；ps、tmux 窗格表、会话登记整批只读一次：每分钟扫全体 agent 用，逐个调要 N 倍子进程。
+ */
+export async function resolveSessionIdsForWindows(wins: { key: string; tmuxName: string; cwd: string }[]): Promise<Map<string, string>> {
+  const out = new Map<string, string>();
+  if (!wins.length) return out;
+  const panes = new Map<string, { pid: number; paneId: string }>();
+  const fmt = "#{window_name}\t#{pane_pid}\t#{pane_id}";
+  const listing = await tmuxRaw(["list-panes", "-s", "-t", MASTER_SESSION, "-F", fmt]).catch(() => ""); // tmux 没起：一个窗口都认不到，调用方全按 registry 记的算
+  for (const l of listing.split("\n")) {
+    const [name, pid, paneId] = l.split("\t");
+    if (name && paneId && !panes.has(name)) panes.set(name, { pid: Number(pid), paneId }); // 同 list-panes -t 窗口：取第一个窗格
+  }
+  const proc = Bun.spawn(["ps", "-eo", "pid=,ppid="], { stdout: "pipe", stderr: "pipe" });
+  const ps = await new Response(proc.stdout).text();
+  await proc.exited;
+  const entries = (await readCcSessionEntries()).filter((e) => pidAlive(e.pid)).map((e) => ({ ...e, cwd: safeRealpath(e.cwd) }));
+  for (const w of wins) {
+    const p = panes.get(w.tmuxName);
+    const childPids = p ? [p.pid, ...childPidsInPsOutput(ps, p.pid)] : [];
+    const hit = p && pickCcSessionForWindow(entries, { childPids, paneId: p.paneId, cwd: safeRealpath(w.cwd) });
+    if (hit) out.set(w.key, hit.sessionId);
+  }
+  return out;
 }

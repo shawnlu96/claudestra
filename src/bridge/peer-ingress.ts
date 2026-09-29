@@ -15,6 +15,7 @@ import { findByBearer, readPrincipals } from "../lib/principals.js";
 import { configuredPeerIngressPort } from "../lib/bridge-url.js";
 import { repoEnvVar } from "../lib/env-file.js";
 import { relayMark, sanitizeRelayFrom } from "./relay-inbound.js";
+import { HTTP_IDLE_TIMEOUT_S } from "../lib/esc-guard.js";
 
 export { configuredPeerIngressPort };
 
@@ -107,6 +108,7 @@ function serve(opts: { port: number; host: Host; handleApi: ApiHandler }) {
   return Bun.serve({
     port: opts.port,
     hostname: opts.host,
+    idleTimeout: HTTP_IDLE_TIMEOUT_S, // peer 的打断请求要等 Esc 窗口锁，Bun 默认 10 秒会先切断（lib/esc-guard.ts）
     async fetch(req) {
       if (req.headers.get("upgrade")) return json(400, { ok: false, error: "no websocket on the peer entrance" });
       const raw = new URL(req.url);

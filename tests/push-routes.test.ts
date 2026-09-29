@@ -58,6 +58,27 @@ describe("门", () => {
   });
 });
 
+describe("guest 设备的 Web Push 订阅（T11b：只收指派给自己的「待你处理」）", () => {
+  const guestDev: Principal = { ...guest, credential: "dev_g1" };
+  const ownerDev: Principal = { ...owner, credential: "dev_o" };
+  test("guest 设备：能看 config、订阅（记成 guest + principal + 凭据）；未读、已读、APNs 仍 403；没设备凭据的 guest、peer 连订阅也不行", async () => {
+    expect((await call(handler, "GET", "/api/v1/push/config", undefined, guestDev))!.status).toBe(200);
+    expect((await call(handler, "POST", "/api/v1/push/subscriptions", { subscription: SUB }, guestDev))!.status).toBe(200);
+    expect(listPushSubscriptions(db)).toMatchObject([{ endpoint: SUB.endpoint, audience: "guest", principal: "guest:1", credential: "dev_g1" }]);
+    for (const [m, path] of [["GET", "/api/v1/unread"], ["GET", "/api/v1/reads"], ["POST", "/api/v1/agents/alpha/read"], ["POST", "/api/v1/push/apns"]] as const) {
+      expect((await call(handler, m, path, {}, guestDev))!.status).toBe(403);
+    }
+    for (const p of [guest, { ...peer, credential: "dev_p" }]) expect((await call(handler, "POST", "/api/v1/push/subscriptions", { subscription: SUB }, p))!.status).toBe(403);
+  });
+  test("guest 盖不掉 owner 的订阅、也删不掉", async () => {
+    await call(handler, "POST", "/api/v1/push/subscriptions", { subscription: SUB }, ownerDev);
+    await call(handler, "POST", "/api/v1/push/subscriptions", { subscription: SUB }, guestDev);
+    expect(listPushSubscriptions(db)).toMatchObject([{ audience: "owner", principal: "owner:self", credential: "dev_o" }]);
+    expect(await json(await call(handler, "DELETE", "/api/v1/push/subscriptions", { endpoint: SUB.endpoint }, guestDev))).toEqual({ status: 200, body: { ok: true, removed: false } });
+    expect(listPushSubscriptions(db)).toHaveLength(1);
+  });
+});
+
 describe("推送订阅", () => {
   test("config 形状；订阅 upsert（userAgent 优先于头）、SSRF 拒、形状拒；删除", async () => {
     expect(await json(await call(handler, "GET", "/api/v1/push/config"))).toEqual({ status: 200, body: { mode: "direct", webPush: { vapidPublicKey: "PUB" }, apns: false } });
@@ -85,7 +106,7 @@ describe("推送订阅", () => {
     const tok = "AB".repeat(32);
     expect(await json(await call(handler, "POST", "/api/v1/push/apns", { token: tok, device: "iPhone" }))).toEqual({ status: 200, body: { ok: true, configured: false } });
     expect(await json(await call(handler, "POST", "/api/v1/push/apns", { token: "zz" }))).toMatchObject({ status: 400 });
-    expect(listApnsDevices(db)).toEqual([tok.toLowerCase()]);
+    expect(listApnsDevices(db)).toEqual([{ token: tok.toLowerCase(), principal: "owner:self", credential: null }]); // 登记时的身份：「待你处理」按它过 ask-access
     expect(await json(await call(handler, "DELETE", `/api/v1/push/apns/${tok}`))).toEqual({ status: 200, body: { ok: true, removed: true } });
     expect(listApnsDevices(db)).toEqual([]);
   });

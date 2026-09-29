@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useT } from "@/lib/i18n";
 import { machines } from "@/lib/machines";
-import { listDevices, revokeDevice, type DeviceInfo } from "@/lib/api/devices";
+import { listDevices, revokeCurrentDevice, revokeDevice, type DeviceInfo } from "@/lib/api/devices";
 import { useMachines } from "../../../machines/use-machines";
 import { Section } from "./section";
 import { AddDevicePanel } from "./add-device";
@@ -110,6 +110,48 @@ export function DevicesSection() {
           ))}
         </ul>
       )}
+    </Section>
+  );
+}
+
+/**
+ * 非全权设备（guest / 部分 scope）的设备页：看不到列表（要 manage），只有本设备的「退出登录」——
+ * DELETE /devices/current 撤这次请求用的那条；之后和全权设备退出一样：摘掉这台机器，还有别的机器就切过去，否则去配对页。
+ */
+export function SelfDeviceSection() {
+  const t = useT();
+  const router = useRouter();
+  const { current } = useMachines();
+  const [armed, setArmed] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  const signOut = async () => {
+    if (!armed) return setArmed(true);
+    setArmed(false);
+    setBusy(true);
+    try {
+      await revokeCurrentDevice();
+      if (current) await machines.remove(current.fp);
+      router.replace(machines.currentFp() ? "/chat" : "/pair");
+    } catch (e) {
+      setErr((e as Error).message);
+      setBusy(false);
+    }
+  };
+  return (
+    <Section title={t("本设备")} desc={current ? `${current.name} · ${current.fp}` : undefined}>
+      <div className="flex items-center gap-2 text-xs">
+        <span className="min-w-0 flex-1 text-base-content/55">{t("这台设备只能用分享给它的会话，看不到、也管不了别的设备")}</span>
+        <button
+          className={`btn btn-xs ${armed ? "btn-error" : "btn-ghost text-error"}`}
+          disabled={busy}
+          onClick={() => void signOut()}
+          onBlur={() => setArmed(false)}
+        >
+          {busy ? <span className="loading loading-spinner loading-xs" /> : armed ? t("确定？") : t("退出登录")}
+        </button>
+      </div>
+      {err && <div className="mt-2 text-xs text-error">{t(err)}</div>}
     </Section>
   );
 }

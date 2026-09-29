@@ -26,14 +26,16 @@ import {
 } from "./autopilot-evidence.js";
 import { closeRun, logOrphanRun, pendingCloseOf } from "./autopilot-close.js";
 import { newMessageId, newThreadId, type Envelope } from "./router.js";
+import { turnCuts } from "./turn-cuts.js";
 
 /** 回合结束后等多久再递：让人有机会先开口，也躲开 Stop 之后的收尾（排队消息、typing 清理） */
 let GRACE_MS = 45_000;
 let path = MISSIONS_PATH;
 /** 重排后多久看第一眼：bridge 刚起来时给 channel-server 一点重连的时间 */
 let RECONCILE_DELAY_MS = 5_000;
-/** missions.json 写锁最多等多久（lib/missions.ts 默认 10 秒）；单测缩短，好复现写锁超时 */
+/** missions.json 写锁最多等多久（lib/missions.ts 默认 10 秒）、超时后多久重试；单测缩短，好复现写锁超时 */
 let LOCK_MS: number | undefined;
+let LOCK_RETRY_MS: number = AUTOPILOT_TIMING.lockRetryMs;
 const upd = <T>(mutate: (m: Record<string, Mission>) => T) => updateMissions(mutate, path, LOCK_MS);
 /**
  * 主回合在不在跑（N7 turnState.main）：压缩中也算忙；只剩后台在跑不算。画面认不出 → unknown（让位时放行，否则会永远递不出去）。
@@ -49,9 +51,10 @@ let turnSeen = async (agent: string): Promise<TurnSeen> => {
 };
 /** 单测：状态文件指到临时目录、宽限期缩短、判忙换成假的；生产不调 */
 export function setMissionTestHooks(h: {
-  path?: string; graceMs?: number; reconcileDelayMs?: number; lockMs?: number; turnSeen?: (agent: string) => Promise<TurnSeen>;
+  path?: string; graceMs?: number; reconcileDelayMs?: number; lockMs?: number; lockRetryMs?: number; turnSeen?: (agent: string) => Promise<TurnSeen>;
 }): void {
   if (h.lockMs !== undefined) LOCK_MS = h.lockMs;
+  if (h.lockRetryMs !== undefined) LOCK_RETRY_MS = h.lockRetryMs;
   if (h.path) path = h.path;
   if (h.graceMs !== undefined) GRACE_MS = h.graceMs;
   if (h.reconcileDelayMs !== undefined) RECONCILE_DELAY_MS = h.reconcileDelayMs;
@@ -112,13 +115,25 @@ function afterClose(agent: string, m: Mission | null): void {
   if (m?.status === "active") schedule(agent, Date.parse(m.wake?.dueAt ?? iso(Date.now())) - Date.now(), m);
 }
 
+/** 收尾写锁超时的 run 各自一个重试定时器（按 runId 去重） */
+const closeRetry = new Map<string, ReturnType<typeof setTimeout>>();
+
 /**
  * 收尾并排下一次。写锁超时（证据进了 pendingClose）时 deliveredHere 留着——否则这个没标上「已投递」的 run 会被当成
- * 领了没递、过 claimStaleMs 放回去重投——然后一会儿再看一眼重试。
+ * 领了没递、过 claimStaleMs 放回去重投——然后一会儿重试。重试不挂在 mission 的定时器上：等锁那几秒里 stop / 换代 / 到点，
+ * 那个定时器会被 reconcile 撤掉或改排给新一代，这个 run 的收尾和日志就再也补不上（tests/bridge-mission.test.ts）。
  */
-async function closeAndNext(agent: string, runId: string, m: Pick<Mission, "until" | "id">, opts: Parameters<typeof closeRun>[3] = {}): Promise<void> {
+async function closeAndNext(agent: string, runId: string, opts: Parameters<typeof closeRun>[3] = {}): Promise<void> {
   const closed = await closeRun(agent, runId, ctx(), opts);
-  if (pendingCloseOf(runId)) return schedule(agent, AUTOPILOT_TIMING.lockRetryMs, m);
+  if (pendingCloseOf(runId)) {
+    if (!closeRetry.has(runId)) closeRetry.set(runId, setTimeout(() => {
+      closeRetry.delete(runId);
+      closeAndNext(agent, runId).catch((e) => console.error(`⏱ Autopilot ${agent}: run ${runId} 收尾重试失败:`, (e as Error).message));
+    }, LOCK_RETRY_MS));
+    return;
+  }
+  clearTimeout(closeRetry.get(runId)); // 别的路径（mission 定时器到点）先收成了
+  closeRetry.delete(runId);
   deliveredHere.delete(runId);
   earlyDone.delete(runId);
   afterClose(agent, closed);
@@ -154,7 +169,7 @@ async function expire(agent: string, id: string | undefined, now: number): Promi
     delete cur.wake;
     return { ...cur };
   });
-  if (gone && run?.deliveredAt) await closeRun(agent, run.runId, ctx());
+  if (gone && run?.deliveredAt) await closeAndNext(agent, run.runId); // 已经 expired：收成功也不再排下一次，写锁超时照样重试
   return gone;
 }
 /** 到点时 agent 正忙 / 不在线：收尾那句等它下一次回合结束再递。只在内存、绑定那一代：新一代开始就作废（别把「已关闭」发给新一代） */
@@ -169,7 +184,9 @@ async function deliverWrapup(agent: string, m: Mission, now: number): Promise<vo
 
 /** 让位：主回合在跑、人刚说过话（含点了打断）、agent 不在线。排太久记一行「未推进」（每条唤醒只记一次） */
 async function yieldIfNeeded(agent: string, m: Mission, now: number): Promise<boolean> {
-  const why = yieldReason({ online: !!clientOf(agent), turnBusy: await busyNow(agent), lastHumanAt: lastHumanMessageAt(agent, channelOf(agent) ?? undefined) }, now);
+  const ch = channelOf(agent) ?? undefined;
+  const hold = ch ? turnCuts.interruptHold(ch) : null; // 「停」之后不替人续上（bridge/turn-cuts.ts）
+  const why = yieldReason({ online: !!clientOf(agent), turnBusy: await busyNow(agent), lastHumanAt: lastHumanMessageAt(agent, ch), interruptHold: hold }, now);
   if (!why) return false;
   const logged = await upd((all) => {
     const cur = all[agent];
@@ -223,8 +240,8 @@ async function claimAndNudge(agent: string, m: Mission, now: number): Promise<vo
   }
   const saved = await persistDelivered(agent, runId, now);
   const doneAt = earlyDone.get(runId);
-  if (saved && doneAt !== undefined) return closeAndNext(agent, runId, m, { afterDone: doneAt });
-  schedule(agent, saved ? AUTOPILOT_TIMING.runStaleMs : AUTOPILOT_TIMING.lockRetryMs, m);
+  if (saved && doneAt !== undefined) return closeAndNext(agent, runId, { afterDone: doneAt });
+  schedule(agent, saved ? AUTOPILOT_TIMING.runStaleMs : LOCK_RETRY_MS, m);
 }
 
 /** fire 里除了「试着推进」以外的几步：都只动落盘状态，然后马上再看一眼 */
@@ -232,13 +249,13 @@ async function applyStep(agent: string, m: Mission, step: ReturnType<typeof deci
   const runId = m.run?.runId;
   if (step.kind === "close") {
     const ev = step.lost ? takeEvidence(agent, runId!) : { ...takeEvidence(agent, runId!), failure: step.failure };
-    return closeAndNext(agent, runId!, m, { ev });
+    return closeAndNext(agent, runId!, { ev });
   }
   if (step.kind === "mark_delivered") {
     const saved = await persistDelivered(agent, runId!, Date.parse(m.run!.claimedAt));
     const doneAt = earlyDone.get(runId!);
-    if (saved && doneAt !== undefined) return closeAndNext(agent, runId!, m, { afterDone: doneAt }); // 回合早就结束了：补标之后立刻收
-    return schedule(agent, saved ? 0 : AUTOPILOT_TIMING.lockRetryMs, m);
+    if (saved && doneAt !== undefined) return closeAndNext(agent, runId!, { afterDone: doneAt }); // 回合早就结束了：补标之后立刻收
+    return schedule(agent, saved ? 0 : LOCK_RETRY_MS, m);
   } else {
     await upd((all) => {
       const cur = all[agent];
@@ -265,7 +282,7 @@ async function fire(agent: string): Promise<void> {
     return;
   }
   const r = m.run;
-  if (r && pendingCloseOf(r.runId)) return closeAndNext(agent, r.runId, m); // 上次收尾写锁超时：用留下的证据重试
+  if (r && pendingCloseOf(r.runId)) return closeAndNext(agent, r.runId); // 上次收尾写锁超时：用留下的证据重试
   const turn: TurnSeen = r?.deliveredAt ? await turnSeen(agent) : "idle";
   const step = decideFire(m, now, { turn, tracked: !!r && isTracking(agent, r.runId), deliveredHere: !!r && deliveredHere.has(r.runId) });
   if (step.kind === "wait") return schedule(agent, step.ms, m);
@@ -293,7 +310,7 @@ async function onTurnDone(agent: string, snap: ReturnType<typeof trackedTurn>, a
   if (r) {
     const tracked = isTracking(agent, r.runId);
     if (tracked && !(snap?.runId === r.runId && snap.started)) return; // 上一回合迟到的 Stop
-    if (r.deliveredAt || deliveredHere.has(r.runId)) return closeAndNext(agent, r.runId, pre, tracked ? { afterDone: now } : {});
+    if (r.deliveredAt || deliveredHere.has(r.runId)) return closeAndNext(agent, r.runId, tracked ? { afterDone: now } : {});
     if (tracked) earlyDone.set(r.runId, now);
     return;
   }

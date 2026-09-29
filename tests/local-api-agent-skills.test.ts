@@ -1,5 +1,5 @@
 /**
- * bridge/local-api/agent-skills.ts + skills-library.ts：按 agent 的技能开关要 manage 且在 scope 内（同目录按 agent 的写端点同一口径），
+ * bridge/local-api/agent-skills.ts + skills-library.ts：读要 manage 且在 scope 内，改开关只给全权凭据（canManage），
  * master 单独判（"*" 不含 master）；技能库的 overrides 只报 scope 内的 agent。状态目录由 tests/preload.ts 隔离。
  */
 import { beforeAll, describe, expect, test } from "bun:test";
@@ -31,8 +31,12 @@ describe("/agents/:name/skill-settings 的 scope", () => {
     expect((await call("GET", "/agents/other/skill-settings", PARTIAL)).status).toBe(403);
     expect((await call("POST", "/agents/agent-other/skill-settings", PARTIAL, { skill: "pdf", state: "on" })).status).toBe(403);
     expect((await call("GET", "/agents/master/skill-settings", PARTIAL)).status).toBe(403);
-    // scope 内的名字过了闸，registry 里没有 → 404
+    // 读：scope 内的名字过了闸，registry 里没有 → 404
     expect((await call("GET", "/agents/worker/skill-settings", PARTIAL)).status).toBe(404);
+  });
+  test("改开关只给全权凭据：部分 scope 的 manage 设备对 scope 内的 agent 也 403（和 claude-settings 同一口径）", async () => {
+    const r = await call("POST", "/agents/worker/skill-settings", PARTIAL, { skill: "pdf", state: "on" });
+    expect([r.status, ((await r.json()) as any).error]).toEqual([403, "changing skill settings requires a full-scope token"]);
   });
   test('"*" token 碰不到 master（agent-master 写法也不行）', async () => {
     expect((await call("GET", "/agents/master/skill-settings", STAR)).status).toBe(403);

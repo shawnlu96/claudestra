@@ -10,9 +10,11 @@
  * - 品牌名（Claudestra）、模型名、工具名（Read/Edit/Bash）、agent 名不进字典。
  */
 import { ATTACH_DICT } from "./i18n-dict-attach";
+import { TOOLS_DICT } from "./i18n-dict-tools";
 import { BOUNDARY_DICT } from "./i18n-dict-boundary";
 import { COLLAB_DICT } from "./i18n-dict-collab";
 import { LEDGER_DICT } from "./i18n-dict-ledger";
+import { MEDIA_DICT } from "./i18n-dict-media";
 import { QUOTA_DICT } from "./i18n-dict-quota";
 import { CONTACTS_DICT } from "./i18n-dict-contacts";
 import { SESSIONS_DICT } from "./i18n-dict-sessions";
@@ -20,7 +22,7 @@ import { FLEET_DICT } from "./i18n-dict-fleet";
 import { SKILLS_DICT } from "./i18n-dict-skills";
 
 export const DICT: Record<string, string> = {
-  ...LEDGER_DICT, ...COLLAB_DICT, ...BOUNDARY_DICT, ...ATTACH_DICT,
+  ...LEDGER_DICT, ...COLLAB_DICT, ...BOUNDARY_DICT, ...ATTACH_DICT, ...TOOLS_DICT, ...MEDIA_DICT,
   ...QUOTA_DICT, // 订阅额度卡片组与开关（lib/i18n-dict-quota.ts）
   ...FLEET_DICT, // 批量管理面板与 low-priority 徽章（lib/i18n-dict-fleet.ts）
   ...CONTACTS_DICT, // 侧栏联系人与输入框 @（lib/i18n-dict-contacts.ts）
@@ -28,6 +30,7 @@ export const DICT: Record<string, string> = {
   ...SKILLS_DICT, // 技能库与按会话启停（lib/i18n-dict-skills.ts）
   // ── 通用 ─────────────────────────────────────────────
   "关闭": "Close",
+  "斜杠命令只有 owner 能用，请直接发文字": "Slash commands are owner-only — send it as plain text", // bridge/api-slash.ts 的 slash_owner_only
   "正在回复…": "Replying…",
   "仍在工作…": "Still working…",
   "正在压缩上下文…": "Compacting context…",
@@ -166,6 +169,7 @@ export const DICT: Record<string, string> = {
   "最近": "Last seen",
   "确定？": "Sure?",
   "退出登录": "Sign out",
+  "这台设备只能用分享给它的会话，看不到、也管不了别的设备": "This device can only use the sessions shared with it; it can't see or manage other devices",
   "这个浏览器里的机器": "Machines in this browser",
   "添加另一台机器": "Add another machine",
   "切换机器": "Switch machine",
@@ -501,6 +505,11 @@ export const DICT: Record<string, string> = {
   "任务指令:到点起一个临时 agent 执行,完成后自动清理并报告": "Prompt: a temporary agent runs it on schedule, reports back and is cleaned up",
   "表达式": "Expression",
   "任务指令": "Prompt",
+  "任务名": "Task name",
+  "定时任务的 prompt 只能一行": "A scheduled task's prompt must be a single line",
+  "任务指令里有看不见的控制字符（比如 Tab），请删掉": "The prompt contains an invisible control character (such as Tab) — please remove it",
+  "「{field}」里有换行或看不见的控制字符。到点会原样敲进终端，换行会让它提前提交，所以只能写成一行":
+    "\"{field}\" contains a line break or an invisible control character. It is typed into the terminal as-is at run time, where a line break submits early, so it must be a single line",
   "目录": "Directory",
   "下次": "Next run:", // 后接时间或「已停用」
   "上次": "Last run:",
@@ -548,14 +557,21 @@ export const DICT: Record<string, string> = {
   "每月（1 号）": "Monthly (1st)",
   "当前为手工表达式": "Custom expression in use:",
   "自动存记忆 + Compact": "Auto save memory + Compact",
-  "常规线:上下文超过阈值且闲置满时长后,先抢救记忆再压缩上下文,对所有 agent 生效;实际触发线取「此阈值」与「该 agent 真实窗口 85%」的较小者。救命线:涨到真实窗口 93%(1M = 930K)时无视闲置门槛强制触发一次——Claude Code 自己在 ~967K 裸压且不存记忆,这是最后一道兜底,常规线关了它也在。":
+  "常规线:上下文超过阈值且闲置满时长后,先抢救记忆再压缩上下文;实际触发线取「此阈值」与「该 agent 真实窗口 85%」的较小者。救命线:涨到真实窗口 93%(1M = 930K)时无视闲置门槛强制触发一次——Claude Code 自己在 ~967K 裸压且不存记忆,这是最后一道兜底,常规线关了它也在。":
     "Regular trigger: once context passes the threshold and the agent has been idle long enough, memory is saved and then the context is compacted; " +
-    "applies to every agent, and fires at the lower of this threshold and 85% of the agent's real window. Safety net: at 93% of the real window " +
-    "(930K for 1M) it fires once regardless of idle time — Claude Code compacts on its own at ~967K without saving memory, so this is the last line of defense, even with the regular trigger off.",
+    "it fires at the lower of this threshold and 85% of the agent's real window. Safety net: at 93% of the real window " +
+    "(930K for 1M) it fires once regardless of idle time — Claude Code compacts on its own at ~967K without saving memory, so this is the last line of defense, " +
+    "even with the regular trigger off.",
   "上下文阈值": "Context threshold",
   "闲置时长": "Idle time",
   "立即": "Immediately",
   "93% 救命线": "93% safety net",
+  "按项目 / 角色的上下文边界": "Per-project / per-role context boundaries",
+  "开着:命中策略的 agent(执行者、协调者…)按各自的线压,不再用上面两条;大总管也纳入自动压缩。":
+    "On: agents a policy covers (executors, coordinators…) are compacted at their own lines instead of the two above, and the master is included in auto-compaction.",
+  "关着:上面两条管所有 agent(大总管除外)。打开前建议先在电脑上跑 bun src/manager.ts ctx-boundary dry-run,看会压谁。":
+    "Off: the two above apply to every agent except the master. Before turning it on, run " +
+    "bun src/manager.ts ctx-boundary dry-run on the computer to see which agents it would compact.",
   "归档保留": "Archive retention",
   "已退役会话的归档保留天数；超期由每日兜底清理，0 = 永不清理（归档是「可找回的过期会话」，不是永久仓库）。":
     "How many days to keep archives of retired sessions. A daily sweep removes older ones; 0 = keep forever (the archive holds recoverable old sessions, it isn't permanent storage).",
@@ -692,6 +708,11 @@ export const DICT: Record<string, string> = {
   "我自己的设备": "My own device",
   "给别人": "Someone else",
   "只能用你选的会话；不含大总管，没有终端和管理": "Only the sessions you pick; no master, no terminal, no management",
+  "全部会话（不含大总管）": "All sessions (except master)",
+  "默认一个都不开放：至少选一个会话": "Nothing is shared by default — pick at least one session",
+  "这等于开放全部非大总管 agent，以后新建的也算": "This shares every agent except master, including ones created later",
+  "只想给几个就逐个勾选；确定要全部就再点一次下面的按钮。": "To share just a few, pick them one by one; to share everything, press the button below again.",
+  "确定开放全部": "Yes, share all",
   "给谁，比如「Alex 的手机」": "Who is it for, e.g. \"Alex's phone\"",
   "生成配对码": "Create pairing code",
   "添加设备": "Add device",
@@ -807,6 +828,7 @@ export const DICT: Record<string, string> = {
 
   // ── 会话级模型/effort 切换器 ─────────────────────────
   "当前模型与 effort，点击切换": "Current model & effort — tap to switch",
+  "当前模型与 effort": "Current model & effort",
   // ── Pi 会话的模型/思考档位切换器（v2.23+） ─────────────
   "Pi 会话：当前模型与思考档位，点击切换": "Pi session: current model & thinking level — tap to switch",
   "Codex 会话：当前模型与推理档位，点击切换": "Codex session: current model & reasoning level — tap to switch",

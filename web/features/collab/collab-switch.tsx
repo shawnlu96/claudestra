@@ -4,7 +4,7 @@
  * 关掉就是原来的会话、不用重载。点侧栏任何会话都先关掉它（closingCollab 包住 Sidebar 的 onSelect）。
  */
 import { useEffect, useRef, useSyncExternalStore } from "react";
-import { markRead } from "@/lib/api/push";
+import { markRead } from "../chat/scoped-requests";
 import { machines } from "@/lib/machines";
 import { useChatStore, useChatStoreApi } from "../chat/chat-store";
 import { CollabPaneBoundary } from "@/components/boundaries";
