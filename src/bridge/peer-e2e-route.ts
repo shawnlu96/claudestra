@@ -9,7 +9,7 @@
  */
 import { isPublicKey, keyFingerprint, SIG_HEADERS, verifySigned } from "../lib/instance-key.js";
 import { e2ePeerOf, localE2e, pinPeerE2eKey, readHttpPeers, type LocalE2e } from "../lib/peer-e2e-local.js";
-import { serveE2e, type E2ePeer } from "../lib/peer-e2e-serve.js";
+import { e2eBodyCap, readRequestCapped, serveE2e, type E2ePeer } from "../lib/peer-e2e-serve.js";
 import { SessionTable } from "../lib/peer-e2e-sessions.js";
 import { E2E_HELLO_PATH, e2eError, isE2eFrame } from "../lib/peer-e2e-wire.js";
 import { ReplayCache } from "../lib/peer-trust.js";
@@ -56,14 +56,17 @@ export function createE2eRoute(d: RouteDeps) {
 
   /**
    * 直连来的（主端口、peer 入口直连）外层身份：签名钥匙必须是某个 E2E 联系人钉住的身份钥匙、签名对得上，才往下走。
-   * 失败计入 peerGate 的验签失败桶（bridge/api-auth.ts，认得出的按联系人名、认不出的按来源地址），什么都不写。返回验过的指纹或拒绝响应
+   * 失败计入 peerGate 的验签失败桶（bridge/api-auth.ts，认得出的按联系人名、认不出的按来源地址），什么都不写。返回验过的指纹或拒绝响应。
+   * hello 的防重放也在这里、在扣 hello 限速之前：截获一个 hello 反复重放，耗不掉这个发件人（中继、直连共用）的握手额度
    */
-  async function directSender(req: Request, url: URL, clientIp: string | null): Promise<string | Response> {
+  async function directSender(req: Request, url: URL, clientIp: string | null, body: Uint8Array): Promise<string | Response> {
     const h = (k: string) => req.headers.get(k) ?? "";
     const key = h(SIG_HEADERS.key);
     const peer = isPublicKey(key) ? byFp.get(keyFingerprint(key)) : undefined;
-    const body = new Uint8Array(await req.clone().arrayBuffer());
-    if (peer && peer.idk === key && verifySigned(key, { method: req.method, path: url.pathname + url.search, ts: h(SIG_HEADERS.ts), sig: h(SIG_HEADERS.sig), body }) === "ok") return peer.fp;
+    if (peer && peer.idk === key && verifySigned(key, { method: req.method, path: url.pathname + url.search, ts: h(SIG_HEADERS.ts), sig: h(SIG_HEADERS.sig), body }) === "ok") {
+      const replayed = url.pathname === E2E_HELLO_PATH && helloReplays.seen(h(SIG_HEADERS.sig), h(SIG_HEADERS.ts), (d.now ?? Date.now)(), key) !== false;
+      return replayed ? e2eError(401, "e2e_signature") : peer.fp; // 重放与缓存满（full）同 outerSigned 一样拒，不另开 code
+    }
     return sigFailureAllowed(peer ? peer.name : `ip:${clientIp ?? "unknown"}`) ? e2eError(401, "e2e_signature") : e2eError(429, "e2e_rate_limited");
   }
 
@@ -85,8 +88,11 @@ export function createE2eRoute(d: RouteDeps) {
     const local = await d.local();
     if (!local) return e2eError(503, "e2e_unavailable");
     await refresh();
-    // 先认外层发件人（验签），再按发件人给 hello 限速，之后才轮到解析与 ECDH（lib/peer-e2e-serve.ts）
-    const sender = ctx.relayFrom ?? (await directSender(req, url, ctx.clientIp));
+    // 先认外层发件人（验签），再按发件人给 hello 限速，之后才轮到解析与 ECDH（lib/peer-e2e-serve.ts）。
+    // 直连的外层身份要看正文，读之前先按帧封顶（没验过签的人塞不进大正文）；中继帧的正文 relay-inbound 已经封过
+    const body = ctx.relayFrom ? undefined : await readRequestCapped(req, e2eBodyCap(url.pathname));
+    if (body === null) return e2eError(413, "e2e_too_large");
+    const sender = ctx.relayFrom ?? (await directSender(req, url, ctx.clientIp, body!));
     if (sender instanceof Response) return sender;
     if (url.pathname === E2E_HELLO_PATH && !helloAllowed(sender)) return e2eError(429, "e2e_rate_limited");
     return serveE2e(req, url.pathname, {
@@ -96,12 +102,13 @@ export function createE2eRoute(d: RouteDeps) {
       sessions,
       peerByFp: (fp) => byFp.get(fp) ?? null,
       pinNewer: (p, ek) => d.pin(p.name, ek),
-      outerSigned,
+      // 直连的 hello 在 directSender 里验过签、记过重放，这里再记一次就成了「重放」：只核钥匙是同一把
+      outerSigned: body ? (r, _b, idk) => r.headers.get(SIG_HEADERS.key) === idk : outerSigned,
       dispatch: (inner, peerFp) => {
         setRequestContext(inner, { ...ctx, e2e: { peerFp } });
         return handle(inner);
       },
-    }, { sender });
+    }, { sender, body });
   }
 
   return { route };

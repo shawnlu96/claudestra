@@ -15,6 +15,7 @@ import {
   E2E_CONTENT_TYPE, E2E_HELLO_PATH, E2E_SESSION_TTL_S, e2eError, encodeHelloReply, encodeResponseHead,
   parseHello, parseInnerHead, parseRecordPath, PEER_E2E_LABEL,
 } from "./peer-e2e-wire.js";
+import { collectBody } from "./relay-stream.js";
 
 /** 一个用密钥建立的 peer（peers.json 里带 e2e 字段的记录） */
 export interface E2ePeer {
@@ -47,15 +48,29 @@ export interface ServeDeps {
  */
 export interface ServeContext {
   sender?: string;
+  /** 已读好的外层正文（直连路径验外层签名时读的） */
+  body?: Uint8Array;
 }
 
 const HELLO_MAX = 4096;
-const BODY_MAX = 2 * 1024 * 1024;
+/** 一条记录流的上限；peer 入口对不带凭据的请求也按它封顶（bridge/peer-ingress.ts） */
+export const E2E_BODY_MAX = 2 * 1024 * 1024;
 
-async function readCapped(req: Request, max: number): Promise<Uint8Array | null> {
-  const b = new Uint8Array(await req.arrayBuffer());
-  return b.length > max ? null : b;
+/** 这个外层路径的正文上限：外层身份核对之前就按它读（bridge/peer-e2e-route.ts），超了回 413 */
+export const e2eBodyCap = (path: string): number => (path === E2E_HELLO_PATH ? HELLO_MAX : E2E_BODY_MAX);
+
+/**
+ * 有上限地读正文：声明的 content-length 超限就一个字节都不读，读的时候照样边读边核（chunked、谎报长度的）。
+ * 超限返回 null（回 413）；读流中途失败（对方断开）也归到这里——拒掉这一帧，对方重发即可，没有别的状态要收拾
+ */
+export async function readRequestCapped(req: Request, max: number): Promise<Uint8Array | null> {
+  if (Number(req.headers.get("content-length") ?? 0) > max) return null;
+  return collectBody(req.body, max).catch(() => null);
 }
+
+/** 调用方已按 e2eBodyCap 读过的就用那份（ctx.body），不再读第二遍 */
+const readBody = (req: Request, ctx: ServeContext, max: number): Promise<Uint8Array | null> =>
+  ctx.body ? Promise.resolve(ctx.body.length > max ? null : ctx.body) : readRequestCapped(req, max);
 
 /** 不是 /api/v1/e2e/* → null（交还给原路由） */
 export async function serveE2e(req: Request, path: string, d: ServeDeps, ctx: ServeContext): Promise<Response | null> {
@@ -67,7 +82,7 @@ export async function serveE2e(req: Request, path: string, d: ServeDeps, ctx: Se
 }
 
 async function hello(req: Request, d: ServeDeps, ctx: ServeContext): Promise<Response> {
-  const body = await readCapped(req, HELLO_MAX);
+  const body = await readBody(req, ctx, HELLO_MAX);
   if (!body) return e2eError(413, "e2e_too_large");
   let raw: unknown;
   try {
@@ -102,7 +117,7 @@ async function record(req: Request, sid: Uint8Array, rid: bigint, d: ServeDeps, 
   const s = d.sessions.get(sid);
   if (!s) return e2eError(401, "e2e_session");
   if (ctx.sender !== undefined && ctx.sender !== s.peerFp) return e2eError(403, "e2e_peer_mismatch");
-  const body = await readCapped(req, BODY_MAX);
+  const body = await readBody(req, ctx, E2E_BODY_MAX);
   if (!body) return e2eError(413, "e2e_too_large");
   // 2. 解密全部记录（验 tag、要求见到 final）；失败窗口不动，伪造的大 rid 推不动窗口
   let parts: Uint8Array[];
