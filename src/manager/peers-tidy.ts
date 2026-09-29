@@ -11,7 +11,7 @@ export async function cmdPeerHttpTidy(apply: boolean) {
   const { activePeerTokens, applyPeerTidy, planPeerTidy } = await import("../lib/peer-tidy.js");
   const [data, pf] = await Promise.all([readPeers(), readPrincipals()]);
   const peers = data.httpPeers || [];
-  const plan = planPeerTidy(peers, activePeerTokens(pf.principals));
+  const plan = planPeerTidy(peers, activePeerTokens(pf.principals), await (await import("../lib/peer-trust.js")).peerAnchorOf());
   const todo = plan.filter((g) => !g.skip);
   if (!apply) {
     output({ ok: true, plan });
