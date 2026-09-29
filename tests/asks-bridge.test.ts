@@ -6,7 +6,7 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { answerDiscordInteraction, answerFromCard, answerFromChat } from "../src/bridge/ask-entry.js";
 import { cancelStaleRuntimeAsks, noteRuntimeDialogs, openRuntimeAsk, permissionLabel, resetRuntimeAsksForTest, settleRuntimeAsk } from "../src/bridge/ask-runtime.js";
-import { deliverReplyWithAsk, ownerPresence, sweepExpired, setAsksForTest, type AsksDeps } from "../src/bridge/asks.js";
+import { answerDropped, deliverReplyWithAsk, ownerPresence, sweepExpired, setAsksForTest, type AsksDeps } from "../src/bridge/asks.js";
 import { subscribeEvents, type BridgeEvent } from "../src/bridge/event-bus.js";
 import { setLedgerFeedForTest, sseEventAllow } from "../src/bridge/ledger-feed.js";
 import { handleAsksApi } from "../src/bridge/local-api/asks.js";
@@ -504,5 +504,32 @@ describe("第二轮审查的复现", () => {
     expect((await post(LEGACY_STAR_TOKEN))!.status).toBe(403);
     expect((await post(owner()))!.status).toBe(200);
     ownerPresence.setVisible("dev_1", false);
+  });
+});
+
+describe("押着的答复没送到（Workflow 复核 wf2 classify-merge-8）", () => {
+  test("收件的 agent 被 kill：ask 放回「待你处理」、答案清掉、记一条事件，告诉 owner 再答；再答时重新找收件方", async () => {
+    const a = (await reply())!;
+    expect((await answerFromCard("p", a.id, { choices: ["[button:go]"] }, owner())).status).toBe(202);
+    const answer = delivered.find((e) => e.meta.triggerKind === "ask_answer")!;
+    expect(getAsk(openLedger(path), a.id)?.state).toBe("answered");
+    delivered = [];
+    await answerDropped(answer);
+    expect(getAsk(openLedger(path), a.id)).toMatchObject({ state: "open", answer: null });
+    expect(listEvents(openLedger(path), {}).some((e) => e.kind === "ask_reopen")).toBe(true);
+    expect(events.at(-1)?.data).toMatchObject({ askId: a.id, state: "open" });
+    expect(delivered).toHaveLength(1);
+    expect(delivered[0].to).toMatchObject({ kind: "user", channelId: "999" });
+    expect(delivered[0].content).toContain("没送到");
+    await answerDropped(answer); // 已经放回过：不重复通知
+    expect(delivered).toHaveLength(1);
+    expect((await answerFromCard("p", a.id, { choices: ["[button:go]"] }, owner())).status).toBe(202);
+  });
+
+  test("不是 owner 的答复（过期通知之类）丢了不动 ask", async () => {
+    const a = (await reply())!;
+    await answerDropped({ ...replyEnv("x"), meta: { ...replyEnv("x").meta, askId: a.id, triggerKind: "bridge_synth" } });
+    expect(getAsk(openLedger(path), a.id)?.state).toBe("open");
+    expect(delivered.filter((e) => e.to.kind === "user" && e.to.channelId === "999")).toHaveLength(0);
   });
 });

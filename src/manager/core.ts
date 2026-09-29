@@ -5,7 +5,7 @@
  * 从 manager.ts 逐字搬出（函数体未改，只加 export / 改相对路径）。
  */
 import { STATE_DIR } from "../lib/paths.js";
-import { AGENT_NAME_BLOCKLIST_RE, invisibleNameError, isReservedAgentName, REGISTRY_PATH as STATE_REGISTRY_PATH } from "../lib/registry.js";
+import { AGENT_NAME_BLOCKLIST_RE, canonicalTwinError, invisibleNameError, isReservedAgentName, readRegistryAgentsSync, REGISTRY_PATH as STATE_REGISTRY_PATH } from "../lib/registry.js";
 import { readFile, writeFile, mkdir, rename } from "fs/promises";
 import { writeJsonAtomic } from "../lib/state-file.js";
 import { existsSync, writeSync } from "fs";
@@ -178,7 +178,7 @@ export function normalizeName(raw: string): string {
  * （检查的与 tmux -c 实际收到的必须是同一个串），生产里原样返回。
  */
 export function assertCreatable(name: string, dir: string, runtime: string | undefined): string {
-  assertValidNewName(name);
+  assertValidNewAgent(name);
   const d = normalizeSandboxAgentDir(dir);
   const dirProblem = sandboxAgentDirProblem(d);
   if (dirProblem) throw new Error(dirProblem);
@@ -205,6 +205,13 @@ export function assertValidNewName(raw: string): void {
   if (isReservedAgentName(cleaned)) throw new Error(`agent 名称不能是 owner / master（台账里是身份保留名）：${JSON.stringify(raw)}`);
 }
 
+/** 新建 / resume / 收编：名字合法，且跟 registry 里已有的 agent 规范化后不撞（canonicalTwinError；改名在 agent-rename.ts 按同一规则查） */
+export function assertValidNewAgent(name: string, existing: string[] = readRegistryAgentsSync(STATE_REGISTRY_PATH).map((a) => a.name)): void {
+  assertValidNewName(name);
+  const twin = canonicalTwinError(normalizeName(name), existing);
+  if (twin) throw new Error(twin);
+}
+
 export function formatAge(date: Date): string {
   const diff = Date.now() - date.getTime();
   const mins = Math.floor(diff / 60_000);
@@ -219,10 +226,7 @@ export function output(data: Record<string, unknown>) {
   console.log(JSON.stringify(data));
 }
 
-/**
- * 大输出用这个：同步写完才返回。console.log 写管道是异步的，实测 manager 退出时读方稍慢就只剩前 64KB（`sessions`
- * 带上 Codex 子线程约 180KB → bridge 解析失败）。output() 不直接改成这样：takeover 靠替换 console.log 截 cmdResume 的输出。
- */
+/** 大输出用这个：同步写完才返回。console.log 写非阻塞管道会截断（见 tests/manager-output.test.ts）；output() 不直接改成这样：takeover 靠替换 console.log 截 cmdResume 的输出 */
 export function outputSync(data: Record<string, unknown>) {
   const buf = Buffer.from(JSON.stringify(data) + "\n");
   for (let off = 0; off < buf.length; ) {

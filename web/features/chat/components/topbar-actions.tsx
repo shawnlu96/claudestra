@@ -8,6 +8,7 @@ import { TerminalButton, TerminalIcon, useTerminalEntry } from "../../terminal/t
 import { AgentActions, MoreMenu, closeDropdown, hasActionMenu } from "./agent-actions";
 import { OpenButton } from "./open-button";
 import { InfoButton } from "./info-button";
+import { useFullScope } from "../contacts-data";
 
 /** 管理：四宫格（lucide layout-grid），只在折叠菜单里用——平铺时仍是文字按钮 */
 function ManageIcon() {
@@ -31,8 +32,10 @@ export function TopBarActions({ agent, busy, onManage }: { agent: AgentSession; 
   const t = useT();
   const [searchOpen, setSearchOpen] = useState(false);
   const term = useTerminalEntry(agent);
-  const master = !!agent.pinnedMaster;
-  const merged = hasActionMenu(agent);
+  const full = useFullScope() === true;
+  // 「管理」（重启 / 停止 / 新建 agent）只挂在大总管页，且只给全权设备：scope 含大总管但不是全权的设备点进去全是 403
+  const manage = !!agent.pinnedMaster && full;
+  const merged = hasActionMenu(agent, full);
   const pick = (fn: () => void) => () => {
     closeDropdown();
     fn();
@@ -41,7 +44,7 @@ export function TopBarActions({ agent, busy, onManage }: { agent: AgentSession; 
   const lead = (
     <>
       <ShareMenuItem busy={busy} className="@xl:hidden" onPick={closeDropdown} />
-      {master && (
+      {manage && (
         <li className="@xl:hidden">
           <button onClick={pick(onManage)}>
             <ManageIcon />
@@ -75,7 +78,7 @@ export function TopBarActions({ agent, busy, onManage }: { agent: AgentSession; 
       {/* 窄顶栏只是 CSS 隐藏，不能改成条件渲染：ShareButton 里的「工作中 / 切会话自动退出分享」守卫靠它挂着 */}
       <span className="hidden items-center gap-0.5 @xl:flex">
         <ShareButton busy={busy} />
-        {master && (
+        {manage && (
           <button
             className="btn btn-ghost btn-sm px-2 text-[13px]"
             title={t("Agent 管理(生命周期操作,不经过 LLM)")}

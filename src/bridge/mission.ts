@@ -26,6 +26,7 @@ import {
 } from "./autopilot-evidence.js";
 import { closeRun, logOrphanRun, pendingCloseOf } from "./autopilot-close.js";
 import { newMessageId, newThreadId, type Envelope } from "./router.js";
+import { turnCuts } from "./turn-cuts.js";
 
 /** 回合结束后等多久再递：让人有机会先开口，也躲开 Stop 之后的收尾（排队消息、typing 清理） */
 let GRACE_MS = 45_000;
@@ -169,7 +170,9 @@ async function deliverWrapup(agent: string, m: Mission, now: number): Promise<vo
 
 /** 让位：主回合在跑、人刚说过话（含点了打断）、agent 不在线。排太久记一行「未推进」（每条唤醒只记一次） */
 async function yieldIfNeeded(agent: string, m: Mission, now: number): Promise<boolean> {
-  const why = yieldReason({ online: !!clientOf(agent), turnBusy: await busyNow(agent), lastHumanAt: lastHumanMessageAt(agent, channelOf(agent) ?? undefined) }, now);
+  const ch = channelOf(agent) ?? undefined;
+  const hold = ch ? turnCuts.interruptHold(ch) : null; // 「停」之后不替人续上（bridge/turn-cuts.ts）
+  const why = yieldReason({ online: !!clientOf(agent), turnBusy: await busyNow(agent), lastHumanAt: lastHumanMessageAt(agent, ch), interruptHold: hold }, now);
   if (!why) return false;
   const logged = await upd((all) => {
     const cur = all[agent];

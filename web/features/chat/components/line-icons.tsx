@@ -104,6 +104,22 @@ export const FileIcon = (p: IconProps) => (
   </Svg>
 );
 
+/** lucide chevron-right（展开态由调用方 rotate-90） */
+export const ChevronRightIcon = (p: IconProps) => (
+  <Svg {...p}>
+    <path d="m9 18 6-6-6-6" />
+  </Svg>
+);
+
+/** lucide triangle-alert */
+export const TriangleAlertIcon = (p: IconProps) => (
+  <Svg {...p}>
+    <path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3" />
+    <path d="M12 9v4" />
+    <path d="M12 17h.01" />
+  </Svg>
+);
+
 /** 菜单里按名字取的图标（名字由 ../agent-menu.ts 的纯函数给出，它不能依赖 React） */
 const MENU_ICONS: Record<LineIconName, (p: IconProps) => ReactNode> = {
   "folder-open": FolderOpenIcon,

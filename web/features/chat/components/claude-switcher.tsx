@@ -10,6 +10,7 @@ import { useT } from "@/lib/i18n";
 import { useKeepInViewport } from "@/lib/keep-in-viewport";
 import { claudeSettings } from "@/lib/api/agents";
 import type { ApiError } from "@/lib/api/client";
+import { useFullScope } from "../contacts-data";
 
 /**
  * TopBar 的会话级模型/effort 徽章 + 快速切换器（owner 2026-07-23）。
@@ -18,6 +19,7 @@ import type { ApiError } from "@/lib/api/client";
  * registry → 全局默认）；点开下拉面板直接点选切换——直打 bridge /api/v1/agents/:name/
  * claude-settings → 注入原生 /model、/effort（与 TUI 手打同一路径）。
  * 回合进行中 Bridge 409，就地提示不打断。切换成功 refreshAgents 拉回真值。
+ * 非全权设备（guest / 部分 scope）只给只读徽章：三种运行时的切换接口都要全权，点开也只能 403。
  */
 export function ClaudeSwitcher({ agent }: { agent: AgentSession }) {
   const t = useT();
@@ -29,6 +31,7 @@ export function ClaudeSwitcher({ agent }: { agent: AgentSession }) {
   const popRef = useRef<HTMLDivElement>(null);
   useKeepInViewport(popRef, open);
   const catalog = useClaudeModelCatalog(open), models = catalog.models;
+  const full = useFullScope() === true;
 
   // 点面板外任意处关闭
   useEffect(() => {
@@ -41,6 +44,7 @@ export function ClaudeSwitcher({ agent }: { agent: AgentSession }) {
   }, [open]);
 
   if (agent.status === "stopped") return null;
+  if (!full) return <ReadOnlyChip label={modelLabel(agent.model, models)} effort={agent.effort} />;
 
   // v2.23+ Pi 会话走自己的切换器：模型来自 provider 配置（models.json）而不是
   // Claude Code 的别名表，切换走扩展命令 `/claudestra-model`、`/claudestra-thinking`
@@ -125,6 +129,18 @@ export function ClaudeSwitcher({ agent }: { agent: AgentSession }) {
 }
 
 /** 目录为空时的占位：请求中显示「加载中…」；失败显示原因 + 重试（打开面板时 hook 也会自动重拉一次）。 */
+/** 非全权设备的只读徽章：同一个样子，不能点 */
+function ReadOnlyChip({ label, effort }: { label: string; effort?: string | null }) {
+  const t = useT();
+  return (
+    <span className="flex shrink-0 items-center gap-1 rounded-full bg-base-200 px-2 py-0.5 font-mono text-[10.5px] text-base-content/60" title={t("当前模型与 effort")}>
+      <span className="max-w-[72px] truncate">{label}</span>
+      <span className="opacity-40">·</span>
+      <span>{effort || "?"}</span>
+    </span>
+  );
+}
+
 function ModelCatalogStatus({ loading, error, retry }: { loading: boolean; error: string | null; retry: () => void }) {
   const t = useT();
   if (loading || !error) return <span className="text-[11px] text-base-content/40">{t("加载中…")}</span>;
