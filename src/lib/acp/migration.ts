@@ -20,6 +20,8 @@ export function migrateCodexTransports(agents: Record<string, MigratingAgent>, r
   const result: MigrationResult = { changed: [], restart: [], pending: [] };
   for (const [name, agent] of Object.entries(agents)) {
     if (agent.runtime !== "codex") continue;
+    if (!includePending && agent.transport === "acp") continue;
+    if (!ready.ok && agent.transport === "acp") continue;
     if (agent.transport === "tmux" && (!agent.acpPending || !includePending)) continue;
     const before = agent.transport;
     const pending = agent.acpPending === true;

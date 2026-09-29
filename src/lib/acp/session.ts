@@ -100,7 +100,7 @@ export class AcpSession {
     const r = await this.rpc.request(
       "_session/steering",
       { sessionId: this.sessionId, prompt: [{ type: "text", text }] },
-      { timeoutMs: 30_000, onResult: (res: any) => void (res?.outcome === "startedNewTurn" && (done = this.waitEndAfter(this.statusSeq))) },
+      { onResult: (res: any) => void (res?.outcome === "startedNewTurn" && (done = this.waitEndAfter(this.statusSeq))) },
     );
     if (r?.outcome === "injected") return { outcome: "injected" };
     if (r?.outcome === "startedNewTurn") return { outcome: "startedNewTurn", done: done ?? this.waitEndAfter(this.statusSeq) };

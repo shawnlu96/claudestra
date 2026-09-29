@@ -12,14 +12,27 @@ import { loadRegistry, migrateWorkerToAgent, output, patchRegistryAgent, saveReg
 const RESTART_TIMEOUT_MS = 240_000;
 
 export async function cmdMigrate(mode?: string): Promise<void> {
-  if (mode === "--pre-reload") {
-    const lock = await acquireLock(statePath(".manager-write.lock"));
-    try { return output({ ok: true, ...(await migrateWorkerToAgent()) }); }
-    finally { lock?.release(); }
+  const r = await runMigrateMode(mode, migrateWorkersOnly, migrateAll);
+  output(r);
+  if ("failed" in r && r.failed.length) { console.error(`[migrate] Codex 重启失败：${r.failed.join(", ")}`); process.exitCode = 1; }
+}
+
+async function migrateWorkersOnly() {
+  const lock = await acquireLock(statePath(".manager-write.lock"));
+  try { return await migrateWorkerToAgent(); }
+  finally { lock?.release(); }
+}
+
+export async function runMigrateMode(
+  mode: string | undefined,
+  worker: () => Promise<{ migrated: boolean; entries: number }>,
+  acp: (automatic: boolean) => ReturnType<typeof migrateAll>,
+) {
+  if (mode !== "--acp" && mode !== "--startup") {
+    return { ok: true, ...(await worker()) };
   }
-  const r = await migrateAll(mode === "--startup");
-  output({ ok: r.failed.length === 0, ...r });
-  if (r.failed.length) { console.error(`[migrate] Codex 重启失败：${r.failed.join(", ")}`); process.exitCode = 1; }
+  const r = await acp(mode === "--startup");
+  return { ok: r.failed.length === 0, ...r };
 }
 
 export async function migrateAll(automatic = false) {

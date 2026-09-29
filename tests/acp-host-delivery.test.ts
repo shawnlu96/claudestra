@@ -9,7 +9,7 @@ import { AcpHost } from "../src/lib/acp/host.ts";
 import type { StopReport } from "../src/lib/acp/turn.ts";
 
 type Link = { onRegistered(): void; onDown(why: string): void; onFrame(m: Record<string, unknown>): void };
-type Accept = (frame: any, n: number) => boolean | "throw";
+type Accept = (frame: any, n: number) => boolean | { ok: true; lost: number; bridgeEpoch?: string } | "throw";
 const text = (t: string) => ({ type: "assistant", message: { content: [{ type: "text", text: t }] } });
 const STOP: StopReport = { event: "Stop", stopHookActive: false };
 
@@ -56,6 +56,36 @@ function unitHost(accept: Accept, timings: { drainMs?: number; permissionMs?: nu
 }
 
 describe("流式条目：没确认就不算送到（r4 P1-2）", () => {
+  test("bridge 确认毒条目已丢：本轮 StopFailure；累计丢失数没增长时下一轮可正常 Stop", async () => {
+    const u = unitHost(() => ({ ok: true, lost: 1 }));
+    u.link().onRegistered();
+    u.flushing("first");
+    await u.h.reportStop(STOP);
+    expect(u.stops.at(-1)?.event).toBe("StopFailure");
+    u.flushing("second");
+    await u.h.reportStop(STOP);
+    expect(u.stops.at(-1)?.event).toBe("Stop");
+  });
+
+  test("bridge 重启使累计丢失计数从头算：新一轮同为 1 条仍报 StopFailure", async () => {
+    const u = unitHost((_f, n) => ({ ok: true, lost: 1, bridgeEpoch: n === 1 ? "old" : "new" }));
+    u.link().onRegistered();
+    u.flushing("before restart");
+    await u.h.reportStop(STOP);
+    u.flushing("after restart");
+    await u.h.reportStop(STOP);
+    expect(u.stops.map((s) => s.event)).toEqual(["StopFailure", "StopFailure"]);
+  });
+
+  test("bridge 永不确认时重送有上限，丢掉批次并按 StopFailure 收尾", async () => {
+    const u = unitHost(() => false, { drainMs: 300 });
+    u.link().onRegistered();
+    u.flushing("stuck");
+    await u.h.reportStop(STOP);
+    expect(u.stops.at(-1)?.event).toBe("StopFailure");
+    expect(u.events.filter((e) => e.startsWith("rejected"))).toHaveLength(9);
+  });
+
   test("首条落在注册窗口里：登记前只排队；登记后 watcher 还没挂好回 false 就重送；确认之后才报 Stop", async () => {
     const u = unitHost((_f, n) => n > 2);
     u.h.pushEntries([text("first")]);

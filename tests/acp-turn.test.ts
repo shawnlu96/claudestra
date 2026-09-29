@@ -89,6 +89,17 @@ describe("AcpTurnLoop · 基本", () => {
     expect(f.loop.busy).toBe(false);
   });
 
+  test("忙时 /compact 独占下一轮 prompt，不经 steering 也不和普通消息拼接", async () => {
+    const f = fixture();
+    await f.loop.submit("work");
+    expect(f.loop.submitCommand("/compact")).toBe("queued");
+    expect(f.steers.has("/compact")).toBe(false);
+    await f.finish();
+    expect(f.prompts).toEqual(["work", "/compact"]);
+    await f.finish();
+    expect(f.stops).toHaveLength(2);
+  });
+
   test("不支持 steering：忙时排队，这轮返回后把排着的拼成一轮", async () => {
     const f = fixture({ noSteer: true });
     await f.loop.submit("a");

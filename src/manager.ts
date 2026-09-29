@@ -736,7 +736,7 @@ async function cmdResume(
   forkSession = false,
   runtimeFlag?: string,
 ) {
-  const selected = await (await import("./manager/acp-lifecycle.js")).chooseCreateTransport(runtimeFlag, undefined, forkSession);
+  const selected = await (await import("./manager/acp-lifecycle.js")).chooseResumeTransport(runtimeFlag, (await loadRegistry()).agents[normalizeName(name)], forkSession);
   const adapter = requireManaged(runtimeFlag, selected.transport);
   const avail = await adapter.available();
   if (!avail.ok) throw new Error(`无法用 --runtime ${adapter.id} 收编会话：${avail.hint}`);

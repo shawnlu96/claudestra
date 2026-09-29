@@ -25,7 +25,7 @@ Codex 的窗口仍承载宿主日志。`transport tmux` 可立即切回旧 TUI �
 | 默认迁移 PR | Codex 新建 / 收编默认 ACP；升级时装适配器、迁移 registry、重启旧线程；doctor 检查及 tmux 回退 | ACP 优先，条件不足暂退 tmux |
 | 删除 PR | 真机稳定并经审查后移除 Codex tmux 读屏 / 打字链路 | 仅 ACP |
 
-升级时新版 manager 先做旧 worker→agent 迁移；bridge 重载并开始监听后自动执行 ACP 迁移，避免宿主接到旧 bridge。迁移幂等补齐旧 registry：可用则记 `transport: "acp"` 并重启接旧 thread；固定版本适配器下载 / sha256、Codex `app-server` 探测任一失败时记 `transport: "tmux", acpPending: true`。重启 ACP 接旧线程失败也自动再起 tmux；人工执行 `transport <agent> tmux` 会清除待迁移标记，此后保持回退。暂退 tmux 的 agent 不在每次 bridge 重启时自动反复试；条件恢复后人工重跑 `manager migrate`。失败的重启留标记给下次迁移，doctor 会点名。
+升级时无参数 `migrate` 只做旧 worker→agent 迁移（旧版 updater 也这样调用）；bridge 重载并开始监听后才用 `migrate --startup` 自动执行 ACP 迁移，避免宿主接到旧 bridge。迁移幂等补齐旧 registry：可用则记 `transport: "acp"` 并重启接旧 thread；固定版本适配器下载 / sha256、Codex `app-server` 探测任一失败时，未迁移的记录记 `transport: "tmux", acpPending: true`，已有 ACP 记录保持原样，不打断正在跑的回合。重启 ACP 接旧线程失败也自动再起 tmux；人工执行 `transport <agent> tmux` 会清除待迁移标记，此后保持回退。暂退 tmux 的 agent 不在每次 bridge 重启时自动反复试；条件恢复后人工重跑 `manager migrate --acp`。失败的重启留标记给下次迁移，doctor 会点名。
 
 ## 架构
 
@@ -68,7 +68,7 @@ Codex 的 ACP 策略（`CODEX_ACP_CONTROL`）：
 | 文件 | 职责 |
 |------|------|
 | `rpc.ts` | ndjson JSON-RPC 2.0 双向对端。手写，不加 SDK 依赖。<br>• 没注册处理器的请求回 -32601，绝不悬着不答。<br>• 入站先分清 request / notification / response；畸形响应（缺 jsonrpc、result/error 不是恰好一个）让请求失败，不算成功。<br>• 单行和未收完的半行都有字节上限（缺省 32 MiB，可配）：超了整条连接作废，日志只留截断摘要。<br>• 流断了，在途请求全部失败 |
-| `turn.ts` | 统一调度器：prompt、steering、适配器另起的外部回合、补 reply 都按到达顺序进同一个队列，同一时刻只有一轮。<br>• 有 steering 在途就不开新回合、也不算空闲：`startedNewTurn` 在新回合**开始**时就回，回包到之前那一轮已经在跑。<br>• 外部回合在适配器里已经在跑，先等它（它的结束信号由 IO 在处理回包的同一刻挂上，结束得再早也不漏）。<br>• 插不进的 steering 在原位置变回 prompt，并发失败也不乱序。<br>• 回合结束按 Stop hook 契约上报；bridge 回 block 就排一轮 `<hook_prompt>`，仍排在在跑的外部回合之后 |
+| `turn.ts` | 统一调度器：prompt、steering、适配器另起的外部回合、斜杠命令、补 reply 都按到达顺序进同一个队列，同一时刻只有一轮。<br>• 有 steering 在途就不开新回合、也不算空闲：`startedNewTurn` 在新回合**开始**时就回，回包到之前那一轮已经在跑。<br>• 外部回合在适配器里已经在跑，先等它（它的结束信号由 IO 在处理回包的同一刻挂上，结束得再早也不漏）。<br>• 插不进的 steering 在原位置变回 prompt，并发失败也不乱序；steer 不设短超时，超过 30 秒仍等待原请求，不因本地超时重复投递。<br>• 斜杠命令独占下一轮 prompt，不走 steering。<br>• 回合结束按 Stop hook 契约上报；bridge 回 block 就排一轮 `<hook_prompt>`，仍排在在跑的外部回合之后 |
 | `updates.ts` | `session/update` 翻成 Claude Code 形状的条目，和 rollout 翻译同形 |
 | `failures.ts` | 两种失败形态：AIR `sessionFailure` 按 id 去重；legacy 的 `usageLimitExceeded` JSON-RPC 错误按回合去重。另外处理 `-32000` 未登录；失败会翻成错误条目 |
 | `config.ts` | configOptions 的解析和本地校验，顶栏要的 `model_state`，额度卡的选项 |
@@ -101,7 +101,7 @@ bridge 那头：`bridge/acp-link.ts`（宿主的帧 → watcher 推送 / 卡片 
 - **新建要跑一轮引导。** 新线程在第一轮之前不落盘，所以 create 时起一个短命的适配器，`session/new` 后跑一轮 `[claudestra:bootstrap]`（和 tmux 下 `codex exec` 引导同一个做法，历史里整轮丢掉），职责与频道规则经 `developer_instructions` 在这一轮写进线程。宿主之后一律接已有线程：适配器声明了 `session/resume` 就用它（不回放历史），否则 `session/load`；首条入站附职责前言（与 tmux 同一份）。
 - **fork 与 /clear**：fork 收编仍用 tmux 路径；ACP 下 `/clear` 先切回 tmux。其它斜杠命令（`/compact` 等）原样当一轮 prompt 交给宿主，由适配器自己认。
 - **网页直播的 seq。** 宿主推上来的条目没有 rollout 行号：watcher 给它们本地序号、sid 带 `acp:` 前缀，前端据此不拿它们跟 rollout 的历史游标比，退回按时间戳合并（bridge 直投的 reply 本来就这样）。代价：回合中途刷新网页时，直播气泡的剔重没有按行号那么精确。以后要补，可以让宿主读 rollout 对齐行号。
-- **流式条目不丢、没确认不报成功。** 宿主的条目进出站队列，按序号一批批送，bridge 回 true 才出队；bridge 重启、刚登记还没挂好 watcher（要查 registry）时回 false 或断线，条目留着退避重送，重新登记后接着送，bridge 按 hostId + 序号跳过已经处理过的前缀。回合末等队列全部被确认才报 Stop（收尾文字不会被 Stop 的 drain 漏掉）；90 秒等不到确认，或 bridge 太久不在、队列超过 5000 条丢过最老的，按 StopFailure 报。回合在适配器里接着跑，宿主按 channel-server 的退避重连。
+- **流式条目按确认收尾。** 宿主的条目进有界出站队列，按序号一批批送；bridge 没挂好 watcher 时回 false，宿主退避重送，连续失败 8 次便记丢失并跳过这批。bridge 按 hostId + 序号跳过已处理前缀；单条坏记录和序号缺口按丢失计数确认，避免整批无限重送或重复正文。bridge 回包带累计丢失数，宿主在该轮按 StopFailure 报「可能丢了条目」。回合末等队列清空才报 Stop；90 秒等不到确认、bridge 重连、或队列超过 5000 条溢出也按 StopFailure 报。回合在适配器里接着跑，宿主按 channel-server 的退避重连。
 - **权限卡、额度卡的按钮带卡的代际。** 权限请求按频道排队、一次出一张；每张卡新生成代际，旧卡、答过的一律 409、不授权。作答先原子认领，再经宿主确认它还在等才算答上。宿主等 10 分钟没人答、适配器退出时按取消回适配器并撤卡；宿主断线撤卡，重连后把还在等的补发上来（新卡、新代际）。额度卡同理：同一个失败又报一次沿用这张卡，换了一次失败就是新卡，旧卡的按钮作废。
 - **排障。** 没有 TUI 可看了：看 agent 的 tmux 窗口（宿主日志：收到的消息、接上哪个线程、回合失败、适配器重起）和 `APP_SERVER_LOGS`（状态目录 `logs/acp/<agent>/`）。
 
@@ -109,7 +109,7 @@ bridge 那头：`bridge/acp-link.ts`（宿主的帧 → watcher 推送 / 卡片 
 
 ```bash
 bun src/manager.ts create <name> <dir> [purpose] --runtime codex  # 缺省 ACP；首次自动下载并校验适配器
-bun src/manager.ts migrate                                       # 升级自动执行，也可重跑失败的迁移
+bun src/manager.ts migrate --acp                                 # bridge 启动后自动执行，也可重跑失败的迁移
 bun src/manager.ts doctor                                        # 看适配器、CLI、暂退与待重启
 bun src/manager.ts transport <agent> tmux                         # 一键回退、记住人工选择
 bun src/manager.ts transport <agent> acp                          # 条件恢复后手动切回（自动 restart）

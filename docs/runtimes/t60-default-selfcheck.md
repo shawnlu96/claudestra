@@ -28,7 +28,7 @@ No production credentials were copied or linked into the sandbox.
 The update sequence now defers ACP host restarts until the new bridge is
 listening. Tests check project migration runs first and that a project
 migration error does not suppress ACP migration. Startup skips agents already
-temporarily on tmux; an explicit `manager migrate` retries them.
+temporarily on tmux; an explicit `manager migrate --acp` retries them.
 
 The manual `transport <agent> acp` command reports the registry's actual
 transport after restart. If the ACP start falls back to tmux, it reports the
@@ -55,3 +55,40 @@ reply. The sandbox and its temporary token were removed. A later audit found
 that a thrown restart subprocess error would have stopped migration before
 later agents; the migration now records that agent as failed, keeps its retry
 marker, and continues. A regression covers the sequence.
+
+## r5 repair check
+
+The old updater invokes bare `migrate` before daemon reload. A repair keeps
+that invocation limited to worker→agent migration; only `--startup` (after the
+new bridge listens) and `--acp` run ACP migration. Existing ACP agents are
+left alone by automatic migration and transient readiness failures. The
+reviewer's original #232 probe now passes, as do new command-dispatch and
+active-agent regressions.
+
+The r5 delivery probes found that a poisoned entry made the bridge reject an
+entire batch forever, duplicating earlier text on every retry. The bridge now
+acknowledges processed entries with a loss count, including sequence gaps;
+the host bounds retries and reports StopFailure for any loss. A bridge epoch
+distinguishes cumulative loss counters across bridge restarts. Busy slash
+commands queue as an independent prompt turn; steering has no local 30-second
+timeout, so a delayed result cannot turn into a second prompt. ACP slash
+commands on Discord are refused with a Web instruction.
+
+A fresh read-only ephemeral `codex exec` review found three edge cases. The
+bridge-epoch and Discord findings were fixed; the epoch has a regression test,
+and the Discord path is guarded before any tmux key injection.
+The remaining case is an adapter that holds an open connection forever but
+never answers steering: the turn queue must wait because retrying or opening
+another prompt could duplicate or overlap a turn the adapter already began.
+The adapter exit path resolves the wait; an indefinitely live, unresponsive
+adapter still needs an explicit recovery protocol. This is recorded as a
+remaining availability limit, with delivery kept conservative.
+
+The same pass fixed the r5 resume P2: resuming a same-name agent now preserves
+an explicit manual tmux choice, including fork resume; a temporary tmux
+fallback remains eligible for ACP when conditions recover.
+
+An isolated stub-only sandbox created a default ACP Codex agent and sent a
+second Web message during a paused first turn. Both requests returned 200;
+the first reply confirmed one inserted message and the first turn completed.
+The sandbox was cleaned, with no auth file copied or linked.

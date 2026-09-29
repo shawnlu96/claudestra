@@ -2,8 +2,8 @@ import { expect, test } from "bun:test";
 import { migrateCodexTransports, type MigratingAgent } from "../src/lib/acp/migration.ts";
 import { checkAcpReady, type AcpReadyDeps } from "../src/lib/acp/readiness.ts";
 import { acpDoctorChecks } from "../src/lib/doctor-acp.ts";
-import { restartMigrated } from "../src/manager/acp-migration.ts";
-import { chooseCreateTransport, persistManualTmux, recoverFailedAcpLaunch } from "../src/manager/acp-lifecycle.ts";
+import { restartMigrated, runMigrateMode } from "../src/manager/acp-migration.ts";
+import { chooseCreateTransport, chooseResumeTransport, persistManualTmux, recoverFailedAcpLaunch } from "../src/manager/acp-lifecycle.ts";
 import { managedFor } from "../src/lib/runtimes/index.ts";
 import type { RegistryAgent } from "../src/lib/registry.ts";
 
@@ -12,6 +12,31 @@ const healthy: AcpReadyDeps = {
   run: async () => ({ ok: true, out: "Usage: codex app-server [OPTIONS]", err: "" }),
   installed: () => ({ ok: true, path: "/state/acp/index.js" }),
 };
+
+test("旧 updater 的无参数 migrate 只搬 worker，不在 daemon reload 前启动 ACP 宿主", async () => {
+  const calls: string[] = [];
+  const worker = async () => { calls.push("worker"); return { migrated: true, entries: 1 }; };
+  const acp = async (_automatic: boolean): ReturnType<typeof import("../src/manager/acp-migration.ts").migrateAll> => {
+    calls.push("acp");
+    throw new Error("旧 bridge 尚未 reload，不得迁移 ACP");
+  };
+  expect(await runMigrateMode(undefined, worker, acp)).toEqual({ ok: true, migrated: true, entries: 1 });
+  expect(await runMigrateMode("--pre-reload", worker, acp)).toEqual({ ok: true, migrated: true, entries: 1 });
+  expect(calls).toEqual(["worker", "worker"]);
+});
+
+test("bridge 重启时探测抖动不改已有 ACP agent，也不重启其进行中的回合", () => {
+  const agents: Record<string, MigratingAgent> = {
+    busy: { runtime: "codex", transport: "acp", status: "active", acpRestartPending: true },
+    old: { runtime: "codex", status: "active" },
+  };
+  const unavailable = { ok: false as const, reason: "Codex CLI 暂时不可用" };
+  expect(migrateCodexTransports(agents, unavailable, false)).toMatchObject({ changed: ["old"], restart: [] });
+  expect(agents.busy).toMatchObject({ transport: "acp", acpRestartPending: true });
+  expect(agents.old).toMatchObject({ transport: "tmux", acpPending: true });
+  expect(migrateCodexTransports(agents, { ok: true }, false)).toMatchObject({ changed: [], restart: [] });
+  expect(agents.busy.transport).toBe("acp");
+});
 
 test("ACP 闸门识别旧 CLI 打印顶层 help 后 exit 0，不能误判可用", async () => {
   expect(await checkAcpReady(false, { ...healthy, run: async () => ({ ok: true, out: "Usage: codex [OPTIONS]", err: "" }) }))
@@ -122,6 +147,12 @@ test("旧记录缺 transport 时 owner 选 tmux 会落成显式值，后续迁�
 test("新建显式 --transport tmux 会记成人工选择，fork 的临时 tmux 则仍待迁移", async () => {
   expect(await chooseCreateTransport("codex", "tmux")).toEqual({ transport: "tmux", manualTmux: true });
   expect(await chooseCreateTransport("codex", undefined, true)).toEqual({ transport: "tmux", acpPending: true });
+});
+
+test("resume 同名人工 tmux 不被 ACP 默认值冲掉；暂退 tmux 可以重试 ACP", async () => {
+  expect(await chooseResumeTransport("codex", { transport: "tmux" })).toEqual({ transport: "tmux", manualTmux: true });
+  expect(await chooseResumeTransport("codex", { transport: "tmux" }, true)).toEqual({ transport: "tmux", manualTmux: true });
+  expect(await chooseResumeTransport("codex", { transport: "tmux", acpPending: true }, true)).toEqual({ transport: "tmux", acpPending: true });
 });
 
 test("普通 restart 自己完成 tmux 回退时，迁移输出也如实标记", async () => {

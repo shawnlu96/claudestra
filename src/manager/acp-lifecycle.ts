@@ -35,6 +35,12 @@ export async function chooseCreateTransport(runtime?: string, requested?: string
   return { transport: "tmux", acpPending: true };
 }
 
+/** resume 同名旧记录时沿用人工 tmux；暂退 tmux 的记录可在条件恢复后接回 ACP。 */
+export function chooseResumeTransport(runtime: string | undefined, prior: unknown, fork = false) {
+  const old = prior as { transport?: string; acpPending?: boolean } | undefined;
+  return chooseCreateTransport(runtime, old?.transport === "tmux" && !old.acpPending ? "tmux" : undefined, fork);
+}
+
 export async function prepareCreateRuntime(name: string, dir: string, runtime?: string, requested?: string): Promise<
   { ok: true; dir: string; adapter: ManagedRuntimeAdapter; acpPending?: true; manualTmux?: true } | { ok: false; error: string }
 > {
