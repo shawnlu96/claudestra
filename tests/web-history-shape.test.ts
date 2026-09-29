@@ -145,7 +145,9 @@ describe("外源开头的方括号块：网页显示 = agent 收到的正文（T
     expect(out.attachments?.map((x) => x.name)).toEqual(["pic.png"]);
   });
   test("真正的中断标记 / 命令记录（CC 自己写的，没有 from）仍是分隔线；本人发的也照旧", () => {
-    const out = toChatMessages([u(1, "[Request interrupted by user]"), u(2, "<command-name>/clear</command-name>"), u(3, "[Request interrupted by user for tool use]", { from: "iPhone", fromId: "api:owner:self" })], { selfIds: SELF });
+    const own = { from: "iPhone", fromId: "api:owner:self" };
+    const items = [u(1, "[Request interrupted by user]"), u(2, "<command-name>/clear</command-name>"), u(3, "[Request interrupted by user for tool use]", own)];
+    const out = toChatMessages(items, { selfIds: SELF });
     expect(out.map((m) => `${m.role}:${m.content}`)).toEqual(["system:回合已中断", "system:/clear", "system:回合已中断"]);
   });
 });
