@@ -185,6 +185,19 @@ describe("imageSrcKind：图片来源", () => {
     expect(imageSrcKind("/api/v1/attachments/a%E0%A4%A.png")).toBe("blocked"); // 非法 % 序列一律拒
     expect(imageSrcKind("/api/v1/attachments/a%7F.png")).toBe("blocked"); // DEL 和服务端一样算控制字符
   });
+  test("误降级（r4）：CRLF 的 CHANGELOG 和 LF 版一样不降级", () => {
+    const item = (i: number, j: number) => `- fix \`x${j}\` ([#${i}${j}](https://github.com/o/r/pull/${i}${j}))`;
+    const doc = Array.from({ length: 60 }, (_, i) => `## v1.${i}\n\n` + Array.from({ length: 8 }, (_, j) => item(i, j)).join("\n")).join("\n\n") + "\n";
+    expect(mdTooHeavy(doc)).toBe(false);
+    expect(mdTooHeavy(doc.replace(/\n/g, "\r\n"))).toBe(false);
+  });
+  test("误降级（r4）：README 的 HTML 赞助商块（约 6 KB）在 Worker 路径不降级，同步路径才按累计上限拦", () => {
+    const oc = "https://opencollective.com/p/backer";
+    const backer = (i: number) => `<a href="${oc}/${i}/website" target="_blank"><img src="${oc}/${i}/avatar.svg"></a>`;
+    const readme = "# pkg\n\n" + Array.from({ length: 40 }, (_, i) => backer(i)).join("\n") + "\n\n## Usage\n\ntext\n";
+    expect(mdTooHeavy(readme)).toBe(false);
+    expect(mdTooHeavy(readme, { sync: true })).toBe(true);
+  });
   test("imageSrcOf：do-md 给的 src 带着 title / 尖括号，取出真正的地址", () => {
     expect(imageSrcOf('https://t.example/p.png "title"')).toBe("https://t.example/p.png");
     expect(imageSrcOf("x.png  't'")).toBe("x.png");

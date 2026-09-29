@@ -1,6 +1,7 @@
 /**
- * 试解析排队（tests/web-probe-queue.test.ts）：一个 Worker 依次试解析，每段有时间预算，超时就杀掉 Worker、判「太慢」，
- * 下一段再起新的。护栏按写法一类类补总会漏，预算兜住所有「慢但不溢出」的写法。
+ * 试解析排队（tests/web-probe-queue.test.ts）：一个 Worker 依次试解析，每段有时间预算，超了判「太慢」。
+ * 护栏按写法一类类补总会漏，预算兜住所有「慢但不溢出」的写法。耗时由 Worker 自己量（主线程忙着渲染时收消息会晚，
+ * 按主线程算预算会变长）；主线程的计时器只负责杀掉卡在解析里的 Worker，下一段再起新的。
  * Worker 起不来（不支持、脚本加载失败、迟迟不开工）→ 之后一律返回 null，调用方退回同步试解析 + 护栏。
  * 结果按 md 原文缓存：消息列表重挂载时直接拿结论，不再先闪一下纯文本。
  */
@@ -8,12 +9,14 @@
 export const PROBE_BUDGET_MS = 300;
 /** 派活后多久还没开工算 Worker 起不来：首个任务要先加载脚本和 do-md，经中继的手机上可能要几秒 */
 export const PROBE_START_MS = 10_000;
+/** 开工后超过预算这么久还没回结论，就杀掉 Worker：它自己量的耗时已经超了，只是还没算完 */
+const KILL_GRACE_MS = 200;
 const CACHE_SIZE = 200;
 
 export type ProbeVerdict = "ok" | "complex" | "slow";
 
-/** Worker 里回的消息：开工时 {id, started}，解析完 {id, ok} */
-export type ProbeReply = { id: number; started?: boolean; ok?: boolean };
+/** Worker 里回的消息：开工时 {id, started}，解析完 {id, ok, ms}（ms = Worker 里量的解析耗时） */
+export type ProbeReply = { id: number; started?: boolean; ok?: boolean; ms?: number };
 
 export interface ProbeWorker {
   postMessage(msg: unknown): void;
@@ -64,11 +67,11 @@ export function createProbeQueue(spawn: () => ProbeWorker, { budget = PROBE_BUDG
     if (!busy || data?.id !== busy.id) return;
     clearTimeout(timer);
     if (data.started) {
-      // 超预算时 Worker 还卡在解析里，只能整个杀掉，下一段重新起
-      timer = setTimeout(() => (kill(), finish("slow")), budget);
+      // 兜底：Worker 还卡在解析里就只能整个杀掉，下一段重新起
+      timer = setTimeout(() => (kill(), finish("slow")), budget + KILL_GRACE_MS);
       return;
     }
-    finish(data.ok ? "ok" : "complex");
+    finish(!data.ok ? "complex" : (data.ms ?? 0) > budget ? "slow" : "ok");
   };
   function pump() {
     if (busy || broken || !queue.length) return;

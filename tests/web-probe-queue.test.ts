@@ -1,11 +1,12 @@
 /**
- * T37b r3b：试解析排队（web/lib/chat/probe-queue.ts）——超预算判 slow 并杀掉 Worker、Worker 起不来退回同步（null）、结论缓存。
+ * T37b r3b / r4：试解析排队（web/lib/chat/probe-queue.ts）——按 Worker 自己量的耗时判 slow、卡住的杀掉重起、
+ * Worker 起不来退回同步（null）、结论缓存。
  */
 import { describe, expect, test } from "bun:test";
 import { createProbeQueue, type ProbeReply, type ProbeWorker } from "@/lib/chat/probe-queue";
 
-type Behavior = "ok" | "complex" | "hang" | "silent";
-/** 假 Worker：按 md 决定怎么回。hang = 开工后不再回（解析卡住）；silent = 连开工都不回（脚本没加载） */
+type Behavior = "ok" | "complex" | "over" | "hang" | "silent";
+/** 假 Worker：按 md 决定怎么回。over = 算完了但自己量的耗时超预算；hang = 开工后不再回（解析卡住）；silent = 连开工都不回 */
 function fakeSpawner(behave: (md: string) => Behavior) {
   const log = { spawned: 0, terminated: 0, jobs: [] as string[] };
   const spawn = (): ProbeWorker => {
@@ -21,7 +22,7 @@ function fakeSpawner(behave: (md: string) => Behavior) {
         if (b === "silent") return;
         const reply = (d: ProbeReply) => queueMicrotask(() => w.onmessage?.({ data: d }));
         reply({ id, started: true });
-        if (b !== "hang") setTimeout(() => reply({ id, ok: b === "ok" }), 1);
+        if (b !== "hang") setTimeout(() => reply({ id, ok: b !== "complex", ms: b === "over" ? 31 : 5 }), 1);
       },
     };
     return w;
@@ -52,6 +53,24 @@ describe("createProbeQueue", () => {
     expect(log.terminated).toBe(1);
     expect(log.spawned).toBe(2);
     expect(q.available()).toBe(true);
+  });
+
+  test("按 Worker 自己量的耗时判：超预算判 slow（主线程收消息晚不影响），不杀 Worker", async () => {
+    const { spawn, log } = fakeSpawner((md) => (md === "long" ? "over" : "ok"));
+    const q = createProbeQueue(spawn, opts);
+    expect(await q.probe("long", { md: "long" })).toBe("slow");
+    expect(await q.probe("short", { md: "short" })).toBe("ok");
+    expect(log.terminated).toBe(0);
+    expect(log.spawned).toBe(1);
+  });
+
+  test("主线程卡 100 ms 才处理消息：按 Worker 量的耗时判，不改判 slow", async () => {
+    const { spawn } = fakeSpawner(() => "ok");
+    const q = createProbeQueue(spawn, opts);
+    const p = q.probe("busy", { md: "busy" });
+    const end = performance.now() + 100; // 模拟主线程在渲染：消息和计时器都排着
+    while (performance.now() < end);
+    expect(await p).toBe("ok");
   });
 
   test("同一段并发只解析一次", async () => {

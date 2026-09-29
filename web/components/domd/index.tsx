@@ -91,8 +91,9 @@ function PlainBody({ className, text, reason, onPlain }: { className?: string; t
 export function Domd({ bodyClassName, children, onPlain, probe = "auto", ...provider }: DomdProps) {
   // 表格紧贴上一行时 do-md 认不出来（它要求表格自成块）——渲染前补上那个空行。
   // 见 ./normalize-md：0.2.10 与最新 0.11.2 行为一致，升级救不了，只能归一化。
+  // CRLF 先换成 LF：护栏按 LF 算（lib/chat/md-guard.ts），do-md 要拿到同一份。
   const initMd = useMemo(
-    () => (typeof provider.initMd === "string" ? padTableBlocks(provider.initMd) : provider.initMd),
+    () => (typeof provider.initMd === "string" ? padTableBlocks(provider.initMd.replace(/\r\n/g, "\n")) : provider.initMd),
     [provider.initMd]
   );
   // 懒加载语法落地后 remount 重新 tokenize——DOMD 只读一次,首渲时 grammar 未到

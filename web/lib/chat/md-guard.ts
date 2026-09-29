@@ -7,6 +7,7 @@
  *   真实文档单段定界符最多 1454。阈值内的最坏构造 ≤ 0.45 s。
  *   护栏只挡已知形状，却是短消息和 Worker 用不了时唯一的防线；长消息、附件另有 Worker 试解析的时间预算兜底，
  *   栈溢出 / 树太深由试解析接住（components/domd/use-plain-reason.ts）。渲染慢（嵌套总量、表格）只能靠这里。
+ *   `sync` 只在同步路径加的两条全文累计上限（HTML 行、图片行）：Worker 路径有时间预算，套上会误伤 README 的赞助商块。
  * - 链接只放行 http / https / mailto；图片分本机附件 / 内联 / 外链 / 其他，外链点了才加载（防追踪信标）。
  */
 
@@ -22,8 +23,10 @@ export const MD_MAX_PREFIX = 100;
 /** 任意一行的长度；含 `![` 或以 `<字母` 开头的正文行（会触发 do-md 回溯的两个正则）更短 */
 export const MD_MAX_LINE = 8 * 1024;
 export const MD_MAX_REGEX_LINE = 4 * 1024;
-/** 去掉行首前缀后以 `<字母` 开头的行，全文累计长度（HTML 块正则的回溯随整篇超线性增长，单行限长挡不住多行；真实文档最多 449） */
+/** 同步路径：去掉行首前缀后以 `<字母` 开头的行，全文累计长度（HTML 块正则的回溯随整篇超线性增长，单行限长挡不住多行） */
 export const MD_MAX_HTML_TOTAL = 4 * 1024;
+/** 同步路径：含 `![` 的行全文累计长度（src 一长串引号的图片行多行叠加，chromium 同步渲染 1.3–7.5 s） */
+export const MD_MAX_IMG_TOTAL = 4 * 1024;
 /** `](` 到 `)` 之间的连续空白（图片 / 链接正则在这里是三次方级：1 KB 空白 2.7 s） */
 export const MD_MAX_SRC_SPACE = 64;
 /** 全文各行嵌套层数之和（每行都不超限、行数一多，React 渲染和排版照样卡：`- `×50 × 400 行 1–2 s） */
@@ -119,23 +122,29 @@ function lineTooHeavy(line: string, prefix: number): boolean {
   return line.includes("](") && srcSpaceRun(line) > MD_MAX_SRC_SPACE;
 }
 
-/** 交给 do-md 会卡住或栈溢出 → 调用方按纯文本显示 */
-export function mdTooHeavy(md: string): boolean {
+/**
+ * 交给 do-md 会卡住或栈溢出 → 调用方按纯文本显示。sync = 走主线程同步路径（没有 Worker 的时间预算兜底）。
+ * CRLF 按 LF 算：Domd 交给 do-md 前也会换成 LF（不换的话整篇没有一个真正的空行，定界符按一段数，误降级）。
+ */
+export function mdTooHeavy(raw: string, { sync = false }: { sync?: boolean } = {}): boolean {
+  const md = raw.replace(/\r\n/g, "\n");
   if (utf8Over(md, MD_MAX_BYTES)) return true;
   if (md.split("\n").some((l) => l.length > MD_MAX_LINE)) return true; // 代码块里的超长行也算（Prism 上色同样吃不消）
   let block = 0;
   let total = 0;
   let cells = 0;
   let html = 0;
+  let img = 0;
   let nest = 0;
   for (const line of proseOnly(md).split("\n")) {
     if (line === "") {
-      block = 0; // 只认真正的空行：只含空白的行、CRLF 空行（"\r"）do-md 都不分段
+      block = 0; // 只认真正的空行：只含空白的行 do-md 不分段
       continue;
     }
     const prefix = PREFIX.exec(line)?.[0].length ?? 0;
     if (lineTooHeavy(line, prefix)) return true;
-    if (HTML_START.test(line.slice(prefix)) && (html += line.length - prefix) > MD_MAX_HTML_TOTAL) return true;
+    if (sync && HTML_START.test(line.slice(prefix)) && (html += line.length - prefix) > MD_MAX_HTML_TOTAL) return true;
+    if (sync && line.includes("![") && (img += line.length) > MD_MAX_IMG_TOTAL) return true;
     if ((nest += nestOf(line)) > MD_MAX_NEST_TOTAL) return true;
     if ((cells += line.split("|").length - 1) > MD_MAX_TABLE_CELLS) return true;
     const n = (line.match(DELIM)?.length ?? 0) + (line.match(AUTOLINK)?.length ?? 0) * LINK_WEIGHT;

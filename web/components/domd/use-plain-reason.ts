@@ -2,7 +2,8 @@
  * Domd 该不该退回纯文本：先过护栏（lib/chat/md-guard.ts），再试解析。
  * - 附件预览、超过 WORKER_MIN_BYTES 的消息：在 Worker 里试解析，超预算判「太慢」（lib/chat/probe-queue.ts）；
  *   等结论期间先按纯文本显示（不带提示）。
- * - 更短的消息、流式中的消息、Worker 用不了时：主线程同步试解析（./probe），只能兜住栈溢出和树太深，慢的靠护栏。
+ * - 更短的消息、流式中的消息、Worker 用不了时：主线程同步试解析（./probe），只能兜住栈溢出和树太深，慢的靠护栏，
+ *   这条路径多加两条全文累计上限（mdTooHeavy 的 sync）。
  */
 import { useEffect, useMemo, useState } from "react";
 import { mdTooHeavy, utf8Over } from "@/lib/chat/md-guard";
@@ -47,12 +48,14 @@ export function usePlainReason(opts: StoreProps, mode: ProbeMode): PlainReason |
     };
   }, [md, viaWorker, verdict]); // eslint-disable-line react-hooks/exhaustive-deps -- 结论只随 md 变（行内规则挂载后不变）
   const needSync = typeof md === "string" && !heavy && verdict === null;
+  const syncHeavy = useMemo(() => needSync && mdTooHeavy(md as string, { sync: true }), [md, needSync]);
   // eslint-disable-next-line react-hooks/exhaustive-deps -- 同上：解析结果只随 md 变
-  const syncOk = useMemo(() => !needSync || domdSafe(opts), [md, needSync]);
+  const syncOk = useMemo(() => !needSync || syncHeavy || domdSafe(opts), [md, needSync, syncHeavy]);
   if (typeof md !== "string") return null;
   if (heavy) return "heavy";
   if (verdict === undefined) return "pending";
   if (verdict === "ok") return null;
   if (verdict) return verdict;
+  if (syncHeavy) return "heavy";
   return syncOk ? null : "complex";
 }
