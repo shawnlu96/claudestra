@@ -185,6 +185,11 @@ export interface CodexQueueSinkDeps {
    */
   onTypeInFailed?(info?: { menu?: true; unknown?: true; messageId?: string }): void;
   /**
+   * 消息没进 Codex（不在线 / 认不准线程 / queue 报错）：交给 bridge 只了结这一条（bridge/pi-abort.ts onCodexUndelivered）——
+   * 按 messageId 告诉发送方、销账，只结这一条消息；「工作中」不在这里收，等真实的 Stop / StopFailure。返回 true = bridge 已告诉发送方；false / 没接这个依赖 = 自己 notify
+   */
+  undelivered?(messageId: string, notice: string): Promise<boolean>;
+  /**
    * 重启 / 收编后第一条成功投递前附的前言（codex-launch.codexContextPreamble）。只附一次，
    * 投递失败不算用掉——下一条再附。
    */
@@ -233,7 +238,7 @@ export class CodexQueueSink implements InboundSink {
         const offline = decision.action === "offline";
         const why = offline ? "offline" : `ambiguous locks: ${decision.held.join(",")}`;
         d.log?.(`⚠️ Codex 入站未投递（${why}）`);
-        await d.notify(chatId, offline ? OFFLINE_NOTICE : AMBIGUOUS_NOTICE).catch(() => {});
+        await this.tellUndelivered(chatId, meta?.message_id, offline ? OFFLINE_NOTICE : AMBIGUOUS_NOTICE);
         return { ok: false, error: why };
       }
       if (decision.action === "switch") {
@@ -263,7 +268,7 @@ export class CodexQueueSink implements InboundSink {
       if (!r.ok) {
         const detail = (r.err || r.out || "unknown").trim().split("\n").slice(-1)[0].slice(0, 300);
         d.log?.(`❌ codex queue 失败: ${detail}`);
-        await d.notify(chatId, queueFailureNotice(detail)).catch(() => {});
+        await this.tellUndelivered(chatId, meta?.message_id, queueFailureNotice(detail));
         return { ok: false, error: detail };
       }
       return { ok: true };
@@ -271,5 +276,14 @@ export class CodexQueueSink implements InboundSink {
     const p = this.chain.then(run, run);
     this.chain = p.catch(() => {});
     return p;
+  }
+
+  /** 投不进去：先交给 bridge 按这条的 messageId 了结；bridge 认不出这条（或没连着）才自己走 reply 说（never silent） */
+  private async tellUndelivered(chatId: string | undefined, messageId: string | undefined, notice: string): Promise<void> {
+    const d = this.deps;
+    const took = messageId && d.undelivered
+      ? await d.undelivered(messageId, notice).catch((e) => (d.log?.(`交给 bridge 了结未投递的消息失败，改自己通知: ${(e as Error).message}`), false))
+      : false;
+    if (!took) await d.notify(chatId, notice).catch((e) => d.log?.(`通知发送方失败: ${(e as Error).message}`));
   }
 }

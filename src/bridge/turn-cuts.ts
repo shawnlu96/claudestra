@@ -110,6 +110,16 @@ export class TurnCuts {
     return t && { ...t, agent: this.agentOf.get(channelId) };
   }
 
+  /** 这条其实没投进去（Codex 投递失败）：从送达记录里拿掉。回合在不在跑不在这里判（bridge/pi-abort.ts onCodexUndelivered 不替它宣告完成） */
+  dropUndelivered(channelId: string, messageId: string): void {
+    this.inbound.set(channelId, (this.inbound.get(channelId) ?? []).filter((x) => x.messageId !== messageId));
+  }
+
+  /** 这个频道最后一次投递是给哪个 agent 的（送达记录里的那条被挤掉了也查得到） */
+  agentOn(channelId: string): string | undefined {
+    return this.agentOf.get(channelId);
+  }
+
   /** Codex 停字用：上次 Stop 之后排进 codex queue、还没轮到的人类消息（停之后会先跑它们） */
   codexQueuedBefore(channelId: string): string[] {
     return this.codexQueued.get(channelId) ?? [];

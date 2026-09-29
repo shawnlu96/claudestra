@@ -6,6 +6,7 @@
  *   GET  /api/v1/asks/:id[/locate]                 一条 / 它的原消息在哪（聊天引用条、「回到对话」跳原消息）
  *   GET  /api/v1/ledger/:project/asks              单个项目
  *   POST /api/v1/ledger/:project/asks/:id/answer   卡片作答 {choices: wire[], text?}；已结案 409 ask_closed；运行时弹框 400
+ *   POST /api/v1/ledger/:project/asks/:id/dismiss  owner 删卡（ask-dismiss.ts）：开着的撤销 / 收起，已结案的从列表隐藏
  *   POST /api/v1/presence                          网页可见性 {visible}：可见时每分钟一次、切后台时一次（推送规则判 owner 在不在）
  * 运行时弹框类（AUQ / 权限）的按键仍走 POST /agents/:name/answer，由那个端点记是谁选了什么。实时靠 SSE ask 事件，收到就重拉。
  */
@@ -16,6 +17,7 @@ import { canReadLedger } from "../../lib/devices.js";
 import { getAsk, type Ask } from "../../lib/ledger-asks.js";
 import { agentInScope, isOwnerPrincipal, type Principal } from "../../lib/principals.js";
 import { apiJson, forbidden } from "../api-respond.js";
+import { dismissFromCard } from "../ask-dismiss.js";
 import { answerFromCard } from "../ask-entry.js";
 import { locateAsk } from "../ask-locate.js";
 import { askReadDb, createAskFull, listForWeb, ownerPresence } from "../asks.js";
@@ -40,7 +42,7 @@ async function jsonBody(req: Request): Promise<Record<string, unknown> | null> {
 }
 
 export async function handleAsksApi(req: Request, path: string, principal: Principal): Promise<Response | null> {
-  const m = path === "/asks" ? ["", undefined, undefined, undefined] : path.match(/^\/ledger\/([^/]+)\/asks(?:\/([^/]+)\/(answer))?$/);
+  const m = path === "/asks" ? ["", undefined, undefined, undefined] : path.match(/^\/ledger\/([^/]+)\/asks(?:\/([^/]+)\/(answer|dismiss))?$/);
   const one = path.match(/^\/asks\/([^/]+?)(\/locate)?$/);
   if (!m && !one && path !== "/presence") return null;
   const ledger = canReadLedger(principal);
@@ -61,6 +63,7 @@ export async function handleAsksApi(req: Request, path: string, principal: Princ
   if (id === undefined && project !== undefined && req.method === "POST") return createHumanAsk(req, project, principal);
   if (id !== undefined) {
     if (req.method !== "POST") return apiJson(405, { ok: false, error: "method not allowed" });
+    if (m![3] === "dismiss") return dismissFromCard(project!, id, principal);
     const b = await jsonBody(req);
     if (!b) return apiJson(400, { ok: false, error: "body {choices: string[], text?: string}" });
     return answerFromCard(project!, id, b, principal);

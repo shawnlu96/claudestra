@@ -63,7 +63,7 @@ const COLLAB_WORDS: Record<string, string> = {
   "收起回放": "Close replay",
   "回放进度": "Replay position",
   "回放": "Replay",
-  // 步骤化台账（collab-steps.ts）
+  // 步骤线（collab-step-line.tsx）
   "步骤": "Steps",
   "写": "Write",
   "初审": "Review",
@@ -76,6 +76,9 @@ const COLLAB_WORDS: Record<string, string> = {
   "已交付": "delivered",
   "别的实例": "other instance",
   "作者未知": "author unknown",
+  "推断": "inferred",
+  "卡住了": "Blocked",
+  "等审查": "Awaiting review",
   "待你处理": "For you",
   "在等": "Waiting on",
   "进行中": "Active",
