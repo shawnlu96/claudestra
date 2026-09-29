@@ -17,6 +17,7 @@ import { canManage, effectivePrincipal, guestGrant, hashDeviceToken, type Device
 import type { Principal } from "../src/lib/principals";
 import { agentArchiveDir } from "../src/lib/session-archive";
 import { visibleSessions, type NeutralSessionInfo } from "../src/bridge/sessions-inventory";
+import { PEER_ENTRANCE_ONLY } from "../src/bridge/request-context";
 
 const at = "2026-01-01T00:00:00Z";
 const device = (id: string, grant: Grant): DeviceCredential => ({
@@ -92,14 +93,17 @@ const ENDPOINTS: Record<string, Endpoint> = {
 const allows = (e: Endpoint, cred: string) => (e.owner ? OWNER_ONLY : ALLOWED).has(cred);
 
 /**
- * 另两行来源（上面的矩阵都按主端口经本机反代 = lan）：peer 入口（中继 peer 帧、对外直连）没有设备身份，设备凭据一律 403，
- * Bearer 与 lan 同样判；没定来源（unknown，入口漏设）任何凭据都不认。对照 tests/peer-ingress-sources.test.ts。
+ * 另两行来源（上面的矩阵都按主端口经本机反代 = lan）：peer 入口（中继 peer 帧、对外直连）只收 peer 凭据——设备凭据、
+ * 非 peer 的 Bearer（网页 token、scoped token）一律 403，peer token 与 lan 同样判；没定来源（unknown，入口漏设）任何凭据都不认。
+ * 对照 tests/peer-ingress-sources.test.ts。
  */
 const SOURCES = ["peer-ingress", "unknown"] as const;
 const DEVICE_CREDS = new Set(Object.entries(CREDS).filter(([, c]) => c.auth.device).map(([n]) => n));
+const NON_PEER_BEARERS = new Set(Object.entries(CREDS).filter(([, c]) => c.auth.bearer && !c.p.peer).map(([n]) => n));
 function sourceVerdict(source: (typeof SOURCES)[number], cred: string, e: Endpoint): "allow" | { code?: string; error: string } {
   if (source === "unknown") return { code: "unknown_source", error: "request source not established" };
   if (DEVICE_CREDS.has(cred)) return { code: "device_via_peer_entrance", error: "no device credentials on this entrance" };
+  if (NON_PEER_BEARERS.has(cred)) return { code: PEER_ENTRANCE_ONLY.code, error: PEER_ENTRANCE_ONLY.error };
   return allows(e, cred) ? "allow" : { error: "" };
 }
 

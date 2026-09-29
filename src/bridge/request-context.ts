@@ -35,15 +35,20 @@ const LEAST_PRIVILEGE: RequestContext = { source: "unknown", clientIp: null, htt
  *   legacy   旧 web 会话换设备凭据：只在直托管同源成立，中继路径与隧道都不算；
  *   peer     peer token：经中继的 peer 请求只走 peer 帧进 peer 入口，路径模式与隧道一律拒；
  *   redeem   兑换邀请：同上，合法兑换只走 peer 帧或直连；
- *   api      /api/v1 的任何凭据（Bearer、设备 cookie）：四个已知来源都认，只拒没定来源的（unknown）。
+ *   api      /api/v1 的任何凭据（Bearer、设备 cookie）：四个已知来源都认，只拒没定来源的（unknown）；
+ *   bearer   非 peer 的 Bearer（网页 token、scoped token）：peer 入口是对外端口，泄漏的网页 token 不该能从那里用。
  */
 const SOURCE_POLICY = {
   api: ["loopback", "lan", "relay", "peer-ingress"],
+  bearer: ["loopback", "lan", "relay"],
   device: ["loopback", "lan", "relay"],
   legacy: ["loopback", "lan"],
   peer: ["loopback", "lan", "peer-ingress"],
   redeem: ["loopback", "lan", "peer-ingress"],
 } as const satisfies Record<string, readonly RequestSource[]>;
+
+/** peer 入口拒掉非 peer 凭据时的报错（入口本身与 /api/v1 鉴权共用） */
+export const PEER_ENTRANCE_ONLY = { ok: false, error: "这个入口只收 peer 凭据，请改用主端口或中继地址", code: "peer_entrance_only" } as const;
 
 export function sourceAllows(req: Request, what: keyof typeof SOURCE_POLICY): boolean {
   return (SOURCE_POLICY[what] as readonly RequestSource[]).includes(requestContextOf(req).source);

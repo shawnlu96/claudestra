@@ -8,7 +8,7 @@ import { findByBearer, readPrincipals, SlidingWindowLimiter, tokenIdOf, updatePr
 import { cookieValueFrom, csrfOk, DEVICE_HEADER, effectivePrincipal, findCredential, touchCredential } from "../lib/devices.js";
 import { apiJson } from "./api-respond.js";
 import { checkPeerSignature, peerReplayVerdict, type PeerCheck } from "./peer-signature.js";
-import { requestContextOf, sourceAllows } from "./request-context.js";
+import { PEER_ENTRANCE_ONLY, requestContextOf, sourceAllows } from "./request-context.js";
 import { peerSigErrorText } from "../lib/peer-auth-hints.js";
 
 // 120/min：默认 30 在 web 重度使用下会被打爆——SSE 重连风暴循环触发 429 → 直播流死掉（2026-07-14 真机）。owner 再放大 5 倍：
@@ -36,13 +36,14 @@ function bearerSecret(req: Request, url: URL): string | null {
 /** peers: false = 这条路由不收 peer token（远程终端这类不限速的路由；peer 本来就不该碰终端） */
 export async function authenticateApi(req: Request, url: URL, opts: { rateLimit: boolean; peers?: false }): Promise<Principal | Response> {
   // 入口漏设来源时不认任何凭据（误拒而不是按某个来源放行）：Bearer 本身不看来源，只靠这一道
-  if (!sourceAllows(req, "api")) return apiJson(403, { ok: false, error: "request source not established", code: "unknown_source" });
+  if (!sourceAllows(req, "api")) return unknownSourceRefused(req, url);
   const file = await readPrincipals(principalsPath);
   const secret = bearerSecret(req, url);
   let p: Principal | null;
   if (secret !== null) {
     p = findByBearer(file, secret);
     if (!p) return apiJson(401, { ok: false, error: "invalid or revoked token" });
+    if (!p.peer && !sourceAllows(req, "bearer")) return apiJson(403, PEER_ENTRANCE_ONLY);
   } else {
     const token = cookieValueFrom(req.headers.get("cookie"));
     if (token && !sourceAllows(req, "device")) return apiJson(403, { ok: false, error: "no device credentials on this entrance", code: "device_via_peer_entrance" });
@@ -72,6 +73,17 @@ export async function authenticateApi(req: Request, url: URL, opts: { rateLimit:
     void import("./peer-presence.js").then((m) => m.notePeerInbound(peer)); // 在线 peer 列表的「最近来访」
   }
   return p;
+}
+
+/** 每分钟最多记一行：线上若有入口漏设来源，日志里立刻看得出是哪个入口、哪条路径（不记凭据） */
+let lastUnknownSourceLog = 0;
+function unknownSourceRefused(req: Request, url: URL): Response {
+  const now = Date.now();
+  if (now - lastUnknownSourceLog >= 60_000) {
+    lastUnknownSourceLog = now;
+    console.warn(`[api] 来源未定的请求被拒（入口 ${url.host}，${req.method} ${url.pathname}）：这个入口漏设了请求来源`);
+  }
+  return apiJson(403, { ok: false, error: "request source not established", code: "unknown_source" });
 }
 
 /**

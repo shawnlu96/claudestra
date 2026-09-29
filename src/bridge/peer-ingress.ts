@@ -16,7 +16,8 @@ import { findByBearer, readPrincipals } from "../lib/principals.js";
 import { configuredPeerIngressPort } from "../lib/bridge-url.js";
 import { repoEnvVar } from "../lib/env-file.js";
 import { relayMark, takeRelayFrom, TUNNEL_MARK_HEADER } from "./relay-inbound.js";
-import { setRequestContext } from "./request-context.js";
+import { PEER_ENTRANCE_ONLY, setRequestContext } from "./request-context.js";
+import { drainingFetch } from "./unread-body.js";
 import { isLoopbackAddress } from "../lib/same-host.js";
 import { DEVICE_HEADER } from "../lib/devices.js";
 import { HTTP_IDLE_TIMEOUT_S } from "../lib/esc-guard.js";
@@ -128,7 +129,7 @@ export async function ingressRequest(req: Request, handleApi: ApiHandler, addr: 
   const secret = ingressSecret(req, url);
   const principal = secret ? findByBearer(await readPrincipals(), secret) : null;
   if (ingressVerdict(secret, principal) === "not-peer") {
-    return json(403, { ok: false, error: "this entrance only serves peer tokens" });
+    return json(403, PEER_ENTRANCE_ONLY);
   }
   // 来源指纹只认经中继进来的（relay-inbound.ts 盖了进程内标记），放进请求上下文；原始头一律剥掉
   const headers = new Headers(req.headers);
@@ -140,7 +141,7 @@ export async function ingressRequest(req: Request, handleApi: ApiHandler, addr: 
   if (!localProxy) {
     headers.delete("cookie");
     headers.delete(DEVICE_HEADER);
-    if (!secret && !ingressPublicRoute(req.method, url.pathname)) return json(403, { ok: false, error: "this entrance only serves peer tokens" });
+    if (!secret && !ingressPublicRoute(req.method, url.pathname)) return json(403, PEER_ENTRANCE_ONLY);
   }
   const body = req.method === "GET" || req.method === "HEAD" ? undefined : await req.arrayBuffer();
   const apiReq = new Request(url.toString(), { method: req.method, headers, body });
@@ -155,6 +156,7 @@ function serve(opts: { port: number; host: Host; handleApi: ApiHandler }) {
     port: opts.port,
     hostname: opts.host,
     idleTimeout: HTTP_IDLE_TIMEOUT_S, // peer 的打断请求要等 Esc 窗口锁，Bun 默认 10 秒会先切断（lib/esc-guard.ts）
-    fetch: (req, server) => ingressRequest(req, opts.handleApi, server.requestIP(req)?.address ?? null),
+    // 提前拒绝的请求没读正文：读掉再回，不然同一条连接上的下一个 peer 请求得 400（bridge/unread-body.ts）
+    fetch: drainingFetch((req: Request, server: Bun.Server<undefined>) => ingressRequest(req, opts.handleApi, server.requestIP(req)?.address ?? null)),
   });
 }

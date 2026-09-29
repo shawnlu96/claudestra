@@ -1,6 +1,6 @@
 /**
  * 提前回响应、没读完分块正文时 keep-alive 连接不能坏：
- *   - bridge 一侧 drainingFetch（bridge/unread-body.ts）把没读的正文读掉再回；
+ *   - bridge 一侧 drainingFetch（bridge/unread-body.ts）把没读的正文读掉再回（64KB 内；超过就取消并带 Connection: close）；
  *   - 隧道一侧 forwardTunnel 带正文的请求不复用连接（bridge/relay-inbound.ts keepalive:false）。
  * 两边都去掉时（Bun 1.3.x），同一条回环连接上紧跟的下一个请求得到空的 400、处理函数不被调用。真 Bun.serve、回环随机端口。
  */
@@ -41,14 +41,23 @@ describe("drainingFetch", () => {
     expect(seen).toEqual(["POST /p0", "GET /g0", "POST /p1", "GET /g1", "POST /p2", "GET /g2"]);
   });
 
-  test("处理函数已经读过正文、没有正文、超过上限：都不卡住", async () => {
+  test("处理函数已经读过正文、没有正文、超过上限：都不卡住，超过上限报 false", async () => {
     const read = new Request("http://x/", { method: "POST", body: "abc" });
     await read.text();
-    await drainUnreadBody(read);
-    await drainUnreadBody(new Request("http://x/"));
+    expect(await drainUnreadBody(read)).toBe(true);
+    expect(await drainUnreadBody(new Request("http://x/"))).toBe(true);
     const big = new Request("http://x/", { method: "POST", body: chunked(new Uint8Array(4096)), duplex: "half" } as RequestInit);
-    await drainUnreadBody(big, 1024);
+    expect(await drainUnreadBody(big, 1024)).toBe(false);
     expect(big.bodyUsed).toBe(true);
+  });
+
+  test("正文超过 64KB 不全读：取消并让响应带 Connection: close；读得完的不带", async () => {
+    const reject = drainingFetch(async () => new Response("no", { status: 403, headers: { "x-keep": "1" } }));
+    const post = (n: number) => new Request("http://x/", { method: "POST", body: chunked(new Uint8Array(n)), duplex: "half" } as RequestInit);
+    const big = (await reject(post(200_000), null))!;
+    expect([big.status, big.headers.get("connection"), big.headers.get("x-keep")]).toEqual([403, "close", "1"]);
+    const small = (await reject(post(1000), null))!;
+    expect([small.status, small.headers.get("connection")]).toEqual([403, null]);
   });
 });
 
