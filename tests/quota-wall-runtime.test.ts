@@ -37,7 +37,7 @@ function rig(opts: RigOpts = {}) {
   const prepared: string[] = [];
   const cache = { v: null as UsageSignal | null };
   const flushed: string[] = [];
-  const resumed: { cid: string; text: string }[] = [];
+  const resumed: { cid: string; text: string; afterTurn?: boolean }[] = [];
   const notices: string[] = [];
   const clear = { req: false };
   const probe = { v: null as { pct: number | null; observedAt: number } | null, calls: 0 };
@@ -68,7 +68,7 @@ function rig(opts: RigOpts = {}) {
       flushed.push(cid);
       held.delete(cid);
     },
-    resume: async (cid, _agent, text) => ((opts.heldResume ?? []).includes(cid) ? "held" : (resumed.push({ cid, text }), true)),
+    resume: async (cid, _agent, text, afterTurn) => ((opts.heldResume ?? []).includes(cid) ? "held" : (resumed.push({ cid, text, afterTurn }), true)),
     notifyOwner: async (text) => (notices.push(text), true),
     probe: async () => (probe.calls++, probe.v),
     credits: async () => 1,
@@ -346,6 +346,16 @@ describe("恢复的边角（T24 r1 P2-1/2/3/7/9）", () => {
     expect(r.flushed.sort()).toEqual(["a", "b", "c", "pm"]);
     expect(r.resumed.map((x) => x.cid).sort()).toEqual(["a", "b"]);
     expect(r.disk().wall!.recovery!.wakers!.sort()).toEqual(["c", "pm"]);
+  });
+
+  test("补投的外人消息一送到就开了一轮（判成在跑）：续跑押到那一轮后面照发；没补投过、在跑的才算自己续上了（沙箱 e2e 复现）", async () => {
+    const r = rig({ busy: ["a", "d"] });
+    for (const c of ["a", "d"]) await hitWall(r, c);
+    r.held.holdEnv(env({ kind: "api", tokenId: "tok-g", name: "guest" }, "a", "guest-a"), "quota_wall");
+    r.wall.clear();
+    await r.wall.tick();
+    expect(r.resumed.map((x) => [x.cid, x.afterTurn])).toEqual([["a", true]]);
+    expect(r.disk().wall!.recovery).toMatchObject({ resumed: ["agent-a"], running: ["agent-d"] });
   });
 
   test("noteActivity 交出从续跑名单拿掉的那条（外人那一轮不算数时 rearmResume 放回去）", async () => {

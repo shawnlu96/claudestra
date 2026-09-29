@@ -10,13 +10,13 @@ import type { ChatMessage } from "../chat/type";
 export type HeldBy = "quota_wall" | "wall_menu" | "queued";
 
 export function heldSendNotice(by: HeldBy, zh: boolean): string {
-  if (by === "queued") return zh ? "⏸ 对方暂时收不到，消息已排队，送达后会出现在这里" : "⏸ The agent can't take messages right now; yours is queued and will show up here once delivered";
+  if (by === "queued") return zh ? "对方暂时收不到，消息已排队，送达后会出现在这里" : "The agent can't take messages right now; yours is queued and will show up here once delivered";
   if (by === "wall_menu") {
     return zh
-      ? "⏸ 它停在额度菜单 / 自动续跑倒计时上，bridge 没有发任何键；消息押着，菜单关掉或出闸后送达。要马上处理请在它的窗口里自己操作"
-      : "⏸ It is sitting on the usage-limit menu / auto-continue countdown; no key was sent. Your message is held until the menu closes or the wall lifts — handle it in its window to act now";
+      ? "它停在额度菜单 / 自动续跑倒计时上，bridge 没有发任何键；消息押着，菜单关掉或出闸后送达。要马上处理请在它的窗口里自己操作"
+      : "It is sitting on the usage-limit menu / auto-continue countdown; no key was sent. Your message is held until the menu closes or the wall lifts — handle it in its window to act now";
   }
-  return zh ? "⏸ 整机撞了额度（额度闸开着），消息押着，出闸后按序送达，不用重发" : "⏸ The usage limit is hit machine-wide; your message is held and delivered in order once it lifts — no need to resend";
+  return zh ? "整机撞了额度（额度闸开着），消息押着，出闸后按序送达，不用重发" : "The usage limit is hit machine-wide; your message is held and delivered in order once it lifts — no need to resend";
 }
 
 export function markHeldSend(

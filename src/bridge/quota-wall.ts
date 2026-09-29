@@ -49,8 +49,11 @@ export interface QuotaWallDeps {
     release(now: number): number;
   };
   flush(channelId: string): Promise<void>;
-  /** 投出去了返回 true；不在线 / dropped 返回 false（不算续跑过）；被押住（窗口停在倒计时 / 菜单上）返回 "held" */
-  resume(channelId: string, agent: string, text: string): Promise<boolean | "held">;
+  /**
+   * 投出去了返回 true；不在线 / dropped 返回 false（不算续跑过）；被押住（窗口停在倒计时 / 菜单上）返回 "held"。
+   * afterTurn = 它正在跑的是刚补投的外人那一轮：续跑押到这一轮结束（Stop）再送，也算投出去了
+   */
+  resume(channelId: string, agent: string, text: string, afterTurn?: boolean): Promise<boolean | "held">;
   notifyOwner(text: string): Promise<boolean>;
   /** T2b-2 只读用量接口；null = 这次没探成（关着 / 退避中 / 出错） */
   probe(): Promise<{ pct: number | null; observedAt: number } | null>;
@@ -220,14 +223,17 @@ async function resumeAgents(c: Ctx, id: string): Promise<void> {
   const w = c.state.wall!;
   const got = new Set(w.recovery!.wakers ?? w.recovery!.flushedTo ?? []);
   // 补投了自己人的消息、真送到了（队空了）的不再续跑：那几条消息自会叫醒它。补投的全是外人（guest / peer）的照样续跑——
-  // 外人那一轮不结算、答的不是撞墙那一轮的 caller（T24 wf3 delivery-hold-2），续跑消息押在外人那一轮后面。补投了还押着的
-  // （停在撞墙等待画面、被判成忙）也照样续跑，它跑完一轮 Stop 时押着的也就投了
+  // 外人那一轮不结算、答的不是撞墙那一轮的 caller（T24 wf3 delivery-hold-2）。这时它多半正跑着外人那一轮：续跑押到这一轮结束
+  // 再送（afterTurn），不当成「CC 自己续上了」跳过——没补投过、又在跑的才是自己续上的。补投了还押着的（停在撞墙等待画面、
+  // 被判成忙）也照样续跑，它跑完一轮 Stop 时押着的也就投了
+  const flushed = new Set(w.recovery!.flushedTo ?? []);
   for (const cid of resumeTargets(w, (x) => got.has(x) && !c.d.held.queuedFor(x))) {
     const h = w.hits[cid];
-    const busy = await c.d.mainTurnBusy(cid, h.agent).catch(() => true); // 判不出来按在跑：宁可少续一个，也不在它回合里插话
+    const running = await c.d.mainTurnBusy(cid, h.agent).catch(() => true); // 判不出来按在跑：宁可少续一个，也不在它回合里插话
+    const busy = running && !flushed.has(cid);
     if (!stillRecovering(c, id)) return;
     const r = structuredClone(c.state.wall!.recovery!);
-    const got = busy ? null : await c.d.resume(cid, h.agent, wallResumeText(h.at, h.error));
+    const got = busy ? null : await c.d.resume(cid, h.agent, wallResumeText(h.at, h.error), running);
     const add = (list: string[] = []) => (list.includes(h.agent) ? list : [...list, h.agent]);
     if (busy) r.running = add(r.running);
     else if (got === "held") r.held = add(r.held);

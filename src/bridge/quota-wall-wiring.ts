@@ -100,7 +100,7 @@ function productionWall(b: WallBridgeDeps): QuotaWall {
       release: (now) => b.held.releaseWall(now),
     },
     flush: (cid) => b.flush(cid, "quota_wall"),
-    resume: async (cid, agent, text) => {
+    resume: async (cid, agent, text, afterTurn) => {
       const c = b.clients.get(cid);
       if (!c) return (console.log(`⚠️ 额度恢复续跑 ${agent}：不在线，跳过`), false);
       b.markAgentSource(cid);
@@ -109,7 +109,7 @@ function productionWall(b: WallBridgeDeps): QuotaWall {
         to: { kind: "local", channelId: cid, agentName: agent, ws: c.ws, cwd: c.cwd },
         intent: "notification",
         content: text,
-        meta: { messageId: newMessageId("wall_resume"), triggerKind: "bridge_synth", ts: new Date().toISOString(), threadId: newThreadId() },
+        meta: { messageId: newMessageId("wall_resume"), triggerKind: "bridge_synth", ts: new Date().toISOString(), threadId: newThreadId(), waitForIdle: afterTurn },
       });
       return d.outcome.kind !== "sent" ? false : d.outcome.heldBy ? "held" : true;
     },
