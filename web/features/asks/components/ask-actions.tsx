@@ -5,9 +5,11 @@ import { answerAuq, answerPermission } from "@/lib/api/chat";
 import { ApiError } from "@/lib/api/client";
 import type { WebComponentRow } from "@/lib/chat/events";
 import { useT } from "@/lib/i18n";
+import { activeAnswered, clearAnswered, markAnswered } from "../answer-cooldown";
 import { answeredGroups, rowGroup, wireLabels, type WebAsk } from "../asks-model";
 import { asksStore } from "../asks-store";
 import { AuqChoices, PermissionChoices, ReplyChoices } from "./ask-choices";
+import { AssignedChoices, assignedRejectText, isHumanNodeAsk } from "./assigned-choices";
 import { TerminalIcon } from "./ask-icons";
 
 /**
@@ -22,11 +24,13 @@ export function AskActions({ ask, agent }: { ask: WebAsk; agent: string }) {
   const dialogAgent = ask.fromAgent ?? "";
   const runtime = ask.source === "auq" || ask.source === "permission" || ask.source === "codex";
 
-  // 409 分两种：多行里这一项刚在聊天 / Discord 里答过（其余行还能答，重拉后卡片会收掉它），其余都当整条已结案——
+  // 指派门拒掉的按 code 说（assignedRejectText）。409 另分两种：多行里这一项刚在聊天 / Discord 里答过（其余行还能答，重拉后卡片会收掉它），其余都当整条已结案——
   // 弹框端点的 409（弹框已经没了）不带 code，也归这一类，别把英文原文露给 owner
   // 没到 bridge（断网、中继断了）：别把浏览器的英文原文露给 owner
   const fail = (e: unknown) => {
     if (!(e instanceof ApiError)) return t("没发出去（连不上），再点一次");
+    const assigned = assignedRejectText(e.code, t);
+    if (assigned) return assigned;
     if (e.status !== 409) return e.message;
     return e.code === "ask_part_answered" ? t("这一项刚在别处答过了，已刷新，剩下的还能答") : t("这件已经处理过了（或已过期）");
   };
@@ -34,8 +38,11 @@ export function AskActions({ ask, agent }: { ask: WebAsk; agent: string }) {
   const ok = runtime ? t("已提交给弹框") : ask.fromAgent ? t("已发给 {agent}，它忙完手上这一步就会看到", { agent }) : t("已记下");
   // 乐观作答（T11b 第 8 条）：点下去卡片就移到「最近处理过」、计数减 1；失败回到「等你处理」并显示原因（asks-store.answer）
   const run = async (fn: () => Promise<unknown>, labels: string[], text = "") => {
+    if (activeAnswered()) return; // 过渡中（含淡出那 0.45 秒按钮还在）不再提交：键盘回车挡不住 pointer-events
     setBusy(true);
-    await asksStore.answer(ask.id, { choices: [], labels, text, via: "web_card", at: Date.now() }, fn, { ok, fail });
+    markAnswered(ask.id); // 先让这张原地淡出，再移走（answer-cooldown.ts）
+    const done = await asksStore.answer(ask.id, { choices: [], labels, text, via: "web_card", at: Date.now() }, fn, { ok, fail });
+    if (!done) clearAnswered(ask.id);
     setBusy(false);
   };
   // 多行 reply 在聊天 / Discord 里已答过的组不再给选（bridge 会回「这一项已经答过了」），已答内容在下面「已答：…」那行
@@ -49,7 +56,10 @@ export function AskActions({ ask, agent }: { ask: WebAsk; agent: string }) {
   return (
     <div className="mt-3">
       {!runtime && !canAnswer && <p className="text-[13px] opacity-75">{t("这个登录凭据只能看，作答要在 owner 本人的设备上")}</p>}
-      {!runtime && canAnswer && (
+      {!runtime && canAnswer && isHumanNodeAsk(ask) && (
+        <AssignedChoices busy={busy} onAnswer={(wire, text, atts) => run(() => answerAskCard(ask.project, ask.id, { choices: [wire], text, atts }), wireLabels(rows, [wire]), text)} />
+      )}
+      {!runtime && canAnswer && !isHumanNodeAsk(ask) && (
         <ReplyChoices
           rows={rows}
           allowText={ask.allowText}

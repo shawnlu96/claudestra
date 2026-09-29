@@ -18,6 +18,7 @@ import { RelayError, type InboundContext, type InboundHandler, type InboundReque
 import { dispatchMachineRequest, type ApiHandler } from "./relay-dispatch.js";
 import { setRequestContext } from "./request-context.js";
 import { isDirectLoopback } from "../lib/same-host.js";
+import { RELAY_SIG_DETAIL } from "../lib/peer-auth-hints.js";
 
 export { ReplayCache };
 
@@ -109,10 +110,10 @@ export function verifyPeerSignature(from: string, req: { method: string; path: s
   const key = req.headers[SIG_HEADERS.key];
   const ts = req.headers[SIG_HEADERS.ts];
   const sig = req.headers[SIG_HEADERS.sig];
-  if (!key || !ts || !sig) return new RelayError("bad_signature", "peer", "signature headers missing");
-  if (!isPublicKey(key) || keyFingerprint(key) !== from) return new RelayError("bad_signature", "peer", "signing key does not match sender");
+  if (!key || !ts || !sig) return new RelayError("bad_signature", "peer", RELAY_SIG_DETAIL.missing);
+  if (!isPublicKey(key) || keyFingerprint(key) !== from) return new RelayError("bad_signature", "peer", RELAY_SIG_DETAIL.foreignKey);
   const r = verifySigned(key, { method: req.method, path: req.path, ts, sig, body: req.body }, now);
-  if (r !== "ok") return new RelayError("bad_signature", "peer", r === "stale" ? "timestamp outside ±300 s" : "signature mismatch");
+  if (r !== "ok") return new RelayError("bad_signature", "peer", r === "stale" ? RELAY_SIG_DETAIL.stale : RELAY_SIG_DETAIL.mismatch);
   return null;
 }
 
@@ -124,7 +125,7 @@ export function recordPeerReplay(from: string, req: { method: string; headers: H
   if (req.method === "GET" || req.method === "HEAD") return null;
   const seen = cache.seen(req.headers[SIG_HEADERS.sig]!, req.headers[SIG_HEADERS.ts]!, now, from);
   if (seen === "full") return new RelayError("replay_full", "peer", "replay cache full, retry later");
-  if (seen === "before_start") return new RelayError("bad_signature", "peer", "signed before the receiver started: your clock is behind, sync it and resend");
+  if (seen === "before_start") return new RelayError("bad_signature", "peer", RELAY_SIG_DETAIL.beforeStart);
   if (seen) return new RelayError("replay", "peer", "signature already used");
   return null;
 }

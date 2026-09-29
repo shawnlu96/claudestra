@@ -111,8 +111,7 @@ import { cmdKill, cmdRemove } from "./manager/agent-kill.js"; // 按 registry �
 import { cmdRename } from "./manager/agent-rename.js";
 import { isRestartInProgress, tryLockRestart, unlockRestart } from "./manager/restart-lock.js";
 import { cmdTokenAdd, cmdTokenList, cmdTokenRevoke } from "./manager/tokens.js";
-import { cmdPeerHttpInvite, cmdPeerHttpJoin, cmdPeerHttpAccept, cmdPeerHttpTest, cmdPeerHttpList, cmdPeerHttpScopeCli, cmdPeerHttpRemove, cmdPeerInviteNew, cmdPeerInviteList, cmdPeerInviteRevoke } from "./manager/peers.js";
-import { cmdPeerInviteRedeem, cmdPeerJoinAuto, parseRedeemArgs } from "./manager/peer-join.js";
+import { cmdPeerHttpInvite, cmdPeerHttpJoin, cmdPeerHttpAccept, cmdPeerHttpTest, cmdPeerHttpList, cmdPeerHttpScopeCli, cmdPeerHttpRemove, cmdPeerInviteList, cmdPeerInviteRevoke } from "./manager/peers.js";
 import { cmdCost, cmdMetrics } from "./manager/cost.js";
 import { cmdAutoUpdate } from "./manager/auto-update.js";
 import { cmdWebRelease } from "./manager/web-release.js";
@@ -2702,12 +2701,10 @@ switch (cmd) {
   }
 
   case "cost": await cmdCost(args); break;
+  case "quota-wall": await (await import("./manager/quota-wall.js")).cmdQuotaWall(args); break; // 额度闸 status|clear（T24）
   case "codex-sub-archive": await (await import("./manager/codex-sub-archive.js")).cmdCodexSubArchive(args); break; // Codex 子线程自动归档开关（缺省关）
 
-  case "invite-link": {
-    await cmdInviteLink(args);
-    break;
-  }
+  case "invite-link": await cmdInviteLink(args); break;
 
   // v2.11: Discord peer 已移除，老命令留引导提示（用户手滑打老命令时不至于一脸懵）
   case "peer-expose":
@@ -2765,41 +2762,9 @@ switch (cmd) {
   case "peer-http-tidy": await (await import("./manager/peers-tidy.js")).cmdPeerHttpTidy(args.includes("--apply")); break;
 
   // v2.15+ 一键邀请（免回执自动握手）
-  case "peer-invite-new": {
-    const { rest: afterForce, value: force } = extractBoolFlag(args, "--force");
-    let agentsCsv = "", myUrl = "";
-    for (let i = 0; i < afterForce.length; i++) {
-      const a = afterForce[i];
-      if (a === "--agents") agentsCsv = afterForce[++i] || "";
-      else if (a.startsWith("--agents=")) agentsCsv = a.slice(9);
-      else if (a === "--url") myUrl = afterForce[++i] || "";
-      else if (a.startsWith("--url=")) myUrl = a.slice(6);
-    }
-    await cmdPeerInviteNew(agentsCsv, myUrl, force);
-    break;
-  }
   case "peer-invite-list": await cmdPeerInviteList(); break;
   case "peer-invite-revoke": await cmdPeerInviteRevoke(args[0] || ""); break;
-  case "peer-invite-redeem": await cmdPeerInviteRedeem(parseRedeemArgs(args)); break;
-  case "peer-join-auto": {
-    const { rest: afterForce, value: force } = extractBoolFlag(args, "--force");
-    let agentsCsv = "", myUrl = "", peerUrl = "";
-    const pos: string[] = [];
-    for (let i = 0; i < afterForce.length; i++) {
-      const a = afterForce[i];
-      if (a === "--agents") agentsCsv = afterForce[++i] || "";
-      else if (a.startsWith("--agents=")) agentsCsv = a.slice(9);
-      else if (a === "--url") myUrl = afterForce[++i] || "";
-      else if (a.startsWith("--url=")) myUrl = a.slice(6);
-      // v2.16.1: 覆盖邀请串里的对方地址(跨 tailnet 共享下串里嵌的是发方
-      // 视角 IP,接方视角是另一个映射地址——2026-07-31 实战踩坑)
-      else if (a === "--peer-url") peerUrl = afterForce[++i] || "";
-      else if (a.startsWith("--peer-url=")) peerUrl = a.slice(11);
-      else pos.push(a);
-    }
-    await cmdPeerJoinAuto(pos[0] || "", agentsCsv, myUrl, force, peerUrl);
-    break;
-  }
+  case "peer-invite-new": case "peer-invite-redeem": case "peer-join-auto": await (await import("./manager/peers-invite-cli.js")).runPeerInviteCommand(cmd, args); break;
   case "metrics": {
     await cmdMetrics(args);
     break;
@@ -2981,6 +2946,7 @@ switch (cmd) {
         "auto-update channel beta|release — beta follows every commit on origin/main (default: release)",
         "codex-sub-archive status|on|off — auto-archive Codex sub-threads idle 7 days (default off; the archive retention later deletes them)",
         "cost [--agent <name>] [--today|--week]  — aggregate token usage per agent or overall",
+        "quota-wall status|clear  — usage-limit wall: show state / confirm usage is back (bridge then closes menus, delivers the queue, resumes)",
         "invite-link                     — generate the Discord bot invite URL (owner perms, for your own server)",
         "pair [--json]                   — print a QR code / link / 8-char code so a phone or browser can pair with this machine through the relay (RELAY_URL in .env)",
         "relay-status                    — show the relay connection (address, fingerprint, contacts online)",

@@ -9,6 +9,7 @@ import { subscribeEvents, type BridgeEvent } from "./event-bus.js";
 import { emptyEvidence, type RunEvidence } from "../lib/autopilot-run.js";
 import { countsAsTool, isMutatingTool } from "../lib/autopilot-tools.js";
 import { parseInlineButtons } from "../lib/inline-buttons.js";
+import { isLimitHitText } from "../lib/quota-wall-text.js";
 import type { ActiveRun } from "../lib/autopilot-wake.js";
 import { readPrincipals, tokenIdOf } from "../lib/principals.js";
 
@@ -27,7 +28,7 @@ interface Tracking {
   endedAt?: number;
   frozen: boolean;
   lastEventAt: number;
-  /** 本轮最后一句 assistant 文字：api_error_turn 只带 error:"rate_limit"，重置时间在这句里 */
+  /** 本轮最后一句 assistant 文字：老的 api_error_turn 只带 error:"rate_limit"，重置时间在这句里 */
   lastText?: string;
 }
 const tracking = new Map<string, Tracking>();
@@ -182,8 +183,9 @@ function onRunEvent(t: Tracking, type: BridgeEvent["type"], d: Record<string, un
     }
   } else if (type === "api_error_turn") {
     const err = String(d.error ?? "");
-    // 新版 Claude Code 撞额度（session / weekly limit）落成 isApiErrorMessage + error:"rate_limit"，文字另起一条 assistant_text
-    if (/rate.?limit|usage.?limit/i.test(err)) {
+    // 新版 Claude Code 撞额度（session / weekly limit）落成 isApiErrorMessage + error:"rate_limit"；同样 rate_limit 的
+    // 「Server is temporarily limiting requests」是临时限流，要看原文（事件带 text）才分得开，按普通报错算
+    if (/rate.?limit|usage.?limit/i.test(err) && (!d.text || isLimitHitText(String(d.text)))) {
       ev.rateLimitText ??= t.lastText && LIMIT_TEXT.test(t.lastText) ? t.lastText : RL_NO_TEXT;
       ev.rateLimitAt ??= now;
     } else ev.failure = `API 报错：${err.slice(0, 140) || "（没有原文）"}`;

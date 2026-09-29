@@ -2,7 +2,8 @@ import { beforeEach, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
-import { ctxBoundaryTick, injectCompact, resetCtxBoundaryState } from "../src/bridge/ctx-boundary.js";
+import { ctxBoundaryTick, injectCompact, masterStandIn, needsMasterStandIn, resetCtxBoundaryState } from "../src/bridge/ctx-boundary.js";
+import { MASTER_WINDOW_TARGET } from "../src/lib/tmux-helper.js";
 import { isLinkedWorktree } from "../src/lib/linked-worktree.js";
 import { DEFAULT_KEEP_LIST } from "../src/lib/ctx-boundary-policy.js";
 import { agent, BUSY_PANE, harness, MIN, tgt } from "./ctx-boundary-harness.js";
@@ -29,6 +30,14 @@ describe("ctxBoundaryTick", () => {
     a.convTs = h.now - 5 * MIN;
     expect((await ctxBoundaryTick(h.deps))[0].verdict).toEqual({ fire: true, kind: "idle" });
     expect(h.sent.length).toBe(2);
+  });
+
+  test("额度闸关着（T24）：过软线也不敲，原因记 gated", async () => {
+    const h = harness([]);
+    h.deps.agents = async () => [agent({ ctx: 210_000, convTs: h.now - 4 * MIN })];
+    h.deps.gated = async () => true;
+    expect((await ctxBoundaryTick(h.deps))[0].verdict).toEqual({ fire: false, reason: "gated" });
+    expect(h.sent).toEqual([]);
   });
 
   test("开关缺省关：只关新增的（具名策略按全局线走、大总管不压），全局线和救命线照旧（r3 P2-4）；日志只提示一次", async () => {
@@ -299,5 +308,30 @@ describe("isLinkedWorktree（执行者认法的 worktree 兜底，adv1 P2-8）",
     expect(isLinkedWorktree(repo("sm", "gitdir: ../.git/modules/vendor/lib\n"))).toBe(false);
     expect(isLinkedWorktree(repo("plain", null))).toBe(false);
     expect(isLinkedWorktree(null)).toBe(false);
+  });
+});
+
+describe("registry 没登记大总管（T36c）", () => {
+  test("有 master 条目（两种写法）不补；没有才补", () => {
+    expect(needsMasterStandIn([{ name: "agent-master" }])).toBe(false);
+    expect(needsMasterStandIn([{ name: "agent-x" }, { name: "master" }])).toBe(false);
+    expect(needsMasterStandIn([{ name: "agent-x" }])).toBe(true);
+    expect(needsMasterStandIn([])).toBe(true);
+  });
+
+  test("补的那条：大总管窗口（index 0，不按名字）、launcher 的目录、会话留空等窗格认", () => {
+    const m = masterStandIn("/r/src/../master", "123");
+    expect(m).toMatchObject({ name: "agent-master", target: MASTER_WINDOW_TARGET, cwd: "/r/master", sessionId: "", ctx: null, executor: false, channelId: "123" });
+  });
+
+  test("窗格认到会话 → 按全局线纳入（开关开）；认不到 → 跳过，不发键", async () => {
+    const h = harness([]);
+    const m = masterStandIn("/r/master", null);
+    h.deps.agents = async () => [m];
+    expect(await ctxBoundaryTick(h.deps)).toEqual([]);
+    h.deps.liveSessions = async (as) => as.map((a) => ({ ...a, sessionId: "live", ctx: 900_000, convTs: 0, mtime: 0 }));
+    const r = await ctxBoundaryTick(h.deps);
+    expect(r.map((x) => [x.agent, x.boundary.policy, x.gated, x.verdict.fire])).toEqual([["agent-master", "global", true, true]]);
+    expect(h.sent).toEqual([{ target: MASTER_WINDOW_TARGET, line: "/save-compact" }]);
   });
 });

@@ -6,6 +6,7 @@
  */
 import { bridgeHttpBase } from "../lib/bridge-port.js";
 import { instanceKeySync, keyFingerprint, signedFor } from "../lib/instance-key.js";
+import { createE2eOutbound, defaultOutboundDeps } from "../lib/peer-e2e-outbound.js";
 import { relayPeerFingerprint } from "../lib/peers.js";
 import type { RelayLinkInfo } from "../lib/relay-client-types.js";
 import type { PeerRecord } from "../lib/relay-protocol.js";
@@ -33,15 +34,26 @@ export function myFingerprint(): string | undefined {
 
 const TIMEOUT_CODES = new Set(["timeout", "local_timeout", "peer_disconnected", "connection_lost"]);
 
-/** fetch 的替身：relay://<指纹>/… 交给 bridge 经中继代调（POST /relay/request，bridge 签名），其余加上实例签名直接 fetch——对方只认签名钥匙对得上的 peer */
-export async function peerCliFetch(url: string, init: { method?: string; headers?: Record<string, string>; body?: string; signal?: AbortSignal } = {}): Promise<Response> {
+type CliFetchInit = { method?: string; headers?: Record<string, string>; body?: string | Uint8Array; signal?: AbortSignal };
+/** 发往 required peer 的一律包进 E2E 会话（lib/peer-e2e-outbound.ts）；外层签名由下面的传输层加（直连这里签、中继由 bridge 签） */
+const e2eOutbound = createE2eOutbound(defaultOutboundDeps());
+
+/** manager 的 peer 调用唯一出口：required peer 走 E2E（走不了就抛错，绝不退回明文），其余明文照旧 */
+export async function peerCliFetch(url: string, init: CliFetchInit = {}): Promise<Response> {
+  const viaE2e = await e2eOutbound.fetch(url, init, (u, outer) => rawCliFetch(u, { ...outer, ...(init.signal ? { signal: init.signal } : {}) }));
+  return viaE2e ?? rawCliFetch(url, init);
+}
+
+/** 传输层：relay://<指纹>/… 交给 bridge 经中继代调（POST /relay/request，bridge 签名），其余加上实例签名直接 fetch——对方只认签名钥匙对得上的 peer */
+async function rawCliFetch(url: string, init: CliFetchInit): Promise<Response> {
   const m = /^relay:\/\/([^/]+)(\/.*)?$/i.exec(url);
   const to = m ? relayPeerFingerprint(`relay://${m[1]}`) : null;
-  if (!m || !to) return fetch(url, { ...init, headers: { ...init.headers, ...signedFor(init.method ?? "GET", url, init.body ?? "") } });
+  if (!m || !to) return fetch(url, { ...init, headers: { ...init.headers, ...signedFor(init.method ?? "GET", url, init.body ?? "") } } as RequestInit);
+  const bytes = typeof init.body === "string" ? new TextEncoder().encode(init.body) : (init.body ?? new Uint8Array(0));
   const r = await fetch(`${bridgeHttpBase()}/relay/request`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ to, method: init.method ?? "GET", path: m[2] || "/", headers: init.headers ?? {}, ...(init.body ? { body: b64.enc(new TextEncoder().encode(init.body)) } : {}) }),
+    body: JSON.stringify({ to, method: init.method ?? "GET", path: m[2] || "/", headers: init.headers ?? {}, ...(bytes.length ? { body: b64.enc(bytes) } : {}) }),
     signal: init.signal ?? AbortSignal.timeout(45_000),
   });
   type Relayed = { ok?: boolean; status?: number; headers?: Record<string, string>; body?: string; code?: string; error?: string };

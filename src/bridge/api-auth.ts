@@ -10,6 +10,7 @@ import { apiJson } from "./api-respond.js";
 import { checkPeerSignature, peerReplayVerdict, type PeerCheck } from "./peer-signature.js";
 import { PEER_ENTRANCE_ONLY, requestContextOf, sourceAllows } from "./request-context.js";
 import { peerSigErrorText } from "../lib/peer-auth-hints.js";
+import { peerE2eRefusal, readHttpPeers } from "../lib/peer-e2e-local.js";
 import { messagesOnlyAllows } from "../lib/peer-scope-gate.js";
 
 // 120/min：默认 30 在 web 重度使用下会被打爆——SSE 重连风暴循环触发 429 → 直播流死掉（2026-07-14 真机）。owner 再放大 5 倍：
@@ -18,6 +19,7 @@ const API_RATE_LIMIT_PER_MIN = 120;
 const OWNER_RATE_LIMIT_PER_MIN = 600;
 const limiters = new Map<string, SlidingWindowLimiter>();
 const sigFailures = new Map<string, SlidingWindowLimiter>();
+const SIG_FAILURE_KEYS = 2_000;
 const lastTouchWrite = new Map<string, number>();
 const TOUCH_WRITE_EVERY_MS = 10 * 60_000;
 /** 单测把 principals.json 指到临时目录；生产不调 */
@@ -44,7 +46,6 @@ export async function authenticateApi(req: Request, url: URL, opts: { rateLimit:
   if (secret !== null) {
     p = findByBearer(file, secret);
     if (!p) return apiJson(401, { ok: false, error: "invalid or revoked token" });
-    if (!p.peer && !sourceAllows(req, "bearer")) return apiJson(403, PEER_ENTRANCE_ONLY);
   } else {
     const token = cookieValueFrom(req.headers.get("cookie"));
     if (token && !sourceAllows(req, "device")) return apiJson(403, { ok: false, error: "no device credentials on this entrance", code: "device_via_peer_entrance" });
@@ -55,6 +56,12 @@ export async function authenticateApi(req: Request, url: URL, opts: { rateLimit:
     p = effectivePrincipal(hit);
     void touchLater(hit.credential.id, requestContextOf(req).clientIp);
   }
+  // E2E 会话解开的内层只收 peer token：外层只证明了「是那台 peer 机器」，别的 token 借它的会话就绕过了
+  // peer 入口 / 中继 peer 帧「只认 peer token」的闸（tests/peer-e2e-relay.test.ts）
+  if (requestContextOf(req).e2e && !p.peer) {
+    return apiJson(403, { ok: false, error: "only peer tokens are accepted inside an E2E session", code: "e2e_peer_token_required" });
+  }
+  if (secret !== null && !p.peer && !sourceAllows(req, "bearer")) return apiJson(403, PEER_ENTRANCE_ONLY);
   if (p.peer && opts.peers === false) return apiJson(403, { ok: false, error: "peer tokens are not accepted on this route", code: "peer_route_forbidden" });
   // peer 先验签、判重放，再扣限速：拿到 token 却签不了名的人、重放截获请求的人都耗不掉正牌 peer 的额度（失败另有一个桶）
   const sig = p.peer ? await peerGate(req, url, p.peer, opts.rateLimit) : null;
@@ -97,15 +104,28 @@ function unknownSourceRefused(req: Request, url: URL): Response {
  */
 async function peerGate(req: Request, url: URL, peer: string, rateLimit: boolean): Promise<Extract<PeerCheck, { allow: true }> | Response> {
   if (!sourceAllows(req, "peer")) return apiJson(403, { ok: false, error: "peer tokens are not accepted on the relay path", code: "peer_via_relay_path" });
+  const e2e = peerE2eRefusal(peer, requestContextOf(req).e2e?.peerFp, await readHttpPeers()); // required peer 的明文请求、会话与 token 对不上的，都拒
+  if (e2e) return apiJson(403, { ok: false, error: e2e === "e2e_required" ? "this peer must use end-to-end encryption" : "token does not belong to the session's peer", code: e2e });
   const v = await checkPeerSignature(req, url, peer);
   if (v.allow) return v;
-  let failures = sigFailures.get(peer);
-  if (!failures) sigFailures.set(peer, (failures = new SlidingWindowLimiter(API_RATE_LIMIT_PER_MIN)));
-  if (rateLimit && !failures.tryAcquire()) {
+  if (rateLimit && !sigFailureAllowed(peer)) {
     const error = `too many failed peer signatures (${API_RATE_LIMIT_PER_MIN}/min), last failure: ${v.reason}`;
     return apiJson(429, { ok: false, error, code: "peer_signature", reason: "sig_rate_limited", cause: v.reason });
   }
   return peerSigRejected(v.reason);
+}
+
+/**
+ * 验签失败记一次，超了返回 false（调用方回 429）。peerGate 按 peer 名记；E2E 直连帧外层验签失败也记在这里
+ * （bridge/peer-e2e-route.ts：认得出的联系人按它的名字，认不出的按来源地址）。表满了先丢最早的，丢了只是那个键的计数清零
+ */
+export function sigFailureAllowed(key: string): boolean {
+  let failures = sigFailures.get(key);
+  if (!failures) {
+    if (sigFailures.size >= SIG_FAILURE_KEYS) sigFailures.delete(sigFailures.keys().next().value!);
+    sigFailures.set(key, (failures = new SlidingWindowLimiter(API_RATE_LIMIT_PER_MIN)));
+  }
+  return failures.tryAcquire();
 }
 
 /** reason 单独给出：调用方据此提示「对时 / 重新邀请 / 别原样重发」，而不是笼统的「token 失效」 */

@@ -4,22 +4,30 @@
  */
 import { apiAgentName } from "@/lib/chat/agents";
 import { api } from "./client";
+import { talkEnabledOf } from "../talk-gate";
 
-// ── 全局设置（语言 / 语音识别 key）：GET 只回是否已配 + 尾四位，完整 key 永不回传 ──
+// ── 全局设置（语言 / 语音识别 key / 推送不带正文）：GET 只回是否已配 + 尾四位，完整 key 永不回传 ──
 export interface GlobalSettings {
   groqApiKeySet: boolean;
   groqApiKeyHint: string;
   lang?: "zh" | "en";
+  /** 这台电脑的推送只写「有新消息」（老 bridge 没这个字段 → false） */
+  pushNoContent: boolean;
+  /** Chat（人与人，/talk）入口开没开（缺省关；老 bridge 没这个字段 → false） */
+  talkEnabled: boolean;
 }
-const shapeSettings = (j: { lang?: unknown; groqApiKeyHint?: unknown }): GlobalSettings => {
+const shapeSettings = (j: { lang?: unknown; groqApiKeyHint?: unknown; pushNoContent?: unknown; talkEnabled?: unknown }): GlobalSettings => {
   const hint = typeof j.groqApiKeyHint === "string" ? j.groqApiKeyHint : "";
-  return { groqApiKeySet: !!hint, groqApiKeyHint: hint, ...(j.lang === "en" || j.lang === "zh" ? { lang: j.lang } : {}) };
+  return {
+    groqApiKeySet: !!hint, groqApiKeyHint: hint, pushNoContent: j.pushNoContent === true, talkEnabled: talkEnabledOf(j),
+    ...(j.lang === "en" || j.lang === "zh" ? { lang: j.lang } : {}),
+  };
 };
 export function getSettings(): Promise<GlobalSettings> {
   return api("/settings", { timeoutMs: 8000 }).then(shapeSettings);
 }
 /** 空串 groqApiKey = 清除 */
-export function putSettings(patch: { lang?: "zh" | "en"; groqApiKey?: string }): Promise<GlobalSettings> {
+export function putSettings(patch: { lang?: "zh" | "en"; groqApiKey?: string; pushNoContent?: boolean; talkEnabled?: boolean }): Promise<GlobalSettings> {
   return api("/settings", { method: "PUT", json: patch, timeoutMs: 8000 }).then(shapeSettings);
 }
 

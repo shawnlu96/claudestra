@@ -14,6 +14,10 @@ export const QUOTA_DICT: Record<string, string> = {
   "5 小时": "5-hour",
   "本周 tokens": "Tokens this week",
   "本周花费": "Cost this week",
+  "本月": "This month",
+  "余额": "Balance",
+  "API key 无效或已撤销（检查 Pi 的 models.json）": "API key invalid or revoked (check Pi's models.json)",
+  "这个 key 没有开通该套餐": "this key has no subscription for this plan",
   "免费额度重置": "Free usage resets",
   "持有 {n} 次，此刻可用 {m} 次": "{n} held, {m} usable now",
   "{at} 到期": "expires {at}",
@@ -27,9 +31,11 @@ export const QUOTA_DICT: Record<string, string> = {
   "账户按本机登录推定": "account assumed from local login",
   "实时读取已关闭，只显示本机缓存（设置 · 集成里可打开）": "Live reading is off; showing local cache only (turn it on in Settings · Integrations)",
   "订阅额度实时读取": "Live subscription quotas",
-  "用 Claude Code / codex 已登录的凭据，只读查询订阅额度和免费重置次数：看用量时实时查，后台每 6 小时查一次（快过期提醒靠它）。关掉后只显示本机缓存。":
+  "用 Claude Code / codex 已登录的凭据，只读查询订阅额度和免费重置次数：看用量时实时查，后台每 6 小时查一次（快过期提醒靠它）。Pi 里配置的 DeepSeek / OpenCode Go / Kimi 也用各自的 API key 查余额和套餐用量（只在看用量时查）。关掉后只显示本机缓存。":
     "Uses the credentials Claude Code / codex are already signed in with to read (read-only) your subscription quotas and free resets: " +
-    "live while you view usage, and every 6 hours in the background (for expiry reminders). Turn off to show local cache only.",
+    "live while you view usage, and every 6 hours in the background (for expiry reminders). " +
+    "DeepSeek / OpenCode Go / Kimi providers configured in Pi are checked for balance and plan usage with their own API keys (only while you view usage). " +
+    "Turn off to show local cache only.",
   "接口超时": "request timed out",
   "网络不通": "network unreachable",
   "服务端出错，稍后自动重试": "server error, will retry automatically",
@@ -52,6 +58,21 @@ export const QUOTA_DICT: Record<string, string> = {
   "账户不确定，暂不出提醒": "account uncertain; reminders paused",
   "本机密钥不可用": "local key unavailable",
   "内部出错，稍后自动重试": "internal error, will retry automatically",
+  // 额度闸横幅（features/quota-wall/）
+  "Claude Code 周额度已用完": "Claude Code weekly limit reached",
+  "Claude Code 5 小时额度已用完": "Claude Code session limit reached",
+  "Claude Code 额度已用完": "Claude Code usage limit reached",
+  "额度已恢复，正在关菜单、补投消息、续跑": "Usage restored — closing menus, delivering queued messages, resuming agents",
+  "{when} 重置": "resets {when}",
+  "约 {m} 分钟后": "in about {m} min",
+  "约 {h} 小时后": "in about {h} h",
+  "重置时间未知": "reset time unknown",
+  "排队 {n} 条 agent 消息，恢复后自动送达": "{n} agent message(s) queued, delivered automatically on recovery",
+  "人发的消息 {n} 条押在停着菜单 / 倒计时的窗口上，恢复后送达": "{n} message(s) from people held at windows on the menu / countdown, delivered on recovery",
+  "用量探测不可用：只能等重置回显、到点，或点「已恢复」": "Usage probe unavailable: waits for a reset echo, the reset time, or \"It's back\"",
+  "有 {n} 次重置可用：在撞墙窗口里 /limit-reset": "{n} reset(s) available: run /limit-reset in a walled window",
+  "已恢复": "It's back",
+  "确认已恢复？": "Confirm restored?",
   // 上下文边界（features/chat/ctx-boundary-view.ts、components/ctx-boundary-chip.tsx）
   "上下文边界": "Context boundary",
   "执行类": "Executor",

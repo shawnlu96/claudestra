@@ -24,6 +24,8 @@ export interface RequestContext {
   sameNetwork?: boolean;
   /** 经中继 peer 帧来、且 peer 入口核过进程内标记的发件人指纹（peer-ingress.ts）；别的入口永远没有，别读原始头 */
   relayFrom?: string;
+  /** 由 E2E 会话解开的内层请求：会话发起方的指纹（bridge/peer-e2e-route.ts 设）。peerGate 据此要求 token 的主人就是他 */
+  e2e?: { peerFp: string };
 }
 
 const contexts = new WeakMap<Request, RequestContext>();
@@ -37,6 +39,8 @@ const LEAST_PRIVILEGE: RequestContext = { source: "unknown", clientIp: null, htt
  *   redeem   兑换邀请：同上，合法兑换只走 peer 帧或直连；
  *   api      /api/v1 的任何凭据（Bearer、设备 cookie）：四个已知来源都认，只拒没定来源的（unknown）；
  *   bearer   非 peer 的 Bearer（网页 token、scoped token）：peer 入口是对外端口，泄漏的网页 token 不该能从那里用。
+ *   keyedInvite  网页上生成 / 加入带密钥的邀请：邀请原文要经过这个页面，经中继打开的页面中继能换掉里面的公钥
+ *                （docs/relay/e2e-design.md §5.1）。不在名单里的来源只生成不加密的邀请、拒绝加入加密邀请。
  */
 const SOURCE_POLICY = {
   api: ["loopback", "lan", "relay", "peer-ingress"],
@@ -45,6 +49,7 @@ const SOURCE_POLICY = {
   legacy: ["loopback", "lan"],
   peer: ["loopback", "lan", "peer-ingress"],
   redeem: ["loopback", "lan", "peer-ingress"],
+  keyedInvite: ["loopback", "lan"],
 } as const satisfies Record<string, readonly RequestSource[]>;
 
 /** peer 入口拒掉非 peer 凭据时的报错（入口本身与 /api/v1 鉴权共用） */

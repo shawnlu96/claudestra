@@ -8,7 +8,7 @@
  *   - 只调 /api/v1 的处理函数（注入的 handleApi），控制面、ws、远程终端根本不在这个入口上；
  *   - Bearer（含 SSE 查询 token）必须属于 peer；非 peer 的 Bearer 在所有 socket 来源下都拒；
  *   - 本机反代转来的（网页经 HTTPS 入口）还认设备 cookie；对外直连与中继 peer 帧只认 peer token，
- *     不带凭据只剩兑换邀请和邀请页（见 ingressRequest）。
+ *     不带凭据只剩兑换邀请、邀请页和 E2E 的两种帧（见 ingressRequest、ingressPublicRoute）。
  * 有了它，peer 走 HTTPS 443 就行，3847 不必对外开放、也不用给每个 peer 加防火墙白名单。
  * 没有 HTTPS 的机器，它自己对外当直连入口（ingressHost）——同样只有 peer 能用，主端口照旧只听本机。
  */
@@ -22,6 +22,7 @@ import { isLoopbackAddress } from "../lib/same-host.js";
 import { DEVICE_HEADER } from "../lib/devices.js";
 import { HTTP_IDLE_TIMEOUT_S } from "../lib/esc-guard.js";
 import { MAX_HTTP_BODY, MAX_PEER_BODY, readBoundedRequestBody, RequestBodyError } from "../lib/request-body.js";
+import { E2E_BODY_MAX, isE2eFrame } from "../lib/peer-e2e-wire.js";
 
 export { configuredPeerIngressPort };
 
@@ -110,9 +111,16 @@ export async function peerIngressSyncRoute(req: Request): Promise<Response> {
   return json(200, { ok: true, ...(await syncPeerIngress(body.hold === true)) });
 }
 
-/** 不带凭据时对外只开这两个口：兑换邀请（凭一次性 join 口令）和邀请落地页 */
-function ingressPublicRoute(method: string, pathname: string): boolean {
-  return (method === "POST" && pathname === "/api/v1/peers/redeem") || (method === "GET" && pathname === "/api/v1/invite");
+/**
+ * 不带凭据时对外只开这几个口：兑换邀请（凭一次性 join 口令）、邀请落地页，和 E2E 的两种帧（lib/peer-e2e-wire.ts isE2eFrame，
+ * 逐字匹配 path + 查询串）。E2E 帧不带 token 是设计：token 只在密文里（docs/relay/e2e-design.md §5.1）。等价的检查挪到了
+ * bridge/peer-e2e-route.ts，在任何解析和 ECDH 之前：直连的先验外层实例签名、签名方必须是钉了身份钥匙的 E2E 联系人；
+ * 中继帧由 relay-inbound 核过（lib/peer-trust.ts relayPeerRefusal）。解开后内层照旧过 peerGate，外加 token 主人 = 会话发起方。
+ */
+function ingressPublicRoute(method: string, url: URL, rawHref: string): boolean {
+  const pathname = url.pathname;
+  if ((method === "POST" && pathname === "/api/v1/peers/redeem") || (method === "GET" && pathname === "/api/v1/invite")) return true;
+  return isE2eFrame(method, pathname + url.search) && !rawHref.includes("?"); // URL 解析会吞掉空的 "?"，看原串：带查询串的一律不算
 }
 
 /**
@@ -121,7 +129,7 @@ function ingressPublicRoute(method: string, pathname: string): boolean {
  *     与主端口经反代同待遇（来源 lan，设备 cookie 照认）。前提是中继够不到这个端口——隧道与 peer 帧的 path
  *     都过了同源断言（relay-inbound.ts localUrl），选端口时也避开网页端口；这些松了，这一类就不再成立。
  *   - 中继转来的 peer 帧（进程内标记核过）与非回环 socket（PEER_INGRESS_PUBLIC=1 直接对外）：来源 peer-ingress，
- *     删掉 cookie 与设备头；不带凭据只放兑换与邀请页，其余 403。设备端点与设备凭据在这个来源下一律拒。
+ *     删掉 cookie 与设备头；不带凭据只放兑换、邀请页与 E2E 两种帧，其余 403。设备端点与设备凭据在这个来源下一律拒。
  */
 export async function ingressRequest(req: Request, handleApi: ApiHandler, addr: string | null = null): Promise<Response> {
   if (req.headers.get("upgrade")) return json(400, { ok: false, error: "no websocket on the peer entrance" });
@@ -139,24 +147,29 @@ export async function ingressRequest(req: Request, handleApi: ApiHandler, addr: 
   const tunnelled = headers.has(TUNNEL_MARK_HEADER);
   headers.delete(TUNNEL_MARK_HEADER);
   const localProxy = !relayFrom && !tunnelled && isLoopbackAddress(addr);
+  const publicRoute = ingressPublicRoute(req.method, url, req.url);
+  const e2eFrame = isE2eFrame(req.method, url.pathname + url.search);
   if (!localProxy) {
     headers.delete("cookie");
     headers.delete(DEVICE_HEADER);
-    if (!secret && !ingressPublicRoute(req.method, url.pathname)) return json(403, PEER_ENTRANCE_ONLY);
+    if (!secret && !publicRoute) return json(403, PEER_ENTRANCE_ONLY);
   }
   const hasBody = req.method !== "GET" && req.method !== "HEAD";
   // 配对与旧会话迁移要先于设备鉴权；其余无凭据 POST 不替路由预读正文，避免反代兼容成为慢上传入口。
   const publicDevice = localProxy && ["/api/v1/devices/pair", "/api/v1/devices/legacy-session"].includes(url.pathname);
-  if (hasBody && !secret && !headers.has("cookie") && !ingressPublicRoute(req.method, url.pathname) && !publicDevice) return json(403, PEER_ENTRANCE_ONLY);
-  const browserUpload = localProxy && !secret && headers.has("cookie") && !publicDevice && !ingressPublicRoute(req.method, url.pathname);
+  if (hasBody && !secret && !headers.has("cookie") && !publicRoute && !publicDevice) return json(403, PEER_ENTRANCE_ONLY);
+  const browserUpload = localProxy && !secret && headers.has("cookie") && !publicDevice && !publicRoute && !e2eFrame;
   // 设备上传先交 API 鉴权再读流；不能把 peer 验签的 1 秒预读期限用在手机语音上传上。
   // 假 cookie 不读正文就被拒，外层 drainingFetch 仍负责限时排空并关闭连接。
   let body: Uint8Array | ReadableStream<Uint8Array> | undefined = browserUpload ? req.body ?? undefined : undefined;
+  // E2E 帧的外层 Bearer / cookie 不赋予缓冲权限；不论附什么头都封顶，未认证公开口同样按 E2E 上限预读。
+  const cap = e2eFrame || (!secret && (publicRoute || publicDevice)) ? E2E_BODY_MAX : MAX_PEER_BODY;
   try {
-    if (hasBody && !browserUpload) body = await readBoundedRequestBody(req, MAX_PEER_BODY);
+    if (hasBody && !browserUpload) body = await readBoundedRequestBody(req, cap);
   } catch (e) {
     if (!(e instanceof RequestBodyError)) throw e;
-    const res = json(e.status, { ok: false, error: e.code, code: e.code });
+    const code = e.status === 413 && e2eFrame ? "e2e_too_large" : e.code;
+    const res = json(e.status, { ok: false, error: e.status === 413 ? "request body too large" : e.code, code });
     res.headers.set("connection", "close");
     return res;
   }

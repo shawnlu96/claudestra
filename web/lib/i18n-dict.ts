@@ -19,13 +19,16 @@ import { QUOTA_DICT } from "./i18n-dict-quota";
 import { CONTACTS_DICT } from "./i18n-dict-contacts";
 import { SESSIONS_DICT } from "./i18n-dict-sessions";
 import { SKILLS_DICT } from "./i18n-dict-skills";
+import { TALK_DICT } from "./i18n-dict-talk";
+import { RELAY_DICT } from "./i18n-dict-relay";
 
 export const DICT: Record<string, string> = {
-  ...LEDGER_DICT, ...COLLAB_DICT, ...BOUNDARY_DICT, ...ATTACH_DICT, ...TOOLS_DICT, ...MEDIA_DICT,
+  ...LEDGER_DICT, ...COLLAB_DICT, ...BOUNDARY_DICT, ...ATTACH_DICT, ...TOOLS_DICT, ...MEDIA_DICT, ...TALK_DICT,
   ...QUOTA_DICT, // 订阅额度卡片组与开关（lib/i18n-dict-quota.ts）
   ...CONTACTS_DICT, // 侧栏联系人与输入框 @（lib/i18n-dict-contacts.ts）
   ...SESSIONS_DICT, // 未纳管会话 / 归档（lib/i18n-dict-sessions.ts）
   ...SKILLS_DICT, // 技能库与按会话启停（lib/i18n-dict-skills.ts）
+  ...RELAY_DICT, // Peer 面板的中继卡（lib/i18n-dict-relay.ts）
   // ── 通用 ─────────────────────────────────────────────
   "关闭": "Close",
   "斜杠命令只有 owner 能用，请直接发文字": "Slash commands are owner-only — send it as plain text", // bridge/api-slash.ts 的 slash_owner_only
@@ -234,6 +237,11 @@ export const DICT: Record<string, string> = {
   "影响所有未单独钉模型/effort 的新会话（含终端里直接开的 claude）。已钉的 agent 不受影响。":
     "Applies to new sessions without a pinned model/effort (including claude started in a terminal). Pinned agents are unaffected.",
   "推送通知": "Push notifications",
+  "推送不带正文": "Hide content in notifications",
+  "推送里看不到内容，点开才看得到：打开后，这台电脑发出的推送只写「有新消息」，不带 agent 名和消息内容，点开进会话列表。推送要经过中继和 Apple / Google 的推送服务，打开后它们看不到内容。对这台电脑配对的所有设备都生效。":
+    "You won't see the content in notifications — only after opening the app. " +
+    "Notifications from this computer just say “New message”, with no agent name or message text; tapping one opens the conversation list. " +
+    "Notifications pass through the relay and Apple / Google push services, which then can't see the content. Applies to every device paired with this computer.",
   "Web 端发起的对话有回复时,推送到本设备(页面开着时不打扰)。Discord 发起的照旧走 Discord @。":
     "Get notified on this device when a web conversation gets a reply (quiet while the page is open). Discord conversations still ping via Discord.",
   "语音识别 · Groq API Key": "Speech-to-text · Groq API Key",
@@ -688,8 +696,6 @@ export const DICT: Record<string, string> = {
   "读取中继状态失败": "Couldn't read relay status",
   "我的中继地址": "My relay address",
   "手机 / 别的浏览器不装任何东西、不开 Tailscale 就能打开这个地址。": "Phones and other browsers can open this address with nothing installed and no Tailscale.",
-  "出门访问目前要靠 Tailscale；在 .env 里加这两行、重启 bridge，手机不装任何东西就能打开这台机器。":
-    "Remote access currently needs Tailscale. Add these two lines to .env and restart the bridge; phones can then open this machine with nothing installed.",
   "配对新设备": "Pair a new device",
   "配对码生成失败": "Couldn't create a pairing code",
   "全部会话": "all sessions",
@@ -904,6 +910,7 @@ export const DICT: Record<string, string> = {
   "撤销": "Revoke",
   "有效期至": "Valid until",
   "未送达": "Not delivered",
+  "押着，送达后出现在对话里": "Held — it shows up in the chat once delivered",
   "重新发送": "Resend",
   "iOS 键盘修正（实验）": "iOS keyboard fix (experimental)",
   "开发者模式": "Developer mode",

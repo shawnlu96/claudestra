@@ -16,7 +16,8 @@ import {
   confirmCredential, defaultCredDeps, hmacHex, peekAccountKey, readClaudeCredential, readCodexCredential, type QuotaProvider,
 } from "../lib/quota-credentials.js";
 import { selectQuotaLayers, type LayerInput, type ProviderEntry, type QuotaSnapshot } from "../lib/quota-layers.js";
-import { piProviderEntries } from "../lib/quota-pi.js";
+import { mergePiEntries, piProviderEntries } from "../lib/quota-pi.js";
+import { piPlanEntries } from "../lib/quota-pi-plans.js";
 import { QuotaScheduler, type RefreshResult } from "../lib/quota-scheduler.js";
 import { fileQuotaStore } from "../lib/quota-state.js";
 import { readUsageCacheStale } from "../lib/usage-cache.js";
@@ -43,7 +44,8 @@ export interface QuotaServiceDeps {
   makeScheduler(isEnabled: () => boolean): SchedulerApi;
   readEnabled(): boolean;
   writeEnabled(v: boolean): Promise<void>;
-  local(): Promise<{ claudeCache: LayerInput["local"]["claudeCache"]; codexRollout: LayerInput["local"]["codexRollout"]; extra: ProviderEntry[] }>;
+  /** live = 实时读取开着：Pi 接入商的套餐 / 余额也只在这时去查（lib/quota-pi-plans.ts） */
+  local(live: boolean): Promise<{ claudeCache: LayerInput["local"]["claudeCache"]; codexRollout: LayerInput["local"]["codexRollout"]; extra: ProviderEntry[] }>;
   /** 每个 tick 之后跑一次提醒（quota-reminders.ts）；开关关着时不跑 */
   afterTick(scheduler: SchedulerApi): Promise<void>;
   setTimer(fn: () => void, ms: number): unknown;
@@ -110,7 +112,7 @@ export function createQuotaService(d: QuotaServiceDeps) {
     }
     const [remote, local, health] = await Promise.all([
       enabled ? scheduler.view() : Promise.resolve(null),
-      d.local(),
+      d.local(enabled),
       enabled ? scheduler.health() : Promise.resolve({}),
     ]);
     const now = d.now();
@@ -138,9 +140,8 @@ export function createQuotaService(d: QuotaServiceDeps) {
   }
 
   return {
-    snapshot,
-    retry,
-    setEnabled,
+    snapshot, retry, setEnabled,
+    claudeWall: (refresh: boolean) => (syncEnabled(), claudeWallView(scheduler, enabled, d.now(), refresh)),
     isEnabled: () => enabled,
     isViewing: viewing,
     start(): void {
@@ -157,6 +158,24 @@ export function createQuotaService(d: QuotaServiceDeps) {
 }
 
 export type QuotaService = ReturnType<typeof createQuotaService>;
+
+/**
+ * 额度闸（bridge/quota-wall.ts）用：Claude 两个窗口里较高的百分比（只认实时层）+ 持有的重置次数（held：默认的卡要撞到限额才算
+ * usableNow，撞墙前的快照里 applicableNow 几乎总是 0，拿它判「有没有卡」进闸通知那一行就永远不出现）。
+ * refresh = 先按后台节奏查一次（沿用调度器的间隔、退避与 quotaClaudeBackground 开关；只读接口，不碰 consume / reset）。
+ */
+async function claudeWallView(
+  scheduler: SchedulerApi, enabled: boolean, now: number, refresh: boolean,
+): Promise<{ pct: number | null; observedAt: number; credits: number | null } | null> {
+  if (!enabled) return null;
+  if (refresh) await scheduler.refresh("claude", "background");
+  const snap = selectQuotaLayers({ now, enabled, remote: await scheduler.view(), local: { claudeCache: null, codexRollout: null }, extra: [] });
+  const p = snap.providers.find((x) => x.id === "claude");
+  if (!p) return null;
+  const pcts = p.meters.filter((m) => m.unit === "pct" && (m.kind === "session" || m.kind === "weekly") && m.used !== null).map((m) => m.used as number);
+  const live = p.source.layer === "live" && pcts.length > 0;
+  return { pct: live ? Math.max(...pcts) : null, observedAt: p.source.observedAt ?? 0, credits: p.resetCredits?.held ?? null };
+}
 
 /**
  * 本机实际装的 Claude Code 版本（按登录 shell 的 PATH 解析，与 agent 跑的是同一个 claude；launcher 体检同口径）：
@@ -192,13 +211,14 @@ function productionScheduler(isEnabled: () => boolean): QuotaScheduler {
   });
 }
 
-async function productionLocal() {
-  const [rollout, machine] = await Promise.all([
+async function productionLocal(live: boolean) {
+  const [rollout, machine, plans] = await Promise.all([
     withCodexQuota({ agents: [] }).then((s) => s.quotas[0] ?? null),
     machineUsage(currentUsageWindow()),
+    live ? piPlanEntries({ fetch: (url, init) => fetch(url, init), now: Date.now }) : Promise.resolve([]),
   ]);
   const m = machine && !("unavailable" in machine) ? machine : null;
-  return { claudeCache: readUsageCacheStale(), codexRollout: rollout, extra: piProviderEntries(m) };
+  return { claudeCache: readUsageCacheStale(), codexRollout: rollout, extra: mergePiEntries(plans, piProviderEntries(m)) };
 }
 
 let service: QuotaService | null = null;

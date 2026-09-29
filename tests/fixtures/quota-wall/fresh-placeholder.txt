@@ -1,0 +1,24 @@
+
+ ▐▛███▛█   Claude Code v2.1.283
+▝▜██████▀  Opus 5.5 with xhigh effort · Claude Max
+ ▝▝   ▝▝   /private/tmp/cs-t35/work
+
+▎ Channels (experimental) messages from server:claudestra inject directly in 
+▎ this session · restart without --dangerously-load-development-channels to stop
+
+
+
+
+
+
+
+
+
+
+
+
+────────────────────────────────────────────────────────────────────────────────
+❯ Try "fix lint errors"
+────────────────────────────────────────────────────────────────────────────────
+  Opus 5.5
+  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents

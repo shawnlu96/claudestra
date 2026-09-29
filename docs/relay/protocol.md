@@ -175,11 +175,12 @@ claudestra-relay-auth-v2
 
 ### 4.1 接收方验签（peer 路径，实例 MUST 做）
 
-中继看得见明文（本版没有端到端加密），所以「拿着 token 的中继或别的实例不能冒充发起方」靠这一步：
+中继看得见 peer 请求的明文（用密钥建立的 peer 例外：请求整体加密，见 [e2e-design.md](./e2e-design.md) §5.1，下面的验签照旧作用在外层，内层另验一次），所以「拿着 token 的中继或别的实例不能冒充发起方」靠这一步：
 
 1. `x-claudestra-key` 形状合法，且 `keyFingerprint(key) === from`；否则 `error bad_signature`。`from` 由中继按握手结果盖章，别的实例顶不了 A 的钥匙，中继虽能盖任意 `from` 却签不出 A 的签名。
 2. 按 `instance-key.ts` 的 canonical 验：`claudestra-req-v1\n<METHOD>\n<path>\n<ts>\n<sha256(body) hex>`，body 是完整请求正文的原始字节（流式正文先收齐再验——peer 路径的正文都是小 JSON）；偏差 ±300 秒。`x-claudestra-sig` MUST 是规范的无填充 base64url（86 个字符，解码再编码与原串一致），否则同一个签名能写成多种串。不过 → `bad_signature`。
 3. 核发件人（`lib/peer-trust.ts` `relayPeerRefusal`）：兑换邀请之外，`from` MUST 是本机联系人（peers.json 里未禁用、记有指纹的对方），而且 MUST 带 peer token（Bearer 或 events 的 `?token=`）；token 所属 peer 的期望指纹 MUST 等于 `from`；记录里存了对方完整公钥的，`x-claudestra-key` MUST 就是那一把（不只比 64 位指纹）。否则 `error sender_forbidden`。签名只证明请求出自 `from`，这一步才证明 token 是 `from` 的。
+   例外只有 E2E 的两种帧（`POST /api/v1/e2e/hello`、`POST /api/v1/e2e/<sid>/<rid>`，逐字匹配，`lib/peer-e2e-wire.ts` `isE2eFrame`）：外层不带 token，因为 token 只在密文里、不给中继看（[e2e-design.md](./e2e-design.md) §5.1）。联系人、记下的完整公钥照样核，第 4 步照旧；「token 是 `from` 的」挪到解密之后：内层完整过 `peerGate`（token、验签、重放），再核 token 的主人就是会话发起方（`e2e_peer_mismatch`）。
 4. 防重放：非 GET / HEAD 的签名（按解码后的字节比较）在它的有效期内（签名时间 + 300 秒）见过，→ `error replay`；时间戳早于本进程启动（缓存不落盘）→ `error bad_signature`，message 提示发起方时钟慢、先对时。**只在第 3 步通过后才写缓存**：被拒的请求一条都不进，非联系人签名再合法也占不到位置。兑换帧（非联系人也能发）记在单独的小缓存里（整体 500 条、每个发件人 60 条），满了挤掉最旧的一条而不拒新兑换：口令只能兑换一次、持钥证明绑着加入方现生成的 nonce，被挤掉的签名再来一次最多得到和原请求相同的结果。联系人的缓存按发件人分桶：一个发件人 2000 条、整体 5 万条未过期，满了拒新请求（`error replay_full`）并告警，不挤掉未过期的条目；一个发件人灌满只拒它自己。
 
 目标地址用 `new URL(path, 入口基址)` 构造并断言与基址同源（`relay-inbound.ts` `localUrl`）：`path` MUST 以单个 `/` 开头（`//`、`/\`、`@host`、不带斜杠的一律 `error path_forbidden`），帧里的 `path` 改不了目标主机。peer 帧在第 1 步之前就做这项检查，不合格的不验签、不进防重放缓存。隧道请求（§4.2）同样如此。拒绝发件人的日志每个发件人每分钟一行（发件人数超过上限的归到同一行）。
@@ -188,7 +189,7 @@ claudestra-relay-auth-v2
 
 bridge 里请求来源分四类（`bridge/request-context.ts`）：`loopback`、`lan`、`relay`、`peer-ingress`；没设过来源的请求是 `unknown`，各处按来源放行都查同一张正向白名单（`sourceAllows`），`unknown` 一个都不认——`/api/v1` 的任何凭据（含不看来源的 Bearer）在 `unknown` 下一律 403 `unknown_source`，并每分钟最多记一行日志（入口与路径，不含凭据）；来源为 `peer-ingress` 的请求（不包括下面的回环反代兼容路径）只收 peer 凭据，设备凭据与非 peer 的 Bearer（网页 token、scoped token）一律 403（权限矩阵：`tests/session-gates.test.ts`）。主端口与接管的旧 web 端口对每个请求都定来源（`relay-inbound.ts` `socketTrust`）：带隧道标记的是 `relay`，回环 socket 且无 XFF 的是 `loopback`，其余是 `lan`（`clientIp` 取 socket 地址，`https` 跟随 `x-forwarded-proto`）。
 
-peer 入口只见其中两种：回环 socket、没有中继标记、也没有隧道标记头 = 本机反代（`tailscale serve` 把 `/api/v1` 挂在这里，网页经 HTTPS 入口也走它），按主端口经反代对待（来源 `lan`，设备 cookie 照认——这一类成立的前提是上面的同源断言，而且入口端口不是网页端口：选端口时避开网页端口，两者相同时隧道一律 `local_unreachable`）；中继 peer 帧与非回环 socket（`PEER_INGRESS_PUBLIC=1` 对外直连）来源是 `peer-ingress`，删掉 cookie 与设备头，不带凭据只放兑换（`POST /api/v1/peers/redeem`）与邀请页（`GET /api/v1/invite`），设备端点与设备凭据一律 403；回环反代即使带 XFF 仍保留设备 cookie 与设备端点，但不享受 loopback 豁免；所有来源的非 peer Bearer 均在此端口拒绝。`legacy-session` 只认 `loopback` / `lan`（包含此反代兼容路径），不认 `peer-ingress` / `relay`。
+peer 入口只见其中两种：回环 socket、没有中继标记、也没有隧道标记头 = 本机反代（`tailscale serve` 把 `/api/v1` 挂在这里，网页经 HTTPS 入口也走它），按主端口经反代对待（来源 `lan`，设备 cookie 照认——这一类成立的前提是上面的同源断言，而且入口端口不是网页端口：选端口时避开网页端口，两者相同时隧道一律 `local_unreachable`）；中继 peer 帧与非回环 socket（`PEER_INGRESS_PUBLIC=1` 对外直连）来源是 `peer-ingress`，删掉 cookie 与设备头，不带凭据只放兑换（`POST /api/v1/peers/redeem`）、邀请页（`GET /api/v1/invite`）与 E2E 的两种帧（逐字匹配、不许带查询串），设备端点与设备凭据一律 403；回环反代即使带 XFF 仍保留设备 cookie 与设备端点，但不享受 loopback 豁免；所有来源的非 peer Bearer 均在此端口拒绝。E2E 帧的外层身份在 `bridge/peer-e2e-route.ts` 里、任何解析和 ECDH 之前核：中继帧已由上面第 1–4 步核过；直连的先验外层实例签名，签名方必须是钉了身份钥匙的 E2E 联系人，失败计入 `peerGate` 的验签失败桶，hello 另按发件人限速。`legacy-session` 只认 `loopback` / `lan`（包含此反代兼容路径），不认 `peer-ingress` / `relay`。
 
 bridge 再按 peer token 与 scope 放行，并对 peer token 强制验签：签名钥匙的指纹 MUST 等于这个 peer 的期望指纹（peers.json 的 `fp` → `relay://<fp>` 基址 → 首次签名时钉住的指纹；记了完整公钥 `publicKey` 的只认这一把），不签、签错、过期、换了钥匙都 401；公钥与签名都只认规范的无填充 base64url。直连（不经中继）的 peer 请求同样如此。顺序是：验签 → 防重放（非 GET / HEAD 的签名在有效期内只认一次；GET / HEAD 同一签名第二次起照放行但不扣额度——正牌 peer 同一秒对同一路径发两次签名相同——超过 5 次按重放拒；签于本进程启动之前但仍在验签有效期内的 GET 同样纳入计次：第一次扣额度，重复沿用上述限制，不回 `before_start`；bridge 另持一份 `ReplayCache`，所有入口共用）→ 扣成功请求的限速额度 → 记重放计数与验签结果（429 不占计数；GET 表满拒新签名，不逐出未过期计数）；重放 401，不扣额度、不写 `peer-keys.json`。验签失败另有一个每 peer 每分钟 120 次的桶，超了 429（`reason: sig_rate_limited`，`cause` 是这次失败的原因）；失败只记在内存，由定时器每分钟最多补写一次，钉住的钥匙不动。不限速的路由（远程终端）不收 peer token，一律 403。三样都没有的老 peer 在截止日（默认 2026-11-01，`PEER_LEGACY_DEADLINE` 可覆盖）前放行并告警（doctor 会列出来）；截止日之后一律拒（`reason: unanchored`），签名对得上也不再现钉。邀请里带的 token 在兑换之前只能读（`invite_read_only`），邀请过期或撤销即失效（`invite_expired`，不等清扫）。经中继来的请求（路径模式 §6 与 §4.2 的隧道，bridge 里来源都是 relay）不收 peer token，也不接兑换邀请，一律 403；控制面闸门看到隧道标记就不当本机，不单靠 XFF。
 
@@ -336,7 +337,7 @@ IP 的取法与握手限流相同：`RELAY_TRUST_PROXY=<受信反代层数>` 时
 
 中继**不能**：冒充实例发 peer 请求（没有私钥；接收方验签，核对 token 属于签名者，bridge 对 peer token 强制验签，路径模式不收 peer token）；未经 B 列为联系人就替 A 敲 B 的门（除兑换邀请那一条限流路径）。
 
-明说的残余风险，留给下一版端到端加密：隧道里的 Web 流量（含会话 cookie）对中继可见；中继若能直连某台实例的 Web 端口（同机部署）就能绕过一切。缓解：不在跑 bridge 的机器上跑中继；Web 与 peer 入口默认只听本机。中继日志 MUST 只记信封：时间、from、to、id、方法、路径前缀、大小、状态、耗时；不记头与正文，不记 `/c/<code>` 的短码值。
+明说的残余风险（端到端加密的设计与分期见 [e2e-design.md](./e2e-design.md)）：隧道里的 Web 流量（含会话 cookie）对中继可见；中继若能直连某台实例的 Web 端口（同机部署）就能绕过一切。缓解：不在跑 bridge 的机器上跑中继；Web 与 peer 入口默认只听本机。中继日志 MUST 只记信封：时间、from、to、id、方法、路径前缀、大小、状态、耗时；不记头与正文，不记 `/c/<code>` 的短码值。
 
 ## 10. 测试向量
 
@@ -366,4 +367,4 @@ slug   macbook-a
 sig    JaWyysd1-D9wa1rQt94MjYMgmNzu1vEboFjmBzHR78LpfcOwEBJrYlb-MJvt4dt6LRCSRfvq6eyaTawFj5x4Ag
 ```
 
-peer 入口预读正文同样有 1 秒绝对期限，超时 408、超大 413 并关闭连接；peer / 兑换正文上限 2MiB。HTTP listener 明确封顶 32MiB（网页语音上传需要 20MiB）；本机反代受保护路由的设备 cookie 请求原样传递正文流，由 API 先认证再读取，不受 peer 的预读期限影响；假 cookie 被拒后由 drainingFetch 限时排空。公开兑换/配对仍限时预读，不能靠附带 cookie 绕过。无凭据的反代 POST 除兑换与配对/旧会话迁移外，读正文前即拒绝。
+peer 入口预读正文统一有 1 秒绝对期限，超时 408、超大 413 并关闭连接：E2E 帧不论附带任何头，以及未认证的公开口，均按 E2E_BODY_MAX 封顶；普通 peer 验签路径按 MAX_PEER_BODY 封顶（目前两者都是 2MiB）。HTTP listener 明确封顶 32MiB（网页语音上传需要 20MiB）；本机反代受保护路由的设备 cookie 请求原样传递正文流，由 API 先认证再读取，不受 peer 的预读期限影响；假 cookie 被拒后由 drainingFetch 限时排空。公开 E2E/兑换/配对仍限时预读，不能靠附带 cookie 绕过；无凭据的非公开 POST 在预读前拒绝。readRequestCapped 委托同一个有界读取实现，E2E 内部调用方沿用正文拒收回 413 并关闭连接的契约。

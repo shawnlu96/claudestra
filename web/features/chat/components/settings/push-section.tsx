@@ -3,9 +3,11 @@ import { useEffect, useState } from "react";
 import { enablePush, disablePush, getPushSubscription } from "@/lib/push/client";
 import { useT } from "@/lib/i18n";
 import { Section } from "./section";
+import { useSettingsFlag } from "./settings-flag";
 
-/** Web Push(owner 2026-07-16):本设备订阅状态 */
+/** Web Push(owner 2026-07-16):本设备订阅状态 + 这台电脑的「不带正文」开关 */
 export function usePushToggle(open: boolean) {
+  const noContent = useSettingsFlag("pushNoContent", open); // 整台电脑的「推送不带正文」（src/lib/push-redact.ts）
   const [pushOn, setPushOn] = useState(false);
   const [pushMsg, setPushMsg] = useState("");
   const [pushBusy, setPushBusy] = useState(false);
@@ -27,13 +29,14 @@ export function usePushToggle(open: boolean) {
     setPushBusy(false);
   };
 
-  return { pushOn, pushMsg, pushBusy, togglePush };
+  return { pushOn, pushMsg, pushBusy, togglePush, noContent };
 }
 
 export function PushSection({ push }: { push: ReturnType<typeof usePushToggle> }) {
   const t = useT();
-  const { pushOn, pushMsg, pushBusy, togglePush } = push;
+  const { pushOn, pushMsg, pushBusy, togglePush, noContent } = push;
   return (
+      <>
         <Section
           title={t("推送通知")}
           aside={
@@ -49,5 +52,21 @@ export function PushSection({ push }: { push: ReturnType<typeof usePushToggle> }
         >
           {pushMsg ? <div className="text-xs text-base-content/60">{t(pushMsg)}</div> : null}
         </Section>
+        <Section
+          title={t("推送不带正文")}
+          aside={
+            <input
+              type="checkbox"
+              className="toggle toggle-sm shrink-0"
+              checked={noContent.on === true}
+              disabled={noContent.busy || noContent.on === null}
+              onChange={() => void noContent.toggle()}
+            />
+          }
+          desc={t("推送里看不到内容，点开才看得到：打开后，这台电脑发出的推送只写「有新消息」，不带 agent 名和消息内容，点开进会话列表。推送要经过中继和 Apple / Google 的推送服务，打开后它们看不到内容。对这台电脑配对的所有设备都生效。")}
+        >
+          {noContent.err ? <div className="text-xs text-error">{noContent.err}</div> : null}
+        </Section>
+      </>
   );
 }

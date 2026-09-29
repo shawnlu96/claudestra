@@ -166,6 +166,48 @@ describe("请求往返", () => {
     await until(() => aborted);
     expect(relay.received.some((r) => r.fp === a.fp && r.frame.t === "cancel")).toBe(true);
   });
+  test("响应超过 maxResponseBytes：发起方发 cancel、读端报 response_too_large，对方的流被停；头里的 inline 正文超了直接拒", async () => {
+    let pulled = 0;
+    const flood: InboundHandler = async () => ({
+      status: 200, headers: {}, body: new ReadableStream<Uint8Array>({ pull: async (c) => { pulled++; await sleep(1); c.enqueue(new Uint8Array(16 * 1024)); } }),
+    });
+    const a = client(relay, "A6");
+    const b = client(relay, "B6", flood);
+    await Promise.all([relay.waitOnline(a.fp), relay.waitOnline(b.fp)]);
+    await until(() => a.c.state === "online" && b.c.state === "online");
+    const r = await a.c.request(b.fp, { method: "GET", path: "/api/v1/agents", headers: {} }, { maxResponseBytes: 100 * 1024 });
+    await expect(collectBody(r.body, 1e9)).rejects.toMatchObject({ code: "response_too_large" });
+    await relay.waitFor((x) => x.fp === a.fp && x.frame.t === "cancel");
+    const stopped = pulled;
+    await sleep(100);
+    expect(pulled - stopped).toBeLessThan(10); // 对方收到 cancel 就停了，不是一直灌
+    const c = client(relay, "B7", async () => ({ status: 200, headers: {}, body: enc("x".repeat(2000)) }));
+    await relay.waitOnline(c.fp);
+    await until(() => c.c.state === "online");
+    await expect(a.c.request(c.fp, { method: "GET", path: "/api/v1/agents", headers: {} }, { maxResponseBytes: 100 })).rejects.toMatchObject({ code: "response_too_large" });
+  });
+});
+
+describe("作恶的中继：空 / 非法 base64 的 data 帧", () => {
+  test("空 data 帧、解不开的 base64：当场断掉这个请求（bad_frame）并发 cancel；头里 inline 正文是乱码直接拒", async () => {
+    let head: Record<string, unknown> | undefined;
+    const evil = startFakeRelay({ answerForward: (f) => head && { ...head, id: f.id } });
+    opened.push(evil);
+    const a = client(evil, "EV");
+    await evil.waitOnline(a.fp);
+    await until(() => a.c.state === "online");
+    const target = "1111-2222-3333-4444";
+    for (const bad of ["", "@@@@", "QQ"]) {
+      head = { t: "res", status: 200, headers: {}, more: true };
+      const r = await a.c.request(target, { method: "GET", path: "/api/v1/agents", headers: {} });
+      const req = await evil.waitFor((x) => x.fp === a.fp && x.frame.t === "req" && !evil.received.some((y) => y.frame.t === "cancel" && y.frame.id === x.frame.id));
+      evil.sendTo(a.fp, { t: "data", id: req.frame.id, b64: bad });
+      await expect(collectBody(r.body, 1e6)).rejects.toMatchObject({ code: "bad_frame" });
+      await evil.waitFor((x) => x.fp === a.fp && x.frame.t === "cancel" && x.frame.id === req.frame.id);
+    }
+    head = { t: "res", status: 200, headers: {}, more: false, body: "@@not-base64" };
+    await expect(a.c.request(target, { method: "GET", path: "/api/v1/agents", headers: {} })).rejects.toMatchObject({ code: "bad_frame" });
+  });
 });
 
 describe("推送（push / push-ack）", () => {

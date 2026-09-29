@@ -55,6 +55,10 @@ export interface AppConfig {
   /** 没人看看板时也在后台读 Claude 的 Keychain、查 Claude 额度与重置卡（6 小时一次），让 Claude 的快过期提醒也能后台触发。
    *  缺省开（owner 09-28 批准；设计稿 T2b §3 / §5 原定只在看板打开时读）；false 单独关掉。每个 tick 现读，改完不用重启 */
   quotaClaudeBackground?: boolean;
+  /** 推送不带正文：Web Push / APNs 只发「Claudestra · 有新消息」（lib/push-redact.ts）。缺省关；派发器每条现读，改完不用重启 */
+  pushNoContent?: boolean;
+  /** 网页的 Chat（人与人，/talk）入口：缺省关——侧栏不出「工作台 | Chat」切换，/talk 跳回 /chat。只收界面，talk API 与数据照旧（T50） */
+  talkEnabled?: boolean;
 }
 
 /** 归档保留天数缺省值（设置里可改） */
@@ -92,6 +96,8 @@ function merge(base: AppConfig, raw: any): AppConfig {
     ...(typeof raw.groqApiKey === "string" && raw.groqApiKey ? { groqApiKey: raw.groqApiKey } : {}),
     ...(typeof raw.quotaLive === "boolean" ? { quotaLive: raw.quotaLive } : {}),
     ...(typeof raw.quotaClaudeBackground === "boolean" ? { quotaClaudeBackground: raw.quotaClaudeBackground } : {}),
+    ...(typeof raw.pushNoContent === "boolean" ? { pushNoContent: raw.pushNoContent } : {}),
+    ...(typeof raw.talkEnabled === "boolean" ? { talkEnabled: raw.talkEnabled } : {}),
   };
 }
 
@@ -117,8 +123,9 @@ function defaults(): AppConfig {
  * （2026-09 审查 D7-4）。其余字段仍取默认值。
  */
 export function safeConfigOnCorrupt(): AppConfig {
-  // 订阅额度的两个开关同口径：坏文件时不读凭据（owner 关掉的「读 Keychain」不能因为文件坏了被静默打开）
-  return { ...DEFAULT_CONFIG, autoUpdate: { claudestra: false, claudeCode: false }, quotaLive: false, quotaClaudeBackground: false };
+  // 订阅额度的两个开关同口径：坏文件时不读凭据（owner 关掉的「读 Keychain」不能因为文件坏了被静默打开）；
+  // 推送同理取保守的一边：owner 打开的「不带正文」不能因为文件坏了被静默关掉
+  return { ...DEFAULT_CONFIG, autoUpdate: { claudestra: false, claudeCode: false }, quotaLive: false, quotaClaudeBackground: false, pushNoContent: true };
 }
 
 // 常驻进程（bridge / launcher）运行中文件被写坏时，继续用上次成功读到的内容
@@ -229,6 +236,19 @@ export async function setAutoCompact(patch: { window?: number; idleHours?: numbe
 export async function setQuotaLive(enabled: boolean): Promise<AppConfig> {
   const cfg = await readConfig();
   cfg.quotaLive = enabled;
+  await writeConfig(cfg);
+  return cfg;
+}
+
+export async function setPushNoContent(enabled: boolean): Promise<AppConfig> {
+  const cfg = await readConfig();
+  cfg.pushNoContent = enabled;
+  await writeConfig(cfg);
+  return cfg;
+}
+
+export async function setTalkEnabled(enabled: boolean): Promise<AppConfig> {
+  const cfg = { ...(await readConfig()), talkEnabled: enabled };
   await writeConfig(cfg);
   return cfg;
 }

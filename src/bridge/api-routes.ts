@@ -26,7 +26,7 @@ import {
   INVALID_JSON,
   readJsonBody,
   invalidJsonBody,
-  liveInteractiveHolder,
+  liveInteractiveHolder, heldFields, stopExtra,
 } from "./api-respond.js";
 import { interruptAgentByName } from "./preempt.js";
 import { existsSync, readdirSync } from "fs";
@@ -88,7 +88,8 @@ import { handleCronRoutes } from "./cron-routes.js";
 import { handleAutoCompactRoute } from "./auto-compact-routes.js";
 import { trackInboundHandoff } from "./handoff-tracker.js";
 import { authenticateApi } from "./api-auth.js";
-import { redeemArgs, redeemPrecheck } from "./peer-redeem.js";
+import { handlePeerRedeem } from "./peer-redeem.js";
+import { peerE2eRoute } from "./peer-e2e-route.js";
 import { handleDevicesManaged, handleDevicesPublic } from "./devices.js";
 import { apiFeatures, handleExtensionRoutes } from "./api-extensions.js";
 import { revocable } from "./credential-revocation.js";
@@ -137,8 +138,8 @@ export interface ApiReplyResult {
   files?: { name: string; url: string }[];
   threadId: string;
   agent: string;
-  /** true = agent 没调 reply()，文本来自 Stop-hook drain 兜底（R3） */
-  viaFallback?: boolean;
+  /** true = agent 没调 reply()，文本来自 Stop-hook drain 兜底（R3）；apiError = 那一轮以 API 错误结束、reply 为 null，error = 错误类型 */
+  viaFallback?: boolean; apiError?: boolean; error?: string;
 }
 
 export const pendingApiRequests = new Map<string, PendingApiRequest[]>();
@@ -268,25 +269,6 @@ async function findHistoryAgent(
   return hit ? { name: hit.name, cwd: hit.cwd, sessionId: hit.sessionId, runtime: hit.runtime } : null;
 }
 
-// ── v2.15+ 一键邀请兑换（无 Bearer 的公开端点，见 handleApiRequest 顶部）──
-
-async function handlePeerRedeem(req: Request): Promise<Response> {
-  const input = await redeemPrecheck(req); // 来源、口令、按来源限流、对方指纹与公钥（bridge/peer-redeem.ts）
-  if (input instanceof Response) return input;
-  const r: any = await runManager("peer-invite-redeem", ...redeemArgs(input));
-  if (r?.ok) {
-    recordMetric("peer_managed", { meta: { action: "redeem", peer: r.peer } });
-    console.log(`🤝 [api] peer 邀请已兑换: ${r.peer}（scope: ${(r.agents || []).join(",")}）`);
-    void deps?.notifyOwner?.(
-      `🤝 新 peer「${r.peer}」通过一键邀请接入，可访问: ${(r.agents || []).join(", ") || "（无）"}` +
-        (r.oneWay ? "（单向：对方访问我，我未获对方权限）" : "") +
-        `。撤销：侧栏顶部 Peer 按钮 → 移除，或 \`peer-http-remove ${r.peer}\``,
-    ).catch(() => {});
-  }
-  // 失败一律 400 且不细分原因等级——这是个无鉴权端点，不给探测者更多信息面
-  return apiJson(r?.ok ? 200 : 400, r ?? { ok: false, error: "manager failed" });
-}
-
 // ── 路由分发 ────────────────────────────────────────────────────────────
 
 /**
@@ -307,12 +289,10 @@ export async function serveApiRequest(req: Request, url: URL): Promise<Response>
 async function handleApiRequest(req: Request, url: URL): Promise<Response> {
   if (!deps) return apiJson(503, { ok: false, error: "api routes not initialized" });
 
-  // v2.15+ POST /api/v1/peers/redeem —— 一键邀请的兑换回调（对方 bridge 打进来，
-  // 拿不到我方 Bearer）。鉴权依据是 body 里的一次性 joinSecret（manager 侧常数
-  // 时间比对）。48 hex 穷举本不现实，限流是纵深防御 + 挡日志噪音。
-  if (url.pathname === "/api/v1/peers/redeem" && req.method === "POST") {
-    return handlePeerRedeem(req);
-  }
+  const e2e = await peerE2eRoute(req, url, (inner) => serveApiRequest(inner, new URL(inner.url))); // peer 整体加密：解开后内层从头走一遍（bridge/peer-e2e-route.ts）
+  if (e2e) return e2e;
+  // v2.15+ POST /api/v1/peers/redeem —— 一键邀请的兑换回调（无 Bearer，鉴权靠一次性 joinSecret；bridge/peer-redeem.ts）
+  if (url.pathname === "/api/v1/peers/redeem" && req.method === "POST") return handlePeerRedeem(req, { runManager, notifyOwner: deps.notifyOwner });
   if (url.pathname === "/api/v1/invite" && req.method === "GET") return invitePageResponse(); // 邀请落地页，不要 token（bridge/invite-page.ts）
   const pub = await handleDevicesPublic(req, url); // 设备配对的公开端点（bridge/devices.ts）：没有凭据才能配对
   if (pub) return pub;
@@ -1228,12 +1208,12 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
     if (principal.peer) trackInboundHandoff(threadId, principal.peer, agent.name, text.length); // 交接记录（bridge/handoff-tracker.ts）
     // R2 入站镜像：只是 Discord 抄送，失败不影响已完成的投递；mirrorApiExchange 内部已 try/catch 记日志，这里的 catch 只防未来改动漏抛
     deps.mirrorApiExchange({ kind: "api", tokenId, name: tokenName }, agent.channelId, `[🌐 API←${tokenName}] ${apiMirrorBody(text, attachments.length)}`).catch(() => {});
-    deps.startTypingWithSafety(agent.channelId);
-    // API 触发的 turn 不发 Stop 完成通知 @ owner（回复走 API 回路 + R2 镜像已可见）
-    deps.lastMessageSource.set(agent.channelId, "agent");
+    if (!delivery.outcome.heldBy) deps.startTypingWithSafety(agent.channelId); // 押住了就没有回合，别亮「正在输入」
+    deps.lastMessageSource.set(agent.channelId, "agent"); // API 触发的 turn 不发 Stop 完成通知 @ owner（回复走 API 回路 + R2 镜像已可见）
 
-    if (waitSec === 0) {
-      return apiJson(202, { ok: true, accepted: true, threadId, agent: agent.name, hint: `poll GET /api/v1/threads/${threadId} or subscribe /api/v1/events` });
+    if (waitSec === 0 || delivery.outcome.heldBy) { // heldBy = 押住了（额度闸 / 停在额度菜单，没发键），不干等答复；原因只给能看额度的 owner（canSeeQuota）
+      const held = heldFields(delivery.outcome.heldBy, principal);
+      return apiJson(202, { ok: true, accepted: true, threadId, agent: agent.name, ...held, hint: `poll GET /api/v1/threads/${threadId} or subscribe /api/v1/events` });
     }
 
     const result = await new Promise<ApiReplyResult | null>((resolve) => {
@@ -1291,8 +1271,8 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
     if (r instanceof Error) return apiJson(500, { ok: false, error: `tmux send-keys 失败: ${r.message}` });
     if (r.deduped) return apiJson(200, { ok: true, deduped: true });
     const sent = r.keys;
-    console.log(`⚡ [api] ${sent.length ? "打断键已发送" : "当前空闲，未发打断键"}：${agent.name} (token=${tokenId})`);
-    return apiJson(200, { ok: true, agent: agent.name, ...(sent.length ? {} : { idle: true }) }); // done 照发：前端误判忙时借此解锁
+    console.log(`⚡ [api] ${sent.length ? "打断键已发送" : r.wall ? "停在撞墙画面上，没发键" : "当前空闲，未发打断键"}：${agent.name} (token=${tokenId})`);
+    return apiJson(200, { ok: true, agent: agent.name, ...stopExtra(r, principal) }); // done 照发：前端误判忙时借此解锁
   }
 
   // POST /api/v1/agents/:name/clear —— 远程调用 CC 原生 /clear（清上下文）。

@@ -72,6 +72,8 @@ export type WebStreamEvent =
   /** 助手文本段（过程叙述，追加到当前流式助手消息的 content） */
   /** progress=true:进度句(💭,Fable 5.1 的 progress-update thinking 块)——自成一段、更弱化 */
   | { t: "text"; text: string; progress?: boolean; seq?: number; sid?: string }
+  /** API 错误条目（撞额度 / 网络…）：一行系统提示，连续相同的并成 ×N，不当 agent 气泡 */
+  | { t: "notice"; text: string; seq?: number; sid?: string }
   /** 另一端用户的发言(跨端同步:手机/电脑/Discord 同看一个会话)。
    *  本端自己发的回声由前端按文本对账去重。 */
   | { t: "user-in"; text: string; from?: string; attachments?: { name: string; kind: "image" | "file"; url?: string }[]; askId?: string; wire?: string }

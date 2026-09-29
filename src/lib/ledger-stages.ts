@@ -21,21 +21,23 @@ export const ITEM_STATUSES = ["todo", "decide", "design", "doing", "done", "drop
 export type ItemStatus = (typeof ITEM_STATUSES)[number];
 
 /**
- * stage / item / task / meta / dep 由写入函数自动产生；ask / ask_expire / ask_cancel / ask_reopen（与作答的 decision）只由 bridge 的 ledger-asks.ts 写；其余由调用方显式追加。
+ * stage / item / task / meta / dep 由写入函数自动产生；ask / ask_expire / ask_cancel / ask_reopen（与作答的 decision）只由 bridge 的 ledger-asks.ts 写；
+ * assign_reopen 只由 ledger-human.ts 写（PM 重开指给人的 ask）；其余由调用方显式追加。
  * dispatch = 派出审查员（reviewer / round / head）、escalate = 升级给 PM（或 owner），编排班子的「现在谁在接」靠它们推导（ledger-handler.ts）。
  */
 const EVENT_KINDS = [
   "stage", "item", "task", "meta", "dep", "note", "deliver", "review", "decision", "deploy", "verify", "rollback", "freeze", "unfreeze",
-  "ask", "ask_expire", "ask_cancel", "ask_reopen", "dispatch", "escalate",
+  "ask", "ask_expire", "ask_cancel", "ask_reopen", "assign_reopen", "dispatch", "escalate", "step", "accept",
 ] as const;
 export type EventKind = (typeof EVENT_KINDS)[number];
 
 /**
- * 「待你处理」这一族事件（ledger-asks.ts 写）：开出 / 过期 / 撤销，以及作答写下的 decision（data 带 askId）。
+ * 「待你处理」这一族事件（ledger-asks.ts 写）：开出 / 过期 / 撤销、重开指派，以及作答写下的 decision（data 带 askId）。
  * 它们不算任务的「最近一条」、也不进项目级事件列表——否则一条 ask 就能盖掉「线上验证失败」这类问题态（协作视图靠它）。
  */
 export function isAskEvent(e: { kind: string; data: Record<string, unknown> }): boolean {
-  return e.kind === "ask" || e.kind === "ask_expire" || e.kind === "ask_cancel" || e.kind === "ask_reopen" || (e.kind === "decision" && typeof e.data.askId === "string");
+  if (e.kind === "ask" || e.kind === "ask_expire" || e.kind === "ask_cancel" || e.kind === "ask_reopen" || e.kind === "assign_reopen") return true;
+  return e.kind === "decision" && typeof e.data.askId === "string";
 }
 
 export type ReviewVerdict = "pass" | "changes" | "block";
@@ -130,12 +132,25 @@ const EXECUTOR_MOVES: readonly (readonly [Stage, Stage])[] = [
   ["fix", "review"],
 ];
 
+/** 一张卡拆成的步骤（docs/team/collab-model.md §1）：每一步单独记执行者和结果（lib/ledger-steps.ts） */
+export const STEPS = ["restate", "write", "review", "fix", "final_review", "ui_check", "merge", "verify"] as const;
+export type StepName = (typeof STEPS)[number];
+
+/** 这个阶段在干活的是哪一步：按顺序取第一个有人接的（没派「修」就还是写的人修）。blocked 看 stageBefore */
+export const STAGE_STEPS: Partial<Record<Stage, readonly StepName[]>> = {
+  spec: ["restate", "write"], restate: ["restate", "write"], build: ["write"], fix: ["fix", "write"],
+  review: ["final_review", "review"], merge: ["merge"], live: ["verify"],
+};
+
 /**
- * 受托方（peer）能推的：接了、写复述（spec→restate）、PR 开了 / 改完了（build / fix→review），以及合并前的阶段进出 blocked。
- * 放行复述（restate→build）、merge 及以后、cancelled、回退改规格都不给——那些是发起方 PM 的事，和本机执行者一样。
+ * 受托方（peer）按自己接的那一步能推的：复述（spec→restate）、写完（build→review）、修完（fix→review），以及合并前的阶段进出 blocked。
+ * 是不是「它的那一步」由调用方按步骤判（roleOf 的 active）；放行复述、merge 及以后、cancelled、回退改规格都是发起方 PM 的事。
  */
+const PEER_STEP_MOVES: Partial<Record<StepName, readonly (readonly [Stage, Stage])[]>> = {
+  restate: [["spec", "restate"]], write: [["build", "review"]], fix: [["fix", "review"]],
+};
 const PEER_WORK_STAGES: readonly Stage[] = ["spec", "restate", "build", "review", "fix"];
-const PEER_MOVES: readonly (readonly [Stage, Stage])[] = [["spec", "restate"], ["build", "review"], ["fix", "review"]];
+const PEER_MOVES = Object.values(PEER_STEP_MOVES).flat();
 function peerMayMove(task: TransitionTask, to: Stage): boolean {
   if (to === "blocked") return PEER_WORK_STAGES.includes(task.stage);
   if (task.stage === "blocked") return !!task.stageBefore && PEER_WORK_STAGES.includes(task.stageBefore) && to === task.stageBefore;
@@ -200,13 +215,18 @@ export function nextTaskState(task: TaskStageState, to: Stage): Pick<LedgerTask,
  * actor 在这个任务上的角色。PM 只认项目 PM 名单（只有 owner 能设）——task.pm 是展示字段，算进来就能 setTask 自封 PM。
  * 名单优先于执行者（ops 任务 PM 自做时 agent 是 PM 自己）。"master" / "owner" 按名字认，身份推导（T8b）必须保留这两个名字。
  */
-export function roleOf(actor: string, task: Pick<LedgerTask, "agent"> & { extra?: Record<string, unknown> }, pms: readonly string[]): Role | null {
-  if (actor.startsWith("peer:")) return samePeer(delegatePeerOf(task, "delegate"), actor.slice(5)) ? "peer" : null;
+export function roleOf(
+  actor: string, task: Pick<LedgerTask, "agent"> & { extra?: Record<string, unknown> }, pms: readonly string[], active?: ActiveStep | null,
+): Role | null {
+  if (actor.startsWith("peer:")) return samePeer(active !== undefined ? active?.peer ?? null : delegatePeerOf(task, "delegate"), actor.slice(5)) ? "peer" : null;
   if (actor === "master" || actor === "owner") return actor;
   if (pms.includes(actor)) return "pm";
-  if (task.agent === actor) return "executor";
+  if (task.agent === actor || (!!active?.agent && active.agent === actor)) return "executor";
   return null;
 }
+
+/** 当前阶段那一步的执行者（lib/ledger-steps.ts activeStepOf）：peer = 那一步派给了哪个实例；agent = 派给了哪个本机 agent */
+export interface ActiveStep { peer: string | null; agent: string | null }
 
 /** 指标终点：按顺序取第一个出现的（code / ops 以 verified 为准，没经过 verified 才看 done）；cancelled 也算结束 */
 export function endStages(kind: TaskKind): Stage[] {
@@ -226,4 +246,4 @@ export function delegatePeerOf(task: { extra?: Record<string, unknown> }, field:
 }
 
 /** peer 名精确比较：兑换邀请时撞名判断区分大小写（manager/peer-names.ts），这里不分就能让 "shawn" 冒领 "Shawn" 的卡 */
-export const samePeer = (a: string | null, b: string): boolean => !!a && !!b && a === b;
+const samePeer = (a: string | null, b: string): boolean => !!a && !!b && a === b;
