@@ -96,20 +96,25 @@ export function signedFor(method: string, url: string, body: string | Uint8Array
 }
 
 /**
- * 按用途签一段文本（不是 HTTP 请求）：第一行是用途前缀，签给一种用途的签名挪不到另一种用途、也挪不成请求签名
- * （请求签名的第一行固定是 claudestra-req-v1）。字段里不许有换行，否则字段边界能被挪动。
+ * 实例钥匙按用途签文本时认的用途（白名单）。第一行是用途前缀，签给一种用途的签名挪不到另一种用途，也挪不成请求签名
+ * （claudestra-req-v1）或中继登录签名（claudestra-relay-auth-v2）——这两种的原文拼法和这里一样，所以只认登记过的用途，
+ * 新用途在这里加一行，首行不能和任何已有签名原文相同。
  */
+const SIGN_PURPOSES = ["claudestra-invite-pop-v1"] as const;
+export type SignPurpose = (typeof SIGN_PURPOSES)[number];
+
+/** 字段里不许有换行，否则字段边界能被挪动 */
 function purposeMessage(purpose: string, fields: string[]): Buffer | null {
-  if (!/^claudestra-[a-z-]+-v\d+$/.test(purpose) || purpose === "claudestra-req-v1" || fields.some((f) => /[\r\n]/.test(f))) return null;
+  if (!(SIGN_PURPOSES as readonly string[]).includes(purpose) || fields.some((f) => /[\r\n]/.test(f))) return null;
   return Buffer.from([purpose, ...fields].join("\n"));
 }
 
-export function signPurpose(purpose: string, fields: string[], key = instanceKeySync()): { key: string; sig: string } | null {
+export function signPurpose(purpose: SignPurpose, fields: string[], key = instanceKeySync()): { key: string; sig: string } | null {
   const msg = purposeMessage(purpose, fields);
   return key && msg ? { key: key.publicKey, sig: sign(null, msg, key.privateKey).toString("base64url") } : null;
 }
 
-export function verifyPurpose(publicKey: string, purpose: string, fields: string[], sig: string): boolean {
+export function verifyPurpose(publicKey: string, purpose: SignPurpose, fields: string[], sig: string): boolean {
   const msg = purposeMessage(purpose, fields);
   if (!msg || !isPublicKey(publicKey) || !isCanonicalSig(sig)) return false;
   try {

@@ -1,5 +1,5 @@
 /**
- * 中继进 bridge 的各条路待遇一致（bridge/relay-inbound.ts setSocketRequestContext、bridge/api-auth.ts）：
+ * 中继进 bridge 的各条路待遇一致（bridge/relay-inbound.ts socketTrust、bridge/api-auth.ts）：
  * 隧道请求来源定成 relay（peer token 403、不算同机）；兑换只认 peer 入口核过的发件人或兑换请求自带的签名；
  * peer 先验签再扣限速；删掉后同名重加 / 重新邀请能改钉。状态文件写在 preload 的临时 STATE_DIR，peer 名各用各的。
  */
@@ -12,32 +12,45 @@ import { STATE_DIR } from "../src/lib/paths.js";
 import { authenticateApi } from "../src/bridge/api-auth.js";
 import { redeemRefusal, redeemSender, relaySenderFp } from "../src/bridge/peer-redeem.js";
 import { peerAuthHint } from "../src/lib/peer-auth-hints.js";
-import { makeInboundHandler, setSocketRequestContext } from "../src/bridge/relay-inbound.js";
+import { makeInboundHandler, socketTrust } from "../src/bridge/relay-inbound.js";
 import { dispatchMachineRequest } from "../src/bridge/relay-dispatch.js";
 import { requestContextOf, setRequestContext } from "../src/bridge/request-context.js";
-import { isDirectLoopback } from "../src/bridge/web-gateway.js";
 import { handleHost } from "../src/bridge/local-api/host.js";
+import { handleDevicesPublic } from "../src/bridge/devices.js";
+import { DEVICE_HEADER } from "../src/lib/devices.js";
 import type { Principal } from "../src/lib/principals.js";
 
 const newKey = () => instanceKeySync(mkdtempSync(join(tmpdir(), "relay-entry-")))!;
-const keyP = newKey(), keyQ = newKey(), keyQ2 = newKey();
+const keyP = newKey(), keyQ = newKey(), keyQ2 = newKey(), keyG = newKey();
 const fpP = keyFingerprint(keyP.publicKey), fpQ2 = keyFingerprint(keyQ2.publicKey);
-const TOK = { p: "p".repeat(48), q: "q".repeat(48) };
+const TOK = { p: "p".repeat(48), q: "q".repeat(48), g: "g".repeat(48) };
 const empty = () => new ReadableStream<Uint8Array>({ start: (c) => c.close() });
 
-/** 模拟 bridge 主端口 / 旧 web 端口：socket 是回环，照 bridgeFetch 的顺序定来源 */
-function viaBridgePort(url: string, init: RequestInit): Request {
+/** 模拟 bridge 主端口 / 旧 web 端口：socket 是回环，调 bridgeFetch 用的同一个 socketTrust；loopback 记下闸门结果 */
+const gate = new WeakMap<Request, boolean>();
+function viaBridgePort(url: string, init: RequestInit, addr = "127.0.0.1"): Request {
   const r = new Request(`http://127.0.0.1:3333${new URL(url).pathname}${new URL(url).search}`, init);
-  setSocketRequestContext(r, "127.0.0.1", isDirectLoopback("127.0.0.1", r.headers.get("x-forwarded-for")));
+  gate.set(r, socketTrust(r, addr));
   return r;
+}
+/** 经 forwardTunnel 打到 bridge 端口，交给 handle 处理 */
+async function viaTunnel(path: string, headers: Record<string, string>, handle: (r: Request) => Promise<Response>, method = "GET"): Promise<Response> {
+  const h = makeInboundHandler({
+    webBase: "http://127.0.0.1:3333", ingressBase: () => null, refusePeer: async () => null,
+    fetchImpl: (async (url: string, init: RequestInit) => handle(viaBridgePort(url, init))) as unknown as typeof fetch,
+  });
+  const body = method === "GET" ? empty() : new ReadableStream<Uint8Array>({ start: (c) => (c.enqueue(new TextEncoder().encode("{}")), c.close()) });
+  const res = await h({ method, path, headers, body }, { from: "relay", signal: new AbortController().signal });
+  return new Response(res.body, { status: res.status, headers: res.headers });
 }
 
 beforeAll(() => {
   const principal = (id: string, secret: string, peer: string) => ({ id: `token:${id}`, role: "external", name: id, agents: ["*"], secret, createdAt: "2026-09-01T00:00:00Z", peer });
-  writeFileSync(join(STATE_DIR, "principals.json"), JSON.stringify({ principals: [principal("tok_re_p", TOK.p, "re-p"), principal("tok_re_q", TOK.q, "re-q")] }));
+  writeFileSync(join(STATE_DIR, "principals.json"), JSON.stringify({ principals: [principal("tok_re_p", TOK.p, "re-p"), principal("tok_re_q", TOK.q, "re-q"), principal("tok_re_g", TOK.g, "re-g")] }));
   writeFileSync(join(STATE_DIR, "peers.json"), JSON.stringify({ httpPeers: [
     { name: "re-p", fp: fpP, inTokenId: "tok_re_p", addedAt: "2026-09-01T00:00:00.000Z" },
     { name: "re-q", baseUrl: "https://q.example", inTokenId: "tok_re_q", addedAt: "2026-09-01T00:00:00.000Z" },
+    { name: "re-g", fp: keyFingerprint(keyG.publicKey), inTokenId: "tok_re_g", addedAt: "2026-09-01T00:00:00.000Z" },
   ] }));
 });
 afterAll(() => {
@@ -87,6 +100,38 @@ describe("隧道：中继不带模式头走旧子域名隧道，进 bridge 端�
     expect(proxied.headers.get("x-claudestra-tunnel-mark")).toBeNull();
     expect(requestContextOf(viaBridgePort("http://x/", {})).source).toBe("loopback");
   });
+  test("带 XFF 的隧道请求：来源 relay、不算本机，legacy-session 404", async () => {
+    let seen: Request | null = null;
+    const res = await viaTunnel("/api/v1/devices/legacy-session", { "x-forwarded-for": "203.0.113.9", cookie: "cstra_session=s", [DEVICE_HEADER]: "1" },
+      async (r) => ((seen = r), (await handleDevicesPublic(r, new URL(r.url)))!), "POST");
+    expect(requestContextOf(seen!)).toMatchObject({ source: "relay", clientIp: "203.0.113.9", https: true });
+    expect(gate.get(seen!)).toBe(false);
+    expect(res.status).toBe(404);
+    expect(await res.json()).toMatchObject({ code: "no_legacy_session" });
+  });
+  test("每个请求都定来源：本机反代带 XFF → lan，clientIp 是 socket 地址、https 跟随 x-forwarded-proto；局域网直连同样有上下文", () => {
+    const proxied = viaBridgePort("http://x/api/v1/agents", { headers: { "x-forwarded-for": "203.0.113.9", "x-forwarded-proto": "https" } });
+    expect(requestContextOf(proxied)).toEqual({ source: "lan", clientIp: "127.0.0.1", https: true });
+    expect(gate.get(proxied)).toBe(false);
+    const plain = viaBridgePort("http://x/api/v1/agents", { headers: { "x-forwarded-for": "203.0.113.9" } });
+    expect(requestContextOf(plain).https).toBe(false);
+    const lan = viaBridgePort("http://x/api/v1/agents", {}, "192.168.1.5");
+    expect(requestContextOf(lan)).toEqual({ source: "lan", clientIp: "192.168.1.5", https: false });
+    expect(gate.get(lan)).toBe(false);
+    expect(gate.get(viaBridgePort("http://x/hook", {}))).toBe(true);
+  });
+});
+
+describe("没设过来源上下文的请求：各白名单都不认", () => {
+  test("peer token、设备 cookie、兑换、设备端点一律拒", async () => {
+    const bare = (path: string, init: RequestInit = {}) => new Request(`http://127.0.0.1:1${path}`, init);
+    expect(requestContextOf(bare("/")).source).toBe("unknown");
+    expect(await status(bare(PATH, { headers: { authorization: `Bearer ${TOK.p}`, ...signedHeaders("GET", PATH, "", keyP) } }))).toBe(403);
+    expect(await status(bare(PATH, { headers: { cookie: "cstra_dev=abc" } }))).toBe(403);
+    expect(redeemRefusal(bare("/api/v1/peers/redeem", { method: "POST", body: "{}" }))?.status).toBe(403);
+    const pair = bare("/api/v1/devices/pair/challenge");
+    expect((await handleDevicesPublic(pair, new URL(pair.url)))?.status).toBe(403);
+  });
 });
 
 describe("兑换邀请：来源与发件人指纹", () => {
@@ -127,6 +172,23 @@ describe("先验签再扣限速；改钉", () => {
     expect(await (limited as Response).json()).toMatchObject({ code: "peer_signature", reason: "sig_rate_limited", cause: "key_changed" });
     expect(peerAuthHint({ code: "peer_signature", reason: "sig_rate_limited", cause: "stale" })).toMatch(/限流.*stale/);
     expect(await status(direct(TOK.p, keyP), true)).toBe(200);
+  });
+  test("同一条签名 GET 重复出现：只第一次扣成功限速桶，超过 5 次按重放拒；正牌新请求照常", async () => {
+    const at = Date.now();
+    const get = (path: string) => {
+      const r = new Request(`http://127.0.0.1:1${path}`, { headers: { authorization: `Bearer ${TOK.g}`, ...signedHeaders("GET", path, "", keyG, at) } });
+      setRequestContext(r, { source: "lan", clientIp: null, https: false });
+      return r;
+    };
+    const once = async (r: Request) => {
+      const p = await authenticateApi(r, new URL(r.url), { rateLimit: true });
+      return p instanceof Response ? `${p.status}:${((await p.json()) as { reason?: string }).reason ?? ""}` : "200";
+    };
+    for (let i = 0; i < 119; i++) expect(await once(get(`${PATH}?i=${i}`))).toBe("200");
+    for (let i = 0; i < 4; i++) expect(await once(get(`${PATH}?i=0`))).toBe("200"); // 重复的不扣桶（第 2～5 次）
+    expect(await once(get(`${PATH}?i=0`))).toBe("401:replay"); // 第 6 次
+    expect(await once(get(`${PATH}?i=fresh`))).toBe("200"); // 桶里还剩 1 格
+    expect(await once(get(`${PATH}?i=fresh2`))).toBe("429:rate_limited");
   });
   test("不限速的路由（远程终端）不收 peer token：签名对也 403，不碰防重放缓存", async () => {
     const r = direct(TOK.p, keyP, "POST", '{"data":"x"}');

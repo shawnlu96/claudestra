@@ -71,7 +71,7 @@ import { emitEvent, forgetAgent, subscribeEvents, replayEventsSince, getAgentSta
 import { collectSessions } from "./bridge/sessions-inventory.js";
 import { cleanupBgJob } from "./lib/bg-jobs.js";
 import { startSessionReconciler } from "./bridge/session-reconciler.js";
-import { initPeerIngress, localProbeResponse, relayControlRoutes, setSocketRequestContext } from "./bridge/relay-routes.js";
+import { initPeerIngress, localProbeResponse, relayControlRoutes, socketTrust } from "./bridge/relay-routes.js";
 import { handleForward, initForward, rememberInbound } from "./bridge/forward.js";
 import { initInbox, takeInbox, inboxOpts } from "./bridge/inbox.js";
 import { startArchiveSweeper } from "./bridge/archive-sweeper.js";
@@ -96,7 +96,6 @@ import {
   serveStaticSite, appConfigResponse, startLegacyWebPort,
   isCrossOrigin,
   isOriginExplicitlyAllowed,
-  isDirectLoopback,
   controlAccessVerdict,
 } from "./bridge/web-gateway.js";
 // v2.6.0+ HTTP API 身份与授权（设计 §3.4 / §5）
@@ -3408,9 +3407,8 @@ async function bridgeFetch(req: Request, server: { requestIP(r: Request): { addr
     // 判定不会把本机 agent 误拦。
     {
       const ip = server.requestIP(req);
-      // 本机反代转进来的（带 XFF）不算回环：控制面豁免与请求来源（/devices/local）同一口径（web-gateway.ts isDirectLoopback）
-      const direct = isDirectLoopback(ip?.address, req.headers.get("x-forwarded-for"));
-      const loopback = direct && !setSocketRequestContext(req, ip?.address ?? null, direct); // 隧道请求（来源 relay）XFF 缺了也不算回环（bridge/relay-inbound.ts）
+      // 定来源并判本机：本机反代（带 XFF）与隧道请求都不算回环，控制面豁免与请求来源同一口径（bridge/relay-inbound.ts socketTrust）
+      const loopback = socketTrust(req, ip?.address ?? null);
       const verdict = controlAccessVerdict({
         loopback, method: req.method, staticHosting: !!STATIC_DIR, websocket: !!req.headers.get("upgrade"), // ws 升级在 API 鉴权之前：/api/v1 与静态的放行都不覆盖它
         pathname: url0.pathname,

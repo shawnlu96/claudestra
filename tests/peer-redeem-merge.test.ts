@@ -34,7 +34,7 @@ beforeAll(() => {
   const inv = (n: number) => ({ id: `inv_rm${n}`, joinSecret: `join-secret-rm-${n}`, inTokenId: `tok_rm_i${n}`, agents: ["*"], url: "http://c.example", createdAt: AT, expiresAt });
   writeFileSync(join(STATE_DIR, "peers.json"), JSON.stringify({
     httpPeers: [{ name: "rm-victim", inTokenId: "tok_rm_v", instanceId: IID_V, fp: fpV, addedAt: AT }],
-    pendingInvites: [inv(1), inv(2), inv(3)],
+    pendingInvites: [inv(1), inv(2), inv(3), inv(4)],
   }));
 });
 afterAll(() => {
@@ -42,10 +42,10 @@ afterAll(() => {
 });
 
 /** 跑一次兑换，返回 manager 打出的 JSON */
-async function redeem(join: string, name: string, iid: string, fp: string, pk = "", nonce = ""): Promise<Record<string, unknown>> {
+async function redeem(join: string, name: string, iid: string, fp: string, pk = "", nonce = "", inviteUrl = "HTTP://C.example/"): Promise<Record<string, unknown>> {
   const log = spyOn(console, "log").mockImplementation(() => {});
   try {
-    await cmdPeerInviteRedeem({ join, name, url: "", token: "", iid, fp, pk, nonce });
+    await cmdPeerInviteRedeem({ join, name, url: "", token: "", iid, fp, pk, nonce, inviteUrl });
     return JSON.parse(String(log.mock.calls.at(-1)?.[0]));
   } finally {
     log.mockRestore();
@@ -100,13 +100,21 @@ describe("按实例 id 合并：签名指纹对不上就拒绝兑换", () => {
     expect(await call(SECRET.i1, keyM)).toBe("rm-victim-2");
     expect((await rec("rm-victim"))?.fp).toBe(fpV);
   });
+  test("加入方手里的邀请地址和这张邀请生成时的不一样 → invite_url_mismatch，计一次拒绝，邀请不消耗", async () => {
+    const out = await redeem("join-secret-rm-4", "rm-other", "", fpM, "", "n".repeat(22), "http://m.example");
+    expect(out).toMatchObject({ ok: false, code: "invite_url_mismatch" });
+    expect(await pending("inv_rm4")).toBe(true);
+    expect((await readPeers()).pendingInvites?.find((i) => i.id === "inv_rm4")?.refusals).toBe(1);
+    expect(await rec("rm-other")).toBeUndefined();
+  });
   test("V 本人重新加入（签名指纹对得上）→ 合进原记录，吊销被取代的旧 token", async () => {
     const nonce = "n".repeat(22);
     const out = await redeem("join-secret-rm-3", "anything", IID_V, fpV, keyV.publicKey, nonce);
     expect(out).toMatchObject({ ok: true, peer: "rm-victim", revokedTokens: ["tok_rm_v"] });
     // 带了 nonce：回一份本机的持钥证明，覆盖 nonce、口令、兑换方指纹、本机实例 id
     const mine = instanceKeySync()!;
-    expect(checkInviteProof(out.proof, { nonce, join: "join-secret-rm-3", myFp: fpV, inviterIid: String(out.iid) })).toEqual({ key: mine.publicKey, fp: keyFingerprint(mine.publicKey) });
+    const x = { nonce, join: "join-secret-rm-3", redeemerFp: fpV, inviterIid: String(out.iid), inviteUrl: "http://c.example" };
+    expect(checkInviteProof(out.proof, x)).toEqual({ key: mine.publicKey, fp: keyFingerprint(mine.publicKey) });
     expect((await rec("rm-victim"))?.publicKey).toBe(keyV.publicKey);
     expect((await rec("rm-victim"))?.fp).toBe(fpV);
     expect(await call(SECRET.i3, keyV)).toBe("rm-victim");

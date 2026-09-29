@@ -31,13 +31,14 @@ export type ReplayVerdict = false | "replay" | "before_start" | "full";
  * 非幂等方法的签名在有效期内只认一次（签名含时间戳与正文哈希，同一签名 = 同一请求）。键是解码后的签名字节，
  * 不是原串——同一签名不能靠换一种 base64url 写法变成新键（验签那边也只认规范写法，两头都防）。
  * 条目留到签名本身过期（签名时间 + MAX_SKEW_S），之后验签就会判 stale，不必再记。
- * 满了 fail-closed：拒新请求并告警，绝不挤掉还没过期的条目（挤掉等于放行那条签名的重放）。
+ * 满了默认 fail-closed：拒新请求并告警，绝不挤掉还没过期的条目（挤掉等于放行那条签名的重放）。
+ * evict = true 的缓存满了挤掉最旧的一条：只给另有兜底、丢一条也不会放行重放的用途（兑换帧、GET 计次，见各自调用处）。
  * 按 peer 分桶计数：一个 peer 灌满只拒它自己。中继 peer 帧（bridge/relay-inbound.ts，按发件人指纹分）与
  * authApi（bridge/peer-signature.ts，按 peer 名分）各持一份：经中继来的请求两份各见一次不算重放，
  * 截获后换一条路重放则会撞上 authApi 那份。
  */
 export class ReplayCache {
-  private readonly entries = new Map<string, { exp: number; peer: string }>();
+  private readonly entries = new Map<string, { exp: number; peer: string; n: number }>();
   private readonly perPeer = new Map<string, number>();
   private nextSweep = 0;
   private warnedAt = -Infinity;
@@ -46,6 +47,7 @@ export class ReplayCache {
     private readonly startS = PROCESS_START_S,
     private readonly validMs = (MAX_SKEW_S + 1) * 1000,
     private readonly maxPerPeer = REPLAY_MAX_PER_PEER,
+    private readonly evict = false,
   ) {}
 
   get size(): number {
@@ -53,31 +55,52 @@ export class ReplayCache {
   }
 
   seen(sig: string, ts: string, now: number, peer: string): ReplayVerdict {
+    const n = this.hits(sig, ts, now, peer);
+    return typeof n === "number" ? n > 1 && "replay" : n;
+  }
+
+  /** 这个签名在有效期内是第几次出现（1 = 第一次）；before_start / full 同 seen */
+  hits(sig: string, ts: string, now: number, peer: string): number | "before_start" | "full" {
     const t = Number(ts);
     if (!(t >= this.startS)) return "before_start"; // 那之前见过什么已无从得知
     const key = Buffer.from(sig, "base64url").toString("hex");
-    if ((this.entries.get(key)?.exp ?? -Infinity) >= now) return "replay";
+    const hit = this.entries.get(key);
+    if (hit && hit.exp >= now) return ++hit.n;
     if (now >= this.nextSweep) this.sweep(now);
-    if (this.entries.size >= this.max || (this.perPeer.get(peer) ?? 0) >= this.maxPerPeer) {
-      if (now - this.warnedAt > 60_000) console.warn(`⚠️ [peer-sig] 防重放缓存已满（${peer} 或整体），拒绝新的非 GET 请求直到有条目过期`);
-      this.warnedAt = now;
-      return "full";
+    const peerFull = (this.perPeer.get(peer) ?? 0) >= this.maxPerPeer;
+    if (peerFull || this.entries.size >= this.max) {
+      if (!this.evict) {
+        if (now - this.warnedAt > 60_000) console.warn(`⚠️ [peer-sig] 防重放缓存已满（${peer} 或整体），拒绝新的非 GET 请求直到有条目过期`);
+        this.warnedAt = now;
+        return "full";
+      }
+      this.dropOldest(peerFull ? peer : null);
     }
-    this.entries.set(key, { exp: t * 1000 + this.validMs, peer });
+    this.entries.set(key, { exp: t * 1000 + this.validMs, peer, n: 1 });
     this.perPeer.set(peer, (this.perPeer.get(peer) ?? 0) + 1);
-    return false;
+    return 1;
+  }
+
+  /** 挤掉最早记下的一条（peer 给了就只在它自己的条目里挑） */
+  private dropOldest(peer: string | null): void {
+    for (const [k, e] of this.entries) {
+      if (peer !== null && e.peer !== peer) continue;
+      this.remove(k, e);
+      return;
+    }
+  }
+
+  private remove(k: string, e: { peer: string }): void {
+    this.entries.delete(k);
+    const n = (this.perPeer.get(e.peer) ?? 1) - 1;
+    if (n > 0) this.perPeer.set(e.peer, n);
+    else this.perPeer.delete(e.peer);
   }
 
   /** 删掉签名已过期的条目；一秒最多扫一次（满了也不例外，灌满的人拖不慢判定） */
   private sweep(now: number): void {
     this.nextSweep = now + 1000;
-    for (const [k, e] of this.entries) {
-      if (e.exp >= now) continue;
-      this.entries.delete(k);
-      const n = (this.perPeer.get(e.peer) ?? 1) - 1;
-      if (n > 0) this.perPeer.set(e.peer, n);
-      else this.perPeer.delete(e.peer);
-    }
+    for (const [k, e] of this.entries) if (e.exp < now) this.remove(k, e);
   }
 }
 
@@ -141,8 +164,9 @@ export async function peerAnchorOf(): Promise<(p: HttpPeer) => string | null> {
   return (p) => expectedPeerFp(p, currentPin(pins[p.name], p)?.fingerprint);
 }
 
-/** once：验签通过的非 GET/HEAD 请求要在限速之后再过一次防重放（bridge/api-auth.ts） */
-export type PeerSigVerdict = { allow: true; legacy: boolean; once?: { sig: string; ts: string } } | { allow: false; reason: string };
+/** once：验签通过的请求在扣限速之前再过一次防重放（bridge/peer-signature.ts peerReplayVerdict；GET/HEAD 只计次） */
+export type PeerOnce = { sig: string; ts: string; idempotent: boolean };
+export type PeerSigVerdict = { allow: true; legacy: boolean; once?: PeerOnce } | { allow: false; reason: string };
 
 /**
  * 验签结果 → 放不放行。有期望指纹（anchored）时只认 ok；没有时截止日前一律放行（签名对得上就由调用方钉住，

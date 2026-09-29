@@ -4,15 +4,19 @@
  *   b. 非回环 socket（对外直连）→ 来源 peer-ingress，删 cookie / 设备头，不带凭据只放兑换与邀请页；
  *   c. 中继 peer 帧（进程内标记）→ 同 b，带发件人指纹；
  *   d. 设备端点、设备凭据在 peer-ingress 下一律拒；legacy-session 只认 loopback / lan。
- * 另有控制面闸门：带隧道标记的请求即使缺了 XFF 也不算回环（bridge/relay-inbound.ts setSocketRequestContext）。
+ * 另有控制面闸门：带隧道标记的请求即使缺了 XFF 也不算回环（bridge/relay-inbound.ts socketTrust）。
  */
-import { describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { ingressRequest } from "../src/bridge/peer-ingress.js";
-import { makeInboundHandler, RELAY_MARK_HEADER, relayMark, setSocketRequestContext } from "../src/bridge/relay-inbound.js";
+import { makeInboundHandler, RELAY_MARK_HEADER, relayMark, socketTrust, TUNNEL_MARK_HEADER } from "../src/bridge/relay-inbound.js";
 import { requestContextOf, setRequestContext, type RequestSource } from "../src/bridge/request-context.js";
 import { handleDevicesPublic } from "../src/bridge/devices.js";
 import { authenticateApi } from "../src/bridge/api-auth.js";
-import { isDirectLoopback } from "../src/bridge/web-gateway.js";
+import { setWebStatePathForTest } from "../src/bridge/local-api/db.js";
+import { closeWebState } from "../src/lib/web-state.js";
 import { DEVICE_HEADER } from "../src/lib/devices.js";
 
 const FP = "16f9-b5d1-30fb-8923";
@@ -55,6 +59,22 @@ describe("peer 入口的四类来源", () => {
     await ingressRequest(new Request("http://127.0.0.1:1/api/v1/peers/redeem", { method: "POST", headers, body: "{}" }), api, "127.0.0.1");
     expect(seen).toEqual([{ source: "peer-ingress", relayFrom: FP, cookie: null, device: null, path: "/api/v1/peers/redeem" }]);
   });
+  test("回环 socket 但带隧道标记头（不论值）→ 不当本机反代，按 peer-ingress 处理", async () => {
+    const { seen, api } = capture();
+    const headers = { ...browser, [TUNNEL_MARK_HEADER]: "anything" };
+    expect((await ingressRequest(new Request("http://127.0.0.1:1/api/v1/agents", { headers }), api, "127.0.0.1")).status).toBe(403);
+    await ingressRequest(new Request("http://127.0.0.1:1/api/v1/invite", { headers }), api, "127.0.0.1");
+    expect(seen).toEqual([{ source: "peer-ingress", cookie: null, device: null, path: "/api/v1/invite" }]);
+  });
+  test("网页端口与 peer 入口是同一个端口：隧道一律 local_unreachable，fetch 一次都不调", async () => {
+    const calls: string[] = [];
+    const handler = makeInboundHandler({ webBase: "http://127.0.0.1:3333", ingressBase: () => "http://127.0.0.1:3333", refusePeer: async () => null,
+      fetchImpl: (async (u: string) => { calls.push(u); return new Response("x"); }) as unknown as typeof fetch });
+    const body = new ReadableStream<Uint8Array>({ start: (c) => c.close() });
+    await expect(handler({ method: "GET", path: "/api/v1/agents", headers: {}, body }, { from: "relay", signal: new AbortController().signal }))
+      .rejects.toMatchObject({ code: "local_unreachable" });
+    expect(calls).toEqual([]);
+  });
   test("隧道把 path 改写成打到 peer 入口：被同源断言拦住，到不了 a 类（fetch 一次都不调）", async () => {
     const calls: string[] = [];
     const handler = makeInboundHandler({ webBase: "http://127.0.0.1:2", ingressBase: () => "http://127.0.0.1:1", refusePeer: async () => null,
@@ -82,9 +102,31 @@ describe("peer-ingress 来源下的权限矩阵（设备端点、设备凭据、
       expect((await handleDevicesPublic(r, new URL(r.url)))?.status).toBe(403);
     }
   });
-  test("legacy-session 只认 loopback / lan：relay 下也拒", async () => {
-    const r = withSource("relay", "/api/v1/devices/legacy-session", { method: "POST", body: "{}" });
-    expect((await handleDevicesPublic(r, new URL(r.url)))?.status).toBe(403);
+  describe("legacy-session 只认 loopback / lan（请求带齐设备头与旧会话 cookie，结果只由来源决定）", () => {
+    let dir: string;
+    beforeAll(() => {
+      dir = mkdtempSync(join(tmpdir(), "legacy-src-"));
+      setWebStatePathForTest(join(dir, "web-state.sqlite"));
+    });
+    afterAll(() => {
+      closeWebState(join(dir, "web-state.sqlite"));
+      setWebStatePathForTest(undefined);
+      rmSync(dir, { recursive: true, force: true });
+    });
+    const legacy = async (source: RequestSource) => {
+      const r = withSource(source, "/api/v1/devices/legacy-session", { method: "POST", headers: { [DEVICE_HEADER]: "1", cookie: "cstra_session=nope" }, body: "{}" });
+      const res = (await handleDevicesPublic(r, new URL(r.url)))!;
+      return [res.status, ((await res.json()) as { code?: string }).code];
+    };
+    test("relay → 404 no_legacy_session；peer-ingress、unknown → 403（设备端点整体不开）", async () => {
+      expect(await legacy("relay")).toEqual([404, "no_legacy_session"]);
+      expect((await legacy("peer-ingress"))[0]).toBe(403);
+      expect((await legacy("unknown"))[0]).toBe(403);
+    });
+    test("对照：loopback / lan 走到会话核对，旧会话不认识 → 401 legacy_session_invalid", async () => {
+      expect(await legacy("loopback")).toEqual([401, "legacy_session_invalid"]);
+      expect(await legacy("lan")).toEqual([401, "legacy_session_invalid"]);
+    });
   });
   test("设备 cookie 经 peer-ingress 来 → 403（不当成设备身份）", async () => {
     const r = withSource("peer-ingress", "/api/v1/agents", { headers: { cookie: "cstra_dev=abc" } });
@@ -98,12 +140,10 @@ describe("peer-ingress 来源下的权限矩阵（设备端点、设备凭据、
     await handler({ method: "GET", path: "/hook", headers: {}, body: new ReadableStream({ start: (c) => c.close() }) }, { from: "relay", signal: new AbortController().signal });
     const { "x-forwarded-for": _xff, ...noXff } = sent[0]!;
     const tunnelled = new Request("http://127.0.0.1:3847/hook", { headers: noXff });
-    const direct = isDirectLoopback("127.0.0.1", tunnelled.headers.get("x-forwarded-for"));
-    expect(direct).toBe(true); // 只看 socket 与 XFF 会被当成本机
-    expect(direct && !setSocketRequestContext(tunnelled, "127.0.0.1", direct)).toBe(false); // bridge.ts 的闸门：隧道标记排除
+    expect(socketTrust(tunnelled, "127.0.0.1")).toBe(false); // 只看 socket 与 XFF 会被当成本机，隧道标记把它排除
     expect(requestContextOf(tunnelled).source).toBe("relay");
     const local = new Request("http://127.0.0.1:3847/hook");
-    expect(!setSocketRequestContext(local, "127.0.0.1", true)).toBe(true);
+    expect(socketTrust(local, "127.0.0.1")).toBe(true);
     expect(requestContextOf(local).source).toBe("loopback");
   });
 });

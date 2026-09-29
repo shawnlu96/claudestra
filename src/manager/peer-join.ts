@@ -8,7 +8,7 @@ import { classifyJoinError, joinFailureHint, localTailnetAddr, type JoinFailureK
 import { resolveMyBridgeUrl, scanTailnetBridges } from "./peers-net.js";
 import { instanceIdSync, isInstanceId } from "../lib/instance-id.js";
 import { INVITE_MAX_REFUSALS, isPeerBaseUrl, relayPeerFingerprint, relayUrlOf, type PeerInviteV2, type PendingInvite } from "../lib/peers.js";
-import { checkInviteProof, judgeJoin, newInviteNonce, signInviteProof } from "../lib/invite-proof.js";
+import { checkInviteProof, inviteUrlKey, judgeJoin, newInviteNonce, signInviteProof } from "../lib/invite-proof.js";
 import { legacyStillOpen, peerAnchorOf } from "../lib/peer-trust.js";
 import { uniquePeerName } from "./peer-names.js";
 import { myFingerprint, peerCliFetch, relayStatus } from "./relay.js";
@@ -25,15 +25,17 @@ export interface RedeemArgs {
   pk: string;
   /** 加入方给的一次性随机数：有它（且知道兑换方是谁）才签持钥证明 */
   nonce: string;
+  /** 加入方手里邀请串的原始地址：和这张邀请生成时的地址比对，并签进持钥证明 */
+  inviteUrl: string;
 }
 
 const REDEEM_FLAGS: Record<string, keyof RedeemArgs> = {
-  "--join": "join", "--name": "name", "--url": "url", "--token": "token", "--iid": "iid", "--fp": "fp", "--pk": "pk", "--nonce": "nonce",
+  "--join": "join", "--name": "name", "--url": "url", "--token": "token", "--iid": "iid", "--fp": "fp", "--pk": "pk", "--nonce": "nonce", "--invite-url": "inviteUrl",
 };
 
 /** manager peer-invite-redeem 的参数（bridge/peer-redeem.ts redeemArgs 按同样的名字写） */
 export function parseRedeemArgs(args: string[]): RedeemArgs {
-  const o: RedeemArgs = { join: "", name: "", url: "", token: "", iid: "", fp: "", pk: "", nonce: "" };
+  const o: RedeemArgs = { join: "", name: "", url: "", token: "", iid: "", fp: "", pk: "", nonce: "", inviteUrl: "" };
   for (let i = 0; i < args.length; i++) {
     const k = REDEEM_FLAGS[args[i]!];
     if (k) o[k] = args[++i] || "";
@@ -41,7 +43,7 @@ export function parseRedeemArgs(args: string[]): RedeemArgs {
   return o;
 }
 
-/** 兑换因实例 id 冲突被拒：这张邀请记一次，满 INVITE_MAX_REFUSALS 次作废并吊销内嵌 token（一张邀请不能拿来反复试探）。返回是否已作废 */
+/** 兑换因实例 id 冲突、邀请地址对不上被拒：这张邀请记一次，满 INVITE_MAX_REFUSALS 次作废并吊销内嵌 token（一张邀请不能拿来反复试探）。返回是否已作废 */
 async function countRefusal(inv: PendingInvite): Promise<boolean> {
   const { readPeers, writePeers } = await import("../lib/peers.js");
   const data = await readPeers();
@@ -70,6 +72,11 @@ export async function cmdPeerInviteRedeem(a: RedeemArgs) {
     return;
   }
   if (a.url && !isPeerBaseUrl(a.url)) { output({ ok: false, error: "对方 url 必须是 http(s):// 开头或 relay://<对方指纹>" }); return; }
+  // 加入方手里的邀请地址和这张邀请生成时的不一样：邀请串在路上被改过，兑换请求是别人转过来的
+  if (a.inviteUrl && inviteUrlKey(a.inviteUrl) !== inviteUrlKey(inv.url)) {
+    const spent = await countRefusal(inv);
+    return output({ ok: false, error: `邀请里的地址和这张邀请生成时的不一样：请经可信的渠道重新拿一张邀请${spent ? "（这张邀请已作废）" : ""}`, code: "invite_url_mismatch" });
+  }
   const url = a.url.replace(/\/+$/, "");
   const pk = a.fp ? a.pk : "";
   const who = { inTokenId: inv.inTokenId, iid: a.iid, url, fp: a.fp, pk };
@@ -101,7 +108,7 @@ export async function cmdPeerInviteRedeem(a: RedeemArgs) {
   });
   await removePendingInvite(inv.id);
   const myIid = instanceIdSync() || "";
-  const proof = signInviteProof(a.nonce, a.join, a.fp, myIid);
+  const proof = signInviteProof({ nonce: a.nonce, join: a.join, redeemerFp: a.fp, inviterIid: myIid, inviteUrl: a.inviteUrl });
   output({
     ok: true, peer: finalName, agents: inv.agents, oneWay: !rec.outToken, inviteId: inv.id,
     ...(superseded.length ? { revokedTokens: superseded.map(tokenIdOf) } : {}),
@@ -129,8 +136,11 @@ async function prepareReverse(name: string, agents: string[], myUrl: string, for
 
 type RedeemRes = { ok?: boolean; error?: string; code?: string; agents?: string[]; peer?: string; proof?: unknown; iid?: unknown } | null;
 
-/** 回调对方 /peers/redeem。带上本机实例 id（对方据此把我合进他已有的那条记录）与这次的 nonce（换对方的持钥证明） */
-async function postRedeem(hs: PeerInviteV2, rev: Reverse, nonce: string): Promise<{ res: RedeemRes; err: string; failKind: JoinFailureKind }> {
+/**
+ * 回调对方 /peers/redeem。带上本机实例 id（对方据此把我合进他已有的那条记录）、这次的 nonce（换对方的持钥证明）
+ * 和邀请串里的原始地址 inviteUrl（--peer-url 改的是连哪里，不改这个）
+ */
+async function postRedeem(hs: PeerInviteV2, rev: Reverse, nonce: string, inviteUrl: string): Promise<{ res: RedeemRes; err: string; failKind: JoinFailureKind }> {
   let res: RedeemRes = null;
   let err = "", failKind: JoinFailureKind = "other";
   const iid = instanceIdSync();
@@ -139,7 +149,7 @@ async function postRedeem(hs: PeerInviteV2, rev: Reverse, nonce: string): Promis
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        join: hs.join, name: selfPeerName(), nonce,
+        join: hs.join, name: selfPeerName(), nonce, inviteUrl,
         ...(iid ? { iid } : {}),
         ...(rev.secret ? { url: rev.url, token: rev.secret } : {}),
       }),
@@ -156,10 +166,10 @@ async function postRedeem(hs: PeerInviteV2, rev: Reverse, nonce: string): Promis
 }
 
 /** 兑换成功后核对方的持钥证明，决定这条记录能不能落地、写什么（lib/invite-proof.ts judgeJoin）；再查实例 id 没被别的记录占着 */
-async function settleJoin(hs: PeerInviteV2, name: string, before: { name: string; publicKey?: string } | null, anchor: string | null, res: RedeemRes, nonce: string) {
+async function settleJoin(hs: PeerInviteV2, name: string, before: { name: string; publicKey?: string } | null, anchor: string | null, res: RedeemRes, x: { nonce: string; inviteUrl: string }) {
   const { readPeers } = await import("../lib/peers.js");
   const inviterIid = isInstanceId(res?.iid) ? res.iid : "";
-  const proof = checkInviteProof(res?.proof, { nonce, join: hs.join, myFp: myFingerprint() ?? "", inviterIid });
+  const proof = checkInviteProof(res?.proof, { ...x, join: hs.join, redeemerFp: myFingerprint() ?? "", inviterIid });
   const v = judgeJoin({ before, anchor, claimedFp: hs.fp, relayFp: relayPeerFingerprint(hs.url), proof, inviterIid });
   if ("error" in v) return v;
   const iid = v.fields.instanceId;
@@ -175,6 +185,7 @@ export async function cmdPeerJoinAuto(inviteStr: string, agentsCsv: string, myUr
     await import("../lib/peers.js");
   if (!inviteStr) { output({ ok: false, error: "peer-join-auto '<邀请串>' [--agents <a,b>] [--url <我方地址>] [--peer-url <对方地址覆盖>]" }); return; }
   const hs = parsePeerInviteV2(inviteStr);
+  const inviteUrl = hs?.url ?? "";
   // 跨 tailnet 纠偏：邀请串嵌的是发方视角的 tailscale IP，接方看到的可能是映射地址；--peer-url 显式覆盖，连不上时下方兜底扫描给候选
   if (hs && peerUrlOverride.trim()) hs.url = peerUrlOverride.trim().replace(/\/+$/, "");
   if (!hs) {
@@ -209,7 +220,7 @@ export async function cmdPeerJoinAuto(inviteStr: string, agentsCsv: string, myUr
   };
   // 回调对方 redeem——失败必须回滚：半截 peer 会在列表里装成能用的样子
   const nonce = newInviteNonce();
-  const { res: redeemRes, err: redeemErr, failKind } = await postRedeem(hs, rev, nonce);
+  const { res: redeemRes, err: redeemErr, failKind } = await postRedeem(hs, rev, nonce, inviteUrl);
   if (redeemErr) {
     await rollback();
     // 连接类失败 → 扫 tailnet 同端口找可达的 bridge 候选（只做无凭据的 GET 探测，兑换凭据绝不往未确认的地址发）
@@ -219,7 +230,7 @@ export async function cmdPeerJoinAuto(inviteStr: string, agentsCsv: string, myUr
       hint: joinFailureHint(failKind, { peerUrl: hs.url, myAddr: net ? await localTailnetAddr() : undefined, candidates, code: redeemRes?.code }) });
     return;
   }
-  const settled = await settleJoin(hs, finalName, before, anchor, redeemRes, nonce);
+  const settled = await settleJoin(hs, finalName, before, anchor, redeemRes, { nonce, inviteUrl });
   if ("error" in settled) {
     await rollback();
     output({ ok: false, error: `加入失败（已回滚）: ${settled.error}`, hint: `${settled.hint}。对方那边已经把你加上了，请对方在 Peer 面板移除这条再重新邀请。` });

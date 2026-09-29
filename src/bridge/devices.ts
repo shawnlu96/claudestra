@@ -19,7 +19,7 @@ import { apiJson, forbidden, INVALID_JSON, invalidJsonBody, readJsonBody } from 
 import { emitCredentialRevoked } from "./credential-revocation.js";
 import { relayClient } from "./relay-link.js";
 import { activePairingCodeList, issuePairingCode, redeemPairingByProof, redeemPairingCode } from "./relay-pairing.js";
-import { requestContextOf, type RequestContext } from "./request-context.js";
+import { requestContextOf, sourceAllows, type RequestContext } from "./request-context.js";
 
 const challenges = new ChallengeStore();
 const approvals = new Approvals();
@@ -97,7 +97,7 @@ function pairFailure(reason: "invalid" | "expired" | "rate_limited"): Response {
 export async function handleDevicesPublic(req: Request, url: URL): Promise<Response | null> {
   const p = url.pathname;
   // 正向白名单：本机、主端口（含本机反代）、中继路径模式才有配对；peer 入口（对外直连 / 中继 peer 帧）一律拒
-  if (p.startsWith("/api/v1/devices/") && !DEVICE_SOURCES.has(requestContextOf(req).source)) return forbidden("device endpoints are not available on the peer entrance");
+  if (p.startsWith("/api/v1/devices/") && !sourceAllows(req, "device")) return forbidden("device endpoints are not available on the peer entrance");
   if (p === "/api/v1/devices/pair/challenge" && req.method === "GET") {
     return apiJson(200, { ok: true, ...challenges.issue(), fp: machineFp(), machineName: hostname() });
   }
@@ -107,8 +107,6 @@ export async function handleDevicesPublic(req: Request, url: URL): Promise<Respo
   if (p === "/api/v1/devices/legacy-session" && req.method === "POST") return legacySession(req);
   return null;
 }
-
-const DEVICE_SOURCES: ReadonlySet<string> = new Set(["loopback", "lan", "relay"]);
 
 /**
  * 旧 web 的登录 cookie（cstra_session）→ 一次性换 owner 全权设备凭据（lib/legacy-web.ts）：从旧 web 服务升上来的机器，
@@ -120,7 +118,7 @@ async function legacySession(req: Request): Promise<Response> {
   if (!req.headers.get(DEVICE_HEADER)) return forbidden(`${DEVICE_HEADER} header required`);
   const ctx = requestContextOf(req);
   const sid = cookieValueFrom(req.headers.get("cookie"), LEGACY_SESSION_COOKIE);
-  if (!sid || (ctx.source !== "loopback" && ctx.source !== "lan")) return apiJson(404, { ok: false, error: "no legacy session", code: "no_legacy_session" });
+  if (!sid || !sourceAllows(req, "legacy")) return apiJson(404, { ok: false, error: "no legacy session", code: "no_legacy_session" });
   if (!redeemLegacySession(webDb(), sid)) return apiJson(401, { ok: false, error: "legacy session expired or already used", code: "legacy_session_invalid" });
   const body = await readJsonBody(req);
   const deviceName = str((body === INVALID_JSON || !body ? {} : (body as Body)).deviceName) ?? "升级前已登录的浏览器";

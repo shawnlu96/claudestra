@@ -12,16 +12,24 @@ import { SIG_HEADERS, isPublicKey, keyFingerprint, verifySigned } from "../lib/i
 import { RELAY_BASE_HEADER, RELAY_FROM, RELAY_FROM_HEADER, apiPathOk, isRedeemRequest, type Headers } from "../lib/relay-protocol.js";
 import { RELAY_MODE_API, RELAY_MODE_HEADER } from "../lib/relay-machine-path.js";
 import { ReplayCache } from "../lib/peer-trust.js";
+import { LogThrottle } from "../lib/log-throttle.js";
 import { collectBody, dropForPeer, forwardHeaders, headersToObject, rewriteLocation } from "../lib/relay-stream.js";
 import { RelayError, type InboundContext, type InboundHandler, type InboundRequest, type InboundResponse } from "../lib/relay-client-types.js";
 import { dispatchMachineRequest, type ApiHandler } from "./relay-dispatch.js";
 import { setRequestContext } from "./request-context.js";
+import { isDirectLoopback } from "../lib/same-host.js";
 
 export { ReplayCache };
 
-/** 兑换帧的防重放缓存：中继对每个发件人每分钟只放 6 条兑换，一个发件人在签名有效期内最多约 60 条；总量满了只拒兑换 */
+/**
+ * 兑换帧的防重放缓存：中继对每个发件人每分钟只放 6 条兑换，一个发件人在签名有效期内最多约 60 条。满了挤掉最旧的一条，
+ * 不拒新兑换：兑换本身另有两道兜底——口令只能兑换一次，持钥证明绑着加入方现生成的 nonce——被挤掉的那条签名再来一次，
+ * 最多得到和原请求相同的结果；拒新兑换的话，非联系人用几个身份灌满就能挡住所有经中继的兑换。
+ */
 const REDEEM_REPLAY_MAX = 500;
 const REDEEM_REPLAY_PER_SENDER = 60;
+
+const refusalLog = new LogThrottle();
 
 /** peer 请求正文上限：验签要整读，别让对方灌满内存（peer 路径的正文都是小 JSON） */
 const MAX_PEER_BODY = 2 * 1024 * 1024;
@@ -49,21 +57,23 @@ function markEquals(got: string | null, expected: string): boolean {
  * bridge 主端口 / 旧 web 端口认出它，就把这个请求的来源定成 relay——中继自己选走隧道还是路径模式，
  * 两条路进 bridge 后的待遇必须一样（peer token 403、不算本机、不算同机）。
  */
-const TUNNEL_MARK_HEADER = "x-claudestra-tunnel-mark";
+export const TUNNEL_MARK_HEADER = "x-claudestra-tunnel-mark";
 let tunnelMarkValue: string | null = null;
 const tunnelMark = (): string => (tunnelMarkValue ??= randomBytes(32).toString("base64url"));
 
 /**
- * bridge 主端口与接管的旧 web 端口给每个请求定来源（bridge.ts bridgeFetch）；标记头核完就删，不往后传。
- * 返回是不是隧道请求：控制面闸门据此把它排除在回环之外，不单靠隧道写的那个非空 XFF。
+ * bridge 主端口与接管的旧 web 端口给每个请求定来源，返回这个请求算不算本机（控制面闸门用）。bridge.ts 只调这一个，
+ * 测试也调它：来源必须每个请求都设——隧道、反代、局域网请求都带 XFF 或不是回环，设上下文要是排在「是不是直连回环」
+ * 之后就会整批漏设。本机 = 回环 socket、没有 XFF、也不带隧道标记（标记头核完就删，不往后传；tests/relay-entry-trust.test.ts）。
  */
-export function setSocketRequestContext(req: Request, addr: string | null, loopback: boolean): boolean {
+export function socketTrust(req: Request, addr: string | null): boolean {
+  const direct = isDirectLoopback(addr, req.headers.get("x-forwarded-for"));
   const tunnel = markEquals(req.headers.get(TUNNEL_MARK_HEADER), tunnelMark());
   req.headers.delete(TUNNEL_MARK_HEADER);
   const https = req.headers.get("x-forwarded-proto") === "https";
-  if (!tunnel) setRequestContext(req, { source: loopback ? "loopback" : "lan", clientIp: addr, https });
+  if (!tunnel) setRequestContext(req, { source: direct ? "loopback" : "lan", clientIp: addr, https });
   else setRequestContext(req, { source: "relay", clientIp: req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() || null, https: true });
-  return tunnel;
+  return direct && !tunnel;
 }
 
 /**
@@ -161,6 +171,9 @@ function rewriteLocalLocation(headers: Headers, webBase: string, publicHost: str
 async function forwardTunnel(req: InboundRequest, ctx: InboundContext, d: InboundDeps): Promise<InboundResponse> {
   const fetchImpl = d.fetchImpl ?? fetch;
   const target = localUrl(d.webBase, req.path);
+  // 网页端口和 peer 入口撞在一起时拒绝隧道：入口把回环 socket 来的请求当本机反代（peer-ingress.ts），隧道不能落到那里
+  const ingress = d.ingressBase();
+  if (ingress && new URL(ingress).origin === new URL(d.webBase).origin) throw new RelayError("local_unreachable", "peer", "web port is the peer ingress port on this instance");
   const hasBody = req.method !== "GET" && req.method !== "HEAD";
   // 浏览器看到的主机名以中继盖的 x-forwarded-host 为准（front 已剥掉客户端自带的）；Host 也改成它，
   // 本机 Web 才会按公网地址算相对跳转，而不是按它自己的回环监听地址
@@ -196,6 +209,10 @@ type Caches = { peer: ReplayCache; redeem: ReplayCache };
 
 async function forwardPeer(from: string, req: InboundRequest, ctx: InboundContext, d: InboundDeps, caches: Caches): Promise<InboundResponse> {
   if (!apiPathOk(req.path)) throw new RelayError("path_forbidden", "peer", `${req.path} is not under /api/v1`);
+  const base = d.ingressBase();
+  if (!base) throw new RelayError("local_unreachable", "peer", "peer ingress port not configured on this instance");
+  // 拼目标地址在验签和记防重放之前：路径不合格直接报 path_forbidden，不占缓存，也不会被下面的 fetch 错误改写成连不上本机
+  const target = localUrl(base, req.path);
   let body: Uint8Array;
   try {
     body = await collectBody(req.body, MAX_PEER_BODY);
@@ -207,20 +224,20 @@ async function forwardPeer(from: string, req: InboundRequest, ctx: InboundContex
   if (bad) throw bad;
   const refused = await d.refusePeer(from, req);
   if (refused) {
-    console.warn(`🚫 [relay] ${from} ${req.method} ${req.path.split("?")[0]}: ${refused}`); // 细节只进本机日志：对外同一句，不让联系人借此试探 token
+    // 细节只进本机日志：对外同一句，不让联系人借此试探 token。每个发件人每分钟一行（lib/log-throttle.ts）
+    const log = refusalLog.take(from, now);
+    if (log) console.warn(`🚫 [relay] ${log.key} ${req.method} ${req.path.split("?")[0]}: ${refused}${log.muted ? `（上一分钟另有 ${log.muted} 条被拒）` : ""}`);
     throw new RelayError("sender_forbidden", "peer", "sender is not allowed to make this request");
   }
   const replay = recordPeerReplay(from, req, isRedeemRequest(req.method, req.path) ? caches.redeem : caches.peer, now);
   if (replay) throw replay;
-  const base = d.ingressBase();
-  if (!base) throw new RelayError("local_unreachable", "peer", "peer ingress port not configured on this instance");
   const headers = forwardHeaders(req.headers, dropForPeer);
   headers[RELAY_FROM_HEADER] = from;
   headers[RELAY_MARK_HEADER] = relayMark();
   const hasBody = req.method !== "GET" && req.method !== "HEAD";
   let r: Response;
   try {
-    r = await (d.fetchImpl ?? fetch)(localUrl(base, req.path), { method: req.method, headers, redirect: "manual", signal: ctx.signal, ...(hasBody ? { body } : {}) });
+    r = await (d.fetchImpl ?? fetch)(target, { method: req.method, headers, redirect: "manual", signal: ctx.signal, ...(hasBody ? { body } : {}) });
   } catch (e) {
     throw localError(e, ctx.signal);
   }
@@ -229,7 +246,7 @@ async function forwardPeer(from: string, req: InboundRequest, ctx: InboundContex
 }
 
 export function makeInboundHandler(d: InboundDeps): InboundHandler {
-  const caches: Caches = d.caches ?? { peer: new ReplayCache(), redeem: new ReplayCache(REDEEM_REPLAY_MAX, undefined, undefined, REDEEM_REPLAY_PER_SENDER) };
+  const caches: Caches = d.caches ?? { peer: new ReplayCache(), redeem: new ReplayCache(REDEEM_REPLAY_MAX, undefined, undefined, REDEEM_REPLAY_PER_SENDER, true) };
   return (req, ctx) => {
     if (ctx.from !== RELAY_FROM) return forwardPeer(ctx.from, req, ctx, d, caches);
     const pathMode = req.headers[RELAY_MODE_HEADER] === RELAY_MODE_API;

@@ -47,6 +47,9 @@ export function joinFailureHint(kind: JoinFailureKind, ctx: HintCtx): string {
       if (ctx.code === "iid_taken") {
         return "对方那边已有一个同实例 id 的联系人，但钥匙对不上：请对方先删掉旧联系人再发邀请；你这边如果是老版本，先升级（claudestra update）。";
       }
+      if (ctx.code === "invite_url_mismatch") {
+        return "你手里邀请串的地址和对方生成时的不一样，邀请可能在转交途中被改过：请对方经可信的渠道重新发一张；要连别的地址用 --peer-url，别改邀请串。";
+      }
       return "对方收到了请求，但拒绝了这张邀请：可能已过期（24 小时）、已经用过或被撤销——请对方重新生成一张。";
     default:
       return "确认对方 bridge 在线、地址对外可达、邀请未过期未撤销。";

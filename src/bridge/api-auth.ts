@@ -7,8 +7,8 @@
 import { findByBearer, readPrincipals, SlidingWindowLimiter, tokenIdOf, updatePrincipals, type Principal } from "../lib/principals.js";
 import { cookieValueFrom, csrfOk, DEVICE_HEADER, effectivePrincipal, findCredential, touchCredential } from "../lib/devices.js";
 import { apiJson } from "./api-respond.js";
-import { checkPeerSignature, isPeerReplay, type PeerCheck } from "./peer-signature.js";
-import { requestContextOf } from "./request-context.js";
+import { checkPeerSignature, peerReplayVerdict, type PeerCheck } from "./peer-signature.js";
+import { requestContextOf, sourceAllows } from "./request-context.js";
 import { peerSigErrorText } from "../lib/peer-auth-hints.js";
 
 // 120/min：默认 30 在 web 重度使用下会被打爆——SSE 重连风暴循环触发 429 → 直播流死掉（2026-07-14 真机）。owner 再放大 5 倍：
@@ -43,7 +43,7 @@ export async function authenticateApi(req: Request, url: URL, opts: { rateLimit:
     if (!p) return apiJson(401, { ok: false, error: "invalid or revoked token" });
   } else {
     const token = cookieValueFrom(req.headers.get("cookie"));
-    if (token && requestContextOf(req).source === "peer-ingress") return apiJson(403, { ok: false, error: "no device credentials on the peer entrance", code: "device_via_peer_entrance" });
+    if (token && !sourceAllows(req, "device")) return apiJson(403, { ok: false, error: "no device credentials on this entrance", code: "device_via_peer_entrance" });
     if (!token) return apiJson(401, { ok: false, error: "missing Authorization: Bearer <secret> or device cookie (only GET /events may use ?token=)" });
     const hit = findCredential(file, token);
     if (!hit) return apiJson(401, { ok: false, error: "device credential invalid, revoked or expired", code: "device_invalid" });
@@ -55,10 +55,10 @@ export async function authenticateApi(req: Request, url: URL, opts: { rateLimit:
   // peer 先验签、判重放，再扣限速：拿到 token 却签不了名的人、重放截获请求的人都耗不掉正牌 peer 的额度（失败另有一个桶）
   const sig = p.peer ? await peerGate(req, url, p.peer, opts.rateLimit) : null;
   if (sig instanceof Response) return sig;
-  const replay = sig?.once ? isPeerReplay(sig.once, p.peer!) : false;
-  if (replay) return peerSigRejected(replay);
+  const replay = sig?.once ? peerReplayVerdict(sig.once, p.peer!) : null;
+  if (replay?.reject) return peerSigRejected(replay.reject);
   await sig?.commit();
-  if (opts.rateLimit) {
+  if (opts.rateLimit && replay?.charge !== false) {
     const limit = p.role === "owner" ? OWNER_RATE_LIMIT_PER_MIN : API_RATE_LIMIT_PER_MIN;
     const key = tokenIdOf(p);
     let limiter = limiters.get(key);
@@ -78,7 +78,7 @@ export async function authenticateApi(req: Request, url: URL, opts: { rateLimit:
  * 拿着 token 却签不了名的人就能把正牌 peer 挡在外面。
  */
 async function peerGate(req: Request, url: URL, peer: string, rateLimit: boolean): Promise<Extract<PeerCheck, { allow: true }> | Response> {
-  if (requestContextOf(req).source === "relay") return apiJson(403, { ok: false, error: "peer tokens are not accepted on the relay path", code: "peer_via_relay_path" });
+  if (!sourceAllows(req, "peer")) return apiJson(403, { ok: false, error: "peer tokens are not accepted on the relay path", code: "peer_via_relay_path" });
   const v = await checkPeerSignature(req, url, peer);
   if (v.allow) return v;
   let failures = sigFailures.get(peer);

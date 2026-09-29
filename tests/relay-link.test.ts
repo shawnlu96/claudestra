@@ -173,6 +173,17 @@ describe("入站分流（relay-inbound.ts）", () => {
     const probe = { method: "GET", path: "/api/v1/agents", headers: signed("GET", "/api/v1/agents"), body: bodyStream("") };
     await expect(noIngress.handler(probe, ctx(myFp))).rejects.toMatchObject({ code: "local_unreachable" });
   });
+  test("peer：签名合法但路径不是本机绝对路径 → path_forbidden，在验签和记防重放之前拒（fetch 0 次、缓存不增）", async () => {
+    const calls: string[] = [];
+    const caches = { peer: new ReplayCache(20), redeem: new ReplayCache(5) };
+    const handler = makeInboundHandler({ webBase: "http://127.0.0.1:2", refusePeer: ALLOW_ALL, ingressBase: () => "http://127.0.0.1:1", caches, now: () => NOW,
+      fetchImpl: (async (u: string) => (calls.push(u), new Response("ok"))) as unknown as typeof fetch });
+    for (const path of ["//h/api/v1/x", "http://h/api/v1/x", "/\\h/api/v1/x", "api/v1/x"]) {
+      await expect(handler({ method: "POST", path, headers: signed("POST", path, "{}"), body: bodyStream("{}") }, ctx(myFp))).rejects.toMatchObject({ code: "path_forbidden" });
+    }
+    expect(calls).toEqual([]);
+    expect(caches.peer.size).toBe(0);
+  });
   type PeerReq = { method: string; path: string; headers: Record<string, string>; body: Uint8Array };
   /** forwardPeer 里的顺序：先验签，（核对联系人之后）再记防重放 */
   const verifyPeerRequest = (from: string, r: PeerReq, cache: ReplayCache, now: number) => verifyPeerSignature(from, r, now) ?? recordPeerReplay(from, r, cache, now);
@@ -182,7 +193,7 @@ describe("入站分流（relay-inbound.ts）", () => {
       return { privateKey, publicKey: String(createPublicKey(privateKey).export({ format: "jwk" }).x) };
     };
     const contact = tempKey(), contactFp = keyFingerprint(contact.publicKey);
-    const caches = { peer: new ReplayCache(20), redeem: new ReplayCache(5, undefined, undefined, 2) };
+    const caches = { peer: new ReplayCache(20), redeem: new ReplayCache(5, undefined, undefined, 2, true) };
     const refusePeer = async (from: string, r: { method: string; path: string; headers: Record<string, string> }) =>
       relayPeerRefusal(from, r, { contacts: new Set([contactFp]), bearerOwner: (t) => (t === "tok" ? { peer: "c", fp: contactFp } : null) });
     const handler = makeInboundHandler({ webBase: "http://127.0.0.1:2", refusePeer, ingressBase: () => "http://127.0.0.1:1", caches,
@@ -193,9 +204,11 @@ describe("入站分流（relay-inbound.ts）", () => {
       await expect(post(tempKey(), "/api/v1/agents/a/messages", `{"n":${i}}`, { authorization: "Bearer tok" })).rejects.toMatchObject({ code: "sender_forbidden" });
     }
     expect(caches.peer.size).toBe(0);
-    // 兑换帧单独一个小桶：灌满只拒兑换
+    // 兑换帧单独一个小桶，满了挤掉最旧的：灌满之后新身份照样能兑换，联系人的缓存不受影响
     for (let i = 0; i < 5; i++) expect((await post(tempKey(), "/api/v1/peers/redeem", `{"join":"${i}"}`)).status).toBe(200);
-    await expect(post(tempKey(), "/api/v1/peers/redeem", '{"join":"x"}')).rejects.toMatchObject({ code: "replay_full" });
+    expect(caches.redeem.size).toBe(5);
+    expect((await post(tempKey(), "/api/v1/peers/redeem", '{"join":"x"}')).status).toBe(200);
+    expect(caches.redeem.size).toBe(5);
     expect(caches.peer.size).toBe(0);
     expect((await post(contact, "/api/v1/agents/a/messages", "{}", { authorization: "Bearer tok" })).status).toBe(200);
     expect(caches.peer.size).toBe(1);
@@ -249,6 +262,20 @@ describe("入站分流（relay-inbound.ts）", () => {
     expect(c.seen(sigOf(3), at(1), t0 + 1500, "r")).toBe(false);
     expect(c.seen(sigOf(2), at(1), t0 + 1500, "q")).toBe("replay");
     expect(c.seen(sigOf(4), at(1), t0 + 1500, "r")).toBe("full");
+  });
+  test("ReplayCache evict：满了挤掉最旧的（整体满挤全局最旧，某个 peer 满挤它自己最旧的）；hits 计次", () => {
+    const start = Math.floor(NOW / 1000), t0 = start * 1000;
+    const c = new ReplayCache(3, start, 60_000, 2, true);
+    const sigOf = (n: number) => Buffer.alloc(64, n).toString("base64url");
+    expect(c.hits(sigOf(1), String(start), t0, "a")).toBe(1);
+    expect(c.hits(sigOf(1), String(start), t0, "a")).toBe(2);
+    expect(c.seen(sigOf(2), String(start), t0, "a")).toBe(false);
+    expect(c.seen(sigOf(3), String(start), t0, "a")).toBe(false); // a 满了（2 条）：挤掉 a 最旧的 1
+    expect(c.seen(sigOf(1), String(start), t0, "b")).toBe(false);
+    expect(c.seen(sigOf(4), String(start), t0, "c")).toBe(false); // 整体满了（3 条）：挤掉全局最旧的 2
+    expect(c.size).toBe(3);
+    expect(c.seen(sigOf(3), String(start), t0, "a")).toBe("replay");
+    expect(c.seen(sigOf(2), String(start), t0, "a")).toBe(false);
   });
   test("ReplayCache：按 peer 分桶——一个 peer 灌满只拒它自己", () => {
     const start = Math.floor(NOW / 1000), t0 = start * 1000;

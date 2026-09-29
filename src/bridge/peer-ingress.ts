@@ -15,7 +15,7 @@
 import { findByBearer, readPrincipals } from "../lib/principals.js";
 import { configuredPeerIngressPort } from "../lib/bridge-url.js";
 import { repoEnvVar } from "../lib/env-file.js";
-import { relayMark, takeRelayFrom } from "./relay-inbound.js";
+import { relayMark, takeRelayFrom, TUNNEL_MARK_HEADER } from "./relay-inbound.js";
 import { setRequestContext } from "./request-context.js";
 import { isLoopbackAddress } from "../lib/same-host.js";
 import { DEVICE_HEADER } from "../lib/devices.js";
@@ -114,10 +114,10 @@ function ingressPublicRoute(method: string, pathname: string): boolean {
 }
 
 /**
- * 入口收到的一个请求（单测直接调，不开端口）。按 socket 来源分三类：
- *   - 回环 socket、没有中继标记 = 本机反代（tailscale serve 把 /api/v1 挂到这里，网页经 HTTPS 入口也走它）：
+ * 入口收到的一个请求（单测直接调，不开端口），按来源分两种待遇（docs/relay/protocol.md §4.1 的四类来源里，入口只见这两种）：
+ *   - 回环 socket、没有中继标记、也没有隧道标记头 = 本机反代（tailscale serve 把 /api/v1 挂到这里，网页经 HTTPS 入口也走它）：
  *     与主端口经反代同待遇（来源 lan，设备 cookie 照认）。前提是中继够不到这个端口——隧道与 peer 帧的 path
- *     都过了同源断言（relay-inbound.ts localUrl），改不了目标主机；那条断言松了，这一类就不再成立。
+ *     都过了同源断言（relay-inbound.ts localUrl），选端口时也避开网页端口；这些松了，这一类就不再成立。
  *   - 中继转来的 peer 帧（进程内标记核过）与非回环 socket（PEER_INGRESS_PUBLIC=1 直接对外）：来源 peer-ingress，
  *     删掉 cookie 与设备头；不带凭据只放兑换与邀请页，其余 403。设备端点与设备凭据在这个来源下一律拒。
  */
@@ -133,7 +133,10 @@ export async function ingressRequest(req: Request, handleApi: ApiHandler, addr: 
   // 来源指纹只认经中继进来的（relay-inbound.ts 盖了进程内标记），放进请求上下文；原始头一律剥掉
   const headers = new Headers(req.headers);
   const relayFrom = takeRelayFrom(headers, relayMark());
-  const localProxy = !relayFrom && isLoopbackAddress(addr);
+  // 带隧道标记头的（不论值）不算本机反代：隧道只该打网页端口，打到这里说明端口配撞了
+  const tunnelled = headers.has(TUNNEL_MARK_HEADER);
+  headers.delete(TUNNEL_MARK_HEADER);
+  const localProxy = !relayFrom && !tunnelled && isLoopbackAddress(addr);
   if (!localProxy) {
     headers.delete("cookie");
     headers.delete(DEVICE_HEADER);

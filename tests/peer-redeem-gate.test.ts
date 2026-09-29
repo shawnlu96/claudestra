@@ -1,6 +1,6 @@
 /**
  * 兑换端点进 manager 之前的一段（bridge/peer-redeem.ts redeemPrecheck）：经中继隧道 / 路径模式来的 403；
- * 口令不对的按来源分桶限速，不连累别的来源、也不连累同一来源上口令对的兑换；口令对的才进全局桶；nonce 至少 128 位。
+ * 口令不对的按来源分桶限速，不连累别的来源、也不连累同一来源上口令对的兑换；口令对的按邀请分桶；nonce 至少 128 位。
  * 状态文件写在 preload 的临时 STATE_DIR。
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
@@ -10,11 +10,12 @@ import { STATE_DIR } from "../src/lib/paths.js";
 import { redeemArgs, redeemPrecheck, resetRedeemLimitsForTest, type RedeemInput } from "../src/bridge/peer-redeem.js";
 import { setRequestContext, type RequestContext } from "../src/bridge/request-context.js";
 
-const JOIN = "g".repeat(48);
+const JOIN = "g".repeat(48), JOIN2 = "h".repeat(48);
 beforeAll(() => {
   const expiresAt = new Date(Date.now() + 3600_000).toISOString();
   writeFileSync(join(STATE_DIR, "peers.json"), JSON.stringify({ httpPeers: [], pendingInvites: [
     { id: "inv_gate", joinSecret: JOIN, inTokenId: "tok_gate", agents: ["*"], url: "", createdAt: "", expiresAt },
+    { id: "inv_gate2", joinSecret: JOIN2, inTokenId: "tok_gate2", agents: ["*"], url: "", createdAt: "", expiresAt },
   ] }));
 });
 afterAll(() => rmSync(join(STATE_DIR, "peers.json"), { force: true }));
@@ -41,9 +42,10 @@ describe("兑换前置检查", () => {
     expect(await status(req({ join: "b".repeat(48), name: "n" }, { clientIp: null, relayFrom: "16f9-b5d1-30fb-8923" }))).toBe(400);
     expect(await status(req({ join: JOIN, name: "n" }))).toBe(200);
   });
-  test("口令对的进全局桶：每分钟 30 次", async () => {
-    for (let i = 0; i < 30; i++) expect(await status(req({ join: JOIN, name: "n" }, { clientIp: `198.51.100.${i}` }))).toBe(200);
+  test("口令对的按邀请分桶：一张邀请每分钟 6 次，拿着它连发不连累别的邀请", async () => {
+    for (let i = 0; i < 6; i++) expect(await status(req({ join: JOIN, name: "n" }, { clientIp: `198.51.100.${i}` }))).toBe(200);
     expect(await status(req({ join: JOIN, name: "n" }, { clientIp: "198.51.100.99" }))).toBe(429);
+    expect(await status(req({ join: JOIN2, name: "n" }, { clientIp: "198.51.100.99" }))).toBe(200);
   });
   test("nonce 不足 128 位当没带；参数原样交给 manager", async () => {
     const short = (await redeemPrecheck(req({ join: JOIN, name: "n", nonce: "a".repeat(21) }))) as RedeemInput;
@@ -51,5 +53,8 @@ describe("兑换前置检查", () => {
     const ok = (await redeemPrecheck(req({ join: JOIN, name: "n", nonce: "a".repeat(22), iid: "bad id" }))) as RedeemInput;
     expect(ok).toMatchObject({ nonce: "a".repeat(22), iid: "", fp: "", pk: "" });
     expect(redeemArgs(ok)).toEqual(["--join", JOIN, "--name", "n", "--nonce", "a".repeat(22)]);
+    const withUrl = (await redeemPrecheck(req({ join: JOIN2, name: "n", inviteUrl: "https://v.example" }))) as RedeemInput;
+    expect(redeemArgs(withUrl)).toEqual(["--join", JOIN2, "--name", "n", "--invite-url", "https://v.example"]);
+    expect(((await redeemPrecheck(req({ join: JOIN2, name: "n", inviteUrl: "javascript:x" }))) as RedeemInput).inviteUrl).toBe(""); // 不是 peer 地址的样子当没带
   });
 });
