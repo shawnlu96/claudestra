@@ -111,7 +111,7 @@ import { cmdKill, cmdRemove } from "./manager/agent-kill.js"; // 按 registry �
 import { cmdRename } from "./manager/agent-rename.js";
 import { isRestartInProgress, tryLockRestart, unlockRestart } from "./manager/restart-lock.js";
 import { cmdTokenAdd, cmdTokenList, cmdTokenRevoke } from "./manager/tokens.js";
-import { cmdPeerHttpInvite, cmdPeerHttpJoin, cmdPeerHttpAccept, cmdPeerHttpTest, cmdPeerHttpList, cmdPeerHttpScope, cmdPeerHttpRemove, cmdPeerInviteNew, cmdPeerInviteList, cmdPeerInviteRevoke } from "./manager/peers.js";
+import { cmdPeerHttpInvite, cmdPeerHttpJoin, cmdPeerHttpAccept, cmdPeerHttpTest, cmdPeerHttpList, cmdPeerHttpScopeCli, cmdPeerHttpRemove, cmdPeerInviteNew, cmdPeerInviteList, cmdPeerInviteRevoke } from "./manager/peers.js";
 import { cmdPeerInviteRedeem, cmdPeerJoinAuto, parseRedeemArgs } from "./manager/peer-join.js";
 import { cmdCost, cmdMetrics } from "./manager/cost.js";
 import { cmdAutoUpdate } from "./manager/auto-update.js";
@@ -2758,19 +2758,7 @@ switch (cmd) {
   // 中继（bridge/relay-link.ts）：配对短码 / 二维码给手机与浏览器，状态查询；实现在 manager/relay.ts
   case "pair": await (await import("./manager/pair.js")).cmdPair(args); break;
   case "relay-status": await (await import("./manager/relay.js")).cmdRelayStatus(); break;
-  case "peer-http-scope": {
-    const { rest: afterForce, value: force } = extractBoolFlag(args, "--force");
-    let agentsCsv = "";
-    const pos: string[] = [];
-    for (let i = 0; i < afterForce.length; i++) {
-      const a = afterForce[i];
-      if (a === "--agents") agentsCsv = afterForce[++i] || "";
-      else if (a.startsWith("--agents=")) agentsCsv = a.slice(9);
-      else pos.push(a);
-    }
-    await cmdPeerHttpScope(pos[0] || "", agentsCsv, force);
-    break;
-  }
+  case "peer-http-scope": await cmdPeerHttpScopeCli(args); break;
   case "peer-http-remove": await cmdPeerHttpRemove(args[0] || ""); break;
   case "peer-http-messages-only": await (await import("./manager/peers.js")).cmdPeerHttpMessagesOnly(args[0] || "", args[1] || ""); break;
   case "peer-ledger": await (await import("./manager/peer-ledger-cli.js")).cmdPeerLedger(args); break;

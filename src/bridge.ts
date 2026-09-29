@@ -74,7 +74,6 @@ import { initPeerIngress, localProbeResponse, relayControlRoutes, socketTrust } 
 import { handleForward, initForward, rememberInbound } from "./bridge/forward.js";
 import { initInbox, takeInbox, inboxOpts } from "./bridge/inbox.js";
 import { startArchiveSweeper } from "./bridge/archive-sweeper.js";
-import { startCtxBoundary } from "./bridge/ctx-boundary.js";
 // Web 远程终端（PTY attach → SSE；见 web-terminal.ts 头注释）
 import { handleTerminalApi, sweepStaleTerminalSessions } from "./bridge/web-terminal.js";
 import {
@@ -3531,7 +3530,7 @@ setTimeout(() => {
     })
     .catch(() => {});
 }, 3_000);
-startCtxBoundary(); // 上下文边界自动压缩：每分钟一轮，Discord / web-only 都跑（bridge/ctx-boundary.ts）
+void import("./bridge/ctx-boundary.js").then((m) => m.startCtxBoundary()); // 上下文边界自动压缩：每分钟一轮，Discord / web-only 都跑
 
 // Web-only: 无 DISCORD_BOT_TOKEN → Web-only 模式：不连 Discord，只跑与平台无关的初始化子集。HTTP/ws/api/事件流在上面 Bun.serve 时已就绪。
 // 跳过的 Discord 专属项：cleanupStaleThinkingMessages / initStatsDashboard /
