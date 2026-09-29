@@ -86,12 +86,16 @@ export function apiMirrorBody(text: string, attachmentCount: number): string {
 
 const XML_ENTITY: Record<string, string> = { "&amp;": "&", "&quot;": '"', "&lt;": "<", "&gt;": ">", "&apos;": "'" };
 
+/** <channel> 头属性值的 XML 实体还原（renderContentForLocal 写头时转义过） */
+export function decodeXmlAttr(v: string): string {
+  return v.replace(/&(?:amp|quot|lt|gt|apos);/g, (e) => XML_ENTITY[e] ?? e);
+}
+
 /** <channel …> 属性串里的 attachments="a;b"（bridge 用 ; 连接，见 bridge.ts 组 meta 处） */
 export function channelAttachmentPaths(attrs: string): string[] {
   const v = /(?:^|\s)attachments="([^"]*)"/.exec(attrs)?.[1];
   if (!v) return [];
-  return v
-    .replace(/&(?:amp|quot|lt|gt|apos);/g, (e) => XML_ENTITY[e] ?? e)
+  return decodeXmlAttr(v)
     .split(";")
     .map((p) => p.trim())
     .filter(Boolean);

@@ -30,7 +30,7 @@ import {
 } from "./api-respond.js";
 import { interruptAgentByName } from "./preempt.js";
 import { existsSync, readdirSync, statSync } from "fs";
-import { TMP_DIR, MASTER_DIR, INBOX_DIR, REPO_ROOT, ALLOWED_USER_IDS } from "./config.js";
+import { TMP_DIR, MASTER_DIR, REPO_ROOT, ALLOWED_USER_IDS } from "./config.js";
 import {
   readPrincipals,
   agentInScope,
@@ -95,6 +95,7 @@ import { pickSwitchOverride, rememberSwitchOverride } from "./switch-override.js
 import { displayModelEffort } from "../lib/display-model.js";
 import { cachedCodexCatalog, readCodexConfigDefaults } from "../lib/codex-catalog.js";
 import { invitePageResponse } from "./invite-page.js";
+import { saveUploadToInbox } from "./local-api/media-refresh.js";
 
 /**
  * 只允许当作**单层目录名**用的标识（归档区 archived/<name>）：拒绝路径分隔符、相对段、NUL。
@@ -1228,7 +1229,6 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
         const form = await req.formData();
         text = String(form.get("text") || "");
         waitSec = Number(form.get("wait") || 0);
-        await Bun.spawn(["mkdir", "-p", INBOX_DIR]).exited;
         // 不用 `f is File` 类型谓词：Bun 的全局 File 与 node:buffer 的 File 在类型
         // 上不兼容（缺 webkitRelativePath/slice），谓词写法会被 tsc 拒。运行时判据
         // 仍是 instanceof File，只是把窄化交给 typeof 排除字符串项。
@@ -1238,9 +1238,7 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
           .slice(0, 5) as unknown as File[];
         for (const f of files) {
           if (f.size > 10 * 1024 * 1024) return apiJson(413, { ok: false, error: `file "${f.name}" exceeds 10MB` });
-          const dest = `${INBOX_DIR}/api_${Date.now()}_${f.name.replace(/[^\w.\-]/g, "_")}`;
-          await Bun.write(dest, f);
-          attachments.push(dest);
+          attachments.push(await saveUploadToInbox(f, agent.name)); // 原子占名 + 记归属（local-api/media-refresh.ts）
         }
       } else {
         const body = (await req.json()) as { text?: string; wait?: number };
