@@ -10,6 +10,7 @@ import { apiJson } from "./api-respond.js";
 import { checkPeerSignature, peerReplayVerdict, type PeerCheck } from "./peer-signature.js";
 import { requestContextOf, sourceAllows } from "./request-context.js";
 import { peerSigErrorText } from "../lib/peer-auth-hints.js";
+import { messagesOnlyAllows } from "../lib/peer-scope-gate.js";
 
 // 120/min：默认 30 在 web 重度使用下会被打爆——SSE 重连风暴循环触发 429 → 直播流死掉（2026-07-14 真机）。owner 再放大 5 倍：
 // 手机 + 电脑 + 侧栏轮询共用一个身份
@@ -58,6 +59,7 @@ export async function authenticateApi(req: Request, url: URL, opts: { rateLimit:
   const replay = sig?.once ? peerReplayVerdict(sig.once, p.peer!) : null;
   if (replay?.reject) return peerSigRejected(replay.reject);
   await sig?.commit();
+  if (p.messagesOnly && !messagesOnlyAllows(req.method, url.pathname)) return apiJson(403, { ok: false, error: "this token may only deliver messages", code: "messages_only" });
   if (opts.rateLimit && replay?.charge !== false) {
     const limit = p.role === "owner" ? OWNER_RATE_LIMIT_PER_MIN : API_RATE_LIMIT_PER_MIN;
     const key = tokenIdOf(p);
