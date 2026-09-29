@@ -49,7 +49,8 @@ const GET_REPEAT_MAX = 5;
 export function peerReplayVerdict(once: PeerOnce, peer: string): { reject: ReplayVerdict; charge: boolean } {
   if (!once.idempotent) return { reject: replays.seen(once.sig, once.ts, Date.now(), peer), charge: true };
   const n = getRepeats.hits(once.sig, once.ts, Date.now(), peer);
-  if (typeof n !== "number") return { reject: n, charge: true };
+  // 签于本进程启动之前的 GET：之前见没见过无从得知，按第一次放行扣额度（拒了会让时钟慢的对端重启后轮询失败）
+  if (typeof n !== "number") return { reject: n === "before_start" ? false : n, charge: true };
   return { reject: n > GET_REPEAT_MAX && "replay", charge: n === 1 };
 }
 

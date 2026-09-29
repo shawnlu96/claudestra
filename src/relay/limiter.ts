@@ -36,20 +36,24 @@ export class KeyedWindows {
 /**
  * 反代之后的客户端地址：X-Forwarded-For 从右往左数第 hops 项（hops = 受信反代的层数，RELAY_TRUST_PROXY）。
  * 每层反代把它看到的对端追加在最右，更左边的是客户端自己写的，取最左一项等于让客户端自报地址、按 IP 的限额形同虚设。
- * 项数不到 hops（请求没经过全部受信层）取最左一项，那也是受信层写的。hops 为 0 或没有这个头返回 undefined（用连接对端）。
+ * 项数不到 hops（请求没经过全部受信层，或层数配多了）时最左那项可能是客户端写的，不认，和 hops 为 0、没有这个头一样
+ * 返回 undefined（用连接对端，最坏是一群人共用反代的地址、限流偏严）。
  */
 export function forwardedClientIp(xff: string | null | undefined, hops: number): string | undefined {
   if (hops <= 0 || !xff) return undefined;
   const parts = xff.split(",").map((s) => s.trim()).filter(Boolean);
-  return parts.length ? parts[Math.max(0, parts.length - hops)] : undefined;
+  return parts.length >= hops ? parts[parts.length - hops] : undefined;
 }
 
 /**
  * 按 IP 计数的配额用的键：IPv6 取前 64 位（一台设备通常分到整段 /64，逐地址计数换个后缀就是新桶），
- * IPv4 与 IPv4 映射地址按原样的 IPv4。认不出的写法原样返回，只会更严不会合并别人。
+ * IPv4 与 IPv4 映射地址按原样的 IPv4；反代写成带端口的（`1.2.3.4:5678`、`[v6]:443`）去掉端口，不然每换一个源端口就是新桶。
+ * 认不出的写法原样返回，只会更严不会合并别人。
  */
 export function ipLimitKey(ip: string): string {
-  const s = ip.trim().toLowerCase().replace(/%.*$/, "").replace(/^\[|\]$/g, "");
+  const raw = ip.trim().toLowerCase();
+  const withPort = /^(\d{1,3}(?:\.\d{1,3}){3}):\d+$/.exec(raw) ?? /^\[([^\]]+)\](?::\d+)?$/.exec(raw);
+  const s = (withPort ? withPort[1] : raw).replace(/%.*$/, "");
   if (!s.includes(":")) return s;
   const mapped = /^::ffff:(\d{1,3}(?:\.\d{1,3}){3})$/.exec(s);
   if (mapped) return mapped[1];

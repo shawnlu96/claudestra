@@ -10,6 +10,7 @@ import { join } from "node:path";
 import { instanceKeySync, keyFingerprint, signedHeaders } from "../src/lib/instance-key.js";
 import { STATE_DIR } from "../src/lib/paths.js";
 import { authenticateApi } from "../src/bridge/api-auth.js";
+import { peerReplayVerdict } from "../src/bridge/peer-signature.js";
 import { redeemRefusal, redeemSender, relaySenderFp } from "../src/bridge/peer-redeem.js";
 import { peerAuthHint } from "../src/lib/peer-auth-hints.js";
 import { makeInboundHandler, socketTrust } from "../src/bridge/relay-inbound.js";
@@ -208,4 +209,11 @@ describe("先验签再扣限速；改钉", () => {
     set({ name: "re-q", baseUrl: "https://q.example", inTokenId: "tok_re_q", addedAt: new Date(Date.now() + 1000).toISOString() }); // 删掉后同名重加，没有 fp
     expect(await status(direct(TOK.q, keyQ))).toBe(200); // 之前钉的 Q2 早于新记录，不作数，按新对方重新钉
   });
+});
+
+test("签于本进程启动之前的 GET：按第一次放行并扣额度，不按 before_start 拒；非 GET 照拒", () => {
+  const ts = "1000"; // 必定早于防重放缓存建立（整套测试共用一个进程，模块可能早就加载了）
+  const sig = Buffer.from(`early-${Date.now()}`).toString("base64url");
+  expect(peerReplayVerdict({ sig, ts, idempotent: true }, "re-early")).toEqual({ reject: false, charge: true });
+  expect(peerReplayVerdict({ sig, ts, idempotent: false }, "re-early")).toEqual({ reject: "before_start", charge: true });
 });

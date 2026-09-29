@@ -9,10 +9,10 @@ import { createRelay, type Relay } from "../src/relay/server.ts";
 import { SUBPROTOCOL } from "../src/lib/relay-protocol.ts";
 
 describe("forwardedClientIp", () => {
-  test("一层受信反代取最右一项；两层取倒数第二项；项数不够取最左", () => {
+  test("一层受信反代取最右一项；两层取倒数第二项；项数不够不认（用连接对端）", () => {
     expect(forwardedClientIp("10.9.9.1, 198.51.100.1", 1)).toBe("198.51.100.1");
     expect(forwardedClientIp("10.9.9.1, 198.51.100.1, 172.16.0.2", 2)).toBe("198.51.100.1");
-    expect(forwardedClientIp("198.51.100.1", 3)).toBe("198.51.100.1");
+    expect(forwardedClientIp("198.51.100.1", 2)).toBeUndefined();
     expect(forwardedClientIp(" 198.51.100.1 ,, ", 1)).toBe("198.51.100.1");
   });
   test("不在反代之后或没有头：undefined（用连接对端）", () => {
@@ -34,25 +34,29 @@ describe("ipLimitKey", () => {
   test("IPv4 与 IPv4 映射地址按 IPv4；认不出的原样", () => {
     expect(ipLimitKey("198.51.100.1")).toBe("198.51.100.1");
     expect(ipLimitKey("::ffff:198.51.100.1")).toBe("198.51.100.1");
+    expect(ipLimitKey("198.51.100.1:5678")).toBe("198.51.100.1");
+    expect(ipLimitKey("[2001:db8:1:2::9]:443")).toBe(ipLimitKey("2001:db8:1:2::1"));
     expect(ipLimitKey("1::2::3")).toBe("1::2::3");
     expect(ipLimitKey("?")).toBe("?");
   });
 });
 
-test("RELAY_TRUST_PROXY：层数；旧写法 1 仍是一层；认不出的当 0", () => {
+test("RELAY_TRUST_PROXY：层数 0–5；旧写法 1 仍是一层；超过 5 或认不出的当 0", () => {
   const hops = (v?: string) => relayEnv({ RELAY_BASE: "r.test", RELAY_TRUST_PROXY: v }, () => undefined).trustProxy;
-  expect([hops("1"), hops("2"), hops("0"), hops(undefined), hops("yes"), hops("-1")]).toEqual([1, 2, 0, 0, 0, 0]);
+  expect([hops("1"), hops("2"), hops("5"), hops("0"), hops(undefined), hops("yes"), hops("-1"), hops("6"), hops("99")]).toEqual([1, 2, 5, 0, 0, 0, 0, 0, 0]);
 });
 
 describe("真中继：握手限额按受信反代写的那项计", () => {
-  let relay: Relay;
+  let relay: Relay, twoHops: Relay;
   beforeAll(() => {
-    relay = createRelay({ base: "relay.test", port: 0, hostname: "127.0.0.1", db: ":memory:", trustProxy: true, limits: { authPerIpPerMinute: 3 }, log: () => {} });
+    const opts = { base: "relay.test", port: 0, hostname: "127.0.0.1", db: ":memory:", limits: { authPerIpPerMinute: 3 }, log: () => {} };
+    relay = createRelay({ ...opts, trustProxy: true });
+    twoHops = createRelay({ ...opts, trustProxy: 2 });
   });
-  afterAll(() => relay.stop());
+  afterAll(() => { relay.stop(); twoHops.stop(); });
 
-  const open = (xff: string) => new Promise<string>((resolve) => {
-    const ws = new WebSocket(`ws://127.0.0.1:${relay.port}/v1/ws`, { protocols: [SUBPROTOCOL], headers: { "x-forwarded-for": xff } } as unknown as string[]);
+  const open = (xff: string, port = relay.port) => new Promise<string>((resolve) => {
+    const ws = new WebSocket(`ws://127.0.0.1:${port}/v1/ws`, { protocols: [SUBPROTOCOL], headers: { "x-forwarded-for": xff } } as unknown as string[]);
     const t = setTimeout(() => { resolve("timeout"); ws.close(); }, 3000);
     ws.onmessage = (m) => {
       const f = JSON.parse(String(m.data));
@@ -62,9 +66,9 @@ describe("真中继：握手限额按受信反代写的那项计", () => {
     };
     ws.onclose = () => { clearTimeout(t); resolve("closed"); };
   });
-  const tally = async (xffs: string[]) => {
+  const tally = async (xffs: string[], port = relay.port) => {
     const out: Record<string, number> = {};
-    for (const x of xffs) { const r = await open(x); out[r] = (out[r] ?? 0) + 1; }
+    for (const x of xffs) { const r = await open(x, port); out[r] = (out[r] ?? 0) + 1; }
     return out;
   };
 
@@ -72,6 +76,11 @@ describe("真中继：握手限额按受信反代写的那项计", () => {
     const got = await tally(Array.from({ length: 6 }, (_, i) => `10.9.${i}.1, 198.51.100.7`));
     expect(got.hello).toBe(3);
     expect(got["error:rate_limited"]).toBe(3);
+  });
+  test("层数配多了（配 2 层、XFF 只有一项）：不认 XFF，按连接对端计，改写也绕不开", async () => {
+    const got = await tally(Array.from({ length: 5 }, (_, i) => `10.8.${i}.1`), twoHops.port);
+    expect(got.hello).toBe(3);
+    expect(got["error:rate_limited"]).toBe(2);
   });
   test("同一段 /64 换后缀算同一个来源；另一段 /64 有自己的额度", async () => {
     const same = await tally(Array.from({ length: 5 }, (_, i) => `2001:db8:7:7::${(i + 1).toString(16)}`));

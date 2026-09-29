@@ -190,7 +190,7 @@ bridge 里请求来源分四类（`bridge/request-context.ts`）：`loopback`、
 
 peer 入口只见其中两种：回环 socket、没有中继标记、也没有隧道标记头 = 本机反代（`tailscale serve` 把 `/api/v1` 挂在这里，网页经 HTTPS 入口也走它），按主端口经反代对待（来源 `lan`，设备 cookie 照认——这一类成立的前提是上面的同源断言，而且入口端口不是网页端口：选端口时避开网页端口，两者相同时隧道一律 `local_unreachable`）；中继 peer 帧与非回环 socket（`PEER_INGRESS_PUBLIC=1` 对外直连）来源是 `peer-ingress`，删掉 cookie 与设备头，不带凭据只放兑换（`POST /api/v1/peers/redeem`）与邀请页（`GET /api/v1/invite`），设备端点与设备凭据一律 403；`legacy-session` 只认本机与主端口。
 
-bridge 再按 peer token 与 scope 放行，并对 peer token 强制验签：签名钥匙的指纹 MUST 等于这个 peer 的期望指纹（peers.json 的 `fp` → `relay://<fp>` 基址 → 首次签名时钉住的指纹；记了完整公钥 `publicKey` 的只认这一把），不签、签错、过期、换了钥匙都 401；公钥与签名都只认规范的无填充 base64url。直连（不经中继）的 peer 请求同样如此。顺序是：验签 → 防重放（非 GET / HEAD 的签名在有效期内只认一次；GET / HEAD 同一签名第二次起照放行但不扣额度——正牌 peer 同一秒对同一路径发两次签名相同——超过 5 次按重放拒；bridge 另持一份 `ReplayCache`，所有入口共用）→ 记下验签结果 → 扣成功请求的限速额度；重放 401，不扣额度、不写 `peer-keys.json`。验签失败另有一个每 peer 每分钟 120 次的桶，超了 429（`reason: sig_rate_limited`，`cause` 是这次失败的原因）；失败只记在内存，由定时器每分钟最多补写一次，钉住的钥匙不动。不限速的路由（远程终端）不收 peer token，一律 403。三样都没有的老 peer 在截止日（默认 2026-11-01，`PEER_LEGACY_DEADLINE` 可覆盖）前放行并告警（doctor 会列出来）；截止日之后一律拒（`reason: unanchored`），签名对得上也不再现钉。邀请里带的 token 在兑换之前只能读（`invite_read_only`），邀请过期或撤销即失效（`invite_expired`，不等清扫）。经中继来的请求（路径模式 §6 与 §4.2 的隧道，bridge 里来源都是 relay）不收 peer token，也不接兑换邀请，一律 403；控制面闸门看到隧道标记就不当本机，不单靠 XFF。
+bridge 再按 peer token 与 scope 放行，并对 peer token 强制验签：签名钥匙的指纹 MUST 等于这个 peer 的期望指纹（peers.json 的 `fp` → `relay://<fp>` 基址 → 首次签名时钉住的指纹；记了完整公钥 `publicKey` 的只认这一把），不签、签错、过期、换了钥匙都 401；公钥与签名都只认规范的无填充 base64url。直连（不经中继）的 peer 请求同样如此。顺序是：验签 → 防重放（非 GET / HEAD 的签名在有效期内只认一次；GET / HEAD 同一签名第二次起照放行但不扣额度——正牌 peer 同一秒对同一路径发两次签名相同——超过 5 次按重放拒；签于本进程启动之前的 GET 按第一次放行，不回 `before_start`；bridge 另持一份 `ReplayCache`，所有入口共用）→ 记下验签结果 → 扣成功请求的限速额度；重放 401，不扣额度、不写 `peer-keys.json`。验签失败另有一个每 peer 每分钟 120 次的桶，超了 429（`reason: sig_rate_limited`，`cause` 是这次失败的原因）；失败只记在内存，由定时器每分钟最多补写一次，钉住的钥匙不动。不限速的路由（远程终端）不收 peer token，一律 403。三样都没有的老 peer 在截止日（默认 2026-11-01，`PEER_LEGACY_DEADLINE` 可覆盖）前放行并告警（doctor 会列出来）；截止日之后一律拒（`reason: unanchored`），签名对得上也不再现钉。邀请里带的 token 在兑换之前只能读（`invite_read_only`），邀请过期或撤销即失效（`invite_expired`，不等清扫）。经中继来的请求（路径模式 §6 与 §4.2 的隧道，bridge 里来源都是 relay）不收 peer token，也不接兑换邀请，一律 403；控制面闸门看到隧道标记就不当本机，不单靠 XFF。
 
 直连兑换时，bridge 用兑换请求自带签名的钥匙（指纹与完整公钥）记下这个 peer（经中继兑换用 `from` 与已核过的签名钥匙）。兑换带来的实例 id 命中已有记录时，只有这把钥匙等于那条记录的期望钥匙才合并；对不上（含没签名、那条记录没有期望指纹）则拒绝兑换（`code: iid_taken`），不建第二条同实例 id 的记录，原记录与它的 token 不动；同一张邀请被这样拒满 3 次就作废并吊销内嵌 token。兑换端点的限速先核 join 口令再计数：口令不对的按来源（中继发件人指纹 / socket 地址）分桶，每个来源每分钟 10 次；口令对的进全局桶（每分钟 30 次）。
 
@@ -261,7 +261,7 @@ front 的响应头补 `strict-transport-security`；不改写 HTML；不缓存�
 | 隧道请求，每 IP | 600 / 分钟（一页几十个资源，别卡正常浏览） | `429` 文本，`retry-after: 60`，不进实例 |
 | 每台实例同时在途的隧道请求 | 256 | `503` JSON `{ok:false,error:"too many concurrent requests"}`，`retry-after: 5`；多半是它的 Web 卡住不回 |
 
-IP 的取法与握手限流相同：`RELAY_TRUST_PROXY=<受信反代层数>` 时取 `X-Forwarded-For` 从右数第这么多项（最右是最近一层反代追加的对端，更左边的客户端自己能写），否则取连接对端。按 IP 的配额 IPv6 按 /64 计数（`src/relay/limiter.ts` `ipLimitKey`）。
+IP 的取法与握手限流相同：`RELAY_TRUST_PROXY=<受信反代层数>` 时取 `X-Forwarded-For` 从右数第这么多项（最右是最近一层反代追加的对端，更左边的客户端自己能写；项数不够、层数超过 5 都不认），否则取连接对端。按 IP 的配额 IPv6 按 /64 计数（`src/relay/limiter.ts` `ipLimitKey`）。
 
 ### 6.2 路径模式：`<base>/m/<fp>/api/v1/…`（docs/design-hosted-frontend.md）
 
