@@ -10,7 +10,7 @@ import { windowWallWait } from "../lib/wall-screen.js";
 import { emitEvent } from "./event-bus.js";
 import { extensionAbort, setAbortCapable } from "./pi-abort.js";
 import { isAcpChannel, noteAcpChannel } from "./acp-state.js";
-export { onAbortAck, setExtensionSocket, stopAfterAbort, stopWaitIds } from "./pi-abort.js"; // bridge.ts 只从这里接打断相关的线
+export { onAbortAck, onCodexUndelivered, setExtensionSocket, stopAfterAbort, stopWaitIds } from "./pi-abort.js"; // bridge.ts 只从这里接打断相关的线
 export { HTTP_IDLE_TIMEOUT_S } from "../lib/esc-guard.js";
 import { probeTurnAt, resolveTurnWindow } from "./turn-probe.js";
 import { turnCuts } from "./turn-cuts.js";

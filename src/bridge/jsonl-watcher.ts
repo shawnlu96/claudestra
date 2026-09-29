@@ -354,15 +354,13 @@ async function processNewData(state: WatcherState, discord: Client, pushed?: obj
   // Claude Code 写入 jsonl → fs.watch fire → 第一次 processNewData 进 await stat /
   // await read 阶段（async I/O，要十几到上百 ms）→ 期间 Stop hook 抵达 →
   // drainChannelWatcher 调 processNewData 看到 state.processing=true 立刻 return →
-  // drain 跑到 flushText 时 textQueue 还是空（第一次 push 还没发生）→ 用户只看到
-  // 「✅ 完成」空通知。
+  // drain 跑到 flushText 时 textQueue 还是空（第一次 push 还没发生）→ 用户只看到「✅ 完成」空通知。
   //
   // 改成"等上一次跑完再做"。两路 processNewData 序列化：第一次 push 完了第二次
   // 才进，第二次的 newStat 看到 lastSize 已被更新，没新数据，直接退出 —— 但此时
   // textQueue 已经被第一次填好了，drain 后续的 flush 就能拿到。
   //
-  // 锁等待带 5s 上限防 hang（理论上不应该；processNewData 内部 await 都是 fs / parse，
-  // 不会卡住）。
+  // 锁等待带 5s 上限防 hang（理论上不应该；processNewData 内部 await 都是 fs / parse，不会卡住）。
   const lockWaitStart = Date.now();
   while (state.processing) {
     if (Date.now() - lockWaitStart > 5000) {
@@ -379,7 +377,7 @@ async function processNewData(state: WatcherState, discord: Client, pushed?: obj
     let toolsChanged = false;
     for (const { seq, line, entry: given } of items as Item[]) {
       try {
-        // v2.23+ runtime 感知：Pi 的行在这里翻译成 Claude Code 形状（ACP 宿主推来的已是这个形状），下面的解析逻辑一行都不用改
+        // Pi / Codex 的行在这里翻译成 Claude Code 形状；ACP 宿主推来的已是这个形状，下面共用解析逻辑
         const entry = given ?? translateSessionLine(state.runtime, line!, state);
         if (!entry) continue;
 
@@ -685,15 +683,15 @@ const PENDING_POLL_MS = 2000;
 const PENDING_MAX_WAIT_MS = 600_000;
 
 
-export async function startWatching(
-  agentName: string, cwd: string, sessionId: string,
-  channelId: string, discord: Client,
-  opts: { runtime?: string; sessionFile?: string; transport?: string } = {}
-) {
+export async function startWatching(agentName: string, cwd: string, sessionId: string, channelId: string, discord: Client, opts: { runtime?: string; sessionFile?: string; transport?: string } = {}) {
   const { runtime, sessionFile } = opts;
   stopWatching(agentName);
   if (opts.transport === "acp" || isAcpChannel(channelId)) return startPushWatcher(agentName, sessionId, channelId, runtime);
   const jsonlPath = resolveSessionPath(runtime, cwd, sessionId, sessionFile);
+  // 同一会话文件重新注册（两份 channel-server 对抢、bridge 重连）不重启：新 watcher 从文件末尾起读，两次之间写的行会丢（对抢时每几秒一次）
+  const cur = watchers.get(agentName);
+  if (jsonlPath && cur?.jsonlPath === jsonlPath && cur.channelId === channelId && cur.sessionId === sessionId) return void console.log(`👁 监听沿用: ${agentName}`);
+  stopWatching(agentName);
 
   if (!jsonlPath) {
     const startedAt = Date.now();

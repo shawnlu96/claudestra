@@ -19,7 +19,10 @@ const CONFIG = [{ id: "model", name: "Model", type: "select", currentValue: "gpt
 const who = { principal: "owner:self" };
 
 beforeAll(() => {
-  setExtensionSocket((ch) => sockets.get(ch), { deliver: async () => undefined, ownerId: () => "", books: () => ({}) as any });
+  setExtensionSocket((ch) => sockets.get(ch), {
+    deliver: async () => undefined, ownerId: () => "", books: () => ({}) as any,
+    hold: () => { throw new Error("ACP link fixture must not queue a voided-message echo"); },
+  });
 });
 
 describe("onAcpFrame", () => {
