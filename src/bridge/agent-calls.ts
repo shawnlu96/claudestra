@@ -36,11 +36,16 @@ export interface PendingAgentCall {
   ambiguityNotifiedAt?: number;
   /** 已经告诉过 caller「它这轮以 API 错误结束、回程保留」的时刻（每槽一次，bridge/stop-settle.ts） */
   apiErrorNotifiedAt?: number;
-  /** target 以 API 错误结束、这一槽在等它接着做完的那一轮（bridge/stop-settle.ts）；withheld = 错误前它已经说了的话 */
+  /**
+   * 视图上的汇总（view / perRequest 算出来的）：等续跑的最早时刻、扣下的话。盘上逐条存在 requests 里，每条只带走自己那份；
+   * 槽上直接存的是老格式，启动时按 apiErrorFor 摊到请求上（foldLegacyApiError）
+   */
   apiErrorAt?: number;
   withheld?: string[];
-  /** 撞错那一轮 target 已看到的请求 id：等续跑标记和扣下的话属于它们，不转挂到后来送到的请求上（过期 / 推回都按它找频道） */
+  /** 老格式：撞错那一轮 target 已看到的请求 id（只在迁移时读） */
   apiErrorFor?: string[];
+  /** 这条请求上有一段扣下的话归属不明、没有转发（老格式迁移时判不清的），过期通知里说一句 */
+  withheldUnclear?: boolean;
   /** 这一槽的各条请求（老数据没有：整槽当一条） */
   requests?: CallRequest[];
   /** requests 的 message_id（#116 时期的老槽只有它，requestsOf 据此拆成逐条） */
@@ -54,6 +59,10 @@ export interface CallRequest {
   ts: number;
   /** 真正送到 target 手上的时刻（失效钟）：记下时先填发出时刻，押后的送达时 touch 改掉；老数据没有，过期时回落槽级 ts */
   deliveredAt?: number;
+  /** target 看到这条之后以 API 错误结束、在等它接着做完（第一次的时刻）；withheld = 错误前它说的、归这一条的话 */
+  apiErrorAt?: number;
+  withheld?: string[];
+  withheldUnclear?: boolean;
 }
 
 /** 这条请求还押在 target 队里（它没看到） */
@@ -85,13 +94,51 @@ const shaped = (target: string, base: PendingAgentCall, reqs: CallRequest[]): Pe
   };
 };
 const idsOf = (reqs: CallRequest[]) => reqs.map((r) => r.messageId).filter((x): x is string => !!x);
-const NO_API_ERROR = { apiErrorAt: undefined, withheld: undefined, apiErrorFor: undefined };
-/** 推扣下的话用：回复频道 / expecting 取这几条里属于撞错那一轮的最后一条（老数据没记归属就取最后一条） */
-const ownedBy = (c: PendingAgentCall, reqs: CallRequest[]): PendingAgentCall => {
-  const own = c.apiErrorFor ? reqs.filter((r) => r.messageId && c.apiErrorFor!.includes(r.messageId)) : reqs;
-  const last = own[own.length - 1];
-  return last ? { ...c, expecting: last.expecting, originalReplyChannel: last.originalReplyChannel } : c;
+const SLOT_API_ERROR = { apiErrorAt: undefined, withheld: undefined, apiErrorFor: undefined, withheldUnclear: undefined };
+const awaitedResume = (r: CallRequest) => !!(r.apiErrorAt || r.withheld?.length || r.withheldUnclear);
+const sameReq = (a: CallRequest, b: CallRequest) => (a.messageId ? a.messageId === b.messageId : !b.messageId);
+
+/** 这几条请求的视图：等续跑取最早、扣下的话按条拼起来——汇总只供判断和日志，推送一律按条（withheldParts / perRequest） */
+const summarize = (c: PendingAgentCall, reqs: CallRequest[]): PendingAgentCall => {
+  const errAt = reqs.map((r) => r.apiErrorAt).filter((x): x is number => !!x);
+  const withheld = reqs.flatMap((r) => r.withheld ?? []);
+  return {
+    ...c, ...SLOT_API_ERROR, requests: reqs, messageIds: idsOf(reqs),
+    apiErrorAt: errAt.length ? Math.min(...errAt) : undefined, withheld: withheld.length ? withheld : undefined,
+  };
 };
+
+/** 只含这一条请求的视图：回复频道 / expecting / 等续跑 / 扣下的话都是它自己的（推扣下的话、过期通知用） */
+function perRequest(c: PendingAgentCall, r: CallRequest): PendingAgentCall {
+  return {
+    ...c, ...SLOT_API_ERROR, requests: [r], messageIds: idsOf([r]), expecting: r.expecting, originalReplyChannel: r.originalReplyChannel,
+    apiErrorAt: r.apiErrorAt, withheld: r.withheld, withheldUnclear: r.withheldUnclear,
+  };
+}
+
+/** 视图里各条请求扣下的话，按条拆开：每份推到它自己那条的回复频道，不合并（T6c1 r2：合并后 q1 的话会跟着 q2 走） */
+export function withheldParts(view: PendingAgentCall): PendingAgentCall[] {
+  return (view.requests ?? []).filter((r) => r.withheld?.length).map((r) => perRequest(view, r));
+}
+
+/**
+ * 老格式：等续跑 / 扣下的话存在槽上。摊到归属的请求上——记了 apiErrorFor 按它，没记就算槽里全部请求的；扣下的话只有恰好
+ * 一条归属时才挂上，归属不清就不推（宁可少发，不错投），只在那几条的过期通知里说一句。返回摊好的槽；没有老字段 = undefined
+ */
+function foldLegacyApiError(c: PendingAgentCall): PendingAgentCall | undefined {
+  if (!c.apiErrorAt && !c.withheld?.length && !c.apiErrorFor) return undefined;
+  const reqs = requestsOf(c);
+  const mine = c.apiErrorFor ? reqs.filter((r) => r.messageId && c.apiErrorFor!.includes(r.messageId)) : reqs;
+  const owners = mine.length ? mine : reqs;
+  const clear = owners.length === 1;
+  const requests = reqs.map((r) => {
+    if (!owners.includes(r)) return r;
+    const at = c.apiErrorAt ? { apiErrorAt: r.apiErrorAt ?? c.apiErrorAt } : {};
+    if (!c.withheld?.length) return { ...r, ...at };
+    return clear ? { ...r, ...at, withheld: [...(r.withheld ?? []), ...c.withheld] } : { ...r, ...at, withheldUnclear: true };
+  });
+  return { ...c, ...SLOT_API_ERROR, requests, messageIds: idsOf(requests) };
+}
 const keyOf = (target: string, caller: string) => `${target}${SEP}${caller}`;
 const targetOf = (key: string, c: PendingAgentCall) => c.targetChannelId ?? key.split(SEP)[0];
 
@@ -104,6 +151,11 @@ export class AgentCallBook extends PersistedMap<PendingAgentCall> {
       this.deleteQuiet(k); // 老格式 key = target：迁成 (target, caller)
       this.setQuiet(keyOf(k, c.callerChannelId), { ...c, targetChannelId: k });
       migrated = true;
+    }
+    for (const [k, c] of [...this.entries()]) {
+      const folded = foldLegacyApiError(c);
+      if (folded) this.setQuiet(k, folded);
+      migrated ||= !!folded;
     }
     if (migrated) this.persist();
     if (this.size) console.log(`♻️ 恢复待回程的 send_to_agent ${this.size} 条（对方的答复仍会推回发起方）`);
@@ -129,12 +181,13 @@ export class AgentCallBook extends PersistedMap<PendingAgentCall> {
   consume(target: string, caller: string, answered?: PendingAgentCall): boolean {
     const cur = this.slot(target, caller);
     if (!cur) return false;
-    if (cur.withheld?.length) this.onWithheld?.(ownedBy(cur, answered?.requests ?? requestsOf(cur))); // 它直接答了：扣下的话推给 caller，不跟着槽悄悄清掉
-    if (!answered?.requests) return this.delete(keyOf(target, caller));
-    const done = new Set(answered.requests.map((r) => r.messageId));
-    const left = requestsOf(cur).filter((r) => !done.has(r.messageId));
+    const all = requestsOf(cur);
+    const done = answered?.requests ? all.filter((r) => answered.requests!.some((a) => sameReq(a, r))) : all;
+    // 它直接答了：答掉的那几条各自扣下的话推给 caller（各走各的回复频道），不跟着请求悄悄清掉
+    for (const r of done) if (r.withheld?.length) this.onWithheld?.(perRequest(cur, r));
+    const left = all.filter((r) => !done.includes(r));
     if (!left.length) return this.delete(keyOf(target, caller));
-    this.store(target, { ...cur, ...NO_API_ERROR }, left); // 扣下的话已随答复推走
+    this.store(target, cur, left);
     return true;
   }
 
@@ -157,7 +210,7 @@ export class AgentCallBook extends PersistedMap<PendingAgentCall> {
     if (!seen.length) return undefined;
     const expecting = seen.map((r) => r.expecting).filter(Boolean).join("；另一个问题：") || undefined;
     // 回复频道只取已送到的那几条自己的；没有就留空走默认，不借槽里还押着的请求的（codex 复核：会串到别的会话）
-    return { ...c, requests: seen, expecting, originalReplyChannel: seen[seen.length - 1].originalReplyChannel };
+    return { ...summarize(c, seen), expecting, originalReplyChannel: seen[seen.length - 1].originalReplyChannel };
   }
 
   /** target 明确答给 caller（回发 send_to_agent / reply 到 caller 的频道） */
@@ -212,21 +265,29 @@ export class AgentCallBook extends PersistedMap<PendingAgentCall> {
   markApiError(target: string, stillHeld: StillHeld, withheld: string | null, caller?: string | null, now = Date.now()): string | undefined {
     const w = this.waiting(target, stillHeld);
     const owner = caller !== undefined ? caller : w.length === 1 ? w[0]!.callerChannelId : null;
-    const to = withheld && owner && w.some((c) => c.callerChannelId === owner) ? owner : undefined;
+    const mine = withheld && owner ? w.find((c) => c.callerChannelId === owner) : undefined;
+    // 扣到那一槽已看到的最后一条；看到的几条回复频道不一样就对不上是答哪条的，不扣（stop-settle 告诉 owner），免得 q1 的话推到 q2 的频道
+    const into = mine && new Set(mine.requests!.map((r) => r.originalReplyChannel ?? "")).size === 1 ? mine.requests!.at(-1) : undefined;
     for (const c of w) {
       const raw = this.slot(target, c.callerChannelId);
-      const add = c.callerChannelId === to ? { withheld: [...(raw?.withheld ?? []), withheld!] } : {};
-      const seen = [...new Set([...(raw?.apiErrorFor ?? []), ...idsOf(c.requests ?? [])])];
-      if (raw) this.setQuiet(keyOf(target, c.callerChannelId), { ...raw, apiErrorAt: raw.apiErrorAt ?? now, apiErrorFor: seen.length ? seen : undefined, ...add });
+      if (!raw) continue;
+      const requests = requestsOf(raw).map((r) => {
+        if (!c.requests!.some((x) => sameReq(x, r))) return r;
+        const marked = { ...r, apiErrorAt: r.apiErrorAt ?? now };
+        return c === mine && into && sameReq(into, r) ? { ...marked, withheld: [...(r.withheld ?? []), withheld!] } : marked;
+      });
+      this.setQuiet(keyOf(target, c.callerChannelId), { ...raw, requests });
     }
     if (w.length) this.persist();
-    return to;
+    return into ? owner! : undefined;
   }
 
-  /** 扣下的话已经推给 caller 了：只清那一槽的 withheld */
-  clearWithheld(target: string, caller: string): void {
-    const raw = this.slot(target, caller);
-    if (raw?.withheld) this.set(keyOf(target, caller), { ...raw, withheld: undefined });
+  /** 扣下的话已经推给 caller 了：只清 pac 里那几条请求的 withheld（withheldParts 拆出来的一份 = 一条） */
+  clearWithheld(target: string, pac: PendingAgentCall): void {
+    const raw = this.slot(target, pac.callerChannelId);
+    const done = pac.requests ?? [];
+    if (!raw || !done.length) return;
+    this.set(keyOf(target, pac.callerChannelId), { ...raw, requests: requestsOf(raw).map((r) => (done.some((x) => sameReq(x, r)) ? { ...r, withheld: undefined } : r)) });
   }
 
   /** 有 caller 在等 target 接着做完（它上一轮以 API 错误结束）：这时 owner 在 Discord 打字不算接管 */
@@ -271,20 +332,11 @@ export class AgentCallBook extends PersistedMap<PendingAgentCall> {
       const gone = reqs.filter((r) => requestExpired(r, c, held, now, staleMs));
       if (!gone.length) continue;
       const left = reqs.filter((r) => !gone.includes(r));
-      // 等续跑标记和扣下的话只属于撞错那一轮看到的请求（老数据没记：算过期的这几条的），不转挂到别的请求上（T6c1 r1 P1-2）
-      const owns = (r: CallRequest) => (c.apiErrorFor ? !!r.messageId && c.apiErrorFor.includes(r.messageId) : gone.includes(r));
-      const leftOwners = c.apiErrorAt ? left.filter(owns) : [];
-      const rest = leftOwners.length ? { ...c, apiErrorFor: idsOf(leftOwners) } : { ...c, ...NO_API_ERROR };
       if (!left.length) this.deleteQuiet(k);
-      else this.setQuiet(k, shaped(target, rest, left));
-      const pac = { ...c, targetChannelId: target, requests: gone, messageIds: idsOf(gone) };
-      out.push(pac);
-      const notify = c.apiErrorAt ? gone.filter(owns) : [];
-      if (c.apiErrorAt && !notify.length && !leftOwners.length && c.withheld?.length) console.warn(`⚠️ ${c.targetName} 扣下的话找不到所属请求，随过期丢弃（不转给别的请求）`);
-      notify.forEach((r, i) => this.onExpired?.({
-        ...pac, requests: [r], expecting: r.expecting, originalReplyChannel: r.originalReplyChannel,
-        withheld: !leftOwners.length && i === notify.length - 1 ? c.withheld : undefined, // 扣下的话只附一次；那一轮还有请求在等就留给它
-      }, "之后 2 小时没有接着做完"));
+      else this.setQuiet(k, shaped(target, c, left));
+      out.push({ ...summarize(c, gone), targetChannelId: target });
+      // 等续跑 / 扣下的话都在各自的请求上：每条只带走自己那份，留下的请求不继承（T6c1 r2）
+      for (const r of gone.filter(awaitedResume)) this.onExpired?.({ ...perRequest(c, r), targetChannelId: target }, "之后 2 小时没有接着做完");
     }
     if (out.length) this.persist();
     return out;
@@ -297,7 +349,8 @@ export class AgentCallBook extends PersistedMap<PendingAgentCall> {
       if (targetOf(k, c) !== channelId && c.callerChannelId !== channelId) continue;
       this.deleteQuiet(k);
       n++;
-      if (c.apiErrorAt && targetOf(k, c) === channelId) this.onExpired?.({ ...c, targetChannelId: channelId }, "之后它被关掉了");
+      if (targetOf(k, c) !== channelId) continue;
+      for (const r of requestsOf(c).filter(awaitedResume)) this.onExpired?.({ ...perRequest(c, r), targetChannelId: channelId }, "之后它被关掉了");
     }
     if (n) this.persist();
     return n;
@@ -327,5 +380,6 @@ export function withheldNotice(pac: PendingAgentCall): string {
 export function expiredNotice(pac: PendingAgentCall, why = "之后 2 小时没有接着做完"): string {
   const at = new Date(pac.apiErrorAt ?? pac.ts).toTimeString().slice(0, 5);
   const head = `[ℹ️ ${pac.targetName} 没有给出答复（原因：它 ${at} 那一轮以 API 错误结束，${why}），扣下的话附后，请重发或换人]`;
-  return pac.withheld?.length ? `${head}\n\n${pac.withheld.join("\n\n")}` : head;
+  const unclear = pac.withheldUnclear ? "\n\n（另有一段回复因归属不明没有转发）" : "";
+  return pac.withheld?.length ? `${head}${unclear}\n\n${pac.withheld.join("\n\n")}` : `${head}${unclear}`;
 }

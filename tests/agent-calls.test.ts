@@ -6,7 +6,7 @@ import { afterAll, describe, expect, test } from "bun:test";
 import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { AgentCallBook, ambiguityNotice, type PendingAgentCall } from "../src/bridge/agent-calls.js";
+import { AgentCallBook, ambiguityNotice, expiredNotice, type PendingAgentCall } from "../src/bridge/agent-calls.js";
 
 const dir = mkdtempSync(join(tmpdir(), "agent-calls-"));
 afterAll(() => rmSync(dir, { recursive: true, force: true }));
@@ -165,7 +165,7 @@ describe("撞错后的槽（T24）", () => {
     book.add("c-codex", call(9), "m2");
     book.dropRequest("c-codex", "c-me", "m2");
     expect(pushed).toEqual([]);
-    expect(book.slot("c-codex", "c-me")).toMatchObject({ apiErrorAt: 5, withheld: ["（给我的）半句"], messageIds: ["m1"] });
+    expect(book.slot("c-codex", "c-me")!.requests).toMatchObject([{ messageId: "m1", apiErrorAt: 5, withheld: ["（给我的）半句"] }]);
   });
 
   test("target 被关掉：等续跑的槽经 onExpired 告诉 caller（附扣下的话），别的槽照旧静默删（wf delivery-hold-8）", () => {
@@ -249,19 +249,30 @@ describe("逐条过期（T6c1：同一槽 q1 已送、q2 押着，扫描不能�
     expect(ids(new AgentCallBook(p).slot("c-codex", "c-pi"))).toEqual(["q2"]); // 落盘
   });
 
-  test("等续跑的槽整槽过期：每条各发一条通知（各带自己的回复频道），扣下的话只附一次", () => {
+  test("撞错时看到的几条回复频道相同：扣到最后一条；整槽过期每条各发一条通知，扣下的话只随它自己那条", () => {
+    const book = new AgentCallBook(null);
+    const sent: [string | undefined, string][] = [];
+    book.onExpired = (p) => void sent.push([p.originalReplyChannel, p.withheld?.join("") ?? ""]);
+    book.add("c-codex", { ...call(0), originalReplyChannel: "A" }, "q1");
+    book.add("c-codex", { ...call(0), originalReplyChannel: "A" }, "q2");
+    expect(book.markApiError("c-codex", none, "半句", "c-me", 60_000)).toBe("c-me");
+    book.sweepStale(2 * H + 1, STALE, heldIds());
+    expect(sent).toEqual([["A", ""], ["A", "半句"]]);
+    expect(book.slot("c-codex", "c-me")).toBeUndefined();
+  });
+
+  test("撞错时看到的几条回复频道不一样：对不上是答哪条的，不扣（交给 stop-settle 告诉 owner）；过期各发一条空通知", () => {
     const book = new AgentCallBook(null);
     const sent: [string | undefined, string][] = [];
     book.onExpired = (p) => void sent.push([p.originalReplyChannel, p.withheld?.join("") ?? ""]);
     book.add("c-codex", { ...call(0), originalReplyChannel: "A" }, "q1");
     book.add("c-codex", { ...call(0), originalReplyChannel: "B" }, "q2");
-    book.markApiError("c-codex", none, "半句", "c-me", 60_000);
+    expect(book.markApiError("c-codex", none, "半句", "c-me", 60_000)).toBeUndefined();
     book.sweepStale(2 * H + 1, STALE, heldIds());
-    expect(sent).toEqual([["A", ""], ["B", "半句"]]);
-    expect(book.slot("c-codex", "c-me")).toBeUndefined();
+    expect(sent).toEqual([["A", ""], ["B", ""]]);
   });
 
-  test("部分过期：剩下的全押着 → 等续跑标记和扣下的话随过期那条推走、从槽上清掉；剩下有已送到的 → 留给它", () => {
+  test("部分过期：等续跑和扣下的话只跟自己那条走——q1 过期带走自己的，押着的 q2 没有；q2 之后被答不会再推", () => {
     const book = new AgentCallBook(null);
     const sent: string[] = [];
     book.onExpired = (p) => void sent.push(`${ids(p)}:${p.withheld?.join("") ?? ""}`);
@@ -271,19 +282,20 @@ describe("逐条过期（T6c1：同一槽 q1 已送、q2 押着，扫描不能�
     book.add("c-codex", call(60_000), "q2");
     book.sweepStale(2 * H + 1, STALE, heldIds("q2"));
     expect(sent).toEqual(["q1:半句"]);
-    expect(book.slot("c-codex", "c-me")).toMatchObject({ apiErrorAt: undefined, withheld: undefined, messageIds: ["q2"] });
+    expect(book.slot("c-codex", "c-me")!.requests).toEqual([expect.objectContaining({ messageId: "q2" })]);
+    expect(book.slot("c-codex", "c-me")!.requests![0]).not.toHaveProperty("withheld");
     book.consume("c-codex", "c-me", book.exact("c-codex", "c-me", none));
-    expect(sent).toEqual(["q1:半句"]); // q2 答掉时不会把那句话再推一遍
+    expect(sent).toEqual(["q1:半句"]);
 
     const b2 = new AgentCallBook(null);
     const sent2: string[] = [];
     b2.onExpired = (p) => void sent2.push(`${ids(p)}:${p.withheld?.join("") ?? ""}`);
     b2.add("c-codex", call(0), "q1");
     b2.add("c-codex", call(H), "q2");
-    b2.markApiError("c-codex", none, "半句", "c-me", H + 60_000);
+    b2.markApiError("c-codex", none, "半句", "c-me", H + 60_000); // 同一回复频道：扣到看到的最后一条 q2
     b2.sweepStale(2 * H + 1, STALE, heldIds());
     expect(sent2).toEqual(["q1:"]);
-    expect(b2.slot("c-codex", "c-me")).toMatchObject({ apiErrorAt: H + 60_000, withheld: ["半句"], messageIds: ["q2"] });
+    expect(b2.slot("c-codex", "c-me")!.requests).toMatchObject([{ messageId: "q2", apiErrorAt: H + 60_000, withheld: ["半句"] }]);
   });
 
   test("r1 P1-2：q1 撞错扣下的话、q2 后送到（不同回复频道）、q1 单独过期 → 那句话随 q1 的通知发到 q1 的频道，不留给 q2", () => {
@@ -296,7 +308,7 @@ describe("逐条过期（T6c1：同一槽 q1 已送、q2 押着，扫描不能�
     book.add("c-codex", { ...call(H), originalReplyChannel: "chan-q2" }, "q2");
     book.sweepStale(2 * H + 1, STALE, heldIds());
     expect(sent).toEqual(["expired:q1:chan-q1:q1 的半句"]);
-    expect(book.slot("c-codex", "c-me")).toMatchObject({ apiErrorAt: undefined, withheld: undefined, apiErrorFor: undefined, messageIds: ["q2"] });
+    expect(book.slot("c-codex", "c-me")!.requests!.map((r) => [r.messageId, r.apiErrorAt, r.withheld])).toEqual([["q2", undefined, undefined]]);
     book.consume("c-codex", "c-me", book.exact("c-codex", "c-me", none));
     expect(sent).toHaveLength(1); // q2 被答掉时没有别人的话可推
   });
@@ -310,5 +322,56 @@ describe("逐条过期（T6c1：同一槽 q1 已送、q2 押着，扫描不能�
     book.add("c-codex", { ...call(H), originalReplyChannel: "chan-q2" }, "q2");
     book.consume("c-codex", "c-me", book.exact("c-codex", "c-me", none));
     expect(sent).toEqual(["chan-q1:半句"]);
+  });
+
+  test("r2：q1、q2 先后两次撞错（不同回复频道）→ 各自的话只在各自那条上；q1 过期带走 q1 的，q2 被答只推 q2 的", () => {
+    const book = new AgentCallBook(null);
+    const sent: string[] = [];
+    book.onExpired = (p) => void sent.push(`expired:${ids(p)}:${p.originalReplyChannel}:${p.withheld?.join("|") ?? ""}`);
+    book.onWithheld = (p) => void sent.push(`withheld:${ids(p)}:${p.originalReplyChannel}:${p.withheld?.join("|") ?? ""}`);
+    book.add("c-codex", { ...call(0), originalReplyChannel: "chan-q1" }, "q1");
+    book.markApiError("c-codex", none, "q1 的半句", "c-me", 60_000);
+    book.add("c-codex", { ...call(H), originalReplyChannel: "chan-q2" }, "q2");
+    // 第二次撞错时它看到 q1、q2 两条、频道不一样：这一轮的话对不上是答哪条的，不扣（stop-settle 告诉 owner）
+    expect(book.markApiError("c-codex", none, "q2 的半句", "c-me", H + 60_000)).toBeUndefined();
+    book.sweepStale(2 * H + 1, STALE, heldIds());
+    expect(sent).toEqual(["expired:q1:chan-q1:q1 的半句"]);
+    book.consume("c-codex", "c-me", book.exact("c-codex", "c-me", none));
+    expect(sent).toEqual(["expired:q1:chan-q1:q1 的半句"]); // q2 那条上没有别人的话
+  });
+
+  test("r2：两次撞错各看到一条（q1 答掉前 q2 还押着）→ 各扣各的，q2 过期只带 q2 的", () => {
+    const book = new AgentCallBook(null);
+    const sent: string[] = [];
+    book.onExpired = (p) => void sent.push(`${ids(p)}:${p.originalReplyChannel}:${p.withheld?.join("|") ?? ""}`);
+    book.add("c-codex", { ...call(0), originalReplyChannel: "chan-q1" }, "q1");
+    book.add("c-codex", { ...call(0), originalReplyChannel: "chan-q2" }, "q2");
+    book.markApiError("c-codex", (r) => r.messageId === "q2", "q1 的半句", "c-me", 60_000);
+    book.markApiError("c-codex", (r) => r.messageId === "q1", "q2 的半句", "c-me", 2 * 60_000); // 假想：只看到 q2 的那一轮
+    book.sweepStale(3 * H, STALE, heldIds());
+    expect(sent).toEqual(["q1:chan-q1:q1 的半句", "q2:chan-q2:q2 的半句"]);
+  });
+
+  test("老格式槽级扣下的话：只有一条归属就挂到它上面；归属不清不推，过期通知里说一句", () => {
+    const p = join(dir, "legacy-withheld.json");
+    writeFileSync(p, JSON.stringify({
+      ["c-codex\u001fc-me"]: { ...call(0), targetChannelId: "c-codex", apiErrorAt: 60_000, withheld: ["我的半句"], requests: [{ messageId: "q1", ts: 0 }] },
+      ["c-codex\u001fc-pi"]: { ...call(0, "c-pi", "agent-pi"), targetChannelId: "c-codex", apiErrorAt: 60_000, withheld: ["谁的半句"],
+        requests: [{ messageId: "p1", ts: 0, originalReplyChannel: "X" }, { messageId: "p2", ts: 0, originalReplyChannel: "Y" }] },
+      ["c-codex\u001fc-r1"]: { ...call(0, "c-r1", "agent-r1"), targetChannelId: "c-codex", apiErrorAt: 60_000, withheld: ["r 的半句"], apiErrorFor: ["r1"],
+        requests: [{ messageId: "r1", ts: 0 }, { messageId: "r2", ts: 0 }] },
+    }));
+    const book = new AgentCallBook(p);
+    expect(book.slot("c-codex", "c-me")!.requests).toMatchObject([{ messageId: "q1", apiErrorAt: 60_000, withheld: ["我的半句"] }]);
+    expect(book.slot("c-codex", "c-r1")!.requests).toMatchObject([{ messageId: "r1", withheld: ["r 的半句"] }, { messageId: "r2" }]);
+    expect(book.slot("c-codex", "c-r1")!.requests![1]).not.toHaveProperty("withheld");
+    expect(book.slot("c-codex", "c-me")!.withheld).toBeUndefined();
+    const sent: string[] = [];
+    book.onExpired = (x) => void sent.push(expiredNotice(x));
+    book.sweepStale(3 * H, STALE, () => []);
+    const pi = sent.filter((t) => t.includes("归属不明"));
+    expect(pi).toHaveLength(2);
+    expect(sent.join("\n")).not.toContain("谁的半句");
+    expect(new AgentCallBook(p).size).toBe(0);
   });
 });
