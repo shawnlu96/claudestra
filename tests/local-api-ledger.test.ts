@@ -113,6 +113,8 @@ describe("GET /ledger/:project", () => {
       closeLedger(dbPath);
     }
     expect(body.projectEvents.map((e: { kind: string }) => e.kind)).toEqual(["freeze", "meta"]);
+    expect(body.deps).toEqual([]);
+    expect(body.tasks.map((t: { runnable: boolean; blockedBy: string[] }) => [t.runnable, t.blockedBy])).toEqual([[true, []], [false, []]]);
   });
 
   test("schema 报库里的 user_version：库比代码新时如实报，并在打开时提醒一次", async () => {
@@ -135,6 +137,7 @@ describe("GET /ledger/:project", () => {
     expect(body.task).toMatchObject({ id: "T1", stage: "merge", round: 2 });
     expect(body.events.length).toBe(11);
     expect(body.timeline.at(-1).stage).toBe("merge");
+    expect([body.deps, body.reviewBranches]).toEqual([{ in: [], out: [] }, { pass: "merge", changes: "fix", taken: "pass" }]);
     expect((await get("/ledger/p/tasks/T3")).status).toBe(404);
     expect((await get("/ledger/p/tasks/nope")).status).toBe(404);
   });

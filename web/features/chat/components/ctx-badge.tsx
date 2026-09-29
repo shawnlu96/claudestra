@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import type { AgentSession } from "../type";
 import { CTX_ADVICE, ctxView, type CtxLevel } from "../ctx-level";
 import { requestCompact } from "@/lib/api/fleet";
+import { useFleetAccess } from "./ctx-warn-banner";
 import { useT } from "@/lib/i18n";
 import { useKeepInViewport } from "@/lib/keep-in-viewport";
 
@@ -31,6 +32,7 @@ export function CtxBadge({ agent }: { agent: AgentSession }) {
   const t = useT();
   const [open, setOpen] = useState(false);
   const [res, setRes] = useState<CompactRes>(null);
+  const canCompact = useFleetAccess();
   const wrapRef = useRef<HTMLDivElement>(null);
   const popRef = useRef<HTMLDivElement>(null);
   useKeepInViewport(popRef, open);
@@ -79,7 +81,7 @@ export function CtxBadge({ agent }: { agent: AgentSession }) {
           {scaled ? (
             <ScaledAdvice />
           ) : (
-            <ClaudeAdvice level={level} res={res} compacting={agent.compacting === true} onCompact={onCompact} />
+            <ClaudeAdvice level={level} res={res} compacting={agent.compacting === true} onCompact={canCompact ? onCompact : null} />
           )}
         </div>
       )}
@@ -101,7 +103,8 @@ function ScaledAdvice() {
 type CompactRes = null | "sending" | { ok: boolean; text: string };
 
 /** Claude Code：四档建议表 + 一键「存记忆 + Compact」 */
-function ClaudeAdvice(p: { level: CtxLevel; res: CompactRes; compacting: boolean; onCompact: () => void }) {
+/** onCompact 为 null = 这台设备没有直接压缩的权限（GET /fleet/access 403）：只给建议表，不给按钮 */
+function ClaudeAdvice(p: { level: CtxLevel; res: CompactRes; compacting: boolean; onCompact: (() => void) | null }) {
   const t = useT();
   const level = p.level;
   return (
@@ -125,16 +128,18 @@ function ClaudeAdvice(p: { level: CtxLevel; res: CompactRes; compacting: boolean
           );
         })}
       </div>
-      <button
-        type="button"
-        className="btn btn-warning btn-xs mt-2.5 w-full"
-        disabled={p.res === "sending" || (!!p.res && p.res.ok) || p.compacting}
-        onClick={p.onCompact}
-      >
-        {p.compacting ? t("压缩中…") : p.res === "sending" ? t("请求中…") : p.res?.ok ? t("已请求") : `🧹 ${t("存记忆 + Compact")}`}
-      </button>
+      {p.onCompact && (
+        <button
+          type="button"
+          className="btn btn-warning btn-xs mt-2.5 w-full"
+          disabled={p.res === "sending" || (!!p.res && p.res.ok) || p.compacting}
+          onClick={p.onCompact}
+        >
+          {p.compacting ? t("压缩中…") : p.res === "sending" ? t("请求中…") : p.res?.ok ? t("已请求") : `🧹 ${t("存记忆 + Compact")}`}
+        </button>
+      )}
       {p.res && p.res !== "sending" && (
-        <div className={`mt-1.5 text-[11px] leading-snug ${p.res.ok ? "text-base-content/60" : "text-error"}`}>{p.res.text}</div>
+        <div className={`mt-1.5 text-[11px] leading-snug ${p.res.ok ? "text-base-content/60" : "text-error"}`}>{t(p.res.text)}</div>
       )}
     </>
   );

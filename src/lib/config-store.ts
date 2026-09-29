@@ -102,8 +102,17 @@ function fleetOf(f: unknown): Pick<AppConfig, "fleet"> {
   if (!f || typeof f !== "object") return {};
   const { compactKeep, callers } = f as Record<string, unknown>;
   const list = Array.isArray(callers) ? callers.filter((c): c is string => typeof c === "string" && c.trim() !== "") : null;
-  const fleet = { ...(typeof compactKeep === "string" && compactKeep.trim() ? { compactKeep } : {}), ...(list ? { callers: list } : {}) };
+  const fleet = { ...(okCompactKeep(compactKeep) ? { compactKeep } : {}), ...(list ? { callers: list } : {}) };
   return Object.keys(fleet).length ? { fleet } : {};
+}
+
+/**
+ * 保留清单会原样敲进 CC 输入框：只收 1500 字以内、不带控制字符的非空串，否则当没配、用默认清单。
+ * 超长时 tmux send-keys 整条失败；换行、ESC 等会被 TUI 当成按键（config.json 是手改的，这里是唯一的闸）
+ */
+const MAX_COMPACT_KEEP = 1500;
+function okCompactKeep(v: unknown): v is string {
+  return typeof v === "string" && !!v.trim() && v.length <= MAX_COMPACT_KEEP && !/[\x00-\x1f\x7f-\x9f]/.test(v);
 }
 
 function defaults(): AppConfig {

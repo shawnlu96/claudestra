@@ -1,5 +1,4 @@
 /**
-/**
  * ws 请求 `fleet_state` / `fleet_run` 的入口，两类连接，都先要求升级时是直连回环（ws 升级那一层已拒非回环，这里按连接地址再判一次兜底）：
  * - channel-server 的 `fleet` MCP 工具（带 via:"mcp"）：按这条连接上注册的频道认调用方（lib/fleet-caller.ts），
  *   不信请求里的任何身份字段；只有大总管、台账 pms、config fleet.callers 放行，并按调用方收窄范围。
@@ -8,9 +7,9 @@
  */
 import { readConfigSync } from "../../lib/config-store.js";
 import { FleetScopeError, identifyFleetCaller, MCP_TEXT_MAX, type CallerDecision } from "../../lib/fleet-caller.js";
-import { bareName, parseFleetAction, parseFleetSelect } from "../../lib/fleet-plan.js";
+import { parseFleetAction, parseFleetSelect } from "../../lib/fleet-plan.js";
 import { openLedger, pmsByProject } from "../../lib/ledger-store.js";
-import { readRegistryAgents } from "../../lib/registry.js";
+import { isMasterName, readRegistryAgents } from "../../lib/registry.js";
 import { connectionOf, fleetState, runFleet } from "./service.js";
 
 function readPms(): Map<string, string[]> {
@@ -35,8 +34,11 @@ async function whoIs(ws: unknown, mcp: boolean): Promise<CallerDecision> {
   });
 }
 
-/** 返回 bridgeRequest 认的形状：{ result } 或 { error }。ws = bridge.ts 里收到这条消息的连接（ws.data.loopback 升级时标好） */
-export async function handleFleetWs(msg: Record<string, unknown>, ws: unknown): Promise<{ result?: unknown; error?: string }> {
+/**
+ * 返回 bridgeRequest 认的形状：{ result } 或 { error }。ws = bridge.ts 里收到这条消息的连接（ws.data.loopback 升级时标好：
+ * 直连回环且不带 X-Forwarded-For 才是 true）；run 只给单测换成假的，看落款
+ */
+export async function handleFleetWs(msg: Record<string, unknown>, ws: unknown, run = runFleet): Promise<{ result?: unknown; error?: string }> {
   if ((ws as { data?: { loopback?: unknown } } | undefined)?.data?.loopback !== true) return { error: "批量管理只收本机直连回环的连接" };
   try {
     const who = await whoIs(ws, msg.via === "mcp");
@@ -57,12 +59,12 @@ export async function handleFleetWs(msg: Record<string, unknown>, ws: unknown): 
       if (keep !== undefined) return { error: "fleet 工具不接受 keep：压缩统一用 config 里的保留清单" };
       if ((a.action.text ?? "").length > MCP_TEXT_MAX) return { error: `text 不能超过 ${MCP_TEXT_MAX} 字` };
       // MCP 默认预演：只有明确的 false 才真执行
-      return { result: await runFleet({ action: a.action, select: s.select, dryRun: msg.dryRun !== false, actor: caller.name, via: "mcp", caller }) };
+      return { result: await run({ action: a.action, select: s.select, dryRun: msg.dryRun !== false, actor: caller.name, via: "mcp", caller }) };
     }
-    if (a.action.kind === "text" || keep !== undefined || s.select.includeMaster || s.select.agents?.some((n) => bareName(n) === "master")) {
+    if (a.action.kind === "text" || keep !== undefined || s.select.includeMaster || s.select.agents?.some(isMasterName)) {
       return { error: "命令行不能群发文字、自定义保留清单或带上大总管：这些只在网页上用 owner 设备操作" };
     }
-    return { result: await runFleet({ action: a.action, select: s.select, dryRun: msg.dryRun === true, actor: "local-cli", via: "ws" }) };
+    return { result: await run({ action: a.action, select: s.select, dryRun: msg.dryRun === true, actor: "local-cli", via: "ws" }) };
   } catch (e) {
     return { error: e instanceof FleetScopeError ? e.message : `批量管理出错：${(e as Error).message}` };
   }

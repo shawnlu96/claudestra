@@ -33,6 +33,7 @@ describe("HTTP 权限矩阵", () => {
       expect(canRunFleet(p)).toBe(allowed);
       const state = await call(p, "/fleet/state");
       const run = await call(p, "/fleet/run", post({ action: { kind: "lp-on" }, select: { all: true }, dryRun: true }));
+      expect((await call(p, "/fleet/access"))?.status).toBe(allowed ? 200 : 403);
       expect(state?.status).toBe(allowed ? 200 : 403);
       expect(run?.status).toBe(allowed ? 200 : 403);
     });
@@ -84,9 +85,20 @@ describe("ws：认不出调用方是不是 owner，只给最低权限（adv1 P1-
       [{ kind: "compact" }, { all: true, includeMaster: true }],
       [{ kind: "lp-on" }, { agents: ["master"] }],
       [{ kind: "lp-on" }, { agents: ["a", "agent-master"] }],
+      [{ kind: "lp-on" }, { agents: ["MASTER"] }],
+      [{ kind: "lp-on" }, { agents: ["agent-agent-master"] }],
+      [{ kind: "lp-on" }, { agents: ["ｍａｓｔｅｒ"] }],
     ] as const) {
       expect((await ws(action, select)).error).toContain("只在网页上用 owner 设备操作");
     }
+  });
+
+  test("放行的请求落款一律是 local-cli（via ws），消息里自带的 actor / via 不算（r2 P2-6）", async () => {
+    const seen: unknown[] = [];
+    const fake = async (req: unknown) => (seen.push(req), { ok: true }) as never;
+    const msg = { type: "fleet_run", action: { kind: "lp-on" }, select: { all: true }, actor: "owner", via: "web" };
+    expect(await handleFleetWs(msg, { data: { loopback: true } }, fake)).toEqual({ result: { ok: true } });
+    expect(seen).toEqual([{ action: { kind: "lp-on" }, select: { all: true }, dryRun: false, actor: "local-cli", via: "ws" }]);
   });
 });
 

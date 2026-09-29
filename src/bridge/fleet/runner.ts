@@ -2,18 +2,19 @@
  * 批量管理的发键执行器：一个 agent 一个动作，每一步发完都重抓画面复核，结果归成 已执行 / 已排队 / 已跳过 / 失败。
  * 发键只经注入的 PaneIO（生产实现在 service.ts，全走 tmux-helper），判态全在 lib/lp-state.ts；这里只排步骤。
  * 安全边界：画面上有任何菜单 / 对话框一个键都不按（含 Esc）；输入框里有别人的字就不动、绝不清；
- * 敲字前隔一小段再抓一次屏，两次都过才发；Esc 只在确认有回合在跑时才按（空闲时按两下会弹 Rewind）。用例见 tests/fleet-runner.test.ts。
+ * 发键前隔一小段再抓一次屏，两次都过才发，按键只看这两帧；Esc 只在两帧都确认有回合在跑时才按（空闲时按两下会弹 Rewind）。
+ * 用例见 tests/fleet-runner.test.ts。
  */
 import { ccOnly, compactCommand, type FleetAction, type FleetResult } from "../../lib/fleet-plan.js";
 import { decideLp, lastLpEcho, readLpPane, stripAnsi, type LpRead } from "../../lib/lp-state.js";
 
-type PaneKey = "C-u";
 export interface PaneIO {
   /** capture-pane -p -e */
   capture(win: string): Promise<string>;
-  /** 打字 + 回车（生产实现是 tmuxSendLine，带 copy-mode 守卫） */
+  /** 打字 + 回车（带 copy-mode 守卫）；tmux 发送失败要抛，不能当成发了 */
   sendLine(win: string, text: string): Promise<void>;
-  press(win: string, key: PaneKey): Promise<void>;
+  /** 按 n 次退格（失败同样要抛） */
+  erase(win: string, n: number): Promise<void>;
   /** 走 tmuxSendEscape（带双击护栏） */
   escape(win: string): Promise<void>;
   sleep(ms: number): Promise<void>;
@@ -73,7 +74,7 @@ async function setLp(io: PaneIO, win: string, want: "on" | "off"): Promise<Step>
   if (end.r.lowPriority === want) return done(want === "on" ? `已开${end.r.resetsAt ? `，到 ${end.r.resetsAt}` : ""}` : "已关");
   const echo = badEcho(end.raw);
   if (echo) return failed(`CC 回：${echo}`);
-  if (end.r.input === "queued") return { outcome: "queued", detail: "刚好开始忙，/low-priority 排队了，回合结束才生效" };
+  if (end.r.input === "queued") return { outcome: "queued", detail: "刚好开始忙，/low-priority 排队了，回合结束才生效；那之前有人手动切过 LP 的话它会切反，请回头看一眼" };
   return failed("发了 /low-priority，8 秒内状态栏没变，需要人工看");
 }
 
@@ -139,28 +140,47 @@ function saveCompact(io: PaneIO, win: string): Promise<Step> {
   return slash(io, win, "/save-compact", null, "已开始（先存记忆再压缩）");
 }
 
-/** 打断自动续跑后，Esc 可能把我们敲的 /low-priority 放回输入框：只清这一行，别的字可能是有人在打，绝不清 */
+const OWN_ECHO = "/low-priority";
+const OTHER_TEXT = "LP 已开；输入框里有别的内容，没清也没压缩";
+
+/**
+ * 打断自动续跑后，Esc 可能把我们敲的 /low-priority 放回输入框：两帧都正好是这几个字，才按同样多的退格（不用 C-u 清整行）；
+ * 多一个字少一个字、排队消息、任何对话框都不动。按键只看闸门的第二帧，不再多抓：从这一帧到退格落地的几十毫秒里
+ * 有人接着打字，是抓屏再按键固有的竞态（docs/architecture/fleet-ops.md），事后没清干净就报失败，绝不报已执行
+ */
 async function clearOwnEcho(io: PaneIO, win: string): Promise<Step | null> {
-  const { block } = await gateTwice(io, win, (r): Step | null => {
-    if (r.modal) return failed(`LP 已开，但${r.reason ?? "底部没有输入框"}，没压缩`);
-    if (r.input === "empty" || (r.input === "draft" && r.inputText === "/low-priority")) return null;
-    if (r.input === "queued") return skipped("LP 已开；输入框里已有排队的消息，没压缩");
-    return skipped(`LP 已开；输入框里有别的字（${r.inputText.slice(0, 40) || "看不清"}），没清也没压缩`);
+  let sawEmpty = false;
+  const { block, x } = await gateTwice(io, win, (r): Step | null => {
+    if (r.modal) return failed(`LP 已开，但${r.reason ?? "底部没有输入框"}，没按任何键、没压缩`);
+    if (r.input === "queued") return failed("LP 已开；输入框里已有排队的消息，没清也没压缩");
+    const own = r.input === "draft" && r.inputText === OWN_ECHO;
+    if (r.input !== "empty" && !own) return failed(`${OTHER_TEXT}（看到的是「${r.inputText.slice(0, 40) || "看不清"}」）`);
+    // 第一帧空、第二帧才冒出这几个字：不是两帧都看到，照样不按
+    if (own && sawEmpty) return failed(`${OTHER_TEXT}（两次抓屏之间输入框变了）`);
+    sawEmpty = r.input === "empty";
+    return null;
   });
   if (block) return block;
-  if ((await read(io, win)).r.input === "empty") return null;
-  await io.press(win, "C-u");
-  return (await waitFor(io, win, 2000, (x) => x.r.input === "empty")).ok ? null : failed("LP 已开，但清不掉输入框里的 /low-priority，没压缩");
+  if (x.r.input === "empty") return null;
+  await io.erase(win, OWN_ECHO.length);
+  const end = await waitFor(io, win, 2000, (y) => y.r.input === "empty");
+  if (end.ok) return null;
+  return failed(`LP 已开；按了 ${OWN_ECHO.length} 次退格清 /low-priority，输入框里还剩「${end.r.inputText.slice(0, 40) || "看不清"}」，没压缩（可能有人同时在打字，请看一眼）`);
 }
 
-/** 开 LP → 打断它自动开的续跑 → 清掉 Esc 放回来的 /low-priority → 压缩 */
+/**
+ * 开 LP → 打断它自动开的续跑 → 清掉 Esc 放回来的 /low-priority → 压缩。
+ * 这次确实把 LP 打开了：压缩不用做（对话太短 / 正在压缩）算已执行；被人的字、排队消息、对话框挡住算失败（活没干完，要人看），
+ * 和单独压缩同一口径；detail 都以「LP 已开」开头，看得出 LP 那步成了
+ */
 async function lpThenCompact(io: PaneIO, win: string, keep: string): Promise<Step> {
   const before = (await read(io, win)).r;
   if (before.lowPriority !== "on") {
     const lp = await setLp(io, win, "on");
     if (lp.outcome !== "done") return { ...lp, detail: `开 LP：${lp.detail}` };
     const turn = await waitFor(io, win, 3000, (x) => x.r.busy);
-    if (turn.ok) {
+    // 空闲窗口上一个键都不按：隔一小段再看一次，两帧都在忙才按 Esc
+    if (turn.ok && !(await gateTwice(io, win, (r) => (r.busy && !r.modal ? null : "idle"))).block) {
       await io.escape(win);
       const idle = await waitFor(io, win, 5000, (x) => !x.r.busy);
       if (!idle.ok) return failed("LP 已开，但 Esc 没打断自动续跑，没压缩");
@@ -170,8 +190,7 @@ async function lpThenCompact(io: PaneIO, win: string, keep: string): Promise<Ste
     if ((await read(io, win)).r.lowPriority !== "on") return failed("打断后 LP 不在了，没压缩");
   }
   const c = await compact(io, win, keep);
-  // 这次确实把 LP 打开了、只是压缩那步跳过（对话太短 / 正在压缩）：整体算执行过，不能报「已跳过」让人以为什么都没做
-  if (before.lowPriority !== "on" && c.outcome === "skipped") return done(`LP 已开，${c.detail}`);
+  if (before.lowPriority !== "on") return { ...c, outcome: c.outcome === "skipped" ? "done" : c.outcome, detail: `LP 已开，${c.detail}` };
   return { ...c, detail: `LP 开着，${c.detail}` };
 }
 
@@ -205,6 +224,6 @@ async function runAction(action: FleetAction, agent: string, w: string, ctx: Run
       }
     }
   } catch (e) {
-    return out(failed(`出错：${(e as Error).message}`));
+    return out(failed(`出错：${(e as Error).message.slice(0, 200)}`)); // tmux 失败的报错带整条命令（含保留清单），截短
   }
 }

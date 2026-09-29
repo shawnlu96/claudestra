@@ -2,7 +2,7 @@
  * 批量管理的服务层：收候选（registry + 大总管）、刷新 LP 状态、选人、并发跑、留痕。
  * HTTP（routes.ts）和 ws 请求（ws.ts：CLI 与 MCP 工具）都只调 runFleet / fleetState，权限在它们各自入口判；
  * 带 caller（MCP 工具，lib/fleet-caller.ts）时再按调用方收窄范围。
- * 生产 PaneIO 全走 tmux-helper：抓屏 capture-pane -p -e，打字 tmuxSendLine，Esc 走 tmuxSendEscape 的双击护栏。
+ * 生产 PaneIO 全走 tmux-helper：抓屏 capture-pane -p -e，打字 / 退格走 tmuxRawStrict（失败要抛），Esc 走 tmuxSendEscape 的双击护栏。
  */
 import type { ServerWebSocket } from "bun";
 import { statSync } from "node:fs";
@@ -15,7 +15,7 @@ import {
   type Excluded, type FleetAction, type FleetCandidate, type FleetResult, type FleetSelect,
 } from "../../lib/fleet-plan.js";
 import { agentRuntime, readRegistryAgents } from "../../lib/registry.js";
-import { tmuxRaw, tmuxRawStrict, tmuxSendEscape, tmuxSendLine } from "../../lib/tmux-helper.js";
+import { ensurePaneInteractive, tmuxRawStrict, tmuxSendEscape } from "../../lib/tmux-helper.js";
 import type { Envelope } from "../router.js";
 import { newMessageId, newThreadId } from "../router.js";
 import { auditFleet } from "./audit.js";
@@ -42,10 +42,18 @@ export function connectionOf(ws: unknown): { channels: string[]; controlChannelI
   return { channels, controlChannelId: deps?.controlChannelId };
 }
 
+/** 同 tmuxSendLine（copy-mode 守卫 + 字面敲字 + 回车），但 tmux 失败就抛：它走 tmuxRaw 吞掉失败，超长的保留清单会变成「发了没反应」 */
+async function sendLineStrict(w: string, text: string): Promise<void> {
+  await ensurePaneInteractive(w);
+  await tmuxRawStrict(["send-keys", "-t", w, "-l", "--", text]);
+  await Bun.sleep(300);
+  await tmuxRawStrict(["send-keys", "-t", w, "Enter"]);
+}
+
 const tmuxPaneIO: PaneIO = {
   capture: (w) => tmuxRawStrict(["capture-pane", "-t", w, "-p", "-e"]),
-  sendLine: (w, t) => tmuxSendLine(w, t, 300),
-  press: async (w, k) => void (await tmuxRaw(["send-keys", "-t", w, k])),
+  sendLine: sendLineStrict,
+  erase: async (w, n) => void (await tmuxRawStrict(["send-keys", "-t", w, ...Array<string>(n).fill("BSpace")])),
   escape: (w) => tmuxSendEscape(w),
   sleep: (ms) => Bun.sleep(ms),
 };
@@ -123,14 +131,18 @@ export function isExecutor(c: Pick<Cand, "name" | "cwd">): boolean {
   return false;
 }
 
-const swapsToCompact = (a: FleetAction, t: Cand) => a.kind === "save-compact" && isExecutor(t);
+/** 对这个目标实际要跑的动作：执行者的 save-compact 改成 compact，note 是结果前面要加的说明（没改是空串） */
+export function actionFor(action: FleetAction, t: Pick<Cand, "name" | "cwd">): { action: FleetAction; note: string } {
+  if (action.kind !== "save-compact" || !isExecutor(t)) return { action, note: "" };
+  return { action: { kind: "compact" }, note: "执行者改成 /compact（save-compact 会盖掉 PM 的 HANDOFF）：" };
+}
 
 async function runTarget(req: FleetRunRequest, t: Cand, ctx: RunCtx): Promise<FleetResult> {
   const na = notApplicable(req.action, t);
   if (na) return { agent: t.name, outcome: "skipped", detail: na }; // 离线 / 运行时不支持：没发键，算跳过（「全部」里常有停掉的旧条目）
-  const swap = swapsToCompact(req.action, t);
-  const r = await runOne(swap ? { kind: "compact" } : req.action, t.name, t.runtime === "claude-code" ? lpWindowOf(t.name) : null, ctx);
-  return swap ? { ...r, detail: `执行者改成 /compact（save-compact 会盖掉 PM 的 HANDOFF）：${r.detail}` } : r;
+  const { action, note } = actionFor(req.action, t);
+  const r = await runOne(action, t.name, t.runtime === "claude-code" ? lpWindowOf(t.name) : null, ctx);
+  return note ? { ...r, detail: note + r.detail } : r;
 }
 
 async function pool<T, R>(items: T[], n: number, fn: (t: T) => Promise<R>): Promise<R[]> {
@@ -167,7 +179,7 @@ function textSender(actor: string, via: string, count: number, intent: "request"
 function dryRunSummary(action: FleetAction, targets: Cand[]): string {
   const lines = targets.map((t) => {
     const na = notApplicable(action, t);
-    const what = na ? `会跳过（${na}）` : swapsToCompact(action, t) ? "改成 /compact（执行者不跑 save-compact）" : ACTION_LABEL[action.kind];
+    const what = na ? `会跳过（${na}）` : actionFor(action, t).note ? "改成 /compact（执行者不跑 save-compact）" : ACTION_LABEL[action.kind];
     return `- ${bareName(t.name)}：${what}`;
   });
   // 第一行保持原样：网页面板只显示第一行

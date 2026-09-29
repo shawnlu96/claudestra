@@ -736,8 +736,11 @@ async function launchInWindow(
   const baseline =
     spec.mode === "fork" && opts.cwd && adapter.forkBaseline ? await adapter.forkBaseline(opts.cwd) : undefined;
   await adapter.beforeLaunch?.(win);
-  await win.sendLine(adapter.buildLaunchCommand(spec));
+  const fresh = spec.mode === "new" || !(await loadRegistry()).agents[tmuxName]; // 全新 agent 不带同名旧 agent 的设置（旧文件等 registry 落盘后再删）
+  const unsent = await win.sendLine(adapter.buildLaunchCommand({ ...spec, ...(fresh ? {} : { settingsName: tmuxName }) })).then(() => null, (e: Error) => e.message);
+  if (unsent) return { result: { ready: false, reason: "exited", detail: `启动命令没发出去：${unsent}`, recoveredFullSession: false } };
   const result = await adapter.waitReady(win, { rounds: CLAUDE_READY_ROUNDS, pollMs: 500 });
+  if (result.ready) (await import("./lib/agent-settings.js")).dropLaunchSettings(tmuxName); // 超长设置落的启动快照：就绪 = CC 已读过
   return { result, baseline };
 }
 
@@ -941,7 +944,7 @@ async function cmdResume(
     ...adapter.registryFields({ ...spec, extras: { piEnv: prior?.piEnv } }),
     ...(await import("./manager/team.js")).keepOnResume(prior, actualSessionId), // 派发关系 / 显示名；external 只在同一会话时保留
   };
-  await saveRegistry(reg);
+  await saveRegistry(reg); if (!prior) (await import("./lib/agent-settings.js")).releaseNameForFreshAgent(tmuxName, reg.agents); // 新名字 = 全新 agent，旧设置此时才清
 
   // 截图发到新频道作为上下文预览
   if (ready) {
@@ -1252,7 +1255,7 @@ async function cmdRestart(name?: string, opts: { includeMaster?: boolean } = {})
     targets = [tmuxName];
   } else {
     const deadButInReg = Object.keys(reg.agents).filter(
-      (n) => reg.agents[n].status === "active" && !liveWindows.includes(n)
+      (n) => reg.agents[n].status === "active" && !liveWindows.includes(n) && !isMasterAgent(n)
     );
     targets = [...liveWindows, ...deadButInReg];
   }
@@ -2552,15 +2555,8 @@ switch (cmd) {
     break;
   }
 
-  case "rename": {
-    const [oldName, newName] = args;
-    if (!oldName || !newName) {
-      output({ ok: false, error: "usage: rename <old-name> <new-name>" });
-      break;
-    }
-    await cmdRename(oldName, newName);
-    break;
-  }
+  case "rename": await (args[0] && args[1] ? cmdRename(args[0], args[1]) : output({ ok: false, error: "usage: rename <old-name> <new-name>" })); break;
+  case "skill-toggle": await (await import("./manager/skills.js")).cmdSkillToggle(args); break; // 按 agent 启停技能（lib/agent-settings.ts）
 
   case "list": await cmdList(); break;
   case "repair": await (await import("./manager/repair.js")).cmdRepair(args); break; // 收拾做到一半的 create / kill / rename 与孤儿窗口、频道（默认只列计划）
@@ -2596,13 +2592,13 @@ switch (cmd) {
     break;
 
   case "restart": {
-    // --include-master：连大总管一起重启（Claude Code 重新登录后让所有会话认新凭证）。
-    // 只在「全体重启」时有意义——指名道姓重启某个 agent 时带它是自相矛盾的。
-    const rest = args.filter((a) => a !== "--include-master");
-    const includeMaster = args.length !== rest.length;
-    const [name] = rest;
-    if (name && includeMaster) {
-      output({ ok: false, error: "--include-master 只能用于全体重启（不要同时指定 agent 名）" });
+    // --include-master：连大总管一起重启（CC 重新登录后让所有会话认新凭证），只在「全体重启」时有意义。只认 `--` 之前的：
+    // bridge 按名字重启传 `restart -- <名>`，名字长得像开关也只是名字。大总管由 launcher 守护，不许按名字重启（历史条目 agent-master 会被拉成分身）
+    const dd = args.indexOf("--");
+    const includeMaster = (dd < 0 ? args : args.slice(0, dd)).includes("--include-master");
+    const [name] = dd < 0 ? args.filter((a) => a !== "--include-master") : args.slice(dd + 1);
+    if (name && (includeMaster || isMasterAgent(name))) {
+      output({ ok: false, error: includeMaster ? "--include-master 只能用于全体重启（不要同时指定 agent 名）" : "大总管由 launcher 守护：要重启它用 restart --include-master" });
       break;
     }
     await cmdRestart(name || undefined, { includeMaster });

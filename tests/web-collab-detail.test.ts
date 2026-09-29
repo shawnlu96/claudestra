@@ -143,7 +143,7 @@ describe("完成检查单", () => {
     const lits = [...new Set([...probes.matchAll(/"([^"\n]*[\u4e00-\u9fff][^"\n]*)"/g)].map((m) => m[1]))];
     // 「没采集」是参数值；INCOMPLETE_TEXT 只进 CLI 报错（网页用自己的短句，见 collab-detail-model 的 INCOMPLETE_TEXT）
     const tpls = [...lits.filter((l) => l !== "没采集" && !Object.values(INCOMPLETE_TEXT).includes(l)), ...verifyTpls];
-    expect(verifyTpls.length).toBe(3);
+    expect(verifyTpls.length).toBe(11);
     expect(tpls.length).toBeGreaterThan(30);
     const holes = (t: string) => [...t.matchAll(/\{(\w+)\}/g)].map((m) => m[1]).sort();
     for (const t of tpls) {
