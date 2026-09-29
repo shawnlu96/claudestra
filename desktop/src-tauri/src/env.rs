@@ -65,10 +65,12 @@ fn drain<R: Read + Send + 'static>(r: Option<R>, slot: usize, tx: mpsc::Sender<(
     });
 }
 
-/// SIGKILL the child's whole session/group: descendants holding our pipes go too. ESRCH (all gone)
-/// is the outcome we want anyway.
+/// SIGKILL the child's whole session/group. Only called while the leader is still unreaped: its
+/// pid (= the group id) can't be reused until we wait() on it, so the signal can't hit a stranger.
 fn kill_group(pgid: u32) {
-    // SAFETY: plain syscall with a pid we spawned; no memory is touched.
+    #[cfg(test)]
+    tests::KILLPG_CALLS.with(|c| c.set(c.get() + 1));
+    // SAFETY: plain syscall with a pid we spawned and have not reaped; no memory is touched.
     unsafe { libc::killpg(pgid as libc::pid_t, libc::SIGKILL) };
 }
 
@@ -91,10 +93,11 @@ impl From<RunError> for String {
 /// Run a command with a deadline; returns (exit ok, stdout, stderr). The deadline covers both
 /// the child's exit and draining its pipes: a descendant it left behind (an rc file's background
 /// job) keeps the pipes open after the child exits, and waiting on that would hang the caller
-/// while it holds a lock or the restart gate. At the deadline the child's whole group is killed
-/// and the pipes are abandoned. tests: env::tests::descendant_holding_the_pipe_*.
+/// while it holds a lock or the restart gate. Still running at the deadline → kill its group.
+/// Already reaped → never signal (its group id may belong to someone else by now): abandon the
+/// pipes, whose reader threads end whenever the stray descendant closes them. tests: env::tests.
 pub fn run_with_timeout(cmd: &mut Command, timeout: Duration) -> Result<(bool, String, String), RunError> {
-    // Own session = own process group (so kill_group reaches descendants) and no controlling
+    // Own session = own process group (so kill_group reaches its descendants) and no controlling
     // terminal, which is also what a Finder-launched app gives the login shell.
     // SAFETY: setsid is async-signal-safe and touches no memory of the parent.
     unsafe { cmd.pre_exec(|| if libc::setsid() < 0 { Err(std::io::Error::last_os_error()) } else { Ok(()) }) };
@@ -114,7 +117,7 @@ pub fn run_with_timeout(cmd: &mut Command, timeout: Duration) -> Result<(bool, S
         match child.try_wait().map_err(|e| RunError::Started(e.to_string()))? {
             Some(s) => break s,
             None if Instant::now() >= deadline => {
-                kill_group(pgid);
+                kill_group(pgid); // try_wait just said it is running, so not reaped yet
                 // reaps the killed child; fails only if it is already reaped
                 let _ = child.wait();
                 return Err(timed_out());
@@ -126,10 +129,8 @@ pub fn run_with_timeout(cmd: &mut Command, timeout: Duration) -> Result<(bool, S
     for _ in 0..2 {
         match rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
             Ok((slot, t)) => text[slot] = t,
-            Err(_) => {
-                kill_group(pgid);
-                return Err(timed_out());
-            }
+            // leader already reaped above: no signal, just stop listening
+            Err(_) => return Err(timed_out()),
         }
     }
     let [out, err] = text;
@@ -139,32 +140,51 @@ pub fn run_with_timeout(cmd: &mut Command, timeout: Duration) -> Result<(bool, S
 /// After a failed read, wait this long before starting another login shell.
 const LOGIN_PATH_RETRY: Duration = Duration::from_secs(60);
 
-/// Keeps a successful read for good; a failure (rc error, 5 s timeout) is retried, but not on
-/// every call: before setup `locate()` runs on each 8 s poll, and an interactive shell each time
-/// would re-run the user's whole rc stack.
+/// Only a successful read is kept. Reads run on a background thread; callers never wait for one.
 struct LoginPathCache {
     value: Option<String>,
     failed_at: Option<Instant>,
+    reading: bool,
 }
 
 impl LoginPathCache {
-    fn get(&mut self, now: Instant, read: impl FnOnce() -> Option<String>) -> Option<String> {
-        if self.value.is_none() && self.failed_at.map_or(true, |t| now.duration_since(t) >= LOGIN_PATH_RETRY) {
-            self.value = read();
-            self.failed_at = self.value.is_none().then_some(now);
+    /// The PATH if known, and whether the caller should start a read now: none in flight, and not
+    /// within LOGIN_PATH_RETRY of a failure (before setup this runs on every 8 s poll, and an
+    /// interactive shell each time would re-run the user's whole rc stack).
+    fn poll(&mut self, now: Instant) -> (Option<String>, bool) {
+        let start = self.value.is_none()
+            && !self.reading
+            && self.failed_at.map_or(true, |t| now.duration_since(t) >= LOGIN_PATH_RETRY);
+        self.reading |= start;
+        (self.value.clone(), start)
+    }
+
+    fn finish(&mut self, now: Instant, got: Option<String>) {
+        self.reading = false;
+        self.failed_at = got.is_none().then_some(now);
+        if got.is_some() {
+            self.value = got;
         }
-        self.value.clone()
     }
 }
 
-/// PATH from an interactive login shell (bun's installer writes to .zshrc, not .zprofile).
-/// Markers keep rc-file chatter out of the value. Held under the lock so two polls never start
-/// two shells at once.
+static LOGIN_PATH: Mutex<LoginPathCache> = Mutex::new(LoginPathCache { value: None, failed_at: None, reading: false });
+
+/// PATH from an interactive login shell (bun's installer writes to .zshrc, not .zprofile), or None
+/// while it isn't known yet: the caller goes on with the default dirs and a later poll picks the
+/// value up. The read itself is bounded by run_with_timeout's 5 s.
 fn login_shell_path() -> Option<String> {
-    static CACHE: Mutex<LoginPathCache> = Mutex::new(LoginPathCache { value: None, failed_at: None });
-    // a panic inside read() leaves the cache itself consistent (at worst still empty)
-    let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
-    cache.get(Instant::now(), read_login_shell_path)
+    // the cache's fields are updated together, so a poisoned lock still holds a usable value
+    let lock = || LOGIN_PATH.lock().unwrap_or_else(|e| e.into_inner());
+    let (value, start) = lock().poll(Instant::now());
+    if start {
+        std::thread::spawn(move || {
+            // a panic must still clear `reading`, or no read would ever start again
+            let got = std::panic::catch_unwind(read_login_shell_path).ok().flatten();
+            lock().finish(Instant::now(), got);
+        });
+    }
+    value
 }
 
 fn read_login_shell_path() -> Option<String> {
@@ -231,14 +251,25 @@ mod tests {
         assert_eq!(sh_quote("/a b/it's"), "'/a b/it'\\''s'");
     }
 
+    thread_local! {
+        pub(super) static KILLPG_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+
+    fn fresh() -> LoginPathCache {
+        LoginPathCache { value: None, failed_at: None, reading: false }
+    }
+
     #[test]
     fn login_path_failure_is_retried_later_success_is_kept() {
         let t0 = Instant::now();
-        let mut c = LoginPathCache { value: None, failed_at: None };
-        assert_eq!(c.get(t0, || None), None);
-        assert_eq!(c.get(t0 + Duration::from_secs(10), || panic!("retried too soon")), None);
-        assert_eq!(c.get(t0 + LOGIN_PATH_RETRY, || Some("/a:/b".into())).as_deref(), Some("/a:/b"));
-        assert_eq!(c.get(t0 + LOGIN_PATH_RETRY * 5, || panic!("success is cached")).as_deref(), Some("/a:/b"));
+        let mut c = fresh();
+        assert_eq!(c.poll(t0), (None, true), "first poll starts a read");
+        assert_eq!(c.poll(t0), (None, false), "one read at a time");
+        c.finish(t0, None);
+        assert_eq!(c.poll(t0 + Duration::from_secs(10)), (None, false), "backs off after a failure");
+        assert_eq!(c.poll(t0 + LOGIN_PATH_RETRY), (None, true));
+        c.finish(t0 + LOGIN_PATH_RETRY, Some("/a:/b".into()));
+        assert_eq!(c.poll(t0 + LOGIN_PATH_RETRY * 5), (Some("/a:/b".into()), false), "success is kept");
     }
 
     #[test]
@@ -253,11 +284,13 @@ mod tests {
     #[test]
     fn failed_login_shell_exit_is_not_cached() {
         let t0 = Instant::now();
-        let mut c = LoginPathCache { value: None, failed_at: None };
+        let mut c = fresh();
         let marked = || "__CSPATH__/half:/built__CSPATH__".to_string();
-        assert_eq!(c.get(t0, || login_path_from(Ok((false, marked(), String::new())))), None);
-        let good = c.get(t0 + LOGIN_PATH_RETRY, || login_path_from(Ok((true, marked(), String::new()))));
-        assert_eq!(good.as_deref(), Some("/half:/built"), "retried after the back-off");
+        c.poll(t0);
+        c.finish(t0, login_path_from(Ok((false, marked(), String::new()))));
+        assert_eq!(c.poll(t0 + LOGIN_PATH_RETRY), (None, true), "not cached, retried after the back-off");
+        c.finish(t0 + LOGIN_PATH_RETRY, login_path_from(Ok((true, marked(), String::new()))));
+        assert_eq!(c.poll(t0 + LOGIN_PATH_RETRY).0.as_deref(), Some("/half:/built"));
     }
 
     /// Through a real child process: a throwaway script stands in for the login shell (setting
@@ -282,33 +315,53 @@ mod tests {
         unsafe { libc::kill(pid, 0) == 0 }
     }
 
-    /// The child exits at once, its background job keeps stdout open. The deadline must still
-    /// hold, and the job must be killed rather than left holding the pipe.
-    #[test]
-    fn descendant_holding_the_pipe_does_not_outlive_the_deadline() {
-        let pidfile = std::env::temp_dir().join(format!("cs-t18b-bg-{}", std::process::id()));
-        let script = format!("sleep 30 & echo $! > '{}'; exit 0", pidfile.display());
+    fn bg_job(script_tail: &str, name: &str) -> (Result<(bool, String, String), RunError>, Duration, i32) {
+        let pidfile = std::env::temp_dir().join(format!("cs-t18b-{name}-{}", std::process::id()));
+        let script = format!("{script_tail} & echo $! > '{}'; exit 0", pidfile.display());
         let t0 = Instant::now();
         let r = run_with_timeout(Command::new("/bin/sh").args(["-c", &script]), Duration::from_millis(300));
         let took = t0.elapsed();
-        assert!(matches!(r, Err(RunError::Started(_))), "{r:?}");
-        assert!(took < Duration::from_secs(2), "took {took:?}");
-        let pid: i32 = std::fs::read_to_string(&pidfile).unwrap().trim().parse().unwrap();
+        let pid = std::fs::read_to_string(&pidfile).unwrap().trim().parse().unwrap();
         // best-effort cleanup of the pid file in the per-user temp folder
         let _ = std::fs::remove_file(&pidfile);
-        let gone = (0..20).any(|_| {
-            std::thread::sleep(Duration::from_millis(50));
-            !alive(pid)
-        });
-        assert!(gone, "background job {pid} still holds the pipe");
+        (r, took, pid)
     }
 
+    /// The leader exits at once and is reaped; its background job keeps stdout open. The deadline
+    /// must hold, and no signal may go to the dead leader's group id (it may be reused).
     #[test]
-    fn descendant_holding_the_pipe_is_killed_on_a_hung_child_too() {
+    fn descendant_holding_the_pipe_after_the_leader_is_reaped_is_left_alone() {
+        let before = KILLPG_CALLS.with(|c| c.get());
+        let (r, took, pid) = bg_job("sleep 30", "stay");
+        assert!(matches!(r, Err(RunError::Started(_))), "{r:?}");
+        assert!(took < Duration::from_secs(2), "took {took:?}");
+        assert_eq!(KILLPG_CALLS.with(|c| c.get()), before, "no killpg after the leader was reaped");
+        assert!(alive(pid), "the stray job is abandoned, not signalled");
+        // SAFETY: our own test child, confirmed alive just above
+        unsafe { libc::kill(pid, libc::SIGKILL) };
+    }
+
+    /// Same, with a descendant that left the group: the case where the old group id is free.
+    #[test]
+    fn descendant_that_left_the_group_is_left_alone() {
+        let before = KILLPG_CALLS.with(|c| c.get());
+        let (r, took, pid) = bg_job("perl -e 'use POSIX; setsid(); sleep 30'", "setsid");
+        assert!(matches!(r, Err(RunError::Started(_))), "{r:?}");
+        assert!(took < Duration::from_secs(2), "took {took:?}");
+        assert_eq!(KILLPG_CALLS.with(|c| c.get()), before);
+        // SAFETY: our own test child (kill on a gone pid is a harmless ESRCH)
+        unsafe { libc::kill(pid, libc::SIGKILL) };
+    }
+
+    /// Leader still running at the deadline: its group is killed (safe, it isn't reaped yet).
+    #[test]
+    fn hung_leader_and_its_group_are_killed() {
+        let before = KILLPG_CALLS.with(|c| c.get());
         let t0 = Instant::now();
         let r = run_with_timeout(Command::new("/bin/sh").args(["-c", "sleep 30 & sleep 30"]), Duration::from_millis(300));
         assert!(matches!(r, Err(RunError::Started(_))), "{r:?}");
         assert!(t0.elapsed() < Duration::from_secs(2));
+        assert_eq!(KILLPG_CALLS.with(|c| c.get()), before + 1);
     }
 
     #[test]
