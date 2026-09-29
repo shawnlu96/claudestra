@@ -156,33 +156,6 @@ describe("preempt stop：停字", () => {
     expect(await cc.gate.preempt("ch", "agent-a", { stop: true })).toEqual({ fired: false, why: "not_busy" });
   });
 
-  test("押过的停在等间隔 / 画面的途中不需要了（wanted 为假）：一个键都不发；还要的把 wanted 交给发键处（T13e r2 P1）", async () => {
-    let want = true;
-    const keys: string[] = [];
-    const gate = createInterruptGate({
-      ...stubDeps(), probe: async () => ((want = false), { main: "busy", bg: false }), interrupt: async () => (keys.push("C-c"), ["C-c"]),
-    }, 4_000);
-    expect(await gate.preempt("ch", "agent-a", { stop: true, wanted: () => want })).toEqual({ fired: false, why: "withdrawn" });
-    expect(keys).toEqual([]);
-    let passed: (() => boolean) | undefined;
-    const w = () => true;
-    const g2 = createInterruptGate({ ...stubDeps(), interrupt: async (_w, _r, _c, _k, wanted) => ((passed = wanted), ["C-c"]) }, 4_000);
-    await g2.preempt("ch", "agent-a", { stop: true, wanted: w });
-    expect(passed).toBe(w);
-  });
-
-  test("发键处撤回（KeyWithdrawnError，一个键都没发）：回 withdrawn，冷却还原，下一条普通消息照常抢占（T13e r3 P2-1）", async () => {
-    let withdraw = true;
-    const keys: string[] = [];
-    const withdrawn = Object.assign(new Error("withdrawn"), { name: "KeyWithdrawnError" });
-    const gate = createInterruptGate({
-      ...stubDeps(), interrupt: async () => { if (withdraw) throw withdrawn; return keys.push("C-c"), ["C-c"]; },
-    }, 4_000);
-    expect(await gate.preempt("ch", "agent-a", { stop: true, wanted: () => true })).toEqual({ fired: false, why: "withdrawn" });
-    withdraw = false;
-    expect(await gate.preempt("ch", "agent-a")).not.toEqual({ fired: false, why: "cooldown" });
-    expect(keys).toEqual(["C-c"]);
-  });
 
   test("刚抢占完 1s 就说「停」：不被 4s 冷却吞掉，也不丢——等够 1.5s 最小间隔再发", async () => {
     const slept: number[] = [];

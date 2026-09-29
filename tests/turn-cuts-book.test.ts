@@ -113,7 +113,6 @@ describe("「停」与 Autopilot（P2-8）", () => {
     for (const cause of ["stopword", "manual", "terminal", "codex_interrupt"] as const) {
       const { b, tick } = book();
       b.noteHuman("ch", cause === "stopword");
-      tick(1); // 同一毫秒算 owner 在后（T13e r3）：停要晚于上一句
       b.record({ channelId: "ch", agent: "a", cause, tools: { inflight: [] } });
       expect(b.interruptHold("ch")).toBe("stopped");
       tick(1_000);
@@ -141,14 +140,6 @@ describe("终端里自己按的打断（P1-1 第二条）", () => {
     b.onEvent(interrupted(at()));
     await flush();
     expect(b.get("ch")?.cause).toBe("terminal");
-    expect(b.interruptHold("ch")).toBe("stopped");
-  });
-  test("bridge 记了要发键、最后撤回没发（T13e r2）：还原，随后终端里真人的打断照样记成 owner 的停", async () => {
-    const { b, at, tick } = book();
-    b.noteKeySent("ch", "preempt")();
-    tick(400);
-    b.onEvent(interrupted(at()));
-    await flush();
     expect(b.interruptHold("ch")).toBe("stopped");
   });
   test("bridge 刚发过键 → 是自己的回声，不记", async () => {
@@ -443,55 +434,8 @@ describe("Workflow 复核 wf2（@2968ec7f）", () => {
   });
 });
 
-describe("停之后马上开口（wf2 stop-semantics-4）", () => {
-  const interrupted = (at: number) => ({ type: "turn_interrupted", ts: iso(at + 2_000), data: { ts: iso(at) }, chatId: "ch", agent: "a" });
-  const typed = (at: number, stop = false) => ({ type: "terminal_input", ts: iso(at + 2_000), data: { stop, ts: iso(at) }, chatId: "ch", agent: "a" });
-  test("终端 Esc 的 cut 晚于随后的终端输入才记下：记停时直接带上解除，不卡到 owner 再说一句", async () => {
-    const t0 = T0;
-    // 查程序发键（tmux list-panes）负载高时要几百毫秒：这期间 owner 在终端里敲的新指令先处理完了
-    const slowKeys = async (): Promise<ProgramInput[]> => (await new Promise((r) => setTimeout(r, 20)), []);
-    const late = new TurnCuts(null, () => t0 + 3_000, slowKeys);
-    late.onEvent(interrupted(t0));
-    late.noteHuman("ch", false, t0 + 1_500);
-    await new Promise((r) => setTimeout(r, 40));
-    expect(late.get("ch")?.cause).toBe("terminal");
-    expect(late.interruptHold("ch")).toBeNull();
-    // 对照：没有再开口 → 停着
-    const { b } = book();
-    b.onEvent(interrupted(t0));
-    await flush();
-    expect(b.interruptHold("ch")).toBe("stopped");
-  });
-  test("停字收尾一拍里 owner 又发了别的：按停字到达的时刻比，解除", () => {
-    const { b, tick } = book();
-    const heard = b.noteHuman("ch", true);
-    tick(500);
-    b.noteHuman("ch", false); // 收尾一拍（1.2 秒）里 owner 又说了一句
-    tick(700);
-    b.record({ channelId: "ch", agent: "a", cause: "stopword", tools: { inflight: [] }, stopAt: heard });
-    expect(b.interruptHold("ch")).toBeNull();
-    expect(b.stoppedAt("ch")).toBe(heard);
-  });
-  test("bridge 重启后：owner 解除叫停的时刻从盘上认得，押着的旧「停」晚投不重新挂起（T13e r1 P1-1）", () => {
-    const path = join(mkdtempSync(join(tmpdir(), "cuts-restart-")), "cuts.json");
-    const { b, tick, at } = book({ path });
-    const heldAt = b.noteHuman("ch", true);
-    b.record({ channelId: "ch", agent: "a", cause: "stopword", tools: { inflight: [] }, stopAt: heldAt });
-    tick(1_000);
-    b.noteHuman("ch", false); // 答卡片
-    const again = new TurnCuts(path, () => at() + 5_000, async () => []);
-    expect(again.lastSpokeAt("ch")).toBe(at());
-    again.record({ channelId: "ch", agent: "a", cause: "stopword", tools: { inflight: [] }, stopAt: heldAt });
-    expect(again.interruptHold("ch")).toBeNull();
-  });
-  test("owner 和「停」同一毫秒开口：算 owner 在后，记停时直接带上解除（和 noteHuman 解除同一口径，T13e r3 P2-2）", () => {
-    const { b } = book();
-    const heard = b.noteHuman("ch", true);
-    b.noteHuman("ch", false, heard);
-    b.record({ channelId: "ch", agent: "a", cause: "stopword", tools: { inflight: [] }, stopAt: heard });
-    expect(b.interruptHold("ch")).toBeNull();
-  });
-  test("带 dropIfStopped 的（Autopilot 到点收尾）：ws.send 前那一查，叫停中不投、解除了照投（T13e r2 P2）", () => {
+describe("Autopilot 到点收尾（wf2 stop-semantics-7）", () => {
+  test("带 dropIfStopped 的：ws.send 前那一查，叫停中不投、解除了照投（T13e r2 P2）", () => {
     const { b, tick } = book();
     const wrap = { ...env("w1", "Autopilot 已关闭"), from: { kind: "bridge", label: "mission" } } as Envelope;
     wrap.meta.dropIfStopped = true;
@@ -501,17 +445,6 @@ describe("停之后马上开口（wf2 stop-semantics-4）", () => {
     tick(1_000);
     b.noteHuman("ch", false);
     expect(b.noticeWanted(wrap)).toBe(true);
-  });
-  test("「停」之前的终端输入晚读到，不能解开之后才叫的停", async () => {
-    const { b, at, tick } = book();
-    const typedAt = at();
-    tick(1_000);
-    b.noteHuman("ch", true);
-    b.record({ channelId: "ch", agent: "a", cause: "stopword", tools: { inflight: [] } });
-    tick(1_500);
-    b.onEvent(typed(typedAt));
-    await flush();
-    expect(b.interruptHold("ch")).toBe("stopped");
   });
 });
 

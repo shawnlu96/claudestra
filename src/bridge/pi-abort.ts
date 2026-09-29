@@ -12,7 +12,6 @@ import { newMessageId, newThreadId, type Endpoint, type Envelope } from "./route
 import { turnCuts } from "./turn-cuts.js";
 import type { TurnTrigger } from "../lib/turn-cuts.js";
 import { dropVoidedPendings, type VoidableBooks } from "../lib/pending-reply-scope.js";
-import { KeyWithdrawnError } from "../lib/esc-guard.js";
 
 type Socket = { send(data: string): void };
 interface EchoDeps {
@@ -118,8 +117,7 @@ export function holdStopWait(env: Envelope, channelId: string, agent: string, wa
 }
 
 /** 请 Pi 扩展中止当前回合：真中止了 / 没回执 = ["abort"]，本来就空闲 = []；没连着、扩展太旧、扩展回执说中止不了 = 抛错（调用方如实回报，不说「已打断」） */
-export async function extensionAbort(channelId: string, wanted?: () => boolean): Promise<readonly string[]> {
-  if (wanted && !wanted()) throw new KeyWithdrawnError("中止请求没发：发出那一刻已经不需要了"); // 到下面 ws.send 之间没有 await
+export async function extensionAbort(channelId: string): Promise<readonly string[]> {
   const ws = socketOf(channelId);
   if (!ws) throw new Error("Pi 会话没连着 bridge，中止请求发不过去");
   if (!abortCapable.has(channelId)) throw new Error("这个 Pi 会话的 Claudestra 扩展太旧、不会中止（重启这个 agent 换上新扩展）");
