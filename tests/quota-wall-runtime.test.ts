@@ -8,7 +8,7 @@ import { ageHeld, HeldQueue, HELD_GIVE_UP_MS } from "../src/bridge/held-queue.js
 import { createQuotaWall, type QuotaWallDeps, type WallWindow } from "../src/bridge/quota-wall.js";
 import type { Envelope } from "../src/bridge/router.js";
 import { senderTrigger } from "../src/bridge/stop-settle.js";
-import { emptyWallState, type UsageSignal, type WallState } from "../src/lib/quota-wall.js";
+import { emptyWallState, gatesAsHuman, type UsageSignal, type WallState } from "../src/lib/quota-wall.js";
 
 const T0 = Date.parse("2026-09-28T13:19:40Z");
 const WEEKLY = "You've hit your weekly limit · resets Sep 30 at 6am (Asia/Tokyo)";
@@ -126,6 +126,24 @@ describe("进闸 / 押后", () => {
     expect(await r.wall.holds(env(agentFrom("b"), "cx", "m6"), "cx")).toBe(false);
     expect(await r.wall.noteApiError({ channelId: "c", agent: "agent-c", at: T0 + 5, error: "server_error", text: "API Error: 500" })).toBe(true);
     expect(Object.keys(r.wall.snapshot().wall!.hits)).toEqual(["a", "c"]);
+  });
+
+  test("fleet 群发文字（quotaGated）来源是 owner 也押到出闸；同一个 owner 的 ask 答复（只带 waitForIdle）照旧穿闸（T62）", async () => {
+    const r = rig();
+    const owner = { kind: "api", name: "owner", tokenId: "owner:self", owner: true } as const;
+    const fleet = env(owner, "a", "f1");
+    fleet.meta.waitForIdle = fleet.meta.quotaGated = true;
+    const ask = env(owner, "a", "k1");
+    ask.meta.waitForIdle = true;
+    expect(await r.wall.holds(fleet, "a")).toBe(false); // 没闸：照投
+    await hitWall(r, "a");
+    expect(await r.wall.holds(fleet, "a")).toBe(true);
+    expect(await r.wall.holds(ask, "a")).toBe(false);
+    // 撞墙期间「押着几条人发的」（bridge/quota-wall-wiring.ts wallCount）同样不算群发
+    const held = new HeldQueue(null);
+    held.holdEnv(ask, "quota_wall");
+    held.holdEnv(fleet, "quota_wall");
+    expect(held.wallCount(gatesAsHuman)).toEqual({ human: 1, agent: 1 });
   });
 
   test("开了 low-priority 照常在跑的窗口：闸对它放行，agent 消息照投、不算在闸里（T24 wf gate-state-2）", async () => {

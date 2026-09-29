@@ -58,6 +58,25 @@ export interface LedgerTaskView {
   stageSinceApprox?: boolean;
   lastReview?: ReviewSummaryView | null;
   metrics: TaskMetricsView;
+  /** 步骤线（T51，collab-step-line-model.ts 解析）；老 bridge 没有 */
+  stepLine?: unknown;
+  /** 挡着它的前置任务（src/lib/ledger-deps.ts blockedBy）；老 bridge 没有 = 不挡 */
+  blockedBy?: string[];
+}
+
+/** 依赖边（src/lib/ledger-deps.ts DepView）：effective = PM 定死的 state，没定就按前置阶段推导的 derived */
+export interface LedgerDepView {
+  from: string;
+  to: string;
+  kind: "blocks" | "branch";
+  when: string;
+  state: "waiting" | "active" | "done" | null;
+  derived: "waiting" | "active" | "done";
+  effective: "waiting" | "active" | "done";
+  fromCancelled?: boolean;
+  createdBy: string;
+  createdAt: number;
+  updatedAt: number;
 }
 
 export interface LedgerOverview {
@@ -66,6 +85,8 @@ export interface LedgerOverview {
   meta: { pms: string[]; docsDir: string | null; queueFrozen: { frozen: boolean; reason: string; since: number | null } };
   items: { id: string; title: string; oneLine: string }[];
   tasks: LedgerTaskView[];
+  /** 老 bridge 没有 = 没有依赖边（因果线画布只画分组框） */
+  deps?: LedgerDepView[];
 }
 
 /** 首页 7 列；审查与返工同一列（⇄） */
@@ -113,6 +134,8 @@ export interface LineView {
   pm: string | null;
   round: number;
   pr: string | null;
+  /** 步骤线的原始数据（T51），列表那一行的小圆点从这里画 */
+  stepLine?: unknown;
 }
 
 export interface Headline {
@@ -311,6 +334,7 @@ export function lineOf(
     pm: bareAgent(t.pm),
     round: t.round,
     pr: t.pr,
+    stepLine: t.stepLine,
   };
 }
 

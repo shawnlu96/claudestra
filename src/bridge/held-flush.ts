@@ -5,6 +5,7 @@
  * 投出去之后才出队；目标又忙就停，原条目留着、计时不变；每个频道同一时刻只有一个投递者（held.claim）。
  */
 import { isOwnerSource } from "../lib/delegate-marker.js";
+import { gatesAsHuman } from "../lib/quota-wall.js";
 import { tmuxCapture } from "../lib/tmux-helper.js";
 import { inputBox } from "../lib/turn-state.js";
 import { heldAcrossStopNote } from "../lib/turn-cuts.js";
@@ -23,7 +24,7 @@ export interface FlushDeps {
   client: (channelId: string) => { ws: LocalEndpoint["ws"]; cwd?: string } | undefined;
   /** stillWanted：投递途中最后一刻再核对这条还在队里（被 kill 清理 / 放弃摘掉的就不发、不押回） */
   deliver: (env: Envelope, to: LocalEndpoint, stillWanted?: () => boolean) => Promise<Delivery>;
-  /** 这个频道在额度闸里（bridge/quota-wall.ts）：只投人类消息，其余留着等出闸补投——否则每分钟扫描都投一次、再被押回来 */
+  /** 这个频道在额度闸里（bridge/quota-wall.ts）：只投能穿闸的（gatesAsHuman），其余留着等出闸补投——否则每分钟扫描都投一次、再被押回来 */
   walled?: (channelId: string) => Promise<boolean>;
   /** 回程簿失效钟从真正送达起算（只动这封消息发送方那一槽） */
   touch: (channelId: string, env: Envelope) => void;
@@ -117,7 +118,7 @@ export async function flushHeld(d: FlushDeps, channelId: string, reason: string)
   const evAgent = q[0].to.agentName || channelId;
   // 不管从哪条路押进来的，闸内都按额度闸算（不老化、出闸补投）；压缩中也要先改记，不然一直在压缩的目标会漏掉（T24 r2 P2-8）
   const walled = !!(await d.walled?.(channelId));
-  if (walled) d.held.markWall(channelId, (i) => !d.isHumanRequest(i.env));
+  if (walled) d.held.markWall(channelId, (i) => !gatesAsHuman(i.env));
   if (d.compacting(evAgent)) return; // 压缩上下文中一律继续押(deliverToLocal 也会押回来,省一次往返)
   if (!d.held.claim(channelId)) return; // Stop / 压缩结束 / 扫描撞车:别人正在投这个频道
   try {
@@ -125,9 +126,10 @@ export async function flushHeld(d: FlushDeps, channelId: string, reason: string)
     if (!working) openedBy.delete(channelId);
     let first: HeldItem | undefined;
     // 人类消息只因「别掐压缩」被押,压缩一结束就该到——不等回合空闲,deliverToLocal 自带抢占(C-c)语义;
-    // agent→agent 仍等空闲(回合中通知有丢弃窗口)。快照:遍历中别处可能往这个频道 hold 新消息,只投这一刻到期的
-    const humanOnly = working || walled;
-    const due = humanOnly ? q.filter((i) => d.isHumanRequest(i.env)) : q.filter((i) => !leaseActive(i));
+    // agent→agent 仍等空闲(回合中通知有丢弃窗口)。快照:遍历中别处可能往这个频道 hold 新消息,只投这一刻到期的。
+    // 闸内另看能不能穿闸(gatesAsHuman),和忙时能不能投(isHumanRequest)是两回事:ask 答复带 waitForIdle,闸内目标空闲照投、忙时照旧等,
+    // 拿 isHumanRequest 判闸的话它会被改记成额度闸、等到出闸(tests/held-flush.test.ts T64)
+    const due = q.filter((i) => (!walled || gatesAsHuman(i.env)) && (working ? d.isHumanRequest(i.env) : !leaseActive(i)));
     for (const item of due) {
       // ws 可能已换代(channel-server 重连 / bridge 重启后从盘上恢复的没有 ws):按 channelId 取最新连接;不在线就留着
       const fresh = d.client(channelId);

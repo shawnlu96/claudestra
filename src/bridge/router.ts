@@ -137,11 +137,7 @@ export interface Envelope {
     components?: unknown[];
     /** 附件绝对路径，仅加在第一 chunk 上，最多 10 个 / 25MB */
     files?: string[];
-    /**
-     * v2.4.16+ deliverToLocal 不要给 target 挂 pendingInterAgentMsg watchdog。
-     * 用于 send_to_agent({oneShot:true}) 的 fire-and-forget 路径——caller 不期待
-     * pushback，target 也不该被 watchdog 在 Stop 时 nudge 要求回应。
-     */
+    /** deliverToLocal 不给 target 挂 pendingInterAgentMsg 看门狗：send_to_agent({oneShot:true}) 这类 caller 不等回的，target 的 Stop 也不该被催着回应 */
     skipInterAgentWatchdog?: boolean;
     /** 这条是「转交」过来的用户消息（bridge/forward.ts）：接手方不能再转，防来回踢皮球 */
     forwarded?: boolean;
@@ -154,6 +150,7 @@ export interface Envelope {
      * - 永远不触发抢占：即使 from 是人类、intent 是 request，也不算 isHumanRequest（不打断、flush 时也不插队）。
      */
     waitForIdle?: boolean;
+    quotaGated?: boolean; // 过额度闸按非人算：只有 fleet 群发文字打，ask 答复不打（缘由见 lib/quota-wall.ts gatesAsHuman）
     /** 这条 reply 建出的 / 这条答复所答的「待你处理」id（bridge/asks.ts）；出站 chat_message 事件带上，网页据此把气泡和 ask 对上 */
     askId?: string;
     /** 这条 reply 建出的授权类 ask 的参数哈希（lib/ask-bind.ts）：随 reply 结果回给 agent，执行前 ledger ask-check 用 */

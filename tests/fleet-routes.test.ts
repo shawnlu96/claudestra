@@ -100,17 +100,17 @@ describe("凭据 scope 传到服务层：全 scope 不含大总管，没授 mast
 describe("ws：只收直连回环", () => {
   test("升级时没标 loopback（非回环 / 带 XFF 的反代）→ 拒绝", async () => {
     for (const data of [undefined, {}, { loopback: false }, { loopback: "true" }]) {
-      expect(await handleFleetWs({ type: "fleet_state" }, data)).toEqual({ error: "批量管理只收本机直连回环的连接" });
+      expect(await handleFleetWs({ type: "fleet_state" }, { data })).toEqual({ error: "批量管理只收本机直连回环的连接" });
     }
   });
   test("回环 + 坏参数 → 报错而不是执行", async () => {
-    expect((await handleFleetWs({ type: "fleet_run", action: { kind: "nope" }, select: { all: true } }, { loopback: true })).error).toContain("动作只能是");
-    expect((await handleFleetWs({ type: "fleet_run", action: { kind: "compact" }, select: {} }, { loopback: true })).error).toContain("要指定");
+    expect((await handleFleetWs({ type: "fleet_run", action: { kind: "nope" }, select: { all: true } }, { data: { loopback: true } })).error).toContain("动作只能是");
+    expect((await handleFleetWs({ type: "fleet_run", action: { kind: "compact" }, select: {} }, { data: { loopback: true } })).error).toContain("要指定");
   });
 });
 
 describe("ws：认不出调用方是不是 owner，只给最低权限（adv1 P1-1）", () => {
-  const ws = (action: unknown, select: unknown) => handleFleetWs({ type: "fleet_run", action, select, dryRun: true }, { loopback: true });
+  const ws = (action: unknown, select: unknown) => handleFleetWs({ type: "fleet_run", action, select, dryRun: true }, { data: { loopback: true } });
   test("群发文字、自定义保留清单、带上大总管（includeMaster 或点名）一律拒收", async () => {
     for (const [action, select] of [
       [{ kind: "text", text: "hi" }, { all: true }],
@@ -130,7 +130,7 @@ describe("ws：认不出调用方是不是 owner，只给最低权限（adv1 P1-
     const seen: unknown[] = [];
     const fake = async (req: unknown) => (seen.push(req), { ok: true }) as never;
     const msg = { type: "fleet_run", action: { kind: "lp-on" }, select: { all: true }, actor: "owner", via: "web" };
-    expect(await handleFleetWs(msg, { loopback: true }, fake)).toEqual({ result: { ok: true } });
+    expect(await handleFleetWs(msg, { data: { loopback: true } }, fake)).toEqual({ result: { ok: true } });
     expect(seen).toMatchObject([{ action: { kind: "lp-on" }, select: { all: true }, dryRun: false, actor: "local-cli", via: "ws" }]);
     // 能动谁也按 local-cli 最低权限：大总管不在里面（进门时已拒掉点名和 includeMaster，这里是服务层那道）
     const allowed = (seen[0] as { allowed: (n: string) => boolean }).allowed;
@@ -138,7 +138,7 @@ describe("ws：认不出调用方是不是 owner，只给最低权限（adv1 P1-
   });
 
   test("状态里不列大总管", async () => {
-    const r = (await handleFleetWs({ type: "fleet_state" }, { loopback: true })) as { result: { agents: { name: string }[] } };
+    const r = (await handleFleetWs({ type: "fleet_state" }, { data: { loopback: true } })) as { result: { agents: { name: string }[] } };
     expect(r.result.agents.map((a) => a.name)).not.toContain("master");
   });
 });

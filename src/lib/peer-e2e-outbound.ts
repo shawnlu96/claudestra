@@ -4,7 +4,7 @@
  * 目标是 required peer 却走不了加密（本机钥匙读不到、对方记录坏了）→ 抛错，绝不退回明文。
  * 外层传输（中继 / 直连、外层签名）由调用方以 raw 注入；这里只管会话。
  */
-import { E2eInnerError, E2eLocalError, markE2eResponse, PeerE2eClient } from "./peer-e2e-client.js";
+import { E2eInnerError, E2eLocalError, markE2eResponse, PeerE2eClient, type E2ePost } from "./peer-e2e-client.js";
 import { e2ePeerOf, localE2e, peerForUrl, pinPeerE2eKey, readHttpPeers, type LocalE2e } from "./peer-e2e-local.js";
 import type { HttpPeer } from "./peers.js";
 
@@ -30,7 +30,8 @@ const DUPLICATE_TEXT = "对方已经处理过这条（回复在路上丢了）�
 export function createE2eOutbound(d: OutboundDeps) {
   const clients = new Map<string, { client: PeerE2eClient; ident: string }>();
 
-  function clientFor(rec: HttpPeer, local: LocalE2e, base: string, raw: RawPost): PeerE2eClient {
+  /** 会话按 peer 缓存；client 里不留任何一次请求的传输或 signal（T59：缓存了第一次的 raw，signal 到期后第二次必失败） */
+  function clientFor(rec: HttpPeer, local: LocalE2e, base: string): PeerE2eClient {
     const ident = JSON.stringify([base, rec.e2e, local.fp]);
     const hit = clients.get(rec.name);
     if (hit?.ident === ident) return hit.client;
@@ -43,11 +44,6 @@ export function createE2eOutbound(d: OutboundDeps) {
       pinNewer: async (p, ek) => {
         current = { ...current, ek };
         await d.pin(p.name, ek);
-      },
-      post: (path, body, contentType) => {
-        const url = `${base}${path}`;
-        const u = new URL(url);
-        return raw(url, { method: "POST", body, headers: { "content-type": contentType, ...(d.sign ? d.sign("POST", u.pathname + u.search, body) : {}) } });
       },
     });
     clients.set(rec.name, { client, ident });
@@ -68,13 +64,14 @@ export function createE2eOutbound(d: OutboundDeps) {
     if (!local) throw new E2eLocalError("e2e_unavailable", "local E2E key unavailable; refusing to fall back to plaintext");
     const body = typeof init.body === "string" ? new TextEncoder().encode(init.body) : (init.body ?? new Uint8Array(0));
     try {
-      return await clientFor(rec, local, base, raw).fetch(init.method ?? "GET", url.slice(base.length), init.headers ?? {}, body);
+      const post: E2ePost = (path, bytes, contentType) => {
+        const url = `${base}${path}`;
+        const u = new URL(url);
+        return raw(url, { method: "POST", body: bytes, headers: { "content-type": contentType, ...(d.sign ? d.sign("POST", u.pathname + u.search, bytes) : {}) } });
+      };
+      return await clientFor(rec, local, base).fetch(init.method ?? "GET", url.slice(base.length), init.headers ?? {}, body, post);
     } catch (e) {
       if (!(e instanceof E2eInnerError)) throw e;
-      if (e.code === "e2e_peer_restarted") {
-        const body = { ok: false, code: "peer_signature", reason: "e2e_peer_restarted", error: e.message.replace(/^\w+: /, "") };
-        return markE2eResponse(Response.json(body, { status: 401 }));
-      }
       if (e.code === "e2e_duplicate") return markE2eResponse(Response.json({ ok: false, error: DUPLICATE_TEXT }, { status: 409 }));
       throw e;
     }

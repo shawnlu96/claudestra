@@ -1453,6 +1453,7 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
       const { auqStates, buildAuqKeystrokes, clearAuqState, sendAuqKeys } = await import("./ask-user-question.js");
       const state = auqStates.get(agent.channelId);
       if (!state) return apiJson(404, { ok: false, error: "no pending AskUserQuestion for this agent" });
+      if ((await import("./ask-runtime.js")).staleAuqCard(body?.askId, agent.channelId, state.questions)) return apiJson(409, { ok: false, code: "ask_stale", error: "card is for an earlier dialog" });
       const action = String(body?.action || "submit");
       if (action === "cancel") {
         const failed = await tmuxSendEscape(state.tmuxTarget, { strict: true }).then(() => null, (e: Error) => e);
@@ -1469,12 +1470,9 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
           return sel.map((n: unknown) => Number(n)).filter((n: number) => Number.isInteger(n) && n >= 0 && n < q.options.length);
         });
       }
-      // M4：发键前重验弹窗还在（与 permission 分支同款防误击）。AUQ 若已在 TUI 侧
-      // 被应答/取消而 AuqState 尚未清（/pending replay 让陈旧提交更易发生），键会
-      // 误入 composer——v2.17.2 起键序列含数字键，误入会真的打出字符，必须挡。
-      // v2.17.2：判据从 paneLooksIdle 升级为 parseAuqPane（弹窗签名不在=stale，
-      // 覆盖"已应答且 agent 正忙"的窗口）；解析结果顺手交给 buildAuqKeystrokes
-      // 做现场对账（光标位/勾选态）。抓不到 pane 才跳过重验，退回盲发。
+      // M4：发键前重验弹窗还在（同 permission 分支）。AUQ 已在 TUI 侧答掉 / 取消而 AuqState 未清时，
+      // 键（含数字键）会误入 composer 打出字符。判据用 parseAuqPane（弹窗签名不在 = stale，覆盖「已答且
+      // agent 正忙」），解析结果交给 buildAuqKeystrokes 对光标位 / 勾选态。抓不到 pane 才退回盲发。
       let auqPane = "";
       try { auqPane = await tmuxCapture(state.tmuxTarget, 40); } catch { /* 跳过重验 */ }
       const auqParse = auqPane ? parseAuqPane(auqPane) : null;

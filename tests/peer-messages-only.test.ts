@@ -6,6 +6,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { authenticateApi, setApiAuthPrincipalsPathForTest } from "../src/bridge/api-auth.js";
+import { setRequestContext } from "../src/bridge/request-context.js";
 import { messagesOnlyAllows, setMessagesOnly } from "../src/lib/peer-scope-gate.js";
 
 describe("messagesOnlyAllows", () => {
@@ -66,6 +67,7 @@ describe("鉴权闸门", () => {
   });
   const call = async (method: string, path: string) => {
     const r = new Request(`http://bridge.local${path}`, { method, headers: { Authorization: `Bearer ${SECRET}` } });
+    setRequestContext(r, { source: "lan", clientIp: "192.0.2.1", https: true });
     return authenticateApi(r, new URL(r.url), { rateLimit: false });
   };
   test("投递放行，读历史 / 事件流 / 打断 403 messages_only", async () => {

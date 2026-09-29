@@ -358,3 +358,9 @@ export function getMeta(db: Database, project: string): LedgerMeta {
     peerPms: toPeerPms(kv.get("peerPms")),
   };
 }
+
+/** 各项目的 PM 名单（只列设过 pms 的项目）；fleet 按它认 PM 与其管辖的项目 */
+export function pmsByProject(db: Database): Map<string, string[]> {
+  const rows = db.prepare("SELECT project FROM meta WHERE key = 'pms' ORDER BY project").all() as { project: string }[];
+  return new Map(rows.map(({ project }) => [project, getMeta(db, project).pms]));
+}

@@ -7,10 +7,11 @@
 import { describe, expect, test } from "bun:test";
 import { createAbortControl, type AbortableCtx } from "../src/pi/abort-control.js";
 import {
-  extensionAbort, onAbortAck, setAbortCapable, setExtensionSocket, stopAfterAbort, voidedEchoTo, voidedNotice,
+  extensionAbort, onAbortAck, onCodexUndelivered, setAbortCapable, setExtensionSocket, stopAfterAbort, voidedEchoTo, voidedNotice,
 } from "../src/bridge/pi-abort.js";
 import type { Envelope } from "../src/bridge/router.js";
 import { turnCuts } from "../src/bridge/turn-cuts.js";
+import { emitEvent, getAgentStatus, subscribeEvents } from "../src/bridge/event-bus.js";
 import { stopHeadline } from "../src/lib/turn-cuts.js";
 
 /** 模拟 Pi：queue = 排队的 steer 消息；tui = 有中止处理（把排队的退回输入框），否则队列留着、中止后会拿它们续跑 */
@@ -155,7 +156,8 @@ describe("bridge 侧（Workflow 复核 wf2）", () => {
     dropped: [] as string[],
     pendingAgentCalls: { dropRequest: (t: string, c: string, id: string) => void books.dropped.push(`${t}<-${c}:${id}`) },
   };
-  setExtensionSocket((ch) => (ch === "pi" ? sock : undefined), { deliver: async (e) => void delivered.push(e), ownerId: () => "owner", books: () => books });
+  const held: Envelope[] = [];
+  setExtensionSocket((ch) => (ch === "pi" ? sock : undefined), { deliver: async (e) => void delivered.push(e), ownerId: () => "owner", books: () => books, hold: (e) => void held.push(e) });
   setAbortCapable("pi", true);
   const lastId = () => JSON.parse(sent.at(-1) ?? "{}").id as string;
   const inbound = (id: string, from: Envelope["from"]) => turnCuts.noteDelivered({
@@ -200,7 +202,8 @@ describe("bridge 侧（Workflow 复核 wf2）", () => {
     delivered.length = 0;
     onAbortAck({ id: lastId(), result: "aborted", voided: ["peer1", "ag1"] }, sock);
     await p;
-    expect(delivered.map((e) => e.to)).toEqual([expect.objectContaining({ kind: "api", tokenId: "tok_peer" })]); // agent-x 不在线：没法告诉它
+    expect(delivered.map((e) => e.to)).toEqual([expect.objectContaining({ kind: "api", tokenId: "tok_peer" })]);
+    expect(held.map((e) => [e.to, e.meta.inReplyTo])).toEqual([[expect.objectContaining({ kind: "local", channelId: "ag-x" }), "ag1"]]); // agent-x 不在线：押着等它连回来
     expect(delivered[0].content).toContain("你发给 agent-pi 的「请求 peer1」");
     stopAfterAbort("pi");
   });
@@ -228,6 +231,119 @@ describe("bridge 侧（Workflow 复核 wf2）", () => {
     await q;
     expect(books.pendingInterAgentMsg.has("pi")).toBe(true);
     stopAfterAbort("pi");
+  });
+
+  describe("Codex 投递失败：只了结没投进去的这一条，不替它宣告完成（T52 复审 #204 第 9 轮收口）", () => {
+    const deps = { agentOf: async (c: string) => (c === "r9-restart" ? "agent-r9-restart" : undefined) };
+    const send = (ch: string, id: string, busy: boolean, from?: Envelope["from"]) => turnCuts.noteDelivered({
+      from: from ?? { kind: "api", tokenId: `tok_${id}`, name: id }, to: { kind: "local", channelId: ch, agentName: `agent-${ch}` }, intent: "request",
+      content: id, meta: { messageId: id, triggerKind: "api_user", ts: "", threadId: "t" },
+    } as unknown as Envelope, ch, false, busy);
+    const out: string[] = [];
+    const cs = { send: (d: string) => void out.push(d) };
+    const fail = (ch: string, id: string, reason = "x") => onCodexUndelivered({ requestId: id, channelId: ch, messageId: id, reason }, cs, true, deps);
+    const settled = () => JSON.parse(out.at(-1)!).result.settled;
+    const thinking = (ch: string, agent = `agent-${ch}`) => emitEvent({ agent, chatId: ch, type: "agent_status", data: { status: "thinking" } });
+    const notices: { chatId: string; text: string }[] = [];
+    subscribeEvents({}, (e) => {
+      const d = e.data as { from?: unknown; notice?: unknown; text?: unknown };
+      if (e.type === "chat_message" && d.from === "bridge" && d.notice === true && String(d.text).includes("没投进 Codex")) notices.push({ chatId: e.chatId, text: String(d.text) });
+    });
+
+    test("只回显这一条（inReplyTo），结束这条消息的等待；别的还在跑的消息、状态都不动", async () => {
+      send("r9-a", "run1", false, { kind: "api", tokenId: "tok_a", name: "peer-a" } as Envelope["from"]);
+      send("r9-a", "bad1", true, { kind: "api", tokenId: "tok_b", name: "peer-b" } as Envelope["from"]);
+      thinking("r9-a");
+      delivered.length = 0;
+      await fail("r9-a", "bad1", "⚠️ 消息投递到 Codex 失败：boom");
+      expect(delivered).toHaveLength(1);
+      expect(delivered[0]).toMatchObject({ intent: "response", to: { kind: "api", tokenId: "tok_b" }, content: "⚠️ 消息投递到 Codex 失败：boom" });
+      expect(delivered[0].meta.inReplyTo).toBe("bad1");
+      expect(settled()).toBe(1);
+      expect(turnCuts.deliveredMessage("r9-a", "run1")).toBeDefined();
+      expect(turnCuts.deliveredMessage("r9-a", "bad1")).toBeUndefined();
+      expect(getAgentStatus("agent-r9-a")).toBe("thinking");
+    });
+
+    test("空闲时投的唯一一条没投进去：也不发 done，「工作中」等真实收尾；频道里标一句", async () => {
+      send("r9-idle", "only", false);
+      thinking("r9-idle");
+      notices.length = 0;
+      await fail("r9-idle", "only");
+      expect(getAgentStatus("agent-r9-idle")).toBe("thinking");
+      expect(notices.map((n) => n.chatId)).toEqual(["r9-idle"]);
+    });
+
+    test("第 8 轮两条探针的场景（读入顺序晚于消费、重挂前的旧基线）：都不发 done", async () => {
+      for (const ch of ["r9-late-read", "r9-rewatch"]) {
+        send(ch, "A", false); thinking(ch); send(ch, "B", true); send(ch, "C", true);
+        await fail(ch, "C");
+        expect(getAgentStatus(`agent-${ch}`)).toBe("thinking");
+      }
+    });
+
+    test("已经收尾（不在 thinking）：不标", async () => {
+      send("r9-done", "x", false);
+      emitEvent({ agent: "agent-r9-done", chatId: "r9-done", type: "agent_status", data: { status: "done" } });
+      notices.length = 0;
+      await fail("r9-done", "x");
+      expect(notices).toEqual([]);
+    });
+
+    test("bridge 重启后没有投递记录：按频道从 registry 查到 agent，照样标一句，不发 done", async () => {
+      thinking("r9-restart", "agent-r9-restart");
+      notices.length = 0;
+      await fail("r9-restart", "pre-restart-message");
+      expect(notices.map((n) => n.chatId)).toEqual(["r9-restart"]);
+      expect(getAgentStatus("agent-r9-restart")).toBe("thinking");
+    });
+
+    test("不是这个频道当前的连接 / 认不出这条：什么都不动，settled 0（channel-server 自己兜底说）", async () => {
+      send("r9-b", "bad3", false, { kind: "api", tokenId: "tok_c", name: "c" } as Envelope["from"]);
+      delivered.length = 0;
+      await onCodexUndelivered({ requestId: "r3", channelId: "r9-b", messageId: "bad3", reason: "x" }, cs, false, deps);
+      expect(settled()).toBe(0);
+      await fail("r9-b", "nope");
+      expect(settled()).toBe(0);
+      expect(delivered).toEqual([]);
+      expect(turnCuts.deliveredMessage("r9-b", "bad3")).toBeDefined();
+    });
+
+    test("发送方 agent 断线——回显押进队列才算告诉到（settled 1）；bridge 自己的通知没有回信地址，settled 0", async () => {
+      send("cx4", "off1", false, { kind: "local", channelId: "ag-off", agentName: "agent-off" } as Envelope["from"]);
+      held.length = 0;
+      await fail("cx4", "off1");
+      expect(held.map((e) => [e.to.kind, e.meta.inReplyTo])).toEqual([["local", "off1"]]);
+      expect(settled()).toBe(1);
+      send("cx4", "br1", false, { kind: "bridge", label: "cron" } as Envelope["from"]);
+      await fail("cx4", "br1");
+      expect(settled()).toBe(0);
+    });
+
+    test("发送方在线、回显投递报错 / 被丢 / 抛错——押进队列（不带旧连接）才算告诉到；API 发送方送不到不算", async () => {
+      const wire = (mode: string) => setExtensionSocket((ch) => (ch === "pi" || ch === "caller" ? sock : undefined), {
+        deliver: async () => {
+          if (mode === "reject") throw new Error("socket closed during send");
+          return { outcome: mode === "error" ? { kind: "error", error: new Error("socket closed") } : { kind: "dropped", reason: "offline" } };
+        },
+        ownerId: () => "owner", books: () => books, hold: (e) => void held.push(e),
+      });
+      try {
+        for (const mode of ["error", "dropped", "reject"]) {
+          wire(mode);
+          held.length = 0;
+          send("cx6", `on-${mode}`, false, { kind: "local", channelId: "caller", agentName: "caller" } as Envelope["from"]);
+          await fail("cx6", `on-${mode}`);
+          expect(held.map((e) => [e.to.kind, e.meta.inReplyTo, (e.to as { ws?: unknown }).ws])).toEqual([["local", `on-${mode}`, undefined]]);
+          expect(settled()).toBe(1);
+        }
+        send("cx6", "api-err", false);
+        await fail("cx6", "api-err");
+        expect(settled()).toBe(0);
+      } finally {
+        setExtensionSocket((ch) => (ch === "pi" ? sock : undefined), { deliver: async (e) => void delivered.push(e), ownerId: () => "owner", books: () => books, hold: (e) => void held.push(e) });
+      }
+    });
   });
 
   test("回显地址：Discord 人 → 他发消息的频道；agent → 它自己；bridge 自己的通知不回显", () => {

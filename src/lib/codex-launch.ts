@@ -350,8 +350,10 @@ export async function resolveCodexBinary(
 
 /**
  * 能不能当 Codex agent 的底座：入站全靠 `codex queue`，没有这个子命令（旧版）就别建 agent，
- * 免得建出一个收不到消息的频道。
+ * 免得建出一个收不到消息的频道。只看退出码不够：旧版（0.147 实测）把 `queue` 当成交互模式的提示词参数，
+ * `--help` 打印顶层帮助、照样 exit 0；真有这个子命令，它的帮助里才有 `--thread`（tests/codex-launch.test.ts）。
  */
 export async function probeCodexQueue(run: Runner, codexBin: string): Promise<boolean> {
-  return (await run([codexBin, "queue", "--help"], 20_000)).ok;
+  const r = await run([codexBin, "queue", "--help"], 20_000);
+  return r.ok && /--thread\b/.test(r.out + r.err);
 }

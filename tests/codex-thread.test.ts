@@ -85,12 +85,14 @@ test("codexQueueArgs", () => {
   expect(codexQueueArgs("/c", A, "hi")).toEqual(["/c", "queue", "--thread", A, "--message", "hi"]);
 });
 
-function harness(initial: { sid?: string; held: string[][]; queueOk?: boolean; queueDelayMs?: number[] }) {
+/** bridge：不给 = 没接 undelivered 依赖；true / false = bridge 认没认出这条；"throw" = bridge 请求失败 */
+function harness(initial: { sid?: string; held: string[][]; queueOk?: boolean; queueDelayMs?: number[]; bridge?: boolean | "throw" }) {
   let sid = initial.sid;
   let heldCall = 0;
   const queued: Array<{ sid: string; text: string }> = [];
   const notices: Array<{ chatId?: string; text: string }> = [];
   const switches: string[] = [];
+  const undelivered: Array<{ messageId: string; notice: string }> = [];
   let qi = 0;
   const sink = new CodexQueueSink({
     source: "claudestra",
@@ -104,8 +106,15 @@ function harness(initial: { sid?: string; held: string[][]; queueOk?: boolean; q
       return initial.queueOk === false ? { ok: false, out: "", err: "Error: boom\n" } : { ok: true, out: "Queued", err: "" };
     },
     notify: async (chatId, text) => { notices.push({ chatId, text }); },
+    ...(initial.bridge === undefined ? {} : {
+      undelivered: async (messageId: string, notice: string) => {
+        undelivered.push({ messageId, notice });
+        if (initial.bridge === "throw") throw new Error("ws down");
+        return initial.bridge === true;
+      },
+    }),
   });
-  return { sink, queued, notices, switches, sid: () => sid };
+  return { sink, queued, notices, switches, sid: () => sid, undelivered };
 }
 
 describe("CodexQueueSink", () => {
@@ -153,6 +162,33 @@ describe("CodexQueueSink", () => {
     const r = await h.sink.deliver("hi", { chat_id: "1" });
     expect(r).toEqual({ ok: false, error: "Error: boom" });
     expect(h.notices[0].text).toContain("Error: boom");
+  });
+
+  test("投不进去交给 bridge 按 messageId 了结（只结这一条，T52 #204 P1）：bridge 认出了就不再自己 reply（P2 不报两遍）", async () => {
+    const off = harness({ sid: A, held: [[]], bridge: true });
+    await off.sink.deliver("hi", { chat_id: "api:t", message_id: "m1" });
+    expect(off.undelivered).toEqual([{ messageId: "m1", notice: OFFLINE_NOTICE }]);
+    expect(off.notices).toEqual([]);
+    const amb = harness({ sid: undefined, held: [[A, B]], bridge: true });
+    await amb.sink.deliver("hi", { chat_id: "1", message_id: "m2" });
+    expect(amb.undelivered).toEqual([{ messageId: "m2", notice: AMBIGUOUS_NOTICE }]);
+    const q = harness({ sid: A, held: [[A]], queueOk: false, bridge: true });
+    await q.sink.deliver("hi", { chat_id: "1", message_id: "m3" });
+    expect(q.undelivered).toEqual([{ messageId: "m3", notice: "⚠️ 消息投递到 Codex 失败：Error: boom" }]);
+    expect(q.notices).toEqual([]);
+  });
+
+  test("bridge 认不出这条 / 请求失败 / 没有 message_id：自己走 reply 说（never silent）", async () => {
+    for (const bridge of [false, "throw"] as const) {
+      const h = harness({ sid: A, held: [[A]], queueOk: false, bridge });
+      await h.sink.deliver("hi", { chat_id: "1", message_id: "m4" });
+      expect(h.undelivered).toHaveLength(1);
+      expect(h.notices).toEqual([{ chatId: "1", text: "⚠️ 消息投递到 Codex 失败：Error: boom" }]);
+    }
+    const noId = harness({ sid: A, held: [[]], bridge: true });
+    await noId.sink.deliver("hi", { chat_id: "1" });
+    expect(noId.undelivered).toEqual([]);
+    expect(noId.notices).toEqual([{ chatId: "1", text: OFFLINE_NOTICE }]);
   });
 
   test("串行：先到的先投，即使它的 queue 更慢", async () => {

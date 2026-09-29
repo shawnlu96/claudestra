@@ -1,12 +1,12 @@
 /**
- * peer 专用入口：bridge 在回环上另开一个端口（默认 bridge 端口 + 1），只服务 peer，
+ * peer API 入口：bridge 在回环上另开一个端口（默认 bridge 端口 + 1），保留本机反代的网页兼容路径，
  * 给 HTTPS 反代（Caddy 的 `handle /api/v1/*`、tailscale serve 的 `--set-path /api/v1`）转发用。
  *
  * 为什么不让反代直接打主端口：经反代进来的请求源地址是 127.0.0.1，主端口对回环一律放行
  * （控制面路由、ws 升级都在那儿），`/api/v1/../hook` 这种路径一规整就是回环特权——等于把
  * 控制面和 ws（宿主 RCE）经 443 交给整个 tailnet。这里从结构上断掉：
  *   - 只调 /api/v1 的处理函数（注入的 handleApi），控制面、ws、远程终端根本不在这个入口上；
- *   - 带了凭据就必须是 peer 签的 token（principal.peer），网页用的全权 token 从这里进不来；
+ *   - Bearer（含 SSE 查询 token）必须属于 peer；非 peer 的 Bearer 在所有 socket 来源下都拒；
  *   - 本机反代转来的（网页经 HTTPS 入口）还认设备 cookie；对外直连与中继 peer 帧只认 peer token，
  *     不带凭据只剩兑换邀请、邀请页和 E2E 的两种帧（见 ingressRequest、ingressPublicRoute）。
  * 有了它，peer 走 HTTPS 443 就行，3847 不必对外开放、也不用给每个 peer 加防火墙白名单。
@@ -16,12 +16,13 @@ import { findByBearer, readPrincipals } from "../lib/principals.js";
 import { configuredPeerIngressPort } from "../lib/bridge-url.js";
 import { repoEnvVar } from "../lib/env-file.js";
 import { relayMark, takeRelayFrom, TUNNEL_MARK_HEADER } from "./relay-inbound.js";
-import { setRequestContext } from "./request-context.js";
+import { PEER_ENTRANCE_ONLY, setRequestContext } from "./request-context.js";
+import { drainingFetch } from "./unread-body.js";
 import { isLoopbackAddress } from "../lib/same-host.js";
 import { DEVICE_HEADER } from "../lib/devices.js";
 import { HTTP_IDLE_TIMEOUT_S } from "../lib/esc-guard.js";
+import { MAX_HTTP_BODY, MAX_PEER_BODY, readBoundedRequestBody, RequestBodyError } from "../lib/request-body.js";
 import { E2E_BODY_MAX, isE2eFrame } from "../lib/peer-e2e-wire.js";
-import { readRequestCapped } from "../lib/peer-e2e-serve.js";
 
 export { configuredPeerIngressPort };
 
@@ -38,7 +39,7 @@ export function ingressSecret(req: { method: string; headers: { get(k: string): 
   return req.method === "GET" && url.pathname === "/api/v1/events" ? url.searchParams.get("token") || "" : "";
 }
 
-/** 纯判定（tests/peer-ingress.test.ts）：带凭据就必须是 peer；没带交给 API（兑换邀请 / 401） */
+/** Bearer / SSE token 必须属于 peer；设备 cookie 的反代兼容例外在 ingressRequest 单独判定 */
 export function ingressVerdict(secret: string, principal: { peer?: string } | null): "ok" | "not-peer" {
   if (!secret) return "ok";
   return principal?.peer ? "ok" : "not-peer";
@@ -62,7 +63,7 @@ export function ingressHost(publicFlag: boolean, hasPeers: boolean, holdUntil: n
 
 const HOLD_MS = 10 * 60_000;
 let handler: ApiHandler | null = null;
-let cur: { srv: ReturnType<typeof serve>; port: number; host: Host } | null = null;
+let cur: { srv: ReturnType<typeof servePeerIngress>; port: number; host: Host } | null = null;
 let holdUntil = 0;
 
 /** 有没有在用的 peer token（兑换前的邀请也签了 peer token，一并算）；读失败按「有」算，宁可保持现状 */
@@ -87,7 +88,7 @@ export async function syncPeerIngress(hold = false): Promise<{ port: number | nu
   cur = null;
   if (!port || !host || !handler) return { port, host: null };
   try {
-    cur = { srv: serve({ port, host, handleApi: handler }), port, host };
+    cur = { srv: servePeerIngress({ port, host, handleApi: handler }), port, host };
     const how = host === "0.0.0.0" ? "对外直连，外来的只收 peer token" : "只听本机，供 HTTPS 反代转发";
     console.log(`🤝 peer 入口: http://${host}:${port}（${how}）`);
     return { port, host };
@@ -128,7 +129,7 @@ function ingressPublicRoute(method: string, url: URL, rawHref: string): boolean 
  *     与主端口经反代同待遇（来源 lan，设备 cookie 照认）。前提是中继够不到这个端口——隧道与 peer 帧的 path
  *     都过了同源断言（relay-inbound.ts localUrl），选端口时也避开网页端口；这些松了，这一类就不再成立。
  *   - 中继转来的 peer 帧（进程内标记核过）与非回环 socket（PEER_INGRESS_PUBLIC=1 直接对外）：来源 peer-ingress，
- *     删掉 cookie 与设备头；不带凭据只放兑换与邀请页，其余 403。设备端点与设备凭据在这个来源下一律拒。
+ *     删掉 cookie 与设备头；不带凭据只放兑换、邀请页与 E2E 两种帧，其余 403。设备端点与设备凭据在这个来源下一律拒。
  */
 export async function ingressRequest(req: Request, handleApi: ApiHandler, addr: string | null = null): Promise<Response> {
   if (req.headers.get("upgrade")) return json(400, { ok: false, error: "no websocket on the peer entrance" });
@@ -137,7 +138,7 @@ export async function ingressRequest(req: Request, handleApi: ApiHandler, addr: 
   const secret = ingressSecret(req, url);
   const principal = secret ? findByBearer(await readPrincipals(), secret) : null;
   if (ingressVerdict(secret, principal) === "not-peer") {
-    return json(403, { ok: false, error: "this entrance only serves peer tokens" });
+    return json(403, PEER_ENTRANCE_ONLY);
   }
   // 来源指纹只认经中继进来的（relay-inbound.ts 盖了进程内标记），放进请求上下文；原始头一律剥掉
   const headers = new Headers(req.headers);
@@ -146,17 +147,32 @@ export async function ingressRequest(req: Request, handleApi: ApiHandler, addr: 
   const tunnelled = headers.has(TUNNEL_MARK_HEADER);
   headers.delete(TUNNEL_MARK_HEADER);
   const localProxy = !relayFrom && !tunnelled && isLoopbackAddress(addr);
+  const publicRoute = ingressPublicRoute(req.method, url, req.url);
+  const e2eFrame = isE2eFrame(req.method, url.pathname + url.search);
   if (!localProxy) {
     headers.delete("cookie");
     headers.delete(DEVICE_HEADER);
-    if (!secret && !ingressPublicRoute(req.method, url, req.url)) return json(403, { ok: false, error: "this entrance only serves peer tokens" });
+    if (!secret && !publicRoute) return json(403, PEER_ENTRANCE_ONLY);
   }
-  // 读正文时身份还没核的按 E2E 记录流的上限封顶，大正文进不了内存（本机反代转来的也一样）：不带凭据的公开口（兑换、E2E 帧），
-  // 以及 E2E 帧不论带什么头——外层 Bearer 在 E2E 帧上没有意义，一枚泄漏的 peer token 不该换来无上限的缓冲
-  const e2eFrame = isE2eFrame(req.method, url.pathname + url.search);
-  const capped = e2eFrame || (!secret && ingressPublicRoute(req.method, url, req.url));
-  const body = req.method === "GET" || req.method === "HEAD" ? undefined : capped ? await readRequestCapped(req, E2E_BODY_MAX) : await req.arrayBuffer();
-  if (body === null) return json(413, { ok: false, error: "request body too large", code: e2eFrame ? "e2e_too_large" : "body_too_large" });
+  const hasBody = req.method !== "GET" && req.method !== "HEAD";
+  // 配对与旧会话迁移要先于设备鉴权；其余无凭据 POST 不替路由预读正文，避免反代兼容成为慢上传入口。
+  const publicDevice = localProxy && ["/api/v1/devices/pair", "/api/v1/devices/legacy-session"].includes(url.pathname);
+  if (hasBody && !secret && !headers.has("cookie") && !publicRoute && !publicDevice) return json(403, PEER_ENTRANCE_ONLY);
+  const browserUpload = localProxy && !secret && headers.has("cookie") && !publicDevice && !publicRoute && !e2eFrame;
+  // 设备上传先交 API 鉴权再读流；不能把 peer 验签的 1 秒预读期限用在手机语音上传上。
+  // 假 cookie 不读正文就被拒，外层 drainingFetch 仍负责限时排空并关闭连接。
+  let body: Uint8Array | ReadableStream<Uint8Array> | undefined = browserUpload ? req.body ?? undefined : undefined;
+  // E2E 帧的外层 Bearer / cookie 不赋予缓冲权限；不论附什么头都封顶，未认证公开口同样按 E2E 上限预读。
+  const cap = e2eFrame || (!secret && (publicRoute || publicDevice)) ? E2E_BODY_MAX : MAX_PEER_BODY;
+  try {
+    if (hasBody && !browserUpload) body = await readBoundedRequestBody(req, cap);
+  } catch (e) {
+    if (!(e instanceof RequestBodyError)) throw e;
+    const code = e.status === 413 && e2eFrame ? "e2e_too_large" : e.code;
+    const res = json(e.status, { ok: false, error: e.status === 413 ? "request body too large" : e.code, code });
+    res.headers.set("connection", "close");
+    return res;
+  }
   const apiReq = new Request(url.toString(), { method: req.method, headers, body });
   setRequestContext(apiReq, localProxy
     ? { source: "lan", clientIp: addr, https: req.headers.get("x-forwarded-proto") === "https" }
@@ -164,11 +180,13 @@ export async function ingressRequest(req: Request, handleApi: ApiHandler, addr: 
   return handleApi(apiReq, url);
 }
 
-function serve(opts: { port: number; host: Host; handleApi: ApiHandler }) {
+export function servePeerIngress(opts: { port: number; host: Host; handleApi: ApiHandler }) {
   return Bun.serve({
+    maxRequestBodySize: MAX_HTTP_BODY,
     port: opts.port,
     hostname: opts.host,
     idleTimeout: HTTP_IDLE_TIMEOUT_S, // peer 的打断请求要等 Esc 窗口锁，Bun 默认 10 秒会先切断（lib/esc-guard.ts）
-    fetch: (req, server) => ingressRequest(req, opts.handleApi, server.requestIP(req)?.address ?? null),
+    // 提前拒绝的请求没读正文：读掉再回，不然同一条连接上的下一个 peer 请求得 400（bridge/unread-body.ts）
+    fetch: drainingFetch((req: Request, server: Bun.Server<undefined>) => ingressRequest(req, opts.handleApi, server.requestIP(req)?.address ?? null)),
   });
 }

@@ -93,10 +93,12 @@
 .dot.cur { width: 10px; height: 10px; border: 2px solid var(--sc); background: var(--bg); }
 .row.hot .dot.cur { border-color: var(--accent); }
 .st { position: absolute; top: 46%; z-index: 2; transition: left .9s cubic-bezier(.2, .7, .2, 1), transform .9s cubic-bezier(.2, .7, .2, 1); }
-.card { width: 208px; padding: 9px 11px 10px; border-radius: 10px; background: var(--panel); border: 1px solid var(--line-2); box-shadow: var(--shadow); transition: border-color .6s, box-shadow .6s, width .3s; }
-.panelOn .card { width: 172px; }
+/* 宽度跟着名字走（208 起、最多 288，面板开着 172 起、最多 232）：定宽时「执行者」会被挤成竖排、跨实例的名字只剩半截（T51） */
+.card { width: max-content; min-width: 208px; max-width: 288px; box-sizing: border-box; padding: 9px 11px 10px; border-radius: 10px; background: var(--panel); border: 1px solid var(--line-2); box-shadow: var(--shadow); transition: border-color .6s, box-shadow .6s, width .3s; }
+.panelOn .card { min-width: 172px; max-width: 232px; }
 .row.hot .card { border-color: color-mix(in srgb, var(--accent) 65%, transparent); box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 25%, transparent), 0 10px 30px -10px var(--glow); }
 .cwho { display: flex; align-items: center; gap: 6px; font-size: var(--fs-3); color: var(--muted); min-width: 0; }
+.cwho > svg, .cwho > .who { flex: none; white-space: nowrap; }
 .cwho .nm { color: var(--text-2); font-weight: 500; font-size: var(--fs-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
 .cwho .stg { margin-left: auto; color: var(--faint); white-space: nowrap; display: none; }
 .act { display: flex; align-items: center; gap: 7px; margin-top: 6px; font-size: var(--fs-2); min-width: 0; }
@@ -216,7 +218,7 @@
   .track { min-height: 0; padding: 28px 14px 14px 16px; background: none; }
   .rlBase, .rlFill, .rlHot, .dot { top: 16px; }
   .st { position: relative; left: auto !important; top: auto; transform: none !important; }
-  .card, .panelOn .card { width: auto; box-shadow: none; background: var(--bg-2); }
+  .card, .panelOn .card { width: auto; min-width: 0; max-width: none; box-shadow: none; background: var(--bg-2); }
   .cwho .stg { display: inline; }
   .cap { bottom: auto; top: -24px; left: auto; right: 0; }
   .done { padding-left: 16px; }

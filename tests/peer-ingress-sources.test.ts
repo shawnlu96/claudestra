@@ -6,7 +6,7 @@
  *   d. 设备端点、设备凭据在 peer-ingress 下一律拒；legacy-session 只认 loopback / lan。
  * 另有控制面闸门：带隧道标记的请求即使缺了 XFF 也不算回环（bridge/relay-inbound.ts socketTrust）。
  */
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, spyOn, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -132,6 +132,23 @@ describe("peer-ingress 来源下的权限矩阵（设备端点、设备凭据、
     const r = withSource("peer-ingress", "/api/v1/agents", { headers: { cookie: "cstra_dev=abc" } });
     const res = await authenticateApi(r, new URL(r.url), { rateLimit: false });
     expect(res instanceof Response ? res.status : 200).toBe(403);
+  });
+  test("没定来源 → 403 unknown_source，日志每分钟最多一行、带入口与路径、不带凭据", async () => {
+    const warn = spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const codes: unknown[] = [];
+      for (const path of ["/api/v1/agents", "/api/v1/cron"]) {
+        const r = new Request(`http://127.0.0.1:3847${path}`, { headers: { authorization: "Bearer s-secret-xyz" } });
+        const res = await authenticateApi(r, new URL(r.url), { rateLimit: false });
+        codes.push(res instanceof Response ? [res.status, ((await res.json()) as { code: string }).code] : "allowed");
+      }
+      expect(codes).toEqual([[403, "unknown_source"], [403, "unknown_source"]]);
+      const lines = warn.mock.calls.map((c) => String(c[0])).filter((l) => l.includes("来源未定"));
+      expect(lines.length).toBeLessThanOrEqual(1); // 同一分钟里别的用例可能已经记过那一行
+      for (const l of lines) expect([l.includes("127.0.0.1:3847"), l.includes("s-secret-xyz")]).toEqual([true, false]);
+    } finally {
+      warn.mockRestore();
+    }
   });
   test("控制面：带隧道标记的请求缺了 XFF 也不算回环；真本机不受影响", async () => {
     const sent: Record<string, string>[] = [];
