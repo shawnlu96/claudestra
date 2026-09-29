@@ -20,7 +20,7 @@ import { projectJsonlPath, findJsonlBySessionId } from "./jsonl-cost.js";
 import { agentArchiveDir, ARCHIVE_ROOT, realpathWithin } from "./session-archive.js";
 import { channelAnswer, channelBodyText, commandRecordLine, commandStdoutLine, senderOf, type AskAnswerRef } from "./inbound-body.js";
 import { settleToolCard } from "./auq-echo.js";
-import { sanitizeComponents } from "./history-components.js";
+import { dropFailedReplyRows, keepReplyRows, sanitizeComponents } from "./history-components.js";
 import { askIdOfReplyResult } from "./reply-ask-schema.js";
 
 /** 超过此字节数的 session jsonl 走尾读(见 readSessionHistory)。与搜索同阈值。 */
@@ -506,7 +506,7 @@ function parseHistoryLines(
   const all: HistoryMessage[] = [];
   // tool_use id → 工具卡 / reply 气泡：后续 user 记录里的 tool_result 回填失败态、建出的 askId
   const toolById = new Map<string, HistoryToolCall>();
-  const replyById = new Map<string, HistoryMessage>();
+  const replyById = new Map<string, HistoryMessage>(), replyRows = new Map<string, ReplyComponentRow[]>();
   // v2.21.4 队列附件去重:同一条入站消息若另有 user(isMeta) 记录,以 user 记录为准
   const seenChannelIds = collectChannelMessageIds(lines);
 
@@ -549,6 +549,7 @@ function parseHistoryLines(
         settleToolCard(toolById.get(b.tool_use_id), b, rec);
         const rm = replyById.get(b.tool_use_id);
         if (rm) rm.replyAskId = askIdOfReplyResult(b) ?? rm.replyAskId;
+        if (rm && b.is_error === true) dropFailedReplyRows(rm, replyRows.get(b.tool_use_id)); // 被 bridge 拒发的 reply，按钮不进历史
       }
       const text =
         typeof c === "string"
@@ -622,7 +623,7 @@ function parseHistoryLines(
             replyTexts.push(b.input.text);
             if (typeof b.id === "string" && b.id) replyIds.push(b.id);
             // reply 附带的按钮/选单也进历史（否则用户不在直播那刻就看不到按钮）
-            replyComponents.push(...sanitizeComponents(b.input?.components));
+            replyComponents.push(...keepReplyRows(replyRows, b.id, sanitizeComponents(b.input?.components)));
             // 出站附件（agent 发给用户的图/文件）：jsonl 里是绝对路径,取 basename——bridge 投递时已拷贝到 inbox（时间戳前缀）,取回走后缀匹配兜底
             for (const f of Array.isArray(b.input?.files) ? b.input.files : []) {
               const base = typeof f === "string" ? f.trim().split("/").pop() : "";

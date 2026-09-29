@@ -51,12 +51,10 @@ import {
   discordDeleteChannel,
   moveChannelRequest,
 } from "./bridge/discord-api.js";
-import {
-  runManager,
-  buildStatusPanel,
-  handleMgmtButton,
-  handleMgmtSelect,
-} from "./bridge/management.js";
+import { runManager, buildStatusPanel, handleMgmtOrTeamButton, handleMgmtSelect } from "./bridge/management.js";
+import { postProposalCard } from "./bridge/team-confirm.js";
+import { reservedButtonRefusal } from "./lib/reserved-buttons.js";
+import { editOwnerRefusal, noteReplySent } from "./bridge/edit-guard.js";
 import { runtimeForSessionPath, sessionJsonlPath, translateSessionLine } from "./lib/session-source.js";
 import { resolveSessionIdForWindow } from "./lib/cc-sessions.js";
 import { startWatching, stopWatching, stopWatchingByChannel, resetToolTracking, hasRecentScheduleWakeup, agentNameForChannel, formatTool } from "./bridge/jsonl-watcher.js";
@@ -171,6 +169,8 @@ import { nudgeReason, pickUnrepliedForNudge } from "./lib/reply-nudge.js";
 import { apiQueueToSettle, dropPendingsForChannel, hangsInterAgentWatchdog, hangsPendingReply, nudgesForOrigin, pendingKeysOwedBy, takeApiPending } from "./lib/pending-reply-scope.js";
 import { countsAsActivity, dueForResume, markResumed, noteActivity, noteApiError, resumeText, type ApiErrorState } from "./lib/api-error-resume.js";
 import { initHttpPeer, cancelHttpPeerCallsForChannel } from "./bridge/http-peer.js";
+import { extractControlToken } from "./bridge/api-auth.js";
+import { initTeamRouter } from "./bridge/team-router.js";
 import { readRegistryAgents, readRegistryAgentsSync, agentRuntime, type AgentRuntime } from "./lib/registry.js";
 import { statePath } from "./lib/paths.js";
 import { controlFor, managedFor } from "./lib/runtimes/index.js";
@@ -579,12 +579,12 @@ import {
 } from "./bridge/discord-adapter.js";
 
 /**
- * v2.0.0+ 统一消息投递入口。所有 bridge 的出入站消息（messageCreate 路由 /
- * reply / send_to_agent / pushback）都走这一个函数。
- * 内部按 to.kind 派发（local ws inject / user discord send / api resolve），
- * 状态追踪 + @ mention / header 渲染全在一处管。
+ * v2.0.0+ 统一消息投递入口。所有 bridge 的出入站消息（messageCreate 路由 / reply / send_to_agent / pushback）都走这一个函数。
+ * 内部按 to.kind 派发（local ws inject / user discord send / api resolve），状态追踪 + @ mention / header 渲染全在一处管。
  */
 async function deliver(env: RouterEnvelope): Promise<RouterDelivery> {
+  const refused = reservedButtonRefusal(env.from, env.content, env.meta.components); // 保留按钮只许 bridge 自己发（lib/reserved-buttons.ts）
+  if (refused) return { envelope: env, outcome: { kind: "dropped", reason: refused } };
   // 0. intent-aware 预处理：response 消息先清对应 pending
   if (env.intent === "response" && env.meta.inReplyTo) {
     for (const [key, p] of pendingReplies.entries()) {
@@ -824,7 +824,7 @@ async function deliverToLocal(env: RouterEnvelope, to: RouterLocalEndpoint, stil
   if (isHumanRequest(env)) await preemptForHuman(env, to.channelId, evAgent);
   if (env.meta.interruptNote) meta.interrupt_note = "true"; // 历史只剥真由 bridge 加的抬头(lib/inbound-body.ts),用户手写的同样开头不剥
   const content = await renderContentForLocal(env); // 抢占之后渲染:抬头(env.meta.interruptNote)是抢占时写的
-  // agent→agent 目标回合中就不发、押到 Stop(回合中通知有丢弃窗口);人类/API 消息上面已抢占 C-c 不押;压缩中一律押(压缩结束放行)
+  // agent→agent 与带 waitForIdle 的通知（班子通知等）目标回合中就不发、押到 Stop(回合中通知有丢弃窗口);人类/API 消息上面已抢占 C-c 不押;压缩中一律押(压缩结束放行)
   // 压缩看 turnState(事件态或画面):permission-watcher 8 秒一扫才置 compacting,只看事件态会在压缩开头几秒把消息投进去
   const turn = await probeTurn(to.channelId, evAgent, CONTROL_CHANNEL_ID);
   const compactingNow = turn.main === "compacting";
@@ -834,7 +834,7 @@ async function deliverToLocal(env: RouterEnvelope, to: RouterLocalEndpoint, stil
   if ((stillWanted && !stillWanted()) || !turnCuts.noticeWanted(env)) return { envelope: env, outcome: { kind: "dropped", reason: "已从押后队列撤下" } };
   if (busy) {
     const n = heldLocalMsgs.holdEnv(env); // 从 flush 来的是队里那个 env 本身,不会重复入队
-    console.log(`⏸ 消息押后(${evAgent} ${compactingNow ? "压缩上下文中" : "回合中"}): 来自 ${meta.user},队列 ${n} 条`);
+    console.log(`⏸ 消息押后(${evAgent} ${compactingNow ? "压缩上下文中" : "回合中"}): 来自 ${meta.user}（${env.meta.messageId}）,队列 ${n} 条`);
     // 对调用方是「已受理、排队中」(note=queued):真正 ws.send 在 Stop/扫描时发生,send_to_agent 据此告诉发送方
     return { envelope: env, outcome: { kind: "sent", note: "queued" } };
   }
@@ -1644,7 +1644,7 @@ registerInteractionHandlers(discord, {
   scheduleClearRotation,
   runManager,
   buildStatusPanel,
-  handleMgmtButton,
+  handleMgmtButton: handleMgmtOrTeamButton, // 编排班子提案按钮先截（bridge/team-confirm.ts）
   handleMgmtSelect,
 });
 
@@ -1671,8 +1671,7 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
 
   switch (msg.type) {
     case "ping": {
-      // v2.2.0+: keepalive。收到本身就重置了 Bun 的 ws idleTimeout；回个 pong
-      // 让 channel-server 那侧的 idle 也重置。无需其它处理。
+      // v2.2.0+: keepalive。收到本身就重置了 Bun 的 ws idleTimeout；回个 pong 让 channel-server 那侧的 idle 也重置，无需其它处理。
       try { ws.send(JSON.stringify({ type: "pong" })); } catch { /* non-critical */ }
       return;
     }
@@ -1871,7 +1870,7 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
           ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, error: errMsg }));
           break;
         }
-        const ids = delivery.outcome.discordMessageIds || [];
+        const ids = noteReplySent(delivery.outcome.discordMessageIds || [], fromChannelId); // edit_message 只准改自己发的（bridge/edit-guard.ts）
         ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, result: { messageIds: ids, askId: env.meta.askId, askHash: env.meta.askHash } }));
 
         // v2.6.0+ 事件埋点：agent 的正式回复镜像（out）
@@ -2062,6 +2061,8 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
           ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, error: `edit_message 仅支持 Discord 会话（收到 ${dest.transport}: 前缀地址），API 会话的消息发出后不可编辑，需更正就再 reply 一条。` }));
           break;
         }
+        const notOwner = editOwnerRefusal(String(msg.messageId ?? ""), [...clients].find(([, i]) => i.ws === ws)?.[0] ?? "");
+        if (notOwner) throw new Error(notOwner);
         await discordEditMessage(discord, dest.id, msg.messageId, msg.text);
         ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, result: { ok: true } }));
       } catch (err) {
@@ -2184,6 +2185,7 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
     }
 
     case "move_channel": ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, ...(await moveChannelRequest(discord, WEB_ONLY, msg)) })); break;
+    case "team_proposal_post": ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, ...(await postProposalCard(String(msg.id ?? ""), deliver)) })); break;
     case "check_inbox": ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, ...(await takeInbox(ws, Date.now(), inboxOpts(msg))) })); break;
 
     case "project_info": {
@@ -3150,15 +3152,6 @@ const STATIC_DIR = process.env.BRIDGE_STATIC_DIR || "";
 // 路由 + ws 升级要此 token,/api/v1 走自己的 Bearer。未设 = 非回环控制访问
 // 全拒(fail-closed,当前合法流量 100% 回环,零影响)。
 const CONTROL_TOKEN = process.env.BRIDGE_CONTROL_TOKEN || "";
-/** 从请求取 control token:Authorization: Bearer / x-bridge-token / ?control_token= */
-function extractControlToken(req: Request, url: URL): string | null {
-  const auth = req.headers.get("authorization");
-  if (auth?.toLowerCase().startsWith("bearer ")) return auth.slice(7).trim();
-  const h = req.headers.get("x-bridge-token");
-  if (h) return h.trim();
-  const q = url.searchParams.get("control_token");
-  return q ? q.trim() : null;
-}
 
 /**
  * clear 后的会话轮转收尾（后台异步）。
@@ -3521,6 +3514,7 @@ initInbox({
   } }),
 });
 void import("./bridge/mission.js").then((m) => m.initMission({ clients, deliver, lastMessageSource, controlChannelId: CONTROL_CHANNEL_ID })); // Autopilot：回合结束自动推进
+initTeamRouter({ clients, deliver, hold: (env) => heldLocalMsgs.holdEnv(env), working: localAgentWorking, markBridgeSource: (c) => lastMessageSource.set(c, "agent") }); // 台账事件路由
 void import("./bridge/ask-entry.js").then((m) => m.initAskWiring({ // 待你处理：答复 / 过期通知不抢占（押后由 waitForIdle 标记）
   clients, deliver, hold: (e) => void heldLocalMsgs.holdEnv(e), controlChannelId: CONTROL_CHANNEL_ID, discord: WEB_ONLY ? null : discord,
 }));

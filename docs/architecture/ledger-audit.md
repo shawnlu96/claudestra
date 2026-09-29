@@ -21,6 +21,8 @@ The bridge stays a read-only ledger client: the timer calls `ledger audit --json
 |---|---|---|---|
 | `review_no_reviewer` | Task in `review` for > 20 min (since entering, or the last `note` / `review` event), no reviewer subagent running for it, and this round's last review is not a pass | Dispatch a reviewer | dispatcher, else PM |
 | `review_passed_idle` | Task still in `review` > 30 min after this round's last review passed (`verdict: pass`; notes don't reset it), no reviewer running | Review passed: move to merge, or wait for the owner's call | PM |
+
+In a project with `meta.team` (T30), a pass that still owes an adversarial round (`owesAdversarial` on the spec card's review line, the same check as `ledger review --to merge`; a missing spec card counts as not owed) is reported as `review_no_reviewer` to the dispatcher instead — "还欠对抗式，派对抗式", or "check the spec card" when it can't be told — 20 min after the pass, and `review_passed_idle` is not raised.
 | `executor_idle` | Task in `build` / `fix`, executor's main turn not busy, its session file unwritten for > 15 min (and ≥ 15 min in the stage), no `deliver` since entering | Ask the executor | dispatcher, else PM |
 | `deliver_not_in_review` | Task in `build` / `fix`, a `deliver` recorded **after** entering that stage > 30 min ago, no `review` event after it (a skipped review `review→merge`, a send-back to `fix`, `blocked` never fire) | Check the stage | dispatcher, else PM |
 | `pm_held` | A message to someone on the PM list has been held > 10 min **while that agent is idle**, or was claimed by `check_inbox` > 10 min ago without an ack | `check_inbox` | PM |
@@ -35,7 +37,7 @@ Boundaries are strict: exactly at the threshold does not fire.
 - **Stage entry time** comes from the task's stage events. Imported tasks with approximate times (`approxTime`) are never judged on them.
 - **Reviewers** are found in the `subagents/` of every agent in the project plus the PM list. A description counts when it reads like a review (`Review`, `Reviewer`, `Adversarial review`, `Recheck`, `审查`, `复验`, `复核`); every task-like token in it (`T8h+T11a` → two, `T2b-2`, `HF-182`, and any word with letters and digits such as `release-v2.32.0`; a trailing `-r1` is the round) is compared case-insensitively with ledger ids, and `r<N>` / `round N` / `第 N 轮` give the round. A reviewer counts as running until it answers, is stopped, or writes nothing for 30 min (same rules as the bg-activity cards). Only a missing `subagents/` dir means "none dispatched"; a PM without `cwd` / `sessionId`, an unreadable dir or a recent subagent whose `.meta.json` is missing or broken makes the three review rules (`review_no_reviewer`, `review_passed_idle`, `deliver_not_in_review`) skip for that run.
 - **Busy** means the tmux pane shows a main turn or compaction (`lib/turn-state.ts`). For `pm_held`, an `unknown` pane counts as busy when the session file was written in the last 3 min; while the PM is busy an already-open `pm_held` finding is kept open (`keep`), so busy/idle flips don't reopen and re-push it.
-- **PM / dispatcher** both come from `meta.pms`. A name containing `dispatch` is the dispatcher, and the first other name is the PM. A single name receives everything.
+- **PM / dispatcher** both come from `meta.pms`. With `meta.team.dispatcher` set, that agent is the dispatcher; otherwise a name containing `dispatch` is. The first other name is the PM. A single name receives everything.
 
 Only projects with a PM list are audited, unless `--project` names one. Writing results needs owner / master, or the project's PM with `--project`; `--dry-run` is open to anyone and uses the `LedgerReader` connection (`readwrite` + `create: false` + `query_only`), so it never creates or migrates the database; the notice ends with this command.
 
@@ -62,5 +64,5 @@ If the dispatcher can't be reached for 2 runs in a row, the dispatcher's rules (
 
 ## Follow-ups
 
-- **After T30 merges:** take the dispatcher from `meta.team.dispatcher` (null = no dispatcher, everything goes to the PM) instead of guessing by name; route by `currentHandler`; let `review_no_reviewer` / `deliver_not_in_review` read `dispatch` events (`data.round`) before falling back to subagent descriptions; honour the `meta.team.audit` switch. Automatic escalations (`data.auto: true`) must be told apart if the audit ever counts escalations.
+- **Still open with T30:** route by `currentHandler`; let `review_no_reviewer` / `deliver_not_in_review` read `dispatch` events (`data.round`) before falling back to subagent descriptions; honour the `meta.team.audit` switch. Automatic escalations (`data.auto: true`) must be told apart if the audit ever counts escalations.
 - **After T13a wires `meta.waitForIdle` into delivery:** drop the busy check + hold in `ledger-audit-service.ts` and just deliver.

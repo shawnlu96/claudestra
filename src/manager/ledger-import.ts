@@ -9,7 +9,7 @@ import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import type { Stage, TaskKind } from "../lib/ledger-stages.js";
 import { IMPORT_ACTOR } from "../lib/ledger-checks.js";
-import { busyAsLedgerError, LedgerError } from "../lib/ledger-store.js";
+import { busyAsLedgerError, getMeta, LedgerError } from "../lib/ledger-store.js";
 import { appendEvent, createItem, importTask, setMeta, type ImportTaskInput, type NewItem } from "../lib/ledger-write.js";
 import type { LedgerCli, Result } from "./ledger-context.js";
 import { agentKey } from "./ledger-identity.js";
@@ -266,6 +266,19 @@ function step<T>(what: string, fn: () => T): T {
   }
 }
 
+/**
+ * PM 名单：import 是 owner 专用的一次性迁移，只在名单为空时写；已有名单就拒绝（改名单走 meta --pms 提案 + owner 确认 + team-apply）。
+ * 重跑同一份映射（名单已经一样）照常幂等，不报错。
+ */
+function importPms(db: Database, project: string, pms: string[]): void {
+  const cur = getMeta(db, project).pms;
+  if (JSON.stringify(cur) === JSON.stringify(pms)) return;
+  if (cur.length) {
+    throw new LedgerError("conflict", `项目 ${project} 已有 PM 名单（${cur.join("、")}）：ledger import 只在名单为空时写入；改名单用 ledger meta --pms 提议，owner 在界面上确认后由 team-apply 写入`);
+  }
+  setMeta(db, { actor: IMPORT_ACTOR, dedupKey: hashKey("import:pms", project, pms.join(",")) }, { project, key: "pms", value: pms });
+}
+
 /** 顺序：PM 名单 → 事项 → 任务（依赖事项）→ 事件（目标要先存在）；身份一律 IMPORT_ACTOR（事件自动带 imported） */
 function applyAll(db: Database, plan: ImportPlan): Record<string, Tally> {
   const tally = (): Tally => ({ created: 0, duplicate: 0 });
@@ -273,7 +286,7 @@ function applyAll(db: Database, plan: ImportPlan): Record<string, Tally> {
   const bump = (t: Tally, dup: boolean) => void (dup ? t.duplicate++ : t.created++);
   const drift: string[] = [];
   const actor = IMPORT_ACTOR;
-  if (plan.pms) setMeta(db, { actor, dedupKey: hashKey("import:pms", plan.project, plan.pms.join(",")) }, { project: plan.project, key: "pms", value: plan.pms });
+  if (plan.pms) importPms(db, plan.project, plan.pms);
   for (const { input, ts } of plan.items) {
     const r = step(`事项 ${input.id}`, () => createItem(db, { actor, now: ts, approxTime: true, dedupKey: `import:item:${plan.project}:${input.id}` }, input));
     bump(out.items, r.duplicate);

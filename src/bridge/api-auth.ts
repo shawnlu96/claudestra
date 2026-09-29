@@ -74,3 +74,13 @@ async function touchLater(credentialId: string, ip: string | null): Promise<void
     console.error(`⚠️ 设备凭据 ${credentialId} 记录最近使用失败: ${(e as Error).message}`);
   }
 }
+
+/** 从请求取 control token:Authorization: Bearer / x-bridge-token / ?control_token= */
+export function extractControlToken(req: Request, url: URL): string | null {
+  const auth = req.headers.get("authorization");
+  if (auth?.toLowerCase().startsWith("bearer ")) return auth.slice(7).trim();
+  const h = req.headers.get("x-bridge-token");
+  if (h) return h.trim();
+  const q = url.searchParams.get("control_token");
+  return q ? q.trim() : null;
+}

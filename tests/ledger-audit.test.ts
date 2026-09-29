@@ -102,6 +102,29 @@ describe("review 阶段审查已通过", () => {
     const running = snap({ tasks: [passed(NOW - 60 * MIN, NOW - 40 * MIN)], reviewers: [{ taskId: "t1", round: 1 }] });
     expect(rules(running)).toEqual([]);
   });
+  describe("开了编排班子（T30）：pass 之后还欠对抗式就不是等推 merge", () => {
+    const POLICY = "Claude 审查员一轮；最后一轮对抗式";
+    // 派审要排在 pass 前面（按 seq 判先后），所以先建派审再建 pass
+    const withDispatch = (kind: string, passAt: number) =>
+      entered("T1", "review", NOW - 60 * MIN, [ev("T1", passAt - MIN, "dispatch", { reviewer: kind, round: 1, head: null }), ev("T1", passAt, "review", { round: 1, verdict: "pass" })]);
+    test("常规 pass 之后 31 分钟、规格卡要求对抗式 → 不对 PM 报「推进 merge」，只对调度助理报「派对抗式」", () => {
+      const s = snap({ pms: [PM, DISPATCH], team: { dispatcher: DISPATCH }, tasks: [{ ...withDispatch("regular", NOW - 31 * MIN), specPolicy: POLICY }] });
+      expect(only(s, "review_passed_idle")).toEqual([]);
+      const f = auditLedger(s, NOW).findings;
+      expect(f).toHaveLength(1);
+      expect(f[0]).toMatchObject({ rule: "review_no_reviewer", taskId: "T1", since: NOW - 31 * MIN, suggestion: "还欠对抗式，派对抗式", notify: DISPATCH });
+    });
+    test("说不清（规格卡提到对抗式但读不出策略）→ 同样交调度助理核对；对抗式 pass 还清了 → 照旧报「推进 merge」给 PM", () => {
+      const unknown = snap({ pms: [PM, DISPATCH], team: { dispatcher: DISPATCH }, tasks: [{ ...withDispatch("regular", NOW - 31 * MIN), specPolicy: undefined }] });
+      expect(auditLedger(unknown, NOW).findings.map((f) => [f.rule, f.notify, f.suggestion])).toEqual([["review_no_reviewer", DISPATCH, "按规格卡核对还欠不欠对抗式，欠就派对抗式"]]);
+      const settled = snap({ pms: [PM, DISPATCH], team: { dispatcher: DISPATCH }, tasks: [{ ...withDispatch("adversarial", NOW - 31 * MIN), specPolicy: POLICY }] });
+      expect(only(settled, "review_passed_idle")[0]).toMatchObject({ notify: PM, suggestion: "审查已通过，推进 merge 或等拍板" });
+    });
+    test("没开班子的项目不按规格卡判，照旧报「推进 merge」", () => {
+      const s = snap({ pms: [PM, DISPATCH], tasks: [{ ...withDispatch("regular", NOW - 31 * MIN), specPolicy: POLICY }] });
+      expect(only(s, "review_passed_idle")).toHaveLength(1);
+    });
+  });
   test("上一轮的 pass（进入本轮 review 之前）不算", () => {
     const old = entered("T1", "review", NOW - 25 * MIN, [], {});
     old.events.splice(1, 0, ev("T1", NOW - 90 * MIN, "review", { round: 1, verdict: "pass" }));
@@ -313,6 +336,11 @@ describe("收件人与去重 key", () => {
     expect(auditRecipient("ship_stalled", [DISPATCH])).toBe(DISPATCH);
     expect(auditRecipient("executor_idle", [PM])).toBe(PM);
     expect(auditRecipient("pm_held", [])).toBeNull();
+    // 配了 meta.team.dispatcher 就只认它：名字带 dispatch 的 PM 不再被当成调度助理
+    const disp = "agent-helper";
+    expect(auditRecipient("review_no_reviewer", [DISPATCH, disp], disp)).toBe(disp);
+    expect(auditRecipient("ship_stalled", [DISPATCH, disp], disp)).toBe(DISPATCH);
+    expect(auditRecipient("ship_stalled", [disp, DISPATCH], null)).toBe(disp);
   });
   test("同一个状态跑两次 key 一样；时间往后走 key 不变", () => {
     const s = snap({ tasks: [entered("T1", "review", NOW - 30 * MIN)] });
