@@ -6,7 +6,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdtempSync, readdirSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { appendSendKeysAudit, authorizedSendKeysArgs, guardedScreenOf, sendKeysCaller, type SendKeysAudit } from "../src/lib/send-key-guard.js";
+import { appendSendKeysAudit, authorizedSendKeysArgs, guardedScreenOf, seenScreenOf, sendKeysCaller, type SendKeysAudit } from "../src/lib/send-key-guard.js";
 import { parseSendKeysArgs, sendKeysChecked, type SendKeysDeps } from "../src/manager/send-keys.js";
 import { handleSwmodelButton } from "../src/bridge/swmodel-button.js";
 
@@ -36,19 +36,34 @@ describe("guardedScreenOf", () => {
   test("草稿、回合中、LP 在跑、切模型确认框（管理按钮要能按）→ 不拦", () => {
     for (const f of PLAIN) expect([f, guardedScreenOf(fx(f), undefined)]).toEqual([f, null]);
   });
+  test("seenScreenOf：切模型 / effort 确认框单独认出来（按钮授权要认准它）；空屏 = unreadable；草稿 = 普通画面", () => {
+    for (const f of ["cc2.1.280-switch-model.txt", "cc2.1.280-change-effort.txt"]) expect([f, seenScreenOf(fx(`switch-confirm/${f}`), undefined)]).toEqual([f, "switch_confirm"]);
+    expect([seenScreenOf("", undefined), seenScreenOf(" \n\n  \n", undefined)]).toEqual(["unreadable", "unreadable"]);
+    expect(seenScreenOf(fx("turn-zone/cc-numlist-draft.txt"), undefined)).toBeNull();
+    expect(seenScreenOf(fx("quota-wall/menu-on-credits.txt"), undefined)).toBe("limit_menu");
+  });
 });
 
-const PROG = { force: false, authorizedBy: null };
-const FORCE = { force: true, authorizedBy: null };
+const PROG = { force: false, authorizedBy: null, expect: null };
+const FORCE = { force: true, authorizedBy: null, expect: null };
+const SWMODEL = { force: false, authorizedBy: "button:swmodel_yes:agent-x", expect: "switch_confirm" as const };
 
-function harness(screens: string[]) {
+/** screens：依次抓到的画面；Error = 这一次抓屏失败。sendKey 照真实实现的约定：先过 gate，过了才算发出 */
+function harness(screens: (string | Error)[]) {
   const sent: string[] = [];
   const audits: SendKeysAudit[] = [];
   let i = 0;
   const deps: SendKeysDeps = {
-    capture: async () => screens[Math.min(i++, screens.length - 1)]!,
+    capture: async () => {
+      const s = screens[Math.min(i++, screens.length - 1)]!;
+      if (s instanceof Error) throw s;
+      return s;
+    },
     runtimeOf: () => undefined,
-    sendKey: async (_t, k) => void sent.push(k),
+    sendKey: async (_t, k, gate) => {
+      await gate();
+      sent.push(k);
+    },
     audit: (e) => void audits.push(e),
     caller: () => "agent-pm",
     now: () => new Date("2026-09-30T00:00:00Z"),
@@ -96,6 +111,36 @@ describe("sendKeysChecked", () => {
     if (!r.ok) expect(r.sent).toEqual(["Enter"]);
   });
 
+  test("抓屏失败 / 超时 / 空屏：一个键都不发，报 unreadable 和抓屏的报错；--force 照发，审计记 unreadable", async () => {
+    for (const s of [new Error("tmux capture-pane 超时"), "", "  \n \n"]) {
+      for (const opts of [PROG, SWMODEL]) {
+        const h = harness([s]);
+        const r = await sendKeysChecked("agent-x", ["Enter"], opts, h.deps);
+        expect([r.ok, r.ok ? null : r.screen, h.sent, h.audits]).toEqual([false, "unreadable", [], []]);
+        if (!r.ok && s instanceof Error) expect(r.error).toContain("超时");
+      }
+    }
+    const f = harness([new Error("no such window")]);
+    const r = await sendKeysChecked("agent-x", ["Escape"], FORCE, f.deps);
+    expect([r.ok, f.sent, f.audits.map((a) => a.screen)]).toEqual([true, ["Escape"], ["unreadable"]]);
+  });
+
+  test("抓屏只发生在 sendKey 给的 gate 里（真实 sendKey 在拿锁、等完节流之后才调 gate，见 tests/esc-guard.test.ts）", async () => {
+    let inGate = false;
+    const outside: string[] = [];
+    const h = harness([fx("turn-zone/cc-draft-num.txt")]);
+    const cap = h.deps.capture;
+    h.deps.capture = async (t) => (inGate || outside.push(t), cap(t));
+    h.deps.sendKey = async (_t, k, gate) => {
+      inGate = true;
+      await gate();
+      inGate = false;
+      h.sent.push(k);
+    };
+    for (const opts of [PROG, FORCE, SWMODEL]) await sendKeysChecked("agent-x", ["C-u", "hi", "Enter"], opts, h.deps);
+    expect(outside).toEqual([]);
+  });
+
   test("管理按钮代决切模型（swmodel_yes / no 发 Enter / Escape）不受影响", async () => {
     for (const k of ["Enter", "Escape"]) {
       const h = harness([fx("switch-confirm/cc2.1.280-switch-model.txt")]);
@@ -107,24 +152,46 @@ describe("sendKeysChecked", () => {
 
 describe("owner 点过才发键的路径（--authorized）", () => {
   test("argv 形状：authorizedSendKeysArgs 拼的，manager 解析回来是同一组选项和键", () => {
-    const argv = authorizedSendKeysArgs("agent-x", "button:swmodel_yes:agent-x", ["Enter"]);
+    const argv = authorizedSendKeysArgs("agent-x", "button:swmodel_yes:agent-x", "switch_confirm", ["Enter"]);
     expect(argv.slice(0, 2)).toEqual(["tmux-send-keys", "agent-x"]);
-    expect(parseSendKeysArgs(argv.slice(2))).toEqual({ force: false, authorizedBy: "button:swmodel_yes:agent-x", keys: ["Enter"] });
-    expect(parseSendKeysArgs(["--force", "1"])).toEqual({ force: true, authorizedBy: null, keys: ["1"] });
+    expect(parseSendKeysArgs(argv.slice(2))).toEqual({ ...SWMODEL, keys: ["Enter"] });
+    expect(parseSendKeysArgs(["--force", "1"])).toEqual({ ...FORCE, keys: ["1"] });
+  });
+
+  test("选项只认键之前的；--authorized 与 --expect 要成对；--expect 只认已知画面", () => {
+    expect(parseSendKeysArgs(["1", "--force", "Enter"])).toEqual({ ...PROG, keys: ["1", "--force", "Enter"] });
+    for (const bad of [["--authorized", "button:x", "Enter"], ["--expect", "limit_menu", "1"], ["--authorized", "b", "--expect", "input_box", "1"], ["--force"], ["--authorized"]]) {
+      expect([bad, "error" in parseSendKeysArgs(bad)]).toEqual([bad, true]);
+    }
   });
 
   test("授权发：切模型框上照发，审计记上是哪个按钮授权的", async () => {
     const h = harness([fx("switch-confirm/cc2.1.280-switch-model.txt")]);
-    const r = await sendKeysChecked("agent-x", ["Enter"], { force: false, authorizedBy: "button:swmodel_yes:agent-x" }, h.deps);
+    const r = await sendKeysChecked("agent-x", ["Enter"], SWMODEL, h.deps);
     expect([r.ok, h.sent]).toEqual([true, ["Enter"]]);
-    expect(h.audits.map((a) => [a.authorizedBy, a.screen, a.keys])).toEqual([["button:swmodel_yes:agent-x", null, ["Enter"]]]);
+    expect(h.audits.map((a) => [a.authorizedBy, a.screen, a.keys])).toEqual([["button:swmodel_yes:agent-x", "switch_confirm", ["Enter"]]]);
   });
 
-  test("按钮点得晚、框已经换成额度菜单 / 权限框：授权不算数，不发、不记", async () => {
-    for (const f of ["quota-wall/menu-on-credits.txt", "turn-zone/modal-permission.txt"]) {
+  test("按钮点得晚、框已经关了回到输入框（草稿在框里）/ 换成额度菜单 / 权限框：授权不算数，不发、不记，说「框已经变了」", async () => {
+    for (const f of ["turn-zone/cc-numlist-draft.txt", "turn-zone/cc-draft-num.txt", "lp/input-draft-multiline.ansi", "turn-zone/busy-queued.txt",
+      "quota-wall/menu-on-credits.txt", "turn-zone/modal-permission.txt"]) {
+      for (const k of ["Enter", "Escape"]) {
+        const h = harness([fx(f)]);
+        const r = await sendKeysChecked("agent-x", [k], SWMODEL, h.deps);
+        expect([f, k, r.ok, h.sent, h.audits]).toEqual([f, k, false, [], []]);
+        if (!r.ok) expect(r.error).toContain("框已经变了");
+      }
+    }
+  });
+
+  test("owner 在受保护画面上做的选择（如额度菜单点了某个选项）：--expect 那种画面就放行，不用 --force；画面不对照样不发", async () => {
+    const menu = { force: false, authorizedBy: "ask:ask_123", expect: "limit_menu" as const };
+    const ok = harness([fx("quota-wall/menu-on-credits.txt")]);
+    expect((await sendKeysChecked("agent-x", ["2"], menu, ok.deps)).ok).toBe(true);
+    expect([ok.sent, ok.audits.map((a) => [a.authorizedBy, a.screen])]).toEqual([["2"], [["ask:ask_123", "limit_menu"]]]);
+    for (const f of ["quota-wall/walled.txt", "turn-zone/cc-draft-num.txt"]) {
       const h = harness([fx(f)]);
-      const r = await sendKeysChecked("agent-x", ["Enter"], { force: false, authorizedBy: "button:swmodel_yes:agent-x" }, h.deps);
-      expect([f, r.ok, h.sent, h.audits]).toEqual([f, false, [], []]);
+      expect([f, (await sendKeysChecked("agent-x", ["2"], menu, h.deps)).ok, h.sent]).toEqual([f, false, []]);
     }
   });
 
@@ -134,8 +201,8 @@ describe("owner 点过才发键的路径（--authorized）", () => {
     expect((await handleSwmodelButton("swmodel_yes:agent-x", rm)).text).toContain("确认切换模型");
     expect((await handleSwmodelButton("swmodel_no:agent-x", rm)).text).toContain("保持当前模型");
     expect(calls).toEqual([
-      ["tmux-send-keys", "agent-x", "--authorized", "button:swmodel_yes:agent-x", "Enter"],
-      ["tmux-send-keys", "agent-x", "--authorized", "button:swmodel_no:agent-x", "Escape"],
+      ["tmux-send-keys", "agent-x", "--authorized", "button:swmodel_yes:agent-x", "--expect", "switch_confirm", "Enter"],
+      ["tmux-send-keys", "agent-x", "--authorized", "button:swmodel_no:agent-x", "--expect", "switch_confirm", "Escape"],
     ]);
     expect((await handleSwmodelButton("swmodel_yes:agent-x", async () => ({ error: "窗口停在额度菜单上" }))).text).toBe("❌ 发键失败: 窗口停在额度菜单上");
   });

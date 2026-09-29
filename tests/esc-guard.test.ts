@@ -170,3 +170,37 @@ describe("持锁进程被暂停过、锁已被回收（T13e r1 P1-2）", () => {
     expect(await esc.lastSentAt("master:agent-x")).toBe(0);
   });
 });
+
+describe("调用方的画面闸（gate）与非 Esc 键的同一把锁（T41a 对抗式 r1 P1-3：先查画面、再等锁 / 节流，等的时候弹出来的框挡不住）", () => {
+  test("gate 在拿锁、等完双击节流、blocked 之后才跑，紧挨着发；gate 抛错 = 不发、错误原样给调用方", async () => {
+    const w = world({ ids: { t: "@1" } });
+    const esc = createEscGuard(w.deps);
+    await esc("t");
+    const order: string[] = [];
+    const lock = w.deps.lock;
+    w.deps.lock = async (k) => (order.push("lock"), lock(k));
+    w.deps.sleep = async (ms) => void (order.push("throttle"), w.advance(ms));
+    w.deps.blocked = async () => (order.push("blocked"), null);
+    await esc("t", { strict: true, gate: async () => void order.push(`gate@${w.deps.now()}`) });
+    expect(order).toEqual(["lock", "throttle", "blocked", `gate@${w.sent[1]!.at}`]);
+    await expect(esc("t", { strict: true, gate: async () => { throw new Error("窗口停在额度菜单上"); } })).rejects.toThrow("额度菜单");
+    expect(w.sent.length).toBe(2);
+  });
+  test("locked：非 Esc 的键拿同一个窗口的锁；Esc 还拿着锁（等节流）时排在后面，不会插进 Esc 的查画面和发键之间", async () => {
+    const w = world({ ids: { a: "@1", b: "@1" } });
+    const esc = createEscGuard(w.deps);
+    await esc("a");
+    const order: string[] = [];
+    await Promise.all([
+      esc("a", { gate: async () => void order.push("esc-gate") }).then(() => order.push("esc-sent")),
+      esc.locked("b", async () => void order.push("key")),
+    ]);
+    expect(order).toEqual(["esc-gate", "esc-sent", "key"]);
+  });
+  test("locked 拿不到锁：fn 不跑，抛错", async () => {
+    const w = world({ ids: { t: "@1" }, noLock: true });
+    let ran = false;
+    await expect(createEscGuard(w.deps).locked("t", async () => void (ran = true))).rejects.toThrow("等不到窗口锁");
+    expect(ran).toBe(false);
+  });
+});

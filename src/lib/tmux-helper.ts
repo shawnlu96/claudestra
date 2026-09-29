@@ -213,8 +213,10 @@ export const tmuxSendEscape = createEscGuard({
   now: () => Date.now(),
 });
 
-/** 程序敲进 agent 窗口的字 / 按键：发之前记一笔（按窗口、跨进程），bridge 据此认出会话记录里不是 owner 在终端里打的（lib/program-input.ts） */
-export const noteProgramInput = async (target: string, text = ""): Promise<void> => recordProgramInput(escFile(await tmuxSendEscape.keyOf(target), "input"), text);
+/** 程序敲进 agent 窗口的字 / 按键：发之前记一笔（按窗口、跨进程），bridge 据此认出会话记录里不是 owner 在终端里打的（lib/program-input.ts）。
+ * programInputNoter 先把要等的（查窗口 id）等完，返回同步的记账函数：查完画面到发键之间不能再有等待（manager/send-keys.ts） */
+export const programInputNoter = async (target: string) => { const f = escFile(await tmuxSendEscape.keyOf(target), "input"); return (text = "") => recordProgramInput(f, text); };
+export const noteProgramInput = async (target: string, text = ""): Promise<void> => (await programInputNoter(target))(text);
 export const programInputsOf = async (target: string): Promise<ProgramInput[]> => readProgramInputs(escFile(await tmuxSendEscape.keyOf(target), "input"));
 
 /**

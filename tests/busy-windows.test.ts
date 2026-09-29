@@ -57,4 +57,3 @@ describe("撞墙等待不算空闲（T41a：升级会重启全员，CC 排好的
     expect(windowLooksIdle(undefined, wallFx("draft"))).toBe(paneLooksIdle(wallFx("draft")));
   });
 });
-

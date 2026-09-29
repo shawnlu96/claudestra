@@ -104,7 +104,7 @@ import { sandboxManagerRefusal } from "./lib/sandbox-env.js";
 import { assertResumable, assertSandboxSession } from "./lib/sandbox-sessions.js";
 import { loadRegistry, patchRegistryAgent, saveRegistry, normalizeName, assertValidNewAgent, formatAge, output, outputSync, extractPermFlags, extractEffortFlag, extractModeFlag, extractModelFlag, extractBoolFlag, extractMultiFlag, extractStringFlag } from "./manager/core.js";
 import { runProjectCommand } from "./manager/projects.js";
-import { parseSendKeysArgs, realSendKeysDeps, sendKeysChecked } from "./manager/send-keys.js";
+import { runSendKeysCommand, SEND_KEYS_USAGE } from "./manager/send-keys.js";
 import { cmdCronAdd, cmdCronList, cmdCronEdit, cmdCronRemove, cmdCronToggle, cmdCronHistory } from "./manager/cron.js";
 import { cmdPermissions } from "./manager/permissions.js";
 import { cmdKill, cmdRemove } from "./manager/agent-kill.js"; // 按 registry 补完剩余步骤、重复跑幂等
@@ -2100,8 +2100,7 @@ async function cmdTmuxSendKeys(name: string, args: string[]) {
     output({ ok: false, error: `${tmuxName} 不存在` });
     return;
   }
-  const { keys, ...opts } = parseSendKeysArgs(args); // keys 可以是 "Enter" "Escape" "Left" "C-c" 或普通字符串；画面闸见 manager/send-keys.ts
-  output({ agent: tmuxName, ...(await sendKeysChecked(tmuxName, keys, opts, realSendKeysDeps())) });
+  output({ agent: tmuxName, ...(await runSendKeysCommand(tmuxName, args)) }); // keys 可以是 "Enter" "Escape" "Left" "C-c" 或普通字符串；画面闸见 manager/send-keys.ts
 }
 
 async function cmdTmuxCapture(name: string, lines: number) {
@@ -2771,7 +2770,7 @@ switch (cmd) {
 
   case "tmux-send-keys": {
     const [name, ...rest] = args;
-    if (!name || parseSendKeysArgs(rest).keys.length === 0) { output({ ok: false, error: "usage: tmux-send-keys <agent> [--force] [--authorized <ref>] <keys...>" }); break; }
+    if (!name || !rest.length) { output({ ok: false, error: SEND_KEYS_USAGE }); break; }
     await cmdTmuxSendKeys(name, rest);
     break;
   }
@@ -2944,7 +2943,7 @@ switch (cmd) {
         "relay-status                    — show the relay connection (address, fingerprint, contacts online)",
         "metrics [--today|--week|--since <ISO>] [--agent <n>] [--raw]  — summarise the bridge event log",
         "tmux-screenshot <agent>         — screenshot an agent's tmux window (returns a PNG path)",
-        "tmux-send-keys <agent> [--force] <keys...>  — send keys/text (refused on limit menu / countdown / permission / AUQ; --force audits)",
+        "tmux-send-keys <agent> [--force] <keys...>  — send keys/text (refused on limit menu / countdown / permission / AUQ / unreadable pane; --force audits)",
         "tmux-capture <agent> [lines]    — read the last N lines of an agent's pane",
         "fleet state | fleet <lp-on|lp-off|compact|save-compact|lp-compact> --agents a,b|--project p|--all [--walled] [--ctx-over N] [--dry-run]  — batch ops via the bridge",
         "tmux-wait-idle <agent> [ms]     — block until the agent is idle again (default 30s)",
