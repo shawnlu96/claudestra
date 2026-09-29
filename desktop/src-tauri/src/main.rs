@@ -41,6 +41,35 @@ impl RestartGate {
     }
 }
 
+/// One restart in flight. Dropping it ends the gate, so an early return or a panic can't leave
+/// `in_flight` stuck (which would refuse every later restart until the app is quit).
+pub struct RestartGuard<'a> {
+    gate: &'a Mutex<RestartGate>,
+    /// kickstart ran (even partly): the daemons are coming back up, so the light settles grey
+    pub kicked: bool,
+}
+
+impl<'a> RestartGuard<'a> {
+    fn acquire(gate: &'a Mutex<RestartGate>, now: Instant) -> Option<Self> {
+        // lazily, and after the lock is released: a guard built for a refused begin would be
+        // dropped here and end the restart that is actually running
+        let began = lock(gate).begin(now);
+        began.then(|| RestartGuard { gate, kicked: false })
+    }
+}
+
+impl Drop for RestartGuard<'_> {
+    fn drop(&mut self) {
+        lock(self.gate).end(Instant::now(), self.kicked);
+    }
+}
+
+/// The gate's data stays valid even if some holder panicked; `unwrap` here would turn one panic
+/// into a second one inside `Drop` (an abort) and lock the gate for good.
+fn lock(gate: &Mutex<RestartGate>) -> std::sync::MutexGuard<'_, RestartGate> {
+    gate.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 pub struct AppState {
     install: Mutex<env::Install>,
     pub tray: Mutex<Option<tray::TrayHandles>>,
@@ -59,21 +88,13 @@ impl AppState {
     }
 
     /// One restart at a time, and none while the previous one is still settling.
-    pub fn begin_restart(&self) -> Result<(), String> {
-        if self.restart.lock().unwrap().begin(Instant::now()) {
-            Ok(())
-        } else {
-            Err(i18n::tr("正在重启，稍等再试", "A restart is already in progress"))
-        }
-    }
-
-    /// `kicked`: kickstart ran (even partly), so the daemons are coming back up.
-    pub fn end_restart(&self, kicked: bool) {
-        self.restart.lock().unwrap().end(Instant::now(), kicked);
+    pub fn begin_restart(&self) -> Result<RestartGuard<'_>, String> {
+        RestartGuard::acquire(&self.restart, Instant::now())
+            .ok_or_else(|| i18n::tr("正在重启，稍等再试", "A restart is already in progress"))
     }
 
     pub fn restarting(&self) -> bool {
-        self.restart.lock().unwrap().busy(Instant::now())
+        lock(&self.restart).busy(Instant::now())
     }
 
     pub fn last_str(&self, key: &str) -> Option<String> {
@@ -98,7 +119,7 @@ fn show_window(app: &AppHandle, tab: &str, notice: Option<&str>) {
 /// Menu actions have no UI of their own; a failure opens the window with the reason.
 fn report(app: &AppHandle, what: &str, r: Result<(), String>) {
     if let Err(e) = r {
-        show_window(app, "status", Some(&format!("{what}：{e}")));
+        show_window(app, "status", Some(&format!("{what}{}{e}", i18n::tr("：", ": "))));
     }
 }
 
@@ -188,6 +209,29 @@ mod tests {
         assert!(!g.begin(t0 + Duration::from_secs(14)));
         assert!(!g.busy(t0 + RESTART_SETTLE));
         assert!(g.begin(t0 + RESTART_SETTLE));
+    }
+
+    #[test]
+    fn guard_ends_the_gate_on_drop() {
+        let gate = Mutex::new(RestartGate::default());
+        let g = RestartGuard::acquire(&gate, Instant::now()).expect("free");
+        assert!(RestartGuard::acquire(&gate, Instant::now()).is_none(), "second restart while the first runs");
+        drop(g); // kicked stays false: nothing to settle
+        assert!(RestartGuard::acquire(&gate, Instant::now()).is_some());
+    }
+
+    #[test]
+    fn guard_releases_the_gate_when_the_restart_panics() {
+        let gate = Mutex::new(RestartGate::default());
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let mut g = RestartGuard::acquire(&gate, Instant::now()).expect("free");
+            g.kicked = true;
+            panic!("restart blew up");
+        }));
+        assert!(r.is_err());
+        let t = Instant::now();
+        assert!(lock(&gate).busy(t), "kicked before the panic: still settles grey");
+        assert!(!lock(&gate).busy(t + RESTART_SETTLE), "but never stays stuck");
     }
 
     #[test]

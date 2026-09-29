@@ -43,16 +43,27 @@ pub async fn probe_tools(app: AppHandle) -> Result<Value, String> {
 }
 
 /// Shared by the menu and the window. Refused while another restart runs or settles; desktop-cli
-/// itself refuses during an auto-update. `results` present = kickstart was attempted (maybe only
-/// partly), so the grey settle window applies; a refusal before that leaves the light alone.
+/// itself refuses during an auto-update. The gate is held by a guard, so it is released however
+/// this returns; the tray is refreshed after the guard drops, to pick up the grey settle state.
 pub fn restart_now(app: &AppHandle) -> Result<Value, String> {
     let state = app.state::<AppState>();
-    state.begin_restart()?;
-    let raw = cli::desktop_cli_raw(&state.install(), "restart");
-    state.end_restart(raw.as_ref().is_ok_and(|v| v["results"].is_array()));
+    let inst = state.install();
+    let raw = {
+        let mut guard = state.begin_restart()?;
+        let raw = cli::desktop_cli_raw(&inst, "restart");
+        guard.kicked = kick_attempted(inst.cli_available, &raw);
+        raw
+    };
     let status = tray::refresh(app);
     tray::apply(app, &status);
     raw.and_then(cli::check_error)
+}
+
+/// Did kickstart (maybe only partly) run? `results` present = yes; a JSON refusal without it
+/// (auto-update running) = no, the light stays as is. No JSON at all (timeout, crash) = unknown,
+/// so settle grey: a false "healthy" right after a half-done restart is the worse mistake.
+fn kick_attempted(cli_available: bool, raw: &Result<Value, String>) -> bool {
+    cli_available && raw.as_ref().map_or(true, |v| v["results"].is_array())
 }
 
 #[tauri::command]
@@ -73,4 +84,17 @@ pub async fn open_logs(app: AppHandle) -> Result<(), String> {
 #[tauri::command]
 pub async fn launch_setup(app: AppHandle) -> Result<String, String> {
     blocking(move || cli::launch_setup(&app.state::<AppState>().install())).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn kick_attempted_only_when_kickstart_may_have_run() {
+        assert!(kick_attempted(true, &Ok(json!({ "ok": false, "results": [], "error": "x" }))));
+        assert!(!kick_attempted(true, &Ok(json!({ "ok": false, "error": "auto-update running" }))));
+        assert!(kick_attempted(true, &Err("timed out after 90s".into())), "unknown outcome settles grey");
+        assert!(!kick_attempted(false, &Err("not set up".into())), "never spawned");
+    }
 }

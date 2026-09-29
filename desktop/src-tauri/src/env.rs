@@ -8,7 +8,7 @@
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::OnceLock;
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 pub const BRIDGE_LABEL: &str = "com.claudestra.bridge";
@@ -89,12 +89,35 @@ pub fn run_with_timeout(cmd: &mut Command, timeout: Duration) -> Result<(bool, S
     Ok((status.success(), out, err))
 }
 
+/// After a failed read, wait this long before starting another login shell.
+const LOGIN_PATH_RETRY: Duration = Duration::from_secs(60);
+
+/// Keeps a successful read for good; a failure (rc error, 5 s timeout) is retried, but not on
+/// every call: before setup `locate()` runs on each 8 s poll, and an interactive shell each time
+/// would re-run the user's whole rc stack.
+struct LoginPathCache {
+    value: Option<String>,
+    failed_at: Option<Instant>,
+}
+
+impl LoginPathCache {
+    fn get(&mut self, now: Instant, read: impl FnOnce() -> Option<String>) -> Option<String> {
+        if self.value.is_none() && self.failed_at.map_or(true, |t| now.duration_since(t) >= LOGIN_PATH_RETRY) {
+            self.value = read();
+            self.failed_at = self.value.is_none().then_some(now);
+        }
+        self.value.clone()
+    }
+}
+
 /// PATH from an interactive login shell (bun's installer writes to .zshrc, not .zprofile).
-/// Markers keep rc-file chatter out of the value. Cached: before setup, `locate()` runs on every
-/// poll, and an interactive shell each time would re-run the user's whole rc stack every 8 s.
+/// Markers keep rc-file chatter out of the value. Held under the lock so two polls never start
+/// two shells at once.
 fn login_shell_path() -> Option<String> {
-    static CACHE: OnceLock<Option<String>> = OnceLock::new();
-    CACHE.get_or_init(read_login_shell_path).clone()
+    static CACHE: Mutex<LoginPathCache> = Mutex::new(LoginPathCache { value: None, failed_at: None });
+    // a panic inside read() leaves the cache itself consistent (at worst still empty)
+    let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    cache.get(Instant::now(), read_login_shell_path)
 }
 
 fn read_login_shell_path() -> Option<String> {
@@ -150,6 +173,16 @@ mod tests {
     #[test]
     fn quotes_single_quotes() {
         assert_eq!(sh_quote("/a b/it's"), "'/a b/it'\\''s'");
+    }
+
+    #[test]
+    fn login_path_failure_is_retried_later_success_is_kept() {
+        let t0 = Instant::now();
+        let mut c = LoginPathCache { value: None, failed_at: None };
+        assert_eq!(c.get(t0, || None), None);
+        assert_eq!(c.get(t0 + Duration::from_secs(10), || panic!("retried too soon")), None);
+        assert_eq!(c.get(t0 + LOGIN_PATH_RETRY, || Some("/a:/b".into())).as_deref(), Some("/a:/b"));
+        assert_eq!(c.get(t0 + LOGIN_PATH_RETRY * 5, || panic!("success is cached")).as_deref(), Some("/a:/b"));
     }
 
     #[test]
