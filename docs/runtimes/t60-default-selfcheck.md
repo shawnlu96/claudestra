@@ -35,6 +35,14 @@ transport after restart. If the ACP start falls back to tmux, it reports the
 fallback and an error instead of claiming ACP succeeded. Six Bun entrypoint
 builds and the strict check passed after these changes.
 
+The owner-reported Codex tmux interruption/queue failure is covered by an ACP
+busy-message regression. The bridge interrupt gate emits no Esc and no
+"interrupted" status for a busy Codex ACP channel. A real ACP host, stub
+adapter, channel-server and tool proxy then receive a second human message
+while the first turn is paused: steering injects it into that turn, the reply
+confirms receipt, the original turn ends normally, and exactly one Stop is
+reported. The stub's short pause keeps this path deterministic in CI.
+
 Follow-up inspection also found that a new agent created with explicit
 `--transport tmux` needs the same sticky registry value as a manual rollback;
 the create path now writes it. A failed ACP launch in the sandbox cannot fall
