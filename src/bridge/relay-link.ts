@@ -14,7 +14,12 @@ import type { RelayLinkInfo } from "../lib/relay-client-types.js";
 import { instanceKeySync, signedHeaders } from "../lib/instance-key.js";
 import { createE2eOutbound, defaultOutboundDeps } from "../lib/peer-e2e-outbound.js";
 import { E2E_RESPONSE_WIRE_MAX } from "../lib/peer-e2e-wire.js";
-import { ensurePeerIngressPort, resolveWebPort } from "../lib/peer-ingress-config.js";
+import { existsSync, readFileSync, rmSync } from "node:fs";
+import { ensurePeerIngressPort, resolveWebPort, saveEnvText, writeEnvKeys } from "../lib/peer-ingress-config.js";
+import { acquireLock } from "../lib/file-lock.js";
+import { statePath } from "../lib/paths.js";
+import { REPO_ROOT } from "../lib/repo-root.js";
+import { DEFAULT_RELAY_URL, normalizeRelayUrl } from "../lib/setup-remote-access.js";
 import { configuredPeerIngressPort, DEFAULT_BRIDGE_PORT } from "../lib/bridge-url.js";
 import { bridgeHttpBase, bridgePortOf } from "../lib/bridge-port.js";
 import { repoEnvVar } from "../lib/env-file.js";
@@ -70,14 +75,26 @@ export async function refreshRelayContacts(): Promise<void> {
   client.setContacts(peers.filter((p) => !p.disabled && p.fp && FP_RE.test(p.fp)).map((p) => p.fp!));
 }
 
-/** bridge 启动时调一次。没配 RELAY_URL 立刻返回；连接失败由客户端库自己退避重连，这里不抛 */
-export async function startRelayLink(deps: { handleApi?: ApiHandler } = {}): Promise<void> {
+/** 启动时的依赖留着：网页上一键接入中继时（enableRelay）当场连，用同一套 */
+let startDeps: { handleApi?: ApiHandler } = {};
+
+export type RelayStart = { ok: true } | { ok: false; error: string };
+
+/**
+ * bridge 启动时调一次，网页一键接入时（enableRelay）再调。连上 / 已在连 = ok；连中继失败由客户端库自己退避重连，
+ * 那是「离线在重连」，不算失败。失败 = 这台机器根本连不了：没配地址、沙箱、没有实例密钥、客户端建不起来
+ */
+export async function startRelayLink(deps: { handleApi?: ApiHandler } = {}): Promise<RelayStart> {
+  startDeps = deps;
   const relayUrl = repoEnvVar("RELAY_URL").trim();
-  if (!relayUrl || client || sandboxDisabled("中继")) return; // 沙箱不用生产实例身份连中继（lib/sandbox.ts）
+  if (client) return { ok: true };
+  if (!relayUrl) return { ok: false, error: "没配 RELAY_URL" };
+  const off = sandboxDisabled("中继"); // 沙箱不用生产实例身份连中继（lib/sandbox.ts）
+  if (off) return { ok: false, error: off };
   const key = instanceKeySync();
   if (!key) {
     console.error("⚠️ 中继：本机没有实例密钥（instance-key.pem 读写失败），不连中继");
-    return;
+    return { ok: false, error: "本机没有实例密钥（instance-key.pem 读写失败）" };
   }
   let port = configuredPeerIngressPort({ PEER_INGRESS_PORT: repoEnvVar("PEER_INGRESS_PORT") });
   if (!port) {
@@ -88,10 +105,30 @@ export async function startRelayLink(deps: { handleApi?: ApiHandler } = {}): Pro
   }
   const ingressPort = port;
   const webPort = resolveWebPort();
-  const webBase = `http://127.0.0.1:${webPort}`;
   if (ingressPort === webPort) console.error(`⚠️ 中继：peer 入口端口和网页端口都是 ${webPort}，子域名隧道一律拒绝（local_unreachable）——改 .env 的 PEER_INGRESS_PORT 或 WEB_PORT`);
+  try {
+    client = connectClient(relayUrl, key, ingressPort, webPort, deps);
+  } catch (e) {
+    console.error(`⚠️ 中继：客户端建不起来：${(e as Error).message}`);
+    return { ok: false, error: `中继客户端建不起来：${(e as Error).message}` };
+  }
+  if (!contactsTimer) contactsTimer = setInterval(() => void refreshRelayContacts(), CONTACTS_EVERY_MS);
+  return { ok: true };
+}
+
+/** 撤掉 startRelayLink 建的客户端和联系人定时器（一键接入失败回滚用） */
+function stopRelayLink(): void {
+  client?.close();
+  client = null;
+  if (contactsTimer) clearInterval(contactsTimer);
+  contactsTimer = null;
+}
+
+function connectClient(relayUrl: string, key: NonNullable<ReturnType<typeof instanceKeySync>>, ingressPort: number | null, webPort: number,
+  deps: { handleApi?: ApiHandler }): RelayClient {
+  const webBase = `http://127.0.0.1:${webPort}`;
   const log = (level: "info" | "warn" | "error", msg: string) => (level === "info" ? console.log : console.error)(`🛰 中继: ${msg}`);
-  client = connect({
+  return connect({
     relayUrl,
     key,
     name: hostname(),
@@ -109,7 +146,85 @@ export async function startRelayLink(deps: { handleApi?: ApiHandler } = {}): Pro
     },
     log,
   });
-  if (!contactsTimer) contactsTimer = setInterval(() => void refreshRelayContacts(), CONTACTS_EVERY_MS);
+}
+
+export type EnableRelayResult =
+  | { ok: true; relayUrl: string; state: string | null }
+  | { ok: false; status: 400 | 409 | 500; error: string };
+
+export interface EnableRelayDeps {
+  envPath: string;
+  /** 机器级的一把锁：同时点两下 / 两个页面同时点，后到的直接 409，不排队重做一遍 */
+  lockPath: string;
+  sandbox: () => string | null;
+  /** 锁里重读：进程环境 + .env 文件，锁外读的不作数 */
+  current: () => string;
+  start: () => Promise<RelayStart>;
+  /** start 失败、.env 已恢复之后：关掉可能建出的客户端，按恢复后的 .env 收回 start 顺手开的 peer 入口 */
+  undo: () => Promise<void>;
+  /** 接上以后的连接状态（离线在重连也算接入成功，前端单列显示） */
+  state: () => string | null;
+}
+
+const liveEnableDeps = (): EnableRelayDeps => ({
+  envPath: `${REPO_ROOT}/.env`,
+  lockPath: statePath("env-write.lock"),
+  sandbox: () => sandboxDisabled("中继"),
+  current: () => repoEnvVar("RELAY_URL").trim(),
+  start: () => startRelayLink(startDeps),
+  undo: async () => {
+    stopRelayLink();
+    await syncPeerIngress();
+  },
+  state: () => client?.info().state ?? null,
+});
+
+/**
+ * Peer 面板「一键接入中继」：.env 写 RELAY_URL（不给地址 = 官方中继）后当场连上，不用重启 bridge。
+ * 已经配了的不动（换地址改 .env 或重跑 setup）；沙箱不写仓库 .env、也不拿生产身份连中继。RELAY_NAME 不写：没写就按主机名取。
+ * 连不了（没实例密钥等，见 startRelayLink）就把 .env 恢复成写之前的原样、撤掉副作用，不留半套配置
+ */
+export async function enableRelay(requested: string | undefined, d: EnableRelayDeps = liveEnableDeps()): Promise<EnableRelayResult> {
+  const off = d.sandbox();
+  if (off) return { ok: false, status: 409, error: off };
+  const relayUrl = normalizeRelayUrl(requested ?? DEFAULT_RELAY_URL);
+  if (!relayUrl) return { ok: false, status: 400, error: "中继地址不对：写 wss://<主机> 或主机名（不能带空白和 $）" };
+  const lock = await acquireLock(d.lockPath, 0);
+  if (!lock) return { ok: false, status: 409, error: "另一次接入正在进行，稍后刷新看结果" };
+  try {
+    if (d.current()) return { ok: false, status: 409, error: "已经配了 RELAY_URL：要换地址改 .env 或重跑 bun run setup" };
+    const snapshot = existsSync(d.envPath) ? readFileSync(d.envPath, "utf8") : null;
+    await writeEnvKeys({ RELAY_URL: relayUrl }, d.envPath);
+    const r = await d.start().catch((e: unknown): RelayStart => ({ ok: false, error: (e as Error).message }));
+    if (r.ok) return { ok: true, relayUrl, state: d.state() };
+    if (snapshot === null) rmSync(d.envPath, { force: true });
+    else saveEnvText(d.envPath, snapshot);
+    await d.undo();
+    return { ok: false, status: 500, error: `接不上中继，.env 已恢复原样：${r.error}` };
+  } finally {
+    lock.release();
+  }
+}
+
+/**
+ * POST /relay/setup 的请求体：空 body / {} = 官方中继，{relayUrl: "<地址>"} = 指定地址；
+ * 坏 JSON、别的字段、relayUrl 不是非空字符串一律 400——拼错字段名（{url}）悄悄退回官方中继比报错更糟
+ */
+export function parseRelaySetup(text: string): { ok: true; relayUrl?: string } | { ok: false; error: string } {
+  if (!text.trim()) return { ok: true };
+  let body: unknown;
+  try {
+    body = JSON.parse(text);
+  } catch {
+    return { ok: false, error: "请求体不是 JSON" };
+  }
+  if (!body || typeof body !== "object" || Array.isArray(body)) return { ok: false, error: "请求体要是对象" };
+  const extra = Object.keys(body).filter((k) => k !== "relayUrl");
+  if (extra.length) return { ok: false, error: `不认识的字段：${extra.join(", ")}` };
+  const v = (body as { relayUrl?: unknown }).relayUrl;
+  if (v === undefined) return { ok: true };
+  if (typeof v !== "string" || !v.trim()) return { ok: false, error: "relayUrl 要是非空字符串" };
+  return { ok: true, relayUrl: v };
 }
 
 export interface PeerFetchInit {

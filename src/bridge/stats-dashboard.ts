@@ -40,6 +40,7 @@ import { computeAgentStats, formatTokens, type AgentStat } from "../lib/agent-st
 import { currentUsageWindow, noteWeekResetText, type UsageWindowBounds } from "../lib/usage-window.js";
 import { fmtAge, machineFooter, machineUsage, type MachineSlot } from "./machine-usage.js";
 import { withCodexQuota, type CodexQuotaObservation } from "../lib/codex-usage.js";
+import { lpTag } from "./fleet/lp-monitor.js";
 
 const DASHBOARD_CHANNEL_NAME = "📊-claudestra-stats";
 const ACCOUNT_TTL_MS = 3 * 60 * 1000; // 账号级 %，慢变化，3min 才重抓
@@ -562,12 +563,10 @@ function renderEmbed(snap: StatsSnapshot): EmbedBuilder {
   for (const a of snap.agents.slice(0, 24)) {
     const name = a.name.replace(/^agent-/, "");
     // compact 后无新对话 → 上下文是估算值，加 ~ 和标注（真实值下轮对话自动校准）
-    const ctx = a.contextEstimated
-      ? `📖 ~${formatTokens(a.contextTokens)} ${a.contextPct}%（刚 compact）`
-      : `📖 ${formatTokens(a.contextTokens)} ${a.contextPct}%`;
+    const ctx = a.contextEstimated ? `📖 ~${formatTokens(a.contextTokens)} ${a.contextPct}%（刚 compact）` : `📖 ${formatTokens(a.contextTokens)} ${a.contextPct}%`;
     const bv = ctxBoundaryViewFor({ ...a, sessionId: a.jsonl?.split("/").pop()?.replace(/\.jsonl$/, "") }, a.contextTokens);
     emb.addFields({
-      name: `${bv ? BOUNDARY_DOT[bv.level] : ctxDot(a.contextPct)} ${name} · ${ctx}`,
+      name: `${bv ? BOUNDARY_DOT[bv.level] : ctxDot(a.contextPct)} ${name} · ${ctx}${lpTag(a.name)}`, // lpTag：low-priority 纯文字标签（bridge/fleet/lp-monitor.ts）
       value: `${a.model.replace(/^claude-/, "")} · 当前会话 今 ${formatTokens(a.today.tokens)} · 周 ${formatTokens(a.week.tokens)}${boundaryNote(bv)}`,
       inline: false,
     });

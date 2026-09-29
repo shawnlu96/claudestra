@@ -69,7 +69,7 @@ import { emitEvent, forgetAgent, subscribeEvents, replayEventsSince, getAgentSta
 import { collectSessions } from "./bridge/sessions-inventory.js";
 import { cleanupBgJob } from "./lib/bg-jobs.js";
 import { startSessionReconciler } from "./bridge/session-reconciler.js";
-import { initPeerIngress, localProbeResponse, relayControlRoutes, socketTrust } from "./bridge/relay-routes.js";
+import { initPeerIngress, localProbeResponse, relayControlRoutes, requestContextOf, socketTrust } from "./bridge/relay-routes.js";
 import { handleForward, initForward, rememberInbound } from "./bridge/forward.js";
 import { dispatchToAgent } from "./bridge/dispatch-route.js"; // 统一派单的本机入口（ws dispatch_to_agent），不做 peer 转换
 import { initInbox, takeInbox, inboxOpts } from "./bridge/inbox.js";
@@ -2198,6 +2198,7 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
     case "abort_ack": onAbortAck(msg, ws); break; // Pi 扩展的中止回执（只认这个频道当前的连接）
     case "codex_typein_failed": if (clients.get(msg.channelId)?.ws === ws) turnCuts.rearmAfterInterrupt(msg.channelId); break; // 退回了 queue:下一条再打字
     case "forward_to_agent": ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, ...(await handleForward(ws, msg)) })); break;
+    case "fleet_state": case "fleet_run": ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, ...(await (await import("./bridge/fleet/ws.js")).handleFleetWs(msg, ws.data)) })); break;
     case "dispatch_to_agent": ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, ...(await dispatchToAgent(msg, ws, { clients, deliver, lastMessageSource })) })); break;
     case "route_to_agent": {
       try {
@@ -2337,11 +2338,9 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
 
         // v1.9.21+: 记 pending agent call。当 target agent 下一次 reply 到自己 channel
         // 时，bridge 把那段 text 也 push 回 caller 的 ws（免 fetch_messages 轮询）。
-        //
         // v2.0.1+: 同时推断 originalReplyChannel —— caller 手头正在处理的
         // inbound 请求的 intendedReplyChannel。pushback 用它做 meta.chat_id，
         // caller LLM 就不会错用 target 的私频当作回复目标（Bug 2 修复）。
-        //
         // oneShot=true 是 fire-and-forget:不挂 pending(不会 pushback),下游 deliverToLocal 也不给 target 挂
         // pendingInterAgentMsg watchdog。用于 status sync / ack / FYI 等 agent 之间不期待回应的消息。
         // 先记回程再投递:投出去 / 进押后队列之后 bridge 崩溃,重启恢复的也是「有消息、有回程」
@@ -3280,7 +3279,7 @@ async function handleHttpRoutes(req: Request, url: URL): Promise<Response> {
 }
 
 // 主端口与接管的旧 web 端口（bridge/legacy-web-port.ts）共用这一个处理函数：同一道控制面闸门
-async function bridgeFetch(req: Request, server: { requestIP(r: Request): { address: string } | null; upgrade(r: Request): boolean }) {
+async function bridgeFetch(req: Request, server: { requestIP(r: Request): { address: string } | null; upgrade(r: Request, o?: { data?: unknown }): boolean }) {
     const reqOrigin = req.headers.get("Origin");
     const crossOrigin = isCrossOrigin(reqOrigin, req.url, req.headers);
     const url0 = new URL(req.url);
@@ -3317,7 +3316,7 @@ async function bridgeFetch(req: Request, server: { requestIP(r: Request): { addr
         console.warn(`🚫 拒绝跨源 WebSocket 升级: Origin=${reqOrigin}`); return new Response("cross-origin websocket refused", { status: 403 });
       }
     }
-    if (server.upgrade(req)) return undefined;
+    if (server.upgrade(req, { data: { loopback: requestContextOf(req).source === "loopback" } })) return undefined; // ws.data.loopback：批量管理只收直连回环（bridge/fleet/ws.ts）
     const url = new URL(req.url);
     // v2.10+ CORS（BRIDGE_CORS_ORIGIN 未设 = 不发头，行为同旧版）
     const cors = corsHeadersFor(reqOrigin, CORS_ORIGIN_SETTING);
@@ -3414,6 +3413,7 @@ initTeamRouter({ clients, deliver, hold: (env) => heldLocalMsgs.holdEnv(env), wo
 void import("./bridge/ask-entry.js").then((m) => m.initAskWiring({ // 待你处理：答复 / 过期通知不抢占（押后由 waitForIdle 标记）
   clients, deliver, hold: (e) => void heldLocalMsgs.holdEnv(e), controlChannelId: CONTROL_CHANNEL_ID, discord: WEB_ONLY ? null : discord,
 }));
+void import("./bridge/fleet/service.js").then((m) => m.initFleet({ clients, deliver, controlChannelId: CONTROL_CHANNEL_ID })); // 批量管理：LP 状态轮询 + fleet 动作（bridge/fleet/）
 void import("./bridge/ledger-audit-service.js").then((m) => m.startLedgerAudit({ clients, deliver, hold: (e) => void heldLocalMsgs.holdEnv(e), lastMessageSource, runManager })); // 台账巡检
 void import("./bridge/dispatch-sweeper.js").then((m) => m.startDispatchSweeper({ clients, deliver, runManager })); // 统一派单：重发、回执、超时提醒
 
