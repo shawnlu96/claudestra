@@ -185,6 +185,7 @@ describe("到点", () => {
     done();
     await until(() => sent.length === 1);
     expect(sent[0].content).toContain("Autopilot 已关闭");
+    expect(sent[0].meta.dropIfStopped).toBe(true); // 投递途中 owner 叫停：ws.send 前那一查不投（turn-cuts noticeWanted）
   });
   test("到点时 owner 叫停中：不递收尾（不让它叫停后又写台账、发总结），只记一行日志（wf2 stop-semantics-7）", async () => {
     turnCuts.record({ channelId: "ctl", agent: "master", cause: "manual", tools: { inflight: [] } });

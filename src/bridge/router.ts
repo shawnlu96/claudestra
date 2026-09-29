@@ -144,6 +144,7 @@ export interface Envelope {
     /** 打断抬头（bridge/preempt.ts 写入，renderContentForLocal 放在正文最前）：这条消息打断了什么 / 这是一条「停」 */
     interruptNote?: string;
     heldStopNoted?: boolean; // owner 的「停」押在撞墙画面上时已当场记过（bridge/preempt.ts noteHeldStop）：重投不再记，免得清掉之后才来的回程槽
+    dropIfStopped?: boolean; // owner 叫停中就不投（Autopilot 到点收尾）：ws.send 前最后那一查（bridge/turn-cuts.ts noticeWanted）
     heldStopAt?: number; // 那次「停」的时刻：晚投时按它排、不按投递时刻，owner 之后开过口就作废（bridge/preempt.ts）
     /**
      * 只在目标主回合空闲时投（与 agent→agent 同规则），语义固定、别的任务直接复用（打断收尾提醒、T11a 的答复）：

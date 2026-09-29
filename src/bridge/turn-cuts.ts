@@ -279,8 +279,10 @@ export class TurnCuts {
     return resumeNoticeEnv(channelId, agent, resumeNotice(cut, (seg, t) => this.replyState(seg, t)));
   }
 
-  /** 押着的收尾提醒投出去之前再问一次：生成之后又被打断 / 叫停过、那件事已续上、过了 30 分钟，都不投了 */
+  /** 押着的收尾提醒投出去之前再问一次：生成之后又被打断 / 叫停过、那件事已续上、过了 30 分钟，都不投了；带 dropIfStopped 的叫停中不投 */
   noticeWanted(env: Envelope): boolean {
+    // Autopilot 到点收尾：投递途中（押墙、判忙的 await 里）owner 叫停了就不投，这一查和 ws.send 之间没有 await（T13e r2 P2）
+    if (env.meta.dropIfStopped) return this.interruptHold((env.to as LocalEndpoint).channelId) !== "stopped";
     if (!isCutNotice(env)) return true;
     const ch = (env.to as LocalEndpoint).channelId;
     const born = Date.parse(env.meta.ts) || 0;

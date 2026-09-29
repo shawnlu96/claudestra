@@ -150,7 +150,7 @@ async function sendNudge(agent: string, m: Mission, kind: NudgeKind, now: number
     to: { kind: "local", channelId: c.channelId, ws: c.client.ws, cwd: c.client.cwd },
     intent: "notification",
     content: nudgeText(m, kind, now, DONE_CMD(agent)),
-    meta: { messageId: newMessageId("mission"), triggerKind: "bridge_synth", ts: iso(now), threadId: newThreadId() },
+    meta: { messageId: newMessageId("mission"), triggerKind: "bridge_synth", ts: iso(now), threadId: newThreadId(), dropIfStopped: kind === "deadline" || undefined },
   })) as { outcome?: { kind?: string; reason?: string } } | undefined;
   const failed = r?.outcome?.kind === "error" || r?.outcome?.kind === "dropped";
   console.log(`⏱ Autopilot ${agent}: ${failed ? `${kind} 没递出去（${r?.outcome?.kind}）` : `递出 ${kind}（第 ${m.nudges + 1} 次）`}`);

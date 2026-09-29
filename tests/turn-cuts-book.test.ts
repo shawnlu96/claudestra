@@ -475,6 +475,17 @@ describe("停之后马上开口（wf2 stop-semantics-4）", () => {
     again.record({ channelId: "ch", agent: "a", cause: "stopword", tools: { inflight: [] }, stopAt: heldAt });
     expect(again.interruptHold("ch")).toBeNull();
   });
+  test("带 dropIfStopped 的（Autopilot 到点收尾）：ws.send 前那一查，叫停中不投、解除了照投（T13e r2 P2）", () => {
+    const { b, tick } = book();
+    const wrap = { ...env("w1", "Autopilot 已关闭"), from: { kind: "bridge", label: "mission" } } as Envelope;
+    wrap.meta.dropIfStopped = true;
+    expect(b.noticeWanted(wrap)).toBe(true);
+    b.record({ channelId: "ch", agent: "a", cause: "manual", tools: { inflight: [] } });
+    expect(b.noticeWanted(wrap)).toBe(false);
+    tick(1_000);
+    b.noteHuman("ch", false);
+    expect(b.noticeWanted(wrap)).toBe(true);
+  });
   test("「停」之前的终端输入晚读到，不能解开之后才叫的停", async () => {
     const { b, at, tick } = book();
     const typedAt = at();
