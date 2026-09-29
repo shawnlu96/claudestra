@@ -52,6 +52,8 @@ async function startAndNudge(): Promise<Mission> {
 
 let paneBusy = false;
 let paneUnknown = false;
+/** 查忙闲的那一拍里插一件事（owner 恰好这时叫停） */
+let onTurnSeen: (() => void) | undefined;
 /** 真 bridge 投递给本地时会发 thinking（deliverToLocal）；run 只认那之后的 done */
 const realDeliver = async (env: Envelope) => {
   sent.push(env);
@@ -61,7 +63,7 @@ const realDeliver = async (env: Envelope) => {
 let deliverImpl: (env: Envelope) => Promise<unknown> = realDeliver;
 beforeAll(() => {
   setEvidenceWaitForTest({ minMs: 30, quietMs: 20, maxMs: 300 });
-  setMissionTestHooks({ path, graceMs: 50, reconcileDelayMs: 20, turnSeen: async () => (paneBusy ? "busy" : paneUnknown ? "unknown" : "idle") });
+  setMissionTestHooks({ path, graceMs: 50, reconcileDelayMs: 20, turnSeen: async () => (onTurnSeen?.(), paneBusy ? "busy" : paneUnknown ? "unknown" : "idle") });
   initMission({
     clients: new Map([["ctl", { ws: {} as never, channelId: "ctl", cwd: "/tmp" }]]),
     deliver: (env) => deliverImpl(env),
@@ -197,6 +199,20 @@ describe("到点", () => {
       await settle();
       expect(sent.length).toBe(0);
     } finally {
+      turnCuts.forget("ctl");
+    }
+  });
+  test("查忙闲的那一拍里 owner 叫停：投递前再查一次，照样不递收尾（T13e r1 P2-2）", async () => {
+    onTurnSeen = () => void turnCuts.record({ channelId: "ctl", agent: "master", cause: "manual", tools: { inflight: [] } });
+    try {
+      const m = await put({ until: new Date(Date.now() - 1000).toISOString() });
+      turnEnd();
+      await until(async () => (await cur()).status === "expired");
+      await settle();
+      expect(sent.length).toBe(0);
+      expect(readRunLog(m.id!).map((l) => l.reason)).toContain("到点已关闭（owner 叫停中，没有递收尾那句）");
+    } finally {
+      onTurnSeen = undefined;
       turnCuts.forget("ctl");
     }
   });

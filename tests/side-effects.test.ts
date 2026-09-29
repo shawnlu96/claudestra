@@ -381,6 +381,11 @@ describe("classifyTool：非 Bash 工具", () => {
     ["mcp__binance__get_transfer_history", "none"],
     ["mcp__binance__get_and_cancel_order", "external"],
     ["mcp__binance__place_order", "external"],
+    // T13e r1 P2-1：读动词开头、带退款 / 扣款这类动作词的复合名照样算对外
+    ["mcp__stripe__get_order_refund", "external"],
+    ["mcp__stripe__read_charge_refund", "external"],
+    ["mcp__shop__list_and_pay", "external"],
+    ["mcp__exchange__fetch_withdraw", "external"],
   ];
   for (const [name, kind, opts] of cases) {
     test(`${kind.padEnd(11)} ${name}${opts?.target ? ` → ${opts.target}` : ""}`, () => {

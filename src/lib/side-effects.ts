@@ -54,8 +54,9 @@ const MCP_MONEY_WORD = /^(place|order|buy|sell|trade|refund|charge|pay|payment|t
 const MCP_DB_SERVER = /db|sql|postgres|mysql|sqlite|mongo|redis|supabase|database|bigquery|snowflake|clickhouse|neon|prisma/i;
 /** 服务名不在上表也认（Cloudflare 的 d1_database_query、turso / redshift 的 query）：工具名本身像在跑语句 */
 const MCP_DB_TOOL = /sql|query|cypher|statement|database|(^|[_-])d1([_-]|$)/i;
-/** 工具短名的第一个词是这些读动词：查订单 / 查转账记录（带下单词也是读） */
+/** 工具短名的第一个词是这些读动词：查订单 / 查付款记录。只放过名词（order / payment / trade / transfer），带退款、扣款这类动作词的照样算对外 */
 const MCP_READ_FIRST = /^(get|list|search|fetch|describe|view|read)$/i;
+const MCP_MONEY_NOUN = /^(order|payment|trade|transfer)$/i;
 
 /**
  * 分类一次工具调用。command：Bash 的命令原文（jsonl-watcher 的 detail 里「描述 ─── 命令」取后半，见 bashCommandOf）；
@@ -75,8 +76,10 @@ export function classifyTool(name: string, opts: { command?: string; target?: st
   const server = name.startsWith("mcp__") ? name.split("__")[1] ?? "" : "";
   if (MCP_DB_SERVER.test(server) && /query|exec|sql|migrat/i.test(short) || MCP_DB_TOOL.test(short)) return v("check_first", "语句可能已经执行（写语句收不回），先查数据现状");
   // get_order / list_payment_intents 是查订单，不是下单：以读动词开头、又没有写词的，先于下单词判只读
-  if (MCP_READ_FIRST.test(short.split(/[_-]/)[0] ?? "") && mcpReadOnly(short)) return v("none");
-  if (short.split(/[_-]/).some((w) => MCP_MONEY_WORD.test(w))) return v("external", "交易 / 支付可能已经生效，先去对方那边查订单状态，别重复下");
+  const words = short.split(/[_-]/);
+  const money = words.filter((w) => MCP_MONEY_WORD.test(w));
+  if (MCP_READ_FIRST.test(words[0] ?? "") && money.every((w) => MCP_MONEY_NOUN.test(w)) && mcpReadOnly(short)) return v("none");
+  if (money.length) return v("external", "交易 / 支付可能已经生效，先去对方那边查订单状态，别重复下");
   if (mcpReadOnly(short)) return v("none");
   if (MCP_EXTERNAL_SERVER.test(server)) return v("external", "对外操作可能已经生效（消息已发、PR 已开），先去对方那边核对，别重复做");
   return v("check_first");
