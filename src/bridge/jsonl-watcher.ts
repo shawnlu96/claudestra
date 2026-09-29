@@ -685,8 +685,7 @@ const PENDING_MAX_WAIT_MS = 600_000;
 
 export async function startWatching(agentName: string, cwd: string, sessionId: string, channelId: string, discord: Client, opts: { runtime?: string; sessionFile?: string; transport?: string } = {}) {
   const { runtime, sessionFile } = opts;
-  stopWatching(agentName);
-  if (opts.transport === "acp" || isAcpChannel(channelId)) return startPushWatcher(agentName, sessionId, channelId, runtime);
+  if (opts.transport === "acp" || isAcpChannel(channelId)) { stopWatching(agentName); return startPushWatcher(agentName, sessionId, channelId, runtime); }
   const jsonlPath = resolveSessionPath(runtime, cwd, sessionId, sessionFile);
   // 同一会话文件重新注册（两份 channel-server 对抢、bridge 重连）不重启：新 watcher 从文件末尾起读，两次之间写的行会丢（对抢时每几秒一次）
   const cur = watchers.get(agentName);
