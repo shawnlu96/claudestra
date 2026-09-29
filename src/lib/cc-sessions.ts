@@ -15,7 +15,7 @@
 import { readdir, readFile } from "fs/promises";
 import { realpathSync } from "fs";
 import { join } from "path";
-import { MASTER_SESSION, tmuxRaw, windowTarget, windowChildPids, pidAlive } from "./tmux-helper.js";
+import { MASTER_SESSION, tmuxRaw, windowKey, windowTarget, windowChildPids, pidAlive } from "./tmux-helper.js";
 import { ancestorPids } from "./takeover.js";
 import { isSandbox } from "./sandbox.js";
 
@@ -204,6 +204,22 @@ export function pickCcSessionUnderPane(
   return [...(cwdMatch.length ? cwdMatch : top)].sort((a, b) => (b.startedAt ?? 0) - (a.startedAt ?? 0))[0] ?? null;
 }
 
+const PANE_LIST_FMT = "#{window_index}\t#{window_name}\t#{pane_pid}";
+
+/**
+ * list-panes（PANE_LIST_FMT）→ 窗口名 → 窗格进程，同一窗口取第一个窗格；index 0 另记在键 "0" 下，查的时候过 windowKey，
+ * 大总管（windowKey("master") = "0"）就按 index 认——它的窗口名会被 rename / allow-rename 改掉，按名字认不到（tests/cc-sessions.test.ts）
+ */
+export function panePidsByWindow(listing: string): Map<string, number> {
+  const panes = new Map<string, number>();
+  for (const l of listing.split("\n")) {
+    const [idx, name, pid] = l.split("\t");
+    if (!name || !pid) continue;
+    for (const k of idx === "0" ? [name, "0"] : [name]) if (!panes.has(k)) panes.set(k, Number(pid));
+  }
+  return panes;
+}
+
 /**
  * 一批窗口各自在跑的 CC 会话（key → sessionId），找不到的不在表里。每个窗口按 pickCcSessionUnderPane 认：CC 直接当窗格进程起
  * （没有 shell 父进程）时窗格进程就是它。ps、tmux 窗格表、会话登记整批只读一次：每分钟扫全体 agent 用，逐个调要 N 倍子进程。
@@ -211,12 +227,7 @@ export function pickCcSessionUnderPane(
 export async function resolveSessionIdsForWindows(wins: { key: string; tmuxName: string; cwd: string }[]): Promise<Map<string, string>> {
   const out = new Map<string, string>();
   if (!wins.length) return out;
-  const panes = new Map<string, number>();
-  const listing = await tmuxRaw(["list-panes", "-s", "-t", MASTER_SESSION, "-F", "#{window_name}\t#{pane_pid}"]).catch(() => ""); // tmux 没起：一个窗口都认不到，调用方全按 registry 记的算
-  for (const l of listing.split("\n")) {
-    const [name, pid] = l.split("\t");
-    if (name && pid && !panes.has(name)) panes.set(name, Number(pid)); // 同 list-panes -t 窗口：取第一个窗格
-  }
+  const panes = panePidsByWindow(await tmuxRaw(["list-panes", "-s", "-t", MASTER_SESSION, "-F", PANE_LIST_FMT]).catch(() => "")); // tmux 没起：一个都认不到，调用方按 registry 记的算
   const proc = Bun.spawn(["ps", "-eo", "pid=,ppid="], { stdout: "pipe", stderr: "pipe" });
   const ps = await new Response(proc.stdout).text();
   await proc.exited;
@@ -227,7 +238,7 @@ export async function resolveSessionIdsForWindows(wins: { key: string; tmuxName:
   }
   const entries = (await readCcSessionEntries()).filter((e) => pidAlive(e.pid)).map((e) => ({ ...e, cwd: safeRealpath(e.cwd) }));
   for (const w of wins) {
-    const panePid = panes.get(w.tmuxName);
+    const panePid = panes.get(windowKey(w.tmuxName));
     const hit = panePid && pickCcSessionUnderPane(entries, panePid, (p) => parents.get(p) ?? null, safeRealpath(w.cwd));
     if (hit) out.set(w.key, hit.sessionId);
   }

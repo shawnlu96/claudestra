@@ -25,10 +25,9 @@ import {
   type Boundary, type BoundaryVerdict, type CtxBoundaryView, type GlobalAutoCompact, type SkipReason,
 } from "../lib/ctx-boundary-decision.js";
 import {
-  agentWindowName, compactInjectedRecently, injectCompact, liveInjectDeps, loadInjectState, paneGateOf, resetInjectState, sweepPendingEcho,
+  agentTarget, agentWindowName, compactInjectedRecently, injectCompact, liveInjectDeps, loadInjectState, paneGateOf, resetInjectState, sweepPendingEcho,
   type InjectDeps, type InjectResult, type InjectTarget, type PaneCapture,
 } from "./ctx-boundary-inject.js";
-import { windowTarget } from "../lib/tmux-helper.js";
 import { MASTER_DIR } from "./config.js";
 export { compactInjectedRecently, injectCompact } from "./ctx-boundary-inject.js"; // 看板 / 手动按钮原来从这里拿
 import { PersistedMap } from "./persisted-map.js";
@@ -249,7 +248,7 @@ export function ctxBoundaryWarnings(): PolicyWarning[] {
 /** 按 registry 名字拼注入对象（Discord 手动按钮、T35 的批量动作用） */
 export async function injectTargetFor(name: string): Promise<InjectTarget> {
   const r = (await readRegistryAgents()).find((x) => x.name === name);
-  return { name, target: windowTarget(agentWindowName(name)), executor: isExecutor({ name, worktree: isLinkedWorktree(r?.cwd) }) };
+  return { name, target: agentTarget(name), executor: isExecutor({ name, worktree: isLinkedWorktree(r?.cwd) }) };
 }
 
 async function sessionStats(runtime: string | undefined, cwd: string | null, sessionId: string) {
@@ -273,7 +272,7 @@ async function sessionStats(runtime: string | undefined, cwd: string | null, ses
 export function masterStandIn(masterDir: string, channelId: string | null): BoundaryAgent {
   const name = "agent-master";
   return {
-    name, projectId: null, channelId, cwd: resolve(masterDir), sessionId: "", target: windowTarget(agentWindowName(name)), executor: false,
+    name, projectId: null, channelId, cwd: resolve(masterDir), sessionId: "", target: agentTarget(name), executor: false,
     ctx: null, convTs: null, mtime: null, realWindow: null,
   };
 }
@@ -294,7 +293,7 @@ async function liveAgents(): Promise<BoundaryAgent[]> {
       channelId: r.channelId ?? null,
       cwd,
       sessionId: r.sessionId,
-      target: windowTarget(agentWindowName(r.name)),
+      target: agentTarget(r.name),
       executor: isExecutor({ name: r.name, worktree: isLinkedWorktree(cwd) }),
       ...(await sessionStats(r.runtime, cwd, r.sessionId)),
     });
