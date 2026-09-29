@@ -146,6 +146,16 @@ describe("preempt stop：停字", () => {
     expect(cx.keys).toEqual(["Escape"]);
   });
 
+  test("Pi 的停字不看 bridge 的忙闲（事件态 done / 空）：照样请扩展中止，扩展回空闲才算 not_busy（wf2 pi-3）", async () => {
+    const pi = harness({ runtime: "pi", main: "idle" });
+    expect((await pi.gate.preempt("ch", "agent-a", { stop: true })).fired).toBe(true);
+    expect(pi.probes()).toBe(0);
+    const idle = harness({ runtime: "pi", main: "idle", noKeys: true });
+    expect(await idle.gate.preempt("ch", "agent-a", { stop: true })).toEqual({ fired: false, why: "no_keys" });
+    const cc = harness({ main: "idle" }); // CC 照旧按画面判
+    expect(await cc.gate.preempt("ch", "agent-a", { stop: true })).toEqual({ fired: false, why: "not_busy" });
+  });
+
   test("刚抢占完 1s 就说「停」：不被 4s 冷却吞掉，也不丢——等够 1.5s 最小间隔再发", async () => {
     const slept: number[] = [];
     const gate = createInterruptGate({
