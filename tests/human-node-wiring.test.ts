@@ -24,7 +24,7 @@ import { createTask, moveStage, setMeta, setTask } from "../src/lib/ledger-write
 import type { Principal } from "../src/lib/principals.js";
 import type { RegistryAgent } from "../src/lib/registry.js";
 import { ensureLocalPerson, mergePeople } from "../src/lib/talk-people.js";
-import { guest, owner } from "./asks-test-kit.js";
+import { guest, owner, storedPrincipals } from "./asks-test-kit.js";
 import { tempLedgerPath } from "./ledger-test-helpers.js";
 
 const ws = { tag: "ws" } as never;
@@ -49,7 +49,7 @@ beforeEach(() => {
   const registry = [{ name: "agent-pm", channelId: "222", status: "active", projectId: "p" } as RegistryAgent];
   const deps: AsksDeps = { clients, controlChannelId: "999", deliver: async (env) => (sent.push(env), { envelope: env, outcome: { kind: "sent" } }), hold: () => {} };
   setAsksForTest({ path, deps, registry, ownerChats: ["api:owner:self"] });
-  setTalkForTest({ dbPath: join(dir, "talk.sqlite"), attDir: join(dir, "att"), fp: () => "aaaa-bbbb", principals: async () => ({ principals: [owner(), AA, A2, BB] }) });
+  setTalkForTest({ dbPath: join(dir, "talk.sqlite"), attDir: join(dir, "att"), fp: () => "aaaa-bbbb", principals: async () => storedPrincipals(owner(), AA, A2, BB) });
   for (const p of ["guest:aa", "guest:a2", "guest:bb"]) ensureLocalPerson(talkDb(), p);
   mergePeople(talkDb(), "local:guest:a2", "local:guest:aa");
   setMeta(db, { actor: "owner" }, { project: "p", key: "pms", value: ["agent-pm"] });

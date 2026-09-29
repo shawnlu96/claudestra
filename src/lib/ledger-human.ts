@@ -8,7 +8,7 @@ import type { Database } from "bun:sqlite";
 import { askPlanFor, assignSeqOf, checkHumanDeliver, humanDeliverText, isHumanNodeAsk, isWorkStage, type AskPlan, type DeliverGate, type HumanResult } from "./human-node.js";
 import { hasAsksTable, listAsks, type Ask } from "./ledger-asks.js";
 import { isManager, mustTask, type WriteCtx, type WriteResult } from "./ledger-checks.js";
-import type { LedgerTask } from "./ledger-stages.js";
+import type { LedgerEvent, LedgerTask } from "./ledger-stages.js";
 import { getTask, LedgerError, listEvents, toTask } from "./ledger-store.js";
 import { insertEvent, replay, tx } from "./ledger-tx.js";
 import { applyMove } from "./ledger-write.js";
@@ -18,8 +18,13 @@ const NOTE_MAX = 4000;
 export const HUMAN_ATTS_MAX = 9;
 const SHA_RE = /^[0-9a-f]{64}$/;
 
-/** 同一条 ask 只记一次交付：重复作答、bridge 重放都落到这个 key 上 */
-export const humanDeliverKey = (askId: string): string => `human-deliver:${askId}`;
+/**
+ * 同一条 ask 只记一次交付：事务里按 data.askId 查这个任务已有的 deliver。不用全局 dedupKey——askId 读得到、key 格式猜得到，
+ * 别的任务的执行者先用 `ledger note --dedup` 占住，这条指派就永远交付不了（tests/collab-trust.test.ts）。
+ */
+function deliveredFor(db: Database, task: LedgerTask, askId: string): LedgerEvent | undefined {
+  return listEvents(db, { project: task.project, target: task.id }).find((e) => e.kind === "deliver" && e.data.askId === askId);
+}
 
 /** 任务现在的开单序号（事务里现读事件） */
 function seqNow(db: Database, task: LedgerTask): number {
@@ -59,11 +64,11 @@ export function humanDeliver(db: Database, actor: string, input: HumanDeliverInp
   const atts = [...new Set(input.atts ?? [])];
   if (note.length > NOTE_MAX) throw new LedgerError("invalid", `说明最多 ${NOTE_MAX} 字`);
   if (atts.length > HUMAN_ATTS_MAX || !atts.every((a) => SHA_RE.test(a))) throw new LedgerError("invalid", `附件最多 ${HUMAN_ATTS_MAX} 张，且要是 sha256`);
-  const ctx: WriteCtx = { actor, now, dedupKey: humanDeliverKey(input.askId) };
+  const ctx: WriteCtx = { actor, now };
   return tx(db, () => {
     const task = mustTask(db, input.taskId);
-    const dup = replay(db, ctx, { project: task.project, target: task.id, kind: "deliver" }, () => task);
-    if (dup) return dup;
+    const prev = deliveredFor(db, task, input.askId);
+    if (prev) return { row: task, event: prev, duplicate: true };
     const g = gate(db, actor, task, input, "done");
     if (!g.ok) throw new LedgerError(g.code, g.reason, { stage: task.stage, rev: task.rev });
     const moved = applyMove(db, ctx, task, { from: task.stage, to: "review" }, false, "", "executor").task;

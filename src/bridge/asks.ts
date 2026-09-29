@@ -9,6 +9,7 @@ import { existsSync } from "node:fs";
 import type { Database } from "bun:sqlite";
 import type { ServerWebSocket } from "bun";
 import { groupsLeft, type AskRow, type WireMatch } from "../lib/ask-options.js";
+import { isOwnerSource } from "../lib/delegate-marker.js";
 import { OWNER_PRINCIPAL_ID } from "../lib/devices.js";
 import { t } from "../lib/i18n.js";
 import { answerAsk, hasAsksTable, listAsks, MASTER_PROJECT, openAskFull, patchAsk, reopenAsk, type Ask, type AskAnswer, type AskAtt, type AskVia, type NewAsk } from "../lib/ledger-asks.js";
@@ -273,7 +274,9 @@ export function setPrepareAssigned(fn: typeof prepareAssigned): void {
 export async function commitAnswer(i: AnswerInput): Promise<Ask> {
   if (!deps) throw new Error("asks 未初始化");
   const labels = i.picks.map((p) => p.label);
-  const base = { choices: i.picks.map((p) => p.wire), labels, text: i.text, principal: i.principal, device: i.device, via: i.via, at: Date.now(), final: i.final };
+  // 作答的不是 owner 本人（guest）：原话不进台账 decision 的 text（ledger-asks.ts answerAsk）
+  const who = { principal: i.principal, device: i.device, ...(isOwnerSource(i.from) ? {} : { external: true }) };
+  const base = { choices: i.picks.map((p) => p.wire), labels, text: i.text, ...who, via: i.via, at: Date.now(), final: i.final };
   const answer = i.atts?.length ? { ...base, atts: i.atts } : base;
   const within = i.ask.kind === "assigned" && prepareAssigned ? await prepareAssigned(i.ask, answer) : undefined;
   const a = answerAsk(askDb(), i.ask.id, answer, within);

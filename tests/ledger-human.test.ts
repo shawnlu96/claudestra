@@ -6,7 +6,7 @@ import type { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { HUMAN_NODE_CREATOR } from "../src/lib/human-node.js";
 import { openAsk } from "../src/lib/ledger-asks.js";
-import { humanDeliver, humanDeliverKey, isCurrentAssignment, pendingAssignments, reopenAssignment, staleAssignments, type HumanDeliverInput } from "../src/lib/ledger-human.js";
+import { humanDeliver, isCurrentAssignment, pendingAssignments, reopenAssignment, staleAssignments, type HumanDeliverInput } from "../src/lib/ledger-human.js";
 import { isAskEvent } from "../src/lib/ledger-stages.js";
 import { closeLedger, getTask, LedgerError, listEvents, openLedger } from "../src/lib/ledger-store.js";
 import { createTask, moveStage, recordReview, setMeta, setTask } from "../src/lib/ledger-write.js";
@@ -50,7 +50,7 @@ describe("人工交付", () => {
     const r = humanDeliver(db, GUEST, input(), 5_000);
     expect(r.duplicate).toBe(false);
     expect(r.row).toMatchObject({ stage: "review", round: 1, assigneeKind: "human", agent: null });
-    expect(r.event).toMatchObject({ actor: GUEST, kind: "deliver", text: "T1 人工交付：完成", dedupKey: humanDeliverKey("a1"), ts: 5_000 });
+    expect(r.event).toMatchObject({ actor: GUEST, kind: "deliver", text: "T1 人工交付：完成", dedupKey: null, ts: 5_000 });
     expect(r.event.data).toEqual({ round: 1, headSHA: null, evidence: null, askId: "a1", external: true, note: "改好了，截图见附件", atts: ["a".repeat(64)] });
     const stage = listEvents(db, { target: "T1" }).find((e) => e.kind === "stage" && e.data.to === "review")!;
     expect(stage).toMatchObject({ actor: GUEST, dedupKey: null, data: { from: "build", to: "review", round: 1 } });

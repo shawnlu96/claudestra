@@ -10,8 +10,8 @@ import { repoEnvVar } from "../../lib/env-file.js";
 import { instanceKeySync, keyFingerprint } from "../../lib/instance-key.js";
 import { STATE_DIR } from "../../lib/paths.js";
 import { sandboxDisabled } from "../../lib/sandbox.js";
-import { effectivePrincipal } from "../../lib/devices.js";
-import { readPrincipals, type Principal, type PrincipalsFile } from "../../lib/principals.js";
+import { principalView } from "../../lib/devices.js";
+import { readPrincipals, type PrincipalsFile } from "../../lib/principals.js";
 import { readRegistryAgents } from "../../lib/registry.js";
 import { loadOrCreateVapidKeys, readVapidKeys, webPushSender, type VapidIdentity } from "../../lib/web-push.js";
 import { openWebState } from "../../lib/web-state.js";
@@ -37,17 +37,6 @@ export async function pushOwnerNoticeTracked(title: string, body: string): Promi
 }
 const DEFAULT_VAPID_SUBJECT = "https://github.com/shawnlu96/claudestra";
 
-/**
- * 订阅认人：principal 还在、没禁用；订阅时带着设备凭据的，凭据也得还在、没禁用、没过期（按凭据收窄 scope）。
- * 没带凭据的是 token 订的（web-ui token 等），按 principal 本身算。读的是最多 60 s 前的 principals.json
- */
-export function subscriberPrincipal(file: PrincipalsFile, pid: string, cid: string | null, now = Date.now()): Principal | null {
-  const principal = file.principals.find((p) => p.id === pid && !p.disabled);
-  if (!principal) return null;
-  if (!cid) return principal;
-  const credential = principal.credentials?.find((c) => c.id === cid && !c.disabled && Date.parse(c.expiresAt) > now);
-  return credential ? effectivePrincipal({ principal, credential }) : null;
-}
 let started = false;
 
 function directBackends(): DirectBackends {
@@ -84,7 +73,8 @@ export function initPush(deliver?: (env: Envelope) => Promise<Delivery>): void {
   setInterval(() => void refresh(), PRINCIPALS_REFRESH_MS).unref();
   configurePushRoutes({ db, sender, liveAgents: async () => (await readRegistryAgents()).map((a) => a.name) });
   const key = instanceKeySync();
-  const resolvePrincipal = (pid: string, cid: string | null) => (file ? subscriberPrincipal(file, pid, cid) : null);
+  // 订阅认人读的是最多 60 s 前的 principals.json
+  const resolvePrincipal = (pid: string, cid: string | null) => (file ? principalView(file, pid, cid) : null);
   let isQuietReply: (threadId: unknown) => boolean = () => false;
   const quiet = (threadId: unknown) => isQuietReply(threadId);
   const dispatcher = createDispatcher({ db, sender, isOwnerChat: (id) => owner.has(id), resolvePrincipal, isQuietReply: quiet, ...(key ? { fp: keyFingerprint(key.publicKey) } : {}) });

@@ -10,6 +10,7 @@ import { attPath, getAtt } from "../lib/talk-atts.js";
 import { contentSha, renderDropBody, type DropInput, type DropLine } from "../lib/talk-drop-render.js";
 import { claimDrop, getDrop, type DropRow } from "../lib/talk-drops.js";
 import { getMessage, type TalkMessage } from "../lib/talk-messages.js";
+import { OWNER_PERSON } from "../lib/talk-people.js";
 import { getRoom, isMember, parseRoomKey, type Room } from "../lib/talk-rooms.js";
 import { DROP_ID_RE } from "../lib/talk-schema.js";
 import { asksDeps, registry } from "./asks.js";
@@ -61,8 +62,9 @@ function pickMessages(me: Me, room: Room, raw: unknown): TalkMessage[] | DropErr
 function lineOf(m: TalkMessage, me: Me, principals: PrincipalsFile): DropLine {
   const db = talkDb();
   const attPaths = m.atts.map((sha) => getAtt(db, sha)).filter((a) => a !== null).map((a) => attPath(talkAttDir(), a!));
+  const person = personOfKey(m.authorKey, me.fp);
   return {
-    author: nameOf(personOfKey(m.authorKey, me.fp), principals), external: m.origin !== me.fp, msgKey: `${m.origin}/${m.id}`,
+    author: nameOf(person, principals), external: m.origin !== me.fp, owner: person === OWNER_PERSON, msgKey: `${m.origin}/${m.id}`,
     at: m.createdAt, text: m.text, attPaths, refs: m.refs.map((r) => ({ kind: r.kind, title: r.title })),
   };
 }

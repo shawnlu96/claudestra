@@ -1,6 +1,6 @@
 /**
  * 从 Chat 勾几条消息「新建任务」：要能读台账（canReadLedger，和台账 API 同一道门；guest、部分 scope 的 owner 设备、集成 token 在网页和 API 两层都拒）。
- * 台账只由 CLI 写：经 runManager 调 `ledger task-new`，再 `ledger note` 把勾选的原文记在任务上（人写的，按外部文本存）。
+ * 台账只由 CLI 写：经 runManager 调 `ledger task-new`，再 `ledger note` 把勾选的原文记在任务上（不是 owner 写的行按外部文本包边界，talk-drop-render.ts）。
  * 子进程环境去掉 DISCORD_CHANNEL_ID，ledger 的身份推导就落到 owner（lib 里 resolveActor：没有频道 = 终端 = owner）；
  * 两步各带 dedup，网络重试 / 连点不会建出两条。
  */

@@ -26,7 +26,7 @@ import { savePushSubscription, type PushSubscriber } from "../src/lib/push-store
 import type { RegistryAgent } from "../src/lib/registry.js";
 import { ensureLocalPerson, mergePeople, unmergePerson } from "../src/lib/talk-people.js";
 import { closeWebState, openWebState } from "../src/lib/web-state.js";
-import { at, guest, LEGACY_STAR_TOKEN, owner, PEER } from "./asks-test-kit.js";
+import { at, guest, LEGACY_STAR_TOKEN, owner, PEER, storedPrincipals } from "./asks-test-kit.js";
 import { tempLedgerPath } from "./ledger-test-helpers.js";
 
 const PMCTX = { actor: "agent-pm" };
@@ -78,7 +78,7 @@ beforeEach(() => {
   };
   setAsksForTest({ path, deps, registry: [{ name: "agent-pm", channelId: "222", status: "active", projectId: "p" } as RegistryAgent], ownerChats: ["api:owner:self"] });
   setLedgerFeedForTest({ path, emit: () => {} });
-  setTalkForTest({ dbPath: join(dir, "talk.sqlite"), attDir: join(dir, "att"), fp: () => "aaaa-bbbb", principals: async () => ({ principals: [owner(), AA, A2, BB, WHO.webUi] }) });
+  setTalkForTest({ dbPath: join(dir, "talk.sqlite"), attDir: join(dir, "att"), fp: () => "aaaa-bbbb", principals: async () => storedPrincipals(owner(), AA, A2, BB, WHO.webUi) });
   for (const p of ["guest:aa", "guest:a2", "guest:bb"]) ensureLocalPerson(talkDb(), p);
   mergePeople(talkDb(), "local:guest:a2", "local:guest:aa");
   setMeta(db, { actor: "owner" }, { project: "p", key: "pms", value: ["agent-pm"] });

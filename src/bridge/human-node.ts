@@ -7,6 +7,7 @@
  */
 import type { Database } from "bun:sqlite";
 import { setAskAssigneesOf } from "../lib/ask-access.js";
+import { principalView } from "../lib/devices.js";
 import { HUMAN_NODE_CREATOR, isHumanNodeAsk, pmNotice, resultOfChoices, type AskPlan, type HumanResult } from "../lib/human-node.js";
 import { t } from "../lib/i18n.js";
 import { closeAsk } from "../lib/ledger-asks.js";
@@ -36,6 +37,8 @@ export interface AssignedAnswer {
   choices: string[];
   text: string;
   principal: string;
+  /** 这次作答用的设备凭据 id：按它的生效视图认人 */
+  device?: string;
   atts?: { kind: string; ref: string }[];
 }
 
@@ -56,8 +59,8 @@ export interface HumanNodeDeps {
   cancelAsk: (askId: string, reason: string) => void;
   /** 给 task.pm 发一条不抢占的通知：PM 不在线就不投、不转投大总管 */
   notifyPm: (task: LedgerTask, text: string, askId: string) => Promise<void>;
-  /** 作答的 principal → 人；默认按 talk 的 people 表解析 */
-  answerer?: (principal: string) => Promise<Answerer | null>;
+  /** 作答的 principal（+ 设备凭据）→ 人；默认按 talk 的 people 表解析 */
+  answerer?: (principal: string, device?: string) => Promise<Answerer | null>;
 }
 
 /** 扫一遍：先撤过时的，再开该有的，返回新开的条数。opened 记本进程开过的 key，免得每轮都去撞库；重启后第一轮撞库拿回已有的，没有副作用 */
@@ -102,15 +105,18 @@ export function startHumanNode(d: HumanNodeDeps): () => void {
   return () => clearInterval(timer);
 }
 
-/** 网页凭据按 talk 的 people 表认人；Discord 上能点按钮的只有 ALLOWED_USER_IDS，按 owner 算 */
-async function answererFromTalk(principal: string): Promise<Answerer | null> {
+/**
+ * 网页凭据按 talk 的 people 表认人，owner 与否看这次用的凭据（canManage，和 Chat 里一致）：部分 scope 的 owner 设备不按 owner 算。
+ * Discord 上能点按钮的只有 ALLOWED_USER_IDS，按 owner 算
+ */
+async function answererFromTalk(principal: string, device?: string): Promise<Answerer | null> {
   const fp = selfFp();
   if (!fp) return null;
   if (principal.startsWith("discord:")) {
     const persons = personAliases(talkDb(), personIdOf(OWNER_PRINCIPAL));
     return { actor: persons[0], persons, isOwner: true, keys: [memberKey(fp, OWNER_PRINCIPAL)] };
   }
-  const p = (await talkPrincipals()).principals.find((x) => x.id === principal);
+  const p = principalView(await talkPrincipals(), principal, device);
   const me = p ? meOf(p) : null;
   return me ? { actor: me.personId, persons: personAliases(talkDb(), me.personId), isOwner: me.isOwner, keys: me.keys } : null;
 }
@@ -138,15 +144,15 @@ const reject = (status: AskRejected["status"], code: string, zh: string, en: str
 export async function prepareAssignedAnswer(d: HumanNodeDeps, ask: AssignedAsk, answer: AssignedAnswer): Promise<(() => void) | undefined> {
   if (!isHumanNodeAsk(ask)) return undefined;
   const db = d.db();
-  const result = resultOfChoices(answer.choices);
+  const result = answer.choices.length === 1 ? resultOfChoices(answer.choices) : null;
   if (!db || !ask.taskId) throw reject(503, "ledger_unavailable", "台账库还没准备好，这次没记下，稍后再试", "Ledger not ready; nothing recorded, try again later");
-  if (!result) throw reject(400, "assign_choice", "点「完成」或「做不了」", "Pick Done or Can't do it");
+  if (!result) throw reject(400, "assign_choice", "「完成」和「做不了」只能点一个", "Pick exactly one: Done or Can't do it");
   if (result === "cant" && !answer.text.trim()) throw reject(400, "reason_required", "做不了要写一下原因", "Say why it can't be done");
   if (!isCurrentAssignment(db, ask)) {
     d.cancelAsk(ask.id, STALE);
     throw reject(409, "assign_stale", "这条指派已过时（任务改派、离开了 build / fix 或重开了指派），已撤下", "This assignment is out of date and was withdrawn");
   }
-  const who = await (d.answerer ?? answererFromTalk)(answer.principal);
+  const who = await (d.answerer ?? answererFromTalk)(answer.principal, answer.device);
   if (!who) throw reject(503, "answerer_unknown", "认不出作答人（本机 Chat 的身份没取到），这次没记下，稍后再试", "Couldn't tell who answered; nothing recorded, try again later");
   const input: HumanDeliverInput = { taskId: ask.taskId, askId: ask.id, ask, answerer: who, note: answer.text, atts: linkAtts(ask, who, answer.atts) };
   return () => writeAnswer(db, who.actor, input, result);
