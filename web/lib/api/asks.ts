@@ -2,7 +2,7 @@
  * 「待你处理」（bridge local-api/asks.ts）：列表、卡片作答、网页可见性心跳；以及聊天里点按钮时带上 askId 的小抄。
  * 门是 canReadLedger：部分 scope 的设备 / guest 拿 403，调用方按「没有待办」处理。
  */
-import type { WebAsk } from "@/features/asks/asks-model";
+import type { WebAsk, WebAskAtt } from "@/features/asks/asks-model";
 import { api } from "./client";
 import { followEventStream } from "./ledger";
 
@@ -17,9 +17,9 @@ export async function fetchAsks(signal?: AbortSignal): Promise<{ ok: boolean; as
 
 /**
  * 卡片作答：choices = 回投 wire（[button:id] / [select:id:v1,v2]），text = 文本框里的话；卡片是一次提交，bridge 按全部答完结案。
- * 只给 reply 类用（运行时弹框走 answerAuq / answerPermission）。409 = 已被别处处理 / 已过期
+ * 只给 reply 类用（运行时弹框走 answerAuq / answerPermission）。atts = 指派事项附的图。409 = 已被别处处理 / 已过期
  */
-export function answerAskCard(project: string, id: string, body: { choices?: string[]; text?: string }): Promise<{ ok: boolean }> {
+export function answerAskCard(project: string, id: string, body: { choices?: string[]; text?: string; atts?: WebAskAtt[] }): Promise<{ ok: boolean }> {
   return api(`/ledger/${encodeURIComponent(project)}/asks/${encodeURIComponent(id)}/answer`, { method: "POST", json: body, timeoutMs: 15_000 });
 }
 

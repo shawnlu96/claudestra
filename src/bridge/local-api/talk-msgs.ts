@@ -2,7 +2,9 @@
  * Chat 的消息与附件接口（local-api/talk.ts 分发到这里）。读写前都先过 isMember：不是房间成员一律 404（不透露房间存在）。
  * 发消息不进任何 agent 的上下文；@ 只是结构化存 person id，对 owner 的 @ 才推送（推送订阅目前只登记 owner 的设备）。
  */
+import { canSeeAsk } from "../../lib/ask-access.js";
 import { canReadLedger } from "../../lib/devices.js";
+import { getAsk } from "../../lib/ledger-asks.js";
 import { agentInScope, type Principal, type PrincipalsFile } from "../../lib/principals.js";
 import { attPath, attsUsableBy, canReadAtt, getAtt, removeUnreferenced, saveAtt, ATT_MAX_BYTES } from "../../lib/talk-atts.js";
 import { deleteMessage, getMessage, insertMessage, listMessages, parseDraft, type TalkMessage, type TalkRef } from "../../lib/talk-messages.js";
@@ -10,6 +12,7 @@ import { OWNER_PERSON, personAliases } from "../../lib/talk-people.js";
 import { getRoom, isMember, parseRoomKey, type Room } from "../../lib/talk-rooms.js";
 import { collectBody } from "../../lib/relay-stream.js";
 import { apiJson } from "../api-respond.js";
+import { askReadDb } from "../asks.js";
 import { pushOwnerNotice } from "../push/init.js";
 import { nameOf, personOfKey, publishTalk, rememberMe, roomView, talkAttDir, talkDb, talkPrincipals, type Me } from "../talk.js";
 
@@ -27,6 +30,13 @@ function refOpen(p: Principal, r: TalkRef): boolean {
   if (r.kind === "message") return agentInScope(p, r.scope);
   return canReadLedger(p);
 }
+
+/** 挂在 ask 上的图（指派事项作答附的）：看得见那条 ask 才能用，和「待你处理」列表同一个判定 */
+const seesAsk = (p: Principal) => (askId: string): boolean => {
+  const db = askReadDb();
+  const a = db ? getAsk(db, askId) : null;
+  return !!a && canSeeAsk(p, a);
+};
 
 const canonical = (key: string, me: Me): string => personAliases(talkDb(), personOfKey(key, me.fp))[0];
 
@@ -61,7 +71,7 @@ export async function postRoomMessage(me: Me, p: Principal, key: string, body: R
   const people = new Set(room.members.map((k) => canonical(k, me)));
   const bad = draft.mentions.find((id) => !people.has(personAliases(db, id)[0]));
   if (bad) return apiJson(400, { ok: false, error: `mention is not in this room: ${bad}` });
-  if (!attsUsableBy(db, draft.atts, me.keys, () => canReadLedger(p))) return apiJson(400, { ok: false, error: "unknown attachment: upload it first" });
+  if (!attsUsableBy(db, draft.atts, me.keys, seesAsk(p))) return apiJson(400, { ok: false, error: "unknown attachment: upload it first" });
   rememberMe(me);
   const mentions = draft.mentions.map((id) => personAliases(db, id)[0]);
   const m = { origin: me.fp, id: draft.id, room, authorKey: me.authorKey, text: draft.text, atts: draft.atts, refs: draft.refs, mentions, createdAt: Date.now() };
@@ -121,7 +131,7 @@ export async function uploadAtt(me: Me, req: Request): Promise<Response> {
 export function readAtt(me: Me, p: Principal, sha: string): Response {
   const db = talkDb();
   const att = /^[0-9a-f]{64}$/.test(sha) ? getAtt(db, sha) : null;
-  if (!att || !canReadAtt(db, sha, me.keys, () => canReadLedger(p))) return apiJson(404, { ok: false, error: "attachment not found" });
+  if (!att || !canReadAtt(db, sha, me.keys, seesAsk(p))) return apiJson(404, { ok: false, error: "attachment not found" });
   return new Response(Bun.file(attPath(talkAttDir(), att)), {
     headers: { "Content-Type": att.mime, "Cache-Control": "private, max-age=604800, immutable", "X-Content-Type-Options": "nosniff", "Content-Security-Policy": "default-src 'none'" },
   });

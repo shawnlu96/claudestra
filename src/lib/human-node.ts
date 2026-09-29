@@ -47,6 +47,8 @@ export interface AskPlan {
   dedupKey: string;
   assignee: string;
   title: string;
+  /** 卡片上直接显示的背景：第几轮返工、PM 写的 brief */
+  context: string;
   body: string;
   options: unknown[];
 }
@@ -58,9 +60,10 @@ export interface AskPlan {
 export function askPlanFor(task: HumanTaskView, attempt: number): AskPlan | null {
   if (task.assigneeKind !== "human" || !task.assignee || !isWorkStage(task.stage)) return null;
   const brief = typeof task.extra.brief === "string" && task.extra.brief.trim() ? task.extra.brief.trim() : "";
-  const lines = [`${task.id} ${task.title}`, ...(task.stage === "fix" ? [`第 ${task.round} 轮返工`] : []), ...(brief ? ["", brief] : [])];
+  const rework = task.stage === "fix" ? [`第 ${task.round} 轮返工`] : [];
   const title = `${task.id} ${task.title}`;
-  return { dedupKey: assignDedupKey(task.id, task.round, attempt), assignee: task.assignee, title, body: lines.join("\n"), options: assignOptions() };
+  const body = [title, ...rework, ...(brief ? ["", brief] : [])].join("\n");
+  return { dedupKey: assignDedupKey(task.id, task.round, attempt), assignee: task.assignee, title, context: [...rework, brief].filter(Boolean).join("\n"), body, options: assignOptions() };
 }
 
 /** 拒绝的 code 同 LedgerError：阶段不对、ask 过时 = conflict（库里已变），不是这个人 = forbidden */

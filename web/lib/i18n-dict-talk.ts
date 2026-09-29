@@ -57,4 +57,8 @@ export const TALK_DICT: Record<string, string> = {
   "选择项目": "Choose a project",
   "任务号，如 T123": "Task id, e.g. T123",
   "任务标题": "Task title",
+  "做完了写几句说明；做不了写原因": "Done? Add a short note. Can't do it? Say why.",
+  "做不了要写一下原因": "Please say why you can't do it",
+  "做不了": "Can't do it",
+  "附图": "Attach image",
 };

@@ -168,7 +168,7 @@ export function initHumanNode(): () => void {
     db: askDbIfExists,
     openAsk: (task, p) =>
       void createAsk({
-        source: "system", createdBy: "system:human-node", kind: "assigned", project: task.project, taskId: task.id, title: p.title, body: p.body,
+        source: "system", createdBy: "system:human-node", kind: "assigned", project: task.project, taskId: task.id, title: p.title, context: p.context, body: p.body,
         options: p.options, allowText: true, assignee: p.assignee, dedupKey: p.dedupKey, blocking: true,
       }),
     notifyPm: (task, text, askId) => notifyTaskPm(task, task.project, text, askId, "human-node"),

@@ -8,6 +8,7 @@ import { useT } from "@/lib/i18n";
 import { answeredGroups, rowGroup, wireLabels, type WebAsk } from "../asks-model";
 import { asksStore } from "../asks-store";
 import { AuqChoices, PermissionChoices, ReplyChoices } from "./ask-choices";
+import { AssignedChoices, isHumanNodeAsk } from "./assigned-choices";
 import { TerminalIcon } from "./ask-icons";
 
 /**
@@ -49,7 +50,10 @@ export function AskActions({ ask, agent }: { ask: WebAsk; agent: string }) {
   return (
     <div className="mt-3">
       {!runtime && !canAnswer && <p className="text-[13px] opacity-75">{t("这个登录凭据只能看，作答要在 owner 本人的设备上")}</p>}
-      {!runtime && canAnswer && (
+      {!runtime && canAnswer && isHumanNodeAsk(ask) && (
+        <AssignedChoices busy={busy} onAnswer={(wire, text, atts) => run(() => answerAskCard(ask.project, ask.id, { choices: [wire], text, atts }), wireLabels(rows, [wire]), text)} />
+      )}
+      {!runtime && canAnswer && !isHumanNodeAsk(ask) && (
         <ReplyChoices
           rows={rows}
           allowText={ask.allowText}

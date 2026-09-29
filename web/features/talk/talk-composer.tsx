@@ -5,38 +5,21 @@
  */
 import { useRef, useState } from "react";
 import { useT } from "@/lib/i18n";
-import { postMessage, uploadImage, type TalkAtt, type TalkPerson } from "@/lib/api/talk";
-import { AtIcon, CloseIcon, ImageIcon, SendIcon } from "./talk-icons";
-
-const ACCEPT = "image/png,image/jpeg,image/webp";
-
-interface Pending {
-  local: string;
-  att: TalkAtt | null;
-  error?: string;
-}
+import { postMessage, type TalkPerson } from "@/lib/api/talk";
+import { IMAGE_ACCEPT, PendingStrip, usePendingImages } from "./pending-images";
+import { AtIcon, ImageIcon, SendIcon } from "./talk-icons";
 
 export function TalkComposer({ roomKey, members, meId, onSent }: { roomKey: string; members: TalkPerson[]; meId: string; onSent: () => void }) {
   const t = useT();
   const [text, setText] = useState("");
   const [picked, setPicked] = useState<TalkPerson[]>([]);
-  const [atts, setAtts] = useState<Pending[]>([]);
+  const imgs = usePendingImages();
   const [picker, setPicker] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   const areaRef = useRef<HTMLTextAreaElement>(null);
   const others = members.filter((m) => m.id !== meId);
-
-  const addFiles = (files: FileList | null) => {
-    for (const f of Array.from(files ?? []).slice(0, 9 - atts.length)) {
-      const local = URL.createObjectURL(f);
-      setAtts((xs) => [...xs, { local, att: null }]);
-      uploadImage(f)
-        .then((r) => setAtts((xs) => xs.map((x) => (x.local === local ? { ...x, att: r.att } : x))))
-        .catch((e) => setAtts((xs) => xs.map((x) => (x.local === local ? { ...x, error: (e as Error).message } : x))));
-    }
-  };
 
   const mention = (p: TalkPerson) => {
     setPicker(false);
@@ -45,11 +28,10 @@ export function TalkComposer({ roomKey, members, meId, onSent }: { roomKey: stri
     areaRef.current?.focus();
   };
 
-  const ready = atts.every((a) => a.att || a.error);
   const send = async () => {
     const body = text.trim();
-    const shas = atts.flatMap((a) => (a.att ? [a.att.sha256] : []));
-    if (busy || !ready || (!body && !shas.length)) return;
+    const shas = imgs.uploaded.map((a) => a.sha256);
+    if (busy || !imgs.ready || (!body && !shas.length)) return;
     setBusy(true);
     setError(null);
     try {
@@ -57,8 +39,7 @@ export function TalkComposer({ roomKey, members, meId, onSent }: { roomKey: stri
       await postMessage(roomKey, { id: `tm_${crypto.randomUUID()}`, text: body, atts: shas, mentions });
       setText("");
       setPicked([]);
-      atts.forEach((a) => URL.revokeObjectURL(a.local));
-      setAtts([]);
+      imgs.clear();
       onSent();
     } catch (e) {
       setError((e as Error).message);
@@ -69,13 +50,13 @@ export function TalkComposer({ roomKey, members, meId, onSent }: { roomKey: stri
 
   return (
     <div className="shrink-0 border-t border-base-300 bg-base-100 px-3 pt-2" style={{ paddingBottom: "max(env(safe-area-inset-bottom), 0.5rem)" }}>
-      <PendingStrip atts={atts} onRemove={(a) => (URL.revokeObjectURL(a.local), setAtts((xs) => xs.filter((x) => x !== a)))} />
+      <PendingStrip atts={imgs.atts} onRemove={imgs.remove} />
       {error && <p className="mb-1 text-xs text-error">{t("没发出去：{e}", { e: error })}</p>}
       <div className="relative flex items-end gap-1.5">
         <button className="btn btn-ghost btn-sm btn-square" aria-label={t("发图片")} title={t("发图片")} onClick={() => fileRef.current?.click()}>
           <ImageIcon size={18} />
         </button>
-        <input ref={fileRef} type="file" accept={ACCEPT} multiple hidden onChange={(e) => (addFiles(e.target.files), (e.target.value = ""))} />
+        <input ref={fileRef} type="file" accept={IMAGE_ACCEPT} multiple hidden onChange={(e) => (imgs.add(e.target.files), (e.target.value = ""))} />
         {others.length > 0 && (
           <button className="btn btn-ghost btn-sm btn-square" aria-label={t("@ 某人")} title={t("@ 某人")} onClick={() => setPicker((v) => !v)}>
             <AtIcon size={18} />
@@ -96,29 +77,10 @@ export function TalkComposer({ roomKey, members, meId, onSent }: { roomKey: stri
             }
           }}
         />
-        <button className="btn btn-primary btn-sm btn-square" aria-label={t("发送")} disabled={busy || !ready || (!text.trim() && !atts.some((a) => a.att))} onClick={() => void send()}>
+        <button className="btn btn-primary btn-sm btn-square" aria-label={t("发送")} disabled={busy || !imgs.ready || (!text.trim() && !imgs.uploaded.length)} onClick={() => void send()}>
           <SendIcon size={16} />
         </button>
       </div>
-    </div>
-  );
-}
-
-function PendingStrip({ atts, onRemove }: { atts: Pending[]; onRemove: (a: Pending) => void }) {
-  const t = useT();
-  if (!atts.length) return null;
-  return (
-    <div className="mb-2 flex flex-wrap gap-2">
-      {atts.map((a) => (
-        <div key={a.local} className="relative h-16 w-16 overflow-hidden rounded-lg border border-base-300">
-          {/* eslint-disable-next-line @next/next/no-img-element -- 本地 object URL 预览，不走 next/image */}
-          <img src={a.local} alt="" className={`h-full w-full object-cover ${a.att ? "" : "opacity-50"}`} />
-          {a.error && <span className="absolute inset-x-0 bottom-0 bg-error/80 px-1 text-[10px] text-error-content">{t("上传失败")}</span>}
-          <button className="absolute right-0.5 top-0.5 rounded-full bg-base-100/80 p-0.5" aria-label={t("移除")} onClick={() => onRemove(a)}>
-            <CloseIcon size={12} />
-          </button>
-        </div>
-      ))}
     </div>
   );
 }
