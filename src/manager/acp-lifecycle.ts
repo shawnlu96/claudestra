@@ -16,7 +16,7 @@ import { statePath } from "../lib/paths.js";
 import { SRC_DIR } from "../lib/repo-root.js";
 import { runManagerProcess } from "../lib/run-manager.js";
 import { isSandbox } from "../lib/sandbox.js";
-import { managedFor, normalizeTransport, requireManaged, transportsOf, type ManagedRuntimeAdapter, type ReadyResult, type Transport } from "../lib/runtimes/index.js";
+import { managedFor, normalizeTransport, requireManaged, transportsOf, type LaunchSpec, type ManagedRuntimeAdapter, type ReadyResult, type Transport } from "../lib/runtimes/index.js";
 import { gracefulExitWindow } from "../lib/runtimes/graceful-exit.js";
 import { tmuxWindowOps } from "../lib/runtimes/window-ops.js";
 import { killPidsEscalating, listWindowIdsByName, MASTER_SESSION, sessionTarget, tmuxRaw, tmuxRawStrict, windowChildPids } from "../lib/tmux-helper.js";
@@ -25,10 +25,9 @@ import { assertCreatable, loadRegistry, output, patchRegistryAgent, saveRegistry
 const RESTART_TIMEOUT_MS = 240_000;
 
 /** 新建 / resume 的 Codex 缺省 ACP；前置条件不齐时给明确原因并沿用可工作的 tmux。 */
-export async function chooseCreateTransport(runtime?: string, requested?: string, fork = false): Promise<{ transport: Transport; acpPending?: true; manualTmux?: true }> {
+export async function chooseCreateTransport(runtime?: string, requested?: string): Promise<{ transport: Transport; acpPending?: true; manualTmux?: true }> {
   if (runtime !== "codex") return { transport: "tmux" };
   if (requested === "tmux") return { transport: "tmux", manualTmux: true };
-  if (fork) return { transport: "tmux", acpPending: true }; // fork 一次走旧路径，之后可迁回 ACP
   const ready = await checkAcpReady(true);
   if (ready.ok) return { transport: "acp" };
   console.error(`[acp] ${ready.reason}；本次 Codex agent 回退 tmux，doctor 会报告`);
@@ -36,9 +35,9 @@ export async function chooseCreateTransport(runtime?: string, requested?: string
 }
 
 /** resume 同名旧记录时沿用人工 tmux；暂退 tmux 的记录可在条件恢复后接回 ACP。 */
-export function chooseResumeTransport(runtime: string | undefined, prior: unknown, fork = false) {
+export function chooseResumeTransport(runtime: string | undefined, prior: unknown) {
   const old = prior as { transport?: string; acpPending?: boolean } | undefined;
-  return chooseCreateTransport(runtime, old?.transport === "tmux" && !old.acpPending ? "tmux" : undefined, fork);
+  return chooseCreateTransport(runtime, old?.transport === "tmux" && !old.acpPending ? "tmux" : undefined);
 }
 
 export async function prepareCreateRuntime(name: string, dir: string, runtime?: string, requested?: string): Promise<
@@ -48,6 +47,15 @@ export async function prepareCreateRuntime(name: string, dir: string, runtime?: 
   const resolved = assertCreatable(name, dir, runtime, chosen.transport);
   try { return { ok: true, dir: resolved, adapter: requireManaged(runtime, chosen.transport), acpPending: chosen.acpPending, manualTmux: chosen.manualTmux }; }
   catch (e) { return { ok: false, error: (e as Error).message }; }
+}
+
+/** ACP fork 先拿新线程 id，再以 resume 模式起常驻宿主；失败不能把源 id 误记进 registry。 */
+export async function prepareAcpFork(spec: LaunchSpec, adapter: ManagedRuntimeAdapter, transport: Transport): Promise<LaunchSpec> {
+  if (spec.mode !== "fork" || transport !== "acp") return spec;
+  if (!adapter.prepareSession) throw new Error("ACP 适配器没有 fork 准备方法");
+  const { sessionId } = await adapter.prepareSession(spec);
+  if (!adapter.isValidSessionId(sessionId) || sessionId === spec.sessionId) throw new Error("ACP fork 没返回新的合法 sessionId");
+  return { ...spec, mode: "resume", sessionId };
 }
 
 /** 已记 acp 的 agent 若升级后丢了适配器或 CLI 太旧，restart 仍可从同一线程走 tmux。 */

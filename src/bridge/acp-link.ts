@@ -178,7 +178,7 @@ export function onAcpHostGone(channelId: string, ws: Socket): void {
 /** 经宿主调 session/set_config_option（设置页的模型 / 推理强度、额度卡的「切到 X」）：不重启 */
 export const acpSetConfig = (channelId: string, configId: string, value: string) => acpCall(channelId, { op: "set_config", configId, value });
 
-/** 斜杠命令（/compact 等）原样当一轮 prompt 交给宿主：不包 <channel>，适配器自己认（lib/runtimes/codex.ts CODEX_ACP_CONTROL.slashAsPrompt） */
+/** 斜杠命令（/compact 等）原样当一轮 prompt 交给宿主：不包 <channel>，适配器自己认（lib/runtimes/codex-control.ts） */
 export const acpSlash = (channelId: string, text: string) => acpCall(channelId, { op: "slash", text });
 
 function acpCall(channelId: string, body: Record<string, unknown>): Promise<{ ok: boolean; error?: string }> {

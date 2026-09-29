@@ -50,6 +50,7 @@ bridge ──ws（channel-server / Pi 扩展同一套协议，register 带 runti
 
 - **registry**：每个 agent 有一个 `transport` 字段。旧记录缺字段仍由低层读成 tmux；升级迁移会补成 acp 或暂退 tmux。显式 tmux 是人工回退，迁移不会覆盖（`lib/registry.ts`、`runtimes/types.ts`）。
 - **适配器**：`ManagedRuntimeAdapter.acp?: { control }`。没声明的运行时只能走 tmux，`transportsOf(runtime)` 据此回答能走哪些 transport。
+- **会话来源**：rollout 发现、历史翻译与 token 扫描在 `lib/runtimes/codex-source.ts`，ACP 和 tmux 启动适配器共用。ACP 版直接组合这份来源与自己的生命周期，不继承 Codex TUI 的启动、退出或锁探测状态；这让将来删 tmux 路径时不会连历史一起删掉。
 - **策略**：`controlFor(runtime, transport = "tmux")`。只有 transport=acp 且运行时声明了 ACP 段时才返回 ACP 的策略，其余情况都返回原来那份（`tests/runtime-transport.test.ts` 钉住缺省逐字不变）。
 
 Codex 的 ACP 策略（`CODEX_ACP_CONTROL`）：
@@ -99,7 +100,7 @@ bridge 那头：`bridge/acp-link.ts`（宿主的帧 → watcher 推送 / 卡片 
 - **适配器安装。** codex-acp 的 GitHub release 上没有任何附件，所以 `manager acp-install` 直接下载 npm registry 上的 `codex-acp-2.0.0.tgz`（269KB），版本钉死，sha256 写死在 `lib/acp/install.ts`（`a8d48bdf70c0e3e585abbdce19f78765450d8fa6ada1da0fd53508e64315905b`），校验不过就拒装、不回退到 npm；只解出 `dist/index.js` 放到状态目录，用我们自己的 bun 跑，并记下它的哈希——宿主每次启动都核对，装好后被改过就拒起。设了 `CODEX_PATH` 它不会加载那份 344MB 的 `@openai/codex`；不进 package.json。
 - **Codex 升级。** Claudestra 不自动升 Codex（launcher 只自动升 Claude Code）。迁移 / 新建 / 重启先用 `codex app-server --help` 探测能力，不能只信退出码：旧 CLI 会把未知子命令当提示词并以 0 退出。宿主还会核对本机 Codex 与适配器配套版本；不匹配先告警。升适配器要改 `install.ts` 的版本和 sha256，再重跑 `acp-install`。
 - **新建要跑一轮引导。** 新线程在第一轮之前不落盘，所以 create 时起一个短命的适配器，`session/new` 后跑一轮 `[claudestra:bootstrap]`（和 tmux 下 `codex exec` 引导同一个做法，历史里整轮丢掉），职责与频道规则经 `developer_instructions` 在这一轮写进线程。宿主之后一律接已有线程：适配器声明了 `session/resume` 就用它（不回放历史），否则 `session/load`；首条入站附职责前言（与 tmux 同一份）。
-- **fork 与 /clear**：fork 收编仍用 tmux 路径；ACP 下 `/clear` 先切回 tmux。其它斜杠命令（`/compact` 等）原样当一轮 prompt 交给宿主，由适配器自己认。
+- **fork 与 /clear**：`resume --fork --runtime codex` 经 `session/fork` 建新线程、重新订阅并跑一轮引导，registry 只记新 id。ACP 下 `/clear` 暂未轮转，先切回 tmux；其它斜杠命令（`/compact` 等）原样当一轮 prompt 交给宿主，由适配器自己认。
 - **网页直播的 seq。** 宿主推上来的条目没有 rollout 行号：watcher 给它们本地序号、sid 带 `acp:` 前缀，前端据此不拿它们跟 rollout 的历史游标比，退回按时间戳合并（bridge 直投的 reply 本来就这样）。代价：回合中途刷新网页时，直播气泡的剔重没有按行号那么精确。以后要补，可以让宿主读 rollout 对齐行号。
 - **流式条目按确认收尾。** 宿主的条目进有界出站队列，按序号一批批送；bridge 没挂好 watcher 时回 false，宿主退避重送，连续失败 8 次便记丢失并跳过这批。bridge 按 hostId + 序号跳过已处理前缀；单条坏记录和序号缺口按丢失计数确认，避免整批无限重送或重复正文。bridge 回包带累计丢失数，宿主在该轮按 StopFailure 报「可能丢了条目」。回合末等队列清空才报 Stop；90 秒等不到确认、bridge 重连、或队列超过 5000 条溢出也按 StopFailure 报。回合在适配器里接着跑，宿主按 channel-server 的退避重连。
 - **权限卡、额度卡的按钮带卡的代际。** 权限请求按频道排队、一次出一张；每张卡新生成代际，旧卡、答过的一律 409、不授权。作答先原子认领，再经宿主确认它还在等才算答上。宿主等 10 分钟没人答、适配器退出时按取消回适配器并撤卡；宿主断线撤卡，重连后把还在等的补发上来（新卡、新代际）。额度卡同理：同一个失败又报一次沿用这张卡，换了一次失败就是新卡，旧卡的按钮作废。

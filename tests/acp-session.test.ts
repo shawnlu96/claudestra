@@ -52,6 +52,22 @@ describe("AcpSession · 起步", () => {
     expect(f.last("session/load")).toBeTruthy();
   });
 
+  test("fork 能力和新线程 id 都按 ACP 回包确认", async () => {
+    const f = fakeAdapter();
+    const init = f.session.initialize();
+    f.reply("initialize", { agentCapabilities: { sessionCapabilities: { resume: {}, fork: {} } } });
+    expect(await init).toEqual({ resume: true, fork: true });
+    const fork = f.session.fork(SID, "/w");
+    expect(f.last("session/fork").params).toEqual({ sessionId: SID, cwd: "/w", mcpServers: [] });
+    const newId = "019a0000-0000-7000-8000-000000000002";
+    f.reply("session/fork", { sessionId: newId });
+    expect(await fork).toBe(newId);
+    expect(f.session.sessionId).toBe(newId);
+    const repeated = f.session.fork(SID, "/w");
+    f.reply("session/fork", { sessionId: SID });
+    await expect(repeated).rejects.toThrow("新的 sessionId");
+  });
+
   test("别的会话的更新不进来；本会话的原样交给宿主", async () => {
     const f = fakeAdapter();
     await attached(f);
