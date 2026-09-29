@@ -1,5 +1,5 @@
 /**
- * 运行时「待你处理」（AUQ / 权限 / Codex 弹框）的指纹（T61）：同一个 agent、同一条规则、命中的同一行原文 = 同一个弹框。
+ * 运行时「待你处理」（AUQ / 权限 / Codex 弹框）的指纹（T61）：同一个 agent、同一条规则、命中的同一行原文 = 同一个弹框。下面的跨重启规则只给 Codex / 权限卡，AUQ 见 auqIdentity。
  * 指纹记进 ask 的 extra.fp，落在台账里，bridge 重启后照样认得：
  *   - 同指纹还开着的 → 沿用原卡（不撤旧建新）；
  *   - 同指纹被 owner 删过、或 Codex 额度卡已到重置时间（expired），且弹框从那以后一直没消失过（extra.clearedAt 没记）→ 不再开；
@@ -16,29 +16,14 @@ export function runtimeFingerprint(source: AskSource, agent: string, rule: strin
   return createHash("sha256").update(JSON.stringify([source, agent.replace(/^agent-/, ""), rule, line.trim()])).digest("hex").slice(0, 32);
 }
 
-/** 两条检测对各字段的截断上限（jsonl-watcher / permission-watcher 的 slice）：到了上限 = 可能没读全 */
-const AUQ_CAPS = { question: 300, label: 100, description: 100 };
-/** 换行规范化：pane 把折行拼成空格、jsonl 是原文换行，中文还会在任意字间折——去掉全部空白再比 */
-const squash = (s: string) => s.replace(/\s+/g, "");
-const cut = (s: string, cap: number) => s.length >= cap || /(…|\.\.\.)$/.test(s.trim());
-
 /**
- * AUQ 的身份：各问的问题、单选 / 多选、按顺序的选项文字和描述——网页按下标提交，描述里写的是授权对象、范围和后果，
- * 这几样变了，同一个下标就是另一回事（tests/ask-dismiss.test.ts）。有字段到了截断上限或带省略号 = 读不全，返回 null：
- * 身份未知，不认领旧卡，每次都开新卡
+ * AUQ 的身份：各问的问题、单选 / 多选、按顺序的选项文字和描述，原样精确比较（不去空白、不做规范化）——网页按下标提交，
+ * 描述里写的是授权对象、范围和后果，差一个空格都可能是另一个对象（「/tmp/a /tmp/b」≠「/tmp/a/tmp/b」，tests/ask-dismiss.test.ts）。
+ * 只在同一个 bridge 进程里用来判断「还是不是正跟着的那个弹框」；AUQ 不跨重启认领（bridge/ask-runtime.ts）
  */
-export function auqIdentity(qs: unknown): string | null {
+export function auqIdentity(qs: unknown): string {
   const list = (Array.isArray(qs) ? qs : []) as { question?: string; multiSelect?: boolean; options?: { label?: string; description?: string }[] }[];
-  let whole = true;
-  const field = (v: string | undefined, cap: number) => {
-    if (cut(v ?? "", cap)) whole = false;
-    return squash(v ?? "");
-  };
-  const id = JSON.stringify(list.map((q) => [
-    field(q?.question, AUQ_CAPS.question), !!q?.multiSelect,
-    (q?.options ?? []).map((o) => [field(o?.label, AUQ_CAPS.label), field(o?.description, AUQ_CAPS.description)]),
-  ]));
-  return whole ? id : null;
+  return JSON.stringify(list.map((q) => [q?.question ?? "", !!q?.multiSelect, (q?.options ?? []).map((o) => [o?.label ?? "", o?.description ?? ""])]));
 }
 
 /** 同一个频道、同一种来源、同一个指纹的最近一条（任何状态） */

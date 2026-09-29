@@ -123,15 +123,15 @@ describe("指纹：同一个弹框重启沿用原卡，删过的不再冒出来"
     expect(codexRows().map((a) => a.state)).toEqual(["open"]);
   });
 
-  test("重启后还没看过屏幕（watcher 没起来 / 抓屏失败）：不撤卡、不记消失；看到弹框还在就认回原卡", async () => {
+  test("重启后还没看过屏幕（watcher 没起来 / 抓屏失败）：不撤卡、不记消失；看过屏幕确认没了才撤", async () => {
     await openRuntimeAsk(auq(["Yes", "No"]));
     const [a] = auqRows();
     resetRuntimeAsksForTest();
     await Bun.sleep(15);
     expect(getAsk(db(), a!.id)).toMatchObject({ state: "open" });
     expect(getAsk(db(), a!.id)!.extra.clearedAt).toBeUndefined();
-    await openRuntimeAsk(auq(["Yes", "No"]));
-    expect(auqRows().map((x) => [x.id, x.state])).toEqual([[a!.id, "open"]]);
+    await tick(null);
+    expect(getAsk(db(), a!.id)).toMatchObject({ state: "cancelled", extra: { clearedAt: expect.any(Number) } });
   });
 
   test("重启后第一眼就是空屏：删过的也记上消失，同一行再出现开新卡", async () => {
@@ -185,7 +185,36 @@ describe("指纹：同一个弹框重启沿用原卡，删过的不再冒出来"
   });
 });
 
-describe("AUQ 按下标作答：选项换了就是另一个弹框", () => {
+describe("AUQ 按下标作答：只在同一个进程里按身份精确沿用，重启后开新卡", () => {
+  test("重启后同一个弹框也不认领旧卡：旧卡撤掉、开新卡，旧卡提交被拒", async () => {
+    await openRuntimeAsk(auq(["Yes", "No"]));
+    const [old] = auqRows();
+    resetRuntimeAsksForTest();
+    await openRuntimeAsk(auq(["Yes", "No"]));
+    const fresh = auqRows().find((a) => a.id !== old!.id)!;
+    expect(getAsk(db(), old!.id)?.state).toBe("cancelled");
+    expect(fresh.state).toBe("open");
+    expect(staleAuqCard(old!.id, "111", fresh.options)).toBe(true);
+  });
+
+  test("同一个进程里同一个弹框重复来 question 事件：不换卡（描述到了 100 字也一样）", async () => {
+    const long = auq(["Proceed", "Cancel"], "d".repeat(100));
+    await openRuntimeAsk(long);
+    await openRuntimeAsk(long);
+    await openRuntimeAsk(long);
+    expect(auqRows().map((a) => a.state)).toEqual(["open"]);
+  });
+
+  test("删过的 AUQ：同一个进程里同一个弹框不再开；不按删过跨重启压住", async () => {
+    await openRuntimeAsk(auq(["Yes", "No"]));
+    await dismiss(auqRows()[0]!);
+    await openRuntimeAsk(auq(["Yes", "No"]));
+    expect(auqRows().map((a) => a.state)).toEqual(["cancelled"]);
+    resetRuntimeAsksForTest();
+    await openRuntimeAsk(auq(["Yes", "No"]));
+    expect(auqRows().map((a) => a.state).sort()).toEqual(["cancelled", "open"]);
+  });
+
   test("同名问题换了选项顺序：重启后不认回旧卡，旧卡撤掉；拿旧卡的 id 提交被拒", async () => {
     await openRuntimeAsk(auq(["Cancel", "Delete"]));
     const [old] = auqRows();
@@ -216,24 +245,19 @@ describe("AUQ 按下标作答：选项换了就是另一个弹框", () => {
     expect(staleAuqCard(fresh.id, "111", newq.options)).toBe(false);
   });
 
-  test("折行 / 空白差异不算变了（pane 拼成空格、jsonl 原文换行、中文任意字间折）；到截断上限或带省略号 = 身份未知", () => {
-    expect(auqIdentity(qs(["继续"], "只读检查，\n不改任何东西"))).toBe(auqIdentity(qs(["继续"], "只读检查， 不改任 何东西")));
-    expect(auqIdentity(qs(["继续"], "x".repeat(100)))).toBeNull();
-    expect(auqIdentity(qs(["继续"], "Deletes the staging…"))).toBeNull();
-    expect(auqIdentity(qs(["继续"], "x".repeat(99)))).not.toBeNull();
-  });
-
-  test("身份未知的：重启后同一个弹框也不认领旧卡，开新卡换掉；只有正跟着的那张能提交", async () => {
-    const long = auq(["Proceed", "Cancel"], "d".repeat(100));
-    await openRuntimeAsk(long);
+  test("空白也算：「/tmp/reports /tmp/archive」和「/tmp/reports/tmp/archive」是两个授权对象、两张卡", async () => {
+    const a = auq(["Delete", "Cancel"], "Delete /tmp/reports /tmp/archive");
+    const b = auq(["Delete", "Cancel"], "Delete /tmp/reports/tmp/archive");
+    expect(auqIdentity(a.options)).not.toBe(auqIdentity(b.options));
+    await openRuntimeAsk(a);
     const [old] = auqRows();
     resetRuntimeAsksForTest();
-    await openRuntimeAsk(long);
-    const fresh = auqRows().find((a) => a.id !== old!.id)!;
-    expect(getAsk(db(), old!.id)?.state).toBe("cancelled");
-    expect(fresh.state).toBe("open");
-    expect(staleAuqCard(old!.id, "111", long.options)).toBe(true);
-    expect(staleAuqCard(fresh.id, "111", long.options)).toBe(false);
+    await openRuntimeAsk(b);
+    const fresh = auqRows().find((x) => x.id !== old!.id)!;
+    expect(fresh).toMatchObject({ state: "open", options: b.options });
+    expect(staleAuqCard(old!.id, "111", b.options)).toBe(true);
+    await openRuntimeAsk(a); // 同一个进程里换回来：再换卡
+    expect(auqRows().filter((x) => x.state === "open").map((x) => x.options)).toEqual([a.options]);
   });
 
   test("进程一直在跑、换了选项：旧卡结掉、开新卡", async () => {

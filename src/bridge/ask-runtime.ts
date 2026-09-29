@@ -4,8 +4,8 @@
  * - AUQ：订阅 question / question_cleared 事件；从网页 / Discord 提交的记 answered，其余记 cancelled；
  * - 权限 / Codex：permission-watcher 每轮一行 noteRuntimeDialogs；Discord 按钮答了记 answered（discord-interactions 一行），
  *   网页按键端点发完键当场记（api-routes.ts 一行）；其余（终端里答了、回合结束）弹框消失时记 cancelled。
- * 「每个频道每种来源一条开着的」记在内存；每条带指纹（lib/ask-fingerprint.ts，落在 extra.fp）：bridge 重启后同一个弹框沿用原卡、
- * owner 删过的（ask-dismiss.ts）只要弹框一直没消失就不再开。「消失」只认真看过屏幕的一轮（noteAbsent）：没采样、抓屏失败都算不知道，
+ * 「每个频道每种来源一条开着的」记在内存；每条带指纹（lib/ask-fingerprint.ts，落在 extra.fp）：bridge 重启后同一个 Codex / 权限弹框
+ * 沿用原卡、owner 删过的只要弹框一直没消失就不再开（ask-dismiss.ts）；AUQ 只在同一个进程里按身份精确沿用，重启后开新卡。「消失」只认真看过屏幕的一轮（noteAbsent）：没采样、抓屏失败都算不知道，
  * 不撤卡也不记消失；重启前留下、之后再没被看到的，到期由过期清扫收起。
  */
 import { t } from "../lib/i18n.js";
@@ -78,9 +78,8 @@ interface RuntimeAskInput {
 
 export async function openRuntimeAsk(r: RuntimeAskInput): Promise<void> {
   const key = rtKey(r.source, r.channelId);
-  // AUQ 按下标作答：同名问题换了选项 / 描述就是另一个弹框；身份读不全的每次都当新的（tests/ask-dismiss.test.ts）
-  const line = r.source === "auq" ? (auqIdentity(r.options) ?? `incomplete:${crypto.randomUUID()}`) : r.context;
-  const fp = runtimeFingerprint(r.source, r.agentName, r.title, line);
+  // AUQ 按下标作答：问题 / 选项 / 描述有一处不同就是另一个弹框，换卡（tests/ask-dismiss.test.ts）
+  const fp = runtimeFingerprint(r.source, r.agentName, r.title, r.source === "auq" ? auqIdentity(r.options) : r.context);
   const held = runtimeOpen.get(key);
   if (held?.fp === fp) return;
   if (held) settleRuntimeAsk(r.source, r.channelId); // 同一频道换成了另一个弹框：上一个结掉（记消失）再看这个
@@ -88,7 +87,8 @@ export async function openRuntimeAsk(r: RuntimeAskInput): Promise<void> {
   const slot: Held = { id: "", fp };
   runtimeOpen.set(key, slot);
   try {
-    const prior = priorByFingerprint(askDb(), r.source, r.channelId, fp);
+    // 跨重启认领、删过压住只给 Codex / 权限卡（owner 要的是额度卡别反复冒）；AUQ 重启后一律开新卡，旧的由 supersede / noteAbsent 撤
+    const prior = r.source === "auq" ? null : priorByFingerprint(askDb(), r.source, r.channelId, fp);
     const reuse = reuseOf(prior);
     supersede(r.source, r.channelId, reuse === "adopt" ? prior!.id : "");
     if (reuse !== "new") return void runtimeOpen.set(key, { id: reuse === "adopt" ? prior!.id : `~${prior!.id}`, fp });
@@ -210,17 +210,15 @@ export function noteRuntimeDialogs(channelId: string, agentName: string, pane: s
 
 /**
  * 网页卡片提交 AUQ 前对一下：卡是不是当前这个弹框的（api-routes 的 answer 端点一行）。卡已结案（被换掉 / 删了）、不是这个频道的、
- * 不是内存里正跟着的那张、身份和当前弹框对不上 = 过期卡，它的下标在当前弹框上是另一回事，拒掉。身份读不全的只能靠「正跟着的那张」：
- * 每次检测都开新卡换掉旧的，正跟着的就是最近这次。不带 askId 的（聊天里的交互卡）不查
+ * 不是内存里正跟着的那张、身份和当前弹框对不上 = 过期卡，它的下标在当前弹框上是另一回事，拒掉。
+ * 不带 askId 的（聊天里的交互卡）不查；和实际画面比对是 T65 的事
  */
 export function staleAuqCard(askId: unknown, channelId: string, questions: unknown): boolean {
   if (typeof askId !== "string" || !askId) return false;
   const db = askDbIfExists();
   const a = db && hasAsksTable(db) ? getAsk(db, askId) : null;
   if (!a || a.state !== "open" || a.source !== "auq" || a.fromChannelId !== channelId) return true;
-  if (runtimeOpen.get(rtKey("auq", channelId))?.id !== askId) return true;
-  const card = auqIdentity(a.options);
-  return card !== null && card !== auqIdentity(questions);
+  return runtimeOpen.get(rtKey("auq", channelId))?.id !== askId || auqIdentity(a.options) !== auqIdentity(questions);
 }
 
 /** 标题取第一问；多问的标上一共几问（卡片里每问都能答） */
