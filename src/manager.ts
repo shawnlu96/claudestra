@@ -31,7 +31,6 @@ import {
   MASTER_SESSION,
   AGENT_PREFIX,
   tmuxRaw,
-  tmuxSendEscape, noteProgramInput,
   tmuxRawStrict,
   sessionTarget,
   windowTarget,
@@ -105,6 +104,7 @@ import { sandboxManagerRefusal } from "./lib/sandbox-env.js";
 import { assertResumable, assertSandboxSession } from "./lib/sandbox-sessions.js";
 import { loadRegistry, patchRegistryAgent, saveRegistry, normalizeName, assertValidNewAgent, formatAge, output, outputSync, extractPermFlags, extractEffortFlag, extractModeFlag, extractModelFlag, extractBoolFlag, extractMultiFlag, extractStringFlag } from "./manager/core.js";
 import { runProjectCommand } from "./manager/projects.js";
+import { realSendKeysDeps, sendKeysChecked } from "./manager/send-keys.js";
 import { cmdCronAdd, cmdCronList, cmdCronEdit, cmdCronRemove, cmdCronToggle, cmdCronHistory } from "./manager/cron.js";
 import { cmdPermissions } from "./manager/permissions.js";
 import { cmdKill, cmdRemove } from "./manager/agent-kill.js"; // 按 registry 补完剩余步骤、重复跑幂等
@@ -2094,21 +2094,14 @@ async function cmdTmuxScreenshot(name: string) {
   output({ ok: true, agent: tmuxName, path: pngPath });
 }
 
-async function cmdTmuxSendKeys(name: string, keys: string[]) {
+async function cmdTmuxSendKeys(name: string, args: string[]) {
   const tmuxName = normalizeName(name);
   if (!(await windowExists(tmuxName))) {
     output({ ok: false, error: `${tmuxName} 不存在` });
     return;
   }
-  // keys 可以是 "Enter" "Escape" "Left" "C-c" 或普通字符串（用 -l 字面模式）
-  for (const k of keys) {
-    const special = /^(Enter|Escape|Esc|Left|Right|Up|Down|Tab|BTab|BSpace|C-[a-z]|M-[a-z]|Space)$/i.test(k);
-    const args = special ? ["send-keys", "-t", windowTarget(tmuxName), k] : ["send-keys", "-t", windowTarget(tmuxName), "-l", "--", k];
-    if (!/^(Escape|Esc)$/i.test(k)) await noteProgramInput(windowTarget(tmuxName), special ? "" : k); // bridge 别把程序敲的字 / C-c 当成 owner
-    await (/^(Escape|Esc)$/i.test(k) ? tmuxSendEscape(windowTarget(tmuxName), { strict: true }) : tmuxRaw(args)); // Esc 走双击护栏（跨进程也算），没发出去就报错
-    await Bun.sleep(50);
-  }
-  output({ ok: true, agent: tmuxName, keys });
+  const { value: force, rest: keys } = extractBoolFlag(args, "--force"); // keys 可以是 "Enter" "Escape" "Left" "C-c" 或普通字符串；画面闸见 manager/send-keys.ts
+  output({ agent: tmuxName, ...(await sendKeysChecked(tmuxName, keys, force, realSendKeysDeps())) });
 }
 
 async function cmdTmuxCapture(name: string, lines: number) {
@@ -2778,7 +2771,7 @@ switch (cmd) {
 
   case "tmux-send-keys": {
     const [name, ...rest] = args;
-    if (!name || rest.length === 0) { output({ ok: false, error: "usage: tmux-send-keys <agent> <keys...>" }); break; }
+    if (!name || extractBoolFlag(rest, "--force").rest.length === 0) { output({ ok: false, error: "usage: tmux-send-keys <agent> [--force] <keys...>" }); break; }
     await cmdTmuxSendKeys(name, rest);
     break;
   }
@@ -2951,7 +2944,7 @@ switch (cmd) {
         "relay-status                    — show the relay connection (address, fingerprint, contacts online)",
         "metrics [--today|--week|--since <ISO>] [--agent <n>] [--raw]  — summarise the bridge event log",
         "tmux-screenshot <agent>         — screenshot an agent's tmux window (returns a PNG path)",
-        "tmux-send-keys <agent> <keys...>  — send keys/text to an agent (Enter/Escape/Left/C-c …)",
+        "tmux-send-keys <agent> [--force] <keys...>  — send keys/text (refused on limit menu / countdown / permission / AUQ; --force audits)",
         "tmux-capture <agent> [lines]    — read the last N lines of an agent's pane",
         "fleet state | fleet <lp-on|lp-off|compact|save-compact|lp-compact> --agents a,b|--project p|--all [--walled] [--ctx-over N] [--dry-run]  — batch ops via the bridge",
         "tmux-wait-idle <agent> [ms]     — block until the agent is idle again (default 30s)",
