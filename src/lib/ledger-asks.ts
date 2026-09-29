@@ -15,6 +15,8 @@ export type AskKind = "decide" | "authorize" | "owner_action" | "accept" | "assi
 type AskState = "open" | "answered" | "expired" | "cancelled" | "superseded";
 /** human / system = 人或系统发起的（chat 审核、409 转人工、指派）：没有发起 agent，fromAgent 为空 */
 export type AskSource = "reply" | "auq" | "permission" | "codex" | "human" | "system";
+/** 运行时卡住的镜像（AUQ / 权限 / Codex 弹框）：只活在 bridge 内存里，作答走原有的按键端点，bridge 重启时撤掉重建 */
+export const isRuntimeAsk = (a: { source: AskSource }): boolean => a.source === "auq" || a.source === "permission" || a.source === "codex";
 /** 大总管不属于任何项目，它发的 ask 记在这个 project 下，只从跨项目的 /api/v1/asks 读 */
 export const MASTER_PROJECT = "master";
 
@@ -40,6 +42,8 @@ export interface AskAnswer {
   final?: boolean;
   /** 作答附带的附件引用（指派事项「完成」时的说明图等，T28a 存在 talk 附件库）：这里只原样存 */
   atts?: AskAtt[];
+  /** 作答的不是 owner 本人（guest）：原话不进 decision 的 text */
+  external?: boolean;
 }
 
 export interface AskAtt {
@@ -251,12 +255,12 @@ function mergeAnswer(a: Ask, next: AskAnswer): { merged: AskAnswer; done: boolea
 }
 
 /**
- * owner 作答，同一事务里追加 decision 事件（actor = 作答的凭据 / Discord 用户，取不到记 unknown；text 是人话，data 带原话与所选）。多行 reply 逐行点时先记部分答案、
- * 状态仍是 open，所有组都答完才 answered。已结案 → conflict；这组答过了 → conflict（current.dup）；
- * 到点还没被扫成 expired 的，这里先记成 expired（事务照常提交）再报 conflict（current.expiredNow，调用方据此补发过期通知）——
- * 在事务里抛错会把这笔回滚掉。
+ * 作答，同一事务里追加 decision 事件（actor = 作答的凭据 / Discord 用户，取不到记 unknown；data 带原话与所选）。多行 reply 逐行点时先记部分答案、仍 open，都答完才 answered。
+ * 已结案 / 这组答过（current.dup）→ conflict；到点还没扫成 expired 的先记 expired（事务照常提交，在事务里抛错会回滚）再报 conflict（current.expiredNow，调用方补发过期通知）。
+ * within：结案那一笔同一事务里顺带写的（T28a 指派写交付），抛错整笔回滚、答案不落库。
+ * 指派事项、或作答的不是 owner 本人（answer.external）：decision 的 text 只写选了哪项，原话只在 data.ownerWords、标 external。
  */
-export function answerAsk(db: Database, id: string, answer: AskAnswer): Ask {
+export function answerAsk(db: Database, id: string, answer: AskAnswer, within?: () => void): Ask {
   const r = tx(db, (): AnswerOutcome => {
     const a = getAsk(db, id);
     if (!a) throw new LedgerError("not_found", `ask ${id} 不存在`);
@@ -265,9 +269,11 @@ export function answerAsk(db: Database, id: string, answer: AskAnswer): Ask {
     const m = mergeAnswer(a, answer);
     if (!m) return { ask: a, err: "dup" };
     const out = setState(db, id, m.done ? "answered" : "open", answer.at, m.merged);
-    const said = [answer.labels.join("；"), answer.text ? `「${answer.text}」` : ""].filter(Boolean).join(" ");
-    const data = { via: answer.via, choices: answer.choices, labels: answer.labels, ownerWords: answer.text, principal: answer.principal, partial: !m.done };
+    const external = a.kind === "assigned" || answer.external === true;
+    const said = [answer.labels.join("；"), answer.text && !external ? `「${answer.text}」` : ""].filter(Boolean).join(" ");
+    const data = { via: answer.via, choices: answer.choices, labels: answer.labels, ownerWords: answer.text, principal: answer.principal, partial: !m.done, ...(external ? { external } : {}) };
     addEvent(db, out, "decision", answer.principal || "unknown", said || out.title, data, answer.at);
+    if (m.done) within?.();
     return { ask: out };
   });
   if (r.err === "dup") throw new LedgerError("conflict", `ask ${id} 这一项已经答过了`, { state: r.ask.state, answer: r.ask.answer, dup: true });
@@ -322,7 +328,8 @@ export interface AskQuery {
   states?: AskState[];
   fromAgent?: string;
   source?: AskSource;
-  assignee?: string;
+  /** 给数组 = 其中任一（合并过设备的人名下有多个 person id） */
+  assignee?: string | readonly string[];
   /** 已结案的只要 updatedAt 晚于它的（「最近处理过」） */
   closedSince?: number;
   limit?: number;
@@ -339,7 +346,10 @@ export function listAsks(db: Database, q: AskQuery = {}): Ask[] {
   if (q.project !== undefined) add("project = ?", q.project);
   if (q.fromAgent !== undefined) add("fromAgent = ?", q.fromAgent);
   if (q.source !== undefined) add("source = ?", q.source);
-  if (q.assignee !== undefined) add("assignee = ?", q.assignee);
+  if (q.assignee !== undefined) {
+    const who = typeof q.assignee === "string" ? [q.assignee] : q.assignee;
+    add(`assignee IN (${who.map(() => "?").join(",") || "NULL"})`, ...who);
+  }
   if (q.states?.length) add(`state IN (${q.states.map(() => "?").join(",")})`, ...q.states);
   if (q.closedSince !== undefined) add("(state = 'open' OR updatedAt > ?)", q.closedSince);
   const sql = `SELECT * FROM asks${conds.length ? ` WHERE ${conds.join(" AND ")}` : ""}

@@ -5,6 +5,7 @@ import { AttachmentStrip } from "@/features/chat/components/attachments";
 import { agentLabel, answerSummary, askAttachments, closedText, spanText, type WebAsk } from "../asks-model";
 import { useAsks } from "../asks-store";
 import { AskActions } from "./ask-actions";
+import { AnswerImages } from "./assigned-choices";
 import { ChatIcon, ClockIcon } from "./ask-icons";
 
 /**
@@ -54,6 +55,7 @@ export function AskCard({ ask, now, focused, onOpenChat }: { ask: WebAsk; now: n
 
       {open && <AskActions ask={ask} agent={agent} />}
       {answerSummary(ask) && <p className="mt-2 text-[12.5px] opacity-75">{open ? t("已答：{s}", { s: answerSummary(ask) }) : answerSummary(ask)}</p>}
+      <AnswerImages atts={ask.answer?.atts} />
       {note && <p className={`mt-2 text-[12.5px] ${note.ok ? "text-success" : "text-error"}`}>{note.text}</p>}
 
       <footer className="mt-3 flex items-center gap-2 text-[12px]">

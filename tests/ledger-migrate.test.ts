@@ -261,17 +261,24 @@ describe("v1 → 依赖边版本", () => {
 });
 
 describe("写事件的底座只给写入模块", () => {
-  test("src 里 import ledger-tx 的只有 ledger-write.ts / ledger-deps-write.ts（直接写事件会绕过阶段机与权限）", () => {
+  // ledger-human.ts：v3.2 例外（human 节点的人工交付与重开指派），它按执行者角色推 build / fix → review，门在 human-node.ts
+  test("src 里 import ledger-tx / applyMove 的只有写入模块（直接写事件、带 asRole 推阶段会绕过阶段机与权限）", () => {
     const root = resolve(import.meta.dir, "../src");
-    const hits: string[] = [];
+    const tx: string[] = [];
+    const move: string[] = [];
     const walk = (d: string): void => {
       for (const e of readdirSync(d, { withFileTypes: true })) {
         const p = join(d, e.name);
         if (e.isDirectory()) walk(p);
-        else if (p.endsWith(".ts") && /from "\.\/ledger-tx\.js"|ledger-tx\.js"/.test(readFileSync(p, "utf8"))) hits.push(p.slice(root.length + 1));
+        else if (p.endsWith(".ts")) {
+          const src = readFileSync(p, "utf8");
+          if (/from "\.\/ledger-tx\.js"|ledger-tx\.js"/.test(src)) tx.push(p.slice(root.length + 1));
+          if (/import \{[^}]*\bapplyMove\b[^}]*\} from/.test(src)) move.push(p.slice(root.length + 1));
+        }
       }
     };
     walk(root);
-    expect(hits.sort()).toEqual(["lib/ledger-deps-write.ts", "lib/ledger-write.ts"]);
+    expect(tx.sort()).toEqual(["lib/ledger-deps-write.ts", "lib/ledger-human.ts", "lib/ledger-write.ts"]);
+    expect(move).toEqual(["lib/ledger-human.ts"]);
   });
 });

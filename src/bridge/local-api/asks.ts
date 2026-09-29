@@ -9,7 +9,7 @@
  *   POST /api/v1/presence                          网页可见性 {visible}：可见时每分钟一次、切后台时一次（推送规则判 owner 在不在）
  * 运行时弹框类（AUQ / 权限）的按键仍走 POST /agents/:name/answer，由那个端点记是谁选了什么。实时靠 SSE ask 事件，收到就重拉。
  */
-import { canAnswerAsk, canSeeAsk, humanAssignee } from "../../lib/ask-access.js";
+import { assigneesOf, canAnswerAsk, canSeeAsk } from "../../lib/ask-access.js";
 import { draftFromReply } from "../../lib/ask-options.js";
 import { assigneeFormatError } from "../../lib/ledger-checks.js";
 import { canReadLedger } from "../../lib/devices.js";
@@ -68,7 +68,7 @@ export async function handleAsksApi(req: Request, path: string, principal: Princ
   if (req.method !== "GET") return apiJson(405, { ok: false, error: "method not allowed" });
   try {
     // 台账读不了的（guest）只查指给自己的，别让别人的 200 条把它挤掉
-    const rows = listForWeb((a) => canSeeAsk(principal, a), project, ledger ? undefined : humanAssignee(principal.id));
+    const rows = listForWeb((a) => canSeeAsk(principal, a), project, ledger ? undefined : assigneesOf(principal));
     const asks = rows.map((a): Ask & { canAnswer: boolean } => ({ ...a, canAnswer: canAnswerAsk(principal, a) }));
     // full：拿到的是完整列表（台账读得了）——网页据此才敢把「列表里查不到」当成早已结案（asks-model replyAskState）
     return apiJson(200, { ok: true, asks, full: ledger, presence: ownerPresence.state(), now: Date.now() });
