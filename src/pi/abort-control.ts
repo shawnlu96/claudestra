@@ -41,8 +41,14 @@ export function createAbortControl(now: () => number = Date.now) {
   /** 叫停中送来的 bridge 消息：settle 后交回扩展投 */
   let deferred: string[] = [];
   const stopping = () => stoppedAt !== undefined && now() - stoppedAt < STOP_HOLD_MS;
+  let capable = false;
 
-  return {
+  const control = {
+    /** session_start：这个 Pi 版本的扩展上下文有没有 abort()。没有就不在注册帧里声明会中止（bridge 不当它能停，停止如实报失败，wf2 pi-8） */
+    onSession(ctx: AbortableCtx | undefined): void {
+      capable = typeof ctx?.abort === "function";
+    },
+    capable: () => capable,
     onRunStart(ctx: AbortableCtx): void {
       runCtx = ctx;
       if (stopping()) ctx.abort?.();
@@ -65,17 +71,31 @@ export function createAbortControl(now: () => number = Date.now) {
       steered = [], deferred = [], stoppedAt = undefined;
       return late;
     },
-    /** 中止当前回合；返回回执的内容：结果、作废的消息 id、其中几条被 Pi 退回了输入框。没在跑 = idle（空闲时 abort 无意义，也没有排队的） */
-    abort(): { result: "aborted" | "idle"; voided: string[]; inEditor: number } {
+    /**
+     * 中止当前回合；返回回执的内容：结果、作废的消息 id、其中几条被 Pi 退回了输入框。没在跑 = idle（空闲时 abort 无意义，也没有排队的）；
+     * 这个 Pi 版本的上下文没有 abort() = unsupported（什么也没做，不能回「已中止」，wf2 pi-8）
+     */
+    abort(): { result: "aborted" | "idle" | "unsupported"; voided: string[]; inEditor: number } {
       const ctx = runCtx;
       if (!ctx || ctx.isIdle?.()) return { result: "idle", voided: [], inEditor: 0 };
+      if (typeof ctx.abort !== "function") return { result: "unsupported", voided: [], inEditor: 0 };
       const voided = ctx.hasPendingMessages?.() ? steered : [];
       steered = [];
       stoppedAt = now();
-      ctx.abort?.();
+      ctx.abort();
       const editor = ctx.ui?.getEditorText?.() ?? "";
       const ids = voided.map((v) => v.messageId).filter((id): id is string => !!id);
       return { result: "aborted", voided: ids, inEditor: voided.filter((v) => editor.includes(v.text)).length };
     },
+    /** bridge 的 {type:"abort", id} → 回执帧。abort() 抛错（会话替换后拿着过期的 ctx）不是「本来就空闲」：回 error，bridge 如实写「没能替你打断」 */
+    ack(id: unknown): Record<string, unknown> {
+      try {
+        return { type: "abort_ack", id, ...control.abort() };
+      } catch (e) {
+        console.error(`claudestra: abort 失败: ${(e as Error).message}`);
+        return { type: "abort_ack", id, result: "error", error: (e as Error).message };
+      }
+    },
   };
+  return control;
 }

@@ -58,6 +58,7 @@ const SESSION_WAIT_MS = 120_000;
 const ENTRY_BATCH_MAX = 200;
 const ENTRY_OUTBOX_MAX = 5_000;
 const ENTRY_ACK_MS = 15_000;
+const ENTRY_RETRY_MAX = 8;
 const TIMINGS: { retryMs: readonly number[]; drainMs: number; permissionMs: number } = { retryMs: [250, 500, 1_000, 2_000, 5_000], drainMs: 90_000, permissionMs: 10 * 60_000 };
 
 const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
@@ -79,6 +80,8 @@ export class AcpHost {
   private outbox: { seq: number; entry: Record<string, unknown> }[] = [];
   private entrySeq = 0;
   private droppedEntries = 0;
+  private lastBridgeLost = 0;
+  private lastBridgeEpoch: string | undefined;
   private deliveryUncertain = false;
   private pumping = false;
   private retryTimer: ReturnType<typeof setTimeout> | null = null;
@@ -234,9 +237,20 @@ export class AcpHost {
       while (this.outbox.length && this.registered && !this.stopping) {
         const batch = this.outbox.slice(0, ENTRY_BATCH_MAX);
         const frame = { channelId: this.cfg.channelId, type: "acp_entries", hostId: this.hostId, firstSeq: batch[0]!.seq, entries: batch.map((b) => b.entry) };
-        const ok = await this.link.request<boolean>(frame, ENTRY_ACK_MS).then((r) => r === true, (e) => (this.deps.log(`条目没送到：${errText(e)}`), false));
+        const ack = await this.link.request<boolean | { ok: true; lost: number; bridgeEpoch?: string }>(frame, ENTRY_ACK_MS)
+          .catch((e) => (this.deps.log(`条目没送到：${errText(e)}`), false as const));
+        const ok = ack === true || (typeof ack === "object" && ack?.ok === true);
         if (!ok && this.retries === 0) this.deps.log(`bridge 还没接住 ${batch.length} 条流式条目（序号 ${frame.firstSeq} 起），留着重送`);
-        if (!ok) return this.retryLater();
+        if (!ok && this.retries < ENTRY_RETRY_MAX) return this.retryLater();
+        if (!ok) {
+          this.droppedEntries += batch.length;
+          this.deps.log(`bridge 连续 ${ENTRY_RETRY_MAX} 次没接住条目：放弃序号 ${frame.firstSeq} 起的 ${batch.length} 条，这轮按 StopFailure 报`);
+        } else if (typeof ack === "object" && Number.isInteger(ack.lost) && ack.lost >= 0) {
+          if (ack.bridgeEpoch && ack.bridgeEpoch !== this.lastBridgeEpoch) this.lastBridgeLost = 0;
+          this.lastBridgeEpoch = ack.bridgeEpoch;
+          if (ack.lost > this.lastBridgeLost) this.droppedEntries += ack.lost - this.lastBridgeLost;
+          this.lastBridgeLost = ack.lost;
+        }
         this.retries = 0;
         const last = batch[batch.length - 1]!.seq;
         this.outbox = this.outbox.filter((b) => b.seq > last);
@@ -346,7 +360,7 @@ export class AcpHost {
   /** bridge 发来的调用（改配置）：结果按 id 回 acp_call_result */
   private async call(m: Record<string, any>): Promise<void> {
     const reply = (body: Record<string, unknown>) => this.link.send({ channelId: this.cfg.channelId, type: "acp_call_result", id: m.id, ...body });
-    if (m.op === "slash") return void (this.loop.submit(String(m.text ?? "")), reply({ ok: true })); // 原样当一轮 prompt，适配器自己认
+    if (m.op === "slash") return void (this.loop.submitCommand(String(m.text ?? "")), reply({ ok: true })); // 独占下一轮 prompt，适配器才会识别命令
     if (m.op === "permission") {
       const ok = this.endPermission(String(m.permId ?? ""), typeof m.optionId === "string" ? m.optionId : null);
       return void reply(ok ? { ok: true } : { ok: false, error: "这个权限请求已经不在等了（超时或适配器重起过）" });

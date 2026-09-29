@@ -41,6 +41,35 @@ impl RestartGate {
     }
 }
 
+/// One restart in flight. Dropping it ends the gate, so an early return or a panic can't leave
+/// `in_flight` stuck (which would refuse every later restart until the app is quit).
+pub struct RestartGuard<'a> {
+    gate: &'a Mutex<RestartGate>,
+    /// kickstart ran (even partly): the daemons are coming back up, so the light settles grey
+    pub kicked: bool,
+}
+
+impl<'a> RestartGuard<'a> {
+    fn acquire(gate: &'a Mutex<RestartGate>, now: Instant) -> Option<Self> {
+        // lazily, and after the lock is released: a guard built for a refused begin would be
+        // dropped here and end the restart that is actually running
+        let began = lock(gate).begin(now);
+        began.then(|| RestartGuard { gate, kicked: false })
+    }
+}
+
+impl Drop for RestartGuard<'_> {
+    fn drop(&mut self) {
+        lock(self.gate).end(Instant::now(), self.kicked);
+    }
+}
+
+/// The gate's data stays valid even if some holder panicked; `unwrap` here would turn one panic
+/// into a second one inside `Drop` (an abort) and lock the gate for good.
+fn lock(gate: &Mutex<RestartGate>) -> std::sync::MutexGuard<'_, RestartGate> {
+    gate.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 pub struct AppState {
     install: Mutex<env::Install>,
     pub tray: Mutex<Option<tray::TrayHandles>>,
@@ -49,31 +78,29 @@ pub struct AppState {
 }
 
 impl AppState {
-    /// Cached until everything is in place; before that, look again (setup may have just finished).
     pub fn install(&self) -> env::Install {
+        self.install_with(env::locate)
+    }
+
+    /// Cached once everything is in place and the PATH is a real one; before that, look again on
+    /// each call (setup may have just finished, or the background login-shell read just landed).
+    /// Freezing a `Default` PATH would hide the user's tool dirs until the app is restarted.
+    fn install_with(&self, locate: impl FnOnce() -> env::Install) -> env::Install {
         let mut cur = self.install.lock().unwrap();
-        if !(cur.daemons_installed && cur.cli_available) {
-            *cur = env::locate();
+        if !(cur.daemons_installed && cur.cli_available && cur.path_source != env::PathSource::Default) {
+            *cur = locate();
         }
         cur.clone()
     }
 
     /// One restart at a time, and none while the previous one is still settling.
-    pub fn begin_restart(&self) -> Result<(), String> {
-        if self.restart.lock().unwrap().begin(Instant::now()) {
-            Ok(())
-        } else {
-            Err(i18n::tr("正在重启，稍等再试", "A restart is already in progress"))
-        }
-    }
-
-    /// `kicked`: kickstart ran (even partly), so the daemons are coming back up.
-    pub fn end_restart(&self, kicked: bool) {
-        self.restart.lock().unwrap().end(Instant::now(), kicked);
+    pub fn begin_restart(&self) -> Result<RestartGuard<'_>, String> {
+        RestartGuard::acquire(&self.restart, Instant::now())
+            .ok_or_else(|| i18n::tr("正在重启，稍等再试", "A restart is already in progress"))
     }
 
     pub fn restarting(&self) -> bool {
-        self.restart.lock().unwrap().busy(Instant::now())
+        lock(&self.restart).busy(Instant::now())
     }
 
     pub fn last_str(&self, key: &str) -> Option<String> {
@@ -98,7 +125,7 @@ fn show_window(app: &AppHandle, tab: &str, notice: Option<&str>) {
 /// Menu actions have no UI of their own; a failure opens the window with the reason.
 fn report(app: &AppHandle, what: &str, r: Result<(), String>) {
     if let Err(e) = r {
-        show_window(app, "status", Some(&format!("{what}：{e}")));
+        show_window(app, "status", Some(&format!("{what}{}{e}", i18n::tr("：", ": "))));
     }
 }
 
@@ -176,6 +203,7 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
 
     #[test]
     fn restart_gate_blocks_reentry_and_settles() {
@@ -188,6 +216,94 @@ mod tests {
         assert!(!g.begin(t0 + Duration::from_secs(14)));
         assert!(!g.busy(t0 + RESTART_SETTLE));
         assert!(g.begin(t0 + RESTART_SETTLE));
+    }
+
+    #[test]
+    fn guard_ends_the_gate_on_drop() {
+        let gate = Mutex::new(RestartGate::default());
+        let g = RestartGuard::acquire(&gate, Instant::now()).expect("free");
+        assert!(RestartGuard::acquire(&gate, Instant::now()).is_none(), "second restart while the first runs");
+        drop(g); // kicked stays false: nothing to settle
+        assert!(RestartGuard::acquire(&gate, Instant::now()).is_some());
+    }
+
+    #[test]
+    fn guard_releases_the_gate_when_the_restart_panics() {
+        let gate = Mutex::new(RestartGate::default());
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let mut g = RestartGuard::acquire(&gate, Instant::now()).expect("free");
+            g.kicked = true;
+            panic!("restart blew up");
+        }));
+        assert!(r.is_err());
+        let t = Instant::now();
+        assert!(lock(&gate).busy(t), "kicked before the panic: still settles grey");
+        assert!(!lock(&gate).busy(t + RESTART_SETTLE), "but never stays stuck");
+    }
+
+    /// A checkout with the desktop entry point, and a bridge plist whose `EnvironmentVariables`
+    /// are `env_xml` (empty = no PATH at all). Lives under the test's own temp dir.
+    fn fake_install(name: &str, env_xml: &str) -> (PathBuf, PathBuf) {
+        let dir = std::env::temp_dir().join(format!("t18b-{name}-{}", std::process::id()));
+        let repo = dir.join("repo");
+        std::fs::create_dir_all(repo.join("src")).unwrap();
+        for f in ["src/setup.ts", "src/desktop-cli.ts"] {
+            std::fs::write(repo.join(f), "").unwrap();
+        }
+        let plist = dir.join("bridge.plist");
+        let body = format!(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<plist version=\"1.0\"><dict><key>Label</key><string>{}</string>\
+             <key>WorkingDirectory</key><string>{}</string>{env_xml}</dict></plist>\n",
+            env::BRIDGE_LABEL,
+            repo.display()
+        );
+        std::fs::write(&plist, body).unwrap();
+        (dir, plist)
+    }
+
+    fn state_with(install: env::Install) -> AppState {
+        AppState {
+            install: Mutex::new(install),
+            tray: Mutex::new(None),
+            last_status: Mutex::new(None),
+            restart: Mutex::new(RestartGate::default()),
+        }
+    }
+
+    #[test]
+    fn default_path_is_replaced_once_the_login_shell_read_lands() {
+        let (dir, plist) = fake_install("appstate", "");
+        let cache = Mutex::new(env::LoginPathCache::new());
+        let login = || cache.lock().unwrap().poll(Instant::now()).0;
+        let calls = std::cell::Cell::new(0);
+        let relocate = || {
+            calls.set(calls.get() + 1);
+            env::locate_with(&plist, login)
+        };
+        let state = state_with(relocate());
+        let first = state.install_with(relocate);
+        assert!(first.daemons_installed && first.cli_available, "installed: the old code froze here");
+        assert_eq!(first.path_source, env::PathSource::Default, "read still in flight");
+        cache.lock().unwrap().finish(Instant::now(), Some("/t18b-custom-bin:/usr/bin".into()));
+        let got = state.install_with(relocate);
+        assert_eq!(got.path_source, env::PathSource::LoginShell);
+        assert!(got.path.starts_with("/t18b-custom-bin:"), "{}", got.path);
+        assert_eq!(calls.get(), 3);
+        let kept = state.install_with(|| panic!("a real PATH is cached, no more lookups"));
+        assert_eq!(kept.path, got.path);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn plist_path_wins_and_skips_the_login_shell() {
+        let env_xml = "<key>EnvironmentVariables</key><dict><key>PATH</key><string>/t18b-plist-bin</string></dict>";
+        let (dir, plist) = fake_install("plist", env_xml);
+        let inst = env::locate_with(&plist, || panic!("plist has a PATH"));
+        assert_eq!(inst.path_source, env::PathSource::Plist);
+        assert!(inst.path.starts_with("/t18b-plist-bin:"), "{}", inst.path);
+        let missing = env::locate_with(&dir.join("absent.plist"), || None);
+        assert_eq!((missing.daemons_installed, missing.path_source), (false, env::PathSource::Default));
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

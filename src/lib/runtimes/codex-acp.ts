@@ -4,7 +4,7 @@
  * - new：和 tmux 下 exec 引导同一个坑——新线程在第一轮之前不落盘，所以这里起一个短命的适配器，session/new 后跑一轮
  *   `[claudestra:bootstrap]`（历史翻译整轮丢掉），职责与频道规则经 developer_instructions 在这一轮写进线程，拿到 thread id；
  * - resume / restart：宿主接上 registry 里的 thread id（有 session/resume 用它，不回放历史），首条入站附职责前言；
- * - fork：试点不支持，直接拒（先切回 tmux）；
+ * - fork：短命适配器调 session/fork，重新接上新线程并跑引导轮，再由常驻宿主接手；
  * - 就绪：宿主在 bridge 登记好、接上线程之后写 @claudestra_ready=1（与 channel-server / Pi 同一个标记）；
  * - 退出：C-c 给宿主（它收尾关掉适配器，app-server 跟着走），回到 shell。
  * 选用见 runtimes/index.ts managedFor(runtime, transport)。docs/runtimes/codex-acp.md；tests/codex-acp-adapter.test.ts。
@@ -19,9 +19,10 @@ import { isSandbox, SANDBOX_ROOT_ENV } from "../sandbox.js";
 import { acpAgentCommand, adapterEnv, spawnAdapter } from "../acp/adapter-proc.js";
 import { ACP_AGENT_ENV, sandboxAcpHome } from "../acp/stub.js";
 import { AcpSession } from "../acp/session.js";
-import { CODEX_ACP_CONTROL, codexAdapter } from "./codex.js";
+import { CODEX_ACP_CONTROL } from "./codex-control.js";
 import { defaultCodexDeps, type CodexAdapterDeps } from "./codex-deps.js";
 import { CODEX_READY_OPTION, waitCodexReady } from "./codex-ready.js";
+import { codexSource, isValidCodexSessionId } from "./codex-source.js";
 import type { LaunchSpec, ManagedRuntimeAdapter, WindowOps } from "./types.js";
 
 const BOOTSTRAP_TIMEOUT_MS = 180_000;
@@ -60,7 +61,7 @@ async function bootstrapThread(spec: LaunchSpec, deps: CodexAdapterDeps): Promis
   const agent = acpAgentCommand(process.env, deps.bunBin);
   if ("error" in agent) throw new Error(agent.error);
   const codexPath = agent.stub ? undefined : ((await deps.resolveBin()) ?? undefined);
-  const developerInstructions = codexDeveloperInstructions({
+  const developerInstructions = spec.mode === "fork" ? undefined : codexDeveloperInstructions({
     agentName: spec.agentName, purpose: spec.purpose, projectContext: spec.projectContext, channelRules: channelInstructions(deps.repoRoot),
   });
   const env = adapterEnv({
@@ -72,8 +73,10 @@ async function bootstrapThread(spec: LaunchSpec, deps: CodexAdapterDeps): Promis
   const s = new AcpSession(proc.wire, { onUpdate: () => {}, onPermission: async () => null, log: (m) => logs.push(m) });
   const timer = setTimeout(() => proc.stop(), BOOTSTRAP_TIMEOUT_MS);
   try {
-    await s.initialize();
-    const sid = await s.create(spec.cwd);
+    const caps = await s.initialize();
+    if (spec.mode === "fork" && !caps.fork) throw new Error("ACP 适配器没有声明 session/fork 能力");
+    const sid = spec.mode === "fork" ? await s.fork(spec.sessionId, spec.cwd) : await s.create(spec.cwd);
+    if (spec.mode === "fork") await s.attach(sid, spec.cwd, caps.resume); // codex-acp 2.0.0 fork 后会取消订阅，先重新接上
     for (const [id, v] of [["model", codexModel(spec.model)], ["reasoning_effort", codexEffort(spec.effort)]] as const) if (v) await s.setConfig(id, v);
     const r = await s.prompt(BOOTSTRAP_PROMPT);
     if (r.kind === "failed") throw new Error(`引导轮失败：${r.failure.message}`);
@@ -101,11 +104,15 @@ function createCodexAcpAdapter(overrides: Partial<CodexAdapterDeps> = {}): Manag
   const deps = () => (depsCache ??= { ...defaultCodexDeps(), ...overrides });
   let bin: string | null = null;
   return {
-    ...codexAdapter,
+    ...codexSource,
+    manageable: true,
     control: CODEX_ACP_CONTROL,
+    acp: { control: CODEX_ACP_CONTROL },
     inbound: "acp-host",
     turnEnd: "acp-host",
     exitCommand: "",
+    noteTag: "codex",
+    isValidSessionId: isValidCodexSessionId,
     async available() {
       const agent = acpAgentCommand(process.env, deps().bunBin);
       if ("error" in agent) return { ok: false, hint: agent.error };
@@ -114,8 +121,7 @@ function createCodexAcpAdapter(overrides: Partial<CodexAdapterDeps> = {}): Manag
       return found ? { ok: true } : { ok: false, hint: "登录 shell 的 PATH 里找不到 codex（ACP 适配器用 CODEX_PATH 锁本机的 codex）" };
     },
     async prepareSession(spec) {
-      if (spec.mode === "fork") throw new Error("ACP 试点不支持 fork：先切回 tmux（manager transport <agent> tmux）再 fork");
-      return { sessionId: spec.mode === "new" ? await bootstrapThread(spec, deps()) : spec.sessionId };
+      return { sessionId: spec.mode === "resume" ? spec.sessionId : await bootstrapThread(spec, deps()) };
     },
     buildLaunchCommand: (spec) => buildAcpHostCommand(spec, { bunBin: deps().bunBin, repoRoot: deps().repoRoot, codexBin: bin ?? undefined }),
     async beforeLaunch(win) {

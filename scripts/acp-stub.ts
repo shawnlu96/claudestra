@@ -3,7 +3,7 @@
  * - 像 Codex 一样按 CODEX_CONFIG 的 mcp_servers 起 MCP server（我们的 channel-server，经宿主的回环代理），回合里真的调 reply；
  * - 流式：正文增量、一个命令工具调用（带终端输出增量）、用量、线程状态（active / idle）；
  * - steering：有回合在跑就 injected，没有就自己另起一轮、答 startedNewTurn（结束只靠线程状态 idle，和真适配器一样）；
- * - 注入：正文带 [stub:slow] = 慢回合（等 session/cancel），[stub:quota] = 撞额度（声明了 AIR 给 sessionFailure，没声明给
+ * - 注入：正文带 [stub:slow] = 慢回合（等 session/cancel），[stub:pause] = 暂停 1.5 秒供忙时插话验收，[stub:quota] = 撞额度（声明了 AIR 给 sessionFailure，没声明给
  *   legacy 的 usageLimitExceeded 错误），[stub:perm] = 跑命令前向宿主要权限（session/request_permission，答案写进回复）；
  *   环境变量 STUB_AUTH_REQUIRED=1 = 没登录（接线程时回 -32000）。
  * 沙箱里 acp 固定起它（lib/acp/stub.ts，不用也不认 CLAUDESTRA_ACP_AGENT）；沙箱外单测 / 排查可用 CLAUDESTRA_ACP_AGENT='["bun","<repo>/scripts/acp-stub.ts"]'。
@@ -91,6 +91,7 @@ async function turn(text: string): Promise<Rec> {
     }
     update({ sessionUpdate: "tool_call_update", toolCallId: cid, _meta: { terminal_output_delta: { data: "stub\n", terminal_id: cid } } });
     update({ sessionUpdate: "tool_call_update", toolCallId: cid, status: "completed", _meta: { terminal_exit: { exit_code: 0, terminal_id: cid } } });
+    if (text.includes("[stub:pause]")) await sleep(1_500);
     if (text.includes("[stub:slow]")) for (let i = 0; i < 300 && !running.cancelled; i++) await sleep(100);
     if (running.cancelled) return { stopReason: "cancelled" };
     const chatId = /chat_id="([^"]+)"/.exec(text)?.[1];
@@ -113,10 +114,14 @@ async function handle(m: Rec): Promise<Rec | undefined> {
       return {
         protocolVersion: 1,
         agentInfo: { name: "acp-stub", version: "0" },
-        agentCapabilities: { loadSession: true, sessionCapabilities: { resume: {} } },
+        agentCapabilities: { loadSession: true, sessionCapabilities: { resume: {}, fork: {} } },
         _meta: { steering: { supported: true } },
       };
     case "session/new":
+      sessionId = randomUUID();
+      return { sessionId, configOptions: config };
+    case "session/fork":
+      if (typeof p.sessionId !== "string" || !p.sessionId) throw { code: -32602, message: "Missing source sessionId" };
       sessionId = randomUUID();
       return { sessionId, configOptions: config };
     case "session/resume":

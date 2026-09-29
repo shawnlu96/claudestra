@@ -19,10 +19,12 @@ import { answerEcho } from "../lib/inbound-body.js";
 import { OwnerPresence } from "../lib/owner-presence.js";
 import { readPrincipals } from "../lib/principals.js";
 import { readRegistryAgents, type RegistryAgent } from "../lib/registry.js";
+import { matchStopWord } from "../lib/stop-words.js";
 import { emitEvent } from "./event-bus.js";
 import { ledgerDb } from "./ledger-feed.js";
 import { ownerChatIds } from "./push/dispatcher.js";
 import { newMessageId, newThreadId, parseChatId, type Delivery, type Endpoint, type Envelope, type TriggerKind } from "./router.js";
+import { turnCuts } from "./turn-cuts.js";
 
 export interface AsksDeps {
   clients: Map<string, { ws: ServerWebSocket<unknown>; cwd?: string }>;
@@ -293,6 +295,8 @@ export async function commitAnswer(i: AnswerInput): Promise<Ask> {
     return a;
   }
   const to = await answerTarget(a);
+  // owner 答卡片也是开口：解除这个 agent 上的「停」（答复带 waitForIdle，不经抢占那条路）；选的 / 写的是停字就不解除（wf2 classify-merge-9）
+  if (isOwnerSource(i.from)) turnCuts.noteHuman(to.channelId, matchStopWord(i.original ?? [...labels, i.text].filter(Boolean).join(" ")).stop);
   const outbox = await sendCalm(i.from, to, "response", answerContent(a, i.picks, i.text, i.original, to), a.id, "ask_answer");
   patchAsk(askDb(), a.id, { outboxMessageId: outbox, ...(to.redirected ? { extra: { redirectedTo: to.redirected } } : {}) });
   if (to.redirected) console.log(`↪ ask ${a.id} 的发起方 ${a.fromAgent} 不在了，答复改投 ${to.redirected}`);
