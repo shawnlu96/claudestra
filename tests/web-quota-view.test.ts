@@ -63,6 +63,7 @@ describe("文案与按钮", () => {
     expect(canRetry(d.entries[0])).toBeNull();
     expect(canRetry({ ...d.entries[0], source: { layer: "none", observedAt: null, reason: "http_5xx", needsUserRetry: false } })).toBeNull();
     expect(canRetry({ ...d.entries[0], source: { layer: "none", observedAt: null, reason: "bad_shape", needsUserRetry: false } })).toBe("claude");
+    expect(canRetry({ ...d.entries[0], source: { layer: "live_stale", observedAt: null, reason: "http_403", needsUserRetry: false } })).toBe("claude");
     // bridge 标了需要用户重试就给按钮，不管原因码是什么（先 5xx 再 Keychain 出错之类）；keychain_error 兜底名单也认
     expect(canRetry({ ...d.entries[0], source: { layer: "live_stale", observedAt: null, reason: "http_5xx", needsUserRetry: true } })).toBe("claude");
     expect(canRetry({ ...d.entries[0], source: { layer: "none", observedAt: null, reason: "keychain_error", needsUserRetry: false } })).toBe("claude");

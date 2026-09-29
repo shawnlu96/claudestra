@@ -115,14 +115,15 @@ describe("失败分类与冷却", () => {
     expect((await h.scheduler.refresh("codex", "view")).status).toBe("fetched");
   });
 
-  test("403 长冷却", async () => {
+  test("403 走短退避，用户点重试不等退避", async () => {
     const h = harness(() => jsonResponse(403, {}));
     await h.scheduler.refresh("codex", "view");
-    h.advance(HOUR);
-    expect(await h.scheduler.refresh("codex", "view")).toEqual({ status: "skipped_cooldown", code: "http_403" });
-    h.advance(QUOTA_TIMING.forbiddenCooldownMs);
+    h.advance(MIN);
+    expect(await h.scheduler.refresh("codex", "view")).toEqual({ status: "failed", code: "http_403" }); // 第 1 次退避 ≤72s
+    h.advance(MIN);
+    expect(await h.scheduler.refresh("codex", "view")).toEqual({ status: "skipped_cooldown", code: "http_403" }); // 第 2 次 ~2 分钟
     h.route = okRoutes;
-    expect((await h.scheduler.refresh("codex", "view")).status).toBe("fetched");
+    expect((await h.scheduler.refresh("codex", "user_retry")).status).toBe("fetched");
   });
 
   test("429 是账户级：Retry-After 期间同账户另一个端点也等", async () => {
@@ -226,8 +227,8 @@ describe("丢弃：开关与身份复核", () => {
 
 describe("账户隔离与持久化", () => {
   test("换号后看不到旧号的快照；换回来旧号的冷却还在", async () => {
-    const h = harness(() => jsonResponse(403, {}));
-    await h.scheduler.refresh("codex", "view"); // A：403 长冷却
+    const h = harness(() => jsonResponse(404, {}));
+    await h.scheduler.refresh("codex", "view"); // A：404 暂停 24 小时
     h.cd.files.set("/home/u/.codex/auth.json", codexAuth("tokB", "account-B"));
     h.route = okRoutes;
     h.advance(2 * MIN);
@@ -236,7 +237,7 @@ describe("账户隔离与持久化", () => {
     expect(vb.codex.account?.key).toBe(hmacHex(SECRET, "codex", "account-B"));
     h.cd.files.set("/home/u/.codex/auth.json", codexAuth());
     h.advance(2 * MIN);
-    expect(await h.scheduler.refresh("codex", "view")).toEqual({ status: "skipped_cooldown", code: "http_403" });
+    expect(await h.scheduler.refresh("codex", "view")).toEqual({ status: "skipped_paused" });
     const va = await h.scheduler.view();
     expect(va.codex.account?.key).toBe(hmacHex(SECRET, "codex", "raw-codex-account-id-0001"));
     expect(va.codex.endpoints.codex_usage?.snapshot).toBeNull(); // A 从没成功过，不拿 B 的数据充数
