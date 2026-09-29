@@ -8,7 +8,7 @@ import { sweepExpired } from "../src/bridge/ask-expire.js";
 import { noteRuntimeDialogs, openRuntimeAsk, resetRuntimeAsksForTest, staleAuqCard } from "../src/bridge/ask-runtime.js";
 import { listForWeb, setAsksForTest, type AsksDeps } from "../src/bridge/asks.js";
 import type { Envelope } from "../src/bridge/router.js";
-import { codexExpiry, codexQuotaText, reuseOf, runtimeFingerprint } from "../src/lib/ask-fingerprint.js";
+import { auqIdentity, codexExpiry, codexQuotaText, reuseOf, runtimeFingerprint } from "../src/lib/ask-fingerprint.js";
 import { answerAsk, getAsk, listAsks, openAsk, patchAsk, type Ask, type NewAsk } from "../src/lib/ledger-asks.js";
 import { closeLedger, openLedger } from "../src/lib/ledger-store.js";
 import type { RegistryAgent } from "../src/lib/registry.js";
@@ -56,9 +56,10 @@ const tick = async (pane: string | null) => {
 };
 const codexRows = () => listAsks(db(), { source: "codex" });
 const auqRows = () => listAsks(db(), { source: "auq" });
-const auq = (labels: string[]) => ({
+const qs = (labels: string[], description?: string) => [{ question: "Choose action", multiSelect: false, options: labels.map((label) => ({ label, description })) }];
+const auq = (labels: string[], description?: string) => ({
   source: "auq" as const, channelId: "111", agentName: "agent-x", kind: "decide" as const, title: "Choose action", context: "Choose action",
-  options: [{ question: "Choose action", options: labels.map((label) => ({ label })) }],
+  options: qs(labels, description),
 });
 
 describe("三类卡删掉的效果", () => {
@@ -198,6 +199,41 @@ describe("AUQ 按下标作答：选项换了就是另一个弹框", () => {
     expect(staleAuqCard(fresh.id, "111", now.options)).toBe(false);
     expect(staleAuqCard(fresh.id, "222", now.options)).toBe(true);
     expect(staleAuqCard(undefined, "111", now.options)).toBe(false); // 聊天里的交互卡不带 askId，不查
+  });
+
+  test("只改了选项描述（授权范围 / 后果变了）：也是另一个弹框，不认回旧卡，旧卡提交被拒", async () => {
+    const oldq = auq(["Proceed", "Cancel"], "Only inspect, no changes");
+    const newq = auq(["Proceed", "Cancel"], "Delete production data");
+    expect(auqIdentity(oldq.options)).not.toBe(auqIdentity(newq.options));
+    await openRuntimeAsk(oldq);
+    const [old] = auqRows();
+    resetRuntimeAsksForTest();
+    await openRuntimeAsk(newq);
+    const fresh = auqRows().find((a) => a.id !== old!.id)!;
+    expect(getAsk(db(), old!.id)?.state).toBe("cancelled");
+    expect(fresh).toMatchObject({ state: "open", options: newq.options });
+    expect(staleAuqCard(old!.id, "111", newq.options)).toBe(true);
+    expect(staleAuqCard(fresh.id, "111", newq.options)).toBe(false);
+  });
+
+  test("折行 / 空白差异不算变了（pane 拼成空格、jsonl 原文换行、中文任意字间折）；到截断上限或带省略号 = 身份未知", () => {
+    expect(auqIdentity(qs(["继续"], "只读检查，\n不改任何东西"))).toBe(auqIdentity(qs(["继续"], "只读检查， 不改任 何东西")));
+    expect(auqIdentity(qs(["继续"], "x".repeat(100)))).toBeNull();
+    expect(auqIdentity(qs(["继续"], "Deletes the staging…"))).toBeNull();
+    expect(auqIdentity(qs(["继续"], "x".repeat(99)))).not.toBeNull();
+  });
+
+  test("身份未知的：重启后同一个弹框也不认领旧卡，开新卡换掉；只有正跟着的那张能提交", async () => {
+    const long = auq(["Proceed", "Cancel"], "d".repeat(100));
+    await openRuntimeAsk(long);
+    const [old] = auqRows();
+    resetRuntimeAsksForTest();
+    await openRuntimeAsk(long);
+    const fresh = auqRows().find((a) => a.id !== old!.id)!;
+    expect(getAsk(db(), old!.id)?.state).toBe("cancelled");
+    expect(fresh.state).toBe("open");
+    expect(staleAuqCard(old!.id, "111", long.options)).toBe(true);
+    expect(staleAuqCard(fresh.id, "111", long.options)).toBe(false);
   });
 
   test("进程一直在跑、换了选项：旧卡结掉、开新卡", async () => {

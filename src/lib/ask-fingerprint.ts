@@ -16,13 +16,29 @@ export function runtimeFingerprint(source: AskSource, agent: string, rule: strin
   return createHash("sha256").update(JSON.stringify([source, agent.replace(/^agent-/, ""), rule, line.trim()])).digest("hex").slice(0, 32);
 }
 
+/** 两条检测对各字段的截断上限（jsonl-watcher / permission-watcher 的 slice）：到了上限 = 可能没读全 */
+const AUQ_CAPS = { question: 300, label: 100, description: 100 };
+/** 换行规范化：pane 把折行拼成空格、jsonl 是原文换行，中文还会在任意字间折——去掉全部空白再比 */
+const squash = (s: string) => s.replace(/\s+/g, "");
+const cut = (s: string, cap: number) => s.length >= cap || /(…|\.\.\.)$/.test(s.trim());
+
 /**
- * AUQ 的身份：各问的问题、单选 / 多选、按顺序的选项文字——网页按下标提交，这几样变了，同一个下标就是另一个操作。
- * 选项描述不算：pane 和 jsonl 两条检测画出来的描述不一样，算进去同一个弹框会来回换卡，下标的意思却没变
+ * AUQ 的身份：各问的问题、单选 / 多选、按顺序的选项文字和描述——网页按下标提交，描述里写的是授权对象、范围和后果，
+ * 这几样变了，同一个下标就是另一回事（tests/ask-dismiss.test.ts）。有字段到了截断上限或带省略号 = 读不全，返回 null：
+ * 身份未知，不认领旧卡，每次都开新卡
  */
-export function auqIdentity(qs: unknown): string {
-  const list = (Array.isArray(qs) ? qs : []) as { question?: string; multiSelect?: boolean; options?: { label?: string }[] }[];
-  return JSON.stringify(list.map((q) => [q?.question ?? "", !!q?.multiSelect, (q?.options ?? []).map((o) => o?.label ?? "")]));
+export function auqIdentity(qs: unknown): string | null {
+  const list = (Array.isArray(qs) ? qs : []) as { question?: string; multiSelect?: boolean; options?: { label?: string; description?: string }[] }[];
+  let whole = true;
+  const field = (v: string | undefined, cap: number) => {
+    if (cut(v ?? "", cap)) whole = false;
+    return squash(v ?? "");
+  };
+  const id = JSON.stringify(list.map((q) => [
+    field(q?.question, AUQ_CAPS.question), !!q?.multiSelect,
+    (q?.options ?? []).map((o) => [field(o?.label, AUQ_CAPS.label), field(o?.description, AUQ_CAPS.description)]),
+  ]));
+  return whole ? id : null;
 }
 
 /** 同一个频道、同一种来源、同一个指纹的最近一条（任何状态） */
