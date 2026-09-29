@@ -7,6 +7,7 @@
 import { afterAll, describe, expect, test } from "bun:test";
 import { drainingFetch, drainUnreadBody } from "../src/bridge/unread-body.js";
 import { makeInboundHandler } from "../src/bridge/relay-inbound.js";
+import { connect } from "node:net";
 
 const chunked = (s: string | Uint8Array) => new ReadableStream<Uint8Array>({
   start: (c) => { c.enqueue(typeof s === "string" ? new TextEncoder().encode(s) : s); c.close(); },
@@ -27,6 +28,54 @@ function rejectingServer(wrap: boolean) {
 }
 
 describe("drainingFetch", () => {
+  test("慢速拒绝正文每 200ms 来一字节：绝对期限内回 403 并关闭连接", async () => {
+    const handler = drainingFetch(async () => new Response("no", { status: 403 }));
+    const srv = Bun.serve({ port: 0, hostname: "127.0.0.1", idleTimeout: 30, fetch: handler });
+    const socket = connect({ host: "127.0.0.1", port: srv.port! });
+    let interval: ReturnType<typeof setInterval> | undefined;
+    let watchdog: ReturnType<typeof setTimeout> | undefined;
+    let received = "";
+    let responseAt = 0;
+    const started = Date.now();
+    try {
+      await new Promise<void>((resolve, reject) => {
+        watchdog = setTimeout(() => reject(new Error(`rejection waited for body EOF; received=${JSON.stringify(received)}`)), 9_000);
+        socket.on("data", (b) => { received += b.toString(); responseAt ||= Date.now(); });
+        socket.on("error", reject);
+        socket.on("end", () => resolve());
+        socket.on("close", () => resolve());
+        socket.on("connect", () => {
+          socket.write("POST /forbidden HTTP/1.1\r\nHost: test\r\nTransfer-Encoding: chunked\r\n\r\n1\r\nx\r\n");
+          interval = setInterval(() => socket.write("1\r\nx\r\n"), 200);
+        });
+      });
+      expect(received).toContain("403");
+      expect(received.toLowerCase()).toContain("connection: close");
+      expect(responseAt - started).toBeLessThan(2_500);
+      // Bun 的 socket timeout 按粗粒度时钟触发；客户端持续滴流也必须被服务端断开。
+      expect(Date.now() - started).toBeLessThan(9_000);
+    } finally {
+      clearInterval(interval);
+      clearTimeout(watchdog);
+      socket.destroy();
+      srv.stop(true);
+    }
+  }, 12_000);
+
+  test("停止发送且底层 cancel 永不完成：不把取消承诺作为响应前置", async () => {
+    let cancelled = false;
+    const body = new ReadableStream<Uint8Array>({ cancel() { cancelled = true; return new Promise(() => {}); } });
+    const req = new Request("http://test/", { method: "POST", body, duplex: "half" } as RequestInit);
+    expect(await drainUnreadBody(req, 1024, 30)).toBe(false);
+    expect(cancelled).toBe(true);
+  });
+
+  test("已声明超大正文直接取消，不等上传或取消完成", async () => {
+    const body = new ReadableStream<Uint8Array>({ cancel: () => new Promise(() => {}) });
+    const req = new Request("http://test/", { method: "POST", headers: { "content-length": "999999" }, body, duplex: "half" } as RequestInit);
+    expect(await drainUnreadBody(req)).toBe(false);
+  });
+
   test("提前 403 没读的分块正文被读掉：紧跟的请求照常到处理函数", async () => {
     const { base, seen } = rejectingServer(true);
     const got: number[] = [];

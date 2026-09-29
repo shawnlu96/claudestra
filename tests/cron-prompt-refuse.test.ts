@@ -8,6 +8,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "os";
 import { join } from "path";
 import { CRON_PROMPT_REFUSED, controlCharError } from "../src/lib/flag-like";
+import { testChildEnv } from "./test-env.ts";
 
 const SRC = join(import.meta.dir, "..", "src");
 let home = "";
@@ -24,7 +25,7 @@ beforeAll(() => {
   mkdirSync(join(home, ".claude-orchestrator"));
   writeFileSync(join(bin, "tmux"), `#!/bin/sh\nprintf '%s\\n' "$*" >> '${join(home, "tmux.log")}'\nexit 1\n`, { mode: 0o755 });
   writeFileSync(join(bin, "bun"), `#!/bin/sh\nprintf '%s\\n' "$*" >> '${join(home, "bun.log")}'\necho '{"ok":false}'\n`, { mode: 0o755 });
-  env = { PATH: `${bin}:/usr/bin:/bin`, HOME: home, TMPDIR: home, CLAUDESTRA_RUNTIME_DIR: join(home, "rt"), CONTROL_CHANNEL_ID: "", LANG: "C" };
+  env = testChildEnv({ PATH: `${bin}:/usr/bin:/bin`, HOME: home, TMPDIR: home, CLAUDESTRA_RUNTIME_DIR: join(home, "rt"), CONTROL_CHANNEL_ID: "", LANG: "C" });
 });
 afterAll(() => rmSync(home, { recursive: true, force: true }));
 

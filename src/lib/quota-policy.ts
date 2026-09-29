@@ -19,7 +19,6 @@ export const QUOTA_TIMING = {
   /** 两次 tick 间隔超过它 = 睡眠唤醒，立刻重查 */
   wakeGapMs: 15 * MIN,
   authCooldownMs: 30 * MIN,
-  forbiddenCooldownMs: 6 * HOUR,
   rateLimitDefaultMs: 15 * MIN,
   pauseMs: 24 * HOUR,
   /** 额度快照超过这个年龄算陈旧；重置明细按后台节奏放宽 */
@@ -36,7 +35,8 @@ export type RefreshResult =
 
 
 const PAUSE_CODES = new Set<FetchErrorCode>(["http_404", "bad_shape", "bad_json", "redirect", "too_large", "http_4xx"]);
-const BACKOFF_CODES = new Set<FetchErrorCode>(["timeout", "network", "http_5xx"]);
+// 403 也走退避：它会偶发，按长冷却处理会让额度卡挂着几小时前的旧数；真被拒也只是封顶每小时试一次
+const BACKOFF_CODES = new Set<FetchErrorCode>(["timeout", "network", "http_5xx", "http_403"]);
 
 /** 网络 / 超时 / 5xx 的退避：60s 起翻倍、封顶 1 小时，±20% 抖动 */
 export function backoffMs(failures: number, random: number): number {
@@ -63,8 +63,7 @@ export function applyFailure(
     h.cooldownUntil = ctx.now + QUOTA_TIMING.authCooldownMs;
     h.authFingerprint = ctx.fingerprint;
     acct.uncertain = true;
-  } else if (out.code === "http_403") h.cooldownUntil = ctx.now + QUOTA_TIMING.forbiddenCooldownMs;
-  else if (out.code === "http_429") {
+  } else if (out.code === "http_429") {
     h.cooldownUntil = null;
     acct.rateLimitedUntil = ctx.now + (out.retryAfterMs ?? QUOTA_TIMING.rateLimitDefaultMs);
   } else if (BACKOFF_CODES.has(out.code)) h.cooldownUntil = ctx.now + backoffMs(h.failures, ctx.random);
@@ -116,6 +115,7 @@ export function gate(acct: AccountState, endpoint: QuotaEndpoint, now: number, r
   if (now - lastAny < QUOTA_TIMING.minIntervalMs) return { status: "skipped_interval" };
   if (!h || h.paused || h.cooldownUntil === null || h.cooldownUntil <= now || !h.lastCode) return null;
   const cooling = { status: "skipped_cooldown", code: h.lastCode } as const;
+  if (reason === "user_retry" && h.lastCode === "http_403") return null; // 界面给 403 留了「重试」：用户点了就不等退避
   if (h.lastCode !== "http_401") return cooling;
   if (fingerprint !== null) return fingerprint === h.authFingerprint ? cooling : null;
   const checked = h.credCheckedAt ?? h.lastAttemptAt;

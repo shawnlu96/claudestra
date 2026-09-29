@@ -42,15 +42,15 @@ const replays = new ReplayCache();
  * 重放截获的 GET 就耗不掉对方的额度；同一签名超过 GET_REPEAT_MAX 次才按重放拒。满了挤掉最旧的：丢一条只是那条签名
  * 再出现时多扣一次额度，不会放行任何本该拒的请求。
  */
-const getRepeats = new ReplayCache(undefined, undefined, undefined, undefined, true);
+// GET 签名已验过有效期：从 epoch 起计次，启动前的签名也必须进入重复计数，不能每次重放都扣正常额度。
+const getRepeats = new ReplayCache(undefined, 0, undefined, undefined, true);
 const GET_REPEAT_MAX = 5;
 
 /** 验签通过的请求判重放：reject 非 false = 拒（值是原因）；charge = 要不要扣成功限速桶 */
 export function peerReplayVerdict(once: PeerOnce, peer: string): { reject: ReplayVerdict; charge: boolean } {
   if (!once.idempotent) return { reject: replays.seen(once.sig, once.ts, Date.now(), peer), charge: true };
   const n = getRepeats.hits(once.sig, once.ts, Date.now(), peer);
-  // 签于本进程启动之前的 GET：之前见没见过无从得知，按第一次放行扣额度（拒了会让时钟慢的对端重启后轮询失败）
-  if (typeof n !== "number") return { reject: n === "before_start" ? false : n, charge: true };
+  if (typeof n !== "number") return { reject: n, charge: true };
   return { reject: n > GET_REPEAT_MAX && "replay", charge: n === 1 };
 }
 

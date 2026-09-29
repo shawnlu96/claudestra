@@ -17,6 +17,8 @@ import { useAgentMenuTrigger } from "./agent-menu";
 import { dragAllowed, dragHandlers, useAgentDrop } from "./agent-dnd";
 import { MissionBadge } from "./mission-ui";
 import { LedgerStageChip } from "./ledger-stage-chip";
+import { CtxBoundaryChip } from "./ctx-boundary-chip";
+import { BOUNDARY_ROW_TONE, hasNamedPolicy } from "../ctx-boundary-view";
 import { useFullScope } from "../contacts-data";
 import { TapHint } from "./tap-hint";
 import { InboxIcon } from "../../asks/components/ask-icons";
@@ -122,12 +124,9 @@ export function AgentRow({
   const ctx = a.status === "active" && typeof a.contextTokens === "number" ? a.contextTokens : 0;
   const cv = ctxView(ctx, a.contextWindow);
   const ctxPct = Math.min(100, cv.pct);
-  const ctxTone = {
-    deep: "bg-error/30",
-    high: "bg-error/14",
-    mid: "bg-warning/12",
-    none: "bg-base-content/[0.04]",
-  }[cv.level];
+  // 命中具名上下文边界的（执行类等）按边界上色：过压缩线黄、过硬上限红；其余照旧按 1M 刻度（ctx-boundary-view.ts）
+  const bnd = hasNamedPolicy(a.ctxBoundary) && a.status === "active" ? a.ctxBoundary : null;
+  const ctxTone = bnd ? BOUNDARY_ROW_TONE[bnd.level] : { deep: "bg-error/30", high: "bg-error/14", mid: "bg-warning/12", none: "bg-base-content/[0.04]" }[cv.level];
   // 忙碌态 = 行外框(owner 2026-09-06:「工作中给它加一个不断闪烁的黄色边框」);
   // 压缩中同款蓝色常亮。状态点 / 「工作中」文字保留,边框是给一眼扫过用的。
   const busyNow = !!(a.busy || busyLive);
@@ -312,6 +311,7 @@ export function AgentRow({
             <NameTags a={a} projEmoji={projEmoji} />
           </span>
           <RepoTag a={a} />
+          {bnd && <CtxBoundaryChip b={bnd} />}
           {tail}{a.ledgerTask && <LedgerStageChip task={a.ledgerTask} names={[a.label, a.displayName]} />}
           {a.mission && <MissionBadge mission={a.mission} compact />}
           {/* 非激活且输入框里有没发的字 → 【草稿】(owner 2026-09-24);切回来就是当前会话,标自然消失。

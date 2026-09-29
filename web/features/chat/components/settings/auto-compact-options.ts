@@ -10,7 +10,9 @@ export interface AutoCompactState {
   idleHours: number | null;
   /** v2.21.3+ 93% 救命线独立开关(常规线关了它也兜底) */
   emergency?: boolean;
-  defaults: { window: number; idleHours: number; emergency?: boolean; emergencyRatio?: number };
+  /** 上下文边界新增的自动压缩(具名策略和大总管)开关,缺省关 */
+  inject?: boolean;
+  defaults: { window: number; idleHours: number; emergency?: boolean; emergencyRatio?: number; inject?: boolean };
 }
 
 export const AC_WINDOW_PRESETS = [400_000, 500_000, 750_000, 1_000_000] as const;

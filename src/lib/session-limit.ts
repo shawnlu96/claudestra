@@ -1,6 +1,6 @@
 import type { SubSessionInfo } from "./runtimes/types.js";
 
-type Row = { sessionId: string; sub?: SubSessionInfo };
+type Row = { sessionId: string; sub?: SubSessionInfo; oneShot?: true };
 
 /** 每行所属的主会话：顺着 sub.parentId 往上追到头；追不到头（父文件已删）或成环的，自己算主会话 */
 function topsOf<T extends Row>(rows: T[]): Map<T, T> {
@@ -22,11 +22,13 @@ function topsOf<T extends Row>(rows: T[]): Map<T, T> {
 /**
  * 会话列表的条数上限只数主会话：Codex 一个主会话常带几十个子线程（subagent / 自动审查），按总数截断时子线程能占掉七成，
  * 真正的主会话反被挤出列表。子线程跟着所属的主会话走——主会话留下它就留下；顺着父会话追不到头（父文件已删）或成环的，
- * 自己按主会话算，不丢行。保持原顺序。tests/session-limit.test.ts。
+ * 自己按主会话算，不丢行。程序跑出来的一次性会话（codex exec）另算名额（maxOneShots，缺省同 max），不挤占人开的主会话。
+ * 保持原顺序。tests/session-limit.test.ts。
  */
-export function limitByMainSessions<T extends Row>(rows: T[], max: number): T[] {
+export function limitByMainSessions<T extends Row>(rows: T[], max: number, maxOneShots = max): T[] {
   const tops = topsOf(rows);
-  const kept = new Set(rows.filter((r) => tops.get(r) === r).slice(0, max));
+  const heads = rows.filter((r) => tops.get(r) === r);
+  const kept = new Set([...heads.filter((r) => !r.oneShot).slice(0, max), ...heads.filter((r) => r.oneShot).slice(0, maxOneShots)]);
   return rows.filter((r) => kept.has(tops.get(r)!));
 }
 

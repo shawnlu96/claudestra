@@ -39,7 +39,7 @@ import { existsSync, readdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { SubSessionInfo } from "./runtimes/types.js";
-import { codexSubOf, isCodexSubThread } from "./codex-subthread.js";
+import { codexSubOf, isCodexOneShot, isCodexSubThread } from "./codex-subthread.js";
 
 type AnyRecord = Record<string, any>;
 
@@ -129,14 +129,15 @@ export async function readCodexMetaPayload(path: string): Promise<AnyRecord | nu
 }
 
 /** 首行 session_meta 里的 sessionId / cwd / 子线程归属（取不到 cwd 或 id = null） */
-export async function readCodexMeta(path: string): Promise<{ sessionId: string; cwd: string; sub?: SubSessionInfo } | null> {
+export async function readCodexMeta(path: string): Promise<{ sessionId: string; cwd: string; sub?: SubSessionInfo; oneShot?: true } | null> {
   const p = await readCodexMetaPayload(path);
   if (!p) return null;
   const cwd = typeof p.cwd === "string" ? p.cwd : "";
   // id 是本线程自己的；session_id 是根会话的——子线程两者不同（主会话相同）
   const sessionId = String(p.id ?? p.session_id ?? "");
   if (!cwd || !sessionId) return null;
-  return isCodexSubThread(p) ? { sessionId, cwd, sub: codexSubOf(p) } : { sessionId, cwd };
+  if (isCodexSubThread(p)) return { sessionId, cwd, sub: codexSubOf(p) };
+  return isCodexOneShot(p) ? { sessionId, cwd, oneShot: true } : { sessionId, cwd };
 }
 
 /** 按 sessionId 找 Codex 线程的归属（收编前判「是不是子会话」用）；找不到文件 / 不是子线程 = null */

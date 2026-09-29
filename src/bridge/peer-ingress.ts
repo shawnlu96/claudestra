@@ -1,12 +1,12 @@
 /**
- * peer 专用入口：bridge 在回环上另开一个端口（默认 bridge 端口 + 1），只服务 peer，
+ * peer API 入口：bridge 在回环上另开一个端口（默认 bridge 端口 + 1），保留本机反代的网页兼容路径，
  * 给 HTTPS 反代（Caddy 的 `handle /api/v1/*`、tailscale serve 的 `--set-path /api/v1`）转发用。
  *
  * 为什么不让反代直接打主端口：经反代进来的请求源地址是 127.0.0.1，主端口对回环一律放行
  * （控制面路由、ws 升级都在那儿），`/api/v1/../hook` 这种路径一规整就是回环特权——等于把
  * 控制面和 ws（宿主 RCE）经 443 交给整个 tailnet。这里从结构上断掉：
  *   - 只调 /api/v1 的处理函数（注入的 handleApi），控制面、ws、远程终端根本不在这个入口上；
- *   - 带了凭据就必须是 peer 签的 token（principal.peer），网页用的全权 token 从这里进不来；
+ *   - Bearer（含 SSE 查询 token）必须属于 peer；非 peer 的 Bearer 在所有 socket 来源下都拒；
  *   - 本机反代转来的（网页经 HTTPS 入口）还认设备 cookie；对外直连与中继 peer 帧只认 peer token，
  *     不带凭据只剩兑换邀请和邀请页（见 ingressRequest）。
  * 有了它，peer 走 HTTPS 443 就行，3847 不必对外开放、也不用给每个 peer 加防火墙白名单。
@@ -37,7 +37,7 @@ export function ingressSecret(req: { method: string; headers: { get(k: string): 
   return req.method === "GET" && url.pathname === "/api/v1/events" ? url.searchParams.get("token") || "" : "";
 }
 
-/** 纯判定（tests/peer-ingress.test.ts）：带凭据就必须是 peer；没带交给 API（兑换邀请 / 401） */
+/** Bearer / SSE token 必须属于 peer；设备 cookie 的反代兼容例外在 ingressRequest 单独判定 */
 export function ingressVerdict(secret: string, principal: { peer?: string } | null): "ok" | "not-peer" {
   if (!secret) return "ok";
   return principal?.peer ? "ok" : "not-peer";

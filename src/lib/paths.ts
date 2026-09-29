@@ -24,6 +24,7 @@ import { homedir } from "os";
 import { join } from "path";
 import { resolveBridgeUrl } from "./bridge-url.js";
 import { enforceSandboxProcess, SANDBOX_DENY_DIRS_ENV, SANDBOX_DENY_PORTS_ENV, SANDBOX_FLAG, SANDBOX_ROOT_ENV } from "./sandbox.js";
+import { testSafeStateDir } from "./test-guard.js";
 /** 入口文件（launcher / cron）经这里拿：它们本来就 import paths，省一行 import（三个文件都在体积上限） */
 export { refuseInSandbox } from "./sandbox.js";
 
@@ -37,8 +38,8 @@ function envDir(name: string): string | undefined {
   return v || undefined;
 }
 
-/** ~/.claude-orchestrator（或 CLAUDESTRA_STATE_DIR） */
-export const STATE_DIR = envDir("CLAUDESTRA_STATE_DIR") ?? stateDirIn(homedir());
+/** ~/.claude-orchestrator（或 CLAUDESTRA_STATE_DIR）；测试进程落不到真实目录（lib/test-guard.ts） */
+export const STATE_DIR = testSafeStateDir(envDir("CLAUDESTRA_STATE_DIR") ?? stateDirIn(homedir()), stateDirIn(homedir()));
 
 /** 生产默认运行目录（不看 override）。沙箱脚本拿它当拒绝清单的一项 */
 export const DEFAULT_RUNTIME_DIR = "/tmp/claude-orchestrator";

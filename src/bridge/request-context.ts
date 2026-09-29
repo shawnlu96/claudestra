@@ -1,7 +1,7 @@
 /**
  * 请求来源上下文（docs/design-hosted-frontend.md §6）。bridge 里「谁在调 API」有四种来源，权限完全不同：
  *   loopback  真实回环 socket（本机进程、本机浏览器）——回环豁免只认它；
- *   lan       非回环 socket（局域网 / Tailscale 直连）；
+ *   lan       非回环 socket（局域网 / Tailscale 直连），或 peer 端口的无标记回环反代兼容路径；
  *   relay     经中继隧道、由 relay-dispatch 在进程内直接调进来的请求——它从没经过 socket，
  *             绝不能因为「bridge 在 127.0.0.1 上」被当成回环；
  *   peer-ingress  peer 入口上对外直连或中继转来的 peer 帧（peer-ingress.ts）：只认 peer token，设备端点与设备凭据一律拒；

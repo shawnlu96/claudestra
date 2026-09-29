@@ -15,6 +15,7 @@ import { listListeners, runCli, tcpOpen } from "./tailscale.js";
 import { detectBridgeUrls } from "./net-addr.js";
 import { bridgeHttpBase } from "./bridge-port.js";
 import { probeBridgeApi } from "./peer-url.js";
+import { assertNoRepoEnvWriteInTest } from "./test-guard.js";
 import { repoEnvVar } from "./env-file.js";
 import { webPortFromStartScript } from "./cli-install.js";
 
@@ -65,7 +66,10 @@ export async function ensurePeerIngressPort(bridgePort: number, webPort?: number
   }
   if (lsofMissing) console.warn("⚠️ lsof 跑不起来（PATH 里没有 /usr/sbin？），peer 入口端口改用连接探测判断占用");
   const port = pickIngressPort(bridgePort, (p) => busy.has(p), webPort);
-  if (port) await writeFile(envPath, mergeEnvContent(text, { PEER_INGRESS_PORT: String(port) }, ENV_HEADER));
+  if (port) {
+    assertNoRepoEnvWriteInTest(envPath);
+    await writeFile(envPath, mergeEnvContent(text, { PEER_INGRESS_PORT: String(port) }, ENV_HEADER));
+  }
   return port;
 }
 
@@ -81,6 +85,7 @@ export async function openDirectPeerIngress(bridgePort: number, envPath = `${REP
   if (!best) return null;
   const text = existsSync(envPath) ? await readFile(envPath, "utf8") : null;
   if (parseEnvRaw(text ?? "").PEER_INGRESS_PUBLIC !== "1") {
+    assertNoRepoEnvWriteInTest(envPath);
     await writeFile(envPath, mergeEnvContent(text, { PEER_INGRESS_PUBLIC: "1" }, ENV_HEADER));
   }
   // hold：邀请的 token 还没签出来，先让 bridge 别因「还没有 peer」又把入口收回本机

@@ -20,6 +20,7 @@ import { join, resolve } from "path";
 import { DEFAULT_BRIDGE_PORT } from "../src/lib/bridge-url.js";
 import { OUTBOUND_BLOCKED_MARK } from "../src/lib/sandbox.js";
 import { fakeClaudeSource } from "./sandbox-fake-claude.js";
+import { testChildEnv } from "./test-env.ts";
 
 const REPO = resolve(import.meta.dir, "..");
 const SCRIPT = join(REPO, "scripts", "sandbox.ts");
@@ -252,11 +253,11 @@ async function agentSide(): Promise<void> {
 function productionManager(...args: string[]): { code: number; out: string } {
   const r = Bun.spawnSync([BUN, "--no-env-file", join(REPO, "src", "manager.ts"), ...args], {
     cwd: tmp, stdout: "pipe", stderr: "pipe", timeout: 30_000,
-    env: {
+    env: testChildEnv({
       PATH: `${join(tmp, "shim")}:${process.env.PATH}`, HOME: home, BUN_RUNTIME_TRANSPILER_CACHE_PATH: "0",
       CLAUDESTRA_STATE_DIR: join(tmp, "prodmgr", "state"), CLAUDESTRA_RUNTIME_DIR: join(tmp, "prodmgr", "run"),
       BRIDGE_URL: `ws://127.0.0.1:${decoy!.port}`, BRIDGE_PORT: String(decoy!.port),
-    },
+    }),
   });
   return { code: r.exitCode ?? 1, out: r.stdout.toString() + r.stderr.toString() };
 }
@@ -351,7 +352,7 @@ describe("沙箱 bridge 无副作用", () => {
     ];
     for (const [want, extra] of cases) {
       const r = Bun.spawnSync([BUN, "--no-env-file", join(REPO, "src", "bridge.ts")], {
-        cwd: tmp, env: { ...base, ...extra }, stdout: "pipe", stderr: "pipe", timeout: 20_000,
+        cwd: tmp, env: testChildEnv({ ...base, BRIDGE_URL: undefined, ...extra }), stdout: "pipe", stderr: "pipe", timeout: 20_000,
       });
       const out = r.stdout.toString() + r.stderr.toString();
       expect(r.exitCode, out).not.toBe(0);
@@ -404,11 +405,11 @@ describe("沙箱 bridge 无副作用", () => {
     const fakeProd = join(tmp, "fakeprod-run");
     mkdirSync(join(base, "run"), { recursive: true });
     mkdirSync(fakeProd, { recursive: true });
-    const env = {
-      PATH: process.env.PATH ?? "", HOME: home, BUN_RUNTIME_TRANSPILER_CACHE_PATH: "0", CLAUDESTRA_SANDBOX: "1",
+    const env = testChildEnv({
+      HOME: home, BUN_RUNTIME_TRANSPILER_CACHE_PATH: "0", CLAUDESTRA_SANDBOX: "1",
       CLAUDESTRA_STATE_DIR: join(base, "state"), CLAUDESTRA_RUNTIME_DIR: join(base, "run"), BRIDGE_PORT: "23998", BRIDGE_URL: "ws://localhost:23998",
       CLAUDESTRA_SANDBOX_DENY_DIRS: fakeProd,
-    };
+    });
     const attempt = (swap: string) => Bun.spawnSync([BUN, "--no-env-file", "-e", `
       const { tmuxRaw } = await import(${JSON.stringify(join(REPO, "src", "lib", "tmux-helper.ts"))});
       const fs = await import("fs");
@@ -433,8 +434,8 @@ describe("沙箱 bridge 无副作用", () => {
       console.log(out.join(","));`;
     const p = Bun.spawn([BUN, "--no-env-file", "-e", code], {
       cwd: tmp, stdout: "pipe", stderr: "pipe",
-      env: { PATH: process.env.PATH ?? "", HOME: home, BUN_RUNTIME_TRANSPILER_CACHE_PATH: "0", CLAUDESTRA_SANDBOX: "1", BRIDGE_PORT: "23999",
-        BRIDGE_URL: "ws://localhost:23999", CLAUDESTRA_STATE_DIR: join(tmp, "g", "state"), CLAUDESTRA_RUNTIME_DIR: join(tmp, "g", "run") },
+      env: testChildEnv({ HOME: home, BUN_RUNTIME_TRANSPILER_CACHE_PATH: "0", CLAUDESTRA_SANDBOX: "1", BRIDGE_PORT: "23999",
+        BRIDGE_URL: "ws://localhost:23999", CLAUDESTRA_STATE_DIR: join(tmp, "g", "state"), CLAUDESTRA_RUNTIME_DIR: join(tmp, "g", "run") }),
     });
     const [out, err] = [await new Response(p.stdout).text(), await new Response(p.stderr).text()];
     await p.exited;
@@ -451,7 +452,8 @@ describe("沙箱 bridge 无副作用", () => {
     const hook = async (env: Record<string, string>) => {
       const p = Bun.spawn([BUN, "--no-env-file", join(REPO, "src", "hooks", "typing-hook.ts")], {
         cwd: tmp, stdin: new Blob([JSON.stringify({ hook_event_name: "Stop" })]), stdout: "pipe", stderr: "pipe",
-        env: { PATH: process.env.PATH ?? "", HOME: home, BUN_RUNTIME_TRANSPILER_CACHE_PATH: "0", CLAUDESTRA_SANDBOX: "1", DISCORD_CHANNEL_ID: "local-sbx", ...env },
+        env: testChildEnv({ HOME: home, BUN_RUNTIME_TRANSPILER_CACHE_PATH: "0", CLAUDESTRA_SANDBOX: "1", DISCORD_CHANNEL_ID: "local-sbx",
+          BRIDGE_URL: undefined, BRIDGE_PORT: undefined, ...env }),
       });
       return { code: await p.exited, err: await new Response(p.stderr).text() };
     };

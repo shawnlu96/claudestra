@@ -18,6 +18,7 @@ import { measureDup } from "./rules/dup.ts";
 import { loadParser, measureFn, type SpanParser } from "./rules/fn.ts";
 import { measurePatterns } from "./rules/patterns.ts";
 import { measureSize } from "./rules/size.ts";
+import { measureTestEnv } from "./rules/test-env.ts";
 import { measureTwins } from "./rules/twins.ts";
 import { BASELINE_REL, checkSelfRaised, checkWiring, guardSelfFiles, isStrict } from "./self.ts";
 import type { Baseline, Counts, Files, Finding, RuleResult } from "./types.ts";
@@ -41,6 +42,7 @@ const RULES: Rule[] = [
   { id: "twins", prefixes: ["twins"], run: (f) => measureTwins(f) },
   { id: "comments", prefixes: ["comments"], run: (f) => measureComments(f) },
   { id: "dead", prefixes: ["dead"], run: () => measureDead(ROOT) },
+  { id: "testenv", prefixes: ["testenv"], run: (f) => measureTestEnv(f) },
 ];
 
 let parserMemo: Promise<{ name: string; parse: SpanParser } | null> | null = null;

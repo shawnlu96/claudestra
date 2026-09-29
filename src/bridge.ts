@@ -6,6 +6,7 @@
  */
 
 import { enableTimestampLogs } from "./lib/log-timestamp.js";
+import { PEER_DELEGATION_DOC } from "./lib/peer-ledger.js";
 import { requestStillHeld, shouldSweepPac } from "./lib/held-pac.js";
 import { copyOutboundToInbox } from "./bridge/local-api/media-refresh.js";
 import { splitInlineButtons, toButtonRows, inlineChipsToText } from "./lib/inline-buttons.js";
@@ -1064,7 +1065,7 @@ async function renderContentForLocal(env: RouterEnvelope): Promise<string> {
     if (from.peer) {
       return [
         `[🤝 来自 peer 实例「${from.peer}」的跨机请求（HTTP API，对方是另一个 Claudestra 的 agent/用户）。`,
-        `用 reply() 回答——回复会自动转交对方的调用方。回答实质内容,保持精简;超出你职责范围的请求可以礼貌说明并拒绝。]`,
+        `用 reply() 回答——回复会自动转交对方的调用方。回答实质内容,保持精简;超出你职责范围的请求可以礼貌说明并拒绝。首行是 [协作 …] 时先按 ${PEER_DELEGATION_DOC} 回自家 owner 频道问接不接，owner 同意前不动手。]`,
         ``,
         inboundBodyForLocal(env),
       ].join("\n");
@@ -3521,8 +3522,7 @@ void import("./bridge/ledger-audit-service.js").then((m) => m.startLedgerAudit({
 // 清扫上次崩溃 / 被杀残留的 webterm-* viewer session（grouped session 视图，kill 不伤 master 本体）；Discord 与 Web-only 模式都要
 sweepStaleTerminalSessions().catch(() => {});
 
-// v2.21+ 存量 agent 的 project 归属补齐(「每个 agent 必属一个 project」对老数据
-// 成立)。委托 manager(写锁+原子写),幂等——没缺的直接 migrated:0 返回。
+// 存量 agent 的 project 归属补齐(「每个 agent 必属一个 project」对老数据成立)。委托 manager(写锁+原子写),幂等——没缺的直接 migrated:0 返回。
 setTimeout(() => {
   runManager("project-migrate")
     .then((r: any) => {
@@ -3530,9 +3530,9 @@ setTimeout(() => {
     })
     .catch(() => {});
 }, 3_000);
+void import("./bridge/ctx-boundary.js").then((m) => m.startCtxBoundary()); // 上下文边界自动压缩：每分钟一轮，Discord / web-only 都跑
 
-// Web-only: 无 DISCORD_BOT_TOKEN → Web-only 模式：不连 Discord，只跑与
-// 平台无关的初始化子集。HTTP/ws/api/事件流在上面 Bun.serve 时已就绪。
+// Web-only: 无 DISCORD_BOT_TOKEN → Web-only 模式：不连 Discord，只跑与平台无关的初始化子集。HTTP/ws/api/事件流在上面 Bun.serve 时已就绪。
 // 跳过的 Discord 专属项：cleanupStaleThinkingMessages / initStatsDashboard /
 // registerSlashCommands / startPermissionWatcher / startWedgeWatcher /
 // startSessionReconciler / gateway 看门狗（它们的告警面/交互面都是 Discord）。
