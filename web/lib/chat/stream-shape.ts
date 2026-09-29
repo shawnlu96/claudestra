@@ -71,6 +71,7 @@ function chatMessage(d: Record<string, unknown>, selfIds: ReadonlySet<string>): 
     text: String(d.text ?? ""),
     ...(Array.isArray(d.components) ? { components: d.components as WebComponentRow[] } : {}),
     ...(atts.length ? { attachments: atts } : {}),
+    ...(typeof d.askId === "string" ? { askId: d.askId } : {}),
   };
 }
 

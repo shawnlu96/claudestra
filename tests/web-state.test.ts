@@ -38,4 +38,22 @@ describe("openWebState", () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+  test("老库的 apns_devices 补 principal / credential 列时清掉老行（不知道是谁登记的，adv2 P2-4）；之后登记的行再开不动", () => {
+    const dir = mkdtempSync(join(tmpdir(), "web-state-"));
+    const path = join(dir, "web-state.sqlite");
+    try {
+      const old = new Database(path);
+      old.exec("CREATE TABLE apns_devices (token TEXT PRIMARY KEY, device TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, last_seen TEXT NOT NULL)");
+      old.prepare("INSERT INTO apns_devices VALUES (?, ?, ?, ?)").run("ab".repeat(32), "iPhone", "2026-07-24", "2026-07-24");
+      old.close();
+      const db = openWebState(path);
+      expect(db.prepare("SELECT token FROM apns_devices").all()).toEqual([]);
+      db.prepare("INSERT INTO apns_devices VALUES (?, ?, ?, ?, ?, ?)").run("cd".repeat(32), "iPhone", "2026-09-29", "2026-09-29", "owner:self", "dev_1");
+      closeWebState(path);
+      expect(openWebState(path).prepare("SELECT token, principal FROM apns_devices").all()).toEqual([{ token: "cd".repeat(32), principal: "owner:self" }]);
+      closeWebState(path);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });

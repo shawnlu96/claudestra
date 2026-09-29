@@ -102,6 +102,8 @@ export interface ChatMessage {
   replyTs?: string;
   /** reply 附带的交互组件（按钮/选单）。点击回投 [button:<id>] / [select:<id>:<value>]。 */
   replyComponents?: WebComponentRow[];
+  /** 这条 reply 建出的「待你处理」id（直播来自出站事件，历史来自 reply 的 tool_result）：按 id 认领，不按时间猜 */
+  replyAskId?: string;
   /** 已点击的按钮/选项 id —— 点后禁用整组，高亮所选（一条 reply 只作答一次）。 */
   /** @deprecated bug ① 前的消息级单值,仅老快照读;新逻辑用 replyClicks。 */
   replyClickedId?: string;
