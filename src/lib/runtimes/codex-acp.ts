@@ -19,9 +19,10 @@ import { isSandbox, SANDBOX_ROOT_ENV } from "../sandbox.js";
 import { acpAgentCommand, adapterEnv, spawnAdapter } from "../acp/adapter-proc.js";
 import { ACP_AGENT_ENV, sandboxAcpHome } from "../acp/stub.js";
 import { AcpSession } from "../acp/session.js";
-import { CODEX_ACP_CONTROL, codexAdapter } from "./codex.js";
+import { CODEX_ACP_CONTROL } from "./codex-control.js";
 import { defaultCodexDeps, type CodexAdapterDeps } from "./codex-deps.js";
 import { CODEX_READY_OPTION, waitCodexReady } from "./codex-ready.js";
+import { codexSource, isValidCodexSessionId } from "./codex-source.js";
 import type { LaunchSpec, ManagedRuntimeAdapter, WindowOps } from "./types.js";
 
 const BOOTSTRAP_TIMEOUT_MS = 180_000;
@@ -101,11 +102,15 @@ function createCodexAcpAdapter(overrides: Partial<CodexAdapterDeps> = {}): Manag
   const deps = () => (depsCache ??= { ...defaultCodexDeps(), ...overrides });
   let bin: string | null = null;
   return {
-    ...codexAdapter,
+    ...codexSource,
+    manageable: true,
     control: CODEX_ACP_CONTROL,
+    acp: { control: CODEX_ACP_CONTROL },
     inbound: "acp-host",
     turnEnd: "acp-host",
     exitCommand: "",
+    noteTag: "codex",
+    isValidSessionId: isValidCodexSessionId,
     async available() {
       const agent = acpAgentCommand(process.env, deps().bunBin);
       if ("error" in agent) return { ok: false, hint: agent.error };

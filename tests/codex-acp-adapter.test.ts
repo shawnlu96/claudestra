@@ -50,6 +50,11 @@ describe("适配器选择（managedFor / requireManaged 带 transport）", () =>
     expect(a.control).toBe(controlFor("codex", "acp"));
     expect(a.scanSessions).toBe(codexAdapter.scanSessions);
     expect(a.registryFields(SPEC)).toEqual({ runtime: "codex", transport: "acp" });
+    expect(a.isValidSessionId("019a0000-0000-7000-8000-00000000abcd")).toBe(true);
+    expect(a.isValidSessionId("not-a-thread")).toBe(false);
+    expect(a.discoverSessionId).toBeUndefined();
+    expect(a.onExitPane).toBeUndefined();
+    expect("binPath" in a).toBe(false); // ACP 不继承 tmux 适配器的可变状态与探测器
   });
 
   test("不支持 acp 的运行时：managedFor 返回 null，requireManaged 报清楚", () => {

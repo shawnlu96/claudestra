@@ -50,6 +50,7 @@ bridge ──ws（channel-server / Pi 扩展同一套协议，register 带 runti
 
 - **registry**：每个 agent 有一个 `transport` 字段。旧记录缺字段仍由低层读成 tmux；升级迁移会补成 acp 或暂退 tmux。显式 tmux 是人工回退，迁移不会覆盖（`lib/registry.ts`、`runtimes/types.ts`）。
 - **适配器**：`ManagedRuntimeAdapter.acp?: { control }`。没声明的运行时只能走 tmux，`transportsOf(runtime)` 据此回答能走哪些 transport。
+- **会话来源**：rollout 发现、历史翻译与 token 扫描在 `lib/runtimes/codex-source.ts`，ACP 和 tmux 启动适配器共用。ACP 版直接组合这份来源与自己的生命周期，不继承 Codex TUI 的启动、退出或锁探测状态；这让将来删 tmux 路径时不会连历史一起删掉。
 - **策略**：`controlFor(runtime, transport = "tmux")`。只有 transport=acp 且运行时声明了 ACP 段时才返回 ACP 的策略，其余情况都返回原来那份（`tests/runtime-transport.test.ts` 钉住缺省逐字不变）。
 
 Codex 的 ACP 策略（`CODEX_ACP_CONTROL`）：
