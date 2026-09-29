@@ -1,4 +1,6 @@
 import { describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { paneLooksWorking, paneMainTurnBusy } from "../src/lib/turn-state.js";
 
 // 主回合已结束、只剩后台 subagent:pane 仍「工作中」(侧栏该亮),但不能当成主回合在跑去抢占 C-c——
@@ -23,6 +25,16 @@ describe("paneMainTurnBusy", () => {
     expect(paneMainTurnBusy("✶ Thinking… (esc to interrupt)\n" + footer)).toBe(true);
     expect(paneMainTurnBusy("✻ Crunching… (2m 7s · ↓ 4.6k tokens)\n" + footer + "\n  ◯ general-purpose  Anal… 1m 13s · ↓ 58.1k tokens")).toBe(true);
     expect(paneMainTurnBusy("❯ Press up to edit queued messages\n" + footer)).toBe(true);
+  });
+
+  test("排队提示只认输入框里的整行灰字：以这句开头的用户消息 / 草稿不算忙（T41a）", () => {
+    const B = "─".repeat(40);
+    const asked = ["❯ Press up to edit queued messages 是什么意思", "", "⏺ 那是排队提示。", "", "✻ Worked for 3s · done 9:51 PM", "", B, "❯ ", B].join("\n");
+    expect(paneMainTurnBusy(asked)).toBe(false);
+    expect(paneMainTurnBusy([B, "❯ Press up to edit queued messages 这句是什么", B].join("\n"))).toBe(false);
+    expect(paneMainTurnBusy(["✻ Worked for 3s", B, "❯\u00a0Press up to edit queued messages", B].join("\n"))).toBe(true);
+    const real = readFileSync(join(import.meta.dir, "fixtures/turn-zone/busy-queued.txt"), "utf8");
+    expect(paneMainTurnBusy(real.replace(/^✢ Hatching.*$/m, ""))).toBe(true); // 去掉 spinner 也认得出排队
   });
 
   test("真空闲", () => {

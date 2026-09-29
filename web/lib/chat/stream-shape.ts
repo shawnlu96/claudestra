@@ -109,8 +109,8 @@ function anomalyText(d: Record<string, unknown>, lang: Lang): string | null {
       const fams = Array.isArray(d.families) ? (d.families as string[]).join("/") : "?";
       return lang === "en"
         ? `🎛 Claude Code is showing a "Switch model?" dialog (${fams}) that doesn't match any user-initiated switch — not auto-confirmed. ` +
-            "Re-pick the model from the dropdown to complete it, or use the Discord buttons."
-        : `🎛 会话弹出了「Switch model?」确认框（涉及 ${fams}），不是你发起的切换，我没有代按。` + "要切就去右上模型下拉重选一次（会自动确认），或到 Discord 点按钮。";
+            "Re-pick the model from the dropdown to complete it, or answer the dialog yourself in the terminal."
+        : `🎛 会话弹出了「Switch model?」确认框（涉及 ${fams}），不是你发起的切换，我没有代按。` + "要切就去右上模型下拉重选一次（会自动确认），或到终端里自己按。";
     }
     case "model_drift":
       return lang === "en"
