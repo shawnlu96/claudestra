@@ -16,8 +16,6 @@ const SIG_HINTS: Record<string, string> = {
   unanchored: "对方已过了老 peer 的截止日，又从没记下本机的钥匙——请对方删掉这个 peer 后重新给你发一张邀请",
   invite_expired: "这张邀请已过期或被撤销，里面带的 token 跟着失效——请对方重新生成一张邀请",
   invite_read_only: "邀请还没兑换完成，里面带的 token 只能读——先完成加入再发消息",
-  // 本机 E2E 出站合成的（lib/peer-e2e-outbound.ts）：重握手后原样重发撞上 before_start = 对方真重启过、原请求没被处理
-  e2e_peer_restarted: "对方重启过，这条没被处理，请重发",
 };
 
 const KEY_HINT = "对方认不出本机的签名钥匙（本机重装过，或对方记下的指纹不是本机）——请对方删掉这个 peer 后重新给你发一张邀请";

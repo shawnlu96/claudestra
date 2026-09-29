@@ -15,6 +15,7 @@ import { serveE2e, type E2ePeer, type ServeDeps } from "../src/lib/peer-e2e-serv
 import { SessionTable } from "../src/lib/peer-e2e-sessions.ts";
 import { encodeHelloReply, PEER_E2E_LABEL } from "../src/lib/peer-e2e-wire.ts";
 import { toB64url, utf8 } from "../src/lib/e2e/encoding.ts";
+import { createE2eOutbound } from "../src/lib/peer-e2e-outbound.ts";
 
 interface Machine {
   id: InstanceKey;
@@ -200,15 +201,15 @@ describe("peer E2E：重放与重复投递", () => {
     expect(w.r.handled.filter((h) => h.method === "POST")).toHaveLength(1);
   });
 
-  test("对方真的重启过：重启前签的非 GET 被拒，调用方拿到明确可重试的「对方重启过，请重发」；新签的照常", async () => {
+  test("对方真的重启过：重启前签的非 GET 被拒；认证只证明重试被拒，报「结果未知」不说请重发（T59），新签的照常", async () => {
     const w = await world();
     await w.call("GET", "/api/v1/agents");
     // 调用方先签好，发出前对方重启：模拟「会话在、签名在，进程换了」
     const signed = w.call("POST", "/api/v1/x", "before restart");
     w.restartB();
     const err = await signed.catch((e: E2eError) => e);
-    expect(err).toMatchObject({ code: "e2e_peer_restarted" });
-    expect((err as Error).message).toContain("对方重启过，请重发");
+    expect(err).toMatchObject({ code: "e2e_outcome_unknown", sent: true });
+    expect(peerCallFailureText("peer b/x", err, "b")).not.toContain("请重发");
     expect(w.r.handled.filter((h) => h.method === "POST")).toHaveLength(0);
     expect((await w.call("POST", "/api/v1/x", "resent")).status).toBe(201);
   });
@@ -461,5 +462,138 @@ describe("外层响应先封顶、边收边验", () => {
     await expect(w.call("GET", "/api/v1/agents")).rejects.toMatchObject({ code: "e2e_record", sent: true });
     w.bDeps.dispatch = async () => new Response(new Uint8Array(1024 * 1024));
     expect((await w.call("GET", "/api/v1/agents")).status).toBe(200);
+  });
+});
+
+// ── T59 回归（复现来自对方 Codex 的 review-probe，断言改成正确行为）──
+
+describe("T59 P1-1：重握手后的 before_start 报「结果未知」，不诱导重发", () => {
+  test("第一次已被处理、回执丢了、对方重启、认证过的重试被拒：code e2e_outcome_unknown、handled=1、没有「请重发」", async () => {
+    let first = true;
+    const w = await world({ relay: async (req, fwd) => {
+      const res = await fwd(req);
+      if (first && !req.url.endsWith("/hello")) { first = false; w.restartB(); return Response.json({ code: "e2e_session" }, { status: 401 }); }
+      return res;
+    } });
+    const error = await w.call("POST", "/api/v1/agents/x/messages", "execute once").catch((e) => e);
+    expect(w.r.handled.length).toBe(1);
+    expect(error).toBeInstanceOf(E2eOuterError);
+    expect(error).toMatchObject({ code: "e2e_outcome_unknown", sent: true });
+    const text = peerCallFailureText("peer b/x", error, "b");
+    expect(text).toContain("结果未知");
+    expect(text).not.toContain("请重发");
+    expect(error.message).not.toContain("请重发");
+  });
+});
+
+describe("T59 P1-2：会话缓存，传输与 signal 按请求", () => {
+  async function outbound() {
+    const w = await world();
+    const out = createE2eOutbound({
+      local: async () => ({ key: w.a.id, fp: w.a.fp, machine: w.a.m, signed: w.a.blob }),
+      peers: async () => [{ name: "b", baseUrl: "http://b.local", outToken: "tok", fp: w.b.fp, e2e: { idk: w.b.id.publicKey, ek: w.b.blob }, addedAt: "" }],
+      pin: async () => {},
+      sign: (m, p, b) => signedHeaders(m, p, b, w.a.id),
+    });
+    const serve = async (u: string, init: { method: "POST"; headers: Record<string, string>; body: Uint8Array }) =>
+      (await serveE2e(new Request(u, init), new URL(u).pathname, w.bDeps, { sender: w.a.fp }))!;
+    return { w, out, serve };
+  }
+
+  test("第一次的 signal 到期后，第二次换了新传输：走新的（secondUsed=1），调用成功", async () => {
+    const { out, serve } = await outbound();
+    const first = new AbortController();
+    let secondUsed = 0;
+    const raw1 = async (u: string, init: Parameters<typeof serve>[1]) => { first.signal.throwIfAborted(); return serve(u, init); };
+    const raw2 = async (u: string, init: Parameters<typeof serve>[1]) => { secondUsed++; return serve(u, init); };
+    expect((await out.fetch("http://b.local/api/v1/agents", { method: "GET" }, raw1))!.status).toBe(200);
+    first.abort();
+    const res = await out.fetch("http://b.local/api/v1/agents", { method: "GET" }, raw2);
+    expect(secondUsed).toBe(1);
+    expect(res!.status).toBe(200);
+  });
+
+  test("取消新调用只影响它自己：已取消的传输立刻失败，下一次照常", async () => {
+    const { out, serve } = await outbound();
+    const ok = async (u: string, init: Parameters<typeof serve>[1]) => serve(u, init);
+    expect((await out.fetch("http://b.local/api/v1/agents", { method: "GET" }, ok))!.status).toBe(200);
+    const cancelled = new AbortController();
+    cancelled.abort();
+    const raw = async (u: string, init: Parameters<typeof serve>[1]) => { cancelled.signal.throwIfAborted(); return serve(u, init); };
+    await expect(out.fetch("http://b.local/api/v1/agents", { method: "GET" }, raw)).rejects.toMatchObject({ code: "e2e_transport" });
+    expect((await out.fetch("http://b.local/api/v1/agents", { method: "GET" }, ok))!.status).toBe(200);
+  });
+
+  test("并发握手：发起握手的请求被取消，等它的请求用自己的传输重握成功，不陪着失败", async () => {
+    const { out, serve } = await outbound();
+    const aborting = async () => { await new Promise((r) => setTimeout(r, 20)); throw new DOMException("aborted", "AbortError"); };
+    let bUsed = 0;
+    const rawB = async (u: string, init: Parameters<typeof serve>[1]) => { bUsed++; return serve(u, init); };
+    const a = out.fetch("http://b.local/api/v1/agents", { method: "GET" }, aborting);
+    const b = out.fetch("http://b.local/api/v1/agents", { method: "GET" }, rawB);
+    await expect(a).rejects.toThrow(); // 握手阶段的传输错误原样抛（记录帧还没发，不算状态未知）
+    expect((await b)!.status).toBe(200);
+    expect(bUsed).toBeGreaterThanOrEqual(2); // 自己的 hello + 记录帧
+  });
+
+  // r2：对方 Codex 复验的两条探针（原样搬来，断言改成正确行为）——等握手的请求不能被别人的传输和 signal 绑住
+  const gate = () => {
+    let resolve!: () => void;
+    const promise = new Promise<void>((r) => (resolve = r));
+    return { promise, resolve };
+  };
+  const pause = (ms: number) => new Promise((r) => setTimeout(r, ms));
+  const endpoint = "http://b.local/api/v1/agents";
+  type Init = Parameters<Awaited<ReturnType<typeof outbound>>["serve"]>[1];
+
+  test("r2①：A 的握手挂住时，B 自己被取消会立刻结束，不陪着干等", async () => {
+    const { out, serve } = await outbound();
+    const entered = gate(), release = gate();
+    const a = out.fetch(endpoint, { method: "GET" }, async (u: string, init: Init) => {
+      entered.resolve();
+      await release.promise;
+      return serve(u, init);
+    });
+    await entered.promise;
+    const ctrl = new AbortController();
+    let bSettled = false;
+    const b = out.fetch(endpoint, { method: "GET" }, async (u: string, init: Init) => {
+      ctrl.signal.throwIfAborted();
+      return serve(u, init);
+    }).catch((e) => e).finally(() => (bSettled = true));
+    await pause(20);
+    ctrl.abort();
+    await pause(150);
+    const settled = bSettled;
+    release.resolve();
+    await Promise.all([a, b]);
+    expect(settled).toBe(true);
+  });
+
+  test("r2②：A、B 先后被取消，没被取消的 C 用自己的传输握手并成功", async () => {
+    const { out, serve } = await outbound();
+    const aEntered = gate(), bEntered = gate();
+    const aAbort = new AbortController(), bAbort = new AbortController();
+    let cUsed = 0;
+    const blocked = (g: ReturnType<typeof gate>, ctrl: AbortController) => async () => {
+      g.resolve();
+      return await new Promise<Response>((_, reject) => ctrl.signal.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")), { once: true }));
+    };
+    const a = out.fetch(endpoint, { method: "GET" }, blocked(aEntered, aAbort)).catch((e) => e);
+    await aEntered.promise;
+    const b = out.fetch(endpoint, { method: "GET" }, blocked(bEntered, bAbort)).catch((e) => e);
+    const c = out.fetch(endpoint, { method: "GET" }, async (u: string, init: Init) => {
+      cUsed++;
+      return serve(u, init);
+    }).catch((e) => e);
+    await pause(20);
+    aAbort.abort();
+    await bEntered.promise;
+    await pause(20);
+    bAbort.abort();
+    await Promise.all([a, b]);
+    const result = await c;
+    expect(cUsed).toBeGreaterThanOrEqual(1);
+    expect((result as Response).status).toBe(200);
   });
 });
