@@ -14,7 +14,7 @@ import { teamRouterTicker } from "../src/bridge/team-router.js";
 import { LedgerReader } from "../src/lib/ledger-read.js";
 import { getMeta, getTask, listEvents, openLedger } from "../src/lib/ledger-store.js";
 import { stepsOf } from "../src/lib/ledger-steps.js";
-import { peerWakes, prComments, type PeerWake, type PrComment } from "../src/lib/ledger-wake.js";
+import { blockquote, peerWakes, prComments, type PeerWake, type PrComment } from "../src/lib/ledger-wake.js";
 import { createTask, moveStage, recordReview, setMeta, setTask } from "../src/lib/ledger-write.js";
 import { routeEvents, type RouteNotice } from "../src/lib/team-route.js";
 import { runLedger } from "../src/manager/ledger.js";
@@ -114,6 +114,22 @@ describe("本机推一步、那一步归 peer → 叫醒 peer", () => {
     expect(got[0]!.text).toContain("要修改（P0 0 / P1 1 / P2 0），推到 fix");
   });
 
+  test("发给 peer 的和对方查卡看到的同一个口径：不带本机 actor、阶段说明原文；审查正文照给", () => {
+    moveStage(db, PM, { taskId: "T9", from: "spec", to: "restate" });
+    const from = top();
+    moveStage(db, PM, { taskId: "T9", from: "restate", to: "build", text: "内部路径 /Users/x/secret、owner 原话：先别告诉对方" });
+    const [w] = peerWakes(after(from), ctx());
+    expect(w!.text).not.toContain("agent-pm");
+    expect(w!.text).not.toContain("secret");
+    expect(w!.text).toContain("阶段 restate → build");
+    moveStage(db, PM, { taskId: "T9", from: "build", to: "review" });
+    const mid = top();
+    recordReview(db, PM, { taskId: "T9", reviewer: "agent-x", verdict: "changes", p0: 0, p1: 1, p2: 0, text: "第 3 行空指针", move: { from: "review", to: "fix" } });
+    const [r] = peerWakes(after(mid), ctx());
+    expect(r!.text).toContain("第 3 行空指针");
+    expect(r!.text).not.toContain("agent-pm");
+  });
+
   test("推到审查：发给审那一步的 peer B；写卡的 peer 自己推的不发回给它（两边互写不回声）", async () => {
     moveStage(db, PM, { taskId: "T9", from: "spec", to: "restate" });
     moveStage(db, PM, { taskId: "T9", from: "restate", to: "build" });
@@ -177,8 +193,32 @@ describe("审查结论贴 PR", () => {
     expect(c!.body.split("\n")[0]).toBe("[台账同步] T9 第 1 轮审查：**通过** @abcdef1234");
     expect(c!.body).toContain(`审查方 peer B，自报模型 gpt-5-codex；P0 0 / P1 0 / P2 0；台账事件 #${top()}`);
     expect(c!.body).toContain("> LGTM @​someone");
+    const mid = top();
     setTask(db, OWNER, { id: "T9", rev: getTask(db, "T9")!.rev, patch: { pr: "-R evil/x https://github.com/o/r/pull/7" } });
-    expect(prComments(after(from), ctx())).toEqual([]);
+    await peerWrite("B", "T9", { op: "review", verdict: "pass", p0: 0, p1: 0, p2: 0 });
+    expect(prComments(after(mid), ctx())).toEqual([]);
+  });
+
+  test("绑审查那一刻的 PR 与 head：审完 H1 卡退回修复、换 head 换 PR，晚到的轮询仍按 H1、贴原 PR", async () => {
+    setTask(db, OWNER, { id: "T9", rev: getTask(db, "T9")!.rev, patch: { pr: "https://github.com/o/r/pull/7", headSHA: "h1h1h1h1h1" } });
+    moveStage(db, PM, { taskId: "T9", from: "spec", to: "restate" });
+    moveStage(db, PM, { taskId: "T9", from: "restate", to: "build" });
+    await peerWrite("A", "T9", { op: "stage", from: "build", to: "review" });
+    const from = top();
+    await peerWrite("B", "T9", { op: "review", verdict: "changes", p0: 0, p1: 1, p2: 0 });
+    moveStage(db, PM, { taskId: "T9", from: "review", to: "fix" });
+    setTask(db, OWNER, { id: "T9", rev: getTask(db, "T9")!.rev, patch: { pr: "https://github.com/o/r/pull/8", headSHA: "h2h2h2h2h2" } });
+    const [c] = prComments(after(from), ctx());
+    expect(c!.pr).toBe("https://github.com/o/r/pull/7");
+    expect(c!.body.split("\n")[0]).toContain("@h1h1h1h1h1");
+  });
+
+  test("引用块：CRLF / 裸 CR / LF / U+2028 都先统一再逐行加 >，后面的段落跳不出引用", () => {
+    for (const nl of ["\r\n", "\r", "\n", "\u2028", "\u2029", "\u0085"]) {
+      const q = blockquote(`第一行${nl}${nl}**我是本机账号**`);
+      expect(q.split("\n")).toEqual(["> 第一行", "> ", "> **我是本机账号**"]);
+      expect(/[\r\u2028\u2029\u0085]/.test(q)).toBe(false);
+    }
   });
 
   test("postPrComment：先核本机对仓库有没有写权限，没有就不贴；有才发 issues comments", async () => {
