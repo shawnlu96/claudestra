@@ -89,7 +89,7 @@ export async function sweepCodexSubsIfEnabled(
   try {
     const r = await sweep({ keep: new Set(agents.map((a) => a.sessionId).filter((s): s is string => !!s)) });
     const mb = (r.bytes / 1048576).toFixed(1);
-    if (r.archived > 0) console.log(`🗄 Codex 子会话：${r.archived} 个（${mb}MB）超过 ${CODEX_SUB_IDLE_DAYS} 天没写，收进归档区(archived/)`);
+    if (r.archived > 0) console.log(`🗄 Codex 子会话 / 一次性调用：${r.archived} 个（${mb}MB）超过 ${CODEX_SUB_IDLE_DAYS} 天没写，收进归档区(archived/)`);
     return r.archived;
   } catch (e) {
     console.log(`⚠️ Codex 子会话归档扫描失败: ${(e as Error).message}`);
