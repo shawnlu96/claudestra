@@ -55,7 +55,7 @@ function chatMessage(d: Record<string, unknown>, selfIds: ReadonlySet<string>): 
       const said = fromLabel ? d.text : typeof d.echo === "string" ? d.echo : typeof d.askId === "string" ? d.text.split("\n").slice(1).join("\n") : d.text;
       // 本人的剥附件注入块 → 干净正文 + 附件数组（不剥另一端渲染出整块路径文字，回声与乐观消息也对不上）；外源的附件行留在正文里
       const trusted = Array.isArray(d.attachments) ? d.attachments.filter((p): p is string => typeof p === "string") : []; // bridge 真收下的（bridge/inbound-event.ts）
-      const { content, attachments } = foreignAware(said, fromLabel, trusted);
+      const { content, attachments } = foreignAware(said, !!fromLabel || !from, trusted); // 没带来源的也不可信
       if (!content && !attachments?.length) return null;
       const wire = !fromLabel && typeof d.echo === "string" && typeof d.wire === "string" ? extractAttachments(d.wire).content : ""; // 作答的原文：对账、回填已答态用
       const ask = { ...(typeof d.askId === "string" ? { askId: d.askId } : {}), ...(wire && wire !== content ? { wire } : {}) };

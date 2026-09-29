@@ -148,12 +148,12 @@ export function askAnchor(messages: readonly ChatMessage[], askId: string | unde
 }
 
 /**
- * 用户正文 → 显示正文 + 附件卡片：本人的剥掉附件行；外源（from 有值）原文照显，卡片只按服务端给的真附件路径 trusted 画（stream-shape 直播同一口径）。
- * 外源正文里的 [attachment: …] 只当文字：外人写一行 [attachment: /not-an-upload/id_rsa]，owner 会看到一张像是对方真发了文件的卡片
+ * 用户正文 → 显示正文 + 附件卡片：认定是本人的剥掉附件行；不可信的（外源，或记录里没有来源）原文照显，卡片只按服务端给的真附件路径 verified 画
+ * （stream-shape 直播同一口径）。不可信正文里的 [attachment: …] 只当文字：外人写一行 [attachment: /not-an-upload/id_rsa]，owner 会看到一张像是对方真发了文件的卡片
  */
-export function foreignAware(text: string, from: string | undefined, trusted?: readonly string[]): { content: string; attachments?: ChatAttachmentView[] } {
-  if (!from) return extractAttachments(text);
-  const atts = (trusted ?? []).map((p) => attachmentFromPath(p)).filter((a): a is ChatAttachmentView => !!a);
+export function foreignAware(text: string, untrusted: boolean, verified?: readonly string[]): { content: string; attachments?: ChatAttachmentView[] } {
+  if (!untrusted) return extractAttachments(text);
+  const atts = (verified ?? []).map((p) => attachmentFromPath(p)).filter((a): a is ChatAttachmentView => !!a);
   return { content: text.trim(), ...(atts.length ? { attachments: atts } : {}) };
 }
 
@@ -172,7 +172,8 @@ function userMessage(m: NeutralMessage, anchor: ChatMessage | null, opts: ShapeO
   const click = m.wire || from ? null : resolveUserClick(own, anchor, forms);
   // bridge 注入的来源头只由服务端按 channel 属性剥（lib/inbound-body.ts channelBodyText）；网页对外源正文不做任何按文本的剥除，
   // 附件行也留在正文里、卡片只是附加预览——否则外人写一行 [attachment: 任意路径]，owner 只看到一个文件名，agent 拿到的是路径
-  const { content, attachments } = foreignAware(click?.text ?? own, from, m.attachments);
+  // 没有来源的记录（Pi 裸记录：Discord 用户直发 Pi 的原文，本人和外人分不出）也不按正文画卡片、不剥附件行（tests/web-history-shape.test.ts「Pi 裸记录」）
+  const { content, attachments } = foreignAware(click?.text ?? own, !!from || !m.from, m.attachments);
   const pending = click && !click.resolved ? { clickRaw: own } : {}; // 存剥过指令行的：翻页补解析时不能把指令行带回气泡
   const ask = { ...(m.askId ? { askId: m.askId } : {}), ...(m.wire ? { wire: m.wire } : {}) };
   return { id: `h${m.seq}`, role: "user", content, ts: m.ts, from, sid: opts.sid, seqEnd: m.seq, ...(attachments ? { attachments } : {}), ...pending, ...ask };
