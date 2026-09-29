@@ -160,37 +160,47 @@ export async function holdAtWallWait(env: Envelope, to: LocalEndpoint, agent: st
 }
 
 const RESUME_LABEL = "api-error-resume";
-/** 频道 → 已经交给投递的那份续跑计划（= 它的 messageId）；撤销时只撤这一份 */
+const isResume = (env: Envelope) => env.from.kind === "bridge" && env.from.label === RESUME_LABEL;
+/**
+ * 频道 → 当前有效的那份续跑计划（= 续跑信封的 messageId）。只有它能发；撤销 = 删掉。bridge 重启后从押后队列里恢复的
+ * 续跑信封重建（rebuildResumePlans）——不然重启后撤不掉队里的旧「继续」（T52 Codex 复审 #208 第 5 轮 P2-1）
+ */
 const planOf = new Map<string, string>();
-/** 撤掉的续跑计划：deliverToLocal 在所有 await 之后、入队或 ws.send 之前核一次（resumeStillWanted），初次投递和押后 flush 都覆盖 */
-const cancelledPlans = new Set<string>();
-const CANCELLED_KEEP = 200;
-
-/** 这条续跑的计划被撤了 → false：不发、不押（撞额度之后续了必然再撞，T52 Codex 复审 #208 P2）。已经 ws.send 的不追 */
-export function resumeStillWanted(env: Envelope): boolean {
-  return !(env.from.kind === "bridge" && env.from.label === RESUME_LABEL && cancelledPlans.has(env.meta.messageId));
-}
-
-/** 续跑交给投递之前记下这份计划 */
-export const trackResumePlan = (cid: string, plan: string): void => void planOf.set(cid, plan);
 
 /**
- * 撤掉这个频道已经交给投递的那份续跑（只认计划 id，不按频道 / 时间删）：标成撤销（队外的由 resumeStillWanted 在发前拦），
- * 押在队里的那条直接撤下。返回撤掉的计划 id。tests/quota-wall-resume-cancel.test.ts
+ * 这条续跑还是它频道当前的计划 → true；被撤的、被新计划顶掉的、重启后队里也没有的一律不发不押（未知计划不放行）。
+ * deliverToLocal 在所有 await 之后、入队或 ws.send 之前调，初次投递和押后 flush 都覆盖；已经 ws.send 的不追
  */
+export function resumeStillWanted(env: Envelope): boolean {
+  return !isResume(env) || planOf.get((env.to as LocalEndpoint).channelId) === env.meta.messageId;
+}
+
+/** 续跑交给投递之前记下这份计划（同频道的旧计划随之作废） */
+export const trackResumePlan = (cid: string, plan: string): void => void planOf.set(cid, plan);
+
+/** 启动时调：清空后按押后队列里的续跑信封重建计划表。返回重建了几条 */
+export function rebuildResumePlans(held: HeldQueue): number {
+  planOf.clear();
+  for (const [cid, items] of held) for (const i of items) if (isResume(i.env)) planOf.set(cid, i.env.meta.messageId);
+  return planOf.size;
+}
+
+/** 撤掉这个频道当前的那份续跑（只认计划 id）：删计划，押在队里的那条直接撤下。返回撤掉的计划 id。tests/quota-wall-resume-cancel.test.ts */
 export function cancelResumePlan(held: HeldQueue, cid: string): string | null {
   const plan = planOf.get(cid);
   if (!plan) return null;
   planOf.delete(cid);
-  cancelledPlans.add(plan);
-  if (cancelledPlans.size > CANCELLED_KEEP) cancelledPlans.delete(cancelledPlans.values().next().value as string);
-  for (const i of (held.get(cid) ?? []).filter((x) => x.env.from.kind === "bridge" && x.env.meta.messageId === plan)) held.remove(cid, i);
+  for (const i of (held.get(cid) ?? []).filter((x) => isResume(x.env) && x.env.meta.messageId === plan)) held.remove(cid, i);
   return plan;
 }
 
-/** 撞额度（CC 的 api_error_turn 进闸 / 模型额度、Codex 的 rateLimited 条目）：删计划，已经交给投递的那份撤掉 */
+/**
+ * 撞额度（CC 的 api_error_turn 进闸 / 模型额度、Codex 的 rateLimited 条目）：删计划、撤掉已经交给投递的那份，
+ * 被「它又动了」挪走待 rearm 的那份也作废——不然外人回合的 Stop 会把旧计划挂回来（第 5 轮 P2-2）
+ */
 function cancelResume(b: WallBridgeDeps, states: Map<string, ApiErrorState>, cid: string): void {
   states.delete(cid);
+  cancelledResume.delete(cid);
   const plan = cancelResumePlan(b.held, cid);
   if (plan) console.log(`⏸ ${cid}：撞额度，撤掉续跑 ${plan}`);
 }
@@ -203,6 +213,8 @@ export const rearmResume = (cid: string): void => rearm?.(cid);
 /** bridge 启动时调一次：起闸、接 api_error_turn、15 秒一拍（续跑到期 + 闸的 tick） */
 export function startQuotaWall(b: WallBridgeDeps): QuotaWall {
   bridge = b;
+  const rebuilt = rebuildResumePlans(b.held); // 重启：押后队列已从盘上恢复，续跑计划跟着恢复
+  if (rebuilt) console.log(`🔁 押后队列里有 ${rebuilt} 条续跑，计划已恢复`);
   const w = (wall = productionWall(b));
   for (const cb of earlyExitListeners.splice(0)) w.onExit(cb);
   // 闸内回程簿不按 2 小时扫（撞周额度一等一两天）；出闸时整本失效钟重新起算，等它们的真实答复
