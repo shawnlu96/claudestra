@@ -1,7 +1,7 @@
 /** 协作视图 v4 因果线画布的布局模型（web/features/collab/v4/causal-model.ts）：分组、按依赖从左往右、折叠、边状态映射 */
 import { describe, expect, test } from "bun:test";
 import type { LedgerDepView, LedgerTaskView, Stage } from "../web/features/collab/collab-model";
-import { causalCanvas, edgeStyle, LOOSE_GROUP, type Box, type CEdge } from "../web/features/collab/v4/causal-model";
+import { causalCanvas, COL_GAP, edgeStyle, LOOSE_GROUP, type Box, type CEdge } from "../web/features/collab/v4/causal-model";
 import { initialView, labelWidth, offscreen, placeLabels, READABLE_K } from "../web/features/collab/v4/canvas-view";
 
 function task(id: string, stage: Stage, over: Partial<LedgerTaskView> = {}): LedgerTaskView {
@@ -116,9 +116,9 @@ describe("边标签避让与打开时的视口（canvas-view.ts）", () => {
     const shown = ls.filter((l) => !l.dot).map(rect);
     for (let i = 0; i < shown.length; i++) for (let j = i + 1; j < shown.length; j++) expect(overlap(shown[i]!, shown[j]!)).toBe(false);
   });
-  test("估宽：中文比英文宽，封顶 150", () => {
+  test("估宽：中文比英文宽，以列缝宽为上限", () => {
     expect(labelWidth("合并后")).toBeGreaterThan(labelWidth("abc"));
-    expect(labelWidth("很".repeat(40))).toBe(150);
+    expect(labelWidth("很".repeat(40))).toBe(COL_GAP - 6);
   });
   test("整张在 0.8 以上放得下就整张放；放不下用 0.8、在跑的对齐左上，视口外的件数按方向报", () => {
     const small = causalCanvas({ items, deps: [], tasks: [task("A", "build")] });

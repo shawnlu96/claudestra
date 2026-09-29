@@ -25,7 +25,9 @@ export interface Canvas {
 }
 
 export const LOOSE_GROUP = "__loose";
-const FULL_H = 64, MINI_H = 30, NODE_W = 208, COL_GAP = 64, ROW_GAP = 10, PAD = 14, HEAD = 30, GROUP_GAP = 28;
+/** 列间距要放得下一个边标签（canvas-view.ts placeLabels 把标签放在列缝里，宽度以它为上限） */
+export const COL_GAP = 96;
+const FULL_H = 64, MINI_H = 30, NODE_W = 208, ROW_GAP = 10, PAD = 14, HEAD = 30, GROUP_GAP = 28;
 const FULL: ReadonlySet<Stage> = new Set(["restate", "build", "review", "fix", "merge", "blocked"]);
 const NOT_STARTED: ReadonlySet<Stage> = new Set(["spec", "restate"]);
 const TERMINAL: ReadonlySet<Stage> = new Set(["done", "cancelled"]);

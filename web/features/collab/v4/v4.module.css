@@ -52,7 +52,7 @@
 .eDotted .eLine { stroke: var(--faint); stroke-dasharray: 1.5 5; stroke-linecap: round; }
 .eSel .eLine { stroke-width: 2.8; }
 @keyframes flow { to { stroke-dashoffset: -22; } }
-.elabel { position: absolute; transform: translate(-50%, -50%); max-width: 150px; text-align: center; padding: 1px 6px; border-radius: 6px; background: var(--bg); border: 1px solid var(--line);
+.elabel { position: absolute; transform: translate(-50%, -50%); text-align: center; padding: 1px 6px; border-radius: 6px; background: var(--bg); border: 1px solid var(--line);
   color: var(--muted); font-size: 10.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .elabel.eSel { color: var(--text); border-color: var(--line-2); }
 

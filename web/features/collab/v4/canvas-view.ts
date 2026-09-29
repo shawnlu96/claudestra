@@ -1,9 +1,9 @@
 /**
  * 因果线画布的几何（纯函数，单测 tests/web-collab-causal.test.ts）：边的曲线、边标签避让、打开时的视口、视口外还剩几件。
- * 标签按边的先后逐个找位置：沿曲线试几个点、再上下错开，压到节点或别的标签就换下一个，全都压到就退成一个点
- * （悬停看全文，点开右侧属性页）。标签宽度是按字数估的，跟实际渲染差几个像素，所以碰撞判断留了余量。
+ * 标签放在列缝里（出发节点右边那道缝、到达节点左边那道缝，都不行再沿曲线试），每处再上下错开几档；压到节点或别的标签就换，
+ * 全都压到就退成一个点（悬停看全文，点开右侧属性页）。宽度按字数估、以列缝为上限，放不全的省略号截断、悬停看全文。
  */
-import type { Box, Canvas, CEdge } from "./causal-model";
+import { COL_GAP, type Box, type Canvas, type CEdge } from "./causal-model";
 
 export interface View { x: number; y: number; k: number }
 export interface EdgeLabel { id: string; x: number; y: number; w: number; h: number; dot: boolean }
@@ -11,9 +11,9 @@ export interface EdgeLabel { id: string; x: number; y: number; w: number; h: num
 export const VIEW_PAD = 24;
 /** 打开时缩放不低于它：再小字就认不出，宁可有几件在视口外（给出提示），整张看点「适配全部」 */
 export const READABLE_K = 0.8;
-const LABEL_H = 18, LABEL_MAX_W = 150, GAP = 3;
-const TRY_T = [0.5, 0.35, 0.65, 0.22, 0.78];
-const TRY_DY = [0, -(LABEL_H + GAP), LABEL_H + GAP];
+const LABEL_H = 18, GAP = 3, LABEL_MAX_W = COL_GAP - 2 * GAP;
+const TRY_T = [0.5, 0.35, 0.65];
+const TRY_DY = [0, -1, 1, -2, 2].map((n) => n * (LABEL_H + GAP));
 
 const bend = (e: CEdge) => Math.max(40, Math.abs(e.x2 - e.x1) / 2);
 
@@ -29,7 +29,25 @@ export function pointAt(e: CEdge, t: number): { x: number; y: number } {
   return { x: a * e.x1 + b * (e.x1 + dx) + c * (e.x2 - dx) + d * e.x2, y: a * e.y1 + b * e.y1 + c * e.y2 + d * e.y2 };
 }
 
-/** 估宽：中文按 10.5px、其余按 6px，再加内边距；和 .elabel 的 max-width 同一个上限 */
+/** 曲线上横坐标为 x 的点（从左往右的边 x 随 t 单调，二分即可）；x 不在两端之间 = null */
+function pointAtX(e: CEdge, x: number): { x: number; y: number } | null {
+  if (e.x2 <= e.x1 || x < e.x1 || x > e.x2) return null;
+  let lo = 0, hi = 1;
+  for (let i = 0; i < 24; i++) {
+    const mid = (lo + hi) / 2;
+    if (pointAt(e, mid).x < x) lo = mid;
+    else hi = mid;
+  }
+  return pointAt(e, (lo + hi) / 2);
+}
+
+/** 候选锚点：出发那道列缝的中间、到达那道列缝的中间，再是曲线上几处 */
+function anchors(e: CEdge): { x: number; y: number }[] {
+  const gaps = [pointAtX(e, e.x1 + COL_GAP / 2), pointAtX(e, e.x2 - COL_GAP / 2)].filter((p) => p !== null);
+  return [...gaps, ...TRY_T.map((t) => pointAt(e, t))];
+}
+
+/** 估宽：中文按 10.5px、其余按 6px，再加内边距；以列缝宽为上限 */
 export function labelWidth(text: string): number {
   let w = 14;
   for (const ch of text) w += /[⺀-￿]/.test(ch) ? 10.5 : 6;
@@ -42,8 +60,7 @@ export function placeLabels(edges: readonly CEdge[], obstacles: readonly Box[]):
   const placed: Box[] = [];
   return edges.filter((e) => e.dep.when).map((e) => {
     const w = labelWidth(e.dep.when);
-    for (const t of TRY_T) {
-      const p = pointAt(e, t);
+    for (const p of anchors(e)) {
       for (const dy of TRY_DY) {
         const box = { x: p.x - w / 2, y: p.y + dy - LABEL_H / 2, w, h: LABEL_H };
         if (obstacles.some((o) => hits(box, o)) || placed.some((o) => hits(box, o))) continue;
