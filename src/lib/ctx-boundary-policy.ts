@@ -99,8 +99,24 @@ function parseOne(e: Record<string, unknown>, id: string, base: CtxPolicy | null
       ccWindow = null;
     }
   }
-  const keep = typeof e.keep === "string" && e.keep.trim() ? e.keep.replace(/\s*\n\s*/g, " ").trim() : base?.keep ?? null;
+  let keep = base?.keep ?? null;
+  if (typeof e.keep === "string" && e.keep.trim()) {
+    const k = e.keep.replace(/\s*\n\s*/g, " ").trim();
+    const len = k.length; // okCompactKeep 是类型守卫，else 分支里 k 会被收窄成 never
+    if (okCompactKeep(k)) keep = k;
+    else warn(`keep 会原样敲进输入框：不能带控制字符（单独的回车、ESC、Tab 会被当成按键），最长 ${MAX_COMPACT_KEEP} 字；这条（${len} 字）已忽略，用默认保留清单`);
+  }
   return { id, projects, names, window, idleMinutes, hardCap, action, ccWindow, keep };
+}
+
+/**
+ * 保留清单会原样敲进 CC 输入框：只收上限以内、不带控制字符的非空串，否则当没配、用默认清单。
+ * 超长时 tmux send-keys 整条失败；单独的回车、ESC 会被 TUI 当成按键，回车会把半截命令提前提交（config.json 是手改的，这里是唯一的闸）。
+ * 别处要敲保留清单的（例如批量管理的 fleet.compactKeep）也用这一个函数。单测 tests/ctx-boundary-policy.test.ts。
+ */
+const MAX_COMPACT_KEEP = 1500;
+export function okCompactKeep(v: unknown): v is string {
+  return typeof v === "string" && !!v.trim() && v.length <= MAX_COMPACT_KEEP && !/[\x00-\x1f\x7f-\x9f]/.test(v);
 }
 
 /**
