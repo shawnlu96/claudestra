@@ -34,7 +34,7 @@ export const PENDING_KEEP_MS = 30 * 60_000;
  * 匹配三口径:归一化全文相等 / 历史含 wire 原文([button:id] 落在 channel 包装里)
  * / 「🔘 label」兜底形态(2026-07-16)。CRLF 归一防注入链路差异(2026-07-15)。
  * v2.23+ 加第四口径:剥掉注入头后的裸文本相等（Pi 的入站消息在记录里带 🌐 头,
- * 本地气泡只有正文——不比裸文本就当成两条）。
+ * 本地气泡只有正文——不比裸文本就当成两条）。只和本人的历史条目配:外源同文会把 owner 还在排队的消息当成已送达吞掉。
  */
 export function survivingPending(
   current: ChatMessage[],
@@ -60,6 +60,7 @@ export function survivingPending(
       (h, i) =>
         !used.has(i) &&
         h.role === "user" &&
+        !h.from &&
         ((t ? norm(h.content) === t : sameAttachmentOnly(m, h)) ||
           // Pi：历史带注入头、本地只有正文 ⇒ 与两侧各自的裸文本比对
           (tBare.length > 0 && norm(stripInboundHeader(h.content)) === tBare) ||
@@ -116,16 +117,23 @@ export function echoKeyOf(text: string, attachments?: ChatMessage["attachments"]
 /**
  * 他端用户发言（stream user-in）是不是视图里已有的某条（本端乐观消息的回声 / 历史已有）：有正文比正文（含注入头无关比对）；
  * 纯附件比附件本身——只比「附件数相同」会把别的设备连发的第二张纯图当成回声吞掉（审查 P2-3）。
- * 外源（from）发言不可能是本端乐观消息的回声；乐观气泡已认领过回声（echoKey）就只认那一条，同名的第二张 image.png 不再被吞。
+ * 只在本人之间认：外源（from）发言按正文配上视图里任何一条都会被吞——外人重放 owner 最近说过的话，agent 收到、owner 看不到；
+ * 本人的发言也不能配外源气泡。外源气泡偶尔和历史重复一条，下次对齐就被历史整体替换（tests/web-foreign-echo.test.ts）。
+ * 乐观气泡已认领过回声（echoKey）就只认那一条，同名的第二张 image.png 不再被吞。
  */
 export function isUserEcho(m: ChatMessage, text: string, attachments?: ChatMessage["attachments"], from?: string): boolean {
-  if (m.role !== "user" || (from && m.local)) return false;
+  if (m.role !== "user" || from || m.from) return false;
   if (m.local && m.echoKey !== undefined) return m.echoKey === echoKeyOf(text, attachments);
   const norm = (x: string) => x.replace(/\r\n?/g, "\n").trim();
   const t = norm(text);
   const raw = m.wire ?? m.content ?? "";
   if (t) return norm(raw) === t || norm(stripInboundHeader(raw)) === t;
   return !norm(raw) && sameAttachments(m.attachments, attachments);
+}
+
+/** 他端发言在视图尾部 15 条里的回声（chat-store addRemoteUserMessage 的对账去重）；没有 → undefined */
+export function findUserEcho(messages: readonly ChatMessage[], text: string, attachments?: ChatMessage["attachments"], from?: string): ChatMessage | undefined {
+  return messages.slice(-15).find((m) => isUserEcho(m, text, attachments, from));
 }
 
 /**

@@ -122,13 +122,16 @@ describe("resolveDeltaClicks（差量里的回投往前找所属表单）", () =
     expect(r.base[3].replyClicks).toEqual({ b0: "go" });
   });
 
-  test("普通文字消息不受影响；别的设备 / 访客点的也一样还原（整段整形不分来源，实时视图也不分）", () => {
+  test("普通文字消息不受影响；回投只认看的人自己：owner 看访客的点击是原文、不标已答，访客在自己设备上照常还原（T31）", () => {
     const r = split(prior, [u(3, "随便说点")]);
     expect(r.shaped[0].content).toBe("随便说点");
     expect(r.shaped[0].clickRaw).toBeUndefined();
     const guest = split(prior, [u(3, "[button:go]", { from: "guest-mom", fromId: "api:guest:mom" })]);
-    expect(guest.shaped[0].content).toBe("✅ 发版");
+    expect(guest.shaped[0].content).toBe("[button:go]");
     expect(guest.shaped[0].from).toBe("guest-mom");
+    expect(guest.base[1].replyClicks).toBeUndefined();
+    const own = toChatMessages(structuredClone([...prior, u(3, "[button:go]", { from: "guest-mom", fromId: "api:guest:mom" })]), { selfIds: new Set(["api:guest:mom"]) });
+    expect(own[2].content).toBe("✅ 发版");
   });
 });
 

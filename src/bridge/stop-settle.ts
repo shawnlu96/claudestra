@@ -14,7 +14,7 @@ import { apiQueueToSettle } from "../lib/pending-reply-scope.js";
 import { isOwnStopChannel } from "../lib/pushback-scope.js";
 import { isModelLimitHit, wallHitOf } from "../lib/quota-wall-text.js";
 import { DEFAULT_RUNTIME } from "../lib/runtimes/index.js";
-import { withExpecting, withheldNotice, type PendingAgentCall } from "./agent-calls.js";
+import { withExpecting, withheldNotice, withheldParts, type PendingAgentCall } from "./agent-calls.js";
 
 export interface StopTurn {
   /** 要结算的频道（channelsToClear 里的一个） */
@@ -169,8 +169,8 @@ async function settleOwn(d: CallerSettleDeps, t: StopTurn, mine: boolean): Promi
     d.rearmResume(t.cid); // 答的是外人：回程留着；它的 60 秒续跑要是被这一轮取消了，重新排上，不然没人再叫它接着做
     return own;
   }
-  // 扣下的话按槽逐个推（每槽只有归属确定的那份，markApiError）；推失败这一轮的正文扣回它该归的那一槽，不丢
-  for (const c of waiting.filter((x) => x.withheld?.length)) {
+  // 扣下的话按条逐个推（每份挂在归属确定的那条请求上、推到那条的回复频道，markApiError）；推失败这一轮的正文扣回它该归的那一条，不丢
+  for (const c of waiting.flatMap(withheldParts)) {
     if (await pushWithheld(d, t.cid, c)) continue;
     markWithheld(d, t, t.drain.text);
     return own;

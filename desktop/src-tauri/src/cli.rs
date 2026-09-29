@@ -1,7 +1,7 @@
 //! Everything the app runs. Decisions (what counts as healthy, which daemons, which port) live in
 //! the repo's `src/desktop-cli.ts`; this file only spawns it and hands back its JSON.
 
-use crate::env::{home, run_with_timeout, sh_quote, Install};
+use crate::env::{home, run_with_timeout, sh_quote, Install, RunError};
 use crate::i18n::tr;
 use serde_json::{json, Value};
 use std::os::unix::fs::PermissionsExt;
@@ -23,7 +23,7 @@ fn timeout_for(sub: &str) -> Duration {
 /// `{ok:false, error}` is a failed command and becomes Err here, so every caller (menu, window,
 /// tray) shows the real reason. doctor's `ok:false` without `error` only means "has failures".
 pub fn desktop_cli(inst: &Install, sub: &str) -> Result<Value, String> {
-    desktop_cli_raw(inst, sub).and_then(check_error)
+    desktop_cli_raw(inst, sub).map_err(String::from).and_then(check_error)
 }
 
 pub fn check_error(v: Value) -> Result<Value, String> {
@@ -34,13 +34,15 @@ pub fn check_error(v: Value) -> Result<Value, String> {
 }
 
 /// `bun src/desktop-cli.ts <sub>` in the checkout; the last stdout line is the JSON result, as is.
-pub fn desktop_cli_raw(inst: &Install, sub: &str) -> Result<Value, String> {
+/// `NotStarted` = desktop-cli never ran (no checkout, bun missing); `Started` = it ran but gave no
+/// usable answer (timeout, crash, bad JSON), so whatever it does may have partly happened.
+pub fn desktop_cli_raw(inst: &Install, sub: &str) -> Result<Value, RunError> {
     if !inst.cli_available {
-        return Err(if inst.has_checkout {
+        return Err(RunError::NotStarted(if inst.has_checkout {
             tr("这份 Claudestra 比小程序旧，先更新（claudestra update）", "This Claudestra checkout is older than the app; update it first")
         } else {
             tr("Claudestra 还没装好，打开「安装向导…」", "Claudestra isn't set up yet; open Setup…")
-        });
+        }));
     }
     let mut cmd = Command::new(&inst.bun);
     cmd.arg("src/desktop-cli.ts")
@@ -52,8 +54,8 @@ pub fn desktop_cli_raw(inst: &Install, sub: &str) -> Result<Value, String> {
     let (_, out, err) = run_with_timeout(&mut cmd, timeout_for(sub))?;
     let line = out.lines().rev().find(|l| l.trim_start().starts_with('{'));
     match line {
-        Some(l) => serde_json::from_str(l).map_err(|e| format!("bad JSON from desktop-cli: {e}")),
-        None => Err(format!("desktop-cli printed nothing: {}", err.trim())),
+        Some(l) => serde_json::from_str(l).map_err(|e| RunError::Started(format!("bad JSON from desktop-cli: {e}"))),
+        None => Err(RunError::Started(format!("desktop-cli printed nothing: {}", err.trim()))),
     }
 }
 
@@ -67,7 +69,7 @@ pub fn probe_tools(inst: &Install) -> Value {
             match run_with_timeout(&mut cmd, Duration::from_secs(10)) {
                 Ok((true, out, _)) => json!({ "name": tool, "found": true, "version": out.lines().next().unwrap_or("").trim() }),
                 Ok((false, _, err)) => json!({ "name": tool, "found": false, "error": err.lines().next().unwrap_or("").trim() }),
-                Err(e) => json!({ "name": tool, "found": false, "error": e }),
+                Err(e) => json!({ "name": tool, "found": false, "error": String::from(e) }),
             }
         })
         .collect();

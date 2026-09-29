@@ -76,7 +76,7 @@ async function readPaged(d: InboxDeps, channelId: string, readId: string, page: 
   if (!it) return { result: { n: 0, text: `收件箱里没有 ${readId}（已确认过，或已按普通消息送达）。` } };
   const { messageId } = it.env.meta;
   if (!leaseActive(it, now)) {
-    d.calls.touch(channelId, it.env.from.kind === "local" ? it.env.from.channelId : undefined);
+    d.calls.touchDelivered(channelId, it.env);
     it.lease = { batchId: `inbox_${randomUUID()}`, at: now };
     d.held.persist();
   }
@@ -146,7 +146,7 @@ export async function takeInbox(ws: ServerWebSocket<unknown>, now = Date.now(), 
     if (!picked.length) return { result: { n: 0, text: [`${ackNote}收件箱里没有可领取的消息。`, ...previews].join("\n\n") } };
     const batchId = `inbox_${randomUUID()}`; // 毫秒会撞：同一毫秒两次领取会被绑成一批
     // 先 touch 再落租约（和押后投递同序）：落盘后、touch 前崩溃，重启时回程簿会带着旧钟被当成过期扫掉
-    for (const { it } of picked) d.calls.touch(channelId, it.env.from.kind === "local" ? it.env.from.channelId : undefined); // 这些请求这会儿才真正到它手上
+    for (const { it } of picked) d.calls.touchDelivered(channelId, it.env); // 这些请求这会儿才真正到它手上
     for (const { it } of picked) {
       it.lease = { batchId, at: now };
       d.emitIn(channelId, it.env);
