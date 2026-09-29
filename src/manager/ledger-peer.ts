@@ -1,7 +1,8 @@
 /**
  * `ledger peer-write <peer> <task> <json>`：peer 台账接口的写入执行（bridge 的 local-api/peer-ledger.ts 经 runManager 调）。
  * 能不能写在 lib/peer-ledger.ts 判，阶段合不合法由写入层按 peer 角色判；事件 actor 记 "peer:<名>"。
- * 只认 owner 身份调用（bridge 进程没有频道号）：agent 在自己的 Bash 里调会被拒，冒充不了 peer。
+ * 只认 owner 身份调用（bridge 进程没有频道号）：带着自己频道号的 agent 直接调会被拒。台账身份本来就是自报的（ledger-identity.ts），
+ * 本机 agent 清掉频道号照样能以 owner 身份伪造 peer:<名> 的事件；防的是对方 peer，它只能经 bridge 的接口写。
  * tests/peer-ledger.test.ts。
  */
 import { LedgerError, getTask } from "../lib/ledger-store.js";
@@ -14,7 +15,7 @@ import type { CommandSpec } from "./ledger-write-cmds.js";
 const PEER_NAME_RE = /^[\p{L}\p{N}_.-]{1,64}$/u;
 
 function peerWrite(c: LedgerCli): Result {
-  if (c.deps.actor !== "owner") throw new LedgerError("forbidden", "peer-write 只给 bridge 用（以 owner 身份调），agent 不能冒充 peer 写台账");
+  if (c.deps.actor !== "owner") throw new LedgerError("forbidden", "peer-write 只给 bridge 用（以 owner 身份调）");
   const [, peer, id, json] = c.p.pos;
   if (!peer || !PEER_NAME_RE.test(peer)) throw new LedgerError("invalid", "peer 名不合法");
   let body: unknown;

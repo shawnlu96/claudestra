@@ -30,9 +30,9 @@ export async function handlePeerLedgerApi(req: Request, path: string, principal:
   if (req.method !== "POST" || id === undefined) return apiJson(405, { ok: false, error: "method not allowed" });
   const body = await readJsonBody(req);
   if (body === INVALID_JSON) return invalidJsonBody();
-  // 频道号置空 = 以 owner 身份跑；peer-write 只认 owner 调用，事件 actor 由它记成 peer:<名>
+  // 频道号置空 = 以 owner 身份跑，事件 actor 由 peer-write 记成 peer:<名>；「--」之后全当位置参数，任务 id 写成 --help 也不会被当旗标
   const env = { ...ENV_WITH_BUN, DISCORD_CHANNEL_ID: "" };
-  const r = await runManagerProcess(["ledger", "peer-write", peer, id, JSON.stringify(body)], { bunPath: BUN_PATH, managerPath: MANAGER_PATH, env, timeoutMs: 30_000 });
+  const r = await runManagerProcess(["ledger", "peer-write", "--", peer, id, JSON.stringify(body)], { bunPath: BUN_PATH, managerPath: MANAGER_PATH, env, timeoutMs: 30_000 });
   if (r?.ok) return apiJson(200, r);
   return apiJson(STATUS[r?.code] ?? 500, { ok: false, code: r?.code ?? "internal", error: r?.error ?? "ledger write failed", ...(r?.current ? { current: r.current } : {}) });
 }

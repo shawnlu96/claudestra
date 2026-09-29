@@ -1,13 +1,13 @@
 /**
  * 跨实例委托的台账接口（docs/team/peer-delegation.md）：受托方用 peer token 读写委托给它的那几张卡，台账留在发起方本机。
  * 哪些卡算「给这个 peer 的」：extra.delegate（执行方）或 extra.reviewer（审查方）@ 后面的名字等于 token 对应的 peer。
- * 读：这些卡本身 + 它们的事件时间线（去掉 owner 原话和「待你处理」）。写的判定在这里，执行在 manager/ledger-peer.ts：
+ * 读：这些卡本身 + 它们的事件时间线（白名单，peerEventView）。写的判定在这里，执行在 manager/ledger-peer.ts：
  * note（双方）、挂 PR / head（执行方，合并前）、阶段（执行方，ledger-stages.ts peerMayMove）、审查结论（审查方，不带阶段跳转）。
  * tests/peer-ledger.test.ts。
  */
 import type { Database } from "bun:sqlite";
 import { resolve } from "node:path";
-import { delegatePeerOf, isAskEvent, samePeer, STAGES, type LedgerEvent, type LedgerTask, type ReviewVerdict, type Stage } from "./ledger-stages.js";
+import { delegatePeerOf, samePeer, STAGES, type LedgerEvent, type LedgerTask, type ReviewVerdict, type Stage } from "./ledger-stages.js";
 import { getTask, listEvents, toTask } from "./ledger-store.js";
 import { REPO_ROOT } from "./repo-root.js";
 
@@ -56,15 +56,41 @@ export function peerTasks(db: Database, peer: string): PeerTaskView[] {
   });
 }
 
-/** owner 原话（decision）和「待你处理」一族不给对方看 */
-const hiddenFromPeer = (e: LedgerEvent): boolean => e.kind === "decision" || isAskEvent(e);
+export interface PeerEventView {
+  seq: number;
+  ts: number;
+  kind: string;
+  /** 受托方自己写的（actor 是 peer:<它>）：原样给；其余只给白名单字段，不给 actor */
+  mine: boolean;
+  text?: string;
+  data: Record<string, unknown>;
+}
+
+/**
+ * 事件时间线白名单：发起方的内部信息（建卡的 extra、分支、规格卡路径、PM 的 note、owner 原话、派审、升级、部署地址……）不出本机。
+ * 受托方自己写的原样；阶段变化只给 from / to；建卡 / 改卡只给 pr / headSHA（都没有就整条不给）；交付只给 head；
+ * 审查只给结论（verdict、P 计数、轮次、正文，不给结论文件路径）。其余整条不给。tests/peer-ledger.test.ts。
+ */
+function peerEventView(e: LedgerEvent, peer: string): PeerEventView | null {
+  const base = { seq: e.seq, ts: e.ts, kind: e.kind };
+  if (e.actor === `peer:${peer}`) return { ...base, mine: true, text: e.text, data: e.data };
+  const d = e.data;
+  if (e.kind === "stage") return { ...base, mine: false, data: { from: d.from, to: d.to } };
+  if (e.kind === "deliver") return { ...base, mine: false, data: { headSHA: d.headSHA ?? null } };
+  if (e.kind === "review") return { ...base, mine: false, text: e.text, data: { verdict: d.verdict, p0: d.p0, p1: d.p1, p2: d.p2, round: d.round } };
+  if (e.kind !== "task") return null;
+  const patch = (d.patch ?? {}) as Record<string, unknown>;
+  const refs = Object.fromEntries(["pr", "headSHA"].filter((k) => patch[k] != null).map((k) => [k, patch[k]]));
+  return Object.keys(refs).length ? { ...base, mine: false, data: refs } : null;
+}
 
 /** 不是委托给它的卡一律当不存在（null → 404），不泄露别的任务在不在 */
-export function peerTaskDetail(db: Database, peer: string, id: string): { task: PeerTaskView; events: LedgerEvent[] } | null {
+export function peerTaskDetail(db: Database, peer: string, id: string): { task: PeerTaskView; events: PeerEventView[] } | null {
   const t = getTask(db, id);
   const links = t ? peerLinks(t, peer) : [];
   if (!t || !links.length) return null;
-  return { task: peerTaskView(t, links), events: listEvents(db, { project: t.project, target: id }).filter((e) => !hiddenFromPeer(e)) };
+  const events = listEvents(db, { project: t.project, target: id }).flatMap((e) => peerEventView(e, peer) ?? []);
+  return { task: peerTaskView(t, links), events };
 }
 
 export type PeerOp =
@@ -102,17 +128,15 @@ export function parsePeerOp(body: unknown): PeerOp | string {
   return "op 只能是 note / pr / stage / review";
 }
 
-const PEER_EDIT_STAGES: readonly Stage[] = ["spec", "restate", "build", "review", "fix"];
+/** 挂 PR / head 只在开发、返工时：进了 review 再换，发起方审过的就不是现在这份了 */
+const PEER_PR_STAGES: readonly Stage[] = ["build", "fix"];
 
 /** 这个 peer 能不能对这张卡做这个操作；能 = null。阶段本身合不合法由写入层按 peer 角色判（ledger-stages.ts） */
-export function peerOpDenied(op: PeerOp, task: Pick<LedgerTask, "stage" | "stageBefore">, links: PeerLink[]): string | null {
+export function peerOpDenied(op: PeerOp, task: Pick<LedgerTask, "stage">, links: PeerLink[]): string | null {
   const isDelegate = links.includes("delegate");
   if (op.op === "note") return null;
   if (op.op === "review") return links.includes("reviewer") ? null : "只有审查方能写审查结论";
   if (!isDelegate) return "只有执行方能挂 PR、推阶段";
-  if (op.op === "pr") {
-    const at = task.stage === "blocked" ? task.stageBefore : task.stage;
-    if (!at || !PEER_EDIT_STAGES.includes(at)) return `任务已在 ${task.stage}，合并之后 PR / head 由发起方 PM 改`;
-  }
+  if (op.op === "pr" && !PEER_PR_STAGES.includes(task.stage)) return `任务在 ${task.stage}，只有 build / fix 阶段能挂 PR / head（进了 review 再换就不是审过的那份）`;
   return null;
 }

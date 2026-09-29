@@ -131,11 +131,11 @@ const EXECUTOR_MOVES: readonly (readonly [Stage, Stage])[] = [
 ];
 
 /**
- * 受托方（peer）能推的：接了（spec→restate→build）、PR 开了 / 改完了（build / fix→review），以及合并前的阶段进出 blocked。
- * merge 及以后、cancelled、回退改规格都不给——那些是发起方 PM 的事。
+ * 受托方（peer）能推的：接了、写复述（spec→restate）、PR 开了 / 改完了（build / fix→review），以及合并前的阶段进出 blocked。
+ * 放行复述（restate→build）、merge 及以后、cancelled、回退改规格都不给——那些是发起方 PM 的事，和本机执行者一样。
  */
 const PEER_WORK_STAGES: readonly Stage[] = ["spec", "restate", "build", "review", "fix"];
-const PEER_MOVES: readonly (readonly [Stage, Stage])[] = [["spec", "restate"], ["restate", "build"], ["build", "review"], ["fix", "review"]];
+const PEER_MOVES: readonly (readonly [Stage, Stage])[] = [["spec", "restate"], ["build", "review"], ["fix", "review"]];
 function peerMayMove(task: TransitionTask, to: Stage): boolean {
   if (to === "blocked") return PEER_WORK_STAGES.includes(task.stage);
   if (task.stage === "blocked") return !!task.stageBefore && PEER_WORK_STAGES.includes(task.stageBefore) && to === task.stageBefore;
@@ -173,7 +173,7 @@ function legality(task: TransitionTask, to: Stage): TransitionCheck {
 export function canTransition(task: TransitionTask, to: Stage, role: Role): TransitionCheck {
   const legal = legality(task, to);
   if (!legal.ok) return legal;
-  if (role === "peer") return peerMayMove(task, to) ? { ok: true } : { ok: false, code: "forbidden", reason: `受托方只能推接活、交付和进出 blocked，${task.stage}→${to} 要发起方 PM 推` };
+  if (role === "peer") return peerMayMove(task, to) ? { ok: true } : { ok: false, code: "forbidden", reason: `受托方只能推写复述、交付和进出 blocked，${task.stage}→${to} 要发起方 PM 推` };
   if (role !== "executor") return { ok: true };
   const allowed = EXECUTOR_MOVES.some(([from, dest]) => from === task.stage && dest === to);
   return allowed ? { ok: true } : { ok: false, code: "forbidden", reason: `执行者只能推 spec→restate、build/fix→review，${task.stage}→${to} 要 PM 推` };
@@ -225,5 +225,5 @@ export function delegatePeerOf(task: { extra?: Record<string, unknown> }, field:
   return peer || null;
 }
 
-/** peer 名比较不分大小写（peers.json 里名字唯一，send_to_agent 的地址写法也不分） */
-export const samePeer = (a: string | null, b: string): boolean => !!a && !!b && a.toLowerCase() === b.toLowerCase();
+/** peer 名精确比较：兑换邀请时撞名判断区分大小写（manager/peer-names.ts），这里不分就能让 "shawn" 冒领 "Shawn" 的卡 */
+export const samePeer = (a: string | null, b: string): boolean => !!a && !!b && a === b;
