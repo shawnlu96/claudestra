@@ -52,8 +52,12 @@ test("ACP Codex 的 Web 聊天 /clear 拒绝，不落成普通 prompt 或 tmux �
     const h = harness();
     const owner = await call(OWNER, "/clear", h.deps, agent);
     const guest = await call(GUEST, "/clear", h.deps, agent);
+    const attachedOwner = await handleSlashPassthrough({ principal: OWNER, tokenId: "owner:self", agent, text: "/clear", hasAttachments: true }, h.deps);
+    const attachedGuest = await handleSlashPassthrough({ principal: GUEST, tokenId: "guest:1234", agent, text: "/clear", hasAttachments: true }, h.deps);
     expect(owner?.status).toBe(409);
     expect(guest?.status).toBe(403);
+    expect(attachedOwner?.status).toBe(409);
+    expect(attachedGuest?.status).toBe(403);
     expect(h.sent).toEqual([]);
   } finally {
     noteAcpChannel(agent.channelId, "tmux");

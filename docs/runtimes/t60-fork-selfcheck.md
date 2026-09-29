@@ -33,3 +33,19 @@ before prompting:
   The sandbox was cleaned.
 - The sandbox forbids `manager resume`, so the manager's registry handoff is
   covered by a focused test that rejects a repeated or malformed fork ID.
+
+## r5 rebase selfcheck
+
+After rebasing onto the r5 #232 fixes, a second ephemeral read-only `codex
+exec` review focused on the resolved `cmdResume` conflict. It found no fork
+handoff or manual tmux rollback regression. It did find that Web chat
+`/clear` with an attachment returned early before the ACP refusal, allowing
+the text to be delivered as an ordinary prompt. The ACP `/clear` check now
+runs before the general attachment bypass; owner receives 409 and guest 403
+whether or not an attachment accompanies the command. The updated Web test
+asserts both cases and no tmux injection.
+
+The rebased branch passed a strict full check (6961 tests), eight entrypoint
+builds, and a stub-only sandbox Web message (200) plus `/clear` refusal (409).
+The sandbox was cleaned without copying or linking Codex credentials. The
+final strict check after the attachment fix is recorded in the PR description.

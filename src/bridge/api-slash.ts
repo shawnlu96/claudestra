@@ -64,7 +64,7 @@ async function acpSlashPassthrough(agent: SlashAgent, cmd: string, ccText: strin
 /** 处理完了（直通 202 / 403 / 409 / 注入失败 500）→ Response；不是能直通的命令 → null，调用方按普通消息投递 */
 export async function handleSlashPassthrough(r: SlashRequest, deps: SlashDeps): Promise<Response | null> {
   const { principal, agent, text } = r;
-  if (r.hasAttachments || principal.peer) return null; // peer 的斜杠文字永远是普通消息（v2.11 review 2026-07-19 #5）
+  if (principal.peer) return null; // peer 的斜杠文字永远是普通消息（v2.11 review 2026-07-19 #5）
   const slashM = text.trim().match(SLASH_RE);
   if (!slashM) return null;
   const owner = isOwnerPrincipal(principal);
@@ -74,6 +74,7 @@ export async function handleSlashPassthrough(r: SlashRequest, deps: SlashDeps): 
   const rt = String(agent.runtime || "");
   if (rt === "codex" && slashM[1] === "clear" && await isConfiguredAcpChannel(agent.channelId))
     return owner ? apiJson(409, { ok: false, error: "ACP 模式尚不支持 /clear；会话未改动" }) : apiJson(403, { ok: false, ...SLASH_OWNER_ONLY });
+  if (r.hasAttachments) return null;
   const args = (slashM[2] || "").trim();
   const nativeHit = runtimeCommandsFor(rt, agent.name)?.find((c) => c.name === slashM[1]);
   const resolved = nativeHit
