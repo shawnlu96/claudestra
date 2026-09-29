@@ -17,7 +17,7 @@ import { findSessionJsonlBySessionId, sessionJsonlPath } from "./session-source.
 import { existsSync, readdirSync, realpathSync } from "fs";
 import { mkdir, readdir } from "fs/promises";
 import { basename, dirname, join, resolve, sep } from "path";
-import { projectJsonlPath, findJsonlBySessionId, projectsSlug } from "./jsonl-cost.js";
+import { projectsSlug } from "./jsonl-cost.js";
 import { copyIfLarger } from "./archive-copy.js";
 import { archiveWorkflowDirs } from "./workflow-archive.js";
 
@@ -94,6 +94,33 @@ function listPiSubagentJsonls(mainPath: string): Array<{ id: string; path: strin
   return out;
 }
 
+/** 找不到源文件时的说明：写明去哪找过，Codex / Pi 不能再报成「被 CC 清理」 */
+function missingSourceNote(runtime: string, sessionId: string): string {
+  if (runtime === "codex") return `Codex 会话记录不存在：~/.codex/sessions 下找不到 thread ${sessionId} 的 rollout`;
+  if (runtime === "pi") return `Pi 会话文件不存在：~/.pi/agent/sessions 下找不到 ${sessionId}`;
+  return "源 jsonl 不存在（可能已被 CC 清理）";
+}
+
+/** registry 条目里归档要用的几项 */
+export interface ArchivableAgent {
+  cwd?: string;
+  sessionId?: string;
+  runtime?: string;
+}
+
+/**
+ * 按 registry 条目归档（manager 的 archive / kill / 换代都走这里）：runtime 跟着条目走，调用方不用记得传。
+ * sessionId 缺省取条目当前值；换代时传旧 id。
+ */
+export function archiveAgentSession(
+  agentName: string,
+  info: ArchivableAgent,
+  sessionId: string | undefined = info.sessionId,
+  opts: { archiveRoot?: string } = {},
+): Promise<ArchiveResult> {
+  return archiveSession(agentName, info.cwd, sessionId ?? "", { runtime: info.runtime, archiveRoot: opts.archiveRoot });
+}
+
 /**
  * 归档一个 agent 的某个 session：主 jsonl + subagents/*.jsonl（Pi 的子代理产物会
  * 落成与 Claude Code 同构的布局，见下方 listPiSubagentJsonls）+ workflow 目录（workflow-archive.ts）。
@@ -112,15 +139,14 @@ export async function archiveSession(
   if (typeof sessionId !== "string" || !sessionId) {
     return { ok: false, archived: [], note: `无效 sessionId（期望字符串，实得 ${typeof sessionId}）` };
   }
-  // v2.23+ runtime 感知：Pi 的会话文件在 ~/.pi/agent/sessions/<cwd编码>/ 下，
-  // 文件名带时间戳前缀 ⇒ 只能扫目录（sessionJsonlPath 返回 null 即未找到）
-  const piRuntime = agentRuntime({ runtime: opts.runtime }) === "pi";
+  // 定位交给运行时适配器：Claude Code 按 cwd 推算，Pi / Codex 的文件名带时间戳推不出（返回 null）→ 按 id 全库找。
+  // runtime 不传 = Claude Code：Codex 的 rollout 在 ~/.codex/sessions/ 下，漏传就会被报成「找不到」（tests/session-archive.test.ts）
+  const runtime = agentRuntime({ runtime: opts.runtime });
+  const piRuntime = runtime === "pi";
   let src = opts.srcPath ?? "";
-  if (!src && cwd) src = piRuntime ? (sessionJsonlPath(opts.runtime, cwd, sessionId) ?? "") : projectJsonlPath(cwd, sessionId);
-  if (!src || !existsSync(src)) src = findSessionJsonlBySessionId(opts.runtime, sessionId) ?? "";
-  if (!src || !existsSync(src)) {
-    return { ok: false, archived: [], note: "源 jsonl 不存在（可能已被 CC 清理）" };
-  }
+  if (!src && cwd) src = sessionJsonlPath(runtime, cwd, sessionId) ?? "";
+  if (!src || !existsSync(src)) src = findSessionJsonlBySessionId(runtime, sessionId) ?? "";
+  if (!src || !existsSync(src)) return { ok: false, archived: [], note: missingSourceNote(runtime, sessionId) };
 
   const dir = join(opts.archiveRoot ?? ARCHIVE_ROOT, agentName);
   await mkdir(dir, { recursive: true });
