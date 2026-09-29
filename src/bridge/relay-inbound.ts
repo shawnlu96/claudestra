@@ -32,7 +32,7 @@ const REDEEM_REPLAY_PER_SENDER = 60;
 const refusalLog = new LogThrottle();
 
 /** peer 请求正文上限：验签要整读，别让对方灌满内存（peer 路径的正文都是小 JSON） */
-const MAX_PEER_BODY = 2 * 1024 * 1024;
+import { MAX_PEER_BODY } from "../lib/request-body.js";
 
 /**
  * 只有经中继进来的 peer 请求才带的标记头。peer 入口靠它决定要不要相信 x-claudestra-relay-from：

@@ -179,3 +179,5 @@ function oldChunk(pinned: string, pathname: string): StaticHit | null {
   }
   return null;
 }
+
+export { MAX_HTTP_BODY } from "../lib/request-body.js";

@@ -59,9 +59,8 @@ export async function authenticateApi(req: Request, url: URL, opts: { rateLimit:
   // peer 先验签、判重放，再扣限速：拿到 token 却签不了名的人、重放截获请求的人都耗不掉正牌 peer 的额度（失败另有一个桶）
   const sig = p.peer ? await peerGate(req, url, p.peer, opts.rateLimit) : null;
   if (sig instanceof Response) return sig;
-  const replay = sig?.once ? peerReplayVerdict(sig.once, p.peer!) : null;
+  const replay = sig?.once ? peerReplayVerdict(sig.once, p.peer!, false) : null;
   if (replay?.reject) return peerSigRejected(replay.reject);
-  await sig?.commit();
   if (p.messagesOnly && !messagesOnlyAllows(req.method, url.pathname)) return apiJson(403, { ok: false, error: "this token may only deliver messages", code: "messages_only" });
   if (opts.rateLimit && replay?.charge !== false) {
     const limit = p.role === "owner" ? OWNER_RATE_LIMIT_PER_MIN : API_RATE_LIMIT_PER_MIN;
@@ -70,6 +69,9 @@ export async function authenticateApi(req: Request, url: URL, opts: { rateLimit:
     if (!limiter) limiters.set(key, (limiter = new SlidingWindowLimiter(limit)));
     if (!limiter.tryAcquire()) return apiJson(429, { ok: false, error: `rate limit exceeded (${limit} req/min)`, code: "rate_limited", reason: "rate_limited" });
   }
+  // 从只读重放判定到扣桶、记入缓存之间不 await；429 不占条目，也不会让重试绕过限速桶。
+  if (sig?.once) peerReplayVerdict(sig.once, p.peer!);
+  await sig?.commit();
   if (p.peer) {
     const peer = p.peer;
     void import("./peer-presence.js").then((m) => m.notePeerInbound(peer)); // 在线 peer 列表的「最近来访」

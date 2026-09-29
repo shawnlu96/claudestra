@@ -21,6 +21,7 @@ import { drainingFetch } from "./unread-body.js";
 import { isLoopbackAddress } from "../lib/same-host.js";
 import { DEVICE_HEADER } from "../lib/devices.js";
 import { HTTP_IDLE_TIMEOUT_S } from "../lib/esc-guard.js";
+import { MAX_HTTP_BODY, MAX_PEER_BODY, readBoundedRequestBody, RequestBodyError } from "../lib/request-body.js";
 
 export { configuredPeerIngressPort };
 
@@ -61,7 +62,7 @@ export function ingressHost(publicFlag: boolean, hasPeers: boolean, holdUntil: n
 
 const HOLD_MS = 10 * 60_000;
 let handler: ApiHandler | null = null;
-let cur: { srv: ReturnType<typeof serve>; port: number; host: Host } | null = null;
+let cur: { srv: ReturnType<typeof servePeerIngress>; port: number; host: Host } | null = null;
 let holdUntil = 0;
 
 /** 有没有在用的 peer token（兑换前的邀请也签了 peer token，一并算）；读失败按「有」算，宁可保持现状 */
@@ -86,7 +87,7 @@ export async function syncPeerIngress(hold = false): Promise<{ port: number | nu
   cur = null;
   if (!port || !host || !handler) return { port, host: null };
   try {
-    cur = { srv: serve({ port, host, handleApi: handler }), port, host };
+    cur = { srv: servePeerIngress({ port, host, handleApi: handler }), port, host };
     const how = host === "0.0.0.0" ? "对外直连，外来的只收 peer token" : "只听本机，供 HTTPS 反代转发";
     console.log(`🤝 peer 入口: http://${host}:${port}（${how}）`);
     return { port, host };
@@ -143,7 +144,20 @@ export async function ingressRequest(req: Request, handleApi: ApiHandler, addr: 
     headers.delete(DEVICE_HEADER);
     if (!secret && !ingressPublicRoute(req.method, url.pathname)) return json(403, PEER_ENTRANCE_ONLY);
   }
-  const body = req.method === "GET" || req.method === "HEAD" ? undefined : await req.arrayBuffer();
+  const hasBody = req.method !== "GET" && req.method !== "HEAD";
+  // 配对与旧会话迁移要先于设备鉴权；其余无凭据 POST 不替路由预读正文，避免反代兼容成为慢上传入口。
+  const publicDevice = localProxy && ["/api/v1/devices/pair", "/api/v1/devices/legacy-session"].includes(url.pathname);
+  if (hasBody && !secret && !headers.has("cookie") && !ingressPublicRoute(req.method, url.pathname) && !publicDevice) return json(403, PEER_ENTRANCE_ONLY);
+  const browserUpload = localProxy && !secret && headers.has("cookie") && !publicDevice && !ingressPublicRoute(req.method, url.pathname);
+  let body: Uint8Array | undefined;
+  try {
+    if (hasBody) body = await readBoundedRequestBody(req, browserUpload ? MAX_HTTP_BODY : MAX_PEER_BODY);
+  } catch (e) {
+    if (!(e instanceof RequestBodyError)) throw e;
+    const res = json(e.status, { ok: false, error: e.code, code: e.code });
+    res.headers.set("connection", "close");
+    return res;
+  }
   const apiReq = new Request(url.toString(), { method: req.method, headers, body });
   setRequestContext(apiReq, localProxy
     ? { source: "lan", clientIp: addr, https: req.headers.get("x-forwarded-proto") === "https" }
@@ -151,8 +165,9 @@ export async function ingressRequest(req: Request, handleApi: ApiHandler, addr: 
   return handleApi(apiReq, url);
 }
 
-function serve(opts: { port: number; host: Host; handleApi: ApiHandler }) {
+export function servePeerIngress(opts: { port: number; host: Host; handleApi: ApiHandler }) {
   return Bun.serve({
+    maxRequestBodySize: MAX_HTTP_BODY,
     port: opts.port,
     hostname: opts.host,
     idleTimeout: HTTP_IDLE_TIMEOUT_S, // peer 的打断请求要等 Esc 窗口锁，Bun 默认 10 秒会先切断（lib/esc-guard.ts）

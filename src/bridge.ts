@@ -92,7 +92,7 @@ import { apiErrorResponse } from "./bridge/api-respond.js";
 import { listSessionIdsForCwd, latestSessionIdForCwd } from "./bridge/session-ids.js";
 import {
   corsHeadersFor,
-  serveStaticSite, appConfigResponse, startLegacyWebPort, drainingFetch,
+  serveStaticSite, appConfigResponse, startLegacyWebPort, drainingFetch, MAX_HTTP_BODY,
   isCrossOrigin,
   isOriginExplicitlyAllowed,
   controlAccessVerdict,
@@ -3444,7 +3444,7 @@ async function bridgeFetch(req: Request, server: { requestIP(r: Request): { addr
 }
 
 const server = Bun.serve({
-  port: BRIDGE_PORT,
+  port: BRIDGE_PORT, maxRequestBodySize: MAX_HTTP_BODY,
   // 默认只绑回环：/hook /stats /skills/rescan 无鉴权，绑 0.0.0.0 等于暴露在内网。peer 走 HTTPS
   // 反代 → 回环上的 peer 专用入口（bridge/peer-ingress.ts），不必对外开放这里。
   hostname: process.env.BRIDGE_BIND || "127.0.0.1",

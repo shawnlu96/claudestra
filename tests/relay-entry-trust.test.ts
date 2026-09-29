@@ -189,7 +189,7 @@ describe("先验签再扣限速；改钉", () => {
     for (let i = 0; i < 4; i++) expect(await once(get(`${PATH}?i=0`))).toBe("200"); // 重复的不扣桶（第 2～5 次）
     expect(await once(get(`${PATH}?i=0`))).toBe("401:replay"); // 第 6 次
     expect(await once(get(`${PATH}?i=fresh`))).toBe("200"); // 桶里还剩 1 格
-    expect(await once(get(`${PATH}?i=fresh2`))).toBe("429:rate_limited");
+    for (let i = 0; i < 8; i++) expect(await once(get(`${PATH}?i=fresh2`))).toBe("429:rate_limited");
   });
   test("不限速的路由（远程终端）不收 peer token：签名对也 403，不碰防重放缓存", async () => {
     const r = direct(TOK.p, keyP, "POST", '{"data":"x"}');

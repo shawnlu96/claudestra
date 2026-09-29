@@ -4,6 +4,7 @@
  * 请求交给 bridge 主端口同一个处理函数——同一道控制面闸门（非回环只放静态文件与带凭据的 /api/v1，控制路由要 token）；
  * WebSocket 在这里一律不升级（channel-server 只连主端口），省得把 route_to_agent 面带到对外的端口上。
  */
+import { MAX_HTTP_BODY } from "../lib/request-body.js";
 import { HTTP_IDLE_TIMEOUT_S } from "../lib/esc-guard.js";
 
 type Handler = (req: Request, server: { requestIP(r: Request): { address: string } | null; upgrade(r: Request): boolean }) => Promise<Response | undefined>;
@@ -15,13 +16,13 @@ export function startLegacyWebPort(handler: Handler, env: Record<string, string 
   const hostname = env.BRIDGE_LEGACY_WEB_BIND || "0.0.0.0";
   try {
     const server = Bun.serve({
-      port,
+      port, maxRequestBodySize: MAX_HTTP_BODY,
       hostname,
       idleTimeout: HTTP_IDLE_TIMEOUT_S, // 打断请求要等 Esc 窗口锁，Bun 默认 10 秒会先切断（lib/esc-guard.ts）
       fetch: async (req, server) => {
         if (req.headers.get("upgrade")) return new Response("websocket is not available on the legacy web port", { status: 426 });
         // 处理函数对每个请求都会先试 server.upgrade()；这个 listener 没配 websocket，Bun 会直接抛——升级前面已拒，这里恒为 false
-        const view = { requestIP: (r: Request) => server.requestIP(r), upgrade: () => false };
+        const view = { requestIP: (r: Request) => server.requestIP(r), upgrade: () => false, timeout: (r: Request, seconds: number) => server.timeout(r, seconds) };
         return (await handler(req, view)) ?? new Response("upgrade refused", { status: 426 });
       },
     });
