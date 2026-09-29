@@ -14,7 +14,7 @@ import { TerminalIcon } from "./ask-icons";
 
 /**
  * 一张开着的「待你处理」卡的作答区（ask-card.tsx）：reply / 人发起的是按钮行 + 文本框（答不了的凭据只给一句说明），
- * AUQ / 权限走原有的按键端点，Codex 弹框只能去终端。作答一律乐观（asks-store.answer）。
+ * AUQ / 权限走原有的按键端点，Codex 弹框只能去终端（额度用完的只是告知几点恢复，不叫人去终端）。作答一律乐观（asks-store.answer）。
  */
 export function AskActions({ ask, agent }: { ask: WebAsk; agent: string }) {
   const t = useT();
@@ -32,6 +32,7 @@ export function AskActions({ ask, agent }: { ask: WebAsk; agent: string }) {
     const assigned = assignedRejectText(e.code, t);
     if (assigned) return assigned;
     if (e.status !== 409) return e.message;
+    if (e.code === "ask_stale") return t("弹框已经换了，这张作废，答新的那张");
     return e.code === "ask_part_answered" ? t("这一项刚在别处答过了，已刷新，剩下的还能答") : t("这件已经处理过了（或已过期）");
   };
   // 人 / 系统发起的（指派、审核）没有 agent 可投：只记账
@@ -40,7 +41,7 @@ export function AskActions({ ask, agent }: { ask: WebAsk; agent: string }) {
   const run = async (fn: () => Promise<unknown>, labels: string[], text = "") => {
     if (activeAnswered()) return; // 过渡中（含淡出那 0.45 秒按钮还在）不再提交：键盘回车挡不住 pointer-events
     setBusy(true);
-    markAnswered(ask.id); // 先让这张原地淡出，再移走（answer-cooldown.ts）
+    markAnswered(ask.id, ask); // 先让这张原地淡出，再移走（answer-cooldown.ts，位置按这一刻钉住，ask-fade.ts）
     const done = await asksStore.answer(ask.id, { choices: [], labels, text, via: "web_card", at: Date.now() }, fn, { ok, fail });
     if (!done) clearAnswered(ask.id);
     setBusy(false);
@@ -71,14 +72,14 @@ export function AskActions({ ask, agent }: { ask: WebAsk; agent: string }) {
         <AuqChoices
           questions={ask.options as never[]}
           busy={busy}
-          onSubmit={(sel) => run(() => answerAuq(dialogAgent, "submit", sel), auqLabels(sel))}
-          onCancel={() => run(() => answerAuq(dialogAgent, "cancel"), [t("取消")])}
+          onSubmit={(sel) => run(() => answerAuq(dialogAgent, "submit", sel, ask.id), auqLabels(sel))}
+          onCancel={() => run(() => answerAuq(dialogAgent, "cancel", [], ask.id), [t("取消")])}
         />
       )}
       {ask.source === "permission" && (
         <PermissionChoices rows={rows} busy={busy} onPick={pickPermission} />
       )}
-      {ask.source === "codex" && (
+      {ask.source === "codex" && !ask.extra?.quota && (
         <p className="flex items-center gap-1.5 text-[13px] opacity-75">
           <TerminalIcon />
           {t("这个弹框要到终端里处理")}
