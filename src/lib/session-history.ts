@@ -20,7 +20,7 @@ import { join } from "path";
 import { projectJsonlPath, findJsonlBySessionId } from "./jsonl-cost.js";
 import { agentArchiveDir, ARCHIVE_ROOT, realpathWithin } from "./session-archive.js";
 import { channelAnswer, channelAttachments, channelBodyText, commandRecordLine, commandStdoutLine, senderOf, type AskAnswerRef, type InboundAttachmentsRef } from "./inbound-body.js";
-import { ccOwnRecord } from "./cc-own-records.js";
+import { ccOwnRecord, plainUserText } from "./cc-own-records.js";
 import { settleToolCard } from "./auq-echo.js";
 import { dropFailedReplyRows, keepReplyRows, sanitizeComponents } from "./history-components.js";
 import { askIdOfReplyResult } from "./reply-ask-schema.js";
@@ -559,6 +559,8 @@ function parseHistoryLines(
           : Array.isArray(c)
             ? c.filter((b: any) => b?.type === "text").map((b: any) => b.text || "").join("\n")
             : "";
+      const plain = plainUserText(rec, text, runtime); // Pi / Codex：原文照登，不认文本头（lib/cc-own-records.ts）
+      if (plain !== undefined) { if (plain.trim()) all.push({ seq, ts, role: "user", text: plain }); continue; }
       if (rec.isMeta === true) {
         // isMeta + <channel> 包装 = channel 送达的真实入站消息，解包进历史；
         // 其余 isMeta（caveat / local-command 输出等）照旧过滤
@@ -572,13 +574,9 @@ function parseHistoryLines(
         continue;
       }
       if (!text.trim()) continue; // 纯 tool_result 载荷
-      // CC 自己写的斜杠命令 / 命令输出 / 后台通知 / 中断标记不是用户打的字，只在 CC 会话里认（lib/cc-own-records.ts）；
-      // Pi 技能调用 <skill name="x" …>整份 SKILL.md</skill>[参数] → system 轻条目「/x 参数」。不处理会把原始标签 / 整篇技能说明裸渲染成用户气泡
-      const trimmed = text.trim();
-      const own = ccOwnRecord(trimmed, runtime);
+      // CC 自己写的斜杠命令 / 命令输出 / 后台通知 / 中断标记不是用户打的字（lib/cc-own-records.ts）
+      const own = ccOwnRecord(text.trim(), runtime);
       if (own) { if ("system" in own) all.push({ seq, ts, role: "system", text: own.system }); continue; }
-      const skill = /^<skill name="([^"]+)"[^>]*>[\s\S]*<\/skill>([\s\S]*)$/.exec(trimmed);
-      if (skill) { all.push({ seq, ts, role: "system", text: `/${skill[1]} ${skill[2].trim()}`.trim() }); continue; }
       const msg: HistoryMessage = { seq, ts, role: "user", text };
       if (rec.isCompactSummary === true) msg.compactSummary = true;
       all.push(msg);
@@ -874,7 +872,8 @@ export async function searchSessionHistory(
 
   for await (const { line, idx } of grepJsonlLines(filePath, q, opts.chunkBytes)) {
     if (hits.length >= maxHits) break;
-    const rec: any = translateSessionLine(runtimeForSessionPath(filePath), line);
+    const runtime = runtimeForSessionPath(filePath);
+    const rec: any = translateSessionLine(runtime, line);
     if (!rec) continue;
     const ts = typeof rec.timestamp === "string" ? rec.timestamp : null;
 
@@ -901,7 +900,9 @@ export async function searchSessionHistory(
             : "";
       let body = text;
       let from: string | undefined;
-      if (rec.isMeta === true) {
+      const plain = plainUserText(rec, text, runtime); // 与历史同规则：Pi / Codex 原文照搜
+      if (plain !== undefined) body = plain;
+      else if (rec.isMeta === true) {
         // channel 送达的入站消息解包；其余 isMeta（caveat / 命令输出）不搜
         const un = unwrapChannelMessage(text);
         if (!un) continue;
@@ -909,10 +910,8 @@ export async function searchSessionHistory(
         body = un.text;
         from = un.from;
       } else {
-        const trimmed = text.trim();
         // 与 readSessionHistory 同规则：机器产物不当用户消息搜
-        if (!trimmed) continue;
-        if (ccOwnRecord(trimmed, runtimeForSessionPath(filePath)) || /^<skill name="/.test(trimmed)) continue;
+        if (!text.trim() || ccOwnRecord(text.trim(), runtime)) continue;
       }
       const lower = body.toLowerCase();
       if (!lower.includes(q)) continue;

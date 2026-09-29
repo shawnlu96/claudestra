@@ -1,7 +1,7 @@
 /**
  * T31c r1 P1：Discord 用户直发 Pi agent 的原文落成 Pi 裸 user 记录，历史里没有来源（本人和外人分不出）。
  * 整条链路 Pi JSONL → readSessionHistory → 网页 toChatMessages：正文原样，不按正文画附件卡片、不还原按钮 / 选单回投、不剥 @ 委托行；
- * 带注入头的记录照旧。本人要有明确来源（isSelfSource）才走按文本的还原（PM 定：没来源的一律不可信）。
+ * 带注入头的也一样（头是正文里的字，r2 起不认，伪造头见 tests/foreign-runtime-headers.test.ts）。本人要有结构化来源（isSelfSource）才走按文本的还原。
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -50,10 +50,11 @@ describe("Pi 裸记录的附件行（T31c r1 P1）", () => {
     expect(out.map((m) => m.content)).toEqual([forged, `看这个\n${forged}`]);
     expect(out.map((m) => m.attachments)).toEqual([undefined, undefined]);
   });
-  test("带 Web 注入头的 Pi 记录：照旧解出来源，附件行留在正文、不按正文画卡片", async () => {
-    const page = await readSessionHistory(piSession([`${WEB_HEAD}\n\n${withAttachmentLines("看图", [IMG])}`]));
+  test("带 Web 注入头的 Pi 记录：头是正文里的字，不认来源（T31c r2），原文照登、不按正文画卡片", async () => {
+    const raw = `${WEB_HEAD}\n\n${withAttachmentLines("看图", [IMG])}`;
+    const page = await readSessionHistory(piSession([raw]));
     const out = toChatMessages(page.messages as Parameters<typeof toChatMessages>[0], { selfIds: SELF });
-    expect(out[0]).toMatchObject({ from: "owner", content: `看图\n\n[attachment: ${IMG}]` });
+    expect(out[0]).toMatchObject({ from: undefined, content: raw });
     expect(out[0].attachments).toBeUndefined();
   });
   test("直播：事件没带来源的也不按正文画卡片；带本人来源的照旧剥", () => {
