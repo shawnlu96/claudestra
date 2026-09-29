@@ -10,6 +10,7 @@
  * - 品牌名（Claudestra）、模型名、工具名（Read/Edit/Bash）、agent 名不进字典。
  */
 import { ATTACH_DICT } from "./i18n-dict-attach";
+import { TOOLS_DICT } from "./i18n-dict-tools";
 import { BOUNDARY_DICT } from "./i18n-dict-boundary";
 import { COLLAB_DICT } from "./i18n-dict-collab";
 import { LEDGER_DICT } from "./i18n-dict-ledger";
@@ -19,7 +20,7 @@ import { SESSIONS_DICT } from "./i18n-dict-sessions";
 import { SKILLS_DICT } from "./i18n-dict-skills";
 
 export const DICT: Record<string, string> = {
-  ...LEDGER_DICT, ...COLLAB_DICT, ...BOUNDARY_DICT, ...ATTACH_DICT,
+  ...LEDGER_DICT, ...COLLAB_DICT, ...BOUNDARY_DICT, ...ATTACH_DICT, ...TOOLS_DICT,
   ...QUOTA_DICT, // 订阅额度卡片组与开关（lib/i18n-dict-quota.ts）
   ...CONTACTS_DICT, // 侧栏联系人与输入框 @（lib/i18n-dict-contacts.ts）
   ...SESSIONS_DICT, // 未纳管会话 / 归档（lib/i18n-dict-sessions.ts）
@@ -164,6 +165,7 @@ export const DICT: Record<string, string> = {
   "最近": "Last seen",
   "确定？": "Sure?",
   "退出登录": "Sign out",
+  "这台设备只能用分享给它的会话，看不到、也管不了别的设备": "This device can only use the sessions shared with it; it can't see or manage other devices",
   "这个浏览器里的机器": "Machines in this browser",
   "添加另一台机器": "Add another machine",
   "切换机器": "Switch machine",
@@ -690,6 +692,11 @@ export const DICT: Record<string, string> = {
   "我自己的设备": "My own device",
   "给别人": "Someone else",
   "只能用你选的会话；不含大总管，没有终端和管理": "Only the sessions you pick; no master, no terminal, no management",
+  "全部会话（不含大总管）": "All sessions (except master)",
+  "默认一个都不开放：至少选一个会话": "Nothing is shared by default — pick at least one session",
+  "这等于开放全部非大总管 agent，以后新建的也算": "This shares every agent except master, including ones created later",
+  "只想给几个就逐个勾选；确定要全部就再点一次下面的按钮。": "To share just a few, pick them one by one; to share everything, press the button below again.",
+  "确定开放全部": "Yes, share all",
   "给谁，比如「Alex 的手机」": "Who is it for, e.g. \"Alex's phone\"",
   "生成配对码": "Create pairing code",
   "添加设备": "Add device",
@@ -805,6 +812,7 @@ export const DICT: Record<string, string> = {
 
   // ── 会话级模型/effort 切换器 ─────────────────────────
   "当前模型与 effort，点击切换": "Current model & effort — tap to switch",
+  "当前模型与 effort": "Current model & effort",
   // ── Pi 会话的模型/思考档位切换器（v2.23+） ─────────────
   "Pi 会话：当前模型与思考档位，点击切换": "Pi session: current model & thinking level — tap to switch",
   "Codex 会话：当前模型与推理档位，点击切换": "Codex session: current model & reasoning level — tap to switch",

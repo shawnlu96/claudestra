@@ -154,7 +154,7 @@ bun src/manager.ts version   # current version + whether an update is available
 bun src/manager.ts update    # git pull + rebuild web/out if stale + reload the 3 launchd daemons
 
 # Hosted frontend (docs/design-hosted-frontend.md): the bridge serves web/out (BRIDGE_STATIC_DIR); browsers pair, no password
-bun src/manager.ts pair [--agents a,b|*] [--no-terminal] [--no-manage] [--guest <name>] [--url <entry>] [--json]  # QR / link / 8-char code
+bun src/manager.ts pair [--agents a,b|*] [--no-terminal] [--no-manage] [--guest <name> --agents a,b [--confirm-all]] [--url <entry>] [--json]  # QR / link / 8-char code; guest '*' needs --confirm-all
 bun src/manager.ts migrate-web-state   # old Next BFF settings.db + groqApiKey → bridge (tar backup first; idempotent)
 bun src/manager.ts retire-web          # unload + back up old com.claudestra.web; refuses until the bridge serves web/out and a backup exists
 
@@ -232,7 +232,6 @@ tmux -S /tmp/claude-orchestrator/master.sock -CC attach
   - **Minor** (`x.Y.0`) — genuinely new user-facing capability that deserves a one-line "现在你可以 ..." headline. Examples: v1.3.0 Claude Code auto-update, v1.5.0 Discord slash autocomplete. Older minors are kept as history.
   - **Major** (`X.0.0`) — breaking change or system-level rearchitecture. Owner bumps these manually; never bump major on your own initiative.
   - Heuristic: if you're writing release notes and catch yourself opening with "修了..." / "加了个..." / "补了测试" / "重构了..." — that's a **patch**. Only headline-worthy new capability = minor.
-- `tmux-helper.ts` and `claude-launch.ts` are the canonical places for tmux commands and Claude Code launch flags. Don't inline these in new files.
 - Admin buttons that should skip the LLM go in `bridge/management.ts`. Add the `id` to both `handleMgmtButton` and the relevant panel builder.
 - Before shipping, run `bun run check` (= `tsc --noEmit` + `bun test` + `scripts/guard`). **`bun build` does not typecheck** — it happily compiles `const x: number = "str"`, so the old advice to rely on it for type errors was wrong. Still build each entry point (`bridge`, `channel-server`, `manager`, `launcher`, `cron`, `setup`) to catch module-resolution errors that typechecking misses. CI runs all three on every push and PR.
 - Test suite (`bun test`) exercises pure logic. `bridge.ts` itself has no isolated unit tests (Discord client + ws + peers.json coupling) — live verification in the isolated dev sandbox (`bun run sandbox up`, [docs/architecture/sandbox.md](./docs/architecture/sandbox.md)) is the coverage there.

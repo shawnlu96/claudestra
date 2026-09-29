@@ -149,7 +149,7 @@ bun src/manager.ts version   # 当前版本 + 是否有更新
 bun src/manager.ts update    # git pull + 重建过期的 web/out + 重载 3 个 daemon
 
 # 托管前端（docs/design-hosted-frontend.md）：bridge 托管 web/out（BRIDGE_STATIC_DIR）；浏览器配对即进
-bun src/manager.ts pair [--agents a,b|*] [--no-terminal] [--no-manage] [--guest <名字>] [--url <入口>] [--json]  # 二维码 / 链接 / 8 位码
+bun src/manager.ts pair [--agents a,b|*] [--no-terminal] [--no-manage] [--guest <名字> --agents a,b [--confirm-all]] [--url <入口>] [--json]  # 二维码 / 链接 / 8 位码；guest 给 '*' 要 --confirm-all
 bun src/manager.ts migrate-web-state   # 旧 Next BFF 的 settings.db + groqApiKey → bridge（先备份，幂等）
 bun src/manager.ts retire-web          # 卸旧 com.claudestra.web、备份 plist；bridge 没托管 web/out 或没备份就拒绝
 
@@ -225,7 +225,6 @@ tmux -S /tmp/claude-orchestrator/master.sock -CC attach
   - **Minor**（`x.Y.0`）— 真正新的、值得一句「现在你可以……」标题的用户可见能力。例：v1.3.0 Claude Code 自动更新、v1.5.0 Discord slash 补全。旧 minor 作为历史保留。
   - **Major**（`X.0.0`）— 破坏性变更或系统级重构。由 owner 手动 bump；不要自己主动升 major。
   - 判断法：写 release notes 时如果开头是「修了……」「加了个……」「补了测试」「重构了……」——那就是 **patch**。只有配得上标题的新能力才是 minor。
-- `tmux-helper.ts` 和 `claude-launch.ts` 是 tmux 命令和 Claude Code 启动参数的**唯一权威位置**。新文件里不要再内联这些。
 - 需要绕过 LLM 的管理按钮放到 `bridge/management.ts`。把 `id` 同时加到 `handleMgmtButton` 和对应的面板构造器。
 - 提交前跑 `bun run check`（= `tsc --noEmit` + `bun test` + `scripts/guard`）。**`bun build` 不做类型检查** —— 它对 `const x: number = "str"` 直接放行，此前"用它快速抓类型错误"的说法是错的。每个入口仍要 `bun build src/<entry>.ts --target=bun` 跑一遍（`bridge`、`channel-server`、`manager`、`launcher`、`cron`、`setup`），它能抓到类型检查覆盖不到的模块解析错误。CI 在每次 push / PR 上跑这三件事。
 - Cron 测试测解析与触发时间；实机走沙箱（`bun run sandbox`，[docs/architecture/sandbox.md](./docs/architecture/sandbox.md)）。

@@ -10,6 +10,7 @@ import { useEffect, useRef, useState } from "react";
 import { renderSVG } from "uqr";
 import { getLang, useT } from "@/lib/i18n";
 import { decideApproval, listApprovals, listDevices, type PendingApproval, type ShareCode } from "@/lib/api/devices";
+import { grantsAllAgents, GUEST_ALL_WARNING } from "@/lib/guest-share";
 import { fmtRemaining, remainingSeconds } from "../relay-card-logic";
 import { CopyButton } from "./peers-shared";
 
@@ -51,6 +52,7 @@ export function ApprovalRow({ a, onDone }: { a: PendingApproval; onDone: (approv
           {grantSummary(t, a.grant, a.guest)}
           {a.clientIp ? ` · ${a.clientIp}` : ""}
         </span>
+        {a.guest && grantsAllAgents(a.grant) && <span className="block font-medium text-warning">{t(GUEST_ALL_WARNING)}</span>}
         <span className="block text-[10.5px] text-base-content/45">{t("设备名是对方自己填的；短码对得上再允许")}</span>
         {err && <span className="block text-error">{err}</span>}
       </span>

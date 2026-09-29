@@ -91,6 +91,7 @@ export function isWriteInvocation(cmd: string | undefined, args: readonly string
   const subs = WRITE_SUBCOMMANDS[cmd];
   if (subs) return subs.has(sub);
   if (cmd === "auto-update") return !AUTO_UPDATE_READ_SUBS.has(sub);
+  if (cmd === "ledger" && sub === "audit") return !args.includes("--dry-run"); // 巡检默认把结果写进 audit_findings
   if (cmd === "ledger") return sub === "meta" ? args.slice(1).some((a) => /^--(pms|docs-dir)(=|$)/.test(a)) : !LEDGER_READ_SUBS.has(sub);
   return false;
 }

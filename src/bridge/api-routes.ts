@@ -28,7 +28,7 @@ import {
   invalidJsonBody,
   liveInteractiveHolder,
 } from "./api-respond.js";
-import { interruptAgentByName } from "./interrupt-gate.js";
+import { interruptAgentByName } from "./preempt.js";
 import { existsSync, readdirSync, statSync } from "fs";
 import { TMP_DIR, MASTER_DIR, INBOX_DIR, REPO_ROOT, ALLOWED_USER_IDS } from "./config.js";
 import {
@@ -70,8 +70,6 @@ import {
   MASTER_SESSION,
 } from "../lib/tmux-helper.js";
 import { paneLooksWorking } from "../lib/turn-state.js";
-import { stopTyping } from "./components.js";
-import { clearSafetyTimer } from "./discord-adapter.js";
 import { recordMetric } from "../lib/metrics.js";
 import { commandsForAgent, resolveWebInvocation, isProjectSkillForOtherAgent } from "./slash-registry.js";
 import { runtimeCommandsFor } from "../lib/runtime-commands.js";
@@ -122,6 +120,7 @@ export interface PendingApiRequest {
   agentChannelId: string;
   agentName: string;
   threadId: string;
+  messageId?: string; waitUntil?: number; // messageId：带 inReplyTo 的回复（作废回显）按它认领（lib/pending-reply-scope.ts takeApiPending）；waitUntil：同步等到几时
   ts: number;
   /** wait 模式挂的 resolver（无 wait 则为空） */
   resolve?: (result: ApiReplyResult) => void;
@@ -1304,6 +1303,7 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
       agentChannelId: agent.channelId,
       agentName: agent.name,
       threadId,
+      messageId: env.meta.messageId, waitUntil: waitSec > 0 ? Date.now() + waitSec * 1000 : undefined, // 投递前就标：停字的抢占在 deliver 里跑，resolve 这时还没挂（pi-abort holdStopWait）
       ts: Date.now(),
     };
     const queue = pendingApiRequests.get(key) || [];
@@ -1376,20 +1376,12 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
     if (!agent) return apiJson(404, { ok: false, error: `agent "${agentParam}" not found` });
     // 防重入 + 按键选择都在 interruptGate（与人类消息抢占、Discord 停止按钮同一个每频道冷却）：
     // 空闲态连发两次 C-c 是 CC 的退出快捷键，双击可能直接把会话关了；CC 主回合空闲一个键都不发
-    const r = await interruptAgentByName(agent.name, agent.channelId).catch((e: Error) => e);
+    // 记 cut、指标、停 typing、状态收尾成 done 都在 manualInterrupt（被打断的 CC 回合不发 Stop hook，不收尾黄点常驻）
+    // 非 owner 的 token（外源、peer）照样能打断，但不记成 owner 的「停」（不挂起 Autopilot、不清续做链）
+    const r = await interruptAgentByName(agent.name, agent.channelId, { owner: isOwnerPrincipal(principal), name: principal.name || tokenId, peer: principal.peer }).catch((e: Error) => e);
     if (r instanceof Error) return apiJson(500, { ok: false, error: `tmux send-keys 失败: ${r.message}` });
     if (r.deduped) return apiJson(200, { ok: true, deduped: true });
     const sent = r.keys;
-    if (sent.length) recordMetric("agent_interrupt", { channelId: agent.channelId, agent: agent.name, meta: { trigger: "api" } });
-    stopTyping(agent.channelId);
-    clearSafetyTimer(agent.channelId);
-    // 被打断的回合 CC 不触发 Stop hook —— agentStatuses 会永远卡在 thinking：
-    // 列表黄点常驻、前端乐观解锁后又被 15s 轮询的 busy 补锁锁回「正在回复」
-    // (owner 2026-07-14 真机)。打断即回合收尾：状态置 done + SSE 广播解锁。
-    const evAgentInt =
-      agentNameForChannel(agent.channelId) ||
-      (agent.channelId === CONTROL_CHANNEL_ID ? "master" : agent.name);
-    emitEvent({ agent: evAgentInt, chatId: agent.channelId, type: "agent_status", data: { status: "done", trigger: "interrupt", ...(principal.peer ? { peer: principal.peer } : {}) } });
     console.log(`⚡ [api] ${sent.length ? "打断键已发送" : "当前空闲，未发打断键"}：${agent.name} (token=${tokenId})`);
     return apiJson(200, { ok: true, agent: agent.name, ...(sent.length ? {} : { idle: true }) }); // done 照发：前端误判忙时借此解锁
   }
@@ -1577,9 +1569,8 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
       if (!state) return apiJson(404, { ok: false, error: "no pending AskUserQuestion for this agent" });
       const action = String(body?.action || "submit");
       if (action === "cancel") {
-        try {
-          await tmuxSendEscape(state.tmuxTarget);
-        } catch { /* non-critical：状态照清 */ }
+        const failed = await tmuxSendEscape(state.tmuxTarget, { strict: true }).then(() => null, (e: Error) => e);
+        if (failed) return apiJson(409, { ok: false, error: `取消没生效：${failed.message}` }); // Esc 没发出去：问题还在，状态留着可以再取消
         clearAuqState(agent.channelId);
         recordMetric("auq_cancel", { channelId: agent.channelId, meta: { trigger: "api" } });
         emitEvent({ agent: agent.name, chatId: agent.channelId, type: "question_cleared", data: { reason: "cancel", via: "api", by: tokenId, credential: principal.credential } });
