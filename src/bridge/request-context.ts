@@ -24,6 +24,8 @@ export interface RequestContext {
   sameNetwork?: boolean;
   /** 经中继 peer 帧来、且 peer 入口核过进程内标记的发件人指纹（peer-ingress.ts）；别的入口永远没有，别读原始头 */
   relayFrom?: string;
+  /** 由 E2E 会话解开的内层请求：会话发起方的指纹（bridge/peer-e2e-route.ts 设）。peerGate 据此要求 token 的主人就是他 */
+  e2e?: { peerFp: string };
 }
 
 const contexts = new WeakMap<Request, RequestContext>();
@@ -34,13 +36,16 @@ const LEAST_PRIVILEGE: RequestContext = { source: "unknown", clientIp: null, htt
  *   device   设备 cookie 与 /api/v1/devices/* 公开端点：peer 入口没有设备身份；
  *   legacy   旧 web 会话换设备凭据：只在直托管同源成立，中继路径与隧道都不算；
  *   peer     peer token：经中继的 peer 请求只走 peer 帧进 peer 入口，路径模式与隧道一律拒；
- *   redeem   兑换邀请：同上，合法兑换只走 peer 帧或直连。
+ *   redeem   兑换邀请：同上，合法兑换只走 peer 帧或直连；
+ *   keyedInvite  网页上生成 / 加入带密钥的邀请：邀请原文要经过这个页面，经中继打开的页面中继能换掉里面的公钥
+ *                （docs/relay/e2e-design.md §5.1）。不在名单里的来源只生成不加密的邀请、拒绝加入加密邀请。
  */
 const SOURCE_POLICY = {
   device: ["loopback", "lan", "relay"],
   legacy: ["loopback", "lan"],
   peer: ["loopback", "lan", "peer-ingress"],
   redeem: ["loopback", "lan", "peer-ingress"],
+  keyedInvite: ["loopback", "lan"],
 } as const satisfies Record<string, readonly RequestSource[]>;
 
 export function sourceAllows(req: Request, what: keyof typeof SOURCE_POLICY): boolean {

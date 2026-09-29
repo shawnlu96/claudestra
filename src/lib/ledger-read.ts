@@ -11,6 +11,7 @@ import { blockedBy, depViews, reviewBranches, type DepView, type ReviewBranches 
 import { currentStageMark, stageTimeline, taskMetrics, type StageEntry, type TaskMetrics } from "./ledger-metrics.js";
 import { isAskEvent, TERMINAL_STAGES, type LedgerEvent, type LedgerItem, type LedgerTask, type Stage } from "./ledger-stages.js";
 import { auditChangedProjects, openFindings, type StoredFinding } from "./ledger-audit-store.js";
+import { stepsOf, type TaskStep } from "./ledger-steps.js";
 import { getMeta, LEDGER_PATH, LEDGER_SCHEMA_VERSION, listDeps, listEvents, listItems, listTasks, getTask, toEvent, type LedgerMeta } from "./ledger-store.js";
 
 /** 读连接等锁的上限：WAL 下读不等写，只有写者刚建库、还没切 WAL 的那一瞬会撞上；宁可这一轮报 busy 也不卡住 bridge */
@@ -195,6 +196,8 @@ export interface TaskDetail {
   deps: { in: DepView[]; out: DepView[] };
   /** 审查分叉：现算，不存边 */
   reviewBranches: ReviewBranches;
+  /** 步骤化台账（ledger-steps.ts）：库里的行 + 老字段推出来的 */
+  steps: TaskStep[];
 }
 
 /** GET /ledger/:project/tasks/:id：任务不在这个项目下 → null（任务 id 全局唯一，但不许借别的项目名读到） */
@@ -210,6 +213,7 @@ export function taskDetail(db: Database, project: string, id: string, now: numbe
     timeline: stageTimeline(events, now),
     deps: { in: deps.filter((d) => d.to === id), out: deps.filter((d) => d.from === id) },
     reviewBranches: reviewBranches(task, view.lastReview, enteredFrom(task, events)),
+    steps: stepsOf(db, task),
   };
 }
 

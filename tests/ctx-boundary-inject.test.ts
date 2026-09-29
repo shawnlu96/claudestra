@@ -1,7 +1,7 @@
 import { afterAll, beforeEach, describe, expect, test } from "bun:test";
 import { existsSync, readFileSync, rmSync } from "fs";
 import {
-  agentWindowName, compactInjectedRecently, injectCompact, loadInjectState, resetInjectState, sweepPendingEcho,
+  agentTarget, agentWindowName, compactInjectedRecently, injectCompact, loadInjectState, resetInjectState, sweepPendingEcho,
 } from "../src/bridge/ctx-boundary-inject.js";
 import { resetCtxBoundaryState } from "../src/bridge/ctx-boundary.js";
 import { DEFAULT_KEEP_LIST, normalizeCompactKeep, type CompactKeep } from "../src/lib/ctx-boundary-policy.js";
@@ -160,6 +160,7 @@ test("大总管：registry 名 agent-master 对应窗口 master（adv1 P2-13：�
   expect(agentWindowName("agent-master")).toBe("master");
   expect(windowTarget(agentWindowName("agent-master"))).toBe("master:=master");
   expect(windowTarget(agentWindowName("agent-task-t36"))).toBe("master:=agent-task-t36");
+  expect([agentTarget("agent-master"), agentTarget("agent-task-t36")]).toEqual(["master:0", "master:=agent-task-t36"]); // 大总管按 index 0（T36c 复核）
 });
 
 describe("删自己留下的字：退格分批、每批核对（r3 P2-2）、待删的字落盘（r3 P2-3）", () => {

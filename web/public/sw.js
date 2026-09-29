@@ -1,7 +1,8 @@
 /**
  * Claudestra Web Push Service Worker。
  * - push：无条件展示通知（iOS/Safari 对「push 到达却不展示」有惩罚，静默几次后丢弃该订阅的后续推送；每条独立 tag）；
- *   dismiss 型只清同 agent 的旧通知；badge 字段同步 App 图标角标。
+ *   dismiss 型只清同一台机器（fp）、同 agent 的旧通知；「推送不带正文」的机器发的 dismiss 与通知都不带 agent，按 fp 一起清。
+ *   badge 字段同步 App 图标角标。
  * - notificationclick：聚焦已有窗口（postMessage 原地切会话；「待你处理」推送则打开抽屉），没有则新开 /chat（?ask= 由页面打开抽屉）。点通知 = 已读：回执给**发通知的那台机器**
  *   （payload 里的 fp；老 payload 没有就用 IndexedDB 里记的当前机器）——凭据是 HttpOnly cookie，SW 的 fetch 自动带上。
  */
@@ -79,7 +80,8 @@ self.addEventListener("push", (event) => {
       self.registration.getNotifications().then((ns) => {
         for (const n of ns) {
           const d = n.data || {};
-          if (d.agent === payload.agent && (d.ts || 0) <= (payload.ts || Date.now())) n.close();
+          // fp 也要对上：一个 SW 管多台机器，不带正文的通知 agent 都是 ""，不比 fp 会把别的机器的通知一起清掉
+          if (d.agent === payload.agent && (d.fp || "") === (payload.fp || "") && (d.ts || 0) <= (payload.ts || Date.now())) n.close();
         }
       }),
     );

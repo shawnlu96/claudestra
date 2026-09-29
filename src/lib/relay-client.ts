@@ -13,6 +13,7 @@ import {
 import { InboundRouter, type Logger } from "./relay-client-inbound.js";
 import { OutboundTable, type RequestOptions } from "./relay-client-outbound.js";
 import { PushTable } from "./relay-client-push.js";
+import { remoteCode } from "./remote-text.js";
 import { RelayError, type InboundHandler, type PushAck, type PushRequest, type RelayInfo, type RelayRequest, type RelayResponse, type RelayState } from "./relay-client-types.js";
 
 export { RelayError };
@@ -340,7 +341,7 @@ export class RelayClient {
       }
       return this.log("warn", `中继报错 ${f.code}（id=${f.id}）: ${f.message ?? ""}`);
     }
-    this.lastError = f.code;
+    this.lastError = remoteCode(f.code, "relay_error"); // 之后会拼进 connection_lost 的说明（见 request），中继能随意填
     this.log("warn", `中继拒绝连接: ${f.code} ${f.message ?? ""}`);
   }
 }
