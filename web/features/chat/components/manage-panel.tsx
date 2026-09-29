@@ -45,7 +45,7 @@ export function ManagePanel({ open, onClose }: { open: boolean; onClose: () => v
     setMsg(r.ok ? t(kind === "restart" ? "{name} 已重启" : "{name} 已停止", { name }) : r.error || t("操作失败"));
   };
 
-  const rows = agents.filter((a) => !a.pinnedMaster);
+  const rows = agents.filter((a) => !a.pinnedMaster && a.kind !== "worker");
 
   return (
     <ResponsiveShell z="z-[80]" panelClass="sm:max-w-xl" onClose={onClose}>

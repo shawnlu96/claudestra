@@ -880,7 +880,6 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
     const tasks = [...activeBgTasksFor(name), ...(name !== agentParam ? activeBgTasksFor(agentParam) : [])];
     return apiJson(200, { ok: true, tasks });
   }
-
   // GET /api/v1/history/search —— 跨 agent 跨 session 聊天记录全文搜索。
   //   ?q=<词，≥2 字符>&limit=<1..100，默认 30>&agent=<可选，只搜这个 agent>
   // 场景：compact 后 agent 忘事 / 用户只剩模糊记忆——对话正文全局检索捞回来。
@@ -894,6 +893,8 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
     const agentFilter = url.searchParams.get("agent");
 
     const { readRegistryAgents } = await import("../lib/registry.js");
+    const { visibleInDefaultSearch } = await import("../lib/worker-kind.js");
+    const { archivedWorkerKind } = await import("../lib/session-archive.js");
     const { readdirSync } = await import("fs");
     // scope 内的候选 agent：registry 全量 + 归档目录（已删 agent）+ master（须显式 scope）
     const regAgents = await readRegistryAgents();
@@ -915,8 +916,7 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
         return apiJson(403, { ok: false, error: `agent "${agentFilter}" not in token scope` });
       }
       names = names.filter((n) => n === want || n === agentFilter);
-    }
-
+    } else names = names.filter((n) => visibleInDefaultSearch(n, regMap.get(n), archivedWorkerKind(n)));
     type Hit = { agent: string; sessionId: string; source: string; seq: number; ts: string | null; role: string; snippet: string; from?: string; compact?: boolean };
     const { searchSessionHistory } = await import("../lib/session-history.js");
     const all: Hit[] = [];

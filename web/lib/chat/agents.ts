@@ -50,6 +50,7 @@ export type UpdateHint =
 export interface AgentSession {
   /** agent 名，作为会话 id（大总管用保留名 __master__） */
   name: string;
+  kind?: "worker" | null;
   displayName: string;
   purpose: string;
   cwd: string;
@@ -100,6 +101,7 @@ export interface AgentSession {
 
 interface ApiAgent {
   name: string;
+  kind?: "worker" | null;
   status?: string;
   /** 工作目录（registry.cwd）：侧栏标「所在仓」用（features/chat/agent-repo.ts） */
   cwd?: string;
@@ -215,5 +217,5 @@ const lpSig = (lp?: LpState | null) => (lp ? `|lp:${lp.lowPriority}:${lp.walled}
 export function agentExtraSig(a: AgentSession): string {
   const hint = a.updateHint ? JSON.stringify(a.updateHint) : "";
   const m = a.mission ? `${a.mission.until}|${a.mission.nudges}|${a.mission.resumeAt ?? ""}` : "";
-  return hint + m + (a.queued ? `q${a.queued}` : "") + `|${a.parent ?? ""}|${a.task ?? ""}` + ledgerSig(a.ledgerTask) + lpSig(a.lowPriority);
+  return hint + m + (a.queued ? `q${a.queued}` : "") + `|${a.kind ?? ""}|${a.parent ?? ""}|${a.task ?? ""}` + ledgerSig(a.ledgerTask) + lpSig(a.lowPriority);
 }

@@ -56,6 +56,7 @@ describe("最近 3 件事", () => {
     expect(eventLine(ev("note", {}, "老台账的一条日志", "import"))).toBe("老台账的一条日志");
     expect(eventLine(ev("stage", { from: "build", to: "review" }))).toBe("pm 推到「审查」");
     expect(eventLine(ev("verify", { result: "fail" }, "白屏"))).toBe("线上验证失败：白屏");
+    expect(eventLine(ev("scheduler", { op: "plan" }, "派对抗式审查", "scheduler"))).toBe("调度：派对抗式审查");
     expect(eventLine(ev("meta"))).toBeNull();
   });
 });
@@ -87,6 +88,14 @@ describe("审查与参与者", () => {
   test("跨实例委托：执行者是 extra.delegate", () => {
     const delegated = { ...task, agent: null, extra: { delegate: "claudestra@Shawn" } };
     expect(participants({ task: delegated, events: [] })[0]).toEqual({ name: "claudestra@Shawn", role: "executor" });
+  });
+  test("本卡已绑定的作者和未出首轮报告的审查员能从 DAG 任务详情打开", () => {
+    expect(participants({ task: { ...task, agent: null }, events: [], sessions: {
+      author: { agent: "agent-build" }, reviewer: { agent: "agent-review" },
+    } })).toEqual([{ name: "build", role: "executor" }, { name: "claudestra", role: "pm" }, { name: "review", role: "reviewer" }]);
+    expect(participants({ task, events: [ev("review", { reviewer: "agent-review", round: 1 })],
+      sessions: { reviewer: { agent: "agent-review" } } }).filter((p) => p.role === "reviewer"))
+      .toEqual([{ name: "review", role: "reviewer", rounds: [1] }]);
   });
 });
 

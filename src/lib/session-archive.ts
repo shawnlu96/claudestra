@@ -12,16 +12,17 @@
  */
 
 import { ARCHIVE_ROOT as STATE_ARCHIVE_ROOT } from "./paths.js";
-import { agentRuntime } from "./registry.js";
+import { agentRuntime, readRegistryAgents } from "./registry.js";
 import { findSessionJsonlBySessionId, sessionJsonlPath } from "./session-source.js";
 import { existsSync, readdirSync, realpathSync } from "fs";
-import { mkdir, readdir } from "fs/promises";
+import { mkdir, readdir, writeFile } from "fs/promises";
 import { basename, dirname, join, resolve, sep } from "path";
 import { projectJsonlPath, findJsonlBySessionId, projectsSlug } from "./jsonl-cost.js";
 import { copyIfLarger } from "./archive-copy.js";
 import { archiveWorkflowDirs } from "./workflow-archive.js";
 
 export const ARCHIVE_ROOT = STATE_ARCHIVE_ROOT;
+const WORKER_MARKER = ".worker-kind";
 
 /**
  * 某个 agent 的归档目录。名字拼出来不是归档根下的单层目录（带 /、..、绝对路径——URL 里的 %2F 解码后就是 /）→ null。
@@ -38,6 +39,12 @@ export function agentArchiveDir(agentName: string, root: string = ARCHIVE_ROOT):
   } catch {
     return null; // 读不了真实路径（没权限）就不读：同 realpathWithin
   }
+}
+
+/** A marker survives registry removal, so default global search never resurrects a removed worker. */
+export function archivedWorkerKind(agentName: string, root: string = ARCHIVE_ROOT): boolean {
+  const dir = agentArchiveDir(agentName, root);
+  return !!dir && existsSync(join(dir, WORKER_MARKER));
 }
 
 /** p 的真实路径（解开所有符号链接）在 root 的真实路径之下。读不了（悬空链接、没权限）→ false，调用方当它不在根下跳过 */
@@ -104,13 +111,24 @@ export async function archiveSession(
   agentName: string,
   cwd: string | undefined,
   sessionId: string,
-  opts: { archiveRoot?: string; srcPath?: string; runtime?: string } = {},
+  opts: { archiveRoot?: string; srcPath?: string; runtime?: string; kind?: "worker" } = {},
 ): Promise<ArchiveResult> {
   // typeof 守卫(peer 2026-08-09):调用方把非字符串(如误传 opts 对象)落到
   // sessionId 位时,下面的路径拼接会得到必不存在的路径 → 误报「源已被 CC 清理」,
   // 一个和真实原因完全无关、还很吓人的诊断。类型不对就直说类型不对。
   if (typeof sessionId !== "string" || !sessionId) {
     return { ok: false, archived: [], note: `无效 sessionId（期望字符串，实得 ${typeof sessionId}）` };
+  }
+  const kind = opts.kind ?? (opts.archiveRoot ? undefined : (await readRegistryAgents()).find((a) => a.name === agentName)?.kind);
+  if (kind === "worker") {
+    const dir = agentArchiveDir(agentName, opts.archiveRoot ?? ARCHIVE_ROOT);
+    if (!dir) throw new Error("worker 归档目录不合法");
+    await mkdir(dir, { recursive: true });
+    try {
+      await writeFile(join(dir, WORKER_MARKER), "worker\n", { flag: "wx" });
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e; // 已有标记无需覆盖，也不跟随同名软链
+    }
   }
   // v2.23+ runtime 感知：Pi 的会话文件在 ~/.pi/agent/sessions/<cwd编码>/ 下，
   // 文件名带时间戳前缀 ⇒ 只能扫目录（sessionJsonlPath 返回 null 即未找到）

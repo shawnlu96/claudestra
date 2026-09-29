@@ -133,7 +133,7 @@ export function sandboxLaunchArgs(mcpName: string, bunPath: string, srcDir: stri
 const SANDBOX_MANAGER_COMMANDS = new Set([
   "create", "kill", "remove", "list", "restart", "archive", "token-add", "token-list", "token-revoke",
   "project-add", "project-list", "project-assign", "project-edit", "project-remove", "cron-list", "tmux-capture",
-  "project-migrate", "sessions", "set-session", "label", "cron-add", "cron-edit", "cron-remove", "cron-toggle", "cron-history",
+  "project-migrate", "worker-kind-migrate", "sessions", "set-session", "label", "cron-add", "cron-edit", "cron-remove", "cron-toggle", "cron-history",
   "tmux-send-keys", "team-link", // team-link 只改沙箱 registry 的 parent / task（manager/team.ts），同 label
   "rename", "repair", "fleet", // 只动沙箱 registry / tmux / bridge（manager/agent-rename.ts、manager/repair.ts；fleet 只连沙箱 bridge 的 ws）；doctor 读生产 launchd，仍不开放
   "quota-wall", // 额度闸 status|clear：只读写沙箱状态目录下的 quota-wall.json / 请求文件（manager/quota-wall.ts）

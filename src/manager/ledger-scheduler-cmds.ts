@@ -1,6 +1,7 @@
 /** Narrow CLI entrypoints for durable scheduler facts; no arbitrary stage or owner action is exposed here. */
 import { INTENT_ACTIONS, INTENT_STATUSES, WORKFLOW_MODES, WORKFLOW_TEMPLATES, AUTHOR_FAMILIES } from "../lib/ledger-scheduler.js";
 import { planIntent, setWorkflow, settleIntent } from "../lib/ledger-scheduler-write.js";
+import { bindSchedulerSession, recordSessionRetirement, type SessionRole, type SessionTransport } from "../lib/scheduler-sessions.js";
 import { LedgerError } from "../lib/ledger-store.js";
 import { intFlag } from "./ledger-identity.js";
 import type { LedgerCli } from "./ledger-context.js";
@@ -55,6 +56,32 @@ export const SCHEDULER_CMDS: Record<string, CommandSpec> = {
       return { ok: true, intent: settleIntent(c.db, c.ctx(), {
         id: c.p.pos[1] ?? "", from: from as (typeof INTENT_STATUSES)[number], to: to as (typeof INTENT_STATUSES)[number],
         receipt: c.p.flags.receipt,
+      }) };
+    },
+  },
+  "scheduler-session-bind": {
+    valued: ["role", "intent", "agent", "session", "family", "transport"], bools: [],
+    usage: "scheduler-session-bind <task> --role author|reviewer --intent <key> --agent <name> --session <id> --family claude|codex --transport acp|tmux|peer",
+    run(c) {
+      const role = c.need("role"), family = c.need("family"), transport = c.need("transport");
+      if (!["author", "reviewer"].includes(role) || !AUTHOR_FAMILIES.includes(family as never) || !["acp", "tmux", "peer"].includes(transport)) {
+        throw new LedgerError("invalid", "session 角色、模型家族或 transport 不认识");
+      }
+      return { ok: true, ...bindSchedulerSession(c.db, c.ctx(), {
+        taskId: c.p.pos[1] ?? "", role: role as SessionRole, intentId: c.need("intent"), agent: c.need("agent"),
+        sessionId: c.need("session"), family: family as "claude" | "codex", transport: transport as SessionTransport,
+      }) };
+    },
+  },
+  "scheduler-session-retire": {
+    valued: ["role", "intent", "effect", "receipt"], bools: [],
+    usage: "scheduler-session-retire <task> --role author|reviewer --intent <key> --effect archive|kill --receipt <evidence>",
+    run(c) {
+      const role = c.need("role"), effect = c.need("effect");
+      if (!["author", "reviewer"].includes(role) || !["archive", "kill"].includes(effect)) throw new LedgerError("invalid", "session 角色或退役效果不认识");
+      return { ok: true, session: recordSessionRetirement(c.db, c.ctx(), {
+        taskId: c.p.pos[1] ?? "", role: role as SessionRole, intentId: c.need("intent"),
+        effect: effect as "archive" | "kill", receipt: c.need("receipt"),
       }) };
     },
   },

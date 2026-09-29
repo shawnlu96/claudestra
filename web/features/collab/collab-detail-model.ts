@@ -21,6 +21,7 @@ export interface TaskDetail {
   steps?: unknown;
   /** 步骤线（T51，collab-step-line-model.ts 解析）：steps + 当前这一步 + 是否在等对方 owner；老 bridge 没有 */
   stepLine?: unknown;
+  sessions?: { author?: { agent: string; source?: string } | null; reviewer?: { agent: string; source?: string } | null };
   now: number;
 }
 
@@ -101,6 +102,8 @@ function eventText(e: LedgerEventView, who: string, tail: string, tr: Tr): strin
       return tr("{who} 回滚", { who }) + (tail ? `${colon}${tail}` : "");
     case "note":
       return tail ? (who ? `${who}${colon}${tail}` : tail) : null;
+    case "scheduler":
+      return tail ? tr("调度：{t}", { t: tail }) : null;
     default:
       return null;
   }
@@ -173,20 +176,23 @@ export interface Participant {
 }
 
 /** 执行者（task.agent，没有时是跨实例委托的 extra.delegate）、PM（task.pm）、审查员（review 事件的 reviewer，按人去重、记轮次） */
-export function participants(d: Pick<TaskDetail, "task" | "events">): Participant[] {
+export function participants(d: Pick<TaskDetail, "task" | "events" | "sessions">): Participant[] {
   const out: Participant[] = [];
-  const exec = bareAgent(d.task.agent) ?? delegateOf(d.task);
+  const exec = bareAgent(d.sessions?.author?.agent) ?? bareAgent(d.task.agent) ?? delegateOf(d.task);
   if (exec) out.push({ name: exec, role: "executor" });
   const pm = bareAgent(d.task.pm);
   if (pm) out.push({ name: pm, role: "pm" });
   const byReviewer = new Map<string, number[]>();
   for (const r of reviewRows(d.events)) {
-    if (!r.reviewer) continue;
-    const list = byReviewer.get(r.reviewer) ?? [];
+    const reviewer = bareAgent(r.reviewer);
+    if (!reviewer) continue;
+    const list = byReviewer.get(reviewer) ?? [];
     if (r.round !== null && !list.includes(r.round)) list.push(r.round);
-    byReviewer.set(r.reviewer, list);
+    byReviewer.set(reviewer, list);
   }
   for (const [name, rounds] of byReviewer) out.push({ name, role: "reviewer", rounds });
+  const activeReviewer = bareAgent(d.sessions?.reviewer?.agent);
+  if (activeReviewer && !byReviewer.has(activeReviewer)) out.push({ name: activeReviewer, role: "reviewer" });
   return out;
 }
 

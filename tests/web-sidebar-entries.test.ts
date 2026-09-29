@@ -42,6 +42,12 @@ describe("filterAndRankWorkers（侧栏排序）", () => {
     expect(names(filterAndRankWorkers(ws, "car", new Set()))).toEqual(["beta"]);
     expect(names(filterAndRankWorkers(ws, "web", new Set()))).toEqual(["alpha"]);
   });
+  test("worker 从默认列表与名称搜索隐藏，store 仍保留它供直接打开", () => {
+    const ws = [ag("pm"), ag("task-68", { kind: "worker", task: "T68 调度" }), ag("codex")];
+    expect(names(filterAndRankWorkers(ws, "", new Set()))).toEqual(["pm", "codex"]);
+    expect(names(filterAndRankWorkers(ws, "调度", new Set()))).toEqual([]);
+    expect(names(ws)).toEqual(["pm", "task-68", "codex"]);
+  });
   test("不改输入数组", () => {
     const ws = [ag("a"), ag("b")];
     filterAndRankWorkers(ws, "", new Set(["b"]));
