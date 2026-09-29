@@ -139,12 +139,23 @@ export async function writePrincipals(data: PrincipalsFile, path = PRINCIPALS_PA
   await writeJsonStateGuarded(path, data, { mode: 0o600, validate: isPrincipalsFile });
 }
 
-/** 生成一个新 token principal（不落盘，调用方决定何时 write） */
+/** 老 Next 前端替 owner 持有的 token 名：isOwnerPrincipal 凭它认 owner，所以新签的凭据（token、guest）一律不许再叫这个 */
+const LEGACY_OWNER_TOKEN_NAME = "web-ui";
+
+/** 名字撞上保留名 → 给人看的拒绝原因，否则 null。大小写、首尾空白都不算区别 */
+export function reservedNameError(name: string): string | null {
+  if (name.trim().toLowerCase() !== LEGACY_OWNER_TOKEN_NAME) return null;
+  return `"${LEGACY_OWNER_TOKEN_NAME}" 是保留名（老 web 前端的 owner 凭据靠这个名字认 owner 身份），请换一个名字`;
+}
+
+/** 生成一个新 token principal（不落盘，调用方决定何时 write）。保留名直接抛：签发路径漏查也签不出冒认 owner 的 token */
 export function newTokenPrincipal(
   name: string,
   agents: string[],
   opts?: { terminal?: boolean; peer?: string },
 ): Principal {
+  const reserved = reservedNameError(name);
+  if (reserved) throw new Error(reserved);
   const tokenId = `tok_${randomBytes(4).toString("hex")}`;
   return {
     id: `token:${tokenId}`,
@@ -252,7 +263,7 @@ export function terminalAllowed(p: Principal, agentName: string): boolean {
  */
 export function isOwnerPrincipal(p: Pick<Principal, "id" | "name" | "disabled" | "peer">): boolean {
   if (p.peer || p.disabled) return false;
-  return p.id === OWNER_PRINCIPAL_ID || (p.name === "web-ui" && p.id.startsWith("token:"));
+  return p.id === OWNER_PRINCIPAL_ID || (p.name === LEGACY_OWNER_TOKEN_NAME && p.id.startsWith("token:"));
 }
 
 /**

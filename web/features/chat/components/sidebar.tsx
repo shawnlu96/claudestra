@@ -27,6 +27,7 @@ import type { AgentSession } from "../type";
 import { rowOpenIntent } from "../open-intent";
 import { swipeReg } from "./agent-row-swipe";
 import { MasterIcon } from "./master-icon";
+import { SidebarMediaButton } from "../../media/media-button";
 
 /**
  * 会话列表面板。移动端是全屏「菜单」（w-full，横滑容器的基础页）；桌面端定宽常驻左栏（sm:w-64）。
@@ -217,9 +218,7 @@ export function Sidebar({ onSelect }: { onSelect: () => void }) {
         className="absolute inset-y-0 -right-[2px] z-10 hidden w-[5px] cursor-col-resize hover:bg-primary/30 active:bg-primary/40 sm:block"
         onPointerDown={startResize}
       />
-      {/* 安全区顶部由面板自己垫（bg=base-200，条带与列表同色无缝）。
-          刷新按钮已移除（列表由 15s 轮询 + 回前台重连自动感知 roster 变化）；
-          新建会话统一走大总管对话，Web 侧不再单独提供入口。 */}
+      {/* 安全区顶部由面板自己垫（bg=base-200，条带与列表同色无缝）；列表靠轮询 + 回前台重连自动刷新，没有刷新按钮 */}
       <div
         className="px-4 pb-2"
         style={{ paddingTop: "calc(env(safe-area-inset-top) + 0.75rem)" }}
@@ -236,6 +235,7 @@ export function Sidebar({ onSelect }: { onSelect: () => void }) {
             onPeers={() => setSettingsPage("peers")}
             onStats={() => setShowStats(true)}
           />
+          <SidebarMediaButton />
           <button
             className="flex size-7 items-center justify-center rounded-lg text-base-content/50 transition-colors hover:bg-base-300 hover:text-base-content"
             title={t("设置")}

@@ -12,7 +12,7 @@ import {
 } from "../lib/devices.js";
 import { LEGACY_SESSION_COOKIE, redeemLegacySession } from "../lib/legacy-web.js";
 import { webDb } from "./local-api/db.js";
-import { readPrincipalsStrict, updatePrincipals, type Principal } from "../lib/principals.js";
+import { readPrincipalsStrict, reservedNameError, updatePrincipals, type Principal } from "../lib/principals.js";
 import { canonicalAgentName, REGISTRY_PATH, readRegistryAgentsSync } from "../lib/registry.js";
 import { formatCode } from "../lib/relay-protocol.js";
 import { apiJson, forbidden, INVALID_JSON, invalidJsonBody, readJsonBody } from "./api-respond.js";
@@ -273,6 +273,9 @@ export function issuePairing(
   const guest = str(body.guest);
   // 带了 guest 字段名字却是空白 / 数字 / null：拒，不能当成没带、退化成给自己签全权码
   if (body.guest !== undefined && !guest) return { ok: false, code: "guest_name_required", error: "guest 要写这台设备是给谁的（名字不能是空白，也得是文字）" };
+  // guest 的名字会成为它消息的来源名：老记录里「来源 = web-ui」被网页当 owner 本人（web/lib/chat/history-shape.ts）
+  const reserved = guest ? reservedNameError(guest) : null;
+  if (reserved) return { ok: false, error: reserved };
   const guestAgents = guest ? checkGuestAgents(body.agents, body.confirmAllAgents, registryHas()) : null;
   if (guestAgents && !guestAgents.ok) return { ok: false, code: guestAgents.code, error: guestAgents.error };
   const fp = i.fp ?? machineFp();

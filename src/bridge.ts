@@ -6,8 +6,8 @@
  */
 
 import { enableTimestampLogs } from "./lib/log-timestamp.js";
-import { requestStillHeld } from "./lib/held-pac.js";
-import { sanitizeAttachmentBase } from "./lib/attachment-name.js";
+import { requestStillHeld, shouldSweepPac } from "./lib/held-pac.js";
+import { copyOutboundToInbox } from "./bridge/local-api/media-refresh.js";
 import { splitInlineButtons, toButtonRows, inlineChipsToText } from "./lib/inline-buttons.js";
 import { isTargetsOwnReply } from "./lib/pushback-scope.js";
 import { hasActiveBgActivities, startBgActivityWatcher } from "./bridge/bg-activity-watcher.js";
@@ -574,6 +574,7 @@ initDaemonLogs("bridge");
 
 // v2.19.0 认主守卫：热备机器上的 launchd 自启 + rsync 来的配置 = 双响（见 lib/owner-guard.ts）
 import { assertPrimaryOrExit } from "./lib/owner-guard.js";
+import { saveDiscordDownload } from "./lib/media-outbound.js";
 await assertPrimaryOrExit("bridge");
 
 // v2.6.0+ C2-4：Discord 前端 UI 归属模块（typing / status 消息 / 完成通知 / 按钮）
@@ -693,23 +694,6 @@ async function deliverToApi(env: RouterEnvelope, to: RouterApiUserEndpoint): Pro
     apiFiles.set(id, { path: p, tokenId: to.tokenId, name });
     return { name, url: `/api/v1/files/${id}` };
   });
-  // 出站附件持久化（owner 2026-07-14:「你也可以给我发图片」）：agent reply 的
-  // files 常在临时目录（scratchpad/截图），拷进 inbox（web 附件取回白名单）——
-  // SSE 事件带 inbox 文件名，web 前端走 /api/chat/attachment/<name> 内联显示，
-  // 时间戳前缀防碰撞 + 与 Discord 下载附件同一套展示名清洗（去 ^\d+_）。
-  const eventFiles: { name: string; attachment: string }[] = [];
-  for (const p of env.meta.files || []) {
-    try {
-      const base = sanitizeAttachmentBase(p); // 保 Unicode;与 web attachment 路由同一套(peer 2026-08-25)
-      const dest = `${Date.now()}_${base}`;
-      await fs.mkdir(INBOX_DIR, { recursive: true });
-      await fs.copyFile(p, `${INBOX_DIR}/${dest}`);
-      eventFiles.push({ name: base, attachment: dest });
-    } catch (e) {
-      console.error(`API 出站附件拷贝失败 ${p}:`, (e as Error).message);
-    }
-  }
-
   const threadId = pending?.threadId || env.meta.threadId;
   const agentName = pending?.agentName ||
     (env.from.kind === "local" ? env.from.agentName : undefined) ||
@@ -720,6 +704,8 @@ async function deliverToApi(env: RouterEnvelope, to: RouterApiUserEndpoint): Pro
     // "?" 的幽灵会话，用户在正确的会话里什么也看不到（owner 两次实报「问号频道」，
     // 推送通知标题就是一个问号）。registry 是持久的，不受连接状态影响。
     agentNameByChannelFromRegistry(fromChannelId) || "?";
+  // reply 的附件（常在临时目录）拷进 inbox 供网页内联显示，并记账「谁、哪个原路径 → 哪个副本」（媒体索引按账认领，见 lib/media-outbound.ts）
+  const eventFiles = await copyOutboundToInbox(env.meta.files || [], agentName);
   const result: ApiReplyResult = {
     reply: env.content,
     components: env.meta.components,
@@ -1397,8 +1383,6 @@ discord.on("messageCreate", async (msg: DiscordMessage) => {
   // 处理附件
   const attachmentPaths: string[] = [];
   if (msg.attachments.size > 0) {
-    const inboxDir = INBOX_DIR;
-    await Bun.spawn(["mkdir", "-p", inboxDir]).exited;
     for (const [, att] of msg.attachments) {
       try {
         // 这是全仓库唯一一个没有超时的 fetch，而它就坐在 messageCreate 处理路径上：
@@ -1417,9 +1401,7 @@ discord.on("messageCreate", async (msg: DiscordMessage) => {
           console.warn(`⚠️ 附件 ${att.name} 实际大小超限，丢弃`);
           continue;
         }
-        const filePath = `${inboxDir}/${att.id}_${att.name}`;
-        await Bun.write(filePath, buf);
-        attachmentPaths.push(filePath);
+        attachmentPaths.push(await saveDiscordDownload(INBOX_DIR, att.id, att.name, new Uint8Array(buf)));
       } catch (err) {
         console.error(`下载附件失败: ${att.name}`, err);
       }

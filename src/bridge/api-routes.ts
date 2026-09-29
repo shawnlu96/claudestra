@@ -30,7 +30,7 @@ import {
 } from "./api-respond.js";
 import { interruptAgentByName } from "./preempt.js";
 import { existsSync, readdirSync, statSync } from "fs";
-import { TMP_DIR, MASTER_DIR, INBOX_DIR, REPO_ROOT, ALLOWED_USER_IDS } from "./config.js";
+import { TMP_DIR, MASTER_DIR, REPO_ROOT, ALLOWED_USER_IDS } from "./config.js";
 import {
   readPrincipals,
   agentInScope,
@@ -45,14 +45,15 @@ import { loadJobs } from "../cron.js";
 import { HYGIENE_JOB_NAME, HYGIENE_FREQS, freqOfSchedule, hygienePrompt, mem0McpConfigured, type HygieneFreq } from "../lib/memory-hygiene.js";
 import { readConfig as readAppConfig, setAutoCompact } from "../lib/config-store.js";
 import { isMasterName, readRegistryAgents } from "../lib/registry.js";
-import { nonClaudeRuntimeError } from "../lib/claude-settings-runtime.js";
+import { claudeSwitchInputError, isSafeModelArg, nonClaudeRuntimeError } from "../lib/claude-settings-runtime.js";
 import { collectSessions, visibleSessions } from "./sessions-inventory.js";
-import { archivedOnlyAgent, isMasterSessionFile, locateSessionFile, masterSessionsAllowed } from "./session-file.js";
+import { archivedOnlyAgent, locateSessionFile, masterSessionHidden } from "./session-file.js";
 import { readPiRuntimeSnapshot } from "../lib/pi-env.js";
 import { findSessionJsonlBySessionId } from "../lib/session-source.js";
 import { cleanupBgJob } from "../lib/bg-jobs.js";
 import { emitEvent, getAgentStatus, type EventFilter, isBusyStatus } from "./event-bus.js";
 import { listAgentSessions, readSessionHistory, isValidSessionId, isValidSubagentId } from "../lib/session-history.js";
+import { ARCHIVE_ROOT, realpathWithin } from "../lib/session-archive.js";
 import { formatTool, formatToolDetail, agentNameForChannel } from "./jsonl-watcher.js";
 import { newThreadId, type Envelope, type ApiUserEndpoint } from "./router.js";
 // additive 端点（interrupt/clear/answer/pending/create/lifecycle）复用的共享 helper。
@@ -69,22 +70,23 @@ import {
   listWindows,
   MASTER_SESSION,
 } from "../lib/tmux-helper.js";
-import { wallWaitRefusal, windowWallWait } from "../lib/wall-screen.js";
 import { canSeeQuota } from "../lib/devices.js";
 import { paneLooksWorking } from "../lib/turn-state.js";
 import { recordMetric } from "../lib/metrics.js";
-import { commandsForAgent, resolveWebInvocation, isProjectSkillForOtherAgent } from "./slash-registry.js";
+import { commandsForAgent } from "./slash-registry.js";
+import { handleSlashPassthrough, type SlashDeps } from "./api-slash.js";
 import { runtimeCommandsFor } from "../lib/runtime-commands.js";
 import { scanSessionTail, TAIL_WINDOWS, type SessionTailInfo } from "../lib/session-tail.js";
-import { resolveModelAlias, isKnownEffort, isKnownRuntimeEffort, KNOWN_EFFORT_LEVELS, RUNTIME_ONLY_EFFORT_LEVELS } from "../lib/claude-launch.js";
+import { resolveModelAlias, isKnownEffort, KNOWN_EFFORT_LEVELS } from "../lib/claude-launch.js";
 import { activeBgJob, bgJobLog, bgJobLogResponse, spawnBgJob } from "./bg-jobs-http.js";
 import { handleUpdateRoutes } from "./update-routes.js";
 import { handlePeersRoutes } from "./peers-routes.js";
 import { agentListExtras, handleAgentInfoRoutes } from "./agent-info-routes.js";
 import { refuseUnconfirmedSubSession } from "./subsession-guard.js";
 import { sseEventAllow } from "./ledger-feed.js";
-import { firstFlagLikeField } from "../lib/flag-like.js";
+import { firstFlagLikeField, textFieldsProblem } from "../lib/flag-like.js";
 import { handleRuntimeSettingsRoutes } from "./runtime-settings-routes.js";
+import { handleCronRoutes } from "./cron-routes.js";
 import { trackInboundHandoff } from "./handoff-tracker.js";
 import { authenticateApi } from "./api-auth.js";
 import { handleDevicesManaged, handleDevicesPublic } from "./devices.js";
@@ -94,6 +96,7 @@ import { pickSwitchOverride, rememberSwitchOverride } from "./switch-override.js
 import { displayModelEffort } from "../lib/display-model.js";
 import { cachedCodexCatalog, readCodexConfigDefaults } from "../lib/codex-catalog.js";
 import { invitePageResponse } from "./invite-page.js";
+import { saveUploadToInbox } from "./local-api/media-refresh.js";
 
 /**
  * 只允许当作**单层目录名**用的标识（归档区 archived/<name>）：拒绝路径分隔符、相对段、NUL。
@@ -202,6 +205,18 @@ let deps: ApiDeps | null = null;
 export function initApiRoutes(d: ApiDeps): void {
   deps = d;
 }
+
+/** 斜杠直通的运行时依赖（api-slash.ts 不 import hub，依赖从这里注入） */
+const slashDeps = (d: ApiDeps): SlashDeps => ({
+  sendLine: tmuxSendLine,
+  mirror: d.mirrorApiExchange,
+  scheduleClearRotation: d.scheduleClearRotation,
+  markThinking: (a) => {
+    const ev = agentNameForChannel(a.channelId) || (a.channelId === CONTROL_CHANNEL_ID ? "master" : a.name);
+    emitEvent({ agent: ev, chatId: a.channelId, type: "agent_status", data: { status: "thinking" } });
+  },
+  record: (cmd, a) => recordMetric("api_slash", { channelId: a.channelId, agent: a.name, meta: { cmd } }),
+});
 
 // ── 鉴权 + 通用 helper ──────────────────────────────────────────────────
 
@@ -624,12 +639,12 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
     });
   }
 
-  // v2.7+ POST /api/v1/sessions/:sessionId/adopt —— 收编：把该 session 立为
-  // 某正式 agent 的会话并重启拉起（body: {"agent": "<name>"}）。仅全权 token。
+  // v2.7+ POST /api/v1/sessions/:sessionId/adopt —— 收编：把该 session 立为某正式 agent 的会话并重启拉起（body: {"agent": "<name>"}）。仅全权 token；大总管的会话另要 master 在 scope 内
   const adoptMatch = path.match(/^\/sessions\/([^/]+)\/adopt$/);
   if (adoptMatch && req.method === "POST") {
     if (!isFullScope(principal)) return forbidden("adopt requires a full-scope token");
     const sid = decodeURIComponent(adoptMatch[1]);
+    if (masterSessionHidden(principal, locateSessionFile(sid, undefined, undefined), MASTER_DIR)) return notInScope("master");
     let agentName = "";
     try {
       agentName = String(((await req.json()) as any)?.agent || "");
@@ -736,7 +751,6 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
     })());
     if (kind === "agent") {
       const { readRegistryAgents } = await import("../lib/registry.js");
-      const { ARCHIVE_ROOT } = await import("../lib/session-archive.js");
       const norm = (x: unknown) => String(x || "").replace(/^agent-/, "");
       const info = (await readRegistryAgents()).find((r) => norm(r.name) === norm(rid));
       const sid = String(meta?.sessionId || (info as any)?.sessionId || "");
@@ -861,7 +875,7 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
     const mCwd = typeof mbody?.cwd === "string" ? mbody.cwd : undefined;
     const mfile = locateSessionFile(sid, mRuntime, mCwd); // 定位口径与 /sessions/:id/history 同一个函数
     if (!mfile) return apiJson(404, { ok: false, error: `session "${sid}" not found on disk` });
-    if (isMasterSessionFile(mfile, MASTER_DIR) && !masterSessionsAllowed(principal)) return notInScope("master");
+    if (masterSessionHidden(principal, mfile, MASTER_DIR)) return notInScope("master");
     const fsp = await import("node:fs/promises");
     try {
       const st = await fsp.stat(mfile);
@@ -904,7 +918,7 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
     const before = url.searchParams.get("before");
     const file = locateSessionFile(sid, runtime, cwd);
     if (!file) return apiJson(404, { ok: false, error: `session "${sid}" not found on disk` });
-    if (isMasterSessionFile(file, MASTER_DIR) && !masterSessionsAllowed(principal)) return notInScope("master"); // "*" 不含 master（bridge/session-file.ts）
+    if (masterSessionHidden(principal, file, MASTER_DIR)) return notInScope("master"); // "*" 不含 master（bridge/session-file.ts）
     const page = await readSessionHistory(file, {
       limit,
       ...(before ? { before: Number(before) } : {}),
@@ -973,7 +987,6 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
 
     const { readRegistryAgents } = await import("../lib/registry.js");
     const { readdirSync } = await import("fs");
-    const { ARCHIVE_ROOT } = await import("../lib/session-archive.js");
     // scope 内的候选 agent：registry 全量 + 归档目录（已删 agent）+ master（须显式 scope）
     const regAgents = await readRegistryAgents();
     const regMap = new Map(regAgents.map((a) => [a.name, a]));
@@ -1152,7 +1165,9 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
     if (subagent) {
       if (!isValidSubagentId(subagent)) return apiJson(400, { ok: false, error: "invalid subagent id" });
       file = `${found.path.replace(/\.jsonl$/, "")}/subagents/${subagent}.jsonl`;
-      if (!existsSync(file)) return apiJson(404, { ok: false, error: `subagent "${subagent}" not found in session` });
+      // 归档里的子 agent 目录是符号链接、指到本 agent 归档目录外面（别的 agent 的也算）→ 当它不存在（lib/session-archive.ts realpathWithin）
+      const escapes = found.source === "archive" && !realpathWithin(file, found.path.replace(/\/[^/]+$/, ""));
+      if (escapes || !existsSync(file)) return apiJson(404, { ok: false, error: `subagent "${subagent}" not found in session` });
     }
     const limitRaw = Number(url.searchParams.get("limit") || 100);
     const beforeRaw = url.searchParams.get("before");
@@ -1215,7 +1230,6 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
         const form = await req.formData();
         text = String(form.get("text") || "");
         waitSec = Number(form.get("wait") || 0);
-        await Bun.spawn(["mkdir", "-p", INBOX_DIR]).exited;
         // 不用 `f is File` 类型谓词：Bun 的全局 File 与 node:buffer 的 File 在类型
         // 上不兼容（缺 webkitRelativePath/slice），谓词写法会被 tsc 拒。运行时判据
         // 仍是 instanceof File，只是把窄化交给 typeof 排除字符串项。
@@ -1225,9 +1239,7 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
           .slice(0, 5) as unknown as File[];
         for (const f of files) {
           if (f.size > 10 * 1024 * 1024) return apiJson(413, { ok: false, error: `file "${f.name}" exceeds 10MB` });
-          const dest = `${INBOX_DIR}/api_${Date.now()}_${f.name.replace(/[^\w.\-]/g, "_")}`;
-          await Bun.write(dest, f);
-          attachments.push(dest);
+          attachments.push(await saveUploadToInbox(f, agent.name)); // 原子占名 + 记归属（local-api/media-refresh.ts）
         }
       } else {
         const body = (await req.json()) as { text?: string; wait?: number };
@@ -1241,60 +1253,9 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
     waitSec = Math.min(Math.max(waitSec, 0), 300);
     if (!attachments.length) { const r = await (await import("./ask-entry.js")).answerFromChat({ agent: agent.name, text, principal, askId: url.searchParams.get("ask") }); if (r) return r; }
 
-    // Web slash 直通：「/cmd [args]」命中注册表 → tmux 字面注入（CC 原生解释，同 Discord slash）；没命中的 "/xxx" 落回普通消息（可能真想发
-    // 以 / 开头的文本）。TUI 类命令没有回合，响应带 slash:true 让前端不进「正在回复」。peer 不给直通：那是 TUI 控制权（/clear 可跨机清
-    // 上下文），messaging scope 不该静默升级，peer 文本一律按普通消息投。窗口停在额度菜单 / 撞墙倒计时上不注入（lib/wall-screen.ts）。
-    const slashM = attachments.length === 0 && !principal.peer ? text.trim().match(/^\/([\w:-]+)(?:\s+([\s\S]+))?$/) : null;
-    if (slashM) {
-      const regName = agent.name === "master" ? null : agent.name;
-      // Pi / Codex 的命令表是它们自己的（lib/runtime-commands.ts），命中就交给运行时原生解释（同名命令语义不同）。
-      // Codex 不在表里的 "/xxx" 落回普通消息——CC 的技能注进 Codex 的 TUI 没有意义；Pi 照旧回落到 CC 注册表
-      const rt = String((agent as any).runtime || "");
-      const nativeHit = runtimeCommandsFor(rt, agent.name)?.find((c) => c.name === slashM[1]);
-      const resolved = nativeHit
-        ? { ok: true as const, ccText: `/${nativeHit.invokeName}${(slashM[2] || "").trim() ? ` ${slashM[2].trim()}` : ""}`, scope: nativeHit.scope }
-        : rt === "codex" ? { ok: false as const, reason: "not a Codex command" } : resolveWebInvocation(slashM[1], regName, slashM[2] || "");
-      if (resolved.ok) {
-        const win = agent.name === "master" ? `${MASTER_SESSION}:0` : windowTarget(agent.name);
-        const wall = await windowWallWait(win);
-        if (wall) return apiJson(409, { ok: false, error: `${agent.name} ${wallWaitRefusal(wall, canSeeQuota(principal))}，这条命令没有注入` });
-        try {
-          await tmuxSendLine(win, resolved.ccText);
-          // v2.16.2 输入框打 /model 也登记切换意图(peer 报告根因 1:slash 直通
-          // 无任何代按逻辑,弹窗迟到 1.5s 无人按,agent 卡死)——watcher 兜底代按
-          if (slashM[1] === "model" && (slashM[2] || "").trim()) {
-            const { noteModelSwitchIntent } = await import("./permission-watcher.js");
-            noteModelSwitchIntent(agent.name, resolveModelAlias((slashM[2] || "").trim()));
-          }
-        } catch (e) {
-          return apiJson(500, { ok: false, error: `tmux 注入失败: ${(e as Error).message}` });
-        }
-        const tn = principal.name || tokenId;
-        deps.mirrorApiExchange({ kind: "api", tokenId, name: tn }, agent.channelId, `[🌐 API←${tn}] ${text}`).catch(() => {});
-        recordMetric("api_slash", { channelId: agent.channelId, agent: agent.name, meta: { cmd: slashM[1] } });
-        // skill 类命令(非 builtin)注入后跑的是真实 LLM 回合、Stop hook 会收尾:发 thinking 让 web 思考徽章 / 侧栏 busy 亮起。
-        // builtin TUI 命令(/cost /compact /context…)无回合无 Stop hook,发了会永久卡 thinking,不发。
-        if (resolved.scope !== "builtin") {
-          const evAgentSlash =
-            agentNameForChannel(agent.channelId) ||
-            (agent.channelId === CONTROL_CHANNEL_ID ? "master" : agent.name);
-          emitEvent({ agent: evAgentSlash, chatId: agent.channelId, type: "agent_status", data: { status: "thinking" } });
-        }
-        // 直通的 /clear 与 clear 端点一样会轮转 session——必须同样挂轮转收尾，
-        // 否则 registry/watcher/history 盯死文件（2026-07-15 用户在 Web 输入框
-        // 打 /clear，temp 的历史冻结整整 7 天才被发现）。
-        if (slashM[1] === "clear" && agent.name !== "master" && agent.cwd) {
-          deps.scheduleClearRotation(agent.name, agent.channelId, agent.cwd, agent.sessionId);
-        }
-        console.log(`⚡ [api] slash 注入 ${agent.name}: ${resolved.ccText}`);
-        return apiJson(202, { ok: true, accepted: true, slash: true, ccText: resolved.ccText, agent: agent.name });
-      }
-      const other = isProjectSkillForOtherAgent(slashM[1], regName);
-      if (other) {
-        return apiJson(409, { ok: false, error: `/${slashM[1]} 是 ${other.replace(/^agent-/, "")} 的项目技能，当前 agent 不可用` });
-      }
-      // 不是已知命令 → 继续按普通消息投递
-    }
+    // Web 斜杠直通只给 owner（bridge/api-slash.ts）：能直通就注入 TUI 并在这里返回（非 owner → 403）；不是命令 → 按普通消息往下投
+    const slashRes = await handleSlashPassthrough({ principal, tokenId, agent, text, hasAttachments: attachments.length > 0 }, slashDeps(deps));
+    if (slashRes) return slashRes;
 
     const tokenName = principal.name || tokenId;
     const threadId = newThreadId();
@@ -1341,13 +1302,11 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
     // R2 入站镜像：只是 Discord 抄送，失败不影响已完成的投递；mirrorApiExchange 内部已 try/catch 记日志，这里的 catch 只防未来改动漏抛
     deps.mirrorApiExchange({ kind: "api", tokenId, name: tokenName }, agent.channelId, `[🌐 API←${tokenName}] ${apiMirrorBody(text, attachments.length)}`).catch(() => {});
     if (!delivery.outcome.heldBy) deps.startTypingWithSafety(agent.channelId); // 押住了就没有回合，别亮「正在输入」
-    // API 触发的 turn 不发 Stop 完成通知 @ owner（回复走 API 回路 + R2 镜像已可见）
-    deps.lastMessageSource.set(agent.channelId, "agent");
+    deps.lastMessageSource.set(agent.channelId, "agent"); // API 触发的 turn 不发 Stop 完成通知 @ owner（回复走 API 回路 + R2 镜像已可见）
 
-    // heldBy：押住了（额度闸 / 目标停在额度菜单，没发键），不干等答复。原因只给全权 owner（canSeeQuota，额度是 owner 的事），别人只看到 queued
-    if (waitSec === 0 || delivery.outcome.heldBy) {
+    if (waitSec === 0 || delivery.outcome.heldBy) { // heldBy = 押住了（额度闸 / 停在额度菜单，没发键），不干等答复；原因只给能看额度的 owner（canSeeQuota）
       const held = delivery.outcome.heldBy ? { queued: true, heldBy: canSeeQuota(principal) ? delivery.outcome.heldBy : undefined } : {};
-      return apiJson(202, { ok: true, accepted: true, threadId, agent: agent.name, ...held, hint: `poll GET /api/v1/threads/${threadId}` });
+      return apiJson(202, { ok: true, accepted: true, threadId, agent: agent.name, ...held, hint: `poll GET /api/v1/threads/${threadId} or subscribe /api/v1/events` });
     }
 
     const result = await new Promise<ApiReplyResult | null>((resolve) => {
@@ -1384,6 +1343,8 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
     if (!agent) return apiJson(404, { ok: false, error: `agent "${agentParam}" not found` });
     // Pi / Codex 的命令来自它们自己（lib/runtime-commands.ts）；这里也决定了「能注入什么」：面板里没有的命令，直通分支会拒绝 —— 两边同源。
     const runtime = String((agent as any).runtime || "") || "claude-code";
+    // 斜杠直通只给 owner（api-slash.ts）：别人拿到命令表也用不了，给空表，网页就不显示候选 / 技能按钮
+    if (!isOwnerPrincipal(principal)) return apiJson(200, { ok: true, agent: agent.name, runtime, commands: [], slash: false });
     const commands = runtimeCommandsFor(runtime, agent.name) ?? commandsForAgent(agent.name === "master" ? null : agent.name);
     return apiJson(200, { ok: true, agent: agent.name, runtime, commands });
   }
@@ -1452,8 +1413,8 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
     });
   }
 
-  // POST /api/v1/agents/:name/claude-settings —— 会话级切模型/effort：tmux 注入原生 /model、/effort(与 TUI 手打同一生效路径)。
-  // 非 CC runtime 400;回合进行中 409(注入只会排进输入框);非 master 同步写 registry(manager set-claude)——restart 后沿用。
+  // POST /api/v1/agents/:name/claude-settings —— tmux 注入原生 /model、/effort(与 TUI 手打同一路径，所以要全权 token)。
+  // 非 CC runtime 400;回合中 409(注入只会排进输入框);非 master 同步写 registry(manager set-claude)，restart 后沿用。
   const claudeSetMatch = path.match(/^\/agents\/([^/]+)\/claude-settings$/);
   if (claudeSetMatch && req.method === "POST") {
     const agentParam = decodeURIComponent(claudeSetMatch[1]);
@@ -1461,14 +1422,13 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
     if (!isFullScope(principal)) return forbidden("claude-settings requires a full-scope token"); // 与 pi/codex-settings 同一门（bridge/runtime-settings-routes.ts）
     const body: any = await readJsonBody(req);
     if (body === INVALID_JSON) return invalidJsonBody();
+    const textBad = textFieldsProblem(body, ["model", "effort"]); // 先看原文再 trim，口径同 cron / create
+    if (textBad) return apiJson(400, textBad);
     const model = typeof body?.model === "string" && body.model.trim() ? resolveModelAlias(body.model) : undefined;
     const effort = typeof body?.effort === "string" && body.effort.trim() ? body.effort.trim() : undefined;
     if (!model && !effort) return apiJson(400, { ok: false, error: 'body must contain "model" and/or "effort"' });
-    // v2.21.1+ 会话级切换接受 runtime-only 档(ultracode)——它就是「this session
-    // only」语义,与 /effort 注入这条路完全对齐(peer owner 请求 2026-08-30)
-    if (effort && !isKnownRuntimeEffort(effort)) {
-      return apiJson(400, { ok: false, error: `未知 effort: "${effort}"。可用: ${[...KNOWN_EFFORT_LEVELS, ...RUNTIME_ONLY_EFFORT_LEVELS].join(", ")}` });
-    }
+    const inputErr = claudeSwitchInputError(model, effort);
+    if (inputErr) return apiJson(400, { ok: false, error: inputErr });
     const runtimeErr = nonClaudeRuntimeError(agentParam, await readRegistryAgents());
     if (runtimeErr) return apiJson(400, { ok: false, error: runtimeErr });
     const agent = await findApiAgent(agentParam);
@@ -1701,11 +1661,12 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
     if (!isFullScope(principal)) return forbidden("create requires a full-scope token");
     const body: any = await readJsonBody(req);
     if (body === INVALID_JSON) return invalidJsonBody();
+    const textBad = textFieldsProblem(body, ["name", "dir", "purpose", "model", "effort", "project", "runtime", "piBase"]); // 先看原文再 trim，口径同 cron（lib/flag-like.ts）
+    if (textBad) return apiJson(400, textBad);
     const name = String(body?.name || "").trim();
     const dir = String(body?.dir || "").trim();
     const purpose = String(body?.purpose || "").trim();
-    // v2.10+ 可选钉模型/effort(owner 2026-07-16:「新建 agent 加选模型和 Effort」)。
-    // 透传给 manager create --model/--effort,校验(别名/合法档位)由 manager 做。
+    // 可选钉模型 / effort：透传给 manager create --model/--effort，别名与合法档位由 manager 校验
     const model = String(body?.model || "").trim();
     const effort = String(body?.effort || "").trim();
     // v2.21+ 可选归属 project(缺省由 manager 按 dir 自动归属/建组)
@@ -1722,6 +1683,7 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
     // 自由文本不会被当成 flag（manager/create-args.ts 注释：曾可用 purpose 替换整个命令黑名单）。
     const flagLike = firstFlagLikeField({ name, dir, project, model, effort });
     if (flagLike) return apiJson(400, { ok: false, error: `${flagLike} 不能以 "-" 开头` });
+    if (model && !isSafeModelArg(model)) return apiJson(400, { ok: false, error: "model 含非法字符" });
     const createArgs = ["create", name, dir];
     if (purpose) createArgs.push("--purpose", purpose);
     if (model) createArgs.push("--model", model);
@@ -1755,6 +1717,8 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
       return apiJson(400, { ok: false, error: 'agent/sessionId/cwd 不能以 "-" 开头' });
     }
     if (!isValidSessionId(sessionId)) return apiJson(400, { ok: false, error: "invalid sessionId" });
+    // 收编 / 分叉 / 接管大总管的会话同样要 master 在 scope 内（按会话 id 读历史同一个判定）
+    if (masterSessionHidden(principal, locateSessionFile(sessionId, runtime || undefined, cwd || undefined), MASTER_DIR)) return notInScope("master");
     // 只读来源（Codex 在接线前）不能收编；以前这里不校验，未知值会被悄悄当 Claude Code 起
     if (runtime && !managedFor(runtime)) {
       return apiJson(400, { ok: false, error: `runtime must be one of: ${manageableRuntimeIds().join(", ")}` });
@@ -1764,10 +1728,8 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
     const args = ["resume", agent, sessionId];
     if (cwd) args.push(cwd);
     if (runtime && runtime !== DEFAULT_RUNTIME) args.push("--runtime", runtime);
-    // ⚠ 必须**同步等**（与 POST /agents 的 create 一致）：原来做成 202 + 后台，
-    // 结果只进事件流 → 界面只看到「已受理」，后台失败（最常见：默认名字与已有
-    // agent 撞车 → manager 报「已存在」）时用户完全看不到原因，只会认为"收编失败"。
-    // 代价是这个请求要挂 10-40s（起窗口 + 等就绪），browser 侧超时给到 180s。
+    // ⚠ 必须**同步等**（与 POST /agents 的 create 一致）：做成 202 + 后台的话结果只进事件流，后台失败（最常见：默认名字
+    // 与已有 agent 撞车 → manager 报「已存在」）时用户看不到原因。代价是请求要挂 10-40s（起窗口 + 等就绪），browser 侧超时给到 180s。
     //
     // D1-5 占用闸：这个会话正被本机一个活的 interactive Claude Code 开着（用户在别的终端里），
     // 直接 resume 会让两个进程同时写同一个 session。没带 fork / takeover 就回 409 + {live,pid}，
@@ -1866,69 +1828,8 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
   // ── v2.20+ /cron —— 定时任务管理面(owner 2026-08-26「cron 没有 UI」)。
   // 与 /peers 同款:全权 token 门禁,mutation 全走 runManager 复用 CLI 校验,
   // 与 Discord /cron 面板、CLI 手管三方等价互不打架。
-  if (path === "/cron" || path.startsWith("/cron/")) {
-    if (!isFullScope(principal)) return forbidden("cron management requires a full-scope token");
-    if (path === "/cron" && req.method === "GET") {
-      const jobs = await loadJobs();
-      return apiJson(200, {
-        ok: true,
-        jobs: jobs.map((j) => ({
-          id: j.id,
-          name: j.name,
-          schedule: j.schedule,
-          dir: j.dir.replace(process.env.HOME || "", "~"),
-          prompt: j.prompt, // 全文——编辑界面要用,不像 cron-list 截 80
-          enabled: j.enabled,
-          lastRun: j.lastRun ?? null,
-          nextRun: j.nextRun ?? null,
-          targetAgent: j.targetAgent ?? null,
-          effort: j.effort ?? null, // null = 缺省(临时 agent 走 medium)
-          project: j.project ?? null, // null = 按 dir 自动解析
-          createdAt: j.createdAt,
-        })),
-      });
-    }
-    if (path === "/cron" && req.method === "POST") {
-      const body: any = await readJsonBody(req);
-      if (body === INVALID_JSON) return invalidJsonBody();
-      const name = String(body?.name ?? "").trim();
-      const schedule = String(body?.schedule ?? "").trim();
-      const prompt = String(body?.prompt ?? "").trim();
-      const dir = String(body?.dir ?? "~").trim() || "~";
-      if (!name || !schedule || !prompt) {
-        return apiJson(400, { ok: false, error: "name/schedule/prompt required" });
-      }
-      const extra: string[] = body?.targetAgent ? ["--target-agent", String(body.targetAgent)] : [];
-      if (body?.effort) extra.push("--effort", String(body.effort));
-      if (body?.project) extra.push("--project", String(body.project));
-      const r = await runManager("cron-add", name, schedule, dir, ...extra, prompt);
-      return apiJson(r?.ok ? 200 : 400, r ?? { ok: false, error: "manager failed" });
-    }
-    const cronAction = path.match(/^\/cron\/([^/]+)\/(toggle|remove|edit)$/);
-    if (cronAction && req.method === "POST") {
-      const id = decodeURIComponent(cronAction[1]);
-      const action = cronAction[2];
-      let r: any;
-      if (action === "toggle") r = await runManager("cron-toggle", id);
-      else if (action === "remove") r = await runManager("cron-remove", id);
-      else {
-        const body: any = await readJsonBody(req);
-        if (body === INVALID_JSON) return invalidJsonBody();
-        const flags: string[] = [];
-        if (body?.schedule) flags.push("--schedule", String(body.schedule));
-        if (body?.prompt) flags.push("--prompt", String(body.prompt));
-        if (body?.name) flags.push("--name", String(body.name));
-        if (body?.dir) flags.push("--dir", String(body.dir));
-        if (body?.effort) flags.push("--effort", String(body.effort));
-        // project: 传 "" / null 表示清除(回到按 dir 解析),manager 侧用 "-" 表示
-        if (body?.project !== undefined) flags.push("--project", body.project ? String(body.project) : "-");
-        if (!flags.length) return apiJson(400, { ok: false, error: "nothing to edit" });
-        r = await runManager("cron-edit", id, ...flags);
-      }
-      return apiJson(r?.ok ? 200 : 400, r ?? { ok: false, error: "manager failed" });
-    }
-    return apiJson(405, { ok: false, error: "method not allowed" });
-  }
+  const cronRes = await handleCronRoutes(req, path, principal, { runManager, loadJobs }); // /cron*（bridge/cron-routes.ts）
+  if (cronRes) return cronRes;
 
   // ── v2.20.2+ /auto-compact —— 自动存记忆+compact 的阈值/闲置门槛(owner:
   // 「设置里看不到」——此前只有配置文件可改)。写入 Claudestra 自己的
