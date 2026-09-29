@@ -44,3 +44,12 @@ export function browserStore(): Store | null {
 
 /** 右栏临时浮出被收回的那一次（use-panes.ts）：只管这一次选中，选中换成别的或清空就忘掉，之后再选回它也照样浮出 */
 export const keepDismissed = (dismissed: string | null, peekKey: string | null): string | null => (peekKey === dismissed ? dismissed : null);
+
+/**
+ * 点右栏的收起 / 展开：临时浮出时只收回这一次；常驻展开时收起，并把当前选中记为已收回——不记的话同一轮就按「收起 + 有选中」
+ * 临时浮出，看起来没收，要点第二次（单测）；收起着就展开
+ */
+export function toggleRight(p: Panes, peek: boolean, peekKey: string | null, dismissed: string | null): { panes: Panes; dismissed: string | null } {
+  if (peek) return { panes: p, dismissed: peekKey };
+  return { panes: { ...p, right: !p.right }, dismissed: p.right ? peekKey : dismissed };
+}

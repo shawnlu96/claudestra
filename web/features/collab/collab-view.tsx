@@ -225,7 +225,7 @@ export function CollabView({ project }: { project: string }) {
       ) : (
         <PaneLayout peekKey={openTask ?? (page ? JSON.stringify(sel) : null)} tr={tr} right={right} left={<Outline ov={o} lines={lines} filter={filter}
           onFilter={setFilter} waits={waits} onWaits={() => select({ kind: "waits" })} selected={openTask} onPick={pickTask} tr={tr} />}>
-          <CenterPane team={team} ov={o} lines={lines} actionText={actionText} hot={advance?.id ?? null}
+          <CenterPane team={team} canvas={canvas} lines={lines} actionText={actionText} hot={advance?.id ?? null}
             selection={openTask ? { kind: "task", id: openTask } : sel} focus={focus} onSelect={select} tr={tr} />
         </PaneLayout>
       )}

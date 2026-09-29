@@ -1,10 +1,10 @@
 /**
  * 因果线画布的几何（纯函数，单测 tests/web-collab-causal.test.ts）：边的曲线、边标签避让、视口（打开时摆一次、明确选中才居中、
- * 数据刷新不动用户拖好的位置、「适配全部」）、视口外还剩几件、点提示往那边平移、重排后钉住正在看的框（reanchor）。
+ * 数据刷新不动用户拖好的位置、「适配全部」）、视口外还剩几件、点提示往那边平移。
  * 标签放在列缝里（出发节点右边那道缝、到达节点左边那道缝，都不行再沿曲线试），每处再上下错开几档；压到节点或别的标签就换，
  * 全都压到就退成一个点（悬停看全文，点开右侧属性页）。宽度按字数估、以列缝为上限，放不全的省略号截断、悬停看全文。
  */
-import { COL_GAP, VIEW_PAD, type Box, type Canvas, type CEdge } from "./causal-model";
+import { COL_GAP, type Box, type Canvas, type CEdge } from "./causal-model";
 
 export interface View { x: number; y: number; k: number }
 /** 外面要求居中到某个任务；seq 每次点都 +1，同一个任务再点一次也会再居中 */
@@ -13,9 +13,10 @@ export interface Focus { id: string; seq: number }
 export interface ViewState { view: View; placed: boolean; centered: number }
 export interface EdgeLabel { id: string; x: number; y: number; w: number; h: number; dot: boolean }
 
+export const VIEW_PAD = 24;
 /**
  * 缩放下限：节点标题基准 12.5px（--fs-2），乘 0.96 正好 12px，再小就认不出。打开时、「适配全部」、滚轮缩小共用它，
- * 放不下就平移（拖拽）；布局已经按视口宽度排过（causal-model.ts），大多数项目在这个比例下一屏放得下
+ * 放不下就平移（「还有 N 件」提示 / 拖拽）
  */
 export const MIN_K = 0.96, MAX_K = 1.6;
 const LABEL_H = 18, GAP = 3, LABEL_MAX_W = COL_GAP - 2 * GAP;
@@ -135,53 +136,6 @@ export function reconcileView(st: ViewState, c: Canvas, vw: number, vh: number, 
     next = { ...next, centered: focus.seq, ...(b ? { view: centerOn(next.view, b, vw, vh) } : {}) };
   }
   return next;
-}
-
-/** 画布视口的宽高（CausalCanvas 量到的） */
-export interface Port { w: number; h: number }
-
-/** 视口中正在看的那个框：选中的任务（在视口里）优先，否则中心离视口中心最近的；没有框 = null */
-function anchorOf(c: Canvas, v: View, p: Port, prefer: string | null): { id: string; box: Box } | null {
-  const all = boxesOf(c);
-  const inView = (b: Box) => v.x + (b.x + b.w) * v.k > 0 && v.x + b.x * v.k < p.w && v.y + (b.y + b.h) * v.k > 0 && v.y + b.y * v.k < p.h;
-  const pid = prefer ? c.boxOf.get(prefer) : undefined;
-  const picked = all.find((x) => x.id === pid && inView(x.box));
-  if (picked) return picked;
-  const d = (b: Box) => Math.hypot(v.x + (b.x + b.w / 2) * v.k - p.w / 2, v.y + (b.y + b.h / 2) * v.k - p.h / 2);
-  return all.reduce<{ id: string; box: Box } | null>((best, x) => (!best || d(x.box) < d(best.box) ? x : best), null);
-}
-
-const clamp = (n: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, lo > hi ? lo : n));
-
-/** 一条轴上别一边露白、另一边还切着内容：整张放得下就整张放进来，放不下就两边都不露白（只收回露白的那一截） */
-function tidyAxis(at: number, size: number, port: number): number {
-  const lo = port - VIEW_PAD - size;
-  return size <= port - VIEW_PAD * 2 ? clamp(at, VIEW_PAD, lo) : clamp(at, lo, VIEW_PAD);
-}
-
-/**
- * 重排后的收拾：钉住之后一边露白、另一边切着内容时，收回露白的那一截（use-viewport.ts 下一帧带过渡滑过去）。
- * 挪动距离不超过露白的量，被钉的框仍在视口里（单测）。没什么可收的返回原对象
- */
-export function tidyView(c: Canvas, v: View, p: Port): View {
-  const x = tidyAxis(v.x, c.w * v.k, p.w), y = tidyAxis(v.y, c.h * v.k, p.h);
-  return x === v.x && y === v.y ? v : { ...v, x, y };
-}
-
-/**
- * 重排 / 视口变化后的补偿：侧栏收起展开会改视口宽，causal-model.ts 按宽重排，所有框都可能挪位。
- * 把正在看的框钉在视口里原来的位置（相对视口：侧栏收起时它跟着视口边一起滑，和别的应用一样）；新视口放不下那个位置就挪进来。
- * 框换了 id（被折叠）按 boxOf 找它现在的框。结果和原来一样就返回原对象（渲染时对齐，不来回触发）
- */
-export function reanchor(v: View, prev: { c: Canvas; p: Port }, c: Canvas, p: Port, prefer: string | null): View {
-  const a = anchorOf(prev.c, v, prev.p, prefer);
-  const nid = a && (c.boxOf.get(a.id) ?? a.id);
-  const nb = nid ? boxesOf(c).find((x) => x.id === nid)?.box : undefined;
-  if (!a || !nb) return v;
-  const m = VIEW_PAD / 2;
-  const sx = clamp(v.x + a.box.x * v.k, m, p.w - nb.w * v.k - m), sy = clamp(v.y + a.box.y * v.k, m, p.h - nb.h * v.k - m);
-  const x = sx - nb.x * v.k, y = sy - nb.y * v.k;
-  return x === v.x && y === v.y ? v : { ...v, x, y };
 }
 
 export type Dir = "right" | "down" | "left" | "up";

@@ -4,11 +4,11 @@
  * 关掉详情 = 收回去；临时浮出不写存储。
  */
 import { useState } from "react";
-import { browser, browserStore, keepDismissed, readPanes, WIDE, writePanes, type Panes } from "./panes";
+import { browser, browserStore, keepDismissed, readPanes, toggleRight, WIDE, writePanes, type Panes } from "./panes";
 
 /**
- * right = 右栏此刻是否展开（含临时浮出）；peek = 这次展开是临时的（浮在画布上，不挤画布，也就不触发重排）。
- * 临时浮出时点收起 = 只把这一次收回去，选中换了再浮出
+ * right = 右栏此刻是否展开（含临时浮出）；peek = 这次展开是临时的（浮在画布上，不挤画布）。
+ * 点收起一次就收：临时浮出时只收回这一次，常驻时收起并不再为当前选中浮出；选中换了再浮出
  */
 export function usePanes(peekKey: string | null) {
   const [panes, setPanes] = useState<Panes>(() => readPanes(browserStore(), browser.innerWidth ?? WIDE));
@@ -24,6 +24,10 @@ export function usePanes(peekKey: string | null) {
     right: panes.right || peek,
     peek,
     toggleLeft: () => save({ ...panes, left: !panes.left }),
-    toggleRight: () => (peek ? setDismissed(peekKey) : save({ ...panes, right: !panes.right })),
+    toggleRight: () => {
+      const t = toggleRight(panes, peek, peekKey, dismissed);
+      if (t.panes !== panes) save(t.panes);
+      setDismissed(t.dismissed);
+    },
   };
 }

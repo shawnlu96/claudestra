@@ -2,14 +2,14 @@
 /**
  * 因果线画布（v4 中区「因果线」标签）：布局全在 causal-model.ts，这里只画。事项框、节点、折叠组是 HTML（好点、好排字），
  * 边是底下一层 SVG（实线已成立 / 流动虚线判定中 / 灰点线还没到，边上写条件原文）；整层用一个 transform 平移缩放。
- * 拖动平移、滚轮缩放、「适配全部」、点「还有 N 件」往那边平移；外面明确选中任务时把它平移到视口中间，重排 / 刷新时正在看的框不动。
+ * 拖动平移、滚轮缩放、「适配全部」、点「还有 N 件」往那边平移；外面明确选中任务时把它平移到视口中间，数据刷新不动视口。
  * 视口 hook 在 use-viewport.ts，标签避让与视口几何在 canvas-view.ts；选中状态的形状在 v4-selection.ts。
  */
 import { useMemo } from "react";
-import type { LedgerOverview, LineView, Tr } from "../collab-model";
-import { causalCanvas, type Box, type Canvas, type CEdge, type CNode } from "./causal-model";
+import type { LineView, Tr } from "../collab-model";
+import type { Box, Canvas, CEdge, CNode } from "./causal-model";
 import { edgePath, placeLabels, type Focus } from "./canvas-view";
-import { usePort, useSettled, useViewport } from "./use-viewport";
+import { usePort, useViewport } from "./use-viewport";
 import { depKey, edgeSel, type Selection } from "./v4-selection";
 import { StageBar } from "./stage-bar";
 import v from "./v4.module.css";
@@ -56,7 +56,7 @@ function EdgeLabels({ canvas, selection, onSelect }: { canvas: Canvas; selection
 }
 
 export function CausalCanvas(props: {
-  ov: Pick<LedgerOverview, "tasks" | "items" | "deps">;
+  canvas: Canvas;
   lines: ReadonlyMap<string, LineView>;
   actionText: (id: string) => string;
   selection: Selection;
@@ -66,16 +66,14 @@ export function CausalCanvas(props: {
   onSelect: (s: Selection) => void;
   tr: Tr;
 }) {
-  const { ov, lines, selection, focus, onSelect, tr } = props;
+  const { canvas, lines, selection, focus, onSelect, tr } = props;
   const { box, port } = usePort();
-  const laid = useSettled(port);
-  const canvas = useMemo(() => causalCanvas(ov, { width: laid.w, height: laid.h }), [ov, laid.w, laid.h]);
-  const selId = selection?.kind === "task" ? selection.id : null;
-  const { view, glide, bump, fitAll, pan, off, handlers } = useViewport(canvas, port, focus, selId, () => onSelect(null));
+  const { view, glide, bump, fitAll, pan, off, handlers } = useViewport(canvas, port, focus, () => onSelect(null));
 
+  const selId = selection?.kind === "task" ? selection.id : null;
   return (
     <div ref={box} className={v.canvas} {...handlers}>
-      {port.w > 0 && <div className={`${v.world} ${glide ? v.glide : ""}`} style={{ transform: `translate(${view.x}px, ${view.y}px) scale(${view.k})` }}>
+      <div className={`${v.world} ${glide ? v.glide : ""}`} style={{ transform: `translate(${view.x}px, ${view.y}px) scale(${view.k})` }}>
         {canvas.groups.map((g) => (
           <div key={g.id} className={v.group} style={{ left: g.x, top: g.y, width: g.w, height: g.h }}>
             <span className={v.gt}>{g.title || tr("未归事项")}</span>
@@ -101,7 +99,7 @@ export function CausalCanvas(props: {
             {tr("{n} 件在等 {x}", { n: f.members.length, x: f.waitFor })}
           </button>
         ))}
-      </div>}
+      </div>
       <div className={v.tools}>
         <button type="button" className={`${v.tool} ${bump ? v.bump : ""}`} onClick={fitAll}>{tr("适配全部")}</button>
       </div>

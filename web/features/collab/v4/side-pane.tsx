@@ -1,7 +1,7 @@
 "use client";
 /**
  * 左右两栏的外壳：朝画布那边一条 28px 的窄条，上面是收起 / 展开按钮（位置不随状态变）；收起时内容宽度过渡到 0。
- * float = 右栏临时浮出（use-panes.ts 的 peek）：内容盖在画布上而不挤它，画布不重排、视口不跳
+ * float = 右栏临时浮出（use-panes.ts 的 peek）：内容盖在画布上而不挤它
  */
 import type { Tr } from "../collab-model";
 import { Icon } from "../collab-icons";
