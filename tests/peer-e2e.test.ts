@@ -535,4 +535,65 @@ describe("T59 P1-2：会话缓存，传输与 signal 按请求", () => {
     expect((await b)!.status).toBe(200);
     expect(bUsed).toBeGreaterThanOrEqual(2); // 自己的 hello + 记录帧
   });
+
+  // r2：对方 Codex 复验的两条探针（原样搬来，断言改成正确行为）——等握手的请求不能被别人的传输和 signal 绑住
+  const gate = () => {
+    let resolve!: () => void;
+    const promise = new Promise<void>((r) => (resolve = r));
+    return { promise, resolve };
+  };
+  const pause = (ms: number) => new Promise((r) => setTimeout(r, ms));
+  const endpoint = "http://b.local/api/v1/agents";
+  type Init = Parameters<Awaited<ReturnType<typeof outbound>>["serve"]>[1];
+
+  test("r2①：A 的握手挂住时，B 自己被取消会立刻结束，不陪着干等", async () => {
+    const { out, serve } = await outbound();
+    const entered = gate(), release = gate();
+    const a = out.fetch(endpoint, { method: "GET" }, async (u: string, init: Init) => {
+      entered.resolve();
+      await release.promise;
+      return serve(u, init);
+    });
+    await entered.promise;
+    const ctrl = new AbortController();
+    let bSettled = false;
+    const b = out.fetch(endpoint, { method: "GET" }, async (u: string, init: Init) => {
+      ctrl.signal.throwIfAborted();
+      return serve(u, init);
+    }).catch((e) => e).finally(() => (bSettled = true));
+    await pause(20);
+    ctrl.abort();
+    await pause(150);
+    const settled = bSettled;
+    release.resolve();
+    await Promise.all([a, b]);
+    expect(settled).toBe(true);
+  });
+
+  test("r2②：A、B 先后被取消，没被取消的 C 用自己的传输握手并成功", async () => {
+    const { out, serve } = await outbound();
+    const aEntered = gate(), bEntered = gate();
+    const aAbort = new AbortController(), bAbort = new AbortController();
+    let cUsed = 0;
+    const blocked = (g: ReturnType<typeof gate>, ctrl: AbortController) => async () => {
+      g.resolve();
+      return await new Promise<Response>((_, reject) => ctrl.signal.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")), { once: true }));
+    };
+    const a = out.fetch(endpoint, { method: "GET" }, blocked(aEntered, aAbort)).catch((e) => e);
+    await aEntered.promise;
+    const b = out.fetch(endpoint, { method: "GET" }, blocked(bEntered, bAbort)).catch((e) => e);
+    const c = out.fetch(endpoint, { method: "GET" }, async (u: string, init: Init) => {
+      cUsed++;
+      return serve(u, init);
+    }).catch((e) => e);
+    await pause(20);
+    aAbort.abort();
+    await bEntered.promise;
+    await pause(20);
+    bAbort.abort();
+    await Promise.all([a, b]);
+    const result = await c;
+    expect(cUsed).toBeGreaterThanOrEqual(1);
+    expect((result as Response).status).toBe(200);
+  });
 });

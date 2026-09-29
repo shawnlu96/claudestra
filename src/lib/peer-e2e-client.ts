@@ -111,7 +111,6 @@ function throwIfInnerReplay(payload: Uint8Array): void {
 
 export class PeerE2eClient {
   private session: ClientSession | null = null;
-  private pending: Promise<ClientSession> | null = null;
   private readonly now: () => number;
   private readonly limits: BodyLimits;
   constructor(private readonly d: ClientDeps) {
@@ -194,28 +193,15 @@ export class PeerE2eClient {
   }
 
   /**
-   * 同一时刻只握一次手，别的请求等它。等的是别人发起的握手（用的是别人的传输和 signal）而它失败了——比如发起的那个请求被取消——
-   * 就用自己的传输再握一次，不陪着一起失败（T59）
+   * 有可用会话就共用；没有就用本次请求自己的传输握手，不排在别人的握手后面（T59 r2）。共用进行中的握手会把等的人
+   * 绑在发起者的传输和 signal 上：发起者挂住，等的人自己被取消了也要干等；发起者被取消，等的人跟着失败。
+   * 代价是冷启动时并发的几个请求各握一次手（握完谁都能用，最后握完的留作会话；对方 hello 限速每个联系人每分钟 20 次）
    */
   private async ensure(post: E2ePost): Promise<ClientSession> {
     const s = this.session;
     if (s && s.expiresAt > this.now() && s.nextRid < RID_CAP) return s;
     this.session = null;
-    const shared = this.pending;
-    if (shared) {
-      try {
-        return await shared;
-      } catch (e) {
-        console.warn(`[peer-e2e] 别的请求发起的握手失败（${(e as Error).message}），用本次请求自己的传输重握`);
-      }
-    }
-    if (!this.pending || this.pending === shared) {
-      const mine = this.handshake(post).finally(() => {
-        if (this.pending === mine) this.pending = null;
-      });
-      this.pending = mine;
-    }
-    return this.pending;
+    return this.handshake(post);
   }
 
   /** 握手阶段这个请求的记录帧还没发：失败都是 sent=false（重握手那一次由 fetch 改判成状态未知） */
