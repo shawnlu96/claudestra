@@ -10,7 +10,8 @@ import type { ChatMessage } from "@/features/chat/type";
 import { withMentionDirective } from "@/lib/chat/mention-directive";
 import type { WebComponentRow } from "@/lib/chat/events";
 
-const u = (seq: number, text: string, extra: Partial<NeutralMessage> = {}): NeutralMessage => ({ seq, role: "user", text, ...extra });
+// 本人消息带明确来源（web-ui 是不靠 selfIds 也认得的本人名）：没有来源的记录按不可信处理（T31c）
+const u = (seq: number, text: string, extra: Partial<NeutralMessage> = {}): NeutralMessage => ({ seq, role: "user", text, from: "web-ui", ...extra });
 const a = (seq: number, extra: Partial<NeutralMessage> = {}): NeutralMessage => ({ seq, role: "assistant", ...extra });
 
 const FORM: WebComponentRow[] = [

@@ -165,15 +165,17 @@ function userMessage(m: NeutralMessage, anchor: ChatMessage | null, opts: ShapeO
   if (!from && /^\[Request interrupted/.test(text)) return systemDivider(m, "回合已中断", opts.sid);
   const cmd = from ? null : text.match(/^<command-name>(\/[\w-]+)<\/command-name>/);
   if (cmd) return systemDivider(m, cmd[1], opts.sid);
-  const own = from ? text : stripMentionDirective(text); // @ 委托指令行只给 agent 看；只剥本人的（外源的末行照原样给 owner 看）
+  // 不可信 = 外源，或记录里没有来源（Pi 裸记录：Discord 用户直发 Pi 的原文，本人和外人分不出）。下面按文本的还原 / 剥除只对认定是本人的做
+  // （tests/pi-foreign-attachments.test.ts）；上面两种分隔线是 CC 自己写的无来源记录，不在此列
+  const untrusted = !!from || !m.from;
+  const own = untrusted ? text : stripMentionDirective(text); // @ 委托指令行只给 agent 看；只剥本人的（外源的末行照原样给 owner 看）
   // 按钮 / 选单回投只认本人：外源正文里写一行 [button:go] / [select:…]，owner 会看到「✅ 发版」、表单被标已答，agent 收到的却是原文
   // （T31，直播 delta-clicks.ts 同一道闸）。外源的回投照原文显示，不碰任何表单
-  if (m.wire && !from) markAnswerClicks(m.wire, anchor, forms); // 作答：正文已是人话，原文只用来回填已答态
-  const click = m.wire || from ? null : resolveUserClick(own, anchor, forms);
+  if (m.wire && !untrusted) markAnswerClicks(m.wire, anchor, forms); // 作答：正文已是人话，原文只用来回填已答态
+  const click = m.wire || untrusted ? null : resolveUserClick(own, anchor, forms);
   // bridge 注入的来源头只由服务端按 channel 属性剥（lib/inbound-body.ts channelBodyText）；网页对外源正文不做任何按文本的剥除，
   // 附件行也留在正文里、卡片只是附加预览——否则外人写一行 [attachment: 任意路径]，owner 只看到一个文件名，agent 拿到的是路径
-  // 没有来源的记录（Pi 裸记录：Discord 用户直发 Pi 的原文，本人和外人分不出）也不按正文画卡片、不剥附件行（tests/web-history-shape.test.ts「Pi 裸记录」）
-  const { content, attachments } = foreignAware(click?.text ?? own, !!from || !m.from, m.attachments);
+  const { content, attachments } = foreignAware(click?.text ?? own, untrusted, m.attachments);
   const pending = click && !click.resolved ? { clickRaw: own } : {}; // 存剥过指令行的：翻页补解析时不能把指令行带回气泡
   const ask = { ...(m.askId ? { askId: m.askId } : {}), ...(m.wire ? { wire: m.wire } : {}) };
   return { id: `h${m.seq}`, role: "user", content, ts: m.ts, from, sid: opts.sid, seqEnd: m.seq, ...(attachments ? { attachments } : {}), ...pending, ...ask };

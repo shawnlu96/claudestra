@@ -27,7 +27,9 @@ describe("isSelfSource（本人的所有来源都算本人）", () => {
   });
 });
 
-const u = (seq: number, text: string, extra: Partial<NeutralMessage> = {}): NeutralMessage => ({ seq, role: "user", text, ts: `2026-09-27T00:00:${String(seq).padStart(2, "0")}Z`, ...extra });
+// 本人消息带明确来源（web-ui 是不靠 selfIds 也认得的本人名）：没有来源的记录按不可信处理（T31c）
+const u = (seq: number, text: string, extra: Partial<NeutralMessage> = {}): NeutralMessage =>
+  ({ seq, role: "user", text, from: "web-ui", ts: `2026-09-27T00:00:${String(seq).padStart(2, "0")}Z`, ...extra });
 const a = (seq: number, extra: Partial<NeutralMessage> = {}): NeutralMessage => ({ seq, role: "assistant", ts: `2026-09-27T00:00:${String(seq).padStart(2, "0")}Z`, ...extra });
 
 describe("toChatMessages（历史记录 → 气泡）", () => {

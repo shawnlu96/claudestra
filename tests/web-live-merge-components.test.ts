@@ -14,7 +14,7 @@ import type { WebComponentRow } from "@/lib/chat/events";
 const btn = (...ids: string[]): WebComponentRow => ({ type: "buttons", buttons: ids.map((id) => ({ id, label: `L${id}` })) });
 const form = (id: string, vals = ["a", "b"]): WebComponentRow => ({ type: "multiselect", id, placeholder: `P${id}`, options: vals.map((v) => ({ label: `O${v}`, value: v })) });
 const A = (seq: number, comps: WebComponentRow[]): NeutralMessage => ({ seq, role: "assistant", text: `t${seq}`, replyText: `r${seq}`, replyComponents: comps });
-const U = (seq: number, text: string): NeutralMessage => ({ seq, role: "user", text });
+const U = (seq: number, text: string): NeutralMessage => ({ seq, role: "user", text, from: "web-ui" }); // 本人：没有来源的记录按不可信处理（T31c）
 // toChatMessages 会就地回填 replyClicks，每次给一份新拷贝
 const shape = (items: NeutralMessage[]) => toChatMessages(JSON.parse(JSON.stringify(items)) as NeutralMessage[], { sid: "s" });
 const live = (split: number, items: NeutralMessage[]) => mergeContiguousAssistant(shape(items.slice(0, split)), shape(items.slice(split)));

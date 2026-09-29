@@ -237,7 +237,7 @@ describe("composeFormSend（发送时原位换成 [select:…]）", () => {
 
 describe("还原（历史 + 他端实时）", () => {
   const ts = (seq: number) => `2026-09-28T00:00:${String(seq).padStart(2, "0")}Z`;
-  const u = (seq: number, text: string): NeutralMessage => ({ seq, role: "user", text, ts: ts(seq) });
+  const u = (seq: number, text: string): NeutralMessage => ({ seq, role: "user", text, from: "web-ui", ts: ts(seq) }); // 本人：没有来源的记录按不可信处理（T31c）
   const a = (seq: number, extra: Partial<NeutralMessage>): NeutralMessage => ({ seq, role: "assistant", ts: ts(seq), ...extra });
 
   test("wireToDisplay：值全对得上才还原并 commit；代码块里的行、未知 id、未知值原样", () => {
