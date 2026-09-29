@@ -275,6 +275,10 @@ describe("testenv（测试子进程的最小 env 必须经 testChildEnv）", () 
     expect(count(`Bun.spawn(["b"], { env: process.env });\nconst m = /x/.exec(s);`)).toBe(0);
     expect(count(`const E = { ...(process.env as Record<string, string>), A: "1" };\nBun.spawn(["b"], { env: E });`)).toBe(0);
   });
+  test("展开一个来自 testChildEnv 的变量算安全；展开手写字面量的变量照样计数", () => {
+    expect(count(`const base = testChildEnv({ A: "1" });\nBun.spawnSync(["a"], { env: { ...base, B: "2" } });`)).toBe(0);
+    expect(count(`const base = { PATH: "/bin" };\nBun.spawnSync(["a"], { env: { ...base, B: "2" } });`)).toBe(1);
+  });
   test("继承当前环境、经 testChildEnv、认不出来源的参数不算；tests 以外的文件、字符串里的写法不算", () => {
     expect(count(`Bun.spawn(["b"], { env: { ...process.env, A: "1" } });`)).toBe(0);
     expect(count(`Bun.spawn(["c"], { env: testChildEnv({ A: "1" }) });`)).toBe(0);

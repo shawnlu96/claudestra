@@ -1,5 +1,5 @@
 /** 测试进程的隔离闸（src/lib/test-guard.ts、bridge-url 的测试闸、readDotenvFileSync 的短路、tests/test-env.ts） */
-import { mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
@@ -7,6 +7,7 @@ import { configuredBridgePort, DEFAULT_BRIDGE_PORT, dotenvBridgePort, resolveBri
 import { readDotenvFileSync, repoEnvVar } from "../src/lib/env-file.js";
 import { REPO_ROOT } from "../src/lib/repo-root.js";
 import { assertNoRepoEnvWriteInTest, isRepoEnvFile, isTestProcess, testSafeStateDir } from "../src/lib/test-guard.js";
+import { clearTestStateDir } from "./state-files.ts";
 import { testChildEnv } from "./test-env.ts";
 
 const KEYS = ["BRIDGE_URL", "BRIDGE_PORT", "CLAUDESTRA_SANDBOX", "CLAUDESTRA_STATE_DIR", "CONTROL_CHANNEL_ID"] as const;
@@ -133,6 +134,24 @@ describe("状态目录", () => {
     expect(testSafeStateDir(fake, fake, { CLAUDESTRA_TEST: "1" })).toBe(fake);
     expect(testSafeStateDir("/sbx/state", real, { CLAUDESTRA_TEST: "1" })).toBe("/sbx/state");
     expect(testSafeStateDir(real, real, {})).toBe(real);
+  });
+});
+
+describe("清空测试状态子目录（tests/state-files.ts）", () => {
+  test("不在临时目录下（显式指向真实状态目录 / 另一套实例）→ 抛错、不删；临时目录下照清", () => {
+    expect(() => clearTestStateDir("/Users/someone/.claude-orchestrator/agent-settings")).toThrow("不在系统临时目录下");
+    const dir = mkdtempSync(join(tmpdir(), "tg-clear-"));
+    const sub = join(dir, "agent-settings");
+    try {
+      mkdirSync(sub);
+      writeFileSync(join(sub, "agent-x.json"), "{}");
+      expect(() => clearTestStateDir(sub, () => false)).toThrow("拒绝清空");
+      expect(existsSync(join(sub, "agent-x.json"))).toBe(true);
+      clearTestStateDir(sub);
+      expect(existsSync(sub)).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 

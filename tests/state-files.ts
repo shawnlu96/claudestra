@@ -5,6 +5,7 @@
  */
 import { afterAll, afterEach, beforeAll, beforeEach } from "bun:test";
 import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { isUnderTempDir } from "../src/lib/test-guard.js";
 
 /** 每条用例前记下 paths 的原样并调用 seed 写入本用例的内容，用例结束后还原 */
 export function ownStateFilesPerTest(paths: string[], seed: () => void): void {
@@ -22,11 +23,21 @@ export function ownStateFilesPerTest(paths: string[], seed: () => void): void {
 }
 
 /**
+ * 清空状态目录下的 dir——只在它（解析软链后）位于系统临时目录下时（preload 建的状态目录就在这里）。显式设的
+ * CLAUDESTRA_STATE_DIR 可能指向真实的 ~/.claude-orchestrator 或另一套实例，那里的东西不是测试的，删了就没了 → 抛错不删。
+ */
+export function clearTestStateDir(dir: string, isTemp: (p: string) => boolean = isUnderTempDir): void {
+  if (!isTemp(dir)) {
+    throw new Error(`拒绝清空 ${dir}：不在系统临时目录下（CLAUDESTRA_STATE_DIR 显式指向了真实状态目录？去掉它，让 tests/preload.ts 建临时目录）`);
+  }
+  rmSync(dir, { recursive: true, force: true });
+}
+
+/**
  * 本测试文件独占共享状态目录下的 dir（如 agent-settings/）：开跑前清空（别的测试或上一次跑留下的文件不影响「没文件」的断言），
- * 跑完再清空（不留给后面的文件）。文件内用例之间的先后照旧。
+ * 跑完再清空（不留给后面的文件）。文件内用例之间的先后照旧。不在临时目录下就抛错不删（clearTestStateDir）。
  */
 export function ownStateDirForFile(dir: string): void {
-  const clear = () => rmSync(dir, { recursive: true, force: true });
-  beforeAll(clear);
-  afterAll(clear);
+  beforeAll(() => clearTestStateDir(dir));
+  afterAll(() => clearTestStateDir(dir));
 }

@@ -53,7 +53,8 @@ export function assertNoRepoEnvWriteInTest(path: string): void {
 /** 临时目录的根：测试的假 HOME / 状态目录都建在这下面（macOS 上 /tmp、/var/folders 是 /private 下的软链） */
 const TEMP_ROOTS = ["/tmp", "/var/folders"];
 
-function underTemp(p: string): boolean {
+/** 解析软链后在系统临时目录下（测试的假 HOME、preload 建的状态目录都在这里） */
+export function isUnderTempDir(p: string): boolean {
   const c = canonical(p);
   return [tmpdir(), ...TEMP_ROOTS].map(canonical).some((r) => c === r || c.startsWith(`${r}/`));
 }
@@ -67,7 +68,7 @@ function underTemp(p: string): boolean {
  * NODE_ENV 再求值（tests/paths.test.ts）。
  */
 export function testSafeStateDir(dir: string, defaultDir: string, env: Env = process.env): string {
-  if (!isTestProcess(env) || underTemp(dir) || canonical(dir) !== canonical(defaultDir)) return dir;
+  if (!isTestProcess(env) || isUnderTempDir(dir) || canonical(dir) !== canonical(defaultDir)) return dir;
   const tmp = mkdtempSync(join(tmpdir(), "cstra-test-state-"));
   process.stderr.write(`[test-guard] 测试进程的状态目录指向 ${dir}（不是临时目录），已改用 ${tmp}（tests/preload.ts 没加载？在仓库根跑 bun test）\n`);
   env.CLAUDESTRA_STATE_DIR = tmp;
