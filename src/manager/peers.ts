@@ -274,8 +274,7 @@ export async function cmdPeerInviteNew(agentsCsv: string, myUrl: string, force: 
   }
   const check = await checkPeerScope(agents, force), keys = allowLegacy ? null : await inviteKeys();
   if (check.error || (!allowLegacy && !keys)) { output({ ok: false, error: check.error ?? "本机 E2E 密钥读不到，生成不了加密邀请；确实要连就加 --allow-legacy（明文）" }); return; }
-  const id = `inv_${randomBytes(4).toString("hex")}`;
-  const joinSecret = randomBytes(24).toString("hex");
+  const id = `inv_${randomBytes(4).toString("hex")}`, joinSecret = randomBytes(24).toString("hex");
   // 占位 peer 名 "invite:<id>"——兑换时改成对方自报名。占位前缀同时是
   // 「未兑换」的判定依据(过期清扫只吊销这类)。
   const { tokenId, secret } = await issuePeerToken(`invite:${id}`, agents);
@@ -304,8 +303,7 @@ export async function cmdPeerInviteList() {
     return {
       id: i.id, agents: i.agents, createdAt: i.createdAt, expiresAt: i.expiresAt,
       // token secret 还在才拼得出完整串（供「再复制一次」;secret 本就落在本机文件里）
-      invite: tok?.secret && (!i.e2e || keys)
-        ? encodePeerInviteV2({ v: 2, name: selfPeerName(), url: i.url, token: tok.secret, join: i.joinSecret, fp: myFingerprint(), ...(i.e2e ? keys : {}) }) : null,
+      invite: tok?.secret && (!i.e2e || keys) ? encodePeerInviteV2({ v: 2, name: selfPeerName(), url: i.url, token: tok.secret, join: i.joinSecret, fp: myFingerprint(), ...(i.e2e && keys) }) : null,
     };
   });
   output({ ok: true, count: invites.length, invites, ...(swept ? { sweptExpired: swept } : {}) });
