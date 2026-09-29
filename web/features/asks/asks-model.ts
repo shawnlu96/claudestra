@@ -41,8 +41,8 @@ export interface WebAsk {
   bind?: { action: string; params: unknown; version?: string } | null;
   /** 这个凭据能不能答这一条（bridge lib/ask-access.ts canAnswerAsk，列表逐行给）；老 bridge 不给 = 能答 */
   canAnswer?: boolean;
-  /** files = 原消息带的附件（bridge 拷进 inbox 后的名字）；loc = 原消息在会话里的位置（定位过才有） */
-  extra?: { files?: { name: string; attachment: string }[] };
+  /** files = 原消息带的附件（bridge 拷进 inbox 后的名字）；loc = 原消息在会话里的位置（定位过才有）；dismissed / hidden = owner 删掉了（不显示） */
+  extra?: { files?: { name: string; attachment: string }[]; dismissed?: unknown; hidden?: unknown };
 }
 
 /** 原消息带的附件 → 聊天附件条的形状（卡片上直接点开，走 T37 的预览层） */
@@ -74,7 +74,11 @@ export interface AskGroups {
 /** 等你处理的排序：急的在前，卡活的其次，同一档里等得久的在前 */
 const rank = (a: WebAsk) => (a.urgency === "urgent" ? 0 : a.blocking === true ? 1 : 2);
 
-export function groupAsks(asks: WebAsk[]): AskGroups {
+/** owner 删掉的（开着的撤销、已结案的隐藏）：哪一组都不进 */
+export const deletedAsk = (a: Pick<WebAsk, "extra">): boolean => !!(a.extra?.dismissed || a.extra?.hidden);
+
+export function groupAsks(all: WebAsk[]): AskGroups {
+  const asks = all.filter((a) => !deletedAsk(a));
   const open = asks.filter((a) => a.state === "open").sort((x, y) => rank(x) - rank(y) || x.createdAt - y.createdAt);
   return {
     waiting: open.filter((a) => a.kind !== "accept"),
@@ -278,27 +282,31 @@ export const ASK_EVENT_REFRESH_MS = 300;
 /** 第一次拉「待你处理」列表最多等这么久；过了还没回，聊天气泡的按钮先按 partial 放开（asks-store start） */
 export const ASK_LIST_WAIT_MS = 4_000;
 
-/** 乐观作答（T11b 第 8 条）：提交时本地先记一笔，服务端确认前盖在拉到的数据上 */
-export interface PendingAnswer {
+/** 乐观作答（T11b 第 8 条）/ 乐观删卡（T61）：提交时本地先记一笔，服务端确认前盖在拉到的数据上 */
+export type PendingAnswer = {
   /** 提交返回的时刻（还在飞时是点下去的时刻）：盖多久从这里算 */
   at: number;
-  answer: NonNullable<WebAsk["answer"]>;
   /** 请求还没回来：不管多久都不撤（作答接口超时 60 秒，机器忙时拖过 20 秒也正常） */
   inFlight?: boolean;
-}
+} & ({ answer: NonNullable<WebAsk["answer"]>; dismiss?: undefined } | { dismiss: true; answer?: undefined });
 /** 提交返回后盖这么久服务端还说开着：以服务端为准（提交其实没成、或 SSE / 拉取一直没回来），卡片回到「等你处理」 */
 export const PENDING_MAX_MS = 20_000;
 
 /**
  * 把乐观作答盖到服务端列表上：盖上的那条显示成已答（移出「等你处理」、计数减 1）。服务端已不是 open（确认了，或别处先答 / 过期）、
- * 列表里没有了、或盖太久了 → 放进 settled，调用方从待确认表里删掉，此后只看服务端
+ * 列表里没有了、或盖太久了 → 放进 settled，调用方从待确认表里删掉，此后只看服务端。删卡的那条标 dismissed（哪组都不进），服务端也删了才算确认
  */
 export function applyPending(server: WebAsk[], pending: ReadonlyMap<string, PendingAnswer>, now: number): { asks: WebAsk[]; settled: string[] } {
   const settled = new Set<string>();
   const asks = server.map((a) => {
     const p = pending.get(a.id);
     if (!p) return a;
-    if (a.state !== "open" || (!p.inFlight && now - p.at > PENDING_MAX_MS)) {
+    const expired = !p.inFlight && now - p.at > PENDING_MAX_MS;
+    if (p.dismiss) {
+      if (deletedAsk(a) || expired) return settled.add(a.id), a;
+      return { ...a, extra: { ...a.extra, dismissed: true } };
+    }
+    if (a.state !== "open" || expired) {
       settled.add(a.id);
       return a;
     }

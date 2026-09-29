@@ -17,7 +17,7 @@ import { apiJson, forbidden } from "./api-respond.js";
 import { notifyTaskPm } from "./ask-expire.js";
 import { answersGoToAgent, answerTarget, askDb, asksDeps, hhmm, publishAsk, sendCalm } from "./asks.js";
 
-export const DISMISS_REASON = t("owner 删掉，未作答", "deleted by the owner, unanswered");
+const DISMISS_REASON = t("owner 删掉，未作答", "deleted by the owner, unanswered");
 
 export async function dismissFromCard(project: string, id: string, p: Principal): Promise<Response> {
   if (!isOwnerPrincipal(p) || !canReadLedger(p)) return forbidden("only the owner (full-access device) can delete an ask");

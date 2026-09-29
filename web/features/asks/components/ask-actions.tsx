@@ -40,7 +40,7 @@ export function AskActions({ ask, agent }: { ask: WebAsk; agent: string }) {
   const run = async (fn: () => Promise<unknown>, labels: string[], text = "") => {
     if (activeAnswered()) return; // 过渡中（含淡出那 0.45 秒按钮还在）不再提交：键盘回车挡不住 pointer-events
     setBusy(true);
-    markAnswered(ask.id); // 先让这张原地淡出，再移走（answer-cooldown.ts）
+    markAnswered(ask.id, ask); // 先让这张原地淡出，再移走（answer-cooldown.ts，位置按这一刻钉住，ask-fade.ts）
     const done = await asksStore.answer(ask.id, { choices: [], labels, text, via: "web_card", at: Date.now() }, fn, { ok, fail });
     if (!done) clearAnswered(ask.id);
     setBusy(false);
