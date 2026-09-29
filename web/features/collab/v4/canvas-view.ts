@@ -137,8 +137,8 @@ export function reconcileView(st: ViewState, c: Canvas, vw: number, vh: number, 
   return next;
 }
 
-/** 画布视口在页面上的位置和大小（getBoundingClientRect）；锚定补偿按屏幕坐标算，侧栏收起时视口左边会挪 */
-export interface Port { left: number; top: number; w: number; h: number }
+/** 画布视口的宽高（CausalCanvas 量到的） */
+export interface Port { w: number; h: number }
 
 /** 视口中正在看的那个框：选中的任务（在视口里）优先，否则中心离视口中心最近的；没有框 = null */
 function anchorOf(c: Canvas, v: View, p: Port, prefer: string | null): { id: string; box: Box } | null {
@@ -153,23 +153,35 @@ function anchorOf(c: Canvas, v: View, p: Port, prefer: string | null): { id: str
 
 const clamp = (n: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, lo > hi ? lo : n));
 
+/** 一条轴上别一边露白、另一边还切着内容：整张放得下就整张放进来，放不下就两边都不露白（只收回露白的那一截） */
+function tidyAxis(at: number, size: number, port: number): number {
+  const lo = port - VIEW_PAD - size;
+  return size <= port - VIEW_PAD * 2 ? clamp(at, VIEW_PAD, lo) : clamp(at, lo, VIEW_PAD);
+}
+
 /**
- * 重排 / 视口挪动后的补偿：侧栏收起展开会改视口宽（causal-model.ts 按宽重排）和视口左边，
- * 把正在看的框钉在原来的屏幕位置；新视口放不下那个位置就挪进视口里。框换了 id（被折叠）按 boxOf 找它现在的框。
- * 没有可锚的框 = 只补视口左上角的位移。结果和原来一样就返回原对象（渲染时对齐，不来回触发）
+ * 重排后的收拾：钉住之后一边露白、另一边切着内容时，收回露白的那一截（use-viewport.ts 下一帧带过渡滑过去）。
+ * 挪动距离不超过露白的量，被钉的框仍在视口里（单测）。没什么可收的返回原对象
+ */
+export function tidyView(c: Canvas, v: View, p: Port): View {
+  const x = tidyAxis(v.x, c.w * v.k, p.w), y = tidyAxis(v.y, c.h * v.k, p.h);
+  return x === v.x && y === v.y ? v : { ...v, x, y };
+}
+
+/**
+ * 重排 / 视口变化后的补偿：侧栏收起展开会改视口宽，causal-model.ts 按宽重排，所有框都可能挪位。
+ * 把正在看的框钉在视口里原来的位置（相对视口：侧栏收起时它跟着视口边一起滑，和别的应用一样）；新视口放不下那个位置就挪进来。
+ * 框换了 id（被折叠）按 boxOf 找它现在的框。结果和原来一样就返回原对象（渲染时对齐，不来回触发）
  */
 export function reanchor(v: View, prev: { c: Canvas; p: Port }, c: Canvas, p: Port, prefer: string | null): View {
   const a = anchorOf(prev.c, v, prev.p, prefer);
   const nid = a && (c.boxOf.get(a.id) ?? a.id);
   const nb = nid ? boxesOf(c).find((x) => x.id === nid)?.box : undefined;
-  let next: View;
-  if (!a || !nb) next = { ...v, x: v.x + prev.p.left - p.left, y: v.y + prev.p.top - p.top };
-  else {
-    const sx = prev.p.left + v.x + a.box.x * v.k - p.left, sy = prev.p.top + v.y + a.box.y * v.k - p.top;
-    const m = VIEW_PAD / 2, x = clamp(sx, m, p.w - nb.w * v.k - m), y = clamp(sy, m, p.h - nb.h * v.k - m);
-    next = { ...v, x: x - nb.x * v.k, y: y - nb.y * v.k };
-  }
-  return next.x === v.x && next.y === v.y ? v : next;
+  if (!a || !nb) return v;
+  const m = VIEW_PAD / 2;
+  const sx = clamp(v.x + a.box.x * v.k, m, p.w - nb.w * v.k - m), sy = clamp(v.y + a.box.y * v.k, m, p.h - nb.h * v.k - m);
+  const x = sx - nb.x * v.k, y = sy - nb.y * v.k;
+  return x === v.x && y === v.y ? v : { ...v, x, y };
 }
 
 export type Dir = "right" | "down" | "left" | "up";

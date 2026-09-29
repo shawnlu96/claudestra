@@ -9,7 +9,7 @@ import { useMemo } from "react";
 import type { LedgerOverview, LineView, Tr } from "../collab-model";
 import { causalCanvas, type Box, type Canvas, type CEdge, type CNode } from "./causal-model";
 import { edgePath, placeLabels, type Focus } from "./canvas-view";
-import { usePort, useViewport } from "./use-viewport";
+import { usePort, useSettled, useViewport } from "./use-viewport";
 import { depKey, edgeSel, type Selection } from "./v4-selection";
 import { StageBar } from "./stage-bar";
 import v from "./v4.module.css";
@@ -68,7 +68,8 @@ export function CausalCanvas(props: {
 }) {
   const { ov, lines, selection, focus, onSelect, tr } = props;
   const { box, port } = usePort();
-  const canvas = useMemo(() => causalCanvas(ov, { width: port.w, height: port.h }), [ov, port.w, port.h]);
+  const laid = useSettled(port);
+  const canvas = useMemo(() => causalCanvas(ov, { width: laid.w, height: laid.h }), [ov, laid.w, laid.h]);
   const selId = selection?.kind === "task" ? selection.id : null;
   const { view, glide, bump, fitAll, pan, off, handlers } = useViewport(canvas, port, focus, selId, () => onSelect(null));
 

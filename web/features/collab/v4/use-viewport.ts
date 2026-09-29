@@ -1,32 +1,41 @@
 "use client";
 /**
  * 因果线画布的视口 hook（几何全在 canvas-view.ts，单测 tests/web-collab-causal.test.ts）：量视口、平移缩放、打开时摆一次、
- * Focus 变了才居中、重排后把正在看的框钉住（reanchor）、「还有 N 件」往那边平移、「适配全部」。
- * 按钮触发的移动带过渡（glide），拖拽 / 滚轮不带，否则手跟不上。
+ * Focus 变了才居中、重排后把正在看的框钉住（reanchor）再滑去收拾好的位置（tidyView）、「还有 N 件」往那边平移、「适配全部」。
+ * 按钮触发的移动和重排后的收拾带过渡（glide），拖拽 / 滚轮 / 钉住不带，否则手跟不上、被钉的框会先跳一下。
  */
 import { useEffect, useRef, useState } from "react";
 import type { Canvas } from "./causal-model";
 import { VIEW_PAD } from "./causal-model";
-import { fitAllView, fitsAll, MAX_K, MIN_K, offscreen, panView, reanchor, reconcileView, type Dir, type Focus, type Port, type View, type ViewState } from "./canvas-view";
+import { fitAllView, fitsAll, MAX_K, MIN_K, offscreen, panView, reanchor, reconcileView, tidyView, type Dir, type Focus, type Port, type View, type ViewState } from "./canvas-view";
 
 const INITIAL: ViewState = { view: { x: VIEW_PAD, y: VIEW_PAD, k: 1 }, placed: false, centered: 0 };
-const NO_PORT: Port = { left: 0, top: 0, w: 0, h: 0 };
+const NO_PORT: Port = { w: 0, h: 0 };
+/** 侧栏宽度过渡 180ms（v4.module.css .paneBody）：停稳再重排，过渡期间内容只跟着视口边滑，不逐帧重排 */
+const SETTLE_MS = 220;
 
-/** 画布视口在页面上的位置和大小；布局按宽高排（causal-model.ts），没量到之前是 0 */
+/** 画布视口的宽高；布局按它排（causal-model.ts），没量到之前是 0 */
 export function usePort() {
   const box = useRef<HTMLDivElement>(null);
   const [port, setPort] = useState(NO_PORT);
   useEffect(() => {
     const el = box.current;
     if (!el) return;
-    const ro = new ResizeObserver(() => {
-      const r = el.getBoundingClientRect();
-      setPort({ left: r.left, top: r.top, w: el.clientWidth, h: el.clientHeight });
-    });
+    const ro = new ResizeObserver(() => setPort({ w: el.clientWidth, h: el.clientHeight }));
     ro.observe(el);
     return () => ro.disconnect();
   }, []);
   return { box, port };
+}
+
+/** 布局用的尺寸：视口停稳 SETTLE_MS 后才跟上；第一次量到立即用 */
+export function useSettled(port: Port): Port {
+  const [settled, setSettled] = useState(NO_PORT);
+  useEffect(() => {
+    const t = setTimeout(() => setSettled(port), settled.w ? SETTLE_MS : 0);
+    return () => clearTimeout(t);
+  }, [port, settled.w]);
+  return settled.w ? settled : port;
 }
 
 /** 点空白 = onBackground；prefer = 选中的任务，重排时优先钉住它 */
@@ -36,12 +45,17 @@ export function useViewport(canvas: Canvas, port: Port, focus: Focus | null, pre
   const [laid, setLaid] = useState<{ c: Canvas; p: Port } | null>(null);
   const [glide, setGlide] = useState(false);
   const [bump, setBump] = useState(false);
-  // 渲染时对齐（不走 effect）：先按上一次的布局把正在看的框钉住，再做打开时摆放 / Focus 居中；没事可做时都原样返回，不来回触发
+  const [settle, setSettle] = useState<View | null>(null);
+  // 渲染时对齐（不走 effect）：先按上一次的布局把正在看的框钉住（瞬时），再做打开时摆放 / Focus 居中；没事可做时都原样返回，不来回触发
   let cur = st;
   if (laid && cur.placed && port.w && (laid.c !== canvas || laid.p !== port)) {
     const view = reanchor(cur.view, laid, canvas, port, prefer);
-    if (view !== cur.view && glide) setGlide(false); // 跟着侧栏过渡逐帧补偿，带过渡会拖在后面
+    if (view !== cur.view && glide) setGlide(false); // 钉住要瞬时：带过渡时新坐标先到、平移后到，被钉的框会先跳一下
     if (view !== cur.view) cur = { ...cur, view };
+    if (laid.c.w !== canvas.w || laid.c.h !== canvas.h) {
+      const t = tidyView(canvas, cur.view, port);
+      if (t !== cur.view) setSettle(t);
+    }
   }
   if (port.w && (!laid || laid.c !== canvas || laid.p !== port)) setLaid({ c: canvas, p: port });
   const next = reconcileView(cur, canvas, port.w, port.h, focus);
@@ -51,6 +65,15 @@ export function useViewport(canvas: Canvas, port: Port, focus: Focus | null, pre
     setGlide(glides);
     setSt((s) => ({ ...s, view: f(s.view) }));
   };
+  // 钉住那一帧画出来之后，再带过渡滑到收拾好的位置
+  useEffect(() => {
+    if (!settle) return;
+    const id = requestAnimationFrame(() => {
+      setSettle(null);
+      setView(() => settle, true);
+    });
+    return () => cancelAnimationFrame(id);
+  }, [settle]);
   const fitAll = () => {
     if (!port.w) return;
     setView(() => fitAllView(canvas, port.w, port.h), true);

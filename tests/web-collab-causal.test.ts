@@ -2,7 +2,9 @@
 import { describe, expect, test } from "bun:test";
 import type { LedgerDepView, LedgerTaskView, Stage } from "../web/features/collab/collab-model";
 import { causalCanvas, COL_GAP, edgeStyle, LOOSE_GROUP, type Box, type CEdge } from "../web/features/collab/v4/causal-model";
-import { fitAllView, fitsAll, initialView, labelWidth, MIN_K, offscreen, panView, placeLabels, reanchor, reconcileView, type View, type ViewState } from "../web/features/collab/v4/canvas-view";
+import {
+  fitAllView, fitsAll, initialView, labelWidth, MIN_K, offscreen, panView, placeLabels, reanchor, reconcileView, tidyView, type View, type ViewState,
+} from "../web/features/collab/v4/canvas-view";
 
 function task(id: string, stage: Stage, over: Partial<LedgerTaskView> = {}): LedgerTaskView {
   return {
@@ -225,43 +227,59 @@ describe("按视口宽高重排（T67）", () => {
 describe("审查修复轮（T67 r1）", () => {
   const many = (n: number) => Array.from({ length: n }, (_, i) => task(`L${i}`, i % 3 ? "spec" : "build", { itemId: i % 2 ? "I1" : "I2" }));
   const ov = { items, deps: [], tasks: many(60) };
-  const screen = (c: ReturnType<typeof causalCanvas>, v: View, left: number, id: string) => {
+  type C = ReturnType<typeof causalCanvas>;
+  const at = (c: C, v: View, id: string) => {
     const n = c.groups.flatMap((g) => g.nodes).find((x) => x.id === id)!;
-    return [left + v.x + n.x * v.k, v.y + n.y * v.k].map((q) => Math.round(q * 1000) / 1000);
+    return [v.x + n.x * v.k, v.y + n.y * v.k].map((q) => Math.round(q * 1000) / 1000);
   };
+  const nodes = (c: C) => c.groups.flatMap((g) => g.nodes);
+  /** 整张挪一下（尺寸不变）：模拟数据刷新后框换了位置 */
+  const moved = (c: C, dx: number, dy: number): C => ({ ...c, groups: c.groups.map((g) => ({ ...g, x: g.x + dx, y: g.y + dy,
+    nodes: g.nodes.map((n) => ({ ...n, x: n.x + dx, y: n.y + dy })), folds: g.folds.map((f) => ({ ...f, x: f.x + dx, y: f.y + dy })) })) });
 
-  test("收起右栏（视口变宽、左边不动）：重排后正在看的节点屏幕位置不变", () => {
-    const a = causalCanvas(ov, { width: 740, height: 700 }), b = causalCanvas(ov, { width: 1384, height: 700 });
+  test("框挪了位置：正在看的（离视口中心最近的）钉在视口里原处；选中的任务在视口里就优先钉它；没变 = 原对象", () => {
+    const a = causalCanvas(ov, { width: 740, height: 700 }), b = moved(a, 300, 120), p = { w: 740, h: 700 };
     const v = { x: 24, y: -200, k: MIN_K };
-    const pa = { left: 264, top: 60, w: 740, h: 700 }, pb = { ...pa, w: 1384 };
-    const nv = reanchor(v, { c: a, p: pa }, b, pb, null);
-    const moved = a.groups.flatMap((g) => g.nodes).filter((n) => {
-      const m = b.groups.flatMap((g) => g.nodes).find((x) => x.id === n.id)!;
-      return m.x !== n.x || m.y !== n.y;
-    });
-    expect(moved.length).toBeGreaterThan(0); // 布局确实重排了
-    const near = (c: typeof a, vv: View, p: typeof pa) => c.groups.flatMap((g) => g.nodes)
-      .map((n) => ({ id: n.id, d: Math.hypot(p.left + vv.x + (n.x + n.w / 2) * vv.k - (p.left + p.w / 2), vv.y + (n.y + n.h / 2) * vv.k - p.h / 2) }))
+    const near = nodes(a).map((n) => ({ id: n.id, d: Math.hypot(v.x + (n.x + n.w / 2) * v.k - 370, v.y + (n.y + n.h / 2) * v.k - 350) }))
       .sort((x, y) => x.d - y.d)[0]!.id;
-    const id = near(a, v, pa);
-    expect(screen(b, nv, pb.left, id)).toEqual(screen(a, v, pa.left, id));
+    expect(at(b, reanchor(v, { c: a, p }, b, p, null), near)).toEqual(at(a, v, near));
+    const pick = nodes(a).filter((n) => n.id !== near && v.y + n.y * v.k > 0 && v.y + (n.y + n.h) * v.k < 680).at(-1)!.id; // 视口里另一个
+    expect(at(b, reanchor(v, { c: a, p }, b, p, pick), pick)).toEqual(at(a, v, pick));
+    expect(reanchor(v, { c: a, p }, a, { ...p }, null)).toBe(v);
   });
 
-  test("收起左栏（视口左边左移）：选中的任务优先钉住；原位置放不进新视口就挪进来；布局没变 = 原对象", () => {
-    const a = causalCanvas(ov, { width: 1100, height: 700 }), b = causalCanvas(ov, { width: 1384, height: 700 });
+  test("收起两栏（740 → 1384 重排，审查 r1 的场景）：先钉住（屏幕位置一点不动），再收拾露白；收拾后被钉的节点仍在视口里", () => {
+    const a = causalCanvas(ov, { width: 740, height: 700 }), b = causalCanvas(ov, { width: 1384, height: 700 }), p = { w: 1384, h: 700 };
+    expect(nodes(a).some((n) => { const m = nodes(b).find((x) => x.id === n.id)!; return m.x !== n.x || m.y !== n.y; })).toBe(true);
+    for (const v of [initialView(a, 740, 700), { x: -100, y: -900, k: MIN_K }, { x: -300, y: -1500, k: MIN_K }]) {
+      const near = nodes(a).map((n) => ({ id: n.id, d: Math.hypot(v.x + (n.x + n.w / 2) * v.k - 370, v.y + (n.y + n.h / 2) * v.k - 350) }))
+        .sort((x, y) => x.d - y.d)[0]!.id;
+      const pin = reanchor(v, { c: a, p: { w: 740, h: 700 } }, b, p, null);
+      const [x0, y0] = at(a, v, near), nb = nodes(b).find((n) => n.id === near)!;
+      const inside = (q: number, lo: number, hi: number) => Math.round(Math.min(Math.max(q, lo), hi) * 1000) / 1000; // 原来被切掉一截的挪进视口
+      expect(at(b, pin, near)).toEqual([inside(x0!, 12, 1384 - nb.w * MIN_K - 12), inside(y0!, 12, 700 - nb.h * MIN_K - 12)]);
+      const nv = tidyView(b, pin, p);
+      const [x, y] = at(b, nv, near);
+      expect(x).toBeGreaterThanOrEqual(0);
+      expect(x! + 208 * MIN_K).toBeLessThanOrEqual(1384);
+      expect(y).toBeGreaterThanOrEqual(0);
+      expect(y).toBeLessThan(700);
+      expect(nv.x < 24 && nv.x + b.w * nv.k < 1384 - 24).toBe(false); // 不再左边切着、右边露白
+      expect(nv.x > 24 && nv.x + b.w * nv.k > 1384 - 24).toBe(false);
+      expect(nv.y > 24 && nv.y + b.h * nv.k > 700 - 24).toBe(false);
+      expect(tidyView(b, nv, p)).toBe(nv);
+    }
+  });
+
+  test("视口变小（展开侧栏）：原位置放不下就把被钉的框挪进视口", () => {
+    const a = causalCanvas(ov, { width: 1384, height: 700 }), b = causalCanvas(ov, { width: 400, height: 300 });
     const v = { x: 24, y: 24, k: MIN_K };
-    const pa = { left: 264, top: 60, w: 1100, h: 700 }, pb = { left: 28, top: 60, w: 1384, h: 700 };
-    // 选中一个在视口右下部分的（不是离中心最近的那个），它应当被优先钉住
-    const pick = a.groups.flatMap((g) => g.nodes).filter((n) => v.x + n.x * v.k > 600 && v.y + (n.y + n.h) * v.k < 680).at(-1)!.id;
-    const nv = reanchor(v, { c: a, p: pa }, b, pb, pick);
-    expect(screen(b, nv, pb.left, pick)).toEqual(screen(a, v, pa.left, pick));
-    const small = { left: 264, top: 60, w: 400, h: 300 };
-    const back = reanchor(nv, { c: b, p: pb }, a, small, pick);
-    const [sx, sy] = screen(a, back, small.left, pick);
-    expect(sx! - small.left).toBeGreaterThanOrEqual(0);
-    expect(sx! - small.left).toBeLessThan(small.w);
-    expect(sy).toBeGreaterThanOrEqual(0);
-    expect(reanchor(v, { c: a, p: pa }, a, { ...pa }, null)).toBe(v);
+    const pick = nodes(a).filter((n) => v.x + n.x * v.k > 800 && v.y + (n.y + n.h) * v.k < 680).at(-1)!.id;
+    const [x, y] = at(b, reanchor(v, { c: a, p: { w: 1384, h: 700 } }, b, { w: 400, h: 300 }, pick), pick);
+    expect(x).toBeGreaterThanOrEqual(0);
+    expect(x).toBeLessThan(400);
+    expect(y).toBeGreaterThanOrEqual(0);
+    expect(y).toBeLessThan(300);
   });
 
   test("「还有 N 件」点了往那边平移大半屏，件数变少；一路点下去到边为止，不越过画布", () => {
