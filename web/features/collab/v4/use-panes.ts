@@ -4,7 +4,7 @@
  * 关掉详情 = 收回去；临时浮出不写存储。
  */
 import { useState } from "react";
-import { browser, browserStore, readPanes, WIDE, writePanes, type Panes } from "./panes";
+import { browser, browserStore, keepDismissed, readPanes, WIDE, writePanes, type Panes } from "./panes";
 
 /**
  * right = 右栏此刻是否展开（含临时浮出）；peek = 这次展开是临时的（浮在画布上，不挤画布，也就不触发重排）。
@@ -13,7 +13,7 @@ import { browser, browserStore, readPanes, WIDE, writePanes, type Panes } from "
 export function usePanes(peekKey: string | null) {
   const [panes, setPanes] = useState<Panes>(() => readPanes(browserStore(), browser.innerWidth ?? WIDE));
   const [dismissed, setDismissed] = useState<string | null>(null);
-  if (peekKey === null && dismissed !== null) setDismissed(null); // 选中清空后再点同一个也要能浮出来（渲染时对齐）
+  if (keepDismissed(dismissed, peekKey) !== dismissed) setDismissed(null); // 渲染时对齐
   const peek = !panes.right && peekKey !== null && peekKey !== dismissed;
   const save = (p: Panes) => {
     setPanes(p);

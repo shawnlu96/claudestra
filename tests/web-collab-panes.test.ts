@@ -1,6 +1,6 @@
 /** 协作视图两侧栏收起状态的存取（web/features/collab/v4/panes.ts）：默认值、存储不可用 / 内容坏了回默认、写失败不抛 */
 import { describe, expect, test } from "bun:test";
-import { defaultPanes, PANES_KEY, readPanes, writePanes } from "../web/features/collab/v4/panes";
+import { defaultPanes, keepDismissed, PANES_KEY, readPanes, writePanes } from "../web/features/collab/v4/panes";
 
 const mem = (init: Record<string, string> = {}) => {
   const m = new Map(Object.entries(init));
@@ -25,5 +25,13 @@ describe("两侧栏收起状态", () => {
     expect(readPanes(s, 800)).toEqual({ left: false, right: true });
     expect(() => writePanes(broken, { left: true, right: true })).not.toThrow();
     expect(() => writePanes(null, { left: true, right: true })).not.toThrow();
+  });
+  test("临时浮出收回只管这一次：A 收回 → 选 B → 再选 A，A 照样浮出", () => {
+    let d: string | null = "A"; // 选中 A 时点了收回
+    expect(keepDismissed(d, "A")).toBe("A"); // 还是 A：保持收回
+    d = keepDismissed(d, "B"); // 直接换到 B
+    expect(d).toBeNull();
+    expect(keepDismissed(d, "A")).toBeNull(); // 再选回 A：不再被上一次的收回挡住
+    expect(keepDismissed("A", null)).toBeNull();
   });
 });

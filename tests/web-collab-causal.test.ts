@@ -2,7 +2,7 @@
 import { describe, expect, test } from "bun:test";
 import type { LedgerDepView, LedgerTaskView, Stage } from "../web/features/collab/collab-model";
 import { causalCanvas, COL_GAP, edgeStyle, LOOSE_GROUP, type Box, type CEdge } from "../web/features/collab/v4/causal-model";
-import { fitAllView, initialView, labelWidth, MIN_K, offscreen, placeLabels, reconcileView, type ViewState } from "../web/features/collab/v4/canvas-view";
+import { fitAllView, fitsAll, initialView, labelWidth, MIN_K, offscreen, panView, placeLabels, reanchor, reconcileView, type View, type ViewState } from "../web/features/collab/v4/canvas-view";
 
 function task(id: string, stage: Stage, over: Partial<LedgerTaskView> = {}): LedgerTaskView {
   return {
@@ -219,5 +219,65 @@ describe("按视口宽高重排（T67）", () => {
     for (const n of rank0) expect(n.x + n.w).toBeLessThan(at("B").x);
     expect(at("A").x).toBe(Math.max(...rank0.map((n) => n.x)));
     expect(causalCanvas({ items, deps: [dep("A", "B", "active")], tasks }, { width: 1450, height: 700 })).toEqual(c);
+  });
+});
+
+describe("审查修复轮（T67 r1）", () => {
+  const many = (n: number) => Array.from({ length: n }, (_, i) => task(`L${i}`, i % 3 ? "spec" : "build", { itemId: i % 2 ? "I1" : "I2" }));
+  const ov = { items, deps: [], tasks: many(60) };
+  const screen = (c: ReturnType<typeof causalCanvas>, v: View, left: number, id: string) => {
+    const n = c.groups.flatMap((g) => g.nodes).find((x) => x.id === id)!;
+    return [left + v.x + n.x * v.k, v.y + n.y * v.k].map((q) => Math.round(q * 1000) / 1000);
+  };
+
+  test("收起右栏（视口变宽、左边不动）：重排后正在看的节点屏幕位置不变", () => {
+    const a = causalCanvas(ov, { width: 740, height: 700 }), b = causalCanvas(ov, { width: 1384, height: 700 });
+    const v = { x: 24, y: -200, k: MIN_K };
+    const pa = { left: 264, top: 60, w: 740, h: 700 }, pb = { ...pa, w: 1384 };
+    const nv = reanchor(v, { c: a, p: pa }, b, pb, null);
+    const moved = a.groups.flatMap((g) => g.nodes).filter((n) => {
+      const m = b.groups.flatMap((g) => g.nodes).find((x) => x.id === n.id)!;
+      return m.x !== n.x || m.y !== n.y;
+    });
+    expect(moved.length).toBeGreaterThan(0); // 布局确实重排了
+    const near = (c: typeof a, vv: View, p: typeof pa) => c.groups.flatMap((g) => g.nodes)
+      .map((n) => ({ id: n.id, d: Math.hypot(p.left + vv.x + (n.x + n.w / 2) * vv.k - (p.left + p.w / 2), vv.y + (n.y + n.h / 2) * vv.k - p.h / 2) }))
+      .sort((x, y) => x.d - y.d)[0]!.id;
+    const id = near(a, v, pa);
+    expect(screen(b, nv, pb.left, id)).toEqual(screen(a, v, pa.left, id));
+  });
+
+  test("收起左栏（视口左边左移）：选中的任务优先钉住；原位置放不进新视口就挪进来；布局没变 = 原对象", () => {
+    const a = causalCanvas(ov, { width: 1100, height: 700 }), b = causalCanvas(ov, { width: 1384, height: 700 });
+    const v = { x: 24, y: 24, k: MIN_K };
+    const pa = { left: 264, top: 60, w: 1100, h: 700 }, pb = { left: 28, top: 60, w: 1384, h: 700 };
+    // 选中一个在视口右下部分的（不是离中心最近的那个），它应当被优先钉住
+    const pick = a.groups.flatMap((g) => g.nodes).filter((n) => v.x + n.x * v.k > 600 && v.y + (n.y + n.h) * v.k < 680).at(-1)!.id;
+    const nv = reanchor(v, { c: a, p: pa }, b, pb, pick);
+    expect(screen(b, nv, pb.left, pick)).toEqual(screen(a, v, pa.left, pick));
+    const small = { left: 264, top: 60, w: 400, h: 300 };
+    const back = reanchor(nv, { c: b, p: pb }, a, small, pick);
+    const [sx, sy] = screen(a, back, small.left, pick);
+    expect(sx! - small.left).toBeGreaterThanOrEqual(0);
+    expect(sx! - small.left).toBeLessThan(small.w);
+    expect(sy).toBeGreaterThanOrEqual(0);
+    expect(reanchor(v, { c: a, p: pa }, a, { ...pa }, null)).toBe(v);
+  });
+
+  test("「还有 N 件」点了往那边平移大半屏，件数变少；一路点下去到边为止，不越过画布", () => {
+    const c = causalCanvas(ov, { width: 740, height: 700 });
+    let v = fitAllView(c, 740, 700);
+    expect(fitsAll(c, 740, 700)).toBe(false);
+    const before = offscreen(c, v, 740, 700).down;
+    expect(before).toBeGreaterThan(0);
+    v = panView(c, v, 740, 700, "down");
+    expect(offscreen(c, v, 740, 700).down).toBeLessThan(before);
+    expect(offscreen(c, v, 740, 700).up).toBeGreaterThan(0);
+    for (let i = 0; i < 20; i++) v = panView(c, v, 740, 700, "down");
+    expect(offscreen(c, v, 740, 700).down).toBe(0);
+    expect(v.y + c.h * v.k).toBeCloseTo(700 - 24, 5);
+    for (let i = 0; i < 20; i++) v = panView(c, v, 740, 700, "up");
+    expect(v.y).toBe(24);
+    expect(fitsAll(causalCanvas({ items, deps: [], tasks: many(2) }, { width: 1200, height: 800 }), 1200, 800)).toBe(true);
   });
 });

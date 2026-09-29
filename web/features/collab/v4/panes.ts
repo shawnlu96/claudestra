@@ -41,3 +41,6 @@ export function browserStore(): Store | null {
     return null; // 被禁用的存储连读属性都会抛；当作没有存储
   }
 }
+
+/** 右栏临时浮出被收回的那一次（use-panes.ts）：只管这一次选中，选中换成别的或清空就忘掉，之后再选回它也照样浮出 */
+export const keepDismissed = (dismissed: string | null, peekKey: string | null): string | null => (peekKey === dismissed ? dismissed : null);

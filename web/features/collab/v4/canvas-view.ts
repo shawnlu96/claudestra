@@ -1,6 +1,6 @@
 /**
  * 因果线画布的几何（纯函数，单测 tests/web-collab-causal.test.ts）：边的曲线、边标签避让、视口（打开时摆一次、明确选中才居中、
- * 数据刷新不动用户拖好的位置、「适配全部」）、视口外还剩几件。
+ * 数据刷新不动用户拖好的位置、「适配全部」）、视口外还剩几件、点提示往那边平移、重排后钉住正在看的框（reanchor）。
  * 标签放在列缝里（出发节点右边那道缝、到达节点左边那道缝，都不行再沿曲线试），每处再上下错开几档；压到节点或别的标签就换，
  * 全都压到就退成一个点（悬停看全文，点开右侧属性页）。宽度按字数估、以列缝为上限，放不全的省略号截断、悬停看全文。
  */
@@ -136,3 +136,52 @@ export function reconcileView(st: ViewState, c: Canvas, vw: number, vh: number, 
   }
   return next;
 }
+
+/** 画布视口在页面上的位置和大小（getBoundingClientRect）；锚定补偿按屏幕坐标算，侧栏收起时视口左边会挪 */
+export interface Port { left: number; top: number; w: number; h: number }
+
+/** 视口中正在看的那个框：选中的任务（在视口里）优先，否则中心离视口中心最近的；没有框 = null */
+function anchorOf(c: Canvas, v: View, p: Port, prefer: string | null): { id: string; box: Box } | null {
+  const all = boxesOf(c);
+  const inView = (b: Box) => v.x + (b.x + b.w) * v.k > 0 && v.x + b.x * v.k < p.w && v.y + (b.y + b.h) * v.k > 0 && v.y + b.y * v.k < p.h;
+  const pid = prefer ? c.boxOf.get(prefer) : undefined;
+  const picked = all.find((x) => x.id === pid && inView(x.box));
+  if (picked) return picked;
+  const d = (b: Box) => Math.hypot(v.x + (b.x + b.w / 2) * v.k - p.w / 2, v.y + (b.y + b.h / 2) * v.k - p.h / 2);
+  return all.reduce<{ id: string; box: Box } | null>((best, x) => (!best || d(x.box) < d(best.box) ? x : best), null);
+}
+
+const clamp = (n: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, lo > hi ? lo : n));
+
+/**
+ * 重排 / 视口挪动后的补偿：侧栏收起展开会改视口宽（causal-model.ts 按宽重排）和视口左边，
+ * 把正在看的框钉在原来的屏幕位置；新视口放不下那个位置就挪进视口里。框换了 id（被折叠）按 boxOf 找它现在的框。
+ * 没有可锚的框 = 只补视口左上角的位移。结果和原来一样就返回原对象（渲染时对齐，不来回触发）
+ */
+export function reanchor(v: View, prev: { c: Canvas; p: Port }, c: Canvas, p: Port, prefer: string | null): View {
+  const a = anchorOf(prev.c, v, prev.p, prefer);
+  const nid = a && (c.boxOf.get(a.id) ?? a.id);
+  const nb = nid ? boxesOf(c).find((x) => x.id === nid)?.box : undefined;
+  let next: View;
+  if (!a || !nb) next = { ...v, x: v.x + prev.p.left - p.left, y: v.y + prev.p.top - p.top };
+  else {
+    const sx = prev.p.left + v.x + a.box.x * v.k - p.left, sy = prev.p.top + v.y + a.box.y * v.k - p.top;
+    const m = VIEW_PAD / 2, x = clamp(sx, m, p.w - nb.w * v.k - m), y = clamp(sy, m, p.h - nb.h * v.k - m);
+    next = { ...v, x: x - nb.x * v.k, y: y - nb.y * v.k };
+  }
+  return next.x === v.x && next.y === v.y ? v : next;
+}
+
+export type Dir = "right" | "down" | "left" | "up";
+
+/** 「还有 N 件在 X 边」：往那边平移大半屏（留一截上一屏的内容接上），不越过画布那一侧的边 */
+export function panView(c: Canvas, v: View, vw: number, vh: number, dir: Dir): View {
+  const sx = vw * 0.8, sy = vh * 0.8;
+  if (dir === "right") return { ...v, x: Math.min(v.x, Math.max(v.x - sx, vw - VIEW_PAD - c.w * v.k)) };
+  if (dir === "left") return { ...v, x: Math.max(v.x, Math.min(v.x + sx, VIEW_PAD)) };
+  if (dir === "down") return { ...v, y: Math.min(v.y, Math.max(v.y - sy, vh - VIEW_PAD - c.h * v.k)) };
+  return { ...v, y: Math.max(v.y, Math.min(v.y + sy, VIEW_PAD)) };
+}
+
+/** 整张在文字下限（MIN_K）以上装得下吗；装不下时「适配全部」从左上角看起，并用动效示意到底了 */
+export const fitsAll = (c: Canvas, vw: number, vh: number) => !c.w || Math.min((vw - VIEW_PAD * 2) / c.w, (vh - VIEW_PAD * 2) / c.h) >= MIN_K;

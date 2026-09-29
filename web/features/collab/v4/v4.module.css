@@ -57,6 +57,8 @@
   background-image: radial-gradient(var(--line) 1px, transparent 1px); background-size: 20px 20px; }
 .canvas:active { cursor: grabbing; }
 .world { position: absolute; left: 0; top: 0; transform-origin: 0 0; }
+/* 按钮触发的平移（「还有 N 件」、「适配全部」）带过渡；拖拽 / 滚轮不带（use-viewport.ts glide） */
+.glide { transition: transform 260ms ease; }
 .group { position: absolute; border: 1px solid var(--line-2); border-radius: 10px; background: color-mix(in srgb, var(--panel) 55%, transparent); }
 .gt { position: absolute; left: 12px; top: 7px; color: var(--muted); font-size: var(--fs-3); font-weight: 500; }
 .gdone { position: absolute; right: 12px; top: 7px; color: var(--ok); font-size: var(--fs-3); font-family: var(--mono); }
@@ -80,6 +82,11 @@
 .more_down { left: 50%; bottom: 12px; transform: translateX(-50%); }
 .more_left { left: 12px; top: 50%; transform: translateY(-50%); }
 .more_up { left: 50%; top: 12px; transform: translateX(-50%); }
+/* 「适配全部」到文字下限还装不下：按钮左右晃一下，提示跳两下，示意剩下的去那边（.more 自己的 transform 用来居中，这里用 scale / translate） */
+.bump { animation: bump 360ms ease; }
+.beckon { animation: beckon 360ms ease 2; }
+@keyframes bump { 20%, 60% { translate: -4px 0; } 40%, 80% { translate: 4px 0; } }
+@keyframes beckon { 50% { scale: 1.08; border-color: var(--text-2); } }
 .node { position: absolute; display: flex; flex-direction: column; gap: 5px; padding: 7px 9px; border-radius: 9px; background: var(--panel); border: 1px solid var(--line-2);
   box-shadow: var(--shadow); text-align: left; color: var(--text-2); font-size: var(--fs-3); }
 .node::before { content: ""; position: absolute; left: 0; top: 8px; bottom: 8px; width: 2px; border-radius: 2px; background: var(--sc, var(--faint)); }
@@ -129,6 +136,6 @@
   .top { padding: max(env(safe-area-inset-top), 10px) 12px 10px; }
   .back { display: inline-flex; }
 }
-@media (prefers-reduced-motion: reduce) { .eFlow .eLine { animation: none; } .paneBody { transition: none; } }
+@media (prefers-reduced-motion: reduce) { .eFlow .eLine { animation: none; } .paneBody { transition: none; } .glide { transition: none; } .bump, .beckon { animation: none; } }
 .depItem + .depItem { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--line); }
 .depHead { color: var(--text); font-size: var(--fs-2); font-weight: 600; font-family: var(--mono, ui-monospace, monospace); }
