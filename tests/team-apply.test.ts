@@ -9,6 +9,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { beforeEach, describe, expect, test } from "bun:test";
 import { getMeta, listEvents, openLedger } from "../src/lib/ledger-store.js";
+import { isRealPmRole } from "../src/lib/ledger-team-config.js";
 import { createTask, setMeta } from "../src/lib/ledger-write.js";
 import { newProposal, readProposals, updateProposals, type TeamProposal } from "../src/lib/team-proposal.js";
 import type { Registry } from "../src/manager/core.js";
@@ -88,6 +89,17 @@ describe("ledger meta --pms：只生成提案", () => {
     // registry 里 pm 还没有角色、exec 新进名单：都设成 pm；agent-d 不在 registry，跳过
     const roles = [{ agent: "agent-pm", role: "pm" }, { agent: "agent-exec", role: "pm" }];
     expect(posted.at(-1)).toMatchObject({ base: { pms: ["agent-pm", "agent-d"], team: { dispatcher: "agent-d", audit: true } }, roles });
+  });
+
+  test("调度助理不能提议改名单（它靠 PM 身份跑派审，名单类出口只给真 PM，adv1 P2-4）", async () => {
+    setMeta(db, { actor: "owner", now: 3 }, { project: P, key: "pms", value: ["agent-pm", "agent-d"] });
+    setMeta(db, { actor: "owner", now: 4 }, { project: P, key: "team", value: { dispatcher: "agent-d", audit: true } });
+    expect(await run("agent-d", NOW, "meta", "--pms", "d")).toMatchObject({ ok: false, code: "forbidden", error: expect.stringContaining("调度助理除外") });
+    expect(posted).toHaveLength(0);
+    expect(isRealPmRole("pm", "agent-d", getMeta(db, P).team)).toBe(false);
+    expect(isRealPmRole("pm", "agent-pm", getMeta(db, P).team)).toBe(true);
+    expect(isRealPmRole("executor", "agent-exec", null)).toBe(false);
+    expect(isRealPmRole("owner", "owner", getMeta(db, P).team)).toBe(true);
   });
 });
 

@@ -130,7 +130,7 @@ describe("review --to merge：规格卡还欠对抗式就拒绝（开了班子�
     await run("agent-disp", "dispatch", "T1");
     const bad = await run("agent-disp", ...pass("merge"));
     expect(bad).toMatchObject({ ok: false, code: "conflict" });
-    expect(bad.error).toContain("规格卡要求对抗式");
+    expect(bad.error).toContain("要求对抗式");
     expect(getMeta(db, P).team).not.toBeNull();
     expect(listEvents(db, { target: "T1" }).filter((e) => e.kind === "review")).toHaveLength(0); // 拒绝时什么都没写
     expect((await run("agent-disp", ...pass())).ok).toBe(true);

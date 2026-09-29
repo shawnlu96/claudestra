@@ -13,7 +13,7 @@ import { getEventByDedup, getMeta, LedgerError, listEvents } from "../lib/ledger
 import { appendEvent } from "../lib/ledger-write.js";
 import { STATE_DIR, statePath, TMUX_SOCK } from "../lib/paths.js";
 import { readTextSoft, specPathFor } from "../lib/task-spec.js";
-import { lastReviewOf } from "../lib/ledger-handler.js";
+import { lastReviewOf, strictPolicy } from "../lib/ledger-handler.js";
 import { buildReviewPack, nextReview, reviewPolicy, type PrevReview, type ReviewPack } from "../lib/review-pack.js";
 import { REVIEWER_AGENT } from "../lib/team-roles.js";
 import type { LedgerCli, Result } from "./ledger-context.js";
@@ -78,7 +78,7 @@ async function plan(c: LedgerCli): Promise<PackPlan> {
   const prev = toPrev(lastEvent);
   const specPath = specPathOf(c, task);
   const specText = readTextSoft(specPath);
-  const policy = reviewPolicy(specText);
+  const policy = strictPolicy(reviewPolicy(specText), events); // 卡被改松时照派审记录里更严的（与合并门同一口径）
   const next = nextReview(policy, lastEvent ? lastReviewOf(lastEvent, events) : null);
   const adversarial = c.p.bools.has("adversarial") || next === "adversarial";
   const worktree = await worktreeOf(c, task);

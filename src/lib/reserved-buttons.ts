@@ -18,6 +18,7 @@ const PREFIXES = [
   "team_ok:", "team_no:", "swmodel_yes:", "swmodel_no:", "sess_detail:", "sess_cleanup:", "sess_adopt:", "savecompact:", "modal:",
   "escalate:", "wedge_esc:", "wedge_restart:", "focus:", "screenshot:", "interrupt:", "auq:",
   "perm_allow:", "perm_allow_session:", "perm_deny:", "session_summary:", "session_full:", "session_noask:",
+  "auto_allow:", "auto_revert:",
 ];
 
 export function isReservedButtonId(id: string): boolean {

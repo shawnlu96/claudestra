@@ -2,9 +2,10 @@
  * lib/reserved-buttons.ts：bridge 自己处理的按钮 id 只有 bridge 能发。agent / notify / peer 的消息带了保留 id（components 或行内按钮）整条拒；
  * 另外扫 bridge 源码里处理按钮的 id 字面量，漏登记就失败（新增管理按钮忘了进保留表 = agent 又能伪造它）。
  */
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
+import { autoRevertButtonId, isAutoPermButton } from "../src/bridge/auto-allow.js";
 import { isReservedButtonId, RESERVED_BUTTONS, reservedButtonIn, reservedButtonRefusal } from "../src/lib/reserved-buttons.js";
 
 const agent = { kind: "local" };
@@ -43,5 +44,34 @@ describe("保留表和 bridge 源码对得上", () => {
     for (const id of exact) expect(isReservedButtonId(id)).toBe(true);
     for (const p of [...prefixes, ...promptPrefixes]) expect(isReservedButtonId(`${p}x`)).toBe(true);
     expect(RESERVED_BUTTONS.prefixes).toContain("team_ok:");
+  });
+});
+
+describe("封装在函数里的前缀也登记了（adv1 P1-2）", () => {
+  test("自动放行 / 切回（isAutoPermButton 判的 id）：保留表认，agent 贴出被拒", () => {
+    for (const id of ["auto_allow:111111111111111111", autoRevertButtonId("111111111111111111", "plan")]) {
+      expect(isAutoPermButton(id)).toBe(true);
+      expect(isReservedButtonId(id)).toBe(true);
+      expect(reservedButtonRefusal(agent, "请点继续", row(id))).toContain(id);
+      expect(reservedButtonRefusal(agent, `[[{#${id} .primary}✅ 继续]]`, undefined)).toContain(id);
+    }
+  });
+
+  test("bridge 源码里拼出来的按钮 id（id: `前缀:${…}`）都在保留表里", () => {
+    const dir = join(import.meta.dir, "..", "src");
+    const files = [join(dir, "bridge.ts"), ...readdirSync(join(dir, "bridge"), { recursive: true }).map((f) => join(dir, "bridge", String(f)))];
+    const built = files.filter((f) => f.endsWith(".ts")).flatMap((f) => [...readFileSync(f, "utf-8").matchAll(/\bid: `([a-z_]+:)\$\{/g)].map((m) => m[1]));
+    expect(built).toContain("auto_allow:");
+    for (const p of new Set(built)) expect(isReservedButtonId(`${p}x`)).toBe(true);
+  });
+
+  test("discord-interactions 里免 LLM 的分支都先过保留表（free），管理面板没登记的 id 不会进去", () => {
+    const src = readFileSync(join(import.meta.dir, "..", "src/bridge/discord-interactions.ts"), "utf-8");
+    expect(src.match(/const free = isReservedButtonId\(id\);/g)?.length).toBe(2);
+    const gated = [...src.matchAll(/^ {6}if \((.*)\) \{$/gm)].map((m) => m[1]).filter((c) => /\bid\b|isAutoPermButton|promptBtnPrefixes/.test(c));
+    expect(gated.length).toBeGreaterThan(14);
+    for (const c of gated) expect(c.startsWith("free && ")).toBe(true);
+    expect(src).toContain("const mgmtResult = free ? await handleMgmtButton(");
+    expect(src).toContain("const mgmtResult = free ? await handleMgmtSelect(");
   });
 });

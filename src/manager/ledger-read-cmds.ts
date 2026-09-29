@@ -108,7 +108,7 @@ async function meta(c: LedgerCli): Promise<Result> {
   if (pms === undefined && docsDir === undefined) return { ok: true, project, meta: getMeta(c.db, project) };
   if (docsDir !== undefined) setMeta(c.db, { actor: c.deps.actor, now: c.deps.now() }, { project, key: "docsDir", value: expandDocsDir(docsDir) });
   if (pms === undefined) return { ok: true, project, meta: getMeta(c.db, project) };
-  c.requireManager(project, "提议改 PM 名单");
+  c.requireRealPm(project, "提议改 PM 名单");
   const list = [...new Set(pms.split(",").map((s) => s.trim()).filter(Boolean).map(agentKey))];
   const cur = getMeta(c.db, project);
   // 调度助理得在名单里（它跑 dispatch / review 靠 PM 身份）：要换调度助理用 team up，要撤班子用 team down

@@ -7,6 +7,7 @@ import type { Database } from "bun:sqlite";
 import type { SnapshotSources } from "../lib/ledger-audit-snapshot.js";
 import { roleOf, type LedgerTask, type Role } from "../lib/ledger-stages.js";
 import { getItem, getMeta, getTask, LedgerError } from "../lib/ledger-store.js";
+import { isRealPmRole } from "../lib/ledger-team-config.js";
 import type { FactsDeps } from "../lib/ledger-verify-facts.js";
 import type { ProjectDef } from "../lib/projects.js";
 import type { WriteCtx } from "../lib/ledger-write.js";
@@ -81,8 +82,7 @@ export class LedgerCli {
 
   /** 真正的 PM：名单里除了班子调度助理以外的人，或 master / owner（调度助理也在 PM 名单里，PM 专属的出口不能交给它） */
   isRealPm(project: string): boolean {
-    const r = this.role(project);
-    return r === "master" || r === "owner" || (r === "pm" && getMeta(this.db, project).team?.dispatcher !== this.deps.actor);
+    return isRealPmRole(this.role(project), this.deps.actor, getMeta(this.db, project).team);
   }
 
   requireRealPm(project: string, what: string): void {

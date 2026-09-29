@@ -16,3 +16,8 @@ export function toTeam(v: unknown): TeamConfig | null {
   if (typeof t.sinceSeq !== "number") return null;
   return { dispatcher: typeof t.dispatcher === "string" && t.dispatcher ? t.dispatcher : null, audit: t.audit !== false, sinceSeq: t.sinceSeq };
 }
+
+/** 「真 PM」：master / owner，或 PM 名单里、但不是在任调度助理的（调度助理靠 PM 身份跑 dispatch / review，名单和合并类出口不给它） */
+export function isRealPmRole(role: string | null, actor: string, team: TeamConfig | null): boolean {
+  return role === "master" || role === "owner" || (role === "pm" && team?.dispatcher !== actor);
+}

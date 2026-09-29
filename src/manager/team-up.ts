@@ -14,6 +14,7 @@ import { repoEnvVar } from "../lib/env-file.js";
 import { currentHandler, type Handler } from "../lib/ledger-handler.js";
 import { roleOf, TERMINAL_STAGES } from "../lib/ledger-stages.js";
 import { getMeta, LEDGER_PATH, listEvents, listTasks, openLedger, type LedgerMeta } from "../lib/ledger-store.js";
+import { isRealPmRole } from "../lib/ledger-team-config.js";
 import { readProjects } from "../lib/projects.js";
 import { specPolicyOf } from "../lib/task-spec.js";
 import { newProposal, planRoles, proposalText, readProposals, teamBaseOf, updateProposals, type ProposalDraft, type TeamProposal } from "../lib/team-proposal.js";
@@ -163,7 +164,7 @@ export async function cmdTeam(args: string[]): Promise<void> {
   if (sub === "status") return output({ ok: true, ...statusView(db, c.project, Object.values(await readProposals()), c.agents) });
   const meta = getMeta(db, c.project);
   const role = roleOf(c.actor, { agent: null }, meta.pms);
-  if (role === null || role === "executor") return output({ ok: false, error: `team ${sub} 要项目 ${c.project} 的 PM / master / owner 提议（你是 ${c.actor}）` });
+  if (!isRealPmRole(role, c.actor, meta.team)) return output({ ok: false, error: `team ${sub} 要项目 ${c.project} 的 PM（调度助理除外）/ master / owner 提议（你是 ${c.actor}）` });
   const flag = c.p.flags["dispatcher-agent"] ?? (c.p.bools.has("dispatcher") ? "new" : c.p.bools.has("no-dispatcher") ? "none" : undefined);
   const draft =
     sub === "down"

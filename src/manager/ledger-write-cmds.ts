@@ -197,6 +197,10 @@ function deliverCmd(c: LedgerCli): Result {
   // 证据 / 结论只收路径：它们会进 bridge 通知和审查员 prompt（lib/quote-text.ts pathLike）
   if (c.p.flags.evidence !== undefined && !pathLike(c.p.flags.evidence)) throw new LedgerError("invalid", PATH_ONLY("--evidence"));
   checkTaskRefs({ head: c.p.flags.head });
+  // merge 及以后换 head = 没审过的代码顶替审过的（阶段不动，合并门不会再跑），谁交都拒（tests/ledger-merge-gate.test.ts）
+  if (SHIPPED.includes(task.stage) && c.p.flags.head !== undefined && c.p.flags.head !== task.headSHA) {
+    throw new LedgerError("conflict", `任务 ${task.id} 已在 ${task.stage}，交付的 head ${c.p.flags.head} 跟台账的 ${task.headSHA ?? "（空）"} 不一样：先由 PM 退回 review（stage --from merge --to review），再交付、派审`);
+  }
   const r = deliver(c.db, c.ctx(), { taskId: task.id, headSHA: c.p.flags.head, evidence: c.p.flags.evidence, text: c.p.flags.text, moveFrom });
   // routed：项目开了编排班子，bridge 会自动通知调度助理 / PM，执行者不用再发消息（roles/executor.md）
   return { ok: true, task: r.row, event: r.event, duplicate: r.duplicate, routed: getMeta(c.db, task.project).team !== null };

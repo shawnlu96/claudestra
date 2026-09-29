@@ -54,6 +54,7 @@ import {
 import { runManager, buildStatusPanel, handleMgmtOrTeamButton, handleMgmtSelect } from "./bridge/management.js";
 import { postProposalCard } from "./bridge/team-confirm.js";
 import { reservedButtonRefusal } from "./lib/reserved-buttons.js";
+import { editOwnerRefusal, noteReplySent } from "./bridge/edit-guard.js";
 import { runtimeForSessionPath, sessionJsonlPath, translateSessionLine } from "./lib/session-source.js";
 import { resolveSessionIdForWindow } from "./lib/cc-sessions.js";
 import { startWatching, stopWatching, stopWatchingByChannel, resetToolTracking, hasRecentScheduleWakeup, agentNameForChannel, formatTool } from "./bridge/jsonl-watcher.js";
@@ -1869,7 +1870,7 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
           ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, error: errMsg }));
           break;
         }
-        const ids = delivery.outcome.discordMessageIds || [];
+        const ids = noteReplySent(delivery.outcome.discordMessageIds || [], fromChannelId); // edit_message 只准改自己发的（bridge/edit-guard.ts）
         ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, result: { messageIds: ids, askId: env.meta.askId, askHash: env.meta.askHash } }));
 
         // v2.6.0+ 事件埋点：agent 的正式回复镜像（out）
@@ -2060,6 +2061,8 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
           ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, error: `edit_message 仅支持 Discord 会话（收到 ${dest.transport}: 前缀地址），API 会话的消息发出后不可编辑，需更正就再 reply 一条。` }));
           break;
         }
+        const notOwner = editOwnerRefusal(String(msg.messageId ?? ""), [...clients].find(([, i]) => i.ws === ws)?.[0] ?? "");
+        if (notOwner) throw new Error(notOwner);
         await discordEditMessage(discord, dest.id, msg.messageId, msg.text);
         ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, result: { ok: true } }));
       } catch (err) {
