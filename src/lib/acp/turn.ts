@@ -53,6 +53,20 @@ type Pick = { kind: "prompt" | "nudge"; text: string } | { kind: "external"; don
 
 const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
+/**
+ * 调 IO 的唯一入口：同步 throw 也变成 rejection。适配器进程已经退出时，IO 实现可能直接抛而不是返回失败的 Promise；
+ * 直接写 io.x().catch(…) 接不住它——steer 的占位就此不释放，busy 永远为 true，之后什么都投不进去（tests/acp-turn.test.ts「同步抛错」）。
+ */
+function call<T>(f: () => Promise<T>): Promise<T> {
+  try {
+    return Promise.resolve(f());
+  } catch (e) {
+    return Promise.reject(e);
+  }
+}
+
+const failedOutcome = (e: unknown): PromptOutcome => ({ kind: "failed", failure: { kind: "error", key: `transport:${Date.now()}`, message: errText(e) } });
+
 export class AcpTurnLoop {
   private slots: Slot[] = [];
   /** 调度器正在跑一轮（含上报）。steer 在途、调度器停着等它时为 false，但 busy 仍为 true */
@@ -81,10 +95,12 @@ export class AcpTurnLoop {
     // 先占位（到达顺序），再发 steer；落定之前调度器不会开新回合
     const slot: Slot = { kind: "steer" };
     this.slots.push(slot);
-    const r = await this.io.steer!(text).catch((e): SteerResult => (this.io.log(`steering 出错，改排队：${errText(e)}`), { outcome: "failed" }));
+    const r = await call(() => this.io.steer!(text)).catch((e): SteerResult => (this.log(`steering 出错，改排队：${errText(e)}`), { outcome: "failed" }));
     const at = this.slots.indexOf(slot);
     if (r.outcome === "injected") this.slots.splice(at, 1);
-    else this.slots[at] = r.outcome === "startedNewTurn" ? { kind: "external", done: r.done } : { kind: "prompt", text };
+    // done 登记时就接住：排到它之前就 reject 的话，不能变成 unhandled rejection（Bun 进程会以 1 退出）
+    else if (r.outcome === "startedNewTurn") this.slots[at] = { kind: "external", done: call(() => r.done).catch(failedOutcome) };
+    else this.slots[at] = { kind: "prompt", text };
     this.pump();
     return r.outcome === "failed" ? "queued" : "steer";
   }
@@ -101,6 +117,15 @@ export class AcpTurnLoop {
     return { kind: "prompt", text: batch.map((b) => b.text).join("\n\n") };
   }
 
+  /** 日志本身坏了也不能连带卡住调度（它在各个 catch 里被调用） */
+  private log(msg: string): void {
+    try {
+      this.io.log(msg);
+    } catch {
+      /* 日志出口坏了：丢掉这一条，调度照常，不然一次日志失败就把槽卡死 */
+    }
+  }
+
   private pump(): void {
     if (this.pumping) return;
     const first = this.next();
@@ -109,7 +134,7 @@ export class AcpTurnLoop {
     void (async () => {
       try {
         // 单轮出意外（IO 实现抛错）只记日志：调度器停了，排着的消息就永远出不去
-        for (let p: Pick | null = first; p; p = this.next()) await this.run(p).catch((e) => this.io.log(`回合调度出错：${errText(e)}`));
+        for (let p: Pick | null = first; p; p = this.next()) await this.run(p).catch((e) => this.log(`回合调度出错：${errText(e)}`));
       } finally {
         this.pumping = false;
       }
@@ -117,16 +142,13 @@ export class AcpTurnLoop {
   }
 
   private async run(p: Pick): Promise<void> {
-    const outcome = await (p.kind === "external" ? p.done : this.io.prompt(p.text)).catch((e): PromptOutcome => ({
-      kind: "failed",
-      failure: { kind: "error", key: `transport:${Date.now()}`, message: errText(e) },
-    }));
+    const outcome = await call(() => (p.kind === "external" ? p.done : this.io.prompt(p.text))).catch(failedOutcome);
     if (outcome.kind === "failed") {
       // 出卡失败不能连带吞掉下面的上报：bridge 收不到 StopFailure，这个 agent 就一直显示「思考中」
       try {
         this.io.onFailure(outcome.failure);
       } catch (e) {
-        this.io.log(`失败出卡出错：${errText(e)}`);
+        this.log(`失败出卡出错：${errText(e)}`);
       }
     }
     const nudge = p.kind === "nudge";
@@ -134,7 +156,7 @@ export class AcpTurnLoop {
       outcome.kind === "done"
         ? { event: "Stop", stopHookActive: nudge }
         : { event: "StopFailure", stopHookActive: nudge, ...(outcome.kind === "cancelled" ? { interrupt: true } : {}) };
-    const verdict = await this.io.reportStop(report).catch((e) => (this.io.log(`回合结束上报失败（bridge 不在？）：${errText(e)}`), {} as { block?: boolean; reason?: string }));
+    const verdict = await call(() => this.io.reportStop(report)).catch((e) => (this.log(`回合结束上报失败（bridge 不在？）：${errText(e)}`), {} as { block?: boolean; reason?: string }));
     // 补 reply 排到队首；在跑的 external 仍按规则 2 先等完
     if (outcome.kind === "done" && !nudge && verdict.block && verdict.reason) this.slots.unshift({ kind: "nudge", text: hookPromptText(verdict.reason) });
   }

@@ -260,3 +260,72 @@ describe("AcpTurnLoop · 收尾", () => {
     expect(g.stops[0]).toEqual({ event: "StopFailure", stopHookActive: false }); // 出卡失败也照样上报回合结束
   });
 });
+
+describe("AcpTurnLoop · IO 同步抛错 / 提前 reject（审查第 2 轮）", () => {
+  test("steer 同步抛错（适配器进程已退出）：submit 不抛，占位在原处变回 prompt，busy 能回到 false，之后照常开 prompt", async () => {
+    const f = fixture();
+    await f.loop.submit("A");
+    f.io.steer = () => {
+      throw new Error("adapter process already exited");
+    };
+    expect(await f.loop.submit("B")).toBe("queued");
+    await f.finish({ kind: "failed", failure: { kind: "error", key: "exit", message: "exit" } });
+    expect(f.prompts).toEqual(["A", "B"]);
+    await f.finish();
+    expect(f.loop.busy).toBe(false);
+    f.io.steer = undefined;
+    expect(await f.loop.submit("C")).toBe("prompt");
+    expect(f.prompts).toEqual(["A", "B", "C"]);
+  });
+
+  test("prompt / reportStop 同步抛错：按失败收尾、照常上报，排着的继续开", async () => {
+    const f = fixture({ noSteer: true });
+    let n = 0;
+    const realPrompt = f.io.prompt;
+    f.io.prompt = (t) => {
+      if (n++ === 0) throw new Error("stdin closed");
+      return realPrompt(t);
+    };
+    await f.loop.submit("a");
+    await f.loop.submit("b");
+    await tick();
+    expect(f.failures[0]).toMatchObject({ kind: "error", message: "stdin closed" });
+    expect(f.stops[0]).toEqual({ event: "StopFailure", stopHookActive: false });
+    expect(f.prompts).toEqual(["b"]);
+
+    const g = fixture({ noSteer: true });
+    g.io.reportStop = () => {
+      throw new Error("sync boom");
+    };
+    await g.loop.submit("a");
+    await g.loop.submit("b");
+    await g.finish();
+    expect(g.prompts).toEqual(["a", "b"]);
+  });
+
+  test("外部回合的 done 在排到它之前就 reject：不产生 unhandled rejection，按失败收尾", async () => {
+    const unhandled: unknown[] = [];
+    const onUnhandled = (e: unknown) => unhandled.push(e);
+    process.on("unhandledRejection", onUnhandled);
+    try {
+      const f = fixture();
+      await f.loop.submit("A");
+      const b = f.loop.submit("B");
+      let failB!: (e: unknown) => void;
+      const done = new Promise<PromptOutcome>((_, reject) => (failB = reject));
+      f.steers.get("B")!({ outcome: "startedNewTurn", done });
+      await b;
+      failB(new Error("adapter exited before external was picked"));
+      await tick();
+      await tick();
+      await f.finish({ kind: "failed", failure: { kind: "error", key: "exit", message: "adapter exited" } });
+      await tick();
+      expect(unhandled).toEqual([]);
+      expect(f.stops.map((s) => s.event)).toEqual(["StopFailure", "StopFailure"]);
+      expect(f.failures.map((x) => x.message)).toEqual(["adapter exited", "adapter exited before external was picked"]);
+      expect(f.loop.busy).toBe(false);
+    } finally {
+      process.off("unhandledRejection", onUnhandled);
+    }
+  });
+});
