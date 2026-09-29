@@ -5,6 +5,7 @@
  * 经 MCP 一律不动大总管（带上就整个拒）、不动调用方自己。用例见 tests/fleet-caller.test.ts。
  */
 import { bareName, type Excluded, type FleetActionKind, type FleetCandidate, type FleetSelect } from "./fleet-plan.js";
+import { isMasterName } from "./registry.js";
 
 export interface FleetCaller {
   kind: "master" | "pm" | "caller";
@@ -70,8 +71,8 @@ export type ScopeResult<T> = { ok: true; cands: T[]; select: FleetSelect; exclud
  */
 export function scopeForCaller<T extends FleetCandidate>(caller: FleetCaller, action: FleetActionKind, sel: FleetSelect, cands: T[]): ScopeResult<T> {
   const named = new Set((sel.agents ?? []).map(bareName));
-  // 和 ws 的 CLI 分支同一条线（bridge/fleet/ws.ts）：includeMaster、点名 master 都整个拒，不是悄悄跳过
-  if (sel.includeMaster || named.has("master")) return { ok: false, error: `fleet 不能动大总管：${MASTER_OWNER_ONLY}` };
+  // 和 ws 的 CLI 分支同一条线（bridge/fleet/ws.ts）：includeMaster、点名 master（isMasterName 认大小写 / 全角 / 多层前缀）都整个拒
+  if (sel.includeMaster || (sel.agents ?? []).some(isMasterName)) return { ok: false, error: `fleet 不能动大总管：${MASTER_OWNER_ONLY}` };
   if (caller.projects && sel.project !== undefined && !caller.projects.includes(sel.project)) {
     return { ok: false, error: `你不是项目 ${sel.project} 的 PM（你管：${caller.projects.join("、")}）` };
   }

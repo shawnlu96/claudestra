@@ -130,7 +130,8 @@ describe("按调用方收窄", () => {
   });
 
   test("大总管永远不选：点名（带不带前缀）或 includeMaster 都整个报错，和 CLI 同一条线", () => {
-    for (const sel of [{ agents: ["master", "loose"] }, { agents: ["agent-master"] }, { all: true, includeMaster: true }]) {
+    const spellings = ["master", "agent-master", "MASTER", "ｍａｓｔｅｒ", "agent-agent-master"];
+    for (const sel of [{ agents: ["master", "loose"] }, ...spellings.map((m) => ({ agents: [m] })), { all: true, includeMaster: true }]) {
       expect(run(OPS, sel).error).toBe("fleet 不能动大总管：大总管只由 owner 在网页上操作");
     }
     expect(run(OPS, { all: true }).targets).not.toContain("master");
