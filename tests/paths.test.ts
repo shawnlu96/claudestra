@@ -13,11 +13,13 @@ import {
 import { buildClaudeCommand } from "../src/lib/claude-launch";
 import { REGISTRY_PATH } from "../src/lib/registry";
 
-/** 在去掉两个 override 的子进程里求值（测试进程本身被 tests/preload.ts 指到了临时状态目录） */
+/**
+ * 在去掉两个 override 的子进程里求值（测试进程本身被 tests/preload.ts 指到了临时状态目录）。
+ * 也去掉测试标记：否则 lib/test-guard.ts 会把真实状态目录换成临时的。子进程只 import、打印路径，不写文件。
+ */
 function evalClean(expr: string): unknown {
   const env = { ...process.env };
-  delete env.CLAUDESTRA_STATE_DIR;
-  delete env.CLAUDESTRA_RUNTIME_DIR;
+  for (const k of ["CLAUDESTRA_STATE_DIR", "CLAUDESTRA_RUNTIME_DIR", "CLAUDESTRA_TEST", "NODE_ENV"]) delete env[k];
   const root = join(import.meta.dir, "../src/lib");
   const script =
     `import * as p from ${JSON.stringify(join(root, "paths.ts"))};` +

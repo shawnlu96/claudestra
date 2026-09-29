@@ -14,6 +14,7 @@ import {
   tomlString,
   type CodexLaunchSpec,
 } from "../src/lib/codex-launch.js";
+import { testChildEnv } from "./test-env.ts";
 
 const SID = "01a0ca4b-ebca-7b23-b5a2-87941f333018";
 const spec = (over: Partial<CodexLaunchSpec> = {}): CodexLaunchSpec => ({
@@ -36,7 +37,7 @@ async function shellArgv(cmd: string): Promise<{ env: Record<string, string>; ar
   const out = await new Response(Bun.spawn(["/bin/sh", "-c", script], { stdout: "pipe" }).stdout).text();
   const env: Record<string, string> = {};
   const envScript = `${(cmd.match(/^((?:[A-Z_]+=\S* )+)/) || ["", ""])[1]} env`;
-  const envOut = await new Response(Bun.spawn(["/bin/sh", "-c", envScript], { stdout: "pipe", env: {} }).stdout).text();
+  const envOut = await new Response(Bun.spawn(["/bin/sh", "-c", envScript], { stdout: "pipe", env: testChildEnv() }).stdout).text();
   for (const line of envOut.split("\n")) {
     const i = line.indexOf("=");
     if (i > 0) env[line.slice(0, i)] = line.slice(i + 1);

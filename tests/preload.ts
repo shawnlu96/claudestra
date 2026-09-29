@@ -2,11 +2,22 @@
  * 测试一律用临时状态目录：lib/paths.ts 在加载时读 CLAUDESTRA_STATE_DIR，不隔离的话 recordMetric、
  * cron、config 之类会往真实的 ~/.claude-orchestrator 里写（用量统计、交接记录都会被测试数据污染）。
  * 已经显式设了就尊重（手动指定 / 子进程测试）。检查默认路径的用例在子进程里去掉这个变量再验。
+ * 没加载本文件时（仓库外目录跑、绝对路径跑）由 lib/test-guard.ts 按 NODE_ENV=test 兜底。
  */
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { readAutoloadedEnvUnguarded } from "../src/lib/env-file.ts";
+import { REPO_ROOT } from "../src/lib/repo-root.ts";
+import { TEST_FLAG } from "../src/lib/test-guard.ts";
 
+// Bun 从 cwd 自动加载的 .env / .env.test（在主仓库根跑时就是线上配置）：值和文件里一样的键都删掉，
+// 免得频道号、token、中继地址被测试当成自己的。只删同值的，终端显式 export 成别的值的照留。
+for (const dir of new Set([process.cwd(), REPO_ROOT])) {
+  for (const [k, v] of Object.entries(readAutoloadedEnvUnguarded(dir))) if (process.env[k] === v) delete process.env[k];
+}
+
+process.env[TEST_FLAG] = "1";
 if (!process.env.CLAUDESTRA_STATE_DIR) process.env.CLAUDESTRA_STATE_DIR = mkdtempSync(join(tmpdir(), "cstra-test-state-"));
 
 // bridge 一律指向没人听的端口，无条件：agent 会话里本来就带着 BRIDGE_URL，没设时默认又是线上的 3847，

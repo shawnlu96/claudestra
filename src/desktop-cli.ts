@@ -11,7 +11,7 @@
 
 import { existsSync, readFileSync, statSync } from "fs";
 import { resolve } from "path";
-import { resolveBridgePort } from "./lib/bridge-url.js";
+import { dotenvBridgePort } from "./lib/bridge-url.js";
 import { desktopLabels, LABELS_ENV, labelsOverrideFiles, overallStatus, updateHolder } from "./lib/desktop-status.js";
 import { checkRuntime, runDoctor } from "./lib/doctor.js";
 import { readDotenvFileSync } from "./lib/env-file.js";
@@ -47,7 +47,7 @@ async function status() {
     overall: overallStatus(daemons),
     daemons,
     // 端口按 daemon 实际读到的 .env 算（和 doctor 同口径），不看调用方终端 export 的变量
-    webUrl: `http://127.0.0.1:${resolveBridgePort(dotenv ?? {})}`,
+    webUrl: `http://127.0.0.1:${dotenvBridgePort(REPO_ROOT, dotenv)}`,
     logDir: LOG_DIR,
     repoRoot: resolve(REPO_ROOT),
     configured: dotenv !== null,

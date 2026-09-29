@@ -6,6 +6,7 @@
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
+import { testChildEnv } from "./test-env.ts";
 
 export type RunnerResult = { name: string; status?: number; body?: string; threw?: string; message?: string };
 
@@ -37,7 +38,7 @@ export function runnerHome(prefix: string, registry: { agents: Record<string, un
     home,
     run(specs, env = {}) {
       const r = Bun.spawnSync([process.execPath, join(import.meta.dir, "api-route-parity.runner.ts"), JSON.stringify(specs)], {
-        env: {
+        env: testChildEnv({
           PATH: `${fakeBin}:/usr/bin:/bin`,
           HOME: home,
           TMPDIR: home,
@@ -45,7 +46,7 @@ export function runnerHome(prefix: string, registry: { agents: Record<string, un
           CONTROL_CHANNEL_ID: "",
           LANG: "C",
           ...env,
-        },
+        }),
         stdout: "pipe",
         stderr: "pipe",
       });
