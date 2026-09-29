@@ -37,6 +37,7 @@
 .wOwner { color: var(--warn); background: color-mix(in srgb, var(--warn) 14%, transparent); border: 1px dashed color-mix(in srgb, var(--warn) 60%, transparent); }
 .wReview { color: var(--s-run); background: color-mix(in srgb, var(--s-run) 15%, transparent); }
 .inferred { margin: 0 0 8px; color: var(--faint); font-size: var(--fs-3); }
+.looseWait { margin: 0 0 8px; }
 
 /* 列表里的一行简版：一排小圆点 + 当前步骤名和接手人，控制在一行（窄了省略号） */
 .mini { display: flex; align-items: center; gap: 8px; min-width: 0; margin-top: 5px; font-size: var(--fs-3); color: var(--muted); }

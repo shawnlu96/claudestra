@@ -43,6 +43,8 @@ export interface StepLineView {
   slots: StepSlot[];
   current: StepSlot | null;
   wait: WaitKind | null;
+  /** 在等但没有哪一格是当前（进了 review 还没派审查员、卡住的那一步没派人）：详情里单独挂在线上方，不然只有列表看得到 */
+  looseWait: WaitKind | null;
   /** 全是推出来的（老卡）：整条线标「推断」 */
   derivedOnly: boolean;
 }
@@ -110,7 +112,8 @@ export function stepLineView(info: unknown, stage: string, modelOf: (agent: stri
   const slots = SLOT_KEYS.map((k) => slotOf(k, pick(rows, k), active, modelOf));
   const wait: WaitKind | null = stage === "blocked" ? "blocked" : i.awaitingPeerOwner === true ? "owner" : stage === "review" ? "review" : null;
   const filled = slots.filter((s) => s.filled);
-  return { slots, current: slots.find((s) => s.current) ?? null, wait, derivedOnly: filled.length > 0 && filled.every((s) => s.derived) };
+  const current = slots.find((s) => s.current) ?? null;
+  return { slots, current, wait, looseWait: current ? null : wait, derivedOnly: filled.length > 0 && filled.every((s) => s.derived) };
 }
 
 /** 等待的一句（zh 原文）：列表里跟在当前步骤后面、详情里标在当前格上 */

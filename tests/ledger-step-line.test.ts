@@ -33,6 +33,18 @@ describe("stepLine", () => {
     expect(lineOf("T60").awaitingPeerOwner).toBe(false); // 本机的卡从来不等对方
   });
 
+  test("纯步骤派发（没有 delegate）也等对方 owner；只认当前这一步那个 peer 的 accept，别的 peer 先接不算", () => {
+    assignStep(db, PM, { taskId: "T60", step: "write", executor: "agent-a@A", executorKind: "peer" });
+    assignStep(db, PM, { taskId: "T60", step: "review", executor: "agent-b@B", executorKind: "peer" });
+    expect(lineOf("T60").awaitingPeerOwner).toBe(true);
+    recordAccept(db, { actor: "peer:B", now: 1_200 }, { taskId: "T60", peer: "B" });
+    expect(lineOf("T60").awaitingPeerOwner).toBe(true); // 审查 peer 先接，写的 peer 还没点头
+    recordAccept(db, { actor: "peer:A", now: 1_300 }, { taskId: "T60", peer: "A" });
+    expect(lineOf("T60").awaitingPeerOwner).toBe(false);
+    assignStep(db, PM, { taskId: "T51", step: "write", executor: "agent-x", executorKind: "agent" });
+    expect(lineOf("T51").awaitingPeerOwner).toBe(false); // 显式派给本机 agent：不等对方，哪怕 extra 里还留着 delegate
+  });
+
   test("老卡按 extra 推出来的步骤也在线上；当前这一步与 stepAtStage 同口径（blocked 看 stageBefore）", () => {
     toStage("T51", "build");
     expect(lineOf("T51").active).toEqual({ step: "write", round: 0 });

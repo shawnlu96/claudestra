@@ -62,6 +62,16 @@ describe("stepLineView", () => {
     expect(stepLineView(info(one, null, true), "blocked")!.wait).toBe("blocked"); // 卡住优先
   });
 
+  test("没有当前格的等待（进了 review 没派审查员 / 卡住的那一步没人）：looseWait 单独给详情；有当前格就挂在格上", () => {
+    const one = [row({ step: "write", executor: "agent-x", executorKind: "agent" })];
+    expect(stepLineView(info(one), "review")).toMatchObject({ current: null, wait: "review", looseWait: "review" });
+    expect(stepLineView(info(one), "blocked")).toMatchObject({ current: null, looseWait: "blocked" });
+    const cur = stepLineView(info(one, { step: "write", round: 0 }), "blocked")!;
+    expect(cur.current?.key).toBe("write");
+    expect(cur.looseWait).toBeNull();
+    expect(stepLineView(info(one), "build")!.looseWait).toBeNull();
+  });
+
   test("head 区间：两头一样只写一个；没有 headFrom 只写 headTo；未知状态 / 结论丢掉", () => {
     const v = stepLineView(info([
       row({ step: "write", executor: "agent-x", executorKind: "agent", headFrom: "abcdef1234", headTo: "abcdef1234", state: "weird", verdict: "maybe" }),

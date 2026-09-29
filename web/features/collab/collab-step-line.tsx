@@ -55,11 +55,12 @@ function Meta({ s, tr }: { s: StepSlot; tr: Tr }) {
   return bits.length ? <div className={st.meta}>{bits}</div> : null;
 }
 
-/** 详情里的整条线：当前这一格高亮并挂等待徽标 */
+/** 详情里的整条线：当前这一格高亮并挂等待徽标；没有当前格的等待挂在线上方 */
 export function StepLine({ v, tr }: { v: StepLineView; tr: Tr }) {
   return (
     <>
       {v.derivedOnly && <p className={st.inferred}>{tr("老卡没有逐步记录，下面是按负责人推断的")}</p>}
+      {v.looseWait && <p className={st.looseWait}><WaitBadge wait={v.looseWait} tr={tr} /></p>}
       <ol className={st.line}>
         {v.slots.map((s) => (
           <li key={s.key} className={`${st.slot} ${s.current ? st.cur : ""} ${s.filled ? "" : st.empty}`} data-step={s.key} aria-current={s.current ? "step" : undefined}>
