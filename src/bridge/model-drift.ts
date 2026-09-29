@@ -16,7 +16,7 @@
 import { readRegistryAgents } from "../lib/registry.js";
 import { projectJsonlPath } from "../lib/jsonl-cost.js";
 import { resolveModelAlias } from "../lib/claude-launch.js";
-import { sessionTailInfo } from "./api-routes.js";
+import { sessionTailInfo } from "../lib/session-tail.js";
 import { emitEvent } from "./event-bus.js";
 import { modelFamilies } from "./permission-watcher.js";
 

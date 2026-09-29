@@ -5,7 +5,7 @@
  */
 import { repoEnvVar } from "../lib/env-file.js";
 import { hostname } from "os";
-import { loadRegistry, output } from "./core.js";
+import { extractBoolFlag, loadRegistry, output } from "./core.js";
 import { resolveMyBridgeUrl } from "./peers-net.js";
 import { peerAuthHint } from "../lib/peer-auth-hints.js";
 import { inviteLink, isPeerBaseUrl, relayUrlOf } from "../lib/peers.js";
@@ -184,6 +184,20 @@ export async function cmdPeerHttpList() {
     addedAt: p.addedAt,
   }));
   output({ ok: true, count: peers.length, httpPeers: peers });
+}
+
+/** `peer-http-scope <peer> --agents a,b [--force]` 的参数解析（从 manager.ts 原样搬出，大文件只留一行分发） */
+export async function cmdPeerHttpScopeCli(args: string[]) {
+  const { rest: afterForce, value: force } = extractBoolFlag(args, "--force");
+  let agentsCsv = "";
+  const pos: string[] = [];
+  for (let i = 0; i < afterForce.length; i++) {
+    const a = afterForce[i];
+    if (a === "--agents") agentsCsv = afterForce[++i] || "";
+    else if (a.startsWith("--agents=")) agentsCsv = a.slice(9);
+    else pos.push(a);
+  }
+  await cmdPeerHttpScope(pos[0] || "", agentsCsv, force);
 }
 
 /** v2.11.1+ 改 peer 入站 scope（token 不换,对方无感;web peer 管理 UI 的后端） */

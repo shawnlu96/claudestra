@@ -52,4 +52,14 @@ export const QUOTA_DICT: Record<string, string> = {
   "账户不确定，暂不出提醒": "account uncertain; reminders paused",
   "本机密钥不可用": "local key unavailable",
   "内部出错，稍后自动重试": "internal error, will retry automatically",
+  // 上下文边界（features/chat/ctx-boundary-view.ts、components/ctx-boundary-chip.tsx）
+  "上下文边界": "Context boundary",
+  "执行类": "Executor",
+  "协调类": "Coordinator",
+  "全局": "Global",
+  "余 {n}": "{n} left",
+  "超 {n}": "{n} over",
+  "压缩线 {n}": "compacts at {n}",
+  "硬上限 {n}": "hard cap {n}",
+  "配置有问题": "Config problem",
 };

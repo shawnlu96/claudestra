@@ -111,7 +111,7 @@ import { cmdKill, cmdRemove } from "./manager/agent-kill.js"; // 按 registry �
 import { cmdRename } from "./manager/agent-rename.js";
 import { isRestartInProgress, tryLockRestart, unlockRestart } from "./manager/restart-lock.js";
 import { cmdTokenAdd, cmdTokenList, cmdTokenRevoke } from "./manager/tokens.js";
-import { cmdPeerHttpInvite, cmdPeerHttpJoin, cmdPeerHttpAccept, cmdPeerHttpTest, cmdPeerHttpList, cmdPeerHttpScope, cmdPeerHttpRemove, cmdPeerInviteNew, cmdPeerInviteList, cmdPeerInviteRevoke } from "./manager/peers.js";
+import { cmdPeerHttpInvite, cmdPeerHttpJoin, cmdPeerHttpAccept, cmdPeerHttpTest, cmdPeerHttpList, cmdPeerHttpScopeCli, cmdPeerHttpRemove, cmdPeerInviteNew, cmdPeerInviteList, cmdPeerInviteRevoke } from "./manager/peers.js";
 import { cmdPeerInviteRedeem, cmdPeerJoinAuto, parseRedeemArgs } from "./manager/peer-join.js";
 import { cmdCost, cmdMetrics } from "./manager/cost.js";
 import { cmdAutoUpdate } from "./manager/auto-update.js";
@@ -2758,19 +2758,7 @@ switch (cmd) {
   // 中继（bridge/relay-link.ts）：配对短码 / 二维码给手机与浏览器，状态查询；实现在 manager/relay.ts
   case "pair": await (await import("./manager/pair.js")).cmdPair(args); break;
   case "relay-status": await (await import("./manager/relay.js")).cmdRelayStatus(); break;
-  case "peer-http-scope": {
-    const { rest: afterForce, value: force } = extractBoolFlag(args, "--force");
-    let agentsCsv = "";
-    const pos: string[] = [];
-    for (let i = 0; i < afterForce.length; i++) {
-      const a = afterForce[i];
-      if (a === "--agents") agentsCsv = afterForce[++i] || "";
-      else if (a.startsWith("--agents=")) agentsCsv = a.slice(9);
-      else pos.push(a);
-    }
-    await cmdPeerHttpScope(pos[0] || "", agentsCsv, force);
-    break;
-  }
+  case "peer-http-scope": await cmdPeerHttpScopeCli(args); break;
   case "peer-http-remove": await cmdPeerHttpRemove(args[0] || ""); break;
   case "peer-http-messages-only": await (await import("./manager/peers.js")).cmdPeerHttpMessagesOnly(args[0] || "", args[1] || ""); break;
   case "peer-ledger": await (await import("./manager/peer-ledger-cli.js")).cmdPeerLedger(args); break;
@@ -2851,7 +2839,7 @@ switch (cmd) {
   case "migrate-web-state": await (await import("./manager/migrate-web-state.js")).cmdMigrateWebState(); break; // 旧 Next BFF 的 settings.db / config.json → bridge（先 tar 备份，幂等）
   case "web-release": await cmdWebRelease(args); break; // 网页版本发布 / 回滚（lib/web-releases.ts）
   case "retire-web": await (await import("./manager/retire-web.js")).cmdRetireWeb(); break; // 卸旧 com.claudestra.web（前端已由 bridge 托管；先验新模式 + 有备份才动手）
-
+  case "ctx-boundary": await (await import("./manager/ctx-boundary.js")).cmdCtxBoundary(args); break; // 上下文边界自动注入：dry-run | status | on | off
   case "permissions":
   case "perm":
   case "perms": {

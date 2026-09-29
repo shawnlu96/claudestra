@@ -31,7 +31,16 @@ export interface AppConfig {
    *  阈值(tokens,0=关闭常规自动触发;缺省用 stats-dashboard 的默认 400K)。
    *  v2.21.3+ emergency:93% 救命线独立开关(缺省 true)——常规线关了它也在,
    *  只在快撞 CC 的 ~967K 裸压时兜底触发一次(owner 2026-09-03)。 */
-  autoCompact?: { idleHours?: number; window?: number; emergency?: boolean };
+  autoCompact?: {
+    idleHours?: number;
+    window?: number;
+    emergency?: boolean;
+    /** 上下文边界自动注入总开关，缺省关（先 manager ctx-boundary dry-run 看结果再 on）；关着时面板照常显示、手动按钮照常能用 */
+    inject?: boolean;
+    /** 按项目 / 名字模式的上下文边界（lib/ctx-boundary-policy.ts 解析和校验）。这里原样保留：set* 是读改写，
+     *  在这里过滤就会把 owner 写错的条目悄悄抹掉，而不是在面板上报出来 */
+    policies?: unknown;
+  };
   /** v2.23+ 归档保留天数（缺省 90；0 = 永不自动清理）。归档目录里的条目超过
    *  这个天数就由每日兜底清掉——归档是"可找回的过期会话"，不是永久仓库。 */
   archiveRetentionDays?: number;
@@ -76,17 +85,7 @@ function merge(base: AppConfig, raw: any): AppConfig {
             messageId: String(raw.statsDashboard.messageId || ""),
           }
         : base.statsDashboard,
-    autoCompact:
-      raw?.autoCompact &&
-      (typeof raw.autoCompact.idleHours === "number" ||
-        typeof raw.autoCompact.window === "number" ||
-        typeof raw.autoCompact.emergency === "boolean")
-        ? {
-            ...(typeof raw.autoCompact.idleHours === "number" ? { idleHours: raw.autoCompact.idleHours } : {}),
-            ...(typeof raw.autoCompact.window === "number" ? { window: raw.autoCompact.window } : {}),
-            ...(typeof raw.autoCompact.emergency === "boolean" ? { emergency: raw.autoCompact.emergency } : {}),
-          }
-        : base.autoCompact,
+    autoCompact: mergeAutoCompact(raw?.autoCompact) ?? base.autoCompact,
     // 以前漏在这里：任何 set*（读→改→写）都会把磁盘上的 archiveRetentionDays 抹掉
     ...(typeof raw.archiveRetentionDays === "number" ? { archiveRetentionDays: raw.archiveRetentionDays } : {}),
     ...(typeof raw.autoArchiveCodexSubs === "boolean" ? { autoArchiveCodexSubs: raw.autoArchiveCodexSubs } : {}),
@@ -94,6 +93,18 @@ function merge(base: AppConfig, raw: any): AppConfig {
     ...(typeof raw.quotaLive === "boolean" ? { quotaLive: raw.quotaLive } : {}),
     ...(typeof raw.quotaClaudeBackground === "boolean" ? { quotaClaudeBackground: raw.quotaClaudeBackground } : {}),
   };
+}
+
+function mergeAutoCompact(ac: any): AppConfig["autoCompact"] | undefined {
+  if (!ac || typeof ac !== "object") return undefined;
+  const out: NonNullable<AppConfig["autoCompact"]> = {
+    ...(typeof ac.idleHours === "number" ? { idleHours: ac.idleHours } : {}),
+    ...(typeof ac.window === "number" ? { window: ac.window } : {}),
+    ...(typeof ac.emergency === "boolean" ? { emergency: ac.emergency } : {}),
+    ...(typeof ac.inject === "boolean" ? { inject: ac.inject } : {}),
+    ...(ac.policies !== undefined ? { policies: ac.policies } : {}),
+  };
+  return Object.keys(out).length ? out : undefined;
 }
 
 function defaults(): AppConfig {
@@ -202,13 +213,14 @@ export async function setAutoCompactIdleHours(hours: number): Promise<AppConfig>
 }
 
 /** v2.20.2+ 设置界面写入口:一次可改阈值/闲置时长任意子集。 */
-export async function setAutoCompact(patch: { window?: number; idleHours?: number; emergency?: boolean }): Promise<AppConfig> {
+export async function setAutoCompact(patch: { window?: number; idleHours?: number; emergency?: boolean; inject?: boolean }): Promise<AppConfig> {
   const cfg = await readConfig();
   cfg.autoCompact = {
     ...cfg.autoCompact,
     ...(typeof patch.window === "number" ? { window: patch.window } : {}),
     ...(typeof patch.idleHours === "number" ? { idleHours: patch.idleHours } : {}),
     ...(typeof patch.emergency === "boolean" ? { emergency: patch.emergency } : {}),
+    ...(typeof patch.inject === "boolean" ? { inject: patch.inject } : {}),
   };
   await writeConfig(cfg);
   return cfg;

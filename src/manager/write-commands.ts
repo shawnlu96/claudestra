@@ -50,6 +50,7 @@ const WRITE_SUBCOMMANDS: Record<string, ReadonlySet<string>> = {
   effort: new Set(["set", "reset", "all"]),
   mode: new Set(["set", "reset", "all"]),
   model: new Set(["set", "reset", "all"]),
+  "ctx-boundary": new Set(["on", "off"]),
 };
 
 /** ledger 的读子命令；其余都写台账（备机上也要过认主守卫）。meta 只有带 --pms（写提案）/ --docs-dir 才写，--team / --dispatcher 会被拒，也按写算 */
