@@ -240,6 +240,8 @@ export interface ReviewInput {
   text?: string;
   /** 同一事务推阶段（review → fix / merge / done / spec） */
   move?: StageMove;
+  /** 审查方自报的模型（跨实例只能凭声明，记进那一步的 claims） */
+  model?: string;
   /** PM 豁免对抗式（review --waive adversarial，权限在 CLI 层判），只对当时的 head 有效（ledger-handler.ts owesAdversarial） */
   waive?: "adversarial";
 }

@@ -60,7 +60,8 @@ bun src/manager.ts ledger task-new D12 --project <p> --kind code --title "<标�
 
 owner 选了之后写卡：
 
-- 接：`peer-ledger <peer> stage D12 --from spec --to restate --text "复述：<一句话复述你理解的任务>"`，然后**停在 restate 等发起方 PM 放行**（由它推 `restate → build`），和本机执行者一样。复述和原意对不上时，PM 会在开工前纠正。
+- 接：先 `peer-ledger <peer> accept D12`：在对方卡上记一笔「接方已接受」（带时间），同时在本机记一笔。再 `peer-ledger <peer> stage D12 --from spec --to restate --text "复述：<一句话复述你理解的任务>"`，然后**停在 restate 等发起方 PM 放行**（由它推 `restate → build`），和本机执行者一样。复述和原意对不上时，PM 会在开工前纠正。
+- 接受之后，这张卡上派给你的后续步骤（修、复核返工……）首行写 `[协作 D12/<步骤>]`，**不用再问 owner**。注入头只在本机记过「接受了这个 peer 的 D12」时才这样提示；没接受过的卡，就算首行写着步骤，也照新委托处理、先问 owner。
 - 不接：`peer-ledger <peer> note D12 "不接：<原因>"`，由发起方 PM 把任务推到 cancelled。
 
 接下以后，你可以在自家台账里也建一个任务来跟踪（执行者是自己的 agent，`extra` 里记 `"delegation": {"from": "<peer名>", "id": "D12"}`），也可以不建。
@@ -73,7 +74,9 @@ bun src/manager.ts peer-ledger <peer> show D12                    # 卡 + 事件
 bun src/manager.ts peer-ledger <peer> note D12 "进度…"
 bun src/manager.ts peer-ledger <peer> pr D12 --pr https://github.com/o/r/pull/12 --head <sha>
 bun src/manager.ts peer-ledger <peer> stage D12 --from build --to review
-bun src/manager.ts peer-ledger <peer> review D12 --verdict changes --p1 2 --text "见 PR review"   # 只有审查方
+bun src/manager.ts peer-ledger <peer> review D12 --verdict changes --p1 2 --text "见 PR review"   # 只有这一轮审查那一步的实例
+bun src/manager.ts peer-ledger <peer> accept D12                  # owner 同意后跑一次
+# stage / review 可带 --model <模型名>：自报用的什么模型，记进那一步的 claims（跨实例只能凭声明）
 ```
 
 `<peer>` 是你这边给发起方起的 peer 名。
@@ -89,8 +92,10 @@ bun src/manager.ts peer-ledger <peer> review D12 --verdict changes --p1 2 --text
 | 完成 | 见下一节 |
 
 - 权限全在发起方的 bridge 判：只认请求用的 token 对应哪个 peer，认不出你这边是哪个 agent；请求体里写的名字一概不信。
-- 执行方能推的阶段：写复述（`spec→restate`）、交付（`build→review`、`fix→review`），以及合并前的阶段进出 `blocked`。放行复述（`restate→build`）、merge、deploy、verified、cancelled、回退改规格，都只能由发起方 PM 做。
-- 执行方只在 build / fix 阶段能挂 PR 和 head：进了 review 再换，发起方审过的就不是现在这份了。审查方只能写 note 和审查结论，审查结论不带阶段跳转。
+- **权限按步骤判**（T47，`src/lib/ledger-steps.ts`）：卡拆成复述、写、初审、修、终审、看界面、合并部署、核对，每一步单独记执行者。你只能动**当前阶段那一步派给你的**：复述那一步（`spec→restate`）、写那一步（`build→review`）、修那一步（`fix→review`，没单独派「修」就还是写的人修），以及合并前的阶段进出 `blocked`。review 阶段能进出 blocked 的是交付的那一方。放行复述（`restate→build`）、merge、deploy、verified、cancelled、回退改规格，都只能由发起方 PM 做；合并部署、核对这两步不能派给别的实例。
+- 老卡没有步骤记录，按 `extra.delegate`（执行方）/ `extra.reviewer`（审查方）推出来，和以前一样。
+- 只在 build / fix 阶段能挂 PR 和 head：进了 review 再换，发起方审过的就不是现在这份了。审查结论只有这一轮审查那一步的实例能写，不带阶段跳转。
+- **作者按步骤算**：写或修那一步的执行者，加上它交付的 head 区间。审查结论写进来时按这个查「审的人不能是写的人」：查得出且相同就拒；查不出（没交付过 head）放行，结论里标「作者未知」。两边是同一个实例时只能凭对方声明。
 - 时间线是白名单：阶段变化只给 from / to；建卡、改卡只给 PR 和 head；交付只给 head；审查只给结论（verdict、P 计数、轮次、正文）；你自己写的事件原样给。建卡时的 `extra`、分支名、规格卡路径、发起方 PM 的 note、owner 原话、派审、部署这些都不给。
 - 负责人、规格卡、`extra`、别的任务、事项都碰不到。事件的 actor 记成 `peer:<名>`。
 - 写命令都可以带 `--dedup <key>`，重发不会记两次。每次写入用不同的 key，比如带上时间或序号；key 相同的第二条会被当成重复，内容不会记进去。
@@ -124,7 +129,8 @@ bun src/manager.ts peer-http-messages-only <peer> on    # off 恢复
 ## 代码改了什么
 
 - **协作视图**认 `extra.delegate`（`web/features/collab/collab-model.ts` 的 `delegateOf`）：任务没有本机执行者时，「执行者」显示委托对象；spec 阶段的委托任务也画成一条线，不算进 PM 排队；委托任务不判「卡住」，因为等对方 owner、等对方合并门槛本来就按天算。「此刻动作」一栏对委托任务是空的，这是规矩 3 的代价。
-- **peer 请求的注入头**加了一句：首行是 `[协作 …]` 时，先回自家 owner 频道问接不接（附本文档的绝对路径）。
+- **peer 请求的注入头**加了一句：首行是 `[协作 …]` 时，先回自家 owner 频道问接不接（附本文档的绝对路径）。首行是 `[协作 <任务号>/<步骤>]` 且本机记过接受（`src/lib/peer-accepted.ts`，状态目录 `peer-accepted.json`）时，改成「已接受卡上的步骤单，不用再问 owner」（`src/bridge/router.ts` collabNote）。
+- **步骤化台账**（T47）：`task_steps` 表（台账迁移 v6）；本机用 `ledger step <task> <步骤> <执行者> [--kind agent|human|peer]` 派步骤、`ledger steps <task>` 看；交付和审查时自动记 head 区间、结论、本机校验（verified）和对方自报（claims）；协作视图的任务详情多了「步骤」段。
 - **peer 台账接口**：`/api/v1/peer-ledger`（`src/bridge/local-api/peer-ledger.ts`、`src/lib/peer-ledger.ts`），写入经 `ledger peer-write`，bridge 仍然只读台账；台账多了一个 `peer` 角色（`src/lib/ledger-stages.ts`），peer 名精确匹配。受托方用 `manager peer-ledger`（`src/manager/peer-ledger-cli.ts`）。`manager token-list` 会显示每枚 peer token 签给了谁、是不是只能投递消息。
 - **只能投递消息**的 token 范围（`src/lib/peer-scope-gate.ts` 的 `messagesOnlyAllows`，闸门在 `src/bridge/api-auth.ts`）。
 - `send_to_agent` 的工具说明加了发给 peer 前的脱敏提醒；`roles/pm.md` 加了「`extra.delegate` 的任务不在本机派发」。

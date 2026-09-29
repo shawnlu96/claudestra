@@ -166,4 +166,7 @@ export const COLLAB_DICT: Record<string, string> = {
   "回放这条任务": "Replay this task",
   "{pm} 派出": "sent by {pm}",
   "已跑 {d}": "running {d}",
+  "本机核过：审的人不是写的人": "checked here: reviewer is not the author",
+  "同一实例，凭对方声明": "same instance — per their claim",
+  "自报模型 {m}（凭声明）": "reports model {m} (their claim)",
 };

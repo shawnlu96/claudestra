@@ -7,8 +7,9 @@ import { parseLedgerArgs } from "./ledger-identity.js";
 import { peerCliFetch } from "./relay.js";
 
 const USAGE =
-  "peer-ledger <peer> list | show <task> | note <task> <text…> | pr <task> [--pr <url>] [--head <sha>] | " +
-  "stage <task> --from <s> --to <s> [--text <t>] | review <task> --verdict pass|changes|block [--p0 N --p1 N --p2 N] [--text <t>]（写命令都可带 --dedup <key>）";
+  "peer-ledger <peer> list | show <task> | note <task> <text…> | accept <task> | pr <task> [--pr <url>] [--head <sha>] | " +
+  "stage <task> --from <s> --to <s> [--text <t>] [--model <m>] | review <task> --verdict pass|changes|block [--p0 N --p1 N --p2 N] [--text <t>] [--model <m>]" +
+  "（写命令都可带 --dedup <key>；accept 只在我方 owner 同意接这张卡之后跑，之后这张卡上的步骤单不再先问 owner）";
 
 type Json = Record<string, any>;
 
@@ -29,13 +30,18 @@ export async function cmdPeerLedger(args: string[]): Promise<void> {
   if (!id) return output({ ok: false, error: "缺任务 id", usage: USAGE });
   const card = `/tasks/${encodeURIComponent(id)}`;
   if (sub === "show") return output(await call(card));
-  const p = parseLedgerArgs(rest, ["pr", "head", "from", "to", "text", "verdict", "p0", "p1", "p2", "dedup"]);
+  const p = parseLedgerArgs(rest, ["pr", "head", "from", "to", "text", "verdict", "p0", "p1", "p2", "dedup", "model"]);
   if ("error" in p) return output({ ok: false, error: p.error, usage: USAGE });
   const f = p.flags;
   let body: Json;
   if (sub === "note") body = { op: "note", text: p.pos.join(" ") };
-  else if (sub === "stage") body = { op: "stage", from: f.from, to: f.to, text: f.text };
-  else if (sub === "review") body = { op: "review", verdict: f.verdict, p0: Number(f.p0 ?? 0), p1: Number(f.p1 ?? 0), p2: Number(f.p2 ?? 0), text: f.text };
+  else if (sub === "accept") {
+    const r = await call(card, { op: "accept", ...(f.dedup ? { dedup: f.dedup } : {}) });
+    // 对方卡上记下了才在本机记：注入头按本机这一笔放行步骤单（lib/peer-accepted.ts）
+    if (r.ok) (await import("../lib/peer-accepted.js")).markPeerTaskAccepted(peerName!, id);
+    return output(r);
+  } else if (sub === "stage") body = { op: "stage", from: f.from, to: f.to, text: f.text, model: f.model };
+  else if (sub === "review") body = { op: "review", verdict: f.verdict, p0: Number(f.p0 ?? 0), p1: Number(f.p1 ?? 0), p2: Number(f.p2 ?? 0), text: f.text, model: f.model };
   else if (sub === "pr") {
     const cur = await call(card);
     if (!cur.ok) return output(cur);
