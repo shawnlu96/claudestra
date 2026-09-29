@@ -1301,7 +1301,7 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
     try {
       await tmuxSendLine(targetWindow, "/clear");
     } catch (e) {
-      return apiJson(500, { ok: false, error: `tmux 发送失败: ${(e as Error).message}` });
+      return apiJson((e as Error).name === "KeysBlockedError" ? 409 : 500, { ok: false, error: `tmux 发送失败: ${(e as Error).message}` });
     }
     recordMetric("agent_clear", { channelId: agent.channelId, agent: agent.name, meta: { trigger: "api" } });
     console.log(`🧹 [api] /clear 已发送给 ${agent.name} (token=${tokenId})`);
@@ -1417,7 +1417,7 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
         if (r.outcome === "timeout") warnings.push("没等到 /effort 落地,以会话实际显示为准");
       }
     } catch (e) {
-      return apiJson(500, { ok: false, error: `tmux 发送失败: ${(e as Error).message}` });
+      return apiJson((e as Error).name === "KeysBlockedError" ? 409 : 500, { ok: false, error: `tmux 发送失败: ${(e as Error).message}` });
     }
     {
       // 乐观显示:注入已成功,列表立即按新值显示;jsonl 实测追上后自动接管

@@ -6,7 +6,8 @@
  */
 import { CODEX_MENU_REFUSAL, codexMenuShown } from "./codex-menu.js";
 import { wallWaitKind } from "./quota-wall-text.js";
-import { readRegistryAgentsSync } from "./registry.js";
+import { runtimeOfWindow } from "./codex-key-guard.js";
+export { runtimeOfWindow };
 import { paneLooksIdle, tmuxCapture } from "./tmux-helper.js";
 
 export type WallWait = "menu" | "countdown" | "codex_menu";
@@ -17,11 +18,6 @@ export function wallWaitOf(pane: string, runtime: string | undefined): WallWait 
   return wallWaitKind(pane);
 }
 
-/** tmux 窗口目标（master:=agent-x / master:agent-x）→ registry 里的运行时；master 与认不出的按 CC */
-export function runtimeOfWindow(win: string): string | undefined {
-  const name = win.replace(/^[^:]*:=?/, "");
-  return readRegistryAgentsSync().find((a) => a.name === name)?.runtime;
-}
 
 export async function windowWallWait(win: string, runtime: string | undefined = runtimeOfWindow(win)): Promise<WallWait | null> {
   return wallWaitOf(await tmuxCapture(win, 30).catch(() => ""), runtime); // 抓不到：认不出，按调用方原来的逻辑走

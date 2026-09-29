@@ -5,7 +5,9 @@
  * unparsed = 认不出（没有选择卡，由 runtime-dialogs 兜底出运行时卡）。只该对 Codex 窗口用：调用方先确认 runtime。tests/codex-menu.test.ts。
  */
 import { CODEX_FOOTER_RE, parseCodexSelectPane } from "./auq-pane.js";
-import { nonEmptyTail } from "./runtimes/codex-ready.js";
+
+// 不从 runtimes/codex-ready 引 nonEmptyTail：那边依赖 tmux-helper，而 tmux-helper 的最底层发键要用这里的判定（成环）
+const nonEmptyTail = (pane: string, n: number) => pane.split("\n").filter((l) => l.trim()).slice(-n);
 
 /** 页脚要在末尾这么多个非空行里：更早的是历史输出（Codex resume 回放、agent 自己在讲这个菜单） */
 const MENU_TAIL_LINES = 6;
@@ -13,9 +15,14 @@ const ANSI_RE = /\x1b\[[0-9;?]*[A-Za-z]/g;
 
 export type CodexMenuState = "none" | "parsed" | "unparsed";
 
+/** 正常界面的输入框行（› 开头）：出现在页脚之后，说明页脚只是正文里的一句（agent 在讲这个菜单），菜单并不在屏上 */
+const COMPOSER_LINE_RE = /^\s*[›❯](\s|$)/;
+
 export function codexMenuState(pane: string): CodexMenuState {
   const plain = pane.replace(ANSI_RE, "");
-  if (!nonEmptyTail(plain, MENU_TAIL_LINES).some((l) => CODEX_FOOTER_RE.test(l))) return "none";
+  const tail = nonEmptyTail(plain, MENU_TAIL_LINES);
+  const at = tail.findLastIndex((l) => CODEX_FOOTER_RE.test(l));
+  if (at < 0 || tail.slice(at + 1).some((l) => COMPOSER_LINE_RE.test(l))) return "none";
   return parseCodexSelectPane(plain) ? "parsed" : "unparsed";
 }
 

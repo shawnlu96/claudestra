@@ -29,6 +29,8 @@ export interface EscGuardDeps {
   readShared(key: string): number;
   writeShared(key: string, at: number): void;
   send(target: string, strict: boolean): Promise<void>;
+  /** 所有等待之后、发之前的最后一查（Codex 选择菜单，lib/codex-key-guard.ts）：返回错误 = 这一发不发（strict 抛出，否则记日志） */
+  blocked?(target: string): Promise<Error | null>;
   sleep(ms: number): Promise<void>;
   now(): number;
 }
@@ -38,11 +40,12 @@ export function createEscGuard(deps: EscGuardDeps) {
   const keyOf = async (target: string) => (await deps.windowId(target).catch(() => null)) ?? windowKey(target); // 解析不出窗口 id（窗口不在、tmux 出错）就退回按写法归一的 windowKey
   const lastAt = (key: string) => Math.max(lastDone.get(key) ?? 0, deps.readShared(key));
   const serial = createKeyedSerial();
-  async function sendEscape(target: string, opts: { strict?: boolean } = {}): Promise<void> {
+  /** unguarded：生命周期退出（kill / restart 清场）要关掉菜单本身，不走 blocked 那一查（runtimes/window-ops.ts） */
+  async function sendEscape(target: string, opts: { strict?: boolean; unguarded?: boolean } = {}): Promise<void> {
     const key = await keyOf(target);
-    return serial(key, () => sendLocked(key, target, !!opts.strict));
+    return serial(key, () => sendLocked(key, target, !!opts.strict, !!opts.unguarded));
   }
-  async function sendLocked(key: string, target: string, strict: boolean): Promise<void> {
+  async function sendLocked(key: string, target: string, strict: boolean, unguarded: boolean): Promise<void> {
     const lock = await deps.lock(key);
     if (!lock) {
       const msg = `Esc 没发（${target}）：等不到窗口锁，前面排着的 Esc 太多或锁卡住了，不持锁发可能开出 Rewind`;
@@ -53,6 +56,11 @@ export function createEscGuard(deps: EscGuardDeps) {
     try {
       const wait = lastAt(key) + ESC_DOUBLE_TAP_MS - deps.now();
       if (wait > 0) await deps.sleep(wait);
+      const blocked = unguarded ? null : ((await deps.blocked?.(target)) ?? null);
+      if (blocked) {
+        if (strict) throw blocked;
+        return void console.warn(`⚠️ Esc 没发: ${blocked.message}`);
+      }
       await deps.send(target, strict);
     } finally {
       const done = deps.now(); // 发完才记：键一定已经落地

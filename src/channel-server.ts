@@ -400,7 +400,7 @@ const codexSink = new CodexQueueSink({
   notify: (chatId, text, fyi) => bridgeRequest(fyi ? { type: "notify", source: "codex", chatId: CHANNEL_ID, text } : { type: "reply", chatId: chatId || CHANNEL_ID, text }).then(() => undefined),
   log: (line) => console.error(line),
   typeIn: typeIntoOwnPane, // Codex 被打断后 queue 会卡住，打断后的第一条直接打进自己的 pane
-  onTypeInFailed: () => void (bridgeWs?.readyState === WebSocket.OPEN && bridgeWs.send(JSON.stringify({ type: "codex_typein_failed", channelId: CHANNEL_ID }))),
+  onTypeInFailed: (info) => void (bridgeWs?.readyState === WebSocket.OPEN && bridgeWs.send(JSON.stringify({ type: "codex_typein_failed", channelId: CHANNEL_ID, ...info }))),
   preamble: IS_CODEX ? decodePreambleEnv(process.env.CLAUDESTRA_CODEX_PREAMBLE) : undefined, // 重启 / 收编后的职责前言
 });
 

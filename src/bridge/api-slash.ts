@@ -84,6 +84,8 @@ export async function handleSlashPassthrough(r: SlashRequest, deps: SlashDeps): 
       noteModelSwitchIntent(agent.name, resolveModelAlias(args));
     }
   } catch (e) {
+    // 查过之后、真正发键前 Codex 菜单弹出来了（lib/codex-key-guard.ts）：没注入，同上 409
+    if ((e as Error).name === "KeysBlockedError") return apiJson(409, { ok: false, error: `${agent.name} ${(e as Error).message}，这条命令没有注入` });
     return apiJson(500, { ok: false, error: `tmux 注入失败: ${(e as Error).message}` });
   }
   const tn = principal.name || r.tokenId;

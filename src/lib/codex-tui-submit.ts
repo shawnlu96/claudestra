@@ -58,7 +58,7 @@ export function sanitizeForPaste(text: string): string {
 const menuFree = async (io: TypeInIO): Promise<boolean> => !codexMenuShown(await io.capture());
 
 /** unconfirmed：粘进去了、回车后没看到提交，或回车前菜单弹出来了（不能再退回 queue，会重复；调用方记日志留给人看） */
-export type TypeInResult = { ok: true; unconfirmed?: true } | { ok: false; why: string };
+export type TypeInResult = { ok: true; unconfirmed?: true; menu?: true } | { ok: false; why: string; menu?: true };
 
 const SETTLE_MS = 300;
 const SUBMIT_POLLS = 10;
@@ -71,13 +71,16 @@ export async function typeIntoCodex(io: TypeInIO, raw: string): Promise<TypeInRe
   const text = sanitizeForPaste(raw);
   // TUI 里 / 开头是斜杠命令、! 开头是本机 shell：投递内容正常以 <channel 或 [ 开头，万一不是就别打
   if (/^\s*[/!]/.test(text)) return { ok: false, why: "内容以 / 或 ! 开头，TUI 会当成命令" };
-  const before = composerState(await io.capture());
+  const first = await io.capture();
+  // menu：Codex 停在选择菜单，一个键没发——调用方交回 bridge 押住，不退回 queue（T63）
+  if (codexMenuShown(first)) return { ok: false, why: "Codex 停在选择菜单", menu: true };
+  const before = composerState(first);
   if (before !== "empty") return { ok: false, why: `输入框状态 ${before}` };
   await io.paste(text);
   try {
     await io.sleep(SETTLE_MS);
     const shot = await io.capture();
-    if (codexMenuShown(shot)) return { ok: true, unconfirmed: true }; // 粘完菜单弹出来了：不回车、也不按 C-u 清（T63），同下
+    if (codexMenuShown(shot)) return { ok: true, unconfirmed: true, menu: true }; // 粘完菜单弹出来了：不回车、也不按 C-u 清（T63），同下
     const pasted = composerState(shot);
     if (pasted !== "has-text") {
       if (pasted !== "empty" && pasted !== "busy") await io.clear();
@@ -86,7 +89,7 @@ export async function typeIntoCodex(io: TypeInIO, raw: string): Promise<TypeInRe
     for (let attempt = 0; attempt < 2; attempt++) {
       // 每次回车前再看一眼：粘完之后菜单才弹出来，这一下回车就会选中菜单项（T63）。字留在输入框里、不清（清也是按键），
       // 按 unconfirmed 报：调用方不会再退回 queue 重投，日志留给人看
-      if (!(await menuFree(io))) return { ok: true, unconfirmed: true };
+      if (!(await menuFree(io))) return { ok: true, unconfirmed: true, menu: true };
       await io.enter();
       for (let i = 0; i < SUBMIT_POLLS; i++) {
         await io.sleep(SETTLE_MS);

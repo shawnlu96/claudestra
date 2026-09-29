@@ -65,6 +65,7 @@ export class TurnCuts {
   private readonly codexTypeIn = new Set<string>();
   /** 上次 Stop 之后被打断过：下一条入站要打进 TUI */
   private readonly codexPaused = new Set<string>();
+  private readonly typedEnv = new Map<string, Envelope>();
   /** 上次 Stop 之后 bridge 抢占过：先到的还在 queue 里排着，再抢占会让后来的插到它前面 */
   private readonly codexCutSinceStop = new Set<string>();
 
@@ -87,6 +88,7 @@ export class TurnCuts {
    */
   noteDelivered(env: Envelope, channelId: string, typed = false, busy = true): void {
     const at = this.now();
+    if (typed) this.typedEnv.set(channelId, env); // 打字投递的那封留着：第二道闸退回时按 id 押回（bridge/codex-menu-hold.ts）
     this.deliveredAt.set(channelId, at);
     const cut = this.cuts.get(channelId);
     if (cut && cut.byMessageId === env.meta.messageId && cut.deliveredAt === undefined) this.cuts.set(channelId, { ...cut, deliveredAt: at });
@@ -178,6 +180,14 @@ export class TurnCuts {
   /** 投递前调：Codex 上次 Stop 之后被打断过 → 这一条标 after_interrupt（只标一条：它打出的那一轮结束后队列就恢复了） */
   takeAfterInterrupt(channelId: string): boolean {
     return this.codexPaused.delete(channelId);
+  }
+
+  /** 最近一次打字投递的那封（id 对得上才给，给了就删） */
+  takeTypedEnv(channelId: string, messageId: string): Envelope | undefined {
+    const env = this.typedEnv.get(channelId);
+    if (!env || env.meta.messageId !== messageId) return undefined;
+    this.typedEnv.delete(channelId);
+    return env;
   }
 
   /** channel-server 报打字投递没做成（退回了 queue）：下一条再试着打字，打成了那一轮结束后队列里的也会跟着处理 */

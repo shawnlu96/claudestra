@@ -85,7 +85,7 @@ describe("② 打断后粘进 TUI（codex-tui-submit）", () => {
 
   test("粘完菜单才弹出来：不回车、不按 C-u 清，报 unconfirmed（调用方不再退回 queue 重投）", async () => {
     const f = fakeIO([COMPOSER, MENU]);
-    expect(await typeIntoCodex(f.io, "<channel>hi</channel>")).toEqual({ ok: true, unconfirmed: true });
+    expect(await typeIntoCodex(f.io, "<channel>hi</channel>")).toEqual({ ok: true, unconfirmed: true, menu: true });
     expect(f.keys).toEqual(["paste"]);
   });
 });
@@ -130,7 +130,7 @@ describe("① 投递押住（codex-menu-hold）", () => {
   const to = { kind: "local", channelId: "c1", agentName: "agent-c" } as unknown as LocalEndpoint;
   test("菜单在：进押后队列、heldBy=codex_menu；菜单关了：照常投（返回 null）", async () => {
     const held: Envelope[] = [];
-    const queue = { holdEnv: (e: Envelope) => (held.push(e), held.length), rewrite: () => {} };
+    const queue = { holdEnv: (e: Envelope) => (held.push(e), held.length), rewrite: () => {}, get: () => undefined };
     const r = await holdAtCodexMenu(env, to, "agent-c", "master:=agent-c", queue, undefined, async () => "codex_menu");
     expect(r?.outcome).toEqual({ kind: "sent", note: "queued", heldBy: "codex_menu" });
     expect(held.length).toBe(1);
@@ -146,5 +146,107 @@ describe("⑦ 压缩注入（ctx-boundary / fleet / 手动压缩按钮）", () =
     expect(await injectCompact(tgt("c"), { action: "compact" }, h.deps)).toMatchObject({ status: "skipped", reason: "not-cc" });
     expect(h.win("master:c").box).toBe("");
     expect(h.sent).toEqual([]);
+  });
+});
+
+// ── T63 复审（outer-codex @f21b51a7：P1×1、P2×3）──
+import { writeFileSync } from "node:fs";
+import { REGISTRY_PATH } from "../src/lib/registry.js";
+import { keysBlockedAt, KeysBlockedError } from "../src/lib/codex-key-guard.js";
+import { createEscGuard, type EscGuardDeps } from "../src/lib/esc-guard.js";
+import { HeldQueue } from "../src/bridge/held-queue.js";
+import { onCodexTypeInFailed } from "../src/bridge/codex-menu-hold.js";
+import { CodexQueueSink } from "../src/lib/codex-thread.js";
+
+describe("复审 P1：最底层发键在所有等待之后再查菜单", () => {
+  writeFileSync(REGISTRY_PATH, JSON.stringify({ socket: "s", agents: { "agent-c": { runtime: "codex", channelId: "c1", status: "active" }, "agent-k": { channelId: "k1", status: "active" } } }));
+  test("只对 Codex 窗口抓屏判定；CC 窗口不抓", async () => {
+    let captures = 0;
+    const cap = async () => (captures++, MENU);
+    expect(await keysBlockedAt("master:=agent-c", cap)).toBeInstanceOf(KeysBlockedError);
+    expect(await keysBlockedAt("master:=agent-k", cap)).toBeNull();
+    expect(captures).toBe(1);
+  });
+
+  test("Esc：初始没菜单，节流等待期间菜单弹出来 → 不发（strict 抛 KeysBlockedError）；生命周期退出（unguarded）照发", async () => {
+    let clock = 10_000;
+    let menu = false;
+    const sent: string[] = [];
+    const deps: EscGuardDeps = {
+      windowId: async () => "@1",
+      lock: async () => ({ release: () => {} }),
+      readShared: () => clock - 100, // 刚发过一次：这一发要等双击间隔
+      writeShared: () => {},
+      send: async (t) => void sent.push(t),
+      sleep: async (ms) => { clock += ms; menu = true; }, // 等的时候菜单弹出来了
+      now: () => clock,
+      blocked: async (t) => (menu ? new KeysBlockedError(t) : null),
+    };
+    const esc = createEscGuard(deps);
+    await expect(esc("master:=agent-c", { strict: true })).rejects.toBeInstanceOf(KeysBlockedError);
+    await esc("master:=agent-c"); // 非 strict：记日志、不发
+    expect(sent).toEqual([]);
+    await esc("master:=agent-c", { unguarded: true });
+    expect(sent).toEqual(["master:=agent-c"]);
+  });
+});
+
+describe("复审 P2：押住的顺序、误判、第二道闸退回", () => {
+  const mk = (id: string) => ({
+    from: { kind: "api", tokenId: "t", name: "dev" }, to: { kind: "local", channelId: "c9", agentName: "agent-c" }, intent: "request", content: id,
+    meta: { messageId: id, triggerKind: "system", ts: "", threadId: id },
+  }) as unknown as Envelope;
+  const to = { kind: "local", channelId: "c9", agentName: "agent-c" } as unknown as LocalEndpoint;
+
+  test("菜单期间押 A、B；菜单关了、补投前到的 C 排在后面；补投按 A、B、C", async () => {
+    const q = new HeldQueue(null);
+    const [a, b, c] = [mk("A"), mk("B"), mk("C")];
+    const menuUp = async () => "codex_menu" as const;
+    const menuGone = async () => null;
+    expect((await holdAtCodexMenu(a, to, "agent-c", "w", q, undefined, menuUp))?.outcome).toMatchObject({ heldBy: "codex_menu" });
+    await holdAtCodexMenu(b, to, "agent-c", "w", q, undefined, menuUp);
+    expect((await holdAtCodexMenu(c, to, "agent-c", "w", q, undefined, menuGone))?.outcome).toMatchObject({ heldBy: "codex_menu" });
+    expect((q.get("c9") ?? []).map((i) => i.env.meta.messageId)).toEqual(["A", "B", "C"]);
+    const delivered: string[] = [];
+    for (const item of [...(q.get("c9") ?? [])]) { // 模拟 flushHeld：逐条补投，投出去才出队
+      if ((await holdAtCodexMenu(item.env, to, "agent-c", "w", q, undefined, menuGone)) === null) delivered.push(item.env.meta.messageId);
+      q.set("c9", (q.get("c9") ?? []).filter((i) => i !== item));
+    }
+    expect(delivered).toEqual(["A", "B", "C"]);
+    expect(await holdAtCodexMenu(mk("D"), to, "agent-c", "w", q, undefined, menuGone)).toBeNull(); // 补投完之后照常直投
+  });
+
+  test("页脚后面紧跟着正常输入框和状态栏：不是菜单（正文在讲这个菜单）", () => {
+    const talk = ["• 菜单长这样：", "  Press enter to confirm or esc to go back", "", "\x1b[1m›\x1b[0m \x1b[2mAsk Codex to do anything\x1b[0m", "", "  gpt-5.6-sol medium · ~/w"].join("\n");
+    expect(codexMenuShown(talk)).toBe(false);
+    expect(composerState(talk)).toBe("empty");
+  });
+
+  test("第二道闸：打字前看到菜单 → 不走 queue、按 id 交回 bridge；粘完才冒出来 → 报结果未知", async () => {
+    const reports: unknown[] = [];
+    const queued: string[] = [];
+    const sink = (typeIn: () => Promise<{ ok: true; unconfirmed?: true; menu?: true } | { ok: false; why: string; menu?: true }>) => new CodexQueueSink({
+      source: "claudestra", getSessionId: () => "019a0000-0000-7000-8000-000000000001", heldThreadIds: async () => ["019a0000-0000-7000-8000-000000000001"],
+      onSwitch: () => {}, queue: async (_s, t) => (queued.push(t), { ok: true, out: "", err: "" }), notify: async () => {},
+      typeIn, onTypeInFailed: (info) => void reports.push(info),
+    });
+    const meta = { chat_id: "1", message_id: "m7", after_interrupt: "true" };
+    expect(await sink(async () => ({ ok: false, why: "Codex 停在选择菜单", menu: true })).deliver("hi", meta)).toEqual({ ok: true });
+    expect(queued).toEqual([]);
+    await sink(async () => ({ ok: true, unconfirmed: true, menu: true })).deliver("hi", meta);
+    expect(reports).toEqual([{ menu: true, messageId: "m7" }, { unknown: true, messageId: "m7" }]);
+    expect(queued).toEqual([]);
+  });
+
+  test("bridge 收到退回：按 id 找回原信封押回队首；结果未知的只记日志、不押", () => {
+    const q = new HeldQueue(null);
+    const later = mk("L");
+    q.holdEnv(later);
+    const typed = mk("m7");
+    const cuts = { rearmAfterInterrupt: () => {}, takeTypedEnv: (_c: string, id: string) => (id === "m7" ? typed : undefined) } as never;
+    onCodexTypeInFailed({ channelId: "c9", unknown: true, messageId: "m7" }, q, cuts);
+    expect((q.get("c9") ?? []).map((i) => i.env.meta.messageId)).toEqual(["L"]);
+    onCodexTypeInFailed({ channelId: "c9", menu: true, messageId: "m7" }, q, cuts);
+    expect((q.get("c9") ?? []).map((i) => i.env.meta.messageId)).toEqual(["m7", "L"]);
   });
 });
