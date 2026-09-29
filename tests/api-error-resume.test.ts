@@ -23,7 +23,7 @@ describe("api-error-resume", () => {
     expect(m.has("c1")).toBe(true);
     noteActivity(m, "c1", T0 + 1); // 错误条目自己连带的 assistant_text / thinking，几毫秒后
     expect(m.has("c1")).toBe(true);
-    noteActivity(m, "c1", T0 + ACTIVITY_GRACE_MS + 1);
+    expect(noteActivity(m, "c1", T0 + ACTIVITY_GRACE_MS + 1)).toEqual({ errorAt: T0, error: "e" }); // 交出被取消的那条：外人那一轮结束后可重排
     expect(m.has("c1")).toBe(false);
     expect(dueForResume(m, T0 + RESUME_DELAY_MS)).toEqual([]);
   });
@@ -46,6 +46,8 @@ describe("api-error-resume", () => {
   test("错误条目自己那句 API Error 文本不算活动；工具调用 / thinking / 用户消息算", () => {
     expect(countsAsActivity("assistant_text", { text: "API Error: Unable to connect to API (X)" })).toBe(false);
     expect(countsAsActivity("assistant_text", { text: "继续做 §24.1" })).toBe(true);
+    // 撞额度那句（watcher 标 rateLimited）也是错误条目自己带出来的，不算它又动了
+    expect(countsAsActivity("assistant_text", { text: "You've hit your weekly limit · resets Sep 30 at 6am (Asia/Tokyo)", rateLimited: true })).toBe(false);
     expect(countsAsActivity("tool_start", {})).toBe(true);
     expect(countsAsActivity("chat_message", {})).toBe(true);
     expect(countsAsActivity("agent_status", { status: "thinking" })).toBe(true);

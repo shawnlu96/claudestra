@@ -32,6 +32,14 @@ describe("ctxBoundaryTick", () => {
     expect(h.sent.length).toBe(2);
   });
 
+  test("额度闸关着（T24）：过软线也不敲，原因记 gated", async () => {
+    const h = harness([]);
+    h.deps.agents = async () => [agent({ ctx: 210_000, convTs: h.now - 4 * MIN })];
+    h.deps.gated = async () => true;
+    expect((await ctxBoundaryTick(h.deps))[0].verdict).toEqual({ fire: false, reason: "gated" });
+    expect(h.sent).toEqual([]);
+  });
+
   test("开关缺省关：只关新增的（具名策略按全局线走、大总管不压），全局线和救命线照旧（r3 P2-4）；日志只提示一次", async () => {
     const agents = () => [
       agent({ ctx: 300_000, convTs: 0, mtime: 0 }), // 执行者：策略的硬上限 25 万已过，全局线 40 万没过

@@ -11,6 +11,8 @@ import { hasActiveBgActivities } from "./bg-activity-watcher.js";
 import { emitEvent, getAgentStatus, lastActivityAt } from "./event-bus.js";
 
 const norm = (agent: string) => agent.replace(/^agent-/, "");
+/** 大总管的窗口：固定是 master 会话的 index 0（名字只是标签，见 tmux-helper MASTER_WINDOW_NAME） */
+export const MASTER_WINDOW = `${MASTER_SESSION}:0`;
 
 /** 事件态挂在哪个名字上：名字两侧都可能带 agent- 前缀（master 另说），几种都查 */
 const namesOf = (agent: string) => [agent, norm(agent), `agent-${norm(agent)}`];
@@ -50,7 +52,7 @@ export async function probeTurnAt(win: string | null, runtime: string | undefine
 
 /** 频道 → 窗口和运行时：master 固定是 master:0，其余从 registry 找；查不到窗口 = null */
 export async function resolveTurnWindow(channelId: string, controlChannelId: string): Promise<{ win: string | null; runtime?: string }> {
-  if (controlChannelId && channelId === controlChannelId) return { win: `${MASTER_SESSION}:0` };
+  if (controlChannelId && channelId === controlChannelId) return { win: MASTER_WINDOW };
   // registry 读不到：当作查无窗口，只剩事件态可判，不让投递路径因此抛错
   const regs = await readRegistryAgents().catch((e) => (console.warn(`⚠️ 判忙读 registry 失败: ${(e as Error).message}`), []));
   const reg = regs.find((a) => a.channelId === channelId);

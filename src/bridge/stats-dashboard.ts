@@ -35,10 +35,12 @@ import { readUsageCache, readUsageCacheStale, deriveStaleUsage } from "../lib/us
 import { compactInjectedRecently, ctxBoundaryViewFor, ctxBoundaryWarnings } from "./ctx-boundary.js";
 import { boundaryLabel, type CtxBoundaryView } from "../lib/ctx-boundary-decision.js";
 import { discordCreateChannel } from "./discord-api.js";
+import { wallWaitKind } from "../lib/quota-wall-text.js";
 import { computeAgentStats, formatTokens, type AgentStat } from "../lib/agent-stats.js";
 import { currentUsageWindow, noteWeekResetText, type UsageWindowBounds } from "../lib/usage-window.js";
 import { fmtAge, machineFooter, machineUsage, type MachineSlot } from "./machine-usage.js";
 import { withCodexQuota, type CodexQuotaObservation } from "../lib/codex-usage.js";
+import { lpTag } from "./fleet/lp-monitor.js";
 
 const DASHBOARD_CHANNEL_NAME = "📊-claudestra-stats";
 const ACCOUNT_TTL_MS = 3 * 60 * 1000; // 账号级 %，慢变化，3min 才重抓
@@ -186,9 +188,8 @@ export function panelResidue(pane: string): boolean {
  * 它忙就退回任意 idle agent 窗口（通常刚跑完 hook 的那个就是 idle 的）。
  */
 async function findIdleScrapeTarget(): Promise<string | null> {
-  // v2.16.1: agent 窗口优先,master 垫底(原来 master 排第一,吃下绝大多数抓取,
-  // 而 master 是消息最密的窗口——TOCTOU 撞上刚开的回合就把大总管打断,外部
-  // 用户实报「检查用量经常打断大总管」)。gauge 是账号全局的,谁的窗口都一样。
+  // agent 窗口优先,master 垫底:master 是消息最密的窗口,排第一时吃下绝大多数抓取,TOCTOU 撞上刚开的回合就把大总管打断。
+  // gauge 是账号全局的,谁的窗口都一样。
   const wins = (await tmuxRaw(["list-windows", "-t", MASTER_SESSION, "-F", "#{window_name}"]).catch(() => ""))
     .split("\n")
     .filter((w) => w.startsWith("agent-"));
@@ -196,8 +197,9 @@ async function findIdleScrapeTarget(): Promise<string | null> {
   candidates.push(`${MASTER_SESSION}:0`);
   for (const t of candidates) {
     const pane = await tmuxRaw(["capture-pane", "-t", t, "-p"]).catch(() => "");
-    // v2.17.1 清场(peer 报告:遗留面板会让后续每轮抓取假命中冻结帧且 pane 假忙
-    // 数小时):见面板痕迹先补一个 Esc,本轮跳过该窗,下轮它就干净可用了
+    // 停在额度菜单 / 撞墙倒计时上的窗口不碰：/status 的第一个字就会取消自动续跑，菜单上的键会选项（截断的倒计时 paneLooksIdle 判成闲）
+    if (wallWaitKind(pane)) continue;
+    // v2.17.1 清场(peer 报告:遗留面板会让后续每轮抓取假命中冻结帧且 pane 假忙数小时):见面板痕迹先补一个 Esc,本轮跳过该窗,下轮它就干净可用了
     if (panelResidue(pane) && paneLooksIdle(pane.replace(/Esc to cancel|Settings\s+Status\s+Config\s+Usage|Settings dialog/g, ""))) {
       console.log(`📊 清场: ${t} 残留 TUI 面板,补发 Esc`);
       await tmuxSendEscape(t).catch(() => {});
@@ -210,10 +212,8 @@ async function findIdleScrapeTarget(): Promise<string | null> {
       await tmuxSendEscape(t).catch(() => {});
       continue;
     }
-    // compact 盲区双守卫(peer 2026-08-27:compact 中的 pane 判 idle → 被抓取
-    // 硬中断,自激拖长)。①bridge 自有状态:刚注入过 /save-compact 的窗口
-    // 15min 内不当抓取源(不依赖 TUI 文案);②文案识别:兜住用户手动 /compact
-    // 与超时后仍在跑的超长 compact。
+    // compact 盲区双守卫(compact 中的 pane 判 idle → 被抓取硬中断,自激拖长):①刚注入过 /save-compact 的窗口 15min 内不当抓取源
+    // (不依赖 TUI 文案);②文案识别:兜住用户手动 /compact 与超时后仍在跑的超长 compact。
     if (compactInjectedRecently(t)) continue; // 记账与查询都按窗口身份（写法不同也对得上）
     if (/compacting/i.test(pane)) {
       console.log(`📊 ${t} 正在 compact,跳过抓取候选`);
@@ -563,12 +563,10 @@ function renderEmbed(snap: StatsSnapshot): EmbedBuilder {
   for (const a of snap.agents.slice(0, 24)) {
     const name = a.name.replace(/^agent-/, "");
     // compact 后无新对话 → 上下文是估算值，加 ~ 和标注（真实值下轮对话自动校准）
-    const ctx = a.contextEstimated
-      ? `📖 ~${formatTokens(a.contextTokens)} ${a.contextPct}%（刚 compact）`
-      : `📖 ${formatTokens(a.contextTokens)} ${a.contextPct}%`;
+    const ctx = a.contextEstimated ? `📖 ~${formatTokens(a.contextTokens)} ${a.contextPct}%（刚 compact）` : `📖 ${formatTokens(a.contextTokens)} ${a.contextPct}%`;
     const bv = ctxBoundaryViewFor({ ...a, sessionId: a.jsonl?.split("/").pop()?.replace(/\.jsonl$/, "") }, a.contextTokens);
     emb.addFields({
-      name: `${bv ? BOUNDARY_DOT[bv.level] : ctxDot(a.contextPct)} ${name} · ${ctx}`,
+      name: `${bv ? BOUNDARY_DOT[bv.level] : ctxDot(a.contextPct)} ${name} · ${ctx}${lpTag(a.name)}`, // lpTag：low-priority 纯文字标签（bridge/fleet/lp-monitor.ts）
       value: `${a.model.replace(/^claude-/, "")} · 当前会话 今 ${formatTokens(a.today.tokens)} · 周 ${formatTokens(a.week.tokens)}${boundaryNote(bv)}`,
       inline: false,
     });
