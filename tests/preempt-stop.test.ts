@@ -9,7 +9,12 @@ import { writeFileSync } from "node:fs";
 import { REGISTRY_PATH } from "../src/lib/registry.js";
 import { interruptGate } from "../src/bridge/interrupt-gate.js";
 import { holdStopWait, setExtensionSocket, stopWaitIds } from "../src/bridge/pi-abort.js";
-import { manualInterrupt, preemptForHuman, setStopHooks } from "../src/bridge/preempt.js";
+import { holdNotingStop, manualInterrupt, noteHeldStop, preemptForHuman, setStopHooks } from "../src/bridge/preempt.js";
+import { HeldQueue } from "../src/bridge/held-queue.js";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { turnCuts } from "../src/bridge/turn-cuts.js";
 import type { Envelope } from "../src/bridge/router.js";
 import { ownStateFilesPerTest } from "./state-files.ts";
 
@@ -117,5 +122,77 @@ describe("停字那一轮迟迟不来：超时结成「已叫停」，不回 nul
     await sleep(80);
     expect(delivered.map((e) => e.meta.inReplyTo)).toEqual(["s-short"]);
     apiQueues.clear();
+  });
+});
+
+describe("停在撞墙等待画面上（T24 wf3 delivery-hold-4 / 执行者主意 2）：一个键都不发，但 owner 的「停」当场记下", () => {
+  const CC = "cc-wall-ch";
+  const env = (id: string, owner: boolean, text = "停"): Envelope => ({ ...stopEnv(id, owner, text), to: { kind: "local", channelId: CC, agentName: "agent-cc" } }) as Envelope;
+  test("owner 的停字被押住：清 agent 间待回账、记叫停（Autopilot 让位），抬头写停在等待画面、没有在跑", () => {
+    log.length = 0;
+    const e = env("held-stop", true);
+    noteHeldStop(e, CC, "agent-cc", "claude-code");
+    expect(log).toEqual([`clear:${CC}`]);
+    expect(turnCuts.stoppedAt(CC)).toBeNumber();
+    expect(e.meta.interruptNote).toContain("撞墙等待画面");
+    expect(e.meta.interruptNote).not.toContain("没能替你打断");
+  });
+  test("同一条停字每分钟重投又押回来：只记第一次，停之后才来的 agent 回程槽不被清掉（T24 审查 P2-2）", () => {
+    log.length = 0;
+    const e = env("held-stop-again", true);
+    noteHeldStop(e, CC, "agent-cc", "claude-code");
+    noteHeldStop(e, CC, "agent-cc", "claude-code");
+    noteHeldStop(e, CC, "agent-cc", "claude-code");
+    expect(log).toEqual([`clear:${CC}`]);
+  });
+  test("非 owner 的停、owner 的普通消息：不记叫停", () => {
+    log.length = 0;
+    for (const e of [env("g-stop", false), env("o-msg", true, "看一下日志")]) {
+      noteHeldStop(e, "cc-other", "agent-cc", "claude-code");
+      expect(e.meta.interruptNote).toBeUndefined();
+    }
+    expect(log).toEqual([]);
+    expect(turnCuts.stoppedAt("cc-other")).toBeUndefined();
+  });
+  test("押住时记过的停字，最终送达（出闸 / 菜单关掉后）不再清一次槽：停之后才来的回程留着（T24 复核 P2-1）", async () => {
+    log.length = 0;
+    const e = env("held-then-sent", true);
+    noteHeldStop(e, CC, "agent-cc", "claude-code");
+    await preemptForHuman(e, CC, "agent-cc");
+    expect(log.filter((l) => l.startsWith("clear:"))).toEqual([`clear:${CC}`]);
+    await preemptForHuman(env("fresh-stop", true), CC, "agent-cc"); // 对照：没押过的停照常清
+    expect(log.filter((l) => l.startsWith("clear:"))).toEqual([`clear:${CC}`, `clear:${CC}`]);
+  });
+  test("押住时先打标再落盘：bridge 重启后从盘上恢复的同一条停字不再记、不再清（T24 复核 P2-2）", () => {
+    log.length = 0;
+    const p = join(mkdtempSync(join(tmpdir(), "held-stop-")), "held.json");
+    const e = { ...env("persisted-stop", true), to: { kind: "local", channelId: CC, agentName: "agent-cc" } } as Envelope;
+    holdNotingStop(new HeldQueue(p), e, { channelId: CC }, "agent-cc", "claude-code");
+    const back = new HeldQueue(p).get(CC)![0]!.env;
+    expect(back.meta.heldStopNoted).toBe(true);
+    noteHeldStop(back, CC, "agent-cc", "claude-code");
+    expect(log).toEqual([`clear:${CC}`]);
+  });
+  test("老版本落盘、没打标的停字：重启后再押一次，标记要写回盘，再重启也不丢（T24 复核 P2）", () => {
+    log.length = 0;
+    const p = join(mkdtempSync(join(tmpdir(), "held-old-")), "held.json");
+    const e = { ...env("old-stop", true), to: { kind: "local", channelId: CC, agentName: "agent-cc" } } as Envelope;
+    new HeldQueue(p).holdEnv(e); // 老版本：押住了但没有 heldStopNoted
+    const q = new HeldQueue(p);
+    const restored = q.get(CC)![0]!.env;
+    holdNotingStop(q, restored, { channelId: CC }, "agent-cc", "claude-code"); // 重启后的扫描再押一次（同一封）
+    expect(new HeldQueue(p).get(CC)![0]!.env.meta.heldStopNoted).toBe(true);
+    expect(new HeldQueue(p).get(CC)!.length).toBe(1);
+  });
+  test("抢占复核时画面刚变成撞墙等待（闸回 wall_wait）：preemptForHuman 回 wall_wait，不写「没能打断」的抬头，交给调用方押住", async () => {
+    interruptGate.preempt = async () => ({ fired: false, why: "wall_wait" });
+    try {
+      const e = env("race-stop", true);
+      expect(await preemptForHuman(e, CC, "agent-cc")).toBe("wall_wait");
+      expect(e.meta.interruptNote).toBeUndefined();
+      expect(await preemptForHuman(env("race-msg", true, "看一下"), CC, "agent-cc")).toBe("wall_wait");
+    } finally {
+      interruptGate.preempt = async () => (log.push(`abort(skip=${[...stopWaitIds(CH)].join(",")})`), { fired: true });
+    }
   });
 });

@@ -19,6 +19,7 @@ import { useMemoryHygiene, MemoryHygieneSection } from "./memory-hygiene-section
 import { useAutoCompact, AutoCompactSection } from "./auto-compact-section";
 import { AppearanceSection, LanguageSection, useKbFixToggle, KbFixSection, DevModeSection } from "./interface-sections";
 import { ThemeVarsSection } from "./theme-vars-section";
+import { TalkToggleSection } from "./talk-toggle-section";
 import { FontSection } from "./font-section";
 import { ChatPrefsSection } from "./chat-prefs-section";
 import { SkillsSection } from "./skills-section";
@@ -136,6 +137,7 @@ export function SettingsPage({ page, s }: { page: SettingsPageId; s: SettingsSta
     case "labs":
       return (
         <>
+          <TalkToggleSection />
           <KbFixSection kbFix={s.kbFix} />
           <DevModeSection />
         </>

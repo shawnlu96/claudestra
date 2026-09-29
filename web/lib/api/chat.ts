@@ -14,6 +14,10 @@ export interface SendResult {
   /** bridge 走了 tmux 直通（CC 原生解释，无常规回合）——前端据此不进「正在回复」态 */
   slash?: boolean;
   ccText?: string;
+  /** bridge 押住了、没有回合（额度闸 / 目标停在额度菜单，只给全权 owner 设备；别人只拿到 queued） */
+  heldBy?: "quota_wall" | "wall_menu";
+  /** 押住了但不告诉原因（非全权设备 / guest：额度是 owner 的事）：同样没有回合 */
+  queued?: boolean;
 }
 
 /** 投递一条用户消息（fire-and-forget，wait=0）。带附件走 multipart（text + files[]，bridge 落 inbox 并注入路径）。 */

@@ -5,6 +5,7 @@ import { answerAuq, answerPermission } from "@/lib/api/chat";
 import { ApiError } from "@/lib/api/client";
 import type { WebComponentRow } from "@/lib/chat/events";
 import { useT } from "@/lib/i18n";
+import { activeAnswered, clearAnswered, markAnswered } from "../answer-cooldown";
 import { answeredGroups, rowGroup, wireLabels, type WebAsk } from "../asks-model";
 import { asksStore } from "../asks-store";
 import { AuqChoices, PermissionChoices, ReplyChoices } from "./ask-choices";
@@ -37,8 +38,11 @@ export function AskActions({ ask, agent }: { ask: WebAsk; agent: string }) {
   const ok = runtime ? t("已提交给弹框") : ask.fromAgent ? t("已发给 {agent}，它忙完手上这一步就会看到", { agent }) : t("已记下");
   // 乐观作答（T11b 第 8 条）：点下去卡片就移到「最近处理过」、计数减 1；失败回到「等你处理」并显示原因（asks-store.answer）
   const run = async (fn: () => Promise<unknown>, labels: string[], text = "") => {
+    if (activeAnswered()) return; // 过渡中（含淡出那 0.45 秒按钮还在）不再提交：键盘回车挡不住 pointer-events
     setBusy(true);
-    await asksStore.answer(ask.id, { choices: [], labels, text, via: "web_card", at: Date.now() }, fn, { ok, fail });
+    markAnswered(ask.id); // 先让这张原地淡出，再移走（answer-cooldown.ts）
+    const done = await asksStore.answer(ask.id, { choices: [], labels, text, via: "web_card", at: Date.now() }, fn, { ok, fail });
+    if (!done) clearAnswered(ask.id);
     setBusy(false);
   };
   // 多行 reply 在聊天 / Discord 里已答过的组不再给选（bridge 会回「这一项已经答过了」），已答内容在下面「已答：…」那行
