@@ -1,4 +1,4 @@
-/** 本地 API：GET/PUT /api/v1/settings（config.json 里的 lang / groqApiKey）与 GET/PUT /api/v1/profile（user_profile 表） */
+/** 本地 API：GET/PUT /api/v1/settings（config.json 里的 lang / groqApiKey / pushNoContent）与 GET/PUT /api/v1/profile（user_profile 表） */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -29,6 +29,7 @@ beforeAll(() => {
       if (key) cfg.groqApiKey = key;
       else delete cfg.groqApiKey;
     },
+    setPushNoContent: async (on) => { cfg = { ...cfg, pushNoContent: on }; },
   });
 });
 afterAll(() => {
@@ -51,7 +52,7 @@ describe("/api/v1/settings", () => {
   test("GET 任何凭据都行；没配 key 时 hint 是 null", async () => {
     const res = await call("GET", "/api/v1/settings", GUEST);
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ ok: true, lang: "zh", groqApiKeyHint: null });
+    expect(await res.json()).toEqual({ ok: true, lang: "zh", groqApiKeyHint: null, pushNoContent: false });
   });
   test("PUT 要 manage grant：guest 403，什么都没改", async () => {
     expect((await call("PUT", "/api/v1/settings", GUEST, { lang: "en" })).status).toBe(403);
@@ -62,17 +63,25 @@ describe("/api/v1/settings", () => {
     expect((await call("PUT", "/api/v1/settings", OWNER, { groqApiKey: 42 })).status).toBe(400);
     expect((await call("PUT", "/api/v1/settings", OWNER, { groqApiKey: "short" })).status).toBe(400);
     expect((await call("PUT", "/api/v1/settings", OWNER, "{bad")).status).toBe(400);
+    expect((await call("PUT", "/api/v1/settings", OWNER, { lang: "en", pushNoContent: "yes" })).status).toBe(400); // 校验在任何写入之前
     expect(cfg).toEqual({ autoUpdate: { claudestra: true, claudeCode: true }, lang: "zh" });
   });
   test("PUT lang + key：回体只带尾四位提示；空串清除 key；lang 可单独提交", async () => {
     const key = "gsk_abcdefghijklmnopqrstuvwxyz1234";
     const res = await call("PUT", "/api/v1/settings", OWNER, { lang: "en", groqApiKey: key });
-    expect(await res.json()).toEqual({ ok: true, lang: "en", groqApiKeyHint: "····1234" });
+    expect(await res.json()).toEqual({ ok: true, lang: "en", groqApiKeyHint: "····1234", pushNoContent: false });
     expect(cfg.groqApiKey).toBe(key);
     expect(JSON.stringify(await (await call("GET", "/api/v1/settings", GUEST)).json())).not.toContain("gsk_");
-    expect(await (await call("PUT", "/api/v1/settings", OWNER, { groqApiKey: "" })).json()).toEqual({ ok: true, lang: "en", groqApiKeyHint: null });
+    expect(await (await call("PUT", "/api/v1/settings", OWNER, { groqApiKey: "" })).json()).toEqual({ ok: true, lang: "en", groqApiKeyHint: null, pushNoContent: false });
     expect(cfg.groqApiKey).toBeUndefined();
     expect(await (await call("PUT", "/api/v1/settings", OWNER, { lang: "zh" })).json()).toMatchObject({ lang: "zh" });
+  });
+  test("推送不带正文：guest 改不了；owner 打开 / 关上，GET 读回", async () => {
+    expect((await call("PUT", "/api/v1/settings", GUEST, { pushNoContent: true })).status).toBe(403);
+    expect(cfg.pushNoContent).toBeUndefined();
+    expect(await (await call("PUT", "/api/v1/settings", OWNER, { pushNoContent: true })).json()).toMatchObject({ pushNoContent: true });
+    expect(await (await call("GET", "/api/v1/settings", GUEST)).json()).toMatchObject({ pushNoContent: true });
+    expect(await (await call("PUT", "/api/v1/settings", OWNER, { pushNoContent: false })).json()).toMatchObject({ pushNoContent: false });
   });
   test("groqKeyHint", () => {
     expect(groqKeyHint(undefined)).toBeNull();

@@ -88,7 +88,8 @@ import { handleCronRoutes } from "./cron-routes.js";
 import { handleAutoCompactRoute } from "./auto-compact-routes.js";
 import { trackInboundHandoff } from "./handoff-tracker.js";
 import { authenticateApi } from "./api-auth.js";
-import { redeemArgs, redeemPrecheck } from "./peer-redeem.js";
+import { handlePeerRedeem } from "./peer-redeem.js";
+import { peerE2eRoute } from "./peer-e2e-route.js";
 import { handleDevicesManaged, handleDevicesPublic } from "./devices.js";
 import { apiFeatures, handleExtensionRoutes } from "./api-extensions.js";
 import { revocable } from "./credential-revocation.js";
@@ -268,25 +269,6 @@ async function findHistoryAgent(
   return hit ? { name: hit.name, cwd: hit.cwd, sessionId: hit.sessionId, runtime: hit.runtime } : null;
 }
 
-// ── v2.15+ 一键邀请兑换（无 Bearer 的公开端点，见 handleApiRequest 顶部）──
-
-async function handlePeerRedeem(req: Request): Promise<Response> {
-  const input = await redeemPrecheck(req); // 来源、口令、按来源限流、对方指纹与公钥（bridge/peer-redeem.ts）
-  if (input instanceof Response) return input;
-  const r: any = await runManager("peer-invite-redeem", ...redeemArgs(input));
-  if (r?.ok) {
-    recordMetric("peer_managed", { meta: { action: "redeem", peer: r.peer } });
-    console.log(`🤝 [api] peer 邀请已兑换: ${r.peer}（scope: ${(r.agents || []).join(",")}）`);
-    void deps?.notifyOwner?.(
-      `🤝 新 peer「${r.peer}」通过一键邀请接入，可访问: ${(r.agents || []).join(", ") || "（无）"}` +
-        (r.oneWay ? "（单向：对方访问我，我未获对方权限）" : "") +
-        `。撤销：侧栏顶部 Peer 按钮 → 移除，或 \`peer-http-remove ${r.peer}\``,
-    ).catch(() => {});
-  }
-  // 失败一律 400 且不细分原因等级——这是个无鉴权端点，不给探测者更多信息面
-  return apiJson(r?.ok ? 200 : 400, r ?? { ok: false, error: "manager failed" });
-}
-
 // ── 路由分发 ────────────────────────────────────────────────────────────
 
 /**
@@ -307,12 +289,10 @@ export async function serveApiRequest(req: Request, url: URL): Promise<Response>
 async function handleApiRequest(req: Request, url: URL): Promise<Response> {
   if (!deps) return apiJson(503, { ok: false, error: "api routes not initialized" });
 
-  // v2.15+ POST /api/v1/peers/redeem —— 一键邀请的兑换回调（对方 bridge 打进来，
-  // 拿不到我方 Bearer）。鉴权依据是 body 里的一次性 joinSecret（manager 侧常数
-  // 时间比对）。48 hex 穷举本不现实，限流是纵深防御 + 挡日志噪音。
-  if (url.pathname === "/api/v1/peers/redeem" && req.method === "POST") {
-    return handlePeerRedeem(req);
-  }
+  const e2e = await peerE2eRoute(req, url, (inner) => serveApiRequest(inner, new URL(inner.url))); // peer 整体加密：解开后内层从头走一遍（bridge/peer-e2e-route.ts）
+  if (e2e) return e2e;
+  // v2.15+ POST /api/v1/peers/redeem —— 一键邀请的兑换回调（无 Bearer，鉴权靠一次性 joinSecret；bridge/peer-redeem.ts）
+  if (url.pathname === "/api/v1/peers/redeem" && req.method === "POST") return handlePeerRedeem(req, { runManager, notifyOwner: deps.notifyOwner });
   if (url.pathname === "/api/v1/invite" && req.method === "GET") return invitePageResponse(); // 邀请落地页，不要 token（bridge/invite-page.ts）
   const pub = await handleDevicesPublic(req, url); // 设备配对的公开端点（bridge/devices.ts）：没有凭据才能配对
   if (pub) return pub;
