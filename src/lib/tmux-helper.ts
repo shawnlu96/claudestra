@@ -8,6 +8,7 @@
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { assertKeysAllowed, keysBlockedAt } from "./codex-key-guard.js";
+import { formatTmuxFailure } from "./tmux-failure.js"; export { formatTmuxFailure } from "./tmux-failure.js";
 import { createEscGuard, ESC_LOCK_WAIT_MS } from "./esc-guard.js"; export { ESC_DOUBLE_TAP_MS } from "./esc-guard.js";
 import { acquireLock } from "./file-lock.js";
 import { readProgramInputs, recordProgramInput, type ProgramInput } from "./program-input.js";
@@ -69,13 +70,6 @@ async function runTmux(
   } finally {
     clearTimeout(killer);
   }
-}
-
-/** 单行的失败说明（纯函数，便于单测）。 */
-export function formatTmuxFailure(args: string[], code: number | null, err: string): string {
-  const cmd = `tmux ${args.join(" ")}`;
-  const why = err || (code === null ? "（超时被杀，无输出）" : "（无 stderr 输出）");
-  return `${cmd} 失败（exit ${code ?? "null"}）：${why}`;
 }
 
 /**

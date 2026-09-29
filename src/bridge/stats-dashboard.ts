@@ -192,8 +192,7 @@ async function findIdleScrapeTarget(): Promise<string | null> {
   // gauge 是账号全局的,谁的窗口都一样；Codex 窗口不算（T63：它的 /status 不是 CC 的额度表，停在选择菜单上回车还会选项）。
   const codex = new Set(readRegistryAgentsSync().filter((a) => a.runtime === "codex").map((a) => a.name));
   const wins = (await tmuxRaw(["list-windows", "-t", MASTER_SESSION, "-F", "#{window_name}"]).catch(() => ""))
-    .split("\n")
-    .filter((w) => w.startsWith("agent-") && !codex.has(w));
+    .split("\n").filter((w) => w.startsWith("agent-") && !codex.has(w));
   const candidates: string[] = wins.map((w) => windowTarget(w));
   candidates.push(`${MASTER_SESSION}:0`);
   for (const t of candidates) {
