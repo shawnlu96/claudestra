@@ -175,7 +175,7 @@ import { statePath } from "./lib/paths.js";
 import { controlFor, managedFor } from "./lib/runtimes/index.js";
 import { stopNeedsPaneRecheck } from "./lib/runtimes/window-ops.js";
 import { onCodexInterrupt, preemptForHuman, setStopHooks } from "./bridge/preempt.js";
-import { HTTP_IDLE_TIMEOUT_S, noteRuntimeCaps, onAbortAck, setExtensionSocket, stopAfterAbort, stopWaitIds } from "./bridge/interrupt-gate.js";
+import { HTTP_IDLE_TIMEOUT_S, noteRuntimeCaps, onAbortAck, onCodexUndelivered, setExtensionSocket, stopAfterAbort, stopWaitIds } from "./bridge/interrupt-gate.js";
 import { isCutNotice, turnCuts } from "./bridge/turn-cuts.js";
 import { withInterruptNote } from "./lib/turn-cuts.js";
 import { createKeyedSerial } from "./lib/keyed-serial.js";
@@ -2215,6 +2215,7 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
     }
 
     case "abort_ack": onAbortAck(msg, ws); break; // Pi 扩展的中止回执（只认这个频道当前的连接）
+    case "codex_undelivered": onCodexUndelivered(msg, ws, clients.get(msg.channelId)?.ws === ws, { stopTyping, clearSafetyTimer }); break; // 只了结没投进 Codex 的这一条
     case "codex_typein_failed": if (clients.get(msg.channelId)?.ws === ws) turnCuts.rearmAfterInterrupt(msg.channelId); break; // 退回了 queue:下一条再打字
     case "forward_to_agent": ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, ...(await handleForward(ws, msg)) })); break;
     case "route_to_agent": {

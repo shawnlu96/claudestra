@@ -10,7 +10,6 @@
  * 锁文件与 queue 都是 Codex 未公开的内部机制（0.153 实测），升级后可能漂移——解析部分
  * 做成纯函数，漂移时改这里一处。
  */
-import { bridgeHttpBase } from "./bridge-port.js";
 
 /** 重启 / 收编后职责前言的标记（codex-launch.codexContextPreamble 生成；codex-session 的历史翻译据此剥掉前言） */
 export const CONTEXT_PREAMBLE_MARKER = "[claudestra:context]";
@@ -183,10 +182,10 @@ export interface CodexQueueSinkDeps {
   /** 打字投递没做成、退回了 queue：告诉 bridge 下一条再打字（否则这条和后面的都卡在暂停的队列里） */
   onTypeInFailed?(): void;
   /**
-   * 消息没进 Codex（不在线 / queue 报错）：不会开回合、也就没有 Stop hook，bridge 的「工作中」会一直挂着，
-   * 由它替这一轮收尾（postUndeliveredStop）。认不准线程（ambiguous）时不调：多半有子 agent 在跑、回合没完
+   * 消息没进 Codex（不在线 / 认不准线程 / queue 报错）：交给 bridge 只了结这一条（bridge/pi-abort.ts onCodexUndelivered）——
+   * 按 messageId 告诉发送方、销账，这一回合没别的送达才把「工作中」收掉。返回 true = bridge 已告诉发送方；false / 没接这个依赖 = 自己 notify
    */
-  onUndelivered?(): void;
+  undelivered?(messageId: string, notice: string): Promise<boolean>;
   /**
    * 重启 / 收编后第一条成功投递前附的前言（codex-launch.codexContextPreamble）。只附一次，
    * 投递失败不算用掉——下一条再附。
@@ -207,13 +206,6 @@ export const ROTATED_NOTICE = "⚠️ Codex 会话刚轮转、还没有第一轮
 export function queueFailureNotice(detail: string): string {
   if (/no rollout found/i.test(detail)) return ROTATED_NOTICE;
   return `⚠️ 消息投递到 Codex 失败：${detail}`;
-}
-
-/** 投递失败后替这一轮收尾：与 Codex 回合出错时一样报 StopFailure（bridge/codex-turn-failure.ts），走 bridge 正常的回合收尾 */
-export async function postUndeliveredStop(channelId: string, base = bridgeHttpBase()): Promise<void> {
-  const body = JSON.stringify({ channelId, event: "StopFailure" });
-  const res = await fetch(`${base}/hook`, { method: "POST", headers: { "Content-Type": "application/json" }, body });
-  if (!res.ok) throw new Error(`bridge /hook ${res.status}`);
 }
 
 /** 构造 queue 命令（纯函数，便于钉住参数形状） */
@@ -243,8 +235,7 @@ export class CodexQueueSink implements InboundSink {
         const offline = decision.action === "offline";
         const why = offline ? "offline" : `ambiguous locks: ${decision.held.join(",")}`;
         d.log?.(`⚠️ Codex 入站未投递（${why}）`);
-        await d.notify(chatId, offline ? OFFLINE_NOTICE : AMBIGUOUS_NOTICE).catch(() => {});
-        if (offline) d.onUndelivered?.();
+        await this.tellUndelivered(chatId, meta?.message_id, offline ? OFFLINE_NOTICE : AMBIGUOUS_NOTICE);
         return { ok: false, error: why };
       }
       if (decision.action === "switch") {
@@ -268,8 +259,7 @@ export class CodexQueueSink implements InboundSink {
       if (!r.ok) {
         const detail = (r.err || r.out || "unknown").trim().split("\n").slice(-1)[0].slice(0, 300);
         d.log?.(`❌ codex queue 失败: ${detail}`);
-        await d.notify(chatId, queueFailureNotice(detail)).catch(() => {});
-        d.onUndelivered?.();
+        await this.tellUndelivered(chatId, meta?.message_id, queueFailureNotice(detail));
         return { ok: false, error: detail };
       }
       return { ok: true };
@@ -277,5 +267,14 @@ export class CodexQueueSink implements InboundSink {
     const p = this.chain.then(run, run);
     this.chain = p.catch(() => {});
     return p;
+  }
+
+  /** 投不进去：先交给 bridge 按这条的 messageId 了结；bridge 认不出这条（或没连着）才自己走 reply 说（never silent） */
+  private async tellUndelivered(chatId: string | undefined, messageId: string | undefined, notice: string): Promise<void> {
+    const d = this.deps;
+    const took = messageId && d.undelivered
+      ? await d.undelivered(messageId, notice).catch((e) => (d.log?.(`交给 bridge 了结未投递的消息失败，改自己通知: ${(e as Error).message}`), false))
+      : false;
+    if (!took) await d.notify(chatId, notice).catch((e) => d.log?.(`通知发送方失败: ${(e as Error).message}`));
   }
 }
