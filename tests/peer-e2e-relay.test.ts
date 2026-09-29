@@ -18,6 +18,7 @@ import { makeInboundHandler } from "../src/bridge/relay-inbound.ts";
 import { setRequestContext } from "../src/bridge/request-context.ts";
 import { keyFingerprint, signedHeaders } from "../src/lib/instance-key.ts";
 import { STATE_DIR } from "../src/lib/paths.ts";
+import { leakedIn, mark, relayBytes } from "./relay-leak-test-helpers.ts";
 import { localE2e, pinPeerE2eKey, readHttpPeers, RELAY_PAGE_INVITE_WARNING, type LocalE2e } from "../src/lib/peer-e2e-local.ts";
 import { createE2eOutbound } from "../src/lib/peer-e2e-outbound.ts";
 import { openRedeemRequest, readRedeemResponse, sealRedeemRequest, sealRedeemResponse, type SealedRedeem } from "../src/lib/peer-e2e-redeem.ts";
@@ -76,15 +77,17 @@ interface Wire { url: string; method: string; headers: Record<string, string>; b
 type Hook = (w: Wire, send: (w: Wire) => Promise<Response>) => Promise<Response>;
 let hook: Hook | null = null;
 const seen: Buffer[] = [];
+/** B 给 A 记的 peer 名：随机的，泄露检查才不会在密文里偶然撞上；manager 把名字截到 24 字符（manager/peer-names.ts），22 位 hex 足够 */
+const PEER = mark("a").slice(0, 24);
 
 async function send(w: Wire): Promise<Response> {
-  seen.push(Buffer.from(w.body));
+  seen.push(...relayBytes(w.url, w.headers, w.body));
   if (!w.url.startsWith("relay://")) return fetch(w.url, { method: w.method, headers: w.headers, ...(w.body.length ? { body: w.body } : {}) });
   const u = new URL(w.url);
   const r = await a.request(u.hostname, { method: w.method, path: u.pathname + u.search, headers: w.headers, body: w.body.length ? w.body : null }, { timeoutMs: 5000 });
   const res = new Response(NULL_BODY_STATUS.has(r.status) ? null : r.body, { status: r.status, headers: recordToHeaders(r.headers) });
   const bytes = new Uint8Array(await res.arrayBuffer());
-  seen.push(Buffer.from(bytes));
+  seen.push(...relayBytes(w.url, res.headers, bytes));
   return new Response(NULL_BODY_STATUS.has(r.status) ? null : bytes, { status: r.status, headers: res.headers });
 }
 const rawA = (url: string, init: { method?: string; headers?: Record<string, string>; body?: string | Uint8Array }) => {
@@ -160,17 +163,16 @@ async function newInvite(url: string, allowLegacy = false): Promise<{ inv: PeerI
 
 /** A 兑换：加密（带密钥的邀请）或明文（老版本 / --allow-legacy），经 A 的传输打到邀请里的地址 */
 async function redeem(inv: PeerInviteV2, sealed: boolean) {
-  const payload = { join: inv.join, name: "alice", iid: "a1b2c3d4e5f6a1b2c3d4e5f6", idk: localA.key.publicKey, key: localA.signed };
+  const payload = { join: inv.join, name: PEER, iid: "a1b2c3d4e5f6a1b2c3d4e5f6", idk: localA.key.publicKey, key: localA.signed };
   const s = sealed ? await sealRedeemRequest(fromB64url(inv.ek!.pub)!, inv.fp!, payload) : null;
-  const body = JSON.stringify(s ? s.body : { join: inv.join, name: "alice" });
+  const body = JSON.stringify(s ? s.body : { join: inv.join, name: PEER });
   const u = new URL(`${inv.url}/api/v1/peers/redeem`);
   const res = await rawA(u.href, { method: "POST", headers: { "content-type": "application/json", ...signedHeaders("POST", u.pathname, body, localA.key) }, body });
   const json: any = await res.json().catch(() => null); // 回的不是 JSON（假服务的错页）：按失败看状态码
   return { status: res.status, json, outcome: s ? await readRedeemResponse(s.session, res.status, json) : null };
 }
 
-/** 按 UTF-8 原始字节查：中文经 latin1 字符串永远匹配不上；needle 要长或随机，短串会在 base64 密文里偶然出现 */
-const leaks = (words: string[]) => words.filter((w) => seen.some((s) => s.includes(Buffer.from(w, "utf8"))));
+const leaks = (words: string[]) => leakedIn(seen, words);
 const bRecord = async (name: string) => (await readPeers()).httpPeers?.find((p) => p.name === name);
 
 describe("兑换", () => {
@@ -181,9 +183,9 @@ describe("兑换", () => {
     expect(inv.ek).toEqual(localB.signed);
     seen.length = 0;
     const r = await redeem(inv, true);
-    expect(r.outcome).toMatchObject({ ok: true, value: { ok: true, peer: "alice" } });
-    expect(leaks([inv.join, "alice", inv.token])).toEqual([]);
-    const rec = (await bRecord("alice"))!;
+    expect(r.outcome).toMatchObject({ ok: true, value: { ok: true, peer: PEER } });
+    expect(leaks([inv.join, PEER, inv.token])).toEqual([]);
+    const rec = (await bRecord(PEER))!;
     expect(rec.fp).toBe(localA.fp);
     expect(rec.e2e).toEqual({ idk: localA.key.publicKey, ek: localA.signed });
     tokenForA = inv.token;
@@ -258,12 +260,12 @@ for (const [label, base] of [["relay://", () => relayBase], ["直连 http", () =
     test("加密往返：B 按 alice 的 token 与签名认出人；中继看不到路径、token、正文", async () => {
       seen.length = 0;
       const n = handled.length;
-      const body = `机密内容-${crypto.randomUUID()}`;
+      const bodyMark = mark("body"), body = `机密内容-${bodyMark}`;
       const res = await call(base(), "POST", "/api/v1/agents/x/messages", body);
       expect(res.status).toBe(201);
-      expect(await res.json()).toMatchObject({ ok: true, peer: "alice", echo: body });
+      expect(await res.json()).toMatchObject({ ok: true, peer: PEER, echo: body });
       expect(handled.length).toBe(n + 1);
-      expect(leaks(["/api/v1/agents/x/messages", tokenForA, body, "机密内容", "alice"])).toEqual([]);
+      expect(leaks(["/api/v1/agents/x/messages", tokenForA, bodyMark, "机密内容", PEER])).toEqual([]);
     });
 
     test("降级成明文（中继剥掉加密 / 发送方被骗走明文）：403 e2e_required，路由没处理", async () => {
@@ -462,7 +464,7 @@ describe("会话与 peer 生命期", () => {
   test("B 上删掉 alice：会话作废，重新握手被拒，路由不处理", async () => {
     await call(relayBase, "GET", "/api/v1/agents");
     const data = await readPeers();
-    const rec = data.httpPeers!.find((p) => p.name === "alice")!;
+    const rec = data.httpPeers!.find((p) => p.name === PEER)!;
     rec.disabled = true;
     writeFileSync(join(STATE_DIR, "peers.json"), JSON.stringify(data));
     const n = handled.length;

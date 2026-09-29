@@ -4,7 +4,7 @@
  * 任何一处都不回退明文，同一个内层请求最多被处理一次。
  */
 import { describe, expect, test } from "bun:test";
-import { createPublicKey, generateKeyPairSync, randomBytes, randomUUID } from "node:crypto";
+import { createPublicKey, generateKeyPairSync, randomUUID } from "node:crypto";
 import { respond } from "../src/lib/e2e/handshake.ts";
 import { generateEcdh } from "../src/lib/e2e/primitives.ts";
 import { signE2eKey, type MachineE2eKey, type SignedE2eKey } from "../src/lib/e2e-machine-key.ts";
@@ -16,6 +16,7 @@ import { SessionTable } from "../src/lib/peer-e2e-sessions.ts";
 import { encodeHelloReply, PEER_E2E_LABEL } from "../src/lib/peer-e2e-wire.ts";
 import { toB64url, utf8 } from "../src/lib/e2e/encoding.ts";
 import { createE2eOutbound } from "../src/lib/peer-e2e-outbound.ts";
+import { leakedIn, mark, relayView } from "./relay-leak-test-helpers.ts";
 
 interface Machine {
   id: InstanceKey;
@@ -101,7 +102,7 @@ async function world(opts: { relay?: Relay; limits?: ConstructorParameters<typeo
     ...(opts.bodyLimits ? { bodyLimits: opts.bodyLimits } : {}),
   });
   /** 模拟调用方：内层带 Bearer（每个 world 随机一个，泄露检查拿全文去查）、一个每次唯一的内层签名和签名时刻（单调时钟） */
-  const token = `Bearer ${randomBytes(16).toString("hex")}`;
+  const token = `Bearer ${mark("tok")}`;
   let clock = 0;
   const call = (method: string, path: string, body?: string) =>
     client.fetch(method, path, {
@@ -114,8 +115,7 @@ async function world(opts: { relay?: Relay; limits?: ConstructorParameters<typeo
   };
   return {
     a, b, r, bDeps, client, call, token, posted, pinnedByA, restartB,
-    setBKnowsA: (p: E2ePeer | null) => (bKnowsA = p),
-    setAKnowsB: (p: E2ePeer) => (aKnowsB = p),
+    setBKnowsA: (p: E2ePeer | null) => (bKnowsA = p), setAKnowsB: (p: E2ePeer) => (aKnowsB = p),
   };
 }
 
@@ -136,17 +136,16 @@ describe("peer E2E：正常往返", () => {
     expect(w.posted.every((p) => p.startsWith("/api/v1/e2e/"))).toBe(true);
   });
 
-  test("中继看到的字节里没有内层路径、token、正文", async () => {
-    // 标记要长且每次随机：短串（"tok"）会在 base64 密文里偶然出现而假红；中文按 UTF-8 原始字节查，latin1 字符串里永远匹配不上
+  test("中继看到的 URL、header、body 里都没有内层路径、token、正文（各段分开查）", async () => {
     const seen: Buffer[] = [];
     const w = await world({ relay: async (req, fwd) => {
-      const sent = Buffer.from(await req.clone().arrayBuffer()), res = await fwd(req);
-      seen.push(sent, Buffer.from(await res.clone().arrayBuffer()));
+      const sent = await relayView(req), res = await fwd(req);
+      seen.push(...sent, ...(await relayView(res)));
       return res;
     } });
-    const path = `/api/v1/agents/proj-${randomBytes(16).toString("hex")}/messages`, body = `机密内容-${randomUUID()}`;
-    expect([(await w.call("POST", path, body)).status, w.r.handled[0]?.path]).toEqual([201, path]);
-    expect([path, w.token, body, "机密内容"].filter((n) => seen.some((b) => b.includes(Buffer.from(n, "utf8"))))).toEqual([]);
+    const project = mark("proj"), path = `/api/v1/agents/${project}/messages`, bodyMark = mark("body"), secret = w.token.slice("Bearer ".length);
+    expect([(await w.call("POST", path, `机密内容-${bodyMark}`)).status, w.r.handled[0]?.path]).toEqual([201, path]);
+    expect(leakedIn(seen, [project, secret, bodyMark, "机密内容"])).toEqual([]);
   });
 });
 
