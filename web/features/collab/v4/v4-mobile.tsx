@@ -1,6 +1,8 @@
 "use client";
 /** v4 手机：没有画布。按「可执行 / 在跑 → 在等 → 今日完成」分组列卡片，卡上带挡着它的那条因果线；点卡片进全屏详情（collab-detail.tsx） */
 import { dwellText, lineOf, type LedgerOverview, type LineView, type Tr } from "../collab-model";
+import { StepDots } from "../collab-step-line";
+import { stepLineView } from "../collab-step-line-model";
 import { StageBar } from "./stage-bar";
 import { blockLine, mobileSections } from "./v4-model";
 import v from "./v4.module.css";
@@ -30,6 +32,8 @@ export function MobileList(props: {
             const l = lines.get(id) ?? lineOf(t, ov, items, now, tr);
             const block = blockLine(t, ov.deps ?? []);
             const act = props.actionText(id);
+            const steps = stepLineView(l.stepLine, t.stage); // T51：派过人的卡才画步骤小线
+
             return (
               <button key={id} type="button" className={`${v.mcard} ${v[l.tone] ?? ""}`} onClick={() => props.onPick(id)}>
                 <span className={v.nh}>
@@ -37,6 +41,7 @@ export function MobileList(props: {
                   <span className={v.nt}>{t.title}</span>
                 </span>
                 <StageBar stage={t.stage} before={t.stageBefore} kind={t.kind} />
+                {steps && steps.slots.some((x) => x.filled) && <StepDots v={steps} tr={tr} />}
                 <span className={v.nf}>
                   <span>{l.stageLabel}</span>
                   {l.dwellMs !== null && <span className={v.muted}>{dwellText(l, tr)}</span>}

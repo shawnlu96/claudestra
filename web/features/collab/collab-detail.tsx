@@ -8,10 +8,11 @@ import { createPortal } from "react-dom";
 import { useCollabT } from "./collab-i18n";
 import { isWorking, type ActionMap, type AgentAction } from "./collab-action";
 import { useChatStore } from "../chat/chat-store";
-import type { AgentSession } from "@/lib/chat/agents";
+import { uiAgentName, type AgentSession } from "@/lib/chat/agents";
 import type { LineAction } from "./collab-action";
 import { fmtEventTime, participants, recentThree, reviewRows, stageSegments, type Participant, type TaskDetail } from "./collab-detail-model";
-import { STEP_STATE, stepRows } from "./collab-steps";
+import { stepLineView } from "./collab-step-line-model";
+import { StepLine } from "./collab-step-line";
 import { Icon, type IconName } from "./collab-icons";
 import { dwellText, fmtDuration, lineOf, type LedgerOverview, type LineView, type Tr } from "./collab-model";
 import { ChecklistSec } from "./collab-checklist";
@@ -130,27 +131,13 @@ function RecentSec({ d, tr }: { d: TaskDetail; tr: Tr }) {
   );
 }
 
-/** 派过步骤的卡：每一步谁在做、交付的 head 区间、结论；本机核过的和对方自报的分开写（collab-steps.ts） */
-function StepsSec({ d, tr }: { d: TaskDetail; tr: Tr }) {
-  const rows = stepRows(d.steps);
-  if (!rows.length) return null;
+/** 步骤线（T51，collab-step-line.tsx）：整条线、当前这一步、等待；本机 agent 的模型从会话列表查。一步都没人的卡不画 */
+function StepsSec({ d, agents, tr }: { d: TaskDetail; agents: readonly AgentSession[]; tr: Tr }) {
+  const v = stepLineView(d.stepLine, d.task.stage, (n) => agents.find((a) => a.name === uiAgentName(n))?.model ?? null);
+  if (!v || !v.slots.some((x) => x.filled)) return null;
   return (
     <Sec title={tr("步骤")}>
-      {rows.map((r) => (
-        <div key={`${r.step}:${r.round}`} className={s.rr}>
-          <div className={s.h}>
-            <span>{tr(r.label)}</span>
-            <span>{r.executor}{r.peer ? ` · ${tr("别的实例")}` : ""}</span>
-            <span className={s.tm}>{tr(STEP_STATE[r.state] ?? r.state)}{r.heads ? ` · ${r.heads}` : ""}</span>
-          </div>
-          {(r.verdict || r.checked || r.claimedModel) && (
-            <div className={s.tx}>
-              {[r.verdict ? tr(r.verdict === "pass" ? "通过" : r.verdict === "block" ? "拦下" : "要改") : "", r.checked ? tr(r.checked) : "",
-                r.claimedModel ? tr("自报模型 {m}（凭声明）", { m: r.claimedModel }) : ""].filter(Boolean).join(" · ")}
-            </div>
-          )}
-        </div>
-      ))}
+      <StepLine v={v} tr={tr} />
     </Sec>
   );
 }
@@ -244,7 +231,7 @@ function Body(props: {
       <ChecklistSec d={d} tr={tr} />
       <RecentSec d={d} tr={tr} />
       <CollabReplay d={d} tr={tr} />
-      <StepsSec d={d} tr={tr} />
+      <StepsSec d={d} agents={agents} tr={tr} />
       <ReviewSec d={d} tr={tr} />
       <PeopleSec d={d} exec={exec} action={action} running={running} now={now} tr={tr} />
       {pr && (

@@ -7,7 +7,8 @@ import { beforeEach, describe, expect, test } from "bun:test";
 import { clearOpenedBy, dropHeldOnKill, flushHeld, onHeldDelivered, type FlushDeps } from "../src/bridge/held-flush.js";
 import { stopSnapshot, takeApiWaiters } from "../src/bridge/stop-settle.js";
 import { ageHeld, HELD_GIVE_UP_MS, HELD_NOTIFY_MS, HeldQueue, INBOX_LEASE_MS, type HeldItem } from "../src/bridge/held-queue.js";
-import type { Delivery, Envelope, LocalEndpoint } from "../src/bridge/router.js";
+import { isHumanRequest, type Delivery, type Envelope, type LocalEndpoint } from "../src/bridge/router.js";
+import { gatesAsHuman } from "../src/lib/quota-wall.js";
 
 beforeEach(() => clearOpenedBy());
 
@@ -372,5 +373,94 @@ describe("押着的人类消息一轮只投一个发送人（adv3 P2-1 升 P1：
     const h = harness([item("a"), { ...other, env: { ...other.env, from: { kind: "local", agentName: "agent-pm", channelId: "c-pm", ws } } as Envelope }], humanApi);
     await flushHeld(h.deps, "c-me", "stop");
     expect(h.delivered).toEqual(["a", "b"]);
+  });
+});
+
+describe("已押后的 ask 答复在额度闸内也能投（T64：能不能穿闸看 gatesAsHuman，忙时能不能投看 isHumanRequest）", () => {
+  const OWNER_API: Envelope["from"] = { kind: "api", tokenId: "owner:self", name: "owner", owner: true };
+  const OWNER_DISCORD: Envelope["from"] = { kind: "user", userId: "u1", channelId: "c-me", username: "owner" };
+  // ask 答复（asks.ts sendCalm）：response、带 waitForIdle、不带 quotaGated；fleet 群发文字：带 waitForIdle 和 quotaGated
+  const env = (content: string, from: Envelope["from"], meta: Partial<Envelope["meta"]>, intent: Envelope["intent"] = "response"): HeldItem => {
+    const i = item(content);
+    return { ...i, env: { ...i.env, from, intent, meta: { ...i.env.meta, triggerKind: "ask_answer", waitForIdle: true, ...meta } } as Envelope };
+  };
+  const ask = (from: Envelope["from"]) => env("ask", from, { askId: "a1" });
+  const fleet = () => env("fleet", OWNER_API, { triggerKind: "bridge_synth", quotaGated: true }, "request");
+  const reasons = (h: ReturnType<typeof harness>) => (h.held.get("c-me") ?? []).map((i) => [String(i.env.content), i.reason]);
+
+  function walledHarness(items: HeldItem[], over: Partial<FlushDeps> = {}) {
+    const preempt: string[] = [];
+    const h = harness(items, {
+      walled: async () => true, isHumanRequest, settled: async () => true,
+      // 真 deliverToLocal 只在 isHumanRequest 时抢占（bridge.ts preemptForHuman）：这里记下来，断言一次都没有
+      deliver: async (e) => {
+        if (isHumanRequest(e)) preempt.push(String(e.content));
+        h.delivered.push(String(e.content));
+        return sent(e);
+      },
+      ...over,
+    });
+    return { ...h, preempt };
+  }
+
+  for (const [label, from] of [["网页 owner", OWNER_API], ["Discord owner", OWNER_DISCORD]] as const) {
+    test(`${label}：离线时押下，恢复在线、闸还开着、目标空闲 → 投一次；fleet 群发和 agent 消息照旧押着`, async () => {
+      let online = false;
+      const h = walledHarness([item("agent-msg"), fleet(), ask(from)], { client: () => (online ? { ws } : undefined) });
+      await flushHeld(h.deps, "c-me", "sweep");
+      expect(h.delivered).toEqual([]);
+      expect(reasons(h)).toEqual([["agent-msg", "quota_wall"], ["fleet", "quota_wall"], ["ask", undefined]]);
+      online = true;
+      await flushHeld(h.deps, "c-me", "sweep"); // 离线恢复靠每分钟扫描 / Stop 触发
+      await flushHeld(h.deps, "c-me", "sweep");
+      expect(h.delivered).toEqual(["ask"]);
+      expect(h.preempt).toEqual([]);
+      expect(h.contents()).toEqual(["agent-msg", "fleet"]);
+      expect(h.held.wallCount(gatesAsHuman)).toEqual({ human: 0, agent: 2 });
+    });
+  }
+
+  test("压缩中押下，压缩结束、闸还开着：目标空闲 → 投一次；目标忙 → 不投、不抢占，等下一次", async () => {
+    let [compacting, working] = [true, true];
+    const h = walledHarness([fleet(), ask(OWNER_API)], { compacting: () => compacting, working: async () => working });
+    await flushHeld(h.deps, "c-me", "sweep");
+    compacting = false;
+    await flushHeld(h.deps, "c-me", "compact_end");
+    expect(h.delivered).toEqual([]);
+    expect(reasons(h)).toEqual([["fleet", "quota_wall"], ["ask", undefined]]);
+    working = false;
+    await flushHeld(h.deps, "c-me", "stop");
+    await flushHeld(h.deps, "c-me", "sweep");
+    expect(h.delivered).toEqual(["ask"]);
+    expect(h.preempt).toEqual([]);
+    expect(h.contents()).toEqual(["fleet"]);
+  });
+
+  test("wall_activity（窗口又动了）：队里有 ask 答复就触发；CC 自己续跑、目标在忙时不投，那一轮结束后投；只押着 fleet 群发的不触发", async () => {
+    const { flushHumanSoon } = await import("../src/bridge/quota-wall-wiring.js");
+    let working = true;
+    const h = walledHarness([fleet(), ask(OWNER_API)], { working: async () => working });
+    const flushed: string[] = [];
+    const b = { held: h.held, flush: (cid: string, why: string) => (flushed.push(cid), flushHeld(h.deps, cid, why)) } as unknown as Parameters<typeof flushHumanSoon>[0];
+    flushHumanSoon(b, "c-me", 100_000);
+    await Bun.sleep(0);
+    expect(flushed).toEqual(["c-me"]);
+    expect(h.delivered).toEqual([]);
+    working = false;
+    flushHumanSoon(b, "c-me", 110_000);
+    await Bun.sleep(0);
+    expect(h.delivered).toEqual(["ask"]);
+    expect(h.preempt).toEqual([]);
+    flushHumanSoon(b, "c-me", 120_000); // 只剩 fleet 群发：不算能穿闸的，不触发
+    expect(flushed).toEqual(["c-me", "c-me"]);
+    expect(h.contents()).toEqual(["fleet"]);
+  });
+
+  test("闸内目标忙：能抢占的人类 request 照旧投（行为不变），ask 答复和 fleet 群发都不投", async () => {
+    const human = env("human", OWNER_API, { waitForIdle: undefined }, "request");
+    const h = walledHarness([fleet(), ask(OWNER_API), human], { working: async () => true });
+    await flushHeld(h.deps, "c-me", "sweep");
+    expect(h.delivered).toEqual(["human"]);
+    expect(h.contents()).toEqual(["fleet", "ask"]);
   });
 });

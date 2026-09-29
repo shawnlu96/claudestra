@@ -17,8 +17,10 @@ export interface TaskDetail {
   task: LedgerTaskView;
   events: LedgerEventView[];
   timeline: StageEntryView[];
-  /** 步骤化台账（collab-steps.ts 解析）；老 bridge 没有这个字段 */
+  /** 步骤化台账；老 bridge 没有这个字段 */
   steps?: unknown;
+  /** 步骤线（T51，collab-step-line-model.ts 解析）：steps + 当前这一步 + 是否在等对方 owner；老 bridge 没有 */
+  stepLine?: unknown;
   now: number;
 }
 

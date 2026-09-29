@@ -1,5 +1,8 @@
 /** 协作视图（web/features/collab）的字典条目，规则同 lib/i18n-dict.ts；单独成文件是因为主字典顶在行数上限 */
 export const COLLAB_DICT: Record<string, string> = {
+  "等对方 owner 同意": "Awaiting their owner’s OK",
+  "老卡没有逐步记录，下面是按负责人推断的": "This older card has no per-step records; the steps below are inferred from its assignee",
+  "对方自报，本机核不了": "Self-reported by the other side; can’t be verified here",
   "阶段与用时": "Stages & time",
   "最近 3 件事": "Last 3 events",
   "合并队列冻结": "Merge queue frozen",
@@ -172,6 +175,11 @@ export const COLLAB_DICT: Record<string, string> = {
   "未归事项": "No item",
   "{n} 件在等 {x}": "{n} waiting on {x}",
   "适配全部": "Fit all",
+  "团队": "Team",
+  "打开会话": "Open chat",
+  "本机成员": "Member on this machine",
+  "外部实例成员": "Member on a peer instance",
+  "最近 10 分钟的真实往来": "Recorded interactions, last 10 minutes",
   "{n} 条依赖": "{n} dependencies",
   "画布上合成一根线": "Drawn as one line on the canvas",
   "还有 {n} 件在右边 →": "{n} more to the right →",
@@ -199,7 +207,6 @@ export const COLLAB_DICT: Record<string, string> = {
   "平均等复核": "Avg review wait",
   "协作消息": "Collab messages",
   "暂无数据来源": "No data source yet",
-  "团队视图（T55）合并后接到这里": "Team view (T55) plugs in here once merged",
   "PM 定为「{s}」（推导值「{d}」）": "Set by PM to “{s}” (derived: “{d}”)",
   "按前置任务的阶段推导：{d}": "Derived from the prerequisite's stage: {d}",
 };
