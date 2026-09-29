@@ -2,7 +2,8 @@ import { beforeEach, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
-import { ctxBoundaryTick, injectCompact, isLinkedWorktree, resetCtxBoundaryState } from "../src/bridge/ctx-boundary.js";
+import { ctxBoundaryTick, injectCompact, resetCtxBoundaryState } from "../src/bridge/ctx-boundary.js";
+import { isLinkedWorktree } from "../src/lib/linked-worktree.js";
 import { DEFAULT_KEEP_LIST } from "../src/lib/ctx-boundary-policy.js";
 import { agent, BUSY_PANE, harness, MIN, tgt } from "./ctx-boundary-harness.js";
 
@@ -79,10 +80,31 @@ describe("ctxBoundaryTick", () => {
     const r = await ctxBoundaryTick(dry);
     expect(r[0]).toMatchObject({ verdict: { fire: true, kind: "hard-cap" }, would: `/compact ${DEFAULT_KEEP_LIST}` });
     expect(r[0].inject).toBeUndefined();
+    // 窗口小：写明会退到哪一档 / 会跳过（adv2 P2-1）
+    const w = h.win("master:agent-task-t1");
+    w.size = { width: 40, height: 24 };
+    expect((await ctxBoundaryTick(dry))[0].would).toBe("/compact（窗口 40×24 放不下默认保留清单，退到只发 /compact）");
+    w.size = { width: 5, height: 24 };
+    expect((await ctxBoundaryTick(dry))[0].would).toBe("窗口 5×24 连 /compact 都放不下：跳过并提醒 owner");
+    delete w.size;
     expect((await ctxBoundaryTick(dry))[0].verdict.fire).toBe(true); // 没记冷却
     h.state.draft = true;
     expect((await ctxBoundaryTick(dry))[0].verdict).toEqual({ fire: false, reason: "draft" });
     expect([h.sent.length, h.alerts.length]).toEqual([0, 0]);
+  });
+
+  test("窗口太小、连 /compact 都放不下：不按键，提醒 owner，5 分钟后再看（不每分钟敲了又删）", async () => {
+    const h = harness([agent({ ctx: 300_000, convTs: 0 })]);
+    h.win("master:agent-task-t1").size = { width: 5, height: 24 };
+    const r = await ctxBoundaryTick(h.deps);
+    expect(r[0].inject).toMatchObject({ status: "skipped", reason: "window-small" });
+    expect(h.alerts).toEqual([expect.objectContaining({ agent: "agent-task-t1", text: expect.stringContaining("连 /compact 都放不下") })]);
+    h.advance(MIN);
+    expect((await ctxBoundaryTick(h.deps))[0].verdict).toMatchObject({ fire: false });
+    h.advance(5 * MIN);
+    h.win("master:agent-task-t1").size = { width: 80, height: 24 };
+    expect((await ctxBoundaryTick(h.deps))[0].inject).toMatchObject({ status: "executed", line: `/compact ${DEFAULT_KEEP_LIST}` });
+    expect(h.sent.length).toBe(1);
   });
 
   test("闲置不到 3 分钟，或画面在忙 → 等", async () => {

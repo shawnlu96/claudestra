@@ -4,13 +4,18 @@ import {
   agentWindowName, compactInjectedRecently, injectCompact, loadInjectState, resetInjectState, sweepPendingEcho,
 } from "../src/bridge/ctx-boundary-inject.js";
 import { resetCtxBoundaryState } from "../src/bridge/ctx-boundary.js";
-import { DEFAULT_KEEP_LIST } from "../src/lib/ctx-boundary-policy.js";
+import { DEFAULT_KEEP_LIST, normalizeCompactKeep, type CompactKeep } from "../src/lib/ctx-boundary-policy.js";
 import { statePath } from "../src/lib/paths.js";
 import { windowTarget } from "../src/lib/tmux-helper.js";
 import type { PaneQuotaState } from "../src/lib/lp-state.js";
 import { BUSY_PANE, harness, MIN, tgt } from "./ctx-boundary-harness.js";
 
 const EXEC_LINE = `/compact ${DEFAULT_KEEP_LIST}`;
+const kp = (s: string): CompactKeep => {
+  const r = normalizeCompactKeep(s);
+  if (!r.ok) throw new Error(r.why);
+  return r.keep;
+};
 const GUARD_FILE = statePath("ctx-boundary-injected.json");
 const PENDING_FILE = statePath("ctx-boundary-pending-echo.json");
 
@@ -66,7 +71,7 @@ describe("injectCompact：先看画面", () => {
 describe("injectCompact：敲字 → 再看一眼 → 回车（adv1 P2-9）", () => {
   test("闲着 = executed，忙 = queued；执行者的 save-compact 改成 compact", async () => {
     const h = harness([], { panes: { "master:busy": BUSY_PANE } });
-    expect(await injectCompact(tgt("idle"), { action: "compact", keep: "只留卡号" }, h.deps)).toEqual({ status: "executed", line: "/compact 只留卡号" });
+    expect(await injectCompact(tgt("idle"), { action: "compact", keep: kp("只留卡号") }, h.deps)).toEqual({ status: "executed", line: "/compact 只留卡号" });
     expect(await injectCompact(tgt("busy"), { action: "save-compact" }, h.deps)).toEqual({ status: "queued", line: "/save-compact" });
     expect(await injectCompact(tgt("agent-foo", true), { action: "save-compact" }, h.deps)).toMatchObject({ line: EXEC_LINE });
     expect(h.sent.map((s) => s.line)).toEqual(["/compact 只留卡号", "/save-compact", EXEC_LINE]);
@@ -158,7 +163,7 @@ test("大总管：registry 名 agent-master 对应窗口 master（adv1 P2-13：�
 });
 
 describe("删自己留下的字：退格分批、每批核对（r3 P2-2）、待删的字落盘（r3 P2-3）", () => {
-  const LONG = "保".repeat(800);
+  const LONG = kp("保".repeat(800));
   const LINE = `/compact ${LONG}`;
   const compactingOnType = (h: ReturnType<typeof harness>) => (h.win("master:x").onType = (win) => void (win.pane = "✻ Compacting conversation…\n"));
   const countErase = (h: ReturnType<typeof harness>, after?: (i: number) => void) => {
@@ -238,5 +243,74 @@ describe("删自己留下的字：退格分批、每批核对（r3 P2-2）、待
     expect(logs).toEqual([expect.stringContaining("一天都没删成")]);
     expect(w.box).toBe("/save-compact");
     resetInjectState();
+  });
+});
+
+describe("窗口放不下（adv2 P2-1）：按宽高退档，估少了看后半截认出自己删掉，连 /compact 都放不下就不敲", () => {
+  const CJK800 = kp("保留卡号分支和当前进度，".repeat(80).slice(0, 800));
+  const typedLines = (h: ReturnType<typeof harness>, t: string) => {
+    const lines: string[] = [];
+    const type = h.deps.type;
+    h.deps.type = async (tt, text) => {
+      if (tt === t) lines.push(text);
+      await type(tt, text);
+    };
+    return lines;
+  };
+
+  test("80×24 放不下 800 字：直接敲默认清单；40×24：只发 /compact；结果带退档说明", async () => {
+    const h = harness([]);
+    h.win("master:x").size = { width: 80, height: 24 };
+    h.win("master:y").size = { width: 40, height: 24 };
+    const lines = typedLines(h, "master:x");
+    expect(await injectCompact(tgt("x"), { action: "compact", keep: CJK800 }, h.deps)).toEqual({
+      status: "executed", line: EXEC_LINE, note: "窗口 80×24 放不下自定保留清单，退到默认保留清单",
+    });
+    expect(lines).toEqual([EXEC_LINE]); // 放不下的那档一个字都没敲
+    expect(await injectCompact(tgt("y", true), { action: "save-compact" }, h.deps)).toMatchObject({
+      status: "executed", line: "/compact", note: "窗口 40×24 放不下默认保留清单，退到只发 /compact",
+    });
+  });
+
+  test("连 /compact 都放不下：skipped window-small，一个键不按", async () => {
+    const h = harness([]);
+    h.win("master:x").size = { width: 5, height: 24 };
+    const lines = typedLines(h, "master:x");
+    expect(await injectCompact(tgt("x"), { action: "compact" }, h.deps)).toMatchObject({ status: "skipped", reason: "window-small", text: expect.stringContaining("5×24") });
+    expect([lines, h.sent]).toEqual([[], []]);
+  });
+
+  test("估少了（CC 实际折得更窄）：显示区满了、只看到后半截就不回车，删干净敲下一档", async () => {
+    const h = harness([]);
+    const w = h.win("master:x");
+    w.size = { width: 120, height: 40 };
+    w.renderWidth = 20; // 估算按 116 列，实际按 16 列折
+    const lines = typedLines(h, "master:x");
+    const r = await injectCompact(tgt("x"), { action: "compact", keep: CJK800 }, h.deps);
+    expect(r).toEqual({ status: "executed", line: "/compact", note: "窗口 120×40 放不下自定保留清单、默认保留清单，退到只发 /compact" });
+    expect(lines).toEqual([`/compact ${CJK800}`, EXEC_LINE, "/compact"]);
+    expect([h.sent.map((s) => s.line), w.box]).toEqual([["/compact"], ""]);
+  });
+
+  test("截断的字删到一半弹对话框、那一批只生效了一半：记下这批之前的和在途个数，下一轮按框里实际剩的删完", async () => {
+    const h = harness([]);
+    const w = h.win("master:x");
+    w.size = { width: 200, height: 60 };
+    w.renderWidth = 30; // 估算放得下，实际折成 31 行、只显示 25 行
+    w.onType = (win) => void (win.pane = "✻ Compacting conversation…\n"); // 敲完发现在压缩：删掉
+    const calls: number[] = [];
+    h.deps.erase = async (_t, n) => {
+      calls.push(n);
+      const eff = calls.length === 2 ? n / 2 : n; // 第二批只有一半进了输入框，另一半被对话框吃了
+      w.box = [...w.box].slice(0, -eff).join("");
+      if (calls.length === 2) w.pane = "Do you want to proceed?\n[menu]";
+    };
+    const r = await injectCompact(tgt("x"), { action: "compact", keep: kp("保".repeat(390)) }, h.deps); // 399 字：先删零头 199，再 200
+    expect(r).toMatchObject({ status: "failed", leftover: true });
+    expect([calls, [...w.box].length]).toEqual([[199, 200], 100]);
+    w.pane = "some output\n❯ \n";
+    const logs: string[] = [];
+    await sweepPendingEcho(h.deps, (l) => void logs.push(l));
+    expect([calls, w.box, logs]).toEqual([[199, 200, 100], "", [expect.stringContaining("已删掉")]]);
   });
 });

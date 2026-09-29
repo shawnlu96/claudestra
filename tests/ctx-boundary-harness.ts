@@ -1,7 +1,9 @@
 /**
  * 上下文边界测试共用的假终端：每个窗口一段底色画面 + 一个输入框（box）。敲字追加到 box，回车把 box 记成「已提交」并清空，
  * 退格从 box 尾部删。画面文字里带 `[menu]` / `Compacting conversation` 就当有对话框 / 在压缩；onType 模拟敲字那一刻画面变了。
+ * 给了 size 就像真 CC 那样按列宽折行、只显示最后几行（第一行照样当输入框开头）；renderWidth 让它按更窄的宽度折，模拟估算少算了行数。
  */
+import { inputCols, inputRowsVisible, type PaneSize } from "../src/lib/ctx-boundary-fit.js";
 import type { BoundaryAgent, CtxBoundaryDeps } from "../src/bridge/ctx-boundary.js";
 import type { PaneQuotaState } from "../src/lib/lp-state.js";
 
@@ -14,7 +16,21 @@ export interface FakeWin {
   box: string;
   inMode: boolean;
   command: string;
+  size?: PaneSize;
+  renderWidth?: number;
   onType?: (w: FakeWin, text: string) => void;
+}
+
+/** 按列宽逐字折行（中文 2 列），只留最后 n 行 */
+function shownBox(w: FakeWin): string {
+  if (!w.size || !w.box) return w.box;
+  const cols = inputCols(w.renderWidth ?? w.size.width);
+  const rows = [""];
+  for (const ch of w.box) {
+    if (Bun.stringWidth(rows.at(-1)! + ch) > cols) rows.push("");
+    rows[rows.length - 1] += ch;
+  }
+  return rows.slice(-inputRowsVisible(w.size.height)).join("\n");
 }
 
 export function harness(
@@ -42,8 +58,8 @@ export function harness(
     capture: async (t) => {
       const w = win(t);
       if (w.pane === null) return null;
-      const text = `${w.pane}\n[box]${w.box}`;
-      return { plain: text, esc: text, inMode: w.inMode, command: w.command };
+      const text = `${w.pane}\n[box]${shownBox(w)}`;
+      return { plain: text, esc: text, inMode: w.inMode, command: w.command, size: w.size ?? null };
     },
     readPane: (plain) => {
       const box = plain.split("[box]").pop() ?? "";

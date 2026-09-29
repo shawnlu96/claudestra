@@ -5,19 +5,20 @@
  * 开关管不着），大总管不自动压。`manager ctx-boundary dry-run` 用同一套判定、按开关关 / 开各列一遍结果，不发键。
  * 设计 docs/architecture/context-boundary.md；单测 tests/ctx-boundary.test.ts（全部依赖可注入）。
  */
-import { existsSync, readFileSync, statSync } from "fs";
-import { dirname, join } from "path";
+import { statSync } from "fs";
 import { readConfigSync } from "../lib/config-store.js";
 import { agentRuntime, isMasterAgent, readRegistryAgents } from "../lib/registry.js";
 import { statePath } from "../lib/paths.js";
 import { readJsonStateSync } from "../lib/state-file.js";
 import { resolveSessionIdsForWindows } from "../lib/cc-sessions.js";
+import { isLinkedWorktree } from "../lib/linked-worktree.js";
 import { findSessionJsonlBySessionId, sessionJsonlPath } from "../lib/session-source.js";
 import { sessionTailInfo } from "../lib/session-tail.js";
 import { readSessionCtx } from "../lib/usage-cache.js";
 import { paneLooksWorking } from "../lib/turn-state.js";
 import { formatTokens } from "../lib/agent-stats.js";
-import { compactCommand, effectiveAction, isExecutor, matchPolicy, resolvePolicies, type PolicyWarning } from "../lib/ctx-boundary-policy.js";
+import { effectiveAction, isExecutor, matchPolicy, resolvePolicies, type PolicyWarning } from "../lib/ctx-boundary-policy.js";
+import { describeCompactPlan } from "../lib/ctx-boundary-fit.js";
 import {
   boundaryDecision, boundaryView, globalBoundary, policyBoundary, SKIP_REASON_TEXT,
   type Boundary, type BoundaryVerdict, type CtxBoundaryView, type GlobalAutoCompact, type SkipReason,
@@ -36,7 +37,7 @@ import { parseChatId } from "./router.js";
 const TICK_MS = 60_000;
 /** 注入后 30 分钟没回落到线下才重试：注入可能被 TUI 吞掉，布尔标记会卡成永久沉默（git log -S AUTO_COMPACT_RETRY_MS） */
 const RETRY_MS = 30 * 60_000;
-/** 发送失败（窗口没了、tmux 出错）：5 分钟后再试，不进 30 分钟的沉默期 */
+/** 发送失败（窗口没了、tmux 出错）、窗口太小：5 分钟后再试，不进 30 分钟的沉默期（也不每分钟往窗口里敲了又删） */
 const FAIL_RETRY_MS = 5 * 60_000;
 /** 过救命线又被挡住（或敲进去的字没提交）时提醒 owner：同一个 agent 30 分钟最多一次 */
 const ALERT_EVERY_MS = 30 * 60_000;
@@ -182,14 +183,17 @@ async function checkOne(a: BoundaryAgent & { ctx: number }, b: Boundary, deps: C
     return base;
   }
   lastSkip.delete(a.name);
-  if (deps.dryRun) return { ...base, would: compactCommand(b.action, b.keep) };
+  if (deps.dryRun) return { ...base, would: describeCompactPlan(effectiveAction(a.executor, b.action), b.keep, pane?.size ?? null) };
   const inject = await injectCompact(a, { action: b.action, keep: b.keep, pane }, deps);
   if (inject.status === "executed" || inject.status === "queued") lastTrig.set(a.name, now);
-  else if (inject.status === "failed") lastTrig.set(a.name, now - RETRY_MS + FAIL_RETRY_MS);
+  else if (inject.status === "failed" || (inject.status === "skipped" && inject.reason === "window-small")) lastTrig.set(a.name, now - RETRY_MS + FAIL_RETRY_MS);
   if (inject.status === "failed" && inject.leftover) {
     maybeAlert(a, now, deps, `⚠️ 往 ${a.name} 注入压缩没成功：${inject.error}。`, { ctx: a.ctx, cap: b.hardCap, reason: "leftover" });
   }
-  const why = inject.status === "failed" ? `（${inject.error}）` : inject.status === "skipped" ? `（${inject.text}）` : "";
+  if (inject.status === "skipped" && inject.reason === "window-small") {
+    maybeAlert(a, now, deps, `⚠️ ${a.name} 该压缩了（${formatTokens(a.ctx)}），但${inject.text}。`, { ctx: a.ctx, cap: b.hardCap, reason: "window-small" });
+  }
+  const why = inject.status === "failed" ? `（${inject.error}）` : inject.status === "skipped" ? `（${inject.text}）` : inject.note ? `（${inject.note}）` : "";
   deps.log(`🧹 上下文边界 ${verdict.kind === "hard-cap" ? "硬上限" : "闲置"}触发 ${tag}：${b.action} → ${inject.status}${why}`);
   return { ...base, inject };
 }
@@ -238,32 +242,6 @@ export function ctxBoundaryViewFor(
 export function ctxBoundaryWarnings(): PolicyWarning[] {
   const p = currentPolicies(liveDeps);
   return p.ac?.inject === true ? p.warnings : [{ policy: null, text: OFF_TEXT }, ...p.warnings];
-}
-
-const worktreeCache = new Map<string, boolean>();
-/**
- * 工作目录是不是 git 的 linked worktree：往上找第一个 .git，是文件、且指向 `…/worktrees/<名字>` 才算。
- * submodule 的 .git 也是文件，但指向 `…/modules/…`，它的 memory 目录不和别人共用，不能当执行者。按目录缓存（cwd 不会变）
- */
-export function isLinkedWorktree(dir: string | null | undefined): boolean {
-  if (!dir) return false;
-  const hit = worktreeCache.get(dir);
-  if (hit !== undefined) return hit;
-  let v = false;
-  for (let d = dir; ; d = dirname(d)) {
-    const g = join(d, ".git");
-    if (existsSync(g)) {
-      try {
-        v = statSync(g).isFile() && /[\\/]worktrees[\\/][^\\/]+[\\/]?$/.test(readFileSync(g, "utf8").trim());
-      } catch {
-        v = false; // 刚好被删：当普通仓库，下次 cwd 变了才会重算（cwd 不变，这里只是防抛）
-      }
-      break;
-    }
-    if (dirname(d) === d) break;
-  }
-  worktreeCache.set(dir, v);
-  return v;
 }
 
 /** 按 registry 名字拼注入对象（Discord 手动按钮、T35 的批量动作用） */
