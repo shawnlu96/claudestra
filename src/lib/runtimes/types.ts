@@ -185,10 +185,16 @@ export interface RuntimeControl {
   interruptKeys: readonly string[];
   /** 人类消息到达且目标在忙时，是否先打断再投递（Pi 能 steer 进回合，不打断；停字不看这个，三种运行时都打断） */
   preemptOnHumanMessage: boolean;
-  /** 忙闲信号从哪来：pane = 看屏幕文案；hook = 只信回合结束上报（isAgentIdle 恒答空闲） */
-  idleSource: "pane" | "hook";
-  /** 模型钉值怎么生效：in-session = 启动后会话内补发 /model；launch-flag = 启动参数即权威 */
-  modelEnforcement: "in-session" | "launch-flag";
+  /**
+   * 忙闲信号从哪来：pane = 看屏幕文案；hook = 只信回合结束上报（isAgentIdle 恒答空闲）；
+   * acp = 宿主（src/acp-host.ts）上报——session/prompt 没返回就是忙，窗口里只是宿主日志，屏幕判据一概不看
+   */
+  idleSource: "pane" | "hook" | "acp";
+  /**
+   * 模型钉值怎么生效：in-session = 启动后会话内补发 /model；launch-flag = 启动参数即权威；
+   * config-option = 经宿主调 ACP 的 session/set_config_option，会话里随时改、不重启
+   */
+  modelEnforcement: "in-session" | "launch-flag" | "config-option";
   /** CC 的屏幕文案判据（压缩中 / 权限弹窗等）能不能套在它身上 */
   paneHeuristics: boolean;
   /**
@@ -203,6 +209,27 @@ export interface RuntimeControl {
    * 扩展在注册帧里声明 abort:true 才发（老扩展会默默忽略）；接线见 bridge/interrupt-gate.ts。
    */
   abortVia?: "extension";
+  /** 斜杠命令（/compact 等）当普通 prompt 文本投进会话，不敲键（ACP 下由适配器自己认，比如 /compact 转成 thread/compact/start） */
+  slashAsPrompt?: boolean;
+}
+
+/**
+ * agent 和运行时之间走哪条路（按 agent 记在 registry 的 transport 字段，缺省 tmux）：
+ * - tmux：窗口里跑运行时自己的 TUI，键盘 / 屏幕 / hook 驱动（历来如此）；
+ * - acp：窗口里跑常驻宿主 src/acp-host.ts，经 Agent Client Protocol 驱动运行时，窗口只是只读日志（docs/runtimes/codex-acp.md）。
+ */
+export type Transport = "tmux" | "acp";
+
+export const DEFAULT_TRANSPORT: Transport = "tmux";
+
+/** registry 原值 → Transport：只认 "acp"，缺省与认不出的一律 tmux（老 agent 没有这个字段，行为不能变） */
+export function normalizeTransport(v: unknown): Transport {
+  return v === "acp" ? "acp" : DEFAULT_TRANSPORT;
+}
+
+/** 运行时的 ACP 段：声明了才能以 transport=acp 起。control 是 acp 模式下 bridge 侧的策略（controlFor(runtime, "acp") 取它） */
+interface AcpTransport {
+  readonly control: RuntimeControl;
 }
 
 /** fork 后探测真实会话 id 的上下文 */
@@ -231,6 +258,8 @@ export interface ManagedRuntimeAdapter extends SessionSourceAdapter {
    * 连按 Esc 在别的 TUI 里是手势（Codex：backtrack 回溯）的运行时必须自己实现。
    */
   exitPrelude?(win: WindowOps): Promise<"at-shell" | "continue">;
+  /** ACP 通道（T60 试点，目前只有 Codex）。不声明 = 这个运行时只能走 tmux */
+  readonly acp?: AcpTransport;
   /** registry notes 里的会话前缀（历史值 "claude" / "pi"，保持不变） */
   readonly noteTag: string;
 

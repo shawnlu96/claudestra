@@ -1,12 +1,15 @@
 "use client";
 import { useState } from "react";
+import { dismissAskCard } from "@/lib/api/asks";
+import { ApiError } from "@/lib/api/client";
 import { useT } from "@/lib/i18n";
 import { AttachmentStrip } from "@/features/chat/components/attachments";
 import { agentLabel, answerSummary, askAttachments, closedText, spanText, type WebAsk } from "../asks-model";
-import { useAsks } from "../asks-store";
+import { activeAnswered, clearAnswered, markAnswered } from "../answer-cooldown";
+import { asksStore, useAsks } from "../asks-store";
 import { AskActions } from "./ask-actions";
 import { AnswerImages } from "./assigned-choices";
-import { ChatIcon, ClockIcon } from "./ask-icons";
+import { ChatIcon, ClockIcon, TrashIcon } from "./ask-icons";
 
 /**
  * 一张「待你处理」卡（docs 13 §4.4，照 T12 原型右栏的卡）：谁在问、哪个任务、等了多久；标题；背景（owner「不知道上面发生了些什么」）；
@@ -17,7 +20,8 @@ export function AskCard(props: { ask: WebAsk; now: number; focused: boolean; onO
   const { ask, now, focused, onOpenChat, leaving, guard } = props;
   const t = useT();
   const [showBody, setShowBody] = useState(false);
-  const note = useAsks().notes[ask.id];
+  const { notes, full } = useAsks();
+  const note = notes[ask.id];
   const open = ask.state === "open";
   const agent = agentLabel(ask.fromAgent, t, ask.kind);
   return (
@@ -39,6 +43,7 @@ export function AskCard(props: { ask: WebAsk; now: number; focused: boolean; onO
           <ClockIcon />
           {open ? t("等了 {span}", { span: spanText(now - ask.createdAt, t) }) : closedText(ask, t)}
         </span>
+        {full && ask.canAnswer !== false && <DismissButton ask={ask} />}
       </header>
       <h3 className="text-[15px] font-semibold leading-snug">{ask.title}</h3>
       {ask.context && ask.context !== ask.title && <p className="mt-1 line-clamp-3 whitespace-pre-line text-[13px] opacity-75">{ask.context}</p>}
@@ -75,5 +80,24 @@ export function AskCard(props: { ask: WebAsk; now: number; focused: boolean; onO
         {open && <span className="ml-auto opacity-45">{t("还剩 {span} 过期", { span: spanText(ask.expiresAt - now, t) })}</span>}
       </footer>
     </article>
+  );
+}
+
+/**
+ * 右上角的删除（T61，离底部的作答按钮远，防误点）：只给读得了整本台账、能答这条的凭据（= owner 本人）。点了原位淡出，
+ * 开着的撤销 / 运行时弹框只收起，已结案的从列表隐藏（bridge/ask-dismiss.ts）；失败回来并在卡上留原因
+ */
+function DismissButton({ ask }: { ask: WebAsk }) {
+  const t = useT();
+  const fail = (e: unknown) => (e instanceof ApiError ? (e.status === 409 ? t("这件已经处理过了（或已过期）") : e.message) : t("没发出去（连不上），再点一次"));
+  const remove = async () => {
+    if (activeAnswered()) return; // 过渡中不再提交（同作答）
+    markAnswered(ask.id, ask);
+    if (!(await asksStore.dismiss(ask.id, () => dismissAskCard(ask.project, ask.id), fail))) clearAnswered(ask.id);
+  };
+  return (
+    <button type="button" aria-label={t("删除")} title={t("删除")} className="btn btn-ghost btn-xs btn-square -my-1 -mr-1 opacity-45 hover:opacity-100" onClick={() => void remove()}>
+      <TrashIcon />
+    </button>
   );
 }
