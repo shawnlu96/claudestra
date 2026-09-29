@@ -5,7 +5,7 @@
  *   - peerCliFetch：peer 命令里对 relay:// 地址的 fetch 替身——只有 bridge 持有中继连接，manager 请它代调。
  */
 import { bridgeHttpBase } from "../lib/bridge-port.js";
-import { instanceKeySync, keyFingerprint } from "../lib/instance-key.js";
+import { instanceKeySync, keyFingerprint, signedFor } from "../lib/instance-key.js";
 import { relayPeerFingerprint } from "../lib/peers.js";
 import type { RelayLinkInfo } from "../lib/relay-client-types.js";
 import type { PeerRecord } from "../lib/relay-protocol.js";
@@ -33,11 +33,11 @@ export function myFingerprint(): string | undefined {
 
 const TIMEOUT_CODES = new Set(["timeout", "local_timeout", "peer_disconnected", "connection_lost"]);
 
-/** fetch 的替身：relay://<指纹>/… 交给 bridge 经中继代调（POST /relay/request），其余原样 fetch */
+/** fetch 的替身：relay://<指纹>/… 交给 bridge 经中继代调（POST /relay/request，bridge 签名），其余加上实例签名直接 fetch——对方只认签名钥匙对得上的 peer */
 export async function peerCliFetch(url: string, init: { method?: string; headers?: Record<string, string>; body?: string; signal?: AbortSignal } = {}): Promise<Response> {
   const m = /^relay:\/\/([^/]+)(\/.*)?$/i.exec(url);
   const to = m ? relayPeerFingerprint(`relay://${m[1]}`) : null;
-  if (!m || !to) return fetch(url, init);
+  if (!m || !to) return fetch(url, { ...init, headers: { ...init.headers, ...signedFor(init.method ?? "GET", url, init.body ?? "") } });
   const r = await fetch(`${bridgeHttpBase()}/relay/request`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },

@@ -11,7 +11,7 @@ User=relay
 Group=relay
 WorkingDirectory=/opt/claudestra
 Environment=HOME=/var/lib/claudestra-relay
-# 只听本机，由 nginx 做 TLS 与 wss；RELAY_TRUST_PROXY=1 让限流与子域名按 X-Forwarded-* 算
+# 只听本机，由 nginx 做 TLS 与 wss；RELAY_TRUST_PROXY=1 = 前面一层受信反代：子域名按 X-Forwarded-Host、客户端地址取 X-Forwarded-For 最右项
 Environment=RELAY_HOST=127.0.0.1
 Environment=RELAY_PORT=8787
 Environment=RELAY_DATA=/var/lib/claudestra-relay/data

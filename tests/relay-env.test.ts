@@ -7,13 +7,13 @@ describe("relayEnv", () => {
     expect(() => relayEnv({}, () => undefined)).toThrow(/RELAY_BASE/);
     expect(() => relayEnv({ RELAY_BASE: "not a host" }, () => undefined)).toThrow(/RELAY_BASE/);
     const e = relayEnv({ RELAY_BASE: "Relay.Example.com." }, () => undefined);
-    expect(e).toMatchObject({ base: "relay.example.com", port: 8787, hostname: "127.0.0.1", db: "data/relay.sqlite", trustProxy: false });
+    expect(e).toMatchObject({ base: "relay.example.com", port: 8787, hostname: "127.0.0.1", db: "data/relay.sqlite", trustProxy: 0 });
     expect(e.commit).toBeUndefined();
   });
   test("RELAY_DATA / RELAY_DB / RELAY_TRUST_PROXY / RELAY_PORT", () => {
     expect(relayEnv({ RELAY_BASE: "r.test", RELAY_DATA: "/var/lib/x/" }, () => undefined).db).toBe("/var/lib/x/relay.sqlite");
     expect(relayEnv({ RELAY_BASE: "r.test", RELAY_DB: "/tmp/a.sqlite", RELAY_DATA: "/x" }, () => undefined).db).toBe("/tmp/a.sqlite");
-    expect(relayEnv({ RELAY_BASE: "r.test", RELAY_TRUST_PROXY: "1", RELAY_PORT: "9000" }, () => undefined)).toMatchObject({ trustProxy: true, port: 9000 });
+    expect(relayEnv({ RELAY_BASE: "r.test", RELAY_TRUST_PROXY: "1", RELAY_PORT: "9000" }, () => undefined)).toMatchObject({ trustProxy: 1, port: 9000 });
   });
   test("推送网关：VAPID 文件默认在数据目录、subject 默认 mailto:relay@<base>；APNs 三项不全就不开并说明原因", () => {
     const e = relayEnv({ RELAY_BASE: "r.test" }, () => undefined);

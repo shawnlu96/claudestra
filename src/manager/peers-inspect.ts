@@ -30,7 +30,8 @@ export async function cmdPeerInviteInspect(inviteStr: string) {
     return;
   }
   // 已经连着这个对方了：加入会刷新那条记录的地址 / token，确认卡上提一句
-  const existing = (await readPeers()).httpPeers?.find((p) => isSameInviter(p, hs))?.name;
+  const peerTrust = await import("../lib/peer-trust.js"), anchorOf = await peerTrust.peerAnchorOf();
+  const existing = (await readPeers()).httpPeers?.find((p) => isSameInviter(p, hs, anchorOf(p), peerTrust.legacyStillOpen()))?.name;
   const base = { ok: true, name: hs.name, url: hs.url, ...(existing ? { existing } : {}) };
   if (relayPeerFingerprint(hs.url)) return output(await inspectViaRelay(base));
   let failKind: JoinFailureKind = "other";

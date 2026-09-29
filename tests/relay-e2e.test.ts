@@ -13,6 +13,8 @@ import { connect, RelayError, type RelayClient } from "../src/lib/relay-client.t
 import { instanceKeySync, keyFingerprint, signedHeaders, type InstanceKey } from "../src/lib/instance-key.ts";
 import { makeInboundHandler } from "../src/bridge/relay-inbound.ts";
 import { collectBody } from "../src/lib/relay-stream.ts";
+/** 这里测的是帧往返；发件人核对（联系人、token 归属）在 tests/peer-trust.test.ts */
+const ALLOW_ALL = async () => null;
 
 const BASE = "relay.test";
 const quiet = () => {};
@@ -97,7 +99,7 @@ beforeAll(async () => {
   keyB = instanceKeySync(mkdtempSync(join(tmpdir(), "relay-e2e-b-")))!;
   fpA = keyFingerprint(keyA.publicKey);
   fpB = keyFingerprint(keyB.publicKey);
-  const deps = { webBase: `http://127.0.0.1:${web.port}`, ingressBase: () => `http://127.0.0.1:${ingress.port}` };
+  const deps = { webBase: `http://127.0.0.1:${web.port}`, ingressBase: () => `http://127.0.0.1:${ingress.port}`, refusePeer: ALLOW_ALL };
   const relayUrl = `ws://127.0.0.1:${relay.port}/v1/ws`;
   a = connect({ relayUrl, key: keyA, name: "Mini", slug: "mini", onInbound: makeInboundHandler(deps), log: quiet });
   b = connect({ relayUrl, key: keyB, name: "Alex 的 MBP", slug: "alex", onInbound: makeInboundHandler(deps), log: quiet });
@@ -179,7 +181,7 @@ describe("隧道：浏览器 → front → 实例 → 本机 Web", () => {
     expect((await front(`mini.${BASE}`, "/hello", { headers: { upgrade: "websocket" } })).status).toBe(426);
     b = connect({
       relayUrl: `ws://127.0.0.1:${relay.port}/v1/ws`, key: keyB, name: "Alex 的 MBP", slug: "alex", log: quiet,
-      onInbound: makeInboundHandler({ webBase: `http://127.0.0.1:${web.port}`, ingressBase: () => `http://127.0.0.1:${ingress.port}` }),
+      onInbound: makeInboundHandler({ webBase: `http://127.0.0.1:${web.port}`, ingressBase: () => `http://127.0.0.1:${ingress.port}`, refusePeer: ALLOW_ALL }),
     });
     await waitFor(() => b.info().connected);
   });

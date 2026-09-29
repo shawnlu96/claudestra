@@ -7,7 +7,7 @@
  * 端口为什么写死进 .env 而不是每次按「bridge 端口 + 1」算：反代规则指着的是具体端口，
  * BRIDGE_PORT 以后再改（自定义端口的人改过不止一次），算出来的端口就漂了，peer 悄悄断掉。
  */
-import { existsSync } from "fs";
+import { existsSync, readFileSync } from "fs";
 import { readFile, writeFile } from "fs/promises";
 import { REPO_ROOT } from "./repo-root.js";
 import { mergeEnvContent, parseEnvRaw } from "./env-file.js";
@@ -15,12 +15,26 @@ import { listListeners, runCli, tcpOpen } from "./tailscale.js";
 import { detectBridgeUrls } from "./net-addr.js";
 import { bridgeHttpBase } from "./bridge-port.js";
 import { probeBridgeApi } from "./peer-url.js";
+import { repoEnvVar } from "./env-file.js";
+import { webPortFromStartScript } from "./cli-install.js";
 
 const ENV_HEADER = "# Claudestra 运行时配置 (由 bun run setup 生成)";
 
 /** 同一个 serve 端口上把 /api/v1 挂到 peer 入口（serve 剥不剥挂载前缀，入口都认） */
 function servePeerArgs(httpsPort: number, ingressPort: number): string[] {
   return ["serve", "--bg", `--https=${httpsPort}`, "--set-path", "/api/v1", `http://127.0.0.1:${ingressPort}`];
+}
+
+/** Web 的端口：WEB_PORT 显式配置 > web/package.json 的 start 脚本 > 默认（中继隧道打它，peer 入口要避开它） */
+export function resolveWebPort(): number {
+  const env = Number(repoEnvVar("WEB_PORT"));
+  if (Number.isInteger(env) && env > 0) return env;
+  try {
+    const pkg = JSON.parse(readFileSync(`${REPO_ROOT}/web/package.json`, "utf8")) as { scripts?: { start?: string } };
+    return webPortFromStartScript(pkg.scripts?.start);
+  } catch {
+    return webPortFromStartScript(undefined); // web 没装：用默认端口，隧道请求会得到 local_unreachable，日志里看得到
+  }
 }
 
 /** 从 bridge 端口 + 1 往后找第一个空闲、且不是网页端口的（纯函数，tests/peer-ingress.test.ts） */
@@ -37,7 +51,7 @@ export function portBusy(listeners: { command: string; addr: string }[] | null, 
   return listeners ? listeners.length > 0 : tcpConnected;
 }
 
-/** .env 已配就沿用；否则挑一个空闲端口写进去 */
+/** .env 已配就沿用；否则挑一个空闲、不是网页端口的写进去（入口把回环来的请求当本机反代，中继隧道打的网页端口不能是它） */
 export async function ensurePeerIngressPort(bridgePort: number, webPort?: number, envPath = `${REPO_ROOT}/.env`): Promise<number | null> {
   const text = existsSync(envPath) ? await readFile(envPath, "utf8") : null;
   const cur = Number(parseEnvRaw(text ?? "").PEER_INGRESS_PORT || "");
@@ -62,7 +76,7 @@ export async function ensurePeerIngressPort(bridgePort: number, webPort?: number
  * null = 开不出来（附近端口全占 / 没有对外网卡），调用方退回 bridge 端口地址 + 只听本机的警告。
  */
 export async function openDirectPeerIngress(bridgePort: number, envPath = `${REPO_ROOT}/.env`): Promise<{ url: string; note: string } | null> {
-  const port = await ensurePeerIngressPort(bridgePort, undefined, envPath);
+  const port = await ensurePeerIngressPort(bridgePort, resolveWebPort(), envPath);
   const best = port ? detectBridgeUrls(port)[0] : undefined;
   if (!best) return null;
   const text = existsSync(envPath) ? await readFile(envPath, "utf8") : null;
