@@ -21,7 +21,10 @@ const add = (list: ChatMessage[], text: string, from?: string) => {
 const rows = (list: ChatMessage[]) => list.map((m) => `${m.from ?? "我"}:${m.content}`);
 const ownHist: ChatMessage = { id: "h1", role: "user", content: "执行发版" };
 const peerHist: ChatMessage = { id: "h2", role: "user", content: "执行发版", from: "peer-Sekai" };
-const bridgeIn = (data: Record<string, unknown>): BridgeEvent => ({ seq: 1, ts: "2026-09-30T00:00:00Z", chatId: "c", type: "chat_message", agent: "agent-a", data: { direction: "in", srcKind: "api", ...data } });
+const bridgeIn = (data: Record<string, unknown>): BridgeEvent => ({
+  seq: 1, ts: "2026-09-30T00:00:00Z", chatId: "c", type: "chat_message", agent: "agent-a",
+  data: { direction: "in", srcKind: "api", ...data },
+});
 
 describe("直播回声去重只在本人之间认", () => {
   test("外源重放 owner 最近的正文：各自成一条外源气泡，不被当成回声吞掉", () => {
