@@ -1516,7 +1516,7 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
       s.messages.push({
         id: `ru_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
         role: "user",
-        ...(shown === undefined ? liveUserText(text, s.messages, from) : liveAnswerText(text, shown, askId, s.messages)), // 回投 / 作答：人话 + 标已答，原文留 wire
+        ...(shown === undefined ? liveUserText(text, s.messages, from) : liveAnswerText(text, shown, askId, s.messages, from)), // 回投 / 作答：人话 + 标已答，原文留 wire
         ts: new Date().toISOString(),
         ...(from ? { from } : {}), ...(askId ? { askId } : {}), // askId：「待你处理」作答的引用条（features/asks/components/ask-quote.tsx）
         ...(attachments?.length ? { attachments } : {}),

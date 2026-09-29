@@ -154,8 +154,10 @@ function userMessage(m: NeutralMessage, anchor: ChatMessage | null, opts: ShapeO
   const cmd = from ? null : text.match(/^<command-name>(\/[\w-]+)<\/command-name>/);
   if (cmd) return systemDivider(m, cmd[1], opts.sid);
   const own = from ? text : stripMentionDirective(text); // @ 委托指令行只给 agent 看；只剥本人的（外源的末行照原样给 owner 看）
-  if (m.wire) markAnswerClicks(m.wire, anchor, forms); // 作答：正文已是人话，原文只用来回填已答态
-  const click = m.wire ? null : resolveUserClick(own, anchor, forms);
+  // 按钮 / 选单回投只认本人：外源正文里写一行 [button:go] / [select:…]，owner 会看到「✅ 发版」、表单被标已答，agent 收到的却是原文
+  // （T31，直播 delta-clicks.ts 同一道闸）。外源的回投照原文显示，不碰任何表单
+  if (m.wire && !from) markAnswerClicks(m.wire, anchor, forms); // 作答：正文已是人话，原文只用来回填已答态
+  const click = m.wire || from ? null : resolveUserClick(own, anchor, forms);
   // bridge 注入的来源头只由服务端按 channel 属性剥（lib/inbound-body.ts channelBodyText）；这里再按文本剥开头的 […]，
   // 外源写在开头的方括号块 owner 就看不到、agent 却照收，所以正文原样显示
   const { content, attachments } = extractAttachments(click?.text ?? own);
