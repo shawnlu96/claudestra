@@ -3369,8 +3369,7 @@ const server = Bun.serve({
           // 频道真的空了才清对抢记账（免得几小时后的零星重连跟旧记录凑成误报）；「被顶替」不算空，见 beingReplaced 的注释
           // 被顶替的不停 watcher：新连接沿用它（jsonl-watcher startWatching），停了再起会从文件末尾读、漏行
           const replaced = beingReplaced.delete(ws as unknown as object);
-          if (!replaced) contention.forget(channelId);
-          if (!replaced) stopWatchingByChannel(channelId); // 同步兜底：直接按 channelId 在 watcher Map 中查，避免依赖异步 runManager
+          if (!replaced) { contention.forget(channelId); stopWatchingByChannel(channelId); } // 停 watcher 是同步兜底：按 channelId 直接在 watcher Map 里查，不靠异步 runManager
           void import("./bridge/acp-link.js").then((m) => m.onAcpHostGone(channelId, ws)); // ACP 宿主断线：撤它挂着的权限卡（重连后宿主补发）
           console.log(`🔌 断开: 频道 ${channelId} (剩余 ${clients.size} 个)`);
         }
