@@ -131,3 +131,36 @@ describe("脱敏：按敏感字段名遮整段值（T48 P1-2）", () => {
     expect(redactForPeer(once.text)).toEqual({ text: once.text, count: 0 });
   });
 });
+
+describe("脱敏走最终派单正文：先对原文脱敏、再包「│ 」（T48 复验 P1）", () => {
+  const S = REDACTED.secret;
+  const hex32 = "5f0c9e2ab7d14c3f8e6a1b0d9c2e7f43";
+  // outer-codex 复验（台账 seq 2373）的三类：包过前缀之后缩进全成 0，续行就逃过了按字段名的扫描
+  const cases: [string, string, string[]][] = [
+    ["JSON 多行数组", `{"token": [\n  "${hex32}"\n]}\nnext: ok`, [`│ {"token": ${S}`, `│   ${S}`, "│ ]}", "│ next: ok"]],
+    ["YAML 值写在下一行", `token:\n  ${hex32}\nnext: ok`, ["│ token:", `│   ${S}`, "│ next: ok"]],
+    ["YAML 块标量", `token: |\n  ${hex32}\n  ${hex32}\nnext: ok`, ["│ token: |", `│   ${S}`, `│   ${S}`, "│ next: ok"]],
+  ];
+  const orders = (payload: string) => [
+    buildDispatchOrder({ ...base, step: "write", toPeer: true, spec: payload }),
+    buildDispatchOrder({ ...base, step: "fix", toPeer: true, report: payload }),
+  ];
+  test.each(cases)("%s：规格卡（写）和审查报告（修）两条路径都遮住、计数对", (_name, payload, expected) => {
+    for (const o of orders(payload)) {
+      expect(o.text).not.toContain(hex32);
+      expect(o.text).toContain(expected.join("\n"));
+      expect(o.redactions).toBe(1);
+      expect(o.text).toEndWith("本单脱敏 1 处。");
+    }
+  });
+  test("本机派单不脱敏，原文照样包前缀", () => {
+    const o = buildDispatchOrder({ ...base, spec: `token:\n  ${hex32}` });
+    expect(o).toMatchObject({ redactions: 0 });
+    expect(o.text).toContain(`│ token:\n│   ${hex32}`);
+  });
+  test("控制字符先规整再脱敏：制表符缩进的续行照样认得出", () => {
+    const o = buildDispatchOrder({ ...base, toPeer: true, spec: `token:\n\t${hex32}\r\nnext: ok` });
+    expect(o.text).not.toContain(hex32);
+    expect(o.text).toContain(`│ token:\n│  ${S}\n│ next: ok`);
+  });
+});
