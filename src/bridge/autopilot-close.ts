@@ -22,9 +22,12 @@ const iso = (ms: number) => new Date(ms).toISOString();
 
 /** 正在收尾的 run：同一个 run 的第二个 done（打断之后又来 Stop）不重复收 */
 const closing = new Set<string>();
-/** 收尾时写锁超时：证据留在这里，下一次到点（mission.ts fire）原样重试，不丢日志、也不让这个 run 被当成没投递放回去重投 */
-const pendingClose = new Map<string, RunEvidence>();
-export const pendingCloseOf = (runId: string): RunEvidence | undefined => pendingClose.get(runId);
+/**
+ * 收尾时写锁超时：证据留在这里，mission.ts closeAndNext 原样重试，不丢日志、也不让这个 run 被当成没投递放回去重投。
+ * 记账元信息一起留：证据取走时记账已经撤了，重试前换了一代就只能靠它给旧一代补那行日志。
+ */
+const pendingClose = new Map<string, { ev: RunEvidence; meta: { run: ActiveRun; missionId: string } | null }>();
+export const pendingCloseOf = (runId: string): RunEvidence | undefined => pendingClose.get(runId)?.ev;
 
 async function settle(agent: string, doneAt: number): Promise<void> {
   const end = doneAt + EVIDENCE.maxMs;
@@ -55,8 +58,9 @@ export async function closeRun(
   closing.add(runId);
   try {
     if (opts.afterDone !== undefined) await settle(agent, opts.afterDone);
-    const meta = peekTracked(agent, runId);
-    const ev = opts.ev ?? pendingClose.get(runId) ?? takeEvidence(agent, runId);
+    const pending = pendingClose.get(runId);
+    const meta = peekTracked(agent, runId) ?? pending?.meta ?? null;
+    const ev = opts.ev ?? pending?.ev ?? takeEvidence(agent, runId);
     // CC 撞墙：下次唤醒按闸的重置时刻排（出闸时 mission.ts 另行放行）。每次尝试都按当下重算：写锁超时重试时闸可能已经开了。
     // 闸在这一轮撞额度之后已经提前开了（用卡 / clear / 探测）：按出闸时刻排，别退回原文的重置时刻白押（T24 adv2 P2-5）
     const wall = missionOnClaudeCode(agent) ? quotaWall() : null;
@@ -79,7 +83,7 @@ export async function closeRun(
       else delete cur.resumeAt;
       return { m: { ...cur }, run, f };
     }, ctx.path, ctx.lockMs).catch((e) => {
-      pendingClose.set(runId, ev);
+      pendingClose.set(runId, { ev, meta });
       console.error(`⏱ Autopilot ${agent}: run ${runId} 收尾写入失败，下次到点重试:`, (e as Error).message);
       return undefined;
     });
@@ -90,6 +94,7 @@ export async function closeRun(
       return null;
     }
     const active = out.m.status === "active";
+    // 先落盘再追加日志：写锁超时重试时不会重复记一行。两次写之间有几毫秒，读的一方要等日志本身（tests/bridge-mission.test.ts）
     appendRunLog(runLogLine({
       missionId: out.m.id ?? "unknown", agent, run: out.run, outcome: cls.outcome, reason: cls.reason, evidence: ev, now,
       ...(active ? { next: { at: out.f.nextAt, why: out.f.next.why } } : {}),

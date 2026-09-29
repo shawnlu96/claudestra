@@ -85,6 +85,8 @@ export type WebStreamEvent =
       text: string;
       components?: WebComponentRow[];
       attachments?: { name: string; kind: "image" | "file"; url: string }[];
+      /** 这条 reply 建出的「待你处理」（bridge 出站事件带）：气泡按它认领 ask */
+      askId?: string;
     }
   /** 本轮结束。interrupted=被打断(手动停止/连发抢占)——标「⊘ 已打断」而非「✓ 完成」 */
   | { t: "done"; interrupted?: boolean; bgPending?: boolean }

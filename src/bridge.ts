@@ -720,7 +720,7 @@ async function deliverToApi(env: RouterEnvelope, to: RouterApiUserEndpoint): Pro
     agent: agentName,
     chatId: `api:${to.tokenId}`,
     type: "chat_message",
-    data: { direction: "out", from: agentName, text: env.content, threadId, api: true, ...(env.meta.components ? { components: env.meta.components, askId: env.meta.askId } : {}), ...(eventFiles.length ? { files: eventFiles } : {}) },
+    data: { direction: "out", from: agentName, text: env.content, threadId, api: true, ...(env.meta.components ? { components: env.meta.components } : {}), ...(env.meta.askId ? { askId: env.meta.askId } : {}), ...(eventFiles.length ? { files: eventFiles } : {}) },
   });
 
   // R2 审计镜像（fire-and-forget，走 bridge→user 的 UI 类通道）
@@ -1843,7 +1843,7 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
             files: msg.files,
           },
         };
-        const delivery = await (await import("./bridge/asks.js")).deliverReplyWithAsk(env, msg.chatId, fromChannelId, deliver); // 带选项发给 owner → 建「待你处理」
+        const delivery = await (await import("./bridge/ask-reply.js")).deliverReplyWithAsk(env, msg.chatId, fromChannelId, deliver, msg.ask); // 发给 owner → 建「待你处理」
         if (delivery.outcome.kind !== "sent") {
           const errMsg = delivery.outcome.kind === "dropped"
             ? `reply dropped: ${delivery.outcome.reason}`
@@ -1852,14 +1852,14 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
           break;
         }
         const ids = delivery.outcome.discordMessageIds || [];
-        ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, result: { messageIds: ids } }));
+        ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, result: { messageIds: ids, askId: env.meta.askId, askHash: env.meta.askHash } }));
 
         // v2.6.0+ 事件埋点：agent 的正式回复镜像（out）
         // api: 目的地跳过——deliverToApi 已统一埋点（带 threadId/api 标记），
         // 这里再发就是同一条回复的重复事件（web 前端会渲染两遍）。
         if (parseChatId(msg.chatId).transport !== "api") {
           const evAgent = agentLabelForChannel(fromChannelId);
-          emitEvent({ agent: evAgent, chatId: msg.chatId, type: "chat_message", data: { direction: "out", from: evAgent, text, threadId: env.meta.threadId, ...(msg.components ? { components: msg.components, askId: env.meta.askId } : {}) } });
+          emitEvent({ agent: evAgent, chatId: msg.chatId, type: "chat_message", data: { direction: "out", from: evAgent, text, threadId: env.meta.threadId, ...(msg.components ? { components: msg.components } : {}), ...(env.meta.askId ? { askId: env.meta.askId } : {}) } });
         }
 
         // v1.9.21+ send_to_agent 推回机制：

@@ -21,6 +21,7 @@ import { projectJsonlPath, findJsonlBySessionId } from "./jsonl-cost.js";
 import { agentArchiveDir, ARCHIVE_ROOT, realpathWithin } from "./session-archive.js";
 import { channelBodyText, commandRecordLine, commandStdoutLine } from "./inbound-body.js";
 import { sanitizeComponents } from "./history-components.js";
+import { askIdOfReplyResult } from "./reply-ask-schema.js";
 
 /** 超过此字节数的 session jsonl 走尾读(见 readSessionHistory)。与搜索同阈值。 */
 const MAX_HISTORY_FULL_READ_BYTES = 16 * 1024 * 1024;
@@ -127,6 +128,8 @@ export interface HistoryMessage {
   replyComponents?: ReplyComponentRow[];
   /** reply() 附带的出站附件文件名（basename;取回走 inbox 后缀匹配兜底） */
   replyFiles?: string[];
+  /** 这条 reply 建出的「待你处理」（从 reply 的 tool_result 解析）：网页按 id 认领，不按时间猜 */
+  replyAskId?: string;
   /** 回合耗时 ms(system/turn_duration 回填)——只有正常收尾的回合才有 */
   turnMs?: number;
   /** compact 产生的摘要条目（不是真实用户输入） */
@@ -503,8 +506,9 @@ function parseHistoryLines(
   runtime?: string,
 ): HistoryMessage[] {
   const all: HistoryMessage[] = [];
-  // tool_use id → 工具卡：后续 user 记录里的 tool_result(is_error) 回填失败态
+  // tool_use id → 工具卡 / reply 气泡：后续 user 记录里的 tool_result 回填失败态、建出的 askId
   const toolById = new Map<string, HistoryToolCall>();
+  const replyById = new Map<string, HistoryMessage>();
   // v2.21.4 队列附件去重:同一条入站消息若另有 user(isMeta) 记录,以 user 记录为准
   const seenChannelIds = collectChannelMessageIds(lines);
 
@@ -541,15 +545,12 @@ function parseHistoryLines(
 
     if (rec.type === "user") {
       const c = rec.message?.content;
-      // tool_result 的 is_error 回填到对应工具卡（web 标红失败的调用）。
-      // 回填不影响本条 user 记录自身的过滤逻辑，继续走原流程。
-      if (Array.isArray(c)) {
-        for (const b of c) {
-          if (b?.type === "tool_result" && b.tool_use_id && b.is_error === true) {
-            const tc = toolById.get(b.tool_use_id);
-            if (tc) tc.error = true;
-          }
-        }
+      // tool_result 回填：is_error → 工具卡标红；reply 的 → 气泡记下建出的 askId。不影响本条 user 记录自身的过滤，继续走原流程
+      for (const b of Array.isArray(c) ? c : []) {
+        const tc = b?.type === "tool_result" ? toolById.get(b.tool_use_id) : undefined;
+        if (tc && b.is_error === true) tc.error = true;
+        const rm = b?.type === "tool_result" ? replyById.get(b.tool_use_id) : undefined;
+        if (rm) rm.replyAskId = askIdOfReplyResult(b) ?? rm.replyAskId;
       }
       const text =
         typeof c === "string"
@@ -609,6 +610,7 @@ function parseHistoryLines(
       const replyTexts: string[] = [];
       const replyComponents: ReplyComponentRow[] = [];
       const replyFiles: string[] = [];
+      const replyIds: string[] = [];
       const tools: HistoryToolCall[] = [];
       const progress: string[] = [];
       for (const b of content) {
@@ -621,17 +623,13 @@ function parseHistoryLines(
           // 直播能看到、进历史就没了）。这样历史与直播都渲染同一份 reply。
           if (isReplyTool(b.name) && typeof b.input?.text === "string" && b.input.text.trim()) {
             replyTexts.push(b.input.text);
+            if (typeof b.id === "string" && b.id) replyIds.push(b.id);
             // reply 附带的按钮/选单也进历史（否则用户不在直播那刻就看不到按钮）
             replyComponents.push(...sanitizeComponents(b.input?.components));
-            // 出站附件（agent 发给用户的图/文件）：jsonl 里是绝对路径,取 basename
-            // ——bridge 投递时已拷贝到 inbox（时间戳前缀）,取回走后缀匹配兜底
-            if (Array.isArray(b.input?.files)) {
-              for (const f of b.input.files) {
-                if (typeof f === "string" && f.trim()) {
-                  const base = f.trim().split("/").pop();
-                  if (base) replyFiles.push(base);
-                }
-              }
+            // 出站附件（agent 发给用户的图/文件）：jsonl 里是绝对路径,取 basename——bridge 投递时已拷贝到 inbox（时间戳前缀）,取回走后缀匹配兜底
+            for (const f of Array.isArray(b.input?.files) ? b.input.files : []) {
+              const base = typeof f === "string" ? f.trim().split("/").pop() : "";
+              if (base) replyFiles.push(base);
             }
           } else {
             const tc: HistoryToolCall = { name: b.name, summary: fmt(b.name, b.input) };
@@ -651,6 +649,7 @@ function parseHistoryLines(
       if (replyComponents.length) msg.replyComponents = replyComponents;
       Object.assign(msg, replyFiles.length ? { replyFiles } : {}, tools.length ? { tools } : {});
       if (typeof rec.message?.model === "string") msg.model = rec.message.model;
+      for (const id of replyIds) replyById.set(id, msg);
       all.push(msg);
     }
   }

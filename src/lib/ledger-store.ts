@@ -6,6 +6,7 @@
 import { Database } from "bun:sqlite";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
+import { ASKS_REQUIRED_COLUMNS, migrateAsksV2 } from "./ledger-asks-schema.js";
 import type { DepKind, DepState, LedgerDep } from "./ledger-deps.js";
 import type { AssigneeKind, EventKind, LedgerEvent, LedgerItem, LedgerTask } from "./ledger-stages.js";
 import { SCHEMA_AUDIT } from "./ledger-audit-schema.js";
@@ -126,7 +127,7 @@ function migrateDeps(db: Database): void {
 /** 一步迁移：一组单条 SQL（逐条 prepare().run()），或要先查现状的函数（如加列）。别写成一段多语句字符串交给 exec */
 type Migration = readonly string[] | ((db: Database) => void);
 /** 下标 i 把库从版本 i 升到 i+1；新迁移只往末尾追加（并行分支后合的一方排到后面即可，常量都由下标算） */
-export const LEDGER_MIGRATIONS: readonly Migration[] = [SCHEMA_V1, migrateAsks, migrateDeps, SCHEMA_AUDIT];
+export const LEDGER_MIGRATIONS: readonly Migration[] = [SCHEMA_V1, migrateAsks, migrateDeps, SCHEMA_AUDIT, migrateAsksV2];
 const MIGRATIONS = LEDGER_MIGRATIONS;
 /** PRAGMA user_version 的最新值 */
 export const LEDGER_SCHEMA_VERSION = MIGRATIONS.length;
@@ -217,12 +218,12 @@ export function schemaVersion(db: Database): number {
 const REQUIRED_COLUMNS: Record<string, readonly string[]> = {
   tasks: ["assigneeKind", "assignee"],
   task_deps: ["project", "fromTask", "toTask", "kind", "cond", "state", "rev", "createdBy"],
-  asks: ["id", "project", "fromAgent", "source", "kind", "state", "options", "answer", "expiresAt", "extra"],
+  asks: ASKS_REQUIRED_COLUMNS,
   audit_findings: ["key", "project", "rule", "resolvedAt", "notify", "notifiedAt", "queuedAs", "changedAt"],
 };
 /** 迁移完必须在的索引，按所属表：同名索引先建在别的表上时 CREATE INDEX IF NOT EXISTS 会静默跳过，只核名字查不出来 */
 const REQUIRED_INDEXES: Record<string, readonly string[]> = {
-  asks: ["asks_state_project", "asks_from_state"],
+  asks: ["asks_state_project", "asks_from_state", "asks_assignee_state", "asks_key_state"],
   task_deps: ["task_deps_to", "task_deps_project"],
   audit_findings: ["audit_findings_open", "audit_findings_changed"],
 };

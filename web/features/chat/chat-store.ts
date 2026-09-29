@@ -18,7 +18,7 @@ import { isDuplicateSend, type LastSend } from "./send-dedupe";
 import {
   isHistoryBubble,
   coveredByCursor,
-  mergeContiguousAssistant, dropCoveredDelta,
+  mergeContiguousAssistant, dropCoveredDelta, splitsReplyBubble,
   historyHasReply,
   type RecordSrc,
 } from "./live-merge";
@@ -1925,11 +1925,7 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
     return !!text.trim() && historyHasReply(this.state.messages, text);
   }
 
-  public setReplyText(
-    text: string,
-    components?: WebComponentRow[],
-    attachments?: { name: string; kind: "image" | "file"; url: string }[]
-  ) {
+  public setReplyText(text: string, components?: WebComponentRow[], attachments?: { name: string; kind: "image" | "file"; url: string }[], askId?: string) {
     this.flushPendingText(); // reply 段插入前先落缓冲的叙述文本
     // 看着时收到回复 = 已读(2026-09-16 未读功能):服务端刚为这条 +1,立刻归零,
     // 否则自己眼前的回复会在其它设备(和 15s 后的本机列表)上标成未读
@@ -1949,9 +1945,9 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
       if (this.state.replying) this.produce((s) => { s.replying = false; });
       return;
     }
-    // 回合边界上的 reply（他端触发、纯 reply 无叙述）另起气泡，不并进上一回合；
-    // 历史气泡（h 前缀）同样不并——理由见 ensureLiveAssistant
-    if (last && last.role === "assistant" && !isHistoryBubble(last) && !this.nextBubbleBoundary) {
+    // 回合边界上的 reply（他端触发、纯 reply 无叙述）另起气泡，不并进上一回合；历史气泡（h 前缀）同样不并——理由见 ensureLiveAssistant；
+    // 带按钮的 reply 一泡只放一条（splitsReplyBubble）
+    if (last && last.role === "assistant" && !isHistoryBubble(last) && !this.nextBubbleBoundary && !splitsReplyBubble(last, text, components)) {
       this.produce((s) => {
         s.replying = false; // 回复已到,「正在回复…」收场
         const m = s.messages[s.messages.length - 1];
@@ -1960,8 +1956,9 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
         // reply 作为段按时间序入列（reply 后叙述可能还在继续，钉底会时间倒挂）
         m.segments = m.segments ?? [];
         m.segments.push({ kind: "reply", text, ts: new Date().toISOString() });
-        // 组件挂到承载 reply 的气泡；一条 reply 多段拼接时后到的组件覆盖（通常只一组）
+        // 组件挂到承载 reply 的气泡（带按钮的 reply 一泡只有一条，见上）；askId = 它建出的「待你处理」，气泡按它认领（use-reply-ask）
         if (hasComp) m.replyComponents = components;
+        if (askId) m.replyAskId = askId;
         // agent 出站附件（发图给用户）——多段 reply 各自的附件累积
         if (hasAtts) m.attachments = [...(m.attachments ?? []), ...attachments!];
         s.awaitingChunk = false;
@@ -1980,6 +1977,7 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
           segments: [{ kind: "reply", text, ts: new Date().toISOString() }],
           ...(hasComp ? { replyComponents: components } : {}),
           ...(hasAtts ? { attachments } : {}),
+          ...(askId ? { replyAskId: askId } : {}),
           streamed,
           ts: new Date().toISOString(),
         });
