@@ -14,6 +14,13 @@ describe("messagesOnlyAllows", () => {
     expect(messagesOnlyAllows("GET", "/api/v1/threads/thr_1_abc")).toBe(true);
     expect(messagesOnlyAllows("get", "/api/v1/agents")).toBe(true);
   });
+  test("委托卡的台账接口也放行（只碰委托给它的卡，权限在接口里判）", () => {
+    expect(messagesOnlyAllows("GET", "/api/v1/peer-ledger")).toBe(true);
+    expect(messagesOnlyAllows("GET", "/api/v1/peer-ledger/tasks/T46")).toBe(true);
+    expect(messagesOnlyAllows("POST", "/api/v1/peer-ledger/tasks/T46")).toBe(true);
+    expect(messagesOnlyAllows("POST", "/api/v1/peer-ledger")).toBe(false);
+    expect(messagesOnlyAllows("DELETE", "/api/v1/peer-ledger/tasks/T46")).toBe(false);
+  });
   test("历史、事件流、打断、别的方法和畸形路径都拒", () => {
     for (const [m, p] of [
       ["GET", "/api/v1/agents/claudestra/history"],

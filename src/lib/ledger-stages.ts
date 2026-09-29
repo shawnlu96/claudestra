@@ -10,8 +10,12 @@ export type Stage = (typeof STAGES)[number];
 export const TASK_KINDS = ["code", "investigate", "ops"] as const;
 export type TaskKind = (typeof TASK_KINDS)[number];
 
-export const ROLES = ["executor", "pm", "master", "owner"] as const;
+/** peer = 跨实例委托的受托方（actor "peer:<名>"，只经 peer 台账接口写；lib/peer-ledger.ts） */
+export const ROLES = ["executor", "pm", "master", "owner", "peer"] as const;
 export type Role = (typeof ROLES)[number];
+
+/** PM / master / owner：能改负责人、记完成检查、推任意合法阶段的那一档 */
+export const isManagerRole = (r: Role | null): boolean => r === "pm" || r === "master" || r === "owner";
 
 export const ITEM_STATUSES = ["todo", "decide", "design", "doing", "done", "dropped"] as const;
 export type ItemStatus = (typeof ITEM_STATUSES)[number];
@@ -126,6 +130,18 @@ const EXECUTOR_MOVES: readonly (readonly [Stage, Stage])[] = [
   ["fix", "review"],
 ];
 
+/**
+ * 受托方（peer）能推的：接了（spec→restate→build）、PR 开了 / 改完了（build / fix→review），以及合并前的阶段进出 blocked。
+ * merge 及以后、cancelled、回退改规格都不给——那些是发起方 PM 的事。
+ */
+const PEER_WORK_STAGES: readonly Stage[] = ["spec", "restate", "build", "review", "fix"];
+const PEER_MOVES: readonly (readonly [Stage, Stage])[] = [["spec", "restate"], ["restate", "build"], ["build", "review"], ["fix", "review"]];
+function peerMayMove(task: TransitionTask, to: Stage): boolean {
+  if (to === "blocked") return PEER_WORK_STAGES.includes(task.stage);
+  if (task.stage === "blocked") return !!task.stageBefore && PEER_WORK_STAGES.includes(task.stageBefore) && to === task.stageBefore;
+  return PEER_MOVES.some(([from, dest]) => from === task.stage && dest === to);
+}
+
 /** 这种 kind 的任务会不会停在这个阶段（跳转表里有出边的阶段 + 终态）；blocked 不算，它缺 stageBefore 就回不去 */
 export function isStageOfKind(kind: TaskKind, stage: Stage): boolean {
   // 用 hasOwn 不用 in：in 会把 toString 这类原型键也当成阶段
@@ -157,6 +173,7 @@ function legality(task: TransitionTask, to: Stage): TransitionCheck {
 export function canTransition(task: TransitionTask, to: Stage, role: Role): TransitionCheck {
   const legal = legality(task, to);
   if (!legal.ok) return legal;
+  if (role === "peer") return peerMayMove(task, to) ? { ok: true } : { ok: false, code: "forbidden", reason: `受托方只能推接活、交付和进出 blocked，${task.stage}→${to} 要发起方 PM 推` };
   if (role !== "executor") return { ok: true };
   const allowed = EXECUTOR_MOVES.some(([from, dest]) => from === task.stage && dest === to);
   return allowed ? { ok: true } : { ok: false, code: "forbidden", reason: `执行者只能推 spec→restate、build/fix→review，${task.stage}→${to} 要 PM 推` };
@@ -183,7 +200,8 @@ export function nextTaskState(task: TaskStageState, to: Stage): Pick<LedgerTask,
  * actor 在这个任务上的角色。PM 只认项目 PM 名单（只有 owner 能设）——task.pm 是展示字段，算进来就能 setTask 自封 PM。
  * 名单优先于执行者（ops 任务 PM 自做时 agent 是 PM 自己）。"master" / "owner" 按名字认，身份推导（T8b）必须保留这两个名字。
  */
-export function roleOf(actor: string, task: Pick<LedgerTask, "agent">, pms: readonly string[]): Role | null {
+export function roleOf(actor: string, task: Pick<LedgerTask, "agent"> & { extra?: Record<string, unknown> }, pms: readonly string[]): Role | null {
+  if (actor.startsWith("peer:")) return samePeer(delegatePeerOf(task, "delegate"), actor.slice(5)) ? "peer" : null;
   if (actor === "master" || actor === "owner") return actor;
   if (pms.includes(actor)) return "pm";
   if (task.agent === actor) return "executor";
@@ -194,3 +212,18 @@ export function roleOf(actor: string, task: Pick<LedgerTask, "agent">, pms: read
 export function endStages(kind: TaskKind): Stage[] {
   return kind === "investigate" ? ["done", "cancelled"] : ["verified", "done", "cancelled"];
 }
+
+/**
+ * 跨实例委托：extra.delegate（执行方）/ extra.reviewer（审查方）写成 "<agent>@<peer>"，返回 @ 后的 peer 名。
+ * token 只认得出 peer 不认得出那边哪个 agent，所以权限只按 peer 判（docs/team/peer-delegation.md）。
+ */
+export function delegatePeerOf(task: { extra?: Record<string, unknown> }, field: "delegate" | "reviewer"): string | null {
+  const v = task.extra?.[field];
+  if (typeof v !== "string") return null;
+  const at = v.lastIndexOf("@");
+  const peer = at > 0 ? v.slice(at + 1).trim() : "";
+  return peer || null;
+}
+
+/** peer 名比较不分大小写（peers.json 里名字唯一，send_to_agent 的地址写法也不分） */
+export const samePeer = (a: string | null, b: string): boolean => !!a && !!b && a.toLowerCase() === b.toLowerCase();

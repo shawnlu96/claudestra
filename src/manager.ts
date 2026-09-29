@@ -2773,6 +2773,7 @@ switch (cmd) {
   }
   case "peer-http-remove": await cmdPeerHttpRemove(args[0] || ""); break;
   case "peer-http-messages-only": await (await import("./manager/peers.js")).cmdPeerHttpMessagesOnly(args[0] || "", args[1] || ""); break;
+  case "peer-ledger": await (await import("./manager/peer-ledger-cli.js")).cmdPeerLedger(args); break;
   case "peer-http-tidy": await (await import("./manager/peers-tidy.js")).cmdPeerHttpTidy(args.includes("--apply")); break;
 
   // v2.15+ 一键邀请（免回执自动握手）

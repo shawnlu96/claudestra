@@ -22,6 +22,7 @@ import { VERIFY_CMD } from "./ledger-verify.js";
 import { READ_CMDS } from "./ledger-read-cmds.js";
 import { TEAM_CMDS } from "./ledger-team-cmds.js";
 import { WRITE_CMDS, type CommandSpec } from "./ledger-write-cmds.js";
+import { PEER_CMDS } from "./ledger-peer.js";
 import { isWriteInvocation } from "./write-commands.js";
 
 /** 认不出身份时读命令用的 actor：不是 registry 键、不在任何 PM 名单里，roleOf 恒为 null */
@@ -35,6 +36,7 @@ const COMMANDS: Record<string, CommandSpec> = {
   ...READ_CMDS,
   verify: VERIFY_CMD,
   ...AUDIT_CMDS,
+  ...PEER_CMDS,
   import: { valued: ["map", "project"], bools: ["dry-run"], usage: "import <ledger.json> --map <map.json> [--project <id>] [--dry-run]（owner 一次性迁移；映射里的 pms 只在 PM 名单为空时写入）", run: importCmd },
 };
 
