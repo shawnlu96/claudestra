@@ -51,8 +51,10 @@ export function formatResetTs(v: unknown): string {
   return `${d.getMonth() + 1}/${d.getDate()} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
+// 四舍五入但不凑满：99.5% 显示成 100 会被额度闸当成撞墙（还剩 0.5% 就把全机的 agent 消息押住），只有真到 100 才是 100。
+// 超过 100 是 CC 承认的正常值（撞墙那一下冲过线，状态栏报「5h 101%」）：截成 100，跟 quota-dto 的 pctOf 一致；丢成 null 闸就看不见满
 const pct = (v: unknown): number | null =>
-  typeof v === "number" && Number.isFinite(v) && v >= 0 && v <= 100 ? Math.round(v) : null;
+  typeof v === "number" && Number.isFinite(v) && v >= 0 ? (v < 100 ? Math.min(99, Math.round(v)) : 100) : null;
 
 /** 解析 + 新鲜度校验(纯函数,单测)。不新鲜/形态不对返回 null。 */
 export function parseUsageCache(

@@ -1,0 +1,24 @@
+
+ ▐▛███▛█   Claude Code v2.1.283
+▝▜██████▀  Opus 5.5 with xhigh effort · Claude Max
+ ▝▝   ▝▝   /private/tmp/cs-t35/work
+
+▎ Channels (experimental) messages from server:claudestra inject directly in
+▎ this session · restart without --dangerously-load-development-channels to stop
+
+
+
+
+
+
+────────────────────────────────────────────────────────────────────────────────
+❯ draft line 4
+  draft line 5
+  draft line 6
+  draft line 7
+  ────────────────────────────────
+  draft line 9
+  draft line 10
+────────────────────────────────────────────────────────────────────────────────
+  Opus 5.5 · 5h 43% · 7d 47%
+  ⏵⏵ bypass permissions on (shift+tab to cycle)

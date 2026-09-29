@@ -96,6 +96,10 @@ export interface DropBody {
   agent: string;
 }
 /** 预览：content 就是 agent 会收到的原文（含 Web 用户抬头），确认时回传 sha，中间内容变了 bridge 回 409 */
+/** 粘贴外部文字交给 agent（T50）：bridge 生成正文、整段按外部文本包好，以我的身份投；忙就进押后队列 */
+export function pasteExternal(b: { agent: string; text: string; source?: string }): Promise<{ ok: boolean; state: "sent" | "held"; messageId: string }> {
+  return api("/talk/paste", { method: "POST", json: b, timeoutMs: 15_000 });
+}
 export function previewDrop(b: DropBody): Promise<{ ok: boolean; content: string; sha: string; agent: string }> {
   return api("/talk/drops/preview", { method: "POST", json: b, timeoutMs: 15_000 });
 }

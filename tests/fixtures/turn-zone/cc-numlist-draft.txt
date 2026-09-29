@@ -1,0 +1,30 @@
+
+ ▐▛███▛█   Claude Code v2.1.283
+▝▜██████▀  Opus 5.5 (1M context) · API Usage Billing
+ ▝▝   ▝▝   /Users/me/work
+
+
+
+
+
+
+
+
+
+
+
+
+                                                         ctrl+g to edit in Vim
+────────────────────────────────────────────────────────────────────────────────
+❯ 4. step number 4 of the plan                                                  
+  5. step number 5 of the plan                                                  
+  6. step number 6 of the plan                                                  
+  7. step number 7 of the plan                                                  
+  8. step number 8 of the plan                                                  
+  9. step number 9 of the plan                                                  
+  10. step number 10 of the plan                                                
+  11. step number 11 of the plan                                                
+  12. step number 12 of the plan                                                
+  done.                            
+────────────────────────────────────────────────────────────────────────────────
+  ⏵⏵ bypass permissions on (shift+tab to cycle)               

@@ -10,6 +10,7 @@ import { ASKS_REQUIRED_COLUMNS, migrateAsksV2 } from "./ledger-asks-schema.js";
 import type { DepKind, DepState, LedgerDep } from "./ledger-deps.js";
 import type { AssigneeKind, EventKind, LedgerEvent, LedgerItem, LedgerTask } from "./ledger-stages.js";
 import { SCHEMA_AUDIT } from "./ledger-audit-schema.js";
+import { STEPS_SCHEMA } from "./ledger-steps.js";
 import { toTeam, type TeamConfig } from "./ledger-team-config.js";
 import { statePath } from "./paths.js";
 import { runMigrations, type SchemaSpec } from "./sqlite-migrate.js";
@@ -17,7 +18,7 @@ import { runMigrations, type SchemaSpec } from "./sqlite-migrate.js";
 export { schemaVersion } from "./sqlite-migrate.js";
 
 export const LEDGER_PATH = statePath("ledger.sqlite");
-export const LEDGER_TABLES = ["items", "tasks", "events", "meta", "asks", "task_deps", "audit_findings", "audit_baseline"] as const;
+export const LEDGER_TABLES = ["items", "tasks", "events", "meta", "asks", "task_deps", "audit_findings", "audit_baseline", "task_steps"] as const;
 /** 另一个进程持有写锁时最多等这么久，再报 SQLITE_BUSY */
 const BUSY_TIMEOUT_MS = 5000;
 /** 切 WAL 时每次尝试只等这么久，总时长由 ensureWal 的退避循环控制在 BUSY_TIMEOUT_MS 内 */
@@ -129,7 +130,7 @@ function migrateDeps(db: Database): void {
 }
 
 /** 下标 i 把库从版本 i 升到 i+1；新迁移只往末尾追加（并行分支后合的一方排到后面即可，常量都由下标算）。执行规矩见 sqlite-migrate.ts */
-export const LEDGER_MIGRATIONS: SchemaSpec["migrations"] = [SCHEMA_V1, migrateAsks, migrateDeps, SCHEMA_AUDIT, migrateAsksV2];
+export const LEDGER_MIGRATIONS: SchemaSpec["migrations"] = [SCHEMA_V1, migrateAsks, migrateDeps, SCHEMA_AUDIT, migrateAsksV2, STEPS_SCHEMA];
 /** PRAGMA user_version 的最新值 */
 export const LEDGER_SCHEMA_VERSION = LEDGER_MIGRATIONS.length;
 /** 建出 audit_findings 的那一步之后的版本号（单测拿它 - 1 造「巡检之前」的库） */
@@ -217,12 +218,14 @@ const REQUIRED_COLUMNS: Record<string, readonly string[]> = {
   task_deps: ["project", "fromTask", "toTask", "kind", "cond", "state", "rev", "createdBy"],
   asks: ASKS_REQUIRED_COLUMNS,
   audit_findings: ["key", "project", "rule", "resolvedAt", "notify", "notifiedAt", "queuedAs", "changedAt"],
+  task_steps: ["taskId", "step", "round", "executor", "executorKind", "state", "headFrom", "headTo", "verdict", "verified", "claims", "rev"],
 };
 /** 迁移完必须在的索引，按所属表：同名索引先建在别的表上时 CREATE INDEX IF NOT EXISTS 会静默跳过，只核名字查不出来 */
 const REQUIRED_INDEXES: Record<string, readonly string[]> = {
   asks: ["asks_state_project", "asks_from_state", "asks_assignee_state", "asks_key_state"],
   task_deps: ["task_deps_to", "task_deps_project"],
   audit_findings: ["audit_findings_open", "audit_findings_changed"],
+  task_steps: ["task_steps_executor"],
 };
 
 const LEDGER_SCHEMA: SchemaSpec = { label: "台账库", migrations: LEDGER_MIGRATIONS, tables: LEDGER_TABLES, columns: REQUIRED_COLUMNS, indexes: REQUIRED_INDEXES };

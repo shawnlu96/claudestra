@@ -48,6 +48,15 @@ const ship = (sha: string | null, from?: "build" | "fix") => {
   if (sha) head = sha;
   deliver(db, { actor: "agent-exec", now: 2 }, { taskId: "T1", ...(sha ? { headSHA: sha } : {}), moveFrom: from });
 };
+/**
+ * review 里交付新 head 现在一律拒（ledger-steps-write.ts checkReviewHead）；修之前留下的数据里可能有（同一轮的 deliver 事件带新 head）。
+ * 临时把阶段改掉再交付来造这种老数据，钉住合并门这层兜底
+ */
+const legacySwap = (sha: string) => {
+  db.prepare("UPDATE tasks SET stage = 'fix' WHERE id = 'T1'").run();
+  ship(sha);
+  db.prepare("UPDATE tasks SET stage = 'review' WHERE id = 'T1'").run();
+};
 const events = () => listEvents(db, { target: "T1" });
 const round = () => getTask(db, "T1")?.round ?? 0;
 const policy = () => specPolicyOf(getTask(db, "T1") as never, docs);
@@ -81,10 +90,11 @@ describe("派审记录按轮次 + head 绑定", () => {
     expect(getTask(db, "T1")?.stage).toBe("review");
   });
 
-  test("S2：同一轮派了对抗式之后在 review 里重新交付了新 head，没审过的 head 不能 --to merge", async () => {
+  test("S2：同一轮派了对抗式之后 head 换了（review 里交付新 head 已拒，这里是老数据），没审过的 head 不能 --to merge", async () => {
     ship("aaaa1111", "build");
     await run("agent-disp", "dispatch", "T1", "--adversarial");
-    ship("cccc3333");
+    expect(await run("agent-exec", "deliver", "T1", "--head", "cccc3333")).toMatchObject({ ok: false, code: "conflict" });
+    legacySwap("cccc3333");
     expect((await run("agent-disp", ...verdict("pass", "merge"))).code).toBe("conflict");
     // 对新 head 重新派对抗式，判通过就放行
     expect((await run("agent-disp", "dispatch", "T1", "--adversarial")).event.data.head).toBe("cccc3333");
@@ -101,12 +111,12 @@ describe("派审记录按轮次 + head 绑定", () => {
     expect(owesAdversarial(policy(), events(), round())).toBe(true);
     await run("agent-disp", "dispatch", "T1");
     expect((await run("agent-disp", ...verdict("pass", "merge"))).code).toBe("conflict");
-    // task-set 换 head 也算换了：执行者改 --head 不能继承旧的对抗式 pass
+    // 审过之后执行者想 task-set 换 head 继承旧的对抗式 pass：review 里直接拒，head 不动、pass 仍然只对审过的那个
     await run("agent-disp", "dispatch", "T1", "--adversarial");
     await run("agent-disp", ...verdict("pass"));
     expect(owesAdversarial(policy(), events(), round())).toBe(false);
-    await run("agent-exec", "task-set", "T1", "--rev", String(getTask(db, "T1")?.rev), "--head", "eeee5555");
-    expect(owesAdversarial(policy(), events(), round())).toBe(true);
+    expect(await run("agent-exec", "task-set", "T1", "--rev", String(getTask(db, "T1")?.rev), "--head", "eeee5555")).toMatchObject({ ok: false, code: "conflict" });
+    expect(getTask(db, "T1")?.headSHA).toBe("dddd4444");
   });
 });
 
@@ -115,7 +125,7 @@ describe("PM 豁免：review --waive adversarial --text <理由>", () => {
     ship("aaaa1111", "build");
     await run("agent-disp", "dispatch", "T1", "--adversarial");
     await run("agent-disp", ...verdict("pass"));
-    ship("ffff6666");
+    legacySwap("ffff6666");
     const waive = (who: string, ...extra: string[]) => run(who, ...verdict("pass", "merge", "--waive", "adversarial", ...extra));
     expect((await waive("agent-disp", "--text", "增量只改了注释")).code).toBe("forbidden");
     expect((await waive("agent-pm")).code).toBe("invalid");
@@ -336,19 +346,19 @@ describe("进了 merge 之后不能换成没审过的 head（adv1 P1-3）", () =
     head = "bbbb2222";
     const r = await run("agent-exec", "deliver", "T1", "--head", "bbbb2222", "--text", "小修");
     expect(r).toMatchObject({ ok: false, code: "conflict" });
-    expect(r.error).toContain("先由 PM 退回 review");
+    expect(r.error).toContain("先由 PM 退回 fix");
     expect(getTask(db, "T1")).toMatchObject({ stage: "merge", headSHA: "aaaa1111" });
     expect(owesAdversarial(policy(), events(), round())).toBe(false);
   });
 
-  test("PM 也一样拒；同一个 head、不带 head 的交付照收；PM 退回 review 之后新 head 照常交付、重新欠对抗式", async () => {
+  test("PM 也一样拒；同一个 head、不带 head 的交付照收；PM 退回 fix 之后新 head 照常交付、重新欠对抗式", async () => {
     await toMerge();
     expect(await run("agent-pm", "deliver", "T1", "--head", "bbbb2222")).toMatchObject({ ok: false, code: "conflict" });
     expect((await run("agent-exec", "deliver", "T1", "--head", "aaaa1111", "--text", "补证据")).ok).toBe(true);
     expect((await run("agent-exec", "deliver", "T1", "--text", "人工节点")).ok).toBe(true);
-    expect((await run("agent-pm", "stage", "T1", "--from", "merge", "--to", "review")).task.stage).toBe("review");
+    expect((await run("agent-pm", "stage", "T1", "--from", "merge", "--to", "fix")).task.stage).toBe("fix");
     head = "bbbb2222";
-    expect((await run("agent-exec", "deliver", "T1", "--head", "bbbb2222")).task.headSHA).toBe("bbbb2222");
+    expect((await run("agent-exec", "deliver", "T1", "--from", "fix", "--head", "bbbb2222")).task.headSHA).toBe("bbbb2222");
     expect(owesAdversarial(policy(), events(), round())).toBe(true);
   });
 

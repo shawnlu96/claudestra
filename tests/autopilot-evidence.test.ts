@@ -87,6 +87,13 @@ describe("撞额度 / 报错", () => {
     onAutopilotEvent(evt("w", "api_error_turn", { error: "rate_limit" }));
     expect(takeEvidence("w", "r1").rateLimitText).toContain("weekly limit");
   });
+  test("同是 rate_limit 的临时限流（事件带原文）→ failed，不当撞额度（T24a 常规审查）", () => {
+    track("w", "r1");
+    const text = "API Error: Server is temporarily limiting requests (not your usage limit) · Rate limited";
+    onAutopilotEvent(evt("w", "api_error_turn", { error: "rate_limit", text }));
+    onAutopilotEvent(evt("w", "assistant_text", { text, apiError: true }));
+    expect(classifyRun(takeEvidence("w", "r1"))).toMatchObject({ outcome: "failed" });
+  });
   test("其它 API 报错 → failed", () => {
     track("w", "r1");
     onAutopilotEvent(evt("w", "api_error_turn", { error: "overloaded_error" }));

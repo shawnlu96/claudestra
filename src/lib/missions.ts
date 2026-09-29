@@ -6,6 +6,7 @@
 import { randomBytes } from "node:crypto";
 import type { AutopilotFields } from "./autopilot-wake.js";
 import { acquireLock } from "./file-lock.js";
+import { agentRuntime, readRegistryAgentsSync } from "./registry.js";
 import { statePath } from "./paths.js";
 import { readJsonLenient, writeJsonStateGuarded } from "./state-file.js";
 
@@ -139,4 +140,9 @@ export function nudgeText(m: Mission, kind: NudgeKind, now: number, doneCmd: str
     `- 全部做完时执行 \`${doneCmd} "<一句话总结>"\`，Autopilot 就此结束。`,
   );
   return lines.join("\n");
+}
+
+/** 这个 mission 的 agent 跑在 Claude Code 上（master 也是）：额度闸只管 CC，Codex / Pi 有自己的额度，不跟着 CC 的闸排唤醒 */
+export function missionOnClaudeCode(agent: string): boolean {
+  return agent === "master" || agentRuntime(readRegistryAgentsSync().find((a) => missionKey(a.name) === agent)) === "claude-code";
 }
