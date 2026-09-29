@@ -44,6 +44,7 @@ export const PRINCIPALS_WRITE_COMMANDS: ReadonlySet<string> = new Set([
 /** 读写混合的命令族：只有这些子命令算写（其余 list/get/presets/status 是读） */
 const WRITE_SUBCOMMANDS: Record<string, ReadonlySet<string>> = {
   permissions: new Set(["set", "reset"]),
+  team: new Set(["up", "down"]), // 只写提案文件；真正改台账在 owner 确认后由 bridge 执行
   perm: new Set(["set", "reset"]),
   perms: new Set(["set", "reset"]),
   effort: new Set(["set", "reset", "all"]),
@@ -51,8 +52,8 @@ const WRITE_SUBCOMMANDS: Record<string, ReadonlySet<string>> = {
   model: new Set(["set", "reset", "all"]),
 };
 
-/** ledger 的读子命令；其余都写台账（备机上也要过认主守卫）。meta 只有带 --pms / --docs-dir / --team / --dispatcher 才写 */
-const LEDGER_READ_SUBS: ReadonlySet<string> = new Set(["", "help", "whoami", "show", "export", "review-pack", "deps"]);
+/** ledger 的读子命令；其余都写台账（备机上也要过认主守卫）。meta 只有带 --pms（写提案）/ --docs-dir 才写，--team / --dispatcher 会被拒，也按写算 */
+const LEDGER_READ_SUBS: ReadonlySet<string> = new Set(["", "help", "whoami", "show", "export", "review-pack", "deps", "ask-check"]);
 /**
  * ledger 里拿命令级写锁的子命令：task-new / task-set 会写 registry；import 不碰 registry，拿锁只为让一次性迁移与 create / restart 等命令错开，
  * 不影响台账本身的正确性（整批一个 IMMEDIATE 事务）。其余 ledger 写只写 sqlite，不排在 restart 这类长写后面。
@@ -87,6 +88,7 @@ export function isWriteInvocation(cmd: string | undefined, args: readonly string
   if (cmd === "takeover") return takeoverWrites(args);
   if (cmd === "repair") return args.includes("--apply"); // 不带 --apply 只列计划
   const sub = args[0] ?? "";
+  if (cmd === "codex-sub-archive") return sub === "on" || sub === "off"; // 写 config.json；status 是读
   const subs = WRITE_SUBCOMMANDS[cmd];
   if (subs) return subs.has(sub);
   if (cmd === "auto-update") return !AUTO_UPDATE_READ_SUBS.has(sub);

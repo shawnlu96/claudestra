@@ -5,8 +5,8 @@
  * 规则：先按当前阶段定默认的一环，再按进入当前阶段之后的事件往后推：
  *   deliver → 调度助理（没配就是 PM）；dispatch → 审查员；review 没带阶段移动 → 通过归 PM、否则回调度助理，
  *   但通过了而还欠对抗式（owesAdversarial：规格卡要对抗式，当前 head 上还没有对抗式 pass 或 PM 豁免）仍归调度助理；
- *   策略只取调用方读的规格卡（specPolicy），读不到、或说不清这轮是谁审的（没有对得上轮次与 head 的派审）= 不知道，也归调度助理；
- *   escalate → PM（data.to = owner 时归 owner）；升级给 owner 之后 owner 记了 decision → 回到 PM。进入新阶段（stage 事件）重新从默认值算起。
+ *   策略取调用方读的规格卡（specPolicy）和派审记录里更严的，读不到、或说不清这轮是谁审的（没有对得上轮次与 head 的派审）= 不知道，也归调度助理；
+ *   escalate → PM（data.to = owner 时归 owner；硬规则的自动升级 data.auto 不改处理人）；升级给 owner 之后 owner 记了 decision → 回到 PM。进入新阶段（stage 事件）重新从默认值算起。
  */
 import type { LedgerEvent, LedgerTask, Stage } from "./ledger-stages.js";
 import { nextReview, type LastReview, type NextReview } from "./review-pack.js";
@@ -127,9 +127,10 @@ export interface PendingReview {
 /**
  * 还欠不欠对抗式（第 round 轮 = 任务当前轮次）。路由、currentHandler、`review --to merge` 共用这一个判定：
  * 还清的条件见 settles——对抗式 pass / 豁免只对它那一轮、那个 head 有效；正要记的 pending 判通过，且这一轮最后一次交付之后
- * 派的是对抗式（或带豁免），也算还清。策略只认规格卡（lib/task-spec.ts）：读不到、或提到对抗式却读不出「审查：」= unknown。
+ * 派的是对抗式（或带豁免），也算还清。策略取规格卡（lib/task-spec.ts）和派审记录里更严的（strictPolicy）：都读不到、或提到对抗式却读不出「审查：」= unknown。
  */
-export function owesAdversarial(policy: SpecPolicy, events: readonly LedgerEvent[], round: number, pending?: PendingReview): boolean | "unknown" {
+export function owesAdversarial(spec: SpecPolicy, events: readonly LedgerEvent[], round: number, pending?: PendingReview): boolean | "unknown" {
+  const policy = strictPolicy(spec, events);
   if (events.some((e) => settles(e, events, round))) return false;
   if (pending?.verdict === "pass" && (pending.waive === "adversarial" || dispatchKindFor(events, Infinity, round) === "adversarial")) return false;
   if (policy === undefined) return "unknown";
@@ -137,10 +138,21 @@ export function owesAdversarial(policy: SpecPolicy, events: readonly LedgerEvent
 }
 
 /**
+ * 规格卡和本任务派审事件记下的策略（dispatch data.policy）取更严的：派审时卡上要对抗式，事后把卡改松不算数，
+ * 否则改一行规格卡就能让常规 pass 进 merge（tests/ledger-merge-gate.test.ts）。卡上已经要对抗式、或没有派审记录要过，原样返回
+ */
+export function strictPolicy<P extends SpecPolicy>(spec: P, events: readonly LedgerEvent[]): P | string {
+  if (spec?.includes("对抗")) return spec;
+  const recorded = events.find((e) => e.kind === "dispatch" && typeof e.data.policy === "string" && e.data.policy.includes("对抗"));
+  return recorded ? String(recorded.data.policy) : spec;
+}
+
+/**
  * 这条 review 之后下一轮是什么；null = 审查走完（nextReview，与 review-pack 同一算法）。
  * pass 时：还清了（或不要对抗式）= 走完；还欠而这轮没有对得上的派审记录（说不清它是不是对抗式）、或读不到策略 = unknown，交调度助理核对。
  */
-export function nextAfterReview(review: LedgerEvent, events: readonly LedgerEvent[], specPolicy: SpecPolicy): NextReview | "unknown" {
+export function nextAfterReview(review: LedgerEvent, events: readonly LedgerEvent[], spec: SpecPolicy): NextReview | "unknown" {
+  const specPolicy = strictPolicy(spec, events);
   const last = lastReviewOf(review, events);
   if (last.verdict !== "pass") return specPolicy === undefined ? "unknown" : nextReview(specPolicy, last);
   const owes = owesAdversarial(specPolicy, events.filter((e) => e.seq <= review.seq), num(review.data.round));
@@ -159,6 +171,8 @@ function roleAfter(e: LedgerEvent, cur: HandlerRole, events: readonly LedgerEven
     case "review":
       return e.data.verdict === "pass" && nextAfterReview(e, events, specPolicy) === null ? "pm" : "dispatcher";
     case "escalate":
+      // 硬规则的自动升级只是抄送 PM，任务仍在原处理人手上（比如 P0 推回 fix 后仍是执行者在修）
+      if (e.data.auto === true) return null;
       return e.data.to === "owner" ? "owner" : "pm";
     case "decision":
       // 等 owner 拍板时，owner（或 PM 转录的 owner 原话）一记 decision 就回到 PM 去执行

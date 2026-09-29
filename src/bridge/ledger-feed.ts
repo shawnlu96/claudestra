@@ -4,6 +4,7 @@
  * 轮询懒启动：第一条能读台账的 /api/v1/events 连接建过滤器时起，之后常驻——没人能收 ledger 事件时不查库，
  * 也不用往 bridge.ts（热点在上限）加启动行。单测经 setLedgerFeedForTest 换库路径、换 emit，并手动 tick。
  */
+import { askWhoOf, canSeeAsk } from "../lib/ask-access.js";
 import { canReadLedger } from "../lib/devices.js";
 import { LedgerReader, ledgerFeedTicker } from "../lib/ledger-read.js";
 import { agentInScope, type Principal } from "../lib/principals.js";
@@ -35,7 +36,8 @@ function ensureLedgerFeed(): void {
 }
 
 /**
- * /api/v1/events 的逐条过滤：ledger / ask 事件只给 canReadLedger，其余照旧按 agentInScope（"*" 不含 master、peer 永不含 master）。
+ * /api/v1/events 的逐条过滤：ledger 事件只给 canReadLedger；ask 事件按 lib/ask-access.ts canSeeAsk（和列表、推送同一个判定：
+ * 指给自己的 guest 也收得到）；其余照旧按 agentInScope（"*" 不含 master、peer 永不含 master）。
  * 能读台账的连接顺带把轮询起起来。types（?types=ask,ledger）：只要这几类——侧栏「待你处理」开一条只收 ask 的轻量流，不背全量工具事件。
  */
 export function sseEventAllow(principal: Principal, types?: string[]): (evt: BridgeEvent) => boolean {
@@ -45,8 +47,8 @@ export function sseEventAllow(principal: Principal, types?: string[]): (evt: Bri
   return (evt) => {
     if (onlyTypes && !onlyTypes.has(evt.type)) return false;
     if (evt.type === "ledger") return ledger;
-    // ask 事件：台账的门，外加发起方在 scope 里（大总管的 ask 只给含 master 的凭据，和 ask-entry.ts 的 canSeeAsk 同口径）
-    return evt.type === "ask" ? ledger && agentInScope(principal, evt.agent) : agentInScope(principal, evt.agent);
+    if (evt.type === "ask") return canSeeAsk(principal, askWhoOf(evt.data, evt.agent));
+    return agentInScope(principal, evt.agent);
   };
 }
 

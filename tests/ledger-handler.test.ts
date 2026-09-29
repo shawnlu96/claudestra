@@ -41,6 +41,9 @@ describe("currentHandler", () => {
     expect(h()).toMatchObject({ role: "reviewer", agent: null, since: 50 });
     recordReview(db, owner(60), { taskId: "T1", reviewer: "regular", verdict: "changes", p0: 0, p1: 1, p2: 0, move: { from: "review", to: "fix" } });
     expect(h()).toMatchObject({ role: "executor", since: 60 });
+    // 硬规则的自动升级只抄送 PM，执行者仍在修
+    appendEvent(db, { actor: "bridge-rule", now: 65 }, { project: "p", target: "T1", kind: "escalate", text: "P0", data: { to: "pm", auto: true } });
+    expect(h()).toMatchObject({ role: "executor", since: 60 });
   });
 
   test("review 没推阶段：pass（规格卡不要对抗式）→ PM，changes → 调度助理；escalate → PM / owner", () => {

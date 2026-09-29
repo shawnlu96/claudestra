@@ -6,21 +6,22 @@
  *   review 且推到 merge / done / spec，或通过、审查走完但没推阶段 → PM（「可以合并」只在真推到 merge 时说）；
  *   通过了但下一轮还要审（nextReview，与 review-pack 同一算法、同一份规格卡）→ 调度助理（没配就 PM）「常规轮通过，下一轮：对抗式」；
  *   读不到规格卡、或规格卡要对抗式而台账里没有对抗式 pass、这轮也没有派审记录（不知道）→ 同样交调度助理核对，不说「审查走完」
- *   review 出 P0，或第 HARD_ROUND 轮还不通过 → PM 另收一条【升级】（硬规则写死在这里，不靠调度助理判断）
  *   escalate               → PM
+ * 硬规则（review 出 P0，或第 HARD_ROUND 轮还不通过）写死在 autoEscalations：bridge 据此调 `ledger escalate --auto` 记一条升级，
+ * 不靠调度助理判断；那条 escalate 事件下一轮照上面的规则通知 PM。
  * 收件人就是写这条事件的人时不发；没开班子的项目、开班子之前的事件一律不管；该发却找不到 PM 时经 ctx.warn 留日志。
  * 标题行与【升级】这类判定词只由代码按事件类型 / verdict 生成；台账里的自由文本（交付说明、升级原因、审查要点）只进固定标题的
  * 引用框（quoteExternal 单行引用），证据 / 结论路径同样进引用框：通知以 bridge 身份送达，不能让原文伪造指令。
  */
 import { nextAfterReview, pmOf, type SpecPolicy } from "./ledger-handler.js";
-import { pathQuote, quoteExternal, refLike } from "./quote-text.js";
+import { pathLike, pathQuote, quoteExternal, refLike } from "./quote-text.js";
 import type { LedgerEvent, LedgerTask, Stage } from "./ledger-stages.js";
 import type { TeamConfig } from "./ledger-team-config.js";
 
 /** 同一任务审到第几轮还不通过就自动升级给 PM（07c 第 1 节） */
 const HARD_ROUND = 3;
 
-type NoticeKind = "deliver" | "review-fix" | "review-pm" | "review-next" | "hard-rule" | "escalate";
+type NoticeKind = "deliver" | "review-fix" | "review-pm" | "review-next" | "escalate";
 
 export interface RouteNotice {
   seq: number;
@@ -120,25 +121,26 @@ function reviewNotices(e: LedgerEvent, task: LedgerTask, team: TeamConfig, pm: s
     const what = move ? PM_MOVES[move] : "审查走完（还停在 review，等 PM 推阶段）";
     out.push({ to: pm, kind: "review-pm", text: [`${head}\n→ ${what}`, ...reviewBody(e)].join("\n") });
   }
-  const p0 = num(e.data.p0) > 0;
-  const stuck = num(e.data.round) >= HARD_ROUND && e.data.verdict !== "pass";
-  if ((p0 || stuck) && !pm) ctx.warn?.(`${task.id} 触发硬规则升级，但项目 ${task.project} 找不到 PM（名单为空、任务上也没记）`);
-  if (pm && (p0 || stuck) && !out.some((n) => n.to === pm)) {
-    const why = p0 ? "审出 P0" : `第 ${num(e.data.round)} 轮还不通过`;
-    out.push({ to: pm, kind: "hard-rule", text: [`【升级】${tid(task.id)}：${why}（硬规则，自动通知）`, head, ...reviewBody(e)].join("\n") });
-  }
   return out;
 }
 
 function escalateText(e: LedgerEvent, task: LedgerTask | null): string {
   const owner = e.data.to === "owner" ? "（需要 owner 拍板）" : "";
-  return [`【升级】${task ? tid(task.id) : "项目级"}${owner}（${e.actor} 提出）`, ...quoted("升级原因", e.text)].join("\n");
+  const who = e.data.auto === true ? "硬规则，自动升级" : `${e.actor} 提出`;
+  return [`【升级】${task ? tid(task.id) : "项目级"}${owner}（${who}）`, ...quoted("升级原因", e.text)].join("\n");
+}
+
+/** 开了班子、且在开班子之后写的事件才管 */
+function teamOf(e: LedgerEvent, ctx: RouteCtx): ReturnType<RouteCtx["team"]> | null {
+  const t = ctx.team(e.project);
+  return t.team && e.seq > t.team.sinceSeq ? t : null;
 }
 
 /** 一条事件的通知（还没套上 messageId）；escalate 可以是项目级（target 为空），其余只看任务事件 */
 function draftsFor(e: LedgerEvent, batch: readonly LedgerEvent[], ctx: RouteCtx): Draft[] {
-  const { pms, team } = ctx.team(e.project);
-  if (!team || e.seq <= team.sinceSeq) return [];
+  const t = teamOf(e, ctx);
+  if (!t?.team) return [];
+  const { pms, team } = t;
   const task = e.target ? ctx.task(e.target) : null;
   const handlerTeam = { pms, dispatcher: team.dispatcher };
   const pm = pmOf(task ?? { pm: null }, handlerTeam);
@@ -161,6 +163,35 @@ export function routeEvents(batch: readonly LedgerEvent[], ctx: RouteCtx): Route
       if (d.to === e.actor) continue;
       out.push({ ...d, seq: e.seq, project: e.project, taskId: e.target, messageId: `ledger-${e.seq}-${d.to}` });
     }
+  }
+  return out;
+}
+
+export interface AutoEscalation {
+  seq: number;
+  taskId: string;
+  reason: string;
+  /** 同一条 review 只升级一次（bridge 重启、重跑都不重复记） */
+  dedup: string;
+}
+
+/**
+ * 硬规则：review 出 P0，或第 HARD_ROUND 轮起还不通过 → 自动升级给 PM。
+ * 结论就是 PM 自己记的（没配调度助理时常见）不升级：升级事件记在 bridge-rule 名下，绕过「写事件的人不收通知」，会给 PM 发一条自己的事。
+ */
+export function autoEscalations(batch: readonly LedgerEvent[], ctx: RouteCtx): AutoEscalation[] {
+  const out: AutoEscalation[] = [];
+  for (const e of batch) {
+    const t = e.kind === "review" && e.target ? teamOf(e, ctx) : null;
+    if (!t?.team) continue;
+    const task = ctx.task(e.target);
+    if (task && e.actor === pmOf(task, { pms: t.pms, dispatcher: t.team.dispatcher })) continue;
+    const round = num(e.data.round);
+    const why = num(e.data.p0) > 0 ? `第 ${round} 轮审出 P0（${num(e.data.p0)} 个）` : round >= HARD_ROUND && e.data.verdict !== "pass" ? `第 ${round} 轮还不通过` : null;
+    const path = str(e.data.path);
+    // 原因只用台账里的计数和路径拼，不带审查要点原文（原文进 escalate 通知时还要再引用一层）
+    const reason = why && pathLike(path) ? `${why}；结论：${path}` : why;
+    if (reason) out.push({ seq: e.seq, taskId: e.target, reason, dedup: `auto-escalate:${e.seq}` });
   }
   return out;
 }

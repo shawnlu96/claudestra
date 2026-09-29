@@ -51,12 +51,10 @@ import {
   discordDeleteChannel,
   moveChannelRequest,
 } from "./bridge/discord-api.js";
-import {
-  runManager,
-  buildStatusPanel,
-  handleMgmtButton,
-  handleMgmtSelect,
-} from "./bridge/management.js";
+import { runManager, buildStatusPanel, handleMgmtOrTeamButton, handleMgmtSelect } from "./bridge/management.js";
+import { postProposalCard } from "./bridge/team-confirm.js";
+import { reservedButtonRefusal } from "./lib/reserved-buttons.js";
+import { editOwnerRefusal, noteReplySent } from "./bridge/edit-guard.js";
 import { runtimeForSessionPath, sessionJsonlPath, translateSessionLine } from "./lib/session-source.js";
 import { resolveSessionIdForWindow } from "./lib/cc-sessions.js";
 import { startWatching, stopWatching, stopWatchingByChannel, resetToolTracking, hasRecentScheduleWakeup, agentNameForChannel, formatTool } from "./bridge/jsonl-watcher.js";
@@ -581,12 +579,12 @@ import {
 } from "./bridge/discord-adapter.js";
 
 /**
- * v2.0.0+ 统一消息投递入口。所有 bridge 的出入站消息（messageCreate 路由 /
- * reply / send_to_agent / pushback）都走这一个函数。
- * 内部按 to.kind 派发（local ws inject / user discord send / api resolve），
- * 状态追踪 + @ mention / header 渲染全在一处管。
+ * v2.0.0+ 统一消息投递入口。所有 bridge 的出入站消息（messageCreate 路由 / reply / send_to_agent / pushback）都走这一个函数。
+ * 内部按 to.kind 派发（local ws inject / user discord send / api resolve），状态追踪 + @ mention / header 渲染全在一处管。
  */
 async function deliver(env: RouterEnvelope): Promise<RouterDelivery> {
+  const refused = reservedButtonRefusal(env.from, env.content, env.meta.components); // 保留按钮只许 bridge 自己发（lib/reserved-buttons.ts）
+  if (refused) return { envelope: env, outcome: { kind: "dropped", reason: refused } };
   // 0. intent-aware 预处理：response 消息先清对应 pending
   if (env.intent === "response" && env.meta.inReplyTo) {
     for (const [key, p] of pendingReplies.entries()) {
@@ -712,7 +710,7 @@ async function deliverToApi(env: RouterEnvelope, to: RouterApiUserEndpoint): Pro
     agent: agentName,
     chatId: `api:${to.tokenId}`,
     type: "chat_message",
-    data: { direction: "out", from: agentName, text: env.content, threadId, api: true, ...(env.meta.components ? { components: env.meta.components, askId: env.meta.askId } : {}), ...(eventFiles.length ? { files: eventFiles } : {}) },
+    data: { direction: "out", from: agentName, text: env.content, threadId, api: true, ...(env.meta.components ? { components: env.meta.components } : {}), ...(env.meta.askId ? { askId: env.meta.askId } : {}), ...(eventFiles.length ? { files: eventFiles } : {}) },
   });
 
   // R2 审计镜像（fire-and-forget，走 bridge→user 的 UI 类通道）
@@ -1646,7 +1644,7 @@ registerInteractionHandlers(discord, {
   scheduleClearRotation,
   runManager,
   buildStatusPanel,
-  handleMgmtButton,
+  handleMgmtButton: handleMgmtOrTeamButton, // 编排班子提案按钮先截（bridge/team-confirm.ts）
   handleMgmtSelect,
 });
 
@@ -1673,8 +1671,7 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
 
   switch (msg.type) {
     case "ping": {
-      // v2.2.0+: keepalive。收到本身就重置了 Bun 的 ws idleTimeout；回个 pong
-      // 让 channel-server 那侧的 idle 也重置。无需其它处理。
+      // v2.2.0+: keepalive。收到本身就重置了 Bun 的 ws idleTimeout；回个 pong 让 channel-server 那侧的 idle 也重置，无需其它处理。
       try { ws.send(JSON.stringify({ type: "pong" })); } catch { /* non-critical */ }
       return;
     }
@@ -1865,7 +1862,7 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
             files: msg.files,
           },
         };
-        const delivery = await (await import("./bridge/asks.js")).deliverReplyWithAsk(env, msg.chatId, fromChannelId, deliver); // 带选项发给 owner → 建「待你处理」
+        const delivery = await (await import("./bridge/ask-reply.js")).deliverReplyWithAsk(env, msg.chatId, fromChannelId, deliver, msg.ask); // 发给 owner → 建「待你处理」
         if (delivery.outcome.kind !== "sent") {
           const errMsg = delivery.outcome.kind === "dropped"
             ? `reply dropped: ${delivery.outcome.reason}`
@@ -1873,15 +1870,15 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
           ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, error: errMsg }));
           break;
         }
-        const ids = delivery.outcome.discordMessageIds || [];
-        ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, result: { messageIds: ids } }));
+        const ids = noteReplySent(delivery.outcome.discordMessageIds || [], fromChannelId); // edit_message 只准改自己发的（bridge/edit-guard.ts）
+        ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, result: { messageIds: ids, askId: env.meta.askId, askHash: env.meta.askHash } }));
 
         // v2.6.0+ 事件埋点：agent 的正式回复镜像（out）
         // api: 目的地跳过——deliverToApi 已统一埋点（带 threadId/api 标记），
         // 这里再发就是同一条回复的重复事件（web 前端会渲染两遍）。
         if (parseChatId(msg.chatId).transport !== "api") {
           const evAgent = agentLabelForChannel(fromChannelId);
-          emitEvent({ agent: evAgent, chatId: msg.chatId, type: "chat_message", data: { direction: "out", from: evAgent, text, threadId: env.meta.threadId, ...(msg.components ? { components: msg.components, askId: env.meta.askId } : {}) } });
+          emitEvent({ agent: evAgent, chatId: msg.chatId, type: "chat_message", data: { direction: "out", from: evAgent, text, threadId: env.meta.threadId, ...(msg.components ? { components: msg.components } : {}), ...(env.meta.askId ? { askId: env.meta.askId } : {}) } });
         }
 
         // v1.9.21+ send_to_agent 推回机制：
@@ -2064,6 +2061,8 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
           ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, error: `edit_message 仅支持 Discord 会话（收到 ${dest.transport}: 前缀地址），API 会话的消息发出后不可编辑，需更正就再 reply 一条。` }));
           break;
         }
+        const notOwner = editOwnerRefusal(String(msg.messageId ?? ""), [...clients].find(([, i]) => i.ws === ws)?.[0] ?? "");
+        if (notOwner) throw new Error(notOwner);
         await discordEditMessage(discord, dest.id, msg.messageId, msg.text);
         ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, result: { ok: true } }));
       } catch (err) {
@@ -2186,6 +2185,7 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
     }
 
     case "move_channel": ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, ...(await moveChannelRequest(discord, WEB_ONLY, msg)) })); break;
+    case "team_proposal_post": ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, ...(await postProposalCard(String(msg.id ?? ""), deliver)) })); break;
     case "check_inbox": ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, ...(await takeInbox(ws, Date.now(), inboxOpts(msg))) })); break;
 
     case "project_info": {

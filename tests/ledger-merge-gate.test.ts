@@ -4,7 +4,7 @@
  * 上一轮的派审顶不了这一轮、派审之后换了 head 不算审过、对抗式 pass 只对它审的那个 head 有效。
  */
 import type { Database } from "bun:sqlite";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { beforeEach, describe, expect, test } from "bun:test";
@@ -321,5 +321,116 @@ describe("`dispatch:` 幂等键前缀只给派审用", () => {
     }
     const d = await run("agent-disp", "dispatch", "T1");
     expect(d).toMatchObject({ ok: true, duplicate: false, event: { dedupKey: key } });
+  });
+});
+
+describe("进了 merge 之后不能换成没审过的 head（adv1 P1-3）", () => {
+  const toMerge = async () => {
+    ship("aaaa1111", "build");
+    await run("agent-disp", "dispatch", "T1", "--adversarial");
+    expect((await run("agent-disp", ...verdict("pass", "merge"))).task.stage).toBe("merge");
+  };
+
+  test("执行者 deliver --head <新> 被拒（task-set --head 本来就拒），台账 head 不变；报错指向 PM 退回 review", async () => {
+    await toMerge();
+    head = "bbbb2222";
+    const r = await run("agent-exec", "deliver", "T1", "--head", "bbbb2222", "--text", "小修");
+    expect(r).toMatchObject({ ok: false, code: "conflict" });
+    expect(r.error).toContain("先由 PM 退回 review");
+    expect(getTask(db, "T1")).toMatchObject({ stage: "merge", headSHA: "aaaa1111" });
+    expect(owesAdversarial(policy(), events(), round())).toBe(false);
+  });
+
+  test("PM 也一样拒；同一个 head、不带 head 的交付照收；PM 退回 review 之后新 head 照常交付、重新欠对抗式", async () => {
+    await toMerge();
+    expect(await run("agent-pm", "deliver", "T1", "--head", "bbbb2222")).toMatchObject({ ok: false, code: "conflict" });
+    expect((await run("agent-exec", "deliver", "T1", "--head", "aaaa1111", "--text", "补证据")).ok).toBe(true);
+    expect((await run("agent-exec", "deliver", "T1", "--text", "人工节点")).ok).toBe(true);
+    expect((await run("agent-pm", "stage", "T1", "--from", "merge", "--to", "review")).task.stage).toBe("review");
+    head = "bbbb2222";
+    expect((await run("agent-exec", "deliver", "T1", "--head", "bbbb2222")).task.headSHA).toBe("bbbb2222");
+    expect(owesAdversarial(policy(), events(), round())).toBe(true);
+  });
+
+  const rev = () => String(getTask(db, "T1")?.rev);
+
+  test("PM 在 merge 阶段 task-set 换成不同的 head 也拒；只补 --pr / --branch、写入相同的 head 照常放行（adv2 P2-1）", async () => {
+    await toMerge();
+    expect(await run("agent-pm", "task-set", "T1", "--rev", rev(), "--head", "ffff6666")).toMatchObject({ ok: false, code: "conflict" });
+    expect((await run("agent-pm", "task-set", "T1", "--rev", rev(), "--pr", "169", "--branch", "task/t1")).ok).toBe(true);
+    expect((await run("agent-pm", "task-set", "T1", "--rev", rev(), "--head", "aaaa1111", "--pr", "170")).ok).toBe(true);
+    expect(getTask(db, "T1")).toMatchObject({ stage: "merge", headSHA: "aaaa1111", pr: "170", branch: "task/t1" });
+  });
+
+  test("merge → blocked 期间换 head：deliver / task-set 都按 merge 拒；绕过去换了的（修之前留下的数据）回 merge 时被合并门拦下（adv2 P1）", async () => {
+    await toMerge();
+    expect((await run("agent-pm", "stage", "T1", "--from", "merge", "--to", "blocked")).ok).toBe(true);
+    head = "dddd4444";
+    expect(await run("agent-exec", "deliver", "T1", "--head", "dddd4444")).toMatchObject({ ok: false, code: "conflict" });
+    expect(await run("agent-exec", "task-set", "T1", "--rev", rev(), "--head", "dddd4444")).toMatchObject({ ok: false, code: "forbidden" });
+    expect(await run("agent-exec", "task-set", "T1", "--rev", rev(), "--branch", "task/x")).toMatchObject({ ok: false, code: "forbidden" });
+    expect(await run("agent-pm", "task-set", "T1", "--rev", rev(), "--head", "dddd4444")).toMatchObject({ ok: false, code: "conflict" });
+    expect(getTask(db, "T1")?.headSHA).toBe("aaaa1111");
+    ship("dddd4444");
+    const back = await run("agent-pm", "stage", "T1", "--from", "blocked", "--to", "merge");
+    expect(back).toMatchObject({ ok: false, code: "conflict" });
+    expect(back.error).toContain("--from blocked --to review");
+    expect(getTask(db, "T1")?.stage).toBe("blocked");
+  });
+
+  /** 出口（PM 定 ①）：之前在 merge 的 blocked 退回 review（round+1），再派审或 PM 豁免 */
+  const unblockToReview = async () => {
+    await toMerge();
+    await run("agent-pm", "stage", "T1", "--from", "merge", "--to", "blocked");
+    ship("dddd4444");
+    expect(await run("agent-exec", "stage", "T1", "--from", "blocked", "--to", "review")).toMatchObject({ ok: false, code: "forbidden" });
+    expect((await run("agent-pm", "stage", "T1", "--from", "blocked", "--to", "review")).task).toMatchObject({ stage: "review", round: 2 });
+    expect(owesAdversarial(policy(), events(), round())).toBe(true);
+  };
+
+  test("出口：merge → blocked → review（round+1）→ 派对抗式 → pass → merge", async () => {
+    await unblockToReview();
+    expect((await run("agent-disp", ...verdict("pass", "merge"))).code).toBe("conflict");
+    expect((await run("agent-disp", "dispatch", "T1", "--adversarial")).event.data.reviewer).toBe("adversarial");
+    expect((await run("agent-disp", ...verdict("pass", "merge"))).task).toMatchObject({ stage: "merge", headSHA: "dddd4444", round: 2 });
+  });
+
+  test("出口：merge → blocked → review → PM --waive → merge", async () => {
+    await unblockToReview();
+    const w = await run("agent-pm", ...verdict("pass", "merge", "--waive", "adversarial", "--text", "只改了 CI 配置"));
+    expect(w.task).toMatchObject({ stage: "merge", headSHA: "dddd4444" });
+  });
+
+  test("merge → blocked → merge，head 没动：照常放行", async () => {
+    await toMerge();
+    await run("agent-pm", "stage", "T1", "--from", "merge", "--to", "blocked");
+    expect((await run("agent-exec", "deliver", "T1", "--head", "aaaa1111", "--text", "等 CI")).ok).toBe(true);
+    expect((await run("agent-pm", "stage", "T1", "--from", "blocked", "--to", "merge")).task.stage).toBe("merge");
+  });
+});
+
+describe("策略取规格卡和派审记录里更严的（adv1 P2-3）", () => {
+  const regularPassAfterAdvDispatchPolicy = async () => {
+    ship("aaaa1111", "build");
+    expect((await run("agent-disp", "dispatch", "T1")).event.data.policy).toContain("对抗");
+    await run("agent-disp", ...verdict("pass"));
+  };
+
+  test("派审时卡上要对抗式，之后把卡改成一轮：常规 pass 仍不能 --to merge，再派审仍选对抗式", async () => {
+    await regularPassAfterAdvDispatchPolicy();
+    spec("# T1\n- 审查：Claude 审查员一轮\n");
+    expect(owesAdversarial(policy(), events(), round())).toBe(true);
+    expect((await run("agent-disp", ...verdict("pass", "merge"))).code).toBe("conflict");
+    const d = await run("agent-disp", "dispatch", "T1");
+    expect(d.event.data).toMatchObject({ reviewer: "adversarial" });
+    expect(d.event.data.policy).toContain("对抗");
+    expect((await run("agent-disp", ...verdict("pass", "merge"))).task.stage).toBe("merge");
+  });
+
+  test("规格卡被删掉：派审记录里记过要对抗式，闸门照样拦", async () => {
+    await regularPassAfterAdvDispatchPolicy();
+    unlinkSync(join(docs, "tasks", "T1.md"));
+    expect((await run("agent-disp", ...verdict("pass", "merge"))).code).toBe("conflict");
+    expect(handler()?.role).toBe("dispatcher");
   });
 });

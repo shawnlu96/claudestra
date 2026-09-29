@@ -7,10 +7,12 @@ import type { Database } from "bun:sqlite";
 import type { SnapshotSources } from "../lib/ledger-audit-snapshot.js";
 import { roleOf, type LedgerTask, type Role } from "../lib/ledger-stages.js";
 import { getItem, getMeta, getTask, LedgerError } from "../lib/ledger-store.js";
+import { isRealPmRole } from "../lib/ledger-team-config.js";
 import type { FactsDeps } from "../lib/ledger-verify-facts.js";
 import type { ProjectDef } from "../lib/projects.js";
 import type { WriteCtx } from "../lib/ledger-write.js";
 import type { Registry } from "./core.js";
+import type { ProposeOpts } from "./team-up.js";
 import type { ParsedArgs } from "./ledger-identity.js";
 
 export interface LedgerDeps {
@@ -26,6 +28,8 @@ export interface LedgerDeps {
   now(): number;
   /** dispatch 核对 head 用；不给 = 真跑 git（单测注入） */
   gitHead?(dir: string): string | null;
+  /** 班子提案（meta --pms、team-apply）存哪、按钮怎么贴；不给 = 状态目录 + 真贴按钮（单测注入） */
+  proposals?: ProposeOpts;
   /** 完成检查单的事实采集（gh / git / 进程）；不给就用真实的（lib/ledger-verify-facts.ts），测试注入假的 */
   factsDeps?(): FactsDeps;
   /** projects.json 的项目清单（verify 按目录判断任务所属项目是否拥有本仓库）；不给按拥有算 */
@@ -78,8 +82,7 @@ export class LedgerCli {
 
   /** 真正的 PM：名单里除了班子调度助理以外的人，或 master / owner（调度助理也在 PM 名单里，PM 专属的出口不能交给它） */
   isRealPm(project: string): boolean {
-    const r = this.role(project);
-    return r === "master" || r === "owner" || (r === "pm" && getMeta(this.db, project).team?.dispatcher !== this.deps.actor);
+    return isRealPmRole(this.role(project), this.deps.actor, getMeta(this.db, project).team);
   }
 
   requireRealPm(project: string, what: string): void {

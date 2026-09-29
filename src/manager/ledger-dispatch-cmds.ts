@@ -13,8 +13,9 @@ import { getEventByDedup, getMeta, LedgerError, listEvents } from "../lib/ledger
 import { appendEvent } from "../lib/ledger-write.js";
 import { STATE_DIR, statePath, TMUX_SOCK } from "../lib/paths.js";
 import { readTextSoft, specPathFor } from "../lib/task-spec.js";
-import { lastReviewOf } from "../lib/ledger-handler.js";
+import { lastReviewOf, strictPolicy } from "../lib/ledger-handler.js";
 import { buildReviewPack, nextReview, reviewPolicy, type PrevReview, type ReviewPack } from "../lib/review-pack.js";
+import { REVIEWER_AGENT } from "../lib/team-roles.js";
 import type { LedgerCli, Result } from "./ledger-context.js";
 import { intFlag } from "./ledger-identity.js";
 import type { CommandSpec } from "./ledger-write-cmds.js";
@@ -60,7 +61,7 @@ interface PackPlan {
   lastDispatch: LedgerEvent | undefined;
   /** 规格卡「审查」那一行，记进 dispatch 事件备查（路由 / currentHandler 自己读规格卡，不依赖它） */
   policy: string | null;
-  pack: ReviewPack;
+  pack: ReviewPack & { subagentType: string };
 }
 
 /**
@@ -77,7 +78,7 @@ async function plan(c: LedgerCli): Promise<PackPlan> {
   const prev = toPrev(lastEvent);
   const specPath = specPathOf(c, task);
   const specText = readTextSoft(specPath);
-  const policy = reviewPolicy(specText);
+  const policy = strictPolicy(reviewPolicy(specText), events); // 卡被改松时照派审记录里更严的（与合并门同一口径）
   const next = nextReview(policy, lastEvent ? lastReviewOf(lastEvent, events) : null);
   const adversarial = c.p.bools.has("adversarial") || next === "adversarial";
   const worktree = await worktreeOf(c, task);
@@ -92,8 +93,10 @@ async function plan(c: LedgerCli): Promise<PackPlan> {
     workDir: join(REVIEWS_DIR, `${tag}-work`),
     prod: { stateDir: STATE_DIR, tmuxSocket: TMUX_SOCK, bridgePort: resolveBridgePort({ BRIDGE_PORT: repoEnvVar("BRIDGE_PORT") }) },
   });
+  // subagentType：编排班子内置的审查员 agent（启动时经 --agents 注入，lib/team-roles.ts）
+  const subagentType = REVIEWER_AGENT[adversarial ? "adversarial" : "regular"];
   const lastDispatch = events.findLast((e) => e.kind === "dispatch");
-  return { task, round, adversarial, worktree, deliverEvent, lastReviewSeq: lastEvent?.seq ?? 0, lastDispatch, policy, pack };
+  return { task, round, adversarial, worktree, deliverEvent, lastReviewSeq: lastEvent?.seq ?? 0, lastDispatch, policy, pack: { ...pack, subagentType } };
 }
 
 async function reviewPack(c: LedgerCli): Promise<Result> {
@@ -139,19 +142,27 @@ async function dispatch(c: LedgerCli): Promise<Result> {
   return { ok: true, event: r.event, duplicate: r.duplicate, ...(headNote ? { headNote } : {}), ...p.pack };
 }
 
+/** 硬规则自动升级的记账身份（bridge 经 runManager 调 `escalate --auto`） */
+const RULE_ACTOR = "bridge-rule";
+
 function escalate(c: LedgerCli): Result {
   const t = c.target(c.p.pos[1]);
   const to = c.p.flags.to ?? "pm";
   if (to !== "pm" && to !== "owner") throw new LedgerError("invalid", "--to 只能是 pm / owner");
+  const auto = c.p.bools.has("auto");
+  // --auto 只给 bridge 用：它经 runManager 调用时身份是 owner；事件记在 bridge-rule 名下，看得出是规则触发、不是谁的判断
+  if (auto && (c.deps.actor !== "owner" || to !== "pm")) throw new LedgerError("forbidden", "--auto 只由 bridge 的硬规则调用，且只升级给 PM");
   if (t.task && to === "pm") c.requireOwnOrManager(t.task, "升级");
   else c.requireManager(t.project, to === "owner" ? "升级给 owner" : "项目级升级");
   const reason = c.need("reason");
-  const r = appendEvent(c.db, c.ctx(), { project: t.project, target: t.target, kind: "escalate", text: reason, data: { to, reason } });
+  const ctx = auto ? { ...c.ctx(), actor: RULE_ACTOR } : c.ctx();
+  const data = { to, reason, ...(auto ? { auto: true } : {}) };
+  const r = appendEvent(c.db, ctx, { project: t.project, target: t.target, kind: "escalate", text: reason, data });
   return { ok: true, event: r.event, duplicate: r.duplicate };
 }
 
 export const DISPATCH_CMDS: Record<string, CommandSpec> = {
   "review-pack": { valued: ["round"], bools: ["adversarial"], usage: "review-pack <task> [--adversarial] [--round N]（只读：打印审查员 prompt）", run: reviewPack },
   dispatch: { valued: ["round", "dedup"], bools: ["adversarial"], usage: "dispatch <task> [--adversarial] [--round N]（核对 head、记派审、打印 prompt）", run: dispatch },
-  escalate: { valued: ["reason", "to", "project", "dedup"], usage: "escalate <task|-> --reason <原因> [--to pm|owner]", run: escalate },
+  escalate: { valued: ["reason", "to", "project", "dedup"], bools: ["auto"], usage: "escalate <task|-> --reason <原因> [--to pm|owner]", run: escalate },
 };

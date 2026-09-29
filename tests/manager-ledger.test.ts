@@ -5,7 +5,7 @@ import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { closeLedger, getTask, listEvents, openLedger } from "../src/lib/ledger-store.js";
-import { createTask } from "../src/lib/ledger-write.js";
+import { createTask, setMeta } from "../src/lib/ledger-write.js";
 import type { Registry } from "../src/manager/core.js";
 import { renameLedgerAgent, runLedger, UNKNOWN_ACTOR } from "../src/manager/ledger.js";
 import { expandDocsDir } from "../src/manager/ledger-read-cmds.js";
@@ -42,7 +42,7 @@ beforeEach(async () => {
   db = openLedger(":memory:");
   dir = mkdtempSync(join(tmpdir(), "ledger-cli-"));
   reg = { socket: "", agents: { [PM]: agent(), [EXE]: agent(), "agent-task-t4": agent() } };
-  expect((await run("owner", "meta", "--project", P, "--pms", "claudestra")).ok).toBe(true);
+  setMeta(db, { actor: "owner", now: 1_000 }, { project: P, key: "pms", value: [PM] }); // meta --pms 只生成提案（tests/team-apply.test.ts）
   expect((await run(PM, "item-new", "i10", "--title", "台账")).ok).toBe(true);
 });
 afterEach(() => {
@@ -225,13 +225,13 @@ describe("决定、部署、验证、回滚、冻结", () => {
 });
 
 describe("meta / show / export", () => {
-  test("meta：不带参数查看；只有 owner 能设；--pms 归一成 registry 键；--docs-dir 存 realpath、拒相对路径", async () => {
+  test("meta：不带参数查看；--docs-dir 只有 owner 能设、存 realpath、拒相对路径", async () => {
     expect((await run(PM, "meta")).meta.pms).toEqual([PM]);
-    expect(await run(PM, "meta", "--pms", "x")).toMatchObject({ ok: false, code: "forbidden" });
     const docs = join(dir, "docs");
     mkdirSync(docs);
-    const r = await run("owner", "meta", "--project", P, "--pms", "claudestra, Task-T4", "--docs-dir", docs);
-    expect(r.meta).toMatchObject({ pms: [PM, "agent-task-t4"], docsDir: realpathSync(docs) });
+    expect(await run(PM, "meta", "--docs-dir", docs)).toMatchObject({ ok: false, code: "forbidden" });
+    const r = await run("owner", "meta", "--project", P, "--docs-dir", docs);
+    expect(r.meta).toMatchObject({ pms: [PM], docsDir: realpathSync(docs) });
     expect(await run("owner", "meta", "--project", P, "--docs-dir", "docs")).toMatchObject({ ok: false, code: "invalid" });
   });
   test("expandDocsDir：~ 按传入的家目录展开；不存在的目录、/、家目录、家目录的上级、临时目录都拒绝", () => {

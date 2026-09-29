@@ -17,9 +17,11 @@ import {
   detectSessionIdlePrompt,
   isAutoConfirmableModal,
   isClaudeReady,
+  probeTuiContract,
   trustPromptMoves,
 } from "../tmux-helper.js";
 import { lastUserTextOf } from "./shared.js";
+import { roleLaunch } from "../team-roles.js";
 import type {
   AnyRecord,
   DiscoveredSession,
@@ -70,6 +72,7 @@ export function claudeLaunchOptions(spec: LaunchSpec): LaunchOptions {
     agentName: spec.agentName,
     settingsAgent: spec.settingsName,
     projectContext: spec.projectContext,
+    role: roleLaunch(x.role),
   };
 }
 
@@ -310,3 +313,21 @@ export const claudeCodeAdapter: ManagedRuntimeAdapter = {
   /** CC agent 的 registry 不写 runtime 字段（历史数据零迁移） */
   registryFields: () => ({}),
 };
+
+/**
+ * 启动超时时补一句可操作的诊断。
+ *
+ * isClaudeReady 完全建立在 TUI 文案上（❯ + 模式 banner）。Claude Code 改了这两处
+ * 渲染，症状就是"每次建 agent 都超时"，而错误信息里没有任何线索指向真正的原因 ——
+ * 用户只会以为是自己装错了。这里在超时时顺手探一次契约：屏幕上明明有 CC 的界面
+ * 却认不出任何标记，就把这条线索直接写进错误里。
+ */
+export function readyTimeoutHint(pane: string): string {
+  const c = probeTuiContract(pane);
+  if (!c.suspect) return "";
+  return (
+    "。⚠️ 检测到 Claude Code 的界面在屏幕上，但认不出它的状态栏文案 —— " +
+    "如果这是升级 Claude Code 之后才开始出现的，很可能是 TUI 文案变了，" +
+    "需要更新 src/lib/tmux-helper.ts 里的 CC_MODE_BANNER_RE 等匹配规则"
+  );
+}

@@ -3,9 +3,10 @@
  * task-new / task-set 改执行者时经 T4 的派发规则联动 registry 的 parent / task（manager/team.ts），台账先写、registry 后写。
  */
 import { normalizePeerAgent } from "../lib/ledger-checks.js";
+import { workStage } from "../lib/ledger-deps.js";
 import { parseExtraChecks, parseExtraRepo } from "../lib/ledger-probes.js";
 import { STAGES, TASK_KINDS, type LedgerTask, type Stage, type TaskKind } from "../lib/ledger-stages.js";
-import { LedgerError } from "../lib/ledger-store.js";
+import { getMeta, LedgerError } from "../lib/ledger-store.js";
 import { pathLike } from "../lib/quote-text.js";
 import {
   appendEvent,
@@ -143,6 +144,19 @@ async function taskNew(c: LedgerCli): Promise<Result> {
 
 /** 合并之后 PR / 分支 / head 就是完成检查单的依据，执行者不能再改（PM 纠错仍可） */
 const SHIPPED: readonly string[] = ["merge", "live", "verified", "done"];
+/** blocked 按进 blocked 前的阶段算：merge → blocked 期间照样不许换 head（tests/ledger-merge-gate.test.ts） */
+const shipped = (t: LedgerTask) => SHIPPED.includes(workStage(t));
+
+/**
+ * merge 及以后换成不同的 head = 没审过的代码顶替审过的（阶段不动，合并门不会再跑），deliver / task-set 谁来都拒，PM 也一样；
+ * 相同的 head、只补 --pr / --branch 照常放行（PM verify 前常这样补字段）
+ */
+function checkShippedHead(task: LedgerTask, head: string | undefined): void {
+  if (!shipped(task) || head === undefined || head === task.headSHA) return;
+  const at = task.stage === "blocked" ? `blocked（之前在 ${task.stageBefore}）` : task.stage;
+  const how = workStage(task) === "merge" ? `（stage --from ${task.stage} --to review）` : "";
+  throw new LedgerError("conflict", `任务 ${task.id} 已在 ${at}，head ${head} 跟台账的 ${task.headSHA ?? "（空）"} 不一样：先由 PM 退回 review${how}，再交付、派审`);
+}
 
 /** 执行者只能改自己任务的这几项；标题、事项、规格、extra、执行者、PM 要 PM / master / owner */
 const EXECUTOR_TASK_FLAGS = new Set(["rev", "dedup", "branch", "pr", "head", "model"]);
@@ -154,9 +168,10 @@ async function taskSet(c: LedgerCli): Promise<Result> {
   if (extraFlags.length && c.role(cur.project, cur) === "executor") {
     throw new LedgerError("forbidden", `执行者只能改 --branch / --pr / --head / --model，${extraFlags.map((f) => `--${f}`).join(" ")} 要 PM 改`);
   }
-  if (c.role(cur.project, cur) === "executor" && SHIPPED.includes(cur.stage) && ["pr", "branch", "head"].some((f) => c.p.flags[f] !== undefined)) {
+  if (c.role(cur.project, cur) === "executor" && shipped(cur) && ["pr", "branch", "head"].some((f) => c.p.flags[f] !== undefined)) {
     throw new LedgerError("forbidden", `任务 ${cur.id} 已在 ${cur.stage}，执行者不能再改 --pr / --branch / --head（完成检查单按它们核对上线）`);
   }
+  checkShippedHead(cur, c.p.flags.head);
   const rev = intFlag(c.p, "rev");
   if (rev === undefined) throw new LedgerError("invalid", "改任务要带 --rev（show 里看当前 rev）");
   checkTaskRefs(c.p.flags);
@@ -175,6 +190,8 @@ function stage(c: LedgerCli): Result {
     c.requireRealPm(task.project, "不记审查结论直接 review → merge ");
     checkMergeGate(c, task);
   }
+  // blocked 回 merge 同样过门：blocked 期间欠下的（或修这条之前换过的 head）不能借解除 blocked 进 merge
+  if (from === "blocked" && to === "merge") checkMergeGate(c, task);
   const r = moveStage(c.db, c.ctx(), { taskId: task.id, from, to, text: c.p.flags.text });
   return { ok: true, task: r.row, event: r.event, duplicate: r.duplicate };
 }
@@ -197,8 +214,10 @@ function deliverCmd(c: LedgerCli): Result {
   // 证据 / 结论只收路径：它们会进 bridge 通知和审查员 prompt（lib/quote-text.ts pathLike）
   if (c.p.flags.evidence !== undefined && !pathLike(c.p.flags.evidence)) throw new LedgerError("invalid", PATH_ONLY("--evidence"));
   checkTaskRefs({ head: c.p.flags.head });
+  checkShippedHead(task, c.p.flags.head);
   const r = deliver(c.db, c.ctx(), { taskId: task.id, headSHA: c.p.flags.head, evidence: c.p.flags.evidence, text: c.p.flags.text, moveFrom });
-  return { ok: true, task: r.row, event: r.event, duplicate: r.duplicate };
+  // routed：项目开了编排班子，bridge 会自动通知调度助理 / PM，执行者不用再发消息（roles/executor.md）
+  return { ok: true, task: r.row, event: r.event, duplicate: r.duplicate, routed: getMeta(c.db, task.project).team !== null };
 }
 
 function review(c: LedgerCli): Result {
