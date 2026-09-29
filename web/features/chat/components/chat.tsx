@@ -415,11 +415,11 @@ function ChatInner() {
     }
     // v2.22+ 原生壳:绑定 APNs 插件事件(token 登记 / 点通知直达),已授权则静默刷新 token
     if (isNativeShell()) {
-      void import("@/lib/push/native").then((m) => {
+      void Promise.all([import("@/lib/push/native"), import("../scoped-requests")]).then(([m, scoped]) => {
         m.bindNativePushListeners((agent) => {
           closingCollab(toContent)(); // 通知直达：先收起协作视图（恢复已读回执），再开会话
           void store.openAgent(agent);
-        }, (ask) => asksStore.openDrawer(ask)); // 「待你处理」推送：打开抽屉定位那张卡
+        }, (ask) => asksStore.openDrawer(ask), scoped.markRead); // 「待你处理」推送：打开抽屉定位那张卡；已读回执非全权设备不发
         void m.refreshNativeRegistration();
       });
     }

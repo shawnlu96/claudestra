@@ -11,7 +11,8 @@ import { parseReviewDescription, runningReviewers } from "../src/lib/ledger-audi
 import { collectAuditSnapshots, type SnapshotSources } from "../src/lib/ledger-audit-snapshot.js";
 import { addDep, setDep } from "../src/lib/ledger-deps-write.js";
 import { AUDIT_SCHEMA_VERSION, closeLedger, LEDGER_MIGRATIONS, openLedger } from "../src/lib/ledger-store.js";
-import { createTask, moveStage, setFrozen, setMeta } from "../src/lib/ledger-write.js";
+import { createTask, moveStage, recordVerify, setFrozen, setMeta } from "../src/lib/ledger-write.js";
+import type { Stage } from "../src/lib/ledger-stages.js";
 import type { RegistryAgent } from "../src/lib/registry.js";
 import type { Registry } from "../src/manager/core.js";
 import { runLedger } from "../src/manager/ledger.js";
@@ -88,6 +89,24 @@ describe("取数", () => {
     const freed = (await collectAuditSnapshots(db, [P], NOW, sources()))[0].tasks.find((t) => t.task.id === "T1");
     expect(freed?.blockedBy).toEqual([]);
     expect(freed?.unblockedAt).toBe(5_000); // 前置进 live 的那一刻
+  });
+
+  test("依赖放行时刻取这一段连续满足的起点：进出 blocked、live → verified 不重新计时，退回 fix 再上线才重算", async () => {
+    createTask(db, { actor: "owner", now: 0 }, { project: P, id: "T0", title: "前置", kind: "code", agent: EXE, pm: PM, stage: "merge" });
+    addDep(db, { actor: "owner", now: 0 }, { from: "T0", to: "T1", kind: "blocks", when: "T0 上线后" });
+    const at = async () => (await collectAuditSnapshots(db, [P], NOW, sources()))[0].tasks.find((t) => t.task.id === "T1")?.unblockedAt;
+    const move = (now: number, from: Stage, to: Stage) => moveStage(db, { actor: "owner", now }, { taskId: "T0", from, to });
+    move(5_000, "merge", "live");
+    move(6_000, "live", "blocked");
+    move(7_000, "blocked", "live");
+    expect(await at()).toBe(5_000);
+    move(8_000, "live", "fix");
+    expect(await at()).toBeNull();
+    move(9_000, "fix", "review");
+    move(10_000, "review", "merge");
+    move(11_000, "merge", "live");
+    recordVerify(db, { actor: "owner", now: 12_000 }, { taskId: "T0", result: "pass", data: { checks: [{ id: "pr-merged", status: "pass" }] } });
+    expect(await at()).toBe(11_000);
   });
 
   test("依赖放行时刻：PM 手动定 done 的边取边的更新时间", async () => {

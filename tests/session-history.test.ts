@@ -198,11 +198,11 @@ describe("readSessionHistory", () => {
     expect(asst.tools?.map((t) => t.name)).toEqual(["reply_all"]);
   });
 
-  test("[fork] TUI 斜杠命令记录 → system 轻条目，stdout 去 ANSI，空输出过滤", async () => {
+  test("[fork] TUI 斜杠命令记录 → system 轻条目（带参数），stdout 去 ANSI，空输出过滤", async () => {
     const dir = mkdtempSync(join(tmpdir(), "hist-"));
     const p = writeJsonl(dir, `${SID}.jsonl`, [
       // command-name 开头
-      { type: "user", timestamp: "2026-07-01T00:00:00Z", message: { content: "<command-name>/model</command-name>\n<command-message>model</command-message>\n<command-args>claude-fable-5</command-args>" } },
+      { type: "user", timestamp: "2026-07-01T00:00:00Z", message: { content: "<command-name>/model</command-name>\n<command-message>model</command-message>\n<command-args>claude-fable-5\n\n第二段</command-args>" } },
       // stdout 带 ANSI
       { type: "user", timestamp: "2026-07-01T00:00:01Z", message: { content: "<local-command-stdout>Set model to \x1b[1mFable 5\x1b[22m and saved</local-command-stdout>" } },
       // command-message 开头（顺序颠倒的变体，之前漏网裸渲染）
@@ -217,7 +217,7 @@ describe("readSessionHistory", () => {
     ]);
     const page = await readSessionHistory(p);
     expect(page.messages.map((m) => [m.role, m.text])).toEqual([
-      ["system", "/model"],
+      ["system", "/model claude-fable-5 第二段"], // 参数带上、压成一行（T32：owner 在网页上要看得到敲进去了什么）
       ["system", "Set model to Fable 5 and saved"],
       ["system", "/save-compact"],
       ["user", "正常消息"],

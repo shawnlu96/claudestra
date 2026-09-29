@@ -4,7 +4,7 @@
  * 网页不打包 @capacitor/* 依赖)。token 登记到当前机器的 /api/v1/push/apns，由 bridge（或经中继网关）推 APNs。
  */
 import { isNativeShell, nativePlugin } from "@/lib/native";
-import { apnsRegister, markRead } from "@/lib/api/push";
+import { apnsRegister } from "@/lib/api/push";
 import { t } from "@/lib/i18n";
 import { askFromLink } from "@/lib/hash-nav";
 
@@ -42,11 +42,16 @@ export async function nativePushPermission(): Promise<"prompt" | "granted" | "de
 let listenersBound = false;
 let onOpenAgent: ((agent: string) => void) | null = null;
 let onOpenAsk: ((ask: string) => void) | null = null;
+let onRead: ((agent: string) => Promise<void>) | null = null;
 
-/** 绑定一次性的插件事件(token 登记 / 点通知直达 agent 或「待你处理」那张卡)。App 每次启动调一次。 */
-export function bindNativePushListeners(openAgent: (agent: string) => void, openAsk: (ask: string) => void): void {
+/**
+ * 绑定一次性的插件事件(token 登记 / 点通知直达 agent 或「待你处理」那张卡)。App 每次启动调一次。
+ * 已读回执由调用方给（chat 的 scoped-requests.markRead：非全权设备不发，接口要全权）——lib 不能反过来 import features。
+ */
+export function bindNativePushListeners(openAgent: (agent: string) => void, openAsk: (ask: string) => void, read: (agent: string) => Promise<void>): void {
   onOpenAgent = openAgent;
   onOpenAsk = openAsk;
+  onRead = read;
   const p = plugin();
   if (!p || listenersBound) return;
   listenersBound = true;
@@ -65,7 +70,7 @@ export function bindNativePushListeners(openAgent: (agent: string) => void, open
     const ask = askFromLink(data.url);
     if (data.agent) {
       // 点了通知 = 读过了:同 SW 的 notificationclick,通知服务端做跨端已读联动
-      void markRead(data.agent).catch(() => {}); // 已读回执丢了下一次打开会话会再发
+      void onRead?.(data.agent).catch(() => {}); // 已读回执丢了下一次打开会话会再发
       if (!ask) onOpenAgent?.(data.agent);
     }
     if (ask) onOpenAsk?.(ask);

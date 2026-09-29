@@ -15,13 +15,15 @@ import { loadRegistry, output } from "./core.js";
  * R1 防呆：目标 agent 未标 external:true（create --external）时要求 --force。
  */
 export async function cmdTokenAdd(name: string, agentsCsv: string, force: boolean, noMirror: boolean, terminal: boolean) {
-  const { readPrincipals, writePrincipals, newTokenPrincipal, tokenIdOf } =
+  const { readPrincipals, writePrincipals, newTokenPrincipal, tokenIdOf, reservedNameError } =
     await import("../lib/principals.js");
   const agents = agentsCsv.split(",").map((s) => s.trim()).filter(Boolean);
   if (!name || agents.length === 0) {
     output({ ok: false, error: 'token-add <name> --agents <a,b|*> [--force] [--no-mirror] [--terminal]' });
     return;
   }
+  const reserved = reservedNameError(name);
+  if (reserved) return output({ ok: false, error: reserved });
 
   // scope 里的 agent 校验：存在性 + R1 external 检查（"*" 跳过存在性，仍警告）
   const reg = await loadRegistry();
