@@ -1,13 +1,14 @@
 /**
- * Codex 原生回合账（T52 Codex 第 6 轮复审 #204）：只认 rollout 里 event_msg 的 task_started / task_complete / turn_aborted，
- * 按频道记「回合开着没有」和「上次确认空闲之后投了哪些、哪些明确没投进去」。不走展示用的事件环（有上限、会被 bg_task 挤掉、
- * 不落盘），也不从「没看到输出」反推空闲——静默思考时 watcher 一条事件都不发。bridge 重启后在看到第一条原生边界之前 known=false，
- * 一律算拿不准。投递失败能不能收 done 只看 codexConfirmedIdle。tests/codex-turn-book.test.ts
+ * Codex 原生回合账（T52 Codex 复审 #204 第 6–7 轮）：只认 rollout 里 event_msg 的 task_started / task_complete / turn_aborted，
+ * 按频道记开着的回合和未决投递。消费关系只按先后判：一条投递只能被「它投出去之后才到的 task_started」消费，回合结束只清被这个
+ * 回合消费的；之后才投的继续挂着。基线未知时投的也记。账本绑定 sessionId 和 watcher 代际：重挂（从 EOF 读，中间可能漏了边界）、
+ * 换会话一律 known=false、未决保留，旧代际的回调写不进来。超过容量转成 unknown，不丢条目倒推空闲。
+ * 投递失败能不能收 done 只看 codexConfirmedIdle。tests/pi-abort-control.test.ts
  */
 
 export type CodexTurnMark = { kind: "start" | "end"; turnId: string };
 
-/** rollout 一行是不是原生回合边界；不是 JSON / 不是边界 = null */
+/** rollout 一行是不是原生回合边界（task_complete 带 error 也算结束）；不是 JSON / 不是边界 = null */
 export function codexTurnMark(line: string): CodexTurnMark | null {
   if (!line.includes('"event_msg"')) return null;
   let e: { type?: unknown; payload?: { type?: unknown; turn_id?: unknown } };
@@ -23,47 +24,77 @@ export function codexTurnMark(line: string): CodexTurnMark | null {
   return null;
 }
 
+/** 一个频道最多挂这么多条未决投递；超了就当拿不准（overflow），直到换会话 / 被清掉 */
+const PENDING_CAP = 200;
+
 interface Book {
-  /** 开着的回合（turn_id）；空 = 确认空闲 */
+  /** 这一代 watcher 见过原生边界（连续读着）；重挂 / 换会话后为 false */
+  known: boolean;
   open: Set<string>;
-  /** 上次确认空闲之后投进来的消息 → 是否已明确没投进去 */
-  sinceIdle: Map<string, boolean>;
-  lastTurnId: string;
-  at: number;
+  /** 未决投递：messageId → 被哪个回合消费（还没被消费 = ""） */
+  pending: Map<string, string>;
+  overflow: boolean;
+  sessionId: string;
+  /** 当前这一代 watcher（jsonl-watcher 的 state 对象）；旧代际的回调不认 */
+  gen: object | null;
 }
 
 const books = new Map<string, Book>();
+const bookOf = (ch: string): Book => {
+  let b = books.get(ch);
+  if (!b) books.set(ch, (b = { known: false, open: new Set(), pending: new Map(), overflow: false, sessionId: "", gen: null }));
+  return b;
+};
 
-/** watcher 每读一行 Codex rollout 调一次（别的 runtime 直接返回） */
-export function noteCodexTurnLine(runtime: string | undefined, channelId: string, line: string, now = Date.now()): void {
+/** jsonl-watcher 新建一代监听时调（从文件末尾开始读，中间的边界可能漏了）：known=false，未决投递保留；换了会话连开着的回合一起作废 */
+export function attachCodexTurns(runtime: string | undefined, channelId: string, sessionId: string, gen: object): void {
+  if (runtime !== "codex" || !channelId) return;
+  const b = bookOf(channelId);
+  if (b.sessionId && b.sessionId !== sessionId) b.overflow = false;
+  b.open.clear();
+  b.sessionId = sessionId;
+  b.gen = gen;
+  b.known = false;
+}
+
+/** watcher 每读一行 Codex rollout 调一次（别的 runtime 直接返回）。gen = 读这一行的那一代 watcher */
+export function noteCodexTurnLine(runtime: string | undefined, channelId: string, line: string, gen?: object): void {
   if (runtime !== "codex" || !channelId) return;
   const m = codexTurnMark(line);
   if (!m) return;
-  const b = books.get(channelId) ?? { open: new Set<string>(), sinceIdle: new Map<string, boolean>(), lastTurnId: "", at: 0 };
-  books.set(channelId, b);
-  if (m.kind === "start") b.open.add(m.turnId);
-  else b.open.delete(m.turnId);
-  b.lastTurnId = m.turnId;
-  b.at = now;
-  // 回合都收了：之前投的要么被这些回合吃掉了，要么接着开新回合（task_started 会再把 open 点亮）
-  if (m.kind === "end" && b.open.size === 0) b.sinceIdle.clear();
+  const b = bookOf(channelId);
+  if (gen && b.gen && b.gen !== gen) return; // 旧代际的 watcher 回调
+  b.known = true;
+  if (m.kind === "start") {
+    b.open.add(m.turnId);
+    for (const [id, by] of b.pending) if (!by) b.pending.set(id, m.turnId || "?"); // 这之前投的被这个回合消费
+    return;
+  }
+  if (!m.turnId) return; // turn_aborted 没带 turn_id：不知道结束的是哪一个，已开的回合不清
+  b.open.delete(m.turnId);
+  for (const [id, by] of b.pending) if (by === m.turnId) b.pending.delete(id);
 }
 
-/** 消息 ws.send 给了 Codex 频道。还没见过原生边界的频道不记：反正拿不准 */
+/** 消息 ws.send 给了 Codex 频道（基线未知也记，作为未决） */
 export function noteCodexSent(channelId: string, messageId: string): void {
-  books.get(channelId)?.sinceIdle.set(messageId, false);
+  const b = bookOf(channelId);
+  if (b.overflow) return;
+  b.pending.set(messageId, "");
+  if (b.pending.size > PENDING_CAP) {
+    b.overflow = true;
+    b.pending.clear(); // 已经拿不准了，清掉只为不占内存；overflow 让 codexConfirmedIdle 一直为 false
+  }
 }
 
-/** channel-server 报这条没投进 Codex */
+/** channel-server 报这条没投进 Codex：它不会开回合，不再算未决 */
 export function noteCodexFailed(channelId: string, messageId: string): void {
-  const b = books.get(channelId);
-  if (b?.sinceIdle.has(messageId)) b.sinceIdle.set(messageId, true);
+  books.get(channelId)?.pending.delete(messageId);
 }
 
-/** 确认空闲：见过原生边界、没有开着的回合、上次空闲之后投的每一条都明确没投进去 */
+/** 确认空闲：这一代 watcher 见过原生边界、没有开着的回合、没有未决投递、没溢出 */
 export function codexConfirmedIdle(channelId: string): boolean {
   const b = books.get(channelId);
-  return !!b && b.open.size === 0 && [...b.sinceIdle.values()].every(Boolean);
+  return !!b && b.known && !b.overflow && b.open.size === 0 && b.pending.size === 0;
 }
 
 /** agent 被 kill / 频道复用前清掉 */

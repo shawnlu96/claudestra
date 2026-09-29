@@ -12,7 +12,7 @@ import {
 import type { Envelope } from "../src/bridge/router.js";
 import { turnCuts } from "../src/bridge/turn-cuts.js";
 import { emitEvent, getAgentStatus, RING_LIMIT } from "../src/bridge/event-bus.js";
-import { codexTurnMark, noteCodexTurnLine } from "../src/lib/codex-turn-book.js";
+import { attachCodexTurns, codexConfirmedIdle, codexTurnMark, noteCodexSent, noteCodexTurnLine } from "../src/lib/codex-turn-book.js";
 
 /** 喂一行 Codex rollout 的原生回合边界（watcher 读到时调的就是它） */
 const codexMark = (ch: string, type: "task_started" | "task_complete" | "turn_aborted", turnId: string) =>
@@ -263,12 +263,12 @@ describe("bridge 侧（Workflow 复核 wf2）", () => {
     });
 
     test("P2：原生回合账确认空闲、之后投的只有这一条且没投进去——收掉「工作中」（不走 Stop 收尾，不发完成通知）", async () => {
-      codexMark("cx", "task_complete", "prev"); // 已知空闲的基线：上一回合收了
-      cx("bad2", { kind: "user", userId: "u", username: "alex", channelId: "dc-7" } as Envelope["from"], false);
+      codexMark("cx-p2", "task_complete", "prev"); // 已知空闲的基线：上一回合收了（新频道：cx 上面几条还未决）
+      cx("bad2", { kind: "user", userId: "u", username: "alex", channelId: "dc-7" } as Envelope["from"], false, "cx-p2");
       delivered.length = 0; calls.length = 0;
-      await onCodexUndelivered({ requestId: "r2", channelId: "cx", messageId: "bad2", reason: "⚠️ Codex 会话不在线，消息未投递" }, sock, true, deps);
+      await onCodexUndelivered({ requestId: "r2", channelId: "cx-p2", messageId: "bad2", reason: "⚠️ Codex 会话不在线，消息未投递" }, sock, true, deps);
       expect(delivered.map((e) => e.to)).toEqual([expect.objectContaining({ kind: "user", channelId: "dc-7" })]);
-      expect(calls).toEqual(["typing:cx", "timer:cx"]);
+      expect(calls).toEqual(["typing:cx-p2", "timer:cx-p2"]);
     });
 
     test("不是这个频道当前的连接 / 认不出这条：什么都不动，settled 0（channel-server 自己兜底说）", async () => {
@@ -380,6 +380,55 @@ describe("bridge 侧（Workflow 复核 wf2）", () => {
       await fail(ch, "D");
       later.at(-1)!();
       expect(calls).toEqual([]);
+    });
+
+    test("第 7 轮 P1-1：A 收尾不会清掉之后才投、还没开跑的 B——C 投失败不收 done", async () => {
+      const ch = "g-queued";
+      codexMark(ch, "task_complete", "prev");
+      send(ch, "A", false); thinking(ch); codexMark(ch, "task_started", "A-turn");
+      send(ch, "B", true);
+      codexMark(ch, "task_complete", "A-turn");
+      expect(codexConfirmedIdle(ch)).toBe(false); // B 还未决
+      send(ch, "C", true);
+      reset();
+      await fail(ch, "C");
+      expect(calls).toEqual([]);
+      codexMark(ch, "task_started", "B-turn"); codexMark(ch, "task_complete", "B-turn");
+      expect(codexConfirmedIdle(ch)).toBe(true); // B 被它之后开的回合消费、收尾
+    });
+
+    test("第 7 轮 P1-1：基线未知时投的也记——之后第一条旧回合的 task_complete 不能把它忘掉", () => {
+      noteCodexSent("g-first-end", "B");
+      codexMark("g-first-end", "task_complete", "old-before-registration");
+      expect(codexConfirmedIdle("g-first-end")).toBe(false);
+    });
+
+    test("第 7 轮 P1-2：watcher 重挂（新一代从 EOF 读）一律拿不准，未决保留；旧一代的回调写不进来", () => {
+      const ch = "g-rewatch", gen1 = {}, gen2 = {};
+      attachCodexTurns("codex", ch, "sid-1", gen1);
+      noteCodexTurnLine("codex", ch, JSON.stringify({ type: "event_msg", payload: { type: "task_complete", turn_id: "prev" } }), gen1);
+      expect(codexConfirmedIdle(ch)).toBe(true);
+      attachCodexTurns("codex", ch, "sid-1", gen2); // 中间漏掉的 task_started(B) 看不到
+      expect(codexConfirmedIdle(ch)).toBe(false);
+      noteCodexTurnLine("codex", ch, JSON.stringify({ type: "event_msg", payload: { type: "task_complete", turn_id: "x" } }), gen1);
+      expect(codexConfirmedIdle(ch)).toBe(false); // 旧代际不认
+      noteCodexTurnLine("codex", ch, JSON.stringify({ type: "event_msg", payload: { type: "task_complete", turn_id: "B" } }), gen2);
+      expect(codexConfirmedIdle(ch)).toBe(true); // 新一代见到边界后才认
+    });
+
+    test("未决超过容量：转成拿不准，不丢条目倒推空闲", () => {
+      const ch = "g-cap";
+      codexMark(ch, "task_complete", "prev");
+      for (let i = 0; i < 201; i++) noteCodexSent(ch, `m${i}`);
+      codexMark(ch, "task_started", "t"); codexMark(ch, "task_complete", "t");
+      expect(codexConfirmedIdle(ch)).toBe(false);
+    });
+
+    test("turn_aborted 没带 turn_id：不知道结束的是哪个，已开的回合不清", () => {
+      const ch = "g-abort-noid";
+      codexMark(ch, "task_started", "A-turn");
+      noteCodexTurnLine("codex", ch, JSON.stringify({ type: "event_msg", payload: { type: "turn_aborted" } }));
+      expect(codexConfirmedIdle(ch)).toBe(false);
     });
 
     test("回合打断（turn_aborted）也算收尾：之后投的唯一一条没投进去——收 done", async () => {
