@@ -1,0 +1,30 @@
+
+⏺ line of slow streamed text number line of slow streamed text number line of
+  slow streamed text number line of slow streamed text number line of slow
+  streamed text number line of slow streamed text number line of slow streamed
+  text number line of slow streamed text number line of slow streamed text
+  number line of slow streamed text number line of slow streamed text number
+  line of slow streamed text number line of slow streamed text number line of
+  slow streamed text number line of slow streamed text number line of slow
+  streamed text number line of slow streamed text number line of slow streamed
+  text number line of slow streamed text number line of slow streamed text
+  number line of slow streamed text number line of slow streamed text number
+  line of slow streamed text number line of slow streamed text number line of
+  slow streamed text number line of slow streamed text number line of slow
+  streamed text number line of slow streamed text number line of slow streamed
+  text number line of slow streamed text number
+
+✻ Churned for 39s · done 5:35 AM
+
+❯ retry probe
+
+⏺ API Error: Repeated 529 Overloaded errors. The API is at capacity —
+  this is usually temporary. Try again in a moment. If it persists,
+  check your inference gateway (127.0.0.1:23981).
+
+✻ Cooked for 1s · done 5:35 AM
+
+────────────────────────────────────────────────────────────────────────────────
+❯
+────────────────────────────────────────────────────────────────────────────────
+  ⏵⏵ auto mode on (shift+tab to cycle) · ← for agents

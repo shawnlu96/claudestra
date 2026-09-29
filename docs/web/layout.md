@@ -78,6 +78,7 @@ features/machines/
   machine-switcher.tsx  顶栏切机器（relay 且 ≥2 台才出现）：machines.setCurrent → 中止旧机器请求 → chat-store.resetForMachine
   use-version-check.ts  回前台且 ≥60s 一查 → {stale, machineOld}（update-toast 消费）；use-version.ts 只拉一次做署名
 features/pair/          pair-flow.ts 三条流程的编排（无 React）→ use-pair-flow.ts 阶段状态机 → pair-screen.tsx 表单 / 等待卡
+features/fleet/         批量管理：fleet-panel.tsx（Agent 管理 → 批量管理；选人 / 动作 / 预演 / 结果，SSE low_priority 实时刷新）、lp-badge.tsx（侧栏 LP 徽章）；接口在 lib/api/fleet.ts
 features/chat/          Chat 本体；无 React 的纯逻辑单独成文件，都有 tests/web-*.test.ts
   type.ts stream.ts     ChatMessage / AgentSession / PendingAsk…；StreamSink + processStreamEvent + consumeSSEStream
   chat-store.ts         zenith 中枢（只许缩）：openGen 门控历史、streamGen 门控流；send / postSend；openStream 的 10s 握手超时、

@@ -1,0 +1,24 @@
+
+
+❯ Reply with the single word: ok
+
+⏺ ok
+
+✻ Sautéed for 5s · done 3:43 AM
+
+❯ Use the AskUserQuestion tool exactly once to ask me: Which color? with two
+  options: Red, Blue. Do nothing else.
+────────────────────────────────────────────────────────────────────────────────
+ ☐ Color
+
+Which color?
+
+❯ 1. Red
+     Red
+  2. Blue
+     Blue
+  3. Type something.
+────────────────────────────────────────────────────────────────────────────────
+  4. Chat about this
+
+Enter to select · ↑/↓ to navigate · Esc to cancel

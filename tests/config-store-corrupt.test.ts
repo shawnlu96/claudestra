@@ -119,3 +119,32 @@ describe("config-store 坏文件", () => {
     expect(readdirSync(dir).filter((f) => f.endsWith(".tmp"))).toEqual([]);
   });
 });
+
+describe("config-store 的 fleet 段（批量管理的保留清单）", () => {
+  test("compactKeep 能读到；不是字符串或空白的丢掉", () => {
+    const dir = mkdtempSync(join(tmpdir(), "cfg-fleet-read-"));
+    writeFileSync(join(dir, "config.json"), JSON.stringify({ fleet: { compactKeep: "保留进度与决定", callers: ["x"] } }));
+    expect(JSON.parse(run(dir, `console.log(JSON.stringify(c.readConfigSync().fleet ?? null));`).out)).toEqual({ compactKeep: "保留进度与决定" });
+    // 不是字符串、空白、超过 800 字、带控制字符（ESC 敲进输入框就是按键）→ 当没配（和上下文边界的 keep 同一个入口 normalizeCompactKeep）
+    for (const bad of [3, "   ", "保".repeat(801), "带\x1b[2J 控制符", "C1\x9b 控制符", "带\t制表符"]) {
+      writeFileSync(join(dir, "config.json"), JSON.stringify({ fleet: { compactKeep: bad } }));
+      expect(run(dir, `console.log(JSON.stringify(c.readConfigSync().fleet ?? null));`).out).toBe("null");
+    }
+    writeFileSync(join(dir, "config.json"), JSON.stringify({ fleet: { compactKeep: "保".repeat(800) } }));
+    expect(JSON.parse(run(dir, `console.log(JSON.stringify(c.readConfigSync().fleet ?? null));`).out).compactKeep).toHaveLength(800);
+    // 多行照收（\r\n、单独的 \r、\n 敲之前才换成空格），存的是原文
+    for (const multi of ["第一行\n第二行", "第一行\r\n第二行", "第一行\r第二行"]) {
+      writeFileSync(join(dir, "config.json"), JSON.stringify({ fleet: { compactKeep: multi } }));
+      expect(JSON.parse(run(dir, `console.log(JSON.stringify(c.readConfigSync().fleet ?? null));`).out)).toEqual({ compactKeep: multi });
+    }
+  });
+
+  test("写别的配置（set*：读 → 改 → 写）不会抹掉磁盘上的 fleet 段", () => {
+    const dir = mkdtempSync(join(tmpdir(), "cfg-fleet-keep-"));
+    writeFileSync(join(dir, "config.json"), JSON.stringify({ lang: "zh", fleet: { compactKeep: "保留进度与决定" } }));
+    const r = run(dir, `await c.setLang("en"); await c.setArchiveRetention(30);`);
+    expect(r.status).toBe(0);
+    const disk = JSON.parse(readFileSync(join(dir, "config.json"), "utf-8"));
+    expect(disk).toMatchObject({ lang: "en", archiveRetentionDays: 30, fleet: { compactKeep: "保留进度与决定" } });
+  });
+});

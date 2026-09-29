@@ -15,7 +15,7 @@ import {
   E2E_CONTENT_TYPE, E2E_HELLO_PATH, E2E_SESSION_TTL_S, e2eError, encodeHelloReply, encodeResponseHead,
   E2E_BODY_MAX, parseHello, parseInnerHead, parseRecordPath, PEER_E2E_LABEL,
 } from "./peer-e2e-wire.js";
-import { collectBody } from "./relay-stream.js";
+import { readBoundedRequestBody, RequestBodyError } from "./request-body.js";
 
 /** 一个用密钥建立的 peer（peers.json 里带 e2e 字段的记录） */
 export interface E2ePeer {
@@ -58,14 +58,12 @@ const HELLO_MAX = 4096;
 export const e2eBodyCap = (path: string): number => (path === E2E_HELLO_PATH ? HELLO_MAX : E2E_BODY_MAX);
 
 /**
- * 有上限地读正文：声明的 content-length 超限就一个字节都不读，读的时候照样边读边核（chunked、谎报长度的）。
- * 超限返回 null（回 413）；读流中途失败（对方断开）也归到这里——拒掉这一帧，对方重发即可，没有别的状态要收拾。
- * 不是超限的失败记一条日志：正文被读过两遍这类实现错误也会落到这里，别让它只显示成「太大」
+ * E2E 调用方沿用 null 表示正文拒收（413 并关闭连接）；实际读取统一走 request-body 的字节上限与 1 秒绝对期限。
+ * 读流失败也拒掉这一帧；实现错误记日志，超大/慢送不逐条刷日志。
  */
 export async function readRequestCapped(req: Request, max: number): Promise<Uint8Array | null> {
-  if (Number(req.headers.get("content-length") ?? 0) > max) return null;
-  return collectBody(req.body, max).catch((e: Error) => {
-    if (!e.message.startsWith("body exceeds")) console.warn(`⚠️ [peer-e2e] 读请求正文失败: ${e.message}`);
+  return readBoundedRequestBody(req, max).catch((e: Error) => {
+    if (!(e instanceof RequestBodyError) || e.status === 400) console.warn(`⚠️ [peer-e2e] 读请求正文失败: ${e.message}`);
     return null;
   });
 }

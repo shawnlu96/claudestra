@@ -19,6 +19,8 @@ export interface HeldItem {
   notifiedAt?: number;
   /** 被 check_inbox 领走、还没确认（bridge/inbox.ts）：租约内 Stop 不再投，过期后照常投 */
   lease?: { batchId: string; at: number };
+  /** 为什么押：额度闸（bridge/quota-wall.ts）押的不老化（撞周额度一押就是一两天），出闸时由恢复流程按序补投 */
+  reason?: "quota_wall";
 }
 
 /** check_inbox 领走后多久没确认就重新投递（按普通消息在回合结束时送达，message_id 不变） */
@@ -81,7 +83,15 @@ export class HeldQueue extends PersistedMap<HeldItem[]> {
    */
   hold(channelId: string, item: HeldItem): number {
     const cur = this.get(channelId) ?? [];
-    if (cur.some((i) => i.env === item.env)) return cur.length;
+    const same = cur.find((i) => i.env === item.env);
+    if (same) {
+      // 闸前因「回合中」押着的，闸内再被押回来就改记成额度闸：不再老化、出闸时一起补投
+      if (item.reason && !same.reason) {
+        same.reason = item.reason;
+        this.set(channelId, [...cur]);
+      }
+      return cur.length;
+    }
     const q = [...cur, item];
     this.set(channelId, q);
     return q.length;
@@ -93,10 +103,63 @@ export class HeldQueue extends PersistedMap<HeldItem[]> {
     return this.delete(channelId);
   }
 
+  /** 已在队里的这一封改过 meta（如停字的已记标记）：整队重写一次盘。hold 认出同一封时不落盘，改动不写回就会在重启后丢 */
+  rewrite(env: Envelope): void {
+    const ch = (env.to as LocalEndpoint).channelId;
+    const q = this.get(ch);
+    if (q?.some((i) => i.env === env)) this.set(ch, [...q]);
+  }
+
   /** 按信封的收件方押后，入队时间取现在 */
-  holdEnv(env: Envelope): number {
+  holdEnv(env: Envelope, reason?: HeldItem["reason"]): number {
     const to = env.to as LocalEndpoint;
-    return this.hold(to.channelId, { env, to, heldAt: Date.now() });
+    return this.hold(to.channelId, { env, to, heldAt: Date.now(), ...(reason ? { reason } : {}) });
+  }
+
+  /**
+   * 闸内把这个频道里还押着的非人类消息改记成额度闸（flush 时调）：闸前因「回合中」押下的、caller 不在线时押的推回、
+   * asks 的押后都不经过 holdForQuotaWall，不改记的话它们照普通消息老化——30 分钟唤醒撞着墙的发送方，24 小时被丢
+   */
+  markWall(channelId: string, pick: (i: HeldItem) => boolean): number {
+    const q = this.get(channelId) ?? [];
+    const hit = q.filter((i) => !i.reason && pick(i));
+    for (const i of hit) i.reason = "quota_wall";
+    if (hit.length) this.set(channelId, [...q]);
+    return hit.length;
+  }
+
+  /** 这个频道还押着（没送到 agent 手上）的消息 id：挂在它们上的 API 请求不能被别的回合结掉（bridge/stop-settle.ts takeApiWaiters） */
+  ids(channelId: string): Set<string> {
+    return new Set((this.get(channelId) ?? []).map((i) => i.env.meta.messageId));
+  }
+
+  /** 额度闸押着的条数，人发的和 agent / bridge 消息分开数（横幅和进闸通知分开写） */
+  wallCount(isHuman: (env: Envelope) => boolean = () => false): { human: number; agent: number } {
+    const all = [...this.values()].flat().filter((i) => i.reason === "quota_wall");
+    const human = all.filter((i) => isHuman(i.env)).length;
+    return { human, agent: all.length - human };
+  }
+
+  /** 有额度闸消息（给了 pick = 其中有 pick 命中的）的频道，按各自最早一条的入队时间排（出闸补投的顺序） */
+  wallChannels(pick: (i: HeldItem) => boolean = () => true): string[] {
+    const first = (q: HeldItem[]) => Math.min(...q.filter((i) => i.reason === "quota_wall").map((i) => i.heldAt));
+    return [...this.entries()].filter(([, q]) => q.some((i) => i.reason === "quota_wall" && pick(i))).sort((a, b) => first(a[1]) - first(b[1])).map(([c]) => c);
+  }
+
+  /** 出闸：额度闸消息转回普通押后，入队时间重置为 now（否则押了一天的立刻被 24 小时放弃），返回条数 */
+  releaseWall(now: number): number {
+    let n = 0;
+    for (const [ch, q] of [...this.entries()]) {
+      if (!q.some((i) => i.reason === "quota_wall")) continue;
+      for (const i of q) {
+        if (i.reason !== "quota_wall") continue;
+        delete i.reason;
+        i.heldAt = now;
+        n++;
+      }
+      this.set(ch, [...q]);
+    }
+    return n;
   }
 
   /** 投出去之后才摘掉并落盘：投递中途崩溃 / 别处 set 触发整表落盘时，盘上都还有它（至少投一次，收件方看 message_id 去重） */
@@ -122,12 +185,18 @@ export type HeldNotice = { kind: "still-queued" | "gave-up"; item: HeldItem; cha
  * 每分钟扫描时调：押满 30 分钟、还没通知过的 → still-queued（只发一次）；押满 24 小时 → 出队并 gave-up。
  * 返回要发给发送方的通知，发不发、怎么发由 bridge 决定（它手里有 clients）。
  */
-export function ageHeld(q: HeldQueue, now: number): HeldNotice[] {
+export function ageHeld(q: HeldQueue, now: number, paused: boolean | ((item: HeldItem) => boolean) = false): HeldNotice[] {
   const out: HeldNotice[] = [];
+  // 额度闸开着时发送方是 Claude Code 的停摆（paused）：提醒是直接 ws.send 给发送方的，它也撞着墙，提醒只会唤醒一个注定失败的回合
+  if (paused === true) return out;
   for (const [channelId, items] of [...q.entries()]) {
     const keep: HeldItem[] = [];
     let changed = false;
     for (const item of items) {
+      if (item.reason === "quota_wall" || (paused && paused(item))) {
+        keep.push(item); // 额度闸押的不提醒、不放弃：发送方多半也撞着墙，提醒只会唤醒一个注定失败的回合
+        continue;
+      }
       if (now - item.heldAt > HELD_GIVE_UP_MS) {
         out.push({ kind: "gave-up", item, channelId });
         notifyHeldSettled(item.env, "gave-up");
@@ -147,8 +216,13 @@ export function ageHeld(q: HeldQueue, now: number): HeldNotice[] {
 }
 
 /** 通知发送方的话（bridge.ts 包成 system notification 发到发送方的 ws） */
-export function heldNoticeText(n: HeldNotice): string {
+export function heldNoticeText(n: HeldNotice, human?: "owner" | "stranger"): string {
   const who = n.item.to.agentName || n.channelId;
+  if (human) {
+    const why = human === "owner" ? "它一直不空闲、停在额度菜单 / 自动续跑倒计时上，或不在线" : "对方一直无法接收"; // 额度状态只告诉 owner（canSeeQuota 同口径）
+    return `⚠️ [bridge] 你发给 ${who} 的消息排了 24 小时仍没送到（${why}），已放弃，没有发任何键。`
+      + `如仍需要请重发。原文：\n${String(n.item.env.content).slice(0, 1500)}`;
+  }
   const head = String(n.item.env.content).slice(0, 150);
   return n.kind === "still-queued"
     ? `[⏳ bridge] 你发给 ${who} 的消息已排队 30 分钟：对方一直在一个长回合里，这一轮结束就会送到，不用重发。原文开头: ${head}`

@@ -26,7 +26,12 @@ describe("manage 门", () => {
       expect((await call("GET", "/api/v1/relay/status", p))!.status).toBe(403);
       expect((await call("POST", "/api/v1/relay/pair", p, {}))!.status).toBe(403);
       expect((await call("GET", "/api/v1/stats", p))!.status).toBe(403);
+      expect((await call("POST", "/api/v1/relay/setup", p, {}))!.status).toBe(403);
     }
+  });
+  test("一键接入中继改的是本机 .env：老的全 scope Bearer token 也不行，只认带管理权限的设备凭据", async () => {
+    expect((await call("POST", "/api/v1/relay/setup", LEGACY_TOKEN, {}))!.status).toBe(403);
+    expect(await call("GET", "/api/v1/relay/setup", OWNER)).toBeNull();
   });
   test("别的方法 / 路径 → null（不抢 api-routes 的路）", async () => {
     expect(await call("POST", "/api/v1/relay/status", OWNER)).toBeNull();

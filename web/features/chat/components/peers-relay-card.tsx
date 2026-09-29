@@ -9,15 +9,35 @@ import { useT } from "@/lib/i18n";
 import { envSnippet, relayHome, relayMode, type RelayStatusView } from "../relay-card-logic";
 import { CopyButton } from "./peers-shared";
 import { PairCodeCard } from "./pair-share";
-import { relayStatus } from "@/lib/api/system";
+import { relaySetup, relayStatus } from "@/lib/api/system";
 import { newShareCode, type ShareCode } from "@/lib/api/devices";
 
-function OffBlock({ status }: { status: RelayStatusView }) {
+function OffBlock({ status, onEnabled }: { status: RelayStatusView; onEnabled: () => void }) {
   const t = useT();
   const snippet = envSnippet(status.relayUrl, status.slug);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  const enable = async () => {
+    setBusy(true);
+    setErr("");
+    try {
+      await relaySetup();
+      onEnabled();
+    } catch (e) {
+      setErr((e as Error).message || t("接入中继失败"));
+    } finally {
+      setBusy(false);
+    }
+  };
   return (
     <div className="mt-2 space-y-2 text-xs text-base-content/70">
-      <p className="leading-relaxed">{t("出门访问目前要靠 Tailscale；在 .env 里加这两行、重启 bridge，手机不装任何东西就能打开这台机器。")}</p>
+      <p className="leading-relaxed">{t("出门访问目前要靠 Tailscale。接入中继之后，手机不装任何东西就能打开这台机器。")}</p>
+      <button className="btn btn-primary btn-sm" disabled={busy} onClick={() => void enable()}>
+        {busy ? <span className="loading loading-spinner loading-xs" /> : t("一键接入官方中继")}
+      </button>
+      <p className="leading-relaxed text-warning">{t("官方中继目前能看到经隧道的内容，敏感内容请用自建中继。")}</p>
+      {err && <div className="text-error">{err}</div>}
+      <p className="pt-1 leading-relaxed text-base-content/55">{t("自建中继：在 .env 里加这两行、重启 bridge。")}</p>
       <div className="flex items-start gap-2">
         <pre className="flex-1 overflow-x-auto rounded-lg bg-base-100 p-2 font-mono text-[11px] leading-relaxed">{snippet}</pre>
         <CopyButton text={snippet} label="复制" />
@@ -94,7 +114,7 @@ export function RelayCard() {
         {mode !== "off" && status?.relayUrl && <span className="ml-auto truncate font-mono text-[10.5px] text-base-content/40">{status.relayUrl}</span>}
       </div>
       {mode === "unknown" && <div className="mt-2 text-xs text-error">{t("读取中继状态失败")}{status?.error ? `：${status.error}` : ""}</div>}
-      {mode === "off" && status && <OffBlock status={status} />}
+      {mode === "off" && status && <OffBlock status={status} onEnabled={() => { void load(); setTimeout(() => void load(), 3000); }} />}
       {mode === "connecting" && status && (
         <div className="mt-2 text-xs text-base-content/60">
           {t("没连上")}{status.state ? ` · ${status.state}` : ""}{status.lastError ? ` · ${status.lastError}` : ""}
