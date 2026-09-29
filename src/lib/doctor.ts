@@ -22,7 +22,7 @@ import { existsSync, statSync } from "fs";
 import { readFile, stat } from "fs/promises";
 import { resolveBunPath } from "./bun-path.js";
 import { DAEMONS } from "./cli-install.js";
-import { daemonState } from "./launchd-status.js";
+import { daemonDetail, daemonState } from "./launchd-status.js";
 import { readRegistryAgents, isMasterAgent } from "./registry.js";
 import { legacyWebDaemonCheck, legacyWebPlistPath, staticIndexExists, webStaticChecks, webStaticState } from "./web-static.js";
 
@@ -178,7 +178,7 @@ async function checkDaemons(): Promise<Check[]> {
     const fix = !d.loaded ? "bun src/manager.ts install-cli"
       : d.status === "fail" ? `launchctl kickstart -k gui/$(id -u)/${label}，起不来就看日志 ${logFile}`
       : d.status === "warn" ? `看日志 ${logFile}` : undefined;
-    out.push({ group: g, name: label, status: d.status, detail: d.detail, fix });
+    out.push({ group: g, name: label, status: d.status, detail: daemonDetail(d.reason, "zh"), fix });
   }
   // 旧 web 服务（v2.24–v2.28 的 next start）：前端现由 bridge 托管，它的 plist 还在就提醒退场（lib/web-static.ts）
   const legacy = legacyWebDaemonCheck(existsSync(legacyWebPlistPath()), g);
