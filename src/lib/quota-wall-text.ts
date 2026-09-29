@@ -9,7 +9,7 @@
  * agent 自己的正文不问；这里再只认句首、limit 后面紧跟标点或行尾，「You've hit your API limit on GitHub」这类话也不算。
  */
 import { parseResetAt } from "./autopilot-run.js";
-import { limitMenuAtBottom } from "./limit-menu.js";
+import { limitMenuAtBottom, menuTitleShown } from "./limit-menu.js";
 import { inputBox, paneSpinnerBusy } from "./turn-state.js";
 
 /** 「hit」是额度窗口，「reached your Fable limit」「Fable 5 limit」是单个模型的额度（本机实录 99 条） */
@@ -109,7 +109,7 @@ function footerLines(lines: string[]): string[] {
  */
 export function wallWaitKind(pane: string): "menu" | "countdown" | null {
   const lines = pane.replace(/\s+$/, "").split("\n");
-  const kind = limitMenuAtBottom(lines) ? "menu" : footerLines(lines).some((l) => WALL_WAIT_LINE.test(l)) ? "countdown" : null;
+  const kind = limitMenuAtBottom(lines) || menuTitleShown(lines) ? "menu" : footerLines(lines).some((l) => WALL_WAIT_LINE.test(l)) ? "countdown" : null;
   return kind && !paneSpinnerBusy(lines.filter((l) => !/^\s/.test(l) && !WALL_WAIT_LINE.test(l)).join("\n")) ? kind : null;
 }
 export const paneShowsWallWait = (pane: string): boolean => wallWaitKind(pane) !== null;

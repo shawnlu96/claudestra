@@ -6,6 +6,7 @@
 import { recordMetric } from "../lib/metrics.js";
 import { readRegistryAgents } from "../lib/registry.js";
 import { ownerStopOf } from "../lib/stop-words.js";
+import { windowWallWait, type WallWait } from "../lib/wall-screen.js";
 import { preemptHeadline, stopHeadline, stopWaitReply } from "../lib/turn-cuts.js";
 import { stopTyping } from "./components.js";
 import { clearSafetyTimer } from "./discord-adapter.js";
@@ -88,6 +89,9 @@ export async function preemptForHuman(env: Envelope, channelId: string, agent: s
   console.log(`⏹ 停字${r.fired ? "打断" : `（没发键：${r.why}）`} ${agent}（${runtime ?? "claude-code"}）`);
 }
 
+/** 手动停止的结果：keys 空 = 空闲 / 刚按过（deduped）/ 停在撞墙画面上（wall，一个键都没发） */
+type StopResult = { keys: readonly string[]; deduped?: true; wall?: WallWait };
+
 /**
  * 手动停止（Discord ⚡ 按钮 / /interrupt / API）：按运行时发键，owner 按的记一条「停」类 cut（不提醒续做、Autopilot 等 owner 再开口）、
  * 记指标、停 typing，并把回合状态收尾成 done——被打断的 CC 回合不发 Stop hook，不收尾的话 web 黄点常驻、busy 补锁复活。
@@ -96,11 +100,16 @@ export async function preemptForHuman(env: Envelope, channelId: string, agent: s
  */
 export async function manualInterrupt(
   channelId: string, win: string, runtime: string | undefined, agent: string, trigger: "button" | "slash" | "api", by: { owner: boolean; name?: string; peer?: string } = { owner: true },
-): Promise<{ keys: readonly string[]; deduped?: true }> {
+): Promise<StopResult> {
   const tools = toolsAt(agent, runtime);
   if (by.owner) clearAgentPendings(channelId); // 同停字：发键之前清，Pi 停下报的 Stop 不再被看门狗拿去催
   const r = await interruptGate.manual(channelId, win, runtime);
-  if (r.deduped) return r; // 刚按过一次停：那一次已经记过、收过尾
+  if (r.deduped) return { keys: r.keys, deduped: true }; // 刚按过一次停：那一次已经记过、收过尾
+  // 停在撞墙画面上：一个键都没发；owner 的停照样记下（Autopilot 让位），回报时说清是哪种画面（再抓一次屏，只为措辞）
+  if (r.wall && by.owner) {
+    turnCuts.record({ channelId, agent, runtime, cause: "manual", byName: by.name, tools: { inflight: [] }, interrupted: false });
+  }
+  if (r.wall) return { keys: [], wall: (await windowWallWait(win)) ?? "countdown" };
   // 空闲也记：owner 按了停，续做提醒和 Autopilot 都该停下
   if (by.owner) turnCuts.record({ channelId, agent, runtime, cause: "manual", byName: by.name, tools: r.keys.length ? tools : { inflight: [] }, interrupted: r.keys.length > 0 });
   else console.log(`⏹ ${by.name ?? "非 owner"} 按停止${r.keys.length ? "打断了" : "（空闲，没发键）"} ${agent}：只打断这一回合，不记成 owner 的「停」、不挂起 Autopilot`);
@@ -109,11 +118,11 @@ export async function manualInterrupt(
   clearSafetyTimer(channelId);
   // 空闲时也发 done：前端误判忙时借此解锁
   emitEvent({ agent, chatId: channelId, type: "agent_status", data: { status: "done", trigger: "interrupt", ...(by.peer ? { peer: by.peer } : {}) } });
-  return r;
+  return { keys: r.keys };
 }
 
 /** 按 agent 名手动打断（API 端点）：大总管（"master" / "0"）不在 registry 的普通条目里，按 Claude Code 的 master:0 处理 */
-export async function interruptAgentByName(name: string, channelId: string, by?: { owner: boolean; name?: string; peer?: string }): Promise<{ keys: readonly string[]; deduped?: true }> {
+export async function interruptAgentByName(name: string, channelId: string, by?: { owner: boolean; name?: string; peer?: string }): Promise<StopResult> {
   const isMaster = name === "master" || name === "0";
   const regs = isMaster ? [] : await readRegistryAgents().catch(() => []); // 读不到就按 CC 的打断键发：人要停，宁可发
   const runtime = regs.find((a) => a.name === name)?.runtime;

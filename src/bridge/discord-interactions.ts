@@ -469,7 +469,7 @@ async function handleInteraction(discord: Client, deps: InteractionDeps, interac
           const r = await manualInterrupt(channelId, windowTarget(agent.name), agent.runtime, agent.name, "slash").catch((e: Error) => e);
           if (r instanceof Error) return void (await interaction.reply(`❌ 发送打断键失败: ${r.message}`));
           const keys = r.keys;
-          if (!keys.length) return void (await interaction.reply(r.deduped ? `⏳ ${agent.name} 刚被打断过` : `💤 ${agent.name} 当前空闲，无需打断`));
+          if (!keys.length) return void (await interaction.reply(r.wall ? `⏸ ${agent.name} ${wallWaitRefusal(r.wall)}` : r.deduped ? `⏳ ${agent.name} 刚被打断过` : `💤 ${agent.name} 当前空闲，无需打断`));
           await finishStatusMessage(discord, channelId, t("⚡ 已打断", "⚡ Interrupted"));
           await interaction.reply(`⚡ 已发送 ${describeKeys(keys)}`);
         } else {
@@ -827,7 +827,7 @@ async function handleInteraction(discord: Client, deps: InteractionDeps, interac
             return void (await interaction.followUp({ content: `❌ tmux 发送打断键失败: ${r.message}`, ephemeral: true }).catch(() => {})); // 回执发不出无妨：错误已记日志
           }
           const keys = r.keys;
-          const idle = { content: r.deduped ? `⏳ ${agentLabel} 刚被打断过` : `💤 ${agentLabel} 当前空闲，无需打断`, ephemeral: true };
+          const idle = { content: r.wall ? `⏸ ${agentLabel} ${wallWaitRefusal(r.wall)}` : r.deduped ? `⏳ ${agentLabel} 刚被打断过` : `💤 ${agentLabel} 当前空闲，无需打断`, ephemeral: true };
           if (!keys.length) return void (await interaction.followUp(idle).catch(() => {})); // 回执发不出无妨：本就什么键都没按
           console.log(`⚡ ${describeKeys(keys)} 已发送给 ${agentLabel}`);
           await finishStatusMessage(discord, targetChannelId, t("⚡ 已打断", "⚡ Interrupted"));

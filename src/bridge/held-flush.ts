@@ -4,9 +4,13 @@
  * 规则：压缩中不投；目标在回合中只投人类消息（它们只因「别掐压缩」被押）；check_inbox 租约内的不投；
  * 投出去之后才出队；目标又忙就停，原条目留着、计时不变；每个频道同一时刻只有一个投递者（held.claim）。
  */
+import { isOwnerSource } from "../lib/delegate-marker.js";
+import { tmuxCapture } from "../lib/tmux-helper.js";
+import { inputBox } from "../lib/turn-state.js";
 import { heldAcrossStopNote } from "../lib/turn-cuts.js";
 import { leaseActive, type HeldItem, type HeldQueue } from "./held-queue.js";
 import type { Delivery, Envelope, LocalEndpoint } from "./router.js";
+import { resolveTurnWindow } from "./turn-probe.js";
 
 export interface FlushDeps {
   held: HeldQueue;
@@ -23,6 +27,27 @@ export interface FlushDeps {
   touch: (channelId: string, env: Envelope) => void;
   /** owner 最近一次叫停这个频道的时刻（bridge/turn-cuts.ts stoppedAt）；押在它之前的条目投出去时加抬头 */
   stoppedAt?: (channelId: string) => number | undefined;
+  /** 画面真静下来了（外人的消息投之前看）；不给 = 隔 1.5 秒抓两次屏比输入框以上（paneSettled） */
+  settled?: (channelId: string) => Promise<boolean>;
+}
+
+const SETTLE_GAP_MS = 1_500;
+/** 输入框以上的内容（正文区）；认不出输入框 = null */
+function aboveBox(pane: string): string | null {
+  const lines = pane.replace(/\s+$/, "").split("\n");
+  const b = inputBox(lines);
+  return b ? lines.slice(0, b.top).join("\n") : null;
+}
+/**
+ * CC 流式出正文时画面上没有 spinner、事件态也还是上一轮的 done（沙箱实测：到点自己续跑的那一轮整轮都这样），判忙看不出它在跑。
+ * 外人的消息投进去就混进这一轮（adv3 P2-1）：投之前隔 1.5 秒抓两次屏，正文区在变 = 还在出字，等下一次触发（Stop / 扫描）
+ */
+async function paneSettled(channelId: string): Promise<boolean> {
+  const { win } = await resolveTurnWindow(channelId, "");
+  if (!win) return false;
+  const a = aboveBox(await tmuxCapture(win, 60));
+  await Bun.sleep(SETTLE_GAP_MS);
+  return a !== null && a === aboveBox(await tmuxCapture(win, 60));
 }
 
 /**
@@ -32,6 +57,35 @@ export interface FlushDeps {
 function markIfHeldAcrossStop(item: HeldItem, stopAt: number | undefined): void {
   const m = item.env.meta;
   if (stopAt && item.heldAt < stopAt && item.env.from.kind !== "bridge" && !m.interruptNote) m.interruptNote = heldAcrossStopNote(item.heldAt, stopAt);
+}
+
+/** 发送人：同一个人（同一个 token / Discord 用户 / agent 频道）连着的几条可以进同一轮 */
+function senderOf(env: Envelope): string {
+  const f = env.from;
+  return f.kind === "api" ? `api:${f.tokenId}` : f.kind === "user" ? `user:${f.userId}` : f.kind === "local" ? `local:${f.channelId}` : f.kind;
+}
+/** 频道 → 这一轮是补投谁的消息开的（目标一空闲就清）：在跑的这一轮不是他开的，他押着的人类消息就等它结束 */
+const openedBy = new Map<string, string>();
+/** 单测之间清掉（生产里目标一空闲就清） */
+export const clearOpenedBy = (): void => openedBy.clear();
+
+/**
+ * 这一条能不能在这一趟接着投（adv3 P2-1，跨 principal 串话）：押着的人类消息一轮只投一个发送人的，不同人各自开一轮、按到达顺序排——
+ * 冷却期不抢占、Stop 兜底会结掉该频道所有 waiter，混投一轮 guest 就拿到给 owner 的话。在跑的一轮不是补投开的（CC 到点自己续跑、
+ * 别处送进来的）：外人的不塞进去，owner 的照常抢占。只有 agent / bridge 消息的一趟照旧一起投（不涉及人，行为不变）
+ */
+async function mayJoin(d: FlushDeps, item: HeldItem, channelId: string, working: boolean, first: HeldItem | undefined): Promise<boolean> {
+  const who = senderOf(item.env);
+  const human = d.isHumanRequest(item.env);
+  if (first && (human || d.isHumanRequest(first.env)) && senderOf(first.env) !== who) return false;
+  if (!human) return true;
+  const opener = openedBy.get(channelId);
+  if (working) return opener ? opener === who : isOwnerSource(item.env.from);
+  // 判成空闲、这一趟还没投过：外人的再确认画面静下来了（流式出字时判不出忙）；同一个人紧跟着的几条不用再看
+  if (isOwnerSource(item.env.from) || first) return true;
+  if (await (d.settled ?? paneSettled)(channelId).catch(() => false)) return true; // 抓屏出错按没静下来：留在队里等 Stop / 下一次扫描
+  console.log(`⏸ 押着的外人消息先不投：${item.to.agentName || channelId} 画面还在变（多半在出字），等 Stop / 下一次扫描`);
+  return false;
 }
 
 export async function flushHeld(d: FlushDeps, channelId: string, reason: string): Promise<void> {
@@ -45,6 +99,8 @@ export async function flushHeld(d: FlushDeps, channelId: string, reason: string)
   if (!d.held.claim(channelId)) return; // Stop / 压缩结束 / 扫描撞车:别人正在投这个频道
   try {
     const working = await d.working(channelId, evAgent);
+    if (!working) openedBy.delete(channelId);
+    let first: HeldItem | undefined;
     // 人类消息只因「别掐压缩」被押,压缩一结束就该到——不等回合空闲,deliverToLocal 自带抢占(C-c)语义;
     // agent→agent 仍等空闲(回合中通知有丢弃窗口)。快照:遍历中别处可能往这个频道 hold 新消息,只投这一刻到期的
     const humanOnly = working || walled;
@@ -55,6 +111,7 @@ export async function flushHeld(d: FlushDeps, channelId: string, reason: string)
       if (!fresh) break;
       // claim 只挡别的 flush / check_inbox:await 期间 ageHeld 放弃、kill 清理都可能已把它摘掉,摘掉的就别再投
       if (!d.held.get(channelId)?.includes(item)) continue;
+      if (!(await mayJoin(d, item, channelId, working, first))) break;
       const to: LocalEndpoint = { ...item.to, ws: fresh.ws, cwd: fresh.cwd };
       markIfHeldAcrossStop(item, d.stoppedAt?.(channelId));
       const r = await d.deliver(item.env, to, () => !!d.held.get(channelId)?.includes(item));
@@ -63,7 +120,7 @@ export async function flushHeld(d: FlushDeps, channelId: string, reason: string)
       // 也不会「新的已落盘、旧的还没摘」时崩溃留下两份。等下一次触发
       if (r.outcome.kind === "sent" && r.outcome.note === "queued") break;
       // 先 touch 再出队落盘:中间崩溃也只是重投一次,不会拿旧钟把回程扫掉
-      if (r.outcome.kind === "sent") d.touch(channelId, item.env);
+      if (r.outcome.kind === "sent") d.touch(channelId, item.env), (first ??= item), openedBy.set(channelId, senderOf(item.env));
       d.held.remove(channelId, item);
       if (r.outcome.kind === "sent") console.log(`▶️ 押后消息投递(${reason}): ${item.env.from.kind === "local" ? item.env.from.agentName : "?"} → ${to.agentName || channelId}`);
     }

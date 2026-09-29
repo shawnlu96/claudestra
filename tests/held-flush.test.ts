@@ -3,10 +3,12 @@
  * 投到一半目标又忙只留原条、计时不变、不 touch；await 期间被别处摘掉的不投；租约内不投；忙时只投人类消息；
  * 不在线 / 压缩中 / 别人正在投都不动；投递报错留着下次再投。
  */
-import { describe, expect, test } from "bun:test";
-import { dropHeldOnKill, flushHeld, type FlushDeps } from "../src/bridge/held-flush.js";
+import { beforeEach, describe, expect, test } from "bun:test";
+import { clearOpenedBy, dropHeldOnKill, flushHeld, type FlushDeps } from "../src/bridge/held-flush.js";
 import { ageHeld, HELD_GIVE_UP_MS, HELD_NOTIFY_MS, HeldQueue, INBOX_LEASE_MS, type HeldItem } from "../src/bridge/held-queue.js";
 import type { Delivery, Envelope, LocalEndpoint } from "../src/bridge/router.js";
+
+beforeEach(() => clearOpenedBy());
 
 const ws = { tag: "target-ws" } as never;
 const item = (content: string, from: "local" | "user" = "local", heldAt = 1000): HeldItem => ({
@@ -221,5 +223,70 @@ describe("撞墙等待时押着的人发消息：窗口一动就补投（T24 wf3
     flushHumanSoon(b, "wf3-a", 12_000);
     flushHumanSoon(b, "wf3-h", 16_000);
     expect(flushed).toEqual(["wf3-h", "wf3-h"]);
+  });
+});
+
+describe("押着的人类消息一轮只投一个发送人（adv3 P2-1 升 P1：出闸成批补投跨 principal 串话）", () => {
+  const api = (content: string, tokenId: string, owner = false): HeldItem => {
+    const i = item(content);
+    return { ...i, env: { ...i.env, from: { kind: "api", tokenId, name: tokenId, ...(owner ? { owner: true as const } : {}) } } as Envelope };
+  };
+  const humanApi = { isHumanRequest: (env: Envelope) => env.from.kind === "user" || (env.from.kind === "api" && !env.from.peer), settled: async () => true };
+
+  test("审查员复现 1：倒计时上押着 owner1、owner2、guest，画面空闲后补投：owner 两条进一轮，guest 等这一轮结束（中途的扫描 / 活动触发也不塞）", async () => {
+    let working = false;
+    const h = harness([api("owner1", "owner:self", true), api("owner2", "owner:self", true), api("guest", "tok-g")], { ...humanApi, working: async () => working });
+    await flushHeld(h.deps, "c-me", "stop");
+    expect(h.delivered).toEqual(["owner1", "owner2"]);
+    working = true;
+    await flushHeld(h.deps, "c-me", "wall_activity");
+    await flushHeld(h.deps, "c-me", "sweep");
+    expect(h.contents()).toEqual(["guest"]);
+    working = false; // owner 那一轮 Stop
+    await flushHeld(h.deps, "c-me", "stop");
+    expect(h.delivered).toEqual(["owner1", "owner2", "guest"]);
+  });
+
+  test("审查员复现 2：CC 到点自己续跑的那一轮（不是补投开的）：guest 不塞进去，等它结束；owner 的照常进（抢占）", async () => {
+    const h = harness([api("guest", "tok-g")], { ...humanApi, working: async () => true });
+    await flushHeld(h.deps, "c-me", "wall_activity");
+    expect(h.delivered).toEqual([]);
+    const o = harness([api("owner", "owner:self", true)], { ...humanApi, working: async () => true });
+    await flushHeld(o.deps, "c-me", "wall_activity");
+    expect(o.delivered).toEqual(["owner"]);
+  });
+
+  test("按到达顺序：guest 先到先开一轮，后到的 owner 等 guest 那一轮结束；agent 请求开的一轮也不混进 guest", async () => {
+    let working = false;
+    const h = harness([api("guest", "tok-g"), api("owner", "owner:self", true)], { ...humanApi, working: async () => working });
+    await flushHeld(h.deps, "c-me", "quota_wall");
+    expect(h.delivered).toEqual(["guest"]);
+    working = true;
+    await flushHeld(h.deps, "c-me", "sweep");
+    expect(h.contents()).toEqual(["owner"]);
+    const pm = harness([item("pm-request"), api("guest", "tok-g")], humanApi);
+    await flushHeld(pm.deps, "c-me", "stop");
+    expect(pm.delivered).toEqual(["pm-request"]);
+    expect(pm.contents()).toEqual(["guest"]);
+  });
+
+  test("判成空闲但画面还在变（CC 流式出正文时没有 spinner、事件态还是 done）：guest 的等画面静下来；owner 的不用等", async () => {
+    let still = false;
+    const h = harness([api("guest", "tok-g")], { ...humanApi, settled: async () => still });
+    await flushHeld(h.deps, "c-me", "sweep");
+    expect(h.delivered).toEqual([]);
+    still = true;
+    await flushHeld(h.deps, "c-me", "stop");
+    expect(h.delivered).toEqual(["guest"]);
+    const o = harness([api("owner", "owner:self", true)], { ...humanApi, settled: async () => false });
+    await flushHeld(o.deps, "c-me", "sweep");
+    expect(o.delivered).toEqual(["owner"]);
+  });
+
+  test("只有 agent 消息的一趟照旧一起投（不涉及人，行为不变）", async () => {
+    const other = item("b");
+    const h = harness([item("a"), { ...other, env: { ...other.env, from: { kind: "local", agentName: "agent-pm", channelId: "c-pm", ws } } as Envelope }], humanApi);
+    await flushHeld(h.deps, "c-me", "stop");
+    expect(h.delivered).toEqual(["a", "b"]);
   });
 });

@@ -5,7 +5,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   countsAsWallActivity, emptyWallState, enterFromUsage, exitVia, isHumanSender, observeCache, markExit, noteOtherError, noteWallActivity, noteWallHit, notifyDue, probeDue,
-  resumeTargets, wallActive, WALL_TIMING, type WallState,
+  resumeTargets, wallActive, WALL_TIMING, type UsageSignal, type WallState,
 } from "../src/lib/quota-wall.js";
 import { noticeOncePerState, recoveredNotice, wallNotice, wallResumeText } from "../src/lib/quota-wall-notice.js";
 import { limitsResetEchoes, matchLimitMenu, parseWallText } from "../src/lib/quota-wall-text.js";
@@ -130,6 +130,26 @@ describe("出闸（任一来源）", () => {
     expect(exitVia(obsAll(sw, at99), { now: T0 + 10, cache: at99 })).toBeNull();
     const rolled = { ...at99, sessionPct: 0, sessionResetsAtMs: 5e12 + 18e6, scrapedAt: T0 + 9 };
     expect(exitVia(obsAll(sw, at99, rolled), { now: T0 + 10, cache: rolled })).toBe("usage_cache");
+  });
+  test("闸里第一眼看到的是旧周期的写者（重置时刻已过）：不拿它打底，当前周期的正常写入不算滚动（adv3 P2-3，周墙 / session 墙）", () => {
+    const run = (wall: NonNullable<WallState["wall"]>, seq: UsageSignal[]) => {
+      let cur = wall;
+      for (const c of seq) {
+        cur = observeCache({ v: 1, wall: cur }, c)?.wall ?? cur;
+        const via = exitVia(cur, { now: c.scrapedAt + 1, cache: c });
+        if (via) return via;
+      }
+      return null;
+    };
+    const ww = w(), R = ww.resetsAt!, DAY = 86_400_000;
+    const wk = (i: number, weekPct: number, at: number): UsageSignal => ({ sessionPct: 30, weekPct, sessionResetsAtMs: T0 + 7_200_000, weekResetsAtMs: at, scrapedAt: T0 + 15_000 * (i + 1) });
+    expect(run(ww, [wk(0, 40, R - 7 * DAY), wk(1, 100, R), wk(2, 40, R - 7 * DAY)])).toBeNull();
+    expect(run(ww, [wk(0, 40, R - 7 * DAY), wk(1, 99, R)])).toBeNull();
+    expect(run(ww, [wk(0, 100, R), wk(1, 3, R + 7 * DAY)])).toBe("usage_cache"); // 真滚动照样出
+    const sw = hit(emptyWallState(), "a", T0, SESSION).state.wall!, S = sw.resetsAt!, H = 3_600_000;
+    const ss = (i: number, sessionPct: number, at: number): UsageSignal => ({ sessionPct, weekPct: 40, sessionResetsAtMs: at, weekResetsAtMs: T0 + 3 * DAY, scrapedAt: T0 + 15_000 * (i + 1) });
+    expect(run(sw, [ss(0, 40, S - 5 * H), ss(1, 100, S), ss(2, 40, S - 5 * H)])).toBeNull();
+    expect(run(sw, [ss(0, 40, S - 5 * H), ss(1, 99, S)])).toBeNull();
   });
   test("session 墙被陈旧写入放行不了：见过 5h 满之后，旧会话写回上一周期（更早的 reset）的 5h 40%（T24 adv2 ④）", () => {
     const sw = hit(emptyWallState(), "a", T0, SESSION).state.wall!;

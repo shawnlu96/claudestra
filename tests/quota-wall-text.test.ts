@@ -7,6 +7,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { isLimitHitText, isModelLimitHit, matchLimitMenu, paneShowsLowPriority, paneShowsWallWait, parseWallText, wallHitOf, wallWaitKind } from "../src/lib/quota-wall-text.js";
 import { paneMainTurnBusy } from "../src/lib/turn-state.js";
+import { limitMenuAtBottom } from "../src/lib/limit-menu.js";
 
 const at = (iso: string) => Date.parse(iso);
 
@@ -177,7 +178,8 @@ describe("真实画面样本（T35 2026-09-29 录的 CC 画面，去掉 ANSI：t
     expect(paneShowsWallWait(foot.join("\n"))).toBe(true);
     expect(paneShowsWallWait(["✻ Pondering… (2m 3s · ↓ 1.2k tokens)", ...foot.slice(1)].join("\n"))).toBe(false); // 顶格 spinner = 真在跑
     const garbled = ["   What do you want to do?", "   ❯ 1. Stop and wait for limit to reset", "Some prose at column 0", "   Enter to confirm · Esc to cancel"];
-    expect(paneShowsWallWait(garbled.join("\n"))).toBe(false); // 选项之间夹着顶格的别的内容：不是菜单
+    expect(limitMenuAtBottom(garbled)).toBe(false); // 选项之间夹着顶格的别的内容：不算认得的菜单
+    expect(paneShowsWallWait(garbled.join("\n"))).toBe(true); // 但标题在、下面没有输入框：宁可不发键（adv3 P2-2）
   });
   test("CC 2.1.283 的另外三种倒计时：周额度 80 列截断、重置时间未知、到点后 continuing shortly（T24 wf keys-screens-2；按 CC 源码文案从 walled.txt 推出）", () => {
     for (const f of ["walled-weekly-80col", "walled-when-resets", "walled-shortly"]) expect([f, paneShowsWallWait(pane(f))]).toEqual([f, true]);

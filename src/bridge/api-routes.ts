@@ -26,7 +26,7 @@ import {
   INVALID_JSON,
   readJsonBody,
   invalidJsonBody,
-  liveInteractiveHolder, heldFields,
+  liveInteractiveHolder, heldFields, stopExtra,
 } from "./api-respond.js";
 import { interruptAgentByName } from "./preempt.js";
 import { existsSync, readdirSync, statSync } from "fs";
@@ -1342,8 +1342,8 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
     if (r instanceof Error) return apiJson(500, { ok: false, error: `tmux send-keys 失败: ${r.message}` });
     if (r.deduped) return apiJson(200, { ok: true, deduped: true });
     const sent = r.keys;
-    console.log(`⚡ [api] ${sent.length ? "打断键已发送" : "当前空闲，未发打断键"}：${agent.name} (token=${tokenId})`);
-    return apiJson(200, { ok: true, agent: agent.name, ...(sent.length ? {} : { idle: true }) }); // done 照发：前端误判忙时借此解锁
+    console.log(`⚡ [api] ${sent.length ? "打断键已发送" : r.wall ? "停在撞墙画面上，没发键" : "当前空闲，未发打断键"}：${agent.name} (token=${tokenId})`);
+    return apiJson(200, { ok: true, agent: agent.name, ...stopExtra(r, principal) }); // done 照发：前端误判忙时借此解锁
   }
 
   // POST /api/v1/agents/:name/clear —— 远程调用 CC 原生 /clear（清上下文）。

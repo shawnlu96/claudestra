@@ -160,6 +160,16 @@ describe("wf3 delivery-hold-1：续跑继承撞错的那一轮，不是「上一
     });
   }
 
+  test("重启后没有撞错那一轮的记录：续跑消息开的一轮来源未知，按外人算，不把它的话结给在等的 PM（adv3 P2-8）", async () => {
+    const h = harness();
+    h.book.add(h.cid, call("c-pm"), "m1");
+    h.book.markApiError(h.cid, () => false, null, "c-pm"); // 撞墙那一刻记在回程簿上（落盘），bridge 随后重启、内存里的来源记录没了
+    h.deliver({ kind: "bridge", label: "quota-wall" }, 1_000);
+    await h.stop("Stop", { text: "不知道是接着谁的活说的话" });
+    expect(h.pushed).toEqual([]);
+    expect(h.rearmed).toEqual([h.cid]);
+  });
+
   test("CC 自己续跑 PM 那一轮时被 guest 抢占（Esc）：guest 那一轮按外人，之后出闸续跑仍结给 PM", async () => {
     const h = harness();
     h.book.add(h.cid, call("c-pm"), "m1");

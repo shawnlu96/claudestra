@@ -94,7 +94,7 @@ function productionWall(b: WallBridgeDeps): QuotaWall {
     },
     held: {
       wallCount: () => b.held.wallCount((e) => isHumanSender(e.from)),
-      queuedFor: (cid) => !!b.held.get(cid)?.length,
+      queuedFor: (cid) => !!b.held.get(cid)?.some((i) => senderTrigger(i.env.from) !== "stranger"),
       wallChannels: () => b.held.wallChannels(),
       wakers: () => b.held.wallChannels((i) => senderTrigger(i.env.from) !== "stranger"),
       release: (now) => b.held.releaseWall(now),

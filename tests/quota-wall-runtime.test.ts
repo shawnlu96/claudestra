@@ -59,7 +59,7 @@ function rig(opts: RigOpts = {}) {
     mainTurnBusy: async (cid) => (opts.busy ?? []).includes(cid),
     held: {
       wallCount: () => held.wallCount(),
-      queuedFor: (cid) => !!held.get(cid)?.length,
+      queuedFor: (cid) => !!held.get(cid)?.some((i) => senderTrigger(i.env.from) !== "stranger"),
       wallChannels: () => held.wallChannels(),
       wakers: () => held.wallChannels((i) => senderTrigger(i.env.from) !== "stranger"),
       release: (t) => held.releaseWall(t),
@@ -192,16 +192,26 @@ describe("出闸三个来源", () => {
     expect(r.disk().wall!.exit!.via).toBe("limits_reset");
   });
 
+  test("进闸通知发出前还没探过：先探一次，探不到就在通知里写「探测不可用」那行（adv3 P2-9）", async () => {
+    const r = rig();
+    await hitWall(r, "a");
+    r.probe.v = null;
+    r.advance(60_000);
+    await r.wall.tick();
+    expect(r.probe.calls).toBe(1);
+    expect(r.notices.at(-1)).toContain("只读用量探测不可用");
+  });
+
   test("用量探测：5 分钟一次，看到 <100 出闸", async () => {
     const r = rig();
     await hitWall(r, "a");
     r.probe.v = { pct: 100, observedAt: T0 + 60_000 };
     r.advance(60_000);
     await r.wall.tick();
-    expect(r.probe.calls).toBe(0);
+    expect(r.probe.calls).toBe(1); // 进闸通知前先探一次（通知要写探测可不可用）
     r.advance(5 * 60_000);
     await r.wall.tick();
-    expect(r.probe.calls).toBe(1);
+    expect(r.probe.calls).toBe(2);
     expect(r.wall.active()).toBe(true);
     r.probe.v = { pct: 4, observedAt: r.at() + 5 * 60_000 };
     r.advance(5 * 60_000);
@@ -346,6 +356,17 @@ describe("恢复的边角（T24 r1 P2-1/2/3/7/9）", () => {
     expect(r.flushed.sort()).toEqual(["a", "b", "c", "pm"]);
     expect(r.resumed.map((x) => x.cid).sort()).toEqual(["a", "b"]);
     expect(r.disk().wall!.recovery!.wakers!.sort()).toEqual(["c", "pm"]);
+  });
+
+  test("owner 的消息补投送到了、同频道 guest 那条按发送人分轮还押着：owner 已经叫醒它，不另发续跑（adv3 P1-a 之后）", async () => {
+    const r = rig({ busy: ["a"] });
+    await hitWall(r, "a");
+    r.held.holdEnv(env({ kind: "api", tokenId: "tok-o", name: "owner", owner: true }, "a", "owner-a"), "quota_wall");
+    r.held.holdEnv(env({ kind: "api", tokenId: "tok-g", name: "guest" }, "a", "guest-a"), "quota_wall");
+    r.deps.flush = async (cid) => void r.held.set(cid, (r.held.get(cid) ?? []).filter((i) => i.env.content !== "owner-a"));
+    r.wall.clear();
+    await r.wall.tick();
+    expect(r.resumed).toEqual([]);
   });
 
   test("补投的外人消息一送到就开了一轮（判成在跑）：续跑押到那一轮后面照发；没补投过、在跑的才算自己续上了（沙箱 e2e 复现）", async () => {

@@ -40,7 +40,7 @@ export interface QuotaWallDeps {
   held: {
     /** 押着、原因是额度闸的条数：人发的（停在菜单 / 倒计时上的窗口）和 agent / bridge 消息分开 */
     wallCount(): { human: number; agent: number };
-    /** 这个频道还有没投出去的消息 */
+    /** 这个频道还押着没投出去的自己人（agent / bridge / owner）消息：补投没送到、叫不醒它（外人的消息补投时按发送人分轮，剩下的不算） */
     queuedFor(channelId: string): boolean;
     /** 有额度闸消息的频道，按最早入队排序；wakers = 其中有自己人（agent / bridge / owner）消息的，补投它会接着做被打断的事 */
     wallChannels(): string[];
@@ -129,16 +129,10 @@ async function sawLimitsReset(c: Ctx): Promise<boolean> {
 
 /** 闸内每一拍：到点发进闸通知、到点探用量、看出闸信号 */
 async function watchWall(c: Ctx, now: number): Promise<void> {
-  const w = c.state.wall!;
-  if (notifyDue(w, now)) {
-    const credits = await c.d.credits().catch(() => null); // 读不到卡数：通知里不写重置卡那行，别的照发
-    const n = c.d.held.wallCount();
-    const text = wallNotice(w, { now, queued: n.agent, queuedHuman: n.human, credits, probeDown: !!w.probeDown });
-    c.d.log(`📣 额度闸通知 owner：${text.split("\n").join(" / ")}`);
-    if (await c.d.notifyOwner(text).catch(() => false)) patchWall(c, { notifiedAt: now }); // 没发出去就不记，下一拍重发
-  }
+  const notify = notifyDue(c.state.wall!, now);
   let probe: { pct: number | null; observedAt: number } | null = null;
-  if (probeDue(c.state.wall!, now)) {
+  // 进闸通知要写「探测不可用」那行：发通知前还没探过就先探一次（不然通知总在第一次探测之前发，那行永远出不来，adv3 P2-9）
+  if (probeDue(c.state.wall!, now) || (notify && c.state.wall!.probeDown === undefined)) {
     patchWall(c, { lastProbeAt: now }); // 先记时刻：探失败也等下一个 5 分钟，退避交给 T2b-2 的调度器
     probe = await c.d.probe().catch(() => null); // 探失败 = 这次没有这个信号，别的出闸来源照常
     const down = !probe || probe.pct === null;
@@ -146,6 +140,14 @@ async function watchWall(c: Ctx, now: number): Promise<void> {
       patchWall(c, { probeDown: down });
       c.d.log(down ? "🔎 额度闸：只读用量探测不可用（关着 / 凭据失败 / 退避中），只能等「Limits reset」回显、到点，或人点「已恢复」" : "🔎 额度闸：只读用量探测恢复了");
     }
+  }
+  if (notify) {
+    const w = c.state.wall!;
+    const credits = await c.d.credits().catch(() => null); // 读不到卡数：通知里不写重置卡那行，别的照发
+    const n = c.d.held.wallCount();
+    const text = wallNotice(w, { now, queued: n.agent, queuedHuman: n.human, credits, probeDown: !!w.probeDown });
+    c.d.log(`📣 额度闸通知 owner：${text.split("\n").join(" / ")}`);
+    if (await c.d.notifyOwner(text).catch(() => false)) patchWall(c, { notifiedAt: now }); // 没发出去就不记，下一拍重发
   }
   const cache = c.d.readCache();
   const seen = observeCache(c.state, cache);

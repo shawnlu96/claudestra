@@ -98,9 +98,11 @@ export function createInterruptGate(deps: InterruptGateDeps, cooldownMs = 4_000)
      * 手动打断（停止按钮 / /interrupt / API）：人明确要停，不看画面判据，按运行时发键（Codex 自己只在忙时发 Esc）。
      * 离上一次发键不足 MANUAL_GAP_MS：上一次也是停止（双击、按钮 + API 同时到）就去重；上一次是自动抢占就等够再发
      * （和停字一样）——抢占后紧接着按停，要停的是插话刚开的那一回合，去重掉就一个键都没发。发键出错原样抛给调用方回报。
+     * 停在额度菜单 / 撞墙倒计时上谁按都不发（wall: true）：Esc 会取消 owner 排好的自动续跑（adv3 P2-4），调用方如实回报
      */
-    manual(channelId: string, win: string, runtime: string | undefined): Promise<{ keys: readonly string[]; deduped?: true }> {
+    manual(channelId: string, win: string, runtime: string | undefined): Promise<{ keys: readonly string[]; deduped?: true; wall?: true }> {
       return serial(channelId, async () => {
+        if (deps.wallWait && (await deps.wallWait(win))) return { keys: [], wall: true as const };
         const since = sinceKey(channelId);
         if (since <= MANUAL_GAP_MS && lastManual.has(channelId)) return { keys: [], deduped: true as const };
         if (since <= gapAfter(channelId)) await deps.sleep(gapAfter(channelId) - since + 50);

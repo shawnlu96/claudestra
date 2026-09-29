@@ -197,11 +197,15 @@ export function observeCache(s: WallState, u: UsageSignal | null): WallState | n
   const w = s.wall;
   if (!u || !w || w.exit || u.scrapedAt <= w.enteredAt) return null;
   const p = w.cache && "fullWeek" in w.cache ? w.cache : undefined; // 老形状（不分窗口）：丢掉重新看，只会出闸更晚
+  // 重置时刻已经过了的是旧周期的写者：不计满、不计入 max——闸里第一眼看到它的话，拿它打底，当前周期的正常写入就成了「滚动」
+  // （adv3 P2-3）。不拿报错原文的重置时刻打底：原文只到分钟，缓存是精确时刻，差几秒就会被当成滚过去
+  const live = (ms: number | null): number | null => (ms !== null && ms > u.scrapedAt ? ms : null);
+  const [weekAt, sessionAt] = [live(u.weekResetsAtMs), live(u.sessionResetsAtMs)];
   const next: WallCacheSeen = {
-    fullWeek: !!p?.fullWeek || full(u.weekPct), fullSession: !!p?.fullSession || full(u.sessionPct),
-    rolledWeek: !!p && (p.rolledWeek || advanced(p.maxWeek, u.weekResetsAtMs)),
-    rolledSession: !!p && (p.rolledSession || advanced(p.maxSession, u.sessionResetsAtMs)),
-    maxWeek: later(p?.maxWeek ?? null, u.weekResetsAtMs), maxSession: later(p?.maxSession ?? null, u.sessionResetsAtMs),
+    fullWeek: !!p?.fullWeek || (weekAt !== null && full(u.weekPct)), fullSession: !!p?.fullSession || (sessionAt !== null && full(u.sessionPct)),
+    rolledWeek: !!p && (p.rolledWeek || advanced(p.maxWeek, weekAt)),
+    rolledSession: !!p && (p.rolledSession || advanced(p.maxSession, sessionAt)),
+    maxWeek: later(p?.maxWeek ?? null, weekAt), maxSession: later(p?.maxSession ?? null, sessionAt),
   };
   if (p && JSON.stringify(p) === JSON.stringify(next)) return null;
   return { v: 1, wall: { ...structuredClone(w), cache: next } };

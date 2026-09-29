@@ -203,6 +203,14 @@ describe("manual：停止按钮 / /interrupt / API", () => {
     }
   });
 
+  test("停在额度菜单（含 34 列折行）/ 撞墙倒计时上：谁按停止都一个键不发，回 wall（adv3 P2-4：Esc 会取消 owner 排好的自动续跑）", async () => {
+    for (const f of ["walled", "menu-no-lp", "menu-narrow34", "menu-narrow34-credits-first"]) {
+      const h = harness({ screens: [fixture(f)] });
+      expect([f, await h.gate.manual("ch", "w", undefined)]).toEqual([f, { keys: [], wall: true }]);
+      expect(h.keys).toEqual([]);
+    }
+  });
+
   test("双击：1.5s 内第二下去重，不发键（两次键挨太近：CC 双 Esc 开 Rewind、Codex 双 Esc 回溯遮罩）", async () => {
     const h = harness();
     const r = await Promise.all([h.gate.manual("ch", "w", undefined), h.gate.manual("ch", "w", undefined)]);

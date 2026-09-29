@@ -74,7 +74,9 @@ export function noteDelivered(cid: string, from: Sender, now = Date.now(), idle 
   const who = senderTrigger(from);
   const caller = from.kind === "local" && from.channelId ? [from.channelId] : [];
   const prev = resumeRec(cid);
-  const fresh = (): TriggerRec => (from.kind === "bridge" && RESUME_LABELS.has(from.label ?? "") && prev ? { ...prev, at: now } : { who, at: now, callers: caller });
+  // 续跑消息开的一轮继承撞错那一轮；重启后没有记录 = 来源未知，按外人算（不结算，adv3 P2-8）
+  const resume = from.kind === "bridge" && RESUME_LABELS.has(from.label ?? "");
+  const fresh = (): TriggerRec => (resume && prev ? { ...prev, at: now } : { who: resume ? "stranger" : who, at: now, callers: caller });
   if (cutSince.delete(cid)) return void turnTrigger.set(cid, fresh());
   const cur = turnTrigger.get(cid);
   const batch = !!cur && now - cur.at <= TRIGGER_BATCH_MS;

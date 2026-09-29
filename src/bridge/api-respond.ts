@@ -6,6 +6,7 @@
  */
 import { agentInScope, type Principal } from "../lib/principals.js";
 import { canManage, canSeeQuota } from "../lib/devices.js";
+import { wallWaitRefusal, type WallWait } from "../lib/wall-screen.js";
 import { readLiveCcSessionEntries, type CcSessionEntry } from "../lib/cc-sessions.js";
 import { isMasterName, readRegistryAgents } from "../lib/registry.js";
 
@@ -25,6 +26,11 @@ export function isFullScope(principal: Principal): boolean {
 /** 投递被押住（额度闸 / 停在额度菜单，没发键）时 202 里多带的：queued 给所有人，原因 heldBy 只给能看额度的 owner（canSeeQuota） */
 export function heldFields(heldBy: unknown, principal: Principal): { queued?: true; heldBy?: string } {
   return typeof heldBy === "string" && heldBy ? { queued: true, heldBy: canSeeQuota(principal) ? heldBy : undefined } : {};
+}
+
+/** POST /interrupt 没发键时的回执：停在撞墙画面上 → wallWait + 如实的原因（额度状态只告诉 canSeeQuota 的）；否则空闲 */
+export function stopExtra(r: { keys: readonly string[]; wall?: WallWait }, principal: Principal): Record<string, unknown> {
+  return r.keys.length ? {} : r.wall ? { wallWait: true, note: wallWaitRefusal(r.wall, canSeeQuota(principal)) } : { idle: true };
 }
 
 /** 403 + 调用方给的文案（各端点「xxx requires a full-scope token」文案各不相同）。 */
