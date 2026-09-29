@@ -178,6 +178,7 @@ export function dwellMs(t: LedgerTaskView, now: number): number | null {
 
 export function isStuck(t: LedgerTaskView, now: number): boolean {
   if (t.stageSinceApprox === true) return false;
+  if (!t.agent && delegateOf(t)) return false; // 委托给别的实例：等对方 owner、对方合并门槛按天算，不算卡住
   const d = dwellMs(t, now);
   return WAIT_STAGES.has(t.stage) && d !== null && d > STUCK_MS;
 }

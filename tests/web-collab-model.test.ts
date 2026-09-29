@@ -153,6 +153,10 @@ describe("跨实例委托（extra.delegate）", () => {
     expect(v.pm.queued).toEqual(["Q"]);
   });
 
+  test("委托任务停多久都不算卡住", () => {
+    expect(isStuck(task("D", "review", { agent: null, extra: { delegate: "x@Y" }, stageSince: NOW - 10 * STUCK_MS }), NOW)).toBe(false);
+  });
+
   test("有本机执行者时不看 extra.delegate", () => {
     const line = homeView(overview([task("L", "build", { extra: { delegate: "x@Y" } })]), NOW).lines[0];
     expect([line.agent, line.delegate]).toEqual(["task-l", null]);
