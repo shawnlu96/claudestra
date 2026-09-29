@@ -155,7 +155,8 @@ export function unclaimedBindAsk(asks: WebAsk[], agent: string, rows: WebCompone
 
 /**
  * bridge 的免 LLM 管理 / 面板按钮（src/bridge/management.ts 的 handleMgmtButton 认的 id）：不是 agent 答复用的按钮，
- * 「列表没到先不让点」「老气泡按过期锁」都不碰它们，老面板照样能点。清单由 tests/web-ask-echo.test.ts 对着 management.ts 逐个核
+ * 只豁免「列表没到先不让点」「老气泡按过期锁」，老面板照样能点；agent 用同名 id 发的、认出了 ask 且已结案的照样锁、点击照样带 askId。
+ * 清单由 tests/web-ask-echo.test.ts 对着 management.ts 逐个核
  */
 export const MGMT_BUTTON_IDS = ["browse_sessions", "cron_history", "cron_remove", "cron_toggle", "kill_agent", "list_agents", "peek_agent",
   "refresh_status", "restart_all", "show_cron_menu", "show_kill_menu", "show_peek_menu", "show_sessions_panel"];
@@ -181,6 +182,8 @@ export interface ReplyAskState {
   waiting: boolean;
   /** 点了也不发：closed / orphan / gone / waiting 任一 */
   blocked: boolean;
+  /** 管理按钮也要锁的那部分：认出的 ask 已结案、没认出的授权类（有 ask 可依，不是猜的） */
+  settled: boolean;
   /** 点击带给 bridge 的 askId：认出的 ask，认不出就用气泡自带的——bridge 按 id 找到已结案的回 409，不靠列表全不全 */
   hintId: string | null;
 }
@@ -202,8 +205,8 @@ export function replyAskState(
   const hasButtons = (rows ?? []).some((r) => !isMgmtRow(r)) || inlineIds.some((id) => !isMgmtButtonId(id)); // 只有管理按钮的不算
   const gone = hasButtons && !ask && list === "full" && Number.isFinite(at) && now - at > ASK_LIST_CLOSED_MS;
   const waiting = hasButtons && list === "loading";
-  const blocked = !!closed || !!orphan || gone || waiting;
-  return { ask, closed, orphan, gone, expired: gone && !m.replyAskId, waiting, blocked, hintId: ask?.id ?? m.replyAskId ?? null };
+  const settled = !!closed || !!orphan;
+  return { ask, closed, orphan, gone, expired: gone && !m.replyAskId, waiting, blocked: settled || gone || waiting, settled, hintId: ask?.id ?? m.replyAskId ?? null };
 }
 
 /** ask 的答案 → 气泡各行的已答值（与 reply-components 的 replyClicks 同形：按钮存 id，选单存 `<id>:<值>`） */

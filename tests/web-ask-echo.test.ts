@@ -104,6 +104,9 @@ describe("ask 移出列表后（结案超过 3 天）点旧按钮不会发出 [b
     // 管理按钮混着 agent 的按钮：还是锁（锁的是 agent 那一行，管理那一行 use-reply-ask 的 rowLocked 放开）
     const mixed = { ...panel, replyComponents: [...panel.replyComponents, ...comps] };
     expect(replyAskState([], "full", "agent-x", mixed, [], NOW).blocked).toBe(true);
+    // agent 自己用同名 id 发的、认出了 ask 且已结案：照样锁（settled），点击带 askId——例外只管「列表没到」「按过期锁」
+    const closedPanel = { id: "ask_9", state: "answered", source: "reply", fromAgent: "agent-x", options: panel.replyComponents, createdAt: Date.parse(old.replyTs) } as unknown as WebAsk;
+    expect(replyAskState([closedPanel], "full", "agent-x", { ...panel, replyAskId: "ask_9" }, [], NOW)).toMatchObject({ settled: true, hintId: "ask_9" });
   });
 
   test("管理按钮清单与 bridge 的 handleMgmtButton 逐个对得上", () => {
