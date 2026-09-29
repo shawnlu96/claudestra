@@ -201,6 +201,18 @@ export function effectivePrincipal(hit: CredentialHit): Principal {
 }
 
 /**
+ * 记下的 principal id + 凭据 id → 那台设备现在的生效视图（推送订阅认人、指派作答认人）：principal 与凭据都得还在、没禁用、
+ * 凭据没过期，按凭据收窄 scope；没带凭据的是 token（web-ui token 等），按 principal 本身算。
+ */
+export function principalView(file: PrincipalsFile, pid: string, cid: string | null | undefined, now = Date.now()): Principal | null {
+  const principal = file.principals.find((p) => p.id === pid && !p.disabled);
+  if (!principal) return null;
+  if (!cid) return principal;
+  const credential = principal.credentials?.find((c) => c.id === cid && !c.disabled && Date.parse(c.expiresAt) > now);
+  return credential ? effectivePrincipal({ principal, credential }) : null;
+}
+
+/**
  * 管理端点的门：scope 含 "*"、非 peer，设备凭据另看 grant.manage；老的全 scope 非 peer token 过渡期仍放行（T6 退场时收紧为只认 owner）。
  * 不能因 role=owner 免掉 "*"：开了终端的设备 role 仍是 owner（effectivePrincipal），部分 scope 的也一样，
  * 会借管理端点（restart-all、建 agent、cron）碰到 scope 外的 agent。owner 本人的凭据本来就是 "*"。见 tests/session-gates.test.ts。

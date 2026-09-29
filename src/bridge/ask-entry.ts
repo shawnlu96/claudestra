@@ -8,7 +8,7 @@
 import { matchWire, splitWire, type AskRow, type WireMatch } from "../lib/ask-options.js";
 import { canReadLedger, OWNER_PRINCIPAL_ID } from "../lib/devices.js";
 import { t } from "../lib/i18n.js";
-import { findAskByDiscordMessage, getAsk, listAsks, type Ask, type AskAtt } from "../lib/ledger-asks.js";
+import { findAskByDiscordMessage, getAsk, isRuntimeAsk, listAsks, type Ask, type AskAtt } from "../lib/ledger-asks.js";
 import { LedgerError } from "../lib/ledger-store.js";
 import { canAnswerAsk, canSeeAsk } from "../lib/ask-access.js";
 import { agentInScope, isOwnerPrincipal, tokenIdOf, type Principal } from "../lib/principals.js";
@@ -16,7 +16,8 @@ import { apiJson, forbidden } from "./api-respond.js";
 import { initRuntimeAsks } from "./ask-runtime.js";
 import { noticeExpired, sweepExpired } from "./ask-expire.js";
 import { initAskPin } from "./ask-pin.js";
-import { answersGoToAgent, answerTarget, askDb, askReadDb, commitAnswer, initAsks, type AnswerInput, type AsksDeps } from "./asks.js";
+import { answersGoToAgent, answerTarget, askDb, askReadDb, AskRejected, commitAnswer, initAsks, type AnswerInput, type AsksDeps } from "./asks.js";
+import { initHumanNode } from "./human-node.js";
 
 /** 每一行 wire 都对得上这条 ask 的选项 → 规范化结果；有一行对不上就不算这条的答复 */
 export function picksFor(a: Ask, wires: string[]): WireMatch[] | null {
@@ -72,12 +73,13 @@ async function commitNoticing(i: AnswerInput): Promise<Ask> {
   }
 }
 
-/** 冲突（刚被别处答了 / 这一项答过了 / 到点过期）→ 409，其余错误照抛 */
+/** 冲突（刚被别处答了 / 这一项答过了 / 到点过期）→ 409；指派门拒了（AskRejected，整笔没记）→ 它给的状态码；其余错误照抛 */
 async function commitOr409(run: () => Promise<Ask>, fallback: Ask): Promise<Response> {
   try {
     const a = await run();
     return apiJson(202, { ok: true, accepted: true, askAnswered: true, ask: { id: a.id, state: a.state }, agent: a.fromAgent });
   } catch (e) {
+    if (e instanceof AskRejected) return apiJson(e.status, { ok: false, code: e.code, error: e.message, askId: fallback.id });
     if (!(e instanceof LedgerError && e.code === "conflict")) throw e;
     const cur = e.current as { state?: Ask["state"]; answer?: Ask["answer"]; dup?: boolean } | undefined;
     if (cur?.dup) return apiJson(409, { ok: false, code: "ask_part_answered", error: t("这一项已经答过了", "This part was already answered"), askId: fallback.id });
@@ -148,8 +150,6 @@ export async function answerFromCard(project: string, id: string, body: { choice
   return commitOr409(() => commitNoticing({ ask: a, picks, text, from: apiFrom(p), principal: p.id, device: p.credential, via: "web_card", final: true, atts }), a);
 }
 
-/** 运行时弹框镜像出来的（AUQ / 权限 / Codex）：按键走它们原有的端点，卡片端点不收 */
-const isRuntimeAsk = (a: Pick<Ask, "source">) => a.source === "auq" || a.source === "permission" || a.source === "codex";
 
 /** 作答附带的附件引用（T28a 的 talk 附件库）：只做形状校验、原样存；不合格 → null（400） */
 function attsOf(raw: unknown): AskAtt[] | null {
@@ -200,6 +200,7 @@ export async function answerFromDiscord(c: DiscordClick, wire: string): Promise<
     if (out.state === "open") await c.whisper(t(`已收到：${picks[0].label}（这条还有别的项没答）`, `Got it: ${picks[0].label} (other parts still open)`));
     else await c.edit(`${c.origContent}\n\n✅ ${t("已点击", "Clicked")}：**${(out.answer?.labels ?? [picks[0].label]).join("、")}**`);
   } catch (e) {
+    if (e instanceof AskRejected) return (await c.whisper(e.message), true);
     if (!(e instanceof LedgerError && e.code === "conflict")) throw e;
     await c.whisper((e.current as { dup?: boolean } | undefined)?.dup ? t("这一项已经答过了", "This part was already answered") : closedWords(getAsk(askDb(), a.id) ?? a));
   }
@@ -255,6 +256,7 @@ export function initAskWiring(d: Omit<AsksDeps, "editDiscord"> & { discord: Disc
   const { discord, ...rest } = d;
   initAsks({ ...rest, editDiscord: discord ? discordAskEditor(discord) : undefined });
   initRuntimeAsks();
+  initHumanNode(); // 指给人的任务：进 build / fix 开指派 ask，作答写台账、通知 PM（bridge/human-node.ts）
   if (discord && d.controlChannelId) initAskPin(discord, d.controlChannelId);
   const sweep = () => void sweepExpired().catch((e) => console.error(`⚠️ ask 过期扫描失败: ${(e as Error).message}`));
   setInterval(sweep, 60_000).unref?.();

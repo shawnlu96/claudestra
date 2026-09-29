@@ -9,6 +9,10 @@ export interface SubSessionRow {
   sessionId: string;
   name: string;
   sub?: SubSessionInfo;
+  /** 程序跑 `codex exec` 留下的一次性会话（bridge 给，src/lib/codex-subthread.ts isCodexOneShot） */
+  oneShot?: boolean;
+  /** 合成的分组行（groupOneShots），不是真会话 */
+  group?: boolean;
   /** bridge 每个主会话只带最新 50 个子线程，省掉的个数记在主会话行上（src/lib/session-limit.ts capSubsPerMain） */
   moreSubs?: number;
 }
@@ -76,4 +80,16 @@ export function sessionTree<T extends SubSessionRow>(all: T[], shown: (r: T) => 
   };
   for (const r of roots) walk(r, 0);
   return out;
+}
+
+export const ONE_SHOT_GROUP = "__codex_one_shot__";
+
+/**
+ * Codex 的一次性调用（不是人开的对话，一次几十个）收进列表末尾一个合成分组行下面：给它们挂上指向分组行的 sub，
+ * 折叠 / 计数全用子会话那一套（sessionTree）。分组行 group=true，调用方的 shown 判据要排除它（它只当分组头）。
+ */
+export function groupOneShots<T extends SubSessionRow>(rows: T[], name: string): T[] {
+  if (!rows.some((r) => r.oneShot && !r.sub)) return rows;
+  const tagged = rows.map((r) => (r.oneShot && !r.sub ? { ...r, sub: { parentId: ONE_SHOT_GROUP, kind: "exec" } } : r));
+  return [...tagged, { sessionId: ONE_SHOT_GROUP, name, group: true } as T];
 }

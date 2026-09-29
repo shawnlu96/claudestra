@@ -23,6 +23,8 @@ export interface EntryView {
   plan: string | null;
   identity: "assumed" | "bound" | "unknown";
   meters: MeterView[];
+  /** 按量接入商的余额（Pi 的 DeepSeek 等）；amount 是 bridge 格式化好的两位小数串 */
+  balance: { amount: string; currency: string | null } | null;
   /** expiries：每张卡 / 每条 credit 的截止；left = 这张卡剩几次（Claude 一张卡可含多次），requiresLimit = 到限额才能用 */
   /** ineligibleReason：接口说这个入口看不到重置卡（如 surface），界面写原因，不显示成 0 张 */
   resetCredits: { held: number; applicableNow: number; expiries: CreditExpiry[] | null; stale: boolean; ineligibleReason: string | null } | null;
@@ -69,6 +71,17 @@ function creditsOf(v: unknown): EntryView["resetCredits"] {
   return { held: num(c.held) ?? 0, applicableNow: num(c.applicableNow) ?? 0, expiries: list, stale: c.stale === true, ineligibleReason: why && /^[a-z_]{1,32}$/.test(why) ? why : null };
 }
 
+function balanceOf(v: unknown): EntryView["balance"] {
+  const b = obj(v);
+  const cur = str(b?.currency);
+  return b && typeof b.amount === "string" && /^-?\d{1,12}(\.\d{1,4})?$/.test(b.amount) ? { amount: b.amount, currency: cur && /^[A-Z]{3}$/.test(cur) ? cur : null } : null;
+}
+
+/** 余额显示：人民币 / 美元写符号，其余带币种代码 */
+export function balanceText(b: NonNullable<EntryView["balance"]>): string {
+  return b.currency === "CNY" ? `¥${b.amount}` : b.currency === "USD" ? `$${b.amount}` : b.currency ? `${b.amount} ${b.currency}` : b.amount;
+}
+
 function entryOf(v: unknown): EntryView | null {
   const e = obj(v);
   const src = obj(e?.source);
@@ -82,6 +95,7 @@ function entryOf(v: unknown): EntryView | null {
     plan: str(e.plan),
     identity: identity === "assumed" || identity === "bound" ? identity : "unknown",
     meters: (Array.isArray(e.meters) ? e.meters : []).map(meterOf).filter((m): m is MeterView => m !== null),
+    balance: balanceOf(e.balance),
     resetCredits: creditsOf(e.resetCredits),
     source: { layer, observedAt: num(src.observedAt), reason: str(src.reason), needsUserRetry: src.needsUserRetry === true },
   };
@@ -142,6 +156,8 @@ const REASONS: Record<string, string> = {
   identity_changed: "读取期间换了账号，这次结果已丢弃",
   account_uncertain: "账户不确定，暂不出提醒",
   no_secret: "本机密钥不可用",
+  pi_key_invalid: "API key 无效或已撤销（检查 Pi 的 models.json）",
+  pi_no_plan: "这个 key 没有开通该套餐",
   internal: "内部出错，稍后自动重试",
 };
 export function reasonText(code: string | null): string | null {
