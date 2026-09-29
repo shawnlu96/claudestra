@@ -8,7 +8,7 @@ import { useT } from "@/lib/i18n";
 import { answeredGroups, rowGroup, wireLabels, type WebAsk } from "../asks-model";
 import { asksStore } from "../asks-store";
 import { AuqChoices, PermissionChoices, ReplyChoices } from "./ask-choices";
-import { AssignedChoices, isHumanNodeAsk } from "./assigned-choices";
+import { AssignedChoices, assignedRejectText, isHumanNodeAsk } from "./assigned-choices";
 import { TerminalIcon } from "./ask-icons";
 
 /**
@@ -23,11 +23,13 @@ export function AskActions({ ask, agent }: { ask: WebAsk; agent: string }) {
   const dialogAgent = ask.fromAgent ?? "";
   const runtime = ask.source === "auq" || ask.source === "permission" || ask.source === "codex";
 
-  // 409 分两种：多行里这一项刚在聊天 / Discord 里答过（其余行还能答，重拉后卡片会收掉它），其余都当整条已结案——
+  // 指派门拒掉的按 code 说（assignedRejectText）。409 另分两种：多行里这一项刚在聊天 / Discord 里答过（其余行还能答，重拉后卡片会收掉它），其余都当整条已结案——
   // 弹框端点的 409（弹框已经没了）不带 code，也归这一类，别把英文原文露给 owner
   // 没到 bridge（断网、中继断了）：别把浏览器的英文原文露给 owner
   const fail = (e: unknown) => {
     if (!(e instanceof ApiError)) return t("没发出去（连不上），再点一次");
+    const assigned = assignedRejectText(e.code, t);
+    if (assigned) return assigned;
     if (e.status !== 409) return e.message;
     return e.code === "ask_part_answered" ? t("这一项刚在别处答过了，已刷新，剩下的还能答") : t("这件已经处理过了（或已过期）");
   };

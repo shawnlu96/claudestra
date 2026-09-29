@@ -5,8 +5,10 @@
  *   每条只发一次（expired 只会结一次）；PM 不在线就不投、不改投大总管，在线但这一下没投进去的照 sendCalm 进押后队列等它空下来；PM 据此 ask-reopen 或改派；
  * - 其余人 / 系统发起的：只有 SSE。
  */
+import { isHumanNodeAsk } from "../lib/human-node.js";
 import { t } from "../lib/i18n.js";
 import { closeAsk, dueAsks, hasAsksTable, type Ask } from "../lib/ledger-asks.js";
+import { isCurrentAssignment } from "../lib/ledger-human.js";
 import type { LedgerTask } from "../lib/ledger-stages.js";
 import { getTask } from "../lib/ledger-store.js";
 import { answersGoToAgent, answerTarget, askDbIfExists, asksDeps, hhmm, publishAsk, registry, sendCalm } from "./asks.js";
@@ -28,10 +30,11 @@ export async function noticeExpired(a: Ask): Promise<void> {
   await sendCalm({ kind: "bridge", label: "ask-expire" }, to, "notification", text, a.id, "bridge_synth");
 }
 
-/** 指派事项过期 → 该任务的 PM。模板固定，不带 ask 里的任何自由文本 */
+/** 指派事项过期 → 该任务的 PM。模板固定，不带 ask 里的任何自由文本；human 节点开的、已不是任务眼下那条的（改派、交付过、重开过）不发 */
 async function noticeAssignedExpired(a: Ask): Promise<void> {
   const db = askDbIfExists();
   if (!db || !a.taskId) return;
+  if (isHumanNodeAsk(a) && !isCurrentAssignment(db, a)) return console.log(`指派事项 ${a.id} 过期时已不是 ${a.taskId} 眼下的指派，不通知 PM`);
   const text = t(`[⌛ ${a.taskId} 指派给 ${a.assignee} 的事项已过期（${a.id}）]`, `[⌛ ${a.taskId}: the item assigned to ${a.assignee} expired (${a.id})]`);
   await notifyTaskPm(getTask(db, a.taskId), a.project, text, a.id, "ask-expire");
 }

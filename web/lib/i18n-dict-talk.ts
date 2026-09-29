@@ -61,4 +61,7 @@ export const TALK_DICT: Record<string, string> = {
   "做不了要写一下原因": "Please say why you can't do it",
   "做不了": "Can't do it",
   "附图": "Attach image",
+  "这条指派已过时（改派了、阶段变了或重开过），已撤下": "This assignment is out of date (reassigned, stage changed or reopened) and was withdrawn",
+  "只有被指派的人或 owner 能作答": "Only the assignee or the owner can answer",
+  "这次没记下，稍后再试": "Not recorded this time; try again later",
 };

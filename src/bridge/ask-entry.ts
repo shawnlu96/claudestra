@@ -15,7 +15,7 @@ import { agentInScope, isOwnerPrincipal, tokenIdOf, type Principal } from "../li
 import { apiJson, forbidden } from "./api-respond.js";
 import { initRuntimeAsks } from "./ask-runtime.js";
 import { noticeExpired, sweepExpired } from "./ask-expire.js";
-import { answersGoToAgent, answerTarget, askDb, askReadDb, commitAnswer, initAsks, type AnswerInput, type AsksDeps } from "./asks.js";
+import { answersGoToAgent, answerTarget, askDb, askReadDb, AskRejected, commitAnswer, initAsks, type AnswerInput, type AsksDeps } from "./asks.js";
 import { initHumanNode } from "./human-node.js";
 
 /** 每一行 wire 都对得上这条 ask 的选项 → 规范化结果；有一行对不上就不算这条的答复 */
@@ -72,12 +72,13 @@ async function commitNoticing(i: AnswerInput): Promise<Ask> {
   }
 }
 
-/** 冲突（刚被别处答了 / 这一项答过了 / 到点过期）→ 409，其余错误照抛 */
+/** 冲突（刚被别处答了 / 这一项答过了 / 到点过期）→ 409；指派门拒了（AskRejected，整笔没记）→ 它给的状态码；其余错误照抛 */
 async function commitOr409(run: () => Promise<Ask>, fallback: Ask): Promise<Response> {
   try {
     const a = await run();
     return apiJson(202, { ok: true, accepted: true, askAnswered: true, ask: { id: a.id, state: a.state }, agent: a.fromAgent });
   } catch (e) {
+    if (e instanceof AskRejected) return apiJson(e.status, { ok: false, code: e.code, error: e.message, askId: fallback.id });
     if (!(e instanceof LedgerError && e.code === "conflict")) throw e;
     const cur = e.current as { state?: Ask["state"]; answer?: Ask["answer"]; dup?: boolean } | undefined;
     if (cur?.dup) return apiJson(409, { ok: false, code: "ask_part_answered", error: t("这一项已经答过了", "This part was already answered"), askId: fallback.id });
@@ -186,6 +187,7 @@ export async function answerFromDiscord(c: DiscordClick, wire: string): Promise<
     if (out.state === "open") await c.whisper(t(`已收到：${picks[0].label}（这条还有别的项没答）`, `Got it: ${picks[0].label} (other parts still open)`));
     else await c.edit(`${c.origContent}\n\n✅ ${t("已点击", "Clicked")}：**${(out.answer?.labels ?? [picks[0].label]).join("、")}**`);
   } catch (e) {
+    if (e instanceof AskRejected) return (await c.whisper(e.message), true);
     if (!(e instanceof LedgerError && e.code === "conflict")) throw e;
     await c.whisper((e.current as { dup?: boolean } | undefined)?.dup ? t("这一项已经答过了", "This part was already answered") : closedWords(getAsk(askDb(), a.id) ?? a));
   }

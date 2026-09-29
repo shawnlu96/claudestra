@@ -1,11 +1,12 @@
 /**
  * 台账 v3.2 例外的写入（docs 10-ledger「附：v3.2 例外」）：human 节点的人在指给自己的 ask 上点「完成」→ deliver 事件，
  * 同一事务推 build / fix → review；PM 重开指派 → assign_reopen 事件。规则在 human-node.ts（纯函数），这里在一个
- * BEGIN IMMEDIATE 里重读任务、现算 attempt、过门、写——门在事务外判就会和并发的推阶段 / 重开抢。
+ * BEGIN IMMEDIATE 里重读任务、现算开单序号、过门、写——门在事务外判就会和并发的推阶段 / 重开抢。
  * 人写的说明只进 data.note，事件 text 是固定模板：班子路由和给 PM 的通知都只读 text，人写的字不进 agent 的上下文。
  */
 import type { Database } from "bun:sqlite";
-import { askPlanFor, attemptOf, checkHumanDeliver, humanDeliverText, isWorkStage, type AskPlan, type DeliverGate, type HumanResult } from "./human-node.js";
+import { askPlanFor, assignSeqOf, checkHumanDeliver, humanDeliverText, isHumanNodeAsk, isWorkStage, type AskPlan, type DeliverGate, type HumanResult } from "./human-node.js";
+import { hasAsksTable, listAsks, type Ask } from "./ledger-asks.js";
 import { isManager, mustTask, type WriteCtx, type WriteResult } from "./ledger-checks.js";
 import type { LedgerTask } from "./ledger-stages.js";
 import { getTask, LedgerError, listEvents, toTask } from "./ledger-store.js";
@@ -20,9 +21,9 @@ const SHA_RE = /^[0-9a-f]{64}$/;
 /** 同一条 ask 只记一次交付：重复作答、bridge 重放都落到这个 key 上 */
 export const humanDeliverKey = (askId: string): string => `human-deliver:${askId}`;
 
-/** 本轮现在是第几次指派（事务里现读 assign_reopen） */
-function attemptNow(db: Database, task: LedgerTask): number {
-  return attemptOf(listEvents(db, { project: task.project, target: task.id }), task.id, task.round);
+/** 任务现在的开单序号（事务里现读事件） */
+function seqNow(db: Database, task: LedgerTask): number {
+  return assignSeqOf(listEvents(db, { project: task.project, target: task.id }), task.id);
 }
 
 export interface HumanDeliverInput {
@@ -40,7 +41,7 @@ export interface HumanDeliverInput {
 /** 门：actor 得是这次作答的人，再按 human-node.ts 的规则（阶段、本轮本次的 ask、assignee 本人或 owner） */
 function gate(db: Database, actor: string, task: LedgerTask, input: HumanDeliverInput, result: HumanResult): DeliverGate {
   if (!input.answerer.persons.includes(actor)) return { ok: false, code: "forbidden", reason: `${actor} 不是这次作答的人` };
-  return checkHumanDeliver(task, input.ask, input.answerer, result, attemptNow(db, task));
+  return checkHumanDeliver(task, input.ask, input.answerer, result, seqNow(db, task));
 }
 
 /** 「做不了」不写台账，只判这次作答算不算数（算数才通知 PM）；返回判门时的任务 */
@@ -73,8 +74,8 @@ export function humanDeliver(db: Database, actor: string, input: HumanDeliverInp
 }
 
 /**
- * PM 重开指派（ask 过期了，或 blocked 回到 build 而 round 没变）：记一条 assign_reopen，data 带本轮 round 与新的 attempt，
- * bridge 看到后按新的 dedupKey 再开一条 ask。只有 PM / master / owner，只在 human 节点的 build / fix。
+ * PM 重开指派（ask 过期了，或人点了「做不了」、PM 处理完要再派一次）：记一条 assign_reopen，data 带本轮 round 与新的开单序号，
+ * bridge 撤掉旧的、按新的 dedupKey 再开一条 ask。只有 PM / master / owner，只在 human 节点的 build / fix。
  */
 export function reopenAssignment(db: Database, ctx: WriteCtx, taskId: string): WriteResult<LedgerTask> {
   return tx(db, () => {
@@ -84,19 +85,35 @@ export function reopenAssignment(db: Database, ctx: WriteCtx, taskId: string): W
     if (!isManager(db, ctx.actor, task)) throw new LedgerError("forbidden", `重开指派要项目 ${task.project} 的 PM / master / owner（你是 ${ctx.actor}）`);
     if (task.assigneeKind !== "human") throw new LedgerError("invalid", `${task.id} 不是指给人的任务`);
     if (!isWorkStage(task.stage)) throw new LedgerError("invalid", `${task.id} 当前阶段是 ${task.stage}，只有 build / fix 能重开指派`, { stage: task.stage });
-    const data = { round: task.round, attempt: attemptNow(db, task) + 1 };
+    const data = { round: task.round, seq: seqNow(db, task) + 1 };
     const event = insertEvent(db, ctx, { project: task.project, target: task.id, kind: "assign_reopen", data }, true);
     return { row: task, event, duplicate: false };
   });
 }
 
-/** 该有指派 ask 的：负责人是人、在 build / fix 的任务，attempt 现算。调用方按 plan.dedupKey 开，撞上 = 这一轮这次已经开过 */
+/** 该有指派 ask 的：负责人是人、在 build / fix 的任务，开单序号现算。调用方按 plan.dedupKey 开，撞上 = 这一次已经开过 */
 export function pendingAssignments(db: Database): { task: LedgerTask; plan: AskPlan }[] {
   const rows = db.prepare("SELECT * FROM tasks WHERE assigneeKind = 'human' AND stage IN ('build', 'fix') ORDER BY id").all() as Record<string, unknown>[];
   return rows.map(toTask).flatMap((task) => {
-    const plan = askPlanFor(task, attemptNow(db, task));
+    const plan = askPlanFor(task, seqNow(db, task));
     return plan ? [{ task, plan }] : [];
   });
+}
+
+/** 这条指派还是不是任务眼下该有的那条（任务在、同一项目、还在 build / fix，负责人与开单序号都对得上） */
+export function isCurrentAssignment(db: Database, a: Pick<Ask, "project" | "taskId" | "dedupKey">): boolean {
+  const task = a.taskId ? getTask(db, a.taskId) : null;
+  return !!task && task.project === a.project && !!a.dedupKey && askPlanFor(task, seqNow(db, task))?.dedupKey === a.dedupKey;
+}
+
+/**
+ * 开着、但已不是任务眼下那条的指派（离开 build / fix、改派、PM 重开过、任务没了）：bridge 撤成 cancelled，免得人答了一条台账不认的。
+ * due 是本轮已算好的 pendingAssignments（省得再算一遍）
+ */
+export function staleAssignments(db: Database, due = pendingAssignments(db)): Ask[] {
+  if (!hasAsksTable(db)) return [];
+  const want = new Set(due.map((x) => `${x.task.project}\n${x.plan.dedupKey}`));
+  return listAsks(db, { states: ["open"], source: "system" }).filter((a) => isHumanNodeAsk(a) && !want.has(`${a.project}\n${a.dedupKey}`));
 }
 
 /**

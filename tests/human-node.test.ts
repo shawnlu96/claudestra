@@ -1,8 +1,8 @@
 /**
- * human 节点的纯规则（lib/human-node.ts）：什么时候开 assigned ask、幂等键与 attempt、v3.2 交付门、给 PM 的固定模板不带人写的字。
+ * human 节点的纯规则（lib/human-node.ts）：什么时候开 assigned ask、幂等键与开单序号、v3.2 交付门、给 PM 的固定模板不带人写的字。
  */
 import { describe, expect, test } from "bun:test";
-import { askPlanFor, assignDedupKey, attemptOf, checkHumanDeliver, humanDeliverText, pmNotice, resultOfChoices, type HumanTaskView } from "../src/lib/human-node.js";
+import { askPlanFor, assignDedupKey, assignSeqOf, checkHumanDeliver, humanDeliverText, isHumanNodeAsk, pmNotice, resultOfChoices, type HumanTaskView } from "../src/lib/human-node.js";
 
 const task = (over: Partial<HumanTaskView> = {}): HumanTaskView => ({
   id: "T123", project: "p", title: "登录页改文案", stage: "build", round: 0, assigneeKind: "human", assignee: "local:guest:ab12", pm: "agent-pm",
@@ -12,7 +12,7 @@ const task = (over: Partial<HumanTaskView> = {}): HumanTaskView => ({
 describe("开 assigned ask", () => {
   test("只在 human 节点进入 build / fix 时开；标题是任务号加标题，背景是返工轮次与 PM 写的 brief", () => {
     const plan = askPlanFor(task(), 1)!;
-    expect(plan).toMatchObject({ dedupKey: "assign:T123:0:1", assignee: "local:guest:ab12", title: "T123 登录页改文案", context: "背景一。背景二。背景三。" });
+    expect(plan).toMatchObject({ dedupKey: "assign:T123:0:1:local:guest:ab12", assignee: "local:guest:ab12", title: "T123 登录页改文案", context: "背景一。背景二。背景三。" });
     const ids = (plan.options as { buttons: { id: string }[] }[]).flatMap((r) => r.buttons.map((b) => b.id));
     expect(ids).toEqual(["assign_done", "assign_cant"]);
     expect(resultOfChoices(["[button:assign_done]"])).toBe("done");
@@ -23,16 +23,29 @@ describe("开 assigned ask", () => {
     expect(askPlanFor(task({ assigneeKind: "agent", assignee: "agent-x" }), 1)).toBeNull();
     expect(askPlanFor(task({ extra: {} }), 1)!.context).toBe("");
   });
-  test("attempt = 1 + 本轮 assign_reopen 次数；别的轮、别的任务不算", () => {
-    const ev = (target: string, round: number) => ({ kind: "assign_reopen", target, data: { round } });
-    expect(attemptOf([], "T123", 0)).toBe(1);
-    expect(attemptOf([ev("T123", 0), ev("T123", 0), ev("T123", 1), ev("T9", 0), { kind: "note", target: "T123", data: { round: 0 } }], "T123", 0)).toBe(3);
-    expect(assignDedupKey("T123", 1, 2)).toBe("assign:T123:1:2");
+  test("开单序号：进 build / fix、PM 重开、改派各加一；改成同一个人、别的阶段、别的任务不算", () => {
+    const stage = (to: string, target = "T123") => ({ kind: "stage", target, data: { to } });
+    const set = (patch: Record<string, unknown>) => ({ kind: "task", target: "T123", data: { op: "set", patch } });
+    const born = { kind: "task", target: "T123", data: { op: "new", patch: { stage: "spec", assignee: "local:guest:aa" } } };
+    expect(assignSeqOf([born], "T123")).toBe(0);
+    const build = [born, stage("restate"), stage("build")];
+    expect(assignSeqOf(build, "T123")).toBe(1);
+    expect(assignSeqOf([...build, stage("blocked"), stage("build")], "T123")).toBe(2);
+    expect(assignSeqOf([...build, { kind: "assign_reopen", target: "T123", data: {} }], "T123")).toBe(2);
+    expect(assignSeqOf([...build, set({ assignee: "local:guest:bb" }), set({ assignee: "local:guest:aa" })], "T123")).toBe(3);
+    expect(assignSeqOf([...build, set({ assignee: "local:guest:aa" }), set({ title: "改个标题" }), stage("build", "T9")], "T123")).toBe(1);
+    expect(assignSeqOf([{ kind: "task", target: "T123", data: { op: "new", patch: { stage: "build" } } }], "T123")).toBe(1);
+    expect(assignDedupKey("T123", 1, 2, "local:guest:aa")).toBe("assign:T123:1:2:local:guest:aa");
+  });
+  test("只有 human 节点开的指派才归它管", () => {
+    expect(isHumanNodeAsk({ kind: "assigned", createdBy: "system:human-node" })).toBe(true);
+    expect(isHumanNodeAsk({ kind: "assigned", createdBy: "owner:self" })).toBe(false);
+    expect(isHumanNodeAsk({ kind: "decide", createdBy: "system:human-node" })).toBe(false);
   });
 });
 
 describe("v3.2 交付门", () => {
-  const ask = { dedupKey: "assign:T123:0:1", kind: "assigned" };
+  const ask = { dedupKey: "assign:T123:0:1:local:guest:ab12", kind: "assigned" };
   const me = { persons: ["local:guest:ab12", "local:guest:cd34"], isOwner: false };
   test("被指派的人（含合并后同一个人名下的设备）点完成 → 写交付并推到 review；做不了 → 不推", () => {
     expect(checkHumanDeliver(task(), ask, me, "done", 1)).toEqual({ ok: true, move: true });
@@ -43,9 +56,10 @@ describe("v3.2 交付门", () => {
     expect(checkHumanDeliver(task(), ask, { persons: ["local:owner:self"], isOwner: true }, "done", 1).ok).toBe(true);
     expect(checkHumanDeliver(task(), ask, { persons: ["local:guest:ffff"], isOwner: false }, "done", 1).ok).toBe(false);
   });
-  test("过时的 ask（上一轮 / 上一次 attempt）、不是 assigned、任务已不在 build / fix、不是 human 节点：都拒", () => {
+  test("过时的 ask（上一轮 / 序号变了 / 改派了）、不是 assigned、任务已不在 build / fix、不是 human 节点：都拒", () => {
     expect(checkHumanDeliver(task({ round: 1, stage: "fix" }), ask, me, "done", 1).ok).toBe(false);
     expect(checkHumanDeliver(task(), ask, me, "done", 2).ok).toBe(false);
+    expect(checkHumanDeliver(task({ assignee: "local:guest:cd34" }), ask, me, "done", 1)).toMatchObject({ ok: false, code: "conflict" });
     expect(checkHumanDeliver(task(), { ...ask, kind: "decide" }, me, "done", 1).ok).toBe(false);
     expect(checkHumanDeliver(task({ stage: "review" }), ask, me, "done", 1).ok).toBe(false);
     expect(checkHumanDeliver(task({ stage: "merge" }), ask, me, "done", 1).ok).toBe(false);

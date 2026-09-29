@@ -21,6 +21,14 @@ const MAX_IMAGES = 9;
 export const isHumanNodeAsk = (a: Pick<WebAsk, "kind" | "options">): boolean =>
   a.kind === "assigned" && (a.options as WebComponentRow[]).some((r) => r.type === "buttons" && r.buttons.some((b) => b.id === ASSIGN_DONE));
 
+/** bridge 的指派门拒掉的（整笔没记，src/bridge/human-node.ts 的 AskRejected code）：给一句人话；别的返回 null，照卡片原来的说法 */
+export function assignedRejectText(code: string | undefined, t: ReturnType<typeof useT>): string | null {
+  if (code === "assign_stale" || code === "assign_conflict") return t("这条指派已过时（改派了、阶段变了或重开过），已撤下");
+  if (code === "assign_forbidden") return t("只有被指派的人或 owner 能作答");
+  if (code === "reason_required") return t("做不了要写一下原因");
+  return code === "answerer_unknown" || code === "ledger_unavailable" ? t("这次没记下，稍后再试") : null;
+}
+
 export function AssignedChoices({ busy, onAnswer }: { busy: boolean; onAnswer: (wire: string, text: string, atts: WebAskAtt[]) => void }) {
   const t = useT();
   const [text, setText] = useState("");

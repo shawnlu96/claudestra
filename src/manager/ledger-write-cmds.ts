@@ -214,7 +214,7 @@ function review(c: LedgerCli): Result {
 /** human 节点的指派 ask 过期了、或 blocked 回到 build 而 round 没变：重开一条（角色与阶段由 ledger-human.ts 判） */
 function askReopen(c: LedgerCli): Result {
   const r = reopenAssignment(c.db, c.ctx(), c.task(c.p.pos[1]).id);
-  return { ok: true, task: r.row, event: r.event, attempt: r.event.data.attempt, duplicate: r.duplicate };
+  return { ok: true, task: r.row, event: r.event, seq: r.event.data.seq, duplicate: r.duplicate };
 }
 
 /** decision / deploy / rollback：PM / master / owner；data 由各自的旗标组成（verify 在 ledger-verify.ts，由系统核对） */
@@ -275,7 +275,7 @@ export const WRITE_CMDS: Record<string, CommandSpec> = {
   },
   stage: { valued: ["from", "to", "text", "dedup"], usage: "stage <task> --from <当前阶段> --to <阶段> [--text]（进 verified 用 ledger verify）", run: stage },
   note: { valued: ["project", "dedup"], usage: "note <task|item|-> <正文>", run: note },
-  "ask-reopen": { valued: ["dedup"], usage: "ask-reopen <task>（指给人的 ask 过期了 / blocked 回来 round 没变时重开一条）", run: askReopen },
+  "ask-reopen": { valued: ["dedup"], usage: "ask-reopen <task>（指给人的 ask 过期了、或点了做不了之后要再派一次时重开一条；旧的由 bridge 撤掉）", run: askReopen },
   deliver: { valued: ["head", "evidence", "from", "text", "dedup"], usage: "deliver <task> [--head <sha>] [--evidence <path>] [--from build|fix] [--text]", run: deliverCmd },
   review: {
     valued: ["reviewer", "verdict", "p0", "p1", "p2", "path", "text", "to", "dedup"],
