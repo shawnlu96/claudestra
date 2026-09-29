@@ -4,7 +4,7 @@
  * 回归：T13a 对抗式 P2-3、T13b 第 4 轮新 P2-1。
  */
 import { describe, expect, spyOn, test } from "bun:test";
-import { createEscGuard, ESC_DOUBLE_TAP_MS, type EscGuardDeps } from "../src/lib/esc-guard.js";
+import { createEscGuard, ESC_DOUBLE_TAP_MS, KeyWithdrawnError, type EscGuardDeps } from "../src/lib/esc-guard.js";
 import { windowKey } from "../src/lib/tmux-target.js";
 
 /** 假时钟：sleep 推进时间；send 本身耗时 sendMs（模拟负载高时 tmux 慢） */
@@ -168,5 +168,15 @@ describe("持锁进程被暂停过、锁已被回收（T13e r1 P1-2）", () => {
     expect(w.sent).toEqual([]);
     expect(w.shared.size).toBe(0); // 没发不记「发完」：之后真人按的 Esc 不会被认成程序发的（T13e r2 P2-3）
     expect(await esc.lastSentAt("master:agent-x")).toBe(0);
+  });
+  test("发键那一刻 wanted 为假（这条停已被 owner 之后的开口作废）：抛 KeyWithdrawnError，不发、不记（T13e r2 P1）", async () => {
+    const w = world();
+    const esc = createEscGuard(w.deps);
+    let want = true;
+    const orig = w.deps.sleep;
+    w.deps.sleep = async (ms) => ((want = false), orig(ms)); // 等双击间隔的途中 owner 答了卡片
+    await esc("master:agent-x");
+    await expect(esc("master:agent-x", { strict: true, wanted: () => want })).rejects.toBeInstanceOf(KeyWithdrawnError);
+    expect(w.sent).toHaveLength(1);
   });
 });

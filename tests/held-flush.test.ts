@@ -204,7 +204,7 @@ describe("叫停和押后（Workflow 复核 wf2）", () => {
   test("classify-merge-1：押在叫停之前、叫停之后才投的（忙时作答的 ask 答复、agent 请求）加抬头；叫停之后才押的不加", async () => {
     const answer = item("[✅ owner 回复了你 10:00 的「待你处理」]\n选择：部署", "user", 1_000);
     const later = item("停之后发的", "local", 3_000);
-    const h = harness([answer, later], { stoppedAt: () => 2_000 });
+    const h = harness([answer, later], { stopMark: () => ({ at: 2_000, order: { seq: 0 } }) });
     const notes: (string | undefined)[] = [];
     h.deps.deliver = async (env) => (notes.push(env.meta.interruptNote), sent(env));
     await flushHeld(h.deps, "c-me", "stop");
@@ -213,12 +213,25 @@ describe("叫停和押后（Workflow 复核 wf2）", () => {
     expect(notes[1]).toBeUndefined();
   });
 
+  test("T13f：有到达序号的按序号比，不按押下时刻——停之前到、停之后才押的加；停之后到、押下时刻却更早的不加", async () => {
+    const arrivedBefore = item("停之前到的答复", "user", 3_000);
+    arrivedBefore.env.meta.arrivalSeq = 10;
+    const arrivedAfter = item("停之后到的", "local", 1_000);
+    arrivedAfter.env.meta.arrivalSeq = 30;
+    const h = harness([arrivedBefore, arrivedAfter], { stopMark: () => ({ at: 2_000, order: { seq: 20 } }) });
+    const notes: (string | undefined)[] = [];
+    h.deps.deliver = async (env) => (notes.push(env.meta.interruptNote), sent(env));
+    await flushHeld(h.deps, "c-me", "stop");
+    expect(notes[0]).toContain("这条是叫停之前");
+    expect(notes[1]).toBeUndefined();
+  });
+
   test("没叫停过 / bridge 自己的通知：不加", async () => {
     const bridgeNote = item("收尾提醒", "local", 1_000);
     bridgeNote.env.from = { kind: "bridge", label: "turn-cuts" };
     const plain = item("a", "local", 1_000);
-    await flushHeld(harness([plain], { stoppedAt: (c) => (c === "other" ? 2_000 : undefined) }).deps, "c-me", "stop");
-    await flushHeld(harness([bridgeNote], { stoppedAt: () => 2_000 }).deps, "c-me", "stop");
+    await flushHeld(harness([plain], { stopMark: (c) => (c === "other" ? { at: 2_000, order: { seq: 0 } } : undefined) }).deps, "c-me", "stop");
+    await flushHeld(harness([bridgeNote], { stopMark: () => ({ at: 2_000, order: { seq: 0 } }) }).deps, "c-me", "stop");
     expect(plain.env.meta.interruptNote).toBeUndefined();
     expect(bridgeNote.env.meta.interruptNote).toBeUndefined();
   });

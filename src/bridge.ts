@@ -430,7 +430,7 @@ function flushHeldLocalMsgs(channelId: string, reason: string): Promise<void> {
   return flushHeld({
     held: heldLocalMsgs, compacting: (a) => getAgentStatus(a) === "compacting", working: localAgentWorking, isHumanRequest, walled: async (c) => !!(await quotaWall()?.gates(c)),
     client: (c) => clients.get(c), deliver: deliverLocalInOrder, touch: (c, env) => pendingAgentCalls.touchDelivered(c, env),
-    stoppedAt: (c) => turnCuts.stoppedAt(c),
+    stopMark: (c) => turnCuts.stopMark(c),
   }, channelId, reason);
 }
 
@@ -780,9 +780,8 @@ function syncMasterWatcher(discord: Client): void {
 }
 
 /**
- * 同一频道的投递按到达顺序整段串行:中间有渲染、抢占(等 1.2s 收尾)、判忙抓屏几处 await,不串行的话后到的消息会先
- * ws.send——owner 语音连发的顺序就乱了(tests/keyed-serial.test.ts)。deliver() 到这里之间没有 await,入队顺序即到达顺序。
- */
+ * 同一频道的投递按到达顺序整段串行:中间有渲染、抢占(等 1.2s 收尾)、判忙抓屏几处 await,不串行的话后到的消息会先 ws.send——owner 语音连发的顺序就乱了
+ * (tests/keyed-serial.test.ts)。deliver() 到这里之间没有 await,入队顺序即到达顺序。 */
 /** 额度闸押后：对调用方同样是「已受理、排队中」，出闸时按序补投（bridge/quota-wall.ts） */
 function holdForQuotaWall(env: RouterEnvelope, agent: string, from: string | undefined): RouterDelivery {
   console.log(`⏸ 消息押后(${agent} 额度闸): 来自 ${from ?? "?"},队列 ${heldLocalMsgs.holdEnv(env, "quota_wall")} 条`);
@@ -790,6 +789,7 @@ function holdForQuotaWall(env: RouterEnvelope, agent: string, from: string | und
 }
 const localSendOrder = createKeyedSerial();
 function deliverLocalInOrder(env: RouterEnvelope, to: RouterLocalEndpoint, stillWanted?: () => boolean): Promise<RouterDelivery> {
+  env.meta.arrivalSeq ??= turnCuts.arrivals.take(); // 到达即领号（押过再投的沿用原号）：「停」与开口谁先到只比它，bridge/preempt.ts
   return localSendOrder(to.channelId, () => deliverToLocal(env, to, stillWanted));
 }
 

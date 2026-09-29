@@ -4,7 +4,7 @@
  * API 停字自己的同步等待在中止之前登记（叫停引起的那次 Stop 的兜底收尾跳过它，bridge.ts 用 stopWaitIds），留给停字那一轮去答，
  * 那一轮迟迟不来才结成一句「已叫停」。看门狗在「叫停后的第一次 Stop」不催那一半在 bridge.ts Stop hook（afterAbort），这里测停之前就清账这一半。
  */
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { writeFileSync } from "node:fs";
 import { REGISTRY_PATH } from "../src/lib/registry.js";
 import { interruptGate } from "../src/bridge/interrupt-gate.js";
@@ -148,7 +148,7 @@ describe("停在撞墙等待画面上（T24 wf3 delivery-hold-4 / 执行者主�
     const e = env("held-stop", true);
     noteHeldStop(e, CC, "agent-cc", "claude-code");
     expect(log).toEqual([`clear:${CC}`]);
-    expect(turnCuts.stoppedAt(CC)).toBeNumber();
+    expect(turnCuts.stopMark(CC)?.at).toBeNumber();
     expect(e.meta.interruptNote).toContain("撞墙等待画面");
     expect(e.meta.interruptNote).not.toContain("没能替你打断");
   });
@@ -167,7 +167,7 @@ describe("停在撞墙等待画面上（T24 wf3 delivery-hold-4 / 执行者主�
       expect(e.meta.interruptNote).toBeUndefined();
     }
     expect(log).toEqual([]);
-    expect(turnCuts.stoppedAt("cc-other")).toBeUndefined();
+    expect(turnCuts.stopMark("cc-other")).toBeUndefined();
   });
   test("押住时记过的停字，最终送达（出闸 / 菜单关掉后）不再清一次槽：停之后才来的回程留着（T24 复核 P2-1）", async () => {
     log.length = 0;
@@ -212,3 +212,169 @@ describe("停在撞墙等待画面上（T24 wf3 delivery-hold-4 / 执行者主�
   });
 });
 
+
+/**
+ * T13f：「停」和 owner 开口 / 作答的先后只比到达序号（lib/arrival-order.ts），不比墙钟毫秒。
+ * T13e r1–r4 的时序探针：押住的旧停晚投、await 中作答（押住的 / 新来的）、同一毫秒两种先后、作答先到但回调晚走完。
+ */
+describe("停字与开口按到达序号排先后（T13f）", () => {
+  const CC = "cc-arrival-ch";
+  const env = (id: string, text = "停"): Envelope => ({ ...stopEnv(id, true, text), to: { kind: "local", channelId: CC, agentName: "agent-cc" } }) as Envelope;
+  const aborted = () => log.some((l) => l.startsWith("abort"));
+  /** 作答（asks.ts commitAnswer）：入口领号，await 之后才 noteHuman */
+  const answer = (order = turnCuts.arrivals.order()) => turnCuts.noteHuman(CC, false, order);
+  const withGate = async (gate: typeof interruptGate.preempt, run: () => Promise<unknown>) => {
+    interruptGate.preempt = gate;
+    try {
+      await run();
+    } finally {
+      interruptGate.preempt = async () => (log.push(`abort(skip=${[...stopWaitIds(CH)].join(",")})`), { fired: true });
+    }
+  };
+  const fresh = () => (turnCuts.forget(CC), (log.length = 0));
+  /** 发键处的替身：await 途中 owner 作答，然后照 wanted 决定发不发 */
+  const answerMidGate = (seen?: { wanted: boolean }): typeof interruptGate.preempt => async (_ch, _a, opts) => {
+    if (seen) seen.wanted = !!opts?.wanted;
+    answer();
+    if (opts?.wanted && !opts.wanted()) return { fired: false, why: "withdrawn" };
+    return log.push("abort"), { fired: true };
+  };
+
+  test("r1 P1-1：押住停 → owner 答卡片 → 停出队：作废，不打断、不重新挂起", async () => {
+    fresh();
+    const e = env("r1");
+    noteHeldStop(e, CC, "agent-cc", "claude-code");
+    expect(turnCuts.interruptHold(CC)).toBe("stopped");
+    answer();
+    expect(turnCuts.interruptHold(CC)).toBeNull();
+    await preemptForHuman(e, CC, "agent-cc");
+    expect(turnCuts.interruptHold(CC)).toBeNull();
+    expect(aborted()).toBe(false);
+    expect(e.meta.interruptNote).toContain("已作废");
+  });
+
+  test("r2 P1：押住的停出队后、发键前（gate 的 await 里）owner 作答：wanted 为假，不发键、不挂起", async () => {
+    fresh();
+    const e = env("r2");
+    noteHeldStop(e, CC, "agent-cc", "claude-code");
+    await withGate(answerMidGate(), () => preemptForHuman(e, CC, "agent-cc"));
+    expect(aborted()).toBe(false);
+    expect(turnCuts.interruptHold(CC)).toBeNull();
+    expect(e.meta.interruptNote).toContain("已作废");
+    expect(e.meta.interruptNote).not.toContain("打断了");
+  });
+
+  test("r3 P1：新来的停（没押过）在 gate 的 await 里 owner 作答：同样带 wanted，不发键、不挂起、不写「已替你打断」", async () => {
+    fresh();
+    const e = env("r3");
+    const seen = { wanted: false };
+    await withGate(answerMidGate(seen), () => preemptForHuman(e, CC, "agent-cc"));
+    expect(seen.wanted).toBe(true);
+    expect(aborted()).toBe(false);
+    expect(turnCuts.interruptHold(CC)).toBeNull();
+    expect(e.meta.interruptNote).toContain("已作废");
+    expect(e.meta.interruptNote).not.toContain("打断");
+  });
+
+  test("键发出之后 owner 才作答：不再挂起，抬头照实写打断了、已作废", async () => {
+    fresh();
+    const e = env("after-key");
+    noteHeldStop(e, CC, "agent-cc", "claude-code");
+    await withGate(async () => (answer(), { fired: true }), () => preemptForHuman(e, CC, "agent-cc"));
+    expect(turnCuts.interruptHold(CC)).toBeNull();
+    expect(e.meta.interruptNote).toContain("打断了当时在跑的回合");
+    expect(e.meta.interruptNote).toContain("已作废");
+  });
+
+  describe("同一毫秒（冻结时钟）", () => {
+    const FROZEN = Date.parse("2026-09-30T08:00:00Z");
+    let spy: ReturnType<typeof spyOn> | undefined;
+    beforeEach(() => void (spy = spyOn(Date, "now").mockReturnValue(FROZEN)));
+    afterEach(() => spy?.mockRestore());
+
+    test("r3 P2-2：停先到、owner 同一毫秒后作答：作废", async () => {
+      fresh();
+      const e = env("same-ms-stop-first");
+      noteHeldStop(e, CC, "agent-cc", "claude-code");
+      answer();
+      await preemptForHuman(e, CC, "agent-cc");
+      expect(aborted()).toBe(false);
+      expect(turnCuts.interruptHold(CC)).toBeNull();
+      expect(e.meta.interruptNote).toContain("已作废");
+    });
+
+    test("r4 P1：owner 先作答、同一毫秒后说「停」：停有效——发键、挂起，抬头不写作废", async () => {
+      fresh();
+      answer();
+      const e = env("same-ms-answer-first");
+      await preemptForHuman(e, CC, "agent-cc");
+      expect(aborted()).toBe(true);
+      expect(turnCuts.interruptHold(CC)).toBe("stopped");
+      expect(e.meta.interruptNote).not.toContain("作废");
+    });
+
+    test("作答先到、但回调 await 完才走到 noteHuman（停已经记下）：不解除后到的停", async () => {
+      fresh();
+      const early = turnCuts.arrivals.order(); // 作答入口领的号
+      const e = env("answer-lands-late");
+      await preemptForHuman(e, CC, "agent-cc");
+      answer(early);
+      expect(turnCuts.interruptHold(CC)).toBe("stopped");
+    });
+
+    test("停先到、作答的 noteHuman 在停的 gate await 里：作废（与墙钟无关）", async () => {
+      fresh();
+      const e = env("stop-then-answer-in-gate");
+      e.meta.arrivalSeq = turnCuts.arrivals.take();
+      await withGate(answerMidGate(), () => preemptForHuman(e, CC, "agent-cc"));
+      expect(aborted()).toBe(false);
+      expect(turnCuts.interruptHold(CC)).toBeNull();
+    });
+  });
+
+  test("owner 在停之前开的口不作废它；叫停记录的位置是到达序号，不是投递时刻", async () => {
+    fresh();
+    answer();
+    const e = env("held-valid");
+    noteHeldStop(e, CC, "agent-cc", "claude-code");
+    answer(turnCuts.arrivals.order()); // 押着期间 owner 又说了一句 → 解除
+    const e2 = env("newer-stop"); // 之后又说「停」：新的停
+    await preemptForHuman(e2, CC, "agent-cc");
+    expect(turnCuts.interruptHold(CC)).toBe("stopped");
+    log.length = 0;
+    await preemptForHuman(e, CC, "agent-cc"); // 旧停这时才出队：它之后 owner 开过口 → 作废；但不盖掉新的停
+    expect(aborted()).toBe(false);
+    expect(e.meta.interruptNote).toContain("已作废");
+    expect(turnCuts.interruptHold(CC)).toBe("stopped");
+    expect(turnCuts.stopMark(CC)?.order).toEqual({ seq: e2.meta.arrivalSeq! });
+  });
+
+  test("押下之前 owner 已经开过口（停在押住时就作废了）：不记停、不清账，投出去时写作废", async () => {
+    fresh();
+    const e = env("stale-at-hold");
+    e.meta.arrivalSeq = turnCuts.arrivals.take();
+    answer();
+    noteHeldStop(e, CC, "agent-cc", "claude-code");
+    expect(log).toEqual([]);
+    expect(e.meta.heldStopNoted).toBeUndefined();
+    expect(turnCuts.interruptHold(CC)).toBeNull();
+    await preemptForHuman(e, CC, "agent-cc");
+    expect(aborted()).toBe(false);
+    expect(e.meta.interruptNote).toContain("已作废");
+  });
+
+  test("停止按钮：按下之后、发键的 await 里 owner 开了口 → 记停时带上解除；之前开的口不解除", async () => {
+    fresh();
+    interruptGate.manual = async () => (answer(), log.push("abort"), { keys: ["Escape"] });
+    try {
+      await manualInterrupt(CC, "master:agent-cc", "claude-code", "agent-cc", "button");
+    } finally {
+      interruptGate.manual = async () => (log.push("abort"), { keys: ["abort"] });
+    }
+    expect(turnCuts.interruptHold(CC)).toBeNull();
+    fresh();
+    answer();
+    await manualInterrupt(CC, "master:agent-cc", "claude-code", "agent-cc", "button");
+    expect(turnCuts.interruptHold(CC)).toBe("stopped");
+  });
+});

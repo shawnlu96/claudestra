@@ -116,6 +116,21 @@ describe("作答 → 答复不抢占", () => {
     expect(listEvents(openLedger(path), { project: "p" }).map((e) => e.kind)).toEqual(["ask", "decision"]);
   });
 
+  test("作答入口就领到达号（T13f）：答复信封带着它；作答之后才到的停不被这次作答解除", async () => {
+    await reply();
+    const before = turnCuts.arrivals.take();
+    await answerFromChat({ agent: "agent-x", text: "[button:go]", principal: owner() });
+    const seq = delivered[0].meta.arrivalSeq!;
+    expect(seq).toBeGreaterThan(before);
+    try {
+      turnCuts.record({ channelId: "111", agent: "agent-x", cause: "manual", tools: { inflight: [] } });
+      turnCuts.noteHuman("111", false, { seq }); // 作答的回调晚走完：号比停小，不解除
+      expect(turnCuts.interruptHold("111")).toBe("stopped");
+    } finally {
+      turnCuts.forget("111");
+    }
+  });
+
   test("owner 叫停后在卡片上作答也算又开口了：解除这个 agent 的「停」（wf2 classify-merge-9）", async () => {
     turnCuts.record({ channelId: "111", agent: "agent-x", cause: "manual", tools: { inflight: [] } });
     try {

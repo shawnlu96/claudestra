@@ -8,7 +8,8 @@ import { controlFor } from "../lib/runtimes/index.js";
 import { readRegistryAgents } from "../lib/registry.js";
 import { ownerStopOf } from "../lib/stop-words.js";
 import { windowWallWait, type WallWait } from "../lib/wall-screen.js";
-import { preemptHeadline, stopHeadline, stopWaitReply } from "../lib/turn-cuts.js";
+import { preemptHeadline, staleStopNote, staleStopReply, stopHeadline, stopWaitReply } from "../lib/turn-cuts.js";
+import type { Order } from "../lib/arrival-order.js";
 import { stopTyping } from "./components.js";
 import { clearSafetyTimer } from "./discord-adapter.js";
 import { emitEvent, inflightTools } from "./event-bus.js";
@@ -24,6 +25,9 @@ const controlChannelId = () => process.env.CONTROL_CHANNEL_ID || "";
 /** bridge.ts 接的线：清掉这个频道上 agent 间的待回账（看门狗、回程槽、在飞的 peer 调用；bridge.ts clearInterAgentPendingsForChannel） */
 let clearAgentPendings: (channelId: string) => unknown = () => undefined;
 export const setStopHooks = (h: { clearAgentPendings: typeof clearAgentPendings }) => void (clearAgentPendings = h.clearAgentPendings);
+
+/** 这封信到达 bridge 时领的号（bridge.ts deliverLocalInOrder 入口领；单测直调、没领过的现领） */
+const arrivalOf = (env: Envelope): Order => ({ seq: (env.meta.arrivalSeq ??= turnCuts.arrivals.take()) });
 
 function senderName(env: Envelope): string {
   return env.from.kind === "user" ? (env.from.username ?? "用户") : env.from.kind === "api" ? env.from.name : "用户";
@@ -54,10 +58,12 @@ export function holdNotingStop(
 
 export function noteHeldStop(env: Envelope, channelId: string, agent: string, runtime?: string): void {
   if (env.meta.forwarded || !ownerStopOf(env).stop || env.meta.heldStopNoted) return; // 转交来的停字不算 owner 在这里叫停（见 preemptForHuman）
+  const stopOrder = arrivalOf(env);
+  if (turnCuts.spokeAfter(channelId, stopOrder)) return; // 押下之前 owner 已经又开过口：不记，投出去时 preemptForHuman 按作废处理
   env.meta.heldStopNoted = true;
   clearAgentPendings(channelId);
   const cut = turnCuts.record({
-    channelId, agent, runtime, cause: "stopword", byMessageId: env.meta.messageId, byName: senderName(env), tools: { inflight: [] }, interrupted: false,
+    channelId, agent, runtime, cause: "stopword", byMessageId: env.meta.messageId, byName: senderName(env), tools: { inflight: [] }, interrupted: false, stopOrder,
   });
   env.meta.interruptNote = stopHeadline(cut, "wall_wait");
   console.log(`⏹ 停字押在撞墙等待画面上（没发键）：${agent} 已记叫停`);
@@ -73,27 +79,36 @@ export function noteHeldStop(env: Envelope, channelId: string, agent: string, ru
  */
 export async function preemptForHuman(env: Envelope, channelId: string, agent: string): Promise<"wall_wait" | void> {
   const { owner, stop } = env.meta.forwarded ? { owner: false, stop: false } : ownerStopOf(env);
-  if (owner) turnCuts.noteHuman(channelId, stop);
+  const order = arrivalOf(env);
+  if (owner) turnCuts.noteHuman(channelId, stop, order);
+  // 「停」的先后按到达序号（押过的沿用原号，不按投递时刻）：它之后 owner 又开过口（答卡片、说话）= 作废——不发键、不挂起，只给 agent 一句提示。
+  // 入口、发键那一刻（wanted：esc-guard / C-c / Pi·ACP 中止帧前同步再问）、记停之前各查一次，三处和各自的动作之间都没有 await
+  const held = stop && env.meta.heldStopNoted === true;
+  const stale = () => stop && turnCuts.spokeAfter(channelId, order);
+  const staleNote = (fired: boolean) => staleStopNote(Date.parse(env.meta.ts) || Date.now(), fired, held);
+  if (stale()) return void (env.meta.interruptNote = staleNote(false));
   // owner 的停 = 接管：发键之前就清 agent 间的待回账。Pi 停下马上报 Stop，等打断返回再清就晚了，看门狗已拿旧账把它催起一轮（adv5 P1）。
   // 押在撞墙画面上时已经清过（noteHeldStop）：最终送达不再清，否则停之后才来的回程槽也一起没了
-  if (stop && !env.meta.heldStopNoted) clearAgentPendings(channelId);
+  if (stop && !held) clearAgentPendings(channelId);
   const { runtime, transport } = await resolveTurnWindow(channelId, controlChannelId());
   const stopWait = stop && runtime === "pi" ? holdStopWait(env, channelId, agent) : undefined;
   const tools = toolsAt(agent, runtime);
   const queuedBefore = stop && runtime === "codex" ? turnCuts.codexQueuedBefore(channelId) : [];
   let r: PreemptResult = { fired: false, why: "not_allowed" };
   try {
-    r = await interruptGate.preempt(channelId, agent, { stop });
+    r = await interruptGate.preempt(channelId, agent, { stop, ...(stop ? { wanted: () => !stale() } : {}) });
   } catch (e) {
     // 等锁 / 节流期间 Codex 菜单弹出来了，Esc 没发（lib/codex-key-guard.ts）：按停在菜单处理，这条押住
     if ((e as Error).name === "KeysBlockedError") r = { fired: false, why: "wall_wait" };
     else console.log(`⚠️ 抢占打断失败,按常规投递: ${(e as Error).message}`);
   }
   if (!r.fired && r.why === "wall_wait") return "wall_wait";
+  // 键发出之后 owner 才开口的，也不再挂起（作答那边已按序号解除），抬头照实写打断了没有
+  if (stale()) return void (stopWait?.(staleStopReply(agent, r.fired)), (env.meta.interruptNote = staleNote(r.fired)));
   if (!r.fired && !stop) return;
   const cut = turnCuts.record({
     channelId, agent, runtime, cause: stop ? "stopword" : "preempt",
-    byMessageId: env.meta.messageId, byName: senderName(env), tools: r.fired ? tools : { inflight: [] }, interrupted: r.fired,
+    byMessageId: env.meta.messageId, byName: senderName(env), tools: r.fired ? tools : { inflight: [] }, interrupted: r.fired, ...(stop ? { stopOrder: order } : {}),
   });
   if (!stop) {
     env.meta.interruptNote = preemptHeadline(cut);
@@ -120,6 +135,7 @@ type StopResult = { keys: readonly string[]; deduped?: true; wall?: WallWait };
 export async function manualInterrupt(
   channelId: string, win: string, runtime: string | undefined, agent: string, trigger: "button" | "slash" | "api", by: { owner: boolean; name?: string; peer?: string } = { owner: true },
 ): Promise<StopResult> {
+  const stopOrder = turnCuts.arrivals.order(); // 按下即领号：发键的 await 途中 owner 又开的口排在它后面，记停时带上解除
   const tools = toolsAt(agent, runtime);
   if (by.owner) clearAgentPendings(channelId); // 同停字：发键之前清，Pi 停下报的 Stop 不再被看门狗拿去催
   const r = await interruptGate.manual(channelId, win, runtime).catch((e: Error) => {
@@ -129,11 +145,11 @@ export async function manualInterrupt(
   if (r.deduped) return { keys: r.keys, deduped: true }; // 刚按过一次停：那一次已经记过、收过尾
   // 停在撞墙画面上：一个键都没发；owner 的停照样记下（Autopilot 让位），回报时说清是哪种画面（再抓一次屏，只为措辞）
   if (r.wall && by.owner) {
-    turnCuts.record({ channelId, agent, runtime, cause: "manual", byName: by.name, tools: { inflight: [] }, interrupted: false });
+    turnCuts.record({ channelId, agent, runtime, cause: "manual", byName: by.name, tools: { inflight: [] }, interrupted: false, stopOrder });
   }
   if (r.wall) return { keys: [], wall: (await windowWallWait(win, runtime)) ?? "countdown" };
   // 空闲也记：owner 按了停，续做提醒和 Autopilot 都该停下
-  if (by.owner) turnCuts.record({ channelId, agent, runtime, cause: "manual", byName: by.name, tools: r.keys.length ? tools : { inflight: [] }, interrupted: r.keys.length > 0 });
+  if (by.owner) turnCuts.record({ channelId, agent, runtime, cause: "manual", byName: by.name, tools: r.keys.length ? tools : { inflight: [] }, interrupted: r.keys.length > 0, stopOrder });
   else console.log(`⏹ ${by.name ?? "非 owner"} 按停止${r.keys.length ? "打断了" : "（空闲，没发键）"} ${agent}：只打断这一回合，不记成 owner 的「停」、不挂起 Autopilot`);
   if (r.keys.length) recordMetric("agent_interrupt", { channelId, agent, meta: { trigger, owner: String(by.owner), ...(by.name ? { by: by.name } : {}) } }); // 记下实际按的人
   stopTyping(channelId);
@@ -157,6 +173,7 @@ export async function interruptAgentByName(name: string, channelId: string, by?:
  */
 export async function onCodexInterrupt(channelId: string, agent: string): Promise<void> {
   const now = Date.now();
+  const stopOrder = turnCuts.arrivals.order(); // 到达即领号：查程序发键的 await 途中 owner 又开的口排在它后面
   if (turnCuts.keySentWithin(channelId, now) || (await turnCuts.programKeyNear(agent, now))) return;
-  turnCuts.record({ channelId, agent, runtime: "codex", cause: "codex_interrupt", tools: toolsAt(agent, "codex") });
+  turnCuts.record({ channelId, agent, runtime: "codex", cause: "codex_interrupt", tools: toolsAt(agent, "codex"), stopOrder });
 }

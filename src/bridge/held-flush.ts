@@ -9,6 +9,7 @@ import { gatesAsHuman } from "../lib/quota-wall.js";
 import { tmuxCapture } from "../lib/tmux-helper.js";
 import { inputBox } from "../lib/turn-state.js";
 import { heldAcrossStopNote } from "../lib/turn-cuts.js";
+import { isAfter, type Order } from "../lib/arrival-order.js";
 import { leaseActive, notifyHeldSettled, type HeldItem, type HeldQueue } from "./held-queue.js";
 import type { Delivery, Envelope, LocalEndpoint } from "./router.js";
 import { resolveTurnWindow } from "./turn-probe.js";
@@ -28,8 +29,8 @@ export interface FlushDeps {
   walled?: (channelId: string) => Promise<boolean>;
   /** 回程簿失效钟从真正送达起算（只动这封消息发送方那一槽） */
   touch: (channelId: string, env: Envelope) => void;
-  /** owner 最近一次叫停这个频道的时刻（bridge/turn-cuts.ts stoppedAt）；押在它之前的条目投出去时加抬头 */
-  stoppedAt?: (channelId: string) => number | undefined;
+  /** owner 最近一次叫停这个频道（bridge/turn-cuts.ts stopMark）；在它之前到的条目投出去时加抬头 */
+  stopMark?: (channelId: string) => { at: number; order: Order } | undefined;
   /** 画面真静下来了（外人的消息投之前看）；不给 = 隔 1.5 秒抓两次屏比输入框以上（paneSettled） */
   settled?: (channelId: string) => Promise<boolean>;
   /** 这个频道当前这一轮的开启时刻（stop-settle 的 turnTrigger；Stop / 打断就没了）；不给 = turnStartedAt */
@@ -60,9 +61,11 @@ async function paneSettled(channelId: string): Promise<boolean> {
  * 押在叫停之前、叫停之后才投出去的（忙时作答的 ask 答复、agent 请求）：加一行抬头「停之前发的，先别照做，问用户还要不要」——
  * 不加的话 agent 看到的顺序是「停之后 owner 又批准了」，会照做（wf2 classify-merge-1）。bridge 自己的通知不加（收尾提醒另有作废规则）。
  */
-function markIfHeldAcrossStop(item: HeldItem, stopAt: number | undefined): void {
+function markIfHeldAcrossStop(item: HeldItem, stop: { at: number; order: Order } | undefined): void {
   const m = item.env.meta;
-  if (stopAt && item.heldAt < stopAt && item.env.from.kind !== "bridge" && !m.interruptNote) m.interruptNote = heldAcrossStopNote(item.heldAt, stopAt);
+  // 比到达序号，不比押下的毫秒（同一毫秒判不出先后）；老版本押下、没领过号的才退回比押下时刻
+  const before = stop && (m.arrivalSeq !== undefined ? isAfter(stop.order, { seq: m.arrivalSeq }) : item.heldAt < stop.at);
+  if (stop && before && item.env.from.kind !== "bridge" && !m.interruptNote) m.interruptNote = heldAcrossStopNote(item.heldAt, stop.at);
 }
 
 /** 发送人：同一个人（同一个 token / Discord 用户 / agent 频道）连着的几条可以进同一轮 */
@@ -138,7 +141,7 @@ export async function flushHeld(d: FlushDeps, channelId: string, reason: string)
       if (!d.held.get(channelId)?.includes(item)) continue;
       if (!(await mayJoin(d, item, channelId, working, first))) break;
       const to: LocalEndpoint = { ...item.to, ws: fresh.ws, cwd: fresh.cwd };
-      markIfHeldAcrossStop(item, d.stoppedAt?.(channelId));
+      markIfHeldAcrossStop(item, d.stopMark?.(channelId));
       const r = await d.deliver(item.env, to, () => !!d.held.get(channelId)?.includes(item));
       if (r.outcome.kind === "error") continue; // 留在队里(盘上一直有它),下一次触发再投
       // 目标又忙了:deliverToLocal 押回时 hold 认出原条目还在(同一封)就不另加——原条目留着,首次入队 / 已提醒时间不重置,

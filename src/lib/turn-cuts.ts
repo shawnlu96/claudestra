@@ -303,6 +303,18 @@ export function stopWaitReply(agent: string, outcome: StopOutcome): string {
   return `[⏹ bridge] 已叫停 ${agent}：${what}。它还没回这条「停」，之后的回复见对话。`;
 }
 
+/** 押在撞墙等待画面上的「停」晚投时，owner 在那之后已经又开过口（答卡片 / 说话）：这条作废，按 owner 后来的话做。interrupted = 键在 owner 开口之前已经发出去了 */
+export function staleStopNote(stopAt: number, interrupted: boolean, held = true): string {
+  const cut = interrupted ? "它送到时打断了当时在跑的回合；" : "";
+  const when = held ? `是 ${hhmmss(stopAt).slice(0, 5)} 押在等待画面上的，押到现在才送到` : `（${hhmmss(stopAt).slice(0, 5)}）还没生效`;
+  return `[⏹ 这条「停」${when}；${cut}用户之后又开过口，这条已作废，照用户后来的话做，不用停。]`;
+}
+
+/** 同上，给停字自己的 API 同步等待（Pi）的答复 */
+export function staleStopReply(agent: string, interrupted: boolean): string {
+  return `[⏹ bridge] 这条「停」生效之前你又开过口，已作废：${interrupted ? `送到时打断了 ${agent} 当时在跑的回合` : `没有打断 ${agent}`}。`;
+}
+
 /** 押在叫停之前、叫停之后才送到的消息（忙时作答的 ask 答复、agent 请求）的抬头：它不是「停之后用户又让你做」 */
 export function heldAcrossStopNote(heldAt: number, stopAt: number): string {
   const [h, s] = [hhmmss(heldAt).slice(0, 5), hhmmss(stopAt).slice(0, 5)];

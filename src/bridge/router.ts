@@ -143,6 +143,7 @@ export interface Envelope {
     forwarded?: boolean;
     /** 打断抬头（bridge/preempt.ts 写入，renderContentForLocal 放在正文最前）：这条消息打断了什么 / 这是一条「停」 */
     interruptNote?: string;
+    arrivalSeq?: number; // 到达 bridge 时领的号（lib/arrival-order.ts）：跟着押后队列落盘，晚投时「停」与开口的先后按它比（bridge/preempt.ts）
     heldStopNoted?: boolean; // owner 的「停」押在撞墙画面上时已当场记过（bridge/preempt.ts noteHeldStop）：重投不再记，免得清掉之后才来的回程槽
     dropIfStopped?: boolean; // owner 叫停中就不投（Autopilot 到点收尾）：ws.send 前最后那一查（bridge/turn-cuts.ts noticeWanted）
     /**
