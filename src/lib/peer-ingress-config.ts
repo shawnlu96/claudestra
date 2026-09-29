@@ -8,7 +8,7 @@
  * BRIDGE_PORT 以后再改（自定义端口的人改过不止一次），算出来的端口就漂了，peer 悄悄断掉。
  */
 import { existsSync, readFileSync } from "fs";
-import { readFile, writeFile } from "fs/promises";
+import { readFile } from "fs/promises";
 import { REPO_ROOT } from "./repo-root.js";
 import { mergeEnvContent, parseEnvRaw } from "./env-file.js";
 import { listListeners, runCli, tcpOpen } from "./tailscale.js";
@@ -16,16 +16,25 @@ import { detectBridgeUrls } from "./net-addr.js";
 import { bridgeHttpBase } from "./bridge-port.js";
 import { probeBridgeApi } from "./peer-url.js";
 import { assertNoRepoEnvWriteInTest } from "./test-guard.js";
+import { writeTextAtomicSync } from "./state-file.js";
 import { repoEnvVar } from "./env-file.js";
 import { webPortFromStartScript } from "./cli-install.js";
 
 const ENV_HEADER = "# Claudestra 运行时配置 (由 bun run setup 生成)";
 
-/** .env 补 / 改几个键（其余原文逐字节不动）；测试里写仓库根的 .env 直接报错 */
+/**
+ * 整份 .env 原子替换（tmp + rename，保留原权限；新建时 0600——里面有 bot token）：原地 writeFile 中途失败会留下
+ * 截断的 .env，bridge 下次启动就少了一半配置。测试里写仓库根的 .env 直接报错
+ */
+export function saveEnvText(envPath: string, text: string): void {
+  assertNoRepoEnvWriteInTest(envPath);
+  writeTextAtomicSync(envPath, text, { preserveMode: true, mode: 0o600 });
+}
+
+/** .env 补 / 改几个键（其余原文逐字节不动） */
 export async function writeEnvKeys(updates: Record<string, string>, envPath = `${REPO_ROOT}/.env`): Promise<void> {
   const text = existsSync(envPath) ? await readFile(envPath, "utf8") : null;
-  assertNoRepoEnvWriteInTest(envPath);
-  await writeFile(envPath, mergeEnvContent(text, updates, ENV_HEADER));
+  saveEnvText(envPath, mergeEnvContent(text, updates, ENV_HEADER));
 }
 
 /** 同一个 serve 端口上把 /api/v1 挂到 peer 入口（serve 剥不剥挂载前缀，入口都认） */
@@ -73,10 +82,7 @@ export async function ensurePeerIngressPort(bridgePort: number, webPort?: number
   }
   if (lsofMissing) console.warn("⚠️ lsof 跑不起来（PATH 里没有 /usr/sbin？），peer 入口端口改用连接探测判断占用");
   const port = pickIngressPort(bridgePort, (p) => busy.has(p), webPort);
-  if (port) {
-    assertNoRepoEnvWriteInTest(envPath);
-    await writeFile(envPath, mergeEnvContent(text, { PEER_INGRESS_PORT: String(port) }, ENV_HEADER));
-  }
+  if (port) saveEnvText(envPath, mergeEnvContent(text, { PEER_INGRESS_PORT: String(port) }, ENV_HEADER));
   return port;
 }
 
@@ -91,10 +97,7 @@ export async function openDirectPeerIngress(bridgePort: number, envPath = `${REP
   const best = port ? detectBridgeUrls(port)[0] : undefined;
   if (!best) return null;
   const text = existsSync(envPath) ? await readFile(envPath, "utf8") : null;
-  if (parseEnvRaw(text ?? "").PEER_INGRESS_PUBLIC !== "1") {
-    assertNoRepoEnvWriteInTest(envPath);
-    await writeFile(envPath, mergeEnvContent(text, { PEER_INGRESS_PUBLIC: "1" }, ENV_HEADER));
-  }
+  if (parseEnvRaw(text ?? "").PEER_INGRESS_PUBLIC !== "1") saveEnvText(envPath, mergeEnvContent(text, { PEER_INGRESS_PUBLIC: "1" }, ENV_HEADER));
   // hold：邀请的 token 还没签出来，先让 bridge 别因「还没有 peer」又把入口收回本机
   const synced = await fetch(`${bridgeHttpBase()}/peer-ingress/sync`, { method: "POST", body: '{"hold":true}', signal: AbortSignal.timeout(5000) })
     .then((r) => r.ok)

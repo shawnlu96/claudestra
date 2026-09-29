@@ -27,8 +27,10 @@ export async function handleControl(req: Request, path: string, principal: Princ
     return new URL(req.url).searchParams.get("refresh") === "1" ? dash.handleStatsRefreshRequest() : dash.handleStatsRequest();
   }
   if (setup) {
-    const body = (await req.json().catch(() => null)) as { relayUrl?: unknown } | null; // 空 body = 用官方中继
-    const r = await (await import("../relay-link.js")).enableRelay(body?.relayUrl);
+    const link = await import("../relay-link.js");
+    const body = link.parseRelaySetup(await req.text());
+    if (!body.ok) return Response.json(body, { status: 400 });
+    const r = await link.enableRelay(body.relayUrl);
     return Response.json(r, { status: r.ok ? 200 : r.status });
   }
   const relay = await import("../relay-routes.js");

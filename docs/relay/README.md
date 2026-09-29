@@ -4,7 +4,7 @@ bridge 只向外连一条 WebSocket 到中继。之后手机、别的电脑的�
 
 ## 在你的电脑上启用
 
-`bun run setup` 的「手机访问」一步默认就配中继：回车用官方中继 `wss://relay.sunstriker.cc`，装完直接打出配对二维码。装好之后才想开的，网页「设置 · Peer 协作」的中继卡点「一键接入官方中继」即可：写进 `.env` 并当场连上，不用重启（只认带管理权限的设备凭据，`POST /api/v1/relay/setup`）。手动配等价于 `.env` 加一行，重启 bridge：
+`bun run setup` 的「手机访问」一步默认就配中继：回车用官方中继 `wss://relay.sunstriker.cc`，装完直接打出配对二维码。装好之后才想开的，网页「设置 · Peer 协作」的中继卡点「一键接入官方中继」即可：写进 `.env` 并当场连上，不用重启（只认带管理权限的设备凭据，`POST /api/v1/relay/setup`；同时点两次后一个 409，本机连不了——比如没有实例密钥——就把 `.env` 恢复原样，地址里带 `$` 的不收，因为 Bun 读 `.env` 会把它展开）。手动配等价于 `.env` 加一行，重启 bridge：
 
 ```
 RELAY_URL=wss://relay.example.com      # 中继地址（官方托管或自建）
