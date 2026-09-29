@@ -9,7 +9,7 @@ import { dirname, join } from "node:path";
 import type { AuditAgent, AuditHeld, AuditInboxEntry, AuditSnapshot, MainTurn } from "./ledger-audit.js";
 import { blockedBy, depViews, isSatisfied, type DepView } from "./ledger-deps.js";
 import { getMeta, listDeps, listEvents, listTasks } from "./ledger-store.js";
-import type { LedgerEvent, LedgerTask, Stage } from "./ledger-stages.js";
+import type { LedgerEvent, LedgerTask, Stage, TaskKind } from "./ledger-stages.js";
 import { runningReviewers, type ReviewerRef } from "./ledger-audit-reviewers.js";
 import { HELD_MESSAGES_PATH } from "./paths.js";
 import { readRegistryAgents, type RegistryAgent } from "./registry.js";
@@ -159,8 +159,25 @@ function enteredStage(e: LedgerEvent): Stage | undefined {
 }
 
 /**
+ * 前置这一段连续满足的起点：最后一次从不满足进入满足的时刻。在满足阶段之间走（live → verified）、
+ * 进出 blocked（暂停不算倒退，同 ledger-deps.ts 的 workStage）都不重新计时，否则下游 merge 停滞会被推后再重推一次。
+ */
+function satisfiedSince(kind: TaskKind, events: readonly LedgerEvent[]): number | undefined {
+  let since: number | undefined;
+  let was = false;
+  for (const e of events) {
+    const stage = enteredStage(e);
+    if (!stage || stage === "blocked") continue;
+    const now = isSatisfied({ kind, stage });
+    if (now && !was) since = e.ts;
+    was = now;
+  }
+  return was ? since : undefined;
+}
+
+/**
  * 依赖最后一次放行的时刻（已放行的边里取最晚）：PM 手动定的状态取边的 updatedAt，
- * 推导的取前置任务最后一次进满足阶段的时刻。没有已放行的边 = null。
+ * 推导的取前置任务这一段连续满足的起点。没有已放行的边 = null。
  */
 function unblockedAt(taskId: string, deps: readonly DepView[], tasks: readonly LedgerTask[], byTarget: ReadonlyMap<string, LedgerEvent[]>): number | null {
   const kindOf = new Map(tasks.map((t) => [t.id, t.kind]));
@@ -168,10 +185,7 @@ function unblockedAt(taskId: string, deps: readonly DepView[], tasks: readonly L
   for (const d of deps) {
     if (d.to !== taskId || d.effective !== "done") continue;
     const kind = kindOf.get(d.from);
-    const satisfiedAt = (byTarget.get(d.from) ?? []).findLast((e) => {
-      const stage = enteredStage(e);
-      return !!kind && !!stage && isSatisfied({ kind, stage });
-    })?.ts;
+    const satisfiedAt = kind ? satisfiedSince(kind, byTarget.get(d.from) ?? []) : undefined;
     const ts = d.state !== null ? d.updatedAt : satisfiedAt;
     if (ts !== undefined && (at === null || ts > at)) at = ts;
   }
