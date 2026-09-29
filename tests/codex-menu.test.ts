@@ -2,7 +2,7 @@
  * T63 Codex 选择菜单护栏：菜单在屏上时，程序化的路径一个键都不发（不回车、不按 Esc / 数字 / 方向键 / C-u），消息押住、命令拒绝。
  * 画面用 2026-09-28 codex 额度用完那晚的真实原屏（tests/auq-pane.test.ts 同一份）。
  */
-import { describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { codexMenuShown, codexMenuState } from "../src/lib/codex-menu.js";
 import { clearRefusal, wallWaitOf } from "../src/lib/wall-screen.js";
 import { detectCodexRuntimeDialog } from "../src/lib/runtime-dialogs.js";
@@ -150,7 +150,7 @@ describe("⑦ 压缩注入（ctx-boundary / fleet / 手动压缩按钮）", () =
 });
 
 // ── T63 复审（outer-codex @f21b51a7：P1×1、P2×3）──
-import { writeFileSync } from "node:fs";
+import { existsSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { REGISTRY_PATH } from "../src/lib/registry.js";
 import { keysBlockedAt, KeysBlockedError } from "../src/lib/codex-key-guard.js";
 import { createEscGuard, type EscGuardDeps } from "../src/lib/esc-guard.js";
@@ -159,7 +159,13 @@ import { onCodexTypeInFailed } from "../src/bridge/codex-menu-hold.js";
 import { CodexQueueSink } from "../src/lib/codex-thread.js";
 
 describe("复审 P1：最底层发键在所有等待之后再查菜单", () => {
-  writeFileSync(REGISTRY_PATH, JSON.stringify({ socket: "s", agents: { "agent-c": { runtime: "codex", channelId: "c1", status: "active" }, "agent-k": { channelId: "k1", status: "active" } } }));
+  // 测试进程共用一个状态目录：写进去的 registry 用完要还原，不然后面按 registry 选目标的测试（fleet-routes）会看到 agent-c / agent-k
+  let prior: string | null = null;
+  beforeAll(() => {
+    prior = existsSync(REGISTRY_PATH) ? readFileSync(REGISTRY_PATH, "utf8") : null;
+    writeFileSync(REGISTRY_PATH, JSON.stringify({ socket: "s", agents: { "agent-c": { runtime: "codex", channelId: "c1", status: "active" }, "agent-k": { channelId: "k1", status: "active" } } }));
+  });
+  afterAll(() => (prior === null ? unlinkSync(REGISTRY_PATH) : writeFileSync(REGISTRY_PATH, prior)));
   test("只对 Codex 窗口抓屏判定；CC 窗口不抓", async () => {
     let captures = 0;
     const cap = async () => (captures++, MENU);
