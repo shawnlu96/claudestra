@@ -13,6 +13,7 @@ import { writeJsonAtomic } from "../lib/state-file.js";
 import { signedFor } from "../lib/instance-key.js";
 import { mergeProbe, probeErrorOf, probeResultOf, type PeerPresence, type ProbeResult } from "../lib/peer-presence.js";
 import { peerFetch, relayPresence } from "./relay-link.js";
+import { readJsonCapped } from "../lib/body-reader.js";
 
 export const PEER_PRESENCE_PATH = join(STATE_DIR, "peer-presence.json");
 const PROBE_EVERY_MS = 60_000;
@@ -43,7 +44,7 @@ async function probe(p: HttpPeer): Promise<ProbeResult | null> {
       headers: { Authorization: `Bearer ${p.outToken}`, ...signedFor("GET", url, "") },
       signal: AbortSignal.timeout(PROBE_TIMEOUT_MS),
     }, { timeoutMs: PROBE_TIMEOUT_MS }); // relay:// 的 peer 经中继探（relay-link.ts）
-    const body = await r.json().catch(() => null); // 非 JSON（对方前面是网页 / 反代错页）按空列表处理，状态码照样判
+    const body = await readJsonCapped(r); // 有上限地读；非 JSON（对方前面是网页 / 反代错页）按空列表处理，状态码照样判
     return probeResultOf(r.status, body, Date.now() - t0);
   } catch (e) {
     return { ok: false, error: probeErrorOf(e) };

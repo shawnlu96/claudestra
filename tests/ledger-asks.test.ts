@@ -5,6 +5,7 @@ import {
   answerAsk, ASK_TTL_MS, closeAsk, dueAsks, findAskByDiscordMessage, getAsk, hasAsksTable, listAsks, openAsk, openAskFull, patchAsk, type AskAnswer, type NewAsk,
 } from "../src/lib/ledger-asks.js";
 import { migrateAsksV2 } from "../src/lib/ledger-asks-schema.js";
+import { STEPS_SCHEMA } from "../src/lib/ledger-steps.js";
 import { projectView } from "../src/lib/ledger-read.js";
 import { closeLedger, LEDGER_MIGRATIONS, LEDGER_SCHEMA_VERSION, LedgerError, listEvents, openLedger, schemaVersion } from "../src/lib/ledger-store.js";
 import { appendEvent, createItem, createTask } from "../src/lib/ledger-write.js";
@@ -241,9 +242,10 @@ function rawAt(steps: readonly (typeof LEDGER_MIGRATIONS)[number][], version: nu
 const tableExists = (d: Database, name: string) => !!d.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(name);
 
 describe("迁移到第二版", () => {
-  test("顺序：v1 → asks → T8h 的依赖边 → T29 的巡检表 → asks 第二版（v5）", () => {
-    expect(LEDGER_MIGRATIONS.length).toBe(5);
+  test("顺序：v1 → asks → T8h 的依赖边 → T29 的巡检表 → asks 第二版（v5）→ T47 的步骤表（v6）", () => {
+    expect(LEDGER_MIGRATIONS.length).toBe(6);
     expect(LEDGER_MIGRATIONS[4]).toBe(migrateAsksV2);
+    expect(LEDGER_MIGRATIONS[5]).toBe(STEPS_SCHEMA);
   });
 
   test("线上的 v3（T8h）、v4（T29，audit_baseline 里有数据）都升到 v5：asks 重建、task_deps / 巡检表 / 任务负责人列都在", () => {
@@ -252,7 +254,7 @@ describe("迁移到第二版", () => {
       if (v === 4) raw.exec("INSERT INTO audit_baseline (project, rule, since) VALUES ('p', 'review_no_reviewer', 123)");
       raw.close();
       const d = openLedger(path);
-      expect([schemaVersion(d), tableExists(d, "task_deps"), tableExists(d, "audit_findings"), getAsk(d, "ask_old")?.assignee]).toEqual([5, true, true, null]);
+      expect([schemaVersion(d), tableExists(d, "task_deps"), tableExists(d, "audit_findings"), getAsk(d, "ask_old")?.assignee]).toEqual([LEDGER_MIGRATIONS.length, true, true, null]);
       if (v === 4) expect(d.query("SELECT since FROM audit_baseline").all()).toEqual([{ since: 123 }]);
       closeLedger(path);
     }
@@ -274,7 +276,7 @@ describe("迁移到第二版", () => {
     for (const steps of [[...LEDGER_MIGRATIONS.slice(0, 2), migrateAsksV2], [...LEDGER_MIGRATIONS.slice(0, 3), migrateAsksV2]]) {
       rawAt(steps, steps.length).close();
       const d = openLedger(path);
-      expect([schemaVersion(d), tableExists(d, "task_deps"), tableExists(d, "audit_findings"), getAsk(d, "ask_old")?.title]).toEqual([5, true, true, "老的"]);
+      expect([schemaVersion(d), tableExists(d, "task_deps"), tableExists(d, "audit_findings"), getAsk(d, "ask_old")?.title]).toEqual([LEDGER_MIGRATIONS.length, true, true, "老的"]);
       closeLedger(path);
     }
   });

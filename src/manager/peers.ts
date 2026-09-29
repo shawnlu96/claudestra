@@ -7,9 +7,12 @@ import { repoEnvVar } from "../lib/env-file.js";
 import { hostname } from "os";
 import { extractBoolFlag, loadRegistry, output } from "./core.js";
 import { resolveMyBridgeUrl } from "./peers-net.js";
-import { peerAuthHint } from "../lib/peer-auth-hints.js";
+import { peerAuthHint, peerErrorText } from "../lib/peer-auth-hints.js";
+import { readJsonCapped } from "../lib/body-reader.js";
+import { isE2eResponse } from "../lib/peer-e2e-client.js";
 import { inviteLink, isPeerBaseUrl, relayUrlOf } from "../lib/peers.js";
 import { myFingerprint, peerCliFetch, relayStatus } from "./relay.js";
+import { inviteKeys, plainInviteWarning } from "../lib/peer-e2e-local.js";
 
 // ── v2.11+ HTTP peer 握手（docs/design-http-peers.md §3）─────────────────
 
@@ -160,9 +163,9 @@ export async function cmdPeerHttpTest(peerName: string) {
       headers: { Authorization: `Bearer ${peer.outToken}` },
       signal: AbortSignal.timeout(10_000),
     });
-    const body: any = await res.json().catch(() => null);
+    const body: any = await readJsonCapped(res); // 有上限地读（lib/body-reader.ts）；非 JSON 为 null
     if (!res.ok) {
-      output({ ok: false, error: `对方返回 ${res.status}: ${body?.error || "未知"}`, hint: [401, 403, 429].includes(res.status) ? peerAuthHint(body) : undefined });
+      output({ ok: false, error: `对方返回 ${res.status}: ${peerErrorText(isE2eResponse(res), body, "未知", peerName)}`, hint: [401, 403, 429].includes(res.status) ? peerAuthHint(body) : undefined });
       return;
     }
     const agents = (body?.agents || []).map((a: any) => ({ name: a.name, status: a.status }));
@@ -283,8 +286,8 @@ async function sweepExpiredInvites(): Promise<number> {
   return expired.length;
 }
 
-/** 生成一键邀请：预签入站 token + 登记待兑换记录,输出 v2 邀请串。 */
-export async function cmdPeerInviteNew(agentsCsv: string, myUrl: string, force: boolean) {
+/** 生成一键邀请：预签入站 token + 登记待兑换记录,输出 v2 邀请串。缺省带密钥（兑换走 HPKE、之后整体加密），--allow-legacy 才生成明文邀请 */
+export async function cmdPeerInviteNew(agentsCsv: string, myUrl: string, force: boolean, allowLegacy = false, viaRelayPage = false) {
   const { addPendingInvite, encodePeerInviteV2, INVITE_TTL_MS } = await import("../lib/peers.js");
   const { randomBytes } = await import("crypto");
   const agents = agentsCsv.split(",").map((s) => s.trim()).filter(Boolean);
@@ -301,10 +304,9 @@ export async function cmdPeerInviteNew(agentsCsv: string, myUrl: string, force: 
     output({ ok: false, error: `--url 必须是 http(s):// 开头的对外可达地址或 relay://<本机指纹>` });
     return;
   }
-  const check = await checkPeerScope(agents, force);
-  if (check.error) { output({ ok: false, error: check.error }); return; }
-  const id = `inv_${randomBytes(4).toString("hex")}`;
-  const joinSecret = randomBytes(24).toString("hex");
+  const check = await checkPeerScope(agents, force), keys = allowLegacy ? null : await inviteKeys();
+  if (check.error || (!allowLegacy && !keys)) { output({ ok: false, error: check.error ?? "本机 E2E 密钥读不到，生成不了加密邀请；确实要连就加 --allow-legacy（明文）" }); return; }
+  const id = `inv_${randomBytes(4).toString("hex")}`, joinSecret = randomBytes(24).toString("hex");
   // 占位 peer 名 "invite:<id>"——兑换时改成对方自报名。占位前缀同时是
   // 「未兑换」的判定依据(过期清扫只吊销这类)。
   const { tokenId, secret } = await issuePeerToken(`invite:${id}`, agents);
@@ -312,12 +314,12 @@ export async function cmdPeerInviteNew(agentsCsv: string, myUrl: string, force: 
   await addPendingInvite({
     id, joinSecret, inTokenId: tokenId, agents, url: myUrl,
     createdAt: new Date(now).toISOString(),
-    expiresAt: new Date(now + INVITE_TTL_MS).toISOString(),
+    expiresAt: new Date(now + INVITE_TTL_MS).toISOString(), ...(keys ? { e2e: true } : {}),
   });
-  const invite = encodePeerInviteV2({ v: 2, name: selfPeerName(), url: myUrl, token: secret, join: joinSecret, fp: myFingerprint() });
+  const invite = encodePeerInviteV2({ v: 2, name: selfPeerName(), url: myUrl, token: secret, join: joinSecret, fp: myFingerprint(), ...(keys ?? {}) });
   output({
-    ok: true, id, agents, myUrl, expiresAt: new Date(now + INVITE_TTL_MS).toISOString(),
-    warnings: resolved.note ? [...check.warnings, resolved.note] : check.warnings,
+    ok: true, id, agents, myUrl, expiresAt: new Date(now + INVITE_TTL_MS).toISOString(), e2e: !!keys,
+    warnings: [...check.warnings, ...(resolved.note ? [resolved.note] : []), ...(keys ? [] : [plainInviteWarning(viaRelayPage)])],
     invite, ...(relay?.connected && relay.base ? { link: inviteLink(relay.base, invite), fp: relay.fp } : {}),
     next: relay?.connected ? "把链接发给对方，点开即完成（没装 Claudestra 的人会看到安装指引）。24h 未兑换自动作废。" : "把邀请串发给对方（走任意私聊渠道）→ 对方粘贴即完成。24h 未兑换自动作废。",
   });
@@ -327,13 +329,13 @@ export async function cmdPeerInviteList() {
   const { readPeers, encodePeerInviteV2 } = await import("../lib/peers.js");
   const { readPrincipals } = await import("../lib/principals.js");
   const swept = await sweepExpiredInvites();
-  const [data, pf] = await Promise.all([readPeers(), readPrincipals()]);
+  const [data, pf, keys] = await Promise.all([readPeers(), readPrincipals(), inviteKeys()]);
   const invites = (data.pendingInvites || []).map((i) => {
     const tok = pf.principals.find((x) => x.id === `token:${i.inTokenId}` && !x.disabled);
     return {
       id: i.id, agents: i.agents, createdAt: i.createdAt, expiresAt: i.expiresAt,
       // token secret 还在才拼得出完整串（供「再复制一次」;secret 本就落在本机文件里）
-      invite: tok?.secret ? encodePeerInviteV2({ v: 2, name: selfPeerName(), url: i.url, token: tok.secret, join: i.joinSecret, fp: myFingerprint() }) : null,
+      invite: tok?.secret && (!i.e2e || keys) ? encodePeerInviteV2({ v: 2, name: selfPeerName(), url: i.url, token: tok.secret, join: i.joinSecret, fp: myFingerprint(), ...(i.e2e && keys) }) : null,
     };
   });
   output({ ok: true, count: invites.length, invites, ...(swept ? { sweptExpired: swept } : {}) });
