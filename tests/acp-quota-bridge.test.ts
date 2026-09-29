@@ -7,12 +7,15 @@ import { testChildEnv } from "./test-env.ts";
 // Run in a child so startQuotaWall's process-wide subscription cannot affect other tests.
 // Production parsing, watcher events, quota-wall cancellation and ask storage remain real.
 async function bridgeProbe() {
+  const { spyOn } = await import("bun:test");
   const { classifyPromptError, failureEntry } = await import("../src/lib/acp/failures.ts");
   const { RpcError } = await import("../src/lib/acp/rpc.ts");
   const { onAcpFrame } = await import("../src/bridge/acp-link.ts");
   const { noteAcpChannel } = await import("../src/bridge/acp-state.ts");
   const { startWatching, stopWatching } = await import("../src/bridge/jsonl-watcher.ts");
-  const { subscribeEvents } = await import("../src/bridge/event-bus.ts");
+  const { subscribeEvents, emitEvent } = await import("../src/bridge/event-bus.ts");
+  const { startCodexTurnFailureWatch } = await import("../src/bridge/codex-turn-failure.ts");
+  const registry = await import("../src/lib/registry.ts");
   const { setExtensionSocket } = await import("../src/bridge/pi-abort.ts");
   const { HeldQueue } = await import("../src/bridge/held-queue.ts");
   const { startQuotaWall, trackResumePlan, resumeStillWanted } = await import("../src/bridge/quota-wall-wiring.ts");
@@ -22,6 +25,10 @@ async function bridgeProbe() {
   const held = new HeldQueue(null), sent: unknown[] = [], events: any[] = [];
   const ws = { send: (data: string) => { sent.push(JSON.parse(data)); } };
   const agents = ["quota", "nonquota"].map((s) => ({ name: `agent-acp-${s}`, channelId: `local-acp-${s}`, status: "active", projectId: "p" }));
+  const control = { name: "agent-tmux-control", channelId: "local-tmux-control" };
+  spyOn(registry, "readRegistryAgents").mockResolvedValue([...agents, control].map((a) => ({ ...a, runtime: "codex" })) as never);
+  const stopFailures: string[] = [];
+  startCodexTurnFailureWatch(async (channel) => { stopFailures.push(channel); });
   setAsksForTest({ path: `${process.env.CLAUDESTRA_STATE_DIR}/asks.db`, registry: agents as never, ownerChats: [] });
   setExtensionSocket(() => ws, { deliver: async () => undefined, ownerId: () => "", books: () => ({}) as never,
     hold: () => { throw new Error("unexpected undelivered echo"); } });
@@ -64,7 +71,11 @@ async function bridgeProbe() {
     unsubAsk();
     stopWatching(a.name);
   }
-  return { out, sent };
+  // Same subscriber must remain active for tmux: otherwise "no ACP callback" would be a vacuous pass.
+  emitEvent({ agent: control.name, chatId: control.channelId, type: "assistant_text", data: { rateLimited: true, text: "control" } });
+  emitEvent({ agent: agents[0].name, chatId: agents[0].channelId, type: "api_error_turn", data: { error: "ACP control" } });
+  await Bun.sleep(650); // The real subscriber delays fallback StopFailure by 500ms.
+  return { out, sent, stopFailures };
 }
 
 test("usageLimitExceeded / Quota depleted crosses ACP watcher, cancels old resume and opens an unselected quota ask", async () => {
@@ -86,6 +97,7 @@ test("usageLimitExceeded / Quota depleted crosses ACP watcher, cancels old resum
     expect(ask.options[0].buttons[0]).toMatchObject({ id: "acp_quota_0", label: "等重置" });
     expect(ask.options[0].buttons.every((b: any) => !b.selected && !b.default)).toBe(true);
     expect(result.sent).toEqual([]); // No model switch, answer or automatic choice was sent.
+    expect(result.stopFailures).toEqual(["local-tmux-control"]); // ACP failures are settled only by their host.
     expect(other).toMatchObject({ kind: "error", textMatches: true, before: true, stillWanted: true, held: 1, entry: { rateLimited: false } });
     expect(other.events).toHaveLength(2);
     expect(other.events.every((e: any) => e.data.rateLimited !== true)).toBe(true);
