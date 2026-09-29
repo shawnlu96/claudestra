@@ -1,7 +1,7 @@
 /** 台账写入（src/lib/ledger-write.ts）：改行与事件同事务、rev / from CAS、dedupKey 幂等、阶段角色、round / specRev、项目级写入 */
 import type { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { closeLedger, getItem, getMeta, getTask, LedgerError, listEvents, openLedger } from "../src/lib/ledger-store.js";
+import { closeLedger, getItem, getMeta, getTask, LedgerError, listEvents, openLedger, pmsByProject } from "../src/lib/ledger-store.js";
 import { appendEvent, createItem, createTask, deliver, importTask, moveStage, recordReview, recordVerify, renameAgentRefs, setFrozen, setItem, setMeta, setTask } from "../src/lib/ledger-write.js";
 import { taskMetrics } from "../src/lib/ledger-metrics.js";
 
@@ -168,6 +168,11 @@ describe("项目级与追加事件", () => {
   test("PM 名单 / docsDir 只有 owner 能设", () => {
     expect(errOf(() => setMeta(db, PM, { project: P, key: "pms", value: ["agent-claudestra", "x"] })).code).toBe("forbidden");
     expect(setMeta(db, OWNER, { project: P, key: "docsDir", value: "/tmp/docs" }).row).toMatchObject({ docsDir: "/tmp/docs", pms: ["agent-claudestra"] });
+  });
+  test("pmsByProject：只列设过 PM 名单的项目（fleet 按它认 PM）", () => {
+    setMeta(db, OWNER, { project: "side", key: "docsDir", value: "/tmp/side" });
+    setMeta(db, OWNER, { project: "other", key: "pms", value: ["agent-x", "agent-claudestra"] });
+    expect([...pmsByProject(db)]).toEqual([["claude-orchestrator", ["agent-claudestra"]], ["other", ["agent-x", "agent-claudestra"]]]);
   });
   test("冻结 / 解冻合并队列各记一条项目级事件；重复冻结报 conflict", () => {
     setFrozen(db, { ...PM, now: 5 }, { project: P, frozen: true, reason: "线上验证失败" });

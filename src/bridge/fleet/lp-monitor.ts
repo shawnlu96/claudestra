@@ -16,6 +16,8 @@ export interface LpSnapshot {
   offer: boolean;
   resetsAt?: string;
   allowancePct?: number;
+  /** 输入框上方有 spinner（回合进行中）；给 fleet state 看忙闲，不进 sig，忙闲翻转不发 SSE */
+  busy?: boolean;
   reason?: string;
   at: number;
 }
@@ -32,8 +34,8 @@ export function lpWindowOf(name: string): string {
 async function probeLp(name: string): Promise<LpSnapshot> {
   try {
     const r = readLpPane(await tmuxRawStrict(["capture-pane", "-t", lpWindowOf(name), "-p", "-e"]));
-    const { lowPriority, walled, offer, resetsAt, allowancePct, reason } = r;
-    return { lowPriority, walled, offer, at: Date.now(), ...(resetsAt ? { resetsAt } : {}), ...(allowancePct !== undefined ? { allowancePct } : {}), ...(reason ? { reason } : {}) };
+    const { lowPriority, walled, offer, resetsAt, allowancePct, reason, busy } = r;
+    return { lowPriority, walled, offer, busy, at: Date.now(), ...(resetsAt ? { resetsAt } : {}), ...(allowancePct !== undefined ? { allowancePct } : {}), ...(reason ? { reason } : {}) };
   } catch (e) {
     return { lowPriority: "unknown", walled: false, offer: false, reason: `抓屏失败：${(e as Error).message.slice(0, 120)}`, at: Date.now() };
   }
