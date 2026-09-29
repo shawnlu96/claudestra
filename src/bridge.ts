@@ -416,9 +416,9 @@ const pendingAgentCalls = new AgentCallBook();
  */
 const heldLocalMsgs = new HeldQueue();
 // Pi 的停：经 ws 请扩展 abort()、等回执；作废的消息回显给发送方，并从下面这几本欠账上销掉（bridge/pi-abort.ts）
-setExtensionSocket((ch) => clients.get(ch)?.ws, { deliver, ownerId: primaryOwnerId, books: () => ({ pendingReplies, pendingThreads, pendingInterAgentMsg, pendingAgentCalls, pendingApiRequests }) });
+setExtensionSocket((ch) => clients.get(ch)?.ws, { deliver, ownerId: primaryOwnerId, hold: (env) => void heldLocalMsgs.holdEnv(env),
+  books: () => ({ pendingReplies, pendingThreads, pendingInterAgentMsg, pendingAgentCalls, pendingApiRequests }) });
 setStopHooks({ clearAgentPendings: (ch) => clearInterAgentPendingsForChannel(ch) }); // owner 的停：发键之前清 agent 间的待回账（bridge/preempt.ts）
-
 
 /** agent→agent 消息现在要不要押着:只看主回合,只剩后台在跑不算,见 lib/turn-state.ts */
 async function localAgentWorking(channelId: string, evAgent: string): Promise<boolean> {
