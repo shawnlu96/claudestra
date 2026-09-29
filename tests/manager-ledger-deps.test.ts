@@ -2,6 +2,7 @@
 import type { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { closeLedger, getTask, openLedger } from "../src/lib/ledger-store.js";
+import { setMeta } from "../src/lib/ledger-write.js";
 import type { Registry } from "../src/manager/core.js";
 import { runLedger } from "../src/manager/ledger.js";
 import { isWriteInvocation, needsWriteLock } from "../src/manager/write-commands.js";
@@ -27,7 +28,7 @@ beforeEach(async () => {
   db = openLedger(":memory:");
   const a = { status: "active", projectId: P } as Registry["agents"][string];
   reg = { socket: "", agents: { [PM]: a, [EXE]: { ...a }, "agent-task-x": { ...a } } };
-  expect((await run("owner", "meta", "--project", P, "--pms", "claudestra")).ok).toBe(true);
+  setMeta(db, { actor: "owner", now: 1_000 }, { project: P, key: "pms", value: [PM] }); // meta --pms 只生成提案（tests/team-apply.test.ts）
   for (const id of ["T1", "T2", "T3"]) expect((await run(PM, "task-new", id, "--title", id, "--kind", "code", "--agent", "task-t8h")).ok).toBe(true);
 });
 afterEach(() => closeLedger(":memory:"));

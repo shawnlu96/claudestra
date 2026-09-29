@@ -41,6 +41,7 @@ import {
 } from "../lib/tmux-helper.js";
 import { resolveInvocation, isProjectSkillForOtherAgent } from "./slash-registry.js";
 import { newMessageId, newThreadId } from "./router.js";
+import { isReservedButtonId } from "../lib/reserved-buttons.js";
 import { clearSafetyTimer, trackStatusMessage, statusMessageIdFor, finishStatusMessage, agentActionButtons } from "./discord-adapter.js";
 import type { ServerWebSocket } from "bun";
 import type { Envelope, Delivery } from "./router.js";
@@ -600,25 +601,26 @@ async function handleInteraction(discord: Client, deps: InteractionDeps, interac
     // ── Buttons ──
     if (interaction.isButton()) {
       const id = interaction.customId;
+      const free = isReservedButtonId(id); // 下面免 LLM 的分支只认保留表里的 id（lib/reserved-buttons.ts）：漏登记的转给 LLM，agent 贴出的同名按钮才拦得住
       await interaction.deferUpdate().catch(async () => {
         await interaction.deferReply({ ephemeral: true }).catch(() => {});
       });
 
       // 用量看板「🔄 刷新」按钮 — 强制立即刷新（deferUpdate 已 ack，doUpdate 会编辑消息）
-      if (id === "stats_refresh") {
+      if (free && id === "stats_refresh") {
         forceRefreshStatsDashboard(discord).catch((e) => console.error("📊 手动刷新失败:", e));
         return;
       }
 
       // v2.5.4+ 「🧹 存记忆 + Compact」按钮（上下文档位提醒消息上的）
-      if (id.startsWith("savecompact:")) {
+      if (free && id.startsWith("savecompact:")) {
         const targetChannelId = id.slice("savecompact:".length);
         await triggerSaveCompact(interaction, targetChannelId, runManager);
         return;
       }
 
       // TUI modal 选项按钮 — 把键转发给 tmux，再截图 + 可能再出菜单
-      if (id.startsWith("modal:")) {
+      if (free && id.startsWith("modal:")) {
         const rest = id.slice("modal:".length);
         const idx = rest.lastIndexOf(":");
         if (idx < 0) return;
@@ -629,7 +631,7 @@ async function handleInteraction(discord: Client, deps: InteractionDeps, interac
       }
 
       // 升级到大总管处理 — 把当前 agent 状态 + 截图 post 到 control 频道，master 自己 LLM 处理
-      if (id.startsWith("escalate:")) {
+      if (free && id.startsWith("escalate:")) {
         const rest = id.slice("escalate:".length);
         const idx = rest.indexOf(":");
         if (idx < 0) return;
@@ -668,7 +670,7 @@ async function handleInteraction(discord: Client, deps: InteractionDeps, interac
       }
 
       // Wedge Esc 救回按钮
-      if (id.startsWith("wedge_esc:")) {
+      if (free && id.startsWith("wedge_esc:")) {
         const agentName = id.slice("wedge_esc:".length);
         try {
           await tmuxSendEscape(windowTarget(agentName), { strict: true });
@@ -681,7 +683,7 @@ async function handleInteraction(discord: Client, deps: InteractionDeps, interac
       }
 
       // v2.0.23+: agent 掉线（claude 退到 shell）的重启按钮
-      if (id.startsWith("wedge_restart:")) {
+      if (free && id.startsWith("wedge_restart:")) {
         const agentName = id.slice("wedge_restart:".length);
         try {
           await interaction.followUp({ content: `🔄 正在重启 ${agentName}...`, ephemeral: true }).catch(() => {});
@@ -699,7 +701,7 @@ async function handleInteraction(discord: Client, deps: InteractionDeps, interac
       }
 
       // v2.2.0+: auto 拦截「临时放行并重试」—— Shift+Tab 运行时切到 bypass + 注入重试
-      if (isAutoPermButton(id)) {
+      if (free && isAutoPermButton(id)) {
         // 切回的目标 = 放行前记下的模式（编在 revert 按钮 id 里），见 bridge/auto-allow.ts
         const { isAllow, channelId: targetChannelId, target } = parseAutoPermButton(id)!;
         try {
@@ -765,7 +767,7 @@ async function handleInteraction(discord: Client, deps: InteractionDeps, interac
 
       // v2.4.19+ 跳到 iTerm tab 按钮（LLM-free）。逻辑抽到 focusITermTab()，
       // /focus slash 命令复用同一份（button 在 pin 弹窗里点不动，slash 更可靠）。
-      if (id.startsWith("focus:")) {
+      if (free && id.startsWith("focus:")) {
         const targetChannelId = id.slice("focus:".length);
         try {
           const r = await focusITermTab(targetChannelId, CONTROL_CHANNEL_ID, runManager);
@@ -777,7 +779,7 @@ async function handleInteraction(discord: Client, deps: InteractionDeps, interac
       }
 
       // v2.4.22+ 截图按钮（复用 /screenshot 逻辑）。ephemeral 回执带图，不刷屏。
-      if (id.startsWith("screenshot:")) {
+      if (free && id.startsWith("screenshot:")) {
         const targetChannelId = id.slice("screenshot:".length);
         try {
           const pngPath = await captureChannelScreenshot(targetChannelId, runManager);
@@ -793,7 +795,7 @@ async function handleInteraction(discord: Client, deps: InteractionDeps, interac
       }
 
       // 打断按钮
-      if (id.startsWith("interrupt:")) {
+      if (free && id.startsWith("interrupt:")) {
         const targetChannelId = id.slice("interrupt:".length);
         console.log(`⚡ 打断按钮点击: channel=${targetChannelId}`);
         try {
@@ -838,11 +840,8 @@ async function handleInteraction(discord: Client, deps: InteractionDeps, interac
       }
 
       // 权限弹窗 + session-idle 弹窗响应按钮
-      const promptBtnPrefixes = [
-        "perm_allow:", "perm_allow_session:", "perm_deny:",
-        "session_summary:", "session_full:", "session_noask:",
-      ];
-      if (promptBtnPrefixes.some((p) => id.startsWith(p))) {
+      const promptBtnPrefixes = ["perm_allow:", "perm_allow_session:", "perm_deny:", "session_summary:", "session_full:", "session_noask:"];
+      if (free && promptBtnPrefixes.some((p) => id.startsWith(p))) {
         const [action, targetChannelId] = id.split(":");
         // 按钮对应的 Claude Code 按键**序列**。
         // v2.0.22+: session-idle modal 不接受 digit 跳转（按 "2" 不会跳到 option 2，
@@ -923,7 +922,7 @@ async function handleInteraction(discord: Client, deps: InteractionDeps, interac
       }
 
       // v2.0.19+: AskUserQuestion 的 Submit / Cancel 按钮
-      if (id.startsWith("auq:")) {
+      if (free && id.startsWith("auq:")) {
         try {
           const { auqStates, buildAuqKeystrokes, clearAuqState, sendAuqKeys } =
             await import("./ask-user-question.js");
@@ -984,7 +983,7 @@ async function handleInteraction(discord: Client, deps: InteractionDeps, interac
       }
 
       // 管理按钮
-      const mgmtResult = await handleMgmtButton(id, channelId, interaction.message?.id, discord);
+      const mgmtResult = free ? await handleMgmtButton(id, channelId, interaction.message?.id, discord) : null;
       if (mgmtResult) {
         if (mgmtResult.text !== "__HANDLED__") {
           // 走 deliver(bridge → user)：discordReply 内部 buildComponents。
@@ -1051,18 +1050,19 @@ async function handleInteraction(discord: Client, deps: InteractionDeps, interac
     // ── Select Menus ──
     if (interaction.isStringSelectMenu()) {
       const id = interaction.customId;
+      const free = isReservedButtonId(id); // 下面免 LLM 的分支只认保留表里的 id（lib/reserved-buttons.ts）：漏登记的转给 LLM，agent 贴出的同名按钮才拦得住
       const value = interaction.values[0];
       await interaction.deferUpdate().catch(() => {});
 
       // v2.5.4+ 看板「🧹 存记忆 + Compact」select（value = 目标 agent 的 channelId）
-      if (id === "stats_savecompact") {
+      if (free && id === "stats_savecompact") {
         await triggerSaveCompact(interaction, value, runManager);
         return;
       }
 
       // v2.0.19+: AskUserQuestion 的 select menu —— 用户选完更新 state，等 Submit 按钮
       // 一并把 selections 翻译成 keystroke 发到 TUI。
-      if (id.startsWith("auq:") && /:q\d+$/.test(id)) {
+      if (free && id.startsWith("auq:") && /:q\d+$/.test(id)) {
         try {
           const { auqStates } = await import("./ask-user-question.js");
           const parts = id.split(":");
@@ -1084,7 +1084,7 @@ async function handleInteraction(discord: Client, deps: InteractionDeps, interac
       }
 
       // TUI modal 选择器
-      if (id.startsWith("modal:")) {
+      if (free && id.startsWith("modal:")) {
         const rest = id.slice("modal:".length);
         // 格式：modal:<targetWindow>:select  —— 最后一段固定是 "select"
         const parts = rest.split(":");
@@ -1093,7 +1093,7 @@ async function handleInteraction(discord: Client, deps: InteractionDeps, interac
         return;
       }
 
-      const mgmtResult = await handleMgmtSelect(id, value, channelId, discord);
+      const mgmtResult = free ? await handleMgmtSelect(id, value, channelId, discord) : null;
       if (mgmtResult) {
         if (mgmtResult.text !== "__HANDLED__") {
           await deliver({

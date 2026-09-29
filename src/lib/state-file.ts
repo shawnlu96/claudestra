@@ -213,6 +213,11 @@ export async function writeJsonAtomic(path: string, data: unknown, opts: WriteOp
 }
 
 export function writeJsonAtomicSync(path: string, data: unknown, opts: WriteOpts = {}): void {
+  writeTextAtomicSync(path, serialize(data, opts), opts);
+}
+
+/** 原子写文本（同 writeJsonAtomicSync，内容由调用方给） */
+export function writeTextAtomicSync(path: string, text: string, opts: Pick<WriteOpts, "mode" | "preserveMode"> = {}): void {
   mkdirSync(dirname(path), { recursive: true });
   const target = resolveTarget(path);
   let mode = opts.mode;
@@ -221,7 +226,7 @@ export function writeJsonAtomicSync(path: string, data: unknown, opts: WriteOpts
   }
   const tmp = tmpName(target);
   try {
-    writeFileSync(tmp, serialize(data, opts), mode !== undefined ? { mode } : undefined);
+    writeFileSync(tmp, text, mode !== undefined ? { mode } : undefined);
     if (mode !== undefined) chmodSync(tmp, mode);
     renameSync(tmp, target);
   } catch (e) {
