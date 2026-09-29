@@ -4,7 +4,10 @@
  */
 import { uiAgentName } from "@/lib/chat/agents";
 import type { WebComponentRow } from "@/lib/chat/events";
+import { attachmentUrl, isImageName } from "@/lib/chat/attachments";
 import { replyRowKey } from "@/lib/chat/reply-clicks";
+import { isReservedButtonId } from "@/lib/chat/reserved-button-ids";
+import type { ChatMessage } from "@/features/chat/type";
 
 /** superseded = 同一个 agent 同一件事又问了新的一版（授权参数变了），旧卡片失效 */
 export type AskState = "open" | "answered" | "expired" | "cancelled" | "superseded";
@@ -38,6 +41,13 @@ export interface WebAsk {
   bind?: { action: string; params: unknown; version?: string } | null;
   /** 这个凭据能不能答这一条（bridge lib/ask-access.ts canAnswerAsk，列表逐行给）；老 bridge 不给 = 能答 */
   canAnswer?: boolean;
+  /** files = 原消息带的附件（bridge 拷进 inbox 后的名字）；loc = 原消息在会话里的位置（定位过才有） */
+  extra?: { files?: { name: string; attachment: string }[] };
+}
+
+/** 原消息带的附件 → 聊天附件条的形状（卡片上直接点开，走 T37 的预览层） */
+export function askAttachments(a: Pick<WebAsk, "extra">): { name: string; kind: "image" | "file"; url: string }[] {
+  return (a.extra?.files ?? []).map((f) => ({ name: f.name, kind: isImageName(f.attachment) ? "image" : "file", url: attachmentUrl(f.attachment) }));
 }
 
 /** 协作视图的「等你」：开着、非验收、没指给别人的（指给 guest 的指派事项是在等那个 guest，不是等 owner） */
@@ -144,6 +154,58 @@ export function unclaimedBindAsk(asks: WebAsk[], agent: string, rows: WebCompone
   return asks.find((a) => a.bind && a.state === "open" && sameShape(a, agent, rows ?? [], inlineIds)) ?? null;
 }
 
+/**
+ * bridge 的免 LLM 管理 / 面板按钮（保留 id 表 lib/chat/reserved-button-ids.ts，src 侧 twin 由 guard 保证一致）：不是 agent 答复用的按钮，
+ * 只豁免「列表没到先不让点」「老气泡按过期锁」，老面板照样能点；agent 用同名 id 发的、认出了 ask 且已结案的照样锁、点击照样带 askId
+ */
+export const isMgmtButtonId = isReservedButtonId;
+/** 整行只有管理按钮 */
+export const isMgmtRow = (row: WebComponentRow): boolean => row.type === "buttons" && row.buttons.length > 0 && row.buttons.every((b) => isMgmtButtonId(b.id));
+
+/** bridge 的「待你处理」列表只带开着的和 3 天内结案的（bridge/asks.ts 列表的 closedSince），两边一致 */
+export const ASK_LIST_CLOSED_MS = 3 * 24 * 3600_000;
+
+/** 列表状态：loading = 还没拉到；full = 完整列表；partial = 过滤过的（guest、部分 scope 只拿到指给自己的，或 403 恒空），不能拿「查不到」当结案 */
+export type AskListState = "loading" | "full" | "partial";
+
+export interface ReplyAskState {
+  ask: WebAsk | null;
+  closed: WebAsk | null;
+  orphan: WebAsk | null;
+  gone: boolean;
+  /** gone 且气泡从没带过 askId（T11 之前的老按钮，不知道有没有人答过）：文案写「已过期」，不写「已结案」 */
+  expired: boolean;
+  /** 列表还没拉到：先不让点，也不先发出去（按钮下面显示「正在核对」） */
+  waiting: boolean;
+  /** 点了也不发：closed / orphan / gone / waiting 任一 */
+  blocked: boolean;
+  /** 管理按钮也要锁的那部分：认出的 ask 已结案、没认出的授权类（有 ask 可依，不是猜的） */
+  settled: boolean;
+  /** 点击带给 bridge 的 askId：认出的 ask，认不出就用气泡自带的——bridge 按 id 找到已结案的回 409，不靠列表全不全 */
+  hintId: string | null;
+}
+
+/**
+ * 一个气泡的按钮对应哪条 ask、锁不锁（use-reply-ask.ts 的纯逻辑）：closed = 认出的 ask 已结案；orphan = 没认出、列表里有同形状开着的授权类；
+ * gone = 完整列表里查不到，且 reply 比列表保留期还旧——开着的 ask 一定在列表里，所以它早已结案、移出了列表（老历史不带 askId 也算）。
+ * 过滤过的列表不按天数锁，只靠点击带的 askId 让 bridge 判（ask-entry staleClick，谁点都 409）。
+ * gone 不锁的话点下去就是一条普通的 [button:…]，decide 类的 agent 会当成新答复（PR B P2-2）；比保留期新的不算（刚建、列表还没刷到）。
+ */
+export function replyAskState(
+  asks: WebAsk[], list: AskListState, agent: string, m: Pick<ChatMessage, "replyComponents" | "replyTs" | "ts" | "replyAskId">, inlineIds: string[], now = Date.now(),
+): ReplyAskState {
+  const rows = m.replyComponents;
+  const ask = askForReply(asks, agent, rows, m.replyTs ?? m.ts, inlineIds, m.replyAskId);
+  const closed = ask && ask.state !== "open" ? ask : null;
+  const orphan = ask ? null : unclaimedBindAsk(asks, agent, rows, inlineIds);
+  const at = Date.parse(m.replyTs ?? m.ts ?? "");
+  const hasButtons = (rows ?? []).some((r) => !isMgmtRow(r)) || inlineIds.some((id) => !isMgmtButtonId(id)); // 只有管理按钮的不算
+  const gone = hasButtons && !ask && list === "full" && Number.isFinite(at) && now - at > ASK_LIST_CLOSED_MS;
+  const waiting = hasButtons && list === "loading";
+  const settled = !!closed || !!orphan;
+  return { ask, closed, orphan, gone, expired: gone && !m.replyAskId, waiting, blocked: settled || gone || waiting, settled, hintId: ask?.id ?? m.replyAskId ?? null };
+}
+
 /** ask 的答案 → 气泡各行的已答值（与 reply-components 的 replyClicks 同形：按钮存 id，选单存 `<id>:<值>`） */
 export function clicksFromAnswer(rows: WebComponentRow[], choices: string[]): Record<string, string> {
   const out: Record<string, string> = {};
@@ -205,6 +267,8 @@ export function answerSummary(a: WebAsk): string {
  * 验收要求「另一台设备 2 秒内消失」：经中继的事件延迟 + 这个等待 + 一次拉取要在 2 秒里（tests/asks-relay-stream.test.ts）
  */
 export const ASK_EVENT_REFRESH_MS = 300;
+/** 第一次拉「待你处理」列表最多等这么久；过了还没回，聊天气泡的按钮先按 partial 放开（asks-store start） */
+export const ASK_LIST_WAIT_MS = 4_000;
 
 /** 乐观作答（T11b 第 8 条）：提交时本地先记一笔，服务端确认前盖在拉到的数据上 */
 export interface PendingAnswer {

@@ -12,6 +12,7 @@ import { expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, readFileSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
+import { testChildEnv } from "./test-env.ts";
 
 type Spec = { name: string; method: string; path: string; token?: "full" | "scoped" | "bogus"; auth?: { bearer: string }; body?: string; liveSession?: string };
 /** cron 的新建 / 编辑只认 owner 本人：runner 自带的 "full" 全权但不是 owner，这两条换成过渡期算 owner 的老 web-ui token */
@@ -111,7 +112,7 @@ test("早退分支响应逐字节不变（golden）", () => {
     writeFileSync(join(fakeBin, "bun"), `#!/bin/sh\necho '{"ok":false,"error":"manager blocked in parity runner"}'\n`, { mode: 0o755 });
     writeFileSync(join(fakeBin, "tmux"), "#!/bin/sh\nexit 1\n", { mode: 0o755 });
     const r = Bun.spawnSync([process.execPath, join(import.meta.dir, "api-route-parity.runner.ts"), JSON.stringify(specs)], {
-      env: { PATH: `${fakeBin}:/usr/bin:/bin`, HOME: home, TMPDIR: home, CONTROL_CHANNEL_ID: "", LANG: "C", RUNNER_PRINCIPALS: JSON.stringify([WEB_UI]) },
+      env: testChildEnv({ PATH: `${fakeBin}:/usr/bin:/bin`, HOME: home, TMPDIR: home, CONTROL_CHANNEL_ID: "", LANG: "C", RUNNER_PRINCIPALS: JSON.stringify([WEB_UI]) }),
       stdout: "pipe",
       stderr: "pipe",
     });

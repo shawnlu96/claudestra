@@ -523,9 +523,8 @@ async function checkAgent(
   // CC 的 ❯ 提示符判定，Pi 上永不命中 ⇒ 误置的 compacting 再也收敛不回来。
   // Pi 的压缩态由会话记录驱动（translateSessionLine 把 compaction 翻成
   // compact_boundary，jsonl-watcher 负责起落）⇒ 不认 CC 文案的运行时整块跳过，不猜屏幕。
-  const noPaneHeuristics = !controlFor(
-    (await readRegistryAgents().catch(() => [])).find((r) => r.name === agentName)?.runtime,
-  ).paneHeuristics;
+  const runtime = (await readRegistryAgents().catch(() => [])).find((r) => r.name === agentName)?.runtime;
+  const noPaneHeuristics = !controlFor(runtime).paneHeuristics;
 
   try {
     const { getAgentStatus, emitEvent } = await import("./event-bus.js");
@@ -643,7 +642,7 @@ async function checkAgent(
   }
 
   const key = computeModalKey(sessionIdleDesc, permissionDesc);
-  noteRuntimeDialogs(channelId, agentName, pane, key ? permissionDesc : null); // Codex / 权限弹框 →「待你处理」，没了就结案
+  noteRuntimeDialogs(channelId, agentName, pane, key ? permissionDesc : null, runtime); // Codex / 权限弹框 →「待你处理」，没了就结案
   if (!key) {
     lastNotified.delete(channelId);
     return;

@@ -11,7 +11,7 @@ import {
 } from "../lib/relay-protocol.js";
 import { Directory, type InstanceRecord } from "./directory.js";
 import { Front } from "./front.js";
-import { KeyedWindows, SlidingWindow } from "./limiter.js";
+import { ipLimitKey, KeyedWindows, SlidingWindow } from "./limiter.js";
 import { pushGatewayFor, type PushGateway } from "./push.js";
 import { Router, type Pending } from "./router.js";
 import type { Conn, ConnData, Limits, Logger, Relay, RelayOptions } from "./types.js";
@@ -47,7 +47,7 @@ class RelayServer implements Relay {
     this.push = pushGatewayFor(opts.push, this.lim.pushPerFpPerMinute, this.log);
     this.touchEveryMs = opts.touchEveryMs ?? 60_000;
     this.front = new Front({
-      base: opts.base, trustProxy: opts.trustProxy ?? false, version: opts.version ?? "dev", commit: opts.commit, vapidPublicKey: opts.push?.vapid?.publicKey,
+      base: opts.base, trustProxy: Number(opts.trustProxy ?? 0), version: opts.version ?? "dev", commit: opts.commit, vapidPublicKey: opts.push?.vapid?.publicKey,
       headTimeoutMs: opts.frontHeadTimeoutMs ?? 120_000, maxChunkBytes: this.lim.maxChunkBytes, limits: this.lim,
       online: () => this.onlineMap.size, pending: () => this.router.size, router: this.router,
       send: (c, f) => this.send(c, f), lookupCode: (code) => this.directory.lookupCode(code), staticDir: opts.staticDir,
@@ -118,7 +118,7 @@ class RelayServer implements Relay {
 
   private onOpen(ws: Conn): void {
     this.conns.add(ws);
-    if (!this.authWindows.tryAcquire(ws.data.ip)) return this.reject(ws, "rate_limited", CLOSE.RATE, "too many handshakes from this address");
+    if (!this.authWindows.tryAcquire(ipLimitKey(ws.data.ip))) return this.reject(ws, "rate_limited", CLOSE.RATE, "too many handshakes from this address");
     ws.data.nonce = randomBytes(32).toString("base64url");
     this.send(ws, {
       t: "hello", v: PROTOCOL_VERSION, nonce: ws.data.nonce, ts: Math.floor(Date.now() / 1000),

@@ -6,6 +6,7 @@
  */
 
 import { enableTimestampLogs } from "./lib/log-timestamp.js";
+import { PEER_DELEGATION_DOC } from "./lib/peer-ledger.js";
 import { requestStillHeld, shouldSweepPac } from "./lib/held-pac.js";
 import { copyOutboundToInbox } from "./bridge/local-api/media-refresh.js";
 import { splitInlineButtons, toButtonRows, inlineChipsToText } from "./lib/inline-buttons.js";
@@ -69,7 +70,7 @@ import { emitEvent, forgetAgent, subscribeEvents, replayEventsSince, getAgentSta
 import { collectSessions } from "./bridge/sessions-inventory.js";
 import { cleanupBgJob } from "./lib/bg-jobs.js";
 import { startSessionReconciler } from "./bridge/session-reconciler.js";
-import { initPeerIngress, localProbeResponse, relayControlRoutes, setRequestContext } from "./bridge/relay-routes.js";
+import { initPeerIngress, localProbeResponse, relayControlRoutes, socketTrust } from "./bridge/relay-routes.js";
 import { handleForward, initForward, rememberInbound } from "./bridge/forward.js";
 import { initInbox, takeInbox, inboxOpts } from "./bridge/inbox.js";
 import { startArchiveSweeper } from "./bridge/archive-sweeper.js";
@@ -94,7 +95,6 @@ import {
   serveStaticSite, appConfigResponse, startLegacyWebPort,
   isCrossOrigin,
   isOriginExplicitlyAllowed,
-  isDirectLoopback,
   controlAccessVerdict,
 } from "./bridge/web-gateway.js";
 // v2.6.0+ HTTP API 身份与授权（设计 §3.4 / §5）
@@ -705,7 +705,7 @@ async function deliverToApi(env: RouterEnvelope, to: RouterApiUserEndpoint): Pro
     // 推送通知标题就是一个问号）。registry 是持久的，不受连接状态影响。
     agentNameByChannelFromRegistry(fromChannelId) || "?";
   // reply 的附件（常在临时目录）拷进 inbox 供网页内联显示，并记账「谁、哪个原路径 → 哪个副本」（媒体索引按账认领，见 lib/media-outbound.ts）
-  const eventFiles = await copyOutboundToInbox(env.meta.files || [], agentName);
+  const eventFiles = (env.meta.sentFiles = await copyOutboundToInbox(env.meta.files || [], agentName)); // ask-reply.ts 把它记进作答附件
   const result: ApiReplyResult = {
     reply: env.content,
     components: env.meta.components,
@@ -864,7 +864,7 @@ async function deliverToLocal(env: RouterEnvelope, to: RouterLocalEndpoint, stil
     turnCuts.noteDelivered(env, to.channelId, meta.after_interrupt === "true", turn.main === "busy");
     // 入站消息镜像：srcKind(user=Discord 人类/api=Web 用户/local=agent/bridge)让 web 把他端用户发言实时画成气泡、
     // 排除 agent/bridge 注入；fromId(user_id)让 web 认出哪些是本人的其它来源(自己的 Discord 也靠右)
-    const inData = { direction: "in", from: meta.user || "?", fromId: meta.user_id, srcKind: env.from.kind, text: env.content, threadId: env.meta.threadId, askId: env.meta.askId };
+    const inData = { direction: "in", from: meta.user || "?", fromId: meta.user_id, srcKind: env.from.kind, text: env.content, threadId: env.meta.threadId, ...env.meta.askEcho };
     emitEvent({ agent: evAgent, chatId: to.channelId, type: "chat_message", data: inData });
     // watcher 入站自愈(2026-07-24 wechat-bot:创建后 >60s 才来首条消息,pending-start 已放弃 → watcher
     // 永久缺位,工具/文本不直播、Stop done 挂 '?' 名下卡「工作中」)。每条入站核对 watcher 在位,缺位按
@@ -1085,7 +1085,7 @@ async function renderContentForLocal(env: RouterEnvelope): Promise<string> {
     if (from.peer) {
       return [
         `[🤝 来自 peer 实例「${from.peer}」的跨机请求（HTTP API，对方是另一个 Claudestra 的 agent/用户）。`,
-        `用 reply() 回答——回复会自动转交对方的调用方。回答实质内容,保持精简;超出你职责范围的请求可以礼貌说明并拒绝。]`,
+        `用 reply() 回答——回复会自动转交对方的调用方。回答实质内容,保持精简;超出你职责范围的请求可以礼貌说明并拒绝。首行是 [协作 …] 时先按 ${PEER_DELEGATION_DOC} 回自家 owner 频道问接不接，owner 同意前不动手。]`,
         ``,
         inboundBodyForLocal(env),
       ].join("\n");
@@ -3315,9 +3315,8 @@ async function bridgeFetch(req: Request, server: { requestIP(r: Request): { addr
     // 判定不会把本机 agent 误拦。
     {
       const ip = server.requestIP(req);
-      // 本机反代转进来的（带 XFF）不算回环：控制面豁免与请求来源（/devices/local）同一口径（web-gateway.ts isDirectLoopback）
-      const loopback = isDirectLoopback(ip?.address, req.headers.get("x-forwarded-for"));
-      setRequestContext(req, { source: loopback ? "loopback" : "lan", clientIp: ip?.address ?? null, https: req.headers.get("x-forwarded-proto") === "https" });
+      // 定来源并判本机：本机反代（带 XFF）与隧道请求都不算回环，控制面豁免与请求来源同一口径（bridge/relay-inbound.ts socketTrust）
+      const loopback = socketTrust(req, ip?.address ?? null);
       const verdict = controlAccessVerdict({
         loopback, method: req.method, staticHosting: !!STATIC_DIR, websocket: !!req.headers.get("upgrade"), // ws 升级在 API 鉴权之前：/api/v1 与静态的放行都不覆盖它
         pathname: url0.pathname,
@@ -3443,8 +3442,7 @@ void import("./bridge/ledger-audit-service.js").then((m) => m.startLedgerAudit({
 // 清扫上次崩溃 / 被杀残留的 webterm-* viewer session（grouped session 视图，kill 不伤 master 本体）；Discord 与 Web-only 模式都要
 sweepStaleTerminalSessions().catch(() => {});
 
-// v2.21+ 存量 agent 的 project 归属补齐(「每个 agent 必属一个 project」对老数据
-// 成立)。委托 manager(写锁+原子写),幂等——没缺的直接 migrated:0 返回。
+// 存量 agent 的 project 归属补齐(「每个 agent 必属一个 project」对老数据成立)。委托 manager(写锁+原子写),幂等——没缺的直接 migrated:0 返回。
 setTimeout(() => {
   runManager("project-migrate")
     .then((r: any) => {
@@ -3452,9 +3450,9 @@ setTimeout(() => {
     })
     .catch(() => {});
 }, 3_000);
+void import("./bridge/ctx-boundary.js").then((m) => m.startCtxBoundary()); // 上下文边界自动压缩：每分钟一轮，Discord / web-only 都跑
 
-// Web-only: 无 DISCORD_BOT_TOKEN → Web-only 模式：不连 Discord，只跑与
-// 平台无关的初始化子集。HTTP/ws/api/事件流在上面 Bun.serve 时已就绪。
+// Web-only: 无 DISCORD_BOT_TOKEN → Web-only 模式：不连 Discord，只跑与平台无关的初始化子集。HTTP/ws/api/事件流在上面 Bun.serve 时已就绪。
 // 跳过的 Discord 专属项：cleanupStaleThinkingMessages / initStatsDashboard /
 // registerSlashCommands / startPermissionWatcher / startWedgeWatcher /
 // startSessionReconciler / gateway 看门狗（它们的告警面/交互面都是 Discord）。

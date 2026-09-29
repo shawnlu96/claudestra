@@ -10,6 +10,7 @@ import { measureFn, type SpanParser } from "../scripts/guard/rules/fn.ts";
 import { commentExplains, measurePatterns } from "../scripts/guard/rules/patterns.ts";
 import { lineCount, measureSize } from "../scripts/guard/rules/size.ts";
 import { maskStrings } from "../scripts/guard/rules/lex.ts";
+import { measureTestEnv } from "../scripts/guard/rules/test-env.ts";
 import { measureTwins } from "../scripts/guard/rules/twins.ts";
 import { checkSelfRaised, checkWiring, guardSelfFiles, isStrict } from "../scripts/guard/self.ts";
 import type { Baseline } from "../scripts/guard/types.ts";
@@ -252,6 +253,39 @@ describe("patterns", () => {
     const r = measurePatterns(files({ "src/x.ts": src }));
     expect(r.counts["catch:empty-block"]).toBe(2);
     expect(r.counts["catch:silent-promise"]).toBe(6);
+  });
+});
+
+describe("testenv（测试子进程的最小 env 必须经 testChildEnv）", () => {
+  const count = (src: string, f = "tests/x.test.ts") => measureTestEnv(new Map([[f, src]])).counts["testenv:bare-spawn-env"];
+  test("手写最小 env（字面量、变量、先占位 {} 后在 beforeAll 里赋值）计数", () => {
+    expect(count(`Bun.spawnSync(["a"], { env: { PATH: "/bin", HOME: h } });`)).toBe(1);
+    expect(count(`spawnSync(process.execPath, ["-e", s], { env: {} });`)).toBe(1);
+    expect(count(`const env = { PATH: "/bin" };\nBun.spawnSync(["a"], { env, stdout: "pipe" });`)).toBe(1);
+    expect(count(`let e: Record<string, string> = {};\nbeforeAll(() => { e = { PATH: "/bin" }; });\nBun.spawnSync(["a"], { env: e });`)).toBe(1);
+  });
+  test("取 process.env 的单个值不算继承；exec、别名导入、解构、带引号的键、Bun $ 的 .env() 都认得", () => {
+    expect(count(`Bun.spawnSync(["a"], { env: { PATH: process.env.PATH, HOME: h } });`)).toBe(1);
+    expect(count(`cp.exec("ls", { env: { PATH: "/bin" } });`)).toBe(1);
+    expect(count(`import { spawnSync as run } from "node:child_process";\nrun("a", [], { env: { PATH: "/bin" } });`)).toBe(1);
+    expect(count(`const { spawnSync: sp } = Bun;\nsp(["a"], { env: { PATH: "/bin" } });`)).toBe(1);
+    expect(count(`Bun.spawnSync(["a"], { "env": { PATH: "/bin" } });`)).toBe(1);
+    expect(count("await $`ls`.env({ PATH: \"/bin\" });")).toBe(1);
+    expect(count("await $`ls`.env(testChildEnv());")).toBe(0);
+    expect(count(`Bun.spawn(["b"], { env: process.env });\nconst m = /x/.exec(s);`)).toBe(0);
+    expect(count(`const E = { ...(process.env as Record<string, string>), A: "1" };\nBun.spawn(["b"], { env: E });`)).toBe(0);
+  });
+  test("展开一个来自 testChildEnv 的变量算安全；展开手写字面量的变量照样计数", () => {
+    expect(count(`const base = testChildEnv({ A: "1" });\nBun.spawnSync(["a"], { env: { ...base, B: "2" } });`)).toBe(0);
+    expect(count(`const base = { PATH: "/bin" };\nBun.spawnSync(["a"], { env: { ...base, B: "2" } });`)).toBe(1);
+  });
+  test("继承当前环境、经 testChildEnv、认不出来源的参数不算；tests 以外的文件、字符串里的写法不算", () => {
+    expect(count(`Bun.spawn(["b"], { env: { ...process.env, A: "1" } });`)).toBe(0);
+    expect(count(`Bun.spawn(["c"], { env: testChildEnv({ A: "1" }) });`)).toBe(0);
+    expect(count(`let e: Record<string, string> = {};\nbeforeAll(() => { e = testChildEnv({}); });\nBun.spawnSync(["a"], { env: e });`)).toBe(0);
+    expect(count(`function run(env: Record<string, string>) { return Bun.spawnSync(["a"], { env }); }`)).toBe(0);
+    expect(count(`Bun.spawnSync(["a"], { env: {} });`, "src/x.ts")).toBe(0);
+    expect(count(`const s = 'Bun.spawnSync(["a"], { env: {} })';`)).toBe(0);
   });
 });
 

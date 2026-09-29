@@ -26,10 +26,10 @@ export const BLOCKING_DIALOG_RE = /Hooks need review|Do you trust|Update availab
  * 光有关键词不够——resume 的 TUI 会先把历史对话渲染进 pane（早于 @claudestra_ready），
  * 历史里提到 "Update available" 的会话就会被误判成对话框、整个窗口被清理掉。
  */
-const DIALOG_SHAPE_RE = /^\s*(?:[›>❯]\s*)?1\.\s|press enter to continue/im;
+export const DIALOG_SHAPE_RE = /^\s*(?:[›>❯]\s*)?1\.\s|press enter to continue/im;
 
 /** 只看 pane 末尾这么多非空行：对话框与报错都画在底部，更早的是历史回放 */
-const VERDICT_TAIL_LINES = 15;
+export const VERDICT_TAIL_LINES = 15;
 
 /** 启动前 pane 里已有的命中次数：复用窗口时，上一次启动留下的报错 / 对话框文字不能再算一次 */
 export interface PaneBaseline {
@@ -47,7 +47,7 @@ function matchedLine(pane: string, re: RegExp): string {
   return (pane.split("\n").find((l) => re.test(l)) || "").trim().slice(0, 200);
 }
 
-const nonEmptyTail = (pane: string, n: number) => pane.split("\n").filter((l) => l.trim()).slice(-n);
+export const nonEmptyTail = (pane: string, n: number) => pane.split("\n").filter((l) => l.trim()).slice(-n);
 
 const verdictTail = (pane: string) => nonEmptyTail(pane, VERDICT_TAIL_LINES).join("\n");
 

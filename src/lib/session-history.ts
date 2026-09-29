@@ -19,7 +19,8 @@ import { open as fsOpen } from "fs/promises";
 import { join } from "path";
 import { projectJsonlPath, findJsonlBySessionId } from "./jsonl-cost.js";
 import { agentArchiveDir, ARCHIVE_ROOT, realpathWithin } from "./session-archive.js";
-import { channelBodyText, commandRecordLine, commandStdoutLine } from "./inbound-body.js";
+import { channelAnswer, channelBodyText, commandRecordLine, commandStdoutLine, senderOf, type AskAnswerRef } from "./inbound-body.js";
+import { settleToolCard } from "./auq-echo.js";
 import { dropFailedReplyRows, keepReplyRows, sanitizeComponents } from "./history-components.js";
 import { askIdOfReplyResult } from "./reply-ask-schema.js";
 
@@ -115,7 +116,8 @@ export type ReplyComponentRow =
   | { type: "select"; id: string; placeholder?: string; options: { label: string; value: string; description?: string }[] }
   | { type: "multiselect"; id: string; placeholder?: string; min?: number; max?: number; submitLabel?: string; options: { label: string; value: string; description?: string }[] };
 
-export interface HistoryMessage {
+/** askId / wire：owner 对「待你处理」的作答（lib/inbound-body.ts answerEcho） */
+export interface HistoryMessage extends AskAnswerRef {
   /** jsonl 行号（0-based），分页锚点，同一文件内稳定 */
   seq: number;
   ts: string | null;
@@ -134,10 +136,7 @@ export interface HistoryMessage {
   turnMs?: number;
   /** compact 产生的摘要条目（不是真实用户输入） */
   compactSummary?: boolean;
-  /**
-   * v2.21.3+ 进度句(💭):Fable 5.1 的 progress-update thinking 块——「接下来我会…」
-   * 这类给用户看的短注,不是推理正文。与 text 分开:渲染更弱、不进 content 对账。
-   */
+  /** 进度句(💭):progress-update thinking 块「接下来我会…」,给用户看的短注,与 text 分开(渲染更弱、不进 content 对账) */
   progress?: string;
   model?: string;
   /** 入站消息的发送者标签（<channel> 的 user 属性：API token 名 / Discord 用户名 / 来源 agent） */
@@ -262,14 +261,14 @@ function collectChannelMessageIds(lines: string[]): Set<string> {
  * 解包一条 <channel> 入站消息：返回 { text, from }；不是 channel 包装
  * （caveat / local-command 等真 meta）返回 null。
  */
-export function unwrapChannelMessage(raw: string): { text: string; from?: string; fromId?: string } | null {
+export function unwrapChannelMessage(raw: string): ({ text: string; from?: string; fromId?: string } & AskAnswerRef) | null {
   const m = raw.match(CHANNEL_WRAP_RE);
   if (!m) return null;
   const from = /(?:^|\s)user="([^"]*)"/.exec(m[1])?.[1] || undefined;
   const fromId = /(?:^|\s)user_id="([^"]*)"/.exec(m[1])?.[1] || undefined;
   const text = channelBodyText(m[1], m[2]); // 剥注入头 + 补附件行（lib/inbound-body.ts）
   if (!text) return null;
-  return { text, from, fromId };
+  return { text, from, fromId, ...channelAnswer(m[1], m[2]) };
 }
 
 function summarize(sessionId: string, source: "live" | "archive", path: string): SessionSummary | null {
@@ -535,7 +534,7 @@ function parseHistoryLines(
           const mid = channelMessageId(queued);
           if (!mid || !seenChannelIds.has(mid)) {
             const msg: HistoryMessage = { seq, ts, role: "user", text: un.text };
-            if (un.from) Object.assign(msg, { from: un.from, fromId: un.fromId });
+            Object.assign(msg, senderOf(un));
             all.push(msg);
           }
         }
@@ -545,11 +544,11 @@ function parseHistoryLines(
 
     if (rec.type === "user") {
       const c = rec.message?.content;
-      // tool_result 回填：is_error → 工具卡标红；reply 的 → 气泡记下建出的 askId。不影响本条 user 记录自身的过滤，继续走原流程
+      // tool_result 回填：工具卡（失败标红、AUQ 换成作答摘要）；reply 的 → 气泡记下建出的 askId。不影响本条 user 记录自身的过滤，继续走原流程
       for (const b of Array.isArray(c) ? c : []) {
-        const tc = b?.type === "tool_result" ? toolById.get(b.tool_use_id) : undefined;
-        if (tc && b.is_error === true) tc.error = true;
-        const rm = b?.type === "tool_result" ? replyById.get(b.tool_use_id) : undefined;
+        if (b?.type !== "tool_result") continue;
+        settleToolCard(toolById.get(b.tool_use_id), b, rec);
+        const rm = replyById.get(b.tool_use_id);
         if (rm) rm.replyAskId = askIdOfReplyResult(b) ?? rm.replyAskId;
         if (rm && b.is_error === true) dropFailedReplyRows(rm, replyRows.get(b.tool_use_id)); // 被 bridge 拒发的 reply，按钮不进历史
       }
@@ -567,7 +566,7 @@ function parseHistoryLines(
         // bridge 内部注入(看门狗 nudge 等,user="bridge:*")是发给 agent 的指令,不是对话,不进历史(直播侧 srcKind 同款排除)
         if (un.from && /^bridge(:|$)/.test(un.from)) continue;
         const msg: HistoryMessage = { seq, ts, role: "user", text: un.text };
-        if (un.from) Object.assign(msg, { from: un.from, fromId: un.fromId });
+        Object.assign(msg, senderOf(un));
         all.push(msg);
         continue;
       }
@@ -651,6 +650,7 @@ function parseHistoryLines(
       Object.assign(msg, replyFiles.length ? { replyFiles } : {}, tools.length ? { tools } : {});
       if (typeof rec.message?.model === "string") msg.model = rec.message.model;
       for (const id of replyIds) replyById.set(id, msg);
+      for (const b of content) if (b?.type === "tool_result" && replyIds.includes(b.tool_use_id)) msg.replyAskId = askIdOfReplyResult(b) ?? msg.replyAskId; // Codex：结果和调用同一条
       all.push(msg);
     }
   }

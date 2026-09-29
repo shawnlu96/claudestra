@@ -9,7 +9,7 @@
  */
 import type { ChatMessage } from "./type";
 import { FormLookup } from "@/lib/chat/form-restore";
-import { hasClickTargets, resolveUserClick } from "@/lib/chat/history-shape";
+import { askAnchor, hasClickTargets, markAnswerClicks, resolveUserClick } from "@/lib/chat/history-shape";
 import { stripMentionDirective } from "@/lib/chat/mention-directive";
 
 type OnUser = (m: ChatMessage, anchor: ChatMessage | null, forms: FormLookup) => void;
@@ -62,4 +62,11 @@ export function liveUserText(text: string, messages: ChatMessage[], from?: strin
   const own = from ? text : stripMentionDirective(text);
   const content = resolveLiveClick(own, messages) ?? own;
   return content === text ? { content } : { content, wire: text };
+}
+
+/** 直播推来的 owner 作答（bridge 给了人话和原文）：原文回填所答气泡的已答态，显示人话，原文留 wire 给回声对账（isUserEcho） */
+export function liveAnswerText(wire: string, shown: string, askId: string | undefined, messages: ChatMessage[]): { content: string; wire: string } {
+  const { anchor, forms } = walk(messages);
+  markAnswerClicks(wire, askAnchor(messages, askId) ?? anchor, forms);
+  return { content: shown, wire };
 }

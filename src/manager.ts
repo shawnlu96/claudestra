@@ -14,7 +14,7 @@
  */
 
 import { writeClaudeSettings } from "./lib/session-recall.js";
-import { DEFAULT_BRIDGE_PORT } from "./lib/bridge-url.js";
+import { configuredBridgePort } from "./lib/bridge-url.js";
 import { repoEnvVar } from "./lib/env-file.js";
 import { RUNTIME_DIR, runtimePath, statePath } from "./lib/paths.js";
 import { resolveBridgeUrl } from "./lib/bridge-url.js";
@@ -111,7 +111,8 @@ import { cmdKill, cmdRemove } from "./manager/agent-kill.js"; // 按 registry �
 import { cmdRename } from "./manager/agent-rename.js";
 import { isRestartInProgress, tryLockRestart, unlockRestart } from "./manager/restart-lock.js";
 import { cmdTokenAdd, cmdTokenList, cmdTokenRevoke } from "./manager/tokens.js";
-import { cmdPeerHttpInvite, cmdPeerHttpJoin, cmdPeerHttpAccept, cmdPeerHttpTest, cmdPeerHttpList, cmdPeerHttpScope, cmdPeerHttpRemove, cmdPeerInviteNew, cmdPeerInviteList, cmdPeerInviteRevoke, cmdPeerInviteRedeem, cmdPeerJoinAuto } from "./manager/peers.js";
+import { cmdPeerHttpInvite, cmdPeerHttpJoin, cmdPeerHttpAccept, cmdPeerHttpTest, cmdPeerHttpList, cmdPeerHttpScopeCli, cmdPeerHttpRemove, cmdPeerInviteNew, cmdPeerInviteList, cmdPeerInviteRevoke } from "./manager/peers.js";
+import { cmdPeerInviteRedeem, cmdPeerJoinAuto, parseRedeemArgs } from "./manager/peer-join.js";
 import { cmdCost, cmdMetrics } from "./manager/cost.js";
 import { cmdAutoUpdate } from "./manager/auto-update.js";
 import { cmdWebRelease } from "./manager/web-release.js";
@@ -242,7 +243,7 @@ async function cmdTakeover(target?: string, opts: { all?: boolean; force?: boole
   }
 
   // SIGTERM 之前的全局预检：这边起不来就一个进程都不动
-  const bridgePort = repoEnvVar("BRIDGE_PORT", REPO_ROOT) || String(DEFAULT_BRIDGE_PORT);
+  const bridgePort = configuredBridgePort();
   const [bypassAccepted, masterSession, bridgeReachable] = await Promise.all([
     readBypassConsent(),
     tmuxRawStrict(["has-session", "-t", sessionTarget(MASTER_SESSION)]).then(() => true, () => false),
@@ -1608,7 +1609,7 @@ async function cmdSessions(search?: string) {
   for (const info of Object.values(reg.agents)) if (info.sessionId && info.displayName) nameMap.set(info.sessionId, info.displayName);
 
   // 给 web 端留原始字段（ISO 时间、cwd、子会话归属）；上限 100 个主会话、每个带最新 50 个子线程（多的只报 moreSubs），Discord 面板自己再截
-  const display = capSubsPerMain(limitByMainSessions(sessions, 100), 50).map((s, i) => ({
+  const display = capSubsPerMain(limitByMainSessions(sessions, 100, 50), 50).map((s, i) => ({
     index: i + 1,
     sessionId: s.sessionId,
     name: nameMap.get(s.sessionId) || s.slug || s.sessionId.slice(0, 8),
@@ -1619,7 +1620,7 @@ async function cmdSessions(search?: string) {
     age: formatAge(s.modifiedAt),
     modifiedAt: s.modifiedAt.toISOString(),
     lastMessage: s.lastUserMessage || "",
-    ...(s.sub ? { sub: s.sub } : {}), ...(s.moreSubs ? { moreSubs: s.moreSubs } : {}),
+    ...(s.sub ? { sub: s.sub } : {}), ...(s.moreSubs ? { moreSubs: s.moreSubs } : {}), ...(s.oneShot ? { oneShot: true } : {}),
   }));
 
   outputSync({
@@ -2755,20 +2756,10 @@ switch (cmd) {
   // 中继（bridge/relay-link.ts）：配对短码 / 二维码给手机与浏览器，状态查询；实现在 manager/relay.ts
   case "pair": await (await import("./manager/pair.js")).cmdPair(args); break;
   case "relay-status": await (await import("./manager/relay.js")).cmdRelayStatus(); break;
-  case "peer-http-scope": {
-    const { rest: afterForce, value: force } = extractBoolFlag(args, "--force");
-    let agentsCsv = "";
-    const pos: string[] = [];
-    for (let i = 0; i < afterForce.length; i++) {
-      const a = afterForce[i];
-      if (a === "--agents") agentsCsv = afterForce[++i] || "";
-      else if (a.startsWith("--agents=")) agentsCsv = a.slice(9);
-      else pos.push(a);
-    }
-    await cmdPeerHttpScope(pos[0] || "", agentsCsv, force);
-    break;
-  }
+  case "peer-http-scope": await cmdPeerHttpScopeCli(args); break;
   case "peer-http-remove": await cmdPeerHttpRemove(args[0] || ""); break;
+  case "peer-http-messages-only": await (await import("./manager/peers.js")).cmdPeerHttpMessagesOnly(args[0] || "", args[1] || ""); break;
+  case "peer-ledger": await (await import("./manager/peer-ledger-cli.js")).cmdPeerLedger(args); break;
   case "peer-http-tidy": await (await import("./manager/peers-tidy.js")).cmdPeerHttpTidy(args.includes("--apply")); break;
 
   // v2.15+ 一键邀请（免回执自动握手）
@@ -2787,20 +2778,7 @@ switch (cmd) {
   }
   case "peer-invite-list": await cmdPeerInviteList(); break;
   case "peer-invite-revoke": await cmdPeerInviteRevoke(args[0] || ""); break;
-  case "peer-invite-redeem": {
-    let join = "", name = "", url = "", token = "", iid = "", fp = "";
-    for (let i = 0; i < args.length; i++) {
-      const a = args[i];
-      if (a === "--join") join = args[++i] || "";
-      else if (a === "--name") name = args[++i] || "";
-      else if (a === "--url") url = args[++i] || "";
-      else if (a === "--token") token = args[++i] || "";
-      else if (a === "--iid") iid = args[++i] || "";
-      else if (a === "--fp") fp = args[++i] || ""; // 经中继兑换时 bridge 带上的对方指纹
-    }
-    await cmdPeerInviteRedeem(join, name, url, token, iid, fp);
-    break;
-  }
+  case "peer-invite-redeem": await cmdPeerInviteRedeem(parseRedeemArgs(args)); break;
   case "peer-join-auto": {
     const { rest: afterForce, value: force } = extractBoolFlag(args, "--force");
     let agentsCsv = "", myUrl = "", peerUrl = "";
@@ -2859,7 +2837,7 @@ switch (cmd) {
   case "migrate-web-state": await (await import("./manager/migrate-web-state.js")).cmdMigrateWebState(); break; // 旧 Next BFF 的 settings.db / config.json → bridge（先 tar 备份，幂等）
   case "web-release": await cmdWebRelease(args); break; // 网页版本发布 / 回滚（lib/web-releases.ts）
   case "retire-web": await (await import("./manager/retire-web.js")).cmdRetireWeb(); break; // 卸旧 com.claudestra.web（前端已由 bridge 托管；先验新模式 + 有备份才动手）
-
+  case "ctx-boundary": await (await import("./manager/ctx-boundary.js")).cmdCtxBoundary(args); break; // 上下文边界自动注入：dry-run | status | on | off
   case "permissions":
   case "perm":
   case "perms": {

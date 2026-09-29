@@ -19,7 +19,8 @@ import { resetToolTracking, agentNameForChannel } from "./jsonl-watcher.js";
 import { emitEvent } from "./event-bus.js";
 import { permissionMessages, clearPermissionMessage } from "./permission-watcher.js";
 import { clearWedgeState } from "./wedge-watcher.js";
-import { forceRefreshStatsDashboard, noteSaveCompactInjected } from "./stats-dashboard.js";
+import { forceRefreshStatsDashboard } from "./stats-dashboard.js";
+import { injectCompact, injectTargetFor } from "./ctx-boundary.js";
 import { parseAuqPane } from "../lib/auq-pane.js";
 import { recordMetric } from "../lib/metrics.js";
 import { describeKeys } from "../lib/runtimes/window-ops.js";
@@ -386,15 +387,12 @@ async function triggerSaveCompact(interaction: any, targetChannelId: string, run
       await interaction.followUp({ content: "❌ 找不到对应 agent（可能已被 kill）", ephemeral: true }).catch(() => {});
       return;
     }
-    noteSaveCompactInjected(windowTarget(agent.name));
-    await tmuxSendLine(windowTarget(agent.name), "/save-compact");
-    console.log(`🧹 save-compact 已发送: ${agent.name} (channel=${targetChannelId})`);
-    await interaction
-      .followUp({
-        content: `🧹 已让 **${String(agent.name).replace(/^agent-/, "")}** 存记忆 + compact（正忙的话会排队，做完它会在自己频道汇报）`,
-        ephemeral: true,
-      })
-      .catch(() => {});
+    const r = await injectCompact(await injectTargetFor(agent.name), { action: "save-compact" }); // 与自动压缩同一入口：同一套画面判定、同一个 15 分钟守卫
+    if (r.status === "skipped" || r.status === "failed") throw new Error(r.status === "skipped" ? `现在不能注入：${r.text}` : r.error);
+    console.log(`🧹 save-compact 已发送: ${agent.name} (channel=${targetChannelId}, ${r.status})`);
+    const what = r.line === "/save-compact" ? "存记忆 + compact" : `${r.line === "/compact" ? "" : "带保留清单 "}compact（执行者不跑 save-compact${r.note ? `；${r.note}` : ""}）`;
+    const content = `🧹 已让 **${String(agent.name).replace(/^agent-/, "")}** ${what}（${r.status === "queued" ? "它正忙，已排队" : "已开始"}）`;
+    await interaction.followUp({ content, ephemeral: true }).catch(() => {});
   } catch (e) {
     console.error("🧹 save-compact 触发失败:", e);
     await interaction.followUp({ content: `❌ 触发失败: ${(e as Error).message}`, ephemeral: true }).catch(() => {});
@@ -898,9 +896,10 @@ async function handleInteraction(discord: Client, deps: InteractionDeps, interac
             { stdout: "pipe", stderr: "pipe" }
           );
           await proc.exited;
-          if (proc.exitCode !== 0) {
-            const stderr = await new Response(proc.stderr).text();
-            console.error(`🔔 tmux send-keys 失败: ${stderr}`);
+          if (proc.exitCode !== 0) console.error(`🔔 tmux send-keys 失败: ${await new Response(proc.stderr).text()}`);
+          // 发键成功当场把「待你处理」里的权限 ask 记成 answered（ask-runtime.ts）；等改完 Discord 消息再记，watcher 可能先看到弹框没了记成撤销。发键失败不记
+          else if (isPermBtn) {
+            void import("./ask-runtime.js").then((m) => m.settleRuntimeAsk("permission", targetChannelId, "discord", labelMap[action], { principal: `discord:${interaction.user.id}` }));
           }
 
           // 编辑原消息显示已处理（保留指纹让下次 poll 自然清理，避免竞争条件）
@@ -913,8 +912,6 @@ async function handleInteraction(discord: Client, deps: InteractionDeps, interac
             } catch { /* non-critical */ }
             permissionMessages.delete(targetChannelId);
           }
-          // 「待你处理」里对应的权限 ask 记成 answered（ask-runtime.ts），不然弹框消失时会被当成撤销
-          if (isPermBtn) void import("./ask-runtime.js").then((m) => m.settleRuntimeAsk("permission", targetChannelId, "discord", labelMap[action], { principal: `discord:${interaction.user.id}` }));
         } catch (e) {
           console.error(`🔔 权限响应流程异常:`, e);
         }
@@ -962,7 +959,8 @@ async function handleInteraction(discord: Client, deps: InteractionDeps, interac
             }).catch(() => {});
             recordMetric("auq_submit", { channelId: auqChannel, meta: { questions: String(state.questions.length) } });
             clearAuqState(auqChannel);
-            // 同步收掉 web 端的交互卡
+            // 「待你处理」记下选了什么、谁选的（ask-runtime.ts，要在广播之前）；再同步收掉 web 端的交互卡
+            (await import("./ask-runtime.js")).settleAuq(auqChannel, "discord", state, { principal: `discord:${interaction.user.id}` });
             emitEvent({ agent: agentNameForChannel(auqChannel) || "master", chatId: auqChannel, type: "question_cleared", data: { reason: "submit", via: "discord", uid: interaction.user.id } });
           } else if (action === "cancel") {
             const failed = await tmuxSendEscape(state.tmuxTarget, { strict: true }).then(() => null, (e: Error) => e);

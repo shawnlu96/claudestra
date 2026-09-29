@@ -67,4 +67,14 @@ export const QUOTA_DICT: Record<string, string> = {
   "有 {n} 次重置可用：在撞墙窗口里 /limit-reset": "{n} reset(s) available: run /limit-reset in a walled window",
   "已恢复": "It's back",
   "确认已恢复？": "Confirm restored?",
+  // 上下文边界（features/chat/ctx-boundary-view.ts、components/ctx-boundary-chip.tsx）
+  "上下文边界": "Context boundary",
+  "执行类": "Executor",
+  "协调类": "Coordinator",
+  "全局": "Global",
+  "余 {n}": "{n} left",
+  "超 {n}": "{n} over",
+  "压缩线 {n}": "compacts at {n}",
+  "硬上限 {n}": "hard cap {n}",
+  "配置有问题": "Config problem",
 };

@@ -19,13 +19,14 @@ export interface StaticHit {
  * 托管前端 HTML 的 CSP（docs/design-hosted-frontend.md §8.7）：脚本只许同源文件 + 这份 HTML 自己的内联脚本哈希——Next 导出的每一页
  * 都带几段 `self.__next_f.push(...)` 启动脚本，不放哈希页面起不来；我们自己的脚本已全是外链（web/public/boot.js）。样式允许内联
  * （Tailwind 运行时注入的 style 属性 / daisyUI 主题），图片允许 data: / blob: / https:（头像、附件的 object URL、回复里的外链图），
- * 连接额外放 blob:（分享导出把附件图读成 data URL）与回环（中继页面探本机 bridge，bridge/local-probe.ts），worker 同源（SW），
+ * 连接额外放 blob:（分享导出把附件图读成 data URL）与回环（中继页面探本机 bridge，bridge/local-probe.ts），worker 同源（SW）
+ * 加 blob:（Turbopack 把 md 试解析 Worker 包成 blob: 地址再 importScripts 同源 chunk；只有 script-src 放行的脚本能造它），
  * 不许被嵌 iframe。中继与 bridge 直托管都经 staticResponse 发同一份；改这里要两边一起验。
  */
 export function staticSiteCsp(scriptHashes: readonly string[] = []): string {
   return [
     "default-src 'self'", `script-src ${["'self'", ...scriptHashes].join(" ")}`, "style-src 'self' 'unsafe-inline'", "img-src 'self' data: blob: https:",
-    "font-src 'self' data:", "connect-src 'self' blob: http://127.0.0.1:*", "worker-src 'self'", "manifest-src 'self'", "object-src 'none'", "base-uri 'none'",
+    "font-src 'self' data:", "connect-src 'self' blob: http://127.0.0.1:*", "worker-src 'self' blob:", "manifest-src 'self'", "object-src 'none'", "base-uri 'none'",
     "frame-ancestors 'none'", "form-action 'self'",
   ].join("; ");
 }

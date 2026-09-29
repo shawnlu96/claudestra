@@ -1,0 +1,24 @@
+
+[38;5;246m  ⎿  [39mContinuing now at lower priority until your limit resets at 3:20am. Your
+     weekly limit still applies, and responses may pause while waiting for spare
+     capacity. Run /low-priority to stop.
+[38;5;246m  ⎿  Interrupted · What should Claude do instead?[39m
+
+[38;5;239m[48;5;237m❯[39m [38;5;231m/compact 摘要必须让新上下文无需返工、无需重新提供约束就能接着干。务必保留:(1)[39m
+[38;5;231m遇到的难点/问题及其处理与结果;(2)提出、尝试或放弃过的方案及原因;(3)用户与 PM [39m
+[38;5;231m的要求、决定、同意、否决、确立为约束/边界的内容——按原话;(4)当前精确进度:已覆盖/[39m
+[38;5;231m已定/已完成的,分支名、head、PR 号;(5)未了、未决、已承诺、预期接下来发生的事,以[39m
+[38;5;231m及被额度打断时正在做的那一步;(6)难以重建的细节——名字、数字、日期、原话、路径、[39m
+[38;5;231m命令、链接——原样保留。这六项宁长勿缺,其余从简。[39m
+[38;5;246m[49m  ⎿  [39mNot enough messages to compact.
+
+[38;5;239m[48;5;237m❯[39m [38;5;231m/low-priority[39m
+[38;5;246m[49m  ⎿  [39mLower-priority mode is off. New messages wait for your usage limit as
+     usual; run /low-priority again to turn it back on.
+
+[38;5;244m────────────────────────────────────────────────────────────────────────────────
+[39m❯ 
+[38;5;244m────────────────────────────────────────────────────────────────────────────────
+[39m  [38;5;231m⚠ /low-priority to continue now at lower priority · uses your weekly limit[39m
+  [38;5;246mOpus 5.5 · 5h 101% · 7d 29%[39m
+  [38;5;211m⏵⏵ bypass permissions on[38;5;246m (shift+tab to cycle) · ← for agents[39m

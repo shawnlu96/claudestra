@@ -76,7 +76,7 @@ export type WebStreamEvent =
   | { t: "notice"; text: string; seq?: number; sid?: string }
   /** 另一端用户的发言(跨端同步:手机/电脑/Discord 同看一个会话)。
    *  本端自己发的回声由前端按文本对账去重。 */
-  | { t: "user-in"; text: string; from?: string; attachments?: { name: string; kind: "image" | "file"; url?: string }[] }
+  | { t: "user-in"; text: string; from?: string; attachments?: { name: string; kind: "image" | "file"; url?: string }[]; askId?: string; wire?: string }
   /** reply() 的最终回复（挂到当前 assistant 气泡的 replyText，与叙述分区渲染）。
    *  components：reply 附带的按钮/选单（点击回投 [button:<id>] / [select:<id>:<value>]）。
    *  attachments：agent 出站附件（图片内联显示,文件给 chip）——url 指向 BFF 附件端点。 */

@@ -90,6 +90,8 @@ export interface AgentStat {
   jsonl: string | null;
   /** 运行时（claude-code | codex | pi）：用量看板按它分行——各家窗口/计费口径不同 */
   runtime: string;
+  /** registry 的 projectId：看板按它找上下文边界策略（bridge/ctx-boundary.ts） */
+  projectId?: string;
 }
 
 export interface AgentLike {
@@ -102,6 +104,7 @@ export interface AgentLike {
   model?: string;
   /** v2.23+ 运行时（registry 字段）：决定会话文件怎么定位 */
   runtime?: string;
+  projectId?: string;
 }
 
 /** 上下文窗口天花板（用于算占比）。会话实测能涨到 ~1M。 */
@@ -315,6 +318,7 @@ export async function computeAgentStats(agents: AgentLike[], window = currentUsa
       name: a.name,
       channelId: a.channelId || "",
       runtime: a.runtime || "claude-code",
+      ...(a.projectId ? { projectId: a.projectId } : {}),
 
       // 实际在跑的模型（jsonl 真相）优先；占位模型（<synthetic> 之类）才退回 registry。
       // ⚠ 原来判据是 startsWith("claude-")，Pi agent 的模型是 provider/model 形式

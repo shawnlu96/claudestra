@@ -63,4 +63,24 @@ describe("judgeSignature（TOFU）", () => {
     expect(judgeSignature(pinned, hdr, () => "bad", T).lastCheck?.result).toBe("bad");
     expect(judgeSignature(undefined, hdr, () => "bad", T)).toEqual({ lastCheck: { at: T, result: "bad" } });
   });
+  test("记录里有对方指纹：以它为准——指纹不符 = key_changed（没钉过也一样），相符而钉的是旧钥匙就改钉", () => {
+    const fp = keyFingerprint(key.publicKey);
+    const other = instanceKeySync(mkdtempSync(join(tmpdir(), "ikey4-")))!.publicKey;
+    expect(judgeSignature(undefined, { ...hdr, key: other }, () => "ok", T, fp).lastCheck?.result).toBe("key_changed");
+    const stale = judgeSignature(undefined, { ...hdr, key: other }, () => "ok", T); // 先钉了旧钥匙（对方重装前）
+    const repinned = judgeSignature(stale, hdr, () => "ok", T, fp.toUpperCase());
+    expect(repinned).toMatchObject({ publicKey: key.publicKey, fingerprint: fp, lastCheck: { result: "ok" } });
+    expect(judgeSignature(repinned, hdr, () => "stale", T, fp).lastCheck?.result).toBe("stale");
+  });
+  test("记录里有完整公钥：只认这一把（不只比 64 位指纹）；公钥的非规范写法一律 bad", () => {
+    const fp = keyFingerprint(key.publicKey);
+    const other = instanceKeySync(mkdtempSync(join(tmpdir(), "ikey5-")))!.publicKey;
+    expect(judgeSignature(undefined, hdr, () => "ok", T, fp, other).lastCheck?.result).toBe("key_changed"); // 指纹相同也不行
+    expect(judgeSignature(undefined, hdr, () => "ok", T, fp, key.publicKey).lastCheck?.result).toBe("ok");
+    const B64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    const pk = key.publicKey, variant = pk.slice(0, -1) + B64[B64.indexOf(pk.at(-1)!) ^ 1];
+    expect(Buffer.from(variant, "base64url").equals(Buffer.from(pk, "base64url"))).toBe(true); // 解出同样的 32 字节
+    expect(isPublicKey(variant)).toBe(false);
+    expect(judgeSignature(undefined, { ...hdr, key: variant }, () => "ok", T).lastCheck?.result).toBe("bad");
+  });
 });

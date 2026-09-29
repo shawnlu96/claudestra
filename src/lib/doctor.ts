@@ -11,9 +11,9 @@
  * - **不打印密钥**。token / secret 一律只报「有没有」和长度。
  */
 
-import { resolveBridgePort } from "./bridge-url.js";
+import { dotenvBridgePort } from "./bridge-url.js";
 import { claudeAccountChecks, parseAuthStatus, parseClaudeVersion } from "./claude-account.js";
-import { parseDotenv, readDotenvFileSync } from "./env-file.js";
+import { readDotenvFileSync } from "./env-file.js";
 import { STATE_DIR, TMUX_SOCK } from "./paths.js";
 import { checkStateFiles, checkUndeliveredAlerts, reservedAgentNameChecks, staleInstallEnvCheck } from "./doctor-state.js";
 import { hasRecallHook, recallAvailable } from "./session-recall.js";
@@ -133,7 +133,7 @@ async function checkConfig(repoRoot: string): Promise<Check[]> {
         fix: `chmod 600 ${envPath}` });
 
   // doctor 看的是 daemon 实际会拿到的配置：只读文件，不看本终端 export 的变量
-  const env = parseDotenv(await readFile(envPath, "utf-8"));
+  const env = readDotenvFileSync(envPath) ?? {};
 
   const webOnly = !env.DISCORD_BOT_TOKEN;
   if (webOnly) {
@@ -218,7 +218,7 @@ async function checkBridge(repoRoot: string): Promise<Check[]> {
   // 与 Bun 加载 .env 同一口径（带引号的 BRIDGE_PORT 以前会被误读成默认端口 → 误诊）
   const dotenvFile = readDotenvFileSync(`${repoRoot}/.env`);
   const dotenv = dotenvFile ?? {};
-  const port = resolveBridgePort(dotenv);
+  const port = dotenvBridgePort(repoRoot, dotenvFile);
 
   const lsof = await sh(["lsof", "-nP", `-iTCP:${port}`, "-sTCP:LISTEN"]);
   const listeners = lsof.out.split("\n").slice(1).filter(Boolean);
@@ -532,7 +532,7 @@ export async function runDoctor(repoRoot: string): Promise<Check[]> {
     checkRuntime(),
     checkConfig(repoRoot),
     checkDaemons(),
-    checkUndeliveredAlerts(), checkStateFiles(),
+    checkUndeliveredAlerts(), checkStateFiles(), import("./doctor-peers.js").then((m) => m.checkLegacyPeers()), // 截止日前还没签名记录的老 peer
     checkBridge(repoRoot),
     checkIntegration(repoRoot),
     checkAgents(), import("./doctor-pending.js").then((m) => m.checkPendingOps(repoRoot)), // 做到一半的 create / kill / rename / update 与孤儿窗口、频道

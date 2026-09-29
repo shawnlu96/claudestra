@@ -24,13 +24,9 @@ import { transcriptUserEvent } from "../lib/turn-cuts.js";
 import { emitEvent, getAgentStatus, isPostTurnActivity } from "./event-bus.js";
 import { isForwardTool } from "../lib/forward.js";
 import { isLimitHitText } from "../lib/quota-wall-text.js";
+import { auqEchoCard } from "../lib/auq-echo.js";
 
-interface ToolEntry {
-  id: string;
-  summary: string;
-  done: boolean;
-  error: boolean;
-}
+interface ToolEntry { id: string; summary: string; done: boolean; error: boolean }
 
 interface WatcherState {
   watcher: FSWatcher;
@@ -596,6 +592,8 @@ async function processNewData(state: WatcherState, discord: Client): Promise<voi
           const ue = transcriptUserEvent(entry, state.runtime);
           if (ue) emitEvent({ agent: state.agentName, chatId: state.channelId, type: ue.type, data: { ts: entry.timestamp, ...ue.data } }, ue);
           if (!Array.isArray(content)) continue;
+          const auq = auqEchoCard(entry, formatToolDetail); // AUQ 作答补一张已完成的卡（lib/auq-echo.ts）
+          if (auq) emitEvent({ agent: state.agentName, chatId: state.channelId, type: "tool_start", data: { ...auq, seq, sid: state.sessionId } });
           for (const block of content) {
             if (block.type === "tool_result" && block.tool_use_id) {
               // 并行 tool_use 各占一条 jsonl、新一条会清空 state.tools：前面几个的结果这里找不到，但 tool_start 发过了，tool_done 照发

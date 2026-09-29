@@ -19,6 +19,7 @@ import { visibleSessions, type NeutralSessionInfo } from "../src/bridge/sessions
 import { projectsSlug } from "../src/lib/jsonl-cost";
 import { isMasterName } from "../src/lib/registry";
 import type { Principal } from "../src/lib/principals";
+import { testChildEnv } from "./test-env.ts";
 
 const at = "2026-01-01T00:00:00Z";
 const device = (id: string, grant: Grant): DeviceCredential => ({
@@ -299,7 +300,7 @@ describe("manager restart：--include-master 只认命令行里本来就有的",
   });
   afterAll(() => rmSync(home, { recursive: true, force: true }));
   const manager = (...args: string[]) => {
-    const env = { PATH: `${join(home, "fakebin")}:/usr/bin:/bin`, HOME: home, TMPDIR: home, CLAUDESTRA_RUNTIME_DIR: join(home, "rt"), CONTROL_CHANNEL_ID: "", LANG: "C" };
+    const env = testChildEnv({ PATH: `${join(home, "fakebin")}:/usr/bin:/bin`, HOME: home, TMPDIR: home, CLAUDESTRA_RUNTIME_DIR: join(home, "rt"), CONTROL_CHANNEL_ID: "", LANG: "C" });
     const r = Bun.spawnSync([process.execPath, join(import.meta.dir, "..", "src", "manager.ts"), ...args], { env, stdout: "pipe", stderr: "pipe" });
     return JSON.parse(r.stdout.toString().trim().split("\n").pop() || "{}") as { ok: boolean; error?: string };
   };
