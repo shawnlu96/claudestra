@@ -4,21 +4,23 @@
  * 渲染在 components/narration-fold.tsx。单测见 tests/web-narration-fold.test.ts。
  *
  * 两层：`all` 是会话级（按 agent）的默认态，后续新到的旁白继承它，写 localStorage
- * 跨刷新保留，新会话默认展开；`overrides` 是单块的手动切换，只在内存里活着，
+ * 跨刷新保留；没按过「收起 / 展开全部」时是 null = 只收「reply 之后紧跟的那段」（agent 常把刚回复的内容
+ * 再写一遍，语言不同时 reply-echo 认不出），其余展开。`overrides` 是单块的手动切换，只在内存里活着，
  * 「收起 / 展开全部」一按就清空——全部 = 重新对齐，不保留零星例外。
  */
 
 export interface FoldState {
-  /** 会话级默认：true = 新旁白一律收起 */
-  all: boolean;
+  /** 会话级默认：true = 一律收起，false = 一律展开，null = 只收 reply 之后紧跟的旁白 */
+  all: boolean | null;
   /** 单块覆盖：key → 是否收起 */
   overrides: Record<string, boolean>;
 }
 
-export const EMPTY_FOLD: FoldState = Object.freeze({ all: false, overrides: Object.freeze({}) }) as FoldState;
+export const EMPTY_FOLD: FoldState = Object.freeze({ all: null, overrides: Object.freeze({}) }) as FoldState;
 
-export function isFolded(s: FoldState, key: string): boolean {
-  return key in s.overrides ? s.overrides[key] : s.all;
+/** postReply：这段旁白紧跟在 reply 之后（components/message-list.tsx 判，reply-echo.ts postReplyMessageIds） */
+export function isFolded(s: FoldState, key: string, postReply = false): boolean {
+  return key in s.overrides ? s.overrides[key] : (s.all ?? postReply);
 }
 
 export function foldOne(s: FoldState, key: string, folded: boolean): FoldState {
@@ -37,12 +39,13 @@ export interface MinimalStorage {
   setItem(key: string, value: string): void;
 }
 
-export function loadFoldAll(storage: MinimalStorage | null, agent: string): boolean {
-  if (!storage || !agent) return false;
+export function loadFoldAll(storage: MinimalStorage | null, agent: string): boolean | null {
+  if (!storage || !agent) return null;
   try {
-    return storage.getItem(FOLD_KEY_PREFIX + agent) === "1";
+    const v = storage.getItem(FOLD_KEY_PREFIX + agent);
+    return v === "1" ? true : v === "0" ? false : null;
   } catch {
-    return false; // 隐私模式读不到 = 默认展开
+    return null; // 隐私模式读不到 = 默认（只收 reply 之后的）
   }
 }
 

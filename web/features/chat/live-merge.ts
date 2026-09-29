@@ -1,6 +1,8 @@
 import { splitsReplyBubble } from "@/lib/chat/history-shape";
 import type { ChatMessage } from "./type";
 
+type Segments = NonNullable<ChatMessage["segments"]>;
+
 export { splitsReplyBubble };
 
 /**
@@ -177,7 +179,7 @@ export function mergeContiguousAssistant(base: ChatMessage[], delta: ChatMessage
   const replyText = [last.replyText, first.replyText].filter(Boolean).join("\n");
   const merged: ChatMessage = {
     ...last,
-    segments: [...(last.segments ?? []), ...(first.segments ?? [])],
+    segments: joinSegments(last.segments ?? [], first.segments ?? []),
     content: [last.content, first.content].filter(Boolean).join("\n\n"),
     ...(toolCalls.length ? { toolCalls } : {}),
     ...(attachments.length ? { attachments } : {}),
@@ -189,6 +191,17 @@ export function mergeContiguousAssistant(base: ChatMessage[], delta: ChatMessage
     seqEnd: typeof first.seqEnd === "number" ? first.seqEnd : last.seqEnd,
   };
   return [...base.slice(0, -1), merged, ...delta.slice(1)];
+}
+
+/**
+ * 两段 segments 首尾相接：接缝两侧都是工具段就并成一段。回合进行中差量是逐条追平的，一条记录一个工具段，
+ * 直接拼会把一串连续工具拆成「各 1 步」，ToolGroup 就收不起来（历史一次读出走 history-shape，本来就是并好的）。
+ */
+function joinSegments(a: Segments, b: Segments): Segments {
+  const tail = a[a.length - 1];
+  const head = b[0];
+  if (tail?.kind !== "tools" || head?.kind !== "tools") return [...a, ...b];
+  return [...a.slice(0, -1), { ...tail, tools: [...tail.tools, ...head.tools] }, ...b.slice(1)];
 }
 
 /**

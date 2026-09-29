@@ -12,6 +12,7 @@ import { execFile } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { replyResultText } from "../lib/reply-ask-schema.js"; // 这个文件没有任何 import，不破坏「只依赖 node: 内置模块」；历史按这句认 reply 建出的 askId
 import { createAbortControl } from "./abort-control.js";
 
 const CHANNEL_ID = (process.env.DISCORD_CHANNEL_ID ?? "").trim();
@@ -490,11 +491,7 @@ export default function claudestraChannel(pi: PiExtensionApi): void {
           components: params?.components,
           files: params?.files,
         });
-        return {
-          content: [{ type: "text", text: `Sent message(s): ${JSON.stringify(result?.messageIds ?? [])}` }],
-          details: {},
-          isError: false,
-        };
+        return { content: [{ type: "text", text: replyResultText({ ...result, messageIds: result?.messageIds ?? [] }) }], details: {}, isError: false };
       } catch (error) {
         return { content: [{ type: "text", text: String(error) }], details: {}, isError: true };
       }
