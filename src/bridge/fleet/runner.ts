@@ -142,6 +142,11 @@ function saveCompact(io: PaneIO, win: string): Promise<Step> {
 
 const OWN_ECHO = "/low-priority";
 const OTHER_TEXT = "LP 已开；输入框里有别的内容，没清也没压缩";
+/**
+ * 输入框里的字，去掉提示符后面那个分隔符：真 CC 的输入框是 `❯` + NBSP（历史行才是普通空格），lp-state 只去一个普通空格。
+ * 只去一个 NBSP、不把 NBSP 整体换成空格：用户多敲的空格还得算「不一样」（adv3 P2-1）。lp-state 自己规范掉之后这里是空操作
+ */
+const shownInput = (r: LpRead) => r.inputText.replace(/^\u00a0/, "");
 
 /**
  * 打断自动续跑后，Esc 可能把我们敲的 /low-priority 放回输入框：两帧都正好是这几个字，才按同样多的退格（不用 C-u 清整行）；
@@ -153,8 +158,8 @@ async function clearOwnEcho(io: PaneIO, win: string): Promise<Step | null> {
   const { block, x } = await gateTwice(io, win, (r): Step | null => {
     if (r.modal) return failed(`LP 已开，但${r.reason ?? "底部没有输入框"}，没按任何键、没压缩`);
     if (r.input === "queued") return failed("LP 已开；输入框里已有排队的消息，没清也没压缩");
-    const own = r.input === "draft" && r.inputText === OWN_ECHO;
-    if (r.input !== "empty" && !own) return failed(`${OTHER_TEXT}（看到的是「${r.inputText.slice(0, 40) || "看不清"}」）`);
+    const own = r.input === "draft" && shownInput(r) === OWN_ECHO;
+    if (r.input !== "empty" && !own) return failed(`${OTHER_TEXT}（看到的是「${shownInput(r).slice(0, 40) || "看不清"}」）`);
     // 第一帧空、第二帧才冒出这几个字：不是两帧都看到，照样不按
     if (own && sawEmpty) return failed(`${OTHER_TEXT}（两次抓屏之间输入框变了）`);
     sawEmpty = r.input === "empty";
@@ -165,7 +170,7 @@ async function clearOwnEcho(io: PaneIO, win: string): Promise<Step | null> {
   await io.erase(win, OWN_ECHO.length);
   const end = await waitFor(io, win, 2000, (y) => y.r.input === "empty");
   if (end.ok) return null;
-  return failed(`LP 已开；按了 ${OWN_ECHO.length} 次退格清 /low-priority，输入框里还剩「${end.r.inputText.slice(0, 40) || "看不清"}」，没压缩（可能有人同时在打字，请看一眼）`);
+  return failed(`LP 已开；按了 ${OWN_ECHO.length} 次退格清 /low-priority，输入框里还剩「${shownInput(end.r).slice(0, 40) || "看不清"}」，没压缩（可能有人同时在打字，请看一眼）`);
 }
 
 /**

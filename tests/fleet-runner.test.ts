@@ -47,9 +47,9 @@ const run = (a: FleetAction, frames: (string | string[])[], text?: RunCtx["deliv
   return runOne(a, "agent-x", "master:=agent-x", ctxOf(f.io, text)).then((r) => ({ ...r, keys: f.keys }));
 };
 
-/** 真实画面拼一个「LP 开着、空闲、输入框里是 text」的帧 */
-function typed(text: string): string {
-  const raw = fx("lp-on-interrupted").replace(/\x1b\[39m❯[^\S\n]*\n/, `\x1b[39m❯ ${text}\n`);
+/** 真实画面拼一个「LP 开着、空闲、输入框里是 text」的帧；真 CC 的输入框是 ❯ + NBSP（样本 draft.ansi），sep 换成普通空格测旧画法 */
+function typed(text: string, sep = "\u00a0"): string {
+  const raw = fx("lp-on-interrupted").replace(/\x1b\[39m❯[^\S\n]*\n/, `\x1b[39m❯${sep}${text}\n`);
   if (!raw.includes(text)) throw new Error("fixture 的输入框行变了，拼不出输入框里的字");
   return raw;
 }
@@ -285,6 +285,13 @@ describe("开 LP 再压缩：Esc 放回输入框的字只清我们自己敲的 /
       const r = await run({ kind: "lp-compact" }, [...head, typed(text)]);
       expect([text, r.outcome, r.keys]).toEqual([text, "failed", ["line:/low-priority", "escape"]]);
       expect(r.detail).toStartWith(OTHER);
+    }
+  });
+
+  test("提示符后面是 NBSP（真 CC）或普通空格，都认得出是我们的 /low-priority → 按 13 次退格", async () => {
+    for (const sep of ["\u00a0", " "]) {
+      const r = await run({ kind: "lp-compact" }, [...head, typed("/low-priority", sep), fx("lp-on-interrupted")]);
+      expect([JSON.stringify(sep), r.keys.includes("erase:13")]).toEqual([JSON.stringify(sep), true]);
     }
   });
 
