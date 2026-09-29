@@ -302,6 +302,12 @@
       "from": 22154,
       "to": 22328,
       "why": "同上（PR #186 审查 P2）：中文版命令清单同步加 codex-sub-archive 一行，细节在 docs/architecture/features.zh-CN.md"
+    },
+    {
+      "key": "guard:scripts/guard/config.ts",
+      "from": 0,
+      "to": 0,
+      "why": "TWINS 加 src/lib/reserved-button-ids.ts ↔ web/lib/chat/reserved-button-ids.ts：网页「待你处理」要认出 bridge 自己的管理 / 面板按钮（老面板不按过期锁），保留 id 表两边由 guard 保证一致（T11b PR B 第 3 轮 P2-2）"
     }
   ]
 }

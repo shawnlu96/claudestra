@@ -77,8 +77,8 @@ function fileNameOf(url: string): string | undefined {
   }
 }
 
-/** msg：所在气泡（有 sid 的历史气泡能精确到那一条；直播气泡按名字找最新的一张） */
-export function AttachmentStrip({ items, msg }: { items: ChatAttachmentView[]; msg?: ChatMessage }) {
+/** msg：所在气泡（有 sid 的历史气泡能精确到那一条；直播气泡按名字找最新的一张）；align：聊天里的用户气泡靠右（默认），「待你处理」卡片里靠左 */
+export function AttachmentStrip({ items, msg, align = "end" }: { items: ChatAttachmentView[]; msg?: ChatMessage; align?: "start" | "end" }) {
   const t = useT();
   const store = useChatStoreApi();
   const images = items.filter((a) => a.kind === "image" && a.url);
@@ -99,7 +99,7 @@ export function AttachmentStrip({ items, msg }: { items: ChatAttachmentView[]; m
   };
 
   return (
-    <div className="flex max-w-[85%] flex-wrap justify-end gap-2">
+    <div className={`flex max-w-[85%] flex-wrap gap-2 ${align === "start" ? "justify-start" : "justify-end"}`}>
       {items.map((a, i) =>
         a.kind === "image" ? (
           <AttachedImage key={i} a={a} onPreview={() => void openViewer(images.indexOf(a))} />

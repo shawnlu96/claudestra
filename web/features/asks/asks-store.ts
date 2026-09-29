@@ -2,7 +2,7 @@
  * 「待你处理」的网页状态（docs 13 §4.4）：侧栏入口、抽屉、聊天气泡上的状态都读这一份。
  * 刷新时机：挂载、自己那条只收 ask 的 SSE（/events?types=ask，没开会话时也实时）、回到前台、可见时每 30 秒兜底。
  * 顺带报网页可见性（POST /presence，推送规则据此判 owner 在不在）：切前台 / 后台各一次，可见时每分钟一次。
- * 凭据读不了台账（403）就当没有待办，也不再轮询。切机器由调用方换 key 重挂（start 见到新 key 先清空）。
+ * 凭据读不了台账（403）就当没有待办，也不再轮询；拉不到（老 bridge 404、503、断网、超时）先当 partial（asks-model replyAskState）。切机器由调用方换 key 重挂（start 见到新 key 先清空）。
  * 作答是乐观的（T11b 第 8 条）：answer() 提交前就把卡标成已答（移出「等你处理」、计数减 1），服务端确认 / SSE 回来再校正，失败回滚并在卡上留原因。
  * 线上 owner 反映答完卡片迟迟不走：作答接口要等投递给 agent（抓屏判忙、读 registry）才回 202，机器一忙就拖好几秒。
  */
@@ -11,11 +11,13 @@ import { ApiError } from "@/lib/api/client";
 import { fetchAsks, followAskEvents, postPresence } from "@/lib/api/asks";
 import { askFromLink, hashBase, leavePlan, shouldPush } from "@/lib/hash-nav";
 import { backGuard, isNarrow, stripHash } from "@/lib/hash-nav-browser";
-import { applyPending, ASK_EVENT_REFRESH_MS, PENDING_MAX_MS, type PendingAnswer, type WebAsk } from "./asks-model";
+import { applyPending, ASK_EVENT_REFRESH_MS, ASK_LIST_WAIT_MS, PENDING_MAX_MS, type PendingAnswer, type WebAsk } from "./asks-model";
 
 export interface AsksSnap {
   asks: WebAsk[];
   loaded: boolean;
+  /** bridge 给的是完整列表（台账读得了）；guest、部分 scope、403 都是 false——聊天气泡不能拿「查不到」当结案（asks-model replyAskState） */
+  full?: boolean;
   /** 抽屉开着吗；focus = 要滚到的那张卡 */
   open: boolean;
   focus: string | null;
@@ -108,14 +110,15 @@ async function refresh(): Promise<void> {
     const bannerAsk = snap.loaded && visible() ? fresh.find((a) => a.blocking === true && a.kind !== "accept") : undefined;
     for (const a of r.asks) seen.add(a.id);
     server = r.asks;
-    show({ loaded: true, ...(bannerAsk ? { banner: bannerAsk } : {}) });
+    show({ loaded: true, full: r.full === true, ...(bannerAsk ? { banner: bannerAsk } : {}) });
   } catch (e) {
-    if (e instanceof ApiError && e.status === 403) {
-      denied = true;
-      server = [];
-      show({ loaded: true });
-    }
-    // 其余（断网、切机器中止）：保留上一份，下次刷新再来
+    if (my < appliedSeq) return; // 上一台机器的、或已被更新的结果盖过的失败，不作数
+    const status = e instanceof ApiError ? e.status : 0;
+    if (status === 403) denied = true;
+    // 403 / 老 bridge 没有 /asks（404、405）= 没有待办；其余（503、断网）还没拿到过列表也先当 partial，都不能让聊天气泡一直「正在核对」
+    if (status === 403 || status === 404 || status === 405) server = [];
+    if (status === 403 || status === 404 || status === 405 || !snap.loaded) show({ loaded: true, full: false });
+    // 拿到过列表的：保留上一份，下次刷新再来
   }
 }
 
@@ -160,7 +163,7 @@ export const asksStore = {
   start(key: string): () => void {
     if (key !== machineKey) {
       machineKey = key;
-      appliedSeq = fetchSeq; // 上一台机器还在飞的拉取回来也不认
+      appliedSeq = fetchSeq + 1; // 上一台机器还在飞的拉取（序号都 ≤ fetchSeq）回来也不认
       denied = false;
       seen.clear();
       pending.clear();
@@ -201,6 +204,8 @@ export const asksStore = {
     window.addEventListener("popstate", onPop);
     document.addEventListener("visibilitychange", onVis);
     void refresh();
+    // 第一次拉取迟迟不回（bridge 卡住）：几秒后先按 partial 放开聊天气泡的按钮，点击带 askId 交给 bridge 判
+    const slow = setTimeout(() => !snap.loaded && set({ loaded: true, full: false }), ASK_LIST_WAIT_MS);
     presence(visible());
     // 推送深链 /chat?ask=<id>：摘掉参数再压 #asks，返回落在会话列表而不是退出应用；带 #asks 刷新（iOS 冷恢复）= 原样重开
     const deep = askFromLink(window.location.href);
@@ -212,6 +217,7 @@ export const asksStore = {
     } else if (onAsksPage()) set({ open: true });
     return () => {
       if (timer) clearTimeout(timer);
+      clearTimeout(slow);
       clearInterval(poll);
       clearInterval(beat);
       ctrl.abort();
