@@ -2,8 +2,8 @@
  * Chat（代码名 talk）的 HTTP 口，只给本机的人（owner 与 guest 设备）；集成 token、peer 一律 403：
  *   GET    /api/v1/talk/me                                  我是谁（person、是不是 owner）
  *   GET    /api/v1/talk/people                              能 @ / 能开 dm 的人（guest 只看得到 owner 和同房间的人）
- *   PATCH  /api/v1/talk/people/:id                          {displayName}           owner 设备注名
- *   POST   /api/v1/talk/people/:id/merge | /unmerge         {into}                  owner 合并 / 拆开两个 guest
+ *   PATCH  /api/v1/talk/people/:id                          {displayName}           owner 设备注名（管理动作：要 canManage）
+ *   POST   /api/v1/talk/people/:id/merge | /unmerge         {into}                  owner 合并 / 拆开两个 guest（同上）
  *   GET    /api/v1/talk/rooms                               我在的房间
  *   POST   /api/v1/talk/rooms                               {kind:"dm", with} | {kind:"thread", members, title}（thread 只有 owner 能建）
  *   GET    /api/v1/talk/rooms/:key/messages?before&limit    一页消息
@@ -12,9 +12,10 @@
  *   POST   /api/v1/talk/atts                                正文 = 图片字节 → {sha256, mime, bytes}
  *   GET    /api/v1/talk/atts/:sha256                        取图（上传者 / 引用它的房间成员）
  *   POST   /api/v1/talk/drops/preview | /drops              丢进工作台：预览（agent 收到的原文 + sha）/ 确认 {dropId, sha, ...}
- *   POST   /api/v1/talk/tasks                               只有 owner：勾选的消息建成台账任务 {room, msgs, project, id, title, kind, req}
+ *   POST   /api/v1/talk/tasks                               要 canReadLedger：勾选的消息建成台账任务 {room, msgs, project, id, title, kind, req}
  * 实时：SSE talk 事件（只推给房间成员），收到就重拉。
  */
+import { canManage, canReadLedger } from "../../lib/devices.js";
 import type { Principal } from "../../lib/principals.js";
 import { ensureLocalPerson, isGuestPrincipal, localPrincipalOf, mergePeople, OWNER_PERSON, personPrincipals, setDisplayName, TalkPeopleError, unmergePerson } from "../../lib/talk-people.js";
 import { createThread, ensureDm, roomsFor, memberKey } from "../../lib/talk-rooms.js";
@@ -60,8 +61,8 @@ async function createRoom(me: Me, b: Record<string, unknown>): Promise<Response>
   const principals = await talkPrincipals();
   if (b.kind === "dm") {
     const target = typeof b.with === "string" ? b.with : "";
-    // guest 只能和 owner 开 dm：不许借 dm 枚举、骚扰别的 guest
-    if (!me.isOwner && target !== OWNER_PERSON) return forbidden("guests can only open a dm with the owner");
+    // guest（和部分 scope 的 owner 设备）只能和 owner 开 dm：不许借 dm 枚举、骚扰别的 guest
+    if (!me.isOwner && target !== OWNER_PERSON) return forbidden("this device can only open a dm with the owner");
     if (!(await livePerson(target))) return apiJson(404, { ok: false, error: "person not found" });
     const theirs = keysOf(me, target);
     if (theirs.some((k) => me.keys.includes(k))) return apiJson(400, { ok: false, error: "cannot dm yourself" });
@@ -82,13 +83,13 @@ async function createRoom(me: Me, b: Record<string, unknown>): Promise<Response>
   return apiJson(201, { ok: true, room: roomView(room, me, principals) });
 }
 
-async function peopleRoute(req: Request, me: Me, rest: string[]): Promise<Response> {
+async function peopleRoute(req: Request, me: Me, p: Principal, rest: string[]): Promise<Response> {
   const principals = await talkPrincipals();
   if (!rest.length) {
     if (req.method !== "GET") return apiJson(405, { ok: false, error: "method not allowed" });
     return apiJson(200, { ok: true, people: directoryFor(me, principals, roomsFor(talkDb(), me.keys)) });
   }
-  if (!me.isOwner) return forbidden("only the owner can edit people");
+  if (!canManage(p)) return forbidden("editing people needs the owner's full-access device");
   const id = decode(rest[0]);
   if (!id) return apiJson(400, { ok: false, error: "bad person id" });
   const b = await body(req);
@@ -150,7 +151,7 @@ async function dropsRoute(req: Request, me: Me, p: Principal, rest: string[]): P
 }
 
 async function taskRoute(req: Request, me: Me, p: Principal): Promise<Response> {
-  if (!me.isOwner) return forbidden("only the owner can create tasks from chat");
+  if (!canReadLedger(p)) return forbidden("creating ledger tasks needs a device that can read the ledger");
   const b = await body(req);
   if (b instanceof Response) return b;
   const r = await createTaskFromTalk(me, p, b);
@@ -164,7 +165,7 @@ export async function handleTalkApi(req: Request, path: string, principal: Princ
   const [section, ...rest] = path.slice("/talk/".length).split("/").filter(Boolean);
   try {
     if (section === "me" && req.method === "GET") return apiJson(200, { ok: true, me: { id: me.personId, isOwner: me.isOwner, fp: me.fp } });
-    if (section === "people") return await peopleRoute(req, me, rest);
+    if (section === "people") return await peopleRoute(req, me, principal, rest);
     if (section === "rooms") return await roomsRoute(req, me, principal, rest, url);
     if (section === "drops") return await dropsRoute(req, me, principal, rest);
     if (section === "tasks" && !rest.length && req.method === "POST") return await taskRoute(req, me, principal);

@@ -5,6 +5,7 @@
  * 读权限只有一个判定：查看者名下的成员键（合并过的人有多个）在不在房间成员里（lib/talk-rooms.ts isMember）。
  */
 import type { Database } from "bun:sqlite";
+import { canManage } from "../lib/devices.js";
 import { instanceKeySync, keyFingerprint } from "../lib/instance-key.js";
 import { isOwnerPrincipal, readPrincipals, type Principal, type PrincipalsFile } from "../lib/principals.js";
 import { ensureLocalPerson, getPerson, isGuestPrincipal, localPrincipalOf, OWNER_PERSON, OWNER_PRINCIPAL, personAliases, personIdOf, personPrincipals } from "../lib/talk-people.js";
@@ -61,6 +62,7 @@ export interface Me {
   keys: string[];
   /** 发消息时的作者键：用本机规范 principal，读侧按人显示 */
   authorKey: string;
+  /** owner 的全权设备（canManage）：改备注名、合并 / 拆开人、建群、删别人的消息都看它；部分 scope 的 owner 设备仍是 owner 这个人，但这些都不行 */
   isOwner: boolean;
   fp: string;
 }
@@ -68,14 +70,14 @@ export interface Me {
 /** 请求方 → 人；不是人（集成 token、peer、停用的）返回 null。只读：people 行由会写库的入口经 rememberMe 建 */
 export function meOf(p: Principal): Me | null {
   if (p.disabled || p.peer) return null;
-  const isOwner = isOwnerPrincipal(p);
-  const principalId = isOwner ? OWNER_PRINCIPAL : isGuestPrincipal(p.id) ? p.id : null;
+  const owner = isOwnerPrincipal(p);
+  const principalId = owner ? OWNER_PRINCIPAL : isGuestPrincipal(p.id) ? p.id : null;
   const fp = selfFp();
   if (!principalId || !fp) return null;
   const db = talkDb();
   const personId = personAliases(db, personIdOf(principalId))[0];
   const keys = personPrincipals(db, personId).map((x) => memberKey(fp, x));
-  return { principalId, personId, keys, authorKey: memberKey(fp, localPrincipalOf(personId) ?? principalId), isOwner, fp };
+  return { principalId, personId, keys, authorKey: memberKey(fp, localPrincipalOf(personId) ?? principalId), isOwner: owner && canManage(p), fp };
 }
 
 /** 发消息、建房这类写入口先记下这个人（people 行幂等建） */

@@ -1,6 +1,6 @@
 /**
  * Chat 的 HTTP 口与 bridge 接线（bridge/local-api/talk*.ts、bridge/talk*.ts）：
- * 权限矩阵（owner / guest / 别的 guest / 集成 token / peer）、guest 在 API 层读不到自己不在的房间、SSE 只推给成员、
+ * 权限矩阵（owner / 部分 scope 的 owner 设备 / guest / 别的 guest / 集成 token / peer）、guest 在 API 层读不到自己不在的房间、SSE 只推给成员、
  * 发 chat 不投给任何 agent、丢进工作台预览与 agent 收到的逐字一致、连点只投一次、押后的结局回写。
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
@@ -15,7 +15,7 @@ import { handleLocalApi } from "../src/bridge/local-api/index.js";
 import { renderApiInbound, type ApiUserEndpoint, type Delivery, type Envelope } from "../src/bridge/router.js";
 import { setTalkForTest } from "../src/bridge/talk.js";
 import { setTalkTaskRunnerForTest } from "../src/bridge/talk-task.js";
-import { effectivePrincipal, type Grant } from "../src/lib/devices.js";
+import { canReadLedger, effectivePrincipal, type Grant } from "../src/lib/devices.js";
 import type { Principal } from "../src/lib/principals.js";
 import type { RegistryAgent } from "../src/lib/registry.js";
 import { tempLedgerPath } from "./ledger-test-helpers.js";
@@ -28,6 +28,8 @@ const guestBase = (hex: string, name: string, disabled = false): Principal => ({
 const GUESTS = [guestBase("aa", "小王"), guestBase("a2", "小王的平板"), guestBase("bb", "老李"), guestBase("cc", "停用的", true)];
 const owner = effectivePrincipal({ principal: OWNER_BASE, credential: cred("dev_o", { agents: ["*", "master"], terminal: true, manage: true }) });
 const guest = (hex: string) => effectivePrincipal({ principal: GUESTS.find((g) => g.id === `guest:${hex}`)!, credential: cred(`dev_${hex}`, { agents: ["agent-x"], terminal: false, manage: false }) });
+/** owner 这个人的部分 scope 设备（配对时收窄了 agent、没给 manage）：读不了台账，Chat 里的管理动作一律 403 */
+const scopedOwner = (manage = false) => effectivePrincipal({ principal: OWNER_BASE, credential: cred(`dev_s${manage}`, { agents: ["agent-x"], terminal: false, manage }) });
 const INTEGRATION: Principal = { id: "token:tok_int", role: "external", name: "integration", agents: ["*"], createdAt: at };
 const SCOPED: Principal = { id: "token:tok_s", role: "external", name: "bot", agents: ["agent-x"], createdAt: at };
 const PEER: Principal = { id: "token:tok_peer", role: "external", agents: ["*"], peer: "P", createdAt: at };
@@ -105,6 +107,17 @@ describe("权限矩阵", () => {
     const all = (await api(owner, "GET", "/talk/people")).json.people.map((p: any) => p.id).sort();
     expect(all).toEqual(["local:guest:a2", "local:guest:aa", "local:guest:bb", "local:owner:self"]);
   });
+  test("部分 scope 的 owner 设备（带不带 manage 都算）：/talk/me 不是 owner；改备注名、合并 / 拆开人 403", async () => {
+    expect((await api(owner, "GET", "/talk/me")).json.me.isOwner).toBe(true);
+    for (const p of [scopedOwner(), scopedOwner(true)]) {
+      expect(canReadLedger(p)).toBe(false);
+      expect((await api(p, "GET", "/talk/me")).json.me).toMatchObject({ id: "local:owner:self", isOwner: false });
+      expect((await api(p, "PATCH", "/talk/people/local%3Aguest%3Abb", { displayName: "x" })).status).toBe(403);
+      expect((await api(p, "POST", "/talk/people/local%3Aguest%3Abb/merge", { into: "local:guest:aa" })).status).toBe(403);
+      expect((await api(p, "POST", "/talk/people/local%3Aguest%3Aa2/unmerge", {})).status).toBe(403);
+      expect((await api(p, "POST", "/talk/rooms", { kind: "thread", members: ["local:guest:bb"] })).status).toBe(403);
+    }
+  });
   test("停用的 guest 开不了 dm；guest 改不了别人的备注名、合并不了人", async () => {
     expect((await api(owner, "POST", "/talk/rooms", { kind: "dm", with: "local:guest:cc" })).status).toBe(404);
     expect((await api(guest("aa"), "PATCH", "/talk/people/local%3Aguest%3Abb", { displayName: "x" })).status).toBe(403);
@@ -122,6 +135,14 @@ describe("权限矩阵", () => {
     const url = new URL("http://x/api/v1/talk/atts");
     const r = await handleLocalApi(new Request(url.toString(), { method: "POST", body: big, duplex: "half" } as RequestInit), url, guest("aa"));
     expect(r?.status).toBe(413);
+    // 不结束的流：超限当场停读，不把整条流拉完
+    let pulls = 0;
+    const endless = new ReadableStream<Uint8Array>({ pull: (c) => void (pulls++, c.enqueue(new Uint8Array(1024 * 1024))) }, { highWaterMark: 0 });
+    const r2 = await handleLocalApi(new Request(url.toString(), { method: "POST", body: endless, duplex: "half" } as RequestInit), url, guest("aa"));
+    expect(r2?.status).toBe(413);
+    const after = pulls;
+    await Bun.sleep(50);
+    expect([pulls <= 10, pulls]).toEqual([true, after]);
   });
   test("删除只有作者或 owner", async () => {
     const m = (await post(owner, dm, "owner 写的")).json.message;
@@ -218,14 +239,16 @@ describe("丢进工作台", () => {
   });
 });
 
-describe("从 Chat 新建任务（一期只有 owner）", () => {
+describe("从 Chat 新建任务（一期只有能读台账的 owner 设备）", () => {
   const calls: string[][] = [];
   beforeAll(() => setTalkTaskRunnerForTest(async (args) => (calls.push(args), { ok: true, task: { id: args[2] } })));
   afterAll(() => setTalkTaskRunnerForTest(undefined));
   const body = (extra: Record<string, unknown> = {}) => ({ room: dm, msgs: [firstMsg], project: "p", id: "T901", title: "登录页\n改文案", kind: "code", req: `tt_${randomUUID()}`, ...extra });
 
-  test("guest、集成 token、peer 都建不了（API 层）", async () => {
+  test("guest、部分 scope 的 owner 设备、集成 token、peer 都建不了（API 层；要 canReadLedger）", async () => {
     expect((await api(guest("aa"), "POST", "/talk/tasks", body())).status).toBe(403);
+    expect((await api(scopedOwner(), "POST", "/talk/tasks", body({ project: "any-project" }))).status).toBe(403);
+    expect((await api(scopedOwner(true), "POST", "/talk/tasks", body())).status).toBe(403);
     expect((await api(INTEGRATION, "POST", "/talk/tasks", body())).status).toBe(403);
     expect((await api(PEER, "POST", "/talk/tasks", body())).status).toBe(403);
     expect(calls).toEqual([]);

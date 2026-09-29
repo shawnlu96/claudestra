@@ -1,9 +1,10 @@
 /**
- * 从 Chat 勾几条消息「新建任务」：一期只有 owner 本人能建（isOwnerPrincipal；guest、集成 token 在网页和 API 两层都拒）。
+ * 从 Chat 勾几条消息「新建任务」：要能读台账（canReadLedger，和台账 API 同一道门；guest、部分 scope 的 owner 设备、集成 token 在网页和 API 两层都拒）。
  * 台账只由 CLI 写：经 runManager 调 `ledger task-new`，再 `ledger note` 把勾选的原文记在任务上（人写的，按外部文本存）。
  * 子进程环境去掉 DISCORD_CHANNEL_ID，ledger 的身份推导就落到 owner（lib 里 resolveActor：没有频道 = 终端 = owner）；
  * 两步各带 dedup，网络重试 / 连点不会建出两条。
  */
+import { canReadLedger } from "../lib/devices.js";
 import { runManagerProcess } from "../lib/run-manager.js";
 import type { Principal } from "../lib/principals.js";
 import { renderTalkExcerpt } from "../lib/talk-drop-render.js";
@@ -30,7 +31,7 @@ export function setTalkTaskRunnerForTest(r: Runner | undefined): void {
 }
 
 export async function createTaskFromTalk(me: Me, principal: Principal, b: Record<string, unknown>): Promise<Record<string, unknown> | DropError> {
-  if (!me.isOwner) return { status: 403, error: "only the owner can create tasks from chat" };
+  if (!canReadLedger(principal)) return { status: 403, error: "creating ledger tasks needs a device that can read the ledger" };
   const { project, id, title, kind, req } = b;
   if (typeof project !== "string" || !PROJECT_RE.test(project)) return { status: 400, error: "project required" };
   if (typeof id !== "string" || !ID_RE.test(id)) return { status: 400, error: "task id must look like T123" };
