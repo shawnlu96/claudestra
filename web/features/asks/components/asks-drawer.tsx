@@ -20,7 +20,7 @@ const RECENT_PREVIEW = 5;
  */
 export function AsksDrawer({ onOpenChat }: { onOpenChat: (agent: string) => void }) {
   const t = useT();
-  const { asks, focus, canAnswer } = useAsks();
+  const { asks, focus } = useAsks();
   const [now, setNow] = useState(() => Date.now());
   const [moreRecent, setMoreRecent] = useState(false);
   useEffect(() => {
@@ -33,7 +33,7 @@ export function AsksDrawer({ onOpenChat }: { onOpenChat: (agent: string) => void
   const swipe = useBackSwipe({ back: () => { if (!isNativeShell()) asksStore.closeDrawer(); } }, true);
   const g = groupAsks(asks);
   const recent = moreRecent ? g.recent : g.recent.slice(0, RECENT_PREVIEW);
-  const card = (a: (typeof asks)[number]) => <AskCard key={a.id} ask={a} now={now} focused={a.id === focus} canAnswer={canAnswer} onOpenChat={onOpenChat} />;
+  const card = (a: (typeof asks)[number]) => <AskCard key={a.id} ask={a} now={now} focused={a.id === focus} onOpenChat={onOpenChat} />;
   const section = (title: string, list: typeof asks) =>
     list.length > 0 && (
       <section className="flex flex-col gap-2.5">

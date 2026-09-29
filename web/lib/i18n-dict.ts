@@ -10,21 +10,26 @@
  * - 品牌名（Claudestra）、模型名、工具名（Read/Edit/Bash）、agent 名不进字典。
  */
 import { ATTACH_DICT } from "./i18n-dict-attach";
+import { TOOLS_DICT } from "./i18n-dict-tools";
 import { BOUNDARY_DICT } from "./i18n-dict-boundary";
 import { COLLAB_DICT } from "./i18n-dict-collab";
 import { LEDGER_DICT } from "./i18n-dict-ledger";
+import { MEDIA_DICT } from "./i18n-dict-media";
 import { QUOTA_DICT } from "./i18n-dict-quota";
 import { CONTACTS_DICT } from "./i18n-dict-contacts";
 import { SESSIONS_DICT } from "./i18n-dict-sessions";
+import { SKILLS_DICT } from "./i18n-dict-skills";
 import { TALK_DICT } from "./i18n-dict-talk";
 
 export const DICT: Record<string, string> = {
-  ...LEDGER_DICT, ...COLLAB_DICT, ...BOUNDARY_DICT, ...ATTACH_DICT, ...TALK_DICT,
+  ...LEDGER_DICT, ...COLLAB_DICT, ...BOUNDARY_DICT, ...ATTACH_DICT, ...TOOLS_DICT, ...MEDIA_DICT, ...TALK_DICT,
   ...QUOTA_DICT, // 订阅额度卡片组与开关（lib/i18n-dict-quota.ts）
   ...CONTACTS_DICT, // 侧栏联系人与输入框 @（lib/i18n-dict-contacts.ts）
   ...SESSIONS_DICT, // 未纳管会话 / 归档（lib/i18n-dict-sessions.ts）
+  ...SKILLS_DICT, // 技能库与按会话启停（lib/i18n-dict-skills.ts）
   // ── 通用 ─────────────────────────────────────────────
   "关闭": "Close",
+  "斜杠命令只有 owner 能用，请直接发文字": "Slash commands are owner-only — send it as plain text", // bridge/api-slash.ts 的 slash_owner_only
   "正在回复…": "Replying…",
   "仍在工作…": "Still working…",
   "正在压缩上下文…": "Compacting context…",
@@ -163,6 +168,7 @@ export const DICT: Record<string, string> = {
   "最近": "Last seen",
   "确定？": "Sure?",
   "退出登录": "Sign out",
+  "这台设备只能用分享给它的会话，看不到、也管不了别的设备": "This device can only use the sessions shared with it; it can't see or manage other devices",
   "这个浏览器里的机器": "Machines in this browser",
   "添加另一台机器": "Add another machine",
   "切换机器": "Switch machine",
@@ -173,24 +179,6 @@ export const DICT: Record<string, string> = {
   "手机怎么连到这台电脑": "How your phone reaches this computer",
   "{n} 条别的 agent 发来的消息在排队（它这一轮结束或调 check_inbox 时收到）":
     "{n} message from other agents queued (arrives when its turn ends or it calls check_inbox)|{n} messages from other agents queued (arrive when its turn ends or it calls check_inbox)",
-  // ── 设置 · 技能 ──
-  "技能库": "Skills",
-  "这台电脑上的技能": "Skills on this computer",
-  "各 runtime 能用哪些技能、从哪来、同名时谁生效。现在只能看，启用 / 停用和安装后面做。":
-    "Which skills each runtime can use, where they come from, and which one wins on a name clash. Read-only for now; enabling, disabling and installing come later.",
-  "全部": "All",
-  "搜索技能": "Search skills",
-  "没有匹配的技能": "No matching skills",
-  "个人": "personal",
-  "claude.ai 同步": "synced from claude.ai",
-  "自带": "built-in",
-  "共享目录": "shared folder",
-  "被{scope}的同名技能盖过": "overridden by a {scope} skill of the same name",
-  "同名还有 {n} 处": "{n} more with this name",
-  "不在 / 菜单": "hidden from / menu",
-  "只能手动调用": "manual only",
-  "找了哪些目录（{n} 个，{m} 个存在）": "Folders searched ({n}, {m} exist)",
-  "不存在": "missing",
   "这几条路可以同时开着，想用哪个用哪个。每个地址第一次打开都要配对一次：设置 · 设备 → 添加设备。": "These paths can all be on at once; use whichever you like. Each address needs pairing the first time: Settings · Devices → Add device.",
   "局域网": "LAN",
   "自己的域名": "Your own domain",
@@ -516,6 +504,11 @@ export const DICT: Record<string, string> = {
   "任务指令:到点起一个临时 agent 执行,完成后自动清理并报告": "Prompt: a temporary agent runs it on schedule, reports back and is cleaned up",
   "表达式": "Expression",
   "任务指令": "Prompt",
+  "任务名": "Task name",
+  "定时任务的 prompt 只能一行": "A scheduled task's prompt must be a single line",
+  "任务指令里有看不见的控制字符（比如 Tab），请删掉": "The prompt contains an invisible control character (such as Tab) — please remove it",
+  "「{field}」里有换行或看不见的控制字符。到点会原样敲进终端，换行会让它提前提交，所以只能写成一行":
+    "\"{field}\" contains a line break or an invisible control character. It is typed into the terminal as-is at run time, where a line break submits early, so it must be a single line",
   "目录": "Directory",
   "下次": "Next run:", // 后接时间或「已停用」
   "上次": "Last run:",
@@ -707,6 +700,11 @@ export const DICT: Record<string, string> = {
   "我自己的设备": "My own device",
   "给别人": "Someone else",
   "只能用你选的会话；不含大总管，没有终端和管理": "Only the sessions you pick; no master, no terminal, no management",
+  "全部会话（不含大总管）": "All sessions (except master)",
+  "默认一个都不开放：至少选一个会话": "Nothing is shared by default — pick at least one session",
+  "这等于开放全部非大总管 agent，以后新建的也算": "This shares every agent except master, including ones created later",
+  "只想给几个就逐个勾选；确定要全部就再点一次下面的按钮。": "To share just a few, pick them one by one; to share everything, press the button below again.",
+  "确定开放全部": "Yes, share all",
   "给谁，比如「Alex 的手机」": "Who is it for, e.g. \"Alex's phone\"",
   "生成配对码": "Create pairing code",
   "添加设备": "Add device",
@@ -822,6 +820,7 @@ export const DICT: Record<string, string> = {
 
   // ── 会话级模型/effort 切换器 ─────────────────────────
   "当前模型与 effort，点击切换": "Current model & effort — tap to switch",
+  "当前模型与 effort": "Current model & effort",
   // ── Pi 会话的模型/思考档位切换器（v2.23+） ─────────────
   "Pi 会话：当前模型与思考档位，点击切换": "Pi session: current model & thinking level — tap to switch",
   "Codex 会话：当前模型与推理档位，点击切换": "Codex session: current model & reasoning level — tap to switch",

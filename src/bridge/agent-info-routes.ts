@@ -10,7 +10,7 @@ import { existsSync } from "node:fs";
 import { USER_ARCHIVE_ROOT } from "../lib/session-archive.js";
 import type { Principal, PrincipalsFile } from "../lib/principals.js";
 import { agentInScope, readPrincipals } from "../lib/principals.js";
-import { readRegistryAgents, type RegistryAgent } from "../lib/registry.js";
+import { isMasterName, readRegistryAgents, type RegistryAgent } from "../lib/registry.js";
 import { missionKey, readMissions, type MissionMap } from "../lib/missions.js";
 import { peersSharingAgent } from "../lib/peer-scope-gate.js";
 import { heldAgentCounts } from "./held-queue.js";
@@ -120,7 +120,7 @@ export async function handleAgentInfoRoutes(
   if (!m) return null;
   if (!isFullScope(principal) || principal.peer) return forbidden(`agent ${m[2]} requires a full-scope (non-peer) token`);
   const bare = decodeURIComponent(m[1]).replace(/^agent-/, "");
-  if (bare === "master") return apiJson(400, { ok: false, error: "master has no registry details" });
+  if (isMasterName(bare)) return apiJson(400, { ok: false, error: "master has no registry details" });
   const [agents, pf] = await Promise.all([io.readRegistryAgents(), io.readPrincipals()]);
   const a = agents.find((x) => x.name === `agent-${bare}` || x.name === bare);
   if (!a) return apiJson(404, { ok: false, error: `agent "${bare}" not found` });

@@ -125,15 +125,15 @@ export interface Headline {
 export interface OwnerWait {
   id: string;
   taskId: string | null;
-  /** bridge 名（agent-xxx / master） */
-  fromAgent: string;
+  /** bridge 名（agent-xxx / master）；人 / 系统发起的为 null（只按任务号挂线） */
+  fromAgent: string | null;
   title: string;
 }
 
 /** 这条线在等 owner 的哪件事：挂在这个任务上的优先，其次是这条线的执行者发的、没挂任务的 */
 export function waitFor(t: Pick<LedgerTaskView, "id" | "agent">, waits: readonly OwnerWait[]): OwnerWait | null {
   const agent = bareAgent(t.agent);
-  return waits.find((w) => w.taskId === t.id) ?? waits.find((w) => !w.taskId && agent !== null && bareAgent(w.fromAgent) === agent) ?? null;
+  return waits.find((w) => w.taskId === t.id) ?? waits.find((w) => !w.taskId && agent !== null && !!w.fromAgent && bareAgent(w.fromAgent) === agent) ?? null;
 }
 
 export interface PmStrip {

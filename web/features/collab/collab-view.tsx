@@ -12,6 +12,7 @@ import { actionLine } from "./collab-action";
 import { CollabDetail } from "./collab-detail";
 import { Icon } from "./collab-icons";
 import { CollabLine, LineHeaderCols } from "./collab-line";
+import { waitsOnOwner } from "../asks/asks-model";
 import { useAsks } from "../asks/asks-store";
 import { columnOf, homeView, type HomeView, type LedgerOverview, type LineView, type Tr } from "./collab-model";
 import { openCollabTask, useCollabNav } from "./collab-nav";
@@ -147,9 +148,9 @@ export function CollabView({ project }: { project: string }) {
   const lastSeen = useLastSeen(project);
   const busy = useMemo(() => new Map(agents.map((a) => [a.name, a.busy])), [agents]);
   const ov = load.status === "ok" ? load.ov : null;
-  // 「等你」：侧栏「待你处理」同一份数据（features/asks），只取这个项目开着的、非验收的
+  // 「等你」：侧栏「待你处理」同一份数据（features/asks），只取这个项目开着的、非验收、没指给别人的
   const { asks } = useAsks();
-  const waits = useMemo(() => asks.filter((a) => a.project === project && a.state === "open" && a.kind !== "accept"), [asks, project]);
+  const waits = useMemo(() => asks.filter((a) => a.project === project && waitsOnOwner(a)), [asks, project]);
   const byTask = useMemo(() => reviewersByTask(reviewers), [reviewers]);
   const view = useMemo(() => {
     if (!ov) return null;

@@ -10,7 +10,8 @@ import { repoEnvVar } from "../../lib/env-file.js";
 import { instanceKeySync, keyFingerprint } from "../../lib/instance-key.js";
 import { STATE_DIR } from "../../lib/paths.js";
 import { sandboxDisabled } from "../../lib/sandbox.js";
-import { readPrincipals } from "../../lib/principals.js";
+import { effectivePrincipal } from "../../lib/devices.js";
+import { readPrincipals, type Principal, type PrincipalsFile } from "../../lib/principals.js";
 import { readRegistryAgents } from "../../lib/registry.js";
 import { loadOrCreateVapidKeys, readVapidKeys, webPushSender, type VapidIdentity } from "../../lib/web-push.js";
 import { openWebState } from "../../lib/web-state.js";
@@ -35,6 +36,18 @@ export async function pushOwnerNoticeTracked(title: string, body: string): Promi
   return dispatcherRef ? dispatcherRef.notice({ title, body }) : null;
 }
 const DEFAULT_VAPID_SUBJECT = "https://github.com/shawnlu96/claudestra";
+
+/**
+ * 订阅认人：principal 还在、没禁用；订阅时带着设备凭据的，凭据也得还在、没禁用、没过期（按凭据收窄 scope）。
+ * 没带凭据的是 token 订的（web-ui token 等），按 principal 本身算。读的是最多 60 s 前的 principals.json
+ */
+export function subscriberPrincipal(file: PrincipalsFile, pid: string, cid: string | null, now = Date.now()): Principal | null {
+  const principal = file.principals.find((p) => p.id === pid && !p.disabled);
+  if (!principal) return null;
+  if (!cid) return principal;
+  const credential = principal.credentials?.find((c) => c.id === cid && !c.disabled && Date.parse(c.expiresAt) > now);
+  return credential ? effectivePrincipal({ principal, credential }) : null;
+}
 let started = false;
 
 function directBackends(): DirectBackends {
@@ -58,9 +71,11 @@ export function initPush(deliver?: (env: Envelope) => Promise<Delivery>): void {
   let direct: DirectBackends | null = null;
   const sender = createPushSender({ relay: relayClient, direct: () => (direct ??= directBackends()) });
   let owner = new Set([OWNER_CHAT_ID]);
+  let file: PrincipalsFile | null = null;
   const refresh = async () => {
     try {
-      owner = ownerChatIds(await readPrincipals());
+      file = await readPrincipals();
+      owner = ownerChatIds(file);
     } catch (e) {
       console.error(`⚠️ 推送：读 principals.json 失败，沿用上一份 owner 身份表: ${(e as Error).message}`);
     }
@@ -69,11 +84,15 @@ export function initPush(deliver?: (env: Envelope) => Promise<Delivery>): void {
   setInterval(() => void refresh(), PRINCIPALS_REFRESH_MS).unref();
   configurePushRoutes({ db, sender, liveAgents: async () => (await readRegistryAgents()).map((a) => a.name) });
   const key = instanceKeySync();
-  const dispatcher = createDispatcher({ db, sender, isOwnerChat: (id) => owner.has(id), ...(key ? { fp: keyFingerprint(key.publicKey) } : {}) });
+  const resolvePrincipal = (pid: string, cid: string | null) => (file ? subscriberPrincipal(file, pid, cid) : null);
+  let isQuietReply: (threadId: unknown) => boolean = () => false;
+  const quiet = (threadId: unknown) => isQuietReply(threadId);
+  const dispatcher = createDispatcher({ db, sender, isOwnerChat: (id) => owner.has(id), resolvePrincipal, isQuietReply: quiet, ...(key ? { fp: keyFingerprint(key.publicKey) } : {}) });
   dispatcherRef = dispatcher;
   subscribeEvents({}, (evt) => void dispatcher.onEvent(evt).catch((e) => console.error(`⚠️ 推送派发异常（这一条没推出去）: ${(e as Error).message}`)));
   console.log("🔔 推送派发器已启动（进程内订阅 event-bus）");
   // 「待你处理」：动态 import 同额度服务——asks 拖着台账库，推送的单测不该为它付加载代价
+  void import("../ask-reply.js").then((m) => (isQuietReply = m.isQuietReply)).catch((e) => console.error(`⚠️ 知会类回复的免推送没接上（照常推）: ${(e as Error).message}`));
   void import("../asks.js")
     .then((m) => m.onAsk((a) => void dispatcher.onAsk(a, m.ownerPresence.state()).catch((e) => console.error(`⚠️ 待你处理没推出去: ${(e as Error).message}`))))
     .catch((e) => console.error(`⚠️ 待你处理的推送没接上: ${(e as Error).message}`));
