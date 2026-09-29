@@ -42,7 +42,7 @@ export interface WebAsk {
   /** 这个凭据能不能答这一条（bridge lib/ask-access.ts canAnswerAsk，列表逐行给）；老 bridge 不给 = 能答 */
   canAnswer?: boolean;
   /** files = 原消息带的附件（bridge 拷进 inbox 后的名字）；loc = 原消息在会话里的位置（定位过才有）；dismissed / hidden = owner 删掉了（不显示） */
-  extra?: { files?: { name: string; attachment: string }[]; dismissed?: unknown; hidden?: unknown; quota?: unknown };
+  extra?: { files?: { name: string; attachment: string }[]; dismissed?: unknown; hidden?: unknown; quota?: unknown; acp?: unknown };
 }
 
 /** 原消息带的附件 → 聊天附件条的形状（卡片上直接点开，走 T37 的预览层） */

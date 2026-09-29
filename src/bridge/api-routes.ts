@@ -1439,7 +1439,7 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
   }
 
   // POST /api/v1/agents/:name/answer —— 交互卡回传。只给 owner 本人：批准权限弹框、替 agent 回答 = 以 owner 名义拍板（与 ask-entry.ts canAnswerAsk 同一判定）
-  // body {kind:"auq", action:"submit"|"cancel", selections?: number[][]} 或 {kind:"permission", action:"allow"|"allow_session"|"deny"}
+  // body {kind:"auq", action:"submit"|"cancel", selections?: number[][]} 或 {kind:"permission", action:"allow"|"allow_session"|"deny"} 或 {kind:"acp", action:<按钮 id>}
   const answerMatch = path.match(/^\/agents\/([^/]+)\/answer$/);
   if (answerMatch && req.method === "POST") {
     const agentParam = decodeURIComponent(answerMatch[1]);
@@ -1519,7 +1519,7 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
       return apiJson(200, { ok: true });
     }
 
-    return apiJson(400, { ok: false, error: 'kind must be "auq" or "permission"' });
+    return kind === "acp" ? (await import("./acp-link.js")).answerAcpResponse(agent.channelId, body, principal) : apiJson(400, { ok: false, error: 'kind must be "auq", "permission" or "acp"' });
   }
 
   // GET /api/v1/agents/:name/pending —— 当前挂起的交互卡 + thinking 态。

@@ -14,6 +14,7 @@ import {
 } from "../lib/turn-cuts.js";
 import { emitEvent, inflightTools, subscribeEvents } from "./event-bus.js";
 import { HELD_GIVE_UP_MS } from "./held-queue.js";
+import { isAcpChannel } from "./acp-state.js";
 import { PersistedMap } from "./persisted-map.js";
 import { newMessageId, newThreadId, type Envelope, type LocalEndpoint } from "./router.js";
 
@@ -212,7 +213,7 @@ export class TurnCuts {
 
   /** bridge 能不能主动打断：Codex 要 channel-server 会打字投递；非停字的抢占在上次 Stop 之后只做一次（保顺序） */
   mayBridgeInterrupt(channelId: string, runtime: string | undefined, stop: boolean): boolean {
-    if (runtime !== "codex") return true;
+    if (runtime !== "codex" || isAcpChannel(channelId)) return true; // ACP 宿主打断走 session/cancel，没有 queue 卡住的问题
     return this.codexTypeIn.has(channelId) && (stop || !this.codexCutSinceStop.has(channelId));
   }
 

@@ -1167,7 +1167,6 @@ discord.once("ready", async () => {
   // v2.7+ 注入链路查询做「窗口活着但 channel-server 掉线」哨兵
   startWedgeWatcher(discord, (channelId) => clients.has(channelId));
 
-
   // v2.16+ 模型漂移告警——CC 用量保护静默降级不再无感（2026-07-30 外部用户
   // 报「莫名其妙被切到 Sonnet 4.6」）。Discord 告警 + session_anomaly SSE。
   {
@@ -2196,6 +2195,7 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
     }
 
     case "abort_ack": onAbortAck(msg, ws); break; // Pi 扩展的中止回执（只认这个频道当前的连接）
+    case "acp_entries": case "acp_config": case "acp_failure": case "acp_permission": case "acp_call_result": await (await import("./bridge/acp-link.js")).onAcpFrame(msg, ws, discord); break;
     case "codex_undelivered": void onCodexUndelivered(msg, ws, clients.get(msg.channelId)?.ws === ws); break; // 只了结没投进 Codex 的这一条，不替它宣告完成
     case "codex_typein_failed": if (clients.get(msg.channelId)?.ws === ws) onCodexTypeInFailed(msg, heldLocalMsgs); break; // 下一条再打字；菜单挡住的押回
     case "forward_to_agent": ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, ...(await handleForward(ws, msg)) })); break;
@@ -2663,7 +2663,7 @@ function sameWsChannels(channelId: string): string[] {
 
 async function handleHookRequest(req: Request): Promise<Response> {
   try {
-    const body = await req.json() as { channelId: string; event: string; stopHookActive?: boolean; interrupt?: boolean };
+    const body = await req.json() as { channelId: string; event: string; stopHookActive?: boolean; interrupt?: boolean; acpDeliveryWarning?: boolean };
     const { channelId, event } = body;
     if (!channelId || !event) {
       return new Response("Missing channelId or event", { status: 400 });
@@ -2698,10 +2698,10 @@ async function handleHookRequest(req: Request): Promise<Response> {
       }
     }
 
-    // 所有 hook 事件都停 typing / 清 safety timer
     // 兼容旧版 hook 发的 "stop"
     if (event === "Stop" || event === "StopFailure" || event === "Notification" || event === "stop") {
       console.log(`🏁 Hook 收到 ${event}: channel=${channelId}`);
+      if (body.acpDeliveryWarning) await (await import("./bridge/acp-delivery-warning.js")).notifyAcpDeliveryLoss(channelId, deliver);
       // v2.4.25+ 对话完成 → 刷用量看板（防抖合并，内部惰性缓存 /status）
       if (event === "Stop" || event === "StopFailure" || event === "stop") {
         updateStatsDashboard(discord);
@@ -2772,7 +2772,7 @@ async function handleHookRequest(req: Request): Promise<Response> {
           const agent = (listResult.agents || []).find((a: any) => a.channelId === channelId);
           if (agent) {
             const target = windowTarget(agent.name);
-            const pane = await tmuxCapture(target, 30);
+            const pane = (await import("./bridge/acp-state.js")).isAcpChannel(channelId) ? "" : await tmuxCapture(target, 30); // ACP 宿主的窗口只是日志
             if (detectRuntimePermissionPrompt(pane) || detectSessionIdlePrompt(pane)) {
               console.log(`🏁 pane 有弹窗，跳过完成通知: channel=${channelId} agent=${agent.name}`);
               shouldNotify = false;
@@ -2912,7 +2912,7 @@ async function handleHookRequest(req: Request): Promise<Response> {
       // v2.4.22+ 去掉 interrupt（活干完了），但**保留 focus + screenshot 按钮** ——
       // 这条消息永远在频道底部附近，用户随手能点跳 tab / 截图，不用翻 pin 或打命令。
       for (const cid of channelsToClear) {
-        await finishStatusMessage(discord, cid, t("✅ 完成", "✅ Done"), agentActionButtons(cid, false));
+        await finishStatusMessage(discord, cid, body.acpDeliveryWarning ? "⚠️ 可能丢了条目" : t("✅ 完成", "✅ Done"), agentActionButtons(cid, false));
       }
 
       // 发完成通知 @ user（仅 Stop/StopFailure）。watcher 已经把 agent 的消息推
@@ -3369,8 +3369,8 @@ const server = Bun.serve({
           // 频道真的空了才清对抢记账（免得几小时后的零星重连跟旧记录凑成误报）；「被顶替」不算空，见 beingReplaced 的注释
           // 被顶替的不停 watcher：新连接沿用它（jsonl-watcher startWatching），停了再起会从文件末尾读、漏行
           const replaced = beingReplaced.delete(ws as unknown as object);
-          if (!replaced) contention.forget(channelId);
-          if (!replaced) stopWatchingByChannel(channelId); // 同步兜底：直接按 channelId 在 watcher Map 中查，避免依赖异步 runManager
+          if (!replaced) { contention.forget(channelId); stopWatchingByChannel(channelId); } // 停 watcher 是同步兜底：按 channelId 直接在 watcher Map 里查，不靠异步 runManager
+          void import("./bridge/acp-link.js").then((m) => m.onAcpHostGone(channelId, ws)); // ACP 宿主断线：撤它挂着的权限卡（重连后宿主补发）
           console.log(`🔌 断开: 频道 ${channelId} (剩余 ${clients.size} 个)`);
         }
       }

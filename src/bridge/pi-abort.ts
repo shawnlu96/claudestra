@@ -31,6 +31,8 @@ export function setExtensionSocket(fn: typeof socketOf, deps: EchoDeps): void {
   socketOf = fn;
   echo = deps;
 }
+/** 频道 → 当前登记的那条连接（bridge/acp-link.ts 认帧的来源、给 ACP 宿主发调用都用它） */
+export const extensionSocketOf = (channelId: string): Socket | undefined => socketOf(channelId);
 
 const abortCapable = new Set<string>();
 export function setAbortCapable(channelId: string, on: boolean): void {

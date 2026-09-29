@@ -70,7 +70,7 @@ import { ancestorPids, mayTakeOver, preflightProblems, recoverCommand, resumeOut
 import {
   allSources,
   claudeCodeAdapter,
-  controlFor,
+  controlFor, normalizeTransport,
   managedFor,
   requireManaged,
   type DiscoveredSession,
@@ -167,7 +167,7 @@ async function isAgentIdle(name: string): Promise<boolean> {
   const bare = name.replace(/^agent-/, "");
   const reg = await loadRegistry();
   const info = reg.agents?.[name] ?? reg.agents?.[bare] ?? reg.agents?.[`agent-${bare}`];
-  if (controlFor(info?.runtime).idleSource === "hook") return true;
+  if (controlFor(info?.runtime, normalizeTransport((info as { transport?: string } | undefined)?.transport)).idleSource !== "pane") return true; // hook / acp 同理
   return isIdle(windowTarget(name));
 }
 
@@ -459,16 +459,16 @@ async function cmdCreate(
   model?: string,
   external?: boolean,
   projectFlag?: string,
-  runtimeFlag?: string,
+  runtimeFlag?: string, transportFlag?: string,
   piBaseFlag?: string,
   teamFlags: import("./manager/team.js").TeamFlags = {},
 ) {
-  dir = assertCreatable(name, dir, runtimeFlag); // 名字合法；沙箱 / 生产各自的目录闸与 runtime 闸（manager/core.ts）
+  dir = assertCreatable(name, dir, runtimeFlag, transportFlag); // 名字合法；沙箱 / 生产各自的目录闸与 runtime 闸（manager/core.ts）
   // runtime 只决定「用哪个适配器」（启动命令 / 就绪判据 / registry 字段），
   // 其余（频道 / 窗口 / project / registry 形状）各运行时完全一致。
   let adapter: ManagedRuntimeAdapter;
   try {
-    adapter = requireManaged(runtimeFlag);
+    adapter = requireManaged(runtimeFlag, transportFlag);
   } catch (e) {
     output({ ok: false, error: (e as Error).message });
     return;
@@ -1276,7 +1276,7 @@ async function cmdRestart(name?: string, opts: { includeMaster?: boolean } = {})
       continue;
     }
     // 运行时由 registry 决定；只读来源 / 认不出的 runtime 不能由我们拉起
-    const adapter = managedFor(info.runtime);
+    const adapter = managedFor(info.runtime, (info as { transport?: string }).transport); // transport=acp → 窗口里跑 ACP 宿主
     if (!adapter) {
       results.push({ name: tmuxName, ok: false, error: `runtime "${info.runtime}" 不能由 Claudestra 启动` });
       continue;
@@ -1449,7 +1449,6 @@ async function cmdRestart(name?: string, opts: { includeMaster?: boolean } = {})
       unlockRestart(tmuxName); // 无论成败/异常都释锁，别把 agent 永久锁死
     }
   }
-
 
   // 重启后做一次完整 skill 重扫（每个 agent cwd 可能项目级 skill 有变动）
   await triggerSkillsRescan("full");
@@ -2353,7 +2352,7 @@ switch (cmd) {
   case "create": {
     const c = (await import("./manager/create-args.js")).parseCreateArgs(args); // --purpose 最先抽，自由文本不会被当成 flag
     if ("error" in c) output({ ok: false, error: c.error });
-    else await cmdCreate(c.name, c.dir, c.purpose, c.perms, c.effort, c.mode, c.model, c.external, c.projectFlag, c.runtimeFlag, c.piBaseFlag, c.teamFlags);
+    else await cmdCreate(c.name, c.dir, c.purpose, c.perms, c.effort, c.mode, c.model, c.external, c.projectFlag, c.runtimeFlag, c.transportFlag, c.piBaseFlag, c.teamFlags);
     break;
   }
 
@@ -2363,6 +2362,7 @@ switch (cmd) {
     break;
   case "project-migrate": await cmdProjectMigrate(); break;
   case "external": await (await import("./manager/agent-external.js")).cmdAgentExternal(args[0] || "", args[1] || ""); break;
+  case "transport": case "acp-install": await (await import("./manager/acp-lifecycle.js")).cmdAcp(cmd, args); break; // T60 ACP：切 transport / 装适配器
 
   // v2.6.0+ HTTP API token 管理（多前端架构 Phase B）
   case "token-add": {

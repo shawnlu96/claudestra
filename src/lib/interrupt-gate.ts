@@ -6,12 +6,12 @@
  * 接线在 bridge/interrupt-gate.ts。
  */
 import { createKeyedSerial } from "./keyed-serial.js";
-import { controlFor } from "./runtimes/index.js";
+import { controlFor, type Transport } from "./runtimes/index.js";
 import type { TurnState } from "./turn-state.js";
 
 export interface InterruptGateDeps {
   /** 频道 → 窗口和运行时；查不到窗口 = null */
-  resolve: (channelId: string) => Promise<{ win: string | null; runtime?: string }>;
+  resolve: (channelId: string) => Promise<{ win: string | null; runtime?: string; transport?: Transport }>;
   probe: (win: string, runtime: string | undefined, agent: string, channelId: string) => Promise<TurnState>;
   /**
    * 窗口停在额度菜单 / 撞墙等待（lib/quota-wall-text.ts paneShowsWallWait）：一个键都不发，停字也不发（菜单里有花钱的选项，
@@ -65,8 +65,8 @@ export function createInterruptGate(deps: InterruptGateDeps, cooldownMs = 4_000)
         // 刚打断过（抢占或手动）：连发的补充消息不叠加打断；停字等够最小间隔再发
         if (!stop && since <= cooldownMs) return { fired: false, why: "cooldown" };
         if (stop && since <= gapAfter(channelId)) await deps.sleep(gapAfter(channelId) - since + 50);
-        const { win, runtime } = await deps.resolve(channelId);
-        if (!win || (!stop && !controlFor(runtime).preemptOnHumanMessage)) return { fired: false, why: "not_allowed" };
+        const { win, runtime, transport } = await deps.resolve(channelId);
+        if (!win || (!stop && !controlFor(runtime, transport).preemptOnHumanMessage)) return { fired: false, why: "not_allowed" };
         if (deps.allow && !deps.allow(channelId, runtime, stop)) return { fired: false, why: "not_allowed" };
         if (await deps.wallWait?.(win)) return { fired: false, why: "wall_wait" };
         const shouldFire = (m: TurnState["main"]) => m === "busy" || (stop && m === "unknown");

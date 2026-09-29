@@ -20,6 +20,7 @@ export interface StopReport {
   event: "Stop" | "StopFailure";
   stopHookActive: boolean;
   interrupt?: boolean;
+  acpDeliveryWarning?: true;
 }
 
 /**
@@ -65,7 +66,9 @@ function call<T>(f: () => Promise<T>): Promise<T> {
   }
 }
 
-const failedOutcome = (e: unknown): PromptOutcome => ({ kind: "failed", failure: { kind: "error", key: `transport:${Date.now()}`, message: errText(e) } });
+/** 传输层失败的去重键：单调序号。不能用时间戳——同一毫秒里两次失败会被 FailureDedup 合成一条、少出一张卡 */
+let transportFailures = 0;
+const failedOutcome = (e: unknown): PromptOutcome => ({ kind: "failed", failure: { kind: "error", key: `transport:${++transportFailures}`, message: errText(e) } });
 
 export class AcpTurnLoop {
   private slots: Slot[] = [];

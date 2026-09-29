@@ -1001,7 +1001,7 @@ async function handleInteraction(discord: Client, deps: InteractionDeps, interac
         }
         return;
       }
-
+      if (free && (id.startsWith("acp_perm_") || id.startsWith("acp_quota_"))) return void await (await import("./acp-link.js")).answerAcpDiscordInteraction(interaction, channelId);
       // 未知按钮 → 走 deliver 转发给 LLM，agent 看到 content="[button:<id>]"
       const client = clients.get(channelId);
       if ((await (await import("./ask-entry.js")).answerDiscordInteraction(interaction, channelId, `[button:${id}]`, () => startTypingWithSafety(channelId))) || !client) return;
