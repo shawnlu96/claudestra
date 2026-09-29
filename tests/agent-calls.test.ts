@@ -205,14 +205,34 @@ describe("逐条过期（T6c1：同一槽 q1 已送、q2 押着，扫描不能�
     expect(book.slot("c-codex", "c-me")).toBeUndefined();
   });
 
-  test("touch 带 message_id 只动那一条；槽里对不上这个 id 就整槽刷（宁可多留）", () => {
+  test("touch 带 message_id 只动那一条；对不上的不动已有请求的钟（老数据没记 id 的照旧跟着刷）；不带 = 整槽重置", () => {
     const book = new AgentCallBook(null);
     book.add("c-codex", call(0), "q1");
     book.add("c-codex", call(0), "q2");
     book.touch("c-codex", "c-me", 5000, "q2");
     expect(book.slot("c-codex", "c-me")!.requests!.map((r) => r.deliveredAt)).toEqual([0, 5000]);
     book.touch("c-codex", "c-me", 7000, "reply_fwd_x");
-    expect(book.slot("c-codex", "c-me")!.requests!.map((r) => r.deliveredAt)).toEqual([7000, 7000]);
+    expect(book.slot("c-codex", "c-me")!.requests!.map((r) => r.deliveredAt)).toEqual([0, 5000]);
+    expect(book.slot("c-codex", "c-me")!.ts).toBe(0);
+    book.add("c-codex", call(0, "c-old", "agent-old")); // 没记 id 的老式请求：没法按 id 对，照旧跟着这个 caller 的送达刷
+    book.touch("c-codex", "c-old", 8000, "whatever");
+    expect(book.slot("c-codex", "c-old")!.requests!.map((r) => r.deliveredAt)).toEqual([8000]);
+    book.touch("c-codex", "c-me", 9000); // 额度闸出闸：显式整槽重置
+    expect(book.slot("c-codex", "c-me")!.requests!.map((r) => r.deliveredAt)).toEqual([9000, 9000]);
+    expect(book.slot("c-codex", "c-me")!.ts).toBe(9000);
+  });
+
+  test("r1 P1-1：同一 caller 每小时一条押后送达的 oneShot 通知（不登记回程），不会让早已送到的 q1 永不过期", () => {
+    const book = new AgentCallBook(null);
+    book.add("c-codex", call(H), "q1");
+    const gone: string[] = [];
+    for (let h = 2; h <= 4; h++) {
+      book.touchDelivered("c-codex", { from: { kind: "local", channelId: "c-me" }, meta: { messageId: `note${h}` } } as never, h * H);
+      book.touchDelivered("c-codex", { from: { kind: "user" }, meta: { messageId: `human${h}` } } as never, h * H); // 人类消息不碰回程簿
+      gone.push(...book.sweepStale(h * H + 60_000, STALE, heldIds()).flatMap((c) => c.messageIds ?? []));
+    }
+    expect(gone).toEqual(["q1"]); // 3h+1min 那次扫描就删了（送达于 1h）
+    expect(book.slot("c-codex", "c-me")).toBeUndefined();
   });
 
   test("老数据兼容：请求没记送达时刻回落槽级 ts；#116 老槽 q2 押着时只删 q1", () => {
@@ -264,5 +284,31 @@ describe("逐条过期（T6c1：同一槽 q1 已送、q2 押着，扫描不能�
     b2.sweepStale(2 * H + 1, STALE, heldIds());
     expect(sent2).toEqual(["q1:"]);
     expect(b2.slot("c-codex", "c-me")).toMatchObject({ apiErrorAt: H + 60_000, withheld: ["半句"], messageIds: ["q2"] });
+  });
+
+  test("r1 P1-2：q1 撞错扣下的话、q2 后送到（不同回复频道）、q1 单独过期 → 那句话随 q1 的通知发到 q1 的频道，不留给 q2", () => {
+    const book = new AgentCallBook(null);
+    const sent: string[] = [];
+    book.onExpired = (p) => void sent.push(`expired:${ids(p)}:${p.originalReplyChannel}:${p.withheld?.join("") ?? ""}`);
+    book.onWithheld = (p) => void sent.push(`withheld:${p.originalReplyChannel}:${p.withheld?.join("") ?? ""}`);
+    book.add("c-codex", { ...call(0), originalReplyChannel: "chan-q1" }, "q1");
+    book.markApiError("c-codex", none, "q1 的半句", "c-me", 60_000);
+    book.add("c-codex", { ...call(H), originalReplyChannel: "chan-q2" }, "q2");
+    book.sweepStale(2 * H + 1, STALE, heldIds());
+    expect(sent).toEqual(["expired:q1:chan-q1:q1 的半句"]);
+    expect(book.slot("c-codex", "c-me")).toMatchObject({ apiErrorAt: undefined, withheld: undefined, apiErrorFor: undefined, messageIds: ["q2"] });
+    book.consume("c-codex", "c-me", book.exact("c-codex", "c-me", none));
+    expect(sent).toHaveLength(1); // q2 被答掉时没有别人的话可推
+  });
+
+  test("扣下的话被直接答掉时推到撞错那一轮请求的频道，不是槽里最后一条（后来的 q2）的", () => {
+    const book = new AgentCallBook(null);
+    const sent: string[] = [];
+    book.onWithheld = (p) => void sent.push(`${p.originalReplyChannel}:${p.withheld?.join("")}`);
+    book.add("c-codex", { ...call(0), originalReplyChannel: "chan-q1" }, "q1");
+    book.markApiError("c-codex", none, "半句", "c-me", 60_000);
+    book.add("c-codex", { ...call(H), originalReplyChannel: "chan-q2" }, "q2");
+    book.consume("c-codex", "c-me", book.exact("c-codex", "c-me", none));
+    expect(sent).toEqual(["chan-q1:半句"]);
   });
 });
