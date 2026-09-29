@@ -1,10 +1,11 @@
 /**
  * 往 Claude Code 会话里注入一次压缩。自动压缩（ctx-boundary.ts）、Discord 手动按钮、T35 的批量动作都走 injectCompact，
- * 共用一份画面判定（lib/ctx-boundary-decision.ts paneBlock）和一份 15 分钟注入守卫（落盘，bridge 重启也不重复注入）。
+ * 共用一份画面判定（lib/ctx-boundary-decision.ts paneBlock）、一份 15 分钟注入守卫（落盘，bridge 重启也不重复注入）和按窗口的执行权（withWindow）。
  * 敲字和回车分开：敲完再读一次画面，输入框里正好是这条、底部也没冒出对话框才按回车。按窗口大小从长到短挑一档（lib/ctx-boundary-fit.ts），
  * 敲完只看得到后半截（窗口放不下）就删掉、退一档。
  * 设计 docs/architecture/context-boundary.md；单测 tests/ctx-boundary-inject.test.ts（依赖全部可注入）。
  */
+import { AsyncLocalStorage } from "node:async_hooks";
 import { isMasterAgent } from "../lib/registry.js";
 import { statePath } from "../lib/paths.js";
 import { readJsonStateSync } from "../lib/state-file.js";
@@ -69,7 +70,7 @@ export interface InjectDeps {
   sleep(ms: number): Promise<void>;
 }
 
-type InjectSkip = PaneBlock | "pane-unknown" | "recent" | "window-small";
+type InjectSkip = PaneBlock | "pane-unknown" | "recent" | "window-small" | "busy";
 /** failed 且 leftover：敲进去的字没提交、还留在输入框里（调用方要告诉 owner）；note：窗口放不下、退了档 */
 export type InjectResult =
   | { status: "executed" | "queued"; line: string; note?: string }
@@ -111,6 +112,37 @@ export function resetInjectState(): void {
   pendingEcho = new Map();
 }
 
+/**
+ * 按窗口的执行权：自动压缩、手动按钮、批量动作往同一个窗口发键前先拿到它，拿不到就跳过（不排队：等到手时画面和守卫早变了）。
+ * 在第一次 await 之前同步拿到；守卫和画面都在拿到之后才查，敲字、回车、删字全程持有，finally 放掉。同一条流程里再进
+ * （批量「开 LP 再压缩」的最后一步、自动压缩一轮里调 injectCompact）直接放行：认 AsyncLocalStorage 记下的这一次持有，放掉后遗留的回调不算。
+ * 只管 bridge 进程：会发键的入口都在这里（CLI 的批量也经 ws 进 bridge）。tests/inject-lock.test.ts
+ */
+const windowHolders = new Map<string, { who: string; id: symbol }>();
+const heldHere = new AsyncLocalStorage<ReadonlyMap<string, symbol>>();
+
+/** 当前这条流程是不是正拿着这个窗口 */
+export function holdsWindow(target: string): boolean {
+  const key = windowKey(target);
+  const id = heldHere.getStore()?.get(key);
+  return id !== undefined && windowHolders.get(key)?.id === id;
+}
+
+/** 拿到窗口执行权再跑 fn；别人拿着就返回 busy(谁在用)，fn 不跑。who 是给被挡的一方看的（「批量动作」「自动压缩」） */
+export async function withWindow<T>(target: string, who: string, fn: () => Promise<T>, busy: (holder: string) => T): Promise<T> {
+  if (holdsWindow(target)) return fn();
+  const key = windowKey(target);
+  const holder = windowHolders.get(key);
+  if (holder) return busy(holder.who);
+  const id = Symbol(who);
+  windowHolders.set(key, { who, id });
+  try {
+    return await heldHere.run(new Map([...(heldHere.getStore() ?? []), [key, id]]), fn);
+  } finally {
+    windowHolders.delete(key);
+  }
+}
+
 export function compactInjectedRecently(target: string, now = Date.now()): boolean {
   return guardLeftMs(target, now) > 0;
 }
@@ -137,7 +169,7 @@ function keysBlocked(g: PaneGate): PaneBlock | null {
 }
 
 const errText = (e: unknown) => (e as Error).message;
-const skip = (reason: Exclude<InjectSkip, "window-small">): InjectResult => ({ status: "skipped", reason, text: SKIP_REASON_TEXT[reason] });
+const skip = (reason: Exclude<InjectSkip, "window-small" | "busy">): InjectResult => ({ status: "skipped", reason, text: SKIP_REASON_TEXT[reason] });
 
 type Typed = { kind: "ok" | "abort"; pane: PaneCapture } | { kind: "blocked"; why: string } | { kind: "cut" } | { kind: "mismatch" };
 
@@ -226,16 +258,19 @@ function keepPending(target: string, e: { left: string; inflight?: number }, now
  * 框里换成了别的字（owner 动过）就不管了；挡了一整天也不管了
  */
 export async function sweepPendingEcho(deps: InjectDeps, log: (l: string) => void): Promise<void> {
-  for (const [target, p] of [...pendingEcho]) {
-    const e = deps.now() - p.at > PENDING_TTL_MS ? { r: "expired" as const, left: p.text } : await eraseOwnEcho(target, p.text, deps, p.inflight ?? 0);
-    if (e.r === "blocked" || e.r === "failed") {
-      if (e.left !== p.text || e.inflight !== p.inflight) keepPending(target, e, deps.now());
-      continue;
-    }
-    pendingEcho.delete(target);
-    const what = { erased: "已删掉", "not-ours": "输入框里已经不是它了，不动", expired: "一天都没删成，不再管" }[e.r];
-    log(`🧭 上下文边界 ${target} 上次没提交的压缩命令：${what}`);
+  // 别人正在这个窗口发键：这轮不删，留到下一轮
+  for (const [target, p] of [...pendingEcho]) await withWindow(target, "上下文边界（删上次留下的字）", () => sweepOne(target, p, deps, log), () => undefined);
+}
+
+async function sweepOne(target: string, p: Pending, deps: InjectDeps, log: (l: string) => void): Promise<void> {
+  const e = deps.now() - p.at > PENDING_TTL_MS ? { r: "expired" as const, left: p.text } : await eraseOwnEcho(target, p.text, deps, p.inflight ?? 0);
+  if (e.r === "blocked" || e.r === "failed") {
+    if (e.left !== p.text || e.inflight !== p.inflight) keepPending(target, e, deps.now());
+    return;
   }
+  pendingEcho.delete(target);
+  const what = { erased: "已删掉", "not-ours": "输入框里已经不是它了，不动", expired: "一天都没删成，不再管" }[e.r];
+  log(`🧭 上下文边界 ${target} 上次没提交的压缩命令：${what}`);
 }
 
 const windowSmall = (size: PaneSize | null | undefined): InjectResult => ({
@@ -244,17 +279,25 @@ const windowSmall = (size: PaneSize | null | undefined): InjectResult => ({
   text: `${sizeText(size)}太小，连 /compact 都放不下，已跳过（把窗口拉大就行）`,
 });
 
+const windowBusy = (who: string): InjectResult => ({ status: "skipped", reason: "busy", text: `${who}正在操作这个窗口，这次没敲` });
+
 /**
  * 注入一次压缩（拿不准目标时用 ctx-boundary.ts 的 injectTargetFor(name)）。15 分钟守卫对所有调用方生效，没有绕过开关。
- * 先读画面（pane 由调用方传入时用它）：读不到 / paneBlock 挡住 → 不敲键。执行者的 save-compact 改成 compact。
+ * 先拿窗口执行权（别人拿着就跳过），再查守卫、读画面：pane 只在调用方自己拿着这个窗口时用（锁里抓的），否则锁里重抓；
+ * 读不到 / paneBlock 挡住 → 不敲键。执行者的 save-compact 改成 compact。
  * 按窗口大小从长到短挑一档敲（放不下的不敲）→ 再读画面 → 输入框正好是这条才回车；只看得到后半截就删掉、敲下一档。
  * 忙的时候回车会排队到回合结束（queued），闲着就是立刻执行（executed）。
  */
-export async function injectCompact(
+export function injectCompact(
   t: InjectTarget,
   opts: { action: CompactAction; keep?: CompactKeep | null; pane?: PaneCapture | null },
   deps: InjectDeps = liveInjectDeps,
 ): Promise<InjectResult> {
+  const pane = holdsWindow(t.target) ? opts.pane : undefined;
+  return withWindow(t.target, "另一次压缩注入", () => injectHeld(t, { ...opts, pane }, deps), windowBusy);
+}
+
+async function injectHeld(t: InjectTarget, opts: Parameters<typeof injectCompact>[1], deps: InjectDeps): Promise<InjectResult> {
   const left = guardLeftMs(t.target, deps.now());
   if (left > 0) return { status: "skipped", reason: "recent", text: `${SKIP_REASON_TEXT.recent}，还要等 ${Math.ceil(left / 60_000)} 分钟` };
   // 类型上只收 normalizeCompactKeep 产出的；运行时再过一遍，强转进来的也拦得住
