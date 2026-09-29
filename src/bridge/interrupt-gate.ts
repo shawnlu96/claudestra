@@ -28,10 +28,10 @@ export const interruptGate = createInterruptGate({
   resolve: (ch) => resolveTurnWindow(ch, controlChannelId()),
   probe: probeTurnAt,
   wallWait: async (win) => !!(await windowWallWait(win)), // 抓不到屏：交给 probe 按老规矩判（它也抓不到就是 unknown，不发键）
-  interrupt: async (win, runtime, ch, kind) => {
+  interrupt: async (win, runtime, ch, kind, wanted) => {
     turnCuts.noteKeySent(ch, kind); // 先记：Codex 的打断回报 0.5 秒就到
-    if (controlFor(runtime, isAcpChannel(ch) ? "acp" : "tmux").abortVia === "extension") return extensionAbort(ch);
-    return interruptWindow(win, runtime);
+    if (controlFor(runtime, isAcpChannel(ch) ? "acp" : "tmux").abortVia === "extension") return extensionAbort(ch, wanted);
+    return interruptWindow(win, runtime, wanted);
   },
   allow: (ch, runtime, stop) => turnCuts.mayBridgeInterrupt(ch, runtime, stop),
   onPreempted: (agent, channelId) => {

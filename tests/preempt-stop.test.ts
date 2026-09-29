@@ -229,6 +229,42 @@ describe("押住的旧「停」晚投：按它当时的时刻排，不按投递�
     expect(log.some((l) => l.startsWith("abort"))).toBe(false);
     expect(e.meta.interruptNote).toContain("已作废");
   });
+  test("出队后、发键前（等锁 / 等间隔的 await 里）owner 答卡片：发键处的 wanted 为假，不发键、不挂起（T13e r2 P1）", async () => {
+    turnCuts.forget(CC);
+    log.length = 0;
+    const e = env("stale-mid-await");
+    noteHeldStop(e, CC, "agent-cc", "claude-code");
+    await sleep(5);
+    interruptGate.preempt = async (_ch, _a, opts) => {
+      turnCuts.noteHuman(CC, false); // gate 的 await 途中 owner 答了卡片
+      if (opts?.wanted && !opts.wanted()) return { fired: false, why: "withdrawn" };
+      return log.push("abort"), { fired: true };
+    };
+    try {
+      await preemptForHuman(e, CC, "agent-cc");
+    } finally {
+      interruptGate.preempt = async () => (log.push(`abort(skip=${[...stopWaitIds(CH)].join(",")})`), { fired: true });
+    }
+    expect(log.some((l) => l.startsWith("abort"))).toBe(false);
+    expect(turnCuts.interruptHold(CC)).toBeNull();
+    expect(e.meta.interruptNote).toContain("已作废");
+    expect(e.meta.interruptNote).not.toContain("打断了");
+  });
+  test("键发出之后 owner 才答卡片：不再挂起，抬头照实写打断了、已作废", async () => {
+    turnCuts.forget(CC);
+    const e = env("stale-after-key");
+    noteHeldStop(e, CC, "agent-cc", "claude-code");
+    await sleep(5);
+    interruptGate.preempt = async () => (turnCuts.noteHuman(CC, false), { fired: true });
+    try {
+      await preemptForHuman(e, CC, "agent-cc");
+    } finally {
+      interruptGate.preempt = async () => (log.push(`abort(skip=${[...stopWaitIds(CH)].join(",")})`), { fired: true });
+    }
+    expect(turnCuts.interruptHold(CC)).toBeNull();
+    expect(e.meta.interruptNote).toContain("打断了当时在跑的回合");
+    expect(e.meta.interruptNote).toContain("已作废");
+  });
   test("owner 在押住之前开的口不作废它：出队照常打断、仍是叫停", async () => {
     turnCuts.forget(CC);
     log.length = 0;

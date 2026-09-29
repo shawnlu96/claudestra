@@ -18,6 +18,7 @@ import {
   windowTarget,
 } from "../tmux-helper.js";
 import { codexBusy } from "./codex-exit.js";
+import { KeyWithdrawnError } from "../esc-guard.js";
 import { controlFor } from "./index.js";
 import type { WindowOps } from "./types.js";
 
@@ -66,14 +67,18 @@ export async function interruptVia(io: InterruptIO, runtime: string | undefined 
   return control.interruptKeys;
 }
 
-/** interruptVia 的 tmux 版 */
-export async function interruptWindow(target: string, runtime: string | undefined | null): Promise<readonly string[]> {
+/** interruptVia 的 tmux 版。wanted：每个键发出前同步再问一次（和发键之间没有 await），假就抛 KeyWithdrawnError、不发 */
+export async function interruptWindow(target: string, runtime: string | undefined | null, wanted?: () => boolean): Promise<readonly string[]> {
   await ensurePaneInteractive(target); // pane 在 copy-mode 时键会被 tmux 自己吃掉（发了也打断不了）
   return interruptVia(
     {
       capture: (lines) => tmuxCapture(target, lines),
       // Esc 也走双击护栏：和 watcher / 面板清场的 Esc 挨得太近会打开 CC 的 Rewind
-      sendKey: (key) => (key === "Escape" ? tmuxSendEscape(target, { strict: true }) : tmuxRawStrict(["send-keys", "-t", target, key]).then(() => undefined)),
+      sendKey: (key) => {
+        if (key === "Escape") return tmuxSendEscape(target, { strict: true, wanted });
+        if (wanted && !wanted()) throw new KeyWithdrawnError(`${key} 没发（${target}）：发键那一刻已经不需要了`);
+        return tmuxRawStrict(["send-keys", "-t", target, key]).then(() => undefined);
+      },
     },
     runtime,
   );

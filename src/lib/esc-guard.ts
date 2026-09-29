@@ -21,6 +21,11 @@ export const ESC_LOCK_WAIT_MS = 12_000;
  */
 export const HTTP_IDLE_TIMEOUT_S = 30;
 
+/** 这一发在发键那一刻已经不需要了（调用方的 wanted() 为假，如押着的旧「停」出队途中 owner 又开了口）：一个键都没发 */
+export class KeyWithdrawnError extends Error {
+  override name = "KeyWithdrawnError";
+}
+
 export interface EscGuardDeps {
   /** 目标 → tmux 的 #{window_id}（如 "@3"）；窗口不在 = null，查询出错 = 抛错 */
   windowId(target: string): Promise<string | null>;
@@ -46,15 +51,16 @@ export function createEscGuard(deps: EscGuardDeps) {
     console.warn(`⚠️ ${msg}`);
     if (strict) throw new Error(msg);
   };
-  /** unguarded：生命周期退出（kill / restart 清场）要关掉菜单本身，不走 blocked 那一查（runtimes/window-ops.ts） */
-  async function sendEscape(target: string, opts: { strict?: boolean; unguarded?: boolean } = {}): Promise<void> {
+  /** unguarded：生命周期退出（kill / restart 清场）要关掉菜单本身，不走 blocked 那一查（runtimes/window-ops.ts）。wanted：发键前同步再问一次，假就抛 KeyWithdrawnError */
+  async function sendEscape(target: string, opts: { strict?: boolean; unguarded?: boolean; wanted?: () => boolean } = {}): Promise<void> {
     const id = await deps.windowId(target).then((x) => ({ x }), (e: Error) => ({ err: e }));
     if ("err" in id) return refuse(`Esc 没发（${target}）：查不到窗口 id（${id.err.message}），换个键互斥不住别的发送方`, !!opts.strict);
     const key = id.x ?? windowKey(target);
-    return serial(key, () => sendLocked(key, target, !!opts.strict, !!opts.unguarded));
+    return serial(key, () => sendLocked(key, target, !!opts.strict, !!opts.unguarded, opts.wanted));
   }
-  async function sendLocked(key: string, target: string, strict: boolean, unguarded: boolean): Promise<void> {
+  async function sendLocked(key: string, target: string, strict: boolean, unguarded: boolean, wanted?: () => boolean): Promise<void> {
     const lock = await deps.lock(key);
+    let sent = false;
     if (!lock) return refuse(`Esc 没发（${target}）：等不到窗口锁，前面排着的 Esc 太多或锁卡住了，不持锁发可能开出 Rewind`, strict);
     try {
       const wait = lastAt(key) + ESC_DOUBLE_TAP_MS - deps.now();
@@ -65,11 +71,13 @@ export function createEscGuard(deps: EscGuardDeps) {
         return void console.warn(`⚠️ Esc 没发: ${blocked.message}`);
       }
       if (lock.held && !lock.held()) return refuse(`Esc 没发（${target}）：等的这段时间窗口锁被当过期回收了，别的进程可能刚发过`, strict);
+      if (wanted && !wanted()) throw new KeyWithdrawnError(`Esc 没发（${target}）：发键那一刻已经不需要了`);
+      sent = true; // 从这里起键可能已经落地（send 抛错也可能发出去了）：记时刻，下一发照样隔开
       await deps.send(target, strict);
     } finally {
-      const done = deps.now(); // 发完才记：键一定已经落地
-      lastDone.set(key, done);
-      deps.writeShared(key, done);
+      // 没发（拒发 / 被拦 / 撤回）不记：lastSentAt 会把之后几秒里真人按的 Esc 认成程序发的（T13e r2 P2-3）
+      const done = deps.now();
+      if (sent) lastDone.set(key, done), deps.writeShared(key, done);
       lock.release();
     }
   }
