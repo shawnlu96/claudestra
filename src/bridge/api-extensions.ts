@@ -8,11 +8,12 @@ import { pushRoutes } from "./push/routes.js";
 import { handleLocalApi, LOCAL_API_FEATURES } from "./local-api/index.js";
 import { API_VERSION } from "./local-api/version.js";
 import { sandboxRouteGate } from "./sandbox-routes.js";
+import { confirmDeps, teamConfirmRoute } from "./team-confirm.js";
 
 export type ExtensionHandler = (req: Request, url: URL, principal: Principal) => Promise<Response | null> | Response | null;
 
-/** 端点族在这里登记（import 它的 handler 后加进数组）。沙箱拒绝表必须排第一 */
-const EXTENSIONS: ExtensionHandler[] = [sandboxRouteGate, pushRoutes, handleLocalApi];
+/** 端点族在这里登记（import 它的 handler 后加进数组）。沙箱拒绝表必须排第一；班子确认要在 api-routes 的发消息路由之前截下按钮 */
+const EXTENSIONS: ExtensionHandler[] = [sandboxRouteGate, teamConfirmRoute(confirmDeps), pushRoutes, handleLocalApi];
 
 /** GET /api/v1/capabilities 附带的 apiVersion / features：各端点族把自己的名字并进来，前端按名字判能力 */
 export function apiFeatures(): { apiVersion: number; features: string[] } {

@@ -13,6 +13,7 @@ import { sandboxLaunchArgs } from "./sandbox-env.js";
 import { launchSettingsFor, settingsLaunchArgs } from "./agent-settings.js";
 import { resolveBunPath } from "./bun-path.js";
 import { SRC_DIR } from "./repo-root.js";
+import { roleFlags } from "./team-roles.js";
 
 const MCP_NAME = process.env.MCP_NAME || "claudestra";
 
@@ -283,6 +284,7 @@ export interface LaunchOptions {
    * 知道整个 project 的仓在哪、该找哪个同事协作。
    */
   projectContext?: string;
+  role?: import("./team-roles.js").RoleLaunch; // 编排班子角色落盘后的文件，roleFlags 拼成 --agents / --agent / --append-system-prompt-file
 }
 
 /** POSIX 单引号 shell 转义（pi-launch.ts 复用同一套，保证两侧注入的 env 语义一致） */
@@ -375,11 +377,10 @@ export function buildClaudeCommand(opts: LaunchOptions): string {
   if (disallowed.length > 0) {
     parts.push("--disallowedTools", shellEscape(disallowed.join(" ")));
   }
+  if (opts.role) parts.push(...roleFlags(opts.role, shellEscape));
 
-  // v2.16+ purpose 注入:一行系统提示,让 agent 知道自己是谁、被派来干什么。
-  // 截断 500 字防超长 purpose 撑爆 tmux send-keys 单行命令。
-  // v2.21+ project 上下文并入同一条 --append-system-prompt(多条 flag 的合并
-  // 语义不背书,单条最稳)。
+  // purpose 与 project 上下文合成一条 --append-system-prompt（多条 flag 的合并语义不背书，单条最稳）；
+  // 各自截断，防超长内容撑爆 tmux send-keys 单行命令。
   const sysLines: string[] = [];
   if (opts.purpose && opts.purpose.trim()) {
     const p = opts.purpose.trim().slice(0, 500);
