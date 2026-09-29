@@ -11,6 +11,7 @@ import {
 } from "../src/bridge/pi-abort.js";
 import type { Envelope } from "../src/bridge/router.js";
 import { turnCuts } from "../src/bridge/turn-cuts.js";
+import { emitEvent, getAgentStatus } from "../src/bridge/event-bus.js";
 import { stopHeadline } from "../src/lib/turn-cuts.js";
 
 /** 模拟 Pi：queue = 排队的 steer 消息；tui = 有中止处理（把排队的退回输入框），否则队列留着、中止后会拿它们续跑 */
@@ -279,7 +280,11 @@ describe("bridge 侧（Workflow 复核 wf2）", () => {
 
   describe("Codex 投递失败：只有「空闲时投的最后一条」没投进去才收 done，不按消息推算哪一回合在跑（T52 复审 #204）", () => {
     const calls: string[] = [];
-    const deps = { stopTyping: (c: string) => void calls.push(`typing:${c}`), clearSafetyTimer: (c: string) => void calls.push(`timer:${c}`) };
+    const later: (() => void)[] = [];
+    const deps = {
+      stopTyping: (c: string) => void calls.push(`typing:${c}`), clearSafetyTimer: (c: string) => void calls.push(`timer:${c}`),
+      later: (fn: () => void) => void later.push(fn),
+    };
     const send = (ch: string, id: string, busy: boolean, from?: Envelope["from"]) => turnCuts.noteDelivered({
       from: from ?? { kind: "api", tokenId: `tok_${id}`, name: id }, to: { kind: "local", channelId: ch, agentName: "agent-cx" }, intent: "request",
       content: id, meta: { messageId: id, triggerKind: "api_user", ts: "", threadId: "t" },
@@ -324,6 +329,42 @@ describe("bridge 侧（Workflow 复核 wf2）", () => {
       calls.length = 0;
       await fail("cx5", "E");
       expect(calls).toEqual([]);
+    });
+
+    test("第 4 轮 P1：空闲时投 A、忙时投 B，两条都失败——当场拿不准不动；90 秒复查时没有任何动静，收掉网页的「工作中」", async () => {
+      const ch = "cx7", agent = "agent-cx7";
+      const sendTo = (id: string, busy: boolean) => turnCuts.noteDelivered({
+        from: { kind: "api", tokenId: `tok_${id}`, name: id }, to: { kind: "local", channelId: ch, agentName: agent }, intent: "request",
+        content: id, meta: { messageId: id, triggerKind: "api_user", ts: "", threadId: "t" },
+      } as unknown as Envelope, ch, false, busy);
+      sendTo("A", false);
+      emitEvent({ agent, chatId: ch, type: "agent_status", data: { status: "thinking" } });
+      sendTo("B", true);
+      calls.length = 0; later.length = 0;
+      await fail(ch, "A");
+      await fail(ch, "B");
+      expect(calls).toEqual([]);
+      expect(later).toHaveLength(2);
+      await Bun.sleep(2); // 复查时刻晚于失败
+      later.at(-1)!();
+      expect(calls).toEqual([`typing:${ch}`, `timer:${ch}`]);
+      expect(getAgentStatus(agent)).toBe("done");
+    });
+
+    test("复查前又有动静（会话记录活动 / 新投递）：不收 done", async () => {
+      const ch = "cx8", agent = "agent-cx8";
+      turnCuts.noteDelivered({
+        from: { kind: "api", tokenId: "tok_x", name: "x" }, to: { kind: "local", channelId: ch, agentName: agent }, intent: "request",
+        content: "x", meta: { messageId: "X", triggerKind: "api_user", ts: "", threadId: "t" },
+      } as unknown as Envelope, ch, false, true);
+      emitEvent({ agent, chatId: ch, type: "agent_status", data: { status: "thinking" } });
+      calls.length = 0; later.length = 0;
+      await fail(ch, "X");
+      await Bun.sleep(2);
+      emitEvent({ agent, chatId: ch, type: "tool_start", data: { toolId: "t1", name: "Bash" } });
+      later.at(-1)!();
+      expect(calls).toEqual([]);
+      expect(getAgentStatus(agent)).toBe("thinking");
     });
 
     test("P2：发送方 agent 断线——回显押进队列才算告诉到（settled 1）；bridge 自己的通知没有回信地址，settled 0", async () => {
