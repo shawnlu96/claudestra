@@ -1,9 +1,16 @@
 "use client";
 /**
  * v4 右区「属性」：选中任务时是现成的任务详情（collab-detail.tsx，多挂一段「它的因果线」）；其余几页在这里——
- * 没选中 = 项目概览，边 = 条件原文与判定依据，折叠组 = 成员，「待你处理」= 挂在这个项目上的那几条。
+ * 没选中 = 项目概览，边 = 条件原文与判定依据，折叠组 = 成员，「待你处理」= 挂在这个项目上的那几条，
+ * 团队成员 = 他在本项目手上的卡（team-panel-cards.tsx）+ 本机的打开会话；手机上团队面板本身也用这里的外框整屏打开。
  */
 import type { HomeView, LedgerDepView, LedgerOverview, OwnerWait, Tr } from "../collab-model";
+import { useChatStoreApi } from "../../chat/chat-store";
+import { useChatNav } from "../../chat/components/nav-context";
+import { uiAgentName } from "@/lib/chat/agents";
+import { closeCollab } from "../collab-nav";
+import { TeamPanelCards } from "../team-panel-cards";
+import type { Member } from "./v4-selection";
 import { Icon } from "../collab-icons";
 import s from "../collab.module.css";
 import type { CFold } from "./causal-model";
@@ -156,4 +163,27 @@ export function CauseSec({ id, deps, onEdge, tr }: { id: string; deps: readonly 
       {outgoing.map((d) => row(d, d.to))}
     </Sec>
   );
+}
+
+/** 团队成员：本项目里他手上的卡（点开是任务详情）；本机 agent 还能直接打开会话 */
+export function MemberPage({ m, project, onClose, tr }: { m: Member; project: string; onClose: () => void; tr: Tr }) {
+  const store = useChatStoreApi();
+  const nav = useChatNav();
+  const open = () => {
+    if (!m.agent) return;
+    closeCollab();
+    void store.openAgent(uiAgentName(m.agent));
+    nav.toContent();
+  };
+  return (
+    <Shell title={m.peer ? `${m.name}@${m.peer}` : m.name} sub={tr(m.peer ? "外部实例成员" : "本机成员")} onClose={onClose} tr={tr}>
+      {m.agent && <button type="button" className={v.link} onClick={open}>{tr("打开会话")} →</button>}
+      <TeamPanelCards key={m.id} project={project} peer={m.peer ?? ""} agent={m.name} />
+    </Shell>
+  );
+}
+
+/** 手机：团队面板整屏（桌面在中区「团队」标签里） */
+export function TeamPage({ onClose, tr, children }: { onClose: () => void; tr: Tr; children: React.ReactNode }) {
+  return <Shell title={tr("团队")} sub={tr("最近 10 分钟的真实往来")} onClose={onClose} tr={tr}>{children}</Shell>;
 }

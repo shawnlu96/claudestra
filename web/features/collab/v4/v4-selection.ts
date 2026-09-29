@@ -5,10 +5,17 @@
  */
 import type { LedgerDepView, LedgerOverview } from "../collab-model";
 import type { Canvas, CFold } from "./causal-model";
+import type { TeamNode } from "../team-graph-model";
 
-/** 选中了什么：任务、边（一根线可能合了好几条依赖，按依赖的键记）、折叠组、「待你处理」 */
-export type Selection = { kind: "task"; id: string } | { kind: "edge"; keys: string[] } | { kind: "fold"; id: string } | { kind: "waits" } | null;
-export type Resolved = { kind: "edge"; deps: LedgerDepView[] } | { kind: "fold"; fold: CFold } | { kind: "waits" } | null;
+/**
+ * 选中了什么：任务、边（一根线可能合了好几条依赖，按依赖的键记）、折叠组、「待你处理」、团队成员（只记身份：节点 id、名字、
+ * 所在实例、本机 agent 名，状态由团队面板自己拉）、团队（手机没有中区标签，整屏打开团队面板）
+ */
+export type Member = { kind: "member"; id: string; name: string; peer: string | null; agent: string | null };
+export type Selection = { kind: "task"; id: string } | { kind: "edge"; keys: string[] } | { kind: "fold"; id: string } | { kind: "waits" } | Member | { kind: "team" } | null;
+export type Resolved = { kind: "edge"; deps: LedgerDepView[] } | { kind: "fold"; fold: CFold } | { kind: "waits" } | Member | { kind: "team" } | null;
+
+export const memberSel = (n: TeamNode): Member => ({ kind: "member", id: n.id, name: n.name, peer: n.peer ?? null, agent: n.agent?.name ?? null });
 
 export const depKey = (d: Pick<LedgerDepView, "from" | "to">) => `${d.from}>${d.to}`;
 export const edgeSel = (deps: readonly LedgerDepView[]): Selection => ({ kind: "edge", keys: deps.map(depKey) });
@@ -16,7 +23,7 @@ export const edgeSel = (deps: readonly LedgerDepView[]): Selection => ({ kind: "
 /** 任务选中走任务详情（openTask），这里只管其余几种；目标全没了 = null */
 export function resolveSelection(sel: Selection, ov: Pick<LedgerOverview, "deps">, canvas: Pick<Canvas, "groups">): Resolved {
   if (!sel || sel.kind === "task") return null;
-  if (sel.kind === "waits") return sel;
+  if (sel.kind === "waits" || sel.kind === "member" || sel.kind === "team") return sel;
   if (sel.kind === "edge") {
     const deps = (ov.deps ?? []).filter((d) => sel.keys.includes(depKey(d)));
     return deps.length ? { kind: "edge", deps } : null;
@@ -26,6 +33,6 @@ export function resolveSelection(sel: Selection, ov: Pick<LedgerOverview, "deps"
 }
 
 /** 窄屏（手机）此刻整屏显示哪一页：任务详情优先，其次边 / 折叠组 / 待你处理，都没有是列表 */
-export function narrowPane(openTask: string | null, r: Resolved): "detail" | "edge" | "fold" | "waits" | "list" {
+export function narrowPane(openTask: string | null, r: Resolved): "detail" | NonNullable<Resolved>["kind"] | "list" {
   return openTask ? "detail" : r?.kind ?? "list";
 }
