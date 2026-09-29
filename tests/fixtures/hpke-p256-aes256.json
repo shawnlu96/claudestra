@@ -1,0 +1,43 @@
+{
+  "source": "https://github.com/cfrg/draft-irtf-cfrg-hpke/blob/master/test-vectors.json (mode 0, kem 0x0010, kdf 0x0001, aead 0x0002)",
+  "info": "4f6465206f6e2061204772656369616e2055726e",
+  "skRm": "317f915db7bc629c48fe765587897e01e282d3e8445f79f27f65d031a88082b2",
+  "pkRm": "04abc7e49a4c6b3566d77d0304addc6ed0e98512ffccf505e6a8e3eb25c685136f853148544876de76c0f2ef99cdc3a05ccf5ded7860c7c021238f9e2073d2356c",
+  "skEm": "90345e3a1d116c1dd39ae76d95ab858c142223a63e44f8f85318cfa91a84858e",
+  "pkEm": "04c06b4f6bebc7bb495cb797ab753f911aff80aefb86fd8b6fcc35525f3ab5f03e0b21bd31a86c6048af3cb2d98e0d3bf01da5cc4c39ff5370d331a4f1f7d5a4e0",
+  "enc": "04c06b4f6bebc7bb495cb797ab753f911aff80aefb86fd8b6fcc35525f3ab5f03e0b21bd31a86c6048af3cb2d98e0d3bf01da5cc4c39ff5370d331a4f1f7d5a4e0",
+  "encryptions": [
+    {
+      "aad": "436f756e742d30",
+      "pt": "4265617574792069732074727574682c20747275746820626561757479",
+      "ct": "58c61a45059d0c5704560e9d88b564a8b63f1364b8d1fcb3c4c6ddc1d291742465e902cd216f8908da49f8f96f"
+    },
+    {
+      "aad": "436f756e742d31",
+      "pt": "4265617574792069732074727574682c20747275746820626561757479",
+      "ct": "b4e7c90d1dd62cb563694956eb517ab55d5e7d1f6366a0066c04ababaa444dbaf60a30d7bb7d3e91b969762dee"
+    },
+    {
+      "aad": "436f756e742d32",
+      "pt": "4265617574792069732074727574682c20747275746820626561757479",
+      "ct": "65463cc0e5fd16e1650a55fb37d5b6fe6e5ac5b6f6e8c2640cfb0fcd528dc37bc0963b5c53d6238c42d447ddf4"
+    }
+  ],
+  "exports": [
+    {
+      "exporter_context": "",
+      "L": 32,
+      "exported_value": "7a4c2b89e1909fb0e3ca42d5040f4c2d8346dc0643d787b8474e804f8f72798e"
+    },
+    {
+      "exporter_context": "00",
+      "L": 32,
+      "exported_value": "3ca0e7e10b601a32edd2f91c49bac766892c52bde2df01a6126320c6e6eb8af1"
+    },
+    {
+      "exporter_context": "54657374436f6e74657874",
+      "L": 32,
+      "exported_value": "76c6b4f404990ae362be3efe0d60d9669d87017f9dfe33b8c2ed9fd31d295182"
+    }
+  ]
+}

@@ -2,7 +2,9 @@ import { beforeEach, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
-import { ctxBoundaryTick, injectCompact, isLinkedWorktree, resetCtxBoundaryState } from "../src/bridge/ctx-boundary.js";
+import { ctxBoundaryTick, injectCompact, masterStandIn, needsMasterStandIn, resetCtxBoundaryState } from "../src/bridge/ctx-boundary.js";
+import { MASTER_WINDOW_TARGET } from "../src/lib/tmux-helper.js";
+import { isLinkedWorktree } from "../src/lib/linked-worktree.js";
 import { DEFAULT_KEEP_LIST } from "../src/lib/ctx-boundary-policy.js";
 import { agent, BUSY_PANE, harness, MIN, tgt } from "./ctx-boundary-harness.js";
 
@@ -79,10 +81,31 @@ describe("ctxBoundaryTick", () => {
     const r = await ctxBoundaryTick(dry);
     expect(r[0]).toMatchObject({ verdict: { fire: true, kind: "hard-cap" }, would: `/compact ${DEFAULT_KEEP_LIST}` });
     expect(r[0].inject).toBeUndefined();
+    // 窗口小：写明会退到哪一档 / 会跳过（adv2 P2-1）
+    const w = h.win("master:agent-task-t1");
+    w.size = { width: 40, height: 24 };
+    expect((await ctxBoundaryTick(dry))[0].would).toBe("/compact（窗口 40×24 放不下默认保留清单，退到只发 /compact）");
+    w.size = { width: 5, height: 24 };
+    expect((await ctxBoundaryTick(dry))[0].would).toBe("窗口 5×24 连 /compact 都放不下：跳过并提醒 owner");
+    delete w.size;
     expect((await ctxBoundaryTick(dry))[0].verdict.fire).toBe(true); // 没记冷却
     h.state.draft = true;
     expect((await ctxBoundaryTick(dry))[0].verdict).toEqual({ fire: false, reason: "draft" });
     expect([h.sent.length, h.alerts.length]).toEqual([0, 0]);
+  });
+
+  test("窗口太小、连 /compact 都放不下：不按键，提醒 owner，5 分钟后再看（不每分钟敲了又删）", async () => {
+    const h = harness([agent({ ctx: 300_000, convTs: 0 })]);
+    h.win("master:agent-task-t1").size = { width: 5, height: 24 };
+    const r = await ctxBoundaryTick(h.deps);
+    expect(r[0].inject).toMatchObject({ status: "skipped", reason: "window-small" });
+    expect(h.alerts).toEqual([expect.objectContaining({ agent: "agent-task-t1", text: expect.stringContaining("连 /compact 都放不下") })]);
+    h.advance(MIN);
+    expect((await ctxBoundaryTick(h.deps))[0].verdict).toMatchObject({ fire: false });
+    h.advance(5 * MIN);
+    h.win("master:agent-task-t1").size = { width: 80, height: 24 };
+    expect((await ctxBoundaryTick(h.deps))[0].inject).toMatchObject({ status: "executed", line: `/compact ${DEFAULT_KEEP_LIST}` });
+    expect(h.sent.length).toBe(1);
   });
 
   test("闲置不到 3 分钟，或画面在忙 → 等", async () => {
@@ -277,5 +300,30 @@ describe("isLinkedWorktree（执行者认法的 worktree 兜底，adv1 P2-8）",
     expect(isLinkedWorktree(repo("sm", "gitdir: ../.git/modules/vendor/lib\n"))).toBe(false);
     expect(isLinkedWorktree(repo("plain", null))).toBe(false);
     expect(isLinkedWorktree(null)).toBe(false);
+  });
+});
+
+describe("registry 没登记大总管（T36c）", () => {
+  test("有 master 条目（两种写法）不补；没有才补", () => {
+    expect(needsMasterStandIn([{ name: "agent-master" }])).toBe(false);
+    expect(needsMasterStandIn([{ name: "agent-x" }, { name: "master" }])).toBe(false);
+    expect(needsMasterStandIn([{ name: "agent-x" }])).toBe(true);
+    expect(needsMasterStandIn([])).toBe(true);
+  });
+
+  test("补的那条：大总管窗口（index 0，不按名字）、launcher 的目录、会话留空等窗格认", () => {
+    const m = masterStandIn("/r/src/../master", "123");
+    expect(m).toMatchObject({ name: "agent-master", target: MASTER_WINDOW_TARGET, cwd: "/r/master", sessionId: "", ctx: null, executor: false, channelId: "123" });
+  });
+
+  test("窗格认到会话 → 按全局线纳入（开关开）；认不到 → 跳过，不发键", async () => {
+    const h = harness([]);
+    const m = masterStandIn("/r/master", null);
+    h.deps.agents = async () => [m];
+    expect(await ctxBoundaryTick(h.deps)).toEqual([]);
+    h.deps.liveSessions = async (as) => as.map((a) => ({ ...a, sessionId: "live", ctx: 900_000, convTs: 0, mtime: 0 }));
+    const r = await ctxBoundaryTick(h.deps);
+    expect(r.map((x) => [x.agent, x.boundary.policy, x.gated, x.verdict.fire])).toEqual([["agent-master", "global", true, true]]);
+    expect(h.sent).toEqual([{ target: MASTER_WINDOW_TARGET, line: "/save-compact" }]);
   });
 });

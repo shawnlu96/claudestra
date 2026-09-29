@@ -22,7 +22,7 @@ export interface CtxPolicy {
   /** 第 1 层：CC 的 autoCompactWindow；null = 不带 */
   ccWindow: number | null;
   /** action=compact 时的保留清单；null = DEFAULT_KEEP_LIST */
-  keep: string | null;
+  keep: CompactKeep | null;
 }
 
 export interface PolicyWarning {
@@ -111,22 +111,27 @@ function parseOne(e: Record<string, unknown>, id: string, base: CtxPolicy | null
 /**
  * 保留清单会原样敲进 CC 输入框，这是唯一入口（config.json 手改的 keep、批量管理的 fleet.compactKeep 都只调它）：换行（\r\n、\r、\n）
  * 连同每行首尾的空白换成一个空格，长度按换完的算。其余控制字符（C0、C1、U+2028 / U+2029）拒收，ESC 会打断回合；零宽 / 方向控制这类
- * 格式字符（\p{Cf}）屏上看不见，核对输入框时对不上，只放行排版用的 ZWNJ / ZWJ / 软连字符。拒收在去空白之前判：trim 会顺手去掉边上的
+ * 格式字符（\p{Cf}）屏上看不见，核对输入框时对不上，只放行排版用的 ZWNJ / ZWJ（真 CC 实测核对得上；软连字符会被吞掉，拒收）。
+ * 先做 NFC：CC 把「e + 组合重音」画成预组合的 é，不规范化就核对不上（macOS 文件名是 NFD）。拒收在去空白之前判：trim 会顺手去掉边上的
  * U+2028 / U+FEFF，那就成了悄悄放过。所以按换行切开再逐行 trim，不用「空白 + 换行 + 空白」那种正则：一长串空格会让它平方级回溯。
  * 上限 800：真 CC 上 709 字敲进去、删掉都正常，再长 tmux 的 send-keys 有被拒的风险。单测 tests/ctx-boundary-policy.test.ts。
  */
 const MAX_COMPACT_KEEP = 800;
 const KEEP_NEWLINE = /\r\n|[\r\n]/;
-const KEEP_BAD_CHAR = /[\x00-\x1f\x7f-\x9f\u2028\u2029]|(?![\u200c\u200d\u00ad])\p{Cf}/u;
-export type CompactKeep = { ok: true; keep: string } | { ok: false; why: string };
-export function normalizeCompactKeep(v: unknown): CompactKeep {
+const KEEP_BAD_CHAR = /[\x00-\x1f\x7f-\x9f\u2028\u2029]|(?![\u200c\u200d])\p{Cf}/u;
+/** 过了 normalizeCompactKeep 的保留清单：只有它产得出这个类型，injectCompact 只收它，调用方绕不过（adv2 P2-7） */
+export type CompactKeep = string & { readonly __compactKeep: true };
+export type CompactKeepResult = { ok: true; keep: CompactKeep } | { ok: false; why: string };
+export function normalizeCompactKeep(v: unknown): CompactKeepResult {
   if (typeof v !== "string") return { ok: false, why: "不是字符串" };
-  const lines = v.split(KEEP_NEWLINE);
+  const lines = v.normalize("NFC").split(KEEP_NEWLINE);
   if (lines.some((l) => KEEP_BAD_CHAR.test(l))) return { ok: false, why: "带控制字符或不可见的格式字符（ESC、Tab、零宽空格、方向控制符…）" };
   const keep = lines.map((l) => l.trim()).filter(Boolean).join(" ");
   if (!keep) return { ok: false, why: "是空的" };
   if (keep.length > MAX_COMPACT_KEEP) return { ok: false, why: `超过 ${MAX_COMPACT_KEEP} 字（这条 ${keep.length} 字）` };
-  return { ok: true, keep };
+  // CC 里「\ + 回车」是换行不是提交：命令留在框里，却会报成已执行（真 CC 实测，adv2 P2-4）
+  if (keep.endsWith("\\")) return { ok: false, why: "以反斜杠结尾（CC 会把后面的回车当换行，命令提交不了）" };
+  return { ok: true, keep: keep as CompactKeep };
 }
 
 /**
@@ -253,7 +258,7 @@ export function matchPolicy(policies: readonly CtxPolicy[], agent: { name: strin
 }
 
 /** 注入给 agent 的那一行（tmux 发一行，所以清单不能带换行） */
-export function compactCommand(action: CompactAction, keep: string | null): string {
+export function compactCommand(action: CompactAction, keep: CompactKeep | null): string {
   return action === "save-compact" ? "/save-compact" : `/compact ${keep ?? DEFAULT_KEEP_LIST}`;
 }
 

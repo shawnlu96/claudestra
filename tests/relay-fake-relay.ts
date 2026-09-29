@@ -21,6 +21,8 @@ export interface FakeRelayOptions {
   pushCaps?: { vapidPublicKey?: string; apns: boolean };
   /** push 帧的应答；返回 null = 不回（测超时）。默认回 ok + 201 */
   pushAck?: (frame: Record<string, unknown>) => Record<string, unknown> | null;
+  /** 带 to 的帧先问它：返回一帧就回给发送方、不再转发（模拟作恶的中继伪造 error 帧） */
+  answerForward?: (frame: Record<string, unknown>) => object | undefined;
 }
 
 interface Data { nonce: string; fp: string | null; slug: string }
@@ -102,6 +104,8 @@ export function startFakeRelay(opts: FakeRelayOptions = {}): FakeRelay {
         }
         if (f.t === "contacts") return send(ws, { t: "peers", peers: opts.peersFor?.(fp, f.fps as string[]) ?? [] });
         if (typeof f.to === "string") {
+          const forged = opts.answerForward?.(f);
+          if (forged) return send(ws, forged);
           const target = conns.get(f.to);
           const { to: _to, ...rest } = f;
           if (!target) return send(ws, { t: "error", id: f.id, code: "peer_offline", message: `${f.to} not connected`, origin: "relay" });

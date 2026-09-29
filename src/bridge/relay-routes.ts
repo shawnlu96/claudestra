@@ -12,13 +12,15 @@ import type { Principal } from "../lib/principals.js";
 import { userInfo } from "node:os";
 import { FP_RE, normalizeHeaders } from "../lib/relay-protocol.js";
 import { RelayError } from "../lib/relay-client.js";
+import { relayCallError } from "../lib/peer-auth-hints.js";
 import { b64, collectBody } from "../lib/relay-stream.js";
 import { signedHeaders } from "../lib/instance-key.js";
 import { peerIngressSyncRoute } from "./peer-ingress.js";
 
 /** bridge.ts 只从这一个模块 import 控制路由相关的东西（它在 guard 基线里只许缩，多一行 import 都不行） */
 export { initPeerIngress } from "./peer-ingress.js";
-export { requestContextOf, setRequestContext } from "./request-context.js";
+export { requestContextOf } from "./request-context.js";
+export { socketTrust } from "./relay-inbound.js";
 export { localProbeResponse } from "./local-probe.js";
 import { relayClient, relayInfo } from "./relay-link.js";
 import { activePairingCodeList, activePairingCodes, redeemPairingCode } from "./relay-pairing.js";
@@ -86,11 +88,14 @@ async function relayRequest(req: Request): Promise<Response> {
   // 对方按 §4.1 验签：签名要盖住实际发出的方法、路径（含查询串）与正文，manager 那头没有实例私钥，只能在这里签
   const headers = { ...normalizeHeaders(body.headers), ...signedHeaders(method, path, bytes) };
   try {
-    const r = await c.request(to, { method, path, headers, body: bytes.length ? bytes : null }, { timeoutMs });
+    const r = await c.request(to, { method, path, headers, body: bytes.length ? bytes : null }, { timeoutMs, maxResponseBytes: MAX_CLI_RESPONSE });
     const out = await collectBody(r.body, MAX_CLI_RESPONSE);
     return json(200, { ok: true, status: r.status, headers: r.headers, body: b64.enc(out) });
   } catch (e) {
-    if (e instanceof RelayError) return json(502, { ok: false, code: e.code, origin: e.origin, error: e.message });
+    if (e instanceof RelayError) {
+      const rc = relayCallError(e); // 说明原文可能出自中继：manager 只拿 code 与本机的提示（lib/peer-auth-hints.ts）
+      return json(502, { ok: false, code: rc.code, origin: e.origin, error: rc.hint ?? rc.message });
+    }
     return json(502, { ok: false, code: "local_error", error: (e as Error).message });
   }
 }

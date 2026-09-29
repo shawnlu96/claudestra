@@ -2,7 +2,7 @@
  * 上下文边界的决策（纯函数）：这一轮用哪条线（策略 / 全局）、决策表、面板显示。策略的解析与匹配在 ctx-boundary-policy.ts，
  * 执行在 bridge/ctx-boundary.ts；设计 docs/architecture/context-boundary.md，单测 tests/ctx-boundary-policy.test.ts。
  */
-import type { CompactAction, PolicyMatch, PolicyVia, PolicyWarning } from "./ctx-boundary-policy.js";
+import type { CompactAction, CompactKeep, PolicyMatch, PolicyVia, PolicyWarning } from "./ctx-boundary-policy.js";
 import type { PaneQuotaState } from "./lp-state.js";
 
 // ── 这一轮用哪条线 ─────────────────────────────────────────────────────
@@ -17,7 +17,7 @@ export interface Boundary {
   hardCap: number | null;
   idleMs: number;
   action: CompactAction;
-  keep: string | null;
+  keep: CompactKeep | null;
   ccWindow: number | null;
 }
 

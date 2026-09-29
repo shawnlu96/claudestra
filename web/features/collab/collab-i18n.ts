@@ -63,6 +63,19 @@ const COLLAB_WORDS: Record<string, string> = {
   "收起回放": "Close replay",
   "回放进度": "Replay position",
   "回放": "Replay",
+  // 步骤化台账（collab-steps.ts）
+  "步骤": "Steps",
+  "写": "Write",
+  "初审": "Review",
+  "修": "Fix",
+  "终审": "Final review",
+  "看界面": "UI check",
+  "合并部署": "Merge & deploy",
+  "核对": "Verify",
+  "已派": "assigned",
+  "已交付": "delivered",
+  "别的实例": "other instance",
+  "作者未知": "author unknown",
 };
 
 export function useCollabT(): Tr {

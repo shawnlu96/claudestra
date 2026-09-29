@@ -11,9 +11,11 @@ import { taskMetrics } from "../lib/ledger-metrics.js";
 import { getItem, getMeta, getTask, LedgerError, listDeps, listEvents, listItems, listTasks } from "../lib/ledger-store.js";
 import { setMeta } from "../lib/ledger-write.js";
 import { isUmbrellaDir, normalizeDir } from "../lib/projects.js";
+import { planRoles, teamBaseOf } from "../lib/team-proposal.js";
 import type { LedgerCli, Result } from "./ledger-context.js";
 import { agentKey, intFlag } from "./ledger-identity.js";
 import type { CommandSpec } from "./ledger-write-cmds.js";
+import { propose, type Agents } from "./team-up.js";
 
 const DEFAULT_EVENTS = 20;
 
@@ -93,18 +95,30 @@ export function expandDocsDir(raw: string, home = homedir()): string {
   return real;
 }
 
-/** 不带参数 = 查看；--pms / --docs-dir 只有 owner 能设（库里判） */
-function meta(c: LedgerCli): Result {
+/**
+ * 不带参数 = 查看；--docs-dir 只有 owner 能设（库里判）。
+ * --pms 不直接写：PM / master / owner 只能提议，生成提案、贴确认按钮，owner 在界面上点了才由 `ledger team-apply` 写（owner 在终端里也一样）。
+ */
+async function meta(c: LedgerCli): Promise<Result> {
   const project = c.project();
   const { pms, "docs-dir": docsDir } = c.p.flags;
-  if (pms === undefined && docsDir === undefined) return { ok: true, project, meta: getMeta(c.db, project) };
-  const ctx = { actor: c.deps.actor, now: c.deps.now() };
-  if (pms !== undefined) {
-    const list = pms.split(",").map((s) => s.trim()).filter(Boolean).map(agentKey);
-    setMeta(c.db, ctx, { project, key: "pms", value: list });
+  if (c.p.flags.team !== undefined || c.p.flags.dispatcher !== undefined) {
+    throw new LedgerError("invalid", "班子配置不能直接设：用 team up / team down --project <id>，由 owner 在界面上确认");
   }
-  if (docsDir !== undefined) setMeta(c.db, ctx, { project, key: "docsDir", value: expandDocsDir(docsDir) });
-  return { ok: true, project, meta: getMeta(c.db, project) };
+  if (pms === undefined && docsDir === undefined) return { ok: true, project, meta: getMeta(c.db, project) };
+  if (docsDir !== undefined) setMeta(c.db, { actor: c.deps.actor, now: c.deps.now() }, { project, key: "docsDir", value: expandDocsDir(docsDir) });
+  if (pms === undefined) return { ok: true, project, meta: getMeta(c.db, project) };
+  c.requireRealPm(project, "提议改 PM 名单");
+  const list = [...new Set(pms.split(",").map((s) => s.trim()).filter(Boolean).map(agentKey))];
+  const cur = getMeta(c.db, project);
+  // 调度助理得在名单里（它跑 dispatch / review 靠 PM 身份）：要换调度助理用 team up，要撤班子用 team down
+  const disp = cur.team?.dispatcher;
+  if (disp && !list.includes(disp)) throw new LedgerError("invalid", `${disp} 是在任的调度助理，不能移出 PM 名单：换调度助理用 team up --dispatcher-agent，撤班子用 team down`);
+  const agents = (await c.deps.loadRegistry()).agents as Agents;
+  const base = teamBaseOf(cur);
+  const roles = planRoles({ pms: list, dispatcher: disp ?? null, on: !!cur.team }, base, agents);
+  const draft = { kind: "pms" as const, project, proposer: c.deps.actor, pm: null, pms: list, dispatcher: null, audit: cur.team?.audit ?? true, base, roles };
+  return { ...(await propose(draft, c.deps.proposals)), project, meta: cur };
 }
 
 /**
@@ -137,6 +151,10 @@ export const READ_CMDS: Record<string, CommandSpec> = {
   whoami: { valued: ["project"], usage: "whoami", run: whoami },
   show: { valued: ["events", "project"], usage: "show [<task|item>] [--events N]", run: show },
   export: { valued: ["out", "sqlite", "project"], usage: "export --out <file.json> | --sqlite <file>", run: exportCmd },
-  meta: { valued: ["pms", "docs-dir", "project"], usage: "meta [--pms a,b] [--docs-dir <path>]（不带参数 = 查看）", run: meta },
+  meta: {
+    valued: ["pms", "docs-dir", "team", "dispatcher", "project"],
+    usage: "meta [--pms a,b（生成提案，owner 确认后生效）] [--docs-dir <path>]（不带参数 = 查看）",
+    run: meta,
+  },
   "ask-check": { valued: ["hash", "params", "project"], usage: "ask-check <askId> --hash <h> | --params '<json>'（授权类 ask 执行前核对，非 0 = 别执行）", run: askCheck },
 };

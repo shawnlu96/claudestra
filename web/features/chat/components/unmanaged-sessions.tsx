@@ -7,7 +7,7 @@ import { RuntimeBadge } from "./runtime-badge";
 import { SidebarSectionHeader } from "./sidebar-section-header";
 import { AdoptPanel } from "./adopt-panel";
 import type { SubSessionRow } from "@/lib/session-nesting";
-import { FoldToggle, GroupAnchor, MoreSubsNote, SessionName, sessionRowKey, sessionTree, useFold } from "./session-name";
+import { FoldToggle, GroupAnchor, groupOneShots, MoreSubsNote, SessionName, sessionRowKey, sessionTree, useFold } from "./session-name";
 
 /**
  * 侧栏「未纳管会话」分区（v2.23+）。
@@ -58,7 +58,7 @@ function isTempSession(cwd: string): boolean {
   return /^(\/tmp|\/private\/tmp|\/var\/folders|\/private\/var\/folders)\//.test(cwd || "");
 }
 // 临时目录（测试遗留 / 子代理 scratchpad）的会话是噪声，不列（真想看有 CLI `manager sessions`）；组头计数也按它
-const isUnmanaged = (s: SessionRow) => !s.agentName && !isTempSession(s.cwd);
+const isUnmanaged = (s: SessionRow) => !s.group && !s.agentName && !isTempSession(s.cwd);
 
 /** 能不能收编成可对话的 agent：以 bridge 的 manageable 为准（加运行时前端不用改）；老 bridge 按旧规则 */
 export function canAdoptSession(s: { runtime: string; manageable?: boolean }): boolean {
@@ -193,8 +193,9 @@ export function UnmanagedSessions() {
     };
   }, [fetchSessions]);
 
-  // 与列表同一口径：只数顶层的行（父文件已删的孤儿子会话也在顶层），收在分组头下的子会话不算
-  const count = sessionTree(sessions, isUnmanaged, new Set()).filter((r) => !r.anchor).length;
+  const rows = groupOneShots(sessions, t("Codex 一次性调用")); // codex exec 一次性调用收进末尾的折叠组（lib/session-nesting.ts）
+  // 与列表同一口径：只数顶层的行（父文件已删的孤儿子会话也在顶层），收在分组头下的子会话、一次性调用不算
+  const count = sessionTree(rows, isUnmanaged, new Set()).filter((r) => !r.anchor).length;
 
   const [confirming, setConfirming] = useState<string | null>(null); // 行键（sessionRowKey），不是 sessionId
 
@@ -231,16 +232,12 @@ export function UnmanagedSessions() {
       <SidebarSectionHeader icon="🗂" label={t("未纳管会话")} open={open} onToggle={toggle} count={count} loading={loading} onRefresh={() => void load()} />
       {open ? (
         <div className="pb-1">
-          {error ? (
-            <div className="px-1.5 py-2 text-xs text-error break-words">
-              {t("读取失败")}: {error}
-            </div>
-          ) : null}
+          {error ? <div className="px-1.5 py-2 text-xs text-error break-words">{t("读取失败")}: {error}</div> : null}
           {!loading && !error && !sessions.some(isUnmanaged) ? (
             <div className="px-1.5 py-2 text-xs text-base-content/40">{t("没有未纳管的会话")}</div>
           ) : null}
           <ul className="max-h-64 overflow-y-auto">
-            {sessionTree(sessions, isUnmanaged, fold.open).map(({ row: s, depth, kids, anchor, more }) => <Fragment key={sessionRowKey(s)}>{anchor ? (
+            {sessionTree(rows, isUnmanaged, fold.open).map(({ row: s, depth, kids, anchor, more }) => <Fragment key={sessionRowKey(s)}>{anchor ? (
               <li><GroupAnchor s={s} kids={kids} open={fold.open.has(sessionRowKey(s))} onToggle={() => fold.toggle(sessionRowKey(s))} /></li>
             ) : (
               <li className="flex" style={{ paddingLeft: Math.min(depth, 3) * 14 }}>

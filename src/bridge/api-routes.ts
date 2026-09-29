@@ -35,7 +35,6 @@ import {
   readPrincipals,
   agentInScope,
   tokenIdOf, isOwnerPrincipal,
-  SlidingWindowLimiter,
   type Principal,
 } from "../lib/principals.js";
 import { runManager } from "./management.js";
@@ -89,6 +88,8 @@ import { handleCronRoutes } from "./cron-routes.js";
 import { handleAutoCompactRoute } from "./auto-compact-routes.js";
 import { trackInboundHandoff } from "./handoff-tracker.js";
 import { authenticateApi } from "./api-auth.js";
+import { handlePeerRedeem } from "./peer-redeem.js";
+import { peerE2eRoute } from "./peer-e2e-route.js";
 import { handleDevicesManaged, handleDevicesPublic } from "./devices.js";
 import { apiFeatures, handleExtensionRoutes } from "./api-extensions.js";
 import { revocable } from "./credential-revocation.js";
@@ -268,39 +269,6 @@ async function findHistoryAgent(
   return hit ? { name: hit.name, cwd: hit.cwd, sessionId: hit.sessionId, runtime: hit.runtime } : null;
 }
 
-// ── v2.15+ 一键邀请兑换（无 Bearer 的公开端点，见 handleApiRequest 顶部）──
-
-const redeemLimiter = new SlidingWindowLimiter(10, 60_000);
-
-async function handlePeerRedeem(req: Request): Promise<Response> {
-  if (!redeemLimiter.tryAcquire()) {
-    return apiJson(429, { ok: false, error: "rate limited" });
-  }
-  const body: any = await readJsonBody(req);
-  if (body === INVALID_JSON) return invalidJsonBody();
-  const join = typeof body?.join === "string" ? body.join.trim() : "";
-  const name = typeof body?.name === "string" ? body.name.trim() : "";
-  const peerUrl = typeof body?.url === "string" ? body.url.trim() : "", token = typeof body?.token === "string" ? body.token.trim() : "";
-  const fromFp = /^[0-9a-f]{4}(-[0-9a-f]{4}){3}$/.test(req.headers.get("x-claudestra-relay-from") ?? "") ? req.headers.get("x-claudestra-relay-from")! : ""; // 经中继来的兑换：对方指纹（bridge/relay-inbound.ts 盖的）
-  const iid = typeof body?.iid === "string" && /^[\w-]{1,64}$/.test(body.iid) ? body.iid : ""; // 对方实例 id：同一对方合进同一条记录
-  if (!join || !name) return apiJson(400, { ok: false, error: '"join" and "name" required' });
-  const r: any = await runManager(
-    "peer-invite-redeem", "--join", join, "--name", name,
-    ...(peerUrl ? ["--url", peerUrl] : []), ...(token ? ["--token", token] : []), ...(iid ? ["--iid", iid] : []), ...(fromFp ? ["--fp", fromFp] : []),
-  );
-  if (r?.ok) {
-    recordMetric("peer_managed", { meta: { action: "redeem", peer: r.peer } });
-    console.log(`🤝 [api] peer 邀请已兑换: ${r.peer}（scope: ${(r.agents || []).join(",")}）`);
-    void deps?.notifyOwner?.(
-      `🤝 新 peer「${r.peer}」通过一键邀请接入，可访问: ${(r.agents || []).join(", ") || "（无）"}` +
-        (r.oneWay ? "（单向：对方访问我，我未获对方权限）" : "") +
-        `。撤销：侧栏顶部 Peer 按钮 → 移除，或 \`peer-http-remove ${r.peer}\``,
-    ).catch(() => {});
-  }
-  // 失败一律 400 且不细分原因等级——这是个无鉴权端点，不给探测者更多信息面
-  return apiJson(r?.ok ? 200 : 400, r ?? { ok: false, error: "manager failed" });
-}
-
 // ── 路由分发 ────────────────────────────────────────────────────────────
 
 /**
@@ -321,12 +289,10 @@ export async function serveApiRequest(req: Request, url: URL): Promise<Response>
 async function handleApiRequest(req: Request, url: URL): Promise<Response> {
   if (!deps) return apiJson(503, { ok: false, error: "api routes not initialized" });
 
-  // v2.15+ POST /api/v1/peers/redeem —— 一键邀请的兑换回调（对方 bridge 打进来，
-  // 拿不到我方 Bearer）。鉴权依据是 body 里的一次性 joinSecret（manager 侧常数
-  // 时间比对）。48 hex 穷举本不现实，限流是纵深防御 + 挡日志噪音。
-  if (url.pathname === "/api/v1/peers/redeem" && req.method === "POST") {
-    return handlePeerRedeem(req);
-  }
+  const e2e = await peerE2eRoute(req, url, (inner) => serveApiRequest(inner, new URL(inner.url))); // peer 整体加密：解开后内层从头走一遍（bridge/peer-e2e-route.ts）
+  if (e2e) return e2e;
+  // v2.15+ POST /api/v1/peers/redeem —— 一键邀请的兑换回调（无 Bearer，鉴权靠一次性 joinSecret；bridge/peer-redeem.ts）
+  if (url.pathname === "/api/v1/peers/redeem" && req.method === "POST") return handlePeerRedeem(req, { runManager, notifyOwner: deps.notifyOwner });
   if (url.pathname === "/api/v1/invite" && req.method === "GET") return invitePageResponse(); // 邀请落地页，不要 token（bridge/invite-page.ts）
   const pub = await handleDevicesPublic(req, url); // 设备配对的公开端点（bridge/devices.ts）：没有凭据才能配对
   if (pub) return pub;
@@ -1495,16 +1461,14 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
         if (failed) return apiJson(409, { ok: false, error: `取消没生效：${failed.message}` }); // Esc 没发出去：问题还在，状态留着可以再取消
         clearAuqState(agent.channelId);
         recordMetric("auq_cancel", { channelId: agent.channelId, meta: { trigger: "api" } });
-        emitEvent({ agent: agent.name, chatId: agent.channelId, type: "question_cleared", data: { reason: "cancel", via: "api", by: tokenId, credential: principal.credential } });
+        emitEvent({ agent: agent.name, chatId: agent.channelId, type: "question_cleared", data: { reason: "cancel", via: "api" } });
         return apiJson(200, { ok: true, cancelled: true });
       }
       // submit：body.selections 覆盖状态（web 前端一次性提交所有选择）
       if (Array.isArray(body?.selections)) {
         state.selections = state.questions.map((q, i) => {
           const sel = Array.isArray(body.selections[i]) ? body.selections[i] : [];
-          return sel
-            .map((n: unknown) => Number(n))
-            .filter((n: number) => Number.isInteger(n) && n >= 0 && n < q.options.length);
+          return sel.map((n: unknown) => Number(n)).filter((n: number) => Number.isInteger(n) && n >= 0 && n < q.options.length);
         });
       }
       // M4：发键前重验弹窗还在（与 permission 分支同款防误击）。AUQ 若已在 TUI 侧
@@ -1518,7 +1482,7 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
       const auqParse = auqPane ? parseAuqPane(auqPane) : null;
       if (auqPane && !auqParse) {
         clearAuqState(agent.channelId);
-        emitEvent({ agent: agent.name, chatId: agent.channelId, type: "question_cleared", data: { reason: "stale", via: "api", by: tokenId, credential: principal.credential } });
+        emitEvent({ agent: agent.name, chatId: agent.channelId, type: "question_cleared", data: { reason: "stale", via: "api" } });
         return apiJson(409, { ok: false, error: "AskUserQuestion no longer active (answered elsewhere?)" });
       }
       const keys = buildAuqKeystrokes(state, auqParse);
@@ -1530,7 +1494,9 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
       }
       clearAuqState(agent.channelId);
       recordMetric("auq_submit", { channelId: agent.channelId, meta: { trigger: "api", questions: String(state.questions.length) } });
-      emitEvent({ agent: agent.name, chatId: agent.channelId, type: "question_cleared", data: { reason: "submit", via: "api", by: tokenId, credential: principal.credential } });
+      // 「待你处理」的 AUQ ask 在广播之前记成是谁答的（ask-runtime.ts）：凭据 id 不进 question_cleared，那是发给所有订阅者的
+      (await import("./ask-runtime.js")).settleAuq(agent.channelId, "interact", state, { principal: principal.id, device: principal.credential });
+      emitEvent({ agent: agent.name, chatId: agent.channelId, type: "question_cleared", data: { reason: "submit", via: "api" } });
       return apiJson(200, { ok: true, keys: keys.length });
     }
 
@@ -1551,7 +1517,7 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
         return apiJson(500, { ok: false, error: `tmux send-keys 失败: ${(e as Error).message}` });
       }
       // 「待你处理」里对应的权限 ask 记成是谁答的（ask-runtime.ts），不然弹框消失时会被当成撤销——网页里所有权限卡都走这里
-      void import("./ask-runtime.js").then((m) => m.settleRuntimeAsk("permission", agent.channelId, "interact", m.permissionLabel(action), { principal: tokenId, device: principal.credential }));
+      void import("./ask-runtime.js").then((m) => m.settleRuntimeAsk("permission", agent.channelId, "interact", m.permissionLabel(action), { principal: principal.id, device: principal.credential }));
       return apiJson(200, { ok: true });
     }
 

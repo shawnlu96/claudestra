@@ -52,6 +52,8 @@ export interface Principal {
    * 的 name）。入站注入头据此渲染成「peer 跨机请求」而非「Web 端用户」。
    */
   peer?: string;
+  /** 只能投递消息（peer-http-messages-only）：读历史、事件流、打断等一律 403，判定见 lib/peer-scope-gate.ts messagesOnlyAllows */
+  messagesOnly?: boolean;
   /** 设备凭据（lib/devices.ts）：owner:self / guest:* 这类 principal 靠它们鉴权，没有 secret */
   credentials?: import("./devices.js").DeviceCredential[];
   /** 只出现在请求内生效的视图上（effectivePrincipal）：false = 这条凭据不许碰管理端点 */

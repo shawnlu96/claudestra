@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { parseCcSessionEntry, pickCcSessionForWindow, procStartMatches, type CcSessionEntry } from "../src/lib/cc-sessions";
+import { panePidsByWindow, parseCcSessionEntry, pickCcSessionForWindow, pickCcSessionUnderPane, procStartMatches, type CcSessionEntry } from "../src/lib/cc-sessions";
+import { windowKey } from "../src/lib/tmux-helper";
 
 const SRC = "32bd5a87-6982-4717-aef2-58d80812935b";
 const FORK = "72aabe18-8395-43ee-a9e0-31abdf8aab4e";
@@ -78,5 +79,44 @@ describe("procStartMatches — 识破 pid 复用的过期登记", () => {
   });
   test("本地化的 lstart（zh_CN）解析不了 → false：所以 psLstart 必须强制 C locale", () => {
     expect(procStartMatches({ procStart: utc }, "三  9月/23 03:23:19 2026")).toBe(false);
+  });
+});
+
+describe("pickCcSessionUnderPane：批量认会话只认窗格进程的后代（adv2 P2-2）", () => {
+  // 本 server：窗格 zsh 100 → agent 的 CC 200 → Bash 工具 300 → 嵌套 claude -p 400；另一个 tmux server：窗格 900 → CC 1000（同目录、同 pane 号、启动更晚）
+  const tree: Record<number, number> = { 100: 50, 200: 100, 300: 200, 400: 300, 900: 60, 1000: 900, 150: 100, 250: 150, 50: 1, 60: 1 };
+  const ppid = (p: number) => tree[p] ?? null;
+  const own = e({ pid: 200, sessionId: SRC, startedAt: 1, tmux: "master:@3.%5" });
+  const nested = e({ pid: 400, sessionId: "nested-p", startedAt: 5, tmux: "master:@3.%5" });
+  const other = e({ pid: 1000, sessionId: "other-server", startedAt: 10, tmux: "master:@3.%5" });
+
+  test("别的 server 里同 pane 号、同目录、更晚起的不算；嵌套的 claude -p 不算", () => {
+    expect(pickCcSessionUnderPane([own, nested, other], 100, ppid, own.cwd)?.sessionId).toBe(SRC);
+    expect(pickCcSessionUnderPane([nested, other], 100, ppid, own.cwd)?.sessionId).toBe("nested-p"); // agent 自己的 CC 不在登记里时才轮到它
+    expect(pickCcSessionUnderPane([other], 100, ppid, own.cwd)).toBeNull();
+  });
+
+  test("CC 直接当窗格进程；中间隔一层包装脚本；两个并排的取 cwd 一致、启动最晚的", () => {
+    expect(pickCcSessionUnderPane([own, nested], 200, ppid)?.sessionId).toBe(SRC);
+    const wrapped = e({ pid: 250, sessionId: FORK, startedAt: 2 });
+    expect(pickCcSessionUnderPane([wrapped, other], 100, ppid)?.sessionId).toBe(FORK);
+    const elsewhere = e({ pid: 250, sessionId: FORK, startedAt: 9, cwd: "/tmp/x" });
+    expect(pickCcSessionUnderPane([own, elsewhere], 100, ppid, own.cwd)?.sessionId).toBe(SRC);
+    expect(pickCcSessionUnderPane([own, { ...elsewhere, cwd: own.cwd }], 100, ppid, own.cwd)?.sessionId).toBe(FORK);
+  });
+});
+
+describe("大总管窗口（T36c 复核）", () => {
+  test("窗格进程是 claude.exe、真正登记会话的 CC 在它下面一层：认下面那个", () => {
+    const ppid = (p: number) => ({ 9254: 1, 68530: 9254 } as Record<number, number>)[p] ?? null;
+    const child = e({ pid: 68530, sessionId: SRC, tmux: "master:@502.%502" });
+    expect(pickCcSessionUnderPane([child], 9254, ppid, child.cwd)?.sessionId).toBe(SRC);
+  });
+
+  test("按 index 0 认：窗口名被改掉（不叫 master）也找得到；别处叫 master 的窗口不算", () => {
+    const panes = panePidsByWindow("0\tclaude.exe\t9254\n3\tmaster\t777\n5\tagent-x\t42\n5\tagent-x\t43\n");
+    expect(panes.get(windowKey("master"))).toBe(9254);
+    expect(panes.get(windowKey("agent-x"))).toBe(42);
+    expect(panes.get(windowKey("agent-y"))).toBeUndefined();
   });
 });

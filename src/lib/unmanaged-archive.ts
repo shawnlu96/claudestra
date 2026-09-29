@@ -9,7 +9,7 @@ import { statePath } from "./paths.js";
 import { USER_ARCHIVE_ROOT } from "./session-archive.js";
 import { isValidSessionId } from "./session-history.js";
 import { codexSessionsRoot, listCodexSessionFiles, readCodexMetaPayload } from "./codex-session.js";
-import { codexSubOf, isCodexSubThread } from "./codex-subthread.js";
+import { codexSubOf, isCodexOneShot, isCodexSubThread } from "./codex-subthread.js";
 import { readJsonState, writeJsonAtomic } from "./state-file.js";
 
 export interface UnmanagedArchiveMeta {
@@ -117,8 +117,8 @@ function isPinned(p: Record<string, any>, sid: string, opts: SweepOpts, locksDir
 
 /**
  * Codex 的子线程（subagent 做完一件事就停、自动审查每审一次新开一条）结束后不会再被写，Codex 自己又从不清理，
- * 有的机器两个月攒了 355 个。这里把 idleDays 天没写过的子线程收进归档（可恢复）；主会话、被挂着 / 被锁着的（isPinned）、
- * 用户恢复过的一律不动。开关在 config.json autoArchiveCodexSubs（缺省关，archive-sweeper 判）。单个文件失败只记一笔。
+ * 有的机器两个月攒了 355 个；`codex exec` 的一次性会话（isCodexOneShot）同理。这里把 idleDays 天没写过的这两类收进归档（可恢复）；
+ * 人开的主会话、被挂着 / 被锁着的（isPinned）、用户恢复过的一律不动。开关在 config.json autoArchiveCodexSubs（缺省关，archive-sweeper 判）。单个文件失败只记一笔。
  */
 export async function sweepIdleCodexSubSessions(opts: SweepOpts): Promise<{ archived: number; bytes: number }> {
   const codexRoot = opts.codexRoot ?? codexSessionsRoot();
@@ -132,7 +132,7 @@ export async function sweepIdleCodexSubSessions(opts: SweepOpts): Promise<{ arch
       const st = await stat(file);
       if (st.mtimeMs > cutoff) continue;
       const p = await readCodexMetaPayload(file);
-      if (!p || !isCodexSubThread(p)) continue;
+      if (!p || !(isCodexSubThread(p) || isCodexOneShot(p))) continue;
       const sid = String(p.id ?? p.session_id ?? "");
       if (restored[sid] || isPinned(p, sid, opts, locksDir)) continue;
       const cwd = typeof p.cwd === "string" ? p.cwd : null;

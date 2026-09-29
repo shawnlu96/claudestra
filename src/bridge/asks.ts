@@ -9,11 +9,13 @@ import { existsSync } from "node:fs";
 import type { Database } from "bun:sqlite";
 import type { ServerWebSocket } from "bun";
 import { groupsLeft, type AskRow, type WireMatch } from "../lib/ask-options.js";
+import { isOwnerSource } from "../lib/delegate-marker.js";
 import { OWNER_PRINCIPAL_ID } from "../lib/devices.js";
 import { t } from "../lib/i18n.js";
 import { answerAsk, hasAsksTable, listAsks, MASTER_PROJECT, openAskFull, patchAsk, reopenAsk, type Ask, type AskAnswer, type AskAtt, type AskVia, type NewAsk } from "../lib/ledger-asks.js";
 import { activeTasksByAgent } from "../lib/ledger-read.js";
 import { LEDGER_PATH, openLedger } from "../lib/ledger-store.js";
+import { answerEcho } from "../lib/inbound-body.js";
 import { OwnerPresence } from "../lib/owner-presence.js";
 import { readPrincipals } from "../lib/principals.js";
 import { readRegistryAgents, type RegistryAgent } from "../lib/registry.js";
@@ -202,6 +204,9 @@ export async function answerTarget(a: Ask): Promise<Target> {
   return { channelId: d.controlChannelId, agentName: "master", redirected: "master" };
 }
 
+/** 答复的入站事件带的回显：人话 echo 给气泡显示，原文 wire 给网页和乐观气泡对账、回填按钮已答态 */
+const echoOf = (askId: string, e: { text: string; wire?: string }) => ({ askId, echo: e.text, ...(e.wire ? { wire: e.wire } : {}) });
+
 /** bridge 发给 agent 的一封不抢占的消息：在线就 deliver，不在线或出错进押后队列。trigger：owner 的答复是 ask_answer，其余是 bridge_synth */
 export async function sendCalm(from: Endpoint, to: Target, intent: Envelope["intent"], content: string, askId: string, trigger: TriggerKind): Promise<string> {
   const d = deps!;
@@ -211,7 +216,8 @@ export async function sendCalm(from: Endpoint, to: Target, intent: Envelope["int
     to: { kind: "local", agentName: to.agentName, channelId: to.channelId, ws: live?.ws as ServerWebSocket<unknown>, cwd: live?.cwd },
     intent,
     content,
-    meta: { messageId: newMessageId("ask"), triggerKind: trigger, ts: new Date().toISOString(), threadId: newThreadId(), waitForIdle: true, askId, skipInterAgentWatchdog: true },
+    meta: { messageId: newMessageId("ask"), triggerKind: trigger, ts: new Date().toISOString(), threadId: newThreadId(), waitForIdle: true, askId, skipInterAgentWatchdog: true,
+      ...(trigger === "ask_answer" ? { askEcho: echoOf(askId, answerEcho(content)) } : {}) },
   };
   if (live) {
     const r = await d.deliver(env);
@@ -241,10 +247,28 @@ export interface AnswerInput {
 /** 作答后要不要回投给某个 agent：只有 agent 发起的才回投；人 / 系统发起的、指派事项只记账（T28 §2.5 第 5、6 行） */
 export const answersGoToAgent = (a: Pick<Ask, "fromAgent" | "kind">): boolean => !!a.fromAgent && a.kind !== "assigned";
 
-/** 指派事项被作答（T28a 注册：写交付、推阶段、通知 PM）。没注册或抛错，答案照样记下 */
+/** 指派事项答案落库之后（T28a 注册：通知 PM）。没注册或抛错，答案照样记下 */
 let onAssigned: ((ask: Ask, answer: AskAnswer) => void | Promise<void>) | null = null;
 export function setOnAssignedAnswer(fn: typeof onAssigned): void {
   onAssigned = fn;
+}
+
+/** 作答前被判不算数（T28a 的指派门）：整笔不记；status 原样回给网页（400 缺原因 / 403 不是这个人 / 409 过时 / 503 认不出人），Discord 上悄悄告诉点的人 */
+export class AskRejected extends Error {
+  constructor(
+    readonly status: 400 | 403 | 409 | 503,
+    readonly code: string,
+    message: string,
+  ) {
+    super(message);
+    this.name = "AskRejected";
+  }
+}
+
+/** 指派事项记答案之前（T28a 注册）：认人、判门，不算数抛 AskRejected；返回和答案同一事务写台账的函数（它抛错连答案一起回滚），不归它管的返回 undefined */
+let prepareAssigned: ((ask: Ask, answer: AskAnswer) => Promise<(() => void) | undefined>) | null = null;
+export function setPrepareAssigned(fn: typeof prepareAssigned): void {
+  prepareAssigned = fn;
 }
 
 /**
@@ -255,8 +279,12 @@ export function setOnAssignedAnswer(fn: typeof onAssigned): void {
 export async function commitAnswer(i: AnswerInput): Promise<Ask> {
   if (!deps) throw new Error("asks 未初始化");
   const labels = i.picks.map((p) => p.label);
-  const answer = { choices: i.picks.map((p) => p.wire), labels, text: i.text, principal: i.principal, device: i.device, via: i.via, at: Date.now(), final: i.final };
-  const a = answerAsk(askDb(), i.ask.id, i.atts?.length ? { ...answer, atts: i.atts } : answer);
+  // 作答的不是 owner 本人（guest）：原话不进台账 decision 的 text（ledger-asks.ts answerAsk）
+  const who = { principal: i.principal, device: i.device, ...(isOwnerSource(i.from) ? {} : { external: true }) };
+  const base = { choices: i.picks.map((p) => p.wire), labels, text: i.text, ...who, via: i.via, at: Date.now(), final: i.final };
+  const answer = i.atts?.length ? { ...base, atts: i.atts } : base;
+  const within = i.ask.kind === "assigned" && prepareAssigned ? await prepareAssigned(i.ask, answer) : undefined;
+  const a = answerAsk(askDb(), i.ask.id, answer, within);
   // 只有 owner 本人作答才算「在」（Discord 只有 ALLOWED_USER_IDS；网页看 owner 标记）：guest 答指给自己的不算，否则 owner 卡活的 ask 5 分钟内只弹横幅
   if (i.from.kind !== "api" || i.from.owner) ownerPresence.touch();
   publishAsk(a);
@@ -331,7 +359,7 @@ export function initAsks(d: AsksDeps): void {
 }
 
 /** 网页列表：开着的全给，已结案的只给最近 3 天；visible 是调用方的权限过滤（大总管的 ask 要 scope 含 master） */
-export function listForWeb(visible: (a: Ask) => boolean, project?: string, assignee?: string): Ask[] {
+export function listForWeb(visible: (a: Ask) => boolean, project?: string, assignee?: string | readonly string[]): Ask[] {
   const db = askReadDb();
   return db ? listAsks(db, { project, assignee, closedSince: Date.now() - 3 * 24 * 3600_000, limit: 200 }).filter(visible) : [];
 }

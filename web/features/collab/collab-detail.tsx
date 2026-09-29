@@ -11,6 +11,7 @@ import { useChatStore } from "../chat/chat-store";
 import type { AgentSession } from "@/lib/chat/agents";
 import type { LineAction } from "./collab-line";
 import { fmtEventTime, participants, recentThree, reviewRows, stageSegments, type Participant, type TaskDetail } from "./collab-detail-model";
+import { STEP_STATE, stepRows } from "./collab-steps";
 import { Icon, type IconName } from "./collab-icons";
 import { dwellText, fmtDuration, lineOf, type LedgerOverview, type LineView, type Tr } from "./collab-model";
 import { ChecklistSec } from "./collab-checklist";
@@ -129,6 +130,31 @@ function RecentSec({ d, tr }: { d: TaskDetail; tr: Tr }) {
   );
 }
 
+/** 派过步骤的卡：每一步谁在做、交付的 head 区间、结论；本机核过的和对方自报的分开写（collab-steps.ts） */
+function StepsSec({ d, tr }: { d: TaskDetail; tr: Tr }) {
+  const rows = stepRows(d.steps);
+  if (!rows.length) return null;
+  return (
+    <Sec title={tr("步骤")}>
+      {rows.map((r) => (
+        <div key={`${r.step}:${r.round}`} className={s.rr}>
+          <div className={s.h}>
+            <span>{tr(r.label)}</span>
+            <span>{r.executor}{r.peer ? ` · ${tr("别的实例")}` : ""}</span>
+            <span className={s.tm}>{tr(STEP_STATE[r.state] ?? r.state)}{r.heads ? ` · ${r.heads}` : ""}</span>
+          </div>
+          {(r.verdict || r.checked || r.claimedModel) && (
+            <div className={s.tx}>
+              {[r.verdict ? tr(r.verdict === "pass" ? "通过" : r.verdict === "block" ? "拦下" : "要改") : "", r.checked ? tr(r.checked) : "",
+                r.claimedModel ? tr("自报模型 {m}（凭声明）", { m: r.claimedModel }) : ""].filter(Boolean).join(" · ")}
+            </div>
+          )}
+        </div>
+      ))}
+    </Sec>
+  );
+}
+
 function ReviewSec({ d, tr }: { d: TaskDetail; tr: Tr }) {
   const reviews = reviewRows(d.events).slice(-3);
   if (!reviews.length) return null;
@@ -215,6 +241,7 @@ function Body(props: { d: TaskDetail; line: LineView; action: LineAction; stream
       <ChecklistSec d={d} tr={tr} />
       <RecentSec d={d} tr={tr} />
       <CollabReplay d={d} tr={tr} />
+      <StepsSec d={d} tr={tr} />
       <ReviewSec d={d} tr={tr} />
       <PeopleSec d={d} exec={exec} action={action} running={running} now={now} tr={tr} />
       {pr && (

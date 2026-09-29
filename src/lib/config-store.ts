@@ -58,6 +58,8 @@ export interface AppConfig {
   quotaClaudeBackground?: boolean;
   /** 批量管理（bridge/fleet）：compactKeep 覆盖 /compact 的默认保留清单（lib/fleet-plan.ts DEFAULT_COMPACT_KEEP） */
   fleet?: { compactKeep?: string };
+  /** 推送不带正文：Web Push / APNs 只发「Claudestra · 有新消息」（lib/push-redact.ts）。缺省关；派发器每条现读，改完不用重启 */
+  pushNoContent?: boolean;
 }
 
 /** 归档保留天数缺省值（设置里可改） */
@@ -95,6 +97,7 @@ function merge(base: AppConfig, raw: any): AppConfig {
     ...(typeof raw.groqApiKey === "string" && raw.groqApiKey ? { groqApiKey: raw.groqApiKey } : {}),
     ...(typeof raw.quotaLive === "boolean" ? { quotaLive: raw.quotaLive } : {}),
     ...(typeof raw.quotaClaudeBackground === "boolean" ? { quotaClaudeBackground: raw.quotaClaudeBackground } : {}),
+    ...(typeof raw.pushNoContent === "boolean" ? { pushNoContent: raw.pushNoContent } : {}),
     // 批量管理的保留清单（bridge/fleet 的 compactKeep()）：白名单只带 compactKeep；漏在这里读不到，任何 set* 还会把它抹掉。
     // 和上下文边界的 keep 同一个入口 normalizeCompactKeep，不合格当没配；存原文（多行照收），敲之前再取它规范好的那一行
     ...(normalizeCompactKeep(raw.fleet?.compactKeep).ok ? { fleet: { compactKeep: raw.fleet.compactKeep } } : {}),
@@ -123,8 +126,9 @@ function defaults(): AppConfig {
  * （2026-09 审查 D7-4）。其余字段仍取默认值。
  */
 export function safeConfigOnCorrupt(): AppConfig {
-  // 订阅额度的两个开关同口径：坏文件时不读凭据（owner 关掉的「读 Keychain」不能因为文件坏了被静默打开）
-  return { ...DEFAULT_CONFIG, autoUpdate: { claudestra: false, claudeCode: false }, quotaLive: false, quotaClaudeBackground: false };
+  // 订阅额度的两个开关同口径：坏文件时不读凭据（owner 关掉的「读 Keychain」不能因为文件坏了被静默打开）；
+  // 推送同理取保守的一边：owner 打开的「不带正文」不能因为文件坏了被静默关掉
+  return { ...DEFAULT_CONFIG, autoUpdate: { claudestra: false, claudeCode: false }, quotaLive: false, quotaClaudeBackground: false, pushNoContent: true };
 }
 
 // 常驻进程（bridge / launcher）运行中文件被写坏时，继续用上次成功读到的内容
@@ -235,6 +239,13 @@ export async function setAutoCompact(patch: { window?: number; idleHours?: numbe
 export async function setQuotaLive(enabled: boolean): Promise<AppConfig> {
   const cfg = await readConfig();
   cfg.quotaLive = enabled;
+  await writeConfig(cfg);
+  return cfg;
+}
+
+export async function setPushNoContent(enabled: boolean): Promise<AppConfig> {
+  const cfg = await readConfig();
+  cfg.pushNoContent = enabled;
   await writeConfig(cfg);
   return cfg;
 }

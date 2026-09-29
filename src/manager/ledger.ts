@@ -17,9 +17,13 @@ import { DEP_CMDS } from "./ledger-dep-cmds.js";
 import { parseLedgerArgs, resolveActor } from "./ledger-identity.js";
 import { AUDIT_CMDS } from "./ledger-audit-cmd.js";
 import { importCmd } from "./ledger-import.js";
+import { DISPATCH_CMDS } from "./ledger-dispatch-cmds.js";
 import { VERIFY_CMD } from "./ledger-verify.js";
 import { READ_CMDS } from "./ledger-read-cmds.js";
+import { TEAM_CMDS } from "./ledger-team-cmds.js";
 import { WRITE_CMDS, type CommandSpec } from "./ledger-write-cmds.js";
+import { PEER_CMDS } from "./ledger-peer.js";
+import { STEP_CMDS } from "./ledger-step-cmds.js";
 import { isWriteInvocation } from "./write-commands.js";
 
 /** 认不出身份时读命令用的 actor：不是 registry 键、不在任何 PM 名单里，roleOf 恒为 null */
@@ -27,11 +31,15 @@ export const UNKNOWN_ACTOR = "unknown";
 
 const COMMANDS: Record<string, CommandSpec> = {
   ...WRITE_CMDS,
+  ...DISPATCH_CMDS,
+  ...TEAM_CMDS,
   ...DEP_CMDS,
   ...READ_CMDS,
   verify: VERIFY_CMD,
   ...AUDIT_CMDS,
-  import: { valued: ["map", "project"], bools: ["dry-run"], usage: "import <ledger.json> --map <map.json> [--project <id>] [--dry-run]", run: importCmd },
+  ...PEER_CMDS,
+  ...STEP_CMDS,
+  import: { valued: ["map", "project"], bools: ["dry-run"], usage: "import <ledger.json> --map <map.json> [--project <id>] [--dry-run]（owner 一次性迁移；映射里的 pms 只在 PM 名单为空时写入）", run: importCmd },
 };
 
 export function ledgerUsage(): string {

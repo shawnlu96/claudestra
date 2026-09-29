@@ -32,3 +32,9 @@ export function codexSubOf(p: AnyRecord): SubSessionInfo {
   const sub: SubSessionInfo = { parentId: String(p.parent_thread_id || root), kind: ts ?? subagentSourceOf(p) ?? "subagent" };
   return typeof p.agent_nickname === "string" && p.agent_nickname ? { ...sub, nickname: p.agent_nickname } : sub;
 }
+
+/**
+ * 程序跑 `codex exec` 留下的一次性会话（session_meta.source = "exec"）：不是人开的对话，一跑完就不再写，也没有父会话，
+ * 会话列表里收进一个默认折叠的组、闲置满天数由归档扫描收走，和子线程同样处理。子线程另有归属，不算在这里。
+ */
+export const isCodexOneShot = (p: AnyRecord): boolean => p.source === "exec" && !isCodexSubThread(p);

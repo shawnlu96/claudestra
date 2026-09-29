@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
   BUILTIN_POLICIES, ccLaunchSettings, compactCommand, DEFAULT_KEEP_LIST, effectiveAction, globMatch, isExecutor, matchPolicy, normalizeCompactKeep,
   resolvePolicies,
-  type CtxPolicy,
+  type CompactKeep, type CompactKeepResult, type CtxPolicy,
 } from "../src/lib/ctx-boundary-policy.js";
 import { boundaryDecision, boundaryView, globalBoundary, policyBoundary, type BoundaryInput, type PaneGate } from "../src/lib/ctx-boundary-decision.js";
 
@@ -79,7 +79,7 @@ describe("resolvePolicies：内置 + 按 id 合并 + 校验", () => {
     const r = resolvePolicies([{ id: "coordinator", action: "clear", keep: "第一条\n  第二条" }]);
     const c = byId(r.policies, "coordinator")!;
     expect(c.action).toBe("save-compact");
-    expect(c.keep).toBe("第一条 第二条");
+    expect(c.keep as string | null).toBe("第一条 第二条");
     expect(r.warnings[0].text).toContain("action");
   });
 
@@ -93,23 +93,31 @@ describe("resolvePolicies：内置 + 按 id 合并 + 校验", () => {
       expect(r.warnings[0].text).toContain("keep");
     }
     // \r\n、单独的 \r、\n 都换成空格（连同行首尾空白、空行），长度按换完的算；刚好到上限的收下
-    const keepOf = (k: string) => byId(resolvePolicies([{ id: "executor", keep: k }]).policies, "executor")!.keep;
+    const keepOf = (k: string): string | null => byId(resolvePolicies([{ id: "executor", keep: k }]).policies, "executor")!.keep;
     expect(keepOf("第一条\r\n第二条")).toBe("第一条 第二条");
     expect(keepOf("保留卡号\r然后删掉 worktree")).toBe("保留卡号 然后删掉 worktree");
     expect(keepOf("  第一条 \n\n   第二条\r\n")).toBe("第一条 第二条");
     expect(keepOf(`${"保".repeat(400)}  \r\n  ${"留".repeat(399)}`)).toHaveLength(800);
     expect(byId(resolvePolicies([{ id: "executor", keep: "保".repeat(800) }]).policies, "executor")!.keep).toHaveLength(800);
     expect(resolvePolicies([{ id: "executor", keep: "保".repeat(801) }]).warnings[0].text).toContain("超过 800 字（这条 801 字）");
-    // 排版用的 ZWNJ / ZWJ / 软连字符放行
-    expect(byId(resolvePolicies([{ id: "executor", keep: "a\u200cb\u200dc\u00add" }]).policies, "executor")!.keep).toBe("a\u200cb\u200dc\u00add");
+    // 排版用的 ZWNJ / ZWJ 放行；软连字符 CC 会吞掉、核对对不上，拒收（#171 审查 P2-2，真 CC 实测）
+    expect(keepOf("a\u200cb\u200dc")).toBe("a\u200cb\u200dc");
+    expect(normalizeCompactKeep("keep\u00adlist").ok).toBe(false);
+    // NFD 的「e + 组合重音」规范成预组合的 é：CC 画出来的就是它
+    expect(keepOf("cafe\u0301 卡号")).toBe("caf\u00e9 卡号");
   });
 
   test("normalizeCompactKeep 是唯一入口（T35 fleet.compactKeep 也调它）：先换行再判，边上的 U+2028 也拒收，长空格串不卡", () => {
-    expect(normalizeCompactKeep("保留进度")).toEqual({ ok: true, keep: "保留进度" });
-    expect(normalizeCompactKeep("a\nb")).toEqual({ ok: true, keep: "a b" });
+    const ok = (keep: string) => ({ ok: true, keep }) as unknown as CompactKeepResult;
+    expect(normalizeCompactKeep("保留进度")).toEqual(ok("保留进度"));
+    expect(normalizeCompactKeep("a\nb")).toEqual(ok("a b"));
     for (const v of ["  ", "\r\n", 3, null, "\u009b", "\u2028保留", "保留\u2029", "\ufeff保留"]) expect(normalizeCompactKeep(v).ok).toBe(false);
+    // CC 里「\ + 回车」是换行：结尾的反斜杠拒收（adv2 P2-4）；中间的不影响
+    expect(normalizeCompactKeep("保留卡号\\")).toEqual({ ok: false, why: expect.stringContaining("反斜杠") });
+    expect(normalizeCompactKeep("保留卡号\\\n")).toMatchObject({ ok: false });
+    expect(normalizeCompactKeep("路径 C:\\x 保留")).toEqual(ok("路径 C:\\x 保留"));
     const t0 = performance.now();
-    expect(normalizeCompactKeep(`${" ".repeat(200_000)}x`)).toEqual({ ok: true, keep: "x" });
+    expect(normalizeCompactKeep(`${" ".repeat(200_000)}x`)).toEqual(ok("x"));
     expect(performance.now() - t0).toBeLessThan(500);
   });
 });
@@ -266,8 +274,8 @@ describe("boundaryView / compactCommand / ccLaunchSettings", () => {
   });
   test("压缩命令：compact 带清单（一行），save-compact 就是技能名", () => {
     expect(compactCommand("compact", null)).toBe(`/compact ${DEFAULT_KEEP_LIST}`);
-    expect(compactCommand("compact", "只留卡号")).toBe("/compact 只留卡号");
-    expect(compactCommand("save-compact", "忽略")).toBe("/save-compact");
+    expect(compactCommand("compact", "只留卡号" as CompactKeep)).toBe("/compact 只留卡号");
+    expect(compactCommand("save-compact", "忽略" as CompactKeep)).toBe("/save-compact");
     expect(DEFAULT_KEEP_LIST).not.toContain("\n");
   });
   test("第 1 层：有 ccWindow 才带 autoCompactWindow", () => {

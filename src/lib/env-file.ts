@@ -11,6 +11,7 @@
 import { readFileSync } from "fs";
 import { REPO_ROOT } from "./repo-root.js";
 import { isSandbox } from "./sandbox.js";
+import { AUTOLOADED_ENV_FILES, isRepoEnvFile, isTestProcess } from "./test-guard.js";
 
 const KEY_LINE_RE = /^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=(.*)$/;
 
@@ -66,13 +67,30 @@ export function parseEnvRaw(text: string): Record<string, string> {
   return out;
 }
 
-/** 读并解析一个 .env；文件不存在 / 读不了返回 null（调用方决定「没配过」怎么处理） */
+/**
+ * 读并解析一个 .env；文件不存在 / 读不了返回 null（调用方决定「没配过」怎么处理）。
+ * 测试进程读仓库根的 .env 系列一律当没有（lib/test-guard.ts）：repoEnvVar、doctor、web-static、desktop-cli 都经这里，
+ * 读到了就会拿线上的端口 / 频道号去连、去认身份。测试自己造的临时 repoRoot 不受影响。
+ */
 export function readDotenvFileSync(path: string): Record<string, string> | null {
+  if (isTestProcess() && isRepoEnvFile(path)) return null;
+  return readUnguarded(path);
+}
+
+function readUnguarded(path: string): Record<string, string> | null {
   try {
     return parseDotenv(readFileSync(path, "utf-8"));
   } catch {
     return null;
   }
+}
+
+/**
+ * 不带测试闸：dir 下 Bun 会自动加载的 .env 系列合在一起（后者覆盖前者）。只给测试隔离自己用——
+ * tests/preload.ts 要知道哪些键是 Bun 从 cwd 加载进来的好删掉，bridge-url 要知道仓库 .env 配的端口好拒绝。
+ */
+export function readAutoloadedEnvUnguarded(dir: string): Record<string, string> {
+  return Object.assign({}, ...AUTOLOADED_ENV_FILES.map((f) => readUnguarded(`${dir}/${f}`) ?? {}));
 }
 
 /**

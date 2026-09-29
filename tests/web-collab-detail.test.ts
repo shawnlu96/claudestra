@@ -83,6 +83,11 @@ describe("审查与参与者", () => {
       { name: "codex", role: "reviewer", rounds: [2] },
     ]);
   });
+
+  test("跨实例委托：执行者是 extra.delegate", () => {
+    const delegated = { ...task, agent: null, extra: { delegate: "claudestra@Shawn" } };
+    expect(participants({ task: delegated, events: [] })[0]).toEqual({ name: "claudestra@Shawn", role: "executor" });
+  });
 });
 
 describe("英文界面的标点", () => {
