@@ -4,10 +4,10 @@
  * 伪造的按钮（算不出校验码、贴在别处、点在别的消息上）一律不执行；提案绑内容、过期、只生效一次。
  */
 import type { Database } from "bun:sqlite";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { beforeEach, describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import type { Delivery, Envelope } from "../src/bridge/router.js";
 import { canConfirmTeam, handleTeamButton, postProposalCard, teamConfirmRoute, type ConfirmDeps } from "../src/bridge/team-confirm.js";
 import { getMeta, listEvents, openLedger } from "../src/lib/ledger-store.js";
@@ -30,8 +30,17 @@ const upDraft = () => {
   if ("error" in d) throw new Error(d.error);
   return d;
 };
-// bridge 读 registry 找提议者的频道（测试的状态目录是临时的，见 tests/preload.ts）
-writeFileSync(REGISTRY_PATH, JSON.stringify({ socket: "s", agents: { "agent-pm": { channelId: "c-pm", status: "active" } } }));
+// bridge 读 registry 找提议者的频道。状态目录整个 bun test 进程共用（tests/preload.ts），跑完要还原：
+// 留着它，后面按「registry 在不在」决定自建的用例（preempt-stop）就会读到这份、找不到自己的 agent
+let savedRegistry: string | null = null;
+beforeAll(() => {
+  savedRegistry = existsSync(REGISTRY_PATH) ? readFileSync(REGISTRY_PATH, "utf-8") : null;
+  writeFileSync(REGISTRY_PATH, JSON.stringify({ socket: "s", agents: { "agent-pm": { channelId: "c-pm", status: "active" } } }));
+});
+afterAll(() => {
+  if (savedRegistry === null) rmSync(REGISTRY_PATH, { force: true });
+  else writeFileSync(REGISTRY_PATH, savedRegistry);
+});
 
 describe("planUp / planDown", () => {
   test("默认只配 PM；--dispatcher 新建 <project>-dispatch 并进名单；复用已有 agent 不新建；提案记下提议时的名单与班子", () => {
