@@ -65,8 +65,8 @@ Codex 的 ACP 策略（`CODEX_ACP_CONTROL`）：
 
 | 文件 | 职责 |
 |------|------|
-| `rpc.ts` | ndjson JSON-RPC 2.0 双向对端。手写，不加 SDK 依赖。没注册处理器的请求回 -32601，绝不悬着不答；流断了，在途请求全部失败 |
-| `turn.ts` | 回合循环：同一时刻只有一轮；忙时先试 steering，插不进就排队拼成下一轮；steer 撞上回合收尾时，适配器会另起一轮（`startedNewTurn`），这时靠线程状态等它结束；回合结束按 Stop hook 契约上报，bridge 回 block 就补一轮 `<hook_prompt>` |
+| `rpc.ts` | ndjson JSON-RPC 2.0 双向对端。手写，不加 SDK 依赖。<br>• 没注册处理器的请求回 -32601，绝不悬着不答。<br>• 入站先分清 request / notification / response；畸形响应（缺 jsonrpc、result/error 不是恰好一个）让请求失败，不算成功。<br>• 单行和未收完的半行都有字节上限（缺省 32 MiB，可配）：超了整条连接作废，日志只留截断摘要。<br>• 流断了，在途请求全部失败 |
+| `turn.ts` | 统一调度器：prompt、steering、适配器另起的外部回合、补 reply 都按到达顺序进同一个队列，同一时刻只有一轮。<br>• 有 steering 在途就不开新回合、也不算空闲：`startedNewTurn` 在新回合**开始**时就回，回包到之前那一轮已经在跑。<br>• 外部回合在适配器里已经在跑，先等它（它的结束信号由 IO 在处理回包的同一刻挂上，结束得再早也不漏）。<br>• 插不进的 steering 在原位置变回 prompt，并发失败也不乱序。<br>• 回合结束按 Stop hook 契约上报；bridge 回 block 就排一轮 `<hook_prompt>`，仍排在在跑的外部回合之后 |
 | `updates.ts` | `session/update` 翻成 Claude Code 形状的条目，和 rollout 翻译同形 |
 | `failures.ts` | 两种失败形态：AIR `sessionFailure` 按 id 去重；legacy 的 `usageLimitExceeded` JSON-RPC 错误按回合去重。另外处理 `-32000` 未登录；失败会翻成错误条目 |
 | `config.ts` | configOptions 的解析和本地校验，顶栏要的 `model_state`，额度卡的选项 |

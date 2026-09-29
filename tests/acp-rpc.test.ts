@@ -1,20 +1,30 @@
 import { describe, expect, test } from "bun:test";
 import { createRpcPeer, lineSplitter, METHOD_NOT_FOUND, RpcError, type RpcWire } from "../src/lib/acp/rpc.ts";
 
-/** 内存线路：sent 收我们写出去的行，feed 模拟对端发来的行，close 模拟子进程退出 */
+/** 内存线路：sent 收我们写出去的行，feed 模拟对端发来的行，close 模拟子进程退出，closedBy 记本端主动断开的原因 */
 function memWire() {
   const sent: any[] = [];
-  let onLine: (l: string) => void = () => {};
+  const closedBy: string[] = [];
+  let onData: (c: string | Uint8Array) => void = () => {};
   let onClose: (w: string) => void = () => {};
   const wire: RpcWire = {
     write: (line) => sent.push(JSON.parse(line)),
-    onLine: (cb) => (onLine = cb),
+    onData: (cb) => (onData = cb),
     onClose: (cb) => (onClose = cb),
+    close: (why) => closedBy.push(why),
   };
-  return { wire, sent, feed: (m: object | string) => onLine(typeof m === "string" ? m : JSON.stringify(m)), close: (w = "exit") => onClose(w) };
+  return {
+    wire,
+    sent,
+    closedBy,
+    feed: (m: object | string) => onData((typeof m === "string" ? m : JSON.stringify(m)) + "\n"),
+    raw: (c: string | Uint8Array) => onData(c),
+    close: (w = "exit") => onClose(w),
+  };
 }
 
 const tick = () => new Promise((r) => setTimeout(r, 0));
+const quiet = { log: () => {} };
 
 describe("lineSplitter", () => {
   test("跨 chunk 的半行攒着，空行丢掉，字节流按 UTF-8 解", () => {
@@ -25,24 +35,57 @@ describe("lineSplitter", () => {
     push(new TextEncoder().encode(':"中文"}\n'));
     expect(lines).toEqual(['{"a":1}', '{"b":"中文"}']);
   });
+
+  test("没有换行的半行攒过上限 → onOverflow，之后再来什么都不吐（审查探针：8 个 1 MiB 块不再被攒着）", () => {
+    const got: string[] = [];
+    const why: string[] = [];
+    const push = lineSplitter((l) => got.push(l), 4 * 1024 * 1024, (w) => why.push(w));
+    const piece = "x".repeat(1024 * 1024);
+    for (let i = 0; i < 8; i++) push(piece);
+    push("\n");
+    push('{"ok":1}\n');
+    expect(got).toEqual([]);
+    expect(why.length).toBe(1);
+    expect(why[0]).toContain("4194304");
+    expect(why[0].length).toBeLessThan(400); // 日志只留截断摘要
+  });
+
+  test("一个 chunk 里的整行超限同样拦下，前面的正常行照吐；按字节算（中文 3 字节）", () => {
+    const got: string[] = [];
+    const why: string[] = [];
+    const push = lineSplitter((l) => got.push(l), 10, (w) => why.push(w));
+    push("ok\n中文中文\nlater\n"); // 「中文中文」12 字节 > 10
+    expect(got).toEqual(["ok"]);
+    expect(why.length).toBe(1);
+  });
+
+  test("刚好等于上限的行放行", () => {
+    const got: string[] = [];
+    const push = lineSplitter((l) => got.push(l), 6, () => {});
+    push("中文\n");
+    expect(got).toEqual(["中文"]);
+  });
 });
 
 describe("createRpcPeer", () => {
-  test("请求带递增 id，响应按 id 回到对应的 promise", async () => {
+  test("请求带递增 id，响应按 id 回到对应的 promise；result:null 合法", async () => {
     const m = memWire();
-    const rpc = createRpcPeer(m.wire, () => {});
+    const rpc = createRpcPeer(m.wire, quiet);
     const a = rpc.request("initialize", { protocolVersion: 1 });
     const b = rpc.request("session/new", { cwd: "/x" });
-    expect(m.sent.map((s) => [s.jsonrpc, s.id, s.method])).toEqual([["2.0", 1, "initialize"], ["2.0", 2, "session/new"]]);
+    const c = rpc.request("session/set_mode", {});
+    expect(m.sent.map((s) => [s.jsonrpc, s.id, s.method])).toEqual([["2.0", 1, "initialize"], ["2.0", 2, "session/new"], ["2.0", 3, "session/set_mode"]]);
     m.feed({ jsonrpc: "2.0", id: 2, result: { sessionId: "s" } });
     m.feed({ jsonrpc: "2.0", id: 1, result: { protocolVersion: 1 } });
+    m.feed({ jsonrpc: "2.0", id: 3, result: null });
     expect(await a).toEqual({ protocolVersion: 1 });
     expect(await b).toEqual({ sessionId: "s" });
+    expect(await c).toBeNull();
   });
 
   test("错误响应变成 RpcError，code / data 原样保留（额度、未登录靠它们认）", async () => {
     const m = memWire();
-    const rpc = createRpcPeer(m.wire, () => {});
+    const rpc = createRpcPeer(m.wire, quiet);
     const p = rpc.request("session/prompt", {});
     m.feed({ jsonrpc: "2.0", id: 1, error: { code: -32603, message: "Internal error", data: { codexErrorInfo: "usageLimitExceeded" } } });
     const e = await p.catch((x) => x);
@@ -51,9 +94,24 @@ describe("createRpcPeer", () => {
     expect(e.data).toEqual({ codexErrorInfo: "usageLimitExceeded" });
   });
 
-  test("对端的请求：有处理器回结果，没有回 -32601，处理器抛错回错误——绝不悬着", async () => {
+  test("畸形响应不算成功（审查探针 {\"id\":1}）：缺 jsonrpc、result/error 都没有或都有、error 缺 code，一律让请求失败", async () => {
     const m = memWire();
-    const rpc = createRpcPeer(m.wire, () => {});
+    const rpc = createRpcPeer(m.wire, quiet);
+    const cases = [
+      { id: 1 },
+      { jsonrpc: "2.0", id: 2 },
+      { jsonrpc: "2.0", id: 3, result: 1, error: { code: 1, message: "x" } },
+      { jsonrpc: "2.0", id: 4, error: { message: "no code" } },
+      { id: 5, result: {} },
+    ];
+    const reqs = cases.map((_, i) => rpc.request(`m${i}`).then(() => "resolved", (e) => e.message));
+    for (const c of cases) m.feed(c);
+    for (const r of await Promise.all(reqs)) expect(r).toContain("不合规");
+  });
+
+  test("对端的请求：有处理器回结果，没有回 -32601，处理器抛错回错误，缺 jsonrpc 回 -32600——绝不悬着", async () => {
+    const m = memWire();
+    const rpc = createRpcPeer(m.wire, quiet);
     rpc.onRequest("session/request_permission", () => ({ outcome: { outcome: "cancelled" } }));
     rpc.onRequest("boom", () => {
       throw new RpcError(-32602, "bad", { x: 1 });
@@ -61,33 +119,37 @@ describe("createRpcPeer", () => {
     m.feed({ jsonrpc: "2.0", id: 7, method: "session/request_permission", params: {} });
     m.feed({ jsonrpc: "2.0", id: 8, method: "fs/read_text_file", params: {} });
     m.feed({ jsonrpc: "2.0", id: 9, method: "boom" });
+    m.feed({ id: 10, method: "session/request_permission" });
     await tick();
     // 回答是异步的，先后不保证：按 id 排好再比
     expect([...m.sent].sort((x, y) => x.id - y.id)).toEqual([
       { jsonrpc: "2.0", id: 7, result: { outcome: { outcome: "cancelled" } } },
       { jsonrpc: "2.0", id: 8, error: { code: METHOD_NOT_FOUND, message: "method not found: fs/read_text_file" } },
       { jsonrpc: "2.0", id: 9, error: { code: -32602, message: "bad", data: { x: 1 } } },
+      { jsonrpc: "2.0", id: 10, error: { code: -32600, message: 'Invalid Request: jsonrpc must be "2.0"' } },
     ]);
   });
 
-  test("通知分发给处理器，不回任何东西；坏行只记日志", async () => {
+  test("通知分发给处理器，不回任何东西；坏行、缺 jsonrpc 的通知、数组只记日志", async () => {
     const m = memWire();
     const logs: string[] = [];
-    const rpc = createRpcPeer(m.wire, (s) => logs.push(s));
+    const rpc = createRpcPeer(m.wire, { log: (s) => logs.push(s) });
     const got: any[] = [];
     rpc.onNotification("session/update", (p) => got.push(p));
     m.feed({ jsonrpc: "2.0", method: "session/update", params: { update: { sessionUpdate: "plan" } } });
+    m.feed({ method: "session/update", params: { forged: true } });
     m.feed("not json");
+    m.feed("[1,2]");
     await tick();
     expect(got).toEqual([{ update: { sessionUpdate: "plan" } }]);
     expect(m.sent).toEqual([]);
-    expect(logs.some((l) => l.includes("not json"))).toBe(true);
+    expect(logs.length).toBe(3);
   });
 
   test("通知不带 params 字段就不写 params；超时的请求单独失败，迟到的响应只记日志", async () => {
     const m = memWire();
     const logs: string[] = [];
-    const rpc = createRpcPeer(m.wire, (s) => logs.push(s));
+    const rpc = createRpcPeer(m.wire, { log: (s) => logs.push(s) });
     rpc.notify("session/cancel", { sessionId: "s" });
     expect(m.sent[0]).toEqual({ jsonrpc: "2.0", method: "session/cancel", params: { sessionId: "s" } });
     const p = rpc.request("slow", undefined, { timeoutMs: 5 });
@@ -99,7 +161,7 @@ describe("createRpcPeer", () => {
 
   test("流断了：在途请求全部失败，之后的请求直接拒绝，也不再往外写", async () => {
     const m = memWire();
-    const rpc = createRpcPeer(m.wire, () => {});
+    const rpc = createRpcPeer(m.wire, quiet);
     const p = rpc.request("session/prompt", {});
     m.close("code 1");
     expect(await p.catch((e) => e.message)).toContain("code 1");
@@ -107,5 +169,20 @@ describe("createRpcPeer", () => {
     expect(await rpc.request("x").catch((e) => e.message)).toContain("已断");
     rpc.notify("session/cancel", {});
     expect(m.sent.length).toBe(1);
+  });
+
+  test("对端输出超长行：整条连接作废（在途请求失败、线路被本端断开），日志只留摘要，不截断后接着解析", async () => {
+    const m = memWire();
+    const logs: string[] = [];
+    const rpc = createRpcPeer(m.wire, { log: (s) => logs.push(s), maxLineBytes: 1024 });
+    const p = rpc.request("session/prompt", {});
+    m.raw(`{"jsonrpc":"2.0","id":1,"result":"${"y".repeat(4096)}`);
+    expect(await p.catch((e) => e.message)).toContain("超长行");
+    expect(rpc.closed).toBe(true);
+    expect(m.closedBy).toEqual(["line too long"]);
+    expect(logs.length).toBe(1);
+    expect(logs[0].length).toBeLessThan(400);
+    m.raw('"}\n');
+    expect(logs.length).toBe(1);
   });
 });
