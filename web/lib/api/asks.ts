@@ -23,6 +23,11 @@ export function answerAskCard(project: string, id: string, body: { choices?: str
   return api(`/ledger/${encodeURIComponent(project)}/asks/${encodeURIComponent(id)}/answer`, { method: "POST", json: body, timeoutMs: 15_000 });
 }
 
+/** 删卡（owner 本人）：开着的撤销 / 收起，已结案的从列表隐藏（bridge/ask-dismiss.ts） */
+export function dismissAskCard(project: string, id: string): Promise<{ ok: boolean }> {
+  return api(`/ledger/${encodeURIComponent(project)}/asks/${encodeURIComponent(id)}/dismiss`, { method: "POST", json: {}, timeoutMs: 15_000 });
+}
+
 /** 一条 ask（聊天里「答复：<标题>」引用条按 askId 取标题）；看不见的 404 */
 export function fetchAsk(id: string): Promise<{ ok: boolean; ask: WebAsk }> {
   return api(`/asks/${encodeURIComponent(id)}`, { timeoutMs: 10_000 });

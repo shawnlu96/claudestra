@@ -4,6 +4,7 @@
  * 顺带报网页可见性（POST /presence，推送规则据此判 owner 在不在）：切前台 / 后台各一次，可见时每分钟一次。
  * 凭据读不了台账（403）就当没有待办，也不再轮询；拉不到（老 bridge 404、503、断网、超时）先当 partial（asks-model replyAskState）。切机器由调用方换 key 重挂（start 见到新 key 先清空）。
  * 作答是乐观的（T11b 第 8 条）：answer() 提交前就把卡标成已答（移出「等你处理」、计数减 1），服务端确认 / SSE 回来再校正，失败回滚并在卡上留原因。
+ * 删卡（dismiss，T61）同样乐观：点下去就不显示，失败回来并留原因。
  * 线上 owner 反映答完卡片迟迟不走：作答接口要等投递给 agent（抓屏判忙、读 registry）才回 202，机器一忙就拖好几秒。
  */
 import { useSyncExternalStore } from "react";
@@ -71,16 +72,16 @@ const note = (id: string, n: AskNote | null) => {
 
 /**
  * 乐观作答：先盖上「已答」再提交；成功等服务端确认（SSE / 下一次拉取），失败撤掉那一笔、留下原因，再重拉一次以服务端为准。
- * 出错不再往外抛：原因记在 notes 里由卡片显示；返回成没成
+ * 出错不再往外抛：原因记在 notes 里由卡片显示；返回成没成。删卡（dismiss）走同一套，只是盖上去的是「删了」
  */
-async function answer(id: string, shown: PendingAnswer["answer"], submit: () => Promise<unknown>, words: { ok: string; fail: (e: unknown) => string }): Promise<boolean> {
-  const mine: PendingAnswer = { at: Date.now(), answer: shown, inFlight: true };
+async function optimistic(id: string, over: Omit<PendingAnswer, "at" | "inFlight">, submit: () => Promise<unknown>, words: { ok: string; fail: (e: unknown) => string }): Promise<boolean> {
+  const mine = { ...over, at: Date.now(), inFlight: true } as PendingAnswer;
   pending.set(id, mine);
   show({ notes: note(id, null) });
   try {
     await submit();
     // 盖多久从请求回来算；到点自己撤（不等下一次拉取），服务端还说开着就回到「等你处理」
-    if (pending.get(id) === mine) pending.set(id, { at: Date.now(), answer: shown });
+    if (pending.get(id) === mine) pending.set(id, { ...over, at: Date.now() } as PendingAnswer);
     setTimeout(() => show(), PENDING_MAX_MS + 1);
     set({ notes: note(id, { ok: true, text: words.ok }) });
     return true;
@@ -93,6 +94,10 @@ async function answer(id: string, shown: PendingAnswer["answer"], submit: () => 
     void refresh();
   }
 }
+
+const answer = (id: string, shown: NonNullable<PendingAnswer["answer"]>, submit: () => Promise<unknown>, words: { ok: string; fail: (e: unknown) => string }) =>
+  optimistic(id, { answer: shown }, submit, words);
+const dismiss = (id: string, submit: () => Promise<unknown>, fail: (e: unknown) => string) => optimistic(id, { dismiss: true }, submit, { ok: "", fail });
 
 /** 拉取序号：先发后到的旧结果（例如写库前发出的 30 秒轮询）不能盖掉后发先到的新结果 */
 let fetchSeq = 0;
@@ -154,6 +159,7 @@ export const asksStore = {
   },
   refresh,
   answer,
+  dismiss,
   openDrawer: (focus: string | null = null) => enter(focus),
   closeDrawer: leave,
   /** 「回到对话」：只收起、不出栈——会话页的 #chat 压在 #asks 上面，从会话左滑回来抽屉重新打开 */

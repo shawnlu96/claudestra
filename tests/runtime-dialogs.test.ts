@@ -18,8 +18,8 @@ const USAGE_LIMIT =
 const CODEX_PANE = ["• 我先跑一遍测试。", "", `■ ${USAGE_LIMIT}`, "", "", "› Improve documentation in @filename", "", "  gpt-5.6 high · 100% left · ~/repo"].join("\n");
 
 describe("内置规则：Codex 额度用完", () => {
-  test("rollout 原文画在 Codex 窗口末尾 → 建一条，context 是原文", () => {
-    expect(detectCodexRuntimeDialog(CODEX_PANE, "codex", NO_FILE)).toEqual({ title: "Codex 额度用完了", context: USAGE_LIMIT });
+  test("rollout 原文画在 Codex 窗口末尾 → 建一条，context 是原文、标成额度卡", () => {
+    expect(detectCodexRuntimeDialog(CODEX_PANE, "codex", NO_FILE)).toEqual({ title: "Codex 额度用完了", context: USAGE_LIMIT, quota: true });
   });
 
   test("不是 Codex 窗口（Claude / Pi / 查不到 runtime）→ 一律不认", () => {
