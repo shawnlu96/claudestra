@@ -25,20 +25,31 @@ function escalationText(agent: string, err: string): string {
 
 export function startApiErrorResume(d: ApiErrorResumeDeps): void {
   const states = new Map<string, ApiErrorState>();
-  subscribeEvents({}, (evt) => {
-    const ts = Date.parse(evt.ts) || Date.now();
-    if (evt.type === "api_error_turn") {
-      const err = String((evt.data as { error?: unknown }).error ?? "");
-      if (isQuotaError(err)) return void console.log(`⏸ 回合撞额度结束: ${evt.agent}（${err}）→ 不自动续跑，交给额度闸`);
-      const r = noteApiError(states, evt.chatId, err, ts);
-      console.log(`⚠️ 回合以 API 错误结束: ${evt.agent}（${err || "API Error"}）→ ${r === "track" ? "60s 后自动续跑" : "续跑后再撞，升级到频道"}`);
-      recordMetric("api_error_turn", { agent: evt.agent, meta: { error: err, action: r } });
-      if (r === "escalate") escalate(d, evt.agent, evt.chatId, err);
-      return;
-    }
-    if (countsAsActivity(evt.type, evt.data)) noteActivity(states, evt.chatId, ts);
-  });
+  subscribeEvents({}, (evt) => onResumeEvent(d, states, evt));
   setInterval(() => resumeDue(d, states), 15_000);
+}
+
+type ResumeEvent = { type: string; agent: string; chatId: string; ts: string; data: Record<string, unknown> };
+
+/**
+ * 一条事件怎么影响续跑计划（tests/api-error-resume.test.ts 按事件顺序测）。撞额度要撤掉已经挂上的续跑：
+ * 先来 server_error 挂了计划、紧接着又撞额度，不撤的话 61 秒后照旧投「继续」，续了必然再撞（T52 Codex 复审 #208 P2）
+ */
+export function onResumeEvent(d: ApiErrorResumeDeps, states: Map<string, ApiErrorState>, evt: ResumeEvent): void {
+  const ts = Date.parse(evt.ts) || Date.now();
+  if (evt.type === "api_error_turn") {
+    const err = String(evt.data.error ?? "");
+    if (isQuotaError(err)) {
+      const had = states.delete(evt.chatId);
+      return void console.log(`⏸ 回合撞额度结束: ${evt.agent}（${err}）→ 不自动续跑，交给额度闸${had ? "（撤掉已挂上的续跑）" : ""}`);
+    }
+    const r = noteApiError(states, evt.chatId, err, ts);
+    console.log(`⚠️ 回合以 API 错误结束: ${evt.agent}（${err || "API Error"}）→ ${r === "track" ? "60s 后自动续跑" : "续跑后再撞，升级到频道"}`);
+    recordMetric("api_error_turn", { agent: evt.agent, meta: { error: err, action: r } });
+    if (r === "escalate") escalate(d, evt.agent, evt.chatId, err);
+    return;
+  }
+  if (countsAsActivity(evt.type, evt.data)) noteActivity(states, evt.chatId, ts);
 }
 
 function escalate(d: ApiErrorResumeDeps, agent: string, chatId: string, err: string): void {

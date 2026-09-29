@@ -4,6 +4,7 @@ import {
   ACTIVITY_GRACE_MS, RESUME_DELAY_MS, RESUME_WINDOW_MS, countsAsActivity, dueForResume, markResumed, noteActivity, noteApiError, resumeText,
   type ApiErrorState,
 } from "../src/lib/api-error-resume.js";
+import { onResumeEvent } from "../src/bridge/api-error-resume-wiring.js";
 
 const T0 = 1_000_000;
 
@@ -68,5 +69,25 @@ describe("isQuotaError：撞额度不自动续跑（T52 He 审 #208 P2）", () =
   });
   test("网络 / 证书 / 未知错误照常续跑", () => {
     for (const e of ["UNKNOWN_CERTIFICATE_VERIFICATION_ERROR", "stream disconnected", "unknown", ""]) expect(isQuotaError(e)).toBe(false);
+  });
+});
+
+describe("续跑接线：按事件顺序（bridge/api-error-resume-wiring.ts）", () => {
+  const deps = { client: () => undefined, deliver: async () => undefined, markAgentSource: () => {} };
+  const ev = (error: string, at: number) => ({ type: "api_error_turn", agent: "agent-x", chatId: "c9", ts: new Date(at).toISOString(), data: { error } });
+
+  test("先 server_error 挂上续跑、100ms 后又撞额度：撤掉计划，61 秒后不再投「继续」", () => {
+    const m = new Map<string, ApiErrorState>();
+    onResumeEvent(deps, m, ev("server_error", T0));
+    expect(m.has("c9")).toBe(true);
+    onResumeEvent(deps, m, ev("rate_limit", T0 + 100));
+    expect(dueForResume(m, T0 + 61_000)).toEqual([]);
+  });
+
+  test("反过来：先撞额度（不挂）、后来 server_error 照常挂上", () => {
+    const m = new Map<string, ApiErrorState>();
+    onResumeEvent(deps, m, ev("usage limit reached", T0));
+    onResumeEvent(deps, m, ev("server_error", T0 + 100));
+    expect(dueForResume(m, T0 + 100 + RESUME_DELAY_MS)).toEqual(["c9"]);
   });
 });
