@@ -10,7 +10,7 @@ import { AskQuestionCard } from "./ask-question-card";
 import { ReplyComponents } from "./reply-components";
 import { BgTaskPanel } from "./bg-task-panel";
 import { CcTaskPanel } from "./cc-task-panel";
-import { useT, getLang } from "@/lib/i18n";
+import { useT, getLang, tVerbatim, useLang } from "@/lib/i18n";
 import { BubbleMenu, SelectModeBar, useBubbleMenuTrigger } from "./bubble-menu";
 import { InlineActionContext, type InlineActionCtx } from "@/components/domd/inline-button";
 import { replyEchoMessageIds, isEchoSegment } from "../reply-echo";
@@ -46,7 +46,7 @@ const NO_ORDER: string[] = [];
 /** system 级事件（compact / 斜杠命令 / 中断 / 命令输出）的通用居中分隔条。
  *  与消息气泡视觉解耦：无头像无名字，两侧细线 + 小灰字；PC 端时间在左槽（msg-time.tsx）。 */
 const SystemDivider = memo(function SystemDivider({ m }: { m: ChatMessage }) {
-  const t = useT();
+  useLang(); // 切语言即时重渲；文字走 tVerbatim：内容可能是带 | 的命令原文，不能让 t() 当单复数拆掉前半
   // 进场动画只给实时新增(本地 id)——历史加载/对账替换的 h{seq} 节点不播,
   // 否则打开会话/切回对齐时整页一起闪一遍(owner 2026-07-16「更丝滑」)
   const anim = m.id.startsWith("h") ? "" : "chat-msg-in";
@@ -56,8 +56,8 @@ const SystemDivider = memo(function SystemDivider({ m }: { m: ChatMessage }) {
     <div className={`${anim} relative mb-[22px] flex select-none items-center gap-3`}>
       <GutterTime ts={m.ts} side="left" lead="system" />
       <span className="h-px flex-1 bg-base-content/10" />
-      <span className="max-w-[70%] shrink-0 truncate text-[11px] font-medium tracking-wide text-base-content/35">
-        {t(m.content)}
+      <span title={tVerbatim(m.content)} className="max-w-[70%] shrink-0 truncate text-[11px] font-medium tracking-wide text-base-content/35">
+        {tVerbatim(m.content)}
       </span>
       <HeaderTime ts={m.ts} />
       <span className="h-px flex-1 bg-base-content/10" />

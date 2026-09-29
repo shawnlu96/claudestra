@@ -17,8 +17,9 @@ import { existsSync, readdirSync, statSync } from "fs";
 import { open as fsOpen } from "fs/promises";
 import { join } from "path";
 import { projectJsonlPath, findJsonlBySessionId } from "./jsonl-cost.js";
-import { agentArchiveDir, ARCHIVE_ROOT } from "./session-archive.js";
-import { channelBodyText } from "./inbound-body.js";
+import { agentArchiveDir, ARCHIVE_ROOT, realpathWithin } from "./session-archive.js";
+import { channelBodyText, commandRecordLine, commandStdoutLine } from "./inbound-body.js";
+import { sanitizeComponents } from "./history-components.js";
 
 /** 超过此字节数的 session jsonl 走尾读(见 readSessionHistory)。与搜索同阈值。 */
 const MAX_HISTORY_FULL_READ_BYTES = 16 * 1024 * 1024;
@@ -173,60 +174,6 @@ export function isReplyTool(name: string): boolean {
   return name.startsWith("mcp__") && name.endsWith("__reply");
 }
 
-/** 去掉 ANSI 转义序列（local-command-stdout 里的 \x1b[1m 等，裸渲染是豆腐块）。 */
-function stripAnsi(s: string): string {
-  // eslint-disable-next-line no-control-regex
-  return s.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, "");
-}
-
-/** jsonl 里的 components 不可信——只放行结构完整的按钮行/选单行，其余丢弃。 */
-function sanitizeComponents(raw: unknown): ReplyComponentRow[] {
-  if (!Array.isArray(raw)) return [];
-  const out: ReplyComponentRow[] = [];
-  for (const row of raw) {
-    if (!row || typeof row !== "object") continue;
-    const r = row as Record<string, unknown>;
-    if (r.type === "buttons" && Array.isArray(r.buttons)) {
-      const buttons = r.buttons
-        .filter((b): b is Record<string, unknown> => !!b && typeof b === "object")
-        .filter((b) => typeof b.id === "string" && typeof b.label === "string")
-        .map((b) => ({
-          id: b.id as string,
-          label: b.label as string,
-          ...(typeof b.style === "string" ? { style: b.style } : {}),
-          ...(typeof b.emoji === "string" ? { emoji: b.emoji } : {}),
-        }));
-      if (buttons.length) out.push({ type: "buttons", buttons });
-    } else if ((r.type === "select" || r.type === "multiselect") && typeof r.id === "string" && Array.isArray(r.options)) {
-      const options = r.options
-        .filter((o): o is Record<string, unknown> => !!o && typeof o === "object")
-        .filter((o) => typeof o.label === "string" && typeof o.value === "string")
-        .map((o) => ({
-          label: o.label as string,
-          value: o.value as string,
-          ...(typeof o.description === "string" ? { description: o.description } : {}),
-        }));
-      if (options.length) {
-        // v2.14+ multiselect 与 select 同构，只多 min/max/submitLabel 三个可选字段。
-        // ⚠ 这里漏认一种类型的后果不是「样式不对」而是**整组交互从历史里消失**——
-        // 刷新页面后按钮就没了（owner 2026-07-25 实报「哪有多选按钮」）。
-        out.push({
-          type: r.type as "select" | "multiselect",
-          id: r.id,
-          ...(typeof r.placeholder === "string" ? { placeholder: r.placeholder } : {}),
-          ...(r.type === "multiselect" && typeof r.min === "number" ? { min: r.min } : {}),
-          ...(r.type === "multiselect" && typeof r.max === "number" ? { max: r.max } : {}),
-          ...(r.type === "multiselect" && typeof r.submitLabel === "string"
-            ? { submitLabel: r.submitLabel }
-            : {}),
-          options,
-        });
-      }
-    }
-  }
-  return out;
-}
-
 export interface HistoryPage {
   messages: HistoryMessage[];
   /** 文件内可显示消息总数（不含被过滤的 meta/tool_result 载荷） */
@@ -369,7 +316,7 @@ export async function listAgentSessions(
   if (archiveDir && existsSync(archiveDir)) {
     try {
       for (const f of readdirSync(archiveDir)) {
-        if (!f.endsWith(".jsonl")) continue;
+        if (!f.endsWith(".jsonl") || !realpathWithin(join(archiveDir, f), archiveDir)) continue; // 指到目录外的符号链接不读
         const sid = f.replace(/\.jsonl$/, "");
         const s = summarize(sid, "archive", join(archiveDir, f));
         if (s) byId.set(sid, s);
@@ -502,6 +449,40 @@ export async function readSessionHistory(
   }
 }
 
+/** system 类记录（parseHistoryLines 用）：压缩分界线、斜杠命令、回合耗时回填。处理了返回 true，其它 system 记录不进历史 */
+function applySystemRecord(rec: any, seq: number, ts: string | null, all: HistoryMessage[]): boolean {
+  if (rec.type !== "system") return false;
+  if (rec.subtype === "compact_boundary") {
+    // 纯文本不带装饰——system 条目的分隔线样式由各前端自己渲染
+    all.push({ seq, ts, role: "system", text: "上下文已压缩（compact）" });
+    return true;
+  }
+
+  // 新版 CC 把斜杠命令和它的输出记成成对的 system/local_command（<command-name>… 一条、<local-command-stdout>… 一条），不认就整条从历史里消失
+  if (rec.subtype === "local_command") {
+    const raw = typeof rec.content === "string" ? rec.content : "";
+    const out = commandStdoutLine(raw); // 先认输出：命令的输出里可能恰好印着 <command-name>…
+    const text = out === undefined ? commandRecordLine(raw) : out;
+    if (text) all.push({ seq, ts, role: "system", text });
+    return true;
+  }
+
+  // turn_duration → 回填到刚结束的那轮 assistant 的 turnMs。
+  // 只有正常收尾的回合才有这条(被打断的没有),前端据此给历史尾轮
+  // 渲染「✓ 完成 · 12.3s」——切后台错过 done 事件后刷新也能看到完成态。
+  if (rec.subtype === "turn_duration" && typeof rec.durationMs === "number") {
+    for (let j = all.length - 1; j >= 0; j--) {
+      if (all[j].role === "assistant") {
+        all[j].turnMs = rec.durationMs;
+        break;
+      }
+      if (all[j].role === "user") break; // 中间隔了用户消息就不回填
+    }
+    return true;
+  }
+  return false;
+}
+
 /**
  * 解析一段 jsonl 行为历史消息。seq = lineOffset + 行内下标,维持「全文件行号」
  * 坐标系(全读时 lineOffset=0;尾读时为窗口前缀的换行数)——与 searchSessionHistory
@@ -533,11 +514,7 @@ function parseHistoryLines(
     if (!rec) continue;
     const ts = typeof rec.timestamp === "string" ? rec.timestamp : null;
 
-    if (rec.type === "system" && rec.subtype === "compact_boundary") {
-      // 纯文本不带装饰——system 条目的分隔线样式由各前端自己渲染
-      all.push({ seq, ts, role: "system", text: "上下文已压缩（compact）" });
-      continue;
-    }
+    if (applySystemRecord(rec, seq, ts, all)) continue; // 压缩分界 / 斜杠命令 / 回合耗时
 
     if (rec.type === "attachment") {
       // v2.21.4 被队列吸收的入站消息:agent 忙时 channel 送达的消息先进 CC 队列,随后
@@ -557,20 +534,6 @@ function parseHistoryLines(
             all.push(msg);
           }
         }
-      }
-      continue;
-    }
-
-    // turn_duration → 回填到刚结束的那轮 assistant 的 turnMs。
-    // 只有正常收尾的回合才有这条(被打断的没有),前端据此给历史尾轮
-    // 渲染「✓ 完成 · 12.3s」——切后台错过 done 事件后刷新也能看到完成态。
-    if (rec.type === "system" && rec.subtype === "turn_duration" && typeof rec.durationMs === "number") {
-      for (let j = all.length - 1; j >= 0; j--) {
-        if (all[j].role === "assistant") {
-          all[j].turnMs = rec.durationMs;
-          break;
-        }
-        if (all[j].role === "user") break; // 中间隔了用户消息就不回填
       }
       continue;
     }
@@ -607,7 +570,7 @@ function parseHistoryLines(
       }
       if (!text.trim()) continue; // 纯 tool_result 载荷
       // TUI 斜杠命令记录（不带 isMeta 的裸 user 条目）不是用户打的字：
-      //   <command-name>/x</command-name> ± <command-message>…（顺序不定）→ system 轻条目「/x」
+      //   <command-name>/x</command-name> ± <command-message>… ± <command-args>…（顺序不定）→ system 轻条目「/x 参数」
       //   <local-command-stdout>输出</local-command-stdout> → system 轻条目（去 ANSI、截断）
       //   Pi 技能调用 <skill name="x" …>整份 SKILL.md</skill>[参数] → system 轻条目「/x 参数」
       // 不处理会把原始标签 / 整篇技能说明裸渲染成用户气泡。
@@ -620,17 +583,12 @@ function parseHistoryLines(
         continue;
       }
       if (/^<command-(name|message)>/.test(trimmed)) {
-        const cmd = /<command-name>(\/[\w:-]+)<\/command-name>/.exec(trimmed);
-        if (cmd) all.push({ seq, ts, role: "system", text: cmd[1] });
+        const cmd = commandRecordLine(trimmed);
+        if (cmd) all.push({ seq, ts, role: "system", text: cmd });
         continue; // 无 command-name 的畸形命令记录直接丢
       }
-      const stdout = /^<local-command-stdout>([\s\S]*)<\/local-command-stdout>$/.exec(trimmed);
-      if (stdout) {
-        const body = stripAnsi(stdout[1]).trim();
-        if (!body || body === "(no content)") continue;
-        all.push({ seq, ts, role: "system", text: body.length > 200 ? body.slice(0, 200) + "…" : body });
-        continue;
-      }
+      const stdout = commandStdoutLine(trimmed);
+      if (stdout !== undefined) { if (stdout) all.push({ seq, ts, role: "system", text: stdout }); continue; }
       const skill = /^<skill name="([^"]+)"[^>]*>[\s\S]*<\/skill>([\s\S]*)$/.exec(trimmed);
       if (skill) { all.push({ seq, ts, role: "system", text: `/${skill[1]} ${skill[2].trim()}`.trim() }); continue; }
       // 队列回放的裸斜杠命令：tmux 注入的 /compact 等经 CC 队列会额外落一条纯文本 user 记录，紧接着还有

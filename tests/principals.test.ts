@@ -7,6 +7,8 @@ import { tmpdir } from "os";
 import { join } from "path";
 import {
   newTokenPrincipal,
+  reservedNameError,
+  isOwnerPrincipal,
   tokenIdOf,
   findByBearer,
   findToken,
@@ -38,6 +40,19 @@ describe("newTokenPrincipal", () => {
     const b = newTokenPrincipal("b", ["x"]);
     expect(a.id).not.toBe(b.id);
     expect(a.secret).not.toBe(b.secret);
+  });
+});
+
+describe("保留名 web-ui（isOwnerPrincipal 凭它认老 web 前端的 owner token，T32）", () => {
+  test("新签的 token 不许叫 web-ui：大小写、首尾空白都拦；别的名字照签", () => {
+    for (const n of ["web-ui", "Web-UI", " web-ui ", "WEB-UI\t"]) {
+      expect([n, reservedNameError(n)]).toEqual([n, expect.stringContaining("保留名")]);
+      expect(() => newTokenPrincipal(n, ["*"])).toThrow("保留名");
+    }
+    for (const n of ["web-ui-2", "webui", "peer-web-ui", "张三"]) {
+      expect([n, reservedNameError(n)]).toEqual([n, null]);
+      expect(isOwnerPrincipal(newTokenPrincipal(n, ["*"]))).toBe(false);
+    }
   });
 });
 
@@ -112,7 +127,7 @@ describe("agentInScope", () => {
   });
 
   test("非 peer token 的 master 显式授权不受影响", () => {
-    const p = newTokenPrincipal("web-ui", ["*", "master"]);
+    const p = newTokenPrincipal("owner-console", ["*", "master"]);
     expect(agentInScope(p, "master")).toBe(true);
   });
 
