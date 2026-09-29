@@ -22,13 +22,15 @@ async function atomicWrite(dest: string, data: Uint8Array): Promise<void> {
   }
 }
 
-export async function copyIfLarger(src: string, dest: string): Promise<CopyOutcome> {
+/** onError 拿到失败原因（归档要把它写进结果说明，只说「失败」没法排查） */
+export async function copyIfLarger(src: string, dest: string, onError?: (e: Error) => void): Promise<CopyOutcome> {
   try {
     const s = await stat(src);
     if (existsSync(dest) && (await stat(dest)).size >= s.size) return "same";
     await atomicWrite(dest, await readFile(src));
     return "copied";
-  } catch {
+  } catch (e) {
+    onError?.(e as Error);
     return "failed"; // 源被 CC 清掉 / 盘满 / 没权限：原归档不动，调用方记失败，下次再试
   }
 }

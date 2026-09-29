@@ -4,11 +4,12 @@
  * 归档副本还得能被历史面板读出来（首行嗅探认出运行时再翻译）。
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { archiveSession } from "../src/lib/session-archive.js";
 import { testChildEnv } from "./test-env.js";
+import { realOpsDeps } from "../src/manager/ops-deps.js";
 import { encodePiSessionDir } from "../src/lib/pi-session.js";
 
 const home = mkdtempSync(join(tmpdir(), "archive-rt-home-"));
@@ -59,6 +60,12 @@ console.log(JSON.stringify({
 }));
 `;
 
+const DUAL_SCRIPT = `
+const { archiveAgentSession } = await import(${JSON.stringify(join(import.meta.dir, "../src/lib/session-archive.ts"))});
+const { archiveRoot, cwd, sid } = JSON.parse(process.argv.at(-1));
+console.log(JSON.stringify(await archiveAgentSession("agent-cx", { cwd, sessionId: sid, runtime: "codex" }, undefined, { archiveRoot })));
+`;
+
 describe("Codex agent 的归档（子进程，临时 HOME）", () => {
   const missingSid = "019a0000-0000-7000-8000-000000000000";
   let out: Record<string, any>;
@@ -88,8 +95,75 @@ describe("Codex agent 的归档（子进程，临时 HOME）", () => {
 
   test("rollout 不在：ok:false，说明写明是 Codex、去哪找过，不静默成功", () => {
     expect(out.missing).toMatchObject({ ok: false, archived: [] });
-    for (const s of ["Codex", "~/.codex/sessions", missingSid]) expect(out.missing.note).toContain(s);
+    for (const s of ["Codex", join(home, ".codex", "sessions"), missingSid]) expect(out.missing.note).toContain(s); // 报实际找过的根
     expect(existsSync(`${archiveRoot}-missing`)).toBe(false);
+  });
+});
+
+describe("CODEX_HOME 另设了根（T72 r1 P1-2）", () => {
+  test("HOME 下和 CODEX_HOME 下各有一份同 id 的 rollout：归档拷的是 CODEX_HOME 那份", () => {
+    const codexHome = join(home, "codex-home-b");
+    const inB = join(codexHome, "sessions", "2026", "09", "30", `rollout-2026-09-30T05-06-07-${CODEX_SID}.jsonl`);
+    mkdirSync(join(inB, ".."), { recursive: true });
+    writeFileSync(inB, L({ timestamp: TS, type: "session_meta", payload: { id: CODEX_SID, cwd, source: "B" } }) + "\n");
+    const dual = `${archiveRoot}-dual`;
+    const r = Bun.spawnSync([process.execPath, "-e", DUAL_SCRIPT, JSON.stringify({ archiveRoot: dual, cwd, sid: CODEX_SID })], {
+      env: testChildEnv({ HOME: home, CODEX_HOME: codexHome }),
+    });
+    if (r.exitCode !== 0) throw new Error(r.stderr.toString());
+    expect(JSON.parse(r.stdout.toString().trim().split("\n").at(-1)!).ok).toBe(true);
+    expect(readFileSync(join(dual, "agent-cx", `${CODEX_SID}.jsonl`), "utf8")).toBe(readFileSync(inB, "utf8"));
+  });
+});
+
+describe("复制失败不能报成功（T72 r1 P1-3）", () => {
+  const SID3 = "33333333-4444-5555-6666-777777777777";
+  test("源文件读不了：ok:false，说明带原因，不再是「归档已是最新」", async () => {
+    const src = join(home, "unreadable", `${SID3}.jsonl`);
+    mkdirSync(join(src, ".."), { recursive: true });
+    writeFileSync(src, '{"type":"user"}\n');
+    chmodSync(src, 0o000);
+    try {
+      const r = await archiveSession("agent-x", undefined, SID3, { srcPath: src, archiveRoot: `${archiveRoot}-p13` });
+      expect(r).toMatchObject({ ok: false, archived: [] });
+      expect(r.note).toContain("没拷上");
+      expect(r.note).toContain("EACCES");
+    } finally {
+      chmodSync(src, 0o644);
+    }
+  });
+
+  test("主文件拷上了、子代理文件拷失败：仍是 ok:false，已拷的照列", async () => {
+    const src = join(home, "sub-fail", `${SID3}.jsonl`);
+    const sub = join(home, "sub-fail", SID3, "subagents", "agent-a.jsonl");
+    mkdirSync(join(sub, ".."), { recursive: true });
+    writeFileSync(src, '{"type":"user"}\n');
+    writeFileSync(sub, '{"type":"assistant"}\n');
+    chmodSync(sub, 0o000);
+    try {
+      const r = await archiveSession("agent-x", undefined, SID3, { srcPath: src, archiveRoot: `${archiveRoot}-p13b` });
+      expect(r.ok).toBe(false);
+      expect(r.archived).toEqual([join(`${archiveRoot}-p13b`, "agent-x", `${SID3}.jsonl`)]);
+      expect(r.note).toContain("agent-a.jsonl");
+    } finally {
+      chmodSync(sub, 0o644);
+    }
+  });
+
+  test("kill / remove 用的 deps.archive：归档 ok:false 时写日志，不吞", async () => {
+    const prev = process.env.CODEX_HOME;
+    process.env.CODEX_HOME = join(home, "codex-empty"); // 空根：这个 thread 必然找不到，也不去扫真实 ~/.codex
+    const logged: string[] = [];
+    const orig = console.error;
+    console.error = (...a: unknown[]) => void logged.push(a.join(" "));
+    try {
+      await realOpsDeps.archive("agent-cx", { cwd, sessionId: "019a1111-0000-7000-8000-000000000000", runtime: "codex" });
+    } finally {
+      console.error = orig;
+      if (prev === undefined) delete process.env.CODEX_HOME;
+      else process.env.CODEX_HOME = prev;
+    }
+    expect(logged.some((l) => l.includes("[archive] agent-cx 归档失败") && l.includes("Codex 会话记录不存在"))).toBe(true);
   });
 });
 
