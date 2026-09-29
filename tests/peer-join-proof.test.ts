@@ -36,6 +36,7 @@ beforeAll(() => {
   // 假邀请方：兑换一律成功，证明按 mode 签（key=null = 老版本，不给证明）
   server = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: async (req) => {
     const body = await req.json() as { join: string; nonce?: string };
+    victimUrlDuringRedeem = (await readPeers()).httpPeers?.find((p) => p.name === "victim")?.baseUrl;
     const redeemer = keyFingerprint(req.headers.get(SIG_HEADERS.key)!);
     const nonce = mode.nonce ? mode.nonce(body.nonce ?? "") : body.nonce ?? "";
     const proof = mode.key ? signInviteProof(nonce, body.join, redeemer, mode.iid ?? "", mode.key) : null;
@@ -50,8 +51,11 @@ afterAll(() => {
 /** 手拼邀请串（encodePeerInviteV2 会自动带上本机的实例 id）；fp / iid 都是邀请方自报的 */
 const invite = (name: string, fp?: string, iid?: string) =>
   Buffer.from(JSON.stringify({ v: 2, name, url: url(), token: "t".repeat(32), join: `join-${name}-${"x".repeat(16)}`, ...(fp ? { fp } : {}), ...(iid ? { iid } : {}) })).toString("base64url");
+/** 假邀请方收到兑换时，本机 victim 记录的出站地址（证明核过之前不该被改） */
+let victimUrlDuringRedeem: string | undefined | null = null;
 async function joinWith(m: Mode, inv: string): Promise<Record<string, unknown>> {
   mode = m;
+  victimUrlDuringRedeem = null;
   const log = spyOn(console, "log").mockImplementation(() => {});
   try {
     await cmdPeerJoinAuto(inv, "", "", false);
@@ -104,6 +108,7 @@ describe("加入邀请：自报的指纹 / 实例 id 不能冒名合并", () => 
     const out = await joinWith({ key: keyM }, invite("victim", fpV, IID_V));
     expect(out.ok).toBe(false);
     expect(String(out.error)).toContain("不是同一把");
+    expect(victimUrlDuringRedeem).toBeUndefined(); // 等对方回复期间 victim 的地址也没被改过
     expect(await rec("victim")).toMatchObject({ fp: fpV, instanceId: IID_V });
     expect((await rec("victim"))?.baseUrl).toBeUndefined();
   });

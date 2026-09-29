@@ -193,7 +193,10 @@ export async function cmdPeerJoinAuto(inviteStr: string, agentsCsv: string, myUr
   const anchor = before ? (await peerAnchorOf())(before) : null;
   const rev = await prepareReverse(finalName, agents, myUrl, force);
   if ("error" in rev) { output({ ok: false, error: rev.error }); return; }
-  await upsertHttpPeer({ name: finalName, baseUrl: hs.url, outToken: hs.token, ...(rev.tokenId ? { inTokenId: rev.tokenId } : {}) });
+  const link = { name: finalName, baseUrl: hs.url, outToken: hs.token, ...(rev.tokenId ? { inTokenId: rev.tokenId } : {}) };
+  // 要合进有期望指纹的已有记录：持钥证明核过之前不动它（兑换要等对方回复，这段时间里它的地址不能先改成邀请里的）
+  const deferred = !!(before && anchor);
+  if (!deferred) await upsertHttpPeer(link);
   const rollback = async () => {
     if (before) {
       const data = await readPeers();
@@ -222,7 +225,7 @@ export async function cmdPeerJoinAuto(inviteStr: string, agentsCsv: string, myUr
     output({ ok: false, error: `加入失败（已回滚）: ${settled.error}`, hint: `${settled.hint}。对方那边已经把你加上了，请对方在 Peer 面板移除这条再重新邀请。` });
     return;
   }
-  await upsertHttpPeer({ name: finalName, ...settled.fields });
+  await upsertHttpPeer({ ...(deferred ? link : { name: finalName }), ...settled.fields });
   output({
     ok: true, peer: finalName, peerUrl: hs.url,
     remoteAgents: redeemRes?.agents ?? [],
