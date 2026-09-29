@@ -1126,6 +1126,10 @@ registerAdapter(createDiscordChatAdapter(discord));
 // Web-only: local adapter 常驻注册：Discord 模式下没有 local-* 地址流通，
 // 不会被命中；Web-only 模式下承接会话地址供给（create_channel）与出站落空。
 registerAdapter(createLocalChatAdapter());
+// Codex 回合失败时不发 hook ⇒ 替它补 StopFailure（bridge/codex-turn-failure.ts）。不放 Discord ready 里：web-only 永远等不到 ready
+startCodexTurnFailureWatch(async (channelId) => {
+  await fetch(`http://127.0.0.1:${BRIDGE_PORT}/hook`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ channelId, event: "StopFailure" }) });
+});
 
 discord.once("ready", async () => {
   setBotUserId(discord.user?.id || "");
@@ -1166,10 +1170,6 @@ discord.once("ready", async () => {
   // v2.7+ 注入链路查询做「窗口活着但 channel-server 掉线」哨兵
   startWedgeWatcher(discord, (channelId) => clients.has(channelId));
 
-  // Codex 回合失败时不发 hook ⇒ 替它补 StopFailure（bridge/codex-turn-failure.ts）
-  startCodexTurnFailureWatch(async (channelId) => {
-    await fetch(`http://127.0.0.1:${BRIDGE_PORT}/hook`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ channelId, event: "StopFailure" }) });
-  });
   // v2.24+ 回合以 API 错误结束 ⇒ 60s 无活动自动续跑一次（owner 2026-09-18；规则见 lib/api-error-resume.ts）
   const apiErrorStates = new Map<string, ApiErrorState>();
   subscribeEvents({}, (evt) => {

@@ -155,6 +155,32 @@ export function isPidAlive(pid: number): boolean {
   }
 }
 
+/** ps 的 etime（[[dd-]hh:]mm:ss）→ 秒；认不出 → NaN */
+export function etimeSeconds(s: string): number {
+  const m = /^(?:(\d+)-)?(?:(\d+):)?(\d+):(\d+)$/.exec(s.trim());
+  return m ? ((Number(m[1] ?? 0) * 24 + Number(m[2] ?? 0)) * 60 + Number(m[3])) * 60 + Number(m[4]) : NaN;
+}
+
+/** `ps -axo pid=,ppid=,etime=,command=` 里与 self 同一个父进程、比它早起（同一秒起的比 pid）的其它 channel-server */
+export function olderSiblingChannelServers(psOut: string, self: { pid: number; ppid: number }): number[] {
+  const rows = psOut.split("\n").map((l) => /^\s*(\d+)\s+(\d+)\s+(\S+)\s+(.*)$/.exec(l)).filter((m) => !!m)
+    .map((m) => ({ pid: Number(m[1]), ppid: Number(m[2]), age: etimeSeconds(m[3]), cmd: m[4] }));
+  const me = rows.find((r) => r.pid === self.pid);
+  if (!me || !Number.isFinite(me.age)) return [];
+  return rows.filter((r) => r.pid !== self.pid && r.ppid === self.ppid && /channel-server\.ts(\s|$)/.test(r.cmd)
+    && (r.age > me.age || (r.age === me.age && r.pid < self.pid))).map((r) => r.pid);
+}
+
+/**
+ * Codex 给子 agent 线程（spawn_agent）另起一份 MCP，继承同一个 DISCORD_CHANNEL_ID，握完手也去注册，和主线程那份
+ * 每 3~60 秒对抢一次频道。同一个 Codex 进程里已有更早的 channel-server = 自己是子线程那份，该 inert（lib/channel-mode.ts）。
+ * ps 跑不起来按「没有」处理：退回老行为（对抢），不能让主线程那份也连不上
+ */
+export function hasOlderChannelServerSibling(self = { pid: process.pid, ppid: process.ppid }): boolean {
+  const r = Bun.spawnSync(["ps", "-axo", "pid=,ppid=,etime=,command="], { stdout: "pipe", stderr: "ignore" });
+  return r.exitCode === 0 && olderSiblingChannelServers(r.stdout.toString(), self).length > 0;
+}
+
 /** 与设计里的 InboundSink 同形（合并后可换成 runtimes/types.ts 的定义） */
 export interface InboundSink {
   deliver(content: string, meta: Record<string, string>): Promise<{ ok: true } | { ok: false; error: string }>;

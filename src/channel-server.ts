@@ -14,7 +14,7 @@ import { resolveBridgeUrl } from "./lib/bridge-url.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { installCrashGuard } from "./lib/crash-guard.js";
 import { decideAfterReplaced } from "./lib/link-policy.js";
-import { channelServerMode, mcpCapabilities, shouldConnectBridge } from "./lib/channel-mode.js";
+import { channelServerMode, inertNotice, mcpCapabilities, shouldConnectBridge } from "./lib/channel-mode.js";
 import { REPO_ROOT } from "./lib/repo-root.js";
 import { channelInstructions } from "./lib/channel-instructions.js";
 import { typeIntoOwnPane } from "./lib/codex-tui-submit.js";
@@ -43,12 +43,12 @@ const MCP_NAME = process.env.MCP_NAME || "claudestra";
 // 地方设它，而且这个名字在别处惯指「状态目录」，留着只会被误用——直接取仓库根。
 const CLAUDESTRA_HOME = REPO_ROOT;
 
-// 没有 DISCORD_CHANNEL_ID = 用户自己开的会话（用户级 MCP 注册也会拉起我们）。
+// 没有 DISCORD_CHANNEL_ID = 用户自己开的会话（用户级 MCP 注册也会拉起我们）；Codex 子 agent 线程那份同样不抢频道。
 // 不 exit：退出会在用户的 /mcp 里留一条 ✘ failed。改为 0 工具空闲（见 lib/channel-mode.ts）
 const MODE = channelServerMode(process.env);
 const INERT = MODE === "inert";
 if (INERT) {
-  console.error("ℹ 没有 DISCORD_CHANNEL_ID：不是 Claudestra 启动的会话，以 0 工具空闲模式运行（不连 bridge）");
+  console.error(inertNotice(process.env));
 }
 
 // ============================================================
