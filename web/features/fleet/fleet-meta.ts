@@ -10,7 +10,7 @@ export const ACTION_META: Record<FleetActionKind, { label: string; hint: string 
   compact: { label: "压缩", hint: "带保留清单发 /compact；忙的排队，撞墙没开 LP 的不发。" },
   "lp-on": { label: "开 LP", hint: "只对撞墙中的会话；开着的跳过，忙的不发。" },
   "save-compact": { label: "存记忆再压缩", hint: "先存记忆再压缩；worktree 里的执行者改发 /compact。" },
-  text: { label: "发一段话", hint: "逐个投递，开头带「批量指令」来源头；正忙的先排队，这一轮结束再投。" },
+  text: { label: "发一段话", hint: "逐个投递，开头带「批量指令」来源头。" },
 };
 
 /** 最常用的三个排在分段按钮上，其余收进「更多」 */
