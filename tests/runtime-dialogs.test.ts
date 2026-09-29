@@ -31,6 +31,12 @@ describe("内置规则：Codex 额度用完", () => {
     expect(detectCodexRuntimeDialog(quoted, "codex", NO_FILE)).toBeNull();
   });
 
+  test("正文编号列表里引用这句话（末尾有「1. 」行）→ 不认：额度规则只认「■ 」行（PR B r2 P2-B）", () => {
+    const listed = ["• 总结：", `1. 上次报 ${USAGE_LIMIT}`, "2. 已处理", "› "].join("\n");
+    expect(detectCodexRuntimeDialog(listed, "codex", NO_FILE)).toBeNull();
+    expect(detectCodexRuntimeDialog([`• 上次是 ${USAGE_LIMIT}`, "› 1. Retry"].join("\n"), "codex", NO_FILE)).toBeNull();
+  });
+
   test("报错行已经滚出末尾 15 行（之后又跑了一整轮）→ 不认，开着的那条会被结案", () => {
     const later = Array.from({ length: 20 }, (_, i) => `• 输出第 ${i} 行`);
     expect(detectCodexRuntimeDialog([`■ ${USAGE_LIMIT}`, ...later].join("\n"), "codex", NO_FILE)).toBeNull();
@@ -52,5 +58,13 @@ describe("扩展规则：状态目录的 codex-dialogs.json", () => {
     writeFileSync(file, JSON.stringify([{ pattern: "model is overloaded", title: "模型过载" }]));
     expect(detectCodexRuntimeDialog("• 日志里写着 model is overloaded\n› ", "codex", file)).toBeNull();
     expect(detectCodexRuntimeDialog("■ Model is overloaded\n› ", "codex", file)?.title).toBe("模型过载");
+  });
+
+  test("选项行要紧跟在命中行下面：别处的「1. 」列表不算对话框", () => {
+    const file = join(dir, "codex-dialogs-3.json");
+    writeFileSync(file, JSON.stringify([{ pattern: "model is overloaded", title: "模型过载" }]));
+    const far = ["1. 先看日志", "2. 再重试", "• 日志里写着 model is overloaded", "› "].join("\n");
+    expect(detectCodexRuntimeDialog(far, "codex", file)).toBeNull();
+    expect(detectCodexRuntimeDialog("1. 日志里写着 model is overloaded\n2. 已处理\n› ", "codex", file)).toBeNull();
   });
 });

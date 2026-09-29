@@ -16,7 +16,8 @@ import type { Envelope } from "../src/bridge/router.js";
 import { auqAnswerSummary, auqEchoCard } from "../src/lib/auq-echo.js";
 import { answerEcho, channelAnswer } from "../src/lib/inbound-body.js";
 import { getAsk, listAsks, openAsk, patchAsk, type NewAsk } from "../src/lib/ledger-asks.js";
-import { readSessionHistory } from "../src/lib/session-history.js";
+import { readSessionHistory, unwrapChannelMessage } from "../src/lib/session-history.js";
+import { heldAcrossStopNote, withInterruptNote } from "../src/lib/turn-cuts.js";
 import { closeLedger, listEvents, openLedger } from "../src/lib/ledger-store.js";
 import type { RegistryAgent } from "../src/lib/registry.js";
 import { at, guest, owner } from "./asks-test-kit.js";
@@ -60,6 +61,13 @@ describe("作答回显（第 7 条）", () => {
   test("channelAnswer 只认 trigger=ask_answer 的；带注入头的也剥得掉", () => {
     expect(channelAnswer(' trigger="ask_answer" api="true"', `[🌐 来自 Web 端用户「owner」]\n\n${zh}\n[button:go]`)).toEqual({ askId: "ask_q1", wire: "[button:go]" });
     expect(channelAnswer(' trigger="user_message"', `${zh}\n[button:go]`)).toEqual({});
+  });
+  test("押在叫停之前、之后才送到的作答：先剥叫停抬头，刷新后 askId、原文都还在（PR B r2 P2-A）", () => {
+    const attrs = ' trigger="ask_answer" interrupt_note="true"';
+    const body = withInterruptNote(`${zh}\n[button:go]`, heldAcrossStopNote(Date.parse("2026-09-29T01:00:00Z"), Date.parse("2026-09-29T01:01:00Z")));
+    expect(channelAnswer(attrs, body)).toEqual({ askId: "ask_q1", wire: "[button:go]" });
+    const un = unwrapChannelMessage(`<channel source="claudestra" chat_id="api:owner:self" user="web"${attrs}>\n${body}\n</channel>`);
+    expect(un).toMatchObject({ askId: "ask_q1", wire: "[button:go]" });
   });
 });
 

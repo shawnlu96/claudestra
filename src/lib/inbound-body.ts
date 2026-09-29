@@ -154,7 +154,7 @@ export function answerEcho(content: string): AskAnswerRef & { text: string } {
 /** channel 包装的属性串 + 内文 → 这条是哪条 ask 的作答、owner 的原文（不是作答 → 空对象） */
 export function channelAnswer(attrs: string, body: string): AskAnswerRef {
   if (!ASK_ANSWER_RE.test(attrs)) return {};
-  const { askId, wire } = answerEcho(stripChannelHeader(body));
+  const { askId, wire } = answerEcho(stripChannelHeader(body, NOTE_ATTR_RE.test(attrs))); // 押过叫停的作答前面还有一段叫停抬头
   return { ...(askId ? { askId } : {}), ...(wire ? { wire } : {}) };
 }
 
