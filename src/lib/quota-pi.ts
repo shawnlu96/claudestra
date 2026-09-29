@@ -8,6 +8,17 @@
 import type { MachineUsage } from "./machine-usage.js";
 import type { ProviderEntry } from "./quota-layers.js";
 
+/** 套餐 / 余额条目（lib/quota-pi-plans.ts）和本机本周用量合成一张卡：同一个接入商只出一张，本周 tokens / 花费接在后面 */
+export function mergePiEntries(plans: ProviderEntry[], local: ProviderEntry[]): ProviderEntry[] {
+  const rest = new Map(local.map((e) => [e.id, e]));
+  const merged = plans.map((p) => {
+    const l = rest.get(p.id);
+    rest.delete(p.id);
+    return l ? { ...p, meters: [...p.meters, ...l.meters] } : p;
+  });
+  return [...merged, ...rest.values()];
+}
+
 export function piProviderEntries(m: Pick<MachineUsage, "piProviders" | "window" | "scannedAt"> | null): ProviderEntry[] {
   if (!m?.piProviders) return [];
   // 本周周期从 weekStart 起到扫描时刻；前端据 periodMinutes 写「本周」的口径

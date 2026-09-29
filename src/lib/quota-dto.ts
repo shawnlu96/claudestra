@@ -82,7 +82,7 @@ export interface CodexResetCreditsDto {
 const obj = (v: unknown): AnyRecord | null => (v && typeof v === "object" && !Array.isArray(v) ? (v as AnyRecord) : null);
 
 /** 百分比：负数 / 非数字不认；超过 100（超额）按 100 显示 */
-function pctOf(v: unknown): number | null {
+export function pctOf(v: unknown): number | null {
   if (typeof v !== "number" || !Number.isFinite(v) || v < 0) return null;
   return Math.min(100, Math.round(v * 10) / 10);
 }
@@ -96,7 +96,7 @@ const TS_MIN_MS = Date.UTC(2020, 0, 1);
 export const TS_MAX_MS = Date.UTC(2100, 0, 1);
 
 /** ISO 串 / Unix 秒 → ms；认不出或超出可信区间 null */
-function timeOf(v: unknown): number | null {
+export function timeOf(v: unknown): number | null {
   if (typeof v === "string" && !/^\d{4}-\d{2}-\d{2}T[\d:.]+(Z|[+-]\d{2}:?\d{2})?$/.test(v)) return null;
   const ms = resetTsMs(v);
   return ms !== null && ms >= TS_MIN_MS && ms < TS_MAX_MS ? ms : null;
