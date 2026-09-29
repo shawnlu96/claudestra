@@ -2,7 +2,7 @@
  * 协作视图详情面板（第二层）的纯逻辑：阶段用时条、最近 3 件事、审查摘要、参与者。
  * 输入是 GET /api/v1/ledger/:project/tasks/:id 的 {task, events, timeline}；单测 tests/web-collab-detail.test.ts。
  */
-import { bareAgent, type LedgerEventView, type LedgerTaskView, type Stage, type Tr } from "./collab-model";
+import { bareAgent, delegateOf, type LedgerEventView, type LedgerTaskView, type Stage, type Tr } from "./collab-model";
 import { fillParams } from "@/lib/i18n-fill";
 
 const zh: Tr = fillParams;
@@ -168,10 +168,10 @@ export interface Participant {
   rounds?: number[];
 }
 
-/** 执行者（task.agent）、PM（task.pm）、审查员（review 事件的 reviewer，按人去重、记轮次） */
+/** 执行者（task.agent，没有时是跨实例委托的 extra.delegate）、PM（task.pm）、审查员（review 事件的 reviewer，按人去重、记轮次） */
 export function participants(d: Pick<TaskDetail, "task" | "events">): Participant[] {
   const out: Participant[] = [];
-  const exec = bareAgent(d.task.agent);
+  const exec = bareAgent(d.task.agent) ?? delegateOf(d.task);
   if (exec) out.push({ name: exec, role: "executor" });
   const pm = bareAgent(d.task.pm);
   if (pm) out.push({ name: pm, role: "pm" });

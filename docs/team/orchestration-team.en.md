@@ -104,4 +104,5 @@ It lists the PM list, the dispatcher, and for each open task **who is holding it
 
 ## Related
 
+- Handing a task to an agent on another Claudestra instance: [cross-instance delegation](./peer-delegation.md) (Chinese)
 - Code: `src/manager/ledger-team-cmds.ts` (team-apply), `roles/`, `src/lib/team-*.ts`, `src/lib/ledger-handler.ts`, `src/lib/review-pack.ts`, `src/bridge/team-router.ts`, `src/bridge/team-confirm.ts`, `src/manager/team-up.ts`, `src/manager/ledger-dispatch-cmds.ts`
