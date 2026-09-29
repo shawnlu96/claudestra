@@ -19,7 +19,11 @@ function eventData(ctx: WriteCtx, e: EventDraft): Record<string, unknown> {
   return { ...e.data, imported: true, ...(ctx.approxTime ? { approxTime: true } : {}) };
 }
 
+/** `dispatch:` 前缀的幂等键留给派审（manager/ledger-dispatch-cmds.ts dispatchKey 按规则算出来）：别的事件先占掉，派审就记不上 */
+const DISPATCH_KEY = "dispatch:";
+
 export function insertEvent(db: Database, ctx: WriteCtx, e: EventDraft, primary: boolean): LedgerEvent {
+  if (primary && ctx.dedupKey?.startsWith(DISPATCH_KEY) && e.kind !== "dispatch") throw new LedgerError("invalid", `dedupKey 的 ${DISPATCH_KEY} 前缀只给 dispatch 事件用`);
   const r = db
     .prepare("INSERT INTO events (ts, actor, project, target, kind, text, data, dedupKey) VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING *")
     .get(ctx.now ?? Date.now(), ctx.actor, e.project, e.target, e.kind, e.text ?? "", JSON.stringify(eventData(ctx, e)), primary ? ctx.dedupKey || null : null);

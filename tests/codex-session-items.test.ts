@@ -6,7 +6,8 @@
  * 路径与个人信息已替换。
  */
 import { describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   codexCommandText,
@@ -43,10 +44,12 @@ for (const stateful of [true, false]) {
 
     test("code-mode 的 exec 包装与它的输出都不出现", () => {
       expect(toolUses(recs).some((t: any) => t.name === "exec")).toBe(false);
-      const results = recs.flatMap((r) =>
-        Array.isArray(r.message?.content) ? r.message.content.filter((b: any) => b.type === "tool_result") : [],
-      );
-      expect(results).toEqual([]);
+      const results = (type: string) =>
+        recs.filter((r) => r.type === type).flatMap((r) => (Array.isArray(r.message?.content) ? r.message.content.filter((b: any) => b.type === "tool_result") : []));
+      expect(results("user")).toEqual([]);
+      // McpToolCall 的结果跟调用同一条 assistant 记录（历史从这里取 reply 建出的 askId），id 对得上那次调用
+      const replyIds = toolUses(recs).filter((t: any) => t.name === "mcp__claudestra__reply").map((t: any) => t.id);
+      expect(results("assistant").map((b: any) => b.tool_use_id)).toEqual(replyIds);
     });
 
     test("AGENTS.md 注入块、引导消息不当用户发言；channel 包装标 isMeta", () => {
@@ -98,6 +101,15 @@ test("历史面板读得出 Codex 的 reply（经 session-source 首行嗅探认
   const users = page.messages.filter((m: any) => m.role === "user").map((m: any) => m.text);
   expect(users).toContain("hello from web");
   expect(users.some((t: string) => t.includes("AGENTS.md"))).toBe(false);
+});
+
+test("McpToolCall 的结果带着 reply 建出的 askId：历史气泡认得出是哪条「待你处理」（PR B r2 缺口 1）", async () => {
+  // channel-server 的 reply 结果（replyResultText）原样进 item.result；夹具是建 ask 之前的版本，这里换成带 askId 的那句
+  const lines = LINES.map((l) => (l.includes('"McpToolCall"') && l.includes("PONG-1") ? l.replace("Sent message(s): undefined", "Sent message(s): [] · ask ask_codex1") : l));
+  const file = join(mkdtempSync(join(tmpdir(), "codex-ask-")), "rollout.jsonl");
+  writeFileSync(file, `${lines.join("\n")}\n`);
+  const replies = (await readSessionHistory(file, { limit: 200 })).messages.filter((m: any) => m.replyText);
+  expect(replies.map((m: any) => [m.replyText, m.replyAskId])).toEqual([["PONG-1", "ask_codex1"], ["NUDGED", undefined], ["SLEPT", undefined]]);
 });
 
 test("Extension web.search → WebSearch{query}；其它扩展按 kind 命名", () => {

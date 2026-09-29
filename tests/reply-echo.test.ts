@@ -16,6 +16,7 @@ import {
   replyEchoMessageIds,
   isEchoSegment,
   ECHO_MIN_CHARS,
+  postReplyMessageIds,
 } from "@/features/chat/reply-echo";
 
 const LONG = "**没出问题** —— 那段报错是我自己复核脚本的两条「防呆守卫」拒绝了写入，不是仓库坏了。说清楚：两个 AssertionError 是我的脚本主动中止。";
@@ -131,5 +132,21 @@ describe("replyEchoMessageIds（形态②：紧随其后的独立消息）", () 
       { id: "a2", role: "assistant", segments: [{ kind: "text", text: LONG }] },
     ]);
     expect(ids.size).toBe(0);
+  });
+});
+
+describe("postReplyMessageIds：紧跟 reply 的纯旁白消息（默认收起，不看文字是否相同）", () => {
+  test("中文 reply 之后的英文复述也算；中间隔了别的旁白 / 用户消息 / 带工具的都不算", () => {
+    const ids = postReplyMessageIds([
+      { id: "a1", role: "assistant", segments: [{ kind: "text", text: "Checking CI" }, { kind: "reply", text: "发版完成" }] },
+      { id: "a2", role: "assistant", segments: [{ kind: "text", text: "Release is out and verified" }] },
+      { id: "a3", role: "assistant", segments: [{ kind: "text", text: "Main CI passed" }] },
+      { id: "a4", role: "assistant", replyText: "旧快照的回复" },
+      { id: "u1", role: "user", content: "好" },
+      { id: "a5", role: "assistant", segments: [{ kind: "text", text: "新回合开头的旁白" }] },
+      { id: "a6", role: "assistant", segments: [{ kind: "reply", text: "回复" }] },
+      { id: "a7", role: "assistant", segments: [{ kind: "text", text: "带工具的不算纯旁白" }], toolCalls: [{}] },
+    ]);
+    expect([...ids]).toEqual(["a2"]);
   });
 });

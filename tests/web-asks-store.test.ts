@@ -1,20 +1,24 @@
 /**
  * web/features/asks/asks-store.ts 的乐观作答状态机（PR0 审查 r1 的 P2-1～4、6）：到点自己撤、只撤自己那一笔、乱序拉取丢旧的、
  * 服务端结案后清掉失败红字。接口 mock 掉（@/lib/api/asks），拉取可以手动按顺序放行。
+ * 以及列表拉不到时（老 bridge 404、503、断网、超时）不让聊天气泡永久「正在核对」（PR B 第 3 轮 P1）。
  */
-import { beforeEach, expect, mock, test } from "bun:test";
+import { beforeEach, describe, expect, mock, test } from "bun:test";
 
 type A = Record<string, unknown>;
 interface AsksStore {
-  get(): { asks: A[]; notes: Record<string, { ok: boolean; text: string } | undefined> };
+  get(): { asks: A[]; loaded: boolean; full?: boolean; notes: Record<string, { ok: boolean; text: string } | undefined> };
   refresh(): Promise<void>;
+  start(key: string): () => void;
   answer(id: string, shown: unknown, submit: () => Promise<unknown>, words: { ok: string; fail: (e: unknown) => string }): Promise<boolean>;
 }
 let serverList: A[] = [];
 const queue: { resolve: (v: unknown) => void; snapshot: A[] }[] = [];
 let manual = false;
+let failWith: unknown = null;
 mock.module("@/lib/api/asks", () => ({
   fetchAsks: () => {
+    if (failWith) return Promise.reject(failWith);
     const snapshot = structuredClone(serverList);
     if (!manual) return Promise.resolve({ ok: true, asks: snapshot, now: Date.now() });
     return new Promise((resolve) => queue.push({ resolve, snapshot }));
@@ -25,7 +29,7 @@ mock.module("@/lib/api/asks", () => ({
 // 变量路径：根 tsconfig 没有 DOM 类型，store 用到 document / serviceWorker，只在运行时加载（类型取 AsksStore 的形状）
 const STORE = "@/features/asks/asks-store";
 const { asksStore } = (await import(STORE)) as { asksStore: AsksStore };
-const { askCounts, PENDING_MAX_MS } = await import("@/features/asks/asks-model");
+const { askCounts, ASK_LIST_WAIT_MS, PENDING_MAX_MS } = await import("@/features/asks/asks-model");
 const { ApiError } = await import("@/lib/api/client");
 
 const ask = (over: A): A => ({
@@ -37,12 +41,13 @@ const shown = { choices: [], labels: ["甲"], text: "", via: "web_card", at: 0 }
 const words = { ok: "OK", fail: (e: unknown) => `FAIL:${(e as Error).message}` };
 const tick = () => new Promise((r) => setTimeout(r, 5));
 const st = () => asksStore.get().asks.find((a) => a.id === "ask_1")?.state;
-const release = (fetches: typeof queue) => fetches.forEach((f) => f.resolve({ ok: true, asks: f.snapshot, now: 0 }));
+const release = (fetches: typeof queue, full?: boolean) => fetches.forEach((f) => f.resolve({ ok: true, asks: f.snapshot, full, now: 0 }));
 const realNow = Date.now;
 
 beforeEach(async () => {
   Date.now = realNow;
   manual = false;
+  failWith = null;
   queue.length = 0;
   serverList = [ask({ id: "ask_1" }), ask({ id: "ask_2" })];
   await asksStore.refresh();
@@ -106,4 +111,83 @@ test("断网失败留下的红字：这件在别处结案后清掉；失败立�
   serverList = [ask({ id: "ask_1", state: "answered", answer: { ...shown, via: "discord" } }), ask({ id: "ask_2" })];
   await asksStore.refresh();
   expect([st(), asksStore.get().notes.ask_1]).toEqual(["answered", undefined]);
+});
+
+describe("列表拉不到也不永久锁死：只有第一次请求还没回时是 loading", () => {
+  const g = globalThis as Record<string, unknown>;
+  const noop = () => undefined;
+  let n = 0;
+  const loadState = () => [asksStore.get().loaded, asksStore.get().full === true];
+  /** 换一台机器 = 快照从头来并发第一次拉取；start 要用的 window / document 只在这里临时补上。setTimeout 记下「最多等多久」那一个 */
+  function fresh(): { stop: () => void; slow: () => void } {
+    const saved = { window: g.window, document: g.document, setTimeout: globalThis.setTimeout };
+    g.window = { addEventListener: noop, removeEventListener: noop, location: { href: "http://x/chat", hash: "", search: "", pathname: "/chat" } };
+    g.document = { visibilityState: "visible", addEventListener: noop, removeEventListener: noop };
+    let slow: () => void = noop;
+    globalThis.setTimeout = ((f: () => void, ms: number) => (ms === ASK_LIST_WAIT_MS ? ((slow = f), 0) : saved.setTimeout(f, ms))) as typeof setTimeout;
+    let stop: () => void;
+    try {
+      stop = asksStore.start(`machine-${++n}`);
+    } finally {
+      globalThis.setTimeout = saved.setTimeout;
+    }
+    return { stop: () => (stop(), Object.assign(g, { window: saved.window, document: saved.document })), slow: () => slow() };
+  }
+
+  test("老 bridge 没有 /asks（404、405）、503、断网：第一次失败就回落 partial，之后一直失败也不回到 loading", async () => {
+    for (const err of [new ApiError("unknown endpoint", 404), new ApiError("method", 405), new ApiError("ledger", 503), new TypeError("Failed to fetch")]) {
+      failWith = err;
+      const s = fresh();
+      await tick();
+      expect(loadState()).toEqual([true, false]);
+      for (let i = 0; i < 3; i++) await asksStore.refresh();
+      expect(loadState()).toEqual([true, false]);
+      s.stop();
+    }
+  });
+
+  test("第一次请求迟迟不回：之前是 loading，等满 ASK_LIST_WAIT_MS 回落 partial；晚到的完整列表照样变 full", async () => {
+    manual = true;
+    const s = fresh();
+    await tick();
+    expect(loadState()).toEqual([false, false]);
+    s.slow();
+    expect(loadState()).toEqual([true, false]);
+    release(queue.splice(0), true);
+    await tick();
+    expect(loadState()).toEqual([true, true]);
+    s.stop();
+  });
+
+  test("拿到过完整列表后再失败：保留上一份（仍是 full）；404 才改口成 partial", async () => {
+    manual = true;
+    const s = fresh();
+    await tick();
+    release(queue.splice(0), true);
+    await tick();
+    manual = false;
+    failWith = new ApiError("ledger", 503);
+    await asksStore.refresh();
+    expect([...loadState(), asksStore.get().asks.length]).toEqual([true, true, 2]);
+    failWith = new ApiError("unknown endpoint", 404);
+    await asksStore.refresh();
+    expect([...loadState(), asksStore.get().asks.length]).toEqual([true, false, 0]);
+    s.stop();
+  });
+
+  test("上一台机器在飞的拉取换机器后才失败：不算这台的结果，这台还在等自己的第一次", async () => {
+    manual = true;
+    const a = fresh();
+    await tick();
+    const [old] = queue.splice(0);
+    a.stop();
+    const b = fresh();
+    await tick();
+    queue.splice(0);
+    failWith = new TypeError("Failed to fetch");
+    old.resolve(Promise.reject(failWith));
+    await tick();
+    expect(loadState()).toEqual([false, false]);
+    b.stop();
+  });
 });

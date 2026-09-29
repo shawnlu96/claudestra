@@ -198,6 +198,15 @@ export function codexCommandText(command: unknown): string {
   return parts.join(" ");
 }
 
+/**
+ * McpToolCall 的结果和调用在同一行到：跟 tool_use 放进同一条 assistant 记录（session-history 从这里取 reply 建出的 askId）。
+ * 别处（watcher、打断判定）只在 user 记录里认 tool_result，放在 assistant 里不会被当成一次工具结束或人的输入
+ */
+function mcpResultBlock(item: AnyRecord, id: string): AnyRecord[] {
+  const r = item.type === "McpToolCall" && item.result && typeof item.result === "object" ? (item.result as AnyRecord) : null;
+  return r ? [{ type: "tool_result", tool_use_id: id, content: codexTextOf(r.content) }] : [];
+}
+
 /** item_completed 里的结构化工具记录 → tool_use；不是工具（或与 response_item 重复）返回 null */
 function codexItemToolUse(item: AnyRecord): { id: string; name: string; input: AnyRecord } | null {
   const id = String(item.id ?? "");
@@ -319,7 +328,7 @@ export function codexLineToClaudeShape(line: string, state?: CodexTranslateState
     if (state?.bootstrapTurn) return null;
     const tu = codexItemToolUse(p.item as AnyRecord);
     if (!tu) return null;
-    return { type: "assistant", timestamp: ts, message: { content: [{ type: "tool_use", ...tu }] } };
+    return { type: "assistant", timestamp: ts, message: { content: [{ type: "tool_use", ...tu }, ...mcpResultBlock(p.item as AnyRecord, tu.id)] } };
   }
   if (e.type !== "response_item") return null;
 

@@ -532,7 +532,7 @@ export async function runDoctor(repoRoot: string): Promise<Check[]> {
     checkRuntime(),
     checkConfig(repoRoot),
     checkDaemons(),
-    checkUndeliveredAlerts(), checkStateFiles(),
+    checkUndeliveredAlerts(), checkStateFiles(), import("./doctor-peers.js").then((m) => m.checkLegacyPeers()), // 截止日前还没签名记录的老 peer
     checkBridge(repoRoot),
     checkIntegration(repoRoot),
     checkAgents(), import("./doctor-pending.js").then((m) => m.checkPendingOps(repoRoot)), // 做到一半的 create / kill / rename / update 与孤儿窗口、频道
