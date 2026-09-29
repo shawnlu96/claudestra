@@ -147,8 +147,7 @@ export interface Envelope {
     forwarded?: boolean;
     /** 打断抬头（bridge/preempt.ts 写入，renderContentForLocal 放在正文最前）：这条消息打断了什么 / 这是一条「停」 */
     interruptNote?: string;
-    /** owner 的「停」押在撞墙等待画面上时已当场记过（bridge/preempt.ts noteHeldStop）：每次重投又押回来不再记，免得清掉停之后才来的回程槽 */
-    heldStopNoted?: boolean;
+    heldStopNoted?: boolean; // owner 的「停」押在撞墙画面上时已当场记过（bridge/preempt.ts noteHeldStop）：重投不再记，免得清掉之后才来的回程槽
     /**
      * 只在目标主回合空闲时投（与 agent→agent 同规则），语义固定、别的任务直接复用（打断收尾提醒、T11a 的答复）：
      * - 主回合忙或正在压缩 → 进押后队列，Stop / 压缩结束 / 每分钟扫描时 flush 再投；
@@ -171,8 +170,7 @@ export interface Envelope {
 // ============================================================
 
 export type DeliveryOutcome =
-  // heldBy：押后的原因（note=queued 时）——额度闸 / 目标停在额度菜单（没发键，调用方要如实告诉发送方，bridge/quota-wall-wiring.ts）
-  | { kind: "sent"; discordMessageIds?: string[]; note?: string; heldBy?: "quota_wall" | "wall_menu" }   // 成功投递
+  | { kind: "sent"; discordMessageIds?: string[]; note?: string; heldBy?: "quota_wall" | "wall_menu" }   // 成功投递；heldBy = 押后原因（额度闸 / 停在额度菜单，没发键，bridge/quota-wall-wiring.ts）
   | { kind: "dropped"; reason: string }                               // 主动丢弃（信任检查 / 目标离线等）
   | { kind: "error"; error: Error };                                  // 失败
 
