@@ -10,7 +10,9 @@ import { translate } from "@/lib/chat/stream-shape";
 import { isUserEcho } from "@/features/chat/view-compose";
 import { liveAnswerText } from "@/features/chat/delta-clicks";
 import type { ChatMessage } from "@/features/chat/type";
-import { isMgmtButtonId, MGMT_BUTTON_IDS, MGMT_BUTTON_PREFIXES, replyAskState, type WebAsk } from "@/features/asks/asks-model";
+import { isMgmtButtonId, replyAskState, type WebAsk } from "@/features/asks/asks-model";
+import { RESERVED_BUTTONS as WEB_RESERVED } from "@/lib/chat/reserved-button-ids";
+import { RESERVED_BUTTONS } from "../src/lib/reserved-button-ids.js";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
@@ -109,13 +111,14 @@ describe("ask 移出列表后（结案超过 3 天）点旧按钮不会发出 [b
     expect(replyAskState([closedPanel], "full", "agent-x", { ...panel, replyAskId: "ask_9" }, [], NOW)).toMatchObject({ settled: true, hintId: "ask_9" });
   });
 
-  test("管理按钮清单与 bridge 的 handleMgmtButton 逐个对得上", () => {
-    const src = readFileSync(join(import.meta.dir, "../src/bridge/management.ts"), "utf8");
-    const ids = [...src.matchAll(/\bid === "([\w:-]+)"/g)].map((m) => m[1]);
-    const prefixes = [...src.matchAll(/\bid\.startsWith\("([\w:-]+)"\)/g)].map((m) => m[1]);
-    expect([...new Set(ids)].sort()).toEqual([...MGMT_BUTTON_IDS].sort());
-    expect([...new Set(prefixes)].sort()).toEqual([...MGMT_BUTTON_PREFIXES].sort());
-    expect([isMgmtButtonId("swmodel_yes:gpt"), isMgmtButtonId("deploy")]).toEqual([true, false]);
+  test("网页认的管理按钮就是 bridge 的保留 id 表：twin 两份去注释后逐行一致、认的 id 一样", () => {
+    const code = (f: string) => readFileSync(join(import.meta.dir, "..", f), "utf8").replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "").trim();
+    expect(code("web/lib/chat/reserved-button-ids.ts")).toBe(code("src/lib/reserved-button-ids.ts"));
+    expect(WEB_RESERVED).toEqual(RESERVED_BUTTONS);
+    for (const id of [...RESERVED_BUTTONS.exact, ...RESERVED_BUTTONS.prefixes.map((p) => `${p}x`)]) expect(isMgmtButtonId(id)).toBe(true);
+    // 旧的正则扫描漏掉的几类：discord-interactions 的统计面板 / savecompact / modal，auto-allow.ts 的常量前缀
+    for (const id of ["stats_refresh", "savecompact:agent-x", "modal:abc", "auto_allow:1", "auto_revert:1:plan"]) expect(isMgmtButtonId(id)).toBe(true);
+    expect([isMgmtButtonId("deploy"), isMgmtButtonId("list_agents_extra")]).toEqual([false, false]);
   });
 
   test("列表还没拉到：带不带 askId 都先不让点（不先发出去再说），按钮下面显示「正在核对」", () => {

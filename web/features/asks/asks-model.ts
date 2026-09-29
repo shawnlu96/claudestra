@@ -6,6 +6,7 @@ import { uiAgentName } from "@/lib/chat/agents";
 import type { WebComponentRow } from "@/lib/chat/events";
 import { attachmentUrl, isImageName } from "@/lib/chat/attachments";
 import { replyRowKey } from "@/lib/chat/reply-clicks";
+import { isReservedButtonId } from "@/lib/chat/reserved-button-ids";
 import type { ChatMessage } from "@/features/chat/type";
 
 /** superseded = 同一个 agent 同一件事又问了新的一版（授权参数变了），旧卡片失效 */
@@ -154,14 +155,10 @@ export function unclaimedBindAsk(asks: WebAsk[], agent: string, rows: WebCompone
 }
 
 /**
- * bridge 的免 LLM 管理 / 面板按钮（src/bridge/management.ts 的 handleMgmtButton 认的 id）：不是 agent 答复用的按钮，
- * 只豁免「列表没到先不让点」「老气泡按过期锁」，老面板照样能点；agent 用同名 id 发的、认出了 ask 且已结案的照样锁、点击照样带 askId。
- * 清单由 tests/web-ask-echo.test.ts 对着 management.ts 逐个核
+ * bridge 的免 LLM 管理 / 面板按钮（保留 id 表 lib/chat/reserved-button-ids.ts，src 侧 twin 由 guard 保证一致）：不是 agent 答复用的按钮，
+ * 只豁免「列表没到先不让点」「老气泡按过期锁」，老面板照样能点；agent 用同名 id 发的、认出了 ask 且已结案的照样锁、点击照样带 askId
  */
-export const MGMT_BUTTON_IDS = ["browse_sessions", "cron_history", "cron_remove", "cron_toggle", "kill_agent", "list_agents", "peek_agent",
-  "refresh_status", "restart_all", "show_cron_menu", "show_kill_menu", "show_peek_menu", "show_sessions_panel"];
-export const MGMT_BUTTON_PREFIXES = ["sess_adopt:", "sess_cleanup:", "sess_detail:", "swmodel_no:", "swmodel_yes:"];
-export const isMgmtButtonId = (id: string): boolean => MGMT_BUTTON_IDS.includes(id) || MGMT_BUTTON_PREFIXES.some((p) => id.startsWith(p));
+export const isMgmtButtonId = isReservedButtonId;
 /** 整行只有管理按钮 */
 export const isMgmtRow = (row: WebComponentRow): boolean => row.type === "buttons" && row.buttons.length > 0 && row.buttons.every((b) => isMgmtButtonId(b.id));
 
@@ -270,6 +267,8 @@ export function answerSummary(a: WebAsk): string {
  * 验收要求「另一台设备 2 秒内消失」：经中继的事件延迟 + 这个等待 + 一次拉取要在 2 秒里（tests/asks-relay-stream.test.ts）
  */
 export const ASK_EVENT_REFRESH_MS = 300;
+/** 第一次拉「待你处理」列表最多等这么久；过了还没回，聊天气泡的按钮先按 partial 放开（asks-store start） */
+export const ASK_LIST_WAIT_MS = 4_000;
 
 /** 乐观作答（T11b 第 8 条）：提交时本地先记一笔，服务端确认前盖在拉到的数据上 */
 export interface PendingAnswer {
