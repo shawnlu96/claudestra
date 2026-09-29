@@ -269,7 +269,7 @@ for (const [label, base] of [["relay://", () => relayBase], ["直连 http", () =
       expect(res.status).toBe(201);
       expect(await res.json()).toMatchObject({ ok: true, peer: PEER, echo: body });
       expect(handled.length).toBe(n + 1);
-      expect(leaks(["/api/v1/agents/x/messages", tokenForA, bodyMark, "机密内容", PEER])).toEqual([]);
+      expect(leaks(["/api/v1/agents/x/messages", tokenForA, `Bearer ${tokenForA}`, body, bodyMark, "机密内容", PEER])).toEqual([]);
     });
 
     test("降级成明文（中继剥掉加密 / 发送方被骗走明文）：403 e2e_required，路由没处理", async () => {

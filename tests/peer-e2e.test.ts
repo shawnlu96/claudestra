@@ -136,16 +136,16 @@ describe("peer E2E：正常往返", () => {
     expect(w.posted.every((p) => p.startsWith("/api/v1/e2e/"))).toBe(true);
   });
 
-  test("中继看到的 URL、header、body 里都没有内层路径、token、正文（各段分开查）", async () => {
+  test("中继看到的 URL、header、body 里都没有内层路径、token、正文（整段和各段分开查，含常见可逆编码）", async () => {
     const seen: Buffer[] = [];
     const w = await world({ relay: async (req, fwd) => {
       const sent = await relayView(req), res = await fwd(req);
       seen.push(...sent, ...(await relayView(res)));
       return res;
     } });
-    const project = mark("proj"), path = `/api/v1/agents/${project}/messages`, bodyMark = mark("body"), secret = w.token.slice("Bearer ".length);
-    expect([(await w.call("POST", path, `机密内容-${bodyMark}`)).status, w.r.handled[0]?.path]).toEqual([201, path]);
-    expect(leakedIn(seen, [project, secret, bodyMark, "机密内容"])).toEqual([]);
+    const project = mark("proj"), path = `/api/v1/agents/${project}/messages`, bodyMark = mark("body"), body = `机密内容-${bodyMark}`;
+    expect([(await w.call("POST", path, body)).status, w.r.handled[0]?.path]).toEqual([201, path]);
+    expect(leakedIn(seen, [path, project, w.token, w.token.slice("Bearer ".length), body, bodyMark, "机密内容"])).toEqual([]);
   });
 });
 
