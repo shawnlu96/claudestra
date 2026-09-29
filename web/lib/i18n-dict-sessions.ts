@@ -10,6 +10,8 @@ export const SESSIONS_DICT: Record<string, string> = {
   "自动审查": "Auto review",
   "已纳管": "Managed",
   "{n} 个子会话": "{n} sub-session|{n} sub-sessions",
+  "Codex 一次性调用": "Codex one-shot runs",
+  "{n} 条": "{n}",
   "展开子会话": "Show sub-sessions",
   "收起子会话": "Hide sub-sessions",
   "另有 {n} 个较早的子会话未列出": "{n} older sub-session not listed|{n} older sub-sessions not listed",

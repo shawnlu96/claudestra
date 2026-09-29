@@ -5,12 +5,13 @@
  * 那一轮迟迟不来才结成一句「已叫停」。看门狗在「叫停后的第一次 Stop」不催那一半在 bridge.ts Stop hook（afterAbort），这里测停之前就清账这一半。
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { existsSync, rmSync, writeFileSync } from "node:fs";
+import { writeFileSync } from "node:fs";
 import { REGISTRY_PATH } from "../src/lib/registry.js";
 import { interruptGate } from "../src/bridge/interrupt-gate.js";
 import { holdStopWait, setExtensionSocket, stopWaitIds } from "../src/bridge/pi-abort.js";
 import { manualInterrupt, preemptForHuman, setStopHooks } from "../src/bridge/preempt.js";
 import type { Envelope } from "../src/bridge/router.js";
+import { ownStateFilesPerTest } from "./state-files.ts";
 
 const CH = "pi-stop-ch";
 const log: string[] = [];
@@ -21,15 +22,14 @@ const books = {
   pendingReplies: new Map(), pendingThreads: new Map(), pendingInterAgentMsg: new Map(),
   pendingAgentCalls: { dropRequest: () => undefined }, pendingApiRequests: apiQueues,
 };
-let createdRegistry = false;
 const orig = { preempt: interruptGate.preempt, manual: interruptGate.manual };
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+// 每条用例自己写一份只有 agent-pi 的 registry，跑完还原
+ownStateFilesPerTest([REGISTRY_PATH], () =>
+  writeFileSync(REGISTRY_PATH, JSON.stringify({ agents: { "agent-pi": { channelId: CH, runtime: "pi", status: "active" } } })));
+
 beforeAll(() => {
-  if (!existsSync(REGISTRY_PATH)) {
-    writeFileSync(REGISTRY_PATH, JSON.stringify({ agents: { "agent-pi": { channelId: CH, runtime: "pi", status: "active" } } }));
-    createdRegistry = true;
-  }
   setExtensionSocket(() => undefined, { deliver: async (e) => void delivered.push(e), ownerId: () => "owner", books: () => books });
   setStopHooks({ clearAgentPendings: (ch) => void log.push(`clear:${ch}`) });
   // 发键处换成记一笔：看清账和中止谁先谁后；中止那一刻停字自己的同步等待登记了没有（那一刻 Pi 报的 Stop 要跳过它）
@@ -38,7 +38,6 @@ beforeAll(() => {
 });
 afterAll(() => {
   Object.assign(interruptGate, orig);
-  if (createdRegistry) rmSync(REGISTRY_PATH, { force: true }); // 测试自己在临时状态目录里建的，删掉免得影响别的用例
 });
 
 const stopEnv = (id: string, owner: boolean, text = "停"): Envelope =>

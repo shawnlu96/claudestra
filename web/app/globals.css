@@ -43,25 +43,16 @@
     --color-base-100: "#FFFFFF";
     --color-base-200: "#F7F7F7";
     --color-base-300: "#EDEDED";
-    /* 状态色压深:daisyUI 默认亮色在白底上只有 1.7～3:1,状态字看不清。最难的底是侧栏选中行(base-300)
-       再叠同色 12～15% 浅底(阶段小标):这组在那上面实测 ≥4.9,白底 ≥6.8(WCAG 4.5);实心按钮 / 徽章上的字改白。
-       协作视图(collab.module.css)与阶段小标直接引用这组,不再各自混黑;再调浅要重测小标。深色主题不动。 */
-    --color-info: "#035E91";
-    --color-info-content: "#FFFFFF";
-    --color-success: "#086840";
-    --color-success-content: "#FFFFFF";
-    --color-warning: "#7A4F00";
-    --color-warning-content: "#FFFFFF";
-    --color-error: "#A81A1A";
-    --color-error-content: "#FFFFFF";
-    /* text-*-soft-N 的内层混色：浅色 100% = 与自身混，一律满色（叠透明度在浅底上会跌破 4.5:1） */
-    --status-soft-self: 100%;
+    /* 状态色用 daisyUI 默认亮色：整组压深过一次（深棕 warning），整屏发棕，owner 要求恢复。
+       要提对比度只动单处文字，不要改这组全局色——「待你处理」、徽章、描边都读它。 */
+    /* text-*-soft-N 的内层混色：0% = 与 text-warning/N 相同 */
+    --status-soft-self: 0%;
     --radius-field: 0.5rem;
     --depth: 0;
 }
 
-/* 次要状态字：text-warning-soft-80 在深色下等同 text-warning/80，浅色下取满色（--status-soft-self，见上面两个主题块）。
-   状态文字（出错信息、「工作中」、删除按钮…）想压淡一档时用它，不要直接写 text-warning/80——浅色下对比度不够。
+/* 次要状态字：text-warning-soft-80 目前在两种主题下都等同 text-warning/80（--status-soft-self 都是 0%，见上面两个主题块）；
+   留着这层是为了以后要单独给浅色提对比度时，只改 --status-soft-self，不必再改组件。
    写法 = 外层 color-mix(状态色 N%, 内层)，内层 = color-mix(状态色 self%, transparent)：self 100% 时内层就是状态色本身，混出来满色；
    0% 时内层透明，与 Tailwind 的 /N 同一个式子。var() 只当普通百分比用，不套 max()/calc()——那样在不支持的引擎里整条声明
    会在计算值阶段失效、退成父元素颜色。不支持 color-mix 的浏览器：Tailwind 自动先写一条满色兜底，再用 @supports 包住这条。 */

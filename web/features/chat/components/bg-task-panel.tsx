@@ -6,7 +6,7 @@ import { useT, getLang } from "@/lib/i18n";
 
 /**
  * 后台任务（subagent / bg shell）跟踪面板 —— Discord 子区在 web 的对应物。
- * 每个任务一张可折叠卡：running 时转圈、done 时 ✓+时长；展开看流式进度行。
+ * 任务收在一个框里、每个一行：running 时转圈、done 时 ✓+时长；点开看流式进度行。
  * subagent 行带 markdown 前缀（-# 🔧 / 💬），shell 行是原始输出。
  */
 
@@ -116,22 +116,13 @@ const BgTaskCard = memo(function BgTaskCard({ t }: { t: BgTaskView }) {
   const running = t.status === "running";
   const store = useChatStoreApi();
   return (
-    <details className="group rounded-lg border border-warning/25 bg-warning/[0.06] [&>summary]:list-none" open={running}>
+    // 一任务一行、默认收起（同 CC 底栏的任务列表）：一次起好几个 subagent 时，展开的流式输出会把输入框上方占满
+    <details className="group [&>summary]:list-none">
       <summary className="flex cursor-pointer select-none items-center gap-2 px-3 py-1.5 text-xs">
         <KindIcon kind={t.kind} />
-        <span className="flex min-w-0 flex-1 flex-col">
-          <span className="truncate font-medium text-warning-soft-90">
-            {/* bridge 给的 title 带 🐚/🧵/🤖 emoji 前缀(Discord 线程名用)——web 已有线性 kind 图标,剥掉免重复 */}
-            {(t.title || (t.kind === "shell" ? tr("后台命令") : "subagent")).replace(/^[🐚🧵🤖]\s*/u, "")}
-          </span>
-          {/* 类型 · 模型 · 最近一步在做什么（CC 底栏那句摘要只在它内存里，拿不到；最近一次工具调用是最接近的替身） */}
-          {(t.agentType || (running && t.lines.length > 0)) && (
-            <span className="truncate text-[11px] opacity-50">
-              {[t.agentType, t.model].filter(Boolean).join(" · ")}
-              {t.agentType && running && t.lines.length > 0 ? " · " : ""}
-              {running && t.lines.length > 0 ? cleanLine(t.lines[t.lines.length - 1]!) : ""}
-            </span>
-          )}
+        <span className="min-w-0 flex-1 truncate font-medium text-warning-soft-90">
+          {/* bridge 给的 title 带 🐚/🧵/🤖 emoji 前缀(Discord 线程名用)——web 已有线性 kind 图标,剥掉免重复 */}
+          {(t.title || (t.kind === "shell" ? tr("后台命令") : "subagent")).replace(/^[🐚🧵🤖]\s*/u, "")}
         </span>
         <BgStatus t={t} />
         {!t.progress && t.lines.length > 0 && (
@@ -168,6 +159,7 @@ const BgTaskCard = memo(function BgTaskCard({ t }: { t: BgTaskView }) {
         <span className="shrink-0 opacity-30 transition-transform group-open:rotate-90">›</span>
       </summary>
       <div className="px-3 pb-2 pt-0.5">
+        {t.agentType && <div className="pb-1 text-[11px] opacity-50">{[t.agentType, t.model].filter(Boolean).join(" · ")}</div>}
         {t.lines.length === 0 ? (
           <div className="py-1 text-[11px] opacity-40">{tr("等待输出…")}</div>
         ) : (
@@ -205,6 +197,14 @@ function BgLines({ lines }: { lines: string[] }) {
   );
 }
 
+function TaskRows({ tasks }: { tasks: BgTaskView[] }) {
+  return (
+    <div className="divide-y divide-warning/15 overflow-hidden rounded-lg border border-warning/25 bg-warning/[0.06]">
+      {tasks.map((t) => <BgTaskCard key={t.id} t={t} />)}
+    </div>
+  );
+}
+
 export function BgTaskPanel() {
   const tr = useT(); // 同上,map 回调里 t 是任务变量
   const tasks = useChatStore((s) => s.state.bgTasks);
@@ -221,9 +221,7 @@ export function BgTaskPanel() {
         <span>{tr("后台任务")}</span>
         <span className="opacity-60">{tasks.length}</span>
       </div>
-      {running.map((t) => (
-        <BgTaskCard key={t.id} t={t} />
-      ))}
+      {running.length > 0 && <TaskRows tasks={running} />}
       {done.length > 0 &&
         (showDone ? (
           <>
@@ -233,9 +231,7 @@ export function BgTaskPanel() {
             >
               {tr("收起已完成")}
             </button>
-            {done.map((t) => (
-              <BgTaskCard key={t.id} t={t} />
-            ))}
+            <TaskRows tasks={done} />
           </>
         ) : (
           <button

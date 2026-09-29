@@ -132,7 +132,7 @@ describe("serveStaticSite（Next 导出布局 + CSP）", () => {
     expect(staticSiteCsp()).toBe(
       "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; font-src 'self' data:; " +
         "connect-src 'self' blob: http://127.0.0.1:*; " +
-        "worker-src 'self'; manifest-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
+        "worker-src 'self' blob:; manifest-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
     );
   });
 

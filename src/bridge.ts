@@ -3499,8 +3499,7 @@ void import("./bridge/ledger-audit-service.js").then((m) => m.startLedgerAudit({
 // 清扫上次崩溃 / 被杀残留的 webterm-* viewer session（grouped session 视图，kill 不伤 master 本体）；Discord 与 Web-only 模式都要
 sweepStaleTerminalSessions().catch(() => {});
 
-// v2.21+ 存量 agent 的 project 归属补齐(「每个 agent 必属一个 project」对老数据
-// 成立)。委托 manager(写锁+原子写),幂等——没缺的直接 migrated:0 返回。
+// 存量 agent 的 project 归属补齐(「每个 agent 必属一个 project」对老数据成立)。委托 manager(写锁+原子写),幂等——没缺的直接 migrated:0 返回。
 setTimeout(() => {
   runManager("project-migrate")
     .then((r: any) => {
@@ -3508,9 +3507,9 @@ setTimeout(() => {
     })
     .catch(() => {});
 }, 3_000);
+void import("./bridge/ctx-boundary.js").then((m) => m.startCtxBoundary()); // 上下文边界自动压缩：每分钟一轮，Discord / web-only 都跑
 
-// Web-only: 无 DISCORD_BOT_TOKEN → Web-only 模式：不连 Discord，只跑与
-// 平台无关的初始化子集。HTTP/ws/api/事件流在上面 Bun.serve 时已就绪。
+// Web-only: 无 DISCORD_BOT_TOKEN → Web-only 模式：不连 Discord，只跑与平台无关的初始化子集。HTTP/ws/api/事件流在上面 Bun.serve 时已就绪。
 // 跳过的 Discord 专属项：cleanupStaleThinkingMessages / initStatsDashboard /
 // registerSlashCommands / startPermissionWatcher / startWedgeWatcher /
 // startSessionReconciler / gateway 看门狗（它们的告警面/交互面都是 Discord）。

@@ -5,7 +5,7 @@ import { managedAgentOf, type SubSessionRow } from "@/lib/session-nesting";
 import { BotIcon } from "./line-icons";
 import { Chevron } from "./project-group";
 
-export { sessionRowKey, sessionTree } from "@/lib/session-nesting";
+export { groupOneShots, sessionRowKey, sessionTree } from "@/lib/session-nesting";
 
 /** 行标题：子会话前面挂「↳ 昵称 / 自动审查 / 子会话」徽章 */
 export function SessionName({ s }: { s: SubSessionRow }) {
@@ -61,7 +61,7 @@ export function GroupAnchor({ s, kids, open, onToggle }: { s: SubSessionRow & { 
       {agent ? <BotIcon size={13} className="shrink-0 text-base-content/50" /> : null}
       <span className="truncate">{agent || s.name || s.sessionId.slice(0, 8)}</span>
       {agent ? <span className="shrink-0 rounded bg-base-content/10 px-1 text-[10px]">{t("已纳管")}</span> : null}
-      <span className="ml-auto shrink-0 text-[11px] text-base-content/40">{t("{n} 个子会话", { n: kids })}</span>
+      <span className="ml-auto shrink-0 text-[11px] text-base-content/40">{t(s.group ? "{n} 条" : "{n} 个子会话", { n: kids })}</span>
     </button>
   );
 }

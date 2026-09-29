@@ -108,6 +108,8 @@ export interface LineView {
   reason: string;
   /** 前端会话名（去掉 agent- 前缀）；没派人为 null */
   agent: string | null;
+  /** 交给别的实例的 agent 在做（extra.delegate，"<agent>@<peer>"）；本机有执行者时为 null */
+  delegate: string | null;
   pm: string | null;
   round: number;
   pr: string | null;
@@ -153,6 +155,13 @@ export interface HomeView {
 
 export const bareAgent = (name: string | null | undefined): string | null => (name ? name.replace(/^agent-/, "") : null);
 
+/** 跨实例委托的执行者："<agent>@<peer>"，发起方 PM 建任务时写进 extra.delegate（docs/team/peer-delegation.md） */
+export function delegateOf(t: Pick<LedgerTaskView, "extra">): string | null {
+  const d = t.extra?.delegate;
+  return typeof d === "string" && d ? d : null;
+}
+const unassigned = (t: LedgerTaskView): boolean => !t.agent && !delegateOf(t);
+
 const isClosed = (s: Stage) => s === "done" || s === "cancelled" || s === "verified";
 
 /** 进入当前阶段的时刻：优先 bridge 下发的 stageSince，老 bridge 退到最后一条 stage 事件（没有就不显示时长） */
@@ -169,6 +178,7 @@ export function dwellMs(t: LedgerTaskView, now: number): number | null {
 
 export function isStuck(t: LedgerTaskView, now: number): boolean {
   if (t.stageSinceApprox === true) return false;
+  if (!t.agent && delegateOf(t)) return false; // 委托给别的实例：等对方 owner、对方合并门槛按天算，不算卡住
   const d = dwellMs(t, now);
   return WAIT_STAGES.has(t.stage) && d !== null && d > STUCK_MS;
 }
@@ -214,7 +224,7 @@ function reviewRound(t: LedgerTaskView): number {
 export function stageLabel(t: LedgerTaskView, all: readonly LedgerTaskView[], frozen: string | null, tr: Tr = zh): string {
   switch (t.stage) {
     case "spec":
-      return tr(t.agent ? "等开工" : "排队 · 等派发");
+      return tr(unassigned(t) ? "排队 · 等派发" : "等开工");
     case "restate":
       return tr("等 PM 放行");
     case "build":
@@ -297,6 +307,7 @@ export function lineOf(
     stuck: att === "stuck",
     reason: att === "owner" && wait ? tr("等你：{t}", { t: wait.title }) : reasonOf(t, att, dwell, frozen, tr),
     agent: bareAgent(t.agent),
+    delegate: t.agent ? null : delegateOf(t),
     pm: bareAgent(t.pm),
     round: t.round,
     pr: t.pr,
@@ -318,7 +329,7 @@ function localMidnight(now: number): number {
 export function homeView(ov: LedgerOverview, now: number, tr: Tr = zh, waits: readonly OwnerWait[] = []): HomeView {
   const items = new Map(ov.items.map((i) => [i.id, i]));
   // 没派人的 spec 是 PM 手里的排队，不画成线（PM 调度条里计数）
-  const open = ov.tasks.filter((t) => !isClosed(t.stage) && !(t.stage === "spec" && !t.agent));
+  const open = ov.tasks.filter((t) => !isClosed(t.stage) && !(t.stage === "spec" && unassigned(t)));
   const lines = sortLines(open.map((t) => lineOf(t, ov, items, now, tr, waitFor(t, waits))));
   const midnight = localMidnight(now);
   const pm = ov.meta.pms[0] ?? open.find((t) => t.pm)?.pm ?? null;
@@ -338,7 +349,7 @@ export function homeView(ov: LedgerOverview, now: number, tr: Tr = zh, waits: re
       pm: bareAgent(pm),
       managing: open.filter((t) => !pm || t.pm === pm).length,
       reviewing: open.filter((t) => t.stage === "review").length,
-      queued: ov.tasks.filter((t) => t.stage === "spec" && !t.agent).map((t) => t.id),
+      queued: ov.tasks.filter((t) => t.stage === "spec" && unassigned(t)).map((t) => t.id),
       frozen: frozenReason(ov.meta, tr),
     },
   };

@@ -90,6 +90,7 @@ One line each; full descriptions in [docs/architecture/features.md](./docs/archi
 - **Read-only history API + manual archive category** — `GET /api/v1/agents/:name/history`, archive/restore endpoints, retention prunes only the manual category.
 - **Pi agent sessions** — `runtime: "pi"` agents via the Pi extension, capability profiles (`pi-env`), session records translated to Claude Code shape (`lib/session-source.ts`).
 - **HTTP peers** — cross-instance collaboration over `/api/v1` with scoped tokens and one-click invites; master is never shareable.
+- **Context boundaries** — per-project / name-pattern compaction lines: [context-boundary.md](./docs/architecture/context-boundary.md).
 
 ## Security posture
 
