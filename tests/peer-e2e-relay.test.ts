@@ -75,16 +75,16 @@ async function bApi(req: Request, url: URL): Promise<Response> {
 interface Wire { url: string; method: string; headers: Record<string, string>; body: Uint8Array }
 type Hook = (w: Wire, send: (w: Wire) => Promise<Response>) => Promise<Response>;
 let hook: Hook | null = null;
-const seen: string[] = [];
+const seen: Buffer[] = [];
 
 async function send(w: Wire): Promise<Response> {
-  seen.push(Buffer.from(w.body).toString("latin1"));
+  seen.push(Buffer.from(w.body));
   if (!w.url.startsWith("relay://")) return fetch(w.url, { method: w.method, headers: w.headers, ...(w.body.length ? { body: w.body } : {}) });
   const u = new URL(w.url);
   const r = await a.request(u.hostname, { method: w.method, path: u.pathname + u.search, headers: w.headers, body: w.body.length ? w.body : null }, { timeoutMs: 5000 });
   const res = new Response(NULL_BODY_STATUS.has(r.status) ? null : r.body, { status: r.status, headers: recordToHeaders(r.headers) });
   const bytes = new Uint8Array(await res.arrayBuffer());
-  seen.push(Buffer.from(bytes).toString("latin1"));
+  seen.push(Buffer.from(bytes));
   return new Response(NULL_BODY_STATUS.has(r.status) ? null : bytes, { status: r.status, headers: res.headers });
 }
 const rawA = (url: string, init: { method?: string; headers?: Record<string, string>; body?: string | Uint8Array }) => {
@@ -169,7 +169,8 @@ async function redeem(inv: PeerInviteV2, sealed: boolean) {
   return { status: res.status, json, outcome: s ? await readRedeemResponse(s.session, res.status, json) : null };
 }
 
-const leaks = (words: string[]) => words.filter((w) => seen.some((s) => s.includes(w)));
+/** 按 UTF-8 原始字节查：中文经 latin1 字符串永远匹配不上；needle 要长或随机，短串会在 base64 密文里偶然出现 */
+const leaks = (words: string[]) => words.filter((w) => seen.some((s) => s.includes(Buffer.from(w, "utf8"))));
 const bRecord = async (name: string) => (await readPeers()).httpPeers?.find((p) => p.name === name);
 
 describe("兑换", () => {
@@ -257,11 +258,12 @@ for (const [label, base] of [["relay://", () => relayBase], ["直连 http", () =
     test("加密往返：B 按 alice 的 token 与签名认出人；中继看不到路径、token、正文", async () => {
       seen.length = 0;
       const n = handled.length;
-      const res = await call(base(), "POST", "/api/v1/agents/x/messages", "机密内容");
+      const body = `机密内容-${crypto.randomUUID()}`;
+      const res = await call(base(), "POST", "/api/v1/agents/x/messages", body);
       expect(res.status).toBe(201);
-      expect(await res.json()).toMatchObject({ ok: true, peer: "alice", echo: "机密内容" });
+      expect(await res.json()).toMatchObject({ ok: true, peer: "alice", echo: body });
       expect(handled.length).toBe(n + 1);
-      expect(leaks(["/api/v1/agents/x/messages", tokenForA, "机密", "alice"])).toEqual([]);
+      expect(leaks(["/api/v1/agents/x/messages", tokenForA, body, "机密内容", "alice"])).toEqual([]);
     });
 
     test("降级成明文（中继剥掉加密 / 发送方被骗走明文）：403 e2e_required，路由没处理", async () => {
