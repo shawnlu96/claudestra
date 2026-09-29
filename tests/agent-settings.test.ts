@@ -26,6 +26,11 @@ import { buildClaudeCommand } from "../src/lib/claude-launch.js";
 import { logPath } from "../src/lib/log-paths.js";
 import { claudeLaunchOptions } from "../src/lib/runtimes/claude-code.js";
 import { sandboxLaunchArgs } from "../src/lib/sandbox-env.js";
+import { statePath } from "../src/lib/paths.js";
+import { ownStateDirForFile } from "./state-files.ts";
+
+// 用例按「没文件」断言：共享状态目录里别的测试留下的 agent-settings/ 会让它们挂（脏目录重跑实测）
+ownStateDirForFile(statePath("agent-settings"));
 
 const readJson = (p: string) => JSON.parse(readFileSync(p, "utf8"));
 /** 序列化后正好 bytes 字节的 { skillOverrides: {...} }（最后一个键名补齐长度） */
