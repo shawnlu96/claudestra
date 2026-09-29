@@ -1,7 +1,8 @@
 /** 协作视图 v4 因果线画布的布局模型（web/features/collab/v4/causal-model.ts）：分组、按依赖从左往右、折叠、边状态映射 */
 import { describe, expect, test } from "bun:test";
 import type { LedgerDepView, LedgerTaskView, Stage } from "../web/features/collab/collab-model";
-import { causalCanvas, edgeStyle, LOOSE_GROUP } from "../web/features/collab/v4/causal-model";
+import { causalCanvas, edgeStyle, LOOSE_GROUP, type Box, type CEdge } from "../web/features/collab/v4/causal-model";
+import { initialView, labelWidth, offscreen, placeLabels, READABLE_K } from "../web/features/collab/v4/canvas-view";
 
 function task(id: string, stage: Stage, over: Partial<LedgerTaskView> = {}): LedgerTaskView {
   return {
@@ -92,5 +93,48 @@ describe("边状态映射", () => {
     const c = causalCanvas({ items, tasks: [task("A", "build"), task("B", "build")], deps: [dep("A", "B", "active")] });
     const [a, b] = ["A", "B"].map((id) => c.groups[0]!.nodes.find((n) => n.id === id)!);
     expect(c.edges[0]).toMatchObject({ x1: a!.x + a!.w, y1: a!.y + a!.h / 2, x2: b!.x, y2: b!.y + b!.h / 2 });
+  });
+});
+
+describe("边标签避让与打开时的视口（canvas-view.ts）", () => {
+  const edge = (id: string, when: string, x1 = 0, y1 = 100, x2 = 300, y2 = 100): CEdge =>
+    ({ id, from: "a", to: "b", style: "flow", dep: dep("a", "b", "active", { when }), x1, y1, x2, y2 });
+  const overlap = (a: Box, b: Box) => a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h;
+  const rect = (l: { x: number; y: number; w: number; h: number }) => ({ x: l.x - l.w / 2, y: l.y - l.h / 2, w: l.w, h: l.h });
+
+  test("中点撞在一起的标签错开，互不压、也不压节点；没条件的边不出标签", () => {
+    const node = { x: 120, y: 60, w: 60, h: 20 };
+    const ls = placeLabels([edge("e1", "步骤表合并后"), edge("e2", "定死 waitForIdle"), edge("e3", "")], [node]);
+    expect(ls.map((l) => [l.id, l.dot])).toEqual([["e1", false], ["e2", false]]);
+    expect(overlap(rect(ls[0]!), rect(ls[1]!))).toBe(false);
+    for (const l of ls) expect(overlap(rect(l), node)).toBe(false);
+  });
+  test("实在放不下的退成一个点（悬停 / 点开看全文），先到的标签照常显示", () => {
+    const ls = placeLabels(Array.from({ length: 30 }, (_, i) => edge(`e${i}`, "都过审合并", 0, 100, 120, 100)), []);
+    expect(ls[0]!.dot).toBe(false);
+    expect(ls.some((l) => l.dot)).toBe(true);
+    const shown = ls.filter((l) => !l.dot).map(rect);
+    for (let i = 0; i < shown.length; i++) for (let j = i + 1; j < shown.length; j++) expect(overlap(shown[i]!, shown[j]!)).toBe(false);
+  });
+  test("估宽：中文比英文宽，封顶 150", () => {
+    expect(labelWidth("合并后")).toBeGreaterThan(labelWidth("abc"));
+    expect(labelWidth("很".repeat(40))).toBe(150);
+  });
+  test("整张在 0.8 以上放得下就整张放；放不下用 0.8、在跑的对齐左上，视口外的件数按方向报", () => {
+    const small = causalCanvas({ items, deps: [], tasks: [task("A", "build")] });
+    const v0 = initialView(small, 800, 600);
+    expect(v0.k).toBeGreaterThanOrEqual(READABLE_K);
+    expect(offscreen(small, v0, 800, 600)).toEqual({ right: 0, down: 0, left: 0, up: 0 });
+    const chain = ["A", "B", "C", "D", "E"];
+    const wide = causalCanvas({
+      items, tasks: [...chain.map((id, i) => task(id, i < 2 ? "build" : "live")), task("F", "spec", { blockedBy: ["E"] }), task("G", "spec", { blockedBy: ["E"] })],
+      deps: chain.slice(1).map((id, i) => dep(chain[i]!, id, "waiting")).concat([dep("E", "F", "waiting"), dep("E", "G", "waiting")]),
+    });
+    const v1 = initialView(wide, 540, 800);
+    expect(v1.k).toBe(READABLE_K);
+    const a = wide.groups[0]!.nodes.find((n) => n.id === "A")!;
+    expect(v1.x + a.x * v1.k).toBeGreaterThanOrEqual(0);
+    // 540 宽放下前两列；第三列起出框：C、D、E 三个节点 + 折叠组按件数算的 F、G
+    expect(offscreen(wide, v1, 540, 800)).toEqual({ right: 5, down: 0, left: 0, up: 0 });
   });
 });

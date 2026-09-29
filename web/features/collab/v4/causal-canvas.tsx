@@ -2,28 +2,21 @@
 /**
  * 因果线画布（v4 中区「因果线」标签）：布局全在 causal-model.ts，这里只画。事项框、节点、折叠组是 HTML（好点、好排字），
  * 边是底下一层 SVG（实线已成立 / 流动虚线判定中 / 灰点线还没到，边上写条件原文）；整层用一个 transform 平移缩放。
- * 拖动平移、滚轮缩放、「适配全部」；外面选中任务时把它平移到视口中间。
+ * 拖动平移、滚轮缩放、「适配全部」；外面选中任务时把它平移到视口中间。标签避让、打开时的视口、「还有 N 件在右边」在 canvas-view.ts。
  */
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { LedgerDepView, LineView, Tr } from "../collab-model";
-import type { Canvas, CEdge, CFold, CNode } from "./causal-model";
+import type { Box, Canvas, CFold, CNode } from "./causal-model";
+import { edgePath, initialView, offscreen, placeLabels, VIEW_PAD, type View } from "./canvas-view";
 import { StageBar } from "./stage-bar";
 import v from "./v4.module.css";
 
 /** 选中了什么：任务、边（按依赖记，属性区和任务详情里的因果线点过来的是同一种）、折叠组、「待你处理」 */
 export type Selection = { kind: "task"; id: string } | { kind: "edge"; dep: LedgerDepView } | { kind: "fold"; fold: CFold } | { kind: "waits" } | null;
 
-interface View { x: number; y: number; k: number }
-const PAD = 24;
 const clampK = (k: number) => Math.min(1.6, Math.max(0.3, k));
-/** 打开时缩放不低于它：四列的图塞进 1440 宽下约 540px 的中区只剩一半大小，字认不出；宁可右侧出框靠拖动，整张看点「适配全部」 */
-const READABLE_K = 0.8;
 const STYLE_CLASS = { solid: v.eSolid, flow: v.eFlow, dotted: v.eDotted } as const;
-
-function edgePath(e: CEdge): string {
-  const dx = Math.max(40, Math.abs(e.x2 - e.x1) / 2);
-  return `M ${e.x1} ${e.y1} C ${e.x1 + dx} ${e.y1}, ${e.x2 - dx} ${e.y2}, ${e.x2} ${e.y2}`;
-}
+const MORE = { right: "还有 {n} 件在右边 →", down: "下面还有 {n} 件 ↓", left: "← 左边还有 {n} 件", up: "↑ 上面还有 {n} 件" } as const;
 
 function NodeCard(props: { n: CNode; line: LineView | undefined; act: string; selected: boolean; hot: boolean; onClick: () => void; tr: Tr }) {
   const { n, line, act, selected, onClick, tr } = props;
@@ -47,29 +40,34 @@ function NodeCard(props: { n: CNode; line: LineView | undefined; act: string; se
   );
 }
 
-export function CausalCanvas(props: {
-  canvas: Canvas;
-  lines: ReadonlyMap<string, LineView>;
-  actionText: (id: string) => string;
-  selection: Selection;
-  /** 刚推进的那一个：全屏唯一的品牌色 */
-  hot: string | null;
-  focus: string | null;
-  onSelect: (s: Selection) => void;
-  tr: Tr;
-}) {
-  const { canvas, lines, selection, focus, onSelect, tr } = props;
+/** 视口：平移缩放、打开时摆放（canvas-view.ts initialView）、「适配全部」、外面选中任务时居中、视口外还剩几件；点空白 = onBackground */
+function useViewport(canvas: Canvas, focus: string | null, onBackground: () => void) {
   const box = useRef<HTMLDivElement>(null);
   const drag = useRef<{ x: number; y: number; vx: number; vy: number; moved: boolean } | null>(null);
-  const [view, setView] = useState<View>({ x: PAD, y: PAD, k: 1 });
-
-  const fitTo = useCallback((floor: number) => {
+  const [view, setView] = useState<View>({ x: VIEW_PAD, y: VIEW_PAD, k: 1 });
+  const [size, setSize] = useState({ w: 0, h: 0 });
+  useEffect(() => {
+    const el = box.current;
+    if (!el) return;
+    const ro = new ResizeObserver(() => setSize({ w: el.clientWidth, h: el.clientHeight }));
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+  // 图的尺寸变了（或第一次量到视口）才重摆；只是换了个对象不动，免得实时刷新把用户拖好的位置冲掉
+  const placedFor = useRef("");
+  useEffect(() => {
+    const key = `${canvas.w}x${canvas.h}`;
+    if (!size.w || placedFor.current === key) return;
+    placedFor.current = key;
+    setView(initialView(canvas, size.w, size.h));
+  }, [canvas, size]);
+  const fitAll = useCallback(() => {
     const el = box.current;
     if (!el || !canvas.w) return;
-    const k = Math.min(1, (el.clientWidth - PAD * 2) / canvas.w, (el.clientHeight - PAD * 2) / canvas.h);
-    setView({ x: PAD, y: PAD, k: clampK(Math.max(floor, k)) });
+    const k = Math.min(1, (el.clientWidth - VIEW_PAD * 2) / canvas.w, (el.clientHeight - VIEW_PAD * 2) / canvas.h);
+    setView({ x: VIEW_PAD, y: VIEW_PAD, k: clampK(k) });
   }, [canvas.w, canvas.h]);
-  useEffect(() => fitTo(READABLE_K), [fitTo]);
+  const off = size.w ? offscreen(canvas, view, size.w, size.h) : null;
 
   // 从大纲点任务：把它的框平移到视口中间（折叠在组里的就平移到那一组）
   useEffect(() => {
@@ -100,14 +98,44 @@ export function CausalCanvas(props: {
     setView((cur) => ({ ...cur, x: d.vx + e.clientX - d.x, y: d.vy + e.clientY - d.y }));
   };
   const onUp = () => {
-    if (drag.current && !drag.current.moved) onSelect(null);
+    if (drag.current && !drag.current.moved) onBackground();
     drag.current = null;
   };
+
+  const handlers = { onWheel, onPointerDown: onDown, onPointerMove: onMove, onPointerUp: onUp, onPointerCancel: onUp };
+  return { box, view, fitAll, off, handlers };
+}
+
+function EdgeLabels({ canvas, selEdge, onSelect }: { canvas: Canvas; selEdge: string | null; onSelect: (s: Selection) => void }) {
+  const labels = useMemo(() => placeLabels(canvas.edges, canvas.groups.flatMap((g): Box[] => [...g.nodes, ...g.folds])), [canvas]);
+  return labels.map((l) => {
+    const e = canvas.edges.find((x) => x.id === l.id)!;
+    const cls = `${l.dot ? v.edot : v.elabel} ${selEdge === e.id ? v.eSel : ""}`;
+    const pick = () => onSelect({ kind: "edge", dep: e.dep });
+    return l.dot
+      ? <button key={`l-${l.id}`} type="button" className={cls} style={{ left: l.x, top: l.y }} title={e.dep.when} aria-label={e.dep.when} onClick={pick} />
+      : <button key={`l-${l.id}`} type="button" className={cls} style={{ left: l.x, top: l.y, width: l.w }} title={e.dep.when} onClick={pick}>{e.dep.when}</button>;
+  });
+}
+
+export function CausalCanvas(props: {
+  canvas: Canvas;
+  lines: ReadonlyMap<string, LineView>;
+  actionText: (id: string) => string;
+  selection: Selection;
+  /** 刚推进的那一个：全屏唯一的品牌色 */
+  hot: string | null;
+  focus: string | null;
+  onSelect: (s: Selection) => void;
+  tr: Tr;
+}) {
+  const { canvas, lines, selection, focus, onSelect, tr } = props;
+  const { box, view, fitAll, off, handlers } = useViewport(canvas, focus, () => onSelect(null));
 
   const selId = selection?.kind === "task" ? selection.id : null;
   const selEdge = selection?.kind === "edge" ? `${selection.dep.from}>${selection.dep.to}` : null;
   return (
-    <div ref={box} className={v.canvas} onWheel={onWheel} onPointerDown={onDown} onPointerMove={onMove} onPointerUp={onUp} onPointerCancel={onUp}>
+    <div ref={box} className={v.canvas} {...handlers}>
       <div className={v.world} style={{ transform: `translate(${view.x}px, ${view.y}px) scale(${view.k})` }}>
         {canvas.groups.map((g) => (
           <div key={g.id} className={v.group} style={{ left: g.x, top: g.y, width: g.w, height: g.h }}>
@@ -123,12 +151,7 @@ export function CausalCanvas(props: {
             </g>
           ))}
         </svg>
-        {canvas.edges.filter((e) => e.dep.when).map((e) => (
-          <button key={`l-${e.id}`} type="button" className={`${v.elabel} ${selEdge === e.id ? v.eSel : ""}`}
-            style={{ left: (e.x1 + e.x2) / 2, top: (e.y1 + e.y2) / 2 }} onClick={() => onSelect({ kind: "edge", dep: e.dep })}>
-            {e.dep.when}
-          </button>
-        ))}
+        <EdgeLabels canvas={canvas} selEdge={selEdge} onSelect={onSelect} />
         {canvas.groups.flatMap((g) => g.nodes).map((n) => (
           <NodeCard key={n.id} n={n} line={lines.get(n.id)} act={props.actionText(n.id)} selected={selId === n.id} hot={props.hot === n.id} tr={tr}
             onClick={() => onSelect({ kind: "task", id: n.id })} />
@@ -141,8 +164,11 @@ export function CausalCanvas(props: {
         ))}
       </div>
       <div className={v.tools}>
-        <button type="button" className={v.tool} onClick={() => fitTo(0)}>{tr("适配全部")}</button>
+        <button type="button" className={v.tool} onClick={fitAll}>{tr("适配全部")}</button>
       </div>
+      {off && (Object.keys(MORE) as (keyof typeof MORE)[]).filter((d) => off[d] > 0).map((d) => (
+        <button key={d} type="button" className={`${v.more} ${v[`more_${d}`]}`} onClick={fitAll}>{tr(MORE[d], { n: off[d] })}</button>
+      ))}
       {canvas.groups.length === 0 && <div className={v.blank}>{tr("没有可画的任务")}</div>}
     </div>
   );

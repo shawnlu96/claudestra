@@ -52,9 +52,18 @@
 .eDotted .eLine { stroke: var(--faint); stroke-dasharray: 1.5 5; stroke-linecap: round; }
 .eSel .eLine { stroke-width: 2.8; }
 @keyframes flow { to { stroke-dashoffset: -22; } }
-.elabel { position: absolute; transform: translate(-50%, -50%); max-width: 150px; padding: 1px 6px; border-radius: 6px; background: var(--bg); border: 1px solid var(--line);
+.elabel { position: absolute; transform: translate(-50%, -50%); max-width: 150px; text-align: center; padding: 1px 6px; border-radius: 6px; background: var(--bg); border: 1px solid var(--line);
   color: var(--muted); font-size: 10.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .elabel.eSel { color: var(--text); border-color: var(--line-2); }
+
+.edot { position: absolute; width: 10px; height: 10px; margin: -5px 0 0 -5px; padding: 0; border-radius: 50%; background: var(--muted); border: 2px solid var(--bg); }
+.edot:hover, .edot.eSel { background: var(--text); }
+.more { position: absolute; padding: 4px 10px; border-radius: 999px; background: var(--panel); border: 1px solid var(--line-2); box-shadow: var(--shadow);
+  color: var(--text-2); font-size: var(--fs-3); white-space: nowrap; }
+.more_right { right: 12px; top: 50%; transform: translateY(-50%); }
+.more_down { left: 50%; bottom: 12px; transform: translateX(-50%); }
+.more_left { left: 12px; top: 50%; transform: translateY(-50%); }
+.more_up { left: 50%; top: 12px; transform: translateX(-50%); }
 .node { position: absolute; display: flex; flex-direction: column; gap: 5px; padding: 7px 9px; border-radius: 9px; background: var(--panel); border: 1px solid var(--line-2);
   box-shadow: var(--shadow); text-align: left; color: var(--text-2); font-size: var(--fs-3); }
 .node::before { content: ""; position: absolute; left: 0; top: 8px; bottom: 8px; width: 2px; border-radius: 2px; background: var(--sc, var(--faint)); }
