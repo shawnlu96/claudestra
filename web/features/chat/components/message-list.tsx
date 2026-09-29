@@ -8,7 +8,6 @@ import { BubbleBoundary } from "@/components/boundaries";
 import { PermissionCard } from "./permission-card";
 import { AskQuestionCard } from "./ask-question-card";
 import { ReplyComponents } from "./reply-components";
-import { BgTaskPanel } from "./bg-task-panel";
 import { CcTaskPanel } from "./cc-task-panel";
 import { useT, getLang, tVerbatim, useLang } from "@/lib/i18n";
 import { BubbleMenu, SelectModeBar, useBubbleMenuTrigger } from "./bubble-menu";
@@ -385,7 +384,6 @@ export function MessageList() {
   const store = useChatStoreApi();
   const pendingPermission = useChatStore((s) => s.state.pendingPermission);
   const pendingAsk = useChatStore((s) => s.state.pendingAsk);
-  const bgTaskCount = useChatStore((s) => s.state.bgTasks.length);
   const browsing = useChatStore((s) => s.state.browsing);
   const scrollerRef = useRef<HTMLDivElement>(null);
   const followRef = useRef(true);
@@ -553,7 +551,7 @@ export function MessageList() {
     if (Date.now() < touchHoldRef.current) return; // 抬手后 releaseTouchHold 补吸底
     const el = scrollerRef.current;
     if (el) el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
-  }, [messages.length, pendingPermission, pendingAsk, bgTaskCount]);
+  }, [messages.length, pendingPermission, pendingAsk]);
 
   /* 自己发送 / 重发 → 无条件回到底部（即便此刻正在上面看历史）。 */
   useEffect(() => {
@@ -742,7 +740,6 @@ export function MessageList() {
         )}
         {/* 活跃会话的面板/交互卡不属于历史现场——浏览模式只藏不清,回来原样恢复 */}
         {!browsing && <CcTaskPanel />}
-        {!browsing && <BgTaskPanel />}
         {!browsing && pendingPermission && <PermissionCard p={pendingPermission} />}
         {!browsing && pendingAsk && <AskQuestionCard a={pendingAsk} />}
         {standaloneThinking && !browsing && (
