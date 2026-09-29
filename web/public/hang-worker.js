@@ -1,6 +1,6 @@
 /*
  * 主线程卡死探针（boot.js ④ 起的 Worker）：主线程每秒 beat 一次，5 秒没心跳就往当前机器的 /api/v1/client-log 报 [hang]，
- * 恢复后再报一条。单独成文件是为了托管方的 CSP 能保持 worker-src 'self'（blob: Worker 会被拦）；请求基址由主线程的 init
+ * 恢复后再报一条。单独成文件：老 bridge 的 CSP 只有 worker-src 'self'（blob: Worker 会被拦）；请求基址由主线程的 init
  * 消息给（lib/machines.ts 写在 localStorage 的 cstra_api_base 镜像），同源相对路径即可。
  */
 var BASE = "", last = Date.now(), paused = false, hung = false, ctx = "", tick = Date.now();
