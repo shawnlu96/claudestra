@@ -14,6 +14,11 @@ export const E2E_HELLO_PATH = "/api/v1/e2e/hello";
 export const E2E_CONTENT_TYPE = "application/octet-stream";
 /** 会话有效期（秒）：24 小时，响应里报给发起方，它据此提前换会话 */
 export const E2E_SESSION_TTL_S = 24 * 3600;
+/**
+ * 一条记录流（外层正文）的上限：收方超了回 413（lib/peer-e2e-serve.ts、bridge/peer-ingress.ts），发方封好超了就不发
+ * （lib/peer-e2e-client.ts）——收方在上传途中早回 413，发方的 keep-alive 连接会卡住下一条
+ */
+export const E2E_BODY_MAX = 2 * 1024 * 1024;
 
 const FP_RE = /^[0-9a-f]{4}(-[0-9a-f]{4}){3}$/;
 const RECORD_PATH_RE = /^\/api\/v1\/e2e\/([A-Za-z0-9_-]{22})\/([1-9]\d{0,16})$/;

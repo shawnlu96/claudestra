@@ -25,6 +25,7 @@ import { loadRelayPeerView, relayPeerRefusal } from "../src/lib/peer-trust.ts";
 import { signInviteProof } from "../src/lib/invite-proof.ts";
 import { encodePeerInviteV2, parsePeerInviteV2, readPeers, type HttpPeer, type PeerInviteV2 } from "../src/lib/peers.ts";
 import { newTokenPrincipal, readPrincipals, updatePrincipals } from "../src/lib/principals.ts";
+import { peerCallFailureText } from "../src/lib/peer-auth-hints.ts";
 import { connect, type RelayClient } from "../src/lib/relay-client.ts";
 import { NULL_BODY_STATUS, recordToHeaders } from "../src/lib/relay-stream.ts";
 import { fromB64url, utf8 } from "../src/lib/e2e/encoding.ts";
@@ -358,6 +359,20 @@ for (const [label, base] of [["relay://", () => relayBase], ["直连 http", () =
       expect(handled.length).toBe(n);
       expect((await call(base(), "GET", "/api/v1/agents")).status).toBe(201);
     });
+
+    // 发方走生产的 keep-alive 传输：收方上传途中早回 413 的话，同一连接上的下一条会卡到超时、还被报成「可能已送达」
+    test("加密后超过 2 MiB：发方本地拒发（e2e_too_large、说清没发出），一个记录帧都不上线；下一条照常", async () => {
+      const posted: string[] = [];
+      hook = async (w, s) => (posted.push(w.url), s(w));
+      const n = handled.length;
+      const err = await call(base(), "POST", "/api/v1/agents/x/messages", "x".repeat(3 * 1024 * 1024)).catch((e) => e);
+      hook = null;
+      expect(err).toMatchObject({ code: "e2e_too_large" });
+      expect(peerCallFailureText("x@bob", err.message, "bob")).toContain("消息没送到");
+      expect(posted.filter((u) => !u.endsWith("/hello"))).toEqual([]);
+      expect(handled.length).toBe(n);
+      expect((await call(base(), "GET", "/api/v1/agents")).status).toBe(201);
+    });
   });
 }
 
@@ -415,6 +430,12 @@ describe("直连外层：先封顶、先判重放，再扣 hello 限速", () => 
     const res = await bApi(req, new URL(req.url));
     expect(res.status).toBe(413);
     expect(await res.json()).toMatchObject({ code: "e2e_too_large" });
+  });
+
+  test("E2E 帧外层带一枚有效的 peer Bearer：入口照样先封顶（413 e2e_too_large），不整段读进内存", async () => {
+    const res = await direct(new Uint8Array(5 * 1024 * 1024), { authorization: `Bearer ${tokenForA}` });
+    expect(res.status).toBe(413);
+    expect(await res.json()).toMatchObject({ code: "e2e_too_large", error: "request body too large" }); // 入口这一层回的，不是读完后路由回的
   });
 });
 

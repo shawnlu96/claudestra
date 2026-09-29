@@ -15,7 +15,7 @@ import { compareE2eKey, verifyE2eKey, type MachineE2eKey, type SignedE2eKey } fr
 import type { E2ePeer } from "./peer-e2e-serve.js";
 import {
   E2E_CONTENT_TYPE, E2E_HELLO_PATH, E2E_SESSION_TTL_S, encodeHello, encodeInnerHead, INNER_REPLAY_REASONS, parseHelloReply, parseResponseHead,
-  PEER_E2E_LABEL, recordPath,
+  PEER_E2E_LABEL, recordPath, E2E_BODY_MAX,
 } from "./peer-e2e-wire.js";
 
 export class E2eError extends Error {
@@ -96,6 +96,8 @@ export class PeerE2eClient {
     const s = await this.ensure();
     const rid = s.nextRid++;
     const stream = await sealMessage({ key: s.keys.c2b, sid: s.sid, dir: DIR_REQ, rid, label: PEER_E2E_LABEL }, head, body);
+    // 跳过的 rid 不碍事：收方的窗口只拒重复与过旧的
+    if (stream.length > E2E_BODY_MAX) throw new E2eError("e2e_too_large", `request is ${stream.length} bytes, over the peer's ${E2E_BODY_MAX}-byte limit; not sent`);
     const res = await this.d.post(recordPath(s.sid, rid), stream, E2E_CONTENT_TYPE);
     if (res.status !== 200 || res.headers.get("content-type") !== E2E_CONTENT_TYPE) {
       const code = await codeOf(res);

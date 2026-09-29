@@ -20,8 +20,8 @@ import { setRequestContext } from "./request-context.js";
 import { isLoopbackAddress } from "../lib/same-host.js";
 import { DEVICE_HEADER } from "../lib/devices.js";
 import { HTTP_IDLE_TIMEOUT_S } from "../lib/esc-guard.js";
-import { isE2eFrame } from "../lib/peer-e2e-wire.js";
-import { E2E_BODY_MAX, readRequestCapped } from "../lib/peer-e2e-serve.js";
+import { E2E_BODY_MAX, isE2eFrame } from "../lib/peer-e2e-wire.js";
+import { readRequestCapped } from "../lib/peer-e2e-serve.js";
 
 export { configuredPeerIngressPort };
 
@@ -151,10 +151,12 @@ export async function ingressRequest(req: Request, handleApi: ApiHandler, addr: 
     headers.delete(DEVICE_HEADER);
     if (!secret && !ingressPublicRoute(req.method, url, req.url)) return json(403, { ok: false, error: "this entrance only serves peer tokens" });
   }
-  // 不带凭据的公开口（兑换、E2E 帧）读正文时身份还没核：按 E2E 记录流的上限封顶，大正文进不了内存（本机反代转来的也一样）
-  const capped = !secret && ingressPublicRoute(req.method, url, req.url);
+  // 读正文时身份还没核的按 E2E 记录流的上限封顶，大正文进不了内存（本机反代转来的也一样）：不带凭据的公开口（兑换、E2E 帧），
+  // 以及 E2E 帧不论带什么头——外层 Bearer 在 E2E 帧上没有意义，一枚泄漏的 peer token 不该换来无上限的缓冲
+  const e2eFrame = isE2eFrame(req.method, url.pathname + url.search);
+  const capped = e2eFrame || (!secret && ingressPublicRoute(req.method, url, req.url));
   const body = req.method === "GET" || req.method === "HEAD" ? undefined : capped ? await readRequestCapped(req, E2E_BODY_MAX) : await req.arrayBuffer();
-  if (body === null) return json(413, { ok: false, error: "request body too large" });
+  if (body === null) return json(413, { ok: false, error: "request body too large", code: e2eFrame ? "e2e_too_large" : "body_too_large" });
   const apiReq = new Request(url.toString(), { method: req.method, headers, body });
   setRequestContext(apiReq, localProxy
     ? { source: "lan", clientIp: addr, https: req.headers.get("x-forwarded-proto") === "https" }

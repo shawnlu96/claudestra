@@ -49,6 +49,8 @@ export function relayRefusalHint(message: string): string | null {
 
 /** 发 peer 请求抛了异常（不是超时）时给调用方的话：中继入站的拒绝按原因说，其余才是连不上 */
 export function peerCallFailureText(label: string, message: string, peerName: string): string {
+  // 本机 E2E 出站封好超了上限就不发（lib/peer-e2e-client.ts）：不是网络问题，也确定没送到
+  if (message.startsWith("e2e_too_large:")) return `[⚠️ peer 调用失败] ${label} 没有发出：加密后超过对方的单条上限（2 MiB），消息没送到——缩短或拆成几条再发。`;
   const refused = relayRefusalHint(message);
   if (refused) return `[⚠️ peer 调用失败] ${label} 被对方拒绝（${message}）：${refused}。`;
   return `[⚠️ peer 调用失败] ${label} 网络不可达：${message}。请确认对方实例在线（peer-http-test ${peerName}）。`;

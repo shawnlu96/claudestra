@@ -13,7 +13,7 @@ import { compareE2eKey, verifyE2eKey, type MachineE2eKey, type SignedE2eKey } fr
 import type { SessionTable } from "./peer-e2e-sessions.js";
 import {
   E2E_CONTENT_TYPE, E2E_HELLO_PATH, E2E_SESSION_TTL_S, e2eError, encodeHelloReply, encodeResponseHead,
-  parseHello, parseInnerHead, parseRecordPath, PEER_E2E_LABEL,
+  E2E_BODY_MAX, parseHello, parseInnerHead, parseRecordPath, PEER_E2E_LABEL,
 } from "./peer-e2e-wire.js";
 import { collectBody } from "./relay-stream.js";
 
@@ -53,19 +53,21 @@ export interface ServeContext {
 }
 
 const HELLO_MAX = 4096;
-/** 一条记录流的上限；peer 入口对不带凭据的请求也按它封顶（bridge/peer-ingress.ts） */
-export const E2E_BODY_MAX = 2 * 1024 * 1024;
 
 /** 这个外层路径的正文上限：外层身份核对之前就按它读（bridge/peer-e2e-route.ts），超了回 413 */
 export const e2eBodyCap = (path: string): number => (path === E2E_HELLO_PATH ? HELLO_MAX : E2E_BODY_MAX);
 
 /**
  * 有上限地读正文：声明的 content-length 超限就一个字节都不读，读的时候照样边读边核（chunked、谎报长度的）。
- * 超限返回 null（回 413）；读流中途失败（对方断开）也归到这里——拒掉这一帧，对方重发即可，没有别的状态要收拾
+ * 超限返回 null（回 413）；读流中途失败（对方断开）也归到这里——拒掉这一帧，对方重发即可，没有别的状态要收拾。
+ * 不是超限的失败记一条日志：正文被读过两遍这类实现错误也会落到这里，别让它只显示成「太大」
  */
 export async function readRequestCapped(req: Request, max: number): Promise<Uint8Array | null> {
   if (Number(req.headers.get("content-length") ?? 0) > max) return null;
-  return collectBody(req.body, max).catch(() => null);
+  return collectBody(req.body, max).catch((e: Error) => {
+    if (!e.message.startsWith("body exceeds")) console.warn(`⚠️ [peer-e2e] 读请求正文失败: ${e.message}`);
+    return null;
+  });
 }
 
 /** 调用方已按 e2eBodyCap 读过的就用那份（ctx.body），不再读第二遍 */
