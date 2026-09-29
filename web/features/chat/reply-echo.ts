@@ -114,3 +114,22 @@ export function isEchoSegment(m: EchoCandidate, segText: string | undefined): bo
   if (!segText?.trim()) return false;
   return repliesOf(m).some((r) => isReplyEcho(segText, r));
 }
+
+/**
+ * 紧跟在 reply 之后、只有旁白的消息 id（历史按 jsonl 记录切条，「回复完又用文字写一遍」常独立成一条）。
+ * 不看文字是否相同——中文 reply + 英文复述这种 isReplyEcho 认不出；这里只决定默认收起（narration-fold.ts），不藏。
+ */
+export function postReplyMessageIds(messages: EchoCandidate[]): Set<string> {
+  const out = new Set<string>();
+  let prevEndsWithReply = false;
+  for (const m of messages) {
+    if (m.role !== "assistant") {
+      prevEndsWithReply = false;
+      continue;
+    }
+    if (prevEndsWithReply && bareNarration(m)) out.add(m.id);
+    const segs = m.segments ?? [];
+    prevEndsWithReply = segs.length ? segs[segs.length - 1].kind === "reply" : !!m.replyText?.trim();
+  }
+  return out;
+}
