@@ -69,6 +69,7 @@ owner 点确认后，bridge 先把提案标成「已确认」，再依次做下�
 
 - 执行者交付只跑 `ledger deliver`。输出里 `routed: true` 表示 bridge 会通知接手的人，执行者不用再发消息。
 - `ledger dispatch <T>` 会先核对执行者 worktree 的 HEAD 是不是交付时记下的那个 head，对上了才派审。规格卡「审查」那一行写了「对抗式最后一轮」的话，前面一轮没有 P0 / P1 时，它会自动换成对抗式审查员。对抗式的结论另存 `reviews/<T>-r<N>-adv.md`，不和同一轮的常规结论撞名。常规轮通过时 bridge 不会告诉 PM「可以合并」，而是提醒调度助理再派对抗式。
+- 进 merge 有一道闸门：`review --to merge`、PM 手动 `stage review → merge`、解除 blocked 回 merge 都要过。规格卡要对抗式的话，当前轮次、当前 head 上得有对抗式通过，或者 PM 的 `--waive adversarial`。策略取规格卡和派审记录里更严的一条，所以派审之后把卡改松不算数。但规格卡在第一次派审之前就被改松的话，没有记录可以比对，闸门按改松后的卡放行，所以改「审查」一行要经 PM。任务进了 merge 及以后（包括从这些阶段进的 blocked），谁要换成不同的 head，都得先由 PM 退回 review。只补 PR、分支，或者写入相同的 head，照常放行。之前在 merge 的 blocked 回 merge 被闸门拦下时，PM 可以把它直接退回 review，效果和 merge → review 一样（round+1）。
 - 执行者写的交付说明、升级原因，在通知和审查员 prompt 里只以单行引用出现（「…」，注明是谁的原文），证据和结论只收文件路径（写入时就拒绝全角标点、【】「」、空白和不可见字符），显示时同样放进引用框：被审的人没法借这些文字给审查员或 PM 下指令。
 - 调度助理没跑 `ledger dispatch` 就记了通过（比如 PM 手写 prompt 派的审）：bridge 读规格卡的「审查」一行，判断下一轮还要不要对抗式，和 `review-pack` 读的是同一份；规格卡也找不到时交调度助理核对，不会说「审查走完」。
 - `ledger review-pack <T>` 是只读版：只打印审查员 prompt，不记账。

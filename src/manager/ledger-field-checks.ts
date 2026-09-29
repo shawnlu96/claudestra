@@ -46,8 +46,8 @@ function adversarialDebt(c: LedgerCli, task: LedgerTask, pending?: PendingReview
 }
 
 /**
- * 进 merge 的闸门：review --to merge（pending = 正要记的这条结论）和 PM 手动 stage review → merge（不带 pending）都过它；
- * 真要跳过对抗式统一走 review --waive adversarial --text <理由>，理由记进事件
+ * 进 merge 的闸门：review --to merge（pending = 正要记的这条结论）、PM 手动 stage review → merge 和 blocked → merge（不带 pending）都过它；
+ * 真要跳过对抗式统一走 review --waive adversarial --text <理由>，理由记进事件；blocked 被拦时先退回 review（lib/ledger-stages.ts）
  */
 export function checkMergeGate(c: LedgerCli, task: LedgerTask, pending?: PendingReview): void {
   const why = adversarialDebt(c, task, pending);
@@ -56,5 +56,6 @@ export function checkMergeGate(c: LedgerCli, task: LedgerTask, pending?: Pending
   const out = c.isRealPm(task.project)
     ? `PM 核对后确实不需要再审，可以${waive}`
     : `把这件事升级给 PM（ledger escalate ${task.id} --reason …）`;
-  throw new LedgerError("conflict", `${why}：先 ledger dispatch ${task.id}（会按规格卡选对抗式）派审，通过后 review --to merge；${out}`);
+  const back = task.stage === "blocked" ? `回不了 merge：先 stage ${task.id} --from blocked --to review，再` : "先";
+  throw new LedgerError("conflict", `${why}：${back} ledger dispatch ${task.id}（会按规格卡选对抗式）派审，通过后 review --to merge；${out}`);
 }

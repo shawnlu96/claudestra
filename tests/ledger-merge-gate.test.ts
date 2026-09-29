@@ -351,6 +351,62 @@ describe("进了 merge 之后不能换成没审过的 head（adv1 P1-3）", () =
     expect((await run("agent-exec", "deliver", "T1", "--head", "bbbb2222")).task.headSHA).toBe("bbbb2222");
     expect(owesAdversarial(policy(), events(), round())).toBe(true);
   });
+
+  const rev = () => String(getTask(db, "T1")?.rev);
+
+  test("PM 在 merge 阶段 task-set 换成不同的 head 也拒；只补 --pr / --branch、写入相同的 head 照常放行（adv2 P2-1）", async () => {
+    await toMerge();
+    expect(await run("agent-pm", "task-set", "T1", "--rev", rev(), "--head", "ffff6666")).toMatchObject({ ok: false, code: "conflict" });
+    expect((await run("agent-pm", "task-set", "T1", "--rev", rev(), "--pr", "169", "--branch", "task/t1")).ok).toBe(true);
+    expect((await run("agent-pm", "task-set", "T1", "--rev", rev(), "--head", "aaaa1111", "--pr", "170")).ok).toBe(true);
+    expect(getTask(db, "T1")).toMatchObject({ stage: "merge", headSHA: "aaaa1111", pr: "170", branch: "task/t1" });
+  });
+
+  test("merge → blocked 期间换 head：deliver / task-set 都按 merge 拒；绕过去换了的（修之前留下的数据）回 merge 时被合并门拦下（adv2 P1）", async () => {
+    await toMerge();
+    expect((await run("agent-pm", "stage", "T1", "--from", "merge", "--to", "blocked")).ok).toBe(true);
+    head = "dddd4444";
+    expect(await run("agent-exec", "deliver", "T1", "--head", "dddd4444")).toMatchObject({ ok: false, code: "conflict" });
+    expect(await run("agent-exec", "task-set", "T1", "--rev", rev(), "--head", "dddd4444")).toMatchObject({ ok: false, code: "forbidden" });
+    expect(await run("agent-exec", "task-set", "T1", "--rev", rev(), "--branch", "task/x")).toMatchObject({ ok: false, code: "forbidden" });
+    expect(await run("agent-pm", "task-set", "T1", "--rev", rev(), "--head", "dddd4444")).toMatchObject({ ok: false, code: "conflict" });
+    expect(getTask(db, "T1")?.headSHA).toBe("aaaa1111");
+    ship("dddd4444");
+    const back = await run("agent-pm", "stage", "T1", "--from", "blocked", "--to", "merge");
+    expect(back).toMatchObject({ ok: false, code: "conflict" });
+    expect(back.error).toContain("--from blocked --to review");
+    expect(getTask(db, "T1")?.stage).toBe("blocked");
+  });
+
+  /** 出口（PM 定 ①）：之前在 merge 的 blocked 退回 review（round+1），再派审或 PM 豁免 */
+  const unblockToReview = async () => {
+    await toMerge();
+    await run("agent-pm", "stage", "T1", "--from", "merge", "--to", "blocked");
+    ship("dddd4444");
+    expect(await run("agent-exec", "stage", "T1", "--from", "blocked", "--to", "review")).toMatchObject({ ok: false, code: "forbidden" });
+    expect((await run("agent-pm", "stage", "T1", "--from", "blocked", "--to", "review")).task).toMatchObject({ stage: "review", round: 2 });
+    expect(owesAdversarial(policy(), events(), round())).toBe(true);
+  };
+
+  test("出口：merge → blocked → review（round+1）→ 派对抗式 → pass → merge", async () => {
+    await unblockToReview();
+    expect((await run("agent-disp", ...verdict("pass", "merge"))).code).toBe("conflict");
+    expect((await run("agent-disp", "dispatch", "T1", "--adversarial")).event.data.reviewer).toBe("adversarial");
+    expect((await run("agent-disp", ...verdict("pass", "merge"))).task).toMatchObject({ stage: "merge", headSHA: "dddd4444", round: 2 });
+  });
+
+  test("出口：merge → blocked → review → PM --waive → merge", async () => {
+    await unblockToReview();
+    const w = await run("agent-pm", ...verdict("pass", "merge", "--waive", "adversarial", "--text", "只改了 CI 配置"));
+    expect(w.task).toMatchObject({ stage: "merge", headSHA: "dddd4444" });
+  });
+
+  test("merge → blocked → merge，head 没动：照常放行", async () => {
+    await toMerge();
+    await run("agent-pm", "stage", "T1", "--from", "merge", "--to", "blocked");
+    expect((await run("agent-exec", "deliver", "T1", "--head", "aaaa1111", "--text", "等 CI")).ok).toBe(true);
+    expect((await run("agent-pm", "stage", "T1", "--from", "blocked", "--to", "merge")).task.stage).toBe("merge");
+  });
 });
 
 describe("策略取规格卡和派审记录里更严的（adv1 P2-3）", () => {
