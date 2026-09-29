@@ -6,7 +6,7 @@
 
 ## 什么会进 agent 上下文（封闭清单）
 
-一期只有一条：**丢进工作台**——在房间里勾几条消息，选一个 agent，确认后以**发起人自己的 Web 身份**投给它（不冒充 owner），目标只能是他 scope 里的本机 agent。平时发消息、@ 人、建房、删除、上传图片都不投给任何 agent（`tests/talk-api.test.ts`、沙箱实测看 agent 会话记录）。新增投递路径前先改设计，别在别处顺手投。
+一期只有一条：**丢进工作台**——在房间里勾几条消息，选一个 agent，确认后以**发起人自己的 Web 身份**投给它（不冒充 owner），目标只能是发起人 scope 里的本机 agent。平时发消息、@ 人、建房、删除、上传图片都不投给任何 agent（`tests/talk-api.test.ts`、沙箱实测看 agent 会话记录）。新增投递路径前先改设计，别在别处顺手投。
 
 - **逐字一致**：预览和确认都经 `bridge/talk-drop.ts` 的同一段渲染（正文 `lib/talk-drop-render.ts`，抬头 `bridge/router.ts renderApiInbound`，bridge.ts 投递时用的也是它），确认时重算 sha，对不上回 409。
 - **只投一次、不丢**：前端开弹窗时生成 `dropId`，bridge 先 `INSERT OR IGNORE` 占位再投；intent 是 notification（不抢占），目标在线且空闲才直接送，否则进押后队列。押后队列的结局（送达 / 24 小时放弃 / 目标被 kill）经 `bridge/held-queue.ts onHeldSettled` 回写 drops；bridge 重启后占了位却不在队里的标 failed，界面可重发。

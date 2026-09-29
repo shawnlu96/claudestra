@@ -1,6 +1,6 @@
 /**
- * 「丢进工作台」：勾选几条 Chat 消息交给一个 agent。这是人与人的内容进 agent 上下文的唯一入口（设计稿 §2.5 第 1 行）。
- * - 身份：以发起人自己的 Web 身份投（和他在工作台里直接发消息同一个 api 端点），不冒充 owner；目标只能是他 scope 里的本机 agent。
+ * 「丢进工作台」：勾选几条 Chat 消息交给一个 agent。这是人与人的内容进 agent 上下文的唯一入口（docs/talk/README.md「封闭清单」）。
+ * - 身份：以发起人自己的 Web 身份投（和发起人在工作台里直接发消息同一个 api 端点），不冒充 owner；目标只能是发起人 scope 里的本机 agent。
  * - 逐字一致：预览和确认都经 buildDrop → renderApiInbound，确认时重算 sha，不一致回 409（中间有人删了消息 / 改了名）。
  * - 不抢占、不丢：intent 用 notification，目标在线且空闲才直接送；忙、压缩中、不在线就进押后队列，等空闲再送（held-flush 不会对
  *   notification 抢占）。押后的结局经 held-queue 的 onHeldSettled 回写 drops（talk.ts 顶层挂的监听）。

@@ -1,6 +1,6 @@
 /**
  * talk（界面叫 Chat）在 bridge 里的运行时：库句柄、「请求方是谁」、名字目录、SSE。人与人的消息**不进任何 agent 的上下文**，
- * 只有「丢进工作台」（talk-drop.ts）会投给 agent——这是封闭清单，别的路径加投递要先改设计稿 §2.5。
+ * 只有「丢进工作台」（talk-drop.ts）会投给 agent——这是封闭清单（docs/talk/README.md），别的路径加投递要先改设计。
  * 谁能用：本机 owner（含 Discord 上的 owner、旧 web-ui token）和 guest 设备；集成 token、peer 一律不是人，403。
  * 读权限只有一个判定：查看者名下的成员键（合并过的人有多个）在不在房间成员里（lib/talk-rooms.ts isMember）。
  */
