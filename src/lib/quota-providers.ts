@@ -136,17 +136,28 @@ export async function getQuota<E extends QuotaEndpoint>(
   const target = QUOTA_ENDPOINTS[endpoint];
   if (!target || target.provider !== cred.provider) throw new Error(`quota endpoint ${endpoint} 与凭据 ${cred.provider} 不匹配`);
   assertAllowedUrl(target.url);
+  const headers = { ...pickClientHeaders(cred, deps.clientHeaders), ...cred.authHeaders() };
+  const r = await fetchJsonCapped(target.url, headers, deps);
+  if (!r.ok) return r;
+  const data = parseFor(endpoint, r.data, deps.hashCreditId);
+  return data ? { ok: true, data } : { ok: false, code: "bad_shape" };
+}
+
+/**
+ * 只读 GET 一个 JSON：拒绝重定向、超时（缺省 5 秒）、正文流式读且有上限；失败只给固定错误码，不带响应体、不带异常原文。
+ * 地址白名单由调用方把关（getQuota 的固定表、lib/quota-pi-plans.ts 的接入商表）。
+ */
+export async function fetchJsonCapped(
+  url: string,
+  headers: Record<string, string>,
+  deps: { fetch: QuotaFetch; now: () => number; timeoutMs?: number },
+): Promise<FetchOutcome<unknown>> {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), deps.timeoutMs ?? QUOTA_TIMEOUT_MS);
   try {
     let res: Response;
     try {
-      res = await deps.fetch(target.url, {
-        method: "GET",
-        headers: { Accept: "application/json", ...pickClientHeaders(cred, deps.clientHeaders), ...cred.authHeaders() },
-        redirect: "manual",
-        signal: ctrl.signal,
-      });
+      res = await deps.fetch(url, { method: "GET", headers: { Accept: "application/json", ...headers }, redirect: "manual", signal: ctrl.signal });
     } catch {
       return { ok: false, code: ctrl.signal.aborted ? "timeout" : "network" }; // 异常原文可能带请求细节，只留错误码
     }
@@ -167,14 +178,11 @@ export async function getQuota<E extends QuotaEndpoint>(
       return { ok: false, code: ctrl.signal.aborted ? "timeout" : "network" }; // 读正文中途断开 / 超时，原文不外传
     }
     if (!body.ok) return { ok: false, code: "too_large" };
-    let json: unknown;
     try {
-      json = JSON.parse(body.text);
+      return { ok: true, data: JSON.parse(body.text) as unknown };
     } catch {
       return { ok: false, code: "bad_json" }; // 不是 JSON（常见是登录页 / 风控页），正文不记
     }
-    const data = parseFor(endpoint, json, deps.hashCreditId);
-    return data ? { ok: true, data } : { ok: false, code: "bad_shape" };
   } finally {
     clearTimeout(timer);
   }

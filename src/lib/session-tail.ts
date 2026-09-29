@@ -16,7 +16,8 @@
  * 256KB 窗内 0 条真实对话 → 退 mtime → CC 一 touch 就顶到列表第一。
  */
 
-import { translateSessionLine } from "./session-source.js";
+import { statSync } from "fs";
+import { runtimeForSessionPath, translateSessionLine } from "./session-source.js";
 
 export interface SessionTailInfo {
   /** 最后一条真实对话(user/assistant)的时间；窗内找不到为 null（**不退 mtime**） */
@@ -161,4 +162,43 @@ export function scanSessionTail(text: string, runtime?: string): SessionTailInfo
   }
   const { effortSettled: _settled, ctxSettled: _ctx, ...info } = acc;
   return info;
+}
+
+/**
+ * 会话文件里最后一条真实对话记录（user/assistant，带 timestamp）的时间。
+ *
+ * 不能用文件 mtime 当「最近对话时间」：CC 会持续原地更新状态类记录
+ * （last-prompt / mode / file-history-snapshot 等），且自己的 housekeeping
+ * 还会周期性 touch 会话文件（2026-08-10 实测：12 个 agent 的 jsonl 被逐个
+ * touch，字节与归档副本 cmp 完全一致）——空闲 agent 的 mtime 一直在刷新，
+ * 列表排序就出现「没动静的 agent 莫名顶到最前」
+ * （2026-07-13 router；2026-08-10 qingniao-miniapp owner 报「我明明啥也没干」）。
+ *
+ * 扫描策略（v2.18.1 修正）：tail 逐级放宽 256KB → 2MB → 8MB 逆序找，命中即停；
+ * 长期只被 restart 的 agent，尾部窗口可能全是重启残渣（No response requested. +
+ * /model 命令记录 + file-history-snapshot），真实对话被挤到更早的位置。
+ * 全读完仍找不到 → convTs 为 **null**（旧实现退回 mtime，等于把「CC 摸过文件」
+ * 当成活动，正是上面那个 bug 的直接成因；调用方退回 registry.created 更诚实）。
+ * 按 (path, mtimeMs) 缓存——mtime 没变不重读，放宽窗口的读放大只在 touch 后发生一次。
+ */
+const tailInfoCache = new Map<string, { mtimeMs: number; info: SessionTailInfo }>();
+export async function sessionTailInfo(path: string): Promise<SessionTailInfo | null> {
+  try {
+    const st = statSync(path);
+    const hit = tailInfoCache.get(path);
+    if (hit && hit.mtimeMs === st.mtimeMs) return hit.info;
+    let info: SessionTailInfo = {
+      convTs: null, ctxTokens: null, ctxWindow: null, model: null, modelTs: null, effort: null, effortTs: null,
+    };
+    for (const win of TAIL_WINDOWS) {
+      const start = Math.max(0, st.size - win);
+      info = scanSessionTail(await Bun.file(path).slice(start, st.size).text(), runtimeForSessionPath(path));
+      // 真实对话已命中，或已经读到文件头（再放宽也没有新内容）→ 收工
+      if (info.convTs !== null || start === 0) break;
+    }
+    tailInfoCache.set(path, { mtimeMs: st.mtimeMs, info });
+    return info;
+  } catch {
+    return null;
+  }
 }

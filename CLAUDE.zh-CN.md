@@ -86,6 +86,7 @@ master/                大总管指令模板（由 setup.ts 渲染）
 - **只读历史 API + 手动归档区** — `GET /api/v1/agents/:name/history`、归档/恢复端点，保留期只清手动归档区。
 - **Pi agent 会话** — `runtime: "pi"` 经 Pi 扩展接入，能力档案（`pi-env`），会话记录翻译成 Claude Code 形状（`lib/session-source.ts`）。
 - **HTTP peers** — 跨实例协作走 `/api/v1`，scope token + 一键邀请；大总管永不可分享。
+- **上下文边界** — 按项目 / 名字模式的压缩线：[context-boundary.md](./docs/architecture/context-boundary.md)。
 
 ## 安全姿态
 

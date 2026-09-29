@@ -19,7 +19,6 @@ import {
   type Client,
   type TextChannel,
 } from "discord.js";
-import { statSync } from "fs";
 import {
   tmuxRaw,
   MASTER_SESSION,
@@ -28,12 +27,13 @@ import {
   tmuxSendEscape,
   isRewindDialog,
   ESC_DOUBLE_TAP_MS,
-  windowTarget, windowKey,
-  tmuxSendLine,
+  windowTarget,
 } from "../lib/tmux-helper.js";
-import { readConfig, readConfigSync, setStatsDashboard, isConfigCorrupt } from "../lib/config-store.js";
+import { readConfig, setStatsDashboard, isConfigCorrupt } from "../lib/config-store.js";
 import { readRegistryAgents } from "../lib/registry.js";
-import { readUsageCache, readUsageCacheStale, deriveStaleUsage, readSessionCtx } from "../lib/usage-cache.js";
+import { readUsageCache, readUsageCacheStale, deriveStaleUsage } from "../lib/usage-cache.js";
+import { compactInjectedRecently, ctxBoundaryViewFor, ctxBoundaryWarnings } from "./ctx-boundary.js";
+import { boundaryLabel, type CtxBoundaryView } from "../lib/ctx-boundary-decision.js";
 import { discordCreateChannel } from "./discord-api.js";
 import { computeAgentStats, formatTokens, type AgentStat } from "../lib/agent-stats.js";
 import { currentUsageWindow, noteWeekResetText, type UsageWindowBounds } from "../lib/usage-window.js";
@@ -214,10 +214,7 @@ async function findIdleScrapeTarget(): Promise<string | null> {
     // 硬中断,自激拖长)。①bridge 自有状态:刚注入过 /save-compact 的窗口
     // 15min 内不当抓取源(不依赖 TUI 文案);②文案识别:兜住用户手动 /compact
     // 与超时后仍在跑的超长 compact。
-    const scTs = recentSaveCompact.get(windowKey(t)); // 记账与查询都按窗口身份（写法不同也对得上）
-    if (scTs && Date.now() - scTs < SAVE_COMPACT_GUARD_MS) {
-      continue;
-    }
+    if (compactInjectedRecently(t)) continue; // 记账与查询都按窗口身份（写法不同也对得上）
     if (/compacting/i.test(pane)) {
       console.log(`📊 ${t} 正在 compact,跳过抓取候选`);
       continue;
@@ -513,6 +510,14 @@ const LIMIT_YELLOW = 50, LIMIT_RED = 80;
 function ctxDot(pct: number): string {
   return pct >= CTX_RED ? "🔴" : pct >= CTX_YELLOW ? "🟡" : "🟢";
 }
+const BOUNDARY_DOT: Record<CtxBoundaryView["level"], string> = { ok: "🟢", over: "🟡", cap: "🔴" };
+/** 「🧭 执行类 余 35K」/「超 20K · 上限 250K」；配置有问题的策略带 ⚠ */
+function boundaryNote(v: CtxBoundaryView | null): string {
+  if (!v || v.remaining === null) return v?.hardCap ? `\n🧭 ${boundaryLabel(v.policy)} · 上限 ${formatTokens(v.hardCap)}` : "";
+  const left = v.remaining >= 0 ? `余 ${formatTokens(v.remaining)}` : `超 ${formatTokens(-v.remaining)}`;
+  const cap = v.hardCap !== null ? ` · 上限 ${formatTokens(v.hardCap)}` : "";
+  return `\n🧭 ${boundaryLabel(v.policy)} ${formatTokens(v.window)} ${left}${cap}${v.warnings.length ? " ⚠" : ""}`;
+}
 function limitDot(pct: number | null): string {
   if (pct == null) return "⚪";
   return pct >= LIMIT_RED ? "🔴" : pct >= LIMIT_YELLOW ? "🟡" : "🟢";
@@ -545,7 +550,8 @@ function renderEmbed(snap: StatsSnapshot): EmbedBuilder {
   } else {
     desc.push("_（/status 抓取中 / 无空闲会话可借，点 🔄 重试）_");
   }
-  desc.push("_🟢 正常 · 🟡 偏高 · 🔴 需注意（点=上下文占用 / 前缀=limit）_");
+  desc.push("_🟢 正常 · 🟡 过了压缩线 · 🔴 过了硬上限（点=上下文边界 / 前缀=limit）_");
+  for (const w of ctxBoundaryWarnings().slice(0, 3)) desc.push(`⚠️ 上下文边界配置${w.policy ? `（${boundaryLabel(w.policy)}）` : ""}：${w.text}`);
 
   const emb = new EmbedBuilder()
     .setTitle("📊 Claudestra 用量看板")
@@ -560,9 +566,10 @@ function renderEmbed(snap: StatsSnapshot): EmbedBuilder {
     const ctx = a.contextEstimated
       ? `📖 ~${formatTokens(a.contextTokens)} ${a.contextPct}%（刚 compact）`
       : `📖 ${formatTokens(a.contextTokens)} ${a.contextPct}%`;
+    const bv = ctxBoundaryViewFor({ ...a, sessionId: a.jsonl?.split("/").pop()?.replace(/\.jsonl$/, "") }, a.contextTokens);
     emb.addFields({
-      name: `${ctxDot(a.contextPct)} ${name} · ${ctx}`,
-      value: `${a.model.replace(/^claude-/, "")} · 当前会话 今 ${formatTokens(a.today.tokens)} · 周 ${formatTokens(a.week.tokens)}`,
+      name: `${bv ? BOUNDARY_DOT[bv.level] : ctxDot(a.contextPct)} ${name} · ${ctx}`,
+      value: `${a.model.replace(/^claude-/, "")} · 当前会话 今 ${formatTokens(a.today.tokens)} · 周 ${formatTokens(a.week.tokens)}${boundaryNote(bv)}`,
       inline: false,
     });
   }
@@ -653,223 +660,21 @@ const CTX_TIERS = [250_000, 300_000, 400_000, 500_000, 750_000];
 const notifiedTier = new Map<string, number>(); // channelId → 已提醒过的档位（1-based，0=没过档）
 let tierBaselined = false;
 
-const DEFAULT_AUTO_COMPACT_WINDOW = 400_000;
-/**
- * channelId → 上次自动触发的时间戳。v2.21.1+ 从布尔改时间戳(peer 2026-08-30
- * 实锤):布尔标记只在跨绝对档位时清,而档位越往上越宽(500K→750K 差 250K)——
- * 一次注入被 TUI 吞掉(agent 恰好在忙/弹窗挡着),标记就卡成永久沉默,
- * market-maker 668K 超线 4 小时零触发。改为:触发后 30 分钟没观察到上下文
- * 回落(跨档会清)就允许重试——重试仍要过闲置门槛,不会打扰干活中的 agent。
- */
-const autoCompactTriggered = new Map<string, number>();
-const AUTO_COMPACT_RETRY_MS = 30 * 60 * 1000;
-
-/**
- * v2.21.1+ 按 agent 真实窗口收紧阈值(peer 2026-08-30);比例在 2026-09-02
- * 由实测重定(owner 报 Robinhood 被 CC 裸压、上下文全丢)。
- *
- * **必须赶在 CC 自家 auto-compact 前面**——它只压不存记忆,一旦它先动手,
- * 「先存记忆再 compact」这套保护就等于不存在。
- *
- * ⚠ 纠错(2026-09-03,owner 质疑后全量核对 compact_boundary 记录):CC 默认在
- * 1M 窗口的 **约 967K(96.7%)** 才自动压缩(changelog 2.1.247 原话),2026-04~06
- * 的自动压缩全部落在 967K~1,003K。2026-09-02 记的「62%~72% 就压」是误诊:
- * 615K/632K/642K 那组根本不是 CC 的自动压缩;717K~723K 的 3 次(08-27 起)是
- * 因为 v2.20.x 遗留在 ~/.claude/settings.json 的 autoCompactWindow: 750000 被
- * CC 2.1.247+ 开始认了(750K − ~30K 缓冲 ≈ 720K)。那两个键已移除。
- *
- * 现在两档(相对真实窗口):
- *   NORMAL 85%   常规线(1M = 850K),留足闲置等待的余量
- *   EMERGENCY 93% 救命线(1M = 930K),离 CC 的 967K 只剩几万 token,
- *                 **无视闲置门槛**立即触发(打断一次 ≪ 记忆全丢)
- * 拿不到真实窗口(没配 statusline 落盘)时退回配置绝对值,且无救命线。
- */
-const REAL_WINDOW_TRIGGER_RATIO = 0.85;
-const EMERGENCY_WINDOW_RATIO = 0.93;
-
-function sessionIdOfStat(a: AgentStat): string | null {
-  const base = a.jsonl?.split("/").pop() || "";
-  return base.endsWith(".jsonl") ? base.slice(0, -".jsonl".length) : null;
-}
-
-/** 该 agent 的真实上下文窗口(statusline 落盘的权威值);拿不到 → null。 */
-function realWindowOf(a: AgentStat): number | null {
-  const sid = sessionIdOfStat(a);
-  const ctx = sid ? readSessionCtx(sid) : null;
-  return ctx && ctx.window > 0 ? ctx.window : null;
-}
-
-function effectiveAutoCompactThreshold(cfgThreshold: number, a: AgentStat): number {
-  if (cfgThreshold <= 0) return 0;
-  const w = realWindowOf(a);
-  if (w) return Math.min(cfgThreshold, Math.floor(w * REAL_WINDOW_TRIGGER_RATIO));
-  return cfgThreshold;
-}
-
-/**
- * 救命线:踩到它说明 CC 随时会裸压,必须**无视闲置门槛**立即存记忆+压。
- * 只有拿得到真实窗口时才有这条线(否则无从判断离 CC 的触发点还有多远)。
- */
-function emergencyThresholdOf(a: AgentStat): number | null {
-  const w = realWindowOf(a);
-  return w ? Math.floor(w * EMERGENCY_WINDOW_RATIO) : null;
-}
-
-/** v2.21.3+ 救命线独立开关(缺省开)。owner 2026-09-03:把常规线关成 window=0 后
- *  发现 `eff > 0` 那道闸把救命线一起关了——忙碌 agent 涨到 967K 就是 CC 裸压,
- *  记忆全丢(Robinhood 08-27 就是这么丢的)。常规线管「不打扰」,救命线管「别撞墙」,
- *  两者不该绑在一个数上。 */
-function loadAutoCompactEmergency(): boolean {
-  try {
-    return readConfigSync().autoCompact?.emergency !== false;
-  } catch {
-    return true;
-  }
-}
-
-/**
- * 自动 save-compact 的触发裁决(纯函数,单测在 tests/stats-resets.test.ts):
- *   常规线:eff>0 且 ctx≥eff 且闲置满门槛
- *   救命线:emergency 非 null 且 ctx≥emergency——**独立于常规线**,无视闲置
- * 两者任一成立、且距上次触发超过 retryMs(注入可能排队未执行)才开火。
- */
-export function autoCompactDecision(p: {
-  ctx: number;
-  eff: number;
-  emergency: number | null;
-  idleOk: boolean;
-  lastTrig: number;
-  now: number;
-  retryMs: number;
-}): { fire: boolean; emergency: boolean } {
-  const isEmergency = p.emergency !== null && p.ctx >= p.emergency;
-  const overNormal = p.eff > 0 && p.ctx >= p.eff && p.idleOk;
-  const fire = (overNormal || isEmergency) && p.now - p.lastTrig > p.retryMs;
-  return { fire, emergency: fire && isEmergency };
-}
-
-function loadAutoCompactThreshold(): number {
-  try {
-    // 只读 Claudestra 自己的 config.json（设置界面写这里）。曾兜底读 ~/.claude/settings.json
-    // 的 autoCompactWindow——那是 Claude Code 自己认的键（遗留的 750000 让 CC 约 720K 就裸压，
-    // b294b84 已移除），拿它当我们的阈值等于两套语义混用，且设置页显示「未设置」却在生效。
-    const v = readConfigSync().autoCompact?.window;
-    if (v === 0) return 0;
-    if (typeof v === "number" && Number.isFinite(v) && v > 0) return v;
-  } catch { /* 用默认 */ }
-  return DEFAULT_AUTO_COMPACT_WINDOW;
-}
-
-/** 闲置门槛(owner 2026-08-26「不然我干着干着就 compact 了」):超线只是必要条件,
- *  还得**闲置满 N 小时**才注入 /save-compact。config.json 的 autoCompact.idleHours
- *  可调,0 = 不要闲置门槛(回到超线即触发)。 */
-const DEFAULT_AUTO_COMPACT_IDLE_HOURS = 3;
-
-function loadAutoCompactIdleMs(): number {
-  try {
-    // v2.20.1+: Claudestra 独立配置,避免往 ~/.claude/settings.json 写未知字段被 CC 校验拒绝。
-    const cfg = readConfigSync();
-    const v = cfg.autoCompact?.idleHours;
-    if (v === 0) return 0;
-    if (typeof v === "number" && Number.isFinite(v) && v > 0) return v * 3600_000;
-  } catch { /* 用默认 */ }
-  // 曾兜底读 ~/.claude/settings.json 的 autoCompactIdleHours：CC 校验会拒这个未知字段，
-  // 没有任何代码再写它，已删。
-  return DEFAULT_AUTO_COMPACT_IDLE_HOURS * 3600_000;
-}
-
-/** 闲置判据 = 会话 jsonl 的 mtime(对话/工具活动都会写它;/status 抓取走 TUI
- *  面板不落 jsonl,实测几周才 1 条,不会把闲置刷没)。拿不到 jsonl → 判「不闲置」,
- *  宁可不触发也不打断。 */
-function idleLongEnough(a: AgentStat, idleMs: number): boolean {
-  if (idleMs <= 0) return true;
-  if (!a.jsonl) return false;
-  try {
-    return Date.now() - statSync(a.jsonl).mtimeMs >= idleMs;
-  } catch {
-    return false;
-  }
-}
-
 function tierOf(tokens: number): number {
   let t = 0;
   for (let i = 0; i < CTX_TIERS.length; i++) if (tokens >= CTX_TIERS[i]) t = i + 1;
   return t;
 }
 
-/**
- * 近期注入过 /save-compact 的窗口(tmux target → ts)。compact 期间 TUI 既不
- * idle 也无常规 busy 指示,paneIdle 判不出来——抓取选中它再敲 /status+Esc 就是
- * 硬中断,且「compact 让窗口看起来闲 → 被抓取打断 → compact 拖更久」构成自激
- * (peer 实报 2026-08-27:market-maker 一次 compact 被掐 4 次拖 11 分钟)。
- * 注入后 15 分钟内不作为抓取源;文案识别(/compacting/i)另兜手动 /compact。
- */
-const recentSaveCompact = new Map<string, number>();
-const SAVE_COMPACT_GUARD_MS = 15 * 60 * 1000;
-
-/** bridge 的手动按钮路径(savecompact:)也要记账——两条注入路径同一份守卫。 */
-export function noteSaveCompactInjected(target: string): void {
-  recentSaveCompact.set(windowKey(target), Date.now());
-}
-
-async function triggerAutoSaveCompact(a: AgentStat, effThreshold: number): Promise<void> {
-  try {
-    const target = a.name === "master" ? `${MASTER_SESSION}:0` : windowTarget(a.name);
-    noteSaveCompactInjected(target);
-    await tmuxSendLine(target, "/save-compact");
-    console.log(`🧹 auto save-compact triggered: ${a.name} @ ${formatTokens(a.contextTokens)} (threshold=${formatTokens(effThreshold)})`);
-  } catch (e) {
-    console.error(`🧹 auto save-compact 失败 (${a.name}):`, (e as Error).message);
-  }
-}
-
 async function checkContextTiers(discord: Client, agents: AgentStat[]): Promise<void> {
-  const threshold = loadAutoCompactThreshold();
-  const idleMs = loadAutoCompactIdleMs();
-  const emergencyOn = loadAutoCompactEmergency();
   const first = !tierBaselined;
   tierBaselined = true;
   for (const a of agents) {
     if (!a.channelId) continue;
     const tier = tierOf(a.contextTokens);
     const prev = notifiedTier.get(a.channelId) ?? 0;
-    if (tier !== prev) {
-      notifiedTier.set(a.channelId, tier); // 涨了记新档；掉了（compact 过）复位
-      // 上下文回落或跨过新高位：重置自动触发状态，允许下一轮再涨时再次触发
-      autoCompactTriggered.delete(a.channelId);
-    }
-    // 自动触发:超线 + (闲置满门槛 或 踩到救命线) + (未触发过 或 上次触发已超
-    // 30min 没见效)。**每轮都查**(不只在跨档时)——超线但还在干活的,等它闲
-    // 下来那轮再动手(owner 2026-08-26:别干着干着就 compact)。
-    // ⚠ 必须放在 tier===0 闸**之前**(peer 2026-08-30):小窗口 agent 的有效
-    // 阈值低于最小绝对档 250K,放闸后面就永远轮不到触发。
-    // v2.21.1+ 救命线(owner 2026-09-02 上下文被 CC 裸压全丢):闲置门槛对忙碌
-    // agent 是永久阻塞——Robinhood 一直在干活,涨到 717K 被 CC 压掉,我们一次
-    // 都没触发过。踩到 EMERGENCY(窗口 93%,离 CC 的 ~967K 只剩几万 token)时
-    // **无视闲置**,因为再等下去就是被裸压(记忆全丢),打断一次远比那个轻。
-    // v2.21.3+ 救命线不再挂在 eff>0 后面:常规线关(window=0)时它照样兜底。
-    if (!first) {
-      const eff = effectiveAutoCompactThreshold(threshold, a);
-      const emergency = emergencyOn ? emergencyThresholdOf(a) : null;
-      const lastTrig = autoCompactTriggered.get(a.channelId) ?? 0;
-      const d = autoCompactDecision({
-        ctx: a.contextTokens,
-        eff,
-        emergency,
-        idleOk: idleLongEnough(a, idleMs),
-        lastTrig,
-        now: Date.now(),
-        retryMs: AUTO_COMPACT_RETRY_MS,
-      });
-      if (d.fire) {
-        autoCompactTriggered.set(a.channelId, Date.now());
-        if (d.emergency) {
-          console.log(`🚨 救命线触发(${formatTokens(a.contextTokens)} ≥ ${formatTokens(emergency!)},CC 随时裸压):${a.name} 无视闲置门槛`);
-        }
-        await triggerAutoSaveCompact(a, d.emergency ? emergency! : eff);
-      }
-    }
-
+    // 涨了记新档；掉了（compact 过）复位。自动压缩不在这里，在 bridge/ctx-boundary.ts（每分钟一轮，web-only 也跑）
+    if (tier !== prev) notifiedTier.set(a.channelId, tier);
     if (tier === 0 || first) continue;
 
     // 档位提醒只在**向上跨档**时发一次。18dec8f 把原 `tier === prev → continue`

@@ -7,6 +7,7 @@ import {
   ASSIGNEE_KINDS,
   isStageOfKind,
   ITEM_STATUSES,
+  isManagerRole,
   roleOf,
   STAGES,
   TASK_KINDS,
@@ -215,8 +216,7 @@ export function toColumn(k: string, v: unknown): unknown {
 
 /** actor 在这个任务上是不是 PM / master / owner（项目 PM 名单现查） */
 export function isManager(db: Database, actor: string, task: Pick<LedgerTask, "agent" | "project">): boolean {
-  const role = roleOf(actor, task, getMeta(db, task.project).pms);
-  return role !== null && role !== "executor";
+  return isManagerRole(roleOf(actor, task, getMeta(db, task.project).pms));
 }
 
 export interface StageMove {

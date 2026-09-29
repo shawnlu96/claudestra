@@ -143,3 +143,22 @@ describe("等你（T11a：features/asks 的开着的 ask 喂进来）", () => {
     expect(homeView(overview([task("B", "build")]), NOW, undefined, [wait("ask_9", null, "agent-other")]).headline.owner).toBe(0);
   });
 });
+
+describe("跨实例委托（extra.delegate）", () => {
+  test("没有本机执行者时显示委托对象；spec 阶段也画成线、不算 PM 排队", () => {
+    const d = { agent: null, extra: { delegate: "claudestra@Shawn" } };
+    const v = homeView(overview([task("D1", "build", d), task("D2", "spec", d), task("Q", "spec", { agent: null })]), NOW);
+    expect(v.lines.map((l) => [l.id, l.agent, l.delegate]).sort()).toEqual([["D1", null, "claudestra@Shawn"], ["D2", null, "claudestra@Shawn"]]);
+    expect(v.lines.find((l) => l.id === "D2")?.stageLabel).toBe("等开工");
+    expect(v.pm.queued).toEqual(["Q"]);
+  });
+
+  test("委托任务停多久都不算卡住", () => {
+    expect(isStuck(task("D", "review", { agent: null, extra: { delegate: "x@Y" }, stageSince: NOW - 10 * STUCK_MS }), NOW)).toBe(false);
+  });
+
+  test("有本机执行者时不看 extra.delegate", () => {
+    const line = homeView(overview([task("L", "build", { extra: { delegate: "x@Y" } })]), NOW).lines[0];
+    expect([line.agent, line.delegate]).toEqual(["task-l", null]);
+  });
+});

@@ -105,5 +105,6 @@ bun src/manager.ts team status --project <id>
 
 ## 相关
 
+- 把活交给另一台 Claudestra 上的 agent：[跨实例委托](./peer-delegation.md)
 - 台账的数据结构与事件形状：台账设计稿（`meta.team`、`dispatch` / `escalate` 事件）
 - 代码：`src/manager/ledger-team-cmds.ts`（team-apply）、`roles/`、`src/lib/team-*.ts`、`src/lib/ledger-handler.ts`、`src/lib/review-pack.ts`、`src/bridge/team-router.ts`、`src/bridge/team-confirm.ts`、`src/manager/team-up.ts`、`src/manager/ledger-dispatch-cmds.ts`

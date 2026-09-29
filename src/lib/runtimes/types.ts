@@ -42,6 +42,8 @@ export interface DiscoveredSession {
   runtime: string;
   /** 主会话不带 */
   sub?: SubSessionInfo;
+  /** 程序跑出来的一次性会话（codex exec）：列表里收进折叠组、不占主会话名额（lib/codex-subthread.ts isCodexOneShot） */
+  oneShot?: true;
 }
 
 export interface SessionSourceAdapter {

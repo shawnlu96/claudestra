@@ -5,7 +5,7 @@
  */
 import { repoEnvVar } from "../lib/env-file.js";
 import { hostname } from "os";
-import { loadRegistry, output } from "./core.js";
+import { extractBoolFlag, loadRegistry, output } from "./core.js";
 import { resolveMyBridgeUrl } from "./peers-net.js";
 import { peerAuthHint, peerErrorText } from "../lib/peer-auth-hints.js";
 import { readJsonCapped } from "../lib/body-reader.js";
@@ -189,6 +189,20 @@ export async function cmdPeerHttpList() {
   output({ ok: true, count: peers.length, httpPeers: peers });
 }
 
+/** `peer-http-scope <peer> --agents a,b [--force]` 的参数解析（从 manager.ts 原样搬出，大文件只留一行分发） */
+export async function cmdPeerHttpScopeCli(args: string[]) {
+  const { rest: afterForce, value: force } = extractBoolFlag(args, "--force");
+  let agentsCsv = "";
+  const pos: string[] = [];
+  for (let i = 0; i < afterForce.length; i++) {
+    const a = afterForce[i];
+    if (a === "--agents") agentsCsv = afterForce[++i] || "";
+    else if (a.startsWith("--agents=")) agentsCsv = a.slice(9);
+    else pos.push(a);
+  }
+  await cmdPeerHttpScope(pos[0] || "", agentsCsv, force);
+}
+
 /** v2.11.1+ 改 peer 入站 scope（token 不换,对方无感;web peer 管理 UI 的后端） */
 export async function cmdPeerHttpScope(peerName: string, agentsCsv: string, force: boolean) {
   const { findHttpPeer } = await import("../lib/peers.js");
@@ -211,6 +225,22 @@ export async function cmdPeerHttpScope(peerName: string, agentsCsv: string, forc
   p.agents = agents;
   await writePrincipals(file);
   output({ ok: true, peer: peerName, exposedAgents: agents, tokenId: tokenIdOf(p), warnings: check.warnings, note: "入站 scope 已更新，立即生效（token 不变）" });
+}
+
+/** 签给该 peer 的 token 只能投递消息（on）/ 恢复原样（off）：token 不换、立即生效，对方互发不受影响（docs/team/peer-delegation.md） */
+export async function cmdPeerHttpMessagesOnly(peerName: string, mode: string) {
+  if (!peerName || (mode !== "on" && mode !== "off")) return output({ ok: false, error: "peer-http-messages-only <peerName> on|off" });
+  // 整条命令已持 principals 锁（write-commands.ts PRINCIPALS_WRITE_COMMANDS），这里直接读写，不能再 updatePrincipals
+  const { readPrincipals, writePrincipals } = await import("../lib/principals.js");
+  const { setMessagesOnly } = await import("../lib/peer-scope-gate.js");
+  const on = mode === "on";
+  const file = await readPrincipals();
+  if (!file.principals.some((p) => p.peer === peerName && !p.disabled)) {
+    return output({ ok: false, error: `peer "${peerName}" 没有有效 token——先完成握手（invite/join）` });
+  }
+  const changed = setMessagesOnly(file.principals, peerName, on);
+  if (changed) await writePrincipals(file);
+  output({ ok: true, peer: peerName, messagesOnly: on, changed, note: on ? "对方只能投递消息：读历史、事件流、打断都会 403" : "已恢复原来的权限" });
 }
 
 export async function cmdPeerHttpRemove(peerName: string) {

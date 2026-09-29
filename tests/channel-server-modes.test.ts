@@ -12,6 +12,7 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { join } from "node:path";
 import { OFFLINE_NOTICE } from "../src/lib/codex-thread.js";
+import { testChildEnv } from "./test-env.ts";
 
 const SERVER = join(import.meta.dir, "..", "src", "channel-server.ts");
 
@@ -57,13 +58,14 @@ async function startServer(channelId: string, extraEnv: Record<string, string>) 
     stdin: "pipe",
     stdout: "pipe",
     stderr: "ignore",
-    env: {
+    env: testChildEnv({
       PATH: process.env.PATH || "/usr/bin:/bin",
       HOME: process.env.HOME || "/tmp",
       DISCORD_CHANNEL_ID: channelId,
       BRIDGE_URL: `ws://127.0.0.1:${bridge.port}`,
+      BRIDGE_PORT: String(bridge.port),
       ...extraEnv,
-    },
+    }),
   });
   const out: any[] = [];
   (async () => {

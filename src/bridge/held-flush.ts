@@ -5,7 +5,7 @@
  * 投出去之后才出队；目标又忙就停，原条目留着、计时不变；每个频道同一时刻只有一个投递者（held.claim）。
  */
 import { heldAcrossStopNote } from "../lib/turn-cuts.js";
-import { leaseActive, type HeldItem, type HeldQueue } from "./held-queue.js";
+import { leaseActive, notifyHeldSettled, type HeldItem, type HeldQueue } from "./held-queue.js";
 import type { Delivery, Envelope, LocalEndpoint } from "./router.js";
 
 export interface FlushDeps {
@@ -70,6 +70,7 @@ export async function flushHeld(d: FlushDeps, channelId: string, reason: string)
       // 先 touch 再出队落盘:中间崩溃也只是重投一次,不会拿旧钟把回程扫掉
       if (r.outcome.kind === "sent") {
         d.touch(channelId, item.env);
+        notifyHeldSettled(item.env, "delivered");
         for (const fn of deliveredHooks) fn(channelId, item.env);
       }
       d.held.remove(channelId, item);
@@ -86,7 +87,7 @@ export async function flushHeld(d: FlushDeps, channelId: string, reason: string)
  */
 export function dropHeldOnKill(held: HeldQueue, channelId: string, onDropped: (env: Envelope) => Promise<void> = answerDropped): void {
   const dropped = held.get(channelId) ?? [];
-  if (!held.delete(channelId)) return;
+  if (!held.discard(channelId)) return;
   console.log(`🧹 agent 已 kill,丢掉押给它的 ${dropped.length} 条消息 (channel=${channelId})`);
   for (const i of dropped) void onDropped(i.env).catch((e: Error) => console.error(`⚠️ 被丢的押后消息善后失败: ${e.message}`));
 }

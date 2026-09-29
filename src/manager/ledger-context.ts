@@ -5,7 +5,7 @@
  */
 import type { Database } from "bun:sqlite";
 import type { SnapshotSources } from "../lib/ledger-audit-snapshot.js";
-import { roleOf, type LedgerTask, type Role } from "../lib/ledger-stages.js";
+import { isManagerRole, roleOf, type LedgerTask, type Role } from "../lib/ledger-stages.js";
 import { getItem, getMeta, getTask, LedgerError } from "../lib/ledger-store.js";
 import { isRealPmRole } from "../lib/ledger-team-config.js";
 import type { FactsDeps } from "../lib/ledger-verify-facts.js";
@@ -77,7 +77,7 @@ export class LedgerCli {
   /** PM 名单里的人、master、owner */
   requireManager(project: string, what: string): void {
     const r = this.role(project);
-    if (r === null || r === "executor") throw new LedgerError("forbidden", `${what}要项目 ${project} 的 PM / master / owner（你是 ${this.deps.actor}）`);
+    if (!isManagerRole(r)) throw new LedgerError("forbidden", `${what}要项目 ${project} 的 PM / master / owner（你是 ${this.deps.actor}）`);
   }
 
   /** 真正的 PM：名单里除了班子调度助理以外的人，或 master / owner（调度助理也在 PM 名单里，PM 专属的出口不能交给它） */

@@ -19,9 +19,10 @@ import { QUOTA_DICT } from "./i18n-dict-quota";
 import { CONTACTS_DICT } from "./i18n-dict-contacts";
 import { SESSIONS_DICT } from "./i18n-dict-sessions";
 import { SKILLS_DICT } from "./i18n-dict-skills";
+import { TALK_DICT } from "./i18n-dict-talk";
 
 export const DICT: Record<string, string> = {
-  ...LEDGER_DICT, ...COLLAB_DICT, ...BOUNDARY_DICT, ...ATTACH_DICT, ...TOOLS_DICT, ...MEDIA_DICT,
+  ...LEDGER_DICT, ...COLLAB_DICT, ...BOUNDARY_DICT, ...ATTACH_DICT, ...TOOLS_DICT, ...MEDIA_DICT, ...TALK_DICT,
   ...QUOTA_DICT, // 订阅额度卡片组与开关（lib/i18n-dict-quota.ts）
   ...CONTACTS_DICT, // 侧栏联系人与输入框 @（lib/i18n-dict-contacts.ts）
   ...SESSIONS_DICT, // 未纳管会话 / 归档（lib/i18n-dict-sessions.ts）
@@ -560,14 +561,21 @@ export const DICT: Record<string, string> = {
   "每月（1 号）": "Monthly (1st)",
   "当前为手工表达式": "Custom expression in use:",
   "自动存记忆 + Compact": "Auto save memory + Compact",
-  "常规线:上下文超过阈值且闲置满时长后,先抢救记忆再压缩上下文,对所有 agent 生效;实际触发线取「此阈值」与「该 agent 真实窗口 85%」的较小者。救命线:涨到真实窗口 93%(1M = 930K)时无视闲置门槛强制触发一次——Claude Code 自己在 ~967K 裸压且不存记忆,这是最后一道兜底,常规线关了它也在。":
+  "常规线:上下文超过阈值且闲置满时长后,先抢救记忆再压缩上下文;实际触发线取「此阈值」与「该 agent 真实窗口 85%」的较小者。救命线:涨到真实窗口 93%(1M = 930K)时无视闲置门槛强制触发一次——Claude Code 自己在 ~967K 裸压且不存记忆,这是最后一道兜底,常规线关了它也在。":
     "Regular trigger: once context passes the threshold and the agent has been idle long enough, memory is saved and then the context is compacted; " +
-    "applies to every agent, and fires at the lower of this threshold and 85% of the agent's real window. Safety net: at 93% of the real window " +
-    "(930K for 1M) it fires once regardless of idle time — Claude Code compacts on its own at ~967K without saving memory, so this is the last line of defense, even with the regular trigger off.",
+    "it fires at the lower of this threshold and 85% of the agent's real window. Safety net: at 93% of the real window " +
+    "(930K for 1M) it fires once regardless of idle time — Claude Code compacts on its own at ~967K without saving memory, so this is the last line of defense, " +
+    "even with the regular trigger off.",
   "上下文阈值": "Context threshold",
   "闲置时长": "Idle time",
   "立即": "Immediately",
   "93% 救命线": "93% safety net",
+  "按项目 / 角色的上下文边界": "Per-project / per-role context boundaries",
+  "开着:命中策略的 agent(执行者、协调者…)按各自的线压,不再用上面两条;大总管也纳入自动压缩。":
+    "On: agents a policy covers (executors, coordinators…) are compacted at their own lines instead of the two above, and the master is included in auto-compaction.",
+  "关着:上面两条管所有 agent(大总管除外)。打开前建议先在电脑上跑 bun src/manager.ts ctx-boundary dry-run,看会压谁。":
+    "Off: the two above apply to every agent except the master. Before turning it on, run " +
+    "bun src/manager.ts ctx-boundary dry-run on the computer to see which agents it would compact.",
   "归档保留": "Archive retention",
   "已退役会话的归档保留天数；超期由每日兜底清理，0 = 永不清理（归档是「可找回的过期会话」，不是永久仓库）。":
     "How many days to keep archives of retired sessions. A daily sweep removes older ones; 0 = keep forever (the archive holds recoverable old sessions, it isn't permanent storage).",

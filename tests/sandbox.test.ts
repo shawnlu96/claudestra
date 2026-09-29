@@ -27,6 +27,7 @@ import { buildClaudeCommand } from "../src/lib/claude-launch.js";
 import { sandboxDeniedRoute, sandboxRouteGate } from "../src/bridge/sandbox-routes.js";
 import { cleanupBgJob, tryRosterCleanup } from "../src/lib/bg-jobs.js";
 import { runSwitchCommand } from "../src/lib/tmux-helper.js";
+import { testChildEnv } from "./test-env.ts";
 
 const ON = { CLAUDESTRA_SANDBOX: "1" };
 const P = DEFAULT_BRIDGE_PORT;
@@ -299,7 +300,7 @@ describe("沙箱关掉的 API 与动作", () => {
   test("全局 claudestra wrapper：带着沙箱环境敲它直接拒绝（不连生产 tmux / launchd）", () => {
     const dir = mkdtempSync(join(tmpdir(), "sbx-wrap-"));
     writeFileSync(join(dir, "claudestra"), cliWrapperScript("/opt/claudestra"));
-    const r = Bun.spawnSync(["bash", join(dir, "claudestra"), "ls"], { env: { PATH: "/usr/bin:/bin", CLAUDESTRA_SANDBOX: "1" }, stdout: "pipe", stderr: "pipe" });
+    const r = Bun.spawnSync(["bash", join(dir, "claudestra"), "ls"], { env: testChildEnv({ PATH: "/usr/bin:/bin", CLAUDESTRA_SANDBOX: "1" }), stdout: "pipe", stderr: "pipe" });
     expect(r.exitCode).toBe(1);
     expect(r.stderr.toString()).toContain("沙箱环境");
   });

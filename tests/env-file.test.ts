@@ -8,6 +8,7 @@ import { tmpdir } from "os";
 import { join } from "path";
 import { spawnSync } from "child_process";
 import { resolveBridgePort, DEFAULT_BRIDGE_PORT } from "../src/lib/bridge-url.ts";
+import { testChildEnv } from "./test-env.ts";
 
 const HEADER = "# Claudestra 运行时配置 (由 bun run setup 生成)";
 const cfg = { DISCORD_BOT_TOKEN: "", BRIDGE_PORT: "3847", USER_NAME: "Shawn", MCP_NAME: "claudestra" };
@@ -70,7 +71,7 @@ describe("parseDotenv（与 Bun 加载 .env 同口径）", () => {
     writeFileSync(join(dir, ".env"), EDGE);
     const keys = Object.keys(parseDotenv(EDGE));
     const r = spawnSync(process.execPath, ["-e", `console.log(JSON.stringify(Object.fromEntries(${JSON.stringify(keys)}.map((k) => [k, process.env[k]]))))`], {
-      cwd: dir, env: { HOME: process.env.HOME, PATH: process.env.PATH }, encoding: "utf-8",
+      cwd: dir, env: testChildEnv(), encoding: "utf-8",
     });
     expect(r.status).toBe(0);
     expect(JSON.parse(r.stdout)).toEqual(parseDotenv(EDGE));
