@@ -31,7 +31,8 @@ function requireAuditWriter(c: LedgerCli): void {
 
 /** 调度助理不在线时回落给谁：同一项目的 PM；本来就推给 PM 的不需要 */
 function withFallback(c: LedgerCli, f: StoredFinding): StoredFinding & { fallback?: string } {
-  const pm = auditRecipient("pm_held", getMeta(c.db, f.project).pms);
+  const meta = getMeta(c.db, f.project);
+  const pm = auditRecipient("pm_held", meta.pms, meta.team?.dispatcher);
   return pm && pm !== f.notify ? { ...f, fallback: pm } : f;
 }
 

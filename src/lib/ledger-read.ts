@@ -62,6 +62,11 @@ export class LedgerReader {
     return db;
   }
 
+  /** 当前打开的库文件标识（dev:ino）；没打开为 null。换了文件（恢复备份、备机接管）就变 */
+  get file(): string | null {
+    return this.fileId;
+  }
+
   close(): void {
     this.db?.close();
     this.db = null;

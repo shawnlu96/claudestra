@@ -4,6 +4,7 @@
 
 import { TextChannel, PermissionFlagsBits, type CategoryChannel, type Client } from "discord.js";
 import { buildComponents } from "./components.js";
+import { reservedEditRefusal } from "./edit-guard.js";
 // guild id 走 config 的唯一导出，别各处直读 env（D7-10）
 import { DISCORD_GUILD_ID } from "./config.js";
 
@@ -144,6 +145,8 @@ export async function discordEditMessage(
   if (!channel || !("messages" in channel)) throw new Error("频道不存在");
   const msg = await (channel as TextChannel).messages.fetch(messageId);
   if (msg.author.id !== botUserId) throw new Error("只能编辑 bot 自己的消息");
+  const reserved = reservedEditRefusal(msg.components);
+  if (reserved) throw new Error(reserved);
   await msg.edit(text);
 }
 
