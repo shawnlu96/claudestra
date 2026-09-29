@@ -3,7 +3,7 @@
  * 在 React 之前同步执行，顺序有意义：① 明暗主题 + 自定义 CSS 变量在 paint 前落地（不然暗色用户白闪一帧）；
  * ② 25s 启动看门狗（主 bundle 没起来时唯一能发声的东西；按钮用 addEventListener，内联 onclick 过不了 CSP）；③ iPad 壳的键盘
  * resize 模式；④ 主线程卡顿 / 触摸丢失探针，打点到当前机器的 /api/v1/client-log（基址取 lib/machines.ts 写的 localStorage 镜像
- * cstra_api_base；卡死探针的 Worker 是独立文件 hang-worker.js——worker-src 'self' 不放 blob:）；⑤ React 提交突发探针。
+ * cstra_api_base；卡死探针的 Worker 是独立文件 hang-worker.js——老 bridge 的 CSP 是 worker-src 'self'，blob: 会被拦）；⑤ React 提交突发探针。
  * 各段的来由与判据见 git log -S 对应片段（原 layout.tsx 的注释）。
  */
 function B(){try{return localStorage.getItem("cstra_api_base")||""}catch(e){return ""}}
