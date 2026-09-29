@@ -3,7 +3,7 @@
  * 持有者崩了（不再续租）过期后照样回收。回归：T13a wf2 esc-keys-1（Esc 锁 5 秒过期、卡住的 tmux 调用超过它，锁被回收后两发 Esc 挨在一起）。
  */
 import { afterEach, beforeEach, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { acquireLock } from "../src/lib/file-lock.js";
@@ -61,4 +61,47 @@ test("正常串行：释放之后下一个马上拿到", async () => {
   const b = await pending;
   expect(b).not.toBeNull();
   b!.release();
+});
+
+test("锁被别人回收重建之后：held() 为假，续租不去碰别人的锁", async () => {
+  const a = await acquireLock(lock, 100, 300);
+  expect(a!.held()).toBe(true);
+  writeFileSync(join(lock, "owner"), "someone-else");
+  const old = new Date(Date.now() - 10_000);
+  utimesSync(lock, old, old);
+  await new Promise((r) => setTimeout(r, 250)); // 续租间隔是 100ms：跑过两轮
+  expect(a!.held()).toBe(false);
+  expect(Date.now() - statSync(lock).mtimeMs).toBeGreaterThan(5_000); // 没给别人的锁续租
+  a!.release();
+});
+
+test("持有者被暂停超过期限（SIGSTOP，T13e r1 P1-2）：别人回收拿到锁；它恢复后 held() 为假、不给新锁续租", async () => {
+  const child = join(dir, "holder.ts");
+  const mod = join(import.meta.dir, "../src/lib/file-lock.ts");
+  writeFileSync(child, `import { acquireLock } from ${JSON.stringify(mod)};
+const l = await acquireLock(${JSON.stringify(lock)}, 1000, 300);
+console.log("got");
+setInterval(() => console.log(l!.held() ? "held" : "lost"), 40);`);
+  const p = Bun.spawn(["bun", child], { stdout: "pipe" });
+  const out: string[] = [];
+  const reader = (async () => { for await (const c of p.stdout) out.push(...new TextDecoder().decode(c).split("\n").filter(Boolean)); })();
+  while (!out.includes("got")) await new Promise((r) => setTimeout(r, 20));
+  process.kill(p.pid, "SIGSTOP");
+  try {
+    const b = await acquireLock(lock, 3_000, 300);
+    expect(b).not.toBeNull();
+    const mine = readFileSync(join(lock, "owner"), "utf8");
+    const n = out.length;
+    process.kill(p.pid, "SIGCONT");
+    await new Promise((r) => setTimeout(r, 300));
+    expect(out.slice(n).length).toBeGreaterThan(0);
+    expect(out.slice(n).every((l) => l === "lost")).toBe(true);
+    expect(readFileSync(join(lock, "owner"), "utf8")).toBe(mine);
+    expect(b!.held()).toBe(true);
+    b!.release();
+  } finally {
+    process.kill(p.pid, "SIGCONT");
+    p.kill();
+    await reader.catch(() => undefined); // 子进程被杀、管道断：这里只收它的输出
+  }
 });

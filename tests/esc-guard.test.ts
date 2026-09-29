@@ -8,7 +8,7 @@ import { createEscGuard, ESC_DOUBLE_TAP_MS, type EscGuardDeps } from "../src/lib
 import { windowKey } from "../src/lib/tmux-target.js";
 
 /** 假时钟：sleep 推进时间；send 本身耗时 sendMs（模拟负载高时 tmux 慢） */
-function world(opts: { ids?: Record<string, string>; sendMs?: number; noLock?: boolean; idError?: boolean } = {}) {
+function world(opts: { ids?: Record<string, string>; sendMs?: number; noLock?: boolean; idError?: boolean; lostLock?: boolean } = {}) {
   let clock = 1_000_000;
   const sent: { target: string; at: number }[] = [];
   const shared = new Map<string, number>();
@@ -22,7 +22,7 @@ function world(opts: { ids?: Record<string, string>; sendMs?: number; noLock?: b
       if (opts.noLock) return null;
       while (held.has(key)) await new Promise((r) => setTimeout(r, 1));
       held.add(key);
-      return { release: () => void held.delete(key) };
+      return { release: () => void held.delete(key), held: () => !opts.lostLock };
     },
     readShared: (k) => shared.get(k) ?? 0,
     writeShared: (k, at) => void shared.set(k, at),
@@ -154,5 +154,17 @@ describe("查窗口 id 出错（wf2 esc-keys-1）", () => {
     const w = world({ idError: true });
     const esc = createEscGuard(w.deps);
     expect(await esc.keyOf("master:=a")).toBe(windowKey("master:=a"));
+  });
+});
+
+describe("持锁进程被暂停过、锁已被回收（T13e r1 P1-2）", () => {
+  test("发之前核对锁不再是自己的：不发，strict 抛错如实回报", async () => {
+    const w = world({ lostLock: true });
+    const esc = createEscGuard(w.deps);
+    const warn = spyOn(console, "warn").mockImplementation(() => {});
+    await expect(esc("master:agent-x", { strict: true })).rejects.toThrow("锁被当过期回收");
+    await esc("master:agent-x");
+    warn.mockRestore();
+    expect(w.sent).toEqual([]);
   });
 });

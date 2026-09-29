@@ -24,8 +24,8 @@ export const HTTP_IDLE_TIMEOUT_S = 30;
 export interface EscGuardDeps {
   /** 目标 → tmux 的 #{window_id}（如 "@3"）；窗口不在 = null，查询出错 = 抛错 */
   windowId(target: string): Promise<string | null>;
-  /** 按窗口的跨进程锁；拿不到 = null（这一发不发） */
-  lock(key: string): Promise<{ release(): void } | null>;
+  /** 按窗口的跨进程锁；拿不到 = null（这一发不发）。held()：发之前再核一次还是不是自己的（持锁进程被暂停过、锁已被回收 = 不发） */
+  lock(key: string): Promise<{ release(): void; held?(): boolean } | null>;
   /** 跨进程共享的「上一次发完」时刻（没有 = 0） */
   readShared(key: string): number;
   writeShared(key: string, at: number): void;
@@ -64,6 +64,7 @@ export function createEscGuard(deps: EscGuardDeps) {
         if (strict) throw blocked;
         return void console.warn(`⚠️ Esc 没发: ${blocked.message}`);
       }
+      if (lock.held && !lock.held()) return refuse(`Esc 没发（${target}）：等的这段时间窗口锁被当过期回收了，别的进程可能刚发过`, strict);
       await deps.send(target, strict);
     } finally {
       const done = deps.now(); // 发完才记：键一定已经落地
