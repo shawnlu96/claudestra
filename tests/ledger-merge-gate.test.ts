@@ -274,3 +274,33 @@ describe("一次派审只算一次（dispatchKindFor）", () => {
     expect(owesAdversarial(policy(), events(), round())).toBe(false);
   });
 });
+
+describe("PM 手动 stage review → merge：不拦，还欠对抗式时回告警", () => {
+  test("常规 pass 后手动推 merge：照推，带告警（怎么补对抗式、怎么 --waive）；还清了就不带", async () => {
+    ship("aaaa1111", "build");
+    await run("agent-disp", "dispatch", "T1");
+    await run("agent-disp", ...verdict("pass"));
+    const r = await run("agent-pm", "stage", "T1", "--from", "review", "--to", "merge");
+    expect(r.task.stage).toBe("merge");
+    expect(r.warning).toContain("ledger dispatch T1");
+    expect(r.warning).toContain("--waive adversarial --text <理由>");
+    moveStage(db, o, { taskId: "T1", from: "merge", to: "review" });
+    await run("agent-disp", "dispatch", "T1", "--adversarial");
+    await run("agent-disp", ...verdict("pass"));
+    const ok = await run("agent-pm", "stage", "T1", "--from", "review", "--to", "merge");
+    expect(ok.task.stage).toBe("merge");
+    expect(ok.warning).toBeUndefined();
+  });
+});
+
+describe("`dispatch:` 幂等键前缀只给派审用", () => {
+  test("执行者拿算得出的派审键写 note 被拒，调度助理照常派审", async () => {
+    ship("aaaa1111", "build");
+    const key = `dispatch:T1:r${round()}:regular:aaaa1111:d${events().findLast((e) => e.kind === "deliver")?.seq}:v0`;
+    for (const k of [key, `${key}:s0`]) {
+      expect(await run("agent-exec", "note", "T1", "占位", "--dedup", k)).toMatchObject({ ok: false, code: "invalid" });
+    }
+    const d = await run("agent-disp", "dispatch", "T1");
+    expect(d).toMatchObject({ ok: true, duplicate: false, event: { dedupKey: key } });
+  });
+});

@@ -8,10 +8,11 @@ import { ledgerAuditTicker, type LedgerAuditDeps } from "../src/bridge/ledger-au
 import type { Envelope } from "../src/bridge/router.js";
 import { projectsSlug } from "../src/lib/jsonl-cost.js";
 import { parseReviewDescription, runningReviewers } from "../src/lib/ledger-audit-reviewers.js";
+import { auditLedger } from "../src/lib/ledger-audit.js";
 import { collectAuditSnapshots, type SnapshotSources } from "../src/lib/ledger-audit-snapshot.js";
 import { addDep, setDep } from "../src/lib/ledger-deps-write.js";
 import { AUDIT_SCHEMA_VERSION, closeLedger, LEDGER_MIGRATIONS, openLedger } from "../src/lib/ledger-store.js";
-import { createTask, moveStage, setFrozen, setMeta } from "../src/lib/ledger-write.js";
+import { appendEvent, createTask, moveStage, recordReview, setFrozen, setMeta } from "../src/lib/ledger-write.js";
 import type { RegistryAgent } from "../src/lib/registry.js";
 import type { Registry } from "../src/manager/core.js";
 import { runLedger } from "../src/manager/ledger.js";
@@ -74,6 +75,24 @@ describe("取数", () => {
     }));
     const [s] = await collectAuditSnapshots(db, [P], NOW, sources());
     expect(s.held).toEqual([{ to: PM, from: "agent-task-t9", messageId: "m1", heldAt: 5, leaseAt: 7 }]);
+  });
+
+  test("开了编排班子：常规 pass 停 31 分钟、规格卡要求对抗式 → 只对调度助理报「派对抗式」；dispatcher 按 meta.team 认", async () => {
+    const owner = { actor: "owner", now: 0 };
+    const disp = "agent-helper"; // 名字里没有 dispatch：按名字猜会猜错
+    setMeta(db, owner, { project: P, key: "pms", value: ["agent-pm-dispatch", disp] });
+    setMeta(db, owner, { project: P, key: "team", value: { dispatcher: disp, audit: true } });
+    mkdirSync(join(dir, "ledger", "docs", "tasks"), { recursive: true });
+    writeFileSync(join(dir, "ledger", "docs", "tasks", "T1.md"), "# T1\n- 审查：Claude 审查员一轮；最后一轮对抗式\n");
+    // T1 在 NOW - 30 分钟进 review；派审、pass 在那之后，巡检在 pass 之后 31 分钟跑
+    appendEvent(db, { actor: disp, now: NOW - 29 * MIN }, { project: P, target: "T1", kind: "dispatch", data: { reviewer: "regular", round: 1, head: null } });
+    recordReview(db, { actor: disp, now: NOW - 28 * MIN }, { taskId: "T1", reviewer: "r", verdict: "pass", p0: 0, p1: 0, p2: 0 });
+    const at = NOW + 3 * MIN;
+    const [s] = await collectAuditSnapshots(db, [P], at, sources());
+    expect(s.team).toEqual({ dispatcher: disp });
+    expect(s.tasks.find((t) => t.task.id === "T1")?.specPolicy).toBe("Claude 审查员一轮；最后一轮对抗式");
+    const f = auditLedger(s, at).findings;
+    expect(f.map((x) => [x.rule, x.notify, x.suggestion])).toEqual([["review_no_reviewer", disp, "还欠对抗式，派对抗式"]]);
   });
 
   test("依赖：前置任务还没上线 → 后续任务带 blockedBy；前置上线后清空", async () => {

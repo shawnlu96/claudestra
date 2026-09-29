@@ -15,6 +15,7 @@ import { HELD_MESSAGES_PATH } from "./paths.js";
 import { readRegistryAgents, type RegistryAgent } from "./registry.js";
 import { sessionJsonlPath } from "./session-source.js";
 import { readJsonStateSync } from "./state-file.js";
+import { specPathFor, specPolicyOf } from "./task-spec.js";
 import { listWindows, tmuxRawStrict, windowTarget } from "./tmux-helper.js";
 import { turnState } from "./turn-state.js";
 
@@ -184,11 +185,13 @@ export async function collectAuditSnapshots(db: Database, projects: readonly str
     for (const e of listEvents(db, { project })) byTarget.set(e.target, [...(byTarget.get(e.target) ?? []), e]);
     const all = listTasks(db, project);
     const deps = depViews(listDeps(db, project), all);
+    const meta = getMeta(db, project);
     const tasks = all.map((task) => ({
       task, events: byTarget.get(task.id) ?? [], blockedBy: blockedBy(task.id, deps).map((d) => d.from), unblockedAt: unblockedAt(task.id, deps, all, byTarget),
+      ...(meta.team ? { specPolicy: specPathFor(task, meta.docsDir) ? specPolicyOf(task, meta.docsDir) : null } : {}),
     }));
     const unfrozenAt = byTarget.get("")?.findLast((e) => e.kind === "unfreeze")?.ts ?? null;
-    return { project, meta: getMeta(db, project), tasks, unfrozenAt };
+    return { project, meta, tasks, unfrozenAt };
   });
   // 只给用得上的人抓屏 / 看会话文件：build / fix 的执行者（空闲规则）和各项目 PM 名单（押后规则）
   const want = new Set<string>();
@@ -213,6 +216,7 @@ export async function collectAuditSnapshots(db: Database, projects: readonly str
     return {
       project,
       pms: meta.pms,
+      team: meta.team ? { dispatcher: meta.team.dispatcher } : null,
       tasks,
       agents: reg?.agents ?? null,
       reviewers: reviewers.value,

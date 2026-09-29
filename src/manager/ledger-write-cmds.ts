@@ -20,7 +20,7 @@ import {
   type AppendableKind,
 } from "../lib/ledger-write.js";
 import type { LedgerCli, Result } from "./ledger-context.js";
-import { checkMergeGate, checkTaskRefs } from "./ledger-field-checks.js";
+import { checkMergeGate, checkTaskRefs, mergeStageWarning } from "./ledger-field-checks.js";
 import { agentKey, intFlag, jsonObjectFlag } from "./ledger-identity.js";
 import { MASTER_PARENT, TASK_MAX, validateParent, validateTask } from "./team.js";
 
@@ -170,10 +170,12 @@ function stage(c: LedgerCli): Result {
   const task = c.task(c.p.pos[1]);
   const from = stageFlag(c, "from");
   const to = stageFlag(c, "to");
-  // review → merge 手动推是绕过合并闸门（checkMergeGate）的人工出口，只给 PM
-  if (from === "review" && to === "merge") c.requireRealPm(task.project, "不记审查结论直接 review → merge ");
+  // review → merge 手动推是绕过合并闸门（checkMergeGate）的人工出口，只给 PM；还欠对抗式不拦，回告警
+  const toMerge = from === "review" && to === "merge";
+  if (toMerge) c.requireRealPm(task.project, "不记审查结论直接 review → merge ");
+  const warning = toMerge ? mergeStageWarning(c, task) : null;
   const r = moveStage(c.db, c.ctx(), { taskId: task.id, from, to, text: c.p.flags.text });
-  return { ok: true, task: r.row, event: r.event, duplicate: r.duplicate };
+  return { ok: true, task: r.row, event: r.event, duplicate: r.duplicate, ...(warning ? { warning } : {}) };
 }
 
 /** note：任务上执行者本人也能写；事项与项目级只有 PM / master / owner */
