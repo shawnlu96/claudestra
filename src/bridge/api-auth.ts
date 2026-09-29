@@ -8,7 +8,7 @@ import { findByBearer, readPrincipals, SlidingWindowLimiter, tokenIdOf, updatePr
 import { cookieValueFrom, csrfOk, DEVICE_HEADER, effectivePrincipal, findCredential, touchCredential } from "../lib/devices.js";
 import { apiJson } from "./api-respond.js";
 import { checkPeerSignature, peerReplayVerdict, type PeerCheck } from "./peer-signature.js";
-import { requestContextOf, sourceAllows } from "./request-context.js";
+import { PEER_ENTRANCE_ONLY, requestContextOf, sourceAllows } from "./request-context.js";
 import { peerSigErrorText } from "../lib/peer-auth-hints.js";
 import { peerE2eRefusal, readHttpPeers } from "../lib/peer-e2e-local.js";
 import { messagesOnlyAllows } from "../lib/peer-scope-gate.js";
@@ -38,6 +38,8 @@ function bearerSecret(req: Request, url: URL): string | null {
 
 /** peers: false = 这条路由不收 peer token（远程终端这类不限速的路由；peer 本来就不该碰终端） */
 export async function authenticateApi(req: Request, url: URL, opts: { rateLimit: boolean; peers?: false }): Promise<Principal | Response> {
+  // 入口漏设来源时不认任何凭据（误拒而不是按某个来源放行）：Bearer 本身不看来源，只靠这一道
+  if (!sourceAllows(req, "api")) return unknownSourceRefused(req, url);
   const file = await readPrincipals(principalsPath);
   const secret = bearerSecret(req, url);
   let p: Principal | null;
@@ -59,13 +61,13 @@ export async function authenticateApi(req: Request, url: URL, opts: { rateLimit:
   if (requestContextOf(req).e2e && !p.peer) {
     return apiJson(403, { ok: false, error: "only peer tokens are accepted inside an E2E session", code: "e2e_peer_token_required" });
   }
+  if (secret !== null && !p.peer && !sourceAllows(req, "bearer")) return apiJson(403, PEER_ENTRANCE_ONLY);
   if (p.peer && opts.peers === false) return apiJson(403, { ok: false, error: "peer tokens are not accepted on this route", code: "peer_route_forbidden" });
   // peer 先验签、判重放，再扣限速：拿到 token 却签不了名的人、重放截获请求的人都耗不掉正牌 peer 的额度（失败另有一个桶）
   const sig = p.peer ? await peerGate(req, url, p.peer, opts.rateLimit) : null;
   if (sig instanceof Response) return sig;
-  const replay = sig?.once ? peerReplayVerdict(sig.once, p.peer!) : null;
+  const replay = sig?.once ? peerReplayVerdict(sig.once, p.peer!, false) : null;
   if (replay?.reject) return peerSigRejected(replay.reject);
-  await sig?.commit();
   if (p.messagesOnly && !messagesOnlyAllows(req.method, url.pathname)) return apiJson(403, { ok: false, error: "this token may only deliver messages", code: "messages_only" });
   if (opts.rateLimit && replay?.charge !== false) {
     const limit = p.role === "owner" ? OWNER_RATE_LIMIT_PER_MIN : API_RATE_LIMIT_PER_MIN;
@@ -74,11 +76,25 @@ export async function authenticateApi(req: Request, url: URL, opts: { rateLimit:
     if (!limiter) limiters.set(key, (limiter = new SlidingWindowLimiter(limit)));
     if (!limiter.tryAcquire()) return apiJson(429, { ok: false, error: `rate limit exceeded (${limit} req/min)`, code: "rate_limited", reason: "rate_limited" });
   }
+  // 从只读重放判定到扣桶、记入缓存之间不 await；429 不占条目，也不会让重试绕过限速桶。
+  if (sig?.once) peerReplayVerdict(sig.once, p.peer!);
+  await sig?.commit();
   if (p.peer) {
     const peer = p.peer;
     void import("./peer-presence.js").then((m) => m.notePeerInbound(peer)); // 在线 peer 列表的「最近来访」
   }
   return p;
+}
+
+/** 每分钟最多记一行：线上若有入口漏设来源，日志里立刻看得出是哪个入口、哪条路径（不记凭据） */
+let lastUnknownSourceLog = 0;
+function unknownSourceRefused(req: Request, url: URL): Response {
+  const now = Date.now();
+  if (now - lastUnknownSourceLog >= 60_000) {
+    lastUnknownSourceLog = now;
+    console.warn(`[api] 来源未定的请求被拒（入口 ${url.host}，${req.method} ${url.pathname}）：这个入口漏设了请求来源`);
+  }
+  return apiJson(403, { ok: false, error: "request source not established", code: "unknown_source" });
 }
 
 /**
