@@ -67,10 +67,11 @@ describe("currentHandler", () => {
     appendEvent(db, { actor: "agent-disp", now: 50 }, { project: "p", target: "T1", kind: "dispatch", data: { reviewer: "regular", round: 1, policy: "Claude 一轮；最后一轮对抗式" } });
     recordReview(db, owner(60), { taskId: "T1", reviewer: "regular", verdict: "pass", p0: 0, p1: 0, p2: 0 });
     expect(h(withD, POL)).toMatchObject({ role: "dispatcher", since: 60 });
+    expect(h(withD)).toMatchObject({ role: "dispatcher", since: 60 }); // 读不到规格卡 = 不知道
     appendEvent(db, { actor: "agent-disp", now: 70 }, { project: "p", target: "T1", kind: "dispatch", data: { reviewer: "adversarial", round: 1, policy: "Claude 一轮；最后一轮对抗式" } });
     recordReview(db, owner(80), { taskId: "T1", reviewer: "adversarial", verdict: "pass", p0: 0, p1: 0, p2: 0 });
     expect(h(withD, POL)).toMatchObject({ role: "pm", since: 80 });
-    expect(h(withD)).toMatchObject({ role: "dispatcher" }); // 读不到规格卡 = 不知道
+    expect(h(withD)).toMatchObject({ role: "pm" }); // 读不到规格卡，但当前 head 上已有对抗式 pass：欠不欠都已还清
     appendEvent(db, { actor: "agent-pm", now: 90 }, { project: "p", target: "T1", kind: "escalate", text: "要拍板", data: { to: "owner" } });
     expect(h(withD, POL)).toMatchObject({ role: "owner" });
     appendEvent(db, owner(100), { project: "p", target: "T1", kind: "decision", text: "合", data: {} });
@@ -97,18 +98,18 @@ describe("currentHandler", () => {
     moveStage(db, owner(30), { taskId: "T1", from: "restate", to: "build" });
     deliver(db, { actor: "agent-exec", now: 40 }, { taskId: "T1", moveFrom: "build" });
     const ev = () => listEvents(db, { target: "T1" });
-    expect(owesAdversarial(undefined, ev())).toBe("unknown");
-    expect(owesAdversarial(null, ev())).toBe(false);
-    expect(owesAdversarial("Claude 一轮", ev())).toBe(false);
-    expect(owesAdversarial(POL, ev(), { verdict: "pass" })).toBe(true);
+    expect(owesAdversarial(undefined, ev(), 1)).toBe("unknown");
+    expect(owesAdversarial(null, ev(), 1)).toBe(false);
+    expect(owesAdversarial("Claude 一轮", ev(), 1)).toBe(false);
+    expect(owesAdversarial(POL, ev(), 1, { verdict: "pass" })).toBe(true);
     // review 的 reviewer 自由文本写 adversarial 不算
     recordReview(db, owner(50), { taskId: "T1", reviewer: "adversarial", verdict: "pass", p0: 0, p1: 0, p2: 0 });
-    expect(owesAdversarial(POL, ev())).toBe(true);
+    expect(owesAdversarial(POL, ev(), 1)).toBe(true);
     appendEvent(db, { actor: "agent-disp", now: 60 }, { project: "p", target: "T1", kind: "dispatch", data: { reviewer: "adversarial", round: 1 } });
-    expect(owesAdversarial(POL, ev(), { verdict: "pass" })).toBe(false);
-    expect(owesAdversarial(POL, ev(), { verdict: "changes" })).toBe(true);
+    expect(owesAdversarial(POL, ev(), 1, { verdict: "pass" })).toBe(false);
+    expect(owesAdversarial(POL, ev(), 1, { verdict: "changes" })).toBe(true);
     recordReview(db, owner(70), { taskId: "T1", reviewer: "x", verdict: "pass", p0: 0, p1: 0, p2: 0 });
-    expect(owesAdversarial(POL, ev())).toBe(false);
+    expect(owesAdversarial(POL, ev(), 1)).toBe(false);
   });
 
   test("merge 之后归 PM，终态返回 null", () => {

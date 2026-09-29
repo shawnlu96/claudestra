@@ -105,7 +105,7 @@ function SourceLine({ source, ts }: { source: string; ts?: number }) {
       {source}
       {has && ` · ${fmtAge(ts)}`}
       {has && isStale(ts) && (
-        <span className="ml-1 text-warning/80">
+        <span className="ml-1 text-warning-soft-80">
           <WarnIcon /> {t("数据偏旧")}
         </span>
       )}

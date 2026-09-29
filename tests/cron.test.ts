@@ -5,9 +5,10 @@
  * 以及 job store 的 CRUD 操作。
  */
 
-import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { existsSync } from "fs";
-import { resolve } from "path";
+import { describe, test, expect, beforeEach, afterEach, afterAll } from "bun:test";
+import { existsSync, mkdtempSync, rmSync } from "fs";
+import { tmpdir } from "os";
+import { join, resolve } from "path";
 import {
   parseCronExpression,
   cronMatches,
@@ -19,6 +20,13 @@ import {
 
 // 仓库根目录 — 不依赖固定磁盘路径，测试在任何 clone 位置都能跑
 const REPO_ROOT = resolve(import.meta.dir, "..");
+
+// manager CLI 子进程显式指向临时状态目录，不靠 preload：在仓库外的目录跑这个文件时不读 bunfig，
+// 子进程会写进真的 cron.json，线上 cron 守护进程会把 test-job 当成真任务排程
+const CLI_STATE = mkdtempSync(join(tmpdir(), "cron-cli-state-"));
+const CLI_ENV: Record<string, string> = { ...(process.env as Record<string, string>), CLAUDESTRA_STATE_DIR: CLI_STATE };
+delete CLI_ENV.DISCORD_CHANNEL_ID;
+afterAll(() => rmSync(CLI_STATE, { recursive: true, force: true }));
 
 // ============================================================
 // Cron Expression Parser Tests
@@ -369,7 +377,7 @@ describe("Manager CLI cron commands", () => {
   test("cron-add 应该输出 JSON", async () => {
     const proc = Bun.spawn(
       ["bun", "run", "src/manager.ts", "cron-add"],
-      { stdout: "pipe", stderr: "pipe", cwd: REPO_ROOT }
+      { stdout: "pipe", stderr: "pipe", cwd: REPO_ROOT, env: CLI_ENV }
     );
     const out = await new Response(proc.stdout).text();
     await proc.exited;
@@ -381,7 +389,7 @@ describe("Manager CLI cron commands", () => {
   test("cron-list 应该返回 jobs 数组", async () => {
     const proc = Bun.spawn(
       ["bun", "run", "src/manager.ts", "cron-list"],
-      { stdout: "pipe", stderr: "pipe", cwd: REPO_ROOT }
+      { stdout: "pipe", stderr: "pipe", cwd: REPO_ROOT, env: CLI_ENV }
     );
     const out = await new Response(proc.stdout).text();
     await proc.exited;
@@ -393,7 +401,7 @@ describe("Manager CLI cron commands", () => {
   test("cron-remove 无参数应报错", async () => {
     const proc = Bun.spawn(
       ["bun", "run", "src/manager.ts", "cron-remove"],
-      { stdout: "pipe", stderr: "pipe", cwd: REPO_ROOT }
+      { stdout: "pipe", stderr: "pipe", cwd: REPO_ROOT, env: CLI_ENV }
     );
     const out = await new Response(proc.stdout).text();
     await proc.exited;
@@ -405,7 +413,7 @@ describe("Manager CLI cron commands", () => {
   test("cron-toggle 无参数应报错", async () => {
     const proc = Bun.spawn(
       ["bun", "run", "src/manager.ts", "cron-toggle"],
-      { stdout: "pipe", stderr: "pipe", cwd: REPO_ROOT }
+      { stdout: "pipe", stderr: "pipe", cwd: REPO_ROOT, env: CLI_ENV }
     );
     const out = await new Response(proc.stdout).text();
     await proc.exited;
@@ -417,7 +425,7 @@ describe("Manager CLI cron commands", () => {
   test("cron-history 应该返回 records 数组", async () => {
     const proc = Bun.spawn(
       ["bun", "run", "src/manager.ts", "cron-history"],
-      { stdout: "pipe", stderr: "pipe", cwd: REPO_ROOT }
+      { stdout: "pipe", stderr: "pipe", cwd: REPO_ROOT, env: CLI_ENV }
     );
     const out = await new Response(proc.stdout).text();
     await proc.exited;
@@ -438,7 +446,7 @@ describe("Cron CRUD via manager CLI", () => {
     // Clean up test job if it exists
     const proc = Bun.spawn(
       ["bun", "run", "src/manager.ts", "cron-remove", testJobName],
-      { stdout: "pipe", stderr: "pipe", cwd: REPO_ROOT }
+      { stdout: "pipe", stderr: "pipe", cwd: REPO_ROOT, env: CLI_ENV }
     );
     await proc.exited;
   });
@@ -447,7 +455,7 @@ describe("Cron CRUD via manager CLI", () => {
     // 1. Add
     const addProc = Bun.spawn(
       ["bun", "run", "src/manager.ts", "cron-add", testJobName, "0 9 * * *", "/tmp", "echo hello"],
-      { stdout: "pipe", stderr: "pipe", cwd: REPO_ROOT }
+      { stdout: "pipe", stderr: "pipe", cwd: REPO_ROOT, env: CLI_ENV }
     );
     const addOut = JSON.parse((await new Response(addProc.stdout).text()).trim());
     await addProc.exited;
@@ -457,7 +465,7 @@ describe("Cron CRUD via manager CLI", () => {
     // 2. List — should contain the new job
     const listProc = Bun.spawn(
       ["bun", "run", "src/manager.ts", "cron-list"],
-      { stdout: "pipe", stderr: "pipe", cwd: REPO_ROOT }
+      { stdout: "pipe", stderr: "pipe", cwd: REPO_ROOT, env: CLI_ENV }
     );
     const listOut = JSON.parse((await new Response(listProc.stdout).text()).trim());
     await listProc.exited;
@@ -469,7 +477,7 @@ describe("Cron CRUD via manager CLI", () => {
     // 3. Toggle — disable
     const toggleProc = Bun.spawn(
       ["bun", "run", "src/manager.ts", "cron-toggle", testJobName],
-      { stdout: "pipe", stderr: "pipe", cwd: REPO_ROOT }
+      { stdout: "pipe", stderr: "pipe", cwd: REPO_ROOT, env: CLI_ENV }
     );
     const toggleOut = JSON.parse((await new Response(toggleProc.stdout).text()).trim());
     await toggleProc.exited;
@@ -479,7 +487,7 @@ describe("Cron CRUD via manager CLI", () => {
     // 4. Toggle again — re-enable
     const toggle2Proc = Bun.spawn(
       ["bun", "run", "src/manager.ts", "cron-toggle", testJobName],
-      { stdout: "pipe", stderr: "pipe", cwd: REPO_ROOT }
+      { stdout: "pipe", stderr: "pipe", cwd: REPO_ROOT, env: CLI_ENV }
     );
     const toggle2Out = JSON.parse((await new Response(toggle2Proc.stdout).text()).trim());
     await toggle2Proc.exited;
@@ -489,7 +497,7 @@ describe("Cron CRUD via manager CLI", () => {
     // 5. Remove
     const removeProc = Bun.spawn(
       ["bun", "run", "src/manager.ts", "cron-remove", testJobName],
-      { stdout: "pipe", stderr: "pipe", cwd: REPO_ROOT }
+      { stdout: "pipe", stderr: "pipe", cwd: REPO_ROOT, env: CLI_ENV }
     );
     const removeOut = JSON.parse((await new Response(removeProc.stdout).text()).trim());
     await removeProc.exited;
@@ -499,7 +507,7 @@ describe("Cron CRUD via manager CLI", () => {
     // 6. Verify removal
     const list2Proc = Bun.spawn(
       ["bun", "run", "src/manager.ts", "cron-list"],
-      { stdout: "pipe", stderr: "pipe", cwd: REPO_ROOT }
+      { stdout: "pipe", stderr: "pipe", cwd: REPO_ROOT, env: CLI_ENV }
     );
     const list2Out = JSON.parse((await new Response(list2Proc.stdout).text()).trim());
     await list2Proc.exited;
@@ -511,14 +519,14 @@ describe("Cron CRUD via manager CLI", () => {
     // Add first
     const add1 = Bun.spawn(
       ["bun", "run", "src/manager.ts", "cron-add", testJobName, "0 9 * * *", "/tmp", "test"],
-      { stdout: "pipe", stderr: "pipe", cwd: REPO_ROOT }
+      { stdout: "pipe", stderr: "pipe", cwd: REPO_ROOT, env: CLI_ENV }
     );
     await add1.exited;
 
     // Add duplicate
     const add2 = Bun.spawn(
       ["bun", "run", "src/manager.ts", "cron-add", testJobName, "0 10 * * *", "/tmp", "test2"],
-      { stdout: "pipe", stderr: "pipe", cwd: REPO_ROOT }
+      { stdout: "pipe", stderr: "pipe", cwd: REPO_ROOT, env: CLI_ENV }
     );
     const out = JSON.parse((await new Response(add2.stdout).text()).trim());
     await add2.exited;
@@ -529,7 +537,7 @@ describe("Cron CRUD via manager CLI", () => {
   test("删除不存在的任务应该失败", async () => {
     const proc = Bun.spawn(
       ["bun", "run", "src/manager.ts", "cron-remove", "nonexistent-job-12345"],
-      { stdout: "pipe", stderr: "pipe", cwd: REPO_ROOT }
+      { stdout: "pipe", stderr: "pipe", cwd: REPO_ROOT, env: CLI_ENV }
     );
     const out = JSON.parse((await new Response(proc.stdout).text()).trim());
     await proc.exited;
@@ -540,7 +548,7 @@ describe("Cron CRUD via manager CLI", () => {
   test("无效的 cron 表达式应该被拒绝", async () => {
     const proc = Bun.spawn(
       ["bun", "run", "src/manager.ts", "cron-add", "bad-cron", "invalid", "/tmp", "test"],
-      { stdout: "pipe", stderr: "pipe", cwd: REPO_ROOT }
+      { stdout: "pipe", stderr: "pipe", cwd: REPO_ROOT, env: CLI_ENV }
     );
     const out = JSON.parse((await new Response(proc.stdout).text()).trim());
     await proc.exited;

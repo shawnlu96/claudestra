@@ -72,6 +72,8 @@ export const ARCHIVE_ROOT = statePath("archive");
 export const INBOX_DIR = statePath("inbox");
 export const UPDATE_LOCK = statePath("update.lock");
 export const CRON_HISTORY_PATH = statePath("cron-history.json");
+/** agent→agent 押后队列（bridge/held-queue.ts 写，台账巡检 lib/ledger-audit-snapshot.ts 读） */
+export const HELD_MESSAGES_PATH = statePath("held-messages.json");
 /** notify 投递失败的留痕（lib/notify 写，doctor 读） */
 export const UNDELIVERED_ALERTS_LOG = join(LOG_DIR, "undelivered-alerts.log");
 

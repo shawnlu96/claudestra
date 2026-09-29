@@ -1,7 +1,5 @@
 /**
- * Claude Code 启动命令构造
- *
- * 统一 manager/launcher/cron 三处的 Claude Code 启动参数：
+ * Claude Code 启动命令构造。统一 manager/launcher/cron 三处的 Claude Code 启动参数：
  * - MCP server 名（由 env MCP_NAME 控制，默认 claudestra）
  * - disallowedTools 黑名单（支持命名预设和自定义）
  * - dev channel 加载 + skip-permissions
@@ -12,6 +10,7 @@ import { resolveBridgeUrl } from "./bridge-url.js";
 import { bridgePortOf } from "./bridge-port.js";
 import { isSandbox } from "./sandbox.js";
 import { sandboxLaunchArgs } from "./sandbox-env.js";
+import { launchSettingsFor, settingsLaunchArgs } from "./agent-settings.js";
 import { resolveBunPath } from "./bun-path.js";
 import { SRC_DIR } from "./repo-root.js";
 import { roleFlags } from "./team-roles.js";
@@ -277,14 +276,15 @@ export interface LaunchOptions {
   purpose?: string;
   /** purpose 注入时的自称名（registry 名，如 agent-foo）。 */
   agentName?: string;
+  /** 按哪个名字找 agent-settings/<名>.json（registry 名 / master）；不传 = 不带 --settings */
+  settingsAgent?: string;
   /**
    * v2.21+ project 上下文注入:一行「你属于 project X,目录有…,同伴有…」,与
    * purpose 合并成同一条 --append-system-prompt。让 review/测试类 agent 天然
    * 知道整个 project 的仓在哪、该找哪个同事协作。
    */
   projectContext?: string;
-  /** 编排班子角色落盘后的文件（lib/team-roles.ts roleFlags 拼成 --agents / --agent / --append-system-prompt-file） */
-  role?: import("./team-roles.js").RoleLaunch;
+  role?: import("./team-roles.js").RoleLaunch; // 编排班子角色落盘后的文件，roleFlags 拼成 --agents / --agent / --append-system-prompt-file
 }
 
 /** POSIX 单引号 shell 转义（pi-launch.ts 复用同一套，保证两侧注入的 env 语义一致） */
@@ -332,7 +332,9 @@ export function buildClaudeCommand(opts: LaunchOptions): string {
   if (mode === "auto") mode = "bypassPermissions";
 
   const parts: string[] = ["claude", "--dangerously-load-development-channels", `server:${MCP_NAME}`];
-  if (isSandbox()) parts.push(...sandboxLaunchArgs(MCP_NAME, resolveBunPath(), SRC_DIR).map(shellEscape));
+  const own = launchSettingsFor(opts.settingsAgent); // agent 设置（lib/agent-settings.ts），内联传（超长落快照）；沙箱与沙箱覆盖合成一份，只传一次 --settings
+  if (isSandbox()) parts.push(...sandboxLaunchArgs(MCP_NAME, resolveBunPath(), SRC_DIR, own, opts.settingsAgent).map(shellEscape));
+  else parts.push(...settingsLaunchArgs(own, opts.settingsAgent).map(shellEscape));
 
   // bypassPermissions 走经过验证的 --dangerously-skip-permissions（语义相同，且它
   // 还顺带跳过 workspace trust dialog）；其余模式走 --permission-mode <mode>。
@@ -377,10 +379,8 @@ export function buildClaudeCommand(opts: LaunchOptions): string {
   }
   if (opts.role) parts.push(...roleFlags(opts.role, shellEscape));
 
-  // v2.16+ purpose 注入:一行系统提示,让 agent 知道自己是谁、被派来干什么。
-  // 截断 500 字防超长 purpose 撑爆 tmux send-keys 单行命令。
-  // v2.21+ project 上下文并入同一条 --append-system-prompt(多条 flag 的合并
-  // 语义不背书,单条最稳)。
+  // purpose 与 project 上下文合成一条 --append-system-prompt（多条 flag 的合并语义不背书，单条最稳）；
+  // 各自截断，防超长内容撑爆 tmux send-keys 单行命令。
   const sysLines: string[] = [];
   if (opts.purpose && opts.purpose.trim()) {
     const p = opts.purpose.trim().slice(0, 500);

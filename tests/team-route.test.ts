@@ -8,7 +8,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { beforeEach, describe, expect, test } from "bun:test";
 import { makeSender, teamRouterTicker } from "../src/bridge/team-router.js";
-import type { Delivery, Envelope } from "../src/bridge/router.js";
+import { isHumanRequest, type Delivery, type Envelope } from "../src/bridge/router.js";
 import { LedgerReader } from "../src/lib/ledger-read.js";
 import { closeLedger, getMeta, getTask, listEvents, openLedger } from "../src/lib/ledger-store.js";
 import { appendEvent, createTask, deliver, moveStage, recordReview, setMeta } from "../src/lib/ledger-write.js";
@@ -199,6 +199,8 @@ describe("routeEvents：外源文本、对抗式、找不到 PM", () => {
     recordReview(db, { actor: "agent-disp", now: 4 }, { taskId: "T1", reviewer: "regular", verdict: "pass", p0: 0, p1: 0, p2: 0 });
     expect(route(cut, pol)).toEqual([]); // 调度助理自己记的，也不去告诉 PM「通过」
     team(null);
+    // 一次派审只算一次（ledger-handler.ts dispatchKindFor）：第二条常规结论要有自己的派审
+    appendEvent(db, owner(5), { project: "p", target: "T1", kind: "dispatch", data: { reviewer: "regular", round: 1, policy: "最后一轮对抗式" } });
     const cut2 = listEvents(db).at(-1)?.seq ?? 0;
     recordReview(db, owner(5), { taskId: "T1", reviewer: "regular", verdict: "pass", p0: 0, p1: 0, p2: 0 });
     const n = route(cut2, pol);
@@ -471,5 +473,11 @@ describe("makeSender：送达才标消息来源；没送到进押后队列", () 
     expect([...busy.marked, ...queued.marked]).toEqual([]);
     expect(busy.held).toHaveLength(1);
     expect(queued.held).toHaveLength(0); // deliverToLocal 自己押了
+  });
+  test("班子通知带 waitForIdle：deliverToLocal 在目标回合中押后、永不抢占（不带会在回合开头被静默丢掉）", async () => {
+    const busy = deps({ kind: "sent" }, true);
+    await busy.send(notice, "c-pm");
+    expect(busy.held[0]).toMatchObject({ intent: "notification", from: { kind: "bridge", label: "ledger" }, meta: { waitForIdle: true } });
+    expect(isHumanRequest(busy.held[0])).toBe(false);
   });
 });

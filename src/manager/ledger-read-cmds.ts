@@ -6,7 +6,7 @@ import { existsSync, realpathSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import { taskMetrics } from "../lib/ledger-metrics.js";
-import { getItem, getMeta, getTask, LedgerError, listEvents, listItems, listTasks } from "../lib/ledger-store.js";
+import { getItem, getMeta, getTask, LedgerError, listDeps, listEvents, listItems, listTasks } from "../lib/ledger-store.js";
 import { setMeta } from "../lib/ledger-write.js";
 import { isUmbrellaDir, normalizeDir } from "../lib/projects.js";
 import { planRoles, teamBaseOf } from "../lib/team-proposal.js";
@@ -22,7 +22,7 @@ function whoami(c: LedgerCli): Result {
   return { ok: true, actor: c.deps.actor, project, role: project ? c.role(project) : null };
 }
 
-/** 不带目标：项目总览（任务附指标）；任务：详情 + 指标 + 最近事件；事项：详情 + 挂着的任务 + 最近事件 */
+/** 不带目标：项目总览（任务附指标）；任务：详情 + 指标 + 最近事件（依赖边看 ledger deps）；事项：详情 + 挂着的任务 + 最近事件 */
 function show(c: LedgerCli): Result {
   const id = c.p.pos[1];
   const limit = intFlag(c.p, "events") ?? DEFAULT_EVENTS;
@@ -62,7 +62,7 @@ function exportCmd(c: LedgerCli): Result {
   // 一个读事务里取完：别的进程在中途写入时，items / tasks / events 仍是同一刻的快照
   const data = c.db.transaction(() => ({
     project, exportedAt: new Date(c.deps.now()).toISOString(), meta: getMeta(c.db, project),
-    items: listItems(c.db, project), tasks: listTasks(c.db, project), events: listEvents(c.db, { project }),
+    items: listItems(c.db, project), tasks: listTasks(c.db, project), deps: listDeps(c.db, project), events: listEvents(c.db, { project }),
   }))();
   try {
     writeFileSync(dest, `${JSON.stringify(data, null, 2)}\n`, { flag: "wx" });
@@ -70,7 +70,7 @@ function exportCmd(c: LedgerCli): Result {
     const code = (e as NodeJS.ErrnoException).code;
     throw new LedgerError(code === "EEXIST" ? "conflict" : "invalid", code === "EEXIST" ? `${dest} 已存在，不覆盖` : `写 ${dest} 失败：${(e as Error).message}`);
   }
-  return { ok: true, out: dest, items: data.items.length, tasks: data.tasks.length, events: data.events.length };
+  return { ok: true, out: dest, items: data.items.length, tasks: data.tasks.length, deps: data.deps.length, events: data.events.length };
 }
 
 /**

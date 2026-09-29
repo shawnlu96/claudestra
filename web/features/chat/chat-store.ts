@@ -21,47 +21,30 @@ import {
   historyHasReply,
   type RecordSrc,
 } from "./live-merge";
-import { composeView, droppedBlobUrls, revokeBlobUrls, stripInboundHeader } from "./view-compose";
+import { composeView, droppedBlobUrls, echoKeyOf, isUserEcho, revokeBlobUrls, sendCursor } from "./view-compose";
 import { decideReconnect } from "./reconnect-policy";
 import { ReloadScroll, reloadKindFor, type ReloadKind } from "./reload-scroll";
 
 import type { WebStreamEvent, WebComponentRow, BgMeta, BgProgress, BgEndStatus } from "@/lib/chat/events";
 import { getLang, t as tr } from "@/lib/i18n";
 import { postClientLog } from "@/lib/client-log";
-import { restoreFormReply } from "@/lib/chat/form-restore";
+import { liveUserText, resolveDeltaClicks, resolvePendingClicks } from "./delta-clicks";
+import { agentsSignature } from "./agents-signature";
 import { ApiError, DeviceInvalidError } from "@/lib/api/client";
-import { agentExtraSig, loadAgents as apiLoadAgents, MASTER_AGENT_NAME } from "@/lib/chat/agents";
+import { loadAgents as apiLoadAgents, MASTER_AGENT_NAME } from "@/lib/chat/agents";
 import { createAgent as apiCreateAgent, lifecycleAction as apiLifecycle } from "@/lib/api/agents";
 import { fetchHistory } from "@/lib/api/history";
 import { openAgentEventStream } from "@/lib/api/stream";
-import { agentTasks, answerAuq, answerPermission, clearAgentSession, interruptAgent, sendMessage, setHidden, type SendResult } from "@/lib/api/chat";
+import { agentTasks, answerAuq, answerPermission, clearAgentSession, interruptAgent, sendErrorText, sendMessage, setHidden, type SendResult } from "@/lib/api/chat";
 import { getProfile, putProfile } from "@/lib/api/settings";
-import { projectsList } from "@/lib/api/system";
-import { markRead } from "@/lib/api/push";
+import { markRead, projectsList } from "./scoped-requests"; // 非全权设备不发（接口要全权）
 
-/**
- * roster 变化指纹：捕获会影响渲染的字段（成员 + 状态 + 展示名 + 置顶/mock 标记
- * + busy/contextTokens/lastActivityTs）。轮询用它判断列表是否真的变了，只有变了
- * 才更新 state。⚠ 后三个易变字段必须入指纹——contextTokens 不入的话，compact 后
- * 轮询拉回的新值会被「列表没变」挡掉，ctx 徽章/用量面板永远停在压缩前的旧值
- *（2026-07-16 真机实锤）；busy/lastActivityTs 同理（黄点与时间标签靠轮询回落）。
- */
 /** v2.17.2 侧栏最近触碰时刻(pointerdown/滚动)——roster 重排的交互期冻结依据。
  *  sidebar 的容器事件调 noteSidebarInteraction 更新;见 refreshAgents 内注释。 */
 let lastSidebarTouchAt = 0;
 const SIDEBAR_FREEZE_MS = 2_000;
 export function noteSidebarInteraction() {
   lastSidebarTouchAt = Date.now();
-}
-
-function agentsSignature(list: AgentSession[]): string {
-  return list
-    .map(
-      (a) =>
-        `${a.name}${a.status}${a.displayName}${a.pinnedMaster ? 1 : 0}${a.mock ? 1 : 0}` +
-        `${a.busy ? 1 : 0}${a.projectId ?? ""}${a.contextTokens ?? ""}${a.lastActivityTs ?? ""}${a.model ?? ""}${a.effort ?? ""}${a.unread ?? 0}${a.label ?? ""}${a.external ? 1 : 0}${a.sharedPeers ?? 0}${(a.sharedWith ?? []).join(",")}${agentExtraSig(a)}`
-    )
-    .join("");
 }
 
 // 视图合流（入站头剥离 / 乐观消息保全 / 按 ts 插回 / 直播保全）在 view-compose.ts
@@ -679,7 +662,7 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
               ts: msgs[msgs.length - 1]?.ts ?? new Date().toISOString(),
             } as ChatMessage]
           : [];
-        s.messages = [...msgs, ...divider, ...s.messages];
+        s.messages = resolvePendingClicks([...msgs, ...divider, ...s.messages]); // 更早的一页可能正是之前找不到的表单
         s.historyHasMore = !!json.hasMore;
         s.loadingOlder = false;
       });
@@ -765,7 +748,7 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
       if (gen !== this.openGen) return;
       const msgs = hydrateHistoryMessages(json.data ?? []);
       this.produce((s) => {
-        if (msgs.length) s.messages = [...s.messages, ...msgs];
+        if (msgs.length) s.messages = [...s.messages, ...resolveDeltaClicks(s.messages, msgs)];
         s.historyNewerHasMore = msgs.length > 0 && !!json.hasMore;
         s.loadingNewer = false;
       });
@@ -858,7 +841,7 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
         // 用现有视图代替重拉
         const base = s.messages.filter((m) => m.id.startsWith("h"));
         // 同一回合被 7s 差量切成的多段历史气泡拼回一泡(见 live-merge.ts)
-        const history = mergeContiguousAssistant(base, dropCoveredDelta(base, delta));
+        const history = mergeContiguousAssistant(base, resolveDeltaClicks(base, dropCoveredDelta(base, delta)));
         const v = composeView({
           current: s.messages,
           history,
@@ -1514,24 +1497,14 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
    *  ——按归一化文本对尾部消息对账,匹配到(乐观消息/历史已有)则跳过,否则画成
    *  用户气泡。历史重拉时 ru_ 气泡会被 jsonl 里的正主整体替换,无双份。 */
   public addRemoteUserMessage(text: string, attachments?: ChatAttachmentView[], from?: string) {
-    const norm = (x: string) => x.replace(/\r\n?/g, "\n").trim();
-    const t = norm(text);
-    if (!t && !attachments?.length) return;
-    const tail = this.state.messages.slice(-15);
-    // 对账去重:文本相同即回声(附件消息 BFF 已剥注入块,与乐观消息的干净文本
-    // 对得上);纯附件无文本时按附件数量兜底匹配
-    // 注入头无关比对：Pi 的历史里这条消息自带 `[🌐 来自 …]` 头，比原文会失配 ⇒
-    // 回声被画成第二个气泡（owner 2026-09-14 实报「发一条多出现一个」）
-    const bare = (m: ChatMessage) => norm(stripInboundHeader(m.wire ?? m.content ?? ""));
-    if (
-      tail.some(
-        (m) =>
-          m.role === "user" &&
-          (norm(m.wire ?? m.content) === t || (t !== "" && bare(m) === t)) &&
-          (t !== "" || (m.attachments?.length ?? 0) === (attachments?.length ?? 0))
-      )
-    )
+    if (!text.trim() && !attachments?.length) return;
+    // 对账去重：尾部 15 条里已有这条（本端乐观消息的回声 / 历史已有）就不再画——比对规则见 view-compose 的 isUserEcho
+    const echo = this.state.messages.slice(-15).find((m) => isUserEcho(m, text, attachments, from));
+    if (echo) {
+      // 回声认领本端乐观气泡：记下这条的指纹，同一气泡不再吞下一条同名附件
+      if (echo.local && echo.echoKey === undefined) this.produce((s) => void s.messages.filter((x) => x.id === echo.id).forEach((x) => (x.echoKey = echoKeyOf(text, attachments))));
       return;
+    }
     this.produce((s) => {
       // 与 send 一致:插话给流式中的助手气泡定稿,后续输出另起气泡
       if (s.streaming) {
@@ -1541,7 +1514,7 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
       s.messages.push({
         id: `ru_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
         role: "user",
-        content: restoreFormReply(text, s.messages) ?? text, // 他端发的表单回投：显示可读行 + 标已答
+        ...liveUserText(text, s.messages, from), // 他端发的按钮 / 表单回投：可读文案 + 标已答；本人的 @ 委托指令行剥掉；原文留 wire 给回声对账
         ts: new Date().toISOString(),
         ...(from ? { from } : {}),
         ...(attachments?.length ? { attachments } : {}),
@@ -1611,6 +1584,7 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
         content: display,
         ts: new Date().toISOString(),
         attachments,
+        ...sendCursor(s.messages), // 纯附件没有正文可比，对账靠发送时的历史游标
         local: true, // 历史确认前保留(见 loadMessages 的乐观消息保全)
         // 按钮点击:展示 label、实发 wire——对账按 wire 匹配,否则气泡永挂 30min
         ...(wire !== display ? { wire } : {}),
@@ -1639,18 +1613,18 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
     if (!entry) return;
     const { agent, wire, files } = entry;
     const hasFiles = !!files && files.length > 0;
-    const fail = (why: string) => {
+    const fail = (why: string, handled = false) => {
       const errId = this.nextId();
       entry.errId = errId;
       this.produce((s) => {
         s.streaming = false;
         s.awaitingChunk = false;
         const opt = s.messages.find((m) => m.id === optimisticId);
-        if (opt) opt.failed = true; // 气泡标「未送达」+ 重发/删除按钮,别装作已发出
+        if (opt) opt.failed = !handled; // 标「未送达」+ 重发/删除;「待你处理」已在别处答了(409 ask_closed)不算失败,只提示一句
         s.messages.push({
           id: errId,
           role: "assistant",
-          content: `${getLang() === "zh" ? "⚠️ 发送失败：" : "⚠️ Send failed: "}${why}`,
+          content: handled ? why : `${getLang() === "zh" ? "⚠️ 发送失败：" : "⚠️ Send failed: "}${why}`,
           ts: new Date().toISOString(),
         });
       });
@@ -1702,7 +1676,7 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
       }
     } catch (e) {
       const timedOut = (e as Error).name === "TimeoutError";
-      fail(timedOut ? (getLang() === "zh" ? "上传超时（网络不稳）" : "upload timed out") : (e as Error).message);
+      fail(timedOut ? (getLang() === "zh" ? "上传超时（网络不稳）" : "upload timed out") : sendErrorText(e), e instanceof ApiError && e.code === "ask_closed");
     }
   }
 

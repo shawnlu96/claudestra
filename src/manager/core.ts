@@ -5,10 +5,10 @@
  * 从 manager.ts 逐字搬出（函数体未改，只加 export / 改相对路径）。
  */
 import { STATE_DIR } from "../lib/paths.js";
-import { isReservedAgentName, REGISTRY_PATH as STATE_REGISTRY_PATH } from "../lib/registry.js";
+import { AGENT_NAME_BLOCKLIST_RE, canonicalTwinError, invisibleNameError, isReservedAgentName, readRegistryAgentsSync, REGISTRY_PATH as STATE_REGISTRY_PATH } from "../lib/registry.js";
 import { readFile, writeFile, mkdir, rename } from "fs/promises";
 import { writeJsonAtomic } from "../lib/state-file.js";
-import { existsSync } from "fs";
+import { existsSync, writeSync } from "fs";
 import { TMUX_SOCK as SOCK, AGENT_PREFIX, tmuxRaw, windowTarget } from "../lib/tmux-helper.js";
 import { type PiEnvProfile } from "../lib/pi-env.js";
 import { type PendingOp } from "../lib/pending-ops.js";
@@ -86,8 +86,7 @@ export interface AgentInfo {
   /** 派发者的 registry 键（`agent-xxx` / `master`）与任务短名——manager/team.ts 写入，侧栏据此挂树 */
   parent?: string;
   task?: string;
-  /** 编排班子角色：启动时按它注入角色提示（lib/team-roles.ts）；只有 Claude Code runtime 生效 */
-  role?: import("../lib/team-roles.js").TeamRole;
+  role?: import("../lib/team-roles.js").TeamRole; // 编排班子角色：启动时按它注入角色提示（lib/team-roles.ts）；只有 Claude Code runtime 生效
 }
 
 export interface Registry {
@@ -161,13 +160,8 @@ export async function saveRegistry(reg: Registry) {
 // 拒绝空白、shell 元字符、控制字符。CJK 和其他 Unicode 字母允许。
 // 长度上限 48 — Discord 频道名上限 100，tmux window 名没硬限制，48 足够宽。
 //
-// v2.13.1+ 补上 `/`、`\`、`:`、`~` 和 `..`：agent 名会直接拼进文件路径 ——
-// session-archive.ts 的 join(ARCHIVE_ROOT, agentName)、screenshot.ts 的
-// `${TMP_DIR}/peek_${windowName}_...`。名字里带 `/` 或 `..` 就能把归档目录和
-// 截图文件写到预期之外的位置（攻击者控制得了目录、控制不了完整文件名，所以是
-// 目录创建 + 文件覆盖，不是 RCE，但没有任何理由允许）。
-// `.` 也挡：tmux 在目标串里按 `.` 切 pane，带点的窗口按名字永远找不到（create 按 @id 能建成，之后按名字的操作全静默失效）
-const NAME_BLOCKLIST_RE = /[\s"'`$;&|<>()*?{}\\/:~.\x00-\x1f\x7f]/;
+// 字符黑名单在 lib/registry.ts（AGENT_NAME_BLOCKLIST_RE，含 `.`、路径分隔符与不可见字符的理由），台账校验负责人时用同一份。
+const NAME_BLOCKLIST_RE = AGENT_NAME_BLOCKLIST_RE;
 /** 单独挡 `..`（上面的字符类挡不住不含分隔符的纯 ".."） */
 const NAME_TRAVERSAL_RE = /(^|[^\w])\.\.($|[^\w])|^\.+$/;
 
@@ -185,7 +179,7 @@ export function normalizeName(raw: string): string {
  * （检查的与 tmux -c 实际收到的必须是同一个串），生产里原样返回。
  */
 export function assertCreatable(name: string, dir: string, runtime: string | undefined): string {
-  assertValidNewName(name);
+  assertValidNewAgent(name);
   const d = normalizeSandboxAgentDir(dir);
   const dirProblem = sandboxAgentDirProblem(d);
   if (dirProblem) throw new Error(dirProblem);
@@ -199,15 +193,22 @@ export function assertValidNewName(raw: string): void {
   if (cleaned.length === 0 || cleaned.length > 48) {
     throw new Error(`agent 名称长度必须在 1~48 之间: "${raw}"`);
   }
+  const invisible = invisibleNameError(cleaned);
+  if (invisible) throw new Error(`${invisible}: ${JSON.stringify(raw)}`);
   if (NAME_BLOCKLIST_RE.test(cleaned)) {
-    throw new Error(
-      `agent 名称含非法字符: "${raw}"（不能包含空白、点号 .、路径分隔符 / \\ : ~ 或 shell 元字符 " ' \` $ ; & | < > ( ) * ? { }）`
-    );
+    throw new Error(`agent 名称含非法字符: "${raw}"（不能包含空白、点号 .、路径分隔符 / \\ : ~、shell 元字符 " ' \` $ ; & | < > ( ) * ? { }）`);
   }
   if (NAME_TRAVERSAL_RE.test(cleaned)) {
     throw new Error(`agent 名称不能包含 ".."：${JSON.stringify(raw)}`);
   }
   if (isReservedAgentName(cleaned)) throw new Error(`agent 名称不能是 owner / master（台账里是身份保留名）：${JSON.stringify(raw)}`);
+}
+
+/** 新建 / resume / 收编：名字合法，且跟 registry 里已有的 agent 规范化后不撞（canonicalTwinError；改名在 agent-rename.ts 按同一规则查） */
+export function assertValidNewAgent(name: string, existing: string[] = readRegistryAgentsSync(STATE_REGISTRY_PATH).map((a) => a.name)): void {
+  assertValidNewName(name);
+  const twin = canonicalTwinError(normalizeName(name), existing);
+  if (twin) throw new Error(twin);
 }
 
 export function formatAge(date: Date): string {
@@ -222,6 +223,19 @@ export function formatAge(date: Date): string {
 
 export function output(data: Record<string, unknown>) {
   console.log(JSON.stringify(data));
+}
+
+/** 大输出用这个：同步写完才返回。console.log 写非阻塞管道会截断（见 tests/manager-output.test.ts）；output() 不直接改成这样：takeover 靠替换 console.log 截 cmdResume 的输出 */
+export function outputSync(data: Record<string, unknown>) {
+  const buf = Buffer.from(JSON.stringify(data) + "\n");
+  for (let off = 0; off < buf.length; ) {
+    try {
+      off += writeSync(1, buf, off);
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== "EAGAIN") throw e;
+      Bun.sleepSync(2); // 管道满：等读方取走一些再写
+    }
+  }
 }
 
 /**

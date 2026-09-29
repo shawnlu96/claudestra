@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { codexSubSessionOf, readCodexMeta } from "../src/lib/codex-session";
 import { isCodexSubThread } from "../src/lib/codex-subthread";
-import { nestSubSessions, sessionRowKey } from "../web/lib/session-nesting";
+import { sessionRowKey, sessionTree, type SubSessionRow } from "../web/lib/session-nesting";
 
 // Codex 的子线程（subagent / 自动审查）与主会话同 cwd，列表里分不出主从；session_meta 里 id≠session_id 就是子线程
 const dir = mkdtempSync(join(tmpdir(), "codex-sub-"));
@@ -83,19 +83,22 @@ describe("sessionRowKey", () => {
   });
 });
 
-describe("nestSubSessions", () => {
+// 全部展开、全部列出时的排序与缩进（折叠 / 已纳管分组头见 tests/session-limit.test.ts）
+const nestAll = <T extends SubSessionRow>(rows: T[]) => sessionTree(rows, () => true, new Set(rows.map(sessionRowKey)));
+
+describe("sessionTree 全展开", () => {
   test("同一个 sessionId 两行（不同 cwd 的 Claude Code 会话）：按行对象去重，两行都在、顺序不变", () => {
     const D1 = { sessionId: "D", name: "w1" };
     const E = { sessionId: "E", name: "w" };
     const D2 = { sessionId: "D", name: "w2" };
-    expect(nestSubSessions([D1, E, D2]).map((r) => r.row)).toEqual([D1, E, D2]);
+    expect(nestAll([D1, E, D2]).map((r) => r.row)).toEqual([D1, E, D2]);
   });
   const row = (sessionId: string, parentId?: string) => ({ sessionId, name: "w", ...(parentId ? { sub: { parentId, kind: "subagent" } } : {}) });
   test("子会话排到父会话下面并缩进，父不在列表里就留原位", () => {
     const rows = [row("C", "B"), row("X"), row("B", "A"), row("A"), row("Z", "gone")];
-    expect(nestSubSessions(rows).map((r) => `${r.row.sessionId}${r.depth}`)).toEqual(["X0", "A0", "B1", "C2", "Z0"]);
+    expect(nestAll(rows).map((r) => `${r.row.sessionId}${r.depth}`)).toEqual(["X0", "A0", "B1", "C2", "Z0"]);
   });
   test("成环也不丢行", () => {
-    expect(nestSubSessions([row("P", "Q"), row("Q", "P")]).map((r) => r.row.sessionId).sort()).toEqual(["P", "Q"]);
+    expect(nestAll([row("P", "Q"), row("Q", "P")]).map((r) => r.row.sessionId).sort()).toEqual(["P", "Q"]);
   });
 });

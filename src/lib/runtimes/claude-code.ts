@@ -39,7 +39,9 @@ export function claudeProjectsRoot(home: string = homedir()): string {
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 export const CLAUDE_CODE_CONTROL: RuntimeControl = {
-  interruptKeys: ["C-c"],
+  // Esc 不用 C-c：主回合空闲、只剩后台子 agent 时，C-c 会停掉全部后台 agent（CC 2.1.283 实测 + 源码的 suppressBackgroundAgentKill），
+  // Esc 永远不碰后台 agent；主回合在跑时两者一样打断。事件态滞后把空闲误判成忙时，Esc 也是空操作。docs/architecture/interrupts.md
+  interruptKeys: ["Escape"],
   preemptOnHumanMessage: true,
   idleSource: "pane",
   // --model 对 --resume 的会话经常不生效（会话保留原模型），启动后要会话内补发 /model
@@ -68,6 +70,7 @@ export function claudeLaunchOptions(spec: LaunchSpec): LaunchOptions {
     model: spec.model,
     purpose: spec.purpose,
     agentName: spec.agentName,
+    settingsAgent: spec.settingsName,
     projectContext: spec.projectContext,
     role: roleLaunch(x.role),
   };

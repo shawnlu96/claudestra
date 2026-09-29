@@ -5,6 +5,8 @@
  * 标记先落盘：砍在之后任一步，再跑 `rename old new`（registry 已没有 old，凭 from===old 认出是补跑）
  * 或 repair 都能补 ②–⑤；没有这个标记的「新名已存在」仍拒绝（不认碰巧同名的条目）。
  */
+import { renameAgentSettings } from "../lib/agent-settings.js";
+import { canonicalTwinError } from "../lib/registry.js";
 import { AGENT_PREFIX } from "../lib/tmux-helper.js";
 import { isPendingLive, newPending } from "../lib/pending-ops.js";
 import { assertValidNewName, normalizeName, output } from "./core.js";
@@ -34,6 +36,8 @@ export async function runRename(oldName: string, newName: string, deps: OpsDeps)
     if (!info) return { ok: false, error: `registry 里没有 ${oldTmux}` };
     if (info.pending) return { ok: false, error: `${oldTmux} 有做到一半的 ${info.pending.op}，先跑 manager repair --apply 收拾` };
     if (target) return { ok: false, error: `${newTmux} 已存在，换个名字` };
+    const twin = canonicalTwinError(newTmux, Object.keys(reg.agents).filter((n) => n !== oldTmux)); // 改成自己的全角写法不算撞
+    if (twin) return { ok: false, error: twin };
   }
 
   const newChannelName = newTmux.replace(AGENT_PREFIX, "");
@@ -47,6 +51,7 @@ export async function runRename(oldName: string, newName: string, deps: OpsDeps)
     await deps.saveRegistry(reg);
   }
   steps.push({ step: "registry", ok: true, ...(resuming ? { skipped: "上次已迁移" } : {}) });
+  renameAgentSettings(oldTmux, newTmux, resuming ? { oldTaken } : undefined); // 按 agent 的技能开关跟着改名（补跑只挪不删，旧名被占用时不动）
 
   const windows = await deps.listWindows();
   if (!oldTaken && windows.includes(oldTmux) && !windows.includes(newTmux)) {

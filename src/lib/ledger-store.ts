@@ -6,13 +6,14 @@
 import { Database } from "bun:sqlite";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
-import type { EventKind, LedgerEvent, LedgerItem, LedgerTask } from "./ledger-stages.js";
+import type { DepKind, DepState, LedgerDep } from "./ledger-deps.js";
+import type { AssigneeKind, EventKind, LedgerEvent, LedgerItem, LedgerTask } from "./ledger-stages.js";
+import { SCHEMA_AUDIT } from "./ledger-audit-schema.js";
+import { toTeam, type TeamConfig } from "./ledger-team-config.js";
 import { statePath } from "./paths.js";
 
 export const LEDGER_PATH = statePath("ledger.sqlite");
-export const LEDGER_TABLES = ["items", "tasks", "events", "meta"] as const;
-/** PRAGMA user_version；升级时在 MIGRATIONS 末尾追加一步，旧库按顺序补齐 */
-export const LEDGER_SCHEMA_VERSION = 1;
+export const LEDGER_TABLES = ["items", "tasks", "events", "meta", "asks", "task_deps", "audit_findings", "audit_baseline"] as const;
 /** 另一个进程持有写锁时最多等这么久，再报 SQLITE_BUSY */
 const BUSY_TIMEOUT_MS = 5000;
 /** 切 WAL 时每次尝试只等这么久，总时长由 ensureWal 的退避循环控制在 BUSY_TIMEOUT_MS 内 */
@@ -35,42 +36,103 @@ export class LedgerError extends Error {
   }
 }
 
-const SCHEMA_V1 = `
-CREATE TABLE items (
-  project TEXT NOT NULL, id TEXT NOT NULL, title TEXT NOT NULL,
-  ownerWords TEXT NOT NULL DEFAULT '', priority TEXT NOT NULL DEFAULT '',
-  status TEXT NOT NULL CHECK (status IN ('todo','decide','design','doing','done','dropped')),
-  oneLine TEXT NOT NULL DEFAULT '', next TEXT NOT NULL DEFAULT '',
-  rev INTEGER NOT NULL DEFAULT 1, extra TEXT NOT NULL DEFAULT '{}',
-  createdAt INTEGER NOT NULL, updatedAt INTEGER NOT NULL,
-  PRIMARY KEY (project, id));
-CREATE TABLE tasks (
-  id TEXT PRIMARY KEY, project TEXT NOT NULL, itemId TEXT, title TEXT NOT NULL,
-  kind TEXT NOT NULL CHECK (kind IN ('code','investigate','ops')),
-  stage TEXT NOT NULL CHECK (stage IN ('spec','restate','build','review','fix','merge','live','verified','done','blocked','cancelled')),
-  stageBefore TEXT, round INTEGER NOT NULL DEFAULT 0,
-  agent TEXT, pm TEXT, branch TEXT, pr TEXT, headSHA TEXT, spec TEXT,
-  specRev INTEGER NOT NULL DEFAULT 1, model TEXT,
-  rev INTEGER NOT NULL DEFAULT 1, extra TEXT NOT NULL DEFAULT '{}',
-  createdAt INTEGER NOT NULL, updatedAt INTEGER NOT NULL,
-  FOREIGN KEY (project, itemId) REFERENCES items(project, id));
-CREATE INDEX tasks_project ON tasks(project);
-CREATE TABLE events (
-  seq INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER NOT NULL,
-  actor TEXT NOT NULL, project TEXT NOT NULL,
-  target TEXT NOT NULL,
-  kind TEXT NOT NULL, text TEXT NOT NULL DEFAULT '', data TEXT NOT NULL DEFAULT '{}',
-  dedupKey TEXT UNIQUE);
-CREATE INDEX events_project_target ON events(project, target, seq);
-CREATE TRIGGER events_no_update BEFORE UPDATE ON events BEGIN SELECT RAISE(ABORT, 'ledger events are append-only'); END;
-CREATE TRIGGER events_no_delete BEFORE DELETE ON events BEGIN SELECT RAISE(ABORT, 'ledger events are append-only'); END;
-CREATE TABLE meta (
-  project TEXT NOT NULL, key TEXT NOT NULL,
-  value TEXT NOT NULL, PRIMARY KEY (project, key));
-`;
+/** 一条语句一个元素（迁移规矩：bun 的多语句 exec 会吞运行期错误）；触发器的 BEGIN … END 整条算一个 */
+const SCHEMA_V1: readonly string[] = [
+  `CREATE TABLE items (
+    project TEXT NOT NULL, id TEXT NOT NULL, title TEXT NOT NULL,
+    ownerWords TEXT NOT NULL DEFAULT '', priority TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL CHECK (status IN ('todo','decide','design','doing','done','dropped')),
+    oneLine TEXT NOT NULL DEFAULT '', next TEXT NOT NULL DEFAULT '',
+    rev INTEGER NOT NULL DEFAULT 1, extra TEXT NOT NULL DEFAULT '{}',
+    createdAt INTEGER NOT NULL, updatedAt INTEGER NOT NULL,
+    PRIMARY KEY (project, id))`,
+  `CREATE TABLE tasks (
+    id TEXT PRIMARY KEY, project TEXT NOT NULL, itemId TEXT, title TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK (kind IN ('code','investigate','ops')),
+    stage TEXT NOT NULL CHECK (stage IN ('spec','restate','build','review','fix','merge','live','verified','done','blocked','cancelled')),
+    stageBefore TEXT, round INTEGER NOT NULL DEFAULT 0,
+    agent TEXT, pm TEXT, branch TEXT, pr TEXT, headSHA TEXT, spec TEXT,
+    specRev INTEGER NOT NULL DEFAULT 1, model TEXT,
+    rev INTEGER NOT NULL DEFAULT 1, extra TEXT NOT NULL DEFAULT '{}',
+    createdAt INTEGER NOT NULL, updatedAt INTEGER NOT NULL,
+    FOREIGN KEY (project, itemId) REFERENCES items(project, id))`,
+  "CREATE INDEX tasks_project ON tasks(project)",
+  `CREATE TABLE events (
+    seq INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER NOT NULL,
+    actor TEXT NOT NULL, project TEXT NOT NULL,
+    target TEXT NOT NULL,
+    kind TEXT NOT NULL, text TEXT NOT NULL DEFAULT '', data TEXT NOT NULL DEFAULT '{}',
+    dedupKey TEXT UNIQUE)`,
+  "CREATE INDEX events_project_target ON events(project, target, seq)",
+  "CREATE TRIGGER events_no_update BEFORE UPDATE ON events BEGIN SELECT RAISE(ABORT, 'ledger events are append-only'); END",
+  "CREATE TRIGGER events_no_delete BEFORE DELETE ON events BEGIN SELECT RAISE(ABORT, 'ledger events are append-only'); END",
+  `CREATE TABLE meta (
+    project TEXT NOT NULL, key TEXT NOT NULL,
+    value TEXT NOT NULL, PRIMARY KEY (project, key))`,
+];
 
-/** 下标 i 把库从版本 i 升到 i+1 */
-const MIGRATIONS: string[] = [SCHEMA_V1];
+/**
+ * 「待你处理」（docs 13 §4.2）：唯一由 bridge 写的表（ledger-asks.ts）；阶段机与 items / tasks 仍只有 CLI 写。
+ * 每条语句单独 prepare().run()：bun 的 db.exec 一次跑多条语句时，运行期错误（CHECK、触发器）会被吞掉，版本号照样往前推。
+ * 建表 / 建索引都带 IF NOT EXISTS，可重跑：分支上提前打开过的库再按合并后的顺序迁移时不会撞「already exists」。
+ * project = "master" 表示大总管发的（它不属于任何项目）；blocking NULL = 自动建的、不知道卡不卡活。
+ */
+const ASKS_STATEMENTS = [
+  `CREATE TABLE IF NOT EXISTS asks (
+  id TEXT PRIMARY KEY, project TEXT NOT NULL, itemId TEXT, taskId TEXT,
+  fromAgent TEXT NOT NULL, fromChannelId TEXT NOT NULL,
+  source TEXT NOT NULL CHECK (source IN ('reply','auq','permission','codex')),
+  kind TEXT NOT NULL CHECK (kind IN ('decide','authorize','owner_action','accept')),
+  blocking INTEGER, urgency TEXT NOT NULL DEFAULT 'normal' CHECK (urgency IN ('normal','urgent')),
+  title TEXT NOT NULL, context TEXT NOT NULL DEFAULT '', body TEXT NOT NULL DEFAULT '',
+  options TEXT NOT NULL DEFAULT '[]', allowText INTEGER NOT NULL DEFAULT 1, kindHint TEXT,
+  chatId TEXT NOT NULL DEFAULT '', threadId TEXT, discordMessageIds TEXT NOT NULL DEFAULT '[]',
+  expiresAt INTEGER NOT NULL,
+  state TEXT NOT NULL CHECK (state IN ('open','answered','expired','cancelled')),
+  answer TEXT, outboxMessageId TEXT, extra TEXT NOT NULL DEFAULT '{}',
+  createdAt INTEGER NOT NULL, updatedAt INTEGER NOT NULL)`,
+  "CREATE INDEX IF NOT EXISTS asks_state_project ON asks(state, project)",
+  "CREATE INDEX IF NOT EXISTS asks_from_state ON asks(fromAgent, state)",
+];
+
+function migrateAsks(db: Database): void {
+  for (const sql of ASKS_STATEMENTS) db.prepare(sql).run();
+}
+
+/**
+ * 依赖边 + 负责人类型（T8h）。when / from / to 是 SQL 关键字，列名用 cond / fromTask / toTask，行映射成 when / from / to。
+ * 旧任务有 agent 的回填成 assigneeKind=agent；两端都要是已有任务、不许自环，环与同项目在写入层判（ledger-deps-write.ts）。
+ * 每一步都可重跑（PM 定的迁移规矩）：版本号撞过、表或列已在时照样走通。SQLite 的 ADD COLUMN 没有 IF NOT EXISTS，先查列再加。
+ */
+function migrateDeps(db: Database): void {
+  const cols = new Set((db.prepare("PRAGMA table_info(tasks)").all() as { name: string }[]).map((c) => c.name));
+  // 一条语句一次 prepare().run()：bun 的多语句 exec 会吞掉运行期错误（CHECK、触发器 ABORT），版本号却照样往前推
+  const run = (sql: string) => db.prepare(sql).run();
+  if (!cols.has("assigneeKind")) run("ALTER TABLE tasks ADD COLUMN assigneeKind TEXT CHECK (assigneeKind IN ('agent','human','peer_agent'))");
+  if (!cols.has("assignee")) run("ALTER TABLE tasks ADD COLUMN assignee TEXT");
+  run("UPDATE tasks SET assigneeKind = 'agent', assignee = agent WHERE assigneeKind IS NULL AND agent IS NOT NULL AND agent != ''");
+  run(`CREATE TABLE IF NOT EXISTS task_deps (
+  project TEXT NOT NULL,
+  fromTask TEXT NOT NULL REFERENCES tasks(id), toTask TEXT NOT NULL REFERENCES tasks(id),
+  kind TEXT NOT NULL CHECK (kind IN ('blocks','branch')),
+  cond TEXT NOT NULL DEFAULT '',
+  state TEXT CHECK (state IN ('waiting','active','done')),
+  rev INTEGER NOT NULL DEFAULT 1, createdBy TEXT NOT NULL,
+  createdAt INTEGER NOT NULL, updatedAt INTEGER NOT NULL,
+  PRIMARY KEY (fromTask, toTask), CHECK (fromTask <> toTask))`);
+  run("CREATE INDEX IF NOT EXISTS task_deps_to ON task_deps(toTask)");
+  run("CREATE INDEX IF NOT EXISTS task_deps_project ON task_deps(project)");
+}
+
+/** 一步迁移：一组单条 SQL（逐条 prepare().run()），或要先查现状的函数（如加列）。别写成一段多语句字符串交给 exec */
+type Migration = readonly string[] | ((db: Database) => void);
+/** 下标 i 把库从版本 i 升到 i+1；新迁移只往末尾追加（并行分支后合的一方排到后面即可，常量都由下标算） */
+export const LEDGER_MIGRATIONS: readonly Migration[] = [SCHEMA_V1, migrateAsks, migrateDeps, SCHEMA_AUDIT];
+const MIGRATIONS = LEDGER_MIGRATIONS;
+/** PRAGMA user_version 的最新值 */
+export const LEDGER_SCHEMA_VERSION = MIGRATIONS.length;
+/** 建出 audit_findings 的那一步之后的版本号（单测拿它 - 1 造「巡检之前」的库） */
+export const AUDIT_SCHEMA_VERSION = MIGRATIONS.indexOf(SCHEMA_AUDIT) + 1;
 
 function isBusy(e: unknown): boolean {
   return String((e as { code?: unknown })?.code ?? "").startsWith("SQLITE_BUSY");
@@ -117,6 +179,7 @@ export function openLedger(path: string = LEDGER_PATH): Database {
       db.exec(`PRAGMA busy_timeout = ${BUSY_TIMEOUT_MS}`);
       db.exec("PRAGMA foreign_keys = ON");
       migrate(db);
+      reconcileAssignees(db);
     });
   } catch (e) {
     db.close();
@@ -124,6 +187,22 @@ export function openLedger(path: string = LEDGER_PATH): Database {
   }
   cache.set(path, db);
   return db;
+}
+
+/** 与 agent 列对不上的行：agent 有值却不是 kind=agent 且同值；agent 空了 kind 却还是 agent */
+const ASSIGNEE_DRIFT = `(agent IS NOT NULL AND agent != '' AND (assigneeKind IS NOT 'agent' OR assignee IS NOT agent))
+  OR ((agent IS NULL OR agent = '') AND assigneeKind = 'agent')`;
+
+/**
+ * 不认识负责人列的旧代码（回滚、旧分支的 CLI）只改 agent 列，迁移时的回填不会再跑：每次打开按 agent 列纠正，幂等。
+ * 新代码写的行永远满足「kind=agent ⇔ agent = assignee」，对不上就说明 agent 是后写的，以它为准；先只读查，没有就不拿写锁。
+ */
+function reconcileAssignees(db: Database): void {
+  if (!db.prepare(`SELECT 1 FROM tasks WHERE ${ASSIGNEE_DRIFT} LIMIT 1`).get()) return;
+  db.transaction(() => {
+    db.prepare(`UPDATE tasks SET assigneeKind = 'agent', assignee = agent WHERE agent IS NOT NULL AND agent != '' AND (${ASSIGNEE_DRIFT})`).run();
+    db.prepare(`UPDATE tasks SET assigneeKind = NULL, assignee = NULL WHERE ${ASSIGNEE_DRIFT}`).run();
+  }).immediate();
 }
 
 export function closeLedger(path: string = LEDGER_PATH): void {
@@ -135,15 +214,65 @@ export function schemaVersion(db: Database): number {
   return (db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version;
 }
 
-/** IMMEDIATE 事务里先重读版本：两个进程同时首次打开时，后到的看到已迁移就什么都不做 */
+/** 迁移完必须在的列（表由 LEDGER_TABLES 核）：新迁移加了列就补在这里 */
+const REQUIRED_COLUMNS: Record<string, readonly string[]> = {
+  tasks: ["assigneeKind", "assignee"],
+  task_deps: ["project", "fromTask", "toTask", "kind", "cond", "state", "rev", "createdBy"],
+  asks: ["id", "project", "fromAgent", "source", "kind", "state", "options", "answer", "expiresAt", "extra"],
+  audit_findings: ["key", "project", "rule", "resolvedAt", "notify", "notifiedAt", "queuedAs", "changedAt"],
+};
+/** 迁移完必须在的索引，按所属表：同名索引先建在别的表上时 CREATE INDEX IF NOT EXISTS 会静默跳过，只核名字查不出来 */
+const REQUIRED_INDEXES: Record<string, readonly string[]> = {
+  asks: ["asks_state_project", "asks_from_state"],
+  task_deps: ["task_deps_to", "task_deps_project"],
+  audit_findings: ["audit_findings_open", "audit_findings_changed"],
+};
+
+/** 按 LEDGER_TABLES、REQUIRED_COLUMNS、REQUIRED_INDEXES 找缺的表 / 列 / 索引；空数组 = 完整 */
+function missingSchema(db: Database): string[] {
+  const rows = db.prepare("SELECT type, name, tbl_name FROM sqlite_master WHERE type IN ('table', 'index')").all() as { type: string; name: string; tbl_name: string }[];
+  const tables = new Set(rows.filter((r) => r.type === "table").map((r) => r.name));
+  const indexes = new Set(rows.filter((r) => r.type === "index").map((r) => `${r.tbl_name}.${r.name}`));
+  const missing: string[] = LEDGER_TABLES.filter((t) => !tables.has(t));
+  for (const [table, names] of Object.entries(REQUIRED_INDEXES)) missing.push(...names.filter((n) => !indexes.has(`${table}.${n}`)).map((n) => `index ${table}.${n}`));
+  for (const [table, cols] of Object.entries(REQUIRED_COLUMNS)) {
+    if (!tables.has(table)) continue;
+    const have = new Set((db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[]).map((c) => c.name));
+    missing.push(...cols.filter((c) => !have.has(c)).map((c) => `${table}.${c}`));
+  }
+  return missing;
+}
+
+function runStep(db: Database, step: Migration): void {
+  if (typeof step === "function") step(db);
+  else for (const sql of step) db.prepare(sql).run();
+}
+
+/**
+ * IMMEDIATE 事务里先重读版本：两个进程同时首次打开时，后到的看到已迁移就什么都不做。
+ * 版本号到了但表 / 列缺（并行分支的代码先打开过库、按下标迁移跳过了别的分支的步骤）：从第 2 步起全部重跑一遍补齐——
+ * 所以第 1 步之后的每一步都必须可重跑（IF NOT EXISTS、加列先查列）。补完仍缺就报错，不带着残缺的库往下写。
+ */
 function migrate(db: Database): void {
-  if (schemaVersion(db) >= MIGRATIONS.length) return;
-  db.transaction(() => {
-    for (let v = schemaVersion(db); v < MIGRATIONS.length; v++) {
-      db.exec(MIGRATIONS[v]);
-      db.exec(`PRAGMA user_version = ${v + 1}`);
-    }
-  }).immediate();
+  const behind = schemaVersion(db) < MIGRATIONS.length;
+  if (!behind && missingSchema(db).length === 0) return;
+  // 报错里的版本号要是回滚后的：事务里的 user_version 已被推过，库文件里还是进事务时读到的那个
+  let from = schemaVersion(db);
+  try {
+    db.transaction(() => {
+      from = schemaVersion(db);
+      for (let v = from; v < MIGRATIONS.length; v++) {
+        runStep(db, MIGRATIONS[v]);
+        db.exec(`PRAGMA user_version = ${v + 1}`);
+      }
+      if (from > 0 && missingSchema(db).length) for (const step of MIGRATIONS.slice(1)) runStep(db, step);
+      const still = missingSchema(db);
+      if (still.length) throw new Error(`迁移后仍缺：${still.join(", ")}`);
+    }).immediate();
+  } catch (e) {
+    if (isBusy(e)) throw e;
+    throw new Error(`台账库迁移失败（${(e as Error).message}），已回滚，库仍是 v${from}`, { cause: e });
+  }
 }
 
 // ── 行映射 ──
@@ -160,8 +289,17 @@ export function toItem(r: Row): LedgerItem {
   return { ...(r as unknown as LedgerItem), extra: parseJson(r.extra) };
 }
 
+/** 旧版本库（还没迁移）读出来没有 assignee 列，补成 null，接口形状不随库版本变 */
 export function toTask(r: Row): LedgerTask {
-  return { ...(r as unknown as LedgerTask), extra: parseJson(r.extra) };
+  const assigneeKind = (r.assigneeKind ?? null) as AssigneeKind | null;
+  return { ...(r as unknown as LedgerTask), assigneeKind, assignee: (r.assignee ?? null) as string | null, extra: parseJson(r.extra) };
+}
+
+export function toDep(r: Row): LedgerDep {
+  return {
+    project: String(r.project), from: String(r.fromTask), to: String(r.toTask), kind: r.kind as DepKind, when: String(r.cond),
+    state: (r.state ?? null) as DepState | null, rev: Number(r.rev), createdBy: String(r.createdBy), createdAt: Number(r.createdAt), updatedAt: Number(r.updatedAt),
+  };
 }
 
 export function toEvent(r: Row): LedgerEvent {
@@ -186,6 +324,20 @@ export function getTask(db: Database, id: string): LedgerTask | null {
 
 export function listTasks(db: Database, project: string): LedgerTask[] {
   return (db.prepare("SELECT * FROM tasks WHERE project = ? ORDER BY id").all(project) as Row[]).map(toTask);
+}
+
+export function getDep(db: Database, from: string, to: string): LedgerDep | null {
+  const r = db.prepare("SELECT * FROM task_deps WHERE fromTask = ? AND toTask = ?").get(from, to) as Row | null;
+  return r ? toDep(r) : null;
+}
+
+/**
+ * 项目的全部依赖边；库里还没有 task_deps（bridge 先于 CLI 升级，或别的分支的代码先占了版本号）时为空。
+ * 看表在不在而不是版本号：只读连接没法补齐，版本号到了表却不在时按版本判会直接 no such table。
+ */
+export function listDeps(db: Database, project: string): LedgerDep[] {
+  if (!db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'task_deps'").get()) return [];
+  return (db.prepare("SELECT * FROM task_deps WHERE project = ? ORDER BY fromTask, toTask").all(project) as Row[]).map(toDep);
 }
 
 export interface EventQuery {
@@ -222,15 +374,6 @@ export interface QueueFrozen {
   since: number | null;
 }
 
-/** 编排班子（docs 10-ledger「附：编排班子」）：开了才有事件路由；dispatcher 为 null = 交付直接通知 PM。只有 owner 能设 */
-export interface TeamConfig {
-  dispatcher: string | null;
-  /** 巡检开关，T29 读 */
-  audit: boolean;
-  /** 开班子那条 meta 事件的 seq：路由只管它之后的事件，开班子前的历史不补发 */
-  sinceSeq: number;
-}
-
 export interface LedgerMeta {
   /** 项目 PM 名单；只有 owner 能设 */
   pms: string[];
@@ -238,13 +381,6 @@ export interface LedgerMeta {
   docsDir: string | null;
   queueFrozen: QueueFrozen;
   team: TeamConfig | null;
-}
-
-function toTeam(v: unknown): TeamConfig | null {
-  if (!v || typeof v !== "object") return null;
-  const t = v as Record<string, unknown>;
-  if (typeof t.sinceSeq !== "number") return null;
-  return { dispatcher: typeof t.dispatcher === "string" && t.dispatcher ? t.dispatcher : null, audit: t.audit !== false, sinceSeq: t.sinceSeq };
 }
 
 export function getMeta(db: Database, project: string): LedgerMeta {

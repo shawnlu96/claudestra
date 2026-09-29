@@ -16,7 +16,7 @@
 import { nextAfterReview, pmOf, type SpecPolicy } from "./ledger-handler.js";
 import { pathLike, pathQuote, quoteExternal, refLike } from "./quote-text.js";
 import type { LedgerEvent, LedgerTask, Stage } from "./ledger-stages.js";
-import type { TeamConfig } from "./ledger-store.js";
+import type { TeamConfig } from "./ledger-team-config.js";
 
 /** 同一任务审到第几轮还不通过就自动升级给 PM（07c 第 1 节） */
 const HARD_ROUND = 3;
@@ -98,7 +98,7 @@ const PM_MOVES: Partial<Record<Stage, string>> = { merge: "阶段已推到 merge
 const NEXT_WORD = {
   adversarial: "常规轮通过，下一轮：对抗式",
   regular: "判了通过但还有 P0 / P1，下一轮：常规复验",
-  unknown: "判了通过，但台账说不清审查走没走完（读不到规格卡，或这轮没有派审记录）：按规格卡核对是否还欠对抗式，不欠就交 PM 推阶段",
+  unknown: "判了通过，但台账说不清审查走没走完（读不出规格卡的审查策略，或这一轮、这个 head 没有派审记录）：按规格卡核对是否还欠对抗式，欠就 ledger dispatch 派，不欠交 PM 定",
 } as const;
 
 type Draft = Omit<RouteNotice, "messageId" | "seq" | "project" | "taskId">;

@@ -26,8 +26,16 @@ export function specPathFor(task: Pick<LedgerTask, "id" | "spec">, docsDir: stri
   return p && existsSync(p) ? p : null;
 }
 
-/** 规格卡「审查」那一行：string = 写了；null = 规格卡在但没写；undefined = 找不到规格卡（不知道） */
+/**
+ * 规格卡正文的审查策略：string = 写了「审查：」；null = 没写、也没提对抗式；
+ * undefined = 不知道（没有正文，或提到「对抗」却读不出「审查：」——不能当成不要对抗式）
+ */
+export function policyFromSpec(text: string | null): string | null | undefined {
+  if (text === null) return undefined;
+  return reviewPolicy(text) ?? (text.includes("对抗") ? undefined : null);
+}
+
+/** 任务规格卡的审查策略（policyFromSpec）；找不到规格卡 = undefined */
 export function specPolicyOf(task: Pick<LedgerTask, "id" | "spec">, docsDir: string | null): string | null | undefined {
-  const text = readTextSoft(specPathFor(task, docsDir));
-  return text === null ? undefined : reviewPolicy(text);
+  return policyFromSpec(readTextSoft(specPathFor(task, docsDir)));
 }

@@ -40,7 +40,7 @@ Bridge  (bun, 默认 127.0.0.1:3847)     ← 你唯一的后端
 - 所有 `/api/v1/*` 端点走 Bearer token：`Authorization: Bearer <secret>`。
 - Token 由 CLI 签发（目前没有管理 UI）：
   ```bash
-  bun src/manager.ts token-add web-ui --agents '*'        # 全部非 master agent
+  bun src/manager.ts token-add my-client --agents '*'     # 全部非 master agent（web-ui 是保留名，签不出来）
   bun src/manager.ts token-add limited --agents alpha,bravo
   bun src/manager.ts token-list / token-revoke <name>
   ```

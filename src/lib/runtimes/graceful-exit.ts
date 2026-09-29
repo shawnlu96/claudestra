@@ -12,10 +12,13 @@
 import { isAtShell } from "../tmux-helper.js";
 import type { ManagedRuntimeAdapter, WindowOps } from "./types.js";
 
-/** 默认清场：interruptKeys 连发 3 轮确保停下当前操作，再一次守卫 Esc 清菜单 / 弹窗 */
-async function defaultExitPrelude(win: WindowOps, adapter: ManagedRuntimeAdapter): Promise<"at-shell" | "continue"> {
+/**
+ * 默认清场（CC / Pi）：C-c 连发 3 轮确保停下当前操作（连后台 agent 一起停，退出本来就要），再一次守卫 Esc 清菜单 / 弹窗。
+ * 不用 interruptKeys：CC 的打断键是 Esc，连按会打开 Rewind。
+ */
+async function defaultExitPrelude(win: WindowOps): Promise<"at-shell" | "continue"> {
   for (let i = 0; i < 3; i++) {
-    for (const key of adapter.control.interruptKeys) await win.sendKey(key);
+    await win.sendKey("C-c");
     await win.sleep(800);
     const pane = await win.capture(5);
     if (isAtShell(pane)) return "at-shell";
@@ -30,7 +33,7 @@ async function defaultExitPrelude(win: WindowOps, adapter: ManagedRuntimeAdapter
 
 export async function gracefulExitWindow(win: WindowOps, adapter: ManagedRuntimeAdapter): Promise<boolean> {
   // 阶段 1+2: 清场（适配器可接管）
-  const prelude = adapter.exitPrelude ? await adapter.exitPrelude(win) : await defaultExitPrelude(win, adapter);
+  const prelude = adapter.exitPrelude ? await adapter.exitPrelude(win) : await defaultExitPrelude(win);
   if (prelude === "at-shell") return true;
 
   // 阶段 3: 发退出命令

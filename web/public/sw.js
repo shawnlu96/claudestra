@@ -2,7 +2,7 @@
  * Claudestra Web Push Service Worker。
  * - push：无条件展示通知（iOS/Safari 对「push 到达却不展示」有惩罚，静默几次后丢弃该订阅的后续推送；每条独立 tag）；
  *   dismiss 型只清同 agent 的旧通知；badge 字段同步 App 图标角标。
- * - notificationclick：聚焦已有窗口（postMessage 原地切会话），没有则新开 /chat。点通知 = 已读：回执给**发通知的那台机器**
+ * - notificationclick：聚焦已有窗口（postMessage 原地切会话；「待你处理」推送则打开抽屉），没有则新开 /chat（?ask= 由页面打开抽屉）。点通知 = 已读：回执给**发通知的那台机器**
  *   （payload 里的 fp；老 payload 没有就用 IndexedDB 里记的当前机器）——凭据是 HttpOnly cookie，SW 的 fetch 自动带上。
  */
 self.addEventListener("install", () => self.skipWaiting());
@@ -91,7 +91,7 @@ self.addEventListener("push", (event) => {
       tag: payload.tag,
       icon: "/icons/icon-192.png",
       badge: "/icons/icon-192.png",
-      data: { url: payload.url, agent: payload.agent, ts: payload.ts || Date.now(), fp: payload.fp || "" },
+      data: { url: payload.url, agent: payload.agent, ts: payload.ts || Date.now(), fp: payload.fp || "", ask: payload.ask || "" },
     }),
   );
 });
@@ -101,6 +101,7 @@ self.addEventListener("notificationclick", (event) => {
   const data = event.notification.data || {};
   const url = data.url || "/chat";
   const agent = typeof data.agent === "string" ? data.agent : "";
+  const ask = typeof data.ask === "string" ? data.ask : ""; // 「待你处理」推送：已有窗口直接打开抽屉定位这张卡
   if (agent) event.waitUntil(markRead(agent, data.fp));
   event.waitUntil(
     (async () => {
@@ -109,7 +110,8 @@ self.addEventListener("notificationclick", (event) => {
         if ("focus" in w) {
           await w.focus();
           // 已有窗口：postMessage 让页面原地切到该 agent 会话（比 navigate 整页刷新顺滑）
-          if (agent) w.postMessage({ type: "cstra-open-agent", agent, fp: data.fp || "" });
+          if (ask) w.postMessage({ type: "cstra-open-ask", ask, fp: data.fp || "" });
+          else if (agent) w.postMessage({ type: "cstra-open-agent", agent, fp: data.fp || "" });
           return;
         }
       }

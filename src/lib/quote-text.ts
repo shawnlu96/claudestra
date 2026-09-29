@@ -8,7 +8,13 @@
 const MAX_QUOTE = 300;
 const MAX_PATH = 400;
 
-/** 单行、截断、包进「」；原文里的「」换成『』关不掉引号，【】换成〔〕冒充不了判定词 */
+/** 看着像「」【】的同形字（半角 ｢｣、竖排 ﹁﹂﹃﹄、白框 〖〗、竖排 ︻︼︗︘）一并换掉，不然肉眼看是引号提前关上了 */
+const OPEN_QUOTE = /[「｢﹁﹃]/g;
+const CLOSE_QUOTE = /[」｣﹂﹄]/g;
+const OPEN_LENS = /[【〖︻︗]/g;
+const CLOSE_LENS = /[】〗︼︘]/g;
+
+/** 单行、截断、包进「」；原文里的「」（及同形字）换成『』关不掉引号，【】（及同形字）换成〔〕冒充不了判定词 */
 export function quoteExternal(s: string, max = MAX_QUOTE): string {
   const flat = s
     .replace(/\p{Cf}+/gu, "")
@@ -16,7 +22,7 @@ export function quoteExternal(s: string, max = MAX_QUOTE): string {
     .replace(/\s+/g, " ")
     .trim();
   const cut = flat.length > max ? `${flat.slice(0, max)}…` : flat;
-  return `「${cut.replace(/「/g, "『").replace(/」/g, "』").replace(/【/g, "〔").replace(/】/g, "〕")}」`;
+  return `「${cut.replace(OPEN_QUOTE, "『").replace(CLOSE_QUOTE, "』").replace(OPEN_LENS, "〔").replace(CLOSE_LENS, "〕")}」`;
 }
 
 /** 分支名 / PR 号这类引用：只认常见字符，别的不进通知和 prompt */

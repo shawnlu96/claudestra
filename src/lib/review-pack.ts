@@ -66,10 +66,17 @@ export function specSection(md: string, keyword: string): string[] {
   return out;
 }
 
-/** 规格卡开头「- 审查：…」那一行的内容；没有为 null */
+/**
+ * 规格卡里第一处「审查：…」的内容（到 ｜ 为止，｜ 后面才提对抗式时到行尾）；没有为 null。不要求在行首：老卡常写成
+ * 「- runtime：…。审查：…」「｜审查：…」「**审查**：…」。前一个字是字母 / 汉字的不算（「对抗式审查：」不是审查策略）。
+ */
 export function reviewPolicy(md: string | null): string | null {
-  const m = md?.match(/^\s*[-*]\s*审查[：:]\s*(.+)$/m);
-  return m ? m[1].trim() : null;
+  const m = md?.match(/(?<![\p{L}\p{N}])\**审查\**\s*[：:]\s*\**\s*([^\n]+)/u);
+  if (!m) return null;
+  // 到 ｜ 为止；但 ｜ 前没提对抗式、同一行后面提了（「审查：常规一轮｜对抗式：最后一轮」），整行都算，不能读成只要常规
+  const cut = m[1].split(/[｜|]/)[0];
+  const v = (!cut.includes("对抗") && m[1].includes("对抗") ? m[1] : cut).replace(/\*+/g, "").trim();
+  return v ? v : null;
 }
 
 /**

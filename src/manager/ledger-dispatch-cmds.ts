@@ -1,7 +1,7 @@
 /**
  * 编排班子的确定性步骤（docs 10-ledger「附：编排班子」）：调度助理 / PM 不再手写审查员 prompt、不再手拼记账命令。
  *   review-pack <T>  只读：按规格卡、交付事件、上一轮结论生成审查员 prompt
- *   dispatch <T>     核对 head → 记 dispatch 事件 → 输出同一份审查包（同一轮重复调用幂等，返回原事件）
+ *   dispatch <T>     核对 head → 记 dispatch 事件 → 输出同一份审查包（什么都没变时重复调用幂等，返回原事件）
  *   escalate <T|->   升级给 PM / owner；bridge 的事件路由据此通知 PM
  * 规格卡与上一轮 md 只读、找不到就在 prompt 里注明，不因此失败；head 对不上才拒绝派审（审错版本比不审更糟）。
  */
@@ -9,7 +9,7 @@ import { join } from "node:path";
 import { resolveBridgePort } from "../lib/bridge-url.js";
 import { repoEnvVar } from "../lib/env-file.js";
 import type { LedgerEvent, LedgerTask } from "../lib/ledger-stages.js";
-import { getMeta, LedgerError, listEvents } from "../lib/ledger-store.js";
+import { getEventByDedup, getMeta, LedgerError, listEvents } from "../lib/ledger-store.js";
 import { appendEvent } from "../lib/ledger-write.js";
 import { STATE_DIR, statePath, TMUX_SOCK } from "../lib/paths.js";
 import { readTextSoft, specPathFor } from "../lib/task-spec.js";
@@ -56,6 +56,9 @@ interface PackPlan {
   adversarial: boolean;
   worktree: string | null;
   deliverEvent: LedgerEvent | undefined;
+  /** 最后一条 review 的 seq（没有 = 0）和最后一条 dispatch，派审幂等键用 */
+  lastReviewSeq: number;
+  lastDispatch: LedgerEvent | undefined;
   /** 规格卡「审查」那一行，记进 dispatch 事件备查（路由 / currentHandler 自己读规格卡，不依赖它） */
   policy: string | null;
   pack: ReviewPack & { subagentType: string };
@@ -92,7 +95,8 @@ async function plan(c: LedgerCli): Promise<PackPlan> {
   });
   // subagentType：编排班子内置的审查员 agent（启动时经 --agents 注入，lib/team-roles.ts）
   const subagentType = REVIEWER_AGENT[adversarial ? "adversarial" : "regular"];
-  return { task, round, adversarial, worktree, deliverEvent, policy, pack: { ...pack, subagentType } };
+  const lastDispatch = events.findLast((e) => e.kind === "dispatch");
+  return { task, round, adversarial, worktree, deliverEvent, lastReviewSeq: lastEvent?.seq ?? 0, lastDispatch, policy, pack: { ...pack, subagentType } };
 }
 
 async function reviewPack(c: LedgerCli): Promise<Result> {
@@ -112,14 +116,26 @@ function checkHead(p: PackPlan, head: (dir: string) => string | null): string | 
   return null;
 }
 
+/**
+ * 派审幂等键：只有「什么都没变」时重跑才算重复。判定只认最近一条 dispatch（lib/ledger-handler.ts dispatchKindFor），
+ * 所以键里带 head、最后一次交付和最后一条 review：交付后、审完后再派都是新的一次；命中的旧事件已经不是最近一条
+ * dispatch（中间派过别的种类）也新写一条——拿回旧的，下一条结论会被算到中间那次派审头上（tests/ledger-merge-gate.test.ts）。
+ * 最近一条就是同一键（含续派加的 :s 后缀）时照旧按重复返回它。
+ */
+function dispatchKey(c: LedgerCli, p: PackPlan, reviewer: string): string {
+  const key = `dispatch:${p.task.id}:r${p.round}:${reviewer}:${p.task.headSHA ?? "-"}:d${p.deliverEvent?.seq ?? 0}:v${p.lastReviewSeq}`;
+  const last = p.lastDispatch;
+  if (last?.dedupKey && (last.dedupKey === key || last.dedupKey.startsWith(`${key}:s`))) return last.dedupKey;
+  return getEventByDedup(c.db, key) ? `${key}:s${last?.seq ?? 0}` : key;
+}
+
 async function dispatch(c: LedgerCli): Promise<Result> {
   const p = await plan(c);
   c.requireManager(p.task.project, "派审查员");
   if (p.task.stage !== "review") throw new LedgerError("invalid", `任务 ${p.task.id} 在 ${p.task.stage}，不在 review，不派审查员`, { stage: p.task.stage });
   const headNote = checkHead(p, c.deps.gitHead ?? gitHead);
   const reviewer = p.adversarial ? "adversarial" : "regular";
-  // 去重键带 head：同一轮重新交付了新 head 再派，是新的一次派审，不能拿回带旧 head 的那条
-  const ctx = { ...c.ctx(), dedupKey: c.p.flags.dedup ?? `dispatch:${p.task.id}:r${p.round}:${reviewer}:${p.task.headSHA ?? "-"}` };
+  const ctx = { ...c.ctx(), dedupKey: c.p.flags.dedup ?? dispatchKey(c, p, reviewer) };
   // policy：派审当时规格卡的审查策略，备查；路由 / currentHandler 判断还要不要审时读的是规格卡本身
   const data = { reviewer, round: p.round, head: p.task.headSHA, path: p.pack.reviewPath, policy: p.policy };
   const r = appendEvent(c.db, ctx, { project: p.task.project, target: p.task.id, kind: "dispatch", text: p.pack.description, data });

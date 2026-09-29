@@ -6,7 +6,7 @@ import { afterAll, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { buildSkillLibrary, markShadowing, skillRoots, type LibrarySkill } from "../src/lib/skill-library.js";
+import { buildSkillLibrary, markShadowing, onlyProjects, skillRoots, type LibrarySkill } from "../src/lib/skill-library.js";
 
 const home = mkdtempSync(join(tmpdir(), "skill-lib-"));
 afterAll(() => rmSync(home, { recursive: true, force: true }));
@@ -36,6 +36,19 @@ describe("skillRoots", () => {
     expect(brief.filter((b) => b === "claude-code:project:/w/a/.claude/skills")).toHaveLength(1);
     expect(brief).toContain("pi:project:/w/b/.agents/skills");
     expect(brief.some((b) => b.startsWith("claude-code:project:/h/"))).toBe(false);
+  });
+});
+
+describe("onlyProjects（按凭据 scope 裁剪技能库）", () => {
+  test("scope 外 agent 的项目技能 / 项目搜索根不报；个人、插件、同步原样保留", () => {
+    const items = [
+      { scope: "personal", dir: "/h/.claude/skills/a" },
+      { scope: "project", project: "/w/mine", dir: "/w/mine/.claude/skills/b" },
+      { scope: "project", project: "/w/other", dir: "/w/other/.claude/skills/c" },
+      { scope: "project", dir: "/w/?/.claude/skills/d" },
+      { scope: "plugin", dir: "/p/skills" },
+    ];
+    expect(onlyProjects(items, new Set(["/w/mine"])).map((x) => x.dir)).toEqual(["/h/.claude/skills/a", "/w/mine/.claude/skills/b", "/p/skills"]);
   });
 });
 

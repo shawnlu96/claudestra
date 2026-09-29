@@ -6,6 +6,7 @@
  * 再跑 kill（或 repair --apply）都从 ②重走，每一步可重复。删频道因 bridge 不在失败时留下
  * pending{pid:0, left:["channel"]}，别让一个在世的频道被当成已删（tests/resumable-ops.test.ts）。
  */
+import { removeAgentSettings } from "../lib/agent-settings.js";
 import { isPendingLive, newPending } from "../lib/pending-ops.js";
 import { isMasterAgent } from "../lib/registry.js";
 import { normalizeName, output, type Registry } from "./core.js";
@@ -135,6 +136,7 @@ export async function runRemove(name: string, deps: OpsDeps, opts: KillOptions =
   dropCaseVariants(fresh, name);
   (await import("./team.js")).repointParentRefs(fresh, name); // 清掉子 agent 指向它的 parent，免得同名重建被旧孤儿认作父
   await deps.saveRegistry(fresh);
+  removeAgentSettings(name); // 按 agent 的技能开关随永久删除一起清掉（kill 只是停止，保留）
   await deps.rescan("remove", name);
   if (channelId) await deps.agentCleanup(channelId, name);
   return { ok: true, agent: name, message: `${name} 已永久移除（会话归档保留）。` };

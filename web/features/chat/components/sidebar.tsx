@@ -10,15 +10,14 @@ import { SidebarBanners } from "./sidebar-banners";
 import { StatsPanel } from "./stats-panel";
 import { useT, getLang } from "@/lib/i18n";
 import { ChatHitRow, type ChatSearchHit } from "./search-hits";
-import { UnmanagedSessions } from "./unmanaged-sessions";
-import { ArchivedSessions } from "./archived-sessions";
+import { SidebarExtraGroups } from "./sidebar-extra-groups";
 import { buildSidebarEntries, buildTeams, entryMembers, filterAndRankWorkers, splitDormant, splitMasterKids, type SidebarEntry, type TeamNode } from "../sidebar-entries";
 import { MasterTeam, TeamGroup, type RowSlots } from "./team-group";
 import { usePersistedSet } from "../use-persisted-set";
 import { AgentRow } from "./agent-row";
 import { AgentMenu } from "./agent-menu";
 import { ProjectMenu } from "./project-menu";
-import { PeersButton } from "./peers-button";
+import { SidebarAdminButtons } from "./sidebar-admin-buttons";
 import { MachineSwitcher } from "../../machines/machine-switcher";
 import { useVersionInfo } from "../../machines/use-version";
 import { searchHistory } from "@/lib/api/chat";
@@ -28,6 +27,7 @@ import type { AgentSession } from "../type";
 import { rowOpenIntent } from "../open-intent";
 import { swipeReg } from "./agent-row-swipe";
 import { MasterIcon } from "./master-icon";
+import { SidebarMediaButton } from "../../media/media-button";
 
 /**
  * 会话列表面板。移动端是全屏「菜单」（w-full，横滑容器的基础页）；桌面端定宽常驻左栏（sm:w-64）。
@@ -218,9 +218,7 @@ export function Sidebar({ onSelect }: { onSelect: () => void }) {
         className="absolute inset-y-0 -right-[2px] z-10 hidden w-[5px] cursor-col-resize hover:bg-primary/30 active:bg-primary/40 sm:block"
         onPointerDown={startResize}
       />
-      {/* 安全区顶部由面板自己垫（bg=base-200，条带与列表同色无缝）。
-          刷新按钮已移除（列表由 15s 轮询 + 回前台重连自动感知 roster 变化）；
-          新建会话统一走大总管对话，Web 侧不再单独提供入口。 */}
+      {/* 安全区顶部由面板自己垫（bg=base-200，条带与列表同色无缝）；列表靠轮询 + 回前台重连自动刷新，没有刷新按钮 */}
       <div
         className="px-4 pb-2"
         style={{ paddingTop: "calc(env(safe-area-inset-top) + 0.75rem)" }}
@@ -229,53 +227,15 @@ export function Sidebar({ onSelect }: { onSelect: () => void }) {
           <span className="font-semibold">{t("会话")}</span>
           {/* 多机切换（中继模式 ≥2 台才出现）：同一个 store 换数据源——断流、清空、从新机器重拉（chat-store.resetForMachine） */}
           <span className="ml-auto"><MachineSwitcher onSwitched={() => store.resetForMachine()} /></span>
-          {/* v2.21+ 项目管理入口 */}
-          <button
-            className="flex h-7 items-center justify-center rounded-lg px-1.5 text-base-content/50 transition-colors hover:bg-base-300 hover:text-base-content"
-            title={t("项目管理")}
-            aria-label={t("项目管理")}
-            onClick={() => setShowProjects(true)}
-          >
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-              <path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z" />
-            </svg>
-          </button>
-          <button
-            className={`flex h-7 items-center justify-center rounded-lg px-1.5 transition-colors ${
-              manage
-                ? "text-primary"
-                : "text-base-content/50 hover:bg-base-300 hover:text-base-content"
-            }`}
-            title={manage ? t("退出多选") : t("多选管理（批量删除）")}
-            aria-label={manage ? t("退出多选") : t("多选管理")}
-            onClick={() => (manage ? exitManage() : setManage(true))}
-          >
-            {manage ? (
-              <span className="text-xs font-medium">{t("完成")}</span>
-            ) : (
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-                <path d="m3 17 2 2 4-4" />
-                <path d="m3 7 2 2 4-4" />
-                <path d="M13 6h8" />
-                <path d="M13 12h8" />
-                <path d="M13 18h8" />
-              </svg>
-            )}
-          </button>
-          <PeersButton onClick={() => setSettingsPage("peers")} />
-          <button
-            className="flex size-7 items-center justify-center rounded-lg text-base-content/50 transition-colors hover:bg-base-300 hover:text-base-content"
-            title={t("用量看板")}
-            aria-label={t("用量看板")}
-            onClick={() => setShowStats(true)}
-          >
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-              <path d="M3 3v16a2 2 0 0 0 2 2h16" />
-              <path d="M7 13v4" />
-              <path d="M12 9v8" />
-              <path d="M17 5v12" />
-            </svg>
-          </button>
+          {/* 项目管理 / 多选删除 / Peer / 用量看板：只给全权设备（sidebar-admin-buttons.tsx） */}
+          <SidebarAdminButtons
+            manage={manage}
+            onProjects={() => setShowProjects(true)}
+            onToggleManage={() => (manage ? exitManage() : setManage(true))}
+            onPeers={() => setSettingsPage("peers")}
+            onStats={() => setShowStats(true)}
+          />
+          <SidebarMediaButton />
           <button
             className="flex size-7 items-center justify-center rounded-lg text-base-content/50 transition-colors hover:bg-base-300 hover:text-base-content"
             title={t("设置")}
@@ -543,15 +503,10 @@ export function Sidebar({ onSelect }: { onSelect: () => void }) {
         </div>
       ) : (
         <>
-          {/* v2.23+ 未纳管会话分区：机器上没纳管的会话（pi-web 起的 Pi 会话、终端手敲的）。
+          {/* 附加分组（联系人 / 未纳管会话 / 归档，sidebar-extra-groups.tsx）。
               放在版本行**之上** —— 版本行是页面收尾元素，功能分区压在它下面很反常
               （视觉审查 P2-5）。样式复用项目组头，不再自创一套。 */}
-          {!manage ? (
-            <>
-              <UnmanagedSessions />
-              <ArchivedSessions />
-            </>
-          ) : null}
+          {!manage ? <SidebarExtraGroups /> : null}
           {/* 底部安全区：max() 取大不叠加——home 条区高度只算一次，不再「env+间距」双层 */}
           <div
             className="border-t border-base-300 px-4 pt-2 text-xs opacity-50"
