@@ -9,7 +9,7 @@ import { isModelLimitHit, paneShowsLowPriority } from "../lib/quota-wall-text.js
 import { windowWallWait } from "../lib/wall-screen.js";
 import { noticeOncePerState } from "../lib/quota-wall-notice.js";
 import { recordMetric } from "../lib/metrics.js";
-import { countsAsWallActivity, emptyWallState, isHumanSender, isWallState, QUOTA_WALL_CLEAR_PATH, QUOTA_WALL_PATH, type WallState } from "../lib/quota-wall.js";
+import { countsAsWallActivity, emptyWallState, gatesAsHuman, isWallState, QUOTA_WALL_CLEAR_PATH, QUOTA_WALL_PATH, type WallState } from "../lib/quota-wall.js";
 import { readRegistryAgents } from "../lib/registry.js";
 import { DEFAULT_RUNTIME } from "../lib/runtimes/index.js";
 import { readJsonStateSync, reportCorrupt, writeJsonAtomicSync } from "../lib/state-file.js";
@@ -93,7 +93,7 @@ function productionWall(b: WallBridgeDeps): QuotaWall {
       return agentMsgMustWait(await probeTurn(cid, agent, b.controlChannelId));
     },
     held: {
-      wallCount: () => b.held.wallCount((e) => isHumanSender(e.from)),
+      wallCount: () => b.held.wallCount(gatesAsHuman),
       queuedFor: (cid) => !!b.held.get(cid)?.some((i) => senderTrigger(i.env.from) !== "stranger"),
       wallChannels: () => b.held.wallChannels(),
       wakers: () => b.held.wallChannels((i) => senderTrigger(i.env.from) !== "stranger"),
@@ -150,7 +150,7 @@ export async function holdAtWallWait(env: Envelope, to: LocalEndpoint, agent: st
   if (stillWanted && !stillWanted()) return { envelope: env, outcome: { kind: "dropped", reason: "已从押后队列撤下" } }; // 别把撤下的押回来（会复活）
   const walled = !!wall?.active();
   console.log(`⏸ 消息押后(${agent} 停在额度菜单 / 撞墙等待，没发任何键): 队列 ${holdNotingStop(b.held, env, to, agent, runtime, walled ? "quota_wall" : undefined)} 条`);
-  if (isHumanSender(env.from) && /^\d+$/.test(to.channelId) && firstNoticeFor(to.channelId, `${kind}:${walled}`, env.meta.messageId)) {
+  if (gatesAsHuman(env) && /^\d+$/.test(to.channelId) && firstNoticeFor(to.channelId, `${kind}:${walled}`, env.meta.messageId)) {
     const what = kind === "menu" ? "停在额度菜单" : kind === "countdown" ? "停在自动续跑倒计时" : "停在撞墙等待画面";
     const when = walled ? "出闸后" : kind === "menu" ? "菜单关掉后" : "它接着跑之后";
     await b.escalate(to.channelId, `⏸ ${agent} ${what}（撞墙等待），bridge 没有发任何键；你的消息先押着，${when}送达。要马上处理请在它的窗口里自己操作。`)
@@ -277,7 +277,7 @@ const humanFlushAt = new Map<string, number>();
  * 每分钟扫描——owner 的「停」要在续跑开始几秒内送到并打断（T24 wf3 delivery-hold-4）。同一频道 5 秒内只触发一次。
  */
 export function flushHumanSoon(b: WallBridgeDeps, cid: string, now: number): void {
-  if (!b.held.get(cid)?.some((i) => isHumanSender(i.env.from)) || now - (humanFlushAt.get(cid) ?? 0) < HUMAN_FLUSH_GAP_MS) return;
+  if (!b.held.get(cid)?.some((i) => gatesAsHuman(i.env)) || now - (humanFlushAt.get(cid) ?? 0) < HUMAN_FLUSH_GAP_MS) return;
   humanFlushAt.set(cid, now);
   b.flush(cid, "wall_activity").catch((e) => console.error(`押着的人发消息补投出错（留在队里，Stop / 扫描再投）: ${(e as Error).message}`));
 }

@@ -8,7 +8,8 @@
  * 动态 import：service 拖着 tmux 与台账，本地 API 其余端点族的单测不该为它付加载代价（同 quota.ts）。
  */
 import { parseFleetAction, parseFleetSelect } from "../../lib/fleet-plan.js";
-import { agentInScope, canRunFleet, type Principal } from "../../lib/principals.js";
+import { agentInScope, canRunFleet, tokenIdOf, type Principal } from "../../lib/principals.js";
+import type { ApiUserEndpoint } from "../router.js";
 import { apiJson, forbidden, INVALID_JSON, invalidJsonBody, readJsonBody } from "../api-respond.js";
 
 export async function handleFleetApi(req: Request, path: string, principal: Principal): Promise<Response | null> {
@@ -29,6 +30,8 @@ export async function handleFleetApi(req: Request, path: string, principal: Prin
   if (!a.ok) return apiJson(400, { ok: false, error: a.error });
   const s = parseFleetSelect(b.select);
   if (!s.ok) return apiJson(400, { ok: false, error: s.error });
-  const report = await svc.runFleet({ action: a.action, select: s.select, dryRun: b.dryRun === true, actor: "owner", via: `web:${principal.name || principal.id}`, allowed });
+  // 群发文字的回信地址 = 这台 owner 设备的会话（和它直接给 agent 发消息同一个 chat_id）：目标的回复落回它自己那段对话
+  const replyTo: ApiUserEndpoint = { kind: "api", tokenId: tokenIdOf(principal), name: principal.name || tokenIdOf(principal), owner: true };
+  const report = await svc.runFleet({ action: a.action, select: s.select, dryRun: b.dryRun === true, actor: "owner", via: `web:${principal.name || principal.id}`, allowed, replyTo });
   return apiJson(200, { ok: true, report });
 }

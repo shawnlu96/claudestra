@@ -6,7 +6,8 @@
  * 扩展在注册帧里声明 abort:true 才发（老扩展收到会默默忽略）；gate 接线在 bridge/interrupt-gate.ts。
  */
 import type { ServerWebSocket } from "bun";
-import { emitEvent, getAgentStatus, lastActivityAt } from "./event-bus.js";
+import { emitEvent, getAgentStatus, inflightTools, lastActivityAt, sessionActiveSinceDone } from "./event-bus.js";
+import { readRegistryAgents } from "../lib/registry.js";
 import { newMessageId, newThreadId, type Endpoint, type Envelope } from "./router.js";
 import { turnCuts } from "./turn-cuts.js";
 import type { TurnTrigger } from "../lib/turn-cuts.js";
@@ -217,11 +218,13 @@ export async function onCodexUndelivered(
   const reason = typeof msg.reason === "string" && msg.reason.trim() ? msg.reason.trim().slice(0, 400) : "⚠️ 消息没能投进 Codex";
   let settled = 0;
   if (own && channelId && messageId) {
-    const agent = turnCuts.deliveredMessage(channelId, messageId)?.agent ?? turnCuts.agentOn(channelId);
+    const known = turnCuts.deliveredMessage(channelId, messageId)?.agent ?? turnCuts.agentOn(channelId);
     const told = settleVoided(channelId, [messageId], Date.now(), { text: () => reason, what: "没投进 Codex 的" }); // 先查发送方，再清送达记录
     const idle = turnCuts.dropUndelivered(channelId, messageId);
-    if (idle && agent) settleIdle(agent, channelId, d, "undelivered");
+    if (idle && known) settleIdle(known, channelId, d, "undelivered");
     settled = await told;
+    // bridge 重启后投递记录是空的：agent 按频道从 registry 查（复查不落盘，按新到的失败回执重新排）
+    const agent = known ?? (await (d.agentOf ?? agentFromRegistry)(channelId));
     if (!idle && agent) recheckIdle(agent, channelId, Date.now(), d); // 回显投完再记时刻：回显自己的事件不算「之后的动静」
   }
   ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, result: { settled } }));
@@ -232,7 +235,13 @@ type UndeliveredDeps = {
   clearSafetyTimer(channelId: string): void;
   /** 测试注入；默认 setTimeout */
   later?(fn: () => void, ms: number): void;
+  /** 投递记录里查不到时按频道找 agent（测试注入；默认读 registry） */
+  agentOf?(channelId: string): Promise<string | undefined>;
 };
+
+/** registry 读不到就当查无此 agent：最坏这次不排复查，等下一次失败回执 */
+const agentFromRegistry = async (channelId: string): Promise<string | undefined> =>
+  (await readRegistryAgents().catch((e: Error) => (console.warn(`⚠️ 投递失败复查读 registry 失败: ${e.message}`), []))).find((a) => a.channelId === channelId)?.name;
 
 function settleIdle(agent: string, channelId: string, d: UndeliveredDeps, trigger: string): void {
   emitEvent({ agent, chatId: channelId, type: "agent_status", data: { status: "done", trigger } });
@@ -247,17 +256,22 @@ const namesOf = (agent: string) => [agent, agent.replace(/^agent-/, ""), `agent-
 
 /**
  * 投递失败而拿不准有没有回合在跑（投它时回合态在忙、之后又投了别的、bridge 重启后没有投递记录）：过 90 秒复查一次。
- * 失败之后没有任何新动静（新投递、会话记录活动、hook 收尾都会记进事件环）且还挂着 thinking，才收成 done；
- * 有动静就不动，等下一次失败或活动再判——不对所有失败一律发 done，那样会误收真在跑的回合。同一频道只留最后一次复查
+ * 三条都成立才收成 done：①上次回合结束（done）之后会话自己没动过——Codex 的 probeTurn 只看事件态，thinking 恒判忙，
+ * 用它等于永远不收；②事件环里没有开了没收的工具；③失败之后没有任何新动静。静默不等于空闲（长工具不发心跳），
+ * 拿不准就只在频道里标一句「投递失败」，不宣告完成（T52 复审 #204 第 5 轮）。同一频道只留最后一次复查
  */
 function recheckIdle(agent: string, channelId: string, since: number, d: UndeliveredDeps): void {
   const run = () => {
     rechecks.delete(channelId);
     const names = namesOf(agent);
-    const thinking = names.some((n) => getAgentStatus(n) === "thinking");
-    if (!thinking || Math.max(...names.map(lastActivityAt)) > since) return;
-    console.log(`🩹 ${agent}：投递失败后 ${UNDELIVERED_RECHECK_MS / 1000}s 没有任何动静，收掉「工作中」`);
-    settleIdle(names.find((n) => getAgentStatus(n) === "thinking") ?? agent, channelId, d, "undelivered_recheck");
+    const who = names.find((n) => getAgentStatus(n) === "thinking");
+    if (!who || Math.max(...names.map(lastActivityAt)) > since) return; // 已经收尾了 / 失败之后又有动静：下一次再判
+    if (names.some(sessionActiveSinceDone) || names.some((n) => inflightTools(n).inflight.length > 0)) {
+      const text = `⚠️ 有消息没投进 Codex，但这一回合可能还在跑，bridge 没有替它宣告完成；卡住的话打断一下或重发。`;
+      return void emitEvent({ agent: who, chatId: channelId, type: "chat_message", data: { direction: "out", from: "bridge", text, notice: true } });
+    }
+    console.log(`🩹 ${agent}：投递失败后 ${UNDELIVERED_RECHECK_MS / 1000}s 没有任何动静、上次收尾后也没真开过回合，收掉「工作中」`);
+    settleIdle(who, channelId, d, "undelivered_recheck");
   };
   if (d.later) return d.later(run, UNDELIVERED_RECHECK_MS);
   const prev = rechecks.get(channelId);

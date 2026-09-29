@@ -24,7 +24,14 @@ export interface PaneIO {
   sleep(ms: number): Promise<void>;
 }
 
-export type TextOutcome = { ok: true; queued: boolean } | { ok: false; error: string };
+/** heldBy：押后原因（额度闸 / 停在额度菜单，bridge/router.ts Delivery）；没有 = 目标在忙 */
+export type TextOutcome = { ok: true; queued: boolean; heldBy?: "quota_wall" | "wall_menu" } | { ok: false; error: string };
+
+const QUEUED_DETAIL = {
+  busy: "它正在忙，这一轮结束后再投，还没送到",
+  quota_wall: "额度闸内（撞墙中），出闸后再投，还没送到",
+  wall_menu: "它停在额度菜单 / 撞墙等待上，没发键，之后再投，还没送到",
+} as const;
 export interface RunCtx {
   io: PaneIO;
   /** null：默认清单也不合格（单测保证走不到），交给 injectCompact 退到它自己的默认档 */
@@ -238,7 +245,7 @@ async function runAction(action: FleetAction, agent: string, w: string, ctx: Run
       case "lp-compact": return out(await lpThenCompact(ctx, agent, w, action.keep ?? ctx.keep));
       case "text": {
         const r = await ctx.deliverText(agent, action.text ?? "");
-        return out(r.ok ? (r.queued ? { outcome: "queued", detail: "它正在忙，这一轮结束后再投，还没送到" } : done("已送达")) : failed(r.error));
+        return out(r.ok ? (r.queued ? { outcome: "queued", detail: QUEUED_DETAIL[r.heldBy ?? "busy"] } : done("已送达")) : failed(r.error));
       }
     }
   } catch (e) {

@@ -284,6 +284,7 @@ describe("bridge 侧（Workflow 复核 wf2）", () => {
     const deps = {
       stopTyping: (c: string) => void calls.push(`typing:${c}`), clearSafetyTimer: (c: string) => void calls.push(`timer:${c}`),
       later: (fn: () => void) => void later.push(fn),
+      agentOf: async (c: string) => (c === "after-restart" ? "agent-after-restart" : undefined),
     };
     const send = (ch: string, id: string, busy: boolean, from?: Envelope["from"]) => turnCuts.noteDelivered({
       from: from ?? { kind: "api", tokenId: `tok_${id}`, name: id }, to: { kind: "local", channelId: ch, agentName: "agent-cx" }, intent: "request",
@@ -365,6 +366,51 @@ describe("bridge 侧（Workflow 复核 wf2）", () => {
       later.at(-1)!();
       expect(calls).toEqual([]);
       expect(getAgentStatus(agent)).toBe("thinking");
+    });
+
+    test("第 5 轮 P1：失败之前就开始、还没结束的长工具（有 tool_start 没 tool_done）——90 秒复查不收 done，只标一句投递失败", async () => {
+      const ch = "cx9", agent = "agent-cx9";
+      const sendTo = (id: string, busy: boolean) => turnCuts.noteDelivered({
+        from: { kind: "api", tokenId: `tok_${id}`, name: id }, to: { kind: "local", channelId: ch, agentName: agent }, intent: "request",
+        content: id, meta: { messageId: id, triggerKind: "api_user", ts: "", threadId: "t" },
+      } as unknown as Envelope, ch, false, busy);
+      sendTo("real-turn", false);
+      emitEvent({ agent, chatId: ch, type: "agent_status", data: { status: "thinking" } });
+      emitEvent({ agent, chatId: ch, type: "tool_start", data: { toolId: "long-shell", name: "exec_command" } });
+      await Bun.sleep(2);
+      sendTo("queue-failed", true);
+      calls.length = 0; later.length = 0;
+      await fail(ch, "queue-failed");
+      await Bun.sleep(2);
+      later.at(-1)!();
+      expect(calls).toEqual([]);
+      expect(getAgentStatus(agent)).toBe("thinking");
+    });
+
+    test("上次收尾后会话真开过回合（有文字输出、工具已收）——同样不收 done", async () => {
+      const ch = "cx10", agent = "agent-cx10";
+      turnCuts.noteDelivered({
+        from: { kind: "api", tokenId: "tok_y", name: "y" }, to: { kind: "local", channelId: ch, agentName: agent }, intent: "request",
+        content: "y", meta: { messageId: "Y", triggerKind: "api_user", ts: "", threadId: "t" },
+      } as unknown as Envelope, ch, false, true);
+      emitEvent({ agent, chatId: ch, type: "agent_status", data: { status: "thinking" } });
+      emitEvent({ agent, chatId: ch, type: "assistant_text", data: { text: "在想" } });
+      await Bun.sleep(2);
+      calls.length = 0; later.length = 0;
+      await fail(ch, "Y");
+      await Bun.sleep(2);
+      later.at(-1)!();
+      expect(calls).toEqual([]);
+    });
+
+    test("第 5 轮 P2：bridge 重启后投递记录是空的——agent 按频道查到，照样排上复查；没有动静就收 done", async () => {
+      emitEvent({ agent: "agent-after-restart", chatId: "after-restart", type: "agent_status", data: { status: "thinking" } });
+      calls.length = 0; later.length = 0;
+      await fail("after-restart", "pre-restart-message");
+      expect(later).toHaveLength(1);
+      await Bun.sleep(2);
+      later[0]();
+      expect(getAgentStatus("agent-after-restart")).toBe("done");
     });
 
     test("P2：发送方 agent 断线——回显押进队列才算告诉到（settled 1）；bridge 自己的通知没有回信地址，settled 0", async () => {

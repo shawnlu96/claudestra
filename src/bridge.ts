@@ -204,7 +204,6 @@ import { registerInteractionHandlers } from "./bridge/discord-interactions.js";
 // ============================================================
 // 类型定义
 // ============================================================
-
 interface ClientInfo {
   ws: ServerWebSocket<unknown>;
   channelId: string;

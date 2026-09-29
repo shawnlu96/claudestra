@@ -8,9 +8,12 @@ import { afterAll, beforeAll, describe, expect, spyOn, test } from "bun:test";
 import { existsSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { initFleet, runFleet, type FleetDeps } from "../src/bridge/fleet/service.js";
 import { handleFleetWs } from "../src/bridge/fleet/ws.js";
+import { handleFleetApi } from "../src/bridge/local-api/fleet.js";
 import { flushHeld } from "../src/bridge/held-flush.js";
 import { HeldQueue } from "../src/bridge/held-queue.js";
-import { isHumanRequest, type Delivery, type Envelope, type LocalEndpoint } from "../src/bridge/router.js";
+import { isHumanRequest, renderApiInbound, type ApiUserEndpoint, type Delivery, type Envelope, type LocalEndpoint } from "../src/bridge/router.js";
+import { effectivePrincipal, fullGrant } from "../src/lib/devices.js";
+import type { Principal } from "../src/lib/principals.js";
 import { agentMsgMustWait, holdsUntilIdle, type TurnState } from "../src/lib/turn-state.js";
 import { readConfigSync, writeConfig } from "../src/lib/config-store.js";
 import { listEvents, openLedger } from "../src/lib/ledger-store.js";
@@ -58,6 +61,19 @@ afterAll(async () => {
 });
 
 const mcp = (ws: keyof typeof WS, body: Record<string, unknown>) => handleFleetWs({ via: "mcp", ...body }, WS[ws]);
+const AT = "2026-09-29T00:00:00Z";
+/** owner 那台全权设备（和 tests/fleet-routes.test.ts 同一个造法） */
+const OWNER_DEVICE = effectivePrincipal({
+  principal: { id: "owner:self", role: "owner", name: "owner", agents: ["*", "master"], createdAt: AT, terminal: true },
+  credential: { id: "dev_x", v: 1, type: "bearer", hash: "h", deviceName: "phone", grant: fullGrant(), createdAt: AT, expiresAt: "2099-01-01T00:00:00Z" },
+});
+/** 网页的 HTTP 入口（local-api/fleet.ts）：回信地址由它按 principal 算 */
+async function web(p: Principal, body: unknown): Promise<Report> {
+  const res = await handleFleetApi(new Request("http://x/api/v1/fleet/run", { method: "POST", body: JSON.stringify(body) }), "/fleet/run", p);
+  const j = (await res!.json()) as { ok: boolean; report?: Report; error?: string };
+  if (!j.ok) throw new Error(j.error);
+  return j.report!;
+}
 const STATE = { type: "fleet_state" };
 const run = (o: Record<string, unknown>) => ({ type: "fleet_run", ...o });
 type Report = { dryRun: boolean; targets: string[]; excluded: { name: string; reason: string }[]; results: { agent: string; outcome: string; detail: string }[] };
@@ -151,15 +167,15 @@ describe("真执行一次下发文本", () => {
 
 describe("目标主回合在跑时的群发文字：MCP 知会（codex r1 P1）和网页 owner 的 request 一样押到空闲", () => {
   type Report = { results: { agent: string; outcome: string; detail: string }[] };
-  const PATHS: { path: string; intent: string; head: string; send: (text: string) => Promise<Report> }[] = [
+  const PATHS: { path: string; intent: string; from: object; head: string; send: (text: string) => Promise<Report> }[] = [
     {
-      path: "MCP 知会", intent: "notification", head: "来自 agent-pm1（mcp）",
+      path: "MCP 知会", intent: "notification", from: { kind: "bridge", label: "fleet" }, head: "来自 agent-pm1（mcp）",
       send: async (text) => reportOf(await mcp("pm", run({ action: { kind: "text", text }, select: { agents: ["w1"] }, dryRun: false }))),
     },
     {
-      // 和 local-api/fleet.ts 一样调服务层：owner、不带 caller，走 request
-      path: "网页 owner（T35 request）", intent: "request", head: "来自 owner（web:phone）",
-      send: (text) => runFleet({ action: { kind: "text", text }, select: { agents: ["agent-w1"] }, dryRun: false, actor: "owner", via: "web:phone", allowed: (n) => n !== "master" }),
+      // 走网页的 HTTP 入口（local-api/fleet.ts）：owner 设备，回信地址是它的会话（T62）
+      path: "网页 owner（request）", intent: "request", from: { kind: "api", tokenId: "owner:self", name: "owner", owner: true }, head: "来自 owner（web:owner）",
+      send: (text) => web(OWNER_DEVICE, { action: { kind: "text", text }, select: { agents: ["agent-w1"] }, dryRun: false }),
     },
   ];
   for (const p of PATHS) test(`${p.path}：忙 → queued、ws 上什么都没有；还忙时 flush 不投；空闲后才投出去，发送者、意图和内容不变`, async () => {
@@ -186,12 +202,39 @@ describe("目标主回合在跑时的群发文字：MCP 知会（codex r1 P1）�
       turn = { main: "idle", bg: false };
       await flush();
       expect(onWire).toHaveLength(1);
-      expect(onWire[0]).toMatchObject({ from: { kind: "bridge", label: "fleet" }, intent: p.intent, to: { agentName: "agent-w1", channelId: "ch-w1" }, meta: { waitForIdle: true } });
+      expect(onWire[0]).toMatchObject({ from: p.from, intent: p.intent, to: { agentName: "agent-w1", channelId: "ch-w1" }, meta: { waitForIdle: true, quotaGated: true } });
       expect(onWire[0]!.content).toStartWith(`[📣 批量指令 · ${p.head}· 同时发给 1 个 agent]\n接着处理这项`);
       expect(held.get("ch-w1") ?? []).toEqual([]);
     } finally {
       initFleet(DEPS, { lpMonitor: false });
     }
+  });
+});
+
+describe("网页群发的回信地址（T62）", () => {
+  const TEXT = { action: { kind: "text", text: "各自汇报一下进度" }, select: { agents: ["agent-w1"] }, dryRun: false };
+  test("回信地址 = 发起群发的那台 owner 设备的会话，按 principal 算、不写死；目标看到的抬头让它 reply 回这个会话", async () => {
+    const LEGACY: Principal = { id: "token:tok_web", role: "owner", name: "web-ui", agents: ["*"], createdAt: AT }; // 老前端的 owner token
+    for (const [p, tokenId, name] of [[OWNER_DEVICE, "owner:self", "owner"], [LEGACY, "tok_web", "web-ui"]] as const) {
+      delivered.length = 0;
+      expect((await web(p, TEXT)).results).toEqual([{ agent: "agent-w1", outcome: "done", detail: "已送达" }]);
+      const env = delivered[0]!;
+      expect(env.from).toEqual({ kind: "api", tokenId, name, owner: true }); // bridge 据此给 chat_id = api:<tokenId>，和 owner 直发同一个会话
+      expect(env.intent).toBe("request");
+      expect(env.meta).toMatchObject({ waitForIdle: true, quotaGated: true });
+      const shown = renderApiInbound({ from: env.from as ApiUserEndpoint, content: env.content });
+      expect(shown).toStartWith(`[🌐 来自 Web 端用户「${name}」`);
+      expect(shown).toContain(`[📣 批量指令 · 来自 owner（web:${name}）· 同时发给 1 个 agent]\n各自汇报一下进度`);
+    }
+  });
+  test("MCP 的知会不挂回信；没有回信地址的调用方一律退回知会，不留空地址", async () => {
+    delivered.length = 0;
+    await mcp("pm", run(TEXT));
+    await runFleet({ action: { kind: "text", text: "x" }, select: { agents: ["agent-w1"] }, dryRun: false, actor: "x", via: "test", allowed: (n) => n !== "master" });
+    expect(delivered.map((e) => [e.from, e.intent, e.meta.quotaGated])).toEqual([
+      [{ kind: "bridge", label: "fleet" }, "notification", true],
+      [{ kind: "bridge", label: "fleet" }, "notification", true],
+    ]);
   });
 });
 
