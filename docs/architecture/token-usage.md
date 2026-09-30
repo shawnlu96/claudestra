@@ -7,12 +7,19 @@
 ## 命令
 
 ```bash
-bun src/manager.ts usage ingest [--since <ISO|ms>] [--db <path>]      # 增量导入 + 清理超期明细，输出 JSON
+bun src/manager.ts usage ingest [--since <ISO|ms>] [--prune] [--db <path>]   # 增量导入（--prune 顺带清超期明细），输出 JSON
 bun src/manager.ts usage turns <agent> [--today|--since <ts>] [--json] [--limit N] [--no-ingest]
 bun src/manager.ts usage summary [--today|--since <ts>] [--json] [--no-ingest]
 ```
 
-`turns` / `summary` 默认先增量导入一趟。`--db` 指定别的库文件（对账、测试用，不写生产库）。bridge 每天在归档兜底扫描（`bridge/archive-sweeper.ts`）之后以子进程跑一次 `usage ingest`。
+`turns` / `summary` 默认先增量导入一趟。`--db` 指定别的库文件（对账、测试用，不写生产库）。
+
+谁来导（都在 `bridge/archive-sweeper.ts`，都是 manager 子进程，bridge 进程里不读文件）：
+- bridge 起来 5 分钟后开始，**每 10 分钟**一趟 `usage ingest`（增量，通常 1 秒内）；上一趟没完就跳过这一趟。
+- 每天归档兜底扫描之后一趟 `usage ingest --prune`，清 30 天前的明细。
+- 查询命令查之前也导一趟。
+
+几路之间靠库旁的文件锁 `usage.sqlite.ingest.lock` 串行（`lib/file-lock.ts`）：`ingest` 等锁最多 60 秒、查询最多 30 秒，等不到就说明别的进程正在导（多半是首轮全量）——`ingest` 把这一趟让出去，查询先查现有数据并在输出里注明。并发导入本身不会重复计数（主键去重），锁防的是同一批 GB 级文件被读两遍。导入是同步的，每读一个文件续一次锁；失锁就停，没读完的下一趟按偏移接着读。
 
 ## 什么算一轮
 
@@ -52,6 +59,7 @@ agent、sessionId、是否子 agent（sidechain）、开始时间（外来输入
 ## 保留
 
 - 明细（`calls` / `turns` / `tools`）保留 30 天（本地日期，从今天 00:00 往前数 30 天）；**更早的记录导入时直接跳过**，不回填，因为清理之后再读到同一会话的副本时已经没有主键可以挡重复。
+- 清理只在每日那趟（`--prune`）做；10 分钟一趟的增量不删数据。
 - `daily`（日 × agent × 模型）永久。导入时把涉及的日子记进 `dirty_days`，导完按明细重算那天；那天明细已清掉就不再动它（它是唯一的记录）。改归属时同样只影响还有明细的日子。
 
 ## 与 `cost --today` 对账

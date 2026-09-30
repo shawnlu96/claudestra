@@ -2,18 +2,20 @@
  * token 账（T83）的导入：Claude Code 会话文件 → usage.sqlite。按文件记读到的字节偏移，只读新增的整行，重复跑幂等。
  * 覆盖面：在册 agent 的当前会话、archive/<agent>/ 的退役快照、~/.claude/projects 下其余全部会话（认不出主人的记 unowned）；
  * 子 agent（<sid>/subagents/…）记到父会话的主人，标 sidechain。Codex / Pi 的记录不在这里（Codex 归 T2）。
- * 只在 manager 子进程里跑（首轮要读几个 GB），bridge 只负责每天拉起一次（bridge/archive-sweeper.ts）。
+ * 只在 manager 子进程里跑（首轮要读几个 GB）：bridge 每 10 分钟拉起一趟增量、每天一趟带清理（bridge/archive-sweeper.ts），
+ * 查询命令查之前也导一趟；几路之间靠 ingestLocked 的文件锁串行。
  */
 import type { Database } from "bun:sqlite";
 import { closeSync, fstatSync, openSync, readdirSync, readSync, statSync } from "fs";
 import { basename, join, relative, sep } from "path";
+import { acquireLock } from "./file-lock.js";
 import { projectJsonlPath } from "./jsonl-cost.js";
 import { ARCHIVE_ROOT } from "./paths.js";
 import { agentRuntime, readRegistryAgentsSync, type RegistryAgent } from "./registry.js";
 import { claudeProjectsRoot } from "./runtimes/claude-code.js";
 import { runtimeForSessionPath } from "./session-source.js";
 import { callOf, inboundOf, triggerSummary } from "./usage-classify.js";
-import { pruneUsage, retentionCutoff, UNOWNED, usageWriter, type FileState } from "./usage-store.js";
+import { pruneUsage, rebuildDirtyDays, retentionCutoff, UNOWNED, usageWriter, type FileState } from "./usage-store.js";
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const CHUNK_BYTES = 8 * 1024 * 1024;
@@ -27,6 +29,10 @@ export interface IngestOptions {
   now?: number;
   /** 单测调小，走跨块拼行 */
   chunkBytes?: number;
+  /** 顺带清掉保留期之前的明细；只有每日那趟开（清理是删数据，10 分钟一趟的增量不做） */
+  prune?: boolean;
+  /** 每读一个文件前调一次；返回 false（锁已失）就停在这里，没读的下一趟接着读 */
+  keepAlive?: () => boolean;
 }
 
 export interface IngestResult {
@@ -221,13 +227,30 @@ export function ingestUsage(db: Database, opts: IngestOptions = {}): IngestResul
     try { mtime = statSync(f.path).mtimeMs; } catch { continue; } // 在册会话还没生成文件 / 已被清理
     res.files++;
     if (mtime < since || runtimeForSessionPath(f.path) !== undefined) continue;
+    if (opts.keepAlive && !opts.keepAlive()) break;
     const r = ingestFile(w, db, f, owners.get(f.sessionId) ?? UNOWNED, cutoff, opts.chunkBytes ?? CHUNK_BYTES);
     if (r.bytes) res.read++;
     res.bytes += r.bytes;
     res.calls += r.calls;
   }
   claimOwners(db, w, owners);
-  res.pruned = pruneUsage(db, cutoff);
+  if (opts.prune) res.pruned = pruneUsage(db, cutoff);
+  else rebuildDirtyDays(db);
   res.ms = Math.round(performance.now() - t0);
   return res;
+}
+
+/**
+ * 拿到导入锁才导（锁是库文件旁的目录，lib/file-lock.ts）；等 waitMs 还拿不到 = 别的进程正在导，返回 null，调用方直接查现有数据。
+ * 并发导入本身不会重复计数（主键去重），锁防的是两个进程把同一批 GB 级文件各读一遍。
+ * 导入是同步的、锁的定时续租跑不起来，所以每读一个文件手动续一次（held()）；失租就停，没读完的下一趟接着读。
+ */
+export async function ingestLocked(db: Database, lockPath: string, opts: IngestOptions = {}, waitMs = 0): Promise<IngestResult | null> {
+  const lock = await acquireLock(lockPath, waitMs);
+  if (!lock) return null;
+  try {
+    return ingestUsage(db, { ...opts, keepAlive: lock.held });
+  } finally {
+    lock.release();
+  }
 }

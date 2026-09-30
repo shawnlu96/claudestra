@@ -131,9 +131,9 @@ function prefixed(f: FileState): Record<string, string | number | null> {
 }
 
 /**
- * 按明细重算脏日子的 daily。那天已经没有明细（超期清掉了）就不动：daily 是它唯一的记录，重算会把它抹成 0。
+ * 按明细重算脏日子的 daily（每趟导入都跑，清理不清理都要）。那天已经没有明细（超期清掉了）就不动：daily 是它唯一的记录，重算会把它抹成 0。
  */
-function rebuildDirtyDays(db: Database): number {
+export function rebuildDirtyDays(db: Database): number {
   const days = (db.prepare("SELECT day FROM dirty_days").all() as { day: string }[]).map((r) => r.day);
   const has = db.prepare("SELECT 1 FROM calls WHERE day = ? LIMIT 1");
   const del = db.prepare("DELETE FROM daily WHERE day = ?");

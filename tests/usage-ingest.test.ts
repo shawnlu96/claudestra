@@ -7,7 +7,8 @@ import { appendFileSync, copyFileSync, mkdirSync, mkdtempSync, utimesSync, write
 import { tmpdir } from "os";
 import { join } from "path";
 import { rollupJsonl } from "../src/lib/jsonl-cost.js";
-import { ingestUsage } from "../src/lib/usage-ingest.js";
+import { acquireLock } from "../src/lib/file-lock.js";
+import { ingestLocked, ingestUsage, type IngestOptions } from "../src/lib/usage-ingest.js";
 import { turnsFor, usageSummary } from "../src/lib/usage-query.js";
 import { openUsageDb, retentionCutoff } from "../src/lib/usage-store.js";
 
@@ -51,13 +52,14 @@ function fx() {
   mkdirSync(archive, { recursive: true });
   const db = openUsageDb(":memory:");
   const registry = [{ name: "agent-a", sessionId: S1, cwd: join(root, "nope") }];
-  const run = (now = NOW, chunkBytes?: number) => ingestUsage(db, { projectsRoot: projects, archiveRoot: archive, registry, now, chunkBytes });
+  const opts = (now = NOW, extra: IngestOptions = {}): IngestOptions => ({ projectsRoot: projects, archiveRoot: archive, registry, now, ...extra });
+  const run = (now = NOW, chunkBytes?: number, extra: IngestOptions = {}) => ingestUsage(db, opts(now, { chunkBytes, ...extra }));
   const write = (p: string, recs: object[]) => {
     mkdirSync(join(p, ".."), { recursive: true });
     writeFileSync(p, recs.map((r) => JSON.stringify(r)).join("\n") + "\n");
   };
   const append = (p: string, recs: object[]) => appendFileSync(p, recs.map((r) => JSON.stringify(r)).join("\n") + "\n");
-  return { root, projects, archive, db, run, write, append, main: join(projects, "-work", `${S1}.jsonl`) };
+  return { root, projects, archive, db, opts, run, write, append, main: join(projects, "-work", `${S1}.jsonl`) };
 }
 
 const T = NOW - 2 * H;
@@ -191,7 +193,10 @@ describe("30 天保留", () => {
     f.write(f.main, [human("老活", T), ...resp("1", T + 1, 1000, 10)]);
     f.run();
     const later = NOW + 40 * 24 * H;
-    const r = f.run(later);
+    const tick = f.run(later); // 10 分钟一趟的增量不清理
+    expect(tick.pruned).toBe(0);
+    expect(turnsFor(f.db, "agent-a")).toHaveLength(1);
+    const r = f.run(later, undefined, { prune: true });
     expect(r.pruned).toBe(1);
     expect(turnsFor(f.db, "agent-a")).toHaveLength(0);
     expect(usageSummary(f.db)).toMatchObject([{ agent: "agent-a", calls: 1, output: 10 }]);
@@ -199,7 +204,7 @@ describe("30 天保留", () => {
     const copy = join(f.archive, "agent-a", `${S1}.jsonl`);
     copyFileSync(f.main, copy);
     utimesSync(copy, later / 1000, later / 1000); // kill 时才拷的快照：文件是新的，里面的记录是老的
-    const again = f.run(later);
+    const again = f.run(later, undefined, { prune: true });
     expect(again.read).toBe(1);
     expect(usageSummary(f.db)).toMatchObject([{ agent: "agent-a", calls: 1, output: 10 }]);
   });
@@ -211,5 +216,32 @@ describe("30 天保留", () => {
     f.run();
     expect(turnsFor(f.db, "agent-a").map((t) => t.trigger)).toEqual(["今天"]);
     expect(usageSummary(f.db)[0].calls).toBe(1);
+  });
+});
+
+describe("导入锁", () => {
+  test("别的进程拿着锁：这趟不导、返回 null；锁放了再导，导完把锁还掉", async () => {
+    const f = fx();
+    f.write(f.main, [human("一", T), ...resp("1", T + 1, 1000, 10)]);
+    const lockPath = join(f.root, "usage.sqlite.ingest.lock");
+    const other = await acquireLock(lockPath, 0);
+    expect(await ingestLocked(f.db, lockPath, f.opts(), 0)).toBeNull();
+    expect(usageSummary(f.db)).toHaveLength(0);
+    other!.release();
+    expect((await ingestLocked(f.db, lockPath, f.opts(), 0))?.read).toBe(1);
+    expect(usageSummary(f.db)).toMatchObject([{ agent: "agent-a", calls: 1, output: 10 }]);
+    expect(await acquireLock(lockPath, 0)).not.toBeNull(); // 导完锁已释放
+  });
+
+  test("导到一半失锁就停；没读的文件下一趟接着读，数字不重不漏", () => {
+    const f = fx();
+    f.write(f.main, [human("一", T), ...resp("1", T + 1, 1000, 10)]);
+    f.write(join(f.projects, "-work", `${S2}.jsonl`), [human("二", T), ...resp("2", T + 1, 1000, 20)]);
+    let n = 0;
+    const first = f.run(NOW, undefined, { keepAlive: () => n++ < 1 });
+    expect(first.read).toBe(1);
+    const rest = f.run();
+    expect(rest.read).toBe(1);
+    expect(usageSummary(f.db).reduce((s, r) => s + r.output, 0)).toBe(30);
   });
 });
