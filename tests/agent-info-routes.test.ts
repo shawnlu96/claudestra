@@ -147,6 +147,11 @@ describe("agent-info-routes：POST label", () => {
 });
 
 describe("agentListExtras（GET /agents 的附加字段）", () => {
+  test("worker kind 传到会话 API，普通 agent 明确为 null", async () => {
+    const extras = await agentListExtras(owner, io);
+    expect(extras("agent-task-t68", { kind: "worker" }).kind).toBe("worker");
+    expect(extras("agent-open", {}).kind).toBeNull();
+  });
   test("external / label 人人可见；sharedPeers 只给全权非 peer（谁在共享是 owner 的事）", async () => {
     const own = await agentListExtras(owner, io);
     expect(own("agent-open", { external: true, label: "L" })).toMatchObject({ external: true, label: "L", sharedPeers: 2, sharedWith: ["A", "B"] });

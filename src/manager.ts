@@ -2500,14 +2500,14 @@ switch (cmd) {
     await cmdRemove(name, { force: args.includes("--force") });
     break;
   }
-
   case "rename": await (args[0] && args[1] ? cmdRename(args[0], args[1]) : output({ ok: false, error: "usage: rename <old-name> <new-name>" })); break;
   case "skill-toggle": await (await import("./manager/skills.js")).cmdSkillToggle(args); break; // 按 agent 启停技能（lib/agent-settings.ts）
-
   case "list": await cmdList(); break;
   case "repair": await (await import("./manager/repair.js")).cmdRepair(args); break; // 收拾做到一半的 create / kill / rename 与孤儿窗口、频道（默认只列计划）
   case "label": await (await import("./manager/agent-external.js")).cmdAgentLabel(args[0] || "", args.slice(1).join(" ")); break;
+  case "worker-kind": await (await import("./manager/agent-external.js")).cmdWorkerKind(args[0] || "", args[1] || ""); break;
   case "team-link": case "team": { const m = await import("./manager/team.js"); await (cmd === "team" ? m.cmdTeam(args) : m.cmdTeamLink(args)); break; } // 派发树 / 角色；班子 up·down·status
+  case "worker-kind-migrate": await (await import("./manager/team.js")).cmdWorkerKindMigrate(args); break;
   case "mission": case "autopilot": await (await import("./manager/mission.js")).cmdMission(args); break; // Autopilot（原名值守，lib/missions.ts）
   case "ledger": await (await import("./manager/ledger.js")).cmdLedger(args); break; // 内置台账（manager/ledger.ts，lib/ledger-*.ts）
   case "fleet": await (await import("./manager/fleet.js")).cmdFleet(args); break; // 批量管理：LP 开关 / 压缩 / 群发（经 bridge 的 ws fleet_run，bridge/fleet/）
@@ -2845,7 +2845,7 @@ switch (cmd) {
         bumpedTmuxDashboardLimit: result.bumpedTmuxDashboardLimit,
         allowedMcpTools: result.allowedMcpTools,
         warnings: result.warnings,
-        hint: "打 `claudestra` 试试 —— launchd 3 个 daemon + 进 master TUI。重启机器后服务也会自动起来。",
+        hint: "打 `claudestra` 试试 —— launchd 4 个 daemon + 进 master TUI。重启机器后服务也会自动起来。",
       });
     }
     break;
@@ -2906,7 +2906,7 @@ switch (cmd) {
         "retire-web                      — unload + back up the old com.claudestra.web daemon (the bridge serves web/out now); refuses until BRIDGE_STATIC_DIR is served and migrate-web-state ran",
         "web-release deploy|publish|rollback|migrate|list — build + publish the web bundle as a versioned release (atomic switch of web-releases/current); deploy is the supported manual path",
         "version                         — show the current version and whether an update is available",
-        "update                          — git pull and reload the three launchd daemons",
+        "update                          — git pull and reload the four launchd daemons",
         "auto-update status              — show auto-update toggles",
         "auto-update claudestra on|off   — toggle Claudestra auto-update (default on)",
         "auto-update claude on|off       — toggle Claude Code auto-update (default on)",

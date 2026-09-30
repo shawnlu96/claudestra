@@ -3411,13 +3411,10 @@ void import("./bridge/ask-entry.js").then((m) => m.initAskWiring({ // 待你处�
 }));
 void import("./bridge/fleet/service.js").then((m) => m.initFleet({ clients, deliver, controlChannelId: CONTROL_CHANNEL_ID })); // 批量管理：LP 状态轮询 + fleet 动作（bridge/fleet/）
 void import("./bridge/ledger-audit-service.js").then((m) => m.startLedgerAudit({ clients, deliver, hold: (e) => void heldLocalMsgs.holdEnv(e), lastMessageSource, runManager })); // 台账巡检
-
 // 清扫上次崩溃 / 被杀残留的 webterm-* viewer session（grouped session 视图，kill 不伤 master 本体）；Discord 与 Web-only 模式都要
 sweepStaleTerminalSessions().catch(() => {});
-
 void import("./bridge/startup-migrations.js").then((m) => m.startStartupMigrations(runManager));
 void import("./bridge/ctx-boundary.js").then((m) => m.startCtxBoundary()); // 上下文边界自动压缩：每分钟一轮，Discord / web-only 都跑
-
 // Web-only: 无 DISCORD_BOT_TOKEN → Web-only 模式：不连 Discord，只跑与平台无关的初始化子集。HTTP/ws/api/事件流在上面 Bun.serve 时已就绪。
 // 跳过的 Discord 专属项：cleanupStaleThinkingMessages / initStatsDashboard /
 // registerSlashCommands / startPermissionWatcher / startWedgeWatcher /

@@ -1,6 +1,6 @@
 /**
  * 因果线画布的几何（纯函数，单测 tests/web-collab-causal.test.ts）：边的曲线、边标签避让、视口（打开时摆一次、明确选中才居中、
- * 数据刷新不动用户拖好的位置、「适配全部」）、视口外还剩几件。
+ * 数据刷新不动用户拖好的位置、「适配全部」）、视口外还剩几件、点提示往那边平移。
  * 标签放在列缝里（出发节点右边那道缝、到达节点左边那道缝，都不行再沿曲线试），每处再上下错开几档；压到节点或别的标签就换，
  * 全都压到就退成一个点（悬停看全文，点开右侧属性页）。宽度按字数估、以列缝为上限，放不全的省略号截断、悬停看全文。
  */
@@ -14,10 +14,11 @@ export interface ViewState { view: View; placed: boolean; centered: number }
 export interface EdgeLabel { id: string; x: number; y: number; w: number; h: number; dot: boolean }
 
 export const VIEW_PAD = 24;
-/** 打开时缩放不低于它：再小字就认不出，宁可有几件在视口外（给出提示），整张看点「适配全部」 */
-export const READABLE_K = 0.8;
-/** 滚轮缩放的范围；「适配全部」要放得下时可以比下限更小（十列的链要 0.25 左右） */
-export const MIN_K = 0.3, MAX_K = 1.6, FIT_FLOOR_K = 0.05;
+/**
+ * 缩放下限：节点标题基准 12.5px（--fs-2），乘 0.96 正好 12px，再小就认不出。打开时、「适配全部」、滚轮缩小共用它，
+ * 放不下就平移（「还有 N 件」提示 / 拖拽）
+ */
+export const MIN_K = 0.96, MAX_K = 1.6;
 const LABEL_H = 18, GAP = 3, LABEL_MAX_W = COL_GAP - 2 * GAP;
 const TRY_T = [0.5, 0.35, 0.65];
 const TRY_DY = [0, -1, 1, -2, 2].map((n) => n * (LABEL_H + GAP));
@@ -80,20 +81,20 @@ export function placeLabels(edges: readonly CEdge[], obstacles: readonly Box[]):
   });
 }
 
-const boxesOf = (c: Canvas) => c.groups.flatMap((g) => [...g.nodes.map((n) => ({ id: n.id, box: n as Box, n: 1, hot: n.kind === "full" })),
-  ...g.folds.map((f) => ({ id: f.id, box: f as Box, n: f.members.length, hot: false }))]);
+const boxesOf = (c: Canvas) => c.groups.flatMap((g) => [...g.nodes.map((n) => ({ id: n.id, box: n as Box, n: 1 })),
+  ...g.folds.map((f) => ({ id: f.id, box: f as Box, n: f.members.length }))]);
 
 /**
- * 打开时的视口：整张能在 READABLE_K 以上放下就整张放下；放不下就用 READABLE_K，
- * 把在跑的节点（full）那一块对齐到左上角——它们是打开这页最想看的，剩下的由 offscreen 提示
+ * 打开时的视口：整张能在 MIN_K 以上放下就整张放下；放不下就用 MIN_K，
+ * 把有在跑节点（full）的那几个框对齐到左上角——它们是打开这页最想看的，剩下的由 offscreen 提示
  */
 export function initialView(c: Canvas, vw: number, vh: number): View {
   const fit = Math.min(1, (vw - VIEW_PAD * 2) / c.w, (vh - VIEW_PAD * 2) / c.h);
-  if (!c.w || fit >= READABLE_K) return { x: VIEW_PAD, y: VIEW_PAD, k: fit || 1 };
-  const all = boxesOf(c);
-  const hot = all.some((b) => b.hot) ? all.filter((b) => b.hot) : all;
-  const x0 = Math.min(...hot.map((b) => b.box.x)), y0 = Math.min(...hot.map((b) => b.box.y));
-  return { x: VIEW_PAD - x0 * READABLE_K, y: VIEW_PAD - y0 * READABLE_K, k: READABLE_K };
+  if (!c.w || fit >= MIN_K) return { x: VIEW_PAD, y: VIEW_PAD, k: fit || 1 };
+  const live = c.groups.filter((g) => g.nodes.some((n) => n.kind === "full"));
+  const hot = live.length ? live : c.groups; // 对齐到框的左上角，框标题和边框不被切掉
+  const x0 = Math.min(...hot.map((g) => g.x)), y0 = Math.min(...hot.map((g) => g.y));
+  return { x: VIEW_PAD - x0 * MIN_K, y: VIEW_PAD - y0 * MIN_K, k: MIN_K };
 }
 
 /** 视口外（含被截掉一截）的任务数，按方向；折叠组按里面的件数算 */
@@ -109,11 +110,11 @@ export function offscreen(c: Canvas, v: View, vw: number, vh: number): { right: 
   return out;
 }
 
-/** 「适配全部」：整张放进视口，缩到真正放得下为止（不设 MIN_K），最大 1 */
+/** 「适配全部」：整张放进视口，最大 1、最小 MIN_K；到下限还放不下就从左上角看起，其余靠拖 */
 export function fitAllView(c: Canvas, vw: number, vh: number): View {
   if (!c.w || !c.h) return { x: VIEW_PAD, y: VIEW_PAD, k: 1 };
   const k = Math.min(1, (vw - VIEW_PAD * 2) / c.w, (vh - VIEW_PAD * 2) / c.h);
-  return { x: VIEW_PAD, y: VIEW_PAD, k: Math.max(FIT_FLOOR_K, k) };
+  return { x: VIEW_PAD, y: VIEW_PAD, k: Math.max(MIN_K, k) };
 }
 
 /** 任务所在的框（自己的节点，或折叠它的那一组）平移到视口中间，缩放不变 */
@@ -136,3 +137,17 @@ export function reconcileView(st: ViewState, c: Canvas, vw: number, vh: number, 
   }
   return next;
 }
+
+export type Dir = "right" | "down" | "left" | "up";
+
+/** 「还有 N 件在 X 边」：往那边平移大半屏（留一截上一屏的内容接上），不越过画布那一侧的边 */
+export function panView(c: Canvas, v: View, vw: number, vh: number, dir: Dir): View {
+  const sx = vw * 0.8, sy = vh * 0.8;
+  if (dir === "right") return { ...v, x: Math.min(v.x, Math.max(v.x - sx, vw - VIEW_PAD - c.w * v.k)) };
+  if (dir === "left") return { ...v, x: Math.max(v.x, Math.min(v.x + sx, VIEW_PAD)) };
+  if (dir === "down") return { ...v, y: Math.min(v.y, Math.max(v.y - sy, vh - VIEW_PAD - c.h * v.k)) };
+  return { ...v, y: Math.max(v.y, Math.min(v.y + sy, VIEW_PAD)) };
+}
+
+/** 整张在文字下限（MIN_K）以上装得下吗；装不下时「适配全部」从左上角看起，并用动效示意到底了 */
+export const fitsAll = (c: Canvas, vw: number, vh: number) => !c.w || Math.min((vw - VIEW_PAD * 2) / c.w, (vh - VIEW_PAD * 2) / c.h) >= MIN_K;

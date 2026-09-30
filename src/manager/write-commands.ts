@@ -24,7 +24,8 @@ export const WRITE_COMMANDS: ReadonlySet<string> = new Set([
   "peer-http-invite", "peer-http-join", "peer-http-accept", "peer-http-scope", "peer-http-remove", "peer-http-tidy", "peer-http-messages-only",
   "peer-invite-new", "peer-join-auto", "peer-invite-revoke",
   "token-add", "token-revoke",
-  "project-add", "project-edit", "project-remove", "project-assign", "project-merge", "project-migrate", "external", "label", "transport",
+  "project-add", "project-edit", "project-remove", "project-assign", "project-merge", "project-migrate", "worker-kind-migrate", "worker-kind",
+  "external", "label", "transport",
   "pi-env-set", "team-link", "skill-toggle",
   // 以下原先漏掉：set-session / set-claude / announce-focus 写 registry；migrate 直写 registry.json；
   // peer-invite-redeem 写 principals + peers；peer-invite-list 顺手清扫过期邀请（吊销 token、写 peers）
@@ -59,7 +60,7 @@ const LEDGER_READ_SUBS: ReadonlySet<string> = new Set(["", "help", "whoami", "sh
  * ledger 里拿命令级写锁的子命令：task-new / task-set 会写 registry；import 不碰 registry，拿锁只为让一次性迁移与 create / restart 等命令错开，
  * 不影响台账本身的正确性（整批一个 IMMEDIATE 事务）。其余 ledger 写只写 sqlite，不排在 restart 这类长写后面。
  */
-const LEDGER_REGISTRY_SUBS: ReadonlySet<string> = new Set(["task-new", "task-set", "import"]);
+const LEDGER_REGISTRY_SUBS: ReadonlySet<string> = new Set(["task-new", "task-set", "scheduler-session-bind", "import"]);
 
 /** auto-update 的读子命令（缺省即 status）；其余（channel / claudestra on|off / claude on|off）都写 config.json */
 const AUTO_UPDATE_READ_SUBS: ReadonlySet<string> = new Set(["", "status", "get"]);

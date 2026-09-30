@@ -190,11 +190,11 @@ describe("检查单：extra 只加不减、推断不全、改动的文件决定 
     expect(r.checklistSource).toBe("files+extra");
     expect(r.checks.map((c: any) => c.id)).toEqual(["pr-merged", "web-local", "web-relay", "daemon-bridge", "daemon-cron"]);
   });
-  test("改的是 cron 与 bridge 共用的 lib：两个 daemon 都要核；没 web 改动就不问中继", async () => {
+  test("共享 lib 的 daemon 全核；没 web 改动就不问中继", async () => {
     sc.files = ["src/lib/shared.ts"];
     let relayAsked = false;
     const r = await run(PM, ["verify", "T9", "--dry-run"], { relayStatus: async () => ((relayAsked = true), null) });
-    expect(r.checks.map((c: any) => c.id)).toEqual(["pr-merged", "daemon-bridge", "daemon-cron"]);
+    expect(r.checks.map((c: any) => c.id)).toEqual(["pr-merged", "daemon-bridge", "daemon-cron", "daemon-scheduler", "daemon-launcher"]);
     expect(relayAsked).toBe(false);
   });
   test("gh 拿不到文件列表：真正的 merge commit 从本地 diff 推；推不出（squash / rebase 又拿不到 PR head）→ incomplete → unknown", async () => {

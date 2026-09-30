@@ -14,10 +14,11 @@
  * 这个模块装/迁移以下东西（idempotent，每次 install-cli / update 都跑一次也无害）：
  *   1) `claudestra` CLI wrapper → ~/.local/bin/claudestra（XDG 标准，多数 PATH
  *      默认带它）+ ~/.bun/bin/claudestra symlink（兜底覆盖另一种常见 PATH）
- *   2) 三个 user-level LaunchAgent：
+ *   2) 四个 user-level LaunchAgent：
  *        com.claudestra.bridge.plist    → bun src/bridge.ts
  *        com.claudestra.launcher.plist  → bun src/launcher.ts
  *        com.claudestra.cron.plist      → bun src/cron.ts
+ *        com.claudestra.scheduler.plist → bun src/scheduler.ts
  *      每个都 RunAtLoad=true（开机自启）+ KeepAlive=true（crash 自动重启，替代
  *      pm2 restart_delay）+ ThrottleInterval=10s（防 crash loop）。
  *   3) 迁移：把旧 com.claudestra.autostart.plist（v2.3.x，跑 pm2）+ 旧
@@ -53,7 +54,6 @@ import { cliPathNotes } from "./cli-path.js";
 import { migrateWebHosting } from "./legacy-web.js";
 import { refuseInSandbox } from "./sandbox.js";
 
-
 interface DaemonSpec {
   label: string;
   stem: string;
@@ -65,13 +65,13 @@ interface DaemonSpec {
 export const DAEMONS: DaemonSpec[] = [
   // ⚠ 顺序即 reload 顺序,launcher 必须最后:update 子进程常由 launcher 派生,
   // bootout launcher 会让 launchd 连坐回收它(macOS 责任链不随 detach 断,
-  // peer 取证 2026-08-09)——launcher 放最后保证 bridge/cron 先完成 reload,
+  // peer 取证 2026-08-09)——launcher 放最后保证 bridge/cron/scheduler 先完成 reload,
   // 自杀只损失收尾输出。
   { label: "com.claudestra.bridge",   script: "src/bridge.ts",   stem: "bridge" },
   { label: "com.claudestra.cron",     script: "src/cron.ts",     stem: "cron" },
+  { label: "com.claudestra.scheduler", script: "src/scheduler.ts", stem: "scheduler" },
   { label: "com.claudestra.launcher", script: "src/launcher.ts", stem: "launcher" },
 ];
-
 /** 旧 web 服务的默认端口（web/package.json 的 `start` 脚本没写明时用它）；只剩中继的子域名兼容隧道在用 */
 export const WEB_PORT_FALLBACK = 3333;
 
@@ -737,27 +737,27 @@ async function removeOldAutostartWrapper(): Promise<boolean> {
 }
 
 /**
- * 主入口：装 CLI + 写 3 个 daemon plist + 迁移老配置 + 启动新 plist。
+ * 主入口：装 CLI + 写 4 个 daemon plist + 迁移老配置 + 启动新 plist。
  *
  * 顺序很重要：
  *   1) 写 CLI wrapper（独立于 daemon，先把它落地）
- *   2) 写 3 个新 plist（落地不 load）
+ *   2) 写 4 个新 plist（落地不 load）
  *   3) unload + .bak 老的 autostart plist（不让它再跟新的争）
  *   4) stop 老 pm2 daemon（不让 pm2 进程跟新 launchd 进程同时跑同一个 daemon）
  *   5) 清老 claudestra-autostart 包装脚本
- *   6) bootstrap 3 个新 plist（launchd 接管）
+ *   6) bootstrap 4 个新 plist（launchd 接管）
  *
  * Idempotent —— 跑多次只是重写同一份文件 + 重新 load，无害。每次 update 走一次。
  */
 /**
  * 非 macOS 平台的替代方案提示：一个可直接抄用的 systemd user unit 模板。
- * 三个 daemon 只有入口脚本不同，故只给一份带占位的模板。
+ * 四个 daemon 只有入口脚本不同，故只给一份带占位的模板。
  */
 function systemdUnitHint(repoRoot: string, bunPath: string): string {
   return [
     `  # ~/.config/systemd/user/claudestra-bridge.service`,
-    `  # （launcher / cron 同理，把 ExecStart 换成 src/launcher.ts、src/cron.ts，`,
-    `  #   服务名相应改成 claudestra-launcher / claudestra-cron）`,
+    `  # （launcher / cron / scheduler 同理，把 ExecStart 换成对应入口，`,
+    `  #   服务名相应改成 claudestra-launcher / claudestra-cron / claudestra-scheduler）`,
     `  [Unit]`,
     `  Description=Claudestra bridge`,
     `  [Service]`,
@@ -797,8 +797,8 @@ export async function installClaudestraCli(
   if (process.platform !== "darwin") {
     errors.push(
       `进程守护当前只实现了 macOS launchd，检测到 ${process.platform}。\n` +
-        `Claudestra 本身能在 Linux 上跑（bridge / launcher / cron 都是普通 Bun 进程），\n` +
-        `只是需要你自己接管开机自启。用 systemd 的话，为这三个服务各建一个 user unit：\n\n` +
+        `Claudestra 本身能在 Linux 上跑（bridge / launcher / cron / scheduler 都是普通 Bun 进程），\n` +
+        `只是需要你自己接管开机自启。用 systemd 的话，为这四个服务各建一个 user unit：\n\n` +
         systemdUnitHint(repoRoot, resolveBunPath()) +
         `\n然后 systemctl --user daemon-reload && systemctl --user enable --now claudestra-bridge`
     );
@@ -832,7 +832,7 @@ export async function installClaudestraCli(
   result.web = webStaticState(repoRoot);
   warnings.push(...webStaticWarnings(result.web, { staticIndex: staticIndexExists(result.web.staticDir), legacyPlist: existsSync(legacyWebPlistPath()) }));
 
-  // 2) 写 3 个 daemon plist
+  // 2) 写 4 个 daemon plist
   let plists: { label: string; plistPath: string }[];
   try { plists = await writeDaemonPlists(repoRoot, bunPath); }
   catch (e) { errors.push(`写 daemon plist: ${(e as Error).message}`); return result; }

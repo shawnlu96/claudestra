@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "bridge": "bun run src/bridge.ts",
+    "scheduler": "bun run src/scheduler.ts",
     "manager": "bun run src/manager.ts",
     "sandbox": "bun scripts/sandbox.ts",
     "setup": "bun run src/setup.ts",
