@@ -46,6 +46,45 @@ describe("guardedScreenOf", () => {
   });
 });
 
+describe("guardedScreenOf：目录信任框用宽口径拦，不用自动确认的严格识别（T44 r4 P1）", () => {
+  /** main 537f85bb 上发键闸用的判定原样照抄，做对照：凡它拦的，现在也得拦 */
+  function mainTrustPromptMoves(pane: string): number | null {
+    const tail = pane.split("\n");
+    while (tail.length && !tail[tail.length - 1]!.trim()) tail.pop();
+    const joined = tail.slice(-25).join("\n");
+    if (!/trust this folder/i.test(joined) || !/Enter to confirm/i.test(joined)) return null;
+    const opts = tail.slice(-25).flatMap((l) => {
+      const m = l.match(/^\s*(❯)?\s*(No, exit|Yes, I trust this folder)\s*$/i);
+      return m ? [{ yes: /^yes/i.test(m[2]!), selected: !!m[1] }] : [];
+    });
+    const yesIdx = opts.findIndex((o) => o.yes), selIdx = opts.findIndex((o) => o.selected);
+    return yesIdx < 0 || selIdx < 0 ? null : yesIdx - selIdx;
+  }
+  const trust = fx("trust/cc2.1.284-trust.txt").trimEnd();
+  const numbered = trust.replace(" ❯ No, exit", " ❯ 1. No, exit").replace("   Yes, I trust", "   2. Yes, I trust");
+  const screens: Record<string, string> = {
+    "完整的框": trust,
+    "可见区只有 12 行（标题滚出去了）": trust.split("\n").slice(-12).join("\n"),
+    "框里多一行 WARNING": trust.replace(" Security guide", " WARNING: Please review this project"),
+    "尾注改成 Esc to exit": trust.replace("Esc to cancel", "Esc to exit"),
+    "框底下多一行 Tip": `${trust}\n\n  ✻ Tip: run /init to create a CLAUDE.md`,
+  };
+  test("main 拦的这几种画面，现在都拦", () => {
+    for (const [name, pane] of Object.entries(screens)) {
+      expect([name, mainTrustPromptMoves(pane) !== null, guardedScreenOf(pane, undefined)]).toEqual([name, true, "trust_prompt"]);
+    }
+  });
+  test("带编号的框：main 漏了，现在也拦", () => {
+    expect(mainTrustPromptMoves(numbered)).toBeNull();
+    expect(guardedScreenOf(numbered, undefined)).toBe("trust_prompt");
+    expect(guardedScreenOf(numbered.split("\n").slice(-6).join("\n"), undefined)).toBe("trust_prompt");
+  });
+  test("对话里提到信任框文案、没有确认尾注：普通画面，不拦", () => {
+    const chat = ["⏺ 弹窗的选项是：", "  Yes, I trust this folder", "", "─".repeat(40), "❯ ", "─".repeat(40), "  ⏵⏵ bypass permissions on"].join("\n");
+    expect(guardedScreenOf(chat, undefined)).toBeNull();
+  });
+});
+
 const PROG = { force: false, authorizedBy: null, expect: null, box: null };
 const FORCE = { force: true, authorizedBy: null, expect: null, box: null };
 const MODEL_BOX = fx("switch-confirm/cc2.1.280-switch-model.txt");

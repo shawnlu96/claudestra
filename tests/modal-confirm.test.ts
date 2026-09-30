@@ -43,3 +43,70 @@ describe("盖住输入框的普通确认框：照常自动按", () => {
     expect(isAutoConfirmableModal(pane)).toBe(false);
   });
 });
+
+describe("目录信任框：通用自动确认一个键都不按，只由 lib/trust-prompt.ts 的严格识别处理（T44 r2 P1-1 / P1-2）", () => {
+  const trust = fx("trust/cc2.1.284-trust.txt");
+  const yesLit = trust.replace(" ❯ No, exit", "   No, exit").replace("   Yes, I trust", " ❯ Yes, I trust");
+  const effort = " Use Fable 5.1 at high effort by default?\n   ❯ Keep xhigh\n     Switch Fable 5.1 to high effort\n\n   Enter to confirm · Esc to cancel";
+  test("带编号 / 编号换写法 / Yes 在前 / 文案改过的信任框（默认高亮 No，Enter = 退出）", () => {
+    const variants = [
+      trust.replace(" ❯ No, exit", " ❯ 1. No, exit").replace("   Yes, I trust", "   2. Yes, I trust"),
+      trust.replace(" ❯ No, exit", " ❯ 1) No, exit").replace("   Yes, I trust", "   2) Yes, I trust"),
+      trust.replace(" ❯ No, exit\n   Yes, I trust this folder", " ❯ 1. Yes, I trust this folder\n   2. No, exit"),
+      trust.replace(" ❯ No, exit", " ❯ 1. No, exit").replace("   Yes, I trust this folder", "   2. Yes, I trust this workspace"),
+      trust.replace(" Security guide", " WARNING: Please review this project"),
+      trust,
+    ];
+    for (const [i, pane] of variants.entries()) expect([i, ...both(pane)]).toEqual([i, false, false]);
+  });
+  test("旧信任框残影 + 下面新弹出的 effort 框：残影不算当前画面，effort 框照常按；残影下接 shell 不按", () => {
+    expect(isAutoConfirmableModal(`${yesLit.trimEnd()}\n${effort}`)).toBe(true);
+    expect(both(`${yesLit.trimEnd()}\nuser@host repo %`)).toEqual([false, false]);
+  });
+  test("effort 框残影 + 当前带编号的信任框：不按", () => {
+    const numbered = trust.replace(" ❯ No, exit", " ❯ 1. No, exit").replace("   Yes, I trust", "   2. Yes, I trust");
+    expect(both(`${effort}\n${numbered}`)).toEqual([false, false]);
+  });
+});
+
+describe("权限框的问句里带尾注文字：整屏先判，照样不按（T44 r4 P2）", () => {
+  const perms = ["turn-zone/modal-permission.txt", "turn-zone/cc-perm-quoted.txt"];
+  test("问句带「Esc to cancel」「Enter to confirm」→ 不按（main 也不按）", () => {
+    for (const f of perms) {
+      for (const q of [' Do you want to run grep -n "Esc to cancel" src?', ' Do you want to run grep -n "Enter to confirm" src?']) {
+        const pane = fx(f).replace(" Do you want to proceed?", q);
+        expect([f, q, ...both(pane)]).toEqual([f, q, false, false]);
+      }
+    }
+  });
+  test("尾注文字只出现在命令正文、问句是普通的：不按", () => {
+    for (const f of perms) {
+      const pane = fx(f).replace(" Do you want to proceed?", '   grep -n "Esc to cancel" src\n Do you want to proceed?');
+      expect([f, ...both(pane)]).toEqual([f, false, false]);
+    }
+  });
+  test("问句折成两行：和 main 一样会按——main 原有的漏洞，已知未修，正确修法是让 detectRuntimePermissionPrompt 认折行", () => {
+    const pane = fx("turn-zone/modal-permission.txt").replace(" Do you want to proceed?", ' Do you want to run grep -rn "Esc to cancel"\n src/lib?');
+    expect(isAutoConfirmableModal(pane)).toBe(true);
+  });
+});
+
+describe("旧画面里行中间提到尾注文字：不当裁剪线，下面正常的启动框照常按（T44 r6 P1，和 main 一致）", () => {
+  const dev = "WARNING: Loading development channels\n\n--dangerously-load-development-channels is for local channel development only.\n\n" +
+    "Channels: server:claudestra\n\n❯ 1. I am using this for local development\n  2. Exit\n\nEnter to confirm · Esc to cancel";
+  const effort = " Use Fable 5.1 at high effort by default?\n   ❯ Keep xhigh\n     Switch Fable 5.1 to high effort\n\n   Enter to confirm · Esc to cancel";
+  const chat = "⏺ 尾注就是 Enter to confirm · Esc to cancel，裁剪线认它\n  ⎿ 20:const MODAL_FOOTER_RE = /Enter to confirm|Esc to cancel/i;\n\nuser@host repo % claude";
+  const walled = "  ⚠ Usage limit reached · continuing automatically at 3:20am · esc to cancel\n\nuser@host repo % claude";
+  const auq = " Which one?\n ❯ 1. A\n   2. B\n\n Enter to select · ↑/↓ to navigate · Esc to cancel\n\nuser@host repo % claude";
+  test("旧对话 + dev 框、旧对话 + effort 框、旧撞墙倒计时 + dev 框、旧 AUQ 残影 + dev 框 → 按", () => {
+    for (const [name, pane] of [["chat+dev", `${chat}\n${dev}`], ["chat+effort", `${chat}\n${effort}`],
+      ["walled+dev", `${walled}\n${dev}`], ["auq+dev", `${auq}\n${dev}`]]) {
+      expect([name, ...both(pane!)]).toEqual([name, true, true]);
+    }
+  });
+  test("旧信任框残影 + effort / dev 框照常按（整屏先判的那几道不挡它）", () => {
+    const yesLit = fx("trust/cc2.1.284-trust.txt").replace(" ❯ No, exit", "   No, exit").replace("   Yes, I trust", " ❯ Yes, I trust").trimEnd();
+    expect(both(`${yesLit}\n${effort}`)).toEqual([true, true]);
+    expect(both(`${yesLit}\n${dev}`)).toEqual([true, true]);
+  });
+});

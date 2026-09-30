@@ -3114,6 +3114,8 @@ async function maybeHealRotatedSession(channelId: string) {
   try {
     const agents = await readRegistryAgents();
     const me = agents.find((a) => a.channelId === channelId && a.status === "active");
+    // 首次回合落标记：restart 靠它分辨「从没对话过」和「历史丢了」（manager/first-turn.ts）；没记上下个 Stop 再记
+    if (me && !me.firstTurnAt) void runManager("mark-turn", me.name).catch((e) => console.error(`[mark-turn] ${me.name}:`, e));
     if (!me?.cwd || !me.sessionId) return;
     const cwd = me.cwd.replace(/^~/, process.env.HOME || "~");
     // v2.23.2+ fork 源 id 共用:registry 记的 session 同时是另一个活 agent 的(resume --fork

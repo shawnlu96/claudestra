@@ -11,8 +11,8 @@ import {
   detectSessionIdlePrompt,
   parseChoicePrompt,
   parseModalOptions,
-  trustPromptMoves,
 } from "./tmux-helper.js";
+import { activeModalView, looksLikeTrustPrompt } from "./trust-prompt.js";
 import { inputBox } from "./input-box.js";
 
 /**
@@ -26,6 +26,9 @@ export function isAutoConfirmableModal(
 ): boolean {
   // 弹窗会盖住输入框；输入框还在，画面上的「❯ 1.」就是草稿或对话内容，按 Enter 会把 owner 没打完的草稿提交掉
   if (inputBox(pane.replace(/\s+$/, "").split("\n"))) return false;
+  // 要人决定的框整屏先判一遍（和 main 同口径）：权限框的问句里可能就带「Esc to cancel」，裁段会把问句切掉，只看裁出来的段等于替人批准
+  if (needsHuman(pane, opts)) return false;
+  pane = activeModalView(pane); // 以下只看当前活动的框：上面旧框的残影既不按、也不挡（lib/trust-prompt.ts）
   const modalOpts = parseModalOptions(pane);
   // v2.23.1+ 无编号选择弹窗（effort 默认档位确认等）也算：默认高亮项 = 保持现状，Enter 无副作用
   const choice = modalOpts ? null : parseChoicePrompt(pane);
@@ -33,19 +36,25 @@ export function isAutoConfirmableModal(
   // 两个解析器都保证恰有 ❯ 高亮项，但显式再校验一次，防未来重构破坏不变量
   if (modalOpts && !modalOpts.some((o) => o.selected)) return false;
   if (choice && !choice.some((o) => o.selected)) return false;
+  if (needsHuman(pane, opts)) return false;
+  // 目录信任弹窗默认高亮「No, exit」——直接 Enter 等于退出。看得到它的特征行（带不带编号、全不全）就不按：
+  // 完整的框由 trustPromptMoves 一格一格挪到 Yes，别的样子一律谁都不按（tests/modal-confirm.test.ts）。
+  // 只看活动段：整屏判的话旧信任框残影会挡住下面新弹出的 effort 框
+  if (looksLikeTrustPrompt(pane)) return false;
+  return true;
+}
+
+/** 必须人决定、一个键都不能替人按的框。整屏和活动段各判一遍，任一边命中就不按（宁可少按） */
+function needsHuman(pane: string, opts: { allowSessionIdle?: boolean }): boolean {
   // 运行时权限弹窗（Do you want to edit / run / allow ...）必须用户决定
-  if (detectRuntimePermissionPrompt(pane)) return false;
+  if (detectRuntimePermissionPrompt(pane)) return true;
   // AskUserQuestion 是 agent 在问人：Enter 等于替人选了高亮的第 1 项
-  if (parseAuqPane(pane)) return false;
+  if (parseAuqPane(pane)) return true;
   // session-idle 弹窗除非显式允许
-  if (!opts.allowSessionIdle && detectSessionIdlePrompt(pane)) return false;
-  // 目录信任弹窗默认高亮「No, exit」——直接 Enter 等于退出。它由 trustPromptMoves
-  // 专门处理（先 Down 到 Yes 再 Enter），这里绝不能当普通弹窗自动 Enter
-  if (trustPromptMoves(pane) !== null) return false;
+  if (!opts.allowSessionIdle && detectSessionIdlePrompt(pane)) return true;
   // Bypass 首启确认同样默认高亮「No, exit」，而且接受与否是用户自己的安全决定——
   // 任何自动化都不替用户按（setup 里征得同意后写 skipDangerousModePermissionPrompt）
-  if (detectBypassConsentPrompt(pane)) return false;
+  if (detectBypassConsentPrompt(pane)) return true;
   // 额度菜单：Enter 会替人选中高亮项（光标可能停在「Switch to usage credits」上），一个键都不发，留给人（T24）
-  if (paneShowsLimitMenu(pane)) return false;
-  return true;
+  return paneShowsLimitMenu(pane);
 }

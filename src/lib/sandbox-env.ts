@@ -145,6 +145,7 @@ const SANDBOX_MANAGER_COMMANDS = new Set([
   "team", // 班子提案只写沙箱状态目录的 team-proposals.json，按钮经沙箱 bridge 贴出
   "skill-toggle", // 只写沙箱状态目录下的 agent-settings（lib/agent-settings.ts），技能目录只读
   "transport", // T60：切 transport 只写沙箱 registry、重启沙箱窗口；acp 那头在沙箱里只能是 stub（assertSandboxRuntime）
+  "mark-turn", // 只写沙箱 registry 的 firstTurnAt，沙箱 bridge 的 Stop hook 经 runManager 调
   "migrate", // T60：只改沙箱 registry，重启的 Codex 在沙箱里仍固定走 stub
 ]);
 

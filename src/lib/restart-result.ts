@@ -14,7 +14,8 @@
 import { statSync } from "fs";
 import { isMasterAgent } from "./registry.js";
 import { projectJsonlPath } from "./jsonl-cost.js";
-import type { ReadyResult, RuntimeControl } from "./runtimes/types.js";
+import { archivedSessionCopies } from "./session-archive.js";
+import type { ManagedRuntimeAdapter, ReadyResult, RuntimeControl } from "./runtimes/types.js";
 
 export interface RestartRunOutcome {
   /** 进程退出码是否为 0 */
@@ -65,6 +66,42 @@ export function restartFailureReason(r: RestartRunOutcome): string | null {
 export function restartExceptionResult(name: string, e: unknown): { name: string; ok: false; error: string } {
   const msg = e instanceof Error ? e.message : String(e);
   return { name, ok: false, error: `重启异常: ${msg || "未知错误"}` };
+}
+
+export const NO_SESSION_NOTE = "这个 agent 还没有会话，按新会话启动";
+
+export type RestartLaunchPlan = { mode: "resume" | "new"; refuse?: undefined } | { mode?: undefined; refuse: string };
+
+/**
+ * restart 续旧会话、新起，还是拒绝。create 预先定了 session id，但 CC 要到第一条消息才落 jsonl：
+ * 从没对话过的 agent 带 --resume 必报「No conversation found」退出，这时用同一个 id 新起（registry 不用改）。
+ * 只有 firstTurnAt 明确是 null（create 写的、bridge 的 Stop hook 还没记过回合）、notes 为空、项目目录和归档里都没有
+ * 这个 id 时才新起。对话过 / 接管过 / 老条目说不清的，找不到 jsonl 一律拒绝：新起等于静默丢掉整段对话，得 owner 决定。
+ * 不实现 hasSession 的运行时一律照旧 resume。
+ */
+export function restartLaunchPlan(
+  adapter: Pick<ManagedRuntimeAdapter, "hasSession">,
+  info: { sessionId?: string; cwd?: string; notes?: string; firstTurnAt?: string | null },
+  archived: (sessionId: string) => string[] = archivedSessionCopies,
+): RestartLaunchPlan {
+  const sid = info.sessionId;
+  if (!sid || !adapter.hasSession || adapter.hasSession(sid, info.cwd)) return { mode: "resume" };
+  const where = info.cwd ? projectJsonlPath(info.cwd.replace(/^~/, process.env.HOME || "~"), sid) : `~/.claude/projects/<项目目录>/${sid}.jsonl`;
+  const copy = archived(sid)[0];
+  if (copy) {
+    return { refuse: `会话 ${sid} 的 jsonl 不在原处（可能被 Claude Code 清理了），归档里有一份。没有按新会话启动，免得丢历史；恢复：cp '${copy}' '${where}' 后再 restart` };
+  }
+  const fresh = "要按新会话起由 owner 决定：kill 后重新 create";
+  if (info.firstTurnAt) {
+    return { refuse: `历史已丢失：这个 agent ${info.firstTurnAt} 起有过对话，但 ${sid}.jsonl 找不到、归档里也没有。没有按新会话启动；${fresh}` };
+  }
+  if (info.notes?.trim()) {
+    return { refuse: `历史已丢失：这个 agent 接过已有会话（${info.notes.trim()}），但 ${sid}.jsonl 找不到、归档里也没有。没有按新会话启动；${fresh}` };
+  }
+  if (info.firstTurnAt !== null) {
+    return { refuse: `找不到 ${sid}.jsonl，归档里也没有；这个 agent 建于记录首次回合之前，分不清是从没对话过还是历史丢了，没有按新会话启动；${fresh}` };
+  }
+  return { mode: "new" };
 }
 
 /** restart 结果里失败的 agent 名（「完成」消息只能列成功项，失败项要单独报）。 */

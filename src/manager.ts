@@ -127,7 +127,7 @@ import { abandonCreate, beginCreate, commitCreate, gateOps, guardCreateSignals, 
 import { notify } from "./lib/notify.js";
 import { writeJsonAtomic } from "./lib/state-file.js";
 import { stderrTail } from "./lib/run-manager.js";
-import { readyFailureText, modelPinPlan, modelPinRefusal, restartExceptionResult, bigSessionNote } from "./lib/restart-result.js";
+import { readyFailureText, modelPinPlan, modelPinRefusal, restartExceptionResult, bigSessionNote, restartLaunchPlan, NO_SESSION_NOTE } from "./lib/restart-result.js";
 
 /**
  * 通知 bridge 重新扫 skill 并重新注册 Discord slash commands。
@@ -617,7 +617,7 @@ async function cmdCreate(
     created: new Date().toISOString(),
     status: "active",
     channelId,
-    notes: "",
+    notes: "", firstTurnAt: null, // restart 据此判断「从没对话过」（manager/first-turn.ts）
     sessionId,
     cwd: expandedDir,
     disallowedPreset: perms.preset,
@@ -718,7 +718,7 @@ async function launchInWindow(
   const fresh = spec.mode === "new" || !(await loadRegistry()).agents[tmuxName]; // 全新 agent 不带同名旧 agent 的设置（旧文件等 registry 落盘后再删）
   const unsent = await win.sendLine(adapter.buildLaunchCommand({ ...spec, ...(fresh ? {} : { settingsName: tmuxName }) })).then(() => null, (e: Error) => e.message);
   if (unsent) return { result: { ready: false, reason: "exited", detail: `启动命令没发出去：${unsent}`, recoveredFullSession: false } };
-  const result = await adapter.waitReady(win, { rounds: CLAUDE_READY_ROUNDS, pollMs: 500 });
+  const result = await adapter.waitReady(win, { rounds: CLAUDE_READY_ROUNDS, pollMs: 500, cwd: spec.cwd ?? opts.cwd });
   if (result.ready) (await import("./lib/agent-settings.js")).dropLaunchSettings(tmuxName); // 超长设置落的启动快照：就绪 = CC 已读过
   return { result, baseline };
 }
@@ -1275,10 +1275,9 @@ async function cmdRestart(name?: string, opts: { includeMaster?: boolean } = {})
     }
     // 运行时由 registry 决定；只读来源 / 认不出的 runtime 不能由我们拉起
     let adapter = await (await import("./manager/acp-lifecycle.js")).managedForRestart(tmuxName, info as { runtime?: string; transport?: string });
-    if (!adapter) {
-      results.push({ name: tmuxName, ok: false, error: `runtime "${info.runtime}" 不能由 Claudestra 启动` });
-      continue;
-    }
+    // 没对话过 → 同 id 新起；有历史痕迹却找不到 jsonl → 在碰旧进程之前就拒绝（lib/restart-result.ts）
+    const plan = adapter ? restartLaunchPlan(adapter, info) : { refuse: `runtime "${info.runtime}" 不能由 Claudestra 启动` };
+    if (!adapter || plan.refuse !== undefined) { results.push({ name: tmuxName, ok: false, error: plan.refuse }); continue; }
     // 1. 看同名 window 数量决定路径。永远不要用 ambiguous name target 做 kill
     //    —— v2.4.2 之前这里走 `kill-window -t master:<name>`，tmux 遇到多份同名
     //    会报 "more than one window" 错误，外层 `.catch(() => {})` 吞掉错误后
@@ -1342,7 +1341,7 @@ async function cmdRestart(name?: string, opts: { includeMaster?: boolean } = {})
     const purposeForInject =
       info.purpose && !info.purpose.startsWith("resumed:") ? info.purpose : undefined;
     const spec: LaunchSpec = {
-      mode: "resume",
+      mode: plan.mode, settingsName: tmuxName, // new 时 launchInWindow 不代填设置名
       channelId: info.channelId,
       bridgeUrl: BRIDGE_URL,
       sessionId: info.sessionId,
@@ -1427,7 +1426,7 @@ async function cmdRestart(name?: string, opts: { includeMaster?: boolean } = {})
       name: tmuxName,
       ok: started.ready,
       error: timeoutErr,
-      recreated: recreated || undefined,
+      recreated: recreated || undefined, ...(spec.mode === "new" ? { note: NO_SESSION_NOTE } : {}),
     });
 
     // v2.0.23+: 自动恢复了完整会话 → 给该 agent 频道发一条正面"已恢复"信号，
@@ -2425,6 +2424,7 @@ switch (cmd) {
     break;
   }
 
+  case "mark-turn": await (await import("./manager/first-turn.js")).cmdMarkTurn(args[0]); break; // bridge Stop hook 记首次回合
   // v2.8+ 手动归档：archive <name> —— 立即快照该 agent 当前 session 的 jsonl
   case "archive": {
     const [name] = args;

@@ -5,7 +5,7 @@
  * 生命周期部分：原来在 manager.ts 里抄了三份的就绪轮询（create / resume /
  * startClaudeInWindow）、gracefulExit 的收尾弹窗、fork 后的会话 id 探测，都收在这里。
  */
-import { existsSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
 import { readdir, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, join } from "node:path";
@@ -13,13 +13,13 @@ import { resolveSessionIdForWindow } from "../cc-sessions.js";
 import { buildClaudeCommand, type LaunchOptions } from "../claude-launch.js";
 import { findJsonlBySessionId, projectJsonlPath, projectsDir } from "../jsonl-cost.js";
 import {
-  acceptTrustPrompt,
   detectSessionIdlePrompt,
+  isAtShell,
   isClaudeReady,
   probeTuiContract,
-  trustPromptMoves,
 } from "../tmux-helper.js";
 import { isAutoConfirmableModal } from "../modal-confirm.js";
+import { belowTrustLeftover, looksLikeTrustPrompt, modalFooterAtBottom, TRUST_CAPTURE_LINES, trustPromptKey, trustPromptMoves, trustRefusal } from "../trust-prompt.js";
 import { lastUserTextOf } from "./shared.js";
 import { roleLaunch } from "../team-roles.js";
 import type {
@@ -31,6 +31,20 @@ import type {
   RuntimeControl,
   WindowOps,
 } from "./types.js";
+
+/** 像信任框却认不全时，连着这么多轮（pollMs 500）就报 blocked-dialog */
+const TRUST_UNCLEAR_ROUNDS = 6;
+const TRUST_UNCLEAR_DETAIL = "屏幕上有目录信任弹窗但认不全（带编号、文案变了或叠着别的框），没有自动确认；请自己 attach 进 tmux 确认后再 restart";
+
+/** 信任弹窗显示的是真实路径（/tmp → /private/tmp）；目录不在就按原样比 */
+function realPath(p: string | undefined): string | undefined {
+  if (!p) return undefined;
+  try {
+    return realpathSync(p);
+  } catch {
+    return p; // 目录没了照原样返回：trustRefusal 比不上就拒绝，不会多信任
+  }
+}
 
 export function claudeProjectsRoot(home: string = homedir()): string {
   return join(home, ".claude", "projects");
@@ -223,6 +237,8 @@ export const claudeCodeAdapter: ManagedRuntimeAdapter = {
 
   async waitReady(win: WindowOps, budget): Promise<ReadyResult> {
     let sessionIdlePicked = false;
+    let trustSeen = false;
+    let trustUnclear = 0;
     for (let i = 0; i < budget.rounds; i++) {
       await win.sleep(budget.pollMs);
       const pane = await win.capture(10);
@@ -244,12 +260,28 @@ export const claudeCodeAdapter: ManagedRuntimeAdapter = {
         continue;
       }
 
-      // 目录信任弹窗默认高亮 No, exit，不能直接 Enter：选 Yes 再继续
-      const trustMoves = trustPromptMoves(pane);
+      // 目录信任弹窗默认高亮 No, exit：截整个框，完整干净、目录恰好是本次 cwd 才发一个键，高亮停在 Yes 才回车（lib/trust-prompt.ts）
+      const full = looksLikeTrustPrompt(pane) ? await win.capture(TRUST_CAPTURE_LINES) : "";
+      const trustMoves = full ? trustPromptMoves(full) : null;
       if (trustMoves !== null) {
-        await acceptTrustPrompt(win.target, trustMoves);
-        await win.sleep(1000);
+        trustSeen = true;
+        trustUnclear = 0;
+        const refusal = trustRefusal(full, realPath(budget.cwd), realPath(homedir())!, { resolve: (p) => realPath(p)! });
+        if (refusal) return { ready: false, reason: "blocked-dialog", detail: refusal, recoveredFullSession: false };
+        await win.sendKey(trustPromptKey(trustMoves));
+        await win.sleep(trustMoves === 0 ? 1000 : 300);
         continue;
+      }
+      // 像信任框却认不全（带编号、文案变了、叠着别的框）：一个键都不发，连着几轮（约 3 秒，排除正在画）还这样就直接报，不空等满预算。
+      // 只数屏幕底部真是一个框的轮次：restart 复用旧窗口时旧 CC 最后一帧里的信任框文字底下还有 shell，新 CC 画得再慢也不算
+      trustUnclear = full && modalFooterAtBottom(full) ? trustUnclear + 1 : 0;
+      if (trustUnclear >= TRUST_UNCLEAR_ROUNDS) {
+        return { ready: false, reason: "blocked-dialog", detail: TRUST_UNCLEAR_DETAIL, recoveredFullSession: false };
+      }
+      // 弹窗残影下面接了 shell 提示符 = CC 在弹窗上退出了，别再等满预算。第一次截屏前就退了的也算，但头几轮不判：新 CC 还没接管屏幕
+      const below = trustSeen || i >= 3 ? belowTrustLeftover(pane) : null;
+      if (below !== null && isAtShell(below)) {
+        return { ready: false, reason: "exited", detail: "目录信任弹窗之后 Claude Code 退出了", recoveredFullSession: false };
       }
       if (isAutoConfirmableModal(pane)) {
         await win.sendKey("Enter");
@@ -259,9 +291,9 @@ export const claudeCodeAdapter: ManagedRuntimeAdapter = {
     }
     // 最后再用同样的严格条件捕一次，不靠循环结束的瞬时状态
     const final = await win.capture(10);
-    return isClaudeReady(final)
-      ? { ready: true, recoveredFullSession: sessionIdlePicked }
-      : { ready: false, reason: "timeout", recoveredFullSession: sessionIdlePicked };
+    if (isClaudeReady(final)) return { ready: true, recoveredFullSession: sessionIdlePicked };
+    const detail = looksLikeTrustPrompt(final) ? TRUST_UNCLEAR_DETAIL : undefined;
+    return { ready: false, reason: "timeout", ...(detail ? { detail } : {}), recoveredFullSession: sessionIdlePicked };
   },
 
   async onExitPane(pane, win) {
@@ -270,10 +302,11 @@ export const claudeCodeAdapter: ManagedRuntimeAdapter = {
       await win.sleep(1000);
       return "handled";
     }
-    const trustMoves = trustPromptMoves(pane);
+    // 退出阶段不替用户接受新的目录信任：往 No, exit 挪（它本来就是退出）
+    const trustMoves = looksLikeTrustPrompt(pane) ? trustPromptMoves(await win.capture(TRUST_CAPTURE_LINES), "no") : null;
     if (trustMoves !== null) {
-      await acceptTrustPrompt(win.target, trustMoves);
-      await win.sleep(1000);
+      await win.sendKey(trustPromptKey(trustMoves));
+      await win.sleep(trustMoves === 0 ? 1000 : 300);
       return "handled";
     }
     if (isAutoConfirmableModal(pane)) {
@@ -289,6 +322,10 @@ export const claudeCodeAdapter: ManagedRuntimeAdapter = {
     }
     return "none";
   },
+
+  // CC 到第一条消息才写 jsonl；projectJsonlPath 找不到时返回推算路径，所以还要再核一次存在
+  hasSession: (sessionId, cwd) =>
+    cwd ? existsSync(projectJsonlPath(cwd, sessionId)) : findJsonlBySessionId(sessionId) !== null,
 
   forkBaseline: (cwd) => listSessionJsonls(cwd),
 

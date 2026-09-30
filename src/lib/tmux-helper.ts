@@ -17,6 +17,7 @@ import { sandboxDisabled } from "./sandbox.js";
 import { sandboxTmuxArgv, sandboxVerifyNewWindow } from "./sandbox-tmux.js"; export { sandboxTmuxArgv };
 import { windowKey } from "./tmux-target.js"; export { windowKey };
 import { inputBox } from "./input-box.js";
+import { looksLikeTrustPrompt, TRUST_CAPTURE_LINES, trustPromptKey, trustPromptMoves } from "./trust-prompt.js"; export { looksLikeTrustPrompt };
 export const MASTER_SESSION = "master";
 /**
  * 大总管窗口（index 0）的显式名字。不命名的话 tmux 按前台进程自动改名（claude / 版本号），
@@ -572,43 +573,11 @@ export function detectBypassConsentPrompt(pane: string): boolean {
   );
 }
 
-/**
- * v2.21.4+ 目录信任弹窗。CC 2.1.259 起在家目录这类敏感目录启动会先问:
- *   Quick safety check: Is this a project you created or one you trust? …
- *   ❯ No, exit
- *     Yes, I trust this folder
- *   Enter to confirm · Esc to cancel
- * 默认高亮 **No, exit**——直接 Enter 等于退出;它又没有数字编号,parseModalOptions
- * 认不出,就绪轮询只会干等到超时(2026-09-04:cron 临时 agent dir=~ 全部「启动超时」)。
- * 返回到达「Yes」要按几次 Down(负数 = Up,0 = 已高亮);不是该弹窗返回 null。
- * 编排器启动的 agent 目录都是 owner 自己指定的(create / cron),且本来就跑
- * bypassPermissions,自动信任与现有安全模型一致。
- */
-export function trustPromptMoves(pane: string): number | null {
-  const tail = trimTrailingBlank(pane.split("\n")).slice(-25);
-  const joined = tail.join("\n");
-  if (!/trust this folder/i.test(joined) || !/Enter to confirm/i.test(joined)) return null;
-  const opts: Array<{ yes: boolean; selected: boolean }> = [];
-  for (const raw of tail) {
-    const m = raw.match(/^\s*(❯)?\s*(No, exit|Yes, I trust this folder)\s*$/i);
-    if (!m) continue;
-    opts.push({ yes: /^yes/i.test(m[2]), selected: !!m[1] });
-  }
-  const yesIdx = opts.findIndex((o) => o.yes);
-  const selIdx = opts.findIndex((o) => o.selected);
-  if (yesIdx < 0 || selIdx < 0) return null;
-  return yesIdx - selIdx;
-}
-
-/** 在信任弹窗上选「Yes, I trust this folder」:按 moves 次 Down/Up 再 Enter。 */
-export async function acceptTrustPrompt(target: string, moves: number): Promise<void> {
-  const key = moves >= 0 ? "Down" : "Up";
-  for (let i = 0; i < Math.abs(moves); i++) {
-    await tmuxRaw(["send-keys", "-t", target, key]);
-    await Bun.sleep(120);
-  }
-  await Bun.sleep(150);
-  await tmuxRaw(["send-keys", "-t", target, "Enter"]);
+/** 目录信任弹窗上发这一轮的唯一一个键：截整个弹窗、完整干净才发（见 lib/trust-prompt.ts）；没发返回 false */
+export async function stepTrustPrompt(target: string): Promise<boolean> {
+  const moves = trustPromptMoves(await tmuxCapture(target, TRUST_CAPTURE_LINES));
+  if (moves !== null) await tmuxRaw(["send-keys", "-t", target, trustPromptKey(moves)]);
+  return moves !== null;
 }
 
 /**

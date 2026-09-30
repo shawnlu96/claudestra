@@ -30,6 +30,7 @@ export interface AgentInfo {
   pending?: PendingOp;
   notes: string;
   sessionId?: string;
+  firstTurnAt?: string | null; // 第一次跑完回合的时间（manager/first-turn.ts）；create 写 null = 还没对话过，缺字段 = 老条目、不知道
   cwd: string;
   displayName?: string;
   /** 权限预设名（default/strict/readonly/paranoid/自定义） */
