@@ -8,6 +8,9 @@
  */
 import { existsSync, realpathSync, statSync } from "fs";
 import { dirname, join, relative, resolve, isAbsolute, basename } from "path";
+import {
+  isLab, labConfigProblems, labOutboundPorts, labPeerUrlProblem, labPushEndpointProblem, labRelayUrlProblem, LAB_ROOT_ENV, readLabInstances,
+} from "./sandbox-lab.js";
 
 export const SANDBOX_FLAG = "CLAUDESTRA_SANDBOX";
 /** 沙箱根目录：agent 只许建在它下面（scripts/sandbox.ts 设） */
@@ -142,8 +145,13 @@ export function enforceSandboxProcess(c: DirCheck & { bridgeUrl: () => string; e
   const port = portOf(new URL(c.bridgeUrl()));
   const envPort = (c.env.BRIDGE_PORT || "").trim();
   if (envPort && Number(envPort) !== port) problems.push(`BRIDGE_PORT=${envPort} 与 BRIDGE_URL 的端口 ${port} 不一致`);
+  try {
+    problems.push(...labConfigProblems(c.env, port, denyPorts(c.env)));
+  } catch (e) {
+    problems.push((e as Error).message); // lab 开关写法不认识：同沙箱开关，报错不启动
+  }
   if (problems.length) throw new SandboxViolation(problems);
-  installOutboundGuard(new Set([port]));
+  installOutboundGuard(new Set([port, ...labOutboundPorts(c.env)]));
 }
 
 /**
@@ -182,10 +190,22 @@ export function sandboxBridgeEnvProblems(defaultPort: number, env: Env = process
   const port = Number(env.BRIDGE_PORT);
   if (!Number.isInteger(port) || port <= 0 || port >= 65536) out.push(`BRIDGE_PORT 没设或不合法：会回落到生产默认端口 ${defaultPort}`);
   else if ([defaultPort, ...denyPorts(env)].includes(port)) out.push(`BRIDGE_PORT=${port} 是生产端口`);
-  for (const k of SANDBOX_FORBIDDEN_ENV) if ((env[k] || "").trim()) out.push(`环境里有 ${k}（沙箱不连 Discord / 中继 / peer / 推送，也不多开端口）`);
+  for (const k of SANDBOX_FORBIDDEN_ENV) {
+    const v = (env[k] || "").trim();
+    if (!v || labAllowsEnv(k, v, port, env)) continue;
+    out.push(`环境里有 ${k}（沙箱不连 Discord / 中继 / peer / 推送，也不多开端口；lab 模式只认 lab 中继与 lab 端口）`);
+  }
   const bind = (env.BRIDGE_BIND || "127.0.0.1").trim();
   if (!LOOPBACK_HOSTS.has(bind)) out.push(`BRIDGE_BIND=${bind}：沙箱只许绑回环`);
   return out;
+}
+
+/** lab 模式下这两个键可以有，但只能指向 lab 自己：RELAY_URL = lab 中继，PEER_INGRESS_PORT = lab 端口之一（不是 bridge 端口） */
+function labAllowsEnv(key: string, value: string, bridgePort: number, env: Env): boolean {
+  if (!isLab(env)) return false;
+  if (key === "RELAY_URL") return labRelayUrlProblem(value, env) === null;
+  if (key === "PEER_INGRESS_PORT") return Number(value) !== bridgePort && labOutboundPorts(env).includes(Number(value));
+  return false;
 }
 
 export function enforceSandboxBridgeEnv(defaultPort: number, env: Env = process.env): void {
@@ -196,6 +216,36 @@ export function enforceSandboxBridgeEnv(defaultPort: number, env: Env = process.
 /** 沙箱里关掉的功能：调用方拿到非 null 就跳过 / 拒绝，并把这句原因回给用户 */
 export function sandboxDisabled(feature: string, env: Env = process.env): string | null {
   return isSandbox(env) ? `沙箱模式下「${feature}」已关闭（docs/architecture/sandbox.md）` : null;
+}
+
+/**
+ * 沙箱里关掉、lab 模式（lib/sandbox-lab.ts）里打开的功能：中继链路、推送、peer。非沙箱与 lab 返回 null；
+ * 打开之后每个出口还要各自过 lab 的闸（sandboxRelayUrlProblem / sandboxPeerUrlProblem / sandboxPushEndpointProblem）。
+ */
+export function sandboxDisabledOutsideLab(feature: string, env: Env = process.env): string | null {
+  return isSandbox(env) && !isLab(env) ? `沙箱模式下「${feature}」已关闭（lab 模式才开，docs/architecture/sandbox.md）` : null;
+}
+
+/** 沙箱里要连的中继地址：非 lab 一律拒，lab 只认 lab 中继。非沙箱 null */
+export function sandboxRelayUrlProblem(url: string, env: Env = process.env): string | null {
+  if (!isSandbox(env)) return null;
+  return isLab(env) ? labRelayUrlProblem(url, env) : "沙箱不连中继";
+}
+
+/**
+ * 沙箱里要记 / 要连的 peer 地址：非 lab 一律拒，lab 只认同一 lab 目录下的沙箱实例（按它们的沙箱标记）；
+ * 没有地址（只有入站的记录，不往外连）lab 里放行。非沙箱 null
+ */
+export function sandboxPeerUrlProblem(url: string | undefined, env: Env = process.env): string | null {
+  if (!isSandbox(env)) return null;
+  if (!isLab(env)) return "沙箱不建 peer";
+  return url ? labPeerUrlProblem(url, readLabInstances((env[LAB_ROOT_ENV] || "").trim(), SANDBOX_MARKER)) : null;
+}
+
+/** 沙箱里收的推送订阅 endpoint：非 lab 一律拒，lab 只认假推送端点。非沙箱 null（生产照旧按 lib/push-endpoint.ts） */
+export function sandboxPushEndpointProblem(endpoint: string, env: Env = process.env): string | null {
+  if (!isSandbox(env)) return null;
+  return isLab(env) ? labPushEndpointProblem(endpoint, env) : "沙箱不收推送订阅";
 }
 
 /**

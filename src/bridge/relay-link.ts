@@ -23,7 +23,7 @@ import { DEFAULT_RELAY_URL, normalizeRelayUrl } from "../lib/setup-remote-access
 import { configuredPeerIngressPort, DEFAULT_BRIDGE_PORT } from "../lib/bridge-url.js";
 import { bridgeHttpBase, bridgePortOf } from "../lib/bridge-port.js";
 import { repoEnvVar } from "../lib/env-file.js";
-import { sandboxDisabled } from "../lib/sandbox.js";
+import { sandboxDisabled, sandboxDisabledOutsideLab, sandboxRelayUrlProblem } from "../lib/sandbox.js";
 import { readPeers } from "../lib/peers.js";
 import { loadRelayPeerView, relayPeerRefusal } from "../lib/peer-trust.js";
 import { FP_RE, slugify, type PeerRecord } from "../lib/relay-protocol.js";
@@ -89,7 +89,8 @@ export async function startRelayLink(deps: { handleApi?: ApiHandler } = {}): Pro
   const relayUrl = repoEnvVar("RELAY_URL").trim();
   if (client) return { ok: true };
   if (!relayUrl) return { ok: false, error: "没配 RELAY_URL" };
-  const off = sandboxDisabled("中继"); // 沙箱不用生产实例身份连中继（lib/sandbox.ts）
+  // 沙箱不连中继；lab 模式只连 lab 自己在回环上起的中继（lib/sandbox-lab.ts），身份是沙箱状态目录里的实例密钥
+  const off = sandboxDisabledOutsideLab("中继") ?? sandboxRelayUrlProblem(relayUrl);
   if (off) return { ok: false, error: off };
   const key = instanceKeySync();
   if (!key) {

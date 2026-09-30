@@ -4,6 +4,7 @@
  */
 import { repoEnvVar } from "../lib/env-file.js";
 import { configuredBridgePort, DEFAULT_BRIDGE_PORT } from "../lib/bridge-url.js";
+import { isSandbox } from "../lib/sandbox.js";
 
 /**
  * peer 握手的 `--url` 没给时自动探测本机对外地址（手抄最容易错：IP 记错、忘带端口、填 127.0.0.1）。
@@ -17,6 +18,7 @@ export async function resolveMyBridgeUrl(myUrl: string): Promise<{ url: string; 
     ? `⚠️ bridge 当前只监听 ${bind}（BRIDGE_BIND 未开放）——对方无法连入。在 .env 设 BRIDGE_BIND=0.0.0.0（或 Tailscale IP）并重启 bridge 后邀请才可用。`
     : "";
   if (myUrl) return { url: myUrl, note: bindWarn || undefined };
+  if (isSandbox()) return null; // 沙箱（lab）不探 ts.net / 网卡、不开直连入口（会写 .env）：地址要么经 lab 中继，要么显式 --url
   const https = await (await import("../lib/peer-url.js")).httpsPeerUrl(repoEnvVar("PEER_PUBLIC_URL") || "");
   if (https) return { url: https, note: `用 HTTPS 入口 ${https}（反代 → 本机 peer 专用入口，bridge 端口不必对外开放）` };
   const port = configuredBridgePort();
@@ -39,6 +41,7 @@ export async function resolveMyBridgeUrl(myUrl: string): Promise<{ url: string; 
  *  peer IP 同端口找活着的 bridge(1.5s 超时并行 GET /api/v1/agents,有 HTTP
  *  响应即候选——401 也算,那正是 token 门禁在工作)。只探测不发凭据。 */
 export async function scanTailnetBridges(failedUrl: string): Promise<string[]> {
+  if (isSandbox()) return []; // lab 的 peer 只在本机回环上，扫 tailnet 只会探到别人的机器
   const port = (() => { try { return new URL(failedUrl).port || String(DEFAULT_BRIDGE_PORT); } catch { return String(DEFAULT_BRIDGE_PORT); } })();
   const failedHost = (() => { try { return new URL(failedUrl).hostname; } catch { return ""; } })();
   // CLI 定位统一走 lib/tailscale（PATH → App 包内 → 常见位置），与 setup / doctor / bridge 同一套

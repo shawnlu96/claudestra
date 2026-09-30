@@ -1,7 +1,7 @@
 /**
  * 「推送不带正文」经中继的集成测试（docs/relay/e2e-design.md §6.1 P1a；T21a 的验收口径：进程内集成 + owner 真机检查单）。
  * 真中继（src/relay，带 VAPID）+ 真 relay 客户端 + 真派发器与出口（bridge/push/dispatcher、sender）；推送投到本地 TLS 假推送服务，
- * 再像浏览器那样用订阅私钥解开（push-test-helpers.webPushTestBrowser）。两处逐字节检查：
+ * 再像浏览器那样用订阅私钥解开（scripts/lab-push-fakes.ts 的 webPushTestBrowser）。两处逐字节检查：
  *   - 中继看得到的 push 帧 payload（录下客户端发出的帧）；
  *   - 推送服务之后、浏览器解开的正文。
  * APNs 这一路需要真的 p8 和 Apple 的 HTTP/2 服务，这里不起；它的改写由 tests/push-dispatcher.test.ts 逐字节钉住。
@@ -20,7 +20,7 @@ import { markAgentRead } from "../src/lib/unread-store.ts";
 import { loadOrCreateVapidKeys } from "../src/lib/web-push.ts";
 import { closeWebState, openWebState } from "../src/lib/web-state.ts";
 import { createRelay, type Relay } from "../src/relay/server.ts";
-import { selfSignedCert, webPushTestBrowser } from "./push-test-helpers.ts";
+import { selfSignedCert, webPushTestBrowser } from "../scripts/lab-push-fakes.ts";
 
 const SECRETS = ["secretproj", "机密内容", "tok_live_123", "测试机 iPhone", "guest-bob", "ask_42", "发版"];
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
