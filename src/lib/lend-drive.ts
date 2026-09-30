@@ -13,6 +13,7 @@ import { lendRequest, type LendCall, type Lease, type Receipt } from "./lend-rem
 import type { CloneResult } from "./lend-clone.js";
 import type { SendResult } from "./worker-ports.js";
 import { payloadSha } from "./lend-submit.js";
+import { SchedulerStopped } from "./scheduler-maintenance.js";
 import { createHash } from "node:crypto";
 
 export const BEAT_MS = 60_000;
@@ -124,7 +125,10 @@ export async function settleOrder(row: LendRow, d: LendDeps): Promise<void> {
     row = patchOrder(d.db, row.orderId, [row.state], { settle: { ...s, notify: null } }, d.now());
   }
   if (row.settle!.removeDir) {
-    try { d.removeDir(row.orderId); } catch (e) { d.log(`删 ${row.orderId} 的工作目录失败：${(e as Error).message}`); }
+    try { d.removeDir(row.orderId); } catch (e) {
+      if (e instanceof SchedulerStopped) throw e; // 失租 / 停止不是删失败：不往下清标记、写收据
+      d.log(`删 ${row.orderId} 的工作目录失败：${(e as Error).message}`);
+    }
     row = patchOrder(d.db, row.orderId, [row.state], { settle: { notify: null, removeDir: false } }, d.now());
   }
   await d.writeReceipt(row); // 抛了就留着 settle，下一轮再写（appendReceipt 同 orderId 只写一行）

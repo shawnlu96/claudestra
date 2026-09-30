@@ -19,7 +19,8 @@ export const LEND_ASK_CMDS: Record<string, CommandSpec> = {
     valued: ["params"], bools: [],
     usage: "lend-ask --params '<json>'（调度服务专用：出借单逐单确认，给 owner 开 authorize ask；同一张单只开一次）",
     run(c) {
-      const r = openAskFull(c.db, lendAskInput(params(c, "lend-ask")), c.deps.now());
+      // 调度服务子进程：BEGIN IMMEDIATE 等锁期间可能失租，拿到写锁后、写入前再核一次（runLedger 那次核在等锁之前）
+      const r = openAskFull(c.db, lendAskInput(params(c, "lend-ask")), c.deps.now(), { beforeWrite: () => c.deps.assertLease?.() });
       return { ok: true, askId: r.ask.id, duplicate: r.existed };
     },
   },
@@ -29,7 +30,10 @@ export const LEND_ASK_CMDS: Record<string, CommandSpec> = {
     async run(c) {
       const text = lendInformText(params(c, "lend-inform"));
       if (!c.deps.notifyOwner) return { ok: true, notified: false, why: "这个进程没有通知通道" };
-      return { ok: true, notified: await c.deps.notifyOwner(text) };
+      c.deps.assertLease?.(); // 发帧那一刻 bridge-client 还会核；发完再核：期间失租就报 lease-lost，不让调用方当成送到了去领单
+      const notified = await c.deps.notifyOwner(text);
+      c.deps.assertLease?.();
+      return { ok: true, notified };
     },
   },
 };
