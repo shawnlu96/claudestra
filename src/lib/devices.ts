@@ -244,6 +244,14 @@ export function canAdministerPairing(p: Principal): boolean {
   return canManage(p) && !!p.credential;
 }
 
+/**
+ * 有没有人能批本机浏览器的全权请求：未停用的 principal 下有未停用、未过期、带 manage 的设备凭据（批准门是 canAdministerPairing + capGrant）。
+ * 没有 = 只能走终端 claudestra pair；/devices/local 据此直接回 no_approver，免得网页干等 10 分钟。
+ */
+export function hasPairingApprover(file: PrincipalsFile, now = Date.now()): boolean {
+  return file.principals.some((p) => !p.disabled && !p.peer && (p.credentials ?? []).some((c) => !c.disabled && c.grant.manage && c.grant.agents.includes("*") && Date.parse(c.expiresAt) > now));
+}
+
 /** 给出去的权限不能比自己手里的大：会话取交集，终端 / 管理要自己有才给得出。一个会话都不剩 → null */
 export function capGrant(g: Grant, issuer: Principal): Grant | null {
   const agents = intersectAgents(issuer.agents, g.agents);
@@ -320,6 +328,8 @@ export interface Approval {
   guest?: string;
   /** 这个短码是谁签的（审计，见 pairing-codes IssuedCode.issuer） */
   issuer?: string;
+  /** 本机浏览器请求全权（/devices/local 没带控制 token）：只能由网页里的设备凭据批，回环控制路由（本机 agent 也能 curl）批不了 */
+  local?: true;
   createdAt: number;
   expiresAt: number;
   /** approving = 有人点了批准、正在签凭据：不再出现在待批列表，别人的批准 / 拒绝都进不来 */
@@ -333,7 +343,7 @@ export class Approvals {
   private readonly items = new Map<string, Approval>();
   constructor(private readonly now: () => number = Date.now, private readonly random: Random = defaultRandom, private readonly ttlMs = APPROVAL_TTL_MS) {}
 
-  add(a: { code: string; deviceName: string; clientIp: string | null; grant: Grant; guest?: string; issuer?: string }): Approval {
+  add(a: { code: string; deviceName: string; clientIp: string | null; grant: Grant; guest?: string; issuer?: string; local?: true }): Approval {
     this.prune();
     const item: Approval = { id: Buffer.from(this.random(16)).toString("base64url"), ...a, createdAt: this.now(), expiresAt: this.now() + this.ttlMs, state: "pending" };
     this.items.set(item.id, item);

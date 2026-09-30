@@ -184,7 +184,7 @@ export function tokenIdOf(p: Principal): string {
  * 鉴权判据、又是纯粹的一行改动，没有理由留着不一致（web 侧的 api-auth 早就用了
  * timingSafeEqual）。长度不同直接返回 false —— 长度本身不是秘密。
  */
-function secretEquals(a: string, b: string): boolean {
+export function secretEquals(a: string, b: string): boolean {
   const ba = Buffer.from(a, "utf8");
   const bb = Buffer.from(b, "utf8");
   if (ba.length !== bb.length) return false;
