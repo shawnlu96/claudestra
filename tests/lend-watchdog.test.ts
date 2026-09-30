@@ -57,7 +57,11 @@ describe("i28-R5a 读不了 journal 不再一次就停", () => {
     const { db, path } = journal(9e15);
     db.close();
     const writer = Bun.spawn([process.execPath, "-e", `const { openLendJournal, patchOrder } = await import(${JSON.stringify(`${REPO_ROOT}/src/lib/lend-journal.ts`)});
-      for (const end = Date.now() + 3000; Date.now() < end; await Bun.sleep(5)) { const d = openLendJournal(${JSON.stringify(path)}); patchOrder(d, "o1", ["started"], { lastBeatAt: Date.now() }); d.close(); }`],
+      for (const end = Date.now() + 3000; Date.now() < end; await Bun.sleep(5)) {
+        const d = openLendJournal(${JSON.stringify(path)});
+        patchOrder(d, "o1", ["started"], { lastBeatAt: Date.now() });
+        d.close();
+      }`],
       { stdout: "ignore", stderr: "inherit" });
     const seen: Record<string, number> = {};
     for (const end = Date.now() + 3000; Date.now() < end; await Bun.sleep(5)) { const w = lendStopReason("agent-lend-x", path, 1) ?? "ok"; seen[w] = (seen[w] ?? 0) + 1; }
