@@ -108,6 +108,10 @@ describe("daemon-*", () => {
     const r = judgeProbe("daemon-bridge", bridge({ startedAt: MERGED_AT + 30_000, headSince: PULLED_AT }));
     expect(r).toMatchObject({ status: "fail", detail: expect.stringContaining("还没重启") });
   });
+  test("启动与代码更新在同一秒（两边都是秒精度）→ pass，不误判成还没重启（T68g）", () => {
+    expect(judgeProbe("daemon-bridge", bridge({ startedAt: PULLED_AT, headSince: PULLED_AT }))).toMatchObject({ status: "pass" });
+    expect(status("daemon-bridge", bridge({ startedAt: PULLED_AT - 1000, headSince: PULLED_AT }))).toBe("fail");
+  });
   test("HEAD 含合并提交但工作区还是旧文件（reset --soft / 手改）→ fail", () => {
     expect(judgeProbe("daemon-bridge", bridge({ worktreeClean: false }))).toMatchObject({ status: "fail", detail: expect.stringContaining("和 HEAD 不一致") });
   });

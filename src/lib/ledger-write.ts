@@ -40,6 +40,7 @@ import { getItem, getMeta, LedgerError, pmsByProject, type LedgerMeta } from "./
 import { insertEvent, replay, tx } from "./ledger-tx.js";
 import { activeStepFor, checkReviewHead, checkReviewStep, noteStepDelivered, noteStepReview } from "./ledger-steps-write.js";
 import { releaseFinishedCardLeases } from "./ledger-scheduler-lease.js";
+import { schedulerCanVerify } from "./scheduler-verify-gate.js";
 import { checkStructuredReview } from "./scheduler-review.js";
 import { refuseAutoReviewMove } from "./scheduler-auto-review.js";
 
@@ -182,7 +183,8 @@ function updateTask(db: Database, ctx: WriteCtx, cur: LedgerTask, patch: Record<
 
 /**
  * 在已开的事务里推一步：CAS from → 现算角色 → canTransition → 改行 + stage 事件。
- * asRole 只给 ledger-human.ts（v3.2：human 节点的人按执行者推 build / fix → review，actor 是 person id，roleOf 认不出）；
+ * asRole 只给 ledger-human.ts（v3.2：human 节点的人按执行者推 build / fix → review，actor 是 person id，roleOf 认不出）
+ * 与 recordVerify（调度身份过了 schedulerCanVerify 闸，按 pm 推 live → verified，T68g）；
  * 别的调用方传它就绕过了角色判定，tests/ledger-migrate.test.ts 查着只有那一处 import。
  */
 export function applyMove(
@@ -279,13 +281,14 @@ export function recordVerify(
     let task = mustTask(db, input.taskId);
     const dup = replay(db, ctx, { project: task.project, target: task.id, kind: "verify" }, () => task);
     if (dup) return dup;
-    if (!isManager(db, ctx.actor, task)) throw new LedgerError("forbidden", `记完成检查要项目 ${task.project} 的 PM / master / owner（你是 ${ctx.actor}）`);
+    const may = ctx.actor === "scheduler" ? schedulerCanVerify(db, task.id) : isManager(db, ctx.actor, task);
+    if (!may) throw new LedgerError("forbidden", `记完成检查要项目 ${task.project} 的 PM / master / owner 或部署过本卡的调度服务（你是 ${ctx.actor}）`);
     if (task.stage !== "live") throw new LedgerError("conflict", `任务 ${task.id} 当前阶段是 ${task.stage}，不是 live`, { stage: task.stage, rev: task.rev });
     if (input.result === "pass" && !checksAllClear(input.data.checks, input.data.incomplete)) {
       throw new LedgerError("invalid", "结论是 pass 但检查单不全 / 为空，或有没通过也没豁免的项");
     }
     const event = insertEvent(db, ctx, { project: task.project, target: task.id, kind: "verify", text: input.text, data: { ...input.data, result: input.result } }, true);
-    if (input.result === "pass") task = applyMove(db, ctx, task, { from: "live", to: "verified" }, false).task;
+    if (input.result === "pass") task = applyMove(db, ctx, task, { from: "live", to: "verified" }, false, "", ctx.actor === "scheduler" ? "pm" : undefined).task;
     return { row: task, event, duplicate: false };
   });
 }
