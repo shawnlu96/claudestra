@@ -81,8 +81,13 @@ const SCHEMA: SchemaSpec = {
       db.prepare("CREATE INDEX IF NOT EXISTS turns_attr_task ON turns(attr_task)").run();
       db.prepare("CREATE INDEX IF NOT EXISTS turns_attr_feature ON turns(attr_feature)").run();
     },
+    // v6（T92 r2）：v3 起已入库的 Codex 明细是旧键（线程 + 五项计数），和现在的键对不上；记下待重建，下一趟导入开头做（rekeyCodexDetail）
+    (db) => {
+      db.prepare("CREATE TABLE IF NOT EXISTS rekey (what TEXT PRIMARY KEY)").run();
+      db.prepare("INSERT OR IGNORE INTO rekey (what) SELECT 'codex' WHERE EXISTS (SELECT 1 FROM turns WHERE runtime = 'codex')").run();
+    },
   ],
-  tables: ["files", "turns", "calls", "tools", "daily", "dirty_days", "echoes"],
+  tables: ["files", "turns", "calls", "tools", "daily", "dirty_days", "echoes", "rekey"],
   columns: {
     files: ["fp", "turn_input", "runtime", "model", "parent", "cx_pair"], calls: ["reasoning"], daily: ["reasoning", "runtime"],
     turns: ["runtime", "attr_task", "attr_step", "attr_round", "attr_feature", "attr_item", "attr_basis"],
@@ -230,6 +235,27 @@ export function rebuildDirtyDays(db: Database, cutoffMs = retentionCutoff()): nu
     }
   })();
   return days.length;
+}
+
+/**
+ * 旧键的 Codex 明细认不出对应哪条记录，副本按新键再导一次就算两遍（tests/usage-codex.test.ts「r2 回归」）：保留期内的 Codex 明细清掉、
+ * 文件从头重读按新键重建，那几天标脏按新明细重算 daily；保留期之前的旧明细导入时本来就跳过、撞不上新键，留给清理。Claude 的行不动。
+ * 放在导入开头而不在迁移里：清掉和重读要用同一个保留期下界，跨午夜时才不会有一天既没重读、daily 又按缺了 Codex 的明细重算。
+ */
+export function rekeyCodexDetail(db: Database, cutoffMs: number): boolean {
+  if (!db.prepare("SELECT 1 FROM rekey WHERE what = 'codex'").get()) return false;
+  db.transaction(() => {
+    const codex = "SELECT turn_id FROM turns WHERE runtime = 'codex'";
+    db.prepare(`INSERT OR IGNORE INTO dirty_days (day) SELECT DISTINCT day FROM calls WHERE ts >= ? AND turn_id IN (${codex})`).run(cutoffMs);
+    db.prepare(`DELETE FROM calls WHERE ts >= ? AND turn_id IN (${codex})`).run(cutoffMs);
+    db.prepare("DELETE FROM turns WHERE runtime = 'codex' AND NOT EXISTS (SELECT 1 FROM calls c WHERE c.turn_id = turns.turn_id)").run();
+    db.prepare("DELETE FROM tools WHERE NOT EXISTS (SELECT 1 FROM turns t WHERE t.turn_id = tools.turn_id)").run();
+    db.prepare("DELETE FROM echoes").run();
+    db.prepare(`UPDATE files SET offset = 0, fp = NULL, turn_id = NULL, turn_start = NULL, turn_kind = NULL, turn_trigger = NULL, turn_input = NULL,
+      model = NULL, cx_pair = NULL WHERE runtime = 'codex'`).run();
+    db.prepare("DELETE FROM rekey WHERE what = 'codex'").run();
+  })();
+  return true;
 }
 
 /** 清掉保留期之前的明细（先重算脏日子，daily 拿到的是清理前的完整数字）；返回删掉的调用数 */

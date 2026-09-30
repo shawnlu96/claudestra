@@ -82,6 +82,7 @@ agent、sessionId、是否子 agent（sidechain）、开始时间（外来输入
   - 配对状态存在 `files.cx_pair`，跨读块、跨增量导入接得上。
   - 不拿 record 的 `thread_token_usage` 去配 token_count 的累计：resume 之后两者分叉，本机 30 天里 4 千多次对不上。
   - 早先按「线程 + 五项计数」做键，同一线程计数相同的两次独立请求会并成一次（T92 r1 P1-1），已改掉。全零的 token_count（只报限流）不算。
+  - 旧键已入库的库（v3 起就有 Codex 明细）：旧键认不出对应哪条记录，副本按新键再导会算两遍。v6 迁移只打个标记，下一趟导入开头清掉保留期内的 Codex 明细、Codex 文件从头重读按新键重建，那几天的 daily 按新明细重算（`rekeyCodexDetail`）；这一趟不管 `--today` 都读全保留期。保留期之前的旧明细导入时本来就跳过，留给清理；Claude 的行不动。读不到 Codex 目录时先不清，标记留着。
 - **四项 + reasoning**：Codex 的 `input_tokens` 含命中缓存、`output_tokens` 含 reasoning。入库时 input = input − cached，cacheRead = cached，cacheCreation = cache_write，output = output − reasoning，reasoning 单列；五项之和 = `total_tokens`。看到的上下文 = 单次请求 input + cacheCreation + cacheRead（= Codex 的 input_tokens）。
 - **`total_token_usage` 只用来对账**：它是进程级累计值，换进程 / resume 会重开，重开那一条丢了时做差会少算（本机 30 天少 0.6%），所以不拿它计数。
 - **模型** = `turn_context.model`，是**请求**的模型（rollout 不记实际应答的模型，T91 查实）。查询结果带 `modelBasis: "request"`，文本视图在模型名后标「(请求)」；Claude 的是 `response`。

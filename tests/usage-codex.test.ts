@@ -10,7 +10,7 @@ import { join } from "path";
 import { codexThreadOfFile, codexUsage } from "../src/lib/usage-codex.js";
 import { ingestUsage } from "../src/lib/usage-ingest.js";
 import { turnsFor, usageSummary } from "../src/lib/usage-query.js";
-import { openUsageDb } from "../src/lib/usage-store.js";
+import { openUsageDb, retentionCutoff, usageWriter } from "../src/lib/usage-store.js";
 
 const NOW = Date.now();
 const T = NOW - 2 * 3600_000;
@@ -289,5 +289,43 @@ describe("r1 回归：汇总按运行时分（P2-1）", () => {
     for (const rows of [usageSummary(f.db, 0), usageSummary(f.db)]) {
       expect(rows.map((r) => [r.runtime, r.modelBasis, r.totalTokens])).toEqual([["codex", "request", 1100], ["claude-code", "response", 110]]);
     }
+  });
+});
+
+describe("r2 回归：v3 库里旧键的 Codex 明细（T92 r2 P2）", () => {
+  test("升级后旧请求的副本按新键再出现不重算；Claude 的行、保留期之前的旧明细不动；只重建一次", () => {
+    const f = fx();
+    const dbPath = join(f.root, "usage.sqlite");
+    const old = openUsageDb(dbPath);
+    const w = usageWriter(old);
+    const early = retentionCutoff(NOW) - 86_400_000;
+    const put = (turnId: string, runtime: string, sid: string, at: number, key: string, [input, cacheRead, output, reasoning]: number[]) => {
+      w.turn({ turnId, agent: "agent-cx", sessionId: sid, sidechain: false, startedAt: at, kind: "human", trigger: "", runtime });
+      w.call({ key, ts: at, model: "gpt-6.1-sol", input, cacheCreation: 0, cacheRead, output, reasoning, tools: [] }, turnId);
+    };
+    put(`cx:${turnUuid(1)}`, "codex", TH, T + 10, `cx:${TH}:1000:500:0:100:20`, [500, 500, 80, 20]); // v3 的键：线程 + 五项计数
+    put(`cx:${turnUuid(9)}`, "codex", TH, early, `cx:${TH}:7:0:0:3:0`, [7, 0, 3, 0]);
+    put("cc", "claude-code", "cc-sid", T, "cc-call", [100, 0, 10, 0]);
+    old.exec("PRAGMA user_version = 5");
+    old.close();
+    const db = openUsageDb(dbPath);
+    const first = [meta(TH), ...turn(1, T, "一", [SAME])];
+    f.write(f.path(TH), first);
+    f.write(f.path(TH, REV), [...first, ...turn(2, T + 10_000, "二", [[2000, 0, 50]])]);
+    const run = (extra = {}) => ingestUsage(db, {
+      projectsRoot: join(f.root, "projects"), archiveRoot: f.archive, codexRoot: join(f.root, "sessions"),
+      registry: [{ name: "agent-cx", sessionId: TH, runtime: "codex" }] as never, now: NOW, ...extra,
+    });
+    const byRuntime = (rows: ReturnType<typeof usageSummary>) => rows.map((r) => [r.runtime, r.totalTokens]);
+    const want = [["codex", 1100 + 2050 + 10], ["claude-code", 110]];
+    run({ sinceMs: NOW + 60_000 }); // --today 这类窄窗口：重建那趟照样要读保留期内的全部文件
+    expect(byRuntime(usageSummary(db, 0))).toEqual(want);
+    expect(byRuntime(usageSummary(db))).toEqual(want);
+    const keys = (db.query("SELECT key FROM calls WHERE key LIKE 'cx:%' ORDER BY ts").all() as { key: string }[]).map((r) => r.key);
+    expect(keys[0]).toBe(`cx:${TH}:7:0:0:3:0`);
+    expect(keys.slice(1).every((k) => k.includes(`:${turnUuid(1)}:`) || k.includes(`:${turnUuid(2)}:`))).toBe(true);
+    expect(db.query("SELECT COUNT(*) AS n FROM rekey").get()).toEqual({ n: 0 });
+    run();
+    expect(byRuntime(usageSummary(db))).toEqual(want);
   });
 });

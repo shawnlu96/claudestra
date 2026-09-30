@@ -18,7 +18,7 @@ import { attributeFromPath, type AttrResult } from "./usage-attr.js";
 import { CODEX, codexThreadOfFile, handleCodexLine, type CodexLineCtx } from "./usage-codex.js";
 import { runtimeForSessionPath } from "./session-source.js";
 import { callOf, inboundIdentity, inboundOf, triggerSummary } from "./usage-classify.js";
-import { pruneUsage, rebuildDirtyDays, retentionCutoff, UNOWNED, usageWriter, type FileState } from "./usage-store.js";
+import { pruneUsage, rebuildDirtyDays, rekeyCodexDetail, retentionCutoff, UNOWNED, usageWriter, type FileState } from "./usage-store.js";
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const CHUNK_BYTES = 8 * 1024 * 1024;
@@ -282,7 +282,9 @@ export function ingestUsage(db: Database, opts: IngestOptions = {}): IngestResul
     codexRoot: opts.codexRoot === undefined ? codexRolloutRootOrSkip("token 账导入 Codex") : opts.codexRoot,
   };
   const owners = sessionOwners(o.registry, o.archiveRoot);
-  const since = opts.sinceMs ?? cutoff;
+  // 刚清掉旧键的 Codex 明细：这趟必须把保留期内的文件全读一遍（--today 之类的 sinceMs 会漏掉更早的日子）；读不到 Codex 目录就先不清
+  const rekeyed = !!o.codexRoot && rekeyCodexDetail(db, cutoff);
+  const since = rekeyed ? cutoff : opts.sinceMs ?? cutoff;
   const w = usageWriter(db);
   const ctx: CodexLineCtx = {
     cutoff, tool: w.tool, isEcho: w.isEcho, noteEcho: w.noteEcho,
