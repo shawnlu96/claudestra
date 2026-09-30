@@ -5,17 +5,26 @@
  *   版本登记在 ~/.claude/sessions/<pid>.json，和磁盘上 `claude --version` 一比就知道。
  * - Pi：不自更新，要人跑 `pi update`。最新版问 pi.dev（与 Pi 启动时自己的检查同一个端点）；
  *   运行版本由 claudestra 扩展写进 pi-env 快照（Pi 的 VERSION 常量）。
+ * - Codex：同 Pi，最新版问 npm registry；已装 / 运行版本 / 能否替人 npm 更新见 lib/codex-version.ts。
  */
 import { probeClaudeVersion } from "./claude-binary.js";
 import { readCcSessionEntries } from "./cc-sessions.js";
 import { defaultRunner } from "./codex-thread.js";
 import { resolveLoginBinary } from "./login-binary.js";
+import { fetchLatestCodex, probeCodexInstall, readCodexRunning } from "./codex-version.js";
+import { CODEX_ACP_PAIRS, codexPairsWithAdapter } from "./acp/install.js";
 import { piBinName, readPiRuntimeSnapshot } from "./pi-env.js";
 import { pidAlive } from "./tmux-helper.js";
 
 export type UpdateHint =
-  | { kind: "restart"; running: string; installed: string }
-  | { kind: "pi-update"; installed: string; latest: string };
+  | { kind: "restart"; running: string; installed: string; adapterPairs?: string }
+  | { kind: "pi-update"; installed: string; latest: string }
+  /** npm：是 npm 全局安装，网页才给「更新并重启」按钮（否则只有文字） */
+  | { kind: "codex-update"; installed: string; latest: string; npm: boolean; adapterPairs?: string };
+/*
+ * adapterPairs（只有 Codex 会带）：目标版本不在 codex-acp 配套范围里，值是配套范围（如 0.158.x）。网页只给文字、不给按钮，
+ * 端点也拒——升到不配套的 codex，ACP agent 下次起适配器就是错配（docs/runtimes/codex-acp.md「Codex 升级」）。
+ */
 
 /** a 比 b 新（逐段数字比较）。任一方解析不出 x.y.z → false：拿不准就不打扰人。 */
 export function isNewerVersion(a?: string, b?: string): boolean {
@@ -26,13 +35,34 @@ export function isNewerVersion(a?: string, b?: string): boolean {
   return false;
 }
 
-/** 该给哪条提示。Pi 有新版时先让人 `pi update`——更新完重启一次，「运行版本落后」也一并解决。 */
-export function pickUpdateHint(runtime: string, v: { running?: string; installed?: string; latest?: string }): UpdateHint | null {
-  if (runtime === "pi" && v.installed && v.latest && isNewerVersion(v.latest, v.installed))
-    return { kind: "pi-update", installed: v.installed, latest: v.latest };
-  if (v.running && v.installed && isNewerVersion(v.installed, v.running))
-    return { kind: "restart", running: v.running, installed: v.installed };
-  return null;
+/** 正式版 x.y.z（不带 -alpha 之类的后缀）：codex 只提示升到正式版，端点也只装正式版 */
+export const isStableVersion = (v?: string): boolean => !!v && /^\d+\.\d+\.\d+$/.test(v);
+
+/**
+ * 该给哪条提示。Pi / Codex 有新版时先提示更新——更新完重启一次，「运行版本落后」也一并解决。
+ * Codex 的新版不配套适配器时，能直接点的「重启生效」优先；都不能点才给那条只有文字的。codex 是整机一份，
+ * 所以「更新」对 tmux agent 也拦；「重启」只拦 ACP agent（tmux 的 TUI 不经适配器）。npm latest 是预发布版时
+ * codex 不提示更新（端点也不装，给了按钮也点不成）。tests/update-hints.test.ts。
+ */
+export function pickUpdateHint(
+  runtime: string,
+  v: { running?: string; installed?: string; latest?: string; npm?: boolean; acp?: boolean },
+): UpdateHint | null {
+  let parked: UpdateHint | null = null;
+  if (v.installed && v.latest && isNewerVersion(v.latest, v.installed)) {
+    if (runtime === "pi") return { kind: "pi-update", installed: v.installed, latest: v.latest };
+    if (runtime === "codex" && isStableVersion(v.latest)) {
+      const hint = { kind: "codex-update" as const, installed: v.installed, latest: v.latest, npm: !!v.npm };
+      if (codexPairsWithAdapter(v.latest)) return hint;
+      parked = { ...hint, adapterPairs: CODEX_ACP_PAIRS };
+    }
+  }
+  if (v.running && v.installed && isNewerVersion(v.installed, v.running)) {
+    const hint = { kind: "restart" as const, running: v.running, installed: v.installed };
+    if (!(runtime === "codex" && v.acp && !codexPairsWithAdapter(v.installed))) return hint;
+    parked ??= { ...hint, adapterPairs: CODEX_ACP_PAIRS };
+  }
+  return parked;
 }
 
 // 探测要起进程（登录 shell 15s + --version 20s）或打外网（10s），而列表请求的调用方（web BFF）5s 就放弃
@@ -96,11 +126,25 @@ async function fetchLatestPi(): Promise<string | undefined> {
 const PROBE_CC: VersionProbe = { key: "installed:claude", ttl: INSTALLED_TTL_MS, load: () => probeInstalled("claude") };
 const PROBE_PI: VersionProbe = { key: "installed:pi", ttl: INSTALLED_TTL_MS, load: () => probeInstalled(piBinName()) };
 const PROBE_PI_LATEST: VersionProbe = { key: "latest:pi", ttl: LATEST_TTL_MS, load: fetchLatestPi };
+let codexNpm = false; // 与 installed:codex 同一次探测得出（缓存只存字符串）
+const PROBE_CODEX: VersionProbe = {
+  key: "installed:codex",
+  ttl: INSTALLED_TTL_MS,
+  load: async () => {
+    const i = await probeCodexInstall();
+    codexNpm = !!i?.npm;
+    return i?.version;
+  },
+};
+const PROBE_CODEX_LATEST: VersionProbe = { key: "latest:codex", ttl: LATEST_TTL_MS, load: fetchLatestCodex };
 const versions = makeVersionCache();
 
 /** 网页刚替用户跑完 `pi update`：马上重探已装版本，横幅立刻翻成「重启生效」，不用等 2 分钟 TTL */
 export function forgetInstalledPi(): void {
   versions.forget(PROBE_PI.key);
+}
+export function forgetInstalledCodex(): void {
+  versions.forget(PROBE_CODEX.key);
 }
 
 /** sessionId → 该会话**活着的**进程启动时的版本（同一 session 被重启过多次时取最新那次）。只读本地文件，重启后提示立刻消失 */
@@ -115,10 +159,10 @@ async function ccRunningVersions(): Promise<Map<string, string>> {
 }
 
 type ListedAgent = { name: string; status?: string; updateHint?: UpdateHint | null };
-type RegInfo = { runtime?: string; sessionId?: string };
+type RegInfo = { runtime?: string; sessionId?: string; transport?: string };
 
 /**
- * 给 /api/v1/agents 的列表项挂 updateHint（只看 active 的 Claude Code / Pi 会话；master 不在 registry 里，不提示）。
+ * 给 /api/v1/agents 的列表项挂 updateHint（只看 active 的 Claude Code / Pi / Codex 会话；master 不在 registry 里，不提示）。
  * 不等任何进程/外网探测：冷缓存时这一轮不带提示（undefined），后台刷新完下一轮带上。
  */
 export async function attachUpdateHints(agents: ListedAgent[], regs: Map<string, RegInfo>, cache: VersionCache = versions): Promise<void> {
@@ -127,12 +171,25 @@ export async function attachUpdateHints(agents: ListedAgent[], regs: Map<string,
   const isCc = (a: ListedAgent) => !regs.get(a.name)?.runtime || regs.get(a.name)?.runtime === "claude-code";
   const hasCc = live.some(isCc);
   const hasPi = live.some(isPi);
-  void cache.refresh([...(hasCc ? [PROBE_CC] : []), ...(hasPi ? [PROBE_PI, PROBE_PI_LATEST] : [])]);
+  const isCodex = (a: ListedAgent) => regs.get(a.name)?.runtime === "codex";
+  const hasCodex = live.some(isCodex);
+  void cache.refresh([
+    ...(hasCc ? [PROBE_CC] : []),
+    ...(hasPi ? [PROBE_PI, PROBE_PI_LATEST] : []),
+    ...(hasCodex ? [PROBE_CODEX, PROBE_CODEX_LATEST] : []),
+  ]);
   const ccRunning = hasCc ? await ccRunningVersions() : new Map<string, string>();
   const [ccInstalled, piInstalled, piLatest] = [cache.get(PROBE_CC.key), cache.get(PROBE_PI.key), cache.get(PROBE_PI_LATEST.key)];
   for (const a of live) {
     const r = regs.get(a.name)!;
     if (isCc(a)) a.updateHint = pickUpdateHint("claude-code", { running: r.sessionId ? ccRunning.get(r.sessionId) : undefined, installed: ccInstalled });
     else if (isPi(a)) a.updateHint = pickUpdateHint("pi", { running: readPiRuntimeSnapshot(a.name)?.piVersion, installed: piInstalled, latest: piLatest });
+    else if (isCodex(a)) {
+      const v = {
+        running: readCodexRunning(a.name), installed: cache.get(PROBE_CODEX.key), latest: cache.get(PROBE_CODEX_LATEST.key),
+        npm: codexNpm, acp: r.transport === "acp",
+      };
+      a.updateHint = pickUpdateHint("codex", v);
+    }
   }
 }
