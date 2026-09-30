@@ -168,6 +168,7 @@ import { recordMetric } from "./lib/metrics.js";
 import { nudgeReason, pickUnrepliedForNudge } from "./lib/reply-nudge.js";
 import { dropPendingsForChannel, hangsInterAgentWatchdog, hangsPendingReply, nudgesForOrigin, pendingKeysOwedBy, takeApiPending } from "./lib/pending-reply-scope.js";
 import { holdAtWallWait, quotaWall, rearmResume, resumeStillWanted, startQuotaWall } from "./bridge/quota-wall-wiring.js";
+import { sessionGone } from "./lib/route-session.js";
 import { onCodexTypeInFailed } from "./bridge/codex-menu-hold.js";
 import { initHttpPeer, cancelHttpPeerCallsForChannel } from "./bridge/http-peer.js";
 import { extractControlToken } from "./bridge/api-auth.js";
@@ -202,6 +203,7 @@ import {
 // Discord 交互块（D5-4 从本文件搬出；import 时零副作用，下面显式注册）
 import { registerSlashCommands } from "./bridge/slash-commands.js";
 import { registerInteractionHandlers } from "./bridge/discord-interactions.js";
+import { admitCaller, answerWhoami } from "./bridge/caller-identity.js";
 
 // ============================================================
 // 类型定义
@@ -850,6 +852,7 @@ async function deliverToLocal(env: RouterEnvelope, to: RouterLocalEndpoint, stil
   // 押着的打断收尾提醒:之后又被打断 / 叫停过、那件事已续上、过了 30 分钟,就不投了(turnCuts.noticeWanted)
   const wallHold = await quotaWall()?.holds(env, to.channelId); // 额度闸：agent / bridge 消息押到出闸
   if ((stillWanted && !stillWanted()) || !turnCuts.noticeWanted(env) || !resumeStillWanted(env)) return { envelope: env, outcome: { kind: "dropped", reason: "已从押后队列撤下" } };
+  const gone = await sessionGone(env.meta.expectSession, to.channelId); if (gone) return { envelope: env, outcome: { kind: "dropped", reason: gone.error } };
   if (!busy && wallHold) return holdForQuotaWall(env, evAgent, meta.user);
   if (busy) {
     const n = heldLocalMsgs.holdEnv(env, wallHold ? "quota_wall" : undefined); // 从 flush 来的是队里那个 env 本身,不会重复入队
@@ -1659,16 +1662,12 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
         return;
       }
 
+      if (!admitCaller(ws, msg, clients.get(msg.channelId)?.ws, CONTROL_CHANNEL_ID)) return; // T85：无凭据的不能顶替已验证的持有者
       const old = clients.get(msg.channelId);
       if (old && old.ws !== ws) {
-        // 顶替语义保持不变：后来者接管。典型场景是 Claude Code 重启了它的 MCP server
-        // （旧进程尚未完全退出、ws 还没 close 时新进程已连上），这时新连接才是对的。
-        //
-        // 2026-07-25 曾误改成"活连接优先"来解决一次主会话失联，但实测证伪：subagent
-        // 并不会起自己的 channel-server（它复用父会话的 MCP 连接，jsonl 里的工具列表
-        // 只是继承）。真正的现象是 channel-server 被反复重启、Claude Code 重试若干次后
-        // 放弃。"活连接优先"会拒掉重启后的正统实例，反而加速耗尽重试次数 —— 已回滚。
-        // 这里只保留 idle 时长的诊断输出，便于下次判断旧连接究竟是活的还是僵尸。
+        // 后来者接管（唯一例外是上一行 admitCaller）：典型是 CC 重启了它的 MCP server，旧 ws 还没 close 新进程已连上。
+        // 别改成「活连接优先」：subagent 不起自己的 channel-server，那样只会拒掉重启后的正统实例、加速耗尽 CC 的重试
+        // （2026-07-25 改过又回滚，git log -S 活连接优先）。这里只留 idle 时长的诊断，便于判断旧连接是活的还是僵尸。
         const idleMs = Date.now() - (old.lastSeen ?? 0);
         console.log(
           `🔄 频道 ${msg.channelId} 重新注册 — 主动关闭旧连接（旧连接 ${Math.round(idleMs / 1000)}s 前还在通信，` +
@@ -2199,10 +2198,10 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
     case "codex_undelivered": void onCodexUndelivered(msg, ws, clients.get(msg.channelId)?.ws === ws); break; // 只了结没投进 Codex 的这一条，不替它宣告完成
     case "codex_typein_failed": if (clients.get(msg.channelId)?.ws === ws) onCodexTypeInFailed(msg, heldLocalMsgs); break; // 下一条再打字；菜单挡住的押回
     case "forward_to_agent": ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, ...(await handleForward(ws, msg)) })); break;
+    case "whoami": answerWhoami(ws, msg); break; // T85 调用方身份探针（bridge/caller-identity.ts）
     case "fleet_state": case "fleet_run": ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, ...(await (await import("./bridge/fleet/ws.js")).handleFleetWs(msg, ws)) })); break;
     case "route_to_agent": {
       try {
-        // 找发送方的 channelId
         let fromChannelId = "";
         let fromName = msg.fromName || "";
         for (const [chId, info] of clients.entries()) {
@@ -2216,10 +2215,8 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
           }
         }
 
-        // v1.9.22+: 解析 target，支持 peer: 语法：
-        //   "future_data"                        → 本地 agent-future_data
-        //   "peer:ahh.future_data"               → 跨 peer（HTTP transport）
-        //   "future_data@ahh"                    → 同上（短格式）
+        // 解析 target:"future_data" → 本地 agent-future_data;"peer:ahh.future_data" → 跨 peer（HTTP transport）
+        //   "future_data@ahh" → 同上（短格式）
         const rawTarget = (msg.targetName as string) || "";
         const peerMatch = rawTarget.match(/^peer:([^.]+)\.(.+)$/) || rawTarget.match(/^([^@]+)@(.+)$/);
         if (peerMatch) {
@@ -2259,7 +2256,6 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
           return;
         }
 
-        // 从 registry 找目标 agent
         const regResult = await runManager("list");
         const agents: any[] = regResult.agents || [];
 
@@ -2278,19 +2274,19 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
         const targetName = rawTarget.startsWith("agent-") ? rawTarget : `agent-${rawTarget}`;
         const target = agents.find((a: any) => a.name === targetName);
         if (!target) {
-          ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, error: `Agent '${targetName}' 不存在或未在 registry 中` }));
+          ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, error: `Agent '${targetName}' 不存在或未在 registry 中`, rejected: "no_target" }));
           break;
         }
+        const gone = await sessionGone(msg.expectSession, target.channelId); // 调度派单:目标换过会话就不投(投递前拒,调用方可重排)
+        if (gone) { ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, ...gone })); break; }
 
         const targetClient = clients.get(target.channelId);
         if (!targetClient) {
-          ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, error: `Agent '${targetName}' 未连接到 Bridge（可能已停止）` }));
+          ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, error: `Agent '${targetName}' 未连接到 Bridge（可能已停止）`, rejected: "not_connected" }));
           break;
         }
 
-        // v2.0.0 Phase 4: 通过 deliver(envelope) 注入消息。
-        // from=local(caller agent), to=local(target agent)。renderContentForLocal
-        // 看到 from.kind=="local" 会自动拼 "[🤖 来自 fromName]" 前缀。
+        // deliver(envelope) 注入:from/to 都是 local,renderContentForLocal 见 from.kind=="local" 自动拼 "[🤖 来自 fromName]" 前缀
         const fromEnv: RouterLocalEndpoint = {
           kind: "local",
           agentName: fromName,
@@ -2317,6 +2313,7 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
             ts: new Date().toISOString(),
             threadId: newThreadId(),
             skipInterAgentWatchdog: oneShot || undefined,
+            expectSession: typeof msg.expectSession === "string" ? msg.expectSession : undefined,
           },
         };
         // v2.24+: 给某个 agent 发消息 = 回了它的消息。它之前发来的那条
@@ -3411,13 +3408,10 @@ void import("./bridge/ask-entry.js").then((m) => m.initAskWiring({ // 待你处�
 }));
 void import("./bridge/fleet/service.js").then((m) => m.initFleet({ clients, deliver, controlChannelId: CONTROL_CHANNEL_ID })); // 批量管理：LP 状态轮询 + fleet 动作（bridge/fleet/）
 void import("./bridge/ledger-audit-service.js").then((m) => m.startLedgerAudit({ clients, deliver, hold: (e) => void heldLocalMsgs.holdEnv(e), lastMessageSource, runManager })); // 台账巡检
-
 // 清扫上次崩溃 / 被杀残留的 webterm-* viewer session（grouped session 视图，kill 不伤 master 本体）；Discord 与 Web-only 模式都要
 sweepStaleTerminalSessions().catch(() => {});
-
 void import("./bridge/startup-migrations.js").then((m) => m.startStartupMigrations(runManager));
 void import("./bridge/ctx-boundary.js").then((m) => m.startCtxBoundary()); // 上下文边界自动压缩：每分钟一轮，Discord / web-only 都跑
-
 // Web-only: 无 DISCORD_BOT_TOKEN → Web-only 模式：不连 Discord，只跑与平台无关的初始化子集。HTTP/ws/api/事件流在上面 Bun.serve 时已就绪。
 // 跳过的 Discord 专属项：cleanupStaleThinkingMessages / initStatsDashboard /
 // registerSlashCommands / startPermissionWatcher / startWedgeWatcher /

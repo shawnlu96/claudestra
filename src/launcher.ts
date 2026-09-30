@@ -86,6 +86,7 @@ initDaemonLogs("launcher");
 import { assertPrimaryOrExit } from "./lib/owner-guard.js";
 import { busyAgentWindows } from "./lib/busy-windows.js";
 import { healSelfDirty } from "./lib/self-dirty.js";
+import { discardOneShotAfterReady, issueLaunchCred, sweepStaleOneShots, withOneShot } from "./lib/caller-cred-launch.js";
 await assertPrimaryOrExit("launcher");
 
 // 默认 master 目录：仓库根 / master。允许 env 覆盖以支持自定义部署。
@@ -123,14 +124,8 @@ async function captureLast(lines = 10): Promise<string> {
 }
 
 /**
- * master 的 session-scoped effort（通过 `--effort <level>` CLI flag 传给 Claude Code）。
- *
- * master 绝大多数 turn 是路由调度，low 就够了、响应更快、token 更省。
- * 这个设置只影响 master 这一个 Claude Code 进程，agent 不传 `--effort` →
- * 继承全局 `~/.claude/settings.json` 的 effortLevel（通常是 xhigh/max）。
- *
- * 用 env MASTER_EFFORT=<level> 覆盖。`default` 或空字符串 → 不加 flag，
- * master 也跟着全局 effortLevel 走。
+ * master 的 session-scoped effort（`--effort <level>`）：绝大多数 turn 是路由调度，low 就够、更快更省；只影响 master 这一个进程。
+ * env MASTER_EFFORT=<level> 覆盖；`default` 或空串 → 不加 flag，跟全局 settings.json 的 effortLevel 走。
  */
 const MASTER_EFFORT = (process.env.MASTER_EFFORT || "low").trim();
 
@@ -145,35 +140,39 @@ async function bringUpClaudeInMasterWindow(): Promise<boolean> {
   // shell，下一轮没单子可读，自动降级成全新会话（崩溃/开机路径行为不变）。
   const resume = await takeMasterResume().catch(() => null);
   if (resume) console.log(`↩️  接回大总管原会话 ${resume.sessionId.slice(0, 8)}（${resume.reason ?? "?"}）`);
-  const cmd = buildClaudeCommand({
-    channelId: CONTROL_CHANNEL_ID,
-    bridgeUrl: BRIDGE_URL,
-    effort: MASTER_EFFORT,
-    resumeId: resume?.sessionId, settingsAgent: "master", // 大总管也能按 agent 关技能（manager skill-toggle master …）
-  });
-  // shell init 阶段的 Y/n（oh-my-zsh / homebrew）会吞掉首字符，先清掉。
-  await clearShellInitPrompts(MASTER_WINDOW);
-  await tmuxSendLine(MASTER_WINDOW, cmd);
+  const credFile = await issueLaunchCred({ agent: "master", family: "claude-code", sessionId: resume?.sessionId }, "mcp-config");
+  return withOneShot(credFile, async () => { // T85 启动凭据：channel-server 读走即删；就绪等它读走，超时 / 异常 / 信号立即删
+    const cmd = buildClaudeCommand({
+      channelId: CONTROL_CHANNEL_ID,
+      bridgeUrl: BRIDGE_URL,
+      effort: MASTER_EFFORT,
+      resumeId: resume?.sessionId, settingsAgent: "master", // 大总管也能按 agent 关技能（manager skill-toggle master …）
+      callerCredFile: credFile,
+    });
+    // shell init 阶段的 Y/n（oh-my-zsh / homebrew）会吞掉首字符，先清掉。
+    await clearShellInitPrompts(MASTER_WINDOW);
+    await tmuxSendLine(MASTER_WINDOW, cmd);
 
-  // 等待并自动确认各种提示（dev channel、trust、bypass、etc）
-  for (let i = 0; i < 120; i++) {
-    await Bun.sleep(500);
-    const pane = await captureLast(10);
-
-    if (await isIdle()) {
-      console.log(`✅ 大总管已就绪${MASTER_EFFORT && MASTER_EFFORT !== "default" ? `（effort=${MASTER_EFFORT}）` : ""}`);
-      (await import("./lib/agent-settings.js")).dropLaunchSettings("master"); return true; // 超长设置落的启动快照：就绪 = CC 已读过
-    }
-
-    if (masterShouldAutoConfirm(pane)) {
-      await confirmMasterModal(pane);
+    // 等待并自动确认各种提示（dev channel、trust、bypass、etc）
+    for (let i = 0; i < 120; i++) {
       await Bun.sleep(500);
-      continue;
-    }
-  }
+      const pane = await captureLast(10);
 
-  console.log("⚠️ 大总管启动超时，但 window 可能仍在初始化");
-  return await masterWindowExists();
+      if (await isIdle()) {
+        console.log(`✅ 大总管已就绪${MASTER_EFFORT && MASTER_EFFORT !== "default" ? `（effort=${MASTER_EFFORT}）` : ""}`);
+        (await import("./lib/agent-settings.js")).dropLaunchSettings("master"); await discardOneShotAfterReady(credFile); return true; // 超长设置落的启动快照：就绪 = CC 已读过
+      }
+
+      if (masterShouldAutoConfirm(pane)) {
+        await confirmMasterModal(pane);
+        await Bun.sleep(500);
+        continue;
+      }
+    }
+
+    console.log("⚠️ 大总管启动超时，但 window 可能仍在初始化");
+    return await masterWindowExists();
+  });
 }
 
 async function startMaster() {
@@ -334,6 +333,7 @@ async function checkBetaUpdates(autoOn: boolean) {
     }).catch(() => {});
     return;
   }
+  if (!(await import("./lib/scheduler-update-gate.js")).schedulerQueueIdle()) return;
   const busyNow = await busyAgentWindows(MASTER_WINDOW);
   if (busyNow.length) {
     console.log(`🧪 beta 有新 commit(${remote.slice(0, 7)}),在忙: ${busyNow.join(", ")},下次再试`);
@@ -365,6 +365,7 @@ async function checkBetaUpdates(autoOn: boolean) {
   console.log(`🧪 beta 自动前进尝试 ${head.slice(0, 7)} → ${remote.slice(0, 7)}(成败见 ${BETA_UPDATE_LOG})`);
   const stamp = `\n[${new Date().toISOString()}] 🧪 beta ${head.slice(0, 7)} → ${remote.slice(0, 7)}\n`;
   await import("fs/promises").then((m) => m.appendFile(BETA_UPDATE_LOG, stamp)).catch(() => {});
+  if (!(await import("./lib/scheduler-update-gate.js")).schedulerQueueIdle()) return;
   Bun.spawn(["bash", "-c", `exec "${BUN}" run "${REPO_ROOT}/src/manager.ts" update >> "${BETA_UPDATE_LOG}" 2>&1`], {
     cwd: REPO_ROOT, stdin: "ignore", stdout: "ignore", stderr: "ignore",
     // @ts-ignore Bun 支持 detached
@@ -374,7 +375,6 @@ async function checkBetaUpdates(autoOn: boolean) {
 
 async function checkForUpdates() {
   if (!CONTROL_CHANNEL_ID) return;
-
   // v2.17 通道分流:beta 跟 commit,release 跟正式版
   {
     const cfgChan = await readConfig();
@@ -429,7 +429,7 @@ async function checkForUpdates() {
     return;
   }
 
-  // 自动更新开启 → 等所有 agent 空闲再更新
+  if (!(await import("./lib/scheduler-update-gate.js")).schedulerQueueIdle()) return;
   const busyNow = await busyAgentWindows(MASTER_WINDOW);
   if (busyNow.length) {
     console.log(`🆙 Claudestra ${release.tag} 有新版本，但在忙: ${busyNow.join(", ")}，下次再试`);
@@ -474,10 +474,9 @@ async function checkForUpdates() {
     });
   } catch { /* non-critical */ }
 
-  // 关键：manager.ts update 会 reload launcher 自己，用 detached 让子进程脱离 launcher 生命周期；
-  // 输出追加到日志文件，bail 时有迹可查
   const stamp = `\n[${new Date().toISOString()}] 🆙 release v${local} → ${release.tag}\n`;
   await import("fs/promises").then((m) => m.appendFile(RELEASE_UPDATE_LOG, stamp)).catch(() => {});
+  if (!(await import("./lib/scheduler-update-gate.js")).schedulerQueueIdle()) return;
   Bun.spawn(["bash", "-c", `exec "${BUN}" run "${REPO_ROOT}/src/manager.ts" update >> "${RELEASE_UPDATE_LOG}" 2>&1`], {
     cwd: REPO_ROOT, stdin: "ignore", stdout: "ignore", stderr: "ignore",
     // @ts-ignore Bun 支持 detached
@@ -1088,6 +1087,7 @@ async function main() {
 
   // 持续监控
   while (true) {
+    sweepStaleOneShots(); // T85：启动半路被 kill -9 留下的一次性凭据文件，没人再启动也按时清掉
     await Bun.sleep(CHECK_INTERVAL_MS);
 
     if (!(await sessionExists())) {

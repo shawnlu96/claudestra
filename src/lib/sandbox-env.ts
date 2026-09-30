@@ -5,6 +5,7 @@
 import { join } from "path";
 import { settingsLaunchArgs } from "./agent-settings.js";
 import { sandboxAcpHome } from "./acp/stub.js";
+import { isLab } from "./sandbox-lab.js";
 import { SANDBOX_DENY_DIRS_ENV, SANDBOX_DENY_PORTS_ENV, SANDBOX_FLAG, SANDBOX_ROOT_ENV } from "./sandbox.js";
 
 type Env = Record<string, string | undefined>;
@@ -15,7 +16,7 @@ type Env = Record<string, string | undefined>;
  */
 const INHERITED_KEYS = [
   "PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "LC_ALL", "LC_CTYPE", "TERM", "TMPDIR",
-  // 代理配置只影响「怎么出网」，不带身份；测试靠它把漏网的出站请求引到计数替身上
+  // 代理配置只影响「怎么出网」，不带身份；测试靠它把漏网的出站请求引到计数替身上。lab 模式不继承（scripts/sandbox.ts 的 envFor）
   "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "all_proxy", "no_proxy",
   // CLAUDESTRA_ACP_AGENT 刻意不继承：沙箱里 acp 固定起本仓的 stub（lib/acp/stub.ts），外部 argv 一律不认
 ] as const;
@@ -122,10 +123,20 @@ export function sandboxEnv(
  *   沙箱 agent 每刷新一次状态栏就写一次生产的 usage-cache.json。`--settings` 的优先级高于用户设置，覆盖掉它。
  *   agent 自己的设置（lib/agent-settings.ts）并进同一份：两个 --settings 怎么合并 CC 没背书；超长同样落快照（settingsLaunchArgs）。
  */
-export function sandboxLaunchArgs(mcpName: string, bunPath: string, srcDir: string, agentSettings: Record<string, unknown> = {}, agent?: string): string[] {
-  const cfg = { mcpServers: { [mcpName]: { command: bunPath, args: ["--no-env-file", join(srcDir, "channel-server.ts")] } } };
+export function sandboxLaunchArgs(mcpName: string, bunPath: string, srcDir: string, agentSettings: Record<string, unknown> = {}, agent?: string, withMcpConfig = true): string[] {
+  const cfg = { mcpServers: { [mcpName]: channelServerEntry(bunPath, srcDir, true) } };
   const settings = { ...agentSettings, statusLine: { type: "command", command: join(srcDir, "..", "scripts", "statusline-usage.sh") } };
-  return ["--mcp-config", JSON.stringify(cfg), "--strict-mcp-config", ...settingsLaunchArgs(settings, agent)];
+  // withMcpConfig=false：调用方自己带一份含启动凭据的 --mcp-config（lib/claude-launch.ts），两份同名配置谁生效 CC 没背书
+  return [...(withMcpConfig ? ["--mcp-config", JSON.stringify(cfg)] : []), "--strict-mcp-config", ...settingsLaunchArgs(settings, agent)];
+}
+
+/**
+ * channel-server 在 MCP 配置里的那一项。沙箱跑本 checkout（--no-env-file：不读仓库 .env）；生产与 setup 的
+ * `claude mcp add … -- bun run <仓库>/src/channel-server.ts` 同一条命令。env 只给这个服务进程（启动凭据走这里）。
+ */
+export function channelServerEntry(bunPath: string, srcDir: string, sandbox: boolean, env?: Record<string, string>) {
+  const script = join(srcDir, "channel-server.ts");
+  return { command: bunPath, args: sandbox ? ["--no-env-file", script] : ["run", script], ...(env ? { env } : {}) };
 }
 
 /**
@@ -137,7 +148,7 @@ export function sandboxLaunchArgs(mcpName: string, bunPath: string, srcDir: stri
 const SANDBOX_MANAGER_COMMANDS = new Set([
   "create", "kill", "remove", "list", "restart", "archive", "token-add", "token-list", "token-revoke",
   "project-add", "project-list", "project-assign", "project-edit", "project-remove", "cron-list", "tmux-capture",
-  "project-migrate", "sessions", "set-session", "label", "cron-add", "cron-edit", "cron-remove", "cron-toggle", "cron-history",
+  "project-migrate", "worker-kind-migrate", "sessions", "set-session", "label", "cron-add", "cron-edit", "cron-remove", "cron-toggle", "cron-history",
   "tmux-send-keys", "team-link", // team-link 只改沙箱 registry 的 parent / task（manager/team.ts），同 label
   "rename", "repair", "fleet", // 只动沙箱 registry / tmux / bridge（manager/agent-rename.ts、manager/repair.ts；fleet 只连沙箱 bridge 的 ws）；doctor 读生产 launchd，仍不开放
   "quota-wall", // 额度闸 status|clear：只读写沙箱状态目录下的 quota-wall.json / 请求文件（manager/quota-wall.ts）
@@ -148,14 +159,25 @@ const SANDBOX_MANAGER_COMMANDS = new Set([
   "migrate", // T60：只改沙箱 registry，重启的 Codex 在沙箱里仍固定走 stub
 ]);
 
-/** 返回拒绝原因；null = 可以跑。agent 目录与 runtime 另由 manager 的 create 入口按 lib/sandbox.ts 再查一遍 */
-export function sandboxManagerRefusal(args: string[]): string | null {
+/**
+ * lab 模式（lib/sandbox-lab.ts）另开的：新版邀请流程、peer 管理、给 agent 开 external（peer scope 只收 external agent）。
+ * peer 落盘由 lib/peers.ts 按 lab 闸再查（只认同一 lab 目录下的沙箱实例），出站由闸门只放行 lab 端口。
+ * 老三步握手（peer-http-invite / join / accept）、peer-http-tidy 不开：lab 用不上，少一条路少一处要审。
+ */
+const LAB_MANAGER_COMMANDS = new Set([
+  "peer-invite-new", "peer-join-auto", "peer-invite-redeem", "peer-invite-list", "peer-invite-revoke", "peer-invite-inspect",
+  "peer-http-list", "peer-http-test", "peer-http-scope", "peer-http-remove", "external",
+]);
+
+/** 返回拒绝原因；null = 可以跑。agent 目录与 runtime 另由 manager 的 create 入口按 lib/sandbox.ts 再查一遍。lab = 沙箱的 lab 模式 */
+export function sandboxManagerRefusal(args: string[], lab = isLab(process.env)): string | null {
   const cmd = args[0] ?? "";
-  if (!SANDBOX_MANAGER_COMMANDS.has(cmd)) {
-    return `沙箱里不开放 manager ${cmd || "（空）"}；可用：${[...SANDBOX_MANAGER_COMMANDS].join(" ")}`;
+  if (!SANDBOX_MANAGER_COMMANDS.has(cmd) && !(lab && LAB_MANAGER_COMMANDS.has(cmd))) {
+    const allowed = [...SANDBOX_MANAGER_COMMANDS, ...(lab ? LAB_MANAGER_COMMANDS : [])];
+    return `沙箱里不开放 manager ${cmd || "（空）"}；可用：${allowed.join(" ")}`;
   }
   if (args.includes("--include-master")) return "沙箱没有大总管，不支持 --include-master";
-  if (args.includes("--external")) return "沙箱不对外共享 agent（--external）";
+  if (args.includes("--external") && !lab) return "沙箱不对外共享 agent（--external；lab 模式可以）";
   if (cmd === "transport" && args[2] === "tmux") return "沙箱 Codex 只许 ACP stub，不起真实 TUI";
   const rt = args.indexOf("--runtime");
   const acp = args[rt + 1] === "codex" && (args.indexOf("--transport") < 0 || args[args.indexOf("--transport") + 1] === "acp");

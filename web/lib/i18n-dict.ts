@@ -477,6 +477,7 @@ export const DICT: Record<string, string> = {
   "认不出调用方的身份：改项目目录要找 PM 或 owner（网页 / master）": "Caller identity not recognized: ask a PM or the owner (web / master) to change project directories",
   "{actor} 不是项目 {projects} 的 PM，不能改项目目录：改项目目录要找 PM 或 owner（网页 / master）":
     "{actor} isn’t a PM of project {projects} and can’t change its directories: ask a PM or the owner (web / master)",
+  "{actor} 不能{what}：只有 owner（网页 / 终端）或 master 能改": "{actor} can’t {what}: only the owner (web / terminal) or master can",
   "工作目录(一行一个,可多仓)": "Working directories (one per line, several repos OK)",
   "项目说明(可选,会注入新建 agent 的上下文)": "Project description (optional, added to new agents' context)",
   "至少要一个工作目录": "At least one working directory is required",
@@ -670,10 +671,16 @@ export const DICT: Record<string, string> = {
   "，扫二维码直接进；手输 8 位码则要在电脑上确认一次。码 10 分钟内有效，只能用一次。":
     " — scan the QR code to get in directly; a typed 8-character code needs one confirmation on the computer. Valid for 10 minutes, single use.",
   "等待电脑确认": "Waiting for the computer to confirm",
+  "等待已配对的设备批准": "Waiting for approval on a paired device",
+  "在手机等已配对的设备上核对这个码并允许。确认后这里会自动进入。":
+    "Check this code on a paired device (such as your phone) and allow it. This page continues automatically.",
+  "确认超时，请再点一次一键配对": "Approval timed out — tap one-tap pairing again",
+  "还没有能批准的已配对设备：在电脑终端运行 claudestra pair": "No paired device can approve this yet — run claudestra pair in the computer's terminal",
   "回到运行 claudestra pair 的终端（或电脑上的网页）确认这台设备。确认后这里会自动进入。":
     "Confirm this device in the terminal running claudestra pair (or in the web app on the computer). This page continues automatically.",
   "链接已过期，请重新生成二维码": "The link has expired — generate a new QR code",
   "尝试太频繁，请稍后再试": "Too many attempts — try again later",
+  "已有本机请求在等批准：在已配对的设备上拒绝，或等它过期": "Other requests from this computer are waiting — deny them on a paired device or let them expire",
   "这台机器没有连上中继": "That machine is not connected to the relay",
   "还没有选择机器": "No machine selected yet",
   "只能在电脑本机的浏览器里一键配对": "One-tap pairing only works in a browser on that computer itself",
@@ -706,6 +713,8 @@ export const DICT: Record<string, string> = {
   "全部会话（不含大总管）": "All sessions (except master)",
   "默认一个都不开放：至少选一个会话": "Nothing is shared by default — pick at least one session",
   "这等于开放全部非大总管 agent，以后新建的也算": "This shares every agent except master, including ones created later",
+  "能驱动 agent = 能在这台电脑上以你的身份执行任意命令（agent 默认跳过权限确认）；只开放你愿意把这台电脑交给对方的 agent":
+    "Driving an agent = running any command on this computer as you (agents skip permission prompts by default); only share agents you'd hand this computer over with",
   "只想给几个就逐个勾选；确定要全部就再点一次下面的按钮。": "To share just a few, pick them one by one; to share everything, press the button below again.",
   "确定开放全部": "Yes, share all",
   "给谁，比如「Alex 的手机」": "Who is it for, e.g. \"Alex's phone\"",
@@ -721,6 +730,8 @@ export const DICT: Record<string, string> = {
   "已批准：": "Approved: ",
   "这个码已经用不了了（被用掉或已失效），看下面的设备列表确认": "This code no longer works (used or expired) — check the device list below",
   "输入了短码": "entered the code",
+  "在电脑本机请求全权": "asks for full access on the computer itself",
+  "电脑上的 agent 也能发这个请求；是你刚点的、码对得上再允许": "Agents on the computer can send this too; allow only if you just clicked it and the code matches",
   "设备名是对方自己填的；短码对得上再允许": "The device name is whatever the other side typed; only allow it if the code matches",
   "全部会话、终端和管理（不会超过你这台设备自己的权限）": "All sessions, terminal and management (never more than this device itself has)",
   "拒绝": "Deny",

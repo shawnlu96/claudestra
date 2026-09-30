@@ -38,7 +38,7 @@ export const AUDIT_THRESHOLDS = {
 
 const AUDIT_RULES = [
   "review_no_reviewer", "review_passed_idle", "executor_idle", "deliver_not_in_review", "pm_held",
-  "ship_stalled", "reclaim_executor", "task_agent_missing", "orphan_executor", "owner_inbox_stale",
+  "ship_stalled", "reclaim_executor", "task_agent_missing", "orphan_executor", "owner_inbox_stale", "merge_unknown", "review_witness_mismatch",
 ] as const;
 export type AuditRule = (typeof AUDIT_RULES)[number];
 
@@ -93,6 +93,8 @@ export interface AuditSnapshot {
   team?: { dispatcher: string | null } | null;
   /** 合并队列冻结中（meta.queueFrozen）：merge 停着是预期的 */
   queueFrozen?: boolean;
+  /** 调度引擎合并 journal 停在 unknown 的记录（scheduler_merges）；没有这张表 = 空 */
+  mergeUnknown?: readonly { intentId: string; taskId: string; reason: string; since: number }[];
   /** 最近一次解冻（unfreeze 事件）的时刻：merge 停滞从它之后算 */
   unfrozenAt?: number | null;
   held: readonly AuditHeld[] | null;
@@ -231,6 +233,28 @@ function shipStalled(ts: readonly TaskFacts[], frozen: boolean, unfrozenAt: numb
   }
 }
 
+/** unknown 不会自愈，且在结清前挡住所有 update；冻结又让 ship_stalled 静音，所以单列一条推给 PM，直到人工结清 */
+function mergeUnknown(runs: NonNullable<AuditSnapshot["mergeUnknown"]>, emit: Emit): void {
+  for (const r of runs) {
+    emit({ rule: "merge_unknown", taskId: r.taskId, since: r.since, keyParts: [r.intentId],
+      detail: `${r.taskId} 自动合并结果不明（结清前挡 update）：${r.reason.slice(0, 200)}`,
+      suggestion: `核对 PR 后 ledger scheduler-merge-resolve ${r.intentId} --outcome done|failed|cancelled --receipt <证据>，再 unfreeze` });
+  }
+}
+
+/** An auto card's verdict whose recorded evidence (tmux window, process chain, cwd) does not fit the bound reviewer. */
+function witnessMismatches(ts: readonly TaskFacts[], emit: Emit): void {
+  for (const t of ts) {
+    for (const e of t.events) {
+      const miss = e.kind === "review" ? (e.data.witness as { mismatch?: unknown } | undefined)?.mismatch : undefined;
+      if (!Array.isArray(miss) || !miss.length) continue;
+      emit({ rule: "review_witness_mismatch", taskId: t.task.id, since: e.ts, keyParts: [t.task.id, e.seq],
+        detail: `${t.task.id} 第 ${String(e.data.round)} 轮结论记在 ${String(e.data.reviewer)} 名下（${String(e.data.verdict)}），旁证对不上：${miss.map(String).join("；").slice(0, 300)}`,
+        suggestion: "核对这条结论是不是审查员本人写的；不是就 workflow-set --mode manual --reason 接管，按人工重审" });
+    }
+  }
+}
+
 function registryRules(s: AuditSnapshot, ts: readonly TaskFacts[], agents: ReadonlyMap<string, AuditAgent>, now: number, emit: Emit): void {
   const skip = (name: string) => s.pms.includes(name) || name === "master" || name === "owner";
   const byAgent = new Map<string, TaskFacts[]>();
@@ -324,6 +348,10 @@ export function auditLedger(s: AuditSnapshot, now: number): AuditResult {
   } else skip(why("agents"), "executor_idle", "task_agent_missing", "orphan_executor", "reclaim_executor");
   shipStalled(ts, s.queueFrozen === true, s.unfrozenAt ?? null, now, emit);
   evaluated.push("ship_stalled");
+  mergeUnknown(s.mergeUnknown ?? [], emit);
+  evaluated.push("merge_unknown");
+  witnessMismatches(ts, emit);
+  evaluated.push("review_witness_mismatch");
   if (s.held && s.agents) {
     pmHeld(s, s.held, agents, now, emit, keep);
     evaluated.push("pm_held");

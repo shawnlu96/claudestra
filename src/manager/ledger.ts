@@ -7,6 +7,7 @@
 import { existsSync } from "node:fs";
 import { repoEnvVar } from "../lib/env-file.js";
 import { LedgerReader } from "../lib/ledger-read.js";
+import { notify } from "../lib/notify.js";
 import { LedgerError, LEDGER_PATH, openLedger } from "../lib/ledger-store.js";
 import { renameAgentRefs } from "../lib/ledger-write.js";
 import { readProjects } from "../lib/projects.js";
@@ -14,6 +15,9 @@ import { readRegistryAgents } from "../lib/registry.js";
 import { loadRegistry, output, saveRegistry } from "./core.js";
 import { LedgerCli, type LedgerDeps, type Result } from "./ledger-context.js";
 import { DEP_CMDS } from "./ledger-dep-cmds.js";
+import { DAG_CMDS } from "./ledger-dag-cmds.js";
+import { FEATURE_CMDS } from "./ledger-feature-cmds.js";
+import { FEATURE_MIGRATE_CMDS } from "./ledger-feature-migrate-cmd.js";
 import { parseLedgerArgs, resolveActor } from "./ledger-identity.js";
 import { AUDIT_CMDS } from "./ledger-audit-cmd.js";
 import { importCmd } from "./ledger-import.js";
@@ -25,23 +29,35 @@ import { WRITE_CMDS, type CommandSpec } from "./ledger-write-cmds.js";
 import { PEER_CMDS } from "./ledger-peer.js";
 import { STEP_CMDS } from "./ledger-step-cmds.js";
 import { SCHEDULER_CMDS } from "./ledger-scheduler-cmds.js";
-import { isWriteInvocation } from "./write-commands.js";
+import { SCHEDULER_OBSERVE_CMDS } from "./ledger-scheduler-observe-cmds.js";
+import { SCHEDULER_AUTO_CMDS } from "./ledger-scheduler-auto-cmds.js";
+import { DRY_RUN_READS, isWriteInvocation } from "./write-commands.js";
+import { readSchedulerConfig } from "../lib/scheduler-config.js";
+import { collectCallerWitness } from "../lib/caller-witness.js";
 
 /** 认不出身份时读命令用的 actor：不是 registry 键、不在任何 PM 名单里，roleOf 恒为 null */
 export const UNKNOWN_ACTOR = "unknown";
-const SCHEDULER_SERVICE_COMMANDS = new Set(["scheduler-plan", "scheduler-settle", "scheduler-merge-begin", "scheduler-merge-step"]);
+const SCHEDULER_SERVICE_COMMANDS = new Set([
+  "scheduler-plan", "scheduler-settle", "scheduler-session-bind", "scheduler-session-retire", "scheduler-merge-begin", "scheduler-merge-step",
+  "scheduler-observe", "scheduler-fallback-manual", "scheduler-stage", "scheduler-ui-ask",
+]);
 
 const COMMANDS: Record<string, CommandSpec> = {
   ...WRITE_CMDS,
   ...DISPATCH_CMDS,
   ...TEAM_CMDS,
   ...DEP_CMDS,
+  ...FEATURE_CMDS,
+  ...FEATURE_MIGRATE_CMDS,
+  ...DAG_CMDS,
   ...READ_CMDS,
   verify: VERIFY_CMD,
   ...AUDIT_CMDS,
   ...PEER_CMDS,
   ...STEP_CMDS,
   ...SCHEDULER_CMDS,
+  ...SCHEDULER_OBSERVE_CMDS,
+  ...SCHEDULER_AUTO_CMDS,
   import: { valued: ["map", "project"], bools: ["dry-run"], usage: "import <ledger.json> --map <map.json> [--project <id>] [--dry-run]（owner 一次性迁移；映射里的 pms 只在 PM 名单为空时写入）", run: importCmd },
 };
 
@@ -83,8 +99,8 @@ async function realDeps(args: string[]): Promise<LedgerDeps | { error: string }>
   if (!who.ok && isWriteInvocation("ledger", args)) return { error: who.error };
   const actor = who.ok ? who.actor : UNKNOWN_ACTOR;
   const projects = await readProjects();
-  // ledger audit --dry-run 只读：不走 openLedger（它会建表 / 迁移，分支代码对线上库跑一次就把版本号抬上去）
-  const readOnly = args[0] === "audit" && args.includes("--dry-run") ? new LedgerReader().get() : undefined;
+  // audit / feature-migrate 的 --dry-run 只读：不走 openLedger（它会建表 / 迁移，分支代码对线上库跑一次就把版本号抬上去）
+  const readOnly = DRY_RUN_READS.has(args[0] ?? "") && args.includes("--dry-run") ? new LedgerReader().get() : undefined;
   if (readOnly === null) return { error: "台账库还不存在（或正在建），--dry-run 没东西可看" };
   return {
     db: readOnly ?? openLedger(),
@@ -95,6 +111,11 @@ async function realDeps(args: string[]): Promise<LedgerDeps | { error: string }>
     loadRegistry,
     saveRegistry,
     now: () => Date.now(),
+    callerSession: process.env.CLAUDESTRA_SESSION_ID || process.env.CLAUDE_CODE_SESSION_ID || undefined,
+    callerWitness: collectCallerWitness,
+    autoProjects: () => { const s = readSchedulerConfig(); return s.enabled ? Object.keys(s.projects) : []; },
+    autoDispatch: () => readSchedulerConfig().autoDispatch,
+    notifyOwner: (text) => notify({ source: "ledger", chatId: repoEnvVar("CONTROL_CHANNEL_ID"), text }),
   };
 }
 

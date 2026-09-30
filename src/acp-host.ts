@@ -18,6 +18,11 @@ import { runManagerProcess } from "./lib/run-manager.js";
 import { readRegistryAgents } from "./lib/registry.js";
 import { CODEX_READY_OPTION } from "./lib/runtimes/codex-ready.js";
 import { tmuxRaw } from "./lib/tmux-helper.js";
+import { takeCallerCred } from "./lib/caller-cred.js";
+
+// T85 启动凭据：环境里只有一次性文件的路径，在起任何子进程之前读进内存、删文件、删变量（适配器环境拷的是 process.env，
+// lib/acp/adapter-proc.ts adapterEnv）。宿主自己在 bridge 登记时出示，bridge 按它认这个 agent 的身份。
+const callerCred = takeCallerCred(process.env);
 
 const log = (msg: string) => console.log(`[${new Date().toTimeString().slice(0, 8)}] ${msg}`);
 const need = (k: string) => {
@@ -69,7 +74,7 @@ const host = new AcpHost(
   {
     spawn: (cmd, env, cwd) => spawnAdapter(cmd, env, cwd, log),
     beforeSpawn: noteCodex,
-    makeLink: (deps) => new BridgeLink({ ...deps, url: bridgeUrl }),
+    makeLink: (deps) => new BridgeLink({ ...deps, url: bridgeUrl, registerFrame: () => ({ ...deps.registerFrame(), ...(callerCred ? { callerCred } : {}) }) }),
     startProxy: (deps) => startToolProxy(deps),
     postHook: async (body) => {
       const res = await fetch(`${bridgeUrl.replace(/^ws/, "http").replace(/\/+$/, "")}/hook`, {

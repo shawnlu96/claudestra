@@ -16,7 +16,7 @@ import {
   replyEchoMessageIds,
   isEchoSegment,
   ECHO_MIN_CHARS,
-  postReplyMessageIds,
+  postReplyFolds,
 } from "@/features/chat/reply-echo";
 
 const LONG = "**没出问题** —— 那段报错是我自己复核脚本的两条「防呆守卫」拒绝了写入，不是仓库坏了。说清楚：两个 AssertionError 是我的脚本主动中止。";
@@ -135,9 +135,9 @@ describe("replyEchoMessageIds（形态②：紧随其后的独立消息）", () 
   });
 });
 
-describe("postReplyMessageIds：紧跟 reply 的纯旁白消息（默认收起，不看文字是否相同）", () => {
-  test("中文 reply 之后的英文复述也算；中间隔了别的旁白 / 用户消息 / 带工具的都不算", () => {
-    const ids = postReplyMessageIds([
+describe("postReplyFolds：reply 之后的旁白默认收起（不看文字是否相同）", () => {
+  test("紧跟 reply 的纯旁白收整条；两次 reply 之间的过程旁白不收；本轮最后一次 reply 之后的都收", () => {
+    const folds = postReplyFolds([
       { id: "a1", role: "assistant", segments: [{ kind: "text", text: "Checking CI" }, { kind: "reply", text: "发版完成" }] },
       { id: "a2", role: "assistant", segments: [{ kind: "text", text: "Release is out and verified" }] },
       { id: "a3", role: "assistant", segments: [{ kind: "text", text: "Main CI passed" }] },
@@ -145,8 +145,32 @@ describe("postReplyMessageIds：紧跟 reply 的纯旁白消息（默认收起�
       { id: "u1", role: "user", content: "好" },
       { id: "a5", role: "assistant", segments: [{ kind: "text", text: "新回合开头的旁白" }] },
       { id: "a6", role: "assistant", segments: [{ kind: "reply", text: "回复" }] },
-      { id: "a7", role: "assistant", segments: [{ kind: "text", text: "带工具的不算纯旁白" }], toolCalls: [{}] },
+      { id: "a7", role: "assistant", segments: [{ kind: "text", text: "reply 后带工具的，文字也收" }], toolCalls: [{}] },
     ]);
-    expect([...ids]).toEqual(["a2"]);
+    expect([...folds]).toEqual([["a2", -1], ["a7", -1]]);
+  });
+
+  test("reply → 记记忆 → 改文件 → 英文总结（dynamic-workflow 现场）：中间隔了工具也收", () => {
+    const folds = postReplyFolds([
+      { id: "r", role: "assistant", segments: [{ kind: "reply", text: "两项实测都做完了" }] },
+      { id: "t1", role: "assistant", segments: [], toolCalls: [{}] },
+      { id: "t2", role: "assistant", segments: [], toolCalls: [{}] },
+      { id: "s", role: "assistant", segments: [{ kind: "text", text: "I ran both checks: one real call each to Claude and Codex" }] },
+      { id: "n", role: "user", content: "<task-notification>" },
+      { id: "x", role: "assistant", segments: [{ kind: "text", text: "下一轮的旁白照常显示" }] },
+    ]);
+    expect(folds.get("s")).toBe(-1);
+    expect(folds.has("x")).toBe(false);
+  });
+
+  test("直播态同一条消息里：最后一个 reply 段之后的 text 段收，之前的不收；reply 之后只有工具就不记", () => {
+    const seg = (kind: string, text = "x") => ({ kind, text });
+    const folds = postReplyFolds([
+      { id: "m", role: "assistant", segments: [seg("text"), seg("reply"), seg("text"), seg("reply"), seg("tools"), seg("text")] },
+      { id: "k", role: "user", content: "好" },
+      { id: "q", role: "assistant", segments: [seg("text"), seg("reply"), seg("tools")] },
+    ]);
+    expect(folds.get("m")).toBe(3);
+    expect(folds.has("q")).toBe(false);
   });
 });

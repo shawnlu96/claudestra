@@ -6,6 +6,8 @@
  *   bun run sandbox manager <子命令…>                            在沙箱里跑 manager（create / kill / list / token-add …）
  *   bun run sandbox status | down | clean                        看状态 / 停掉 bridge 与沙箱 tmux / 停掉并删沙箱目录
  *   bun run sandbox env                                          打印沙箱环境（export 行，手动调试用）
+ *   … --lab [--pair] [--as a|b]                                  lab 模式：回环中继 + 两实例 peer + 假推送（scripts/sandbox-lab.ts），不支持代理
+ *   bun run sandbox lab-push --lab [--as a|b]                    lab：给实例登记一个假 Web Push 订阅和一台假 APNs 设备
  *
  * 所有沙箱侧的进程都由本脚本用**从零构建的环境**拉起（lib/sandbox-env.ts），并带 `--no-env-file`：
  * 调用者自己的 BRIDGE_URL / DISCORD_CHANNEL_ID 和任何 .env 都进不去。生产改过的端口 / 目录从生产的
@@ -21,10 +23,13 @@ import {
 import { DEFAULT_BRIDGE_PORT } from "../src/lib/bridge-url.js";
 import { readDotenvFileSync } from "../src/lib/env-file.js";
 import { DEFAULT_RUNTIME_DIR, stateDirIn } from "../src/lib/paths.js";
+import { withoutProxyEnv } from "../src/lib/sandbox-lab.js";
 import { SRC_DIR } from "../src/lib/repo-root.js";
+import * as lab from "./sandbox-lab.ts";
 
 const DEFAULT_PORT = 23900;
 const INNER = "__inner";
+const LAB_RELAY = "__lab-relay";
 const BRIDGE_PLIST = join(homedir(), "Library", "LaunchAgents", "com.claudestra.bridge.plist");
 
 interface Opts {
@@ -33,6 +38,7 @@ interface Opts {
   staticDir?: string;
   rest: string[];
   deny: ProductionDeny;
+  lab?: lab.LabPlan;
 }
 
 function fail(msg: string): never {
@@ -72,26 +78,36 @@ function discoverProduction(): ProductionDeny {
   return productionDeny(sources, { port: DEFAULT_BRIDGE_PORT, dirs: [stateDirIn(homedir()), DEFAULT_RUNTIME_DIR] });
 }
 
-function parseOpts(argv: string[]): Opts {
+function parseOpts(argv: string[], cmd: string): Opts {
   let port = Number(process.env.CLAUDESTRA_SANDBOX_PORT) || DEFAULT_PORT;
   let root = "";
   let staticDir: string | undefined;
+  let labOn = false, pair = false, side: lab.LabSide = "a";
   const rest: string[] = [];
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]!;
     if (a === "--port") port = Number(argv[++i]);
     else if (a === "--root") root = resolve(argv[++i] ?? "");
     else if (a === "--static") staticDir = resolve(argv[++i] ?? "");
+    else if (a === "--lab") labOn = true;
+    else if (a === "--pair") pair = true;
+    else if (a === "--as") side = argv[++i] === "b" ? "b" : argv[i] === "a" ? "a" : fail(`--as 只认 a / b（收到 ${argv[i]}）`);
     else rest.push(a);
   }
   const deny = discoverProduction();
   if (!Number.isInteger(port) || port <= 0 || port >= 65536) fail(`--port 不合法：${port}`);
+  if ((pair || side === "b") && !labOn) fail("--pair / --as 只用于 --lab");
+  if (labOn) lab.refuseLabControlProxy(fail); // 在本进程发出任何请求之前
+  const plan = labOn ? lab.labPlan(port, root, side, pair, cmd === "up") : undefined;
+  if (plan && side === "b" && !plan.pair) fail(`${plan.root} 不是 --pair 建的 lab，没有实例 b`);
+  if (plan) [port, root] = [lab.sidePort(plan), lab.sideRoot(plan)];
   if (deny.ports.includes(port)) fail(`${port} 是生产在用的端口（${deny.ports.join(", ")}），沙箱不能用`);
-  return { port, root: root || `/tmp/claudestra-sandbox-${port}`, staticDir, rest, deny };
+  return { port, root: root || `/tmp/claudestra-sandbox-${port}`, staticDir, rest, deny, lab: plan };
 }
 
 function envFor(o: Opts, layout: SandboxLayout): Record<string, string> {
-  return sandboxEnv(process.env, { layout, port: o.port, staticDir: o.staticDir, deny: o.deny });
+  const env = sandboxEnv(process.env, { layout, port: o.port, staticDir: o.staticDir, deny: o.deny });
+  return o.lab ? { ...withoutProxyEnv(env), ...lab.labEnv(o.lab) } : env;
 }
 
 /** 在沙箱环境里跑一个 bun 进程（继承 stdio），返回退出码 */
@@ -182,29 +198,105 @@ async function cmdUp(o: Opts, layout: SandboxLayout): Promise<void> {
   const problems = upProblems(o, layout);
   if (problems.length) fail(problems.join("\n   "));
   for (const d of [layout.root, layout.stateDir, layout.runtimeDir, layout.masterDir, layout.workDir, layout.zdotDir]) mkdirSync(d, { recursive: true });
-  const marker = { root: canonicalPath(layout.root), port: o.port, repo: resolve(SRC_DIR, ".."), createdAt: new Date().toISOString() };
+  const marker = {
+    root: canonicalPath(layout.root), port: o.port, repo: resolve(SRC_DIR, ".."), createdAt: new Date().toISOString(), ...(o.lab ? lab.labMarkerFields(o.lab) : {}),
+  };
   writeFileSync(join(layout.root, MARKER), JSON.stringify(marker) + "\n");
   for (const [f, body] of Object.entries(zdotdirFiles(layout.historyFile))) writeFileSync(join(layout.zdotDir, f), body);
   if (runInSandbox(o, layout, [import.meta.path, INNER, "ensure-tmux", ...passOpts(o)]) !== 0) fail("沙箱 tmux 起不来（看上面的错误）");
 
-  const log = openSync(layout.logFile, "a");
-  const proc = Bun.spawn([process.execPath, "--no-env-file", `${SRC_DIR}/bridge.ts`], {
-    cwd: layout.root, env: envFor(o, layout), stdin: "ignore", stdout: log, stderr: log, detached: true,
-  });
-  closeSync(log);
-  proc.unref();
-  writeFileSync(layout.pidFile, `${proc.pid}\n`);
+  const pid = spawnDetached(o, layout, [`${SRC_DIR}/bridge.ts`], layout.logFile);
+  writeFileSync(layout.pidFile, `${pid}\n`);
   if (!(await waitReady(o.port, 20_000))) fail(`bridge 20 秒内没起来，看日志：${layout.logFile}`);
   // 新建 agent 要能按目录归到某个 project：给沙箱工作目录建一个（已存在时 manager 报错，无害）
   runInSandbox(o, layout, [`${SRC_DIR}/manager.ts`, "project-add", "sandbox", "--dirs", layout.workDir, "--name", "Sandbox"], true);
-  const self = `bun run sandbox${o.port === DEFAULT_PORT ? "" : ` --port ${o.port}`}`;
+  const self = o.lab ? `bun run sandbox --lab${o.lab.ports.a === DEFAULT_PORT ? "" : ` --port ${o.lab.ports.a}`}${o.lab.side === "b" ? " --as b" : ""}`
+    : `bun run sandbox${o.port === DEFAULT_PORT ? "" : ` --port ${o.port}`}`;
   console.log([
-    `✅ 沙箱 bridge 已启动：http://127.0.0.1:${o.port}（pid ${proc.pid}，Web-only）`,
+    `✅ 沙箱 bridge 已启动：http://127.0.0.1:${o.port}（pid ${pid}，Web-only${o.lab ? `，lab 实例 ${o.lab.side}` : ""}）`,
     `   根目录 ${layout.root}（状态 state/、tmux 与截图 run/、日志 bridge.log；agent 只能建在这下面）`,
     `   建 agent：${self} manager create sbx-a ${layout.workDir} "测试用"`,
     `   发 token：${self} manager token-add dev --agents '*' --force`,
-    `   停掉：${self} down；连目录一起删：${self} clean`,
+    `   停掉：${o.lab ? self.replace(" --as b", "") : self} down；连目录一起删：… clean${o.lab ? "（lab 的 down / clean 管全部实例与 lab 中继）" : ""}`,
   ].join("\n"));
+}
+
+/** 在沙箱环境里起一个脱离本脚本的 bun 进程（bridge / lab 中继），输出进日志文件，返回 pid。cwd 默认沙箱根 */
+function spawnDetached(o: Opts, layout: SandboxLayout, args: string[], logFile: string, over: { cwd?: string; env?: Record<string, string> } = {}): number {
+  const log = openSync(logFile, "a");
+  const proc = Bun.spawn([process.execPath, "--no-env-file", ...args], {
+    cwd: over.cwd ?? layout.root, env: { ...envFor(o, layout), ...over.env }, stdin: "ignore", stdout: log, stderr: log, detached: true,
+  });
+  closeSync(log);
+  proc.unref();
+  return proc.pid;
+}
+
+/** 在沙箱里跑 manager 并收下它最后一行 JSON 输出（lab 的 --pair 互邀、lab-push 发 token 用） */
+function managerCapture(o: Opts, args: string[]): { code: number; json: Record<string, unknown> | null; text: string } {
+  const layout = sandboxLayout(o.root);
+  const r = Bun.spawnSync([process.execPath, "--no-env-file", `${SRC_DIR}/manager.ts`, ...args], { cwd: layout.root, env: envFor(o, layout), stdout: "pipe", stderr: "pipe" });
+  const out = r.stdout.toString();
+  const line = out.trim().split("\n").reverse().find((l) => l.startsWith("{"));
+  let json: Record<string, unknown> | null = null;
+  try {
+    json = line ? (JSON.parse(line) as Record<string, unknown>) : null;
+  } catch {
+    json = null; // 最后一行不是完整 JSON：调用方按失败处理，原文在 text 里
+  }
+  return { code: r.exitCode ?? 1, json, text: out + r.stderr.toString() };
+}
+
+/** lab 里另一侧实例的 Opts（端口、根、lab 布局随 side 换） */
+function sideOpts(o: Opts, side: lab.LabSide): Opts {
+  const plan = { ...o.lab!, side };
+  return { ...o, lab: plan, port: lab.sidePort(plan), root: lab.sideRoot(plan) };
+}
+
+async function cmdLabUp(o: Opts): Promise<void> {
+  const plan = o.lab!;
+  const sides = lab.labSides(plan).map((s) => sideOpts(o, s));
+  const problems = [...lab.labUpProblems(plan, o.deny.ports, portFree), ...sides.flatMap((s) => upProblems(s, sandboxLayout(s.root)))];
+  const prodHit = o.deny.dirs.find((d) => pathsOverlap(plan.root, d));
+  if (prodHit) problems.push(`lab 目录 ${plan.root} 与生产的 ${prodHit} 重叠`);
+  if (problems.length) fail([...new Set(problems)].join("\n   "));
+  mkdirSync(lab.labDataDir(plan), { recursive: true });
+  lab.writeLabMarker(plan);
+  const a = sides[0]!;
+  // 中继带实例 A 的沙箱环境（A 的根此时还不存在，cwd 与转译缓存放 lab 数据目录，免得 A 的根先被写脏、过不了 up 的检查）
+  const relayOver = { cwd: lab.labDataDir(plan), env: { BUN_RUNTIME_TRANSPILER_CACHE_PATH: join(lab.labDataDir(plan), "bun-cache") } };
+  const relayErr = await lab.startLabRelay(plan, () => spawnDetached(a, sandboxLayout(a.root), [import.meta.path, LAB_RELAY], lab.labRelayLog(plan), relayOver));
+  if (relayErr) fail(relayErr);
+  for (const s of sides) await cmdUp(s, sandboxLayout(s.root));
+  if (plan.pair) {
+    const err = await lab.pairLab(plan, (side, args) => managerCapture(sideOpts(o, side), args));
+    if (err) fail(`${err}\n   （lab 已起，排查完可 bun run sandbox --lab down）`);
+    console.log(`🤝 已互邀：B→A 经 lab 中继（relay://），A→B 走 http://127.0.0.1:${lab.sideIngress(plan, "b")}；agent ${lab.LAB_AGENT("a")} / ${lab.LAB_AGENT("b")}`);
+  }
+  console.log(`🧪 lab ${plan.root}：中继 ws://127.0.0.1:${plan.ports.relay}，假推送落盘 ${lab.labSinkDir(plan)}（登记订阅：bun run sandbox lab-push --lab）`);
+}
+
+async function cmdLabOther(cmd: string, o: Opts): Promise<void> {
+  const plan = o.lab!;
+  const bad = lab.labMarkerProblem(plan);
+  if (bad) fail(bad);
+  const sides = lab.labSides(plan).map((s) => sideOpts(o, s)).filter((s) => existsSync(s.root));
+  if (cmd === "status") console.log(`lab ${plan.root}：中继 ${lab.labRelayRunning(plan) ? "在跑" : "没在跑"}（${plan.ports.relay}），假推送 ${plan.ports.push}`);
+  for (const s of sides) await (cmd === "status" ? cmdStatus : cmd === "down" ? cmdDown : cmdClean)(s, sandboxLayout(s.root));
+  if (cmd === "status") return;
+  await lab.stopLabRelay(plan);
+  if (cmd !== "clean") return;
+  const c = canonicalPath(plan.root), home = canonicalPath(homedir());
+  if (c === "/" || c === home || home.startsWith(`${c}/`) || o.deny.dirs.some((d) => pathsOverlap(c, d))) fail(`${plan.root} 是 home / 它的上级 / 与生产目录重叠，不删`);
+  rmSync(plan.root, { recursive: true, force: true });
+  console.log(`🧹 已删除 ${plan.root}`);
+}
+
+/** lab-push：给当前实例登记一个假 Web Push 订阅和一台假 APNs 设备（scripts/sandbox-lab.ts registerLabPush） */
+async function cmdLabPush(o: Opts): Promise<void> {
+  const err = await lab.registerLabPush(o.lab!, o.port, (args) => managerCapture(o, args));
+  if (err) fail(err);
+  console.log(`🔔 实例 ${o.lab!.side} 已登记假 Web Push 订阅与假 APNs 设备；推送落盘到 ${lab.labSinkDir(o.lab!)}`);
 }
 
 function passOpts(o: Opts): string[] {
@@ -281,8 +373,12 @@ async function inner(op: string, layout: SandboxLayout): Promise<void> {
 
 async function main(): Promise<void> {
   const [cmd = "", ...argv] = process.argv.slice(2);
-  const o = parseOpts(argv);
+  if (cmd === LAB_RELAY) return (await import("./sandbox-lab-relay.ts")).runLabRelay(); // 已在沙箱 + lab 环境里（cmdLabUp 拉起）
+  const o = parseOpts(argv, cmd);
   const layout = sandboxLayout(o.root);
+  if (o.lab && cmd === "up") return cmdLabUp(o);
+  if (o.lab && ["down", "clean", "status"].includes(cmd)) return cmdLabOther(cmd, o);
+  if (cmd === "lab-push") return o.lab ? cmdLabPush(o) : fail("lab-push 只用于 --lab");
   switch (cmd) {
     case "up": return cmdUp(o, layout);
     case "down": return cmdDown(o, layout);
@@ -290,13 +386,13 @@ async function main(): Promise<void> {
     case "status": return cmdStatus(o, layout);
     case "env": return cmdEnv(o, layout);
     case "manager": {
-      const refusal = sandboxManagerRefusal(o.rest);
+      const refusal = sandboxManagerRefusal(o.rest, !!o.lab);
       if (refusal) fail(refusal);
       process.exit(runInSandbox(o, layout, [`${SRC_DIR}/manager.ts`, ...o.rest]));
     }
     case INNER: return inner(o.rest[0] ?? "", layout);
     default:
-      console.log("用法：bun run sandbox up|status|down|clean|env|manager <子命令…> [--port N] [--root DIR] [--static DIR]");
+      console.log("用法：bun run sandbox up|status|down|clean|env|manager <子命令…>|lab-push [--port N] [--root DIR] [--static DIR] [--lab [--pair] [--as a|b]]");
       process.exit(cmd ? 1 : 0);
   }
 }

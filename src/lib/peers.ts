@@ -9,6 +9,7 @@
 
 import { readJsonLenient, writeJsonStateGuarded } from "./state-file.js";
 import { STATE_DIR } from "./paths.js";
+import { sandboxPeerUrlProblem } from "./sandbox.js";
 import { instanceIdSync, isInstanceId } from "./instance-id.js";
 import { FP_RE } from "./relay-protocol.js";
 import { isPublicKey, keyFingerprint } from "./instance-key.js";
@@ -148,6 +149,11 @@ async function ensureDir() {
 }
 
 export async function writePeers(data: PeersData): Promise<void> {
+  // 沙箱：一条 peer 都不许记；lab 只许记同一 lab 目录下的沙箱实例（lib/sandbox-lab.ts）。所有落盘都经这里，兑换 / 加入 / 改地址都绕不过
+  for (const p of data.httpPeers ?? []) {
+    const bad = sandboxPeerUrlProblem(p.baseUrl);
+    if (bad) throw new Error(`peer ${p.name} 不能记：${bad}`);
+  }
   await ensureDir();
   // 原子写(tmp+rename):bridge 与 manager CLI 两个进程都会写本文件,原地覆写
   // 的半写状态会被另一进程读成 EMPTY 再回写,放大成整文件清空(含双方 token,

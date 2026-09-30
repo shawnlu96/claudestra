@@ -47,7 +47,7 @@ variants:
 ```
 
 默认每轮审查都是对抗式；不再先常规后对抗。每张卡一个独立执行 session、一个独立审查 session；同卡 P1 复验沿用原审查 session。作者 Codex → Claude Code 审，作者 Claude Code → Codex 审；Pi 或未知模型家族没有明确配对时不自动选 reviewer，停给 PM，不猜同家族。
-`task_steps` 继续真校验作者不同人；新增模型家族校验，peer 自报只能标 claim，不伪称本机已核实。
+`task_steps` 继续真校验作者不同人；新增模型家族校验：registry 能找到的本机身份一律核 runtime，不能凭 transport=peer 变成远端。远端绑定须逐字匹配本卡当前步骤的 <agent>@<peer> 委托；家族自报只能标 claim，不伪称本机已核实。
 
 reviewer 只写结构化结论（head、verdict、P0/P1/P2、findingId、family、探针原文、报告路径、审查 session id），不得同时 `--to` 推自动卡。引擎观察审查事件后决定阶段；旧人工卡的 `review --to` 保持兼容。P1 的 `changes` 自动进 fix
 并附报告要点与原探针；P0 或 `block` 暂停并升级。只剩 P2 时通知 PM 看 diff，同时继续自动合并流程，不再派复验；这是 04:27「只留三道闸」对原 P2 PM 闸的收窄。
@@ -74,7 +74,7 @@ auto 卡不再发旧的 deliver/review 指令，避免双派；`ledger-audit` �
 
 ## 并发、合并与外部效果
 
-按项目配置 `maxActiveWorkers`；首个写/修派单取得卡级 worker 槽与文件锁，持续到 live/verified、整卡取消或 PM 明确释放，不随某个 dispatch intent 的 done 释放。审查槽和合并槽单列。dispatch 的 done 仅代表派单回执，worker 交付以校验过的 deliver 事件为准，两者都不释放卡级锁。卡在规格中声明文件 glob、共享资源与接口。申请占槽和文件锁在台账事务内完成；不确定交集按冲突排队，不能以 git 当前无冲突代替声明。离线或租约到期只告警，不把可能仍在写的锁自动借出。依赖判定复用
+按项目配置 `maxActiveWorkers`；首个写/修派单取得卡级 worker 槽与文件锁，持续到 live/verified、整卡取消或 PM 明确释放，不随某个 dispatch intent 的 done 释放。卡已持有 worker 槽时，后续 write/fix 派单沿用该槽，跳过新占用容量检查；同一卡最多占一个槽，写入事务拒绝第二个槽。审查槽和合并槽单列。dispatch 的 done 仅代表派单回执，worker 交付以校验过的 deliver 事件为准，两者都不释放卡级锁。卡在规格中声明文件 glob、共享资源与接口。申请占槽和文件锁在台账事务内完成；不确定交集按冲突排队，不能以 git 当前无冲突代替声明。离线或租约到期只告警，不把可能仍在写的锁自动借出。依赖判定复用
 `blockedBy/depViews`：code 上游到 live/verified/done 才满足，merge 不算。
 
 合并队列把现有 `merge-queue.sh`、`deploy-full.sh` 的步骤搬进仓库，目标地址从配置注入。每项目串行：update-branch → 若 head 变，回审 → check/CI → merge → 部署 → 验证。记录候选 SHA、CI run、merge SHA、部署产物和核证事实。CI 红、
@@ -86,8 +86,8 @@ auto 卡不再发旧的 deliver/review 指令，避免双派；`ledger-audit` �
 intent 给当前动作/排队与具体原因；ask 给等 owner；audit finding 给异常。API 提供同一事务版本的投影与 `asOfSeq`，避免节点已前进而边仍是旧快照。回放按事件 seq 重建投影，不用临时内存游标。审查分叉只从 review 事件和实际阶段推，边仍只画任务依赖，不画派单消息；
 派单/交付在团队区和时间轴显示。移动卡片或改变视图形态不在 T68。
 
-T69 在 registry 明确标 `kind: "worker"`，用一个 manager 创建/标记入口服务手动创建、每卡 reviewer、调度助理和引擎创建的 worker。历史迁移只对白名单证据（任务关联、角色、已知 `agent-task-*`）幂等补标，不能凭模糊名字隐藏 PM、主 agent、agent-codex 或
-master。会话 API 输出 kind，Web 侧栏/会话列表/搜索默认过滤 worker；直接 URL 与消息路由仍可访问。v4 DAG 节点和团队栏点击 worker 打开同一个会话，可看、插话、打断。待你处理的 ask 不经过该过滤，卡片点击照样进入 worker 会话。Discord 频道不变。UI PR 附前后截图，
+T69 在 registry 明确标 `kind: "worker"`，用一个 manager 创建/标记入口服务手动创建、每卡 reviewer、调度助理和引擎创建的 worker。历史迁移只认明确的执行/调度角色或 `agent-task-*` 名称；单独的 `--task` 标签和 parent 不足以隐藏长驻主 agent。`kind: "main"` 是 owner 可设的显式撤标覆盖，后续 registry 写入与迁移不得重新打回。
+master、PM、agent-codex 受保护。会话 API 输出 kind，Web 侧栏/会话列表/搜索默认过滤 worker，管理面板保留全部；直接 URL 与消息路由仍可访问。v4 DAG 节点和团队栏点击 worker 打开同一个会话，可看、插话、打断。待你处理的 ask 不经过该过滤，卡片点击照样进入 worker 会话。Discord 频道不变。UI PR 附前后截图，
 owner 截图 ask 属上线闸。
 
 ## 分期、验收与切换
@@ -95,7 +95,8 @@ owner 截图 ask 属上线闸。
 1. **PR A：台账状态与意图。** schema、任务模式、CAS、决定事件、资源占用与只读 DAG 投影；双进程争同一 intent 只成功一次。无真实 worker。
 2. **PR B：规划器与模板。** 纯解释器、code/ui/security 分叉、依赖/并发、P1 三轮、跨模型校验、审查 session 绑定；快照回放同输入同计划。
 3. **PR C：T69 与审查 session 编排。** 统一 worker 打标、幂等迁移、列表过滤/直达、ask 保留；每卡独立 reviewer 的创建与 verified 后安全归档。UI 前后截图。
-4. **PR D：合并队列与服务。** 配置化 merge/deploy、CI/head 校验、冻结恢复、launchd 第四服务接 install/update/doctor/部署；沙箱中做崩溃恢复和假外部服务实测。
+4. **PR D：合并队列与服务。** 配置化 merge、CI/head 校验、冻结恢复、launchd 第四服务接 install/update/doctor；合并成功停在 `merged`（待部署），不发起部署。沙箱中做崩溃恢复和假外部服务实测。
+   **自动部署拆到 T68g**（分支 `feat/t68-auto-deploy` 保存了部署任务 / worker / 清理、launchd submit、部署配置与 verify 驱动的实现和测试，未开 PR）。拆的原因：#242 / #259 的四轮审查里，部署生命周期类 P1 每轮都在（部署被服务重载连坐杀掉 → 一次性任务残留 → unknown 把 update 永久锁死 → 放行 unknown 后在途部署与下一轮 update 重叠）；根子是「结论不明」与「部署子进程是否还活着」没有可核对的区分。在那之前部署由 PM 手动跑（现有 merge-queue / deploy 脚本或 `manager update`），或靠 launcher 自带的自动更新。
 5. **PR E：worker 适配器与切换。** 待 T60 ACP 合入后接 ACP 主接口、本机 channel 回退、T48/T49/peer；先 observe，对新卡逐张开启 auto，旧卡继续 manual。重复通知、重启、断网、额度失败均以台账对账。
 
 每个 PR 均跑 `GUARD_STRICT=1 bun run check`、相关入口构建与沙箱实测，再用一次性 `codex exec` 做一轮对抗自查；自查是开发验收，不是正式任务 reviewer。只 push 分支、开 draft PR；不合并、不动线上服务或生产库。新文件 ≤400 行、热点文件净增 ≤0，`src/lib`
@@ -103,15 +104,59 @@ owner 截图 ask 属上线闸。
 
 ## 已定（待 owner 复核）
 
-- 独立 launchd scheduler 服务；install-cli/update/doctor/部署均纳入。服务故障不拖垮 bridge。
-- 审查通过且 CI 绿自动合并部署。阻塞闸仅 UI 截图、tag/release、同类 P1 三轮；P2 给 PM 看 diff 但不阻塞。
+- 独立 launchd scheduler 服务；install-cli/update/doctor 均纳入（自动部署在 T68g）。服务故障不拖垮 bridge。
+- 审查通过且 CI 绿自动合并；自动部署在 T68g，此前 PM 手动部署。阻塞闸仅 UI 截图、tag/release、同类 P1 三轮；P2 给 PM 看 diff 但不阻塞。
 - 自动卡必填作者模型家族与退路；只从新卡逐张 opt-in，在途卡不迁。
 - 不清楚外部副作用是否已经发生时冻结并升级，宁可停住也不重复 merge/deploy；未知 runtime 家族不猜审查者。
 - 卡级文件锁和 worker 槽持有到 live/verified 或整卡终止；单个意图结清不释放。归一 family 和沿用 findingId 之外，连续四轮任意 P1 是硬升级上限；换规格版本重新计数。
-- 专用 scheduler actor 只能写调度专用命令；人工写入保留实际 actor 和 manual 标记。结果不明的 merge/deploy 即使被取消也不能自动换 key 重试，须有绑定原 intent 的 PM 明确重试决定及外部事实核对。
+- 专用 scheduler actor 只能写调度专用命令（不含 `verify`，部署后验证随自动部署拆到 T68g）；人工写入保留实际 actor 和 manual 标记。服务环境标记用于审计归属与避免借 PM/master 身份，不是同一 OS 用户下的安全边界（本地 shell 本就可写台账文件）；所有自动写入仍要逐意图 CAS 和阶段守卫。结果不明的 merge/deploy 即使被取消也不能自动换 key 重试，须有绑定原 intent 的 PM 明确重试决定及外部事实核对。
+- 在自动重试决定的独立入口落地前，已取消的同轮 merge 一律停给 PM 手工核对并接管，调度器与台账写入口都拒绝换 key 重做。UI 合并的第二道写入闸查台账 authorize ask：owner 答复、未过期、非 guest，绑定当前 task/specRev/head/前后截图摘要；产生 ask 和投影视图的适配器仍在 PR E。
+- T69 移除 worker 前的归档会复制 registry 的 kind 到归档标记；默认全文搜索读该标记过滤，显式指定 agent 仍可查。更早已移除且无标记的旧会话只按 `agent-task-*` 命名识别，不猜其他历史目录。
+- 一次派多张卡给 peer 时，并发往对方项目 PM 入口投递，受本项目「对外委托槽」约束，不等待上一张完成。对方实例升级后，有常设授权且 owner 已设并发上限时，每卡自动建立一个执行 session 和一个跨模型审查 session，按本机相同模板推进；超过上限排队，前卡完成即补位。缺授权或上限时只接单排队并提示对方 owner。双实例沙箱验收：A 同时委托五张给 B，B 上限三，先起三组、后补两组。
+- 自动卡审查结论的身份核对（绑定 reviewer 的频道、运行时环境里的会话、registry 当前 session 与家族、派审 head、审查目录停在该 head 且没有未提交改动）防的是误投、旧会话和串卡，不防蓄意伪造环境的本机 agent：bypass agent 本就是同一用户的任意 shell，能改环境变量，也能直接写台账文件。对伪造只做检测：结论写入时把调用方的 tmux 窗口、父进程链、cwd 记进 review 事件，和绑定审查员对不上就由巡检 `review_witness_mismatch` 推给 PM，不拦写入。要不可伪造，得由宿主（ACP / bridge）代填身份的结果入口，另开卡。
+- 第四服务默认无配置即空转，`doctor` 明报；配置无效时不部分启动。PR D 的 UI 模板在 owner 截图 ask 与 head/specRev/摘要的真实联动接通前禁止自动合并，避免把口头通过当授权。
+- GitHub merge API 可原子锁 head，不能原子锁目标 base；最终检查到合并后必须再读 PR，若 base/head/merge SHA 与批准的 main 目标不符，立即冻结，由 PM 核对。
+
+- 合并 journal 的终点是 `merged`：调度器随后把合并意图结为 done（回执「待 PM 部署」）、释放项目合并槽，任务停在 `merge` 阶段，规划器按已结意图等待；PM 部署并核对后照常手工推 live / verified。`merged` 不挡 update——PM 部署本仓自己就是一次 update。
+- `unknown` 只来自合并这一步（PR/head/CI/mergeability 变化、merge 调用或核对失败、流程漂移），进入时冻结本项目合并队列，并与 `updating`、`merging` 一样算维护忙碌，挡手动 `update` 和 launcher 自动更新：没人确认 GitHub 侧的效果已经结束之前不换代码。出口是 PM / master / owner 核对 GitHub 后执行 `ledger scheduler-merge-resolve <intent> --outcome done|failed|cancelled --receipt <证据>`：journal 进终态 `resolved`，合并意图结为 done（outcome=done）或 cancelled，释放项目合并槽，写 manual 事件，并把本卡 workflow 转为 manual（任务阶段没有经核实的回执推进，引擎不能继续驱动，PM 核对后再决定是否重开 auto；这一条参考了 t68 未提交稿）。调度身份不能结清；队列冻结不随之自动解除，确认没有其他 unknown 后再 `ledger unfreeze`。待结清项由巡检规则 `merge_unknown` 推给 PM，doctor 单列一行。`manager update` 被维护锁拒绝时退出码为 1。
+- scheduler.pid 单实例锁拿不到或失租即停止，每次动作前重核拥有权；scheduler 与 manager update 共用维护锁，update-inflight 标记挡新调度动作；draft 仅等待本卡并跳过未产生的检查查询。
+
+### 调度服务配置
+
+`statePath("scheduler.json")` 不存在时 `enabled=false`；启用时逐项目填写 `maxActiveWorkers`、非空 `requiredChecks`（完整 CI job 名）和 `repoDir`（该项目本地仓库绝对路径，`gh` 在这里运行并核对仓库与 PR 一致）。必过检查缺失、pending、失败或 skipped 均不合并。配置里出现 `deploy` 直接判为无效（服务空转、doctor 报 fail），不静默降级为只合并。仓库的 launchd 安装/更新使用同一 `DAEMONS` 清单，scheduler 排在 launcher 之前。
+
+合并使用 GitHub REST merge 的 `sha` 参数原子锁定已审 head；[GitHub 文档](https://docs.github.com/en/rest/pulls/pulls#merge-a-pull-request)明确 head 不符返回 409。`update-branch` 产生新 head 后，台账同事务改为新轮 review、取消旧 merge intent 并释放项目合并槽。
 
 ## 进度
 
 - 2026-09-30：v1 文档在 `74c34005`；v2 按 04:27 指示改为 ACP 主接口、v4 DAG 数据、T69、每卡跨模型对抗审查 session，并拆为五个实现 PR。
 - PR A：新增台账 workflow、intent、资源占用与 v4 DAG 调度投影；新卡准入、项目事件 CAS、幂等重放、暂停取消、崩溃后的未知结果保锁均在临时库与沙箱 CLI 实测。
   一次性 Codex 对抗自查发现「glob 与实文件锁不相斥」「同任务可并存两个活跃意图」两个 P1，以及重放空白、同毫秒排序两个 P2；已逐项修复并补针对性测试。
+- PR B：写入 v2 数据模板与纯规划器；新卡执行/复述/审查/修复/合并/核证/退役的每一步输出稳定意图或明确等待原因。
+  审查必须绑定本卡 reviewer session、完整 head 和先前派单；P1 同类计数、第三轮升级、P2 通知 PM 后继续、UI ask 绑定及旧结果失效已做分支测试。
+  一次性 Codex 自查指出旧轮派单冒认新轮、并行活跃意图两个 P1，以及历史 P1 证据和截图摘要绑定两个 P2；规划器现要求本轮派单回执、等待任何未结意图，并逐轮校验交付 head/计数、绑定截图摘要。
+- PR C：registry 的唯一分类器在新建、保存与幂等迁移时标记 worker；会话列表和默认全文搜索过滤，管理面板保留全部，v4 任务详情从台账 session 绑定直接打开作者或审查员，会话 store 与待你处理直达保留原路。审查 session 在 v8 台账里按卡和角色唯一绑定，跨模型校验并持有同卡复验身份；verified 后先归档回执再停止，未知结果可凭核对回执续走。沙箱 bridge 实测迁移两次为 1/0，API 正确下发 worker/PM/codex kind。
+  一次性 Codex 对抗自查找到四个 P2：归档后丢失 worker 标记、无 task.agent 的作者无法从 DAG 进入、绑定未核 intent 收件人、归档后停止前会话过早消失；均已修复并补测试。跨模型复审 r1 又要求本机 session 的家族核对 registry runtime，并让 owner 可撤误标、绑定时统一打标、管理面板可操作 worker。截图改走沙箱 headless 浏览器，不动 owner 屏幕。
+- PR D：独立 scheduler 入口、配置与 doctor 行接到第四个 launchd daemon；v9 台账记合并/部署阶段，项目级合并槽与 CAS、完整 head/跨模型审查重核、防重试的 merging/deploying 状态已落地。gh/部署命令经结构化 argv 调用，外部不明即冻结；本卡 verified 由台账检查单判。沙箱中服务禁用/启用空队列均存活，假卡 CLI journal 的分支更新使 merge→review、新轮 head 入账、旧 intent 取消且项目锁归零；没碰真实 GitHub 或部署目标。
+  一次性 Codex 对抗自查找到两项 P1（merge 未原子锁 head、可被无关/跳过的 CI 检查放行）和一项 P2（update-branch 新 head 永久占项目合并槽）；现用 REST `sha` 锁 head，配置必过检查且只认 pass，并在新 head 回审时原子释放锁。UI 模板仍等真实 owner 截图 ask 适配器，当前 fail-closed。
+  修复后自查又指出 CLI 环境标记的本地同用户信任边界、GitHub 无法原子锁 base、验证通过后中断的重放问题、跨仓库项目检查错目录。身份边界与 base 的外部 API 限制已按上节显式记录；代码补了合并后 base/head/SHA 复核、不符冻结且不部署，以及本卡验证重放和按项目部署仓库采事实。
+
+- r2 修复：#233 本卡已持有槽时直接复用，台账拒绝第二槽；#235 本机 registry 优先核身份，peer transport 仅认本卡当前步骤明确委托，受保护长驻 session 在台账绑定前拒绝。最新 main 以 merge 合入，保留 T69、ACP 启动迁移与运行时归档源定位。
+
+- #242 r2：独立 launchd 部署任务、结果文件和重启后的 deploying 等待已实现；head 原子约束保留。沙箱实际替换 bridge/cron/scheduler/launcher 四个同名假服务，旧 scheduler PID 17608 被卸载后部署 PID 17707 继续，四个服务均为 new，journal 到 done，退出码 0；证据 `/tmp/t68-r2-self-deploy.log`（实物在临时根）。draft 等待、单实例锁、自动更新队列守卫与四服务安装说明一并补齐。
+
+- #242 r2 一次性 Codex 自查指出自动更新 TOCTOU（P1）、失租后当前步继续（P2）、draft 查询无 CI 结果仍冻结（P2）；已补共享维护锁与跨重启 journal/更新标记守卫、动作前拥有权检查及停止不冻结、draft 适配器跳过 checks 查询，均有针对性回归。不明部署保守挡更新直到 PM 核实，维护锁正常释放；崩溃时按既有租约机制回收，更新标记不自动丢弃。
+
+- 暂停：收到 PM 说明 owner 13:46 已叫停，迟送的 13:42 续做不算新授权；停止检查、提交、推送和交付，等 owner 按钮确认。#233 `efcfa80a` / #235 `abec3f88` 已推。#242 合并与修复均保留未提交；沙箱自身部署两次通过，check2 7324/0；最后补的维护交接提前收尾、60 秒等待及 spawn thunk 守卫仅有 typecheck/严格 guard 通过，恢复后先补最终全量检查。交接 `/tmp/t68-next-step.txt`。
+
+- 续做：PM 澄清 13:46 是补报宿主中断的信号，不是 owner/PM 叫停；按最新明确指令恢复 #242 收尾。第二次自查的两项 P2 已修：部署提交后立即结束本 tick，释放维护锁；同部署任务的交接等待改为 60 秒；install/migrate 通过 thunk 在 spawn 之前查持锁并在 await 后再查。最后跑全量严格检查后，以普通 merge commit 推送三个叠加 PR；E 段 #257 由另一执行者负责。
+
+- 收尾隔离补充：部署 request 只存执行环境白名单，保留 `BRIDGE_PORT`，否则带 sandbox 标记的子进程会回落到生产默认端口并被隔离闸拒绝；真实子进程导入隔离闸的回归已通过（未监听或连接任何端口）。
+
+- r2 最终交付验证：`GUARD_BASE=feat/t68-worker-sessions GUARD_STRICT=1 bun run check` 7326 pass / 0 fail，严格 guard 全绿；定向 27/0，八个入口构建通过。沙箱两次自身部署的证据为 `/tmp/t68-r2-self-deploy.log` 与 `/tmp/t68-r2-self-deploy2.log`；只用随机标识四个假服务和 stub 台账 verify，生产未动。
+- r3 修复（#242 由 Claude Code 接手）：部署任务收尾自行移除 launchd 标签、observe 兜底移除且不杀运行中任务；unknown 不再挡 update，新增 PM 专用 `scheduler-merge-resolve` 与 `resolved` 终态，巡检 `merge_unknown` 与 doctor 行提示待结清项；被拒的 update 以非 0 退出。
+- r4（Codex 审 109ee73a 不通过：unknown 不代表在途部署已停，放行后可与下一轮 update 重叠）：按审查收口规则拆卡。本 PR 只保留合并队列，停在 `merged` 待 PM 部署；部署任务、worker、清理、部署配置与调度器 verify 挪到 `feat/t68-auto-deploy`，留给 T68g。unknown 恢复为维护忙碌，出口是 `scheduler-merge-resolve`；配置改为 `repoDir`，带 `deploy` 的配置判无效。
+- PR E1：`WorkerSession` 契约（`lib/worker-session.ts`）与端口注入的适配器——Codex 走 ACP（额度/登录失败作结果上报、不重试），Claude Code 走 channel，未迁 ACP 的 Codex 才走 tmux 回退且回执必带原因，peer / Pi / 未知 runtime 退回 manual（`ledger scheduler-fallback-manual`）。台账 transport 仍记宿主形态，派单路径由 runtime+transport 推出，不加迁移。
+  派单驱动先认领再投递，重启后无回执只认台账结果，否则交 PM。observe 用真实台账事实代换调度自有事实（步骤执行者即 session、PM 的 `ledger dispatch` 即派审回执）跑规划器，只写观察事件、决定不变不记；`ledger scheduler-diff` 每条一行对照 PM 实际动作。`ledger review` 增结构化结论（head/session/family/findings 四项同给）。沙箱一张 observe 卡走完交付→changes→修→pass，只有观察事件。
+- E1 r1 修复（跨模型对抗审查 4 个 P1）：observe 的审查者 / session 只取结论之前的指派与 registry 当前 session，普通派审不算对抗式派审，推不出来的记「未知」；结论后没等观察就推阶段（`review --to`）一律记「未知」——当时的 session、步骤、授权台账只存现状，事后重跑会借用未来事实（r2 撤掉了回溯观察）；UI 卡只读投影真实截图 ask（开着 / 批准 / 拒绝 / 过期），owner 批准只认认证入口写的 `answer.owner` 标记（合并闸同一条）；派单在认领前核任务单、意图、卡当前版本与台账绑定的 session，消息端口带 session id，tmux 回退的每条回执（含失败）带原因。Pi 本段不自动派（缺已核实的家族配对），规格里的 Pi channel 适配顺延。
+- PR E2a：新卡逐张开 auto（在途卡拒并说明，auto 退回人工须带原因），自动卡上 `review --to` 一律拒，结论只收台账绑定的 reviewer 从绑定 session 写（调用方会话取运行时环境 `CLAUDESTRA_SESSION_ID` / `CLAUDE_CODE_SESSION_ID`，registry 当前 session 与 runtime 家族、派审 head、审查目录所在 commit 都要对上、且没有未提交改动；旁证不一致记进事件由巡检标出，不拦），PM 要代记先退回人工；PM 用 `ledger restate-approve` 放行复述。`schedulerAutoTick` 每卡一步：先结清未结意图（pending 在事务外按「去掉本意图」重算核对，submitted 走 E1 对账），再规划执行；推阶段与截图 ask 只经 `scheduler-stage` / `scheduler-ui-ask`，两者都在写事务内重算计划、仍是同一意图才执行。作者 session = 卡上 PM 指定的执行者，reviewer = 按卡新建的跨家族 `agent-rv-<task>`，住在从执行者仓库拉出的独立 detached worktree（`statePath("worktrees","rv-<task>")`），每次派审前固定到被审 head，已跟踪文件被审查员改过就不覆盖、退回人工；权限模式仍是运行时默认（ACP 适配器写死 full-access），硬隔离留待后续；派单经 bridge 带期望 session（`expectSession`），路由时与押后补投前都按 registry 核对，换过会话就不投；只有带类型码的投递前拒绝算「没投」，其余错误一律记未知停给 PM。额度 / 登录失败（Codex 的运行时卡、Claude Code 的额度闸命中）按认领时刻归到那张派单，归不上的也退回人工并通知 PM；失联只标原因。截图 ask 过期或缺前后截图退回人工，只剩 P2 时进合并并通知 PM 看 diff。合并意图交 D 的队列；自动 tick 跟在服务循环的 observe tick 后面，merge / observe / auto 整轮在同一个维护租约里（`scheduler-pass.ts`，update 持锁时整轮跳过），租约、停止信号与单实例锁紧贴每个效果重核、中间不隔 await：每个子进程（台账 CLI、git、gh、manager create）spawn 前与退出后（失败也核，停止优先），bridge 帧在 `onopen` 里发出前同步再核（握手期间停了就关连接不发）；失租或停止后本轮后续卡一律不派；`workflow-set --mode auto` 只对 `scheduler.json` 已启用且列出的项目放行（否则没人推它）。自动派单另有总开关 `scheduler.json` 顶层 `autoDispatch`（缺省 false）：关着时服务只跑 merge / observe、不构造也不调用 auto 依赖，`workflow-set --mode auto` 也拒；台账 CLI 子进程排写锁期间失租仍会写入（r5 P1），修复在 T68h，修好前不许打开。沙箱：两张卡由真 Claude Code 执行者与 ACP stub 审查员走到合并意图，UI 卡经 owner 设备凭据在网页端点批准；重启后零新增意图 / 事件。

@@ -246,8 +246,11 @@ export interface AnswerInput {
   atts?: AskAtt[];
 }
 
-/** 作答后要不要回投给某个 agent：只有 agent 发起的才回投；人 / 系统发起的、指派事项只记账（T28 §2.5 第 5、6 行） */
-export const answersGoToAgent = (a: Pick<Ask, "fromAgent" | "kind">): boolean => !!a.fromAgent && a.kind !== "assigned";
+/**
+ * 作答后要不要回投给某个 agent：只有 agent 发起的才回投；人 / 系统发起的、指派事项只记账（T28 §2.5 第 5、6 行）。
+ * 调度服务（fromAgent "scheduler"）不是会话，它从台账读答复；回投会被改投给大总管，变成无人认领的消息
+ */
+export const answersGoToAgent = (a: Pick<Ask, "fromAgent" | "kind">): boolean => !!a.fromAgent && a.fromAgent !== "scheduler" && a.kind !== "assigned";
 
 /** 指派事项答案落库之后（T28a 注册：通知 PM）。没注册或抛错，答案照样记下 */
 let onAssigned: ((ask: Ask, answer: AskAnswer) => void | Promise<void>) | null = null;
@@ -282,7 +285,7 @@ export async function commitAnswer(i: AnswerInput): Promise<Ask> {
   if (!deps) throw new Error("asks 未初始化");
   const labels = i.picks.map((p) => p.label);
   // 作答的不是 owner 本人（guest）：原话不进台账 decision 的 text（ledger-asks.ts answerAsk）
-  const who = { principal: i.principal, device: i.device, ...(isOwnerSource(i.from) ? {} : { external: true }) };
+  const who = { principal: i.principal, device: i.device, ...(isOwnerSource(i.from) ? { owner: true as const } : { external: true }) };
   const base = { choices: i.picks.map((p) => p.wire), labels, text: i.text, ...who, via: i.via, at: Date.now(), final: i.final };
   const answer = i.atts?.length ? { ...base, atts: i.atts } : base;
   const within = i.ask.kind === "assigned" && prepareAssigned ? await prepareAssigned(i.ask, answer) : undefined;

@@ -3,8 +3,9 @@ import { migrateCodexTransports, type MigratingAgent } from "../src/lib/acp/migr
 import { checkAcpReady, type AcpReadyDeps } from "../src/lib/acp/readiness.ts";
 import { acpDoctorChecks } from "../src/lib/doctor-acp.ts";
 import { restartMigrated, runMigrateMode } from "../src/manager/acp-migration.ts";
-import { chooseCreateTransport, chooseResumeTransport, persistManualTmux, prepareAcpFork, recoverFailedAcpLaunch } from "../src/manager/acp-lifecycle.ts";
+import { chooseCreateTransport, chooseResumeTransport, persistManualTmux, prepareAcpResume, recoverFailedAcpLaunch } from "../src/manager/acp-lifecycle.ts";
 import { managedFor } from "../src/lib/runtimes/index.ts";
+import { buildAcpHostCommand } from "../src/lib/runtimes/codex-acp.ts";
 import type { RegistryAgent } from "../src/lib/registry.ts";
 import type { LaunchSpec } from "../src/lib/runtimes/types.ts";
 
@@ -170,13 +171,24 @@ test("ACP fork 在启动前换成新线程 id；相同或非法 id 不能落 reg
   const fresh = "019a0000-0000-7000-8000-000000000002";
   const spec: LaunchSpec = { mode: "fork", sessionId: source, cwd: "/w", channelId: "ch", bridgeUrl: "ws://localhost:3847" };
   const base = managedFor("codex", "acp")!;
-  expect(await prepareAcpFork(spec, { ...base, prepareSession: async () => ({ sessionId: fresh }) }, "acp"))
-    .toEqual({ ...spec, mode: "resume", sessionId: fresh });
-  expect(await prepareAcpFork(spec, base, "tmux")).toBe(spec);
-  await expect(prepareAcpFork(spec, { ...base, prepareSession: async () => ({ sessionId: source }) }, "acp"))
+  expect(await prepareAcpResume(spec, { ...base, prepareSession: async () => ({ sessionId: fresh }) }, "acp", "agent-x"))
+    .toEqual({ ...spec, agentName: "agent-x", mode: "resume", sessionId: fresh });
+  expect(await prepareAcpResume(spec, base, "tmux", "agent-x")).toBe(spec);
+  await expect(prepareAcpResume(spec, { ...base, prepareSession: async () => ({ sessionId: source }) }, "acp", "agent-x"))
     .rejects.toThrow("新的合法 sessionId");
-  await expect(prepareAcpFork(spec, { ...base, prepareSession: async () => ({ sessionId: "bad" }) }, "acp"))
+  await expect(prepareAcpResume(spec, { ...base, prepareSession: async () => ({ sessionId: "bad" }) }, "acp", "agent-x"))
     .rejects.toThrow("新的合法 sessionId");
+});
+
+test("ACP 收编成新名字：resume 不带 agentName 也能拼出宿主命令，自称是收编用的名字；tmux 原样不动", async () => {
+  const spec: LaunchSpec = { mode: "resume", sessionId: "019a0000-0000-7000-8000-000000000001", cwd: "/w", channelId: "ch", bridgeUrl: "ws://localhost:3847" };
+  const o = { bunBin: "/opt/bun", repoRoot: "/repo", env: {} };
+  expect(() => buildAcpHostCommand(spec, o)).toThrow("ACP 宿主需要 agent 名");
+  const base = managedFor("codex", "acp")!;
+  const named = await prepareAcpResume(spec, base, "acp", "agent-codex-dw-pm");
+  expect(buildAcpHostCommand(named, o)).toContain("CLAUDESTRA_AGENT=agent-codex-dw-pm ");
+  expect(await prepareAcpResume({ ...spec, agentName: "agent-old" }, base, "acp", "agent-new")).toMatchObject({ agentName: "agent-old" });
+  expect(await prepareAcpResume(spec, managedFor("codex", "tmux")!, "tmux", "agent-x")).toBe(spec);
 });
 
 test("resume 同名人工 tmux 不被 ACP 默认值冲掉；暂退 tmux 可以重试 ACP", async () => {

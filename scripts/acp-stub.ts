@@ -4,7 +4,8 @@
  * - 流式：正文增量、一个命令工具调用（带终端输出增量）、用量、线程状态（active / idle）；
  * - steering：有回合在跑就 injected，没有就自己另起一轮、答 startedNewTurn（结束只靠线程状态 idle，和真适配器一样）；
  * - 注入：正文带 [stub:slow] = 慢回合（等 session/cancel），[stub:pause] = 暂停 1.5 秒供忙时插话验收，[stub:quota] = 撞额度（声明了 AIR 给 sessionFailure，没声明给
- *   legacy 的 usageLimitExceeded 错误），[stub:perm] = 跑命令前向宿主要权限（session/request_permission，答案写进回复）；
+ *   legacy 的 usageLimitExceeded 错误），[stub:perm] = 跑命令前向宿主要权限（session/request_permission，答案写进回复），
+ *   [stub:send:<目标>] = 回复后再调 send_to_agent 发给目标（沙箱 lab 的跨实例实测：<agent>@<peer>），[stub:whoami] = 先调 whoami、结果写进回复（T85）；
  *   环境变量 STUB_AUTH_REQUIRED=1 = 没登录（接线程时回 -32000）。
  * 沙箱里 acp 固定起它（lib/acp/stub.ts，不用也不认 CLAUDESTRA_ACP_AGENT）；沙箱外单测 / 排查可用 CLAUDESTRA_ACP_AGENT='["bun","<repo>/scripts/acp-stub.ts"]'。
  */
@@ -53,18 +54,19 @@ async function startMcp(): Promise<void> {
   mcp = { client, server: name };
 }
 
-async function callReply(chatId: string, text: string): Promise<void> {
+async function callMcp(tool: string, args: Rec): Promise<Rec> {
   const id = `mcp-${randomUUID().slice(0, 8)}`;
-  const rawInput = { server: mcp?.server ?? "claudestra", tool: "reply", arguments: { chat_id: chatId, text } };
-  update({ sessionUpdate: "tool_call", toolCallId: id, kind: "execute", title: `mcp.${rawInput.server}.reply`, status: "in_progress", rawInput, _meta: { is_mcp_tool_call: true } });
+  const rawInput = { server: mcp?.server ?? "claudestra", tool, arguments: args };
+  update({ sessionUpdate: "tool_call", toolCallId: id, kind: "execute", title: `mcp.${rawInput.server}.${tool}`, status: "in_progress", rawInput, _meta: { is_mcp_tool_call: true } });
   let result: Rec = { content: [{ type: "text", text: "no mcp" }] };
   let error: Rec | null = null;
   try {
-    if (mcp) result = (await mcp.client.callTool({ name: "reply", arguments: { chat_id: chatId, text } })) as Rec;
+    if (mcp) result = (await mcp.client.callTool({ name: tool, arguments: args })) as Rec;
   } catch (e) {
     error = { message: e instanceof Error ? e.message : String(e) };
   }
   update({ sessionUpdate: "tool_call_update", toolCallId: id, status: error ? "failed" : "completed", rawOutput: { result, error } });
+  return error ?? result;
 }
 
 /** 一轮：正文 → 命令 → （慢回合等打断）→ reply → 用量 */
@@ -96,8 +98,12 @@ async function turn(text: string): Promise<Rec> {
     if (running.cancelled) return { stopReason: "cancelled" };
     const chatId = /chat_id="([^"]+)"/.exec(text)?.[1];
     const model = config[0].currentValue;
-    const extra = `${perm}${running.steered.length ? `（途中插话 ${running.steered.length} 条）` : ""}`;
-    if (chatId && !text.includes("[stub:noreply]")) await callReply(chatId, `stub 回复（${model} / ${config[1].currentValue}）${extra}：${text.replace(/<[^>]+>/g, "").trim().slice(0, 80)}`);
+    const who = text.includes("[stub:whoami]") ? `（whoami ${JSON.stringify(await callMcp("whoami", {}))}）` : "";
+    const extra = `${perm}${who}${running.steered.length ? `（途中插话 ${running.steered.length} 条）` : ""}`;
+    const reply = `stub 回复（${model} / ${config[1].currentValue}）${extra}：${text.replace(/<[^>]+>/g, "").trim().slice(0, 80)}`;
+    if (chatId && !text.includes("[stub:noreply]")) await callMcp("reply", { chat_id: chatId, text: reply });
+    const sendTo = /\[stub:send:([^\]\s]+)\]/.exec(text)?.[1];
+    if (sendTo) await callMcp("send_to_agent", { target: sendTo, text: `stub ${sessionId.slice(0, 8)} 跨实例问候（lab）` });
     update({ sessionUpdate: "usage_update", used: 1234 + text.length, size: 272000 });
     return { stopReason: "end_turn" };
   } finally {

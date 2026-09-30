@@ -30,10 +30,10 @@ export function selfPeerName(): string {
 /** invite/join/scope 共用的 scope 校验。external 是正式闸门（owner 2026-09-27）：未开闸的 agent、"*"、master
  *  一律拦。--force 对这些命令已无作用（flag 仍被接受，旧脚本不报错）；规则本体在 lib/peer-scope-gate.ts（有单测）。 */
 export async function checkPeerScope(agents: string[], _force: boolean): Promise<{ error?: string; warnings: string[] }> {
-  const { scopeGateError } = await import("../lib/peer-scope-gate.js");
+  const { DRIVE_AGENT_SHELL_WARNING, scopeGateError } = await import("../lib/peer-scope-gate.js");
   const reg = await loadRegistry();
   const error = scopeGateError(agents, reg.agents as Record<string, { external?: boolean | null } | undefined>);
-  return error ? { error, warnings: [] } : { warnings: [] };
+  return error ? { error, warnings: [] } : { warnings: agents.length ? [DRIVE_AGENT_SHELL_WARNING] : [] };
 }
 
 /** 为 peer 签 token 并登记 principal。返回 {tokenId, secret} */

@@ -193,6 +193,13 @@ function unblockedAt(taskId: string, deps: readonly DepView[], tasks: readonly L
   return at;
 }
 
+function unknownMerges(db: Database, project: string): NonNullable<AuditSnapshot["mergeUnknown"]> {
+  if (!db.query("SELECT 1 FROM sqlite_master WHERE type='table' AND name='scheduler_merges'").get()) return [];
+  return (db.query("SELECT intentId, taskId, reason, updatedAt FROM scheduler_merges WHERE project=? AND phase='unknown'").all(project) as
+    { intentId: string; taskId: string; reason: string | null; updatedAt: number }[])
+    .map((r) => ({ intentId: r.intentId, taskId: r.taskId, reason: r.reason ?? "", since: r.updatedAt }));
+}
+
 export async function collectAuditSnapshots(db: Database, projects: readonly string[], now: number, src: SnapshotSources = realSources): Promise<AuditSnapshot[]> {
   const perProject = projects.map((project) => {
     const byTarget = new Map<string, LedgerEvent[]>();
@@ -205,7 +212,7 @@ export async function collectAuditSnapshots(db: Database, projects: readonly str
       ...(meta.team ? { specPolicy: specPathFor(task, meta.docsDir) ? specPolicyOf(task, meta.docsDir) : null } : {}),
     }));
     const unfrozenAt = byTarget.get("")?.findLast((e) => e.kind === "unfreeze")?.ts ?? null;
-    return { project, meta, tasks, unfrozenAt };
+    return { project, meta, tasks, unfrozenAt, mergeUnknown: unknownMerges(db, project) };
   });
   // 只给用得上的人抓屏 / 看会话文件：build / fix 的执行者（空闲规则）和各项目 PM 名单（押后规则）
   const want = new Set<string>();
@@ -217,7 +224,7 @@ export async function collectAuditSnapshots(db: Database, projects: readonly str
   const reg = typeof got === "string" ? null : got;
   const byChannel = new Map((reg?.list ?? []).filter((a) => a.channelId).map((a) => [a.channelId as string, a.name]));
   const held: Got<AuditHeld[]> = reg ? readHeld(src.heldPath, byChannel) : { value: null };
-  return perProject.map(({ project, meta, tasks, unfrozenAt }) => {
+  return perProject.map(({ project, meta, tasks, unfrozenAt, mergeUnknown }) => {
     const reviewers: Got<ReviewerRef[]> = reg ? projectReviewers(src, reg.list, project, meta.pms, now) : { value: null };
     const inbox = readOwnerInbox(meta.docsDir);
     const unavailable: AuditSnapshot["unavailable"] = {
@@ -236,6 +243,7 @@ export async function collectAuditSnapshots(db: Database, projects: readonly str
       reviewers: reviewers.value,
       queueFrozen: meta.queueFrozen.frozen,
       unfrozenAt,
+      mergeUnknown,
       held: held.value,
       ownerInbox: inbox.value,
       unavailable,

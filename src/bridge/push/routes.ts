@@ -12,6 +12,7 @@ import type { Database } from "bun:sqlite";
 import { canManage } from "../../lib/devices.js";
 import type { Principal } from "../../lib/principals.js";
 import { pushEndpointProblem } from "../../lib/push-endpoint.js";
+import { isSandbox, sandboxPushEndpointProblem } from "../../lib/sandbox.js";
 import { deleteApnsDevice, deletePushSubscription, saveApnsDevice, savePushSubscription, type PushSubscriber } from "../../lib/push-store.js";
 import { APNS_TOKEN_RE, asWebPushSubscription } from "../../lib/relay-protocol.js";
 import { markAgentRead, pruneUnread, readMarks, unreadCounts } from "../../lib/unread-store.js";
@@ -101,7 +102,8 @@ async function guestPush(d: PushRouteDeps, req: Request, url: URL, principal: Pr
 function subscribe(d: PushRouteDeps, req: Request, b: Record<string, unknown>, who: PushSubscriber): Response {
   const sub = asWebPushSubscription(b.subscription);
   if (!sub) return apiJson(400, { ok: false, error: "subscription invalid (endpoint https + keys.p256dh/auth required)" });
-  const problem = pushEndpointProblem(sub.endpoint);
+  // lab 沙箱（沙箱里只有 lab 挂这些路由）只收 lab 假推送端点的订阅，真推送服务的订阅一律拒
+  const problem = isSandbox() ? sandboxPushEndpointProblem(sub.endpoint) : pushEndpointProblem(sub.endpoint);
   if (problem) return apiJson(400, { ok: false, error: "endpoint_forbidden" });
   const ua = typeof b.userAgent === "string" && b.userAgent ? b.userAgent : req.headers.get("user-agent") || "";
   // 浏览器报的公钥只认本机签得了的；老前端不报就按此刻 config 给出去的那把记（记错了投递时会换路并改正）

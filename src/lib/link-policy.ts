@@ -56,3 +56,15 @@ export function decideAfterReplaced(opts: {
     reason: `MCP stdio 仍连着，本进程才是 Claude Code 在用的实例（第 ${n} 次被顶替）`,
   };
 }
+
+/**
+ * bridge 拒绝注册用的 close code（T85，bridge/caller-identity.ts）：频道由已验证身份的会话持有，本连接没有有效凭据。
+ * 它不是「被顶替」——不回来抢、不退出（退出 = 失联，见文件头），走下面的普通退避；退避计数只在 registered 时清零，
+ * 所以被拒的一方 3s → 6s → … → 60s 降频。tests/caller-reject.test.ts 用真进程钉住。
+ */
+export const REJECTED_CLOSE_CODE = 4002;
+
+/** 普通断线（bridge 重启、被拒）的重连退避：3s, 6s, 12s, 24s, 48s, 60s 封顶。attempts 从 1 起 */
+export function reconnectDelayMs(attempts: number): number {
+  return Math.min(REPLACED_BASE_DELAY_MS * Math.pow(2, Math.min(Math.max(1, attempts) - 1, 5)), REPLACED_MAX_DELAY_MS);
+}

@@ -109,7 +109,7 @@ export async function checkRuntime(): Promise<Check[]> {
 
   if (process.platform !== "darwin") {
     out.push({ group: g, name: "平台", status: "warn", detail: `${process.platform} —— launchd 是 macOS 专有`,
-      fix: "非 macOS 上三个 daemon 装不上，需要自己用 systemd/supervisor 托管 bridge、launcher、cron" });
+      fix: "非 macOS 上四个 daemon 装不上，需要自己用 systemd/supervisor 托管 bridge、launcher、cron、scheduler" });
   }
   return out;
 }
@@ -531,16 +531,16 @@ export async function runDoctor(repoRoot: string): Promise<Check[]> {
   const groups = await Promise.all([
     checkRuntime(),
     checkConfig(repoRoot),
-    checkDaemons(),
+    checkDaemons(), import("./doctor-scheduler.js").then((m) => m.checkScheduler()),
     checkUndeliveredAlerts(), checkStateFiles(), import("./doctor-peers.js").then((m) => m.checkLegacyPeers()), // 截止日前还没签名记录的老 peer
     checkBridge(repoRoot),
     checkIntegration(repoRoot),
     checkAgents(), import("./doctor-pending.js").then((m) => m.checkPendingOps(repoRoot)), // 做到一半的 create / kill / rename / update 与孤儿窗口、频道
-    import("./doctor-acp.js").then((m) => m.checkCodexAcp()),
+    import("./doctor-acp.js").then((m) => m.checkCodexAcp()), import("./doctor-review-worktrees.js").then((m) => m.checkReviewWorktrees()), // 审查 worktree 残留
     checkGitHead(repoRoot),
     checkWorktreeClean(repoRoot),
     checkWebBuild(repoRoot),
-    checkDeployment(), import("./doctor-ccswitch.js").then((m) => m.checkCcSwitch()), // API 源 / CC Switch 会不会冲掉 hooks
+    checkDeployment(), import("./doctor-ccswitch.js").then((m) => m.checkApiSources()), // API 源 / CC Switch 会不会冲掉 hooks + AI 能力清单一行
     import("./doctor-remote.js").then((m) => m.checkRemoteAccess(repoRoot)),
     import("./cli-path.js").then((m) => m.checkCliOnPath()), // 新开终端能不能直接敲 claudestra
   ]);

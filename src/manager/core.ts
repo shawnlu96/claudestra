@@ -13,7 +13,7 @@ import { TMUX_SOCK as SOCK, AGENT_PREFIX, tmuxRaw, windowTarget } from "../lib/t
 import { type PiEnvProfile } from "../lib/pi-env.js";
 import { type PendingOp } from "../lib/pending-ops.js";
 import { assertSandboxRuntime, normalizeSandboxAgentDir, refuseSandboxDirInProduction, sandboxAgentDirProblem } from "../lib/sandbox.js";
-
+import { markWorkerKinds } from "../lib/worker-kind.js";
 export const REGISTRY_PATH = STATE_REGISTRY_PATH;
 // ============================================================
 // Registry
@@ -21,6 +21,7 @@ export const REGISTRY_PATH = STATE_REGISTRY_PATH;
 
 export interface AgentInfo {
   project: string;
+  kind?: "worker" | "main";
   purpose: string;
   created: string;
   /** creating = create 的占位（pending.op=create），成功后被正式条目整条覆盖 */
@@ -143,6 +144,7 @@ export async function patchRegistryAgent(name: string, mutate: (a: AgentInfo) =>
 }
 
 export async function saveRegistry(reg: Registry) {
+  markWorkerKinds(reg.agents);
   await mkdir(STATE_DIR, { recursive: true });
   // 原子写：同目录临时文件 + rename（POSIX 下 rename 原子）。防并发 reader 读到
   // 半写文件（JSON.parse 抛错），也防单次写被撕裂。tmp 名带 pid + 进程内递增序号，
@@ -152,7 +154,6 @@ export async function saveRegistry(reg: Registry) {
   // 真出问题再上文件锁。bridge 侧后台写者（clear 轮转）已尽量避开活跃 agent。
   await writeJsonAtomic(REGISTRY_PATH, reg);
 }
-
 // ============================================================
 // 辅助
 // ============================================================
@@ -225,9 +226,9 @@ export function output(data: Record<string, unknown>) {
   console.log(JSON.stringify(data));
 }
 
-/** 大输出用这个：同步写完才返回。console.log 写非阻塞管道会截断（见 tests/manager-output.test.ts）；output() 不直接改成这样：takeover 靠替换 console.log 截 cmdResume 的输出 */
-export function outputSync(data: Record<string, unknown>) {
-  const buf = Buffer.from(JSON.stringify(data) + "\n");
+/** 大输出用这个：同步写完才返回（字符串 = 给人看的文本，原样写）。console.log 写非阻塞管道会截断（见 tests/manager-output.test.ts）；output() 不直接改成这样：takeover 靠替换 console.log 截 cmdResume 的输出 */
+export function outputSync(data: Record<string, unknown> | string) {
+  const buf = Buffer.from((typeof data === "string" ? data : JSON.stringify(data)) + "\n");
   for (let off = 0; off < buf.length; ) {
     try {
       off += writeSync(1, buf, off);

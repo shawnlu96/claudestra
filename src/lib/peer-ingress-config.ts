@@ -16,6 +16,7 @@ import { detectBridgeUrls } from "./net-addr.js";
 import { bridgeHttpBase } from "./bridge-port.js";
 import { probeBridgeApi } from "./peer-url.js";
 import { assertNoRepoEnvWriteInTest } from "./test-guard.js";
+import { refuseInSandbox } from "./sandbox.js";
 import { writeTextAtomicSync } from "./state-file.js";
 import { repoEnvVar } from "./env-file.js";
 import { webPortFromStartScript } from "./cli-install.js";
@@ -28,6 +29,7 @@ const ENV_HEADER = "# Claudestra 运行时配置 (由 bun run setup 生成)";
  */
 export function saveEnvText(envPath: string, text: string): void {
   assertNoRepoEnvWriteInTest(envPath);
+  refuseInSandbox("改写 .env（沙箱的配置全在环境里；写了就是改生产 / 主树的配置）"); // 挡 openDirectPeerIngress、ensurePeerIngressPort
   writeTextAtomicSync(envPath, text, { preserveMode: true, mode: 0o600 });
 }
 

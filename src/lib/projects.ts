@@ -28,6 +28,8 @@ export interface ProjectDef {
   /** 工作目录集合(绝对路径)。一个 project 可以横跨多个仓,如 qingniao 的 miniapp + backend */
   dirs: string[];
   description?: string;
+  /** 个人项目：永远不进 lend.json 的 borrow（lib/lend-policy.ts isPersonalProject；目录含家目录 / 临时目录的项目不标也算） */
+  personal?: boolean;
   createdAt: string;
 }
 
@@ -55,6 +57,7 @@ export async function readProjects(path = PROJECTS_PATH): Promise<ProjectsData> 
         emoji: typeof p.emoji === "string" ? p.emoji : undefined,
         dirs: Array.isArray(p.dirs) ? p.dirs.filter((d: unknown) => typeof d === "string" && d) : [],
         description: typeof p.description === "string" ? p.description : undefined,
+        ...(p.personal === true ? { personal: true } : {}),
         createdAt: typeof p.createdAt === "string" ? p.createdAt : "",
       });
     }

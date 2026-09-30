@@ -36,13 +36,14 @@ export function printMachineChanges(ui: SetupUi, mcpName: string): void {
   sub(t("把已装 MCP 服务的工具加进 permissions.allow（你自己开的 Claude Code 会话也会生效）", "adds your installed MCP servers' tools to permissions.allow (applies to your own Claude Code sessions too)"));
   sub(t("记下你刚才同意的 bypass 模式", "records the bypass-mode consent you just gave"));
   item(t(`Claude Code 用户级 MCP：注册 ${mcpName}`, `Claude Code user-level MCP: registers ${mcpName}`));
-  item(t("~/Library/LaunchAgents：bridge / launcher / cron 三个开机自启服务", "~/Library/LaunchAgents: three autostart services (bridge / launcher / cron)"));
+  item(t("~/Library/LaunchAgents：bridge / launcher / cron / scheduler 四个开机自启服务",
+    "~/Library/LaunchAgents: four autostart services (bridge / launcher / cron / scheduler)"));
   item(t("~/.local/bin/claudestra 命令，外加 ~/.bun/bin/claudestra 软链；登录 shell 找不到它时在 profile（zsh 是 ~/.zprofile）末尾补一行 PATH",
          "the ~/.local/bin/claudestra command plus a ~/.bun/bin/claudestra symlink; if your login shell can't find it, one PATH line is appended to its profile (~/.zprofile for zsh)"));
   item(t("~/.claude/skills：链接仓库自带的技能（目前是 save-clear / save-compact）；同名的目录和指向别处的软链都不动",
          "~/.claude/skills: links the bundled skills (currently save-clear / save-compact); same-name directories and symlinks pointing elsewhere are left alone"));
-  item(t("从旧版本升上来时：停掉旧的 pm2 服务、卸掉旧的 LaunchAgent、迁移旧 Web 服务的数据（先备份）；每次安装都会重载三个服务",
-         "when upgrading from an older version: stops old pm2 services, unloads old LaunchAgents and migrates the old web service's data (backed up first); every install reloads the three services"));
+  item(t("从旧版本升上来时：停掉旧的 pm2 服务、卸掉旧的 LaunchAgent、迁移旧 Web 服务的数据（先备份）；每次安装都会重载四个服务",
+         "when upgrading from an older version: stops old pm2 services, unloads old LaunchAgents and migrates the old web service's data (backed up first); every install reloads the four services"));
   item(t("iTerm 偏好 TmuxDashboardLimit（装了 iTerm 才改）", "iTerm preference TmuxDashboardLimit (only if iTerm is installed)"));
   const state = STATE_DIR.replace(homedir(), "~");
   item(t(`Claudestra 自己的状态与会话归档在 ${state}（归档不加密；各 runtime 的原始会话记录仍在它们自己的目录）`,

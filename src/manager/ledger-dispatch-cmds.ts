@@ -6,6 +6,7 @@
  * 规格卡与上一轮 md 只读、找不到就在 prompt 里注明，不因此失败；head 对不上才拒绝派审（审错版本比不审更糟）。
  */
 import { join } from "node:path";
+import { gitHeadSync } from "../lib/scheduler-review-worktree.js";
 import { resolveBridgePort } from "../lib/bridge-url.js";
 import { repoEnvVar } from "../lib/env-file.js";
 import type { LedgerEvent, LedgerTask } from "../lib/ledger-stages.js";
@@ -32,11 +33,6 @@ async function worktreeOf(c: LedgerCli, task: LedgerTask): Promise<string | null
   const info = (await c.deps.loadRegistry()).agents[task.agent] as { cwd?: string; dir?: string } | undefined;
   const dir = info?.cwd ?? info?.dir;
   return dir ? dir.replace(/^~(?=\/|$)/, process.env.HOME ?? "~") : null;
-}
-
-function gitHead(dir: string): string | null {
-  const r = Bun.spawnSync(["git", "-C", dir, "rev-parse", "HEAD"], { stdout: "pipe", stderr: "pipe" });
-  return r.exitCode === 0 ? r.stdout.toString().trim() : null;
 }
 
 function toPrev(e: LedgerEvent | undefined): PrevReview | null {
@@ -133,7 +129,7 @@ async function dispatch(c: LedgerCli): Promise<Result> {
   const p = await plan(c);
   c.requireManager(p.task.project, "派审查员");
   if (p.task.stage !== "review") throw new LedgerError("invalid", `任务 ${p.task.id} 在 ${p.task.stage}，不在 review，不派审查员`, { stage: p.task.stage });
-  const headNote = checkHead(p, c.deps.gitHead ?? gitHead);
+  const headNote = checkHead(p, c.deps.gitHead ?? gitHeadSync);
   const reviewer = p.adversarial ? "adversarial" : "regular";
   const ctx = { ...c.ctx(), dedupKey: c.p.flags.dedup ?? dispatchKey(c, p, reviewer) };
   // policy：派审当时规格卡的审查策略，备查；路由 / currentHandler 判断还要不要审时读的是规格卡本身

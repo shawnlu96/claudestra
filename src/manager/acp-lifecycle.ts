@@ -50,13 +50,18 @@ export async function prepareCreateRuntime(name: string, dir: string, runtime?: 
   catch (e) { return { ok: false, error: (e as Error).message }; }
 }
 
-/** ACP fork 先拿新线程 id，再以 resume 模式起常驻宿主；失败不能把源 id 误记进 registry。 */
-export async function prepareAcpFork(spec: LaunchSpec, adapter: ManagedRuntimeAdapter, transport: Transport): Promise<LaunchSpec> {
-  if (spec.mode !== "fork" || transport !== "acp") return spec;
+/**
+ * ACP 收编：宿主必须有自称，而 resume 历来不注入 agentName、收编成新名字时 registry 里也没有 settingsName——不补就在
+ * buildAcpHostCommand 抛错。fork 先拿新线程 id，再以 resume 模式起常驻宿主；失败不能把源 id 误记进 registry。
+ */
+export async function prepareAcpResume(spec: LaunchSpec, adapter: ManagedRuntimeAdapter, transport: Transport, name: string): Promise<LaunchSpec> {
+  if (transport !== "acp") return spec;
+  const named = { ...spec, agentName: spec.agentName ?? name };
+  if (named.mode !== "fork") return named;
   if (!adapter.prepareSession) throw new Error("ACP 适配器没有 fork 准备方法");
-  const { sessionId } = await adapter.prepareSession(spec);
-  if (!adapter.isValidSessionId(sessionId) || sessionId === spec.sessionId) throw new Error("ACP fork 没返回新的合法 sessionId");
-  return { ...spec, mode: "resume", sessionId };
+  const { sessionId } = await adapter.prepareSession(named);
+  if (!adapter.isValidSessionId(sessionId) || sessionId === named.sessionId) throw new Error("ACP fork 没返回新的合法 sessionId");
+  return { ...named, mode: "resume", sessionId };
 }
 
 /** 已记 acp 的 agent 若升级后丢了适配器或 CLI 太旧，restart 仍可从同一线程走 tmux。 */
