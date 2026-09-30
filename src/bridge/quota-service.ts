@@ -12,6 +12,7 @@
 
 import { readConfigSync, setQuotaLive } from "../lib/config-store.js";
 import { withCodexQuota } from "../lib/codex-usage.js";
+import type { CodexUsageSignal } from "../lib/codex-wall.js";
 import {
   confirmCredential, defaultCredDeps, hmacHex, peekAccountKey, readClaudeCredential, readCodexCredential, type QuotaProvider,
 } from "../lib/quota-credentials.js";
@@ -142,6 +143,7 @@ export function createQuotaService(d: QuotaServiceDeps) {
   return {
     snapshot, retry, setEnabled,
     claudeWall: (refresh: boolean) => (syncEnabled(), claudeWallView(scheduler, enabled, d.now(), refresh)),
+    codexWall: (refresh: boolean) => (syncEnabled(), codexWallView(scheduler, enabled, refresh)),
     isEnabled: () => enabled,
     isViewing: viewing,
     start(): void {
@@ -175,6 +177,24 @@ async function claudeWallView(
   const pcts = p.meters.filter((m) => m.unit === "pct" && (m.kind === "session" || m.kind === "weekly") && m.used !== null).map((m) => m.used as number);
   const live = p.source.layer === "live" && pcts.length > 0;
   return { pct: live ? Math.max(...pcts) : null, observedAt: p.source.observedAt ?? 0, credits: p.resetCredits?.held ?? null };
+}
+
+/**
+ * Codex 额度墙（bridge/codex-wall.ts）用：当前 Codex 账号的 codex_usage（5h / 7d 里较高的百分比、limitReached）+ 重置卡张数
+ * （codex_usage 里带的和重置明细里较新的那份）。refresh = 先按后台节奏查一次 codex_usage（沿用调度器的 60 秒间隔、退避与冷却）。
+ * 账户不确定（401 / 换号中）或还没有快照 = null：墙不拿它判进出
+ */
+async function codexWallView(scheduler: SchedulerApi, enabled: boolean, refresh: boolean): Promise<CodexUsageSignal | null> {
+  if (!enabled) return null;
+  if (refresh) await scheduler.refresh("codex", "background");
+  const v = (await scheduler.view()).codex;
+  const snap = v?.endpoints.codex_usage?.snapshot;
+  if (!v?.account || v.account.uncertain || !snap) return null;
+  const pcts = snap.data.windows.filter((w) => w.kind === "session" || w.kind === "weekly").map((w) => w.usedPct);
+  const detail = v.endpoints.codex_reset_credits?.snapshot;
+  const inUsage = snap.data.resetCredits?.availableCount ?? null;
+  const credits = detail && (inUsage === null || detail.observedAt > snap.observedAt) ? detail.data.availableCount : inUsage;
+  return { account: v.account.key, usedPct: pcts.length ? Math.max(...pcts) : null, limitReached: snap.data.limitReached, observedAt: snap.observedAt, credits };
 }
 
 /**

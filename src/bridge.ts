@@ -168,6 +168,7 @@ import { recordMetric } from "./lib/metrics.js";
 import { nudgeReason, pickUnrepliedForNudge } from "./lib/reply-nudge.js";
 import { dropPendingsForChannel, hangsInterAgentWatchdog, hangsPendingReply, nudgesForOrigin, pendingKeysOwedBy, takeApiPending } from "./lib/pending-reply-scope.js";
 import { holdAtWallWait, quotaWall, rearmResume, resumeStillWanted, startQuotaWall } from "./bridge/quota-wall-wiring.js";
+import { codexWallPaused, startCodexWall, wallGateOf, wallHoldOf } from "./bridge/codex-wall-wiring.js";
 import { onCodexTypeInFailed } from "./bridge/codex-menu-hold.js";
 import { initHttpPeer, cancelHttpPeerCallsForChannel } from "./bridge/http-peer.js";
 import { extractControlToken } from "./bridge/api-auth.js";
@@ -429,7 +430,7 @@ async function localAgentWorking(channelId: string, evAgent: string): Promise<bo
 /** 押后队列投递:Stop hook / 压缩结束 / 周期扫描调用(规则与交错场景见 bridge/held-flush.ts 及其测试) */
 function flushHeldLocalMsgs(channelId: string, reason: string): Promise<void> {
   return flushHeld({
-    held: heldLocalMsgs, compacting: (a) => getAgentStatus(a) === "compacting", working: localAgentWorking, isHumanRequest, walled: async (c) => !!(await quotaWall()?.gates(c)),
+    held: heldLocalMsgs, compacting: (a) => getAgentStatus(a) === "compacting", working: localAgentWorking, isHumanRequest, walled: wallGateOf,
     client: (c) => clients.get(c), deliver: deliverLocalInOrder, touch: (c, env) => pendingAgentCalls.touchDelivered(c, env),
     stoppedAt: (c) => turnCuts.stoppedAt(c),
   }, channelId, reason);
@@ -551,7 +552,7 @@ import type {
   Delivery as RouterDelivery,
 } from "./bridge/router.js";
 import { endpointLabel, envelopeLabel, inboundBodyForLocal, isHumanRequest, newMessageId, newThreadId, parseChatId, renderApiInbound } from "./bridge/router.js";
-import { HeldQueue, unseenFrom } from "./bridge/held-queue.js";
+import { HeldQueue, unseenFrom, type WallReason } from "./bridge/held-queue.js";
 import { sweepHeldAges } from "./bridge/held-age.js";
 import { dropHeldOnKill, flushHeld } from "./bridge/held-flush.js";
 import { probeTurn } from "./bridge/turn-probe.js";
@@ -785,9 +786,9 @@ function syncMasterWatcher(discord: Client): void {
  * ws.send——owner 语音连发的顺序就乱了(tests/keyed-serial.test.ts)。deliver() 到这里之间没有 await,入队顺序即到达顺序。
  */
 /** 额度闸押后：对调用方同样是「已受理、排队中」，出闸时按序补投（bridge/quota-wall.ts） */
-function holdForQuotaWall(env: RouterEnvelope, agent: string, from: string | undefined): RouterDelivery {
-  console.log(`⏸ 消息押后(${agent} 额度闸): 来自 ${from ?? "?"},队列 ${heldLocalMsgs.holdEnv(env, "quota_wall")} 条`);
-  return { envelope: env, outcome: { kind: "sent", note: "queued", heldBy: "quota_wall" } };
+function holdForQuotaWall(env: RouterEnvelope, agent: string, from: string | undefined, reason: WallReason = "quota_wall"): RouterDelivery {
+  console.log(`⏸ 消息押后(${agent} ${reason === "quota_wall" ? "额度闸" : "Codex 额度墙"}): 来自 ${from ?? "?"},队列 ${heldLocalMsgs.holdEnv(env, reason)} 条`);
+  return { envelope: env, outcome: { kind: "sent", note: "queued", heldBy: reason } };
 }
 const localSendOrder = createKeyedSerial();
 function deliverLocalInOrder(env: RouterEnvelope, to: RouterLocalEndpoint, stillWanted?: () => boolean): Promise<RouterDelivery> {
@@ -848,14 +849,14 @@ async function deliverToLocal(env: RouterEnvelope, to: RouterLocalEndpoint, stil
   const busy = holdsUntilIdle(env.from.kind, env.meta.waitForIdle, turn);
   // flush 投递途中(上面几处 await)这条已被别处从押后队列摘掉(kill 清理 / 24 小时放弃):既不押回(会复活)也不发
   // 押着的打断收尾提醒:之后又被打断 / 叫停过、那件事已续上、过了 30 分钟,就不投了(turnCuts.noticeWanted)
-  const wallHold = await quotaWall()?.holds(env, to.channelId); // 额度闸：agent / bridge 消息押到出闸
+  const wallHold = await wallHoldOf(env, to.channelId); // 额度闸 / Codex 额度墙：agent / bridge 消息押到出闸（bridge/codex-wall-wiring.ts）
   if ((stillWanted && !stillWanted()) || !turnCuts.noticeWanted(env) || !resumeStillWanted(env)) return { envelope: env, outcome: { kind: "dropped", reason: "已从押后队列撤下" } };
-  if (!busy && wallHold) return holdForQuotaWall(env, evAgent, meta.user);
+  if (!busy && wallHold) return holdForQuotaWall(env, evAgent, meta.user, wallHold);
   if (busy) {
-    const n = heldLocalMsgs.holdEnv(env, wallHold ? "quota_wall" : undefined); // 从 flush 来的是队里那个 env 本身,不会重复入队
+    const n = heldLocalMsgs.holdEnv(env, wallHold ?? undefined); // 从 flush 来的是队里那个 env 本身,不会重复入队
     console.log(`⏸ 消息押后(${evAgent} ${compactingNow ? "压缩上下文中" : "回合中"}): 来自 ${meta.user}（${env.meta.messageId}）,队列 ${n} 条`);
     // 对调用方是「已受理、排队中」(note=queued):真正 ws.send 在 Stop/扫描时发生,send_to_agent 据此告诉发送方
-    return { envelope: env, outcome: { kind: "sent", note: "queued", ...(wallHold ? { heldBy: "quota_wall" as const } : {}) } };
+    return { envelope: env, outcome: { kind: "sent", note: "queued", ...(wallHold ? { heldBy: wallHold } : {}) } };
   }
   try {
     if (turnCuts.takeAfterInterrupt(to.channelId)) meta.after_interrupt = "true"; // Codex 被打断后 queue 会卡住,这条改打进 TUI
@@ -2608,7 +2609,7 @@ const PAC_STALE_MS = 2 * 3_600_000;
 setInterval(() => {
   const now = Date.now();
   const IA_WATCHDOG_STALE_MS = 10 * 60_000;
-  const wallPaused = (ch?: string) => !!quotaWall()?.active() && agentRuntime(clients.get(ch ?? "")) === "claude-code"; // 闸只停 CC 的，出闸重新起算
+  const wallPaused = (ch?: string) => (!!quotaWall()?.active() && agentRuntime(clients.get(ch ?? "")) === "claude-code") || codexWallPaused(agentRuntime(clients.get(ch ?? ""))); // 各闸只停自己那家的，出闸重新起算
   for (const p of pendingAgentCalls.sweepStale(now, PAC_STALE_MS, heldFromOf, wallPaused)) {
     console.log(`🧹 pendingAgentCalls stale: 清掉 target=${p.targetName} (caller=${p.callerName})`);
   }
@@ -3400,11 +3401,13 @@ initInbox({
 });
 void import("./bridge/mission.js").then((m) => m.initMission({ clients, deliver, lastMessageSource, controlChannelId: CONTROL_CHANNEL_ID })); // Autopilot：回合结束自动推进
 // 回合以 API 错误结束 ⇒ 60s 后续跑一次；撞额度 ⇒ 全机额度闸（agent 消息押后、出闸统一恢复）。Discord 与 Web-only 都要，规则见 bridge/quota-wall-wiring.ts
-startQuotaWall({
+const wallDeps: Parameters<typeof startQuotaWall>[0] = {
   held: heldLocalMsgs, calls: pendingAgentCalls, clients, deliver, flush: flushHeldLocalMsgs, controlChannelId: CONTROL_CHANNEL_ID,
   markAgentSource: (cid) => void lastMessageSource.set(cid, "agent"),
   escalate: async (cid, text) => void (await ((await discord.channels.fetch(cid)) as TextChannel).send(text)),
-});
+};
+startQuotaWall(wallDeps);
+startCodexWall(wallDeps); // Codex 额度墙：同一份依赖，按 Codex 账号押 / 恢复（bridge/codex-wall-wiring.ts）
 initTeamRouter({ clients, deliver, hold: (env) => heldLocalMsgs.holdEnv(env), working: localAgentWorking, markBridgeSource: (c) => lastMessageSource.set(c, "agent") }); // 台账事件路由
 void import("./bridge/ask-entry.js").then((m) => m.initAskWiring({ // 待你处理：答复 / 过期通知不抢占（押后由 waitForIdle 标记）
   clients, deliver, hold: (e) => void heldLocalMsgs.holdEnv(e), controlChannelId: CONTROL_CHANNEL_ID, discord: WEB_ONLY ? null : discord,

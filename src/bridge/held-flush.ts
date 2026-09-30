@@ -9,7 +9,7 @@ import { gatesAsHuman } from "../lib/quota-wall.js";
 import { tmuxCapture } from "../lib/tmux-helper.js";
 import { inputBox } from "../lib/turn-state.js";
 import { heldAcrossStopNote } from "../lib/turn-cuts.js";
-import { leaseActive, notifyHeldSettled, type HeldItem, type HeldQueue } from "./held-queue.js";
+import { leaseActive, notifyHeldSettled, type HeldItem, type HeldQueue, type WallReason } from "./held-queue.js";
 import type { Delivery, Envelope, LocalEndpoint } from "./router.js";
 import { resolveTurnWindow } from "./turn-probe.js";
 import { senderTrigger, turnStartedAt } from "./stop-settle.js";
@@ -24,8 +24,11 @@ export interface FlushDeps {
   client: (channelId: string) => { ws: LocalEndpoint["ws"]; cwd?: string } | undefined;
   /** stillWanted：投递途中最后一刻再核对这条还在队里（被 kill 清理 / 放弃摘掉的就不发、不押回） */
   deliver: (env: Envelope, to: LocalEndpoint, stillWanted?: () => boolean) => Promise<Delivery>;
-  /** 这个频道在额度闸里（bridge/quota-wall.ts）：只投能穿闸的（gatesAsHuman），其余留着等出闸补投——否则每分钟扫描都投一次、再被押回来 */
-  walled?: (channelId: string) => Promise<boolean>;
+  /**
+   * 这个频道在额度闸里（bridge/quota-wall.ts）：只投能穿闸的（gatesAsHuman），其余留着等出闸补投——否则每分钟扫描都投一次、再被押回来。
+   * 返回押后原因 = 在 Codex 额度墙里（bridge/codex-wall.ts），按那个原因改记；true = CC 的额度闸
+   */
+  walled?: (channelId: string) => Promise<boolean | WallReason>;
   /** 回程簿失效钟从真正送达起算（只动这封消息发送方那一槽） */
   touch: (channelId: string, env: Envelope) => void;
   /** owner 最近一次叫停这个频道的时刻（bridge/turn-cuts.ts stoppedAt）；押在它之前的条目投出去时加抬头 */
@@ -117,8 +120,9 @@ export async function flushHeld(d: FlushDeps, channelId: string, reason: string)
   if (!q || q.length === 0) return;
   const evAgent = q[0].to.agentName || channelId;
   // 不管从哪条路押进来的，闸内都按额度闸算（不老化、出闸补投）；压缩中也要先改记，不然一直在压缩的目标会漏掉（T24 r2 P2-8）
-  const walled = !!(await d.walled?.(channelId));
-  if (walled) d.held.markWall(channelId, (i) => !gatesAsHuman(i.env));
+  const wall = await d.walled?.(channelId);
+  const walled = !!wall;
+  if (walled) d.held.markWall(channelId, (i) => !gatesAsHuman(i.env), wall === true ? "quota_wall" : wall);
   if (d.compacting(evAgent)) return; // 压缩上下文中一律继续押(deliverToLocal 也会押回来,省一次往返)
   if (!d.held.claim(channelId)) return; // Stop / 压缩结束 / 扫描撞车:别人正在投这个频道
   try {

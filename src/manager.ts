@@ -2669,6 +2669,7 @@ switch (cmd) {
 
   case "cost": await cmdCost(args); break;
   case "quota-wall": await (await import("./manager/quota-wall.js")).cmdQuotaWall(args); break; // 额度闸 status|clear（T24）
+  case "codex-wall": await (await import("./manager/codex-wall.js")).cmdCodexWall(args); break; // Codex 额度墙 status|clear（T78）
   case "codex-sub-archive": await (await import("./manager/codex-sub-archive.js")).cmdCodexSubArchive(args); break; // Codex 子线程自动归档开关（缺省关）
 
   case "invite-link": await cmdInviteLink(args); break;
@@ -2914,6 +2915,7 @@ switch (cmd) {
         "codex-sub-archive status|on|off — auto-archive Codex sub-threads idle 7 days (default off; the archive retention later deletes them)",
         "cost [--agent <name>] [--today|--week]  — aggregate token usage per agent or overall",
         "quota-wall status|clear  — usage-limit wall: show state / confirm usage is back (bridge then closes menus, delivers the queue, resumes)",
+        "codex-wall status|clear  — Codex usage wall: show state / confirm Codex usage is back (bridge then delivers the queue, resumes, tells callers)",
         "invite-link                     — generate the Discord bot invite URL (owner perms, for your own server)",
         "pair [--json]                   — print a QR code / link / 8-char code so a phone or browser can pair with this machine through the relay (RELAY_URL in .env)",
         "relay-status                    — show the relay connection (address, fingerprint, contacts online)",

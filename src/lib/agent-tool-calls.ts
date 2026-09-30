@@ -15,6 +15,7 @@ export async function forwardTool(bridgeRequest: BridgeRequest, args: any) {
 /** 押后的原因（bridge 的 Delivery.heldBy）：如实告诉发送方，别让它以为对方只是在忙 */
 const heldText: Record<string, (target: string) => string> = {
   quota_wall: () => "整机撞了额度（额度闸开着），消息已押住（bridge 重启也不丢），出闸后按序送达，不用重发。",
+  codex_quota_wall: (target) => `${target} 的 Codex 额度撞墙了，消息已押住（bridge 重启也不丢），额度恢复后按序送达，不用重发。`,
   wall_menu: (target) => `${target} 停在额度菜单（撞墙等待），bridge 没有发任何键；消息已押住，出闸 / 菜单关掉后送达，不用重发。`,
   codex_menu: (target) => `${target} 停在 Codex 的选择菜单上，bridge 没有发任何键；消息已押住（bridge 重启也不丢），菜单关掉后按顺序送达，不用重发。`,
 };

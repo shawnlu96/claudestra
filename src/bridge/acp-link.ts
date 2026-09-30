@@ -104,6 +104,13 @@ export async function onAcpFrame(msg: Record<string, any>, ws: Socket, discord: 
   }
 }
 
+/** Codex 额度墙出墙：还没人答的额度卡作废（旧按钮一律 409），库里的卡由 ask-runtime 的 closeCodexQuotaAsks 收。返回作废的频道 */
+export function dropQuotaCards(): string[] {
+  const out = [...quotaCards].filter(([, q]) => !q.claimed).map(([cid]) => cid);
+  for (const cid of out) quotaCards.delete(cid);
+  return out;
+}
+
 /** 一批条目：跳过这个宿主已经处理过的前缀（上次回包丢了、宿主重送），剩下的交 watcher；watcher 不在回 false，宿主会重送 */
 async function acceptEntries(channelId: string, msg: Record<string, any>, discord: Client): Promise<boolean | { ok: true; lost: number; bridgeEpoch: string }> {
   const entries: object[] = Array.isArray(msg.entries) ? msg.entries : [];
