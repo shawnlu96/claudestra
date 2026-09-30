@@ -1,5 +1,5 @@
 /** 领单留痕（bridge 替领单的执行者 / 审查员以其身份写）与未领单报警（调度服务专用）；逻辑与校验在 lib/order-mark.ts。 */
-import { markOrderTaken, markUnclaimed } from "../lib/order-mark.js";
+import { markOrderTaken, markUnclaimed, markUnclaimedSent } from "../lib/order-mark.js";
 import { LedgerError } from "../lib/ledger-store.js";
 import type { CommandSpec } from "./ledger-write-cmds.js";
 
@@ -19,9 +19,17 @@ export const ORDER_MARK_CMDS: Record<string, CommandSpec> = {
   },
   "scheduler-unclaimed": {
     valued: ["text"], bools: [],
-    usage: "scheduler-unclaimed <intent-key> --text <说明>（调度服务专用：唤醒发出后没人领单，记一次报警；按单去重，duplicate=true 不再通知）",
+    usage: "scheduler-unclaimed <intent-key> --text <说明>（调度服务专用：唤醒发出后没人领单，记一次报警；按单去重，通知是否送到看 scheduler-unclaimed-sent）",
     run(c) {
       const r = markUnclaimed(c.db, { actor: c.deps.actor, now: c.deps.now() }, { intentId: intentArg(c.p.pos[1]), text: c.need("text") });
+      return { ok: true, event: r.event, duplicate: r.duplicate };
+    },
+  },
+  "scheduler-unclaimed-sent": {
+    valued: [], bools: [],
+    usage: "scheduler-unclaimed-sent <intent-key>（调度服务专用：未领单报警已交给 PM；没有它，下一个 tick 会按原文重发）",
+    run(c) {
+      const r = markUnclaimedSent(c.db, { actor: c.deps.actor, now: c.deps.now() }, { intentId: intentArg(c.p.pos[1]) });
       return { ok: true, event: r.event, duplicate: r.duplicate };
     },
   },

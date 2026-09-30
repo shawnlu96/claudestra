@@ -15,7 +15,7 @@ import type { SchedulerIntent } from "./ledger-scheduler.js";
 import { getSchedulerSession } from "./scheduler-sessions.js";
 import type { VerifiedCall } from "./order-tool-route.js";
 import { SRC_DIR } from "./repo-root.js";
-import { clipWire, wireFindings } from "./order-findings.js";
+import { clipWire, fitFindings, wireFindings } from "./order-findings.js";
 import { currentReviewFacts } from "./scheduler-review.js";
 
 type WorkStage = "build" | "fix";
@@ -104,6 +104,6 @@ export function orderWireFor(db: Database, o: CurrentOrder): { ok: true; order: 
     writeBack: `用 deliver 工具回写：orderId ${o.orderId}，head = 本卡分支在 origin 上的完整 SHA（bridge 会核对）。CLI 仍可用：${CLI} deliver ${t.id} --from ${o.stage} --head <完整 SHA> --evidence <报告路径>`,
     findings: fix.findings, fallback: fallback ? clipWire(`再不行退到：${fallback}`, WIRE_LIMITS.fallback) : null,
   };
-  const parsed = parseOrderWire(wire);
+  const parsed = parseOrderWire(fitFindings(wire, fix.report));
   return parsed.ok ? { ok: true, order: parsed.value } : { ok: false, error: `台账里这张单的字段不合 OrderWire：${parsed.error}` };
 }

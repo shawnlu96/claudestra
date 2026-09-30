@@ -2,7 +2,8 @@
  * 领单留痕与未领单报警：两条都是按意图去重的 scheduler 事件，写一次，重复调用原样回放（duplicate=true）。
  * - order_taken：执行者 / 审查员 take_order / take_review 领到调度器的单时，bridge 以调用方身份写（身份门已过，lib/order-tool-route.ts）。
  *   只认这条意图的收件人、且会话是台账当前绑定的那个——换了会话、别的 agent 都记不上，所以记录不会串卡串会话。
- * - unclaimed：唤醒发出 N 分钟没人领，调度服务先落这条事件，首写才通知 PM：重启、重复 tick、两个 tick 并发都只报一次。
+ * - unclaimed：唤醒发出 N 分钟没人领，调度服务先落这条事件（报警文本定死在这里），再通知 PM；通知送到后才落 unclaimed_sent。
+ *   有 sent 就不再发：重启、重复 tick 都只报一次；通知没送到（bridge 不在、发完前崩了）下一个 tick 照同一文本重发，至少送到一次。
  * 调度器对账时把 order_taken 当成「单已送到」的证据（lib/scheduler-dispatch.ts）。tests/order-mark.test.ts。
  */
 import type { Database } from "bun:sqlite";
@@ -19,6 +20,7 @@ export const UNCLAIMED_ALARM_MS = 10 * 60_000;
 
 export const takenKey = (intentId: string): string => `scheduler:${intentId}:taken`;
 export const unclaimedKey = (intentId: string): string => `scheduler:${intentId}:unclaimed`;
+export const unclaimedSentKey = (intentId: string): string => `scheduler:${intentId}:unclaimed_sent`;
 
 /** 收件人领过这条意图的单：事件 seq，没有就 null */
 export function orderTakenSeq(db: Database, intentId: string): number | null {
@@ -65,6 +67,21 @@ export function markUnclaimed(db: Database, ctx: WriteCtx, input: { intentId: st
     if (getEventByDedup(db, takenKey(intent.id))) throw new LedgerError("conflict", `单 ${intent.id} 已被领走，不报警`);
     const event = insertEvent(db, { ...ctx, dedupKey: unclaimedKey(intent.id) }, {
       project: intent.project, target: intent.taskId, kind: "scheduler", text, data: { op: "unclaimed", id: intent.id, recipient: intent.recipient },
+    }, true);
+    return { event, duplicate: false };
+  });
+}
+
+/** 未领单报警已交给 PM：只由调度服务在 notifyPm 成功后写；要先有那条报警 */
+export function markUnclaimedSent(db: Database, ctx: WriteCtx, input: { intentId: string }): Marked {
+  if (ctx.actor !== "scheduler") throw new LedgerError("forbidden", "报警送达只由调度服务写");
+  return tx(db, () => {
+    const prior = getEventByDedup(db, unclaimedSentKey(input.intentId));
+    if (prior) return { event: prior, duplicate: true };
+    const alarm = getEventByDedup(db, unclaimedKey(input.intentId));
+    if (!alarm) throw new LedgerError("conflict", `单 ${input.intentId} 没有未领单报警`);
+    const event = insertEvent(db, { ...ctx, dedupKey: unclaimedSentKey(input.intentId) }, {
+      project: alarm.project, target: alarm.target, kind: "scheduler", text: "未领单报警已送达 PM", data: { op: "unclaimed_sent", id: input.intentId, alarmSeq: alarm.seq },
     }, true);
     return { event, duplicate: false };
   });

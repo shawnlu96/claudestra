@@ -12,7 +12,7 @@ import type { LedgerEvent, LedgerTask } from "./ledger-stages.js";
 import { getMeta, getTask, listEvents } from "./ledger-store.js";
 import { currentReview, stepsOf } from "./ledger-steps.js";
 import { manualOrderId } from "./order-take.js";
-import { clipWire as clip, wireFindings } from "./order-findings.js";
+import { clipWire as clip, fitFindings, wireFindings } from "./order-findings.js";
 import type { ReviewFinding } from "./scheduler-review.js";
 import { parseOrderWire, WIRE_LIMITS, type OrderWire } from "./order-wire.js";
 import { statePath } from "./paths.js";
@@ -85,10 +85,10 @@ function acceptanceOf(specPath: string | null): string[] {
   return lines.slice(0, WIRE_LIMITS.items).map((l) => clip(l, WIRE_LIMITS.line));
 }
 
-/** 上一轮（早于本轮）最后一条带逐项结论的 review 事件的 findings */
-function prevFindings(events: readonly LedgerEvent[], round: number): ReviewFinding[] {
+/** 上一轮（早于本轮）最后一条带逐项结论的 review 事件：它的 findings，和装不下时单子里指过去的报告路径 */
+function prevReview(events: readonly LedgerEvent[], round: number): { findings: ReviewFinding[]; report: string | null } {
   const prev = events.findLast((e) => e.kind === "review" && typeof e.data.round === "number" && e.data.round < round && Array.isArray(e.data.findings));
-  return wireFindings(prev?.data.findings);
+  return { findings: wireFindings(prev?.data.findings), report: typeof prev?.data.path === "string" ? prev.data.path : null };
 }
 
 /** GitHub PR 链接或纯数字 → repo / pr；别的写法（分支名、空）当本机单 */
@@ -105,12 +105,13 @@ function reportPathFor(slot: Pick<ReviewSlot, "task" | "node">, dir = reviewsDir
 }
 
 /** 审查单本身；构造完过一遍 parseOrderWire——发出去的单和收进来的单用同一把尺子，坏了就不发（返回 null 并说明） */
-function reviewOrderOf(db: Database, slot: ReviewSlot, dir = reviewsDir()): { ok: true; order: OrderWire } | { ok: false; error: string } {
+export function reviewOrderOf(db: Database, slot: ReviewSlot, dir = reviewsDir()): { ok: true; order: OrderWire } | { ok: false; error: string } {
   const { task } = slot;
   const events = listEvents(db, { project: task.project, target: task.id });
   const wf = getWorkflow(db, task.id);
   const report = reportPathFor(slot, dir);
   const specPath = specPathFor(task, getMeta(db, task.project).docsDir);
+  const prev = prevReview(events, task.round);
   const order: OrderWire = {
     v: 1, orderId: slot.orderId, taskId: task.id, specRev: task.specRev, dagVersion: null, node: slot.node, step: "review",
     round: task.round, head: slot.head, ...prCoords(task.pr),
@@ -120,10 +121,10 @@ function reviewOrderOf(db: Database, slot: ReviewSlot, dir = reviewsDir()): { ok
     outputs: ["结论：submit_verdict（VerdictWire：verdict、p0/p1/p2 计数与逐项 findings 一致）", `报告：${report}（非空；bridge 只校验路径，不读内容）`],
     acceptance: acceptanceOf(specPath),
     writeBack: `submit_verdict({v:1, orderId:"${slot.orderId}", head:"${slot.head}", …, reportPath:"${report}"})；只记结论，不推阶段`,
-    findings: prevFindings(events, task.round),
+    findings: prev.findings,
     fallback: wf?.fallback ? clip(wf.fallback, WIRE_LIMITS.fallback) : null,
   };
-  const checked = parseOrderWire(order);
+  const checked = parseOrderWire(fitFindings(order, prev.report));
   return checked.ok ? { ok: true, order: checked.value } : { ok: false, error: `审查单构造出错（${checked.error}）` };
 }
 

@@ -44,6 +44,7 @@ export const UNKNOWN_ACTOR = "unknown";
 const SCHEDULER_SERVICE_COMMANDS = new Set([
   "scheduler-plan", "scheduler-settle", "scheduler-session-bind", "scheduler-session-retire", "scheduler-merge-begin", "scheduler-merge-step",
   "scheduler-observe", "scheduler-fallback-manual", "scheduler-stage", "scheduler-ui-ask", "scheduler-unclaimed",
+  "scheduler-unclaimed-sent",
 ]);
 
 const COMMANDS: Record<string, CommandSpec> = {

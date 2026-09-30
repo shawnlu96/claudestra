@@ -3,7 +3,9 @@ import { describe, expect, test } from "bun:test";
 import { openAsk } from "../src/lib/ledger-asks.js";
 import { getWorkflow, type IntentStatus, type SchedulerIntent } from "../src/lib/ledger-scheduler.js";
 import { getEventByDedup, listEvents } from "../src/lib/ledger-store.js";
-import { markingTakes, recordTaken, takenKey, UNCLAIMED_ALARM_MS, unclaimedKey } from "../src/lib/order-mark.js";
+import { markingTakes, recordTaken, takenKey, UNCLAIMED_ALARM_MS, unclaimedKey, unclaimedSentKey } from "../src/lib/order-mark.js";
+import { fitFindings } from "../src/lib/order-findings.js";
+import { unpullableReason } from "../src/lib/order-pullable.js";
 import { currentOrders, orderWireFor } from "../src/lib/order-take.js";
 import { routeOrderTool, type OrderToolHandler } from "../src/lib/order-tool-route.js";
 import { codexFailure } from "../src/lib/scheduler-auto-ports.js";
@@ -12,6 +14,7 @@ import { CLAIM_LEASE_MS, driveDispatch, type SchedulerLedgerOps } from "../src/l
 import { ledgerResult } from "../src/lib/scheduler-work-order.js";
 import { createAcpWorker } from "../src/lib/worker-acp.js";
 import { createChannelWorker, createTmuxFallbackWorker } from "../src/lib/worker-message.js";
+import { parseVerdictWire, WIRE_MAX_BYTES } from "../src/lib/order-wire.js";
 import { renderWorkOrder } from "../src/lib/worker-order.js";
 import type { AdapterDeps } from "../src/lib/worker-ports.js";
 import { deliveryFor, sentAsWake, type SessionRef, type WorkOrder } from "../src/lib/worker-session.js";
@@ -232,6 +235,102 @@ describe("未领单报警：唤醒发出 10 分钟没人领，只报一次", () 
       await text.tick();
       expect(text.notices).toEqual([]);
     } finally { text.close(); }
+  });
+});
+
+describe("未领单报警没送到 PM：记着没送到，稍后照原文重发，送到才算报过", () => {
+  test("第一次 notifyPm 失败 → 60 秒内不重试 → 之后重发一次成功 → 再也不报", async () => {
+    const f = autoFixture();
+    try {
+      await toBuild(f);
+      await f.tick();
+      const id = lastIntent(f).id;
+      const tries: string[] = [];
+      let down = true;
+      f.tickDeps.notifyPm = async (_t, text) => { tries.push(text); if (down) throw new Error("bridge unavailable"); };
+      f.advance(UNCLAIMED_ALARM_MS + 1);
+      expect(await f.tick()).toMatchObject({ step: "waiting", detail: expect.stringContaining("稍后重发") });
+      expect(getEventByDedup(f.db, unclaimedKey(id))).not.toBeNull();
+      expect(getEventByDedup(f.db, unclaimedSentKey(id))).toBeNull();
+      down = false;
+      f.advance(30_000);
+      expect(await f.tick()).toMatchObject({ detail: expect.stringContaining("待重发") });
+      expect(tries).toHaveLength(1);
+      f.advance(31_000);
+      expect(await f.tick()).toMatchObject({ detail: "agent-task-one 未领单，已报警" });
+      expect(tries).toHaveLength(2);
+      expect(tries[1]).toBe(tries[0]); // 同一条报警、同一段文字，不是每次现拼
+      expect(getEventByDedup(f.db, unclaimedSentKey(id))?.data).toMatchObject({ op: "unclaimed_sent", id });
+      for (let i = 0; i < 3; i++) { f.advance(UNCLAIMED_ALARM_MS); expect(await f.tick()).toMatchObject({ detail: expect.stringContaining("已报警过") }); }
+      expect(tries).toHaveLength(2);
+    } finally { f.close(); }
+  });
+
+  test("报警记上了、通知前进程没了：新进程照原文补发；送达只由调度服务写、要先有报警", async () => {
+    const f = autoFixture();
+    try {
+      await toBuild(f);
+      await f.tick();
+      const id = lastIntent(f).id;
+      expect(await f.cli("agent-task-one", "scheduler-unclaimed-sent", id)).toMatchObject({ ok: false, code: "forbidden" });
+      expect(await f.cli("scheduler", "scheduler-unclaimed-sent", id)).toMatchObject({ ok: false, code: "conflict" });
+      expect((await f.cli("scheduler", "scheduler-unclaimed", id, "--text", "crash 前落的报警")).ok).toBe(true);
+      f.advance(UNCLAIMED_ALARM_MS + 1);
+      expect(await f.tick()).toMatchObject({ detail: "agent-task-one 未领单，已报警" });
+      expect(f.notices).toEqual(["crash 前落的报警"]);
+    } finally { f.close(); }
+  });
+});
+
+describe("结论再长，修复单也领得到（单子整体不超 WIRE_MAX_BYTES）", () => {
+  const big = (n: number, severity: "P1" | "P2" = "P1", size = 3950) =>
+    Array.from({ length: n }, (_, i) => ({ findingId: `large-${severity}-${i}`, family: "concurrency", severity, probe: "x".repeat(size) }));
+
+  test("8 条满长 P1（VerdictWire 合法）→ review→fix 后照发唤醒，take_order 拿到装得下的单，注明全文在报告", async () => {
+    const f = autoFixture();
+    try {
+      await toBuild(f);
+      await f.tick();
+      await f.cli("agent-task-one", "deliver", "T1", "--from", "build", "--head", H1);
+      await f.tick(); await f.tick();
+      const rows = big(8);
+      const verdict = { v: 1, orderId: lastIntent(f).id, head: H1, verdict: "changes", p0: 0, p1: 8, p2: 0,
+        findings: rows.map((r) => ({ ...r, description: "x" })), reportPath: "/r/T1-r1.md" };
+      expect(parseVerdictWire(verdict).ok).toBe(true);
+      expect((await f.review("changes", H1, rows)).ok).toBe(true);
+      await f.tick();
+      expect(await f.tick()).toMatchObject({ step: "sent", detail: "channel" });
+      expect(lastIntent(f).receipt).toContain("delivery=wake");
+      const order = currentOrders(f.db, author(f))[0];
+      const wire = orderWireFor(f.db, order);
+      if (!wire.ok) throw new Error(wire.error);
+      expect(Buffer.byteLength(JSON.stringify(wire.order))).toBeLessThanOrEqual(WIRE_MAX_BYTES);
+      expect(wire.order.findings.map((x) => x.findingId)).toEqual(rows.map((r) => r.findingId));
+      expect(wire.order.inputs.at(-1)).toContain("全文看审查报告 reviews/T1-r1/report.md");
+    } finally { f.close(); }
+  });
+
+  test("压到最短还装不下就先丢最轻的项；装得下的单原样不动", () => {
+    const small = { inputs: ["a"], findings: big(2, "P1", 10) };
+    expect(fitFindings(small, "/r.md")).toBe(small);
+    const wire = { inputs: ["x".repeat(16 * 1024)], findings: [...big(60, "P2"), ...big(40, "P1")] };
+    const fit = fitFindings(wire, "/r.md");
+    expect(Buffer.byteLength(JSON.stringify(fit))).toBeLessThanOrEqual(WIRE_MAX_BYTES);
+    expect(fit.findings.length).toBeLessThan(100);
+    expect(fit.findings.slice(0, 40).every((x) => x.severity === "P1")).toBe(true);
+    expect(fit.inputs.at(-1)).toContain(`只列最严重的 ${fit.findings.length}/100 项`);
+  });
+
+  test("领单口径找不到这张单（会话不是台账绑定的那个）→ 不发唤醒，写明原因", async () => {
+    const f = autoFixture();
+    try {
+      await toBuild(f);
+      await f.tick();
+      const intent = lastIntent(f);
+      const ref = boundRef(f.db, "T1", "author")!;
+      expect(unpullableReason(f.db, ref, intent)).toBeNull();
+      expect(unpullableReason(f.db, { ...ref, sessionId: "s-other" }, intent)).toContain("找不到这张单");
+    } finally { f.close(); }
   });
 });
 
