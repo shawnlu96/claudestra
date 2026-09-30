@@ -40,7 +40,7 @@ const agentName = need("CLAUDESTRA_AGENT");
 const sessionId = need("CLAUDESTRA_SESSION_ID");
 const bridgeUrl = resolveBridgeUrl();
 const bunBin = resolveBunPath();
-const agent = acpAgentCommand(process.env, bunBin);
+const agent = acpAgentCommand(process.env, bunBin, undefined, process.env[CLEAN_ENV_FLAG] === "1");
 if ("error" in agent) {
   console.error(`❌ ${agent.error}`);
   process.exit(3);

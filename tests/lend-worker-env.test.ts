@@ -1,9 +1,12 @@
 /** T94 出借 worker 的白名单环境（src/lib/runtimes/clean-env.ts，接到 codex-acp 启动命令与 ACP 适配器环境） */
 import { describe, expect, test } from "bun:test";
-import { adapterEnv } from "../src/lib/acp/adapter-proc.js";
+import { mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { acpAgentCommand, adapterEnv, spawnAdapter } from "../src/lib/acp/adapter-proc.js";
 import { shellEscape } from "../src/lib/claude-launch.js";
 import { buildAcpHostCommand } from "../src/lib/runtimes/codex-acp.js";
-import { CLEAN_ENV_FLAG, envIPrefix, isLendWorkerName, LEND_WORKER_MARK, LEND_WORKER_PREFIX, pickWorkerEnv, WORKER_ENV_WHITELIST } from "../src/lib/runtimes/clean-env.js";
+import { BUN_NO_AUTOLOAD, CLEAN_ENV_FLAG, envIPrefix, isLendWorkerName, LEND_WORKER_MARK, LEND_WORKER_PREFIX, pickWorkerEnv, WORKER_ENV_WHITELIST } from "../src/lib/runtimes/clean-env.js";
 import type { LaunchSpec } from "../src/lib/runtimes/types.js";
 import { testChildEnv } from "./test-env.js";
 
@@ -92,5 +95,69 @@ describe("T94 codex-acp 接线", () => {
     expect(env.GH_TOKEN).toBe("gh-secret");
     expect(env[LEND_WORKER_MARK]).toBeUndefined();
     expect(JSON.parse(env.CODEX_CONFIG).mcp_servers.claudestra).toBeDefined();
+  });
+});
+
+/**
+ * 外来 clone：.env 是指向「宿主」假凭据文件的软链，另有 .env.local / .env.development / .env.test 普通文件，bunfig.toml 配了 preload。
+ * 探针脚本打印它看到的几个假变量和 preload 有没有跑。只用假值，不碰真凭据。
+ */
+function hostileClone(): { clone: string; probe: string; fakeRoot: string } {
+  const base = mkdtempSync(join(tmpdir(), "lend-autoload-"));
+  const host = join(base, "host");
+  const clone = join(base, "clone");
+  const fakeRoot = join(base, "root");
+  for (const d of [host, clone, join(fakeRoot, "src")]) mkdirSync(d, { recursive: true });
+  writeFileSync(join(host, ".env"), "GH_TOKEN=fake-host-gh\nBRIDGE_CONTROL_TOKEN=fake-host-ctl\n");
+  symlinkSync(join(host, ".env"), join(clone, ".env"));
+  writeFileSync(join(clone, ".env.local"), "FAKE_LOCAL=1\n");
+  writeFileSync(join(clone, ".env.development"), "FAKE_DEV=1\n");
+  writeFileSync(join(clone, ".env.test"), "FAKE_TEST=1\n");
+  writeFileSync(join(clone, "pre.ts"), "(globalThis as { __pre?: string }).__pre = 'ran';\n");
+  writeFileSync(join(clone, "bunfig.toml"), 'preload = ["./pre.ts"]\n');
+  const keys = ["GH_TOKEN", "BRIDGE_CONTROL_TOKEN", "FAKE_LOCAL", "FAKE_DEV", "FAKE_TEST"];
+  const body = `console.log("PROBE" + JSON.stringify({ env: ${JSON.stringify(keys)}.filter((k) => process.env[k]), pre: (globalThis as { __pre?: string }).__pre ?? null }));\n`;
+  const probe = join(base, "probe.ts");
+  writeFileSync(probe, body);
+  writeFileSync(join(fakeRoot, "src", "acp-host.ts"), body); // 宿主命令跑的是 <repoRoot>/src/acp-host.ts：换成探针
+  return { clone, probe, fakeRoot };
+}
+const probeOut = (out: string) => JSON.parse(/PROBE(.*)/.exec(out)![1]!) as { env: string[]; pre: string | null };
+
+describe("T94 外来 clone 里起 bun：不自动加载 .env* / bunfig.toml（r1 P1-1）", () => {
+  test("对照：不加参数的 bun 在这个 clone 里确实会读到软链 .env 并跑 preload（证明探针有效）", async () => {
+    const { clone, probe } = hostileClone();
+    const p = Bun.spawn([process.execPath, probe], { cwd: clone, env: testChildEnv(), stdout: "pipe" });
+    const got = probeOut(await new Response(p.stdout).text());
+    expect(got.env).toContain("GH_TOKEN");
+    expect(got.pre).toBe("ran");
+  });
+
+  test("宿主命令（create / restart 都走它）：在 clone 里真跑，没有 .env* 里的变量，preload 没跑", async () => {
+    const { clone, fakeRoot } = hostileClone();
+    const cmd = buildAcpHostCommand(spec("agent-lend-0123456789"), { bunBin: process.execPath, repoRoot: fakeRoot, env: DIRTY });
+    expect(cmd).toContain(BUN_NO_AUTOLOAD.join(" "));
+    const p = Bun.spawn(["/bin/sh", "-c", cmd], { cwd: clone, env: testChildEnv(DIRTY), stdout: "pipe" });
+    expect(probeOut(await new Response(p.stdout).text())).toEqual({ env: [], pre: null });
+  });
+
+  test("适配器 argv（宿主与 create 引导都用 acpAgentCommand）：clean 时经 spawnAdapter 在 clone 里起，同样什么都没加载", async () => {
+    const { clone, probe } = hostileClone();
+    const lab = { CLAUDESTRA_SANDBOX: "1" };
+    const got = acpAgentCommand(lab, process.execPath, undefined, true);
+    if ("error" in got) throw new Error(got.error);
+    expect(got.cmd.slice(0, -1)).toEqual([process.execPath, ...BUN_NO_AUTOLOAD]);
+    const env = { ...testChildEnv(), ...adapterEnv({ base: DIRTY, bunBin: process.execPath, channelServer: "/r/c.ts", mcpName: "claudestra", logsDir: "/l", clean: true }) };
+    const proc = spawnAdapter([...got.cmd.slice(0, -1), probe], env, clone, () => {});
+    let out = "";
+    proc.wire.onData((c) => (out += typeof c === "string" ? c : new TextDecoder().decode(c)));
+    await proc.exited;
+    await Bun.sleep(50);
+    expect(probeOut(out)).toEqual({ env: [], pre: null });
+    expect(acpAgentCommand(lab, "/b/bun")).toMatchObject({ cmd: ["/b/bun", expect.any(String)] }); // 普通 agent 不变
+  });
+
+  test("出借 worker 不认 CLAUDESTRA_ACP_AGENT 手工覆盖", () => {
+    expect(acpAgentCommand({ CLAUDESTRA_ACP_AGENT: '["bun","x.ts"]' }, "/b/bun", undefined, true)).toMatchObject({ error: expect.stringContaining("不认") });
   });
 });

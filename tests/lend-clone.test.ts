@@ -3,18 +3,19 @@ import { describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { orderDir, orderDirName, prepareClone, removeOrderDir, type Run } from "../src/lib/lend-clone.js";
+import { orderDir, orderDirName, outsideLink, prepareClone, removeOrderDir, type Run } from "../src/lib/lend-clone.js";
 import { runBounded } from "../src/lib/run-bounded.js";
 
 const ENV = { PATH: process.env.PATH, HOME: process.env.HOME, GH_TOKEN: "gh-secret", BRIDGE_CONTROL_TOKEN: "ctl" };
 
-async function sourceRepo(): Promise<{ dir: string; head: string }> {
+async function sourceRepo(links: Record<string, string> = {}): Promise<{ dir: string; head: string }> {
   const dir = mkdtempSync(join(tmpdir(), "lend-src-"));
   const git = (...a: string[]) => runBounded(["git", "-c", "user.email=t@t", "-c", "user.name=t", ...a], { cwd: dir, timeoutMs: 20_000 });
   await git("init", "-q");
   await git("config", "uploadpack.allowAnySHA1InWant", "true");
   writeFileSync(join(dir, "a.txt"), "1");
-  await git("add", "a.txt");
+  for (const [at, to] of Object.entries(links)) (mkdirSync(join(dir, at, ".."), { recursive: true }), symlinkSync(to, join(dir, at)));
+  await git("add", "-A");
   await git("commit", "-qm", "c1");
   const head = (await git("rev-parse", "HEAD")).stdout.trim();
   writeFileSync(join(dir, "a.txt"), "2");
@@ -67,6 +68,20 @@ describe("T94 工作副本", () => {
   test("目录名：带冒号的 orderId 也安全，两张单不会落到同一目录", () => {
     expect(orderDirName("a:b")).not.toBe(orderDirName("a_b"));
     expect(orderDirName("../../x")).not.toContain("/");
+  });
+
+  test("对方仓库里提交了指向工作副本外面的软链（.env → 宿主文件、子目录里的 ../../ 逃逸）：不起 worker；指向里面的软链照常", async () => {
+    const host = mkdtempSync(join(tmpdir(), "host-"));
+    writeFileSync(join(host, ".env"), "GH_TOKEN=fake-host-gh\n");
+    const root = mkdtempSync(join(tmpdir(), "lend-root-"));
+    for (const [i, links] of ([{ ".env": join(host, ".env") }, { "sub/deep/.env.local": "../../../../host/.env" }] as Record<string, string>[]).entries()) {
+      const { dir: src, head } = await sourceRepo(links);
+      expect(await prepareClone({ orderId: `ln${i}`, repo: "o/r", pr: null, head }, { root, env: ENV, run: localRun(src) }))
+        .toMatchObject({ ok: false, reason: expect.stringContaining("软链") });
+    }
+    const { dir: src, head } = await sourceRepo({ "docs/a.txt": "../a.txt", "b": "docs" });
+    expect(await prepareClone({ orderId: "ln-ok", repo: "o/r", pr: null, head }, { root, env: ENV, run: localRun(src) })).toMatchObject({ ok: true });
+    expect(outsideLink(orderDir("ln-ok", root))).toBeNull();
   });
 
   test("删目录只删这张单自己的：软链到别处的不删", () => {

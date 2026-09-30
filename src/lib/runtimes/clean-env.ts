@@ -44,6 +44,13 @@ export function envIPrefix(env: Record<string, string | undefined>, escape: (v: 
   return ["env -i", ...pairs, 'TMUX_PANE="$TMUX_PANE"'].join(" ");
 }
 
+/**
+ * 出借 worker 链上的 bun 进程（宿主、适配器）都在外来 clone 里起：不许自动读 cwd 的 .env / .env.local / .env.*（clone 里放个软链
+ * 就能把宿主的 GH_TOKEN、控制 token 带回白名单之后的环境），也不许读 cwd 的 bunfig.toml（preload = 在我们的进程里跑外来代码）。
+ * tests/lend-worker-env.test.ts 起真 bun 核。
+ */
+export const BUN_NO_AUTOLOAD = ["--no-env-file", "--config=/dev/null"] as const;
+
 /** 宿主告诉自己「起适配器时只给白名单」的标记；只有 envIPrefix 起的宿主才带 */
 export const CLEAN_ENV_FLAG = "CLAUDESTRA_ACP_CLEAN_ENV";
 

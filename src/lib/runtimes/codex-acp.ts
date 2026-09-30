@@ -21,7 +21,7 @@ import { isSandbox, SANDBOX_ROOT_ENV } from "../sandbox.js";
 import { acpAgentCommand, adapterEnv, spawnAdapter } from "../acp/adapter-proc.js";
 import { ACP_AGENT_ENV, sandboxAcpHome } from "../acp/stub.js";
 import { AcpSession } from "../acp/session.js";
-import { CLEAN_ENV_FLAG, envIPrefix, isLendWorkerName } from "./clean-env.js";
+import { BUN_NO_AUTOLOAD, CLEAN_ENV_FLAG, envIPrefix, isLendWorkerName } from "./clean-env.js";
 import { CODEX_ACP_CONTROL } from "./codex-control.js";
 import { defaultCodexDeps, type CodexAdapterDeps } from "./codex-deps.js";
 import { CODEX_READY_OPTION, waitCodexReady } from "./codex-ready.js";
@@ -64,13 +64,14 @@ export function buildAcpHostCommand(spec: LaunchSpec, o: { bunBin: string; repoR
   const prefix = pairs.filter(([, v]) => v).map(([k, v]) => `${k}=${shellEscape(v!)}`).join(" ");
   const cred = acpCallerCredAssignment(spec.callerCredFile, shellEscape); // T85：路径只给宿主这一条命令，宿主起适配器前读走即删
   const head = clean ? `${envIPrefix(env, shellEscape)} ` : "";
-  return `${head}${prefix}${cred}${pathOverrideAssignments(shellEscape, env)} ${shellEscape(o.bunBin)} ${shellEscape(join(o.repoRoot, "src/acp-host.ts"))}`;
+  const bun = [shellEscape(o.bunBin), ...(clean ? BUN_NO_AUTOLOAD : [])].join(" ");
+  return `${head}${prefix}${cred}${pathOverrideAssignments(shellEscape, env)} ${bun} ${shellEscape(join(o.repoRoot, "src/acp-host.ts"))}`;
 }
 
 /** create 的引导：起一个短命的适配器，新建线程并跑一轮，返回 thread id（不挂 claudestra MCP，频道相关的环境变量全清掉） */
 async function bootstrapThread(spec: LaunchSpec, deps: CodexAdapterDeps): Promise<string> {
   if (!spec.cwd) throw new Error("Codex（ACP）新建会话需要工作目录（LaunchSpec.cwd）");
-  const agent = acpAgentCommand(process.env, deps.bunBin);
+  const agent = acpAgentCommand(process.env, deps.bunBin, undefined, isLendWorkerName(spec.agentName));
   if ("error" in agent) throw new Error(agent.error);
   const codexPath = agent.stub ? undefined : ((await deps.resolveBin()) ?? undefined);
   const developerInstructions = spec.mode === "fork" ? undefined : codexDeveloperInstructions({
