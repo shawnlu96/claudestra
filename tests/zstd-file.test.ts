@@ -10,7 +10,7 @@ import { join } from "node:path";
 import zlib from "node:zlib";
 import { copyIfLarger, sweepStaleTmp } from "../src/lib/archive-copy.js";
 import { readZstdFirstLine, scanZstdFile } from "../src/lib/zstd-file.js";
-import { blockHeaderOffsets, streamCompress, zstdFrame } from "./zstd-test-kit.js";
+import { blockHeaderOffsets, pzstdLike, streamCompress, zstdFrame } from "./zstd-test-kit.js";
 
 const base = mkdtempSync(join(tmpdir(), "zstd-file-"));
 /** 压不太动的文本：块多、每块都是真压缩块（截断才落在块中间） */
@@ -24,16 +24,17 @@ const file = (data: Uint8Array | string) => {
 };
 
 describe("scanZstdFile：只走帧头 / 块头，判完整 + 求声明大小", () => {
-  test("Bun 压缩的单帧 / 多帧拼接 / 前面带可跳过帧：完整，声明大小之和；流式压缩没声明：完整、size null", async () => {
+  test("单帧（Bun 压缩带大小 / 流式压缩没大小）：完整；多帧、带可跳过帧：unsupported", async () => {
     const a = Buffer.from("a".repeat(300_000) + "\n");
     const b = Buffer.from("line\n");
     expect(await scanZstdFile(file(Bun.zstdCompressSync(a)))).toEqual({ complete: true, size: a.length });
-    expect(await scanZstdFile(file(Buffer.concat([Bun.zstdCompressSync(a), Bun.zstdCompressSync(b)])))).toEqual({ complete: true, size: a.length + b.length });
+    expect(await scanZstdFile(file(await streamCompress(Buffer.from("x\n"))))).toEqual({ complete: true, size: null });
     const skip = Buffer.alloc(12);
     skip.writeUInt32LE(0x184d2a50, 0);
     skip.writeUInt32LE(4, 4);
-    expect(await scanZstdFile(file(Buffer.concat([skip, Bun.zstdCompressSync(b)])))).toEqual({ complete: true, size: b.length });
-    expect(await scanZstdFile(file(await streamCompress(Buffer.from("x\n"))))).toEqual({ complete: true, size: null });
+    for (const bytes of [Buffer.concat([Bun.zstdCompressSync(a), Bun.zstdCompressSync(b)]), Buffer.concat([skip, Bun.zstdCompressSync(b)]), Buffer.concat([Bun.zstdCompressSync(b), skip])]) {
+      expect(await scanZstdFile(file(bytes))).toMatchObject({ complete: false, unsupported: true });
+    }
   });
 
   test("空文件 / 不是 zstd / 截在块内容、块头、帧尾校验和 / 末尾多余字节：不完整", async () => {
@@ -123,6 +124,29 @@ describe("copyIfLarger 的 .zst 路径", () => {
         const errs: string[] = [];
         expect(await copyIfLarger(file(bytes), join(dir, "x.jsonl"), (e) => errs.push(e.message))).toBe("failed");
         expect(errs.join()).toContain(".zst 不完整");
+        expect(readdirSync(dir)).toEqual([]);
+      }
+      expect(spy).toHaveBeenCalledTimes(0);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  // r5 P1：node:zlib 流式解码器解完第一帧就正常 end，后面的帧静默丢掉；各帧都没声明大小时解完没东西可核
+  test("多帧（都没大小 / 都带大小 / pzstd 输出）：failed「多帧 .zst 暂不支持」，不解压、不落盘", async () => {
+    const one = noisy(200_000);
+    const two = Buffer.from("SECOND_FRAME_LAST_MESSAGE\n");
+    const spy = spyOn(zlib, "createZstdDecompress");
+    try {
+      for (const bytes of [
+        Buffer.concat([await streamCompress(one), await streamCompress(two)]),
+        Buffer.concat([Bun.zstdCompressSync(one), Bun.zstdCompressSync(two)]),
+        pzstdLike([Bun.zstdCompressSync(one), Bun.zstdCompressSync(two)]),
+      ]) {
+        const dir = destDir();
+        const errs: string[] = [];
+        expect(await copyIfLarger(file(bytes), join(dir, "x.jsonl"), (e) => errs.push(e.message))).toBe("failed");
+        expect(errs.join()).toContain("多帧 .zst 暂不支持");
         expect(readdirSync(dir)).toEqual([]);
       }
       expect(spy).toHaveBeenCalledTimes(0);

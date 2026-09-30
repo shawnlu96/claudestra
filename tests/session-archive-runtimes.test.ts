@@ -128,6 +128,7 @@ describe("复制失败不能报成功（T72 r1 P1-3）", () => {
       expect(r).toMatchObject({ ok: false, archived: [] });
       expect(r.note).toContain("没拷上");
       expect(r.note).toContain("EACCES");
+      expect(r.note).toContain("下次 archive 会补"); // 权限类是暂时的；.zst 坏了才写「需人工处理」（tests/codex-archive-read.test.ts）
     } finally {
       chmodSync(src, 0o644);
     }

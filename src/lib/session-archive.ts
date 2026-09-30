@@ -18,7 +18,7 @@ import { existsSync, readdirSync, realpathSync } from "fs";
 import { mkdir, readdir } from "fs/promises";
 import { basename, dirname, join, resolve, sep } from "path";
 import { projectsSlug } from "./jsonl-cost.js";
-import { copyIfLarger, sweepStaleTmp } from "./archive-copy.js";
+import { copyIfLarger, isSourceUnusable, sweepStaleTmp } from "./archive-copy.js";
 import { archiveWorkflowDirs } from "./workflow-archive.js";
 import { pickCodexRolloutForArchive, type RolloutPick } from "./codex-rollout-pick.js";
 import { writeSessionSidecar } from "./session-sidecar.js";
@@ -152,8 +152,12 @@ export async function archiveSession(
   await sweepStaleTmp(dir);
   const archived: string[] = [];
   const failed: string[] = [];
+  let unusable = false;
   const copy = async (from: string, dest: string) => {
-    const r = await copyIfLarger(from, dest, (e) => failed.push(`${basename(from)}: ${e.message}`));
+    const r = await copyIfLarger(from, dest, (e) => {
+      failed.push(`${basename(from)}: ${e.message}`);
+      unusable ||= isSourceUnusable(e);
+    });
     if (r === "copied") archived.push(dest);
     return r;
   };
@@ -192,9 +196,11 @@ export async function archiveSession(
 
   // 任何一份没拷上都是 ok:false：kill / remove 靠它记日志，「无变化」和「拷失败」不能混成一句（tests/session-archive-runtimes.test.ts）
   const extra = [pickNote, ...sidecarNotes].filter(Boolean).map((n) => `；${n}`).join("");
-  if (incomplete) return { ok: false, archived, note: `归档不完整：${incomplete}${failed.length ? `；另有 ${failed.join("；")} 没拷上` : ""}${extra}` };
+  const human = unusable ? "；.zst 源文件本身不能用，重试不会好，需人工处理" : "";
+  if (incomplete) return { ok: false, archived, note: `归档不完整：${incomplete}${failed.length ? `；另有 ${failed.join("；")} 没拷上` : ""}${human}${extra}` };
   if (failed.length) {
-    return { ok: false, archived, note: `归档不完整：${failed.length} 个文件没拷上（${failed.join("；")}）；源文件还在，下次 archive 会补${extra}` };
+    const retry = unusable ? human : "；源文件还在，下次 archive 会补";
+    return { ok: false, archived, note: `归档不完整：${failed.length} 个文件没拷上（${failed.join("；")}）${retry}${extra}` };
   }
   return { ok: true, archived, note: (archived.length ? `已归档 ${archived.length} 个文件` : "归档已是最新（无变化）") + extra };
 }

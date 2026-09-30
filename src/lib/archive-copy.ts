@@ -5,13 +5,13 @@
  *   copyIfChanged 会被整个重写的文件（workflow 运行 JSON 跑的过程中可能变小）：内容不同就镜像源；.json 先解析成功才替换，
  *                 读的前后源变了（正被重写）就重读，三次都不稳就这次放弃
  * 返回 "copied" / "same" / "failed"：失败要让调用方报出来，别和「没变化」混在一起。
- * `.zst` 源（Codex 满 7 天压缩的 rollout）按解压后的内容比、落盘：结构不完整（截断）直接 failed；归档已不小于帧头声明的大小就不解；
+ * `.zst` 源（Codex 满 7 天压缩的 rollout）按解压后的内容比、落盘：结构不完整（截断）或不是单帧直接 failed；归档已不小于帧头声明的大小就不解；
  * 否则流式解到临时文件，解出字节数与声明不符也 failed，对上才 rename（lib/zstd-file.ts）。失败一律不落盘、不留临时文件。
  */
 import { existsSync } from "fs";
 import { readdir, readFile, rename, stat, unlink, writeFile } from "fs/promises";
 import { join } from "path";
-import { decompressZstdToFile, scanZstdFile } from "./zstd-file.js";
+import { decompressZstdToFile, scanZstdFile, ZstdUnusableError } from "./zstd-file.js";
 
 /**
  * .zst 解压后的上限。真实 Codex rollout 在几 MB 到几百 MB；解压是流式落盘，这个数限的是磁盘占用和 sweep 的耗时，
@@ -20,6 +20,11 @@ import { decompressZstdToFile, scanZstdFile } from "./zstd-file.js";
 const ZSTD_ARCHIVE_MAX_BYTES = 1024 * 1024 * 1024;
 
 export type CopyOutcome = "copied" | "same" | "failed";
+
+/** copyIfLarger 的失败是不是源本身坏了（.zst 不完整 / 多帧 / 超上限 / 解码报错）：是的话重试不会好，不是（盘满、源被删）下次再试 */
+export function isSourceUnusable(e: Error): boolean {
+  return e instanceof ZstdUnusableError || String((e as { code?: unknown }).code ?? "").startsWith("ZSTD_error_");
+}
 
 /** 本模块临时文件的命名：`<dest>.tmp-<pid>-<毫秒>` */
 const TMP_RE = /\.tmp-\d+-\d+$/;
@@ -73,15 +78,16 @@ async function destSize(dest: string): Promise<number | null> {
 
 async function copyZstdIfLarger(src: string, dest: string, max: number): Promise<CopyOutcome> {
   const scan = await scanZstdFile(src);
-  if (!scan.complete) throw new Error(`.zst 不完整：${scan.reason}`); // 流式解码器遇截断不报错，只能在解之前拦
+  // 流式解码器遇截断、遇多帧都不报错（只解到第一帧末尾），只能在解之前拦
+  if (!scan.complete) throw new ZstdUnusableError(scan.unsupported ? scan.reason : `.zst 不完整：${scan.reason}`);
   const declared = scan.size;
   const have = await destSize(dest);
   if (declared !== null && have !== null && have >= declared) return "same"; // 冷段每日 sweep 走这里：零解压
-  if (declared !== null && declared > max) throw new Error(`.zst 解压超过上限：帧头声明 ${declared} 字节 > ${max}`);
+  if (declared !== null && declared > max) throw new ZstdUnusableError(`.zst 解压超过上限：帧头声明 ${declared} 字节 > ${max}`);
   const tmp = `${dest}.tmp-${process.pid}-${Date.now()}`;
   try {
     const n = await decompressZstdToFile(src, tmp, max);
-    if (declared !== null && n !== declared) throw new Error(`.zst 解出 ${n} 字节，与帧头声明的 ${declared} 不符`);
+    if (declared !== null && n !== declared) throw new ZstdUnusableError(`.zst 解出 ${n} 字节，与帧头声明的 ${declared} 不符`);
     const now = await destSize(dest);
     if (now !== null && now >= n) {
       await unlink(tmp);

@@ -23,10 +23,40 @@ export function zstdFrame(fcs: number, content: Buffer): Buffer {
   return Buffer.concat([head, Buffer.from([bh & 0xff, (bh >> 8) & 0xff, (bh >> 16) & 0xff]), content]);
 }
 
-/** 首行是一个正常帧（流式读首行拿得到），后面接一个手搓帧；两帧声明大小之和 = total */
-export function headThenFrame(headLine: string, total: number, rest: Buffer = Buffer.from("x")): Buffer {
+const blockHeader = (last: boolean, type: number, size: number) => {
+  const h = (last ? 1 : 0) | (type << 1) | (size << 3);
+  return Buffer.from([h & 0xff, (h >> 8) & 0xff, (h >> 16) & 0xff]);
+};
+
+/**
+ * 单帧、结构完整、声明 total 字节的解压炸弹：首块是 raw 的 `headLine\n`（流式读首行拿得到），其余是 128KB 的 RLE 块。
+ * 声明与内容一致，2GiB 也只有约 64KB
+ */
+export function rleBomb(headLine: string, total: number): Buffer {
   const head = Buffer.from(`${headLine}\n`);
-  return Buffer.concat([Bun.zstdCompressSync(head), zstdFrame(total - head.length, rest)]);
+  const fh = Buffer.alloc(14);
+  fh.writeUInt32LE(0xfd2fb528, 0);
+  fh[4] = 0xc0; // FCS 8 字节、非单段
+  fh[5] = 0x38; // 窗口 128KB：块最大 128KB
+  fh.writeBigUInt64LE(BigInt(total), 6);
+  const parts = [fh, blockHeader(false, 0, head.length), head];
+  for (let left = total - head.length; left > 0; ) {
+    const n = Math.min(left, 128 * 1024);
+    left -= n;
+    parts.push(blockHeader(left === 0, 1, n), Buffer.from("x"));
+  }
+  return Buffer.concat(parts);
+}
+
+/** pzstd 的输出：每个数据帧前面一个 4 字节内容的可跳过帧（记下一帧的压缩后长度） */
+export function pzstdLike(frames: Uint8Array[]): Buffer {
+  return Buffer.concat(frames.flatMap((f) => {
+    const skip = Buffer.alloc(12);
+    skip.writeUInt32LE(0x184d2a50, 0);
+    skip.writeUInt32LE(4, 4);
+    skip.writeUInt32LE(f.length, 8);
+    return [skip, Buffer.from(f)];
+  }));
 }
 
 /** 单帧 .zst 里各块头的偏移（造「截在块头中间」用）；只认 Bun / Codex 那种带 FCS 的单帧 */

@@ -13,7 +13,7 @@ import { archiveAgentSession, archiveSession } from "../src/lib/session-archive.
 import { isValidSessionId, readSessionHistory, searchSessionHistory } from "../src/lib/session-history.js";
 import { UNTRUSTED_RUNTIME, sourceIdForPath } from "../src/lib/runtimes/index.js";
 import { readFirstLineSync, sessionSidecarPath } from "../src/lib/session-sidecar.js";
-import { blockHeaderOffsets, headThenFrame } from "./zstd-test-kit.js";
+import { blockHeaderOffsets, rleBomb, streamCompress } from "./zstd-test-kit.js";
 
 const base = mkdtempSync(join(tmpdir(), "codex-archive-read-"));
 const realCodexHome = process.env.CODEX_HOME;
@@ -211,14 +211,11 @@ describe("specRev 2：thread/revert 链", () => {
   });
 
   // r3：.zst 解压在 bridge 的每日 sweep 里跑，不许全量同步解、不许无上限
-  test("冷段帧头大小 ≤ 已有归档：只流式读首行，不整份解压（手搓帧声明与内容不符，真解会失败）", async () => {
+  test("冷段帧头大小 ≤ 已有归档：只流式读首行，不整份解压", async () => {
     const id = sid();
-    const p = rollout("2026-09-29T01-02-03", id, { id }, [userLine("COLD")], ".jsonl.zst");
+    rollout("2026-09-29T01-02-03", id, { id }, [userLine("COLD")], ".jsonl.zst");
     const root = archiveRoot();
     expect((await archive(id, root)).ok).toBe(true);
-    const dest = join(root, "agent-cx", `${id}.jsonl`);
-    const head = readFileSync(dest, "utf8").split("\n")[0]!;
-    writeFileSync(p, headThenFrame(head, readFileSync(dest).length));
     const spy = spyOn(zlib, "createZstdDecompress");
     try {
       expect(await archive(id, root)).toMatchObject({ ok: true, archived: [], note: "归档已是最新（无变化）" });
@@ -234,13 +231,28 @@ describe("specRev 2：thread/revert 链", () => {
     rollout("2026-09-29T01-02-03", id, { id }, [userLine("OLD")]);
     const p = rollout("2026-09-30T01-02-03", `${id}_${r1}`, { id, history_base: { thread_id: id } }, [], ".jsonl.zst");
     const head = L({ timestamp: TS, type: "session_meta", payload: { cwd, id, history_base: { thread_id: id } } });
-    writeFileSync(p, headThenFrame(head, 2 * 1024 * 1024 * 1024));
+    writeFileSync(p, rleBomb(head, 2 * 1024 * 1024 * 1024));
     const root = archiveRoot();
     const r = await archive(id, root);
     expect(r.ok).toBe(false);
     expect(r.note).toContain("解压超过上限");
     expect(readdirSync(join(root, "agent-cx")).filter((f) => f.includes(".tmp-"))).toEqual([]);
     expect(r.archived).toEqual([join(root, "agent-cx", `${id}.jsonl`)]);
+  });
+
+  // r5 P1：流式解码器只解第一帧；多帧 .zst 不收，说明里不许写「下次会补」（损坏 / 不支持的源不会自己变好）
+  test("多帧 .zst（都没声明大小）：ok:false「多帧 .zst 暂不支持」「需人工处理」，不落盘", async () => {
+    const id = sid();
+    const p = rollout("2026-09-29T01-02-03", id, { id }, [userLine("FIRST")]);
+    writeFileSync(`${p}.zst`, Buffer.concat([await streamCompress(readFileSync(p)), await streamCompress(Buffer.from(`${userLine("SECOND_FRAME_LAST_MESSAGE")}\n`))]));
+    rmSync(p);
+    const root = archiveRoot();
+    const r = await archive(id, root);
+    expect(r).toMatchObject({ ok: false, archived: [] });
+    expect(r.note).toContain("多帧 .zst 暂不支持");
+    expect(r.note).toContain("需人工处理");
+    expect(r.note).not.toContain("下次");
+    expect(readdirSync(join(root, "agent-cx"))).toEqual([]);
   });
 
   // r4 P1：截断的多块 .zst 首行完好（pick 放行），流式解码器遇截断又不报错 → 曾经半截落盘还 ok:true
@@ -261,6 +273,8 @@ describe("specRev 2：thread/revert 链", () => {
       const r = await archive(id, root);
       expect(r.ok).toBe(false);
       expect(r.note).toContain(".zst 不完整");
+      expect(r.note).toContain("需人工处理");
+      expect(r.note).not.toContain("下次");
       expect(readdirSync(join(root, "agent-cx"))).toEqual([]);
     });
   }
