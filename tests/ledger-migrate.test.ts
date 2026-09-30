@@ -270,6 +270,8 @@ describe("写事件的底座只给写入模块", () => {
   // ledger-scheduler-resume.ts：改规格后把退回人工的 auto 卡交回调度（T68h），只 PM / master / owner，CAS + 未定意图先对账
   // ledger-scheduler-pool.ts：调度身份把审查挂进共享池（i28-R9），事务内重算计划核对后才出单，之后只按出借单状态 CAS 结算意图
   // scheduler-apply.ts：调度身份按模板推自动卡（只许 restate→build、review→fix / merge），事务内重算计划核对后才 applyMove（T68f）
+  // scheduler-deploy.ts：部署 journal（T68g），只有调度身份推进，deployed 才把本卡 merge→live，结清只 PM / master / owner
+  // order-mark.ts：只写两种按意图去重的 scheduler 事件（领单留痕 = 收件人本人本会话、未领单报警 = 调度身份），不推阶段（i28-M4b）
   test("src 里 import ledger-tx / applyMove 的只有写入模块（直接写事件、带 asRole 推阶段会绕过阶段机与权限）", () => {
     const root = resolve(import.meta.dir, "../src");
     const tx: string[] = [];
@@ -289,7 +291,8 @@ describe("写事件的底座只给写入模块", () => {
     expect(tx.sort()).toEqual(["lib/ledger-dag-write.ts", "lib/ledger-deps-write.ts",
       "lib/ledger-feature-write.ts", "lib/ledger-human.ts", "lib/ledger-lend-result.ts", "lib/ledger-lend.ts", "lib/ledger-scheduler-pool.ts",
       "lib/ledger-scheduler-resume.ts", "lib/ledger-scheduler-settle.ts", "lib/ledger-scheduler-write.ts", "lib/ledger-steps-write.ts", "lib/ledger-write.ts",
-      "lib/scheduler-apply.ts", "lib/scheduler-fallback.ts", "lib/scheduler-merge.ts", "lib/scheduler-observe.ts", "lib/scheduler-sessions.ts"]);
+      "lib/order-mark.ts", "lib/scheduler-apply.ts", "lib/scheduler-deploy.ts", "lib/scheduler-fallback.ts", "lib/scheduler-merge.ts", "lib/scheduler-observe.ts",
+      "lib/scheduler-sessions.ts"]);
     expect(move.sort()).toEqual(["lib/ledger-human.ts", "lib/scheduler-apply.ts"]);
   });
 });

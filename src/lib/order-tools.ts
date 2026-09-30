@@ -4,6 +4,8 @@
  * 这里不校验、不补字段：参数原样交给 bridge，由 bridge 先认身份（requireVerified）再按 T87 的 wire 校验（bridge/order-tools.ts）。
  * tests/order-tools.test.ts。
  */
+import { DAG_TOOL_TIMEOUT_MS, DAG_TOOLS } from "./dag-tools.js";
+
 type BridgeRequest = (msg: any, timeoutMs?: number) => Promise<any>;
 
 /** bridge 要查一次远端分支 head（git ls-remote）再跑 manager 写台账，比普通工具慢 */
@@ -94,6 +96,7 @@ export const ORDER_TOOLS = [
       required: ["v", "orderId", "head", "verdict", "p0", "p1", "p2", "findings", "reportPath"],
     },
   },
+  ...DAG_TOOLS,
 ];
 
 const NAMES = new Set(ORDER_TOOLS.map((t) => t.name));
@@ -102,7 +105,7 @@ export const isOrderTool = (name: string): boolean => NAMES.has(name);
 /** bridge 回 {ok:false, code, error} = 拒绝（没写任何东西），标成 isError 让模型看得见 code */
 export async function orderTool(bridgeRequest: BridgeRequest, name: string, args: unknown) {
   try {
-    const r = await bridgeRequest({ type: "order_tool", tool: name, args: args ?? {} }, ORDER_TOOL_TIMEOUT_MS);
+    const r = await bridgeRequest({ type: "order_tool", tool: name, args: args ?? {} }, DAG_TOOL_TIMEOUT_MS[name] ?? ORDER_TOOL_TIMEOUT_MS);
     return { content: [{ type: "text" as const, text: JSON.stringify(r ?? {}, null, 2) }], ...(r?.ok === false ? { isError: true } : {}) };
   } catch (e) {
     return { content: [{ type: "text" as const, text: (e as Error).message }], isError: true };

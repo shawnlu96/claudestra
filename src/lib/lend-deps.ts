@@ -82,12 +82,14 @@ const writeFooter = (row: LendRow): string[] => [
 const footer = (row: LendRow): string => ["——以下是本机 Claudestra 出借服务写的，不是对方的内容——",
   ...(isWriteStep(String(orderOf(row)?.step ?? "")) ? writeFooter(row) : reviewFooter(row))].join("\n");
 
-/** 写单副本里的提交署名：出借人自己的 git 身份（全局配置）；没配就用一个明确的占位，不猜 */
-function gitIdentity(): { name: string; email: string } {
+/** 写单副本里的提交署名：出借人自己的 git 身份（全局配置）。缺一项就是 null，写单退回并说明，不用占位冒名、也不猜 */
+function gitIdentity(): { name: string; email: string } | null {
   const get = (k: string): string => {
-    try { return Bun.spawnSync(["git", "config", "--global", "--get", k], { stdout: "pipe", stderr: "ignore" }).stdout.toString().trim(); } catch { return ""; /* 没装 git / 没配：走占位 */ }
+    try { return Bun.spawnSync(["git", "config", "--global", "--get", k], { stdout: "pipe", stderr: "ignore" }).stdout.toString().trim(); } catch { return ""; /* 没装 git：当没配，写单退回时会说明 */ }
   };
-  return { name: get("user.name") || "claudestra-lend", email: get("user.email") || "lend@claudestra.invalid" };
+  const name = get("user.name");
+  const email = get("user.email");
+  return name && email ? { name, email } : null;
 }
 
 async function verifyReceipt(peer: string, r: { orderId: string; sha256: string; eventSeq: number; taskId: string; key: string; sig: string }): Promise<boolean> {

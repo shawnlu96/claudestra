@@ -7,7 +7,9 @@
 import type { Database } from "bun:sqlite";
 import { getIntent, getWorkflow, type AuthorFamily, type IntentStatus, type SchedulerIntent } from "./ledger-scheduler.js";
 import type { LedgerTask } from "./ledger-stages.js";
-import { getTask, listEvents } from "./ledger-store.js";
+import { getEventByDedup, getTask, listEvents } from "./ledger-store.js";
+import { orderTakenSeq, UNCLAIMED_ALARM_MS, unclaimedKey, unclaimedSentKey } from "./order-mark.js";
+import { unpullableReason } from "./order-pullable.js";
 import { deadUiAsk, screenshotRefs } from "./scheduler-apply.js";
 import { autoSnapshot } from "./scheduler-auto-snapshot.js";
 import { SchedulerStopped } from "./scheduler-maintenance.js";
@@ -21,7 +23,7 @@ import type { BorrowEntry } from "./lend-config.js";
 import type { RemotePolicy } from "./scheduler-config.js";
 import { isPoolIntent } from "./scheduler-pool-plan.js";
 import { drivePool } from "./scheduler-pool-tick.js";
-import type { EnsureResult, SessionRef, WorkerSession } from "./worker-session.js";
+import { deliveryFor, sentAsWake, type EnsureResult, type SessionRef, type WorkerSession } from "./worker-session.js";
 
 type Manager = (...args: string[]) => Promise<Record<string, unknown>>;
 type Planned = Extract<PlannerDecision, { kind: "intent" }>;
@@ -53,6 +55,9 @@ const noticeLost = (what: string) => (e: unknown): void => {
   if (e instanceof SchedulerStopped) throw e;
   console.error(`⚠️ [scheduler] ${what}：${(e as Error).message}`);
 };
+/** 未领单报警没送到 PM 时多久重发一次；上次失败时间只放内存（按库分开），重启后立刻再试一次，无妨 */
+const UNCLAIMED_RETRY_MS = 60_000;
+const alarmFailedAt = new WeakMap<Database, Map<string, number>>();
 const roleOfIntent = (i: Pick<SchedulerIntent, "action" | "node">): SessionRole =>
   i.action === "review" || i.node === "adversarial_review" ? "reviewer" : "author";
 
@@ -136,6 +141,7 @@ class Card {
         return t ? { specRev: t.specRev, head: t.headSHA, round: t.round, bound: boundRef(this.db, taskId, role) } : null;
       },
       settle: (id, from, to, receipt) => this.settle(id, from, to, receipt),
+      taken: (id) => orderTakenSeq(this.db, id),
       now: () => this.deps.now(),
     };
   }
@@ -159,7 +165,10 @@ class Card {
     }
     const order = workOrderFor(this.task, intent, plan, ref, checkout);
     if (!order) return this.out("held", `节点 ${intent.node} 没有任务单`);
-    return this.fromDrive(await driveDispatch(this.ops(), w, ref, order));
+    let delivery = deliveryFor(w.route, order.step);
+    const unpullable = delivery.mode === "wake" ? unpullableReason(this.db, ref, intent) : null;
+    if (unpullable) delivery = { mode: "text", reason: `领单工具拿不到这张单（${oneLine(unpullable)}），改发全文` };
+    return this.fromDrive(await driveDispatch(this.ops(), w, ref, { ...order, delivery }));
   }
 
   fromDrive(r: DriveOutcome): CardOutcome {
@@ -234,8 +243,46 @@ class Card {
       const what = seen.failure.kind === "quota" ? "撞额度" : seen.failure.kind === "auth" ? "登录失效" : "回合失败";
       return this.escalate(`${ref.agent} ${what}：${seen.failure.message}`, sent.id);
     }
+    const alarm = await this.unclaimed(sent, ref);
+    if (alarm) return alarm;
     if (seen.state === "unknown") return this.out("held", `${wait.reason}；${seen.reason}`);
     return this.out("waiting", wait.reason);
+  }
+
+  /**
+   * A wake line is only a nudge; the order waits in the ledger. If its recipient has not taken it after UNCLAIMED_ALARM_MS, PM
+   * hears once: the alarm row (with its fixed text) is written first, the notice goes out, and only a delivered notice writes
+   * unclaimed_sent. Without that row a later tick resends the same text (every UNCLAIMED_RETRY_MS), so a bridge outage or a
+   * crash between the two writes delays the warning instead of swallowing it. tests/scheduler-dispatch-wake.test.ts.
+   */
+  async unclaimed(sent: SchedulerIntent, ref: SessionRef): Promise<CardOutcome | null> {
+    if (!sentAsWake(sent.receipt) || orderTakenSeq(this.db, sent.id) !== null) return null;
+    const waited = this.deps.now() - sent.updatedAt;
+    if (waited < UNCLAIMED_ALARM_MS) return null;
+    if (getEventByDedup(this.db, unclaimedSentKey(sent.id))) return this.out("waiting", `${ref.agent} 未领单，已报警过`);
+    const failed = alarmFailedAt.get(this.db) ?? new Map<string, number>();
+    alarmFailedAt.set(this.db, failed);
+    const lastFail = failed.get(sent.id);
+    if (lastFail !== undefined && this.deps.now() - lastFail < UNCLAIMED_RETRY_MS) return this.out("waiting", `${ref.agent} 未领单，报警待重发`);
+    let text = getEventByDedup(this.db, unclaimedKey(sent.id))?.text;
+    if (!text) {
+      const draft = `[调度引擎] ${this.task.id} 的单 ${sent.id} 唤醒已发给 ${ref.agent} ${Math.floor(waited / 60_000)} 分钟，还没人领` +
+        `（${sent.action === "review" ? "take_review" : "take_order"}）：看看会话在不在、有没有派单工具`;
+      const r = await this.deps.manager("ledger", "scheduler-unclaimed", sent.id, "--text", draft);
+      if (r.ok !== true) return this.out("held", `未领单报警没记上：${String(r.error)}`);
+      text = typeof (r.event as { text?: unknown } | undefined)?.text === "string" ? (r.event as { text: string }).text : draft;
+    }
+    try {
+      await this.deps.notifyPm(this.task, text);
+    } catch (e) {
+      noticeLost("未领单报警没发出去（台账已记，稍后重发）")(e);
+      failed.set(sent.id, this.deps.now());
+      return this.out("waiting", `${ref.agent} 未领单，报警没发出去，稍后重发`);
+    }
+    failed.delete(sent.id);
+    const done = await this.deps.manager("ledger", "scheduler-unclaimed-sent", sent.id);
+    if (done.ok !== true) console.error(`⚠️ [scheduler] 未领单报警已发出但送达没记上（下个 tick 可能重发一次）：${String(done.error)}`);
+    return this.out("waiting", `${ref.agent} 未领单，已报警`);
   }
 
   /**

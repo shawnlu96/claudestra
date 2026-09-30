@@ -20,6 +20,8 @@ import { schedulerObserveTick } from "./scheduler-observe-tick.js";
 import { mergeTick, schedulerManagerWith } from "./scheduler-service.js";
 import type { LeaseHold, SchedulerLease } from "./scheduler-lease-env.js";
 import { passPace } from "./scheduler-yield.js";
+import { deployTick } from "./scheduler-deploy-tick.js";
+import { deploymentJobs, type DeployJobs } from "./scheduler-deploy-job.js";
 import type { WorkerSession } from "./worker-session.js";
 
 type Manager = (...args: string[]) => Promise<Record<string, unknown>>;
@@ -30,6 +32,7 @@ export interface PassOpts {
   assertOwner: Active;
   manager?: Manager;
   external?: (project: SchedulerConfig["projects"][string]) => MergeExternal;
+  deployJobs?: DeployJobs;
   autoDeps?: (active: Active) => AutoTickDeps;
   /** Tests point this at a private lock / update marker / update request. */
   maintenance?: { path?: string; marker?: string; request?: string };
@@ -91,6 +94,9 @@ export async function schedulerPass(db: Database | null, config: SchedulerConfig
       if (!db) throw new Error("scheduler enabled but ledger is unavailable");
       // every gh subprocess of the merge driver, reads included, is checked right before its spawn and after its exit
       await mergeTick(db, config, manager, opts.external ?? ((p) => mergeExternal(p, guard(active, runBounded))), active, pace.phase());
+      // launchctl calls of the deploy step are guarded the same way; the deploy job itself belongs to launchd, not to this pass
+      await deployTick(db, config, { manager, jobs: opts.deployJobs ?? deploymentJobs({ command: guard(active, runBounded) }),
+        assertActive: active, now: Date.now }, pace.phase());
       // observe 卡只写观察事件，auto 卡每卡推一步；某张卡失败不挡其余卡，失败汇总给服务的去重日志
       failed.push(...(await schedulerObserveTick(db, config.projects, manager, pace.phase())).failed);
       if (config.autoDispatch === true) {

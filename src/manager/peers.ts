@@ -150,12 +150,15 @@ export async function cmdPeerHttpAccept(peerName: string, handshakeStr: string) 
   output({ ok: true, peer: peerName, peerUrl: hs.url, note: `握手完成。跑 peer-http-test ${peerName} 验证连通。` });
 }
 
+/** 只有「他→我」的记录没有可测的方向：对方加入过我的邀请，我还没加入他的（一键邀请）或还在等回执（旧三步握手） */
+const ONE_WAY_TEST_NOTE = "目前只有对方能访问你：要测你到对方这一向，请对方生成一张邀请给你加入，不用删掉 peer（旧三步握手则是等 accept 回执）";
+
 export async function cmdPeerHttpTest(peerName: string) {
   const { findHttpPeer } = await import("../lib/peers.js");
   const peer = await findHttpPeer(peerName);
   if (!peer) { output({ ok: false, error: `HTTP peer "${peerName}" 不存在` }); return; }
   if (!peer.outToken || !peer.baseUrl) {
-    output({ ok: false, error: `握手未完成（${!peer.baseUrl ? "缺对方地址" : "缺 outToken"}）——invite 后要等 accept 回执` });
+    output({ ok: false, error: `握手未完成（${!peer.baseUrl ? "缺对方地址" : "缺 outToken"}）——${ONE_WAY_TEST_NOTE}` });
     return;
   }
   try {

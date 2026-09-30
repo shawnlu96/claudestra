@@ -6,6 +6,7 @@ import { resumeAutoWorkflow } from "../lib/ledger-scheduler-resume.js";
 import { bindSchedulerSession, recordSessionRetirement, type SessionRole, type SessionTransport } from "../lib/scheduler-sessions.js";
 import { advanceMergeRun, beginMergeRun, MERGE_RESOLUTIONS, resolveMergeRun, type MergePhase, type MergeResolution } from "../lib/scheduler-merge.js";
 import { getMeta, getTask, LedgerError } from "../lib/ledger-store.js";
+import { getDeployRun, resolveDeployRun } from "../lib/scheduler-deploy.js";
 import { intFlag } from "./ledger-identity.js";
 import type { LedgerCli } from "./ledger-context.js";
 import type { CommandSpec } from "./ledger-write-cmds.js";
@@ -163,7 +164,9 @@ export const SCHEDULER_CMDS: Record<string, CommandSpec> = {
     run(c) {
       const outcome = c.need("outcome");
       if (!MERGE_RESOLUTIONS.includes(outcome as never)) throw new LedgerError("invalid", "--outcome 只能是 done / failed / cancelled");
-      const run = resolveMergeRun(c.db, c.ctx(), { intentId: c.p.pos[1] ?? "", outcome: outcome as MergeResolution, receipt: c.need("receipt") });
+      const input = { intentId: c.p.pos[1] ?? "", outcome: outcome as MergeResolution, receipt: c.need("receipt") };
+      const deploy = getDeployRun(c.db, input.intentId)?.phase === "unknown"; // merged fine, the deploy after it is what is unknown
+      const run = deploy ? resolveDeployRun(c.db, c.ctx(), input) : resolveMergeRun(c.db, c.ctx(), input);
       return { ok: true, run, next: "项目合并队列仍冻结；核对无其他 unknown 后用 ledger unfreeze 解冻" };
     },
   },

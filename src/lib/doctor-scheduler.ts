@@ -28,10 +28,14 @@ export function checkSchedulerJournal(reader = new LedgerReader()): Check[] {
       ? db.query("SELECT intentId, taskId, project, reason FROM scheduler_merges WHERE phase='unknown' ORDER BY updatedAt").all() as
         { intentId: string; taskId: string; project: string; reason: string | null }[]
       : [];
+    // A deploy unknown (T68g) has the same exit; it does not hold off updates, but the queue stays frozen until resolved.
+    if (db?.query("SELECT 1 FROM sqlite_master WHERE type='table' AND name='scheduler_deploys'").get()) {
+      rows.push(...db.query("SELECT intentId, taskId, project, '部署：' || COALESCE(reason,'') AS reason FROM scheduler_deploys WHERE phase='unknown'").all() as typeof rows);
+    }
     out.push(rows.length
       ? { group: "launchd daemon", name: "合并队列结果不明", status: "warn",
         detail: rows.map((r) => `${r.project}/${r.taskId}（${r.intentId}）：${(r.reason ?? "").slice(0, 120)}`).join("；"),
-        fix: "PM 核对 GitHub 后：ledger scheduler-merge-resolve <intent> --outcome done|failed|cancelled --receipt <证据>，再 ledger unfreeze" }
+        fix: "PM 核对 GitHub（部署的看任务目录 scheduler-deploy/ 的 result.json）后：ledger scheduler-merge-resolve <intent> --outcome done|failed|cancelled --receipt <证据>，再 ledger unfreeze" }
       : { group: "launchd daemon", name: "合并队列结果不明", status: "ok", detail: "没有待人工结清的合并" });
   } catch (e) {
     out.push({ group: "launchd daemon", name: "合并队列结果不明", status: "warn", detail: `读不了台账：${(e as Error).message}` });

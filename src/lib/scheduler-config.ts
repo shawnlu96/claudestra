@@ -19,9 +19,20 @@ interface ProjectSchedule {
   /** Always set by parseSchedulerConfig (default DEFAULT_REMOTE); a hand-built policy without it never pools. */
   remote?: RemotePolicy;
   requiredChecks: string[];
-  /** Local clone whose `gh` context must match the PR repository; the scheduler never deploys from it. */
+  /** Local clone whose `gh` context must match the PR repository; with `deploy` it is also the tree that gets deployed. */
   repoDir: string;
+  /** Absent = merge only, the PM deploys (T68g). */
+  deploy?: DeployTarget;
 }
+/** Steps are fixed in code (lib/scheduler-deploy-steps.ts); only machine-specific parts live here, never in the repo. */
+export interface DeployTarget {
+  /** Relay deploy command, run only when the pulled commits touch web / relay code; absent = that step is reported as skipped. */
+  relayArgv?: string[];
+  restartLabels: string[];
+  timeoutMs: number;
+}
+/** Same four as DAEMONS in cli-install.ts (tests/scheduler-config.test.ts pins it); order follows the PM's deploy script. */
+export const DEFAULT_RESTART_LABELS = ["com.claudestra.bridge", "com.claudestra.cron", "com.claudestra.launcher", "com.claudestra.scheduler"];
 export interface SchedulerConfig {
   enabled: boolean;
   pollMs: number;
@@ -48,13 +59,11 @@ export function parseSchedulerConfig(raw: unknown): SchedulerConfig {
     }
     const requiredChecks = parseRequiredChecks(p.requiredChecks);
     if (!requiredChecks) throw new Error(`scheduler project ${id} needs 1..20 requiredChecks names`);
-    // Refusing beats ignoring: a config written for automatic deployment must not silently run merge-only.
-    if (p.deploy !== undefined) throw new Error(`scheduler project ${id}: automatic deploy is not supported (T68g); remove deploy, the PM deploys`);
     if (typeof p.repoDir !== "string" || !isAbsolute(p.repoDir) || /[\p{Cc}\p{Cf}]/u.test(p.repoDir)) {
       throw new Error(`scheduler project ${id} needs absolute repoDir`);
     }
     projects[id] = { maxActiveWorkers: p.maxActiveWorkers as number, requiredChecks,
-      repoDir: p.repoDir, remote: parseRemote(id, p.remote) };
+      repoDir: p.repoDir, remote: parseRemote(id, p.remote), ...(p.deploy !== undefined ? { deploy: parseDeployTarget(id, p.deploy) } : {}) };
   }
   if (r.enabled && Object.keys(projects).length === 0) throw new Error("enabled scheduler needs at least one project");
   return { enabled: r.enabled, pollMs: pollMs as number, autoDispatch: r.autoDispatch === true, projects };
@@ -73,6 +82,28 @@ function parseRemote(id: string, raw: unknown): RemotePolicy {
   const timeout = r.poolTimeoutMin ?? DEFAULT_REMOTE.poolTimeoutMin;
   if (!Number.isInteger(timeout) || (timeout as number) < 1 || (timeout as number) > 240) throw new Error(`scheduler project ${id}: remote.poolTimeoutMin must be 1..240`);
   return { mode, roles: roles.length ? ["review"] : [], poolTimeoutMin: timeout as number };
+}
+
+const argv = (v: unknown): v is string[] => Array.isArray(v) && v.length > 0 && v.length <= 32 &&
+  v.every((x) => typeof x === "string" && x.length > 0 && x.length <= 500 && !/[\p{Cc}\p{Cf}]/u.test(x));
+
+/** A sandbox must name its own fake labels: restarting the real daemons from a test instance would hit production. */
+function parseDeployTarget(id: string, raw: unknown, env = process.env): DeployTarget {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error(`scheduler project ${id}: deploy must be an object`);
+  const d = raw as Record<string, unknown>;
+  if (d.relayArgv !== undefined && !argv(d.relayArgv)) throw new Error(`scheduler project ${id}: deploy.relayArgv must be a nonempty argv`);
+  if (d.restartLabels !== undefined && (!argv(d.restartLabels) || (d.restartLabels as string[]).some((l) => !/^[\w.-]{1,120}$/.test(l)))) {
+    throw new Error(`scheduler project ${id}: deploy.restartLabels must be launchd labels`);
+  }
+  const labels = (d.restartLabels as string[] | undefined) ?? DEFAULT_RESTART_LABELS;
+  if (env.CLAUDESTRA_SANDBOX === "1" && labels.some((l) => DEFAULT_RESTART_LABELS.includes(l))) {
+    throw new Error(`scheduler project ${id}: a sandbox deploy must list its own restartLabels, never the production daemons`);
+  }
+  const timeoutMs = d.timeoutMs === undefined ? 40 * 60_000 : d.timeoutMs;
+  if (!Number.isInteger(timeoutMs) || (timeoutMs as number) < 60_000 || (timeoutMs as number) > 3_600_000) {
+    throw new Error(`scheduler project ${id}: deploy.timeoutMs must be 60000..3600000`);
+  }
+  return { ...(d.relayArgv ? { relayArgv: d.relayArgv as string[] } : {}), restartLabels: [...labels], timeoutMs: timeoutMs as number };
 }
 
 /**

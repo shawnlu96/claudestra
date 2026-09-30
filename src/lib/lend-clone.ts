@@ -42,10 +42,15 @@ function gitEnv(base: Record<string, string | undefined>): Record<string, string
 export interface CloneWrite { branch: string; name: string; email: string }
 export interface CloneInput { orderId: string; repo: string; pr: number | null; head: string; write?: CloneWrite }
 
-/** 写单副本的锁：worker 在这里 push 任何地址（origin、URL、本地路径、ext::）都在传输层被拒，也拿不到凭据 */
+/**
+ * 写单副本的锁：worker 在这里 push 任何地址（origin、URL、本地路径、ext::）都在传输层被拒，也拿不到凭据。
+ * git 先看 protocol.<协议>.allow 再看 protocol.allow，出借人全局配置里一条 protocol.file.allow=always 就能越过总开关：
+ * 常见协议在这里逐个写死，全局 / 系统配置里另外出现的逐协议许可由 lockProtocols 读出来逐条盖掉。tests/lend-write.test.ts。
+ */
+const PROTOCOLS = ["file", "git", "ssh", "http", "https", "ftp", "ftps", "ext", "fd"] as const;
 export const WRITE_LOCK: readonly [string, string][] = [
-  ["protocol.allow", "never"], ["credential.helper", ""], ["core.askPass", "false"], ["core.sshCommand", "false"],
-  ["remote.origin.pushurl", "lend-no-push://worker-may-not-push"],
+  ["protocol.allow", "never"], ...PROTOCOLS.map((p): [string, string] => [`protocol.${p}.allow`, "never"]),
+  ["credential.helper", ""], ["core.askPass", "false"], ["core.sshCommand", "false"], ["remote.origin.pushurl", "lend-no-push://worker-may-not-push"],
 ];
 export type CloneResult = { ok: true; dir: string } | { ok: false; reason: string };
 
@@ -99,8 +104,24 @@ export async function prepareClone(input: CloneInput, o: { root?: string; env?: 
       const r = await git(args);
       if (r.code !== 0) return { ok: false, reason: `${what}失败：${tail(r)}` };
     }
+    const locked = await lockProtocols(git);
+    if (locked) return { ok: false, reason: locked };
   }
   return { ok: true, dir };
+}
+
+/** 生效配置里（含全局、系统、include）每一条 protocol.<协议>.allow 都在副本里盖成 never，再逐条读回核对；返回问题，没问题 = null */
+async function lockProtocols(git: (args: string[]) => Promise<BoundedResult>): Promise<string | null> {
+  const listed = await git(["config", "--name-only", "--get-regexp", "^protocol\\..+\\.allow$"]);
+  if (listed.code !== 0 && listed.code !== 1) return `读 git 协议许可失败：${tail(listed)}`; // 1 = 一条都没有
+  const keys = [...new Set([...WRITE_LOCK.map(([k]) => k).filter((k) => k.startsWith("protocol.")), ...listed.stdout.split("\n").map((l) => l.trim()).filter(Boolean)])];
+  for (const k of keys) {
+    const set = await git(["config", k, "never"]);
+    if (set.code !== 0) return `上锁失败（${k.slice(0, 80)}）：${tail(set)}`;
+    const got = await git(["config", "--get", k]);
+    if (got.stdout.trim() !== "never") return `上锁没生效：${k.slice(0, 80)} 读回来是 ${got.stdout.trim().slice(0, 40) || "空"}`;
+  }
+  return null;
 }
 
 /** 工作树里第一个软链（相对 dir 的路径）；没有 = null。不跟随软链、不看它指向哪；根下的 .git 是我们自己 git init 的，不扫 */

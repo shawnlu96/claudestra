@@ -7,6 +7,7 @@ import { readPrincipals, tokenIdOf } from "../lib/principals.js";
 import { parsePeerInviteV2, readPeers } from "../lib/peers.js";
 import { RELAY_PAGE_JOIN_REFUSED } from "../lib/peer-e2e-local.js";
 import { sourceAllows } from "./request-context.js";
+import { handleRelayStrict, keyedJoinAllowed, relayPageJoinNote } from "./peer-relay-strict.js";
 import { readRegistryAgents } from "../lib/registry.js";
 import { recordMetric } from "../lib/metrics.js";
 import { instanceKeySync, keyFingerprint } from "../lib/instance-key.js";
@@ -24,6 +25,8 @@ export async function handlePeersRoutes(req: Request, path: string, principal: P
   if (!isFullScope(principal)) return forbidden("peers management requires a full-scope token");
   if (path === "/peers" && req.method === "GET") return listPeers(runManager);
   if (path === "/peers/contacts" && req.method === "GET") return listPeerContacts(); // 侧栏联系人 / @ 候选：只读内存，不起子进程
+  const strict = await handleRelayStrict(req, path, principal); // 中继页面加入加密邀请的严格模式开关（bridge/peer-relay-strict.ts）
+  if (strict) return strict;
   // POST /peers/tidy —— 把同一个对方散成的多条旧记录合成一条（lib/peer-tidy.ts；GET /peers 的 tidy 字段是预览）
   if (path === "/peers/tidy" && req.method === "POST") {
     const r = await runManager("peer-http-tidy", "--apply");
@@ -37,7 +40,8 @@ export async function handlePeersRoutes(req: Request, path: string, principal: P
     const invite = String(body?.invite ?? "").trim();
     if (!invite) return apiJson(400, { ok: false, error: '"invite" required' });
     const r = await runManager("peer-invite-inspect", invite);
-    return apiJson(200, r ?? { ok: false, error: "manager failed" }); // 连不上是数据不是服务错，同 /test
+    const note = r?.ok && parsePeerInviteV2(invite)?.ek && (await relayPageJoinNote(req)) ? { viaRelayPage: true } : {}; // 加入页的淡色「经中继加入」
+    return apiJson(200, r ? { ...r, ...note } : { ok: false, error: "manager failed" }); // 连不上是数据不是服务错，同 /test
   }
   if (req.method === "POST" && (path === "/peers/invite-new" || path === "/peers/join-auto" || path === "/peers/invite-revoke")) {
     return inviteAction(req, path, runManager);
@@ -108,7 +112,8 @@ async function inviteAction(req: Request, path: string, runManager: RunManager):
     ? body.agents.map((s: unknown) => String(s).trim()).filter(Boolean).join(",")
     : "";
   const flags: string[] = body?.force ? ["--force"] : [];
-  // 只有本机 / 局域网打开的页面能碰带密钥的邀请（request-context.ts keyedInvite）：经中继的页面中继能换公钥，判不出来源的同样对待
+  // 生成带密钥的邀请只认本机 / 局域网打开的页面（request-context.ts keyedInvite）：经中继的页面中继能换公钥，判不出来源的同样对待。
+  // 加入加密邀请另看严格模式（bridge/peer-relay-strict.ts keyedJoinAllowed）
   const viaRelay = !sourceAllows(req, "keyedInvite");
   let r: any;
   if (path === "/peers/invite-new") {
@@ -118,7 +123,7 @@ async function inviteAction(req: Request, path: string, runManager: RunManager):
   } else if (path === "/peers/join-auto") {
     const invite = String(body?.invite ?? "").trim();
     if (!invite) return apiJson(400, { ok: false, error: '"invite" required' });
-    if (viaRelay && parsePeerInviteV2(invite)?.ek) return apiJson(400, { ok: false, error: RELAY_PAGE_JOIN_REFUSED });
+    if (parsePeerInviteV2(invite)?.ek && !(await keyedJoinAllowed(req))) return apiJson(400, { ok: false, error: RELAY_PAGE_JOIN_REFUSED });
     r = await runManager("peer-join-auto", invite,
       ...(agentsCsv ? ["--agents", agentsCsv] : []),
       ...(body?.url ? ["--url", String(body.url)] : []), ...flags);

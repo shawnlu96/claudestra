@@ -63,6 +63,8 @@ export interface AppConfig {
   pushNoContent?: boolean;
   /** 网页的 Chat（人与人，/talk）入口：缺省关——侧栏不出「工作台 | Chat」切换，/talk 跳回 /chat。只收界面，talk API 与数据照旧（T50） */
   talkEnabled?: boolean;
+  /** 严格模式：经中继打开的页面不能加入加密邀请（bridge/peer-relay-strict.ts）。缺省关 = 允许；每次加入现读 */
+  peerRelayJoinStrict?: boolean;
 }
 
 /** 归档保留天数缺省值（设置里可改） */
@@ -104,6 +106,7 @@ function merge(base: AppConfig, raw: any): AppConfig {
     // 批量管理（bridge/fleet）：白名单带 compactKeep 和 callers；漏在这里读不到，任何 set* 还会把它抹掉
     ...fleetOf(raw.fleet),
     ...(typeof raw.talkEnabled === "boolean" ? { talkEnabled: raw.talkEnabled } : {}),
+    ...(typeof raw.peerRelayJoinStrict === "boolean" ? { peerRelayJoinStrict: raw.peerRelayJoinStrict } : {}),
   };
 }
 
@@ -268,6 +271,12 @@ export async function setPushNoContent(enabled: boolean): Promise<AppConfig> {
 
 export async function setTalkEnabled(enabled: boolean): Promise<AppConfig> {
   const cfg = { ...(await readConfig()), talkEnabled: enabled };
+  await writeConfig(cfg);
+  return cfg;
+}
+
+export async function setPeerRelayJoinStrict(enabled: boolean): Promise<AppConfig> {
+  const cfg = { ...(await readConfig()), peerRelayJoinStrict: enabled };
   await writeConfig(cfg);
   return cfg;
 }
