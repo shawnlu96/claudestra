@@ -81,13 +81,16 @@ describe("校验", () => {
     expect(bad((f) => { f.borrow[0].maxOpen = 0; })).toContain("maxOpen");
     expect(bad((f) => { f.borrow[0].fp = "not-a-fp"; })).toContain("fp");
   });
-  test("CLI 输入：至少一个家族出位、仓库要是 owner/repo、write 角色先拒、until 要在未来", () => {
+  test("CLI 输入：至少一个家族出位、仓库要是 owner/repo、角色只认 review / write（缺省只开 review）、until 要在未来", () => {
     expect(lendOk({ families: { codex: "0" } })).toMatchObject({ ok: false });
     expect(lendOk({ families: { codex: "2x" } })).toMatchObject({ ok: false });
     expect(lendOk({ repos: undefined })).toMatchObject({ ok: false });
     expect(lendOk({ repos: "https://github.com/a/b" })).toMatchObject({ ok: false });
-    expect(lendOk({ roles: "review,write" })).toMatchObject({ ok: false });
-    expect(lendOk({ confirm: "auto" })).toMatchObject({ ok: true, entry: { confirm: "auto" } });
+    expect(lendOk({ roles: "review,write" })).toMatchObject({ ok: true, entry: { roles: ["review", "write"] } }); // i28-R6 放开 write
+    expect(lendOk({ roles: undefined })).toMatchObject({ ok: true, entry: { roles: ["review"] } });
+    expect(lendOk({ roles: "review,admin" })).toMatchObject({ ok: false });
+    expect(lendOk({ confirm: "auto" })).toMatchObject({ ok: false }); // 预先授权必须限时（specRev 2）
+    expect(lendOk({ confirm: "auto", until: "2100-01-01T00:00:00Z" })).toMatchObject({ ok: true, entry: { confirm: "auto", until: "2100-01-01T00:00:00.000Z" } });
     expect(lendOk({ confirm: "yes" })).toMatchObject({ ok: false });
     expect(lendOk({ until: "2020-01-01T00:00:00Z" })).toMatchObject({ ok: false });
     expect(lendOk({ ordersPerDay: "0" })).toMatchObject({ ok: false });
@@ -204,6 +207,21 @@ describe("联系人校验", () => {
     const eff = effectiveLend({ status: "ok", file: f }, contacts, projects, Date.parse("2026-02-01T00:00:00Z"));
     expect(eff.lending).toBe(false);
     expect(eff.dropped[0]).toContain("到期");
+  });
+  test("预先授权（auto）：until 之前算数；到期或没写 until → 条目照常出借但退回逐单确认（specRev 2）", () => {
+    const at = (until: string | undefined, now: string) => {
+      const f = validFile();
+      f.lend[0] = { ...f.lend[0], confirm: "auto", ...(until ? { until } : {}) };
+      if (!until) delete f.lend[0].until;
+      return effectiveLend({ status: "ok", file: f }, contacts, projects, Date.parse(now));
+    };
+    expect(at("2026-01-01T00:00:00.000Z", "2025-12-31T00:00:00Z").lend[0]).toMatchObject({ confirm: "auto" });
+    for (const eff of [at("2026-01-01T00:00:00.000Z", "2026-01-01T00:00:01Z"), at(undefined, "2025-01-01T00:00:00Z")]) {
+      expect(eff.lending).toBe(true);
+      expect(eff.lend[0].confirm).toBe("per-order");
+      expect(eff.lend[0].until).toBeUndefined();
+      expect(eff.dropped[0]).toContain("按逐单确认");
+    }
   });
 });
 

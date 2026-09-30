@@ -11,6 +11,7 @@
  * 沙箱里 acp 固定起它（lib/acp/stub.ts，不用也不认 CLAUDESTRA_ACP_AGENT）；沙箱外单测 / 排查可用 CLAUDESTRA_ACP_AGENT='["bun","<repo>/scripts/acp-stub.ts"]'。
  */
 import { randomUUID } from "node:crypto";
+import { appendFileSync, writeFileSync } from "node:fs";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 
@@ -70,6 +71,39 @@ async function callMcp(tool: string, args: Rec): Promise<Rec> {
   return error ?? result;
 }
 
+/**
+ * 沙箱里的出借 worker（T94；写单见 lendWork）：派单尾注里有本机写的 `<bun> --no-env-file --config=/dev/null <manager.ts> lend submit <orderId>`（lib/lend-deps.ts）就在当前目录
+ * 交一份 pass。子进程挂在这个 stub 下面，lend submit 的三条绑定（cwd / 会话 / 窗口进程祖先）照真的走。lab 实测走通一单用。
+ */
+function lendSubmit(text: string): string {
+  const w = /^(\S+) --no-env-file --config=\/dev\/null (\S+manager\.ts) lend submit (\S+) --summary-file/m.exec(text);
+  if (w) return lendWork(w[1], w[2], w[3]);
+  const m = /^(\S+) --no-env-file --config=\/dev\/null (\S+manager\.ts) lend submit (\S+) --verdict/m.exec(text);
+  if (!m) return "";
+  writeFileSync("findings.json", "[]");
+  writeFileSync("report.md", "stub 审过：没有发现问题（lab）\n");
+  const r = Bun.spawnSync([m[1], "--no-env-file", "--config=/dev/null", m[2], "lend", "submit", m[3], "--verdict", "pass", "--findings-file", "findings.json", "--report", "report.md"],
+    { stdout: "pipe", stderr: "pipe" });
+  return `（lend submit：${(r.stdout.toString() || r.stderr.toString()).trim().slice(0, 200)}）`;
+}
+
+/**
+ * 写单（i28-R6）：在当前分支上改一个文件、git commit，再交一行摘要与自查。副本上了锁推不出去，这里也不试；
+ * 摘要 / 自查写成文件交（不进命令行参数），同 lib/lend-deps.ts 的尾注。
+ */
+function lendWork(bun: string, manager: string, orderId: string): string {
+  const run = (argv: string[]) => Bun.spawnSync(argv, { stdout: "pipe", stderr: "pipe" });
+  appendFileSync("LEND_STUB.md", `stub 改了一行（${orderId}，${new Date().toISOString()}）\n`);
+  const add = run(["git", "add", "LEND_STUB.md"]);
+  const commit = run(["git", "commit", "-q", "-m", `lend stub：${orderId}`]);
+  if (add.exitCode !== 0 || commit.exitCode !== 0) return `（git commit 失败：${(commit.stderr.toString() || add.stderr.toString()).trim().slice(0, 200)}）`;
+  const push = run(["git", "push", "origin", "HEAD:main"]); // 反例：副本上了锁，worker 推 main 一定失败
+  writeFileSync("summary.txt", "stub 在 LEND_STUB.md 加了一行（lab）");
+  writeFileSync("selfcheck.md", `- 只在当前分支提交\n- 试推 main：${push.exitCode === 0 ? "竟然成功了（锁没上）" : "被拒（锁生效）"}\n`);
+  const r = run([bun, "--no-env-file", "--config=/dev/null", manager, "lend", "submit", orderId, "--summary-file", "summary.txt", "--self-check-file", "selfcheck.md"]);
+  return `（lend submit：${(r.stdout.toString() || r.stderr.toString()).trim().slice(0, 200)}）`;
+}
+
 /** 一轮：正文 → 命令 → （慢回合等打断）→ reply → 用量 */
 async function turn(text: string): Promise<Rec> {
   running = { cancelled: false, steered: [] };
@@ -100,11 +134,12 @@ async function turn(text: string): Promise<Rec> {
     const chatId = /chat_id="([^"]+)"/.exec(text)?.[1];
     const model = config[0].currentValue;
     const who = text.includes("[stub:whoami]") ? `（whoami ${JSON.stringify(await callMcp("whoami", {}))}）` : "";
+    const lend = lendSubmit(text);
     let calls = "";
     for (const [, tool, arg] of text.matchAll(/\[stub:call:([\w-]+):([\w-]*)\]/g)) {
       calls += `（${tool} ${JSON.stringify(await callMcp(tool, arg ? JSON.parse(Buffer.from(arg, "base64url").toString()) : {}))}）`;
     }
-    const extra = `${perm}${who}${calls}${running.steered.length ? `（途中插话 ${running.steered.length} 条）` : ""}`;
+    const extra = `${perm}${who}${lend}${calls}${running.steered.length ? `（途中插话 ${running.steered.length} 条）` : ""}`;
     const reply = `stub 回复（${model} / ${config[1].currentValue}）${extra}：${text.replace(/<[^>]+>/g, "").trim().slice(0, 80)}`;
     if (chatId && !text.includes("[stub:noreply]")) await callMcp("reply", { chat_id: chatId, text: reply });
     const sendTo = /\[stub:send:([^\]\s]+)\]/.exec(text)?.[1];

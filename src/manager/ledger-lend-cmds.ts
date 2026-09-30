@@ -1,19 +1,27 @@
 /**
  * `ledger lend-*`（T93，docs/design/remote-capacity.md §2.2、§3）：
- * - PM：lend-offer / lend-cancel / lend-reoffer 挂单、撤单、重挂；lend-orders 查这张卡的出借单。
+ * - PM：lend-offer / lend-cancel / lend-reoffer 挂单、撤单、重挂；lend-orders 查这张卡的出借单；lend-reclaim 收回写代码（i28-R6）。
+ *   挂什么看卡的阶段：review = 审查单，build = 开工单（从 --base 切出借分支），fix = 修复单（只派回持有写租约的出借方，带上一轮审查报告原文）。
  * - bridge 专用（owner 身份，local-api/lend.ts 经 runManager 调）：lend-poll / lend-claim / lend-lease / lend-write / lend-sweep / lend-pin。
  *   每次先把过期的租约结成 unknown 并通知 PM（不自动重派），再按请求做一次 CAS；拒绝码放在 current.lend 里给 bridge 映射。
- * lend-write 的幂等键是请求体原文的 sha256：bridge 把请求体原样当参数传进来。tests/ledger-lend.test.ts。
+ * lend-write 的幂等键是请求体原文的 sha256：bridge 把请求体原样当参数传进来；带 deliver 的是写单交付（ledger-lend-result.ts）。
+ * tests/ledger-lend.test.ts、tests/ledger-lend-write.test.ts。
  */
 import { createHash } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
-import { signPurpose } from "../lib/instance-key.js";
+import { keyFingerprint, signPurpose } from "../lib/instance-key.js";
 import { readLend, type BorrowEntry, type LendFamily, REPO_RE } from "../lib/lend-config.js";
 import { effectiveLend, readLendContext } from "../lib/lend-policy.js";
-import { LEND_VERSION, parseLendRequest, type LendEndpoint } from "../lib/lend-wire.js";
-import { cancelLend, claimLend, leaseLend, listLendOrders, offerLend, pollLend, refuse, reofferLend, sweepLend, type LendNotice, type OfferInput } from "../lib/ledger-lend.js";
-import { RECEIPT_PURPOSE, writeLendResult, type LendResultDeps } from "../lib/ledger-lend-result.js";
+import { isBaseBranch, remoteHeadAt, stepOfStage } from "../lib/lend-git.js";
+import { isDeliverRequest, LEND_VERSION, parseLendRequest, type LendEndpoint } from "../lib/lend-wire.js";
+import { cancelLend, claimLend, leaseLend, listLendOrders, offerLend, pollLend, reclaimLend, refuse, reofferLend, sweepLend, type LendNotice,
+  type OfferInput } from "../lib/ledger-lend.js";
+
+import { heldLease, lastReviewOf } from "../lib/ledger-lend-lease.js";
+import { RECEIPT_PURPOSE, writeLendDeliver, writeLendResult, type LendDeliverDeps, type LendResultDeps } from "../lib/ledger-lend-result.js";
+import { readPeers } from "../lib/peers.js";
+import { runBounded } from "../lib/run-bounded.js";
 import { getMeta, LedgerError } from "../lib/ledger-store.js";
 import { appendEvent } from "../lib/ledger-write.js";
 import type { LedgerTask } from "../lib/ledger-stages.js";
@@ -28,7 +36,8 @@ import type { CommandSpec } from "./ledger-write-cmds.js";
 export interface LendCliDeps {
   borrow(): Promise<BorrowEntry[]>;
   notifyPm(project: string, text: string): Promise<void>;
-  result: LendResultDeps;
+  /** 审查结论与写单交付共用（报告目录、写报告、签回执）；写单另要查远端 head 与对方指纹（只测审查的注入可以不给） */
+  result: LendResultDeps & Partial<Pick<LendDeliverDeps, "remoteHead" | "peerFp">>;
 }
 
 function realLendDeps(c: LedgerCli): LendCliDeps {
@@ -45,11 +54,22 @@ function realLendDeps(c: LedgerCli): LendCliDeps {
         writeTextAtomicSync(path, body);
       },
       sign: (fields) => signPurpose(RECEIPT_PURPOSE, fields),
+      remoteHead: (repo, branch) => remoteHeadAt(repo, branch, runBounded),
+      peerFp: async (peer) => {
+        const rec = ((await readPeers()).httpPeers ?? []).find((p) => p.name === peer && !p.disabled);
+        return rec?.publicKey ? keyFingerprint(rec.publicKey) : null;
+      },
     },
   };
 }
 
 const lendDeps = (c: LedgerCli): LendCliDeps => c.deps.lend ?? realLendDeps(c);
+
+function writeDeps(c: LedgerCli): LendDeliverDeps {
+  const r = lendDeps(c).result;
+  if (!r.remoteHead || !r.peerFp) throw new LedgerError("invalid", "这台机器没接上写单要的远端查询（注入缺 remoteHead / peerFp）");
+  return r as LendDeliverDeps;
+}
 const PEER_RE = /^[\p{L}\p{N}_.-]{1,64}$/u;
 
 async function borrowOf(c: LedgerCli, peer: string): Promise<(project: string) => BorrowEntry | null> {
@@ -71,28 +91,72 @@ async function tell(c: LedgerCli, notices: LendNotice[]): Promise<number> {
   return sent;
 }
 
-function offerInput(c: LedgerCli, task: LedgerTask, borrow: BorrowEntry | null): OfferInput {
-  const { peer, repo, family = "codex" } = c.p.flags;
+/** 修复单缺省派回持有写租约的出借方与仓库（「优先派回同一出借方」）；别的单 --peer / --repo 必填 */
+function offerPeer(c: LedgerCli, task: LedgerTask): { peer: string; repo: string } {
+  const lease = stepOfStage(task.stage) === "fix" ? heldLease(c.db, task) : null;
+  const { peer = lease?.peer, repo = lease?.repo } = c.p.flags;
   if (!peer || !PEER_RE.test(peer)) throw new LedgerError("invalid", "--peer <peer 名> 必填");
   if (!repo || !REPO_RE.test(repo)) throw new LedgerError("invalid", "--repo <owner/name> 必填（只给对方 GitHub 坐标）");
+  return { peer, repo };
+}
+
+function offerInput(c: LedgerCli, task: LedgerTask, borrow: BorrowEntry | null): OfferInput {
+  const { family = "codex" } = c.p.flags;
+  const { peer, repo } = offerPeer(c, task);
   // 表和接口按两家留了位置，这一切片只借 Codex（T93 规格；r1 P2-4）
-  if (family !== "codex") throw new LedgerError("invalid", `这一版只借 Codex 审查，--family 只能是 codex（不是 ${family}）`);
+  if (family !== "codex") throw new LedgerError("invalid", `这一版只借 Codex，--family 只能是 codex（不是 ${family}）`);
   const prFlag = c.p.flags.pr ?? task.pr?.match(/(\d+)\/?$/)?.[1];
   const pr = prFlag === undefined ? null : Number(prFlag);
   if (pr !== null && (!Number.isInteger(pr) || pr < 1)) throw new LedgerError("invalid", "--pr 要是 PR 编号");
   const spec = readTextSoft(specPathFor(task, getMeta(c.db, task.project).docsDir));
   if (!spec) throw new LedgerError("invalid", `找不到 ${task.id} 的规格卡原文（对方读不到本机文件，要内联进派单）`);
-  return { taskId: task.id, peer, family: family as LendFamily, repo, pr, spec, borrow };
+  return { taskId: task.id, peer, family: family as LendFamily, repo, pr: stepOfStage(task.stage) === "write" ? null : pr, spec, borrow };
+}
+
+/**
+ * 写单要的材料都在事务外备好：对方指纹（按钉住的公钥算，分支名由它定）、开工单的基线在远端的 head、修复单的上一轮审查报告原文。
+ * 查远端 / 读文件失败一律拒挂，不带半张单出去。
+ */
+async function writeMaterials(c: LedgerCli, task: LedgerTask, input: OfferInput): Promise<OfferInput> {
+  const step = stepOfStage(task.stage);
+  if (step !== "write" && step !== "fix") return input;
+  const deps = writeDeps(c);
+  const fp = await deps.peerFp(input.peer);
+  if (!fp) throw new LedgerError("invalid", `${input.peer} 没有钉住的实例公钥，出借分支没法定名（先让对方完成 E2E 配对）`);
+  const base = c.p.flags.base ?? "main";
+  if (!isBaseBranch(base)) throw new LedgerError("invalid", `--base ${base} 不是能用的基线分支名`);
+  let baseSha: string | null = null;
+  let report: string | null = null;
+  if (step === "write") {
+    const r = await deps.remoteHead(input.repo, base);
+    if (!r.ok) throw new LedgerError("invalid", `查不到 ${input.repo} 的 ${base}：${r.error}`);
+    baseSha = r.head;
+  } else {
+    const path = lastReviewOf(c.db, task).path;
+    report = readTextSoft(path);
+    if (!report) throw new LedgerError("invalid", `找不到上一轮审查报告原文（${path ?? "卡上最近的审查没记报告路径"}），修复单要把它内联给对方`);
+  }
+  return { ...input, write: { fp, base, baseSha, report } };
 }
 
 async function offer(c: LedgerCli, again: boolean): Promise<Result> {
   const task = c.task(c.p.pos[1]);
   c.requireManager(task.project, again ? "重挂出借单" : "挂出借单");
-  const input = offerInput(c, task, (await borrowOf(c, c.p.flags.peer ?? ""))(task.project));
+  const peer = offerPeer(c, task).peer;
+  const input = await writeMaterials(c, task, offerInput(c, task, (await borrowOf(c, peer))(task.project)));
   const reason = c.p.flags.reason ?? "";
   if (again && !reason.trim()) throw new LedgerError("invalid", "重挂要写 --reason（核对了什么）");
   const o = again ? reofferLend(c.db, c.ctx(), { ...input, reason }) : offerLend(c.db, c.ctx(), input);
-  return { ok: true, orderId: o.orderId, peer: o.peer, family: o.family, sha256: o.sha256, supersedes: o.supersedes };
+  return { ok: true, orderId: o.orderId, step: o.step, peer: o.peer, family: o.family, sha256: o.sha256, supersedes: o.supersedes,
+    ...(o.branch ? { branch: o.branch, base: o.base } : {}) };
+}
+
+function reclaim(c: LedgerCli): Result {
+  const task = c.task(c.p.pos[1]);
+  const reason = c.p.flags.reason ?? "";
+  if (!reason.trim()) throw new LedgerError("invalid", "收回要写 --reason");
+  const r = reclaimLend(c.db, c.ctx(), { taskId: task.id, reason });
+  return { ok: true, task: task.id, peer: r.lease?.peer ?? null, cancelled: r.cancelled };
 }
 
 function cancel(c: LedgerCli): Result {
@@ -123,7 +187,7 @@ async function bridgeCall(c: LedgerCli, endpoint: LendEndpoint): Promise<Result>
   const req = parseLendRequest(endpoint, body);
   if (!req.ok) return refuse("invalid", req.error);
   const v = LEND_VERSION;
-  if (endpoint === "poll") return { ok: true, v, ...pollLend(c.db, peer, req.value as never, await borrowOf(c, peer)), notified };
+  if (endpoint === "poll") return { ok: true, v, ...pollLend(c.db, peer, req.value as never, await borrowOf(c, peer), c.ctx().now), notified };
   if (endpoint === "claim") {
     const r = claimLend(c.db, c.ctx(), peer, req.value as never, await borrowOf(c, peer));
     return "stale" in r ? refuse("cancelled", "卡已推进，这一单已作废") : { ok: true, v, ...r };
@@ -133,7 +197,9 @@ async function bridgeCall(c: LedgerCli, endpoint: LendEndpoint): Promise<Result>
     return { ok: true, v, lease: r.lease, notified: notified + (await tell(c, r.notices)) };
   }
   const sha = createHash("sha256").update(raw as string, "utf8").digest("hex");
-  const receipt = writeLendResult(c.db, { actor: `peer:${peer}`, now: c.deps.now() }, peer, req.value as never, sha, lendDeps(c).result);
+  const payload = req.value as Parameters<typeof isDeliverRequest>[0];
+  const receipt = isDeliverRequest(payload) ? await writeLendDeliver(c.db, c.ctx(), peer, payload, sha, writeDeps(c))
+    : writeLendResult(c.db, { actor: `peer:${peer}`, now: c.deps.now() }, peer, payload, sha, lendDeps(c).result);
   return { ok: true, v, receipt };
 }
 
@@ -158,14 +224,15 @@ async function pinned(c: LedgerCli): Promise<Result> {
   return { ok: true, projects: written };
 }
 
-const OFFER_FLAGS = ["peer", "repo", "pr", "family", "reason", "project"];
+const OFFER_FLAGS = ["peer", "repo", "pr", "family", "reason", "project", "base"];
 const bridgeSpec = (endpoint: LendEndpoint, what: string): CommandSpec => ({
   valued: [], usage: `lend-${endpoint === "result" ? "write" : endpoint} <peer> <json>（bridge 专用：${what}）`, run: (c) => bridgeCall(c, endpoint),
 });
 
 export const LEND_CMDS: Record<string, CommandSpec> = {
   "lend-offer": {
-    valued: OFFER_FLAGS, usage: "lend-offer <task> --peer <名> --repo <owner/name> [--pr N] [--family codex]（把本轮审查挂进出借池，只给这个 peer）",
+    valued: OFFER_FLAGS,
+    usage: "lend-offer <task> --peer <名> --repo <owner/name> [--pr N] [--family codex] [--base main]（把这张卡本轮的审查 / 开工 / 修复挂进出借池，只给这个 peer；修复单缺省派回写租约的出借方）",
     run: (c) => offer(c, false),
   },
   "lend-reoffer": {
@@ -174,10 +241,11 @@ export const LEND_CMDS: Record<string, CommandSpec> = {
   },
   "lend-cancel": { valued: ["reason", "project"], usage: "lend-cancel <task> --reason <原因>（撤掉未结的出借单，之后到的结论一律不入账）", run: cancel },
   "lend-orders": { valued: ["project"], usage: "lend-orders <task>（这张卡的出借单）", run: orders },
+  "lend-reclaim": { valued: ["reason", "project"], usage: "lend-reclaim <task> --reason <原因>（收回写代码：撤掉未结的写单、结束写租约，卡退回本机）", run: reclaim },
   "lend-poll": bridgeSpec("poll", "对方拉挂给它的单"),
   "lend-claim": bridgeSpec("claim", "对方领单，拿到完整派单和租约"),
   "lend-lease": bridgeSpec("lease", "续租 / 释放"),
-  "lend-write": bridgeSpec("result", "对方交审查结论，核对完才入账"),
+  "lend-write": bridgeSpec("result", "对方交审查结论 / 写单交付，核对完才入账"),
   "lend-pin": { valued: [], usage: "lend-pin -- <peer> <指纹> first|repin（bridge 专用：对方公钥刚钉住，记台账）", run: pinned },
   "lend-sweep": { valued: [], usage: "lend-sweep（bridge 定时调：过期租约结成 unknown 并通知 PM）", run: sweep },
 };

@@ -78,12 +78,15 @@ function parseCount(raw: string | undefined, label: string, min: number, max: nu
   return n >= min && n <= max ? n : `${label} 要是 ${min}..${max} 的整数（收到 ${raw}）`;
 }
 
-/** v1 只做 review（写权限要 §4 的 fork PR 方案，还没做）；schema 里留着 write，CLI 先拒 */
+/**
+ * review = 审查单；write = 开工 / 修复单（i28-R6：出借方在借入方仓库的 lend/ 分支上写代码、推送、开 PR）。缺省只开 review，
+ * write 要明确写出来：它会用出借人自己的 GitHub 登录推送。
+ */
 function parseRoles(raw: string | undefined): LendRole[] | string {
   const roles = raw === undefined ? ["review"] : splitList(raw);
   if (roles.length === 0) return "--roles 不能为空";
-  const bad = roles.find((r) => r !== "review");
-  return bad ? `--roles 目前只支持 review（${bad === "write" ? "write 角色要等 fork PR 方案" : `不认识 ${bad}`}）` : (roles as LendRole[]);
+  const bad = roles.find((r) => r !== "review" && r !== "write");
+  return bad ? `--roles 只认 review / write（不认识 ${bad}）` : (roles as LendRole[]);
 }
 
 export interface LendSetInput {
@@ -124,6 +127,7 @@ export function buildLendEntry(input: LendSetInput, contacts: readonly LendConta
     if (!/^\d{4}-\d{2}-\d{2}T/.test(input.until) || Number.isNaN(t) || t <= now) return { ok: false, error: `--until 要是未来的 ISO 时间：${input.until}` };
     until = new Date(t).toISOString();
   }
+  if (confirm === "auto" && !until) return { ok: false, error: "--confirm auto（预先授权）必须带 --until：不许无限期免确认" };
   return {
     ok: true,
     entry: { ...who.entry, families, roles, repos, quota: { ordersPerDay: perDay, tokensPerDay: null }, confirm, ...(until ? { until } : {}) },
@@ -162,6 +166,22 @@ export interface EffectiveLend {
   dropped: string[];
 }
 
+/**
+ * 限时预先授权（confirm auto）此刻还算不算数：必须写了 until 且没到；到期或没写一律退回逐单确认（条目本身照常出借）。
+ * 当天单数由 quota.ordersPerDay 硬卡（用完当天不再接单），不在这里判。tests/lend-preauth.test.ts。
+ */
+function preauthProblem(e: LendEntry, now: number): string | null {
+  if (e.confirm !== "auto") return null;
+  if (!e.until) return "没写到期时间";
+  return Date.parse(e.until) <= now ? `已于 ${e.until} 到期` : null;
+}
+
+function perOrder(e: LendEntry): LendEntry {
+  const out: LendEntry = { ...e, confirm: "per-order" };
+  delete out.until;
+  return out;
+}
+
 /** 实际生效的声明：文件无效 = 全关；enabled=false = 不出借；每条再按当下的联系人、到期时间、个人项目过滤 */
 export function effectiveLend(
   read: LendRead, contacts: readonly LendContact[], projects: readonly (ProjectDef & { personal?: boolean })[], now = Date.now(),
@@ -172,9 +192,11 @@ export function effectiveLend(
   const lend: LendEntry[] = [];
   if (f.enabled === true) {
     for (const e of f.lend) {
-      const bad = contactProblem(contacts, e) ?? (e.until && Date.parse(e.until) <= now ? `出借给 ${e.peer} 已于 ${e.until} 到期` : null);
-      if (bad) dropped.push(`lend ${e.peer}：${bad}`);
-      else lend.push(e);
+      const bad = contactProblem(contacts, e) ?? (e.confirm !== "auto" && e.until && Date.parse(e.until) <= now ? `出借给 ${e.peer} 已于 ${e.until} 到期` : null);
+      if (bad) { dropped.push(`lend ${e.peer}：${bad}`); continue; }
+      const pre = preauthProblem(e, now);
+      if (pre) dropped.push(`lend ${e.peer} 的预先授权：${pre}，按逐单确认`);
+      lend.push(pre ? perOrder(e) : e); // auto 的 until 只是预先授权的期限，退回逐单确认后不再当出借期限
     }
   }
   const borrow: BorrowEntry[] = [];

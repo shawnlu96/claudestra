@@ -44,6 +44,13 @@ export async function peerCliFetch(url: string, init: CliFetchInit = {}): Promis
   return viaE2e ?? rawCliFetch(url, init);
 }
 
+/** 只走 E2E（出借接口，T94）：目标不是带 E2E 的 peer 就抛错，连明文的那条路都不给 */
+export async function peerE2eOnlyFetch(url: string, init: CliFetchInit): Promise<Response> {
+  const viaE2e = await e2eOutbound.fetch(url, init, (u, outer) => rawCliFetch(u, { ...outer, ...(init.signal ? { signal: init.signal } : {}) }));
+  if (!viaE2e) throw new Error("对方不是端到端加密的 peer（老记录或 --allow-legacy 建的），出借接口不走明文");
+  return viaE2e;
+}
+
 /** 传输层：relay://<指纹>/… 交给 bridge 经中继代调（POST /relay/request，bridge 签名），其余加上实例签名直接 fetch——对方只认签名钥匙对得上的 peer */
 async function rawCliFetch(url: string, init: CliFetchInit): Promise<Response> {
   const m = /^relay:\/\/([^/]+)(\/.*)?$/i.exec(url);
