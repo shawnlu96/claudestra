@@ -3,7 +3,7 @@ import { INTENT_ACTIONS, INTENT_STATUSES, WORKFLOW_MODES, WORKFLOW_TEMPLATES, AU
 import { planIntent, setWorkflow, settleIntent } from "../lib/ledger-scheduler-write.js";
 import { bindSchedulerSession, recordSessionRetirement, type SessionRole, type SessionTransport } from "../lib/scheduler-sessions.js";
 import { advanceMergeRun, beginMergeRun, MERGE_RESOLUTIONS, resolveMergeRun, type MergePhase, type MergeResolution } from "../lib/scheduler-merge.js";
-import { LedgerError } from "../lib/ledger-store.js";
+import { getTask, LedgerError } from "../lib/ledger-store.js";
 import { intFlag } from "./ledger-identity.js";
 import type { LedgerCli } from "./ledger-context.js";
 import type { CommandSpec } from "./ledger-write-cmds.js";
@@ -25,8 +25,9 @@ export const SCHEDULER_CMDS: Record<string, CommandSpec> = {
       if (!WORKFLOW_TEMPLATES.includes(template as never) || !WORKFLOW_MODES.includes(mode as never) || !AUTHOR_FAMILIES.includes(family as never)) {
         throw new LedgerError("invalid", "模板、模式或模型家族不认识");
       }
-      if (mode === "auto" && !c.deps.autoTickWired) {
-        throw new LedgerError("forbidden", "调度服务还没接上自动 tick（等 PR D 合入后在服务循环里接线）：现在开 auto 没有东西推它，先用 observe 或 manual");
+      const project = getTask(c.db, c.p.pos[1] ?? "")?.project;
+      if (mode === "auto" && project && !(c.deps.autoProjects?.() ?? []).includes(project)) {
+        throw new LedgerError("forbidden", `调度服务没对项目 ${project} 开（scheduler.json 要 enabled 且列出该项目）：开 auto 没人推它，先用 observe 或 manual`);
       }
       const r = setWorkflow(c.db, c.ctx(), {
         taskId: c.p.pos[1] ?? "", taskRev: integer(c, "rev"),

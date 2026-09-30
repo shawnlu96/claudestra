@@ -47,7 +47,7 @@ export function autoFixture(opts: { template?: "code" | "ui"; reviewerRuntime?: 
   db.query("INSERT INTO meta (project, key, value) VALUES ('p', 'pms', '[\"pm\"]') ON CONFLICT (project, key) DO UPDATE SET value = excluded.value").run();
   setWorkflow(db, at("owner"), { taskId: "T1", taskRev: 1, template, templateVersion: 2, mode: "auto", authorFamily: "claude", fallback: "只报错不修" });
   const deps = (actor: string): LedgerDeps => ({
-    db, actor, registryPath, projectIds: ["p"], now: () => (now += 10), autoTickWired: true, callerSession: SESSIONS[actor],
+    db, actor, registryPath, projectIds: ["p"], now: () => (now += 10), autoProjects: () => ["p"], callerSession: SESSIONS[actor],
     gitHead: () => reviewerAt ?? getTask(db, "T1")?.headSHA ?? null,
     loadRegistry: async () => JSON.parse(readFileSync(registryPath, "utf8")) as Registry, saveRegistry: async () => {},
   });

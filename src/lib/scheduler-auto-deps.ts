@@ -19,6 +19,7 @@ import { runManagerProcess } from "./run-manager.js";
 import { boundRef, type AutoTickDeps } from "./scheduler-auto-tick.js";
 import { acpPort, messagePort, type RegistryRow } from "./scheduler-auto-ports.js";
 import { runtimeFamily } from "./scheduler-auto-review.js";
+import { schedulerManager } from "./scheduler-service.js";
 import { openReviewWorktree, pinReviewWorktree } from "./scheduler-review-worktree.js";
 import type { SessionRole } from "./scheduler-sessions.js";
 import { ledgerResult } from "./scheduler-work-order.js";
@@ -29,11 +30,9 @@ import { selectWorkerRoute, type EnsureResult, type SessionRef, type WorkerSessi
 
 type Manager = (...args: string[]) => Promise<Record<string, unknown>>;
 
-const run = (env: Record<string, string | undefined>, timeoutMs: number): Manager => (...args) =>
-  runManagerProcess(args, { bunPath: resolveBunPath(), managerPath: `${SRC_DIR}/manager.ts`, env: { ...process.env, DISCORD_CHANNEL_ID: "", ...env }, timeoutMs });
-
-const schedulerLedger: Manager = run({ CLAUDESTRA_SCHEDULER_SERVICE: "1" }, 120_000);
-const plainManager: Manager = run({}, 180_000);
+// Agent creation runs without the scheduler identity (which is limited to ledger commands); ledger writes use the service's.
+const plainManager: Manager = (...args) =>
+  runManagerProcess(args, { bunPath: resolveBunPath(), managerPath: `${SRC_DIR}/manager.ts`, env: { ...process.env, DISCORD_CHANNEL_ID: "" }, timeoutMs: 180_000 });
 
 export const reviewerName = (taskId: string): string => `agent-rv-${taskId.toLowerCase()}`;
 
@@ -124,7 +123,7 @@ export function autoTickDeps(db: Database, registryPath?: string, worktreeRoot =
   const registryRow: RegistryRow = (agent) => readRegistryAgentsSync(registryPath).find((a) => a.name === agent);
   const env: Env = { db, registryRow, worktreeRoot };
   return {
-    manager: schedulerLedger,
+    manager: schedulerManager,
     worker: (ref) => worker(db, registryRow, ref),
     ensure: (task, role, family) => ensure(env, task, role, family),
     pinReview: (task, ref, head) => pinReview(env, task, ref, head),

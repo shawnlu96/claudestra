@@ -177,13 +177,18 @@ describe("P1-5 failures are tied to the order by its claim, and one that cannot 
   });
 });
 
-test("P1-6 auto cannot be switched on while the service does not run the auto tick", async () => {
+test("P1-6 auto is only switched on for a project the scheduler service is running", async () => {
   const f = autoFixture();
   try {
     const t2 = createTask(f.db, f.at("owner"), { project: "p", id: "T2", title: "new", kind: "code" }).row;
     const args = ["workflow-set", "T2", "--rev", String(t2.rev), "--template", "code", "--version", "2", "--mode", "auto", "--author-family", "claude", "--fallback", "退回人工"];
-    expect(await f.cliWith({ autoTickWired: undefined }, "pm", ...args)).toMatchObject({ ok: false, code: "forbidden", error: expect.stringContaining("还没接上自动 tick") });
-    expect(await f.cliWith({ autoTickWired: undefined }, "pm", ...args.map((a) => (a === "auto" ? "observe" : a)))).toMatchObject({ ok: true });
+    const refused = { ok: false, code: "forbidden", error: expect.stringContaining("调度服务没对项目 p 开") };
+    expect(await f.cliWith({ autoProjects: undefined }, "pm", ...args)).toMatchObject(refused);
+    expect(await f.cliWith({ autoProjects: () => ["other"] }, "pm", ...args)).toMatchObject(refused);
+    expect(await f.cliWith({ autoProjects: undefined }, "pm", ...args.map((a) => (a === "auto" ? "observe" : a)))).toMatchObject({ ok: true });
+    const t2b = f.db.query("SELECT rev FROM tasks WHERE id = 'T2'").get() as { rev: number };
+    const again = args.map((a, i) => (args[i - 1] === "--rev" ? String(t2b.rev) : a));
+    expect(await f.cliWith({ autoProjects: () => ["p"] }, "pm", ...again, "--workflow-rev", "1")).toMatchObject({ ok: true });
   } finally { f.close(); }
 });
 
