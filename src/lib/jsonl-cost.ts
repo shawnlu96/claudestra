@@ -43,7 +43,7 @@ function addUsage(acc: Usage, u: any): void {
  * 已知缺口：没有 id 的记录逐条计（Pi 由 pi-session 把 entry.id 填进 message.id；老格式没有就算了）；
  * Codex 按文件做累计值差分、不走这里，fork 出来的 rollout 若抄了累计计数器会重复计（本机未见）。
  */
-function usageDedupKey(rec: any): string | null {
+export function usageDedupKey(rec: any): string | null {
   const id = rec?.message?.id;
   if (typeof id !== "string" || !id) return null;
   return `${id}:${typeof rec.requestId === "string" ? rec.requestId : ""}`;

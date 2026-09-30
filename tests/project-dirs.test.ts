@@ -54,7 +54,7 @@ test("报错模板（project-dirs.ts / project-guard.ts）在网页英文词表�
   const tpls = ["../src/lib/project-dirs.ts", "../src/manager/project-guard.ts"].flatMap((f) =>
     [...strip(f).matchAll(/(?:fail\(|const tpl = )"([^"\n]+)"/g)].map((m) => m[1]),
   );
-  expect(tpls.length).toBe(7);
+  expect(tpls.length).toBe(8);
   const holes = (t: string) => [...t.matchAll(/\{(\w+)\}/g)].map((m) => m[1]).sort();
   for (const t of tpls) {
     expect(DICT[t], t).toBeString();

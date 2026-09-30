@@ -9,11 +9,11 @@ import { readProjects, writeProjects, PROJECT_ID_RE, type ProjectDef } from "../
 import { validateProjectDirs } from "../lib/project-dirs.js";
 import { bridgeRequest } from "../lib/bridge-client.js";
 import { loadRegistry, saveRegistry, normalizeName, output } from "./core.js";
-import { requireProjectWriter } from "./project-guard.js";
+import { requireOwnerOrMaster, requireProjectWriter } from "./project-guard.js";
 
 async function cmdProjectAdd(
   id: string,
-  opts: { name?: string; emoji?: string; dirs?: string[]; desc?: string },
+  opts: ProjectFlags,
 ) {
   if (!PROJECT_ID_RE.test(id)) {
     output({ ok: false, error: `project id 需匹配 ${PROJECT_ID_RE}(小写字母数字/-/_,≤32): "${id}"` });
@@ -37,6 +37,7 @@ async function cmdProjectAdd(
     ...(opts.emoji ? { emoji: opts.emoji } : {}),
     dirs,
     ...(opts.desc ? { description: opts.desc } : {}),
+    ...(opts.personal ? { personal: true } : {}),
     createdAt: new Date().toISOString(),
   };
   data.projects.push(proj);
@@ -62,7 +63,7 @@ async function cmdProjectList() {
 
 async function cmdProjectEdit(
   id: string,
-  opts: { name?: string; emoji?: string; dirs?: string[]; desc?: string },
+  opts: ProjectFlags,
 ) {
   const data = await readProjects();
   const p = data.projects.find((x) => x.id === id);
@@ -90,6 +91,8 @@ async function cmdProjectEdit(
     if (opts.desc) p.description = opts.desc;
     else delete p.description;
   }
+  if (opts.personal === true) p.personal = true;
+  else if (opts.personal === false) delete p.personal;
   await writeProjects(data);
   if (p.name !== oldName) await renameProjectCategory(id, oldName, p.name);
   output({ ok: true, project: p });
@@ -155,9 +158,9 @@ async function cmdProjectAssign(agentName: string, projectId: string) {
   output({ ok: true, agent: tmuxName, from: from || null, to: projectId });
 }
 
-type ProjectFlags = { name?: string; emoji?: string; dirs?: string[]; desc?: string };
+type ProjectFlags = { name?: string; emoji?: string; dirs?: string[]; desc?: string; personal?: boolean; personalBad?: string };
 
-/** --name / --emoji / --dirs / --desc；edit 时空值 = 清掉（emptyClears），add 时空值 = 没给 */
+/** --name / --emoji / --dirs / --desc / --personal on|off；edit 时空值 = 清掉（emptyClears），add 时空值 = 没给 */
 function parseProjectFlags(args: string[], emptyClears: boolean): { opts: ProjectFlags; pos: string[] } {
   const opts: ProjectFlags = {};
   const pos: string[] = [];
@@ -168,14 +171,18 @@ function parseProjectFlags(args: string[], emptyClears: boolean): { opts: Projec
     else if (a === "--emoji") opts.emoji = val(++i);
     else if (a === "--dirs") opts.dirs = (args[++i] || "").split(",").map((s) => s.trim()).filter(Boolean);
     else if (a === "--desc") opts.desc = val(++i);
-    else pos.push(a);
+    else if (a === "--personal") {
+      const v = args[++i];
+      if (v === "on" || v === "off") opts.personal = v === "on";
+      else opts.personalBad = v ?? "";
+    } else pos.push(a);
   }
   return { opts, pos };
 }
 
 const USAGE: Record<string, string> = {
-  "project-add": "project-add <id> --dirs <a,b> [--name <显示名>] [--emoji <e>] [--desc <说明>]",
-  "project-edit": "project-edit <id> [--name <显示名>] [--emoji <e>] [--dirs <a,b>] [--desc <说明>]",
+  "project-add": "project-add <id> --dirs <a,b> [--name <显示名>] [--emoji <e>] [--desc <说明>] [--personal on|off]",
+  "project-edit": "project-edit <id> [--name <显示名>] [--emoji <e>] [--dirs <a,b>] [--desc <说明>] [--personal on|off]",
   "project-remove": "project-remove <id>(须先清空成员)",
   "project-assign": "project-assign <agent> <projectId>",
   "project-merge": "project-merge <src> <dst>(目录并进 dst、成员挪过去、删 src)",
@@ -187,13 +194,18 @@ export async function runProjectCommand(cmd: string, args: string[]): Promise<vo
   const { opts, pos } = parseProjectFlags(args, cmd === "project-edit");
   const [a, b] = cmd === "project-add" || cmd === "project-edit" ? pos : args;
   const need2 = cmd === "project-assign" || cmd === "project-merge";
-  if (!a || (need2 && !b)) {
+  if (!a || (need2 && !b) || opts.personalBad !== undefined) {
     output({ ok: false, error: USAGE[cmd] ?? `unknown ${cmd}` });
     return;
   }
   // 能改目录归属的三个命令只许 owner / master / 目标项目的 PM（merge 要两边都是）（project-guard.ts）
   if (cmd === "project-add" || cmd === "project-merge" || (cmd === "project-edit" && opts.dirs !== undefined)) {
     const denied = await requireProjectWriter(cmd === "project-merge" ? [a, b] : [a]);
+    if (denied) return output({ ok: false, code: "forbidden", ...denied });
+  }
+  // 个人项目永不外借（lib/lend-policy.ts）：取消这个标记等于放开外借，只许 owner / master
+  if (cmd === "project-edit" && opts.personal === false) {
+    const denied = await requireOwnerOrMaster("取消个人项目标记");
     if (denied) return output({ ok: false, code: "forbidden", ...denied });
   }
   if (cmd === "project-add") return cmdProjectAdd(a, opts);
@@ -219,6 +231,7 @@ async function cmdProjectMerge(srcId: string, dstId: string) {
   const checked = validateProjectDirs([...dst.dirs, ...src.dirs], data.projects.filter((p) => p.id !== srcId), dstId);
   if (!checked.ok) return output(checked);
   dst.dirs = checked.dirs;
+  if (src.personal) dst.personal = true; // 个人项目的目录并进来，合并后的项目也得是个人项目，否则等于放开外借
   const reg = await loadRegistry();
   const moved = Object.entries(reg.agents).filter(([, a]) => a.projectId === srcId);
   for (const [, a] of moved) a.projectId = dstId;

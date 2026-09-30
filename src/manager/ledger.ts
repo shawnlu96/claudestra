@@ -7,6 +7,7 @@
 import { existsSync } from "node:fs";
 import { repoEnvVar } from "../lib/env-file.js";
 import { LedgerReader } from "../lib/ledger-read.js";
+import { notify } from "../lib/notify.js";
 import { LedgerError, LEDGER_PATH, openLedger } from "../lib/ledger-store.js";
 import { renameAgentRefs } from "../lib/ledger-write.js";
 import { readProjects } from "../lib/projects.js";
@@ -14,6 +15,8 @@ import { readRegistryAgents } from "../lib/registry.js";
 import { loadRegistry, output, saveRegistry } from "./core.js";
 import { LedgerCli, type LedgerDeps, type Result } from "./ledger-context.js";
 import { DEP_CMDS } from "./ledger-dep-cmds.js";
+import { DAG_CMDS } from "./ledger-dag-cmds.js";
+import { FEATURE_CMDS } from "./ledger-feature-cmds.js";
 import { parseLedgerArgs, resolveActor } from "./ledger-identity.js";
 import { AUDIT_CMDS } from "./ledger-audit-cmd.js";
 import { importCmd } from "./ledger-import.js";
@@ -43,6 +46,8 @@ const COMMANDS: Record<string, CommandSpec> = {
   ...DISPATCH_CMDS,
   ...TEAM_CMDS,
   ...DEP_CMDS,
+  ...FEATURE_CMDS,
+  ...DAG_CMDS,
   ...READ_CMDS,
   verify: VERIFY_CMD,
   ...AUDIT_CMDS,
@@ -108,6 +113,7 @@ async function realDeps(args: string[]): Promise<LedgerDeps | { error: string }>
     callerWitness: collectCallerWitness,
     autoProjects: () => { const s = readSchedulerConfig(); return s.enabled ? Object.keys(s.projects) : []; },
     autoDispatch: () => readSchedulerConfig().autoDispatch,
+    notifyOwner: (text) => notify({ source: "ledger", chatId: repoEnvVar("CONTROL_CHANNEL_ID"), text }),
   };
 }
 
