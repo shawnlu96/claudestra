@@ -1,8 +1,8 @@
-# Token 账：会话按轮落库（T83 Claude Code · T92 Codex）
+# Token 账：会话按轮落库（T83 Claude Code · T92 Codex · T95 算到卡上）
 
-把每个 Claude Code 会话和 Codex 线程按「轮」切开，存进独立的 `~/.claude-orchestrator/usage/usage.sqlite`（不碰台账 `ledger.sqlite`），给后续归到任务步骤（T3）和界面（T4）用。Codex 的差异集中在文末「Codex」一节。
+把每个 Claude Code 会话和 Codex 线程按「轮」切开，存进独立的 `~/.claude-orchestrator/usage/usage.sqlite`（不碰台账 `ledger.sqlite`），每一轮再按台账算到卡 / 步骤 / 轮次 / feature（文末「算到卡上」），给界面（T4）用。Codex 的差异集中在「Codex」一节。
 
-代码：`src/lib/usage-classify.ts`（Claude 的切轮判定、来源摘要、调用）、`usage-codex.ts`（Codex rollout 的同一套）、`usage-store.ts`（库结构与清理）、`usage-ingest.ts`（导入）、`usage-query.ts`（读），CLI `src/manager/usage.ts`。单测 `tests/usage-classify.test.ts`、`tests/usage-ingest.test.ts`、`tests/usage-codex.test.ts`。
+代码：`src/lib/usage-classify.ts`（Claude 的切轮判定、来源摘要、调用）、`usage-codex.ts`（Codex rollout 的同一套）、`usage-store.ts`（库结构与清理）、`usage-ingest.ts`（导入）、`usage-attr.ts`（算到卡上）、`usage-query.ts`（读），CLI `src/manager/usage.ts`，只读 API `src/bridge/local-api/usage.ts`。单测 `tests/usage-classify.test.ts`、`tests/usage-ingest.test.ts`、`tests/usage-codex.test.ts`、`tests/usage-attr.test.ts`、`tests/usage-attr-api.test.ts`。
 
 ## 命令
 
@@ -10,9 +10,12 @@
 bun src/manager.ts usage ingest [--since <ISO|ms>] [--prune] [--db <path>]   # 增量导入（--prune 顺带清超期明细），输出 JSON
 bun src/manager.ts usage turns <agent> [--today|--since <ts>] [--json] [--limit N] [--no-ingest]
 bun src/manager.ts usage summary [--today|--since <ts>] [--json] [--no-ingest]
+bun src/manager.ts usage by-task <卡号> [--json]                 # 一张卡按 步骤 × 轮次 × agent
+bun src/manager.ts usage by-feature <feature 名或 id> [--json]   # 一个 feature（或事项）按卡
+bun src/manager.ts usage attribute [--today|--since <ts>] [--json] # 归属依据分布：未归属占多少、原因是什么
 ```
 
-`turns` / `summary` 默认先增量导入一趟。`--db` 指定别的库文件（对账、测试用，不写生产库）。
+查询默认先增量导入一趟（导完按台账重算归属）。`--db` 指定别的库文件、`--ledger` 指定别的台账（对账、测试用，不写生产库；台账只读打开）。
 
 谁来导（都在 `bridge/archive-sweeper.ts`，都是 manager 子进程，bridge 进程里不读文件）：
 - bridge 起来 5 分钟后开始，**每 10 分钟**一趟 `usage ingest`（增量，通常 1 秒内）；上一趟没完就跳过这一趟。
@@ -78,3 +81,25 @@ agent、sessionId、是否子 agent（sidechain）、开始时间（外来输入
 - **模型** = `turn_context.model`，是**请求**的模型（rollout 不记实际应答的模型，T91 查实）。查询结果带 `modelBasis: "request"`，文本视图在模型名后标「(请求)」；Claude 的是 `response`。
 - **归属**：registry 里 Codex agent（tmux / ACP）的 `sessionId` 就是 thread id；其次归档目录名。子线程（`session_meta` 带父线程：subagent、guardian_review 等，判定复用 `codex-subthread.ts`）记到父线程的主人，标 `sidechain`、来源记 `subagent`。`codex exec` 一次性会话（ask_codex 等）和手开的会话认不出主人，记 `unowned`。
 - 其余（按文件偏移 + 文件身份增量、锁、10 分钟增量、查询前导入、30 天清理）与 Claude 完全相同。
+
+## 算到卡上（T95）
+
+每一轮回答两个问题：为哪张卡、哪一步（复述 / 写 / 审 / 修 / 合并 / 验证）、第几轮花的；属于哪个 feature。结果写在 `turns` 的 `attr_task` / `attr_step` / `attr_round` / `attr_feature` / `attr_item` / `attr_basis` 六列，原始用量（`calls`、轮的其他列）不动。
+
+**输入**全部来自台账（只读打开）：`tasks`（featureId、itemId、负责人）、`task_steps`（每一步第几轮派给了谁、何时派的；老卡没有步骤行时按负责人 / reviewer 推，同 `ledger-steps.ts` 的 `stepsOf`）、`events` 里的阶段事件、`scheduler_sessions`、各项目 `meta.pms`。
+
+**按轮的开始时间判**，优先级从高到低：
+
+1. **调度引擎绑定的会话**（`scheduler_sessions.sessionId` = 轮的 session / Codex thread）：整条会话属于那张卡，`basis = session`。步骤取这一刻卡所在的阶段，且要和会话角色对得上（author ↔ 复述 / 写 / 修，reviewer ↔ 审），对不上 step 记空。
+2. **PM 与大总管**（任一项目 `meta.pms`、卡上的 `pm`、`master`）：一律 `coordination`（协调开销），不摊到卡上，哪怕它在某张卡上挂着执行者。
+3. **步骤窗口**：阶段事件把一张卡切成一段段 `[起, 止)`；每段的执行者是这个阶段那一步（`STAGE_STEPS` 顺序：修没派人就退到写）的步骤行。同一步中途改派，在新那一行的派发时刻切开，之前归旧人、之后归新人。段开始时还没有行、行在段里或段尾 1 秒内才建的，从段开始就算它的（「修」那一行常在修完交付时才补派）。`blocked` 按卡住之前的阶段算；`spec`（PM 写规格）和 `verified` / `done` / `cancelled` 不开窗口。轮次取那一步的行；退到别的步骤时取阶段事件上的任务轮次。
+   - 这一刻正好落在**一张卡**的窗口里 → `basis = step`。
+   - 落在**两张以上**卡的窗口里 → `overlap`，不猜。
+
+**未归属的原因**（`attr_task` 为空）：`coordination`、`overlap`、`outside_window`（台账里当过执行者，但这一刻不在任何窗口里，常见于台账阶段推晚了：在「规格」阶段就开工、审查阶段里已经在修）、`not_in_ledger`（台账里从没当过执行者：非台账管理的项目 agent）、`unowned`（会话不属于任何 agent）。
+
+**feature**：卡上有 `featureId`（T84 新台账）就记它；另记卡的事项 `itemId`（还没迁进 feature 的卡挂在事项上）。`by-feature` 先按 id（全 id 或本机前缀后的 slug）精确找 feature / 事项，再按标题包含找，命中多个就列出来让人写 id；API 只认 id。
+
+**何时算**：每次 `usage ingest`（bridge 10 分钟一趟、每日那趟、查询前那趟）导完就按台账**整体重算**一遍、只写变了的行（本机 30 天约 8 千轮，毫秒级）。所以规则改了、台账补推了阶段，下一趟全部跟着变；不需要迁移旧数据。明细清掉（30 天）之后的轮不再有归属，按卡的永久汇总不在本卡范围。
+
+**只读 API**：`GET /api/v1/usage/task/:id`、`GET /api/v1/usage/feature/:id`，只给全权设备（`canAdministerPairing`：全 scope、非 peer、manage、设备凭据，与 `/ai-inventory` 同一道门），只读 usage 库现有数据（只读连接），不导入、不重算。

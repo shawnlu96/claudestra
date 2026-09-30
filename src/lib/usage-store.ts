@@ -51,10 +51,19 @@ const SCHEMA: SchemaSpec = {
       addColumns(db, "turns", [["runtime", `TEXT NOT NULL DEFAULT '${CLAUDE}'`]]);
       addColumns(db, "daily", [["reasoning", "INTEGER NOT NULL DEFAULT 0"], ["runtime", `TEXT NOT NULL DEFAULT '${CLAUDE}'`]]);
     },
+    // v4（T95 归属）：轮算到哪张卡 / 哪一步 / 第几轮 / 哪个 feature，按什么判的；全由 usage-attr.ts 从台账重算，可整体覆盖
+    (db) => {
+      addColumns(db, "turns", [["attr_task", "TEXT"], ["attr_step", "TEXT"], ["attr_round", "INTEGER"], ["attr_feature", "TEXT"], ["attr_item", "TEXT"], ["attr_basis", "TEXT"]]);
+      db.prepare("CREATE INDEX IF NOT EXISTS turns_attr_task ON turns(attr_task)").run();
+      db.prepare("CREATE INDEX IF NOT EXISTS turns_attr_feature ON turns(attr_feature)").run();
+    },
   ],
   tables: ["files", "turns", "calls", "tools", "daily", "dirty_days"],
-  columns: { files: ["fp", "turn_input", "runtime", "model", "parent"], calls: ["reasoning"], turns: ["runtime"], daily: ["reasoning", "runtime"] },
-  indexes: { turns: ["turns_agent", "turns_session"], calls: ["calls_turn", "calls_day", "calls_ts"], tools: ["tools_turn"] },
+  columns: {
+    files: ["fp", "turn_input", "runtime", "model", "parent"], calls: ["reasoning"], daily: ["reasoning", "runtime"],
+    turns: ["runtime", "attr_task", "attr_step", "attr_round", "attr_feature", "attr_item", "attr_basis"],
+  },
+  indexes: { turns: ["turns_agent", "turns_session", "turns_attr_task", "turns_attr_feature"], calls: ["calls_turn", "calls_day", "calls_ts"], tools: ["tools_turn"] },
 };
 
 /** 打开（没有就建）token 账库；多个进程可同时开（WAL + busy_timeout） */

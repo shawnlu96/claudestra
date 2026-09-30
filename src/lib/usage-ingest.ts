@@ -14,6 +14,7 @@ import { ARCHIVE_ROOT } from "./paths.js";
 import { agentRuntime, readRegistryAgentsSync, type RegistryAgent } from "./registry.js";
 import { claudeProjectsRoot } from "./runtimes/claude-code.js";
 import { codexRolloutRootOrSkip } from "./codex-home.js";
+import { attributeFromPath, type AttrResult } from "./usage-attr.js";
 import { CODEX, codexThreadOfFile, handleCodexLine, type CodexLineCtx } from "./usage-codex.js";
 import { runtimeForSessionPath } from "./session-source.js";
 import { callOf, inboundIdentity, inboundOf, triggerSummary } from "./usage-classify.js";
@@ -37,6 +38,8 @@ export interface IngestOptions {
   prune?: boolean;
   /** 每读一块、认领 / 清理之前各调一次；返回 false（锁已失）就停在这里，没做完的下一趟接着做 */
   keepAlive?: () => boolean;
+  /** 台账库：给了就在导完之后按它整体重算一遍归属（usage-attr.ts）；缺省不算（单测、没有台账的机器） */
+  ledgerPath?: string | null;
 }
 
 export interface IngestResult {
@@ -48,6 +51,8 @@ export interface IngestResult {
   ms: number;
   /** 导到一半失了锁：停在这里，没读的、清理和 daily 重算都留给下一趟 */
   aborted?: boolean;
+  /** 重算了归属：轮数、改了几行、各依据的轮数；台账不在就没有 */
+  attributed?: AttrResult;
 }
 
 interface SessionFile {
@@ -304,6 +309,7 @@ export function ingestUsage(db: Database, opts: IngestOptions = {}): IngestResul
   if (!alive()) return done(true);
   if (opts.prune) res.pruned = pruneUsage(db, cutoff);
   else rebuildDirtyDays(db, cutoff);
+  if (opts.ledgerPath && alive()) res.attributed = attributeFromPath(db, opts.ledgerPath) ?? undefined;
   res.ms = Math.round(performance.now() - t0);
   return res;
 }
