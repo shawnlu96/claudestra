@@ -3,9 +3,9 @@
  * 规矩与审批在 lib/ledger-dag-write.ts；这里只解析参数、查发起方频道（审批 ask 的答复要投回发起的 PM），
  * 直接生效的在事务提交后经 deps.notifyOwner（bridge 的系统通知，lib/notify.ts）告诉 owner——送不到就在结果里写「未通知」，由 PM 补发。
  */
-import { diffNodes, type DagCancel } from "../lib/ledger-dag-rules.js";
 import { approveDag, bindNode, rewriteDag } from "../lib/ledger-dag-write.js";
-import { effectiveNodes, getDagVersion, getPendingProposal, projectNodes, resolveFeature, type DagNode, type Feature } from "../lib/ledger-feature.js";
+import { dagDiff, dagSnapshot } from "../lib/ledger-dag-view.js";
+import { resolveFeature } from "../lib/ledger-feature.js";
 import { storedOrigin } from "../lib/ledger-origin.js";
 import { LedgerError } from "../lib/ledger-store.js";
 import type { LedgerCli, Result } from "./ledger-context.js";
@@ -90,40 +90,11 @@ function dagBind(c: LedgerCli): Result {
   return { ok: true, node: r.row, event: r.event, duplicate: r.duplicate };
 }
 
-/** 版本号或 pending → 节点（已并上绑卡）与这一版记下的取消 */
-function versionNodes(c: LedgerCli, f: Feature, raw: string): { nodes: DagNode[]; cancels: DagCancel[]; version: number } {
-  if (raw === "pending") {
-    const p = getPendingProposal(c.db, f.id);
-    if (!p) throw new LedgerError("not_found", `feature ${f.id} 没有待批的重写`);
-    return { nodes: p.nodes, cancels: p.cancels, version: p.version };
-  }
-  if (!/^\d+$/.test(raw)) throw new LedgerError("invalid", `--diff 的版本要是数字或 pending，收到 ${raw}`);
-  const v = getDagVersion(c.db, f.id, Number(raw));
-  if (!v) throw new LedgerError("not_found", `feature ${f.id} 没有 v${raw}`);
-  return { nodes: effectiveNodes(c.db, v), cancels: v.cancels, version: v.version };
-}
-
-/** a → b 的差异；取消原因取 (a, b] 之间各版（含 pending）记下的 */
-function diff(c: LedgerCli, f: Feature, a: string, b: string): Result {
-  const from = versionNodes(c, f, a);
-  const to = versionNodes(c, f, b);
-  const between: DagCancel[] = [];
-  for (let v = from.version + 1; v <= to.version; v++) {
-    between.push(...(v === to.version ? to.cancels : (getDagVersion(c.db, f.id, v)?.cancels ?? [])));
-  }
-  return { ok: true, feature: f.id, from: from.version, to: to.version, diff: diffNodes(from.nodes, to.nodes, between) };
-}
-
-/** 某一版的快照（缺省当前版），附任务卡现读的状态；同时给出 pending 提案。--diff a b 看两版差异 */
+/** 某一版的快照（缺省当前版），附任务卡现读的状态；同时给出 pending 提案。--diff a b 看两版差异（lib/ledger-dag-view.ts） */
 function dagShow(c: LedgerCli): Result {
   const f = feature(c);
-  if (c.p.flags.diff !== undefined) return diff(c, f, c.p.flags.diff, c.p.pos[2] ?? String(f.currentVersion));
-  const n = intFlag(c.p, "version") ?? f.currentVersion;
-  const v = n ? getDagVersion(c.db, f.id, n) : null;
-  if (!v) throw new LedgerError("not_found", f.currentVersion ? `feature ${f.id} 没有 v${n}（当前 v${f.currentVersion}）` : `feature ${f.id} 还没建 DAG（先 dag-init）`);
-  const p = getPendingProposal(c.db, f.id);
-  const pending = p ? { ...p, nodes: projectNodes(c.db, p.nodes) } : null;
-  return { ok: true, feature: f.id, current: f.currentVersion, version: { ...v, nodes: projectNodes(c.db, effectiveNodes(c.db, v)) }, pending };
+  if (c.p.flags.diff !== undefined) return { ok: true, feature: f.id, ...dagDiff(c.db, f, c.p.flags.diff, c.p.pos[2] ?? String(f.currentVersion)) };
+  return { ok: true, feature: f.id, current: f.currentVersion, ...dagSnapshot(c.db, f, intFlag(c.p, "version")) };
 }
 
 export const DAG_CMDS: Record<string, CommandSpec> = {

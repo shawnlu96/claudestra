@@ -16,6 +16,7 @@ import { runBounded } from "../lib/run-bounded.js";
 import { runManagerProcess } from "../lib/run-manager.js";
 import { askDb } from "./asks.js";
 import { callerOf } from "./caller-identity.js";
+import { dagToolHandlers } from "./dag-tools.js";
 import { BUN_PATH, ENV_WITH_BUN, MANAGER_PATH, MASTER_DIR } from "./config.js";
 import { ledgerDb } from "./ledger-feed.js";
 import { reviewToolHandlers } from "./review-tools.js";
@@ -52,6 +53,7 @@ const HANDLERS: Record<string, OrderToolHandler> = {
     db: ledgerDb(), open: (input) => openAskFull(askDb(), input), notify: (to, text, messageId) => sendLedgerNotice({ to, text, messageId }),
     markHanded: (id) => patchAsk(askDb(), id, { extra: { notice: "handed" } }),
   }),
+  ...dagToolHandlers(),
 };
 
 export async function answerOrderTool(ws: ServerWebSocket<unknown>, msg: Record<string, unknown>): Promise<void> {
