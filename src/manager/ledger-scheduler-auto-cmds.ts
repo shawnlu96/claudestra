@@ -11,7 +11,7 @@ import type { CommandSpec } from "./ledger-write-cmds.js";
 /** Auto snapshots read only ledger bindings, so the registry is not consulted; capacity comes from the service policy. */
 function planOpts(c: LedgerCli) {
   const max = intFlag(c.p, "max-workers") ?? 2;
-  if (max < 1 || max > 32) throw new LedgerError("invalid", "--max-workers 要在 1–32");
+  if (max < 0 || max > 32) throw new LedgerError("invalid", "--max-workers 要在 0–32（0 = 本机不开 worker，i28-R9）");
   return { registry: [], maxWorkers: max, now: c.deps.now() };
 }
 

@@ -29,7 +29,7 @@ export interface PoolStepInput {
   /** The card's spec text (the peer cannot read this machine's files); null = cannot be offered. */
   spec: string | null;
 }
-export type PoolOutcome = "pooled" | "claimed" | "done" | "unknown" | "timeout" | "returned" | "refused" | "settled";
+type PoolOutcome = "pooled" | "claimed" | "done" | "unknown" | "timeout" | "returned" | "refused" | "settled";
 export interface PoolStepResult { outcome: PoolOutcome; orderId: string | null; intent: SchedulerIntent; text: string }
 
 const otherFamily = (f: AuthorFamily): AuthorFamily => f === "claude" ? "codex" : "claude";

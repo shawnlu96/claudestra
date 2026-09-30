@@ -15,7 +15,7 @@ import { POOL_RECIPIENT, type PoolFacts } from "./scheduler-pool-plan.js";
 
 export const poolLinkKey = (intentId: string): string => `scheduler:${intentId}:pool`;
 /** The reviewer session id writeLendResult records for an order (ledger-lend-result.ts). */
-export const lendSessionId = (peer: string, orderId: string): string => `lend:${peer}:${orderId}`;
+const lendSessionId = (peer: string, orderId: string): string => `lend:${peer}:${orderId}`;
 /** Written by the scheduler's timeout withdrawal; doctor counts timeouts by it. */
 export const POOL_TIMEOUT_REASON = "挂池超时";
 

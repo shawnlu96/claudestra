@@ -99,10 +99,11 @@ export const SCHEDULER_CMDS: Record<string, CommandSpec> = {
       if (!["off", "overflow", "prefer"].includes(mode) || !["review", "none"].includes(roles)) throw new LedgerError("invalid", "--mode / --roles 不认识");
       const minutes = integer(c, "timeout-min");
       if (minutes < 1) throw new LedgerError("invalid", "--timeout-min 至少 1");
-      const intent = c.p.pos[1] ?? "";
+      const intent = c.p.pos[1] ?? "", maxWorkers = integer(c, "max-workers");
+      if (maxWorkers > 32) throw new LedgerError("invalid", "--max-workers 要在 0–32");
       const borrow = await (c.deps.lend?.borrow() ?? readEffectiveBorrow());
       return { ok: true, ...schedulerPoolStep(c.db, c.ctx(), {
-        intentId: intent, maxWorkers: integer(c, "max-workers"), timeoutMs: minutes * 60_000, borrow,
+        intentId: intent, maxWorkers, timeoutMs: minutes * 60_000, borrow,
         remote: { mode: mode as RemoteMode, roles: roles === "review" ? ["review"] : [], poolTimeoutMin: minutes },
         spec: specOf(c, intent),
       }) };

@@ -16,9 +16,9 @@ export const isPoolIntent = (i: Pick<SchedulerIntent, "action" | "recipient">): 
   i.action === "review" && !!i.recipient?.startsWith(POOL_RECIPIENT);
 
 /** Families a borrowed worker may review in (mirrors lend-offer's v1 slice: only Codex is lent). */
-export const LENDABLE_FAMILIES: readonly AuthorFamily[] = ["codex"];
+const LENDABLE_FAMILIES: readonly AuthorFamily[] = ["codex"];
 
-export interface PoolPeer { peer: string; open: number; maxOpen: number }
+interface PoolPeer { peer: string; open: number; maxOpen: number }
 export interface PoolFacts {
   remote: RemotePolicy;
   /** Active local reviewer sessions on the project's other cards; review holds no worker slot, so this is its capacity. */
