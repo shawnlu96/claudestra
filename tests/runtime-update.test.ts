@@ -3,7 +3,7 @@
  * 不真跑 `npm install -g`：shell / registry / 忙闲 / precheck 全注入。
  */
 import { describe, expect, test } from "bun:test";
-import { handleRuntimeUpdate, type RuntimeUpdateDeps } from "../src/bridge/runtime-update";
+import { handleRuntimeUpdate, prepareCodexUpdate, type RuntimeUpdateDeps } from "../src/bridge/runtime-update";
 import type { Principal } from "../src/lib/principals";
 
 const at = "2026-01-01T00:00:00Z";
@@ -19,12 +19,11 @@ function deps(over: Partial<RuntimeUpdateDeps> & { npm?: boolean } = {}) {
     busy: () => false,
     shell: async (cmd) => (cmds.push(cmd), { ok: true, tail: "done" }),
     updaters: {
-      pi: { label: "Pi", command: () => "pi update", forget: () => forgot.push("pi") },
+      pi: { label: "Pi", prepare: async () => ({ command: "pi update" }), forget: () => forgot.push("pi") },
       codex: {
         label: "Codex",
-        command: () => "npm install -g @openai/codex@latest",
+        prepare: () => prepareCodexUpdate({ install: async () => ({ version: "0.158.0", npm: over.npm !== false }), latest: async () => "0.158.4" }),
         forget: () => forgot.push("codex"),
-        precheck: async () => (over.npm === false ? "Codex 不是 npm 全局安装" : null),
       },
     },
     ...over,
@@ -41,7 +40,7 @@ describe("codex-update", () => {
     const restarted: string[][] = [];
     const r = await post("c", "codex", OWNER, d, async (...a: string[]) => (restarted.push(a), { ok: true }));
     expect(r.status).toBe(200);
-    expect(cmds).toEqual(["npm install -g @openai/codex@latest"]);
+    expect(cmds).toEqual(["npm install -g @openai/codex@0.158.4"]);
     expect(forgot).toEqual(["codex"]);
     expect(restarted).toEqual([["restart", "agent-c"]]);
   });
@@ -75,6 +74,35 @@ describe("codex-update", () => {
   });
 });
 
+describe("codex-update 的版本闸门（codex-acp 配套范围）", () => {
+  const install = async () => ({ version: "0.158.0", npm: true });
+  test("latest 在配套范围内：钉死版本号装，不写 @latest", async () => {
+    expect(await prepareCodexUpdate({ install, latest: async () => "0.158.2" })).toEqual({ command: "npm install -g @openai/codex@0.158.2" });
+  });
+  test("latest 超出配套范围：409，说明配套范围，不给命令", async () => {
+    const p = await prepareCodexUpdate({ install, latest: async () => "0.159.2" });
+    expect(p).toMatchObject({ status: 409 });
+    expect("error" in p && p.error).toContain("0.158.x");
+  });
+  test("端点：超出配套范围 409，不跑 npm、不重启", async () => {
+    let restarts = 0;
+    const { d, cmds } = deps();
+    const gated = { ...d, updaters: { ...d.updaters, codex: { ...d.updaters.codex, prepare: () => prepareCodexUpdate({ install, latest: async () => "0.159.2" }) } } };
+    const r = await post("c", "codex", OWNER, gated, async () => (restarts++, { ok: true }));
+    expect(r.status).toBe(409);
+    expect(cmds).toEqual([]);
+    expect(restarts).toBe(0);
+  });
+  test("查不到 latest / 版本号不规整：502，绝不拼进 shell", async () => {
+    expect(await prepareCodexUpdate({ install, latest: async () => undefined })).toMatchObject({ status: 502 });
+    expect(await prepareCodexUpdate({ install, latest: async () => "0.158.0; rm x" })).toMatchObject({ status: 502 });
+    expect(await prepareCodexUpdate({ install, latest: async () => { throw new Error("offline"); } })).toMatchObject({ status: 502 });
+  });
+  test("找不到 codex 400", async () => {
+    expect(await prepareCodexUpdate({ install: async () => null, latest: async () => "0.158.2" })).toMatchObject({ status: 400 });
+  });
+});
+
 describe("整机锁：pi-update 与 codex-update 共用", () => {
   test("一个在跑，另一个（同运行时或另一运行时）都 409；跑完释放", async () => {
     let release!: () => void;
@@ -94,7 +122,7 @@ describe("整机锁：pi-update 与 codex-update 共用", () => {
     let release!: () => void;
     const gate = new Promise<void>((r) => (release = r));
     const { d } = deps();
-    const slowCheck = { ...d, updaters: { ...d.updaters, codex: { ...d.updaters.codex, precheck: async () => (await gate, null) } } };
+    const slowCheck = { ...d, updaters: { ...d.updaters, codex: { ...d.updaters.codex, prepare: async () => (await gate, { command: "npm i" }) } } };
     const first = post("c", "codex", OWNER, slowCheck);
     await Bun.sleep(0);
     expect((await post("p", "pi", OWNER, deps().d)).status).toBe(409);

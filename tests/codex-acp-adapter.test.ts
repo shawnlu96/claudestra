@@ -1,5 +1,7 @@
 import { describe, expect, test } from "bun:test";
-import { buildAcpHostCommand, codexAcpAdapter } from "../src/lib/runtimes/codex-acp.ts";
+import { buildAcpHostCommand, codexAcpAdapter, createCodexAcpAdapter } from "../src/lib/runtimes/codex-acp.ts";
+import { readCodexRunning, recordCodexRunning } from "../src/lib/codex-version.ts";
+import type { WindowOps } from "../src/lib/runtimes/types.ts";
 import { codexAdapter, controlFor, managedFor, requireManaged } from "../src/lib/runtimes/index.ts";
 import { CODEX_ACP_CONTROL } from "../src/lib/runtimes/codex.ts";
 import { decodePreambleEnv } from "../src/lib/codex-thread.ts";
@@ -138,5 +140,22 @@ describe("沙箱：CLAUDESTRA_ACP_AGENT 冒充不了 stub（r4 P1-3）", () => {
     expect(cmd).toContain(`HOME=${home} `);
     expect(cmd).toContain(`CODEX_HOME=${home}/.codex `);
     expect(adapterEnv({ base: { HOME: "/Users/me" }, bunBin: "bun", channelServer: "x", mcpName: "m", logsDir: "/l" }).HOME).toBe("/Users/me");
+  });
+});
+
+describe("ACP 运行版本来源", () => {
+  test("beforeLaunch 只清掉上一次的记录，不探版本：真正的运行版本由宿主起适配器前记（codex-version noteAcpCodexRunning）", async () => {
+    recordCodexRunning("agent-acpv", "0.157.0");
+    let versionProbes = 0;
+    const a = createCodexAcpAdapter({
+      resolveBin: async () => "/x/codex",
+      run: async (cmd: string[]) => (cmd[1] === "--version" && versionProbes++, { ok: true, out: "", err: "" }),
+    });
+    const opts: Record<string, string> = {};
+    const win = { name: "agent-acpv", target: "master:agent-acpv", setOption: async (k: string, v: string) => ((opts[k] = v), true) } as unknown as WindowOps;
+    await a.beforeLaunch!(win);
+    expect(readCodexRunning("agent-acpv")).toBeUndefined();
+    expect(versionProbes).toBe(0);
+    expect(opts["@claudestra_ready"]).toBe("0");
   });
 });

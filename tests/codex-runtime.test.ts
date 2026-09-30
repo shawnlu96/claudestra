@@ -3,6 +3,7 @@
  * 真 Codex 的端到端见 scripts/codex-adapter-e2e.ts。
  */
 import { describe, expect, test } from "bun:test";
+import { readCodexRunning } from "../src/lib/codex-version";
 import { BOOTSTRAP_MARKER, codexContextPreamble, codexDeveloperInstructions } from "../src/lib/codex-launch.js";
 import { codexLineToClaudeShape } from "../src/lib/codex-session.js";
 import {
@@ -174,6 +175,16 @@ describe("beforeLaunch / waitReady", () => {
     expect(w.opts["@claudestra_ready"]).toBe("0");
     w.opts["@claudestra_ready"] = "1";
     expect(await a.waitReady(w.win, budget)).toEqual({ ready: true });
+  });
+
+  test("tmux 运行版本来源：beforeLaunch 探这次要起的 codex --version 并记下（网页「重启生效」提示读它）", async () => {
+    const a = createCodexAdapter(deps({ run: async (cmd: string[]) => ({ ok: true, out: cmd[1] === "--version" ? "codex-cli 0.158.0\n" : "", err: "" }) }));
+    const w = fakeWindow(["~ %"]);
+    await a.beforeLaunch!(w.win);
+    expect(readCodexRunning("agent-cx")).toBe("0.158.0");
+    const b = createCodexAdapter(deps({ run: async () => ({ ok: false, out: "", err: "boom" }) }));
+    await b.beforeLaunch!(w.win);
+    expect(readCodexRunning("agent-cx")).toBeUndefined(); // 探不出记空，不沿用上一次
   });
 
   test("active writer → occupied（restart 据此改 fork）", async () => {

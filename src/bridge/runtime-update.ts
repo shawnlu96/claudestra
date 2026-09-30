@@ -7,12 +7,14 @@
  *   用户在终端里敲命令的环境就是这个，agent 的 tmux 窗口也是。
  * - 整机同一时刻只跑一个（pi 与 codex 共用一把锁）：两个 `npm install -g` 并发会互相踩坏安装目录。
  * - Codex 只在 npm 全局安装时替人更新（brew 等装法网页只给文字提示）；ChatGPT.app 内置那份（ask_codex 用）不碰。
+ * - 重启走 manager restart，按 registry 的 transport 分派：ACP agent 由宿主收尾再起，不往 Codex TUI 发键。
  */
 import { agentInScope, type Principal } from "../lib/principals.js";
 import { readRegistryAgents } from "../lib/registry.js";
 import { piBinName } from "../lib/pi-env.js";
 import { shellEscape } from "../lib/claude-launch.js";
-import { probeCodexInstall } from "../lib/codex-version.js";
+import { fetchLatestCodex, probeCodexInstall } from "../lib/codex-version.js";
+import { CODEX_ACP_PAIRS, CODEX_ACP_VERSION, codexPairsWithAdapter } from "../lib/acp/install.js";
 import { forgetInstalledCodex, forgetInstalledPi } from "../lib/update-hints.js";
 import { apiJson, forbidden, isFullScope, notInScope } from "./api-respond.js";
 import { getAgentStatus, isBusyStatus } from "./event-bus.js";
@@ -24,26 +26,35 @@ let runningFor: string | null = null;
 
 export const RUNTIME_UPDATE_PATH = /^\/agents\/([^/]+)\/(pi|codex)-update$/;
 
+type Prepared = { command: string } | { status: number; error: string };
 interface Updater {
   label: string;
-  command: () => string;
+  /** 能替人更新就给出要跑的命令，否则给拒绝的状态码和原因（占着整机锁时调） */
+  prepare: () => Promise<Prepared>;
   forget: () => void;
-  /** 不能替人更新的原因（null = 可以） */
-  precheck?: () => Promise<string | null>;
 }
 const UPDATERS: Record<"pi" | "codex", Updater> = {
-  pi: { label: "Pi", command: () => `${shellEscape(piBinName())} update --self --no-approve`, forget: forgetInstalledPi },
-  codex: {
-    label: "Codex",
-    command: () => "npm install -g @openai/codex@latest",
-    forget: forgetInstalledCodex,
-    precheck: async () => {
-      const i = await probeCodexInstall();
-      if (!i) return "登录 shell 的 PATH 里找不到 codex";
-      return i.npm ? null : "Codex 不是 npm 全局安装（brew 等），请用原来的安装方式手动更新";
-    },
-  },
+  pi: { label: "Pi", prepare: async () => ({ command: `${shellEscape(piBinName())} update --self --no-approve` }), forget: forgetInstalledPi },
+  codex: { label: "Codex", prepare: () => prepareCodexUpdate(), forget: forgetInstalledCodex },
 };
+
+/**
+ * 装的是**这一刻查到的** latest 且钉死版本号，不写 @latest：查完到装之间 npm 发了新版，也不会装上没核对过配套的那个。
+ * 不在 codex-acp 配套范围里就 409（网页此时本来就不给按钮）：升上去 ACP agent 下次起适配器就是错配。
+ */
+export async function prepareCodexUpdate(
+  d: { install: typeof probeCodexInstall; latest: typeof fetchLatestCodex } = { install: probeCodexInstall, latest: fetchLatestCodex },
+): Promise<Prepared> {
+  const i = await d.install();
+  if (!i) return { status: 400, error: "登录 shell 的 PATH 里找不到 codex" };
+  if (!i.npm) return { status: 400, error: "Codex 不是 npm 全局安装（brew 等），请用原来的安装方式手动更新" };
+  const latest = await d.latest().catch((e) => (console.warn("⚠️ [codex-update] 查 npm latest 失败:", e), undefined));
+  if (!latest || !/^\d+\.\d+\.\d+$/.test(latest)) return { status: 502, error: "查不到 npm 上 @openai/codex 的最新版本，稍后再试" };
+  if (!codexPairsWithAdapter(latest)) {
+    return { status: 409, error: `npm 上的 Codex ${latest} 不在 codex-acp ${CODEX_ACP_VERSION} 的配套范围（${CODEX_ACP_PAIRS}），等适配器升级后再更新` };
+  }
+  return { command: `npm install -g @openai/codex@${latest}` };
+}
 
 export interface RuntimeUpdateDeps {
   agents: () => Promise<{ name: string; runtime?: string }[]>;
@@ -78,9 +89,9 @@ export async function handleRuntimeUpdate(
   if (runningFor) return apiJson(409, { ok: false, error: `正在为 ${runningFor} 更新，稍等再试` });
   runningFor = canonical; // 先占锁再做任何 await：precheck 期间另一个请求也得排在外面
   try {
-    const refuse = await u.precheck?.();
-    if (refuse) return apiJson(400, { ok: false, error: refuse });
-    const r = await deps.shell(u.command());
+    const p = await u.prepare();
+    if ("error" in p) return apiJson(p.status, { ok: false, error: p.error });
+    const r = await deps.shell(p.command);
     u.forget();
     if (!r.ok) return apiJson(500, { ok: false, error: `${u.label} 更新失败：${r.tail || "没有输出"}` });
     const restarted = await runManager("restart", canonical);

@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { attachUpdateHints, isNewerVersion, makeVersionCache, pickUpdateHint } from "../src/lib/update-hints";
 import { parseCcSessionEntry } from "../src/lib/cc-sessions";
 import { probeClaudeVersion } from "../src/lib/claude-binary";
-import { isNpmGlobalCodex, readCodexRunning, recordCodexRunning } from "../src/lib/codex-version";
+import { isNpmGlobalCodex, noteAcpCodexRunning, readCodexRunning, recordCodexRunning } from "../src/lib/codex-version";
 import { mkdtempSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
@@ -140,10 +140,10 @@ describe("Codex", () => {
     expect(isNpmGlobalCodex(undefined)).toBe(false);
   });
   test("pickUpdateHint：有新版先提示更新（带 npm 标记），哪怕运行版本也落后", () => {
-    expect(pickUpdateHint("codex", { running: "0.157.0", installed: "0.158.0", latest: "0.159.0", npm: true }))
-      .toEqual({ kind: "codex-update", installed: "0.158.0", latest: "0.159.0", npm: true });
-    expect(pickUpdateHint("codex", { installed: "0.158.0", latest: "0.159.0" }))
-      .toEqual({ kind: "codex-update", installed: "0.158.0", latest: "0.159.0", npm: false });
+    expect(pickUpdateHint("codex", { running: "0.157.0", installed: "0.158.0", latest: "0.158.3", npm: true }))
+      .toEqual({ kind: "codex-update", installed: "0.158.0", latest: "0.158.3", npm: true });
+    expect(pickUpdateHint("codex", { installed: "0.157.2", latest: "0.158.1" }))
+      .toEqual({ kind: "codex-update", installed: "0.157.2", latest: "0.158.1", npm: false });
   });
   test("pickUpdateHint：已是最新但会话还在旧版 → 重启；都一样 / 缺运行版本 → 不提示", () => {
     expect(pickUpdateHint("codex", { running: "0.157.0", installed: "0.158.0", latest: "0.158.0", npm: true }))
@@ -163,13 +163,91 @@ describe("Codex", () => {
   test("attachUpdateHints：Codex 会话才去探 codex 的已装 / 最新版本", async () => {
     const asked: string[][] = [];
     const cache = {
-      get: (k: string) => ({ "installed:codex": "0.158.0", "latest:codex": "0.159.0" })[k],
+      get: (k: string) => ({ "installed:codex": "0.158.0", "latest:codex": "0.158.2" })[k],
       refresh: (probes: { key: string }[]) => (asked.push(probes.map((p) => p.key)), Promise.resolve()),
       forget: () => {},
     };
     const agents: any[] = [{ name: "c1", status: "active" }];
     await attachUpdateHints(agents, new Map([["c1", { runtime: "codex" }]]), cache);
-    expect(agents[0].updateHint).toMatchObject({ kind: "codex-update", installed: "0.158.0", latest: "0.159.0" });
+    expect(agents[0].updateHint).toEqual({ kind: "codex-update", installed: "0.158.0", latest: "0.158.2", npm: false });
     expect(asked).toEqual([["installed:codex", "latest:codex"]]);
+  });
+});
+
+describe("Codex × codex-acp 配套范围（0.158.x）", () => {
+  const PAIRS = "0.158.x";
+  test("新版不配套、也没有可重启的：给只有文字的更新提示（带 adapterPairs），tmux / acp 一样", () => {
+    for (const acp of [false, true]) {
+      expect(pickUpdateHint("codex", { running: "0.158.0", installed: "0.158.0", latest: "0.159.2", npm: true, acp }))
+        .toEqual({ kind: "codex-update", installed: "0.158.0", latest: "0.159.2", npm: true, adapterPairs: PAIRS });
+    }
+  });
+  test("新版不配套，但已装的配套、会话落后：能点的「重启生效」优先", () => {
+    for (const acp of [false, true]) {
+      expect(pickUpdateHint("codex", { running: "0.157.0", installed: "0.158.0", latest: "0.159.2", npm: true, acp }))
+        .toEqual({ kind: "restart", running: "0.157.0", installed: "0.158.0" });
+    }
+  });
+  test("已装的就不配套（手动升过）：ACP agent 的重启只给文字；tmux agent 照常可重启", () => {
+    expect(pickUpdateHint("codex", { running: "0.158.0", installed: "0.159.2", latest: "0.159.2", acp: true }))
+      .toEqual({ kind: "restart", running: "0.158.0", installed: "0.159.2", adapterPairs: PAIRS });
+    expect(pickUpdateHint("codex", { running: "0.158.0", installed: "0.159.2", latest: "0.159.2", acp: false }))
+      .toEqual({ kind: "restart", running: "0.158.0", installed: "0.159.2" });
+  });
+  test("两条都不能点：更新那条优先（它说明了为什么别升）", () => {
+    expect(pickUpdateHint("codex", { running: "0.158.0", installed: "0.159.0", latest: "0.160.0", acp: true }))
+      .toEqual({ kind: "codex-update", installed: "0.159.0", latest: "0.160.0", npm: false, adapterPairs: PAIRS });
+  });
+  test("闸门只管 Codex：Pi 的新版照常提示", () => {
+    expect(pickUpdateHint("pi", { installed: "0.158.0", latest: "0.159.2" })).toEqual({ kind: "pi-update", installed: "0.158.0", latest: "0.159.2" });
+  });
+  test("attachUpdateHints：transport=acp 才拦重启（registry 的 transport 透传进来）", async () => {
+    const dir = process.env.CLAUDESTRA_STATE_DIR!;
+    recordCodexRunning("ca", "0.158.0", dir);
+    recordCodexRunning("ct", "0.158.0", dir);
+    const cache = { get: (k: string) => ({ "installed:codex": "0.159.2", "latest:codex": "0.159.2" })[k], refresh: () => Promise.resolve(), forget: () => {} };
+    const agents: any[] = [{ name: "ca", status: "active" }, { name: "ct", status: "active" }];
+    await attachUpdateHints(agents, new Map([["ca", { runtime: "codex", transport: "acp" }], ["ct", { runtime: "codex", transport: "tmux" }]]), cache);
+    expect(agents[0].updateHint).toMatchObject({ kind: "restart", adapterPairs: PAIRS });
+    expect(agents[1].updateHint).toEqual({ kind: "restart", running: "0.158.0", installed: "0.159.2" });
+  });
+});
+
+describe("ACP 运行版本来源：宿主起适配器前探 CODEX_PATH（noteAcpCodexRunning）", () => {
+  const setup = () => {
+    const dir = mkdtempSync(join(tmpdir(), "codex-running-acp-"));
+    const logs: string[] = [];
+    return { dir, logs, log: (m: string) => logs.push(m) };
+  };
+  test("配套版本：记下运行版本，不告警", () => {
+    const { dir, logs, log } = setup();
+    expect(noteAcpCodexRunning({ agent: "agent-a", codexPath: "/x/codex", probe: () => "codex-cli 0.158.0\n", log, dir })).toBe("0.158.0");
+    expect(readCodexRunning("agent-a", dir)).toBe("0.158.0");
+    expect(logs).toEqual([]);
+  });
+  test("适配器退避重起时 codex 已被升级：记录跟着换成新版本，并告警不配套", () => {
+    const { dir, logs, log } = setup();
+    let v = "codex-cli 0.158.0";
+    const probe = () => v;
+    noteAcpCodexRunning({ agent: "agent-a", codexPath: "/x/codex", probe, log, dir });
+    v = "codex-cli 0.159.2";
+    noteAcpCodexRunning({ agent: "agent-a", codexPath: "/x/codex", probe, log, dir });
+    expect(readCodexRunning("agent-a", dir)).toBe("0.159.2");
+    expect(logs.join("\n")).toContain("0.158.x");
+  });
+  test("探不出版本：记空记录（不沿用旧值）并告警", () => {
+    const { dir, logs, log } = setup();
+    recordCodexRunning("agent-a", "0.157.0", dir);
+    noteAcpCodexRunning({ agent: "agent-a", codexPath: "/x/codex", probe: () => { throw new Error("ENOENT"); }, log, dir });
+    expect(readCodexRunning("agent-a", dir)).toBeUndefined();
+    expect(logs.length).toBe(2);
+  });
+  test("stub（沙箱）没有 CODEX_PATH：不探、不记、不告警", () => {
+    const { dir, logs, log } = setup();
+    let probed = 0;
+    expect(noteAcpCodexRunning({ agent: "agent-a", probe: () => (probed++, ""), log, dir })).toBeUndefined();
+    expect(probed).toBe(0);
+    expect(readCodexRunning("agent-a", dir)).toBeUndefined();
+    expect(logs).toEqual([]);
   });
 });

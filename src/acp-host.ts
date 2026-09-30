@@ -8,6 +8,7 @@ import { join } from "node:path";
 import { resolveBunPath } from "./lib/bun-path.js";
 import { resolveBridgeUrl } from "./lib/bridge-url.js";
 import { decodePreambleEnv } from "./lib/codex-thread.js";
+import { noteAcpCodexRunning } from "./lib/codex-version.js";
 import { acpAgentCommand, spawnAdapter } from "./lib/acp/adapter-proc.js";
 import { BridgeLink } from "./lib/acp/bridge-link.js";
 import { AcpHost } from "./lib/acp/host.js";
@@ -16,9 +17,6 @@ import { statePath } from "./lib/paths.js";
 import { SRC_DIR } from "./lib/repo-root.js";
 import { CODEX_READY_OPTION } from "./lib/runtimes/codex-ready.js";
 import { tmuxRaw } from "./lib/tmux-helper.js";
-
-/** 适配器 2.0.0 配套的 codex 版本（它的 package.json 依赖 @openai/codex ^0.158.0）；升级时和 install.ts 一起改 */
-const CODEX_COMPAT_RE = /\b0\.158\.\d+\b/;
 
 const log = (msg: string) => console.log(`[${new Date().toTimeString().slice(0, 8)}] ${msg}`);
 const need = (k: string) => {
@@ -41,10 +39,13 @@ if ("error" in agent) {
   process.exit(3);
 }
 const codexPath = process.env.CLAUDESTRA_CODEX_BIN?.trim() || undefined;
-if (!agent.stub && codexPath) {
-  const v = spawnSync(codexPath, ["--version"], { encoding: "utf8" }).stdout?.trim() ?? "";
-  if (!CODEX_COMPAT_RE.test(v)) log(`⚠️ 本机 codex 是「${v || "读不出版本"}」，codex-acp 2.0.0 配套的是 0.158.x：升 codex 要连适配器一起手动对齐（docs/runtimes/codex-acp.md）`);
-}
+/** 每次起适配器前记一次（含退避重起）：app-server 跑的是那一刻磁盘上的 codex，网页「重启生效」提示读这条记录 */
+const noteCodex = () => noteAcpCodexRunning({
+  agent: agentName,
+  codexPath: agent.stub ? undefined : codexPath,
+  probe: (bin) => spawnSync(bin, ["--version"], { encoding: "utf8", timeout: 20_000 }).stdout ?? "",
+  log,
+});
 
 const host = new AcpHost(
   {
@@ -67,7 +68,7 @@ const host = new AcpHost(
     },
   },
   {
-    spawn: (cmd, env, cwd) => spawnAdapter(cmd, env, cwd, log),
+    spawn: (cmd, env, cwd) => (noteCodex(), spawnAdapter(cmd, env, cwd, log)),
     makeLink: (deps) => new BridgeLink({ ...deps, url: bridgeUrl }),
     startProxy: (deps) => startToolProxy(deps),
     postHook: async (body) => {

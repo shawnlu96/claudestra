@@ -14,6 +14,9 @@ export const UPDATE_DICT: Record<string, string> = {
   "Pi 可更新": "Pi update available",
   "Codex 可更新": "Codex update available",
   "（不是 npm 全局安装，请用原来的方式更新）": " (not a global npm install — update it the way you installed it)",
+  "（ACP 适配器只配套": " (the ACP adapter only pairs with",
+  "，等适配器升级后再更新）": "; wait for an adapter upgrade before updating)",
+  "，重启前先对齐版本）": "; align the versions before restarting)",
   "重启后生效新版本": "Restart to run the new version",
   "这个版本不再提示": "Don't remind me about this version",
 };
