@@ -334,6 +334,7 @@ async function checkBetaUpdates(autoOn: boolean) {
     }).catch(() => {});
     return;
   }
+  if (!(await import("./lib/scheduler-update-gate.js")).schedulerQueueIdle()) return;
   const busyNow = await busyAgentWindows(MASTER_WINDOW);
   if (busyNow.length) {
     console.log(`🧪 beta 有新 commit(${remote.slice(0, 7)}),在忙: ${busyNow.join(", ")},下次再试`);
@@ -365,6 +366,7 @@ async function checkBetaUpdates(autoOn: boolean) {
   console.log(`🧪 beta 自动前进尝试 ${head.slice(0, 7)} → ${remote.slice(0, 7)}(成败见 ${BETA_UPDATE_LOG})`);
   const stamp = `\n[${new Date().toISOString()}] 🧪 beta ${head.slice(0, 7)} → ${remote.slice(0, 7)}\n`;
   await import("fs/promises").then((m) => m.appendFile(BETA_UPDATE_LOG, stamp)).catch(() => {});
+  if (!(await import("./lib/scheduler-update-gate.js")).schedulerQueueIdle()) return;
   Bun.spawn(["bash", "-c", `exec "${BUN}" run "${REPO_ROOT}/src/manager.ts" update >> "${BETA_UPDATE_LOG}" 2>&1`], {
     cwd: REPO_ROOT, stdin: "ignore", stdout: "ignore", stderr: "ignore",
     // @ts-ignore Bun 支持 detached
@@ -374,7 +376,6 @@ async function checkBetaUpdates(autoOn: boolean) {
 
 async function checkForUpdates() {
   if (!CONTROL_CHANNEL_ID) return;
-
   // v2.17 通道分流:beta 跟 commit,release 跟正式版
   {
     const cfgChan = await readConfig();
@@ -429,7 +430,7 @@ async function checkForUpdates() {
     return;
   }
 
-  // 自动更新开启 → 等所有 agent 空闲再更新
+  if (!(await import("./lib/scheduler-update-gate.js")).schedulerQueueIdle()) return;
   const busyNow = await busyAgentWindows(MASTER_WINDOW);
   if (busyNow.length) {
     console.log(`🆙 Claudestra ${release.tag} 有新版本，但在忙: ${busyNow.join(", ")}，下次再试`);
@@ -474,10 +475,9 @@ async function checkForUpdates() {
     });
   } catch { /* non-critical */ }
 
-  // 关键：manager.ts update 会 reload launcher 自己，用 detached 让子进程脱离 launcher 生命周期；
-  // 输出追加到日志文件，bail 时有迹可查
   const stamp = `\n[${new Date().toISOString()}] 🆙 release v${local} → ${release.tag}\n`;
   await import("fs/promises").then((m) => m.appendFile(RELEASE_UPDATE_LOG, stamp)).catch(() => {});
+  if (!(await import("./lib/scheduler-update-gate.js")).schedulerQueueIdle()) return;
   Bun.spawn(["bash", "-c", `exec "${BUN}" run "${REPO_ROOT}/src/manager.ts" update >> "${RELEASE_UPDATE_LOG}" 2>&1`], {
     cwd: REPO_ROOT, stdin: "ignore", stdout: "ignore", stderr: "ignore",
     // @ts-ignore Bun 支持 detached
