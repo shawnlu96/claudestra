@@ -2669,6 +2669,7 @@ switch (cmd) {
 
   case "cost": await cmdCost(args); break;
   case "quota-wall": await (await import("./manager/quota-wall.js")).cmdQuotaWall(args); break; // 额度闸 status|clear（T24）
+  case "ai-inventory": await (await import("./manager/ai-inventory.js")).cmdAiInventory(args); break; // 本机 AI 能力清单（只读，T91）
   case "codex-sub-archive": await (await import("./manager/codex-sub-archive.js")).cmdCodexSubArchive(args); break; // Codex 子线程自动归档开关（缺省关）
 
   case "invite-link": await cmdInviteLink(args); break;
