@@ -185,11 +185,11 @@ export async function tmuxSendLine(target: string, text: string, delayMs = 100, 
     console.log(`⌨️ ${target} 卡在 copy-mode,已 cancel 后注入`);
   }
   const inputLog = escFile(await tmuxSendEscape.keyOf(target), "input"); // 要等的（查窗口 id）先等完：最后一次菜单检查和发字之间不能再有等待（T63）
-  await assertKeysAllowed(target, (t) => tmuxCapture(t, 30)); // Codex 停在选择菜单：一个键都不发（lib/codex-key-guard.ts）
+  await assertKeysAllowed(target, (t) => tmuxCapture(t, 30)); // Codex 选择菜单 / 切换确认框：一个键都不发（lib/codex-key-guard.ts）
   recordProgramInput(inputLog, text);
   await (strict ? tmuxRawStrict : tmuxRaw)(["send-keys", "-t", target, "-l", "--", text]);
   await Bun.sleep(delayMs);
-  await assertKeysAllowed(target, (t) => tmuxCapture(t, 30)); // 等的这 100ms 里菜单弹出来了：字留在框里，回车不按
+  await assertKeysAllowed(target, (t) => tmuxCapture(t, 30)); // 等的这 100ms 里菜单 / 框弹出来了：字留在框里，回车不按
   await tmuxRaw(["send-keys", "-t", target, "Enter"]);
 }
 
@@ -1001,6 +1001,9 @@ export type SwitchOutcome =
   /** 轮询窗内没看到落地（框可能仍挂着：看 pane） */
   | "timeout";
 
+/** foreign 的 reason：框在注入前就停着，这次没注入 */
+export const SWITCH_LEFTOVER = "leftover";
+
 export interface SwitchResult {
   outcome: SwitchOutcome;
   /** 返回前最后一次 capture（按过键之后会重新 capture，不会是按键前的旧屏） */
@@ -1039,12 +1042,21 @@ async function pressSwitchConfirm(target: string, p: SwitchConfirmPrompt, io: Sw
  * claude-settings 端点、网页斜杠的 /model X、/effort X（bridge/api-slash.ts）与 manager 的 enforceSessionModel 共用；返回 applied/confirmed 时
  * TUI 已回到输入框，调用方可以放心接着注入下一条命令。沙箱里拒绝：CC 会把它存成 ~/.claude/settings.json 的全局默认。
  */
-export async function runSwitchCommand(
-  target: string,
-  kind: SwitchConfirmKind,
-  arg: string,
-  opts: { sendDelayMs?: number; ticks?: number; intervalMs?: number; captureLines?: number; io?: SwitchIO } = {},
-): Promise<SwitchResult> {
+type SwitchOpts = { sendDelayMs?: number; ticks?: number; intervalMs?: number; captureLines?: number; io?: SwitchIO };
+/** 同一窗口的切换串行（本进程内）：两条同时跑，后一条的注入 / 回车会落在前一条的框上。跨进程（manager）不在这把锁里 */
+const switchChains = new Map<string, Promise<unknown>>();
+
+export function runSwitchCommand(target: string, kind: SwitchConfirmKind, arg: string, opts: SwitchOpts = {}): Promise<SwitchResult> {
+  const run = (switchChains.get(target) ?? Promise.resolve())
+    .catch(() => undefined) // 前一条的失败已交给它自己的调用方，这里只排队
+    .then(() => runSwitchCommandOnce(target, kind, arg, opts));
+  switchChains.set(target, run);
+  const done = () => { if (switchChains.get(target) === run) switchChains.delete(target); };
+  run.then(done, done);
+  return run;
+}
+
+async function runSwitchCommandOnce(target: string, kind: SwitchConfirmKind, arg: string, opts: SwitchOpts): Promise<SwitchResult> {
   const { sendDelayMs = 100, ticks = 10, intervalMs = 700, captureLines = 120, io = tmuxSwitchIO } = opts;
   const off = sandboxDisabled(`/${kind} 切换`); if (off) return { outcome: "rejected", pane: "", reason: off };
   const capture = () => io.capture(target, captureLines).catch(() => "");
@@ -1075,7 +1087,7 @@ export async function runSwitchCommand(
   };
   // 注入前就停着一张框：那张不是这条命令引出的，打进去的字还会被它吞掉——不注入，留给 owner
   const stale = detectSwitchConfirmPrompt(before);
-  if (stale) return { outcome: "foreign", pane: before, prompt: stale, pressed: false };
+  if (stale) return { outcome: "foreign", pane: before, prompt: stale, pressed: false, reason: SWITCH_LEFTOVER };
   await io.sendLine(target, `/${kind} ${arg}`, sendDelayMs);
   let pressed = false;
   let pane = "";

@@ -14,7 +14,8 @@ import type { Principal } from "../src/lib/principals.js";
 import { commandLine, commandStdoutLine } from "../src/lib/inbound-body.js";
 import { readSessionHistory } from "../src/lib/session-history.js";
 import { noteAcpChannel } from "../src/bridge/acp-state.js";
-import { detectSwitchConfirmPrompt, type SwitchResult } from "../src/lib/tmux-helper.js";
+import { detectSwitchConfirmPrompt, SWITCH_LEFTOVER, type SwitchResult } from "../src/lib/tmux-helper.js";
+import { assertKeysAllowed } from "../src/lib/codex-key-guard.js";
 
 const base = { createdAt: "2026-01-01T00:00:00Z" };
 const OWNER: Principal = { ...base, id: "owner:self", role: "owner", name: "owner", agents: ["*", "master"], credential: "dev_o1" };
@@ -241,6 +242,30 @@ describe("owner 的 /model X、/effort X 走同步注入确认（T41c r2），�
     const late = await call(OWNER, "/model sonnet-5", harness(null, { outcome: "timeout", pressed: false }).deps);
     expect(late?.status).toBe(202);
     expect((await body(late)).warning).toContain("终端");
+  });
+
+  test("409 文案分开：框本来就停着（没注入）/ 认不出版本核对不了 / 目标确实不同（T41c r3 P2-8）", async () => {
+    const box = detectSwitchConfirmPrompt(fx("switch-model"))!;
+    const cases: [string, Partial<SwitchResult>, string][] = [
+      ["/model sonnet-5", { outcome: "foreign", prompt: box, pressed: false, reason: SWITCH_LEFTOVER }, "没有注入"],
+      ["/model my-proxy-model", { outcome: "foreign", prompt: box, pressed: false }, "认不出"],
+      ["/model opus-5-5", { outcome: "foreign", prompt: box, pressed: false }, "目标不同"],
+    ];
+    for (const [text, sw, want] of cases) {
+      const r = await call(OWNER, text, harness(null, sw).deps);
+      expect([text, r?.status, (await body(r)).error?.includes(want)]).toEqual([text, 409, true]);
+    }
+  });
+
+  test("r3 P1-1：窗口停在切换框上，非切换命令 / 不带参数的 /model 也不注入（tmuxSendLine 的闸抛 KeysBlockedError → 409）", async () => {
+    const h = harness();
+    const sent: string[] = [];
+    const deps: SlashDeps = { ...h.deps, sendLine: async (w, t) => { await assertKeysAllowed(w, async () => fx("switch-model")); sent.push(t); } };
+    for (const text of ["/compact", "/model", "/clear"]) {
+      const r = await call(OWNER, text, deps);
+      expect([text, r?.status, (await body(r)).error?.includes("确认框")]).toEqual([text, 409, true]);
+    }
+    expect(sent).toEqual([]);
   });
 
   test("window 0 此刻不是大总管 → 409，一个键都不发", async () => {

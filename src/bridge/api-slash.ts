@@ -8,7 +8,8 @@
 import { isOwnerPrincipal, type Principal } from "../lib/principals.js";
 import { runtimeCommandsFor } from "../lib/runtime-commands.js";
 import { resolveModelAlias } from "../lib/claude-launch.js";
-import { MASTER_SESSION, windowTarget, type SwitchConfirmKind, type SwitchResult } from "../lib/tmux-helper.js";
+import { MASTER_SESSION, SWITCH_LEFTOVER, windowTarget, type SwitchConfirmKind, type SwitchResult } from "../lib/tmux-helper.js";
+import { modelTargetKey } from "../lib/switch-target.js";
 import { MASTER_WINDOW_MISMATCH } from "../lib/master-modal.js";
 import { canSeeQuota } from "../lib/devices.js";
 import { wallWaitRefusal, windowWallWait, type WallWait } from "../lib/wall-screen.js";
@@ -68,11 +69,21 @@ async function acpSlashPassthrough(agent: SlashAgent, cmd: string, ccText: strin
 
 const SWITCH_TITLE = { model: "Switch model?", effort: "Change effort level?" } as const;
 
+/** 框没按的原因：本来就停着 / 认不出版本核对不了（自定义 id 等）/ 目标确实不同 */
+export function foreignReason(kind: SwitchConfirmKind, arg: string, r: SwitchResult & { prompt: NonNullable<SwitchResult["prompt"]> }): string {
+  if (r.reason === SWITCH_LEFTOVER) return "这条命令没有注入（框在注入前就停着）";
+  if (kind === "model" && r.prompt.kind === "model" && (!modelTargetKey(arg) || !modelTargetKey(r.prompt.target))) {
+    return `认不出「${arg}」和框里目标的版本，核对不了，没有代按`;
+  }
+  return "和这条命令的目标不同，没有代按";
+}
+
 /** runSwitchCommand 的结局 → 409 文案（null = 注入成功，warning 另给）。不按的框留给 owner：watcher 会通知 */
-function switchOutcome(kind: SwitchConfirmKind, r: SwitchResult): { error?: string; warning?: string } {
+function switchOutcome(kind: SwitchConfirmKind, arg: string, r: SwitchResult): { error?: string; warning?: string } {
   if (r.outcome === "rejected") return { error: `CC 拒绝了这次切换：${r.reason ?? "原因见终端"}` };
   if (r.outcome === "foreign" && r.prompt) {
-    return { error: `会话停在「${SWITCH_TITLE[r.prompt.kind]}」确认框上（切到 ${r.prompt.target}），和这条命令对不上，没有代按；请到终端或网页终端里自己按` };
+    const why = foreignReason(kind, arg, { ...r, prompt: r.prompt });
+    return { error: `会话停在「${SWITCH_TITLE[r.prompt.kind]}」确认框上（切到 ${r.prompt.target}），${why}；请到终端或网页终端里自己按` };
   }
   if (r.outcome === "timeout") {
     return { warning: r.prompt ? `按过一次确认，「${SWITCH_TITLE[kind]}」框还在，请到终端或网页终端里看一眼` : `没等到 /${kind} 落地；如果弹了确认框，请到终端或网页终端里自己按` };
@@ -118,7 +129,8 @@ export async function handleSlashPassthrough(r: SlashRequest, deps: SlashDeps): 
   let warning: string | undefined;
   try {
     if (switchKind) {
-      const out = switchOutcome(switchKind, await deps.switchCommand(win, switchKind, switchKind === "model" ? resolveModelAlias(args) : args));
+      const arg = switchKind === "model" ? resolveModelAlias(args) : args;
+      const out = switchOutcome(switchKind, arg, await deps.switchCommand(win, switchKind, arg));
       if (out.error) return apiJson(409, { ok: false, error: out.error });
       warning = out.warning;
     } else await deps.sendLine(win, resolved.ccText);

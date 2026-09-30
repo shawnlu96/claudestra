@@ -74,7 +74,7 @@ import { clearRefusal, runtimeOfWindow } from "../lib/wall-screen.js";
 import { paneLooksWorking } from "../lib/turn-state.js";
 import { recordMetric } from "../lib/metrics.js";
 import { commandsForAgent } from "./slash-registry.js";
-import { handleSlashPassthrough, type SlashDeps } from "./api-slash.js";
+import { foreignReason, handleSlashPassthrough, type SlashDeps } from "./api-slash.js";
 import { isConfiguredAcpChannel } from "./acp-state.js";
 import { runtimeCommandsFor } from "../lib/runtime-commands.js";
 import { sessionTailInfo, type SessionTailInfo } from "../lib/session-tail.js";
@@ -1384,7 +1384,7 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
         }
         const stuck = detectSwitchConfirmPrompt(r.pane);
         if (r.outcome === "foreign" && stuck) {
-          return `会话停在「${promptTitle(stuck.kind)}」确认框上(切到 ${stuck.target}),与本次选择不符,请到终端或网页终端里自己按`;
+          return `会话停在「${promptTitle(stuck.kind)}」确认框上(切到 ${stuck.target}),${foreignReason(kind, kind === "model" ? model! : effort!, { ...r, prompt: stuck })},请到终端或网页终端里自己按`;
         }
         if (stuck) return `切${label}的确认框没能自动确认,请到终端或网页终端里自己按`;
         return null;

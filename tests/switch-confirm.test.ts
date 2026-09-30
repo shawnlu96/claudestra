@@ -355,6 +355,20 @@ describe("runSwitchCommand（假 pane 序列）", () => {
     expect(sent).toEqual(["line:/model claude-sonnet-5", "key:Enter"]);
   });
 
+  test("T41c r3 P2-3：同一窗口两条切换同时发起 → 串行，后一条等前一条返回才注入", async () => {
+    const events: string[] = [];
+    const io: SwitchIO = {
+      capture: async () => IDLE,
+      sendLine: async (_t, text) => void events.push(`line:${text}`),
+      sendKey: async (_t, k) => void events.push(`key:${k}`),
+      sleep: () => new Promise((r) => setTimeout(r, 1)),
+    };
+    const a = runSwitchCommand("w-lock", "model", "claude-sonnet-5", { io, ticks: 3 }).then((r) => events.push(`done:${r.outcome}`));
+    const b = runSwitchCommand("w-lock", "effort", "high", { io, ticks: 3 }).then((r) => events.push(`done:${r.outcome}`));
+    await Promise.all([a, b]);
+    expect(events).toEqual(["line:/model claude-sonnet-5", "done:timeout", "line:/effort high", "done:timeout"]);
+  });
+
   test("最后一拍才按到框：重看一眼，不拿按键前的旧屏报 timeout", async () => {
     const { io } = fakeIO(IDLE, [SWITCH_MODEL, SETTLED]);
     const r = await runSwitchCommand("w", "model", "claude-sonnet-5", { io, ticks: 1 });
