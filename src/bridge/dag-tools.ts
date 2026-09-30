@@ -6,11 +6,10 @@
  */
 import type { Database } from "bun:sqlite";
 import { createHash, randomBytes } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
-import { dirname } from "node:path";
+import { existsSync, readFileSync, symlinkSync, unlinkSync } from "node:fs";
 import { featureLanes } from "../lib/dag-tools-lanes.js";
 import { composeRewrite, parseRewriteOps, parseToolNodes, planOverExisting, type NodeInput } from "../lib/dag-tools-plan.js";
-import { preflightStart, type StartArgs, type StartEnv } from "../lib/dag-tools-start.js";
+import { preflightStart, startClaims, type StartArgs, type StartEnv } from "../lib/dag-tools-start.js";
 import { runStart, type StepIO } from "../lib/dag-tools-steps.js";
 import { isManager } from "../lib/ledger-checks.js";
 import { nodePhase } from "../lib/ledger-dag-rules.js";
@@ -26,6 +25,7 @@ import { readRegistryAgentsSync } from "../lib/registry.js";
 import { runBounded } from "../lib/run-bounded.js";
 import { runManagerProcess } from "../lib/run-manager.js";
 import { readSchedulerConfig } from "../lib/scheduler-config.js";
+import { writeTextAtomicSync } from "../lib/state-file.js";
 import { BUN_PATH, ENV_WITH_BUN, MANAGER_PATH } from "./config.js";
 import { ledgerDb } from "./ledger-feed.js";
 
@@ -165,8 +165,19 @@ async function rewriteDag(deps: DagToolDeps, call: VerifiedCall, args: unknown):
   return rewrite(deps, call, f, next.value, kind, reason, ops.value.cancel, a.scopeChange === true);
 }
 
-/** 同一个节点同一时刻只许一次开工：两次并发都过了预检，后失败的那次回滚会动到先成功那次的卡 / agent */
-const starting = new Set<string>();
+/**
+ * 进程内占用表：节点在预检前占（同一节点不并发开工），卡号 / agent / 分支 / 路径在预检后一次占齐（lib/dag-tools-start.ts startClaims）。
+ * 只按节点锁不够：不同节点可以给出只差大小写的卡号，派生到同一个 worktree，后失败的那次回滚会删掉先成功那次建的。
+ */
+const claimed = new Set<string>();
+
+/** 全部空闲才一起占上，返回 null；有被占的返回它 */
+function claim(keys: string[]): string | null {
+  const hit = keys.find((k) => claimed.has(k));
+  if (hit) return hit;
+  for (const k of keys) claimed.add(k);
+  return null;
+}
 
 const START_OPTIONAL = ["base", "branch", "taskId", "title", "item", "repo"] as const;
 
@@ -176,9 +187,8 @@ async function startNode(deps: DagToolDeps, call: VerifiedCall, args: unknown): 
   const { db, f, a } = o;
   const key = str(a.key);
   if (!key) return refuse("invalid", "缺节点 key");
-  const lock = `${f.id}:${key}`;
-  if (starting.has(lock)) return refuse("busy", `节点 ${key} 正在开工，等这次的结果`);
-  starting.add(lock);
+  const held = [`node:${f.id}:${key}`];
+  if (claim(held)) return refuse("busy", `节点 ${key} 正在开工，等这次的结果`);
   try {
     const input: StartArgs = { featureId: f.id, key };
     for (const k of START_OPTIONAL) if (str(a[k])) input[k] = str(a[k]);
@@ -186,12 +196,16 @@ async function startNode(deps: DagToolDeps, call: VerifiedCall, args: unknown): 
     const pre = await preflightStart({ ...deps.startEnv(), db, caller: call.agent }, input);
     if (!pre.ok) return refuse(pre.code, pre.error);
     if ("already" in pre) return { ok: true, duplicate: true, ...pre.already, next: "这个节点已经开工过了（已绑卡），没有再建" };
+    const res = startClaims(pre.plan);
+    const busy = claim(res);
+    if (busy) return refuse("busy", `${busy} 正被另一次 start_node 占用：等它结束，或换 taskId / branch`);
+    held.push(...res);
     const io: StepIO = { ...deps.stepIO(), db: () => deps.db() ?? db, manager: (args, timeoutMs) => deps.manager(args, call.channelId, timeoutMs), attempt: randomBytes(4).toString("hex") };
     const out = await runStart(io, pre.plan);
     if (!out.ok) return out as unknown as OrderToolResult;
     return { ...out, next: `调度器会给 ${out.agent} 派复述单；不用给它发消息` };
   } finally {
-    starting.delete(lock);
+    for (const k of held) claimed.delete(k);
   }
 }
 
@@ -238,7 +252,7 @@ function liveDeps(): DagToolDeps {
     }),
     stepIO: () => ({
       git, exists: existsSync, read: (p) => (existsSync(p) ? readFileSync(p, "utf8") : null),
-      write: (p, text) => (mkdirSync(dirname(p), { recursive: true }), writeFileSync(p, text)), remove: (p) => existsSync(p) && unlinkSync(p),
+      write: (p, text) => writeTextAtomicSync(p, text), remove: (p) => existsSync(p) && unlinkSync(p),
       symlink: (target, p) => symlinkSync(target, p), agentExists: (agent) => agents().some((x) => x.name === agent),
     }),
   };

@@ -49,10 +49,20 @@ the brief) → `task-set --agent` → `workflow-set --mode auto` (code template 
 Binding is last on purpose: bindings are append-only and a cancelled card counts as a *done* node, which would freeze the node.
 
 Any failure undoes what was done in reverse — workflow back to manual, `manager kill`, brief restored, worktree and branch removed, card
-moved to `cancelled` — and returns `{failedStep, rolledBack, leftovers}`. A failed step that may be half-done (worktree, create) is undone
-too; atomic ledger writes are not (undoing them could touch a concurrently created card). A card id cannot be reused after rollback: retry
-with `taskId`. Dedup keys carry a per-call random attempt so a retry after rollback is not replayed as the earlier success. Concurrent
-`start_node` on the same node is refused in-process.
+moved to `cancelled` — and returns `{failedStep, rolledBack, leftovers}`. Three rules keep that honest:
+
+- **A failed result is not proof nothing was written.** manager can commit and then be killed by the timeout (or its stdout can fail to
+  parse). After a failed ledger step the tool looks the step up by its dedup key (`task-new`, `task-set`, `dag-bind`) or by the resulting
+  state (`workflow-set` has no dedup); if it landed, the step counts as done and the call carries on (`reconciled` in the result).
+- **Undo only what this call created.** Each step re-checks right before acting that its worktree / branch / agent / spec file is absent;
+  if something appeared after preflight it fails without claiming it. The card is cancelled only if this call's `task-new` event exists.
+  The failed step's own undo also runs, since worktree add, create and file writes can stop half-way; files are written atomically.
+- **Concurrent calls claim resources, not just nodes.** The bridge holds an in-process claim on the node before preflight and on the
+  card id, agent, branch, worktree and file paths (all lower-cased — macOS paths and git refs ignore case) after it; a second call that
+  passed preflight at the same time is refused `busy`. Preflight also refuses a card id that differs from an existing one only by case.
+
+A card id cannot be reused after rollback: retry with `taskId`. Dedup keys carry a per-call random attempt so a retry after rollback is
+not replayed as the earlier success.
 
 The executor brief (`src/lib/dag-tools-prompt.ts`) is generic; a project can replace the body with `ledger/prompts/exec-template.md`
 (`{TASK} {TITLE} {PM} {BRANCH} {BASE} {WORKTREE} {SPEC} {LEDGER}`). The auto-card section (take orders from the scheduler, never message the

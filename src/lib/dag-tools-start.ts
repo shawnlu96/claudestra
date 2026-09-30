@@ -112,7 +112,9 @@ export async function preflightStart(env: StartEnv, args: StartArgs): Promise<Pr
   if (!node.fileGlobs?.length) return no("no_globs", `节点 ${node.key} 没有 fileGlobs：先用 rewrite_dag 的 update 补上文件范围`);
   const taskId = args.taskId ?? `${featureSlug(f, storedOrigin(env.db))}-${node.key}`;
   if (!TASK_ID.test(taskId)) return no("invalid", `卡号 ${taskId} 不合法（字母数字开头，≤ 60 位，只含字母数字 _ . -）`);
-  if (getTask(env.db, taskId)) return no("conflict", `卡号 ${taskId} 已被占用：换一个 taskId`);
+  // 大小写不同的卡号也算占用：worktree / agent / 分支由小写卡号派生，Case-A 与 case-a 会落到同一个目录
+  const taken = getTask(env.db, taskId) ?? (env.db.query("SELECT id FROM tasks WHERE id = ? COLLATE NOCASE").get(taskId) as { id: string } | null);
+  if (taken) return no("conflict", `卡号 ${taken.id} 已被占用：换一个 taskId`);
   const low = taskId.toLowerCase();
   const agentName = agentNameFor(taskId);
   if (env.agentNames().includes(`agent-${agentName}`)) return no("conflict", `agent agent-${agentName} 已存在`);
@@ -144,4 +146,12 @@ export async function preflightStart(env: StartEnv, args: StartArgs): Promise<Pr
       purpose: `${taskId} 执行者（自动卡）：${title}。先读 ${promptPath}`,
     },
   };
+}
+
+/**
+ * 本次开工要独占的资源，规范成小写（macOS 文件系统与 git 引用不分大小写）。bridge 在预检之后、动手之前一次占齐：
+ * 两次并发都过了预检，只有先占到的那次动手，后者直接拒——不然后者失败回滚时会删掉前者刚建的 worktree / agent。
+ */
+export function startClaims(p: StartPlan): string[] {
+  return [`task:${p.taskId}`, `agent:${p.agent}`, `branch:${p.repo}:${p.branch}`, `path:${p.worktree}`, `path:${p.specPath}`, `path:${p.promptPath}`].map((k) => k.toLowerCase());
 }

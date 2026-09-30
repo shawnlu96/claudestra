@@ -29,6 +29,12 @@ let branches: Set<string>;
 let calls: string[][];
 /** 返回 true 的 manager / git 调用被注入成失败 */
 let failOn: (args: string[]) => boolean;
+/** 返回 true 的 manager 调用照常执行（已提交），但结果丢了、返回失败（超时强杀 / stdout 解析失败） */
+let lose: (args: string[]) => boolean;
+/** git 调用前的钩子：返回结果就顶替真实行为（模拟预检之后才冒出来的资源、git 的拒绝） */
+let gitHook: (args: string[]) => { ok: boolean; out: string } | void;
+/** 写这个路径时先写进去、再抛 IO 错（写到一半） */
+let throwAfterWrite: (path: string) => boolean;
 let autoDispatch: boolean;
 
 const ledgerRun = async (args: string[], channelId: string) => {
@@ -40,22 +46,27 @@ const ledgerRun = async (args: string[], channelId: string) => {
   });
 };
 
+async function managerRun(args: string[], channelId: string): Promise<any> {
+  if (args[0] === "ledger") return ledgerRun(args, channelId);
+  if (args[0] === "create") {
+    agents[`agent-${args[1]}`] = { channelId: `ch-${args[1]}`, projectId: P };
+    return { ok: true, agent: `agent-${args[1]}` };
+  }
+  if (args[0] === "kill") {
+    delete agents[args[1]];
+    return { ok: true };
+  }
+  return { ok: false, error: "未知命令" };
+}
+
 function deps(): DagToolDeps {
   return {
     db: () => db,
     manager: async (args, channelId) => {
       calls.push(args);
       if (failOn(args)) return { ok: false, error: `注入失败：${args[0]} ${args[1]}` };
-      if (args[0] === "ledger") return ledgerRun(args, channelId);
-      if (args[0] === "create") {
-        agents[`agent-${args[1]}`] = { channelId: `ch-${args[1]}`, projectId: P };
-        return { ok: true, agent: `agent-${args[1]}` };
-      }
-      if (args[0] === "kill") {
-        delete agents[args[1]];
-        return { ok: true };
-      }
-      return { ok: false, error: "未知命令" };
+      const r = await managerRun(args, channelId);
+      return lose(args) ? { ok: false, error: `注入：${args[0]} ${args[1]} 已提交，结果丢了` } : r;
     },
     callerProject: (a) => agents[a]?.projectId ?? null,
     startEnv: () => ({
@@ -66,6 +77,8 @@ function deps(): DagToolDeps {
       git: async (_cwd, args) => {
         calls.push(["git", ...args]);
         if (failOn(["git", ...args])) return { ok: false, out: "注入失败" };
+        const hooked = gitHook(args);
+        if (hooked) return hooked;
         if (args[0] === "worktree" && args[1] === "add") {
           mkdirSync(args[4], { recursive: true });
           branches.add(args[3]);
@@ -75,7 +88,12 @@ function deps(): DagToolDeps {
         return { ok: true, out: "" };
       },
       exists: existsSync, read: (p) => (existsSync(p) ? readFileSync(p, "utf8") : null),
-      write: (p, t) => (mkdirSync(join(p, ".."), { recursive: true }), writeFileSync(p, t)), remove: (p) => rmSync(p, { force: true }),
+      write: (p, t) => {
+        mkdirSync(join(p, ".."), { recursive: true });
+        writeFileSync(p, t);
+        if (throwAfterWrite(p)) throw new Error(`注入：写 ${p} 后 IO 错`);
+      },
+      remove: (p) => rmSync(p, { force: true }),
       symlink: (t, p) => writeFileSync(p, `-> ${t}`), agentExists: (a) => !!agents[a],
     }),
   };
@@ -97,6 +115,9 @@ beforeEach(() => {
   now = 1_000;
   calls = [];
   failOn = () => false;
+  lose = () => false;
+  gitHook = () => {};
+  throwAfterWrite = () => false;
   autoDispatch = true;
   branches = new Set(["main"]);
   dir = mkdtempSync(join(tmpdir(), "i28-l5-"));
@@ -256,5 +277,130 @@ describe("P1：rewrite_dag 删进行中的节点必须带原因", () => {
     const r = await call(PM, "plan_feature", { ...again, nodes: [node("a", ["src/lib/a*.ts"]), node("b", ["src/bridge/b.ts"]), node("c", ["c.ts"], { deps: ["a"] })] });
     expect(r).toMatchObject({ ok: true, applied: true, lanes: { waiting: [{ key: "c", why: "deps", on: ["a"] }] } });
     expect(getTask(db, "i28-a")?.featureId).toBe("ab12-i28");
+  });
+});
+
+describe("r1：提交了但结果丢了，按本次 dedup 查库接着走", () => {
+  for (const sub of ["task-new", "task-set", "workflow-set", "dag-bind"]) {
+    test(`${sub} 已提交、结果丢了：开工照常完成，只有一张卡，节点绑的是活卡`, async () => {
+      await plan();
+      spec("i28-a");
+      lose = (a) => a[0] === "ledger" && a[1] === sub;
+      const r = await start("a");
+      expect(r).toMatchObject({ ok: true, taskId: "i28-a", reconciled: [sub === "workflow-set" ? "workflow" : sub === "dag-bind" ? "bind" : sub] });
+      expect(getTask(db, "i28-a")).toMatchObject({ stage: "spec", agent: "agent-task-i28-a" });
+      expect(getWorkflow(db, "i28-a")?.mode).toBe("auto");
+      expect(calls.filter((c) => c[1] === "task-new")).toHaveLength(1);
+      const show = await call(PM, "show_dag", { featureId: "i28" });
+      expect(show.version.nodes.find((n: any) => n.key === "a")).toMatchObject({ taskId: "i28-a", status: "spec" });
+    });
+  }
+
+  test("没提交的失败照旧回滚；create 已建好但结果丢了：kill 掉，卡取消，不留半截", async () => {
+    await plan();
+    spec("i28-a");
+    lose = (a) => a[0] === "create";
+    expect(await start("a")).toMatchObject({ ok: false, failedStep: "agent", leftovers: [] });
+    expect(agents["agent-task-i28-a"]).toBeUndefined();
+    expect(getTask(db, "i28-a")?.stage).toBe("cancelled");
+    expect(existsSync(join(dir, "wt", "i28-a"))).toBe(false);
+  });
+
+  test("同名卡是别人建的（本次 task-new 没落库）：回滚不碰它", async () => {
+    await plan();
+    spec("i28-a");
+    const d = deps();
+    const manager = d.manager;
+    // 预检之后别人抢先建了同名卡，本次 task-new 被拒
+    d.manager = async (a, ch, t) => {
+      if (a[1] !== "task-new") return manager(a, ch, t);
+      expect((await ledgerRun(["ledger", "task-new", "i28-a", "--title=别人的", "--kind=code", `--pm=${PM.agent}`, `--project=${P}`], "ch-pm")).ok).toBe(true);
+      return { ok: false, code: "conflict", error: "卡号已存在" };
+    };
+    expect(await dagToolHandlers(d).start_node(PM, { featureId: "i28", key: "a" })).toMatchObject({ ok: false, failedStep: "task-new" });
+    expect(getTask(db, "i28-a")).toMatchObject({ title: "别人的", stage: "spec" });
+  });
+});
+
+describe("r1：只撤本次建的资源", () => {
+  test("不同节点给只差大小写的卡号并发开工：后到的被拒，不删先到那次的 worktree", async () => {
+    await plan();
+    const d = deps();
+    const env = d.startEnv;
+    let arrivals = 0;
+    let release!: () => void;
+    const barrier = new Promise<void>((r) => (release = r));
+    d.startEnv = () => ({ ...env(), branchExists: async () => (++arrivals === 2 && release(), await barrier, false) });
+    const h = dagToolHandlers(d);
+    const rs = await Promise.all([
+      h.start_node(PM, { featureId: "i28", key: "a", spec: "a", taskId: "Case-A", branch: "feat/one" }),
+      h.start_node(PM, { featureId: "i28", key: "b", spec: "b", taskId: "case-a", branch: "feat/two" }),
+    ]);
+    expect(rs.filter((r) => r.ok)).toHaveLength(1);
+    expect(rs.find((r) => !r.ok)).toMatchObject({ code: "busy" });
+    expect(existsSync(join(dir, "wt", "case-a"))).toBe(true);
+    // 先到那次做完后，只差大小写的卡号在预检就被拒
+    expect(await start("b", PM, { spec: "b", taskId: rs[0].ok ? "case-a" : "Case-A", branch: "feat/three" })).toMatchObject({ ok: false, code: "conflict" });
+  });
+
+  const appear: [string, string, () => void, () => void][] = [
+    ["worktree 目录", "worktree", () => mkdirSync(join(dir, "wt", "i28-a", "keep"), { recursive: true }), () => expect(existsSync(join(dir, "wt", "i28-a", "keep"))).toBe(true)],
+    ["分支", "worktree", () => branches.add("feat/i28-a"), () => expect(branches.has("feat/i28-a")).toBe(true)],
+    ["agent", "agent", () => (agents["agent-task-i28-a"] = { channelId: "ch-other", projectId: P }), () => expect(agents["agent-task-i28-a"]?.channelId).toBe("ch-other")],
+  ];
+  for (const [what, step, make, kept] of appear) {
+    test(`${what}在预检之后才出现：${step} 步报错，回滚不碰它`, async () => {
+      await plan();
+      spec("i28-a");
+      gitHook = (a) => void (a[0] === "fetch" && make());
+      expect(await start("a")).toMatchObject({ ok: false, failedStep: step, leftovers: [] });
+      kept();
+      expect(getTask(db, "i28-a")?.stage).toBe("cancelled");
+    });
+  }
+
+  test("worktree add 建了一半就失败：本次建的目录与分支照样撤", async () => {
+    await plan();
+    spec("i28-a");
+    gitHook = (a) => {
+      if (a[0] !== "worktree" || a[1] !== "add") return;
+      mkdirSync(a[4], { recursive: true });
+      branches.add(a[3]);
+      return { ok: false, out: "注入：checkout 中途失败" };
+    };
+    expect(await start("a")).toMatchObject({ ok: false, failedStep: "worktree", leftovers: [] });
+    expect(existsSync(join(dir, "wt", "i28-a"))).toBe(false);
+    expect(branches.has("feat/i28-a")).toBe(false);
+  });
+});
+
+describe("r1：文件写到一半", () => {
+  test("规格卡写进去后抛错：文件删掉，卡取消，不漏报", async () => {
+    await plan();
+    throwAfterWrite = (p) => p.endsWith("i28-a.md");
+    expect(await start("a", PM, { spec: "正文" })).toMatchObject({ ok: false, failedStep: "spec", leftovers: [] });
+    expect(existsSync(join(dir, "ledger", "docs", "tasks", "i28-a.md"))).toBe(false);
+    expect(getTask(db, "i28-a")?.stage).toBe("cancelled");
+  });
+
+  test("执行者说明覆盖旧文件后抛错：恢复原内容", async () => {
+    await plan();
+    spec("i28-a");
+    const prompt = join(dir, "ledger", "reviews", "i28-a-exec-prompt.md");
+    mkdirSync(join(prompt, ".."), { recursive: true });
+    writeFileSync(prompt, "旧说明");
+    let once = true;
+    throwAfterWrite = (p) => p === prompt && once && !(once = false);
+    expect(await start("a")).toMatchObject({ ok: false, failedStep: "prompt", leftovers: [] });
+    expect(readFileSync(prompt, "utf8")).toBe("旧说明");
+    expect(existsSync(join(dir, "wt", "i28-a"))).toBe(false);
+  });
+
+  test("规格卡在预检之后被别人写了：spec 步报错，不覆盖也不删", async () => {
+    await plan();
+    const specPath = join(dir, "ledger", "docs", "tasks", "i28-a.md");
+    lose = (a) => (a[1] === "task-new" && (mkdirSync(join(specPath, ".."), { recursive: true }), writeFileSync(specPath, "PM 写的")), false);
+    expect(await start("a", PM, { spec: "工具给的" })).toMatchObject({ ok: false, failedStep: "spec", leftovers: [] });
+    expect(readFileSync(specPath, "utf8")).toBe("PM 写的");
   });
 });
