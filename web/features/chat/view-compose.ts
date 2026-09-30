@@ -46,7 +46,7 @@ export function survivingPending(
   const norm = (x: string) => x.replace(/\r\n?/g, "\n").trim();
   return current.filter((m) => {
     if (!m.local || m.role !== "user") return false;
-    if (m.ts && !m.held && nowMs - Date.parse(m.ts) > PENDING_KEEP_MS) return false;
+    if (m.ts && !m.held && !m.queued && nowMs - Date.parse(m.ts) > PENDING_KEEP_MS) return false;
     const t = norm(m.content);
     // 带头版本也拿来比一次：本地只有正文、历史带注入头时，光比原文匹配不上
     const tBare = norm(stripInboundHeader(m.content));
@@ -129,11 +129,6 @@ export function isUserEcho(m: ChatMessage, text: string, attachments?: ChatMessa
   const raw = m.wire ?? m.content ?? "";
   if (t) return norm(raw) === t || norm(stripInboundHeader(raw)) === t;
   return !norm(raw) && sameAttachments(m.attachments, attachments);
-}
-
-/** 他端发言在视图尾部 15 条里的回声（chat-store addRemoteUserMessage 的对账去重）；没有 → undefined */
-export function findUserEcho(messages: readonly ChatMessage[], text: string, attachments?: ChatMessage["attachments"], from?: string): ChatMessage | undefined {
-  return messages.slice(-15).find((m) => isUserEcho(m, text, attachments, from));
 }
 
 /**
