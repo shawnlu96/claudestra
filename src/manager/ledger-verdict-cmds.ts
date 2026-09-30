@@ -1,6 +1,6 @@
 /**
  * `ledger submit-verdict`：M3 submit_verdict 工具写台账的那一头（bridge 经 lib/order-ledger-exit.ts 以调用方频道跑它）。
- * 判定全在 lib/review-verdict.ts，这里在写连接上重算一遍：先认 bridge 签的一次性票据（lib/verdict-ticket.ts，绑定 actor 与 wire），
+ * 判定全在 lib/review-verdict.ts，这里在写连接上重算一遍：先认 bridge 签的一次性票据（lib/verdict-ticket.ts，绑定 actor 与 wire；防误用，不是安全边界），
  * actor 由频道推出，--session / --family 必须等于 registry 里这个 agent 的当前值（bridge 从已验证身份填；对不上说明会话换过）。
  * 只记结论，不推阶段。tests/review-tools.test.ts。
  */

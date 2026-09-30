@@ -1,8 +1,9 @@
 /**
  * `ledger submit-verdict` 只收 bridge 签的一次性票据（T97）：bridge 过了身份门（requireVerified）才签，manager 读走即删。
- * 没有它，agent 自己的 Bash（继承了 DISCORD_CHANNEL_ID）照着 registry 填 --session / --family 就能绕过凭据记结论——未验证的结论进了台账。
- * 票据 = 一次性文件里的随机数（T85 的一次性文件：目录 0700、文件 0600，lib/caller-cred.ts）+ 绑定 actor 与整张 wire 的哈希：
- * 换人、改结论都对不上。防的是误用，不是同用户进程蓄意去读文件（与 T85 同一威胁模型）。tests/review-tools.test.ts。
+ * 只防误用：agent 照旧习惯在 Bash 里跑子命令（继承了 DISCORD_CHANNEL_ID，照 registry 填 --session / --family）会被拒。
+ * 票据 = 一次性文件里的随机数（T85 的一次性文件，lib/caller-cred.ts）+ 绑定 actor 与整张 wire 的哈希：换人、改结论、重放都对不上。
+ * 不是安全边界：同用户进程能照这个格式自造一张（manager 没有独立来源可比对，换 MAC / 回 bridge 核销也一样），也能直接写 sqlite；
+ * 与 T85 同一威胁模型。已知限制钉在 tests/review-tools.test.ts。
  */
 import { createHash } from "node:crypto";
 import { CALLER_CRED_FILE_ENV, newCredToken, takeCallerCred, writeOneShot } from "./caller-cred.js";

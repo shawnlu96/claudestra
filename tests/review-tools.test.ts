@@ -4,10 +4,12 @@
  */
 import type { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { createHash, randomBytes } from "node:crypto";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { reviewToolHandlers } from "../src/bridge/review-tools.js";
+import { writeOneShot } from "../src/lib/caller-cred.js";
 import { closeLedger, getTask, listEvents, openLedger } from "../src/lib/ledger-store.js";
 import { assignStep } from "../src/lib/ledger-steps-write.js";
 import { createTask, deliver, setMeta, setTask } from "../src/lib/ledger-write.js";
@@ -95,7 +97,7 @@ describe("审查员工具走完整管道", () => {
     expect(reviews()).toEqual([]);
   });
 
-  test("绕过工具在 shell 里直接跑 ledger submit-verdict（没有 / 重放 / 别人的票据）：拒，不记", async () => {
+  test("照旧习惯在 shell 里直接跑 ledger submit-verdict（没有票据 / 重放 / 别人的票据 / 挪到另一张 wire）：拒，不记", async () => {
     const w = JSON.stringify(wire());
     const direct = ["ledger", "submit-verdict", "T60:review:r1", `--wire=${w}`, "--session=sy", "--family=codex"];
     expect(await run(direct, "ch-y")).toMatchObject({ ok: false, code: "forbidden" });
@@ -104,6 +106,18 @@ describe("审查员工具走完整管道", () => {
     expect(await run(seen, "ch-y")).toMatchObject({ ok: false, code: "forbidden" }); // 票据文件已被第一次读走
     const forged = issueVerdictTicket("agent-x", w);
     expect(await run([...direct, `--ticket-file=${forged.file}`, `--ticket=${forged.proof}`], "ch-y")).toMatchObject({ ok: false, code: "forbidden" });
+    const other = issueVerdictTicket("agent-y", JSON.stringify(wire({ verdict: "block", p0: 1, p1: 0,
+      findings: [{ findingId: "F9", family: "gate", severity: "P0", probe: "复现", description: "说明" }] })));
+    expect(await run([...direct, `--ticket-file=${other.file}`, `--ticket=${other.proof}`], "ch-y")).toMatchObject({ ok: false, code: "forbidden" }); // 票据挪到另一张 wire
+    expect(reviews().length).toBe(1);
+  });
+
+  test("已知限制（不是安全边界）：同用户进程照格式自造票据能记上——manager 没有独立来源可比对，见 lib/verdict-ticket.ts", async () => {
+    const w = JSON.stringify(wire());
+    const token = randomBytes(32).toString("hex");
+    const proof = createHash("sha256").update(`${token}\nagent-y\n${w}`, "utf8").digest("hex");
+    const args = ["ledger", "submit-verdict", "T60:review:r1", `--wire=${w}`, "--session=sy", "--family=codex", `--ticket-file=${writeOneShot(token)}`, `--ticket=${proof}`];
+    expect(await run(args, "ch-y")).toMatchObject({ ok: true, duplicate: false });
     expect(reviews().length).toBe(1);
   });
 
