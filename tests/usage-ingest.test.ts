@@ -3,7 +3,7 @@
  * fixture 用 Claude Code 会话记录的真实形状（一次响应拆成多行、channel 消息 isMeta、忙时的 queued_command 附件）。
  */
 import { describe, test, expect } from "bun:test";
-import { appendFileSync, copyFileSync, mkdirSync, mkdtempSync, utimesSync, writeFileSync } from "fs";
+import { appendFileSync, copyFileSync, mkdirSync, mkdtempSync, renameSync, utimesSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { rollupJsonl } from "../src/lib/jsonl-cost.js";
@@ -243,5 +243,123 @@ describe("导入锁", () => {
     const rest = f.run();
     expect(rest.read).toBe(1);
     expect(usageSummary(f.db).reduce((s, r) => s + r.output, 0)).toBe(30);
+  });
+});
+
+// ── 第 1 轮审查（T83-r1）的回归：每条对应一个 P1 / P2，改之前都是红的 ──
+
+describe("r1 回归：切轮", () => {
+  test("P1-1 没有 origin 的老格式 channel 消息（只有 isMeta）也各开一轮", () => {
+    const f = fx();
+    const old = (text: string, at: number, id: string) => {
+      const { origin: _o, ...r } = chan(text, at, id);
+      return r;
+    };
+    f.write(f.main, [old("第一条", T, "m1"), ...resp("1", T + 1, 1000, 10), old("第二条", T + 2000, "m2"), ...resp("2", T + 2001, 1000, 20)]);
+    f.run();
+    expect(turnsFor(f.db, "agent-a").map((t) => [t.kind, t.trigger, t.calls])).toEqual([["channel", "第一条", 1], ["channel", "第二条", 1]]);
+  });
+
+  test("P1-2 同一张卡片上的两次选择共用 message_id，正文不同：两轮", () => {
+    const f = fx();
+    f.write(f.main, [chan("[select:menu:one]", T, "card1"), ...resp("1", T + 1, 1000, 10), chan("[select:menu:two]", T + 2000, "card1"), ...resp("2", T + 2001, 1000, 20)]);
+    f.run();
+    expect(turnsFor(f.db, "agent-a").map((t) => [t.trigger, t.calls])).toEqual([["[select:menu:one]", 1], ["[select:menu:two]", 1]]);
+  });
+
+  test("P1-2 两条输入连条目 uuid 都撞了，正文不同照样两轮", () => {
+    const f = fx();
+    const same = (text: string, at: number) => ({ ...chan(text, at, "card1"), uuid: "dup" });
+    f.write(f.main, [same("[select:menu:one]", T), ...resp("1", T + 1, 1000, 10), same("[select:menu:two]", T + 2000), ...resp("2", T + 2001, 1000, 20)]);
+    f.run();
+    expect(turnsFor(f.db, "agent-a").map((t) => [t.trigger, t.calls])).toEqual([["[select:menu:one]", 1], ["[select:menu:two]", 1]]);
+  });
+});
+
+describe("r1 回归：文件被换掉 / 截断后又长回来", () => {
+  const byTrigger = (f: ReturnType<typeof fx>) => turnsFor(f.db, "agent-a").map((t) => [t.trigger, t.calls]);
+
+  test("P1-3 原路径换成等长的新文件：新文件的调用照样入库", () => {
+    const f = fx();
+    f.write(f.main, [human("first", T), ...resp("1", T + 1, 1000, 10)]);
+    f.run();
+    renameSync(f.main, join(f.root, "rotated.jsonl"));
+    f.write(f.main, [human("other", T + 5000), ...resp("2", T + 5001, 1000, 10)]);
+    f.run();
+    expect(byTrigger(f)).toEqual([["first", 1], ["other", 1]]);
+  });
+
+  test("P1-3 原路径换成更长的新文件：从头读，不从旧偏移切进半行", () => {
+    const f = fx();
+    f.write(f.main, [human("first", T), ...resp("1", T + 1, 1000, 10)]);
+    f.run();
+    renameSync(f.main, join(f.root, "rotated.jsonl"));
+    f.write(f.main, [human(`second ${"z".repeat(2000)}`, T + 5000), ...resp("2", T + 5001, 1000, 10)]);
+    f.run();
+    expect(byTrigger(f).map(([t, n]) => [String(t).slice(0, 6), n])).toEqual([["first", 1], ["second", 1]]);
+  });
+
+  test("P1-3 同一个 inode 截断重写、又长过旧偏移：认出来从头读；再跑一趟不翻倍", () => {
+    const f = fx();
+    f.write(f.main, [human("first", T), ...resp("1", T + 1, 1000, 10)]);
+    f.run();
+    writeFileSync(f.main, [human(`second ${"z".repeat(2000)}`, T + 5000), ...resp("2", T + 5001, 1000, 10)].map((r) => JSON.stringify(r)).join("\n") + "\n");
+    f.run();
+    f.run();
+    expect(byTrigger(f).map(([t, n]) => [String(t).slice(0, 6), n])).toEqual([["first", 1], ["second", 1]]);
+    expect(usageSummary(f.db, 0)[0]).toMatchObject({ calls: 2, output: 20 });
+  });
+});
+
+describe("r1 回归：数字与脱敏", () => {
+  test("P1-4 AWS secret、引号里带空格的密码不落库", () => {
+    const f = fx();
+    const key = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"; // AWS 文档里的示例值
+    f.write(f.main, [human(`请使用 AWS 密钥 ${key}`, T), ...resp("1", T + 1, 1000, 10), human('password="alpha beta gamma"', T + 2000), ...resp("2", T + 2001, 1000, 10)]);
+    f.run();
+    const stored = (f.db.prepare("SELECT trigger FROM turns").all() as { trigger: string }[]).map((r) => r.trigger).join("\n");
+    expect(stored).not.toContain("EXAMPLEKEY");
+    expect(stored).not.toContain("beta");
+    expect(stored).toContain("[redacted]");
+  });
+
+  test("P1-5 一次响应跨午夜：summary 今天与 cost --today 一致（按最后一行的时间）；分两趟读到也把昨天那条挪走", async () => {
+    const f = fx();
+    const day = new Date(NOW).setHours(0, 0, 0, 0);
+    const [first, last] = [resp("x", day - 1000, 1000, 1), resp("x", day + 1000, 1000, 100)].map((r) => r[r.length - 1]);
+    f.write(f.main, [human("跨夜", day - 2000), first]);
+    f.run();
+    expect(usageSummary(f.db, day)).toHaveLength(0);
+    f.append(f.main, [last]);
+    f.run();
+    const [cost] = await rollupJsonl(f.main, day);
+    const [sum] = usageSummary(f.db, day);
+    expect({ calls: sum.calls, output: sum.output }).toEqual({ calls: cost.requests, output: cost.output });
+    expect(turnsFor(f.db, "agent-a")[0].endedAt).toBe(day + 1000);
+    const days = f.db.prepare("SELECT day, calls, output FROM daily").all() as { day: string; calls: number; output: number }[];
+    expect(days).toHaveLength(1);
+    expect(days[0]).toMatchObject({ calls: 1, output: 100 });
+  });
+});
+
+describe("r1 回归：失锁", () => {
+  test("P2-1 失锁后不再清理：明细还在", () => {
+    const f = fx();
+    f.write(f.main, [human("留着", T), ...resp("1", T + 1, 1000, 10)]);
+    f.run();
+    const r = f.run(NOW + 40 * 24 * H, undefined, { prune: true, keepAlive: () => false });
+    expect(r).toMatchObject({ pruned: 0, aborted: true });
+    expect(turnsFor(f.db, "agent-a")).toHaveLength(1);
+  });
+
+  test("P2-1 同一个文件读到一半失锁：后面的块不读了，下一趟接着读完", () => {
+    const f = fx();
+    f.write(f.main, [human("长文件", T), ...resp("1", T + 1, 1000, 10), ...resp("2", T + 2, 1000, 10), ...resp("3", T + 3, 1000, 10)]);
+    let n = 0;
+    const r = f.run(NOW, 256, { keepAlive: () => n++ < 2 });
+    expect(r.aborted).toBe(true);
+    expect(usageSummary(f.db, 0).reduce((s, x) => s + x.calls, 0)).toBeLessThan(3);
+    f.run();
+    expect(usageSummary(f.db, 0)[0]).toMatchObject({ calls: 3, output: 30 });
   });
 });

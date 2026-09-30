@@ -19,7 +19,7 @@ bun src/manager.ts usage summary [--today|--since <ts>] [--json] [--no-ingest]
 - 每天归档兜底扫描之后一趟 `usage ingest --prune`，清 30 天前的明细。
 - 查询命令查之前也导一趟。
 
-几路之间靠库旁的文件锁 `usage.sqlite.ingest.lock` 串行（`lib/file-lock.ts`）：`ingest` 等锁最多 60 秒、查询最多 30 秒，等不到就说明别的进程正在导（多半是首轮全量）——`ingest` 把这一趟让出去，查询先查现有数据并在输出里注明。并发导入本身不会重复计数（主键去重），锁防的是同一批 GB 级文件被读两遍。导入是同步的，每读一个文件续一次锁；失锁就停，没读完的下一趟按偏移接着读。
+几路之间靠库旁的文件锁 `usage.sqlite.ingest.lock` 串行（`lib/file-lock.ts`）：`ingest` 等锁最多 60 秒、查询最多 30 秒，等不到就说明别的进程正在导（多半是首轮全量）——`ingest` 把这一趟让出去，查询先查现有数据并在输出里注明。并发导入本身不会重复计数（主键去重），锁防的是同一批 GB 级文件被读两遍。导入是同步的，每读一块（8MB）、认领归属 / 清理之前各核对并续一次锁；失锁就停（输出 `aborted`），没做完的下一趟按偏移接着做。
 
 ## 什么算一轮
 
@@ -27,7 +27,7 @@ bun src/manager.ts usage summary [--today|--since <ts>] [--json] [--no-ingest]
 
 算外来输入（开新一轮）：
 - 人敲的字（`origin.kind = human`，老格式没有 origin 的普通文本）、斜杠命令（`<command-name>`）；
-- channel 消息（Discord / Web / API / agent 之间，`origin.kind = channel`）、peer 消息；
+- channel 消息（Discord / Web / API / agent 之间，`origin.kind = channel`；老格式没有 origin、只有 `isMeta`，按完整的 `<channel …>` 包装认）、peer 消息；
 - **忙时被队列吸收进当前回合的 channel 消息**（`attachment.type = queued_command`、`commandMode = prompt`）：它是另一条外来输入，从它起算新一轮，之前的调用归上一轮；
 - 空闲时送来的后台任务通知（`origin.kind = task-notification`）、定时任务 / 唤醒（`isMeta` + `scheduledTaskId`）；
 - 子 agent 文件里的第一条 prompt（记为 `subagent`）。
@@ -36,19 +36,19 @@ bun src/manager.ts usage summary [--today|--since <ts>] [--json] [--no-ingest]
 
 **中断后续做**：打断标记归被打断的那一轮；之后人再说一句（「继续」也好、新要求也好）就是新的一轮。bridge 抢占时送来的那条插话同理，是新的一轮。
 
-同一条 channel 消息既进了队列附件、又落成 user 记录时（按 `message_id` 认），算同一轮。文件从一轮中间开始（fork / 续写的副本）时，开头那段调用单独成一轮，来源记 `continued`。
+轮 id 用开轮那条记录自己的 `uuid`（channel 消息再带上输入身份）。同一条 channel 消息既进了队列附件、又落成 user 记录时算同一轮：按 `message_id` + 渲染后正文的哈希认（`inboundIdentity`）。只认 `message_id` 不够——同一张卡片上的几次按钮 / 选择共用卡片的 `message_id`，正文不同就是不同的输入。文件从一轮中间开始（fork / 续写的副本）时，开头那段调用单独成一轮，来源记 `continued`。
 
 ## 每轮记什么
 
 agent、sessionId、是否子 agent（sidechain）、开始时间（外来输入的时间）、结束时间（最后一次调用）、调用次数；input / cacheCreation / cacheRead / output 四项之和；**看到的上下文** = 本轮单次调用里 input + cacheCreation + cacheRead 的最大值；工具调用次数和按名字计数（同一个 tool_use id 只算一次）；模型；来源类型和来源摘要。
 
-来源摘要 = 渲染后的正文（channel 剥掉注入头、命令还原成 `/x 参数`、通知取 `<summary>`）压成一行，**先整段脱敏再截到 80 字**。脱敏认：`sk-ant-` / `sk-` / `ghp_` 等 GitHub token / `xox?-` / AWS key / JWT / Discord bot token / 32 位以上十六进制 / 40 位以上字母数字混合串 / `Bearer xxx` / 名字里带 token、secret、password、api_key 的 `键=值`。
+来源摘要 = 渲染后的正文（channel 剥掉注入头、命令还原成 `/x 参数`、通知取 `<summary>`）压成一行，**先整段脱敏再截到 80 字**。脱敏认：标准 Base64（含 `+/`）40 位以上且大小写数字俱全的串（AWS secret 等）/ `sk-ant-` / `sk-` / `ghp_` 等 GitHub token / `xox?-` / AWS key / JWT / Discord bot token / 32 位以上十六进制 / 40 位以上字母数字混合串 / `Bearer xxx` / 名字里带 token、secret、password、api_key 的 `键=值`（引号括起来的值整段遮，值里可以有空格）。
 
 ## 数字怎么保证不重不漏
 
-- **调用去重**：`calls` 以 `message.id + requestId` 为主键（与 `cost` 同一个键，`lib/jsonl-cost.ts` 的 `usageDedupKey`；没有 id 的老记录用条目 uuid）。同一响应拆成多行时各项取最大值（= 最后写完整的那行）。跨文件同样去重：归档快照、fork 抄过去的历史行都不会再算一次，调用归第一个读到它的文件。读文件的顺序是：在册 agent 的当前会话 → `archive/` → `~/.claude/projects` 其余。
+- **调用去重**：`calls` 以 `message.id + requestId` 为主键（与 `cost` 同一个键，`lib/jsonl-cost.ts` 的 `usageDedupKey`；没有 id 的老记录用条目 uuid）。同一响应拆成多行时各项取最大值（= 最后写完整的那行），**调用时间也取最后那行**（跨午夜的响应和 `cost --today` 一样算进今天；日期改了，原来那天和新的那天都重算 daily）。跨文件同样去重：归档快照、fork 抄过去的历史行都不会再算一次，调用归第一个读到它的文件。读文件的顺序是：在册 agent 的当前会话 → `archive/` → `~/.claude/projects` 其余。
 - **轮的数字不单独存**：`turns` 只存轮头（来源、开始时间、归属），合计、看到的上下文都是查询时从 `calls` 聚合，重复导入不可能翻倍。
-- **增量**：`files` 表按文件记读到的字节偏移，只读完整的行（文件尾没写完的半行等下一趟），当前所在的轮也记在里面，下一趟接着归。文件变短（被重写）就从头重读，靠主键去重。每块（8MB）一个事务，中途被杀也只是下一趟重读那一块。
+- **增量**：`files` 表按文件记读到的字节偏移，只读完整的行（文件尾没写完的半行等下一趟），当前所在的轮也记在里面，下一趟接着归。文件身份也记着（`dev:ino` + 已读部分开头和结尾各 4KB 的哈希）：文件变短、原路径换成了别的文件（轮转）、同一个 inode 截断后又写长，都从头重读，靠主键去重不翻倍。每块（8MB）一个事务，中途被杀也只是下一趟重读那一块。
 
 ## 归属
 
@@ -60,7 +60,7 @@ agent、sessionId、是否子 agent（sidechain）、开始时间（外来输入
 
 - 明细（`calls` / `turns` / `tools`）保留 30 天（本地日期，从今天 00:00 往前数 30 天）；**更早的记录导入时直接跳过**，不回填，因为清理之后再读到同一会话的副本时已经没有主键可以挡重复。
 - 清理只在每日那趟（`--prune`）做；10 分钟一趟的增量不删数据。
-- `daily`（日 × agent × 模型）永久。导入时把涉及的日子记进 `dirty_days`，导完按明细重算那天；那天明细已清掉就不再动它（它是唯一的记录）。改归属时同样只影响还有明细的日子。
+- `daily`（日 × agent × 模型）永久。导入时把涉及的日子记进 `dirty_days`，导完按明细重算那天：保留期内的日子一律照明细重算（调用挪去别的日子后可能变空）；保留期之前、明细已清掉的日子不再动它（它是唯一的记录）。改归属时同样只影响还有明细的日子。
 
 ## 与 `cost --today` 对账
 

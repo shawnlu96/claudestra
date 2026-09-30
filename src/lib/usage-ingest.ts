@@ -14,7 +14,7 @@ import { ARCHIVE_ROOT } from "./paths.js";
 import { agentRuntime, readRegistryAgentsSync, type RegistryAgent } from "./registry.js";
 import { claudeProjectsRoot } from "./runtimes/claude-code.js";
 import { runtimeForSessionPath } from "./session-source.js";
-import { callOf, inboundOf, triggerSummary } from "./usage-classify.js";
+import { callOf, inboundIdentity, inboundOf, triggerSummary } from "./usage-classify.js";
 import { pruneUsage, rebuildDirtyDays, retentionCutoff, UNOWNED, usageWriter, type FileState } from "./usage-store.js";
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -31,7 +31,7 @@ export interface IngestOptions {
   chunkBytes?: number;
   /** 顺带清掉保留期之前的明细；只有每日那趟开（清理是删数据，10 分钟一趟的增量不做） */
   prune?: boolean;
-  /** 每读一个文件前调一次；返回 false（锁已失）就停在这里，没读的下一趟接着读 */
+  /** 每读一块、认领 / 清理之前各调一次；返回 false（锁已失）就停在这里，没做完的下一趟接着做 */
   keepAlive?: () => boolean;
 }
 
@@ -42,6 +42,8 @@ export interface IngestResult {
   calls: number;
   pruned: number;
   ms: number;
+  /** 导到一半失了锁：停在这里，没读的、清理和 daily 重算都留给下一趟 */
+  aborted?: boolean;
 }
 
 interface SessionFile {
@@ -112,21 +114,45 @@ function listFiles(o: Required<Pick<IngestOptions, "projectsRoot" | "archiveRoot
   return out;
 }
 
-/** 调用只收保留期内的：更早的明细反正要清，收进来还会在清理后被副本重复计入 daily */
-function ingestFile(w: ReturnType<typeof usageWriter>, db: Database, f: SessionFile, agent: string, cutoff: number, chunkBytes: number) {
+const FP_BYTES = 4096;
+
+/** 文件身份：dev:ino + 已读部分（前 offset 字节）开头和结尾各 4KB 的哈希。换了文件、截断后重写都对不上 */
+function fingerprint(fd: number, offset: number): string {
+  const { dev, ino } = fstatSync(fd);
+  const part = (at: number, n: number) => {
+    const b = Buffer.alloc(n);
+    readSync(fd, b, 0, n, at);
+    return Bun.hash(b).toString(36);
+  };
+  const n = Math.min(FP_BYTES, offset);
+  return `${dev}:${ino}:${part(0, n)}:${part(offset - n, n)}`;
+}
+
+/**
+ * 调用只收保留期内的：更早的明细反正要清，收进来还会在清理后被副本重复计入 daily。
+ * 上次的偏移只在同一个文件、已读部分没变时沿用；变短、换了 inode、已读部分被改写都从头重读（调用按主键去重，不会翻倍）。
+ */
+function ingestFile(w: ReturnType<typeof usageWriter>, db: Database, f: SessionFile, agent: string, cutoff: number, chunkBytes: number, alive: () => boolean) {
   let fd: number;
-  try { fd = openSync(f.path, "r"); } catch { return { bytes: 0, calls: 0 }; } // 刚被挪走 / 删掉：下一趟再说
+  try { fd = openSync(f.path, "r"); } catch { return { bytes: 0, calls: 0, aborted: false }; } // 刚被挪走 / 删掉：下一趟再说
   let bytes = 0;
   let calls = 0;
+  let aborted = false;
   try {
     const size = fstatSync(fd).size;
     const prev = w.file(f.path);
-    // 比上次读到的还短 = 文件被重写了：从头再读（调用按键去重，不会重复计）
-    const st: FileState = prev && prev.offset <= size ? { ...prev }
-      : { path: f.path, offset: 0, size, session_id: f.sessionId, agent, sidechain: f.sidechain ? 1 : 0, turn_id: null, turn_start: null, turn_kind: null, turn_trigger: null };
+    const same = prev && prev.offset <= size && (!prev.fp || prev.fp === fingerprint(fd, prev.offset));
+    const st: FileState = same ? { ...prev } : {
+      path: f.path, offset: 0, size, session_id: f.sessionId, agent, sidechain: f.sidechain ? 1 : 0,
+      turn_id: null, turn_start: null, turn_kind: null, turn_trigger: null, fp: null, turn_input: null,
+    };
     let ensured: string | null = null;
     let want = chunkBytes;
     while (st.offset < size) {
+      if (!alive()) {
+        aborted = true;
+        break;
+      }
       const n = Math.min(want, size - st.offset);
       const buf = Buffer.alloc(n);
       readSync(fd, buf, 0, n, st.offset);
@@ -153,15 +179,17 @@ function ingestFile(w: ReturnType<typeof usageWriter>, db: Database, f: SessionF
         }
         st.offset += end + 1;
         st.size = size;
+        st.fp = fingerprint(fd, st.offset);
         w.saveFile(st);
       })();
       bytes += end + 1;
     }
-    if (!prev) w.saveFile(st);
+    // 新文件、换过的文件、v1 库迁移来还没有指纹的文件：这趟没读到新行也把指纹记上
+    if (!prev || !same || !st.fp) w.saveFile({ ...st, fp: st.fp ?? fingerprint(fd, st.offset) });
   } finally {
     closeSync(fd);
   }
-  return { bytes, calls };
+  return { bytes, calls, aborted };
 }
 
 /** 一行：外来输入就切到新一轮（改 st），保留期内的调用返回给调用方入库。只解析可能相关的行（CC 写的是紧凑 JSON） */
@@ -174,9 +202,13 @@ function handleLine(line: string, st: FileState, f: SessionFile, cutoff: number)
   if (!isCall) {
     const i = inboundOf(rec);
     if (!i) return null;
-    const turnId = i.messageId ? `msg:${i.messageId}` : typeof rec.uuid === "string" ? rec.uuid : `${f.sessionId}:${rec.timestamp}`;
-    if (turnId === st.turn_id) return null; // 同一条 channel 消息既进了队列附件又落了 user 记录
-    st.turn_id = turnId;
+    // 同一条 channel 消息既进了队列附件又落了 user 记录：按 message_id + 正文认，同一张卡片上的不同选择正文不同，照样开新轮
+    const input = inboundIdentity(i) ?? null;
+    if (input && input === st.turn_input) return null;
+    st.turn_input = input;
+    // 轮 id = 条目自己的 uuid（fork 副本抄过去的同一条记录仍是同一轮）；channel 消息再带上输入身份，uuid 撞了也不会并轮
+    const own = typeof rec.uuid === "string" && rec.uuid ? rec.uuid : `${f.sessionId}:${rec.timestamp}`;
+    st.turn_id = input ? `${own}/${input}` : own;
     st.turn_start = Date.parse(rec.timestamp) || st.turn_start || 0;
     st.turn_kind = f.sidechain && i.kind === "human" ? "subagent" : i.kind;
     st.turn_trigger = triggerSummary(i);
@@ -187,6 +219,7 @@ function handleLine(line: string, st: FileState, f: SessionFile, cutoff: number)
   if (!st.turn_id) {
     // 文件从一轮中间开始（fork / 续写的副本）：这一段单独算一轮
     st.turn_id = `head:${f.sessionId}${f.sidechain ? `/${basename(f.path, ".jsonl")}` : ""}`;
+    st.turn_input = null;
     st.turn_start = c.ts;
     st.turn_kind = "continued";
     st.turn_trigger = "";
@@ -222,20 +255,25 @@ export function ingestUsage(db: Database, opts: IngestOptions = {}): IngestResul
   const since = opts.sinceMs ?? cutoff;
   const w = usageWriter(db);
   const res: IngestResult = { files: 0, read: 0, bytes: 0, calls: 0, pruned: 0, ms: 0 };
+  // 每块、以及认领 / 清理 / 重算之前都核对一次锁（顺带续租）：导入是同步的，锁的定时续租跑不起来
+  const alive = () => !opts.keepAlive || opts.keepAlive();
+  const done = (aborted: boolean) => ({ ...res, ms: Math.round(performance.now() - t0), ...(aborted ? { aborted } : {}) });
   for (const f of listFiles(o)) {
     let mtime = 0;
     try { mtime = statSync(f.path).mtimeMs; } catch { continue; } // 在册会话还没生成文件 / 已被清理
     res.files++;
     if (mtime < since || runtimeForSessionPath(f.path) !== undefined) continue;
-    if (opts.keepAlive && !opts.keepAlive()) break;
-    const r = ingestFile(w, db, f, owners.get(f.sessionId) ?? UNOWNED, cutoff, opts.chunkBytes ?? CHUNK_BYTES);
+    const r = ingestFile(w, db, f, owners.get(f.sessionId) ?? UNOWNED, cutoff, opts.chunkBytes ?? CHUNK_BYTES, alive);
     if (r.bytes) res.read++;
     res.bytes += r.bytes;
     res.calls += r.calls;
+    if (r.aborted) return done(true);
   }
+  if (!alive()) return done(true);
   claimOwners(db, w, owners);
+  if (!alive()) return done(true);
   if (opts.prune) res.pruned = pruneUsage(db, cutoff);
-  else rebuildDirtyDays(db);
+  else rebuildDirtyDays(db, cutoff);
   res.ms = Math.round(performance.now() - t0);
   return res;
 }
@@ -243,7 +281,7 @@ export function ingestUsage(db: Database, opts: IngestOptions = {}): IngestResul
 /**
  * 拿到导入锁才导（锁是库文件旁的目录，lib/file-lock.ts）；等 waitMs 还拿不到 = 别的进程正在导，返回 null，调用方直接查现有数据。
  * 并发导入本身不会重复计数（主键去重），锁防的是两个进程把同一批 GB 级文件各读一遍。
- * 导入是同步的、锁的定时续租跑不起来，所以每读一个文件手动续一次（held()）；失租就停，没读完的下一趟接着读。
+ * 导入是同步的、锁的定时续租跑不起来，所以每读一块、认领 / 清理之前都手动续一次（held()）；失租就停，没做完的下一趟接着做。
  */
 export async function ingestLocked(db: Database, lockPath: string, opts: IngestOptions = {}, waitMs = 0): Promise<IngestResult | null> {
   const lock = await acquireLock(lockPath, waitMs);

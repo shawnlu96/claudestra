@@ -2,7 +2,7 @@
  * token 账（src/lib/usage-classify.ts）：哪些会话记录开新一轮、来源摘要的渲染与脱敏、调用的去重键和工具块。
  */
 import { describe, test, expect } from "bun:test";
-import { callOf, inboundOf, redactSecrets, triggerSummary } from "../src/lib/usage-classify.js";
+import { callOf, inboundIdentity, inboundOf, redactSecrets, triggerSummary } from "../src/lib/usage-classify.js";
 
 const user = (content: unknown, extra: Record<string, unknown> = {}) => ({ type: "user", uuid: "u1", timestamp: "2026-09-30T01:00:00Z", message: { role: "user", content }, ...extra });
 const channel = (body: string, id = "m1") =>
@@ -13,6 +13,16 @@ describe("inboundOf：开新一轮的记录", () => {
     const i = inboundOf(user(channel("帮我看下 T83"), { isMeta: true, origin: { kind: "channel" } }));
     expect(i?.kind).toBe("channel");
     expect(i?.messageId).toBe("m1");
+  });
+  test("老格式 channel 消息（只有 isMeta、没有 origin）也算 channel（T83-r1 P1-1）", () => {
+    expect(inboundOf(user(channel("老格式"), { isMeta: true }))).toMatchObject({ kind: "channel", messageId: "m1" });
+  });
+  test("输入身份：队列附件与 user 记录相同；同一张卡片上的不同选择不同（T83-r1 P1-2）", () => {
+    const id = (body: string, extra = {}) => inboundIdentity(inboundOf(user(channel(body, "card1"), { isMeta: true, ...extra }))!);
+    const queued = inboundOf({ type: "attachment", attachment: { type: "queued_command", commandMode: "prompt", prompt: channel("[select:a]", "card1") } })!;
+    expect(inboundIdentity(queued)).toBe(id("[select:a]", { origin: { kind: "channel" } }));
+    expect(id("[select:a]")).not.toBe(id("[select:b]"));
+    expect(inboundIdentity(inboundOf(user("没有 message_id"))!)).toBeUndefined();
   });
   test("人敲的字：有 origin human、老格式没有 origin 都算", () => {
     expect(inboundOf(user("hi", { origin: { kind: "human" } }))?.kind).toBe("human");
@@ -58,6 +68,14 @@ describe("triggerSummary：渲染后的正文、脱敏、80 字", () => {
     expect(redactSecrets("BRIDGE_CONTROL_TOKEN=abc123xyz789 下一步")).toBe("BRIDGE_CONTROL_TOKEN=[redacted] 下一步");
     expect(redactSecrets('{"password": "hunter22"}')).toBe('{"password": "[redacted]"}');
     expect(redactSecrets("Authorization: Bearer abcdefghijklmnop123")).toContain("Bearer [redacted]");
+  });
+  test("AWS secret（Base64 带 /）、引号里带空格的值整段遮（T83-r1 P1-4）；普通路径和链接不误伤", () => {
+    expect(redactSecrets("AWS 密钥 wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY 用完删")).toBe("AWS 密钥 [redacted] 用完删");
+    expect(redactSecrets('password="alpha beta gamma" 然后')).toBe('password="[redacted]" 然后');
+    expect(redactSecrets(`{"api_key": 'a b c', "x": 1}`)).toBe(`{"api_key": "[redacted]", "x": 1}`);
+    for (const keep of ["看 /Users/me/repos/claude-orchestrator/src/lib/usage-classify.ts:12", "https://github.com/o/r/pull/265"]) {
+      expect(redactSecrets(keep)).toBe(keep);
+    }
   });
   test("先脱敏再截断：密钥跨在第 80 字上也不留半截", () => {
     const s = `${"字".repeat(70)} sk-ant-api03-${"Z".repeat(40)}`;

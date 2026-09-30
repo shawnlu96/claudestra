@@ -66,6 +66,8 @@ export function inboundOf(rec: Rec): Inbound | null {
   if (origin === "human") return inbound(kindOfText(text) === "command" ? "command" : "human", text);
   if (origin) return null; // auto-continuation 等：系统接着跑，不是新输入
   if (rec.scheduledTaskId) return inbound("scheduled", text);
+  // 老格式的 channel 消息没有 origin、只有 isMeta：认完整的 channel 包装（与历史视图同一个解包），不能当附加信息吞掉
+  if (unwrapChannelMessage(text)) return inbound("channel", text);
   if (rec.isMeta) return null;
   if (!text.trim() && !hasBlock(content, "image")) return null;
   return inbound(kindOfText(text), text);
@@ -77,6 +79,8 @@ const SUMMARY_CHARS = 80;
 
 /** 已知形态的密钥 / token，以及「key=值」里名字像密钥的值 */
 const SECRET_RES: RegExp[] = [
+  // 标准 Base64 字母表（含 + /）的 40 位以上串，大小写和数字都有：AWS secret access key 等。仓库路径大多带 - 或 .，碰不上
+  /(?<![A-Za-z0-9+/])(?=[A-Za-z0-9+/]*[0-9])(?=[A-Za-z0-9+/]*[a-z])(?=[A-Za-z0-9+/]*[A-Z])[A-Za-z0-9+/]{40,}=*/g,
   /sk-ant-[A-Za-z0-9_-]{8,}/g,
   /\bsk-[A-Za-z0-9_-]{16,}/g,
   /\bgh[pousr]_[A-Za-z0-9]{16,}/g,
@@ -89,11 +93,14 @@ const SECRET_RES: RegExp[] = [
   /\b(?=[A-Za-z0-9_-]*\d)(?=[A-Za-z0-9_-]*[A-Za-z])[A-Za-z0-9_-]{40,}/g,
 ];
 const BEARER_RE = /\b(bearer|token)\s+[A-Za-z0-9._~+/-]{12,}=*/gi;
-const KV_SECRET_RE = /\b([\w-]*(?:token|secret|password|passwd|api[_-]?key|access[_-]?key|private[_-]?key)[\w-]*)(["']?\s*[:=]\s*["']?)[^\s"',;&]{4,}/gi;
+const SECRET_KEY = String.raw`\b([\w-]*(?:token|secret|password|passwd|api[_-]?key|access[_-]?key|private[_-]?key)[\w-]*)`;
+/** 引号括起来的值整段遮（值里可以有空格）；没引号的值遇空白 / 分隔符为止 */
+const KV_QUOTED_RE = new RegExp(String.raw`${SECRET_KEY}(["']?\s*[:=]\s*)(?:"[^"\n]*"|'[^'\n]*')`, "gi");
+const KV_SECRET_RE = new RegExp(String.raw`${SECRET_KEY}(["']?\s*[:=]\s*["']?)[^\s"',;&]{4,}`, "gi");
 
 /** 把文本里像密钥的片段换成 [redacted]；先整段脱敏再截断，截断不会把半个密钥留下 */
 export function redactSecrets(s: string): string {
-  let out = s.replace(KV_SECRET_RE, "$1$2[redacted]").replace(BEARER_RE, "$1 [redacted]");
+  let out = s.replace(KV_QUOTED_RE, '$1$2"[redacted]"').replace(KV_SECRET_RE, "$1$2[redacted]").replace(BEARER_RE, "$1 [redacted]");
   for (const re of SECRET_RES) out = out.replace(re, "[redacted]");
   return out;
 }
@@ -104,6 +111,15 @@ function renderRaw(kind: InboundKind, raw: string): string {
   if (kind === "command") return commandRecordLine(raw) ?? raw.replace(/<[^>]+>/g, " ");
   if (kind === "notification") return /<summary>([\s\S]*?)<\/summary>/.exec(raw)?.[1] ?? raw.replace(/<[^>]+>/g, " ");
   return raw;
+}
+
+/**
+ * 同一条外来输入的身份：channel 消息的 message_id + 渲染后正文的哈希。队列附件和随后的 user 记录是同一条输入的两份，身份相同；
+ * 同一张卡片上的几次按钮 / 选择共用卡片的 message_id，正文不同，身份也不同。没有 message_id 的输入不会有两份，返回 undefined。
+ */
+export function inboundIdentity(i: Inbound): string | undefined {
+  if (!i.messageId) return undefined;
+  return `${i.messageId}#${Bun.hash(renderRaw(i.kind, i.raw).replace(/\s+/g, " ").trim()).toString(36)}`;
 }
 
 /** 来源摘要：渲染后的正文压成一行、脱敏、截到 80 字（按码点，不切半个 emoji） */

@@ -35,8 +35,14 @@ const SCHEMA: SchemaSpec = {
         cache_creation INTEGER NOT NULL, cache_read INTEGER NOT NULL, output INTEGER NOT NULL, PRIMARY KEY (day, agent, model))`,
       "CREATE TABLE IF NOT EXISTS dirty_days (day TEXT PRIMARY KEY)",
     ],
+    // v2：files 记文件身份指纹（换了文件 / 截断重写就从头读）和当前轮那条输入的身份（队列附件与 user 记录认成同一轮）
+    (db) => {
+      const have = new Set((db.prepare("PRAGMA table_info(files)").all() as { name: string }[]).map((c) => c.name));
+      for (const col of ["fp", "turn_input"]) if (!have.has(col)) db.prepare(`ALTER TABLE files ADD COLUMN ${col} TEXT`).run();
+    },
   ],
   tables: ["files", "turns", "calls", "tools", "daily", "dirty_days"],
+  columns: { files: ["fp", "turn_input"] },
   indexes: { turns: ["turns_agent", "turns_session"], calls: ["calls_turn", "calls_day", "calls_ts"], tools: ["tools_turn"] },
 };
 
@@ -75,6 +81,10 @@ export interface FileState {
   turn_start: number | null;
   turn_kind: string | null;
   turn_trigger: string | null;
+  /** 文件身份：dev:ino + 已读部分头尾各 4KB 的哈希（usage-ingest.ts 的 fingerprint） */
+  fp: string | null;
+  /** 当前轮那条外来输入的身份（usage-classify.ts 的 inboundIdentity），只有 channel 消息有 */
+  turn_input: string | null;
 }
 
 export interface TurnHead {
@@ -91,17 +101,21 @@ export interface TurnHead {
 /** 导入要用的写语句（prepare 一次，逐行复用） */
 export function usageWriter(db: Database) {
   const getFile = db.prepare("SELECT * FROM files WHERE path = ?");
-  const putFile = db.prepare(`INSERT INTO files (path, offset, size, session_id, agent, sidechain, turn_id, turn_start, turn_kind, turn_trigger, updated_at)
-    VALUES ($path, $offset, $size, $session_id, $agent, $sidechain, $turn_id, $turn_start, $turn_kind, $turn_trigger, $now)
+  const putFile = db.prepare(`INSERT INTO files (path, offset, size, session_id, agent, sidechain, turn_id, turn_start, turn_kind, turn_trigger,
+      fp, turn_input, updated_at)
+    VALUES ($path, $offset, $size, $session_id, $agent, $sidechain, $turn_id, $turn_start, $turn_kind, $turn_trigger, $fp, $turn_input, $now)
     ON CONFLICT(path) DO UPDATE SET offset = excluded.offset, size = excluded.size, session_id = excluded.session_id, agent = excluded.agent,
       sidechain = excluded.sidechain, turn_id = excluded.turn_id, turn_start = excluded.turn_start, turn_kind = excluded.turn_kind,
-      turn_trigger = excluded.turn_trigger, updated_at = excluded.updated_at`);
+      turn_trigger = excluded.turn_trigger, fp = excluded.fp, turn_input = excluded.turn_input, updated_at = excluded.updated_at`);
   const ensureTurn = db.prepare(`INSERT OR IGNORE INTO turns (turn_id, agent, session_id, sidechain, started_at, kind, trigger)
     VALUES (?, ?, ?, ?, ?, ?, ?)`);
-  // 同一响应的几行 usage 不一定相同（流式先写的行 output 偏小）：各项取最大 = 最后写完整的那行，与 cost 的 keepLatest 同一口径
+  // 同一响应的几行 usage 不一定相同（流式先写的行 output 偏小）：各项取最大 = 最后写完整的那行，与 cost 的 keepLatest 同一口径。
+  // 时间也跟最后那行走（ts 取最大、day 随之改）：跨午夜的响应 cost --today 按最后一行算进今天，这里必须一样（tests/usage-ingest.test.ts「跨午夜」）
+  const dayOfCall = db.prepare("SELECT day FROM calls WHERE key = ?");
   const upsertCall = db.prepare(`INSERT INTO calls (key, turn_id, ts, day, model, input, cache_creation, cache_read, output) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(key) DO UPDATE SET input = max(input, excluded.input), cache_creation = max(cache_creation, excluded.cache_creation),
-      cache_read = max(cache_read, excluded.cache_read), output = max(output, excluded.output) RETURNING day`);
+      cache_read = max(cache_read, excluded.cache_read), output = max(output, excluded.output),
+      day = CASE WHEN excluded.ts > ts THEN excluded.day ELSE day END, ts = max(ts, excluded.ts) RETURNING day`);
   const addTool = db.prepare("INSERT OR IGNORE INTO tools (tool_id, turn_id, name) VALUES (?, ?, ?)");
   const markDirty = db.prepare("INSERT OR IGNORE INTO dirty_days (day) VALUES (?)");
   const claim = db.prepare(`INSERT OR IGNORE INTO dirty_days (day) SELECT DISTINCT c.day FROM calls c JOIN turns t ON t.turn_id = c.turn_id
@@ -111,10 +125,12 @@ export function usageWriter(db: Database) {
     file: (path: string) => getFile.get(path) as FileState | null,
     saveFile: (f: FileState) => putFile.run({ ...prefixed(f), $now: Date.now() }),
     turn: (t: TurnHead) => ensureTurn.run(t.turnId, t.agent, t.sessionId, t.sidechain ? 1 : 0, t.startedAt, t.kind, t.trigger),
-    /** 调用进库，并把它所在的那天（已有的键沿用第一次记的日期）标脏，daily 之后按明细重算 */
+    /** 调用进库，并把它所在的那天标脏（日期因后到的行改了的话，原来那天也标），daily 之后按明细重算 */
     call(c: CallUsage, turnId: string): void {
+      const before = dayOfCall.get(c.key) as { day: string } | null;
       const { day } = upsertCall.get(c.key, turnId, c.ts, dayOf(c.ts), c.model, c.input, c.cacheCreation, c.cacheRead, c.output) as { day: string };
       markDirty.run(day);
+      if (before && before.day !== day) markDirty.run(before.day);
       for (const t of c.tools) addTool.run(t.id, turnId, t.name);
     },
     /** 之前记成 unowned 的会话后来认出了主人（归档快照晚到）：改归属并把涉及的日子标脏 */
@@ -131,9 +147,11 @@ function prefixed(f: FileState): Record<string, string | number | null> {
 }
 
 /**
- * 按明细重算脏日子的 daily（每趟导入都跑，清理不清理都要）。那天已经没有明细（超期清掉了）就不动：daily 是它唯一的记录，重算会把它抹成 0。
+ * 按明细重算脏日子的 daily（每趟导入都跑，清理不清理都要）。保留期内的日子明细是全的，一律照明细重算（调用挪去别的日子后这天可能变空）；
+ * 保留期之前的日子明细已清掉就不动：daily 是它唯一的记录，重算会把它抹成 0。
  */
-export function rebuildDirtyDays(db: Database): number {
+export function rebuildDirtyDays(db: Database, cutoffMs = retentionCutoff()): number {
+  const keepFrom = dayOf(cutoffMs);
   const days = (db.prepare("SELECT day FROM dirty_days").all() as { day: string }[]).map((r) => r.day);
   const has = db.prepare("SELECT 1 FROM calls WHERE day = ? LIMIT 1");
   const del = db.prepare("DELETE FROM daily WHERE day = ?");
@@ -143,7 +161,7 @@ export function rebuildDirtyDays(db: Database): number {
   const clear = db.prepare("DELETE FROM dirty_days WHERE day = ?");
   db.transaction(() => {
     for (const d of days) {
-      if (has.get(d)) {
+      if (d >= keepFrom || has.get(d)) {
         del.run(d);
         ins.run(d);
       }
@@ -155,7 +173,7 @@ export function rebuildDirtyDays(db: Database): number {
 
 /** 清掉保留期之前的明细（先重算脏日子，daily 拿到的是清理前的完整数字）；返回删掉的调用数 */
 export function pruneUsage(db: Database, cutoffMs = retentionCutoff()): number {
-  rebuildDirtyDays(db);
+  rebuildDirtyDays(db, cutoffMs);
   const cutoffDay = dayOf(cutoffMs);
   let removed = 0;
   db.transaction(() => {
