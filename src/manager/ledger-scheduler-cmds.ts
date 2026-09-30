@@ -1,6 +1,7 @@
 /** Narrow CLI entrypoints for durable scheduler facts; no arbitrary stage or owner action is exposed here. */
 import { INTENT_ACTIONS, INTENT_STATUSES, WORKFLOW_MODES, WORKFLOW_TEMPLATES, AUTHOR_FAMILIES } from "../lib/ledger-scheduler.js";
 import { planIntent, setWorkflow, settleIntent } from "../lib/ledger-scheduler-write.js";
+import { resumeAutoWorkflow } from "../lib/ledger-scheduler-resume.js";
 import { bindSchedulerSession, recordSessionRetirement, type SessionRole, type SessionTransport } from "../lib/scheduler-sessions.js";
 import { advanceMergeRun, beginMergeRun, MERGE_RESOLUTIONS, resolveMergeRun, type MergePhase, type MergeResolution } from "../lib/scheduler-merge.js";
 import { getTask, LedgerError } from "../lib/ledger-store.js";
@@ -37,6 +38,19 @@ export const SCHEDULER_CMDS: Record<string, CommandSpec> = {
         mode: mode as "manual" | "observe" | "auto", authorFamily: family as "claude" | "codex", fallback: c.need("fallback"), reason: c.p.flags.reason,
       });
       return { ok: true, ...r };
+    },
+  },
+  "workflow-resume": {
+    valued: ["rev", "workflow-rev", "reason", "max-workers"], bools: [],
+    usage: "workflow-resume <task> --rev N --workflow-rev N --reason <为什么交回>（改规格后把退回人工的 auto 卡交回调度：按当前 specRev 重算并记事件；结果未定的意图要先对账）",
+    run(c) {
+      const project = c.task(c.p.pos[1]).project;
+      if (c.deps.autoDispatch?.() !== true) throw new LedgerError("forbidden", "自动派单未开启（scheduler.json autoDispatch），见 T68h");
+      if (!(c.deps.autoProjects?.() ?? []).includes(project)) throw new LedgerError("forbidden", `调度服务没对项目 ${project} 开，交回自动没人推它`);
+      return { ok: true, ...resumeAutoWorkflow(c.db, c.ctx(), {
+        taskId: c.p.pos[1] ?? "", taskRev: integer(c, "rev"), workflowRev: integer(c, "workflow-rev"), reason: c.need("reason"),
+        maxWorkers: intFlag(c.p, "max-workers") ?? 2,
+      }) };
     },
   },
   "scheduler-plan": {

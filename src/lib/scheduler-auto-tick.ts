@@ -16,6 +16,7 @@ import { planScheduler, type PlannerDecision } from "./scheduler-plan.js";
 import { getSchedulerSession, type SessionRole } from "./scheduler-sessions.js";
 import type { SnapshotOpts } from "./scheduler-snapshot.js";
 import { stepOfNode, workOrderFor } from "./scheduler-work-order.js";
+import { paceCards, type TickPace } from "./scheduler-yield.js";
 import type { EnsureResult, SessionRef, WorkerSession } from "./worker-session.js";
 
 type Manager = (...args: string[]) => Promise<Record<string, unknown>>;
@@ -262,21 +263,20 @@ class Card {
   }
 }
 
-export async function schedulerAutoTick(db: Database, projects: Record<string, { maxActiveWorkers: number }>, deps: AutoTickDeps): Promise<AutoTickResult> {
+export async function schedulerAutoTick(db: Database, projects: Record<string, { maxActiveWorkers: number }>, deps: AutoTickDeps,
+  pace?: TickPace): Promise<AutoTickResult> {
   const out: AutoTickResult = { cards: [], failed: [] };
   if (!db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'task_workflows'").get()) return out;
-  for (const [project, policy] of Object.entries(projects)) {
-    const ids = db.query(`SELECT w.taskId FROM task_workflows AS w JOIN tasks AS t ON t.id = w.taskId
-      WHERE w.project = ? AND w.mode = 'auto' AND t.stage NOT IN ('done','cancelled') ORDER BY w.taskId`).all(project) as { taskId: string }[];
-    for (const { taskId } of ids) {
-      const task = getTask(db, taskId);
-      if (!task) continue;
-      try {
-        out.cards.push(await new Card(db, task, { registry: [], maxWorkers: policy.maxActiveWorkers, now: deps.now() }, deps).step());
-      } catch (e) {
-        if (e instanceof SchedulerStopped) throw e;
-        out.failed.push({ taskId, error: oneLine((e as Error).message) });
-      }
+  for (const { project, policy, taskId } of paceCards(db, projects, "auto", pace)) {
+    if (pace?.yieldNow()) break;
+    if (pace) pace.cursor.auto = `${project}/${taskId}`;
+    const task = getTask(db, taskId);
+    if (!task) continue;
+    try {
+      out.cards.push(await new Card(db, task, { registry: [], maxWorkers: policy.maxActiveWorkers, now: deps.now() }, deps).step());
+    } catch (e) {
+      if (e instanceof SchedulerStopped) throw e;
+      out.failed.push({ taskId, error: oneLine((e as Error).message) });
     }
   }
   return out;

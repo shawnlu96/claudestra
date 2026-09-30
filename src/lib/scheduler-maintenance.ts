@@ -6,6 +6,7 @@ import { statePath } from "./paths.js";
 import { LedgerReader } from "./ledger-read.js";
 import { mergeQueueBusy } from "./scheduler-update-gate.js";
 import { UPDATE_INFLIGHT } from "./update-inflight.js";
+import { clearMaintenanceRequest, MAINTENANCE_REQUEST, maintenanceRequested, requestMaintenance } from "./scheduler-yield.js";
 
 export class SchedulerStopped extends Error {}
 
@@ -16,22 +17,39 @@ export async function whileOwned<T>(assertActive: () => void, operation: () => P
   return result;
 }
 
+/**
+ * scheduler: never waits, and stands aside while an update is waiting (a fresh request file, lib/scheduler-yield.ts).
+ * update: with `waitMs`, keeps a request fresh and retries until the running pass yields; a busy merge queue refuses at once.
+ */
 export async function acquireMaintenance(kind: "scheduler" | "update", opts: {
-  path?: string; marker?: string; reader?: LedgerReader;
-} = {}): Promise<LockHandle | null> {
-  const path = opts.path ?? statePath("scheduler-maintenance.lock"), marker = opts.marker ?? UPDATE_INFLIGHT;
+  path?: string; marker?: string; reader?: LedgerReader; request?: string; waitMs?: number;
+} = {}): Promise<(LockHandle & { path: string }) | null> {
+  const path = opts.path ?? statePath("scheduler-maintenance.lock"), marker = opts.marker ?? UPDATE_INFLIGHT, request = opts.request ?? MAINTENANCE_REQUEST;
   mkdirSync(dirname(path), { recursive: true });
-  const lock = await acquireLock(path, 0);
-  if (!lock) return null;
+  if (kind === "scheduler") {
+    if (maintenanceRequested(request)) return null;
+    const lock = await acquireLock(path, 0);
+    if (lock && existsSync(marker)) { lock.release(); return null; }
+    return lock && Object.assign(lock, { path });
+  }
+  const deadline = Date.now() + (opts.waitMs ?? 0);
   try {
-    if (kind === "scheduler" && existsSync(marker)) { lock.release(); return null; }
-    if (kind === "update") {
-      const reader = opts.reader ?? new LedgerReader();
-      try {
-        const db = reader.get();
-        if (db && mergeQueueBusy(db)) { lock.release(); return null; }
-      } finally { reader.close(); }
+    for (;;) {
+      const lock = await acquireLock(path, 0);
+      if (lock) return updateMayRun(lock, opts.reader) ? Object.assign(lock, { path }) : null;
+      if (Date.now() >= deadline) return null;
+      requestMaintenance(request);
+      await Bun.sleep(250);
     }
-    return lock;
-  } catch (e) { lock.release(); throw e; }
+  } finally { clearMaintenanceRequest(request); }
+}
+
+/** Releases the lock and says no while a merge journal is in flight or unresolved (it must finish across restarts first). */
+function updateMayRun(lock: LockHandle, given?: LedgerReader): boolean {
+  const reader = given ?? new LedgerReader();
+  try {
+    const db = reader.get();
+    if (db && mergeQueueBusy(db)) { lock.release(); return false; }
+    return true;
+  } catch (e) { lock.release(); throw e; } finally { reader.close(); }
 }

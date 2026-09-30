@@ -5,6 +5,7 @@
 
 import { resolveBridgeUrl } from "./bridge-url.js";
 import { resolveLogPath } from "./log-paths.js";
+import { schedulerLeaseRefusal, SchedulerLeaseLost } from "./scheduler-lease-env.js";
 
 const BRIDGE_URL = resolveBridgeUrl();
 
@@ -21,6 +22,9 @@ export async function bridgeRequest(msg: Record<string, unknown>, opts?: { timeo
     }, timeoutMs);
 
     ws.onopen = () => {
+      // 调度服务子进程：握手期间失租，帧就不发（核在发帧的同一个同步段里，lib/scheduler-lease-env.ts）
+      const lost = schedulerLeaseRefusal();
+      if (lost) { clearTimeout(timer); ws.close(); return reject(new SchedulerLeaseLost(lost)); }
       ws.send(JSON.stringify({ ...msg, requestId }));
     };
 
@@ -72,7 +76,8 @@ export async function bridgeSend(msg: Record<string, unknown>, opts?: { timeoutM
     };
     const timer = setTimeout(() => finish({ ok: false, sent, error: "Bridge 请求超时" }), opts?.timeoutMs ?? 10000);
     ws.onopen = () => {
-      if (opts?.stillActive && !opts.stillActive()) return finish({ ok: false, sent: false, error: "发送方已停止，帧没有发出" });
+      const lost = schedulerLeaseRefusal();
+      if (lost || (opts?.stillActive && !opts.stillActive())) return finish({ ok: false, sent: false, error: lost ?? "发送方已停止，帧没有发出" });
       ws.send(JSON.stringify({ ...msg, requestId }));
       sent = true;
     };

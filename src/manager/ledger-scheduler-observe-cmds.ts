@@ -40,7 +40,9 @@ export const SCHEDULER_OBSERVE_CMDS: Record<string, CommandSpec> = {
     async run(c) {
       const max = intFlag(c.p, "max-workers") ?? DEFAULT_MAX_WORKERS;
       if (max < 1 || max > 32) throw new LedgerError("invalid", "--max-workers 要在 1–32");
-      const r = observeTask(c.db, c.ctx(), c.task(c.p.pos[1]).id, { registry: await registryRows(c), maxWorkers: max });
+      const registry = await registryRows(c);
+      c.deps.assertLease?.(); // 读 registry 的 await 之后、同步写观察事件之前再核一次调度服务租约
+      const r = observeTask(c.db, c.ctx(), c.task(c.p.pos[1]).id, { registry, maxWorkers: max });
       return { ok: true, duplicate: r.duplicate, decision: r.decision, event: r.observation };
     },
   },

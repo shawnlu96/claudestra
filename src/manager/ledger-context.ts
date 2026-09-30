@@ -27,6 +27,8 @@ export interface LedgerDeps {
   projectIds: readonly string[];
   loadRegistry(): Promise<Registry>;
   saveRegistry(reg: Registry): Promise<void>;
+  /** 调度服务子进程：同步核父进程租约，失租抛 SchedulerLeaseLost；紧挨写入调，中间不隔 await（lib/scheduler-lease-env.ts） */
+  assertLease?(): void;
   /** Scheduler bind reads this registry snapshot path inside its ledger transaction; tests inject an isolated file. */
   registryPath?: string;
   now(): number;

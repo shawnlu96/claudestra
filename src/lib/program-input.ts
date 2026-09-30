@@ -6,6 +6,7 @@
  * 单测 tests/program-input.test.ts。
  */
 import { readFileSync } from "node:fs";
+import { assertSchedulerLease } from "./scheduler-lease-env.js";
 import { writeJsonAtomicSync } from "./state-file.js";
 
 /** 一次敲键：h = 敲的字的指纹（纯按键如 C-c / Enter 是 ""） */
@@ -45,8 +46,9 @@ export function readProgramInputs(path: string): ProgramInput[] {
   }
 }
 
-/** 记一次敲键（发之前调）。不抛：记不下来只是 bridge 少认一次，键照发 */
+/** 记一次敲键（发之前调）。记不下来不抛（bridge 少认一次，键照发）；调度服务子进程失租才抛：这次键本来就不该发 */
 export function recordProgramInput(path: string, text: string, now = Date.now()): void {
+  assertSchedulerLease();
   try {
     const list = readProgramInputs(path).filter((e) => now - e.at < KEEP_MS);
     writeJsonAtomicSync(path, [...list, { at: now, h: inputHash(text) }].slice(-KEEP));

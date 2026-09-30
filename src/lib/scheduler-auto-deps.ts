@@ -18,8 +18,9 @@ import { runManagerProcess } from "./run-manager.js";
 import { boundRef, type AutoTickDeps } from "./scheduler-auto-tick.js";
 import { acpPort, messagePort, type RegistryRow, type StillActive } from "./scheduler-auto-ports.js";
 import { runtimeFamily } from "./scheduler-auto-review.js";
-import { whileOwned } from "./scheduler-maintenance.js";
-import { schedulerManager } from "./scheduler-service.js";
+import { SchedulerStopped, whileOwned } from "./scheduler-maintenance.js";
+import { schedulerManagerWith } from "./scheduler-service.js";
+import { encodeLease, SCHEDULER_LEASE_ENV, type SchedulerLease } from "./scheduler-lease-env.js";
 import { git as realGit, gitDirtySync, openReviewWorktree, pinReviewWorktree, type Git } from "./scheduler-review-worktree.js";
 import type { SessionRole } from "./scheduler-sessions.js";
 import { ledgerResult } from "./scheduler-work-order.js";
@@ -31,8 +32,9 @@ import { selectWorkerRoute, type EnsureResult, type SessionRef, type WorkerSessi
 type Manager = (...args: string[]) => Promise<Record<string, unknown>>;
 
 // Agent creation runs without the scheduler identity (which is limited to ledger commands); ledger writes use the service's.
-const plainManager: Manager = (...args) =>
-  runManagerProcess(args, { bunPath: resolveBunPath(), managerPath: `${SRC_DIR}/manager.ts`, env: { ...process.env, DISCORD_CHANNEL_ID: "" }, timeoutMs: 180_000 });
+// Both carry the service's lease, so a create still queued when the service stops or loses it builds nothing.
+const plainManager = (lease: SchedulerLease | undefined): Manager => (...args) => runManagerProcess(args, { bunPath: resolveBunPath(), managerPath: `${SRC_DIR}/manager.ts`,
+  env: { ...process.env, DISCORD_CHANNEL_ID: "", [SCHEDULER_LEASE_ENV]: encodeLease(lease) }, timeoutMs: 180_000 });
 
 export const reviewerName = (taskId: string): string => `agent-rv-${taskId.toLowerCase()}`;
 
@@ -48,7 +50,7 @@ function refOf(task: LedgerTask, role: SessionRole, row: RegistryAgent, family: 
  * git subprocess runs through `git` (checked before the spawn and after the exit), and a bridge frame asks `alive` in the
  * same synchronous block as the send.
  */
-interface Env { db: Database; registryRow: RegistryRow; worktreeRoot: string; active: () => void; alive: StillActive; git: Git }
+interface Env { db: Database; registryRow: RegistryRow; worktreeRoot: string; active: () => void; alive: StillActive; git: Git; create: Manager }
 const checkoutOf = (env: Env, taskId: string): string => join(env.worktreeRoot, `rv-${taskId.toLowerCase()}`);
 const realOr = (p: string): string => { try { return realpathSync.native(p); } catch { return p; /* not there yet: compare as written */ } };
 
@@ -62,8 +64,9 @@ async function createReviewer(env: Env, task: LedgerTask, family: AuthorFamily):
   const dir = opened.dir;
   const name = reviewerName(task.id);
   const runtime = family === "codex" ? ["--runtime", "codex", "--transport", "acp"] : [];
-  const r = await whileOwned(env.active, () => plainManager("create", name, dir, "--purpose", `${task.id} 跨模型对抗式审查（调度引擎建）`,
+  const r = await whileOwned(env.active, () => env.create("create", name, dir, "--purpose", `${task.id} 跨模型对抗式审查（调度引擎建）`,
     "--project", task.project, "--task", `${task.id} 审查`, ...runtime));
+  if (r.code === "lease-lost") throw new SchedulerStopped(`manager create: ${String(r.error)}`); // 服务在停，不是建失败：不交 PM
   if (r.ok !== true) return { kind: "unknown", reason: `建 ${name} 失败或结果不明：${String(r.error ?? "")}`.slice(0, 400) };
   for (let i = 0; i < 30; i++) {
     env.active();
@@ -127,17 +130,19 @@ export interface AutoDepsOpts {
   active?: () => void;
   /** Tests only: the git underneath the liveness guard. */
   git?: Git;
+  /** The service's leases handed to every manager / ledger child (scheduler-lease-env.ts); none = those children refuse to act. */
+  lease?: SchedulerLease;
 }
 
 export function autoTickDeps(db: Database, opts: AutoDepsOpts = {}): AutoTickDeps {
-  const { registryPath, worktreeRoot = statePath("worktrees"), active = () => {}, git: baseGit = realGit } = opts;
+  const { registryPath, worktreeRoot = statePath("worktrees"), active = () => {}, git: baseGit = realGit, lease } = opts;
   const registryRow: RegistryRow = (agent) => readRegistryAgentsSync(registryPath).find((a) => a.name === agent);
   const alive: StillActive = () => {
     try { active(); return true; } catch { return false; /* any failure of the liveness check means "not provably active": send nothing */ }
   };
-  const env: Env = { db, registryRow, worktreeRoot, active, alive, git: (args) => whileOwned(active, () => baseGit(args)) };
+  const env: Env = { db, registryRow, worktreeRoot, active, alive, git: (args) => whileOwned(active, () => baseGit(args)), create: plainManager(lease) };
   return {
-    manager: schedulerManager,
+    manager: schedulerManagerWith(lease),
     worker: (ref) => worker(env, ref),
     ensure: (task, role, family) => ensure(env, task, role, family),
     pinReview: (task, ref, head) => pinReview(env, task, ref, head),
