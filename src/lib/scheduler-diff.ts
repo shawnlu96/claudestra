@@ -13,12 +13,14 @@ export interface DiffRow {
   planned: string;
   actual: string | null;
   actor: string | null;
-  verdict: "match" | "diff" | "pending";
+  /** superseded = a later observation replaced the plan with no answering action in between (e.g. a dependency cleared). */
+  verdict: "match" | "diff" | "pending" | "superseded";
   note: string;
   lagMs: number | null;
 }
 
-const RESPONSE_KINDS = new Set(["stage", "dispatch", "escalate", "deliver", "review", "verify", "ask", "decision"]);
+/** step counts only as PM's explicit assignment (op=assign); delivery bookkeeping on steps is not an action. */
+const RESPONSE_KINDS = new Set(["stage", "dispatch", "escalate", "deliver", "review", "verify", "ask", "decision", "step"]);
 const PM_GATES = new Set(["pm_restate"]);
 /** Waits that end when a worker (not PM) writes its result; a worker event answering them is the expected path. */
 const WORKER_WAITS = new Set(["in_flight", "intent_in_flight", "review_transition"]);
@@ -31,6 +33,7 @@ function describeEvent(e: LedgerEvent): string {
   if (e.kind === "review") return `审查结论 ${String(e.data.verdict ?? "?")}（${String(e.data.reviewer ?? "?")}）`;
   if (e.kind === "dispatch") return `派审（${String(e.data.reviewer ?? "?")}）`;
   if (e.kind === "deliver") return "交付";
+  if (e.kind === "step") return `指派「${String(e.data.step ?? "?")}」给 ${String(e.data.executor ?? "?")}`;
   if (e.kind === "verify") return `完成检查 ${String(e.data.result ?? "?")}`;
   return e.kind;
 }
@@ -79,7 +82,8 @@ function judge(d: ObservedDecision, e: LedgerEvent, isPm: (actor: string) => boo
       if ((e.kind === "deliver" || e.kind === "stage") && e.actor === d.recipient) return { verdict: "match", note: "同一执行者接手" };
       return { verdict: "diff", note: `引擎会派给 ${d.recipient}，实际：${e.actor} ${describeEvent(e)}` };
     case "ensure_session":
-      return { verdict: "diff", note: `引擎会先建本卡独立 ${d.sessionRole} session，实际由 ${e.actor} 接手（${describeEvent(e)}）` };
+      return { verdict: "diff", note: e.kind === "step" ? "引擎会新建本卡独立 session，PM 指派了现有 agent"
+        : `引擎会先建本卡独立 ${d.sessionRole} session，实际由 ${e.actor} 接手` };
     default: {
       const want = EXPECTED_STAGE[d.action ?? ""];
       if (want && e.kind === "stage" && e.data.to === want) return { verdict: "match", note: "PM 手动完成同一步" };
@@ -112,12 +116,15 @@ export function schedulerDiff(events: readonly LedgerEvent[], isPm: (actor: stri
   const rows: DiffRow[] = [];
   observations.forEach((o, i) => {
     const until = observations[i + 1]?.seq ?? Number.MAX_SAFE_INTEGER;
-    const window = sorted.filter((e) => e.seq > o.seq && e.seq < until && e.actor !== "scheduler" && RESPONSE_KINDS.has(e.kind));
+    const window = sorted.filter((e) => e.seq > o.seq && e.seq < until && e.actor !== "scheduler" && RESPONSE_KINDS.has(e.kind) &&
+      (e.kind !== "step" || e.data.op === "assign"));
     const d = o.data.decision as ObservedDecision;
     const base = { observationSeq: o.seq, stage: String(o.data.stage), round: Number(o.data.round), planned: describeDecision(d) };
     const [first, ...rest] = window;
     if (!first) {
-      rows.push({ ...base, actual: null, actor: null, verdict: "pending", note: "尚无后续动作", lagMs: null });
+      const later = i + 1 < observations.length;
+      rows.push({ ...base, actual: null, actor: null, verdict: later ? "superseded" : "pending",
+        note: later ? "计划被后续事实改写，其间没有对应动作" : "尚无后续动作", lagMs: null });
       return;
     }
     rows.push({ ...base, actual: describeEvent(first), actor: first.actor, ...judge(d, first, isPm), lagMs: first.ts - o.ts });
@@ -139,7 +146,7 @@ export function schedulerDiff(events: readonly LedgerEvent[], isPm: (actor: stri
   return rows;
 }
 
-const VERDICT_WORD: Record<DiffRow["verdict"], string> = { match: "一致", diff: "差异", pending: "未决" };
+const VERDICT_WORD: Record<DiffRow["verdict"], string> = { match: "一致", diff: "差异", pending: "未决", superseded: "改写" };
 
 /** One human line per row for PM / owner: card, stage and round, verdict, engine plan vs what actually happened. */
 export function diffLine(taskId: string, r: DiffRow): string {

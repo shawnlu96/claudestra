@@ -101,6 +101,7 @@ describe("T68e observe mode", () => {
       moveStage(f.db, f.at("agent-one"), { taskId: "T1", from: "spec", to: "restate" });
       moveStage(f.db, f.at("owner"), { taskId: "T1", from: "restate", to: "build" });
       deliver(f.db, f.at("agent-one"), { taskId: "T1", headSHA: H1, moveFrom: "build" });
+      expect((await f.observe()).decision).toMatchObject({ kind: "intent", action: "ensure_session", sessionRole: "reviewer" });
       assignStep(f.db, f.at("owner"), { taskId: "T1", step: "review", executor: "agent-review", executorKind: "agent" });
       expect((await f.observe()).decision).toMatchObject({ kind: "intent", action: "review", recipient: "agent-review" });
       // PM never records `ledger dispatch`: the engine refuses the unsolicited result, PM pushes on anyway.
@@ -111,6 +112,8 @@ describe("T68e observe mode", () => {
       const diff = await runLedger(["scheduler-diff", "T1"], f.deps("owner"));
       const rows = diff.rows as { planned: string; actual: string; verdict: string; note: string }[];
       expect(rows).toContainEqual(expect.objectContaining({ verdict: "diff", planned: "停下升级（review_unsolicited）", actual: "推阶段 review→fix" }));
+      expect(rows).toContainEqual(expect.objectContaining({ verdict: "diff", actual: "指派「review」给 agent-review",
+        note: "引擎会新建本卡独立 session，PM 指派了现有 agent" }));
       expect((diff.summary as { diff: number }).diff).toBeGreaterThan(0);
     } finally { f.close(); }
   });
