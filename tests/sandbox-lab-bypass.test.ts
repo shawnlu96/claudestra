@@ -1,13 +1,13 @@
 /**
  * lab 隔离闸的绕过面（T81 第 1 轮对抗审查的反例，逐条钉住）：
  * - 出站：重定向跳到闸外、显式 proxy / unix、net / tls / Bun.connect 直连——一律拒；lab 带任何代理变量就不启动（第 2 轮的反例），
- *   而且断言的是「闸外替身一次连接都没收到」，不只是初始 URL 被拒；
+ *   lab 控制脚本自己带代理变量也拒绝运行（第 3 轮的反例），而且断言的是「闸外替身一次连接都没收到」，不只是初始 URL 被拒；
  * - 默认生产端口 3847 不靠可选的拒绝清单：清单缺了也不许当 lab 中继 / 假推送 / 假 APNs / peer 入口端口，lab 缺清单直接不启动；
  * - 只设 lab 开关（或写错）而沙箱没开：真实入口（paths 加载）就报错，不按生产静默跑。
  * 都在子进程里真装闸门（import src/lib/paths.ts），测试进程本身不装。
  */
 import { afterAll, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync } from "fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { isSandbox, sandboxBridgeEnvProblems, sandboxRelayUrlProblem } from "../src/lib/sandbox.js";
@@ -16,6 +16,7 @@ import { OUTBOUND_BLOCKED_MARK } from "../src/lib/sandbox-outbound.js";
 import { testChildEnv } from "./test-env.ts";
 
 const PATHS = JSON.stringify(join(import.meta.dir, "..", "src", "lib", "paths.ts"));
+const SANDBOX_SCRIPT = join(import.meta.dir, "..", "scripts", "sandbox.ts");
 const PROD = 3847;
 const tmp = realpathSync(mkdtempSync(join(tmpdir(), "lab-bypass-")));
 const LAB = join(tmp, "lab");
@@ -139,7 +140,7 @@ describe("lab 不支持代理：带任何代理变量就不启动", () => {
   test("NO_PROXY 与 no_proxy 冲突（Bun 按小写走代理）：加载就拒，代理没收到连接、token、正文", async () => {
     const o = await outcome(`Object.assign(process.env, { HTTP_PROXY: P, NO_PROXY: "127.0.0.1", no_proxy: "other.example" });`);
     expect(o.load, o.err).toContain("lab 不支持代理");
-    expect(o.load).toContain("HTTP_PROXY, NO_PROXY, no_proxy");
+    expect(o.load).toContain("先 unset HTTP_PROXY NO_PROXY no_proxy 再跑");
     expect(o).toMatchObject({ post: "skipped", hits: 0, leaked: false });
   }, 30_000);
 
@@ -154,7 +155,7 @@ describe("lab 不支持代理：带任何代理变量就不启动", () => {
     for (const k of names) {
       const r = await run(`await import(${PATHS}); console.log("loaded");`, labEnv({ [k]: "http://127.0.0.1:9" }));
       expect(r.out, k).not.toContain("loaded");
-      expect(r.err, k).toContain(`lab 不支持代理，环境里有 ${k}`);
+      expect(r.err, k).toContain(`lab 不支持代理：先 unset ${k} 再跑`);
     }
     expect((await run(`await import(${PATHS}); console.log("loaded");`, labEnv({ HTTP_PROXY: "" }))).out).toBe("loaded");
     expect((await run(`await import(${PATHS}); console.log("loaded");`, labEnv())).out).toBe("loaded");
@@ -165,6 +166,37 @@ describe("lab 不支持代理：带任何代理变量就不启动", () => {
     expect(withoutProxyEnv(env)).toEqual({ PATH: "/bin", CLAUDESTRA_SANDBOX: "1" });
     expect(labProxyProblem(withoutProxyEnv(env))).toBeNull();
   });
+
+  /** 控制器本身（第 3 轮的反例）：真实的 sandbox.ts lab-push 在一个手搭的 lab 上跑，manager 离线发 token，登记请求由脚本进程直接 fetch */
+  test("lab 控制脚本带 HTTP_PROXY：退出非零，代理与目标都收到 0 条；不带代理时照常登记到目标", async () => {
+    const root = join(tmp, "ctl");
+    mkdirSync(join(root, "a"), { recursive: true });
+    mkdirSync(join(root, "lab", "push-subs"), { recursive: true });
+    const hits = { target: 0, proxy: 0 };
+    const answer = (req: Request) => Response.json(new URL(req.url).pathname.endsWith("/config") ? { mode: "relay", webPush: { vapidPublicKey: "k" } } : { ok: true });
+    const target = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: (req) => (hits.target++, answer(req)) });
+    const proxy = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: (req) => (hits.proxy++, answer(req)) });
+    writeFileSync(join(root, ".claudestra-lab"), JSON.stringify({ root, port: target.port, pair: false }));
+    const labPush = async (extra: Record<string, string>) => {
+      const args = ["lab-push", "--lab", "--port", String(target.port), "--root", root];
+      const p = Bun.spawn([process.execPath, "--no-env-file", SANDBOX_SCRIPT, ...args], { stdout: "pipe", stderr: "pipe", env: testChildEnv({ HOME: join(tmp, "home"), ...extra }) });
+      const [out, err] = [await new Response(p.stdout).text(), await new Response(p.stderr).text()];
+      return { code: await p.exited, out, err };
+    };
+    try {
+      const refused = await labPush({ HTTP_PROXY: `http://127.0.0.1:${proxy.port}` });
+      expect(refused.code).not.toBe(0);
+      expect(refused.err).toContain("lab 不支持代理：先 unset HTTP_PROXY 再跑");
+      expect(hits).toEqual({ target: 0, proxy: 0 });
+      const ok = await labPush({});
+      expect(ok.code, ok.err).toBe(0);
+      expect(ok.out).toContain("已登记假 Web Push 订阅与假 APNs 设备");
+      expect(hits).toEqual({ target: 3, proxy: 0 });
+    } finally {
+      target.stop(true);
+      proxy.stop(true);
+    }
+  }, 60_000);
 });
 
 describe("默认生产端口不靠可选清单", () => {

@@ -88,11 +88,12 @@ function proxyEnvKeys(env: Env): string[] {
 
 /**
  * lab 不支持代理：Bun 读到代理变量就按自己的大小写优先级与缓存转发，闸门模拟不准（fetch 也没有关掉环境代理的选项），
- * 所以加载时环境里有任何一个非空的代理变量就不启动。scripts/sandbox.ts 起的 lab 子进程已剔掉（withoutProxyEnv）
+ * 所以加载时环境里有任何一个非空的代理变量就不启动。scripts/sandbox.ts 带 --lab 时自己也先查这一条（它的控制请求
+ * 同样会走代理），查到就拒绝运行；它起的 lab 子进程另外剔掉（withoutProxyEnv）
  */
 export function labProxyProblem(env: Env): string | null {
   const set = proxyEnvKeys(env).filter((k) => (env[k] ?? "") !== "");
-  return set.length ? `lab 不支持代理，环境里有 ${set.join(", ")}（用 scripts/sandbox.ts 起的 lab 会自动剔掉）` : null;
+  return set.length ? `lab 不支持代理：先 unset ${set.join(" ")} 再跑` : null;
 }
 
 /** lab 子进程的环境：去掉全部代理变量 */

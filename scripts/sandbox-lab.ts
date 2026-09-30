@@ -9,7 +9,7 @@ import { randomBytes } from "node:crypto";
 import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import {
-  LAB_APNS_PORT_ENV, LAB_FLAG, LAB_MARKER, LAB_PORTS_ENV, LAB_PUSH_PORT_ENV, LAB_RELAY_PORT_ENV, LAB_ROOT_ENV,
+  LAB_APNS_PORT_ENV, LAB_FLAG, LAB_MARKER, LAB_PORTS_ENV, LAB_PUSH_PORT_ENV, LAB_RELAY_PORT_ENV, LAB_ROOT_ENV, labProxyProblem,
 } from "../src/lib/sandbox-lab.js";
 import { canonicalPath } from "../src/lib/sandbox.js";
 import { labFiles } from "./sandbox-lab-relay.ts";
@@ -34,6 +34,15 @@ function readLabMarker(root: string): LabMarker | null {
   } catch {
     return null; // 没有 / 读不了：当作还没建（up 之前的检查会据此判断目录能不能用）
   }
+}
+
+/**
+ * lab 的控制请求（就绪探测、lab-push 登记）由 sandbox.ts 进程自己 fetch，Bun 会让它们走环境代理：带任何代理变量就拒绝运行，
+ * 不替用户剔（剔了 env，Bun 已缓存的代理仍在）。lab 子进程另外剔掉并在加载时再查一次
+ */
+export function refuseLabControlProxy(fail: (msg: string) => never): void {
+  const problem = labProxyProblem(process.env);
+  if (problem) fail(problem);
 }
 
 /** --lab 的参数 → 布局。up 以外的命令 pair 以 lab 标记为准（up 时带没带 --pair），不看这次的参数 */

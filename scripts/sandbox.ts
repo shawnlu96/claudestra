@@ -6,7 +6,7 @@
  *   bun run sandbox manager <子命令…>                            在沙箱里跑 manager（create / kill / list / token-add …）
  *   bun run sandbox status | down | clean                        看状态 / 停掉 bridge 与沙箱 tmux / 停掉并删沙箱目录
  *   bun run sandbox env                                          打印沙箱环境（export 行，手动调试用）
- *   … --lab [--pair] [--as a|b]                                  lab 模式：回环中继 + 两实例 peer + 假推送（scripts/sandbox-lab.ts）
+ *   … --lab [--pair] [--as a|b]                                  lab 模式：回环中继 + 两实例 peer + 假推送（scripts/sandbox-lab.ts），不支持代理
  *   bun run sandbox lab-push --lab [--as a|b]                    lab：给实例登记一个假 Web Push 订阅和一台假 APNs 设备
  *
  * 所有沙箱侧的进程都由本脚本用**从零构建的环境**拉起（lib/sandbox-env.ts），并带 `--no-env-file`：
@@ -97,6 +97,7 @@ function parseOpts(argv: string[], cmd: string): Opts {
   const deny = discoverProduction();
   if (!Number.isInteger(port) || port <= 0 || port >= 65536) fail(`--port 不合法：${port}`);
   if ((pair || side === "b") && !labOn) fail("--pair / --as 只用于 --lab");
+  if (labOn) lab.refuseLabControlProxy(fail); // 在本进程发出任何请求之前
   const plan = labOn ? lab.labPlan(port, root, side, pair, cmd === "up") : undefined;
   if (plan && side === "b" && !plan.pair) fail(`${plan.root} 不是 --pair 建的 lab，没有实例 b`);
   if (plan) [port, root] = [lab.sidePort(plan), lab.sideRoot(plan)];
