@@ -6,7 +6,7 @@
  * planMigration 只读；applyMigration 先 VACUUM INTO 备份再在一个事务里重新规划并写入，任何一步失败整批回滚。
  */
 import type { Database } from "bun:sqlite";
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { basename, dirname, join } from "node:path";
 import { vacuumBackup } from "./ledger-backup.js";
 import { getFeature } from "./ledger-feature.js";
@@ -223,11 +223,14 @@ export function planMigration(db: Database, map: MigrateMap, origin: string | nu
 
 const planHasWrites = (p: MigrationPlan): boolean => p.writes.features + p.writes.versions + p.writes.cards > 0;
 
-/** 正式迁移前的备份文件：库文件旁 backups/，带时间和映射表摘要；同一毫秒重跑同一份映射表撞名 = 已备过 */
+/**
+ * 正式迁移前的备份文件：库文件旁 backups/，时间到毫秒 + 映射表摘要 + 随机段，每次有写入的尝试都是新的一份。
+ * 不复用同名旧备份：失败留下的备份之后库可能又被改过，拿它回滚会丢掉那些改动（tests/ledger-feature-l3.test.ts「同一时刻重试」）。
+ */
 function migrateBackupPath(dbPath: string, map: MigrateMap, now: number): string {
   const hash = createHash("sha256").update(JSON.stringify(map)).digest("hex").slice(0, 8);
-  const ts = new Date(now).toISOString().replace(/[-:]/g, "").replace(/\..*/, "");
-  return join(dirname(dbPath), "backups", `${basename(dbPath)}.pre-feature-migrate-${ts}-${hash}.bak`);
+  const ts = new Date(now).toISOString().replace(/[-:]/g, "").replace(".", "-").replace("Z", "");
+  return join(dirname(dbPath), "backups", `${basename(dbPath)}.pre-feature-migrate-${ts}-${hash}-${randomBytes(4).toString("hex")}.bak`);
 }
 
 export interface ApplyResult {
@@ -250,7 +253,7 @@ export function applyMigration(db: Database, ctx: WriteCtx, map: MigrateMap): Ap
   const path = db.filename;
   if (!path || path === ":memory:") throw new LedgerError("invalid", "内存库没法先备份，不迁移");
   const now = ctx.now ?? Date.now();
-  const backup = vacuumBackup(db, migrateBackupPath(path, map, now), "feature 迁移前备份失败", "未迁移，库保持原样");
+  const backup = vacuumBackup(db, migrateBackupPath(path, map, now), "feature 迁移前备份失败", "未迁移，库保持原样", false);
   const w: WriteCtx = { actor: ctx.actor, now };
   return busyAsLedgerError("迁移", () => db.transaction((): ApplyResult => {
     const ro = ledgerOrigin(db);

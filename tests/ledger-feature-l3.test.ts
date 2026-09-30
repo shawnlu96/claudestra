@@ -4,9 +4,9 @@
  */
 import { Database } from "bun:sqlite";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, linkSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { applyMigration, bucketOf, parseMap, planMigration, type MigrateMap } from "../src/lib/ledger-feature-migrate.js";
 import { renderMigrationReport } from "../src/lib/ledger-feature-migrate-md.js";
@@ -179,6 +179,21 @@ describe("备份与权限", () => {
     bak.close();
   });
 
+  test("失败留下备份、库又被改、同一时刻重试：另起一份新备份，内容 = 重试前的库", () => {
+    db.exec("CREATE TEMP TRIGGER boom BEFORE INSERT ON dag_versions WHEN NEW.featureId = 'ab12-f2' BEGIN SELECT RAISE(ABORT, 'boom'); END");
+    expect(() => apply()).toThrow(/boom/);
+    db.exec("DROP TRIGGER boom");
+    const first = readdirSync(join(dir, "backups"));
+    expect(first).toHaveLength(1);
+    db.prepare("UPDATE tasks SET title = 'PM 改过' WHERE id = 'A1'").run();
+    const snap = dump();
+    const r = apply();
+    expect(basename(r.backup as string)).not.toBe(first[0]);
+    const bak = new Database(r.backup as string, { readonly: true });
+    expect(dump(bak)).toEqual(snap);
+    bak.close();
+  });
+
   test("备份失败就不迁移；内存库拒绝迁移", () => {
     writeFileSync(join(dir, "backups"), "不是目录");
     const snap = dump();
@@ -264,6 +279,38 @@ describe("dry-run", () => {
     expect(blocked).toMatch(/readonly/);
     expect(getTask(db, "A1")!.title).toBe("卡 A1");
     db.prepare("UPDATE tasks SET title = '写得进' WHERE id = 'A1'").run();
+  });
+
+  test("--out 落到库、旁路文件、软链 / 硬链 / 软链目录、已有 SQLite 文件上：拒绝，库和旁路文件字节不变", async () => {
+    const map = join(dir, "map.json");
+    writeFileSync(map, JSON.stringify(MAP));
+    db.exec("PRAGMA wal_checkpoint(TRUNCATE)");
+    db.prepare("VACUUM INTO ?").run(join(dir, "copy.bak"));
+    symlinkSync(path, join(dir, "link.md"));
+    const alias = join(mkdtempSync(join(tmpdir(), "ledger-t90-alias-")), "d");
+    symlinkSync(dir, alias);
+    const guarded = [path, `${path}-wal`, `${path}-shm`, join(dir, "copy.bak")].filter((p) => existsSync(p));
+    const before = guarded.map(sha);
+    // 硬链挂在 -wal 上：库本体有硬链时 macOS 的 SQLite 直接报 IOERR_VNODE、走不到写报告，按 inode 比对的是同一道检查
+    expect(existsSync(`${path}-wal`)).toBe(true);
+    linkSync(`${path}-wal`, join(dir, "hard.md"));
+    for (const out of [path, join(dir, "link.md"), join(dir, "hard.md"), `${path}-wal`, `${path}-journal`, join(dir, "copy.bak"), join(alias, "ledger.sqlite")]) {
+      expect(await run(PM, ["feature-migrate", "--map", map, "--dry-run", "--out", out], facts)).toMatchObject({ ok: false, code: "invalid", error: expect.stringContaining("报告没写") });
+    }
+    unlinkSync(join(dir, "hard.md"));
+    expect(guarded.map(sha)).toEqual(before);
+    expect(existsSync(`${path}-journal`)).toBe(false);
+    expect(count("tasks")).toBe(Object.keys(STAGES).length);
+  });
+
+  test("--out 是已有的普通报告：整份替换成新报告", async () => {
+    const map = join(dir, "map.json");
+    const out = join(dir, "report.md");
+    writeFileSync(map, JSON.stringify(MAP));
+    writeFileSync(out, "旧报告");
+    expect(await run(PM, ["feature-migrate", "--map", map, "--dry-run", "--out", out], facts)).toMatchObject({ ok: true, report: out });
+    expect(readFileSync(out, "utf8")).toStartWith("# 旧卡迁进 feature · dry-run");
+    expect(readdirSync(dir).filter((f) => f.endsWith(".tmp"))).toEqual([]);
   });
 
   test("报告单列全部卡已完成的 feature（只剩已完成 / 已取消）", () => {
