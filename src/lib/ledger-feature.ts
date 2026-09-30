@@ -5,6 +5,7 @@
  */
 import type { Database } from "bun:sqlite";
 import type { DagReasonKind, FeatureStatus } from "./ledger-feature-schema.js";
+import { isSatisfied } from "./ledger-deps.js";
 import { TERMINAL_STAGES, type LedgerTask, type Stage } from "./ledger-stages.js";
 import { getTask, LedgerError } from "./ledger-store.js";
 
@@ -22,13 +23,19 @@ export interface Feature {
   updatedAt: number;
 }
 
-/** 版本快照里的一个节点；id 就是任务卡 id */
+/** 没有任务卡的节点（计划中，开工时再绑卡，绑卡属于 L2）的状态 */
+export const PLANNED = "planned";
+export type NodeStatus = Stage | typeof PLANNED;
+
+/** 版本快照里的一个节点；key 在同一版里唯一，taskId 可空（还没建卡） */
 export interface DagNode {
-  id: string;
+  key: string;
+  taskId: string | null;
   oneLine: string;
+  /** 依赖的节点 key */
   deps: string[];
-  /** 建版本时任务卡的 stage */
-  status: Stage;
+  /** 建版本时任务卡的 stage；没卡为 planned */
+  status: NodeStatus;
   /** 粗估（「半天」「S」这类自由短文本），没估为 "" */
   estimate: string;
   /** 从哪一版原样继承来的；新加 / 改过的节点为 null */
@@ -78,28 +85,31 @@ export function listFeatures(db: Database, project: string): Feature[] {
 
 /** 投影出来的节点：快照字段 + 任务卡现读的 status / title */
 export interface NodeView extends Omit<DagNode, "status"> {
-  status: Stage | null;
-  statusAtVersion: Stage;
+  /** 有卡 = 卡的当前 stage；没卡 = planned；卡找不到 = null */
+  status: NodeStatus | null;
+  statusAtVersion: NodeStatus;
   title: string | null;
-  /** 任务卡终态（done / cancelled） */
-  finished: boolean;
-  /** 依赖全部终态、自己还没终态 */
+  /** 按依赖边的口径算「满足」（ledger-deps.ts isSatisfied：code 上线即算，ops / investigate 要 done） */
+  satisfied: boolean;
+  /** 依赖节点全部满足、自己还没满足也没终态：可以开工 */
   ready: boolean;
-  /** 任务卡找不到（被迁走 / 手改库）：status 为 null，不猜 */
+  /** 绑了卡却找不到（被迁走 / 手改库）：status 为 null，不猜 */
   missing: boolean;
 }
 
 export function projectNodes(db: Database, nodes: readonly DagNode[]): NodeView[] {
-  const live = new Map<string, LedgerTask | null>(nodes.map((n) => [n.id, getTask(db, n.id)]));
-  const done = (id: string) => {
-    const t = live.get(id);
-    return !!t && TERMINAL_STAGES.includes(t.stage);
+  const live = new Map<string, LedgerTask | null>(nodes.map((n) => [n.key, n.taskId ? getTask(db, n.taskId) : null]));
+  const ok = (key: string) => {
+    const t = live.get(key);
+    return !!t && isSatisfied(t);
   };
   return nodes.map(({ status, ...n }) => {
-    const t = live.get(n.id) ?? null;
+    const t = live.get(n.key) ?? null;
+    const missing = !!n.taskId && !t;
+    const open = n.taskId ? !!t && !ok(n.key) && !TERMINAL_STAGES.includes(t.stage) : true;
     return {
-      ...n, status: t?.stage ?? null, statusAtVersion: status, title: t?.title ?? null,
-      finished: done(n.id), ready: !!t && !done(n.id) && n.deps.every(done), missing: !t,
+      ...n, status: n.taskId ? (t?.stage ?? null) : PLANNED, statusAtVersion: status, title: t?.title ?? null,
+      satisfied: ok(n.key), ready: open && n.deps.every(ok), missing,
     };
   });
 }

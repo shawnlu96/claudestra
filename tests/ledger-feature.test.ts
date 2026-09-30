@@ -77,11 +77,11 @@ describe("dag-init", () => {
     const id = await newFeature();
     const rev0 = getTask(db, "T2")!.rev;
     const r = await run(PM, "dag-init", "i28", "--rev", "1", "--reason", "owner 09-30 开工",
-      "--nodes", nodes([{ id: "T1", oneLine: "迁移", estimate: "半天" }, { id: "T2", deps: ["T1"] }]));
+      "--nodes", nodes([{ taskId: "T1", oneLine: "迁移", estimate: "半天" }, { taskId: "T2", deps: ["T1"] }]));
     expect(r).toMatchObject({ ok: true, version: { featureId: id, version: 1, reasonKind: "initial", reasonText: "owner 09-30 开工", proposedBy: PM, approvedBy: null } });
     expect(r.version.nodes).toEqual([
-      { id: "T1", oneLine: "迁移", deps: [], status: "spec", estimate: "半天", inheritedFrom: null },
-      { id: "T2", oneLine: "任务 T2", deps: ["T1"], status: "spec", estimate: "", inheritedFrom: null },
+      { key: "T1", taskId: "T1", oneLine: "迁移", deps: [], status: "spec", estimate: "半天", inheritedFrom: null },
+      { key: "T2", taskId: "T2", oneLine: "任务 T2", deps: ["T1"], status: "spec", estimate: "", inheritedFrom: null },
     ]);
     expect(getFeature(db, id)).toMatchObject({ currentVersion: 1, rev: 2 });
     expect(getTask(db, "T2")).toMatchObject({ featureId: id, rev: rev0 + 1 });
@@ -92,15 +92,15 @@ describe("dag-init", () => {
 
   test("已有 v1 再 dag-init（带当前 rev）被拒：建不出第二版", async () => {
     await newFeature();
-    expect((await run(PM, "dag-init", "i28", "--rev", "1", "--nodes", nodes([{ id: "T1" }]))).ok).toBe(true);
-    const again = await run("owner", "dag-init", "i28", "--rev", "2", "--nodes", nodes([{ id: "T1" }, { id: "T2" }]));
+    expect((await run(PM, "dag-init", "i28", "--rev", "1", "--nodes", nodes([{ taskId: "T1" }]))).ok).toBe(true);
+    const again = await run("owner", "dag-init", "i28", "--rev", "2", "--nodes", nodes([{ taskId: "T1" }, { taskId: "T2" }]));
     expect(again).toMatchObject({ ok: false, code: "conflict", current: { currentVersion: 1 } });
     expect(db.prepare("SELECT COUNT(*) AS n FROM dag_versions").get()).toEqual({ n: 1 });
   });
 
   test("库里也拦：版本不能改、不能删；v2 以后不能标成初版", async () => {
     await newFeature();
-    await run(PM, "dag-init", "i28", "--rev", "1", "--nodes", nodes([{ id: "T1" }]));
+    await run(PM, "dag-init", "i28", "--rev", "1", "--nodes", nodes([{ taskId: "T1" }]));
     expect(() => db.prepare("UPDATE dag_versions SET nodes = '[]'").run()).toThrow(/rewrite-only/);
     expect(() => db.prepare("DELETE FROM dag_versions").run()).toThrow(/rewrite-only/);
     expect(() => db.prepare("INSERT INTO dag_versions (featureId, version, reasonKind, proposedBy, createdAt, nodes) VALUES ('ab12-i28', 2, 'initial', 'x', 0, '[]')").run()).toThrow();
@@ -109,7 +109,7 @@ describe("dag-init", () => {
   test("CAS：带旧 rev 被拒，库不动", async () => {
     const id = await newFeature();
     await run(PM, "feature-set", id, "--rev", "1", "--words", "改过");
-    expect(await run(PM, "dag-init", id, "--rev", "1", "--nodes", nodes([{ id: "T1" }]))).toMatchObject({ ok: false, code: "conflict", current: { rev: 2 } });
+    expect(await run(PM, "dag-init", id, "--rev", "1", "--nodes", nodes([{ taskId: "T1" }]))).toMatchObject({ ok: false, code: "conflict", current: { rev: 2 } });
     expect(getFeature(db, id)!.currentVersion).toBe(0);
     expect(getTask(db, "T1")!.featureId).toBeNull();
   });
@@ -117,40 +117,71 @@ describe("dag-init", () => {
   test("节点校验：别的项目、没有的卡、重复、未知依赖、自环、成环、别的 feature 的卡、坏 JSON", async () => {
     await newFeature();
     await newFeature("f2");
-    await run(PM, "dag-init", "f2", "--rev", "1", "--nodes", nodes([{ id: "T3" }]));
+    await run(PM, "dag-init", "f2", "--rev", "1", "--nodes", nodes([{ taskId: "T3" }]));
     const bad = async (xs: unknown, code = "invalid") =>
       expect(await run(PM, "dag-init", "i28", "--rev", "1", "--nodes", typeof xs === "string" ? xs : nodes(xs))).toMatchObject({ ok: false, code });
-    await bad([{ id: "X1" }]);
-    await bad([{ id: "T9" }], "not_found");
-    await bad([{ id: "T1" }, { id: "T1" }]);
-    await bad([{ id: "T1", deps: ["T2"] }]);
-    await bad([{ id: "T1", deps: ["T1"] }]);
-    await bad([{ id: "T1", deps: ["T2"] }, { id: "T2", deps: ["T1"] }]);
-    await bad([{ id: "T3" }], "conflict");
-    await bad([{ id: "T1", oneLine: "两\n行" }]);
+    await bad([{ taskId: "X1" }]);
+    await bad([{ taskId: "T9" }], "not_found");
+    await bad([{ taskId: "T1" }, { taskId: "T1" }]);
+    await bad([{ taskId: "T1", deps: ["T2"] }]);
+    await bad([{ taskId: "T1", deps: ["T1"] }]);
+    await bad([{ taskId: "T1", deps: ["T2"] }, { taskId: "T2", deps: ["T1"] }]);
+    await bad([{ taskId: "T3" }], "conflict");
+    await bad([{ taskId: "T1", oneLine: "两\n行" }]);
     await bad([]);
     await bad("{not json");
     expect(getFeature(db, "ab12-i28")!.currentVersion).toBe(0);
   });
 });
 
-describe("投影", () => {
-  test("feature-show / dag-show 的节点状态跟任务卡现读一致；快照原值留在 statusAtVersion", async () => {
+describe("计划中的节点（还没建卡）", () => {
+  test("taskId 可空：快照记 planned，只给有卡的节点挂 featureId；投影显示计划中，依赖满足后 ready", async () => {
     const id = await newFeature();
-    await run(PM, "dag-init", "i28", "--rev", "1", "--nodes", nodes([{ id: "T1" }, { id: "T2", deps: ["T1"] }]));
+    const r = await run(PM, "dag-init", "i28", "--rev", "1", "--nodes", nodes([
+      { taskId: "T1" }, { key: "L2", oneLine: "重写命令", deps: ["T1"] }, { key: "L3", taskId: null, oneLine: "迁移旧卡", deps: ["L2"], estimate: "1 天" },
+    ]));
+    expect(r.version.nodes.map((n: any) => [n.key, n.taskId, n.status])).toEqual([["T1", "T1", "spec"], ["L2", null, "planned"], ["L3", null, "planned"]]);
+    expect(getTask(db, "T1")!.featureId).toBe(id);
+    expect(listEvents(db, { target: id }).at(-1)!.data.nodes).toEqual(["T1", "L2", "L3"]);
+    const view = async () => (await run(EXE, "feature-show", id)).nodes.map((n: any) => [n.key, n.status, n.ready, n.missing]);
+    expect(await view()).toEqual([["T1", "spec", true, false], ["L2", "planned", false, false], ["L3", "planned", false, false]]);
     const pm = { actor: PM, now: 2_000 };
-    moveStage(db, pm, { taskId: "T1", from: "spec", to: "cancelled" });
-    moveStage(db, pm, { taskId: "T2", from: "spec", to: "restate" });
+    ["restate", "build", "review", "merge", "live"].reduce((from, to) => (moveStage(db, pm, { taskId: "T1", from: from as never, to: to as never }), to), "spec");
+    expect(await view()).toEqual([["T1", "live", false, false], ["L2", "planned", true, false], ["L3", "planned", false, false]]);
+  });
+
+  test("计划节点要有 key 与一句话；同一张卡不能进两个节点", async () => {
+    await newFeature();
+    const bad = async (xs: unknown) => expect(await run(PM, "dag-init", "i28", "--rev", "1", "--nodes", nodes(xs))).toMatchObject({ ok: false, code: "invalid" });
+    await bad([{ oneLine: "没 key" }]);
+    await bad([{ key: "L2" }]);
+    await bad([{ key: "坏 key", oneLine: "x" }]);
+    await bad([{ key: "a", taskId: "T1" }, { key: "b", taskId: "T1" }]);
+    await bad([{ key: "a", taskId: 3, oneLine: "x" }]);
+  });
+});
+
+describe("投影", () => {
+  test("feature-show / dag-show 的节点状态跟任务卡现读一致；快照原值留在 statusAtVersion；满足口径同依赖边", async () => {
+    const id = await newFeature();
+    await run(PM, "dag-init", "i28", "--rev", "1", "--nodes", nodes([{ taskId: "T1" }, { taskId: "T2", deps: ["T1"] }, { taskId: "T3", deps: ["T2"] }]));
+    const pm = { actor: PM, now: 2_000 };
+    const walk = (task: string, stages: string[]) => stages.slice(1).forEach((to, i) => moveStage(db, pm, { taskId: task, from: stages[i] as never, to: to as never }));
+    walk("T1", ["spec", "restate", "build", "review", "merge", "live"]);
+    walk("T2", ["spec", "restate"]);
     const show = await run(EXE, "feature-show", id);
-    for (const n of show.nodes) expect(n.status).toBe(getTask(db, n.id)!.stage);
+    for (const n of show.nodes) expect(n.status).toBe(getTask(db, n.taskId)!.stage);
     expect(show.nodes).toMatchObject([
-      { id: "T1", status: "cancelled", statusAtVersion: "spec", finished: true, ready: false, missing: false },
-      { id: "T2", status: "restate", statusAtVersion: "spec", finished: false, ready: true },
+      { key: "T1", status: "live", statusAtVersion: "spec", satisfied: true, ready: false, missing: false },
+      { key: "T2", status: "restate", statusAtVersion: "spec", satisfied: false, ready: true },
+      { key: "T3", status: "spec", satisfied: false, ready: false },
     ]);
+    moveStage(db, pm, { taskId: "T1", from: "live", to: "fix" });
     const dag = await run(EXE, "dag-show", "i28", "--version", "1");
-    expect(dag.version.nodes.map((n: any) => n.status)).toEqual(["cancelled", "restate"]);
+    expect(dag.version.nodes.map((n: any) => [n.status, n.ready])).toEqual([["fix", true], ["restate", false], ["spec", false]]);
     expect(await run(EXE, "dag-show", "i28", "--version", "2")).toMatchObject({ ok: false, code: "not_found" });
   });
+
 
   test("没建 DAG：feature-show 节点为空，dag-show 报 not_found", async () => {
     await newFeature();

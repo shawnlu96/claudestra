@@ -7,9 +7,9 @@
 import type { Database } from "bun:sqlite";
 import { isManager, mustTask, type WriteCtx, type WriteResult } from "./ledger-checks.js";
 import { DAG_REASON_KINDS, FEATURE_STATUSES, type FeatureStatus } from "./ledger-feature-schema.js";
-import { getFeature, type DagNode, type DagVersion, type Feature, getDagVersion } from "./ledger-feature.js";
+import { getDagVersion, getFeature, PLANNED, type DagNode, type DagVersion, type Feature } from "./ledger-feature.js";
 import { ledgerOrigin } from "./ledger-origin.js";
-import type { LedgerEvent } from "./ledger-stages.js";
+import type { LedgerEvent, LedgerTask } from "./ledger-stages.js";
 import { LedgerError } from "./ledger-store.js";
 import { insertEvent, replay, tx } from "./ledger-tx.js";
 
@@ -18,6 +18,7 @@ export const NODE_LINE_MAX = 60;
 export const NODE_ESTIMATE_MAX = 20;
 export const DAG_NODES_MAX = 200;
 const SLUG = /^[A-Za-z0-9][A-Za-z0-9_-]{0,39}$/;
+const NODE_KEY = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,39}$/;
 
 export interface FeaturePatch {
   title?: string;
@@ -32,9 +33,10 @@ export interface NewFeature extends FeaturePatch {
   title: string;
 }
 
-/** 节点输入：id 是本项目已有的任务卡；oneLine 缺省取任务标题 */
+/** 节点输入：key 在这一版里唯一（缺省取 taskId）；taskId 可空 = 计划中还没建卡；oneLine 有卡时缺省取任务标题 */
 export interface NodeInput {
-  id: string;
+  key?: string;
+  taskId?: string | null;
   oneLine?: string;
   deps?: string[];
   estimate?: string;
@@ -124,10 +126,10 @@ export function setFeature(db: Database, ctx: WriteCtx, input: { id: string; rev
 
 /** 依赖只能指向同一版里的节点、不许自环、不许成环（Kahn：剩下排不出去的就在环上） */
 function checkAcyclic(nodes: readonly DagNode[]): void {
-  const indeg = new Map(nodes.map((n) => [n.id, n.deps.length]));
+  const indeg = new Map(nodes.map((n) => [n.key, n.deps.length]));
   const out = new Map<string, string[]>();
-  for (const n of nodes) for (const d of n.deps) out.set(d, [...(out.get(d) ?? []), n.id]);
-  const queue = nodes.filter((n) => n.deps.length === 0).map((n) => n.id);
+  for (const n of nodes) for (const d of n.deps) out.set(d, [...(out.get(d) ?? []), n.key]);
+  const queue = nodes.filter((n) => n.deps.length === 0).map((n) => n.key);
   for (let i = 0; i < queue.length; i++) {
     for (const next of out.get(queue[i]) ?? []) {
       const left = (indeg.get(next) as number) - 1;
@@ -135,30 +137,47 @@ function checkAcyclic(nodes: readonly DagNode[]): void {
       if (left === 0) queue.push(next);
     }
   }
-  if (queue.length < nodes.length) throw new LedgerError("invalid", `节点依赖成环：${nodes.filter((n) => !queue.includes(n.id)).map((n) => n.id).join(", ")}`);
+  if (queue.length < nodes.length) throw new LedgerError("invalid", `节点依赖成环：${nodes.filter((n) => !queue.includes(n.key)).map((n) => n.key).join(", ")}`);
 }
 
-/** 校验节点输入并补成快照：任务卡要在本项目、不属于别的 feature；status 取此刻的 stage */
+/** 节点的任务卡：要在本项目、不属于别的 feature；没绑卡返回 null */
+function nodeTask(db: Database, feature: Pick<Feature, "id" | "project">, key: string, raw: unknown): LedgerTask | null {
+  if (raw === undefined || raw === null) return null;
+  if (typeof raw !== "string" || !raw) throw new LedgerError("invalid", `节点 ${key} 的 taskId 要是任务卡 id 或 null`);
+  const task = mustTask(db, raw);
+  if (task.project !== feature.project) throw new LedgerError("invalid", `任务 ${raw} 在项目 ${task.project}，feature 在 ${feature.project}`);
+  if (task.featureId && task.featureId !== feature.id) throw new LedgerError("conflict", `任务 ${raw} 已属于 feature ${task.featureId}`, { featureId: task.featureId });
+  return task;
+}
+
+/** 校验一个节点输入并补成快照：status 取此刻的 stage，没卡为 planned */
+function buildNode(db: Database, feature: Pick<Feature, "id" | "project">, x: unknown): DagNode {
+  if (!x || typeof x !== "object" || Array.isArray(x)) throw new LedgerError("invalid", "每个节点要是对象 {key?, taskId?, oneLine?, deps?, estimate?}");
+  const n = x as Record<string, unknown>;
+  const key = n.key ?? n.taskId;
+  if (typeof key !== "string" || !NODE_KEY.test(key)) throw new LedgerError("invalid", "节点要有 key（字母数字开头、≤40 位；有 taskId 时缺省取它）");
+  const task = nodeTask(db, feature, key, n.taskId);
+  if (n.deps !== undefined && !(Array.isArray(n.deps) && n.deps.every((d) => typeof d === "string"))) throw new LedgerError("invalid", `节点 ${key} 的 deps 要是字符串数组`);
+  const oneLine = n.oneLine === undefined && task ? task.title : line(n.oneLine, `节点 ${key} 的一句话`, NODE_LINE_MAX, true);
+  const estimate = line(n.estimate, `节点 ${key} 的粗估`, NODE_ESTIMATE_MAX, false);
+  return { key, taskId: task?.id ?? null, oneLine, deps: [...new Set((n.deps as string[] | undefined) ?? [])], status: task?.stage ?? PLANNED, estimate, inheritedFrom: null };
+}
+
+/** 整版校验：key 唯一、一张卡只进一个节点、依赖只指向同版节点、不许自环 / 成环 */
 export function buildNodes(db: Database, feature: Pick<Feature, "id" | "project">, raw: unknown): DagNode[] {
   if (!Array.isArray(raw) || raw.length === 0) throw new LedgerError("invalid", "--nodes 要是非空 JSON 数组");
   if (raw.length > DAG_NODES_MAX) throw new LedgerError("invalid", `一版最多 ${DAG_NODES_MAX} 个节点，收到 ${raw.length}`);
-  const seen = new Set<string>();
-  const nodes = raw.map((x: unknown): DagNode => {
-    if (!x || typeof x !== "object" || Array.isArray(x)) throw new LedgerError("invalid", "每个节点要是对象 {id, oneLine?, deps?, estimate?}");
-    const n = x as Record<string, unknown>;
-    if (typeof n.id !== "string" || !n.id) throw new LedgerError("invalid", "节点缺 id（任务卡 id）");
-    if (seen.has(n.id)) throw new LedgerError("invalid", `节点 ${n.id} 重复`);
-    seen.add(n.id);
-    const task = mustTask(db, n.id);
-    if (task.project !== feature.project) throw new LedgerError("invalid", `任务 ${n.id} 在项目 ${task.project}，feature 在 ${feature.project}`);
-    if (task.featureId && task.featureId !== feature.id) throw new LedgerError("conflict", `任务 ${n.id} 已属于 feature ${task.featureId}`, { featureId: task.featureId });
-    if (n.deps !== undefined && !(Array.isArray(n.deps) && n.deps.every((d) => typeof d === "string"))) throw new LedgerError("invalid", `节点 ${n.id} 的 deps 要是字符串数组`);
-    const deps = [...new Set((n.deps as string[] | undefined) ?? [])];
-    const oneLine = n.oneLine === undefined ? task.title : line(n.oneLine, `节点 ${n.id} 的一句话`, NODE_LINE_MAX, true);
-    return { id: n.id, oneLine, deps, status: task.stage, estimate: line(n.estimate, `节点 ${n.id} 的粗估`, NODE_ESTIMATE_MAX, false), inheritedFrom: null };
-  });
+  const nodes = raw.map((x: unknown) => buildNode(db, feature, x));
+  const keys = new Set<string>();
+  const tasks = new Set<string>();
   for (const n of nodes) {
-    for (const d of n.deps) if (d === n.id || !seen.has(d)) throw new LedgerError("invalid", `节点 ${n.id} 的依赖 ${d} ${d === n.id ? "是它自己" : "不在这一版的节点里"}`);
+    if (keys.has(n.key)) throw new LedgerError("invalid", `节点 ${n.key} 重复`);
+    if (n.taskId && tasks.has(n.taskId)) throw new LedgerError("invalid", `任务 ${n.taskId} 出现在两个节点里`);
+    keys.add(n.key);
+    if (n.taskId) tasks.add(n.taskId);
+  }
+  for (const n of nodes) {
+    for (const d of n.deps) if (d === n.key || !keys.has(d)) throw new LedgerError("invalid", `节点 ${n.key} 的依赖 ${d} ${d === n.key ? "是它自己" : "不在这一版的节点里"}`);
   }
   checkAcyclic(nodes);
   return nodes;
@@ -167,7 +186,8 @@ export function buildNodes(db: Database, feature: Pick<Feature, "id" | "project"
 /** 节点任务卡挂上 featureId：每张卡 rev + 1、附一条 task 事件（和 task-set 的事件同形），依赖任务 rev 的 CAS 能看到这次改动 */
 function linkTasks(db: Database, ctx: WriteCtx, feature: Feature, nodes: readonly DagNode[]): void {
   for (const n of nodes) {
-    const t = mustTask(db, n.id);
+    if (!n.taskId) continue;
+    const t = mustTask(db, n.taskId);
     if (t.featureId === feature.id) continue;
     const rev = t.rev + 1;
     db.prepare("UPDATE tasks SET featureId = ?, rev = ?, updatedAt = ? WHERE id = ?").run(feature.id, rev, ctx.now ?? Date.now(), t.id);
@@ -195,7 +215,7 @@ export function initDag(db: Database, ctx: WriteCtx, input: { id: string; rev: n
     const rev = cur.rev + 1;
     db.prepare("UPDATE features SET currentVersion = 1, rev = ?, updatedAt = ? WHERE id = ?").run(rev, now, cur.id);
     linkTasks(db, ctx, cur, nodes);
-    const event = insertEvent(db, ctx, { ...key, data: { op: "dag-init", version: 1, nodes: nodes.map((n) => n.id), rev } }, true);
+    const event = insertEvent(db, ctx, { ...key, data: { op: "dag-init", version: 1, nodes: nodes.map((n) => n.key), rev } }, true);
     return { row: getDagVersion(db, cur.id, 1) as DagVersion, event, duplicate: false };
   });
 }
