@@ -280,7 +280,7 @@ export interface LaunchOptions {
    */
   projectContext?: string;
   role?: import("./team-roles.js").RoleLaunch; // 编排班子角色落盘后的文件，roleFlags 拼成 --agents / --agent / --append-system-prompt-file
-  callerCredFile?: string; // T85 一次性文件（含启动凭据的 MCP 配置，lib/caller-cred-launch.ts）；命令行里只出现路径
+  callerCredFile?: string; // T85 启动凭据的一次性文件（lib/caller-cred-launch.ts）；命令行里只出现路径
 }
 
 /** POSIX 单引号 shell 转义（pi-launch.ts 复用同一套，保证两侧注入的 env 语义一致） */
@@ -332,7 +332,7 @@ export function buildClaudeCommand(opts: LaunchOptions): string {
   const cred = opts.callerCredFile; // 有它就由它带 channel-server 的配置，沙箱那份不再重复给
   if (isSandbox()) parts.push(...sandboxLaunchArgs(MCP_NAME, resolveBunPath(), SRC_DIR, own, opts.settingsAgent, !cred).map(shellEscape));
   else parts.push(...settingsLaunchArgs(own, opts.settingsAgent).map(shellEscape));
-  parts.push(...ccCallerCredArgs(cred, MCP_NAME, shellEscape));
+  parts.push(...ccCallerCredArgs(cred, MCP_NAME).map(shellEscape));
 
   // bypassPermissions 走经过验证的 --dangerously-skip-permissions（语义相同，且它
   // 还顺带跳过 workspace trust dialog）；其余模式走 --permission-mode <mode>。

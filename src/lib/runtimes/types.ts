@@ -167,7 +167,7 @@ export interface LaunchSpec {
   permissionMode?: string;
   /** 运行时专属项（CC：disallowedPreset / disallowedRaw；Pi：piEnv）。不认得的键忽略 */
   extras?: Readonly<Record<string, unknown>>;
-  /** T85 启动凭据的一次性文件（manager/caller-cred-launch.ts 按适配器的 callerCred 写好内容），命令里只放路径 */
+  /** T85 启动凭据的一次性文件（lib/caller-cred-launch.ts 签发时写好），命令里只放路径 */
   callerCredFile?: string;
 }
 
@@ -264,7 +264,7 @@ export interface ManagedRuntimeAdapter extends SessionSourceAdapter {
   readonly acp?: AcpTransport;
   /** registry notes 里的会话前缀（历史值 "claude" / "pi"，保持不变） */
   readonly noteTag: string;
-  /** T85 启动凭据怎么交给 MCP 服务：mcp-config = 文件是含凭据的 MCP 配置（CC）；env = 文件是凭据本身（ACP 宿主）。不声明 = 不签 */
+  /** T85 启动凭据文件的路径怎么交：mcp-config = 放进 --mcp-config 里 channel-server 的 env（CC）；env = 宿主命令的环境变量（ACP）。不声明 = 不签 */
   readonly callerCred?: "mcp-config" | "env";
 
   isValidSessionId(id: string): boolean;

@@ -86,7 +86,7 @@ initDaemonLogs("launcher");
 import { assertPrimaryOrExit } from "./lib/owner-guard.js";
 import { busyAgentWindows } from "./lib/busy-windows.js";
 import { healSelfDirty } from "./lib/self-dirty.js";
-import { discardOneShot, issueLaunchCred } from "./lib/caller-cred-launch.js";
+import { discardOneShot, discardOneShotAfterReady, issueLaunchCred } from "./lib/caller-cred-launch.js";
 await assertPrimaryOrExit("launcher");
 
 // 默认 master 目录：仓库根 / master。允许 env 覆盖以支持自定义部署。
@@ -146,9 +146,8 @@ async function bringUpClaudeInMasterWindow(): Promise<boolean> {
     bridgeUrl: BRIDGE_URL,
     effort: MASTER_EFFORT,
     resumeId: resume?.sessionId, settingsAgent: "master", // 大总管也能按 agent 关技能（manager skill-toggle master …）
-    callerCredFile: credFile, // T85 启动凭据：shell 展开时读走即删，一分钟后兜底再删一次
+    callerCredFile: credFile, // T85 启动凭据：channel-server 读走即删，就绪 / 超时后兜底再删
   });
-  setTimeout(() => discardOneShot(credFile), 60_000).unref?.();
   // shell init 阶段的 Y/n（oh-my-zsh / homebrew）会吞掉首字符，先清掉。
   await clearShellInitPrompts(MASTER_WINDOW);
   await tmuxSendLine(MASTER_WINDOW, cmd);
@@ -160,7 +159,7 @@ async function bringUpClaudeInMasterWindow(): Promise<boolean> {
 
     if (await isIdle()) {
       console.log(`✅ 大总管已就绪${MASTER_EFFORT && MASTER_EFFORT !== "default" ? `（effort=${MASTER_EFFORT}）` : ""}`);
-      (await import("./lib/agent-settings.js")).dropLaunchSettings("master"); return true; // 超长设置落的启动快照：就绪 = CC 已读过
+      (await import("./lib/agent-settings.js")).dropLaunchSettings("master"); await discardOneShotAfterReady(credFile); return true; // 超长设置落的启动快照：就绪 = CC 已读过
     }
 
     if (masterShouldAutoConfirm(pane)) {
@@ -170,7 +169,7 @@ async function bringUpClaudeInMasterWindow(): Promise<boolean> {
     }
   }
 
-  console.log("⚠️ 大总管启动超时，但 window 可能仍在初始化");
+  console.log("⚠️ 大总管启动超时，但 window 可能仍在初始化"); discardOneShot(credFile);
   return await masterWindowExists();
 }
 

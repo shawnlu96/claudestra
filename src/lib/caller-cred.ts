@@ -1,24 +1,26 @@
 /**
  * MCP 调用方身份的凭据（T85，docs/architecture/caller-identity.md）：每次启动一个会话，manager / launcher 签一个随机凭据，
- * 只交给 MCP 服务进程（CC：--mcp-config 里该服务的 env；Codex ACP：宿主进程，它起适配器前就从环境里删掉），
- * 从不进 Claude Code / Codex 主进程的环境，于是它们的 Bash 子进程拿不到。
- * 落盘的只有 sha256 → {agent, 启动时的会话, 运行时}；同一个 agent 再签就删掉旧的，重启后旧凭据当场失效。
- * 明文只在「manager 写一次性文件 → 启动命令里的 shell 展开读走并删掉」这几百毫秒里在盘上（oneShotArg）。
+ * 明文只写进一次性文件（目录 0700、文件 0600），argv 和环境里只有它的路径（`ps -E` 看得到进程的启动环境，进程里 delete 也抹不掉）；
+ * 路径只给 MCP 服务进程（CC：--mcp-config 里该服务的 env；Codex ACP：宿主进程），它读进内存就删文件（takeCallerCred）。
+ * 盘上的窗口 = 启动 → MCP 服务读走，manager / launcher 就绪或失败后兜底再删。Claude Code / Codex 主进程与它们的 Bash 子进程都拿不到。
+ * 落盘长存的只有 sha256 → {agent, 启动时的会话, 运行时}；同一个 agent 再签就删掉旧的，重启后旧凭据当场失效。
  * tests/caller-cred.test.ts。
  */
 import { createHash, randomBytes } from "node:crypto";
-import { mkdirSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { basename, join } from "node:path";
 import { acquireLock } from "./file-lock.js";
 import { statePath } from "./paths.js";
 import { readJsonStateSync, writeJsonAtomic } from "./state-file.js";
 
-/** channel-server / acp-host 读凭据的环境变量名（只出现在 MCP 服务 / 宿主自己的环境里，读完即删） */
-export const CALLER_CRED_ENV = "CLAUDESTRA_CALLER_CRED";
+/** 一次性凭据文件路径的环境变量名（只出现在 MCP 服务 / 宿主自己的环境里）；值是路径，不是凭据 */
+export const CALLER_CRED_FILE_ENV = "CLAUDESTRA_CALLER_CRED_FILE";
 export const CALLER_CREDS_PATH = statePath("caller-creds.json");
 const ONE_SHOT_DIR = statePath("run", "caller-cred");
 /** 一次性文件没被 shell 读走（窗口没起来、命令没执行）时的清扫线 */
 const ONE_SHOT_STALE_MS = 10 * 60_000;
+/** writeOneShot 起的文件名；takeCallerCred 只删长这样的文件（路径来自环境变量，不能让它删到别的文件） */
+const ONE_SHOT_NAME = /^[0-9a-f]{16}\.cred$/;
 
 export interface CredRecord {
   agent: string;
@@ -66,11 +68,22 @@ export async function issueCallerCred(rec: Omit<CredRecord, "issuedAt">, path = 
   return token;
 }
 
-/** 从环境里取走凭据（取完删掉，本进程再起的子进程就继承不到） */
+/**
+ * 按环境里的路径读走凭据并删文件，环境变量也删（本进程再起的子进程继承不到）。文件已不在（/mcp 重连、被兜底删了）
+ * = undefined：连接照样注册，只是 verified=false，重启 agent 才有新凭据。
+ */
 export function takeCallerCred(env: Record<string, string | undefined>): string | undefined {
-  const v = env[CALLER_CRED_ENV]?.trim();
-  delete env[CALLER_CRED_ENV];
-  return v || undefined;
+  const path = env[CALLER_CRED_FILE_ENV]?.trim();
+  delete env[CALLER_CRED_FILE_ENV];
+  if (!path || !ONE_SHOT_NAME.test(basename(path))) return undefined;
+  let token = "";
+  try {
+    token = readFileSync(path, "utf8").trim();
+    rmSync(path, { force: true });
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code !== "ENOENT") console.error(`⚠ 读不了启动凭据文件（本次 verified=false）：${(e as Error).message}`);
+  }
+  return /^[0-9a-f]{64}$/.test(token) ? token : undefined;
 }
 
 /** 写一次性文件（目录 0700、文件 0600），顺手清掉超时没被读走的旧文件。返回路径 */
@@ -84,20 +97,21 @@ export function writeOneShot(content: string, dir = ONE_SHOT_DIR, now = Date.now
       console.error(`⚠ 清不掉过期的一次性凭据文件 ${p}：${(e as Error).message}`); // 下次签发再清，不挡这次启动
     }
   }
-  const path = join(dir, `${randomBytes(8).toString("hex")}.cred`);
+  const path = join(dir, `${randomBytes(8).toString("hex")}.cred`); // 名字须合 ONE_SHOT_NAME
   writeFileSync(path, content, { mode: 0o600, flag: "wx" });
   return path;
 }
 
-/** 就绪后兜底删一次（正常早已被 shell 读走删掉） */
+/** 启动失败时兜底删（正常早被 MCP 服务读走删掉） */
 export function discardOneShot(path: string | undefined): void {
   if (path) rmSync(path, { force: true });
 }
 
 /**
- * 启动命令里的那一截：`"$(cat 文件; rm -f 文件)"`。命令行、zsh 历史、tmux 屏幕上只有路径；
- * 文件已经不在（被清扫）时退回 fallback，会话照样起来，只是身份是 verified=false。
+ * 就绪后兜底删：先等 MCP 服务自己读走（CC 的就绪看的是 TUI，MCP 服务可能还没起来，删早了它就只能 verified=false），
+ * 最多等 waitMs 再删。正常路径文件早已不在，立即返回。
  */
-export function oneShotArg(path: string, fallback: string, esc: (s: string) => string): string {
-  return `"$(cat ${esc(path)} 2>/dev/null || printf '%s' ${esc(fallback)}; rm -f ${esc(path)})"`;
+export async function discardOneShotAfterReady(path: string | undefined, waitMs = 20_000): Promise<void> {
+  for (const end = Date.now() + waitMs; path && existsSync(path) && Date.now() < end; ) await Bun.sleep(250);
+  discardOneShot(path);
 }

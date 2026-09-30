@@ -127,7 +127,7 @@ import { abandonCreate, beginCreate, commitCreate, gateOps, guardCreateSignals, 
 import { notify } from "./lib/notify.js";
 import { writeJsonAtomic } from "./lib/state-file.js";
 import { stderrTail } from "./lib/run-manager.js";
-import { discardOneShot, issueCallerCredFor } from "./lib/caller-cred-launch.js";
+import { discardOneShot, discardOneShotAfterReady, issueCallerCredFor } from "./lib/caller-cred-launch.js";
 import { readyFailureText, modelPinPlan, modelPinRefusal, restartExceptionResult, bigSessionNote } from "./lib/restart-result.js";
 
 /**
@@ -721,7 +721,7 @@ async function launchInWindow(
   const unsent = await win.sendLine(adapter.buildLaunchCommand({ ...spec, callerCredFile: credFile, ...(fresh ? {} : { settingsName: tmuxName }) })).then(() => null, (e: Error) => e.message);
   if (unsent) return discardOneShot(credFile), { result: { ready: false, reason: "exited", detail: `启动命令没发出去：${unsent}`, recoveredFullSession: false } };
   const result = await adapter.waitReady(win, { rounds: CLAUDE_READY_ROUNDS, pollMs: 500 });
-  discardOneShot(credFile);
+  await (result.ready ? discardOneShotAfterReady(credFile) : discardOneShot(credFile));
   if (result.ready) (await import("./lib/agent-settings.js")).dropLaunchSettings(tmuxName); // 超长设置落的启动快照：就绪 = CC 已读过
   return { result, baseline };
 }

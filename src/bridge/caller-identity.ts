@@ -8,13 +8,14 @@ import type { ServerWebSocket } from "bun";
 import { statSync } from "node:fs";
 import { CALLER_CREDS_PATH, hashCred, readCredStore, type CredRecord } from "../lib/caller-cred.js";
 import { rejectsTakeover, resolveCallerIdentity, type CallerIdentity } from "../lib/caller-identity.js";
+import { REJECTED_CLOSE_CODE } from "../lib/link-policy.js";
 import { readRegistryAgentsSync } from "../lib/registry.js";
 import { connectionOf } from "./fleet/service.js";
 
 /** 连接 → 它注册时出示的凭据的哈希（连接关了自动回收） */
 const credHashOf = new WeakMap<object, string>();
 let cache: { mtimeMs: number; creds: Record<string, CredRecord> } | null = null;
-/** 被拒的野进程每 3 秒重试一次（它每次连上都把退避清零）：同一个频道 + pid 只记一次日志 */
+/** 被拒的野进程会退避重试（3s → 60s）：同一个频道 + pid 只记一次日志 */
 const rejectLogged = new Set<string>();
 
 function currentCreds(): Record<string, CredRecord> {
@@ -37,7 +38,7 @@ function identityOf(ws: object, channelId: string | undefined, controlChannelId:
 
 /**
  * register 时调：记下凭据哈希；频道正被一个仍有效的已验证连接持有、而新来的没有有效凭据 → 拒绝并返回 false。
- * 拒绝用 4002（普通关闭）：对方走指数退避重连，不会当成「被顶替」回来抢，也不会退出（channel-server 没有守护者）。
+ * 拒绝用 4002（REJECTED_CLOSE_CODE）：对方走指数退避重连，不会当成「被顶替」回来抢，也不会退出（channel-server 没有守护者）。
  */
 export function admitCaller(ws: ServerWebSocket<unknown>, msg: Record<string, unknown>, holder: ServerWebSocket<unknown> | undefined, controlChannelId?: string): boolean {
   const token = msg.callerCred;
@@ -56,7 +57,7 @@ export function admitCaller(ws: ServerWebSocket<unknown>, msg: Record<string, un
   }
   try {
     ws.send(JSON.stringify({ type: "rejected", reason }));
-    ws.close(4002, "verified holder");
+    ws.close(REJECTED_CLOSE_CODE, "verified holder");
   } catch (e) {
     console.error(`⚠ 拒绝注册时回帧失败（对方已断开？）：${(e as Error).message}`);
   }

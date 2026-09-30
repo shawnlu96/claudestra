@@ -3,8 +3,8 @@ import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, statSync, uti
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { adapterEnv } from "../src/lib/acp/adapter-proc.ts";
-import { CALLER_CRED_ENV, hashCred, issueCallerCred, lookupCred, newCredToken, oneShotArg, readCredStore, takeCallerCred, writeOneShot } from "../src/lib/caller-cred.ts";
-import { acpCallerCredAssignment, callerCredMcpConfig } from "../src/lib/caller-cred-launch.ts";
+import { CALLER_CRED_FILE_ENV, discardOneShotAfterReady, hashCred, issueCallerCred, lookupCred, newCredToken, readCredStore, takeCallerCred, writeOneShot } from "../src/lib/caller-cred.ts";
+import { acpCallerCredAssignment } from "../src/lib/caller-cred-launch.ts";
 import { buildClaudeCommand, shellEscape } from "../src/lib/claude-launch.ts";
 import { testChildEnv } from "./test-env.ts";
 
@@ -49,12 +49,6 @@ describe("凭据与存储", () => {
     expect(lookupCred({}, undefined)).toBeNull();
   });
 
-  test("takeCallerCred 读完就从环境里删掉", () => {
-    const env: Record<string, string | undefined> = { [CALLER_CRED_ENV]: "abc", OTHER: "1" };
-    expect(takeCallerCred(env)).toBe("abc");
-    expect(env).toEqual({ OTHER: "1" });
-    expect(takeCallerCred(env)).toBeUndefined();
-  });
 });
 
 describe("一次性文件", () => {
@@ -69,11 +63,29 @@ describe("一次性文件", () => {
     expect(existsSync(stale)).toBe(false);
   });
 
-  test("shell 展开读出内容并删文件；文件不在时退回 fallback", () => {
-    const p = writeOneShot("s3cr3t 'quoted' $HOME", fresh("oneshot"));
-    expect(sh(`printf '%s' ${oneShotArg(p, "FB", shellEscape)}`)).toBe("s3cr3t 'quoted' $HOME");
+  test("takeCallerCred 按路径读走凭据：删文件、删环境变量；文件不在 / 名字不像一次性文件 → 不读不删", () => {
+    const token = newCredToken();
+    const p = writeOneShot(token, fresh("oneshot"));
+    const env: Record<string, string | undefined> = { [CALLER_CRED_FILE_ENV]: p, OTHER: "1" };
+    expect(takeCallerCred(env)).toBe(token);
+    expect(env).toEqual({ OTHER: "1" });
     expect(existsSync(p)).toBe(false);
-    expect(sh(`printf '%s' ${oneShotArg(p, '{"mcpServers":{}}', shellEscape)}`)).toBe('{"mcpServers":{}}');
+    expect(takeCallerCred({ [CALLER_CRED_FILE_ENV]: p })).toBeUndefined(); // /mcp 重连：文件已不在
+    const other = join(root, "not-a-cred.txt");
+    writeFileSync(other, token);
+    expect(takeCallerCred({ [CALLER_CRED_FILE_ENV]: other })).toBeUndefined();
+    expect(existsSync(other)).toBe(true);
+  });
+
+  test("就绪后兜底删：等 MCP 服务读走，读走了立即返回；一直没人读就到点删", async () => {
+    const p = writeOneShot("x", fresh("oneshot"));
+    setTimeout(() => rmSync(p, { force: true }), 100);
+    const t0 = Date.now();
+    await discardOneShotAfterReady(p, 5_000);
+    expect(Date.now() - t0).toBeLessThan(2_000);
+    const q = writeOneShot("y", fresh("oneshot"));
+    await discardOneShotAfterReady(q, 300);
+    expect(existsSync(q)).toBe(false);
   });
 });
 
@@ -89,39 +101,49 @@ describe("交付：Bash 子进程的环境里没有凭据", () => {
     return { dir, envOut, argsOut };
   }
 
-  test("CC：凭据只在 --mcp-config 里 claudestra 那一项的 env；命令行文本只有路径；claude 进程环境里没有", () => {
+  /** 假进程 dump 下来的环境 → 对象 */
+  const envOf = (file: string): Record<string, string | undefined> =>
+    Object.fromEntries(readFileSync(file, "utf8").split("\n").filter(Boolean).map((l) => [l.slice(0, l.indexOf("=")), l.slice(l.indexOf("=") + 1)]));
+
+  test("CC：argv 与 claude 的环境里都没有凭据；--mcp-config 里 claudestra 那一项的 env 只有文件路径，channel-server 读走即删", () => {
     const token = newCredToken();
-    const file = writeOneShot(callerCredMcpConfig("claudestra", token), fresh("oneshot"));
+    const file = writeOneShot(token, fresh("oneshot"));
     const cmd = buildClaudeCommand({ channelId: "123", bridgeUrl: "ws://localhost:1", callerCredFile: file });
     expect(cmd).not.toContain(token);
-    expect(cmd).toContain(file);
     const bin = fakeBin("claude");
     sh(cmd, { PATH: `${bin.dir}:${process.env.PATH}` });
     const env = readFileSync(bin.envOut, "utf8");
     expect(env).not.toContain(token);
-    expect(env).not.toContain(CALLER_CRED_ENV);
-    const args = readFileSync(bin.argsOut, "utf8").split("\n");
-    const cfg = JSON.parse(args[args.indexOf("--mcp-config") + 1]);
-    expect(cfg.mcpServers.claudestra.env).toEqual({ [CALLER_CRED_ENV]: token });
+    expect(env).not.toContain(CALLER_CRED_FILE_ENV);
+    const args = readFileSync(bin.argsOut, "utf8");
+    expect(args).not.toContain(token);
+    const list = args.split("\n");
+    const cfg = JSON.parse(list[list.indexOf("--mcp-config") + 1]);
+    expect(cfg.mcpServers.claudestra.env).toEqual({ [CALLER_CRED_FILE_ENV]: file });
+    expect(existsSync(file)).toBe(true); // 留给 channel-server 读
+    const mcpEnv: Record<string, string | undefined> = { ...cfg.mcpServers.claudestra.env };
+    expect(takeCallerCred(mcpEnv)).toBe(token);
     expect(existsSync(file)).toBe(false);
   });
 
-  test("ACP：凭据只给宿主；宿主取走后，适配器（及 Codex 的 shell）环境里哪儿都没有", () => {
+  test("ACP：宿主命令只带路径；宿主读走后文件删掉，适配器（及 Codex 的 shell）环境里哪儿都没有", () => {
     const token = newCredToken();
     const file = writeOneShot(token, fresh("oneshot"));
     const bin = fakeBin("host");
-    sh(`X=1${acpCallerCredAssignment(file, shellEscape)} '${join(bin.dir, "host")}'`);
-    const hostEnv: Record<string, string | undefined> = Object.fromEntries(
-      readFileSync(bin.envOut, "utf8").split("\n").filter(Boolean).map((l) => [l.slice(0, l.indexOf("=")), l.slice(l.indexOf("=") + 1)]),
-    );
-    expect(hostEnv[CALLER_CRED_ENV]).toBe(token);
+    const cmd = `X=1${acpCallerCredAssignment(file, shellEscape)} '${join(bin.dir, "host")}'`;
+    expect(cmd).not.toContain(token);
+    sh(cmd);
+    const hostEnv = envOf(bin.envOut);
+    expect(JSON.stringify(hostEnv)).not.toContain(token);
+    expect(hostEnv[CALLER_CRED_FILE_ENV]).toBe(file);
     expect(takeCallerCred(hostEnv)).toBe(token);
+    expect(existsSync(file)).toBe(false);
     const env = adapterEnv({
       base: hostEnv, bunBin: "/bin/bun", channelServer: "/repo/src/channel-server.ts", mcpName: "claudestra", logsDir: "/tmp/x",
       channel: { channelId: "c", proxyUrl: "ws://127.0.0.1:1/?t=x", agentName: "agent-a", sessionId: "s" },
     });
     expect(JSON.stringify(env)).not.toContain(token);
-    expect(existsSync(file)).toBe(false);
+    expect(JSON.stringify(env)).not.toContain(file);
   });
 
   test("没文件就不加任何东西", () => {

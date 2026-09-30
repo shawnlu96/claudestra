@@ -12,11 +12,19 @@ Every bypass agent is already an unrestricted shell on this machine, so **delibe
 ## How it works
 
 1. **Issue** (`lib/caller-cred.ts`, `lib/caller-cred-launch.ts`): every launch through `manager` `launchInWindow` (create / resume / restart / fork) and every master launch in `launcher.ts` issues a fresh 32-byte random credential. `caller-creds.json` (state dir, mode 0600) stores only `sha256 → {agent, sessionId at launch, family, issuedAt}`. A new credential for an agent deletes that agent's previous record, so the old credential stops working immediately.
-2. **Hand-off** without touching the main process environment:
-   - **Claude Code**: a one-shot file (0700 dir, 0600 file) holds an MCP config with just the `claudestra` server, and the credential sits in that server's `env`. The launch command passes `--mcp-config "$(cat <file>; rm -f <file>)"`. A same-name `--mcp-config` overrides the user-scope registration, and Claude Code merges the entry's `env` into the server's environment only. Claude Code and its Bash tool never see it (both verified by hand with a probe server). The Bash test is in `tests/caller-cred.test.ts`.
-   - **Codex ACP**: the same one-shot file becomes `CLAUDESTRA_CALLER_CRED=…` for the `acp-host` command only. `acp-host` removes it from `process.env` before it spawns anything. `adapterEnv` copies `process.env`, so without that removal the credential would reach Codex's shell commands. It also never goes into `CODEX_CONFIG`, because codex-acp logs that value verbatim at startup and passes it on to app-server.
-   - The command line, zsh history and the tmux screen contain only the file path. The shell reads and deletes the file when it expands the command. `manager` deletes it again after the ready check, and `launcher` a minute after sending. Unread files older than 10 minutes are swept at the next issue.
-3. **Register**: `channel-server` reads the credential into memory and deletes the env var, so its own children such as `codex queue` don't inherit it. After the MCP handshake it sends the credential in the `register` frame as `callerCred`, and `acp-host` does the same in its own register frame. The bridge (`bridge/caller-identity.ts`) keeps only the hash, attached to that ws.
+2. **Hand-off**: the credential lives only in a one-shot file (0700 dir, 0600 file). Every argv and every environment carries just the file's **path**. Two reasons:
+   - any same-user process can read argv with `ps`;
+   - it can also read a process's **launch environment** with `ps -E`. Checked on macOS: this works for non-platform binaries such as bun, and still works after the process deletes the variable from `process.env`.
+
+   Delivery per runtime:
+   - **Claude Code**: `--mcp-config` carries an inline config with just the `claudestra` server, and that server's `env` holds `CLAUDESTRA_CALLER_CRED_FILE=<path>`. A same-name `--mcp-config` overrides the user-scope registration, and Claude Code merges the entry's `env` into the server's environment only. Claude Code and its Bash tool never see even the path (both verified by hand with a probe server). The Bash test is in `tests/caller-cred.test.ts`.
+   - **Codex ACP**: `CLAUDESTRA_CALLER_CRED_FILE=<path>` goes to the `acp-host` command only. The host reads the file, deletes it and drops the variable before it spawns anything. The credential never goes into `CODEX_CONFIG`, because codex-acp logs that value verbatim at startup and passes it on to app-server.
+3. **Register**: the MCP server (`channel-server`, or `acp-host` under ACP) reads the file into memory and deletes it (`takeCallerCred`). It only deletes files that match the one-shot naming pattern. After the MCP handshake it sends the credential in the `register` frame as `callerCred`. The bridge (`bridge/caller-identity.ts`) keeps only the hash, attached to that ws.
+
+   Backstop deletion:
+   - `manager`: after the ready check, it waits up to 20 s for the MCP server to consume the file, then deletes it. Claude Code's ready signal is its TUI prompt, which can appear before the MCP server starts. On failure paths it deletes the file immediately.
+   - `launcher` does the same for master.
+   - Unread files older than 10 minutes are swept at the next issue.
 4. **Resolve** (`lib/caller-identity.ts`, pure): `CallerIdentity {agent, sessionId, family, verified}`. `verified` requires:
    - the hash is still in the store;
    - the credential was issued to the agent that owns the registered channel (master = control channel);
@@ -27,9 +35,9 @@ Every bypass agent is already an unrestricted shell on this machine, so **delibe
 
 ## Misdelivery guard
 
-If a channel is held by a connection whose credential is still valid, a registration **without** a valid credential is refused (`rejected` + close 4002). The newcomer backs off and retries as usual. It does not treat this as being replaced, and it does not exit. Situations this does not affect:
+If a channel is held by a connection whose credential is still valid, a registration **without** a valid credential is refused (`rejected` + close 4002). The newcomer backs off 3s → 60s (`lib/link-policy.ts` `reconnectDelayMs`). Its counter resets only on `registered`, not on connect, so a rejected stray does not retry every 3 s. It does not treat this as being replaced, and it does not exit. `tests/caller-reject.test.ts` pins both sides. Situations this does not affect:
 
-- `/mcp` reconnect: the new instance carries the same credential;
+- `/mcp` reconnect: the old instance is gone, so there is no holder. The new instance finds the file already consumed and registers as `verified=false`. Restart the agent to get a fresh credential.
 - restart: the old credential is gone, so the old holder is unverified;
 - the upgrade window: nobody has a credential yet.
 
@@ -39,7 +47,7 @@ Under ACP the host is the only bridge registrant. Codex's `channel-server` insta
 
 ## Known limits (accepted, not P1)
 
-- Deliberately reading the credential is out of scope. That covers the Claude Code / acp-host argv (`ps`), process memory, the one-shot file in its sub-second window, and `/mcp` details.
+- **Plaintext on disk, from launch to consumption**: the one-shot file exists from the moment `manager` / `launcher` writes it until the MCP server reads it. That is normally about a second; at most it lasts until the backstop after ready, or until a failure path. Reading the file inside that window is out of scope, and so is deliberately reading process memory. Everything else holds only the path or the hash.
 - Runtimes not covered, always `verified=false`: Pi, Codex tmux transport, HTTP peers / remote agents.
-- If the one-shot file is gone before the shell expands the command, the session starts with the same config minus the credential (`verified=false`).
+- If the one-shot file is gone when the MCP server starts (`/mcp` reconnect, a swept file), the session still works, with `verified=false`.
 - The ACP `outsideMcpLauncher` signal is self-reported. It catches accidents, not intent.
