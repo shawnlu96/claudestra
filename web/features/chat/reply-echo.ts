@@ -116,20 +116,37 @@ export function isEchoSegment(m: EchoCandidate, segText: string | undefined): bo
 }
 
 /**
- * 紧跟在 reply 之后、只有旁白的消息 id（历史按 jsonl 记录切条，「回复完又用文字写一遍」常独立成一条）。
+ * 默认收起的旁白：消息 id → 这条消息里第几段之后的 text 段收起（-1 = 整条都收）。两种来源：
+ * ① 紧跟在 reply 之后、只有旁白的消息（历史按 jsonl 记录切条，「回复完又用文字写一遍」常独立成一条）；
+ * ② 本轮（到下一条非 assistant 消息为止）最后一次 reply 之后的文字：agent 常先记记忆、改文件再补一段总结，
+ *    中间隔了工具调用也算，工具段照常显示；两次 reply 之间的过程旁白不收。
  * 不看文字是否相同——中文 reply + 英文复述这种 isReplyEcho 认不出；这里只决定默认收起（narration-fold.ts），不藏。
  */
-export function postReplyMessageIds(messages: EchoCandidate[]): Set<string> {
-  const out = new Set<string>();
+export function postReplyFolds(messages: EchoCandidate[]): Map<string, number> {
+  const out = new Map<string, number>();
   let prevEndsWithReply = false;
+  let turn: EchoCandidate[] = [];
+  const closeTurn = () => {
+    const last = turn.findLastIndex((m) => repliesOf(m).length > 0);
+    if (last >= 0) {
+      const segs = turn[last].segments ?? [];
+      const r = segs.findLastIndex((s) => s.kind === "reply" && !!s.text?.trim());
+      if (r >= 0 && segs.slice(r + 1).some((s) => s.kind === "text")) out.set(turn[last].id, r);
+      for (const m of turn.slice(last + 1)) out.set(m.id, -1);
+    }
+    turn = [];
+  };
   for (const m of messages) {
     if (m.role !== "assistant") {
+      closeTurn();
       prevEndsWithReply = false;
       continue;
     }
-    if (prevEndsWithReply && bareNarration(m)) out.add(m.id);
+    if (prevEndsWithReply && bareNarration(m)) out.set(m.id, -1);
+    turn.push(m);
     const segs = m.segments ?? [];
     prevEndsWithReply = segs.length ? segs[segs.length - 1].kind === "reply" : !!m.replyText?.trim();
   }
+  closeTurn();
   return out;
 }
