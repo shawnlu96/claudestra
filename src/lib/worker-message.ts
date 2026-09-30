@@ -3,9 +3,9 @@
  * Both send through MessagePort (today's send_to_agent path; T48 swaps the port). The fallback cannot be built without a
  * reason, and every receipt it produces carries that reason, so the ledger always shows why a session was typed into.
  */
-import { ensureVia, observeVia, sendReceipt, type AdapterDeps, type MessagePort } from "./worker-ports.js";
+import { ensureVia, observeVia, orderMismatch, sendReceipt, type AdapterDeps, type MessagePort } from "./worker-ports.js";
 import { renderWorkOrder } from "./worker-order.js";
-import type { SubmitReceipt, WorkerSession } from "./worker-session.js";
+import type { ControlReceipt, SubmitReceipt, WorkerSession } from "./worker-session.js";
 
 export interface MessageAdapterOpts extends AdapterDeps {
   port: MessagePort;
@@ -22,32 +22,34 @@ export function createTmuxFallbackWorker(o: MessageAdapterOpts & { reason: strin
 }
 
 function messageWorker(o: MessageAdapterOpts, route: "channel" | "tmux", fallback: string | null): WorkerSession {
+  const why = fallback ? { fallbackReason: fallback } : {};
   return {
     route,
+    fallbackReason: fallback,
     ensure: (taskId, role, family) => ensureVia(o, route, taskId, role, family),
     async submit(ref, intentId, order): Promise<SubmitReceipt> {
-      if (order.dedupKey !== intentId) return { status: "rejected", route, reason: "任务单去重键与调度意图不一致" };
+      const bad = orderMismatch(route, ref, intentId, order);
+      if (bad) return { status: "rejected", route, reason: bad, ...why };
       try {
-        return sendReceipt(route, intentId, await o.port.send(ref.agent, renderWorkOrder(order), intentId), fallback);
+        return sendReceipt(route, intentId, await o.port.send(ref.agent, ref.sessionId, renderWorkOrder(order), intentId), fallback);
       } catch (e) {
-        return { status: "unknown", route, reason: `发送中断：${(e as Error).message}` };
+        return { status: "unknown", route, reason: `发送中断：${(e as Error).message}`, ...why };
       }
     },
     async observe(ref, order) {
       let live: Awaited<ReturnType<MessagePort["status"]>>;
       try {
-        live = await o.port.status(ref.agent);
+        live = await o.port.status(ref.agent, ref.sessionId);
       } catch {
         live = "unknown"; // a failed status read only means unknown liveness; the ledger result check below still runs
       }
       return observeVia(o, ref, order, live);
     },
-    async cancel(ref) {
+    async cancel(ref): Promise<ControlReceipt> {
       try {
-        const r = await o.port.interrupt(ref.agent);
-        return r.ok && fallback ? { ok: true, evidence: `${r.evidence}; ${fallback}` } : r;
+        return { ...(await o.port.interrupt(ref.agent, ref.sessionId)), ...why };
       } catch (e) {
-        return { ok: false, unknown: true, reason: `打断请求中断：${(e as Error).message}` };
+        return { ok: false, unknown: true, reason: `打断请求中断：${(e as Error).message}`, ...why };
       }
     },
     archive: (ref) => o.sessions.archive(ref),

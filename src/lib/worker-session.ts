@@ -38,11 +38,13 @@ export interface WorkOrder {
 /**
  * sent = the transport accepted the message under this key; rejected = provably not delivered (safe to replan);
  * unknown = may or may not have been delivered, so nobody may resend under a new key until PM reconciles.
+ * fallbackReason is set on every receipt of a tmux fallback, success or not, so the ledger always shows why.
  */
-export type SubmitReceipt =
+export type SubmitReceipt = (
   | { status: "sent"; route: WorkerRouteKind; messageKey: string; evidence: string }
   | { status: "rejected"; route: WorkerRouteKind; reason: string }
-  | { status: "unknown"; route: WorkerRouteKind; reason: string };
+  | { status: "unknown"; route: WorkerRouteKind; reason: string }
+) & { fallbackReason?: string };
 
 /** The part of a work order observe() needs to match a ledger result or a host failure to this exact intent. */
 export type OrderProbe = Pick<WorkOrder, "round" | "step" | "head" | "dedupKey">;
@@ -59,10 +61,12 @@ export type EnsureResult =
   | { kind: "manual"; reason: string }
   | { kind: "unknown"; reason: string };
 
-export type ControlReceipt = { ok: true; evidence: string } | { ok: false; unknown: boolean; reason: string };
+export type ControlReceipt = ({ ok: true; evidence: string } | { ok: false; unknown: boolean; reason: string }) & { fallbackReason?: string };
 
 export interface WorkerSession {
   readonly route: WorkerRouteKind;
+  /** Non-null only for the tmux fallback; the driver writes it into the claim and every receipt. */
+  readonly fallbackReason: string | null;
   ensure(taskId: string, role: SessionRole, family: AuthorFamily): Promise<EnsureResult>;
   submit(ref: SessionRef, intentId: string, order: WorkOrder): Promise<SubmitReceipt>;
   observe(ref: SessionRef, order: OrderProbe): Promise<WorkerObservation>;
@@ -98,4 +102,15 @@ export function selectWorkerRoute(t: RouteTarget): WorkerRoute {
   }
   if (t.runtime === undefined || t.runtime === "claude-code") return { kind: "route", route: "channel", transport: "tmux", family: "claude", fallbackReason: null };
   return { kind: "manual", reason: `未知 runtime ${t.runtime}，不猜派单路径` };
+}
+
+/** The host shape each route can drive; anything else is a misbound session and must not be sent to. */
+const ROUTE_HOST: Record<WorkerRouteKind, { transport: SessionTransport; family: AuthorFamily }> = {
+  acp: { transport: "acp", family: "codex" }, channel: { transport: "tmux", family: "claude" }, tmux: { transport: "tmux", family: "codex" },
+};
+
+export function routeMismatch(route: WorkerRouteKind, ref: Pick<SessionRef, "transport" | "family">): string | null {
+  const want = ROUTE_HOST[route];
+  return ref.transport === want.transport && ref.family === want.family ? null
+    : `${route} 路径只驱动 ${want.family}/${want.transport} 宿主，session 是 ${ref.family}/${ref.transport}`;
 }

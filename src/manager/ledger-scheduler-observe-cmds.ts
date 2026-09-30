@@ -57,7 +57,8 @@ export const SCHEDULER_OBSERVE_CMDS: Record<string, CommandSpec> = {
         schedulerDiff(listEvents(c.db, { project, target: id }), (a) => pms.has(a)).map((r) => ({ ...r, task: id })));
       const count = (v: string) => all.filter((r) => r.verdict === v).length;
       const rows = c.p.bools.has("all") ? all : all.filter((r) => r.verdict !== "match");
-      return { ok: true, project, tasks: ids, summary: { match: count("match"), diff: count("diff"), pending: count("pending"), superseded: count("superseded") },
+      return { ok: true, project, tasks: ids, summary: { match: count("match"), diff: count("diff"), unknown: count("unknown"), pending: count("pending"),
+        superseded: count("superseded") },
         lines: rows.map((r) => diffLine(r.task, r)), rows };
     },
   },

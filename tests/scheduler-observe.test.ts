@@ -2,10 +2,13 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
+import { bindHash } from "../src/lib/ask-bind.js";
+import { answerAsk, openAsk } from "../src/lib/ledger-asks.js";
 import { setWorkflow } from "../src/lib/ledger-scheduler-write.js";
 import { closeLedger, getTask, listEvents, openLedger } from "../src/lib/ledger-store.js";
 import { assignStep } from "../src/lib/ledger-steps-write.js";
 import { appendEvent, createTask, deliver, moveStage, recordReview } from "../src/lib/ledger-write.js";
+import { schedulerDiff } from "../src/lib/scheduler-diff.js";
 import { schedulerObserveTick } from "../src/lib/scheduler-observe-tick.js";
 import { runLedger } from "../src/manager/ledger.js";
 import type { LedgerDeps } from "../src/manager/ledger-context.js";
@@ -15,7 +18,9 @@ const H1 = "1".repeat(40), H2 = "2".repeat(40);
 const P1 = { findingId: "race-1", family: "concurrency", severity: "P1" as const, probe: "two ticks claim the same intent" };
 const P2 = { findingId: "name-1", family: "naming", severity: "P2" as const, probe: "rename helper" };
 
-function fixture() {
+const DIGEST = "d".repeat(64);
+
+function fixture(template: "code" | "ui" = "code") {
   const dir = mkdtempSync(join(tmpdir(), "t68e-observe-")), path = join(dir, "ledger.sqlite"), db = openLedger(path);
   const registryPath = join(dir, "registry.json");
   writeFileSync(registryPath, JSON.stringify({ socket: "", agents: {
@@ -24,8 +29,9 @@ function fixture() {
   } }));
   let now = 1000;
   const at = (actor: string) => ({ actor, now: (now += 10) });
-  createTask(db, at("owner"), { project: "p", id: "T1", title: "observe", kind: "code", agent: "agent-one", extra: { fileGlobs: ["src/lib/x.ts"] } });
-  setWorkflow(db, at("owner"), { taskId: "T1", taskRev: 1, template: "code", templateVersion: 2, mode: "observe", authorFamily: "claude", fallback: "只报错" });
+  createTask(db, at("owner"), { project: "p", id: "T1", title: "observe", kind: "code", agent: "agent-one",
+    extra: { fileGlobs: ["src/lib/x.ts"], ...(template === "ui" ? { screenshotsDigest: DIGEST } : {}) } });
+  setWorkflow(db, at("owner"), { taskId: "T1", taskRev: 1, template, templateVersion: 2, mode: "observe", authorFamily: "claude", fallback: "只报错" });
   const deps = (actor: string): LedgerDeps => ({
     db, actor, registryPath, projectIds: ["p"], now: () => (now += 10),
     loadRegistry: async () => JSON.parse(readFileSync(registryPath, "utf8")) as Registry, saveRegistry: async () => {},
@@ -35,14 +41,23 @@ function fixture() {
     expect(r.ok).toBe(true);
     return r as { duplicate: boolean; decision: Record<string, unknown>; event: { data: Record<string, unknown> } };
   };
-  const review = (verdict: "pass" | "changes", head: string, findings: object[], move?: "fix" | "merge") =>
-    recordReview(db, at("owner"), { taskId: "T1", reviewer: "agent-review", verdict, path: `reviews/T1-r${getTask(db, "T1")!.round}/report.md`,
+  const review = (verdict: "pass" | "changes", head: string, findings: object[], move?: "fix" | "merge", who = ["agent-review", "s-review"]) =>
+    recordReview(db, at("owner"), { taskId: "T1", reviewer: who[0], verdict, path: `reviews/T1-r${getTask(db, "T1")!.round}/report.md`,
       p0: 0, p1: findings.filter((f) => (f as { severity: string }).severity === "P1").length, p2: findings.filter((f) => (f as { severity: string }).severity === "P2").length,
-      head, reviewerSessionId: "s-review", reviewerFamily: "codex", findings: findings as never, ...(move ? { move: { from: "review", to: move } } : {}) });
-  const dispatch = (head: string) => appendEvent(db, at("owner"), { project: "p", target: "T1", kind: "dispatch",
-    data: { reviewer: "adversarial", round: getTask(db, "T1")!.round, head } });
+      head, reviewerSessionId: who[1], reviewerFamily: "codex", findings: findings as never, ...(move ? { move: { from: "review", to: move } } : {}) });
+  const dispatch = (head: string, type = "adversarial") => appendEvent(db, at("owner"), { project: "p", target: "T1", kind: "dispatch",
+    data: { reviewer: type, round: getTask(db, "T1")!.round, head } });
+  /** spec → restate → build → delivered at H1 → review step assigned to agent-review. */
+  const toReview = () => {
+    moveStage(db, at("agent-one"), { taskId: "T1", from: "spec", to: "restate" });
+    moveStage(db, at("owner"), { taskId: "T1", from: "restate", to: "build" });
+    deliver(db, at("agent-one"), { taskId: "T1", headSHA: H1, moveFrom: "build" });
+    assignStep(db, at("owner"), { taskId: "T1", step: "review", executor: "agent-review", executorKind: "agent" });
+  };
+  const rows = async () => (await runLedger(["scheduler-diff", "T1", "--all"], deps("owner"))).rows as
+    { planned: string; actual: string | null; verdict: string; note: string; round: number }[];
   const close = () => { closeLedger(path); rmSync(dir, { recursive: true, force: true }); };
-  return { db, at, deps, observe, review, dispatch, close };
+  return { db, at, deps, observe, review, dispatch, toReview, rows, close, now: () => now };
 }
 
 const externalEffects = (db: ReturnType<typeof openLedger>) => ({
@@ -86,7 +101,7 @@ describe("T68e observe mode", () => {
       const rows = diff.rows as { planned: string; verdict: string; note: string }[];
       expect(rows.filter((r) => r.verdict === "diff")).toEqual([]);
       expect(rows.at(-1)).toMatchObject({ verdict: "pending" });
-      expect(rows.some((r) => r.note.includes("review --to"))).toBe(true);
+      expect(diff.lines).toContain("T1 · review 第 2 轮 · 一致 · 引擎：推阶段到 merge ｜ 实际：owner 推阶段 review→merge（按结论当时的台账回溯重算；阶段一致，0 秒后）");
       expect(diff.lines).toContain("T1 · review 第 1 轮 · 一致 · 引擎：推阶段到 fix ｜ 实际：owner 推阶段 review→fix（阶段一致，0 秒后）");
       const project = await runLedger(["scheduler-diff", "--project", "p"], f.deps("owner"));
       expect(project).toMatchObject({ ok: true, tasks: ["T1"], summary: { diff: 0, pending: 1 } });
@@ -172,6 +187,99 @@ describe("T68e observe mode", () => {
       expect(r.ok).toBe(true);
       expect((r.event as { data: Record<string, unknown> }).data).toMatchObject({ head: H1, reviewerSessionId: "s-review", reviewerFamily: "codex", findings: [P2] });
       rmSync(dir, { recursive: true, force: true });
+    } finally { f.close(); }
+  });
+
+  test("P1-1 regression: a verdict never vouches for its own dispatch, reviewer or session", async () => {
+    const f = fixture();
+    try {
+      f.toReview();
+      expect((await f.observe()).decision).toMatchObject({ action: "review", recipient: "agent-review" });
+      f.dispatch(H1, "regular");
+      await f.observe();
+      f.review("pass", H1, [], undefined, ["agent-other", "nonexistent-session"]);
+      expect((await f.observe()).decision).toMatchObject({ kind: "escalate", code: "review_unsolicited" });
+      const rows = await f.rows();
+      expect(rows).toContainEqual(expect.objectContaining({ verdict: "diff", actual: "派审（regular）" }));
+      expect(rows.filter((r) => r.verdict === "match")).toHaveLength(0);
+    } finally { f.close(); }
+    for (const who of [["agent-other", "s-other"], ["agent-review", "nonexistent-session"]]) {
+      const g = fixture();
+      try {
+        g.toReview();
+        g.dispatch(H1);
+        await g.observe();
+        g.review("pass", H1, [], undefined, who);
+        expect((await g.observe()).decision).toMatchObject({ kind: "escalate", code: "review_unsolicited" });
+        moveStage(g.db, g.at("owner"), { taskId: "T1", from: "review", to: "merge" });
+        await g.observe();
+        expect(await g.rows()).toContainEqual(expect.objectContaining({ verdict: "diff", planned: "停下升级（review_unsolicited）", actual: "推阶段 review→merge" }));
+      } finally { g.close(); }
+    }
+  });
+
+  test("P1-2 regression: review --to in round 3 is judged by the planner replayed at the verdict (three P1 rounds stop)", async () => {
+    const f = fixture();
+    try {
+      f.toReview();
+      for (let r = 1; r <= 3; r++) {
+        f.dispatch(H1);
+        await f.observe();
+        f.review("changes", H1, [P1], "fix");
+        await f.observe();
+        if (r < 3) deliver(f.db, f.at("agent-one"), { taskId: "T1", headSHA: H1, moveFrom: "fix" });
+      }
+      const rows = await f.rows();
+      expect(rows.filter((r) => r.actual === "推阶段 review→fix").map((r) => [r.round, r.verdict, r.planned])).toEqual([
+        [1, "match", "推阶段到 fix"], [2, "match", "推阶段到 fix"], [3, "diff", "停下升级（three_p1_rounds）"],
+      ]);
+      const blind = listEvents(f.db, { project: "p", target: "T1" }).filter((e) => !(e.kind === "scheduler" && e.data.retro));
+      expect(schedulerDiff(blind, (a) => a === "owner").filter((r) => r.actual === "推阶段 review→fix").map((r) => r.verdict))
+        .toEqual(["unknown", "unknown", "unknown"]);
+    } finally { f.close(); }
+  });
+
+  test("P1-3 regression: the owner's real screenshot ask is projected — none / open / approved / rejected / stale", async () => {
+    const f = fixture("ui");
+    try {
+      f.toReview();
+      f.dispatch(H1);
+      await f.observe();
+      f.review("pass", H1, []);
+      expect((await f.observe()).decision).toMatchObject({ action: "ask" });
+      const ask = (head: string, from = "scheduler") => {
+        const binding = { action: "scheduler_ui_screenshot", params: { task: "T1", specRev: 1, head, screenshotsDigest: DIGEST }, approve: ["ok"] };
+        return openAsk(f.db, { project: "p", taskId: "T1", fromAgent: from, source: "system", kind: "authorize", title: "看前后截图",
+          expiresAt: f.now() + 1e9, bind: { ...binding, paramsHash: bindHash(binding, from) } }, f.now() + 1);
+      };
+      const answer = (id: string, button: string) => answerAsk(f.db, id, { choices: [`[button:${button}]`], labels: [button], text: "",
+        principal: "owner", via: "web_card", at: f.now() + 2 });
+      const a = ask(H1);
+      expect((await f.observe()).decision).toMatchObject({ kind: "wait", code: "owner_screenshot" });
+      answer(a.id, "ok");
+      expect((await f.observe()).decision).toMatchObject({ action: "stage", targetStage: "merge" });
+      answer(ask(H1).id, "no");
+      expect((await f.observe()).decision).toMatchObject({ kind: "escalate", code: "ui_rejected" });
+      answer(ask(H2).id, "ok");
+      expect((await f.observe()).decision).toMatchObject({ kind: "escalate", code: "ui_stale" });
+      answer(ask(H1, "agent-one").id, "ok");
+      expect((await f.observe()).decision).toMatchObject({ kind: "escalate", code: "ui_stale" });
+    } finally { f.close(); }
+  });
+
+  test("P2-1 regression: a changed work order is a new observation and the record carries the findings", async () => {
+    const f = fixture();
+    try {
+      f.toReview();
+      f.dispatch(H1);
+      await f.observe();
+      f.review("changes", H1, [P1]);
+      const first = await f.observe();
+      f.review("changes", H1, [{ ...P1, findingId: "race-2", probe: "probe B" }]);
+      const second = await f.observe();
+      expect(second.duplicate).toBe(false);
+      expect(first.event.data.decision).toMatchObject({ workOrder: { findings: [{ findingId: "race-1" }] } });
+      expect(second.event.data.decision).toMatchObject({ workOrder: { findings: [{ findingId: "race-2", probe: "probe B" }] } });
     } finally { f.close(); }
   });
 });

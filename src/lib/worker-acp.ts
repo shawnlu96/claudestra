@@ -3,7 +3,7 @@
  * A quota / auth failure is a result, not a retry signal: the scheduler escalates it; the quota channel owns the choice.
  */
 import type { AcpFailure } from "./acp/failures.js";
-import { ensureVia, observeVia, sendReceipt, type AdapterDeps, type LiveState, type SendResult } from "./worker-ports.js";
+import { ensureVia, observeVia, orderMismatch, sendReceipt, type AdapterDeps, type LiveState, type SendResult } from "./worker-ports.js";
 import { renderWorkOrder } from "./worker-order.js";
 import type { ControlReceipt, SubmitReceipt, WorkerSession } from "./worker-session.js";
 
@@ -22,11 +22,12 @@ export interface AcpPort {
 export function createAcpWorker(o: AdapterDeps & { port: AcpPort }): WorkerSession {
   return {
     route: "acp",
+    fallbackReason: null,
     ensure: (taskId, role, family) => family === "codex" ? ensureVia(o, "acp", taskId, role, family)
       : Promise.resolve({ kind: "manual", reason: "ACP 路径只承载 Codex 会话" }),
     async submit(ref, intentId, order): Promise<SubmitReceipt> {
-      if (ref.transport !== "acp") return { status: "rejected", route: "acp", reason: `session 宿主是 ${ref.transport}，不是 ACP` };
-      if (order.dedupKey !== intentId) return { status: "rejected", route: "acp", reason: "任务单去重键与调度意图不一致" };
+      const bad = orderMismatch("acp", ref, intentId, order);
+      if (bad) return { status: "rejected", route: "acp", reason: bad };
       try {
         return sendReceipt("acp", intentId, await o.port.prompt(ref.agent, ref.sessionId, renderWorkOrder(order), intentId), null);
       } catch (e) {

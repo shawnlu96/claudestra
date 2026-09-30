@@ -1,7 +1,8 @@
 /**
  * Ledger → PlannerSnapshot. For an observe card the scheduler owns no intents or sessions, so its own facts are
- * replaced by what PM actually did: the step executors are the sessions, PM's `ledger dispatch` events are the review
- * dispatches. The plan then answers "given reality so far, what would the engine do next" — exactly what the diff needs.
+ * replaced by what PM actually recorded before the fact: the step executors (with the registry's real session) are the
+ * sessions, PM's adversarial `ledger dispatch` events are the review dispatches. A verdict never vouches for itself:
+ * who reviewed and which session did it are compared against these earlier facts, not read from the verdict.
  */
 import type { Database } from "bun:sqlite";
 import { blockedBy, depViews } from "./ledger-deps.js";
@@ -12,52 +13,50 @@ import { getMeta, listDeps, listEvents, listTasks } from "./ledger-store.js";
 import type { RegistryAgent } from "./registry.js";
 import type { PlannerSnapshot, WorkerRef } from "./scheduler-plan.js";
 import { taskWorkerRefs } from "./scheduler-sessions.js";
+import { projectUiGate } from "./scheduler-ui-gate.js";
 
 export interface SnapshotOpts {
   registry: readonly RegistryAgent[];
   maxWorkers: number;
+  /** Clock for ask expiry; the observe write passes its own ctx.now so a replayed tick sees the same gate. */
+  now?: number;
 }
 
 const familyOf = (a: RegistryAgent): AuthorFamily | null =>
   a.runtime === "codex" ? "codex" : a.runtime === undefined || a.runtime === "claude-code" ? "claude" : null;
 
-/** Local registry agents only; a peer or human executor has no session the engine could address. */
-function localRef(opts: SnapshotOpts, taskId: string, agent: string | null | undefined, sessionId?: unknown): WorkerRef | null {
+/** Local registry agents with a real current session only; no session id means no ref, never a made-up one. */
+function localRef(opts: SnapshotOpts, taskId: string, agent: string | null | undefined): WorkerRef | null {
   const reg = agent ? opts.registry.find((a) => a.name === agent) : undefined;
   const family = reg && familyOf(reg);
-  if (!reg || !family) return null;
-  const sid = typeof sessionId === "string" && sessionId ? sessionId : reg.sessionId || `registry:${reg.name}`;
-  return { agent: reg.name, sessionId: sid, taskId, family, source: "local" };
+  if (!reg || !family || !reg.sessionId) return null;
+  return { agent: reg.name, sessionId: reg.sessionId, taskId, family, source: "local" };
 }
 
-const firstReview = (events: readonly LedgerEvent[]) => events.find((e) => e.kind === "review");
-
-function reviewerOfRound(events: readonly LedgerEvent[], round: number, after: number): string | null {
-  const r = events.find((e) => e.kind === "review" && e.data.round === round && e.seq > after);
-  return typeof r?.data.reviewer === "string" ? r.data.reviewer : null;
+/** The review executor PM assigned before `seq` (a step event), never the reviewer a later verdict names. */
+function assignedReviewer(events: readonly LedgerEvent[], seq: number): string | null {
+  const a = events.findLast((e) => e.kind === "step" && e.data.op === "assign" && e.data.step === "review" && e.seq < seq);
+  return a?.data.executorKind === "agent" && typeof a.data.executor === "string" ? a.data.executor : null;
 }
 
 /**
- * PM's review dispatches become shadow review intents with their acknowledgement right after them (seq + 0.5 keeps
- * the planner's strict "dispatch < ack < result" ordering without inventing a ledger event).
+ * PM's adversarial dispatches become shadow review intents. PM's dispatch event is the real delivery record, so it is
+ * the ack; the shadow intent sits half a step before it. Recipient and session come from the assignment in force at
+ * dispatch time; when there was none the intent has no recipient and no proof, so a later verdict stays unproven.
+ * A regular (non-adversarial) dispatch is not what the engine would send and yields nothing.
  */
-function shadowReviews(task: LedgerTask, events: readonly LedgerEvent[], fallbackReviewer: WorkerRef | null) {
+function shadowReviews(task: LedgerTask, events: readonly LedgerEvent[], bound: WorkerRef | null, opts: SnapshotOpts) {
   const intents: SchedulerIntent[] = [];
   const proofs: PlannerSnapshot["reviewDispatches"][number][] = [];
   for (const e of events) {
-    if (e.kind !== "dispatch" || typeof e.data.round !== "number") continue;
-    const reviewer = reviewerOfRound(events, e.data.round, e.seq) ?? fallbackReviewer?.agent ?? null;
+    if (e.kind !== "dispatch" || typeof e.data.round !== "number" || e.data.reviewer !== "adversarial") continue;
+    const ref = bound ?? localRef(opts, task.id, assignedReviewer(events, e.seq));
     const head = typeof e.data.head === "string" ? e.data.head : null;
     const id = `pm-dispatch:${e.seq}`;
-    intents.push({ id, taskId: task.id, project: task.project, node: "adversarial_review", action: "review", recipient: reviewer,
-      causalSeq: e.seq, eventSeq: e.seq, taskRev: task.rev, specRev: task.specRev, head, templateVersion: 2, status: "done",
+    intents.push({ id, taskId: task.id, project: task.project, node: "adversarial_review", action: "review", recipient: ref?.agent ?? null,
+      causalSeq: e.seq - 0.5, eventSeq: e.seq - 0.5, taskRev: task.rev, specRev: task.specRev, head, templateVersion: 2, status: "done",
       attempts: 1, receipt: "PM 手动派审", reason: "PM 手动派审", createdAt: e.ts, updatedAt: e.ts });
-    const review = events.find((r) => r.kind === "review" && r.data.round === e.data.round && r.seq > e.seq);
-    if (reviewer && head) {
-      proofs.push({ intentId: id, round: e.data.round, head, reviewer,
-        reviewerSessionId: typeof review?.data.reviewerSessionId === "string" ? review.data.reviewerSessionId : fallbackReviewer?.sessionId ?? "",
-        ackSeq: e.seq + 0.5 });
-    }
+    if (ref && head) proofs.push({ intentId: id, round: e.data.round, head, reviewer: ref.agent, reviewerSessionId: ref.sessionId, ackSeq: e.seq });
   }
   return { intents, proofs };
 }
@@ -71,20 +70,19 @@ function slotFacts(db: Database, project: string, maxWorkers: number) {
   return { held, workerCount: new Set(slots.map((h) => h.taskId)).size, freeWorkerSlot: free };
 }
 
-export function observeSnapshot(db: Database, task: LedgerTask, opts: SnapshotOpts): PlannerSnapshot {
+/** asOf replays the card as it stood right after that event (used to judge a verdict PM acted on before a tick). */
+export function observeSnapshot(db: Database, task: LedgerTask, opts: SnapshotOpts, asOf?: number): PlannerSnapshot {
   const workflow = getWorkflow(db, task.id);
-  const events = listEvents(db, { project: task.project, target: task.id });
+  const events = listEvents(db, { project: task.project, target: task.id }).filter((e) => asOf === undefined || e.seq <= asOf);
   const steps = stepsOf(db, task);
   const bound = taskWorkerRefs(db, task.id);
   const writer = stepAtStage(steps, { stage: task.stage === "fix" ? "fix" : "build", stageBefore: null });
   const author = bound.author ?? (writer?.executorKind === "agent" ? localRef(opts, task.id, writer.executor) : null);
-  const first = firstReview(events);
   const reviewStep = currentReview(steps);
-  const reviewer = bound.reviewer ?? (typeof first?.data.reviewer === "string"
-    ? localRef(opts, task.id, first.data.reviewer, first.data.reviewerSessionId)
-    : reviewStep?.executorKind === "agent" ? localRef(opts, task.id, reviewStep.executor) : null);
-  const shadow = shadowReviews(task, events, reviewer);
-  const real = db.query("SELECT * FROM scheduler_intents WHERE taskId = ? ORDER BY eventSeq").all(task.id) as SchedulerIntent[];
+  const reviewer = bound.reviewer ?? (reviewStep?.executorKind === "agent" ? localRef(opts, task.id, reviewStep.executor) : null);
+  const shadow = shadowReviews(task, events, bound.reviewer, opts);
+  const real = (db.query("SELECT * FROM scheduler_intents WHERE taskId = ? ORDER BY eventSeq").all(task.id) as SchedulerIntent[])
+    .filter((i) => asOf === undefined || i.eventSeq <= asOf);
   const slots = slotFacts(db, task.project, opts.maxWorkers);
   const globs = Array.isArray(task.extra.fileGlobs) ? task.extra.fileGlobs.filter((g): g is string => typeof g === "string") : [];
   const digest = typeof task.extra.screenshotsDigest === "string" ? task.extra.screenshotsDigest : null;
@@ -93,6 +91,6 @@ export function observeSnapshot(db: Database, task: LedgerTask, opts: SnapshotOp
     blockedBy: blockedBy(task.id, depViews(listDeps(db, task.project), listTasks(db, task.project))).map((d) => d.from),
     queueFrozen: getMeta(db, task.project).queueFrozen.frozen, fileGlobs: globs,
     heldResources: slots.held, workerCount: slots.workerCount, maxWorkers: opts.maxWorkers, freeWorkerSlot: slots.freeWorkerSlot,
-    author, reviewer, reviewDispatches: shadow.proofs, uiGate: { state: "none" }, screenshotsDigest: digest,
+    author, reviewer, reviewDispatches: shadow.proofs, uiGate: projectUiGate(db, task, opts.now ?? Date.now()), screenshotsDigest: digest,
   };
 }
