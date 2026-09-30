@@ -35,7 +35,7 @@ describe("pickCodexRolloutForArchive", () => {
     const root = freshRoot();
     const mine = rollout(root, { id: SID, cwd: "/agent/one" }, { day: "29", mtime: 1_790_000_000 });
     rollout(root, { id: SID, cwd: "/agent/two" }, { mtime: 1_790_100_000 });
-    expect(await pickCodexRolloutForArchive(SID, "/agent/one", root)).toEqual({ path: mine });
+    expect(await pickCodexRolloutForArchive(SID, "/agent/one", root)).toEqual({ segments: [{ path: mine, stem: SID }] });
   });
 
   test("同 id 两份、cwd 也相同：分不清，拒绝并列出两份候选", async () => {
@@ -59,7 +59,7 @@ describe("pickCodexRolloutForArchive", () => {
     const root = freshRoot();
     const p = rollout(root, { id: SID, cwd: "/agent/old-tree" });
     const r = await pickCodexRolloutForArchive(SID, "/agent/new-tree", root);
-    expect(r).toMatchObject({ path: p });
+    expect(r).toMatchObject({ segments: [{ path: p, stem: SID }] });
     for (const s of ["/agent/old-tree", "/agent/new-tree"]) expect("note" in r && r.note).toContain(s);
   });
 
@@ -91,7 +91,7 @@ describe("pickCodexRolloutForArchive", () => {
     mkdirSync(real, { recursive: true });
     symlinkSync(real, link);
     const p = rollout(root, { id: SID, cwd: real });
-    expect(await pickCodexRolloutForArchive(SID, `${link}/`, root)).toEqual({ path: p });
+    expect(await pickCodexRolloutForArchive(SID, `${link}/`, root)).toEqual({ segments: [{ path: p, stem: SID }] });
   });
 });
 
