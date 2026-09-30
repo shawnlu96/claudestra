@@ -32,6 +32,7 @@ function start(
   extraEnv: Record<string, string> = {},
   rotate: (oldId: string, newId: string) => Promise<{ ok: boolean; error?: string }> = async () => ({ ok: true }),
   rebind: () => Promise<boolean> = async () => true,
+  beforeSpawn?: () => Promise<void>,
 ) {
   const sent: any[] = [];
   const requests: any[] = [];
@@ -59,6 +60,7 @@ function start(
         procs.push(p);
         return p;
       },
+      beforeSpawn,
       makeLink: (d) => {
         link = d;
         return {
@@ -88,6 +90,31 @@ function start(
 }
 
 describe("ACP 宿主整条链（stub）", () => {
+  test("beforeSpawn（探 codex 版本）等完才起适配器；等的时候宿主被停了就不再起", async () => {
+    let release!: () => void;
+    const gate = () => new Promise<void>((r) => { release = r; });
+    const h = start({}, undefined, undefined, gate);
+    await new Promise((r) => setTimeout(r, 50));
+    expect(procs.length).toBe(0);
+    release();
+    await until(h.isReady);
+    host!.stop();
+    host = null;
+    procs.splice(0).forEach((p) => p.stop());
+    start({}, undefined, undefined, gate);
+    await new Promise((r) => setTimeout(r, 50));
+    host!.stop();
+    release();
+    await new Promise((r) => setTimeout(r, 50));
+    expect(procs.length).toBe(0);
+  }, 20_000);
+
+  test("beforeSpawn reject 了：只记日志，照常起适配器（宿主不能卡在半开）", async () => {
+    const h = start({}, undefined, undefined, async () => { throw new Error("探测炸了"); });
+    await until(h.isReady);
+    expect(h.logs.some((m) => m.includes("按未知照常起") && m.includes("探测炸了"))).toBe(true);
+  }, 20_000);
+
   test("/clear 忙时拒绝；空闲时新线程引导后换 registry，轮换中的人类消息排队到新线程", async () => {
     let release!: () => void;
     const gate = new Promise<void>((r) => (release = r));
