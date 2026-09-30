@@ -189,7 +189,7 @@ export async function tmuxSendLine(target: string, text: string, delayMs = 100, 
   recordProgramInput(inputLog, text);
   await (strict ? tmuxRawStrict : tmuxRaw)(["send-keys", "-t", target, "-l", "--", text]);
   await Bun.sleep(delayMs);
-  await assertKeysAllowed(target, (t) => tmuxCapture(t, 30)); // 等的这 100ms 里菜单 / 框弹出来了：字留在框里，回车不按
+  await assertKeysAllowed(target, (t) => tmuxCapture(t, 30), true); // 等的这 100ms 里菜单 / 框弹出来了：字已进输入框，回车不按
   await tmuxRaw(["send-keys", "-t", target, "Enter"]);
 }
 

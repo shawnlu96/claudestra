@@ -9,10 +9,15 @@ import { CODEX_MENU_REFUSAL, codexMenuShown } from "./codex-menu.js";
 import { readRegistryAgentsSync } from "./registry.js";
 import { SWITCH_BOX_REFUSAL, switchBoxShown } from "./switch-box.js";
 
-/** 调用方按 name 认它（409 / cron 记失败 / 抢占当作停在菜单上）：Codex 菜单和切换框同一种错 */
+const TYPED_LEFTOVER = "处理完后请到终端清掉输入框里这行字";
+
+/**
+ * 调用方按 name 认它（409 / cron 记失败 / 抢占当作停在菜单上）：Codex 菜单和切换框同一种错。
+ * typed = 回车前那道闸拦下的：字已经打进输入框（框关掉后留作草稿），不能再说「没发任何键」。
+ */
 export class KeysBlockedError extends Error {
-  constructor(target: string, refusal = CODEX_MENU_REFUSAL) {
-    super(`${refusal}（${target}）`);
+  constructor(target: string, refusal = CODEX_MENU_REFUSAL, readonly typed = false) {
+    super(typed ? `${refusal.replace("没发任何键", "字已打进输入框、没有回车")}（${target}）；${TYPED_LEFTOVER}` : `${refusal}（${target}）`);
     this.name = "KeysBlockedError";
   }
 }
@@ -31,12 +36,12 @@ export async function keysBlockedAt(target: string, capture: (target: string) =>
 }
 
 /**
- * tmuxSendLine 打字前、回车前各调一次：Codex 菜单之外，任何窗口停在切模型 / effort 确认框上也不发——打的字会被框吞掉，
+ * tmuxSendLine 打字前、回车前各调一次（回车前那次 typed=true）：Codex 菜单之外，任何窗口停在切模型 / effort 确认框上也不发——打的字会被框吞掉，
  * 回车替框选 Yes（cron、斜杠直通、Discord 斜杠都走这里）。runSwitchCommand 注入前已排除残留框，确认那一下不经这里。
  * Esc 护栏只用 keysBlockedAt（不拦切换框：Esc 在框上是「不切」，owner 的停止按钮要能用）。抓不到屏按不拦。
  */
-export async function assertKeysAllowed(target: string, capture: (target: string) => Promise<string>): Promise<void> {
+export async function assertKeysAllowed(target: string, capture: (target: string) => Promise<string>, typed = false): Promise<void> {
   const pane = await capture(target).catch(() => ""); // 抓不到屏：认不出画面，按不拦走，照调用方原来的逻辑
-  if (runtimeOfWindow(target) === "codex" && codexMenuShown(pane)) throw new KeysBlockedError(target);
-  if (switchBoxShown(pane)) throw new KeysBlockedError(target, SWITCH_BOX_REFUSAL);
+  if (runtimeOfWindow(target) === "codex" && codexMenuShown(pane)) throw new KeysBlockedError(target, CODEX_MENU_REFUSAL, typed);
+  if (switchBoxShown(pane)) throw new KeysBlockedError(target, SWITCH_BOX_REFUSAL, typed);
 }

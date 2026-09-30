@@ -269,6 +269,19 @@ describe("owner 的 /model X、/effort X 走同步注入确认（T41c r2），�
     expect(sent).toEqual([]);
   });
 
+  test("r4 P2-②：打完字、回车前框才弹出 → 409 如实说字已进输入框没回车、要清掉，不说「没有注入」", async () => {
+    const h = harness();
+    const typed: string[] = [];
+    const deps: SlashDeps = { ...h.deps, sendLine: async (w, t) => {
+      await assertKeysAllowed(w, async () => fx("model-set"));
+      typed.push(t);
+      await assertKeysAllowed(w, async () => fx("switch-model"), true);
+    } };
+    const err = (await body(await call(OWNER, "/compact", deps))).error ?? "";
+    expect(typed).toEqual(["/compact"]);
+    expect([err.includes("字已打进输入框、没有回车"), err.includes("清掉输入框"), err.includes("没有注入"), err.includes("没发任何键")]).toEqual([true, true, false, false]);
+  });
+
   test("window 0 此刻不是大总管 → 409，一个键都不发", async () => {
     const h = harness(null, undefined, false);
     for (const text of ["/model sonnet-5", "/compact"]) expect((await call(OWNER, text, h.deps, MASTER))?.status).toBe(409);
