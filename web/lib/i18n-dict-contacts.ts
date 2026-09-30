@@ -13,4 +13,7 @@ export const CONTACTS_DICT: Record<string, string> = {
   "取消转达": "Cancel delegation",
   "{name} 已经停止，没法转达": "{name} has stopped, can't relay",
   "{name} 已不在可联系的列表里（可能已撤销或改名），重新 @ 一次": "{name} is no longer reachable (access revoked or renamed) — @ it again",
+  // Peer 面板 scope 勾选器里就地开闸（peers-shared.tsx ScopePicker）
+  "开启后可共享给 peer；对方能看到该会话的全部上下文。关闭请到会话详情。": "When on, this session can be shared with peers, who then see its whole context. Turn it off from session details.",
+  "开闸": "Turn on",
 };
