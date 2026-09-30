@@ -33,10 +33,11 @@
 
 ## 1. 容量声明
 
-### 1.1 出借方 B：`statePath("capacity.json")` 的 `lend` 段
+### 1.1 出借方 B：`statePath("lend.json")` 的 `lend` 段
 
 ```json
-{ "lend": [ {
+{ "enabled": true,                                  // 本文件自己的总开关，缺省 false；与 scheduler.json 的 autoDispatch 无关
+  "lend": [ {
     "peer": "team-a",                                 // B 给 A 起的 peer 名（peers.json 里已握手的那条）
     "families": { "codex": 3, "claude": 2 },          // 同时在跑的上限，按模型家族
     "roles": ["review"],                              // review | write（write 要仓库写权限，见 §4）
@@ -59,7 +60,7 @@
 ```
 
 - A 只会把**列在这里的项目**的单子给**列在这里的 peer**：私有项目、个人项目缺省不外发。没有 `borrow` = 什么都不外借。
-- A 收到的声明快照存在内存 + `statePath("capacity-seen.json")`（peer、fp、快照、收到时间），给调度器选人和网页显示用。
+- A 收到的声明快照存在内存 + `statePath("lend-seen.json")`（peer、fp、快照、收到时间），给调度器选人和网页显示用。
   超过 5 分钟没 poll 的 peer 视为不可用。
 
 ## 2. 领活
@@ -98,12 +99,16 @@ interface OrderWire extends WorkOrder {              // taskId / specRev / head 
 ### 2.3 B 侧：lend 循环
 
 放在 B 的第四服务 `scheduler` 里（`docs/design/scheduler-engine.md`「运行形态」），不放 bridge：bridge 部署重启不该打断在跑的出借。
+它是服务 pass 里 merge / observe / auto 之后的一步，**同一个 pass、同一把维护租约**（`scheduler-pass.ts`）；租约、停止信号与单实例锁
+的核对和 E2a 一样紧贴每个效果（每次 poll / claim / 起 worker / 转发结果之前与之后），失租或停止后本轮不再领新单。开关只看 `lend.json`
+的 `enabled`，**不依赖 `autoDispatch`**：B 可以不开自动派单，只出借。
 
 1. 每 30 秒对每个 `lend` 条目 `poll`（带声明快照 + 当前占用）。返回的单子先本地过滤：仓库在白名单、角色/家族在声明里、今日额度未满、占用未满。
 2. `confirm=per-order`：在 B 的 owner 频道开 authorize ask（`bind: {action: "lend_claim", params: {peer, orderId}}`），
    只认 ask-check 通过的 owner 回答；过期 = 放弃，不 claim。`auto`：直接下一步。
 3. `claim` → 拿到完整订单与租约。
 4. 起一次性 worker：`manager create agent-lend-<orderId 短码> <工作副本> --runtime codex --transport acp`（Claude 走缺省 runtime），标 `kind: worker`（T69），
+   进程环境按 §5 用 `env -i` + 白名单（R4 在 `src/lib/runtimes/` 的启动参数里加 `cleanEnv` 选项，不另写启动器），
    目录是 `statePath("lend","<orderId>")` 下从 GitHub 浅 clone 并 detached 到 `repo.head` 的工作副本。
 5. worker 用 B 本机 MCP `take_review` / `take_order` 领到这张单（M2/M3；M1 的连接身份保证只有这个 worker 能领）。
 6. worker `submit_verdict` / `deliver` → B 的 bridge 原样转发到 A 的 `lend/result`；收到 A 的签名回执后，B 写收据、归档并结束 worker。
@@ -144,13 +149,19 @@ A 零授权、原有合并门槛不变（T46 规矩 4）。私有仓库的授权
 - A 侧：远端结论里的 finding 正文、报告正文按外来文本入库，再派给本机修复者时照样 `quoteExternal`，不当指令。
 
 **B 机器上的隔离**：
-- 每单一个新 worker、一个新工作副本，干完即删；不复用 B 自己的 agent 会话，也不进 B 的会话列表（`kind: worker`）。
-- worker 的环境里**没有** B 的 peer token、实例私钥、GitHub 写凭据：回写只能经 B 本机 MCP 工具，由 B 的 bridge 代签代发。
-- review 单只读：不提交、不推送；工作副本 detached 在订单 head。B 的 owner 仍须知道：bypass 模式的 worker 在 B 机器上等于任意 shell，
-  所以 `repos` 白名单与逐单确认是 B 的真实闸门（同 CLAUDE.md「Security posture」）。硬隔离（容器 / 独立用户）列为后续。
+- **独立 worktree**：每单一个新工作副本 `statePath("lend","<orderId>")`，从 GitHub 公开地址浅 clone、detached 在订单 head；
+  不是 B 自己任何仓库的 worktree，不共享 B 的 `.git`、stash 或分支。干完（或被撤、失租）即删。
+- **一次性会话**：每单一个新 worker，不复用 B 自己的 agent，也不进 B 的会话列表（`kind: worker`）。
+- **干净环境**：worker 进程用 `env -i` 加白名单启动，只放 `PATH HOME USER LANG TERM TMPDIR` 和 Codex 自己的 `CODEX_HOME`（用的是 B 的 Codex 额度，
+  B 的 owner 同意出借即同意这一项）。**不带** B 的 `.env`（Discord / 控制 token 等）、`BRIDGE_CONTROL_TOKEN`、`CLAUDESTRA_*`、`GH_TOKEN` / `GITHUB_TOKEN`；
+  peer token 与实例私钥本来只在 B 的 bridge 进程里，worker 碰不到。回写只能经 B 本机 MCP 工具（M3 前是 `lend submit` CLI，经 bridge 的回环
+  接口），由 B 的 bridge 代签代发，worker 自己发不出带签名的 peer 请求。
+- **只读**：review 单不提交、不推送；工作副本没有写凭据，推也推不上去。
+- **这不是硬边界**：worker 和 B 是同一个 OS 用户，bypass 模式下等于任意 shell，照样能去读 `HOME` 下的文件（peers.json、实例私钥）。
+  所以 B 的真实闸门是 `repos` 白名单与逐单确认（同 CLAUDE.md「Security posture」）；独立 OS 用户 / 容器的硬隔离列为后续节点 R9。
 
 **撤销与紧急停止**：
-- A：`ledger lend-cancel <orderId>` 撤单（下次续租 B 得到 `cancelled`，B 停 worker、写收据）；`capacity.json` 去掉 `borrow` = 停止外借；
+- A：`ledger lend-cancel <orderId>` 撤单（下次续租 B 得到 `cancelled`，B 停 worker、写收据）；`lend.json` 去掉 `borrow` = 停止外借；
   `peer-http-remove` / 吊销 token = 立即切断。
 - B：`manager lend off [--peer x]` 停止领新单，在跑的单按 `--now` 选择立即 kill（向 A 报 `released`）或跑完；owner 删 peer 同效。
 - 两边的 `doctor` 各显示一行：出借中/借入中的单数与最近一次 poll。
@@ -172,9 +183,9 @@ A 零授权、原有合并门槛不变（T46 规矩 4）。私有仓库的授权
 
 | 做 | 先不做 |
 |---|---|
-| `capacity.json`（lend / borrow）+ CLI | 网页设置页、token 额度执行 |
+| `lend.json`（lend / borrow）+ CLI | 网页设置页、token 额度执行 |
 | A：`lend/poll · claim · lease · result` 四接口 + `ledger lend-offer / lend-cancel` | 调度器自动挂池子（v2，等阶段 2 打开 autoDispatch） |
-| B：scheduler 服务里的 lend 循环 + authorize ask + 一次性 Codex worker | write 角色、fork PR、私有仓库授权 |
+| B：scheduler 服务里的 lend 循环（同 pass、同租约）+ authorize ask + 一次性 Codex worker（独立 worktree、`env -i` 白名单，§5） | write 角色、fork PR、私有仓库授权 |
 | 结果写 A 台账 review 事件（家族标 claim） | 远端 Claude worker、多单并发调优 |
 | B 收据 jsonl | 中心服务撮合、中继直连（只留接口，见下） |
 
@@ -185,20 +196,21 @@ A 零授权、原有合并门槛不变（T46 规矩 4）。私有仓库的授权
 中继直连（阶段 6）对这层透明。
 
 **试用步骤**：两位试用同事升级到含本功能的版本 → 各自 `manager lend set team-a --codex 2 --roles review --repos shawnlu96/claudestra` →
-A `capacity.json` 加 `borrow` → PM 对一张已交付的卡 `ledger lend-offer <T> --step review` → B 的 owner 点确认 → 看 A 台账出现 review 事件、B 收据一行。
+A `lend.json` 加 `borrow` → PM 对一张已交付的卡 `ledger lend-offer <T> --step review` → B 的 owner 点确认 → 看 A 台账出现 review 事件、B 收据一行。
 
 ### 子 DAG v1 草案（阶段 4，PR 粒度）
 
 | 节点 | 一句话 | 依赖 | 粗估 |
 |---|---|---|---|
 | R1 | `order-wire.ts`：OrderWire / deliver / verdict 的共享 schema、校验、脱敏；`renderWorkOrder` 接入 | M2/M3 的字段定稿（可先行，M2/M3 反过来引用它） | 3h |
-| R2 | `capacity.json` 读写 + `manager lend set/off/status` + doctor 行 | — | 3h |
+| R2 | `lend.json` 读写 + `manager lend set/off/status` + doctor 行 | — | 3h |
 | R3 | A 侧 `lend/*` 四接口 + `pooled` intent + claim CAS + `ledger lend-offer/cancel/reoffer` + peer-write 入账 | R1、R2、T68 PR A 表 | 6h |
-| R4 | B 侧 lend 循环：poll 过滤、authorize ask、一次性 worker 创建/清理、续租、`lend submit` 转发、收据 | R1、R2、R3 | 7h |
+| R4 | B 侧 lend 循环：同 pass 同租约、poll 过滤、authorize ask、一次性 worker（独立 worktree + `env -i` 白名单）创建/清理、续租、`lend submit` 转发、收据 | R1、R2、R3 | 7h |
 | R5 | 双实例沙箱实测（T81 `--lab --pair`）：A 挂两张、B 上限一、逐单确认、撤单、离线租约 | R3、R4 | 3h |
 | R6 | 调度器 peer 分支：本机满才挂池子（v2） | R5、阶段 2 autoDispatch | 4h |
 | R7 | M3 合入后 worker 改走 `take_review` / `submit_verdict` MCP，家族/会话由 B 的 M1 填 | R4、M3 | 2h |
 | R8 | 私有仓库授权 + write 角色（fork PR） | owner 定 §4 | 6h |
+| R9 | 出借 worker 硬隔离（独立 OS 用户或容器） | R5 | 6h |
 
 明天的最小切片 = R1–R5（约 22h agent 工作量，R2 与 R1 可并行；R3、R4 可在 R1 定稿后并行）。
 
