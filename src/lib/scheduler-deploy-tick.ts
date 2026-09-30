@@ -79,7 +79,7 @@ async function driveRunning(d: DeployTickDeps, run: DeployRun): Promise<void> {
 
 /** live card with a deployed journal: dry-run first; record only a pass, or the failure once the window is over. */
 async function driveVerify(d: DeployTickDeps, db: Database, run: DeployRun): Promise<void> {
-  const task = getTask(db, run.taskId), dedup = `scheduler:${run.intentId}:verify`;
+  const task = getTask(db, run.taskId), dedup = `deploy-verify:${run.intentId}`; // `scheduler:` keys are reserved for scheduler events (ledger-tx.ts)
   if (task?.stage !== "live" || getEventByDedup(db, dedup)) return;
   const at = lastVerify.get(run.intentId);
   if (at !== undefined && d.now() - at < VERIFY_EVERY_MS) return;

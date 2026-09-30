@@ -11,7 +11,7 @@ export function schedulerCanVerify(db: Database, taskId: string, dedupKey?: stri
     JOIN task_workflows AS w ON w.taskId=t.id AND w.mode='auto' AND w.specRev=t.specRev
     JOIN scheduler_deploys AS d ON d.taskId=t.id AND d.project=t.project AND d.phase='deployed'
     JOIN scheduler_merges AS m ON m.intentId=d.intentId AND m.reviewedHead=t.headSHA
-    WHERE t.id=? AND (t.stage='live' OR (t.stage='verified' AND ? = 'scheduler:' || d.intentId || ':verify'
+    WHERE t.id=? AND (t.stage='live' OR (t.stage='verified' AND ? = 'deploy-verify:' || d.intentId
       AND EXISTS (SELECT 1 FROM events AS e WHERE e.project=t.project AND e.target=t.id
         AND e.dedupKey=? AND e.kind='verify' AND e.actor='scheduler'))) LIMIT 1`).get(taskId, dedupKey ?? "", dedupKey ?? "");
 }

@@ -6,6 +6,7 @@ import { getDeployRun } from "../src/lib/scheduler-deploy.js";
 import { mergeTick } from "../src/lib/scheduler-service.js";
 import type { SchedulerConfig } from "../src/lib/scheduler-config.js";
 import { SchedulerStopped } from "../src/lib/scheduler-maintenance.js";
+import { recordVerify } from "../src/lib/ledger-write.js";
 import { ledgerAs, mergedCard } from "./deploy-test-kit.js";
 
 const LABEL = `com.claudestra.scheduler.deploy.${"f".repeat(32)}`;
@@ -31,9 +32,10 @@ function deps(db: Database, jobs: DeployJobs, o: { now?: number; verify?: string
     if (args[1] === "verify") {
       o.verify?.push(args.slice(2).join(" "));
       if (args.includes("--dry-run")) return { ok: true, result: "pass" };
-      db.query("UPDATE tasks SET stage='verified' WHERE id=?").run(args[2]);
-      db.query("INSERT INTO events (ts,actor,project,target,kind,text,data,dedupKey) VALUES (1,'scheduler','p',?,'verify','','{}',?)").run(args[2], args[4]);
-      return { ok: true, moved: true };
+      // the real write path and its scheduler gate; only the fact collection (gh, lsof, ps) is skipped
+      const r = recordVerify(db, { actor: "scheduler", now: now(), dedupKey: args[4] }, { taskId: args[2], result: "pass",
+        data: { checks: [{ id: "pr-merged", status: "pass" }], incomplete: false } });
+      return { ok: true, moved: true, task: r.row };
     }
     return ledger(...args);
   };
@@ -52,7 +54,7 @@ describe("T68g deploy tick", () => {
       j.s.view = { label: LABEL, liveness: "dead", result: { ok: true, summary: "部署到 dddd" }, deadline: 10_000 };
       await deployTick(f.db, config, deps(f.db, j.jobs, { verify }));
       expect(f.db.query("SELECT stage FROM tasks WHERE id='T9'").get()).toEqual({ stage: "verified" });
-      expect(verify).toEqual(["T9 --dry-run", "T9 --dedup scheduler:m9:verify"]);
+      expect(verify).toEqual(["T9 --dry-run", "T9 --dedup deploy-verify:m9"]);
       expect(j.s.log).toContain(`remove ${LABEL}`);
       expect(j.s.log.filter((x) => x === "submit")).toHaveLength(1);
     } finally { f.close(); }
@@ -134,7 +136,7 @@ describe("T68g deploy tick", () => {
       expect(calls).toEqual(["T9 --dry-run"]);
       expect(f.db.query("SELECT stage FROM tasks WHERE id='T9'").get()).toEqual({ stage: "live" });
       await deployTick(f.db, config, { ...failing, now: () => 5_000_000 + VERIFY_WINDOW_MS + 1 });
-      expect(calls.at(-1)).toBe("T9 --dedup scheduler:m9:verify");
+      expect(calls.at(-1)).toBe("T9 --dedup deploy-verify:m9");
     } finally { f.close(); }
   });
 });

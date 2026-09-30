@@ -183,7 +183,8 @@ function updateTask(db: Database, ctx: WriteCtx, cur: LedgerTask, patch: Record<
 
 /**
  * 在已开的事务里推一步：CAS from → 现算角色 → canTransition → 改行 + stage 事件。
- * asRole 只给 ledger-human.ts（v3.2：human 节点的人按执行者推 build / fix → review，actor 是 person id，roleOf 认不出）；
+ * asRole 只给 ledger-human.ts（v3.2：human 节点的人按执行者推 build / fix → review，actor 是 person id，roleOf 认不出）
+ * 与 recordVerify（调度身份过了 schedulerCanVerify 闸，按 pm 推 live → verified，T68g）；
  * 别的调用方传它就绕过了角色判定，tests/ledger-migrate.test.ts 查着只有那一处 import。
  */
 export function applyMove(
@@ -287,7 +288,7 @@ export function recordVerify(
       throw new LedgerError("invalid", "结论是 pass 但检查单不全 / 为空，或有没通过也没豁免的项");
     }
     const event = insertEvent(db, ctx, { project: task.project, target: task.id, kind: "verify", text: input.text, data: { ...input.data, result: input.result } }, true);
-    if (input.result === "pass") task = applyMove(db, ctx, task, { from: "live", to: "verified" }, false).task;
+    if (input.result === "pass") task = applyMove(db, ctx, task, { from: "live", to: "verified" }, false, "", ctx.actor === "scheduler" ? "pm" : undefined).task;
     return { row: task, event, duplicate: false };
   });
 }
