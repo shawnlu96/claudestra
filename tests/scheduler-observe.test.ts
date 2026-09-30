@@ -8,7 +8,6 @@ import { setWorkflow } from "../src/lib/ledger-scheduler-write.js";
 import { closeLedger, getTask, listEvents, openLedger } from "../src/lib/ledger-store.js";
 import { assignStep } from "../src/lib/ledger-steps-write.js";
 import { appendEvent, createTask, deliver, moveStage, recordReview } from "../src/lib/ledger-write.js";
-import { schedulerDiff } from "../src/lib/scheduler-diff.js";
 import { schedulerObserveTick } from "../src/lib/scheduler-observe-tick.js";
 import { runLedger } from "../src/manager/ledger.js";
 import type { LedgerDeps } from "../src/manager/ledger-context.js";
@@ -23,10 +22,11 @@ const DIGEST = "d".repeat(64);
 function fixture(template: "code" | "ui" = "code") {
   const dir = mkdtempSync(join(tmpdir(), "t68e-observe-")), path = join(dir, "ledger.sqlite"), db = openLedger(path);
   const registryPath = join(dir, "registry.json");
-  writeFileSync(registryPath, JSON.stringify({ socket: "", agents: {
-    "agent-one": { runtime: "claude-code", sessionId: "s-one" }, "agent-review": { runtime: "codex", transport: "acp", sessionId: "s-review" },
+  const setReviewSession = (sessionId: string) => writeFileSync(registryPath, JSON.stringify({ socket: "", agents: {
+    "agent-one": { runtime: "claude-code", sessionId: "s-one" }, "agent-review": { runtime: "codex", transport: "acp", sessionId },
     "agent-other": { runtime: "codex", transport: "acp", sessionId: "s-other" },
   } }));
+  setReviewSession("s-review");
   let now = 1000;
   const at = (actor: string) => ({ actor, now: (now += 10) });
   createTask(db, at("owner"), { project: "p", id: "T1", title: "observe", kind: "code", agent: "agent-one",
@@ -57,7 +57,15 @@ function fixture(template: "code" | "ui" = "code") {
   const rows = async () => (await runLedger(["scheduler-diff", "T1", "--all"], deps("owner"))).rows as
     { planned: string; actual: string | null; verdict: string; note: string; round: number }[];
   const close = () => { closeLedger(path); rmSync(dir, { recursive: true, force: true }); };
-  return { db, at, deps, observe, review, dispatch, toReview, rows, close, now: () => now };
+  /** A scheduler screenshot ask bound to the card; `owner` = the answer carries the authenticated owner mark. */
+  const uiAsk = (head: string, from = "scheduler") => {
+    const binding = { action: "scheduler_ui_screenshot", params: { task: "T1", specRev: 1, head, screenshotsDigest: DIGEST }, approve: ["ok"] };
+    return openAsk(db, { project: "p", taskId: "T1", fromAgent: from, source: "system", kind: "authorize", title: "看前后截图",
+      expiresAt: now + 1e9, bind: { ...binding, paramsHash: bindHash(binding, from) } }, now + 1);
+  };
+  const answer = (id: string, button: string, mark: { owner?: true; external?: boolean } = { owner: true }) =>
+    answerAsk(db, id, { choices: [`[button:${button}]`], labels: [button], text: "", principal: "owner", via: "web_card", at: now + 2, ...mark });
+  return { db, at, deps, observe, review, dispatch, toReview, rows, uiAsk, answer, setReviewSession, close, now: () => now };
 }
 
 const externalEffects = (db: ReturnType<typeof openLedger>) => ({
@@ -101,11 +109,14 @@ describe("T68e observe mode", () => {
       const rows = diff.rows as { planned: string; verdict: string; note: string }[];
       expect(rows.filter((r) => r.verdict === "diff")).toEqual([]);
       expect(rows.at(-1)).toMatchObject({ verdict: "pending" });
-      expect(diff.lines).toContain("T1 · review 第 2 轮 · 一致 · 引擎：推阶段到 merge ｜ 实际：owner 推阶段 review→merge（按结论当时的台账回溯重算；阶段一致，0 秒后）");
+      expect(rows.filter((r) => r.verdict === "unknown").map((r) => r.planned)).toEqual(["（结论后的计划没有记录）"]);
       expect(diff.lines).toContain("T1 · review 第 1 轮 · 一致 · 引擎：推阶段到 fix ｜ 实际：owner 推阶段 review→fix（阶段一致，0 秒后）");
       const project = await runLedger(["scheduler-diff", "--project", "p"], f.deps("owner"));
-      expect(project).toMatchObject({ ok: true, tasks: ["T1"], summary: { diff: 0, pending: 1 } });
-      expect(project.lines).toEqual(["T1 · merge 第 2 轮 · 未决 · 引擎：进合并队列（合并 + 部署） ｜ 实际：（还没有）（尚无后续动作）"]);
+      expect(project).toMatchObject({ ok: true, tasks: ["T1"], summary: { diff: 0, unknown: 1, pending: 1 } });
+      expect(project.lines).toEqual([
+        "T1 · review 第 2 轮 · 未知 · 引擎：（结论后的计划没有记录） ｜ 实际：owner 推阶段 review→merge（审查结论之后直接推阶段、中间没有观察；当时的 session 与授权台账只存现状，无法还原引擎的判断，需核对，0 秒后）",
+        "T1 · merge 第 2 轮 · 未决 · 引擎：进合并队列（合并 + 部署） ｜ 实际：（还没有）（尚无后续动作）",
+      ]);
       expect(externalEffects(f.db)).toEqual({ intents: 0, resources: 0, sessions: 0, schedulerMoves: 0 });
     } finally { f.close(); }
   });
@@ -218,25 +229,54 @@ describe("T68e observe mode", () => {
     }
   });
 
-  test("P1-2 regression: review --to in round 3 is judged by the planner replayed at the verdict (three P1 rounds stop)", async () => {
-    const f = fixture();
+  test("P1-2 regression: review --to is never a match; with an observation after the verdict round 3 is a three-P1 stop", async () => {
+    for (const observed of [false, true]) {
+      const f = fixture();
+      try {
+        f.toReview();
+        for (let r = 1; r <= 3; r++) {
+          f.dispatch(H1);
+          await f.observe();
+          f.review("changes", H1, [P1], observed ? undefined : "fix");
+          await f.observe();
+          if (observed) moveStage(f.db, f.at("owner"), { taskId: "T1", from: "review", to: "fix" });
+          if (r < 3) deliver(f.db, f.at("agent-one"), { taskId: "T1", headSHA: H1, moveFrom: "fix" });
+        }
+        await f.observe();
+        const moves = (await f.rows()).filter((r) => r.actual === "推阶段 review→fix").map((r) => [r.verdict, r.planned]);
+        expect(moves).toEqual(observed ? [["match", "推阶段到 fix"], ["match", "推阶段到 fix"], ["diff", "停下升级（three_p1_rounds）"]]
+          : Array(3).fill(["unknown", "（结论后的计划没有记录）"]));
+      } finally { f.close(); }
+    }
+  });
+
+  test("r2 P1 regression: facts that appear after the verdict never make an earlier move look planned", async () => {
+    // A: PM moves to merge with the verdict, the owner approves the screenshots only afterwards.
+    const f = fixture("ui");
     try {
       f.toReview();
-      for (let r = 1; r <= 3; r++) {
-        f.dispatch(H1);
-        await f.observe();
-        f.review("changes", H1, [P1], "fix");
-        await f.observe();
-        if (r < 3) deliver(f.db, f.at("agent-one"), { taskId: "T1", headSHA: H1, moveFrom: "fix" });
-      }
+      f.dispatch(H1);
+      await f.observe();
+      f.review("pass", H1, [], "merge");
+      f.answer(f.uiAsk(H1).id, "ok");
+      await f.observe();
       const rows = await f.rows();
-      expect(rows.filter((r) => r.actual === "推阶段 review→fix").map((r) => [r.round, r.verdict, r.planned])).toEqual([
-        [1, "match", "推阶段到 fix"], [2, "match", "推阶段到 fix"], [3, "diff", "停下升级（three_p1_rounds）"],
-      ]);
-      const blind = listEvents(f.db, { project: "p", target: "T1" }).filter((e) => !(e.kind === "scheduler" && e.data.retro));
-      expect(schedulerDiff(blind, (a) => a === "owner").filter((r) => r.actual === "推阶段 review→fix").map((r) => r.verdict))
-        .toEqual(["unknown", "unknown", "unknown"]);
+      expect(rows.find((r) => r.actual === "推阶段 review→merge")).toMatchObject({ verdict: "unknown" });
+      expect(rows.filter((r) => r.verdict === "match" && r.actual === "推阶段 review→merge")).toEqual([]);
     } finally { f.close(); }
+    // B: PM records a verdict from a session that was not dispatched; the registry moves to that session afterwards.
+    const g = fixture();
+    try {
+      g.toReview();
+      g.dispatch(H1);
+      await g.observe();
+      g.review("pass", H1, [], "merge", ["agent-review", "s-future"]);
+      g.setReviewSession("s-future");
+      await g.observe();
+      const rows = await g.rows();
+      expect(rows.find((r) => r.actual === "推阶段 review→merge")).toMatchObject({ verdict: "unknown" });
+      expect(rows.filter((r) => r.verdict === "match" && r.actual === "推阶段 review→merge")).toEqual([]);
+    } finally { g.close(); }
   });
 
   test("P1-3 regression: the owner's real screenshot ask is projected — none / open / approved / rejected / stale", async () => {
@@ -247,13 +287,7 @@ describe("T68e observe mode", () => {
       await f.observe();
       f.review("pass", H1, []);
       expect((await f.observe()).decision).toMatchObject({ action: "ask" });
-      const ask = (head: string, from = "scheduler") => {
-        const binding = { action: "scheduler_ui_screenshot", params: { task: "T1", specRev: 1, head, screenshotsDigest: DIGEST }, approve: ["ok"] };
-        return openAsk(f.db, { project: "p", taskId: "T1", fromAgent: from, source: "system", kind: "authorize", title: "看前后截图",
-          expiresAt: f.now() + 1e9, bind: { ...binding, paramsHash: bindHash(binding, from) } }, f.now() + 1);
-      };
-      const answer = (id: string, button: string) => answerAsk(f.db, id, { choices: [`[button:${button}]`], labels: [button], text: "",
-        principal: "owner", via: "web_card", at: f.now() + 2 });
+      const { uiAsk: ask, answer } = f;
       const a = ask(H1);
       expect((await f.observe()).decision).toMatchObject({ kind: "wait", code: "owner_screenshot" });
       answer(a.id, "ok");
@@ -264,6 +298,22 @@ describe("T68e observe mode", () => {
       expect((await f.observe()).decision).toMatchObject({ kind: "escalate", code: "ui_stale" });
       answer(ask(H1, "agent-one").id, "ok");
       expect((await f.observe()).decision).toMatchObject({ kind: "escalate", code: "ui_stale" });
+    } finally { f.close(); }
+  });
+
+  test("r2 P2 regression: only an answer carrying the authenticated owner mark counts as the owner's approval", async () => {
+    const f = fixture("ui");
+    try {
+      f.toReview();
+      f.dispatch(H1);
+      await f.observe();
+      f.review("pass", H1, []);
+      for (const mark of [{}, { external: true }]) {
+        f.answer(f.uiAsk(H1).id, "ok", mark);
+        expect((await f.observe()).decision).toMatchObject({ kind: "escalate", code: "ui_unverified" });
+      }
+      f.answer(f.uiAsk(H1).id, "ok");
+      expect((await f.observe()).decision).toMatchObject({ action: "stage", targetStage: "merge" });
     } finally { f.close(); }
   });
 

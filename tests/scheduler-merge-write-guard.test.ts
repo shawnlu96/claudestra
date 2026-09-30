@@ -65,10 +65,18 @@ test("write transaction refuses an unreviewed or stale merge head and a UI merge
       .toThrow(/截图授权/);
     const params = { task: "T2", specRev: 1, head, screenshotsDigest: digest };
     const binding = { action: "scheduler_ui_screenshot", params, approve: ["approve"] };
-    const ask = openAskFull(db, { project: "p", taskId: "T2", source: "system", kind: "authorize", title: "看截图",
-      fromAgent: "scheduler", options: [{ type: "buttons", buttons: [{ id: "approve", label: "同意" }] }],
-      bind: { ...binding, paramsHash: bindHash(binding, "scheduler") } }, 10).ask;
-    answerAsk(db, ask.id, { choices: ["[button:approve]"], labels: ["同意"], text: "", principal: "owner:self", via: "web_card", at: 11 });
+    const approve = (owner: boolean) => {
+      const ask = openAskFull(db, { project: "p", taskId: "T2", source: "system", kind: "authorize", title: "看截图",
+        fromAgent: "scheduler", options: [{ type: "buttons", buttons: [{ id: "approve", label: "同意" }] }],
+        bind: { ...binding, paramsHash: bindHash(binding, "scheduler") } }, 10).ask;
+      answerAsk(db, ask.id, { choices: ["[button:approve]"], labels: ["同意"], text: "", principal: "owner:self", via: "web_card", at: 11,
+        ...(owner ? { owner: true as const } : {}) });
+    };
+    // 答复没有认证入口写的 owner 标记（旧答复 / 低层写入），不算 owner 批准
+    approve(false);
+    expect(() => planIntent(db, { actor: "scheduler", now: 12 }, { id: "ui-merge", taskId: "T2", taskRev: 1,
+      workflowRev: ui.rev, causalSeq: seq(), node: "merge_deploy", action: "merge", reason: "merge" })).toThrow(/截图授权/);
+    approve(true);
     expect(planIntent(db, { actor: "scheduler", now: 12 }, { id: "ui-merge", taskId: "T2", taskRev: 1,
       workflowRev: ui.rev, causalSeq: seq(), node: "merge_deploy", action: "merge", reason: "merge" }).intent.status)
       .toBe("pending");

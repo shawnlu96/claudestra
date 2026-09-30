@@ -5,7 +5,7 @@
  */
 import type { Database } from "bun:sqlite";
 import { bindHash, checkAsk } from "./ask-bind.js";
-import { getAsk } from "./ledger-asks.js";
+import { getAsk, ownerAnswered } from "./ledger-asks.js";
 import { isManager } from "./ledger-checks.js";
 import type { LedgerTask } from "./ledger-stages.js";
 import type { PlannerSnapshot } from "./scheduler-plan.js";
@@ -35,7 +35,7 @@ export function projectUiGate(db: Database, task: LedgerTask, now: number): UiGa
     if (ask.expiresAt <= now || (ask.state !== "open" && ask.state !== "answered")) return { state: "none" };
     if (ask.state === "open") return { state: "open", ...bound };
     const check = checkAsk(ask, bindHash(ask.bind, from), from, now);
-    return check.ok ? { state: "approved", ...bound, ownerVerified: ask.answer?.external !== true } : { state: "rejected", ...bound };
+    return check.ok ? { state: "approved", ...bound, ownerVerified: ownerAnswered(ask.answer) } : { state: "rejected", ...bound };
   }
   return { state: "none" };
 }

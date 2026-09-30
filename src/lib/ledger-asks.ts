@@ -44,7 +44,12 @@ export interface AskAnswer {
   atts?: AskAtt[];
   /** 作答的不是 owner 本人（guest）：原话不进 decision 的 text */
   external?: boolean;
+  /** 认证入口判定是 owner 本人作答（bridge/asks.ts commitAnswer）：要 owner 批准的闸只认这个正面标记，缺了不算 */
+  owner?: true;
 }
+
+/** owner 本人答的：只认正面标记，旧答复 / 运行时弹框 / 来源不明的一律不算，推不出就不认 */
+export const ownerAnswered = (a: AskAnswer | null | undefined): boolean => a?.owner === true && a.external !== true;
 
 export interface AskAtt {
   kind: string;

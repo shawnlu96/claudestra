@@ -1,8 +1,9 @@
 /**
  * Pure comparison of observe records with what actually happened next. Each observation is answered by the first
  * later non-scheduler event; PM stage moves or escalations that follow in the same window are listed as unplanned.
- * A move right after a verdict is answered by the retro observation replayed at that verdict (scheduler-observe).
  * "match" only when the ledger proves the same action; what cannot be told from the ledger is "unknown", never a match.
+ * A move right after a verdict with no observation in between is unknown: the plan at that moment depends on sessions,
+ * steps and asks the ledger keeps only as current state, so replaying it later would borrow facts from the future.
  */
 import type { LedgerEvent } from "./ledger-stages.js";
 import type { ObservedDecision } from "./scheduler-observe.js";
@@ -26,9 +27,7 @@ const PM_GATES = new Set(["pm_restate"]);
 /** Waits that end when a worker (not PM) writes its result; a worker event answering them is the expected path. */
 const WORKER_WAITS = new Set(["in_flight", "intent_in_flight", "review_transition"]);
 
-const isObservation = (e: LedgerEvent): boolean => e.kind === "scheduler" && e.data.op === "observe" && e.data.retro === undefined;
-const retroOf = (e: LedgerEvent): { reviewSeq: number; moveSeq: number } | null =>
-  e.kind === "scheduler" && e.data.op === "observe" && e.data.retro && typeof e.data.retro === "object" ? e.data.retro as { reviewSeq: number; moveSeq: number } : null;
+const isObservation = (e: LedgerEvent): boolean => e.kind === "scheduler" && e.data.op === "observe";
 const moveOf = (e: LedgerEvent): string => `${String(e.data.from ?? "?")}→${String(e.data.to ?? "?")}`;
 
 function describeEvent(e: LedgerEvent): string {
@@ -116,8 +115,6 @@ function judge(d: ObservedDecision, e: LedgerEvent, isPm: (actor: string) => boo
 export function schedulerDiff(events: readonly LedgerEvent[], isPm: (actor: string) => boolean): DiffRow[] {
   const sorted = [...events].sort((a, b) => a.seq - b.seq);
   const observations = sorted.filter(isObservation);
-  const retros = new Map<number, LedgerEvent>();
-  for (const e of sorted) { const r = retroOf(e); if (r) retros.set(r.moveSeq, e); }
   const assignedReviewer = (seq: number): string | null => {
     const a = sorted.findLast((e) => e.kind === "step" && e.data.op === "assign" && e.data.step === "review" && e.seq < seq);
     return a?.data.executorKind === "agent" && typeof a.data.executor === "string" ? a.data.executor : null;
@@ -142,15 +139,9 @@ export function schedulerDiff(events: readonly LedgerEvent[], isPm: (actor: stri
     rows.push({ ...base, actual: describeEvent(first), actor: first.actor, ...judge(d, first, isPm, c), lagMs: first.ts - o.ts, at: first.seq });
     let sawVerdict = first.kind === "review";
     for (const e of rest) {
-      const retro = retros.get(e.seq);
-      if (retro) {
-        const rd = retro.data.decision as ObservedDecision;
-        const j = judge(rd, e, isPm, c);
-        rows.push({ observationSeq: retro.seq, stage: "review", round: Number(retro.data.round), planned: describeDecision(rd), actual: describeEvent(e),
-          actor: e.actor, verdict: j.verdict, note: `按结论当时的台账回溯重算；${j.note}`, lagMs: 0, at: e.seq });
-      } else if (e.kind === "stage" && sawVerdict && e.data.from === "review" && isPm(e.actor)) {
+      if (e.kind === "stage" && sawVerdict && e.data.from === "review" && isPm(e.actor)) {
         rows.push({ ...base, planned: "（结论后的计划没有记录）", actual: describeEvent(e), actor: e.actor, verdict: "unknown",
-          note: "审查结论之后直接推阶段、中间没有观察，无法还原引擎的判断，需核对", lagMs: e.ts - o.ts, at: e.seq });
+          note: "审查结论之后直接推阶段、中间没有观察；当时的 session 与授权台账只存现状，无法还原引擎的判断，需核对", lagMs: e.ts - o.ts, at: e.seq });
       } else if ((e.kind === "stage" || e.kind === "escalate") && isPm(e.actor)) {
         rows.push({ ...base, actual: describeEvent(e), actor: e.actor, verdict: "diff", note: "观察之后又一个未经计划的动作", lagMs: e.ts - o.ts, at: e.seq });
       }

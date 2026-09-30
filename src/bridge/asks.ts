@@ -282,7 +282,7 @@ export async function commitAnswer(i: AnswerInput): Promise<Ask> {
   if (!deps) throw new Error("asks 未初始化");
   const labels = i.picks.map((p) => p.label);
   // 作答的不是 owner 本人（guest）：原话不进台账 decision 的 text（ledger-asks.ts answerAsk）
-  const who = { principal: i.principal, device: i.device, ...(isOwnerSource(i.from) ? {} : { external: true }) };
+  const who = { principal: i.principal, device: i.device, ...(isOwnerSource(i.from) ? { owner: true as const } : { external: true }) };
   const base = { choices: i.picks.map((p) => p.wire), labels, text: i.text, ...who, via: i.via, at: Date.now(), final: i.final };
   const answer = i.atts?.length ? { ...base, atts: i.atts } : base;
   const within = i.ask.kind === "assigned" && prepareAssigned ? await prepareAssigned(i.ask, answer) : undefined;

@@ -70,10 +70,10 @@ function slotFacts(db: Database, project: string, maxWorkers: number) {
   return { held, workerCount: new Set(slots.map((h) => h.taskId)).size, freeWorkerSlot: free };
 }
 
-/** asOf replays the card as it stood right after that event (used to judge a verdict PM acted on before a tick). */
-export function observeSnapshot(db: Database, task: LedgerTask, opts: SnapshotOpts, asOf?: number): PlannerSnapshot {
+/** Current state only: registry sessions, steps, bindings, asks and resources have no history, so no past replay. */
+export function observeSnapshot(db: Database, task: LedgerTask, opts: SnapshotOpts): PlannerSnapshot {
   const workflow = getWorkflow(db, task.id);
-  const events = listEvents(db, { project: task.project, target: task.id }).filter((e) => asOf === undefined || e.seq <= asOf);
+  const events = listEvents(db, { project: task.project, target: task.id });
   const steps = stepsOf(db, task);
   const bound = taskWorkerRefs(db, task.id);
   const writer = stepAtStage(steps, { stage: task.stage === "fix" ? "fix" : "build", stageBefore: null });
@@ -81,8 +81,7 @@ export function observeSnapshot(db: Database, task: LedgerTask, opts: SnapshotOp
   const reviewStep = currentReview(steps);
   const reviewer = bound.reviewer ?? (reviewStep?.executorKind === "agent" ? localRef(opts, task.id, reviewStep.executor) : null);
   const shadow = shadowReviews(task, events, bound.reviewer, opts);
-  const real = (db.query("SELECT * FROM scheduler_intents WHERE taskId = ? ORDER BY eventSeq").all(task.id) as SchedulerIntent[])
-    .filter((i) => asOf === undefined || i.eventSeq <= asOf);
+  const real = db.query("SELECT * FROM scheduler_intents WHERE taskId = ? ORDER BY eventSeq").all(task.id) as SchedulerIntent[];
   const slots = slotFacts(db, task.project, opts.maxWorkers);
   const globs = Array.isArray(task.extra.fileGlobs) ? task.extra.fileGlobs.filter((g): g is string => typeof g === "string") : [];
   const digest = typeof task.extra.screenshotsDigest === "string" ? task.extra.screenshotsDigest : null;
