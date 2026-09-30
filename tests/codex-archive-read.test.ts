@@ -5,7 +5,7 @@
  * rollout 根走 CODEX_HOME（codexSessionsRoot 每次调用现读环境变量），全部落在临时目录，不碰真实 ~/.codex。
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { archiveAgentSession, archiveSession } from "../src/lib/session-archive.js";
@@ -168,6 +168,57 @@ describe("specRev 2：thread/revert 链", () => {
     expect(r.note).toContain(".zst");
   });
 
+  test("前缀段后来被压成 .zst、归档里已有：算已存，ok:true（每日 sweep 不报假失败）", async () => {
+    const id = sid();
+    const r1 = rid(n);
+    const old = rollout("2026-09-29T01-02-03", id, { id }, [userLine("OLD")]);
+    rollout("2026-09-30T01-02-03", `${id}_${r1}`, { id, history_base: { thread_id: id } }, [userLine("LATEST")]);
+    const root = archiveRoot();
+    expect((await archive(id, root)).ok).toBe(true);
+    renameSync(old, `${old}.zst`);
+    const r = await archive(id, root);
+    expect(r).toMatchObject({ ok: true, archived: [] });
+    rmSync(join(root, "agent-cx", `${id}.jsonl`));
+    expect((await archive(id, root)).ok).toBe(false); // 归档里没有了就还是缺段
+  });
+
+  // P1（T75 r1）：文件名更新的同线程段没进归档时，不能 ok:true 只存旧正文
+  const newerSkipped: Array<[string, (id: string, r1: string) => void, string]> = [
+    ["最新段是 .zst", (id, r1) => rollout("2026-09-30T01-02-03", `${id}_${r1}`, { id, history_base: { thread_id: id } }, [userLine("NEW")], ".jsonl.zst"), ".zst"],
+    ["最新段首行是半截 JSON", (id, r1) => {
+      const p = rollout("2026-09-30T01-02-03", `${id}_${r1}`, { id }, []);
+      writeFileSync(p, L({ timestamp: TS, type: "session_meta", payload: { id, cwd } }).slice(0, 40));
+    }, "首行读不出"],
+    ["最新段首行 id 不符", (id, r1) => rollout("2026-09-30T01-02-03", `${id}_${r1}`, { id: sid() }, [userLine("NEW")]), "首行 id 是"],
+  ];
+  for (const [label, make, why] of newerSkipped) {
+    test(`${label}：ok:false，写明是最新段；旧段照拷`, async () => {
+      const id = sid();
+      const r1 = rid(n);
+      rollout("2026-09-29T01-02-03", id, { id }, [userLine("OLD")]);
+      make(id, r1);
+      const root = archiveRoot();
+      const r = await archive(id, root);
+      expect(r.ok).toBe(false);
+      expect(r.note).toContain(`最新段 ${r1} 没归档`);
+      expect(r.note).toContain(why);
+      expect(r.archived).toEqual([join(root, "agent-cx", `${id}.jsonl`)]);
+    });
+  }
+
+  test("回退后被放弃的中间段是 .zst：ok:false，写明是哪一段", async () => {
+    const id = sid();
+    const [a, b] = [rid(n * 10 + 1), rid(n * 10 + 2)];
+    rollout("2026-09-28T01-02-03", id, { id }, [userLine("S0")]);
+    rollout("2026-09-29T01-02-03", `${id}_${a}`, { id, history_base: { thread_id: id } }, [userLine("S1")], ".jsonl.zst");
+    rollout("2026-09-30T01-02-03", `${id}_${b}`, { id, history_base: { thread_id: id } }, [userLine("S2")]);
+    const r = await archive(id, archiveRoot());
+    expect(r.ok).toBe(false);
+    expect(r.note).toContain(`段 ${a} 没归档`);
+    expect(r.note).not.toContain("最新段");
+    expect(r.archived.map((p) => p.split("/").pop())).toEqual([`${id}.jsonl`, `${b}.jsonl`]);
+  });
+
   test("两次 revert：三段按文件名时间 + rolloutId 排序，全部归档", async () => {
     const id = sid();
     const [a, b] = [rid(n * 10 + 1), rid(n * 10 + 2)];
@@ -189,6 +240,15 @@ describe("specRev 2：thread/revert 链", () => {
     const r = await archive(id, archiveRoot());
     expect(r.ok).toBe(true);
     expect(r.note).toContain(`父线程 ${parent}`);
+  });
+
+  test("分页 fork 的父线程 rollout 已不在本机：原文件的前缀只能是父线程，不算缺段", async () => {
+    const id = sid();
+    const parent = sid();
+    rollout("2026-09-29T01-02-03", id, { id, forked_from_id: parent, history_base: { thread_id: parent } }, [userLine("CHILD")]);
+    const r = await archive(id, archiveRoot());
+    expect(r.ok).toBe(true);
+    expect(r.note).toContain(`前缀 ${parent} 属于父线程`);
   });
 
   test("同一段两份、cwd 分不开：仍然拒绝（T72 语义不变）", async () => {

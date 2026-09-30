@@ -142,12 +142,12 @@ export async function archiveSession(
     return { ok: false, archived: [], note: `无效 sessionId（期望字符串，实得 ${typeof sessionId}）` };
   }
   const runtime = agentRuntime({ runtime: opts.runtime });
-  const located = await locateSource(runtime, cwd, sessionId, opts.srcPath);
+  const dir = join(opts.archiveRoot ?? ARCHIVE_ROOT, agentName);
+  const located = await locateSource(runtime, cwd, sessionId, dir, opts.srcPath);
   if ("error" in located) return { ok: false, archived: [], note: located.error };
   const { segments, note: pickNote, incomplete } = located;
   const src = segments[0]!.path; // 子代理 / workflow 目录跟着原文件走（只有 CC / Pi 有，它们只有一段）
 
-  const dir = join(opts.archiveRoot ?? ARCHIVE_ROOT, agentName);
   await mkdir(dir, { recursive: true });
   const archived: string[] = [];
   const failed: string[] = [];
@@ -202,9 +202,9 @@ export async function archiveSession(
  * 会话源文件。Codex 走 pickCodexRolloutForArchive（核对首行 id，同 id 多份再按 cwd 分，分不开就拒；revert 链整条返回）；
  * 其余交给运行时适配器：Claude Code 按 cwd 推算，Pi 文件名带时间戳推不出（返回 null）→ 按 id 全库找。
  */
-async function locateSource(runtime: string, cwd: string | undefined, sessionId: string, srcPath?: string): Promise<RolloutPick> {
+async function locateSource(runtime: string, cwd: string | undefined, sessionId: string, dir: string, srcPath?: string): Promise<RolloutPick> {
   if (srcPath && existsSync(srcPath)) return { segments: [{ path: srcPath, stem: sessionId }] };
-  if (runtime === "codex") return pickCodexRolloutForArchive(sessionId, cwd);
+  if (runtime === "codex") return pickCodexRolloutForArchive(sessionId, cwd, undefined, dir);
   let src = !srcPath && cwd ? (sessionJsonlPath(runtime, cwd, sessionId) ?? "") : "";
   if (!src || !existsSync(src)) src = findSessionJsonlBySessionId(runtime, sessionId) ?? "";
   if (!src || !existsSync(src)) return { error: missingSourceNote(runtime, sessionId) };
