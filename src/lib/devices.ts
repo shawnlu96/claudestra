@@ -320,6 +320,8 @@ export interface Approval {
   guest?: string;
   /** 这个短码是谁签的（审计，见 pairing-codes IssuedCode.issuer） */
   issuer?: string;
+  /** 本机浏览器请求全权（/devices/local 没带控制 token）：只能由网页里的设备凭据批，回环控制路由（本机 agent 也能 curl）批不了 */
+  local?: true;
   createdAt: number;
   expiresAt: number;
   /** approving = 有人点了批准、正在签凭据：不再出现在待批列表，别人的批准 / 拒绝都进不来 */
@@ -333,7 +335,7 @@ export class Approvals {
   private readonly items = new Map<string, Approval>();
   constructor(private readonly now: () => number = Date.now, private readonly random: Random = defaultRandom, private readonly ttlMs = APPROVAL_TTL_MS) {}
 
-  add(a: { code: string; deviceName: string; clientIp: string | null; grant: Grant; guest?: string; issuer?: string }): Approval {
+  add(a: { code: string; deviceName: string; clientIp: string | null; grant: Grant; guest?: string; issuer?: string; local?: true }): Approval {
     this.prune();
     const item: Approval = { id: Buffer.from(this.random(16)).toString("base64url"), ...a, createdAt: this.now(), expiresAt: this.now() + this.ttlMs, state: "pending" };
     this.items.set(item.id, item);

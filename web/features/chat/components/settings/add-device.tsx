@@ -2,7 +2,7 @@
 import { useState } from "react";
 import { useT } from "@/lib/i18n";
 import { newShareCode, type ShareCode } from "@/lib/api/devices";
-import { GUEST_ALL_WARNING, guestShareOpts, shareCodeErrorText } from "@/lib/guest-share";
+import { DRIVE_AGENT_SHELL_WARNING, GUEST_ALL_WARNING, guestShareOpts, shareCodeErrorText } from "@/lib/guest-share";
 import { useChatStore } from "../../chat-store";
 import { PairCodeCard } from "../pair-share";
 
@@ -50,6 +50,7 @@ function GuestFields({ guest, onGuest, picked, onToggle, choices, armed }: {
         {choices.map((c) => chip(c.name, c.label))}
       </div>
       {picked.length === 0 && <div className="text-[11px] text-base-content/50">{t("默认一个都不开放：至少选一个会话")}</div>}
+      {picked.length > 0 && <div className="text-[11px] text-warning">{t(DRIVE_AGENT_SHELL_WARNING)}</div>}
       {armed && (
         <div className="rounded-lg bg-warning/10 px-2.5 py-2 text-xs">
           <span className="block font-medium">{t(GUEST_ALL_WARNING)}</span>

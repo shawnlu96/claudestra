@@ -4,6 +4,7 @@
  * 管理端点（grant.manage）：列设备、撤销、待确认列表与决定。回环控制路由（manager CLI）在 relay-routes.ts 接线，逻辑在这里。
  * 凭据落 principals.json；挑战与待确认在内存（进程重启即失效，重新配对即可）。纯逻辑在 lib/devices.ts / lib/pairing-codes.ts。
  */
+import { randomBytes } from "node:crypto";
 import { hostname } from "node:os";
 import { instanceKeySync, keyFingerprint } from "../lib/instance-key.js";
 import {
@@ -12,9 +13,10 @@ import {
 } from "../lib/devices.js";
 import { LEGACY_SESSION_COOKIE, redeemLegacySession } from "../lib/legacy-web.js";
 import { webDb } from "./local-api/db.js";
-import { readPrincipalsStrict, reservedNameError, updatePrincipals, type Principal } from "../lib/principals.js";
+import { readPrincipalsStrict, reservedNameError, secretEquals, updatePrincipals, type Principal, type PrincipalsFile } from "../lib/principals.js";
 import { canonicalAgentName, REGISTRY_PATH, readRegistryAgentsSync } from "../lib/registry.js";
-import { formatCode } from "../lib/relay-protocol.js";
+import { formatCode, randomCode } from "../lib/relay-protocol.js";
+import { extractControlToken } from "./api-auth.js";
 import { apiJson, forbidden, INVALID_JSON, invalidJsonBody, readJsonBody } from "./api-respond.js";
 import { emitCredentialRevoked } from "./credential-revocation.js";
 import { relayClient } from "./relay-link.js";
@@ -103,7 +105,7 @@ export async function handleDevicesPublic(req: Request, url: URL): Promise<Respo
   }
   if (p === "/api/v1/devices/pair" && req.method === "POST") return pair(req);
   if (p === "/api/v1/devices/pair/status" && req.method === "GET") return pairStatus(req, url);
-  if (p === "/api/v1/devices/local" && req.method === "POST") return pairLocal(req);
+  if (p === "/api/v1/devices/local" && req.method === "POST") return pairLocal(req, url);
   if (p === "/api/v1/devices/legacy-session" && req.method === "POST") return legacySession(req);
   return null;
 }
@@ -153,22 +155,63 @@ async function pair(req: Request): Promise<Response> {
 
 /** 浏览器轮询待确认：批准的结果只给一次 */
 function pairStatus(req: Request, url: URL): Response {
-  const t = approvals.take(url.searchParams.get("approval") ?? "");
+  const id = url.searchParams.get("approval") ?? "";
+  // 本机全权请求的结果只在回环上取：approvalId 万一从本机页面漏出去，别处也拿不走那张 cookie
+  if (approvals.get(id)?.local && requestContextOf(req).source !== "loopback") return forbidden("local pairing result is only available on this machine");
+  const t = approvals.take(id);
   if (t.state === "pending") return apiJson(202, { ok: true, state: "pending" });
   if (t.state !== "approved") return apiJson(410, { ok: false, state: t.state, error: t.state === "denied" ? "pairing denied on the machine" : "approval expired" });
   return pairedResponse(requestContextOf(req), { ...t.result, grant: t.approval.grant });
 }
 
-/** 本机浏览器：只认真实回环 socket（经中继 dispatch 的 source 是 relay，进不来）+ 自定义头 + 同源 */
-async function pairLocal(req: Request): Promise<Response> {
+/**
+ * 有没有人能批本机浏览器的全权请求：未停用的 principal 下有未停用、未过期、带 manage 的设备凭据（批准门是 canAdministerPairing + capGrant）。
+ * 没有 = 只能走终端 claudestra pair；/devices/local 据此直接回 no_approver，免得网页干等 10 分钟。
+ */
+export function hasPairingApprover(file: PrincipalsFile, now = Date.now()): boolean {
+  return file.principals.some((p) => !p.disabled && !p.peer && (p.credentials ?? []).some((c) => !c.disabled && c.grant.manage && c.grant.agents.includes("*") && Date.parse(c.expiresAt) > now));
+}
+
+/** 本机同时挂着的全权待批上限：本机进程能反复打这个端点，别让它把 owner 的批准横幅和推送刷满 */
+const LOCAL_PENDING_MAX = 3;
+
+/** 控制 token：本机脚本 / CLI 签全权 cookie 的凭证；测试可覆盖。未设 = 这条路关着，只能真人批 */
+let controlTokenOverride: string | undefined;
+export function setLocalPairingControlTokenForTest(token: string | undefined): void {
+  controlTokenOverride = token;
+}
+function controlTokenOk(req: Request, url: URL): boolean {
+  const want = controlTokenOverride ?? process.env.BRIDGE_CONTROL_TOKEN ?? "";
+  const got = extractControlToken(req, url);
+  return !!want && !!got && secretEquals(got, want);
+}
+
+/**
+ * 本机浏览器要全权凭据：只认真实回环 socket（经中继 dispatch 的 source 是 relay，进不来）+ 自定义头 + 同源，这三样本机任何进程都凑得齐
+ * （bypass agent 一条 curl 就行），所以还要二选一：带 BRIDGE_CONTROL_TOKEN 直接签；否则进待批（local），owner 在已配对的全权设备上
+ * 核对展示码点允许，浏览器拿 approvalId 轮询 /devices/pair/status 取 cookie（只给一次、10 分钟过期）。没有能批的设备 → no_approver，
+ * 网页回落到终端 claudestra pair（tests/bridge-devices.test.ts「本机回环自动配对」）。
+ */
+async function pairLocal(req: Request, url: URL): Promise<Response> {
   const ctx = requestContextOf(req);
   if (ctx.source !== "loopback") return forbidden("local pairing is only available from this machine");
   if (!req.headers.get(DEVICE_HEADER)) return forbidden(`${DEVICE_HEADER} header required`);
   const origin = req.headers.get("origin");
-  if (origin && origin !== new URL(req.url).origin) return forbidden("cross-origin local pairing refused");
+  if (origin && origin !== url.origin) return forbidden("cross-origin local pairing refused");
   const body = await readJsonBody(req);
   const deviceName = str((body === INVALID_JSON || !body ? {} : (body as Body)).deviceName) ?? "本机浏览器";
-  return pairedResponse(ctx, await grantCredential(deviceName, fullGrant(), undefined, ctx.clientIp));
+  if (controlTokenOk(req, url)) return pairedResponse(ctx, await grantCredential(deviceName, fullGrant(), undefined, ctx.clientIp, { issuedBy: "control-token" }));
+  if (!hasPairingApprover(await readPrincipalsStrict(principalsPath))) {
+    return apiJson(403, { ok: false, code: "no_approver", error: "no paired device can approve this; run `claudestra pair` in the terminal" });
+  }
+  if (approvals.pending().filter((a) => a.local).length >= LOCAL_PENDING_MAX) {
+    return apiJson(429, { ok: false, code: "rate_limited", error: "too many local pairing requests waiting for approval" });
+  }
+  const a = approvals.add({ code: randomCode((n) => new Uint8Array(randomBytes(n))), deviceName, clientIp: ctx.clientIp, grant: fullGrant(), local: true });
+  void import("./push/init.js")
+    .then((m) => m.pushOwnerNotice("本机浏览器请求配对", `「${deviceName}」要这台电脑的全权。码 ${formatCode(a.code)} 对得上再允许；不是你开的就拒绝。`))
+    .catch((e) => console.error(`⚠️ 本机配对待批提醒没发出去: ${(e as Error).message}`));
+  return apiJson(202, { ok: true, pending: true, approvalId: a.id, code: a.code, expiresAt: new Date(a.expiresAt).toISOString(), machineName: hostname() });
 }
 
 // ── 管理端点 ──────────────────────────────────────────────────────────────
@@ -233,7 +276,7 @@ async function revokeDevice(req: Request, principal: Principal, id: string): Pro
 
 export function pendingApprovals(): Array<Record<string, unknown>> {
   return approvals.pending().map((a) => ({
-    id: a.id, code: a.code, deviceName: a.deviceName, clientIp: a.clientIp, grant: a.grant, ...(a.guest ? { guest: a.guest } : {}),
+    id: a.id, code: a.code, deviceName: a.deviceName, clientIp: a.clientIp, grant: a.grant, ...(a.guest ? { guest: a.guest } : {}), ...(a.local ? { local: true } : {}),
     createdAt: new Date(a.createdAt).toISOString(), expiresAt: new Date(a.expiresAt).toISOString(),
   }));
 }
@@ -244,6 +287,10 @@ export function pendingApprovals(): Array<Record<string, unknown>> {
  */
 export async function decideApproval(id: string, approve: boolean, approver?: Principal): Promise<Record<string, unknown> | null> {
   const peek = approvals.get(id);
+  // 本机浏览器的全权请求：回环控制路由（approver 缺省）本机任何进程都打得到，批准只认网页里的设备；拒绝谁都能拒
+  if (approve && !approver && peek?.local && peek.state === "pending") {
+    return { ok: false, id, state: "pending", error: "本机浏览器的全权请求只能在已配对的设备上批准（网页侧栏的配对横幅）" };
+  }
   if (approve && approver && peek?.state === "pending" && JSON.stringify(capGrant(peek.grant, approver)) !== JSON.stringify(peek.grant)) {
     return { ok: false, id, state: "pending", error: "这个请求要的权限比你这台设备的还大，批准不了；到电脑上或用全权设备批准" };
   }

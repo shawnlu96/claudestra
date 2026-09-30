@@ -71,7 +71,7 @@ async function pairApprove(req: Request): Promise<Response> {
   const body = await readJson(req);
   if (typeof body.id !== "string") return json(400, { ok: false, error: '"id" required' });
   const r = await decideApproval(body.id, body.approve === true);
-  return json(r ? 200 : 404, r ?? { ok: false, error: "approval not found or already decided" });
+  return json(!r ? 404 : r.ok === false ? 403 : 200, r ?? { ok: false, error: "approval not found or already decided" }); // 403：本机全权请求回环批不了
 }
 
 /** manager 经中继调对方：正文 base64 进出，整读（CLI 的响应都是小 JSON） */
