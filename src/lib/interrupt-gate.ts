@@ -6,12 +6,12 @@
  * 接线在 bridge/interrupt-gate.ts。
  */
 import { createKeyedSerial } from "./keyed-serial.js";
-import { controlFor } from "./runtimes/index.js";
+import { controlFor, type Transport } from "./runtimes/index.js";
 import type { TurnState } from "./turn-state.js";
 
 export interface InterruptGateDeps {
   /** 频道 → 窗口和运行时；查不到窗口 = null */
-  resolve: (channelId: string) => Promise<{ win: string | null; runtime?: string }>;
+  resolve: (channelId: string) => Promise<{ win: string | null; runtime?: string; transport?: Transport }>;
   probe: (win: string, runtime: string | undefined, agent: string, channelId: string) => Promise<TurnState>;
   /**
    * 窗口停在额度菜单 / 撞墙等待（lib/quota-wall-text.ts paneShowsWallWait）：一个键都不发，停字也不发（菜单里有花钱的选项，
@@ -56,7 +56,7 @@ export function createInterruptGate(deps: InterruptGateDeps, cooldownMs = 4_000)
      * Pi 不打断（preemptOnHumanMessage=false，消息 steer 进回合）。发完键再看一眼：画面还在忙（焦点在浮层 / copy-mode / vim 插入模式，
      * 键没起作用）就不算打断——调用方不能据此告诉 agent「你被打断了」。
      * stop（停字）：人明确要停——不看 preemptOnHumanMessage（Pi 也打断）；离上一次发键不足最小间隔就等够再发（不丢这次停）；
-     * 判据失效（unknown）也发键；只有确认空闲或压缩中才不发。
+     * 判据失效（unknown）也发键；只有确认空闲或压缩中才不发。中止走扩展 / ACP 宿主的（Pi、ACP Codex）不看 bridge 的忙闲，由运行时回空闲（no_keys）。
      */
     preempt(channelId: string, agent: string, opts: { stop?: boolean } = {}): Promise<PreemptResult> {
       return serial(channelId, async (): Promise<PreemptResult> => {
@@ -65,16 +65,18 @@ export function createInterruptGate(deps: InterruptGateDeps, cooldownMs = 4_000)
         // 刚打断过（抢占或手动）：连发的补充消息不叠加打断；停字等够最小间隔再发
         if (!stop && since <= cooldownMs) return { fired: false, why: "cooldown" };
         if (stop && since <= gapAfter(channelId)) await deps.sleep(gapAfter(channelId) - since + 50);
-        const { win, runtime } = await deps.resolve(channelId);
-        if (!win || (!stop && !controlFor(runtime).preemptOnHumanMessage)) return { fired: false, why: "not_allowed" };
+        const { win, runtime, transport } = await deps.resolve(channelId);
+        if (!win || (!stop && !controlFor(runtime, transport).preemptOnHumanMessage)) return { fired: false, why: "not_allowed" };
         if (deps.allow && !deps.allow(channelId, runtime, stop)) return { fired: false, why: "not_allowed" };
         if (await deps.wallWait?.(win)) return { fired: false, why: "wall_wait" };
         const shouldFire = (m: TurnState["main"]) => m === "busy" || (stop && m === "unknown");
-        const { main } = await deps.probe(win, runtime, agent, channelId);
+        // 事件态在按停之后、bridge 重启后、终端里自己开的回合上都不准；中止本身幂等（wf2 pi-3）
+        const askRuntime = stop && controlFor(runtime, transport).abortVia === "extension";
+        const { main } = askRuntime ? { main: "busy" as const } : await deps.probe(win, runtime, agent, channelId);
         if (main === "unknown" && !stop) console.warn(`⚠️ ${win} 忙闲判据失效（TUI 文案可能已变），跳过自动打断`);
         if (!shouldFire(main)) return { fired: false, why: "not_busy" };
         // 只对看画面的运行时（CC）复核：撞墙菜单 / 倒计时只有 CC 有，Codex / Pi 的忙闲来自 hook，多等这一拍没有用
-        if (deps.wallWait && controlFor(runtime).paneHeuristics) {
+        if (deps.wallWait && controlFor(runtime).paneHeuristics && !askRuntime) {
           await deps.sleep(RECHECK_MS);
           if (await deps.wallWait(win)) return { fired: false, why: "wall_wait" };
           if (!shouldFire((await deps.probe(win, runtime, agent, channelId)).main)) return { fired: false, why: "not_busy" };

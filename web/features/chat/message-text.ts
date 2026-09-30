@@ -33,6 +33,11 @@ export function splitQuoted(content: string): { quoted?: string; body: string } 
   return { quoted: qm?.[1], body: qm ? qm[2] : content };
 }
 
+/** 用户气泡的引用条 + 正文：引用条是本端「引用」功能写的，只拆本人的；外源（from 有值）整段原文交给 markdown，不按文本改显示（T31） */
+export function userQuoteParts(m: Pick<ChatMessage, "content" | "from">): { quoted?: string; body: string } {
+  return m.from ? { body: m.content } : splitQuoted(m.content);
+}
+
 /**
  * 整条 assistant 消息的纯文本（「复制整条」用）：按段序取叙述 + reply，工具卡
  * 不进剪贴板（复制回复是为了转发文字，不是转发执行日志）。

@@ -14,6 +14,7 @@ import {
 } from "../lib/turn-cuts.js";
 import { emitEvent, inflightTools, subscribeEvents } from "./event-bus.js";
 import { HELD_GIVE_UP_MS } from "./held-queue.js";
+import { isAcpChannel } from "./acp-state.js";
 import { PersistedMap } from "./persisted-map.js";
 import { newMessageId, newThreadId, type Envelope, type LocalEndpoint } from "./router.js";
 
@@ -131,7 +132,7 @@ export class TurnCuts {
     this.replies.set(k, [...(this.replies.get(k) ?? []), this.now()].slice(-REPLY_KEEP));
   }
 
-  /** owner 的消息到达（抢占判断之前）：不是「停」就解除「已叫停」。外源（非 owner 的 API 用户）不调：他们不能替 owner 叫停或解除 */
+  /** owner 开口（抢占判断之前 / 终端里敲字 / 答卡片）：不是「停」就解除「已叫停」。外源（非 owner 的 API 用户）不调：他们不能替 owner 叫停或解除 */
   noteHuman(channelId: string, isStop: boolean): void {
     this.prune(this.now()); // 不只在记新 cut 时清：很少被打断的实例，解除过的叫停记录也要按时清掉
     const s = this.stops.get(channelId);
@@ -212,7 +213,7 @@ export class TurnCuts {
 
   /** bridge 能不能主动打断：Codex 要 channel-server 会打字投递；非停字的抢占在上次 Stop 之后只做一次（保顺序） */
   mayBridgeInterrupt(channelId: string, runtime: string | undefined, stop: boolean): boolean {
-    if (runtime !== "codex") return true;
+    if (runtime !== "codex" || isAcpChannel(channelId)) return true; // ACP 宿主打断走 session/cancel，没有 queue 卡住的问题
     return this.codexTypeIn.has(channelId) && (stop || !this.codexCutSinceStop.has(channelId));
   }
 
@@ -232,16 +233,21 @@ export class TurnCuts {
     return this.noticePending.has(channelId) ? "notice" : null;
   }
 
-  /** 回合结束：该提醒就返回提醒的信封（押后队列投，只提醒一次），否则 null */
-  onStop(channelId: string, event: string, agent: string): Envelope | null {
+  /**
+   * 回合结束：该提醒就返回提醒的信封（押后队列投，只提醒一次），否则 null。
+   * afterAbort = 叫停发出中止之后 Pi / ACP 马上报的那次 Stop（bridge/pi-abort.ts stopAfterAbort）：是打断不是做完，
+   * 「这一回合送到了哪些」留给随后记的「停」（⏹ 抬头要列停之前送来的），也不按做完提醒续做（wf2 pi-4）
+   */
+  onStop(channelId: string, event: string, agent: string, afterAbort = false): Envelope | null {
     if (event === "Stop") {
       // 回合正常结束：Codex 的队列恢复了、排着的也会依次跑完（打断回报是 StopFailure，不算）；下一回合的消息从头记
       for (const m of [this.codexPaused, this.codexCutSinceStop]) m.delete(channelId);
-      this.codexQueued.delete(channelId), this.inbound.delete(channelId);
+      this.codexQueued.delete(channelId);
+      if (!afterAbort) this.inbound.delete(channelId);
     }
     const cut = this.cuts.get(channelId);
     if (!cut) return null;
-    const d = onStop(cut, event, this.now());
+    const d = onStop(cut, afterAbort ? "StopFailure" : event, this.now());
     if (d === "expire") this.cuts.set(channelId, { ...cut, state: "expired" });
     if (d !== "hint") return null;
     this.cuts.set(channelId, { ...cut, state: "hinted" });
@@ -249,8 +255,10 @@ export class TurnCuts {
     return resumeNoticeEnv(channelId, agent, resumeNotice(cut, (seg, t) => this.replyState(seg, t)));
   }
 
-  /** 押着的收尾提醒投出去之前再问一次：生成之后又被打断 / 叫停过、那件事已续上、过了 30 分钟，都不投了 */
+  /** 押着的收尾提醒投出去之前再问一次：生成之后又被打断 / 叫停过、那件事已续上、过了 30 分钟，都不投了；带 dropIfStopped 的叫停中不投 */
   noticeWanted(env: Envelope): boolean {
+    // Autopilot 到点收尾：投递途中（押墙、判忙的 await 里）owner 叫停了就不投，这一查和 ws.send 之间没有 await（T13e r2 P2）
+    if (env.meta.dropIfStopped) return this.interruptHold((env.to as LocalEndpoint).channelId) !== "stopped";
     if (!isCutNotice(env)) return true;
     const ch = (env.to as LocalEndpoint).channelId;
     const born = Date.parse(env.meta.ts) || 0;

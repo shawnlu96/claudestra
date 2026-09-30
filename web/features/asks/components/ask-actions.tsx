@@ -1,7 +1,7 @@
 "use client";
 import { useState } from "react";
 import { answerAskCard } from "@/lib/api/asks";
-import { answerAuq, answerPermission } from "@/lib/api/chat";
+import { answerAcp, answerAuq, answerPermission } from "@/lib/api/chat";
 import { ApiError } from "@/lib/api/client";
 import type { WebComponentRow } from "@/lib/chat/events";
 import { useT } from "@/lib/i18n";
@@ -52,6 +52,9 @@ export function AskActions({ ask, agent }: { ask: WebAsk; agent: string }) {
   const rows = all.filter((r, ri) => !done.has(rowGroup(r, ri)));
   // 权限弹框：按原有端点发键，是谁、选了什么由那个端点当场记进这条 ask
   const pickPermission = (action: string) => run(() => answerPermission(dialogAgent, action), wireLabels(rows, [`[button:${action}]`]));
+  // ACP 宿主的卡（额度 / 权限）：按钮原样交给 bridge，由它转给宿主（set_config_option / 权限回包），不发键
+  const acp = !!ask.extra?.acp;
+  const pickAcp = (action: string) => run(() => answerAcp(dialogAgent, action), wireLabels(rows, [`[button:${action}]`]));
   const auqLabels = (sel: number[][]) => (ask.options as { options?: { label: string }[] }[]).flatMap((q, qi) => sel[qi]?.map((oi) => q.options?.[oi]?.label ?? "") ?? []).filter(Boolean);
 
   return (
@@ -76,10 +79,11 @@ export function AskActions({ ask, agent }: { ask: WebAsk; agent: string }) {
           onCancel={() => run(() => answerAuq(dialogAgent, "cancel", [], ask.id), [t("取消")])}
         />
       )}
-      {ask.source === "permission" && (
+      {acp && <PermissionChoices rows={rows} busy={busy} onPick={pickAcp} />}
+      {ask.source === "permission" && !acp && (
         <PermissionChoices rows={rows} busy={busy} onPick={pickPermission} />
       )}
-      {ask.source === "codex" && !ask.extra?.quota && (
+      {ask.source === "codex" && !ask.extra?.quota && !acp && (
         <p className="flex items-center gap-1.5 text-[13px] opacity-75">
           <TerminalIcon />
           {t("这个弹框要到终端里处理")}

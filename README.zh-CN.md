@@ -244,7 +244,7 @@ bun src/manager.ts peer-http-remove <peer>        # 删 peer + 撤销我签出�
 # 低级 tmux 控制（给 master 兜底处理 bridge 认不出的 TUI modal）
 bun src/manager.ts tmux-screenshot <agent>
 bun src/manager.ts tmux-capture <agent> [lines]
-bun src/manager.ts tmux-send-keys <agent> <keys...>
+bun src/manager.ts tmux-send-keys <agent> [--force] <keys...>   # 额度菜单 / 撞墙倒计时 / 权限框 / AskUserQuestion 上拒发；--force 强发并记审计
 bun src/manager.ts tmux-wait-idle <agent> [ms]
 bun src/manager.ts tmux-help                        # tmux 速查（attach / 切窗口 / 分屏）
 

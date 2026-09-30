@@ -29,7 +29,6 @@ import {
   isIdle as tmuxIsIdle,
   tmuxCapture,
   tmuxSendLine,
-  isAutoConfirmableModal,
   trustPromptMoves,
   acceptTrustPrompt,
   detectSessionIdlePrompt,
@@ -38,6 +37,7 @@ import {
   MASTER_SESSION as SESSION_NAME,
   MASTER_WINDOW_NAME,
 } from "./lib/tmux-helper.js";
+import { isAutoConfirmableModal } from "./lib/modal-confirm.js";
 
 /**
  * Master 专用：用 isAutoConfirmableModal 做几何识别 + 允许 session-idle 自动按。

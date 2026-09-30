@@ -7,8 +7,11 @@ import type { SideEffect, SideEffectVerdict } from "./side-effects.js";
 const v = (kind: SideEffect, hint?: string): SideEffectVerdict => (hint ? { kind, hint } : { kind });
 const ext = (hint: string) => v("external", hint);
 
-/** gcloud / az 的查看动词（get-iam-policy、list-tags 这类带后缀的也算） */
-const CLOUD_READ = /^(describe|list|get|ls|show|help|version|wait)(-|$)/;
+/**
+ * 云 CLI 的查看动词（get-iam-policy、list-tags、filter-log-events 这类带后缀的也算）：aws logs tail、dynamodb query / scan、s3 presign、
+ * gcloud auth print-access-token、secrets versions access、logging read 都只是读
+ */
+const CLOUD_READ = /^(describe|list|get|ls|show|help|version|wait|tail|query|scan|presign|filter|search|lookup|print|access|read)(-|$)/;
 /** gcloud / az 的写动词：命令路径上先碰到它就是写（触发任务、调用函数、发消息、部署都在这里） */
 const CLOUD_WRITE = new RegExp(
   "^(delete|remove|create|update|set|unset|deploy|resize|start|stop|restart|reset|deallocate|scale|apply|import|export|add|run|call|invoke|publish|submit"
@@ -29,8 +32,27 @@ function cloudPathReads(t: string[]): boolean {
   return !!verb && CLOUD_READ.test(verb) && !CLOUD_WRITE.test(verb);
 }
 
+/** 写在子命令前面、后面跟一个值的全局选项（kubectl -n kube-system get、aws --profile prod s3 ls）；--x=y、-chdir=x 这种一个词的不用列 */
+const GLOBAL_VALUED: Record<string, RegExp> = {
+  kubectl: /^(-n|--namespace|--context|--kubeconfig|--cluster|--user|-s|--server|--as|--as-group|--token|--request-timeout|-v)$/,
+  helm: /^(-n|--namespace|--kube-context|--kubeconfig|--registry-config|--repository-config)$/,
+  aws: /^(--profile|--region|--output|--endpoint-url|--query|--cli-read-timeout|--cli-connect-timeout|--ca-bundle|--color)$/,
+  gcloud: /^(--project|--account|--configuration|--format|--impersonate-service-account|--verbosity|--billing-project)$/,
+  az: /^(--subscription|--output|-o|--query)$/,
+};
+
+/** 去掉子命令前面的全局选项和它们的值；不认识的选项按不带值算（真带了值，那个值会被当成动词、认不出，照旧判对外） */
+function skipGlobalOptions(t: string[]): string[] {
+  const valued = GLOBAL_VALUED[t[0] ?? ""];
+  const out = [...t];
+  while (out.length > 1 && out[1].startsWith("-")) out.splice(1, valued?.test(out[1]) ? 2 : 1);
+  return out;
+}
+
 /** 云 / 集群 / 基础设施命令；不是这类命令返回 null */
-export function classifyCloud(t: string[]): SideEffectVerdict | null {
+export function classifyCloud(all: string[]): SideEffectVerdict | null {
+  if (!/^(kubectl|helm|terraform|tofu|aws|gcloud|az)$/.test(all[0] ?? "")) return null;
+  const t = skipGlobalOptions(all);
   const [c0 = "", c1 = "", c2 = ""] = t;
   const verbs = t.slice(1).filter((a) => !a.startsWith("-"));
   if (c0 === "kubectl") {

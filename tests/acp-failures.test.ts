@@ -85,6 +85,7 @@ describe("failureEntry（与 codex-session.ts codexTurnError 同形）", () => {
     expect(e).toEqual({
       type: "assistant",
       timestamp: ts,
+      rateLimited: true,
       isApiErrorMessage: false,
       error: "You've hit your usage limit.",
       message: { content: [{ type: "text", text: "You've hit your usage limit." }] },
@@ -93,7 +94,7 @@ describe("failureEntry（与 codex-session.ts codexTurnError 同形）", () => {
 
   test("可重试 / 不知道能否重试的错误标 API 错误；适配器说不能重试的不标", () => {
     const legacy: AcpFailure = { kind: "error", key: "k", message: "boom" };
-    expect(failureEntry(legacy, ts)).toMatchObject({ isApiErrorMessage: true, message: { content: [{ text: "API Error: boom" }] } });
+    expect(failureEntry(legacy, ts)).toMatchObject({ rateLimited: false, isApiErrorMessage: true, message: { content: [{ text: "API Error: boom" }] } });
     expect(failureEntry({ ...legacy, retry: true }, ts)).toMatchObject({ isApiErrorMessage: true });
     expect(failureEntry({ ...legacy, retry: false }, ts)).toMatchObject({ isApiErrorMessage: false });
   });

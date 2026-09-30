@@ -23,6 +23,8 @@ export interface CreateArgs {
   external: boolean;
   projectFlag?: string;
   runtimeFlag?: string;
+  /** T60：--transport acp（只有 codex 支持，缺省 tmux） */
+  transportFlag?: string;
   piBaseFlag?: string;
   teamFlags: TeamFlags;
 }
@@ -42,7 +44,9 @@ export function parseCreateArgs(args: string[]): CreateArgs | { error: string } 
   if (teamError) return { error: teamError };
   const { rest: afterExternal, value: external } = extractBoolFlag(afterTeam, "--external");
   const { rest: afterRuntime, value: runtimeFlag } = extractStringFlag(afterExternal, "--runtime");
-  const { rest: afterPiBase, value: piBaseFlag } = extractStringFlag(afterRuntime, "--pi-base");
+  const { rest: afterTransport, value: transportFlag } = extractStringFlag(afterRuntime, "--transport");
+  if (transportFlag && transportFlag !== "acp" && transportFlag !== "tmux") return { error: `--transport 只能是 tmux 或 acp（收到 ${transportFlag}）` };
+  const { rest: afterPiBase, value: piBaseFlag } = extractStringFlag(afterTransport, "--pi-base");
   const { rest: afterModel, model } = extractModelFlag(afterPiBase);
   const { rest: afterMode, mode } = extractModeFlag(afterModel);
   const { rest: afterEffort, effort } = extractEffortFlag(afterMode);
@@ -52,6 +56,6 @@ export function parseCreateArgs(args: string[]): CreateArgs | { error: string } 
   if (flagLike) return { error: flagLike };
   if (!name || !dir) return { error: CREATE_USAGE };
   return {
-    name, dir, purpose: purposeFlag ?? purposeParts.join(" "), perms: { preset, disallowedRaw }, effort, mode, model, external, projectFlag, runtimeFlag, piBaseFlag, teamFlags,
+    name, dir, purpose: purposeFlag ?? purposeParts.join(" "), perms: { preset, disallowedRaw }, effort, mode, model, external, projectFlag, runtimeFlag, transportFlag, piBaseFlag, teamFlags,
   };
 }

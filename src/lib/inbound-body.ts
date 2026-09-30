@@ -162,13 +162,28 @@ function ownerWordsOfAnswer(attrs: string, text: string): string {
   return ASK_ANSWER_RE.test(attrs) ? answerEcho(text).text : text;
 }
 
-/** 历史里一条入站消息的发送者、所答的 ask 与原文（lib/session-history.ts）：没有的字段不带，历史 JSON 里不出现空键；没有 from 就不带 fromId */
-export function senderOf(un: { from?: string; fromId?: string } & AskAnswerRef): Record<string, string> {
-  const out: Record<string, string> = {};
+/**
+ * bridge 真收下的附件（Discord 下载 / API·peer 上传落 inbox 的路径）：只取自 channel 头属性，不看正文。
+ * 网页给外源消息画附件卡片只认它——外人在正文写一行 [attachment: 任意路径]，owner 会看到一张像是真附件的卡片（tests/web-history-shape.test.ts）
+ */
+export interface InboundAttachmentsRef {
+  attachments?: string[];
+}
+
+/** channel 头属性 → 可信附件清单（没有 → 空对象，历史 JSON 里不出现空键） */
+export function channelAttachments(attrs: string): InboundAttachmentsRef {
+  const paths = channelAttachmentPaths(attrs);
+  return paths.length ? { attachments: paths } : {};
+}
+
+/** 历史里一条入站消息的发送者、所答的 ask、原文与可信附件（lib/session-history.ts）：没有的字段不带，历史 JSON 里不出现空键；没有 from 就不带 fromId */
+export function senderOf(un: { from?: string; fromId?: string } & AskAnswerRef & InboundAttachmentsRef): Record<string, string | string[]> {
+  const out: Record<string, string | string[]> = {};
   if (un.from) out.from = un.from;
   if (un.from && un.fromId) out.fromId = un.fromId;
   if (un.askId) out.askId = un.askId;
   if (un.wire) out.wire = un.wire;
+  if (un.attachments?.length) out.attachments = un.attachments;
   return out;
 }
 
