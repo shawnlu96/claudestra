@@ -81,8 +81,8 @@ async function driveRunning(d: DeployTickDeps, run: DeployRun): Promise<void> {
 async function driveVerify(d: DeployTickDeps, db: Database, run: DeployRun): Promise<void> {
   const task = getTask(db, run.taskId), dedup = `scheduler:${run.intentId}:verify`;
   if (task?.stage !== "live" || getEventByDedup(db, dedup)) return;
-  const at = lastVerify.get(run.intentId) ?? 0;
-  if (d.now() - at < VERIFY_EVERY_MS) return;
+  const at = lastVerify.get(run.intentId);
+  if (at !== undefined && d.now() - at < VERIFY_EVERY_MS) return;
   lastVerify.set(run.intentId, d.now());
   const late = d.now() - (run.deployedAt ?? 0) > VERIFY_WINDOW_MS;
   if (!late) {
