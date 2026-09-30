@@ -2,7 +2,9 @@
 import { describe, expect, test } from "bun:test";
 import type { LedgerDepView, LedgerTaskView, Stage } from "../web/features/collab/collab-model";
 import { causalCanvas, COL_GAP, edgeStyle, LOOSE_GROUP, type Box, type CEdge } from "../web/features/collab/v4/causal-model";
-import { fitAllView, initialView, labelWidth, MIN_K, offscreen, placeLabels, READABLE_K, reconcileView, type ViewState } from "../web/features/collab/v4/canvas-view";
+import {
+  fitAllView, fitsAll, initialView, labelWidth, MIN_K, offscreen, panView, placeLabels, reconcileView, type ViewState,
+} from "../web/features/collab/v4/canvas-view";
 
 function task(id: string, stage: Stage, over: Partial<LedgerTaskView> = {}): LedgerTaskView {
   return {
@@ -122,10 +124,10 @@ describe("边标签避让与打开时的视口（canvas-view.ts）", () => {
     expect(labelWidth("合并后")).toBeGreaterThan(labelWidth("abc"));
     expect(labelWidth("很".repeat(40))).toBe(COL_GAP - 6);
   });
-  test("整张在 0.8 以上放得下就整张放；放不下用 0.8、在跑的对齐左上，视口外的件数按方向报", () => {
+  test("整张在文字下限（MIN_K）以上放得下就整张放；放不下用 MIN_K、在跑的对齐左上，视口外的件数按方向报", () => {
     const small = causalCanvas({ items, deps: [], tasks: [task("A", "build")] });
     const v0 = initialView(small, 800, 600);
-    expect(v0.k).toBeGreaterThanOrEqual(READABLE_K);
+    expect(v0.k).toBeGreaterThanOrEqual(MIN_K);
     expect(offscreen(small, v0, 800, 600)).toEqual({ right: 0, down: 0, left: 0, up: 0 });
     const chain = ["A", "B", "C", "D", "E"];
     const wide = causalCanvas({
@@ -133,7 +135,7 @@ describe("边标签避让与打开时的视口（canvas-view.ts）", () => {
       deps: chain.slice(1).map((id, i) => dep(chain[i]!, id, "waiting")).concat([dep("E", "F", "waiting"), dep("E", "G", "waiting")]),
     });
     const v1 = initialView(wide, 540, 800);
-    expect(v1.k).toBe(READABLE_K);
+    expect(v1.k).toBe(MIN_K);
     const a = wide.groups[0]!.nodes.find((n) => n.id === "A")!;
     expect(v1.x + a.x * v1.k).toBeGreaterThanOrEqual(0);
     // 540 宽放下前两列；第三列起出框：C、D、E 三个节点 + 折叠组按件数算的 F、G
@@ -174,11 +176,39 @@ describe("审查修复轮（T58 P2）", () => {
     expect(gone.centered).toBe(2);
   });
 
-  test("「适配全部」十列的链在 800 宽里整张放得下（缩放可以低于滚轮下限）；打开时仍不低于 0.8", () => {
+  test("「适配全部」不低于文字下限：十列的链在 800 宽里放不下就从左上角看起，右边的由提示和拖拽补；小图照常整张放下", () => {
     const c = chain(10);
     const v = fitAllView(c, 800, 600);
-    expect(v.k).toBeLessThan(MIN_K);
-    expect(offscreen(c, v, 800, 600)).toEqual({ right: 0, down: 0, left: 0, up: 0 });
-    expect(initialView(c, 800, 600).k).toBe(READABLE_K);
+    expect(v).toEqual({ x: 24, y: 24, k: MIN_K });
+    expect(offscreen(c, v, 800, 600).right).toBeGreaterThan(0);
+    expect(MIN_K * 12.5).toBeGreaterThanOrEqual(12); // 节点标题基准 --fs-2 = 12.5px
+    expect(fitAllView(chain(2), 1200, 800).k).toBe(1);
+  });
+});
+
+describe("审查修复轮（T67）", () => {
+  const many = (n: number) => Array.from({ length: n }, (_, i) => task(`L${i}`, i % 3 ? "spec" : "build", { itemId: i % 2 ? "I1" : "I2" }));
+  const ov = { items, deps: [], tasks: many(60) };
+
+  test("布局与视口宽高无关：侧栏收起展开只改可视区域，节点坐标不动，视口不用补偿（重排留到 T68 之后）", () => {
+    expect(causalCanvas.length).toBe(1);
+    expect(causalCanvas(ov)).toEqual(causalCanvas({ ...ov }));
+  });
+
+  test("「还有 N 件」点了往那边平移大半屏，件数变少；一路点下去到边为止，不越过画布", () => {
+    const c = causalCanvas(ov);
+    let v = fitAllView(c, 740, 700);
+    expect(fitsAll(c, 740, 700)).toBe(false);
+    const before = offscreen(c, v, 740, 700).down;
+    expect(before).toBeGreaterThan(0);
+    v = panView(c, v, 740, 700, "down");
+    expect(offscreen(c, v, 740, 700).down).toBeLessThan(before);
+    expect(offscreen(c, v, 740, 700).up).toBeGreaterThan(0);
+    for (let i = 0; i < 40; i++) v = panView(c, v, 740, 700, "down");
+    expect(offscreen(c, v, 740, 700).down).toBe(0);
+    expect(v.y + c.h * v.k).toBeCloseTo(700 - 24, 5);
+    for (let i = 0; i < 40; i++) v = panView(c, v, 740, 700, "up");
+    expect(v.y).toBe(24);
+    expect(fitsAll(causalCanvas({ items, deps: [], tasks: many(2) }), 1200, 800)).toBe(true);
   });
 });
