@@ -8,7 +8,8 @@
 import { isOwnerPrincipal, type Principal } from "../lib/principals.js";
 import { runtimeCommandsFor } from "../lib/runtime-commands.js";
 import { resolveModelAlias } from "../lib/claude-launch.js";
-import { MASTER_SESSION, windowTarget } from "../lib/tmux-helper.js";
+import { MASTER_SESSION, windowTarget, type SwitchConfirmKind, type SwitchResult } from "../lib/tmux-helper.js";
+import { MASTER_WINDOW_MISMATCH } from "../lib/master-modal.js";
 import { canSeeQuota } from "../lib/devices.js";
 import { wallWaitRefusal, windowWallWait, type WallWait } from "../lib/wall-screen.js";
 import { resolveWebInvocation, isProjectSkillForOtherAgent } from "./slash-registry.js";
@@ -39,6 +40,10 @@ export interface SlashDeps {
   record: (cmd: string, agent: SlashAgent) => void;
   /** 窗口停在额度菜单 / 撞墙倒计时上（lib/wall-screen.ts）：不注入；不给 = 真抓屏 */
   wallWait?: (win: string) => Promise<WallWait | null>;
+  /** 同步注入并确认 /model X、/effort X（lib/tmux-helper.ts runSwitchCommand） */
+  switchCommand: (win: string, kind: SwitchConfirmKind, arg: string) => Promise<SwitchResult>;
+  /** window 0 此刻是不是大总管正身（lib/master-modal.ts isMasterWindow） */
+  masterWindowOk: (win: string) => Promise<boolean>;
 }
 
 export interface SlashRequest {
@@ -59,6 +64,20 @@ async function acpSlashPassthrough(agent: SlashAgent, cmd: string, ccText: strin
   deps.markThinking(agent);
   console.log(`⚡ [api] slash 交给 ACP 宿主 ${agent.name}: ${ccText}`);
   return apiJson(202, { ok: true, accepted: true, slash: true, ccText, agent: agent.name, acp: true });
+}
+
+const SWITCH_TITLE = { model: "Switch model?", effort: "Change effort level?" } as const;
+
+/** runSwitchCommand 的结局 → 409 文案（null = 注入成功，warning 另给）。不按的框留给 owner：watcher 会通知 */
+function switchOutcome(kind: SwitchConfirmKind, r: SwitchResult): { error?: string; warning?: string } {
+  if (r.outcome === "rejected") return { error: `CC 拒绝了这次切换：${r.reason ?? "原因见终端"}` };
+  if (r.outcome === "foreign" && r.prompt) {
+    return { error: `会话停在「${SWITCH_TITLE[r.prompt.kind]}」确认框上（切到 ${r.prompt.target}），和这条命令对不上，没有代按；请到终端或网页终端里自己按` };
+  }
+  if (r.outcome === "timeout") {
+    return { warning: r.prompt ? `按过一次确认，「${SWITCH_TITLE[kind]}」框还在，请到终端或网页终端里看一眼` : `没等到 /${kind} 落地；如果弹了确认框，请到终端或网页终端里自己按` };
+  }
+  return {};
 }
 
 /** 处理完了（直通 202 / 403 / 409 / 注入失败 500）→ Response；不是能直通的命令 → null，调用方按普通消息投递 */
@@ -89,18 +108,21 @@ export async function handleSlashPassthrough(r: SlashRequest, deps: SlashDeps): 
   if (!owner) return apiJson(403, { ok: false, ...SLASH_OWNER_ONLY });
   if (await isConfiguredAcpChannel(agent.channelId)) return acpSlashPassthrough(agent, slashM[1], resolved.ccText, deps);
   const win = agent.name === "master" ? `${MASTER_SESSION}:0` : windowTarget(agent.name);
+  if (agent.name === "master" && !(await deps.masterWindowOk(win))) return apiJson(409, { ok: false, error: MASTER_WINDOW_MISMATCH });
   // 停在额度菜单 / 撞墙倒计时上不打字（倒计时上一打字就取消自动续跑，菜单上会选项）；原因只告诉能看额度的凭据（canSeeQuota）
   const wall = await (deps.wallWait ?? ((w: string) => windowWallWait(w, rt || undefined)))(win); // Codex 窗口还认选择菜单（T63）
   if (wall) return apiJson(409, { ok: false, error: `${agent.name} ${wallWaitRefusal(wall, canSeeQuota(principal))}，这条命令没有注入` });
-  // owner 打的 /model、/effort 是 Claudestra 代 owner 注入：注入前登记精确目标的短时意图，watcher 见到目标完全一致的框代按一次
-  // （大总管也登记在 "master" 名下）；先登记是因为框可能在发完字、登记之前就画出来
-  const sw = (slashM[1] === "model" || slashM[1] === "effort") && args ? await import("../lib/switch-intent.js") : null;
-  if (sw && slashM[1] === "model") sw.noteModelSwitchIntent(agent.name, resolveModelAlias(args));
-  else if (sw) sw.noteEffortSwitchIntent(agent.name, args);
+  // CC 的 /model X、/effort X（大总管也是）：同一次调用里注入、等框、目标和注入值完全一致才按，只按一次（T41c）。
+  // 对不上 / 超时都不按、也不留任何意图——之后弹的框 watcher 只通知 owner。Pi 的同名命令是它自己的，照常直通
+  const switchKind = !nativeHit && rt !== "codex" && args && (slashM[1] === "model" || slashM[1] === "effort") ? slashM[1] : null;
+  let warning: string | undefined;
   try {
-    await deps.sendLine(win, resolved.ccText);
+    if (switchKind) {
+      const out = switchOutcome(switchKind, await deps.switchCommand(win, switchKind, switchKind === "model" ? resolveModelAlias(args) : args));
+      if (out.error) return apiJson(409, { ok: false, error: out.error });
+      warning = out.warning;
+    } else await deps.sendLine(win, resolved.ccText);
   } catch (e) {
-    sw?.clearSwitchIntent(agent.name, slashM[1] as "model" | "effort"); // 没注入就没有框可等
     // 查过之后、真正发键前 Codex 菜单弹出来了（lib/codex-key-guard.ts）：没注入，同上 409
     if ((e as Error).name === "KeysBlockedError") return apiJson(409, { ok: false, error: `${agent.name} ${(e as Error).message}，这条命令没有注入` });
     return apiJson(500, { ok: false, error: `tmux 注入失败: ${(e as Error).message}` });
@@ -115,5 +137,5 @@ export async function handleSlashPassthrough(r: SlashRequest, deps: SlashDeps): 
     deps.scheduleClearRotation(agent.name, agent.channelId, agent.cwd, agent.sessionId);
   }
   console.log(`⚡ [api] slash 注入 ${agent.name}: ${resolved.ccText}`);
-  return apiJson(202, { ok: true, accepted: true, slash: true, ccText: resolved.ccText, agent: agent.name });
+  return apiJson(202, { ok: true, accepted: true, slash: true, ccText: resolved.ccText, agent: agent.name, ...(warning ? { warning } : {}) });
 }

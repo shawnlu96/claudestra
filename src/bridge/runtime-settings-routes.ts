@@ -2,7 +2,7 @@
  * 非 Claude Code 运行时的模型 / 档位切换（从 api-routes 拆出来：那个文件只许变小）。
  * - Pi：GET /pi-models 读 ~/.pi/agent/models.json；POST /agents/:name/pi-settings 注入扩展命令
  * - Codex：GET /codex-models 读 `codex debug models`；POST /agents/:name/codex-settings 写 registry 后重启
- * Claude Code 的 /claude-settings 仍在 api-routes（与 permission-watcher 的代按逻辑缠在一起）。
+ * Claude Code 的 /claude-settings 仍在 api-routes（与 runSwitchCommand 的同步确认缠在一起）。
  * runManager 由调用方注入：它在 management.ts（hub），bridge 模块不能反向 import。
  */
 import { agentInScope, type Principal } from "../lib/principals.js";

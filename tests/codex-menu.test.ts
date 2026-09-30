@@ -114,6 +114,7 @@ describe("④ 斜杠直通（api-slash）", () => {
     const deps: SlashDeps = {
       sendLine: async (_w, t) => void sent.push(t), mirror: async () => {}, scheduleClearRotation: () => {}, markThinking: () => {}, record: () => {},
       wallWait: async () => wallWaitOf(MENU, "codex"),
+      switchCommand: async () => { throw new Error("不该走切换"); }, masterWindowOk: async () => true,
     };
     const owner = { id: "owner:self", name: "owner", agents: ["*"], role: "owner" } as never;
     const agent = { name: "agent-c", channelId: "c1", cwd: "/w", runtime: "codex" } as never;

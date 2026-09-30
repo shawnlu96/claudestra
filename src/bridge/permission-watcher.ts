@@ -19,12 +19,12 @@ import {
   detectDevChannelsModal,
   paneCompactProgress,
   modelFamilies,
-  pressSwitchConfirm,
   MASTER_WINDOW_TARGET,
   type SwitchConfirmPrompt,
 } from "../lib/tmux-helper.js";
-import { clearSwitchNotice, markSwitchNotified, switchBoxAction, switchNoticePlan } from "../lib/switch-intent.js";
-import { WEB_ONLY } from "./config.js";
+import { clearSwitchNotice, markSwitchNotified, switchBoxAction, switchNoticePlan } from "../lib/switch-notice.js";
+import { isMasterWindow } from "../lib/master-modal.js";
+import { MASTER_DIR, WEB_ONLY } from "./config.js";
 import { tmuxScreenshot } from "./screenshot.js";
 import { buildComponents } from "./components.js";
 import { runManager } from "./management.js";
@@ -151,37 +151,33 @@ async function maybeEscapeAgentsView(
 /** 实现挪到 tmux-helper（runSwitchCommand 也要用）；这里保留导出给 model-drift 等老调用方。 */
 export { modelFamilies };
 
-async function maybeConfirmSwitchModel(
+/** 切换确认框只通知、从不代按（会按键的只有 runSwitchCommand 的同步注入确认，见 lib/switch-notice.ts）。true = 屏上有框 */
+async function maybeNotifySwitchBox(
   agentName: string,
   channelId: string,
   pane: string,
   allowedUserIds: string[],
   discord: Client,
-  win = windowTarget(agentName),
 ): Promise<boolean> {
-  const a = switchBoxAction(agentName, pane);
+  const a = switchBoxAction(pane);
   if (a.act === "none") clearSwitchNotice(channelId);
-  if (a.act === "press") {
-    console.log(`🎛 ${agentName} 「${a.p.kind === "model" ? "Switch model?" : "Change effort level?"}」命中切换意图(${a.p.target}),自动代按 Yes`);
-    await pressSwitchConfirm(win, a.p);
-  }
-  if (a.act === "notify") await notifySwitchPrompt(agentName, channelId, a.p, a.box, allowedUserIds, discord);
+  else await notifySwitchPrompt(agentName, channelId, a.p, a.box, allowedUserIds, discord);
   return a.act !== "none";
 }
 
 /**
- * 大总管不在 manager list 里，launcher 又不按切换框（lib/modal-confirm.ts）：这里单看它的切换框，
- * 登记过意图的照常代按一次，其余走和 agent 同一条通知路径（网页 session_anomaly + #control），同一张框只报一次。
+ * 大总管不在 manager list 里，launcher 又不按切换框（lib/modal-confirm.ts）：这里单看它的切换框，走和 agent
+ * 同一条通知路径（网页 session_anomaly + #control），同一张框只报一次。window 0 可能被 agent 抢占（launcher 会归位），
+ * 先验明正身，核对不上就不报——否则别人的框会报到 #control。
  */
 async function checkMasterSwitchBox(allowedUserIds: string[], discord: Client): Promise<void> {
   const ch = process.env.CONTROL_CHANNEL_ID || "";
-  if (!ch) return;
-  const win = MASTER_WINDOW_TARGET;
-  const pane = await tmuxCapture(win, 30);
-  await maybeConfirmSwitchModel("master", ch, pane, allowedUserIds, discord, win);
+  if (!ch || !(await isMasterWindow(MASTER_WINDOW_TARGET, MASTER_DIR))) return;
+  const pane = await tmuxCapture(MASTER_WINDOW_TARGET, 30);
+  await maybeNotifySwitchBox("master", ch, pane, allowedUserIds, discord);
 }
 
-/** 没有对得上的意图 → 不代按，通知用户到终端里自己按（Discord 文字 + web 事件）。 */
+/** 不代按，通知用户到终端或网页终端里自己按（Discord 文字 + web 事件）。 */
 async function notifySwitchPrompt(
   agentName: string,
   channelId: string,
@@ -195,8 +191,8 @@ async function notifySwitchPrompt(
   if (!plan.discord) return;
   if (plan.web) console.log(
     isModel
-      ? `🎛 ${agentName} 弹「Switch model?」(→ ${p.target}) 但没有对得上的切换意图，不代按，通知用户`
-      : `🎛 ${agentName} 弹「Change effort level?」(→ ${p.target}) 但没有对得上的切换意图，不代按，通知用户`,
+      ? `🎛 ${agentName} 停在「Switch model?」(→ ${p.target}) 上，不代按，通知用户`
+      : `🎛 ${agentName} 停在「Change effort level?」(→ ${p.target}) 上，不代按，通知用户`,
   );
   // v2.16.2 web 可见(peer 报告根因 3:通知只走 Discord 直发,web 用户零提示
   // 只看到 agent 卡死):同步 emit session_anomaly,BFF 翻译成系统文本。
@@ -219,8 +215,8 @@ async function notifySwitchPrompt(
     const msg = await ch.send({
       content: [
         isModel
-          ? `🎛 **${agentName}** 弹出「Switch model?」（切到 ${p.target}）——不是刚经模型下拉发起的那次切换，可能是 Claude Code 主动提议换模型（常见于用量保护降级）。`
-          : `🎛 **${agentName}** 弹出「Change effort level?」（切到 ${p.target}，会让 prompt cache 失效）——不是经模型/effort 下拉发起的。`,
+          ? `🎛 **${agentName}** 停在「Switch model?」（切到 ${p.target}）确认框上——可能是 Claude Code 主动提议换模型（常见于用量保护降级），也可能是排队的 /model 现在才弹框。`
+          : `🎛 **${agentName}** 停在「Change effort level?」（切到 ${p.target}，会让 prompt cache 失效）确认框上。`,
         isModel
           ? `我没有代按。请到终端或网页终端里自己按：选「1. Yes」回车 = 切换，按 Esc = 保住当前模型。`
           : `我没有代按。请到终端或网页终端里自己按：选「1. Yes」回车 = 切换，按 Esc = 不切。`,
@@ -514,8 +510,8 @@ async function checkAgent(
     return;
   }
 
-  // v2.15.2+「Switch model?」/「Change effort level?」：登记过意图、目标完全一致的框代按一次,其余只通知
-  if (await maybeConfirmSwitchModel(agentName, channelId, pane, allowedUserIds, discord)) return;
+  // v2.15.2+「Switch model?」/「Change effort level?」：只通知 owner，不代按
+  if (await maybeNotifySwitchBox(agentName, channelId, pane, allowedUserIds, discord)) return;
 
   // v2.17.2+ AskUserQuestion pane 侧检测(CC 2.1.x jsonl 迟落盘,唯一及时通路)
   if (await maybeHandleAuq(agentName, channelId, pane, allowedUserIds, discord)) return;
@@ -611,6 +607,8 @@ export function startPermissionWatcher(
     if (ticking) return;
     ticking = true;
     try {
+      // 大总管先看：它不靠 manager list，list 挂了也照样报
+      await checkMasterSwitchBox(allowedUserIds, discord).catch((e) => console.error("🎛 master 切换框检查失败:", e));
       const agents = await listAgentsLatched(() => runManager("list"), listLatch);
       if (!agents) return;
       for (const agent of agents) {
@@ -618,7 +616,6 @@ export function startPermissionWatcher(
         // 注意：不能根据 idle 字段跳过 — 弹窗界面底部也有 ❯ 会被误判为 idle
         await checkAgent(agent.name, agent.channelId, allowedUserIds, discord).catch(() => {});
       }
-      await checkMasterSwitchBox(allowedUserIds, discord).catch((e) => console.error("🎛 master 切换框检查失败:", e));
     } catch { /* non-critical */ } finally {
       // 必须在 finally 里放闸：任何一条异常路径漏掉它，watcher 就永久锁死再不工作。
       ticking = false;

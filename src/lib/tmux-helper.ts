@@ -1007,7 +1007,7 @@ export interface SwitchResult {
   pane: string;
   prompt?: SwitchConfirmPrompt;
   reason?: string;
-  /** 这次调用在框上按过确认键（最多一次）；没按过的 timeout 才能把迟到的框交给 watcher 按意图处理 */
+  /** 这次调用在框上按过确认键（最多一次）。没按到的框不会再有人代按：permission-watcher 只通知 owner */
   pressed?: boolean;
 }
 
@@ -1027,7 +1027,7 @@ const tmuxSwitchIO: SwitchIO = {
 };
 
 /** 在确认框上选 Yes（按 detectSwitchConfirmPrompt 算好的键）。 */
-export async function pressSwitchConfirm(target: string, p: SwitchConfirmPrompt, io: SwitchIO = tmuxSwitchIO): Promise<void> {
+async function pressSwitchConfirm(target: string, p: SwitchConfirmPrompt, io: SwitchIO = tmuxSwitchIO): Promise<void> {
   for (const k of p.keys) {
     await io.sendKey(target, k);
     await io.sleep(120);
@@ -1036,7 +1036,7 @@ export async function pressSwitchConfirm(target: string, p: SwitchConfirmPrompt,
 
 /**
  * 注入 `/model X` 或 `/effort X`，弹出的确认框目标和 X 完全一致才代按 Yes（一张框只按一次），等到命令真正落地再返回。
- * claude-settings 端点与 manager 的 enforceSessionModel 共用；返回 applied/confirmed 时
+ * claude-settings 端点、网页斜杠的 /model X、/effort X（bridge/api-slash.ts）与 manager 的 enforceSessionModel 共用；返回 applied/confirmed 时
  * TUI 已回到输入框，调用方可以放心接着注入下一条命令。沙箱里拒绝：CC 会把它存成 ~/.claude/settings.json 的全局默认。
  */
 export async function runSwitchCommand(

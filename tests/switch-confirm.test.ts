@@ -341,10 +341,18 @@ describe("runSwitchCommand（假 pane 序列）", () => {
     expect(sent).toEqual([]);
   });
 
-  test("没按过的 timeout 标 pressed=false（调用方据此把迟到的框交给 watcher）", async () => {
+  test("没按过的 timeout 标 pressed=false（之后才弹的框没人代按，watcher 只通知）", async () => {
     const { io } = fakeIO(IDLE, [IDLE]);
     const r = await runSwitchCommand("w", "model", "claude-sonnet-5", { io, ticks: 2 });
     expect(r).toMatchObject({ outcome: "timeout", pressed: false });
+  });
+
+  test("T41c r2 P1-1：注入后几拍还是空闲屏（/model 躺在输入框里没处理）→ 迟到的真框仍在同一次调用里按一次", async () => {
+    const queued = IDLE.replace(/^❯ $/m, "❯ /model claude-sonnet-5");
+    expect(paneLooksIdle(queued)).toBe(true);
+    const { io, sent } = fakeIO(IDLE, [IDLE, queued, queued, SWITCH_MODEL, SWITCH_MODEL, SETTLED]);
+    expect((await runSwitchCommand("w", "model", "claude-sonnet-5", { io })).outcome).toBe("confirmed");
+    expect(sent).toEqual(["line:/model claude-sonnet-5", "key:Enter"]);
   });
 
   test("最后一拍才按到框：重看一眼，不拿按键前的旧屏报 timeout", async () => {
