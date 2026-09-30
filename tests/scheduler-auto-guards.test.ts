@@ -116,10 +116,26 @@ describe("T68f UI screenshot gate", () => {
       for (let i = 0; i < 2; i++) expect(await f.tick()).toMatchObject({ step: "waiting", detail: "等待 owner 看前后截图" });
       expect(f.db.query("SELECT COUNT(*) AS n FROM asks").get()).toEqual({ n: 1 });
 
-      answerAsk(f.db, askId, { choices: ["[button:scheduler_ui_approve]"], labels: ["批准合并"], principal: "owner", via: "web_card", at: 5000 } as never);
+      answerAsk(f.db, askId, { choices: ["[button:scheduler_ui_approve]"], labels: ["批准合并"], principal: "owner", owner: true, via: "web_card", at: 5000 } as never);
       expect(await f.tick()).toMatchObject({ step: "stage", detail: "review→merge" });
       expect(await f.tick()).toMatchObject({ step: "merge_queue" });
       expect(f.intents().at(-1)).toMatchObject({ action: "merge", status: "pending" });
+    } finally { f.close(); }
+  });
+
+  test("a guest pressing approve does not release the merge", async () => {
+    const f = autoFixture({ template: "ui" });
+    try {
+      await toBuild(f);
+      await f.tick();
+      await f.cli("agent-task-one", "deliver", "T1", "--from", "build", "--head", H2);
+      await f.tick();
+      await f.tick();
+      await f.review("pass", H2, []);
+      const askId = (await f.tick())!.detail.replace("ask ", "");
+      answerAsk(f.db, askId, { choices: ["[button:scheduler_ui_approve]"], labels: ["批准合并"], principal: "guest-1", external: true, via: "web_card", at: 5000 } as never);
+      expect(await f.tick()).toMatchObject({ step: "manual", detail: expect.stringContaining("ui_unverified") });
+      expect(f.intents().some((i) => i.action === "merge")).toBe(false);
     } finally { f.close(); }
   });
 
@@ -133,7 +149,7 @@ describe("T68f UI screenshot gate", () => {
       await f.tick();
       await f.review("pass", H2, []);
       const askId = (await f.tick())!.detail.replace("ask ", "");
-      answerAsk(f.db, askId, { choices: ["[button:scheduler_ui_reject]"], labels: ["不批准"], principal: "owner", via: "web_card", at: 5000 } as never);
+      answerAsk(f.db, askId, { choices: ["[button:scheduler_ui_reject]"], labels: ["不批准"], principal: "owner", owner: true, via: "web_card", at: 5000 } as never);
       expect(await f.tick()).toMatchObject({ step: "manual", detail: expect.stringContaining("ui_rejected") });
       expect(getWorkflow(f.db, "T1")?.mode).toBe("manual");
     } finally { f.close(); }

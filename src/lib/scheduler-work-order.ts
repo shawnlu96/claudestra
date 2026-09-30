@@ -8,12 +8,14 @@ import { getIntent, type SchedulerIntent } from "./ledger-scheduler.js";
 import type { LedgerTask } from "./ledger-stages.js";
 import { listEvents } from "./ledger-store.js";
 import { statePath } from "./paths.js";
+import { SRC_DIR } from "./repo-root.js";
 import type { PlannerDecision } from "./scheduler-plan.js";
 import type { OrderProbe, SessionRef, WorkOrder } from "./worker-session.js";
 
 type Planned = Extract<PlannerDecision, { kind: "intent" }>;
 const STEP_OF: Record<string, WorkOrder["step"]> = { restate: "restate", write: "write", fix: "fix", adversarial_review: "review" };
-const CLI = "bun src/manager.ts ledger";
+/** Absolute: a worker's cwd is its own worktree or project, not necessarily this repository. */
+const CLI = `bun ${SRC_DIR}/manager.ts ledger`;
 
 export const stepOfNode = (node: string): WorkOrder["step"] | null => STEP_OF[node] ?? null;
 
