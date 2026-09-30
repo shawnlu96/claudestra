@@ -3,9 +3,9 @@
  * machine wrote appears only inside quoteExternal quotes. Two audiences:
  * - local: byte-for-byte the text renderWorkOrder always produced (tests/order-wire-render.test.ts snapshot). Local orders
  *   carry this machine's absolute paths on purpose (the CLI to run), so they are not redacted.
- * - peer: refuse-first. Text is folded to what the peer will read; any secret (peer-secret-gate.ts), a non-full-SHA head, an
- *   id carrying an address or a field over its byte cap refuses the whole order (it stays for local review) instead of
- *   being masked, rewritten or cut. What passes has addresses / personal info masked (dispatch-redact.ts), then is quoted
+ * - peer: refuse-first. Text is folded to what the peer will read; any secret (peer-secret-gate.ts), a head that is not a
+ *   full SHA or not the ledger's head, an id carrying an address or a field over its byte cap refuses the whole order (it
+ *   stays for local review) instead of being masked, rewritten or cut. What passes has addresses / personal info masked (dispatch-redact.ts), then is quoted
  *   line by line. tests/order-wire.test.ts "peer rendering".
  */
 import { redactForPeer } from "./dispatch-redact.js";
@@ -13,7 +13,8 @@ import { isFullSha, WIRE_LIMITS, type OrderWire } from "./order-wire.js";
 import { peerSecretHit } from "./peer-secret-gate.js";
 import { quoteExternal, refLike } from "./quote-text.js";
 
-export type RenderAudience = "local" | "peer";
+/** A peer order carries the ledger's head for this card, so the head field cannot smuggle some other 40 / 64 hex value. */
+type RenderOpts = { audience: "local" } | { audience: "peer"; ledgerHead: string | null };
 
 const list = (title: string, rows: readonly string[]): string[] => rows.length ? [`${title}：`, ...rows.map((r) => `- ${quoteExternal(r)}`)] : [];
 
@@ -56,11 +57,14 @@ const fold = (s: string): string => s.replace(/\p{Cf}+/gu, "").normalize("NFKC")
   .split("\n").map((l) => l.replace(/[\p{Cc}\u2028\u2029]+/gu, " ").replace(/\s+/g, " ")).join("\n");
 
 /**
- * Gate for both peer exits. head is checked here too (a caller may skip parseOrderWire) and is the only hex exempt from the
- * secret gate, by value. Ids must reach the peer unchanged (a deliver cites them), so an address in one refuses as well.
+ * Gate for both peer exits. The head field is the only value not scanned, and only because it must be a full SHA equal to
+ * the ledger's head; every other field is scanned with no exemption, so the head value written anywhere else refuses too
+ * (a heading that shows head is built by the renderer from the field). Ids must reach the peer unchanged (a deliver cites
+ * them), so an address in one refuses as well.
  */
-function gatePeer(o: OrderWire): void {
+function gatePeer(o: OrderWire, ledgerHead: string | null): void {
   if (o.head !== null && !isFullSha(o.head)) throw new OrderRenderError("head 不是完整 40 / 64 位 SHA，拒绝外发");
+  if (o.head !== ledgerHead) throw new OrderRenderError("head 与台账里这张卡的 headSHA 不一致，拒绝外发");
   const ids: [string, string | null][] = [["orderId", o.orderId], ["taskId", o.taskId], ["node", o.node], ["step", o.step], ["repo", o.repo],
     ...o.findings.flatMap((f, i): [string, string][] => [[`findings[${i}].findingId`, f.findingId], [`findings[${i}].family`, f.family]])];
   const free: [string, string | null][] = [...o.inputs.map((v, i): [string, string] => [`inputs[${i}]`, v]),
@@ -69,15 +73,18 @@ function gatePeer(o: OrderWire): void {
   for (const [name, v] of [...ids, ...free]) {
     if (v === null) continue;
     const folded = fold(v);
-    const rule = peerSecretHit(folded, o.head);
+    const rule = peerSecretHit(folded);
     if (rule) throw new OrderRenderError(`${name} 疑似含密钥（${rule}），peer 外发拒绝优先，留在本机审`);
     if (ids.some(([n]) => n === name) && redactForPeer(folded).count > 0) throw new OrderRenderError(`${name} 含疑似敏感内容，编号不能改写，拒绝外发`);
   }
 }
 
-/** The order a peer receives (R3 hand-off): gated as above, then free text folded and masked; ids and head are unchanged. */
-export function redactOrderForPeer(o: OrderWire): { order: OrderWire; count: number } {
-  gatePeer(o);
+/**
+ * The order a peer receives (R3 hand-off): gated as above against `ledgerHead` (the card's headSHA, read by the caller from
+ * the ledger), then free text folded and masked; ids and head are unchanged.
+ */
+export function redactOrderForPeer(o: OrderWire, ledgerHead: string | null): { order: OrderWire; count: number } {
+  gatePeer(o, ledgerHead);
   let count = 0;
   const r = (s: string): string => {
     const out = redactForPeer(fold(s));
@@ -91,8 +98,8 @@ export function redactOrderForPeer(o: OrderWire): { order: OrderWire; count: num
   return { order, count };
 }
 
-function renderPeer(raw: OrderWire): string {
-  const { order: o, count } = redactOrderForPeer(raw);
+function renderPeer(raw: OrderWire, ledgerHead: string | null): string {
+  const { order: o, count } = redactOrderForPeer(raw, ledgerHead);
   const id = (s: string) => (refLike(s) ? s : "（无效）");
   const where = o.repo && refLike(o.repo) ? [`仓库：${o.repo}${o.pr ? ` PR #${o.pr}` : ""}`] : [];
   const findings = o.findings.flatMap((f) => [`${f.severity} ${quoteExternal(f.findingId, 80)} / ${quoteExternal(f.family, 80)}：`,
@@ -112,6 +119,6 @@ function renderPeer(raw: OrderWire): string {
   ].join("\n");
 }
 
-export function renderOrderWire(o: OrderWire, opts: { audience: RenderAudience }): string {
-  return opts.audience === "peer" ? renderPeer(o) : renderLocal(o);
+export function renderOrderWire(o: OrderWire, opts: RenderOpts): string {
+  return opts.audience === "peer" ? renderPeer(o, opts.ledgerHead) : renderLocal(o);
 }

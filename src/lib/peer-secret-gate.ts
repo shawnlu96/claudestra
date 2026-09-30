@@ -10,7 +10,7 @@ const RULES: readonly (readonly [string, RegExp])[] = [
   ["密钥前缀", /sk-[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9]{20,}|xox[abprs]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16}|tok_[A-Za-z0-9]{8,}/],
   ["Bearer", /Bearer[A-Za-z0-9._~+/=-]{8,}/i],
   ["私钥块", /-----BEGIN[A-Z]*PRIVATEKEY-----/],
-  // 32 hex: md5-sized keys and any git sha other than the order's own head, which the caller exempts by value.
+  // 32 hex: md5-sized keys and any git sha, the order's own head included: head travels only in its own field.
   ["长十六进制", /[0-9a-f]{32,}/i],
   ["随机串", /(?=[\w-]*\d)(?=[\w-]*[A-Z])(?=[\w-]*[a-z])[\w-]{32,}/],
 ];
@@ -18,13 +18,9 @@ const RULES: readonly (readonly [string, RegExp])[] = [
 /** Folded text has no control characters, so this placeholder never makes a real value look already masked. */
 const SENTINEL = "\u0000";
 
-/**
- * The first secret rule `folded` (already NFKC / zero-width folded) trips, or null. `head` is the order's validated full
- * SHA: the peer sees it anyway, so its occurrences are taken out before the hex rule runs ("只审 head <sha>" stays legal).
- */
-export function peerSecretHit(folded: string, head: string | null): string | null {
+/** The first secret rule `folded` (already NFKC / zero-width folded) trips, or null. No value is exempt, head included. */
+export function peerSecretHit(folded: string): string | null {
   if (redactFields(folded, SENTINEL).count > 0) return "敏感字段名";
-  let flat = folded.replace(/\s+/g, "");
-  if (head && /^[0-9a-f]+$/i.test(head)) flat = flat.replace(new RegExp(head, "gi"), "");
+  const flat = folded.replace(/\s+/g, "");
   return RULES.find(([, re]) => re.test(flat))?.[0] ?? null;
 }
