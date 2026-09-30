@@ -10,7 +10,7 @@ import { statePath } from "./paths.js";
 
 const LEND_RECEIPTS_PATH = statePath("lend", "receipts.jsonl");
 
-export type Tokens = { input: number; cacheCreation: number; cacheRead: number; output: number; totalTokens: number } | "未知";
+export type Tokens = { input: number; cacheCreation: number; cacheRead: number; output: number; reasoning: number; totalTokens: number } | "未知";
 
 export interface LendReceipt {
   orderId: string;
@@ -55,7 +55,7 @@ export async function tokensFor(sessionId: string | null): Promise<Tokens> {
     try {
       const { sessionTokens } = await import("./usage-query.js");
       const t = sessionTokens(db, sessionId);
-      return t ? { input: t.input, cacheCreation: t.cacheCreation, cacheRead: t.cacheRead, output: t.output, totalTokens: t.totalTokens } : "未知";
+      return t ? { input: t.input, cacheCreation: t.cacheCreation, cacheRead: t.cacheRead, output: t.output, reasoning: t.reasoning, totalTokens: t.totalTokens } : "未知";
     } finally { db.close(); }
   } catch (e) {
     console.error(`⚠️ [lend] 读 ${sessionId} 的 token 用量失败，收据记未知：${(e as Error).message}`);

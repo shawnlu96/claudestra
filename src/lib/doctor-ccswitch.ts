@@ -1,6 +1,6 @@
 /**
  * doctor 的「API 源 / CC Switch」分区（台账 i02 的 A0，报告 docs/02-03-cc-switch.md 第 4 条）：
- *   - Claude Code 现在走哪个源：settings.json 的 env.ANTHROPIC_BASE_URL（有 = 第三方，只报主机名，密钥一律不读不报）
+ *   - Claude Code 现在走哪个源：不在这里报，由 AI 能力清单那一行统一报（lib/ai-endpoints.ts，多来源、脱敏），同一件事不报两遍
  *   - 终端里的 ANTHROPIC_* 环境变量会盖过 settings.json：两边不一致时 agent 实际用哪个不好说
  *   - 装了 CC Switch 时：它切换供应商会**整份重写** ~/.claude/settings.json，Claudestra 挂的 hooks 可能被冲掉
  * 只读、不联网。判定是纯函数 ccSwitchChecks（tests/doctor-ccswitch.test.ts）。
@@ -19,20 +19,8 @@ export interface CcSwitchInputs {
   env: Record<string, string | undefined>;
 }
 
-const hostOf = (url: string) => {
-  try {
-    return new URL(url).host;
-  } catch {
-    return url.slice(0, 60); // 不是合法 URL：原样截一段给人看
-  }
-};
-
 export function ccSwitchChecks(i: CcSwitchInputs): Check[] {
   const out: Check[] = [];
-  const env = (i.settings?.env ?? {}) as Record<string, unknown>;
-  const base = typeof env.ANTHROPIC_BASE_URL === "string" ? env.ANTHROPIC_BASE_URL : "";
-  out.push({ group: GROUP, name: "Claude Code 的 API 源", status: "ok",
-    detail: base ? `第三方：${hostOf(base)}（~/.claude/settings.json）` : "官方（claude.ai 账号登录，settings.json 没设 ANTHROPIC_BASE_URL）" });
   const shellVars = OVERRIDE_VARS.filter((k) => i.env[k]);
   if (shellVars.length) {
     out.push({ group: GROUP, name: "终端环境变量", status: "warn",
@@ -58,4 +46,10 @@ export function checkCcSwitch(home = process.env.HOME || ""): Check[] {
     settings = null; // 没有 / 写坏了：typing hooks 那项已经在报，这里按「没设第三方源」处理
   }
   return ccSwitchChecks({ ccSwitchInstalled: existsSync(join(home, ".cc-switch")), settings, env: process.env });
+}
+
+/** doctor 入口：本分区 + AI 能力清单一行（lib/ai-inventory-format.ts：装了哪些运行时、各自接官方还是第三方） */
+export async function checkApiSources(): Promise<Check[]> {
+  const { checkAiInventory } = await import("./ai-inventory-format.js");
+  return [...checkCcSwitch(), ...(await checkAiInventory())];
 }
