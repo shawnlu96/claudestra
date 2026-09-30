@@ -23,6 +23,7 @@ import {
 import { DEFAULT_BRIDGE_PORT } from "../src/lib/bridge-url.js";
 import { readDotenvFileSync } from "../src/lib/env-file.js";
 import { DEFAULT_RUNTIME_DIR, stateDirIn } from "../src/lib/paths.js";
+import { withoutProxyEnv } from "../src/lib/sandbox-lab.js";
 import { SRC_DIR } from "../src/lib/repo-root.js";
 import * as lab from "./sandbox-lab.ts";
 
@@ -105,7 +106,7 @@ function parseOpts(argv: string[], cmd: string): Opts {
 
 function envFor(o: Opts, layout: SandboxLayout): Record<string, string> {
   const env = sandboxEnv(process.env, { layout, port: o.port, staticDir: o.staticDir, deny: o.deny });
-  return o.lab ? { ...env, ...lab.labEnv(o.lab) } : env;
+  return o.lab ? { ...withoutProxyEnv(env), ...lab.labEnv(o.lab) } : env;
 }
 
 /** 在沙箱环境里跑一个 bun 进程（继承 stdio），返回退出码 */

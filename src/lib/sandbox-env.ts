@@ -16,7 +16,7 @@ type Env = Record<string, string | undefined>;
  */
 const INHERITED_KEYS = [
   "PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "LC_ALL", "LC_CTYPE", "TERM", "TMPDIR",
-  // 代理配置只影响「怎么出网」，不带身份；测试靠它把漏网的出站请求引到计数替身上
+  // 代理配置只影响「怎么出网」，不带身份；测试靠它把漏网的出站请求引到计数替身上。lab 模式不继承（scripts/sandbox.ts 的 envFor）
   "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "all_proxy", "no_proxy",
   // CLAUDESTRA_ACP_AGENT 刻意不继承：沙箱里 acp 固定起本仓的 stub（lib/acp/stub.ts），外部 argv 一律不认
 ] as const;

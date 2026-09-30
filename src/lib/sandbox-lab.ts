@@ -76,8 +76,34 @@ export function labRelayUrl(env: Env): string | null {
   return p ? `ws://127.0.0.1:${p}` : null;
 }
 
+/** 代理环境变量（比对时不分大小写）：curl 系与 Bun 认的就是这四个名字的大小写两种写法 */
+const PROXY_ENV_NAMES = ["http_proxy", "https_proxy", "all_proxy", "no_proxy"];
+
+/** 固定名字逐个查、混写的再靠枚举补：Bun 里运行时写进 process.env 的 HTTP_PROXY 等不出现在 Object.keys 里 */
+function proxyEnvKeys(env: Env): string[] {
+  const named = PROXY_ENV_NAMES.flatMap((n) => [n.toUpperCase(), n]).filter((k) => env[k] !== undefined);
+  const mixed = Object.keys(env).filter((k) => PROXY_ENV_NAMES.includes(k.toLowerCase()));
+  return [...new Set([...named, ...mixed])];
+}
+
 /**
- * lab 配置自洽：lab 目录是绝对路径、本实例的沙箱根就在它下面一层；各端口合法、互不重复、都不是生产端口；
+ * lab 不支持代理：Bun 读到代理变量就按自己的大小写优先级与缓存转发，闸门模拟不准（fetch 也没有关掉环境代理的选项），
+ * 所以加载时环境里有任何一个非空的代理变量就不启动。scripts/sandbox.ts 起的 lab 子进程已剔掉（withoutProxyEnv）
+ */
+export function labProxyProblem(env: Env): string | null {
+  const set = proxyEnvKeys(env).filter((k) => (env[k] ?? "") !== "");
+  return set.length ? `lab 不支持代理，环境里有 ${set.join(", ")}（用 scripts/sandbox.ts 起的 lab 会自动剔掉）` : null;
+}
+
+/** lab 子进程的环境：去掉全部代理变量 */
+export function withoutProxyEnv(env: Record<string, string>): Record<string, string> {
+  const out = { ...env };
+  for (const k of proxyEnvKeys(out)) delete out[k];
+  return out;
+}
+
+/**
+ * lab 配置自洽：没有代理变量；lab 目录是绝对路径、本实例的沙箱根就在它下面一层；各端口合法、互不重复、都不是生产端口；
  * 中继端口在实例端口名单里。沙箱进程加载时经 lib/sandbox.ts 调。
  * bridgePort 是这个进程连的 bridge 地址的端口，不要求在名单里：ACP 宿主给 channel-server 的是它自己的回环代理端口
  * （lib/acp/adapter-proc.ts）；这个端口是不是生产端口由 sandboxBridgeUrlProblem 另查。
@@ -85,6 +111,8 @@ export function labRelayUrl(env: Env): string | null {
 export function labConfigProblems(env: Env, bridgePort: number, denyPorts: number[]): string[] {
   if (!isLab(env)) return [];
   const out: string[] = [];
+  const proxy = labProxyProblem(env);
+  if (proxy) out.push(proxy);
   const root = (env[LAB_ROOT_ENV] || "").trim();
   if (!root || !isAbsolute(root)) out.push(`${LAB_ROOT_ENV} 要是绝对路径（收到 ${root || "空"}）`);
   const sbx = (env.CLAUDESTRA_SANDBOX_ROOT || "").trim();

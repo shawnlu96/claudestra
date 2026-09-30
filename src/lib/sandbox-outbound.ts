@@ -39,44 +39,6 @@ function requestUrl(input: unknown): string {
   return String((input as { url?: string })?.url ?? "");
 }
 
-const PROXY_KEYS = {
-  plain: ["HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy"],
-  secure: ["HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy"],
-};
-/** 每个代理环境变量见过的全部值：Bun 读到代理变量后，进程里再 delete 它并不生效，所以按「见过的都算」判 */
-const envSeen = new Map<string, string[]>();
-
-function envValues(key: string): string[] {
-  const list = envSeen.get(key) ?? [];
-  const v = process.env[key];
-  if (v !== undefined && !list.includes(v)) envSeen.set(key, (list.push(v), list));
-  return list;
-}
-
-/** NO_PROXY 只认逐字的主机名或「主机:端口」（与 Bun 实测一致；后缀匹配之类当作不绕过，最多多拒） */
-function noProxyBypasses(u: URL): boolean {
-  const hits = (v: string) => v.split(",").map((s) => s.trim()).some((e) => e === "*" || e === u.hostname || e === `${u.hostname}:${portOf(u)}`);
-  return ["NO_PROXY", "no_proxy"].some((k) => {
-    const vals = envValues(k);
-    return vals.length > 0 && vals.every(hits);
-  });
-}
-
-/** 代理环境会把这个请求交给闸外的代理 → 返回说明；不走代理或代理本身在放行名单里 → null */
-function envProxyProblem(target: string, allowedPorts: ReadonlySet<number>): string | null {
-  let u: URL;
-  try {
-    u = new URL(target);
-  } catch {
-    return null; // 不是 URL：outboundAllowed 已经拒了
-  }
-  const keys = u.protocol === "https:" || u.protocol === "wss:" ? PROXY_KEYS.secure : PROXY_KEYS.plain;
-  const proxies = keys.flatMap(envValues).filter((v) => v.trim());
-  if (!proxies.length || noProxyBypasses(u)) return null;
-  const bad = proxies.find((p) => !outboundAllowed(p, allowedPorts));
-  return bad ? `${target}（代理环境会经 ${bad} 转发）` : null;
-}
-
 type NodeOpts = { protocol?: string; hostname?: string; host?: string; port?: number | string; socketPath?: string; path?: string };
 
 /**
@@ -125,12 +87,12 @@ export function installOutboundGuard(allowedPorts: ReadonlySet<number>): void {
     console.error(`${OUTBOUND_BLOCKED_MARK} ${what}`);
     return new Error(`沙箱模式拒绝出站请求：${what}`);
   };
-  /** 目标不在名单、或代理环境会把它交给闸外代理 → 拦截用的 Error；放行 → null */
-  const check = (target: string | null, what = target ?? "unix socket"): Error | null => {
-    if (!target || !outboundAllowed(target, allowedPorts)) return blocked(what);
-    const p = envProxyProblem(target, allowedPorts);
-    return p ? blocked(p) : null;
-  };
+  /**
+   * 目标不在名单 → 拦截用的 Error；放行 → null。代理环境变量不在这里判：Bun 按自己的大小写优先级与缓存走代理，模拟不准，
+   * lab 带任何代理变量直接不启动（sandbox-lab.ts 的 labProxyProblem）
+   */
+  const check = (target: string | null, what = target ?? "unix socket"): Error | null =>
+    !target || !outboundAllowed(target, allowedPorts) ? blocked(what) : null;
   guardFetch(check, blocked);
   guardWebSocket(check, blocked);
   guardNodeClients(check);

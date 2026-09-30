@@ -1,6 +1,6 @@
 /**
  * lab 隔离闸的绕过面（T81 第 1 轮对抗审查的反例，逐条钉住）：
- * - 出站：重定向跳到闸外、显式 proxy / unix、代理环境把请求交给闸外代理、net / tls / Bun.connect 直连——一律拒，
+ * - 出站：重定向跳到闸外、显式 proxy / unix、net / tls / Bun.connect 直连——一律拒；lab 带任何代理变量就不启动（第 2 轮的反例），
  *   而且断言的是「闸外替身一次连接都没收到」，不只是初始 URL 被拒；
  * - 默认生产端口 3847 不靠可选的拒绝清单：清单缺了也不许当 lab 中继 / 假推送 / 假 APNs / peer 入口端口，lab 缺清单直接不启动；
  * - 只设 lab 开关（或写错）而沙箱没开：真实入口（paths 加载）就报错，不按生产静默跑。
@@ -11,6 +11,7 @@ import { mkdirSync, mkdtempSync, realpathSync, rmSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { isSandbox, sandboxBridgeEnvProblems, sandboxRelayUrlProblem } from "../src/lib/sandbox.js";
+import { labProxyProblem, withoutProxyEnv } from "../src/lib/sandbox-lab.js";
 import { OUTBOUND_BLOCKED_MARK } from "../src/lib/sandbox-outbound.js";
 import { testChildEnv } from "./test-env.ts";
 
@@ -107,21 +108,63 @@ describe("出站：重定向 / proxy / 底层 socket（闸外替身计数为 0�
     expect(r.err).toContain("api.push.apple.com");
   }, 30_000);
 
-  test("代理环境指向闸外：放行端口的请求也会被代理转走，所以拒；NO_PROXY 逐字写了回环才直连", async () => {
-    const r = await run(`${PRELUDE}
-      process.env.HTTP_PROXY = "http://127.0.0.1:" + F;
-      out.fetch = await v(async () => (await fetch(A + "/")).text());
-      out.nodeHttp = await v(() => new Promise((ok, bad) => http.get(A + "/", (res) => { res.resume(); res.on("end", () => ok(res.statusCode)); }).on("error", bad)));
-      out.ws = await v(() => { new WebSocket(A.replace("http", "ws")).close(); return "made"; });
-      process.env.NO_PROXY = "127.0.0.1";
-      out.bypass = await v(async () => (await fetch(A + "/")).text());
-      await Bun.sleep(200);
-      console.log(JSON.stringify({ out, hits })); process.exit(0);`, labEnv());
-    const { out, hits } = JSON.parse(r.out || "{}");
-    expect(hits, r.err).toBe(0);
-    expect(out).toEqual({ fetch: "blocked", nodeHttp: "blocked", ws: "blocked", bypass: "through:ok" });
-    expect(r.err).toContain("代理环境会经");
+});
+
+/**
+ * 代理场景的子进程：闸外代理替身（原始 TCP，记下收到的字节）与放行端点；setup 在加载 paths 之前跑、after 在之后跑，
+ * 加载成功才发带 token 与正文的 POST。输出加载结果、代理连接数、token / 正文有没有到代理
+ */
+const proxyCase = (setup: string, after = "") => `
+  let hits = 0, seen = "";
+  const proxy = Bun.listen({ hostname: "127.0.0.1", port: 0, socket: { open() { hits++; }, data(s, d) { seen += d.toString();
+    s.write("HTTP/1.1 200 OK\\r\\ncontent-length: 5\\r\\nconnection: close\\r\\n\\r\\nproxy"); s.end(); } } });
+  const allowed = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response("direct") });
+  const A = "http://127.0.0.1:" + allowed.port + "/", P = "http://127.0.0.1:" + proxy.port;
+  Object.assign(process.env, { BRIDGE_PORT: String(allowed.port), BRIDGE_URL: "ws://127.0.0.1:" + allowed.port, CLAUDESTRA_LAB_PORTS: allowed.port + ",${RELAY}" });
+  ${setup}
+  hits = 0; seen = "";
+  let load = "loaded", post = "skipped";
+  try { await import(${PATHS}); } catch (e) { load = "refused:" + e.message; }
+  if (load === "loaded") { ${after}
+    post = await fetch(A, { method: "POST", body: "lab-secret", headers: { authorization: "Bearer lab-token" } }).then((r) => r.text(), (e) => "err:" + e.message); }
+  await Bun.sleep(100);
+  console.log(JSON.stringify({ load, post, hits, leaked: seen.includes("lab-token") || seen.includes("lab-secret") })); process.exit(0);`;
+
+describe("lab 不支持代理：带任何代理变量就不启动", () => {
+  const outcome = async (setup: string, after?: string) => {
+    const r = await run(proxyCase(setup, after), labEnv());
+    return { ...(JSON.parse(r.out || "{}") as { load?: string; post?: string; hits?: number; leaked?: boolean }), err: r.err };
+  };
+
+  test("NO_PROXY 与 no_proxy 冲突（Bun 按小写走代理）：加载就拒，代理没收到连接、token、正文", async () => {
+    const o = await outcome(`Object.assign(process.env, { HTTP_PROXY: P, NO_PROXY: "127.0.0.1", no_proxy: "other.example" });`);
+    expect(o.load, o.err).toContain("lab 不支持代理");
+    expect(o.load).toContain("HTTP_PROXY, NO_PROXY, no_proxy");
+    expect(o).toMatchObject({ post: "skipped", hits: 0, leaked: false });
   }, 30_000);
+
+  test("预热（Bun 已缓存代理）→ 装闸 → 删 env → guarded POST：装闸时就拒，代理计数为 0", async () => {
+    const o = await outcome(`process.env.HTTP_PROXY = P; await (await fetch(A)).text();`, `delete process.env.HTTP_PROXY;`);
+    expect(o.load, o.err).toContain("lab 不支持代理");
+    expect(o).toMatchObject({ post: "skipped", hits: 0, leaked: false });
+  }, 30_000);
+
+  test("八个名字的大小写写法、混写都拒；空值与不带代理照常加载", async () => {
+    const names = ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "all_proxy", "no_proxy", "Https_Proxy"];
+    for (const k of names) {
+      const r = await run(`await import(${PATHS}); console.log("loaded");`, labEnv({ [k]: "http://127.0.0.1:9" }));
+      expect(r.out, k).not.toContain("loaded");
+      expect(r.err, k).toContain(`lab 不支持代理，环境里有 ${k}`);
+    }
+    expect((await run(`await import(${PATHS}); console.log("loaded");`, labEnv({ HTTP_PROXY: "" }))).out).toBe("loaded");
+    expect((await run(`await import(${PATHS}); console.log("loaded");`, labEnv())).out).toBe("loaded");
+  }, 60_000);
+
+  test("sandbox 脚本给 lab 子进程的环境剔掉全部代理变量（非 lab 沙箱照旧继承）", () => {
+    const env = { PATH: "/bin", HTTP_PROXY: "http://p:1", no_proxy: "x", All_Proxy: "socks5://p:2", CLAUDESTRA_SANDBOX: "1" };
+    expect(withoutProxyEnv(env)).toEqual({ PATH: "/bin", CLAUDESTRA_SANDBOX: "1" });
+    expect(labProxyProblem(withoutProxyEnv(env))).toBeNull();
+  });
 });
 
 describe("默认生产端口不靠可选清单", () => {
