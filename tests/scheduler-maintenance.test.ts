@@ -48,3 +48,20 @@ test("in-flight or unknown merge blocks update after daemon replacement; a merge
     expect(update).not.toBeNull(); update!.release();
   } finally { opts.reader.close(); rmSync(root, { recursive: true, force: true }); }
 });
+
+test("P1 overlap (T68g): the deploy job holds the same lease as update; it waits out a scheduler pass and only a half-finished update refuses it", async () => {
+  const root = mkdtempSync(join(tmpdir(), "t68g-maintenance-"));
+  const opts = { path: join(root, "mutex"), marker: join(root, "update.json"), request: join(root, "request"), reader: new LedgerReader(join(root, "missing.db")) };
+  try {
+    const pass = await acquireMaintenance("scheduler", opts);
+    expect(pass).not.toBeNull();
+    setTimeout(() => pass!.release(), 300);
+    const deploy = await acquireMaintenance("deploy", { ...opts, waitMs: 5000 });
+    expect(deploy).not.toBeNull();
+    expect(await acquireMaintenance("update", opts)).toBeNull();
+    expect(await acquireMaintenance("scheduler", opts)).toBeNull();
+    deploy!.release();
+    writeFileSync(opts.marker, "reload still pending");
+    expect(await acquireMaintenance("deploy", opts)).toBeNull();
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});

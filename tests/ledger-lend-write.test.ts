@@ -341,3 +341,19 @@ test("已是最新版本但 lend_orders 还没有 seenAt（先建的 R6 表）�
   expect(m.query("SELECT orderId, step, seenAt FROM lend_orders").all()).toEqual([{ orderId: "lend:T1:s1:r0:a0", step: "write", seenAt: null }]);
   closeLedger(file);
 });
+
+test("生产库按旧顺序把出借写单跑成了第 13 版（部署表缺）：升到第 14 版，部署表补齐，出借写单的行原样", () => {
+  const file = join(mkdtempSync(join(tmpdir(), "lend-v13-")), "ledger.sqlite");
+  const d = openLedger(file);
+  d.run("DROP TABLE scheduler_deploys");
+  d.run(`INSERT INTO lend_orders (orderId, taskId, project, peer, family, step, specRev, round, head, repo, wire, text, sha256, status, leaseMs, createdBy, createdAt, updatedAt,
+    branch, seenAt) VALUES ('lend:T1:s1:r0:a0', 'T1', 'p', 'mate', 'codex', 'write', 1, 0, '${BASE}', '${REPO}', '{}', 't', 's', 'pooled', 1, 'agent-pm', 1, 1, '${BR}', 5)`);
+  d.run("PRAGMA user_version = 13");
+  closeLedger(file);
+  const m = openLedger(file);
+  expect(m.query("PRAGMA user_version").get()).toEqual({ user_version: LEDGER_SCHEMA_VERSION });
+  expect(LEDGER_SCHEMA_VERSION).toBe(14);
+  expect(m.query("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'scheduler_deploys'").all()).toHaveLength(1);
+  expect(m.query("SELECT orderId, step, branch, seenAt FROM lend_orders").all()).toEqual([{ orderId: "lend:T1:s1:r0:a0", step: "write", branch: BR, seenAt: 5 }]);
+  closeLedger(file);
+});

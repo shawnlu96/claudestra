@@ -6,6 +6,7 @@
 import { extractBoolFlag, extractStringFlag } from "./core.js";
 import { cmdPeerInviteNew } from "./peers.js";
 import { cmdPeerInviteRedeem, cmdPeerJoinAuto, parseRedeemArgs } from "./peer-join.js";
+import { cmdPeerRelayStrict } from "./peer-relay-strict.js";
 
 /** 依次抽出这几个取值参数，剩下的是位置参数 */
 function stringFlags(args: string[], names: readonly string[]): { values: Record<string, string>; pos: string[] } {
@@ -30,6 +31,7 @@ export async function runPeerInviteCommand(cmd: string, args: string[]): Promise
       break;
     }
     case "peer-invite-redeem": await cmdPeerInviteRedeem(parseRedeemArgs(args)); break;
+    case "peer-relay-strict": await cmdPeerRelayStrict(args); break; // 同样因为 manager.ts 没有行数余量，挂在这张表上
     case "peer-join-auto": {
       const { rest: afterForce, value: force } = extractBoolFlag(args, "--force");
       // --peer-url 覆盖邀请串里的对方地址：跨 tailnet 共享时串里嵌的是发方视角的 IP，接方要换成自己视角的映射地址

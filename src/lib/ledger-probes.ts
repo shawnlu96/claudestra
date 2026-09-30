@@ -247,7 +247,8 @@ function judgeDaemon(id: ProbeId, daemon: Daemon, f: VerifyFacts): ProbeResult {
   const since = Math.max(mergedAt, d.headSince);
   const [started, sinceText] = whenPair(d.startedAt, since);
   const t = { ...p, started, since: sinceText };
-  if (d.startedAt > since) return result(id, "pass", "{daemon} 启动于 {started}，晚于代码更新到合并提交的 {since}", t, ev);
+  // Both sides have 1 s resolution (ps lstart, reflog / GitHub); equal = same second, and a deploy pulls before it restarts.
+  if (d.startedAt >= since) return result(id, "pass", "{daemon} 启动于 {started}，晚于代码更新到合并提交的 {since}", t, ev);
   return result(id, "fail", "{daemon} 启动于 {started}，早于代码更新到合并提交的 {since}——还没重启", t, ev);
 }
 

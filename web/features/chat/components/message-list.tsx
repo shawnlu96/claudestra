@@ -298,7 +298,7 @@ export const Message = memo(function Message({ m, streaming, isLast, awaiting, p
           </QuoteSwipe>
         )}
         {/* 乐观气泡不装作已送达:失败的带「重新发送 / 删除」(载荷在 store 的 pendingSends,原地重发);bridge 押住的另有标记,说明行对齐后没了也看得出 */}
-        {m.held && !m.failed && <HeldMark />}
+        {(m.held || m.queued) && !m.failed && <HeldMark queued={!m.held} />}
         {m.failed && (
           <div className="flex items-center gap-2 pr-1 text-[11px] font-medium text-error">
             <span>⚠️ {t("未送达")}</span>

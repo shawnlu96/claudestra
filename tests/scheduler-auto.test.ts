@@ -1,6 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import { getWorkflow } from "../src/lib/ledger-scheduler.js";
 import { listEvents } from "../src/lib/ledger-store.js";
+import { currentOrders, orderWireFor } from "../src/lib/order-take.js";
+import { takeReview } from "../src/lib/review-order.js";
 import { CLAIM_LEASE_MS } from "../src/lib/scheduler-dispatch.js";
 import { autoFixture, H1, H2, P1, P2, toBuild } from "./scheduler-auto-helpers.js";
 
@@ -29,15 +31,23 @@ describe("T68f auto mode: the full code flow on mock workers", () => {
       expect(f.ensured).toEqual([{ role: "author", family: "claude" }, { role: "reviewer", family: "codex" }]);
       expect(await f.tick()).toMatchObject({ step: "sent", detail: "acp" });
       expect(f.sent.at(-1)).toMatchObject({ agent: "agent-rv-t1", route: "acp" });
-      expect(f.sent.at(-1)?.text).toContain(`--head ${H1} --session s-rv --family codex`);
-      expect(f.sent.at(-1)?.text).toContain("rv-t1（已固定在这个 head；只读");
+      // 唤醒只一句；单子本身由审查员经 take_review 领（M4b）
+      const rvIntent = f.intents().at(-1)!;
+      expect(f.sent.at(-1)?.text).toBe(`【调度派单】有新单 ${rvIntent.id}（T1 · review · 第 1 轮）：调用 take_review 领取，按单子做，完成用 submit_verdict 回写。`);
+      const rv = takeReview(f.db, { agent: "agent-rv-t1", sessionId: "s-rv", family: "codex", verified: true });
+      expect(rv).toMatchObject({ ok: true, orders: [{ orderId: rvIntent.id, head: H1, step: "review" }] });
+      expect(rv.ok && rv.orders[0].inputs.join("\n")).toContain("只读，不改、不提交、不推送");
       await f.tick();
       expect(f.sent).toHaveLength(3);
 
       expect((await f.review("changes", H1, [P1, P2])).ok).toBe(true);
       expect(await f.tick()).toMatchObject({ step: "stage", detail: "review→fix" });
       expect(await f.tick()).toMatchObject({ step: "sent", detail: "channel" });
-      expect(f.sent.at(-1)?.text).toContain("two ticks claim the same intent");
+      expect(f.sent.at(-1)?.text).toContain("调用 take_order 领取");
+      const [fixOrder] = currentOrders(f.db, { agent: "agent-task-one", sessionId: "s-one", family: "claude-code", channelId: "ch-one" });
+      const wire = orderWireFor(f.db, fixOrder);
+      expect(wire.ok && wire.order).toMatchObject({ orderId: f.intents().at(-1)!.id, step: "fix", findings: [P1, P2] });
+      expect(wire.ok && wire.order.inputs.join("\n")).toContain("上一轮审查报告：reviews/T1-r1/report.md");
       const slots = f.db.query("SELECT resource FROM scheduler_resources WHERE resource LIKE 'slot:%'").all();
       expect(slots).toEqual([{ resource: "slot:p:0" }]);
 

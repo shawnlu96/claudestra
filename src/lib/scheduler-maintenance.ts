@@ -20,8 +20,9 @@ export async function whileOwned<T>(assertActive: () => void, operation: () => P
 /**
  * scheduler: never waits, and stands aside while an update is waiting (a fresh request file, lib/scheduler-yield.ts).
  * update: with `waitMs`, keeps a request fresh and retries until the running pass yields; a busy merge queue refuses at once.
+ * deploy: the one-shot deploy job (T68g) waits like update, but it is part of the queue, so only a half-finished update refuses it.
  */
-export async function acquireMaintenance(kind: "scheduler" | "update", opts: {
+export async function acquireMaintenance(kind: "scheduler" | "update" | "deploy", opts: {
   path?: string; marker?: string; reader?: LedgerReader; request?: string; waitMs?: number;
 } = {}): Promise<(LockHandle & { path: string }) | null> {
   const path = opts.path ?? statePath("scheduler-maintenance.lock"), marker = opts.marker ?? UPDATE_INFLIGHT, request = opts.request ?? MAINTENANCE_REQUEST;
@@ -36,7 +37,8 @@ export async function acquireMaintenance(kind: "scheduler" | "update", opts: {
   try {
     for (;;) {
       const lock = await acquireLock(path, 0);
-      if (lock) return updateMayRun(lock, opts.reader) ? Object.assign(lock, { path }) : null;
+      const mayRun = kind === "deploy" ? (l: LockHandle) => !existsSync(marker) || (l.release(), false) : (l: LockHandle) => updateMayRun(l, opts.reader);
+      if (lock) return mayRun(lock) ? Object.assign(lock, { path }) : null;
       if (Date.now() >= deadline) return null;
       requestMaintenance(request);
       await Bun.sleep(250);

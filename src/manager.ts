@@ -2723,7 +2723,7 @@ switch (cmd) {
   // v2.15+ 一键邀请（免回执自动握手）
   case "peer-invite-list": await cmdPeerInviteList(); break;
   case "peer-invite-revoke": await cmdPeerInviteRevoke(args[0] || ""); break;
-  case "peer-invite-new": case "peer-invite-redeem": case "peer-join-auto": await (await import("./manager/peers-invite-cli.js")).runPeerInviteCommand(cmd, args); break;
+  case "peer-invite-new": case "peer-invite-redeem": case "peer-join-auto": case "peer-relay-strict": await (await import("./manager/peers-invite-cli.js")).runPeerInviteCommand(cmd, args); break;
   case "metrics": {
     await cmdMetrics(args);
     break;

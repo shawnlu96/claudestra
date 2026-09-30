@@ -14,6 +14,8 @@ export type BridgeEventType =
   // 收到后收起交互卡。additive-only 合同允许加类型；upstream 落地同类事件后切换。
   | "question_cleared"
   | "chat_message"
+  // 人发的消息进了押后队列 / 押后作罢（bridge/held-web.ts）：data = 入站镜像字段 + state；网页在气泡下标「排队中」
+  | "chat_held"
   // 上下文压缩完成（CC 在 jsonl 落 system/compact_boundary 时发出）。web 端据此
   // 插分隔线、让 ctx 徽章即时回落。jsonl-watcher 一直在发，但漏了在这里声明 ——
   // 加类型检查后才暴露出来。

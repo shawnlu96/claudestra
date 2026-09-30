@@ -197,7 +197,16 @@ function unknownMerges(db: Database, project: string): NonNullable<AuditSnapshot
   if (!db.query("SELECT 1 FROM sqlite_master WHERE type='table' AND name='scheduler_merges'").get()) return [];
   return (db.query("SELECT intentId, taskId, reason, updatedAt FROM scheduler_merges WHERE project=? AND phase='unknown'").all(project) as
     { intentId: string; taskId: string; reason: string | null; updatedAt: number }[])
-    .map((r) => ({ intentId: r.intentId, taskId: r.taskId, reason: r.reason ?? "", since: r.updatedAt }));
+    .map((r) => ({ intentId: r.intentId, taskId: r.taskId, reason: r.reason ?? "", since: r.updatedAt }))
+    .concat(unknownDeploys(db, project));
+}
+
+/** A deploy unknown (T68g) has the same exit and also freezes the queue (which mutes ship_stalled), so it goes to the PM the same way. */
+function unknownDeploys(db: Database, project: string): NonNullable<AuditSnapshot["mergeUnknown"]> {
+  if (!db.query("SELECT 1 FROM sqlite_master WHERE type='table' AND name='scheduler_deploys'").get()) return [];
+  return (db.query("SELECT intentId, taskId, reason, updatedAt FROM scheduler_deploys WHERE project=? AND phase='unknown'").all(project) as
+    { intentId: string; taskId: string; reason: string | null; updatedAt: number }[])
+    .map((r) => ({ intentId: r.intentId, taskId: r.taskId, reason: `部署：${r.reason ?? ""}`, since: r.updatedAt }));
 }
 
 export async function collectAuditSnapshots(db: Database, projects: readonly string[], now: number, src: SnapshotSources = realSources): Promise<AuditSnapshot[]> {

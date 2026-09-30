@@ -1,6 +1,6 @@
-/** Data-only v2 workflows. The interpreter in scheduler-plan.ts owns conditions and side effects. */
-import type { Stage, StepName } from "./ledger-stages.js";
-import type { WorkflowTemplate } from "./ledger-scheduler.js";
+/** Data-only workflows (v2 all templates, v3 code only). The interpreter in scheduler-plan.ts owns conditions and side effects. */
+import type { LedgerEvent, LedgerTask, Stage, StepName } from "./ledger-stages.js";
+import type { SchedulerIntent, WorkflowTemplate } from "./ledger-scheduler.js";
 
 type NodeAction = "dispatch" | "review" | "stage" | "ask" | "merge" | "verify" | "retire";
 export interface FlowNode {
@@ -9,11 +9,11 @@ export interface FlowNode {
   action: NodeAction;
   step?: StepName;
   next?: Stage;
-  gate?: "pm_restate" | "owner_screenshot" | "ci_and_review";
+  gate?: "pm_restate" | "restate_recorded" | "owner_screenshot" | "ci_and_review";
 }
 export interface FlowTemplate {
   id: WorkflowTemplate;
-  version: 2;
+  version: 2 | 3;
   reviewMode: "adversarial";
   crossFamily: true;
   uiGate: boolean;
@@ -36,6 +36,49 @@ export const FLOW_TEMPLATES: Record<WorkflowTemplate, FlowTemplate> = {
   ui: { id: "ui", version: 2, reviewMode: "adversarial", crossFamily: true, uiGate: true, nodes: CODE_NODES },
   security: { id: "security", version: 2, reviewMode: "adversarial", crossFamily: true, uiGate: false, nodes: CODE_NODES },
 };
+
+/** code v3: the executor's own restate record releases build; PM steps in only via restate-hold. ui / security stay on v2. */
+const CODE_V3_NODES: readonly FlowNode[] = CODE_NODES.map((n) => n.id === "approve_restate" ? { ...n, gate: "restate_recorded" as const } : n);
+const FLOW_TEMPLATES_V3: Partial<Record<WorkflowTemplate, FlowTemplate>> = {
+  code: { ...FLOW_TEMPLATES.code, version: 3, nodes: CODE_V3_NODES },
+};
+
+/** null = no such (template, version); callers treat that as drift / invalid, never as a default. */
+export function templateFor(template: WorkflowTemplate, version: number): FlowTemplate | null {
+  if (version === 2) return FLOW_TEMPLATES[template] ?? null;
+  if (version === 3) return FLOW_TEMPLATES_V3[template] ?? null;
+  return null;
+}
+
+type GateDecision = { kind: "wait" | "escalate"; code: string; reason: string };
+const RELEASES = new Set(["restate_approved", "restate_released"]);
+
+/** A restate-hold for this specRev with no restate-approve / restate-release after it. */
+function openHold(task: LedgerTask, events: readonly LedgerEvent[]): GateDecision | null {
+  const released = events.findLast((e) => e.kind === "decision" && RELEASES.has(String(e.data.op)) && e.data.specRev === task.specRev)?.seq ?? 0;
+  const hold = events.findLast((e) => e.kind === "decision" && e.data.op === "restate_hold" && e.data.specRev === task.specRev && e.seq > released);
+  return hold ? { kind: "wait", code: "restate_hold", reason: `PM 拦住了复述：${hold.text || "等 PM 放行"}` } : null;
+}
+
+/** True once a write order for this specRev left pending (submitted / done / unknown) — past that point a hold stops nothing. */
+const writeOrderSent = (task: LedgerTask, intents: readonly SchedulerIntent[]): boolean =>
+  intents.some((i) => i.node === "write" && i.action === "dispatch" && i.specRev === task.specRev && i.status !== "pending" && i.status !== "cancelled");
+
+/**
+ * v3 only. restate: the executor's own spec→restate event for this specRev must carry the restate text; a blocked→restate
+ * recovery is PM bookkeeping, never a restatement. No record → PM (the executor can't restate twice). An open restate-hold
+ * waits here and again in build until the write order is sent. v2 returns null, so its pm_restate path is untouched.
+ */
+export function restateGate(template: FlowTemplate, node: FlowNode, task: LedgerTask, events: readonly LedgerEvent[],
+  intents: readonly SchedulerIntent[]): GateDecision | null {
+  if (template.version !== 3) return null;
+  if (node.gate === "restate_recorded") {
+    const record = events.findLast((e) => e.kind === "stage" && e.data.from === "spec" && e.data.to === "restate" && e.data.specRev === task.specRev);
+    if (!record?.text.trim()) return { kind: "escalate", code: "restate_missing", reason: "没有本规格版本的复述记录，不开工" };
+    return openHold(task, events);
+  }
+  return node.id === "write" && !writeOrderSent(task, intents) ? openHold(task, events) : null;
+}
 
 /** The stage machine remains canonical; templates only choose work within its legal states. */
 export const nodeAt = (template: FlowTemplate, stage: Stage): FlowNode | null => template.nodes.find((n) => n.stage === stage) ?? null;

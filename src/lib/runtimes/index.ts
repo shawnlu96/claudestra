@@ -88,6 +88,16 @@ export function controlFor(runtime: string | undefined | null, transport: Transp
   return acp?.control ?? s?.control ?? claudeCodeAdapter.control;
 }
 
+/**
+ * 能敲 Claude Code 专属 TUI 命令（用量抓取的 /status）的 agent 窗口：只认 registry 里登记为 CC 的。
+ * Codex 的 /status 不是 CC 的额度表（T63）；Pi 没有这张表，敲进去的 /status + 回车会变成一条发给它的输入；
+ * registry 里查不到的窗口不知道在跑什么，也不碰。tests/runtime-bridge-gates.test.ts
+ */
+export function claudeCodeWindows(windowNames: string[], agents: { name: string; runtime?: string }[]): string[] {
+  const cc = new Set(agents.filter((a) => (a.runtime || DEFAULT_RUNTIME) === DEFAULT_RUNTIME).map((a) => a.name));
+  return windowNames.filter((w) => w.startsWith("agent-") && cc.has(w));
+}
+
 /** 能以哪些 transport 启动：tmux 人人都有，acp 要运行时声明 ACP 段（manager 切 transport 前据此拒绝） */
 export function transportsOf(runtime: string | undefined | null): Transport[] {
   const out: Transport[] = [DEFAULT_TRANSPORT];

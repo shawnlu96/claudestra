@@ -101,7 +101,12 @@ test("usageLimitExceeded / Quota depleted crosses ACP watcher, cancels old resum
     expect(other).toMatchObject({ kind: "error", textMatches: true, before: true, stillWanted: true, held: 1, entry: { rateLimited: false } });
     expect(other.events).toHaveLength(2);
     expect(other.events.every((e: any) => e.data.rateLimited !== true)).toBe(true);
-    expect(other.storedAsks).toEqual([]);
+    // 不能重试的非额度失败不出额度卡，出一张没有按钮的「Codex 回合失败」卡（extra.failure = error），调度器据此交 PM（i28-M4b）
+    expect(other.storedAsks).toHaveLength(1);
+    expect(other.storedAsks[0]).toMatchObject({ state: "open", kind: "owner_action", title: "Codex 回合失败", context: "You've hit your usage limit.",
+      extra: { failure: "error" } });
+    expect(other.storedAsks[0].extra.quota).toBeUndefined();
+    expect(other.storedAsks[0].options).toEqual([]);
   } finally {
     rmSync(state, { recursive: true, force: true });
   }
