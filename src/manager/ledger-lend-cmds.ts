@@ -68,7 +68,7 @@ const lendDeps = (c: LedgerCli): LendCliDeps => c.deps.lend ?? realLendDeps(c);
 function writeDeps(c: LedgerCli): LendDeliverDeps {
   const r = lendDeps(c).result;
   if (!r.remoteHead || !r.peerFp) throw new LedgerError("invalid", "这台机器没接上写单要的远端查询（注入缺 remoteHead / peerFp）");
-  return r as LendDeliverDeps;
+  return { ...(r as LendDeliverDeps), now: () => c.deps.now() };
 }
 const PEER_RE = /^[\p{L}\p{N}_.-]{1,64}$/u;
 

@@ -158,7 +158,7 @@ interface OrderWire extends WorkOrder {              // taskId / specRev / head 
   在远端的 head 切出，修复单从卡上的 head 接着改。
 - **推送用出借人自己的 GitHub 登录**，直接推到 A 的仓库（出借人是协作者时）；没有推送权限的，B 在起 worker 之前 dry-run 试推就发现，
   按 not_started 退回并写明「推到自己 fork 的路径 v1 不支持，只检测」——fork PR 留给后续。
-- **worker 推不出去**：写单的 clone 上锁（`protocol.allow=never`、清空凭据助手、askPass / ssh 指向 false）；推送只由出借服务在另一个目录做，
+- **worker 推不出去**：写单的 clone 上锁（`protocol.allow=never`，生效配置里每一条逐协议许可 `protocol.<协议>.allow` 也在副本里盖成 never——全局配置放行的不算数；清空凭据助手、askPass / ssh 指向 false）；推送只由出借服务在另一个目录做，
   只推订单分支这一条显式 refspec、不 force，非快进就拒。锁是配置不是边界（§5 同一系统用户）。
 - **A 收货**：自己 ls-remote 订单分支，head 逐字相等、卡仍在 build / fix 且轮次没变、查远端期间卡没被改，才在一个事务里记 deliver
   （actor `<出借方指纹>/<worker>`，负责人记成 peer_agent）、推到 review、签回执；同一单同一 head 重交幂等。

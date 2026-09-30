@@ -120,6 +120,8 @@ export interface LendDeliverDeps extends LendResultDeps {
   remoteHead(repo: string, branch: string): Promise<RemoteHead>;
   /** 这个 peer 钉住的公钥的指纹；没钉 = null */
   peerFp(peer: string): Promise<string | null>;
+  /** 核租约截止用的时钟，每次核都重读：查远端要等，ctx.now 是命令开始时定下的，拿它核会放过查远端期间到期的租约。缺省 = ctx.now */
+  now?: () => number;
 }
 
 const STAGE_OF = { write: "build", fix: "fix" } as const;
@@ -161,7 +163,8 @@ function deliverReportBody(o: LendOrder, req: DeliverRequest): string {
 export async function writeLendDeliver(db: Database, ctx: WriteCtx, peer: string, req: DeliverRequest, bodySha: string, deps: LendDeliverDeps): Promise<LendReceipt> {
   const first = getLendOrder(db, req.orderId);
   if (first?.peer === peer && first.resultSha) return first.resultSha === bodySha && first.receipt ? first.receipt : refuse("conflict", "这一单已用另一份交付入账");
-  const o = check(db, first, peer, req, ctx.now ?? Date.now());
+  const clock = deps.now ?? (() => ctx.now ?? Date.now());
+  const o = check(db, first, peer, req, clock());
   const fp = await deps.peerFp(peer);
   if (!fp || lendBranch(o.taskId, fp) !== o.branch) return refuse("invalid", "对方钉住的公钥与这一单的出借分支对不上");
   const rev = mustTask(db, o.taskId).rev;
@@ -169,10 +172,11 @@ export async function writeLendDeliver(db: Database, ctx: WriteCtx, peer: string
   if (!remote.ok) return refuse("unavailable", `查不到远端分支 ${o.branch} 的 head（${remote.error}），稍后重发`);
   if (remote.head !== req.deliver.head) return refuse("invalid", `远端 ${o.branch} 的 head 是 ${remote.head}，不是 ${req.deliver.head}：交付不入账`);
   return tx(db, () => {
-    const now = ctx.now ?? Date.now();
+    const checkedAt = clock();
+    const now = ctx.now ?? checkedAt;
     const again = getLendOrder(db, req.orderId);
     if (again?.resultSha) return again.resultSha === bodySha && again.receipt ? again.receipt : refuse("conflict", "这一单已用另一份交付入账");
-    const cur = check(db, again, peer, req, now);
+    const cur = check(db, again, peer, req, checkedAt);
     const task = mustTask(db, cur.taskId);
     if (task.rev !== rev) return refuse("unavailable", "核对远端期间卡被改过，稍后重发（重新核对）");
     const actor = `${fp.toLowerCase()}/${cur.worker}`;

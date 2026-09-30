@@ -194,6 +194,17 @@ describe("交付核对", () => {
     expect(await call("write", body(orderId, H2))).toMatchObject({ ok: true });
   });
 
+  test("查远端期间租约到期：事务里按当时的时钟重核，回 lease_expired，不记 deliver、不推阶段", async () => {
+    const { orderId } = await offer("--peer", "mate", "--repo", REPO);
+    await claim(orderId);
+    remote[BR] = { ok: true, head: H2 };
+    const until = listLendOrders(db, "T9")[0]!.leaseUntil!;
+    onRemote = () => { now = until + 1; onRemote = null; };
+    expect(await call("write", body(orderId, H2))).toMatchObject({ ok: false, current: { lend: "lease_expired" } });
+    expect(events("deliver")).toEqual([]);
+    expect(getTask(db, "T9")).toMatchObject({ stage: "build", headSHA: null });
+  });
+
   test("分支、PR、起点不对的交付拒收；审查单不能按交付交", async () => {
     const { orderId } = await offer("--peer", "mate", "--repo", REPO);
     await claim(orderId);

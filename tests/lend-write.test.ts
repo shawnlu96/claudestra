@@ -84,6 +84,29 @@ describe("写单副本与推送（真 git，lab 本地 bare 仓库）", () => {
     expect(await ensurePr({ orderId: "o1", repo: "o/r", branch: BR, base: "main", pr: null, title: "t", body: "b" }, opts)).toEqual({ ok: true, pr: null });
   });
 
+  test("P1 反例：出借人全局配置里放行了逐协议（protocol.file.allow=always 等）→ 副本里照样盖成 never，worker 直接 push main 失败", async () => {
+    const L = lab();
+    writeFileSync(join(L.root, ".gitconfig"), '[protocol "file"]\n\tallow = always\n[protocol "lendtest"]\n\tallow = always\n');
+    const c = await prepareClone({ orderId: "o9", repo: "o/r", pr: null, head: L.main, write: { branch: BR, name: "lender", email: "l@x" } }, { root: L.lendRoot, env: L.env });
+    expect(c.ok).toBe(true);
+    const dir = (c as { dir: string }).dir;
+    const h = commit(dir, "b.txt");
+    // worker 的 git 照常读出借人的全局配置（HOME 就是 lab 根），不隔离
+    const asWorker = { PATH: process.env.PATH, HOME: L.root, GIT_CONFIG_NOSYSTEM: "1", GIT_TERMINAL_PROMPT: "0" };
+    const wGit = (...args: string[]) => Bun.spawnSync(["git", ...args], { cwd: dir, stdout: "pipe", stderr: "pipe", env: asWorker });
+    expect(wGit("config", "--get", "protocol.lendtest.allow").stdout.toString().trim()).toBe("never");
+    for (const target of [L.bare, `file://${L.bare}`]) {
+      expect(wGit("push", target, "HEAD:main").exitCode).not.toBe(0);
+      expect(wGit("push", target, `HEAD:${BR}`).exitCode).not.toBe(0);
+    }
+    expect(git(L.bare, "rev-parse", "main")).toBe(L.main);
+    expect(git(L.bare, "branch", "--list")).toBe("* main");
+    const t = { orderId: "o9", repo: "o/r", branch: BR, base: "main", cloneDir: dir, orderHead: L.main };
+    expect(await pushWork({ ...t, head: h }, { root: L.lendRoot, env: L.env })).toEqual({ ok: true }); // 出借服务照样推订单分支
+    expect(git(L.bare, "rev-parse", BR)).toBe(h);
+    expect(git(L.bare, "rev-parse", "main")).toBe(L.main);
+  });
+
   test("P1 反例：订单分支是 main / 别的名字、交的 head 不是新提交、改写了历史、远端被别人推过——一律不推", async () => {
     const L = lab();
     const opts = { root: L.lendRoot, env: L.env };
@@ -166,7 +189,8 @@ const polled = { orderId: "w1", taskId: "T93", step: "write", family: "codex", r
 const wire = { v: 1, orderId: "w1", taskId: "T93", specRev: 1, dagVersion: null, node: "write", step: "write", round: 0, head: BASE, repo: REPO, pr: null,
   inputs: ["规格原文：SPEC-MARKER"], outputs: ["提交"], acceptance: ["只推订单分支"], writeBack: "lend submit", findings: [], fallback: null };
 
-function harness(o: { roles?: LendEntry["roles"]; until?: string; branch?: string; probe?: PushResult; work?: PushResult[]; result?: string[]; anon?: boolean } = {}) {
+function harness(o: { roles?: LendEntry["roles"]; until?: string; branch?: string; probe?: PushResult; work?: PushResult[]; result?: string[]; anon?: boolean;
+  renew?: { refuse: string | null } } = {}) {
   const db = openLendJournal(":memory:");
   const calls: { op: LendOp; body: Record<string, unknown> }[] = [];
   const log = { clones: [] as unknown[], created: [] as string[], sent: [] as string[], pushed: [] as unknown[], prs: [] as { title: string; body: string }[] };
@@ -180,6 +204,8 @@ function harness(o: { roles?: LendEntry["roles"]; until?: string; branch?: strin
       if (op === "poll") return { status: 200, body: { ok: true, v: 1, orders: [polled], pollAfterMs: 30_000 } };
       if (op === "claim") return { status: 200, body: { ok: true, v: 1, order: wire, text: TEXT, sha256: sha(TEXT), lease: { gen: 1, expiresAt: 0, ms: 600_000 },
         write: { branch: o.branch ?? WB, base: "main" } } };
+      const refuse = o.renew?.refuse;
+      if (op === "lease" && body.action === "renew" && refuse) return { status: 409, body: { ok: false, code: refuse, error: refuse } };
       if (op === "lease") return { status: 200, body: { ok: true, v: 1, lease: body.action === "renew" ? { gen: 1, expiresAt: 0, ms: 600_000 } : null } };
       const code = results.shift();
       if (code) return { status: 503, body: { ok: false, code, error: code } };
@@ -302,6 +328,36 @@ describe("lend 循环：写单", () => {
     expect(getOrder(h2.db, "w1")!.state).toBe("stopped");
     expect(h2.ops()).not.toContain("result");
     expect(h2.calls.find((c) => c.op === "lease" && c.body.action === "release")?.body).toMatchObject({ reason: "stopped" });
+  });
+  test("撤单 / 收回后不再发布：提交还没推送（没有交付正文）时续租被拒 → 收尾、停 worker，不推送、不开 PR；已有正文的照旧原字节重发取回执", async () => {
+    const renew = { refuse: null as string | null };
+    const h = harness({ renew });
+    for (let i = 0; i < 5; i++) await h.tick();
+    h.submit();
+    renew.refuse = "cancelled";
+    patchOrder(h.db, "w1", ["result_pending"], { lastBeatAt: null }); // 到点续租
+    await h.tick();
+    expect(getOrder(h.db, "w1")!.state).toBe("cancelled");
+    expect(h.log.pushed.filter((p) => !(p as { probe?: unknown }).probe)).toEqual([]);
+    expect(h.log.prs).toEqual([]);
+    expect(h.ops()).not.toContain("result");
+    expect(await h.d.worker.alive(getOrder(h.db, "w1")!.agent!)).toBe(false);
+
+    const renew2 = { refuse: null as string | null };
+    const h2 = harness({ renew: renew2, result: ["unavailable"] }); // 正文已生成、第一次没送到 = 回执丢了
+    for (let i = 0; i < 5; i++) await h2.tick();
+    h2.submit();
+    await h2.tick();
+    expect(getOrder(h2.db, "w1")).toMatchObject({ state: "result_pending" });
+    expect(getOrder(h2.db, "w1")!.payload).not.toBeNull();
+    renew2.refuse = "cancelled";
+    patchOrder(h2.db, "w1", ["result_pending"], { lastBeatAt: null });
+    await h2.tick();
+    expect(getOrder(h2.db, "w1")!.state).toBe("acked");
+    const sends = h2.calls.filter((c) => c.op === "result").map((c) => JSON.stringify(c.body));
+    expect(sends).toHaveLength(2);
+    expect(sends[0]).toBe(sends[1]);
+    expect(h2.log.pushed.filter((p) => !(p as { probe?: unknown }).probe)).toHaveLength(1);
   });
 });
 
