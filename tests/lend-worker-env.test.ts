@@ -74,6 +74,16 @@ describe("T94 codex-acp 接线", () => {
     for (const s of SECRETS) expect(JSON.stringify(env)).not.toContain(s);
   });
 
+  test("沙箱里的干净模式保留宿主的 bridge 地址（不是带 token 的回环代理），worker 里的 manager 才过得了沙箱的端口检查", () => {
+    const base = { ...DIRTY, CLAUDESTRA_SANDBOX: "1", CLAUDESTRA_SANDBOX_ROOT: "/s", BRIDGE_URL: "ws://127.0.0.1:24101" };
+    const env = adapterEnv({
+      base, bunBin: "/b/bun", channelServer: "/r/c.ts", mcpName: "claudestra", logsDir: "/l",
+      channel: { channelId: "123", proxyUrl: "ws://127.0.0.1:9/tok-secret", agentName: "agent-lend-x", sessionId: "thr-1" }, clean: true,
+    });
+    expect(env.BRIDGE_URL).toBe("ws://127.0.0.1:24101");
+    expect(JSON.stringify(env)).not.toContain("tok-secret");
+  });
+
   test("不 clean 时照旧（回归）：继承环境、挂 MCP", () => {
     const env = adapterEnv({
       base: DIRTY, bunBin: "/b/bun", channelServer: "/r/c.ts", mcpName: "claudestra", logsDir: "/l",
