@@ -43,7 +43,8 @@ async function setEntry(kind: "lend" | "borrow", built: Built<LendFile["lend"][n
     if (kind === "lend") f.enabled = true;
   });
   output({ ok: true, [kind]: entry, message: "confirm" in entry
-    ? `已开始向 ${entry.peer} 出借（${entry.confirm === "auto" ? "自动接单" : "每单等你确认"}）` : `已允许把所列项目的单子给 ${entry.peer}` });
+    ? `已开始向 ${entry.peer} 出借（${entry.confirm === "auto" ? "自动接单" : "每单等你确认"}）`
+    : `已允许把 ${entry.projects.join("、")} 的单子给 ${entry.peer}：这些项目的 PR 会发给对方机器上的 agent 审（代码、规格与验收原文都会到对方那边）` });
 }
 
 async function off(kind: "lend" | "borrow", peer: string | undefined): Promise<void> {

@@ -40,7 +40,8 @@ describe("manager lend / borrow 接线", () => {
     expect(run(["borrow", "set", "team-a", "--projects", "diary"])).toMatchObject({ ok: false, error: expect.stringContaining("个人项目") });
     expect(run(["project-edit", "diary", "--personal", "off"], "222")).toMatchObject({ ok: false, code: "forbidden" });
     expect(run(["project-edit", "diary", "--personal", "maybe"])).toMatchObject({ ok: false });
-    expect(run(["borrow", "set", "team-a", "--projects", "orch", "--max-open", "2"])).toMatchObject({ ok: true });
+    expect(run(["borrow", "set", "team-a", "--projects", "orch", "--max-open", "2"]))
+      .toMatchObject({ ok: true, message: expect.stringContaining("PR 会发给对方机器上的 agent 审") });
     expect(run(["borrow", "status"])).toMatchObject({ ok: true, effective: [{ peer: "team-a", projects: ["orch"], maxOpen: 2 }] });
     expect(run(["borrow", "off"])).toMatchObject({ ok: true });
     expect(file().borrow).toEqual([]);
