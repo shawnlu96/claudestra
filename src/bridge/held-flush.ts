@@ -132,7 +132,8 @@ export async function flushHeld(d: FlushDeps, channelId: string, reason: string)
     // agent→agent 仍等空闲(回合中通知有丢弃窗口)。快照:遍历中别处可能往这个频道 hold 新消息,只投这一刻到期的。
     // 闸内另看能不能穿闸(gatesAsHuman),和忙时能不能投(isHumanRequest)是两回事:ask 答复带 waitForIdle,闸内目标空闲照投、忙时照旧等,
     // 拿 isHumanRequest 判闸的话它会被改记成额度闸、等到出闸(tests/held-flush.test.ts T64)
-    const due = q.filter((i) => (!walled || gatesAsHuman(i.env)) && (working ? d.isHumanRequest(i.env) : !leaseActive(i)));
+    // 停之前到、停之后才投的人类消息（sentBeforeStop）不抢占，忙时同样等空闲（bridge/preempt.ts waitsForIdle）
+    const due = q.filter((i) => (!walled || gatesAsHuman(i.env)) && (working ? d.isHumanRequest(i.env) && !i.env.meta.sentBeforeStop : !leaseActive(i)));
     for (const item of due) {
       // ws 可能已换代(channel-server 重连 / bridge 重启后从盘上恢复的没有 ws):按 channelId 取最新连接;不在线就留着
       const fresh = d.client(channelId);

@@ -44,6 +44,12 @@ function sentBeforeStop(env: Envelope, channelId: string): boolean {
   return true;
 }
 
+/**
+ * deliverToLocal 判忙押后用（lib/turn-state.ts holdsUntilIdle 的 waitForIdle）：停之前到的人类消息不抢占，目标忙时也得押到空闲——
+ * 人类消息本来靠先打断才不在回合中途投；CC 回合起始的推理流里收到的 channel 通知会被静默丢掉（git log -S heldLocalMsgs）
+ */
+export const waitsForIdle = (env: Envelope, channelId: string): boolean => !!env.meta.waitForIdle || sentBeforeStop(env, channelId);
+
 /** ws.send 前一刻（和发送之间没有 await）：再查一次叫停，拼上最终的抬头；bare = 不带抬头渲染好的正文（bridge.ts deliverToLocal） */
 export function noteAtSend(env: Envelope, channelId: string, bare: string, meta: Record<string, string>): string {
   sentBeforeStop(env, channelId);

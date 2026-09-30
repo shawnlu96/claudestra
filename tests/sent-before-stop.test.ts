@@ -7,7 +7,11 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { interruptGate } from "../src/bridge/interrupt-gate.js";
 import { setExtensionSocket } from "../src/bridge/pi-abort.js";
-import { manualInterrupt, noteAtSend, preemptForHuman, setStopHooks } from "../src/bridge/preempt.js";
+import { manualInterrupt, noteAtSend, preemptForHuman, setStopHooks, waitsForIdle } from "../src/bridge/preempt.js";
+import { flushHeld } from "../src/bridge/held-flush.js";
+import { HeldQueue } from "../src/bridge/held-queue.js";
+import { isHumanRequest, type Delivery } from "../src/bridge/router.js";
+import { holdsUntilIdle } from "../src/lib/turn-state.js";
 import { arrivalOf, stampArrival } from "../src/bridge/arrival-stamp.js";
 import { turnCuts } from "../src/bridge/turn-cuts.js";
 import type { Envelope } from "../src/bridge/router.js";
@@ -107,5 +111,72 @@ describe("先到、叫停之后才投的：抬头写停之前发的，不再抢�
     await preemptForHuman(held, CC, "agent-cc");
     expect(log).toEqual([]);
     expect(received(held).body).toStartWith("[⏹ 这条是叫停之前（10:00）");
+  });
+});
+
+/**
+ * T13f r3 P1：停之前到的人类消息不抢占，就不能在回合中途投——CC 回合起始的推理流里收到的 channel 通知会被静默丢掉。
+ * 目标忙时押到空闲（bridge.ts deliverToLocal 用 waitsForIdle 判押，held-flush 忙时不投它），出队时仍带抬头、仍不抢占。
+ * 第一条是审查员的探针（rv-t13f-cc-work/head/tests/zz-r3-busy.test.ts）改写的
+ */
+describe("停之前到的人类消息：忙时押、闲了投、带抬头、零按键（T13f r3 P1）", () => {
+  const busy = { main: "busy", bg: false } as const;
+  const idle = { main: "idle", bg: false } as const;
+
+  test("停投出去、agent 正在回应「已停」；晚到的「继续」既不打断，也押到空闲", async () => {
+    fresh();
+    const [goReq, stopReq] = arrive();
+    await preemptForHuman(env("s7", "停", stopReq), CC, "agent-cc");
+    log.length = 0;
+    const go = env("g7", "继续，看这张图", goReq);
+    await preemptForHuman(go, CC, "agent-cc");
+    expect(log).toEqual([]);
+    expect(holdsUntilIdle(go.from.kind, waitsForIdle(go, CC), busy)).toBe(true);
+    expect(holdsUntilIdle(go.from.kind, waitsForIdle(go, CC), idle)).toBe(false);
+  });
+
+  test("对照：停之后才到的继续照旧不押（靠抢占）；bridge 通知照旧看 waitForIdle", async () => {
+    fresh();
+    const [stopReq, goReq, noticeReq] = [...arrive(), {}];
+    stampArrival(noticeReq);
+    await preemptForHuman(env("s8", "停", stopReq), CC, "agent-cc");
+    const go = env("g8", "继续", goReq);
+    expect(holdsUntilIdle(go.from.kind, waitsForIdle(go, CC), busy)).toBe(false);
+    const notice = env("n8", "提醒", noticeReq, { kind: "bridge" });
+    expect(waitsForIdle(notice, CC)).toBe(false);
+    notice.meta.waitForIdle = true;
+    expect(waitsForIdle(notice, CC)).toBe(true);
+  });
+
+  test("押着的这条：目标忙时 flush 不投它，空闲了才投；投出去带抬头、不发键", async () => {
+    fresh();
+    const [goReq, stopReq] = arrive();
+    await preemptForHuman(env("s9", "停", stopReq), CC, "agent-cc");
+    log.length = 0;
+    const go = env("g9", "继续", goReq);
+    const held = new HeldQueue(null);
+    const to = go.to as never;
+    held.set(CC, [{ env: go, to, heldAt: Date.now() }]);
+    go.meta.sentBeforeStop = waitsForIdle(go, CC); // deliverToLocal 判押时打上的标，跟着押后条目
+    const got: string[] = [];
+    let working = true;
+    const deps = {
+      held, compacting: () => false, working: async () => working, isHumanRequest, client: () => ({ ws: {} as never }), touch: () => undefined,
+      stopMark: (c: string) => turnCuts.stopMark(c), settled: async () => true,
+      deliver: async (e: Envelope): Promise<Delivery> => {
+        await preemptForHuman(e, CC, "agent-cc");
+        got.push(noteAtSend(e, CC, "正文", {}));
+        return { envelope: e, outcome: { kind: "sent" } };
+      },
+    };
+    await flushHeld(deps, CC, "sweep");
+    expect(got).toEqual([]);
+    expect(held.get(CC)?.length).toBe(1);
+    working = false;
+    await flushHeld(deps, CC, "stop");
+    expect(got.length).toBe(1);
+    expect(got[0]).toStartWith("[⏹ 这条是叫停之前");
+    expect(log).toEqual([]);
+    expect(held.get(CC)).toBeUndefined();
   });
 });
