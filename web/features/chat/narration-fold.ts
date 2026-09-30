@@ -4,13 +4,13 @@
  * 渲染在 components/narration-fold.tsx。单测见 tests/web-narration-fold.test.ts。
  *
  * 两层：`all` 是会话级（按 agent）的默认态，后续新到的旁白继承它，写 localStorage
- * 跨刷新保留；没按过「收起 / 展开全部」时是 null = 只收「reply 之后紧跟的那段」（agent 常把刚回复的内容
+ * 跨刷新保留；没按过「收起 / 展开全部」时是 null = 只收 reply 之后的旁白（规则见 reply-echo.ts postReplyFolds；agent 常把刚回复的内容
  * 再写一遍，语言不同时 reply-echo 认不出），其余展开。`overrides` 是单块的手动切换，只在内存里活着，
  * 「收起 / 展开全部」一按就清空——全部 = 重新对齐，不保留零星例外。
  */
 
 export interface FoldState {
-  /** 会话级默认：true = 一律收起，false = 一律展开，null = 只收 reply 之后紧跟的旁白 */
+  /** 会话级默认：true = 一律收起，false = 一律展开，null = 只收 reply 之后的旁白（reply-echo.ts postReplyFolds） */
   all: boolean | null;
   /** 单块覆盖：key → 是否收起 */
   overrides: Record<string, boolean>;
@@ -18,7 +18,7 @@ export interface FoldState {
 
 export const EMPTY_FOLD: FoldState = Object.freeze({ all: null, overrides: Object.freeze({}) }) as FoldState;
 
-/** postReply：这段旁白紧跟在 reply 之后（components/message-list.tsx 判，reply-echo.ts postReplyMessageIds） */
+/** postReply：这段旁白在 reply 之后、默认收起（components/message-list.tsx 判，reply-echo.ts postReplyFolds） */
 export function isFolded(s: FoldState, key: string, postReply = false): boolean {
   return key in s.overrides ? s.overrides[key] : (s.all ?? postReply);
 }

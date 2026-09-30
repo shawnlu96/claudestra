@@ -12,7 +12,7 @@ import { CcTaskPanel } from "./cc-task-panel";
 import { useT, getLang, tVerbatim, useLang } from "@/lib/i18n";
 import { BubbleMenu, SelectModeBar, useBubbleMenuTrigger } from "./bubble-menu";
 import { InlineActionContext } from "@/components/domd/inline-button";
-import { replyEchoMessageIds, isEchoSegment, postReplyMessageIds } from "../reply-echo";
+import { replyEchoMessageIds, isEchoSegment, postReplyFolds } from "../reply-echo";
 import { useInlineActions } from "./use-inline-actions";
 import { messagePlainText, userQuoteParts } from "../message-text";
 import { ToolGroup } from "./tool-rows";
@@ -157,8 +157,8 @@ function AssistantBody({
   m: ChatMessage;
   liveEmpty: boolean;
   streamingLast: boolean;
-  /** 整条是紧跟 reply 的旁白（reply-echo.ts postReplyMessageIds） */
-  postReply?: boolean;
+  /** 第几段之后的旁白默认收起，-1 = 整条（reply-echo.ts postReplyFolds）；不给 = 不收 */
+  postReply?: number;
 }) {
   const segs = m.segments;
   const full = messagePlainText(m); // 长按菜单的「复制整条」用；只有一段时与本段相同,菜单自动不显示
@@ -180,7 +180,7 @@ function AssistantBody({
     seg.kind === "text" && isEchoSegment(m, seg.text) ? null : seg.kind === "text" ? (
       // 只有「最后一段且回合仍在流式」在生长——其余段已封笔,立即富文本
       <TextBlock msgId={m.id} key={i} text={seg.text} ts={seg.ts ?? m.ts} streamed={m.streamed && i === segs!.length - 1} fullText={full} muted
-        foldKey={`${m.id}:${i}`} postReply={postReply || segs![i - 1]?.kind === "reply"} />
+        foldKey={`${m.id}:${i}`} postReply={(postReply !== undefined && i > postReply) || segs![i - 1]?.kind === "reply"} />
     ) : seg.kind === "reply" ? (
       // 空 reply 段不渲染（源头在 chat-store.setReplyText 拦截，这里兜历史快照里的旧空段）
       !seg.text?.trim() ? null : (
@@ -194,7 +194,7 @@ function AssistantBody({
   ) : hasNarration && !isEchoSegment(m, m.content) ? (
     <div className="relative">
       <GutterTime ts={m.ts} side="left" lead="narr" />
-      <TextBlock msgId={m.id} text={m.content} ts={m.ts} streamed={m.streamed} fullText={full} muted foldKey={`${m.id}:c`} postReply={postReply} />
+      <TextBlock msgId={m.id} text={m.content} ts={m.ts} streamed={m.streamed} fullText={full} muted foldKey={`${m.id}:c`} postReply={postReply !== undefined} />
     </div>
   ) : null;
 
@@ -222,7 +222,7 @@ function AssistantBody({
  * 消息的对象引用稳定，memo 后每事件只有正在流式的最后一个气泡重渲染。移动端
  * 列表页与会话页并排都在 DOM——会话页的重渲染风暴会卡死列表页的滚动。
  */
-export const Message = memo(function Message({ m, streaming, isLast, awaiting, postReply }: { m: ChatMessage; streaming: boolean; isLast: boolean; awaiting: boolean; postReply?: boolean }) {
+export const Message = memo(function Message({ m, streaming, isLast, awaiting, postReply }: { m: ChatMessage; streaming: boolean; isLast: boolean; awaiting: boolean; postReply?: number }) {
   devCount("bubble-render"); // 开发者面板的「气泡渲染速率」:memo 失效时这里会飙
   /** user 气泡本体 —— 长按菜单里「选择文字」要框住的范围。 */
   const bubbleRef = useRef<HTMLDivElement>(null);
@@ -610,7 +610,7 @@ export function MessageList() {
   // 形态②的复述：历史按 jsonl 记录切段，agent 复述那份会独立成一条纯 text 消息。
   // 整个列表扫一遍（不是 visible——回合边界可能在窗口之外），拿到该藏的 id。
   const echoIds = replyEchoMessageIds(messages);
-  const postReplyIds = postReplyMessageIds(messages); // 紧跟 reply 的旁白消息：默认收起
+  const postReplyIds = postReplyFolds(messages); // reply 之后的旁白：默认收起
 
   return (
     // touch-pan-y + overscroll-contain：到边界时滚动链穿透到不可滚的应用壳被
@@ -722,7 +722,7 @@ export function MessageList() {
             {share.on && <ShareMask id={m.id} order={order} />}
             {echoIds.has(m.id) ? null : (
               <BubbleBoundary id={`${m.sid ?? ""}:${m.id}`} resetKey={m}>
-                <Message m={m} streaming={streaming} isLast={i === visible.length - 1} awaiting={awaiting} postReply={postReplyIds.has(m.id)} />
+                <Message m={m} streaming={streaming} isLast={i === visible.length - 1} awaiting={awaiting} postReply={postReplyIds.get(m.id)} />
               </BubbleBoundary>
             )}
           </div>
