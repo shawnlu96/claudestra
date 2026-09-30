@@ -109,7 +109,8 @@ describe("poll / claim", () => {
     expect((await poll({ repos: ["x/y"] })).orders).toEqual([]);
     expect((await poll({ busy: { codex: 2 } })).orders).toEqual([]);
     expect((await poll({ ordersLeftToday: 0 })).orders).toEqual([]);
-    refusedWith(await poll({ roles: ["write"] }), "invalid");
+    expect((await poll({ roles: ["write"] })).orders).toEqual([]); // i28-R6：write 是合法角色，但审查单只给报了 review 的
+    refusedWith(await poll({ roles: ["admin"] }), "invalid");
   });
 
   test("claim returns the order, its text hash and a lease, binds the review step; the holder's re-claim is idempotent", async () => {
