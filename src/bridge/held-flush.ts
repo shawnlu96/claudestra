@@ -24,10 +24,7 @@ export interface FlushDeps {
   client: (channelId: string) => { ws: LocalEndpoint["ws"]; cwd?: string } | undefined;
   /** stillWanted：投递途中最后一刻再核对这条还在队里（被 kill 清理 / 放弃摘掉的就不发、不押回） */
   deliver: (env: Envelope, to: LocalEndpoint, stillWanted?: () => boolean) => Promise<Delivery>;
-  /**
-   * 这个频道在额度闸里（bridge/quota-wall.ts）：只投能穿闸的（gatesAsHuman），其余留着等出闸补投——否则每分钟扫描都投一次、再被押回来。
-   * 返回押后原因 = 在 Codex 额度墙里（bridge/codex-wall.ts），按那个原因改记；true = CC 的额度闸
-   */
+  /** 这个频道在额度闸里（bridge/quota-wall.ts；Codex 额度墙返回它的押后原因）：只投能穿闸的（gatesAsHuman），其余留着等出闸补投——否则每分钟扫描都投一次、再被押回来 */
   walled?: (channelId: string) => Promise<boolean | WallReason>;
   /** 回程簿失效钟从真正送达起算（只动这封消息发送方那一槽） */
   touch: (channelId: string, env: Envelope) => void;

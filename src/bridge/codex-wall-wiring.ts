@@ -9,9 +9,9 @@ import { readJsonStateSync, reportCorrupt, writeJsonAtomicSync } from "../lib/st
 import { agentMsgMustWait } from "../lib/turn-state.js";
 import { createCodexWall, type CodexWallRuntime } from "./codex-wall.js";
 import { subscribeEvents } from "./event-bus.js";
-import type { WallReason } from "./held-queue.js";
-import { quotaWall, type WallBridgeDeps } from "./quota-wall-wiring.js";
-import { newMessageId, newThreadId, type Envelope } from "./router.js";
+import type { HeldQueue, WallReason } from "./held-queue.js";
+import { quotaWall, startQuotaWall, type WallBridgeDeps } from "./quota-wall-wiring.js";
+import { newMessageId, newThreadId, type Delivery, type Envelope } from "./router.js";
 import { senderTrigger, turnCallers } from "./stop-settle.js";
 import { probeTurn, resolveTurnWindow } from "./turn-probe.js";
 
@@ -34,6 +34,12 @@ export async function wallHoldOf(env: Envelope, channelId: string): Promise<Wall
 export async function wallGateOf(channelId: string): Promise<boolean | WallReason> {
   if (await quotaWall()?.gates(channelId)) return true;
   return (await wall?.gates(channelId)) ? REASON : false;
+}
+
+/** 按闸押后（deliverToLocal 问过 wallHoldOf 之后）：对调用方同样是「已受理、排队中」，出闸时由那道闸的恢复流程按序补投 */
+export function holdForQuotaWall(held: HeldQueue, env: Envelope, agent: string, from: string | undefined, reason: WallReason): Delivery {
+  console.log(`⏸ 消息押后(${agent} ${reason === "quota_wall" ? "额度闸" : "Codex 额度墙"}): 来自 ${from ?? "?"},队列 ${held.holdEnv(env, reason)} 条`);
+  return { envelope: env, outcome: { kind: "sent", note: "queued", heldBy: reason } };
 }
 
 /** 回程簿 / 押后老化的暂停：Codex 墙在时，Codex agent 的回程不按 2 小时扫、它发出的押后不提醒（提醒会唤醒一个注定失败的回合） */
@@ -117,8 +123,8 @@ function onRateLimited(b: WallBridgeDeps, w: CodexWallRuntime, chatId: string, a
   })().catch((e) => console.error(`Codex 额度墙记撞墙出错（下一次 ⛔ 再记）: ${(e as Error).message}`));
 }
 
-/** bridge 启动时调一次（紧跟 startQuotaWall，同一份依赖）：起墙、接 ⛔ 事件、15 秒一拍 */
-export function startCodexWall(b: WallBridgeDeps): CodexWallRuntime {
+/** 起墙、接 ⛔ 事件、15 秒一拍 */
+function startCodexWall(b: WallBridgeDeps): CodexWallRuntime {
   const w = (wall = productionWall(b));
   subscribeEvents({}, (evt) => {
     const data = (evt.data ?? {}) as { rateLimited?: unknown; text?: unknown };
@@ -127,4 +133,10 @@ export function startCodexWall(b: WallBridgeDeps): CodexWallRuntime {
   });
   setInterval(() => void w.tick(), CODEX_WALL_TIMING.tickMs);
   return w;
+}
+
+/** bridge 启动时调一次：CC 额度闸（行为不变）+ Codex 额度墙，同一份依赖 */
+export function startWalls(b: WallBridgeDeps): void {
+  startQuotaWall(b);
+  startCodexWall(b);
 }

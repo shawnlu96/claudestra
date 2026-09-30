@@ -25,7 +25,6 @@ export interface HeldItem {
 
 /** 两道闸各押各的：CC 闸的出闸补投只动 quota_wall，Codex 墙只动 codex_quota_wall */
 export type WallReason = "quota_wall" | "codex_quota_wall";
-const isWallHeld = (i: HeldItem): boolean => i.reason === "quota_wall" || i.reason === "codex_quota_wall";
 
 /** check_inbox 领走后多久没确认就重新投递（按普通消息在回合结束时送达，message_id 不变） */
 export const INBOX_LEASE_MS = 15 * 60_000;
@@ -207,7 +206,7 @@ export function ageHeld(q: HeldQueue, now: number, paused: boolean | ((item: Hel
     const keep: HeldItem[] = [];
     let changed = false;
     for (const item of items) {
-      if (isWallHeld(item) || (paused && paused(item))) {
+      if (item.reason || (paused && paused(item))) {
         keep.push(item); // 额度闸押的不提醒、不放弃：发送方多半也撞着墙，提醒只会唤醒一个注定失败的回合
         continue;
       }
