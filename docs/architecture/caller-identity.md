@@ -64,6 +64,13 @@ Every dispatch tool travels as one frame type, `order_tool {tool, args}` (`lib/o
 
   It never moves the stage. The same verdict retried is a no-op; a different second verdict is refused.
 
+### Scheduler wake-up dispatch (i28-M4b)
+
+- **How an auto card is dispatched** is fixed before the claim (`deliveryFor` in `lib/worker-session.ts`) and written into the claim and the receipt as `delivery=wake` or `delivery=text（reason）`. Claude Code over the channel and Codex over ACP get one wake-up line naming the order id (`renderWakeLine` in `lib/worker-order.ts`); the order stays in the ledger and is pulled with `take_order` / `take_review`. A Codex tmux session and restate orders keep the full text. One intent is only ever sent one way, and a replay or reconcile never re-sends it.
+- **Pickup record**: after `take_order` / `take_review` returns a scheduler order, the bridge runs `ledger order-taken <orderId> --session` as the caller (`lib/order-mark.ts`). The CLI accepts only the intent's recipient on the ledger-bound session, and only for a sent intent. A failed record is only logged.
+- **Unclaimed alarm**: a wake-up with no pickup after 10 minutes gets one `scheduler-unclaimed` event; PM is notified only on its first write. Reconcile treats a pickup record as proof that a claimed order arrived.
+- **ACP turn failures** that the adapter says cannot be retried (policy blocks such as `cyber_policy`, bad requests, exhausted context) open a "Codex 回合失败" card (`extra.failure = error`, `bridge/acp-link.ts`). When it is tied to an order claimed before it, the scheduler hands the card to PM (`codexFailure` in `lib/scheduler-auto-ports.ts`).
+
 ## Misdelivery guard
 
 If a channel is held by a connection whose credential is still valid, a registration **without** a valid credential is refused (`rejected` + close 4002). The newcomer backs off 3s → 60s (`lib/link-policy.ts` `reconnectDelayMs`). Its counter resets only on `registered`, not on connect, so a rejected stray does not retry every 3 s. It does not treat this as being replaced, and it does not exit. `tests/caller-reject.test.ts` pins both sides. Situations this does not affect:
