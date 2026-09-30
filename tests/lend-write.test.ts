@@ -17,6 +17,7 @@ import { ensurePr, probePush, pushWork, type PushResult } from "../src/lib/lend-
 import type { LendOp } from "../src/lib/lend-remote.js";
 import { submitLendResult, submitLendWork, type SubmitterDeps } from "../src/lib/lend-submit.js";
 import type { HttpPeer } from "../src/lib/peers.js";
+import { testChildEnv } from "./test-env.ts";
 import type { BoundedResult } from "../src/lib/run-bounded.js";
 
 /** 不读本机全局 / 系统配置（CI 上没有 user.name），提交身份显式给 */
@@ -92,7 +93,7 @@ describe("写单副本与推送（真 git，lab 本地 bare 仓库）", () => {
     const dir = (c as { dir: string }).dir;
     const h = commit(dir, "b.txt");
     // worker 的 git 照常读出借人的全局配置（HOME 就是 lab 根），不隔离
-    const asWorker = { PATH: process.env.PATH, HOME: L.root, GIT_CONFIG_NOSYSTEM: "1", GIT_TERMINAL_PROMPT: "0" };
+    const asWorker = testChildEnv({ HOME: L.root, GIT_CONFIG_NOSYSTEM: "1", GIT_TERMINAL_PROMPT: "0" });
     const wGit = (...args: string[]) => Bun.spawnSync(["git", ...args], { cwd: dir, stdout: "pipe", stderr: "pipe", env: asWorker });
     expect(wGit("config", "--get", "protocol.lendtest.allow").stdout.toString().trim()).toBe("never");
     for (const target of [L.bare, `file://${L.bare}`]) {
