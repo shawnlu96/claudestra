@@ -234,20 +234,24 @@ export async function installCodexAcp(rel: AcpRelease, deps: InstallDeps = {}): 
   return { ok: true, reused: false, version: rel.version, codexRange: rel.codexRange, path: dest };
 }
 
-/** 能配 codexVersion 的最新适配器：先问 registry 并装好；registry 不通就在本地已装且完好的版本里挑 */
+/**
+ * 能配 codexVersion 的最新适配器：先问 registry 并装好；registry 不通、或最新候选下载 / 安装失败，就在本地已装、完好
+ * （verifiedVersion）且配套的版本里挑最高的——codex-update 预装过的那个就在这里，npm 之后临时下不动新包也不会留下错配。
+ */
 async function prepareFor(codexVersion: string, deps: InstallDeps, root: string): Promise<InstallResult> {
-  let remote: AcpRelease | null = null;
-  let offline = "";
+  let failure = "";
   try {
-    remote = pickAdapterFor(await fetchAcpReleases(deps.fetchMeta), codexVersion);
+    const remote = pickAdapterFor(await fetchAcpReleases(deps.fetchMeta), codexVersion);
+    const got = remote ? await installCodexAcp(remote, deps) : null;
+    if (got?.ok) return got;
+    if (got) failure = got.error;
   } catch (e) {
-    offline = `查 codex-acp 版本失败：${e instanceof Error ? e.message : e}`;
+    failure = `查 codex-acp 版本失败：${e instanceof Error ? e.message : e}`;
   }
-  if (remote) return installCodexAcp(remote, deps);
   const local = versionDirs(root).map((v) => verifiedVersion(v, root)).filter((x): x is CurrentAcp => !!x && rangeAllows(x.codexRange, codexVersion))
     .sort((a, b) => Bun.semver.order(b.version, a.version))[0];
   if (local) return { ok: true, reused: true, ...local };
-  return { ok: false, error: offline || `npm 上没有能配 codex ${codexVersion} 的 codex-acp 正式版` };
+  return { ok: false, error: failure || `npm 上没有能配 codex ${codexVersion} 的 codex-acp 正式版` };
 }
 
 export interface ReconcileDeps extends InstallDeps {

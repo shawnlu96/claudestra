@@ -277,6 +277,30 @@ describe("审查 r1 的加固", () => {
     expect(currentCodexAcp(root)).toMatchObject({ version: "2.0.1" });
   });
 
+  test("R3-2 对账时 registry 的最高候选下不动：退回本地已装、完好、配套的最高版本，不报错", async () => {
+    fresh();
+    const [ta, tb] = [a(), b()];
+    await installCodexAcp(release("2.0.0", "^0.158.0", ta), { fetch: served(ta), root });
+    await installCodexAcp(release("2.0.1", "^0.159.1", tb), { fetch: served(tb), root }); // codex-update 预装的
+    const newer = release("2.0.2", "^0.159.1", gzipSync(tar([{ name: "package/dist/index.js", body: "2.0.2" }])));
+    const vs = { "2.0.0": release("2.0.0", "^0.158.0", ta), "2.0.1": release("2.0.1", "^0.159.1", tb), "2.0.2": newer };
+    const flaky = async (u: string) => (u.endsWith("2.0.2.tgz") ? new Response("", { status: 503 }) : served(tb)());
+    const r = await reconcileCodexAcp({ codexVersion: async () => "0.159.2", fetch: flaky, fetchMeta: meta(vs), root });
+    expect(r).toMatchObject({ ok: true, version: "2.0.1", reused: true });
+    expect(currentCodexAcp(root)).toMatchObject({ version: "2.0.1" });
+  });
+
+  test("R3-2 本地配套的版本不完好（入口被改）：不拿它兜底，明确报下载失败", async () => {
+    fresh();
+    const tb = b();
+    await installCodexAcp(release("2.0.1", "^0.159.1", tb), { fetch: served(tb), root });
+    writeFileSync(entry("2.0.1"), "tampered");
+    const newer = release("2.0.2", "^0.159.1", gzipSync(tar([{ name: "package/dist/index.js", body: "2.0.2" }])));
+    const r = await reconcileCodexAcp({ codexVersion: async () => "0.159.2", fetch: async () => new Response("", { status: 503 }), fetchMeta: meta({ "2.0.2": newer }), root });
+    expect(r).toMatchObject({ ok: false, error: expect.stringContaining("HTTP 503") });
+    expect(existsSync(join(root, "current.json"))).toBe(false);
+  });
+
   test("R2-③ Codex 版本一直在变：三轮后明确报错，不切", async () => {
     fresh();
     const tgz = a();

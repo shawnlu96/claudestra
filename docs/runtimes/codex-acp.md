@@ -103,11 +103,11 @@ bridge 那头：`bridge/acp-link.ts`（宿主的帧 → watcher 推送 / 卡片 
   - **版本与回退**：`acp/current.json` 指针（tmp+rename 原子写，临时名带 pid + 随机数）决定用哪个版本；旧目录都留着，指针指回去即回退。
   - **状态只有一处判定**：`install.ts currentCodexAcp` 返回 ok / null（什么都没装）/ broken，含入口文件和 entrySha256 校验；宿主起适配器、readiness、横幅、`codex-update` 端点、doctor 都读它。broken（指针读不出、指向的版本标记 / 入口 / 哈希对不上）时一律 fail-closed：不算已装、不算配套，网页不给「更新并重启」、端点 409，宿主告警提示跑 `acp-install`。
   - **老安装**：没有指针、而且状态目录里只有 `codex-acp-2.0.0` 这一个版本目录，才认作老安装（配套 `^0.158.0`）；指针丢了而旁边还有别的版本目录就是 broken，不回退 2.0.0。老安装旁边要装新版本时，先把 2.0.0 写成显式指针，装的过程中它一直可用。
-  - **切指针只经对账**（`reconcileCodexAcp`）：按磁盘上此刻的 Codex 挑版本并装好（锁外，要联网；registry 不通就用本地已装且完好的配套版本），再在 `acp/.pointer.lock`（`lib/file-lock.ts`）里重探一次 Codex——版本没变才切，变了就按新版本重来（最多三轮，之后明确报错）。`acp-install`、readiness、`codex-update` 收尾都走它，并发时最后对账的一方看到的是最终的 Codex，所以结果一定配套或明确报错，不靠长时间持锁。
+  - **切指针只经对账**（`reconcileCodexAcp`）：按磁盘上此刻的 Codex 挑版本并装好（锁外，要联网；registry 不通、或最新候选下载 / 安装失败，就用本地已装、完好且配套的最高版本），再在 `acp/.pointer.lock`（`lib/file-lock.ts`）里重探一次 Codex——版本没变才切，变了就按新版本重来（最多三轮，之后明确报错）。`acp-install`、readiness、`codex-update` 收尾都走它，并发时最后对账的一方看到的是最终的 Codex，所以结果一定配套或明确报错，不靠长时间持锁。
   - **谁来装**：`manager acp-install` 对账到能配本机 Codex 的最新适配器；readiness（迁移 / 新建 / 重启 / 切 transport）在没装、坏了或不配本机 Codex 时也对账，对账失败而已装的完好就沿用（离线不会判成未就绪）。
 - **Codex 升级。** Claudestra 不自动升 Codex（launcher 只自动升 Claude Code）。迁移 / 新建 / 重启先用 `codex app-server --help` 探测能力，不能只信退出码：旧 CLI 会把未知子命令当提示词并以 0 退出。宿主还会核对本机 Codex 与当前适配器的配套范围；不匹配先告警。
   - 配套范围只有一份：当前适配器标记里的范围原文（`install.ts codexPairsWithAdapter`）。宿主告警、网页更新提示、`codex-update` 端点和 doctor 都读它。
-  - 网页「更新并重启」（`bridge/runtime-update.ts`）：npm latest 配当前适配器就只升 Codex；不配但 registry 上有能配它的适配器时，先把适配器装进它自己的目录（不切指针）→ `npm install -g @openai/codex@<latest>` → 成功后按磁盘上的 Codex 对账切指针 → 重启点按钮的 agent。适配器装失败 Codex 不动；Codex 装失败指针没动过，不用回滚；对账失败回 500 并说明。Codex 落盘到对账之间有很短的错配窗口，这期间别的 ACP agent 恰好重启会用上旧适配器 + 新 Codex，已知且可接受。其余在跑的 ACP agent 不动，下次重启自然用上新指针和新 Codex。
+  - 网页「更新并重启」（`bridge/runtime-update.ts`）：npm latest 配当前适配器就直接 `npm install -g @openai/codex@<latest>`；不配但 registry 上有能配它的适配器时，先把适配器装进它自己的目录（不切指针）再装 Codex。两个分支在 npm 成功后都走同一个收尾：按磁盘上的 Codex 对账切指针（那一刻仍没装过任何适配器就跳过），成功才重启点按钮的 agent。适配器装失败 Codex 不动；Codex 装失败指针没动过，不用回滚；对账失败回 500 并说明。Codex 落盘到对账之间有很短的错配窗口，这期间别的 ACP agent 恰好重启会用上旧适配器 + 新 Codex，已知且可接受。其余在跑的 ACP agent 不动，下次重启自然用上新指针和新 Codex。
   - 不配套时宿主只告警、照常起。但 restart 时如果接线程失败，会退回 tmux TUI（`manager/acp-lifecycle.ts recoverFailedAcpLaunch`，registry 改成 `transport:"tmux"` 加 `acpPending`）。所以错配真让 app-server 协议对不上时，表现可能是某次 restart 后悄悄回落到 tmux，而不是报错。doctor 显示当前适配器的版本和配套范围，「Codex 与适配器配套」报 warn，只报告，不改行为。
   - 网页横幅的规则（`lib/update-hints.ts`，registry 的适配器列表缓存 6 小时，列表请求不等网络；冷缓存那一轮先显示「等适配器」，同时触发后台刷新，下一轮轮询出按钮）：
     - npm 上的新版不在当前配套范围里、registry 上也找不到能配它的适配器：只给文字，不给「更新并重启」按钮，端点也回 409；找得到就照常给按钮；
