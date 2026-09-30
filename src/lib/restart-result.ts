@@ -14,7 +14,7 @@
 import { statSync } from "fs";
 import { isMasterAgent } from "./registry.js";
 import { projectJsonlPath } from "./jsonl-cost.js";
-import type { ReadyResult, RuntimeControl } from "./runtimes/types.js";
+import type { ManagedRuntimeAdapter, ReadyResult, RuntimeControl } from "./runtimes/types.js";
 
 export interface RestartRunOutcome {
   /** 进程退出码是否为 0 */
@@ -65,6 +65,21 @@ export function restartFailureReason(r: RestartRunOutcome): string | null {
 export function restartExceptionResult(name: string, e: unknown): { name: string; ok: false; error: string } {
   const msg = e instanceof Error ? e.message : String(e);
   return { name, ok: false, error: `重启异常: ${msg || "未知错误"}` };
+}
+
+export const NO_SESSION_NOTE = "这个 agent 还没有会话，按新会话启动";
+
+/**
+ * restart 续旧会话还是新起。create 预先定了 session id，但 CC 要到第一条消息才落 jsonl：
+ * 从没对话过的 agent 带 --resume 必报「No conversation found」退出。适配器说没落盘就用
+ * 同一个 id 新起（registry 不用改）；不实现 hasSession 的运行时一律照旧 resume。
+ */
+export function restartLaunchMode(
+  adapter: Pick<ManagedRuntimeAdapter, "hasSession">,
+  sessionId: string,
+  cwd?: string,
+): "resume" | "new" {
+  return adapter.hasSession && !adapter.hasSession(sessionId, cwd) ? "new" : "resume";
 }
 
 /** restart 结果里失败的 agent 名（「完成」消息只能列成功项，失败项要单独报）。 */

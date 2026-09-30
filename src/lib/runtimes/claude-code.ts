@@ -5,7 +5,7 @@
  * 生命周期部分：原来在 manager.ts 里抄了三份的就绪轮询（create / resume /
  * startClaudeInWindow）、gracefulExit 的收尾弹窗、fork 后的会话 id 探测，都收在这里。
  */
-import { existsSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
 import { readdir, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, join } from "node:path";
@@ -13,13 +13,14 @@ import { resolveSessionIdForWindow } from "../cc-sessions.js";
 import { buildClaudeCommand, type LaunchOptions } from "../claude-launch.js";
 import { findJsonlBySessionId, projectJsonlPath, projectsDir } from "../jsonl-cost.js";
 import {
-  acceptTrustPrompt,
   detectSessionIdlePrompt,
+  isAtShell,
   isClaudeReady,
   probeTuiContract,
   trustPromptMoves,
 } from "../tmux-helper.js";
 import { isAutoConfirmableModal } from "../modal-confirm.js";
+import { belowTrustLeftover, trustPromptKey, trustRefusal } from "../trust-prompt.js";
 import { lastUserTextOf } from "./shared.js";
 import { roleLaunch } from "../team-roles.js";
 import type {
@@ -31,6 +32,16 @@ import type {
   RuntimeControl,
   WindowOps,
 } from "./types.js";
+
+/** 信任弹窗显示的是真实路径（/tmp → /private/tmp）；目录不在就按原样比 */
+function realPath(p: string | undefined): string | undefined {
+  if (!p) return undefined;
+  try {
+    return realpathSync(p);
+  } catch {
+    return p; // 目录没了照原样返回：trustRefusal 比不上就拒绝，不会多信任
+  }
+}
 
 export function claudeProjectsRoot(home: string = homedir()): string {
   return join(home, ".claude", "projects");
@@ -223,6 +234,7 @@ export const claudeCodeAdapter: ManagedRuntimeAdapter = {
 
   async waitReady(win: WindowOps, budget): Promise<ReadyResult> {
     let sessionIdlePicked = false;
+    let trustSeen = false;
     for (let i = 0; i < budget.rounds; i++) {
       await win.sleep(budget.pollMs);
       const pane = await win.capture(10);
@@ -244,12 +256,20 @@ export const claudeCodeAdapter: ManagedRuntimeAdapter = {
         continue;
       }
 
-      // 目录信任弹窗默认高亮 No, exit，不能直接 Enter：选 Yes 再继续
+      // 目录信任弹窗默认高亮 No, exit：一轮只发一个键，高亮停在 Yes 才回车（lib/trust-prompt.ts）
       const trustMoves = trustPromptMoves(pane);
       if (trustMoves !== null) {
-        await acceptTrustPrompt(win.target, trustMoves);
-        await win.sleep(1000);
+        trustSeen = true;
+        const refusal = trustRefusal(await win.capture(40), realPath(budget.cwd), realPath(homedir())!);
+        if (refusal) return { ready: false, reason: "blocked-dialog", detail: refusal, recoveredFullSession: false };
+        await win.sendKey(trustPromptKey(trustMoves));
+        await win.sleep(trustMoves === 0 ? 1000 : 300);
         continue;
+      }
+      // 弹窗残影下面接了 shell 提示符 = CC 在弹窗上退出了（选了 No），别再等满预算
+      const below = trustSeen ? belowTrustLeftover(pane) : null;
+      if (below !== null && isAtShell(below)) {
+        return { ready: false, reason: "exited", detail: "目录信任弹窗之后 Claude Code 退出了", recoveredFullSession: false };
       }
       if (isAutoConfirmableModal(pane)) {
         await win.sendKey("Enter");
@@ -272,8 +292,8 @@ export const claudeCodeAdapter: ManagedRuntimeAdapter = {
     }
     const trustMoves = trustPromptMoves(pane);
     if (trustMoves !== null) {
-      await acceptTrustPrompt(win.target, trustMoves);
-      await win.sleep(1000);
+      await win.sendKey(trustPromptKey(trustMoves));
+      await win.sleep(trustMoves === 0 ? 1000 : 300);
       return "handled";
     }
     if (isAutoConfirmableModal(pane)) {
@@ -289,6 +309,10 @@ export const claudeCodeAdapter: ManagedRuntimeAdapter = {
     }
     return "none";
   },
+
+  // CC 到第一条消息才写 jsonl；projectJsonlPath 找不到时返回推算路径，所以还要再核一次存在
+  hasSession: (sessionId, cwd) =>
+    cwd ? existsSync(projectJsonlPath(cwd, sessionId)) : findJsonlBySessionId(sessionId) !== null,
 
   forkBaseline: (cwd) => listSessionJsonls(cwd),
 

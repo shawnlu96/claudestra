@@ -127,7 +127,7 @@ import { abandonCreate, beginCreate, commitCreate, gateOps, guardCreateSignals, 
 import { notify } from "./lib/notify.js";
 import { writeJsonAtomic } from "./lib/state-file.js";
 import { stderrTail } from "./lib/run-manager.js";
-import { readyFailureText, modelPinPlan, modelPinRefusal, restartExceptionResult, bigSessionNote } from "./lib/restart-result.js";
+import { readyFailureText, modelPinPlan, modelPinRefusal, restartExceptionResult, bigSessionNote, restartLaunchMode, NO_SESSION_NOTE } from "./lib/restart-result.js";
 
 /**
  * 通知 bridge 重新扫 skill 并重新注册 Discord slash commands。
@@ -718,7 +718,7 @@ async function launchInWindow(
   const fresh = spec.mode === "new" || !(await loadRegistry()).agents[tmuxName]; // 全新 agent 不带同名旧 agent 的设置（旧文件等 registry 落盘后再删）
   const unsent = await win.sendLine(adapter.buildLaunchCommand({ ...spec, ...(fresh ? {} : { settingsName: tmuxName }) })).then(() => null, (e: Error) => e.message);
   if (unsent) return { result: { ready: false, reason: "exited", detail: `启动命令没发出去：${unsent}`, recoveredFullSession: false } };
-  const result = await adapter.waitReady(win, { rounds: CLAUDE_READY_ROUNDS, pollMs: 500 });
+  const result = await adapter.waitReady(win, { rounds: CLAUDE_READY_ROUNDS, pollMs: 500, cwd: spec.cwd ?? opts.cwd });
   if (result.ready) (await import("./lib/agent-settings.js")).dropLaunchSettings(tmuxName); // 超长设置落的启动快照：就绪 = CC 已读过
   return { result, baseline };
 }
@@ -1342,7 +1342,7 @@ async function cmdRestart(name?: string, opts: { includeMaster?: boolean } = {})
     const purposeForInject =
       info.purpose && !info.purpose.startsWith("resumed:") ? info.purpose : undefined;
     const spec: LaunchSpec = {
-      mode: "resume",
+      mode: restartLaunchMode(adapter, info.sessionId, info.cwd), settingsName: tmuxName, // 没对话过 = 没落盘则新起；new 时 launchInWindow 不代填设置名
       channelId: info.channelId,
       bridgeUrl: BRIDGE_URL,
       sessionId: info.sessionId,
@@ -1427,7 +1427,7 @@ async function cmdRestart(name?: string, opts: { includeMaster?: boolean } = {})
       name: tmuxName,
       ok: started.ready,
       error: timeoutErr,
-      recreated: recreated || undefined,
+      recreated: recreated || undefined, ...(spec.mode === "new" ? { note: NO_SESSION_NOTE } : {}),
     });
 
     // v2.0.23+: 自动恢复了完整会话 → 给该 agent 频道发一条正面"已恢复"信号，

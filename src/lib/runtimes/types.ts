@@ -271,9 +271,12 @@ export interface ManagedRuntimeAdapter extends SessionSourceAdapter {
   buildLaunchCommand(spec: LaunchSpec): string;
   /** 发启动命令之前（复用窗口时清掉上一轮的就绪标记） */
   beforeLaunch?(win: WindowOps): Promise<void>;
-  waitReady(win: WindowOps, budget: { rounds: number; pollMs: number }): Promise<ReadyResult>;
+  /** budget.cwd = 这次启动的工作目录（CC 据此判断信任弹窗能不能替人点） */
+  waitReady(win: WindowOps, budget: { rounds: number; pollMs: number; cwd?: string }): Promise<ReadyResult>;
   /** 退出指令发出后，每轮看一眼屏幕，处理这个运行时自己的收尾弹窗 */
   onExitPane?(pane: string, win: WindowOps): Promise<"handled" | "none">;
+  /** 会话落过盘没有（restart 用：没落盘的 resume 必败，改用同 id 新起）。不实现 = 一律当有 */
+  hasSession?(sessionId: string, cwd?: string): boolean;
   /** fork 启动前拍快照（给 discoverSessionId 做 diff 兜底） */
   forkBaseline?(cwd: string): Promise<unknown>;
   /** fork / 轮转后探测窗口里真实的会话 id。不实现 = 这个运行时不需要（会话 id 自报） */

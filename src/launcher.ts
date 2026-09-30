@@ -30,7 +30,7 @@ import {
   tmuxCapture,
   tmuxSendLine,
   trustPromptMoves,
-  acceptTrustPrompt,
+  stepTrustPrompt,
   detectSessionIdlePrompt,
   CC_MODE_BANNER_RE,
   clearShellInitPrompts,
@@ -56,7 +56,7 @@ function masterShouldAutoConfirm(pane: string): boolean {
 async function confirmMasterModal(pane: string): Promise<void> {
   const trustMoves = trustPromptMoves(pane);
   if (trustMoves !== null) {
-    await acceptTrustPrompt(MASTER_WINDOW, trustMoves);
+    await stepTrustPrompt(MASTER_WINDOW, trustMoves); // 一轮一个键，下一轮重看高亮（lib/trust-prompt.ts）
     return;
   }
   if (detectSessionIdlePrompt(pane)) {

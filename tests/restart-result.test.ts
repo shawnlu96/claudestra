@@ -11,8 +11,11 @@ import { describe, test, expect } from "bun:test";
 import {
   restartFailureReason, restartFailedNames, parseManagerList, canaryPlan,
   tempAgentCleanupFailure, restartExceptionResult, readyFailureText, modelPinPlan, modelPinRefusal,
+  restartLaunchMode,
 } from "../src/lib/restart-result.js";
 import { managedFor } from "../src/lib/runtimes/index.js";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 
 describe("restartFailedNames（D7-5：全量重启退出码 0 但部分失败）", () => {
   test("列出失败项的名字；退出码 0 也不能当成功", () => {
@@ -197,5 +200,33 @@ describe("modelPinPlan / modelPinRefusal（model 命令只钉 in-session 运行�
   test("单设被拒时的说明", () => {
     expect(modelPinRefusal("codex", "launch-flag")).toContain('runtime "codex"');
     expect(modelPinRefusal(undefined, undefined)).toContain('runtime "claude-code"');
+  });
+});
+
+describe("restartLaunchMode：从没对话过的 agent 不带 --resume", () => {
+  const SID = "541b5edb-82ef-43b3-93b7-1cf71dfde4f1";
+  test("会话落过盘 → resume；没落盘 → 同一个 id 新起", () => {
+    expect(restartLaunchMode({ hasSession: () => true }, SID, "/w")).toBe("resume");
+    expect(restartLaunchMode({ hasSession: () => false }, SID, "/w")).toBe("new");
+  });
+  test("运行时不实现 hasSession（Pi / Codex）→ 照旧 resume", () => {
+    expect(restartLaunchMode({}, SID, "/w")).toBe("resume");
+    expect(restartLaunchMode(managedFor("pi")!, SID, "/w")).toBe("resume");
+  });
+  test("CC 适配器按 jsonl 在不在判", () => {
+    const cc = managedFor("claude-code")!;
+    const home = process.env.HOME;
+    const tmp = mkdtempSync(`${tmpdir()}/t44-`);
+    process.env.HOME = tmp;
+    try {
+      expect(restartLaunchMode(cc, SID, "/w/repo")).toBe("new");
+      const dir = `${tmp}/.claude/projects/-w-repo`;
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(`${dir}/${SID}.jsonl`, "{}\n");
+      expect(restartLaunchMode(cc, SID, "/w/repo")).toBe("resume");
+      expect(restartLaunchMode(cc, SID, undefined)).toBe("resume"); // 没 cwd：按 id 全库找
+    } finally {
+      process.env.HOME = home;
+    }
   });
 });
