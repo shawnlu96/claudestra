@@ -8,6 +8,7 @@ import type { Database } from "bun:sqlite";
 import type { EventKind } from "./ledger-stages.js";
 import { answerGroups, matchWire, type AskRow } from "./ask-options.js";
 import { busyAsLedgerError, LedgerError } from "./ledger-store.js";
+import { ORIGIN_VALUES, originArgs } from "./ledger-origin.js";
 
 /** assigned = 指派给某个人的事项（T28 的 human 节点）：assignee 本人或 owner 作答，作答不回投任何 agent */
 export type AskKind = "decide" | "authorize" | "owner_action" | "accept" | "assigned";
@@ -146,8 +147,8 @@ function tx<T>(db: Database, fn: () => T): T {
 }
 
 function addEvent(db: Database, a: Ask, kind: EventKind, actor: string, text: string, data: Record<string, unknown>, now: number): void {
-  db.prepare("INSERT INTO events (ts, actor, project, target, kind, text, data) VALUES (?, ?, ?, ?, ?, ?, ?)")
-    .run(now, actor, a.project, a.taskId ?? "", kind, text, JSON.stringify({ askId: a.id, ...data }));
+  db.prepare(`INSERT INTO events (ts, actor, project, target, kind, text, data, origin, originSeq) VALUES (?, ?, ?, ?, ?, ?, ?, ${ORIGIN_VALUES})`)
+    .run(now, actor, a.project, a.taskId ?? "", kind, text, JSON.stringify({ askId: a.id, ...data }), ...originArgs(db));
 }
 
 function newAskId(): string {

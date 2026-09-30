@@ -27,7 +27,7 @@ export type ItemStatus = (typeof ITEM_STATUSES)[number];
  */
 const EVENT_KINDS = [
   "stage", "item", "task", "meta", "dep", "note", "deliver", "review", "decision", "deploy", "verify", "rollback", "freeze", "unfreeze",
-  "ask", "ask_expire", "ask_cancel", "ask_reopen", "assign_reopen", "dispatch", "escalate", "step", "accept", "scheduler",
+  "ask", "ask_expire", "ask_cancel", "ask_reopen", "assign_reopen", "dispatch", "escalate", "step", "accept", "scheduler", "feature",
 ] as const;
 export type EventKind = (typeof EVENT_KINDS)[number];
 
@@ -87,6 +87,8 @@ export interface LedgerTask {
   extra: Record<string, unknown>;
   createdAt: number;
   updatedAt: number;
+  /** 所属 feature（dag-init 时写入，lib/ledger-feature-write.ts）；老库读出来没有这一列 */
+  featureId?: string | null;
 }
 
 export interface LedgerEvent {
@@ -94,12 +96,15 @@ export interface LedgerEvent {
   ts: number;
   actor: string;
   project: string;
-  /** 任务 id / 事项 id / "" = 项目级 */
+  /** 任务 id / 事项 id / feature id / "" = 项目级 */
   target: string;
   kind: EventKind;
   text: string;
   data: Record<string, unknown>;
   dedupKey: string | null;
+  /** 写入方的本机前缀与该前缀下的单调序号（lib/ledger-origin.ts）；老事件、老代码写的为 null / 不存在 */
+  origin?: string | null;
+  originSeq?: number | null;
 }
 
 export const TERMINAL_STAGES: readonly Stage[] = ["done", "cancelled"];

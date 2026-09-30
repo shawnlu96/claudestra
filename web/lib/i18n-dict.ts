@@ -477,6 +477,7 @@ export const DICT: Record<string, string> = {
   "认不出调用方的身份：改项目目录要找 PM 或 owner（网页 / master）": "Caller identity not recognized: ask a PM or the owner (web / master) to change project directories",
   "{actor} 不是项目 {projects} 的 PM，不能改项目目录：改项目目录要找 PM 或 owner（网页 / master）":
     "{actor} isn’t a PM of project {projects} and can’t change its directories: ask a PM or the owner (web / master)",
+  "{actor} 不能{what}：只有 owner（网页 / 终端）或 master 能改": "{actor} can’t {what}: only the owner (web / terminal) or master can",
   "工作目录(一行一个,可多仓)": "Working directories (one per line, several repos OK)",
   "项目说明(可选,会注入新建 agent 的上下文)": "Project description (optional, added to new agents' context)",
   "至少要一个工作目录": "At least one working directory is required",

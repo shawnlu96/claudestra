@@ -10,6 +10,7 @@ import { resolveBridgeUrl } from "./bridge-url.js";
 import { bridgePortOf } from "./bridge-port.js";
 import { isSandbox } from "./sandbox.js";
 import { sandboxLaunchArgs } from "./sandbox-env.js";
+import { ccCallerCredArgs } from "./caller-cred-launch.js";
 import { launchSettingsFor, settingsLaunchArgs } from "./agent-settings.js";
 import { resolveBunPath } from "./bun-path.js";
 import { SRC_DIR } from "./repo-root.js";
@@ -107,14 +108,8 @@ export const DEFAULT_PRESET = "default";
 //
 // disallowedTools 黑名单与 permission-mode 正交，两者叠加：黑名单永远是硬拦截。
 //
-// 历史模式 "auto"（v2.1.0 - v2.4.10 期间是默认）已彻底 deprecated，所有路径都
-// 归一到 bypassPermissions。原因：classifier 模型过载会全 deny、误判 reply 是
-// "擅自向外发布"、每装一个 MCP server 都得 install-cli 加 allow 规则、每次 tool
-// call 加几百 ms。disallowedTools 黑名单已经把真危险命令兜住。详见 v2.4.11/13。
-
-// v2.4.13+ "auto" 从 KNOWN 列表里拿掉了（仍接受作为输入，但会被归一到
-// bypassPermissions，见 buildClaudeCommand / cmdCreate / cmdResume 里的兜底）。
-// 显式删除是为了 `--help` / 错误提示不再把 auto 当合法选项推给用户。
+// "auto" 不在列表里：仍接受作为输入，但一律归一到 bypassPermissions（buildClaudeCommand / cmdCreate / cmdResume
+// 都兜），不列出来是为了 `--help` / 错误提示不把它当合法选项推给用户。弃用原因见 `git log -S '"auto"'`。
 export const PERMISSION_MODES = [
   "default",
   "acceptEdits",
@@ -285,6 +280,7 @@ export interface LaunchOptions {
    */
   projectContext?: string;
   role?: import("./team-roles.js").RoleLaunch; // 编排班子角色落盘后的文件，roleFlags 拼成 --agents / --agent / --append-system-prompt-file
+  callerCredFile?: string; // T85 启动凭据的一次性文件（lib/caller-cred-launch.ts）；命令行里只出现路径
 }
 
 /** POSIX 单引号 shell 转义（pi-launch.ts 复用同一套，保证两侧注入的 env 语义一致） */
@@ -333,8 +329,10 @@ export function buildClaudeCommand(opts: LaunchOptions): string {
 
   const parts: string[] = ["claude", "--dangerously-load-development-channels", `server:${MCP_NAME}`];
   const own = launchSettingsFor(opts.settingsAgent); // agent 设置（lib/agent-settings.ts），内联传（超长落快照）；沙箱与沙箱覆盖合成一份，只传一次 --settings
-  if (isSandbox()) parts.push(...sandboxLaunchArgs(MCP_NAME, resolveBunPath(), SRC_DIR, own, opts.settingsAgent).map(shellEscape));
+  const cred = opts.callerCredFile; // 有它就由它带 channel-server 的配置，沙箱那份不再重复给
+  if (isSandbox()) parts.push(...sandboxLaunchArgs(MCP_NAME, resolveBunPath(), SRC_DIR, own, opts.settingsAgent, !cred).map(shellEscape));
   else parts.push(...settingsLaunchArgs(own, opts.settingsAgent).map(shellEscape));
+  parts.push(...ccCallerCredArgs(cred, MCP_NAME).map(shellEscape));
 
   // bypassPermissions 走经过验证的 --dangerously-skip-permissions（语义相同，且它
   // 还顺带跳过 workspace trust dialog）；其余模式走 --permission-mode <mode>。
