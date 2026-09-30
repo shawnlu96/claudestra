@@ -215,7 +215,7 @@ async function cmdUp(o: Opts, layout: SandboxLayout): Promise<void> {
     `   根目录 ${layout.root}（状态 state/、tmux 与截图 run/、日志 bridge.log；agent 只能建在这下面）`,
     `   建 agent：${self} manager create sbx-a ${layout.workDir} "测试用"`,
     `   发 token：${self} manager token-add dev --agents '*' --force`,
-    `   停掉：${self} down；连目录一起删：${self} clean`,
+    `   停掉：${o.lab ? self.replace(" --as b", "") : self} down；连目录一起删：… clean${o.lab ? "（lab 的 down / clean 管全部实例与 lab 中继）" : ""}`,
   ].join("\n"));
 }
 

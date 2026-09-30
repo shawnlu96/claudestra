@@ -7,10 +7,11 @@ import { chmodSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import {
-  assertSandboxRuntime, canonicalPath, enforceSandboxBridgeEnv, enforceSandboxProcess, isSandbox, outboundAllowed, sandboxAgentDirProblem,
+  assertSandboxRuntime, canonicalPath, enforceSandboxBridgeEnv, enforceSandboxProcess, isSandbox, sandboxAgentDirProblem,
   sandboxBridgeEnvProblems, sandboxBridgeUrlProblem, sandboxDirProblems, sandboxStaticDirProblem, sandboxRootOf, SANDBOX_MARKER,
   normalizeSandboxAgentDir, refuseSandboxDirInProduction,
 } from "../src/lib/sandbox.js";
+import { outboundAllowed } from "../src/lib/sandbox-outbound.js";
 import { assertResumable, assertSandboxSession } from "../src/lib/sandbox-sessions.js";
 import { cliWrapperScript } from "../src/lib/cli-install.js";
 import { runCodex } from "../src/lib/codex.js";

@@ -14,7 +14,7 @@ import { generateKeyPairSync, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import http2 from "node:http2";
 import { join } from "node:path";
-import { isLab, LAB_FLAG, LAB_PUSH_PORT_ENV, LAB_RELAY_PORT_ENV, LAB_ROOT_ENV } from "../src/lib/sandbox-lab.js";
+import { isLab, LAB_APNS_PORT_ENV, LAB_FLAG, LAB_PUSH_PORT_ENV, LAB_RELAY_PORT_ENV, LAB_ROOT_ENV } from "../src/lib/sandbox-lab.js";
 import { loadOrCreateVapidKeys } from "../src/lib/web-push.js";
 import { createRelay } from "../src/relay/server.js";
 import { decryptWebPush, selfSignedCert, type WebPushBrowserKeys } from "./lab-push-fakes.ts";
@@ -23,8 +23,6 @@ import { decryptWebPush, selfSignedCert, type WebPushBrowserKeys } from "./lab-p
 export const LAB_RELAY_BASE = "lab.localhost";
 export const LAB_APNS_TOPIC = "cc.claudestra.lab";
 const WEBPUSH_PREFIX = "/wp/";
-/** 假 APNs 端口：只有 lab 中继进程用（bridge 不连它，不进 lib/sandbox-lab.ts 的放行名单） */
-export const LAB_APNS_PORT_ENV = "CLAUDESTRA_LAB_APNS_PORT";
 
 /** lab 目录下的文件位置（scripts/sandbox-lab.ts 也用：订阅时写浏览器私钥、实测时读落盘的推送） */
 export function labFiles(labRoot: string) {

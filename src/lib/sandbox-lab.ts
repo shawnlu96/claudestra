@@ -13,9 +13,10 @@ export const LAB_FLAG = "CLAUDESTRA_SANDBOX_LAB";
 /** lab 目录：下面是各实例的沙箱根（a/ b/）与 lab 自己的中继 / 假推送数据（lab/） */
 export const LAB_ROOT_ENV = "CLAUDESTRA_LAB_ROOT";
 export const LAB_RELAY_PORT_ENV = "CLAUDESTRA_LAB_RELAY_PORT";
-/** 假推送端点：只有 lab 中继会连它，bridge 不直连（所以它不在 LAB_PORTS 里） */
+/** 假推送端点：Web Push（HTTP/1.1）与假 APNs（h2）各一个端口，只有 lab 中继进程连它们（scripts/sandbox-lab-relay.ts） */
 export const LAB_PUSH_PORT_ENV = "CLAUDESTRA_LAB_PUSH_PORT";
-/** lab 里 bridge 类进程可以连的全部端口：各实例的 bridge 与 peer 入口、lab 中继 */
+export const LAB_APNS_PORT_ENV = "CLAUDESTRA_LAB_APNS_PORT";
+/** lab 的实例端口：各实例的 bridge 与 peer 入口、lab 中继（peer 地址只认实例端口，见 readLabInstances） */
 export const LAB_PORTS_ENV = "CLAUDESTRA_LAB_PORTS";
 /** lab 目录里的标记文件（scripts/sandbox-lab.ts 建），down / clean 靠它认目录 */
 export const LAB_MARKER = ".claudestra-lab";
@@ -51,10 +52,22 @@ function canonical(p: string): string {
   }
 }
 
-/** lab 里出站可以连的端口（bridge 类进程的出站闸门放行名单的 lab 部分）；非 lab 为空 */
+/** lab 的实例端口（bridge、peer 入口、lab 中继）；非 lab 为空 */
+export function labInstancePortsOf(env: Env): number[] {
+  return isLab(env) ? labInstancePorts(env) : [];
+}
+
+function labInstancePorts(env: Env): number[] {
+  return (env[LAB_PORTS_ENV] || "").split(",").map((s) => port(s)).filter((n): n is number => n !== null);
+}
+
+/**
+ * lab 里出站可以连的端口（出站闸门放行名单的 lab 部分）：实例端口 + 假推送的两个端口。假推送端点是 lab 自己起的替身，
+ * 谁连都无害；lab 中继进程与 bridge 共用这份名单（中继也在沙箱环境里跑）。非 lab 为空
+ */
 export function labOutboundPorts(env: Env): number[] {
   if (!isLab(env)) return [];
-  return (env[LAB_PORTS_ENV] || "").split(",").map((s) => port(s)).filter((n): n is number => n !== null);
+  return [...labInstancePorts(env), ...[port(env[LAB_PUSH_PORT_ENV]), port(env[LAB_APNS_PORT_ENV])].filter((n): n is number => n !== null)];
 }
 
 /** lab 中继的唯一合法地址 */
@@ -65,7 +78,7 @@ export function labRelayUrl(env: Env): string | null {
 
 /**
  * lab 配置自洽：lab 目录是绝对路径、本实例的沙箱根就在它下面一层；各端口合法、互不重复、都不是生产端口；
- * 中继端口在放行名单里，假推送端口不在（bridge 不直连它）。沙箱进程加载时经 lib/sandbox.ts 调。
+ * 中继端口在实例端口名单里。沙箱进程加载时经 lib/sandbox.ts 调。
  * bridgePort 是这个进程连的 bridge 地址的端口，不要求在名单里：ACP 宿主给 channel-server 的是它自己的回环代理端口
  * （lib/acp/adapter-proc.ts）；这个端口是不是生产端口由 sandboxBridgeUrlProblem 另查。
  */
@@ -77,13 +90,13 @@ export function labConfigProblems(env: Env, bridgePort: number, denyPorts: numbe
   const sbx = (env.CLAUDESTRA_SANDBOX_ROOT || "").trim();
   if (root && sbx && canonical(dirname(resolve(sbx))) !== canonical(root)) out.push(`沙箱根 ${sbx} 不在 lab 目录 ${root} 下一层`);
   const relay = port(env[LAB_RELAY_PORT_ENV]);
-  const push = port(env[LAB_PUSH_PORT_ENV]);
+  const push = [port(env[LAB_PUSH_PORT_ENV]), port(env[LAB_APNS_PORT_ENV])];
   if (!relay) out.push(`${LAB_RELAY_PORT_ENV} 没设或不合法`);
-  if (!push) out.push(`${LAB_PUSH_PORT_ENV} 没设或不合法`);
+  if (push.some((p) => p === null)) out.push(`${LAB_PUSH_PORT_ENV} / ${LAB_APNS_PORT_ENV} 没设或不合法`);
   const raw = (env[LAB_PORTS_ENV] || "").split(",").map((s) => s.trim()).filter(Boolean);
   const ports = raw.map((s) => port(s));
   if (!raw.length || ports.some((p) => p === null)) out.push(`${LAB_PORTS_ENV} 没设或有不合法的端口`);
-  const all = [...ports.filter((p): p is number => p !== null), ...(push ? [push] : [])];
+  const all = [...ports, ...push].filter((p): p is number => p !== null);
   if (new Set(all).size !== all.length) out.push(`lab 端口有重复（${all.join(", ")}）`);
   const prod = all.filter((p) => denyPorts.includes(p));
   if (prod.length) out.push(`lab 端口 ${prod.join(", ")} 是生产端口`);

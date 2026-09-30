@@ -18,7 +18,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSyn
 import { createHash } from "crypto";
 import { join, resolve } from "path";
 import { DEFAULT_BRIDGE_PORT } from "../src/lib/bridge-url.js";
-import { OUTBOUND_BLOCKED_MARK } from "../src/lib/sandbox.js";
+import { OUTBOUND_BLOCKED_MARK } from "../src/lib/sandbox-outbound.js";
 import { fakeClaudeSource } from "./sandbox-fake-claude.js";
 import { testChildEnv } from "./test-env.ts";
 

@@ -1,6 +1,6 @@
 # Dev sandbox: an isolated bridge for live testing
 
-A second Claudestra on the same machine that cannot touch the production one: its own state, tmux server, port and identity, no Discord, no relay, no push, no peers, no launchd. Built for executors who need to verify a change against a real bridge + real Claude Code agents while production keeps running. It is a developer tool, not a user feature. Code: `src/lib/sandbox.ts` (runtime gates), `src/lib/sandbox-env.ts` (launcher side), `src/bridge/sandbox-routes.ts`, `scripts/sandbox.ts`; proof: `tests/sandbox-isolation.test.ts`.
+A second Claudestra on the same machine that cannot touch the production one: its own state, tmux server, port and identity, no Discord, no relay, no push, no peers, no launchd (lab mode adds a loopback relay, peers between lab instances and a fake push sink — see [Lab mode](#lab-mode)). Built for executors who need to verify a change against a real bridge + real Claude Code agents while production keeps running. It is a developer tool, not a user feature. Code: `src/lib/sandbox.ts` (runtime gates), `src/lib/sandbox-env.ts` (launcher side), `src/bridge/sandbox-routes.ts`, `scripts/sandbox.ts`; proof: `tests/sandbox-isolation.test.ts`.
 
 ## Use it
 
@@ -26,7 +26,7 @@ Everything keys off `CLAUDESTRA_SANDBOX=1` (`0` or unset = off; any other value 
 1. **Clean environment.** `scripts/sandbox.ts` never inherits the caller's environment: it builds one from a short allowlist (`PATH HOME USER LANG TERM TMPDIR` + proxy settings) and sets the sandbox keys. This matters because an executor's own shell carries `BRIDGE_URL=<production>`, `DISCORD_CHANNEL_ID`, `MCP_NAME` — inherited, they would wire sandbox agents to the production bridge. Every process the script or the sandbox bridge starts (bridge, manager, channel-server) runs with `bun --no-env-file`, and in sandbox mode `repoEnvVar` ignores the repo `.env`, so starting from the main tree cannot pick up its relay / push / port config. Claude Code's own global hooks are started without that flag; they only read keys the launch prefix sets explicitly (an explicit env var always wins over `.env`).
 2. **Production deny list.** Before creating anything, the script reads production's real config — the `com.claudestra.bridge` launchd plist (environment + working dir) and the `.env` of that repo and of this checkout's main worktree — and refuses ports and dirs that production uses, defaults included (e.g. a production bridge moved to `13847`, the peer-ingress port, a relocated state dir). The list is passed to every sandbox process (`CLAUDESTRA_SANDBOX_DENY_PORTS` / `_DENY_DIRS`), so the checks below use it too.
 3. **Fail-closed on load.** `lib/paths.ts` refuses to load unless `CLAUDESTRA_STATE_DIR` and `CLAUDESTRA_RUNTIME_DIR` are set and overlap no production dir (symlinks resolved, so `/private/tmp/claude-orchestrator` counts), and unless `BRIDGE_PORT` agrees with `BRIDGE_URL`. `lib/bridge-url.ts` refuses a non-loopback or production-port bridge address — so a hook or channel-server that lost its `BRIDGE_URL` errors out instead of reaching production. `launcher.ts`, `cron.ts` and `setup.ts` refuse to run at all. `bridge/config.ts` refuses to start with `DISCORD_BOT_TOKEN`, `RELAY_URL`, peer-ingress / legacy-web ports, `APNS_*`, `BRIDGE_CONTROL_TOKEN` or a non-loopback `BRIDGE_BIND`.
-4. **Outbound gate.** Every sandbox process wraps `fetch` and `WebSocket`: only its own bridge port on loopback is allowed; anything else is rejected and logged with `🧱 sandbox-outbound-blocked`. Features are also switched off at the source (below), so the gate is a backstop, not the mechanism.
+4. **Outbound gate.** Every sandbox process wraps `fetch`, `WebSocket`, `node:http`/`node:https` `request`/`get` and `node:http2` `connect` (`lib/sandbox-outbound.ts`; web-push and APNs use the node clients): only its own bridge port on loopback is allowed (lab mode adds the lab ports); anything else is rejected and logged with `🧱 sandbox-outbound-blocked`. Features are also switched off at the source (below), so the gate is a backstop, not the mechanism.
 5. **Agents.** The launch prefix carries the sandbox keys (flag, dirs, root, deny list), so each agent's hooks, statusLine and channel-server talk to the sandbox bridge and write sandbox paths. The global Claude Code config points at the **main tree's** code, which may be older than your checkout, so sandbox agents override the pieces that write state with this checkout's copies:
    - `--mcp-config` → this checkout's `channel-server.ts` (the global `claude mcp add` registration would not test your branch), plus `--strict-mcp-config`, so the user's other MCP servers (mem0 etc.) are not loaded;
    - `--settings` → this checkout's `scripts/statusline-usage.sh` as the statusLine; its usage cache honours `CLAUDESTRA_STATE_DIR` like `lib/paths.ts` does. Without the override, a main tree from before that fix would write the production `usage-cache.json` on every status-bar refresh.
@@ -42,9 +42,9 @@ Everything keys off `CLAUDESTRA_SANDBOX=1` (`0` or unset = off; any other value 
 | Feature | Where it is switched off |
 |---|---|
 | Discord (login, channels, admin buttons) | no token allowed → Web-only mode |
-| Relay link and instance identity on the relay | `startRelayLink` (+ `RELAY_URL` refused) |
-| Push (APNs, Web Push; `/api/v1/push/*` not mounted) | `initPush` |
-| Peer presence probes, `/api/v1/peers*`, peer ingress port | `startPeerPresence`, route gate, env check |
+| Relay link and instance identity on the relay (lab: only the lab relay) | `startRelayLink` (+ `RELAY_URL` refused) |
+| Push (APNs, Web Push; `/api/v1/push/*` not mounted; lab: only via the lab relay to the fake sink) | `initPush` |
+| Peer presence probes, `/api/v1/peers*`, peer ingress port (lab: only between lab instances) | `startPeerPresence`, route gate, env check |
 | Update / update check / restart-all / `pi update` | route gate; manager whitelist |
 | Writing `~/.claude/settings.json` (claude-defaults, in-session `/model` `/effort`, manager's model re-pin) | route gate; `runSwitchCommand`; `enforceSessionModel` |
 | Archiving / deleting / cleaning / adopting sessions, resuming by session id, bg-job kill | route gate; `cleanupBgJob` / `tryRosterCleanup` |
@@ -53,6 +53,27 @@ Everything keys off `CLAUDESTRA_SANDBOX=1` (`0` or unset = off; any other value 
 | launchd, cron scheduler, launcher, master agent | never started; `install-cli` / `update` not in the whitelist |
 
 Still on: channel-server registration, `deliver()` routing, `/hook`, held queue and `check_inbox`, `send_to_agent` between sandbox agents, `/api/v1` messaging and history, SSE, archive into the sandbox root.
+
+## Lab mode
+
+`--lab` turns the three off-switches above back on, each pinned to something the lab itself started. Off by default; the gates are pure functions in `src/lib/sandbox-lab.ts` (tests: `tests/sandbox-lab.test.ts`), the script side is `scripts/sandbox-lab.ts` + `scripts/sandbox-lab-relay.ts`.
+
+```bash
+bun run sandbox up --lab --pair             # /tmp/claudestra-lab-23900/{a,b,lab}; A and B invite each other
+bun run sandbox --lab --as b manager list   # any command, against instance b (default a)
+bun run sandbox lab-push --lab              # register a fake Web Push subscription + APNs device on A
+bun run sandbox --lab down | clean          # all instances + the lab relay
+```
+
+Ports run from `--port N`: A `N`, B `N+1`, peer ingress `N+2`/`N+3`, lab relay `N+4`, fake Web Push `N+5`, fake APNs `N+6` — all checked against the production deny list and must be free. `--pair` creates a Codex ACP stub agent (`lab-a` / `lab-b`, `--external`) on each side, has A invite **without** `--url` while connected to the lab relay (invite address `relay://<A>`), and B join with `--url http://127.0.0.1:<B ingress>`: B→A goes through the relay, A→B over http, both E2E-required. The stub's `[stub:send:<agent>@<peer>]` makes it call `send_to_agent`, which drives the real peer path end to end.
+
+- **Switch.** `CLAUDESTRA_SANDBOX_LAB=1` is only valid together with `CLAUDESTRA_SANDBOX=1`; alone, or any other value, it throws. Every sandbox process validates the lab config at load (`labConfigProblems`: lab ports valid, distinct, not production; sandbox root directly under the lab root).
+- **Relay.** `RELAY_URL` must be byte-equal to `ws://127.0.0.1:<lab relay port>` (bridge env check and `startRelayLink`). The lab relay is `src/relay/server.ts` on loopback with its db / VAPID keys in `<lab>/lab`; it refuses to start with `APNS_*` / `RELAY_APNS_*` / `RELAY_VAPID_*` in its environment. The web one-click relay setup stays off (it writes `.env`).
+- **Peers.** `writePeers` checks every `baseUrl` before writing: `http(s)` only on loopback and on a port recorded in the sandbox marker of an instance directly under the same lab root (the marker's `root` and `lab` must both match); `relay://` is allowed because the relay link can only be the lab relay. Only the new invite flow, `peer-http-list/test/scope/remove` and `external` are added to the manager whitelist. Invite addresses are never auto-detected in a sandbox (no ts.net probe, no tailnet scan, no direct-ingress `.env` write — `saveEnvText` refuses in any sandbox).
+- **Push.** The bridge has no direct push backends in a sandbox; pushes go to the lab relay, whose gateway pins Web Push to the fake sink's origin (`pinEndpointOrigin`) and connects APNs to the fake h2 server (`apnsConnect`, a generated p8). Subscriptions are accepted only for `https://127.0.0.1:<fake Web Push port>/…`. The sink writes each push to `<lab>/lab/push-sink/*.json` — APNs as sent, Web Push decrypted with the browser key `lab-push` left in `<lab>/lab/push-subs/`.
+- **Outbound.** The lab ports (instances, relay, both fake push ports) are added to the outbound gate; everything else stays blocked, including real relay hosts, `api.push.apple.com` and FCM through all four client kinds.
+
+Known gap: `peer-http-test` sends its inner request unsigned, so a peer that pinned our key answers 401 `unsigned` (true outside the lab too); test peers through `send_to_agent` instead.
 
 ## Known boundaries
 

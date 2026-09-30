@@ -8,8 +8,9 @@
  */
 import { existsSync, realpathSync, statSync } from "fs";
 import { dirname, join, relative, resolve, isAbsolute, basename } from "path";
+import { installOutboundGuard } from "./sandbox-outbound.js";
 import {
-  isLab, labConfigProblems, labOutboundPorts, labPeerUrlProblem, labPushEndpointProblem, labRelayUrlProblem, LAB_ROOT_ENV, readLabInstances,
+  isLab, labConfigProblems, labInstancePortsOf, labOutboundPorts, labPeerUrlProblem, labPushEndpointProblem, labRelayUrlProblem, LAB_ROOT_ENV, readLabInstances,
 } from "./sandbox-lab.js";
 
 export const SANDBOX_FLAG = "CLAUDESTRA_SANDBOX";
@@ -204,7 +205,7 @@ export function sandboxBridgeEnvProblems(defaultPort: number, env: Env = process
 function labAllowsEnv(key: string, value: string, bridgePort: number, env: Env): boolean {
   if (!isLab(env)) return false;
   if (key === "RELAY_URL") return labRelayUrlProblem(value, env) === null;
-  if (key === "PEER_INGRESS_PORT") return Number(value) !== bridgePort && labOutboundPorts(env).includes(Number(value));
+  if (key === "PEER_INGRESS_PORT") return Number(value) !== bridgePort && labInstancePortsOf(env).includes(Number(value));
   return false;
 }
 
@@ -338,57 +339,4 @@ export function assertSandboxRuntime(runtime: string, env: Env = process.env, tr
     throw new SandboxViolation(["沙箱里不认 CLAUDESTRA_ACP_AGENT：acp 固定起本仓的 scripts/acp-stub.ts，把这个变量去掉再试"]);
   }
   throw new SandboxViolation([`沙箱只支持 Claude Code agent（收到 runtime=${runtime}${transport ? `、transport=${transport}` : ""}；Codex 只许 --transport acp，适配器固定是 stub）`]);
-}
-
-// ── 出站闸门 ────────────────────────────────────────────────────────────────
-
-/** 沙箱进程只许访问本机回环上的这些端口（自己的 bridge）；其余一律拒绝 */
-export function outboundAllowed(target: string | URL, allowedPorts: ReadonlySet<number>): boolean {
-  let u: URL;
-  try {
-    u = typeof target === "string" ? new URL(target) : target;
-  } catch {
-    return false;
-  }
-  if (u.protocol === "file:" || u.protocol === "data:" || u.protocol === "blob:") return true;
-  if (!["http:", "https:", "ws:", "wss:"].includes(u.protocol)) return false;
-  return LOOPBACK_HOSTS.has(u.hostname) && allowedPorts.has(portOf(u));
-}
-
-export const OUTBOUND_BLOCKED_MARK = "🧱 sandbox-outbound-blocked";
-
-function requestUrl(input: unknown): string {
-  if (typeof input === "string") return input;
-  if (input instanceof URL) return input.href;
-  return String((input as { url?: string })?.url ?? "");
-}
-
-let guardInstalled = false;
-
-/**
- * 包住 globalThis.fetch 与 WebSocket：非白名单目标直接拒绝并打一行带 OUTBOUND_BLOCKED_MARK 的日志
- * （tests/sandbox-isolation.test.ts 靠这行断言「没有功能试图出站」）。这是兜底：各功能在沙箱里
- * 本来就该自己关掉；discord.js / web-push / APNs 不走 globalThis.fetch，靠的是 bridge 的环境检查。
- */
-function installOutboundGuard(allowedPorts: ReadonlySet<number>): void {
-  if (guardInstalled) return;
-  guardInstalled = true;
-  const blocked = (what: string) => {
-    console.error(`${OUTBOUND_BLOCKED_MARK} ${what}`);
-    return new Error(`沙箱模式拒绝出站请求：${what}`);
-  };
-  const origFetch = globalThis.fetch;
-  const guarded = ((input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
-    const url = requestUrl(input);
-    if (!outboundAllowed(url, allowedPorts)) return Promise.reject(blocked(url));
-    return origFetch(input, init);
-  }) as typeof fetch;
-  globalThis.fetch = Object.assign(guarded, origFetch);
-  const OrigWs = globalThis.WebSocket;
-  globalThis.WebSocket = class extends OrigWs {
-    constructor(url: string | URL, protocols?: string | string[]) {
-      if (!outboundAllowed(String(url), allowedPorts)) throw blocked(String(url));
-      super(url, protocols);
-    }
-  } as typeof WebSocket;
 }

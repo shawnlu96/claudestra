@@ -9,10 +9,10 @@ import { randomBytes } from "node:crypto";
 import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import {
-  LAB_FLAG, LAB_MARKER, LAB_PORTS_ENV, LAB_PUSH_PORT_ENV, LAB_RELAY_PORT_ENV, LAB_ROOT_ENV,
+  LAB_APNS_PORT_ENV, LAB_FLAG, LAB_MARKER, LAB_PORTS_ENV, LAB_PUSH_PORT_ENV, LAB_RELAY_PORT_ENV, LAB_ROOT_ENV,
 } from "../src/lib/sandbox-lab.js";
 import { canonicalPath } from "../src/lib/sandbox.js";
-import { LAB_APNS_PORT_ENV, labFiles } from "./sandbox-lab-relay.ts";
+import { labFiles } from "./sandbox-lab-relay.ts";
 import { newWebPushBrowserKeys } from "./lab-push-fakes.ts";
 
 export type LabSide = "a" | "b";
@@ -51,7 +51,7 @@ export const sideRoot = (p: LabPlan, side: LabSide = p.side): string => join(p.r
 export const labSides = (p: LabPlan): LabSide[] => (p.pair ? ["a", "b"] : ["a"]);
 
 /** lab 占的全部端口（up 前逐个查：不是生产端口、没被占） */
-export function labPorts(p: LabPlan): number[] {
+function labPorts(p: LabPlan): number[] {
   const o = p.ports;
   return [o.a, o.ingressA, ...(p.pair ? [o.b, o.ingressB] : []), o.relay, o.push, o.apns];
 }
