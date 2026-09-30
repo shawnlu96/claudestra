@@ -37,7 +37,7 @@
 
 ```json
 { "lend": [ {
-    "peer": "shawn",                                  // B 给 A 起的 peer 名（peers.json 里已握手的那条）
+    "peer": "team-a",                                 // B 给 A 起的 peer 名（peers.json 里已握手的那条）
     "families": { "codex": 3, "claude": 2 },          // 同时在跑的上限，按模型家族
     "roles": ["review"],                              // review | write（write 要仓库写权限，见 §4）
     "repos": ["shawnlu96/claudestra"],                // GitHub owner/repo 白名单，只从这里 clone
@@ -55,7 +55,7 @@
 ### 1.2 发起方 A：同一文件的 `borrow` 段
 
 ```json
-{ "borrow": [ { "peer": "he", "projects": ["claude-orchestrator"], "roles": ["review"], "maxOpen": 3 } ] }
+{ "borrow": [ { "peer": "mate-b", "projects": ["claude-orchestrator"], "roles": ["review"], "maxOpen": 3 } ] }
 ```
 
 - A 只会把**列在这里的项目**的单子给**列在这里的 peer**：私有项目、个人项目缺省不外发。没有 `borrow` = 什么都不外借。
@@ -166,7 +166,7 @@ A 零授权、原有合并门槛不变（T46 规矩 4）。私有仓库的授权
 | 结论不明（B 报 unknown / 中途被 kill） | **不换 key 重做**，沿用调度引擎「结果不明停给 PM」；PM 核对后显式 `lend-reoffer`（新 orderId，旧的记 cancelled） | — |
 | A 撤单后 B 仍交结果 | 409，不入账 | 写收据「被撤」 |
 
-## 7. 最小可试用版（明天和 He、Alex 内部试）
+## 7. 最小可试用版（第一次内部试用）
 
 **切片**：只 review、只 Codex、只公开仓库（claudestra 本身）、B 侧逐单确认、额度只按「单/日」、A 侧手动挂单。
 
@@ -184,7 +184,7 @@ A 零授权、原有合并门槛不变（T46 规矩 4）。私有仓库的授权
 **接口预留**：`lend/*` 的四个请求体不含传输细节；以后中心服务撮合时，同样的 poll/claim 由中心转发或直接替代 A 的接口；
 中继直连（阶段 6）对这层透明。
 
-**试用步骤**：He / Alex 升级到含本功能的版本 → 各自 `manager lend set shawn --codex 2 --roles review --repos shawnlu96/claudestra` →
+**试用步骤**：两位试用同事升级到含本功能的版本 → 各自 `manager lend set team-a --codex 2 --roles review --repos shawnlu96/claudestra` →
 A `capacity.json` 加 `borrow` → PM 对一张已交付的卡 `ledger lend-offer <T> --step review` → B 的 owner 点确认 → 看 A 台账出现 review 事件、B 收据一行。
 
 ### 子 DAG v1 草案（阶段 4，PR 粒度）
