@@ -5,7 +5,7 @@
  */
 import { readRegistryAgents } from "../lib/registry.js";
 import { MASTER_SESSION, tmuxRawStrict, windowTarget } from "../lib/tmux-helper.js";
-import { controlFor } from "../lib/runtimes/index.js";
+import { controlFor, normalizeTransport, type Transport } from "../lib/runtimes/index.js";
 import { paneClearlyIdle, turnState, type TurnState } from "../lib/turn-state.js";
 import { hasActiveBgActivities } from "./bg-activity-watcher.js";
 import { emitEvent, getAgentStatus, lastActivityAt } from "./event-bus.js";
@@ -51,12 +51,12 @@ export async function probeTurnAt(win: string | null, runtime: string | undefine
 }
 
 /** 频道 → 窗口和运行时：master 固定是 master:0，其余从 registry 找；查不到窗口 = null */
-export async function resolveTurnWindow(channelId: string, controlChannelId: string): Promise<{ win: string | null; runtime?: string }> {
+export async function resolveTurnWindow(channelId: string, controlChannelId: string): Promise<{ win: string | null; runtime?: string; transport?: Transport }> {
   if (controlChannelId && channelId === controlChannelId) return { win: MASTER_WINDOW };
   // registry 读不到：当作查无窗口，只剩事件态可判，不让投递路径因此抛错
   const regs = await readRegistryAgents().catch((e) => (console.warn(`⚠️ 判忙读 registry 失败: ${(e as Error).message}`), []));
   const reg = regs.find((a) => a.channelId === channelId);
-  return { win: reg ? windowTarget(reg.name) : null, runtime: reg?.runtime };
+  return { win: reg ? windowTarget(reg.name) : null, runtime: reg?.runtime, transport: normalizeTransport(reg?.transport) };
 }
 
 /** 按频道判（bridge 的投递路径） */

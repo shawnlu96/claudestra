@@ -16,6 +16,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { instanceKeySync, type InstanceKey } from "./instance-key.js";
 import { spawnKeychainReader } from "./quota-keychain.js";
+import { assertSandboxCodexHome, sandboxCodexHomeProblem } from "./sandbox.js";
 
 export type QuotaProvider = "claude" | "codex";
 
@@ -83,7 +84,9 @@ export function claudePaths(env: CredDeps["env"], home: string): { accountFile: 
   return { accountFile: join(dir, ".claude.json"), keychainService: `Claude Code-credentials-${suffix}` };
 }
 
+/** 沙箱里 CODEX_HOME 不在沙箱根下就抛（不回落宿主 ~/.codex/auth.json，lib/sandbox.ts）；生产照旧 */
 export function codexAuthPath(env: CredDeps["env"], home: string): string {
+  assertSandboxCodexHome(env);
   return join(env.CODEX_HOME || join(home, ".codex"), "auth.json");
 }
 
@@ -106,6 +109,11 @@ async function claudeAccountId(deps: CredDeps): Promise<string | null> {
 }
 
 async function codexAuth(deps: CredDeps): Promise<{ token: string; accountId: string } | CredErrorCode> {
+  const refused = sandboxCodexHomeProblem(deps.env);
+  if (refused) {
+    console.error(`[quota] 不读 Codex 凭据：${refused}`); // 按「没有凭据」降级，额度链照常走错误码
+    return "auth_missing";
+  }
   const raw = await deps.readText(codexAuthPath(deps.env, deps.home));
   if (raw === null) return "auth_missing";
   const j = parseJson(raw);

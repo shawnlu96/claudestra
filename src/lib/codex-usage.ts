@@ -12,12 +12,12 @@ import { existsSync, statSync } from "node:fs";
 import type { FileStats, StatsWindowScanner, UsageWindow } from "./agent-stats.js";
 import {
   codexSessionIdFromFilename,
-  codexSessionsRoot,
   codexStateRecord,
   codexUsageTotal,
   listCodexSessionFiles,
   readCodexMeta,
 } from "./codex-session.js";
+import { codexRolloutRoot } from "./codex-home.js";
 import { formatResetTs, resetPassed, resetTsMs } from "./usage-cache.js";
 import { windowsFor } from "./usage-window.js";
 
@@ -219,7 +219,7 @@ const mtimeOf = (p: string) => {
  * 全机 rollout 里最新的一条额度观测。按 mtime 从新到旧读：某个文件的最后写入都早于已找到的
  * 观测时，它和更旧的文件里不可能有更新的观测，直接停。
  */
-export async function findLatestCodexQuota(root: string = codexSessionsRoot()): Promise<RawQuota | null> {
+export async function findLatestCodexQuota(root: string = codexRolloutRoot()): Promise<RawQuota | null> {
   if (!existsSync(root)) return null;
   let best: RawQuota | null = null;
   let read = 0;

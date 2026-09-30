@@ -112,7 +112,7 @@ async function runTail(d: UpdateDeps, m: UpdateMarker): Promise<TailOk | { ok: f
   const webBuild = await maybeBuildWeb();
   await setStep(m, "built");
   // 用 subprocess 跑新版的 migrate（当前进程跑的还是旧代码）
-  const migrateError = await d.spawnFailure(Bun.spawn([resolveBunPath(), "run", `${REPO_ROOT}/src/manager.ts`, "migrate"], { cwd: REPO_ROOT, stdout: "pipe", stderr: "pipe" }));
+  const migrateError = await d.spawnFailure(Bun.spawn([resolveBunPath(), "run", `${REPO_ROOT}/src/manager.ts`, "migrate", "--pre-reload"], { cwd: REPO_ROOT, stdout: "pipe", stderr: "pipe" }));
   if (migrateError) console.error(`[update] ⚠️ migrate 失败（继续）: ${migrateError}`);
   await setStep(m, "migrated");
   // daemon reload 不动 tmux 里的 master：让它退出，launcher 用新 CLAUDE.md 重启

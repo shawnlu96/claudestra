@@ -54,6 +54,9 @@ const MCP_MONEY_WORD = /^(place|order|buy|sell|trade|refund|charge|pay|payment|t
 const MCP_DB_SERVER = /db|sql|postgres|mysql|sqlite|mongo|redis|supabase|database|bigquery|snowflake|clickhouse|neon|prisma/i;
 /** 服务名不在上表也认（Cloudflare 的 d1_database_query、turso / redshift 的 query）：工具名本身像在跑语句 */
 const MCP_DB_TOOL = /sql|query|cypher|statement|database|(^|[_-])d1([_-]|$)/i;
+/** 工具短名的第一个词是这些读动词：查订单 / 查付款记录。只放过名词（order / payment / trade / transfer），带退款、扣款这类动作词的照样算对外 */
+const MCP_READ_FIRST = /^(get|list|search|fetch|describe|view|read)$/i;
+const MCP_MONEY_NOUN = /^(order|payment|trade|transfer)$/i;
 
 /**
  * 分类一次工具调用。command：Bash 的命令原文（jsonl-watcher 的 detail 里「描述 ─── 命令」取后半，见 bashCommandOf）；
@@ -71,8 +74,12 @@ export function classifyTool(name: string, opts: { command?: string; target?: st
   }
   if (short === "reply") return v("check_first", "先看回复发出去没有，别重复发");
   const server = name.startsWith("mcp__") ? name.split("__")[1] ?? "" : "";
-  if (short.split(/[_-]/).some((w) => MCP_MONEY_WORD.test(w))) return v("external", "交易 / 支付可能已经生效，先去对方那边查订单状态，别重复下");
   if (MCP_DB_SERVER.test(server) && /query|exec|sql|migrat/i.test(short) || MCP_DB_TOOL.test(short)) return v("check_first", "语句可能已经执行（写语句收不回），先查数据现状");
+  // get_order / list_payment_intents 是查订单，不是下单：以读动词开头、又没有写词的，先于下单词判只读
+  const words = short.split(/[_-]/);
+  const money = words.filter((w) => MCP_MONEY_WORD.test(w));
+  if (MCP_READ_FIRST.test(words[0] ?? "") && money.every((w) => MCP_MONEY_NOUN.test(w)) && mcpReadOnly(short)) return v("none");
+  if (money.length) return v("external", "交易 / 支付可能已经生效，先去对方那边查订单状态，别重复下");
   if (mcpReadOnly(short)) return v("none");
   if (MCP_EXTERNAL_SERVER.test(server)) return v("external", "对外操作可能已经生效（消息已发、PR 已开），先去对方那边核对，别重复做");
   return v("check_first");
@@ -180,14 +187,15 @@ function classifySegment(seg: string, piped = false): SideEffectVerdict {
   if (!t[0]) return v("none");
   const inner = innerCommand(t);
   const base = inner !== undefined ? classifyBash(inner) : classifyCommand(t, has, seg, piped);
-  // 重定向写文件（> / >>，不含 2>&1、>/dev/null）：至少先看文件现状
-  return /(^|[^0-9&>])>>?\s*(?!&|\/dev\/null)\S/.test(seg) ? heavier(base, v("check_first", "命令会写文件，先看文件现状")) : base;
+  // 重定向写文件（> / >> / 1>，不含 2>、2>&1、>/dev/null）：至少先看文件现状
+  return /(^|[^0-9&>]|(^|[^0-9])1)>>?\s*(?!&|\/dev\/null)\S/.test(seg) ? heavier(base, v("check_first", "命令会写文件，先看文件现状")) : base;
 }
 
 function classifyCommand(t: string[], has: (re: RegExp) => boolean, seg: string, piped: boolean): SideEffectVerdict {
   const [c0 = "", c1 = "", c2 = ""] = t;
   if (c0 === "git") return classifyGit(t);
   if (c0 === "gh") return classifyGh(t);
+  if (c0 === "curl" && has(/^(--config|--quote)(=|$)|^-[a-zA-Z]*[KQ]/)) return v("check_first", "请求写在配置文件 / FTP 命令里，看不出做了什么，先查对方状态");
   if (["curl", "wget", "http", "https", "xh"].includes(c0)) {
     return httpMutates(t, seg, piped) ? v("external", "请求可能已经发出，先查对方状态，别重复提交") : v("none");
   }
@@ -203,14 +211,25 @@ function classifyCommand(t: string[], has: (re: RegExp) => boolean, seg: string,
   }
   if (c0 === "tmux") return /^(capture-pane|list-|display|has-session|show)/.test(c1) ? v("none") : v("check_first");
   if (["bun", "npm", "yarn", "pnpm", "npx", "bunx"].includes(c0)) return classifyPkg(c0, c1, c2, t);
-  if (c0 === "find") return has(/^-(delete|exec|execdir|ok)$/) ? v("check_first") : v("none");
-  if (c0 === "fd") return has(/^(-x|-X|--exec|--exec-batch)(=|$)/) ? v("check_first", "fd 对每个结果执行了命令，先核对做到了哪一个") : v("none");
+  if (c0 === "find") return has(/^-(delete|exec|execdir|ok|okdir|fprint0?|fprintf|fls)$/) ? v("check_first") : v("none");
+  if (c0 === "fd") return has(/^(--exec|--exec-batch)(=|$)|^-[a-zA-Z]*[xX]/) ? v("check_first", "fd 对每个结果执行了命令，先核对做到了哪一个") : v("none");
   if (c0 === "sed") return has(/^(-[a-zA-Z]*i|--in-place)/) ? v("check_first", "先看文件现状") : v("none");
   if (c0 === "sort" && has(/^(-[a-zA-Z]*o|--output)/)) return v("check_first", "命令会写文件，先看文件现状");
   if (c0 === "tsc") return has(/^--noEmit$/) ? v("none") : v("idempotent");
   if (c0 === "mkdir" && has(/^-p$/)) return v("idempotent");
-  if (READ_CMDS.has(c0)) return v("none");
+  if (READ_CMDS.has(c0)) return readCmdWrites(t) ? v("check_first", "这个写法会改文件 / 系统设置，先看现状") : v("none");
   return v("check_first", "先核对这条命令做到了哪一步");
+}
+
+/** 只读命令的写法：uniq in out 写 out、tree -o 写文件、hostname / date 带参数是改主机名 / 系统时间（date +%s 是格式，不算） */
+function readCmdWrites(t: string[]): boolean {
+  const [c0, ...args] = t;
+  const pos = args.filter((a, k) => !a.startsWith("-") && !(c0 === "uniq" && /^-[fsw]$/.test(args[k - 1] ?? "")));
+  if (c0 === "uniq") return pos.length >= 2;
+  if (c0 === "tree") return args.some((a) => /^-o/.test(a));
+  if (c0 === "hostname") return pos.length > 0;
+  if (c0 === "date") return args.some((a) => /^(-[a-zA-Z]*s|--set)/.test(a)) || pos.some((a) => !a.startsWith("+"));
+  return false;
 }
 
 const WRITE_METHOD = /^(POST|PUT|PATCH|DELETE)$/i;
@@ -223,8 +242,8 @@ function httpMutates(t: string[], seg: string, piped: boolean): boolean {
     // 短选项可以连写：-sX POST / -sXPOST / -sd@order.json
     const shortX = /^-[a-zA-Z]*X(.*)$/.exec(a);
     const method = (shortX ? shortX[1] || args[k + 1] : undefined) ?? /^--(?:request|method)=(.+)$/.exec(a)?.[1] ?? (/^(--request|--method)$/.test(a) ? args[k + 1] : undefined);
-    if (method && WRITE_METHOD.test(method)) return true;
-    if (/^-[a-zA-Z]*[dFT]/.test(a) && !a.startsWith("--")) return true;
+    if (method && !/^(GET|HEAD|OPTIONS)$/i.test(method)) return true; // PURGE / MKCOL 这类自定义方法也算写
+    if (/^-[a-zA-Z]*[dFT]/.test(shortX ? a.slice(0, a.indexOf("X")) : a) && !a.startsWith("--")) return true; // -XGET 里的 T 是方法名，不是 -T
     if (/^(--data.*|--form.*|--json|--upload-file|--post-data|--post-file|--body-data|--body-file)(=.*)?$/.test(a)) return true;
   }
   // httpie：任何一个位置参数是写方法（带值选项 -a user:pass、--timeout 5 会占掉第一个位置），或带 key=value / key:=json 数据项、--raw 请求体
@@ -282,7 +301,7 @@ function classifyGh(all: string[]): SideEffectVerdict {
   if (/^(view|list|diff|checks|status|watch)$/.test(verb) || noun === "search" || noun === "auth" && verb === "status") return v("none");
   if (noun === "api") {
     const method = t.map((x, k) => /^(-X|--method)$/.test(x) ? t[k + 1] ?? "" : /^(?:-X|--method=)(.+)$/.exec(x)?.[1]).find((m) => m !== undefined);
-    const writes = method !== undefined ? WRITE_METHOD.test(method) : t.some((x) => /^(-f|-F|--field|--raw-field|--input)(=|$)/.test(x));
+    const writes = method !== undefined ? WRITE_METHOD.test(method) : verb === "graphql" ? !graphqlReads(t) : t.some((x) => /^(-f|-F|--field|--raw-field|--input)(=|$)/.test(x));
     return writes ? v("external", "API 写操作可能已经生效，先查对方状态") : v("none");
   }
   if (noun === "workflow" && verb === "run" || noun === "repo" && /^(create|delete|rename|archive|edit|fork)$/.test(verb)) return v("external", "对外操作可能已经生效，先去 GitHub 上核对");
@@ -293,6 +312,13 @@ function classifyGh(all: string[]): SideEffectVerdict {
   if (noun === "pr" && verb === "checkout") return v("idempotent");
   if ((noun === "pr" || noun === "issue") && /^(create|comment|review|close|reopen|edit)$/.test(verb)) return v("external", "别人可能已经看到了，先 gh pr/issue view 核对，别重复发");
   return v("check_first");
+}
+
+/** gh api graphql：query 字段写在命令里、是查询（query … / { … }）、整条没有 mutation 才算只读；从文件读（@x、--input）看不出 */
+function graphqlReads(t: string[]): boolean {
+  const k = t.findIndex((x, i) => /^(-f|-F|--field|--raw-field)$/.test(t[i - 1] ?? "") && x.startsWith("query="));
+  const q = k > 0 ? t[k].slice(6) : "";
+  return k > 0 && /^(query\b|\{)/.test(q) && !t.some((x) => /mutation/i.test(x) || x === "--input");
 }
 
 function classifyManager(sub: string, rest: string[]): SideEffectVerdict {
@@ -308,6 +334,7 @@ function classifyPkg(c0: string, c1: string, c2: string, t: string[]): SideEffec
   const script = c1 === "run" ? c2 : c1;
   if (c0 === "bunx" || c0 === "npx") return c1 === "tsc" && t.includes("--noEmit") ? v("none") : v("check_first");
   if (t.some((x) => /^--(fix|write)$/.test(x))) return v("check_first", "带 --fix / --write 会改文件，先看文件现状");
+  if ((script === "test" || c1 === "test") && t.some((x) => /^(-u|--update-snapshots)$/.test(x))) return v("check_first", "更新了快照文件，先看文件现状");
   if (/^(test|check|guard|typecheck|lint|tsc)$/.test(script) || c1 === "test") return v("none");
   if (/^(build|build:.*)$/.test(script) || c1 === "build") return v("idempotent");
   if (c1 === "install" || c1 === "i" || c1 === "ci") return v("idempotent");

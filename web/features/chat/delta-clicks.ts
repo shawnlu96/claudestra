@@ -33,7 +33,7 @@ function walk(messages: ChatMessage[], onUser?: OnUser): { anchor: ChatMessage |
 export function resolvePendingClicks(messages: ChatMessage[]): ChatMessage[] {
   if (!messages.some((m) => m.role === "user" && m.clickRaw)) return messages;
   walk(messages, (m, anchor, forms) => {
-    if (!m.clickRaw) return;
+    if (!m.clickRaw || m.from) return; // 外源不还原回投（liveUserText 同一道闸）
     const r = resolveUserClick(m.clickRaw, anchor, forms);
     if (!r?.resolved) return;
     m.content = r.text;
@@ -55,18 +55,23 @@ export function resolveLiveClick(text: string, messages: ChatMessage[]): string 
 }
 
 /**
- * 他端用户消息的 content：本人的先剥 @ 委托指令行（只给 agent 看，外源的末行照原样给 owner 看），再按回投还原。
+ * 他端用户消息的 content：本人的先剥 @ 委托指令行（只给 agent 看），再按回投还原；外源（from 有值）原文照显、不碰表单，
+ * 否则外人发一行 [button:go] 就能让 owner 看到「✅ 发版」并把表单标已答（T31，history-shape userMessage 同一道闸）。
  * 和原文不同时原文留在 wire：addRemoteUserMessage 与回声判定（isUserEcho）按 wire ?? content 认重放。
  */
 export function liveUserText(text: string, messages: ChatMessage[], from?: string): { content: string; wire?: string } {
-  const own = from ? text : stripMentionDirective(text);
+  if (from) return { content: text };
+  const own = stripMentionDirective(text);
   const content = resolveLiveClick(own, messages) ?? own;
   return content === text ? { content } : { content, wire: text };
 }
 
-/** 直播推来的 owner 作答（bridge 给了人话和原文）：原文回填所答气泡的已答态，显示人话，原文留 wire 给回声对账（isUserEcho） */
-export function liveAnswerText(wire: string, shown: string, askId: string | undefined, messages: ChatMessage[]): { content: string; wire: string } {
+/**
+ * 直播推来的 owner 作答（bridge 给了人话和原文）：原文回填所答气泡的已答态，显示人话，原文留 wire 给回声对账（isUserEcho）。
+ * 回填只认本人（from 为空）：和 liveUserText 同一道闸
+ */
+export function liveAnswerText(wire: string, shown: string, askId: string | undefined, messages: ChatMessage[], from?: string): { content: string; wire: string } {
   const { anchor, forms } = walk(messages);
-  markAnswerClicks(wire, askAnchor(messages, askId) ?? anchor, forms);
+  if (!from) markAnswerClicks(wire, askAnchor(messages, askId) ?? anchor, forms);
   return { content: shown, wire };
 }

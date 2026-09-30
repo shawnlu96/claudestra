@@ -1,6 +1,6 @@
 import { test, expect, describe } from "bun:test";
 import { formatDoctor, orphanAgentNames, webBuildVerdict, type Check } from "../src/lib/doctor";
-import { classifyDaemonExit } from "../src/lib/launchd-status";
+import { classifyDaemonExit, daemonDetail } from "../src/lib/launchd-status";
 
 describe("classifyDaemonExit", () => {
   test("正常运行 → ok", () => {
@@ -12,7 +12,7 @@ describe("classifyDaemonExit", () => {
   test("SIGTERM（kickstart -k 的正常结果）不算异常", () => {
     const v = classifyDaemonExit("30530", "-15");
     expect(v.status).toBe("ok");
-    expect(v.detail).not.toContain("异常");
+    expect(v.reason).toEqual({ code: "running", pid: "30530" });
   });
 
   test("SIGINT / SIGHUP 同样算正常停止", () => {
@@ -23,13 +23,15 @@ describe("classifyDaemonExit", () => {
   test("SIGKILL 值得提醒（OOM / 强杀）", () => {
     const v = classifyDaemonExit("30530", "-9");
     expect(v.status).toBe("warn");
-    expect(v.detail).toContain("SIGKILL");
+    expect(v.reason.code).toBe("sigkilled");
+    expect(daemonDetail(v.reason, "zh")).toContain("SIGKILL");
   });
 
   test("进程自己非 0 退出 → warn", () => {
     const v = classifyDaemonExit("30530", "1");
     expect(v.status).toBe("warn");
-    expect(v.detail).toContain("异常退出");
+    expect(v.reason).toEqual({ code: "abnormal_exit", pid: "30530", exit: "1" });
+    expect(daemonDetail(v.reason, "zh")).toContain("异常退出");
   });
 
   test("没在跑 → fail（不管上次退出码是什么）", () => {

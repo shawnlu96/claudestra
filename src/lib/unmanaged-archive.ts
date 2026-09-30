@@ -8,7 +8,8 @@ import { dirname, join } from "node:path";
 import { statePath } from "./paths.js";
 import { USER_ARCHIVE_ROOT } from "./session-archive.js";
 import { isValidSessionId } from "./session-history.js";
-import { codexSessionsRoot, listCodexSessionFiles, readCodexMetaPayload } from "./codex-session.js";
+import { listCodexSessionFiles, readCodexMetaPayload } from "./codex-session.js";
+import { codexRolloutRoot } from "./codex-home.js";
 import { codexSubOf, isCodexOneShot, isCodexSubThread } from "./codex-subthread.js";
 import { readJsonState, writeJsonAtomic } from "./state-file.js";
 
@@ -121,7 +122,7 @@ function isPinned(p: Record<string, any>, sid: string, opts: SweepOpts, locksDir
  * 人开的主会话、被挂着 / 被锁着的（isPinned）、用户恢复过的一律不动。开关在 config.json autoArchiveCodexSubs（缺省关，archive-sweeper 判）。单个文件失败只记一笔。
  */
 export async function sweepIdleCodexSubSessions(opts: SweepOpts): Promise<{ archived: number; bytes: number }> {
-  const codexRoot = opts.codexRoot ?? codexSessionsRoot();
+  const codexRoot = opts.codexRoot ?? codexRolloutRoot();
   const locksDir = opts.locksDir ?? join(dirname(codexRoot), "thread-writer-locks");
   const cutoff = (opts.now ?? Date.now()) - (opts.idleDays ?? CODEX_SUB_IDLE_DAYS) * 86_400_000;
   const restored = await readRestored(opts.restoredIndex);

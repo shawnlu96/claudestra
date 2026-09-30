@@ -20,6 +20,7 @@ export interface StopReport {
   event: "Stop" | "StopFailure";
   stopHookActive: boolean;
   interrupt?: boolean;
+  acpDeliveryWarning?: true;
 }
 
 /**
@@ -45,11 +46,12 @@ export const hookPromptText = (reason: string) => `<hook_prompt>${reason}</hook_
 
 type Slot =
   | { kind: "prompt"; text: string }
+  | { kind: "command"; text: string }
   | { kind: "steer" }
   | { kind: "external"; done: Promise<PromptOutcome> }
   | { kind: "nudge"; text: string };
 
-type Pick = { kind: "prompt" | "nudge"; text: string } | { kind: "external"; done: Promise<PromptOutcome> };
+type Pick = { kind: "prompt" | "command" | "nudge"; text: string } | { kind: "external"; done: Promise<PromptOutcome> };
 
 const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
@@ -65,22 +67,45 @@ function call<T>(f: () => Promise<T>): Promise<T> {
   }
 }
 
-const failedOutcome = (e: unknown): PromptOutcome => ({ kind: "failed", failure: { kind: "error", key: `transport:${Date.now()}`, message: errText(e) } });
+/** 传输层失败的去重键：单调序号。不能用时间戳——同一毫秒里两次失败会被 FailureDedup 合成一条、少出一张卡 */
+let transportFailures = 0;
+const failedOutcome = (e: unknown): PromptOutcome => ({ kind: "failed", failure: { kind: "error", key: `transport:${++transportFailures}`, message: errText(e) } });
 
 export class AcpTurnLoop {
   private slots: Slot[] = [];
   /** 调度器正在跑一轮（含上报）。steer 在途、调度器停着等它时为 false，但 busy 仍为 true */
   private pumping = false;
+  private suspended = false;
 
   constructor(private readonly io: TurnIO) {}
 
   /** 有一轮在跑、或者还有没落定 / 没开的槽 */
   get busy(): boolean {
-    return this.pumping || this.slots.length > 0;
+    return this.suspended || this.pumping || this.slots.length > 0;
+  }
+
+  /** 会话轮转只在完全空闲时开始；挂起后新入站留在本宿主队列，不送往旧线程。 */
+  suspendIfIdle(): boolean {
+    if (this.busy) return false;
+    this.suspended = true;
+    return true;
+  }
+
+  resume(): void {
+    this.suspended = false;
+    this.pump();
   }
 
   get queued(): number {
     return this.slots.length;
+  }
+
+  /** 斜杠命令要独占一轮 session/prompt；steering 会把它变成普通文字。 */
+  submitCommand(text: string): "prompt" | "queued" {
+    const idle = !this.busy;
+    this.slots.push({ kind: "command", text });
+    this.pump();
+    return idle ? "prompt" : "queued";
   }
 
   /** 收到一条入站消息。返回它怎么进的会话（日志 / 单测用） */
@@ -107,11 +132,12 @@ export class AcpTurnLoop {
 
   /** 按规则挑下一轮；null = 没东西可开，或者要等 steer 落定 */
   private next(): Pick | null {
-    if (!this.slots.length || this.slots.some((s) => s.kind === "steer")) return null;
+    if (this.suspended || !this.slots.length || this.slots.some((s) => s.kind === "steer")) return null;
     const ext = this.slots.findIndex((s) => s.kind === "external");
     if (ext >= 0) return this.slots.splice(ext, 1)[0] as Pick;
     const head = this.slots[0];
     if (head.kind === "nudge") return this.slots.shift() as Pick;
+    if (head.kind === "command") return this.slots.shift() as Pick;
     const n = this.slots.findIndex((s) => s.kind !== "prompt");
     const batch = this.slots.splice(0, n < 0 ? this.slots.length : n) as { kind: "prompt"; text: string }[];
     return { kind: "prompt", text: batch.map((b) => b.text).join("\n\n") };

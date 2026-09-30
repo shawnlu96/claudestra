@@ -4,6 +4,7 @@
  */
 import { join } from "path";
 import { settingsLaunchArgs } from "./agent-settings.js";
+import { sandboxAcpHome } from "./acp/stub.js";
 import { SANDBOX_DENY_DIRS_ENV, SANDBOX_DENY_PORTS_ENV, SANDBOX_FLAG, SANDBOX_ROOT_ENV } from "./sandbox.js";
 
 type Env = Record<string, string | undefined>;
@@ -16,6 +17,7 @@ const INHERITED_KEYS = [
   "PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "LC_ALL", "LC_CTYPE", "TERM", "TMPDIR",
   // 代理配置只影响「怎么出网」，不带身份；测试靠它把漏网的出站请求引到计数替身上
   "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "all_proxy", "no_proxy",
+  // CLAUDESTRA_ACP_AGENT 刻意不继承：沙箱里 acp 固定起本仓的 stub（lib/acp/stub.ts），外部 argv 一律不认
 ] as const;
 
 export interface SandboxLayout {
@@ -105,6 +107,8 @@ export function sandboxEnv(
     BUN_RUNTIME_TRANSPILER_CACHE_PATH: join(opts.layout.root, "bun-cache"),
     // statusLine 脚本跑的 python3：macOS 自带的那个把字节码缓存写进 ~/Library/Caches/com.apple.python
     PYTHONDONTWRITEBYTECODE: "1",
+    // manager / bridge 定位 Codex 会话与凭据按 CODEX_HOME，不设就回落宿主 ~/.codex；与 ACP 链同一个值（沙箱根非绝对路径时抛）
+    CODEX_HOME: sandboxAcpHome(opts.layout.root).CODEX_HOME,
   });
   if (opts.staticDir) out.BRIDGE_STATIC_DIR = opts.staticDir;
   return out;
@@ -140,6 +144,8 @@ const SANDBOX_MANAGER_COMMANDS = new Set([
   "ledger", // 台账只写沙箱状态目录里的 ledger.sqlite 与沙箱 registry；班子的事件路由、沙箱 bridge 经 runManager 跑的定时巡检都要在沙箱里实测
   "team", // 班子提案只写沙箱状态目录的 team-proposals.json，按钮经沙箱 bridge 贴出
   "skill-toggle", // 只写沙箱状态目录下的 agent-settings（lib/agent-settings.ts），技能目录只读
+  "transport", // T60：切 transport 只写沙箱 registry、重启沙箱窗口；acp 那头在沙箱里只能是 stub（assertSandboxRuntime）
+  "migrate", // T60：只改沙箱 registry，重启的 Codex 在沙箱里仍固定走 stub
 ]);
 
 /** 返回拒绝原因；null = 可以跑。agent 目录与 runtime 另由 manager 的 create 入口按 lib/sandbox.ts 再查一遍 */
@@ -150,7 +156,9 @@ export function sandboxManagerRefusal(args: string[]): string | null {
   }
   if (args.includes("--include-master")) return "沙箱没有大总管，不支持 --include-master";
   if (args.includes("--external")) return "沙箱不对外共享 agent（--external）";
+  if (cmd === "transport" && args[2] === "tmux") return "沙箱 Codex 只许 ACP stub，不起真实 TUI";
   const rt = args.indexOf("--runtime");
-  if (rt >= 0 && args[rt + 1] !== "claude-code") return "沙箱只支持 Claude Code runtime（Pi / Codex 的启动链不经沙箱闸门）";
+  const acp = args[rt + 1] === "codex" && (args.indexOf("--transport") < 0 || args[args.indexOf("--transport") + 1] === "acp");
+  if (rt >= 0 && args[rt + 1] !== "claude-code" && !acp) return "沙箱只支持 Claude Code runtime（Pi / Codex 的启动链不经沙箱闸门；Codex 只许 --transport acp，适配器固定是 stub）";
   return null;
 }
