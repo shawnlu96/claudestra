@@ -10,8 +10,8 @@ import { advanceMergeRun, beginMergeRun } from "../src/lib/scheduler-merge.js";
 import { runLedger } from "../src/manager/ledger.js";
 import type { Registry } from "../src/manager/core.js";
 
-export const HEAD = "c".repeat(40), MERGE = "d".repeat(40);
-export const PR = "https://github.com/example/repo/pull/7";
+const HEAD = "c".repeat(40), PR = "https://github.com/example/repo/pull/7";
+export const MERGE = "d".repeat(40);
 
 export interface MergedCard { db: Database; dir: string; path: string; close(): void; intent: string }
 

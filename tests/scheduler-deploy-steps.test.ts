@@ -95,7 +95,8 @@ describe("T68g deploy worker", () => {
 
   test("result.json is written before the lease is let go; a second launch never reruns", async () => {
     const r = request(), f = fake(), log: string[] = [];
-    await runDeployJob(r.path, { run: f.run, acquire: async () => { log.push("acquire"); return lease(() => { log.push(existsSync(join(r.dir, "result.json")) ? "held-after" : "held"); return true; }, log); } });
+    const held = () => { log.push(existsSync(join(r.dir, "result.json")) ? "held-after" : "held"); return true; };
+    await runDeployJob(r.path, { run: f.run, acquire: async () => { log.push("acquire"); return lease(held, log); } });
     expect(r.result()).toMatchObject({ ok: true, intentId: "m9", mergeSha: SHA });
     expect(log.at(-1)).toBe("release");
     expect(JSON.parse(readFileSync(join(r.dir, "lease.json"), "utf8"))).toMatchObject({ path: "/l", token: "t" });
