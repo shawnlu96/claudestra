@@ -540,10 +540,9 @@ export async function runDoctor(repoRoot: string): Promise<Check[]> {
     checkGitHead(repoRoot),
     checkWorktreeClean(repoRoot),
     checkWebBuild(repoRoot),
-    checkDeployment(), import("./doctor-ccswitch.js").then((m) => m.checkCcSwitch()), // API 源 / CC Switch 会不会冲掉 hooks
+    checkDeployment(), import("./doctor-ccswitch.js").then((m) => m.checkApiSources()), // API 源 / CC Switch 会不会冲掉 hooks + AI 能力清单一行
     import("./doctor-remote.js").then((m) => m.checkRemoteAccess(repoRoot)),
     import("./cli-path.js").then((m) => m.checkCliOnPath()), // 新开终端能不能直接敲 claudestra
-    import("./ai-inventory-format.js").then((m) => m.checkAiInventory()), // 装了哪些运行时、接的官方还是第三方
   ]);
   return groups.flat();
 }

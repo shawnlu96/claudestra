@@ -59,3 +59,9 @@ export function checkCcSwitch(home = process.env.HOME || ""): Check[] {
   }
   return ccSwitchChecks({ ccSwitchInstalled: existsSync(join(home, ".cc-switch")), settings, env: process.env });
 }
+
+/** doctor 入口：本分区 + AI 能力清单一行（lib/ai-inventory-format.ts：装了哪些运行时、各自接官方还是第三方） */
+export async function checkApiSources(): Promise<Check[]> {
+  const { checkAiInventory } = await import("./ai-inventory-format.js");
+  return [...checkCcSwitch(), ...(await checkAiInventory())];
+}

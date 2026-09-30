@@ -12,7 +12,7 @@ import { remoteViewOf } from "./quota-scheduler.js";
 import { fileQuotaStore } from "./quota-state.js";
 import { readUsageCacheStale } from "./usage-cache.js";
 
-export interface InventoryQuotaWindow {
+interface InventoryQuotaWindow {
   id: string;
   kind: string;
   /** 已用百分比；不知道 = null */

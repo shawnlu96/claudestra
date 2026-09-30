@@ -6,9 +6,9 @@
  * 随启动方式而变，报成官方而实际走了第三方是这份清单唯一不能犯的错。
  */
 
-export type EndpointKind = "official" | "third_party" | "unknown";
+type EndpointKind = "official" | "third_party" | "unknown";
 
-export interface EndpointSource {
+interface EndpointSource {
   /** 这条线索的出处：「~/.claude/settings.json env」「当前进程 env」「config.toml model_providers.x」… */
   from: string;
   kind: EndpointKind;
@@ -75,7 +75,7 @@ function merge(provider: string | null, sources: EndpointSource[], models: Recor
 
 // ── Claude Code ──────────────────────────────────────────────────────────
 
-export const ANTHROPIC_OFFICIAL_HOSTS = ["api.anthropic.com"] as const;
+const ANTHROPIC_OFFICIAL_HOSTS = ["api.anthropic.com"] as const;
 
 const CLAUDE_MODEL_VARS = [
   "ANTHROPIC_MODEL", "ANTHROPIC_DEFAULT_OPUS_MODEL", "ANTHROPIC_DEFAULT_SONNET_MODEL", "ANTHROPIC_DEFAULT_HAIKU_MODEL",
@@ -89,7 +89,7 @@ const CLAUDE_CLOUD = [
 ] as const;
 
 /** 判定用到的全部键：读配置时只把这些键拷进 layer，token / key 类字段从一开始就不进来 */
-export const CLAUDE_ENDPOINT_KEYS: readonly string[] = ["ANTHROPIC_BASE_URL", ...CLAUDE_MODEL_VARS, ...CLAUDE_CLOUD.flatMap((c) => [c.flag, c.url])];
+const CLAUDE_ENDPOINT_KEYS: readonly string[] = ["ANTHROPIC_BASE_URL", ...CLAUDE_MODEL_VARS, ...CLAUDE_CLOUD.flatMap((c) => [c.flag, c.url])];
 
 /** 只留判定用的键 */
 export function pickClaudeKeys(env: Record<string, unknown>): Record<string, unknown> {
@@ -137,7 +137,7 @@ export function classifyClaudeEndpoint(layers: ClaudeConfigLayer[]): EndpointVer
 
 // ── Codex ────────────────────────────────────────────────────────────────
 
-export const OPENAI_OFFICIAL_HOSTS = ["api.openai.com", "chatgpt.com"] as const;
+const OPENAI_OFFICIAL_HOSTS = ["api.openai.com", "chatgpt.com"] as const;
 /** Codex 内置的本地模型 provider（没在 model_providers 里定义也能用） */
 const CODEX_LOCAL_BUILTINS: Record<string, string> = { oss: "localhost:11434", ollama: "localhost:11434", lmstudio: "localhost:1234" };
 

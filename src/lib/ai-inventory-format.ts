@@ -29,7 +29,7 @@ export function quotaLabel(q: InventoryQuota): string {
   if (q.status === "unknown" && !q.windows.length) return `${UNKNOWN}（${q.reason ?? "没有数据"}）`;
   const wins = q.windows.map((w) => {
     if (w.resetPassed) return `${w.id} 应已重置（用量${UNKNOWN}）`;
-    return w.usedPct === null ? `${w.id} ${UNKNOWN}` : `${w.id} 已用 ${w.usedPct}%（剩 ${100 - w.usedPct}%，${clock(w.resetsAtMs)} 重置）`;
+    return w.usedPct === null ? `${w.id} ${UNKNOWN}` : `${w.id} 已用 ${w.usedPct}%（剩 ${100 - w.usedPct}%，${w.resetsAtMs === null ? `重置时间${UNKNOWN}` : `${clock(w.resetsAtMs)} 重置`}）`;
   });
   const src = `${LAYER[q.source ?? "none"] ?? q.source}，${clock(q.observedAt)} 观测`;
   return `${q.plan ? `${q.plan} · ` : ""}${wins.join("；")}  [${src}]`;

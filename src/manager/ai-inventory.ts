@@ -15,5 +15,5 @@ export async function cmdAiInventory(args: string[]): Promise<void> {
   }
   const inv = await collectAiInventory(i >= 0 ? { limit: n } : {});
   if (args.includes("--json")) outputSync({ ok: true, ...inv });
-  else console.log(formatAiInventory(inv));
+  else process.stdout.write(formatAiInventory(inv) + "\n"); // 人看的输出；bridge 走 HTTP 路由，不经 runManager 调它
 }
