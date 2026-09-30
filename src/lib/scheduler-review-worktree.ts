@@ -21,6 +21,14 @@ export function gitHeadSync(dir: string): string | null {
   return r.exitCode === 0 ? r.stdout.toString().trim() : null;
 }
 
+/** null = no tracked file differs from HEAD (index or working tree); otherwise what changed, or why it could not be read. */
+export function gitDirtySync(dir: string): string | null {
+  const r = Bun.spawnSync(["git", "-C", dir, "status", "--porcelain", "--untracked-files=no"], { stdout: "pipe", stderr: "pipe" });
+  if (r.exitCode !== 0) return `读不了工作区状态：${r.stderr.toString().trim().slice(0, 200)}`;
+  const out = r.stdout.toString().trim();
+  return out ? out.split("\n").slice(0, 5).join("; ") : null;
+}
+
 /** Move the reviewer's checkout to `head`, refusing when the reviewer changed tracked files. */
 export async function pinReviewWorktree(dir: string, head: string, g: Git = git): Promise<Pinned> {
   const st = await g(["-C", dir, "status", "--porcelain", "--untracked-files=no"]);

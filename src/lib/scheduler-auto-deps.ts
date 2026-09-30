@@ -20,7 +20,7 @@ import { boundRef, type AutoTickDeps } from "./scheduler-auto-tick.js";
 import { acpPort, messagePort, type RegistryRow } from "./scheduler-auto-ports.js";
 import { runtimeFamily } from "./scheduler-auto-review.js";
 import { schedulerManager } from "./scheduler-service.js";
-import { openReviewWorktree, pinReviewWorktree } from "./scheduler-review-worktree.js";
+import { gitDirtySync, openReviewWorktree, pinReviewWorktree } from "./scheduler-review-worktree.js";
 import type { SessionRole } from "./scheduler-sessions.js";
 import { ledgerResult } from "./scheduler-work-order.js";
 import { createAcpWorker } from "./worker-acp.js";
@@ -127,6 +127,7 @@ export function autoTickDeps(db: Database, registryPath?: string, worktreeRoot =
     worker: (ref) => worker(db, registryRow, ref),
     ensure: (task, role, family) => ensure(env, task, role, family),
     pinReview: (task, ref, head) => pinReview(env, task, ref, head),
+    reviewDirty: async (_task, ref) => { const cwd = registryRow(ref.agent)?.cwd; return cwd ? gitDirtySync(cwd) : null; },
     notifyPm: (task, text) => notifyPm(db, task, text),
     now: () => Date.now(),
   };

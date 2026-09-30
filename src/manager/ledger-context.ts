@@ -3,6 +3,7 @@
  * 角色矩阵（docs 10-ledger §3「动作 × 角色」）里阶段以外的部分在这里执行；阶段角色与 owner 专属项在 lib（ledger-write.ts）。
  * 依赖全部注入，测试不碰真实 registry / 状态目录（tests/manager-ledger.test.ts）。
  */
+import type { CallerWitness } from "../lib/caller-witness.js";
 import type { Database } from "bun:sqlite";
 import type { SnapshotSources } from "../lib/ledger-audit-snapshot.js";
 import { isManagerRole, roleOf, type LedgerTask, type Role } from "../lib/ledger-stages.js";
@@ -30,6 +31,10 @@ export interface LedgerDeps {
   now(): number;
   /** dispatch 核对 head 用；不给 = 真跑 git（单测注入） */
   gitHead?(dir: string): string | null;
+  /** 自动卡回写时核审查目录有没有未提交改动；不给 = 真跑 git（单测注入） */
+  gitDirty?(dir: string): string | null;
+  /** 自动卡结论的旁证（tmux 窗口 / 父进程链 / cwd），只记录比对不拦；不给 = 不记 */
+  callerWitness?(): Promise<CallerWitness>;
   /** 班子提案（meta --pms、team-apply）存哪、按钮怎么贴；不给 = 状态目录 + 真贴按钮（单测注入） */
   proposals?: ProposeOpts;
   /** 完成检查单的事实采集（gh / git / 进程）；不给就用真实的（lib/ledger-verify-facts.ts），测试注入假的 */

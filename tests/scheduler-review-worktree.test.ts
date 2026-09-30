@@ -5,7 +5,7 @@ import { describe, expect, test } from "bun:test";
 import { getTask } from "../src/lib/ledger-store.js";
 import { reviewWorktreeChecks } from "../src/lib/doctor-review-worktrees.js";
 import { autoTickDeps } from "../src/lib/scheduler-auto-deps.js";
-import { git, openReviewWorktree, pinReviewWorktree } from "../src/lib/scheduler-review-worktree.js";
+import { git, gitDirtySync, gitHeadSync, openReviewWorktree, pinReviewWorktree } from "../src/lib/scheduler-review-worktree.js";
 import type { SessionRef } from "../src/lib/worker-session.js";
 import { autoFixture } from "./scheduler-auto-helpers.js";
 
@@ -75,6 +75,29 @@ describe("T68f reviewer checkout: its own detached worktree, pinned to the head 
       setCwd(r.checkout);
       expect(await d.pinReview(task, ref, r.h2)).toEqual({ dir: r.checkout });
       expect((await git(["-C", r.checkout, "rev-parse", "HEAD"])).out).toBe(r.h2);
+    } finally { f.close(); r.close(); }
+  });
+
+  test("an edit after the pin keeps HEAD but shows as dirty (working tree or index), to the writer and to the tick", async () => {
+    const r = await repo();
+    const f = autoFixture();
+    try {
+      await openReviewWorktree(r.author, r.checkout, r.h1);
+      const reg = JSON.parse(readFileSync(f.registryPath, "utf8"));
+      reg.agents["agent-rv-t1"].cwd = r.checkout;
+      writeFileSync(f.registryPath, JSON.stringify(reg));
+      const d = autoTickDeps(f.db, f.registryPath, join(r.root, "worktrees"));
+      const ref: SessionRef = { taskId: "T1", role: "reviewer", agent: "agent-rv-t1", sessionId: "s-rv", family: "codex", transport: "acp" };
+      writeFileSync(join(r.checkout, "notes.md"), "untracked report draft");
+      expect(gitDirtySync(r.checkout)).toBeNull();
+      expect(await d.reviewDirty(getTask(f.db, "T1")!, ref)).toBeNull();
+      writeFileSync(join(r.checkout, "a.ts"), "checked=false\n");
+      expect(gitHeadSync(r.checkout)).toBe(r.h1);
+      expect(gitDirtySync(r.checkout)).toBe("M a.ts");
+      expect(await d.reviewDirty(getTask(f.db, "T1")!, ref)).toBe("M a.ts");
+      await git(["-C", r.checkout, "add", "a.ts"]);
+      expect(gitDirtySync(r.checkout)).toBe("M  a.ts");
+      expect(gitDirtySync(join(r.root, "missing"))).toContain("读不了工作区状态");
     } finally { f.close(); r.close(); }
   });
 

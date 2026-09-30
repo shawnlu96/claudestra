@@ -30,6 +30,8 @@ export interface AutoTickDeps {
   ensure(task: LedgerTask, role: SessionRole, family: AuthorFamily): Promise<EnsureResult>;
   /** Put the reviewer's own checkout on the head under review; runs before the claim, so a refusal writes nothing. */
   pinReview(task: LedgerTask, ref: SessionRef, head: string | null): Promise<{ dir: string } | { manual: string }>;
+  /** Uncommitted tracked edits in the reviewer's checkout (null = clean): the verdict is refused, so PM must take over. */
+  reviewDirty(task: LedgerTask, ref: SessionRef): Promise<string | null>;
   notifyPm(task: LedgerTask, text: string): Promise<void>;
   now(): number;
 }
@@ -203,6 +205,8 @@ class Card {
     const step = sent && stepOfNode(sent.node);
     const ref = sent && boundRef(this.db, this.task.id, roleOfIntent(sent));
     if (!sent || !step || !ref) return this.out("waiting", wait.reason);
+    const dirty = ref.role === "reviewer" ? await this.deps.reviewDirty(this.task, ref) : null;
+    if (dirty) return this.escalate(`${ref.agent} 的审查目录有未提交改动（${dirty}）：结论会被拒，审的也不再是 commit ${sent.head ?? ""}`, sent.id);
     const w = this.deps.worker(ref);
     if ("manual" in w) return this.out("held", `${wait.reason}；${w.manual}`);
     const seen = await w.observe(ref, { round: this.task.round, step, head: sent.head, dedupKey: sent.id });

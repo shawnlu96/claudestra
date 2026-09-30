@@ -29,6 +29,7 @@ import { SCHEDULER_OBSERVE_CMDS } from "./ledger-scheduler-observe-cmds.js";
 import { SCHEDULER_AUTO_CMDS } from "./ledger-scheduler-auto-cmds.js";
 import { isWriteInvocation } from "./write-commands.js";
 import { readSchedulerConfig } from "../lib/scheduler-config.js";
+import { collectCallerWitness } from "../lib/caller-witness.js";
 
 /** 认不出身份时读命令用的 actor：不是 registry 键、不在任何 PM 名单里，roleOf 恒为 null */
 export const UNKNOWN_ACTOR = "unknown";
@@ -104,6 +105,7 @@ async function realDeps(args: string[]): Promise<LedgerDeps | { error: string }>
     saveRegistry,
     now: () => Date.now(),
     callerSession: process.env.CLAUDESTRA_SESSION_ID || process.env.CLAUDE_CODE_SESSION_ID || undefined,
+    callerWitness: collectCallerWitness,
     autoProjects: () => { const s = readSchedulerConfig(); return s.enabled ? Object.keys(s.projects) : []; },
   };
 }

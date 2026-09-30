@@ -13,6 +13,7 @@ import type { AdapterDeps, LiveState, SendResult } from "../src/lib/worker-ports
 import type { SessionRef } from "../src/lib/worker-session.js";
 import { runLedger } from "../src/manager/ledger.js";
 import type { LedgerDeps } from "../src/manager/ledger-context.js";
+import type { CallerWitness } from "../src/lib/caller-witness.js";
 import type { Registry } from "../src/manager/core.js";
 
 export const H1 = "1".repeat(40), H2 = "2".repeat(40);
@@ -48,7 +49,8 @@ export function autoFixture(opts: { template?: "code" | "ui"; reviewerRuntime?: 
   setWorkflow(db, at("owner"), { taskId: "T1", taskRev: 1, template, templateVersion: 2, mode: "auto", authorFamily: "claude", fallback: "只报错不修" });
   const deps = (actor: string): LedgerDeps => ({
     db, actor, registryPath, projectIds: ["p"], now: () => (now += 10), autoProjects: () => ["p"], callerSession: SESSIONS[actor],
-    gitHead: () => reviewerAt ?? getTask(db, "T1")?.headSHA ?? null,
+    gitHead: () => reviewerAt ?? getTask(db, "T1")?.headSHA ?? null, gitDirty: () => reviewerDirty,
+    ...(witness ? { callerWitness: async () => witness! } : {}),
     loadRegistry: async () => JSON.parse(readFileSync(registryPath, "utf8")) as Registry, saveRegistry: async () => {},
   });
   const cli = (actor: string, ...args: string[]) => runLedger(args, deps(actor));
@@ -63,6 +65,8 @@ export function autoFixture(opts: { template?: "code" | "ui"; reviewerRuntime?: 
   const pins: string[] = [];
   let pinRefusal: string | null = null;
   let reviewerAt: string | null = null;
+  let reviewerDirty: string | null = null;
+  let witness: CallerWitness | null = null;
   const send = (route: Sent["route"]) => async (agent: string, sessionId: string, text: string, key: string): Promise<SendResult> => {
     if (sendMode === "refuse") return { ok: false, delivered: false, reason: "bridge 拒收" };
     sent.push({ agent, sessionId, text, key, route });
@@ -85,6 +89,7 @@ export function autoFixture(opts: { template?: "code" | "ui"; reviewerRuntime?: 
       return { kind: "ready", created: role === "reviewer", ref: { taskId: task.id, role, agent, sessionId: row.sessionId, family,
         transport: row.transport === "acp" ? "acp" : "tmux" } };
     },
+    reviewDirty: async () => reviewerDirty,
     pinReview: async (_task, _ref, head) => { pins.push(head ?? ""); return pinRefusal ? { manual: pinRefusal } : { dir: join(dir, "rv-t1") }; },
     notifyPm: async (_task, text) => { notices.push(text); },
     now: () => now,
@@ -107,7 +112,8 @@ export function autoFixture(opts: { template?: "code" | "ui"; reviewerRuntime?: 
   const close = () => { closeLedger(path); rmSync(dir, { recursive: true, force: true }); };
   return { db, dir, at, cli, cliWith, tick, task, intents, review, sent, live, acpState, notices, ensured, advance, close, tickDeps, registryPath,
     setSend: (m: typeof sendMode) => { sendMode = m; }, pins, refusePin: (why: string | null) => { pinRefusal = why; },
-    reviewerCheckoutAt: (h: string | null) => { reviewerAt = h; } };
+    reviewerCheckoutAt: (h: string | null) => { reviewerAt = h; }, dirtyReviewer: (d: string | null) => { reviewerDirty = d; },
+    witnessAs: (w: CallerWitness | null) => { witness = w; } };
 }
 
 /** Drive the card from spec to the start of build: author session, restate order, worker restates, PM releases it. */
