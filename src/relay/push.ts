@@ -5,6 +5,7 @@
  * 日志只记 fp、kind、状态、耗时——payload 是通知正文，永远不进日志。
  */
 import { Agent } from "node:https";
+import type { ClientHttp2Session } from "node:http2";
 import { ApnsClient, apnsTokenDead, parseApnsMessage, type ApnsConfig } from "../lib/apns.js";
 import { pushEndpointProblem } from "../lib/push-endpoint.js";
 import { asPush, type PushAckFrame, type RelayPushCapabilities } from "../lib/relay-protocol.js";
@@ -22,6 +23,10 @@ export interface PushGatewayOptions {
   allowPrivateEndpoints?: boolean;
   /** 测试专用：接受假推送服务的自签名证书。生产不传——传了等于对推送服务不验证书 */
   insecureTls?: boolean;
+  /** 沙箱 lab（scripts/sandbox-lab-relay.ts）：Web Push 只许投到这个 origin（假推送端点），别的 endpoint 一律 endpoint_forbidden */
+  pinEndpointOrigin?: string;
+  /** 沙箱 lab：APNs 连这里给的会话（假推送端点），不连 Apple。生产不传 */
+  apnsConnect?: (host: string) => ClientHttp2Session;
 }
 
 /** 两个后端可注入（测试用假的；生产由 pushGatewayFor 从 options 构造） */
@@ -31,6 +36,7 @@ export interface PushGatewayDeps {
   apns: Pick<ApnsClient, "send"> | null;
   perFpPerMinute: number;
   allowPrivateEndpoints?: boolean;
+  pinEndpointOrigin?: string;
   log: Logger;
 }
 
@@ -82,7 +88,9 @@ export class PushGateway {
   private async webPush(fp: string, sub: { endpoint: string; keys: { p256dh: string; auth: string } }, raw: string, ttl?: number): Promise<Omit<PushAckFrame, "t" | "id">> {
     const payload = bindSenderFp(raw, fp);
     if (!payload) return { ok: false, error: "payload_invalid" };
-    const problem = pushEndpointProblem(sub.endpoint, { allowPrivate: this.d.allowPrivateEndpoints });
+    const pin = this.d.pinEndpointOrigin;
+    const problem = pushEndpointProblem(sub.endpoint, { allowPrivate: this.d.allowPrivateEndpoints }) ??
+      (pin && new URL(sub.endpoint).origin !== pin ? `不是钉死的 ${pin}` : null);
     if (problem) {
       this.d.log("warn", `push ${fp} webpush endpoint 被拒（${problem}）`);
       return { ok: false, error: "endpoint_forbidden" };
@@ -110,9 +118,9 @@ export class PushGateway {
 /** 生产构造：options 里有 VAPID 就开 Web Push，有 APNs 配置就开 APNs */
 export function pushGatewayFor(opts: PushGatewayOptions | undefined, perFpPerMinute: number, log: Logger): PushGateway {
   return new PushGateway({
-    perFpPerMinute, log, allowPrivateEndpoints: opts?.allowPrivateEndpoints,
+    perFpPerMinute, log, allowPrivateEndpoints: opts?.allowPrivateEndpoints, pinEndpointOrigin: opts?.pinEndpointOrigin,
     vapidPublicKey: opts?.vapid?.publicKey,
     webPush: opts?.vapid ? webPushSender(opts.vapid, opts.insecureTls ? { agent: new Agent({ rejectUnauthorized: false }) } : {}) : null,
-    apns: opts?.apns ? new ApnsClient(opts.apns) : null,
+    apns: opts?.apns ? new ApnsClient(opts.apns, opts.apnsConnect ? { connect: opts.apnsConnect } : {}) : null,
   });
 }

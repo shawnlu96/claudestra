@@ -9,7 +9,7 @@ import http2 from "node:http2";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ApnsClient, apnsBody, apnsConfigFromEnv, apnsJwt, apnsTokenDead, parseApnsMessage, type ApnsConfig } from "../src/lib/apns.ts";
-import { selfSignedCert } from "./push-test-helpers.ts";
+import { selfSignedCert } from "../scripts/lab-push-fakes.ts";
 
 const dir = mkdtempSync(join(tmpdir(), "apns-"));
 const { privateKey, publicKey } = generateKeyPairSync("ec", { namedCurve: "prime256v1" });

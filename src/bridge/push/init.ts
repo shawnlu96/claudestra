@@ -10,7 +10,7 @@ import { readConfigSync } from "../../lib/config-store.js";
 import { repoEnvVar } from "../../lib/env-file.js";
 import { instanceKeySync, keyFingerprint } from "../../lib/instance-key.js";
 import { STATE_DIR } from "../../lib/paths.js";
-import { sandboxDisabled } from "../../lib/sandbox.js";
+import { isSandbox, sandboxDisabledOutsideLab } from "../../lib/sandbox.js";
 import { principalView } from "../../lib/devices.js";
 import { readPrincipals, type PrincipalsFile } from "../../lib/principals.js";
 import { readRegistryAgents } from "../../lib/registry.js";
@@ -39,6 +39,7 @@ export async function pushOwnerNoticeTracked(title: string, body: string): Promi
 const DEFAULT_VAPID_SUBJECT = "https://github.com/shawnlu96/claudestra";
 
 let started = false;
+const NO_DIRECT: DirectBackends = { vapidPublicKey: null, webPush: null, apns: null };
 
 function directBackends(): DirectBackends {
   let vapid: VapidIdentity | null = null;
@@ -55,11 +56,12 @@ function directBackends(): DirectBackends {
 
 /** deliver：订阅额度提醒的 Discord 渠道要用（quota-service.ts）；额度提醒依赖推送，随推送一起起、沙箱里一起不起 */
 export function initPush(deliver?: (env: Envelope) => Promise<Delivery>): void {
-  if (started || sandboxDisabled("推送")) return; // 沙箱不发 APNs / Web Push；/api/v1/push 路由也就不挂（lib/sandbox.ts）
+  if (started || sandboxDisabledOutsideLab("推送")) return; // 沙箱不发 APNs / Web Push，/api/v1/push 也不挂；lab 模式只经 lab 中继投到假端点
   started = true;
   const db = openWebState();
   let direct: DirectBackends | null = null;
-  const sender = createPushSender({ relay: relayClient, direct: () => (direct ??= directBackends()) });
+  // lab（沙箱里能走到这里的只有 lab）没有直发后端：web-push / APNs 不走 fetch，出站闸门拦不住，只能不建
+  const sender = createPushSender({ relay: relayClient, direct: () => (direct ??= isSandbox() ? NO_DIRECT : directBackends()) });
   let owner = new Set([OWNER_CHAT_ID]);
   let file: PrincipalsFile | null = null;
   const refresh = async () => {

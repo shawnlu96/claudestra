@@ -12,7 +12,7 @@ import { loadOrCreateVapidKeys, readVapidKeys } from "../src/lib/web-push.ts";
 import { PushGateway } from "../src/relay/push.ts";
 import { createRelay, type Relay } from "../src/relay/server.ts";
 import { keyFromSeed, seedOf, TestClient } from "./relay-test-client.ts";
-import { selfSignedCert, webPushTestSubscription } from "./push-test-helpers.ts";
+import { selfSignedCert, webPushTestSubscription } from "../scripts/lab-push-fakes.ts";
 
 const SUB = { endpoint: "https://web.push.apple.com/QAbc", keys: { p256dh: "BPubKey", auth: "authKey" } };
 const payload = JSON.stringify({ title: "a", body: "b" });

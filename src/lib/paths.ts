@@ -22,7 +22,7 @@
 
 import { homedir } from "os";
 import { join } from "path";
-import { resolveBridgeUrl } from "./bridge-url.js";
+import { DEFAULT_BRIDGE_PORT, resolveBridgeUrl } from "./bridge-url.js";
 import { enforceSandboxProcess, SANDBOX_DENY_DIRS_ENV, SANDBOX_DENY_PORTS_ENV, SANDBOX_FLAG, SANDBOX_ROOT_ENV } from "./sandbox.js";
 import { testSafeStateDir } from "./test-guard.js";
 /** 入口文件（launcher / cron）经这里拿：它们本来就 import paths，省一行 import（三个文件都在体积上限） */
@@ -50,7 +50,8 @@ export const RUNTIME_DIR = envDir("CLAUDESTRA_RUNTIME_DIR") ?? DEFAULT_RUNTIME_D
 // 沙箱进程（CLAUDESTRA_SANDBOX=1）在任何路径被用到之前过闸；非沙箱是空操作
 enforceSandboxProcess({
   env: process.env, stateDir: STATE_DIR, runtimeDir: RUNTIME_DIR,
-  defaultStateDir: stateDirIn(homedir()), defaultRuntimeDir: DEFAULT_RUNTIME_DIR, bridgeUrl: () => resolveBridgeUrl(), entry: process.argv[1],
+  defaultStateDir: stateDirIn(homedir()), defaultRuntimeDir: DEFAULT_RUNTIME_DIR, bridgeUrl: () => resolveBridgeUrl(), defaultPort: DEFAULT_BRIDGE_PORT,
+  entry: process.argv[1],
 });
 
 /** 状态目录下的文件 */
