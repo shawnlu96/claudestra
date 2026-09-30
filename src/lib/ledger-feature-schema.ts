@@ -51,14 +51,59 @@ export function FEATURE_SCHEMA(db: Database): void {
   run("CREATE UNIQUE INDEX IF NOT EXISTS events_origin_seq ON events(origin, originSeq)");
 }
 
-export const FEATURE_TABLES = ["ledger_instance", "features", "dag_versions"] as const;
+const REWRITE_ONLY = "BEGIN SELECT RAISE(ABORT, 'dag versions are rewrite-only'); END";
+/** 提案里 dag-approve / 作废能改的只有这几列，其余写入后冻结 */
+const STATUS_KEYS = ["state", "decidedAt", "decidedBy", "decisionNote"];
+const PROPOSAL_COLS = ["seq", "featureId", "version", "baseVersion", "reasonKind", "reasonText", "proposedBy", "nodes", "cancels", "scopeChange", "sha", "askId", "createdAt"];
+
+/**
+ * 第 11 步（T89 = L2 重写与审批）。dag_proposals：要 owner 批的重写先落在这里（pending），批了才写进 dag_versions；
+ * 内容列写入后不可改（trigger），只有 pending 能改状态——审批绑定的快照哈希照着这些列算，改了就对不上。一个 feature 同时只有一个 pending。
+ * dag_bindings：计划节点开工绑卡，不产生新版本；只追加。dag_versions 补上取消记录、是否改范围、批准它的 ask。
+ */
+const DAG_REWRITE_SQL: readonly string[] = [
+  `CREATE TABLE IF NOT EXISTS dag_proposals (
+    seq INTEGER PRIMARY KEY AUTOINCREMENT, featureId TEXT NOT NULL REFERENCES features(id),
+    version INTEGER NOT NULL CHECK (version >= 2), baseVersion INTEGER NOT NULL CHECK (baseVersion = version - 1),
+    reasonKind TEXT NOT NULL CHECK (reasonKind IN (${inList(DAG_REASON_KINDS.slice(1))})), reasonText TEXT NOT NULL,
+    proposedBy TEXT NOT NULL, nodes TEXT NOT NULL, cancels TEXT NOT NULL, scopeChange INTEGER NOT NULL CHECK (scopeChange IN (0, 1)),
+    sha TEXT NOT NULL, askId TEXT NOT NULL, createdAt INTEGER NOT NULL,
+    state TEXT NOT NULL CHECK (state IN ('pending','approved','rejected','void')), decidedAt INTEGER, decidedBy TEXT, decisionNote TEXT)`,
+  "CREATE UNIQUE INDEX IF NOT EXISTS dag_proposals_pending ON dag_proposals(featureId) WHERE state = 'pending'",
+  `CREATE TRIGGER IF NOT EXISTS dag_proposals_frozen BEFORE UPDATE ON dag_proposals
+    WHEN OLD.state <> 'pending' OR ${PROPOSAL_COLS.map((c) => `NEW.${c} IS NOT OLD.${c}`).join(" OR ")} ${REWRITE_ONLY}`,
+  "CREATE TRIGGER IF NOT EXISTS dag_proposals_no_delete BEFORE DELETE ON dag_proposals " + REWRITE_ONLY,
+  `CREATE TRIGGER IF NOT EXISTS dag_proposals_no_replace BEFORE INSERT ON dag_proposals
+    WHEN EXISTS (SELECT 1 FROM dag_proposals WHERE seq = NEW.seq OR (featureId = NEW.featureId AND state = 'pending')) ${REWRITE_ONLY}`,
+  `CREATE TABLE IF NOT EXISTS dag_bindings (
+    featureId TEXT NOT NULL REFERENCES features(id), version INTEGER NOT NULL, nodeKey TEXT NOT NULL, taskId TEXT NOT NULL,
+    boundBy TEXT NOT NULL, boundAt INTEGER NOT NULL, PRIMARY KEY (featureId, version, nodeKey), UNIQUE (featureId, version, taskId))`,
+  "CREATE TRIGGER IF NOT EXISTS dag_bindings_no_update BEFORE UPDATE ON dag_bindings " + REWRITE_ONLY,
+  "CREATE TRIGGER IF NOT EXISTS dag_bindings_no_delete BEFORE DELETE ON dag_bindings " + REWRITE_ONLY,
+  `CREATE TRIGGER IF NOT EXISTS dag_bindings_no_replace BEFORE INSERT ON dag_bindings
+    WHEN EXISTS (SELECT 1 FROM dag_bindings WHERE featureId = NEW.featureId AND version = NEW.version AND (nodeKey = NEW.nodeKey OR taskId = NEW.taskId))
+    ${REWRITE_ONLY}`,
+];
+
+export function DAG_REWRITE_SCHEMA(db: Database): void {
+  for (const sql of DAG_REWRITE_SQL) db.prepare(sql).run();
+  const have = columns(db, "dag_versions");
+  if (!have.has("cancels")) db.prepare("ALTER TABLE dag_versions ADD COLUMN cancels TEXT NOT NULL DEFAULT '[]'").run();
+  if (!have.has("scopeChange")) db.prepare("ALTER TABLE dag_versions ADD COLUMN scopeChange INTEGER NOT NULL DEFAULT 0").run();
+  if (!have.has("askId")) db.prepare("ALTER TABLE dag_versions ADD COLUMN askId TEXT").run();
+}
+
+export const FEATURE_TABLES = ["ledger_instance", "features", "dag_versions", "dag_proposals", "dag_bindings"] as const;
 export const FEATURE_COLUMNS: Record<string, readonly string[]> = {
   features: ["id", "project", "title", "ownerWords", "status", "currentVersion", "rev"],
-  dag_versions: ["featureId", "version", "reasonKind", "reasonText", "proposedBy", "approvedBy", "nodes"],
+  dag_versions: ["featureId", "version", "reasonKind", "reasonText", "proposedBy", "approvedBy", "nodes", "cancels", "scopeChange", "askId"],
+  dag_proposals: [...PROPOSAL_COLS, ...STATUS_KEYS],
+  dag_bindings: ["featureId", "version", "nodeKey", "taskId", "boundBy", "boundAt"],
   events: ["origin", "originSeq"],
 };
 export const FEATURE_INDEXES: Record<string, readonly string[]> = {
   features: ["features_project_title"],
   tasks: ["tasks_feature"],
   events: ["events_origin_seq"],
+  dag_proposals: ["dag_proposals_pending"],
 };
