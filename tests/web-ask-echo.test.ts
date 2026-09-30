@@ -17,6 +17,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
 const SELF = new Set(["api:owner:self"]);
+const OWN = { from: "web", fromId: "api:owner:self" }; // 本人：没有来源的记录按不可信处理（T31c）
 const comps = [{ type: "buttons" as const, buttons: [{ id: "deploy", label: "部署" }, { id: "hold", label: "先不" }] }];
 const content = "[✅ owner 回复了你 09:00 的「待你处理」（ask_1）：要部署吗？选择：部署。下面是 owner 发的原文]\n[button:deploy]";
 const raw = `<channel source="claudestra" chat_id="api:owner:self" user="web" user_id="api:owner:self" trigger="ask_answer" api="true">\n${content}\n</channel>`;
@@ -27,7 +28,7 @@ describe("历史：作答回填所答气泡的已答态（R1）", () => {
     expect(un).toMatchObject({ text: "部署", askId: "ask_1", wire: "[button:deploy]" });
     const items: NeutralMessage[] = [
       { seq: 1, role: "assistant", ts: "2026-09-29T00:00:01Z", replyText: "要部署吗？", replyComponents: comps, replyAskId: "ask_1" },
-      { seq: 2, role: "user", ts: "2026-09-29T00:00:02Z", text: un.text, askId: un.askId, wire: un.wire },
+      { seq: 2, role: "user", ts: "2026-09-29T00:00:02Z", text: un.text, from: un.from, fromId: un.fromId, askId: un.askId, wire: un.wire },
     ];
     const out = toChatMessages(items, { selfIds: SELF });
     expect(out[0].replyClicks).toEqual({ b0: "deploy" });
@@ -38,9 +39,9 @@ describe("历史：作答回填所答气泡的已答态（R1）", () => {
   test("卡片上答的是更早那条：按 replyAskId 回填它，不回填最近的别的锚点", () => {
     const items: NeutralMessage[] = [
       { seq: 1, role: "assistant", replyText: "要部署吗？", replyComponents: comps, replyAskId: "ask_1" },
-      { seq: 2, role: "user", text: "别的事" },
+      { seq: 2, role: "user", text: "别的事", ...OWN },
       { seq: 3, role: "assistant", replyText: "换个问题", replyComponents: comps, replyAskId: "ask_9" },
-      { seq: 4, role: "user", text: "部署", askId: "ask_1", wire: "[button:deploy]" },
+      { seq: 4, role: "user", text: "部署", askId: "ask_1", wire: "[button:deploy]", ...OWN },
     ];
     const out = toChatMessages(items, { selfIds: SELF });
     expect([out[0].replyClicks, out[2].replyClicks]).toEqual([{ b0: "deploy" }, undefined]);
@@ -50,7 +51,7 @@ describe("历史：作答回填所答气泡的已答态（R1）", () => {
 
   test("只写了话的作答没有原文（和正文一样），照旧显示原话", () => {
     const un = answerEcho("[✅ owner 回复了你 09:00 的「待你处理」（ask_2）：发吗？下面是 owner 发的原文]\n先等等");
-    const out = toChatMessages([{ seq: 1, role: "user", text: un.text, askId: un.askId }], { selfIds: SELF });
+    const out = toChatMessages([{ seq: 1, role: "user", text: un.text, askId: un.askId, ...OWN }], { selfIds: SELF });
     expect(out[0]).toMatchObject({ content: "先等等", askId: "ask_2" });
     expect(out[0].wire).toBeUndefined();
   });
@@ -85,7 +86,7 @@ describe("ask 移出列表后（结案超过 3 天）点旧按钮不会发出 [b
   const old = { replyText: "要部署吗？", replyComponents: comps, replyTs: "2026-09-29T00:00:01Z", ts: "2026-09-29T00:00:01Z", replyAskId: "ask_1" };
 
   test("按按钮答的：历史按原文回填了已答态，那一行本来就点不了（reply-components 的 clicks[rowKey] 已有值）", () => {
-    const out = toChatMessages([{ seq: 1, role: "assistant", ...old }, { seq: 2, role: "user", text: "部署", askId: "ask_1", wire: "[button:deploy]" }], { selfIds: SELF });
+    const out = toChatMessages([{ seq: 1, role: "assistant", ...old }, { seq: 2, role: "user", text: "部署", askId: "ask_1", wire: "[button:deploy]", ...OWN }], { selfIds: SELF });
     expect(out[0].replyClicks?.b0).toBe("deploy");
   });
 

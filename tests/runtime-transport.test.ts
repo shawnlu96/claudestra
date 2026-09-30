@@ -51,7 +51,7 @@ describe("transportsOf / normalizeTransport", () => {
 });
 
 describe("registry 读 transport 字段", () => {
-  test("acp 读出来；缺省 / tmux / 脏值读成 undefined（= tmux，老 agent 的读出结果不变）", () => {
+  test("acp 与显式 tmux 读出来；缺省 / 脏值读成 undefined", () => {
     const agents = normalizeRegistryAgents({
       agents: {
         "agent-a": { runtime: "codex", transport: "acp" },
@@ -60,7 +60,7 @@ describe("registry 读 transport 字段", () => {
         "agent-d": { transport: 42 },
       },
     });
-    expect(agents.map((a) => a.transport)).toEqual(["acp", undefined, undefined, undefined]);
+    expect(agents.map((a) => a.transport)).toEqual(["acp", undefined, "tmux", undefined]);
     expect(normalizeTransport(agents[1].transport)).toBe("tmux");
   });
 });

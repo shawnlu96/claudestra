@@ -14,6 +14,8 @@ import { wallWaitRefusal, windowWallWait, type WallWait } from "../lib/wall-scre
 import { resolveWebInvocation, isProjectSkillForOtherAgent } from "./slash-registry.js";
 import { apiJson } from "./api-respond.js";
 import type { ApiUserEndpoint } from "./router.js";
+import { acpSlash } from "./acp-link.js";
+import { isConfiguredAcpChannel } from "./acp-state.js";
 
 export const SLASH_OWNER_ONLY = {
   code: "slash_owner_only",
@@ -49,10 +51,20 @@ export interface SlashRequest {
 
 const SLASH_RE = /^\/([\w:-]+)(?:\s+([\s\S]+))?$/;
 
+/** ACP 宿主的 agent：不敲键，原样当 prompt 交给宿主 */
+async function acpSlashPassthrough(agent: SlashAgent, cmd: string, ccText: string, deps: SlashDeps): Promise<Response> {
+  const r = await acpSlash(agent.channelId, ccText);
+  if (!r.ok) return apiJson(409, { ok: false, error: `没交给宿主：${r.error}` });
+  deps.record(cmd, agent);
+  deps.markThinking(agent);
+  console.log(`⚡ [api] slash 交给 ACP 宿主 ${agent.name}: ${ccText}`);
+  return apiJson(202, { ok: true, accepted: true, slash: true, ccText, agent: agent.name, acp: true });
+}
+
 /** 处理完了（直通 202 / 403 / 409 / 注入失败 500）→ Response；不是能直通的命令 → null，调用方按普通消息投递 */
 export async function handleSlashPassthrough(r: SlashRequest, deps: SlashDeps): Promise<Response | null> {
   const { principal, agent, text } = r;
-  if (r.hasAttachments || principal.peer) return null; // peer 的斜杠文字永远是普通消息（v2.11 review 2026-07-19 #5）
+  if (principal.peer) return null; // peer 的斜杠文字永远是普通消息（v2.11 review 2026-07-19 #5）
   const slashM = text.trim().match(SLASH_RE);
   if (!slashM) return null;
   const owner = isOwnerPrincipal(principal);
@@ -60,6 +72,9 @@ export async function handleSlashPassthrough(r: SlashRequest, deps: SlashDeps): 
   // Pi / Codex 的命令表是它们自己的（lib/runtime-commands.ts），命中就交给运行时原生解释（同名命令语义不同）。
   // Codex 不在表里的 "/xxx" 落回普通消息——CC 的技能注进 Codex 的 TUI 没有意义；Pi 照旧回落到 CC 注册表
   const rt = String(agent.runtime || "");
+  if (rt === "codex" && slashM[1] === "clear" && await isConfiguredAcpChannel(agent.channelId))
+    return owner ? apiJson(409, { ok: false, error: "ACP 模式尚不支持 /clear；会话未改动" }) : apiJson(403, { ok: false, ...SLASH_OWNER_ONLY });
+  if (r.hasAttachments) return null;
   const args = (slashM[2] || "").trim();
   const nativeHit = runtimeCommandsFor(rt, agent.name)?.find((c) => c.name === slashM[1]);
   const resolved = nativeHit
@@ -72,6 +87,7 @@ export async function handleSlashPassthrough(r: SlashRequest, deps: SlashDeps): 
     return apiJson(409, { ok: false, error: `/${slashM[1]} 是 ${other.replace(/^agent-/, "")} 的项目技能，当前 agent 不可用` });
   }
   if (!owner) return apiJson(403, { ok: false, ...SLASH_OWNER_ONLY });
+  if (await isConfiguredAcpChannel(agent.channelId)) return acpSlashPassthrough(agent, slashM[1], resolved.ccText, deps);
   const win = agent.name === "master" ? `${MASTER_SESSION}:0` : windowTarget(agent.name);
   // 停在额度菜单 / 撞墙倒计时上不打字（倒计时上一打字就取消自动续跑，菜单上会选项）；原因只告诉能看额度的凭据（canSeeQuota）
   const wall = await (deps.wallWait ?? ((w: string) => windowWallWait(w, rt || undefined)))(win); // Codex 窗口还认选择菜单（T63）

@@ -19,7 +19,8 @@ import { open as fsOpen } from "fs/promises";
 import { join } from "path";
 import { projectJsonlPath, findJsonlBySessionId } from "./jsonl-cost.js";
 import { agentArchiveDir, ARCHIVE_ROOT, realpathWithin } from "./session-archive.js";
-import { channelAnswer, channelBodyText, commandRecordLine, commandStdoutLine, senderOf, type AskAnswerRef } from "./inbound-body.js";
+import { channelAnswer, channelAttachments, channelBodyText, commandRecordLine, commandStdoutLine, senderOf, type AskAnswerRef, type InboundAttachmentsRef } from "./inbound-body.js";
+import { ccOwnRecord, plainUserText } from "./cc-own-records.js";
 import { settleToolCard } from "./auq-echo.js";
 import { dropFailedReplyRows, keepReplyRows, sanitizeComponents } from "./history-components.js";
 import { askIdOfReplyResult } from "./reply-ask-schema.js";
@@ -117,7 +118,7 @@ export type ReplyComponentRow =
   | { type: "multiselect"; id: string; placeholder?: string; min?: number; max?: number; submitLabel?: string; options: { label: string; value: string; description?: string }[] };
 
 /** askId / wire：owner 对「待你处理」的作答（lib/inbound-body.ts answerEcho） */
-export interface HistoryMessage extends AskAnswerRef {
+export interface HistoryMessage extends AskAnswerRef, InboundAttachmentsRef {
   /** jsonl 行号（0-based），分页锚点，同一文件内稳定 */
   seq: number;
   ts: string | null;
@@ -261,14 +262,14 @@ function collectChannelMessageIds(lines: string[]): Set<string> {
  * 解包一条 <channel> 入站消息：返回 { text, from }；不是 channel 包装
  * （caveat / local-command 等真 meta）返回 null。
  */
-export function unwrapChannelMessage(raw: string): ({ text: string; from?: string; fromId?: string } & AskAnswerRef) | null {
+export function unwrapChannelMessage(raw: string): ({ text: string; from?: string; fromId?: string } & AskAnswerRef & InboundAttachmentsRef) | null {
   const m = raw.match(CHANNEL_WRAP_RE);
   if (!m) return null;
   const from = /(?:^|\s)user="([^"]*)"/.exec(m[1])?.[1] || undefined;
   const fromId = /(?:^|\s)user_id="([^"]*)"/.exec(m[1])?.[1] || undefined;
   const text = channelBodyText(m[1], m[2]); // 剥注入头 + 补附件行（lib/inbound-body.ts）
   if (!text) return null;
-  return { text, from, fromId, ...channelAnswer(m[1], m[2]) };
+  return { text, from, fromId, ...channelAnswer(m[1], m[2]), ...channelAttachments(m[1]) }; // 附件只取头属性：正文里的附件行不可信
 }
 
 function summarize(sessionId: string, source: "live" | "archive", path: string): SessionSummary | null {
@@ -558,6 +559,8 @@ function parseHistoryLines(
           : Array.isArray(c)
             ? c.filter((b: any) => b?.type === "text").map((b: any) => b.text || "").join("\n")
             : "";
+      const plain = plainUserText(rec, text, runtime); // Pi / Codex：原文照登，不认文本头（lib/cc-own-records.ts）
+      if (plain !== undefined) { if (plain.trim()) all.push({ seq, ts, role: "user", text: plain }); continue; }
       if (rec.isMeta === true) {
         // isMeta + <channel> 包装 = channel 送达的真实入站消息，解包进历史；
         // 其余 isMeta（caveat / local-command 输出等）照旧过滤
@@ -571,31 +574,9 @@ function parseHistoryLines(
         continue;
       }
       if (!text.trim()) continue; // 纯 tool_result 载荷
-      // TUI 斜杠命令记录（不带 isMeta 的裸 user 条目）不是用户打的字：
-      //   <command-name>/x</command-name> ± <command-message>… ± <command-args>…（顺序不定）→ system 轻条目「/x 参数」
-      //   <local-command-stdout>输出</local-command-stdout> → system 轻条目（去 ANSI、截断）
-      //   Pi 技能调用 <skill name="x" …>整份 SKILL.md</skill>[参数] → system 轻条目「/x 参数」
-      // 不处理会把原始标签 / 整篇技能说明裸渲染成用户气泡。
-      const trimmed = text.trim();
-      // harness 注入的后台任务完成通知(<task-notification>,裸 user 记录不带 isMeta)同理,取 summary 转 system 轻条目。
-      if (/^<task-notification>/.test(trimmed)) {
-        const sum = /<summary>([\s\S]*?)<\/summary>/.exec(trimmed);
-        const body = sum?.[1]?.trim();
-        all.push({ seq, ts, role: "system", text: body ? `⚙️ ${body}` : "⚙️ 后台任务通知" });
-        continue;
-      }
-      if (/^<command-(name|message)>/.test(trimmed)) {
-        const cmd = commandRecordLine(trimmed);
-        if (cmd) all.push({ seq, ts, role: "system", text: cmd });
-        continue; // 无 command-name 的畸形命令记录直接丢
-      }
-      const stdout = commandStdoutLine(trimmed);
-      if (stdout !== undefined) { if (stdout) all.push({ seq, ts, role: "system", text: stdout }); continue; }
-      const skill = /^<skill name="([^"]+)"[^>]*>[\s\S]*<\/skill>([\s\S]*)$/.exec(trimmed);
-      if (skill) { all.push({ seq, ts, role: "system", text: `/${skill[1]} ${skill[2].trim()}`.trim() }); continue; }
-      // 队列回放的裸斜杠命令：tmux 注入的 /compact 等经 CC 队列会额外落一条纯文本 user 记录，紧接着还有
-      // <command-name> 记录 → 不跳过就渲染成双份。channel 入站是 isMeta 包装、TUI 直敲只落 <command-name>，都不走这里。
-      if (/^\/[\w:-]+$/.test(trimmed)) continue;
+      // CC 自己写的斜杠命令 / 命令输出 / 后台通知 / 中断标记不是用户打的字（lib/cc-own-records.ts）
+      const own = ccOwnRecord(text.trim(), runtime);
+      if (own) { if ("system" in own) all.push({ seq, ts, role: "system", text: own.system }); continue; }
       const msg: HistoryMessage = { seq, ts, role: "user", text };
       if (rec.isCompactSummary === true) msg.compactSummary = true;
       all.push(msg);
@@ -891,7 +872,8 @@ export async function searchSessionHistory(
 
   for await (const { line, idx } of grepJsonlLines(filePath, q, opts.chunkBytes)) {
     if (hits.length >= maxHits) break;
-    const rec: any = translateSessionLine(runtimeForSessionPath(filePath), line);
+    const runtime = runtimeForSessionPath(filePath);
+    const rec: any = translateSessionLine(runtime, line);
     if (!rec) continue;
     const ts = typeof rec.timestamp === "string" ? rec.timestamp : null;
 
@@ -918,7 +900,9 @@ export async function searchSessionHistory(
             : "";
       let body = text;
       let from: string | undefined;
-      if (rec.isMeta === true) {
+      const plain = plainUserText(rec, text, runtime); // 与历史同规则：Pi / Codex 原文照搜
+      if (plain !== undefined) body = plain;
+      else if (rec.isMeta === true) {
         // channel 送达的入站消息解包；其余 isMeta（caveat / 命令输出）不搜
         const un = unwrapChannelMessage(text);
         if (!un) continue;
@@ -926,11 +910,8 @@ export async function searchSessionHistory(
         body = un.text;
         from = un.from;
       } else {
-        const trimmed = text.trim();
         // 与 readSessionHistory 同规则：机器产物不当用户消息搜
-        if (!trimmed) continue;
-        if (/^<(task-notification|command-name|command-message|local-command-stdout)>|^<skill name="/.test(trimmed)) continue;
-        if (/^\/[\w:-]+$/.test(trimmed)) continue;
+        if (!text.trim() || ccOwnRecord(text.trim(), runtime)) continue;
       }
       const lower = body.toLowerCase();
       if (!lower.includes(q)) continue;

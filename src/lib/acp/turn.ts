@@ -20,6 +20,7 @@ export interface StopReport {
   event: "Stop" | "StopFailure";
   stopHookActive: boolean;
   interrupt?: boolean;
+  acpDeliveryWarning?: true;
 }
 
 /**
@@ -45,11 +46,12 @@ export const hookPromptText = (reason: string) => `<hook_prompt>${reason}</hook_
 
 type Slot =
   | { kind: "prompt"; text: string }
+  | { kind: "command"; text: string }
   | { kind: "steer" }
   | { kind: "external"; done: Promise<PromptOutcome> }
   | { kind: "nudge"; text: string };
 
-type Pick = { kind: "prompt" | "nudge"; text: string } | { kind: "external"; done: Promise<PromptOutcome> };
+type Pick = { kind: "prompt" | "command" | "nudge"; text: string } | { kind: "external"; done: Promise<PromptOutcome> };
 
 const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
@@ -65,7 +67,9 @@ function call<T>(f: () => Promise<T>): Promise<T> {
   }
 }
 
-const failedOutcome = (e: unknown): PromptOutcome => ({ kind: "failed", failure: { kind: "error", key: `transport:${Date.now()}`, message: errText(e) } });
+/** 传输层失败的去重键：单调序号。不能用时间戳——同一毫秒里两次失败会被 FailureDedup 合成一条、少出一张卡 */
+let transportFailures = 0;
+const failedOutcome = (e: unknown): PromptOutcome => ({ kind: "failed", failure: { kind: "error", key: `transport:${++transportFailures}`, message: errText(e) } });
 
 export class AcpTurnLoop {
   private slots: Slot[] = [];
@@ -81,6 +85,14 @@ export class AcpTurnLoop {
 
   get queued(): number {
     return this.slots.length;
+  }
+
+  /** 斜杠命令要独占一轮 session/prompt；steering 会把它变成普通文字。 */
+  submitCommand(text: string): "prompt" | "queued" {
+    const idle = !this.busy;
+    this.slots.push({ kind: "command", text });
+    this.pump();
+    return idle ? "prompt" : "queued";
   }
 
   /** 收到一条入站消息。返回它怎么进的会话（日志 / 单测用） */
@@ -112,6 +124,7 @@ export class AcpTurnLoop {
     if (ext >= 0) return this.slots.splice(ext, 1)[0] as Pick;
     const head = this.slots[0];
     if (head.kind === "nudge") return this.slots.shift() as Pick;
+    if (head.kind === "command") return this.slots.shift() as Pick;
     const n = this.slots.findIndex((s) => s.kind !== "prompt");
     const batch = this.slots.splice(0, n < 0 ? this.slots.length : n) as { kind: "prompt"; text: string }[];
     return { kind: "prompt", text: batch.map((b) => b.text).join("\n\n") };
