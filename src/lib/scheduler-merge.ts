@@ -215,6 +215,8 @@ export function resolveMergeRun(db: Database, ctx: WriteCtx, input: { intentId: 
       settleIntent(db, { ...ctx, now }, { id: row.intentId, from: intent.status, to: input.outcome === "done" ? "done" : "cancelled",
         receipt: `merge ${input.outcome}: ${receipt}` });
     }
+    // The task stage was not moved by any verified receipt, so the planner must not keep driving it; PM re-enables auto deliberately.
+    db.prepare("UPDATE task_workflows SET mode='manual', rev=rev+1, updatedAt=? WHERE taskId=? AND mode='auto'").run(now, row.taskId);
     insertEvent(db, { actor: ctx.actor, now, dedupKey: `scheduler:${row.intentId}:merge:resolved` }, {
       project: row.project, target: row.taskId, kind: "scheduler", text: `合并队列：人工结清为 ${input.outcome}（${receipt}）`,
       data: { op: "merge_resolve", intentId: row.intentId, from: "unknown", outcome: input.outcome, receipt, manual: true,

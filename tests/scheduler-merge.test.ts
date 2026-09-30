@@ -189,6 +189,7 @@ describe("T68 durable merge/deploy queue", () => {
         db: f.db, actor: "owner", projectIds: ["p"], loadRegistry: async () => ({} as Registry), saveRegistry: async () => {}, now: () => 200 });
       expect(r).toMatchObject({ ok: true, run: { phase: "resolved" } });
       expect(f.db.query("SELECT status FROM scheduler_intents WHERE id='merge-one'").get()).toEqual({ status: "done" });
+      expect(f.db.query("SELECT mode FROM task_workflows WHERE taskId='T1'").get()).toEqual({ mode: "manual" });
     } finally { f.close(); }
   });
 });
