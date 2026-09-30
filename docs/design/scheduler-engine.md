@@ -95,7 +95,8 @@ owner 截图 ask 属上线闸。
 1. **PR A：台账状态与意图。** schema、任务模式、CAS、决定事件、资源占用与只读 DAG 投影；双进程争同一 intent 只成功一次。无真实 worker。
 2. **PR B：规划器与模板。** 纯解释器、code/ui/security 分叉、依赖/并发、P1 三轮、跨模型校验、审查 session 绑定；快照回放同输入同计划。
 3. **PR C：T69 与审查 session 编排。** 统一 worker 打标、幂等迁移、列表过滤/直达、ask 保留；每卡独立 reviewer 的创建与 verified 后安全归档。UI 前后截图。
-4. **PR D：合并队列与服务。** 配置化 merge/deploy、CI/head 校验、冻结恢复、launchd 第四服务接 install/update/doctor/部署；沙箱中做崩溃恢复和假外部服务实测。
+4. **PR D：合并队列与服务。** 配置化 merge、CI/head 校验、冻结恢复、launchd 第四服务接 install/update/doctor；合并成功停在 `merged`（待部署），不发起部署。沙箱中做崩溃恢复和假外部服务实测。
+   **自动部署拆到 T68g**（分支 `feat/t68-auto-deploy` 保存了部署任务 / worker / 清理、launchd submit、部署配置与 verify 驱动的实现和测试，未开 PR）。拆的原因：#242 / #259 的四轮审查里，部署生命周期类 P1 每轮都在（部署被服务重载连坐杀掉 → 一次性任务残留 → unknown 把 update 永久锁死 → 放行 unknown 后在途部署与下一轮 update 重叠）；根子是「结论不明」与「部署子进程是否还活着」没有可核对的区分。在那之前部署由 PM 手动跑（现有 merge-queue / deploy 脚本或 `manager update`），或靠 launcher 自带的自动更新。
 5. **PR E：worker 适配器与切换。** 待 T60 ACP 合入后接 ACP 主接口、本机 channel 回退、T48/T49/peer；先 observe，对新卡逐张开启 auto，旧卡继续 manual。重复通知、重启、断网、额度失败均以台账对账。
 
 每个 PR 均跑 `GUARD_STRICT=1 bun run check`、相关入口构建与沙箱实测，再用一次性 `codex exec` 做一轮对抗自查；自查是开发验收，不是正式任务 reviewer。只 push 分支、开 draft PR；不合并、不动线上服务或生产库。新文件 ≤400 行、热点文件净增 ≤0，`src/lib`
@@ -103,26 +104,25 @@ owner 截图 ask 属上线闸。
 
 ## 已定（待 owner 复核）
 
-- 独立 launchd scheduler 服务；install-cli/update/doctor/部署均纳入。服务故障不拖垮 bridge。
-- 审查通过且 CI 绿自动合并部署。阻塞闸仅 UI 截图、tag/release、同类 P1 三轮；P2 给 PM 看 diff 但不阻塞。
+- 独立 launchd scheduler 服务；install-cli/update/doctor 均纳入（自动部署在 T68g）。服务故障不拖垮 bridge。
+- 审查通过且 CI 绿自动合并；自动部署在 T68g，此前 PM 手动部署。阻塞闸仅 UI 截图、tag/release、同类 P1 三轮；P2 给 PM 看 diff 但不阻塞。
 - 自动卡必填作者模型家族与退路；只从新卡逐张 opt-in，在途卡不迁。
 - 不清楚外部副作用是否已经发生时冻结并升级，宁可停住也不重复 merge/deploy；未知 runtime 家族不猜审查者。
 - 卡级文件锁和 worker 槽持有到 live/verified 或整卡终止；单个意图结清不释放。归一 family 和沿用 findingId 之外，连续四轮任意 P1 是硬升级上限；换规格版本重新计数。
-- 专用 scheduler actor 只能写调度专用命令和已部署本卡的 `verify`；人工写入保留实际 actor 和 manual 标记。服务环境标记用于审计归属与避免借 PM/master 身份，不是同一 OS 用户下的安全边界（本地 shell 本就可写台账文件）；所有自动写入仍要逐意图 CAS 和阶段守卫。结果不明的 merge/deploy 即使被取消也不能自动换 key 重试，须有绑定原 intent 的 PM 明确重试决定及外部事实核对。
+- 专用 scheduler actor 只能写调度专用命令（不含 `verify`，部署后验证随自动部署拆到 T68g）；人工写入保留实际 actor 和 manual 标记。服务环境标记用于审计归属与避免借 PM/master 身份，不是同一 OS 用户下的安全边界（本地 shell 本就可写台账文件）；所有自动写入仍要逐意图 CAS 和阶段守卫。结果不明的 merge/deploy 即使被取消也不能自动换 key 重试，须有绑定原 intent 的 PM 明确重试决定及外部事实核对。
 - 在自动重试决定的独立入口落地前，已取消的同轮 merge 一律停给 PM 手工核对并接管，调度器与台账写入口都拒绝换 key 重做。UI 合并的第二道写入闸查台账 authorize ask：owner 答复、未过期、非 guest，绑定当前 task/specRev/head/前后截图摘要；产生 ask 和投影视图的适配器仍在 PR E。
 - T69 移除 worker 前的归档会复制 registry 的 kind 到归档标记；默认全文搜索读该标记过滤，显式指定 agent 仍可查。更早已移除且无标记的旧会话只按 `agent-task-*` 命名识别，不猜其他历史目录。
 - 一次派多张卡给 peer 时，并发往对方项目 PM 入口投递，受本项目「对外委托槽」约束，不等待上一张完成。对方实例升级后，有常设授权且 owner 已设并发上限时，每卡自动建立一个执行 session 和一个跨模型审查 session，按本机相同模板推进；超过上限排队，前卡完成即补位。缺授权或上限时只接单排队并提示对方 owner。双实例沙箱验收：A 同时委托五张给 B，B 上限三，先起三组、后补两组。
 - 第四服务默认无配置即空转，`doctor` 明报；配置无效时不部分启动。PR D 的 UI 模板在 owner 截图 ask 与 head/specRev/摘要的真实联动接通前禁止自动合并，避免把口头通过当授权。
-- GitHub merge API 可原子锁 head，不能原子锁目标 base；最终检查到合并后必须再读 PR，若 base/head/merge SHA 与批准的 main 目标不符，立即冻结且不部署，由 PM 核对。验证检查单在每项目配置的 `deploy.cwd` 仓库运行；验证事件落盘后进程中断时，只允许同意图同去重键的 scheduler 结果重放。
+- GitHub merge API 可原子锁 head，不能原子锁目标 base；最终检查到合并后必须再读 PR，若 base/head/merge SHA 与批准的 main 目标不符，立即冻结，由 PM 核对。
 
-- r2 部署改由独立的一次性 launchd job 执行；scheduler 只提交并观察持久化结果，再以 merge SHA 核对产物。scheduler 自身重启不会杀部署命令；重复 intent 不重派，消失或失败仍冻结。scheduler.pid 单实例锁拿不到或失租即停止，每次动作前重核拥有权；scheduler 与 manager update 共用维护锁，部署/结果不明 journal 在进程替换后继续挡自动更新，update-inflight 标记挡新调度动作。只有同 intent 的部署任务能接手自己的维护；draft 仅等待本卡并跳过未产生的检查查询。
+- 合并 journal 的终点是 `merged`：调度器随后把合并意图结为 done（回执「待 PM 部署」）、释放项目合并槽，任务停在 `merge` 阶段，规划器按已结意图等待；PM 部署并核对后照常手工推 live / verified。`merged` 不挡 update——PM 部署本仓自己就是一次 update。
+- `unknown` 只来自合并这一步（PR/head/CI/mergeability 变化、merge 调用或核对失败、流程漂移），进入时冻结本项目合并队列，并与 `updating`、`merging` 一样算维护忙碌，挡手动 `update` 和 launcher 自动更新：没人确认 GitHub 侧的效果已经结束之前不换代码。出口是 PM / master / owner 核对 GitHub 后执行 `ledger scheduler-merge-resolve <intent> --outcome done|failed|cancelled --receipt <证据>`：journal 进终态 `resolved`，合并意图结为 done（outcome=done）或 cancelled，释放项目合并槽，写 manual 事件，并把本卡 workflow 转为 manual（任务阶段没有经核实的回执推进，引擎不能继续驱动，PM 核对后再决定是否重开 auto；这一条参考了 t68 未提交稿）。调度身份不能结清；队列冻结不随之自动解除，确认没有其他 unknown 后再 `ledger unfreeze`。待结清项由巡检规则 `merge_unknown` 推给 PM，doctor 单列一行。`manager update` 被维护锁拒绝时退出码为 1。
+- scheduler.pid 单实例锁拿不到或失租即停止，每次动作前重核拥有权；scheduler 与 manager update 共用维护锁，update-inflight 标记挡新调度动作；draft 仅等待本卡并跳过未产生的检查查询。
 
-- r3 部署任务的生命周期：`launchctl submit` 的任务是 KeepAlive，不移除就每约 10 秒被重新拉起。worker 写完 `result.json` 后最后一步 `launchctl remove` 自己的标签（launchd 随即 SIGTERM 它，结果已落盘）；被重新拉起时发现 `started` 已存在，也先移除自己再退出，绝不重跑部署命令。scheduler 的 observe 看到结果或看到任务已退出时再幂等移除一次兜底；任务仍在运行时绝不从 scheduler 侧移除（那会杀掉进行中的部署），只报 unknown，由 doctor 列出。`launchctl list` 读不到时继续观察，截止时间仍兜底。
-- r3 `unknown` 的出口：合并 journal 进入 `unknown` 后只冻结本项目合并队列，不再算作维护忙碌，手动 `update`、launcher 自动更新照常可用（真正有外部动作在跑的 updating/merging/merged/deploying/deployed/verifying 才挡）。唯一出口是 PM / master / owner 在核对 GitHub 与部署目标后执行 `ledger scheduler-merge-resolve <intent> --outcome done|failed|cancelled --receipt <证据>`：journal 进终态 `resolved`，合并意图结为 done（outcome=done）或 cancelled，释放项目合并槽，写 manual 事件，并把本卡 workflow 转为 manual（任务阶段没有经核实的回执推进，引擎不能继续驱动，PM 核对后再决定是否重开 auto）。调度身份不能结清；队列冻结不随之自动解除，确认没有其他 unknown 后再 `ledger unfreeze`。待结清的 unknown 由巡检规则 `merge_unknown` 推给 PM，doctor 也单列一行。`manager update` 被维护锁拒绝时退出码为 1，部署任务不会把拒绝当成成功。
+### 调度服务配置
 
-### 调度服务配置与部署回执
-
-`statePath("scheduler.json")` 不存在时 `enabled=false`；启用时逐项目填写 `maxActiveWorkers`、非空 `requiredChecks`（完整 CI job 名）和 `deploy`。必过检查缺失、pending、失败或 skipped 均不合并。`deploy.cwd` 是该项目仓库绝对路径，`argv` 是部署命令的字符串数组，`verifyArgv` 是只读部署核证命令；两者都不经 shell 拼接。核证命令输出 JSON：`{"ok":true,"mergeSha":"<完整 SHA>","receipt":"<可核对版本>"}`，合并 SHA 必须与本卡的 merge journal 相同。部署命令以环境变量收到 `CLAUDESTRA_MERGE_SHA`、`CLAUDESTRA_PR_URL`、`CLAUDESTRA_TASK_ID`；可设 `timeoutMs`（1 秒到 1 小时），默认 20 分钟。目标地址与本地凭据只进该机配置，不入仓库。仓库的 launchd 安装/更新使用同一 `DAEMONS` 清单，scheduler 排在 launcher 之前；旧的个人 `deploy-full.sh` 不再是自动合并队列的执行入口。
+`statePath("scheduler.json")` 不存在时 `enabled=false`；启用时逐项目填写 `maxActiveWorkers`、非空 `requiredChecks`（完整 CI job 名）和 `repoDir`（该项目本地仓库绝对路径，`gh` 在这里运行并核对仓库与 PR 一致）。必过检查缺失、pending、失败或 skipped 均不合并。配置里出现 `deploy` 直接判为无效（服务空转、doctor 报 fail），不静默降级为只合并。仓库的 launchd 安装/更新使用同一 `DAEMONS` 清单，scheduler 排在 launcher 之前。
 
 合并使用 GitHub REST merge 的 `sha` 参数原子锁定已审 head；[GitHub 文档](https://docs.github.com/en/rest/pulls/pulls#merge-a-pull-request)明确 head 不符返回 409。`update-branch` 产生新 head 后，台账同事务改为新轮 review、取消旧 merge intent 并释放项目合并槽。
 
@@ -154,3 +154,4 @@ owner 截图 ask 属上线闸。
 
 - r2 最终交付验证：`GUARD_BASE=feat/t68-worker-sessions GUARD_STRICT=1 bun run check` 7326 pass / 0 fail，严格 guard 全绿；定向 27/0，八个入口构建通过。沙箱两次自身部署的证据为 `/tmp/t68-r2-self-deploy.log` 与 `/tmp/t68-r2-self-deploy2.log`；只用随机标识四个假服务和 stub 台账 verify，生产未动。
 - r3 修复（#242 由 Claude Code 接手）：部署任务收尾自行移除 launchd 标签、observe 兜底移除且不杀运行中任务；unknown 不再挡 update，新增 PM 专用 `scheduler-merge-resolve` 与 `resolved` 终态，巡检 `merge_unknown` 与 doctor 行提示待结清项；被拒的 update 以非 0 退出。
+- r4（Codex 审 109ee73a 不通过：unknown 不代表在途部署已停，放行后可与下一轮 update 重叠）：按审查收口规则拆卡。本 PR 只保留合并队列，停在 `merged` 待 PM 部署；部署任务、worker、清理、部署配置与调度器 verify 挪到 `feat/t68-auto-deploy`，留给 T68g。unknown 恢复为维护忙碌，出口是 `scheduler-merge-resolve`；配置改为 `repoDir`，带 `deploy` 的配置判无效。

@@ -1,13 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import { parseSchedulerConfig } from "../src/lib/scheduler-config.js";
 import { mergeExternal } from "../src/lib/scheduler-merge-external.js";
-import type { MergeRun } from "../src/lib/scheduler-merge.js";
 import type { runBounded } from "../src/lib/run-bounded.js";
 
 const H = "a".repeat(40), M = "b".repeat(40);
 const policy = parseSchedulerConfig({ enabled: true, projects: { p: { maxActiveWorkers: 2, requiredChecks: ["check", "Guard"],
-  deploy: { cwd: "/tmp/project", argv: ["/usr/bin/true"], verifyArgv: ["verify", "--json"] } } } }).projects.p;
-const row = { intentId: "i", taskId: "T1", prRef: "https://github.com/example/repo/pull/42", mergeSha: M } as MergeRun;
+  repoDir: "/tmp/project" } } }).projects.p;
+const row = { prRef: "https://github.com/example/repo/pull/42" };
 
 describe("T68 real merge adapter command boundary", () => {
   test("draft metadata is returned without querying absent or pending checks", async () => {
@@ -21,7 +20,7 @@ describe("T68 real merge adapter command boundary", () => {
       }) };
       throw new Error("draft must not run gh pr checks");
     };
-    const snapshot = await mergeExternal(policy, async () => ({ ok: true }), command).inspect(row.prRef);
+    const snapshot = await mergeExternal(policy, command).inspect(row.prRef);
     expect(snapshot.draft).toBe(true);
     expect(snapshot.checks).toEqual([]);
     expect(calls).toHaveLength(2);
@@ -32,18 +31,10 @@ describe("T68 real merge adapter command boundary", () => {
       calls.push(argv);
       return { code: 0, stdout: JSON.stringify({ merged: true, sha: M }), stderr: "", timedOut: false };
     };
-    const ops = mergeExternal(policy, async () => ({ ok: true }), command);
+    const ops = mergeExternal(policy, command);
     expect(await ops.merge(row.prRef, H)).toBe(M);
     expect(calls).toEqual([["gh", "api", "-X", "PUT", "repos/example/repo/pulls/42/merge", "-f", `sha=${H}`, "-f", "merge_method=merge"]]);
     await expect(ops.merge(row.prRef, "bad")).rejects.toThrow(/expected head/);
     expect(calls).toHaveLength(1);
-  });
-  test("deployment receipt must name the exact merge SHA", async () => {
-    const command: typeof runBounded = async () => ({ code: 0, stdout: JSON.stringify({ ok: true, mergeSha: H, receipt: "release-1" }),
-      stderr: "", timedOut: false });
-    const ops = mergeExternal(policy, async () => ({ ok: true }), command, {
-      submit: async () => "job", observe: async () => ({ status: "complete" }),
-    });
-    expect((await ops.deployed(row)).status).toBe("unknown");
   });
 });

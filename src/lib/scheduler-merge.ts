@@ -1,4 +1,7 @@
-/** Durable merge/deploy journal: uncertain external effects freeze the queue instead of replaying commands. */
+/**
+ * Durable merge journal: uncertain external effects freeze the queue instead of replaying commands.
+ * The scheduler stops at `merged`; deployment stays with the PM (docs/design/scheduler-engine.md, 分期 T68g).
+ */
 import type { Database } from "bun:sqlite";
 import { isManager, mustTask, type WriteCtx } from "./ledger-checks.js";
 import { getIntent, getWorkflow } from "./ledger-scheduler.js";
@@ -9,8 +12,7 @@ import { getSchedulerSession } from "./scheduler-sessions.js";
 import { canTransition, nextTaskState } from "./ledger-stages.js";
 import { settleIntent } from "./ledger-scheduler-write.js";
 
-export type MergePhase = "ready" | "updating" | "await_review" | "await_ci" | "merging" | "merged" |
-  "deploying" | "deployed" | "verifying" | "done" | "unknown" | "resolved";
+export type MergePhase = "ready" | "updating" | "await_review" | "await_ci" | "merging" | "merged" | "unknown" | "resolved";
 export interface MergeRun {
   intentId: string;
   taskId: string;
@@ -22,8 +24,6 @@ export interface MergeRun {
   phase: MergePhase;
   rev: number;
   mergeSha: string | null;
-  deployReceipt: string | null;
-  verifyReceipt: string | null;
   reason: string | null;
   createdAt: number;
   updatedAt: number;
@@ -51,9 +51,7 @@ export function mergeRunDrift(db: Database, run: MergeRun): string | null {
   }
   if (task.headSHA !== run.reviewedHead) return "任务 head 已变化，旧审查失效";
   if (task.pr !== run.prRef || task.branch !== run.expectedBranch) return "任务 PR 或分支已变化";
-  const beforeDeploy = ["ready", "updating", "await_ci", "merging", "merged", "deploying"].includes(run.phase);
-  if (beforeDeploy && task.stage !== "merge") return `任务阶段已从 merge 变为 ${task.stage}`;
-  if (!beforeDeploy && task.stage !== "live" && task.stage !== "verified") return `部署后任务阶段异常：${task.stage}`;
+  if (task.stage !== "merge") return `任务阶段已从 merge 变为 ${task.stage}`;
   if (getMeta(db, run.project).queueFrozen.frozen) return "项目合并队列已冻结";
   if (["ready", "updating", "await_ci", "merging"].includes(run.phase)) {
     const review = currentReviewFacts(task, listEvents(db, { project: run.project, target: run.taskId }));
@@ -114,8 +112,7 @@ export function beginMergeRun(db: Database, ctx: WriteCtx, intentId: string, req
 const NEXT: Record<MergePhase, readonly MergePhase[]> = {
   ready: ["updating", "await_ci", "unknown"], updating: ["await_review", "await_ci", "unknown"],
   await_review: [], await_ci: ["merging", "unknown"], merging: ["merged", "unknown"],
-  merged: ["deploying", "unknown"], deploying: ["deployed", "unknown"],
-  deployed: ["verifying", "unknown"], verifying: ["done", "unknown"], done: [], unknown: [], resolved: [],
+  merged: [], unknown: [], resolved: [],
 };
 
 /** A phase claim is committed before the corresponding external call; receipts move it forward after observing reality. */
@@ -132,15 +129,13 @@ export function advanceMergeRun(db: Database, ctx: WriteCtx, input: {
     const drift = mergeRunDrift(db, row);
     if (drift && input.to !== "unknown" && input.to !== "await_review") throw new LedgerError("conflict", `合并运行已失效：${drift}`);
     const receipt = input.receipt ? text(input.receipt, "回执") : null;
-    if (["await_ci", "merged", "deployed", "done", "unknown", "await_review"].includes(input.to) && !receipt) {
+    if (["await_ci", "merged", "unknown", "await_review"].includes(input.to) && !receipt) {
       throw new LedgerError("invalid", `${input.to} 需要可核对回执或原因`);
     }
     if (input.to === "merged" && !sha(input.mergeSha)) throw new LedgerError("invalid", "合并提交必须是完整 SHA");
     if (input.to === "await_review" && (!sha(input.newHead) || input.newHead === row.reviewedHead)) {
       throw new LedgerError("invalid", "更新分支后必须提供不同的完整 head");
     }
-    if (["deploying", "deployed", "verifying", "done"].includes(input.to) && !row.mergeSha) throw new LedgerError("conflict", "尚未确认合并提交");
-    if (["verifying", "done"].includes(input.to) && !row.deployReceipt) throw new LedgerError("conflict", "尚未确认部署结果");
     const now = ctx.now ?? Date.now();
     if (input.to === "await_review") {
       const task = mustTask(db, row.taskId);
@@ -156,28 +151,8 @@ export function advanceMergeRun(db: Database, ctx: WriteCtx, input: {
       insertEvent(db, { actor: ctx.actor, now }, { project: task.project, target: task.id, kind: "stage", text: "分支更新后重新审查新 head",
         data: { from: "merge", to: "review", round: next.round, specRev: next.specRev, head: input.newHead } }, false);
     }
-    if (input.to === "deployed") {
-      const task = mustTask(db, row.taskId);
-      if (task.stage !== "merge" || task.headSHA !== row.reviewedHead || !canTransition(task, "live", "pm").ok) {
-        throw new LedgerError("conflict", "部署核证时任务阶段或 head 已变，不能推进 live");
-      }
-      const next = nextTaskState(task, "live");
-      db.prepare("UPDATE tasks SET stage=?, stageBefore=?, round=?, specRev=?, rev=rev+1, updatedAt=? WHERE id=?")
-        .run(next.stage, next.stageBefore, next.round, next.specRev, now, task.id);
-      insertEvent(db, { actor: ctx.actor, now }, { project: task.project, target: task.id, kind: "stage", text: "部署核实后进入 live",
-        data: { from: "merge", to: "live", round: next.round, specRev: next.specRev } }, false);
-      insertEvent(db, { actor: ctx.actor, now }, { project: task.project, target: task.id, kind: "deploy", text: "自动部署已核实",
-        data: { version: receipt, mergeSha: row.mergeSha } }, false);
-    }
-    if (input.to === "done") {
-      const task = mustTask(db, row.taskId);
-      const verified = listEvents(db, { project: row.project, target: row.taskId }).findLast((e) => e.kind === "verify");
-      if (task.stage !== "verified" || verified?.data.result !== "pass") throw new LedgerError("conflict", "台账尚未验证通过");
-    }
-    db.prepare(`UPDATE scheduler_merges SET phase=?, rev=rev+1, mergeSha=COALESCE(?,mergeSha),
-      deployReceipt=COALESCE(?,deployReceipt), verifyReceipt=COALESCE(?,verifyReceipt), reason=?, updatedAt=? WHERE intentId=?`)
-      .run(input.to, input.to === "merged" ? input.mergeSha ?? null : null, input.to === "deployed" ? receipt : null,
-        input.to === "done" ? receipt : null, ["unknown", "await_review"].includes(input.to) ? receipt : null, now, row.intentId);
+    db.prepare("UPDATE scheduler_merges SET phase=?, rev=rev+1, mergeSha=COALESCE(?,mergeSha), reason=?, updatedAt=? WHERE intentId=?")
+      .run(input.to, input.to === "merged" ? input.mergeSha ?? null : null, ["unknown", "await_review"].includes(input.to) ? receipt : null, now, row.intentId);
     if (input.to === "unknown") db.prepare("INSERT INTO meta (project,key,value) VALUES (?, 'queueFrozen', ?) ON CONFLICT(project,key) DO UPDATE SET value=excluded.value")
       .run(row.project, JSON.stringify({ frozen: true, reason: `合并结果不明：${receipt}`, since: now }));
     insertEvent(db, { actor: ctx.actor, now, dedupKey: `scheduler:${row.intentId}:merge:${input.to}` }, {
@@ -193,7 +168,7 @@ export const MERGE_RESOLUTIONS = ["done", "failed", "cancelled"] as const;
 export type MergeResolution = (typeof MERGE_RESOLUTIONS)[number];
 
 /**
- * The only exit from `unknown`: a human manager who checked GitHub / the deployment target closes the journal with a receipt.
+ * The only exit from `unknown`: a human manager who checked GitHub closes the journal with a receipt.
  * The scheduler identity can never do this, otherwise "freeze instead of guessing" would become "guess after a restart".
  * The project queue freeze is left alone on purpose: other unknown runs may remain, so unfreezing stays an explicit `ledger unfreeze`.
  */

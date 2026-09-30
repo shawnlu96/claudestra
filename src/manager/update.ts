@@ -263,10 +263,10 @@ async function cmdUpdateBeta(d: UpdateDeps): Promise<void> {
 
 /** release 通道：查最新 release → 切到 tag → 挂回分支 → 尾段。beta 通道与半截补完在前面分流 */
 export async function cmdUpdate(d: UpdateDeps): Promise<void> {
-  const lock = await acquireMaintenance("update", { ownIntent: process.env.CLAUDESTRA_DEPLOY_INTENT });
+  const lock = await acquireMaintenance("update");
   if (!lock) {
-    process.exitCode = 1; // A scheduler deployment job judges success by exit code; a refused update must not read as deployed.
-    return output({ ok: false, error: "scheduler merge/deploy or another maintenance operation is in progress" });
+    process.exitCode = 1; // Deploy scripts and the launcher log judge by exit code; a refused update must not read as updated.
+    return output({ ok: false, error: "scheduler merge in progress, unresolved unknown merge, or another maintenance operation" });
   }
   const active = () => { if (!lock.held()) throw new Error("update lost maintenance lease"); };
   const guarded: UpdateDeps = {

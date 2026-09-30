@@ -7,7 +7,6 @@ import { acquireLock } from "./lib/file-lock.js";
 import { statePath } from "./lib/paths.js";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
-import { runDeployJob } from "./lib/scheduler-deploy-worker.js";
 import { SchedulerStopped } from "./lib/scheduler-maintenance.js";
 
 export async function runScheduler(signal: AbortSignal, wait: (ms: number) => Promise<void> = Bun.sleep,
@@ -46,12 +45,8 @@ export async function runScheduler(signal: AbortSignal, wait: (ms: number) => Pr
 }
 
 if (import.meta.main) {
-  if (process.argv[2] === "--deploy-job") {
-    await runDeployJob(process.argv[3]);
-  } else {
-    const stop = new AbortController();
-    process.once("SIGINT", () => stop.abort());
-    process.once("SIGTERM", () => stop.abort());
-    await runScheduler(stop.signal);
-  }
+  const stop = new AbortController();
+  process.once("SIGINT", () => stop.abort());
+  process.once("SIGTERM", () => stop.abort());
+  await runScheduler(stop.signal);
 }
