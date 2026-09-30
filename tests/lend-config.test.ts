@@ -3,7 +3,7 @@
  * 联系人校验、个人项目拒绝；以及 lend / borrow 的写子命令过认主守卫、只许 owner / master 改。
  */
 import { describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { acquireLock } from "../src/lib/file-lock.js";
@@ -11,6 +11,7 @@ import { checkLend } from "../src/lib/doctor-lend.js";
 import { defaultLendFile, lendFileProblem, readLend, updateLend, type LendFile } from "../src/lib/lend-config.js";
 import { buildBorrowEntry, buildLendEntry, effectiveLend, isPersonalProject, resolveContact, type LendContact } from "../src/lib/lend-policy.js";
 import type { ProjectDef } from "../src/lib/projects.js";
+import { writeTextAtomicSync } from "../src/lib/state-file.js";
 import { isWriteInvocation } from "../src/manager/write-commands.js";
 import { ownerOrMasterError } from "../src/manager/project-guard.js";
 
@@ -25,10 +26,12 @@ const contacts: LendContact[] = [
 const proj = (id: string, dirs: string[], personal?: boolean): ProjectDef & { personal?: boolean } =>
   ({ id, name: id, dirs, createdAt: "", ...(personal ? { personal } : {}) });
 const HOME = process.env.HOME || "/Users/x";
+/** 目录要真实存在：解析不了的目录按个人项目处理 */
+const repoDir = (n: string) => { const d = join(mkdtempSync(join(tmpdir(), "lend-repo-")), n); mkdirSync(d); return d; };
 const projects = [
-  proj("claude-orchestrator", ["/repos/claude-orchestrator"]),
-  proj("diary", ["/repos/diary"], true),
-  proj("home", [HOME, "/repos/router"]),
+  proj("claude-orchestrator", [repoDir("claude-orchestrator")]),
+  proj("diary", [repoDir("diary")], true),
+  proj("home", [HOME, repoDir("router")]),
   proj("scratch", ["/tmp"]),
 ];
 const lendOk = (over: Partial<Parameters<typeof buildLendEntry>[0]> = {}) =>
@@ -243,5 +246,54 @@ describe("命令权限", () => {
     expect(as("9")).toBeNull();
     expect(as("1")?.error).toContain("agent-pm 不能改出借声明");
     expect(as("404")).not.toBeNull();
+  });
+});
+
+describe("T88 r1 回归", () => {
+  const real = mkdtempSync(join(tmpdir(), "lend-real-"));
+  const links = mkdtempSync(join(tmpdir(), "lend-links-"));
+  const alias = (name: string, target: string) => { const p = join(links, name); symlinkSync(target, p); return p; };
+  test("P1-1 家目录 / 根 / 临时目录的软链别名也算个人项目（写入拒、effective 剔）", () => {
+    const aliases = [alias("home", HOME), alias("root", "/"), alias("tmp", "/tmp"), alias("systmp", tmpdir())];
+    for (const a of aliases) {
+      const p = proj("alias", [a]);
+      expect(isPersonalProject(p), a).toBe(true);
+      expect(buildBorrowEntry({ ref: "mate-b", projects: "alias" }, contacts, [p]), a).toMatchObject({ ok: false });
+      const f = validFile();
+      f.borrow[0].projects = ["alias"];
+      expect(effectiveLend({ status: "ok", file: f }, contacts, [p]).borrow, a).toEqual([]);
+    }
+  });
+  test("P1-1 解析不了的目录按个人项目处理（fail-closed）；普通子目录不误伤", () => {
+    expect(isPersonalProject(proj("gone", ["/no/such/dir-for-lend-test"]))).toBe(true);
+    expect(isPersonalProject(proj("ok", [real]))).toBe(false);
+    expect(isPersonalProject(proj("ok2", [alias("real", real)]))).toBe(false);
+  });
+  test("P1-2 失租的旧 writer 恢复后不能覆盖新 writer 已提交的内容", async () => {
+    const p = tmpPath();
+    let resume!: () => void;
+    const gate = new Promise<void>((r) => { resume = r; });
+    let entered!: () => void;
+    const inA = new Promise<void>((r) => { entered = r; });
+    const a = updateLend(async (f) => {
+      entered();
+      await gate;
+      f.borrow.push({ peer: "first", projects: ["claude-orchestrator"], roles: ["review"], maxOpen: 1 });
+    }, p);
+    await inA;
+    const old = new Date(Date.now() - 181_000);
+    utimesSync(`${p}.lock`, old, old); // 模拟 A 暂停超过锁期限
+    await updateLend((f) => { f.borrow.push({ peer: "second", projects: ["claude-orchestrator"], roles: ["review"], maxOpen: 1 }); }, p);
+    resume();
+    await expect(a).rejects.toThrow("锁");
+    expect((await readLend(p)).file.borrow.map((e) => e.peer)).toEqual(["second"]);
+  });
+  test("P1-2 原子写底座：提交前核验不过就不 rename、不留 tmp", () => {
+    const dir = mkdtempSync(join(tmpdir(), "lend-commit-"));
+    const target = join(dir, "x.json");
+    writeFileSync(target, "{\"v\":1}");
+    expect(() => writeTextAtomicSync(target, "{\"v\":2}", { commitIf: () => false })).toThrow();
+    expect(readFileSync(target, "utf8")).toBe("{\"v\":1}");
+    expect(readdirSync(dir)).toEqual(["x.json"]);
   });
 });

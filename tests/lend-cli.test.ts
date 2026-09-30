@@ -1,6 +1,7 @@
 /** manager lend / borrow 与 project-edit --personal 的接线（临时 CLAUDESTRA_STATE_DIR 里跑子进程；规则本身见 tests/lend-config.test.ts） */
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { acquireLock } from "../src/lib/file-lock.js";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -8,9 +9,11 @@ describe("manager lend / borrow 接线", () => {
   const state = mkdtempSync(join(tmpdir(), "lend-cli-"));
   writeFileSync(join(state, "registry.json"), JSON.stringify({ socket: "", agents: { "agent-exec": { channelId: "222", status: "active" } } }));
   writeFileSync(join(state, "peers.json"), JSON.stringify({ httpPeers: [{ name: "team-a", fp: "aaaa-bbbb-cccc-dddd", addedAt: "" }], pendingInvites: [] }));
+  // 目录要真实存在：解析不了的目录按个人项目处理
+  for (const d of ["orch", "diary"]) mkdirSync(join(state, d));
   writeFileSync(join(state, "projects.json"), JSON.stringify({ projects: [
-    { id: "orch", name: "orch", dirs: ["/no/such/orch"], createdAt: "" },
-    { id: "diary", name: "diary", dirs: ["/no/such/diary"], createdAt: "" },
+    { id: "orch", name: "orch", dirs: [join(state, "orch")], createdAt: "" },
+    { id: "diary", name: "diary", dirs: [join(state, "diary")], createdAt: "" },
   ] }));
   const manager = join(import.meta.dir, "../src/manager.ts");
   const run = (args: string[], channel?: string) => {
@@ -48,5 +51,21 @@ describe("manager lend / borrow 接线", () => {
     writeFileSync(join(state, "lend.json"), "{oops");
     expect(run(["lend", "status"])).toMatchObject({ ok: true, file: "invalid", lending: false });
     expect(run(["lend", "set", "team-a", "--codex", "1", "--repos", "a/b"])).toMatchObject({ ok: false, error: expect.stringContaining("无效") });
+  }, 60_000);
+
+  test("P1-4 等 lend 锁期间联系人被删：拿到锁后重核，拒写", async () => {
+    unlinkSync(join(state, "lend.json")); // 上一条测试留下的是坏文件
+    writeFileSync(join(state, "peers.json"), JSON.stringify({ httpPeers: [{ name: "team-a", fp: "aaaa-bbbb-cccc-dddd", addedAt: "" }], pendingInvites: [] }));
+    const lock = await acquireLock(join(state, "lend.json.lock"), 0);
+    const env: Record<string, string | undefined> = { ...process.env, CLAUDESTRA_STATE_DIR: state };
+    delete env.DISCORD_CHANNEL_ID;
+    const child = Bun.spawn([process.execPath, manager, "lend", "set", "team-a", "--codex", "1", "--repos", "a/b"], { env, stdout: "pipe", stderr: "pipe" });
+    await Bun.sleep(1500);
+    writeFileSync(join(state, "peers.json"), JSON.stringify({ httpPeers: [], pendingInvites: [] }));
+    lock?.release();
+    await child.exited;
+    const out = JSON.parse((await new Response(child.stdout).text()).trim().split("\n").at(-1)!);
+    expect(out).toMatchObject({ ok: false, error: expect.stringContaining("不在联系人里") });
+    expect(existsSync(join(state, "lend.json")) ? file().lend : []).toEqual([]);
   }, 60_000);
 });

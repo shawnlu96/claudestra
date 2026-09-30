@@ -31,17 +31,27 @@ async function status(kind: "lend" | "borrow"): Promise<void> {
   output({ ...base, declared: read.file.borrow, effective: eff.borrow, message });
 }
 
-/** 通过准入的条目按 peer 名 upsert；lend set 同时打开总开关（执行 set 本身就是 owner 的明确意思） */
-async function setEntry(kind: "lend" | "borrow", built: Built<LendFile["lend"][number] | LendFile["borrow"][number]>): Promise<void> {
-  if (!built.ok) return output({ ok: false, error: built.error });
-  const entry = built.entry;
-  await updateLend((f) => {
+type AnyEntry = LendFile["lend"][number] | LendFile["borrow"][number];
+type Ctx = Awaited<ReturnType<typeof readLendContext>>;
+
+/**
+ * 通过准入的条目按 peer 名 upsert；lend set 同时打开总开关（执行 set 本身就是 owner 的明确意思）。
+ * 准入在拿到 lend 锁之后才读 peers / projects 再判：等锁期间联系人被删、项目被标成个人项目，都按新状态拒（tests/lend-cli.test.ts「P1-4」）。
+ */
+async function setEntry(kind: "lend" | "borrow", build: (ctx: Ctx) => Built<AnyEntry>): Promise<void> {
+  const built = await updateLend(async (f) => {
+    const b = build(await readLendContext());
+    if (!b.ok) return b;
+    const entry = b.entry;
     const list = (kind === "lend" ? f.lend : f.borrow) as (typeof entry)[];
     const i = list.findIndex((e) => e.peer === entry.peer);
     if (i >= 0) list[i] = entry;
     else list.push(entry);
     if (kind === "lend") f.enabled = true;
+    return b;
   });
+  if (!built.ok) return output({ ok: false, error: built.error });
+  const entry = built.entry;
   output({ ok: true, [kind]: entry, message: "confirm" in entry
     ? `已开始向 ${entry.peer} 出借（${entry.confirm === "auto" ? "自动接单" : "每单等你确认"}）`
     : `已允许把 ${entry.projects.join("、")} 的单子给 ${entry.peer}：这些项目的 PR 会发给对方机器上的 agent 审（代码、规格与验收原文都会到对方那边）` });
@@ -82,13 +92,11 @@ export async function cmdLend(kind: "lend" | "borrow", args: string[]): Promise<
       return await off(kind, p.flags.peer);
     }
     if (p.pos.length !== 1) return output({ ok: false, error: usage });
-    const ctx = await readLendContext();
     const f = p.flags;
-    const built = kind === "lend"
+    await setEntry(kind, (ctx) => kind === "lend"
       ? buildLendEntry({ ref: p.pos[0], families: { codex: f.codex, claude: f.claude }, roles: f.roles, repos: f.repos,
         ordersPerDay: f["orders-per-day"], confirm: f.confirm, until: f.until }, ctx.contacts)
-      : buildBorrowEntry({ ref: p.pos[0], projects: f.projects, roles: f.roles, maxOpen: f["max-open"] }, ctx.contacts, ctx.projects);
-    await setEntry(kind, built);
+      : buildBorrowEntry({ ref: p.pos[0], projects: f.projects, roles: f.roles, maxOpen: f["max-open"] }, ctx.contacts, ctx.projects));
   } catch (e) {
     output({ ok: false, error: (e as Error).message });
   }

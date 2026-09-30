@@ -8,6 +8,8 @@ import {
   DEFAULT_MAX_OPEN, DEFAULT_ORDERS_PER_DAY, LEND_FAMILIES, MAX_FAMILY_SLOTS, MAX_OPEN, MAX_ORDERS_PER_DAY, MAX_REPOS, REPO_RE,
   type BorrowEntry, type LendConfirm, type LendEntry, type LendFamily, type LendRead, type LendRole,
 } from "./lend-config.js";
+import { realpathSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import { readPeers } from "./peers.js";
 import { isUmbrellaDir, normalizeDir, readProjects, type ProjectDef } from "./projects.js";
 
@@ -16,9 +18,34 @@ export interface LendContact { name: string; fp?: string; disabled?: boolean }
 
 export type Built<T> = { ok: true; entry: T } | { ok: false; error: string };
 
-/** 个人项目：显式标了 personal，或者目录里有家目录 / 根 / 系统临时目录这类伞形目录（「家目录杂项」这种项目什么都可能装） */
+const realOrNull = (d: string): string | null => {
+  try { return realpathSync(d); } catch { return null; /* 不存在 / 没权限：调用方按个人项目处理（fail-closed） */ }
+};
+
+/** 伞形根（家目录 / 根 / 系统临时目录）的字面路径与真实路径；只做精确匹配，HOME/repos/x 这类子目录不算 */
+function umbrellaRoots(): Set<string> {
+  const out = new Set<string>();
+  for (const d of ["/", process.env.HOME || homedir(), homedir(), "/tmp", "/private/tmp", "/var/tmp", tmpdir()]) {
+    out.add(normalizeDir(d));
+    const r = realOrNull(d);
+    if (r) out.add(r);
+  }
+  return out;
+}
+
+/**
+ * 个人项目：显式标了 personal，或者某个目录解析到伞形根（「家目录杂项」这种项目什么都可能装）。
+ * 按真实路径比：软链别名（~/home-alias → ~）也要认出来；解析不了、不是绝对路径的目录一律按个人项目处理。
+ */
 export function isPersonalProject(p: Pick<ProjectDef, "dirs"> & { personal?: boolean }): boolean {
-  return p.personal === true || p.dirs.some((d) => isUmbrellaDir(normalizeDir(d)));
+  if (p.personal === true) return true;
+  const roots = umbrellaRoots();
+  return p.dirs.some((raw) => {
+    const d = normalizeDir(raw);
+    if (!d.startsWith("/") || isUmbrellaDir(d)) return true;
+    const real = realOrNull(d);
+    return real === null || roots.has(real);
+  });
 }
 
 /** 按名字或指纹找一个未禁用的联系人；两种都对不上 / 指纹同时对上多条 → 报错 */
@@ -115,7 +142,7 @@ export function buildBorrowEntry(
   for (const id of ids) {
     const p = projects.find((x) => x.id === id);
     if (!p) return { ok: false, error: `项目 ${id} 不存在（manager project-list 看项目 id）` };
-    if (isPersonalProject(p)) return { ok: false, error: `项目 ${id} 是个人项目，永远不外借（标记或目录含家目录 / 临时目录）` };
+    if (isPersonalProject(p)) return { ok: false, error: `项目 ${id} 是个人项目，永远不外借（标了 personal，或目录是家目录 / 临时目录 / 它们的别名，或目录解析不了）` };
   }
   const roles = parseRoles(input.roles);
   if (typeof roles === "string") return { ok: false, error: roles };
@@ -156,7 +183,7 @@ export function effectiveLend(
     if (bad) { dropped.push(`borrow ${e.peer}：${bad}`); continue; }
     const ok = e.projects.filter((id) => {
       const p = projects.find((x) => x.id === id);
-      const why = !p ? "项目已不存在" : isPersonalProject(p) ? "是个人项目" : null;
+      const why = !p ? "项目已不存在" : isPersonalProject(p) ? "是个人项目（或目录解析不了）" : null;
       if (why) dropped.push(`borrow ${e.peer} / ${id}：${why}`);
       return !why;
     });

@@ -7,7 +7,7 @@
 import { acquireLock } from "./file-lock.js";
 import { statePath } from "./paths.js";
 import { FP_RE } from "./relay-protocol.js";
-import { readJsonState, writeJsonStateGuarded } from "./state-file.js";
+import { assertWritable, readJsonState, writeJsonAtomicSync } from "./state-file.js";
 
 export const LEND_PATH = statePath("lend.json");
 const LEND_VERSION = 1;
@@ -147,10 +147,12 @@ export async function readLend(path = LEND_PATH): Promise<LendRead> {
 }
 
 /**
- * 加锁读改写。拿不到锁、磁盘上是无效文件、改完不合法、写之前发现锁已失 —— 一律抛错不写。
- * mutate 可以就地改 file，返回值原样带出；内容没变就不写。
+ * 加锁读改写。拿不到锁、磁盘上是无效文件、改完不合法、提交时锁已不归自己 —— 一律抛错不写。
+ * mutate 可以就地改 file（可以是 async：要在锁内重读 peers / projects 再决定），返回值原样带出；内容没变就不写。
+ * 核锁与 rename 在同一段同步代码里（writeJsonAtomicSync 的 commitIf）：held() 刚续过租，别的进程回收不了；
+ * 中间只要隔一个 await，挂起过期的旧写者恢复后就会盖掉新写者已提交的内容（tests/lend-config.test.ts「P1-2」）。
  */
-export async function updateLend<T>(mutate: (file: LendFile) => T, path = LEND_PATH, lockMs = 10_000): Promise<T> {
+export async function updateLend<T>(mutate: (file: LendFile) => T | Promise<T>, path = LEND_PATH, lockMs = 10_000): Promise<T> {
   const lock = await acquireLock(`${path}.lock`, lockMs);
   if (!lock) throw new Error(`lend.json 正被别的进程占着（${Math.round(lockMs / 1000)} 秒没拿到锁），这次没改，稍后重试`);
   try {
@@ -158,12 +160,17 @@ export async function updateLend<T>(mutate: (file: LendFile) => T, path = LEND_P
     if (cur.status === "invalid") throw new Error(`lend.json 无效（${cur.error}），已按「关」处理；修好或删掉 ${path} 后重试`);
     const file = cur.file;
     const before = JSON.stringify(file);
-    const out = mutate(file);
+    const out = await mutate(file);
     if (JSON.stringify(file) === before) return out;
     const problem = lendFileProblem(file);
     if (problem) throw new Error(`改完的内容不合法（${problem}），没写`);
-    if (!lock.held()) throw new Error("写之前发现 lend.json 的锁已被回收（进程被挂起太久？），这次没写，重试即可");
-    await writeJsonStateGuarded(path, file, { mode: 0o600, validate: (d) => lendFileProblem(d) === null, trailingNewline: true });
+    await assertWritable(path, (d) => lendFileProblem(d) === null);
+    try {
+      writeJsonAtomicSync(path, file, { mode: 0o600, trailingNewline: true, commitIf: lock.held });
+    } catch (e) {
+      if (!lock.held()) throw new Error("提交前发现 lend.json 的锁已被别人回收（进程被挂起太久？），这次没写，重试即可");
+      throw e;
+    }
     return out;
   } finally {
     lock.release();
