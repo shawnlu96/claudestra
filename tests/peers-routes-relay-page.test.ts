@@ -1,9 +1,10 @@
 /**
  * 网页上的邀请生成 / 加入按请求来源分流（bridge/peers-routes.ts；docs/relay/e2e-design.md §5.1、§6.1 第 12 条）：
  * 只有回环 / 局域网（request-context.ts keyedInvite 白名单）与 CLI 一样；经中继（source=relay）、peer 入口、判不出来源
- * → 只生成不加密的邀请（--via-relay-page）、拒绝加入加密邀请。
+ * → 只生成不加密的邀请（--via-relay-page）。加入加密邀请：严格模式关（缺省）时中继页面也放行、走同一条 peer-join-auto，
+ * 开了就和以前一样拒（bridge/peer-relay-strict.ts）；peer 入口、判不出来源一律拒。
  */
-import { describe, expect, test } from "bun:test";
+import { afterAll, describe, expect, test } from "bun:test";
 import { createPublicKey, generateKeyPairSync } from "node:crypto";
 import { handlePeersRoutes } from "../src/bridge/peers-routes.ts";
 import { setRequestContext, type RequestContext } from "../src/bridge/request-context.ts";
@@ -12,6 +13,7 @@ import { generateEcdh } from "../src/lib/e2e/primitives.ts";
 import { keyFingerprint } from "../src/lib/instance-key.ts";
 import { RELAY_PAGE_JOIN_REFUSED } from "../src/lib/peer-e2e-local.ts";
 import { encodePeerInviteV2 } from "../src/lib/peers.ts";
+import { readConfig, setPeerRelayJoinStrict } from "../src/lib/config-store.ts";
 import type { Principal } from "../src/lib/principals.ts";
 
 const OWNER: Principal = { id: "owner:self", role: "owner", agents: ["*", "master"], createdAt: "2026-01-01T00:00:00Z", manage: true, credential: "dev_o1" };
@@ -56,7 +58,11 @@ describe("网页生成邀请", () => {
 });
 
 describe("网页加入邀请", () => {
-  test("加密邀请：经中继、peer 入口、判不出来源 → 400 并给替代做法，manager 不被调用；回环、局域网 → 照常加入", async () => {
+  const strictBefore = readConfig().then((c) => c.peerRelayJoinStrict === true);
+  afterAll(async () => void (await setPeerRelayJoinStrict(await strictBefore)));
+
+  test("严格模式开：加密邀请经中继、peer 入口、判不出来源 → 400 并给替代做法，manager 不被调用；回环、局域网 → 照常加入", async () => {
+    await setPeerRelayJoinStrict(true);
     const invite = await keyedInvite();
     for (const [name, ctx] of Object.entries(SOURCES)) {
       const m = recorder();
@@ -70,6 +76,35 @@ describe("网页加入邀请", () => {
         expect(m.calls[0].slice(0, 2)).toEqual(["peer-join-auto", invite]);
       }
     }
+  });
+
+  test("严格模式关（缺省）：中继页面也能加入加密邀请，交给同一条 peer-join-auto（指纹、持钥证明在那里核）；peer 入口、判不出来源仍拒", async () => {
+    await setPeerRelayJoinStrict(false);
+    const invite = await keyedInvite();
+    for (const [name, ctx] of Object.entries(SOURCES)) {
+      const m = recorder();
+      const res = (await handlePeersRoutes(post("/peers/join-auto", { invite }, ctx), "/peers/join-auto", OWNER, m.run))!;
+      if (LOCAL.has(name) || name === "relay") {
+        expect(res.status).toBe(200);
+        expect(m.calls).toEqual([["peer-join-auto", invite]]);
+      } else {
+        expect(res.status).toBe(400);
+        expect(m.calls).toEqual([]);
+      }
+    }
+  });
+
+  test("加入前检查：中继页面放行时回 viaRelayPage（加入页的淡色提示），严格模式开或本机页面时不回", async () => {
+    const invite = await keyedInvite();
+    const inspect = async (ctx: RequestContext | null) => {
+      const res = (await handlePeersRoutes(post("/peers/inspect", { invite }, ctx), "/peers/inspect", OWNER, recorder().run))!;
+      return ((await res.json()) as { viaRelayPage?: boolean }).viaRelayPage;
+    };
+    await setPeerRelayJoinStrict(false);
+    expect(await inspect(SOURCES.relay)).toBe(true);
+    expect(await inspect(SOURCES.loopback)).toBeUndefined();
+    await setPeerRelayJoinStrict(true);
+    expect(await inspect(SOURCES.relay)).toBeUndefined();
   });
 
   test("不加密的邀请经中继照常加入（它本来就不防中继）", async () => {

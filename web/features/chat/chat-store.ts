@@ -23,7 +23,8 @@ import {
   historyHasReply,
   type RecordSrc,
 } from "./live-merge";
-import { composeView, droppedBlobUrls, echoKeyOf, findUserEcho, revokeBlobUrls, sendCursor } from "./view-compose";
+import { composeView, droppedBlobUrls, revokeBlobUrls, sendCursor } from "./view-compose";
+import { claimEcho, findEchoTarget, type HeldState } from "./held-echo";
 import { markHeldSend } from "../quota-wall/held-send";
 import { decideReconnect } from "./reconnect-policy";
 import { ReloadScroll, reloadKindFor, type ReloadKind } from "./reload-scroll";
@@ -1500,15 +1501,12 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
    *  电脑端要等对齐才出现)。同一 token 两端共用,本端自己发的消息也会收到回声
    *  ——按归一化文本对尾部消息对账,匹配到(乐观消息/历史已有)则跳过,否则画成
    *  用户气泡。历史重拉时 ru_ 气泡会被 jsonl 里的正主整体替换,无双份。 */
-  public addRemoteUserMessage(text: string, attachments?: ChatAttachmentView[], from?: string, askId?: string, shown?: string) {
+  public addRemoteUserMessage(text: string, attachments?: ChatAttachmentView[], from?: string, askId?: string, shown?: string, held?: HeldState) {
     if (!text.trim() && !attachments?.length) return;
-    // 对账去重：尾部 15 条里已有这条（本端乐观消息的回声 / 历史已有）就不再画——比对规则见 view-compose 的 isUserEcho
-    const echo = findUserEcho(this.state.messages, text, attachments, from);
-    if (echo) {
-      // 回声认领本端乐观气泡：记下这条的指纹，同一气泡不再吞下一条同名附件
-      if (echo.local && echo.echoKey === undefined) this.produce((s) => void s.messages.filter((x) => x.id === echo.id).forEach((x) => (x.echoKey = echoKeyOf(text, attachments))));
-      return;
-    }
+    // 对账去重：尾部 15 条里已有这条（本端乐观消息的回声 / 历史已有）就不再画，只认领它、同步押后的「排队中」标记（held-echo.ts）
+    const echo = findEchoTarget(this.state.messages, text, attachments, from, held);
+    if (echo) return void this.produce((s) => void s.messages.filter((x) => x.id === echo.id).forEach((x) => claimEcho(x, text, attachments, held)));
+    if (held === "dropped") return; // 押后作罢的这端没画过，不用补
     this.produce((s) => {
       // 与 send 一致:插话给流式中的助手气泡定稿,后续输出另起气泡
       if (s.streaming) {
@@ -1521,7 +1519,7 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
         ...(shown === undefined ? liveUserText(text, s.messages, from) : liveAnswerText(text, shown, askId, s.messages, from)), // 回投 / 作答：人话 + 标已答，原文留 wire
         ts: new Date().toISOString(),
         ...(from ? { from } : {}), ...(askId ? { askId } : {}), // askId：「待你处理」作答的引用条（features/asks/components/ask-quote.tsx）
-        ...(attachments?.length ? { attachments } : {}),
+        ...(attachments?.length ? { attachments } : {}), ...(held ? { queued: true } : {}),
       });
     });
   }

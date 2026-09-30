@@ -19,7 +19,7 @@ export type RegistryRow = (agent: string) => RegistryAgent | undefined;
 export type StillActive = () => boolean;
 const always: StillActive = () => true;
 
-const sendVia = (registryRow: RegistryRow, stillActive: StillActive) => async (agent: string, sessionId: string, text: string, key: string): Promise<SendResult> => {
+export const sendVia = (registryRow: RegistryRow, stillActive: StillActive) => async (agent: string, sessionId: string, text: string, key: string): Promise<SendResult> => {
   const row = registryRow(agent);
   if (!row || row.sessionId !== sessionId) return { ok: false, delivered: false, reason: `${agent} 的当前 session 不是台账绑定的 ${sessionId}` };
   const r = await bridgeSend({ type: "route_to_agent", targetName: agent, text, fromName: "scheduler", oneShot: true, expectSession: sessionId },

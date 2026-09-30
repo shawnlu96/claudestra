@@ -9,6 +9,7 @@ import { useT } from "@/lib/i18n";
 import { envSnippet, relayHome, relayMode, type RelayStatusView } from "../relay-card-logic";
 import { CopyButton } from "./peers-shared";
 import { PairCodeCard } from "./pair-share";
+import { RelayStrictRow } from "./peers-relay-strict";
 import { relaySetup, relayStatus } from "@/lib/api/system";
 import { newShareCode, type ShareCode } from "@/lib/api/devices";
 
@@ -121,6 +122,7 @@ export function RelayCard() {
         </div>
       )}
       {mode === "online" && status && <OnlineBlock status={status} />}
+      {mode !== "off" && <RelayStrictRow />}
     </section>
   );
 }

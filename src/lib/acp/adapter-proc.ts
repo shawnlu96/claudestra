@@ -13,6 +13,7 @@ import type { Subprocess } from "bun";
 import { mkdirSync } from "node:fs";
 import { CODEX_MCP_ENV_VARS } from "../codex-launch.js";
 import { isSandbox, SANDBOX_ROOT_ENV } from "../sandbox.js";
+import { BUN_NO_AUTOLOAD, LEND_WORKER_MARK, pickWorkerEnv } from "../runtimes/clean-env.js";
 import { codexAcpInstalled } from "./install.js";
 import type { RpcWire } from "./rpc.js";
 import { ACP_AGENT_ENV, isRepoStub, repoStubPath, sandboxAcpHome } from "./stub.js";
@@ -20,12 +21,15 @@ import { ACP_AGENT_ENV, isRepoStub, repoStubPath, sandboxAcpHome } from "./stub.
 /** 给 channel-server 的环境白名单：去掉只有 tmux 模式才用得上的（窗口就绪 / 打字投递 / 重启前言） */
 const ACP_MCP_ENV_VARS = CODEX_MCP_ENV_VARS.filter((k) => k !== "TMUX" && k !== "TMUX_PANE" && k !== "CLAUDESTRA_CODEX_PREAMBLE");
 
-export function acpAgentCommand(env: Record<string, string | undefined>, bunBin: string, root?: string): { cmd: string[]; stub: boolean } | { error: string } {
+/** clean = 出借 worker：适配器在外来 clone 里起，bun 不自动加载 cwd 的 .env* 与 bunfig.toml（runtimes/clean-env.ts BUN_NO_AUTOLOAD），也不认手工覆盖 */
+export function acpAgentCommand(env: Record<string, string | undefined>, bunBin: string, root?: string, clean = false): { cmd: string[]; stub: boolean } | { error: string } {
+  const bun = [bunBin, ...(clean ? BUN_NO_AUTOLOAD : [])];
   if (isSandbox(env)) {
     const stub = repoStubPath();
-    return stub ? { cmd: [bunBin, stub], stub: true } : { error: "沙箱里找不到本仓的 scripts/acp-stub.ts（或它的真实路径不在本仓里），不起 ACP 适配器" };
+    return stub ? { cmd: [...bun, stub], stub: true } : { error: "沙箱里找不到本仓的 scripts/acp-stub.ts（或它的真实路径不在本仓里），不起 ACP 适配器" };
   }
   const override = env[ACP_AGENT_ENV]?.trim();
+  if (override && clean) return { error: `出借 worker 不认 ${ACP_AGENT_ENV} 手工覆盖（它的 argv 不受干净启动约束）` };
   if (override) {
     try {
       const cmd = JSON.parse(override);
@@ -36,7 +40,7 @@ export function acpAgentCommand(env: Record<string, string | undefined>, bunBin:
     return { error: `${ACP_AGENT_ENV} 要是非空的 JSON 字符串数组（比如 ["bun","scripts/acp-stub.ts"]），收到：${override.slice(0, 120)}` };
   }
   const installed = codexAcpInstalled(root);
-  return installed.ok ? { cmd: [bunBin, installed.path], stub: false } : { error: installed.hint };
+  return installed.ok ? { cmd: [...bun, installed.path], stub: false } : { error: installed.hint };
 }
 
 export interface AdapterEnvSpec {
@@ -50,15 +54,19 @@ export interface AdapterEnvSpec {
   /** 有 = 宿主模式：channel-server 挂上、指向回环代理；没有 = create 的引导（不挂 claudestra，频道相关变量全清掉） */
   channel?: { channelId: string; proxyUrl: string; agentName: string; sessionId: string };
   developerInstructions?: string;
+  /** 出借 worker（runtimes/clean-env.ts）：只从 base 里拿白名单变量，不挂 claudestra MCP（channel 忽略），不给回环代理的地址与 token */
+  clean?: boolean;
 }
 
 export function adapterEnv(s: AdapterEnvSpec): Record<string, string> {
-  const env: Record<string, string> = {};
-  for (const [k, v] of Object.entries(s.base)) if (typeof v === "string") env[k] = v;
-  for (const k of ["TMUX", "TMUX_PANE", "CLAUDESTRA_CODEX_PREAMBLE", "DISCORD_CHANNEL_ID", "BRIDGE_URL", "BRIDGE_PORT", ACP_AGENT_ENV]) delete env[k];
+  const env: Record<string, string> = s.clean ? { ...pickWorkerEnv(s.base), [LEND_WORKER_MARK]: "1" } : {};
+  if (!s.clean) for (const [k, v] of Object.entries(s.base)) if (typeof v === "string") env[k] = v;
+  // 干净模式的 BRIDGE_* 只可能是 pickWorkerEnv 在沙箱里放进来的（宿主的 bridge 地址，不带 token）：删了 worker 里的 manager 在沙箱里一加载就被拒
+  const drop = ["TMUX", "TMUX_PANE", "CLAUDESTRA_CODEX_PREAMBLE", "DISCORD_CHANNEL_ID", ...(s.clean ? [] : ["BRIDGE_URL", "BRIDGE_PORT"]), ACP_AGENT_ENV];
+  for (const k of drop) delete env[k];
   const config: Record<string, unknown> = { check_for_update_on_startup: false };
   if (s.developerInstructions) config.developer_instructions = s.developerInstructions;
-  if (s.channel) {
+  if (s.channel && !s.clean) {
     config.mcp_servers = { [s.mcpName]: { command: s.bunBin, args: [s.channelServer], env_vars: ACP_MCP_ENV_VARS } };
     Object.assign(env, {
       DISCORD_CHANNEL_ID: s.channel.channelId,

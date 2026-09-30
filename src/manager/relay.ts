@@ -38,14 +38,28 @@ type CliFetchInit = { method?: string; headers?: Record<string, string>; body?: 
 /** 发往 required peer 的一律包进 E2E 会话（lib/peer-e2e-outbound.ts）；外层签名由下面的传输层加（直连这里签、中继由 bridge 签） */
 const e2eOutbound = createE2eOutbound(defaultOutboundDeps());
 
-/** manager 的 peer 调用唯一出口：required peer 走 E2E（走不了就抛错，绝不退回明文），其余明文照旧 */
+/**
+ * manager 的 peer 调用唯一出口：required peer 走 E2E（走不了就抛错，绝不退回明文），其余明文照旧。
+ * 内层也要带实例签名（同 bridge/http-peer.ts 的 send_to_agent）：对方解开会话后照常验签，没签的一律 401 unsigned
+ */
 export async function peerCliFetch(url: string, init: CliFetchInit = {}): Promise<Response> {
-  const viaE2e = await e2eOutbound.fetch(url, init, (u, outer) => rawCliFetch(u, { ...outer, ...(init.signal ? { signal: init.signal } : {}) }));
+  const inner = { ...init, headers: { ...init.headers, ...signedFor(init.method ?? "GET", url, init.body ?? "") } };
+  const viaE2e = await e2eOutbound.fetch(url, inner, (u, outer) => rawCliFetch(u, { ...outer, ...(init.signal ? { signal: init.signal } : {}) }));
   return viaE2e ?? rawCliFetch(url, init);
 }
 
-/** 传输层：relay://<指纹>/… 交给 bridge 经中继代调（POST /relay/request，bridge 签名），其余加上实例签名直接 fetch——对方只认签名钥匙对得上的 peer */
-async function rawCliFetch(url: string, init: CliFetchInit): Promise<Response> {
+/** 只走 E2E（出借接口，T94）：目标不是带 E2E 的 peer 就抛错，连明文的那条路都不给 */
+export async function peerE2eOnlyFetch(url: string, init: CliFetchInit): Promise<Response> {
+  const viaE2e = await e2eOutbound.fetch(url, init, (u, outer) => rawCliFetch(u, { ...outer, ...(init.signal ? { signal: init.signal } : {}) }));
+  if (!viaE2e) throw new Error("对方不是端到端加密的 peer（老记录或 --allow-legacy 建的），出借接口不走明文");
+  return viaE2e;
+}
+
+/**
+ * 传输层：relay://<指纹>/… 交给 bridge 经中继代调（POST /relay/request，bridge 签名），其余加上实例签名直接 fetch——对方只认签名钥匙对得上的 peer。
+ * 不查 peer 记录、不进 E2E 会话：只给自带加密的请求用（加密兑换，manager/peer-join.ts postRedeem）
+ */
+export async function rawCliFetch(url: string, init: CliFetchInit): Promise<Response> {
   const m = /^relay:\/\/([^/]+)(\/.*)?$/i.exec(url);
   const to = m ? relayPeerFingerprint(`relay://${m[1]}`) : null;
   if (!m || !to) return fetch(url, { ...init, headers: { ...init.headers, ...signedFor(init.method ?? "GET", url, init.body ?? "") } } as RequestInit);
