@@ -58,7 +58,7 @@ export interface InteractionDeps {
   controlChannelId: string;
   deliver: (env: Envelope) => Promise<Delivery>;
   startTypingWithSafety: (channelId: string) => void;
-  scheduleClearRotation: (agentName: string, channelId: string, cwd: string, oldSid?: string, runtime?: string) => void;
+  scheduleClearRotation: (agentName: string, channelId: string, cwd: string, oldSid?: string) => void;
   /** manager CLI 调用与 LLM-free 管理面板：management.ts 是 hub，bridge/* 不直接 import，由 bridge 注入 */
   runManager: RunManager;
   buildStatusPanel: () => Promise<{ text: string; components: any[] }>;
