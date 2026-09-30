@@ -11,6 +11,7 @@ import {
   decideApproval, handleDevicesManaged, hasPairingApprover, handleDevicesPublic, issuePairing, pendingApprovals, setDevicesPrincipalsPathForTest, setDevicesRegistryPathForTest,
   setLocalPairingControlTokenForTest,
 } from "../src/bridge/devices.js";
+import { relayControlRoutes } from "../src/bridge/relay-routes.js";
 import { setRequestContext, type RequestContext } from "../src/bridge/request-context.js";
 import { attachCredential, ensureOwnerPrincipal, fullGrant, guestGrant, newGuestPrincipal, OWNER_PRINCIPAL_ID } from "../src/lib/devices.js";
 import { proofFor } from "../src/lib/pairing-codes.js";
@@ -314,6 +315,10 @@ describe("本机回环自动配对", () => {
     const { approvalId } = (await (await local()).json()) as { approvalId: string };
     expect((await status(approvalId)).status).toBe(202);
     expect(await decideApproval(approvalId, true)).toMatchObject({ ok: false, state: "pending" }); // approver 缺省 = /relay/pair/approve
+    const viaRoute = await relayControlRoutes(
+      new Request("http://bridge.local/relay/pair/approve", { method: "POST", body: JSON.stringify({ id: approvalId, approve: true }) }), new URL("http://bridge.local/relay/pair/approve"),
+    );
+    expect(viaRoute.status).toBe(403);
     expect((await status(approvalId)).status).toBe(202);
     const out = (await decideApproval(approvalId, true, phone))!;
     expect(out).toMatchObject({ ok: true, state: "approved" });
