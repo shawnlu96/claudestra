@@ -16,6 +16,7 @@ import { statePath } from "./lib/paths.js";
 import { SRC_DIR } from "./lib/repo-root.js";
 import { runManagerProcess } from "./lib/run-manager.js";
 import { readRegistryAgents } from "./lib/registry.js";
+import { CLEAN_ENV_FLAG } from "./lib/runtimes/clean-env.js";
 import { CODEX_READY_OPTION } from "./lib/runtimes/codex-ready.js";
 import { tmuxRaw } from "./lib/tmux-helper.js";
 import { takeCallerCred } from "./lib/caller-cred.js";
@@ -69,6 +70,7 @@ const host = new AcpHost(
       codexPath: agent.stub ? undefined : codexPath,
       logsDir: statePath("logs", "acp", agentName),
       developerInstructions: process.env.CLAUDESTRA_ACP_DEVELOPER ? Buffer.from(process.env.CLAUDESTRA_ACP_DEVELOPER, "base64").toString("utf8") : undefined,
+      clean: process.env[CLEAN_ENV_FLAG] === "1", // 出借 worker：适配器只拿白名单环境、不挂 claudestra MCP（lib/runtimes/clean-env.ts）
     },
   },
   {

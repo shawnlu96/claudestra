@@ -81,6 +81,8 @@ export async function cmdLend(kind: "lend" | "borrow", args: string[]): Promise<
   const usage = kind === "lend" ? LEND_USAGE : BORROW_USAGE;
   const [sub = "status", ...rest] = args;
   if (sub === "status") return status(kind);
+  if (sub === "submit" && kind === "lend") return (await import("./lend-submit.js")).cmdLendSubmit(rest); // 出借 worker 交结论（不过 owner 守卫）
+  if (sub === "call" && kind === "lend") return (await import("./lend-call.js")).cmdLendCall(rest); // 调度服务调 A 的出借接口
   if (sub !== "set" && sub !== "off") return output({ ok: false, error: usage });
   const p = parseLedgerArgs(rest, sub === "off" ? ["peer"] : kind === "lend" ? LEND_FLAGS : BORROW_FLAGS);
   if ("error" in p) return output({ ok: false, error: `${p.error}；${usage}` });

@@ -13,6 +13,7 @@ import type { Subprocess } from "bun";
 import { mkdirSync } from "node:fs";
 import { CODEX_MCP_ENV_VARS } from "../codex-launch.js";
 import { isSandbox, SANDBOX_ROOT_ENV } from "../sandbox.js";
+import { pickWorkerEnv } from "../runtimes/clean-env.js";
 import { codexAcpInstalled } from "./install.js";
 import type { RpcWire } from "./rpc.js";
 import { ACP_AGENT_ENV, isRepoStub, repoStubPath, sandboxAcpHome } from "./stub.js";
@@ -50,15 +51,17 @@ export interface AdapterEnvSpec {
   /** 有 = 宿主模式：channel-server 挂上、指向回环代理；没有 = create 的引导（不挂 claudestra，频道相关变量全清掉） */
   channel?: { channelId: string; proxyUrl: string; agentName: string; sessionId: string };
   developerInstructions?: string;
+  /** 出借 worker（runtimes/clean-env.ts）：只从 base 里拿白名单变量，不挂 claudestra MCP（channel 忽略），不给回环代理的地址与 token */
+  clean?: boolean;
 }
 
 export function adapterEnv(s: AdapterEnvSpec): Record<string, string> {
-  const env: Record<string, string> = {};
-  for (const [k, v] of Object.entries(s.base)) if (typeof v === "string") env[k] = v;
+  const env: Record<string, string> = s.clean ? pickWorkerEnv(s.base) : {};
+  if (!s.clean) for (const [k, v] of Object.entries(s.base)) if (typeof v === "string") env[k] = v;
   for (const k of ["TMUX", "TMUX_PANE", "CLAUDESTRA_CODEX_PREAMBLE", "DISCORD_CHANNEL_ID", "BRIDGE_URL", "BRIDGE_PORT", ACP_AGENT_ENV]) delete env[k];
   const config: Record<string, unknown> = { check_for_update_on_startup: false };
   if (s.developerInstructions) config.developer_instructions = s.developerInstructions;
-  if (s.channel) {
+  if (s.channel && !s.clean) {
     config.mcp_servers = { [s.mcpName]: { command: s.bunBin, args: [s.channelServer], env_vars: ACP_MCP_ENV_VARS } };
     Object.assign(env, {
       DISCORD_CHANNEL_ID: s.channel.channelId,

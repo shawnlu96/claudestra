@@ -30,6 +30,7 @@ import { STEP_CMDS } from "./ledger-step-cmds.js";
 import { SCHEDULER_CMDS } from "./ledger-scheduler-cmds.js";
 import { SCHEDULER_OBSERVE_CMDS } from "./ledger-scheduler-observe-cmds.js";
 import { SCHEDULER_AUTO_CMDS } from "./ledger-scheduler-auto-cmds.js";
+import { LEND_CMDS } from "./ledger-lend-cmds.js";
 import { isWriteInvocation } from "./write-commands.js";
 import { readSchedulerConfig } from "../lib/scheduler-config.js";
 import { collectCallerWitness } from "../lib/caller-witness.js";
@@ -38,7 +39,7 @@ import { collectCallerWitness } from "../lib/caller-witness.js";
 export const UNKNOWN_ACTOR = "unknown";
 const SCHEDULER_SERVICE_COMMANDS = new Set([
   "scheduler-plan", "scheduler-settle", "scheduler-session-bind", "scheduler-session-retire", "scheduler-merge-begin", "scheduler-merge-step",
-  "scheduler-observe", "scheduler-fallback-manual", "scheduler-stage", "scheduler-ui-ask",
+  "scheduler-observe", "scheduler-fallback-manual", "scheduler-stage", "scheduler-ui-ask", "lend-ask",
 ]);
 
 const COMMANDS: Record<string, CommandSpec> = {
@@ -56,6 +57,7 @@ const COMMANDS: Record<string, CommandSpec> = {
   ...SCHEDULER_CMDS,
   ...SCHEDULER_OBSERVE_CMDS,
   ...SCHEDULER_AUTO_CMDS,
+  ...LEND_CMDS,
   import: { valued: ["map", "project"], bools: ["dry-run"], usage: "import <ledger.json> --map <map.json> [--project <id>] [--dry-run]（owner 一次性迁移；映射里的 pms 只在 PM 名单为空时写入）", run: importCmd },
 };
 

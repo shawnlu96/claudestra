@@ -8,6 +8,7 @@ import { statePath } from "./lib/paths.js";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { SchedulerStopped } from "./lib/scheduler-maintenance.js";
+import { lendStep, lendWanted } from "./lib/lend-deps.js";
 
 export async function runScheduler(signal: AbortSignal, wait: (ms: number) => Promise<void> = Bun.sleep,
   lockPath = statePath("scheduler.pid")): Promise<void> {
@@ -23,13 +24,15 @@ export async function runScheduler(signal: AbortSignal, wait: (ms: number) => Pr
       try {
         const config = readSchedulerConfig();
         pollMs = config.pollMs;
-        if (config.enabled) {
+        // 两个开关任一开着就跑 pass：scheduler.json 管合并 / 观察 / 自动派单，lend.json（或还没跑完的出借单）管出借这一步
+        const lend = await lendWanted();
+        if (config.enabled || lend) {
           const db = reader.get();
-          if (!db) throw new Error("scheduler enabled but ledger is unavailable");
-          for (const project of Object.keys(config.projects)) schedulerProjectView(db, project);
+          if (config.enabled && !db) throw new Error("scheduler enabled but ledger is unavailable");
+          if (db && config.enabled) for (const project of Object.keys(config.projects)) schedulerProjectView(db, project);
           const { failed } = await schedulerPass(db, config, { assertOwner: () => {
             if (signal.aborted || !lock.held()) throw new SchedulerStopped("scheduler stopped or lost singleton lease");
-          } });
+          }, ...(lend ? { lend: lendStep(reader) } : {}) });
           if (failed.length) throw new Error(`tick failed: ${failed.map((f) => `${f.taskId} ${f.error}`).join("; ").slice(0, 500)}`);
         }
         if (lastError) console.error("scheduler recovered");
