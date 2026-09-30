@@ -3,7 +3,7 @@ import { INTENT_ACTIONS, INTENT_STATUSES, WORKFLOW_MODES, WORKFLOW_TEMPLATES, AU
 import { planIntent, setWorkflow, settleIntent } from "../lib/ledger-scheduler-write.js";
 import { bindSchedulerSession, recordSessionRetirement, type SessionRole, type SessionTransport } from "../lib/scheduler-sessions.js";
 import { advanceMergeRun, beginMergeRun, MERGE_RESOLUTIONS, resolveMergeRun, type MergePhase, type MergeResolution } from "../lib/scheduler-merge.js";
-import { LedgerError } from "../lib/ledger-store.js";
+import { getTask, LedgerError } from "../lib/ledger-store.js";
 import { intFlag } from "./ledger-identity.js";
 import type { LedgerCli } from "./ledger-context.js";
 import type { CommandSpec } from "./ledger-write-cmds.js";
@@ -17,18 +17,24 @@ const integer = (c: LedgerCli, flag: string): number => {
 
 export const SCHEDULER_CMDS: Record<string, CommandSpec> = {
   "workflow-set": {
-    valued: ["rev", "workflow-rev", "template", "version", "mode", "author-family", "fallback"], bools: [],
-    usage: "workflow-set <task> --rev N [--workflow-rev N] --template code|ui|security --version 2 --mode manual|observe|auto --author-family claude|codex --fallback <退路>",
+    valued: ["rev", "workflow-rev", "template", "version", "mode", "author-family", "fallback", "reason"], bools: [],
+    usage: "workflow-set <task> --rev N [--workflow-rev N] --template code|ui|security --version 2 --mode manual|observe|auto --author-family claude|codex --fallback <退路>" +
+      " [--reason <auto 退回人工时必填>]",
     run(c) {
       const template = c.need("template"), mode = c.need("mode"), family = c.need("author-family");
       if (!WORKFLOW_TEMPLATES.includes(template as never) || !WORKFLOW_MODES.includes(mode as never) || !AUTHOR_FAMILIES.includes(family as never)) {
         throw new LedgerError("invalid", "模板、模式或模型家族不认识");
       }
+      if (mode === "auto" && c.deps.autoDispatch?.() !== true) throw new LedgerError("forbidden", "自动派单未开启（scheduler.json autoDispatch），见 T68h");
+      const project = getTask(c.db, c.p.pos[1] ?? "")?.project;
+      if (mode === "auto" && project && !(c.deps.autoProjects?.() ?? []).includes(project)) {
+        throw new LedgerError("forbidden", `调度服务没对项目 ${project} 开（scheduler.json 要 enabled 且列出该项目）：开 auto 没人推它，先用 observe 或 manual`);
+      }
       const r = setWorkflow(c.db, c.ctx(), {
         taskId: c.p.pos[1] ?? "", taskRev: integer(c, "rev"),
         workflowRev: c.p.flags["workflow-rev"] === undefined ? undefined : integer(c, "workflow-rev"),
         template: template as "code" | "ui" | "security", templateVersion: integer(c, "version"),
-        mode: mode as "manual" | "observe" | "auto", authorFamily: family as "claude" | "codex", fallback: c.need("fallback"),
+        mode: mode as "manual" | "observe" | "auto", authorFamily: family as "claude" | "codex", fallback: c.need("fallback"), reason: c.p.flags.reason,
       });
       return { ok: true, ...r };
     },

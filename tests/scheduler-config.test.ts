@@ -14,7 +14,7 @@ describe("T68 scheduler service configuration", () => {
   test("missing config stays idle, malformed or relative repoDir fails closed", () => {
     const dir = mkdtempSync(join(tmpdir(), "t68-config-")), path = join(dir, "scheduler.json");
     try {
-      expect(readSchedulerConfig(path)).toEqual({ enabled: false, pollMs: 5000, projects: {} });
+      expect(readSchedulerConfig(path)).toEqual({ enabled: false, pollMs: 5000, autoDispatch: false, projects: {} });
       expect(checkSchedulerConfig(path)[0]).toMatchObject({ status: "warn" });
       writeFileSync(path, JSON.stringify({ enabled: true, projects: { p: { maxActiveWorkers: 2, requiredChecks: ["check", "Guard"], repoDir: "/tmp/project" } } }));
       expect(readSchedulerConfig(path).projects.p.repoDir).toBe("/tmp/project");
@@ -27,6 +27,13 @@ describe("T68 scheduler service configuration", () => {
     const names = ["typecheck + test + guard", "web typecheck + lint", "desktop typecheck + cargo test", "e2e (macOS) & lint"];
     const cfg = parseSchedulerConfig({ enabled: true, projects: { p: { maxActiveWorkers: 1, requiredChecks: names, repoDir: "/tmp/project" } } });
     expect(cfg.projects.p.requiredChecks).toEqual(names);
+  });
+  test("autoDispatch is off unless set to true; any other type is invalid config", () => {
+    const projects = { p: { maxActiveWorkers: 1, requiredChecks: ["check"], repoDir: "/tmp/project" } };
+    expect(parseSchedulerConfig({ enabled: true, projects }).autoDispatch).toBe(false);
+    expect(parseSchedulerConfig({ enabled: true, autoDispatch: false, projects }).autoDispatch).toBe(false);
+    expect(parseSchedulerConfig({ enabled: true, autoDispatch: true, projects }).autoDispatch).toBe(true);
+    for (const bad of ["true", 1, null, {}]) expect(() => parseSchedulerConfig({ enabled: true, autoDispatch: bad, projects })).toThrow(/autoDispatch/);
   });
   test("rejects an automatic deploy target, invalid capacity and unknown poll intervals", () => {
     const p = { maxActiveWorkers: 2, requiredChecks: ["check"], repoDir: "/tmp/project" };
