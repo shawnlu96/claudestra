@@ -106,7 +106,7 @@ describe("表单同步行 + @ 同一条：指令行剥掉、表单照常还原",
     const wire = withMentionDirective("[select:t9:d]\n顺便问下 @writer", target, "zh");
     const out = toChatMessages([
       { seq: 1, role: "assistant", text: "", replyText: "选一下", replyComponents: [row] },
-      { seq: 2, role: "user", text: wire },
+      { seq: 2, role: "user", text: wire, from: "web-ui" }, // 本人：没有来源的记录按不可信处理（T31c）
     ], {});
     const u = out.find((m) => m.role === "user")!;
     expect(u.content).toContain("【");

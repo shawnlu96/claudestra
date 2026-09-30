@@ -27,7 +27,7 @@ export type ItemStatus = (typeof ITEM_STATUSES)[number];
  */
 const EVENT_KINDS = [
   "stage", "item", "task", "meta", "dep", "note", "deliver", "review", "decision", "deploy", "verify", "rollback", "freeze", "unfreeze",
-  "ask", "ask_expire", "ask_cancel", "ask_reopen", "assign_reopen", "dispatch", "escalate", "step", "accept",
+  "ask", "ask_expire", "ask_cancel", "ask_reopen", "assign_reopen", "dispatch", "escalate", "step", "accept", "scheduler",
 ] as const;
 export type EventKind = (typeof EVENT_KINDS)[number];
 

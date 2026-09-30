@@ -39,6 +39,7 @@ import { checksAllClear } from "./ledger-probes.js";
 import { getItem, getMeta, LedgerError, pmsByProject, type LedgerMeta } from "./ledger-store.js";
 import { insertEvent, replay, tx } from "./ledger-tx.js";
 import { activeStepFor, checkReviewHead, checkReviewStep, noteStepDelivered, noteStepReview } from "./ledger-steps-write.js";
+import { releaseFinishedCardLeases } from "./ledger-scheduler-lease.js";
 
 export type { AppendableKind, ImportTaskInput, NewItem, NewTask, ReviewInput, StageMove, WriteCtx, WriteResult };
 
@@ -197,6 +198,7 @@ export function applyMove(
   noteStepDelivered(db, ctx, task, move.to, move.model);
   const data = { from: task.stage, to: move.to, round: next.round, specRev: next.specRev, ...(next.stageBefore ? { stageBefore: next.stageBefore } : {}) };
   const event = insertEvent(db, ctx, { project: task.project, target: task.id, kind: "stage", text, data }, primary);
+  releaseFinishedCardLeases(db, task.id);
   return { task: mustTask(db, task.id), event };
 }
 

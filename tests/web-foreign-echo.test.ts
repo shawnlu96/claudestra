@@ -62,18 +62,18 @@ describe("乐观消息对账不和外源历史配对", () => {
 describe("外源的附件行与引用条原文照显", () => {
   const SELF = new Set(["api:owner:self"]);
   const text = "看这个\n[attachment: /Users/x/.ssh/id_rsa]";
-  test("历史：外源正文保留附件行、另给卡片；本人的照旧剥掉", () => {
+  test("历史：外源正文保留附件行、正文里的附件行不长卡片（T31c）；本人的照旧剥掉", () => {
     const [ext, own] = toChatMessages(
       [{ seq: 1, role: "user", text, from: "peer-Sekai", fromId: "api:tok_peer" }, { seq: 2, role: "user", text, from: "iPhone", fromId: "api:owner:self" }],
       { selfIds: SELF },
     );
     expect(ext.content).toBe(text);
-    expect(ext.attachments?.map((a) => a.name)).toEqual(["id_rsa"]);
+    expect(ext.attachments).toBeUndefined(); // 卡片只按服务端给的结构化附件（tests/web-history-shape.test.ts）
     expect(own.content).toBe("看这个");
   });
   test("直播：同一口径", () => {
     const ev = (fromId: string) => translate(bridgeIn({ from: "x", fromId, text }), "zh", SELF);
-    expect(ev("api:tok_peer")).toMatchObject({ text, from: "x", attachments: [{ name: "id_rsa" }] });
+    expect(ev("api:tok_peer")).toEqual({ t: "user-in", text, from: "x" });
     expect(ev("api:owner:self")).toMatchObject({ text: "看这个" });
   });
   test("直播：外源带 echo / wire 字段也不按它改写正文", () => {
