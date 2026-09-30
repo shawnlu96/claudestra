@@ -20,6 +20,7 @@ import { OwnerPresence } from "../lib/owner-presence.js";
 import { readPrincipals } from "../lib/principals.js";
 import { readRegistryAgents, type RegistryAgent } from "../lib/registry.js";
 import { matchStopWord } from "../lib/stop-words.js";
+import type { Order } from "../lib/arrival-order.js";
 import { emitEvent } from "./event-bus.js";
 import { ledgerDb } from "./ledger-feed.js";
 import { ownerChatIds } from "./push/dispatcher.js";
@@ -244,6 +245,8 @@ export interface AnswerInput {
   final?: boolean;
   /** 附件引用（指派事项「完成」时附的说明图等），原样存进答案 */
   atts?: AskAtt[];
+  /** 作答请求到达 bridge 时领的号（bridge/arrival-stamp.ts，入口第一个 await 之前）；没给就在这里现领 */
+  order?: Order;
 }
 
 /** 作答后要不要回投给某个 agent：只有 agent 发起的才回投；人 / 系统发起的、指派事项只记账（T28 §2.5 第 5、6 行） */
@@ -280,7 +283,7 @@ export function setPrepareAssigned(fn: typeof prepareAssigned): void {
  */
 export async function commitAnswer(i: AnswerInput): Promise<Ask> {
   if (!deps) throw new Error("asks 未初始化");
-  const order = turnCuts.arrivals.order(); // 作答到达即领号（下面有 await）：和「停」谁先到只比它
+  const order = i.order ?? turnCuts.arrivals.order(); // 和「停」谁先到只比它：入口领的号（鉴权、查 ask 都在它之后）
   const labels = i.picks.map((p) => p.label);
   // 作答的不是 owner 本人（guest）：原话不进台账 decision 的 text（ledger-asks.ts answerAsk）
   const who = { principal: i.principal, device: i.device, ...(isOwnerSource(i.from) ? {} : { external: true }) };

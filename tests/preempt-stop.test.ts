@@ -9,7 +9,9 @@ import { writeFileSync } from "node:fs";
 import { REGISTRY_PATH } from "../src/lib/registry.js";
 import { interruptGate } from "../src/bridge/interrupt-gate.js";
 import { holdStopWait, setExtensionSocket, stopWaitIds } from "../src/bridge/pi-abort.js";
-import { holdNotingStop, manualInterrupt, noteHeldStop, preemptForHuman, setStopHooks } from "../src/bridge/preempt.js";
+import { holdNotingStop, interruptAgentByName, manualInterrupt, noteHeldStop, onCodexInterrupt, preemptForHuman, setStopHooks } from "../src/bridge/preempt.js";
+import { arrivalOf, stampArrival } from "../src/bridge/arrival-stamp.js";
+import { registerInteractionHandlers } from "../src/bridge/discord-interactions.js";
 import { HeldQueue } from "../src/bridge/held-queue.js";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -376,5 +378,74 @@ describe("停字与开口按到达序号排先后（T13f）", () => {
     answer();
     await manualInterrupt(CC, "master:agent-cc", "claude-code", "agent-cc", "button");
     expect(turnCuts.interruptHold(CC)).toBe("stopped");
+  });
+});
+
+/**
+ * T13f r1 P1-1：号在请求进 bridge 的第一时间领（bridge/arrival-stamp.ts），之后读正文、下载附件、查 registry 的 await 不改它。
+ * 每类入口两种处理先后都跑一遍：结论只看进来的先后（stamp 的顺序），不看谁先走完。
+ */
+describe("入口领号：先到的请求卡在 await 里、后到的先走完（T13f r1 P1-1）", () => {
+  const CC = "cc-entry-ch";
+  const env = (id: string, text: string, from: object): Envelope => {
+    const e = { ...stopEnv(id, true, text), to: { kind: "local", channelId: CC, agentName: "agent-cc" } } as Envelope;
+    e.meta.arrivalSeq = stampArrival(from); // bridge.ts messageCreate / api-routes 建信封时取的就是入口领的那个号
+    return e;
+  };
+  const fresh = () => (turnCuts.forget(CC), (log.length = 0));
+  /** 先后两个请求进来（a 先 b 后），各自领号；然后按 order 给的先后跑完 */
+  const arrive = () => [{}, {}].map((r) => (stampArrival(r), r));
+  const noted = (e: Envelope) => e.meta.interruptNote ?? "";
+
+  test("消息（Web 读正文 / Discord 下载附件）：先到的「继续」晚走完，不解除后到的停", async () => {
+    fresh();
+    const [goReq, stopReq] = arrive();
+    await preemptForHuman(env("s1", "停", stopReq), CC, "agent-cc");
+    await preemptForHuman(env("g1", "继续", goReq), CC, "agent-cc");
+    expect(turnCuts.interruptHold(CC)).toBe("stopped");
+  });
+
+  test("消息：先到的「停」晚走完（后到的继续已经投了）= 作废，不发键、不挂起", async () => {
+    fresh();
+    const [stopReq, goReq] = arrive();
+    await preemptForHuman(env("g2", "继续", goReq), CC, "agent-cc");
+    log.length = 0;
+    const late = env("s2", "停", stopReq);
+    await preemptForHuman(late, CC, "agent-cc");
+    expect(log.some((l) => l.startsWith("abort"))).toBe(false);
+    expect(turnCuts.interruptHold(CC)).toBeNull();
+    expect(noted(late)).toContain("已作废");
+  });
+
+  test("停止按钮（Web / Discord）：先按的停在查 registry 的 await 里，后到的「继续」先走完 → 记停时带上解除；反过来停着", async () => {
+    for (const [first, want] of [["stop", null], ["go", "stopped"]] as const) {
+      fresh();
+      const [a, b] = arrive();
+      const [stopReq, goReq] = first === "stop" ? [a, b] : [b, a];
+      const pressed = interruptAgentByName("agent-cc", CC, { owner: true }, arrivalOf(stopReq)); // 读 registry 是真 await
+      await preemptForHuman(env(`g-${first}`, "继续", goReq), CC, "agent-cc");
+      await pressed;
+      expect(turnCuts.interruptHold(CC)).toBe(want);
+    }
+  });
+
+  test("Codex 的打断回报：hook 请求进来时的号；查程序发键的 await 里 owner 说了继续 → 记停时带上解除", async () => {
+    fresh();
+    const [hookReq, goReq] = arrive();
+    const reported = onCodexInterrupt(CC, "agent-cc", arrivalOf(hookReq));
+    await preemptForHuman(env("g-codex", "继续", goReq), CC, "agent-cc");
+    await reported;
+    expect(turnCuts.get(CC)?.cause).toBe("codex_interrupt");
+    expect(turnCuts.interruptHold(CC)).toBeNull();
+  });
+
+  test("Discord 交互：派发那一刻就领号（鉴权、查 registry、deferUpdate 之前）", () => {
+    let dispatch: (i: object) => unknown = () => undefined;
+    registerInteractionHandlers({ on: (_: string, fn: typeof dispatch) => void (dispatch = fn) } as never, {} as never);
+    const click = { type: 3, channelId: null, user: { id: "u" } };
+    dispatch(click);
+    const later = turnCuts.arrivals.take();
+    expect(arrivalOf(click).seq).toBeLessThan(later);
+    expect(stampArrival(click)).toBe(arrivalOf(click).seq); // 同一个请求只认第一次领的号
   });
 });

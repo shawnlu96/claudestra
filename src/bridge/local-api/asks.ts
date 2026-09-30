@@ -19,6 +19,7 @@ import { agentInScope, isOwnerPrincipal, type Principal } from "../../lib/princi
 import { apiJson, forbidden } from "../api-respond.js";
 import { dismissFromCard } from "../ask-dismiss.js";
 import { answerFromCard } from "../ask-entry.js";
+import { arrivalOf } from "../arrival-stamp.js";
 import { locateAsk } from "../ask-locate.js";
 import { askReadDb, createAskFull, listForWeb, ownerPresence } from "../asks.js";
 
@@ -66,7 +67,7 @@ export async function handleAsksApi(req: Request, path: string, principal: Princ
     if (m![3] === "dismiss") return dismissFromCard(project!, id, principal);
     const b = await jsonBody(req);
     if (!b) return apiJson(400, { ok: false, error: "body {choices: string[], text?: string}" });
-    return answerFromCard(project!, id, b, principal);
+    return answerFromCard(project!, id, b, principal, arrivalOf(req)); // 请求进 bridge 时领的号：读正文的 await 之前
   }
   if (req.method !== "GET") return apiJson(405, { ok: false, error: "method not allowed" });
   try {

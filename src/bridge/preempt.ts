@@ -26,7 +26,7 @@ const controlChannelId = () => process.env.CONTROL_CHANNEL_ID || "";
 let clearAgentPendings: (channelId: string) => unknown = () => undefined;
 export const setStopHooks = (h: { clearAgentPendings: typeof clearAgentPendings }) => void (clearAgentPendings = h.clearAgentPendings);
 
-/** 这封信到达 bridge 时领的号（bridge.ts deliverLocalInOrder 入口领；单测直调、没领过的现领） */
+/** 这封信到达 bridge 时领的号（请求入口领，bridge/arrival-stamp.ts；bridge.ts deliverLocalInOrder 补领；单测直调、没领过的现领） */
 const arrivalOf = (env: Envelope): Order => ({ seq: (env.meta.arrivalSeq ??= turnCuts.arrivals.take()) });
 
 function senderName(env: Envelope): string {
@@ -134,8 +134,8 @@ type StopResult = { keys: readonly string[]; deduped?: true; wall?: WallWait };
  */
 export async function manualInterrupt(
   channelId: string, win: string, runtime: string | undefined, agent: string, trigger: "button" | "slash" | "api", by: { owner: boolean; name?: string; peer?: string } = { owner: true },
+  stopOrder: Order = turnCuts.arrivals.order(), // 按下时的号（入口领，bridge/arrival-stamp.ts）：之后 owner 又开的口排在它后面，记停时带上解除
 ): Promise<StopResult> {
-  const stopOrder = turnCuts.arrivals.order(); // 按下即领号：发键的 await 途中 owner 又开的口排在它后面，记停时带上解除
   const tools = toolsAt(agent, runtime);
   if (by.owner) clearAgentPendings(channelId); // 同停字：发键之前清，Pi 停下报的 Stop 不再被看门狗拿去催
   const r = await interruptGate.manual(channelId, win, runtime).catch((e: Error) => {
@@ -160,20 +160,19 @@ export async function manualInterrupt(
 }
 
 /** 按 agent 名手动打断（API 端点）：大总管（"master" / "0"）不在 registry 的普通条目里，按 Claude Code 的 master:0 处理 */
-export async function interruptAgentByName(name: string, channelId: string, by?: { owner: boolean; name?: string; peer?: string }): Promise<StopResult> {
+export async function interruptAgentByName(name: string, channelId: string, by?: { owner: boolean; name?: string; peer?: string }, stopOrder?: Order): Promise<StopResult> {
   const isMaster = name === "master" || name === "0";
   const regs = isMaster ? [] : await readRegistryAgents().catch(() => []); // 读不到就按 CC 的打断键发：人要停，宁可发
   const runtime = regs.find((a) => a.name === name)?.runtime;
-  return manualInterrupt(channelId, agentWindow(name), runtime, isMaster ? "master" : name, "api", by);
+  return manualInterrupt(channelId, agentWindow(name), runtime, isMaster ? "master" : name, "api", by, stopOrder);
 }
 
 /**
  * Codex 的 Interrupt hook（typing-hook 报成 StopFailure + interrupt，Esc 后约 0.5 秒到）：bridge 刚发过键的是回声，抢占那边会记；
  * 别的进程发的键（manager 重启清场的 C-c、tmux-send-keys）也不算；否则是有人在终端里自己按了 Esc——记一条「停」类 cut，只留档不提醒。
  */
-export async function onCodexInterrupt(channelId: string, agent: string): Promise<void> {
-  const now = Date.now();
-  const stopOrder = turnCuts.arrivals.order(); // 到达即领号：查程序发键的 await 途中 owner 又开的口排在它后面
+export async function onCodexInterrupt(channelId: string, agent: string, stopOrder: Order = turnCuts.arrivals.order()): Promise<void> {
+  const now = Date.now(); // stopOrder = hook 请求进 bridge 时领的号：查程序发键的 await 途中 owner 又开的口排在它后面
   if (turnCuts.keySentWithin(channelId, now) || (await turnCuts.programKeyNear(agent, now))) return;
   turnCuts.record({ channelId, agent, runtime: "codex", cause: "codex_interrupt", tools: toolsAt(agent, "codex"), stopOrder });
 }

@@ -177,6 +177,7 @@ import { statePath } from "./lib/paths.js";
 import { controlFor, managedFor } from "./lib/runtimes/index.js";
 import { stopNeedsPaneRecheck } from "./lib/runtimes/window-ops.js";
 import { onCodexInterrupt, preemptForHuman, setStopHooks } from "./bridge/preempt.js";
+import { arrivalOf, stampArrival } from "./bridge/arrival-stamp.js";
 import { HTTP_IDLE_TIMEOUT_S, noteRuntimeCaps, onAbortAck, onCodexUndelivered, setExtensionSocket, stopAfterAbort, stopWaitIds } from "./bridge/interrupt-gate.js";
 import { isCutNotice, turnCuts } from "./bridge/turn-cuts.js";
 import { withInterruptNote } from "./lib/turn-cuts.js";
@@ -407,15 +408,12 @@ async function channelStillRegistered(channelId: string): Promise<boolean> {
 const pendingAgentCalls = new AgentCallBook();
 
 /**
- * v2.21.1+ 目标回合中的 agent→agent 消息押后队列(owner 2026-08-28「miniapp 发
- * 不到 backend」实锤)。CC 2.1.247 对回合中到达的 channel 通知**分窗口处置**:
- * 工具执行窗口会 queue-operation 排队到回合后浮出(tmp 对照实验证实),但回合
- * 起始的推理流窗口里到达的通知被静默丢弃(miniapp 08:00:22 → backend 回合始于
- * 08:00:05、首个 assistant 输出 08:00:49,消息永远没落 jsonl)。CC 内部窗口我们
- * 管不了 → bridge 侧根治:目标在回合中就不 ws.send,压进本队列,Stop hook 后
- * 统一投递;每分钟兜底扫描(Stop 丢失/持续忙)。落盘、30 分钟提醒 / 24 小时放弃见 bridge/held-queue.ts。
+ * 目标回合中的 agent→agent 消息押后队列:CC 回合起始的推理流窗口里到达的 channel 通知会被静默丢弃（工具执行窗口才会排队）,
+ * 那个窗口 bridge 管不了,所以目标在回合中就不 ws.send,压进本队列,Stop hook 后统一投递;每分钟兜底扫描(Stop 丢失/持续忙)。
+ * 落盘、30 分钟提醒 / 24 小时放弃见 bridge/held-queue.ts；`git log -S heldLocalMsgs` 有当时的实测。
  */
 const heldLocalMsgs = new HeldQueue();
+turnCuts.arrivals.atLeast(heldLocalMsgs.maxArrivalSeq()); // 押着的消息的号给新号垫底：号文件丢了、时钟又往回拨，也不会发出比它们小的号
 // Pi 的停：经 ws 请扩展 abort()、等回执；作废的消息回显给发送方，并从下面这几本欠账上销掉（bridge/pi-abort.ts）
 setExtensionSocket((ch) => clients.get(ch)?.ws, { deliver, ownerId: primaryOwnerId, hold: (env) => void heldLocalMsgs.holdEnv(env),
   books: () => ({ pendingReplies, pendingThreads, pendingInterAgentMsg, pendingAgentCalls, pendingApiRequests }) });
@@ -1350,6 +1348,7 @@ discord.on("messageCreate", async (msg: DiscordMessage) => {
 
   const client = clients.get(channelId);
   if (!client) return;
+  stampArrival(msg); // 到达即领号：下面下载附件、收尾状态消息都有 await，和「停」谁先到只比它（bridge/arrival-stamp.ts）
 
   let content = msg.content
     .replace(new RegExp(`<@!?${getBotUserId()}>`, "g"), "")
@@ -1466,7 +1465,7 @@ discord.on("messageCreate", async (msg: DiscordMessage) => {
       messageId: msg.id,
       triggerKind: "user_discord",
       ts: msg.createdAt.toISOString(),
-      threadId: newThreadId(),
+      threadId: newThreadId(), arrivalSeq: stampArrival(msg), // 上面进来时领的号
       attachments: attachmentPaths.length > 0 ? attachmentPaths : undefined,
     },
   };
@@ -2705,7 +2704,7 @@ async function handleHookRequest(req: Request): Promise<Response> {
         updateStatsDashboard(discord);
         // v2.6.0+ 事件埋点：turn 结束（在去抖/通知判断之前 —— 事件流忠实反映 hook）
         const evAgent = await agentLabelForChannelAsync(channelId);
-        if (body.interrupt) await onCodexInterrupt(channelId, evAgent); // Codex 被打断(typing-hook 报成 StopFailure):先记 cut 再置 done
+        if (body.interrupt) await onCodexInterrupt(channelId, evAgent, arrivalOf(req)); // Codex 被打断(typing-hook 报成 StopFailure):先记 cut 再置 done
         // v2.20.2+ 回合结束≠任务完成:后台还有活(subagent/bg shell)时带上
         // bgPending,web 端把绿勾换成「后台继续中」(owner 实报提前完成误导)
         const bgPending = hasActiveBgActivities(evAgent);
@@ -3031,7 +3030,7 @@ initApiRoutes({
 initHttpPeer({
   deliver, getClientWs: (channelId) => (clients.get(channelId)?.ws as any) ?? null,
   hold: (env) => void heldLocalMsgs.holdEnv(env),
-  handleApi: async (r) => (await handleTerminalApi(r, new URL(r.url))) ?? serveApiRequest(r, new URL(r.url)), // 中继路径模式的进程内 dispatch（relay-dispatch.ts）
+  handleApi: async (r) => (stampArrival(r), (await handleTerminalApi(r, new URL(r.url))) ?? serveApiRequest(r, new URL(r.url))), // 中继路径模式的进程内 dispatch（relay-dispatch.ts）；先领到达号
 });
 
 const CORS_ORIGIN_SETTING = process.env.BRIDGE_CORS_ORIGIN || "";
@@ -3281,12 +3280,10 @@ async function bridgeFetch(req: Request, server: { requestIP(r: Request): { addr
     const reqOrigin = req.headers.get("Origin");
     const crossOrigin = isCrossOrigin(reqOrigin, req.url, req.headers);
     const url0 = new URL(req.url);
+    if (req.method !== "GET") stampArrival(req); // 到达即领号（鉴权、读正文之前）：停止 / 开口 / 作答谁先到只比它（bridge/arrival-stamp.ts）
 
-    // v2.21.1+ 控制面非回环鉴权(security-audit P0,2026-09-01)。最前置,回环是
-    // 最强信任信号——本机 channel-server/manager/web-BFF/discord 全走回环,豁免
-    // 一切;非回环的裸路由 + ws 升级要 control token,/api/v1 交给自己的 Bearer。
-    // 实测 requestIP 对回环 http 与 ws-upgrade 都稳定返回 127.0.0.1(sandbox 验过),
-    // 判定不会把本机 agent 误拦。
+    // 控制面非回环鉴权,最前置:回环是最强信任信号——本机 channel-server/manager/web-BFF/discord 全走回环,豁免一切;
+    // 非回环的裸路由 + ws 升级要 control token,/api/v1 交给自己的 Bearer。requestIP 对回环 http 与 ws-upgrade 都返回 127.0.0.1(沙箱验过)。
     {
       const ip = server.requestIP(req);
       // 定来源并判本机：本机反代（带 XFF）与隧道请求都不算回环，控制面豁免与请求来源同一口径（bridge/relay-inbound.ts socketTrust）
