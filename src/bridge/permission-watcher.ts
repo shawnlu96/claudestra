@@ -22,6 +22,7 @@ import {
   effortDialogLevel,
   modelFamilies,
   pressSwitchConfirm,
+  MASTER_WINDOW_TARGET,
   type SwitchConfirmPrompt,
 } from "../lib/tmux-helper.js";
 import { screenFingerprint } from "../lib/send-key-guard.js";
@@ -205,30 +206,55 @@ export function isPressedBox(agentName: string, pane: string, now = Date.now()):
   return !!b && now - b.ts < PRESSED_BOX_QUIET_MS && b.fp === screenFingerprint(pane);
 }
 
+export type SwitchBoxAction =
+  | { act: "none" }
+  /** 刚按过的那张框的旧帧：不按也不报 */
+  | { act: "stale" }
+  | { act: "press"; p: SwitchConfirmPrompt }
+  | { act: "notify"; p: SwitchConfirmPrompt; box: string };
+
 /**
- * 「Switch model?」/「Change effort level?」确认框（CC 2.1.280 起两种都弹）。
+ * 「Switch model?」/「Change effort level?」确认框（CC 2.1.280 起两种都弹）怎么处理（press 会消费意图、记下这张框）。
  * 只代按 bridge 自己注入、登记过意图、而且框里目标和意图完全一致的那张，一张框只按一次；
  * 其余（CC 主动提议降级、同家族别的版本、没登记过的）一律不按，只通知 owner 到终端或网页终端里自己按。
  */
+export function switchBoxAction(agentName: string, pane: string, now = Date.now()): SwitchBoxAction {
+  // 识别收敛到 detectSwitchConfirmPrompt：只认底部真框（标题独占一行 + Yes/No 两项、看不到真输入框）
+  const p = detectSwitchConfirmPrompt(pane);
+  if (!p) return { act: "none" };
+  if (isPressedBox(agentName, pane, now)) return { act: "stale" };
+  if (!consumeSwitchIntent(agentName, p, now)) return { act: "notify", p, box: screenFingerprint(pane) };
+  notePressedBox(agentName, pane, now);
+  return { act: "press", p };
+}
+
 async function maybeConfirmSwitchModel(
   agentName: string,
   channelId: string,
   pane: string,
   allowedUserIds: string[],
-  discord: Client
+  discord: Client,
+  win = windowTarget(agentName),
 ): Promise<boolean> {
-  // 识别收敛到 detectSwitchConfirmPrompt：只认底部真框（标题独占一行 + Yes/No 两项、看不到真输入框）
-  const p = detectSwitchConfirmPrompt(pane);
-  if (!p) return false;
-  if (isPressedBox(agentName, pane)) return true;
-  if (consumeSwitchIntent(agentName, p)) {
-    console.log(`🎛 ${agentName} 「${p.kind === "model" ? "Switch model?" : "Change effort level?"}」命中切换意图(${p.target}),自动代按 Yes`);
-    notePressedBox(agentName, pane);
-    await pressSwitchConfirm(windowTarget(agentName), p);
-    return true;
+  const a = switchBoxAction(agentName, pane);
+  if (a.act === "press") {
+    console.log(`🎛 ${agentName} 「${a.p.kind === "model" ? "Switch model?" : "Change effort level?"}」命中切换意图(${a.p.target}),自动代按 Yes`);
+    await pressSwitchConfirm(win, a.p);
   }
-  await notifySwitchPrompt(agentName, channelId, p, allowedUserIds, discord);
-  return true;
+  if (a.act === "notify") await notifySwitchPrompt(agentName, channelId, a.p, a.box, allowedUserIds, discord);
+  return a.act !== "none";
+}
+
+/**
+ * 大总管不在 manager list 里，launcher 又不按切换框（lib/modal-confirm.ts）：这里单看它的切换框，
+ * 登记过意图的照常代按一次，其余走和 agent 同一条通知路径（网页 session_anomaly + #control），同一张框只报一次。
+ */
+async function checkMasterSwitchBox(allowedUserIds: string[], discord: Client): Promise<void> {
+  const ch = process.env.CONTROL_CHANNEL_ID || "";
+  if (!ch) return;
+  const win = MASTER_WINDOW_TARGET;
+  const pane = await tmuxCapture(win, 30);
+  if (!(await maybeConfirmSwitchModel("master", ch, pane, allowedUserIds, discord, win))) lastNotified.delete(ch);
 }
 
 /** 没有对得上的意图 → 不代按，通知用户到终端里自己按（Discord 文字 + web 事件）。 */
@@ -236,11 +262,12 @@ async function notifySwitchPrompt(
   agentName: string,
   channelId: string,
   p: SwitchConfirmPrompt,
+  box: string,
   allowedUserIds: string[],
   discord: Client
 ): Promise<void> {
   const isModel = p.kind === "model";
-  const key = `${isModel ? "swmodel" : "sweffort"}|${p.target.toLowerCase()}`;
+  const key = `switch|${box}`; // 按框指纹去重：同一张框只报一次，关了再弹一张新的照报
   if (lastNotified.get(channelId) === key) return;
   lastNotified.set(channelId, key);
   console.log(
@@ -665,6 +692,7 @@ export function startPermissionWatcher(
         // 注意：不能根据 idle 字段跳过 — 弹窗界面底部也有 ❯ 会被误判为 idle
         await checkAgent(agent.name, agent.channelId, allowedUserIds, discord).catch(() => {});
       }
+      await checkMasterSwitchBox(allowedUserIds, discord).catch((e) => console.error("🎛 master 切换框检查失败:", e));
     } catch { /* non-critical */ } finally {
       // 必须在 finally 里放闸：任何一条异常路径漏掉它，watcher 就永久锁死再不工作。
       ticking = false;

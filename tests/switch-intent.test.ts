@@ -5,7 +5,7 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { clearSwitchIntent, consumeSwitchIntent, isPressedBox, noteEffortSwitchIntent, notePressedBox, noteModelSwitchIntent } from "../src/bridge/permission-watcher.ts";
+import { clearSwitchIntent, consumeSwitchIntent, isPressedBox, noteEffortSwitchIntent, notePressedBox, noteModelSwitchIntent, switchBoxAction } from "../src/bridge/permission-watcher.ts";
 import { detectSwitchConfirmPrompt } from "../src/lib/tmux-helper.ts";
 
 const fx = (f: string): string => readFileSync(join(import.meta.dir, "fixtures", "switch-confirm", f), "utf8");
@@ -63,5 +63,24 @@ describe("isPressedBox", () => {
     expect(isPressedBox("t41c-g", SWITCH_MODEL, t + 700)).toBe(true);
     expect(isPressedBox("t41c-g", SWITCH_MODEL.replaceAll("Sonnet 5", "Sonnet 4.6"), t + 700)).toBe(false);
     expect(isPressedBox("t41c-g", SWITCH_MODEL, t + 20_001)).toBe(false);
+  });
+});
+
+describe("switchBoxAction（watcher 对 agent 和大总管同一套）", () => {
+  test("没框 → none；没意图 → notify 带框指纹；意图对上 → press 一次，旧帧 stale，意图用掉后新框 notify", () => {
+    const t = Date.now();
+    expect(switchBoxAction("master", fx("cc2.1.280-model-set.txt"), t).act).toBe("none");
+    const n = switchBoxAction("master", SWITCH_MODEL, t);
+    expect(n.act).toBe("notify");
+    expect(n.act === "notify" && n.box).toMatch(/^[0-9a-f]{12}$/);
+    noteModelSwitchIntent("master", "claude-sonnet-5");
+    expect(switchBoxAction("master", SWITCH_MODEL, t).act).toBe("press");
+    expect(switchBoxAction("master", SWITCH_MODEL, t + 700).act).toBe("stale");
+    expect(switchBoxAction("master", SWITCH_MODEL, t + 20_001).act).toBe("notify");
+  });
+
+  test("意图是 Sonnet 5、框是 Sonnet 4.6 → notify，不按", () => {
+    noteModelSwitchIntent("t41c-h", "claude-sonnet-5");
+    expect(switchBoxAction("t41c-h", SWITCH_MODEL.replaceAll("Sonnet 5", "Sonnet 4.6")).act).toBe("notify");
   });
 });

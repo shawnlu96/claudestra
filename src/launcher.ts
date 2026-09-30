@@ -34,7 +34,7 @@ import {
   MASTER_SESSION as SESSION_NAME,
   MASTER_WINDOW_NAME,
 } from "./lib/tmux-helper.js";
-import { confirmMasterModal, createSwitchBoxNotifier, masterShouldAutoConfirm } from "./lib/master-modal.js";
+import { confirmMasterModal, masterShouldAutoConfirm } from "./lib/master-modal.js";
 import { buildClaudeCommand } from "./lib/claude-launch.js";
 import { resolveNpm } from "./lib/npm-path.js";
 import { resolveBunPath } from "./lib/bun-path.js";
@@ -77,7 +77,6 @@ if (!CONTROL_CHANNEL_ID) {
 }
 
 const MASTER_WINDOW = `${SESSION_NAME}:0`;
-const noticeSwitchBox = createSwitchBoxNotifier((text) => notify({ source: "launcher", chatId: CONTROL_CHANNEL_ID, text }));
 
 async function sessionExists(): Promise<boolean> {
   return masterSessionExists();
@@ -1088,7 +1087,7 @@ async function main() {
     if (masterShouldAutoConfirm(pane)) {
       console.log("⚠️ 大总管卡在确认弹窗，自动确认...");
       await confirmMasterModal(MASTER_WINDOW, pane);
-    } else await noticeSwitchBox(pane);
+    }
 
     // 定期检查 Claudestra 新版本（Release）
     if (Date.now() - lastUpdateCheck >= UPDATE_CHECK_INTERVAL_MS) {
