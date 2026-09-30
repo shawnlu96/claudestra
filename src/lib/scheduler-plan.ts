@@ -2,7 +2,7 @@
 import type { LedgerEvent, LedgerTask, Stage } from "./ledger-stages.js";
 import { resourceKey, resourcesOverlap, type AuthorFamily, type SchedulerIntent, type TaskWorkflow } from "./ledger-scheduler.js";
 import { currentReviewFacts, p1AnyStreak, p1FindingStreak, type ReviewFacts, type ReviewFinding } from "./scheduler-review.js";
-import { FLOW_TEMPLATES, nodeAt, restateRecordedGate, templateFor, type FlowNode } from "./scheduler-template.js";
+import { FLOW_TEMPLATES, nodeAt, restateGate, templateFor, type FlowNode } from "./scheduler-template.js";
 import { cardWorkerSlots } from "./scheduler-worker-slot.js";
 
 export interface WorkerRef {
@@ -307,8 +307,6 @@ function stageStep(s: PlannerSnapshot, node: FlowNode): PlannerDecision {
       e.data.op === "restate_approved" && e.data.specRev === s.task.specRev);
     if (!approved) return wait("pm_restate", "等待 PM 放行复述");
   }
-  const restate = node.gate === "restate_recorded" ? restateRecordedGate(s.task, s.events, latestSeq(s.events, s.task)) : null;
-  if (restate) return restate;
   if (node.stage === "live" && s.events.some((e) => e.kind === "verify" && e.seq >= latestSeq(s.events, s.task) && e.data.result !== "pass")) {
     return escalate("verify_failed", "完成检查单未通过，不能自动重跑");
   }
@@ -335,6 +333,8 @@ export function planScheduler(s: PlannerSnapshot): PlannerDecision {
   const template = templateFor(workflow.template, workflow.templateVersion);
   const node = template && nodeAt(template, task.stage);
   if (!node) return escalate("stage_unknown", `模板 ${workflow.template} 不认识阶段 ${task.stage}`);
+  const restate = restateGate(template!, node, task, s.events, s.intents);
+  if (restate) return restate;
   const decision = task.stage === "spec" || task.stage === "build" || task.stage === "fix" ? dispatchWork(s, node)
     : task.stage === "review" ? reviewStep(s, node) : stageStep(s, node);
   const active = s.intents.find((i) => i.status === "pending" || i.status === "submitted" || i.status === "unknown");

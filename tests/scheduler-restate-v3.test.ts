@@ -83,7 +83,54 @@ describe("code v3 template", () => {
     expect(await f.cli("pm", "restate-approve", "T1")).toMatchObject({ ok: true });
     await f.tick();
     expect(f.task().stage).toBe("build");
+    await f.tick(); // write order
+    expect(f.sent.at(-1)?.text).toContain("write");
     expect(await f.cli("pm", "restate-hold", "T1", "--reason", "晚了")).toMatchObject({ ok: false, code: "conflict" });
+  });
+
+  test("v3: in build, a hold still lands before the write order is sent; restate-release lets it go", async () => {
+    await v3AtRestateOrder();
+    expect(await restate("--text", "复述见 reviews/T1-restate.md")).toMatchObject({ ok: true });
+    await f.tick(); // restate → build
+    expect(f.task().stage).toBe("build");
+    expect(f.sent).toHaveLength(1);
+    expect(await f.cli("pm", "restate-hold", "T1", "--reason", "开工前再对一下")).toMatchObject({ ok: true });
+    expect(await f.tick()).toMatchObject({ step: "waiting", detail: "PM 拦住了复述：开工前再对一下" });
+    expect(f.sent).toHaveLength(1);
+    expect(await f.cli("agent-task-one", "restate-release", "T1")).toMatchObject({ ok: false, code: "forbidden" });
+    expect(await f.cli("pm", "restate-release", "T1")).toMatchObject({ ok: true });
+    await f.tick();
+    expect(f.sent).toHaveLength(2);
+    expect(f.sent.at(-1)?.text).toContain("write");
+  });
+
+  test("v3: a pending write order can't be held: the tick may be sending it right now", async () => {
+    await v3AtRestateOrder();
+    expect(await restate("--text", "复述")).toMatchObject({ ok: true });
+    await f.tick(); // restate → build
+    f.db.query(`INSERT INTO scheduler_intents (id, taskId, project, node, action, recipient, causalSeq, taskRev, specRev, head, templateVersion,
+      status, reason, createdAt, updatedAt) VALUES ('w1', 'T1', 'p', 'write', 'dispatch', 'agent-task-one', 1, 1, 1, NULL, 3, 'pending', 'x', 1, 1)`).run();
+    expect(await f.cli("pm", "restate-hold", "T1", "--reason", "晚了一步")).toMatchObject({ ok: false, code: "conflict" });
+  });
+
+  test("v3: blocked→restate recovery text is not a restatement; a real record survives a block/unblock", async () => {
+    await v3AtRestateOrder();
+    expect(await restate()).toMatchObject({ ok: true });
+    expect(await f.cli("pm", "stage", "T1", "--from", "restate", "--to", "blocked", "--text", "外部依赖")).toMatchObject({ ok: true });
+    expect(await f.cli("pm", "stage", "T1", "--from", "blocked", "--to", "restate", "--text", "解除外部依赖阻塞")).toMatchObject({ ok: true });
+    await f.tick();
+    expect(f.task().stage).toBe("restate");
+    expect(getWorkflow(f.db, "T1")?.mode).toBe("manual");
+    expect(f.notices.at(-1)).toContain("restate_missing");
+    f.close();
+
+    await v3AtRestateOrder();
+    expect(await restate("--text", "复述见 reviews/T1-restate.md")).toMatchObject({ ok: true });
+    expect(await f.cli("pm", "stage", "T1", "--from", "restate", "--to", "blocked", "--text", "外部依赖")).toMatchObject({ ok: true });
+    expect(await f.cli("pm", "stage", "T1", "--from", "blocked", "--to", "restate")).toMatchObject({ ok: true });
+    await f.tick();
+    expect(f.task().stage).toBe("build");
+    expect(getWorkflow(f.db, "T1")?.mode).toBe("auto");
   });
 
   test("v2 is unchanged: a restate record alone still waits for PM, and restate-hold refuses v2 cards", async () => {

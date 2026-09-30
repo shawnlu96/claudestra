@@ -1,6 +1,6 @@
 /** Data-only workflows (v2 all templates, v3 code only). The interpreter in scheduler-plan.ts owns conditions and side effects. */
 import type { LedgerEvent, LedgerTask, Stage, StepName } from "./ledger-stages.js";
-import type { WorkflowTemplate } from "./ledger-scheduler.js";
+import type { SchedulerIntent, WorkflowTemplate } from "./ledger-scheduler.js";
 
 type NodeAction = "dispatch" | "review" | "stage" | "ask" | "merge" | "verify" | "retire";
 export interface FlowNode {
@@ -50,20 +50,34 @@ export function templateFor(template: WorkflowTemplate, version: number): FlowTe
   return null;
 }
 
-/**
- * restate_recorded: the stage event that put the card in restate (enteredSeq) must be for this specRev and carry the restate
- * text (normally "复述见 reviews/<task>-restate.md"); without it the card goes to PM, since the executor can't restate twice.
- * An open restate-hold (no restate-approve after it) waits.
- */
-export function restateRecordedGate(task: LedgerTask, events: readonly LedgerEvent[], enteredSeq: number):
-  { kind: "wait" | "escalate"; code: string; reason: string } | null {
-  const entered = events.find((e) => e.seq === enteredSeq && e.kind === "stage" && e.data.to === "restate");
-  if (!entered || entered.data.specRev !== task.specRev || !entered.text.trim()) {
-    return { kind: "escalate", code: "restate_missing", reason: "没有本规格版本的复述记录，不开工" };
-  }
-  const since = events.findLast((e) => e.kind === "decision" && e.data.op === "restate_approved" && e.data.specRev === task.specRev)?.seq ?? 0;
-  const hold = events.findLast((e) => e.kind === "decision" && e.data.op === "restate_hold" && e.data.specRev === task.specRev && e.seq > since);
+type GateDecision = { kind: "wait" | "escalate"; code: string; reason: string };
+const RELEASES = new Set(["restate_approved", "restate_released"]);
+
+/** A restate-hold for this specRev with no restate-approve / restate-release after it. */
+function openHold(task: LedgerTask, events: readonly LedgerEvent[]): GateDecision | null {
+  const released = events.findLast((e) => e.kind === "decision" && RELEASES.has(String(e.data.op)) && e.data.specRev === task.specRev)?.seq ?? 0;
+  const hold = events.findLast((e) => e.kind === "decision" && e.data.op === "restate_hold" && e.data.specRev === task.specRev && e.seq > released);
   return hold ? { kind: "wait", code: "restate_hold", reason: `PM 拦住了复述：${hold.text || "等 PM 放行"}` } : null;
+}
+
+/** True once a write order for this specRev left pending (submitted / done / unknown) — past that point a hold stops nothing. */
+const writeOrderSent = (task: LedgerTask, intents: readonly SchedulerIntent[]): boolean =>
+  intents.some((i) => i.node === "write" && i.action === "dispatch" && i.specRev === task.specRev && i.status !== "pending" && i.status !== "cancelled");
+
+/**
+ * v3 only. restate: the executor's own spec→restate event for this specRev must carry the restate text; a blocked→restate
+ * recovery is PM bookkeeping, never a restatement. No record → PM (the executor can't restate twice). An open restate-hold
+ * waits here and again in build until the write order is sent. v2 returns null, so its pm_restate path is untouched.
+ */
+export function restateGate(template: FlowTemplate, node: FlowNode, task: LedgerTask, events: readonly LedgerEvent[],
+  intents: readonly SchedulerIntent[]): GateDecision | null {
+  if (template.version !== 3) return null;
+  if (node.gate === "restate_recorded") {
+    const record = events.findLast((e) => e.kind === "stage" && e.data.from === "spec" && e.data.to === "restate" && e.data.specRev === task.specRev);
+    if (!record?.text.trim()) return { kind: "escalate", code: "restate_missing", reason: "没有本规格版本的复述记录，不开工" };
+    return openHold(task, events);
+  }
+  return node.id === "write" && !writeOrderSent(task, intents) ? openHold(task, events) : null;
 }
 
 /** The stage machine remains canonical; templates only choose work within its legal states. */
