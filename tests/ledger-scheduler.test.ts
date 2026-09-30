@@ -49,7 +49,7 @@ describe("T68 durable scheduler facts", () => {
     const f = fixture();
     try {
       f.db.query("UPDATE scheduler_meta SET value = ? WHERE key = 'activationSeq'").run(String(f.seq()));
-      expect(() => f.workflow("T1")).toThrow(/只给迁移后新建/);
+      expect(() => f.workflow("T1")).toThrow(/迁移后新建/);
       expect(getWorkflow(f.db, "T1")).toBeNull();
     } finally { f.close(); }
   });
@@ -194,7 +194,7 @@ describe("T68 durable scheduler facts", () => {
         resources: ["task:t1", "slot:p:0", "src/bridge.ts"] });
       const moved = moveStage(f.db, f.owner, { taskId: "T1", from: "spec", to: "restate" }).row;
       setWorkflow(f.db, f.owner, { taskId: "T1", taskRev: moved.rev, workflowRev: a.rev,
-        template: "code", templateVersion: 2, mode: "manual", authorFamily: "claude", fallback: "PM 接手" });
+        template: "code", templateVersion: 2, mode: "manual", authorFamily: "claude", fallback: "PM 接手", reason: "PM 接手核对" });
       expect(f.db.query("SELECT resource FROM scheduler_resources WHERE taskId = 'T1' ORDER BY resource").all())
         .toEqual([{ resource: "slot:p:0" }, { resource: "src/bridge.ts" }]);
       expect(() => planIntent(f.db, { actor: "scheduler" }, { id: "pending:T2", taskId: "T2", taskRev: 1,
@@ -254,7 +254,7 @@ describe("T68 durable scheduler facts", () => {
         causalSeq: f.seq(), node: "restate", action: "dispatch", reason: "派复述", resources: ["task:T1"] });
       const moved = moveStage(f.db, { actor: "agent-one" }, { taskId: "T1", from: "spec", to: "restate" }).row;
       const next = setWorkflow(f.db, f.owner, { taskId: "T1", taskRev: moved.rev, workflowRev: w.rev,
-        template: "code", templateVersion: 2, mode: "manual", authorFamily: "claude", fallback: "收窄到只报错" });
+        template: "code", templateVersion: 2, mode: "manual", authorFamily: "claude", fallback: "收窄到只报错", reason: "PM 暂停" });
       expect(next.workflow.mode).toBe("manual");
       expect(getIntent(f.db, "pause:T1")?.status).toBe("cancelled");
       expect(f.db.query("SELECT COUNT(*) AS n FROM scheduler_resources WHERE taskId = 'T1'").get()).toEqual({ n: 0 });

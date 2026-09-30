@@ -54,7 +54,8 @@ export type WorkerObservation =
   | { state: "running"; busy: boolean }
   | { state: "result"; outcome: "delivered" | "reviewed"; eventSeq: number }
   | { state: "result"; outcome: "failed"; failure: WorkerFailure }
-  | { state: "unknown"; reason: string };
+  /** failure: the host reported a failed turn it could not tie to any order claimed before it; PM's call, not a wait. */
+  | { state: "unknown"; reason: string; failure?: WorkerFailure };
 
 export type EnsureResult =
   | { kind: "ready"; ref: SessionRef; created: boolean }

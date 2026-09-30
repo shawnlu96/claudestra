@@ -26,6 +26,8 @@ import { checkMergeGate, checkTaskRefs } from "./ledger-field-checks.js";
 import { agentKey, intFlag, jsonObjectFlag } from "./ledger-identity.js";
 import { MASTER_PARENT, TASK_MAX, validateParent, validateTask } from "./team.js";
 import { structuredReviewFlags } from "./ledger-scheduler-observe-cmds.js";
+import { autoReviewWriter } from "../lib/scheduler-auto-review.js";
+import { witnessMismatch } from "../lib/caller-witness.js";
 
 const ITEM_FLAGS: Record<string, string> = { title: "title", status: "status", priority: "priority", "owner-words": "ownerWords", "one-line": "oneLine", next: "next" };
 const TASK_FLAGS: Record<string, string> = {
@@ -236,9 +238,10 @@ function deliverCmd(c: LedgerCli): Result {
   return { ok: true, task: r.row, event: r.event, duplicate: r.duplicate, routed: getMeta(c.db, task.project).team !== null };
 }
 
-function review(c: LedgerCli): Result {
+async function review(c: LedgerCli): Promise<Result> {
   const task = c.task(c.p.pos[1]);
-  c.requireManager(task.project, "记审查结论");
+  const bound = autoReviewWriter(c.db, task, c.deps, c.p.flags);
+  if (!bound) c.requireManager(task.project, "记审查结论");
   const counts = { p0: intFlag(c.p, "p0"), p1: intFlag(c.p, "p1"), p2: intFlag(c.p, "p2") };
   if (Object.values(counts).some((v) => v === undefined)) throw new LedgerError("invalid", "要带 --p0 --p1 --p2（没有就写 0）");
   if (c.p.flags.path !== undefined && !pathLike(c.p.flags.path)) throw new LedgerError("invalid", PATH_ONLY("--path"));
@@ -246,9 +249,11 @@ function review(c: LedgerCli): Result {
   const verdict = c.need("verdict");
   const waive = waiveFlag(c, task, verdict);
   if (move?.to === "merge") checkMergeGate(c, task, { verdict, waive });
+  const w = bound && c.deps.callerWitness ? await c.deps.callerWitness() : null;
+  const witness = w && bound ? { ...w, mismatch: witnessMismatch(w, bound) } : undefined;
   const r = recordReview(c.db, c.ctx(), {
     taskId: task.id, reviewer: c.need("reviewer"), verdict: verdict as never, ...(counts as { p0: number; p1: number; p2: number }),
-    path: c.p.flags.path, text: c.p.flags.text, move, ...(waive ? { waive } : {}), ...structuredReviewFlags(c),
+    path: c.p.flags.path, text: c.p.flags.text, move, ...(waive ? { waive } : {}), ...structuredReviewFlags(c), ...(witness ? { witness } : {}),
   });
   return { ok: true, task: r.row, event: r.event, duplicate: r.duplicate };
 }

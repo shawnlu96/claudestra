@@ -48,3 +48,47 @@ export async function bridgeRequest(msg: Record<string, unknown>, opts?: { timeo
     };
   });
 }
+
+type BridgeSendResult = { ok: true; result: any } | { ok: false; sent: boolean; error: string; rejected?: string };
+
+/**
+ * Like bridgeRequest, for callers that must not resend blindly: sent=false means the request never left this process or
+ * the bridge answered with a typed `rejected` code (refused before any delivery) — safe to plan again. Any other error
+ * after sending is sent=true: the bridge may have delivered before failing, so the outcome is unknown.
+ * stillActive is asked in the same synchronous block as the send: a caller that stopped during the handshake sends nothing.
+ */
+export async function bridgeSend(msg: Record<string, unknown>, opts?: { timeoutMs?: number; stillActive?: () => boolean }): Promise<BridgeSendResult> {
+  return new Promise((resolve) => {
+    let sent = false;
+    let done = false;
+    const ws = new WebSocket(BRIDGE_URL);
+    const requestId = `req_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    const finish = (r: BridgeSendResult) => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      ws.close();
+      resolve(r);
+    };
+    const timer = setTimeout(() => finish({ ok: false, sent, error: "Bridge 请求超时" }), opts?.timeoutMs ?? 10000);
+    ws.onopen = () => {
+      if (opts?.stillActive && !opts.stillActive()) return finish({ ok: false, sent: false, error: "发送方已停止，帧没有发出" });
+      ws.send(JSON.stringify({ ...msg, requestId }));
+      sent = true;
+    };
+    ws.onmessage = (event) => {
+      let data: any;
+      try {
+        data = JSON.parse(typeof event.data === "string" ? event.data : "");
+      } catch {
+        return; // a frame that is not JSON is some other broadcast on this socket, not our answer
+      }
+      if (data?.requestId !== requestId) return;
+      if (!data.error) return finish({ ok: true, result: data.result });
+      const rejected = typeof data.rejected === "string" ? data.rejected : undefined;
+      finish({ ok: false, sent: rejected ? false : sent, error: String(data.error), ...(rejected ? { rejected } : {}) });
+    };
+    ws.onerror = () => finish({ ok: false, sent, error: "Bridge 连接出错" });
+    ws.onclose = () => finish({ ok: false, sent, error: "Bridge 连接在答复前断开" });
+  });
+}

@@ -2,15 +2,14 @@
  * Codex over the ACP host: structured turns, structured failures and session/cancel. No TUI parsing, no keys.
  * A quota / auth failure is a result, not a retry signal: the scheduler escalates it; the quota channel owns the choice.
  */
-import type { AcpFailure } from "./acp/failures.js";
-import { ensureVia, observeVia, orderMismatch, sendReceipt, type AdapterDeps, type LiveState, type SendResult } from "./worker-ports.js";
+import { ensureVia, observeVia, orderMismatch, sendReceipt, withHostFailure, type AdapterDeps, type HostFailure, type LiveState, type SendResult } from "./worker-ports.js";
 import { renderWorkOrder } from "./worker-order.js";
 import type { ControlReceipt, SubmitReceipt, WorkerSession } from "./worker-session.js";
 
 /** Host turn state as reported by the ACP host (session/prompt pending = busy); lastFailure is the latest failed turn. */
 export interface AcpTurnState {
   live: LiveState;
-  lastFailure?: { failure: AcpFailure; afterKey: string | null };
+  lastFailure?: HostFailure;
 }
 
 export interface AcpPort {
@@ -41,13 +40,7 @@ export function createAcpWorker(o: AdapterDeps & { port: AcpPort }): WorkerSessi
       } catch {
         state = { live: "unknown" }; // an unreadable host only means unknown liveness; ledger facts still decide a finished result
       }
-      const seen = observeVia(o, ref, order, state.live);
-      const failed = state.lastFailure;
-      if (seen.state === "result" || !failed || state.live === "busy") return seen;
-      // A failure counts only when the host tied it to our key; an unattributed one may predate this order.
-      if (failed.afterKey === null) return { state: "unknown", reason: `宿主报了未归属本单的失败（${failed.failure.kind}）` };
-      if (failed.afterKey !== order.dedupKey) return seen;
-      return { state: "result", outcome: "failed", failure: { kind: failed.failure.kind, message: failed.failure.message } };
+      return withHostFailure(observeVia(o, ref, order, state.live), state.lastFailure, state.live, order);
     },
     async cancel(ref) {
       try { return await o.port.cancel(ref.agent, ref.sessionId); }
