@@ -28,7 +28,7 @@ afterEach(() => {
   for (const p of procs.splice(0)) p.stop();
 });
 
-function start(extraEnv: Record<string, string> = {}) {
+function start(extraEnv: Record<string, string> = {}, beforeSpawn?: () => Promise<void>) {
   const sent: any[] = [];
   const requests: any[] = [];
   const stops: (StopReport & { channelId: string })[] = [];
@@ -53,6 +53,7 @@ function start(extraEnv: Record<string, string> = {}) {
         procs.push(p);
         return p;
       },
+      beforeSpawn,
       makeLink: (d) => {
         link = d;
         return {
@@ -81,6 +82,25 @@ function start(extraEnv: Record<string, string> = {}) {
 }
 
 describe("ACP 宿主整条链（stub）", () => {
+  test("beforeSpawn（探 codex 版本）等完才起适配器；等的时候宿主被停了就不再起", async () => {
+    let release!: () => void;
+    const gate = () => new Promise<void>((r) => { release = r; });
+    const h = start({}, gate);
+    await new Promise((r) => setTimeout(r, 50));
+    expect(procs.length).toBe(0);
+    release();
+    await until(h.isReady);
+    host!.stop();
+    host = null;
+    procs.splice(0).forEach((p) => p.stop());
+    start({}, gate);
+    await new Promise((r) => setTimeout(r, 50));
+    host!.stop();
+    release();
+    await new Promise((r) => setTimeout(r, 50));
+    expect(procs.length).toBe(0);
+  }, 20_000);
+
   test("起步：登记 + 接上线程 → 标就绪；启动钉的模型经 set_config_option 生效，顶栏条目跟上", async () => {
     const h = start();
     await until(h.isReady);

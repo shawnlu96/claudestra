@@ -40,6 +40,8 @@ export interface HostConfig {
 
 export interface HostDeps {
   spawn(cmd: string[], env: Record<string, string>, cwd: string): AdapterProc;
+  /** 每次起适配器前等它跑完（含退避重起）；自己负责超时、不 reject */
+  beforeSpawn?(): Promise<void>;
   makeLink(deps: Omit<BridgeLinkDeps, "url">): Pick<BridgeLink, "connect" | "send" | "request" | "close" | "up">;
   startProxy(deps: Omit<ToolProxyDeps, "port">): ToolProxy;
   postHook(body: { channelId: string } & StopReport): Promise<{ block?: boolean; reason?: string }>;
@@ -143,6 +145,8 @@ export class AcpHost {
 
   private async startAdapter(): Promise<void> {
     if (this.stopping) return;
+    await this.deps.beforeSpawn?.();
+    if (this.stopping) return; // 等的时候收到了 SIGINT：别再起一个没人收尾的适配器
     const env = adapterEnv({ ...this.cfg.env, channel: { channelId: this.cfg.channelId, proxyUrl: this.proxy.url, agentName: this.cfg.agentName, sessionId: this.cfg.sessionId } });
     const proc = this.deps.spawn(this.cfg.agentCmd, env, this.cfg.cwd);
     this.proc = proc;

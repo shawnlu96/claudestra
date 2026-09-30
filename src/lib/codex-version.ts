@@ -4,7 +4,7 @@
  * - 运行：rollout 首行的 session_meta.cli_version 是**建线程**时的版本，resume 不会改（实测 0.153 建、0.158 续跑仍写 0.153），
  *   所以另记一笔到 <STATE_DIR>/codex-running/<agent>.json：tmux 在适配器 beforeLaunch 里记；ACP 由宿主在每次起 codex-acp
  *   之前记（noteAcpCodexRunning），因为 app-server 是适配器按 CODEX_PATH 起的，适配器退避重起时跑的是那一刻磁盘上的版本；
- * - npm 全局安装与否：决定能不能替用户跑 `npm install -g @openai/codex@latest`（brew 等只给文字提示）。
+ * - npm 全局安装与否：决定能不能替用户跑 `npm install -g @openai/codex@<版本>`（brew 等只给文字提示）。
  */
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -50,27 +50,45 @@ export function readCodexRunning(agent: string, dir: string = STATE_DIR): string
   }
 }
 
-/** `codex --version` 的原始输出（如 "codex-cli 0.158.0"）→ "0.158.0" */
-const parseCodexVersion = (out: string | undefined): string | undefined => out?.match(/(\d+\.\d+\.\d+)/)?.[1];
+/** 宿主探 codex 版本最多等这么久：探的时候适配器还没起，等久了就是晚起；超时记「未知」，照样起 */
+const ACP_PROBE_MS = 10_000;
 
 /**
- * ACP 宿主每次起适配器之前调：探 CODEX_PATH、记运行版本、不配套就告警。stub（沙箱）没有 codex，不探也不记——
- * manager 的 beforeLaunch 已先写了空记录，网页就不会拿上一次启动的旧值误报「该重启」。
+ * ACP 宿主每次起适配器之前调：异步探 CODEX_PATH（不卡宿主的事件循环）、记运行版本、不配套就告警（同一版本只告一次）。
+ * 超时用 race 硬截：假 codex 的子进程攥着 stdout 时 runner 的 kill 等不回来。stub（沙箱）没有 codex，不探也不记——
+ * manager 的 beforeLaunch 已先写了空记录，网页就不会拿上一次启动的旧值误报「该重启」。tests/update-hints.test.ts。
  */
-export function noteAcpCodexRunning(o: {
+export async function noteAcpCodexRunning(o: {
   agent: string;
   codexPath?: string;
-  probe: (bin: string) => string;
   log: (msg: string) => void;
+  /** 返回解析好的 x.y.z；缺省 `codex --version` */
+  probe?: (bin: string) => Promise<string | null | undefined>;
   dir?: string;
-}): string | undefined {
+  timeoutMs?: number;
+  /** 已告警过的版本（宿主整个进程共用一份），退避重起时不重复刷屏 */
+  warned?: Set<string>;
+}): Promise<string | undefined> {
   if (!o.codexPath) return undefined;
-  let out = "";
-  try { out = o.probe(o.codexPath).trim(); } catch (e) { o.log(`⚠️ 探不出 codex 版本：${String(e)}`); }
-  if (!codexPairsWithAdapter(out)) {
-    o.log(`⚠️ 本机 codex 是「${out || "读不出版本"}」，codex-acp ${CODEX_ACP_VERSION} 配套的是 ${CODEX_ACP_PAIRS}：升 codex 要连适配器一起手动对齐（docs/runtimes/codex-acp.md）`);
+  const ms = o.timeoutMs ?? ACP_PROBE_MS;
+  const probe = o.probe ?? ((bin: string) => probeClaudeVersion(defaultRunner, bin, ms));
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const late = new Promise<"timeout">((r) => { timer = setTimeout(() => r("timeout"), ms); });
+  let v: string | undefined;
+  try {
+    const got = await Promise.race([probe(o.codexPath), late]);
+    if (got === "timeout") o.log(`⚠️ 探 codex 版本超过 ${ms / 1000}s，记为未知，照常起适配器`);
+    else v = got ?? undefined;
+  } catch (e) {
+    o.log(`⚠️ 探不出 codex 版本：${String(e)}`);
+  } finally {
+    clearTimeout(timer);
   }
-  const v = parseCodexVersion(out);
+  const key = v ?? "读不出版本";
+  if (!codexPairsWithAdapter(v) && !o.warned?.has(key)) {
+    o.warned?.add(key);
+    o.log(`⚠️ 本机 codex 是「${key}」，codex-acp ${CODEX_ACP_VERSION} 配套的是 ${CODEX_ACP_PAIRS}：升 codex 要连适配器一起手动对齐（docs/runtimes/codex-acp.md）`);
+  }
   try { recordCodexRunning(o.agent, v, o.dir); } catch (e) { o.log(`⚠️ 记不下 codex 运行版本（网页少一条「重启生效」提示）：${String(e)}`); }
   return v;
 }

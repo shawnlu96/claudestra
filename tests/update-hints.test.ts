@@ -213,39 +213,52 @@ describe("Codex × codex-acp 配套范围（0.158.x）", () => {
   });
 });
 
-describe("ACP 运行版本来源：宿主起适配器前探 CODEX_PATH（noteAcpCodexRunning）", () => {
+describe("ACP 运行版本来源：宿主起适配器前异步探 CODEX_PATH（noteAcpCodexRunning）", () => {
   const setup = () => {
     const dir = mkdtempSync(join(tmpdir(), "codex-running-acp-"));
     const logs: string[] = [];
     return { dir, logs, log: (m: string) => logs.push(m) };
   };
-  test("配套版本：记下运行版本，不告警", () => {
+  test("配套版本：记下运行版本，不告警", async () => {
     const { dir, logs, log } = setup();
-    expect(noteAcpCodexRunning({ agent: "agent-a", codexPath: "/x/codex", probe: () => "codex-cli 0.158.0\n", log, dir })).toBe("0.158.0");
+    expect(await noteAcpCodexRunning({ agent: "agent-a", codexPath: "/x/codex", probe: async () => "0.158.0", log, dir })).toBe("0.158.0");
     expect(readCodexRunning("agent-a", dir)).toBe("0.158.0");
     expect(logs).toEqual([]);
   });
-  test("适配器退避重起时 codex 已被升级：记录跟着换成新版本，并告警不配套", () => {
+  test("适配器退避重起时 codex 已被升级：记录跟着换成新版本；同一个不配套版本只告警一次", async () => {
     const { dir, logs, log } = setup();
-    let v = "codex-cli 0.158.0";
-    const probe = () => v;
-    noteAcpCodexRunning({ agent: "agent-a", codexPath: "/x/codex", probe, log, dir });
-    v = "codex-cli 0.159.2";
-    noteAcpCodexRunning({ agent: "agent-a", codexPath: "/x/codex", probe, log, dir });
+    const warned = new Set<string>();
+    let v = "0.158.0";
+    const o = { agent: "agent-a", codexPath: "/x/codex", probe: async () => v, log, dir, warned };
+    await noteAcpCodexRunning(o);
+    v = "0.159.2";
+    await noteAcpCodexRunning(o);
+    await noteAcpCodexRunning(o);
     expect(readCodexRunning("agent-a", dir)).toBe("0.159.2");
-    expect(logs.join("\n")).toContain("0.158.x");
+    expect(logs.length).toBe(1);
+    expect(logs[0]).toContain("0.158.x");
   });
-  test("探不出版本：记空记录（不沿用旧值）并告警", () => {
+  test("探不出版本：记空记录（不沿用旧值）并告警", async () => {
     const { dir, logs, log } = setup();
     recordCodexRunning("agent-a", "0.157.0", dir);
-    noteAcpCodexRunning({ agent: "agent-a", codexPath: "/x/codex", probe: () => { throw new Error("ENOENT"); }, log, dir });
+    await noteAcpCodexRunning({ agent: "agent-a", codexPath: "/x/codex", probe: async () => { throw new Error("ENOENT"); }, log, dir });
     expect(readCodexRunning("agent-a", dir)).toBeUndefined();
     expect(logs.length).toBe(2);
   });
-  test("stub（沙箱）没有 CODEX_PATH：不探、不记、不告警", () => {
+  test("探版本卡住：到时限记「未知」、照常返回，不等那个进程", async () => {
+    const { dir, logs, log } = setup();
+    recordCodexRunning("agent-a", "0.157.0", dir);
+    const t0 = Date.now();
+    const got = await noteAcpCodexRunning({ agent: "agent-a", codexPath: "/x/codex", probe: () => new Promise(() => {}), log, dir, timeoutMs: 50 });
+    expect(got).toBeUndefined();
+    expect(Date.now() - t0).toBeLessThan(1_000);
+    expect(readCodexRunning("agent-a", dir)).toBeUndefined();
+    expect(logs[0]).toContain("记为未知");
+  });
+  test("stub（沙箱）没有 CODEX_PATH：不探、不记、不告警", async () => {
     const { dir, logs, log } = setup();
     let probed = 0;
-    expect(noteAcpCodexRunning({ agent: "agent-a", probe: () => (probed++, ""), log, dir })).toBeUndefined();
+    expect(await noteAcpCodexRunning({ agent: "agent-a", probe: async () => (probed++, ""), log, dir })).toBeUndefined();
     expect(probed).toBe(0);
     expect(readCodexRunning("agent-a", dir)).toBeUndefined();
     expect(logs).toEqual([]);

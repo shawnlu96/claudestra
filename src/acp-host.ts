@@ -3,7 +3,6 @@
  * （owner 在这里打字不起作用）。逻辑都在 lib/acp/host.ts，这里只读环境变量、接真实依赖、处理信号。启动命令由
  * lib/runtimes/codex-acp.ts 生成；手动排障：`tmux -S … attach` 看这个窗口，适配器的详细日志在 APP_SERVER_LOGS。
  */
-import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 import { resolveBunPath } from "./lib/bun-path.js";
 import { resolveBridgeUrl } from "./lib/bridge-url.js";
@@ -40,12 +39,8 @@ if ("error" in agent) {
 }
 const codexPath = process.env.CLAUDESTRA_CODEX_BIN?.trim() || undefined;
 /** 每次起适配器前记一次（含退避重起）：app-server 跑的是那一刻磁盘上的 codex，网页「重启生效」提示读这条记录 */
-const noteCodex = () => noteAcpCodexRunning({
-  agent: agentName,
-  codexPath: agent.stub ? undefined : codexPath,
-  probe: (bin) => spawnSync(bin, ["--version"], { encoding: "utf8", timeout: 20_000 }).stdout ?? "",
-  log,
-});
+const warned = new Set<string>();
+const noteCodex = async () => void (await noteAcpCodexRunning({ agent: agentName, codexPath: agent.stub ? undefined : codexPath, log, warned }));
 
 const host = new AcpHost(
   {
@@ -68,7 +63,8 @@ const host = new AcpHost(
     },
   },
   {
-    spawn: (cmd, env, cwd) => (noteCodex(), spawnAdapter(cmd, env, cwd, log)),
+    spawn: (cmd, env, cwd) => spawnAdapter(cmd, env, cwd, log),
+    beforeSpawn: noteCodex,
     makeLink: (deps) => new BridgeLink({ ...deps, url: bridgeUrl }),
     startProxy: (deps) => startToolProxy(deps),
     postHook: async (body) => {
