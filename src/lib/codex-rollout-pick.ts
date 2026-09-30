@@ -8,10 +8,12 @@
  *
  * revert 链：Codex `thread/revert` 保留 thread id、另起 `<threadId>_<rolloutId>.jsonl`，新文件**只装新条目**，
  * 首行 history_base.thread_id 记着前一段的 rolloutId。只拷最新一段会丢前缀、只拷原文件会丢新正文，所以整条链每段各存一份（按 rolloutId 命名）；
- * 本线程有段没存上（.zst / 首行坏 / 链上引用落空）→ incomplete，调用方报 ok:false；归档里已有的 .zst 段算已存。
+ * Codex 按文件 mtime 满 7 天把段压成 `.jsonl.zst`：压过的段解压后同明文段一样认、一样拷（copyIfLarger 解压落盘），同一段明文和 .zst 都在时用明文。
+ * 本线程有段没存上（解压失败 / 首行坏 / 链上引用落空）→ incomplete，调用方报 ok:false。
  */
 import { realpathSync } from "node:fs";
-import { basename, join } from "node:path";
+import { basename } from "node:path";
+import { readMaybeZstd } from "./archive-copy.js";
 import { codexSessionsRoot, listCodexSessionFiles, readCodexMetaPayload } from "./codex-session.js";
 
 /**
@@ -55,27 +57,45 @@ const chainOrder = (a: Named, b: Named) =>
 
 const metaId = (meta: Record<string, any> | null) => String(meta?.id ?? meta?.session_id ?? "");
 
-/**
- * archiveDir：归档落点（`<agent>/` 目录）。给了它，已被 Codex 压成 .zst 的段在归档里有同名、首行 id 对得上的副本时算已存；
- * 不给就一律当缺段（tests/codex-archive-read.test.ts）。
- */
+/** 首行 session_meta.payload；.zst 整份解压后取首行（没有只解开头的同步接口），解压失败返回原因 */
+async function readSegmentMeta(f: Named): Promise<{ meta: Record<string, any> | null } | { error: string }> {
+  if (!f.name.compressed) return { meta: await readCodexMetaPayload(f.path) };
+  let text: string;
+  try {
+    text = (await readMaybeZstd(f.path)).toString("utf8");
+  } catch (e) {
+    return { error: `.zst 解压失败：${(e as Error).message}` };
+  }
+  const nl = text.indexOf("\n");
+  try {
+    const obj = JSON.parse(nl < 0 ? text : text.slice(0, nl));
+    return { meta: obj?.type === "session_meta" ? (obj?.payload ?? {}) : null };
+  } catch {
+    return { meta: null }; // 首行坏：同明文段，当首行读不出
+  }
+}
+
 export async function pickCodexRolloutForArchive(
   sessionId: string,
   cwd: string | undefined,
   root: string = codexSessionsRoot(),
-  archiveDir?: string,
 ): Promise<RolloutPick> {
   const all = listCodexSessionFiles(root, (n) => parseCodexRolloutFilename(n) !== null)
     .map((path) => ({ path, name: parseCodexRolloutFilename(basename(path))! }));
   const mine = all.filter((f) => f.name.threadId === sessionId);
-  const named = mine.filter((f) => !f.name.compressed);
-  if (named.length === 0) return { error: `Codex 会话记录不存在：${root} 下找不到 thread ${sessionId} 的 rollout` };
+  if (mine.length === 0) return { error: `Codex 会话记录不存在：${root} 下找不到 thread ${sessionId} 的 rollout` };
   const want = cwd ? canonicalDir(cwd) : null;
   const described: string[] = [];
   const idOk: Candidate[] = [];
   const skipped = new Map<string, string>(); // 文件名是本线程、首行却认不了的段 → 原因（chainGaps 报缺口用）
-  for (const f of named) {
-    const meta = await readCodexMetaPayload(f.path);
+  for (const f of mine) {
+    const read = await readSegmentMeta(f);
+    if ("error" in read) {
+      described.push(`${f.path}（${read.error}）`);
+      skipped.set(f.path, read.error);
+      continue;
+    }
+    const meta = read.meta;
     const id = metaId(meta);
     const metaCwd = typeof meta?.cwd === "string" ? meta.cwd : "";
     described.push(`${f.path}（id=${id || "?"}，cwd=${metaCwd || "?"}）`);
@@ -89,7 +109,9 @@ export async function pickCodexRolloutForArchive(
 
   const chosen: Candidate[] = [];
   for (const rid of new Set(idOk.map((c) => c.name.rolloutId))) {
-    const group = idOk.filter((c) => c.name.rolloutId === rid);
+    const same = idOk.filter((c) => c.name.rolloutId === rid);
+    // 压缩中途崩溃会留下同一段的明文 + .zst：明文是原件（.zst 可能是半截），不算两份
+    const group = same.some((c) => !c.name.compressed) ? same.filter((c) => !c.name.compressed) : same;
     const inDir = group.filter((c) => sameDir(c.cwd));
     const pick = group.length === 1 ? group[0] : inDir.length === 1 ? inDir[0] : undefined;
     if (!pick) {
@@ -106,7 +128,7 @@ export async function pickCodexRolloutForArchive(
     notes.push(`rollout 记的 cwd 是 ${cwds}，与 ${expect} 不同（多半是换目录 resume）；id 唯一，照常归档`);
   }
   if (chosen.length > 1) notes.push(`Codex revert 链 ${chosen.length} 段，每段各存一份，最新 ${basename(chosen[chosen.length - 1]!.path)}`);
-  const incomplete = await chainGaps({ chosen, all, mine, skipped, sessionId, archiveDir, notes });
+  const incomplete = chainGaps({ chosen, all, mine, skipped, sessionId, notes });
   return {
     segments: chosen.map((c) => ({ path: c.path, stem: c.name.rolloutId })),
     ...(notes.length ? { note: notes.join("；") } : {}),
@@ -114,36 +136,27 @@ export async function pickCodexRolloutForArchive(
   };
 }
 
-/** 这段已在归档里：`<archiveDir>/<rolloutId>.jsonl` 存在且首行 id 是本线程（别的线程恰好同名的文件不算） */
-async function alreadyArchived(archiveDir: string | undefined, rid: string, sessionId: string): Promise<boolean> {
-  return !!archiveDir && metaId(await readCodexMetaPayload(join(archiveDir, `${rid}.jsonl`))) === sessionId;
-}
-
 /**
  * 归档缺什么，任一出现就返回说明（调用方报 ok:false，能拷的段照拷）：
- *   1. 文件名是本线程、却没进 chosen 的段（更新的段是 .zst / 首行读不出 / 首行 id 不符，或回退后被放弃的中间段）——不报就是 ok:true 只存旧正文
+ *   1. 文件名是本线程、却没进 chosen 的段（首行读不出 / 首行 id 不符 / .zst 解压失败，最新段或回退后被放弃的中间段）——不报就是 ok:true 只存旧正文
  *   2. 已选段的 history_base 指向的同线程段找不到
- * 全是 .zst 的段在归档里已有 → 算已存：Codex 按文件 mtime 满 7 天自动压，不这样每日 sweep 会对每条老 revert 链永远报失败。
  * 前缀在别的线程（分页 fork 的父线程）只记 note；原文件（rolloutId = threadId）的 history_base 只可能指向父线程，找不到也按 fork 记 note。
  */
-async function chainGaps(ctx: {
+function chainGaps(ctx: {
   chosen: Candidate[];
   all: Named[];
   mine: Named[];
   skipped: Map<string, string>;
   sessionId: string;
-  archiveDir: string | undefined;
   notes: string[];
-}): Promise<string | null> {
-  const { chosen, all, mine, skipped, sessionId, archiveDir, notes } = ctx;
+}): string | null {
+  const { chosen, all, mine, skipped, sessionId, notes } = ctx;
   const have = new Set(chosen.map((c) => c.name.rolloutId));
   const latest = [...mine].sort(chainOrder).at(-1)!.name.rolloutId;
   const missing: string[] = [];
   for (const rid of new Set(mine.map((f) => f.name.rolloutId))) {
     if (have.has(rid)) continue;
-    const files = mine.filter((f) => f.name.rolloutId === rid);
-    if (files.every((f) => f.name.compressed) && (await alreadyArchived(archiveDir, rid, sessionId))) continue;
-    const why = files.map((f) => `${basename(f.path)}：${f.name.compressed ? "已被 Codex 压缩成 .zst，没法原样归档" : (skipped.get(f.path) ?? "?")}`);
+    const why = mine.filter((f) => f.name.rolloutId === rid).map((f) => `${basename(f.path)}：${skipped.get(f.path) ?? "?"}`);
     missing.push(`${rid === latest ? "最新段" : "段"} ${rid} 没归档（${why.join("；")}）`);
   }
   for (const c of chosen) {
@@ -156,7 +169,7 @@ async function chainGaps(ctx: {
       notes.push(`${basename(c.path)} 的前缀 ${c.base} 属于父线程（fork），本机已找不到，不算本线程缺段`);
     } else if (!ref.length) {
       missing.push(`${basename(c.path)} 的前一段 ${c.base}（找不到文件）`);
-    } // ref 是本线程的段：上面一轮已按「没进 chosen」报过（或已在归档里）
+    } // ref 是本线程的段：上面一轮已按「没进 chosen」报过
   }
   return missing.length ? `revert 链缺段：${missing.join("；")}` : null;
 }

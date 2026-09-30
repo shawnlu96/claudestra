@@ -5,6 +5,7 @@
  *   copyIfChanged 会被整个重写的文件（workflow 运行 JSON 跑的过程中可能变小）：内容不同就镜像源；.json 先解析成功才替换，
  *                 读的前后源变了（正被重写）就重读，三次都不稳就这次放弃
  * 返回 "copied" / "same" / "failed"：失败要让调用方报出来，别和「没变化」混在一起。
+ * `.zst` 源（Codex 满 7 天压缩的 rollout）先解压，比大小和落盘都按解压后的内容；解压失败 = "failed"，不当「没变化」。
  */
 import { existsSync } from "fs";
 import { readFile, rename, stat, unlink, writeFile } from "fs/promises";
@@ -22,17 +23,24 @@ async function atomicWrite(dest: string, data: Uint8Array): Promise<void> {
   }
 }
 
+/** 源文件内容：`.zst` 按标准 zstd 流解压（Codex 的 compression.rs 写的就是），坏流抛错 */
+export async function readMaybeZstd(src: string): Promise<Buffer> {
+  const raw = await readFile(src);
+  return src.endsWith(".zst") ? Buffer.from(Bun.zstdDecompressSync(raw)) : raw;
+}
+
 /** onError 拿到失败原因（归档要把它写进结果说明，只说「失败」没法排查） */
 export async function copyIfLarger(src: string, dest: string, onError?: (e: Error) => void): Promise<CopyOutcome> {
   try {
-    const s = await stat(src);
+    const data = src.endsWith(".zst") ? await readMaybeZstd(src) : null; // 明文源先只 stat：没变化时不读整份
+    const size = data ? data.length : (await stat(src)).size;
     if (existsSync(dest)) {
       const d = await stat(dest);
       // 目标被占成目录之类：只比大小会误报「已是最新」，实际没有可读的归档
       if (!d.isFile()) throw new Error(`归档目标不是普通文件：${dest}`);
-      if (d.size >= s.size) return "same";
+      if (d.size >= size) return "same";
     }
-    await atomicWrite(dest, await readFile(src));
+    await atomicWrite(dest, data ?? (await readFile(src)));
     return "copied";
   } catch (e) {
     onError?.(e as Error);

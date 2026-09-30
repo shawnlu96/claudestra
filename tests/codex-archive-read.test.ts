@@ -5,7 +5,7 @@
  * rollout 根走 CODEX_HOME（codexSessionsRoot 每次调用现读环境变量），全部落在临时目录，不碰真实 ~/.codex。
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { archiveAgentSession, archiveSession } from "../src/lib/session-archive.js";
@@ -36,13 +36,21 @@ const sid = () => `019a2b3c-4d5e-7f60-8a9b-${String(++n).padStart(12, "0")}`;
 const rid = (k: number) => `019a2b3d-1111-7777-8888-${String(k).padStart(12, "0")}`;
 const userLine = (text: string) => L({ timestamp: TS, type: "response_item", payload: { type: "message", role: "user", content: [{ type: "input_text", text }] } });
 
-/** 写一段 rollout：name 为 `<threadId>` 或 `<threadId>_<rolloutId>`，meta 覆盖 session_meta.payload */
+/** 写一段 rollout：name 为 `<threadId>` 或 `<threadId>_<rolloutId>`，meta 覆盖 session_meta.payload；.zst 写真的 zstd 流 */
 function rollout(stamp: string, name: string, meta: Record<string, unknown>, body: string[], ext = ".jsonl"): string {
   const dir = join(sessions, "2026", "09", stamp.slice(8, 10));
   mkdirSync(dir, { recursive: true });
   const p = join(dir, `rollout-${stamp}-${name}${ext}`);
-  writeFileSync(p, [L({ timestamp: TS, type: "session_meta", payload: { cwd, ...meta } }), ...body].join("\n") + "\n");
+  const text = [L({ timestamp: TS, type: "session_meta", payload: { cwd, ...meta } }), ...body].join("\n") + "\n";
+  writeFileSync(p, ext.endsWith(".zst") ? Bun.zstdCompressSync(Buffer.from(text)) : text);
   return p;
+}
+
+/** 模拟 Codex compression.rs：写 .zst、删明文 */
+function compress(p: string): string {
+  writeFileSync(`${p}.zst`, Bun.zstdCompressSync(readFileSync(p)));
+  rmSync(p);
+  return `${p}.zst`;
 }
 
 const archiveRoot = () => join(base, `archive-${++n}`);
@@ -158,33 +166,54 @@ describe("specRev 2：thread/revert 链", () => {
     expect(r.archived).toEqual([join(root, "agent-cx", `${r1}.jsonl`)]);
   });
 
-  test("前缀段被 Codex 压成 .zst：ok:false，说明是压缩", async () => {
+  test("前缀段被 Codex 压成 .zst：解压后照样归档，ok:true，内容与压缩前一致", async () => {
     const id = sid();
     const r1 = rid(n);
     rollout("2026-09-29T01-02-03", id, { id }, [userLine("OLD")], ".jsonl.zst");
     rollout("2026-09-30T01-02-03", `${id}_${r1}`, { id, history_base: { thread_id: id } }, [userLine("LATEST")]);
-    const r = await archive(id, archiveRoot());
-    expect(r.ok).toBe(false);
-    expect(r.note).toContain(".zst");
+    const root = archiveRoot();
+    const r = await archive(id, root);
+    expect(r.ok).toBe(true);
+    const dest = join(root, "agent-cx", `${id}.jsonl`);
+    expect(await texts(dest)).toContain("OLD");
+    expect(sourceIdForPath(dest)).toBe("codex");
   });
 
-  test("前缀段后来被压成 .zst、归档里已有：算已存，ok:true（每日 sweep 不报假失败）", async () => {
+  test("最新段归档后又追加、再被压成 .zst：解压比大小，补上尾巴（不是「无变化」）", async () => {
     const id = sid();
     const r1 = rid(n);
-    const old = rollout("2026-09-29T01-02-03", id, { id }, [userLine("OLD")]);
-    rollout("2026-09-30T01-02-03", `${id}_${r1}`, { id, history_base: { thread_id: id } }, [userLine("LATEST")]);
+    rollout("2026-09-29T01-02-03", id, { id }, [userLine("S0")]);
+    const s1 = rollout("2026-09-30T01-02-03", `${id}_${r1}`, { id, history_base: { thread_id: id } }, [userLine("S1_HEAD")]);
     const root = archiveRoot();
     expect((await archive(id, root)).ok).toBe(true);
-    renameSync(old, `${old}.zst`);
-    const r = await archive(id, root);
-    expect(r).toMatchObject({ ok: true, archived: [] });
-    rmSync(join(root, "agent-cx", `${id}.jsonl`));
-    expect((await archive(id, root)).ok).toBe(false); // 归档里没有了就还是缺段
+    writeFileSync(s1, `${readFileSync(s1, "utf8")}${userLine("S1_TAIL_AFTER_ARCHIVE")}\n`);
+    const plain = readFileSync(s1, "utf8");
+    compress(s1);
+    const dest = join(root, "agent-cx", `${r1}.jsonl`);
+    expect(await archive(id, root)).toMatchObject({ ok: true, archived: [dest] });
+    expect(readFileSync(dest, "utf8")).toBe(plain);
+    expect(await archive(id, root)).toMatchObject({ ok: true, archived: [], note: "归档已是最新（无变化）；Codex revert 链 2 段，每段各存一份，最新 " + `rollout-2026-09-30T01-02-03-${id}_${r1}.jsonl.zst` });
+  });
+
+  test("整条线程都被压成 .zst、同一段明文和 .zst 都在（压缩中途崩溃）：都照常归档", async () => {
+    const id = sid();
+    const p = rollout("2026-09-29T01-02-03", id, { id }, [userLine("ONLY_ZST")]);
+    compress(p);
+    const root = archiveRoot();
+    expect((await archive(id, root)).ok).toBe(true);
+    expect(await texts(join(root, "agent-cx", `${id}.jsonl`))).toContain("ONLY_ZST");
+    const id2 = sid();
+    const p2 = rollout("2026-09-29T01-02-03", id2, { id: id2 }, [userLine("BOTH")]);
+    writeFileSync(`${p2}.zst`, Bun.zstdCompressSync(readFileSync(p2)).subarray(0, 10)); // 半截 .zst
+    expect(await archive(id2, root)).toMatchObject({ ok: true, archived: [join(root, "agent-cx", `${id2}.jsonl`)] });
   });
 
   // P1（T75 r1）：文件名更新的同线程段没进归档时，不能 ok:true 只存旧正文
   const newerSkipped: Array<[string, (id: string, r1: string) => void, string]> = [
-    ["最新段是 .zst", (id, r1) => rollout("2026-09-30T01-02-03", `${id}_${r1}`, { id, history_base: { thread_id: id } }, [userLine("NEW")], ".jsonl.zst"), ".zst"],
+    ["最新段 .zst 解不开", (id, r1) => {
+      const p = rollout("2026-09-30T01-02-03", `${id}_${r1}`, { id, history_base: { thread_id: id } }, [userLine("NEW")], ".jsonl.zst");
+      writeFileSync(p, "not a zstd stream\n");
+    }, ".zst 解压失败"],
     ["最新段首行是半截 JSON", (id, r1) => {
       const p = rollout("2026-09-30T01-02-03", `${id}_${r1}`, { id }, []);
       writeFileSync(p, L({ timestamp: TS, type: "session_meta", payload: { id, cwd } }).slice(0, 40));
@@ -206,17 +235,21 @@ describe("specRev 2：thread/revert 链", () => {
     });
   }
 
-  test("回退后被放弃的中间段是 .zst：ok:false，写明是哪一段", async () => {
+  test("回退后被放弃的中间段：.zst 照常解压归档；解不开就 ok:false，写明是哪一段", async () => {
     const id = sid();
     const [a, b] = [rid(n * 10 + 1), rid(n * 10 + 2)];
     rollout("2026-09-28T01-02-03", id, { id }, [userLine("S0")]);
-    rollout("2026-09-29T01-02-03", `${id}_${a}`, { id, history_base: { thread_id: id } }, [userLine("S1")], ".jsonl.zst");
+    const s1 = rollout("2026-09-29T01-02-03", `${id}_${a}`, { id, history_base: { thread_id: id } }, [userLine("S1")], ".jsonl.zst");
     rollout("2026-09-30T01-02-03", `${id}_${b}`, { id, history_base: { thread_id: id } }, [userLine("S2")]);
     const r = await archive(id, archiveRoot());
-    expect(r.ok).toBe(false);
-    expect(r.note).toContain(`段 ${a} 没归档`);
-    expect(r.note).not.toContain("最新段");
-    expect(r.archived.map((p) => p.split("/").pop())).toEqual([`${id}.jsonl`, `${b}.jsonl`]);
+    expect(r.ok).toBe(true);
+    expect(r.archived.map((p) => p.split("/").pop())).toEqual([`${id}.jsonl`, `${a}.jsonl`, `${b}.jsonl`]);
+    writeFileSync(s1, "garbage");
+    const r2 = await archive(id, archiveRoot());
+    expect(r2.ok).toBe(false);
+    expect(r2.note).toContain(`段 ${a} 没归档`);
+    expect(r2.note).not.toContain("最新段");
+    expect(r2.archived.map((p) => p.split("/").pop())).toEqual([`${id}.jsonl`, `${b}.jsonl`]);
   });
 
   test("两次 revert：三段按文件名时间 + rolloutId 排序，全部归档", async () => {
