@@ -7,10 +7,10 @@
 import type { Database } from "bun:sqlite";
 import { createHash } from "node:crypto";
 import { isManager, mustTask, type WriteCtx } from "./ledger-checks.js";
-import { getWorkflow, type TaskWorkflow } from "./ledger-scheduler.js";
+import { getWorkflow } from "./ledger-scheduler.js";
 import type { LedgerEvent, LedgerTask } from "./ledger-stages.js";
 import { stepAtStage, stepsOf } from "./ledger-steps.js";
-import { getEventByDedup, getMeta, LedgerError, listEvents, toEvent } from "./ledger-store.js";
+import { getMeta, LedgerError, toEvent } from "./ledger-store.js";
 import { insertEvent, tx } from "./ledger-tx.js";
 import { planScheduler, type PlannerDecision } from "./scheduler-plan.js";
 import { observeSnapshot, type SnapshotOpts } from "./scheduler-snapshot.js";
@@ -61,7 +61,7 @@ function routeFor(d: PlannerDecision, opts: SnapshotOpts, peerExecutor: string |
 
 function latestObservation(db: Database, taskId: string): LedgerEvent | null {
   const row = db.query(`SELECT * FROM events WHERE target = ? AND kind = 'scheduler' AND json_extract(data, '$.op') = 'observe'
-    AND json_extract(data, '$.retro') IS NULL ORDER BY seq DESC LIMIT 1`).get(taskId);
+    ORDER BY seq DESC LIMIT 1`).get(taskId);
   return row ? toEvent(row as Parameters<typeof toEvent>[0]) : null;
 }
 
@@ -70,33 +70,6 @@ const peerExecutor = (db: Database, task: LedgerTask, hasAuthor: boolean): strin
   if (hasAuthor) return null;
   return writer?.executorKind === "peer" ? writer.executor : task.assigneeKind === "peer_agent" ? task.assignee : null;
 };
-
-/**
- * A verdict PM acts on before the next tick (`review --to`, or a quick stage move) leaves no observation between the
- * verdict and the move. Replay the same planner on the ledger as it stood right after the verdict and record that plan
- * as a retro observation answered by the move, so the diff never judges the branch with a weaker rule of its own.
- */
-function recordRetro(db: Database, ctx: WriteCtx, task: LedgerTask, workflow: TaskWorkflow, opts: SnapshotOpts): void {
-  const events = listEvents(db, { project: task.project, target: task.id });
-  const observed = events.filter((e) => e.kind === "scheduler" && e.data.op === "observe" && e.data.retro === undefined);
-  if (!observed.length) return;
-  events.forEach((r, i) => {
-    if (r.kind !== "review" || r.seq < observed[0].seq) return;
-    const move = events.slice(i + 1).find((e) => e.kind === "stage");
-    if (!move || move.data.from !== "review" || move.actor === "scheduler" || observed.some((o) => o.seq > r.seq && o.seq < move.seq)) return;
-    const dedupKey = `scheduler:observe:${task.id}:retro:r${r.seq}`;
-    if (getEventByDedup(db, dedupKey)) return;
-    const round = typeof r.data.round === "number" ? r.data.round : task.round;
-    const head = typeof r.data.head === "string" ? r.data.head : task.headSHA;
-    const plan = planScheduler(observeSnapshot(db, { ...task, stage: "review", round, headSHA: head }, opts, r.seq));
-    const decision = compact(plan);
-    insertEvent(db, { actor: ctx.actor, now: ctx.now ?? Date.now(), dedupKey }, {
-      project: task.project, target: task.id, kind: "scheduler", text: `回溯观察：${decision.reason}`.slice(0, 600),
-      data: { op: "observe", retro: { reviewSeq: r.seq, moveSeq: move.seq }, decision, route: routeFor(plan, opts, null), stage: "review",
-        round, head, specRev: task.specRev, asOfSeq: r.seq, template: workflow.template, version: workflow.templateVersion },
-    }, true);
-  });
-}
 
 export interface ObserveResult { observation: LedgerEvent; duplicate: boolean; decision: ObservedDecision }
 
@@ -111,7 +84,6 @@ export function observeTask(db: Database, ctx: WriteCtx, taskId: string, opts: S
     if (workflow?.mode !== "observe") throw new LedgerError("conflict", "任务不在 observe 模式");
     const now = ctx.now ?? Date.now();
     const at = { ...opts, now };
-    recordRetro(db, { ...ctx, now }, task, workflow, at);
     const snapshot = observeSnapshot(db, task, at);
     const plan = planScheduler(snapshot);
     const decision = compact(plan);
