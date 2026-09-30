@@ -7,7 +7,7 @@
 import { STATE_DIR } from "../lib/paths.js";
 import { AGENT_NAME_BLOCKLIST_RE, canonicalTwinError, invisibleNameError, isReservedAgentName, readRegistryAgentsSync, REGISTRY_PATH as STATE_REGISTRY_PATH } from "../lib/registry.js";
 import { readFile, writeFile, mkdir, rename } from "fs/promises";
-import { writeJsonAtomic } from "../lib/state-file.js";
+import { writeJsonLeased } from "../lib/scheduler-lease-env.js";
 import { existsSync, writeSync } from "fs";
 import { TMUX_SOCK as SOCK, AGENT_PREFIX, tmuxRaw, windowTarget } from "../lib/tmux-helper.js";
 import { type PiEnvProfile } from "../lib/pi-env.js";
@@ -116,7 +116,7 @@ export async function migrateWorkerToAgent(): Promise<{ migrated: boolean; entri
     raw.agents[newKey] = val;
   }
   delete raw.workers;
-  await writeJsonAtomic(REGISTRY_PATH, raw); // 原子写：迁移中途被杀不能留下半截 registry
+  await writeJsonLeased(REGISTRY_PATH, raw); // 原子写：迁移中途被杀不能留下半截 registry
 
   // 同步重命名 tmux window（可能因为 tmux 不在运行而失败，忽略即可）
   for (const newName of Object.keys(raw.agents)) {
@@ -152,7 +152,7 @@ export async function saveRegistry(reg: Registry) {
   // 注：这解决"半写/撕裂"，但不消除跨进程 read-modify-write 的 lost-update 窗口
   // （两进程各自 load→mutate→save 精确交错时后写覆盖先写）——该窗口概率低，
   // 真出问题再上文件锁。bridge 侧后台写者（clear 轮转）已尽量避开活跃 agent。
-  await writeJsonAtomic(REGISTRY_PATH, reg);
+  await writeJsonLeased(REGISTRY_PATH, reg); // 调度服务的子进程：rename 前同步核父进程租约，失租不发布
 }
 // ============================================================
 // 辅助

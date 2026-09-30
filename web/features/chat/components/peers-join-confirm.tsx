@@ -30,13 +30,15 @@ export function JoinConfirm({ code, onJoined }: { code: string; onJoined?: (peer
     };
   }, [code, round]);
 
-  // 反向开放要勾本机 agent：勾选框第一次打开时才拉本机 agent 列表
-  useEffect(() => {
-    if (!twoWay || localAgents.length) return;
+  // 反向开放要勾本机 agent：勾选框打开时拉本机 agent 列表；勾选器里就地开闸后再拉一次（不然开了仍显示锁着）
+  const loadLocal = () =>
     void peersList<{ localAgents?: LocalAgent[] }>()
       .then((j) => setLocalAgents(j.localAgents || []))
       .catch(() => setLocalAgents([])); // 拉不到就是空列表，勾选器显示「无」，不影响单向加入
-  }, [twoWay, localAgents.length]);
+  useEffect(() => {
+    if (twoWay) loadLocal();
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- 只在勾上时拉；loadLocal 每次渲染新建，放进依赖会循环
+  }, [twoWay]);
 
   const join = async (force = false) => {
     setBusy(true);
@@ -58,7 +60,7 @@ export function JoinConfirm({ code, onJoined }: { code: string; onJoined?: (peer
             <input type="checkbox" className="checkbox checkbox-xs" checked={twoWay} onChange={(e) => setTwoWay(e.target.checked)} />
             <span>{t("也让 {name} 找我的 agent", { name })}</span>
           </label>
-          {twoWay && <ScopePicker localAgents={localAgents} sel={sel} onChange={setSel} />}
+          {twoWay && <ScopePicker localAgents={localAgents} sel={sel} onChange={setSel} onOpened={loadLocal} />}
           {done && !done.ok && (done.error || "").includes("--force") ? (
             <ForceRow msg={done.error || ""} busy={busy} onForce={() => void join(true)} forceLabel="确认风险，强制执行" />
           ) : done && !done.ok ? (

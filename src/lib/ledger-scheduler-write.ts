@@ -15,14 +15,14 @@ import { currentReviewFacts } from "./scheduler-review.js";
 import { bindHash, checkAsk } from "./ask-bind.js";
 import { getAsk, ownerAnswered } from "./ledger-asks.js";
 
-const textOneLine = (value: string, label: string, max: number): string => {
+export const textOneLine = (value: string, label: string, max: number): string => {
   const out = value.trim();
   if (!out || out.length > max || /[\p{Cc}\p{Cf}\u2028\u2029]/u.test(out)) throw new LedgerError("invalid", `${label}要是 1–${max} 字的单行文字`);
   return out;
 };
 const projectSeq = (db: Database, project: string): number =>
   (db.query("SELECT COALESCE(MAX(seq), 0) AS seq FROM events WHERE project = ?").get(project) as { seq: number }).seq;
-const actorMayConfigure = (db: Database, actor: string, project: string): boolean => {
+export const actorMayConfigure = (db: Database, actor: string, project: string): boolean => {
   const meta = getMeta(db, project);
   return actor !== meta.team?.dispatcher && isManager(db, actor, { project, agent: null });
 };

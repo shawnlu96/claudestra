@@ -26,6 +26,7 @@ import { VERIFY_CMD } from "./ledger-verify.js";
 import { READ_CMDS } from "./ledger-read-cmds.js";
 import { TEAM_CMDS } from "./ledger-team-cmds.js";
 import { WRITE_CMDS, type CommandSpec } from "./ledger-write-cmds.js";
+import { LEND_CMDS } from "./ledger-lend-cmds.js";
 import { PEER_CMDS } from "./ledger-peer.js";
 import { STEP_CMDS } from "./ledger-step-cmds.js";
 import { SCHEDULER_CMDS } from "./ledger-scheduler-cmds.js";
@@ -35,6 +36,7 @@ import { VERDICT_CMDS } from "./ledger-verdict-cmds.js";
 import { DRY_RUN_READS, isWriteInvocation } from "./write-commands.js";
 import { readSchedulerConfig } from "../lib/scheduler-config.js";
 import { collectCallerWitness } from "../lib/caller-witness.js";
+import { assertSchedulerLease, SchedulerLeaseLost } from "../lib/scheduler-lease-env.js";
 
 /** 认不出身份时读命令用的 actor：不是 registry 键、不在任何 PM 名单里，roleOf 恒为 null */
 export const UNKNOWN_ACTOR = "unknown";
@@ -55,6 +57,7 @@ const COMMANDS: Record<string, CommandSpec> = {
   verify: VERIFY_CMD,
   ...AUDIT_CMDS,
   ...PEER_CMDS,
+  ...LEND_CMDS,
   ...STEP_CMDS,
   ...SCHEDULER_CMDS,
   ...SCHEDULER_OBSERVE_CMDS,
@@ -78,8 +81,10 @@ export async function runLedger(args: string[], deps: LedgerDeps): Promise<Resul
   const p = parseLedgerArgs(args, spec.valued, spec.bools);
   if ("error" in p) return { ok: false, code: "invalid", error: p.error, usage: `ledger ${spec.usage}` };
   try {
+    deps.assertLease?.(); // 写锁、registry / projects 这些 await 都过了：台账事务是同步的，核完直接跑
     return await spec.run(new LedgerCli(deps, p));
   } catch (e) {
+    if (e instanceof SchedulerLeaseLost) return { ok: false, code: "lease-lost", error: e.message };
     if (e instanceof LedgerError) return { ok: false, code: e.code, error: e.message, ...(e.current ? { current: e.current } : {}), usage: `ledger ${spec.usage}` };
     return { ok: false, code: "invalid", error: (e as Error).message, usage: `ledger ${spec.usage}` };
   }
@@ -112,6 +117,7 @@ async function realDeps(args: string[]): Promise<LedgerDeps | { error: string }>
     projects: () => projects.projects,
     loadRegistry,
     saveRegistry,
+    assertLease: assertSchedulerLease,
     now: () => Date.now(),
     callerSession: process.env.CLAUDESTRA_SESSION_ID || process.env.CLAUDE_CODE_SESSION_ID || undefined,
     callerWitness: collectCallerWitness,

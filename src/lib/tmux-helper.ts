@@ -12,6 +12,7 @@ import { formatTmuxFailure } from "./tmux-failure.js"; export { formatTmuxFailur
 import { createEscGuard, ESC_LOCK_WAIT_MS } from "./esc-guard.js"; export { ESC_DOUBLE_TAP_MS } from "./esc-guard.js";
 import { acquireLock } from "./file-lock.js";
 import { readProgramInputs, recordProgramInput, type ProgramInput } from "./program-input.js";
+import { assertSchedulerLease } from "./scheduler-lease-env.js";
 import { RUNTIME_DIR, TMUX_SOCK } from "./paths.js"; export { TMUX_SOCK };
 import { sandboxDisabled } from "./sandbox.js";
 import { sandboxTmuxArgv, sandboxVerifyNewWindow } from "./sandbox-tmux.js"; export { sandboxTmuxArgv };
@@ -28,7 +29,8 @@ export const MASTER_WINDOW_NAME = "master";
 export const AGENT_PREFIX = "agent-";
 
 /**
- * 执行 tmux 命令，返回 stdout。失败不抛错，返回空字符串。
+ * 执行 tmux 命令，返回 stdout。失败不抛错，返回空字符串。唯一会抛的是调度服务子进程已失租（SchedulerLeaseLost）：
+ * 每条 tmux 命令起进程前同步核一次，异步准备（查 copy-mode、窗口 id、菜单）做完之后失租，这一键照样发不出去。
  *
  * `-f /dev/null` 绕开用户 ~/.tmux.conf：私有 socket 启动的 tmux server
  * 默认仍会读用户配置，如果用户设了 `set -g base-index 1`，我们假定 master:0
@@ -52,6 +54,7 @@ async function runTmux(
   args: string[],
   opts?: { timeoutMs?: number }
 ): Promise<TmuxRunResult> {
+  assertSchedulerLease(); // 与下面的 spawn 之间不隔 await（lib/scheduler-lease-env.ts）
   const proc = Bun.spawn(sandboxTmuxArgv(["tmux", "-f", "/dev/null", "-S", TMUX_SOCK, ...args]), { // 沙箱：socket / new-window 目录先过闸
     stdout: "pipe",
     stderr: "pipe",
@@ -121,6 +124,7 @@ export function sessionTarget(session: string = MASTER_SESSION): string {
 
 /** 非阻塞 fire-and-forget 发送（用于 C-c 等不需要等待的操作） */
 export function tmuxFire(args: string[]): void {
+  assertSchedulerLease();
   Bun.spawn(sandboxTmuxArgv(["tmux", "-f", "/dev/null", "-S", TMUX_SOCK, ...args]));
 }
 

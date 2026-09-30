@@ -15,6 +15,7 @@ import type { WriteCtx } from "../lib/ledger-write.js";
 import type { Registry } from "./core.js";
 import type { ProposeOpts } from "./team-up.js";
 import type { ParsedArgs } from "./ledger-identity.js";
+import type { LendCliDeps } from "./ledger-lend-cmds.js";
 
 export interface LedgerDeps {
   db: Database;
@@ -26,6 +27,8 @@ export interface LedgerDeps {
   projectIds: readonly string[];
   loadRegistry(): Promise<Registry>;
   saveRegistry(reg: Registry): Promise<void>;
+  /** 调度服务子进程：同步核父进程租约，失租抛 SchedulerLeaseLost；紧挨写入调，中间不隔 await（lib/scheduler-lease-env.ts） */
+  assertLease?(): void;
   /** Scheduler bind reads this registry snapshot path inside its ledger transaction; tests inject an isolated file. */
   registryPath?: string;
   now(): number;
@@ -51,6 +54,8 @@ export interface LedgerDeps {
   autoDispatch?(): boolean;
   /** 系统通知送到 owner（dag-rewrite 直接生效时用）：true = bridge 收下了；不给 = 这个进程没有通道，结果里写「未通知」 */
   notifyOwner?(text: string): Promise<boolean>;
+  /** 出借（T93）的 borrow 名单、通知 PM、结论落盘与回执签名；不给 = 读真实的 lend.json / 实例钥匙（单测注入） */
+  lend?: LendCliDeps;
 }
 
 export type Result = Record<string, unknown>;

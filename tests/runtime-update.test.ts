@@ -5,6 +5,11 @@
 import { describe, expect, test } from "bun:test";
 import { handleRuntimeUpdate, prepareCodexUpdate, type RuntimeUpdateDeps } from "../src/bridge/runtime-update";
 import type { Principal } from "../src/lib/principals";
+import type { AcpRelease } from "../src/lib/acp/resolve";
+import { currentCodexAcp } from "../src/lib/acp/install";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 const at = "2026-01-01T00:00:00Z";
 const OWNER = { id: "discord:1", role: "owner", agents: ["*"], createdAt: at } as Principal;
@@ -22,7 +27,7 @@ function deps(over: Partial<RuntimeUpdateDeps> & { npm?: boolean } = {}) {
       pi: { label: "Pi", prepare: async () => ({ command: "pi update" }), forget: () => forgot.push("pi") },
       codex: {
         label: "Codex",
-        prepare: () => prepareCodexUpdate({ install: async () => ({ version: "0.158.0", npm: over.npm !== false }), latest: async () => "0.158.4" }),
+        prepare: () => prepareCodexUpdate({ ...ADAPTER_200, install: async () => ({ version: "0.158.0", npm: over.npm !== false }), latest: async () => "0.158.4" }),
         forget: () => forgot.push("codex"),
       },
     },
@@ -31,6 +36,13 @@ function deps(over: Partial<RuntimeUpdateDeps> & { npm?: boolean } = {}) {
   return { d, cmds, forgot };
 }
 const restartOk = async () => ({ ok: true });
+/** 当前适配器 2.0.0（配 ^0.158.0）；registry 上只有它时 0.159.x 解析不到 */
+const ADAPTER_200 = {
+  adapter: () => ({ version: "2.0.0", codexRange: "^0.158.0", path: "/x/index.js" }),
+  // 有适配器时 npm 成功后一律对账：不桩掉就会真去探本机 codex、查 registry（CI 上没有 codex → 500）
+  reconcile: async () => ({ ok: true as const, path: "/x/index.js", reused: true, version: "2.0.0", codexRange: "^0.158.0" }),
+  releases: async (): Promise<AcpRelease[]> => [],
+};
 const post = (name: string, kind: "pi" | "codex", p: Principal, d: RuntimeUpdateDeps, rm = restartOk) =>
   handleRuntimeUpdate(`/agents/${name}/${kind}-update`, p, rm, d);
 
@@ -76,34 +88,137 @@ describe("codex-update", () => {
 
 describe("codex-update 的版本闸门（codex-acp 配套范围）", () => {
   const install = async () => ({ version: "0.158.0", npm: true });
+  const base = { ...ADAPTER_200, install };
   test("latest 在配套范围内：钉死版本号装，不写 @latest", async () => {
-    expect(await prepareCodexUpdate({ install, latest: async () => "0.158.2" })).toEqual({ command: "npm install -g @openai/codex@0.158.2" });
+    expect(await prepareCodexUpdate({ ...base, latest: async () => "0.158.2" })).toMatchObject({ command: "npm install -g @openai/codex@0.158.2" });
   });
   test("latest 超出配套范围：409，说明配套范围，不给命令", async () => {
-    const p = await prepareCodexUpdate({ install, latest: async () => "0.159.2" });
+    const p = await prepareCodexUpdate({ ...base, latest: async () => "0.159.2" });
     expect(p).toMatchObject({ status: 409 });
-    expect("error" in p && p.error).toContain("0.158.x");
+    expect("error" in p && p.error).toBe("npm 上的 Codex 0.159.2 不在 codex-acp 2.0.0 的配套范围（^0.158.0），等适配器升级后再更新");
   });
   test("端点：超出配套范围 409，不跑 npm、不重启", async () => {
     let restarts = 0;
     const { d, cmds } = deps();
-    const gated = { ...d, updaters: { ...d.updaters, codex: { ...d.updaters.codex, prepare: () => prepareCodexUpdate({ install, latest: async () => "0.159.2" }) } } };
+    const gated = { ...d, updaters: { ...d.updaters, codex: { ...d.updaters.codex, prepare: () => prepareCodexUpdate({ ...base, latest: async () => "0.159.2" }) } } };
     const r = await post("c", "codex", OWNER, gated, async () => (restarts++, { ok: true }));
     expect(r.status).toBe(409);
     expect(cmds).toEqual([]);
     expect(restarts).toBe(0);
   });
   test("查不到 latest：502；版本号不是正式 x.y.z（预发布、夹带命令）：409，绝不拼进 shell", async () => {
-    expect(await prepareCodexUpdate({ install, latest: async () => undefined })).toMatchObject({ status: 502 });
-    expect(await prepareCodexUpdate({ install, latest: async () => { throw new Error("offline"); } })).toMatchObject({ status: 502 });
+    expect(await prepareCodexUpdate({ ...base, latest: async () => undefined })).toMatchObject({ status: 502 });
+    expect(await prepareCodexUpdate({ ...base, latest: async () => { throw new Error("offline"); } })).toMatchObject({ status: 502 });
     for (const bad of ["0.158.0; rm x", "0.158.3-alpha.1", "0.158.3\n"]) {
-      const r = await prepareCodexUpdate({ install, latest: async () => bad });
+      const r = await prepareCodexUpdate({ ...base, latest: async () => bad });
       expect(r).toMatchObject({ status: 409 });
       expect("command" in r).toBe(false);
     }
   });
   test("找不到 codex 400", async () => {
-    expect(await prepareCodexUpdate({ install: async () => null, latest: async () => "0.158.2" })).toMatchObject({ status: 400 });
+    expect(await prepareCodexUpdate({ ...ADAPTER_200, install: async () => null, latest: async () => "0.158.2" })).toMatchObject({ status: 400 });
+  });
+});
+
+describe("codex-update 跟随适配器：先装适配器（不切指针）→ npm 装 Codex → 对账切指针 → 重启", () => {
+  const REL_201: AcpRelease = { version: "2.0.1", codexRange: "^0.159.1", integrity: "sha512-x", tarball: "https://registry.npmjs.org/@agentclientprotocol/codex-acp/-/codex-acp-2.0.1.tgz" };
+  type FlowOpts = { adapterOk?: boolean; shellOk?: boolean; releases?: AcpRelease[]; latest?: string; reconcileOk?: boolean; adapter?: () => any };
+  function flow(o: FlowOpts = {}) {
+    const log: string[] = [];
+    const prepare = () => prepareCodexUpdate({
+      ...ADAPTER_200,
+      install: async () => ({ version: "0.158.0", npm: true }),
+      latest: async () => o.latest ?? "0.159.2",
+      ...(o.adapter ? { adapter: o.adapter } : {}),
+      releases: async () => o.releases ?? [REL_201],
+      installAdapter: async (rel) => (log.push(`adapter:${rel.version}`), o.adapterOk === false
+        ? { ok: false, error: "integrity 对不上" }
+        : { ok: true, path: "/x", reused: false, version: rel.version, codexRange: rel.codexRange }),
+      reconcile: async () => (log.push("reconcile"), o.reconcileOk === false
+        ? { ok: false as const, error: "对账失败：下不动也没有本地配套版本" }
+        : { ok: true as const, path: "/x", reused: true, version: "2.0.1", codexRange: "^0.159.1" }),
+    });
+    const { d } = deps({ shell: async (cmd) => (log.push(`shell:${cmd}`), { ok: o.shellOk !== false, tail: "t" }) });
+    const gated = { ...d, updaters: { ...d.updaters, codex: { ...d.updaters.codex, prepare } } };
+    const run = () => post("c", "codex", OWNER, gated, async (...a: string[]) => (log.push(a.join(" ")), { ok: true }));
+    return { log, run };
+  }
+  test("顺序：适配器 → Codex → 指针 → 重启", async () => {
+    const { log, run } = flow();
+    expect((await run()).status).toBe(200);
+    expect(log).toEqual(["adapter:2.0.1", "shell:npm install -g @openai/codex@0.159.2", "reconcile", "restart agent-c"]);
+  });
+  test("R3-1 快速分支（latest 本来就配当前适配器）npm 成功后也对账：Codex → 对账 → 重启，不碰适配器安装", async () => {
+    const { log, run } = flow({ latest: "0.158.9" });
+    expect((await run()).status).toBe(200);
+    expect(log).toEqual(["shell:npm install -g @openai/codex@0.158.9", "reconcile", "restart agent-c"]);
+  });
+  test("R3-1 快速分支对账失败：500，不重启", async () => {
+    const { log, run } = flow({ latest: "0.158.9", reconcileOk: false });
+    const r = await run();
+    expect(r.status).toBe(500);
+    expect(((await r.json()) as any).error).toContain("对账失败");
+    expect(log).toEqual(["shell:npm install -g @openai/codex@0.158.9", "reconcile"]);
+  });
+  test("R3-1 没装过适配器：npm 后那一刻仍没装就不对账；npm 期间别人装上了就对账", async () => {
+    const none = flow({ adapter: () => null });
+    expect((await none.run()).status).toBe(200);
+    expect(none.log).toEqual(["shell:npm install -g @openai/codex@0.159.2", "restart agent-c"]);
+    let calls = 0; // 第 1 次是 prepare 读（还没装），之后是 npm 成功后读（并发的 acp-install 已经装上）
+    const raced = flow({ adapter: () => (calls++ === 0 ? null : { version: "2.0.0", codexRange: "^0.158.0", path: "/x" }) });
+    expect((await raced.run()).status).toBe(200);
+    expect(raced.log).toEqual(["shell:npm install -g @openai/codex@0.159.2", "reconcile", "restart agent-c"]);
+  });
+  test("适配器装失败：Codex 不动、指针不动、不重启", async () => {
+    const { log, run } = flow({ adapterOk: false });
+    const r = await run();
+    expect(r.status).toBe(502);
+    expect(((await r.json()) as any).error).toContain("Codex 没动");
+    expect(log).toEqual(["adapter:2.0.1"]);
+  });
+  test("Codex 装失败：指针根本没切（不用回滚）、不重启", async () => {
+    const { log, run } = flow({ shellOk: false });
+    expect((await run()).status).toBe(500);
+    expect(log).toEqual(["adapter:2.0.1", "shell:npm install -g @openai/codex@0.159.2"]);
+  });
+  test("解析不到能配的适配器：409，什么都不装", async () => {
+    const { log, run } = flow({ releases: [] });
+    expect((await run()).status).toBe(409);
+    expect(log).toEqual([]);
+  });
+  test("F2 适配器指针 / 标记坏了：409，适配器和 Codex 都不动", async () => {
+    let installs = 0;
+    const p = await prepareCodexUpdate({ ...ADAPTER_200, adapter: () => "broken" as const, install: async () => ({ version: "0.158.0", npm: true }),
+      latest: async () => "0.158.9", installAdapter: async () => (installs++, { ok: false, error: "x" }) });
+    expect(p).toMatchObject({ status: 409 });
+    expect("error" in p && p.error).toContain("acp-install");
+    expect(installs).toBe(0);
+  });
+  test("R2-③ npm 成功后按磁盘上的 Codex 对账；对账失败明确报 500，不重启", async () => {
+    const log: string[] = [];
+    const prepare = () => prepareCodexUpdate({ ...ADAPTER_200, install: async () => ({ version: "0.158.0", npm: true }), latest: async () => "0.159.2",
+      releases: async () => [REL_201], installAdapter: async (rel) => ({ ok: true, path: "/x", reused: false, version: rel.version, codexRange: rel.codexRange }),
+      reconcile: async () => ({ ok: false as const, error: "对账时 Codex 版本一直在变" }) });
+    const { d } = deps();
+    const gated = { ...d, updaters: { ...d.updaters, codex: { ...d.updaters.codex, prepare } } };
+    const r = await post("c", "codex", OWNER, gated, async (...a: string[]) => (log.push(a.join(" ")), { ok: true }));
+    expect(r.status).toBe(500);
+    expect(((await r.json()) as any).error).toContain("切换适配器失败");
+    expect(log).toEqual([]);
+  });
+  test("R2-② 端点读唯一判定处：入口文件丢了（标记还在）也 409，不放行 Codex 升级", async () => {
+    const root = mkdtempSync(join(tmpdir(), "acp-rt-"));
+    mkdirSync(join(root, "codex-acp-2.0.1"), { recursive: true });
+    writeFileSync(join(root, "codex-acp-2.0.1", "installed.json"), JSON.stringify({ version: "2.0.1", codexRange: "^0.159.1", entrySha256: "abc" }));
+    writeFileSync(join(root, "current.json"), JSON.stringify({ version: "2.0.1" }));
+    const p = await prepareCodexUpdate({ install: async () => ({ version: "0.159.1", npm: true }), latest: async () => "0.159.2", adapter: () => currentCodexAcp(root) });
+    expect(p).toMatchObject({ status: 409 });
+    rmSync(root, { recursive: true, force: true });
+  });
+  test("latest 本来就配当前适配器：只升 Codex，不碰适配器", async () => {
+    const p = await prepareCodexUpdate({ ...ADAPTER_200, install: async () => ({ version: "0.158.0", npm: true }), latest: async () => "0.158.9",
+      installAdapter: async () => { throw new Error("不该装适配器"); } });
+    expect(p).toMatchObject({ command: "npm install -g @openai/codex@0.158.9" });
   });
 });
 
