@@ -10,6 +10,7 @@ import type { LedgerTask } from "./ledger-stages.js";
 import { getTask, listEvents } from "./ledger-store.js";
 import { deadUiAsk, screenshotRefs } from "./scheduler-apply.js";
 import { autoSnapshot } from "./scheduler-auto-snapshot.js";
+import { SchedulerStopped } from "./scheduler-maintenance.js";
 import { CLAIM_LEASE_MS, driveDispatch, type DriveOutcome, type SchedulerLedgerOps } from "./scheduler-dispatch.js";
 import { planScheduler, type PlannerDecision } from "./scheduler-plan.js";
 import { getSchedulerSession, type SessionRole } from "./scheduler-sessions.js";
@@ -264,6 +265,7 @@ export async function schedulerAutoTick(db: Database, projects: Record<string, {
       try {
         out.cards.push(await new Card(db, task, { registry: [], maxWorkers: policy.maxActiveWorkers, now: deps.now() }, deps).step());
       } catch (e) {
+        if (e instanceof SchedulerStopped) throw e;
         out.failed.push({ taskId, error: oneLine((e as Error).message) });
       }
     }
