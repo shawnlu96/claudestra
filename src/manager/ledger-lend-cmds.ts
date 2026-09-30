@@ -3,7 +3,7 @@
  * - PM：lend-offer / lend-cancel / lend-reoffer 挂单、撤单、重挂；lend-orders 查这张卡的出借单。
  * - bridge 专用（owner 身份，local-api/lend.ts 经 runManager 调）：lend-poll / lend-claim / lend-lease / lend-write / lend-sweep。
  *   每次先把过期的租约结成 unknown 并通知 PM（不自动重派），再按请求做一次 CAS；拒绝码放在 current.lend 里给 bridge 映射。
- * lend-write 的幂等键是请求体原文的 sha256：bridge 把请求体原样当参数传进来。tests/ledger-lend-cli.test.ts。
+ * lend-write 的幂等键是请求体原文的 sha256：bridge 把请求体原样当参数传进来。tests/ledger-lend.test.ts。
  */
 import { createHash } from "node:crypto";
 import { mkdirSync } from "node:fs";
