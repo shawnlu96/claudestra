@@ -141,7 +141,7 @@ function PeerCard({
         <div className="min-w-0 flex-1">
           {editing ? (
             <div>
-              <ScopePicker localAgents={localAgents} sel={sel} onChange={setSel} />
+              <ScopePicker localAgents={localAgents} sel={sel} onChange={setSel} onOpened={onChanged} />
               {needForce && msg ? (
                 <ForceRow msg={msg} busy={saving} onForce={() => void saveScope(true)} forceLabel="确认风险，强制保存" />
               ) : (
@@ -276,7 +276,7 @@ function InvitePanel({ localAgents, onChanged }: { localAgents: LocalAgent[]; on
         <div className="mt-3 space-y-2">
           <div>
             <div className="mb-1 text-xs text-base-content/60">{t("向对方开放的 agent")}</div>
-            <ScopePicker localAgents={localAgents} sel={sel} onChange={setSel} />
+            <ScopePicker localAgents={localAgents} sel={sel} onChange={setSel} onOpened={onChanged} />
           </div>
           <details className="text-xs">
             <summary className="cursor-pointer text-base-content/50">{t("高级：自定义我方地址（默认自动探测）")}</summary>
