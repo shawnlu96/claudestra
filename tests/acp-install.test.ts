@@ -1,10 +1,10 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { gzipSync } from "node:zlib";
 import {
-  codexAcpInstalled, codexPairsWithAdapter, currentCodexAcp, ensureCodexAcpFor, extractTarEntry, installCodexAcp, sha256Hex, sha512Integrity, useCodexAcp,
+  codexAcpInstalled, codexPairsWithAdapter, currentCodexAcp, ensureCodexAcpFor, extractTarEntry, installCodexAcp, readAcpPointer, tmpName, sha256Hex, sha512Integrity, useCodexAcp,
 } from "../src/lib/acp/install.ts";
 import type { AcpRelease } from "../src/lib/acp/resolve.ts";
 
@@ -37,7 +37,7 @@ const PKG = [
 let root = "";
 afterEach(() => root && rmSync(root, { recursive: true, force: true }));
 const fresh = () => (root = mkdtempSync(join(tmpdir(), "acp-install-")));
-const served = (buf: Uint8Array, status = 200) => async () => ({ ok: status === 200, status, arrayBuffer: async () => Uint8Array.from(buf).buffer });
+const served = (buf: Uint8Array, status = 200) => async () => new Response(Uint8Array.from(buf), { status });
 
 describe("extractTarEntry", () => {
   test("按完整名字取普通文件；目录项、不在包里的名字返回 null", () => {
@@ -95,16 +95,16 @@ describe("指针：当前用哪个版本", () => {
     const b = gzipSync(tar([{ name: "package/dist/index.js", body: "console.log('2.0.1');" }]));
     await installCodexAcp(release("2.0.0", "^0.158.0", a), { fetch: served(a), root });
     await installCodexAcp(release("2.0.1", "^0.159.1", b), { fetch: served(b), root });
-    useCodexAcp("2.0.1", root);
+    await useCodexAcp("2.0.1", null, root);
     expect(codexAcpInstalled(root)).toEqual({ ok: true, path: entry("2.0.1"), version: "2.0.1", codexRange: "^0.159.1" });
     expect(existsSync(join(root, "current.json.tmp"))).toBe(false);
-    useCodexAcp("2.0.0", root);
+    await useCodexAcp("2.0.0", readAcpPointer(root), root);
     expect(codexAcpInstalled(root)).toMatchObject({ ok: true, version: "2.0.0" });
   });
 
-  test("指针指向没装的版本：不算已装", () => {
+  test("指针指向没装的版本：不算已装", async () => {
     fresh();
-    useCodexAcp("9.9.9", root);
+    await useCodexAcp("9.9.9", null, root);
     expect(codexAcpInstalled(root)).toMatchObject({ ok: false });
   });
 
@@ -163,5 +163,111 @@ describe("配套判断读自当前适配器的标记", () => {
     expect(await ensureCodexAcpFor(undefined, { fetch: served(a), fetchMeta: meta(vs), root })).toMatchObject({ ok: false });
     expect(await ensureCodexAcpFor("0.158.0", { fetch: served(a), fetchMeta: async () => Promise.reject(new Error("offline")), root })).toMatchObject({ ok: false });
     expect(currentCodexAcp(root)).toBeNull();
+  });
+});
+
+describe("审查 r1 的加固", () => {
+  const a = () => gzipSync(tar(PKG));
+  const b = () => gzipSync(tar([{ name: "package/dist/index.js", body: "console.log('2.0.1');" }]));
+
+  test("F1 current.json 损坏：判 broken（不退回 2.0.0），不算已装、不算配套；ensure 能把它修好", async () => {
+    fresh();
+    await installCodexAcp(release("2.0.0", "^0.158.0", a()), { fetch: served(a()), root });
+    writeFileSync(join(root, "current.json"), "{not json");
+    expect(currentCodexAcp(root)).toBe("broken");
+    expect(codexAcpInstalled(root)).toMatchObject({ ok: false, hint: expect.stringContaining("指针或标记坏了") });
+    expect(codexPairsWithAdapter("0.158.0", root)).toBe(false);
+    writeFileSync(join(root, "current.json"), JSON.stringify({ version: "../../etc" }));
+    expect(currentCodexAcp(root)).toBe("broken");
+    const tgz = b();
+    expect(await ensureCodexAcpFor("0.159.2", { fetch: served(tgz), fetchMeta: meta({ "2.0.1": release("2.0.1", "^0.159.1", tgz) }), root }))
+      .toMatchObject({ ok: true, version: "2.0.1" });
+    expect(codexAcpInstalled(root)).toMatchObject({ ok: true, version: "2.0.1" });
+  });
+
+  test("F1 指针指向的版本没有标记 / 标记缺范围：broken；从没装过：null", async () => {
+    fresh();
+    expect(currentCodexAcp(root)).toBeNull();
+    await useCodexAcp("2.0.1", null, root);
+    expect(currentCodexAcp(root)).toBe("broken");
+    mkdirSync(join(root, "codex-acp-2.0.1"), { recursive: true });
+    writeFileSync(join(root, "codex-acp-2.0.1", "installed.json"), JSON.stringify({ version: "2.0.1", entrySha256: "x" }));
+    expect(currentCodexAcp(root)).toBe("broken");
+  });
+
+  test("F3 tarball 不是这个版本自己的包：拒装（元数据把 2.1.0 指到 2.0.0 的包）", async () => {
+    fresh();
+    const tgz = a();
+    const rel = { ...release("2.1.0", "^0.160.0", tgz), tarball: `${T}2.0.0.tgz` };
+    const r = await installCodexAcp(rel, { fetch: served(tgz), root });
+    expect(!r.ok && r.error).toContain("tarball 地址不是");
+    expect(existsSync(join(root, "codex-acp-2.1.0"))).toBe(false);
+  });
+
+  test("F4 content-length 超上限：不读 body 直接拒", async () => {
+    fresh();
+    const tgz = a();
+    let read = false;
+    const body = new ReadableStream({ pull: (c) => { read = true; c.enqueue(tgz); c.close(); } }, { highWaterMark: 0 });
+    const fetch = async () => new Response(body, { headers: { "content-length": String(64 * 1024 * 1024) } });
+    const r = await installCodexAcp(release("2.0.1", "^0.159.1", tgz), { fetch, root });
+    expect(!r.ok && r.error).toContain("远超预期");
+    expect(read).toBe(false);
+  });
+
+  test("F4 没给长度、流超上限：读到超限就停", async () => {
+    fresh();
+    let pulled = 0;
+    const chunk = new Uint8Array(1024 * 1024);
+    const body = new ReadableStream({ pull: (c) => { pulled++; c.enqueue(chunk); } }); // 永不结束
+    const r = await installCodexAcp(release("2.0.1", "^0.159.1", a()), { fetch: async () => new Response(body), root });
+    expect(!r.ok && r.error).toContain("远超预期");
+    expect(pulled).toBeLessThan(12);
+  });
+
+  test("F4 integrity 对得上的解压炸弹：解开超过上限就拒", async () => {
+    fresh();
+    const bomb = gzipSync(new Uint8Array(40 * 1024 * 1024));
+    const r = await installCodexAcp(release("2.0.1", "^0.159.1", bomb), { fetch: served(bomb), root });
+    expect(!r.ok && r.error).toContain("解包失败");
+  });
+
+  test("F5 临时文件名每次不同且带 pid：manager 与 bridge 两个进程同时装同一版本也不会 rename 走对方的文件", () => {
+    const [x, y] = [tmpName("/a/index.js"), tmpName("/a/index.js")];
+    expect(x).not.toBe(y);
+    expect(x).toContain(`.${process.pid}.`);
+    expect(x.startsWith("/a/index.js.")).toBe(true); // 同目录：rename 才是原子的
+  });
+  test("F5 同一版本并发安装：临时文件名不撞，都成功、不留 tmp", async () => {
+    fresh();
+    const tgz = a();
+    const rel = release("2.0.0", "^0.158.0", tgz);
+    const rs = await Promise.all([1, 2, 3].map(() => installCodexAcp(rel, { fetch: served(tgz), root })));
+    expect(rs.every((r) => r.ok)).toBe(true);
+    expect(readdirSync(join(root, "codex-acp-2.0.0")).filter((f) => f.endsWith(".tmp"))).toEqual([]);
+  });
+
+  test("F5 切指针要比较：期间被别人切过就拒，挑版本更早的一方不能把指针切回旧版", async () => {
+    fresh();
+    const [ta, tb] = [a(), b()];
+    const vs = { "2.0.0": release("2.0.0", "^0.158.0", ta), "2.0.1": release("2.0.1", "^0.159.1", tb) };
+    const byUrl = async (u: string) => served(u.endsWith("2.0.0.tgz") ? ta : tb)();
+    await installCodexAcp(vs["2.0.1"], { fetch: byUrl, root });
+    // acp-install（按旧 codex 0.158 挑 2.0.0）查元数据的时候，网页更新把指针切到了 2.0.1
+    const racing = async () => (await useCodexAcp("2.0.1", null, root), meta(vs)());
+    const r = await ensureCodexAcpFor("0.158.0", { fetch: byUrl, fetchMeta: racing, root });
+    expect(!r.ok && r.error).toContain("被别的进程切过");
+    expect(currentCodexAcp(root)).toMatchObject({ version: "2.0.1" });
+    await expect(useCodexAcp("2.0.0", null, root)).rejects.toThrow("被别的进程切过");
+  });
+
+  test("F6 复用版本目录要比对配套范围：范围变了就重装、标记跟着改", async () => {
+    fresh();
+    const tgz = a();
+    await installCodexAcp(release("2.0.0", "^0.158.0", tgz), { fetch: served(tgz), root });
+    const r = await installCodexAcp(release("2.0.0", "^0.158.2", tgz), { fetch: served(tgz), root });
+    expect(r).toMatchObject({ ok: true, reused: false, codexRange: "^0.158.2" });
+    await useCodexAcp("2.0.0", null, root);
+    expect(currentCodexAcp(root)).toEqual({ version: "2.0.0", codexRange: "^0.158.2" });
   });
 });

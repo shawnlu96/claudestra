@@ -34,13 +34,15 @@ describe("pickAdapterFor", () => {
     expect(pickAdapterFor(rels, "0.156.2")).toBeNull();
     expect(pickAdapterFor(rels, undefined)).toBeNull();
   });
-  test("拒绝不在 registry.npmjs.org 的 tarball、不是 sha512 的 integrity、缺范围", () => {
+  test("F3 tarball 必须逐字是这个版本自己的包；拒绝别的主机、不是 sha512 的 integrity、缺范围", () => {
     const bad = parseAcpReleases({
       versions: {
         "2.0.1": ver("^0.159.1", "https://evil.example/codex-acp-2.0.1.tgz"),
         "2.0.2": ver("^0.159.1", "https://registry.npmjs.org.evil.example/@agentclientprotocol/codex-acp/-/x.tgz"),
         "2.0.3": ver("^0.159.1", `${T}2.0.3.tgz`, "sha1-AAAA"),
         "2.0.4": { dist: { integrity: "sha512-AAAA", tarball: `${T}2.0.4.tgz` } },
+        "2.1.0": ver("^0.159.1", `${T}2.0.0.tgz`), // F3：同一 registry 上别的版本的包
+        "2.1.1": ver("^0.159.1", `${T}2.1.1.tgz?x=1`),
       },
     });
     expect(bad).toEqual([]);

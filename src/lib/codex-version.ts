@@ -90,7 +90,8 @@ export async function noteAcpCodexRunning(o: {
   const cur = currentCodexAcp(o.acpRoot);
   if (cur && !codexPairsWithAdapter(v, o.acpRoot) && !o.warned?.has(key)) {
     o.warned?.add(key);
-    o.log(`⚠️ 本机 codex 是「${key}」，codex-acp ${cur.version} 配套的是 ${cur.codexRange}：网页「更新并重启」或 \`manager acp-install\` 会换上配套的适配器（docs/runtimes/codex-acp.md）`);
+    const pairs = cur === "broken" ? "codex-acp 的版本指针或标记坏了" : `codex-acp ${cur.version} 配套的是 ${cur.codexRange}`;
+    o.log(`⚠️ 本机 codex 是「${key}」，${pairs}：网页「更新并重启」或 \`manager acp-install\` 会换上配套的适配器（docs/runtimes/codex-acp.md）`);
   }
   try { recordCodexRunning(o.agent, v, o.dir); } catch (e) { o.log(`⚠️ 记不下 codex 运行版本（网页少一条「重启生效」提示）：${String(e)}`); }
   return v;

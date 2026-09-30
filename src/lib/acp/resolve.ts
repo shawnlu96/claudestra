@@ -4,8 +4,11 @@
  * 信任 registry 的理由见 install.ts 顶部。tests/acp-resolve.test.ts。
  */
 const CODEX_ACP_META_URL = "https://registry.npmjs.org/@agentclientprotocol/codex-acp";
-/** 元数据里的 tarball 不在这个前缀下一律不认：元数据被篡改也只能指回 registry 自己 */
-const TARBALL_PREFIX = `${CODEX_ACP_META_URL}/-/`;
+/**
+ * tarball 必须**逐字**是这个版本自己的包：只查前缀的话，元数据可以把 2.1.0 指到同一 registry 上 2.0.0 的包（integrity 也对得上），
+ * 装上的是 2.0.0、标的却是 2.1.0 和它的配套范围。
+ */
+export const expectedTarball = (version: string) => `${CODEX_ACP_META_URL}/-/codex-acp-${version}.tgz`;
 /**
  * 宿主（host.ts / session.ts）只在 2.0.0 及以后验证过：更早的适配器对 AIR / steering 的实现不同，
  * 本机 codex 旧到只有 1.x 能配时宁可解析不到，也不装一个宿主没跑过的协议版本。
@@ -39,7 +42,7 @@ export function parseAcpReleases(meta: unknown): AcpRelease[] {
     const tarball = v?.dist?.tarball;
     if (!STABLE.test(version) || Bun.semver.order(version, MIN_ADAPTER) < 0) continue;
     if (typeof codexRange !== "string" || typeof integrity !== "string" || !integrity.startsWith("sha512-")) continue;
-    if (typeof tarball !== "string" || !tarball.startsWith(TARBALL_PREFIX)) continue;
+    if (tarball !== expectedTarball(version)) continue;
     out.push({ version, codexRange, integrity, tarball });
   }
   return out.sort((a, b) => Bun.semver.order(a.version, b.version));

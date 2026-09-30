@@ -12,7 +12,7 @@ import { readCcSessionEntries } from "./cc-sessions.js";
 import { defaultRunner } from "./codex-thread.js";
 import { resolveLoginBinary } from "./login-binary.js";
 import { fetchLatestCodex, probeCodexInstall, readCodexRunning } from "./codex-version.js";
-import { currentCodexAcp, type CurrentAcp } from "./acp/install.js";
+import { currentCodexAcp, type AdapterNow } from "./acp/install.js";
 import { fetchAcpReleases, pickAdapterFor, rangeAllows, type AcpRelease } from "./acp/resolve.js";
 import { piBinName, readPiRuntimeSnapshot } from "./pi-env.js";
 import { pidAlive } from "./tmux-helper.js";
@@ -45,14 +45,16 @@ export const isStableVersion = (v?: string): boolean => !!v && /^\d+\.\d+\.\d+$/
  * Codex 的新版不配套当前适配器、npm 上也没有能配它的适配器时，能直接点的「重启生效」优先；都不能点才给那条只有文字的。
  * codex 是整机一份，所以「更新」对 tmux agent 也拦；「重启」只拦 ACP agent（tmux 的 TUI 不经适配器；ACP 的 restart 走
  * readiness 自动换适配器，所以找得到能配的也放行）。npm latest 是预发布版时 codex 不提示更新。tests/update-hints.test.ts。
- * adapter：当前适配器（null = 没装，没有要配的）；releases：registry 上的适配器正式版（缓存，冷缓存时是空的）。
+ * adapter：当前适配器（null = 没装，没有要配的；"broken" = 指针 / 标记坏了，一律只给文字，端点也拒）；
+ * releases：registry 上的适配器正式版（缓存，冷缓存时是空的）。
  */
 export function pickUpdateHint(
   runtime: string,
-  v: { running?: string; installed?: string; latest?: string; npm?: boolean; acp?: boolean; adapter?: CurrentAcp | null; releases?: AcpRelease[] },
+  v: { running?: string; installed?: string; latest?: string; npm?: boolean; acp?: boolean; adapter?: AdapterNow; releases?: AcpRelease[] },
 ): UpdateHint | null {
-  const followable = (x: string) => !v.adapter || rangeAllows(v.adapter.codexRange, x) || !!pickAdapterFor(v.releases ?? [], x);
-  const pairs = v.adapter?.codexRange ?? "";
+  const a = v.adapter;
+  const followable = (x: string) => a !== "broken" && (!a || rangeAllows(a.codexRange, x) || !!pickAdapterFor(v.releases ?? [], x));
+  const pairs = a === "broken" ? "未知（适配器指针或标记坏了，先跑 acp-install）" : a?.codexRange ?? "";
   let parked: UpdateHint | null = null;
   if (v.installed && v.latest && isNewerVersion(v.latest, v.installed)) {
     if (runtime === "pi") return { kind: "pi-update", installed: v.installed, latest: v.latest };

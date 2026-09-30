@@ -99,8 +99,10 @@ bridge 那头：`bridge/acp-link.ts`（宿主的帧 → watcher 推送 / 卡片 
   - `~/.codex/sessions` 是共享的，和 `~/.claude` 一样。
 - **AIR 与终端输出。** 宿主声明了 AIR `sessionFailure`（所有回合失败都结构化，不只是额度），同时声明 `clientCapabilities._meta.terminal_output_delta: true`——声明 AIR 而不声明它，命令输出就收不到了。
 - **适配器安装。** codex-acp 的 GitHub release 上没有任何附件，所以直接下 npm registry 上的包文件（2.0.x 约 270KB）：只解出 `dist/index.js` 放到状态目录的 `acp/codex-acp-<版本>/`，用我们自己的 bun 跑，并记下它的哈希——宿主每次启动都核对，装好后被改过就拒起。设了 `CODEX_PATH` 它不会加载那份 344MB 的 `@openai/codex`；不进 package.json。
-  - **信任链（改了 T60 的设计，待 Shawn 确认）**：原先版本钉死、sha256 写死在代码里，每个 Codex 小版本都要改代码发版。现在版本、配套范围（`dependencies["@openai/codex"]`）和 sha512 都取自 registry 元数据，下载后按 `dist.integrity` 比对，对不上拒装。信任 registry 的理由：Codex 本身就是 `npm install -g` 从同一个 registry 装的，registry 被攻破时 Codex 早已失守，写死 sha 不多挡什么。tarball 地址不在 `registry.npmjs.org/@agentclientprotocol/codex-acp/-/` 下一律不认。
-  - **版本与回退**：`acp/current.json` 指针（tmp+rename 原子写）决定用哪个版本；旧目录都留着，指针指回去即回退。没有指针但有 2.0.0 的老安装（这套机制之前唯一的版本）照样认，配套范围按 `^0.158.0`。
+  - **信任链（改了 T60 的设计，待 Shawn 确认）**：原先版本钉死、sha256 写死在代码里，每个 Codex 小版本都要改代码发版。现在版本、配套范围（`dependencies["@openai/codex"]`）和 sha512 都取自 registry 元数据，下载后按 `dist.integrity` 比对，对不上拒装。信任 registry 的理由：Codex 本身就是 `npm install -g` 从同一个 registry 装的，registry 被攻破时 Codex 早已失守，写死 sha 不多挡什么。tarball 地址必须逐字是 `registry.npmjs.org/@agentclientprotocol/codex-acp/-/codex-acp-<该版本>.tgz`（只查前缀的话，元数据能把新版本指到旧版本的包上）；包文件边下边计数（8MB 上限，content-length 超限直接拒），解压也有 32MB 上限。
+  - **版本与回退**：`acp/current.json` 指针（tmp+rename 原子写，临时名带 pid + 随机数）决定用哪个版本；旧目录都留着，指针指回去即回退。没有指针但有 2.0.0 的老安装（这套机制之前唯一的版本）照样认，配套范围按 `^0.158.0`。
+  - **指针坏了 fail-closed**：指针文件读不出、指向的版本没有合法标记，都算「坏了」而不是「没装」——不退回 2.0.0、不算配套，网页不给「更新并重启」、端点 409，doctor 报 warn；`acp-install`（或 readiness 自动安装）重新装一次即修好。
+  - **切指针是比较后再切**：在 `acp/.pointer.lock`（`lib/file-lock.ts`）里核对指针仍是开始时读到的那份才写，否则拒绝——manager 的 `acp-install` 与网页更新并发时，挑版本更早的一方不会把指针切回旧版。拿不到锁就报错不切。
   - **谁来装**：`manager acp-install` 装能配本机已装 Codex 的最新适配器并切过去；readiness（迁移 / 新建 / 重启 / 切 transport）在没装或已装的不配本机 Codex 时也这么做，查不到或下载失败就沿用已装的（离线不会判成未就绪）。
 - **Codex 升级。** Claudestra 不自动升 Codex（launcher 只自动升 Claude Code）。迁移 / 新建 / 重启先用 `codex app-server --help` 探测能力，不能只信退出码：旧 CLI 会把未知子命令当提示词并以 0 退出。宿主还会核对本机 Codex 与当前适配器的配套范围；不匹配先告警。
   - 配套范围只有一份：当前适配器标记里的范围原文（`install.ts codexPairsWithAdapter`）。宿主告警、网页更新提示、`codex-update` 端点和 doctor 都读它。

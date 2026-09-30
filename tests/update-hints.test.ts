@@ -222,6 +222,11 @@ describe("Codex × codex-acp 配套范围（当前适配器 2.0.0，^0.158.0）"
     expect(pickUpdateHint("codex", { adapter, releases: [REL_201], running: "0.158.0", installed: "0.159.2", latest: "0.159.2", acp: true }))
       .toEqual({ kind: "restart", running: "0.158.0", installed: "0.159.2" });
   });
+  test("F1 适配器指针 / 标记坏了：更新、ACP 的重启都只给文字（端点也拒）", () => {
+    const h = pickUpdateHint("codex", { adapter: "broken", releases: [REL_201], running: "0.158.0", installed: "0.158.0", latest: "0.159.2", npm: true, acp: true });
+    expect(h).toMatchObject({ kind: "codex-update", adapterPairs: expect.stringContaining("acp-install") });
+    expect(pickUpdateHint("codex", { adapter: "broken", running: "0.157.0", installed: "0.158.0", acp: true })).toMatchObject({ kind: "restart", adapterPairs: expect.any(String) });
+  });
   test("没装适配器：没有要配的，不拦", () => {
     expect(pickUpdateHint("codex", { adapter: null, installed: "0.158.0", latest: "0.159.2", npm: true }))
       .toEqual({ kind: "codex-update", installed: "0.158.0", latest: "0.159.2", npm: true });

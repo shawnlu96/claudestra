@@ -1,6 +1,6 @@
 /** Codex ACP 迁移健康检查；doctor 只读，不试图安装或重启。 */
 import { checkAcpReady, type AcpReady } from "./acp/readiness.js";
-import { currentCodexAcp, type CurrentAcp } from "./acp/install.js";
+import { currentCodexAcp, type AdapterNow } from "./acp/install.js";
 import { rangeAllows } from "./acp/resolve.js";
 import { probeClaudeVersion } from "./claude-binary.js";
 import { defaultRunner } from "./codex-thread.js";
@@ -11,9 +11,13 @@ import type { Check } from "./doctor.js";
  * 本机 codex 与当前适配器是否配套。只报告：宿主对不配套的版本也只是告警、照常起（codex-version.ts），readiness 只在自动安装时
  * 按版本挑适配器，所以这里是能在出事前看到错配的地方。version：null = 探不出，undefined = 没探（CLI 不可用 / 沙箱 stub）不报。
  */
-function pairingCheck(version: string | null | undefined, activeAcp: number, adapter: CurrentAcp | null): Check[] {
+function pairingCheck(version: string | null | undefined, activeAcp: number, adapter: AdapterNow): Check[] {
   if (version === undefined || !adapter) return [];
   const group = "Codex ACP";
+  if (adapter === "broken") {
+    return [{ group, name: "Codex 与适配器配套", status: "warn", detail: "codex-acp 的版本指针或标记坏了，不知道当前用的是哪个适配器",
+      fix: "运行 bun src/manager.ts acp-install 重新装上能配本机 codex 的适配器" }];
+  }
   const pairs = `codex-acp ${adapter.version} 的配套范围（${adapter.codexRange}）`;
   if (version && rangeAllows(adapter.codexRange, version)) {
     return [{ group, name: "Codex 与适配器配套", status: "ok", detail: `codex ${version} 在 ${pairs}内` }];
@@ -26,7 +30,7 @@ function pairingCheck(version: string | null | undefined, activeAcp: number, ada
   }];
 }
 
-export function acpDoctorChecks(agents: RegistryAgent[], ready: AcpReady, codexVersion?: string | null, adapter = currentCodexAcp()): Check[] {
+export function acpDoctorChecks(agents: RegistryAgent[], ready: AcpReady, codexVersion?: string | null, adapter: AdapterNow = currentCodexAcp()): Check[] {
   const codex = agents.filter((a) => a.runtime === "codex");
   const pending = codex.filter((a) => a.acpPending);
   const unmigrated = codex.filter((a) => a.transport === undefined && !a.acpPending);
@@ -35,7 +39,7 @@ export function acpDoctorChecks(agents: RegistryAgent[], ready: AcpReady, codexV
   const group = "Codex ACP";
   const checks: Check[] = [{
     group, name: "适配器和 app-server", status: ready.ok ? "ok" : activeAcp.length ? "fail" : "warn",
-    detail: ready.ok ? `${adapter ? `codex-acp ${adapter.version}（配 codex ${adapter.codexRange}）` : "ACP stub"} 校验通过，Codex CLI 有 app-server` : ready.reason,
+    detail: ready.ok ? `${adapter && adapter !== "broken" ? `codex-acp ${adapter.version}（配 codex ${adapter.codexRange}）` : "ACP stub"} 校验通过，Codex CLI 有 app-server` : ready.reason,
     ...(!ready.ok ? { fix: "运行 bun src/manager.ts migrate --acp；下载仍失败时现有 Codex 留在 tmux" } : {}),
   }];
   checks.push({ group, name: "registry 迁移", status: unmigrated.length ? "warn" : "ok",

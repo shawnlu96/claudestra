@@ -219,4 +219,6 @@ test("doctor：本机 codex 与适配器不配套只报 warn（宿主照常起�
   expect(pick(null)).toMatchObject({ status: "warn" });
   expect(pick("0.158.0")).toMatchObject({ status: "ok" });
   expect(pick(undefined)).toBeUndefined();
+  const broken = acpDoctorChecks(agents, ok, "0.158.0", "broken").find((c) => c.name === "Codex 与适配器配套");
+  expect(broken).toMatchObject({ status: "warn", detail: expect.stringContaining("指针或标记坏了") }); // F1：坏了不能当配套
 });

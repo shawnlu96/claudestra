@@ -33,7 +33,11 @@ function deps(over: Partial<RuntimeUpdateDeps> & { npm?: boolean } = {}) {
 }
 const restartOk = async () => ({ ok: true });
 /** 当前适配器 2.0.0（配 ^0.158.0）；registry 上只有它时 0.159.x 解析不到 */
-const ADAPTER_200 = { adapter: () => ({ version: "2.0.0", codexRange: "^0.158.0" }), releases: async (): Promise<AcpRelease[]> => [] };
+const ADAPTER_200 = {
+  adapter: () => ({ version: "2.0.0", codexRange: "^0.158.0" }) as const,
+  pointer: () => '{"version":"2.0.0"}',
+  releases: async (): Promise<AcpRelease[]> => [],
+};
 const post = (name: string, kind: "pi" | "codex", p: Principal, d: RuntimeUpdateDeps, rm = restartOk) =>
   handleRuntimeUpdate(`/agents/${name}/${kind}-update`, p, rm, d);
 
@@ -123,7 +127,7 @@ describe("codex-update 跟随适配器：先装适配器（不切指针）→ np
       installAdapter: async (rel) => (log.push(`adapter:${rel.version}`), o.adapterOk === false
         ? { ok: false, error: "integrity 对不上" }
         : { ok: true, path: "/x", reused: false, version: rel.version, codexRange: rel.codexRange }),
-      useAdapter: (v) => log.push(`pointer:${v}`),
+      useAdapter: async (v, expect) => void log.push(`pointer:${v} if ${expect}`),
     });
     const { d } = deps({ shell: async (cmd) => (log.push(`shell:${cmd}`), { ok: o.shellOk !== false, tail: "t" }) });
     const gated = { ...d, updaters: { ...d.updaters, codex: { ...d.updaters.codex, prepare } } };
@@ -133,7 +137,7 @@ describe("codex-update 跟随适配器：先装适配器（不切指针）→ np
   test("顺序：适配器 → Codex → 指针 → 重启", async () => {
     const { log, run } = flow();
     expect((await run()).status).toBe(200);
-    expect(log).toEqual(["adapter:2.0.1", "shell:npm install -g @openai/codex@0.159.2", "pointer:2.0.1", "restart agent-c"]);
+    expect(log).toEqual(["adapter:2.0.1", "shell:npm install -g @openai/codex@0.159.2", "pointer:2.0.1 if {\"version\":\"2.0.0\"}", "restart agent-c"]);
   });
   test("适配器装失败：Codex 不动、指针不动、不重启", async () => {
     const { log, run } = flow({ adapterOk: false });
@@ -150,6 +154,26 @@ describe("codex-update 跟随适配器：先装适配器（不切指针）→ np
   test("解析不到能配的适配器：409，什么都不装", async () => {
     const { log, run } = flow({ releases: [] });
     expect((await run()).status).toBe(409);
+    expect(log).toEqual([]);
+  });
+  test("F2 适配器指针 / 标记坏了：409，适配器和 Codex 都不动", async () => {
+    let installs = 0;
+    const p = await prepareCodexUpdate({ ...ADAPTER_200, adapter: () => "broken" as const, install: async () => ({ version: "0.158.0", npm: true }),
+      latest: async () => "0.158.9", installAdapter: async () => (installs++, { ok: false, error: "x" }) });
+    expect(p).toMatchObject({ status: 409 });
+    expect("error" in p && p.error).toContain("acp-install");
+    expect(installs).toBe(0);
+  });
+  test("切指针失败（期间被别的进程切过）：500，不重启", async () => {
+    const log: string[] = [];
+    const prepare = () => prepareCodexUpdate({ ...ADAPTER_200, install: async () => ({ version: "0.158.0", npm: true }), latest: async () => "0.159.2",
+      releases: async () => [REL_201], installAdapter: async (rel) => ({ ok: true, path: "/x", reused: false, version: rel.version, codexRange: rel.codexRange }),
+      useAdapter: async () => { throw new Error("codex-acp 指针在这期间被别的进程切过"); } });
+    const { d } = deps();
+    const gated = { ...d, updaters: { ...d.updaters, codex: { ...d.updaters.codex, prepare } } };
+    const r = await post("c", "codex", OWNER, gated, async (...a: string[]) => (log.push(a.join(" ")), { ok: true }));
+    expect(r.status).toBe(500);
+    expect(((await r.json()) as any).error).toContain("切换适配器失败");
     expect(log).toEqual([]);
   });
   test("latest 本来就配当前适配器：只升 Codex，不碰适配器", async () => {
