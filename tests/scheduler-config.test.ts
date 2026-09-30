@@ -40,12 +40,26 @@ describe("T68 scheduler service configuration", () => {
     expect(() => parseSchedulerConfig({ enabled: true, projects: { p: { ...p, deploy: { cwd: "/tmp/project", argv: ["deploy"] } } } }))
       .toThrow(/automatic deploy is not supported/);
     expect(() => parseSchedulerConfig({ enabled: true, projects: { p: { ...p, repoDir: undefined } } })).toThrow(/repoDir/);
-    expect(() => parseSchedulerConfig({ enabled: true, projects: { p: { ...p, maxActiveWorkers: 0 } } })).toThrow(/maxActiveWorkers/);
+    expect(() => parseSchedulerConfig({ enabled: true, projects: { p: { ...p, maxActiveWorkers: -1 } } })).toThrow(/maxActiveWorkers/);
+    expect(() => parseSchedulerConfig({ enabled: true, projects: { p: { ...p, maxActiveWorkers: 33 } } })).toThrow(/maxActiveWorkers/);
     expect(() => parseSchedulerConfig({ enabled: true, projects: { p: { ...p, requiredChecks: [] } } })).toThrow(/requiredChecks/);
     for (const bad of ["a\nb", "a\u0000b", "a\u200bb", "a,b", " check", "x".repeat(81)]) {
       expect(() => parseSchedulerConfig({ enabled: true, projects: { p: { ...p, requiredChecks: [bad] } } })).toThrow(/requiredChecks/);
     }
     expect(() => parseSchedulerConfig({ enabled: true, pollMs: 0, projects: {} })).toThrow(/pollMs/);
     expect(() => parseSchedulerConfig({ enabled: true, projects: {} })).toThrow(/at least one project/);
+  });
+  test("i28-R9 remote pool policy: default overflow + review + 15 min, zero local workers allowed, build / fix refused until R6", () => {
+    const p = { maxActiveWorkers: 0, requiredChecks: ["check"], repoDir: "/tmp/project" };
+    expect(parseSchedulerConfig({ enabled: true, projects: { p } }).projects.p).toMatchObject({
+      maxActiveWorkers: 0, remote: { mode: "overflow", roles: ["review"], poolTimeoutMin: 15 },
+    });
+    const off = parseSchedulerConfig({ enabled: true, projects: { p: { ...p, remote: { mode: "off", roles: [] } } } });
+    expect(off.projects.p.remote).toEqual({ mode: "off", roles: [], poolTimeoutMin: 15 });
+    expect(parseSchedulerConfig({ enabled: true, projects: { p: { ...p, remote: { mode: "prefer", poolTimeoutMin: 30 } } } }).projects.p.remote)
+      .toEqual({ mode: "prefer", roles: ["review"], poolTimeoutMin: 30 });
+    for (const remote of [{ mode: "always" }, { roles: ["build"] }, { roles: ["review", "fix"] }, { poolTimeoutMin: 0 }, { poolTimeoutMin: 1.5 }, [], "overflow"]) {
+      expect(() => parseSchedulerConfig({ enabled: true, projects: { p: { ...p, remote } } })).toThrow(/remote/);
+    }
   });
 });

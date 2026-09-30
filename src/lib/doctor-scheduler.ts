@@ -3,6 +3,7 @@ import { existsSync } from "node:fs";
 import { readSchedulerConfig, SCHEDULER_CONFIG_PATH } from "./scheduler-config.js";
 import type { Check } from "./doctor.js";
 import { LedgerReader } from "./ledger-read.js";
+import { poolCounts } from "./scheduler-pool-facts.js";
 
 export function checkSchedulerConfig(path = SCHEDULER_CONFIG_PATH): Check[] {
   const base = { group: "launchd daemon", name: "调度引擎配置" };
@@ -38,8 +39,24 @@ export function checkSchedulerJournal(reader = new LedgerReader()): Check[] {
   return out;
 }
 
+/** 共享池（i28-R9）：调度器挂出去的审查单各停在哪；结果不明的要 PM 核对，所以报 warn */
+export function checkSchedulerPool(reader = new LedgerReader()): Check[] {
+  const base = { group: "launchd daemon", name: "共享池" };
+  try {
+    const db = reader.get();
+    if (!db) return [{ ...base, status: "ok", detail: "还没有台账" }];
+    const n = poolCounts(db);
+    const detail = `挂出待领 ${n.pooled}，被领在审 ${n.claimed}，已交结论 ${n.done}，超时撤回 ${n.timedOut}，结果不明 ${n.unknown}`;
+    return n.unknown
+      ? [{ ...base, status: "warn", detail, fix: "PM 核对对方结果后：ledger lend-reoffer <task> 或 lend-cancel <task>，再处理调度意图" }]
+      : [{ ...base, status: "ok", detail }];
+  } catch (e) {
+    return [{ ...base, status: "warn", detail: `读不了台账：${(e as Error).message}` }];
+  } finally { reader.close(); }
+}
+
 /** 出借循环也跑在 scheduler 服务里（设计稿 remote-capacity §2.3），出借声明一行跟着这里出 */
 export async function checkScheduler(): Promise<Check[]> {
   const { checkLend } = await import("./doctor-lend.js");
-  return [...checkSchedulerConfig(), ...checkSchedulerJournal(), ...await checkLend()];
+  return [...checkSchedulerConfig(), ...checkSchedulerJournal(), ...checkSchedulerPool(), ...await checkLend()];
 }

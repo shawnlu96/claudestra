@@ -12,6 +12,8 @@ import { insertEvent, tx } from "./ledger-tx.js";
 import { releaseFinishedCardLeases } from "./ledger-scheduler-lease.js";
 import { cardWorkerSlots } from "./scheduler-worker-slot.js";
 import { currentReviewFacts } from "./scheduler-review.js";
+import { poolAckSeq } from "./scheduler-pool-facts.js";
+import { isPoolIntent } from "./scheduler-pool-plan.js";
 import { bindHash, checkAsk } from "./ask-bind.js";
 import { getAsk, ownerAnswered } from "./ledger-asks.js";
 
@@ -42,12 +44,15 @@ function requireReviewedMerge(db: Database, task: ReturnType<typeof mustTask>, w
   const reviewEntry = db.query(`SELECT COALESCE(MAX(seq), 0) AS seq FROM events WHERE target = ? AND kind = 'stage'
     AND json_extract(data, '$.to') = 'review' AND json_extract(data, '$.round') = ?`).get(task.id, task.round) as { seq: number };
   if (!reviewEntry.seq) throw new LedgerError("conflict", "缺本轮 review 阶段进入事件");
-  const prior = db.query(`SELECT 1 FROM scheduler_intents AS i JOIN events AS ack
-    ON ack.dedupKey = 'scheduler:' || i.id || ':submitted' AND ack.seq > i.eventSeq AND ack.seq < ?
-    WHERE i.taskId = ? AND i.action = 'review' AND i.recipient = ? AND i.head = ?
-    AND i.eventSeq > ? AND i.eventSeq < ? AND i.status IN ('submitted','done') LIMIT 1`).get(
-    read.facts.eventSeq, task.id, read.facts.reviewer, read.facts.head, reviewEntry.seq, read.facts.eventSeq,
-  );
+  const sent = db.query(`SELECT * FROM scheduler_intents AS i WHERE i.taskId = ? AND i.action = 'review' AND i.recipient = ? AND i.head = ?
+    AND i.eventSeq > ? AND i.eventSeq < ? AND i.status IN ('submitted','done')`).all(
+    task.id, read.facts.reviewer, read.facts.head, reviewEntry.seq, read.facts.eventSeq,
+  ) as SchedulerIntent[];
+  // Receipt: the `submitted` settle for a local order; for a pool order the peer's claim note (the settle may trail the verdict).
+  const prior = sent.some((i) => {
+    const ack = isPoolIntent(i) ? poolAckSeq(db, i.id) : getEventByDedup(db, `scheduler:${i.id}:submitted`)?.seq ?? null;
+    return ack !== null && ack > i.eventSeq && ack < read.facts.eventSeq;
+  });
   if (!prior) throw new LedgerError("conflict", "合并前缺本轮审查派单回执");
   if (workflow.template === "ui") {
     const digest = task.extra.screenshotsDigest;

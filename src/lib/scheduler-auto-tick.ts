@@ -17,6 +17,10 @@ import { getSchedulerSession, type SessionRole } from "./scheduler-sessions.js";
 import type { SnapshotOpts } from "./scheduler-snapshot.js";
 import { stepOfNode, workOrderFor } from "./scheduler-work-order.js";
 import { paceCards, type TickPace } from "./scheduler-yield.js";
+import type { BorrowEntry } from "./lend-config.js";
+import type { RemotePolicy } from "./scheduler-config.js";
+import { isPoolIntent } from "./scheduler-pool-plan.js";
+import { drivePool } from "./scheduler-pool-tick.js";
 import type { EnsureResult, SessionRef, WorkerSession } from "./worker-session.js";
 
 type Manager = (...args: string[]) => Promise<Record<string, unknown>>;
@@ -35,6 +39,8 @@ export interface AutoTickDeps {
   reviewDirty(task: LedgerTask, ref: SessionRef): Promise<string | null>;
   notifyPm(task: LedgerTask, text: string): Promise<void>;
   now(): number;
+  /** Effective lend.json borrow list (i28-R9); absent = this service never pools. Read once per pass. */
+  borrow?(): Promise<BorrowEntry[]>;
 }
 
 interface CardOutcome { taskId: string; step: string; detail: string }
@@ -179,6 +185,11 @@ class Card {
   }
 
   async drive(intent: SchedulerIntent, plan: Planned | null): Promise<CardOutcome> {
+    if (isPoolIntent(intent)) {
+      const r = await drivePool({ manager: this.deps.manager, notifyPm: this.deps.notifyPm, lost: noticeLost }, this.task, intent,
+        this.opts.maxWorkers, this.opts.pool?.remote);
+      return this.out(r.step, r.detail);
+    }
     if (intent.action === "ensure_session") return this.ensure(intent, plan);
     if (intent.action === "dispatch" || intent.action === "review") return this.work(intent, plan);
     if (intent.action === "stage" || intent.action === "ask") return this.internal(intent, plan);
@@ -246,6 +257,7 @@ class Card {
       ORDER BY eventSeq DESC LIMIT 1`).get(this.task.id) as SchedulerIntent | null;
     if (open?.status === "unknown") return this.out("held", `外部结果不明，等 PM 核对：${open.receipt ?? open.reason}`);
     if (open?.action === "merge") return this.out("merge_queue", `合并意图 ${open.status}`);
+    if (open && isPoolIntent(open)) return this.drive(open, null);
     if (open?.status === "pending") {
       const again = planScheduler(autoSnapshot(this.db, this.task, this.opts, open.id));
       if (again.kind !== "intent" || again.id !== open.id) return this.cancelStale(open, "按当前台账重算，已不是这个计划");
@@ -263,9 +275,21 @@ class Card {
   }
 }
 
-export async function schedulerAutoTick(db: Database, projects: Record<string, { maxActiveWorkers: number }>, deps: AutoTickDeps,
+/** One borrow read per pass, and only when some project may pool; an unreadable lend.json pools nothing (fail-closed). */
+function poolReader(deps: AutoTickDeps) {
+  let borrow: Promise<BorrowEntry[]> | null = null;
+  return async (remote: RemotePolicy | undefined): Promise<SnapshotOpts["pool"]> => {
+    if (!remote || !deps.borrow) return undefined;
+    if (remote.mode === "off") return { remote, borrow: [] };
+    borrow ??= deps.borrow().catch((e: unknown) => { console.error(`⚠️ [scheduler] 读 lend.json 借入名单失败，本轮不挂池：${(e as Error).message}`); return []; });
+    return { remote, borrow: await borrow };
+  };
+}
+
+export async function schedulerAutoTick(db: Database, projects: Record<string, { maxActiveWorkers: number; remote?: RemotePolicy }>, deps: AutoTickDeps,
   pace?: TickPace): Promise<AutoTickResult> {
   const out: AutoTickResult = { cards: [], failed: [] };
+  const poolOf = poolReader(deps);
   if (!db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'task_workflows'").get()) return out;
   for (const { project, policy, taskId } of paceCards(db, projects, "auto", pace)) {
     if (pace?.yieldNow()) break;
@@ -273,7 +297,8 @@ export async function schedulerAutoTick(db: Database, projects: Record<string, {
     const task = getTask(db, taskId);
     if (!task) continue;
     try {
-      out.cards.push(await new Card(db, task, { registry: [], maxWorkers: policy.maxActiveWorkers, now: deps.now() }, deps).step());
+      const pool = await poolOf(policy.remote);
+      out.cards.push(await new Card(db, task, { registry: [], maxWorkers: policy.maxActiveWorkers, now: deps.now(), pool }, deps).step());
     } catch (e) {
       if (e instanceof SchedulerStopped) throw e;
       out.failed.push({ taskId, error: oneLine((e as Error).message) });
