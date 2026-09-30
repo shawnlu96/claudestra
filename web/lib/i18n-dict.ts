@@ -679,6 +679,7 @@ export const DICT: Record<string, string> = {
     "Confirm this device in the terminal running claudestra pair (or in the web app on the computer). This page continues automatically.",
   "链接已过期，请重新生成二维码": "The link has expired — generate a new QR code",
   "尝试太频繁，请稍后再试": "Too many attempts — try again later",
+  "已有本机请求在等批准：在已配对的设备上拒绝，或等它过期": "Other requests from this computer are waiting — deny them on a paired device or let them expire",
   "这台机器没有连上中继": "That machine is not connected to the relay",
   "还没有选择机器": "No machine selected yet",
   "只能在电脑本机的浏览器里一键配对": "One-tap pairing only works in a browser on that computer itself",

@@ -105,7 +105,7 @@ export async function relayControlRoutes(req: Request, url: URL): Promise<Respon
   if (p === "/peer-ingress/sync" && req.method === "POST") return peerIngressSyncRoute(req);
   if (p === "/relay/status" && req.method === "GET") return relayStatusResponse();
   if (p === "/relay/pair/new" && req.method === "POST") return pairNew(req);
-  if (p === "/relay/pair/approvals" && req.method === "GET") return json(200, { ok: true, approvals: pendingApprovals(), activeCodes: activePairingCodeList() });
+  if (p === "/relay/pair/approvals" && req.method === "GET") return json(200, { ok: true, approvals: pendingApprovals(true), activeCodes: activePairingCodeList() });
   if (p === "/relay/pair/approve" && req.method === "POST") return pairApprove(req);
   if (p === "/relay/pair/redeem" && req.method === "POST") return pairRedeem(req);
   if (p === "/relay/request" && req.method === "POST") return relayRequest(req);
