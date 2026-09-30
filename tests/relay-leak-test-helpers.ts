@@ -1,7 +1,7 @@
 /**
  * 「中继看不到内层」这类断言的共用件。中继能看到的是 URL、每个 header 的名和值、body，三样都要记下来查；
  * needle 必须是 ≥12 字节的随机或唯一标记（短串会在 base64 密文里偶然出现而假红），按 UTF-8 原始字节比（中文经 latin1 字符串永远匹配不上）。
- * 除原文外还查常见的无密钥可逆编码（base64 / base64url / hex / 百分号 / JSON \uXXXX）；压缩、分段、异或这类更深的藏法不在范围内。
+ * 除原文外还查常见的无密钥可逆编码（base64 / base64url / hex / 百分号 / JSON \uXXXX，大小写混用也算）；压缩、分段、异或这类更深的藏法不在范围内。
  */
 import { randomBytes } from "node:crypto";
 
@@ -28,22 +28,29 @@ function base64Cores(b: Buffer, enc: "base64" | "base64url"): string[] {
   });
 }
 
-/** 一个 needle 的原文和各种可逆编码形式，[编码名, 字节] */
-function encodedForms(needle: string): [string, Buffer][] {
+/** 一个 needle 的原文和各种可逆编码形式：[编码名, 字节, 在哪份归一化副本里查]；hex、\uXXXX 取小写，和转小写的副本比 */
+function encodedForms(needle: string): [string, Buffer, "exact" | "lower"][] {
   const b = Buffer.from(needle, "utf8");
-  const hex = b.toString("hex"), pct = hex.replace(/../g, "%$&");
-  const units = Array.from({ length: needle.length }, (_, i) => needle.charCodeAt(i).toString(16).padStart(4, "0"));
-  const u = (up: boolean) => units.map((x) => `\\u${up ? x.toUpperCase() : x}`).join("");
-  const text: [string, string][] = [
-    ...base64Cores(b, "base64").map((s, k): [string, string] => [`base64@${k}`, s]),
-    ...base64Cores(b, "base64url").map((s, k): [string, string] => [`base64url@${k}`, s]),
-    ["hex", hex], ["HEX", hex.toUpperCase()], ["uri", encodeURIComponent(needle)], ["%xx", pct], ["%XX", pct.toUpperCase()], ["\\uxxxx", u(false)], ["\\uXXXX", u(true)],
+  const u = Array.from({ length: needle.length }, (_, i) => `\\u${needle.charCodeAt(i).toString(16).padStart(4, "0")}`).join("");
+  return [
+    ["raw", b, "exact"],
+    ...base64Cores(b, "base64").map((s, k): [string, Buffer, "exact"] => [`base64@${k}`, Buffer.from(s), "exact"]),
+    ...base64Cores(b, "base64url").map((s, k): [string, Buffer, "exact"] => [`base64url@${k}`, Buffer.from(s), "exact"]),
+    ["hex", Buffer.from(b.toString("hex")), "lower"],
+    ["\\uXXXX", Buffer.from(u), "lower"],
   ];
-  return [["raw", b], ...text.map(([k, s]): [string, Buffer] => [k, Buffer.from(s, "utf8")])];
 }
+
+/**
+ * 大小写可以逐位混用的编码不枚举组合，先归一再比：合法的 %XX（大小写任意）解码回原字节，encodeURIComponent 与逐字节百分号都归到原文；
+ * hex、\uXXXX 在 ASCII 转小写的副本里查。解码整个 body 也不会误报：命中仍要求 ≥12 字节的随机 needle 完整出现。
+ */
+const pctDecode = (s: Buffer) => Buffer.from(s.toString("latin1").replace(/%([0-9a-f]{2})/gi, (_, h: string) => String.fromCharCode(parseInt(h, 16))), "latin1");
+const asciiLower = (s: Buffer) => Buffer.from(s.toString("latin1").replace(/[A-Z]/g, (c) => c.toLowerCase()), "latin1");
 
 /** 哪些 needle（以哪种形式）出现在中继看到的字节里；needle 太短会在密文里偶然撞上，直接报错 */
 export function leakedIn(seen: Buffer[], needles: string[]): string[] {
   for (const n of needles) if (Buffer.byteLength(n) < 12) throw new Error(`leak needle too short: ${n}`);
-  return needles.flatMap((n) => encodedForms(n).filter(([, f]) => seen.some((s) => s.includes(f))).map(([k]) => `${n} (${k})`));
+  const decoded = seen.map(pctDecode), views = { exact: [...seen, ...decoded], lower: [...seen, ...decoded].map(asciiLower) };
+  return needles.flatMap((n) => encodedForms(n).filter(([, f, v]) => views[v].some((s) => s.includes(f))).map(([k]) => `${n} (${k})`));
 }

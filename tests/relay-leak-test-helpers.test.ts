@@ -16,10 +16,12 @@ describe("leakedIn", () => {
     }
   });
 
-  test("hex 大小写、encodeURIComponent、逐字节 %xx 大小写、JSON \\uXXXX 大小写都抓得到", () => {
+  test("hex、encodeURIComponent、逐字节 %xx、JSON \\uXXXX：全小写、全大写、逐位大小写混用都抓得到", () => {
     const b = Buffer.from(needle, "utf8"), hex = b.toString("hex"), pct = hex.replace(/../g, "%$&");
     const u = Array.from({ length: needle.length }, (_, i) => `\\u${needle.charCodeAt(i).toString(16).padStart(4, "0")}`).join("");
-    const forms = [hex, hex.toUpperCase(), encodeURIComponent(needle), pct, pct.toUpperCase(), u, u.replace(/[0-9a-f]{4}/g, (x) => x.toUpperCase())];
+    const mixed = (s: string) => s.replace(/[a-f]/gi, (c, i: number) => (i % 2 ? c.toUpperCase() : c.toLowerCase()));
+    const uri = (f: (s: string) => string) => encodeURIComponent(needle).replace(/%[0-9A-F]{2}/g, f); // 只动转义里的十六进制，明文部分是原文
+    const forms = [hex, pct, u].flatMap((f) => [f, f.replace(/[a-f]/g, (c) => c.toUpperCase()), mixed(f)]).concat(uri((x) => x), uri((x) => x.toLowerCase()), uri(mixed));
     for (const f of forms) expect(leakedIn([wrap(f)], [needle])).not.toEqual([]);
     expect(leakedIn([Buffer.from(JSON.stringify({ v: needle }), "utf8")], [needle])).toEqual([`${needle} (raw)`]);
   });
