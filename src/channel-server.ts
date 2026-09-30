@@ -23,6 +23,7 @@ import { FORWARD_TO_AGENT_DESCRIPTION, SEND_TO_AGENT_DESCRIPTION } from "./lib/a
 import { CHECK_INBOX_TOOL, checkInboxTool, forwardTool, sendToAgentTool } from "./lib/agent-tool-calls.js";
 import { FLEET_TOOL, fleetTool } from "./lib/fleet-tool.js";
 import { callerRegisterFields, takeCallerCred, WHOAMI_TOOL, whoamiTool } from "./lib/whoami-tool.js";
+import { isOrderTool, ORDER_TOOLS, orderTool } from "./lib/order-tools.js";
 import { REPLY_ASK_PROPERTY, replyResultText } from "./lib/reply-ask-schema.js";
 
 // 进程级异常兜底。**故意不退出**：本进程没有任何守护者（Claude Code 不 respawn
@@ -595,7 +596,7 @@ one round trip instead of many.`,
         required: ["message_id", "target"],
       },
     },
-    CHECK_INBOX_TOOL, FLEET_TOOL, WHOAMI_TOOL,
+    CHECK_INBOX_TOOL, FLEET_TOOL, WHOAMI_TOOL, ...ORDER_TOOLS,
     {
       name: "ask_codex",
       description: `Ask the local OpenAI Codex agent (runs on this machine via ChatGPT.app's CLI, owner's subscription quota — use deliberately, never in loops).
@@ -728,14 +729,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (request) => {
 
     case "list_shared_channels": {
       const result = await bridgeRequest({ type: "list_channels" });
-      return {
-        content: [
-          {
-            type: "text" as const,
-            text: JSON.stringify(result.channels || [], null, 2),
-          },
-        ],
-      };
+      return { content: [{ type: "text" as const, text: JSON.stringify(result.channels || [], null, 2) }] };
     }
 
     case "forward_to_agent": return forwardTool(bridgeRequest, args);
@@ -745,6 +739,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (request) => {
     case "fleet": return fleetTool(bridgeRequest, args); // 批量管理：谁能调由 bridge 按本连接注册的频道判（lib/fleet-caller.ts）
 
     default:
+      if (isOrderTool(name)) return orderTool(bridgeRequest, name, args); // 派单工具（lib/order-tools.ts，bridge/order-tools.ts 认身份）
       throw new Error(`Unknown tool: ${name}`);
   }
 });

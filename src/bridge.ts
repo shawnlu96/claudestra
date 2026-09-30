@@ -73,7 +73,7 @@ import { initPeerIngress, localProbeResponse, relayControlRoutes, requestContext
 import { handleForward, initForward, rememberInbound } from "./bridge/forward.js";
 import { initInbox, takeInbox, inboxOpts } from "./bridge/inbox.js";
 import { inboundEventData } from "./bridge/inbound-event.js";
-import { startArchiveSweeper } from "./bridge/archive-sweeper.js";
+import { startSweepers } from "./bridge/sweepers.js";
 // Web 远程终端（PTY attach → SSE；见 web-terminal.ts 头注释）
 import { handleTerminalApi, sweepStaleTerminalSessions } from "./bridge/web-terminal.js";
 import {
@@ -204,6 +204,7 @@ import {
 import { registerSlashCommands } from "./bridge/slash-commands.js";
 import { registerInteractionHandlers } from "./bridge/discord-interactions.js";
 import { admitCaller, answerWhoami } from "./bridge/caller-identity.js";
+import { answerOrderTool } from "./bridge/order-tools.js";
 
 // ============================================================
 // 类型定义
@@ -545,14 +546,11 @@ function clearInterAgentPendingsForChannel(channelId: string): number {
 // ============================================================
 // v2.0.0+ 路由抽象
 // ============================================================
-import type {
-  LocalEndpoint as RouterLocalEndpoint,
-  UserEndpoint as RouterUserEndpoint,
-  ApiUserEndpoint as RouterApiUserEndpoint,
-  Envelope as RouterEnvelope,
-  Delivery as RouterDelivery,
+import {
+  type LocalEndpoint as RouterLocalEndpoint, type UserEndpoint as RouterUserEndpoint, type ApiUserEndpoint as RouterApiUserEndpoint,
+  type Envelope as RouterEnvelope, type Delivery as RouterDelivery,
+  endpointLabel, envelopeLabel, inboundBodyForLocal, isHumanRequest, newMessageId, newThreadId, parseChatId, renderApiInbound,
 } from "./bridge/router.js";
-import { endpointLabel, envelopeLabel, inboundBodyForLocal, isHumanRequest, newMessageId, newThreadId, parseChatId, renderApiInbound } from "./bridge/router.js";
 import { HeldQueue, unseenFrom } from "./bridge/held-queue.js";
 import { sweepHeldAges } from "./bridge/held-age.js";
 import { dropHeldOnKill, flushHeld } from "./bridge/held-flush.js";
@@ -1202,7 +1200,7 @@ discord.once("ready", async () => {
   });
 
   // v2.9+ 归档每日兜底 — 退役归档之外，每 24h 对 active agent 补快照（幂等）
-  startArchiveSweeper();
+  startSweepers();
   recordMetric("bridge_start", { meta: { channels: clients.size } });
 
   // v2.13.1+ TUI 契约自检 — 见 probeTuiContract 的注释：CC 改一句底部文案不会报错，
@@ -2199,6 +2197,7 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
     case "codex_typein_failed": if (clients.get(msg.channelId)?.ws === ws) onCodexTypeInFailed(msg, heldLocalMsgs); break; // 下一条再打字；菜单挡住的押回
     case "forward_to_agent": ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, ...(await handleForward(ws, msg)) })); break;
     case "whoami": answerWhoami(ws, msg); break; // T85 调用方身份探针（bridge/caller-identity.ts）
+    case "order_tool": void answerOrderTool(ws, msg); break; // M2 / M3 派单工具：先认身份再写台账（bridge/order-tools.ts）
     case "fleet_state": case "fleet_run": ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, ...(await (await import("./bridge/fleet/ws.js")).handleFleetWs(msg, ws)) })); break;
     case "route_to_agent": {
       try {
@@ -3421,7 +3420,7 @@ if (WEB_ONLY) {
   // v2.8+ bg 活动追踪 — provisionThread 走 local adapter（落空），bg_task_* 事件照发
   startBgActivityWatcher({ sourceProvider: (cid) => lastMessageSource.lastHuman(cid) });
   // v2.9+ 归档每日兜底 — 纯文件系统操作，历史 API 依赖它
-  startArchiveSweeper();
+  startSweepers();
   // 链路哨兵：wedge watcher 只在 Discord ready 里起，web-only 以前完全没有「窗口活着但
   // channel-server 没连上」的探测——而它的 SSE link_down 正是给 web 用户的（D7-6）
   startLinkSentinel((cid) => clients.has(cid));
