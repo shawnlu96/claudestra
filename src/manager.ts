@@ -127,6 +127,7 @@ import { abandonCreate, beginCreate, commitCreate, gateOps, guardCreateSignals, 
 import { notify } from "./lib/notify.js";
 import { writeJsonAtomic } from "./lib/state-file.js";
 import { stderrTail } from "./lib/run-manager.js";
+import { discardOneShot, issueCallerCredFor } from "./lib/caller-cred-launch.js";
 import { readyFailureText, modelPinPlan, modelPinRefusal, restartExceptionResult, bigSessionNote } from "./lib/restart-result.js";
 
 /**
@@ -716,9 +717,11 @@ async function launchInWindow(
     spec.mode === "fork" && opts.cwd && adapter.forkBaseline ? await adapter.forkBaseline(opts.cwd) : undefined;
   await adapter.beforeLaunch?.(win);
   const fresh = spec.mode === "new" || !(await loadRegistry()).agents[tmuxName]; // 全新 agent 不带同名旧 agent 的设置（旧文件等 registry 落盘后再删）
-  const unsent = await win.sendLine(adapter.buildLaunchCommand({ ...spec, ...(fresh ? {} : { settingsName: tmuxName }) })).then(() => null, (e: Error) => e.message);
-  if (unsent) return { result: { ready: false, reason: "exited", detail: `启动命令没发出去：${unsent}`, recoveredFullSession: false } };
+  const credFile = await issueCallerCredFor(tmuxName, adapter, spec); // T85 启动凭据（lib/caller-cred-launch.ts），就绪 / 失败后兜底删文件
+  const unsent = await win.sendLine(adapter.buildLaunchCommand({ ...spec, callerCredFile: credFile, ...(fresh ? {} : { settingsName: tmuxName }) })).then(() => null, (e: Error) => e.message);
+  if (unsent) return discardOneShot(credFile), { result: { ready: false, reason: "exited", detail: `启动命令没发出去：${unsent}`, recoveredFullSession: false } };
   const result = await adapter.waitReady(win, { rounds: CLAUDE_READY_ROUNDS, pollMs: 500 });
+  discardOneShot(credFile);
   if (result.ready) (await import("./lib/agent-settings.js")).dropLaunchSettings(tmuxName); // 超长设置落的启动快照：就绪 = CC 已读过
   return { result, baseline };
 }

@@ -86,6 +86,7 @@ initDaemonLogs("launcher");
 import { assertPrimaryOrExit } from "./lib/owner-guard.js";
 import { busyAgentWindows } from "./lib/busy-windows.js";
 import { healSelfDirty } from "./lib/self-dirty.js";
+import { discardOneShot, issueLaunchCred } from "./lib/caller-cred-launch.js";
 await assertPrimaryOrExit("launcher");
 
 // 默认 master 目录：仓库根 / master。允许 env 覆盖以支持自定义部署。
@@ -123,14 +124,8 @@ async function captureLast(lines = 10): Promise<string> {
 }
 
 /**
- * master 的 session-scoped effort（通过 `--effort <level>` CLI flag 传给 Claude Code）。
- *
- * master 绝大多数 turn 是路由调度，low 就够了、响应更快、token 更省。
- * 这个设置只影响 master 这一个 Claude Code 进程，agent 不传 `--effort` →
- * 继承全局 `~/.claude/settings.json` 的 effortLevel（通常是 xhigh/max）。
- *
- * 用 env MASTER_EFFORT=<level> 覆盖。`default` 或空字符串 → 不加 flag，
- * master 也跟着全局 effortLevel 走。
+ * master 的 session-scoped effort（`--effort <level>`）：绝大多数 turn 是路由调度，low 就够、更快更省；只影响 master 这一个进程。
+ * env MASTER_EFFORT=<level> 覆盖；`default` 或空串 → 不加 flag，跟全局 settings.json 的 effortLevel 走。
  */
 const MASTER_EFFORT = (process.env.MASTER_EFFORT || "low").trim();
 
@@ -145,12 +140,15 @@ async function bringUpClaudeInMasterWindow(): Promise<boolean> {
   // shell，下一轮没单子可读，自动降级成全新会话（崩溃/开机路径行为不变）。
   const resume = await takeMasterResume().catch(() => null);
   if (resume) console.log(`↩️  接回大总管原会话 ${resume.sessionId.slice(0, 8)}（${resume.reason ?? "?"}）`);
+  const credFile = await issueLaunchCred({ agent: "master", family: "claude-code", sessionId: resume?.sessionId }, "mcp-config");
   const cmd = buildClaudeCommand({
     channelId: CONTROL_CHANNEL_ID,
     bridgeUrl: BRIDGE_URL,
     effort: MASTER_EFFORT,
     resumeId: resume?.sessionId, settingsAgent: "master", // 大总管也能按 agent 关技能（manager skill-toggle master …）
+    callerCredFile: credFile, // T85 启动凭据：shell 展开时读走即删，一分钟后兜底再删一次
   });
+  setTimeout(() => discardOneShot(credFile), 60_000).unref?.();
   // shell init 阶段的 Y/n（oh-my-zsh / homebrew）会吞掉首字符，先清掉。
   await clearShellInitPrompts(MASTER_WINDOW);
   await tmuxSendLine(MASTER_WINDOW, cmd);

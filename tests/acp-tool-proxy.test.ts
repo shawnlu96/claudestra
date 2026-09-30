@@ -115,3 +115,25 @@ describe("工具代理：转发", () => {
     expect(await c.next()).toEqual({ type: "response", requestId: "req_2", error: "bridge 断开" });
   });
 });
+
+describe("工具代理：调用方身份（T85）", () => {
+  test("Codex 起的 channel-server 转上去不带降级标；shell 起的 / 没登记的一律带 callerDowngraded；自带的身份字段丢掉", async () => {
+    const { proxy, upstream } = setup();
+    const mcp = await connect(proxy.url);
+    mcp.send({ type: "register", channelId: "local-acp-1", runtime: "codex" });
+    await mcp.next();
+    mcp.send({ type: "whoami", requestId: "req_1", callerCred: "f".repeat(64), callerDowngraded: false });
+    const shell = await connect(proxy.url);
+    shell.send({ type: "register", channelId: "local-acp-1", runtime: "codex", outsideMcpLauncher: true });
+    await shell.next();
+    shell.send({ type: "whoami", requestId: "req_1" });
+    const bare = await connect(proxy.url);
+    bare.send({ type: "whoami", requestId: "req_1" });
+    await tick(50);
+    expect(upstream).toHaveLength(3);
+    const [a, b, c] = upstream;
+    expect(a).toEqual({ type: "whoami", requestId: expect.stringMatching(/^acp\d+_req_1$/) });
+    expect(b).toMatchObject({ type: "whoami", callerDowngraded: true });
+    expect(c).toMatchObject({ type: "whoami", callerDowngraded: true });
+  });
+});

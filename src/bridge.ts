@@ -203,6 +203,7 @@ import {
 // Discord 交互块（D5-4 从本文件搬出；import 时零副作用，下面显式注册）
 import { registerSlashCommands } from "./bridge/slash-commands.js";
 import { registerInteractionHandlers } from "./bridge/discord-interactions.js";
+import { admitCaller, answerWhoami } from "./bridge/caller-identity.js";
 
 // ============================================================
 // 类型定义
@@ -1661,6 +1662,7 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
         return;
       }
 
+      if (!admitCaller(ws, msg, clients.get(msg.channelId)?.ws, CONTROL_CHANNEL_ID)) return; // T85：无凭据的不能顶替已验证的持有者
       const old = clients.get(msg.channelId);
       if (old && old.ws !== ws) {
         // 顶替语义保持不变：后来者接管。典型场景是 Claude Code 重启了它的 MCP server
@@ -2201,6 +2203,7 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
     case "codex_undelivered": void onCodexUndelivered(msg, ws, clients.get(msg.channelId)?.ws === ws); break; // 只了结没投进 Codex 的这一条，不替它宣告完成
     case "codex_typein_failed": if (clients.get(msg.channelId)?.ws === ws) onCodexTypeInFailed(msg, heldLocalMsgs); break; // 下一条再打字；菜单挡住的押回
     case "forward_to_agent": ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, ...(await handleForward(ws, msg)) })); break;
+    case "whoami": answerWhoami(ws, msg); break; // T85 调用方身份探针（bridge/caller-identity.ts）
     case "fleet_state": case "fleet_run": ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, ...(await (await import("./bridge/fleet/ws.js")).handleFleetWs(msg, ws)) })); break;
     case "route_to_agent": {
       try {
