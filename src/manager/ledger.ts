@@ -44,7 +44,7 @@ import { assertSchedulerLease, SchedulerLeaseLost } from "../lib/scheduler-lease
 export const UNKNOWN_ACTOR = "unknown";
 const SCHEDULER_SERVICE_COMMANDS = new Set([
   "scheduler-plan", "scheduler-settle", "scheduler-session-bind", "scheduler-session-retire", "scheduler-merge-begin", "scheduler-merge-step",
-  "scheduler-observe", "scheduler-fallback-manual", "scheduler-stage", "scheduler-ui-ask", "lend-ask", "lend-inform",
+  "scheduler-observe", "scheduler-fallback-manual", "scheduler-stage", "scheduler-ui-ask", "lend-ask", "lend-inform", "lend-close-asks",
 ]);
 
 const COMMANDS: Record<string, CommandSpec> = {

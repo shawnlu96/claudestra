@@ -110,7 +110,8 @@ async function turn(text: string): Promise<Rec> {
     update({ sessionUpdate: "tool_call_update", toolCallId: cid, _meta: { terminal_output_delta: { data: "stub\n", terminal_id: cid } } });
     update({ sessionUpdate: "tool_call_update", toolCallId: cid, status: "completed", _meta: { terminal_exit: { exit_code: 0, terminal_id: cid } } });
     if (text.includes("[stub:pause]")) await sleep(1_500);
-    if (text.includes("[stub:slow]")) for (let i = 0; i < 300 && !running.cancelled; i++) await sleep(100);
+    const slowSec = /\[stub:slow(?::(\d{1,4}))?\]/.exec(text); // [stub:slow] = 30 秒；[stub:slow:N] = N 秒（lab 验长回合不被误杀）
+    if (slowSec) for (let i = 0; i < Number(slowSec[1] ?? 30) * 10 && !running.cancelled; i++) await sleep(100);
     if (running.cancelled) return { stopReason: "cancelled" };
     const chatId = /chat_id="([^"]+)"/.exec(text)?.[1];
     const model = config[0].currentValue;

@@ -1,82 +1,9 @@
-/** T94 lend 循环（src/lib/lend-loop.ts + lend-drive.ts）：确认门、重启恢复、心跳自停、前提不满足不 poll。A 与 worker 都是假的。 */
+/** T94 lend 循环（src/lib/lend-loop.ts + lend-drive.ts）：确认门、重启恢复、心跳自停、前提不满足不 poll。A 与 worker 都是假的（tests/lend-harness.ts）。 */
 import { describe, expect, test } from "bun:test";
-import { createHash } from "node:crypto";
-import type { LendEntry } from "../src/lib/lend-config.js";
 import { BEAT_MS, detailOf, workerName } from "../src/lib/lend-drive.js";
-import { advance, getMeta, getOrder, openLendJournal, patchOrder, recordAsked, type LendRow } from "../src/lib/lend-journal.js";
-import { lendTick, type LoopDeps } from "../src/lib/lend-loop.js";
-import type { LendOp } from "../src/lib/lend-remote.js";
-import type { HttpPeer } from "../src/lib/peers.js";
-
-const HEAD = "e".repeat(40);
-const FP = "abcd-ef01-2345-6789";
-const ENTRY: LendEntry = { peer: "team-a", fp: FP, families: { codex: 2 }, roles: ["review"], repos: ["shawnlu96/claudestra"],
-  quota: { ordersPerDay: 5, tokensPerDay: null }, confirm: "per-order" };
-const PEER = { name: "team-a", addedAt: "x", fp: FP, baseUrl: "relay://abcd", outToken: "t", publicKey: "k", e2e: { idk: "i", ek: {} } } as unknown as HttpPeer;
-const TEXT = "【调度派单】T93 · review";
-const sha = (s: string) => createHash("sha256").update(s, "utf8").digest("hex");
-const polled = (orderId = "o1") => ({ orderId, taskId: "T93", step: "review", family: "codex", repo: "shawnlu96/claudestra", pr: 270, head: HEAD, round: 1, specRev: 1, offeredAt: 1 });
-const wire = (orderId = "o1") => ({ v: 1, orderId, taskId: "T93", specRev: 1, dagVersion: null, node: "R3", step: "review", round: 1, head: HEAD,
-  repo: "shawnlu96/claudestra", pr: 270, inputs: ["规格"], outputs: ["报告"], acceptance: ["验收"], writeBack: "submit_verdict", findings: [], fallback: null });
-
-/** 限时预先授权（specRev 2）：auto 必须带 until 才算数；harness 的时钟从 1970 年开始，2100 年远在未来 */
-const AUTO = { confirm: "auto", until: "2100-01-01T00:00:00.000Z" } as const;
-
-type Reply = { status: number; body: unknown } | "throw";
-
-function harness(opts: { entry?: Partial<LendEntry>; peer?: Partial<HttpPeer>; env?: Record<string, string> } = {}) {
-  const db = openLendJournal(":memory:");
-  let t = 1_000_000;
-  const calls: { op: LendOp; body: Record<string, unknown> }[] = [];
-  const A: Record<LendOp, (b: Record<string, unknown>) => Reply> = {
-    poll: () => ({ status: 200, body: { ok: true, v: 1, orders: [polled()], pollAfterMs: 30_000 } }),
-    claim: (b) => ({ status: 200, body: { ok: true, v: 1, order: wire(String(b.orderId)), text: TEXT, sha256: sha(TEXT), lease: { gen: 1, expiresAt: 0, ms: 600_000 } } }),
-    lease: (b) => ({ status: 200, body: { ok: true, v: 1, lease: b.action === "renew" ? { gen: 1, expiresAt: 0, ms: 600_000 } : null } }),
-    result: (b) => ({ status: 200, body: { ok: true, v: 1, receipt: { orderId: b.orderId, sha256: sha(JSON.stringify(b)), eventSeq: 9, taskId: "T93", key: "k", sig: "s" } } }),
-  };
-  const asks = new Map<string, "waiting" | "approved" | "declined">();
-  const registry = new Map<string, { sessionId?: string; cwd?: string }>();
-  const log = { created: [] as string[], sent: [] as string[], killed: [] as string[], removed: [] as string[], receipts: [] as LendRow[], asksOpened: 0, informs: [] as string[] };
-  const inform = { ok: true, delayMs: 0 };
-  const entry = { ...ENTRY, ...opts.entry };
-  const d: LoopDeps = {
-    db, now: () => t, env: opts.env ?? {}, footer: () => "（交结论的办法）", log: () => {},
-    call: async (_peer, op, body) => {
-      calls.push({ op, body });
-      const r = A[op](body);
-      if (r === "throw") throw new Error("网络断了");
-      return r;
-    },
-    readLend: async () => ({ status: "ok", file: { version: 1, enabled: true, lend: [entry], borrow: [] } }),
-    context: async () => ({ contacts: [{ name: "team-a", fp: FP }], projects: [] }),
-    peers: async () => [{ ...PEER, ...opts.peer } as HttpPeer],
-    ask: {
-      open: async (p) => { log.asksOpened++; if (!asks.has(`ask-${p.orderId}`)) asks.set(`ask-${p.orderId}`, "waiting"); return { ok: true, askId: `ask-${p.orderId}` }; },
-      inform: async (p) => { t += inform.delayMs; inform.delayMs = 0; if (!inform.ok) return { ok: false, error: "bridge 不在" }; log.informs.push(p.orderId); return { ok: true }; },
-      verdict: (id) => { const s = asks.get(id) ?? "declined"; return s === "declined" ? { state: "declined", reason: "不批" } : { state: s }; },
-    },
-    clone: async (i) => ({ ok: true, dir: `/lend/work/${i.orderId}` }),
-    removeDir: (id) => void log.removed.push(id),
-    verifyReceipt: async () => true,
-    writeReceipt: async (row) => void log.receipts.push(row),
-    worker: {
-      find: (n) => registry.get(n),
-      create: async (n, dir) => { log.created.push(n); registry.set(n, { sessionId: "thr-1", cwd: dir }); return { ok: true }; },
-      send: async (_n, _s, text) => { log.sent.push(text); return { ok: true, messageId: "m1" }; },
-      kill: async (n) => { log.killed.push(n); registry.delete(n); return { ok: true }; },
-      alive: async (n) => registry.has(n),
-    },
-  };
-  return { db, d, A, asks, registry, log, calls, inform, tick: () => lendTick(d), advanceTime: (ms: number) => { t += ms; }, ops: () => calls.map((c) => c.op) };
-}
-
-/** 一路走到 started（首条派单已发） */
-async function toStarted(h: ReturnType<typeof harness>) {
-  await h.tick();
-  h.asks.set("ask-o1", "approved");
-  for (let i = 0; i < 4; i++) await h.tick();
-  expect(getOrder(h.db, "o1")!.state).toBe("started");
-}
+import { MISS_GAP_MS } from "../src/lib/lend-health.js";
+import { advance, getMeta, getOrder, patchOrder, recordAsked } from "../src/lib/lend-journal.js";
+import { AUTO, ENTRY, FP, HEAD, harness, polled, sha, TEXT, toStarted, wire } from "./lend-harness.js";
 
 describe("T94 确认门", () => {
   test("per-order：poll 到单只开 ask，owner 没批之前不 claim、不 clone、不起 worker", async () => {
@@ -356,7 +283,9 @@ describe("T94 重启恢复", () => {
     await toStarted(h);
     let fail = true;
     h.d.writeReceipt = async (row) => { if (fail) { fail = false; throw new Error("disk temporarily unavailable"); } h.log.receipts.push(row); };
-    h.registry.delete(workerName("o1")); // worker 没了
+    h.registry.delete(workerName("o1")); // worker 没了：两轮探测都否定才判死（i28-R5a）
+    await h.tick();
+    h.advanceTime(MISS_GAP_MS);
     const r = await h.tick();
     expect(getOrder(h.db, "o1")!.state).toBe("stopped");
     expect(r.failed.map((f) => f.error)).toEqual(["disk temporarily unavailable"]);

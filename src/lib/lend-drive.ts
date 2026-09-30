@@ -14,6 +14,8 @@ import type { CloneResult } from "./lend-clone.js";
 import type { SendResult } from "./worker-ports.js";
 import { payloadSha } from "./lend-submit.js";
 import { SchedulerStopped } from "./scheduler-maintenance.js";
+import { DOWN_REASON, failureReason, noteLiveness, pausedUntil, pauseForQuota, type CodexFailureSeen, type QuotaView } from "./lend-health.js";
+import type { WorkerLiveness } from "./worker-liveness.js";
 import { createHash } from "node:crypto";
 
 export const BEAT_MS = 60_000;
@@ -27,8 +29,8 @@ interface WorkerPort {
   send(name: string, sessionId: string, text: string, key: string): Promise<SendResult>;
   /** 结束 worker 并确认窗口已不在；ok:false = 没确认退出（调用方保留现场） */
   kill(name: string): Promise<{ ok: boolean; reason?: string }>;
-  /** worker 还在不在跑（窗口在、且窗口里有子进程）；null = 查不到（按还在算） */
-  alive(name: string): Promise<boolean | null>;
+  /** worker 还在不在跑（以 ACP 宿主进程为准，worker-liveness.ts）；unknown = 读不到，不能当成不在 */
+  alive(name: string): Promise<WorkerLiveness>;
 }
 
 export interface LendDeps {
@@ -49,6 +51,12 @@ export interface LendDeps {
   writeReceipt(row: LendRow): Promise<void>;
   /** worker 的首条派单尾注（怎么交结论） */
   footer(row: LendRow): string;
+  /** bridge 为这个 worker 开着的 Codex 额度 / 登录卡（lend-health.ts）；没有 = undefined */
+  failure(agent: string): CodexFailureSeen | undefined;
+  /** 关掉这个 worker 开出的 Codex 运行时卡（`ledger lend-close-asks`）；单结束收尾时调 */
+  closeAsks(agent: string): Promise<{ ok: true } | { ok: false; error: string }>;
+  /** 本机 Codex 额度（撞额度暂停借单用）；读不到 = null */
+  codexQuota(): Promise<QuotaView | null>;
   log(msg: string): void;
 }
 
@@ -87,6 +95,7 @@ export function claimProblem(row: LendRow, entry: LendEntry | undefined, db: Dat
     .get(row.peer, row.family, ...LEASED_STATES) as { n: number };
   if (busy.n >= slots) return "wait";
   if (ordersToday(db, row.peer, now) >= entry.quota.ordersPerDay) return "wait";
+  if (pausedUntil(db, now) !== null) return "wait"; // 本机 Codex 撞额度暂停中：批了也先不领
   return null;
 }
 
@@ -130,6 +139,10 @@ export async function settleOrder(row: LendRow, d: LendDeps): Promise<void> {
       d.log(`删 ${row.orderId} 的工作目录失败：${(e as Error).message}`);
     }
     row = patchOrder(d.db, row.orderId, [row.state], { settle: { notify: null, removeDir: false } }, d.now());
+  }
+  if (row.agent) {
+    const closed = await d.closeAsks(row.agent); // 这个 worker 开出的额度 / 登录卡：单结束了，卡也结掉
+    if (!closed.ok) throw new Error(`关 ${row.agent} 的 Codex 卡失败：${closed.error}`); // 留着 settle，下一轮再关
   }
   await d.writeReceipt(row); // 抛了就留着 settle，下一轮再写（appendReceipt 同 orderId 只写一行）
   patchOrder(d.db, row.orderId, [row.state], { settle: null }, d.now());
@@ -217,7 +230,7 @@ async function heartbeat(row: LendRow, d: LendDeps): Promise<LendRow | null> {
 
 /** result_pending 失了租约：worker 一定停（没确认退出就记日志，下一轮再停；已不在跑就不再每轮调 kill），单照常往下转发结论 */
 async function stopForResult(row: LendRow, why: string, d: LendDeps): Promise<LendRow> {
-  const killed = row.agent && (await d.worker.alive(row.agent)) !== false ? await d.worker.kill(row.agent) : { ok: true };
+  const killed = row.agent && (await d.worker.alive(row.agent)) !== "no_window" ? await d.worker.kill(row.agent) : { ok: true };
   if (!killed.ok) d.log(`${row.orderId} ${why}：${row.agent} 没确认退出（${killed.reason ?? "原因不明"}），下轮再停；结论照常重发取回执`);
   return row;
 }
@@ -235,7 +248,14 @@ export async function driveLeased(row: LendRow, d: LendDeps): Promise<void> {
     await startWorker(cur, d);
   } else if (cur.state === "started") {
     if (cur.submit === null) return submitOrder(cur, d);
-    if ((await d.worker.alive(cur.agent!)) === false) return finish(cur, "stopped", "worker 窗口没了，没交结论", d, true);
+    const failed = d.failure(cur.agent!);
+    if (failed) {
+      if (failed.kind === "quota") pauseForQuota(d.db, cur.orderId, await d.codexQuota(), d.now(), d.log);
+      d.log(`${cur.orderId} ${failureReason(failed)}（agent ${cur.agent}，session ${cur.sessionId}，gen ${cur.leaseGen}，卡 ${failed.askId}）`);
+      return finish(cur, "stopped", failureReason(failed), d, true);
+    }
+    const down = noteLiveness(d.db, cur, await d.worker.alive(cur.agent!), d.now(), d.log);
+    if (down) return finish(cur, "stopped", DOWN_REASON[down], d, true);
     if (d.now() - (cur.startedAt ?? cur.createdAt) > MAX_RUN_MS) return finish(cur, "stopped", `超过 ${MAX_RUN_MS / 3600_000} 小时没交结论`, d, true);
   } else if (cur.state === "result_pending") {
     await forwardResult(cur, d);

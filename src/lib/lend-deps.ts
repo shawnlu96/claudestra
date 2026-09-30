@@ -24,11 +24,13 @@ import { readRegistryAgentsSync } from "./registry.js";
 import { SRC_DIR } from "./repo-root.js";
 import { runManagerProcess } from "./run-manager.js";
 import { BUN_NO_AUTOLOAD } from "./runtimes/clean-env.js";
-import { sendVia } from "./scheduler-auto-ports.js";
+import { codexFailure, sendVia } from "./scheduler-auto-ports.js";
 import { encodeLease, SCHEDULER_LEASE_ENV, type SchedulerLease } from "./scheduler-lease-env.js";
 import { whileOwned } from "./scheduler-maintenance.js";
 import { schedulerManagerWith } from "./scheduler-service.js";
-import { listAgentWindows, windowHasChildProcess, windowTarget } from "./tmux-helper.js";
+import { probeAcpWorker } from "./worker-liveness.js";
+import { readInventoryQuota } from "./ai-quota.js";
+import { quotaViewOf, type CodexFailureSeen } from "./lend-health.js";
 
 type Manager = (...args: string[]) => Promise<Record<string, unknown>>;
 
@@ -84,14 +86,8 @@ function lendDeps(journal: Database, ledger: LedgerReader, active: () => void, l
     if (r.ok !== true) throw new Error(String(r.error ?? "manager lend call 失败"));
     return { status: Number(r.status), body: r.body };
   };
-  /** 窗口在不在：tmux 读失败 = null（按「还在」处理）；服务停止 / 失租照样往外抛，不被吞成 null */
-  const hasWindow = async (name: string): Promise<boolean | null> => {
-    active();
-    let has: boolean | null;
-    try { has = (await listAgentWindows()).includes(name); } catch { has = null; /* 读不到窗口列表 = 不知道：调用方不删现场、不判退出 */ }
-    active();
-    return has;
-  };
+  /** 读失败一律 unknown（worker-liveness.ts）；服务停止 / 失租照样往外抛，不被吞成 unknown */
+  const probe = (name: string) => owned(() => probeAcpWorker(name));
   const registryRow = (name: string) => readRegistryAgentsSync().find((a) => a.name === name);
   const send = sendVia(registryRow, alive);
   return {
@@ -112,6 +108,12 @@ function lendDeps(journal: Database, ledger: LedgerReader, active: () => void, l
         return db ? lendAskVerdict(db, askId, p) : { state: "waiting" }; // 台账暂时读不到：不当成批了，也不当成拒了
       },
     },
+    failure: (agent) => failureOf(ledger, agent),
+    closeAsks: async (agent) => {
+      const r = await svc("ledger", "lend-close-asks", "--agent", agent);
+      return r.ok === true ? { ok: true } : { ok: false, error: String(r.error ?? "ledger lend-close-asks 失败") };
+    },
+    codexQuota: async () => quotaViewOf((await readInventoryQuota()).codex),
     clone: (input) => owned(() => prepareClone(input)),
     removeDir: (orderId) => { active(); removeOrderDir(orderId); },
     writeReceipt: async (row) => {
@@ -129,19 +131,26 @@ function lendDeps(journal: Database, ledger: LedgerReader, active: () => void, l
       send: (name, sessionId, text, key) => owned(() => send(name, sessionId, text, key)),
       kill: async (name) => {
         const r = await plain("kill", name);
-        const still = await hasWindow(name);
-        if (still === false) return { ok: true };
-        return { ok: false, reason: still === null ? "读不到 tmux 窗口列表" : `kill 后窗口还在（${String(r.error ?? "")}）` };
+        const still = await probe(name);
+        if (still === "no_window") return { ok: true };
+        return { ok: false, reason: still === "unknown" ? "读不到 tmux 窗口 / 进程，没法确认已退出" : `kill 后窗口还在（${String(r.error ?? "")}）` };
       },
-      // 窗口在但宿主已退回 shell（自停兜底、崩了）也算不在跑
-      alive: async (name) => {
-        const has = await hasWindow(name);
-        if (has !== true) return has;
-        const kid = await owned(() => windowHasChildProcess(windowTarget(name)).catch(() => null)); // 读不到子进程 = 不知道，按还在算
-        return kid === false ? false : kid === null ? null : true;
-      },
+      alive: probe,
     },
   };
+}
+
+/** bridge 为这个 worker 开的 Codex 额度 / 登录卡（同 scheduler-auto-ports codexFailure）；台账读不了 = 不知道，当没有（存活探测照常兜底） */
+function failureOf(ledger: LedgerReader, agent: string): CodexFailureSeen | undefined {
+  const db = ledger.get();
+  if (!db) return undefined;
+  try {
+    const f = codexFailure(db, agent)?.failure;
+    return f && (f.kind === "quota" || f.kind === "auth") ? { kind: f.kind, askId: f.key, message: f.message.slice(0, 200) } : undefined;
+  } catch (e) {
+    console.error(`[lend] 读 ${agent} 的 Codex 卡失败：${(e as Error).message}`);
+    return undefined;
+  }
 }
 
 /** pass 里 lend 这一步：每轮开一次 journal，跑完关（journal 是 WAL，lend submit 可以同时写） */
