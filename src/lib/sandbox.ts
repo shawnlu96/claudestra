@@ -10,7 +10,8 @@ import { existsSync, realpathSync, statSync } from "fs";
 import { dirname, join, relative, resolve, isAbsolute, basename } from "path";
 import { installOutboundGuard } from "./sandbox-outbound.js";
 import {
-  isLab, labConfigProblems, labInstancePortsOf, labOutboundPorts, labPeerUrlProblem, labPushEndpointProblem, labRelayUrlProblem, LAB_ROOT_ENV, readLabInstances,
+  isLab, LAB_FLAG, labConfigProblems, labInstancePortsOf, labOutboundPorts, labPeerUrlProblem, labPushEndpointProblem, labRelayUrl, labRelayUrlProblem, LAB_ROOT_ENV,
+  readLabInstances,
 } from "./sandbox-lab.js";
 
 export const SANDBOX_FLAG = "CLAUDESTRA_SANDBOX";
@@ -32,9 +33,16 @@ class SandboxViolation extends Error {
   }
 }
 
-/** 只认 1（开）与空 / 0（关）；写成 true / yes 之类直接报错——悄悄当成「关」就是带着沙箱意图跑生产 */
+/**
+ * 只认 1（开）与空 / 0（关）；写成 true / yes 之类直接报错——悄悄当成「关」就是带着沙箱意图跑生产。
+ * 沙箱关着却带了 lab 开关（任何非空、非 0 的值）也报错：所有闸都先问这里，在这儿短路就等于 lab 意图按生产跑
+ */
 export function isSandbox(env: Env = process.env): boolean {
   const v = (env[SANDBOX_FLAG] || "").trim();
+  const lab = (env[LAB_FLAG] || "").trim();
+  if ((v === "" || v === "0") && lab !== "" && lab !== "0") {
+    throw new SandboxViolation([`${LAB_FLAG}=${lab} 但沙箱没开（${SANDBOX_FLAG}=${v || "空"}）：lab 只能和 ${SANDBOX_FLAG}=1 一起用`]);
+  }
   if (v === "" || v === "0") return false;
   if (v === "1") return true;
   throw new SandboxViolation([`${SANDBOX_FLAG}=${v} 不认识：开沙箱写 1，关掉就不设`]);
@@ -76,6 +84,11 @@ export function pathsOverlap(a: string, b: string): boolean {
 
 function denyPorts(env: Env): number[] {
   return (env[SANDBOX_DENY_PORTS_ENV] || "").split(",").map((s) => Number(s.trim())).filter((n) => Number.isInteger(n) && n > 0);
+}
+
+/** 生产端口 = 默认端口（调用方传 lib/bridge-url.ts 的 DEFAULT_BRIDGE_PORT）+ 生产改过的；清单可以缺，默认端口永远在 */
+function productionPorts(defaultPort: number, env: Env): number[] {
+  return [defaultPort, ...denyPorts(env)];
 }
 
 export function denyDirs(env: Env): string[] {
@@ -138,7 +151,7 @@ const SANDBOX_FORBIDDEN_ENTRIES = ["launcher.ts", "cron.ts", "setup.ts"];
  * 两者不一致说明环境拼错了）；入口是 launcher / cron / setup 也抛错；都安全才装出站闸门。
  * bridgeUrl 是惰性的：非沙箱进程不求值。
  */
-export function enforceSandboxProcess(c: DirCheck & { bridgeUrl: () => string; entry?: string }): void {
+export function enforceSandboxProcess(c: DirCheck & { bridgeUrl: () => string; defaultPort: number; entry?: string }): void {
   if (!isSandbox(c.env)) return;
   const problems = sandboxDirProblems(c);
   const entry = basename(c.entry ?? "");
@@ -147,7 +160,9 @@ export function enforceSandboxProcess(c: DirCheck & { bridgeUrl: () => string; e
   const envPort = (c.env.BRIDGE_PORT || "").trim();
   if (envPort && Number(envPort) !== port) problems.push(`BRIDGE_PORT=${envPort} 与 BRIDGE_URL 的端口 ${port} 不一致`);
   try {
-    problems.push(...labConfigProblems(c.env, port, denyPorts(c.env)));
+    problems.push(...labConfigProblems(c.env, port, productionPorts(c.defaultPort, c.env)));
+    // lab 多开了端口：生产改过的端口清单（scripts/sandbox.ts 从生产配置里读出来）缺了就不知道还要避开哪些，不启动
+    if (isLab(c.env) && !denyPorts(c.env).length) problems.push(`lab 模式要带生产端口清单 ${SANDBOX_DENY_PORTS_ENV}（用 scripts/sandbox.ts 起）`);
   } catch (e) {
     problems.push((e as Error).message); // lab 开关写法不认识：同沙箱开关，报错不启动
   }
@@ -190,10 +205,10 @@ export function sandboxBridgeEnvProblems(defaultPort: number, env: Env = process
   const out: string[] = [];
   const port = Number(env.BRIDGE_PORT);
   if (!Number.isInteger(port) || port <= 0 || port >= 65536) out.push(`BRIDGE_PORT 没设或不合法：会回落到生产默认端口 ${defaultPort}`);
-  else if ([defaultPort, ...denyPorts(env)].includes(port)) out.push(`BRIDGE_PORT=${port} 是生产端口`);
+  else if (productionPorts(defaultPort, env).includes(port)) out.push(`BRIDGE_PORT=${port} 是生产端口`);
   for (const k of SANDBOX_FORBIDDEN_ENV) {
     const v = (env[k] || "").trim();
-    if (!v || labAllowsEnv(k, v, port, env)) continue;
+    if (!v || labAllowsEnv(k, v, port, productionPorts(defaultPort, env), env)) continue;
     out.push(`环境里有 ${k}（沙箱不连 Discord / 中继 / peer / 推送，也不多开端口；lab 模式只认 lab 中继与 lab 端口）`);
   }
   const bind = (env.BRIDGE_BIND || "127.0.0.1").trim();
@@ -201,11 +216,15 @@ export function sandboxBridgeEnvProblems(defaultPort: number, env: Env = process
   return out;
 }
 
-/** lab 模式下这两个键可以有，但只能指向 lab 自己：RELAY_URL = lab 中继，PEER_INGRESS_PORT = lab 端口之一（不是 bridge 端口） */
-function labAllowsEnv(key: string, value: string, bridgePort: number, env: Env): boolean {
+/**
+ * lab 模式下这两个键可以有，但只能指向 lab 自己：RELAY_URL = lab 中继，PEER_INGRESS_PORT = lab 端口之一（不是 bridge 端口）；
+ * 两者都不许落在生产端口上（进程总闸已经查过 lab 端口，这里不依赖它再查一遍）
+ */
+function labAllowsEnv(key: string, value: string, bridgePort: number, prod: number[], env: Env): boolean {
   if (!isLab(env)) return false;
-  if (key === "RELAY_URL") return labRelayUrlProblem(value, env) === null;
-  if (key === "PEER_INGRESS_PORT") return Number(value) !== bridgePort && labInstancePortsOf(env).includes(Number(value));
+  if (key === "RELAY_URL") return labRelayUrlProblem(value, env) === null && !prod.some((p) => labRelayUrl(env) === `ws://127.0.0.1:${p}`);
+  const n = Number(value);
+  if (key === "PEER_INGRESS_PORT") return n !== bridgePort && !prod.includes(n) && labInstancePortsOf(env).includes(n);
   return false;
 }
 

@@ -150,7 +150,7 @@ describe("生产改过的端口 / 目录", () => {
     const c = {
       env: { ...ON, CLAUDESTRA_STATE_DIR: "x", CLAUDESTRA_RUNTIME_DIR: "y", BRIDGE_PORT: "23901" },
       stateDir: "/tmp/sbx/state", runtimeDir: "/tmp/sbx/run", defaultStateDir: "/Users/x/.cs", defaultRuntimeDir: "/tmp/co",
-      bridgeUrl: () => "ws://localhost:23902",
+      bridgeUrl: () => "ws://localhost:23902", defaultPort: P,
     };
     expect(() => enforceSandboxProcess(c)).toThrow("不一致");
   });
