@@ -38,7 +38,8 @@ Every bypass agent is already an unrestricted shell on this machine, so **delibe
      - `submit_verdict(VerdictWire)` writes through `ledger submit-verdict`, which re-checks every rule on the write connection (`lib/review-verdict.ts`):
        - the order is the caller's current one, the head equals the order's head, and the reviewer is not the author;
        - p0 / p1 / p2 counts match the findings, and the report is a non-empty file under `ledger/reviews/`;
-       - session and family must equal the registry's current values.
+       - session and family must equal the registry's current values;
+       - the call must carry a one-shot ticket the bridge issued after the identity gate (`lib/verdict-ticket.ts`), so running the subcommand from a shell writes nothing.
 
      It never moves the stage. The same verdict retried is a no-op; a different second verdict is refused.
 

@@ -15,6 +15,7 @@ import type { LedgerRun } from "../src/lib/order-ledger-exit.js";
 import type { VerifiedCall } from "../src/lib/order-tool-route.js";
 import { isOrderTool } from "../src/lib/order-tools.js";
 import { reviewsDir } from "../src/lib/review-order.js";
+import { issueVerdictTicket } from "../src/lib/verdict-ticket.js";
 import { resolveActor } from "../src/manager/ledger-identity.js";
 import { runLedger } from "../src/manager/ledger.js";
 
@@ -92,6 +93,18 @@ describe("审查员工具走完整管道", () => {
     expect(await handlers().submit_verdict!({ ...Y, sessionId: "stale" }, wire())).toMatchObject({ ok: false, code: "forbidden" });
     expect(await handlers().submit_verdict!({ ...Y, family: "claude-code" }, wire())).toMatchObject({ ok: false, code: "forbidden" });
     expect(reviews()).toEqual([]);
+  });
+
+  test("绕过工具在 shell 里直接跑 ledger submit-verdict（没有 / 重放 / 别人的票据）：拒，不记", async () => {
+    const w = JSON.stringify(wire());
+    const direct = ["ledger", "submit-verdict", "T60:review:r1", `--wire=${w}`, "--session=sy", "--family=codex"];
+    expect(await run(direct, "ch-y")).toMatchObject({ ok: false, code: "forbidden" });
+    let seen: string[] = [];
+    await reviewToolHandlers(async (args, ch) => ((seen = args), run(args, ch)), { get: () => db }).submit_verdict!(Y, wire());
+    expect(await run(seen, "ch-y")).toMatchObject({ ok: false, code: "forbidden" }); // 票据文件已被第一次读走
+    const forged = issueVerdictTicket("agent-x", w);
+    expect(await run([...direct, `--ticket-file=${forged.file}`, `--ticket=${forged.proof}`], "ch-y")).toMatchObject({ ok: false, code: "forbidden" });
+    expect(reviews().length).toBe(1);
   });
 
   test("不是本步骤审查员 / 自审：manager 重算后拒", async () => {
