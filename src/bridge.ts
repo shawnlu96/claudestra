@@ -90,6 +90,7 @@ import {
 import { apiErrorResponse } from "./bridge/api-respond.js";
 // clear 轮转的快照 diff / master watcher / 会话轮转自愈用（D5-12：不再为此反向依赖 api-routes）
 import { listSessionIdsForCwd, latestSessionIdForCwd } from "./bridge/session-ids.js";
+import { createClearRotation } from "./bridge/clear-rotation.js";
 import {
   corsHeadersFor,
   serveStaticSite, appConfigResponse, startLegacyWebPort, drainingFetch, MAX_HTTP_BODY,
@@ -1591,6 +1592,16 @@ discord.on("channelDelete", async (channel) => {
 // Interaction 处理（按钮、菜单、Slash Commands）→ bridge/discord-interactions.ts
 // ============================================================
 
+// /clear 后的会话轮转收尾（运行时在模块里按频道推导，bridge/clear-rotation.ts）
+const scheduleClearRotation = createClearRotation({
+  clientRuntime: (cid) => clients.get(cid)?.runtime,
+  runManager,
+  rewatch: (name, cwd, sid, cid, runtime) => {
+    stopWatchingByChannel(cid);
+    startWatching(name, cwd, sid, cid, discord, { runtime });
+  },
+});
+
 registerInteractionHandlers(discord, {
   allowedDiscordIds,
   clients,
@@ -3038,55 +3049,6 @@ const STATIC_DIR = process.env.BRIDGE_STATIC_DIR || "";
 // 路由 + ws 升级要此 token,/api/v1 走自己的 Bearer。未设 = 非回环控制访问
 // 全拒(fail-closed,当前合法流量 100% 回环,零影响)。
 const CONTROL_TOKEN = process.env.BRIDGE_CONTROL_TOKEN || "";
-
-/**
- * clear 后的会话轮转收尾（后台异步）。
- *
- * TUI 里 /clear 会轮转 sessionId，但新 session 的 jsonl 往往要等**首条消息**
- * 才落盘——所以 clear 端点先返回 202，这里每 1.5s poll cwd 的 projects slug 目录。
- *
- * M2：同 cwd 可能有多个 agent，共享同一个 projects slug 目录。光取「最新 jsonl」
- * 会把别的 agent 正在写的既有 session 误认成自己的新会话，串台并污染 registry。
- * 改为**快照 diff**：clear 前记录目录里已有的全部 sid（beforeSids），此后只认领
- * 快照里没有、且非 oldSid 的**新** sid（列表按 mtime 降序，取最新的那个）。再叠一层
- * ownedByOther（新 sid 恰好是别的 agent 官方 session 则跳过）兜双重巧合。命中后：
- *   manager set-session（归档旧会话 + registry 切换，保持 manager 唯一写者）
- *   -> stopWatchingByChannel + startWatching 重绑 jsonl-watcher（否则盯死文件，工具流断掉）。
- * 超时（2min，比如该 CC 版本 /clear 不轮转 session）则放弃，watcher 维持原样。
- */
-function scheduleClearRotation(
-  agentName: string, channelId: string, cwd: string, oldSid?: string, runtime?: string,
-) {
-  const deadline = Date.now() + 120_000;
-  const beforeSids = new Set(listSessionIdsForCwd(cwd, runtime)); // clear 前的会话快照
-  const tick = async () => {
-    try {
-      // 只认领快照外的新 sid（排除同 cwd 其他 agent 一直在写的既有 session）；
-      // 列表 mtime 降序，[0] 是最新出现的那个新会话。
-      const sid = listSessionIdsForCwd(cwd, runtime).find((s) => !beforeSids.has(s) && s !== oldSid);
-      if (sid) {
-        const listResult = await runManager("list");
-        const ownedByOther = ((listResult.agents || []) as any[]).some(
-          (a) => a.name !== agentName && a.sessionId === sid,
-        );
-        if (!ownedByOther) {
-          const r = await runManager("set-session", agentName, sid);
-          if (r?.ok) {
-            stopWatchingByChannel(channelId);
-            startWatching(agentName, cwd, sid, channelId, discord, { runtime: clients.get(channelId)?.runtime });
-            console.log(`🧹 clear 轮转完成 agent=${agentName} ${oldSid?.slice(0, 8) ?? "?"}->${sid.slice(0, 8)}`);
-          } else {
-            console.error(`🧹 clear 轮转 set-session 失败 agent=${agentName}:`, r?.error);
-          }
-          return;
-        }
-      }
-    } catch { /* 下一轮重试 */ }
-    if (Date.now() < deadline) setTimeout(tick, 1500);
-    else console.warn(`🧹 clear 轮转超时 agent=${agentName}（未见新 session jsonl，watcher 维持原 session）`);
-  };
-  setTimeout(tick, 1200);
-}
 
 /**
  * Stop 时的 session 轮转自愈（2026-07-23 用户报：temp 历史停在 7-15）。
