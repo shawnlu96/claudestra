@@ -41,6 +41,8 @@ export interface DagNode {
   estimate: string;
   /** 从哪一版原样继承来的；新加 / 改过的节点为 null */
   inheritedFrom: number | null;
+  /** 开工后要改的文件范围（调度器资源名，lib/ledger-scheduler.ts resourceKey）；开工时写进卡的 extra.fileGlobs，并行车道按它判重叠。旧版本没有 */
+  fileGlobs?: string[];
 }
 
 export interface DagVersion {

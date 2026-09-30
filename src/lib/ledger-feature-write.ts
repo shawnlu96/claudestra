@@ -9,6 +9,7 @@ import { isManager, mustTask, type WriteCtx, type WriteResult } from "./ledger-c
 import { DAG_REASON_KINDS, FEATURE_STATUSES, type FeatureStatus } from "./ledger-feature-schema.js";
 import { getDagVersion, getFeature, PLANNED, type DagNode, type DagVersion, type Feature } from "./ledger-feature.js";
 import { ledgerOrigin } from "./ledger-origin.js";
+import { resourceKey } from "./ledger-scheduler.js";
 import type { LedgerEvent, LedgerTask } from "./ledger-stages.js";
 import { LedgerError } from "./ledger-store.js";
 import { insertEvent, replay, tx } from "./ledger-tx.js";
@@ -17,6 +18,7 @@ const FEATURE_TITLE_MAX = 60;
 const NODE_LINE_MAX = 60;
 const NODE_ESTIMATE_MAX = 20;
 const DAG_NODES_MAX = 200;
+const NODE_GLOBS_MAX = 50;
 const SLUG = /^[A-Za-z0-9][A-Za-z0-9_-]{0,39}$/;
 const NODE_KEY = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,39}$/;
 
@@ -143,7 +145,7 @@ export function nodeTask(db: Database, feature: Pick<Feature, "id" | "project">,
 
 /** 校验一个节点输入并补成快照：status 取此刻的 stage，没卡为 planned */
 function buildNode(db: Database, feature: Pick<Feature, "id" | "project">, x: unknown): DagNode {
-  if (!x || typeof x !== "object" || Array.isArray(x)) throw new LedgerError("invalid", "每个节点要是对象 {key?, taskId?, oneLine?, deps?, estimate?}");
+  if (!x || typeof x !== "object" || Array.isArray(x)) throw new LedgerError("invalid", "每个节点要是对象 {key?, taskId?, oneLine?, deps?, estimate?, fileGlobs?}");
   const n = x as Record<string, unknown>;
   const key = n.key ?? n.taskId;
   if (typeof key !== "string" || !NODE_KEY.test(key)) throw new LedgerError("invalid", "节点要有 key（字母数字开头、≤40 位；有 taskId 时缺省取它）");
@@ -151,7 +153,19 @@ function buildNode(db: Database, feature: Pick<Feature, "id" | "project">, x: un
   if (n.deps !== undefined && !(Array.isArray(n.deps) && n.deps.every((d) => typeof d === "string"))) throw new LedgerError("invalid", `节点 ${key} 的 deps 要是字符串数组`);
   const oneLine = n.oneLine === undefined && task ? task.title : line(n.oneLine, `节点 ${key} 的一句话`, NODE_LINE_MAX, true);
   const estimate = line(n.estimate, `节点 ${key} 的粗估`, NODE_ESTIMATE_MAX, false);
-  return { key, taskId: task?.id ?? null, oneLine, deps: [...new Set((n.deps as string[] | undefined) ?? [])], status: task?.stage ?? PLANNED, estimate, inheritedFrom: null };
+  const globs = nodeGlobs(key, n.fileGlobs);
+  return { key, taskId: task?.id ?? null, oneLine, deps: [...new Set((n.deps as string[] | undefined) ?? [])], status: task?.stage ?? PLANNED, estimate, inheritedFrom: null,
+    ...(globs ? { fileGlobs: globs } : {}) };
+}
+
+/** 文件范围：不带 = 旧写法照收（CLI 兼容）；带了就要非空、每项都是调度器认的资源名，去重排序（sameNode 按集合比） */
+function nodeGlobs(key: string, raw: unknown): string[] | undefined {
+  if (raw === undefined) return undefined;
+  if (!Array.isArray(raw) || raw.length === 0 || !raw.every((g) => typeof g === "string")) throw new LedgerError("invalid", `节点 ${key} 的 fileGlobs 要是非空字符串数组`);
+  if (raw.length > NODE_GLOBS_MAX) throw new LedgerError("invalid", `节点 ${key} 的 fileGlobs 最多 ${NODE_GLOBS_MAX} 项`);
+  const bad = raw.find((g) => resourceKey(g) === null);
+  if (bad !== undefined) throw new LedgerError("invalid", `节点 ${key} 的 fileGlobs 里 ${JSON.stringify(bad).slice(0, 80)} 不是合法的文件范围（相对路径 + *，不含 .. 与 //）`);
+  return [...new Set(raw as string[])].sort();
 }
 
 /** 整版校验：key 唯一、一张卡只进一个节点、依赖只指向同版节点、不许自环 / 成环 */

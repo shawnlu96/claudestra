@@ -73,7 +73,7 @@ export const FEATURE_CMDS: Record<string, CommandSpec> = {
   "feature-set": { valued: ["rev", "title", "words", "status", "project", "dedup"], usage: "feature-set <feature> --rev <n> [--title] [--words] [--status]", run: featureSet },
   "dag-init": {
     valued: ["rev", "nodes", "reason", "project", "dedup"],
-    usage: "dag-init <feature> --rev <n> --nodes '<[{key?,taskId?,oneLine?,deps?,estimate?}]>' [--reason <原文>]（只建 v1）",
+    usage: "dag-init <feature> --rev <n> --nodes '<[{key?,taskId?,oneLine?,deps?,estimate?,fileGlobs?}]>' [--reason <原文>]（只建 v1）",
     run: dagInit,
   },
   "feature-show": { valued: ["project"], usage: "feature-show <feature>", run: featureShow },
