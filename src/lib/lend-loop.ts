@@ -9,15 +9,15 @@ import { effectiveLend, type LendContact } from "./lend-policy.js";
 import type { LendEntry, LendRead } from "./lend-config.js";
 import { advance, getMeta, liveOrders, openSlots, ordersToday, patchOrder, recordAsked, setMeta, unsettledOrders, LEASED_STATES, type LendRow } from "./lend-journal.js";
 import { askParams, claimOrder, claimProblem, driveLeased, settleOrder, type LendDeps } from "./lend-drive.js";
+import { roleOfStep } from "./lend-git.js";
 import { lendRequest, peerLendProblem, proxyVarsIn, type PolledOrder } from "./lend-remote.js";
 import type { HttpPeer } from "./peers.js";
 import type { ProjectDef } from "./projects.js";
 import { SchedulerStopped } from "./scheduler-maintenance.js";
 
 export const POLL_MS = 30_000;
-/** v1 只起 Codex 审查 worker（验收线「可接受：只支持 Codex 审查」）：声明里的 claude 位不报给 A，A 也就不会派 Claude 单来 */
+/** v1 只起 Codex worker（审查与 i28-R6 的写单都是）：声明里的 claude 位不报给 A，A 也就不会派 Claude 单来 */
 const FAMILY = "codex";
-const ROLE = "review";
 
 export interface LoopDeps extends LendDeps {
   readLend(): Promise<LendRead>;
@@ -85,9 +85,10 @@ async function claimIfStill(row: LendRow, mode: LendEntry["confirm"], d: LoopDep
   await claimOrder(row, d);
 }
 
-/** 挂单摘要本地先过一遍：家族、角色、白名单、今日额度、在跑位（含等 owner 批的） */
+/** 挂单摘要本地先过一遍：家族、角色（审查单要 review，开工 / 修复单要 write）、白名单、今日额度、在跑位（含等 owner 批的） */
 function wanted(o: PolledOrder, entry: LendEntry, d: LoopDeps): boolean {
-  if (o.family !== FAMILY || o.step !== ROLE || !entry.roles.includes(ROLE) || !entry.repos.includes(o.repo)) return false;
+  const role = roleOfStep(o.step);
+  if (o.family !== FAMILY || !role || !entry.roles.includes(role) || !entry.repos.includes(o.repo)) return false;
   if (ordersToday(d.db, entry.peer, d.now()) >= entry.quota.ordersPerDay) return false;
   return openSlots(d.db, entry.peer, FAMILY) < (entry.families[FAMILY] ?? 0);
 }
@@ -96,7 +97,7 @@ async function pollPeer(entry: LendEntry, d: LoopDeps, status: LendStatus["peers
   const slots = entry.families[FAMILY] ?? 0;
   const left = Math.max(0, entry.quota.ordersPerDay - ordersToday(d.db, entry.peer, d.now()));
   const r = await lendRequest(d.call, entry.peer, "poll", {
-    capacity: { families: { [FAMILY]: slots }, busy: { [FAMILY]: busyOf(d, entry.peer) }, roles: entry.roles.filter((x) => x === ROLE), repos: entry.repos, ordersLeftToday: left },
+    capacity: { families: { [FAMILY]: slots }, busy: { [FAMILY]: busyOf(d, entry.peer) }, roles: entry.roles, repos: entry.repos, ordersLeftToday: left },
   });
   status.lastPollAt = d.now();
   status.lastError = r.ok ? null : `${r.code} ${r.error}`.slice(0, 200);

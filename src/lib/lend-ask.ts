@@ -56,6 +56,10 @@ const bindOf = (p: LendAskParams) => ({ action: LEND_ASK_ACTION, params: p, appr
 const SHELL_WARNING = "这会让一个外来任务在你的用户下跑一个 shell：它和你是同一个系统用户，能读你家目录里的文件、能用你机器上的 git / SSH 凭据。";
 const prOf = (p: LendAskParams) => (p.pr ? `#${p.pr}（https://github.com/${p.repo}/pull/${p.pr}）` : "（无 PR，按 head 审）");
 const familyOf = (p: LendAskParams) => (p.family === "codex" ? "Codex" : p.family === "claude" ? "Claude" : p.family);
+/** 这一单要对方做什么：审查，还是（i28-R6）写代码 */
+const verbOf = (p: LendAskParams) => (p.step === "write" ? "写代码（开工单）：" : p.step === "fix" ? "改代码（修复单）：" : "审 ");
+const WRITE_WARNING = "这是写代码的单：worker 会在 clone 里提交代码，出借服务用你自己的 GitHub 登录把它推到对方仓库的 lend/ 分支并开 PR。";
+const warnings = (p: LendAskParams): string[] => [SHELL_WARNING, ...(p.step === "write" || p.step === "fix" ? [WRITE_WARNING] : [])];
 
 /**
  * 预先授权（lend.json confirm auto，且在 until 之前）生效时不开 ask，但每单仍告诉 owner 一声（specRev 2）：
@@ -63,8 +67,8 @@ const familyOf = (p: LendAskParams) => (p.family === "codex" ? "Codex" : p.famil
  */
 export function lendInformText(p: LendAskParams): string {
   return [
-    `出借通知（预先授权）：${p.peer} 借一个 ${familyOf(p)} 位审 ${p.repo}${p.pr ? `#${p.pr}` : ""}，马上开始。`,
-    SHELL_WARNING,
+    `出借通知（预先授权）：${p.peer} 借一个 ${familyOf(p)} 位${verbOf(p)}${p.repo}${p.pr ? `#${p.pr}` : ""}，马上开始。`,
+    ...warnings(p),
     `仓库：${p.repo}`,
     `PR：${prOf(p)}`,
     `head：${p.head}`,
@@ -80,10 +84,10 @@ export function lendAskInput(p: LendAskParams): NewAsk {
   const family = familyOf(p);
   return {
     project: MASTER_PROJECT, source: "system", kind: "authorize", fromAgent: LEND_ASKER, createdBy: "system:scheduler", blocking: false,
-    title: `出借确认：${p.peer} 想借一个 ${family} 位审 ${p.repo}${p.pr ? `#${p.pr}` : ""}`,
+    title: `出借确认：${p.peer} 想借一个 ${family} 位${verbOf(p)}${p.repo}${p.pr ? `#${p.pr}` : ""}`,
     context: `lend.json 对 ${p.peer} 设了逐单确认`,
     body: [
-      `${SHELL_WARNING}只在你信任对方和这个仓库时批准。`,
+      `${warnings(p).join("")}只在你信任对方和这个仓库时批准。`,
       `对方：${p.peer}${p.fp ? `（实例指纹 ${p.fp}）` : ""}`,
       `仓库：${p.repo}`,
       `PR：${pr}`,

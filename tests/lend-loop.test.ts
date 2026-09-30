@@ -57,6 +57,8 @@ function harness(opts: { entry?: Partial<LendEntry>; peer?: Partial<HttpPeer>; e
     },
     clone: async (i) => ({ ok: true, dir: `/lend/work/${i.orderId}` }),
     removeDir: (id) => void log.removed.push(id),
+    selfFp: () => FP, identity: () => ({ name: "lender", email: "lender@example.invalid" }),
+    push: { probe: async () => ({ ok: true }), work: async () => ({ ok: true }), pr: async (p) => ({ ok: true, pr: p.pr }) },
     verifyReceipt: async () => true,
     writeReceipt: async (row) => void log.receipts.push(row),
     worker: {

@@ -17,7 +17,7 @@ import { SCHEDULER_COLUMNS, SCHEDULER_INDEXES, SCHEDULER_SCHEMA, SCHEDULER_SESSI
 import { missingSchema, runMigrations, schemaVersion, type SchemaSpec } from "./sqlite-migrate.js";
 import { backupBeforeMigrate } from "./ledger-backup.js";
 import { DAG_REWRITE_SCHEMA, FEATURE_COLUMNS, FEATURE_INDEXES, FEATURE_SCHEMA, FEATURE_TABLES } from "./ledger-feature-schema.js";
-import { LEND_COLUMNS, LEND_INDEXES, LEND_SCHEMA, LEND_TABLES } from "./ledger-lend-schema.js";
+import { LEND_COLUMNS, LEND_INDEXES, LEND_SCHEMA, LEND_TABLES, LEND_WRITE_SCHEMA } from "./ledger-lend-schema.js";
 import { DEPLOY_COLUMNS, DEPLOY_INDEXES, DEPLOY_SCHEMA, DEPLOY_TABLES } from "./ledger-deploy-schema.js";
 export { schemaVersion };
 
@@ -137,7 +137,7 @@ function migrateDeps(db: Database): void {
 /** 下标 i 把库从版本 i 升到 i+1；新迁移只往末尾追加（并行分支后合的一方排到后面即可，常量都由下标算）。执行规矩见 sqlite-migrate.ts */
 export const LEDGER_MIGRATIONS: SchemaSpec["migrations"] = [SCHEMA_V1, migrateAsks, migrateDeps, SCHEMA_AUDIT, migrateAsksV2,
   STEPS_SCHEMA, SCHEDULER_SCHEMA, SCHEDULER_SESSIONS_SCHEMA, SCHEDULER_MERGES_SCHEMA, FEATURE_SCHEMA, DAG_REWRITE_SCHEMA, LEND_SCHEMA,
-  DEPLOY_SCHEMA];
+  DEPLOY_SCHEMA, LEND_WRITE_SCHEMA];
 /** PRAGMA user_version 的最新值 */
 export const LEDGER_SCHEMA_VERSION = LEDGER_MIGRATIONS.length;
 /** 建出 audit_findings 的那一步之后的版本号（单测拿它 - 1 造「巡检之前」的库） */

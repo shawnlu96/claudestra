@@ -11,10 +11,10 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { instanceKeySync, signPurpose } from "../src/lib/instance-key.js";
 import type { BorrowEntry } from "../src/lib/lend-config.js";
-import { listLendOrders } from "../src/lib/ledger-lend.js";
+import { listLendOrders, offerLendCore, withdrawPooledLend } from "../src/lib/ledger-lend.js";
 import { RECEIPT_PURPOSE } from "../src/lib/ledger-lend-result.js";
 import { listSteps } from "../src/lib/ledger-steps.js";
-import { closeLedger, getTask, openLedger } from "../src/lib/ledger-store.js";
+import { closeLedger, getTask, listEvents, openLedger } from "../src/lib/ledger-store.js";
 import { assignStep } from "../src/lib/ledger-steps-write.js";
 import { createTask, deliver, moveStage, setMeta } from "../src/lib/ledger-write.js";
 import { runLedger } from "../src/manager/ledger.js";
@@ -109,7 +109,8 @@ describe("poll / claim", () => {
     expect((await poll({ repos: ["x/y"] })).orders).toEqual([]);
     expect((await poll({ busy: { codex: 2 } })).orders).toEqual([]);
     expect((await poll({ ordersLeftToday: 0 })).orders).toEqual([]);
-    refusedWith(await poll({ roles: ["write"] }), "invalid");
+    expect((await poll({ roles: ["write"] })).orders).toEqual([]); // i28-R6：write 是合法角色，但审查单只给报了 review 的
+    refusedWith(await poll({ roles: ["admin"] }), "invalid");
   });
 
   test("claim returns the order, its text hash and a lease, binds the review step; the holder's re-claim is idempotent", async () => {
@@ -445,5 +446,42 @@ describe("key pin log (lend-pin)", () => {
     expect(await pin("mate", "agent-pm")).toMatchObject({ ok: false, code: "forbidden" });
     expect(await pin("mate", "owner", "not-a-fp")).toMatchObject({ ok: false, code: "invalid" });
     expect(notes()).toHaveLength(1);
+  });
+});
+
+describe("调度器入口（i28-R9 用）", () => {
+  const input = () => ({ taskId: "T9", peer: "mate", family: "codex" as const, repo: REPO, pr: 12, spec: "规格原文", borrow: borrow[0]! });
+  const sched = () => ({ actor: "scheduler", now });
+
+  test("offerLendCore：自动流程的卡、非 PM 身份也能挂（createdBy = 调用方）；borrow 与未结单核对还在", () => {
+    db.run(`INSERT INTO task_workflows (taskId, project, template, templateVersion, mode, authorFamily, fallback, specRev, createdAt, updatedAt)
+      VALUES ('T9', '${P}', 'code', 2, 'auto', 'claude', '退回人工', 1, 1, 1)`);
+    expect(() => offerLendCore(db, sched(), { ...input(), borrow: null })).toThrow(/borrow/);
+    const o = offerLendCore(db, sched(), input());
+    expect(o).toMatchObject({ status: "pooled", step: "review", createdBy: "scheduler", head: H });
+    expect(listEvents(db, { target: "T9" }).at(-1)).toMatchObject({ actor: "scheduler", kind: "note", data: { lend: { op: "offer", orderId: o.orderId } } });
+    expect(() => offerLendCore(db, sched(), input())).toThrow(/未结的出借单/);
+  });
+
+  test("offerLend 仍只认 PM、只借手动卡", async () => {
+    db.run(`INSERT INTO task_workflows (taskId, project, template, templateVersion, mode, authorFamily, fallback, specRev, createdAt, updatedAt)
+      VALUES ('T9', '${P}', 'code', 2, 'auto', 'claude', '退回人工', 1, 1, 1)`);
+    expect(await offer()).toMatchObject({ ok: false, code: "invalid" });
+    expect(await run(["lend-offer", "T9", "--peer", "mate", "--repo", REPO], "agent-x")).toMatchObject({ ok: false, code: "forbidden" });
+    expect(listLendOrders(db, "T9")).toEqual([]);
+  });
+
+  test("withdrawPooledLend：pooled 一次 CAS 撤掉、记 note；已被领的单原样返回、什么都不写；没有这一单报 not_found", async () => {
+    const a = offerLendCore(db, sched(), input());
+    const r = withdrawPooledLend(db, sched(), { orderId: a.orderId, reason: "超时没人领" });
+    expect(r).toMatchObject({ withdrawn: true, order: { status: "cancelled", reason: "超时没人领" } });
+    expect(listEvents(db, { target: "T9" }).at(-1)).toMatchObject({ data: { lend: { op: "cancel", from: "pooled", withdrawnBy: "scheduler" } } });
+    expect(withdrawPooledLend(db, sched(), { orderId: a.orderId, reason: "再撤" })).toMatchObject({ withdrawn: false, order: { status: "cancelled", reason: "超时没人领" } });
+    const b = offerLendCore(db, sched(), input());
+    expect(await claim(b.orderId)).toMatchObject({ ok: true });
+    const seq = listEvents(db, { target: "T9" }).length;
+    expect(withdrawPooledLend(db, sched(), { orderId: b.orderId, reason: "超时" })).toMatchObject({ withdrawn: false, order: { status: "claimed" } });
+    expect(listEvents(db, { target: "T9" })).toHaveLength(seq);
+    expect(() => withdrawPooledLend(db, sched(), { orderId: "lend:nope", reason: "x" })).toThrow(/没有出借单/);
   });
 });

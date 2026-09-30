@@ -3,12 +3,14 @@
  * 只收 journal 里正在跑（started）的单，且调用方要对得上这张单：cwd 在这张单的工作副本里、这张单的 agent 当前会话仍是 journal 记的那个、
  * 调用进程是这个 agent 窗口里的进程（沿 ppid 往上能走到窗口的 pane 进程）。同一个 OS 用户下这防的是误投（别的会话 / 别的目录交错了单），
  * 不防伪造（同 T85 威胁模型）。结论先落 journal（result_pending + sha256），转发给 A 由调度服务做；同一份正文重交是幂等的，换了正文拒。
- * tests/lend-submit.test.ts。
+ * 写单（i28-R6）交的是「工作副本当前 HEAD + 一行摘要 + 自查」：HEAD 由这里读 journal 记的那个目录（不收参数），必须是新提交；
+ * 落成 journal 的 work，推送、开 PR、拼交付正文都由调度服务做（lend-drive.ts publishWork）。tests/lend-submit.test.ts、tests/lend-write.test.ts。
  */
 import type { Database } from "bun:sqlite";
 import { createHash } from "node:crypto";
 import { realpathSync } from "node:fs";
 import { relative, isAbsolute } from "node:path";
+import { isWriteStep } from "./lend-git.js";
 import { advance, getOrder, orderOf, type LendRow } from "./lend-journal.js";
 import { parseVerdictWire, type VerdictWire } from "./order-wire.js";
 
@@ -22,6 +24,9 @@ export interface SubmitInput {
   findings: unknown;
   report: string;
 }
+
+/** 写单交活：一行摘要与自查（都进 A 的 DeliverWire：摘要 ≤ 500 字节单行，自查 ≤ 4000 字节） */
+export interface WorkInput { summary: string; selfCheck: string }
 
 /** POST /api/v1/lend/result 的请求体，整份存进 journal：A 按原始字节的 sha256 做幂等，重发必须逐字节一样 */
 interface LendResultPayload {
@@ -42,6 +47,8 @@ export interface SubmitterDeps {
   panePid: (agent: string) => Promise<number | null>;
   /** pid 的祖先链（不含自己），由近到远 */
   ancestors: (pid: number) => Promise<number[]>;
+  /** 这个目录里 git 的当前 HEAD（写单用）；读不到 = null */
+  headOf?: (dir: string) => Promise<string | null>;
 }
 
 const realOr = (p: string): string => {
@@ -87,10 +94,46 @@ export const payloadSha = (raw: string): string => createHash("sha256").update(r
 
 export type SubmitOutcome = { ok: true; duplicate: boolean; sha: string } | { ok: false; error: string };
 
+const SUMMARY_MAX = 500;
+const SELF_CHECK_MAX = 4000;
+const BAD_LINE = /[\p{Cc}\u2028\u2029]/u;
+const BAD_MULTI = /[\u0000-\u0008\u000b-\u001f\u007f\u2028\u2029]/;
+
+function workProblem(w: WorkInput): string | null {
+  const summary = w.summary.trim();
+  if (!summary || BAD_LINE.test(summary) || Buffer.byteLength(summary) > SUMMARY_MAX) return `摘要要是一行、非空、不超过 ${SUMMARY_MAX} 字节`;
+  if (!w.selfCheck.trim() || BAD_MULTI.test(w.selfCheck) || Buffer.byteLength(w.selfCheck) > SELF_CHECK_MAX) return `自查要非空、不超过 ${SELF_CHECK_MAX} 字节、不含控制字符`;
+  return null;
+}
+
+/** 写单：核调用方 → 读工作副本 HEAD（必须是新提交）→ started 推到 result_pending 带 work；同一份（head + 摘要 + 自查）重交幂等 */
+export async function submitLendWork(db: Database, orderId: string, input: WorkInput, d: SubmitterDeps, now = Date.now()): Promise<SubmitOutcome> {
+  const row = getOrder(db, orderId);
+  if (!row) return { ok: false, error: `本机没有出借单 ${orderId}` };
+  if (!isWriteStep(String(orderOf(row)?.step ?? "")) || !row.wire?.write) return { ok: false, error: `${orderId} 不是开工 / 修复单，交结论用 --verdict` };
+  if (row.state !== "started" && row.state !== "result_pending") return { ok: false, error: `${orderId} 当前是 ${row.state}，不收交付` };
+  const who = await submitterProblem(row, d);
+  if (who) return { ok: false, error: who };
+  const bad = workProblem(input);
+  if (bad) return { ok: false, error: bad };
+  const head = await d.headOf?.(row.dir!);
+  if (!head || !/^[0-9a-f]{40}$/.test(head)) return { ok: false, error: "读不到工作副本的 HEAD（先 git commit）" };
+  if (head === String(orderOf(row)?.head ?? "")) return { ok: false, error: "HEAD 还在订单起点上：先把改动 git commit 到当前分支" };
+  const work = { head, summary: input.summary.trim(), selfCheck: input.selfCheck };
+  const sha = payloadSha(JSON.stringify(work));
+  if (row.state === "result_pending") {
+    return row.work && payloadSha(JSON.stringify(row.work)) === sha ? { ok: true, duplicate: true, sha }
+      : { ok: false, error: `${orderId} 已经交过一份不同的交付（或 HEAD 又动了），不能改` };
+  }
+  advance(db, orderId, "started", "result_pending", { work }, now);
+  return { ok: true, duplicate: false, sha };
+}
+
 /** 核调用方 → 建 payload → started 推到 result_pending（CAS）；已交过同一份 = 幂等成功，换了内容 = 拒 */
 export async function submitLendResult(db: Database, orderId: string, input: SubmitInput, d: SubmitterDeps, now = Date.now()): Promise<SubmitOutcome> {
   const row = getOrder(db, orderId);
   if (!row) return { ok: false, error: `本机没有出借单 ${orderId}` };
+  if (isWriteStep(String(orderOf(row)?.step ?? ""))) return { ok: false, error: `${orderId} 是开工 / 修复单：提交后用 --summary-file / --self-check-file 交` };
   if (row.state !== "started" && row.state !== "result_pending") return { ok: false, error: `${orderId} 当前是 ${row.state}，不收结论` };
   const who = await submitterProblem(row, d);
   if (who) return { ok: false, error: who };

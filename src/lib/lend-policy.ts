@@ -78,12 +78,15 @@ function parseCount(raw: string | undefined, label: string, min: number, max: nu
   return n >= min && n <= max ? n : `${label} 要是 ${min}..${max} 的整数（收到 ${raw}）`;
 }
 
-/** v1 只做 review（写权限要 §4 的 fork PR 方案，还没做）；schema 里留着 write，CLI 先拒 */
+/**
+ * review = 审查单；write = 开工 / 修复单（i28-R6：出借方在借入方仓库的 lend/ 分支上写代码、推送、开 PR）。缺省只开 review，
+ * write 要明确写出来：它会用出借人自己的 GitHub 登录推送。
+ */
 function parseRoles(raw: string | undefined): LendRole[] | string {
   const roles = raw === undefined ? ["review"] : splitList(raw);
   if (roles.length === 0) return "--roles 不能为空";
-  const bad = roles.find((r) => r !== "review");
-  return bad ? `--roles 目前只支持 review（${bad === "write" ? "write 角色要等 fork PR 方案" : `不认识 ${bad}`}）` : (roles as LendRole[]);
+  const bad = roles.find((r) => r !== "review" && r !== "write");
+  return bad ? `--roles 只认 review / write（不认识 ${bad}）` : (roles as LendRole[]);
 }
 
 export interface LendSetInput {

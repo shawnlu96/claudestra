@@ -81,12 +81,14 @@ describe("校验", () => {
     expect(bad((f) => { f.borrow[0].maxOpen = 0; })).toContain("maxOpen");
     expect(bad((f) => { f.borrow[0].fp = "not-a-fp"; })).toContain("fp");
   });
-  test("CLI 输入：至少一个家族出位、仓库要是 owner/repo、write 角色先拒、until 要在未来", () => {
+  test("CLI 输入：至少一个家族出位、仓库要是 owner/repo、角色只认 review / write（缺省只开 review）、until 要在未来", () => {
     expect(lendOk({ families: { codex: "0" } })).toMatchObject({ ok: false });
     expect(lendOk({ families: { codex: "2x" } })).toMatchObject({ ok: false });
     expect(lendOk({ repos: undefined })).toMatchObject({ ok: false });
     expect(lendOk({ repos: "https://github.com/a/b" })).toMatchObject({ ok: false });
-    expect(lendOk({ roles: "review,write" })).toMatchObject({ ok: false });
+    expect(lendOk({ roles: "review,write" })).toMatchObject({ ok: true, entry: { roles: ["review", "write"] } }); // i28-R6 放开 write
+    expect(lendOk({ roles: undefined })).toMatchObject({ ok: true, entry: { roles: ["review"] } });
+    expect(lendOk({ roles: "review,admin" })).toMatchObject({ ok: false });
     expect(lendOk({ confirm: "auto" })).toMatchObject({ ok: false }); // 预先授权必须限时（specRev 2）
     expect(lendOk({ confirm: "auto", until: "2100-01-01T00:00:00Z" })).toMatchObject({ ok: true, entry: { confirm: "auto", until: "2100-01-01T00:00:00.000Z" } });
     expect(lendOk({ confirm: "yes" })).toMatchObject({ ok: false });
