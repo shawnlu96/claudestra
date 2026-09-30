@@ -247,3 +247,26 @@ export function settleIntent(db: Database, ctx: WriteCtx, input: { id: string; f
     return getIntent(db, input.id) as SchedulerIntent;
   });
 }
+
+/**
+ * PM brake on a code v3 auto card (restate-hold / restate-release). One transaction with the write-order check: a planIntent that
+ * lands first makes this refuse; one that lands after sees our event move the project seq and replans into the hold.
+ */
+export function recordRestateBrake(db: Database, ctx: WriteCtx, input: { taskId: string; op: "restate_hold" | "restate_released"; text: string }) {
+  return tx(db, () => {
+    const task = mustTask(db, input.taskId);
+    const workflow = getWorkflow(db, task.id);
+    if (workflow?.mode !== "auto" || workflow.templateVersion !== 3) {
+      throw new LedgerError("invalid", `${task.id} 不是 code v3 自动卡：v2 本来就等 restate-approve，人工卡不经调度器`);
+    }
+    if (!["spec", "restate", "build"].includes(task.stage)) throw new LedgerError("conflict", `${task.id} 已在 ${task.stage}，复述闸已过；要停请用 workflow-set --mode manual`);
+    // Any live write order (pending included: the tick may be sending it right now) means the brake can no longer stop it.
+    const order = db.query(`SELECT id, status FROM scheduler_intents WHERE taskId = ? AND node = 'write' AND action = 'dispatch'
+      AND specRev = ? AND status != 'cancelled' LIMIT 1`).get(task.id, task.specRev) as { id: string; status: string } | null;
+    if (order) throw new LedgerError("conflict", `开工单 ${order.id} 已${order.status === "pending" ? "在发出中" : "发出"}，拦不住了；要停请用 workflow-set --mode manual`);
+    const text = textOneLine(input.text, input.op === "restate_hold" ? "拦住原因" : "放行意见", 600);
+    const event = insertEvent(db, { actor: ctx.actor, now: ctx.now ?? Date.now() }, {
+      project: task.project, target: task.id, kind: "decision", text, data: { op: input.op, specRev: task.specRev } }, true);
+    return { event };
+  });
+}
