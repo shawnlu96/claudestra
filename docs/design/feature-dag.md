@@ -1,6 +1,6 @@
 # T84 feature + 子 DAG 版本
 
-状态：阶段 1 L1（T84：结构、写入口、只读投影）与 L2（T89：重写、审批、绑卡、diff）已实现。L3 旧卡迁移、L4 视图读接口各开一张卡，照这份稿实现。
+状态：阶段 1 L1（T84：结构、写入口、只读投影）、L2（T89：重写、审批、绑卡、diff）与 L3（T90：旧卡迁移命令，见文末）已实现。L4 视图读接口另开一张卡，照这份稿实现。
 
 ## 两层结构
 
@@ -109,5 +109,14 @@
 
 ## 以后
 
-- L3 把现有卡按 owner 叫得出的 feature 归组，每组 dag-init 一次。
 - L4 给看板加读接口（按 feature 列节点与现读状态）。
+
+## L3 旧卡迁移（`ledger feature-migrate`，`src/lib/ledger-feature-migrate.ts`）
+
+`ledger feature-migrate --map <映射表.json> [--dry-run [--out <报告.md>]]`。映射表：`{project, features: [{slug, title, words?, cards}], unassigned?, unsure?: {卡: 说明}}`，同一张卡只能出现一次。
+
+- 卡按此刻的 stage 分四类：verified / done → 已完成，cancelled → 已取消，restate / build / review / fix / merge / live → 进行中，spec → 待排；blocked 按 stageBefore 算。
+- 每个 feature 的 v1 走 `dag-init`：节点 = 进行中的卡 + 它们在同一 feature 里的已完成直接前驱，依赖只取两端都进图的 blocks 边；没进行中的卡就不建 DAG。其余卡只挂 featureId（`assignFeature`，与 dag-init 挂卡同形：卡 rev + 1、追加一条 task 事件，feature 上一条 `assign` 事件）。阶段、依赖边、旧事件不动。
+- 幂等：feature 已在就复用、已有版本不再 dag-init（新开工的卡只挂 featureId，进图走 dag-rewrite）、卡已挂同一个跳过；卡挂着别的 feature 或标题被别的 feature 占了 = 冲突，整批不写。
+- 正式迁移：有东西要写时先 `VACUUM INTO backups/ledger.sqlite.pre-feature-migrate-<毫秒时间>-<映射表摘要>-<随机段>.bak`（每次尝试新备一份、不复用同名旧备份；内存库、备份失败都不迁移），再在一个 IMMEDIATE 事务里重新规划并写入，任何一步失败整批回滚。只能 PM / master / owner。
+- `--dry-run` 只读（只读连接 + query_only，认主守卫按读算）；阶段没到 verified / done 的卡用 gh 查 PR（没有 pr 字段按分支查），已合并的标「阶段落后」，不改阶段。`--out` 不能落到库、它的 -wal / -shm / -journal、库的硬链或任何已有的 SQLite 文件上（软链与软链目录按真实路径判），写法是临时文件再 rename。报告列每个 feature 的四类，外加未归类、归类没把握、阶段落后、没进图的依赖边、全部卡已完成的 feature（状态仍填 active，标不标 done 由 owner 定）、冲突。
