@@ -15,7 +15,7 @@ import {
 } from "../src/lib/restart-result.js";
 import { managedFor } from "../src/lib/runtimes/index.js";
 import { archivedSessionCopies } from "../src/lib/session-archive.js";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 
 describe("restartFailedNames（D7-5：全量重启退出码 0 但部分失败）", () => {
@@ -204,31 +204,43 @@ describe("modelPinPlan / modelPinRefusal（model 命令只钉 in-session 运行�
   });
 });
 
-describe("restartLaunchPlan：从没对话过才新起，历史丢了就拒绝", () => {
+describe("restartLaunchPlan：只有确知从没对话过才新起，其余找不到 jsonl 一律拒绝", () => {
   const SID = "541b5edb-82ef-43b3-93b7-1cf71dfde4f1";
   const none = () => [];
-  test("会话落过盘 → resume；三条都成立（没 jsonl、notes 空、归档没有）→ 同一个 id 新起", () => {
-    expect(restartLaunchPlan({ hasSession: () => true }, { sessionId: SID, cwd: "/w", notes: "claude session: x" }, none)).toEqual({ mode: "resume" });
-    expect(restartLaunchPlan({ hasSession: () => false }, { sessionId: SID, cwd: "/w", notes: "" }, none)).toEqual({ mode: "new" });
+  const blank = { sessionId: SID, cwd: "/w", notes: "", firstTurnAt: null };
+  test("会话落过盘 → resume；create 写的 firstTurnAt=null、notes 空、归档没有 → 同一个 id 新起", () => {
+    expect(restartLaunchPlan({ hasSession: () => true }, { ...blank, firstTurnAt: "2026-09-30T00:00:00Z" }, none)).toEqual({ mode: "resume" });
+    expect(restartLaunchPlan({ hasSession: () => false }, blank, none)).toEqual({ mode: "new" });
   });
   test("运行时不实现 hasSession（Pi / Codex）或没有 sessionId → 照旧 resume", () => {
-    expect(restartLaunchPlan({}, { sessionId: SID, cwd: "/w" }, none)).toEqual({ mode: "resume" });
-    expect(restartLaunchPlan(managedFor("pi")!, { sessionId: SID, cwd: "/w" }, none)).toEqual({ mode: "resume" });
-    expect(restartLaunchPlan({ hasSession: () => false }, { cwd: "/w" }, none)).toEqual({ mode: "resume" });
+    expect(restartLaunchPlan({}, blank, none)).toEqual({ mode: "resume" });
+    expect(restartLaunchPlan(managedFor("pi")!, blank, none)).toEqual({ mode: "resume" });
+    expect(restartLaunchPlan({ hasSession: () => false }, { cwd: "/w", firstTurnAt: null }, none)).toEqual({ mode: "resume" });
   });
   test("jsonl 被清理、归档里还有一份 → 拒绝，给出拷回去的命令，绝不新起", () => {
-    const r = restartLaunchPlan({ hasSession: () => false }, { sessionId: SID, cwd: "/w/repo", notes: "" }, () => ["/a/agent-x/s.jsonl"]);
+    const r = restartLaunchPlan({ hasSession: () => false }, { ...blank, cwd: "/w/repo" }, () => ["/a/agent-x/s.jsonl"]);
     expect(r.mode).toBeUndefined();
     expect(r.refuse).toContain("归档里有一份");
     expect(r.refuse).toContain(`cp '/a/agent-x/s.jsonl' '`);
     expect(r.refuse).toContain(`-w-repo/${SID}.jsonl'`);
   });
+  test("对话过（firstTurnAt 有值）、notes 空、jsonl 和归档都丢了 → 拒绝并写明历史已丢失（审查 r2 P1-3）", () => {
+    const r = restartLaunchPlan({ hasSession: () => false }, { ...blank, firstTurnAt: "2026-09-30T00:00:00Z" }, none);
+    expect(r.mode).toBeUndefined();
+    expect(r.refuse).toContain("历史已丢失");
+    expect(r.refuse).toContain("由 owner 决定");
+  });
   test("registry 记过接管 / 分叉 / adopt，jsonl 和归档都没有 → 拒绝", () => {
     for (const notes of [`claude session: ${SID}`, `claude session: ${SID} (forked from 12345678)`, `claude session: ${SID} (adopted, was 1234)`]) {
-      const r = restartLaunchPlan({ hasSession: () => false }, { sessionId: SID, cwd: "/w", notes }, none);
+      const r = restartLaunchPlan({ hasSession: () => false }, { ...blank, notes }, none);
       expect(r.mode).toBeUndefined();
-      expect(r.refuse).toContain("没有按新会话静默启动");
+      expect(r.refuse).toContain("历史已丢失");
     }
+  });
+  test("老条目没有 firstTurnAt 字段：分不清，拒绝而不是当成没对话过", () => {
+    const r = restartLaunchPlan({ hasSession: () => false }, { sessionId: SID, cwd: "/w", notes: "" }, none);
+    expect(r.mode).toBeUndefined();
+    expect(r.refuse).toContain("分不清");
   });
   test("归档副本按 sessionId 扫所有 agent 目录（含手动归档、改过名的旧目录）", () => {
     const root = mkdtempSync(`${tmpdir()}/t44-arc-`);
@@ -240,13 +252,20 @@ describe("restartLaunchPlan：从没对话过才新起，历史丢了就拒绝",
     writeFileSync(`${root}/agent-old/other.jsonl`, "{}\n");
     expect(archivedSessionCopies(SID, root).sort()).toEqual([`${root}/agent-old/${SID}.jsonl`, `${root}/archived/x/${SID}.jsonl`]);
   });
+  test("同名目录、悬空链接不算归档副本（审查 r2 P2-1）", () => {
+    const root = mkdtempSync(`${tmpdir()}/t44-arc-`);
+    mkdirSync(`${root}/agent-a/${SID}.jsonl`, { recursive: true });
+    mkdirSync(`${root}/agent-b`, { recursive: true });
+    symlinkSync(`${root}/nowhere`, `${root}/agent-b/${SID}.jsonl`);
+    expect(archivedSessionCopies(SID, root)).toEqual([]);
+  });
   test("CC 适配器按 jsonl 在不在判", () => {
     const cc = managedFor("claude-code")!;
     const home = process.env.HOME;
     const tmp = mkdtempSync(`${tmpdir()}/t44-`);
     process.env.HOME = tmp;
     try {
-      expect(restartLaunchPlan(cc, { sessionId: SID, cwd: "/w/repo", notes: "" }, none)).toEqual({ mode: "new" });
+      expect(restartLaunchPlan(cc, { sessionId: SID, cwd: "/w/repo", notes: "", firstTurnAt: null }, none)).toEqual({ mode: "new" });
       const dir = `${tmp}/.claude/projects/-w-repo`;
       mkdirSync(dir, { recursive: true });
       writeFileSync(`${dir}/${SID}.jsonl`, "{}\n");

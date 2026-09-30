@@ -617,7 +617,7 @@ async function cmdCreate(
     created: new Date().toISOString(),
     status: "active",
     channelId,
-    notes: "",
+    notes: "", firstTurnAt: null, // restart 据此判断「从没对话过」（manager/first-turn.ts）
     sessionId,
     cwd: expandedDir,
     disallowedPreset: perms.preset,
@@ -2424,6 +2424,7 @@ switch (cmd) {
     break;
   }
 
+  case "mark-turn": await (await import("./manager/first-turn.js")).cmdMarkTurn(args[0]); break; // bridge Stop hook 记首次回合
   // v2.8+ 手动归档：archive <name> —— 立即快照该 agent 当前 session 的 jsonl
   case "archive": {
     const [name] = args;

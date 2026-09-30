@@ -19,7 +19,7 @@ import {
   probeTuiContract,
 } from "../tmux-helper.js";
 import { isAutoConfirmableModal } from "../modal-confirm.js";
-import { belowTrustLeftover, hasTrustOption, TRUST_CAPTURE_LINES, trustPromptKey, trustPromptMoves, trustRefusal } from "../trust-prompt.js";
+import { belowTrustLeftover, looksLikeTrustPrompt, TRUST_CAPTURE_LINES, trustPromptKey, trustPromptMoves, trustRefusal } from "../trust-prompt.js";
 import { lastUserTextOf } from "./shared.js";
 import { roleLaunch } from "../team-roles.js";
 import type {
@@ -31,6 +31,10 @@ import type {
   RuntimeControl,
   WindowOps,
 } from "./types.js";
+
+/** 像信任框却认不全时，连着这么多轮（pollMs 500）就报 blocked-dialog */
+const TRUST_UNCLEAR_ROUNDS = 6;
+const TRUST_UNCLEAR_DETAIL = "屏幕上有目录信任弹窗但认不全（带编号、文案变了或叠着别的框），没有自动确认；请自己 attach 进 tmux 确认后再 restart";
 
 /** 信任弹窗显示的是真实路径（/tmp → /private/tmp）；目录不在就按原样比 */
 function realPath(p: string | undefined): string | undefined {
@@ -234,6 +238,7 @@ export const claudeCodeAdapter: ManagedRuntimeAdapter = {
   async waitReady(win: WindowOps, budget): Promise<ReadyResult> {
     let sessionIdlePicked = false;
     let trustSeen = false;
+    let trustUnclear = 0;
     for (let i = 0; i < budget.rounds; i++) {
       await win.sleep(budget.pollMs);
       const pane = await win.capture(10);
@@ -256,7 +261,7 @@ export const claudeCodeAdapter: ManagedRuntimeAdapter = {
       }
 
       // 目录信任弹窗默认高亮 No, exit：截整个框，完整干净、目录恰好是本次 cwd 才发一个键，高亮停在 Yes 才回车（lib/trust-prompt.ts）
-      const full = hasTrustOption(pane) ? await win.capture(TRUST_CAPTURE_LINES) : "";
+      const full = looksLikeTrustPrompt(pane) ? await win.capture(TRUST_CAPTURE_LINES) : "";
       const trustMoves = full ? trustPromptMoves(full) : null;
       if (trustMoves !== null) {
         trustSeen = true;
@@ -266,8 +271,13 @@ export const claudeCodeAdapter: ManagedRuntimeAdapter = {
         await win.sleep(trustMoves === 0 ? 1000 : 300);
         continue;
       }
-      // 弹窗残影下面接了 shell 提示符 = CC 在弹窗上退出了（选了 No），别再等满预算
-      const below = trustSeen ? belowTrustLeftover(pane) : null;
+      // 像信任框却认不全（带编号、文案变了、叠着别的框）：一个键都不发，连着几轮（约 3 秒，排除正在画）还这样就直接报，不空等满预算
+      trustUnclear = full ? trustUnclear + 1 : 0;
+      if (trustUnclear >= TRUST_UNCLEAR_ROUNDS) {
+        return { ready: false, reason: "blocked-dialog", detail: TRUST_UNCLEAR_DETAIL, recoveredFullSession: false };
+      }
+      // 弹窗残影下面接了 shell 提示符 = CC 在弹窗上退出了，别再等满预算。第一次截屏前就退了的也算，但头几轮不判：新 CC 还没接管屏幕
+      const below = trustSeen || i >= 3 ? belowTrustLeftover(pane) : null;
       if (below !== null && isAtShell(below)) {
         return { ready: false, reason: "exited", detail: "目录信任弹窗之后 Claude Code 退出了", recoveredFullSession: false };
       }
@@ -280,7 +290,7 @@ export const claudeCodeAdapter: ManagedRuntimeAdapter = {
     // 最后再用同样的严格条件捕一次，不靠循环结束的瞬时状态
     const final = await win.capture(10);
     if (isClaudeReady(final)) return { ready: true, recoveredFullSession: sessionIdlePicked };
-    const detail = hasTrustOption(final) ? "屏幕上有目录信任弹窗但认不全（残缺或叠着别的框），没有自动确认" : undefined;
+    const detail = looksLikeTrustPrompt(final) ? TRUST_UNCLEAR_DETAIL : undefined;
     return { ready: false, reason: "timeout", ...(detail ? { detail } : {}), recoveredFullSession: sessionIdlePicked };
   },
 
@@ -291,7 +301,7 @@ export const claudeCodeAdapter: ManagedRuntimeAdapter = {
       return "handled";
     }
     // 退出阶段不替用户接受新的目录信任：往 No, exit 挪（它本来就是退出）
-    const trustMoves = hasTrustOption(pane) ? trustPromptMoves(await win.capture(TRUST_CAPTURE_LINES), "no") : null;
+    const trustMoves = looksLikeTrustPrompt(pane) ? trustPromptMoves(await win.capture(TRUST_CAPTURE_LINES), "no") : null;
     if (trustMoves !== null) {
       await win.sendKey(trustPromptKey(trustMoves));
       await win.sleep(trustMoves === 0 ? 1000 : 300);

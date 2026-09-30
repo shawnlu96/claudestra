@@ -29,6 +29,7 @@ export const WRITE_COMMANDS: ReadonlySet<string> = new Set([
   // 以下原先漏掉：set-session / set-claude / announce-focus 写 registry；migrate 直写 registry.json；
   // peer-invite-redeem 写 principals + peers；peer-invite-list 顺手清扫过期邀请（吊销 token、写 peers）
   "set-session", "set-claude", "announce-focus", "migrate", "peer-invite-redeem", "peer-invite-list",
+  "mark-turn", // 写 registry firstTurnAt（bridge Stop hook 调）
 ]);
 
 /**

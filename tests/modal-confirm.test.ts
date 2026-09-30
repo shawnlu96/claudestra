@@ -43,3 +43,28 @@ describe("盖住输入框的普通确认框：照常自动按", () => {
     expect(isAutoConfirmableModal(pane)).toBe(false);
   });
 });
+
+describe("目录信任框：通用自动确认一个键都不按，只由 lib/trust-prompt.ts 的严格识别处理（T44 r2 P1-1 / P1-2）", () => {
+  const trust = fx("trust/cc2.1.284-trust.txt");
+  const yesLit = trust.replace(" ❯ No, exit", "   No, exit").replace("   Yes, I trust", " ❯ Yes, I trust");
+  const effort = " Use Fable 5.1 at high effort by default?\n   ❯ Keep xhigh\n     Switch Fable 5.1 to high effort\n\n   Enter to confirm · Esc to cancel";
+  test("带编号 / 编号换写法 / Yes 在前 / 文案改过的信任框（默认高亮 No，Enter = 退出）", () => {
+    const variants = [
+      trust.replace(" ❯ No, exit", " ❯ 1. No, exit").replace("   Yes, I trust", "   2. Yes, I trust"),
+      trust.replace(" ❯ No, exit", " ❯ 1) No, exit").replace("   Yes, I trust", "   2) Yes, I trust"),
+      trust.replace(" ❯ No, exit\n   Yes, I trust this folder", " ❯ 1. Yes, I trust this folder\n   2. No, exit"),
+      trust.replace(" ❯ No, exit", " ❯ 1. No, exit").replace("   Yes, I trust this folder", "   2. Yes, I trust this workspace"),
+      trust.replace(" Security guide", " WARNING: Please review this project"),
+      trust,
+    ];
+    for (const [i, pane] of variants.entries()) expect([i, ...both(pane)]).toEqual([i, false, false]);
+  });
+  test("旧信任框残影 + 下面新弹出的 effort 框：残影不算当前画面，effort 框照常按；残影下接 shell 不按", () => {
+    expect(isAutoConfirmableModal(`${yesLit.trimEnd()}\n${effort}`)).toBe(true);
+    expect(both(`${yesLit.trimEnd()}\nuser@host repo %`)).toEqual([false, false]);
+  });
+  test("effort 框残影 + 当前带编号的信任框：不按", () => {
+    const numbered = trust.replace(" ❯ No, exit", " ❯ 1. No, exit").replace("   Yes, I trust", "   2. Yes, I trust");
+    expect(both(`${effort}\n${numbered}`)).toEqual([false, false]);
+  });
+});

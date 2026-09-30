@@ -1,34 +1,17 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, realpathSync } from "node:fs";
+import { mkdtempSync, readFileSync, realpathSync } from "node:fs";
+import { join } from "node:path";
 import { homedir, tmpdir } from "node:os";
 import { managedFor } from "../src/lib/runtimes/index.ts";
 import type { WindowOps } from "../src/lib/runtimes/types.ts";
-import { belowTrustLeftover, hasTrustOption, trustPromptKey, trustPromptMoves, trustPromptWorkspace, trustRefusal } from "../src/lib/trust-prompt.ts";
+import { isAutoConfirmableModal } from "../src/lib/modal-confirm.ts";
+import { belowTrustLeftover, looksLikeTrustPrompt, trustPromptKey, trustPromptMoves, trustPromptWorkspace, trustRefusal } from "../src/lib/trust-prompt.ts";
 
-// CC 2.1.284 在沙箱新 git 目录里实抓（2026-09-30，capture-pane -S -40，行首空格照抄）
+// CC 2.1.284 在沙箱新 git 目录里实抓（2026-09-30，capture-pane -S -40，行首空格照抄；提示符换成了 user@host）
+const TRUST_FX = readFileSync(join(import.meta.dir, "fixtures/trust/cc2.1.284-trust.txt"), "utf8");
 function dialog(dir: string, selectedYes = false): string {
-  return [
-    "shawn@macmini repo % claude --dangerously-skip-permissions --session-id x",
-    "────────────────────────────────────────────────────────────────────────────────",
-    " Accessing workspace:",
-    "",
-    ` ${dir}`,
-    "",
-    " Quick safety check: Is this a project you created or one you trust? (Like your",
-    " own code, a well-known open source project, or work from your team). If not,",
-    " take a moment to review what's in this folder first.",
-    "",
-    " Claude Code'll be able to read, edit, and execute files here.",
-    "",
-    " Security guide",
-    "",
-    selectedYes ? "   No, exit" : " ❯ No, exit",
-    selectedYes ? " ❯ Yes, I trust this folder" : "   Yes, I trust this folder",
-    "",
-    " Enter to confirm · Esc to cancel",
-    "",
-    "",
-  ].join("\n");
+  const pane = TRUST_FX.replace("/private/tmp/sbx-t44/work/pre-g1", dir);
+  return selectedYes ? pane.replace(" ❯ No, exit", "   No, exit").replace("   Yes, I trust", " ❯ Yes, I trust") : pane;
 }
 
 const DIR = "/private/tmp/sbx-t44/work/pre-g1";
@@ -42,7 +25,7 @@ describe("trustPromptMoves", () => {
 
   test("CC 选了 No 退回 shell 后，回滚区里的旧弹窗不算（修前会对着 shell 连发 Down / Enter）", () => {
     // 沙箱第 5 次 create 实录：弹窗下面接着 shell 提示符
-    const stale = `${dialog(DIR)}\nshawn@macmini pre-g5 %\nshawn@macmini pre-g5 %\n`;
+    const stale = `${dialog(DIR)}\nuser@host pre-g5 %\nuser@host pre-g5 %\n`;
     expect(trustPromptMoves(stale)).toBeNull();
   });
 
@@ -74,13 +57,15 @@ describe("trustPromptMoves：只认当前画面底部完整、干净的框（审
       " Enter to confirm · Esc to cancel",
     ].join("\n");
     expect(trustPromptMoves(`${dialog(DIR, true)}\n${bypass}`)).toBeNull();
-    expect(hasTrustOption(`${dialog(DIR, true)}\n${bypass}`)).toBe(true); // 所以 isAutoConfirmableModal 也不会按它
+    // 活动区只剩 Bypass 框：它由 detectBypassConsentPrompt 挡住，照样不自动按
+    expect(looksLikeTrustPrompt(`${dialog(DIR, true)}\n${bypass}`)).toBe(false);
+    expect(isAutoConfirmableModal(`${dialog(DIR, true)}\n${bypass}`)).toBe(false);
   });
 
   test("只截到半个框（看不到 Accessing workspace）→ 不认，但粗判仍认得出、不许当普通弹窗按", () => {
     const half = dialog(DIR).split("\n").slice(-10).join("\n");
     expect(trustPromptMoves(half)).toBeNull();
-    expect(hasTrustOption(half)).toBe(true);
+    expect(looksLikeTrustPrompt(half)).toBe(true);
   });
 
   test("选项不齐、多一个 ❯ 行、带编号、两个都高亮 → 不认", () => {
@@ -92,6 +77,42 @@ describe("trustPromptMoves：只认当前画面底部完整、干净的框（审
 
   test("选项和尾注之间夹了别的内容 → 不认", () => {
     expect(trustPromptMoves(dialog(DIR).replace(" Enter to confirm", " stray output\n Enter to confirm"))).toBeNull();
+  });
+});
+
+const NUMBERED = dialog(DIR).replace(" ❯ No, exit", " ❯ 1. No, exit").replace("   Yes, I trust", "   2. Yes, I trust");
+const EFFORT = [
+  " Use Fable 5.1 at high effort by default?",
+  "   ❯ Keep xhigh",
+  "     Switch Fable 5.1 to high effort",
+  "",
+  "   Enter to confirm · Esc to cancel",
+].join("\n");
+
+describe("looksLikeTrustPrompt：通用自动确认的护栏（审查 r2 P1-1 / P1-2）", () => {
+  test("带编号的信任框：严格识别不认，但粗判认得出，通用处理器绝不按 Enter", () => {
+    expect(trustPromptMoves(NUMBERED)).toBeNull();
+    expect(looksLikeTrustPrompt(NUMBERED)).toBe(true);
+    expect(isAutoConfirmableModal(NUMBERED)).toBe(false);
+    expect(isAutoConfirmableModal(NUMBERED, { allowSessionIdle: true })).toBe(false);
+  });
+  test("文案变了（多一行 WARNING、尾注换词）照样挡住通用处理器", () => {
+    const warned = dialog(DIR).replace(" Security guide", " WARNING: Please review this project");
+    expect(looksLikeTrustPrompt(warned)).toBe(true);
+    expect(isAutoConfirmableModal(warned)).toBe(false);
+  });
+  test("旧信任框残影 + 下面新弹出的 effort 框：残影不算，effort 框照常自动确认", () => {
+    expect(isAutoConfirmableModal(EFFORT)).toBe(true);
+    const stacked = `${dialog(DIR, true)}\n${EFFORT}`;
+    expect(looksLikeTrustPrompt(stacked)).toBe(false);
+    expect(trustPromptMoves(stacked)).toBeNull();
+    expect(isAutoConfirmableModal(stacked)).toBe(true);
+  });
+  test("旧信任框残影下只接了 shell：通用处理器也不按（残影里的选项不算当前画面）", () => {
+    expect(isAutoConfirmableModal(`${dialog(DIR, true)}\nuser@host repo %`)).toBe(false);
+  });
+  test("命令行 / 正文里顺带提到信任框文案不算", () => {
+    expect(looksLikeTrustPrompt("user@host % claude --append-system-prompt 'Yes, I trust this folder'")).toBe(false);
   });
 });
 
@@ -159,8 +180,8 @@ describe("trustRefusal：只信任恰好等于本次 cwd 的目录（审查 r1 P
 describe("belowTrustLeftover", () => {
   test("弹窗贴底 → null；下面接了 shell → 返回下面那段", () => {
     expect(belowTrustLeftover(dialog(DIR))).toBeNull();
-    expect(belowTrustLeftover(`${dialog(DIR)}\nshawn@macmini pre-g5 %\n`)?.trim()).toBe("shawn@macmini pre-g5 %");
-    expect(belowTrustLeftover("shawn@macmini x %\n")).toBeNull();
+    expect(belowTrustLeftover(`${dialog(DIR)}\nuser@host pre-g5 %\n`)?.trim()).toBe("user@host pre-g5 %");
+    expect(belowTrustLeftover("user@host x %\n")).toBeNull();
   });
 });
 
@@ -227,20 +248,35 @@ describe("claude-code waitReady：信任弹窗", () => {
     expect(w.keys).toEqual([]);
   });
 
-  test("旧框残影下只多一行 shell（高亮在 Yes）：一个键都不发（审查 r1 P1-1）", async () => {
+  test("第一次截屏就是旧框残影 + 一行 shell（高亮在 Yes）：一个键都不发，几轮后报退出（审查 r1 P1-1、r2 P2-3）", async () => {
     const w = ccWindow(dir);
     w.win.capture = async () => `${dialog(dir, true)}\nuser@host repo %`;
-    expect(await cc.waitReady(w.win, budget(dir))).toMatchObject({ ready: false, reason: "timeout" });
+    expect(await cc.waitReady(w.win, budget(dir))).toMatchObject({ ready: false, reason: "exited" });
     expect(w.keys).toEqual([]);
   });
 
-  test("只看得到半个框：一个键都不发，超时说明里写明认不全", async () => {
+  test("只看得到半个框、带编号的框：一个键都不发，连着几轮后报被挡住，不等满预算（审查 r2 P1-1 / P2-2）", async () => {
+    for (const pane of [dialog(dir).split("\n").slice(-10).join("\n"), NUMBERED.replace(DIR, dir)]) {
+      const w = ccWindow(dir);
+      let rounds = 0;
+      w.win.capture = async (l) => (l === 10 && rounds++, pane);
+      const r = await cc.waitReady(w.win, budget(dir));
+      expect(r).toMatchObject({ ready: false, reason: "blocked-dialog" });
+      expect((r as { detail?: string }).detail).toContain("认不全");
+      expect(w.keys).toEqual([]);
+      expect(rounds).toBeLessThan(10);
+    }
+  });
+
+  test("旧信任框残影下面弹出 effort 框：照常按 Enter 过去，不被残影挡住（审查 r2 P1-2）", async () => {
     const w = ccWindow(dir);
-    w.win.capture = async () => dialog(dir).split("\n").slice(-10).join("\n");
-    const r = await cc.waitReady(w.win, budget(dir));
-    expect(r).toMatchObject({ ready: false, reason: "timeout" });
-    expect((r as { detail?: string }).detail).toContain("认不全");
-    expect(w.keys).toEqual([]);
+    let passed = false;
+    w.win.capture = async () => (passed ? READY : `${dialog(dir, true)}\n${EFFORT}`);
+    const send = w.win.sendKey;
+    w.win.sendKey = async (k) => { w.keys.push(k); passed = k === "Enter"; };
+    void send;
+    expect(await cc.waitReady(w.win, budget(dir))).toMatchObject({ ready: true });
+    expect(w.keys).toEqual(["Enter"]);
   });
 
   test("退出阶段遇到信任框：往 No, exit 走，不替用户接受", async () => {

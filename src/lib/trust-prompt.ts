@@ -12,6 +12,8 @@
  */
 
 const TRUST_OPTION_RE = /^\s*(❯)?\s*(No, exit|Yes, I trust this folder)\s*$/i;
+/** 信任框的特征行（行首锚定，命令行 / 正文里顺带提到不算）；带编号、文案微调的也算——只用来「不许别人按」 */
+const TRUST_HINT_RE = /^\s*(?:❯\s*)?(?:\d+[.)]\s*)?(?:Yes, I trust this folder|Accessing workspace:|Quick safety check\b)/i;
 /** 弹窗块里出现这些 = 叠着别的框（Bypass 首启框、编号菜单、另一个确认尾注），不是干净的信任框 */
 const FOREIGN_RE = /Enter to confirm|Accessing workspace|Bypass Permissions|WARNING|Yes, I accept|^\s*(❯\s*)?\d+\.\s/i;
 /** 截整个弹窗要的行数（弹窗约 17 行，给长路径折行留余量） */
@@ -23,9 +25,26 @@ function trimTrailingBlank(pane: string): string[] {
   return lines;
 }
 
-/** 底部 25 行里有信任框的选项行：粗判，只用来决定要不要截整屏细看、以及不许当普通弹窗按 Enter */
-export function hasTrustOption(pane: string): boolean {
-  return trimTrailingBlank(pane).slice(-25).some((l) => TRUST_OPTION_RE.test(l));
+/**
+ * 当前活动画面：最后一行之前的最后一个确认尾注以下的部分。旧框连同它的尾注都在这条线上面，是残影不是当前画面——
+ * 既不能被当成活弹窗去按（残影下接 shell 时 Enter 会落到 shell 上），也不能挡住它下面新弹出来的框。
+ * 通用的自动确认（tmux-helper isAutoConfirmableModal）也只看这一段。
+ */
+export function activeModalView(pane: string): string {
+  const lines = trimTrailingBlank(pane);
+  return lines.slice(lines.slice(0, -1).findLastIndex((l) => /Enter to confirm|Esc to cancel/i.test(l)) + 1).join("\n");
+}
+
+function activeRegion(pane: string): string[] {
+  return activeModalView(pane).split("\n").slice(-25);
+}
+
+/**
+ * 活动区里有信任框的特征（带不带编号、全不全都算）。通用的自动确认看到它一律不按：信任框只能走下面的严格识别；
+ * 就绪轮询也用它决定要不要截整屏细看。
+ */
+export function looksLikeTrustPrompt(pane: string): boolean {
+  return activeRegion(pane).some((l) => TRUST_HINT_RE.test(l));
 }
 
 /**
@@ -35,7 +54,7 @@ export function hasTrustOption(pane: string): boolean {
  * 残影下面多一行 shell、只截到半个框、旧框和新框拼在一起，都不算——对着它们按键会落到 shell 或别的框上。
  */
 function trustSelection(pane: string): 0 | 1 | null {
-  const lines = trimTrailingBlank(pane);
+  const lines = trimTrailingBlank(pane).slice(-TRUST_CAPTURE_LINES);
   const last = lines.length - 1;
   if (last < 0 || !/^\s*Enter to confirm\b.*Esc to cancel\s*$/i.test(lines[last]!)) return null;
   const head = lines.findLastIndex((l) => /^\s*Accessing workspace:\s*$/i.test(l));

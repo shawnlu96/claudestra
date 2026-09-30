@@ -14,7 +14,7 @@
 import { ARCHIVE_ROOT as STATE_ARCHIVE_ROOT } from "./paths.js";
 import { agentRuntime } from "./registry.js";
 import { findSessionJsonlBySessionId, sessionJsonlPath } from "./session-source.js";
-import { existsSync, readdirSync, realpathSync } from "fs";
+import { accessSync, constants, existsSync, readdirSync, realpathSync, statSync } from "fs";
 import { mkdir, readdir } from "fs/promises";
 import { basename, dirname, join, resolve, sep } from "path";
 import { projectsSlug } from "./jsonl-cost.js";
@@ -211,6 +211,17 @@ export async function listArchivedSessions(agentName: string): Promise<string[]>
   }
 }
 
+/** 普通文件且读得了（跟随符号链接）：同名目录、悬空链接、没权限的都不算能拷回去的副本 */
+function isReadableFile(p: string): boolean {
+  try {
+    if (!statSync(p).isFile()) return false;
+    accessSync(p, constants.R_OK);
+    return true;
+  } catch {
+    return false; // 不存在 / 悬空链接 / 没权限：都不是能恢复的副本
+  }
+}
+
 /**
  * 归档里这个 session 的副本（自动快照 <root>/<agent>/<sid>.jsonl、手动归档 <root>/archived/<agent>/<sid>.jsonl）。
  * 按 sessionId 扫所有 agent 目录：改过名的 agent，快照还在旧名字下。restart 用它分辨「从没对话过」与「历史被清理了」。
@@ -226,7 +237,7 @@ export function archivedSessionCopies(sessionId: string, root: string = ARCHIVE_
     }
     for (const d of dirs) {
       const p = join(base, d, `${sessionId}.jsonl`);
-      if (existsSync(p)) out.push(p);
+      if (isReadableFile(p)) out.push(p);
     }
   }
   return out;

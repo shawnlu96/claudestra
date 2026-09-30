@@ -138,6 +138,8 @@ export interface RegistryAgent {
   parent?: string;
   /** 任务短名（≤40 字），侧栏执行者那行的小标 */
   task?: string;
+  /** 第一次跑完回合的时间；null = create 后还没对话过；缺失 = 老条目（manager/first-turn.ts） */
+  firstTurnAt?: string | null;
 }
 
 /** registry.json 的内容 → 规范化后的 agent 列表（纯函数；结构不对返回空数组） */
@@ -181,6 +183,7 @@ function normalizeEntries(agents: Record<string, unknown>): RegistryAgent[] {
       acpRestartPending: a.acpRestartPending === true,
       parent: str("parent"),
       task: str("task"),
+      firstTurnAt: a.firstTurnAt === null ? null : str("firstTurnAt"),
     };
   });
 }

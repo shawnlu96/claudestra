@@ -75,13 +75,13 @@ export type RestartLaunchPlan = { mode: "resume" | "new"; refuse?: undefined } |
 /**
  * restart 续旧会话、新起，还是拒绝。create 预先定了 session id，但 CC 要到第一条消息才落 jsonl：
  * 从没对话过的 agent 带 --resume 必报「No conversation found」退出，这时用同一个 id 新起（registry 不用改）。
- * 「从没对话过」三条都要成立：registry 没记过接管 / 分叉 / adopt（notes 为空）、项目目录没有 jsonl、归档里也没有这个 id。
- * 有任何历史痕迹却找不到 jsonl = 历史被清理或挪走了，新起等于静默丢掉整段对话，所以拒绝并给恢复办法。
+ * 只有 firstTurnAt 明确是 null（create 写的、bridge 的 Stop hook 还没记过回合）、notes 为空、项目目录和归档里都没有
+ * 这个 id 时才新起。对话过 / 接管过 / 老条目说不清的，找不到 jsonl 一律拒绝：新起等于静默丢掉整段对话，得 owner 决定。
  * 不实现 hasSession 的运行时一律照旧 resume。
  */
 export function restartLaunchPlan(
   adapter: Pick<ManagedRuntimeAdapter, "hasSession">,
-  info: { sessionId?: string; cwd?: string; notes?: string },
+  info: { sessionId?: string; cwd?: string; notes?: string; firstTurnAt?: string | null },
   archived: (sessionId: string) => string[] = archivedSessionCopies,
 ): RestartLaunchPlan {
   const sid = info.sessionId;
@@ -91,8 +91,15 @@ export function restartLaunchPlan(
   if (copy) {
     return { refuse: `会话 ${sid} 的 jsonl 不在原处（可能被 Claude Code 清理了），归档里有一份。没有按新会话启动，免得丢历史；恢复：cp '${copy}' '${where}' 后再 restart` };
   }
+  const fresh = "要按新会话起由 owner 决定：kill 后重新 create";
+  if (info.firstTurnAt) {
+    return { refuse: `历史已丢失：这个 agent ${info.firstTurnAt} 起有过对话，但 ${sid}.jsonl 找不到、归档里也没有。没有按新会话启动；${fresh}` };
+  }
   if (info.notes?.trim()) {
-    return { refuse: `这个 agent 接过已有会话（${info.notes.trim()}），但 ${sid}.jsonl 找不到了、归档里也没有。没有按新会话静默启动；确认不要这段历史的话，kill 后重新 create` };
+    return { refuse: `历史已丢失：这个 agent 接过已有会话（${info.notes.trim()}），但 ${sid}.jsonl 找不到、归档里也没有。没有按新会话启动；${fresh}` };
+  }
+  if (info.firstTurnAt !== null) {
+    return { refuse: `找不到 ${sid}.jsonl，归档里也没有；这个 agent 建于记录首次回合之前，分不清是从没对话过还是历史丢了，没有按新会话启动；${fresh}` };
   }
   return { mode: "new" };
 }

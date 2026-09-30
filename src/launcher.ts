@@ -29,7 +29,7 @@ import {
   isIdle as tmuxIsIdle,
   tmuxCapture,
   tmuxSendLine,
-  hasTrustOption,
+  looksLikeTrustPrompt,
   stepTrustPrompt,
   detectSessionIdlePrompt,
   CC_MODE_BANNER_RE,
@@ -45,7 +45,7 @@ import { isAutoConfirmableModal } from "./lib/modal-confirm.js";
  */
 function masterShouldAutoConfirm(pane: string): boolean {
   // v2.21.4+ 目录信任弹窗也算(默认高亮 No, exit,confirmMasterModal 会先挪到 Yes)
-  return hasTrustOption(pane) || isAutoConfirmableModal(pane, { allowSessionIdle: true });
+  return looksLikeTrustPrompt(pane) || isAutoConfirmableModal(pane, { allowSessionIdle: true });
 }
 
 /**
@@ -55,7 +55,7 @@ function masterShouldAutoConfirm(pane: string): boolean {
  */
 async function confirmMasterModal(pane: string): Promise<void> {
   // 信任框：截整个框、完整干净才发一个键，下一轮重看高亮；残缺的一个键都不发，也绝不落到下面的 Enter（lib/trust-prompt.ts）
-  if (hasTrustOption(pane)) { await stepTrustPrompt(MASTER_WINDOW); return; }
+  if (looksLikeTrustPrompt(pane)) { await stepTrustPrompt(MASTER_WINDOW); return; }
   if (detectSessionIdlePrompt(pane)) {
     await tmuxRaw(["send-keys", "-t", MASTER_WINDOW, "Down"]);
     await Bun.sleep(150);

@@ -12,7 +12,7 @@ import {
   parseChoicePrompt,
   parseModalOptions,
 } from "./tmux-helper.js";
-import { hasTrustOption } from "./trust-prompt.js";
+import { activeModalView, looksLikeTrustPrompt } from "./trust-prompt.js";
 import { inputBox } from "./input-box.js";
 
 /**
@@ -26,6 +26,7 @@ export function isAutoConfirmableModal(
 ): boolean {
   // 弹窗会盖住输入框；输入框还在，画面上的「❯ 1.」就是草稿或对话内容，按 Enter 会把 owner 没打完的草稿提交掉
   if (inputBox(pane.replace(/\s+$/, "").split("\n"))) return false;
+  pane = activeModalView(pane); // 以下只看当前活动的框：上面旧框的残影既不按、也不挡（lib/trust-prompt.ts）
   const modalOpts = parseModalOptions(pane);
   // v2.23.1+ 无编号选择弹窗（effort 默认档位确认等）也算：默认高亮项 = 保持现状，Enter 无副作用
   const choice = modalOpts ? null : parseChoicePrompt(pane);
@@ -39,9 +40,9 @@ export function isAutoConfirmableModal(
   if (parseAuqPane(pane)) return false;
   // session-idle 弹窗除非显式允许
   if (!opts.allowSessionIdle && detectSessionIdlePrompt(pane)) return false;
-  // 目录信任弹窗默认高亮「No, exit」——直接 Enter 等于退出。看得到它的选项就不按：完整的框由
-  // trustPromptMoves 一格一格挪到 Yes，只截到半个、叠着别的框的一律谁都不按
-  if (hasTrustOption(pane)) return false;
+  // 目录信任弹窗默认高亮「No, exit」——直接 Enter 等于退出。看得到它的特征行（带不带编号、全不全）就不按：
+  // 完整的框由 trustPromptMoves 一格一格挪到 Yes，别的样子一律谁都不按（tests/modal-confirm.test.ts）
+  if (looksLikeTrustPrompt(pane)) return false;
   // Bypass 首启确认同样默认高亮「No, exit」，而且接受与否是用户自己的安全决定——
   // 任何自动化都不替用户按（setup 里征得同意后写 skipDangerousModePermissionPrompt）
   if (detectBypassConsentPrompt(pane)) return false;
