@@ -37,7 +37,7 @@ function harness(opts: { entry?: Partial<LendEntry>; peer?: Partial<HttpPeer>; e
   const asks = new Map<string, "waiting" | "approved" | "declined">();
   const registry = new Map<string, { sessionId?: string; cwd?: string }>();
   const log = { created: [] as string[], sent: [] as string[], killed: [] as string[], removed: [] as string[], receipts: [] as LendRow[], asksOpened: 0, informs: [] as string[] };
-  const inform = { ok: true };
+  const inform = { ok: true, delayMs: 0 };
   const entry = { ...ENTRY, ...opts.entry };
   const d: LoopDeps = {
     db, now: () => t, env: opts.env ?? {}, footer: () => "（交结论的办法）", log: () => {},
@@ -52,7 +52,7 @@ function harness(opts: { entry?: Partial<LendEntry>; peer?: Partial<HttpPeer>; e
     peers: async () => [{ ...PEER, ...opts.peer } as HttpPeer],
     ask: {
       open: async (p) => { log.asksOpened++; if (!asks.has(`ask-${p.orderId}`)) asks.set(`ask-${p.orderId}`, "waiting"); return { ok: true, askId: `ask-${p.orderId}` }; },
-      inform: async (p) => { if (!inform.ok) return { ok: false, error: "bridge 不在" }; log.informs.push(p.orderId); return { ok: true }; },
+      inform: async (p) => { t += inform.delayMs; inform.delayMs = 0; if (!inform.ok) return { ok: false, error: "bridge 不在" }; log.informs.push(p.orderId); return { ok: true }; },
       verdict: (id) => { const s = asks.get(id) ?? "declined"; return s === "declined" ? { state: "declined", reason: "不批" } : { state: s }; },
     },
     clone: async (i) => ({ ok: true, dir: `/lend/work/${i.orderId}` }),
@@ -139,6 +139,29 @@ describe("T94 限时预先授权（specRev 2）", () => {
     await h.tick();
     expect(h.log.informs).toEqual(["o1"]);
     expect(h.ops()).toContain("claim");
+  });
+
+  test("通知送出去的这段时间里到期（r1 P1-2）：通知回来后按此刻重算，不再免确认 claim，下一轮开 ask", async () => {
+    const h = harness({ entry: { confirm: "auto", until: new Date(1_000_000 + 1_000).toISOString() } });
+    await h.tick(); // poll 到单，落 asked
+    h.inform.delayMs = 2_000; // bridge / manager 往返跨过了 until
+    await h.tick();
+    expect(h.log.informs).toEqual(["o1"]);
+    expect(h.ops()).not.toContain("claim");
+    await h.tick();
+    expect(h.log.asksOpened).toBe(1);
+    expect(h.ops()).not.toContain("claim");
+    expect(h.log.created).toEqual([]);
+  });
+
+  test("同一轮里前一张单的通知慢、跨过了 until：后一张单也不用本轮开头的快照去 claim", async () => {
+    const h = harness({ entry: { confirm: "auto", until: new Date(1_000_000 + 1_000).toISOString() } });
+    h.A.poll = () => ({ status: 200, body: { ok: true, v: 1, orders: [polled("o1"), polled("o2")], pollAfterMs: 30_000 } });
+    await h.tick();
+    h.inform.delayMs = 2_000; // 只有第一张单的通知慢
+    await h.tick();
+    expect(h.ops()).not.toContain("claim");
+    expect(getOrder(h.db, "o2")!.state).toBe("asked");
   });
 
   test("到期：恢复逐单确认——开 ask，owner 没批不 claim", async () => {

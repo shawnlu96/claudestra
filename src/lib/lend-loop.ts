@@ -67,6 +67,21 @@ async function driveAsked(row: LendRow, entry: LendEntry | undefined, d: LoopDep
     if (!told.ok) return d.log(`${row.orderId} 预先授权通知没送到，暂不领单：${told.error}`);
     row = patchOrder(d.db, row.orderId, ["asked"], { preview: { ...row.preview, informedAt: d.now() } }, d.now());
   }
+  await claimIfStill(row, entry!.confirm, d);
+}
+
+/**
+ * claim 前最后一道：重读 lend.json、按此刻重算生效策略，与发出 claim 之间不再有 await。本轮开头的快照不能用：
+ * inform / ask / 前面几张单的网络调用都要时间，预先授权可能在这期间到期（到期后免确认起 worker = 规格 P1），owner 也可能刚关掉出借。
+ * 模式和这轮判定时用的不一样（auto 到期退回逐单确认）就先不领，下一轮按新模式走（逐单确认会开 ask）。
+ */
+async function claimIfStill(row: LendRow, mode: LendEntry["confirm"], d: LoopDeps): Promise<void> {
+  const read = await d.readLend();
+  const ctx = await d.context();
+  const now = d.now();
+  const entry = effectiveLend(read, ctx.contacts, ctx.projects, now).lend.find((e) => e.peer === row.peer);
+  const problem = !entry ? "出借条目已失效" : entry.confirm !== mode ? "预先授权已到期或改了，下一轮按逐单确认走" : claimProblem(row, entry, d.db, now);
+  if (problem) return d.log(`${row.orderId} 这轮不领：${problem}`);
   await claimOrder(row, d);
 }
 
