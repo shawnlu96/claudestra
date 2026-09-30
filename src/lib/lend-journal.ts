@@ -61,6 +61,8 @@ export interface LendRow {
   payloadSha: string | null;
   receipt: Record<string, unknown> | null;
   reason: string | null;
+  /** 终态之后还没做完的外部效果（lend-drive.ts settleOrder）：和终态同一次写入，做完清成 null；非 null 的单每轮补做 */
+  settle: { notify: "stopped" | "not_started" | null; removeDir: boolean } | null;
   /** claim 那天（本机日界线），日额度按它数；released 的不算 */
   day: string | null;
   createdAt: number;
@@ -75,8 +77,12 @@ const SCHEMA: SchemaSpec = {
       startedAt INTEGER, submit TEXT, payload TEXT, payloadSha TEXT, receipt TEXT, reason TEXT, day TEXT, createdAt INTEGER NOT NULL, updatedAt INTEGER NOT NULL)`,
     "CREATE INDEX IF NOT EXISTS lend_orders_state ON lend_orders(state)",
     "CREATE TABLE IF NOT EXISTS lend_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
-  ]],
+  ], (db) => {
+    const cols = (db.prepare("PRAGMA table_info(lend_orders)").all() as { name: string }[]).map((c) => c.name);
+    if (!cols.includes("settle")) db.prepare("ALTER TABLE lend_orders ADD COLUMN settle TEXT").run();
+  }],
   tables: ["lend_orders", "lend_meta"],
+  columns: { lend_orders: ["settle"] },
   indexes: { lend_orders: ["lend_orders_state"] },
 };
 
@@ -92,7 +98,7 @@ export function openLendJournal(path = LEND_JOURNAL_PATH): Database {
   return db;
 }
 
-const JSON_COLS = ["preview", "wire", "payload", "receipt"] as const;
+const JSON_COLS = ["preview", "wire", "payload", "receipt", "settle"] as const;
 
 function toRow(r: Record<string, unknown>): LendRow {
   const out = { ...r } as Record<string, unknown>;
@@ -110,6 +116,11 @@ export function liveOrders(db: Database): LendRow[] {
   return (db.query(`SELECT * FROM lend_orders WHERE state IN (${marks}) ORDER BY createdAt`).all(...LIVE_STATES) as Record<string, unknown>[]).map(toRow);
 }
 
+/** 终态了、收尾效果还没做完的单（进程在终态和收据之间退出、收据写盘失败） */
+export function unsettledOrders(db: Database): LendRow[] {
+  return (db.query("SELECT * FROM lend_orders WHERE settle IS NOT NULL ORDER BY updatedAt").all() as Record<string, unknown>[]).map(toRow);
+}
+
 /** 新单：同一 orderId 已有就原样返回（重复 poll 看到同一张单不会开第二条），inserted 说明是不是这次建的 */
 export function recordAsked(db: Database, o: { orderId: string; peer: string; fp: string | null; family: string; preview: Record<string, unknown> },
   now = Date.now()): { row: LendRow; inserted: boolean } {
@@ -121,7 +132,7 @@ export function recordAsked(db: Database, o: { orderId: string; peer: string; fp
 type Patch = Partial<Omit<LendRow, "orderId" | "peer" | "fp" | "family" | "state" | "createdAt" | "updatedAt">>;
 
 const PATCH_COLS = ["preview", "askId", "wire", "leaseGen", "leaseUntil", "lastBeatAt", "dir", "agent", "sessionId", "startedAt", "submit", "payload", "payloadSha",
-  "receipt", "reason", "day"] as const;
+  "receipt", "reason", "day", "settle"] as const;
 
 function patchSql(p: Patch): { sets: string[]; vals: (string | number | null)[] } {
   const sets: string[] = [];

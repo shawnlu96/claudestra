@@ -4,7 +4,7 @@ import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-  advance, canMove, getOrder, isTerminal, JournalConflict, LIVE_STATES, liveOrders, localDay, openLendJournal, openSlots, ordersToday, patchOrder, recordAsked,
+  advance, canMove, getOrder, isTerminal, JournalConflict, LIVE_STATES, liveOrders, localDay, openLendJournal, openSlots, ordersToday, patchOrder, recordAsked, unsettledOrders,
 } from "../src/lib/lend-journal.js";
 import { appendReceipt, receiptOf } from "../src/lib/lend-receipts.js";
 
@@ -90,5 +90,20 @@ describe("T94 收据", () => {
     const lines = readFileSync(path, "utf8").trim().split("\n");
     expect(lines).toHaveLength(1);
     expect(JSON.stringify(JSON.parse(lines[0]))).not.toMatch(/派单|verdict|report/);
+  });
+});
+
+describe("T94 journal 迁移", () => {
+  test("v1 的库（没有 settle 列）打开时补上列，旧行 settle 为 null、不算没收尾", () => {
+    const path = join(mkdtempSync(join(tmpdir(), "lend-j-")), "journal.sqlite");
+    const db = openLendJournal(path);
+    ask(db);
+    db.exec("ALTER TABLE lend_orders DROP COLUMN settle");
+    db.exec("PRAGMA user_version = 1");
+    db.close();
+    const again = openLendJournal(path);
+    expect(getOrder(again, "o1")!.settle).toBeNull();
+    expect(unsettledOrders(again)).toEqual([]);
+    again.close();
   });
 });

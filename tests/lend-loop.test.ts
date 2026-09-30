@@ -351,6 +351,34 @@ describe("T94 重启恢复", () => {
     expect(h.registry.has(workerName("o1"))).toBe(false);
   });
 
+  test("终态之后收据写盘失败（r1 P2-2）：下一轮补写，只写一次", async () => {
+    const h = harness();
+    await toStarted(h);
+    let fail = true;
+    h.d.writeReceipt = async (row) => { if (fail) { fail = false; throw new Error("disk temporarily unavailable"); } h.log.receipts.push(row); };
+    h.registry.delete(workerName("o1")); // worker 没了
+    const r = await h.tick();
+    expect(getOrder(h.db, "o1")!.state).toBe("stopped");
+    expect(r.failed.map((f) => f.error)).toEqual(["disk temporarily unavailable"]);
+    await h.tick();
+    await h.tick();
+    expect(h.log.receipts.map((x) => [x.orderId, x.state])).toEqual([["o1", "stopped"]]);
+    expect(getOrder(h.db, "o1")!.settle).toBeNull();
+    expect(h.calls.filter((c) => c.op === "lease" && c.body.action === "release")).toHaveLength(1); // 已停的通知不因补写收据重发
+  });
+
+  test("进程在终态落库之后、通知 A 之前退出：重启后补发 stopped 通知、补写收据", async () => {
+    const h = harness();
+    await toStarted(h);
+    advance(h.db, "o1", "started", "stopped", { reason: "worker 窗口没了", settle: { notify: "stopped", removeDir: false } });
+    await h.tick();
+    const rel = h.calls.filter((c) => c.op === "lease" && c.body.action === "release");
+    expect(rel.map((c) => c.body.reason)).toEqual(["stopped"]);
+    expect(h.log.receipts.map((x) => x.state)).toEqual(["stopped"]);
+    expect(h.log.removed).toEqual([]); // stopped 保留现场
+    expect(getOrder(h.db, "o1")!.settle).toBeNull();
+  });
+
   test("回执验签不过：不算入账（stopped），保留工作副本", async () => {
     const h = harness();
     await toStarted(h);

@@ -7,8 +7,8 @@
  */
 import { effectiveLend, type LendContact } from "./lend-policy.js";
 import type { LendEntry, LendRead } from "./lend-config.js";
-import { advance, getMeta, liveOrders, openSlots, ordersToday, patchOrder, recordAsked, setMeta, LEASED_STATES, type LendRow } from "./lend-journal.js";
-import { askParams, claimOrder, claimProblem, driveLeased, type LendDeps } from "./lend-drive.js";
+import { advance, getMeta, liveOrders, openSlots, ordersToday, patchOrder, recordAsked, setMeta, unsettledOrders, LEASED_STATES, type LendRow } from "./lend-journal.js";
+import { askParams, claimOrder, claimProblem, driveLeased, settleOrder, type LendDeps } from "./lend-drive.js";
 import { lendRequest, peerLendProblem, proxyVarsIn, type PolledOrder } from "./lend-remote.js";
 import type { HttpPeer } from "./peers.js";
 import type { ProjectDef } from "./projects.js";
@@ -117,9 +117,10 @@ export async function lendTick(d: LoopDeps): Promise<TickResult> {
   const eff = effectiveLend(read, ctx.contacts, ctx.projects, now);
   const entryOf = (peer: string) => eff.lend.find((e) => e.peer === peer);
   const failed: TickResult["failed"] = [];
-  for (const row of liveOrders(d.db)) {
+  for (const row of [...unsettledOrders(d.db), ...liveOrders(d.db)]) {
     try {
-      if (row.state === "asked") await driveAsked(row, entryOf(row.peer), d);
+      if (row.settle) await settleOrder(row, d); // 上次终态之后没做完的收尾（通知 A、删目录、收据）
+      else if (row.state === "asked") await driveAsked(row, entryOf(row.peer), d);
       else await driveLeased(row, d);
     } catch (e) {
       if (e instanceof SchedulerStopped) throw e;

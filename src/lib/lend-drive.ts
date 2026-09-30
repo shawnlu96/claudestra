@@ -106,13 +106,29 @@ export async function claimOrder(row: LendRow, d: LendDeps): Promise<void> {
   if (mismatch) await release(claimed, "claimed", `完整订单的 ${mismatch} 与挂单摘要不一致`, d);
 }
 
-/** 没起过 worker 就退回：先记 released 再告诉 A（not_started）；告诉失败不重试，A 那边租约到期会停给 PM */
+/** 没起过 worker 就退回：记 released（连同要补做的收尾），再告诉 A（not_started）、删目录、写收据 */
 async function release(row: LendRow, from: LendState, why: string, d: LendDeps): Promise<void> {
-  const done = advance(d.db, row.orderId, from, "released", { reason: why }, d.now());
-  const r = await lendRequest(d.call, row.peer, "lease", { orderId: row.orderId, gen: row.leaseGen, action: "release", reason: "not_started", detail: detailOf(why) });
-  if (!r.ok) d.log(`释放 ${row.orderId}（not_started）没送到 A：${r.code}`);
-  try { d.removeDir(row.orderId); } catch (e) { d.log(`删 ${row.orderId} 的工作目录失败：${(e as Error).message}`); }
-  await d.writeReceipt(done);
+  await settleOrder(advance(d.db, row.orderId, from, "released", { reason: why, settle: { notify: "not_started", removeDir: true } }, d.now()), d);
+}
+
+/**
+ * 终态之后的外部效果，按 journal 里的 settle 逐项做、做一项清一项；lend 循环每轮对还没清完的单再调一次（进程在中间退出、收据写盘失败都能补上）。
+ * 告诉 A 只试一次：发了就清标记，送没送到都不再发（A 那边租约到期会停给 PM）；进程在清标记之前退出会重发一次，A 对已释放的单回错，无害。
+ */
+export async function settleOrder(row: LendRow, d: LendDeps): Promise<void> {
+  const s = row.settle;
+  if (!s) return;
+  if (s.notify) {
+    const r = await lendRequest(d.call, row.peer, "lease", { orderId: row.orderId, gen: row.leaseGen, action: "release", reason: s.notify, detail: detailOf(row.reason) });
+    if (!r.ok) d.log(`告诉 A ${row.orderId} 已${s.notify === "stopped" ? "停" : "退回（not_started）"}没送到：${r.code}`);
+    row = patchOrder(d.db, row.orderId, [row.state], { settle: { ...s, notify: null } }, d.now());
+  }
+  if (row.settle!.removeDir) {
+    try { d.removeDir(row.orderId); } catch (e) { d.log(`删 ${row.orderId} 的工作目录失败：${(e as Error).message}`); }
+    row = patchOrder(d.db, row.orderId, [row.state], { settle: { notify: null, removeDir: false } }, d.now());
+  }
+  await d.writeReceipt(row); // 抛了就留着 settle，下一轮再写（appendReceipt 同 orderId 只写一行）
+  patchOrder(d.db, row.orderId, [row.state], { settle: null }, d.now());
 }
 
 /**
@@ -124,15 +140,8 @@ async function finish(row: LendRow, to: "acked" | "stopped" | "cancelled", why: 
   extra: Partial<Pick<LendRow, "receipt">> = {}): Promise<void> {
   const killed = row.agent ? await d.worker.kill(row.agent) : { ok: true };
   if (!killed.ok) return d.log(`${row.orderId} 要收尾（${to}：${why ?? ""}），但 ${row.agent} 没确认退出（${killed.reason ?? "原因不明"}），下轮再停`);
-  const done = advance(d.db, row.orderId, row.state, to, { reason: why, ...extra }, d.now());
-  if (notify && to === "stopped") {
-    const r = await lendRequest(d.call, row.peer, "lease", { orderId: row.orderId, gen: row.leaseGen, action: "release", reason: "stopped", detail: detailOf(why) });
-    if (!r.ok) d.log(`告诉 A ${row.orderId} 已停没送到：${r.code}`);
-  }
-  if (to === "acked" || to === "cancelled") {
-    try { d.removeDir(row.orderId); } catch (e) { d.log(`删 ${row.orderId} 的工作目录失败：${(e as Error).message}`); }
-  }
-  await d.writeReceipt(done);
+  const settle = { notify: notify && to === "stopped" ? ("stopped" as const) : null, removeDir: to === "acked" || to === "cancelled" };
+  await settleOrder(advance(d.db, row.orderId, row.state, to, { reason: why, ...extra, settle }, d.now()), d);
 }
 
 async function startWorker(row: LendRow, d: LendDeps): Promise<void> {
