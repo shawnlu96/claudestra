@@ -5,7 +5,9 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { clearSwitchIntent, consumeSwitchIntent, isPressedBox, noteEffortSwitchIntent, notePressedBox, noteModelSwitchIntent, switchBoxAction } from "../src/bridge/permission-watcher.ts";
+import {
+  clearSwitchIntent, consumeSwitchIntent, expireSettledIntents, isPressedBox, noteEffortSwitchIntent, notePressedBox, noteModelSwitchIntent, switchBoxAction,
+} from "../src/bridge/permission-watcher.ts";
 import { detectSwitchConfirmPrompt } from "../src/lib/tmux-helper.ts";
 
 const fx = (f: string): string => readFileSync(join(import.meta.dir, "fixtures", "switch-confirm", f), "utf8");
@@ -82,5 +84,46 @@ describe("switchBoxAction（watcher 对 agent 和大总管同一套）", () => {
   test("意图是 Sonnet 5、框是 Sonnet 4.6 → notify，不按", () => {
     noteModelSwitchIntent("t41c-h", "claude-sonnet-5");
     expect(switchBoxAction("t41c-h", SWITCH_MODEL.replaceAll("Sonnet 5", "Sonnet 4.6")).act).toBe("notify");
+  });
+});
+
+describe("意图只活到命令被 CC 处理为止（T41c r1 P1-1）", () => {
+  const IDLE = fx("cc2.1.280-model-set.txt");
+  const BUSY = readFileSync(join(import.meta.dir, "fixtures", "turn-zone", "busy-queued.txt"), "utf8");
+
+  test("/model 无框直接落地（会话回到空闲）→ 意图作废，之后 CC 自己弹的同目标框只通知", () => {
+    const t = Date.now();
+    noteModelSwitchIntent("t41c-i", "claude-sonnet-5");
+    expect(switchBoxAction("t41c-i", IDLE, t + 6_000).act).toBe("none");
+    expect(switchBoxAction("t41c-i", SWITCH_MODEL, t + 60_000).act).toBe("notify");
+  });
+
+  test("刚注入的宽限内（框还没画出来）看到空闲屏不作数", () => {
+    const t = Date.now();
+    noteModelSwitchIntent("t41c-j", "claude-sonnet-5");
+    expireSettledIntents("t41c-j", IDLE, t + 1_000);
+    expect(switchBoxAction("t41c-j", SWITCH_MODEL, t + 2_000).act).toBe("press");
+  });
+
+  test("忙着（命令还在排队）不作废：回合结束后弹的框照常代按一次", () => {
+    const t = Date.now();
+    noteModelSwitchIntent("t41c-k", "claude-sonnet-5");
+    for (const dt of [10_000, 600_000, 1_800_000]) expect(switchBoxAction("t41c-k", BUSY, t + dt).act).toBe("none");
+    expect(switchBoxAction("t41c-k", SWITCH_MODEL, t + 1_800_500).act).toBe("press");
+  });
+
+  test("effort 意图同理", () => {
+    const t = Date.now();
+    noteEffortSwitchIntent("t41c-l", "high");
+    expireSettledIntents("t41c-l", IDLE, t + 6_000);
+    expect(consumeSwitchIntent("t41c-l", EFFORT, t + 7_000)).toBe(false);
+  });
+
+  test("按过的框关掉后，再弹一张同指纹的新框不当旧帧压掉", () => {
+    const t = Date.now();
+    noteModelSwitchIntent("t41c-m", "claude-sonnet-5");
+    expect(switchBoxAction("t41c-m", SWITCH_MODEL, t).act).toBe("press");
+    expect(switchBoxAction("t41c-m", IDLE, t + 1_000).act).toBe("none");
+    expect(switchBoxAction("t41c-m", SWITCH_MODEL, t + 2_000).act).toBe("notify");
   });
 });

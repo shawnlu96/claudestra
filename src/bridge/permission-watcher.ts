@@ -22,6 +22,7 @@ import {
   effortDialogLevel,
   modelFamilies,
   pressSwitchConfirm,
+  paneLooksIdle,
   MASTER_WINDOW_TARGET,
   type SwitchConfirmPrompt,
 } from "../lib/tmux-helper.js";
@@ -155,9 +156,11 @@ export { modelFamilies };
 
 /** 切模型意图表：bridge 自己注入 /model 时登记「agent → 目标模型」，watcher 见框先对意图——目标完全一致才代按。
  *  CC 用量保护会主动弹同款框提议降级（同家族旧版本也算），没有意图 / 目标对不上的框一律只通知。
- *  TTL 2h:/model 在 agent 忙时会排队到回合结束才弹(2026-07-28 实锤迟到数十分钟),
- *  60s 级 TTL 会漏;匹配即消费,一条意图只用一次。 */
+ *  意图只活在「命令还没被 CC 处理」这段：忙时 /model 排队到回合结束才弹(2026-07-28 实锤迟到数十分钟)，所以上限 2h；
+ *  但只要过了宽限、会话空闲又没框，命令就已经落地（或被吞），意图立刻作废（expireSettledIntents）。匹配即消费,只用一次。 */
 const SWITCH_INTENT_TTL_MS = 2 * 3600_000;
+/** 注入后到 CC 画出框之间的空当：这段时间看到的空闲屏不作数 */
+const SWITCH_INTENT_GRACE_MS = 5_000;
 const switchIntents = new Map<string, { model: string; ts: number }>();
 
 /** 注入 /model 的三条路径(web slash 直通/Discord slash/claude-settings 超时后)都要调。 */
@@ -192,7 +195,19 @@ export function consumeSwitchIntent(agentName: string, p: SwitchConfirmPrompt, n
   return hit;
 }
 
-/** 按过的那张框（agent → 指纹 + 时间）：按键后抓屏可能还是旧帧，同一张框在这段时间里不再按、也不报 */
+/**
+ * 过了宽限、会话空闲、屏上没有切换框 = 那条命令已经被 CC 处理掉（无框直接落地 / 被吞），意图作废：
+ * 之后再弹同目标的框就不是这条命令引出的（CC 自己的提议），只通知。忙着（命令还在排队）不动。
+ */
+export function expireSettledIntents(agentName: string, pane: string, now = Date.now()): void {
+  if (detectSwitchConfirmPrompt(pane) || !paneLooksIdle(pane)) return;
+  for (const table of [switchIntents, effortIntents] as Map<string, { ts: number }>[]) {
+    const it = table.get(agentName);
+    if (it && now - it.ts >= SWITCH_INTENT_GRACE_MS) table.delete(agentName);
+  }
+}
+
+/** 按过的那张框（agent → 指纹 + 时间）：按键后抓屏可能还是旧帧，同一张框在这段时间里不再按、也不报；框一消失就清掉 */
 const PRESSED_BOX_QUIET_MS = 20_000;
 const pressedBoxes = new Map<string, { fp: string; ts: number }>();
 
@@ -221,7 +236,11 @@ export type SwitchBoxAction =
 export function switchBoxAction(agentName: string, pane: string, now = Date.now()): SwitchBoxAction {
   // 识别收敛到 detectSwitchConfirmPrompt：只认底部真框（标题独占一行 + Yes/No 两项、看不到真输入框）
   const p = detectSwitchConfirmPrompt(pane);
-  if (!p) return { act: "none" };
+  if (!p) {
+    pressedBoxes.delete(agentName); // 框关过了：再弹一张同指纹的是新框，不能当旧帧压掉
+    expireSettledIntents(agentName, pane, now);
+    return { act: "none" };
+  }
   if (isPressedBox(agentName, pane, now)) return { act: "stale" };
   if (!consumeSwitchIntent(agentName, p, now)) return { act: "notify", p, box: screenFingerprint(pane) };
   notePressedBox(agentName, pane, now);
