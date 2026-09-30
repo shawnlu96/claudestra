@@ -93,10 +93,14 @@ describe("codex-update 的版本闸门（codex-acp 配套范围）", () => {
     expect(cmds).toEqual([]);
     expect(restarts).toBe(0);
   });
-  test("查不到 latest / 版本号不规整：502，绝不拼进 shell", async () => {
+  test("查不到 latest：502；版本号不是正式 x.y.z（预发布、夹带命令）：409，绝不拼进 shell", async () => {
     expect(await prepareCodexUpdate({ install, latest: async () => undefined })).toMatchObject({ status: 502 });
-    expect(await prepareCodexUpdate({ install, latest: async () => "0.158.0; rm x" })).toMatchObject({ status: 502 });
     expect(await prepareCodexUpdate({ install, latest: async () => { throw new Error("offline"); } })).toMatchObject({ status: 502 });
+    for (const bad of ["0.158.0; rm x", "0.158.3-alpha.1", "0.158.3\n"]) {
+      const r = await prepareCodexUpdate({ install, latest: async () => bad });
+      expect(r).toMatchObject({ status: 409 });
+      expect("command" in r).toBe(false);
+    }
   });
   test("找不到 codex 400", async () => {
     expect(await prepareCodexUpdate({ install: async () => null, latest: async () => "0.158.2" })).toMatchObject({ status: 400 });

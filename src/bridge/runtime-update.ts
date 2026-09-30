@@ -15,7 +15,7 @@ import { piBinName } from "../lib/pi-env.js";
 import { shellEscape } from "../lib/claude-launch.js";
 import { fetchLatestCodex, probeCodexInstall } from "../lib/codex-version.js";
 import { CODEX_ACP_PAIRS, CODEX_ACP_VERSION, codexPairsWithAdapter } from "../lib/acp/install.js";
-import { forgetInstalledCodex, forgetInstalledPi } from "../lib/update-hints.js";
+import { forgetInstalledCodex, forgetInstalledPi, isStableVersion } from "../lib/update-hints.js";
 import { apiJson, forbidden, isFullScope, notInScope } from "./api-respond.js";
 import { getAgentStatus, isBusyStatus } from "./event-bus.js";
 
@@ -49,7 +49,8 @@ export async function prepareCodexUpdate(
   if (!i) return { status: 400, error: "登录 shell 的 PATH 里找不到 codex" };
   if (!i.npm) return { status: 400, error: "Codex 不是 npm 全局安装（brew 等），请用原来的安装方式手动更新" };
   const latest = await d.latest().catch((e) => (console.warn("⚠️ [codex-update] 查 npm latest 失败:", e), undefined));
-  if (!latest || !/^\d+\.\d+\.\d+$/.test(latest)) return { status: 502, error: "查不到 npm 上 @openai/codex 的最新版本，稍后再试" };
+  if (!latest) return { status: 502, error: "查不到 npm 上 @openai/codex 的最新版本，稍后再试" };
+  if (!isStableVersion(latest)) return { status: 409, error: `npm 上的 Codex ${latest.slice(0, 40)} 不是正式版，不替你装` };
   if (!codexPairsWithAdapter(latest)) {
     return { status: 409, error: `npm 上的 Codex ${latest} 不在 codex-acp ${CODEX_ACP_VERSION} 的配套范围（${CODEX_ACP_PAIRS}），等适配器升级后再更新` };
   }

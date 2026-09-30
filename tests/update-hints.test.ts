@@ -198,6 +198,11 @@ describe("Codex × codex-acp 配套范围（0.158.x）", () => {
     expect(pickUpdateHint("codex", { running: "0.158.0", installed: "0.159.0", latest: "0.160.0", acp: true }))
       .toEqual({ kind: "codex-update", installed: "0.159.0", latest: "0.160.0", npm: false, adapterPairs: PAIRS });
   });
+  test("npm latest 是预发布版：不提示更新（端点也不装）；会话落后时照常给重启", () => {
+    expect(pickUpdateHint("codex", { installed: "0.158.0", latest: "0.158.3-alpha.1", npm: true })).toBeNull();
+    expect(pickUpdateHint("codex", { running: "0.158.0", installed: "0.158.2", latest: "0.158.3-alpha.1", npm: true, acp: true }))
+      .toEqual({ kind: "restart", running: "0.158.0", installed: "0.158.2" });
+  });
   test("闸门只管 Codex：Pi 的新版照常提示", () => {
     expect(pickUpdateHint("pi", { installed: "0.158.0", latest: "0.159.2" })).toEqual({ kind: "pi-update", installed: "0.158.0", latest: "0.159.2" });
   });

@@ -35,10 +35,14 @@ export function isNewerVersion(a?: string, b?: string): boolean {
   return false;
 }
 
+/** 正式版 x.y.z（不带 -alpha 之类的后缀）：codex 只提示升到正式版，端点也只装正式版 */
+export const isStableVersion = (v?: string): boolean => !!v && /^\d+\.\d+\.\d+$/.test(v);
+
 /**
  * 该给哪条提示。Pi / Codex 有新版时先提示更新——更新完重启一次，「运行版本落后」也一并解决。
  * Codex 的新版不配套适配器时，能直接点的「重启生效」优先；都不能点才给那条只有文字的。codex 是整机一份，
- * 所以「更新」对 tmux agent 也拦；「重启」只拦 ACP agent（tmux 的 TUI 不经适配器）。tests/update-hints.test.ts。
+ * 所以「更新」对 tmux agent 也拦；「重启」只拦 ACP agent（tmux 的 TUI 不经适配器）。npm latest 是预发布版时
+ * codex 不提示更新（端点也不装，给了按钮也点不成）。tests/update-hints.test.ts。
  */
 export function pickUpdateHint(
   runtime: string,
@@ -47,7 +51,7 @@ export function pickUpdateHint(
   let parked: UpdateHint | null = null;
   if (v.installed && v.latest && isNewerVersion(v.latest, v.installed)) {
     if (runtime === "pi") return { kind: "pi-update", installed: v.installed, latest: v.latest };
-    if (runtime === "codex") {
+    if (runtime === "codex" && isStableVersion(v.latest)) {
       const hint = { kind: "codex-update" as const, installed: v.installed, latest: v.latest, npm: !!v.npm };
       if (codexPairsWithAdapter(v.latest)) return hint;
       parked = { ...hint, adapterPairs: CODEX_ACP_PAIRS };
