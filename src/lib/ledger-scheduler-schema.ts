@@ -63,13 +63,13 @@ export function SCHEDULER_SESSIONS_SCHEMA(db: Database): void {
   db.prepare("CREATE INDEX IF NOT EXISTS scheduler_sessions_state ON scheduler_sessions(state)").run();
 }
 
-/** The merge/deploy journal survives an interrupted external command without authorizing blind retries. */
+/** The merge journal survives an interrupted external command without authorizing blind retries. */
 export function SCHEDULER_MERGES_SCHEMA(db: Database): void {
   db.prepare(`CREATE TABLE IF NOT EXISTS scheduler_merges (
     intentId TEXT PRIMARY KEY REFERENCES scheduler_intents(id), taskId TEXT NOT NULL REFERENCES tasks(id), project TEXT NOT NULL,
     prRef TEXT NOT NULL, expectedBranch TEXT NOT NULL, reviewedHead TEXT NOT NULL, requiredChecks TEXT NOT NULL,
-    phase TEXT NOT NULL CHECK (phase IN ('ready','updating','await_review','await_ci','merging','merged','deploying','deployed','verifying','done','unknown','resolved')),
-    rev INTEGER NOT NULL DEFAULT 1, mergeSha TEXT, deployReceipt TEXT, verifyReceipt TEXT, reason TEXT,
+    phase TEXT NOT NULL CHECK (phase IN ('ready','updating','await_review','await_ci','merging','merged','unknown','resolved')),
+    rev INTEGER NOT NULL DEFAULT 1, mergeSha TEXT, reason TEXT,
     createdAt INTEGER NOT NULL, updatedAt INTEGER NOT NULL
   )`).run();
   db.prepare("CREATE INDEX IF NOT EXISTS scheduler_merges_project_phase ON scheduler_merges(project, phase)").run();
@@ -82,7 +82,7 @@ export const SCHEDULER_COLUMNS = {
   scheduler_intents: ["id", "taskId", "project", "node", "action", "causalSeq", "eventSeq", "taskRev", "specRev", "status", "reason", "receipt"],
   scheduler_resources: ["project", "resource", "taskId", "intentId", "acquiredAt", "scope"],
   scheduler_sessions: ["taskId", "role", "agent", "sessionId", "family", "transport", "state", "createIntentId", "retireIntentId", "archiveReceipt", "killReceipt"],
-  scheduler_merges: ["intentId", "taskId", "project", "prRef", "expectedBranch", "reviewedHead", "requiredChecks", "phase", "rev", "mergeSha", "deployReceipt", "verifyReceipt", "reason"],
+  scheduler_merges: ["intentId", "taskId", "project", "prRef", "expectedBranch", "reviewedHead", "requiredChecks", "phase", "rev", "mergeSha", "reason"],
 } as const;
 export const SCHEDULER_INDEXES = {
   task_workflows: ["task_workflows_project"],

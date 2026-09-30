@@ -11,7 +11,6 @@ import { setWorkflow } from "../src/lib/ledger-scheduler-write.js";
 import { createTask } from "../src/lib/ledger-write.js";
 import { parseSchedulerConfig } from "../src/lib/scheduler-config.js";
 import { schedulerMergeTick } from "../src/lib/scheduler-service.js";
-import { schedulerCanVerify } from "../src/lib/scheduler-verify-gate.js";
 import { runLedger } from "../src/manager/ledger.js";
 import type { Registry } from "../src/manager/core.js";
 
@@ -40,28 +39,16 @@ function fixture() {
   return { db, ctx, close, path, dir };
 }
 
-describe("T68 durable merge/deploy queue", () => {
-  test("scheduler actor can write a merge journal and replay only its own verified result", async () => {
+describe("T68 durable merge queue", () => {
+  test("scheduler actor can write a merge journal but can no longer run ledger verify", async () => {
     const f = fixture();
     try {
-      const ctx = { actor: "scheduler", now: 101 };
-      expect(schedulerCanVerify(f.db, "T1")).toBe(false);
-      beginMergeRun(f.db, ctx, "merge-one", ["check"]);
+      beginMergeRun(f.db, { actor: "scheduler", now: 101 }, "merge-one", ["check"]);
       expect(f.db.query("SELECT actor FROM events WHERE kind='scheduler' ORDER BY seq DESC LIMIT 1").get()).toEqual({ actor: "scheduler" });
       f.db.query("UPDATE tasks SET stage='live' WHERE id='T1'").run();
-      f.db.query("UPDATE scheduler_merges SET phase='verifying', mergeSha=?, deployReceipt='build ok' WHERE intentId='merge-one'").run(M);
-      expect(schedulerCanVerify(f.db, "T1")).toBe(true);
-      f.db.query("UPDATE tasks SET stage='verified' WHERE id='T1'").run();
-      f.db.query("INSERT INTO events (ts,actor,project,target,kind,text,data,dedupKey) VALUES (101,'scheduler','p','T1','verify','',?,'scheduler:merge-one:verify')")
-        .run(JSON.stringify({ result: "pass" }));
-      expect(schedulerCanVerify(f.db, "T1", "scheduler:merge-one:verify")).toBe(true);
-      expect(schedulerCanVerify(f.db, "T1", "scheduler:other:verify")).toBe(false);
       const deps = { db: f.db, actor: "scheduler", projectIds: ["p"], loadRegistry: async () => ({} as Registry),
         saveRegistry: async () => {}, now: () => 101 };
-      expect(await runLedger(["verify", "T1", "--dedup", "scheduler:merge-one:verify"], deps)).toMatchObject({ ok: true, duplicate: true });
-      expect(await runLedger(["verify", "T1", "--dedup", "scheduler:other:verify"], deps)).toMatchObject({ ok: false, code: "forbidden" });
-      f.db.query("UPDATE scheduler_merges SET phase='unknown' WHERE intentId='merge-one'").run();
-      expect(schedulerCanVerify(f.db, "T1")).toBe(false);
+      expect(await runLedger(["verify", "T1", "--dedup", "scheduler:merge-one:verify"], deps)).toMatchObject({ ok: false, code: "forbidden" });
     } finally { f.close(); }
   });
   test("requires submitted intent, same reviewed head and project merge lock", () => {
@@ -116,7 +103,7 @@ describe("T68 durable merge/deploy queue", () => {
     } finally { f.close(); }
   });
 
-  test("merge and deployment receipts must be observed before done", () => {
+  test("merged is terminal: the task waits in merge for the PM to deploy, the tick settles the intent and frees the slot", async () => {
     const f = fixture();
     try {
       beginMergeRun(f.db, f.ctx, "merge-one", ["check"]);
@@ -124,16 +111,24 @@ describe("T68 durable merge/deploy queue", () => {
         receipt?: string, mergeSha?: string) => advanceMergeRun(f.db, f.ctx, { intentId: "merge-one", from, to, rev, receipt, mergeSha });
       step("ready", "await_ci", 1, "checks all green");
       step("await_ci", "merging", 2);
-      step("merging", "merged", 3, "PR merged", M);
-      step("merged", "deploying", 4);
-      step("deploying", "deployed", 5, "build abc123");
-      expect(f.db.query("SELECT stage FROM tasks WHERE id='T1'").get()).toEqual({ stage: "live" });
-      step("deployed", "verifying", 6);
-      f.db.query("UPDATE tasks SET stage='verified' WHERE id='T1'").run();
-      f.db.query("INSERT INTO events (ts,actor,project,target,kind,text,data) VALUES (101,'scheduler','p','T1','verify','',?)")
-        .run(JSON.stringify({ result: "pass" }));
-      expect(step("verifying", "done", 7, "verify checks pass")).toMatchObject({ phase: "done", mergeSha: M,
-        deployReceipt: "build abc123", verifyReceipt: "verify checks pass" });
+      expect(step("merging", "merged", 3, "PR merged", M)).toMatchObject({ phase: "merged", mergeSha: M });
+      expect(() => step("merged", "unknown", 4, "late doubt")).toThrow(/不能从/);
+      expect(f.db.query("SELECT stage FROM tasks WHERE id='T1'").get()).toEqual({ stage: "merge" });
+      expect(mergeQueueBusy(f.db)).toBe(false);
+      const calls: string[][] = [];
+      const manager = async (...args: string[]) => {
+        calls.push(args);
+        return runLedger(args.slice(1), { db: f.db, actor: "scheduler", projectIds: ["p"], loadRegistry: async () => ({} as Registry),
+          saveRegistry: async () => {}, now: () => 300 }) as Promise<Record<string, unknown>>;
+      };
+      const config = parseSchedulerConfig({ enabled: true, projects: { p: { maxActiveWorkers: 2, requiredChecks: ["check"], repoDir: "/tmp/p" } } });
+      const noExternal = () => { throw new Error("merged must not touch GitHub or deploy"); };
+      expect(await schedulerMergeTick(f.db, config, manager, noExternal)).toBe(1);
+      expect(calls.map((a) => a[1])).toEqual(["scheduler-settle"]);
+      expect(f.db.query("SELECT status, receipt FROM scheduler_intents WHERE id='merge-one'").get())
+        .toEqual({ status: "done", receipt: `merge:${M}; 待 PM 部署` });
+      expect(f.db.query("SELECT count(*) AS n FROM scheduler_resources WHERE intentId='merge-one'").get()).toEqual({ n: 0 });
+      expect(await schedulerMergeTick(f.db, config, manager, noExternal)).toBe(0);
     } finally { f.close(); }
   });
   test("preflight rejection records unknown intent instead of retrying it each poll", async () => {
@@ -144,14 +139,13 @@ describe("T68 durable merge/deploy queue", () => {
         calls.push(args);
         return args[1] === "scheduler-merge-begin" ? { ok: false, code: "invalid", error: "review missing" } : { ok: true };
       };
-      const config = parseSchedulerConfig({ enabled: true, projects: { p: { maxActiveWorkers: 2, requiredChecks: ["check"],
-        deploy: { cwd: "/tmp/p", argv: ["true"], verifyArgv: ["true"] } } } });
+      const config = parseSchedulerConfig({ enabled: true, projects: { p: { maxActiveWorkers: 2, requiredChecks: ["check"], repoDir: "/tmp/p" } } });
       expect(await schedulerMergeTick(f.db, config, manager)).toBe(1);
       expect(calls.map((args) => args[1])).toEqual(["scheduler-merge-begin", "scheduler-settle"]);
       expect(calls[1]).toContain("unknown");
     } finally { f.close(); }
   });
-  test("unknown freezes only the merge queue: update is free, and only a human manager with a receipt resolves it", async () => {
+  test("unknown freezes the queue and holds off update until a human manager resolves it with a receipt", async () => {
     const f = fixture();
     const reader = new LedgerReader(f.path), lock = { path: join(f.dir, "mutex"), marker: join(f.dir, "update.json"), reader };
     try {
@@ -160,9 +154,8 @@ describe("T68 durable merge/deploy queue", () => {
       advanceMergeRun(f.db, f.ctx, { intentId: "merge-one", from: "await_ci", to: "merging", rev: 2 });
       expect(mergeQueueBusy(f.db)).toBe(true);
       advanceMergeRun(f.db, f.ctx, { intentId: "merge-one", from: "merging", to: "unknown", rev: 3, receipt: "gh timeout" });
-      expect(mergeQueueBusy(f.db)).toBe(false);
-      const update = await acquireMaintenance("update", lock);
-      expect(update).not.toBeNull(); update!.release();
+      expect(mergeQueueBusy(f.db)).toBe(true);
+      expect(await acquireMaintenance("update", lock)).toBeNull();
       const cli = (actor: string, ...args: string[]) => runLedger(["scheduler-merge-resolve", "merge-one", ...args], {
         db: f.db, actor, projectIds: ["p"], loadRegistry: async () => ({} as Registry), saveRegistry: async () => {}, now: () => 200 });
       expect(await cli("scheduler", "--outcome", "failed", "--receipt", "PR still open")).toMatchObject({ ok: false, code: "forbidden" });
@@ -178,6 +171,9 @@ describe("T68 durable merge/deploy queue", () => {
       expect(ev.actor).toBe("owner");
       expect(JSON.parse(ev.data)).toMatchObject({ op: "merge_resolve", outcome: "failed", manual: true, queueFrozen: true });
       expect(await cli("owner", "--outcome", "done", "--receipt", "again")).toMatchObject({ ok: false, code: "conflict" });
+      expect(mergeQueueBusy(f.db)).toBe(false);
+      const update = await acquireMaintenance("update", lock);
+      expect(update).not.toBeNull(); update!.release();
     } finally { reader.close(); f.close(); }
   });
   test("resolving as done settles the merge intent done", async () => {
@@ -185,7 +181,7 @@ describe("T68 durable merge/deploy queue", () => {
     try {
       beginMergeRun(f.db, f.ctx, "merge-one", ["check"]);
       advanceMergeRun(f.db, f.ctx, { intentId: "merge-one", from: "ready", to: "unknown", rev: 1, receipt: "mergeState=BLOCKED" });
-      const r = await runLedger(["scheduler-merge-resolve", "merge-one", "--outcome", "done", "--receipt", "merged by PM abc; deploy verified"], {
+      const r = await runLedger(["scheduler-merge-resolve", "merge-one", "--outcome", "done", "--receipt", "gh pr view 42: MERGED abc"], {
         db: f.db, actor: "owner", projectIds: ["p"], loadRegistry: async () => ({} as Registry), saveRegistry: async () => {}, now: () => 200 });
       expect(r).toMatchObject({ ok: true, run: { phase: "resolved" } });
       expect(f.db.query("SELECT status FROM scheduler_intents WHERE id='merge-one'").get()).toEqual({ status: "done" });

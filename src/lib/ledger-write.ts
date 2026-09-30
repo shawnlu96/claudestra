@@ -41,7 +41,6 @@ import { insertEvent, replay, tx } from "./ledger-tx.js";
 import { activeStepFor, checkReviewHead, checkReviewStep, noteStepDelivered, noteStepReview } from "./ledger-steps-write.js";
 import { releaseFinishedCardLeases } from "./ledger-scheduler-lease.js";
 import { checkStructuredReview } from "./scheduler-review.js";
-import { schedulerCanVerify } from "./scheduler-verify-gate.js";
 
 export type { AppendableKind, ImportTaskInput, NewItem, NewTask, ReviewInput, StageMove, WriteCtx, WriteResult };
 
@@ -273,9 +272,7 @@ export function recordVerify(
     let task = mustTask(db, input.taskId);
     const dup = replay(db, ctx, { project: task.project, target: task.id, kind: "verify" }, () => task);
     if (dup) return dup;
-    if (!(ctx.actor === "scheduler" ? schedulerCanVerify(db, task.id) : isManager(db, ctx.actor, task))) {
-      throw new LedgerError("forbidden", `记完成检查要项目 ${task.project} 的 PM / master / owner 或已部署的调度运行（你是 ${ctx.actor}）`);
-    }
+    if (!isManager(db, ctx.actor, task)) throw new LedgerError("forbidden", `记完成检查要项目 ${task.project} 的 PM / master / owner（你是 ${ctx.actor}）`);
     if (task.stage !== "live") throw new LedgerError("conflict", `任务 ${task.id} 当前阶段是 ${task.stage}，不是 live`, { stage: task.stage, rev: task.rev });
     if (input.result === "pass" && !checksAllClear(input.data.checks, input.data.incomplete)) {
       throw new LedgerError("invalid", "结论是 pass 但检查单不全 / 为空，或有没通过也没豁免的项");

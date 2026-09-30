@@ -5,7 +5,7 @@ import { SchedulerStopped } from "../src/lib/scheduler-maintenance.js";
 
 const H = "a".repeat(40), M = "b".repeat(40);
 const base: MergeRun = { intentId: "i", taskId: "T1", project: "p", prRef: "https://github.com/a/b/pull/1",
-  reviewedHead: H, expectedBranch: "task/T1", requiredChecks: "check", phase: "ready", rev: 1, mergeSha: null, deployReceipt: null, verifyReceipt: null,
+  reviewedHead: H, expectedBranch: "task/T1", requiredChecks: "check", phase: "ready", rev: 1, mergeSha: null,
   reason: null, createdAt: 1, updatedAt: 1 };
 const pr = (p: Partial<PrSnapshot> = {}): PrSnapshot => ({ state: "OPEN", head: H, branch: "task/T1", base: "main", draft: false, crossRepository: false,
   mergeState: "CLEAN", mergeSha: null, checks: [{ name: "check", bucket: "pass" }], ...p });
@@ -17,17 +17,12 @@ function fixture(initial = base) {
     inspect: async () => { calls.push("inspect"); return snapshot; },
     updateBranch: async () => { calls.push("update"); },
     merge: async (_, expectedHead) => { expect(expectedHead).toBe(H); calls.push("merge"); snapshot = pr({ state: "MERGED", mergeSha: M }); return M; },
-    deploy: async () => { calls.push("deploy"); return "sent"; },
-    deployed: async () => { calls.push("deployed"); return { status: "deployed", receipt: "release-b" }; },
-    verifyLedger: async () => { calls.push("verify"); return "ledger-verified"; },
   };
   const advance = async (from: MergeRun["phase"], to: MergeRun["phase"], rev: number, receipt?: string, mergeSha?: string, newHead?: string) => {
     expect([from, rev]).toEqual([row.phase, row.rev]);
     if (to === "await_review") expect(newHead).toBe(M);
     calls.push(`journal:${to}`);
-    row = { ...row, phase: to, rev: row.rev + 1, reason: receipt ?? null,
-      mergeSha: mergeSha ?? row.mergeSha, deployReceipt: to === "deployed" ? receipt ?? null : row.deployReceipt,
-      verifyReceipt: to === "done" ? receipt ?? null : row.verifyReceipt };
+    row = { ...row, phase: to, rev: row.rev + 1, reason: receipt ?? null, mergeSha: mergeSha ?? row.mergeSha };
     return row;
   };
   return { get row() { return row; }, get snapshot() { return snapshot; }, set snapshot(x: PrSnapshot) { snapshot = x; }, calls, ops, advance };
@@ -54,36 +49,17 @@ describe("T68 merge driver", () => {
       expect(f.calls).toEqual(["inspect"]);
     }
   });
-  test("pending independent deployment survives restart without resubmit or freeze", async () => {
-    const f = fixture({ ...base, phase: "merged", mergeSha: M });
-    f.ops.deployed = async () => ({ status: "running" });
-    await driveMerge(f.row, f.ops, f.advance);
-    expect(f.row.phase).toBe("deploying");
-    await driveMerge(f.row, f.ops, f.advance);
-    expect(f.calls.filter((c) => c === "deploy")).toHaveLength(1);
-    expect(f.row.phase).toBe("deploying");
-    f.ops.deployed = async () => ({ status: "deployed", receipt: "four-services-new" });
-    await driveMerge(f.row, f.ops, f.advance);
-    expect(f.row.phase).toBe("deployed");
-  });
-  test("failed independent deployment freezes and is never submitted twice", async () => {
-    const f = fixture({ ...base, phase: "deploying", mergeSha: M });
-    f.ops.deployed = async () => ({ status: "failed", reason: "exit 1" });
-    await driveMerge(f.row, f.ops, f.advance);
-    expect(f.row.phase).toBe("unknown");
-    expect(f.calls).not.toContain("deploy");
-  });
-  test("CI and exact head are checked before merge; effects are journaled first", async () => {
+  test("CI and exact head are checked before merge; effects are journaled first; merged is terminal", async () => {
     const f = fixture();
     await driveMerge(f.row, f.ops, f.advance);
     await driveMerge(f.row, f.ops, f.advance);
     expect(f.row.phase).toBe("merged");
     expect(f.calls).toEqual(["inspect", "journal:await_ci", "inspect", "journal:merging", "inspect", "merge", "inspect", "journal:merged"]);
+    expect(f.row.reason).toContain("待 PM 部署");
+    const settled = f.calls.length;
     await driveMerge(f.row, f.ops, f.advance);
-    await driveMerge(f.row, f.ops, f.advance);
-    expect(f.row.phase).toBe("done");
-    expect(f.calls.indexOf("journal:deploying")).toBeLessThan(f.calls.indexOf("deploy"));
-    expect(f.calls.indexOf("journal:verifying")).toBeLessThan(f.calls.indexOf("verify"));
+    expect(f.row.phase).toBe("merged");
+    expect(f.calls).toHaveLength(settled); // No inspect, no deployment: the PM deploys by hand.
   });
   test("branch update changing head requires another review", async () => {
     const f = fixture();
@@ -102,7 +78,7 @@ describe("T68 merge driver", () => {
     expect(f.row.phase).toBe("unknown");
     expect(f.calls).not.toContain("merge");
   });
-  test("fork PR at the same head is not eligible for local deployment", async () => {
+  test("fork PR at the same head is not eligible for merge", async () => {
     const f = fixture();
     f.snapshot = pr({ crossRepository: true });
     await driveMerge(f.row, f.ops, f.advance);
@@ -131,17 +107,17 @@ describe("T68 merge driver", () => {
     expect(f.row.phase).toBe("unknown");
     expect(f.calls).not.toContain("merge");
   });
-  test("a retargeted PR after merge freezes before deployment", async () => {
+  test("a retargeted PR after merge freezes instead of reporting merged", async () => {
     const f = fixture({ ...base, phase: "merging", rev: 3 });
     f.snapshot = pr({ state: "MERGED", base: "other", mergeSha: M });
     await driveMerge(f.row, f.ops, f.advance);
     expect(f.row.phase).toBe("unknown");
-    expect(f.calls).not.toContain("deploy");
   });
-  test("restart in deploying observes deployment without rerunning it", async () => {
-    const f = fixture({ ...base, phase: "deploying", rev: 5, mergeSha: M });
+  test("restart in merging with a verified merge reaches merged without calling merge again", async () => {
+    const f = fixture({ ...base, phase: "merging", rev: 3 });
+    f.snapshot = pr({ state: "MERGED", mergeSha: M });
     await driveMerge(f.row, f.ops, f.advance);
-    expect(f.row.phase).toBe("deployed");
-    expect(f.calls).not.toContain("deploy");
+    expect([f.row.phase, f.row.mergeSha]).toEqual(["merged", M]);
+    expect(f.calls).not.toContain("merge");
   });
 });

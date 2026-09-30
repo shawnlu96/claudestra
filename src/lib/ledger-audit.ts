@@ -233,12 +233,12 @@ function shipStalled(ts: readonly TaskFacts[], frozen: boolean, unfrozenAt: numb
   }
 }
 
-/** unknown 不会自愈，也不再挡 update；冻结又让 ship_stalled 静音，所以单列一条推给 PM，直到人工结清 */
+/** unknown 不会自愈，且在结清前挡住所有 update；冻结又让 ship_stalled 静音，所以单列一条推给 PM，直到人工结清 */
 function mergeUnknown(runs: NonNullable<AuditSnapshot["mergeUnknown"]>, emit: Emit): void {
   for (const r of runs) {
     emit({ rule: "merge_unknown", taskId: r.taskId, since: r.since, keyParts: [r.intentId],
-      detail: `${r.taskId} 自动合并/部署结果不明：${r.reason.slice(0, 200)}`,
-      suggestion: `核对 PR 与部署目标后 ledger scheduler-merge-resolve ${r.intentId} --outcome done|failed|cancelled --receipt <证据>，再 unfreeze` });
+      detail: `${r.taskId} 自动合并结果不明（结清前挡 update）：${r.reason.slice(0, 200)}`,
+      suggestion: `核对 PR 后 ledger scheduler-merge-resolve ${r.intentId} --outcome done|failed|cancelled --receipt <证据>，再 unfreeze` });
   }
 }
 

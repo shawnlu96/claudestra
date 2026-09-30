@@ -1,4 +1,4 @@
-/** One bounded merge/deploy step per call. All external effects are preceded by a durable phase claim. */
+/** One bounded merge step per call. All external effects are preceded by a durable phase claim; `merged` is terminal. */
 import type { MergeRun, MergePhase } from "./scheduler-merge.js";
 import { SchedulerStopped } from "./scheduler-maintenance.js";
 
@@ -17,12 +17,7 @@ export interface MergeExternal {
   inspect(pr: string): Promise<PrSnapshot>;
   updateBranch(pr: string): Promise<void>;
   merge(pr: string, expectedHead: string): Promise<string>;
-  deploy(run: MergeRun): Promise<string>;
-  deployed(run: MergeRun): Promise<DeploymentObservation>;
-  verifyLedger(run: MergeRun): Promise<string>;
 }
-type DeploymentObservation = { status: "running" } | { status: "deployed"; receipt: string } |
-  { status: "unknown" | "failed"; reason: string };
 export type MergeAdvance = (from: MergePhase, to: MergePhase, rev: number, receipt?: string, mergeSha?: string, newHead?: string) => Promise<MergeRun>;
 
 const sameHead = (run: MergeRun, pr: PrSnapshot): boolean => pr.head.toLowerCase() === run.reviewedHead.toLowerCase();
@@ -31,7 +26,7 @@ const green = (run: MergeRun, checks: PrSnapshot["checks"]): boolean =>
   checks.every((c) => c.bucket !== "fail" && c.bucket !== "cancel" && c.bucket !== "pending");
 const short = (s: string) => s.slice(0, 12);
 
-/** A changed head always returns to review; an unobserved merge/deploy is never retried. */
+/** A changed head always returns to review; an unobserved merge is never retried. */
 export async function driveMerge(run: MergeRun, external: MergeExternal, advance: MergeAdvance,
   assertActive: () => void = () => {}): Promise<MergeRun> {
   let current = run;
@@ -40,7 +35,7 @@ export async function driveMerge(run: MergeRun, external: MergeExternal, advance
     current = await advance(current.phase, to, current.rev, receipt, mergeSha, newHead);
     return current;
   };
-  if (["done", "unknown", "resolved", "await_review"].includes(run.phase)) return run;
+  if (["merged", "unknown", "resolved", "await_review"].includes(run.phase)) return run;
   try {
     if (run.phase === "ready") {
       const pr = await external.inspect(run.prRef);
@@ -92,36 +87,18 @@ export async function driveMerge(run: MergeRun, external: MergeExternal, advance
       if (merged.state !== "MERGED" || merged.base !== "main" || !sameHead(run, merged) || merged.mergeSha !== mergeSha) {
         return step("unknown", "合并后 PR 目标分支、head 或合并提交无法核实");
       }
-      return step("merged", `PR 已合并 ${short(mergeSha)}`, mergeSha);
+      return step("merged", `PR 已合并 ${short(mergeSha)}，待 PM 部署`, mergeSha);
     }
     if (run.phase === "merging") {
       const pr = await external.inspect(run.prRef);
       return pr.state === "MERGED" && pr.base === "main" && pr.mergeSha && /^[a-f0-9]{40}$/i.test(pr.mergeSha) && sameHead(run, pr)
-        ? step("merged", `重启后核实 PR 已合并 ${short(pr.mergeSha)}`, pr.mergeSha)
+        ? step("merged", `重启后核实 PR 已合并 ${short(pr.mergeSha)}，待 PM 部署`, pr.mergeSha)
         : step("unknown", "合并曾发出但未能核实结果，不重复 gh pr merge");
     }
-    if (run.phase === "merged" || run.phase === "deploying") {
-      if (run.phase === "merged") {
-        await step("deploying");
-        assertActive();
-        await external.deploy(current);
-      }
-      const result = await external.deployed(current);
-      if (result.status === "running") return current;
-      return result.status === "deployed" ? step("deployed", result.receipt) : step("unknown", result.reason);
-    }
-    if (run.phase === "deployed") {
-      await step("verifying");
-      assertActive();
-      const receipt = await external.verifyLedger(run);
-      return step("done", receipt);
-    }
-    assertActive();
-    const receipt = await external.verifyLedger(run);
-    return step("done", receipt); // verify 只在适配器证明已有结果时返回；失败冻结而不重复部署
+    return run;
   } catch (e) {
     if (e instanceof SchedulerStopped) throw e; // Shutdown or lost ownership leaves the journal for the new controller to reconcile.
-    if (["unknown", "done"].includes(current.phase)) throw e;
+    if (["unknown", "merged"].includes(current.phase)) throw e;
     return step("unknown", `外部步骤失败：${(e as Error).message.slice(0, 450)}`);
   }
 }

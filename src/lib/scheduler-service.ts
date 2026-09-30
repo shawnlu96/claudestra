@@ -23,7 +23,7 @@ const requireOk = (result: Record<string, unknown>, what: string): Record<string
 
 /** One project is serial; journal rows plus project merge lock survive a daemon restart. */
 export async function schedulerMergeTick(db: Database, config: SchedulerConfig, manager: Manager = schedulerManager,
-  externalFactory: (project: SchedulerConfig["projects"][string], manager: Manager) => MergeExternal = mergeExternal,
+  externalFactory: (project: SchedulerConfig["projects"][string]) => MergeExternal = mergeExternal,
   assertOwner: () => void = () => {}): Promise<number> {
   if (!config.enabled) return 0;
   const lock = await acquireMaintenance("scheduler");
@@ -35,7 +35,7 @@ export async function schedulerMergeTick(db: Database, config: SchedulerConfig, 
 }
 
 async function mergeTick(db: Database, config: SchedulerConfig, manager: Manager,
-  externalFactory: (project: SchedulerConfig["projects"][string], manager: Manager) => MergeExternal, assertActive: () => void): Promise<number> {
+  externalFactory: (project: SchedulerConfig["projects"][string]) => MergeExternal, assertActive: () => void): Promise<number> {
   let handled = 0;
   for (const [project, policy] of Object.entries(config.projects)) {
     const intents = db.query(`SELECT id, status FROM scheduler_intents WHERE project=? AND action='merge'
@@ -59,13 +59,14 @@ async function mergeTick(db: Database, config: SchedulerConfig, manager: Manager
         }
         run = r.run as MergeRun;
       }
-      const drift = ["done", "unknown", "resolved", "await_review"].includes(run.phase) ? null : mergeRunDrift(db, run);
+      const drift = ["merged", "unknown", "resolved", "await_review"].includes(run.phase) ? null : mergeRunDrift(db, run);
       if (drift) {
         requireOk(await manager("ledger", "scheduler-merge-step", intent.id, "--from", run.phase, "--to", "unknown",
           "--rev", String(run.rev), "--receipt", drift), "freeze drifted merge run");
-      } else if (run.phase === "done") {
+      } else if (run.phase === "merged") {
+        // Settling frees the project merge slot; the task stays in `merge` until the PM deploys and moves it to live by hand.
         requireOk(await manager("ledger", "scheduler-settle", intent.id, "--from", "submitted", "--to", "done",
-          "--receipt", `merge:${run.mergeSha}; deploy:${run.deployReceipt?.slice(0, 200)}; verify:${run.verifyReceipt?.slice(0, 200)}`), "settle merge intent");
+          "--receipt", `merge:${run.mergeSha}; 待 PM 部署`), "settle merge intent");
       } else if (!["unknown", "resolved", "await_review"].includes(run.phase)) {
         const advance = async (from: MergePhase, to: MergePhase, rev: number, receipt?: string, mergeSha?: string, newHead?: string) => {
           const args = ["ledger", "scheduler-merge-step", intent.id, "--from", from, "--to", to, "--rev", String(rev)];
@@ -75,8 +76,7 @@ async function mergeTick(db: Database, config: SchedulerConfig, manager: Manager
           const result = requireOk(await manager(...args), "advance merge run");
           return result.run as MergeRun;
         };
-        const advanced = await driveMerge(run, externalFactory(policy, manager), advance, assertActive);
-        if (advanced.phase === "deploying") return handled + 1; // Release the submission lease before another project's slow GitHub calls.
+        await driveMerge(run, externalFactory(policy), advance, assertActive);
       }
       handled++;
     }

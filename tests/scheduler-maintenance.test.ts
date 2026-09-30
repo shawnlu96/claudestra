@@ -32,27 +32,19 @@ test("update lease and scheduler mutations exclude each other; in-flight reload 
     expect(await acquireMaintenance("scheduler", opts)).toBeNull();
   } finally { update?.release(); rmSync(root, { recursive: true, force: true }); }
 });
-test("in-flight deployment blocks update after daemon replacement; only the exact deployment intent can use update", async () => {
+test("in-flight or unknown merge blocks update after daemon replacement; a merged journal does not", async () => {
   const root = mkdtempSync(join(tmpdir(), "t68-maintenance-db-"));
   const path = join(root, "ledger.db"), db = new Database(path);
-  db.exec("PRAGMA user_version=1; CREATE TABLE scheduler_merges(intentId TEXT,phase TEXT); INSERT INTO scheduler_merges VALUES ('job','deploying')");
+  db.exec("PRAGMA user_version=1; CREATE TABLE scheduler_merges(intentId TEXT,phase TEXT); INSERT INTO scheduler_merges VALUES ('job','merging')");
   db.close();
   const opts = { path: join(root, "mutex"), marker: join(root, "update.json"), reader: new LedgerReader(path) };
   try {
     expect(await acquireMaintenance("update", opts)).toBeNull();
-    const job = await acquireMaintenance("update", { ...opts, ownIntent: "job" });
-    expect(job).not.toBeNull(); job!.release();
+    const set = (phase: string) => { const w = new Database(path); w.prepare("UPDATE scheduler_merges SET phase=?").run(phase); w.close(); };
+    set("unknown");
+    expect(await acquireMaintenance("update", opts)).toBeNull();
+    set("merged");
+    const update = await acquireMaintenance("update", opts);
+    expect(update).not.toBeNull(); update!.release();
   } finally { opts.reader.close(); rmSync(root, { recursive: true, force: true }); }
-});
-test("a launched deployment waits for its submitting tick to release the shared maintenance lease", async () => {
-  const root = mkdtempSync(join(tmpdir(), "t68-maintenance-handoff-"));
-  const opts = { path: join(root, "mutex"), marker: join(root, "update.json"), reader: new LedgerReader(join(root, "missing.db")) };
-  const scheduler = await acquireMaintenance("scheduler", opts);
-  try {
-    expect(scheduler).not.toBeNull();
-    const pending = acquireMaintenance("update", { ...opts, ownIntent: "same-deployment" });
-    await Bun.sleep(20); scheduler!.release();
-    const job = await pending;
-    expect(job).not.toBeNull(); job!.release();
-  } finally { scheduler?.release(); rmSync(root, { recursive: true, force: true }); }
 });
