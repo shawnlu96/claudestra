@@ -68,3 +68,27 @@ describe("目录信任框：通用自动确认一个键都不按，只由 lib/tr
     expect(both(`${effort}\n${numbered}`)).toEqual([false, false]);
   });
 });
+
+describe("权限框的问句里带尾注文字：裁段切不掉问句，照样不按（T44 r4 P2）", () => {
+  const perms = ["turn-zone/modal-permission.txt", "turn-zone/cc-perm-quoted.txt"];
+  test("问句带「Esc to cancel」「Enter to confirm」→ 不按（单行的 main 也不按；折成两行的 main 会按，现在裁剪线落在问句上就不按）", () => {
+    for (const f of perms) {
+      for (const q of [' Do you want to run grep -n "Esc to cancel" src?', ' Do you want to run grep -n "Enter to confirm" src?',
+        ' Do you want to run grep -rn "Esc to cancel"\n src/lib?']) {
+        const pane = fx(f).replace(" Do you want to proceed?", q);
+        expect([f, q, ...both(pane)]).toEqual([f, q, false, false]);
+      }
+    }
+  });
+  test("尾注文字只出现在命令正文、问句是普通的：不按", () => {
+    for (const f of perms) {
+      const pane = fx(f).replace(" Do you want to proceed?", '   grep -n "Esc to cancel" src\n Do you want to proceed?');
+      expect([f, ...both(pane)]).toEqual([f, false, false]);
+    }
+  });
+  test("旧信任框残影 + effort 框照常按（整屏先判的那几道不挡它）", () => {
+    const yesLit = fx("trust/cc2.1.284-trust.txt").replace(" ❯ No, exit", "   No, exit").replace("   Yes, I trust", " ❯ Yes, I trust").trimEnd();
+    const effort = " Use Fable 5.1 at high effort by default?\n   ❯ Keep xhigh\n     Switch Fable 5.1 to high effort\n\n   Enter to confirm · Esc to cancel";
+    expect(both(`${yesLit}\n${effort}`)).toEqual([true, true]);
+  });
+});

@@ -37,6 +37,16 @@ export function activeModalView(pane: string): string {
   return lines.slice(lines.slice(0, -1).findLastIndex((l) => MODAL_FOOTER_RE.test(l)) + 1).join("\n");
 }
 
+/**
+ * activeModalView 在哪一行裁的：没裁 = null，裁了 = 那一行是不是独占一行的尾注（「Enter to confirm · …」「Esc to cancel · …」开头）。
+ * 不是 = 裁在别的文字中间（权限框问句里带了这段字），裁出来的段不可信，通用自动确认一个键都不按（tests/modal-confirm.test.ts）
+ */
+export function activeModalCutClean(pane: string): boolean | null {
+  const lines = trimTrailingBlank(pane);
+  const cut = lines.slice(0, -1).findLastIndex((l) => MODAL_FOOTER_RE.test(l));
+  return cut < 0 ? null : /^\s*(?:Enter to confirm|Esc to cancel)\b/i.test(lines[cut]!);
+}
+
 /** 最后一个非空行是弹框尾注 = 屏幕底部此刻真有一个框。restart 复用旧窗口时旧 CC 最后一帧里的信任框文字不满足它（底下还有 shell / 新命令行） */
 export function modalFooterAtBottom(pane: string): boolean {
   return MODAL_FOOTER_RE.test(trimTrailingBlank(pane).at(-1) ?? "");
