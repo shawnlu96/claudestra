@@ -1,13 +1,14 @@
 /**
  * T31 r2：外源消息不参与网页侧任何按文本做的去重、还原、隐藏、改显示。
- * - 直播回声去重（chat-store addRemoteUserMessage → view-compose findUserEcho / isUserEcho）：外人重放 owner 最近说过的话，以前被当成回声吞掉，
+ * - 直播回声去重（chat-store addRemoteUserMessage → held-echo findEchoTarget / view-compose isUserEcho）：外人重放 owner 最近说过的话，以前被当成回声吞掉，
  *   agent 收到、owner 看不到；本人的发言也不能配上外源气泡。
  * - 乐观消息对账（survivingPending）：外源同文不能让 owner 还在排队的消息当成已送达消失。
  * - 附件行（history-shape / stream-shape foreignAware）：外源的 [attachment: 路径] 留在正文里，卡片只是附加预览。
  * - 引用条（message-text userQuoteParts）：只拆本人的。
  */
 import { describe, expect, test } from "bun:test";
-import { findUserEcho, isUserEcho, survivingPending } from "@/features/chat/view-compose";
+import { isUserEcho, survivingPending } from "@/features/chat/view-compose";
+import { findEchoTarget } from "@/features/chat/held-echo";
 import { userQuoteParts } from "@/features/chat/message-text";
 import { toChatMessages } from "@/lib/chat/history-shape";
 import { translate, type BridgeEvent } from "@/lib/chat/stream-shape";
@@ -15,7 +16,7 @@ import type { ChatMessage } from "@/features/chat/type";
 
 /** chat-store addRemoteUserMessage 的判重：找到回声就不画，否则追加一条他端气泡（根 tsc 解析不了 zenith，store 本身不在这里构造） */
 const add = (list: ChatMessage[], text: string, from?: string) => {
-  if (!findUserEcho(list, text, undefined, from)) list.push({ id: `ru_${list.length}`, role: "user", content: text, ...(from ? { from } : {}) });
+  if (!findEchoTarget(list, text, undefined, from)) list.push({ id: `ru_${list.length}`, role: "user", content: text, ...(from ? { from } : {}) });
   return list;
 };
 const rows = (list: ChatMessage[]) => list.map((m) => `${m.from ?? "我"}:${m.content}`);
