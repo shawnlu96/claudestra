@@ -69,6 +69,13 @@ export class HeldQueue extends PersistedMap<HeldItem[]> {
     if (n) console.log(`♻️ 恢复押后消息 ${n} 条（bridge 重启前没投出去的）`);
   }
 
+  /** 押着的消息里最大的到达号：号文件丢了、时钟回拨时给新号垫底（bridge.ts 启动时，lib/arrival-order.ts atLeast） */
+  maxArrivalSeq(): number {
+    let max = 0;
+    for (const q of this.values()) for (const i of q) max = Math.max(max, i.env.meta.arrivalSeq ?? 0);
+    return max;
+  }
+
   override set(channelId: string, items: HeldItem[]): this {
     if (items.length) return super.set(channelId, items);
     this.delete(channelId);

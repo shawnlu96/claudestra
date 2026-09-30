@@ -6,10 +6,10 @@
 import { isAfter, laterOf, type Order } from "../lib/arrival-order.js";
 import { PersistedMap } from "./persisted-map.js";
 
-/** at = 记下的墙钟（抬头显示、清理）；seq/t = 这次「停」的到达位置（老版本落的盘没有，按 0：比之后的一切都早）；goAt = 解除的墙钟（清理用） */
-type StopRec = { at: number; seq?: number; t?: number; goAt?: number; go?: Order };
+/** at = 记下的墙钟（抬头显示、清理）；seq/t/n = 这次「停」的到达位置（老版本落的盘没有，按 0：比之后的一切都早）；goAt = 解除的墙钟（清理用） */
+type StopRec = { at: number; seq?: number; t?: number; n?: number; goAt?: number; go?: Order };
 const isStopRec = (v: unknown) => !!v && typeof v === "object" && typeof (v as { at?: unknown }).at === "number";
-const orderOf = (s: StopRec): Order => ({ seq: s.seq ?? 0, ...(s.t !== undefined ? { t: s.t } : {}) });
+const orderOf = (s: StopRec): Order => ({ seq: s.seq ?? 0, ...(s.t !== undefined ? { t: s.t, n: s.n } : {}) });
 const released = (s: StopRec) => !!s.go && isAfter(s.go, orderOf(s));
 
 export class StopBook {
@@ -41,7 +41,7 @@ export class StopBook {
     const prev = this.stops.get(channelId);
     if (prev && !isAfter(order, orderOf(prev))) return;
     const go = this.lastSpoke(channelId);
-    const rec: StopRec = { at, seq: order.seq, ...(order.t !== undefined ? { t: order.t } : {}), ...(go ? { go } : {}) };
+    const rec: StopRec = { at, seq: order.seq, ...(order.t !== undefined ? { t: order.t, n: order.n } : {}), ...(go ? { go } : {}) };
     this.stops.set(channelId, released(rec) ? { ...rec, goAt: at } : rec);
   }
 
@@ -65,6 +65,13 @@ export class StopBook {
   /** 只清已解除、且解除超过 keepMs 的：还没解除的一直留着（Autopilot 要等 owner 开口） */
   prune(now: number, keepMs: number): void {
     for (const [ch, s] of this.stops) if (s.goAt !== undefined && now - s.goAt > keepMs) this.stops.delete(ch);
+  }
+
+  /** 盘上记过的最大到达号（叫停和解除它的开口）：号文件丢了、时钟回拨时给新号垫底（lib/arrival-order.ts atLeast） */
+  maxSeq(): number {
+    let max = 0;
+    for (const [, s] of this.stops) max = Math.max(max, s.seq ?? 0, s.go?.seq ?? 0);
+    return max;
   }
 
   private lastSpoke(channelId: string): Order | undefined {

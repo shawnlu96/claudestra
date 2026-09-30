@@ -80,6 +80,7 @@ export class TurnCuts {
     this.cuts = new PersistedMap<Cut>(path, "打断记录", isCut, []);
     this.stops = new StopBook(path && path.replace(/\.json$/, "-stops.json"), now);
     this.arrivals = new ArrivalOrder(path && path.replace(/\.json$/, "-seq.json"), now);
+    this.arrivals.atLeast(this.stops.maxSeq());
   }
 
   get(channelId: string): Cut | undefined {

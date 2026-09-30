@@ -1,12 +1,15 @@
 /**
  * lib/arrival-order.ts 与 bridge/turn-cuts.ts 的叫停记录（T13f）：先后只比到达序号；序号落盘、重启接着涨；
- * 终端里的事件晚两秒读到，按会话记录时刻回推位置，同一毫秒拿不准时判「停」在后。
+ * 终端里的事件晚两秒读到，按会话记录时刻回推位置：和 bridge 事件同一毫秒拿不准时判「停」在后；两条终端事件之间按时刻再按行序。
  */
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ArrivalOrder, isAfter, laterOf } from "../src/lib/arrival-order.js";
+import { ArrivalOrder, isAfter, laterOf, type SeqFile } from "../src/lib/arrival-order.js";
+import { arrivalSeqVerdict } from "../src/lib/doctor-arrival.js";
+import { HeldQueue } from "../src/bridge/held-queue.js";
+import type { Envelope } from "../src/bridge/router.js";
 import { TurnCuts } from "../src/bridge/turn-cuts.js";
 import type { ProgramInput } from "../src/lib/program-input.js";
 
@@ -56,7 +59,7 @@ describe("ArrivalOrder", () => {
     const mid = o.backdate(T0 + 500, false);
     expect(isAfter(mid, a) && isAfter(b, mid)).toBe(true);
     expect(isAfter(o.backdate(T0 + 600, true), mid)).toBe(true); // 同一段里的两条终端事件按时刻排
-    expect(isAfter(stopAtB, goAtB)).toBe(true);
+    expect(isAfter(goAtB, stopAtB)).toBe(true); // 两条终端事件之间按会话记录的先后（同一毫秒按行序），不看回推落点（P2-1）
   });
 });
 
@@ -149,5 +152,80 @@ describe("终端里的事件晚读到（wf2 stop-semantics-4）", () => {
     b.onEvent(typed(T0)); // T0 在终端里敲的，T0+2s 才读到
     await flush();
     expect(b.interruptHold("ch")).toBe("stopped");
+  });
+});
+
+describe("终端里同一毫秒的两行（T13f r1 P2-1）", () => {
+  test("先按 Esc、同一毫秒又敲了一句（两行都记在 T）：按读到的行序，后一行解除前一行的停；同一毫秒有没有 bridge 事件都一样", async () => {
+    for (const bridgeAtT of [false, true]) {
+      const { b, tick, at } = book();
+      const T = at();
+      if (bridgeAtT) b.arrivals.take(); // 同一毫秒 bridge 也领过号：停和不是停的回推落点不同，不能拿 seq 比
+      tick(2_000);
+      b.onEvent(interrupted(T));
+      b.onEvent(typed(T));
+      await Bun.sleep(5);
+      expect(b.get("ch")?.cause).toBe("terminal");
+      expect(b.interruptHold("ch")).toBeNull();
+    }
+  });
+
+  test("反过来：先敲一句、同一毫秒再按 Esc → 停着；更早的一行晚读到也盖不过更晚的停", async () => {
+    const { b, tick, at } = book();
+    const T = at();
+    tick(2_000);
+    b.onEvent(typed(T));
+    b.onEvent(interrupted(T));
+    await Bun.sleep(5);
+    expect(b.interruptHold("ch")).toBe("stopped");
+    b.onEvent(typed(T - 1)); // 更早那一刻的输入，这时才读到
+    await flush();
+    expect(b.interruptHold("ch")).toBe("stopped");
+  });
+
+  test("行序跟着叫停记录落盘：重启后同一毫秒的下一行照样认得先后", async () => {
+    const path = tmp("cuts.json");
+    const { b, tick, at } = book(path);
+    const T = at();
+    tick(2_000);
+    b.onEvent(interrupted(T));
+    await Bun.sleep(5);
+    const saved = JSON.parse(readFileSync(path.replace(/\.json$/, "-stops.json"), "utf-8")).ch;
+    expect(saved).toMatchObject({ t: T, n: expect.any(Number) });
+  });
+});
+
+describe("号不倒退（T13f r1 P2-2）", () => {
+  test("号文件丢了、时钟又往回拨：盘上叫停记录的号垫底，重启后 owner 开口照样解除", () => {
+    const path = tmp("cuts.json");
+    stop(book(path).b);
+    rmSync(path.replace(/\.json$/, "-seq.json"));
+    const again = new TurnCuts(path, () => T0 - 3_600_000);
+    expect(again.interruptHold("ch")).toBe("stopped");
+    again.noteHuman("ch", false);
+    expect(again.interruptHold("ch")).toBeNull();
+  });
+
+  test("押着的消息的号也垫底（bridge.ts 启动时）", () => {
+    const q = new HeldQueue(null);
+    const env = { to: { kind: "local", channelId: "ch" }, meta: { arrivalSeq: 5_000_000_000_000_000 } } as unknown as Envelope;
+    q.holdEnv(env);
+    const o = new ArrivalOrder(null, () => T0);
+    o.atLeast(q.maxArrivalSeq());
+    expect(o.take()).toBeGreaterThan(5_000_000_000_000_000);
+  });
+
+  test("两个 bridge 写同一份号文件：后发现的一方跳过对方预留的号，记下来；doctor 一天内报 warn", () => {
+    const path = tmp("seq.json");
+    const a = new ArrivalOrder(path, () => T0);
+    const b = new ArrivalOrder(path, () => T0);
+    const fromA = a.take();
+    const fromB = b.take();
+    expect(fromB).toBeGreaterThanOrEqual(fromA + 1_000);
+    const file = JSON.parse(readFileSync(path, "utf-8")) as SeqFile;
+    expect(file.foreign?.at).toBe(T0);
+    expect(arrivalSeqVerdict(file, T0 + 60_000)[0]).toMatchObject({ status: "warn", name: "到达序号" });
+    expect(arrivalSeqVerdict(file, T0 + 2 * 86_400_000)).toEqual([]);
+    expect(arrivalSeqVerdict({ ceiling: 1 }, T0)).toEqual([]);
   });
 });
