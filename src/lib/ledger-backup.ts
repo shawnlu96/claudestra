@@ -1,21 +1,24 @@
 /**
- * 台账迁移前的整库备份：库文件旁的 backups/ledger.sqlite.pre-v<目标版本>.bak，回滚 = 停服务后拿它换回 ledger.sqlite。
- * VACUUM INTO 是一致读（WAL 里已提交的都在），先写临时文件再 link 成正式名：link 不覆盖，并发首开时只有一个进程的留下，
- * 进程中途挂掉也不会留一个半截文件冒充备份。同名备份已在 = 这次升级之前已经备过，跳过（重开幂等）。
- * 备份失败就抛：调用方不迁移（fail-closed），库保持原版本，老代码照常能用。
+ * 台账迁移前的整库备份：库文件旁的 backups/，回滚 = 停服务后拿它换回 ledger.sqlite。判「要不要备」与 runMigrations 同口径：
+ * 版本落后（升级，备成 pre-v<目标版本>.bak），或版本已到而表 / 列 / 索引缺（并行分支撞了迁移编号，runMigrations 会重跑补齐；
+ * 备成 pre-v<目标版本>.repair-<缺什么的摘要>.bak——不能因为版本号已到就跳过，也不能拿升级那份旧备份顶替）。
+ * VACUUM INTO 是一致读，先写临时文件再 link 成正式名：link 不覆盖，并发首开只留一份，进程中途挂掉也不会留半截文件冒充备份。
+ * 同名备份已在 = 这次改库之前已经备过，跳过（重开 / 补迁移失败后重试都幂等）。备份失败就抛：调用方不迁移，库保持原样。
  */
 import type { Database } from "bun:sqlite";
+import { createHash } from "node:crypto";
 import { existsSync, linkSync, mkdirSync, rmSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 
-export function ledgerBackupPath(path: string, target: number): string {
-  return join(dirname(path), "backups", `${basename(path)}.pre-v${target}.bak`);
+export function ledgerBackupPath(path: string, target: number, repair = ""): string {
+  return join(dirname(path), "backups", `${basename(path)}.pre-v${target}${repair && `.repair-${repair}`}.bak`);
 }
 
-/** 需要时备份，返回备份文件路径；新库（v0）、内存库、已是目标版本都不备份，返回 null */
-export function backupBeforeMigrate(db: Database, path: string, from: number, target: number): string | null {
-  if (path === ":memory:" || from === 0 || from >= target) return null;
-  const dest = ledgerBackupPath(path, target);
+/** 需要时备份，返回备份文件路径；新库（v0）、内存库、版本已到且 schema 完整（这次打开不改库）都不备份，返回 null */
+export function backupBeforeMigrate(db: Database, path: string, from: number, target: number, missing: readonly string[]): string | null {
+  if (path === ":memory:" || from === 0 || (from >= target && missing.length === 0)) return null;
+  const repair = from >= target ? createHash("sha256").update(missing.join("\n")).digest("hex").slice(0, 8) : "";
+  const dest = ledgerBackupPath(path, target, repair);
   if (existsSync(dest)) return dest;
   const tmp = `${dest}.${process.pid}.${Date.now()}.tmp`;
   try {

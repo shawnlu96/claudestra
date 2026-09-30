@@ -1,7 +1,8 @@
 /**
  * feature + 子 DAG 版本的表（T84，设计稿 docs/design/feature-dag.md）。迁移规矩同 ledger-store.ts：一条语句一次 prepare().run()，
  * 每步可重跑（IF NOT EXISTS、加列先查列），因为版本号撞过时要从第 2 步起整体重跑补齐。
- * dag_versions 只追加：库里用 trigger 拦 UPDATE / DELETE——改 DAG 只能写一个新版本（只重写，不修改）。
+ * dag_versions 只追加：库里用 trigger 拦 UPDATE / DELETE，并拦同键 INSERT——REPLACE 的隐式删除默认不触发 DELETE trigger，
+ * 不拦就能用 INSERT OR REPLACE 换掉旧版本（tests/ledger-feature.test.ts「REPLACE / UPSERT」）。改 DAG 只能写一个新版本。
  */
 import type { Database } from "bun:sqlite";
 
@@ -30,6 +31,9 @@ const FEATURE_SQL: readonly string[] = [
     PRIMARY KEY (featureId, version), CHECK ((version = 1) = (reasonKind = 'initial')))`,
   "CREATE TRIGGER IF NOT EXISTS dag_versions_no_update BEFORE UPDATE ON dag_versions BEGIN SELECT RAISE(ABORT, 'dag versions are rewrite-only'); END",
   "CREATE TRIGGER IF NOT EXISTS dag_versions_no_delete BEFORE DELETE ON dag_versions BEGIN SELECT RAISE(ABORT, 'dag versions are rewrite-only'); END",
+  `CREATE TRIGGER IF NOT EXISTS dag_versions_no_replace BEFORE INSERT ON dag_versions
+    WHEN EXISTS (SELECT 1 FROM dag_versions WHERE featureId = NEW.featureId AND version = NEW.version)
+    BEGIN SELECT RAISE(ABORT, 'dag versions are rewrite-only'); END`,
 ];
 
 function columns(db: Database, table: string): Set<string> {

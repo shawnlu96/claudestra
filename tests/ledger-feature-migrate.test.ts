@@ -98,6 +98,29 @@ describe("v9 → v10", () => {
     raw.close();
   });
 
+  test("版本号已被别的分支占到目标版本、feature 表还缺：补迁移前也先备份，补齐后重开不再备份", () => {
+    const path = tmpPath();
+    makeV9(path);
+    const raw = new Database(path);
+    raw.prepare("CREATE TABLE other_branch (x TEXT)").run();
+    raw.exec(`PRAGMA user_version = ${LEDGER_SCHEMA_VERSION}`);
+    const tasks = dump(raw, "tasks", "rowid");
+    raw.close();
+    const hasFeatures = (d: Database) => !!d.prepare("SELECT 1 FROM sqlite_master WHERE name = 'features'").get();
+    expect(hasFeatures(openLedger(path))).toBe(true);
+    closeLedger(path);
+    const dir = join(path, "..", "backups");
+    const baks = readdirSync(dir);
+    expect(baks).toHaveLength(1);
+    const bak = new Database(join(dir, baks[0]), { readonly: true });
+    expect(hasFeatures(bak)).toBe(false);
+    expect(dump(bak, "tasks", "rowid")).toEqual(tasks);
+    bak.close();
+    openLedger(path);
+    closeLedger(path);
+    expect(readdirSync(dir)).toEqual(baks);
+  });
+
   test("新库（v0）不备份", () => {
     const path = tmpPath();
     openLedger(path);

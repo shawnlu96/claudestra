@@ -32,7 +32,7 @@
 | `createdAt` | |
 | `nodes` | 节点快照 JSON，见下 |
 
-表上 CHECK：`version = 1` 当且仅当 `reasonKind = 'initial'`。库里 trigger 拦 UPDATE / DELETE。
+表上 CHECK：`version = 1` 当且仅当 `reasonKind = 'initial'`。库里 trigger 拦 UPDATE / DELETE，也拦同键 INSERT（挡住 `INSERT OR REPLACE`：它的隐式删除默认不触发 DELETE trigger）。
 
 节点快照（`DagNode`，`src/lib/ledger-feature.ts`）：
 
@@ -63,7 +63,7 @@
 ## 迁移与备份
 
 - 走现有迁移数组，`LEDGER_SCHEMA_VERSION` 仍由数组长度算；每步可重跑（IF NOT EXISTS、加列先查列）。
-- `openLedger` 发现库版本低于代码版本时，先 `VACUUM INTO` 到 `backups/ledger.sqlite.pre-v<目标版本>.bak`（先写临时文件再 link，并发只留一份；同名已在就跳过）。备份失败就不迁移，库保持原版本。
+- `openLedger` 这次要改库就先 `VACUUM INTO` 备份（先写临时文件再 link，并发只留一份；同名已在就跳过），判断与迁移同口径：版本落后 → `backups/ledger.sqlite.pre-v<目标版本>.bak`；版本已到但表 / 列 / 索引缺（并行分支撞了迁移编号，要重跑补齐）→ `….pre-v<目标版本>.repair-<缺项摘要>.bak`。备份失败就不迁移，库保持原样。
 - 回滚：停服务，用备份换回 `ledger.sqlite`。旧代码能直接打开 v10 的库（只核自己要的表和列），一般不需要回滚。
 
 ## 写入口（CLI，`src/manager/ledger-feature-cmds.ts`）
@@ -82,7 +82,7 @@
 
 ## 「只重写」的四条规矩（L2 照此实现）
 
-1. **版本写入后不可改、不可删。** 库里 trigger 拦 UPDATE / DELETE；要改就写新版本。
+1. **版本写入后不可改、不可删。** 库里 trigger 拦 UPDATE / DELETE / 同键 INSERT（含 REPLACE、UPSERT）；要改就写新版本。
 2. **改图 = 整份重写成新版本。** 新版本带完整节点快照、原因类型、原因原文、发起人、批准人；除初版外都要有批准人（批准人能否是发起人本人由 L2 卡定）。
 3. **版本号连续，只能往前。** 新版本号 = `currentVersion + 1`，与 `features.rev` 的 CAS、`currentVersion` 的推进在同一事务；想退回旧图也是写一个内容同旧版的新版本。
 4. **已完成的节点只能原样继承。** 终态节点（done / cancelled）在新版里必须出现、一句话与依赖不变，并标 `inheritedFrom`；节点状态的真相永远在任务卡上，版本只记当时的样子。

@@ -14,7 +14,7 @@ import { STEPS_SCHEMA } from "./ledger-steps.js";
 import { toTeam, type TeamConfig } from "./ledger-team-config.js";
 import { statePath } from "./paths.js";
 import { SCHEDULER_COLUMNS, SCHEDULER_INDEXES, SCHEDULER_SCHEMA, SCHEDULER_SESSIONS_SCHEMA, SCHEDULER_MERGES_SCHEMA, SCHEDULER_TABLES } from "./ledger-scheduler-schema.js";
-import { runMigrations, schemaVersion, type SchemaSpec } from "./sqlite-migrate.js";
+import { missingSchema, runMigrations, schemaVersion, type SchemaSpec } from "./sqlite-migrate.js";
 import { backupBeforeMigrate } from "./ledger-backup.js";
 import { FEATURE_COLUMNS, FEATURE_INDEXES, FEATURE_SCHEMA, FEATURE_TABLES } from "./ledger-feature-schema.js";
 export { schemaVersion };
@@ -183,7 +183,7 @@ export function openLedger(path: string = LEDGER_PATH): Database {
       ensureWal(db);
       db.exec(`PRAGMA busy_timeout = ${BUSY_TIMEOUT_MS}`);
       db.exec("PRAGMA foreign_keys = ON");
-      backupBeforeMigrate(db, path, schemaVersion(db), LEDGER_SCHEMA_VERSION);
+      backupBeforeMigrate(db, path, schemaVersion(db), LEDGER_SCHEMA_VERSION, missingSchema(db, LEDGER_SCHEMA));
       runMigrations(db, LEDGER_SCHEMA);
       reconcileAssignees(db);
     });

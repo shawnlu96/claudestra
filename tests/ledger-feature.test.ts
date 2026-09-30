@@ -106,6 +106,19 @@ describe("dag-init", () => {
     expect(() => db.prepare("INSERT INTO dag_versions (featureId, version, reasonKind, proposedBy, createdAt, nodes) VALUES ('ab12-i28', 2, 'initial', 'x', 0, '[]')").run()).toThrow();
   });
 
+  test("REPLACE / UPSERT 也换不掉已有版本：快照与事件都不变", async () => {
+    await newFeature();
+    await run(PM, "dag-init", "i28", "--rev", "1", "--nodes", nodes([{ taskId: "T1" }]));
+    const before = db.prepare("SELECT * FROM dag_versions").all();
+    const evs = listEvents(db).length;
+    const row = "INTO dag_versions (featureId, version, reasonKind, proposedBy, createdAt, nodes) VALUES ('ab12-i28', 1, 'initial', 'x', 9, '[]')";
+    for (const sql of [`INSERT ${row}`, `INSERT OR REPLACE ${row}`, `REPLACE ${row}`, `INSERT ${row} ON CONFLICT (featureId, version) DO UPDATE SET nodes = excluded.nodes`]) {
+      expect(() => db.prepare(sql).run()).toThrow();
+    }
+    expect(db.prepare("SELECT * FROM dag_versions").all()).toEqual(before);
+    expect(listEvents(db).length).toBe(evs);
+  });
+
   test("CAS：带旧 rev 被拒，库不动", async () => {
     const id = await newFeature();
     await run(PM, "feature-set", id, "--rev", "1", "--words", "改过");
@@ -209,5 +222,19 @@ describe("事件来源", () => {
     expect(storedOrigin(db)).toBeNull();
     expect(ledgerOrigin(db, () => "cd34")).toBe("cd34");
     expect(ledgerOrigin(db, () => "ffff")).toBe("cd34");
+  });
+
+  test("事务回滚后不留前缀：同一事务里读到的未提交值不算数", () => {
+    closeLedger(":memory:");
+    db = openLedger(":memory:");
+    const rollback = db.transaction(() => {
+      expect(ledgerOrigin(db, () => "abcd")).toBe("abcd");
+      expect(ledgerOrigin(db, () => "abcd")).toBe("abcd");
+      throw new Error("回滚");
+    });
+    expect(() => rollback.immediate()).toThrow("回滚");
+    expect(storedOrigin(db)).toBeNull();
+    expect(ledgerOrigin(db, () => "ffff")).toBe("ffff");
+    expect(storedOrigin(db)).toBe("ffff");
   });
 });

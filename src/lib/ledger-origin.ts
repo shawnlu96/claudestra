@@ -2,6 +2,7 @@
  * 台账的本机前缀（docs/design/feature-dag.md §全局编号）：新对象（feature）的 id 和新事件的 origin 都带它，给以后同步到中心服务留位。
  * 取 STATE_DIR/instance-id 的前 4 位：它是专门的本机稳定 id（peer 握手也认它），不碰私钥文件；registry 没有实例名字段。
  * 第一次用到时写进库里的 ledger_instance 表固定下来：之后 instance-id 文件被换，已发出的 id / 事件序号也不漂。
+ * 每次现查库、不做进程内缓存：事务里读到的可能是本事务刚插、随后回滚的值，缓存会把它留下（tests/ledger-feature.test.ts「事务回滚」）。
  * 读不到 instance-id（读写失败）就返回 null：事件照写只是不带 origin，建 feature 会拒绝——绝不拿没落盘的随机值当前缀。
  */
 import type { Database } from "bun:sqlite";
@@ -9,8 +10,6 @@ import { instanceIdSync } from "./instance-id.js";
 
 const ORIGIN_KEY = "origin";
 const PREFIX_LEN = 4;
-
-const cache = new WeakMap<Database, string>();
 
 function hasTable(db: Database): boolean {
   return !!db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'ledger_instance'").get();
@@ -24,11 +23,7 @@ export function storedOrigin(db: Database): string | null {
 
 /** 本库的前缀；首次调用时从 instance-id 取并落库（INSERT OR IGNORE：并发首用时以先写进去的为准） */
 export function ledgerOrigin(db: Database, source: () => string = () => instanceIdSync().slice(0, PREFIX_LEN)): string | null {
-  const hit = cache.get(db);
-  if (hit) return hit;
   const stored = storedOrigin(db);
-  // 只缓存已落库的值：刚写进去的那次可能随外层事务回滚
-  if (stored) cache.set(db, stored);
   if (stored || !hasTable(db)) return stored;
   const fresh = source();
   if (!/^[0-9a-z]{4}$/.test(fresh)) return null;
