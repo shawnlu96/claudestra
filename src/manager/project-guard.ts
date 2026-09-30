@@ -42,3 +42,20 @@ export async function requireProjectWriter(targets: readonly string[]): Promise<
   const env = { channelId: process.env.DISCORD_CHANNEL_ID, controlChannelId: repoEnvVar("CONTROL_CHANNEL_ID") };
   return projectWriterError(env, (await loadRegistry()).agents, targets, LEDGER_PATH);
 }
+
+/**
+ * 只许 owner / master：出借 / 借入声明（lend.json）与取消「个人项目」标记——这两件决定的是「什么能交给别人的机器」，
+ * 不是某个项目内部的事，PM 与执行者都不该能改（设计稿 remote-capacity §1「只有 owner 能改」）。同样只防手滑。
+ */
+export function ownerOrMasterError(env: { channelId?: string; controlChannelId?: string }, agents: Record<string, { channelId?: string }>, what: string): Denied | null {
+  const who = resolveActor(env, agents);
+  if (who.ok && (who.actor === "owner" || who.actor === "master")) return null;
+  const params = { actor: who.ok ? who.actor : "?", what };
+  const tpl = "{actor} 不能{what}：只有 owner（网页 / 终端）或 master 能改";
+  return { error: tpl.replace(/\{(\w+)\}/g, (m, k: string) => params[k as keyof typeof params] ?? m), tpl, params };
+}
+
+export async function requireOwnerOrMaster(what: string): Promise<Denied | null> {
+  const env = { channelId: process.env.DISCORD_CHANNEL_ID, controlChannelId: repoEnvVar("CONTROL_CHANNEL_ID") };
+  return ownerOrMasterError(env, (await loadRegistry()).agents, what);
+}

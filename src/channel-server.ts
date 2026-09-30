@@ -13,7 +13,7 @@ import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { resolveBridgeUrl } from "./lib/bridge-url.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { installCrashGuard } from "./lib/crash-guard.js";
-import { decideAfterReplaced } from "./lib/link-policy.js";
+import { decideAfterReplaced, reconnectDelayMs, REJECTED_CLOSE_CODE } from "./lib/link-policy.js";
 import { channelServerMode, mcpCapabilities, shouldConnectBridge } from "./lib/channel-mode.js";
 import { REPO_ROOT } from "./lib/repo-root.js";
 import { channelInstructions } from "./lib/channel-instructions.js";
@@ -22,6 +22,7 @@ import { CodexQueueSink, decodePreambleEnv, codexParentGone, codexQueueArgs, def
 import { FORWARD_TO_AGENT_DESCRIPTION, SEND_TO_AGENT_DESCRIPTION } from "./lib/agent-tool-docs.js";
 import { CHECK_INBOX_TOOL, checkInboxTool, forwardTool, sendToAgentTool } from "./lib/agent-tool-calls.js";
 import { FLEET_TOOL, fleetTool } from "./lib/fleet-tool.js";
+import { callerRegisterFields, takeCallerCred, WHOAMI_TOOL, whoamiTool } from "./lib/whoami-tool.js";
 import { REPLY_ASK_PROPERTY, replyResultText } from "./lib/reply-ask-schema.js";
 
 // 进程级异常兜底。**故意不退出**：本进程没有任何守护者（Claude Code 不 respawn
@@ -38,6 +39,7 @@ import {
 // ============================================================
 
 const CHANNEL_ID = process.env.DISCORD_CHANNEL_ID || "";
+const CALLER_CRED = takeCallerCred(process.env); // T85 启动凭据：按环境里的路径读进内存、删文件删变量，子进程（codex queue 等）拿不到
 const BRIDGE_URL = resolveBridgeUrl();
 const MCP_NAME = process.env.MCP_NAME || "claudestra";
 // 仓库目录（拼 discord-reply.ts 兜底命令用）。曾可被 CLAUDESTRA_HOME 覆盖，但没有任何
@@ -65,7 +67,6 @@ const pendingRequests = new Map<
 >();
 let requestCounter = 0;
 let reconnectAttempts = 0;
-const MAX_RECONNECT_DELAY_MS = 60_000;
 
 // Codex 模式（CLAUDESTRA_RUNTIME=codex）：Codex 不认 notifications/claude/channel，
 // 入站改走 `codex queue`；其余（握手后注册、被顶替不退出、reply 等工具）与 CC 共用。
@@ -159,22 +160,18 @@ function registerFrame(): string {
     frame.agentName = AGENT_NAME || undefined;
     frame.sessionId = codexSessionId;
   }
+  Object.assign(frame, callerRegisterFields(CALLER_CRED, process.env)); // T85：身份由 bridge 按凭据判（docs/architecture/caller-identity.md）
   return JSON.stringify(frame);
 }
 
 function connectBridge(): Promise<void> {
-  // v2.2.0+: 每次新连接前重置 replaced latch。replaced 是模块级变量，之前从不重置，
-  // 一旦收到过一次（哪怕是重连竞态里发给上一条 ws 的）"replaced"，标记就永久 true，
-  // 之后**任何**断开都会 process.exit(0) → channel-server 进程死掉、Claude Code 不
-  // 自动 respawn → agent 跟 Discord 彻底断、只能手动 /mcp。这里在每次新连接开始时
-  // 清掉残留 latch，只让「当前这条连接确实被取代」时才退出。
+  // 每次新连接前重置 replaced latch：残留的旧标记会让之后任何一次断开都被当成「被取代」处理。
   replaced = false;
   return new Promise((resolve, reject) => {
     const ws = new WebSocket(BRIDGE_URL);
 
     ws.onopen = () => {
-      bridgeWs = ws;
-      reconnectAttempts = 0;
+      bridgeWs = ws; // 退避计数在 registered 才清零：连上就清的话，被拒（4002）的一方会每 3 秒撞一次
       // 注册频道。v1.9.21+ 带上 cwd → bridge 用它算 Claude Code jsonl 路径
       // (~/.claude/projects/<slug>/<sessionId>.jsonl)，用于 reply 缺失时兜底抽取
       // assistant 文字。
@@ -194,6 +191,7 @@ function connectBridge(): Promise<void> {
 
       if (msg.type === "registered") {
         registered = true;
+        reconnectAttempts = 0;
         if (IS_CODEX) markCodexReady();
         // 拿回频道了，但**先别急着清零**顶替计数。
         // 实测（45s 压力测试）：对面若是同样会重连的实例，立刻清零会让退避永远停在
@@ -288,12 +286,8 @@ function connectBridge(): Promise<void> {
         console.error(`⚠️ 被新连接顶替 —— ${d.reason}，${d.delayMs / 1000}s 后重新注册`);
         delay = d.delayMs;
       } else {
-        // 正常的指数退避重连：3s, 6s, 12s, 24s, 48s, 60s cap
-        reconnectAttempts++;
-        delay = Math.min(
-          3000 * Math.pow(2, Math.min(reconnectAttempts - 1, 5)),
-          MAX_RECONNECT_DELAY_MS
-        );
+        if (event.code === REJECTED_CLOSE_CODE) console.error(`⛔ bridge 拒绝注册（${event.reason}）：频道由已验证身份的会话持有，退避后再试，不退出`);
+        delay = reconnectDelayMs(++reconnectAttempts); // 普通断线与被拒（4002）同一条指数退避：3s → 60s
       }
       setTimeout(() => {
         connectBridge().catch(() => {});
@@ -601,8 +595,7 @@ one round trip instead of many.`,
         required: ["message_id", "target"],
       },
     },
-    CHECK_INBOX_TOOL,
-    FLEET_TOOL,
+    CHECK_INBOX_TOOL, FLEET_TOOL, WHOAMI_TOOL,
     {
       name: "ask_codex",
       description: `Ask the local OpenAI Codex agent (runs on this machine via ChatGPT.app's CLI, owner's subscription quota — use deliberately, never in loops).
@@ -748,6 +741,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (request) => {
     case "forward_to_agent": return forwardTool(bridgeRequest, args);
     case "send_to_agent": return sendToAgentTool(bridgeRequest, args);
     case "check_inbox": return checkInboxTool(bridgeRequest, args);
+    case "whoami": return whoamiTool(bridgeRequest); // T85 只读探针：bridge 认出的调用方身份
     case "fleet": return fleetTool(bridgeRequest, args); // 批量管理：谁能调由 bridge 按本连接注册的频道判（lib/fleet-caller.ts）
 
     default:

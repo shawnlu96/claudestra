@@ -12,6 +12,7 @@
 import { join } from "node:path";
 import { channelInstructions } from "../channel-instructions.js";
 import { shellEscape } from "../claude-launch.js";
+import { acpCallerCredAssignment } from "../caller-cred-launch.js";
 import { BOOTSTRAP_PROMPT, codexContextPreamble, codexDeveloperInstructions, codexEffort, codexModel } from "../codex-launch.js";
 import { encodePreambleEnv } from "../codex-thread.js";
 import { recordCodexRunning } from "../codex-version.js";
@@ -57,7 +58,8 @@ export function buildAcpHostCommand(spec: LaunchSpec, o: { bunBin: string; repoR
     ...(sandbox ? Object.entries(sandboxAcpHome(env[SANDBOX_ROOT_ENV])) : []),
   ];
   const prefix = pairs.filter(([, v]) => v).map(([k, v]) => `${k}=${shellEscape(v!)}`).join(" ");
-  return `${prefix}${pathOverrideAssignments(shellEscape, env)} ${shellEscape(o.bunBin)} ${shellEscape(join(o.repoRoot, "src/acp-host.ts"))}`;
+  const cred = acpCallerCredAssignment(spec.callerCredFile, shellEscape); // T85：路径只给宿主这一条命令，宿主起适配器前读走即删
+  return `${prefix}${cred}${pathOverrideAssignments(shellEscape, env)} ${shellEscape(o.bunBin)} ${shellEscape(join(o.repoRoot, "src/acp-host.ts"))}`;
 }
 
 /** create 的引导：起一个短命的适配器，新建线程并跑一轮，返回 thread id（不挂 claudestra MCP，频道相关的环境变量全清掉） */
@@ -117,6 +119,7 @@ export function createCodexAcpAdapter(overrides: Partial<CodexAdapterDeps> = {})
     turnEnd: "acp-host",
     exitCommand: "",
     noteTag: "codex",
+    callerCred: "env",
     isValidSessionId: isValidCodexSessionId,
     async available() {
       const agent = acpAgentCommand(process.env, deps().bunBin);
