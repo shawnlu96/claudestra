@@ -45,6 +45,10 @@ export function buildAcpHostCommand(spec: LaunchSpec, o: { bunBin: string; repoR
     ["CLAUDESTRA_CODEX_BIN", o.codexBin],
     ["CLAUDESTRA_ACP_MODEL", codexModel(spec.model) ?? undefined],
     ["CLAUDESTRA_ACP_EFFORT", codexEffort(spec.effort) ?? undefined],
+    ["CLAUDESTRA_ACP_DEVELOPER", encodePreambleEnv(codexDeveloperInstructions({
+      agentName: agent, purpose: spec.purpose, projectContext: spec.projectContext, channelRules: channelInstructions(o.repoRoot),
+    }))],
+    ["CLAUDESTRA_ACP_CLEAR_PREAMBLE", encodePreambleEnv(codexContextPreamble({ agentName: agent, purpose: spec.purpose, projectContext: spec.projectContext }))],
     // 重启 / 收编：developer_instructions 只在建线程那一轮生效，首条入站附前言（与 tmux 同一份文字）
     ["CLAUDESTRA_CODEX_PREAMBLE", spec.mode === "new" ? undefined : encodePreambleEnv(codexContextPreamble({ agentName: agent, purpose: spec.purpose, projectContext: spec.projectContext }))],
     // 沙箱外的手工覆盖（单测 / 排查）照带；沙箱里不带：适配器固定是本仓 stub，宿主这条链的 HOME 挪进沙箱根（lib/acp/stub.ts）

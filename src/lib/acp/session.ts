@@ -74,8 +74,8 @@ export class AcpSession {
   }
 
   /** 新建线程（只在 create 的引导里用：新线程要先跑一轮才落盘，见 runtimes/codex-acp.ts） */
-  async create(cwd: string): Promise<string> {
-    const r = await this.rpc.request("session/new", { cwd, mcpServers: [] }, { timeoutMs: 120_000 });
+  async create(cwd: string, timeoutMs = 120_000): Promise<string> {
+    const r = await this.rpc.request("session/new", { cwd, mcpServers: [] }, { timeoutMs });
     if (typeof r?.sessionId !== "string" || !r.sessionId) throw new Error("session/new 没返回 sessionId");
     this.sessionId = r.sessionId;
     this.configOptions = parseConfigOptions(r?.configOptions);
@@ -91,10 +91,10 @@ export class AcpSession {
     return this.sessionId;
   }
 
-  async prompt(text: string): Promise<PromptOutcome> {
+  async prompt(text: string, timeoutMs?: number): Promise<PromptOutcome> {
     const turnKey = `${this.sessionId}#${++this.turnSeq}`;
     try {
-      const r = await this.rpc.request("session/prompt", { sessionId: this.sessionId, prompt: [{ type: "text", text }] });
+      const r = await this.rpc.request("session/prompt", { sessionId: this.sessionId, prompt: [{ type: "text", text }] }, { timeoutMs });
       const air = airFailureOf(r);
       if (air) return { kind: "failed", failure: classifyAirFailure(air) };
       return r?.stopReason === "cancelled" ? { kind: "cancelled" } : { kind: "done" };
@@ -123,11 +123,11 @@ export class AcpSession {
   }
 
   /** 改会话配置（模型 / 推理强度…）：先本地校验，再调 set_config_option，成功后更新缓存 */
-  async setConfig(configId: string, value: string): Promise<{ ok: true } | { ok: false; error: string }> {
+  async setConfig(configId: string, value: string, timeoutMs = 30_000): Promise<{ ok: true } | { ok: false; error: string }> {
     const refusal = configRefusal(this.configOptions, configId, value);
     if (refusal) return { ok: false, error: refusal };
     try {
-      const r = await this.rpc.request("session/set_config_option", { sessionId: this.sessionId, configId, value }, { timeoutMs: 30_000 });
+      const r = await this.rpc.request("session/set_config_option", { sessionId: this.sessionId, configId, value }, { timeoutMs });
       const next = parseConfigOptions(r?.configOptions);
       if (next.length) this.configOptions = next;
       return { ok: true };

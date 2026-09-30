@@ -16,6 +16,7 @@ import {
   getAgentDoneAt,
   isPostTurnActivity,
   forgetAgent,
+  retireAgentSessionEvents,
   type BridgeEvent,
 } from "../src/bridge/event-bus.js";
 import { agentInScope, type Principal } from "../src/lib/principals.js";
@@ -128,6 +129,16 @@ describe("replayEventsSince", () => {
     mk("b");
     expect(replayEventsSince(0).length).toBe(2);
     expect(replayEventsSince(0, { agent: "b" }).length).toBe(1);
+  });
+
+  test("ACP clear 只移掉旧线程的回放，别的设备仍能收到排队人类消息和新线程输出", () => {
+    mk("a", "assistant_text", { text: "old", sid: "acp:old" });
+    mk("a", "chat_message", { text: "queued human" });
+    mk("a", "assistant_text", { text: "new", sid: "acp:new" });
+    mk("b", "assistant_text", { text: "other", sid: "acp:old" });
+    retireAgentSessionEvents("a", "old");
+    expect(replayEventsSince(0, { agent: "a" }).map((e) => e.data.text)).toEqual(["queued human", "new"]);
+    expect(replayEventsSince(0, { agent: "b" }).map((e) => e.data.text)).toEqual(["other"]);
   });
 
   test("环形淘汰：每 agent 只留最近 RING_LIMIT 条", () => {
