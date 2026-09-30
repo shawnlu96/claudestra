@@ -15,7 +15,7 @@ import { LEND_ROOT, prepareClone, removeOrderDir } from "./lend-clone.js";
 import { readLend } from "./lend-config.js";
 import { isWriteStep } from "./lend-git.js";
 import { ensurePr, probePush, pushWork } from "./lend-push.js";
-import { LEND_JOURNAL_PATH, liveOrders, openLendJournal, orderOf, unsettledOrders, type LendRow } from "./lend-journal.js";
+import { guardJournalWrites, LEND_JOURNAL_PATH, liveOrders, openLendJournal, orderOf, unsettledOrders, type LendRow } from "./lend-journal.js";
 import { readLendContext } from "./lend-policy.js";
 import { appendReceipt, receiptOf, tokensFor } from "./lend-receipts.js";
 import type { LendCall } from "./lend-remote.js";
@@ -137,11 +137,15 @@ function lendDeps(journal: Database, ledger: LedgerReader, active: () => void, l
       },
     },
     clone: (input) => owned(() => prepareClone(input)),
-    removeDir: (orderId) => { removeOrderDir(orderId); removeOrderDir(orderId, LEND_ROOT, "push"); },
+    removeDir: (orderId) => { active(); removeOrderDir(orderId); removeOrderDir(orderId, LEND_ROOT, "push"); },
     selfFp: () => { const k = instanceKeySync(); return k ? keyFingerprint(k.publicKey) : null; },
     identity: gitIdentity,
     push: { probe: (t) => owned(() => probePush(t)), work: (t) => owned(() => pushWork(t)), pr: (p) => owned(() => ensurePr(p)) },
-    writeReceipt: async (row) => void appendReceipt(receiptOf(row, await tokensFor(row.sessionId))),
+    writeReceipt: async (row) => {
+      const tokens = await tokensFor(row.sessionId);
+      active(); // 查用量要 await：写收据前贴着再核
+      appendReceipt(receiptOf(row, tokens));
+    },
     worker: {
       find: (name) => { const r = registryRow(name); return r ? { sessionId: r.sessionId, cwd: r.cwd } : undefined; },
       create: async (name, dir, purpose) => {
@@ -169,6 +173,8 @@ function lendDeps(journal: Database, ledger: LedgerReader, active: () => void, l
 
 /** pass 里 lend 这一步：每轮开一次 journal，跑完关（journal 是 WAL，lend submit 可以同时写） */
 export const lendStep = (ledger: LedgerReader) => async (active: () => void, lease?: SchedulerLease) => {
+  active(); // 打开 journal 会建目录 / 迁移：失租就连打开都不做
   const journal = openLendJournal();
+  guardJournalWrites(journal, active);
   try { return await (await import("./lend-loop.js")).lendTick(lendDeps(journal, ledger, active, lease)); } finally { journal.close(); }
 };

@@ -95,6 +95,11 @@ const SCHEMA: SchemaSpec = {
 /** claim 到的订单（OrderWire 的字段）；没 claim 过是 null */
 export const orderOf = (row: Pick<LendRow, "wire">): Record<string, unknown> | null => row.wire?.order ?? null;
 
+/** 调度服务的 lend 这一步挂上 active（lend-deps.ts）：每次写 journal 前同步核一次，与写之间不隔 await；失租 / 停止就抛、不写 */
+const writeGuards = new WeakMap<Database, () => void>();
+export const guardJournalWrites = (db: Database, check: () => void): void => void writeGuards.set(db, check);
+const checkWrite = (db: Database): void => writeGuards.get(db)?.();
+
 export function openLendJournal(path = LEND_JOURNAL_PATH): Database {
   if (path !== ":memory:") mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
   const db = new Database(path);
@@ -130,6 +135,7 @@ export function unsettledOrders(db: Database): LendRow[] {
 /** 新单：同一 orderId 已有就原样返回（重复 poll 看到同一张单不会开第二条），inserted 说明是不是这次建的 */
 export function recordAsked(db: Database, o: { orderId: string; peer: string; fp: string | null; family: string; preview: Record<string, unknown> },
   now = Date.now()): { row: LendRow; inserted: boolean } {
+  checkWrite(db);
   const r = db.query(`INSERT INTO lend_orders (orderId, peer, fp, family, state, preview, createdAt, updatedAt) VALUES (?, ?, ?, ?, 'asked', ?, ?, ?)
     ON CONFLICT(orderId) DO NOTHING`).run(o.orderId, o.peer, o.fp, o.family, JSON.stringify(o.preview), now, now);
   return { row: getOrder(db, o.orderId)!, inserted: r.changes === 1 };
@@ -156,6 +162,7 @@ export class JournalConflict extends Error {}
 
 /** 只改字段、不换状态：要求此刻仍在 from 里（CAS），否则 JournalConflict */
 export function patchOrder(db: Database, orderId: string, from: readonly LendState[], p: Patch, now = Date.now()): LendRow {
+  checkWrite(db);
   const { sets, vals } = patchSql(p);
   const marks = from.map(() => "?").join(",");
   const r = db.query(`UPDATE lend_orders SET ${[...sets, "updatedAt = ?"].join(", ")} WHERE orderId = ? AND state IN (${marks})`)
@@ -166,6 +173,7 @@ export function patchOrder(db: Database, orderId: string, from: readonly LendSta
 
 /** 推进状态：from → to 必须是 NEXT 表允许的一步，且此刻仍在 from（CAS）；终态写 reason */
 export function advance(db: Database, orderId: string, from: LendState | readonly LendState[], to: LendState, p: Patch = {}, now = Date.now()): LendRow {
+  checkWrite(db);
   const froms = typeof from === "string" ? [from] : from;
   const bad = froms.find((f) => !canMove(f, to));
   if (bad) throw new JournalConflict(`不能从 ${bad} 走到 ${to}`);
@@ -202,5 +210,6 @@ export function getMeta(db: Database, key: string): string | null {
 }
 
 export function setMeta(db: Database, key: string, value: string): void {
+  checkWrite(db);
   db.query("INSERT INTO lend_meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(key, value);
 }
