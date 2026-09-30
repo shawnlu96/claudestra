@@ -32,7 +32,7 @@ export function parseSchedulerConfig(raw: unknown): SchedulerConfig {
       throw new Error(`scheduler project ${id} needs maxActiveWorkers 1..32`);
     }
     if (!Array.isArray(p.requiredChecks) || p.requiredChecks.length < 1 || p.requiredChecks.length > 20 ||
-      p.requiredChecks.some((x) => typeof x !== "string" || !/^[\w .:/-]{1,80}$/.test(x))) {
+      p.requiredChecks.some((x) => !isCheckName(x))) {
       throw new Error(`scheduler project ${id} needs 1..20 requiredChecks names`);
     }
     // Refusing beats ignoring: a config written for automatic deployment must not silently run merge-only.
@@ -45,6 +45,13 @@ export function parseSchedulerConfig(raw: unknown): SchedulerConfig {
   }
   if (r.enabled && Object.keys(projects).length === 0) throw new Error("enabled scheduler needs at least one project");
   return { enabled: r.enabled, pollMs: pollMs as number, projects };
+}
+
+// Names are compared verbatim (case and spaces) with `gh pr checks` job names such as "typecheck + test + guard".
+// A comma is refused because the merge journal and `scheduler-merge-begin --required-checks` store the list comma-joined;
+// padding is refused because it could never match and would park the PR in await_ci forever.
+function isCheckName(x: unknown): boolean {
+  return typeof x === "string" && x.length >= 1 && x.length <= 80 && x === x.trim() && !x.includes(",") && !/[\p{Cc}\p{Cf}]/u.test(x);
 }
 
 export function readSchedulerConfig(path = SCHEDULER_CONFIG_PATH): SchedulerConfig {
