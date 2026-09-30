@@ -12,6 +12,7 @@ import { insertEvent, tx } from "./ledger-tx.js";
 import { releaseFinishedCardLeases } from "./ledger-scheduler-lease.js";
 import { cardWorkerSlots } from "./scheduler-worker-slot.js";
 import { currentReviewFacts } from "./scheduler-review.js";
+import { templateFor } from "./scheduler-template.js";
 import { bindHash, checkAsk } from "./ask-bind.js";
 import { getAsk, ownerAnswered } from "./ledger-asks.js";
 
@@ -96,7 +97,7 @@ export function setWorkflow(db: Database, ctx: WriteCtx, input: WorkflowInput): 
     if (takeover && !input.reason?.trim()) throw new LedgerError("invalid", "从 auto 退回人工要带 --reason（为什么接管），记进台账");
     if (!WORKFLOW_TEMPLATES.includes(input.template) || !WORKFLOW_MODES.includes(input.mode)) throw new LedgerError("invalid", "流程模板或模式不认识");
     if (!AUTHOR_FAMILIES.includes(input.authorFamily)) throw new LedgerError("invalid", "作者模型家族只认 claude / codex");
-    if (input.templateVersion !== 2) throw new LedgerError("invalid", "当前只认模板版本 2");
+    if (!templateFor(input.template, input.templateVersion)) throw new LedgerError("invalid", `模板 ${input.template} 没有版本 ${input.templateVersion}（code 有 2 / 3，ui、security 只有 2）`);
     const fallback = textOneLine(input.fallback, "退路方案", 600);
     const data = { template: input.template, templateVersion: input.templateVersion, mode: input.mode, authorFamily: input.authorFamily, fallback };
     const unchanged = existing && existing.specRev === task.specRev && Object.entries(data).every(([k, v]) => existing[k as keyof TaskWorkflow] === v);

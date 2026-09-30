@@ -2,7 +2,7 @@
 import type { LedgerEvent, LedgerTask, Stage } from "./ledger-stages.js";
 import { resourceKey, resourcesOverlap, type AuthorFamily, type SchedulerIntent, type TaskWorkflow } from "./ledger-scheduler.js";
 import { currentReviewFacts, p1AnyStreak, p1FindingStreak, type ReviewFacts, type ReviewFinding } from "./scheduler-review.js";
-import { FLOW_TEMPLATES, nodeAt, type FlowNode } from "./scheduler-template.js";
+import { FLOW_TEMPLATES, nodeAt, restateRecordedGate, templateFor, type FlowNode } from "./scheduler-template.js";
 import { cardWorkerSlots } from "./scheduler-worker-slot.js";
 
 export interface WorkerRef {
@@ -307,6 +307,8 @@ function stageStep(s: PlannerSnapshot, node: FlowNode): PlannerDecision {
       e.data.op === "restate_approved" && e.data.specRev === s.task.specRev);
     if (!approved) return wait("pm_restate", "等待 PM 放行复述");
   }
+  const restate = node.gate === "restate_recorded" ? restateRecordedGate(s.task, s.events, latestSeq(s.events, s.task)) : null;
+  if (restate) return restate;
   if (node.stage === "live" && s.events.some((e) => e.kind === "verify" && e.seq >= latestSeq(s.events, s.task) && e.data.result !== "pass")) {
     return escalate("verify_failed", "完成检查单未通过，不能自动重跑");
   }
@@ -321,7 +323,7 @@ function stageStep(s: PlannerSnapshot, node: FlowNode): PlannerDecision {
 export function planScheduler(s: PlannerSnapshot): PlannerDecision {
   const { task, workflow } = s;
   if (!workflow || workflow.mode === "manual") return wait("manual", "任务由 PM 人工推进");
-  if (task.kind !== "code" || workflow.templateVersion !== 2 || workflow.taskId !== task.id || workflow.specRev !== task.specRev) {
+  if (task.kind !== "code" || !templateFor(workflow.template, workflow.templateVersion) || workflow.taskId !== task.id || workflow.specRev !== task.specRev) {
     return escalate("workflow_drift", "流程模板、任务类型或规格版本已变，自动推进暂停");
   }
   if (!["claude", "codex"].includes(workflow.authorFamily) || !workflow.fallback.trim()) return escalate("spec_missing", "作者模型家族或退路方案缺失");
@@ -330,7 +332,7 @@ export function planScheduler(s: PlannerSnapshot): PlannerDecision {
   if (task.stage === "blocked") return wait("blocked", "任务已阻塞，等 PM 解除");
   if (s.queueFrozen && ["spec", "build", "fix", "merge"].includes(task.stage)) return wait("queue_frozen", "项目队列已冻结，不派新活");
   if (s.blockedBy.length) return wait("dependency", `等待前置任务：${s.blockedBy.join("、")}`);
-  const template = FLOW_TEMPLATES[workflow.template];
+  const template = templateFor(workflow.template, workflow.templateVersion);
   const node = template && nodeAt(template, task.stage);
   if (!node) return escalate("stage_unknown", `模板 ${workflow.template} 不认识阶段 ${task.stage}`);
   const decision = task.stage === "spec" || task.stage === "build" || task.stage === "fix" ? dispatchWork(s, node)
