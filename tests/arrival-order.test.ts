@@ -260,6 +260,16 @@ describe("盘上写坏的号不卡死（T13f r2 P2-1）", () => {
     expect(JSON.parse(readFileSync(stops, "utf-8")).ch2.go).toBeUndefined();
   });
 
+  test("已解除的停，开口号是坏的：仍算已解除，不变回停着（T13f r3 P2）", () => {
+    const path = tmp("cuts.json");
+    const stops = path.replace(/\.json$/, "-stops.json");
+    writeFileSync(stops, JSON.stringify({ ch: { at: T0, seq: 5, go: { seq: 1e300 }, goAt: T0 + 1 }, term: { at: T0, seq: 7, t: T0, n: 3, go: { seq: "x" }, goAt: T0 + 1 } }));
+    const { b } = book(path);
+    expect(b.interruptHold("ch")).toBeNull();
+    expect(b.interruptHold("term")).toBeNull();
+    expect(JSON.parse(readFileSync(stops, "utf-8")).ch.go).toEqual({ seq: 6 });
+  });
+
   test("押后队列里的到达号是 1e300 / 字符串：去掉并写回盘，垫底只看好的", () => {
     const path = tmp("held.json");
     const item = (seq: unknown) => ({ env: { to: { kind: "local", channelId: "ch" }, from: { kind: "api" }, meta: { arrivalSeq: seq } }, to: { channelId: "ch" }, heldAt: T0 });

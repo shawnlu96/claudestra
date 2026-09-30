@@ -22,14 +22,19 @@ export class StopBook {
     for (const [ch, s] of [...this.stops]) this.scrub(ch, s);
   }
 
-  /** 盘上写坏的号（lib/arrival-order.ts plausibleSeq）：停按老版本没号的算（之后的开口都能解），坏的开口丢掉；留着的话这条停永远解不开 */
+  /**
+   * 盘上写坏的号（lib/arrival-order.ts plausibleSeq）：停按老版本没号的算（之后的开口都能解）；留着的话这条停永远解不开。
+   * 坏的开口：已解除过（有 goAt）的换成紧跟在停后面的号，仍算已解除——丢掉的话已解除的停会变回停着，Autopilot 卡到 24 小时清理
+   */
   private scrub(channelId: string, s: StopRec): void {
     const badStop = s.seq !== undefined && !plausibleSeq(s.seq);
     const badGo = s.go !== undefined && !plausibleSeq(s.go.seq);
     if (!badStop && !badGo) return;
     console.error(`🚨 叫停记录 ${channelId} 里的到达号不合理（停 ${s.seq}，开口 ${s.go?.seq}），坏的去掉`);
     const { seq, t, n, go, ...rest } = s;
-    this.stops.set(channelId, { ...rest, ...(badStop ? {} : { seq, t, n }), ...(badGo ? {} : { go }) });
+    const kept = badStop ? {} : { seq, t, n };
+    const fixedGo = !badGo ? go : s.goAt !== undefined ? { seq: (kept.seq ?? 0) + 1 } : undefined;
+    this.stops.set(channelId, { ...rest, ...kept, ...(fixedGo ? { go: fixedGo } : {}) });
   }
 
   /** owner 说了不是停的话（到达位置 order）：只解除在它之前到的停——作答的回调 await 了一阵才走到这里，之后才到的停不解 */
