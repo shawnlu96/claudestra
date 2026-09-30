@@ -112,3 +112,31 @@ describe("T68g deploy worker", () => {
     expect(existsSync(join(r.dir, "result.json"))).toBe(false);
   });
 });
+
+describe("T68g deploy worker, booted out", () => {
+  test("P1 killed mid-deploy: SIGTERM leaves a result and frees the lease before exiting, the running step dies with it", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "t68g-sigterm-"));
+    try {
+      const path = join(dir, "request.json"), lockDir = join(dir, "lock");
+      writeJsonAtomicSync(path, { intentId: "m9", mergeSha: SHA, taskId: "T9", prRef: "https://github.com/a/b/pull/7",
+        label: `com.claudestra.scheduler.deploy.${"a".repeat(32)}`, repoDir: dir, relayArgv: null, restartLabels: LABELS,
+        timeoutMs: 600_000, createdAt: Date.now(), env: {} });
+      const src = `const { runDeployJob } = await import(${JSON.stringify(join(import.meta.dir, "../src/lib/scheduler-deploy-worker.ts"))});
+        const { acquireLock } = await import(${JSON.stringify(join(import.meta.dir, "../src/lib/file-lock.ts"))});
+        const { runBounded } = await import(${JSON.stringify(join(import.meta.dir, "../src/lib/run-bounded.ts"))});
+        const acquire = async () => Object.assign(await acquireLock(${JSON.stringify(lockDir)}, 0), { path: ${JSON.stringify(lockDir)} });
+        const run = (argv, o) => argv.includes("--abbrev-ref") ? runBounded(["/bin/sh", "-c", "echo $$ > ${dir}/step.pid; exec sleep 60"], o) : runBounded(argv, o);
+        await runDeployJob(${JSON.stringify(path)}, { acquire, run });`;
+      const child = Bun.spawn(["bun", "-e", src], { stdout: "ignore", stderr: "ignore" });
+      for (let i = 0; i < 100 && !existsSync(join(dir, "step.pid")); i++) await Bun.sleep(50);
+      const stepPid = Number(readFileSync(join(dir, "step.pid"), "utf8"));
+      expect(existsSync(lockDir)).toBe(true);
+      child.kill("SIGTERM");
+      expect(await child.exited).toBe(143);
+      expect(JSON.parse(readFileSync(join(dir, "result.json"), "utf8"))).toMatchObject({ ok: false, summary: expect.stringMatching(/SIGTERM/) });
+      expect(existsSync(lockDir)).toBe(false);
+      await Bun.sleep(100);
+      expect(() => process.kill(stepPid, 0)).toThrow();
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+});

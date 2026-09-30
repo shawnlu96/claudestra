@@ -37,6 +37,14 @@ export async function runDeployJob(requestPath: string, deps: WorkerDeps = {}): 
     write(o);
     return o;
   }
+  // Booted out (deadline, or by hand): leave a result and free the lease before dying, so the scheduler can conclude at once
+  // instead of waiting for the lease to go stale. runBounded's own handler has already killed the running step's group.
+  const onTerm = () => {
+    write({ ok: false, summary: "部署任务收到 SIGTERM（被卸下），中途停止", steps: [], relay: "not_needed", head: null });
+    lease.release();
+    process.exit(143);
+  };
+  process.once("SIGTERM", onTerm);
   try {
     writeJsonAtomicSync(join(dir, "lease.json"), { path: lease.path, token: lease.token, pid: process.pid, at: now() }, { mode: 0o600 });
     let outcome: StepsOutcome;
@@ -48,5 +56,5 @@ export async function runDeployJob(requestPath: string, deps: WorkerDeps = {}): 
     }
     write(outcome); // before the lease goes: once the lease is free, a result is already on disk
     return outcome;
-  } finally { lease.release(); }
+  } finally { process.off("SIGTERM", onTerm); lease.release(); }
 }
