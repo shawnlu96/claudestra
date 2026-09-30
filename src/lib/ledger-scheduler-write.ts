@@ -7,9 +7,13 @@ import {
   WORKFLOW_MODES, WORKFLOW_TEMPLATES, type AuthorFamily, type IntentAction, type IntentStatus, type SchedulerIntent,
   type TaskWorkflow, type WorkflowMode, type WorkflowTemplate,
 } from "./ledger-scheduler.js";
-import { getEventByDedup, getMeta, LedgerError, listDeps, listTasks } from "./ledger-store.js";
+import { getEventByDedup, getMeta, LedgerError, listDeps, listEvents, listTasks } from "./ledger-store.js";
 import { insertEvent, tx } from "./ledger-tx.js";
 import { releaseFinishedCardLeases } from "./ledger-scheduler-lease.js";
+import { cardWorkerSlots } from "./scheduler-worker-slot.js";
+import { currentReviewFacts } from "./scheduler-review.js";
+import { bindHash, checkAsk } from "./ask-bind.js";
+import { getAsk } from "./ledger-asks.js";
 
 const textOneLine = (value: string, label: string, max: number): string => {
   const out = value.trim();
@@ -25,6 +29,40 @@ const actorMayConfigure = (db: Database, actor: string, project: string): boolea
 const actorMaySchedule = (db: Database, actor: string, project: string): boolean =>
   actor === "scheduler" || actorMayConfigure(db, actor, project);
 const cardResource = (action: IntentAction, resource: string): boolean => action === "dispatch" && !resource.startsWith("task:");
+
+function requireReviewedMerge(db: Database, task: ReturnType<typeof mustTask>, workflow: TaskWorkflow, node: string, now: number): void {
+  if (task.stage !== "merge" || node !== "merge_deploy") throw new LedgerError("invalid", "merge 意图只许在 merge_deploy 节点");
+  const read = currentReviewFacts(task, listEvents(db, { project: task.project, target: task.id }));
+  if (read.kind !== "facts" || read.facts.verdict === "block" ||
+    read.facts.findings.some((f) => f.severity === "P0" || f.severity === "P1") ||
+    (read.facts.verdict === "changes" && !read.facts.findings.some((f) => f.severity === "P2"))) {
+    throw new LedgerError("conflict", "合并前缺本轮同 head 的通过审查");
+  }
+  if (read.facts.reviewerFamily === workflow.authorFamily) throw new LedgerError("conflict", "合并前缺跨模型审查");
+  const reviewEntry = db.query(`SELECT COALESCE(MAX(seq), 0) AS seq FROM events WHERE target = ? AND kind = 'stage'
+    AND json_extract(data, '$.to') = 'review' AND json_extract(data, '$.round') = ?`).get(task.id, task.round) as { seq: number };
+  if (!reviewEntry.seq) throw new LedgerError("conflict", "缺本轮 review 阶段进入事件");
+  const prior = db.query(`SELECT 1 FROM scheduler_intents AS i JOIN events AS ack
+    ON ack.dedupKey = 'scheduler:' || i.id || ':submitted' AND ack.seq > i.eventSeq AND ack.seq < ?
+    WHERE i.taskId = ? AND i.action = 'review' AND i.recipient = ? AND i.head = ?
+    AND i.eventSeq > ? AND i.eventSeq < ? AND i.status IN ('submitted','done') LIMIT 1`).get(
+    read.facts.eventSeq, task.id, read.facts.reviewer, read.facts.head, reviewEntry.seq, read.facts.eventSeq,
+  );
+  if (!prior) throw new LedgerError("conflict", "合并前缺本轮审查派单回执");
+  if (workflow.template === "ui") {
+    const digest = task.extra.screenshotsDigest;
+    if (typeof digest !== "string" || !/^[a-f0-9]{64}$/i.test(digest)) throw new LedgerError("conflict", "UI 前后截图摘要缺失");
+    const params = { task: task.id, specRev: task.specRev, head: task.headSHA, screenshotsDigest: digest };
+    const rows = db.query(`SELECT id FROM asks WHERE taskId = ? AND kind = 'authorize' AND state = 'answered'
+      ORDER BY updatedAt DESC LIMIT 20`).all(task.id) as { id: string }[];
+    const approved = rows.some(({ id }) => {
+      const ask = getAsk(db, id);
+      if (!ask || ask.fromAgent !== "scheduler" || ask.bind?.action !== "scheduler_ui_screenshot" || ask.answer?.external === true) return false;
+      return checkAsk(ask, bindHash({ ...ask.bind, params }, "scheduler"), "scheduler", now).ok;
+    });
+    if (!approved) throw new LedgerError("conflict", "缺同 head/specRev/摘要的 owner 截图授权");
+  }
+}
 
 export interface WorkflowInput {
   taskId: string;
@@ -132,10 +170,20 @@ export function planIntent(db: Database, ctx: WriteCtx, input: PlanIntentInput):
     const blocked = blockedBy(task.id, depViews(listDeps(db, task.project), listTasks(db, task.project)));
     if (blocked.length) throw new LedgerError("conflict", `任务被前置挡住：${blocked.map((d) => d.from).join("、")}`);
     if (!INTENT_ACTIONS.includes(input.action)) throw new LedgerError("invalid", "调度动作不认识");
+    if (input.action === "merge") {
+      const entered = db.query(`SELECT COALESCE(MAX(seq), 0) AS seq FROM events WHERE target = ? AND kind = 'stage'
+        AND json_extract(data, '$.to') = 'merge'`).get(task.id) as { seq: number };
+      const cancelled = db.query(`SELECT id FROM scheduler_intents WHERE taskId = ? AND action = 'merge'
+        AND status = 'cancelled' AND causalSeq >= ? LIMIT 1`).get(task.id, entered.seq);
+      if (cancelled) throw new LedgerError("conflict", "本轮已取消合并意图，自动重试禁用；请 PM 手动核对并接管");
+      requireReviewedMerge(db, task, workflow, node, ctx.now ?? Date.now());
+    }
     const live = db.query("SELECT id FROM scheduler_intents WHERE taskId = ? AND status IN ('pending','submitted','unknown') LIMIT 1")
       .get(task.id) as { id: string } | null;
     if (live) throw new LedgerError("conflict", `任务已有未结调度意图 ${live.id}`);
     const held = db.query("SELECT resource, taskId FROM scheduler_resources WHERE project = ?").all(task.project) as { resource: string; taskId: string }[];
+    const slots = new Set([...cardWorkerSlots(held, task.id), ...resources.filter((r) => r?.startsWith("slot:"))]);
+    if (slots.size > 1) throw new LedgerError("conflict", "一张卡最多持有一个 worker 槽；后续派单须沿用已持有的槽");
     for (const resource of resources) {
       const used = held.find((row) => row.taskId !== task.id && resourcesOverlap(resource as string, row.resource));
       if (used) throw new LedgerError("conflict", `资源 ${resource} 与 ${used.resource} 重叠（${used.taskId} 占用）`);

@@ -74,7 +74,7 @@ auto 卡不再发旧的 deliver/review 指令，避免双派；`ledger-audit` �
 
 ## 并发、合并与外部效果
 
-按项目配置 `maxActiveWorkers`；首个写/修派单取得卡级 worker 槽与文件锁，持续到 live/verified、整卡取消或 PM 明确释放，不随某个 dispatch intent 的 done 释放。审查槽和合并槽单列。dispatch 的 done 仅代表派单回执，worker 交付以校验过的 deliver 事件为准，两者都不释放卡级锁。卡在规格中声明文件 glob、共享资源与接口。申请占槽和文件锁在台账事务内完成；不确定交集按冲突排队，不能以 git 当前无冲突代替声明。离线或租约到期只告警，不把可能仍在写的锁自动借出。依赖判定复用
+按项目配置 `maxActiveWorkers`；首个写/修派单取得卡级 worker 槽与文件锁，持续到 live/verified、整卡取消或 PM 明确释放，不随某个 dispatch intent 的 done 释放。卡已持有 worker 槽时，后续 write/fix 派单沿用该槽，跳过新占用容量检查；同一卡最多占一个槽，写入事务拒绝第二个槽。审查槽和合并槽单列。dispatch 的 done 仅代表派单回执，worker 交付以校验过的 deliver 事件为准，两者都不释放卡级锁。卡在规格中声明文件 glob、共享资源与接口。申请占槽和文件锁在台账事务内完成；不确定交集按冲突排队，不能以 git 当前无冲突代替声明。离线或租约到期只告警，不把可能仍在写的锁自动借出。依赖判定复用
 `blockedBy/depViews`：code 上游到 live/verified/done 才满足，merge 不算。
 
 合并队列把现有 `merge-queue.sh`、`deploy-full.sh` 的步骤搬进仓库，目标地址从配置注入。每项目串行：update-branch → 若 head 变，回审 → check/CI → merge → 部署 → 验证。记录候选 SHA、CI run、merge SHA、部署产物和核证事实。CI 红、
@@ -109,9 +109,13 @@ owner 截图 ask 属上线闸。
 - 不清楚外部副作用是否已经发生时冻结并升级，宁可停住也不重复 merge/deploy；未知 runtime 家族不猜审查者。
 - 卡级文件锁和 worker 槽持有到 live/verified 或整卡终止；单个意图结清不释放。归一 family 和沿用 findingId 之外，连续四轮任意 P1 是硬升级上限；换规格版本重新计数。
 - 专用 scheduler actor 只能写调度专用命令；人工写入保留实际 actor 和 manual 标记。结果不明的 merge/deploy 即使被取消也不能自动换 key 重试，须有绑定原 intent 的 PM 明确重试决定及外部事实核对。
+- 在自动重试决定的独立入口落地前，已取消的同轮 merge 一律停给 PM 手工核对并接管，调度器与台账写入口都拒绝换 key 重做。UI 合并的第二道写入闸查台账 authorize ask：owner 答复、未过期、非 guest，绑定当前 task/specRev/head/前后截图摘要；产生 ask 和投影视图的适配器仍在 PR E。
 
 ## 进度
 
 - 2026-09-30：v1 文档在 `74c34005`；v2 按 04:27 指示改为 ACP 主接口、v4 DAG 数据、T69、每卡跨模型对抗审查 session，并拆为五个实现 PR。
 - PR A：新增台账 workflow、intent、资源占用与 v4 DAG 调度投影；新卡准入、项目事件 CAS、幂等重放、暂停取消、崩溃后的未知结果保锁均在临时库与沙箱 CLI 实测。
   一次性 Codex 对抗自查发现「glob 与实文件锁不相斥」「同任务可并存两个活跃意图」两个 P1，以及重放空白、同毫秒排序两个 P2；已逐项修复并补针对性测试。
+- PR B：写入 v2 数据模板与纯规划器；新卡执行/复述/审查/修复/合并/核证/退役的每一步输出稳定意图或明确等待原因。
+  审查必须绑定本卡 reviewer session、完整 head 和先前派单；P1 同类计数、第三轮升级、P2 通知 PM 后继续、UI ask 绑定及旧结果失效已做分支测试。
+  一次性 Codex 自查指出旧轮派单冒认新轮、并行活跃意图两个 P1，以及历史 P1 证据和截图摘要绑定两个 P2；规划器现要求本轮派单回执、等待任何未结意图，并逐轮校验交付 head/计数、绑定截图摘要。

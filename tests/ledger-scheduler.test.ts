@@ -167,6 +167,24 @@ describe("T68 durable scheduler facts", () => {
     } finally { f.close(); }
   });
 
+  test("subsequent dispatches cannot accumulate another worker slot and can reuse the existing card slot", () => {
+    const f = fixture();
+    try {
+      const w = f.workflow("T1");
+      const plan = (id: string, slot: string) => planIntent(f.db, { actor: "scheduler" }, {
+        id, taskId: "T1", taskRev: 1, workflowRev: w.rev, causalSeq: f.seq(),
+        node: "fix", action: "dispatch", reason: "fix", resources: [slot, "src/bridge.ts"],
+      });
+      plan("write:T1", "slot:p:0");
+      settleIntent(f.db, { actor: "scheduler" }, { id: "write:T1", from: "pending", to: "submitted" });
+      settleIntent(f.db, { actor: "scheduler" }, { id: "write:T1", from: "submitted", to: "done", receipt: "delivered" });
+      expect(() => plan("fix:T1:new", "slot:p:1")).toThrow(/最多持有一个 worker 槽/);
+      expect(plan("fix:T1:reuse", "slot:p:0").intent.status).toBe("pending");
+      expect(f.db.query("SELECT resource FROM scheduler_resources WHERE taskId='T1' AND resource LIKE 'slot:%'").all())
+        .toEqual([{ resource: "slot:p:0" }]);
+    } finally { f.close(); }
+  });
+
   test("switching an in-progress card to manual does not silently lend out its pending dispatch file claim", () => {
     const f = fixture();
     try {
