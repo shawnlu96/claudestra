@@ -230,7 +230,9 @@ function showDag(deps: DagToolDeps, args: unknown): OrderToolResult {
 function liveDeps(): DagToolDeps {
   const git = async (cwd: string, args: string[], timeoutMs = 30_000) => {
     const r = await runBounded(["git", ...args], { cwd, env: { ...process.env, GIT_TERMINAL_PROMPT: "0" }, timeoutMs });
-    return { ok: r.code === 0 && !r.timedOut, out: (r.timedOut ? "超时" : r.stderr || r.stdout).trim().slice(0, 500) };
+    const ok = r.code === 0 && !r.timedOut;
+    // 成功取完整 stdout（rev-parse 的 sha、worktree list 要整份解析）；失败取错误，截短了放进回报
+    return { ok, out: ok ? r.stdout.trim() : (r.timedOut ? "超时" : r.stderr || r.stdout).trim().slice(0, 500) };
   };
   const agents = () => readRegistryAgentsSync();
   return {

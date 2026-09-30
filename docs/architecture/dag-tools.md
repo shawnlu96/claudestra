@@ -54,8 +54,11 @@ moved to `cancelled` — and returns `{failedStep, rolledBack, leftovers}`. Thre
 - **A failed result is not proof nothing was written.** manager can commit and then be killed by the timeout (or its stdout can fail to
   parse). After a failed ledger step the tool looks the step up by its dedup key (`task-new`, `task-set`, `dag-bind`) or by the resulting
   state (`workflow-set` has no dedup); if it landed, the step counts as done and the call carries on (`reconciled` in the result).
-- **Undo only what this call created.** Each step re-checks right before acting that its worktree / branch / agent / spec file is absent;
-  if something appeared after preflight it fails without claiming it. The card is cancelled only if this call's `task-new` event exists.
+- **Undo only what this call created** — ownership is proven, never inferred from "it wasn't there when I looked". The card is cancelled
+  only if this call's `task-new` event exists. The worktree is added with `--lock --reason dag-start:<id>:<attempt>`, so a failed add is
+  cleaned up only through the worktree carrying this call's lock; one created at the same path by anyone else is never touched (unlock
+  after a successful add). A branch is deleted if this call's add created it, or — when the add failed — only while it still sits on the
+  resolved base commit (no one's work is on it). `git worktree move` is not used: onto an existing directory it moves *into* it.
   The failed step's own undo also runs, since worktree add, create and file writes can stop half-way; files are written atomically.
 - **Concurrent calls claim resources, not just nodes.** The bridge holds an in-process claim on the node before preflight and on the
   card id, agent, branch, worktree and file paths (all lower-cased — macOS paths and git refs ignore case) after it; a second call that

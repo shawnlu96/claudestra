@@ -115,11 +115,30 @@ function fileStep(name: "spec" | "prompt", io: StepIO, path: string, text: () =>
   };
 }
 
-const hasBranch = async (io: StepIO, p: StartPlan) => (await io.git(p.repo, ["rev-parse", "--verify", "--quiet", `refs/heads/${p.branch}`])).ok;
+/** 分支的提交；没有这个分支为 null */
+async function tip(io: StepIO, p: StartPlan, ref: string): Promise<string | null> {
+  const r = await io.git(p.repo, ["rev-parse", "--verify", "--quiet", ref]);
+  return r.ok && r.out ? r.out : null;
+}
 
+/** `git worktree list --porcelain` 里锁标记等于 tag 的那个 worktree 的路径 */
+async function lockedBy(io: StepIO, p: StartPlan, tag: string): Promise<string | null> {
+  const r = await io.git(p.repo, ["worktree", "list", "--porcelain"]);
+  const block = r.ok ? r.out.split("\n\n").find((b) => b.split("\n").includes(`locked ${tag}`)) : undefined;
+  return block?.match(/^worktree (.+)$/m)?.[1] ?? null;
+}
+
+/**
+ * 归属靠「确实是本次建的」，不靠「检查时没看见」——检查和创建之间，别的进程（手工 git、另一个 bridge）照样能在同一路径建 worktree：
+ * - add 带 `--lock --reason <本次 attempt>`，git 在 checkout 之前就把锁写进 worktree 元数据。add 失败时只清锁标记是本次的那个；
+ *   路径被别人占了，git 拒 add、不会有本次的锁，外来的 worktree 一个文件都不碰。add 成功后解锁，之后这个路径才算本次的。
+ *   （`git worktree move` 不能拿来落位：目标已是目录时它会挪进去而不是失败。）
+ * - 分支：add 成功 = 本次建的。add 失败时归属不明（路径冲突时 git 已经建了分支），只在它还停在本次起点提交上时才删——那样的分支上
+ *   没有任何人的工作，删了不丢东西；否则留下并报出来。
+ */
 function worktreeStep(io: StepIO, p: StartPlan): Step {
-  // 本次要建的：动手前确认不在才置上。已在的是别人的（预检之后才出现），失败回滚绝不删
-  const mine = { worktree: false, branch: false };
+  const tag = `dag-start:${p.taskId}:${io.attempt}`;
+  const mine = { placed: false, branch: false, base: null as string | null };
   return {
     name: "worktree",
     run: async () => {
@@ -128,10 +147,14 @@ function worktreeStep(io: StepIO, p: StartPlan): Step {
         if (!f.ok) return `git fetch origin 失败：${f.out}`;
       }
       if (io.exists(p.worktree)) return `worktree 目录 ${p.worktree} 已存在（预检之后才出现，不是这次建的）`;
-      if (await hasBranch(io, p)) return `分支 ${p.branch} 已存在（预检之后才出现，不是这次建的）`;
-      mine.worktree = mine.branch = true;
-      const w = await io.git(p.repo, ["worktree", "add", "-b", p.branch, p.worktree, p.base]);
+      if (await tip(io, p, `refs/heads/${p.branch}`)) return `分支 ${p.branch} 已存在（预检之后才出现，不是这次建的）`;
+      mine.base = await tip(io, p, `${p.base}^{commit}`);
+      if (!mine.base) return `起点 ${p.base} 找不到提交`;
+      const w = await io.git(p.repo, ["worktree", "add", "--lock", "--reason", tag, "-b", p.branch, p.worktree, p.base]);
       if (!w.ok) return `git worktree add 失败：${w.out}`;
+      mine.placed = mine.branch = true;
+      const u = await io.git(p.repo, ["worktree", "unlock", p.worktree]);
+      if (!u.ok) return `worktree 解锁失败：${u.out}`;
       // 软链依赖目录：执行者跑检查要用；仓库没有就跳过（不是每个项目都有）
       for (const sub of ["node_modules", join("web", "node_modules")]) {
         if (io.exists(join(p.repo, sub)) && io.exists(dirname(join(p.worktree, sub))) && !io.exists(join(p.worktree, sub))) io.symlink(join(p.repo, sub), join(p.worktree, sub));
@@ -140,14 +163,17 @@ function worktreeStep(io: StepIO, p: StartPlan): Step {
     },
     undo: async () => {
       const out: string[] = [];
-      if (mine.worktree && io.exists(p.worktree)) {
-        const w = await io.git(p.repo, ["worktree", "remove", "--force", p.worktree]);
-        if (!w.ok) out.push(`worktree ${p.worktree} 没删掉：${w.out}`);
+      // 两道 --force：本次的锁可能还在（add 成功后解锁前失败，或 add 做了一半）
+      const dir = mine.placed ? p.worktree : mine.base ? await lockedBy(io, p, tag) : null;
+      if (dir && (mine.placed ? io.exists(dir) : true)) {
+        const w = await io.git(p.repo, ["worktree", "remove", "--force", "--force", dir]);
+        if (!w.ok) out.push(`worktree ${dir} 没删掉：${w.out}`);
       }
-      if (mine.branch && (await hasBranch(io, p))) {
+      const now = mine.base ? await tip(io, p, `refs/heads/${p.branch}`) : null;
+      if (now && (mine.branch || now === mine.base)) {
         const b = await io.git(p.repo, ["branch", "-D", p.branch]);
         if (!b.ok) out.push(`分支 ${p.branch} 没删掉：${b.out}`);
-      }
+      } else if (now) out.push(`分支 ${p.branch} 已有别的提交（不在本次起点上），没删`);
       return out.join("；") || null;
     },
   };

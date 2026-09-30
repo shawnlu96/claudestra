@@ -5,7 +5,7 @@
  */
 import type { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { dagToolHandlers, type DagToolDeps } from "../src/bridge/dag-tools.js";
@@ -26,6 +26,8 @@ const MASTER: VerifiedCall = { agent: "master", sessionId: null, family: "claude
 let dir: string, repo: string, db: Database, now: number;
 let agents: Record<string, { channelId: string; projectId?: string }>;
 let branches: Set<string>;
+/** 假 git 登记的 worktree：路径 → 锁标记 */
+let worktrees: Map<string, string | null>;
 let calls: string[][];
 /** 返回 true 的 manager / git 调用被注入成失败 */
 let failOn: (args: string[]) => boolean;
@@ -79,12 +81,23 @@ function deps(): DagToolDeps {
         if (failOn(["git", ...args])) return { ok: false, out: "注入失败" };
         const hooked = gitHook(args);
         if (hooked) return hooked;
-        if (args[0] === "worktree" && args[1] === "add") {
-          mkdirSync(args[4], { recursive: true });
-          branches.add(args[3]);
-        } else if (args[0] === "worktree" && args[1] === "remove") rmSync(args[3], { recursive: true, force: true });
-        else if (args[0] === "rev-parse") return { ok: branches.has(args[3].replace("refs/heads/", "")), out: "" };
-        else if (args[0] === "branch") branches.delete(args[2]);
+        const [cmd, sub] = args;
+        if (cmd === "worktree" && sub === "add") {
+          const path = args.at(-2) as string;
+          if (existsSync(path)) return { ok: false, out: "already exists" };
+          mkdirSync(path, { recursive: true });
+          branches.add(args[args.indexOf("-b") + 1]);
+          worktrees.set(path, args[args.indexOf("--reason") + 1] ?? null);
+        } else if (cmd === "worktree" && sub === "unlock") worktrees.set(args[2], null);
+        else if (cmd === "worktree" && sub === "list") {
+          return { ok: true, out: [...worktrees].map(([w, lock]) => `worktree ${w}\nHEAD base0${lock ? `\nlocked ${lock}` : ""}`).join("\n\n") };
+        } else if (cmd === "worktree" && sub === "remove") {
+          rmSync(args.at(-1) as string, { recursive: true, force: true });
+          worktrees.delete(args.at(-1) as string);
+        } else if (cmd === "rev-parse") {
+          const ok = args[3].endsWith("^{commit}") || branches.has(args[3].replace("refs/heads/", ""));
+          return { ok, out: ok ? "base0" : "" };
+        } else if (cmd === "branch") branches.delete(args[2]);
         return { ok: true, out: "" };
       },
       exists: existsSync, read: (p) => (existsSync(p) ? readFileSync(p, "utf8") : null),
@@ -120,6 +133,7 @@ beforeEach(() => {
   throwAfterWrite = () => false;
   autoDispatch = true;
   branches = new Set(["main"]);
+  worktrees = new Map();
   dir = mkdtempSync(join(tmpdir(), "i28-l5-"));
   repo = join(dir, "repo");
   mkdirSync(join(repo, ".git"), { recursive: true });
@@ -364,13 +378,66 @@ describe("r1：只撤本次建的资源", () => {
     spec("i28-a");
     gitHook = (a) => {
       if (a[0] !== "worktree" || a[1] !== "add") return;
-      mkdirSync(a[4], { recursive: true });
-      branches.add(a[3]);
+      mkdirSync(a.at(-2) as string, { recursive: true });
+      branches.add(a[a.indexOf("-b") + 1]);
+      worktrees.set(a.at(-2) as string, a[a.indexOf("--reason") + 1]);
       return { ok: false, out: "注入：checkout 中途失败" };
     };
     expect(await start("a")).toMatchObject({ ok: false, failedStep: "worktree", leftovers: [] });
-    expect(existsSync(join(dir, "wt", "i28-a"))).toBe(false);
+    expect(readdirSync(join(dir, "wt"))).toEqual([]);
     expect(branches.has("feat/i28-a")).toBe(false);
+  });
+});
+
+describe("r2：真 git——worktree 带本次的锁标记建，回滚只认这个标记", () => {
+  const git = (a: string[]) => {
+    const r = Bun.spawnSync(["git", ...a], { cwd: repo, stdout: "pipe", stderr: "pipe" });
+    return { ok: r.exitCode === 0, out: (r.exitCode === 0 ? r.stdout.toString() : r.stderr.toString()).trim() };
+  };
+  const realGit = (hook: (a: string[]) => void = () => {}) => {
+    const d = deps();
+    const orig = d.stepIO;
+    d.stepIO = () => ({ ...orig(), git: async (_c, a) => (calls.push(["git", ...a]), hook(a), git(a)) });
+    return dagToolHandlers(d);
+  };
+  const wt = () => join(dir, "wt", "i28-a");
+  beforeEach(async () => {
+    rmSync(join(repo, ".git"), { recursive: true, force: true });
+    expect(git(["init", "-q", "-b", "main"]).ok).toBe(true);
+    expect(git(["-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "-q", "--allow-empty", "-m", "base"]).ok).toBe(true);
+    await plan();
+    spec("i28-a");
+  });
+
+  test("正常路径：worktree 落在正式路径、登记在 git 里，锁已解开", async () => {
+    expect(await realGit().start_node(PM, { featureId: "i28", key: "a", base: "main" })).toMatchObject({ ok: true, worktree: wt() });
+    expect(git(["worktree", "list", "--porcelain"]).out).toContain(`worktree ${realpathSync(wt())}\nHEAD`);
+    expect(git(["worktree", "list", "--porcelain"]).out).not.toContain("locked");
+    expect(git(["rev-parse", "--verify", "--quiet", "refs/heads/feat/i28-a"]).ok).toBe(true);
+  });
+
+  test("审查员探针：exists 检查之后、add 之前别人在正式路径建了 worktree 并写了未提交文件——原样保留，本次建的分支撤掉", async () => {
+    let injected = false;
+    const h = realGit((a) => {
+      if (injected || a[0] !== "rev-parse" || a[3] !== "refs/heads/feat/i28-a") return;
+      injected = true;
+      expect(git(["worktree", "add", "-q", "-b", "feat/external", wt(), "main"]).ok).toBe(true);
+      writeFileSync(join(wt(), "external-unsaved.txt"), "别人的活");
+    });
+    expect(await h.start_node(PM, { featureId: "i28", key: "a", base: "main" })).toMatchObject({ ok: false, failedStep: "worktree", leftovers: [] });
+    expect(readFileSync(join(wt(), "external-unsaved.txt"), "utf8")).toBe("别人的活");
+    expect(git(["rev-parse", "--abbrev-ref", "HEAD"]).ok && Bun.spawnSync(["git", "-C", wt(), "branch", "--show-current"]).stdout.toString().trim()).toBe("feat/external");
+    expect(readdirSync(join(dir, "wt"))).toEqual(["i28-a"]);
+    expect(git(["rev-parse", "--verify", "--quiet", "refs/heads/feat/i28-a"]).ok).toBe(false);
+    expect(getTask(db, "i28-a")?.stage).toBe("cancelled");
+  });
+
+  test("后面的步骤失败：本次的 worktree 与分支都撤掉", async () => {
+    failOn = (a) => a[0] === "create";
+    expect(await realGit().start_node(PM, { featureId: "i28", key: "a", base: "main" })).toMatchObject({ ok: false, failedStep: "agent", leftovers: [] });
+    expect(readdirSync(join(dir, "wt"))).toEqual([]);
+    expect(git(["worktree", "list", "--porcelain"]).out).not.toContain(join("wt", "i28-a"));
+    expect(git(["rev-parse", "--verify", "--quiet", "refs/heads/feat/i28-a"]).ok).toBe(false);
   });
 });
 
