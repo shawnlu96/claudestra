@@ -165,7 +165,7 @@ function ingestFile(w: ReturnType<typeof usageWriter>, db: Database, f: SessionF
     const st: FileState = same ? { ...prev } : {
       path: f.path, offset: 0, size, session_id: f.sessionId, agent, sidechain: f.sidechain ? 1 : 0,
       turn_id: null, turn_start: null, turn_kind: null, turn_trigger: null, fp: null, turn_input: null,
-      runtime: f.runtime ?? (sniffCodex(fd) ? CODEX : null), model: null, parent: null,
+      runtime: f.runtime ?? (sniffCodex(fd) ? CODEX : null), model: null, parent: null, cx_pair: null,
     };
     let ensured: string | null = null;
     let want = chunkBytes;
@@ -280,7 +280,7 @@ export function ingestUsage(db: Database, opts: IngestOptions = {}): IngestResul
   const since = opts.sinceMs ?? cutoff;
   const w = usageWriter(db);
   const ctx: CodexLineCtx = {
-    cutoff, tool: w.tool,
+    cutoff, tool: w.tool, isEcho: w.isEcho, noteEcho: w.noteEcho,
     ownerOf: (thread, parent) => owners.get(thread) ?? (parent ? owners.get(parent) ?? w.knownOwner(parent) : null) ?? UNOWNED,
   };
   const res: IngestResult = { files: 0, read: 0, bytes: 0, calls: 0, pruned: 0, ms: 0 };

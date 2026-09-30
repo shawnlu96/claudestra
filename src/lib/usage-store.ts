@@ -21,6 +21,24 @@ function addColumns(db: Database, table: string, cols: [string, string][]): void
   for (const [col, decl] of cols) if (!have.has(col)) db.prepare(`ALTER TABLE ${table} ADD COLUMN ${col} ${decl}`).run();
 }
 
+/**
+ * daily 换主键 (day, agent, runtime, model)：SQLite 改不了主键，建新表搬过去。老行的 runtime 是 v3 时的 MAX(runtime)，混过的分不开；
+ * 还有明细的日子全部标脏，导完按明细重算成分开的行，明细已清掉的日子只能保持原样。可重跑：新表已在就只补标脏。
+ */
+function migrateDailyRuntime(db: Database): void {
+  const pk = (db.prepare("PRAGMA table_info(daily)").all() as { name: string; pk: number }[]).filter((c) => c.pk > 0).map((c) => c.name);
+  if (!pk.includes("runtime")) {
+    db.prepare(`CREATE TABLE daily_v4 (day TEXT NOT NULL, agent TEXT NOT NULL, runtime TEXT NOT NULL DEFAULT '${CLAUDE}', model TEXT NOT NULL,
+      calls INTEGER NOT NULL, input INTEGER NOT NULL, cache_creation INTEGER NOT NULL, cache_read INTEGER NOT NULL, output INTEGER NOT NULL,
+      reasoning INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (day, agent, runtime, model))`).run();
+    db.prepare(`INSERT INTO daily_v4 (day, agent, runtime, model, calls, input, cache_creation, cache_read, output, reasoning)
+      SELECT day, agent, runtime, model, calls, input, cache_creation, cache_read, output, reasoning FROM daily`).run();
+    db.prepare("DROP TABLE daily").run();
+    db.prepare("ALTER TABLE daily_v4 RENAME TO daily").run();
+  }
+  db.prepare("INSERT OR IGNORE INTO dirty_days (day) SELECT DISTINCT day FROM calls").run();
+}
+
 const SCHEMA: SchemaSpec = {
   label: "token 账库",
   migrations: [
@@ -51,9 +69,15 @@ const SCHEMA: SchemaSpec = {
       addColumns(db, "turns", [["runtime", `TEXT NOT NULL DEFAULT '${CLAUDE}'`]]);
       addColumns(db, "daily", [["reasoning", "INTEGER NOT NULL DEFAULT 0"], ["runtime", `TEXT NOT NULL DEFAULT '${CLAUDE}'`]]);
     },
+    // v4（T92 r1）：Codex record 与 token_count 的配对状态和认过的回声（usage-codex.ts countCall）；daily 主键加上 runtime（同 agent 同模型名的 Claude / Codex 不再并成一行）
+    (db) => {
+      addColumns(db, "files", [["cx_pair", "TEXT"]]);
+      db.prepare("CREATE TABLE IF NOT EXISTS echoes (key TEXT PRIMARY KEY, ts INTEGER NOT NULL)").run();
+      migrateDailyRuntime(db);
+    },
   ],
-  tables: ["files", "turns", "calls", "tools", "daily", "dirty_days"],
-  columns: { files: ["fp", "turn_input", "runtime", "model", "parent"], calls: ["reasoning"], turns: ["runtime"], daily: ["reasoning", "runtime"] },
+  tables: ["files", "turns", "calls", "tools", "daily", "dirty_days", "echoes"],
+  columns: { files: ["fp", "turn_input", "runtime", "model", "parent", "cx_pair"], calls: ["reasoning"], turns: ["runtime"], daily: ["reasoning", "runtime"] },
   indexes: { turns: ["turns_agent", "turns_session"], calls: ["calls_turn", "calls_day", "calls_ts"], tools: ["tools_turn"] },
 };
 
@@ -102,6 +126,8 @@ export interface FileState {
   model: string | null;
   /** Codex 子线程的父线程 id：主人跟父线程走 */
   parent: string | null;
+  /** Codex：待配对的 token_usage_record / 刚配过的回声（usage-codex.ts countCall）；跨读块、跨增量导入要接得上 */
+  cx_pair: string | null;
 }
 
 export interface TurnHead {
@@ -120,7 +146,7 @@ export interface TurnHead {
 export function usageWriter(db: Database) {
   const getFile = db.prepare("SELECT * FROM files WHERE path = ?");
   const cols = ["path", "offset", "size", "session_id", "agent", "sidechain", "turn_id", "turn_start", "turn_kind", "turn_trigger", "fp", "turn_input",
-    "runtime", "model", "parent"];
+    "runtime", "model", "parent", "cx_pair"];
   const putFile = db.prepare(`INSERT INTO files (${cols.join(", ")}, updated_at) VALUES (${cols.map((c) => `$${c}`).join(", ")}, $now)
     ON CONFLICT(path) DO UPDATE SET ${[...cols.slice(1), "updated_at"].map((c) => `${c} = excluded.${c}`).join(", ")}`);
   const ensureTurn = db.prepare(`INSERT OR IGNORE INTO turns (turn_id, agent, session_id, sidechain, started_at, kind, trigger, runtime)
@@ -134,6 +160,8 @@ export function usageWriter(db: Database) {
       cache_read = max(cache_read, excluded.cache_read), output = max(output, excluded.output), reasoning = max(reasoning, excluded.reasoning),
       day = CASE WHEN excluded.ts > ts THEN excluded.day ELSE day END, ts = max(ts, excluded.ts) RETURNING day`);
   const addTool = db.prepare("INSERT OR IGNORE INTO tools (tool_id, turn_id, name) VALUES (?, ?, ?)");
+  const getEcho = db.prepare("SELECT 1 FROM echoes WHERE key = ?");
+  const addEcho = db.prepare("INSERT OR IGNORE INTO echoes (key, ts) VALUES (?, ?)");
   const markDirty = db.prepare("INSERT OR IGNORE INTO dirty_days (day) VALUES (?)");
   const claim = db.prepare(`INSERT OR IGNORE INTO dirty_days (day) SELECT DISTINCT c.day FROM calls c JOIN turns t ON t.turn_id = c.turn_id
     WHERE t.session_id = ? AND t.agent = '${UNOWNED}'`);
@@ -144,6 +172,8 @@ export function usageWriter(db: Database) {
     saveFile: (f: FileState) => putFile.run({ ...prefixed(f), $now: Date.now() }),
     turn: (t: TurnHead) => ensureTurn.run(t.turnId, t.agent, t.sessionId, t.sidechain ? 1 : 0, t.startedAt, t.kind, t.trigger, t.runtime),
     tool: (id: string, turnId: string, name: string) => addTool.run(id, turnId, name),
+    isEcho: (key: string) => !!getEcho.get(key),
+    noteEcho: (key: string, ts: number) => addEcho.run(key, Number.isFinite(ts) ? ts : Date.now()),
     /** 库里已经认出主人的会话（Codex 子线程按父线程找主人用）；没有 = null */
     knownOwner: (sessionId: string) => (ownerOf.get(sessionId) as { agent: string } | null)?.agent ?? null,
     /** 调用进库，并把它所在的那天标脏（日期因后到的行改了的话，原来那天也标），daily 之后按明细重算 */
@@ -178,8 +208,8 @@ export function rebuildDirtyDays(db: Database, cutoffMs = retentionCutoff()): nu
   const has = db.prepare("SELECT 1 FROM calls WHERE day = ? LIMIT 1");
   const del = db.prepare("DELETE FROM daily WHERE day = ?");
   const ins = db.prepare(`INSERT INTO daily (day, agent, model, calls, input, cache_creation, cache_read, output, reasoning, runtime)
-    SELECT c.day, t.agent, c.model, COUNT(*), SUM(c.input), SUM(c.cache_creation), SUM(c.cache_read), SUM(c.output), SUM(c.reasoning), MAX(t.runtime)
-    FROM calls c JOIN turns t ON t.turn_id = c.turn_id WHERE c.day = ? GROUP BY c.day, t.agent, c.model`);
+    SELECT c.day, t.agent, c.model, COUNT(*), SUM(c.input), SUM(c.cache_creation), SUM(c.cache_read), SUM(c.output), SUM(c.reasoning), t.runtime
+    FROM calls c JOIN turns t ON t.turn_id = c.turn_id WHERE c.day = ? GROUP BY c.day, t.agent, t.runtime, c.model`);
   const clear = db.prepare("DELETE FROM dirty_days WHERE day = ?");
   db.transaction(() => {
     for (const d of days) {
@@ -202,6 +232,7 @@ export function pruneUsage(db: Database, cutoffMs = retentionCutoff()): number {
     removed = db.prepare("DELETE FROM calls WHERE day < ?").run(cutoffDay).changes;
     db.prepare("DELETE FROM turns WHERE started_at < ? AND NOT EXISTS (SELECT 1 FROM calls c WHERE c.turn_id = turns.turn_id)").run(cutoffMs);
     db.prepare("DELETE FROM tools WHERE NOT EXISTS (SELECT 1 FROM turns t WHERE t.turn_id = tools.turn_id)").run();
+    db.prepare("DELETE FROM echoes WHERE ts < ?").run(cutoffMs); // 保留期之前的 token_count 导入时本来就跳过，不用再认
   })();
   return removed;
 }
