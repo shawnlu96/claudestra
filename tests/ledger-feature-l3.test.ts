@@ -9,6 +9,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { applyMigration, bucketOf, parseMap, planMigration, type MigrateMap } from "../src/lib/ledger-feature-migrate.js";
+import { renderMigrationReport } from "../src/lib/ledger-feature-migrate-md.js";
 import { getDagVersion, getFeature } from "../src/lib/ledger-feature.js";
 import { closeLedger, getTask, openLedger } from "../src/lib/ledger-store.js";
 import { createTask, setMeta } from "../src/lib/ledger-write.js";
@@ -239,6 +240,7 @@ describe("dry-run", () => {
     expect(md).toContain("- A2：阶段 review，PR #12 合并于 2026-09-30T00:00:00Z");
     expect(md).toContain("- S1 → A2：S1 待排，不进图");
     expect(md).toContain("- GONE");
+    expect(md).toContain("### 全部卡已完成的 feature（迁移仍填 active，要不要标 done 请 owner 定）（0）");
   });
 
   test("dry-run 期间连接是 query_only：中途有人借这条连接写也会被挡", async () => {
@@ -262,5 +264,12 @@ describe("dry-run", () => {
     expect(blocked).toMatch(/readonly/);
     expect(getTask(db, "A1")!.title).toBe("卡 A1");
     db.prepare("UPDATE tasks SET title = '写得进' WHERE id = 'A1'").run();
+  });
+
+  test("报告单列全部卡已完成的 feature（只剩已完成 / 已取消）", () => {
+    const plan = planMigration(db, { project: P, features: [{ slug: "z", title: "只剩完成", cards: ["D2", "C1"] }, { slug: "y", title: "还在做", cards: ["A1", "D1"] }] });
+    const md = renderMigrationReport({ plan, lagging: [], prErrors: {}, generatedAt: "t", source: "s" });
+    expect(md).toContain("（1）\n\n- 只剩完成（`ab12-z`）：已完成 1 · 已取消 1\n");
+    expect(md).not.toContain("- 还在做（");
   });
 });

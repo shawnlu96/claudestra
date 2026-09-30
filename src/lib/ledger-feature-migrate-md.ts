@@ -1,6 +1,6 @@
 /**
  * feature 迁移 dry-run 的 markdown 报告（给 owner 看归类）：每个 feature 一张表，卡按「进 v1 / 待排 / 已完成 / 已取消」分组，
- * 后面是未归类、归类没把握、阶段落后、没进图的依赖边、冲突五张清单。只拼字符串，不读库也不查 gh（查 PR 在 CLI 层）。
+ * 后面是未归类、归类没把握、阶段落后、没进图的依赖边、全部已完成的 feature、冲突六张清单。只拼字符串，不读库也不查 gh（查 PR 在 CLI 层）。
  */
 import type { Bucket, CardRef, FeaturePlan, MigrationPlan } from "./ledger-feature-migrate.js";
 
@@ -45,6 +45,9 @@ function featureSection(f: FeaturePlan, marks: Map<string, string[]>): string[] 
   return [...out, ""];
 }
 
+/** 有卡、且没有进行中和待排的卡（只剩已完成 / 已取消） */
+const allDone = (plan: MigrationPlan) => plan.features.filter((f) => f.cards.done.length && !f.cards.active.length && !f.cards.pending.length);
+
 function list(title: string, rows: string[], empty = "无"): string[] {
   return [`### ${title}（${rows.length}）`, "", ...(rows.length ? rows : [empty]), ""];
 }
@@ -77,6 +80,8 @@ export function renderMigrationReport(r: ReportInput): string {
     ...list("归类没把握", plan.unsure.map((u) => `- ${u.id} → ${u.feature ?? "未归类"}：${cell(u.note)}`)),
     ...list("阶段落后（PR 已合并、台账阶段没跟上；不自动改，交给 PM）", r.lagging.map((l) => `- ${l.id}：阶段 ${l.stage}，PR ${l.pr} 合并于 ${l.mergedAt ?? "?"}`)),
     ...list("没进图的依赖边（blocks，前置 → 后续）", plan.droppedEdges.map((e) => `- ${e.from} → ${e.to}：${e.why}`)),
+    ...list("全部卡已完成的 feature（迁移仍填 active，要不要标 done 请 owner 定）", allDone(plan).map((f) =>
+      `- ${cell(f.title)}（\`${f.id}\`）：已完成 ${f.cards.done.length}${f.cards.cancelled.length ? ` · 已取消 ${f.cards.cancelled.length}` : ""}`)),
     ...list("冲突（有冲突时正式迁移整批拒绝）", plan.conflicts.map((c) => `- ${c}`)),
     ...(plan.missing.length ? list("映射表里有、库里没有的卡", plan.missing.map((id) => `- ${id}`)) : []),
     ...(Object.keys(r.prErrors).length ? list("PR 没查到的卡", Object.entries(r.prErrors).map(([id, e]) => `- ${id}：${cell(e)}`)) : []),
