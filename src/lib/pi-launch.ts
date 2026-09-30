@@ -21,7 +21,8 @@ import { bridgePortOf } from "./bridge-port.js";
 import { dirname, join } from "path";
 import { fileURLToPath } from "url";
 import { shellEscape } from "./claude-launch.js";
-import { assertSandboxRuntime } from "./sandbox.js";
+import { assertSandboxRuntime, isSandbox } from "./sandbox.js";
+import { resolveBunPath } from "./bun-path.js";
 import { piBinName, piEnvFlags, type PiEnvProfile } from "./pi-env.js";
 
 /** Claudestra 注入的 Pi 扩展：绝对路径（扩展必须能被 Pi 直接 -e 加载） */
@@ -31,6 +32,12 @@ export const PI_EXTENSION_PATH = join(
   "pi",
   "claudestra-extension.ts",
 );
+
+/** spike：直连 rpc 宿主（docs/design/pi-acp-eval.md）。沙箱里恒走它（沙箱不许起 Pi 的 TUI）；沙箱外靠 CLAUDESTRA_PI_TRANSPORT=rpc 手动打开 */
+const PI_RPC_HOST_PATH = join(dirname(fileURLToPath(import.meta.url)), "..", "pi-rpc-host.ts");
+function piUsesRpcHost(env: Record<string, string | undefined> = process.env): boolean {
+  return isSandbox(env) || env.CLAUDESTRA_PI_TRANSPORT === "rpc";
+}
 
 /** Pi 的 --thinking 合法值（与 claude 的 effort 档位不完全重合，只放行交集） */
 export const PI_THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
@@ -122,5 +129,8 @@ export function buildPiCommand(opts: PiLaunchOptions): string {
     parts.push("--append-system-prompt", shellEscape(sysLines.join("\n")));
   }
 
-  return `${prefix} ${parts.join(" ")}`;
+  if (!piUsesRpcHost()) return `${prefix} ${parts.join(" ")}`;
+  // 沙箱：Pi 的会话 / 设置目录钉在沙箱根里（assertSandboxRuntime 已核过它不在生产目录）
+  const piDir = isSandbox() && process.env.PI_CODING_AGENT_DIR ? ` PI_CODING_AGENT_DIR=${shellEscape(process.env.PI_CODING_AGENT_DIR)}` : "";
+  return `${prefix}${piDir} ${shellEscape(resolveBunPath())} ${shellEscape(PI_RPC_HOST_PATH)} ${parts.join(" ")}`;
 }

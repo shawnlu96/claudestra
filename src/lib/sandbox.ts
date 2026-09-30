@@ -351,11 +351,22 @@ export function refuseInSandbox(what: string, env: Env = process.env): void {
  * 协议 stub（lib/acp/stub.ts）。外部的 CLAUDESTRA_ACP_AGENT 是任意 argv，沙箱里带着它就拒——不让人以为它生效了。
  * tmux 版 Codex（buildCodexCommand 不带 transport）照旧拒。
  */
+/** spike：沙箱里的 Pi 只许把 PI_CODING_AGENT_DIR 放在沙箱根下（不碰 ~/.pi，owner 定的） */
+export function sandboxPiAgentDir(root: string): string {
+  return join(root, "pi-agent");
+}
+function sandboxPiAgentDirOk(env: Env): boolean {
+  const root = env[SANDBOX_ROOT_ENV]?.trim();
+  const dir = env.PI_CODING_AGENT_DIR?.trim();
+  return !!root && !!dir && isAbsolute(root) && dir === sandboxPiAgentDir(root);
+}
+
 export function assertSandboxRuntime(runtime: string, env: Env = process.env, transport?: string): void {
   if (!isSandbox(env) || runtime === "claude-code") return;
   if (runtime === "codex" && transport === "acp") {
     if (!env.CLAUDESTRA_ACP_AGENT?.trim()) return;
     throw new SandboxViolation(["沙箱里不认 CLAUDESTRA_ACP_AGENT：acp 固定起本仓的 scripts/acp-stub.ts，把这个变量去掉再试"]);
   }
+  if (runtime === "pi" && sandboxPiAgentDirOk(env)) return; // spike：Pi 走直连 rpc 宿主，会话目录必须在沙箱根里
   throw new SandboxViolation([`沙箱只支持 Claude Code agent（收到 runtime=${runtime}${transport ? `、transport=${transport}` : ""}；Codex 只许 --transport acp，适配器固定是 stub）`]);
 }

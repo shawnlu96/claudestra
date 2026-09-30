@@ -1,0 +1,28 @@
+diff --git a/src/bridge.ts b/src/bridge.ts
+index eb24c7cc..89da08bf 100644
+--- a/src/bridge.ts
++++ b/src/bridge.ts
+@@ -3058,6 +3058,8 @@ function scheduleClearRotation(
+   agentName: string, channelId: string, cwd: string, oldSid?: string, runtime?: string,
+ ) {
+   const deadline = Date.now() + 120_000;
++  // 调用方（API / 斜杠直通 / Discord）都不传 runtime：缺省按 CC 目录找，Pi 的新会话永远找不到、轮转 120s 后静默超时
++  runtime ??= clients.get(channelId)?.runtime;
+   const beforeSids = new Set(listSessionIdsForCwd(cwd, runtime)); // clear 前的会话快照
+   const tick = async () => {
+     try {
+diff --git a/src/bridge/stats-dashboard.ts b/src/bridge/stats-dashboard.ts
+index 68885e69..9a34fd2e 100644
+--- a/src/bridge/stats-dashboard.ts
++++ b/src/bridge/stats-dashboard.ts
+@@ -189,8 +189,8 @@ export function panelResidue(pane: string): boolean {
+  */
+ async function findIdleScrapeTarget(): Promise<string | null> {
+   // agent 窗口优先,master 垫底:master 是消息最密的窗口,排第一时吃下绝大多数抓取,TOCTOU 撞上刚开的回合就把大总管打断。
+-  // gauge 是账号全局的,谁的窗口都一样；Codex 窗口不算（T63：它的 /status 不是 CC 的额度表，停在选择菜单上回车还会选项）。
+-  const codex = new Set(readRegistryAgentsSync().filter((a) => a.runtime === "codex").map((a) => a.name));
++  // gauge 是账号全局的,谁的窗口都一样；只认 CC 窗口（T63：Codex 的 /status 不是 CC 的额度表；Pi 的 rpc 宿主空闲时画 `❯`，敲进去会当成一条消息）。
++  const codex = new Set(readRegistryAgentsSync().filter((a) => a.runtime && a.runtime !== "claude-code").map((a) => a.name));
+   const wins = (await tmuxRaw(["list-windows", "-t", MASTER_SESSION, "-F", "#{window_name}"]).catch(() => ""))
+     .split("\n").filter((w) => w.startsWith("agent-") && !codex.has(w));
+   const candidates: string[] = wins.map((w) => windowTarget(w));

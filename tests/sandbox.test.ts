@@ -125,7 +125,7 @@ describe("sandboxEnv", () => {
       CLAUDESTRA_SANDBOX_DENY_DIRS: "/p/state:/p/run", CLAUDESTRA_STATE_DIR: "/tmp/sbx/state", CLAUDESTRA_RUNTIME_DIR: "/tmp/sbx/run",
       MASTER_DIR: "/tmp/sbx/master", BRIDGE_PORT: "23900", BRIDGE_URL: "ws://localhost:23900", BRIDGE_BIND: "127.0.0.1",
       HISTFILE: "/tmp/sbx/shell_history", ZDOTDIR: "/tmp/sbx/zdotdir", BUN_RUNTIME_TRANSPILER_CACHE_PATH: "/tmp/sbx/bun-cache",
-      PYTHONDONTWRITEBYTECODE: "1", CODEX_HOME: "/tmp/sbx/acp-home/.codex",
+      PYTHONDONTWRITEBYTECODE: "1", CODEX_HOME: "/tmp/sbx/acp-home/.codex", PI_CODING_AGENT_DIR: "/tmp/sbx/pi-agent",
     });
   });
 });
@@ -223,7 +223,7 @@ describe("sandboxManagerRefusal", () => {
     expect(sandboxManagerRefusal(["resume", "a", "sid"])).not.toBeNull();
     expect(sandboxManagerRefusal(["restart", "--include-master"])).not.toBeNull();
     expect(sandboxManagerRefusal(["create", "a", "/w", "--external"])).not.toBeNull();
-    expect(sandboxManagerRefusal(["create", "a", "/w", "--runtime", "pi"])).not.toBeNull();
+    expect(sandboxManagerRefusal(["create", "a", "/w", "--runtime", "pi"])).toBeNull(); // spike：Pi 走直连 rpc 宿主（lib/pi-launch.ts）
     expect(sandboxManagerRefusal([])).not.toBeNull();
   });
 });

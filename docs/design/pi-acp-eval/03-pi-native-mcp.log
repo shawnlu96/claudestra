@@ -1,0 +1,38 @@
+[0.0s] ===== 扩展注册到假 bridge
+[0.2s] STDERR Warning: No project session found with id 'probe-1790789162726'; creating a new session with that id.
+[0.3s] WS<-ext {"type":"register","channelId":"chan-mcp","cwd":"/private/tmp/claude-501/-Users-he-repos-claudestra--claude-worktrees-pi-acp/b93a1c1a-ed11-4720-95c5-10bf13e5f19e/scratchpad/work","pid":63304,"ppid":63303}
+[0.3s] ===== 扩展注册到假 bridge: OK
+[0.3s] ===== get_state / get_commands
+[0.3s] EV response {"id":"c1","type":"response","command":"get_state","success":true,"data":{"model":{"id":"deepseek-v4-flash","name":"DeepSeek V4 Flash","api":"openai-completions","provider":"cc-switch-deep-seek","baseUrl":"https://api.de
+[0.3s] state {"model":{"id":"deepseek-v4-flash","name":"DeepSeek V4 Flash","api":"openai-completions","provider":"cc-switch-deep-seek","baseUrl":"https://api.deepseek.com/v1","reasoning":true,"thinkingLevelMap":{"minimal":null,"low":null,"medium":null,"high":"high","max":"max"},"input":["text"],"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0},"contextWindow":1000000,"maxTokens":384000},"
+[0.3s] EV response {"id":"c2","type":"response","command":"get_commands","success":true,"data":{"commands":[{"name":"mcp","description":"Manage MCP servers: sign in, reconnect, enable or disable, and change exposure","source":"extension","
+[0.3s] commands {"commands":[{"name":"mcp","description":"Manage MCP servers: sign in, reconnect, enable or disable, and change exposure","source":"extension","sourceInfo":{"path":"builtin:mcp","source":"builtin","scope":"temporary","origin":"top-level"}},{"name":"skill:claude-handoff","description":"Hand the current conversation off to a fresh background agent that picks up the work immediately."
+[0.3s] ===== get_state / get_commands: OK
+[0.3s] ===== bridge 往 channel-server 推一条 message（Pi 不认 channel 通知，预期无反应）
+[4.3s] 此期间 agent_start 次数 0
+[4.3s] ===== bridge 往 channel-server 推一条 message（Pi 不认 channel 通知，预期无反应）: OK
+[4.3s] ===== rpc prompt → 模型调 mcp__claudestra__reply
+[4.3s] EV response {"id":"c3","type":"response","command":"prompt","success":true,"data":{"disposition":"started"}}
+[4.3s] EV agent_start {"type":"agent_start"}
+[4.3s] EV turn_start {"type":"turn_start"}
+[4.3s] EV message_start {"type":"message_start","message":{"role":"system","content":"","sections":{"preamble":"You are an expert coding assistant operating inside pi, a coding agent harness. You help users by reading files, executing commands,
+[4.3s] EV message_end {"type":"message_end","message":{"role":"system","content":"","sections":{"preamble":"You are an expert coding assistant operating inside pi, a coding agent harness. You help users by reading files, executing commands, e
+[4.3s] EV message_start {"type":"message_start","message":{"role":"user","content":[{"type":"text","text":"立刻调用 mcp__claudestra__reply 工具，参数 text 为 pong-mcp。不要输出别的文字。"}],"timestamp":1790789167034}}
+[4.3s] EV message_end {"type":"message_end","message":{"role":"user","content":[{"type":"text","text":"立刻调用 mcp__claudestra__reply 工具，参数 text 为 pong-mcp。不要输出别的文字。"}],"timestamp":1790789167034}}
+[4.8s] EV message_start {"type":"message_start","message":{"role":"assistant","content":[],"api":"openai-completions","provider":"cc-switch-deep-seek","model":"deepseek-v4-flash","usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total
+[5.4s] EV message_end {"type":"message_end","message":{"role":"assistant","content":[{"type":"toolCall","id":"call_00_0czmkYgawvMZr9Sh02IB9777","name":"mcp__claudestra__reply","arguments":{"chat_id":"api:test","text":"pong-mcp"}}],"api":"open
+[5.4s] EV tool_execution_start {"type":"tool_execution_start","toolCallId":"call_00_0czmkYgawvMZr9Sh02IB9777","toolName":"mcp__claudestra__reply","args":{"chat_id":"api:test","text":"pong-mcp"}}
+[5.4s] WS<-ext {"type":"reply","chatId":"api:test","text":"pong-mcp","requestId":"req_1"}
+[5.4s] EV tool_execution_end {"type":"tool_execution_end","toolCallId":"call_00_0czmkYgawvMZr9Sh02IB9777","toolName":"mcp__claudestra__reply","result":{"content":[{"type":"text","text":"Sent message(s): undefined"}],"details":{"server":"claudestra",
+[5.4s] EV message_start {"type":"message_start","message":{"role":"toolResult","toolCallId":"call_00_0czmkYgawvMZr9Sh02IB9777","toolName":"mcp__claudestra__reply","content":[{"type":"text","text":"Sent message(s): undefined"}],"details":{"serve
+[5.4s] EV message_end {"type":"message_end","message":{"role":"toolResult","toolCallId":"call_00_0czmkYgawvMZr9Sh02IB9777","toolName":"mcp__claudestra__reply","content":[{"type":"text","text":"Sent message(s): undefined"}],"details":{"server"
+[5.4s] EV turn_end {"type":"turn_end","message":{"role":"assistant","content":[{"type":"toolCall","id":"call_00_0czmkYgawvMZr9Sh02IB9777","name":"mcp__claudestra__reply","arguments":{"chat_id":"api:test","text":"pong-mcp"}}],"api":"openai-
+[5.4s] EV turn_start {"type":"turn_start"}
+[6.0s] EV message_start {"type":"message_start","message":{"role":"assistant","content":[],"api":"openai-completions","provider":"cc-switch-deep-seek","model":"deepseek-v4-flash","usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total
+[6.5s] EV message_end {"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"pong-mcp"}],"api":"openai-completions","provider":"cc-switch-deep-seek","model":"deepseek-v4-flash","usage":{"input":235,"output":4,"c
+[6.5s] EV turn_end {"type":"turn_end","message":{"role":"assistant","content":[{"type":"text","text":"pong-mcp"}],"api":"openai-completions","provider":"cc-switch-deep-seek","model":"deepseek-v4-flash","usage":{"input":235,"output":4,"cach
+[6.5s] EV agent_end {"type":"agent_end","messages":[{"role":"system","content":"","sections":{"preamble":"You are an expert coding assistant operating inside pi, a coding agent harness. You help users by reading files, executing commands, e
+[6.5s] EV agent_settled {"type":"agent_settled"}
+[6.5s] assistant: [{"type":"toolCall","id":"call_00_0czmkYgawvMZr9Sh02IB9777","name":"mcp__claudestra__reply","arguments":{"chat_id":"api:test","text":"pong-mcp"}}] [{"type":"text","text":"pong-mcp"}]
+[6.5s] ===== rpc prompt → 模型调 mcp__claudestra__reply: OK
+[7.0s] exit code 0

@@ -1,0 +1,66 @@
+[0.0s] ===== A: 裸 pi-acp，mcpServers 是否被理会
+[0.1s] initialize {"protocolVersion":1,"agentInfo":{"name":"pi-acp","title":"pi ACP adapter","version":"0.0.34"},"authMethods":[{"id":"pi_terminal_login","name":"Launch pi in the terminal","description":"Start pi in an interactive terminal to configure API keys or login","type":"terminal","args":["--terminal-login"],"env":{}}],"agentCapabilities":{"loadSession":true,"mcpCapabilities":{"http":false
+[1.2s] session/new {"sessionId":"01a0f33c-6d2f-725a-9e80-6696ca57302e","configOptions":[{"type":"select","id":"model","category":"model","name":"Model","description":"Select the model for this session","currentValue":"cc-switch-deep-seek/deepseek-v4-flash","options":[{"value":"cc-switch-deep-seek/deepseek-flash","name":"cc-switch-deep-seek/deepseek-flash","description":null},{"value":"cc-switch-de
+[1.2s] UPD session_info_update {"sessionUpdate":"session_info_update","_meta":{"piAcp":{"queueDepth":0,"running":true}}}
+[1.2s] UPD usage_update {"sessionUpdate":"usage_update","used":1447,"size":1000000}
+[1.2s] UPD available_commands_update {"sessionUpdate":"available_commands_update","availableCommands":[{"name":"compact","description":"Manually compact the session context","input":{"hint":"optional custom instructions"}},{"name":"autoc
+[2.1s] UPD usage_update {"sessionUpdate":"usage_update","used":1712,"size":1000000}
+[2.1s] UPD session_info_update {"sessionUpdate":"session_info_update","_meta":{"piAcp":{"queueDepth":0,"running":false}}}
+[2.1s] stopReason end_turn updates {"session_info_update":2,"usage_update":2,"available_commands_update":1,"agent_thought_chunk":71,"agent_message_chunk":7}
+[2.1s] assistant text: read, bash, edit, write
+[2.1s] mcp marker exists: false
+[2.1s] ===== A: 裸 pi-acp，mcpServers 是否被理会: OK
+[2.1s] ===== B: 包装命令 + 扩展
+[3.0s] BRIDGE<- {"type":"register","channelId":"chan-acp","agentName":"agent-acp","runtime":"pi","pid":93762,"ppid":93761,"sessionId":"01a0f33c-7799-73c6-9478-fbaf56935b36","se
+[3.8s] sidB 01a0f33c-7799-73c6-9478-fbaf56935b36 models {"availableModels":[{"modelId":"cc-switch-deep-seek/deepseek-flash","name":"cc-switch-deep-seek/deepseek-flash","description":null},{"modelId":"cc-switch-deep-seek/deepseek-v4-flash","name":"cc-switch-deep-seek/DeepSeek V4 Flash","description":null}],"currentModelId":"cc-switch-deep-seek/deepseek-v4
+[3.8s] UPD usage_update {"sessionUpdate":"usage_update","used":0,"size":1000000}
+[3.8s] UPD available_commands_update {"sessionUpdate":"available_commands_update","availableCommands":[{"name":"compact","description":"Manually compact the session context","input":{"hint":"optional custom instructions"}},{"name":"autoc
+[5.3s] bridge registers so far 1
+[5.3s] UPD session_info_update {"sessionUpdate":"session_info_update","_meta":{"piAcp":{"queueDepth":0,"running":true}}}
+[5.7s] UPD tool_call {"sessionUpdate":"tool_call","toolCallId":"call_00_JJnRcFyYIZsTRyN01Wm36507","title":"reply","kind":"other","status":"pending","rawInput":{"text":"pong"}}
+[5.7s] UPD tool_call_update {"sessionUpdate":"tool_call_update","toolCallId":"call_00_JJnRcFyYIZsTRyN01Wm36507","status":"in_progress","rawInput":{"text":"pong"}}
+[5.7s] BRIDGE<- {"type":"reply","requestId":"37a72e5a-c7ab-475c-9644-e84e8bfda7a8","chatId":"chan-acp","text":"pong"}
+[5.7s] UPD tool_call_update {"sessionUpdate":"tool_call_update","toolCallId":"call_00_JJnRcFyYIZsTRyN01Wm36507","status":"completed","content":[{"type":"content","content":{"type":"text","text":"Sent message(s): []"}}],"rawOutpu
+[6.4s] UPD usage_update {"sessionUpdate":"usage_update","used":2350,"size":1000000}
+[6.4s] UPD session_info_update {"sessionUpdate":"session_info_update","_meta":{"piAcp":{"queueDepth":0,"running":false}}}
+[6.4s] prompt1 stopReason end_turn {"session_info_update":2,"tool_call":1,"tool_call_update":2,"agent_message_chunk":7,"usage_update":1} bridgeReplies 1 hookStops 0
+[6.4s] UPD session_info_update {"sessionUpdate":"session_info_update","_meta":{"piAcp":{"queueDepth":0,"running":true}}}
+[7.4s] UPD tool_call {"sessionUpdate":"tool_call","toolCallId":"call_00_3pPQy1abhyanpGIcHfCX7884","title":"sleep 20","kind":"execute","status":"pending","content":[{"type":"terminal","terminalId":"call_00_3pPQy1abhyanpGIc
+[7.4s] UPD tool_call_update {"sessionUpdate":"tool_call_update","toolCallId":"call_00_3pPQy1abhyanpGIcHfCX7884","title":"sleep 20","kind":"execute","status":"in_progress"}
+[7.4s] UPD tool_call_update {"sessionUpdate":"tool_call_update","toolCallId":"call_00_3pPQy1abhyanpGIcHfCX7884","status":"in_progress","_meta":{}}
+[11.4s] UPD tool_call_update {"sessionUpdate":"tool_call_update","toolCallId":"call_00_3pPQy1abhyanpGIcHfCX7884","status":"failed","_meta":{"terminal_output":{"terminal_id":"call_00_3pPQy1abhyanpGIcHfCX7884","data":"Command abort
+[11.4s] UPD usage_update {"sessionUpdate":"usage_update","used":2425,"size":1000000}
+[11.4s] UPD session_info_update {"sessionUpdate":"session_info_update","_meta":{"piAcp":{"queueDepth":0,"running":false}}}
+[11.4s] prompt2 stopReason (expect cancelled) cancelled {"session_info_update":2,"tool_call":1,"tool_call_update":3,"usage_update":1}
+[11.4s] ADAPTER-STDERR Error handling request {
+  jsonrpc: '2.0',
+  id: 5,
+  method: 'session/set_model',
+  params: {
+    sessionId: '01a0f33c-7799-73c6-9478-fbaf56935b36',
+    modelId: 'cc-switch-deep-seek/deepseek-flash'
+
+[11.4s] set_model {"jsonrpc":"2.0","id":5,"error":{"code":-32601,"message":"\"Method not found\": session/set_model","data":{"method":"session/set_model"}}}
+[11.4s] UPD session_info_update {"sessionUpdate":"session_info_update","_meta":{"piAcp":{"queueDepth":0,"running":true}}}
+[12.0s] UPD usage_update {"sessionUpdate":"usage_update","used":2456,"size":1000000}
+[12.0s] UPD session_info_update {"sessionUpdate":"session_info_update","_meta":{"piAcp":{"queueDepth":0,"running":false}}}
+[12.0s] /new {"jsonrpc":"2.0","id":6,"result":{"stopReason":"end_turn"}} [{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"？"}},{"sessionUpdate":"usage_update","used":2456,"size":1000000},{"sessionUpdate":"session_info_update","_meta":{"piAcp":{"queueDepth":0,"running":false}}}]
+[12.1s] ===== B: 包装命令 + 扩展: OK
+[12.1s] ===== C: 新进程 session/load 恢复 B 的会话
+[12.4s] BRIDGE<- {"type":"register","channelId":"chan-acp","agentName":"agent-acp","runtime":"pi","pid":94230,"ppid":94229,"sessionId":"01a0f33c-7799-73c6-9478-fbaf56935b36","se
+[12.4s] UPD user_message_chunk {"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"用 reply 工具回复 'pong'，只调一次。"}}
+[12.4s] UPD tool_call {"sessionUpdate":"tool_call","toolCallId":"call_00_JJnRcFyYIZsTRyN01Wm36507","title":"reply","kind":"other","status":"completed","rawInput":null,"rawOutput":{"role":"toolResult","toolCallId":"call_00_
+[12.4s] UPD tool_call_update {"sessionUpdate":"tool_call_update","toolCallId":"call_00_JJnRcFyYIZsTRyN01Wm36507","status":"completed","content":[{"type":"content","content":{"type":"text","text":"Sent message(s): []"}}],"rawOutpu
+[12.4s] UPD user_message_chunk {"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"用 bash 执行 sleep 20，然后说完成。"}}
+[12.4s] UPD tool_call {"sessionUpdate":"tool_call","toolCallId":"call_00_3pPQy1abhyanpGIcHfCX7884","title":"bash","kind":"execute","status":"completed","content":[{"type":"terminal","terminalId":"call_00_3pPQy1abhyanpGIcHf
+[12.4s] UPD tool_call_update {"sessionUpdate":"tool_call_update","toolCallId":"call_00_3pPQy1abhyanpGIcHfCX7884","status":"failed","_meta":{"terminal_output":{"terminal_id":"call_00_3pPQy1abhyanpGIcHfCX7884","data":"Command abort
+[12.4s] UPD user_message_chunk {"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"/new"}}
+[12.4s] load {"configOptions":[{"type":"select","id":"model","category":"model","name":"Model","description":"Select the model for this session","currentValue":"cc-switch-deep-seek/deepseek-v4-flash","options":[{"value":"cc-switch-deep-seek/deepseek-flash","name":"cc-switch-deep-seek/deepseek-flash","description replayed updates {"user_message_chunk":3,"tool_call":2,"tool_call_update":2,"agent_mes
+[12.4s] UPD session_info_update {"sessionUpdate":"session_info_update","_meta":{"piAcp":{"queueDepth":0,"running":true}}}
+[12.4s] UPD usage_update {"sessionUpdate":"usage_update","used":2460,"size":1000000}
+[12.4s] UPD available_commands_update {"sessionUpdate":"available_commands_update","availableCommands":[{"name":"compact","description":"Manually compact the session context","input":{"hint":"optional custom instructions"}},{"name":"autoc
+[13.1s] UPD usage_update {"sessionUpdate":"usage_update","used":2473,"size":1000000}
+[13.1s] UPD session_info_update {"sessionUpdate":"session_info_update","_meta":{"piAcp":{"queueDepth":0,"running":false}}}
+[13.1s] stopReason end_turn text: pong
+[13.1s] ===== C: 新进程 session/load 恢复 B 的会话: OK
+[13.1s] bridge registers total 2 replies 1 hookStops 4

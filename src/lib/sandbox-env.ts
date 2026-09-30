@@ -6,7 +6,7 @@ import { join } from "path";
 import { settingsLaunchArgs } from "./agent-settings.js";
 import { sandboxAcpHome } from "./acp/stub.js";
 import { isLab } from "./sandbox-lab.js";
-import { SANDBOX_DENY_DIRS_ENV, SANDBOX_DENY_PORTS_ENV, SANDBOX_FLAG, SANDBOX_ROOT_ENV } from "./sandbox.js";
+import { SANDBOX_DENY_DIRS_ENV, SANDBOX_DENY_PORTS_ENV, SANDBOX_FLAG, SANDBOX_ROOT_ENV, sandboxPiAgentDir } from "./sandbox.js";
 
 type Env = Record<string, string | undefined>;
 
@@ -110,6 +110,8 @@ export function sandboxEnv(
     PYTHONDONTWRITEBYTECODE: "1",
     // manager / bridge 定位 Codex 会话与凭据按 CODEX_HOME，不设就回落宿主 ~/.codex；与 ACP 链同一个值（沙箱根非绝对路径时抛）
     CODEX_HOME: sandboxAcpHome(opts.layout.root).CODEX_HOME,
+    // spike（Pi 直连 rpc）：Pi 的会话 / 设置目录，bridge 读历史、manager 起 Pi 都按它（lib/pi-session.ts piAgentDir）
+    PI_CODING_AGENT_DIR: sandboxPiAgentDir(opts.layout.root),
   });
   if (opts.staticDir) out.BRIDGE_STATIC_DIR = opts.staticDir;
   return out;
@@ -181,6 +183,7 @@ export function sandboxManagerRefusal(args: string[], lab = isLab(process.env)):
   if (cmd === "transport" && args[2] === "tmux") return "沙箱 Codex 只许 ACP stub，不起真实 TUI";
   const rt = args.indexOf("--runtime");
   const acp = args[rt + 1] === "codex" && (args.indexOf("--transport") < 0 || args[args.indexOf("--transport") + 1] === "acp");
-  if (rt >= 0 && args[rt + 1] !== "claude-code" && !acp) return "沙箱只支持 Claude Code runtime（Pi / Codex 的启动链不经沙箱闸门；Codex 只许 --transport acp，适配器固定是 stub）";
+  const piRpc = args[rt + 1] === "pi"; // spike：Pi 在沙箱里固定走直连 rpc 宿主，会话目录钉在沙箱根（lib/pi-launch.ts）
+  if (rt >= 0 && args[rt + 1] !== "claude-code" && !acp && !piRpc) return "沙箱只支持 Claude Code runtime（Pi / Codex 的启动链不经沙箱闸门；Codex 只许 --transport acp，适配器固定是 stub）";
   return null;
 }

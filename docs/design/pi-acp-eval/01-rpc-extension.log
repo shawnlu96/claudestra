@@ -1,0 +1,188 @@
+[0.0s] ===== 扩展注册到假 bridge
+[0.3s] STDERR Warning: No project session found with id 'probe-1790787079962'; creating a new session with that id.
+[0.5s] EV extension_ui_request {"type":"extension_ui_request","id":"80bdc9a8-820a-45a1-9968-9d535cb397cc","method":"setStatus","statusKey":"claudestra","statusText":"⚠️ bridge 断开"}
+[0.5s] WS<-ext {"type":"register","channelId":"chan-probe","agentName":"agent-probe","runtime":"pi","pid":88723,"ppid":88722,"sessionId":"probe-1790787079962","sessionFile":"/private/tmp/claude-501/-Users-he-repos-claudestra--claude-worktrees-pi-acp/b93a1c1a-ed11-4720-95c5-10bf13e5f19e/scratchpad/piagent/sessions/
+[0.5s] ===== 扩展注册到假 bridge: OK
+[0.5s] ===== get_state / get_commands
+[0.5s] EV response {"id":"c1","type":"response","command":"get_state","success":true,"data":{"model":{"id":"deepseek-v4-flash","name":"DeepSeek V4 Flash","api":"openai-completions","provider":"cc-switch-deep-seek","baseUrl":"https://api.de
+[0.5s] state {"model":{"id":"deepseek-v4-flash","name":"DeepSeek V4 Flash","api":"openai-completions","provider":"cc-switch-deep-seek","baseUrl":"https://api.deepseek.com/v1","reasoning":true,"thinkingLevelMap":{"minimal":null,"low":null,"medium":null,"high":"high","max":"max"},"input":["text"],"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0},"contextWindow":1000000,"maxTokens":384000},"
+[0.5s] EV extension_ui_request {"type":"extension_ui_request","id":"3b9e6e2b-7e3f-4f99-9a15-3fee31cf6c9d","method":"setStatus","statusKey":"claudestra","statusText":"🔗 agent-probe"}
+[0.5s] EV response {"id":"c2","type":"response","command":"get_commands","success":true,"data":{"commands":[{"name":"claudestra-model","description":"Claudestra: 切换本会话模型（参数：provider/model）","source":"extension","sourceInfo":{"path":"/Users
+[0.5s] commands {"commands":[{"name":"claudestra-model","description":"Claudestra: 切换本会话模型（参数：provider/model）","source":"extension","sourceInfo":{"path":"/Users/he/repos/claudestra/.claude/worktrees/pi-acp/src/pi/claudestra-extension.ts","source":"cli","scope":"temporary","origin":"top-level"}},{"name":"claudestra-thinking","description":"Claudestra: 切换本会话思考档位（参数：off/minimal/low/medium/high/xhigh/
+[0.5s] ===== get_state / get_commands: OK
+[0.5s] ===== 入站：bridge ws message → Pi 开一轮 → 调 reply 工具 → settled → /hook Stop
+[0.5s] EV agent_start {"type":"agent_start"}
+[0.5s] EV turn_start {"type":"turn_start"}
+[0.5s] EV message_start {"type":"message_start","message":{"role":"system","content":"","sections":{"preamble":"You are an expert coding assistant operating inside pi, a coding agent harness. You help users by reading files, executing commands,
+[0.5s] EV message_end {"type":"message_end","message":{"role":"system","content":"","sections":{"preamble":"You are an expert coding assistant operating inside pi, a coding agent harness. You help users by reading files, executing commands, e
+[0.5s] EV message_start {"type":"message_start","message":{"role":"user","content":[{"type":"text","text":"[来自 tester] 请用 reply 工具回复 'pong'，只调一次，不要做别的。"}],"timestamp":1790787080444}}
+[0.5s] EV message_end {"type":"message_end","message":{"role":"user","content":[{"type":"text","text":"[来自 tester] 请用 reply 工具回复 'pong'，只调一次，不要做别的。"}],"timestamp":1790787080444}}
+[0.7s] EV message_start {"type":"message_start","message":{"role":"assistant","content":[],"api":"openai-completions","provider":"cc-switch-deep-seek","model":"deepseek-v4-flash","usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total
+[1.2s] EV message_end {"type":"message_end","message":{"role":"assistant","content":[{"type":"toolCall","id":"call_00_zV1FPT8lHIM8J2uHN2Y13487","name":"reply","arguments":{"text":"pong"}}],"api":"openai-completions","provider":"cc-switch-deep
+[1.2s] EV tool_execution_start {"type":"tool_execution_start","toolCallId":"call_00_zV1FPT8lHIM8J2uHN2Y13487","toolName":"reply","args":{"text":"pong"}}
+[1.2s] WS<-ext {"type":"reply","requestId":"1b49cc39-26d3-43ba-ba5c-cc0ad77d5dcc","chatId":"chan-probe","text":"pong"}
+[1.2s] EV tool_execution_end {"type":"tool_execution_end","toolCallId":"call_00_zV1FPT8lHIM8J2uHN2Y13487","toolName":"reply","result":{"content":[{"type":"text","text":"Sent message(s): []"}],"details":{},"isError":false},"isError":false}
+[1.2s] EV message_start {"type":"message_start","message":{"role":"toolResult","toolCallId":"call_00_zV1FPT8lHIM8J2uHN2Y13487","toolName":"reply","content":[{"type":"text","text":"Sent message(s): []"}],"details":{},"isError":false,"timestamp":
+[1.2s] EV message_end {"type":"message_end","message":{"role":"toolResult","toolCallId":"call_00_zV1FPT8lHIM8J2uHN2Y13487","toolName":"reply","content":[{"type":"text","text":"Sent message(s): []"}],"details":{},"isError":false,"timestamp":17
+[1.2s] EV turn_end {"type":"turn_end","message":{"role":"assistant","content":[{"type":"toolCall","id":"call_00_zV1FPT8lHIM8J2uHN2Y13487","name":"reply","arguments":{"text":"pong"}}],"api":"openai-completions","provider":"cc-switch-deep-se
+[1.2s] EV turn_start {"type":"turn_start"}
+[1.4s] EV message_start {"type":"message_start","message":{"role":"assistant","content":[],"api":"openai-completions","provider":"cc-switch-deep-seek","model":"deepseek-v4-flash","usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total
+[2.0s] EV message_end {"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"Done — replied \"pong\"."}],"api":"openai-completions","provider":"cc-switch-deep-seek","model":"deepseek-v4-flash","usage":{"input":1
+[2.0s] EV turn_end {"type":"turn_end","message":{"role":"assistant","content":[{"type":"text","text":"Done — replied \"pong\"."}],"api":"openai-completions","provider":"cc-switch-deep-seek","model":"deepseek-v4-flash","usage":{"input":180,
+[2.0s] EV agent_end {"type":"agent_end","messages":[{"role":"system","content":"","sections":{"preamble":"You are an expert coding assistant operating inside pi, a coding agent harness. You help users by reading files, executing commands, e
+[2.0s] EV agent_settled {"type":"agent_settled"}
+[2.0s] HTTP /hook {"channelId":"chan-probe","event":"Stop"}
+[3.0s] hook stops: 1
+[3.0s] ===== 入站：bridge ws message → Pi 开一轮 → 调 reply 工具 → settled → /hook Stop: OK
+[3.0s] ===== 直连 rpc prompt（不经扩展）
+[3.0s] EV response {"id":"c3","type":"response","command":"prompt","success":true,"data":{"disposition":"started"}}
+[3.0s] {
+  id: "c3",
+  type: "response",
+  command: "prompt",
+  success: true,
+  data: {
+    disposition: "started",
+  },
+}
+[3.0s] EV agent_start {"type":"agent_start"}
+[3.0s] EV turn_start {"type":"turn_start"}
+[3.0s] EV message_start {"type":"message_start","message":{"role":"user","content":[{"type":"text","text":"只回答一个字：好"}],"timestamp":1790787082997}}
+[3.0s] EV message_end {"type":"message_end","message":{"role":"user","content":[{"type":"text","text":"只回答一个字：好"}],"timestamp":1790787082997}}
+[3.2s] EV message_start {"type":"message_start","message":{"role":"assistant","content":[],"api":"openai-completions","provider":"cc-switch-deep-seek","model":"deepseek-v4-flash","usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total
+[3.4s] EV message_end {"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"好"}],"api":"openai-completions","provider":"cc-switch-deep-seek","model":"deepseek-v4-flash","usage":{"input":196,"output":1,"cacheRea
+[3.4s] EV turn_end {"type":"turn_end","message":{"role":"assistant","content":[{"type":"text","text":"好"}],"api":"openai-completions","provider":"cc-switch-deep-seek","model":"deepseek-v4-flash","usage":{"input":196,"output":1,"cacheRead":
+[3.4s] EV agent_end {"type":"agent_end","messages":[{"role":"user","content":[{"type":"text","text":"只回答一个字：好"}],"timestamp":1790787082997},{"role":"assistant","content":[{"type":"text","text":"好"}],"api":"openai-completions","provider":"cc
+[3.4s] EV agent_settled {"type":"agent_settled"}
+[3.4s] ===== 直连 rpc prompt（不经扩展）: OK
+[3.4s] ===== abort：长任务中途打断
+[3.4s] HTTP /hook {"channelId":"chan-probe","event":"Stop"}
+[3.4s] EV response {"id":"c4","type":"response","command":"prompt","success":true,"data":{"disposition":"started"}}
+[3.4s] EV agent_start {"type":"agent_start"}
+[3.4s] EV turn_start {"type":"turn_start"}
+[3.4s] EV message_start {"type":"message_start","message":{"role":"user","content":[{"type":"text","text":"用 bash 执行 sleep 20，然后说完成。"}],"timestamp":1790787083318}}
+[3.4s] EV message_end {"type":"message_end","message":{"role":"user","content":[{"type":"text","text":"用 bash 执行 sleep 20，然后说完成。"}],"timestamp":1790787083318}}
+[3.6s] EV message_start {"type":"message_start","message":{"role":"assistant","content":[],"api":"openai-completions","provider":"cc-switch-deep-seek","model":"deepseek-v4-flash","usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total
+[4.1s] EV message_end {"type":"message_end","message":{"role":"assistant","content":[{"type":"toolCall","id":"call_00_rOlLFzoQPPhgwqgjrQPX8440","name":"bash","arguments":{"command":"sleep 20","timeout":30}}],"api":"openai-completions","provid
+[4.1s] EV tool_execution_start {"type":"tool_execution_start","toolCallId":"call_00_rOlLFzoQPPhgwqgjrQPX8440","toolName":"bash","args":{"command":"sleep 20","timeout":30}}
+[4.1s] EV tool_execution_update {"type":"tool_execution_update","toolCallId":"call_00_rOlLFzoQPPhgwqgjrQPX8440","toolName":"bash","args":{"command":"sleep 20","timeout":30},"partialResult":{"content":[]}}
+[7.4s] EV tool_execution_end {"type":"tool_execution_end","toolCallId":"call_00_rOlLFzoQPPhgwqgjrQPX8440","toolName":"bash","result":{"content":[{"type":"text","text":"Command aborted"}],"details":{}},"isError":true}
+[7.4s] EV message_start {"type":"message_start","message":{"role":"toolResult","toolCallId":"call_00_rOlLFzoQPPhgwqgjrQPX8440","toolName":"bash","content":[{"type":"text","text":"Command aborted"}],"details":{},"isError":true,"timestamp":179078
+[7.4s] EV message_end {"type":"message_end","message":{"role":"toolResult","toolCallId":"call_00_rOlLFzoQPPhgwqgjrQPX8440","toolName":"bash","content":[{"type":"text","text":"Command aborted"}],"details":{},"isError":true,"timestamp":17907870
+[7.4s] EV turn_end {"type":"turn_end","message":{"role":"assistant","content":[{"type":"toolCall","id":"call_00_rOlLFzoQPPhgwqgjrQPX8440","name":"bash","arguments":{"command":"sleep 20","timeout":30}}],"api":"openai-completions","provider"
+[7.4s] EV turn_start {"type":"turn_start"}
+[7.4s] EV message_start {"type":"message_start","message":{"role":"assistant","content":[],"api":"openai-completions","provider":"cc-switch-deep-seek","model":"deepseek-v4-flash","usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total
+[7.4s] EV message_end {"type":"message_end","message":{"role":"assistant","content":[],"api":"openai-completions","provider":"cc-switch-deep-seek","model":"deepseek-v4-flash","usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTo
+[7.4s] EV turn_end {"type":"turn_end","message":{"role":"assistant","content":[],"api":"openai-completions","provider":"cc-switch-deep-seek","model":"deepseek-v4-flash","usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalToken
+[7.4s] EV agent_end {"type":"agent_end","messages":[{"role":"user","content":[{"type":"text","text":"用 bash 执行 sleep 20，然后说完成。"}],"timestamp":1790787083318},{"role":"assistant","content":[{"type":"toolCall","id":"call_00_rOlLFzoQPPhgwqgjrQP
+[7.4s] EV agent_settled {"type":"agent_settled"}
+[7.4s] EV response {"id":"c5","type":"response","command":"abort","success":true}
+[7.4s] {
+  id: "c5",
+  type: "response",
+  command: "abort",
+  success: true,
+}
+[7.4s] ===== abort：长任务中途打断: OK
+[7.4s] ===== ws abort（bridge 停止按钮那条路）
+[7.4s] HTTP /hook {"channelId":"chan-probe","event":"Stop"}
+[7.4s] EV response {"id":"c6","type":"response","command":"prompt","success":true,"data":{"disposition":"started"}}
+[7.4s] EV agent_start {"type":"agent_start"}
+[7.4s] EV turn_start {"type":"turn_start"}
+[7.4s] EV message_start {"type":"message_start","message":{"role":"user","content":[{"type":"text","text":"用 bash 执行 sleep 20，然后说完成。"}],"timestamp":1790787087328}}
+[7.4s] EV message_end {"type":"message_end","message":{"role":"user","content":[{"type":"text","text":"用 bash 执行 sleep 20，然后说完成。"}],"timestamp":1790787087328}}
+[7.5s] EV message_start {"type":"message_start","message":{"role":"assistant","content":[],"api":"openai-completions","provider":"cc-switch-deep-seek","model":"deepseek-v4-flash","usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total
+[7.9s] EV message_end {"type":"message_end","message":{"role":"assistant","content":[{"type":"toolCall","id":"call_00_45lGvtHmURArsTiWFdjr0149","name":"bash","arguments":{"command":"sleep 20","timeout":60}}],"api":"openai-completions","provid
+[7.9s] EV tool_execution_start {"type":"tool_execution_start","toolCallId":"call_00_45lGvtHmURArsTiWFdjr0149","toolName":"bash","args":{"command":"sleep 20","timeout":60}}
+[7.9s] EV tool_execution_update {"type":"tool_execution_update","toolCallId":"call_00_45lGvtHmURArsTiWFdjr0149","toolName":"bash","args":{"command":"sleep 20","timeout":60},"partialResult":{"content":[]}}
+[11.4s] WS<-ext {"type":"abort_ack","id":"ab1","result":"aborted","voided":[],"inEditor":0}
+[11.4s] EV tool_execution_end {"type":"tool_execution_end","toolCallId":"call_00_45lGvtHmURArsTiWFdjr0149","toolName":"bash","result":{"content":[{"type":"text","text":"Command aborted"}],"details":{}},"isError":true}
+[11.4s] EV message_start {"type":"message_start","message":{"role":"toolResult","toolCallId":"call_00_45lGvtHmURArsTiWFdjr0149","toolName":"bash","content":[{"type":"text","text":"Command aborted"}],"details":{},"isError":true,"timestamp":179078
+[11.4s] EV message_end {"type":"message_end","message":{"role":"toolResult","toolCallId":"call_00_45lGvtHmURArsTiWFdjr0149","toolName":"bash","content":[{"type":"text","text":"Command aborted"}],"details":{},"isError":true,"timestamp":17907870
+[11.4s] EV turn_end {"type":"turn_end","message":{"role":"assistant","content":[{"type":"toolCall","id":"call_00_45lGvtHmURArsTiWFdjr0149","name":"bash","arguments":{"command":"sleep 20","timeout":60}}],"api":"openai-completions","provider"
+[11.4s] EV turn_start {"type":"turn_start"}
+[11.4s] EV message_start {"type":"message_start","message":{"role":"assistant","content":[],"api":"openai-completions","provider":"cc-switch-deep-seek","model":"deepseek-v4-flash","usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total
+[11.4s] EV message_end {"type":"message_end","message":{"role":"assistant","content":[],"api":"openai-completions","provider":"cc-switch-deep-seek","model":"deepseek-v4-flash","usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTo
+[11.4s] EV turn_end {"type":"turn_end","message":{"role":"assistant","content":[],"api":"openai-completions","provider":"cc-switch-deep-seek","model":"deepseek-v4-flash","usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalToken
+[11.4s] EV agent_end {"type":"agent_end","messages":[{"role":"user","content":[{"type":"text","text":"用 bash 执行 sleep 20，然后说完成。"}],"timestamp":1790787087328},{"role":"assistant","content":[{"type":"toolCall","id":"call_00_45lGvtHmURArsTiWFdj
+[11.4s] EV agent_settled {"type":"agent_settled"}
+[11.4s] ===== ws abort（bridge 停止按钮那条路）: OK
+[11.4s] ===== set_model / set_thinking_level
+[11.4s] HTTP /hook {"channelId":"chan-probe","event":"Stop"}
+[11.4s] EV thinking_level_changed {"type":"thinking_level_changed","level":"high"}
+[11.4s] EV response {"id":"c7","type":"response","command":"set_thinking_level","success":true}
+[11.4s] {
+  id: "c7",
+  type: "response",
+  command: "set_thinking_level",
+  success: true,
+}
+[11.4s] EV response {"id":"c8","type":"response","command":"set_model","success":true,"data":{"id":"deepseek-flash","name":"deepseek-flash","api":"openai-completions","provider":"cc-switch-deep-seek","baseUrl":"https://api.deepseek.com/v1",
+[11.4s] {
+  id: "c8",
+  type: "response",
+  command: "set_model",
+  success: true,
+  data: {
+    id: "deepseek-flash",
+    name: "deepseek-flash",
+    api: "openai-completions",
+    provider: "cc-switch-deep-seek",
+    baseUrl: "https://api.deepseek.com/v1",
+    reasoning: true,
+    thinkingLevelMap: {
+      minimal: null,
+      low: null,
+      medium: null,
+      high: "high",
+      max: "max",
+    },
+    input: [ "text" ],
+    cost: {
+      input: 0,
+      output: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+    },
+    contextWindow: 1000000,
+    maxTokens: 384000,
+  },
+}
+[11.4s] EV response {"id":"c9","type":"response","command":"get_state","success":true,"data":{"model":{"id":"deepseek-flash","name":"deepseek-flash","api":"openai-completions","provider":"cc-switch-deep-seek","baseUrl":"https://api.deepseek
+[11.4s] state {"model":{"id":"deepseek-flash","name":"deepseek-flash","api":"openai-completions","provider":"cc-switch-deep-seek","baseUrl":"https://api.deepseek.com/v1","reasoning":true,"thinkingLevelMap":{"minimal":null,"low":null,"medium":null,"high":"high","max":"max"},"input":["text"],"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0},"contextWindow":1000000,"maxTokens":384000},"think
+[11.4s] ===== set_model / set_thinking_level: OK
+[11.4s] ===== 扩展命令 /claudestra-thinking 走 rpc prompt
+[11.4s] EV thinking_level_changed {"type":"thinking_level_changed","level":"off"}
+[11.4s] EV extension_ui_request {"type":"extension_ui_request","id":"aea71064-6cd2-4418-acb6-9eb99d4a0312","method":"notify","message":"思考档位 → off","notifyType":"info"}
+[11.4s] EV response {"id":"c10","type":"response","command":"prompt","success":true,"data":{"disposition":"handled"}}
+[11.4s] {
+  id: "c10",
+  type: "response",
+  command: "prompt",
+  success: true,
+  data: {
+    disposition: "handled",
+  },
+}
+[11.4s] EV response {"id":"c11","type":"response","command":"get_state","success":true,"data":{"model":{"id":"deepseek-flash","name":"deepseek-flash","api":"openai-completions","provider":"cc-switch-deep-seek","baseUrl":"https://api.deepsee
+[11.4s] state {"model":{"id":"deepseek-flash","name":"deepseek-flash","api":"openai-completions","provider":"cc-switch-deep-seek","baseUrl":"https://api.deepseek.com/v1","reasoning":true,"thinkingLevelMap":{"minimal":null,"low":null,"medium":null,"high":"high","max":"max"},"input":["text"],"cost":{"input":0,"outp
+[11.4s] ===== 扩展命令 /claudestra-thinking 走 rpc prompt: OK
+[11.4s] ===== new_session（/clear 等价）
+[11.4s] EV extension_ui_request {"type":"extension_ui_request","id":"a3c49b49-89f3-4099-adbb-e4105cab71da","method":"setStatus","statusKey":"claudestra","statusText":"⚠️ bridge 断开"}
+[11.4s] EV extension_ui_request {"type":"extension_ui_request","id":"7e9deff4-68ec-4575-acf4-9b39864f0bb8","method":"setStatus","statusKey":"claudestra","statusText":"⚠️ bridge 断开"}
+[11.4s] EV response {"id":"c12","type":"response","command":"new_session","success":true,"data":{"cancelled":false}}
+[11.4s] {
+  id: "c12",
+  type: "response",
+  command: "new_session",
+  success: true,
+  data: {
+    cancelled: false,
+  },
+}
+[11.4s] WS<-ext {"type":"register","channelId":"chan-probe","agentName":"agent-probe","runtime":"pi","pid":88723,"ppid":88722,"sessionId":"01a0f33a-7b91-75f0-b709-e3641ff23848","sessionFile":"/private/tmp/claude-501/-Users-he-repos-claudestra--claude-worktrees-pi-acp/b93a1c1a-ed11-4720-95c5-10bf13e5f19e/scratchpad/
+[11.4s] EV extension_ui_request {"type":"extension_ui_request","id":"9e820908-ff2c-4734-b768-63ea81532392","method":"setStatus","statusKey":"claudestra","statusText":"🔗 agent-probe"}
+[13.4s] EV response {"id":"c13","type":"response","command":"get_state","success":true,"data":{"model":{"id":"deepseek-v4-flash","name":"DeepSeek V4 Flash","api":"openai-completions","provider":"cc-switch-deep-seek","baseUrl":"https://api.d
+[13.4s] state {"model":{"id":"deepseek-v4-flash","name":"DeepSeek V4 Flash","api":"openai-completions","provider":"cc-switch-deep-seek","baseUrl":"https://api.deepseek.com/v1","reasoning":true,"thinkingLevelMap":{"minimal":null,"low":null,"medium":null,"high":"high","max":"max"},"input":["text"],"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0},"contextWindow":1000000,"maxTokens":384000},
+[13.4s] ===== new_session（/clear 等价）: OK
+[13.4s] exit code 0
