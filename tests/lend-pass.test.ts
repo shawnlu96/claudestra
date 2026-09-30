@@ -86,3 +86,23 @@ describe("T94 真服务：没有 scheduler.json、只开了 lend.json 也跑 pas
     expect(existsSync(join(state, "scheduler.json"))).toBe(false);
   }, 30_000);
 });
+
+describe("T94 lend off 之后的收尾（r2 P2）", () => {
+  test("出借关了、journal 里只剩终态但收尾没做完：服务入口仍要跑 lend 这一步；收尾做完、也没活着的单才不跑", async () => {
+    const { lendWanted } = await import("../src/lib/lend-deps.js");
+    const { advance, patchOrder, recordAsked } = await import("../src/lib/lend-journal.js");
+    const dir = mkdtempSync(join(tmpdir(), "lend-wanted-"));
+    roots.push(dir);
+    const journal = join(dir, "journal.sqlite");
+    const lend = join(dir, "lend.json");
+    writeFileSync(lend, JSON.stringify({ version: 1, enabled: false, lend: [], borrow: [] }));
+    const db = openLendJournal(journal);
+    recordAsked(db, { orderId: "o1", peer: "team-a", fp: null, family: "codex", preview: {} });
+    advance(db, "o1", "asked", "claimed");
+    advance(db, "o1", "claimed", "released", { reason: "clone 失败", settle: { notify: null, removeDir: false } }); // 收据还没写成
+    expect(await lendWanted(journal, lend)).toBe(true);
+    patchOrder(db, "o1", ["released"], { settle: null });
+    db.close();
+    expect(await lendWanted(journal, lend)).toBe(false);
+  });
+});

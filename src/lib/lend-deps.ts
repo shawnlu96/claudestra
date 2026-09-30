@@ -12,7 +12,7 @@ import { verifyPurpose } from "./instance-key.js";
 import { lendAskVerdict } from "./lend-ask.js";
 import { LEND_ROOT, prepareClone, removeOrderDir } from "./lend-clone.js";
 import { readLend } from "./lend-config.js";
-import { LEND_JOURNAL_PATH, liveOrders, openLendJournal, type LendRow } from "./lend-journal.js";
+import { LEND_JOURNAL_PATH, liveOrders, openLendJournal, unsettledOrders, type LendRow } from "./lend-journal.js";
 import { readLendContext } from "./lend-policy.js";
 import { appendReceipt, receiptOf, tokensFor } from "./lend-receipts.js";
 import type { LendCall } from "./lend-remote.js";
@@ -36,13 +36,16 @@ const plainManager: Manager = (...args) =>
 
 const LEND_PROJECT = "lend";
 
-/** 要不要进 pass 跑 lend 这一步：出借开着，或 journal 里还有没跑完的单（lend off 之后在跑的单也要跑完、续租、自停） */
-export async function lendWanted(): Promise<boolean> {
-  const read = await readLend();
+/**
+ * 要不要进 pass 跑 lend 这一步：出借开着，或 journal 里还有没跑完的单、没做完的收尾（lend off 之后在跑的单也要跑完、续租、自停，
+ * 终态之后没写成的收据 / 没发出的通知也要补上：收尾不看出借开关）
+ */
+export async function lendWanted(journal = LEND_JOURNAL_PATH, lendPath?: string): Promise<boolean> {
+  const read = await readLend(lendPath);
   if (read.status === "ok" && read.file.enabled) return true;
-  if (!existsSync(LEND_JOURNAL_PATH)) return false;
-  const db = openLendJournal();
-  try { return liveOrders(db).length > 0; } finally { db.close(); }
+  if (!existsSync(journal)) return false;
+  const db = openLendJournal(journal);
+  try { return liveOrders(db).length > 0 || unsettledOrders(db).length > 0; } finally { db.close(); }
 }
 
 /** 出借 worker 固定归到 lend 项目：不按目录落进别的项目，项目上下文里也就不会带上 B 自己的项目花名册 */
