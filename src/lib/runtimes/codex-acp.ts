@@ -21,6 +21,7 @@ import { isSandbox, SANDBOX_ROOT_ENV } from "../sandbox.js";
 import { acpAgentCommand, adapterEnv, spawnAdapter } from "../acp/adapter-proc.js";
 import { ACP_AGENT_ENV, sandboxAcpHome } from "../acp/stub.js";
 import { AcpSession } from "../acp/session.js";
+import { BUN_NO_AUTOLOAD, CLEAN_ENV_FLAG, envIPrefix, isLendWorkerName } from "./clean-env.js";
 import { CODEX_ACP_CONTROL } from "./codex-control.js";
 import { defaultCodexDeps, type CodexAdapterDeps } from "./codex-deps.js";
 import { CODEX_READY_OPTION, waitCodexReady } from "./codex-ready.js";
@@ -38,6 +39,8 @@ export function buildAcpHostCommand(spec: LaunchSpec, o: { bunBin: string; repoR
   if (!spec.sessionId) throw new Error("ACP 宿主需要 thread id（new 先经 prepareSession 引导）");
   const env = o.env ?? process.env;
   const sandbox = isSandbox(env);
+  // 出借 worker：env -i 清掉窗口 shell 继承的一切，宿主只拿下面这些；宿主起适配器时再按白名单给（runtimes/clean-env.ts）
+  const clean = isLendWorkerName(agent);
   const pairs: [string, string | undefined][] = [
     ["DISCORD_CHANNEL_ID", spec.channelId],
     ["BRIDGE_URL", spec.bridgeUrl],
@@ -56,16 +59,19 @@ export function buildAcpHostCommand(spec: LaunchSpec, o: { bunBin: string; repoR
     // 沙箱外的手工覆盖（单测 / 排查）照带；沙箱里不带：适配器固定是本仓 stub，宿主这条链的 HOME 挪进沙箱根（lib/acp/stub.ts）
     [ACP_AGENT_ENV, sandbox ? undefined : env[ACP_AGENT_ENV]?.trim() || undefined],
     ...(sandbox ? Object.entries(sandboxAcpHome(env[SANDBOX_ROOT_ENV])) : []),
+    [CLEAN_ENV_FLAG, clean ? "1" : undefined],
   ];
   const prefix = pairs.filter(([, v]) => v).map(([k, v]) => `${k}=${shellEscape(v!)}`).join(" ");
   const cred = acpCallerCredAssignment(spec.callerCredFile, shellEscape); // T85：路径只给宿主这一条命令，宿主起适配器前读走即删
-  return `${prefix}${cred}${pathOverrideAssignments(shellEscape, env)} ${shellEscape(o.bunBin)} ${shellEscape(join(o.repoRoot, "src/acp-host.ts"))}`;
+  const head = clean ? `${envIPrefix(env, shellEscape)} ` : "";
+  const bun = [shellEscape(o.bunBin), ...(clean ? BUN_NO_AUTOLOAD : [])].join(" ");
+  return `${head}${prefix}${cred}${pathOverrideAssignments(shellEscape, env)} ${bun} ${shellEscape(join(o.repoRoot, "src/acp-host.ts"))}`;
 }
 
 /** create 的引导：起一个短命的适配器，新建线程并跑一轮，返回 thread id（不挂 claudestra MCP，频道相关的环境变量全清掉） */
 async function bootstrapThread(spec: LaunchSpec, deps: CodexAdapterDeps): Promise<string> {
   if (!spec.cwd) throw new Error("Codex（ACP）新建会话需要工作目录（LaunchSpec.cwd）");
-  const agent = acpAgentCommand(process.env, deps.bunBin);
+  const agent = acpAgentCommand(process.env, deps.bunBin, undefined, isLendWorkerName(spec.agentName));
   if ("error" in agent) throw new Error(agent.error);
   const codexPath = agent.stub ? undefined : ((await deps.resolveBin()) ?? undefined);
   const developerInstructions = spec.mode === "fork" ? undefined : codexDeveloperInstructions({
@@ -73,7 +79,7 @@ async function bootstrapThread(spec: LaunchSpec, deps: CodexAdapterDeps): Promis
   });
   const env = adapterEnv({
     base: process.env, bunBin: deps.bunBin, channelServer: join(deps.repoRoot, "src/channel-server.ts"), mcpName: mcpName(),
-    codexPath, logsDir: statePath("logs", "acp", "bootstrap"), developerInstructions,
+    codexPath, logsDir: statePath("logs", "acp", "bootstrap"), developerInstructions, clean: isLendWorkerName(spec.agentName),
   });
   const logs: string[] = [];
   const proc = spawnAdapter(agent.cmd, env, spec.cwd, (m) => logs.push(m));

@@ -10,7 +10,7 @@ const protectedName = (name: string, role?: string): boolean => isMasterName(nam
 export function workerKind(name: string, info: KindEvidence): AgentKind | null {
   if (info.kind === "main") return "main";
   if (protectedName(name, info.role)) return null;
-  if (info.kind === "worker" || info.role === "dispatcher" || info.role === "executor" || /^agent-task-/i.test(name)) return "worker";
+  if (info.kind === "worker" || info.role === "dispatcher" || info.role === "executor" || /^agent-(?:task|lend)-/i.test(name)) return "worker";
   return null;
 }
 
@@ -39,5 +39,5 @@ export function markWorkerKinds(agents: Record<string, KindEvidence>): number {
 /** Global history excludes current tagged workers and removed legacy task workers; an explicit agent query still works. */
 export function visibleInDefaultSearch(name: string, info?: KindEvidence, archivedWorker = false): boolean {
   if (info?.kind === "main") return true;
-  return info?.kind !== "worker" && !archivedWorker && !/^agent-task-/i.test(name);
+  return info?.kind !== "worker" && !archivedWorker && !/^agent-(?:task|lend)-/i.test(name);
 }

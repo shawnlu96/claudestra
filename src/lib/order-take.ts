@@ -27,7 +27,8 @@ export interface CurrentOrder {
 
 const hasTable = (db: Database, t: string): boolean => !!db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(t);
 
-const manualOrderId = (taskId: string, step: string, round: number): string => `${taskId}:${step}:r${round}`;
+/** PM 手动派的单：`<task>:<step>:r<round>`（执行者单与审查单同一口径，lib/review-order.ts 也用它） */
+export const manualOrderId = (taskId: string, step: string, round: number): string => `${taskId}:${step}:r${round}`;
 
 /** 进入当前阶段的那条 stage 事件的 seq：它之前规划的 dispatch 属于上一轮，不能拿来当这一轮的单号 */
 function stageEnteredSeq(db: Database, task: LedgerTask): number {

@@ -4,11 +4,13 @@
  * - Stop 后的屏幕复核只对 idleSource=pane 的运行时（stopNeedsPaneRecheck）
  * - wedge 卡死判定只对 paneHeuristics 的运行时（wedgeJudgedByPane）
  * - interruptOnlyWhenBusy：空闲的 Codex 不发 Esc，返回空数组让调用方回报「无需打断」（interruptVia）
+ * - 用量抓取只往 CC 窗口敲 /status（claudeCodeWindows）
  */
 import { describe, expect, test } from "bun:test";
 import { wedgeJudgedByPane } from "../src/bridge/wedge-watcher.js";
 import { paneIdleVerdict, paneLooksIdle } from "../src/lib/tmux-helper.js";
 import { interruptVia, stopNeedsPaneRecheck, type InterruptIO } from "../src/lib/runtimes/window-ops.js";
+import { claudeCodeWindows } from "../src/lib/runtimes/index.js";
 
 const CODEX_IDLE = [
   "› 上一轮的回答……",
@@ -102,5 +104,18 @@ describe("wedgeJudgedByPane：卡死判定", () => {
     expect(wedgeJudgedByPane("claude-code")).toBe(true);
     expect(wedgeJudgedByPane("pi")).toBe(false);
     expect(wedgeJudgedByPane("codex")).toBe(false);
+  });
+});
+
+describe("claudeCodeWindows：用量抓取往哪些窗口敲 /status", () => {
+  test("只认 registry 里的 CC 窗口：Pi / Codex / 查不到的窗口都不碰", () => {
+    const agents = [
+      { name: "agent-cc", runtime: "claude-code" },
+      { name: "agent-old" }, // 老 agent 没有 runtime 字段 = CC
+      { name: "agent-pi", runtime: "pi" },
+      { name: "agent-codex", runtime: "codex" },
+    ];
+    const wins = ["master", "agent-cc", "agent-old", "agent-pi", "agent-codex", "agent-orphan", ""];
+    expect(claudeCodeWindows(wins, agents)).toEqual(["agent-cc", "agent-old"]);
   });
 });

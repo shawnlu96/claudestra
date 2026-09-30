@@ -167,6 +167,7 @@ const SANDBOX_MANAGER_COMMANDS = new Set([
 const LAB_MANAGER_COMMANDS = new Set([
   "peer-invite-new", "peer-join-auto", "peer-invite-redeem", "peer-invite-list", "peer-invite-revoke", "peer-invite-inspect",
   "peer-http-list", "peer-http-test", "peer-http-scope", "peer-http-remove", "external",
+  "lend", "borrow", // 出借 / 借入：只读写沙箱状态目录的 lend.json 与 lend journal，lend call 只发给 lab 内的 peer（writePeers 已限定）
 ]);
 
 /** 返回拒绝原因；null = 可以跑。agent 目录与 runtime 另由 manager 的 create 入口按 lib/sandbox.ts 再查一遍。lab = 沙箱的 lab 模式 */

@@ -155,3 +155,10 @@ export function attrBreakdown(db: Database, sinceMs = 0): BasisRow[] {
     WHERE t.started_at >= ? GROUP BY basis`).all(sinceMs) as any[];
   return rows.map((r) => withTotal(r) as BasisRow).sort((a, b) => b.totalTokens - a.totalTokens);
 }
+
+/** 某个会话的 token 合计（出借收据用，T94）；账里没有这个会话 = null（调用方记「未知」，不记 0） */
+export function sessionTokens(db: Database, sessionId: string): TokenSums | null {
+  const r = db.prepare(`SELECT ${SUMS} FROM turns t JOIN calls c ON c.turn_id = t.turn_id WHERE t.session_id = ?`).get(sessionId) as
+    Omit<TokenSums, "totalTokens"> | null;
+  return r && r.calls > 0 ? withTotal(r) : null;
+}

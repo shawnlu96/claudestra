@@ -19,6 +19,11 @@ describe("resolveActor", () => {
   test("agent 频道 → registry 键", () => {
     expect(resolveActor({ channelId: "222", controlChannelId: "999" }, agents)).toEqual({ ok: true, actor: "agent-task-t8b" });
   });
+  test("出借 worker（带 CLAUDESTRA_LEND_WORKER）没有频道号也不算 owner，一律拒（T94 specRev 2：不能自己延长预先授权）", () => {
+    expect(resolveActor({ controlChannelId: "999" }, agents, "1")).toMatchObject({ ok: false });
+    expect(resolveActor({ channelId: "999", controlChannelId: "999" }, agents, "1")).toMatchObject({ ok: false });
+    expect(resolveActor({ controlChannelId: "999" }, agents, undefined)).toEqual({ ok: true, actor: "owner" });
+  });
   test("未知频道拒绝，不降级成 owner；没配控制频道时控制频道也算未知", () => {
     const r = resolveActor({ channelId: "333", controlChannelId: "999" }, agents);
     expect(r.ok).toBe(false);

@@ -17,6 +17,7 @@ import { askDb } from "./asks.js";
 import { callerOf } from "./caller-identity.js";
 import { BUN_PATH, ENV_WITH_BUN, MANAGER_PATH, MASTER_DIR } from "./config.js";
 import { ledgerDb } from "./ledger-feed.js";
+import { reviewToolHandlers } from "./review-tools.js";
 import { sendLedgerNotice } from "./team-router.js";
 
 /** manager 以调用方频道为身份跑：actor 由 CLI 按 DISCORD_CHANNEL_ID 算（manager/ledger-identity.ts）。handler 经 lib/order-ledger-exit.ts ledgerWrite 用它 */
@@ -43,6 +44,7 @@ const HANDLERS: Record<string, OrderToolHandler> = {
     db: ledgerDb(), open: (input) => openAskFull(askDb(), input), notify: (to, text, messageId) => sendLedgerNotice({ to, text, messageId }),
     markHanded: (id) => patchAsk(askDb(), id, { extra: { notice: "handed" } }),
   }),
+  ...reviewToolHandlers(ledgerRun),
 };
 
 export async function answerOrderTool(ws: ServerWebSocket<unknown>, msg: Record<string, unknown>): Promise<void> {

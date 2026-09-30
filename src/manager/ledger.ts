@@ -8,6 +8,7 @@ import { existsSync } from "node:fs";
 import { repoEnvVar } from "../lib/env-file.js";
 import { LedgerReader } from "../lib/ledger-read.js";
 import { notify } from "../lib/notify.js";
+import { LEND_WORKER_MARK } from "../lib/runtimes/clean-env.js";
 import { LedgerError, LEDGER_PATH, openLedger } from "../lib/ledger-store.js";
 import { renameAgentRefs } from "../lib/ledger-write.js";
 import { readProjects } from "../lib/projects.js";
@@ -28,10 +29,12 @@ import { TEAM_CMDS } from "./ledger-team-cmds.js";
 import { WRITE_CMDS, type CommandSpec } from "./ledger-write-cmds.js";
 import { LEND_CMDS } from "./ledger-lend-cmds.js";
 import { PEER_CMDS } from "./ledger-peer.js";
+import { LEND_ASK_CMDS } from "./ledger-lend-ask-cmd.js";
 import { STEP_CMDS } from "./ledger-step-cmds.js";
 import { SCHEDULER_CMDS } from "./ledger-scheduler-cmds.js";
 import { SCHEDULER_OBSERVE_CMDS } from "./ledger-scheduler-observe-cmds.js";
 import { SCHEDULER_AUTO_CMDS } from "./ledger-scheduler-auto-cmds.js";
+import { VERDICT_CMDS } from "./ledger-verdict-cmds.js";
 import { DRY_RUN_READS, isWriteInvocation } from "./write-commands.js";
 import { readSchedulerConfig } from "../lib/scheduler-config.js";
 import { collectCallerWitness } from "../lib/caller-witness.js";
@@ -41,7 +44,7 @@ import { assertSchedulerLease, SchedulerLeaseLost } from "../lib/scheduler-lease
 export const UNKNOWN_ACTOR = "unknown";
 const SCHEDULER_SERVICE_COMMANDS = new Set([
   "scheduler-plan", "scheduler-settle", "scheduler-session-bind", "scheduler-session-retire", "scheduler-merge-begin", "scheduler-merge-step",
-  "scheduler-observe", "scheduler-fallback-manual", "scheduler-stage", "scheduler-ui-ask",
+  "scheduler-observe", "scheduler-fallback-manual", "scheduler-stage", "scheduler-ui-ask", "lend-ask", "lend-inform",
 ]);
 
 const COMMANDS: Record<string, CommandSpec> = {
@@ -56,11 +59,13 @@ const COMMANDS: Record<string, CommandSpec> = {
   verify: VERIFY_CMD,
   ...AUDIT_CMDS,
   ...PEER_CMDS,
+  ...LEND_ASK_CMDS,
   ...LEND_CMDS,
   ...STEP_CMDS,
   ...SCHEDULER_CMDS,
   ...SCHEDULER_OBSERVE_CMDS,
   ...SCHEDULER_AUTO_CMDS,
+  ...VERDICT_CMDS,
   import: { valued: ["map", "project"], bools: ["dry-run"], usage: "import <ledger.json> --map <map.json> [--project <id>] [--dry-run]（owner 一次性迁移；映射里的 pms 只在 PM 名单为空时写入）", run: importCmd },
 };
 
@@ -95,7 +100,7 @@ export async function runLedger(args: string[], deps: LedgerDeps): Promise<Resul
 async function realDeps(args: string[]): Promise<LedgerDeps | { error: string }> {
   const reg = await loadRegistry();
   const service = process.env.CLAUDESTRA_SCHEDULER_SERVICE === "1";
-  if (service && process.env.DISCORD_CHANNEL_ID) return { error: "agent 频道不能冒用调度服务身份" };
+  if (service && (process.env.DISCORD_CHANNEL_ID || process.env[LEND_WORKER_MARK])) return { error: "agent 频道 / 出借 worker 不能冒用调度服务身份" };
   if (service && !SCHEDULER_SERVICE_COMMANDS.has(args[0] ?? "")) {
     return { error: "调度服务身份只能运行调度专用命令" };
   }

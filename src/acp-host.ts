@@ -16,6 +16,7 @@ import { statePath } from "./lib/paths.js";
 import { SRC_DIR } from "./lib/repo-root.js";
 import { runManagerProcess } from "./lib/run-manager.js";
 import { readRegistryAgents } from "./lib/registry.js";
+import { CLEAN_ENV_FLAG } from "./lib/runtimes/clean-env.js";
 import { CODEX_READY_OPTION } from "./lib/runtimes/codex-ready.js";
 import { tmuxRaw } from "./lib/tmux-helper.js";
 import { takeCallerCred } from "./lib/caller-cred.js";
@@ -39,7 +40,7 @@ const agentName = need("CLAUDESTRA_AGENT");
 const sessionId = need("CLAUDESTRA_SESSION_ID");
 const bridgeUrl = resolveBridgeUrl();
 const bunBin = resolveBunPath();
-const agent = acpAgentCommand(process.env, bunBin);
+const agent = acpAgentCommand(process.env, bunBin, undefined, process.env[CLEAN_ENV_FLAG] === "1");
 if ("error" in agent) {
   console.error(`❌ ${agent.error}`);
   process.exit(3);
@@ -69,6 +70,7 @@ const host = new AcpHost(
       codexPath: agent.stub ? undefined : codexPath,
       logsDir: statePath("logs", "acp", agentName),
       developerInstructions: process.env.CLAUDESTRA_ACP_DEVELOPER ? Buffer.from(process.env.CLAUDESTRA_ACP_DEVELOPER, "base64").toString("utf8") : undefined,
+      clean: process.env[CLEAN_ENV_FLAG] === "1", // 出借 worker：适配器只拿白名单环境、不挂 claudestra MCP（lib/runtimes/clean-env.ts）
     },
   },
   {
@@ -109,6 +111,18 @@ for (const sig of ["SIGINT", "SIGTERM", "SIGHUP"] as const) {
     host.stop();
     setTimeout(() => process.exit(0), 1_500);
   });
+}
+
+// 出借 worker（干净环境）：scheduler 服务挂了也要按租约自停——宿主自己定时看 journal（lib/lend-watchdog.ts）
+if (process.env[CLEAN_ENV_FLAG] === "1") {
+  const { lendStopReason, WATCHDOG_EVERY_MS } = await import("./lib/lend-watchdog.js");
+  setInterval(() => {
+    const why = lendStopReason(agentName);
+    if (!why) return;
+    log(`出借 worker 自停：${why}`);
+    host.stop();
+    setTimeout(() => process.exit(0), 1_500);
+  }, WATCHDOG_EVERY_MS);
 }
 
 log(`ACP 宿主启动：${agentName} · 线程 ${sessionId.slice(0, 8)} · ${agent.stub ? `stub（${agent.cmd.join(" ")}）` : "codex-acp"} · bridge ${bridgeUrl}`);
