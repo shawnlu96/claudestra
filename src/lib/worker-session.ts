@@ -33,7 +33,26 @@ export interface WorkOrder {
   writeBack: string;
   findings?: ReviewFinding[];
   fallbackWarning?: string | null;
+  /** Fixed before the claim and never changed for this intent: one intent is sent one way, so a fallback cannot double-send. */
+  delivery?: OrderDelivery;
 }
+
+/** wake = one line telling the worker to call take_order / take_review; text = the whole order typed in, with the reason why. */
+export type OrderDelivery = { mode: "wake" } | { mode: "text"; reason: string };
+
+/**
+ * Only sessions that carry the order tools get a wake line: Claude Code over the channel and Codex over ACP (the host proxies
+ * order_tool). A Codex TUI session has no such tool, and take_order does not serve restate orders (spec stage), so both keep text.
+ */
+export function deliveryFor(route: WorkerRouteKind, step: WorkOrder["step"]): OrderDelivery {
+  if (step === "restate") return { mode: "text", reason: "复述单没有领单工具（take_order 只收 build / fix）" };
+  if (route === "tmux") return { mode: "text", reason: "Codex tmux 会话没有派单工具" };
+  return { mode: "wake" };
+}
+
+/** How the claim and the receipt name the delivery; the unclaimed alarm reads it back from the intent's receipt. */
+export const deliveryTag = (d: OrderDelivery | undefined): string => d?.mode === "wake" ? "delivery=wake" : `delivery=text${d ? `（${d.reason}）` : ""}`;
+export const sentAsWake = (receipt: string | null): boolean => !!receipt && /(^|; )delivery=wake(;|$)/.test(receipt);
 
 /**
  * sent = the transport accepted the message under this key; rejected = provably not delivered (safe to replan);
