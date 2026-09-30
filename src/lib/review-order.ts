@@ -12,10 +12,11 @@ import type { LedgerEvent, LedgerTask } from "./ledger-stages.js";
 import { getMeta, getTask, listEvents } from "./ledger-store.js";
 import { currentReview, stepsOf } from "./ledger-steps.js";
 import { manualOrderId } from "./order-take.js";
+import { clipWire as clip, wireFindings } from "./order-findings.js";
+import type { ReviewFinding } from "./scheduler-review.js";
 import { parseOrderWire, WIRE_LIMITS, type OrderWire } from "./order-wire.js";
 import { statePath } from "./paths.js";
 import { specSection } from "./review-pack.js";
-import type { ReviewFinding } from "./scheduler-review.js";
 import { runtimeFamily } from "./scheduler-auto-review.js";
 import { getSchedulerSession } from "./scheduler-sessions.js";
 import { readTextSoft, specPathFor } from "./task-spec.js";
@@ -75,18 +76,6 @@ function reviewSlotsFor(db: Database, caller: ReviewCaller): ReviewSlot[] {
   return ids.map((id) => getTask(db, id)).flatMap((t) => (t ? [reviewSlotFor(db, t, caller)] : [])).filter((s): s is ReviewSlot => !!s);
 }
 
-/** 按 UTF-8 字节截（wire 按字节限长）；截断处标 … 说明不是原文全文 */
-function clip(s: string, max: number): string {
-  const clean = s.replace(/[\u0000-\u0008\u000b-\u001f\u007f\u2028\u2029]/g, " ");
-  if (Buffer.byteLength(clean) <= max) return clean;
-  let out = "";
-  for (const ch of clean) {
-    if (Buffer.byteLength(out + ch) > max - 3) break;
-    out += ch;
-  }
-  return `${out}…`;
-}
-
 /** 规格的「验收线」（没有这一节就退到「验收」）：条目行，最多 WIRE_LIMITS.items 条 */
 function acceptanceOf(specPath: string | null): string[] {
   const text = readTextSoft(specPath);
@@ -96,15 +85,10 @@ function acceptanceOf(specPath: string | null): string[] {
   return lines.slice(0, WIRE_LIMITS.items).map((l) => clip(l, WIRE_LIMITS.line));
 }
 
-const FINDING_KEYS: readonly (keyof ReviewFinding)[] = ["findingId", "family", "severity", "probe"];
-
-/** 上一轮（早于本轮）最后一条带逐项结论的 review 事件的 findings；只留四个字段，坏行丢掉（整单最后还要过 parseOrderWire） */
+/** 上一轮（早于本轮）最后一条带逐项结论的 review 事件的 findings */
 function prevFindings(events: readonly LedgerEvent[], round: number): ReviewFinding[] {
   const prev = events.findLast((e) => e.kind === "review" && typeof e.data.round === "number" && e.data.round < round && Array.isArray(e.data.findings));
-  const rows = (prev?.data.findings ?? []) as Record<string, unknown>[];
-  return rows.filter((f) => f && typeof f === "object" && FINDING_KEYS.every((k) => typeof f[k] === "string")).slice(0, WIRE_LIMITS.findings)
-    .map((f) => ({ findingId: f.findingId as string, family: f.family as string, severity: f.severity as ReviewFinding["severity"],
-      probe: clip(f.probe as string, WIRE_LIMITS.probe) }));
+  return wireFindings(prev?.data.findings);
 }
 
 /** GitHub PR 链接或纯数字 → repo / pr；别的写法（分支名、空）当本机单 */
@@ -130,7 +114,9 @@ function reviewOrderOf(db: Database, slot: ReviewSlot, dir = reviewsDir()): { ok
   const order: OrderWire = {
     v: 1, orderId: slot.orderId, taskId: task.id, specRev: task.specRev, dagVersion: null, node: slot.node, step: "review",
     round: task.round, head: slot.head, ...prCoords(task.pr),
-    inputs: [`规格：${specPath ? clip(specPath, WIRE_LIMITS.path) : `ledger show ${task.id}`}（specRev ${task.specRev}）`, `只审 head ${slot.head}${task.branch ? `（分支 ${clip(task.branch, 200)}）` : ""}`],
+    inputs: [`规格：${specPath ? clip(specPath, WIRE_LIMITS.path) : `ledger show ${task.id}`}（specRev ${task.specRev}）`, `只审 head ${slot.head}${task.branch ? `（分支 ${clip(task.branch, 200)}）` : ""}`,
+      // 自动卡的审查员建在自己的审查 worktree 里，调度器派审前把它固定在这个 head（scheduler-review-worktree.ts）
+      ...(slot.auto ? ["审查目录：你当前会话的工作目录（调度器已固定在这个 head；只读，不改、不提交、不推送）"] : [])],
     outputs: ["结论：submit_verdict（VerdictWire：verdict、p0/p1/p2 计数与逐项 findings 一致）", `报告：${report}（非空；bridge 只校验路径，不读内容）`],
     acceptance: acceptanceOf(specPath),
     writeBack: `submit_verdict({v:1, orderId:"${slot.orderId}", head:"${slot.head}", …, reportPath:"${report}"})；只记结论，不推阶段`,

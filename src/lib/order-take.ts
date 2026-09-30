@@ -6,14 +6,17 @@
  * tests/order-take.test.ts。
  */
 import type { Database } from "bun:sqlite";
-import { getTask } from "./ledger-store.js";
+import { getWorkflow } from "./ledger-scheduler.js";
+import { getTask, listEvents } from "./ledger-store.js";
 import type { LedgerTask } from "./ledger-stages.js";
 import { stepAtStage, stepsOf } from "./ledger-steps.js";
-import { isFullSha, parseOrderWire, type OrderWire } from "./order-wire.js";
+import { isFullSha, parseOrderWire, WIRE_LIMITS, type OrderWire } from "./order-wire.js";
 import type { SchedulerIntent } from "./ledger-scheduler.js";
 import { getSchedulerSession } from "./scheduler-sessions.js";
 import type { VerifiedCall } from "./order-tool-route.js";
 import { SRC_DIR } from "./repo-root.js";
+import { clipWire, wireFindings } from "./order-findings.js";
+import { currentReviewFacts } from "./scheduler-review.js";
 
 type WorkStage = "build" | "fix";
 export interface CurrentOrder {
@@ -75,18 +78,31 @@ function dagVersionOf(db: Database, task: LedgerTask): number | null {
 
 const CLI = `bun ${SRC_DIR}/manager.ts ledger`;
 
+/**
+ * 修复单要带上这一轮审查的逐项结论与报告路径（和调度器 fixPackage 同一口径：currentReviewFacts 取本轮、本 head 的结论）；
+ * 唤醒派单时执行者只看得到 take_order 的单，缺了它就只知道「要修」不知道修什么。写单 / 结论不完整时不带。
+ */
+function fixContext(db: Database, t: LedgerTask, step: "write" | "fix"): { findings: OrderWire["findings"]; report: string | null } {
+  if (step !== "fix") return { findings: [], report: null };
+  const read = currentReviewFacts(t, listEvents(db, { project: t.project, target: t.id }));
+  return read.kind === "facts" ? { findings: wireFindings(read.facts.findings), report: read.facts.reportPath } : { findings: [], report: null };
+}
+
 /** 给执行者的单：字段按 T87 OrderWire，交出去之前过一遍 parseOrderWire（台账里的脏值宁可报错，不发半张单） */
 export function orderWireFor(db: Database, o: CurrentOrder): { ok: true; order: OrderWire } | { ok: false; error: string } {
   const t = o.task;
   const head = t.headSHA && isFullSha(t.headSHA) ? t.headSHA : null;
+  const fix = fixContext(db, t, o.step);
+  const fallback = getWorkflow(db, t.id)?.fallback ?? null;
   const wire = {
     v: 1, orderId: o.orderId, taskId: t.id, specRev: t.specRev, dagVersion: dagVersionOf(db, t), node: o.intent?.node ?? o.step, step: o.step, round: t.round,
     head, repo: null, pr: null,
-    inputs: [`规格与验收：${CLI} show ${t.id}`, ...(t.spec ? [`规格卡：${t.spec}`] : []), ...(t.branch ? [`分支：${t.branch}`] : [])],
+    inputs: [`规格与验收：${CLI} show ${t.id}`, ...(t.spec ? [`规格卡：${t.spec}`] : []), ...(t.branch ? [`分支：${t.branch}`] : []),
+      ...(fix.report ? [`上一轮审查报告：${fix.report}`] : [])],
     outputs: ["分支上的提交，已推到 origin（完整 head SHA）", "证据报告路径"],
     acceptance: ["规格里的验收线逐条自查"],
     writeBack: `用 deliver 工具回写：orderId ${o.orderId}，head = 本卡分支在 origin 上的完整 SHA（bridge 会核对）。CLI 仍可用：${CLI} deliver ${t.id} --from ${o.stage} --head <完整 SHA> --evidence <报告路径>`,
-    findings: [], fallback: null,
+    findings: fix.findings, fallback: fallback ? clipWire(`再不行退到：${fallback}`, WIRE_LIMITS.fallback) : null,
   };
   const parsed = parseOrderWire(wire);
   return parsed.ok ? { ok: true, order: parsed.value } : { ok: false, error: `台账里这张单的字段不合 OrderWire：${parsed.error}` };
