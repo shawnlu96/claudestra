@@ -13,6 +13,8 @@ import { setWorkflow } from "../src/lib/ledger-scheduler-write.js";
 import { closeLedger, openLedger } from "../src/lib/ledger-store.js";
 import { createTask } from "../src/lib/ledger-write.js";
 import { REPO_ROOT } from "../src/lib/repo-root.js";
+import type { AutoTickDeps } from "../src/lib/scheduler-auto-tick.js";
+import { schedulerPass } from "../src/lib/scheduler-pass.js";
 
 interface Frame { type: string; targetName?: string; requestId?: string }
 interface Svc {
@@ -27,14 +29,14 @@ const live: Svc[] = [];
 const dispatched = (s: Svc) => s.frames.filter((f) => f.type === "route_to_agent");
 
 /** ghost: the cards' executor is not in the registry, so the first thing the scheduler sends is the PM notice. */
-function setup(cards: string[], opts: { ghost?: boolean } = {}): Svc {
+function setup(cards: string[], opts: { ghost?: boolean; autoDispatch?: boolean } = {}): Svc {
   const root = mkdtempSync(join(tmpdir(), "t68f-lease-")), state = join(root, "state"), work = join(root, "work");
   for (const d of [state, work, join(root, "home"), join(root, "run"), join(root, "tmp"), join(root, "master")]) mkdirSync(d, { recursive: true });
   const agents = opts.ghost ? {} : Object.fromEntries(cards.map((id, i) => [`agent-task-${i}`, { runtime: "claude-code", sessionId: `s-${i}`, cwd: work,
     channelId: `ch-${i}`, status: "active", projectId: "p", purpose: "", created: "", notes: "" }]));
   writeFileSync(join(state, "projects.json"), JSON.stringify({ projects: [{ id: "p", name: "p", dirs: [work], createdAt: "" }] }));
   writeFileSync(join(state, "registry.json"), JSON.stringify({ socket: "", agents }));
-  writeFileSync(join(state, "scheduler.json"), JSON.stringify({ enabled: true, pollMs: 1000,
+  writeFileSync(join(state, "scheduler.json"), JSON.stringify({ enabled: true, pollMs: 1000, ...(opts.autoDispatch === false ? {} : { autoDispatch: true }),
     projects: { p: { maxActiveWorkers: cards.length, requiredChecks: ["check"], repoDir: work } } }));
   const ledger = join(state, "ledger.sqlite"), db = openLedger(ledger);
   let now = Date.now();
@@ -172,4 +174,28 @@ describe("the scheduler daemon's whole pass lives under the maintenance lease", 
     await stopDuringHandshake(s, STOPS["maintenance lease taken over"]);
     expect(intents(s)).toEqual([expect.objectContaining({ taskId: "T1", action: "ensure_session", status: "cancelled" })]);
   }, 40_000);
+
+  // T68f r6: auto dispatch is off by default until T68h; merge and observe still run
+  test("with autoDispatch absent the real daemon drives no auto card: no session, no plan, no order", async () => {
+    const s = setup(["T1"], { autoDispatch: false });
+    start(s);
+    await Bun.sleep(3500);
+    expect(s.child!.exitCode).toBeNull();
+    expect(s.frames).toEqual([]);
+    expect(intents(s)).toEqual([]);
+  }, 40_000);
+
+  test("a pass with autoDispatch off never builds or calls the auto deps; with it on they are built once", async () => {
+    const s = setup([]), db = openLedger(join(s.state, "ledger.sqlite"));
+    try {
+      let built = 0;
+      const opts = { assertOwner: () => {}, maintenance: { path: s.lockPath, marker: join(s.state, "update.marker") },
+        autoDeps: () => { built++; return {} as AutoTickDeps; } };
+      const config = { enabled: true, pollMs: 1000, projects: {} };
+      expect(await schedulerPass(db, { ...config, autoDispatch: false }, opts)).toEqual({ ran: true, failed: [] });
+      expect(built).toBe(0);
+      await schedulerPass(db, { ...config, autoDispatch: true }, opts);
+      expect(built).toBe(1);
+    } finally { closeLedger(join(s.state, "ledger.sqlite")); }
+  });
 });

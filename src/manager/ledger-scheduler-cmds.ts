@@ -25,6 +25,7 @@ export const SCHEDULER_CMDS: Record<string, CommandSpec> = {
       if (!WORKFLOW_TEMPLATES.includes(template as never) || !WORKFLOW_MODES.includes(mode as never) || !AUTHOR_FAMILIES.includes(family as never)) {
         throw new LedgerError("invalid", "模板、模式或模型家族不认识");
       }
+      if (mode === "auto" && c.deps.autoDispatch?.() !== true) throw new LedgerError("forbidden", "自动派单未开启（scheduler.json autoDispatch），见 T68h");
       const project = getTask(c.db, c.p.pos[1] ?? "")?.project;
       if (mode === "auto" && project && !(c.deps.autoProjects?.() ?? []).includes(project)) {
         throw new LedgerError("forbidden", `调度服务没对项目 ${project} 开（scheduler.json 要 enabled 且列出该项目）：开 auto 没人推它，先用 observe 或 manual`);

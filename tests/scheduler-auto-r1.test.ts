@@ -192,6 +192,19 @@ test("P1-6 auto is only switched on for a project the scheduler service is runni
   } finally { f.close(); }
 });
 
+test("T68f r6: auto is refused while scheduler.json autoDispatch is not true; manual and observe are unaffected", async () => {
+  const f = autoFixture();
+  try {
+    const t2 = createTask(f.db, f.at("owner"), { project: "p", id: "T2", title: "new", kind: "code" }).row;
+    const args = ["workflow-set", "T2", "--rev", String(t2.rev), "--template", "code", "--version", "2", "--mode", "auto", "--author-family", "claude", "--fallback", "退回人工"];
+    const refused = { ok: false, code: "forbidden", error: "自动派单未开启（scheduler.json autoDispatch），见 T68h" };
+    expect(await f.cliWith({ autoDispatch: undefined }, "pm", ...args)).toMatchObject(refused);
+    expect(await f.cliWith({ autoDispatch: () => false }, "pm", ...args)).toMatchObject(refused);
+    expect(f.db.query("SELECT COUNT(*) AS n FROM task_workflows WHERE taskId = 'T2'").get()).toEqual({ n: 0 });
+    expect(await f.cliWith({ autoDispatch: () => false }, "pm", ...args.map((a) => (a === "auto" ? "observe" : a)))).toMatchObject({ ok: true });
+  } finally { f.close(); }
+});
+
 describe("r1 P2s", () => {
   test("P2-1 an expired screenshot ask goes to PM instead of waiting forever", async () => {
     const f = await atReview("ui");

@@ -107,6 +107,7 @@ async function realDeps(args: string[]): Promise<LedgerDeps | { error: string }>
     callerSession: process.env.CLAUDESTRA_SESSION_ID || process.env.CLAUDE_CODE_SESSION_ID || undefined,
     callerWitness: collectCallerWitness,
     autoProjects: () => { const s = readSchedulerConfig(); return s.enabled ? Object.keys(s.projects) : []; },
+    autoDispatch: () => readSchedulerConfig().autoDispatch,
   };
 }
 

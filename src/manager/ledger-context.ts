@@ -47,6 +47,8 @@ export interface LedgerDeps {
   callerSession?: string;
   /** 调度服务在跑自动 tick 的项目（scheduler.json enabled 时的 projects）；不在里面的卡开 auto 没人推，workflow-set 拒绝 */
   autoProjects?(): string[];
+  /** scheduler.json autoDispatch；不为 true 时 workflow-set 拒绝开 auto（T68h 修好子进程重核前默认关） */
+  autoDispatch?(): boolean;
 }
 
 export type Result = Record<string, unknown>;

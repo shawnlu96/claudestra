@@ -13,6 +13,8 @@ interface ProjectSchedule {
 export interface SchedulerConfig {
   enabled: boolean;
   pollMs: number;
+  /** Auto cards are driven only when this is true; off by default until T68h re-checks the lease inside CLI subprocesses. */
+  autoDispatch: boolean;
   projects: Record<string, ProjectSchedule>;
 }
 
@@ -21,6 +23,7 @@ export function parseSchedulerConfig(raw: unknown): SchedulerConfig {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("scheduler config must be an object");
   const r = raw as Record<string, unknown>;
   if (typeof r.enabled !== "boolean") throw new Error("scheduler.enabled must be boolean");
+  if (r.autoDispatch !== undefined && typeof r.autoDispatch !== "boolean") throw new Error("scheduler.autoDispatch must be boolean");
   const pollMs = r.pollMs === undefined ? 5000 : r.pollMs;
   if (!Number.isInteger(pollMs) || (pollMs as number) < 1000 || (pollMs as number) > 60_000) throw new Error("scheduler.pollMs must be 1000..60000");
   if (!r.projects || typeof r.projects !== "object" || Array.isArray(r.projects)) throw new Error("scheduler.projects must be an object");
@@ -42,7 +45,7 @@ export function parseSchedulerConfig(raw: unknown): SchedulerConfig {
       repoDir: p.repoDir };
   }
   if (r.enabled && Object.keys(projects).length === 0) throw new Error("enabled scheduler needs at least one project");
-  return { enabled: r.enabled, pollMs: pollMs as number, projects };
+  return { enabled: r.enabled, pollMs: pollMs as number, autoDispatch: r.autoDispatch === true, projects };
 }
 
 /**
@@ -62,7 +65,7 @@ export function readSchedulerConfig(path = SCHEDULER_CONFIG_PATH): SchedulerConf
   let raw: string;
   try { raw = readFileSync(path, "utf8"); }
   catch (e) {
-    if ((e as NodeJS.ErrnoException).code === "ENOENT") return { enabled: false, pollMs: 5000, projects: {} };
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") return { enabled: false, pollMs: 5000, autoDispatch: false, projects: {} };
     throw e;
   }
   return parseSchedulerConfig(JSON.parse(raw));

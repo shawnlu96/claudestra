@@ -3,7 +3,8 @@
  * update holds it the whole pass is skipped, never just the merge part. The lease, the stop signal and the singleton lock
  * are re-checked with no await between the check and the effect: before each subprocess spawn (ledger CLI, git, gh,
  * manager create) and after it exits, and inside the bridge client's onopen right before a frame is sent. A stop or a lost
- * lease ends the pass there; no later card is driven. Tests: tests/scheduler-service-lease.test.ts.
+ * lease ends the pass there; no later card is driven. Auto cards run only with scheduler.json autoDispatch: true (T68h).
+ * Tests: tests/scheduler-service-lease.test.ts.
  */
 import type { Database } from "bun:sqlite";
 import { autoTickDeps } from "./scheduler-auto-deps.js";
@@ -65,6 +66,7 @@ export async function schedulerPass(db: Database, config: SchedulerConfig, opts:
     await mergeTick(db, config, manager, opts.external ?? ((p) => mergeExternal(p, guard(active, runBounded))), active);
     // observe 卡只写观察事件，auto 卡每卡推一步；某张卡失败不挡其余卡，失败汇总给服务的去重日志
     const observed = await schedulerObserveTick(db, config.projects, manager);
+    if (config.autoDispatch !== true) return { ran: true, failed: observed.failed };
     const auto = await schedulerAutoTick(db, config.projects, guardAutoDeps((opts.autoDeps ?? ((a) => autoTickDeps(db, { active: a })))(active), active));
     return { ran: true, failed: [...observed.failed, ...auto.failed] };
   } finally { lease.release(); }
