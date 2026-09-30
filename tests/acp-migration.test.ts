@@ -68,7 +68,7 @@ test("自动安装按本机 codex 挑适配器；已装且配套不联网；离�
   const withVersion = (v: string) => async (cmd: string[]) =>
     ({ ok: true, out: cmd[1] === "--version" ? `codex-cli ${v}\n` : "Usage: codex app-server [OPTIONS]", err: "" });
   const asked: (string | undefined)[] = [];
-  const offline: AcpReadyDeps["install"] = async (v) => (asked.push(v), { ok: false, error: "offline" });
+  const offline: AcpReadyDeps["install"] = async (probe) => (asked.push(await probe()), { ok: false, error: "offline" }); // 对账时重探磁盘上的 codex
   const pairs = (v: string | undefined) => v === "0.158.0";
   expect(await checkAcpReady(true, { ...healthy, run: withVersion("0.158.0"), pairs, install: offline })).toMatchObject({ ok: true });
   expect(asked).toEqual([]);
@@ -207,10 +207,19 @@ test("普通 restart 的 ACP 接线程失败也回退 tmux，成功后保留待�
   expect(state.acpRestartPending).toBeUndefined();
 });
 
+test("R2-③ readiness 对账拿到的是「重探」函数：对账时读的是磁盘上此刻的 codex，不是开头探到的旧值", async () => {
+  let n = 0;
+  const run = async (cmd: string[]) => ({ ok: true, out: cmd[1] === "--version" ? `codex-cli 0.159.${n++}\n` : "Usage: codex app-server [OPTIONS]", err: "" });
+  let seen: string | undefined;
+  const install: AcpReadyDeps["install"] = async (probe) => ((seen = await probe()), { ok: false, error: "offline" });
+  await checkAcpReady(true, { ...healthy, run, pairs: () => false, install });
+  expect(seen).toBe("0.159.1");
+});
+
 test("doctor：本机 codex 与适配器不配套只报 warn（宿主照常起），配套报 ok，没探到不报", () => {
   const ok = { ok: true as const, codexBin: "/usr/bin/codex" };
   const agents = [{ name: "cx", runtime: "codex", transport: "acp" } as RegistryAgent];
-  const adapter = { version: "2.0.0", codexRange: "^0.158.0" };
+  const adapter = { version: "2.0.0", codexRange: "^0.158.0", path: "/state/acp/codex-acp-2.0.0/index.js" };
   const pick = (v: string | null | undefined) => acpDoctorChecks(agents, ok, v, adapter).find((c) => c.name === "Codex 与适配器配套");
   expect(acpDoctorChecks(agents, ok, "0.158.0", adapter)[0]!.detail).toContain("codex-acp 2.0.0（配 codex ^0.158.0）");
   expect(pick("0.159.0")).toMatchObject({ status: "warn" });

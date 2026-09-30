@@ -12,7 +12,7 @@ import { probeClaudeVersion } from "./claude-binary.js";
 import { resolveCodexBinary } from "./codex-launch.js";
 import { defaultRunner, type Runner } from "./codex-thread.js";
 import { STATE_DIR } from "./paths.js";
-import { codexPairsWithAdapter, currentCodexAcp } from "./acp/install.js";
+import { BROKEN_HINT, codexPairsWithAdapter, currentCodexAcp } from "./acp/install.js";
 
 /** npm 全局装的 @openai/codex：解析出的路径落在包目录里（bin/codex.js 壳，或包内的原生二进制） */
 export function isNpmGlobalCodex(path: string | undefined): boolean {
@@ -90,8 +90,9 @@ export async function noteAcpCodexRunning(o: {
   const cur = currentCodexAcp(o.acpRoot);
   if (cur && !codexPairsWithAdapter(v, o.acpRoot) && !o.warned?.has(key)) {
     o.warned?.add(key);
-    const pairs = cur === "broken" ? "codex-acp 的版本指针或标记坏了" : `codex-acp ${cur.version} 配套的是 ${cur.codexRange}`;
-    o.log(`⚠️ 本机 codex 是「${key}」，${pairs}：网页「更新并重启」或 \`manager acp-install\` 会换上配套的适配器（docs/runtimes/codex-acp.md）`);
+    o.log(cur === "broken"
+      ? `⚠️ 本机 codex 是「${key}」，但 ${BROKEN_HINT}（网页此时不给「更新并重启」）`
+      : `⚠️ 本机 codex 是「${key}」，codex-acp ${cur.version} 配套的是 ${cur.codexRange}：网页「更新并重启」或 \`manager acp-install\` 会换上配套的适配器（docs/runtimes/codex-acp.md）`);
   }
   try { recordCodexRunning(o.agent, v, o.dir); } catch (e) { o.log(`⚠️ 记不下 codex 运行版本（网页少一条「重启生效」提示）：${String(e)}`); }
   return v;

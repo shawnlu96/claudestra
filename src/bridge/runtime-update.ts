@@ -14,7 +14,7 @@ import { readRegistryAgents } from "../lib/registry.js";
 import { piBinName } from "../lib/pi-env.js";
 import { shellEscape } from "../lib/claude-launch.js";
 import { fetchLatestCodex, probeCodexInstall } from "../lib/codex-version.js";
-import { currentCodexAcp, installCodexAcp, readAcpPointer, useCodexAcp } from "../lib/acp/install.js";
+import { currentCodexAcp, installCodexAcp, reconcileCodexAcp } from "../lib/acp/install.js";
 import { fetchAcpReleases, pickAdapterFor, rangeAllows } from "../lib/acp/resolve.js";
 import { forgetInstalledCodex, forgetInstalledPi, isStableVersion } from "../lib/update-hints.js";
 import { apiJson, forbidden, isFullScope, notInScope } from "./api-respond.js";
@@ -44,19 +44,18 @@ const CODEX_DEPS = {
   install: probeCodexInstall,
   latest: fetchLatestCodex,
   adapter: () => currentCodexAcp(),
-  pointer: () => readAcpPointer(),
   releases: () => fetchAcpReleases(),
   installAdapter: (rel: Parameters<typeof installCodexAcp>[0]) => installCodexAcp(rel),
-  useAdapter: (version: string, expect: string | null) => useCodexAcp(version, expect),
+  /** 按磁盘上此刻的 Codex 对账适配器（npm 成功后调；并发的 acp-install 也走它，谁最后对账谁说了算） */
+  reconcile: () => reconcileCodexAcp({ codexVersion: async () => (await probeCodexInstall())?.version }),
 };
 
 /**
  * 装的是**这一刻查到的** latest 且钉死版本号，不写 @latest：查完到装之间 npm 发了新版，也不会装上没核对过配套的那个。
- * latest 不配当前适配器时，先把能配它的最新适配器装进自己的版本目录（不切指针），Codex 装成功后才切指针，然后重启：
- * Codex 装失败指针就没动过，不用回滚。切指针和 Codex 落盘之间有一个很短的错配窗口（旧适配器 + 新 Codex），这期间
- * 别的 ACP agent 恰好重启会撞上，已知且可接受。其余在跑的 ACP agent 不动：它们下次重启自然用上新指针和新 Codex。
- * npm 上也找不到能配的适配器就 409（网页此时本来就不给按钮）。适配器指针 / 标记坏了也 409：不知道现在跑的是哪个，
- * 放行 Codex 升级就可能错配，先 acp-install 修好。切指针时核对指针仍是这里读到的那份（见 useCodexAcp）。
+ * latest 不配当前适配器时，先把能配它的最新适配器装进自己的版本目录（不切指针，装不上就 Codex 也不动），npm 成功后按
+ * 磁盘上此刻的 Codex 对账（reconcileCodexAcp，在锁里切指针），然后重启。对账前有一个很短的错配窗口（旧适配器 + 新 Codex），
+ * 这期间别的 ACP agent 恰好重启会撞上，已知且可接受；其余在跑的 ACP agent 不动，下次重启自然用上新指针和新 Codex。
+ * npm 上也找不到能配的适配器就 409（网页此时本来就不给按钮）。适配器状态 broken 也 409：不知道现在跑的是哪个，先 acp-install。
  */
 export async function prepareCodexUpdate(over: Partial<typeof CODEX_DEPS> = {}): Promise<Prepared> {
   const d = { ...CODEX_DEPS, ...over };
@@ -67,7 +66,6 @@ export async function prepareCodexUpdate(over: Partial<typeof CODEX_DEPS> = {}):
   if (!latest) return { status: 502, error: "查不到 npm 上 @openai/codex 的最新版本，稍后再试" };
   if (!isStableVersion(latest)) return { status: 409, error: `npm 上的 Codex ${latest.slice(0, 40)} 不是正式版，不替你装` };
   const command = `npm install -g @openai/codex@${latest}`;
-  const before = d.pointer();
   const cur = d.adapter();
   if (cur === "broken") return { status: 409, error: "codex-acp 的版本指针或标记坏了，先跑一次 manager acp-install 再更新 Codex" };
   if (!cur || rangeAllows(cur.codexRange, latest)) return { command };
@@ -75,7 +73,13 @@ export async function prepareCodexUpdate(over: Partial<typeof CODEX_DEPS> = {}):
   if (!rel) return { status: 409, error: `npm 上的 Codex ${latest} 不在 codex-acp ${cur.version} 的配套范围（${cur.codexRange}），等适配器升级后再更新` };
   const got = await d.installAdapter(rel);
   if (!got.ok) return { status: 502, error: `先装配套的 codex-acp ${rel.version} 失败，Codex 没动：${got.error}` };
-  return { command, afterShell: () => d.useAdapter(rel.version, before) };
+  return {
+    command,
+    afterShell: async () => {
+      const r = await d.reconcile();
+      if (!r.ok) throw new Error(r.error);
+    },
+  };
 }
 
 export interface RuntimeUpdateDeps {

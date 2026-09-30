@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { attachUpdateHints, isNewerVersion, makeVersionCache, pickUpdateHint } from "../src/lib/update-hints";
 import { parseCcSessionEntry } from "../src/lib/cc-sessions";
 import { probeClaudeVersion } from "../src/lib/claude-binary";
+import { sha256Hex } from "../src/lib/acp/install";
 import { isNpmGlobalCodex, noteAcpCodexRunning, readCodexRunning, recordCodexRunning } from "../src/lib/codex-version";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
@@ -176,15 +177,17 @@ describe("Codex", () => {
 
 /** 状态目录里放一份老 2.0.0 安装（没有指针，配套 ^0.158.0） */
 function legacyAdapter(root: string): string {
+  const body = "console.log('codex-acp 2.0.0');";
   mkdirSync(join(root, "codex-acp-2.0.0"), { recursive: true });
-  writeFileSync(join(root, "codex-acp-2.0.0", "installed.json"), JSON.stringify({ version: "2.0.0", sha256: "x", entrySha256: "y" }));
+  writeFileSync(join(root, "codex-acp-2.0.0", "index.js"), body);
+  writeFileSync(join(root, "codex-acp-2.0.0", "installed.json"), JSON.stringify({ version: "2.0.0", sha256: "x", entrySha256: sha256Hex(new TextEncoder().encode(body)) }));
   return root;
 }
 const REL_201 = { version: "2.0.1", codexRange: "^0.159.1", integrity: "sha512-x", tarball: "https://registry.npmjs.org/@agentclientprotocol/codex-acp/-/codex-acp-2.0.1.tgz" };
 
 describe("Codex × codex-acp 配套范围（当前适配器 2.0.0，^0.158.0）", () => {
   const PAIRS = "^0.158.0";
-  const adapter = { version: "2.0.0", codexRange: PAIRS };
+  const adapter = { version: "2.0.0", codexRange: PAIRS, path: "/x/index.js" };
   test("新版不配套、也没有可重启的：给只有文字的更新提示（带 adapterPairs），tmux / acp 一样", () => {
     for (const acp of [false, true]) {
       expect(pickUpdateHint("codex", { adapter, running: "0.158.0", installed: "0.158.0", latest: "0.159.2", npm: true, acp }))
@@ -275,6 +278,14 @@ describe("ACP 运行版本来源：宿主起适配器前异步探 CODEX_PATH（n
     expect(readCodexRunning("agent-a", dir)).toBe("0.159.2");
     expect(logs.length).toBe(1);
     expect(logs[0]).toContain("codex-acp 2.0.0 配套的是 ^0.158.0");
+  });
+  test("P2 适配器状态坏了：告警指向 acp-install，不说网页「更新并重启」能修（网页此时不给按钮）", async () => {
+    const { dir, logs, log, acpRoot } = setup();
+    writeFileSync(join(acpRoot, "current.json"), "{broken");
+    await noteAcpCodexRunning({ agent: "agent-a", codexPath: "/x/codex", probe: async () => "0.158.0", log, dir, acpRoot });
+    expect(logs.length).toBe(1);
+    expect(logs[0]).toContain("acp-install");
+    expect(logs[0]).not.toContain("会换上配套的适配器");
   });
   test("探不出版本：记空记录（不沿用旧值）并告警", async () => {
     const { dir, logs, log, acpRoot } = setup();

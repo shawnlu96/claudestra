@@ -3,7 +3,7 @@ import { resolveCodexBinary } from "../codex-launch.js";
 import { defaultRunner, type Runner } from "../codex-thread.js";
 import { isSandbox } from "../sandbox.js";
 import { probeClaudeVersion } from "../claude-binary.js";
-import { codexAcpInstalled, codexPairsWithAdapter, ensureCodexAcpFor } from "./install.js";
+import { codexAcpInstalled, codexPairsWithAdapter, reconcileCodexAcp } from "./install.js";
 import { repoStubPath } from "./stub.js";
 
 export type AcpReady = { ok: true; codexBin?: string } | { ok: false; reason: string };
@@ -13,8 +13,8 @@ export interface AcpReadyDeps {
   resolveBin?: () => Promise<string | null>;
   run?: Runner;
   installed?: () => ReturnType<typeof codexAcpInstalled>;
-  /** 装能配这个 codex 版本的最新适配器并切指针；缺省查 npm registry */
-  install?: (codexVersion: string | undefined) => ReturnType<typeof ensureCodexAcpFor>;
+  /** 按磁盘上的 codex 对账（装能配它的适配器并切指针）；参数是探 codex 版本的函数。缺省 reconcileCodexAcp */
+  install?: (codexVersion: () => Promise<string | undefined>) => ReturnType<typeof reconcileCodexAcp>;
   pairs?: (codexVersion: string | undefined) => boolean;
   stub?: () => string | null;
 }
@@ -37,17 +37,20 @@ export async function probeAcpCli(deps: AcpReadyDeps = {}): Promise<AcpReady> {
 }
 
 /**
- * autoInstall：没装、或已装的不配本机 codex 时，按本机 codex 版本去装配套的最新适配器。查不到 / 下载失败时
- * 退回已装的那个照常就绪（宿主对错配只告警，见 codex-version.ts）——离线绝不能把一台本来能跑的机器判成未就绪。
+ * autoInstall：没装、坏了、或已装的不配本机 codex 时，按磁盘上的 codex 对账（reconcileCodexAcp：registry 不通就用本地
+ * 已装且配套的版本）。对账失败但已装的完好时照常就绪（宿主对错配只告警，见 codex-version.ts）——离线绝不能把一台本来能跑
+ * 的机器判成未就绪。
  */
 export async function checkAcpReady(autoInstall = false, deps: AcpReadyDeps = {}): Promise<AcpReady> {
   const cli = await probeAcpCli(deps);
   if (!cli.ok || isSandbox(deps.env ?? process.env)) return cli;
   const have = (deps.installed ?? codexAcpInstalled)();
   if (!autoInstall) return have.ok ? cli : { ok: false, reason: have.hint };
-  const version = cli.codexBin ? (await probeClaudeVersion(deps.run ?? defaultRunner, cli.codexBin).catch(() => null)) ?? undefined : undefined;
+  const bin = cli.codexBin;
+  const probe = async () => (bin ? (await probeClaudeVersion(deps.run ?? defaultRunner, bin).catch(() => null)) ?? undefined : undefined);
+  const version = await probe();
   if (have.ok && (!version || (deps.pairs ?? codexPairsWithAdapter)(version))) return cli;
-  const installed = await (deps.install ?? ensureCodexAcpFor)(version);
+  const installed = await (deps.install ?? ((codexVersion) => reconcileCodexAcp({ codexVersion })))(probe);
   if (installed.ok) return cli;
   if (have.ok) {
     console.warn(`⚠️ [acp] 没换上配 codex ${version} 的适配器，沿用已装的 codex-acp ${have.version}：${installed.error}`);

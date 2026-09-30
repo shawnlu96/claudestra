@@ -6,11 +6,13 @@
  *   是因为 Codex 本身就是 `npm install -g @openai/codex` 从同一个 registry 装的——registry 若被攻破，Codex 早已失守，
  *   写死 sha 只会让每个 Codex 小版本都要改代码发版。改成写死会让「自动跟随」失效；改成别的源要另起信任理由。
  * - 当前用哪个版本：状态目录 acp/current.json 指针（tmp+rename 原子切换），旧版本目录都留着，指针指回去即回退。
- * - 没有指针但有 2.0.0 的老安装（这套机制之前的唯一版本）照样认，配套范围按它的 package.json 记 ^0.158.0。
+ *   适配器处于什么状态只由 currentCodexAcp 一处判定（含入口哈希），其余调用方都读它，不各判各的。
+ * - 没有指针、而且状态目录里只有 2.0.0 这一个版本目录（这套机制之前唯一的版本）才认作老安装，配套范围 ^0.158.0。
+ * - 切指针只经 reconcileCodexAcp：在锁里按磁盘上此刻的 Codex 对账，谁最后对账谁说了算，最终一定配套或明确报错。
  * tests/acp-install.test.ts。
  */
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { gunzipSync } from "node:zlib";
 import { statePath } from "../paths.js";
@@ -59,7 +61,7 @@ function readJson<T>(path: string): T | null {
   try {
     return JSON.parse(readFileSync(path, "utf8")) as T;
   } catch {
-    return null; // 没有 / 坏了：调用方按 currentCodexAcp 的约定区分「没装」和「坏了」
+    return null; // 没有 / 坏了：由 currentCodexAcp 统一归到 broken 或 null
   }
 }
 
@@ -71,33 +73,57 @@ function writeAtomic(path: string, data: string | Uint8Array): void {
   renameSync(tmp, path);
 }
 
-interface CurrentAcp { version: string; codexRange: string }
-/** null = 从没装过（没指针也没老 2.0.0 目录）；"broken" = 指针或标记坏了 / 缺了，不能信 */
+const STABLE = /^\d+\.\d+\.\d+$/;
+interface CurrentAcp { version: string; codexRange: string; path: string }
+/** null = 什么都没装过；"broken" = 有东西但不可信（指针坏、多版本却没指针、标记 / 入口 / 哈希对不上） */
 export type AdapterNow = CurrentAcp | null | "broken";
 
+/** 状态目录里的版本目录（codex-acp-x.y.z） */
+function versionDirs(root: string): string[] {
+  try {
+    return readdirSync(root).map((n) => /^codex-acp-(\d+\.\d+\.\d+)$/.exec(n)?.[1]).filter((v): v is string => !!v);
+  } catch {
+    return []; // 状态目录还没建：什么都没装
+  }
+}
+
+/** 一个版本目录装得完整、没被改过：标记对、范围在、入口在且哈希一致（1.5MB 算一次不到 10ms） */
+function verifiedVersion(version: string, root: string): CurrentAcp | null {
+  const m = readJson<Marker>(join(versionDir(version, root), MARKER));
+  const codexRange = m?.codexRange ?? (version === LEGACY.version ? LEGACY.codexRange : undefined);
+  const path = entryOf(version, root);
+  if (m?.version !== version || !codexRange) return null; // 缺 entrySha256 时下面的哈希比对不会通过
+  try {
+    return existsSync(path) && sha256Hex(readFileSync(path)) === m.entrySha256 ? { version, codexRange, path } : null;
+  } catch (e) {
+    console.warn(`⚠️ [acp-install] 读 ${path} 失败，按不可信处理:`, e);
+    return null;
+  }
+}
+
 /**
- * 指针指的版本和它的配套范围（只读标记，不验哈希：列表请求每轮都调）。指针文件在但读不出、指向的版本没有合法标记，
- * 都算 "broken" 而不是「没装」：退回 2.0.0 或放行 Codex 升级都会造成错配，调用方要 fail-closed。
+ * 适配器此刻的状态——唯一判定处：宿主起适配器、readiness、横幅、codex-update 端点、doctor 都读它。
+ * 有指针就只看指针指的版本；没有指针时，只有状态目录里恰好只剩 2.0.0 一个版本目录才认作老安装，别的版本目录在就是
+ * 指针丢了（不回退旧版）。任何一环对不上都是 broken：调用方一律 fail-closed，由 acp-install / readiness 对账修好。
  */
 export function currentCodexAcp(root = defaultRoot()): AdapterNow {
   const ptr = join(root, POINTER);
   let version = LEGACY.version;
   if (existsSync(ptr)) {
     const v = readJson<{ version?: unknown }>(ptr)?.version;
-    if (typeof v !== "string" || !/^\d+\.\d+\.\d+$/.test(v)) return "broken";
+    if (typeof v !== "string" || !STABLE.test(v)) return "broken";
     version = v;
-  } else if (!existsSync(versionDir(LEGACY.version, root))) {
-    return null;
+  } else {
+    const dirs = versionDirs(root);
+    if (!dirs.length) return null;
+    if (dirs.length !== 1 || dirs[0] !== LEGACY.version) return "broken";
   }
-  const m = readJson<Marker>(join(versionDir(version, root), MARKER));
-  if (m?.version !== version) return "broken";
-  const codexRange = m.codexRange ?? (version === LEGACY.version ? LEGACY.codexRange : undefined);
-  return codexRange ? { version, codexRange } : "broken";
+  return verifiedVersion(version, root) ?? "broken";
 }
 
 /**
  * 本机 codex 和当前适配器配套（宿主告警、网页提示、doctor 共用）。没装过适配器 = 没有要配的，不拦（之后 readiness 自动装时
- * 按本机 codex 挑版本）；状态坏了一律算不配套。
+ * 按本机 codex 挑版本）；broken 一律算不配套。
  */
 export function codexPairsWithAdapter(codexVersion: string | undefined, root?: string): boolean {
   const cur = currentCodexAcp(root);
@@ -105,48 +131,38 @@ export function codexPairsWithAdapter(codexVersion: string | undefined, root?: s
 }
 
 export type Installed = { ok: true; path: string; version: string; codexRange: string } | { ok: false; hint: string };
+const FIX = "跑一次 `bun src/manager.ts acp-install`";
+export const BROKEN_HINT = `codex-acp 的版本指针、标记或入口文件坏了（或被改过）：${FIX}`;
 
-/**
- * 已装好才算数：指针指的版本标记对、入口文件在，而且入口的 sha256 和安装时记下的一致（装好之后被改过也认得出来，
- * 宿主每次启动都查——1.5MB 算一次哈希不到 10ms）。
- */
+/** currentCodexAcp 换成「能不能起」的说法 */
 export function codexAcpInstalled(root?: string): Installed {
   const cur = currentCodexAcp(root);
-  const fix = "跑一次 `bun src/manager.ts acp-install`";
-  if (cur === "broken") return { ok: false, hint: `codex-acp 的版本指针或标记坏了：${fix}` };
-  const hint = `codex-acp${cur ? ` ${cur.version}` : ""} 没装或装好后被改过：${fix}`;
-  if (!cur) return { ok: false, hint };
-  const entry = entryOf(cur.version, root);
-  const m = readJson<Marker>(join(versionDir(cur.version, root), MARKER));
-  try {
-    if (m?.entrySha256 && existsSync(entry) && sha256Hex(readFileSync(entry)) === m.entrySha256) return { ok: true, path: entry, ...cur };
-  } catch (e) {
-    console.warn(`⚠️ [acp-install] 读 ${entry} 失败，按没装处理:`, e);
-  }
-  return { ok: false, hint };
+  if (cur === "broken") return { ok: false, hint: BROKEN_HINT };
+  return cur ? { ok: true, ...cur } : { ok: false, hint: `codex-acp 没装：${FIX}` };
 }
 
-/** 指针文件原文（没有 = null）：切指针时拿它做比较，见 useCodexAcp */
-export function readAcpPointer(root = defaultRoot()): string | null {
-  try {
-    return readFileSync(join(root, POINTER), "utf8");
-  } catch {
-    return null; // 没有指针（从没切过，或老 2.0.0 安装）：比较时就要求「仍然没有」
-  }
+/** 直接写指针，不查不锁：只给 reconcileCodexAcp（在锁里）和单测用 */
+export function useCodexAcp(version: string, root = defaultRoot()): void {
+  mkdirSync(root, { recursive: true });
+  writeAtomic(join(root, POINTER), JSON.stringify({ version, at: new Date().toISOString() }) + "\n");
 }
+
+const pointerLock = async (root: string) => {
+  mkdirSync(root, { recursive: true });
+  return acquireLock(join(root, ".pointer.lock"), 60_000);
+};
 
 /**
- * 切指针（宿主下次起适配器就用这个版本）。比较后再切：只有指针仍是调用方开始时读到的 expect 才切，否则说明别的进程
- * （acp-install / 网页更新 / readiness）在这期间切过，拒绝——免得挑版本更早的那一方把指针切回旧版。
- * 比较和写在同一把跨进程锁里；拿不到锁就报错不切（不降级放行）。
+ * 老 2.0.0 安装还没有指针时，先把它写成显式指针再装别的版本：否则多出一个版本目录，没有指针的老安装就判成 broken，
+ * 这期间重启的 ACP agent 会起不来。
  */
-export async function useCodexAcp(version: string, expect: string | null, root = defaultRoot()): Promise<void> {
-  mkdirSync(root, { recursive: true });
-  const lock = await acquireLock(join(root, ".pointer.lock"));
-  if (!lock) throw new Error("等 codex-acp 指针锁超时，没切");
+async function pinLegacy(root: string): Promise<void> {
+  if (existsSync(join(root, POINTER))) return;
+  const lock = await pointerLock(root);
+  if (!lock) throw new Error("等 codex-acp 指针锁超时");
   try {
-    if (readAcpPointer(root) !== expect) throw new Error("codex-acp 指针在这期间被别的进程切过，没切；重跑一次");
-    writeAtomic(join(root, POINTER), JSON.stringify({ version, at: new Date().toISOString() }) + "\n");
+    const cur = currentCodexAcp(root);
+    if (cur && cur !== "broken" && !existsSync(join(root, POINTER))) useCodexAcp(cur.version, root);
   } finally {
     lock.release();
   }
@@ -186,15 +202,14 @@ async function download(url: string, f: TarballFetch): Promise<Fetched> {
   }
 }
 
-/** 把一个版本装进它自己的目录，**不切指针**（调用方决定何时切：codex-update 要等 Codex 装成功之后） */
+/** 把一个版本装进它自己的目录，**不切指针**（切指针只经 reconcileCodexAcp） */
 export async function installCodexAcp(rel: AcpRelease, deps: InstallDeps = {}): Promise<InstallResult> {
   if (rel.tarball !== expectedTarball(rel.version)) return { ok: false, error: `tarball 地址不是 ${expectedTarball(rel.version)}，拒装` };
-  const dir = versionDir(rel.version, deps.root);
-  const dest = entryOf(rel.version, deps.root);
-  const ok = { version: rel.version, codexRange: rel.codexRange, path: dest };
+  const root = deps.root ?? defaultRoot();
+  const dir = versionDir(rel.version, root);
+  const have = verifiedVersion(rel.version, root);
   const m = readJson<Marker>(join(dir, MARKER));
-  const same = m?.version === rel.version && m.integrity === rel.integrity && m.codexRange === rel.codexRange;
-  if (same && existsSync(dest) && sha256Hex(readFileSync(dest)) === m.entrySha256) return { ok: true, reused: true, ...ok };
+  if (have && m?.integrity === rel.integrity && have.codexRange === rel.codexRange) return { ok: true, reused: true, ...have };
   const got = await download(rel.tarball, deps.fetch ?? defaultFetch);
   if (!got.ok) return got;
   const integrity = sha512Integrity(got.tgz);
@@ -206,30 +221,63 @@ export async function installCodexAcp(rel: AcpRelease, deps: InstallDeps = {}): 
     return { ok: false, error: `解包失败（或解开超过 ${MAX_UNPACKED_BYTES} 字节）：${e instanceof Error ? e.message : e}` };
   }
   if (!entry) return { ok: false, error: `包里没有 ${ENTRY_IN_TAR}` };
-  mkdirSync(dir, { recursive: true });
-  writeAtomic(dest, entry);
-  const marker = { version: rel.version, integrity: rel.integrity, codexRange: rel.codexRange, entrySha256: sha256Hex(entry), installedAt: new Date().toISOString() };
-  writeAtomic(join(dir, MARKER), JSON.stringify(marker) + "\n");
-  return { ok: true, reused: false, ...ok };
-}
-
-/** 能配 codexVersion 的最新适配器：查 registry、装好、切指针（acp-install 与 readiness 用；codex-update 自己分两步） */
-export async function ensureCodexAcpFor(codexVersion: string | undefined, deps: InstallDeps = {}): Promise<InstallResult> {
-  if (!codexVersion) return { ok: false, error: "读不出本机 codex 的版本，没法挑配套的 codex-acp" };
-  const before = readAcpPointer(deps.root);
-  let rel: AcpRelease | null;
   try {
-    rel = pickAdapterFor(await fetchAcpReleases(deps.fetchMeta), codexVersion);
-  } catch (e) {
-    return { ok: false, error: `查 codex-acp 版本失败：${e instanceof Error ? e.message : e}` };
-  }
-  if (!rel) return { ok: false, error: `npm 上没有能配 codex ${codexVersion} 的 codex-acp 正式版` };
-  const r = await installCodexAcp(rel, deps);
-  if (!r.ok) return r;
-  try {
-    await useCodexAcp(r.version, before, deps.root);
+    if (rel.version !== LEGACY.version) await pinLegacy(root);
   } catch (e) {
     return { ok: false, error: e instanceof Error ? e.message : String(e) };
   }
-  return r;
+  mkdirSync(dir, { recursive: true });
+  const dest = entryOf(rel.version, root);
+  writeAtomic(dest, entry);
+  const marker = { version: rel.version, integrity: rel.integrity, codexRange: rel.codexRange, entrySha256: sha256Hex(entry), installedAt: new Date().toISOString() };
+  writeAtomic(join(dir, MARKER), JSON.stringify(marker) + "\n");
+  return { ok: true, reused: false, version: rel.version, codexRange: rel.codexRange, path: dest };
+}
+
+/** 能配 codexVersion 的最新适配器：先问 registry 并装好；registry 不通就在本地已装且完好的版本里挑 */
+async function prepareFor(codexVersion: string, deps: InstallDeps, root: string): Promise<InstallResult> {
+  let remote: AcpRelease | null = null;
+  let offline = "";
+  try {
+    remote = pickAdapterFor(await fetchAcpReleases(deps.fetchMeta), codexVersion);
+  } catch (e) {
+    offline = `查 codex-acp 版本失败：${e instanceof Error ? e.message : e}`;
+  }
+  if (remote) return installCodexAcp(remote, deps);
+  const local = versionDirs(root).map((v) => verifiedVersion(v, root)).filter((x): x is CurrentAcp => !!x && rangeAllows(x.codexRange, codexVersion))
+    .sort((a, b) => Bun.semver.order(b.version, a.version))[0];
+  if (local) return { ok: true, reused: true, ...local };
+  return { ok: false, error: offline || `npm 上没有能配 codex ${codexVersion} 的 codex-acp 正式版` };
+}
+
+export interface ReconcileDeps extends InstallDeps {
+  /** 磁盘上此刻装着的 codex 版本（x.y.z）；每轮对账都重新探 */
+  codexVersion: () => Promise<string | undefined>;
+}
+
+/**
+ * 让适配器和**磁盘上此刻的** Codex 配套：挑版本、装好（锁外，要联网），再在指针锁里重探一次 Codex——版本没变才切，
+ * 变了（别的进程刚升完 Codex）就按新版本再来一轮。幂等：已配套就不动。acp-install、readiness、codex-update 收尾都走这里，
+ * 所以并发时最后一个对账的一方看到的是最终的 Codex，结果一定配套或明确报错，不靠长时间持锁。
+ */
+export async function reconcileCodexAcp(deps: ReconcileDeps): Promise<InstallResult> {
+  const root = deps.root ?? defaultRoot();
+  for (let round = 0; round < 3; round++) {
+    const v = await deps.codexVersion();
+    if (!v) return { ok: false, error: "读不出本机 codex 的版本，没法挑配套的 codex-acp" };
+    const got = await prepareFor(v, deps, root);
+    if (!got.ok) return got;
+    const lock = await pointerLock(root);
+    if (!lock) return { ok: false, error: "等 codex-acp 指针锁超时，没切" };
+    try {
+      if ((await deps.codexVersion()) !== v) continue; // 挑版本期间 Codex 被升过：按新版本重来
+      const cur = currentCodexAcp(root);
+      if (cur && cur !== "broken" && cur.version === got.version) return got;
+      useCodexAcp(got.version, root);
+      return got;
+    } finally {
+      lock.release();
+    }
+  }
+  return { ok: false, error: "对账时 Codex 版本一直在变，没切适配器；等升级结束再跑 acp-install" };
 }

@@ -7,7 +7,7 @@
  * - `acp-install`：装能配本机已装 Codex 的最新 codex-acp 并切过去（lib/acp/install.ts：按 registry 公布的 integrity 验包）。
  * 生命周期本身（create / restart / resume / kill）走 manager 的通用流程，transport=acp 时选 lib/runtimes/codex-acp.ts。
  */
-import { codexAcpInstalled, ensureCodexAcpFor } from "../lib/acp/install.js";
+import { codexAcpInstalled, reconcileCodexAcp } from "../lib/acp/install.js";
 import { probeCodexInstall } from "../lib/codex-version.js";
 import { checkAcpReady } from "../lib/acp/readiness.js";
 import { ACP_AGENT_ENV } from "../lib/acp/stub.js";
@@ -124,7 +124,7 @@ export async function recoverFailedAcpLaunch(
 
 export async function cmdAcp(cmd: string, args: string[]): Promise<void> {
   if (cmd === "acp-install") {
-    const r = await ensureCodexAcpFor((await probeCodexInstall())?.version);
+    const r = await reconcileCodexAcp({ codexVersion: async () => (await probeCodexInstall())?.version });
     return output(r.ok ? { ok: true, version: r.version, codexRange: r.codexRange, path: r.path, reused: r.reused } : { ok: false, error: r.error });
   }
   return switchTransport(args[0] ?? "", args[1] ?? "");
