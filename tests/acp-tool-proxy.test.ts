@@ -136,4 +136,21 @@ describe("工具代理：调用方身份（T85）", () => {
     expect(b).toMatchObject({ type: "whoami", callerDowngraded: true });
     expect(c).toMatchObject({ type: "whoami", callerDowngraded: true });
   });
+
+  test("派单工具帧 order_tool（T96）同样转上去：Codex 起的不带降级标，shell 起的带 callerDowngraded，自报 false 被丢掉", async () => {
+    const { proxy, upstream } = setup();
+    const mcp = await connect(proxy.url);
+    mcp.send({ type: "register", channelId: "local-acp-1", runtime: "codex" });
+    await mcp.next();
+    mcp.send({ type: "order_tool", requestId: "req_1", tool: "take_order", args: {} });
+    const shell = await connect(proxy.url);
+    shell.send({ type: "register", channelId: "local-acp-1", runtime: "codex", outsideMcpLauncher: true });
+    await shell.next();
+    shell.send({ type: "order_tool", requestId: "req_1", tool: "deliver", args: { v: 1 }, callerDowngraded: false });
+    await tick(50);
+    expect(upstream).toEqual([
+      { type: "order_tool", requestId: expect.stringMatching(/^acp\d+_req_1$/), tool: "take_order", args: {} },
+      { type: "order_tool", requestId: expect.stringMatching(/^acp\d+_req_1$/), tool: "deliver", args: { v: 1 }, callerDowngraded: true },
+    ]);
+  });
 });

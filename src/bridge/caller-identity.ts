@@ -66,11 +66,14 @@ export function admitCaller(ws: ServerWebSocket<unknown>, msg: Record<string, un
   return false;
 }
 
-/** 这条连接（及这一帧）的调用方身份：连接没注册或挂着多个频道 → agent=null、verified=false。M2 / M3 的工具从这里取 */
-function callerIdentity(ws: object, frame?: Record<string, unknown>): CallerIdentity {
+/** 这条连接（及这一帧）的调用方身份与它注册的频道：连接没注册或挂着多个频道 → 没有频道、agent=null、verified=false。M2 / M3 的工具从这里取 */
+export function callerOf(ws: object, frame?: Record<string, unknown>): { identity: CallerIdentity; channelId: string | undefined } {
   const { channels, controlChannelId } = connectionOf(ws);
-  return identityOf(ws, channels.length === 1 ? channels[0] : undefined, controlChannelId, frame?.callerDowngraded === true);
+  const channelId = channels.length === 1 ? channels[0] : undefined;
+  return { identity: identityOf(ws, channelId, controlChannelId, frame?.callerDowngraded === true), channelId };
 }
+
+const callerIdentity = (ws: object, frame?: Record<string, unknown>): CallerIdentity => callerOf(ws, frame).identity;
 
 /** 只读探针工具 whoami 的回包 */
 export function answerWhoami(ws: ServerWebSocket<unknown>, msg: Record<string, unknown>): void {
