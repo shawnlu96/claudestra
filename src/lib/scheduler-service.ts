@@ -34,7 +34,8 @@ export async function schedulerMergeTick(db: Database, config: SchedulerConfig, 
   finally { lock.release(); }
 }
 
-async function mergeTick(db: Database, config: SchedulerConfig, manager: Manager,
+/** The merge pass itself; the caller holds the maintenance lease and passes a manager already guarded by assertActive. */
+export async function mergeTick(db: Database, config: SchedulerConfig, manager: Manager,
   externalFactory: (project: SchedulerConfig["projects"][string]) => MergeExternal, assertActive: () => void): Promise<number> {
   let handled = 0;
   for (const [project, policy] of Object.entries(config.projects)) {

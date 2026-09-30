@@ -19,6 +19,7 @@ import { runManagerProcess } from "./run-manager.js";
 import { boundRef, type AutoTickDeps } from "./scheduler-auto-tick.js";
 import { acpPort, messagePort, type RegistryRow } from "./scheduler-auto-ports.js";
 import { runtimeFamily } from "./scheduler-auto-review.js";
+import { whileOwned } from "./scheduler-maintenance.js";
 import { schedulerManager } from "./scheduler-service.js";
 import { gitDirtySync, openReviewWorktree, pinReviewWorktree } from "./scheduler-review-worktree.js";
 import type { SessionRole } from "./scheduler-sessions.js";
@@ -43,7 +44,8 @@ function refOf(task: LedgerTask, role: SessionRole, row: RegistryAgent, family: 
   return { kind: "ready", ref, created: false };
 }
 
-interface Env { db: Database; registryRow: RegistryRow; worktreeRoot: string }
+/** active throws SchedulerStopped once the service is stopping or lost its lease: checked between the steps of a create. */
+interface Env { db: Database; registryRow: RegistryRow; worktreeRoot: string; active: () => void }
 const checkoutOf = (env: Env, taskId: string): string => join(env.worktreeRoot, `rv-${taskId.toLowerCase()}`);
 const realOr = (p: string): string => { try { return realpathSync.native(p); } catch { return p; /* not there yet: compare as written */ } };
 
@@ -52,15 +54,16 @@ async function createReviewer(env: Env, task: LedgerTask, family: AuthorFamily):
   const author = boundRef(db, task.id, "author");
   const authorDir = author && registryRow(author.agent)?.cwd;
   if (!authorDir) return { kind: "manual", reason: "找不到执行者的工作目录，建不了审查 session" };
-  const opened = await openReviewWorktree(authorDir, checkoutOf(env, task.id), task.headSHA);
+  const opened = await whileOwned(env.active, () => openReviewWorktree(authorDir, checkoutOf(env, task.id), task.headSHA));
   if ("manual" in opened) return { kind: "manual", reason: opened.manual };
   const dir = opened.dir;
   const name = reviewerName(task.id);
   const runtime = family === "codex" ? ["--runtime", "codex", "--transport", "acp"] : [];
-  const r = await plainManager("create", name, dir, "--purpose", `${task.id} 跨模型对抗式审查（调度引擎建）`, "--project", task.project,
-    "--task", `${task.id} 审查`, ...runtime);
+  const r = await whileOwned(env.active, () => plainManager("create", name, dir, "--purpose", `${task.id} 跨模型对抗式审查（调度引擎建）`,
+    "--project", task.project, "--task", `${task.id} 审查`, ...runtime));
   if (r.ok !== true) return { kind: "unknown", reason: `建 ${name} 失败或结果不明：${String(r.error ?? "")}`.slice(0, 400) };
   for (let i = 0; i < 30; i++) {
+    env.active();
     const row = registryRow(name);
     if (row?.sessionId) {
       const got = refOf(task, "reviewer", row, family);
@@ -119,9 +122,9 @@ async function notifyPm(db: Database, task: LedgerTask, text: string): Promise<v
 }
 
 /** registryPath / worktreeRoot are for tests; production reads the canonical registry fresh on every lookup. */
-export function autoTickDeps(db: Database, registryPath?: string, worktreeRoot = statePath("worktrees")): AutoTickDeps {
+export function autoTickDeps(db: Database, registryPath?: string, worktreeRoot = statePath("worktrees"), active: () => void = () => {}): AutoTickDeps {
   const registryRow: RegistryRow = (agent) => readRegistryAgentsSync(registryPath).find((a) => a.name === agent);
-  const env: Env = { db, registryRow, worktreeRoot };
+  const env: Env = { db, registryRow, worktreeRoot, active };
   return {
     manager: schedulerManager,
     worker: (ref) => worker(db, registryRow, ref),

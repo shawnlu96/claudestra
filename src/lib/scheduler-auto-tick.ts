@@ -41,6 +41,11 @@ export interface AutoTickResult { cards: CardOutcome[]; failed: { taskId: string
 
 const UNDELIVERED_BACKOFF_MS = 30_000, UNDELIVERED_BACKOFF_CAP_MS = 600_000;
 const oneLine = (s: string): string => s.replace(/\s+/g, " ").trim().slice(0, 560);
+/** A lost notice is logged (the ledger holds the durable record), but a stop / lost lease still ends the pass. */
+const noticeLost = (what: string) => (e: unknown): void => {
+  if (e instanceof SchedulerStopped) throw e;
+  console.error(`⚠️ [scheduler] ${what}：${(e as Error).message}`);
+};
 const roleOfIntent = (i: Pick<SchedulerIntent, "action" | "node">): SessionRole =>
   i.action === "review" || i.node === "adversarial_review" ? "reviewer" : "author";
 
@@ -64,7 +69,7 @@ class Card {
     if (r.ok !== true) return this.out("held", `退回人工失败：${String(r.error)}`);
     if (r.duplicate !== true) {
       await this.deps.notifyPm(this.task, `[调度引擎] ${this.task.id} 退回人工，请接手：${oneLine(reason)}`)
-        .catch((e) => console.error(`⚠️ [scheduler] 通知 PM 失败（台账已记退回人工）：${(e as Error).message}`));
+        .catch(noticeLost("通知 PM 失败（台账已记退回人工）"));
     }
     return this.out("manual", reason);
   }
@@ -185,7 +190,7 @@ class Card {
     const rv = listEvents(this.db, { project: this.task.project, target: this.task.id }).findLast((e) => e.kind === "review");
     const text = `[调度引擎] ${this.task.id} 审查通过但留有 P2，已进合并队列，请看 diff：head ${String(rv?.data.head ?? this.task.headSHA)}` +
       `，报告 ${String(rv?.data.path ?? "（无）")}`;
-    await this.deps.notifyPm(this.task, text).catch((e) => console.error(`⚠️ [scheduler] P2 看 diff 通知没发出去：${(e as Error).message}`));
+    await this.deps.notifyPm(this.task, text).catch(noticeLost("P2 看 diff 通知没发出去"));
   }
 
   /** A screenshot ask that expired or was withdrawn can never be answered; waiting on it would be forever. */
