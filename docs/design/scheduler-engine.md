@@ -47,7 +47,7 @@ variants:
 ```
 
 默认每轮审查都是对抗式；不再先常规后对抗。每张卡一个独立执行 session、一个独立审查 session；同卡 P1 复验沿用原审查 session。作者 Codex → Claude Code 审，作者 Claude Code → Codex 审；Pi 或未知模型家族没有明确配对时不自动选 reviewer，停给 PM，不猜同家族。
-`task_steps` 继续真校验作者不同人；新增模型家族校验，peer 自报只能标 claim，不伪称本机已核实。
+`task_steps` 继续真校验作者不同人；新增模型家族校验：registry 能找到的本机身份一律核 runtime，不能凭 transport=peer 变成远端。远端绑定须逐字匹配本卡当前步骤的 <agent>@<peer> 委托；家族自报只能标 claim，不伪称本机已核实。
 
 reviewer 只写结构化结论（head、verdict、P0/P1/P2、findingId、family、探针原文、报告路径、审查 session id），不得同时 `--to` 推自动卡。引擎观察审查事件后决定阶段；旧人工卡的 `review --to` 保持兼容。P1 的 `changes` 自动进 fix
 并附报告要点与原探针；P0 或 `block` 暂停并升级。只剩 P2 时通知 PM 看 diff，同时继续自动合并流程，不再派复验；这是 04:27「只留三道闸」对原 P2 PM 闸的收窄。
@@ -74,7 +74,7 @@ auto 卡不再发旧的 deliver/review 指令，避免双派；`ledger-audit` �
 
 ## 并发、合并与外部效果
 
-按项目配置 `maxActiveWorkers`；首个写/修派单取得卡级 worker 槽与文件锁，持续到 live/verified、整卡取消或 PM 明确释放，不随某个 dispatch intent 的 done 释放。审查槽和合并槽单列。dispatch 的 done 仅代表派单回执，worker 交付以校验过的 deliver 事件为准，两者都不释放卡级锁。卡在规格中声明文件 glob、共享资源与接口。申请占槽和文件锁在台账事务内完成；不确定交集按冲突排队，不能以 git 当前无冲突代替声明。离线或租约到期只告警，不把可能仍在写的锁自动借出。依赖判定复用
+按项目配置 `maxActiveWorkers`；首个写/修派单取得卡级 worker 槽与文件锁，持续到 live/verified、整卡取消或 PM 明确释放，不随某个 dispatch intent 的 done 释放。卡已持有 worker 槽时，后续 write/fix 派单沿用该槽，跳过新占用容量检查；同一卡最多占一个槽，写入事务拒绝第二个槽。审查槽和合并槽单列。dispatch 的 done 仅代表派单回执，worker 交付以校验过的 deliver 事件为准，两者都不释放卡级锁。卡在规格中声明文件 glob、共享资源与接口。申请占槽和文件锁在台账事务内完成；不确定交集按冲突排队，不能以 git 当前无冲突代替声明。离线或租约到期只告警，不把可能仍在写的锁自动借出。依赖判定复用
 `blockedBy/depViews`：code 上游到 live/verified/done 才满足，merge 不算。
 
 合并队列把现有 `merge-queue.sh`、`deploy-full.sh` 的步骤搬进仓库，目标地址从配置注入。每项目串行：update-branch → 若 head 变，回审 → check/CI → merge → 部署 → 验证。记录候选 SHA、CI run、merge SHA、部署产物和核证事实。CI 红、
@@ -123,3 +123,5 @@ owner 截图 ask 属上线闸。
   一次性 Codex 自查指出旧轮派单冒认新轮、并行活跃意图两个 P1，以及历史 P1 证据和截图摘要绑定两个 P2；规划器现要求本轮派单回执、等待任何未结意图，并逐轮校验交付 head/计数、绑定截图摘要。
 - PR C：registry 的唯一分类器在新建、保存与幂等迁移时标记 worker；会话列表和默认全文搜索过滤，管理面板保留全部，v4 任务详情从台账 session 绑定直接打开作者或审查员，会话 store 与待你处理直达保留原路。审查 session 在 v8 台账里按卡和角色唯一绑定，跨模型校验并持有同卡复验身份；verified 后先归档回执再停止，未知结果可凭核对回执续走。沙箱 bridge 实测迁移两次为 1/0，API 正确下发 worker/PM/codex kind。
   一次性 Codex 对抗自查找到四个 P2：归档后丢失 worker 标记、无 task.agent 的作者无法从 DAG 进入、绑定未核 intent 收件人、归档后停止前会话过早消失；均已修复并补测试。跨模型复审 r1 又要求本机 session 的家族核对 registry runtime，并让 owner 可撤误标、绑定时统一打标、管理面板可操作 worker。截图改走沙箱 headless 浏览器，不动 owner 屏幕。
+
+- r2 修复：#233 本卡已持有槽时直接复用，台账拒绝第二槽；#235 本机 registry 优先核身份，peer transport 仅认本卡当前步骤明确委托，受保护长驻 session 在台账绑定前拒绝。最新 main 以 merge 合入，保留 T69、ACP 启动迁移与运行时归档源定位。

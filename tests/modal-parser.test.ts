@@ -6,7 +6,6 @@ import { describe, test, expect } from "bun:test";
 import {
   parseModalOptions,
   detectArrowNavModal,
-  isAutoConfirmableModal,
   isClaudeReady,
   paneLooksIdle,
   isAtShell,
@@ -19,6 +18,7 @@ import {
   PERMISSION_MODE_CYCLE,
   detectDevChannelsModal,
   childPidsInPsOutput, parseChoicePrompt, detectBypassConsentPrompt } from "../src/lib/tmux-helper.ts";
+import { isAutoConfirmableModal } from "../src/lib/modal-confirm.ts";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 

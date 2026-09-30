@@ -12,6 +12,7 @@ const wallErr = { error: "rate_limit", text: "You've hit your weekly limit · re
 const overloaded = { error: "overloaded", text: "API Error: 529 Overloaded" };
 const call = (caller: string): PendingAgentCall => ({ callerChannelId: caller, callerName: `agent-${caller}`, targetName: "agent-t", ts: 1000 });
 
+const wh = (c?: PendingAgentCall) => c?.requests?.flatMap((r) => r.withheld ?? []) ?? []; // 扣下的话逐条存在请求上（T6c1 r2）
 let seq = 0;
 function harness() {
   const cid = `c-wf2-${++seq}`;
@@ -30,7 +31,7 @@ function harness() {
     nudgeAmbiguous: () => undefined,
     takeApiErrorNotice: (c) => book.takeApiErrorNotice(c, () => false),
     markApiError: (c, text, caller) => book.markApiError(c, () => false, text, caller),
-    clearWithheld: (c, pac) => book.clearWithheld(c, pac.callerChannelId),
+    clearWithheld: (c, pac) => book.clearWithheld(c, pac),
     notify: async () => undefined,
     metric: () => undefined,
   };
@@ -51,8 +52,8 @@ describe("delivery-hold-2：扣下的话只归开这一轮的 caller，不按「
     await h.stop("StopFailure", { text: null, apiError: true, error: overloaded });
     h.deliver({ kind: "bridge", label: "api-error-resume" }, 160_000); // 60 秒续跑：接着做 A 那一轮
     await h.stop("StopFailure", { text: "给 A 的答复：A 项目的内部方案", apiError: true, error: overloaded });
-    expect(h.book.slot(h.cid, "c-b")!.withheld).toEqual(["给 B 的前半段"]);
-    expect(h.book.slot(h.cid, "c-a")!.withheld).toEqual(["给 A 的答复：A 项目的内部方案"]);
+    expect(wh(h.book.slot(h.cid, "c-b"))).toEqual(["给 B 的前半段"]);
+    expect(wh(h.book.slot(h.cid, "c-a"))).toEqual(["给 A 的答复：A 项目的内部方案"]);
   });
 
   test("不是 agent 开的一轮（owner / 非续跑的 bridge 消息，callers 为空）撞错前说的话：不扣进任何一槽，只告诉 owner", async () => {
@@ -62,7 +63,7 @@ describe("delivery-hold-2：扣下的话只归开这一轮的 caller，不按「
     await h.stop("StopFailure", { text: null, apiError: true, error: overloaded }); // B 那一轮空手撞错，B 还在等
     h.deliver({ kind: "api", owner: true }, 100_000);
     await h.stop("StopFailure", { text: "给 owner 的半句", apiError: true, error: overloaded });
-    expect(h.book.slot(h.cid, "c-b")?.withheld).toBeUndefined();
+    expect(wh(h.book.slot(h.cid, "c-b"))).toEqual([]);
     expect(h.unattributed).toEqual(["给 owner 的半句"]);
     expect(h.counts).toEqual([{ callers: 0, waiting: 1, wall: false }]);
   });

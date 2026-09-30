@@ -13,6 +13,7 @@ import { clearProject, scanProject } from "../src/bridge/slash-registry.js";
 import type { Principal } from "../src/lib/principals.js";
 import { commandLine, commandStdoutLine } from "../src/lib/inbound-body.js";
 import { readSessionHistory } from "../src/lib/session-history.js";
+import { noteAcpChannel } from "../src/bridge/acp-state.js";
 
 const base = { createdAt: "2026-01-01T00:00:00Z" };
 const OWNER: Principal = { ...base, id: "owner:self", role: "owner", name: "owner", agents: ["*", "master"], credential: "dev_o1" };
@@ -43,6 +44,26 @@ function harness(wall: "menu" | "countdown" | null = null) {
 
 const call = (principal: Principal, text: string, deps: SlashDeps, agent: Record<string, unknown> = AGENT) =>
   handleSlashPassthrough({ principal, tokenId: principal.id.replace(/^token:/, ""), agent: agent as typeof AGENT, text, hasAttachments: false }, deps);
+
+test("ACP Codex 的 Web 聊天 /clear：宿主不在线与带附件都拒绝，guest 无权", async () => {
+  const agent = { ...AGENT, channelId: "local-acp-clear", runtime: "codex" };
+  noteAcpChannel(agent.channelId, "acp");
+  try {
+    const h = harness();
+    const owner = await call(OWNER, "/clear", h.deps, agent);
+    const guest = await call(GUEST, "/clear", h.deps, agent);
+    const attachedOwner = await handleSlashPassthrough({ principal: OWNER, tokenId: "owner:self", agent, text: "/clear", hasAttachments: true }, h.deps);
+    const attachedGuest = await handleSlashPassthrough({ principal: GUEST, tokenId: "guest:1234", agent, text: "/clear", hasAttachments: true }, h.deps);
+    expect(owner?.status).toBe(409);
+    expect(guest?.status).toBe(403);
+    expect(attachedOwner?.status).toBe(409);
+    expect((await attachedOwner?.json() as { error: string }).error).toContain("不接收附件");
+    expect(attachedGuest?.status).toBe(403);
+    expect(h.sent).toEqual([]);
+  } finally {
+    noteAcpChannel(agent.channelId, "tmux");
+  }
+});
 
 describe("四种凭据 × 带参数和换行的斜杠命令", () => {
   test("owner：原文（含参数、换行）注入 TUI，202", async () => {

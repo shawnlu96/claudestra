@@ -44,6 +44,27 @@ const proof = (round: number, intentSeq: number) => ({ intentId: `review-r${roun
   reviewer: reviewer.agent, reviewerSessionId: reviewer.sessionId, ackSeq: intentSeq + 1 });
 
 describe("T68 data workflow planner", () => {
+  test("two P1 cards at full capacity reuse their own slot instead of deadlocking or claiming a second slot", () => {
+    for (const [id, own, other] of [["T1", "slot:p:0", "slot:p:1"], ["T2", "slot:p:1", "slot:p:0"]]) {
+      const s = snapshot("fix", 1);
+      s.task.id = id;
+      s.workflow!.taskId = id;
+      s.author = { ...author, taskId: id };
+      s.events = [...s.events, delivery(19, 1), review(20, 1, [finding("delivery")]),
+        event(25, "stage", { from: "review", to: "fix", round: 1 })];
+      s.heldResources = [{ taskId: id, resource: own }, { taskId: id === "T1" ? "T2" : "T1", resource: other }];
+      s.workerCount = 2;
+      s.freeWorkerSlot = null;
+      const decision = planScheduler(s);
+      expect(decision).toMatchObject({ kind: "intent", action: "dispatch" });
+      if (decision.kind === "intent") expect(decision.resources.filter((r) => r.startsWith("slot:"))).toEqual([own]);
+      s.workerCount = 1;
+      s.freeWorkerSlot = "slot:p:2";
+      const spare = planScheduler(s);
+      expect(spare).toMatchObject({ kind: "intent", action: "dispatch" });
+      if (spare.kind === "intent") expect(spare.resources.filter((r) => r.startsWith("slot:"))).toEqual([own]);
+    }
+  });
   test("new card provisions its author, then dispatches once; capacity, dependency and file locks stop new work", () => {
     const s = snapshot();
     s.author = null;

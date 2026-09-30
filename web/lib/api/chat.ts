@@ -13,6 +13,9 @@ const enc = (agent: string) => encodeURIComponent(apiAgentName(agent));
 export interface SendResult {
   /** bridge 走了 tmux 直通（CC 原生解释，无常规回合）——前端据此不进「正在回复」态 */
   slash?: boolean;
+  clear?: boolean;
+  sessionId?: string;
+  previousSessionId?: string;
   ccText?: string;
   /** bridge 押住了、没有回合（额度闸 / 目标停在额度菜单，只给全权 owner 设备；别人只拿到 queued） */
   heldBy?: "quota_wall" | "wall_menu";
@@ -41,9 +44,9 @@ export function interruptAgent(agent: string): Promise<{ ok: boolean; agent?: st
   return api(`/agents/${enc(agent)}/interrupt`, { method: "POST", json: {}, timeoutMs: 20_000 });
 }
 
-/** 清空会话：bridge 打原生 /clear + 后台轮转；回合进行中 409 */
-export function clearAgentSession(agent: string): Promise<{ ok: boolean }> {
-  return api(`/agents/${enc(agent)}/clear`, { method: "POST", json: {}, timeoutMs: 15_000 });
+/** 清空会话：ACP 先引导新线程再换 registry；回合进行中 409。 */
+export function clearAgentSession(agent: string): Promise<{ ok: boolean; sessionId?: string; previousSessionId?: string }> {
+  return api(`/agents/${enc(agent)}/clear`, { method: "POST", json: {}, timeoutMs: 230_000 });
 }
 
 const PERM_ACTION: Record<string, string> = { perm_allow: "allow", perm_allow_session: "allow_session", perm_deny: "deny", allow: "allow", allow_session: "allow_session", deny: "deny" };
@@ -53,6 +56,11 @@ export function answerPermission(agent: string, action: string): Promise<{ ok: b
   const mapped = PERM_ACTION[action];
   if (!mapped) return Promise.reject(new Error(`不支持的 action: ${action}`));
   return api(`/agents/${enc(agent)}/answer`, { method: "POST", json: { kind: "permission", action: mapped }, timeoutMs: 15_000 });
+}
+
+/** 应答 ACP 宿主的卡（T60：额度卡的「等重置 / 切到某模型」、权限请求）：action = 卡上按钮的 id，bridge 转给宿主 */
+export function answerAcp(agent: string, action: string): Promise<{ ok: boolean }> {
+  return api(`/agents/${enc(agent)}/answer`, { method: "POST", json: { kind: "acp", action }, timeoutMs: 20_000 });
 }
 
 /** 应答 AskUserQuestion：submit(selections[][]) 或 cancel。askId = 从「待你处理」卡上答：bridge 先核对卡是不是当前这个弹框的（409 ask_stale） */

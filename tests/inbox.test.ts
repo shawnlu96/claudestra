@@ -48,7 +48,7 @@ describe("takeInbox", () => {
     expect(q.map((i) => i.env.content)).toEqual(["复核意见 1", "人类补充", "复核意见 2"]); // 还在队里
     expect(q.filter((i) => leaseActive(i, 5 * 60_000)).length).toBe(2);
     expect(mirrored).toEqual(["复核意见 1", "复核意见 2"]);
-    expect(calls.slot("c-me", "c-codex")!.ts).toBeGreaterThan(1);
+    expect(calls.slot("c-me", "c-codex")!.requests![0]!.deliveredAt).toBeGreaterThan(1); // 失效钟记在这条请求上
   });
 
   test("没 ack 再调：原样重给还没确认的那批（工具结果丢了也能重读），不续租、不领新的；过期后照常重领", async () => {

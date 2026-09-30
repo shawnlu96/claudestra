@@ -73,7 +73,7 @@ export async function runKill(name: string, deps: OpsDeps, opts: KillOptions = {
   }
   if (hasWindow) await killWindows(winNames, deps);
   // 会话退役 → 归档 jsonl 快照（CC 的 cleanupPeriodDays 会清源文件）
-  if (info?.sessionId) await deps.archive(name, info.cwd, info.sessionId);
+  if (info?.sessionId) await deps.archive(name, info);
   const left: string[] = [];
   if (info?.channelId) {
     const r = await deps.deleteChannel(info.channelId);
@@ -119,7 +119,7 @@ export async function runRemove(name: string, deps: OpsDeps, opts: KillOptions =
   }
   if (deps.restartInProgress(name)) return { ok: false, error: `${name} 正在 restart（窗口在重建），等它结束再 remove` };
   if (hasWindow) await killWindows(winNames, deps);
-  if (info?.sessionId) await deps.archive(name, info.cwd, info.sessionId);
+  if (info?.sessionId) await deps.archive(name, info);
   const channelId = info?.channelId || (info?.pending?.op === "create" ? info.pending.channelId : undefined);
   if (channelId) {
     const r = await deps.deleteChannel(channelId);

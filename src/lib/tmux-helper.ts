@@ -16,7 +16,7 @@ import { RUNTIME_DIR, TMUX_SOCK } from "./paths.js"; export { TMUX_SOCK };
 import { sandboxDisabled } from "./sandbox.js";
 import { sandboxTmuxArgv, sandboxVerifyNewWindow } from "./sandbox-tmux.js"; export { sandboxTmuxArgv };
 import { windowKey } from "./tmux-target.js"; export { windowKey };
-import { paneShowsLimitMenu } from "./limit-menu.js";
+import { inputBox } from "./input-box.js";
 export const MASTER_SESSION = "master";
 /**
  * 大总管窗口（index 0）的显式名字。不命名的话 tmux 按前台进程自动改名（claude / 版本号），
@@ -200,7 +200,7 @@ export function tmuxInterrupt(target: string): void {
 /** 双 Esc 护栏（CC 连按两次 Esc = Rewind）：所有 Esc 都必须走这里。规则、窗口身份、跨进程锁见 lib/esc-guard.ts */
 const escFile = (key: string, ext: string) => join(RUNTIME_DIR, `esc-${key.replace(/[^\w.-]/g, "_")}.${ext}`);
 export const tmuxSendEscape = createEscGuard({
-  windowId: async (t) => (await tmuxRaw(["list-panes", "-t", t, "-F", "#{window_id}"])).split("\n")[0] || null,
+  windowId: async (t) => (await tmuxRawStrict(["list-panes", "-t", t, "-F", "#{window_id}"])).split("\n")[0] || null, // 出错就抛：Esc 不发（esc-guard）
   lock: (key) => acquireLock(escFile(key, "lock"), ESC_LOCK_WAIT_MS, 5_000), // 等锁 > 过期：持锁进程崩了也等得到回收；等不到就不发（esc-guard）
   readShared: (key) => {
     try { return Number(readFileSync(escFile(key, "at"), "utf8")) || 0; } catch { return 0; /* 还没有人给这个窗口发过 Esc */ }
@@ -214,8 +214,10 @@ export const tmuxSendEscape = createEscGuard({
   now: () => Date.now(),
 });
 
-/** 程序敲进 agent 窗口的字 / 按键：发之前记一笔（按窗口、跨进程），bridge 据此认出会话记录里不是 owner 在终端里打的（lib/program-input.ts） */
-export const noteProgramInput = async (target: string, text = ""): Promise<void> => recordProgramInput(escFile(await tmuxSendEscape.keyOf(target), "input"), text);
+/** 程序敲进 agent 窗口的字 / 按键：发之前记一笔（按窗口、跨进程），bridge 据此认出会话记录里不是 owner 在终端里打的（lib/program-input.ts）。
+ * programInputNoter 先把要等的（查窗口 id）等完，返回同步的记账函数：查完画面到发键之间不能再有等待（manager/send-keys.ts） */
+export const programInputNoter = async (target: string) => { const f = escFile(await tmuxSendEscape.keyOf(target), "input"); return (text = "") => recordProgramInput(f, text); };
+export const noteProgramInput = async (target: string, text = ""): Promise<void> => (await programInputNoter(target))(text);
 export const programInputsOf = async (target: string): Promise<ProgramInput[]> => readProgramInputs(escFile(await tmuxSendEscape.keyOf(target), "input"));
 
 /**
@@ -552,37 +554,6 @@ export function btabStepsTo(current: string, target: string): number {
 }
 
 /**
- * pane 上是否有「可以安全自动按 Enter 确认」的 modal：parseModalOptions 几何识别（❯ 标记的选项菜单），再按负向黑名单排除必须人决定的——
- * 运行时权限弹窗、session-idle（除非 allowSessionIdle：master 启动时允许，agent 由 permission-watcher 发按钮）、信任 / Bypass 首启框、额度菜单。
- * CC 改启动期 modal 文案（dev-channel / trust files …）也不会让 launcher 卡住：❯ + Enter to confirm 的几何特征还在就自动通过。
- */
-export function isAutoConfirmableModal(
-  pane: string,
-  opts: { allowSessionIdle?: boolean } = {}
-): boolean {
-  const modalOpts = parseModalOptions(pane);
-  // v2.23.1+ 无编号选择弹窗（effort 默认档位确认等）也算：默认高亮项 = 保持现状，Enter 无副作用
-  const choice = modalOpts ? null : parseChoicePrompt(pane);
-  if (!modalOpts && !choice) return false;
-  // 两个解析器都保证恰有 ❯ 高亮项，但显式再校验一次，防未来重构破坏不变量
-  if (modalOpts && !modalOpts.some((o) => o.selected)) return false;
-  if (choice && !choice.some((o) => o.selected)) return false;
-  // 运行时权限弹窗（Do you want to edit / run / allow ...）必须用户决定
-  if (detectRuntimePermissionPrompt(pane)) return false;
-  // session-idle 弹窗除非显式允许
-  if (!opts.allowSessionIdle && detectSessionIdlePrompt(pane)) return false;
-  // 目录信任弹窗默认高亮「No, exit」——直接 Enter 等于退出。它由 trustPromptMoves
-  // 专门处理（先 Down 到 Yes 再 Enter），这里绝不能当普通弹窗自动 Enter
-  if (trustPromptMoves(pane) !== null) return false;
-  // Bypass 首启确认同样默认高亮「No, exit」，而且接受与否是用户自己的安全决定——
-  // 任何自动化都不替用户按（setup 里征得同意后写 skipDangerousModePermissionPrompt）
-  if (detectBypassConsentPrompt(pane)) return false;
-  // 额度菜单：Enter 会替人选中高亮项（光标可能停在「Switch to usage credits」上），一个键都不发，留给人（T24）
-  if (paneShowsLimitMenu(pane)) return false;
-  return true;
-}
-
-/**
  * Claude Code 首次以 --dangerously-skip-permissions 启动时的确认框：
  *   WARNING: Claude Code running in Bypass Permissions mode …
  *   ❯ No, exit
@@ -858,11 +829,12 @@ const SWITCH_CONFIRM_TITLES: Record<string, SwitchConfirmKind> = {
 
 /**
  * 认出切模型/effort 确认框并算出「选 Yes」的按键；别的框一律 null。
- * 只认底部：标题行必须独占一行、下面恰好是「Yes, switch to …」+「No …」两个编号项、
- * 且下面没有输入框页脚（真框盖住输入框；页脚还在 = 那段字只是屏幕上显示的内容）。
+ * 只认底部：标题行必须独占一行、下面恰好是「Yes, switch to …」+「No …」两个编号项、第 2 项就是最后一行，
+ * 且看不到真输入框、下面没有输入框页脚（真框盖住输入框；输入框 / 页脚还在 = 那段字只是屏上残留，Enter 会提交草稿）。
  */
 export function detectSwitchConfirmPrompt(pane: string): SwitchConfirmPrompt | null {
   const lines = trimTrailingBlank(pane.split("\n")).slice(-20);
+  if (inputBox(lines)) return null;
   let titleIdx = -1;
   let kind: SwitchConfirmKind | null = null;
   for (let i = lines.length - 1; i >= 0; i--) {
@@ -877,7 +849,7 @@ export function detectSwitchConfirmPrompt(pane: string): SwitchConfirmPrompt | n
     const m = raw.match(/^\s*(❯)?\s*\d{1,2}\.\s+(.+?)\s*$/);
     if (m) opts.push({ selected: !!m[1], label: m[2]! });
   }
-  if (opts.length !== 2) return null;
+  if (opts.length !== 2 || !/^\s*(❯)?\s*\d{1,2}\.\s/.test(below.at(-1)!)) return null;
   const yesM = opts[0]!.label.match(/^Yes, switch to (.+)$/i);
   if (!yesM || !/^No\b/i.test(opts[1]!.label)) return null;
   const sel = opts.findIndex((o) => o.selected);

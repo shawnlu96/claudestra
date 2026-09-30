@@ -111,6 +111,7 @@ export interface RegistryAgent {
   name: string;
   /** T69: work sessions stay addressable but are hidden from the ordinary conversation roster. */
   kind?: "worker" | "main";
+  role?: string;
   status?: string;
   channelId?: string;
   sessionId?: string;
@@ -132,6 +133,10 @@ export interface RegistryAgent {
   piEnv?: Record<string, unknown>;
   /** T60 走哪条 transport：只有 "acp" 会读出来，缺省 = tmux（读的人用 runtimes 的 normalizeTransport） */
   transport?: Transport;
+  /** 适配器或 CLI 不可用时的 tmux 暂退；条件恢复后 migrate 会再试 ACP */
+  acpPending?: boolean;
+  /** 迁移改了 transport，但窗口重启尚未成功 */
+  acpRestartPending?: boolean;
   /** 派发者的 registry 键（`agent-xxx` 或 `master`）：侧栏把它挂在派发者下面（manager/team.ts 写入）。展示用，不参与授权 */
   parent?: string;
   /** 任务短名（≤40 字），侧栏执行者那行的小标 */
@@ -156,6 +161,7 @@ function normalizeEntries(agents: Record<string, unknown>): RegistryAgent[] {
     return {
       name,
       kind: a.kind === "worker" || a.kind === "main" ? a.kind : undefined,
+      role: str("role"),
       status: str("status"),
       channelId: str("channelId"),
       sessionId: str("sessionId"),
@@ -174,8 +180,10 @@ function normalizeEntries(agents: Record<string, unknown>): RegistryAgent[] {
       runtime: str("runtime"),
       // 嵌套对象：不是对象就当没有（脏数据不能把 bridge 搞崩）
       piEnv: a.piEnv && typeof a.piEnv === "object" ? (a.piEnv as Record<string, unknown>) : undefined,
-      // 同上，漏读 = acp 的 agent 被当 tmux 起。只留 acp：tmux 与认不出的都当缺省
-      transport: a.transport === "acp" ? "acp" : undefined,
+      // 显式 tmux 是人工回退，doctor 与迁移须能区分它和旧 registry 的缺字段。
+      transport: a.transport === "acp" ? "acp" : a.transport === "tmux" ? "tmux" : undefined,
+      acpPending: a.acpPending === true,
+      acpRestartPending: a.acpRestartPending === true,
       parent: str("parent"),
       task: str("task"),
     };

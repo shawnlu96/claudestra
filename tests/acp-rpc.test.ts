@@ -186,3 +186,31 @@ describe("createRpcPeer", () => {
     expect(logs.length).toBe(1);
   });
 });
+
+describe("onResult 同步钩子（steer 回包那一刻就登记等待）", () => {
+  test("回包与紧跟其后的通知在同一个 chunk 里：钩子先于下一行的通知处理器跑", async () => {
+    const m = memWire();
+    const rpc = createRpcPeer(m.wire, quiet);
+    const order: string[] = [];
+    rpc.onNotification("session/update", () => order.push("idle-update"));
+    const p = rpc.request("_session/steering", {}, { onResult: (r: any) => order.push(`hook:${r.outcome}`) });
+    m.raw('{"jsonrpc":"2.0","id":1,"result":{"outcome":"startedNewTurn"}}\n{"jsonrpc":"2.0","method":"session/update","params":{}}\n');
+    expect(order).toEqual(["hook:startedNewTurn", "idle-update"]);
+    expect(await p).toEqual({ outcome: "startedNewTurn" });
+  });
+
+  test("钩子抛错不影响结果交付；错误回包不调钩子", async () => {
+    const m = memWire();
+    const logs: string[] = [];
+    const rpc = createRpcPeer(m.wire, { log: (s) => logs.push(s) });
+    let called = 0;
+    const ok = rpc.request("a", {}, { onResult: () => { called++; throw new Error("boom"); } });
+    const bad = rpc.request("b", {}, { onResult: () => called++ });
+    m.feed({ jsonrpc: "2.0", id: 1, result: 7 });
+    m.feed({ jsonrpc: "2.0", id: 2, error: { code: 1, message: "x" } });
+    expect(await ok).toBe(7);
+    expect(await bad.catch((e) => e.code)).toBe(1);
+    expect(called).toBe(1);
+    expect(logs.some((l) => l.includes("钩子出错"))).toBe(true);
+  });
+});

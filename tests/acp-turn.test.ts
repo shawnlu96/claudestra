@@ -89,6 +89,17 @@ describe("AcpTurnLoop · 基本", () => {
     expect(f.loop.busy).toBe(false);
   });
 
+  test("忙时 /compact 独占下一轮 prompt，不经 steering 也不和普通消息拼接", async () => {
+    const f = fixture();
+    await f.loop.submit("work");
+    expect(f.loop.submitCommand("/compact")).toBe("queued");
+    expect(f.steers.has("/compact")).toBe(false);
+    await f.finish();
+    expect(f.prompts).toEqual(["work", "/compact"]);
+    await f.finish();
+    expect(f.stops).toHaveLength(2);
+  });
+
   test("不支持 steering：忙时排队，这轮返回后把排着的拼成一轮", async () => {
     const f = fixture({ noSteer: true });
     await f.loop.submit("a");
@@ -327,5 +338,24 @@ describe("AcpTurnLoop · IO 同步抛错 / 提前 reject（审查第 2 轮）", 
     } finally {
       process.off("unhandledRejection", onUnhandled);
     }
+  });
+});
+
+describe("AcpTurnLoop · 失败去重键", () => {
+  test("传输层失败按单调序号给键：同一毫秒里两次失败也是两张卡（不能用 Date.now）", async () => {
+    const f = fixture({ noSteer: true });
+    f.io.prompt = () => Promise.reject(new Error("acp 连接断了"));
+    const realNow = Date.now;
+    Date.now = () => 1_790_000_000_000; // 钉死时间：两次失败落在同一毫秒
+    try {
+      await f.loop.submit("a");
+      await tick();
+      await f.loop.submit("b");
+      await tick();
+    } finally {
+      Date.now = realNow;
+    }
+    expect(f.failures.length).toBe(2);
+    expect(new Set(f.failures.map((x) => x.key)).size).toBe(2);
   });
 });
