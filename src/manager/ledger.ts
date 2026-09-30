@@ -34,6 +34,7 @@ import { SCHEDULER_AUTO_CMDS } from "./ledger-scheduler-auto-cmds.js";
 import { DRY_RUN_READS, isWriteInvocation } from "./write-commands.js";
 import { readSchedulerConfig } from "../lib/scheduler-config.js";
 import { collectCallerWitness } from "../lib/caller-witness.js";
+import { assertSchedulerLease, SchedulerLeaseLost } from "../lib/scheduler-lease-env.js";
 
 /** 认不出身份时读命令用的 actor：不是 registry 键、不在任何 PM 名单里，roleOf 恒为 null */
 export const UNKNOWN_ACTOR = "unknown";
@@ -76,8 +77,10 @@ export async function runLedger(args: string[], deps: LedgerDeps): Promise<Resul
   const p = parseLedgerArgs(args, spec.valued, spec.bools);
   if ("error" in p) return { ok: false, code: "invalid", error: p.error, usage: `ledger ${spec.usage}` };
   try {
+    deps.assertLease?.(); // 写锁、registry / projects 这些 await 都过了：台账事务是同步的，核完直接跑
     return await spec.run(new LedgerCli(deps, p));
   } catch (e) {
+    if (e instanceof SchedulerLeaseLost) return { ok: false, code: "lease-lost", error: e.message };
     if (e instanceof LedgerError) return { ok: false, code: e.code, error: e.message, ...(e.current ? { current: e.current } : {}), usage: `ledger ${spec.usage}` };
     return { ok: false, code: "invalid", error: (e as Error).message, usage: `ledger ${spec.usage}` };
   }
@@ -110,6 +113,7 @@ async function realDeps(args: string[]): Promise<LedgerDeps | { error: string }>
     projects: () => projects.projects,
     loadRegistry,
     saveRegistry,
+    assertLease: assertSchedulerLease,
     now: () => Date.now(),
     callerSession: process.env.CLAUDESTRA_SESSION_ID || process.env.CLAUDE_CODE_SESSION_ID || undefined,
     callerWitness: collectCallerWitness,

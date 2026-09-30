@@ -18,7 +18,7 @@ export async function whileOwned<T>(assertActive: () => void, operation: () => P
 
 export async function acquireMaintenance(kind: "scheduler" | "update", opts: {
   path?: string; marker?: string; reader?: LedgerReader;
-} = {}): Promise<LockHandle | null> {
+} = {}): Promise<(LockHandle & { path: string }) | null> {
   const path = opts.path ?? statePath("scheduler-maintenance.lock"), marker = opts.marker ?? UPDATE_INFLIGHT;
   mkdirSync(dirname(path), { recursive: true });
   const lock = await acquireLock(path, 0);
@@ -32,6 +32,6 @@ export async function acquireMaintenance(kind: "scheduler" | "update", opts: {
         if (db && mergeQueueBusy(db)) { lock.release(); return null; }
       } finally { reader.close(); }
     }
-    return lock;
+    return Object.assign(lock, { path });
   } catch (e) { lock.release(); throw e; }
 }

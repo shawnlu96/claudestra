@@ -127,6 +127,7 @@ import { abandonCreate, beginCreate, commitCreate, gateOps, guardCreateSignals, 
 import { notify } from "./lib/notify.js";
 import { writeJsonAtomic } from "./lib/state-file.js";
 import { stderrTail } from "./lib/run-manager.js";
+import { adoptSchedulerLease, assertSchedulerLease, schedulerLeaseRefusal } from "./lib/scheduler-lease-env.js";
 import { launchWithCallerCred } from "./lib/caller-cred-launch.js";
 import { readyFailureText, modelPinPlan, modelPinRefusal, restartExceptionResult, bigSessionNote } from "./lib/restart-result.js";
 
@@ -540,6 +541,7 @@ async function cmdCreate(
   let channelId = "";
   let windowId = "";
   try {
+    assertSchedulerLease(); // 调度服务起的 create：建频道 / 建窗口前再核一次父服务租约（lib/scheduler-lease-env.ts）
     const result = await bridgeRequest({
       type: "create_channel",
       name: channelName,
@@ -568,6 +570,7 @@ async function cmdCreate(
   try {
     // 2. 创建 tmux window（在 master session 里）
     await ensureSocket();
+    assertSchedulerLease();
     windowId = (await tmuxRawStrict(["new-window", "-P", "-F", "#{window_id}", "-t", sessionTarget(MASTER_SESSION), "-n", tmuxName, "-c", expandedDir])).trim();
     await recordCreate(tmuxName, { windowId }, realOpsDeps, run); // 残留清理只按这个 id 关窗
     await Bun.sleep(500);
@@ -2135,6 +2138,7 @@ async function cmdTmuxWaitIdle(name: string, timeoutMs: number) {
 // ============================================================
 
 const [cmd, ...args] = process.argv.slice(2);
+adoptSchedulerLease(); // 调度服务子进程带来的租约身份：读进来、从 env 删掉（孙进程不继承）
 // 沙箱：白名单由 manager 自己把（lib/sandbox-env.ts），带着沙箱环境直接跑 manager 也绕不过；scripts/sandbox.ts 是第二道
 const sandboxRefusal = isSandbox() ? sandboxManagerRefusal([cmd ?? "", ...args]) : null;
 if (sandboxRefusal) { output({ ok: false, error: sandboxRefusal }); process.exit(1); }
@@ -2299,6 +2303,8 @@ if (needsWriteLock(cmd, args)) {
   const pLock = PRINCIPALS_WRITE_COMMANDS.has(cmd) ? await acquireLock((await import("./lib/principals.js")).principalsLockPath()) : null;
   if (pLock) process.on("exit", () => pLock.release());
 }
+const leaseLost = schedulerLeaseRefusal(); // 拿到写锁后核调度服务租约：服务已失租 / 已停，这个子进程一步都不做
+if (leaseLost) { output({ ok: false, code: "lease-lost", error: leaseLost }); writeLock?.release(); process.exit(1); }
 
 try {
 switch (cmd) {
