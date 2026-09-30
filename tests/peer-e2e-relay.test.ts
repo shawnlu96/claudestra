@@ -201,12 +201,16 @@ describe("兑换", () => {
     await sleep(100);
   });
 
-  test("老版本明文兑换带密钥的邀请：403 e2e_required，提示升级或 --allow-legacy，邀请当场作废", async () => {
+  test("老版本明文兑换带密钥的邀请：403 e2e_required，按加入方的角度提示「你这边」升级，邀请当场作废", async () => {
     const { inv } = await newInvite(relayBase);
     const r = await redeem(inv, false);
     expect(r.status).toBe(403);
     expect(r.json).toMatchObject({ code: "e2e_required" });
-    expect(String(r.json.error)).toContain("--allow-legacy");
+    // 这句是加入方读的：说的是他自己旧，不能读成「邀请方旧」，也不给他邀请方才能跑的 --allow-legacy
+    expect(String(r.json.error)).toContain("你这边的 Claudestra 版本太旧");
+    expect(String(r.json.error)).toContain("请对方重新生成一张邀请");
+    expect(String(r.json.error)).not.toContain("--allow-legacy");
+    expect(String(r.json.error)).not.toContain("对方版本");
     expect((await readPeers()).pendingInvites?.some((p) => p.joinSecret === inv.join)).toBe(false);
     const tok = (await readPrincipals()).principals.find((p) => p.secret === inv.token);
     expect(tok?.disabled).toBe(true);
