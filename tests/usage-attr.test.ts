@@ -7,6 +7,9 @@ import type { Database } from "bun:sqlite";
 import { mkdtempSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
+import type { StepName } from "../src/lib/ledger-stages.js";
+import { assignStep } from "../src/lib/ledger-steps-write.js";
+import type { ExecutorKind } from "../src/lib/ledger-steps.js";
 import { closeLedger, openLedger } from "../src/lib/ledger-store.js";
 import { attributeFromPath, attributeTurns, resolveFeatureIds } from "../src/lib/usage-attr.js";
 import { turnsFor, usageByFeature, usageByTask } from "../src/lib/usage-query.js";
@@ -166,6 +169,104 @@ describe("换执行者", () => {
     attributeTurns(u, db);
     expect(attrOf(u, fixer)).toEqual({ task: "T1", step: "fix", round: 1, basis: "step" });
     expect(attrOf(u, writer)).toMatchObject({ task: null, basis: "outside_window" });
+  });
+});
+
+/** 走台账真实的派人写入（assignStep）：同轮改派覆盖行上的执行者、只在派发事件里留历史，这正是要测的 */
+function assign(db: Database, id: string, name: StepName, round: number, executor: string, at: number, kind: ExecutorKind = "agent") {
+  assignStep(db, { actor: "agent-pm", now: at }, { taskId: id, step: name, round, executor, executorKind: kind });
+}
+
+describe("r1 回归：改派历史与审查轮次（T95 r1）", () => {
+  test("同一步同一轮改派后重算：改派前两张卡的重叠仍是 overlap，新人接手前的轮不算这张卡", () => {
+    const { db } = ledger();
+    for (const id of ["T1", "T2"]) {
+      task(db, id, T0);
+      stage(db, id, T0, "spec", "build", 1);
+      assign(db, id, "write", 1, "agent-a", T0);
+    }
+    const u = openUsageDb(":memory:");
+    const a20 = turn(u, "agent-a", T0 + 20 * M), b20 = turn(u, "agent-b", T0 + 20 * M);
+    const a40 = turn(u, "agent-a", T0 + 40 * M), b40 = turn(u, "agent-b", T0 + 40 * M);
+    attributeTurns(u, db);
+    expect(attrOf(u, a20)).toMatchObject({ task: null, basis: "overlap" });
+    assign(db, "T1", "write", 1, "agent-b", T0 + 30 * M);
+    attributeTurns(u, db);
+    expect(attrOf(u, a20)).toMatchObject({ task: null, basis: "overlap" });
+    expect(attrOf(u, b20)).toMatchObject({ task: null, basis: "outside_window" });
+    expect(attrOf(u, a40)).toEqual({ task: "T2", step: "write", round: 1, basis: "step" });
+    expect(attrOf(u, b40)).toEqual({ task: "T1", step: "write", round: 1, basis: "step" });
+  });
+
+  test("旧终审 → 返修 → 新一轮初审：新一轮盖过旧终审；新审查员同时接着另一张卡就是 overlap", () => {
+    const { db } = ledger();
+    task(db, "T1", T0);
+    stage(db, "T1", T0, "spec", "build", 1);
+    stage(db, "T1", T0 + 10 * M, "build", "review", 1);
+    assign(db, "T1", "final_review", 1, "agent-old", T0 + 10 * M);
+    stage(db, "T1", T0 + 20 * M, "review", "fix", 1);
+    stage(db, "T1", T0 + 30 * M, "fix", "review", 2);
+    assign(db, "T1", "review", 2, "agent-new", T0 + 30 * M);
+    task(db, "T2", T0 + 30 * M);
+    stage(db, "T2", T0 + 30 * M, "spec", "build", 1);
+    assign(db, "T2", "write", 1, "agent-new", T0 + 30 * M);
+    const u = openUsageDb(":memory:");
+    const old15 = turn(u, "agent-old", T0 + 15 * M), old40 = turn(u, "agent-old", T0 + 40 * M), new40 = turn(u, "agent-new", T0 + 40 * M);
+    attributeTurns(u, db);
+    expect(attrOf(u, old15)).toEqual({ task: "T1", step: "final_review", round: 1, basis: "step" });
+    expect(attrOf(u, old40)).toMatchObject({ task: null, basis: "outside_window" });
+    expect(attrOf(u, new40)).toMatchObject({ task: null, basis: "overlap" });
+  });
+
+  test("审查阶段中途加派：同轮终审盖过初审、更大一轮的初审再盖过终审，都在派人那一刻切", () => {
+    const { db } = ledger();
+    task(db, "T1", T0);
+    stage(db, "T1", T0, "spec", "build", 1);
+    stage(db, "T1", T0 + 10 * M, "build", "review", 1);
+    assign(db, "T1", "review", 1, "agent-r1", T0 + 10 * M);
+    assign(db, "T1", "final_review", 1, "agent-f", T0 + 25 * M);
+    assign(db, "T1", "review", 2, "agent-r2", T0 + 40 * M);
+    const u = openUsageDb(":memory:");
+    const ids = {
+      r1At20: turn(u, "agent-r1", T0 + 20 * M), r1At30: turn(u, "agent-r1", T0 + 30 * M),
+      fAt30: turn(u, "agent-f", T0 + 30 * M), fAt45: turn(u, "agent-f", T0 + 45 * M), r2At45: turn(u, "agent-r2", T0 + 45 * M),
+    };
+    attributeTurns(u, db);
+    expect(attrOf(u, ids.r1At20)).toEqual({ task: "T1", step: "review", round: 1, basis: "step" });
+    expect(attrOf(u, ids.r1At30)).toMatchObject({ task: null, basis: "outside_window" });
+    expect(attrOf(u, ids.fAt30)).toEqual({ task: "T1", step: "final_review", round: 1, basis: "step" });
+    expect(attrOf(u, ids.fAt45)).toMatchObject({ task: null, basis: "outside_window" });
+    expect(attrOf(u, ids.r2At45)).toEqual({ task: "T1", step: "review", round: 2, basis: "step" });
+  });
+
+  test("改派给别的实例：之前归本机的人，之后本机的人这张卡的窗口停掉", () => {
+    const { db } = ledger();
+    task(db, "T1", T0);
+    stage(db, "T1", T0, "spec", "build", 1);
+    assign(db, "T1", "write", 1, "agent-a", T0);
+    assign(db, "T1", "write", 1, "agent-x@peer-a", T0 + 30 * M, "peer");
+    const u = openUsageDb(":memory:");
+    const before = turn(u, "agent-a", T0 + 20 * M), after = turn(u, "agent-a", T0 + 40 * M);
+    attributeTurns(u, db);
+    expect(attrOf(u, before)).toEqual({ task: "T1", step: "write", round: 1, basis: "step" });
+    expect(attrOf(u, after)).toMatchObject({ task: null, basis: "outside_window" });
+  });
+
+  test("行比第一条派发事件早（交付时补的行、后来同轮改派）：那一段原来是谁找不回来，别的卡上的单卡轮不归，写明原因", () => {
+    const { db } = ledger();
+    task(db, "T1", T0);
+    stage(db, "T1", T0, "spec", "build", 1);
+    step(db, "T1", "write", 1, "agent-a", T0); // 没有派发事件的行
+    assign(db, "T1", "write", 1, "agent-b", T0 + 30 * M);
+    task(db, "T2", T0);
+    stage(db, "T2", T0, "spec", "build", 1);
+    assign(db, "T2", "write", 1, "agent-a", T0);
+    const u = openUsageDb(":memory:");
+    const a20 = turn(u, "agent-a", T0 + 20 * M), a40 = turn(u, "agent-a", T0 + 40 * M), b40 = turn(u, "agent-b", T0 + 40 * M);
+    attributeTurns(u, db);
+    expect(attrOf(u, a20)).toMatchObject({ task: null, basis: "executor_lost" });
+    expect(attrOf(u, a40)).toEqual({ task: "T2", step: "write", round: 1, basis: "step" });
+    expect(attrOf(u, b40)).toEqual({ task: "T1", step: "write", round: 1, basis: "step" });
   });
 });
 

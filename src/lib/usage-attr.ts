@@ -6,15 +6,16 @@
 import { Database } from "bun:sqlite";
 import { existsSync } from "fs";
 import { STAGE_STEPS, STAGES, type Stage, type StepName } from "./ledger-stages.js";
-import { stepsOf, type TaskStep } from "./ledger-steps.js";
+import { stepAtStage, stepsOf, type TaskStep } from "./ledger-steps.js";
 import { UNOWNED } from "./usage-store.js";
 
 /**
  * 判的依据。session / step 有卡；其余是未归属的原因：
  * coordination = PM / 大总管（协调开销，不摊到卡上）；overlap = 同一时刻挂着多张卡的窗口（不猜）；
- * outside_window = 台账里当过执行者，但这一刻不在任何一步的窗口里；not_in_ledger = 台账里从没当过执行者；unowned = 会话不属于任何 agent
+ * outside_window = 台账里当过执行者，但这一刻不在任何一步的窗口里；not_in_ledger = 台账里从没当过执行者；unowned = 会话不属于任何 agent；
+ * executor_lost = 只落在一张卡上，但这一刻别的卡有一段执行者被同轮改派覆盖、事件里也找不回来（说不准是不是重叠，不归）
  */
-const ATTR_BASES = ["session", "step", "coordination", "overlap", "outside_window", "not_in_ledger", "unowned"] as const;
+const ATTR_BASES = ["session", "step", "coordination", "overlap", "outside_window", "not_in_ledger", "unowned", "executor_lost"] as const;
 type AttrBasis = (typeof ATTR_BASES)[number];
 
 interface Attribution {
@@ -32,14 +33,31 @@ interface TaskInfo {
   itemId: string | null;
 }
 
-/** 某张卡某一步的一段时间：[start, end)，executor 是这段时间里这一步的执行者 */
+/** 某张卡某一步的一段时间：[start, end)，executor 是这段时间里这一步的本机执行者；null = 被覆盖了、找不回来是谁 */
 interface Window {
   task: TaskInfo;
   start: number;
   end: number;
   step: string;
   round: number;
-  executor: string;
+  executor: string | null;
+}
+
+interface Exec {
+  at: number;
+  executor: string | null;
+  kind: string;
+}
+
+/**
+ * 一个步骤行（同一步同一轮）和它的执行者时间线。同轮改派会覆盖行上的执行者、保留 createdAt，谁在什么时候接的只在派发事件
+ * （events kind=step op=assign，不可变）里：按事件切。没有派发事件的行（交付时补的）和推出来的，一直是行上那个人；
+ * 行比第一条派发事件早（补的行后来又被改派）：那一段原来是谁已被覆盖，记 null。
+ */
+interface Entry {
+  row: TaskStep;
+  from: number;
+  execs: Exec[];
 }
 
 interface AttrLedger {
@@ -52,6 +70,8 @@ interface AttrLedger {
   sessions: Map<string, { taskId: string; role: string }>;
   managers: Set<string>;
   executors: Set<string>;
+  /** 执行者找不回来的窗口 */
+  lost: Window[];
 }
 
 /** 每个阶段自己的那一步（记进归属的 step）；spec 是 PM 写规格，verified / done / cancelled 没人干活，都不开窗口 */
@@ -92,42 +112,61 @@ function stageSegments(created: number, moves: { ts: number; from: Stage; to: St
   return segs.filter((s) => s.end > s.start);
 }
 
-/**
- * 一段阶段里这一步的执行者，按步骤行切开：派人时刻（createdAt）之后归新派的人（换执行者）。
- * 段开始时还没有行、行在段里（或紧跟段尾）才建的，从段开始就算它的（「修」常常修完交付时才补派）。
- * 这个阶段自己那一步没派过人，退到 STAGE_STEPS 的下一步（修 → 写），轮次用阶段事件上的任务轮次。
- */
-function windowsOf(task: TaskInfo, seg: { start: number; end: number; stage: Stage; round: number }, steps: TaskStep[]): Window[] {
-  const own = OWN_STEP[seg.stage];
-  if (!own) return [];
-  for (const name of STAGE_STEPS[seg.stage] ?? []) {
-    const rows = steps.filter((s) => s.step === name && s.executorKind === "agent" && s.createdAt <= seg.end + LATE_ROW_MS)
-      .sort((a, b) => a.createdAt - b.createdAt || a.round - b.round);
-    if (!rows.length) continue;
-    const out: Window[] = [];
-    let cur = rows.filter((r) => r.createdAt <= seg.start).pop() ?? rows[0];
-    let from = seg.start;
-    for (const r of rows) {
-      if (r.createdAt <= from || r === cur) continue;
-      if (r.createdAt >= seg.end) break;
-      out.push(win(task, from, r.createdAt, own, cur, seg.round));
-      cur = r;
-      from = r.createdAt;
-    }
-    out.push(win(task, from, seg.end, own, cur, seg.round));
-    return out;
-  }
-  return [];
+type Seg = { start: number; end: number; stage: Stage; round: number };
+
+function entriesOf(steps: TaskStep[], assigns: Map<string, Exec[]> | undefined): Entry[] {
+  return steps.map((row) => {
+    const ev = row.derived ? [] : assigns?.get(`${row.step}#${row.round}`) ?? [];
+    if (!ev.length) return { row, from: row.createdAt, execs: [{ at: row.createdAt, executor: row.executor, kind: row.executorKind }] };
+    const lost = ev[0].at > row.createdAt + LATE_ROW_MS ? [{ at: row.createdAt, executor: null, kind: "agent" }] : [];
+    return { row, from: Math.min(row.createdAt, ev[0].at), execs: [...lost, ...ev] };
+  });
 }
 
-function win(task: TaskInfo, start: number, end: number, own: StepName, row: TaskStep, taskRound: number): Window {
+const execAt = (e: Entry, t: number): Exec => e.execs.filter((x) => x.at <= t).pop() ?? e.execs[0];
+
+/**
+ * 一段阶段切成若干窗口：在每个派人 / 改派时刻重新挑这一刻在干活的那一步——和台账同一条规则（stepAtStage：审查阶段按 currentReview
+ * 取轮次大的、同轮终审优先；其余按 STAGE_STEPS 的退路顺序），挑中的派给了别的实例或人就没有本机窗口。
+ * 段开始时某一步还没派过人、到推出这一段时才补的行（「修」常常修完交付时才补派），从段开始就算它的；段中途派的从派的那一刻算。
+ */
+function windowsOf(task: TaskInfo, seg: Seg, entries: Entry[]): Window[] {
+  const own = OWN_STEP[seg.stage];
+  if (!own) return [];
+  const eff = new Map<Entry, number>();
+  for (const name of STAGE_STEPS[seg.stage] ?? []) {
+    const mine = entries.filter((e) => e.row.step === name && e.from <= seg.end + LATE_ROW_MS).sort((a, b) => a.from - b.from);
+    const late = mine.length > 0 && !mine.some((e) => e.from <= seg.start) && mine[0].from >= seg.end - LATE_ROW_MS;
+    mine.forEach((e, i) => eff.set(e, late && i === 0 ? seg.start : e.from));
+  }
+  const cuts = new Set([seg.start]);
+  for (const [e, at] of eff) for (const t of [at, ...e.execs.map((x) => x.at)]) if (t > seg.start && t < seg.end) cuts.add(t);
+  const pts = [...cuts].sort((a, b) => a - b);
+  const out: Window[] = [];
+  pts.forEach((p, i) => {
+    const now = new Map<TaskStep, Exec>();
+    for (const [e, at] of eff) if (at <= p) now.set(e.row, execAt(e, p));
+    const cur = stepAtStage([...now.keys()], { stage: seg.stage, stageBefore: null });
+    const x = cur && now.get(cur);
+    if (!cur || !x || (x.executor !== null && x.kind !== "agent")) return;
+    const w = win(task, p, pts[i + 1] ?? seg.end, own, cur, x.executor, seg.round);
+    const last = out[out.length - 1];
+    if (last && last.end === w.start && last.executor === w.executor && last.step === w.step && last.round === w.round) last.end = w.end;
+    else out.push(w);
+  });
+  return out;
+}
+
+function win(task: TaskInfo, start: number, end: number, own: StepName, row: TaskStep, executor: string | null, taskRound: number): Window {
   const step = own === "review" && row.step === "final_review" ? "final_review" : own;
-  return { task, start, end, step, round: row.step === step ? row.round : taskRound, executor: row.executor };
+  return { task, start, end, step, round: row.step === step ? row.round : taskRound, executor };
 }
 
 /** 读台账里判归属要用的全部东西（一趟几千行事件，毫秒级） */
 function readAttrLedger(db: Database): AttrLedger {
-  const out: AttrLedger = { byAgent: new Map(), byTask: new Map(), tasks: new Map(), sessions: new Map(), managers: new Set(["master"]), executors: new Set() };
+  const out: AttrLedger = {
+    byAgent: new Map(), byTask: new Map(), tasks: new Map(), sessions: new Map(), managers: new Set(["master"]), executors: new Set(), lost: [],
+  };
   for (const r of db.query("SELECT value FROM meta WHERE key = 'pms'").all() as { value: string }[]) {
     const pms = json(`{"pms":${r.value}}`).pms; // meta.value 是 JSON 数组：包一层再走同一个容错解析
     if (Array.isArray(pms)) for (const p of pms) if (typeof p === "string") out.managers.add(p);
@@ -138,15 +177,28 @@ function readAttrLedger(db: Database): AttrLedger {
     if (!isStage(d.from) || !isStage(d.to)) continue;
     (moves.get(e.target) ?? moves.set(e.target, []).get(e.target)!).push({ ts: e.ts, from: d.from, to: d.to, round: Number(d.round) || 0 });
   }
+  const assigns = new Map<string, Map<string, Exec[]>>();
+  for (const e of db.query("SELECT target, ts, data FROM events WHERE kind = 'step' ORDER BY seq").all() as { target: string; ts: number; data: string }[]) {
+    const d = json(e.data);
+    if (d.op !== "assign" || typeof d.executor !== "string") continue;
+    if (d.executorKind === "agent") out.executors.add(d.executor);
+    const byKey = assigns.get(e.target) ?? assigns.set(e.target, new Map()).get(e.target)!;
+    const key = `${d.step}#${Number(d.round) || 0}`;
+    (byKey.get(key) ?? byKey.set(key, []).get(key)!).push({ at: e.ts, executor: d.executor, kind: String(d.executorKind) });
+  }
   for (const r of db.query("SELECT * FROM tasks").all() as Record<string, any>[]) {
     if (typeof r.pm === "string" && r.pm) out.managers.add(r.pm);
     const task: TaskInfo = { id: r.id, featureId: r.featureId ?? null, itemId: r.itemId ?? null };
     out.tasks.set(task.id, task);
     const steps = stepsOf(db, { ...r, extra: json(r.extra) } as Parameters<typeof stepsOf>[1]);
     for (const s of steps) if (s.executorKind === "agent") out.executors.add(s.executor);
-    const wins = stageSegments(r.createdAt, moves.get(task.id) ?? []).flatMap((seg) => windowsOf(task, seg, steps));
+    const entries = entriesOf(steps, assigns.get(task.id));
+    const wins = stageSegments(r.createdAt, moves.get(task.id) ?? []).flatMap((seg) => windowsOf(task, seg, entries));
     out.byTask.set(task.id, wins);
-    for (const w of wins) (out.byAgent.get(w.executor) ?? out.byAgent.set(w.executor, []).get(w.executor)!).push(w);
+    for (const w of wins) {
+      if (w.executor === null) out.lost.push(w);
+      else (out.byAgent.get(w.executor) ?? out.byAgent.set(w.executor, []).get(w.executor)!).push(w);
+    }
   }
   for (const ws of out.byAgent.values()) ws.sort((a, b) => a.start - b.start);
   if (hasTable(db, "scheduler_sessions")) {
@@ -181,6 +233,8 @@ function attributeTurn(l: AttrLedger, t: { agent: string; sessionId: string; sta
   const hits = (l.byAgent.get(t.agent) ?? []).filter((w) => w.start <= t.startedAt && t.startedAt < w.end);
   const tasks = new Set(hits.map((w) => w.task.id));
   if (tasks.size > 1) return none("overlap");
+  const at = (w: Window) => w.start <= t.startedAt && t.startedAt < w.end;
+  if (hits.length && l.lost.some((w) => w.task.id !== hits[0].task.id && at(w))) return none("executor_lost");
   if (hits.length) return onTask(hits[0].task, "step", hits[0].step, hits[0].round);
   return none(l.executors.has(t.agent) ? "outside_window" : "not_in_ledger");
 }

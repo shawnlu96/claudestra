@@ -93,17 +93,20 @@ agent、sessionId、是否子 agent（sidechain）、开始时间（外来输入
 
 每一轮回答两个问题：为哪张卡、哪一步（复述 / 写 / 审 / 修 / 合并 / 验证）、第几轮花的；属于哪个 feature。结果写在 `turns` 的 `attr_task` / `attr_step` / `attr_round` / `attr_feature` / `attr_item` / `attr_basis` 六列，原始用量（`calls`、轮的其他列）不动。
 
-**输入**全部来自台账（只读打开）：`tasks`（featureId、itemId、负责人）、`task_steps`（每一步第几轮派给了谁、何时派的；老卡没有步骤行时按负责人 / reviewer 推，同 `ledger-steps.ts` 的 `stepsOf`）、`events` 里的阶段事件、`scheduler_sessions`、各项目 `meta.pms`。
+**输入**全部来自台账（只读打开）：`tasks`（featureId、itemId、负责人）、`task_steps`（每一步第几轮派给了谁；老卡没有步骤行时按负责人 / reviewer 推，同 `ledger-steps.ts` 的 `stepsOf`）、`events` 里的阶段事件和派发事件（`kind=step`、`op=assign`）、`scheduler_sessions`、各项目 `meta.pms`。
 
 **按轮的开始时间判**，优先级从高到低：
 
 1. **调度引擎绑定的会话**（`scheduler_sessions.sessionId` = 轮的 session / Codex thread）：整条会话属于那张卡，`basis = session`。步骤取这一刻卡所在的阶段，且要和会话角色对得上（author ↔ 复述 / 写 / 修，reviewer ↔ 审），对不上 step 记空。
 2. **PM 与大总管**（任一项目 `meta.pms`、卡上的 `pm`、`master`）：一律 `coordination`（协调开销），不摊到卡上，哪怕它在某张卡上挂着执行者。
-3. **步骤窗口**：阶段事件把一张卡切成一段段 `[起, 止)`；每段的执行者是这个阶段那一步（`STAGE_STEPS` 顺序：修没派人就退到写）的步骤行。同一步中途改派，在新那一行的派发时刻切开，之前归旧人、之后归新人。段开始时还没有行、行在段里或段尾 1 秒内才建的，从段开始就算它的（「修」那一行常在修完交付时才补派）。`blocked` 按卡住之前的阶段算；`spec`（PM 写规格）和 `verified` / `done` / `cancelled` 不开窗口。轮次取那一步的行；退到别的步骤时取阶段事件上的任务轮次。
+3. **步骤窗口**：阶段事件把一张卡切成一段段 `[起, 止)`，每段再在派人 / 改派的时刻切开，每一小段按台账同一条规则挑这一刻在干活的那一步（`stepAtStage`：审查阶段按 `currentReview` 取轮次大的、同一轮终审优先；其余按 `STAGE_STEPS` 的退路顺序，修没派人就退到写）。挑中的派给了别的实例或人，这一段本机没有窗口。
+   - 执行者按派发事件还原：同一步同一轮改派会覆盖步骤行上的执行者（`createdAt` 不变），谁在什么时候接的只留在事件里，所以改派前归旧人、之后归新人。没有派发事件的行（交付时补的）一直是行上那个人；行比它的第一条派发事件早（补的行后来又同轮改派），那一段原来是谁已找不回来，记成执行者不明。
+   - 段开始时某一步还没派人、到推出这一段时（1 秒内）才补的行，从段开始就算它的（「修」那一行常在修完交付时才补派）；段中途派的从派的那一刻算。
+   - `blocked` 按卡住之前的阶段算；`spec`（PM 写规格）和 `verified` / `done` / `cancelled` 不开窗口。轮次取那一步的行；退到别的步骤时取阶段事件上的任务轮次。
    - 这一刻正好落在**一张卡**的窗口里 → `basis = step`。
    - 落在**两张以上**卡的窗口里 → `overlap`，不猜。
 
-**未归属的原因**（`attr_task` 为空）：`coordination`、`overlap`、`outside_window`（台账里当过执行者，但这一刻不在任何窗口里，常见于台账阶段推晚了：在「规格」阶段就开工、审查阶段里已经在修）、`not_in_ledger`（台账里从没当过执行者：非台账管理的项目 agent）、`unowned`（会话不属于任何 agent）。
+**未归属的原因**（`attr_task` 为空）：`coordination`、`overlap`、`outside_window`（台账里当过执行者，但这一刻不在任何窗口里，常见于台账阶段推晚了：在「规格」阶段就开工、审查阶段里已经在修）、`not_in_ledger`（台账里从没当过执行者：非台账管理的项目 agent）、`unowned`（会话不属于任何 agent）、`executor_lost`（只落在一张卡的窗口里，但这一刻别的卡有一段执行者找不回来，说不准是不是重叠，不归）。
 
 **feature**：卡上有 `featureId`（T84 新台账）就记它；另记卡的事项 `itemId`（还没迁进 feature 的卡挂在事项上）。`by-feature` 先按 id（全 id 或本机前缀后的 slug）精确找 feature / 事项，再按标题包含找，命中多个就列出来让人写 id；API 只认 id。
 
