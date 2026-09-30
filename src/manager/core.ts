@@ -226,9 +226,9 @@ export function output(data: Record<string, unknown>) {
   console.log(JSON.stringify(data));
 }
 
-/** 大输出用这个：同步写完才返回。console.log 写非阻塞管道会截断（见 tests/manager-output.test.ts）；output() 不直接改成这样：takeover 靠替换 console.log 截 cmdResume 的输出 */
-export function outputSync(data: Record<string, unknown>) {
-  const buf = Buffer.from(JSON.stringify(data) + "\n");
+/** 大输出用这个：同步写完才返回（字符串 = 给人看的文本，原样写）。console.log 写非阻塞管道会截断（见 tests/manager-output.test.ts）；output() 不直接改成这样：takeover 靠替换 console.log 截 cmdResume 的输出 */
+export function outputSync(data: Record<string, unknown> | string) {
+  const buf = Buffer.from((typeof data === "string" ? data : JSON.stringify(data)) + "\n");
   for (let off = 0; off < buf.length; ) {
     try {
       off += writeSync(1, buf, off);

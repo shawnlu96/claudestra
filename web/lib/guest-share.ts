@@ -7,6 +7,8 @@ import type { ApiError } from "@/lib/api/client";
 
 /** 给 guest 开放 "*" 时的提醒（发码前的二次确认、批准时的警告共用） */
 export const GUEST_ALL_WARNING = "这等于开放全部非大总管 agent，以后新建的也算";
+/** 给别人开放会话的底线提醒：agent 默认跳过权限确认，能驱动它 = 主机 shell（src/lib/peer-scope-gate.ts 同一句） */
+export const DRIVE_AGENT_SHELL_WARNING = "能驱动 agent = 能在这台电脑上以你的身份执行任意命令（agent 默认跳过权限确认）；只开放你愿意把这台电脑交给对方的 agent";
 const NAME_HINT = "写一下是给谁的，比如「Alex 的手机」";
 
 export type ShareOpts = { guest?: string; agents?: string[]; confirmAllAgents?: boolean };

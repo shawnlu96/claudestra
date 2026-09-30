@@ -14,6 +14,8 @@ import { readRegistryAgents } from "../lib/registry.js";
 import { loadRegistry, output, saveRegistry } from "./core.js";
 import { LedgerCli, type LedgerDeps, type Result } from "./ledger-context.js";
 import { DEP_CMDS } from "./ledger-dep-cmds.js";
+import { DAG_CMDS } from "./ledger-dag-cmds.js";
+import { FEATURE_CMDS } from "./ledger-feature-cmds.js";
 import { parseLedgerArgs, resolveActor } from "./ledger-identity.js";
 import { AUDIT_CMDS } from "./ledger-audit-cmd.js";
 import { importCmd } from "./ledger-import.js";
@@ -43,6 +45,8 @@ const COMMANDS: Record<string, CommandSpec> = {
   ...DISPATCH_CMDS,
   ...TEAM_CMDS,
   ...DEP_CMDS,
+  ...FEATURE_CMDS,
+  ...DAG_CMDS,
   ...READ_CMDS,
   verify: VERIFY_CMD,
   ...AUDIT_CMDS,

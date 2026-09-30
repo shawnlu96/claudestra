@@ -68,7 +68,7 @@ export function PairScreen() {
           <h1 className="mb-1 text-center text-xl font-bold">Claudestra</h1>
           <p className="mb-4 text-center text-xs text-base-content/60">{t("把这个浏览器配对到你的电脑")}</p>
           {flow.phase.kind === "pending" ? (
-            <PendingCard machineName={flow.phase.machineName} onCancel={flow.cancel} />
+            <PendingCard machineName={flow.phase.machineName} code={flow.phase.code} onCancel={flow.cancel} />
           ) : (
             <PairForm
               code={code}
@@ -157,16 +157,19 @@ function PairForm({ code, deviceName, phase, loopback, onCode, onDeviceName, onS
   );
 }
 
-function PendingCard({ machineName, onCancel }: { machineName: string; onCancel: () => void }) {
+function PendingCard({ machineName, code, onCancel }: { machineName: string; code?: string; onCancel: () => void }) {
   const t = useT();
   return (
     <div className="space-y-3 text-center">
       <span className="loading loading-dots loading-md text-primary" />
       <div className="text-sm font-medium">
-        {t("等待电脑确认")}
+        {t(code ? "等待已配对的设备批准" : "等待电脑确认")}
         {machineName ? ` · ${machineName}` : ""}
       </div>
-      <div className="text-xs leading-relaxed text-base-content/60">{t("回到运行 claudestra pair 的终端（或电脑上的网页）确认这台设备。确认后这里会自动进入。")}</div>
+      {code && <div className="font-mono text-2xl font-semibold tracking-[0.2em]">{formatCode(code)}</div>}
+      <div className="text-xs leading-relaxed text-base-content/60">
+        {t(code ? "在手机等已配对的设备上核对这个码并允许。确认后这里会自动进入。" : "回到运行 claudestra pair 的终端（或电脑上的网页）确认这台设备。确认后这里会自动进入。")}
+      </div>
       <button className="btn btn-ghost btn-sm" onClick={onCancel}>
         {t("取消")}
       </button>

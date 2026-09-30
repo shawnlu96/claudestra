@@ -25,7 +25,8 @@ import { archiveSession } from "../lib/session-archive.js";
 import { CODEX_SUB_IDLE_DAYS, sweepIdleCodexSubSessions } from "../lib/unmanaged-archive.js";
 import { projectsSlug } from "../lib/jsonl-cost.js";
 import { tmuxRaw, MASTER_SESSION } from "../lib/tmux-helper.js";
-import { MASTER_DIR } from "./config.js";
+import { BUN_PATH, ENV_WITH_BUN, MANAGER_PATH, MASTER_DIR } from "./config.js";
+import { runManagerProcess } from "../lib/run-manager.js";
 
 const SWEEP_MS = 24 * 3600_000;
 const FIRST_DELAY_MS = 10 * 60_000; // 启动 10min 后跑首轮，避开 bridge 启动风暴
@@ -155,10 +156,49 @@ export async function sweepArchives(): Promise<{ agents: number; archived: numbe
   return { agents: swept, archived };
 }
 
+const USAGE_INGEST_TIMEOUT_MS = 60 * 60_000;
+const USAGE_TICK_MS = 10 * 60_000; // token 视图要当天看得到：增量一趟通常 1 秒内
+const USAGE_FIRST_DELAY_MS = 5 * 60_000; // 与首轮归档扫描错开
+
+/**
+ * 导 token 账（lib/usage-ingest.ts）。放子进程：首轮要读几个 GB，进 bridge 就是 RSS 棘轮；超时被杀也不丢进度（按文件偏移续读）。
+ * 每 10 分钟一趟增量、每天归档扫完一趟带 --prune（清 30 天前明细）；子进程之间靠 usage 库旁的文件锁串行。
+ */
+async function ingestTokenUsage(prune: boolean): Promise<void> {
+  const args = prune ? ["usage", "ingest", "--prune"] : ["usage", "ingest"];
+  const r = await runManagerProcess(args, { bunPath: BUN_PATH, managerPath: MANAGER_PATH, env: ENV_WITH_BUN, timeoutMs: USAGE_INGEST_TIMEOUT_MS });
+  if (!r?.ok) console.log(`⚠️ token 账导入失败: ${r?.error ?? "无输出"}`);
+  else if (prune && !r.skipped) {
+    console.log(`🧮 token 账每日导入: 读 ${r.read} 个文件 ${Math.round(r.bytes / 1048576)}MB，${r.calls} 次调用，清理超期明细 ${r.pruned} 条（${r.ms}ms）`);
+  }
+}
+
+let usageTickRunning = false;
+
+/** 10 分钟一趟；上一趟（比如首轮全量）还没完就跳过，不叠子进程 */
+function usageTick(): void {
+  if (usageTickRunning) return;
+  usageTickRunning = true;
+  void ingestTokenUsage(false)
+    .catch((e) => console.log(`⚠️ token 账导入失败: ${(e as Error).message}`))
+    .finally(() => { usageTickRunning = false; });
+}
+
+function dailySweep(): void {
+  void sweepArchives()
+    .catch(() => {}) // sweepArchives 内部逐项兜错、各自打日志；这里只保证它失败也照样导 token 账
+    .then(() => ingestTokenUsage(true))
+    .catch((e) => console.log(`⚠️ token 账导入失败: ${(e as Error).message}`));
+}
+
 export function startArchiveSweeper(): void {
   setTimeout(() => {
-    void sweepArchives().catch(() => {});
-    setInterval(() => void sweepArchives().catch(() => {}), SWEEP_MS);
+    dailySweep();
+    setInterval(dailySweep, SWEEP_MS);
   }, FIRST_DELAY_MS);
-  console.log("🗄 归档每日兜底启动（首轮 10min 后，此后每 24h）");
+  setTimeout(() => {
+    usageTick();
+    setInterval(usageTick, USAGE_TICK_MS);
+  }, USAGE_FIRST_DELAY_MS);
+  console.log("🗄 归档每日兜底启动（首轮 10min 后，此后每 24h）；token 账增量每 10min");
 }

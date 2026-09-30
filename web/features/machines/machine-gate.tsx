@@ -13,7 +13,7 @@ import { dismissLocalHop, hopToLocal, maybeHopToLocal, receiveHandoff, useLocalH
 
 /**
  * /chat 的门：配置与机器清单就位后才渲染应用（否则 store 一开机就打没有基址的请求）。
- *   direct → 这台 bridge 就是唯一机器，没记录就补一条（名字用 app-config 的 machineName）；凭据自动备好，收中继页面交过来的偏好；
+ *   direct → 这台 bridge 就是唯一机器，没记录就补一条（名字用 app-config 的 machineName）；旧登录自动换凭据，本机没凭据去 /pair，收中继页面交过来的偏好；
  *   relay  → 一台机器都没有就去 /pair；渲染后探一次「是不是就在这台电脑上」，是就切到本机直连（local-hop.ts）。
  * 当前机器的凭据被拒（401 device_invalid）时压一条「重新配对」横幅，不清机器、不整页跳转——别的机器还能用。
  */
@@ -28,7 +28,12 @@ export function MachineGate({ children }: { children: ReactNode }) {
         const fp = cfg.fp || LOCAL_FP;
         if (!machines.get(fp)) await machines.add({ fp, name: cfg.machineName });
         if (machines.currentFp() !== fp) await machines.setCurrent(fp);
-        const ok = await ensureDirectCredential(fp, isLoopbackHost(window.location.hostname));
+        const ok = await ensureDirectCredential();
+        if (!ok && isLoopbackHost(window.location.hostname)) {
+          // 本机没凭据：去配对页点「一键配对本机」（要别的设备批准，开机不自动发）；带上来处，中继交过来的偏好在 # 里一起走
+          router.replace(`/pair?next=${encodeURIComponent(`${window.location.pathname}${window.location.search}${window.location.hash}`)}`);
+          return;
+        }
         if (ok && (await receiveHandoff())) return; // 带着中继那边的偏好过来：写入后整页重载一次
       } else if (!machines.currentFp()) {
         // 带上来处：/join#<邀请码> 这类页面配完机器要回来（# 只在浏览器里，一起带走）
