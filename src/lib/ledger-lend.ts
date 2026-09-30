@@ -99,8 +99,13 @@ function unbindStep(db: Database, o: LendOrder): void {
 }
 
 const LABEL: Record<LendStep, string> = { review: "审查", write: "开工单", fix: "修复单" };
-/** A write order pooled this long with nobody claiming it could not go back to that peer (offline, full): the card returns to local work. */
+/**
+ * A write order still pooled this long after the peer first saw it (or after the offer, if it never did) could not go back to that
+ * peer (offline, full, owner not approving): the card returns to local work. Counting from first sight, not every poll, bounds it.
+ */
 export const WRITE_POOL_TTL_MS = 30 * 60_000;
+/** The sweep's predicate (bound: now - WRITE_POOL_TTL_MS); the bridge's minute check uses the same text. */
+export const STALE_WRITE_SQL = "status = 'pooled' AND step IN ('write','fix') AND COALESCE(seenAt, createdAt) < ?";
 
 export interface OfferInput {
   taskId: string; peer: string; family: LendFamily; repo: string; pr: number | null; spec: string; borrow: BorrowEntry | null; supersedes?: string;
@@ -219,9 +224,9 @@ export function sweepLend(db: Database, ctx: WriteCtx): LendNotice[] {
       const text = `出借单 ${o.orderId}（${o.taskId} ${LABEL[o.step]}，${o.peer}）租约过期，结果不明。不会自动重派：核对后 ledger lend-reoffer ${o.taskId} 或 lend-cancel`;
       return { project: o.project, taskId: o.taskId, text };
     });
-    const stale = (db.query("SELECT * FROM lend_orders WHERE status = 'pooled' AND step IN ('write','fix') AND createdAt < ?").all(now - WRITE_POOL_TTL_MS) as
-      Record<string, unknown>[]).map(toOrder);
-    return [...expired, ...stale.map((o) => sendBack(db, ctx, o, `挂了 ${WRITE_POOL_TTL_MS / 60_000} 分钟没人领（对方离线或名额满）`, now))];
+    const stale = (db.query(`SELECT * FROM lend_orders WHERE ${STALE_WRITE_SQL}`).all(now - WRITE_POOL_TTL_MS) as Record<string, unknown>[]).map(toOrder);
+    const why = `挂出或对方看到后 ${WRITE_POOL_TTL_MS / 60_000} 分钟没人领（对方离线、名额满或没批）`;
+    return [...expired, ...stale.map((o) => sendBack(db, ctx, o, why, now))];
   });
 }
 
@@ -251,7 +256,9 @@ export function reclaimLend(db: Database, ctx: WriteCtx, input: { taskId: string
   });
 }
 
-export function pollLend(db: Database, peer: string, req: PollRequest, borrow: (project: string) => BorrowEntry | null): { orders: OfferSummary[]; pollAfterMs: number } {
+/** Write orders handed out here get their first-seen time (seenAt) so the unclaimed timeout starts when the peer could act on them. */
+export function pollLend(db: Database, peer: string, req: PollRequest, borrow: (project: string) => BorrowEntry | null, now = Date.now()):
+  { orders: OfferSummary[]; pollAfterMs: number } {
   const c = req.capacity;
   const open = (f: LendFamily) => (c.families[f] ?? 0) > (c.busy[f] ?? 0);
   const rows = (db.query("SELECT * FROM lend_orders WHERE peer = ? AND status = 'pooled' ORDER BY createdAt").all(peer) as Record<string, unknown>[]).map(toOrder);
@@ -261,6 +268,8 @@ export function pollLend(db: Database, peer: string, req: PollRequest, borrow: (
     .slice(0, pollLimit(rows.length))
     .map((o) => ({ orderId: o.orderId, taskId: o.taskId, step: o.step, family: o.family, repo: o.repo, pr: o.pr, head: o.head, round: o.round,
       specRev: o.specRev, offeredAt: o.createdAt }));
+  const seen = db.prepare("UPDATE lend_orders SET seenAt = ? WHERE orderId = ? AND status = 'pooled' AND seenAt IS NULL");
+  for (const o of orders) if (isWriteStep(o.step)) seen.run(now, o.orderId);
   return { orders, pollAfterMs: POLL_AFTER_MS };
 }
 

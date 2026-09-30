@@ -187,7 +187,7 @@ async function bridgeCall(c: LedgerCli, endpoint: LendEndpoint): Promise<Result>
   const req = parseLendRequest(endpoint, body);
   if (!req.ok) return refuse("invalid", req.error);
   const v = LEND_VERSION;
-  if (endpoint === "poll") return { ok: true, v, ...pollLend(c.db, peer, req.value as never, await borrowOf(c, peer)), notified };
+  if (endpoint === "poll") return { ok: true, v, ...pollLend(c.db, peer, req.value as never, await borrowOf(c, peer), c.ctx().now), notified };
   if (endpoint === "claim") {
     const r = claimLend(c.db, c.ctx(), peer, req.value as never, await borrowOf(c, peer));
     return "stale" in r ? refuse("cancelled", "卡已推进，这一单已作废") : { ok: true, v, ...r };

@@ -256,6 +256,19 @@ describe("修复单与写租约", () => {
     expect(await claim(orderId)).toMatchObject({ ok: false, current: { lend: "cancelled" } });
   });
 
+  test("超时从对方第一次看到起算：挂出 25 分钟后才被 poll 到的单，再过 25 分钟还在；之后反复 poll 不续命", async () => {
+    const { orderId } = await offer("--peer", "mate", "--repo", REPO);
+    now += WRITE_POOL_TTL_MS - 5 * 60_000;
+    expect((await poll()).orders.map((o: { orderId: string }) => o.orderId)).toEqual([orderId]);
+    now += WRITE_POOL_TTL_MS - 5 * 60_000;
+    await poll();
+    expect(listLendOrders(db, "T9")[0]).toMatchObject({ orderId, status: "pooled" });
+    now += 5 * 60_000 + 1;
+    expect(await run(["lend-sweep"], "owner")).toMatchObject({ ok: true });
+    expect(listLendOrders(db, "T9")[0]).toMatchObject({ orderId, status: "cancelled" });
+    expect(getWriteLease(db, "T9")).toMatchObject({ state: "ended" });
+  });
+
   test("派不回去：对方没起得来 worker（比如没有推送权限）→ 写租约结束、通知 PM", async () => {
     const { orderId } = await offer("--peer", "mate", "--repo", REPO);
     await claim(orderId);
@@ -303,5 +316,17 @@ test("T93 建的 lend_orders（step 只收 review）迁移后行原样保留，�
   m.run(`UPDATE lend_orders SET step = 'fix', branch = '${BR}'`);
   expect(m.query("SELECT step FROM lend_orders").get()).toEqual({ step: "fix" });
   expect(m.query("SELECT name FROM sqlite_master WHERE name IN ('lend_orders_live','lend_orders_peer_status','lend_write_leases') ORDER BY name").all()).toHaveLength(3);
+  closeLedger(file);
+});
+
+test("已是最新版本但 lend_orders 还没有 seenAt（先建的 R6 表）：打开时补上这一列，行不动", () => {
+  const file = join(mkdtempSync(join(tmpdir(), "lend-seen-")), "ledger.sqlite");
+  const d = openLedger(file);
+  d.run("ALTER TABLE lend_orders DROP COLUMN seenAt");
+  d.run(`INSERT INTO lend_orders (orderId, taskId, project, peer, family, step, specRev, round, head, repo, wire, text, sha256, status, leaseMs, createdBy, createdAt, updatedAt)
+    VALUES ('lend:T1:s1:r0:a0', 'T1', 'p', 'mate', 'codex', 'write', 1, 0, '${BASE}', '${REPO}', '{}', 't', 's', 'pooled', 1, 'agent-pm', 1, 1)`);
+  closeLedger(file);
+  const m = openLedger(file);
+  expect(m.query("SELECT orderId, step, seenAt FROM lend_orders").all()).toEqual([{ orderId: "lend:T1:s1:r0:a0", step: "write", seenAt: null }]);
   closeLedger(file);
 });

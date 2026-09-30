@@ -7,7 +7,7 @@
  * 对方公钥一钉住（api-auth 在路由前 commit），就经 `ledger lend-pin` 给借它算力的项目各记一条事件。
  */
 import { SIG_HEADERS } from "../../lib/instance-key.js";
-import { WRITE_POOL_TTL_MS } from "../../lib/ledger-lend.js";
+import { STALE_WRITE_SQL, WRITE_POOL_TTL_MS } from "../../lib/ledger-lend.js";
 import { LEND_BODY_MAX, LEND_STATUS, type LendEndpoint } from "../../lib/lend-wire.js";
 import type { Principal } from "../../lib/principals.js";
 import { runManagerProcess } from "../../lib/run-manager.js";
@@ -77,7 +77,7 @@ export function startLendSweeper(): void {
     try {
       const now = Date.now();
       due = !!ledgerDb()?.query(`SELECT 1 FROM lend_orders WHERE (status = 'claimed' AND leaseUntil < ?)
-        OR (status = 'pooled' AND step IN ('write','fix') AND createdAt < ?) LIMIT 1`).get(now, now - WRITE_POOL_TTL_MS);
+        OR (${STALE_WRITE_SQL}) LIMIT 1`).get(now, now - WRITE_POOL_TTL_MS);
     } catch (e) {
       // 表还没建（库还没迁到 T93）或库暂时读不了：这一分钟不扫，下一分钟再看；没有到期的单也就没有要结的
       console.warn(`⚠️ [lend] 查到期租约失败：${(e as Error).message}`);

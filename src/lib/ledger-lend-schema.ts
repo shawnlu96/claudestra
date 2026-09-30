@@ -3,7 +3,8 @@
  * 不复用 scheduler_intents：那张表的状态 CHECK 没有 pooled，planIntent 只收自动流程的卡，自动 tick 会取消没绑 session 的 pending。
  * 状态：pooled（等人领）→ claimed（某个 peer 持有租约）→ done（结论 / 交付已入账）| unknown（租约过期 / 对方报停，交 PM）|
  * cancelled（PM 撤单或重挂）| released（对方报 worker 从没起过）。一张卡同时最多一单未结（部分唯一索引）。
- * i28-R6：step 多了 write（开工单）/ fix（修复单），带 branch / base；lend_write_leases 记这张卡的写租约留在哪个出借方。
+ * i28-R6：step 多了 write（开工单）/ fix（修复单），带 branch / base；seenAt = 对方 poll 第一次看到这一单的时间（写单没人领的超时从它起算）；
+ * lend_write_leases 记这张卡的写租约留在哪个出借方。
  * 迁移规矩同 ledger-store.ts：一条语句一次 prepare().run()，每步可重跑。tests/ledger-lend.test.ts、tests/ledger-lend-write.test.ts。
  */
 import type { Database } from "bun:sqlite";
@@ -23,7 +24,7 @@ const ordersTable = (name: string): string => `CREATE TABLE IF NOT EXISTS ${name
     status TEXT NOT NULL CHECK (status IN (${inList(LEND_ORDER_STATUSES)})),
     worker TEXT, leaseGen INTEGER NOT NULL DEFAULT 0, leaseMs INTEGER NOT NULL, leaseUntil INTEGER,
     resultSha TEXT, receipt TEXT, eventSeq INTEGER, reason TEXT, supersedes TEXT,
-    createdBy TEXT NOT NULL, createdAt INTEGER NOT NULL, updatedAt INTEGER NOT NULL, branch TEXT, base TEXT)`;
+    createdBy TEXT NOT NULL, createdAt INTEGER NOT NULL, updatedAt INTEGER NOT NULL, branch TEXT, base TEXT, seenAt INTEGER)`;
 
 const ORDER_INDEXES: readonly string[] = [
   "CREATE INDEX IF NOT EXISTS lend_orders_peer_status ON lend_orders(peer, status)",
@@ -58,13 +59,16 @@ export function LEND_WRITE_SCHEMA(db: Database): void {
     run("ALTER TABLE lend_orders_r6 RENAME TO lend_orders");
   }
   LEND_SCHEMA(db);
+  // 先建出来的 R6 表还没有 seenAt：补一列，已有就跳过（可重跑）
+  const cols = db.query("PRAGMA table_info(lend_orders)").all() as { name: string }[];
+  if (!cols.some((c) => c.name === "seenAt")) run("ALTER TABLE lend_orders ADD COLUMN seenAt INTEGER");
   run(LEASES_SQL);
 }
 
 export const LEND_TABLES = ["lend_orders", "lend_write_leases"] as const;
 export const LEND_COLUMNS: Record<string, readonly string[]> = {
   lend_orders: ["orderId", "taskId", "project", "peer", "family", "step", "specRev", "round", "head", "repo", "pr", "wire", "text", "sha256", "status",
-    "worker", "leaseGen", "leaseMs", "leaseUntil", "resultSha", "receipt", "eventSeq", "reason", "supersedes", "createdBy", "branch", "base"],
+    "worker", "leaseGen", "leaseMs", "leaseUntil", "resultSha", "receipt", "eventSeq", "reason", "supersedes", "createdBy", "branch", "base", "seenAt"],
   lend_write_leases: ["taskId", "peer", "fp", "branch", "repo", "prevAssignee", "prevAssigneeKind", "state", "reason"],
 };
 export const LEND_INDEXES: Record<string, readonly string[]> = { lend_orders: ["lend_orders_peer_status", "lend_orders_live"] };
