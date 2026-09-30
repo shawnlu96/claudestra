@@ -84,8 +84,10 @@ async function pollPeer(entry: LendEntry, d: LoopDeps, status: LendStatus["peers
     capacity: { families: { [FAMILY]: slots }, busy: { [FAMILY]: busyOf(d, entry.peer) }, roles: entry.roles.filter((x) => x === ROLE), repos: entry.repos, ordersLeftToday: left },
   });
   status.lastPollAt = d.now();
+  status.lastError = r.ok ? null : `${r.code} ${r.error}`.slice(0, 200);
+  setMeta(d.db, `lastPoll:${entry.peer}`, JSON.stringify({ at: status.lastPollAt, error: status.lastError }));
   setMeta(d.db, `nextPoll:${entry.peer}`, String(d.now() + (r.ok ? Math.max(POLL_MS, Math.min(r.value.pollAfterMs, 10 * 60_000)) : POLL_MS)));
-  if (!r.ok) { status.lastError = `${r.code} ${r.error}`.slice(0, 200); return; }
+  if (!r.ok) return;
   for (const o of r.value.orders) {
     if (!wanted(o, entry, d)) continue;
     const preview = { taskId: o.taskId, step: o.step, repo: o.repo, pr: o.pr, head: o.head, round: o.round, specRev: o.specRev };
@@ -114,7 +116,9 @@ export async function lendTick(d: LoopDeps): Promise<TickResult> {
   const status: LendStatus = { at: now, lending: eff.lending, blocked, peers: {} };
   const peers = blocked ? [] : await d.peers();
   for (const entry of blocked ? [] : eff.lend) {
-    const s = { problem: peerLendProblem(peers.find((p) => p.name === entry.peer), entry.peer), lastPollAt: null as number | null, lastError: null as string | null };
+    // 被节流跳过的轮次沿用上一次 poll 的时间与错误（meta lastPoll:<peer>），doctor 才看得到「最近一次 poll 失败在哪」
+    const last = JSON.parse(getMeta(d.db, `lastPoll:${entry.peer}`) ?? "{}") as { at?: number; error?: string | null };
+    const s = { problem: peerLendProblem(peers.find((p) => p.name === entry.peer), entry.peer), lastPollAt: last.at ?? null, lastError: last.error ?? null };
     status.peers[entry.peer] = s;
     if (s.problem || now < Number(getMeta(d.db, `nextPoll:${entry.peer}`) ?? 0)) continue;
     try {

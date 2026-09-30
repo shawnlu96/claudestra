@@ -3,7 +3,7 @@ import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import type { LendEntry } from "../src/lib/lend-config.js";
 import { BEAT_MS, detailOf, workerName } from "../src/lib/lend-drive.js";
-import { advance, getOrder, openLendJournal, patchOrder, recordAsked, type LendRow } from "../src/lib/lend-journal.js";
+import { advance, getMeta, getOrder, openLendJournal, patchOrder, recordAsked, type LendRow } from "../src/lib/lend-journal.js";
 import { lendTick, type LoopDeps } from "../src/lib/lend-loop.js";
 import type { LendOp } from "../src/lib/lend-remote.js";
 import type { HttpPeer } from "../src/lib/peers.js";
@@ -175,6 +175,19 @@ describe("T94 限时预先授权（specRev 2）", () => {
     await h.tick();
     expect(getOrder(h.db, "o1")!.state).toBe("declined");
     expect(h.ops()).not.toContain("claim");
+  });
+});
+
+describe("T94 poll 状态", () => {
+  test("poll 失败的原因在被节流跳过的下一轮仍记在 status 里（doctor 读）", async () => {
+    const h = harness();
+    h.A.poll = () => ({ status: 401, body: { ok: false, code: "unauthorized", error: "没签名" } });
+    await h.tick();
+    h.advanceTime(1_000);
+    await h.tick();
+    expect(h.ops()).toEqual(["poll"]);
+    const st = JSON.parse(getMeta(h.db, "status")!);
+    expect(st.peers["team-a"]).toMatchObject({ lastPollAt: 1_000_000, lastError: expect.stringContaining("unauthorized") });
   });
 });
 
