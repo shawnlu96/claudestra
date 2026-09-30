@@ -7,7 +7,9 @@
 import { dirname, join, normalize } from "node:path";
 import type { Daemon } from "./ledger-probes.js";
 
-const DAEMON_ENTRIES: Record<Daemon, string> = { bridge: "src/bridge.ts", cron: "src/cron.ts", launcher: "src/launcher.ts" };
+const DAEMON_ENTRIES: Record<Daemon, string> = {
+  bridge: "src/bridge.ts", cron: "src/cron.ts", scheduler: "src/scheduler.ts", launcher: "src/launcher.ts",
+};
 
 const SPEC_RE = /(?:\bfrom\s*|\bimport\s*\(\s*|^\s*import\s+)["'](\.{1,2}\/[^"']+)["']/gm;
 
@@ -54,9 +56,10 @@ export function daemonsOfFromRepo(read: (rel: string) => string | null): Daemons
 }
 
 export const conservativeDaemonsOf: DaemonsOf = (f) => {
-  if (f.startsWith("src/lib/")) return ["bridge", "cron", "launcher"];
+  if (f.startsWith("src/lib/")) return ["bridge", "cron", "scheduler", "launcher"];
   if (f === "src/bridge.ts" || f.startsWith("src/bridge/")) return ["bridge"];
   if (f === "src/cron.ts") return ["cron"];
+  if (f === "src/scheduler.ts") return ["scheduler"];
   if (f === "src/launcher.ts") return ["launcher"];
   return [];
 };

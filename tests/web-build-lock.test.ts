@@ -95,13 +95,22 @@ describe("takeLock / releaseLock", () => {
 /** 起 n 个子进程跑同一段脚本，统一在 startAt 时刻起跑（屏障），返回各自打印的 JSON */
 async function race<T>(dir: string, body: string, n: number, extraEnv: Record<string, string> = {}): Promise<T[]> {
   const mod = resolve(import.meta.dir, "../src/lib/web-build-lock.ts");
-  const script = join(dir, `worker-${Math.random().toString(36).slice(2)}.ts`);
-  writeFileSync(script, `import { closeSync, openSync, unlinkSync } from "node:fs";
+  const id = Math.random().toString(36).slice(2);
+  const script = join(dir, `worker-${id}.ts`), readyDir = join(dir, `ready-${id}`);
+  mkdirSync(readyDir);
+  writeFileSync(script, `import { closeSync, openSync, readdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { releaseLock, takeLock } from ${JSON.stringify(mod)};
 const startAt = Number(process.env.START_AT);
+writeFileSync(process.env.READY_DIR + "/" + process.pid, "");
+const deadline = Date.now() + 10000;
+while (readdirSync(process.env.READY_DIR).length < Number(process.env.RACE_N)) {
+  if (Date.now() > deadline) throw new Error("race start barrier timed out");
+  await Bun.sleep(5);
+}
 while (Date.now() < startAt) {}
 ${body}`);
-  const env = { ...process.env, CLAUDESTRA_STATE_DIR: join(dir, "state"), START_AT: String(Date.now() + 1500), ...extraEnv };
+  const env = { ...process.env, CLAUDESTRA_STATE_DIR: join(dir, "state"), START_AT: String(Date.now() + 1500), READY_DIR: readyDir,
+    RACE_N: String(n), ...extraEnv };
   const procs = Array.from({ length: n }, () => Bun.spawn(["bun", script], { env, stdout: "pipe", stderr: "pipe" }));
   return Promise.all(procs.map(async (p) => JSON.parse((await new Response(p.stdout).text()).trim()) as T));
 }
@@ -114,7 +123,7 @@ describe("多进程抢锁", () => {
       for (let round = 0; round < 8; round++) {
         mkdirSync(join(dir, "state"), { recursive: true });
         writeFileSync(join(dir, "state", "web-build.lock"), String(deadPid()));
-        const outs = await race<{ got: boolean }>(dir, `const got = takeLock(); await Bun.sleep(200); if (got) releaseLock(); console.log(JSON.stringify({ got }));`, 4);
+        const outs = await race<{ got: boolean }>(dir, `const got = takeLock(); await Bun.sleep(750); if (got) releaseLock(); console.log(JSON.stringify({ got }));`, 4);
         expect(outs.filter((o) => o.got)).toHaveLength(1);
       }
     } finally {
