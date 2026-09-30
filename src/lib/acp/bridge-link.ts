@@ -96,10 +96,13 @@ export class BridgeLink {
   }
 
   private onRegisteredFrame(): void {
+    const already = this.registered;
     this.registered = true;
     this.attempts = 0;
-    this.timers.push(setTimeout(() => (this.replacedCount = 0), STABLE_HOLD_MS));
-    this.timers.push(setInterval(() => this.ws?.readyState === 1 && this.ws.send(JSON.stringify({ type: "ping" })), PING_MS));
+    if (!already) {
+      this.timers.push(setTimeout(() => (this.replacedCount = 0), STABLE_HOLD_MS));
+      this.timers.push(setInterval(() => this.ws?.readyState === 1 && this.ws.send(JSON.stringify({ type: "ping" })), PING_MS));
+    }
     this.deps.onRegistered();
   }
 

@@ -21,6 +21,8 @@ import {
   parseBootstrapThreadId,
   probeCodexQueue,
 } from "../codex-launch.js";
+import { recordCodexRunning } from "../codex-version.js";
+import { probeClaudeVersion } from "../claude-binary.js";
 import { bridgePortOf, defaultCodexDeps, type CodexAdapterDeps } from "./codex-deps.js";
 import { CODEX_ACP_CONTROL } from "./codex-control.js";
 import { codexExitPrelude, codexOnExitPane } from "./codex-exit.js";
@@ -160,7 +162,10 @@ function launchCommand(ctx: CodexCtx, spec: LaunchSpec): string {
 async function beforeLaunch(ctx: CodexCtx, win: WindowOps): Promise<void> {
   const ok = await win.setOption(CODEX_READY_OPTION, "0");
   if (!ok) console.error(`⚠ 清不掉 ${win.name} 的 ${CODEX_READY_OPTION}（复用窗口时可能误判就绪）`);
-  await ensureBin(ctx);
+  const bin = await ensureBin(ctx);
+  // 网页「重启生效」提示要知道这个会话跑的是哪一版（rollout 里的 cli_version 是建线程时的，见 lib/codex-version.ts）
+  const v = await probeClaudeVersion(ctx.deps.run, bin).catch(() => null); // 探不出 = 记空，只少一条提示
+  try { recordCodexRunning(win.name, v ?? undefined); } catch (e) { console.error(`⚠ 记不下 ${win.name} 的 codex 版本:`, e); }
   const pane = await win.capture(200).catch(() => ""); // 截不到屏就以空基线起步，最多多报一次旧文字
   ctx.baselines.set(win.target, paneBaseline(pane));
 }

@@ -232,6 +232,29 @@ export function normalizeSandboxAgentDir(dir: string, env: Env = process.env): s
   return isSandbox(env) ? expandHome(dir.trim(), env) : dir;
 }
 
+/**
+ * 沙箱里 Codex 的根（CODEX_HOME）必须显式设在沙箱根下：没设时 Codex 会话 / auth.json 的定位回落宿主 ~/.codex，
+ * 会扫到 owner 真实的 rollout、同 id 时把宿主正文拷进沙箱归档。沙箱环境由 sandbox-env.ts 设它（与 ACP 链同一个值）。
+ * 非沙箱返回 null（生产照旧按 CODEX_HOME || ~/.codex）。调用入口在 lib/codex-home.ts、quota-credentials.ts。
+ */
+export function sandboxCodexHomeProblem(env: Env = process.env): string | null {
+  if (!isSandbox(env)) return null;
+  const root = (env[SANDBOX_ROOT_ENV] || "").trim();
+  const home = (env.CODEX_HOME || "").trim();
+  if (!root || !isAbsolute(root)) return `沙箱没设绝对路径的 ${SANDBOX_ROOT_ENV}，不知道 Codex 的根该在哪`;
+  if (!home) return "沙箱里没设 CODEX_HOME：Codex 会话 / 凭据会回落到宿主 ~/.codex（用 scripts/sandbox.ts 起沙箱）";
+  if (!isAbsolute(home)) return `沙箱里的 CODEX_HOME 要写绝对路径（收到 ${home}）`;
+  const inside = relative(canonicalPath(root), canonicalPath(home));
+  if (inside === "" || inside.startsWith("..") || isAbsolute(inside)) return `沙箱里的 CODEX_HOME=${home} 不在沙箱根 ${root}/ 下`;
+  return null;
+}
+
+/** 定位 Codex 会话 / 凭据之前调：沙箱里 CODEX_HOME 不安全就抛，不回落宿主 */
+export function assertSandboxCodexHome(env: Env = process.env): void {
+  const p = sandboxCodexHomeProblem(env);
+  if (p) throw new SandboxViolation([p]);
+}
+
 /** 生产侧：目录在某个沙箱根下就拒绝（sandbox clean 会连目录删掉）；沙箱里不管（沙箱 agent 本来就在那） */
 export function refuseSandboxDirInProduction(dir: string, what: string, env: Env = process.env): void {
   if (isSandbox(env) || !dir || dir === "-") return;

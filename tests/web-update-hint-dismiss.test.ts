@@ -30,6 +30,11 @@ describe("updateHintKey", () => {
     expect(updateHintKey("p1", h)).toBe("pi-update:0.87.1");
     expect(updateHintKey("p2", { ...h, installed: "0.85.0" })).toBe(updateHintKey("p1", h));
   });
+  test("「Codex 可更新」同理，且与 Pi 的 key 不撞", () => {
+    const h = { kind: "codex-update", installed: "0.158.0", latest: "0.159.0", npm: true } as const;
+    expect(updateHintKey("c1", h)).toBe("codex-update:0.159.0");
+    expect(updateHintKey("c2", { ...h, installed: "0.157.0" })).toBe(updateHintKey("c1", h));
+  });
 });
 
 describe("关闭记录的持久化", () => {

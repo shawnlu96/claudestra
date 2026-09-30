@@ -45,7 +45,7 @@ function harness(wall: "menu" | "countdown" | null = null) {
 const call = (principal: Principal, text: string, deps: SlashDeps, agent: Record<string, unknown> = AGENT) =>
   handleSlashPassthrough({ principal, tokenId: principal.id.replace(/^token:/, ""), agent: agent as typeof AGENT, text, hasAttachments: false }, deps);
 
-test("ACP Codex 的 Web 聊天 /clear 拒绝，不落成普通 prompt 或 tmux 发键", async () => {
+test("ACP Codex 的 Web 聊天 /clear：宿主不在线与带附件都拒绝，guest 无权", async () => {
   const agent = { ...AGENT, channelId: "local-acp-clear", runtime: "codex" };
   noteAcpChannel(agent.channelId, "acp");
   try {
@@ -57,6 +57,7 @@ test("ACP Codex 的 Web 聊天 /clear 拒绝，不落成普通 prompt 或 tmux �
     expect(owner?.status).toBe(409);
     expect(guest?.status).toBe(403);
     expect(attachedOwner?.status).toBe(409);
+    expect((await attachedOwner?.json() as { error: string }).error).toContain("不接收附件");
     expect(attachedGuest?.status).toBe(403);
     expect(h.sent).toEqual([]);
   } finally {

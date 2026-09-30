@@ -14,6 +14,7 @@ import { channelInstructions } from "../channel-instructions.js";
 import { shellEscape } from "../claude-launch.js";
 import { BOOTSTRAP_PROMPT, codexContextPreamble, codexDeveloperInstructions, codexEffort, codexModel } from "../codex-launch.js";
 import { encodePreambleEnv } from "../codex-thread.js";
+import { recordCodexRunning } from "../codex-version.js";
 import { pathOverrideAssignments, statePath } from "../paths.js";
 import { isSandbox, SANDBOX_ROOT_ENV } from "../sandbox.js";
 import { acpAgentCommand, adapterEnv, spawnAdapter } from "../acp/adapter-proc.js";
@@ -45,6 +46,10 @@ export function buildAcpHostCommand(spec: LaunchSpec, o: { bunBin: string; repoR
     ["CLAUDESTRA_CODEX_BIN", o.codexBin],
     ["CLAUDESTRA_ACP_MODEL", codexModel(spec.model) ?? undefined],
     ["CLAUDESTRA_ACP_EFFORT", codexEffort(spec.effort) ?? undefined],
+    ["CLAUDESTRA_ACP_DEVELOPER", encodePreambleEnv(codexDeveloperInstructions({
+      agentName: agent, purpose: spec.purpose, projectContext: spec.projectContext, channelRules: channelInstructions(o.repoRoot),
+    }))],
+    ["CLAUDESTRA_ACP_CLEAR_PREAMBLE", encodePreambleEnv(codexContextPreamble({ agentName: agent, purpose: spec.purpose, projectContext: spec.projectContext }))],
     // 重启 / 收编：developer_instructions 只在建线程那一轮生效，首条入站附前言（与 tmux 同一份文字）
     ["CLAUDESTRA_CODEX_PREAMBLE", spec.mode === "new" ? undefined : encodePreambleEnv(codexContextPreamble({ agentName: agent, purpose: spec.purpose, projectContext: spec.projectContext }))],
     // 沙箱外的手工覆盖（单测 / 排查）照带；沙箱里不带：适配器固定是本仓 stub，宿主这条链的 HOME 挪进沙箱根（lib/acp/stub.ts）
@@ -99,7 +104,7 @@ async function acpExitPrelude(win: WindowOps): Promise<"at-shell" | "continue"> 
   return "continue";
 }
 
-function createCodexAcpAdapter(overrides: Partial<CodexAdapterDeps> = {}): ManagedRuntimeAdapter {
+export function createCodexAcpAdapter(overrides: Partial<CodexAdapterDeps> = {}): ManagedRuntimeAdapter {
   let depsCache: CodexAdapterDeps | null = null;
   const deps = () => (depsCache ??= { ...defaultCodexDeps(), ...overrides });
   let bin: string | null = null;
@@ -127,6 +132,8 @@ function createCodexAcpAdapter(overrides: Partial<CodexAdapterDeps> = {}): Manag
     async beforeLaunch(win) {
       if (!(await win.setOption(CODEX_READY_OPTION, "0"))) console.error(`⚠ 清不掉 ${win.name} 的 ${CODEX_READY_OPTION}（复用窗口时可能误判就绪）`);
       bin = await deps().resolveBin().catch(() => null); // stub 用不上；真适配器起不来时宿主自己报 CODEX_PATH 的错
+      // 运行版本由宿主起适配器前记（lib/codex-version.ts noteAcpCodexRunning）；先清掉上一次的，宿主没起来也不会误报「该重启」
+      try { recordCodexRunning(win.name, undefined); } catch (e) { console.error(`⚠ 清不掉 ${win.name} 的 codex 运行版本记录:`, e); }
     },
     waitReady: (win, budget) => waitCodexReady(win, budget, { occupied: 0, dialog: 0 }),
     exitPrelude: acpExitPrelude,

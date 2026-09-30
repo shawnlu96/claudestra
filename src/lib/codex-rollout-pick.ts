@@ -14,6 +14,7 @@
 import { realpathSync } from "node:fs";
 import { basename } from "node:path";
 import { codexSessionsRoot, listCodexSessionFiles, readCodexMetaPayload } from "./codex-session.js";
+import { sandboxCodexHomeProblem } from "./sandbox.js";
 import { readZstdFirstLine } from "./zstd-file.js";
 
 /**
@@ -76,6 +77,7 @@ export async function pickCodexRolloutForArchive(
   cwd: string | undefined,
   root: string = codexSessionsRoot(),
 ): Promise<RolloutPick> {
+  if (sandboxCodexHomeProblem()) return { error: sandboxCodexHomeProblem()! }; // 沙箱 CODEX_HOME 不安全：不回落宿主 ~/.codex；归档不抛错，按 ok:false 报
   const all = listCodexSessionFiles(root, (n) => parseCodexRolloutFilename(n) !== null)
     .map((path) => ({ path, name: parseCodexRolloutFilename(basename(path))! }));
   const mine = all.filter((f) => f.name.threadId === sessionId);

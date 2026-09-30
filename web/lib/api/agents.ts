@@ -28,8 +28,8 @@ export function createAgent(body: CreateAgentBody): Promise<{ ok?: boolean; agen
   });
 }
 
-export type LifecycleAction = "kill" | "restart" | "remove" | "archive" | "pi-update";
-const LIFECYCLE_TIMEOUT: Record<LifecycleAction, number> = { kill: 60_000, restart: 90_000, remove: 60_000, archive: 30_000, "pi-update": 360_000 };
+export type LifecycleAction = "kill" | "restart" | "remove" | "archive" | "pi-update" | "codex-update";
+const LIFECYCLE_TIMEOUT: Record<LifecycleAction, number> = { kill: 60_000, restart: 90_000, remove: 60_000, archive: 30_000, "pi-update": 360_000, "codex-update": 360_000 };
 
 export async function lifecycleAction(action: LifecycleAction, name: string): Promise<Record<string, unknown>> {
   const r = await api(`/agents/${encodeURIComponent(name.trim())}/${action}`, { method: "POST", json: {}, timeoutMs: LIFECYCLE_TIMEOUT[action] });

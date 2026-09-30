@@ -10,7 +10,7 @@
 import { closeSync, fstatSync, openSync, readdirSync, readSync, statSync } from "fs";
 import { join } from "path";
 import { readFileStats, scanStatsWindow, type UsageWindow } from "./agent-stats.js";
-import { codexSessionsRoot } from "./codex-session.js";
+import { codexRolloutRoot } from "./codex-home.js";
 import { piAgentDir } from "./pi-session.js";
 import { claudeProjectsRoot } from "./runtimes/claude-code.js";
 import { runtimeForSessionPath } from "./session-source.js";
@@ -45,7 +45,7 @@ function addWin(acc: UsageWindow, w: UsageWindow): void {
 
 /** 各运行时会话根目录（Pi 的根可被 PI_CODING_AGENT_DIR 覆盖，与 Pi 自身一致） */
 function usageRoots(): string[] {
-  return [claudeProjectsRoot(), join(piAgentDir(), "sessions"), codexSessionsRoot()];
+  return [claudeProjectsRoot(), join(piAgentDir(), "sessions"), codexRolloutRoot()];
 }
 
 /**

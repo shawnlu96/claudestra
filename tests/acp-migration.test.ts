@@ -190,3 +190,15 @@ test("普通 restart 的 ACP 接线程失败也回退 tmux，成功后保留待�
   expect(state).toMatchObject({ transport: "tmux", acpPending: true });
   expect(state.acpRestartPending).toBeUndefined();
 });
+
+test("doctor：本机 codex 与适配器不配套只报 warn（宿主照常起），配套报 ok，没探到不报", () => {
+  const ok = { ok: true as const, codexBin: "/usr/bin/codex" };
+  const agents = [{ name: "cx", runtime: "codex", transport: "acp" } as RegistryAgent];
+  const pick = (v: string | null | undefined) => acpDoctorChecks(agents, ok, v).find((c) => c.name === "Codex 与适配器配套");
+  expect(pick("0.159.0")).toMatchObject({ status: "warn" });
+  expect(pick("0.159.0")!.detail).toContain("0.158.x");
+  expect(pick("0.159.0")!.detail).toContain("1 个 ACP agent 照常运行");
+  expect(pick(null)).toMatchObject({ status: "warn" });
+  expect(pick("0.158.0")).toMatchObject({ status: "ok" });
+  expect(pick(undefined)).toBeUndefined();
+});
