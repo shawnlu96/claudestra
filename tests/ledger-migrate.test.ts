@@ -263,6 +263,7 @@ describe("v1 → 依赖边版本", () => {
 describe("写事件的底座只给写入模块", () => {
   // ledger-human.ts：v3.2 例外（human 节点的人工交付与重开指派），它按执行者角色推 build / fix → review，门在 human-node.ts；
   // ledger-steps-write.ts：步骤化台账（T47）的写入，派步骤要 PM，交付 / 审查的钩子挂在 ledger-write.ts 的事务里
+  // ledger-scheduler-write.ts：调度意图与资源锁同事务写，入口只提供限定动作与 CAS
   test("src 里 import ledger-tx / applyMove 的只有写入模块（直接写事件、带 asRole 推阶段会绕过阶段机与权限）", () => {
     const root = resolve(import.meta.dir, "../src");
     const tx: string[] = [];
@@ -279,7 +280,7 @@ describe("写事件的底座只给写入模块", () => {
       }
     };
     walk(root);
-    expect(tx.sort()).toEqual(["lib/ledger-deps-write.ts", "lib/ledger-human.ts", "lib/ledger-steps-write.ts", "lib/ledger-write.ts"]);
+    expect(tx.sort()).toEqual(["lib/ledger-deps-write.ts", "lib/ledger-human.ts", "lib/ledger-scheduler-write.ts", "lib/ledger-steps-write.ts", "lib/ledger-write.ts"]);
     expect(move).toEqual(["lib/ledger-human.ts"]);
   });
 });
