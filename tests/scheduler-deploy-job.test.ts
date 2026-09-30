@@ -82,6 +82,16 @@ describe("T68g deploy job (launchd)", () => {
     expect(await x.jobs.observe(run)).toMatchObject({ result: null, corrupt: expect.stringMatching(/identity/) });
   });
 
+  test("an unreadable request.json never wedges running: the label follows from the directory, the deadline counts as passed", async () => {
+    const x = fixture();
+    const label = await x.jobs.submit(run, "/repo", target);
+    writeFileSync(join(x.dir(), "request.json"), "{ torn");
+    expect(await x.jobs.observe(run)).toMatchObject({ label, liveness: "alive", result: null, corrupt: expect.stringMatching(/request\.json/) });
+    expect((await x.jobs.observe(run))!.deadline).toBeLessThan(x.f.time);
+    x.f.state = "absent";
+    expect(await x.jobs.observe(run)).toMatchObject({ label, liveness: "dead", result: null });
+  });
+
   test("remove only touches deploy labels and treats 'already gone' as done", async () => {
     const x = fixture();
     await expect(x.jobs.remove("com.claudestra.bridge")).rejects.toThrow(/non-deploy/);

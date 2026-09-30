@@ -103,6 +103,7 @@ async function liveness(dir: string, label: string, command: typeof runBounded, 
 export function deploymentJobs(opts: { root?: string; command?: typeof runBounded; now?: () => number; uid?: number } = {}): DeployJobs {
   const root = opts.root ?? statePath("scheduler-deploy"), command = opts.command ?? runBounded, now = opts.now ?? Date.now;
   const domain = `gui/${opts.uid ?? process.getuid?.() ?? 0}`;
+  const labelFor = (dir: string) => `${DEPLOY_LABEL_PREFIX}${createHash("sha256").update(dir).digest("hex").slice(0, 32)}`;
   const dirFor = (run: DeployRun) => join(root, createHash("sha256").update(run.intentId).digest("hex"));
   const requestFor = (run: DeployRun) => {
     const request = readDeployJob(join(dirFor(run), "request.json"));
@@ -118,7 +119,7 @@ export function deploymentJobs(opts: { root?: string; command?: typeof runBounde
         if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
         return requestFor(run).label; // An existing claim is observed, never submitted a second time.
       }
-      const label = `${DEPLOY_LABEL_PREFIX}${createHash("sha256").update(dir).digest("hex").slice(0, 32)}`;
+      const label = labelFor(dir);
       const job: DeployJob = { intentId: run.intentId, mergeSha: run.mergeSha, taskId: run.taskId, prRef: run.prRef, label, repoDir,
         relayArgv: target.relayArgv ?? null, restartLabels: target.restartLabels, timeoutMs: target.timeoutMs, createdAt: now(), env: deployEnv(process.env) };
       const requestPath = join(dir, "request.json"), plistPath = join(dir, "job.plist");
@@ -130,19 +131,22 @@ export function deploymentJobs(opts: { root?: string; command?: typeof runBounde
       return label;
     },
     async observe(run) {
-      let request: DeployJob;
+      const dir = dirFor(run);
+      // An unreadable request must not wedge the journal in running (it holds off updates): the label follows from the
+      // directory, launchd still answers for it, and the deadline counts as passed so a live job gets booted out.
+      let request: Pick<DeployJob, "label" | "createdAt" | "timeoutMs">, badRequest: string | undefined;
       try { request = requestFor(run); }
       catch (e) {
-        const code = (e as NodeJS.ErrnoException).code;
-        if (/missing/.test((e as Error).message) || code === "ENOENT") return null;
-        throw e;
+        if (/missing/.test((e as Error).message) || (e as NodeJS.ErrnoException).code === "ENOENT") return null;
+        request = { label: labelFor(dir), createdAt: 0, timeoutMs: 0 };
+        badRequest = `request.json 读不了：${(e as Error).message.slice(0, 120)}`;
       }
-      const dir = dirFor(run), deadline = request.createdAt + request.timeoutMs + GRACE_MS;
+      const deadline = request.createdAt + request.timeoutMs + GRACE_MS;
       const read = () => readJsonStateSync(join(dir, "result.json"));
       const first = read(), live = await liveness(dir, request.label, command, now);
       // The job writes result.json before it gives up its lease; a result that appears while we looked is read again.
       const settled = first.status === "missing" && live === "dead" ? read() : first;
-      if (settled.status === "missing") return { label: request.label, liveness: live, result: null, deadline };
+      if (settled.status === "missing") return { label: request.label, liveness: live, result: null, deadline, ...(badRequest ? { corrupt: badRequest } : {}) };
       if (settled.status !== "ok") return { label: request.label, liveness: live, result: null, corrupt: `result.json ${settled.status}`, deadline };
       const r = settled.data as { intentId?: unknown; mergeSha?: unknown; ok?: unknown; summary?: unknown };
       if (r.intentId !== run.intentId || r.mergeSha !== run.mergeSha || typeof r.ok !== "boolean") {
