@@ -12,7 +12,7 @@ interface EndpointSource {
   /** 这条线索的出处：「~/.claude/settings.json env」「当前进程 env」「config.toml model_providers.x」… */
   from: string;
   kind: EndpointKind;
-  /** 脱敏后的地址（去掉账号口令、query、fragment，长得像 key 的路径段打码）；没设 / 解析不了 = null */
+  /** 脱敏后的地址：只有协议 + 主机[:端口]，路径与账号口令、query 都不留；没设 / 解析不了 = null */
   baseUrl: string | null;
   host: string | null;
   note?: string;
@@ -33,24 +33,18 @@ export interface EndpointVerdict {
 
 // ── base_url 脱敏 ─────────────────────────────────────────────────────────
 
-/** 路径段像密钥：sk- / key- 之类前缀，或 ≥ 24 位且字母数字混排的随机串 */
-const looksSecret = (raw: string) => {
-  let seg = raw;
-  try { seg = decodeURIComponent(raw); } catch { /* 坏的 % 转义：按原样判断，照样可能打码 */ }
-  return /^(sk|ak|key|pk|token)[-_]/i.test(seg) || (seg.length >= 24 && /[a-z]/i.test(seg) && /\d/.test(seg));
-};
-
 /**
- * 只留 协议 + 主机[:端口] + 路径：URL 重拼时账号口令自然丢掉，query / fragment 整段不要（key 常挂在 ?key=）。
- * 解析不了返回 null——不能像 doctor 那样截原文给人看，原文里可能就有 key。
+ * 只留 协议 + 主机[:端口]：路径、账号口令、query、fragment 一律不要。key 可以藏在路径任何一段（/api_key/abc、;token=x），
+ * 猜「哪段像 key」总有漏网的短值，所以整段路径都不输出；官方 / 第三方只按主机与端口判，用不着路径。
+ * 解析不了返回 null——不能像 doctor 那样截原文给人看，原文里可能就有 key。见 tests/ai-endpoints.test.ts「路径一律不输出」。
  */
 export function sanitizeBaseUrl(raw: unknown): { baseUrl: string; host: string; protocol: string; port: string } | null {
   if (typeof raw !== "string" || !raw.trim()) return null;
   let u: URL;
   try { u = new URL(raw.trim()); } catch { return null; } // 不是合法 URL：调用方记「解析不了」，不输出原文
   if (!u.hostname) return null;
-  const path = u.pathname.split("/").map((s) => (looksSecret(s) ? "***" : s)).join("/").replace(/\/+$/, "");
-  return { baseUrl: `${u.protocol}//${u.host}${path}`, host: u.host.toLowerCase(), protocol: u.protocol, port: u.port };
+  const host = u.host.toLowerCase();
+  return { baseUrl: `${u.protocol}//${host}`, host, protocol: u.protocol, port: u.port };
 }
 
 /** 官方 = https、主机名严格等于官方域名、默认端口；其余一律第三方（含 http、自定义端口、子域名伪装） */
@@ -65,12 +59,15 @@ const str = (v: unknown): string | null => (typeof v === "string" && v.trim() ? 
 const obj = (v: unknown): Record<string, unknown> => (v && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : {});
 const truthy = (v: unknown) => typeof v === "string" && /^(1|true|yes|on)$/i.test(v.trim());
 
-/** 来源合并：任一第三方 → 第三方；否则任一未知 → 未知；全官方（或没有任何线索时的缺省官方）→ 官方 */
+/** 来源的接口身份：官方算一家；第三方按主机（云厂商开关没写地址时按厂商名）；判不出的各算各的 */
+const identity = (s: EndpointSource, i: number) => (s.kind === "official" ? "official" : s.kind === "third_party" ? `3p:${s.host ?? s.note}` : `?:${i}`);
+
+/** 来源合并：任一第三方 → 第三方；否则任一未知 → 未知；全官方（或没有任何线索时的缺省官方）→ 官方。冲突 = 来源指向不止一处接口 */
 function merge(provider: string | null, sources: EndpointSource[], models: Record<string, string>, fallback: EndpointKind, note?: string): EndpointVerdict {
   const third = sources.find((s) => s.kind === "third_party");
   const kind: EndpointKind = third ? "third_party" : sources.some((s) => s.kind === "unknown") ? "unknown" : sources.length ? "official" : fallback;
-  const kinds = new Set(sources.map((s) => s.kind));
-  return { kind, host: third?.host ?? null, provider, sources, conflict: kinds.size > 1, models, ...(note ? { note } : {}) };
+  const ids = new Set(sources.map(identity));
+  return { kind, host: third?.host ?? null, provider, sources, conflict: ids.size > 1, models, ...(note ? { note } : {}) };
 }
 
 // ── Claude Code ──────────────────────────────────────────────────────────
@@ -161,13 +158,15 @@ export function classifyCodexEndpoint(toml: Record<string, unknown> | null | und
     sources.push(defined.base_url === undefined
       ? { from, kind: "unknown", baseUrl: null, host: null, note: "自定义 provider 没写 base_url" }
       : urlSource(from, defined.base_url, OPENAI_OFFICIAL_HOSTS));
-  } else if (provider === "openai") {
-    if (root.openai_base_url !== undefined) sources.push(urlSource("config.toml openai_base_url", root.openai_base_url, OPENAI_OFFICIAL_HOSTS));
-    if (env.OPENAI_BASE_URL) sources.push(urlSource("当前进程 env OPENAI_BASE_URL", env.OPENAI_BASE_URL, OPENAI_OFFICIAL_HOSTS));
   } else if (CODEX_LOCAL_BUILTINS[provider]) {
     sources.push({ from: `内置 provider ${provider}`, kind: "third_party", baseUrl: null, host: CODEX_LOCAL_BUILTINS[provider]!, note: "本地模型" });
-  } else {
+  } else if (provider !== "openai") {
     sources.push({ from: `config.toml model_provider = ${provider}`, kind: "unknown", baseUrl: null, host: null, note: "provider 在配置里找不到定义" });
+  }
+  // 走 openai 时这两处都可能改地址，谁盖谁不去赌：和 provider 表里的写法一起列出，任一非官方即第三方
+  if (provider === "openai") {
+    if (root.openai_base_url !== undefined) sources.push(urlSource("config.toml openai_base_url", root.openai_base_url, OPENAI_OFFICIAL_HOSTS));
+    if (env.OPENAI_BASE_URL) sources.push(urlSource("当前进程 env OPENAI_BASE_URL", env.OPENAI_BASE_URL, OPENAI_OFFICIAL_HOSTS));
   }
   const name = str(defined.name);
   return merge(name ? `${provider}（${name}）` : provider, sources, models, "official");

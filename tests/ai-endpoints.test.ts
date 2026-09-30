@@ -14,15 +14,24 @@ const SECRET = "SENTINEL0secret0VALUE0123456789";
 describe("sanitizeBaseUrl", () => {
   test("去掉 query / fragment / 账号口令", () => {
     const s = sanitizeBaseUrl(`https://user:${SECRET}@proxy.example.com/v1/?key=${SECRET}&x=1#${SECRET}`)!;
-    expect(s.baseUrl).toBe("https://proxy.example.com/v1");
+    expect(s.baseUrl).toBe("https://proxy.example.com");
     expect(s.host).toBe("proxy.example.com");
     expect(JSON.stringify(s)).not.toContain(SECRET);
   });
-  test("路径里像 key 的段打码", () => {
-    expect(sanitizeBaseUrl(`https://gw.example.com/sk-abc/v1`)!.baseUrl).toBe("https://gw.example.com/***/v1");
-    expect(sanitizeBaseUrl(`https://gw.example.com/${SECRET}/anthropic`)!.baseUrl).toBe("https://gw.example.com/***/anthropic");
+  test.each([
+    "https://relay.example/api_key/shortKey123/v1",
+    "https://relay.example/v1/secretpassword/anthropic",
+    "https://relay.example/v1;token=FAKETOKEN",
+    "https://relay.example/v1/%73hortKey123",
+    "https://gw.example.com/sk-abc/v1",
+  ])("路径一律不输出（短 key、纯字母、路径参数、编码段都不猜）：%s", (url) => {
+    const s = sanitizeBaseUrl(url)!;
+    expect(s.baseUrl).toBe(`https://${s.host}`);
+    for (const leak of ["shortKey", "secretpassword", "FAKETOKEN", "73hort", "sk-abc", "v1"]) expect(JSON.stringify(s)).not.toContain(leak);
+  });
+  test("端口保留：官方判定要看它", () => {
+    expect(sanitizeBaseUrl("http://LOCALHOST:11434/v1")).toEqual({ baseUrl: "http://localhost:11434", host: "localhost:11434", protocol: "http:", port: "11434" });
     expect(sanitizeBaseUrl(`https://gw.example.com/%E0%A4%A/v1`)!.host).toBe("gw.example.com"); // 坏的 % 转义不抛
-    expect(sanitizeBaseUrl("https://api.deepseek.com/anthropic")!.baseUrl).toBe("https://api.deepseek.com/anthropic");
   });
   test("解析不了 / 空 → null，不回原文", () => {
     expect(sanitizeBaseUrl(`not a url ${SECRET}`)).toBeNull();
@@ -65,6 +74,18 @@ describe("Claude Code", () => {
     expect(v.host).toBe("open.bigmodel.cn");
     expect(v.conflict).toBe(true);
     expect(v.sources.map((s) => s.from)).toEqual(["settings ANTHROPIC_BASE_URL", "env ANTHROPIC_BASE_URL"]);
+  });
+  test("两处不同的第三方也算冲突；同一个第三方写两遍不算", () => {
+    const two = classifyClaudeEndpoint([
+      { from: "settings", env: { ANTHROPIC_BASE_URL: "https://a.example/v1" } },
+      { from: "env", env: { ANTHROPIC_BASE_URL: "https://b.example/v1" } },
+    ]);
+    expect(two).toMatchObject({ kind: "third_party", host: "a.example", conflict: true });
+    const same = classifyClaudeEndpoint([
+      { from: "settings", env: { ANTHROPIC_BASE_URL: "https://a.example/v1" } },
+      { from: "env", env: { ANTHROPIC_BASE_URL: "https://a.example/anthropic" } },
+    ]);
+    expect(same.conflict).toBe(false);
   });
   test("settings 解析不了 = 未知，不当官方", () => {
     const v = classifyClaudeEndpoint([{ from: "s", env: null }, { from: "env", env: {} }]);
@@ -117,6 +138,13 @@ describe("Codex", () => {
   test("OPENAI_BASE_URL 覆盖内置 openai = 第三方", () => {
     expect(classifyCodexEndpoint({}, { OPENAI_BASE_URL: "https://relay.example.com/v1" }).kind).toBe("third_party");
     expect(classifyCodexEndpoint({}, { OPENAI_BASE_URL: "https://api.openai.com/v1" }).kind).toBe("official");
+  });
+  test("provider 表里定义了 openai：OPENAI_BASE_URL / openai_base_url 照样列出，任一非官方即第三方", () => {
+    const toml = { openai_base_url: "https://api.openai.com/v1", model_providers: { openai: { base_url: "https://api.openai.com/v1" } } };
+    const v = classifyCodexEndpoint(toml, { OPENAI_BASE_URL: "https://relay.example/v1" });
+    expect(v.sources.map((s) => s.from)).toEqual(["config.toml model_providers.openai.base_url", "config.toml openai_base_url", "当前进程 env OPENAI_BASE_URL"]);
+    expect(v).toMatchObject({ kind: "third_party", host: "relay.example", conflict: true });
+    expect(classifyCodexEndpoint({ model_provider: "ds", model_providers: { ds: { base_url: "https://api.deepseek.com" } } }, { OPENAI_BASE_URL: "https://x.example" }).sources).toHaveLength(1);
   });
   test("provider 找不到定义 / 文件解析不了 = 未知；内置本地模型 = 第三方", () => {
     expect(classifyCodexEndpoint({ model_provider: "nope" }, {}).kind).toBe("unknown");

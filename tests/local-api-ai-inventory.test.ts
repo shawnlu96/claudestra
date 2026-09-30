@@ -1,5 +1,5 @@
 /**
- * GET /api/v1/ai-inventory：只给全权设备（与额度看板同一道门 canSeeQuota），只读（非 GET 405），能力列表里登记。
+ * GET /api/v1/ai-inventory：只给全权设备（canAdministerPairing：设备凭据才算，老 Bearer 不放），只读（非 GET 405），能力列表里登记。
  * 验收线 P1：API 不得对非全权设备开放；不得新增写操作。
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
@@ -21,6 +21,8 @@ const MATRIX: [string, Principal, boolean][] = [
   ["guest 设备", device({ agents: ["*"], terminal: false, manage: true }, { id: "guest:g", role: "external", agents: ["*"], createdAt: at }), false],
   ["peer token（历史上签过 *）", { id: "token:tok_peer", role: "external", agents: ["*"], peer: "P", createdAt: at }, false],
   ["部分 scope 的 Bearer token", { id: "token:tok_s", role: "external", agents: ["worker"], createdAt: at }, false],
+  ["老的全 scope Bearer token（额度看板过渡期放行，这里不放）", { id: "token:test", role: "external", agents: ["*"], createdAt: at }, false],
+  ["老的 owner 全 scope Bearer（web-ui）", { id: "token:tok_w", name: "web-ui", role: "owner", agents: ["*", "master"], createdAt: at }, false],
 ];
 const OWNER = MATRIX[0][1];
 

@@ -90,7 +90,8 @@ export function codexHits(lines: string[]): ModelHit[] {
         if (typeof p.turn_id === "string") byTurn.set(p.turn_id, m);
       }
     } else if (e?.type === "token_usage_record") {
-      const m = (typeof p.turn_id === "string" && byTurn.get(p.turn_id)) || current;
+      // 带 turn_id 就只认那一回合的上下文：尾读截掉了它的 turn_context 时记 unknown，借别的回合的模型等于编证据
+      const m = typeof p.turn_id === "string" ? byTurn.get(p.turn_id) ?? "unknown" : current;
       if (m) records.push({ id: typeof p.response_id === "string" ? `codex:${p.response_id}` : null, ts, model: m });
     } else if (e?.type === "event_msg" && p.type === "token_count" && p.info && current) {
       counts.push({ id: null, ts, model: current });
@@ -99,8 +100,8 @@ export function codexHits(lines: string[]): ModelHit[] {
   return records.length ? records : counts;
 }
 
-/** 最近 limit 次（按时间倒序、按 id 去重）的模型分布；share 保留两位小数 */
-export function modelDistribution(hits: ModelHit[], limit: number, source: ModelEvidence["source"], filesScanned: number): ModelEvidence {
+/** 按时间倒序、按 id 去重后的最近 limit 条；扫描的停止条件和最终分布都用它，重复行不能挤掉别的有效样本 */
+function recentDistinct(hits: ModelHit[], limit: number): ModelHit[] {
   const seen = new Set<string>();
   const picked: ModelHit[] = [];
   for (const h of [...hits].filter((x) => Number.isFinite(x.ts)).sort((a, b) => b.ts - a.ts)) {
@@ -111,6 +112,12 @@ export function modelDistribution(hits: ModelHit[], limit: number, source: Model
     picked.push(h);
     if (picked.length >= limit) break;
   }
+  return picked;
+}
+
+/** 最近 limit 次的模型分布；share 保留两位小数 */
+export function modelDistribution(hits: ModelHit[], limit: number, source: ModelEvidence["source"], filesScanned: number): ModelEvidence {
+  const picked = recentDistinct(hits, limit);
   const counts = new Map<string, number>();
   for (const h of picked) counts.set(h.model, (counts.get(h.model) ?? 0) + 1);
   const models = [...counts].map(([model, count]) => ({ model, count, share: Math.round((count / picked.length) * 100) / 100 }))
@@ -125,42 +132,45 @@ export function modelDistribution(hits: ModelHit[], limit: number, source: Model
 // ── 读文件 ───────────────────────────────────────────────────────────────
 
 const TAIL_BYTES = 1024 * 1024;
+/** 抽出 unknown 时这个文件放宽到的窗口：Codex 长回合的 turn_context 常在尾部 1MB 之前（本机实测过半的记录对不上） */
+const WIDE_TAIL_BYTES = 8 * TAIL_BYTES;
 const MAX_FILES = 40;
 const LOOKBACK_MS = 14 * 24 * 3600_000;
 export const EVIDENCE_LIMIT = 200;
 
-async function tailLines(path: string): Promise<string[]> {
+async function tailLines(path: string, bytes = TAIL_BYTES): Promise<string[]> {
   try {
     const size = statSync(path).size;
-    return (await Bun.file(path).slice(Math.max(0, size - TAIL_BYTES)).text()).split("\n");
+    return (await Bun.file(path).slice(Math.max(0, size - bytes)).text()).split("\n");
   } catch (e) {
     console.error(`[ai-inventory] 读会话记录失败（跳过这个文件）: ${(e as Error).message}`);
     return [];
   }
 }
 
-const mtimeOf = (p: string) => {
-  try { return statSync(p).mtimeMs; } catch { return 0; } // 扫描途中被删：排到最后，不会被读
+const statOf = (p: string) => {
+  try { const st = statSync(p); return { m: st.mtimeMs, size: st.size }; } catch { return { m: 0, size: 0 }; } // 扫描途中被删：排到最后，不会被读
 };
 
 /**
- * 按 mtime 从新到旧读尾部：已攒够 limit 条、且下一个文件最后写入都早于已攒到的第 limit 新的那条时停——
+ * 按 mtime 从新到旧读尾部：去重后已攒够 limit 条、且下一个文件最后写入都早于其中最旧的那条时停——
  * 它和更旧的文件里不可能再有更新的响应。
  */
 export async function scanEvidence(
   roots: string[], extract: (lines: string[]) => ModelHit[], source: ModelEvidence["source"], limit = EVIDENCE_LIMIT, now = Date.now(),
 ): Promise<ModelEvidence> {
-  const files = listRecentJsonl(roots, now - LOOKBACK_MS).map((p) => ({ p, m: mtimeOf(p) })).sort((a, b) => b.m - a.m);
+  const files = listRecentJsonl(roots, now - LOOKBACK_MS).map((p) => ({ p, ...statOf(p) })).sort((a, b) => b.m - a.m);
   const hits: ModelHit[] = [];
   let scanned = 0;
   for (const f of files) {
     if (scanned >= MAX_FILES) break;
-    if (hits.length >= limit) {
-      const nth = hits.map((h) => h.ts).sort((a, b) => b - a)[limit - 1]!;
-      if (f.m < nth) break;
-    }
+    const picked = recentDistinct(hits, limit);
+    if (picked.length >= limit && f.m < picked[limit - 1]!.ts) break;
     scanned++;
-    hits.push(...extract(await tailLines(f.p)));
+    let got = extract(await tailLines(f.p));
+    // 窗口外才有的回合上下文：放宽一次再抽，仍对不上的照记 unknown（不借别的回合）
+    if (got.some((h) => h.model === "unknown") && f.size > TAIL_BYTES) got = extract(await tailLines(f.p, WIDE_TAIL_BYTES));
+    hits.push(...got);
   }
   return modelDistribution(hits, limit, source, scanned);
 }

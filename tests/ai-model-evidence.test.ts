@@ -38,6 +38,10 @@ describe("codexHits", () => {
     const hits = codexHits([tc("t1", "gpt-6.1-sol", 0), rec("t1", "r1", 1), cnt(1), tc("t2", "gpt-6-mini", 2), rec("t2", "r2", 3), rec("t1", "r3", 4)]);
     expect(hits.map((h) => [h.id, h.model])).toEqual([["codex:r1", "gpt-6.1-sol"], ["codex:r2", "gpt-6-mini"], ["codex:r3", "gpt-6.1-sol"]]);
   });
+  test("记录带 turn_id 但那一回合的 turn_context 不在尾读窗口里：记 unknown，不借别的回合的模型", () => {
+    const hits = codexHits([tc("t2", "gpt-second", 0), rec("t1", "r1", 1), rec("t2", "r2", 2)]);
+    expect(hits.map((h) => [h.id, h.model])).toEqual([["codex:r1", "unknown"], ["codex:r2", "gpt-second"]]);
+  });
   test("老 rollout 没有 token_usage_record：退回带 info 的 token_count（只有限流信息的不算）", () => {
     const hits = codexHits([tc("t1", "gpt-5", 0), cnt(1), cnt(2, null), cnt(3)]);
     expect(hits.map((h) => h.model)).toEqual(["gpt-5", "gpt-5"]);
@@ -83,7 +87,37 @@ describe("scanEvidence 读文件尾", () => {
     expect(ev.models).toEqual([{ model: "claude-opus-5-5", count: 2, share: 0.67 }, { model: "glm-5", count: 1, share: 0.33 }]);
   });
 
+  test("停止条件按去重后计：同一响应的重复行占满 limit 时继续读更旧的文件", async () => {
+    const now = Date.now();
+    const d = join(dir, "dup");
+    mkdirSync(d, { recursive: true });
+    const tsAt = (ms: number) => new Date(ms).toISOString();
+    const line = (id: string, model: string, ms: number) => JSON.stringify({ type: "assistant", timestamp: tsAt(ms), message: { id, model } });
+    writeFileSync(join(d, "new.jsonl"), [line("dup", "claude-opus-5-5", now - 10_000), line("dup", "claude-opus-5-5", now - 10_000)].join("\n"));
+    writeFileSync(join(d, "old.jsonl"), line("other", "glm-5", now - 60_000));
+    utimesSync(join(d, "old.jsonl"), new Date(now - 30_000), new Date(now - 30_000)); // mtime 晚于 other、早于 dup
+    const ev = await scanEvidence([d], claudeHits, "response_model", 2, now);
+    expect(ev.filesScanned).toBe(2);
+    expect(ev.sample).toBe(2);
+    expect(ev.models.map((m) => m.model).sort()).toEqual(["claude-opus-5-5", "glm-5"]);
+  });
+
   test("根目录不存在 = 空证据", async () => {
     expect((await scanEvidence([join(dir, "nope")], claudeHits, "response_model")).sample).toBe(0);
   });
+});
+
+test("Codex 回合上下文在尾部 1MB 之前：放宽窗口再读一次，能对上就不记 unknown", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "ai-ev-wide-"));
+  try {
+    const ts0 = new Date(Date.now() - 60_000).toISOString();
+    const ctx = JSON.stringify({ type: "turn_context", timestamp: ts0, payload: { turn_id: "t1", model: "gpt-6.1-sol" } });
+    const pad = JSON.stringify({ type: "response_item", payload: { text: "x".repeat(2 * 1024 * 1024) } });
+    const rec = JSON.stringify({ type: "token_usage_record", timestamp: ts0, payload: { turn_id: "t1", response_id: "r1" } });
+    writeFileSync(join(dir, "rollout.jsonl"), [ctx, pad, rec].join("\n"));
+    const ev = await scanEvidence([dir], codexHits, "request_model", 10);
+    expect(ev.models).toEqual([{ model: "gpt-6.1-sol", count: 1, share: 1 }]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
