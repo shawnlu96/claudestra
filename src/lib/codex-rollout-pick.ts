@@ -8,13 +8,13 @@
  *
  * revert 链：Codex `thread/revert` 保留 thread id、另起 `<threadId>_<rolloutId>.jsonl`，新文件**只装新条目**，
  * 首行 history_base.thread_id 记着前一段的 rolloutId。只拷最新一段会丢前缀、只拷原文件会丢新正文，所以整条链每段各存一份（按 rolloutId 命名）；
- * Codex 按文件 mtime 满 7 天把段压成 `.jsonl.zst`：压过的段解压后同明文段一样认、一样拷（copyIfLarger 解压落盘），同一段明文和 .zst 都在时用明文。
+ * Codex 按文件 mtime 满 7 天把段压成 `.jsonl.zst`：压过的段同明文段一样认（流式只解首行）、一样拷（copyIfLarger 流式解压落盘），同一段明文和 .zst 都在时用明文。
  * 本线程有段没存上（解压失败 / 首行坏 / 链上引用落空）→ incomplete，调用方报 ok:false。
  */
 import { realpathSync } from "node:fs";
 import { basename } from "node:path";
-import { readMaybeZstd } from "./archive-copy.js";
 import { codexSessionsRoot, listCodexSessionFiles, readCodexMetaPayload } from "./codex-session.js";
+import { readZstdFirstLine } from "./zstd-file.js";
 
 /**
  * 一段 rollout 及它在归档里的文件名（不带 .jsonl）：原文件是 thread id，revert 段是它自己的 rolloutId（UUIDv7，不会撞）。
@@ -57,18 +57,14 @@ const chainOrder = (a: Named, b: Named) =>
 
 const metaId = (meta: Record<string, any> | null) => String(meta?.id ?? meta?.session_id ?? "");
 
-/** 首行 session_meta.payload；.zst 整份解压后取首行（没有只解开头的同步接口），解压失败返回原因 */
+/** 首行 session_meta.payload；.zst 流式解到首行为止（与明文同样封顶 4MB），解压失败返回原因 */
 async function readSegmentMeta(f: Named): Promise<{ meta: Record<string, any> | null } | { error: string }> {
   if (!f.name.compressed) return { meta: await readCodexMetaPayload(f.path) };
-  let text: string;
+  const head = await readZstdFirstLine(f.path, 4 * 1024 * 1024);
+  if (head.kind === "error") return { error: `.zst 解压失败：${head.message}` };
+  if (head.kind === "too-long") return { meta: null };
   try {
-    text = (await readMaybeZstd(f.path)).toString("utf8");
-  } catch (e) {
-    return { error: `.zst 解压失败：${(e as Error).message}` };
-  }
-  const nl = text.indexOf("\n");
-  try {
-    const obj = JSON.parse(nl < 0 ? text : text.slice(0, nl));
+    const obj = JSON.parse(head.text);
     return { meta: obj?.type === "session_meta" ? (obj?.payload ?? {}) : null };
   } catch {
     return { meta: null }; // 首行坏：同明文段，当首行读不出

@@ -4,14 +4,16 @@
  *   specRev 2  thread/revert 的 `<threadId>_<rolloutId>.jsonl` 被定位器跳过 → ok:true 却只存旧正文。整条链每段各存一份，缺段 ok:false
  * rollout 根走 CODEX_HOME（codexSessionsRoot 每次调用现读环境变量），全部落在临时目录，不碰真实 ~/.codex。
  */
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { afterAll, beforeAll, describe, expect, spyOn, test } from "bun:test";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import zlib from "node:zlib";
 import { archiveAgentSession, archiveSession } from "../src/lib/session-archive.js";
 import { isValidSessionId, readSessionHistory, searchSessionHistory } from "../src/lib/session-history.js";
 import { UNTRUSTED_RUNTIME, sourceIdForPath } from "../src/lib/runtimes/index.js";
 import { readFirstLineSync, sessionSidecarPath } from "../src/lib/session-sidecar.js";
+import { headThenFrame } from "./zstd-test-kit.js";
 
 const base = mkdtempSync(join(tmpdir(), "codex-archive-read-"));
 const realCodexHome = process.env.CODEX_HOME;
@@ -206,6 +208,39 @@ describe("specRev 2：thread/revert 链", () => {
     const p2 = rollout("2026-09-29T01-02-03", id2, { id: id2 }, [userLine("BOTH")]);
     writeFileSync(`${p2}.zst`, Bun.zstdCompressSync(readFileSync(p2)).subarray(0, 10)); // 半截 .zst
     expect(await archive(id2, root)).toMatchObject({ ok: true, archived: [join(root, "agent-cx", `${id2}.jsonl`)] });
+  });
+
+  // r3：.zst 解压在 bridge 的每日 sweep 里跑，不许全量同步解、不许无上限
+  test("冷段帧头大小 ≤ 已有归档：只流式读首行，不整份解压（手搓帧声明与内容不符，真解会失败）", async () => {
+    const id = sid();
+    const p = rollout("2026-09-29T01-02-03", id, { id }, [userLine("COLD")], ".jsonl.zst");
+    const root = archiveRoot();
+    expect((await archive(id, root)).ok).toBe(true);
+    const dest = join(root, "agent-cx", `${id}.jsonl`);
+    const head = readFileSync(dest, "utf8").split("\n")[0]!;
+    writeFileSync(p, headThenFrame(head, readFileSync(dest).length));
+    const spy = spyOn(zlib, "createZstdDecompress");
+    try {
+      expect(await archive(id, root)).toMatchObject({ ok: true, archived: [], note: "归档已是最新（无变化）" });
+      expect(spy).toHaveBeenCalledTimes(1); // 只有 pick 读首行那一次
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  test("解压炸弹（帧头声明 2GiB）：ok:false 写明上限，归档目录不留临时文件，旧段照拷", async () => {
+    const id = sid();
+    const r1 = rid(n);
+    rollout("2026-09-29T01-02-03", id, { id }, [userLine("OLD")]);
+    const p = rollout("2026-09-30T01-02-03", `${id}_${r1}`, { id, history_base: { thread_id: id } }, [], ".jsonl.zst");
+    const head = L({ timestamp: TS, type: "session_meta", payload: { cwd, id, history_base: { thread_id: id } } });
+    writeFileSync(p, headThenFrame(head, 2 * 1024 * 1024 * 1024));
+    const root = archiveRoot();
+    const r = await archive(id, root);
+    expect(r.ok).toBe(false);
+    expect(r.note).toContain("解压超过上限");
+    expect(readdirSync(join(root, "agent-cx")).filter((f) => f.includes(".tmp-"))).toEqual([]);
+    expect(r.archived).toEqual([join(root, "agent-cx", `${id}.jsonl`)]);
   });
 
   // P1（T75 r1）：文件名更新的同线程段没进归档时，不能 ok:true 只存旧正文
