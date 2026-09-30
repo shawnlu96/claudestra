@@ -4,6 +4,8 @@
  * 纯函数，tests/manager-ledger-identity.test.ts。
  */
 
+import { LEND_WORKER_MARK } from "../lib/runtimes/clean-env.js";
+
 export type ActorResult = { ok: true; actor: string } | { ok: false; error: string };
 
 /**
@@ -14,7 +16,10 @@ export type ActorResult = { ok: true; actor: string } | { ok: false; error: stri
 export function resolveActor(
   env: { channelId?: string; controlChannelId?: string },
   agents: Record<string, { channelId?: string }>,
+  lendWorkerMark = process.env[LEND_WORKER_MARK],
 ): ActorResult {
+  // 出借 worker 的环境里本来就没有频道号，不先拦就会被当成 owner：外来任务能自己改 lend.json、延长预先授权、替 owner 答 ask
+  if (lendWorkerMark) return { ok: false, error: "出借 worker 不能以本机身份写台账或改声明" };
   const ch = env.channelId?.trim();
   if (!ch) return { ok: true, actor: "owner" };
   if (env.controlChannelId && ch === env.controlChannelId.trim()) return { ok: true, actor: "master" };
