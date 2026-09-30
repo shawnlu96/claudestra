@@ -141,10 +141,10 @@ export const SETTINGS_PAGES: { id: SettingsPageId; label: string; icon: ReactNod
 
 /**
  * 这台设备能看的页。非全权设备（guest / 部分 scope）只留纯本地的页和设备页（本设备的退出登录）：会话与自动化、Peer、技能库、
- * Claude 整页的接口都要全权；连接与集成只在原生壳里还剩 App 服务器地址。
+ * Claude、连接与集成整页的接口都要全权。
  */
-export function settingsPagesFor(full: boolean, env: { native: boolean }): SettingsPageId[] {
-  const local: SettingsPageId[] = ["general", "appearance", "security", "labs", ...(env.native ? ["connect" as const] : [])];
+export function settingsPagesFor(full: boolean): SettingsPageId[] {
+  const local: SettingsPageId[] = ["general", "appearance", "security", "labs"];
   return SETTINGS_PAGES.map((p) => p.id).filter((id) => full || local.includes(id));
 }
 
