@@ -25,6 +25,7 @@ import type { LedgerCli, Result } from "./ledger-context.js";
 import { checkMergeGate, checkTaskRefs } from "./ledger-field-checks.js";
 import { agentKey, intFlag, jsonObjectFlag } from "./ledger-identity.js";
 import { MASTER_PARENT, TASK_MAX, validateParent, validateTask } from "./team.js";
+import { structuredReviewFlags } from "./ledger-scheduler-observe-cmds.js";
 
 const ITEM_FLAGS: Record<string, string> = { title: "title", status: "status", priority: "priority", "owner-words": "ownerWords", "one-line": "oneLine", next: "next" };
 const TASK_FLAGS: Record<string, string> = {
@@ -247,7 +248,7 @@ function review(c: LedgerCli): Result {
   if (move?.to === "merge") checkMergeGate(c, task, { verdict, waive });
   const r = recordReview(c.db, c.ctx(), {
     taskId: task.id, reviewer: c.need("reviewer"), verdict: verdict as never, ...(counts as { p0: number; p1: number; p2: number }),
-    path: c.p.flags.path, text: c.p.flags.text, move, ...(waive ? { waive } : {}),
+    path: c.p.flags.path, text: c.p.flags.text, move, ...(waive ? { waive } : {}), ...structuredReviewFlags(c),
   });
   return { ok: true, task: r.row, event: r.event, duplicate: r.duplicate };
 }
@@ -333,8 +334,9 @@ export const WRITE_CMDS: Record<string, CommandSpec> = {
   "ask-reopen": { valued: ["dedup"], usage: "ask-reopen <task>（指给人的 ask 过期了、或点了做不了之后要再派一次时重开一条；旧的由 bridge 撤掉）", run: askReopen },
   deliver: { valued: ["head", "evidence", "from", "text", "dedup"], usage: "deliver <task> [--head <sha>] [--evidence <path>] [--from build|fix] [--text]", run: deliverCmd },
   review: {
-    valued: ["reviewer", "verdict", "p0", "p1", "p2", "path", "text", "to", "waive", "dedup"],
-    usage: "review <task> --reviewer <r> --verdict pass|changes|block --p0 N --p1 N --p2 N [--path <md>] [--text] [--to fix|merge|done|spec] [--waive adversarial]",
+    valued: ["reviewer", "verdict", "p0", "p1", "p2", "path", "text", "to", "waive", "dedup", "head", "session", "family", "findings"],
+    usage: "review <task> --reviewer <r> --verdict pass|changes|block --p0 N --p1 N --p2 N [--path <md>] [--text] [--to fix|merge|done|spec] [--waive adversarial]" +
+      " [--head <完整 sha> --session <审查 session id> --family claude|codex --findings <逐项结论.json>]",
     run: review,
   },
   decision: { valued: ["project", "dedup"], bools: ["transcribed"], usage: "decision <task|item|-> <原话> [--transcribed]", run: decision },

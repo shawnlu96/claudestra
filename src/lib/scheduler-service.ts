@@ -11,7 +11,7 @@ import { acquireMaintenance, SchedulerStopped } from "./scheduler-maintenance.js
 
 type Manager = (...args: string[]) => Promise<Record<string, unknown>>;
 
-const schedulerManager: Manager = (...args) => runManagerProcess(args, {
+export const schedulerManager: Manager = (...args) => runManagerProcess(args, {
   bunPath: resolveBunPath(), managerPath: `${SRC_DIR}/manager.ts`,
   env: { ...process.env, DISCORD_CHANNEL_ID: "", CLAUDESTRA_SCHEDULER_SERVICE: "1" }, timeoutMs: 120_000,
 });

@@ -246,6 +246,11 @@ export interface ReviewInput {
   model?: string;
   /** PM 豁免对抗式（review --waive adversarial，权限在 CLI 层判），只对当时的 head 有效（ledger-handler.ts owesAdversarial） */
   waive?: "adversarial";
+  /** T68 结构化结论：四项同给或都不给（scheduler-review.ts checkStructuredReview），规划器只认这些字段 */
+  head?: string;
+  reviewerSessionId?: string;
+  reviewerFamily?: "claude" | "codex";
+  findings?: { findingId: string; family: string; severity: "P0" | "P1" | "P2"; probe: string }[];
 }
 
 export function checkReview(input: ReviewInput, task: LedgerTask): void {
