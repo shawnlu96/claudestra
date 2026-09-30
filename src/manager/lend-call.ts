@@ -5,6 +5,7 @@
  * 输出 {ok:true, status, body}：只要请求到了对方并拿回响应就是 ok:true，对方的拒绝在 body 里；发不出去 / 不知道发没发出去是 ok:false。
  */
 import { proxyVarsIn, peerLendProblem, type LendOp } from "../lib/lend-remote.js";
+import { signedFor } from "../lib/instance-key.js";
 import { LEND_WORKER_MARK } from "../lib/runtimes/clean-env.js";
 import { output } from "./core.js";
 import { peerE2eOnlyFetch } from "./relay.js";
@@ -25,8 +26,11 @@ export async function cmdLendCall(args: string[]): Promise<void> {
   const problem = peerLendProblem(peer, peerName);
   if (problem) return output({ ok: false, code: "precondition", error: problem });
   try {
-    const res = await peerE2eOnlyFetch(`${peer!.baseUrl!.replace(/\/+$/, "")}/api/v1/lend/${op}`, {
-      method: "POST", headers: { Authorization: `Bearer ${peer!.outToken}`, "Content-Type": "application/json" }, body, signal: AbortSignal.timeout(45_000),
+    const url = `${peer!.baseUrl!.replace(/\/+$/, "")}/api/v1/lend/${op}`;
+    // 内层也要带实例签名（A 的出借路由要求，同 bridge/http-peer.ts）；每次调用现签，result 原样重发时签名不复用，不会被当成重放
+    const res = await peerE2eOnlyFetch(url, {
+      method: "POST", headers: { Authorization: `Bearer ${peer!.outToken}`, "Content-Type": "application/json", ...signedFor("POST", url, body) },
+      body, signal: AbortSignal.timeout(45_000),
     });
     const text = await res.text();
     let parsed: unknown = null;
