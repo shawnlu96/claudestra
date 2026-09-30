@@ -90,9 +90,17 @@ export interface LocalPending {
   machineName: string;
 }
 
-/** 直托管 + 本机回环：一键配对。bridge 带控制 token 才直接签（网页没有）；否则 202 进待批，拿 approvalId 轮询 pairStatus */
+/**
+ * 直托管 + 本机回环：一键配对。bridge 带控制 token 才直接签（网页没有）；否则 202 进待批，拿 approvalId 轮询 pairStatus——
+ * 响应顺带种一个 HttpOnly 领取 cookie，只有这个浏览器取得走结果。
+ */
 export function pairLocal(fp: string, deviceName: string): Promise<PairedInfo | LocalPending> {
   return api<PairedInfo | LocalPending>("/devices/local", { method: "POST", json: { deviceName } }, m(fp));
+}
+
+/** 放弃本机待批（取消 / 离开配对页）：服务端那条也作废，不然它占着同时待批的名额；keepalive 让卸载时也发得出去 */
+export function cancelLocalPairing(fp: string, approvalId: string): Promise<unknown> {
+  return api("/devices/local/cancel", { method: "POST", json: { approval: approvalId }, keepalive: true }, m(fp));
 }
 
 /** 中继的短码查找（不在任何机器的基址下，直接打同源）；404 code_invalid / 429 rate_limited 抛 ApiError */
@@ -178,7 +186,7 @@ export function pairErrorText(e: unknown, local = false): string {
     case "challenge_invalid":
       return "链接已过期，请重新生成二维码";
     case "rate_limited":
-      return "尝试太频繁，请稍后再试";
+      return local ? "已有本机请求在等批准：在已配对的设备上拒绝，或等它过期" : "尝试太频繁，请稍后再试";
     case "machine_unknown":
       return "这台机器没有连上中继";
     case "no_machine":

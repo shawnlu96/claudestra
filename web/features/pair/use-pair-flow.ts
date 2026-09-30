@@ -3,7 +3,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { AppConfig } from "@/lib/app-config";
 import { LOCAL_FP } from "@/lib/app-config";
 import { compactCode, defaultDeviceName } from "@/lib/pairing";
-import { pairErrorText, pairLocal, type PairedInfo } from "@/lib/api/devices";
+import { cancelLocalPairing, pairErrorText, pairLocal, type PairedInfo } from "@/lib/api/devices";
 import { finishPairing, pairByProof, pollApproval, resolveCodeTarget, startCodePairing } from "./pair-flow";
 
 export type PairPhase =
@@ -13,11 +13,19 @@ export type PairPhase =
   | { kind: "pending"; machineName: string; code?: string }
   | { kind: "error"; message: string };
 
-/** 配对页的三条流程 + 阶段状态；成功后 onPaired（页面跳 /chat）。离开页面时中止轮询。 */
+/** 配对页的三条流程 + 阶段状态；成功后 onPaired（页面跳 /chat）。离开页面时中止轮询，本机待批一并作废。 */
 export function usePairFlow(cfg: AppConfig | null, onPaired: () => void) {
   const [phase, setPhase] = useState<PairPhase>({ kind: "idle" });
   const pollAbort = useRef<AbortController | null>(null);
-  useEffect(() => () => pollAbort.current?.abort(), []);
+  /** 还在等批准的本机请求：放弃时通知 bridge 作废（同时待批有名额上限，废弃的别占着） */
+  const localReq = useRef<{ fp: string; id: string } | null>(null);
+  const abandon = useCallback(() => {
+    const r = localReq.current;
+    localReq.current = null;
+    if (r) cancelLocalPairing(r.fp, r.id).catch((e: Error) => console.warn("[pair] 作废本机待批没发出去，等它过期:", e.message));
+    pollAbort.current?.abort();
+  }, []);
+  useEffect(() => abandon, [abandon]);
 
   const done = useCallback(
     async (info: PairedInfo, fp: string) => {
@@ -86,7 +94,12 @@ export function usePairFlow(cfg: AppConfig | null, onPaired: () => void) {
         const fp = cfg.fp || LOCAL_FP;
         const r = await pairLocal(fp, name || defaultDeviceName(navigator.userAgent));
         if (!("pending" in r)) return void (await done(r, fp));
-        await awaitApproval(fp, r.approvalId, { kind: "pending", machineName: r.machineName, code: r.code }, "确认超时，请再点一次一键配对");
+        localReq.current = { fp, id: r.approvalId };
+        try {
+          await awaitApproval(fp, r.approvalId, { kind: "pending", machineName: r.machineName, code: r.code }, "确认超时，请再点一次一键配对");
+        } finally {
+          localReq.current = null;
+        }
       } catch (e) {
         if ((e as Error)?.name === "AbortError") return setPhase({ kind: "idle" });
         setPhase({ kind: "error", message: pairErrorText(e, true) });
@@ -95,6 +108,5 @@ export function usePairFlow(cfg: AppConfig | null, onPaired: () => void) {
     [cfg, done, awaitApproval],
   );
 
-  const cancel = useCallback(() => pollAbort.current?.abort(), []);
-  return useMemo(() => ({ phase, runProof, runCode, runLocal, cancel }), [phase, runProof, runCode, runLocal, cancel]);
+  return useMemo(() => ({ phase, runProof, runCode, runLocal, cancel: abandon }), [phase, runProof, runCode, runLocal, abandon]);
 }
