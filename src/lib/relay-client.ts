@@ -13,6 +13,7 @@ import {
 import { InboundRouter, type Logger } from "./relay-client-inbound.js";
 import { OutboundTable, type RequestOptions } from "./relay-client-outbound.js";
 import { PushTable } from "./relay-client-push.js";
+import { DEFAULT_LIVENESS, RelayLiveness, type LivenessOptions } from "./relay-liveness.js";
 import { remoteCode } from "./remote-text.js";
 import { RelayError, type InboundHandler, type PushAck, type PushRequest, type RelayInfo, type RelayRequest, type RelayResponse, type RelayState } from "./relay-client-types.js";
 
@@ -44,6 +45,7 @@ export interface ConnectOptions {
   onWelcome?: (info: RelayInfo) => void;
   log?: Logger;
   timing?: Partial<RelayTiming>;
+  liveness?: LivenessOptions;
 }
 
 const DEFAULT_TIMING: RelayTiming = {
@@ -81,9 +83,11 @@ export class RelayClient {
   private readonly outbound: OutboundTable;
   private readonly inbound: InboundRouter;
   private readonly pushes: PushTable;
+  private readonly liveness: RelayLiveness;
 
   constructor(private readonly o: ConnectOptions) {
     this.timing = { ...DEFAULT_TIMING, ...o.timing };
+    this.liveness = new RelayLiveness(o.liveness ?? DEFAULT_LIVENESS);
     this.log = o.log ?? ((level, msg) => (level === "info" ? console.log : console.error)(`[relay] ${msg}`));
     const send = (f: object) => this.send(f);
     this.outbound = new OutboundTable(send, rand, LIMITS.maxChunkBytes, this.timing.headGraceMs);
@@ -175,7 +179,9 @@ export class RelayClient {
     const ws = this.ws;
     if (!ws || ws.readyState !== WebSocket.OPEN) return false;
     try {
-      ws.send(JSON.stringify(frame));
+      const raw = JSON.stringify(frame);
+      ws.send(raw);
+      this.liveness.onSend(raw.length);
       return true;
     } catch (e) {
       this.log("warn", `发帧失败（连接正在关闭，close 回调会收尾）: ${(e as Error).message}`);
@@ -194,7 +200,7 @@ export class RelayClient {
     this.outbound.rejectAll(lost);
     this.pushes.rejectAll(lost);
     this.inbound.abortAll();
-    if (wasOnline) this.log("warn", `中继连接断开 code=${code} ${reason}`);
+    if (wasOnline) this.log("warn", `中继连接断开 code=${code} ${reason}${this.lastError && this.lastError !== reason ? `（${this.lastError}）` : ""}`);
     this.scheduleReconnect(fatal);
   }
 
@@ -222,13 +228,17 @@ export class RelayClient {
 
   private startHeartbeat(): void {
     this.clearTimers();
+    this.liveness.reset();
     this.heartbeat = setInterval(() => {
+      this.liveness.onPing();
       this.send({ t: "ping", ts: Date.now() });
       if (this.pongTimer) return;
       this.pongTimer = setTimeout(() => {
         this.pongTimer = null;
-        this.lastError = "pong timeout";
-        this.log("warn", "中继心跳无应答，断开重连");
+        const v = this.liveness.onPongTimeout();
+        if (!v.dead) return this.log("info", `中继心跳 pong 迟到，疑似排在上行数据后面，顺延（${v.reason}）`);
+        this.lastError = `pong timeout (${v.reason})`;
+        this.log("warn", `中继心跳无应答，断开重连（${v.reason}）`);
         this.ws?.close(4408, "pong timeout");
       }, this.timing.pongTimeoutMs);
     }, this.timing.heartbeatMs);
@@ -239,6 +249,7 @@ export class RelayClient {
   private onMessage(ws: WebSocket, raw: string | null): void {
     if (this.ws !== ws) return;
     const f = raw === null ? null : parseFrame(raw);
+    if (f && f.t !== "pong") this.liveness.onInbound();
     if (!f) return this.log("warn", "中继发来无法解析的帧，忽略");
     const from = typeof f.from === "string" ? f.from : undefined;
     switch (f.t) {
@@ -246,6 +257,7 @@ export class RelayClient {
       case "welcome": return this.onWelcome(f);
       case "ping": return void this.send({ t: "pong", ts: f.ts });
       case "pong": {
+        this.liveness.onPong();
         if (this.pongTimer) clearTimeout(this.pongTimer);
         this.pongTimer = null;
         return;
