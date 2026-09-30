@@ -64,7 +64,8 @@ function redeemE2e(raw: string): { idk: string; ek: SignedE2eKey } | null {
   }
 }
 
-const LEGACY_REDEEM_REFUSED = "对方版本太旧，请先升级；确实要连就用 peer-invite-new --allow-legacy 重新生成邀请（这张邀请的兑换口令已明文经过网络，已作废）";
+/** 回给加入方看的（兑换请求是加入方发的）：从加入方的角度写，邀请方的命令（--allow-legacy）不给他 */
+const LEGACY_REDEEM_REFUSED = "你这边的 Claudestra 版本太旧，不支持加密邀请：请先更新到最新版，再请对方重新生成一张邀请（这张的兑换口令已明文经过网络，已作废）";
 
 /** 兑换因实例 id 冲突、邀请地址对不上被拒：这张邀请记一次，满 INVITE_MAX_REFUSALS 次作废并吊销内嵌 token（一张邀请不能拿来反复试探）。返回是否已作废 */
 async function countRefusal(inv: PendingInvite): Promise<boolean> {
