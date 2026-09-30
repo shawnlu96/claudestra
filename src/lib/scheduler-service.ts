@@ -9,6 +9,7 @@ import { driveMerge, type MergeExternal } from "./scheduler-merge-driver.js";
 import { getMergeRun, mergeRunDrift, type MergeRun, type MergePhase } from "./scheduler-merge.js";
 import { acquireMaintenance, SchedulerStopped } from "./scheduler-maintenance.js";
 import { encodeLease, SCHEDULER_LEASE_ENV, type LeaseHold } from "./scheduler-lease-env.js";
+import type { TickPace } from "./scheduler-yield.js";
 
 type Manager = (...args: string[]) => Promise<Record<string, unknown>>;
 
@@ -43,12 +44,13 @@ export async function schedulerMergeTick(db: Database, config: SchedulerConfig, 
 
 /** The merge pass itself; the caller holds the maintenance lease and passes a manager already guarded by assertActive. */
 export async function mergeTick(db: Database, config: SchedulerConfig, manager: Manager,
-  externalFactory: (project: SchedulerConfig["projects"][string]) => MergeExternal, assertActive: () => void): Promise<number> {
+  externalFactory: (project: SchedulerConfig["projects"][string]) => MergeExternal, assertActive: () => void, pace?: TickPace): Promise<number> {
   let handled = 0;
   for (const [project, policy] of Object.entries(config.projects)) {
     const intents = db.query(`SELECT id, status FROM scheduler_intents WHERE project=? AND action='merge'
       AND status IN ('pending','submitted') ORDER BY eventSeq`).all(project) as { id: string; status: string }[];
     for (const intent of intents) {
+      if (pace?.yieldNow()) return handled; // 合并日志落盘可跨轮续，让出只挑意图之间
       if (intent.status === "pending") {
         requireOk(await manager("ledger", "scheduler-settle", intent.id, "--from", "pending", "--to", "submitted",
           "--receipt", "merge controller claimed"), "claim merge intent");

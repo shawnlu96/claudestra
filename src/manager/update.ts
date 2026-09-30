@@ -21,6 +21,7 @@ import {
 import { maybeBuildWeb } from "./web-release.js";
 import { output } from "./core.js";
 import { acquireMaintenance, whileOwned } from "../lib/scheduler-maintenance.js";
+import { UPDATE_WAIT_MS } from "../lib/scheduler-yield.js";
 
 type Proc = { exited: Promise<number>; stdout: ReadableStream; stderr: ReadableStream };
 export interface UpdateDeps {
@@ -263,7 +264,7 @@ async function cmdUpdateBeta(d: UpdateDeps): Promise<void> {
 
 /** release 通道：查最新 release → 切到 tag → 挂回分支 → 尾段。beta 通道与半截补完在前面分流 */
 export async function cmdUpdate(d: UpdateDeps): Promise<void> {
-  const lock = await acquireMaintenance("update");
+  const lock = await acquireMaintenance("update", { waitMs: UPDATE_WAIT_MS }); // 调度一轮在跑：留请求等它在卡间让出（lib/scheduler-yield.ts）
   if (!lock) {
     process.exitCode = 1; // Deploy scripts and the launcher log judge by exit code; a refused update must not read as updated.
     return output({ ok: false, error: "scheduler merge in progress, unresolved unknown merge, or another maintenance operation" });
