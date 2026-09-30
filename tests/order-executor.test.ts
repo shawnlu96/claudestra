@@ -167,6 +167,16 @@ describe("deliver", () => {
     expect(runs).toEqual([]);
   });
 
+  test("参数里夹带身份字段（channel / agent / 会话 / 家族 / actor）→ wire 拒；子进程的频道只来自身份", async () => {
+    const forged = [{ channelId: "ch-t2" }, { agent: OTHER }, { sessionId: "s-x" }, { family: "codex" }, { actor: "owner" }, { DISCORD_CHANNEL_ID: "ch-pm" }];
+    for (const f of forged) expect(await deliverOrder(call(), wire(f), deps())).toMatchObject({ ok: false, code: "invalid_wire" });
+    expect(runs).toEqual([]);
+    const seen: string[] = [];
+    await deliverOrder(call(), wire(), { db, remoteHead: remote(HEAD), run: (args, ch) => (seen.push(ch), run(args, ch)) });
+    expect(seen).toEqual(["ch-t1"]);
+    expect(events("deliver")[0].actor).toBe(EXE);
+  });
+
   test("台账没记分支 → no_branch，不查不写", async () => {
     const t = getTask(db, "T1")!;
     await cli(PM, "task-set", "T1", "--rev", String(t.rev), "--branch", "");
@@ -226,6 +236,9 @@ describe("ask", () => {
     for (const bad of [{ v: 1, orderId: "T1:write:r0" }, { v: 1, orderId: "T1:write:r0", question: "q", options: "a" }, { v: 1, orderId: "T1:write:r0", question: "q", x: 1 },
       { v: 1, orderId: "T1:write:r0", question: "q", options: ["a\nb"] }, { v: 1, orderId: "T1:write:r0", question: "q", options: [""] }]) {
       expect(await askOrder(call(), bad, askDeps())).toMatchObject({ ok: false, code: "invalid_wire" });
+    }
+    for (const f of [{ channelId: "ch-pm" }, { agent: OTHER }, { sessionId: "s-x" }, { assignee: "agent-x" }]) {
+      expect(await askOrder(call(), { v: 1, orderId: "T1:write:r0", question: "q", ...f }, askDeps())).toMatchObject({ ok: false, code: "invalid_wire" });
     }
     expect(listAsks(db, {})).toEqual([]);
     expect(notes).toEqual([]);
