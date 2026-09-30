@@ -8,7 +8,7 @@ import { dirname } from "node:path";
 import { orderOf, type LendRow } from "./lend-journal.js";
 import { statePath } from "./paths.js";
 
-export const LEND_RECEIPTS_PATH = statePath("lend", "receipts.jsonl");
+const LEND_RECEIPTS_PATH = statePath("lend", "receipts.jsonl");
 
 export type Tokens = { input: number; cacheCreation: number; cacheRead: number; output: number; totalTokens: number } | "未知";
 

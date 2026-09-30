@@ -8,20 +8,20 @@ import type { HttpPeer } from "./peers.js";
 import { parseOrderWire, type OrderWire } from "./order-wire.js";
 import { createHash } from "node:crypto";
 
-export const LEND_WIRE_V = 1;
+const LEND_WIRE_V = 1;
 export type LendOp = "poll" | "claim" | "lease" | "result";
 
 /** 注入的传输：status = HTTP 状态，body = 解析后的 JSON（不是 JSON 就是 null）；抛错 = 没发出去或不知道发没发出去 */
 export type LendCall = (peer: string, op: LendOp, body: Record<string, unknown>) => Promise<{ status: number; body: unknown }>;
 
-export type LendErr = { ok: false; status: number; code: string; error: string };
+type LendErr = { ok: false; status: number; code: string; error: string };
 export type LendRes<T> = { ok: true; value: T } | LendErr;
 
 export interface Lease { gen: number; expiresAt: number; ms: number }
 export interface PolledOrder {
   orderId: string; taskId: string; step: string; family: string; repo: string; pr: number | null; head: string; round: number; specRev: number; offeredAt: number;
 }
-export interface Claimed { order: OrderWire; text: string; sha256: string; lease: Lease }
+interface Claimed { order: OrderWire; text: string; sha256: string; lease: Lease }
 export interface Receipt { orderId: string; sha256: string; eventSeq: number; taskId: string; key: string; sig: string }
 
 class Bad extends Error {}

@@ -17,16 +17,16 @@ import { createHash } from "node:crypto";
 
 export const BEAT_MS = 60_000;
 /** 首条派单后一直没交结论的上限：外来任务不能无限期占着 B 的一个 shell */
-export const MAX_RUN_MS = 3 * 3600_000;
+const MAX_RUN_MS = 3 * 3600_000;
 
-export interface WorkerPort {
+interface WorkerPort {
   /** registry 里这个名字的 agent（会话 id、工作目录）；没有 = undefined */
   find(name: string): { sessionId?: string; cwd?: string } | undefined;
   create(name: string, dir: string, purpose: string): Promise<{ ok: true } | { ok: false; error: string }>;
   send(name: string, sessionId: string, text: string, key: string): Promise<SendResult>;
   /** 结束 worker 并确认窗口已不在；ok:false = 没确认退出（调用方保留现场） */
   kill(name: string): Promise<{ ok: boolean; reason?: string }>;
-  /** 窗口还在不在；null = 查不到（按还在算） */
+  /** worker 还在不在跑（窗口在、且窗口里有子进程）；null = 查不到（按还在算） */
   alive(name: string): Promise<boolean | null>;
 }
 
@@ -50,6 +50,13 @@ export interface LendDeps {
 export const workerName = (orderId: string): string => `agent-lend-${createHash("sha256").update(orderId).digest("hex").slice(0, 10)}`;
 
 const str = (v: unknown): string => (typeof v === "string" ? v : "");
+
+/** lease release 的 detail：单行、≤ 500 字节（T93 wire），空 = null；按字节截，不切断多字节字符 */
+export function detailOf(s: string | null): string | null {
+  let t = (s ?? "").replace(/[\p{Cc}\s\u2028\u2029]+/gu, " ").trim();
+  while (Buffer.byteLength(t) > 500) t = [...t].slice(0, -1).join("");
+  return t || null;
+}
 const leaseFields = (l: Lease, now: number) => ({ leaseGen: l.gen, leaseUntil: now + l.ms, lastBeatAt: now });
 
 /** A 回这几个码 = 这张单在 A 那边已经不归我们了：停 worker，按码记终态 */
@@ -98,26 +105,27 @@ export async function claimOrder(row: LendRow, d: LendDeps): Promise<void> {
 /** 没起过 worker 就退回：先记 released 再告诉 A（not_started）；告诉失败不重试，A 那边租约到期会停给 PM */
 async function release(row: LendRow, from: LendState, why: string, d: LendDeps): Promise<void> {
   const done = advance(d.db, row.orderId, from, "released", { reason: why }, d.now());
-  const r = await lendRequest(d.call, row.peer, "lease", { orderId: row.orderId, gen: row.leaseGen, action: "release", reason: "not_started", detail: why.slice(0, 500) });
+  const r = await lendRequest(d.call, row.peer, "lease", { orderId: row.orderId, gen: row.leaseGen, action: "release", reason: "not_started", detail: detailOf(why) });
   if (!r.ok) d.log(`释放 ${row.orderId}（not_started）没送到 A：${r.code}`);
   try { d.removeDir(row.orderId); } catch (e) { d.log(`删 ${row.orderId} 的工作目录失败：${(e as Error).message}`); }
   await d.writeReceipt(done);
 }
 
 /**
- * worker 已起过的单收尾：先停 worker（确认窗口没了），再记终态、写收据；只有 acked / cancelled 且 worker 已确认退出才删工作副本。
+ * worker 已起过的单收尾：先停 worker，确认窗口没了才记终态、写收据；没确认退出就什么都不记，下一轮再停（单仍算活着，
+ * 续租 / 自停照常，doctor 看得见），绝不留一个没人管的 worker。只有 acked / cancelled 才删工作副本，stopped 保留现场。
  * notify = 要不要告诉 A 我们停了（release stopped）；A 已经判过期 / 撤单的就不再说。
  */
 async function finish(row: LendRow, to: "acked" | "stopped" | "cancelled", why: string | null, d: LendDeps, notify: boolean,
   extra: Partial<Pick<LendRow, "receipt">> = {}): Promise<void> {
   const killed = row.agent ? await d.worker.kill(row.agent) : { ok: true };
-  const reason = why && !killed.ok ? `${why}；worker 没确认退出（${killed.reason ?? "原因不明"}），保留现场` : why;
-  const done = advance(d.db, row.orderId, row.state, to, { reason, ...extra }, d.now());
+  if (!killed.ok) return d.log(`${row.orderId} 要收尾（${to}：${why ?? ""}），但 ${row.agent} 没确认退出（${killed.reason ?? "原因不明"}），下轮再停`);
+  const done = advance(d.db, row.orderId, row.state, to, { reason: why, ...extra }, d.now());
   if (notify && to === "stopped") {
-    const r = await lendRequest(d.call, row.peer, "lease", { orderId: row.orderId, gen: row.leaseGen, action: "release", reason: "stopped", detail: (why ?? "").slice(0, 500) || null });
+    const r = await lendRequest(d.call, row.peer, "lease", { orderId: row.orderId, gen: row.leaseGen, action: "release", reason: "stopped", detail: detailOf(why) });
     if (!r.ok) d.log(`告诉 A ${row.orderId} 已停没送到：${r.code}`);
   }
-  if (killed.ok && (to === "acked" || to === "cancelled")) {
+  if (to === "acked" || to === "cancelled") {
     try { d.removeDir(row.orderId); } catch (e) { d.log(`删 ${row.orderId} 的工作目录失败：${(e as Error).message}`); }
   }
   await d.writeReceipt(done);

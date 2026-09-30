@@ -26,7 +26,7 @@ import { runManagerProcess } from "./run-manager.js";
 import { sendVia } from "./scheduler-auto-ports.js";
 import { whileOwned } from "./scheduler-maintenance.js";
 import { schedulerManager } from "./scheduler-service.js";
-import { listAgentWindows } from "./tmux-helper.js";
+import { listAgentWindows, windowHasChildProcess, windowTarget } from "./tmux-helper.js";
 
 type Manager = (...args: string[]) => Promise<Record<string, unknown>>;
 
@@ -34,7 +34,7 @@ type Manager = (...args: string[]) => Promise<Record<string, unknown>>;
 const plainManager: Manager = (...args) =>
   runManagerProcess(args, { bunPath: resolveBunPath(), managerPath: `${SRC_DIR}/manager.ts`, env: { ...process.env, DISCORD_CHANNEL_ID: "" }, timeoutMs: 180_000 });
 
-export const LEND_PROJECT = "lend";
+const LEND_PROJECT = "lend";
 
 /** 要不要进 pass 跑 lend 这一步：出借开着，或 journal 里还有没跑完的单（lend off 之后在跑的单也要跑完、续租、自停） */
 export async function lendWanted(): Promise<boolean> {
@@ -66,7 +66,7 @@ async function verifyReceipt(peer: string, r: { orderId: string; sha256: string;
   return verifyPurpose(rec.publicKey, "claudestra-lend-receipt-v1", [r.orderId, r.sha256, String(r.eventSeq), r.taskId], r.sig);
 }
 
-export function lendDeps(journal: Database, ledger: LedgerReader, active: () => void): LoopDeps {
+function lendDeps(journal: Database, ledger: LedgerReader, active: () => void): LoopDeps {
   const alive = (): boolean => {
     try { active(); return true; } catch { return false; /* 核不过 = 不能证明仍在持有：什么都不发 */ }
   };
@@ -119,7 +119,13 @@ export function lendDeps(journal: Database, ledger: LedgerReader, active: () => 
         if (still === false) return { ok: true };
         return { ok: false, reason: still === null ? "读不到 tmux 窗口列表" : `kill 后窗口还在（${String(r.error ?? "")}）` };
       },
-      alive: hasWindow,
+      // 窗口在但宿主已退回 shell（自停兜底、崩了）也算不在跑
+      alive: async (name) => {
+        const has = await hasWindow(name);
+        if (has !== true) return has;
+        const kid = await owned(() => windowHasChildProcess(windowTarget(name)).catch(() => null)); // 读不到子进程 = 不知道，按还在算
+        return kid === false ? false : kid === null ? null : true;
+      },
     },
   };
 }

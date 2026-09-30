@@ -3,6 +3,7 @@
  * 另一行「出借循环」读 lend journal（lib/lend-journal.ts）：scheduler 服务最近有没有跑出借这一步、为什么没 poll、在跑几单、哪些单停下来保留了现场。
  */
 import { existsSync } from "node:fs";
+import { dirname, join } from "node:path";
 import type { Check } from "./doctor.js";
 import { LEND_PATH, readLend, type LendEntry } from "./lend-config.js";
 import { effectiveLend, readLendContext, type LendContact } from "./lend-policy.js";
@@ -60,7 +61,7 @@ export async function checkLendLoop(lendPath = LEND_PATH, journalPath?: string, 
     }
     if (kept.length) warns.push(`停下的单：${kept.map((k) => `${k.orderId}（${(k.reason ?? "").slice(0, 80)}）`).join("；")}`);
     const detail = [...parts, ...warns].join("；");
-    return [warns.length ? { ...base, status: "warn", detail, fix: "manager lend status 看声明；停下保留现场的单在 ~/.claude-orchestrator/lend/work 下，核对后可手动删" }
+    return [warns.length ? { ...base, status: "warn", detail, fix: `manager lend status 看声明；停下保留现场的单在 ${join(dirname(path), "work")} 下，核对后可手动删` }
       : { ...base, status: "ok", detail }];
   } finally { db.close(); }
 }

@@ -2,7 +2,7 @@
 import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import type { LendEntry } from "../src/lib/lend-config.js";
-import { BEAT_MS, workerName } from "../src/lib/lend-drive.js";
+import { BEAT_MS, detailOf, workerName } from "../src/lib/lend-drive.js";
 import { advance, getOrder, openLendJournal, patchOrder, recordAsked, type LendRow } from "../src/lib/lend-journal.js";
 import { lendTick, type LoopDeps } from "../src/lib/lend-loop.js";
 import type { LendOp } from "../src/lib/lend-remote.js";
@@ -265,6 +265,21 @@ describe("T94 心跳", () => {
     expect(h.log.removed).toEqual([]);
   });
 
+  test("worker 没确认退出：不记终态，下一轮接着停，直到确认退出", async () => {
+    const h = harness();
+    await toStarted(h);
+    h.A.lease = () => "throw";
+    const realKill = h.d.worker.kill;
+    h.d.worker.kill = async () => ({ ok: false, reason: "窗口还在" });
+    h.advanceTime(11 * 60_000);
+    await h.tick();
+    expect(getOrder(h.db, "o1")!.state).toBe("started");
+    expect(h.log.receipts).toEqual([]);
+    h.d.worker.kill = realKill;
+    await h.tick();
+    expect(getOrder(h.db, "o1")!.state).toBe("stopped");
+  });
+
   test("A 说租约已过期 / 撤单：停 worker；撤单记 cancelled", async () => {
     for (const [code, state] of [["lease_expired", "stopped"], ["cancelled", "cancelled"]] as const) {
       const h = harness();
@@ -275,5 +290,16 @@ describe("T94 心跳", () => {
       expect(getOrder(h.db, "o1")!.state).toBe(state);
       expect(h.log.killed).toEqual([workerName("o1")]);
     }
+  });
+});
+
+describe("T94 release 的 detail（T93 wire：单行、≤ 500 字节）", () => {
+  test("换行压成空格，按字节截、不切断汉字，空 = null", () => {
+    expect(detailOf("a\nb\r\n c")).toBe("a b c");
+    const long = detailOf("汉".repeat(400))!;
+    expect(Buffer.byteLength(long)).toBeLessThanOrEqual(500);
+    expect(long).toBe("汉".repeat(166));
+    expect(detailOf("  ")).toBeNull();
+    expect(detailOf(null)).toBeNull();
   });
 });

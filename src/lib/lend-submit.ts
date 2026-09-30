@@ -13,7 +13,7 @@ import { advance, getOrder, orderOf, type LendRow } from "./lend-journal.js";
 import { parseVerdictWire, type VerdictWire } from "./order-wire.js";
 
 /** 报告正文与整个请求体的上限（T93 lend wire v1）：超了让 worker 自己精简，不截断 */
-export const REPORT_MAX_BYTES = 64 * 1024;
+const REPORT_MAX_BYTES = 64 * 1024;
 const BODY_MAX_BYTES = 96 * 1024;
 
 export interface SubmitInput {
@@ -24,7 +24,7 @@ export interface SubmitInput {
 }
 
 /** POST /api/v1/lend/result 的请求体，整份存进 journal：A 按原始字节的 sha256 做幂等，重发必须逐字节一样 */
-export interface LendResultPayload {
+interface LendResultPayload {
   v: 1;
   orderId: string;
   gen: number;
@@ -49,7 +49,7 @@ const realOr = (p: string): string => {
 };
 
 /** 调用方是不是这张单的 worker；null = 是，否则是给 worker 看的一句拒绝理由 */
-export async function submitterProblem(row: LendRow, d: SubmitterDeps): Promise<string | null> {
+async function submitterProblem(row: LendRow, d: SubmitterDeps): Promise<string | null> {
   if (!row.dir || !row.agent || !row.sessionId) return `${row.orderId} 还没起 worker（journal 状态 ${row.state}）`;
   const rel = relative(realOr(row.dir), realOr(d.cwd));
   if (rel.startsWith("..") || isAbsolute(rel)) return `当前目录不在这张单的工作副本里（应在 ${row.dir} 下运行）`;
@@ -61,7 +61,7 @@ export async function submitterProblem(row: LendRow, d: SubmitterDeps): Promise<
 }
 
 /** 按 journal 里的订单补上 orderId / head / 计数，再过一遍 order-wire 的严格校验 */
-export function buildPayload(row: LendRow, input: SubmitInput): { ok: true; payload: LendResultPayload; sha: string } | { ok: false; error: string } {
+function buildPayload(row: LendRow, input: SubmitInput): { ok: true; payload: LendResultPayload; sha: string } | { ok: false; error: string } {
   const order = orderOf(row);
   const head = typeof order?.head === "string" ? order.head : null;
   if (row.leaseGen === null || !row.sessionId) return { ok: false, error: `${row.orderId} 的 journal 缺租约代数或会话` };

@@ -5,6 +5,7 @@ import { shellEscape } from "../src/lib/claude-launch.js";
 import { buildAcpHostCommand } from "../src/lib/runtimes/codex-acp.js";
 import { CLEAN_ENV_FLAG, envIPrefix, isLendWorkerName, LEND_WORKER_PREFIX, pickWorkerEnv, WORKER_ENV_WHITELIST } from "../src/lib/runtimes/clean-env.js";
 import type { LaunchSpec } from "../src/lib/runtimes/types.js";
+import { testChildEnv } from "./test-env.js";
 
 /** B 的 daemon 环境里可能有的东西：.env 的键、控制 token、GitHub token、peer 相关、代理 */
 const DIRTY: Record<string, string> = {
@@ -28,7 +29,7 @@ describe("T94 白名单环境", () => {
   });
 
   test("env -i 前缀真的清掉继承的变量：在脏环境里跑 /usr/bin/env，只剩白名单与 TMUX_PANE", async () => {
-    const proc = Bun.spawn(["/bin/sh", "-c", `${envIPrefix(DIRTY, shellEscape)} /usr/bin/env`], { env: { ...DIRTY, TMUX_PANE: "%7" }, stdout: "pipe" });
+    const proc = Bun.spawn(["/bin/sh", "-c", `${envIPrefix(DIRTY, shellEscape)} /usr/bin/env`], { env: testChildEnv({ ...DIRTY, TMUX_PANE: "%7" }), stdout: "pipe" });
     const out = await new Response(proc.stdout).text();
     await proc.exited;
     const keys = out.trim().split("\n").map((l) => l.split("=")[0]).sort();

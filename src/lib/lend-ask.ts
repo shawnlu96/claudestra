@@ -9,11 +9,11 @@ import { bindHash, checkAsk } from "./ask-bind.js";
 import { getAsk, hasAsksTable, MASTER_PROJECT, ownerAnswered, type NewAsk } from "./ledger-asks.js";
 import { isFullSha } from "./order-wire.js";
 
-export const LEND_ASK_ACTION = "lend_claim";
+const LEND_ASK_ACTION = "lend_claim";
 export const LEND_APPROVE = "lend_claim_approve";
 const LEND_REJECT = "lend_claim_reject";
 /** 发起方写死是调度服务：checkAsk 要求核对者 = 发起者，别的 agent 拿同一张卡去核对不算数 */
-export const LEND_ASKER = "scheduler";
+const LEND_ASKER = "scheduler";
 
 export interface LendAskParams {
   orderId: string;
