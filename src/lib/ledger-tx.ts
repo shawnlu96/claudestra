@@ -6,6 +6,7 @@ import type { Database } from "bun:sqlite";
 import { IMPORT_ACTOR, type WriteCtx, type WriteResult } from "./ledger-checks.js";
 import type { EventKind, LedgerEvent } from "./ledger-stages.js";
 import { busyAsLedgerError, getEventByDedup, LedgerError, toEvent } from "./ledger-store.js";
+import { ORIGIN_VALUES, originArgs } from "./ledger-origin.js";
 
 export type EventDraft = { project: string; target: string; kind: EventKind; text?: string; data?: Record<string, unknown> };
 
@@ -26,8 +27,8 @@ export function insertEvent(db: Database, ctx: WriteCtx, e: EventDraft, primary:
   if (primary && ctx.dedupKey?.startsWith(DISPATCH_KEY) && e.kind !== "dispatch") throw new LedgerError("invalid", `dedupKey 的 ${DISPATCH_KEY} 前缀只给 dispatch 事件用`);
   if (primary && ctx.dedupKey?.startsWith("scheduler:") && e.kind !== "scheduler") throw new LedgerError("invalid", "scheduler: 前缀只给调度事件用");
   const r = db
-    .prepare("INSERT INTO events (ts, actor, project, target, kind, text, data, dedupKey) VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING *")
-    .get(ctx.now ?? Date.now(), ctx.actor, e.project, e.target, e.kind, e.text ?? "", JSON.stringify(eventData(ctx, e)), primary ? ctx.dedupKey || null : null);
+    .prepare(`INSERT INTO events (ts, actor, project, target, kind, text, data, dedupKey, origin, originSeq) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ${ORIGIN_VALUES}) RETURNING *`)
+    .get(ctx.now ?? Date.now(), ctx.actor, e.project, e.target, e.kind, e.text ?? "", JSON.stringify(eventData(ctx, e)), primary ? ctx.dedupKey || null : null, ...originArgs(db));
   return toEvent(r as Record<string, unknown>);
 }
 
