@@ -55,6 +55,16 @@ export function looksLikeTrustPrompt(pane: string): boolean {
 }
 
 /**
+ * 发键闸（lib/send-key-guard.ts）用的宽口径：底部 25 行里有信任框的特征行、也有确认尾注，就当信任框在屏上。不裁残影、不要求框完整——
+ * 手机上可见区只有十来行、框里多一行 WARNING、尾注下面多一行 Tip 都得拦：拦错了调用方可以 --force，放错了 Enter 让 CC 退出、
+ * Down+Enter 等于替 owner 信任目录。只给「拦不拦」用，要发键的自动确认走严格的 trustPromptMoves（tests/send-key-guard.test.ts）。
+ */
+export function trustPromptVisible(pane: string): boolean {
+  const tail = trimTrailingBlank(pane).slice(-25);
+  return tail.some((l) => TRUST_HINT_RE.test(l)) && tail.some((l) => /Enter to confirm|Esc to (?:cancel|exit)/i.test(l));
+}
+
+/**
  * 当前画面底部一个完整、干净的信任框里，高亮的是第几项（0 = No, exit，1 = Yes）；否则 null。
  * 要求：「Enter to confirm」是最后一个非空行；往上最近的「Accessing workspace:」到它之间有 Quick safety check、
  * 恰好两行相邻的选项（No 在上、Yes 在下、只一个 ❯），选项下面只有空行，且块里没有别的框的特征。

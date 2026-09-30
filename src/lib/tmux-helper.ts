@@ -17,7 +17,7 @@ import { sandboxDisabled } from "./sandbox.js";
 import { sandboxTmuxArgv, sandboxVerifyNewWindow } from "./sandbox-tmux.js"; export { sandboxTmuxArgv };
 import { windowKey } from "./tmux-target.js"; export { windowKey };
 import { inputBox } from "./input-box.js";
-import { looksLikeTrustPrompt, TRUST_CAPTURE_LINES, trustPromptKey, trustPromptMoves } from "./trust-prompt.js"; export { looksLikeTrustPrompt, trustPromptMoves };
+import { looksLikeTrustPrompt, TRUST_CAPTURE_LINES, trustPromptKey, trustPromptMoves } from "./trust-prompt.js"; export { looksLikeTrustPrompt };
 export const MASTER_SESSION = "master";
 /**
  * 大总管窗口（index 0）的显式名字。不命名的话 tmux 按前台进程自动改名（claude / 版本号），
