@@ -140,6 +140,21 @@ describe("T68e observe mode", () => {
     } finally { f.close(); }
   });
 
+  test("a card delegated to a peer is observed as manual with the reason, and can be handed back to PM", async () => {
+    const f = fixture();
+    try {
+      assignStep(f.db, f.at("owner"), { taskId: "T1", step: "write", executor: "agent-x@far", executorKind: "peer" });
+      const seen = await f.observe();
+      expect(seen.decision).toMatchObject({ kind: "intent", action: "ensure_session", sessionRole: "author" });
+      expect(seen.event.data.route).toEqual({ kind: "manual", reason: "peer 委托（agent-x@far）本段不自动派，退回 manual" });
+      const fb = await runLedger(["scheduler-fallback-manual", "T1", "--reason", "peer 委托本段不自动派", "--intent", seen.event.data.sig as string], f.deps("scheduler"));
+      expect(fb).toMatchObject({ ok: true, duplicate: false, workflow: { mode: "manual" } });
+      const again = await runLedger(["scheduler-fallback-manual", "T1", "--reason", "peer 委托本段不自动派", "--intent", seen.event.data.sig as string], f.deps("scheduler"));
+      expect(again).toMatchObject({ ok: true, duplicate: true });
+      expect(listEvents(f.db, { project: "p", target: "T1" }).filter((e) => e.data.op === "fallback_manual")).toHaveLength(1);
+    } finally { f.close(); }
+  });
+
   test("structured review is all-or-nothing and must match the task head", async () => {
     const f = fixture();
     try {

@@ -8,6 +8,7 @@ import { createHash } from "node:crypto";
 import { isManager, mustTask, type WriteCtx } from "./ledger-checks.js";
 import { getWorkflow } from "./ledger-scheduler.js";
 import type { LedgerEvent } from "./ledger-stages.js";
+import { stepAtStage, stepsOf } from "./ledger-steps.js";
 import { getMeta, LedgerError, toEvent } from "./ledger-store.js";
 import { insertEvent, tx } from "./ledger-tx.js";
 import { planScheduler, type PlannerDecision } from "./scheduler-plan.js";
@@ -35,7 +36,7 @@ function compact(d: PlannerDecision): ObservedDecision {
 /** The route the engine would use for this recipient; a peer or an unaddressable executor shows up as manual. */
 function routeFor(d: PlannerDecision, opts: SnapshotOpts, peerExecutor: string | null): WorkerRoute | null {
   if (d.kind !== "intent" || !["dispatch", "review", "ensure_session"].includes(d.action)) return null;
-  if (peerExecutor && d.action !== "review") return selectWorkerRoute({ agent: peerExecutor, peer: peerExecutor.split("@").pop() });
+  if (peerExecutor && d.action !== "review") return selectWorkerRoute({ agent: peerExecutor, peer: peerExecutor });
   if (!d.recipient) return null;
   const reg = opts.registry.find((a) => a.name === d.recipient);
   if (!reg) return { kind: "manual", reason: `${d.recipient} 不在本机 registry` };
@@ -62,8 +63,9 @@ export function observeTask(db: Database, ctx: WriteCtx, taskId: string, opts: S
     const snapshot = observeSnapshot(db, task, opts);
     const plan = planScheduler(snapshot);
     const decision = compact(plan);
-    const peerStep = snapshot.author ? null : (task.assigneeKind === "peer_agent" ? task.assignee : null);
-    const route = routeFor(plan, opts, peerStep);
+    const writer = stepAtStage(stepsOf(db, task), { stage: task.stage === "fix" ? "fix" : "build", stageBefore: null });
+    const peer = snapshot.author ? null : writer?.executorKind === "peer" ? writer.executor : task.assigneeKind === "peer_agent" ? task.assignee : null;
+    const route = routeFor(plan, opts, peer);
     const stageSeq = snapshot.events.findLast((e) => e.kind === "stage" && e.data.to === task.stage)?.seq ?? 0;
     const sigBody = JSON.stringify({ decision: { ...decision, reason: undefined }, route, stage: task.stage, stageSeq,
       round: task.round, head: task.headSHA, specRev: task.specRev });
