@@ -17,6 +17,7 @@ import { sandboxDisabled } from "./sandbox.js";
 import { sandboxTmuxArgv, sandboxVerifyNewWindow } from "./sandbox-tmux.js"; export { sandboxTmuxArgv };
 import { windowKey } from "./tmux-target.js"; export { windowKey };
 import { inputBox } from "./input-box.js";
+import { sameModelTarget } from "./switch-target.js";
 export const MASTER_SESSION = "master";
 /**
  * 大总管窗口（index 0）的显式名字。不命名的话 tmux 按前台进程自动改名（claude / 版本号），
@@ -184,11 +185,11 @@ export async function tmuxSendLine(target: string, text: string, delayMs = 100, 
     console.log(`⌨️ ${target} 卡在 copy-mode,已 cancel 后注入`);
   }
   const inputLog = escFile(await tmuxSendEscape.keyOf(target), "input"); // 要等的（查窗口 id）先等完：最后一次菜单检查和发字之间不能再有等待（T63）
-  await assertKeysAllowed(target, (t) => tmuxCapture(t, 30)); // Codex 停在选择菜单：一个键都不发（lib/codex-key-guard.ts）
+  await assertKeysAllowed(target, (t) => tmuxCapture(t, 30)); // Codex 选择菜单 / 切换确认框：一个键都不发（lib/codex-key-guard.ts）
   recordProgramInput(inputLog, text);
   await (strict ? tmuxRawStrict : tmuxRaw)(["send-keys", "-t", target, "-l", "--", text]);
   await Bun.sleep(delayMs);
-  await assertKeysAllowed(target, (t) => tmuxCapture(t, 30)); // 等的这 100ms 里菜单弹出来了：字留在框里，回车不按
+  await assertKeysAllowed(target, (t) => tmuxCapture(t, 30), true); // 等的这 100ms 里菜单 / 框弹出来了：字已进输入框，回车不按
   await tmuxRaw(["send-keys", "-t", target, "Enter"]);
 }
 
@@ -881,16 +882,13 @@ export function effortDialogLevel(level: string): string {
 }
 
 /**
- * 这个框是不是我们刚注入的那条命令引出的：model 按家族比（框里是显示名 "Sonnet 5"，
- * 命令里是 id "claude-sonnet-5"），解析不出家族的自定义 id 只认种类；effort 按档位全等。
+ * 这个框是不是我们刚注入的那条命令引出的：model 比到版本号（框里是显示名 "Sonnet 5"，命令里是 id "claude-sonnet-5"，
+ * lib/switch-target.ts），认不出的 id 一律不算；effort 按档位全等。只比家族会把 Sonnet 4.6 的框当成切 Sonnet 5 代按掉。
  */
 export function switchPromptMatches(p: SwitchConfirmPrompt, kind: SwitchConfirmKind, arg: string): boolean {
   if (p.kind !== kind) return false;
   if (kind === "effort") return effortDialogLevel(p.target) === effortDialogLevel(arg);
-  const want = modelFamilies(arg);
-  if (!want.size) return true;
-  const got = modelFamilies(p.target);
-  return [...want].some((f) => got.has(f));
+  return sameModelTarget(arg, p.target);
 }
 
 /**
@@ -1003,12 +1001,17 @@ export type SwitchOutcome =
   /** 轮询窗内没看到落地（框可能仍挂着：看 pane） */
   | "timeout";
 
+/** foreign 的 reason：框在注入前就停着，这次没注入 */
+export const SWITCH_LEFTOVER = "leftover";
+
 export interface SwitchResult {
   outcome: SwitchOutcome;
   /** 返回前最后一次 capture（按过键之后会重新 capture，不会是按键前的旧屏） */
   pane: string;
   prompt?: SwitchConfirmPrompt;
   reason?: string;
+  /** 这次调用在框上按过确认键（最多一次）。没按到的框不会再有人代按：permission-watcher 只通知 owner */
+  pressed?: boolean;
 }
 
 /** tmux 读写口；单测注入假 pane 序列 */
@@ -1027,7 +1030,7 @@ const tmuxSwitchIO: SwitchIO = {
 };
 
 /** 在确认框上选 Yes（按 detectSwitchConfirmPrompt 算好的键）。 */
-export async function pressSwitchConfirm(target: string, p: SwitchConfirmPrompt, io: SwitchIO = tmuxSwitchIO): Promise<void> {
+async function pressSwitchConfirm(target: string, p: SwitchConfirmPrompt, io: SwitchIO = tmuxSwitchIO): Promise<void> {
   for (const k of p.keys) {
     await io.sendKey(target, k);
     await io.sleep(120);
@@ -1035,16 +1038,25 @@ export async function pressSwitchConfirm(target: string, p: SwitchConfirmPrompt,
 }
 
 /**
- * 注入 `/model X` 或 `/effort X`，确认框出现就代按 Yes，等到命令真正落地再返回。
- * claude-settings 端点与 manager 的 enforceSessionModel 共用；返回 applied/confirmed 时
+ * 注入 `/model X` 或 `/effort X`，弹出的确认框目标和 X 完全一致才代按 Yes（一张框只按一次），等到命令真正落地再返回。
+ * claude-settings 端点、网页斜杠的 /model X、/effort X（bridge/api-slash.ts）与 manager 的 enforceSessionModel 共用；返回 applied/confirmed 时
  * TUI 已回到输入框，调用方可以放心接着注入下一条命令。沙箱里拒绝：CC 会把它存成 ~/.claude/settings.json 的全局默认。
  */
-export async function runSwitchCommand(
-  target: string,
-  kind: SwitchConfirmKind,
-  arg: string,
-  opts: { sendDelayMs?: number; ticks?: number; intervalMs?: number; captureLines?: number; io?: SwitchIO } = {},
-): Promise<SwitchResult> {
+type SwitchOpts = { sendDelayMs?: number; ticks?: number; intervalMs?: number; captureLines?: number; io?: SwitchIO };
+/** 同一窗口的切换串行（本进程内）：两条同时跑，后一条的注入 / 回车会落在前一条的框上。跨进程（manager）不在这把锁里 */
+const switchChains = new Map<string, Promise<unknown>>();
+
+export function runSwitchCommand(target: string, kind: SwitchConfirmKind, arg: string, opts: SwitchOpts = {}): Promise<SwitchResult> {
+  const run = (switchChains.get(target) ?? Promise.resolve())
+    .catch(() => undefined) // 前一条的失败已交给它自己的调用方，这里只排队
+    .then(() => runSwitchCommandOnce(target, kind, arg, opts));
+  switchChains.set(target, run);
+  const done = () => { if (switchChains.get(target) === run) switchChains.delete(target); };
+  run.then(done, done);
+  return run;
+}
+
+async function runSwitchCommandOnce(target: string, kind: SwitchConfirmKind, arg: string, opts: SwitchOpts): Promise<SwitchResult> {
   const { sendDelayMs = 100, ticks = 10, intervalMs = 700, captureLines = 120, io = tmuxSwitchIO } = opts;
   const off = sandboxDisabled(`/${kind} 切换`); if (off) return { outcome: "rejected", pane: "", reason: off };
   const capture = () => io.capture(target, captureLines).catch(() => "");
@@ -1073,33 +1085,37 @@ export async function runSwitchCommand(
     if (pressed && paneLooksIdle(pane)) return { outcome: "confirmed", pane };
     return null;
   };
+  // 注入前就停着一张框：那张不是这条命令引出的，打进去的字还会被它吞掉——不注入，留给 owner
+  const stale = detectSwitchConfirmPrompt(before);
+  if (stale) return { outcome: "foreign", pane: before, prompt: stale, pressed: false, reason: SWITCH_LEFTOVER };
   await io.sendLine(target, `/${kind} ${arg}`, sendDelayMs);
-  let presses = 0;
+  let pressed = false;
   let pane = "";
   for (let i = 0; i < ticks; i++) {
     await io.sleep(intervalMs);
     pane = await capture();
     const p = detectSwitchConfirmPrompt(pane);
     if (p) {
-      if (!switchPromptMatches(p, kind, arg)) return { outcome: "foreign", pane, prompt: p };
-      if (presses >= 3) return { outcome: "timeout", pane, prompt: p }; // 按了不消失：别无限按
+      // 一张框只按一次：按过后还看得到框，可能是抓屏滞后的旧帧——再按一次就会落在关框后的输入框上（tests/switch-confirm.test.ts）
+      if (pressed) continue;
+      if (!switchPromptMatches(p, kind, arg)) return { outcome: "foreign", pane, prompt: p, pressed };
       await pressSwitchConfirm(target, p, io);
-      presses++;
+      pressed = true;
       continue;
     }
-    const v = verdict(pane, presses > 0);
-    if (v) return v;
+    const v = verdict(pane, pressed);
+    if (v) return { ...v, pressed };
   }
-  if (presses > 0) {
+  if (pressed) {
     // 最后一拍刚按过键：pane 还是按键前的屏，重看一眼再下结论
     await io.sleep(intervalMs);
     pane = await capture();
     const p = detectSwitchConfirmPrompt(pane);
-    if (p) return { outcome: "timeout", pane, prompt: p };
+    if (p) return { outcome: "timeout", pane, prompt: p, pressed };
     const v = verdict(pane, true);
-    if (v) return v;
+    if (v) return { ...v, pressed };
   }
-  return { outcome: "timeout", pane };
+  return { outcome: "timeout", pane, pressed };
 }
 
 export async function listWindows(): Promise<string[]> {

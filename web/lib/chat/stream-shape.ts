@@ -107,11 +107,18 @@ function anomalyText(d: Record<string, unknown>, lang: Lang): string | null {
         ? `🧊 Possible stall — output token count has been frozen for ${mins} min mid-turn. Consider Interrupt and retry.`
         : `🧊 疑似卡死 —— 回合进行中，输出 token 计数已 ${mins} 分钟纹丝不动。` + "建议点「停止」中断后重试。";
     case "switch_model_prompt": {
-      const fams = Array.isArray(d.families) ? (d.families as string[]).join("/") : "?";
+      const target = typeof d.target === "string" && d.target ? d.target : Array.isArray(d.families) ? (d.families as string[]).join("/") : "?";
       return lang === "en"
-        ? `🎛 Claude Code is showing a "Switch model?" dialog (${fams}) that doesn't match any user-initiated switch — not auto-confirmed. ` +
-            "Re-pick the model from the dropdown to complete it, or answer the dialog yourself in the terminal."
-        : `🎛 会话弹出了「Switch model?」确认框（涉及 ${fams}），不是你发起的切换，我没有代按。` + "要切就去右上模型下拉重选一次（会自动确认），或到终端里自己按。";
+        ? `🎛 Claude Code is waiting on a "Switch model?" dialog (to ${target}) — not auto-confirmed. ` +
+            "Answer it yourself in the terminal or web terminal: Yes switches, Esc keeps the current model."
+        : `🎛 会话停在「Switch model?」确认框上（切到 ${target}），我没有代按。` + "请到终端或网页终端里自己按：选 Yes = 切换，Esc = 保住当前模型。";
+    }
+    case "switch_effort_prompt": {
+      const target = typeof d.target === "string" && d.target ? d.target : "?";
+      return lang === "en"
+        ? `🎛 Claude Code is waiting on a "Change effort level?" dialog (to ${target}) — not auto-confirmed. ` +
+            "Answer it yourself in the terminal or web terminal."
+        : `🎛 会话停在「Change effort level?」确认框上（切到 ${target}），我没有代按。请到终端或网页终端里自己按。`;
     }
     case "model_drift":
       return lang === "en"

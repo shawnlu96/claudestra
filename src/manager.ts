@@ -1074,7 +1074,7 @@ async function enforceSessionModel(name: string, model?: string): Promise<boolea
     /* 无快照就不恢复 */
   }
   try {
-    // 与 claude-settings 共用 runSwitchCommand：只认底部真框、核对目标家族再代按，
+    // 与 claude-settings 共用 runSwitchCommand：只认底部真框、目标模型完全一致才代按一次，
     // 以「这次命令的结果行出现」判落地——旧实现全屏搜 "Set model to"，scrollback 里
     // 上一次切换的结果行会在框画出来之前就放行，框留在屏幕上没人按。
     const { runSwitchCommand } = await import("./lib/tmux-helper.js");

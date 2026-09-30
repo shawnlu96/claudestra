@@ -35,7 +35,7 @@ describe("guardedScreenOf", () => {
   test("额度菜单 / 撞墙倒计时（含 80 列截断）/ 权限框 / AUQ / Bypass 首启框 → 命中", () => {
     for (const [f, kind] of Object.entries(GUARDED)) expect([f, guardedScreenOf(fx(f), undefined)]).toEqual([f, kind]);
   });
-  test("草稿、回合中、LP 在跑、切模型确认框（程序自发不拦）→ 不拦", () => {
+  test("草稿、回合中、LP 在跑、切模型确认框（它由 seenScreenOf 单独认）→ 不在 guardedScreenOf 里", () => {
     for (const f of PLAIN) expect([f, guardedScreenOf(fx(f), undefined)]).toEqual([f, null]);
   });
   test("seenScreenOf：切模型 / effort 确认框单独认出来（授权发一律不发）；空屏 = unreadable；草稿 = 普通画面", () => {
@@ -147,11 +147,17 @@ describe("sendKeysChecked", () => {
     expect(outside).toEqual([]);
   });
 
-  test("程序自发（没有授权）在切模型确认框上发 Enter / Escape：不在拦截名单，照旧放行", async () => {
-    for (const k of ["Enter", "Escape"]) {
-      const h = harness([fx("switch-confirm/cc2.1.280-switch-model.txt")]);
-      expect((await sendKeysChecked("agent-x", [k], PROG, h.deps)).ok).toBe(true);
-      expect(h.sent).toEqual([k]);
+  test("T41c r3 P1-1：程序自发在切模型 / effort 确认框上 Enter / Escape / 打字一律不发（Enter = 替 owner 选 Yes）；--force 照发并记审计", async () => {
+    for (const box of [MODEL_BOX, EFFORT_BOX]) {
+      for (const keys of [["Enter"], ["Escape"], ["1"], ["/compact", "Enter"]]) {
+        const h = harness([box]);
+        const r = await sendKeysChecked("agent-x", keys, PROG, h.deps);
+        expect([keys, r.ok, r.ok ? null : r.screen, h.sent, h.audits]).toEqual([keys, false, "switch_confirm", [], []]);
+        if (!r.ok) expect(r.error).toContain("--force");
+      }
+      const f = harness([box]);
+      expect((await sendKeysChecked("agent-x", ["Enter"], FORCE, f.deps)).ok).toBe(true);
+      expect([f.sent, f.audits.map((x) => x.screen)]).toEqual([["Enter"], ["switch_confirm"]]);
     }
   });
 });

@@ -400,7 +400,7 @@ async function executeOnExistingAgent(
     } catch { /* non-critical */ }
   }
 
-  // 发 prompt。忙不忙都发，Claude Code TUI 自己排队；停在额度菜单 / 撞墙倒计时上不发（lib/wall-screen.ts），这次记失败
+  // 发 prompt。忙不忙都发，CC TUI 自己排队；停在额度菜单 / 倒计时（lib/wall-screen.ts）或切换确认框（tmuxSendLine 抛）上不发，记失败 + 通知
   const wall = await windowWallWait(tmuxTarget);
   if (wall) throw new Error(`${tmuxName} ${wallWaitRefusal(wall)}，这次没发`);
   await tmuxSendLine(tmuxTarget, job.prompt);
