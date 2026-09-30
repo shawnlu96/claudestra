@@ -6,6 +6,8 @@
  * 哪条漏传一个字段都不会让出借 worker 带着全量环境起来。tests/lend-worker-env.test.ts。
  */
 
+import { isSandbox } from "../sandbox.js";
+
 /** 出借 worker 的 agent 名前缀；lend 循环按 orderId 生成，别的入口建不出这个前缀以外的出借 worker */
 export const LEND_WORKER_PREFIX = "agent-lend-";
 
@@ -14,10 +16,18 @@ export const WORKER_ENV_WHITELIST = ["PATH", "HOME", "USER", "LANG", "TERM", "TM
 
 export const isLendWorkerName = (name: string | undefined): boolean => !!name && name.startsWith(LEND_WORKER_PREFIX);
 
-/** 只留白名单里有值的变量 */
+/**
+ * 白名单之外还要带的路径 / 隔离变量（都不是凭据）：状态与运行目录改过时不带，worker 里的 `lend submit` 和宿主自停兜底会去读默认目录，
+ * 找不到这张单就当它结束了（lend-watchdog.ts）；沙箱实例不带沙箱变量，worker 会被当成生产进程（碰生产目录、起真 Codex）。
+ */
+const PLUMBING = ["CLAUDESTRA_STATE_DIR", "CLAUDESTRA_RUNTIME_DIR"] as const;
+const SANDBOX_VAR = /^CLAUDESTRA_(?:SANDBOX(?:_[A-Z_]+)?|LAB_[A-Z_]+)$/;
+
+/** 只留白名单里有值的变量（外加上面的路径变量；沙箱里再加沙箱变量） */
 export function pickWorkerEnv(env: Record<string, string | undefined>): Record<string, string> {
   const out: Record<string, string> = {};
-  for (const k of WORKER_ENV_WHITELIST) {
+  const keys = [...WORKER_ENV_WHITELIST, ...PLUMBING, ...(isSandbox(env) ? Object.keys(env).filter((k) => SANDBOX_VAR.test(k)) : [])];
+  for (const k of keys) {
     const v = env[k];
     if (typeof v === "string" && v !== "") out[k] = v;
   }
