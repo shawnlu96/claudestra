@@ -127,6 +127,7 @@ import { abandonCreate, beginCreate, commitCreate, gateOps, guardCreateSignals, 
 import { notify } from "./lib/notify.js";
 import { writeJsonAtomic } from "./lib/state-file.js";
 import { stderrTail } from "./lib/run-manager.js";
+import { launchWithCallerCred } from "./lib/caller-cred-launch.js";
 import { readyFailureText, modelPinPlan, modelPinRefusal, restartExceptionResult, bigSessionNote } from "./lib/restart-result.js";
 
 /**
@@ -716,9 +717,8 @@ async function launchInWindow(
     spec.mode === "fork" && opts.cwd && adapter.forkBaseline ? await adapter.forkBaseline(opts.cwd) : undefined;
   await adapter.beforeLaunch?.(win);
   const fresh = spec.mode === "new" || !(await loadRegistry()).agents[tmuxName]; // 全新 agent 不带同名旧 agent 的设置（旧文件等 registry 落盘后再删）
-  const unsent = await win.sendLine(adapter.buildLaunchCommand({ ...spec, ...(fresh ? {} : { settingsName: tmuxName }) })).then(() => null, (e: Error) => e.message);
-  if (unsent) return { result: { ready: false, reason: "exited", detail: `启动命令没发出去：${unsent}`, recoveredFullSession: false } };
-  const result = await adapter.waitReady(win, { rounds: CLAUDE_READY_ROUNDS, pollMs: 500 });
+  const send = (callerCredFile?: string) => win.sendLine(adapter.buildLaunchCommand({ ...spec, callerCredFile, ...(fresh ? {} : { settingsName: tmuxName }) }));
+  const result = await launchWithCallerCred(tmuxName, adapter, spec, send, () => adapter.waitReady(win, { rounds: CLAUDE_READY_ROUNDS, pollMs: 500 })); // T85 启动凭据：签发 → 发命令 → 就绪 → 兜底删
   if (result.ready) (await import("./lib/agent-settings.js")).dropLaunchSettings(tmuxName); // 超长设置落的启动快照：就绪 = CC 已读过
   return { result, baseline };
 }
@@ -2670,6 +2670,8 @@ switch (cmd) {
   case "cost": await cmdCost(args); break;
   case "usage": await (await import("./manager/usage.js")).cmdUsage(args); break; // token 账：按轮落库 ingest|turns|summary（T83）
   case "quota-wall": await (await import("./manager/quota-wall.js")).cmdQuotaWall(args); break; // 额度闸 status|clear（T24）
+  case "ai-inventory": await (await import("./manager/ai-inventory.js")).cmdAiInventory(args); break; // 本机 AI 能力清单（只读，T91）
+  case "lend": case "borrow": await (await import("./manager/lend.js")).cmdLend(cmd, args); break; // 出借 / 借入声明 lend.json（lib/lend-config.ts）
   case "codex-sub-archive": await (await import("./manager/codex-sub-archive.js")).cmdCodexSubArchive(args); break; // Codex 子线程自动归档开关（缺省关）
 
   case "invite-link": await cmdInviteLink(args); break;

@@ -39,20 +39,24 @@ function makeV9(path: string): void {
 
 type Row = Record<string, unknown>;
 const dump = (db: Database, table: string, order: string): Row[] => db.prepare(`SELECT * FROM ${table} ORDER BY ${order}`).all() as Row[];
-const without = (rows: Row[], ...keys: string[]) => rows.map((r) => Object.fromEntries(Object.entries(r).filter(([k]) => !keys.includes(k))));
+const cols = (db: Database, table: string): string[] => (db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[]).map((c) => c.name);
+const only = (rows: Row[], keys: string[]) => rows.map((r) => Object.fromEntries(keys.map((k) => [k, r[k]])));
 
-/** 迁移前后比对：现有表的每一行都原样在，新列只多出 null */
+/** 迁移前后比对：现有表的每一行在原有的列上原样不变；源库早于 feature 表时，新列只多出 null */
 function migrateAndCompare(path: string): Database {
   const before = new Database(path, { readonly: true });
   const tables = ["items", "tasks", "events", "meta", "task_deps", "asks"];
+  const had = Object.fromEntries(tables.map((t) => [t, cols(before, t)]));
   const snap = Object.fromEntries(tables.map((t) => [t, dump(before, t, "rowid")]));
   const from = schemaVersion(before);
   before.close();
   const db = openLedger(path);
   expect(schemaVersion(db)).toBe(LEDGER_SCHEMA_VERSION);
-  for (const t of tables) expect(without(dump(db, t, "rowid"), "featureId", "origin", "originSeq")).toEqual(snap[t]);
-  expect(dump(db, "tasks", "rowid").every((r) => r.featureId === null)).toBe(true);
-  expect(dump(db, "events", "rowid").every((r) => r.origin === null && r.originSeq === null)).toBe(true);
+  for (const t of tables) expect(only(dump(db, t, "rowid"), had[t])).toEqual(snap[t]);
+  if (from <= V9) {
+    expect(dump(db, "tasks", "rowid").every((r) => r.featureId === null)).toBe(true);
+    expect(dump(db, "events", "rowid").every((r) => r.origin === null && r.originSeq === null)).toBe(true);
+  }
   const bak = new Database(ledgerBackupPath(path, LEDGER_SCHEMA_VERSION), { readonly: true });
   expect(schemaVersion(bak)).toBe(from);
   expect(dump(bak, "tasks", "rowid")).toEqual(snap.tasks);
@@ -129,7 +133,7 @@ describe("v9 → v10", () => {
   });
 
   const copy = process.env.LEDGER_COPY;
-  test.skipIf(!copy)("生产库拷贝（LEDGER_COPY）：迁移后每张卡、每条事件原样", () => {
+  test.skipIf(!copy)("生产库拷贝（LEDGER_COPY，v9 或更新）：迁移后每张卡、每条事件原样", () => {
     const path = tmpPath();
     copyFileSync(copy as string, path);
     const db = migrateAndCompare(path);

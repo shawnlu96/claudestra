@@ -168,6 +168,8 @@ export interface WriteOpts {
   preserveMode?: boolean;
   indent?: number;
   trailingNewline?: boolean;
+  /** 只对同步写有效：tmp 写好后、rename 前同步调用，返回 false 就不提交（锁已失的写者靠它在同一段同步代码里核锁，中间不隔 await） */
+  commitIf?: () => boolean;
 }
 
 let seq = 0;
@@ -217,7 +219,7 @@ export function writeJsonAtomicSync(path: string, data: unknown, opts: WriteOpts
 }
 
 /** 原子写文本（同 writeJsonAtomicSync，内容由调用方给） */
-export function writeTextAtomicSync(path: string, text: string, opts: Pick<WriteOpts, "mode" | "preserveMode"> = {}): void {
+export function writeTextAtomicSync(path: string, text: string, opts: Pick<WriteOpts, "mode" | "preserveMode" | "commitIf"> = {}): void {
   mkdirSync(dirname(path), { recursive: true });
   const target = resolveTarget(path);
   let mode = opts.mode;
@@ -228,6 +230,7 @@ export function writeTextAtomicSync(path: string, text: string, opts: Pick<Write
   try {
     writeFileSync(tmp, text, mode !== undefined ? { mode } : undefined);
     if (mode !== undefined) chmodSync(tmp, mode);
+    if (opts.commitIf && !opts.commitIf()) throw new Error(`提交前核验没通过，没写 ${path}`);
     renameSync(tmp, target);
   } catch (e) {
     try { unlinkSync(tmp); } catch { /* 不在 */ }

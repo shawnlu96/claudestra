@@ -123,10 +123,20 @@ export function sandboxEnv(
  *   沙箱 agent 每刷新一次状态栏就写一次生产的 usage-cache.json。`--settings` 的优先级高于用户设置，覆盖掉它。
  *   agent 自己的设置（lib/agent-settings.ts）并进同一份：两个 --settings 怎么合并 CC 没背书；超长同样落快照（settingsLaunchArgs）。
  */
-export function sandboxLaunchArgs(mcpName: string, bunPath: string, srcDir: string, agentSettings: Record<string, unknown> = {}, agent?: string): string[] {
-  const cfg = { mcpServers: { [mcpName]: { command: bunPath, args: ["--no-env-file", join(srcDir, "channel-server.ts")] } } };
+export function sandboxLaunchArgs(mcpName: string, bunPath: string, srcDir: string, agentSettings: Record<string, unknown> = {}, agent?: string, withMcpConfig = true): string[] {
+  const cfg = { mcpServers: { [mcpName]: channelServerEntry(bunPath, srcDir, true) } };
   const settings = { ...agentSettings, statusLine: { type: "command", command: join(srcDir, "..", "scripts", "statusline-usage.sh") } };
-  return ["--mcp-config", JSON.stringify(cfg), "--strict-mcp-config", ...settingsLaunchArgs(settings, agent)];
+  // withMcpConfig=false：调用方自己带一份含启动凭据的 --mcp-config（lib/claude-launch.ts），两份同名配置谁生效 CC 没背书
+  return [...(withMcpConfig ? ["--mcp-config", JSON.stringify(cfg)] : []), "--strict-mcp-config", ...settingsLaunchArgs(settings, agent)];
+}
+
+/**
+ * channel-server 在 MCP 配置里的那一项。沙箱跑本 checkout（--no-env-file：不读仓库 .env）；生产与 setup 的
+ * `claude mcp add … -- bun run <仓库>/src/channel-server.ts` 同一条命令。env 只给这个服务进程（启动凭据走这里）。
+ */
+export function channelServerEntry(bunPath: string, srcDir: string, sandbox: boolean, env?: Record<string, string>) {
+  const script = join(srcDir, "channel-server.ts");
+  return { command: bunPath, args: sandbox ? ["--no-env-file", script] : ["run", script], ...(env ? { env } : {}) };
 }
 
 /**

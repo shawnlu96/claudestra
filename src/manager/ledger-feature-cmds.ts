@@ -1,10 +1,10 @@
 /**
- * `ledger feature-new / feature-set / dag-init / feature-show / dag-show`：feature 与子 DAG（T84，docs/design/feature-dag.md）。
+ * `ledger feature-new / feature-set / dag-init / feature-show`：feature 与子 DAG 初版（T84，docs/design/feature-dag.md）。
  * 写入、权限与 CAS 在 lib/ledger-feature-write.ts；这里只解析参数。feature id 可以写全（带本机前缀）也可以只写 slug。
- * 重写（v2 起）与审批是 L2，本族命令不提供。
+ * 重写（v2 起）、审批、绑卡与 dag-show 在 ledger-dag-cmds.ts。
  */
 import type { FeatureStatus } from "../lib/ledger-feature-schema.js";
-import { getDagVersion, projectNodes, resolveFeature } from "../lib/ledger-feature.js";
+import { effectiveNodes, getDagVersion, getPendingProposal, projectNodes, resolveFeature } from "../lib/ledger-feature.js";
 import { createFeature, initDag, setFeature, type FeaturePatch } from "../lib/ledger-feature-write.js";
 import { storedOrigin } from "../lib/ledger-origin.js";
 import { LedgerError } from "../lib/ledger-store.js";
@@ -55,20 +55,13 @@ function dagInit(c: LedgerCli): Result {
   return { ok: true, version: r.row, event: r.event, duplicate: r.duplicate };
 }
 
-/** 当前版本的节点，状态从任务卡现读；还没建 DAG 时 nodes 为空 */
+/** 当前版本的节点（并上绑卡），状态从任务卡现读；还没建 DAG 时 nodes 为空。有待批的重写一并给出版本号与 ask */
 function featureShow(c: LedgerCli): Result {
   const f = feature(c);
   const v = f.currentVersion ? getDagVersion(c.db, f.id, f.currentVersion) : null;
-  return { ok: true, feature: f, version: v ? { ...v, nodes: undefined } : null, nodes: v ? projectNodes(c.db, v.nodes) : [] };
-}
-
-/** 某一版的快照（缺省当前版）；nodes 同样附上任务卡现读的状态，快照原值在 statusAtVersion */
-function dagShow(c: LedgerCli): Result {
-  const f = feature(c);
-  const n = intFlag(c.p, "version") ?? f.currentVersion;
-  const v = n ? getDagVersion(c.db, f.id, n) : null;
-  if (!v) throw new LedgerError("not_found", f.currentVersion ? `feature ${f.id} 没有 v${n}（当前 v${f.currentVersion}）` : `feature ${f.id} 还没建 DAG（先 dag-init）`);
-  return { ok: true, feature: f.id, current: f.currentVersion, version: { ...v, nodes: projectNodes(c.db, v.nodes) } };
+  const p = getPendingProposal(c.db, f.id);
+  return { ok: true, feature: f, version: v ? { ...v, nodes: undefined } : null, nodes: v ? projectNodes(c.db, effectiveNodes(c.db, v)) : [],
+    pending: p ? { version: p.version, askId: p.askId, proposedBy: p.proposedBy, createdAt: p.createdAt } : null };
 }
 
 export const FEATURE_CMDS: Record<string, CommandSpec> = {
@@ -84,5 +77,4 @@ export const FEATURE_CMDS: Record<string, CommandSpec> = {
     run: dagInit,
   },
   "feature-show": { valued: ["project"], usage: "feature-show <feature>", run: featureShow },
-  "dag-show": { valued: ["version", "project"], usage: "dag-show <feature> [--version N]", run: dagShow },
 };
