@@ -7,7 +7,7 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { classifyClaudeEndpoint, classifyCodexEndpoint, classifyPiEndpoint, sanitizeBaseUrl } from "../src/lib/ai-endpoints.js";
-import { claudeLayers, codexConfigPath } from "../src/lib/ai-inventory.js";
+import { claudeLayers, codexConfigPath, projectLayers } from "../src/lib/ai-inventory.js";
 
 const SECRET = "SENTINEL0secret0VALUE0123456789";
 
@@ -159,6 +159,29 @@ describe("读真实文件：凭据字段从一开始就不进结果", () => {
     mkdirSync(cc, { recursive: true });
     writeFileSync(join(cc, "settings.json"), "{ not json");
     expect(classifyClaudeEndpoint(claudeLayers({ CLAUDE_CONFIG_DIR: cc })).kind).toBe("unknown");
+  });
+
+  test("agent 项目级 settings 把某个 agent 指到第三方 → 整体判第三方；非 Claude / 家目录 / 无线索的不收", () => {
+    const mk = (name: string, files: Record<string, string>) => {
+      const d = join(dir, name);
+      mkdirSync(join(d, ".claude"), { recursive: true });
+      for (const [f, body] of Object.entries(files)) writeFileSync(join(d, ".claude", f), body);
+      return d;
+    };
+    const proxied = mk("proj-a", { "settings.local.json": JSON.stringify({ env: { ANTHROPIC_BASE_URL: "https://api.deepseek.com/anthropic", ANTHROPIC_AUTH_TOKEN: SECRET } }) });
+    const plain = mk("proj-b", { "settings.json": JSON.stringify({ permissions: { allow: [] } }) });
+    const codex = mk("proj-c", { "settings.json": JSON.stringify({ env: { ANTHROPIC_BASE_URL: "https://x.example" } }) });
+    const home = mk("home", { "settings.json": JSON.stringify({ env: { ANTHROPIC_BASE_URL: "https://y.example" } }) });
+    const agents = [
+      { name: "agent-a", cwd: proxied }, { name: "agent-a2", cwd: proxied }, { name: "agent-b", cwd: plain },
+      { name: "agent-c", cwd: codex, runtime: "codex" }, { name: "agent-h", cwd: home }, { name: "agent-n" },
+    ];
+    const layers = projectLayers(agents, home);
+    expect(layers.map((l) => l.from)).toEqual(["agent-a .claude/settings.local.json"]);
+    const v = classifyClaudeEndpoint([...claudeLayers({ CLAUDE_CONFIG_DIR: join(dir, "none") }, agents)]);
+    expect(v.kind).toBe("third_party");
+    expect(v.host).toBe("api.deepseek.com");
+    expect(JSON.stringify(v)).not.toContain(SECRET);
   });
 
   test("CODEX_HOME 决定 config.toml 位置", () => {

@@ -21,6 +21,7 @@ import { isNpmGlobalCodex } from "./codex-version.js";
 import { resolveLoginBinary, type LoginBinary, type Runner } from "./login-binary.js";
 import { piBinName } from "./pi-env.js";
 import { piAgentDir } from "./pi-session.js";
+import { readRegistryAgentsSync, type RegistryAgent } from "./registry.js";
 
 export interface RuntimeInventory {
   id: EvidenceRuntime;
@@ -61,16 +62,38 @@ const MANAGED_SETTINGS = process.platform === "darwin"
   ? "/Library/Application Support/ClaudeCode/managed-settings.json"
   : "/etc/claude-code/managed-settings.json";
 
-/** 企业托管 > 用户 settings > 当前进程 env（顺序只影响列出来的先后，判定是「任一非官方即第三方」） */
-export function claudeLayers(env: NodeJS.ProcessEnv = process.env): ClaudeConfigLayer[] {
-  const layers: ClaudeConfigLayer[] = [];
-  const files: [string, string][] = [["managed-settings.json", MANAGED_SETTINGS], ["~/.claude/settings.json", join(claudeConfigDir(env), "settings.json")]];
-  for (const [from, path] of files) {
-    const j = readJsonFile(path);
-    if (j === undefined) continue;
-    layers.push(j === null ? { from, env: null } : { from, env: pickClaudeKeys(j.env && typeof j.env === "object" ? (j.env as Json) : {}), model: j.model });
+/** 一份 settings 文件 → 一层；不存在 = null；解析不了 = env null（判未知）；只拷判定用的键 */
+function fileLayer(from: string, path: string): ClaudeConfigLayer | null {
+  const j = readJsonFile(path);
+  if (j === undefined) return null;
+  return j === null ? { from, env: null } : { from, env: pickClaudeKeys(j.env && typeof j.env === "object" ? (j.env as Json) : {}), model: j.model };
+}
+
+type AgentDir = Pick<RegistryAgent, "name" | "cwd" | "runtime">;
+
+/**
+ * 在册 Claude Code agent 工作目录下的项目级 settings：CC 按 cwd 读它们，里面的 env 同样能把某个 agent 指到第三方。
+ * 只收有线索的层（写了源 / 模型，或解析不了）；家目录跳过（那里的 .claude/settings.json 就是用户级那份）。
+ */
+export function projectLayers(agents: AgentDir[], home = homedir()): ClaudeConfigLayer[] {
+  const seen = new Set<string>([resolve(home)]);
+  const out: ClaudeConfigLayer[] = [];
+  for (const a of agents) {
+    if ((a.runtime && a.runtime !== "claude-code") || !a.cwd || seen.has(resolve(a.cwd))) continue;
+    seen.add(resolve(a.cwd));
+    for (const f of ["settings.json", "settings.local.json"]) {
+      const l = fileLayer(`${a.name} .claude/${f}`, join(a.cwd, ".claude", f));
+      if (l && (l.env === null || Object.keys(l.env).length || l.model !== undefined)) out.push(l);
+    }
   }
-  layers.push({ from: "当前进程 env", env: pickClaudeKeys(env) });
+  return out;
+}
+
+/** 企业托管 > 用户 settings > 各 agent 的项目 settings > 当前进程 env（顺序只影响列出来的先后，判定是「任一非官方即第三方」） */
+export function claudeLayers(env: NodeJS.ProcessEnv = process.env, agents: AgentDir[] = []): ClaudeConfigLayer[] {
+  const layers = [fileLayer("managed-settings.json", MANAGED_SETTINGS), fileLayer("~/.claude/settings.json", join(claudeConfigDir(env), "settings.json"))]
+    .filter((l): l is ClaudeConfigLayer => l !== null);
+  layers.push(...projectLayers(agents), { from: "当前进程 env", env: pickClaudeKeys(env) });
   return layers;
 }
 
@@ -128,7 +151,7 @@ export async function collectAiInventory(opts: { evidence?: boolean; quota?: boo
     opts.evidence === false ? null : collectModelEvidence(opts.limit ?? EVIDENCE_LIMIT),
   ]);
   const endpoints: Record<EvidenceRuntime, EndpointVerdict> = {
-    "claude-code": classifyClaudeEndpoint(claudeLayers()),
+    "claude-code": classifyClaudeEndpoint(claudeLayers(process.env, readRegistryAgentsSync())),
     codex: classifyCodexEndpoint(readCodexToml(codexConfigPath()), { OPENAI_BASE_URL: process.env.OPENAI_BASE_URL }),
     pi: piEndpoint(),
   };
