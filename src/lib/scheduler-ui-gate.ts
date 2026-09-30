@@ -10,7 +10,7 @@ import { isManager } from "./ledger-checks.js";
 import type { LedgerTask } from "./ledger-stages.js";
 import type { PlannerSnapshot } from "./scheduler-plan.js";
 
-const UI_ASK_ACTION = "scheduler_ui_screenshot";
+export const UI_ASK_ACTION = "scheduler_ui_screenshot";
 
 type UiGate = PlannerSnapshot["uiGate"];
 

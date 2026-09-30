@@ -41,6 +41,7 @@ import { insertEvent, replay, tx } from "./ledger-tx.js";
 import { activeStepFor, checkReviewHead, checkReviewStep, noteStepDelivered, noteStepReview } from "./ledger-steps-write.js";
 import { releaseFinishedCardLeases } from "./ledger-scheduler-lease.js";
 import { checkStructuredReview } from "./scheduler-review.js";
+import { refuseAutoReviewMove } from "./scheduler-auto-review.js";
 
 export type { AppendableKind, ImportTaskInput, NewItem, NewTask, ReviewInput, StageMove, WriteCtx, WriteResult };
 
@@ -247,6 +248,7 @@ export function recordReview(db: Database, ctx: WriteCtx, input: ReviewInput): W
     const dup = replay(db, ctx, { project: task.project, target: task.id, kind: "review" }, () => task);
     if (dup) return dup;
     checkReview(input, task);
+    refuseAutoReviewMove(db, task, input.move);
     checkStructuredReview(input, task);
     const rc = checkReviewStep(db, task, input.reviewer);
     const { taskId: _t, text, move: _m, ...rest } = input;

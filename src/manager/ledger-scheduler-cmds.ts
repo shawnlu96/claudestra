@@ -16,8 +16,9 @@ const integer = (c: LedgerCli, flag: string): number => {
 
 export const SCHEDULER_CMDS: Record<string, CommandSpec> = {
   "workflow-set": {
-    valued: ["rev", "workflow-rev", "template", "version", "mode", "author-family", "fallback"], bools: [],
-    usage: "workflow-set <task> --rev N [--workflow-rev N] --template code|ui|security --version 2 --mode manual|observe|auto --author-family claude|codex --fallback <退路>",
+    valued: ["rev", "workflow-rev", "template", "version", "mode", "author-family", "fallback", "reason"], bools: [],
+    usage: "workflow-set <task> --rev N [--workflow-rev N] --template code|ui|security --version 2 --mode manual|observe|auto --author-family claude|codex --fallback <退路>" +
+      " [--reason <auto 退回人工时必填>]",
     run(c) {
       const template = c.need("template"), mode = c.need("mode"), family = c.need("author-family");
       if (!WORKFLOW_TEMPLATES.includes(template as never) || !WORKFLOW_MODES.includes(mode as never) || !AUTHOR_FAMILIES.includes(family as never)) {
@@ -27,7 +28,7 @@ export const SCHEDULER_CMDS: Record<string, CommandSpec> = {
         taskId: c.p.pos[1] ?? "", taskRev: integer(c, "rev"),
         workflowRev: c.p.flags["workflow-rev"] === undefined ? undefined : integer(c, "workflow-rev"),
         template: template as "code" | "ui" | "security", templateVersion: integer(c, "version"),
-        mode: mode as "manual" | "observe" | "auto", authorFamily: family as "claude" | "codex", fallback: c.need("fallback"),
+        mode: mode as "manual" | "observe" | "auto", authorFamily: family as "claude" | "codex", fallback: c.need("fallback"), reason: c.p.flags.reason,
       });
       return { ok: true, ...r };
     },

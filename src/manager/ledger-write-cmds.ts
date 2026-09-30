@@ -26,6 +26,7 @@ import { checkMergeGate, checkTaskRefs } from "./ledger-field-checks.js";
 import { agentKey, intFlag, jsonObjectFlag } from "./ledger-identity.js";
 import { MASTER_PARENT, TASK_MAX, validateParent, validateTask } from "./team.js";
 import { structuredReviewFlags } from "./ledger-scheduler-observe-cmds.js";
+import { isBoundAutoReviewer } from "../lib/scheduler-auto-review.js";
 
 const ITEM_FLAGS: Record<string, string> = { title: "title", status: "status", priority: "priority", "owner-words": "ownerWords", "one-line": "oneLine", next: "next" };
 const TASK_FLAGS: Record<string, string> = {
@@ -238,7 +239,7 @@ function deliverCmd(c: LedgerCli): Result {
 
 function review(c: LedgerCli): Result {
   const task = c.task(c.p.pos[1]);
-  c.requireManager(task.project, "记审查结论");
+  if (!isBoundAutoReviewer(c.db, task, c.deps.actor, c.p.flags)) c.requireManager(task.project, "记审查结论");
   const counts = { p0: intFlag(c.p, "p0"), p1: intFlag(c.p, "p1"), p2: intFlag(c.p, "p2") };
   if (Object.values(counts).some((v) => v === undefined)) throw new LedgerError("invalid", "要带 --p0 --p1 --p2（没有就写 0）");
   if (c.p.flags.path !== undefined && !pathLike(c.p.flags.path)) throw new LedgerError("invalid", PATH_ONLY("--path"));
