@@ -18,7 +18,7 @@ export interface PromptVars {
   ledgerDir: string;
 }
 
-export const DEFAULT_TEMPLATE = `你是 {TASK}「{TITLE}」的执行者。PM 是 {PM}。审查由调度器另派一个跨模型的审查会话做，你不用自己找审查员。
+const DEFAULT_TEMPLATE = `你是 {TASK}「{TITLE}」的执行者。PM 是 {PM}。审查由调度器另派一个跨模型的审查会话做，你不用自己找审查员。
 
 ## 先读
 1. 规格卡 {SPEC}（只读）。
@@ -31,7 +31,7 @@ export const DEFAULT_TEMPLATE = `你是 {TASK}「{TITLE}」的执行者。PM 是
 - 代码里不放 secrets、IP、个人信息。
 `;
 
-export const AUTO_SECTION = `
+const AUTO_SECTION = `
 ## 本卡是自动卡：生命周期归调度器，不找 PM
 - 派单全部来自调度服务（take_order 取单）。**不要给 {PM} 发任何进度、交付或「收到」消息**，PM 不在这条链上。
 - 「复述」单：把复述（≤ 40 行）写进 {LEDGER}/reviews/{TASK}-restate.md，再把阶段推到 restate（\`ledger stage {TASK} --from spec --to restate --text "复述见 reviews/{TASK}-restate.md"\`），然后停下等开工单。

@@ -41,7 +41,7 @@ export function parseToolNodes(raw: unknown, what = "nodes"): Parsed<NodeInput[]
 }
 
 /** 当前版的节点原样转成 CLI 输入（带绑的卡，否则 CLI 会当成换卡） */
-export const carry = (n: DagNode): NodeInput => ({
+const carry = (n: DagNode): NodeInput => ({
   key: n.key, taskId: n.taskId, oneLine: n.oneLine, deps: [...n.deps], estimate: n.estimate, ...(n.fileGlobs ? { fileGlobs: [...n.fileGlobs] } : {}),
 });
 

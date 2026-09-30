@@ -12,7 +12,7 @@ import { getWorkflow } from "./ledger-scheduler.js";
 import { getTask } from "./ledger-store.js";
 import { ledgerArgs } from "./order-ledger-exit.js";
 
-export interface GitResult {
+interface GitResult {
   ok: boolean;
   out: string;
 }
@@ -32,8 +32,8 @@ export interface StepIO {
   attempt: string;
 }
 
-export const STEP_NAMES = ["task-new", "spec", "worktree", "prompt", "agent", "task-set", "workflow", "bind"] as const;
-export type StepName = (typeof STEP_NAMES)[number];
+const STEP_NAMES = ["task-new", "spec", "worktree", "prompt", "agent", "task-set", "workflow", "bind"] as const;
+type StepName = (typeof STEP_NAMES)[number];
 
 interface Step {
   name: StepName;

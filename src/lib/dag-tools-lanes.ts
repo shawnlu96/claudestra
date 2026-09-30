@@ -30,7 +30,7 @@ export interface BusyCard {
   fileGlobs: readonly string[];
 }
 
-export interface Waiting {
+interface Waiting {
   key: string;
   why: "deps" | "files" | "no_globs";
   /** deps：没满足的依赖节点；files：和它重叠的节点 key 或卡号 */
@@ -110,7 +110,7 @@ export function laneNodes(views: readonly NodeView[]): LaneNode[] {
 }
 
 /** 图外正占着文件的卡：同项目、不在这张图的节点上、没到终态、没满足、写了 extra.fileGlobs */
-export function busyCards(tasks: readonly LedgerTask[], inGraph: ReadonlySet<string>, satisfied: (t: LedgerTask) => boolean): BusyCard[] {
+function busyCards(tasks: readonly LedgerTask[], inGraph: ReadonlySet<string>, satisfied: (t: LedgerTask) => boolean): BusyCard[] {
   const out: BusyCard[] = [];
   for (const t of tasks) {
     if (inGraph.has(t.id) || TERMINAL_STAGES.includes(t.stage) || satisfied(t)) continue;

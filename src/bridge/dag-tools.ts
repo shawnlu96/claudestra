@@ -59,6 +59,18 @@ function feature(db: Database, raw: unknown): Feature | OrderToolResult {
 }
 const isFeature = (x: Feature | OrderToolResult): x is Feature => "project" in x;
 
+interface Opened { db: Database; f: Feature; a: Args }
+/** 取库、找 feature；给了 call（写类工具）再过角色门 */
+function open(deps: DagToolDeps, args: unknown, call: VerifiedCall | null): Opened | OrderToolResult {
+  const db = deps.db();
+  if (!db) return refuse("no_ledger", "台账库打不开");
+  const a = isObj(args) ? args : {};
+  const f = feature(db, a.featureId);
+  if (!isFeature(f)) return f;
+  return (call && gate(db, call, f.project)) || { db, f, a };
+}
+const isOpened = (x: Opened | OrderToolResult): x is Opened => "db" in x;
+
 const livePhase = (db: Database) => (n: DagNode) => nodePhase(n.taskId, n.taskId ? (getTask(db, n.taskId)?.stage ?? null) : null);
 const currentNodes = (db: Database, f: Feature): DagNode[] => {
   const v = getDagVersion(db, f.id, f.currentVersion);
@@ -140,13 +152,9 @@ async function planFeature(deps: DagToolDeps, call: VerifiedCall, args: unknown)
 }
 
 async function rewriteDag(deps: DagToolDeps, call: VerifiedCall, args: unknown): Promise<OrderToolResult> {
-  const db = deps.db();
-  if (!db) return refuse("no_ledger", "台账库打不开");
-  const a = isObj(args) ? args : {};
-  const f = feature(db, a.featureId);
-  if (!isFeature(f)) return f;
-  const denied = gate(db, call, f.project);
-  if (denied) return denied;
+  const o = open(deps, args, call);
+  if (!isOpened(o)) return o;
+  const { db, f, a } = o;
   const kind = str(a.reasonKind), reason = str(a.reason);
   if (!kind || !reason) return refuse("invalid", "改图要带 reasonKind 和 reason（原话）");
   const ops = parseRewriteOps(a);
@@ -160,21 +168,20 @@ async function rewriteDag(deps: DagToolDeps, call: VerifiedCall, args: unknown):
 /** 同一个节点同一时刻只许一次开工：两次并发都过了预检，后失败的那次回滚会动到先成功那次的卡 / agent */
 const starting = new Set<string>();
 
+const START_OPTIONAL = ["base", "branch", "taskId", "title", "item", "repo"] as const;
+
 async function startNode(deps: DagToolDeps, call: VerifiedCall, args: unknown): Promise<OrderToolResult> {
-  const db = deps.db();
-  if (!db) return refuse("no_ledger", "台账库打不开");
-  const a = isObj(args) ? args : {};
-  const f = feature(db, a.featureId);
-  if (!isFeature(f)) return f;
-  const denied = gate(db, call, f.project);
-  if (denied) return denied;
+  const o = open(deps, args, call);
+  if (!isOpened(o)) return o;
+  const { db, f, a } = o;
   const key = str(a.key);
   if (!key) return refuse("invalid", "缺节点 key");
   const lock = `${f.id}:${key}`;
   if (starting.has(lock)) return refuse("busy", `节点 ${key} 正在开工，等这次的结果`);
   starting.add(lock);
   try {
-    const input: StartArgs = { featureId: f.id, key, ...(Object.fromEntries(["base", "branch", "taskId", "title", "item", "repo"].map((k) => [k, str(a[k])]).filter(([, v]) => v)) as Partial<StartArgs>) };
+    const input: StartArgs = { featureId: f.id, key };
+    for (const k of START_OPTIONAL) if (str(a[k])) input[k] = str(a[k]);
     if (typeof a.spec === "string") input.spec = a.spec;
     const pre = await preflightStart({ ...deps.startEnv(), db, caller: call.agent }, input);
     if (!pre.ok) return refuse(pre.code, pre.error);
@@ -189,11 +196,9 @@ async function startNode(deps: DagToolDeps, call: VerifiedCall, args: unknown): 
 }
 
 function showDag(deps: DagToolDeps, args: unknown): OrderToolResult {
-  const db = deps.db();
-  if (!db) return refuse("no_ledger", "台账库打不开");
-  const a = isObj(args) ? args : {};
-  const f = feature(db, a.featureId);
-  if (!isFeature(f)) return f;
+  const o = open(deps, args, null);
+  if (!isOpened(o)) return o;
+  const { db, f, a } = o;
   try {
     if (Array.isArray(a.diff)) return { ok: true, feature: f.id, ...dagDiff(db, f, String(a.diff[0]), String(a.diff[1] ?? f.currentVersion)) };
     const snap = dagSnapshot(db, f, typeof a.version === "number" ? a.version : undefined);

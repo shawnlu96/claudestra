@@ -74,12 +74,12 @@ const TASK_ID = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,59}$/;
 const no = (code: string, error: string): Preflight => ({ ok: false, code, error });
 
 /** feature id 去掉本机前缀后的短名（i28）：卡号 = 短名-节点 key */
-export function featureSlug(f: Feature, origin: string | null): string {
+function featureSlug(f: Feature, origin: string | null): string {
   return origin && f.id.startsWith(`${origin}-`) ? f.id.slice(origin.length + 1) : f.id;
 }
 
 /** 卡号 → agent 名：小写，点号等换成 -（agent 名不许有点号），≤ 48 */
-export const agentNameFor = (taskId: string): string => `task-${taskId.toLowerCase().replace(/[^a-z0-9-]/g, "-")}`.slice(0, 48);
+const agentNameFor = (taskId: string): string => `task-${taskId.toLowerCase().replace(/[^a-z0-9-]/g, "-")}`.slice(0, 48);
 
 async function pickRepo(env: StartEnv, project: string, want: string | undefined): Promise<string | null> {
   const dirs = await env.projectDirs(project);
