@@ -12,7 +12,8 @@ import { readCcSessionEntries } from "./cc-sessions.js";
 import { defaultRunner } from "./codex-thread.js";
 import { resolveLoginBinary } from "./login-binary.js";
 import { fetchLatestCodex, probeCodexInstall, readCodexRunning } from "./codex-version.js";
-import { CODEX_ACP_PAIRS, codexPairsWithAdapter } from "./acp/install.js";
+import { currentCodexAcp, type CurrentAcp } from "./acp/install.js";
+import { fetchAcpReleases, pickAdapterFor, rangeAllows, type AcpRelease } from "./acp/resolve.js";
 import { piBinName, readPiRuntimeSnapshot } from "./pi-env.js";
 import { pidAlive } from "./tmux-helper.js";
 
@@ -22,8 +23,9 @@ export type UpdateHint =
   /** npm：是 npm 全局安装，网页才给「更新并重启」按钮（否则只有文字） */
   | { kind: "codex-update"; installed: string; latest: string; npm: boolean; adapterPairs?: string };
 /*
- * adapterPairs（只有 Codex 会带）：目标版本不在 codex-acp 配套范围里，值是配套范围（如 0.158.x）。网页只给文字、不给按钮，
- * 端点也拒——升到不配套的 codex，ACP agent 下次起适配器就是错配（docs/runtimes/codex-acp.md「Codex 升级」）。
+ * adapterPairs（只有 Codex 会带）：目标版本既不在当前 codex-acp 的配套范围里、npm 上也找不到能配它的适配器，值是当前范围
+ * （如 ^0.158.0）。网页只给文字、不给按钮，端点也拒。找得到能配的适配器时照常给按钮：端点 / restart 会先换上它
+ * （docs/runtimes/codex-acp.md「Codex 升级」）。
  */
 
 /** a 比 b 新（逐段数字比较）。任一方解析不出 x.y.z → false：拿不准就不打扰人。 */
@@ -40,27 +42,30 @@ export const isStableVersion = (v?: string): boolean => !!v && /^\d+\.\d+\.\d+$/
 
 /**
  * 该给哪条提示。Pi / Codex 有新版时先提示更新——更新完重启一次，「运行版本落后」也一并解决。
- * Codex 的新版不配套适配器时，能直接点的「重启生效」优先；都不能点才给那条只有文字的。codex 是整机一份，
- * 所以「更新」对 tmux agent 也拦；「重启」只拦 ACP agent（tmux 的 TUI 不经适配器）。npm latest 是预发布版时
- * codex 不提示更新（端点也不装，给了按钮也点不成）。tests/update-hints.test.ts。
+ * Codex 的新版不配套当前适配器、npm 上也没有能配它的适配器时，能直接点的「重启生效」优先；都不能点才给那条只有文字的。
+ * codex 是整机一份，所以「更新」对 tmux agent 也拦；「重启」只拦 ACP agent（tmux 的 TUI 不经适配器；ACP 的 restart 走
+ * readiness 自动换适配器，所以找得到能配的也放行）。npm latest 是预发布版时 codex 不提示更新。tests/update-hints.test.ts。
+ * adapter：当前适配器（null = 没装，没有要配的）；releases：registry 上的适配器正式版（缓存，冷缓存时是空的）。
  */
 export function pickUpdateHint(
   runtime: string,
-  v: { running?: string; installed?: string; latest?: string; npm?: boolean; acp?: boolean },
+  v: { running?: string; installed?: string; latest?: string; npm?: boolean; acp?: boolean; adapter?: CurrentAcp | null; releases?: AcpRelease[] },
 ): UpdateHint | null {
+  const followable = (x: string) => !v.adapter || rangeAllows(v.adapter.codexRange, x) || !!pickAdapterFor(v.releases ?? [], x);
+  const pairs = v.adapter?.codexRange ?? "";
   let parked: UpdateHint | null = null;
   if (v.installed && v.latest && isNewerVersion(v.latest, v.installed)) {
     if (runtime === "pi") return { kind: "pi-update", installed: v.installed, latest: v.latest };
     if (runtime === "codex" && isStableVersion(v.latest)) {
       const hint = { kind: "codex-update" as const, installed: v.installed, latest: v.latest, npm: !!v.npm };
-      if (codexPairsWithAdapter(v.latest)) return hint;
-      parked = { ...hint, adapterPairs: CODEX_ACP_PAIRS };
+      if (followable(v.latest)) return hint;
+      parked = { ...hint, adapterPairs: pairs };
     }
   }
   if (v.running && v.installed && isNewerVersion(v.installed, v.running)) {
     const hint = { kind: "restart" as const, running: v.running, installed: v.installed };
-    if (!(runtime === "codex" && v.acp && !codexPairsWithAdapter(v.installed))) return hint;
-    parked ??= { ...hint, adapterPairs: CODEX_ACP_PAIRS };
+    if (!(runtime === "codex" && v.acp && !followable(v.installed))) return hint;
+    parked ??= { ...hint, adapterPairs: pairs };
   }
   return parked;
 }
@@ -137,6 +142,12 @@ const PROBE_CODEX: VersionProbe = {
   },
 };
 const PROBE_CODEX_LATEST: VersionProbe = { key: "latest:codex", ttl: LATEST_TTL_MS, load: fetchLatestCodex };
+let acpReleases: AcpRelease[] = []; // 与 releases:codex-acp 同一次探测得出（缓存只存字符串，存的是最高版本号）
+const PROBE_ACP_RELEASES: VersionProbe = {
+  key: "releases:codex-acp",
+  ttl: LATEST_TTL_MS,
+  load: async () => (acpReleases = await fetchAcpReleases()).at(-1)?.version,
+};
 const versions = makeVersionCache();
 
 /** 网页刚替用户跑完 `pi update`：马上重探已装版本，横幅立刻翻成「重启生效」，不用等 2 分钟 TTL */
@@ -176,10 +187,11 @@ export async function attachUpdateHints(agents: ListedAgent[], regs: Map<string,
   void cache.refresh([
     ...(hasCc ? [PROBE_CC] : []),
     ...(hasPi ? [PROBE_PI, PROBE_PI_LATEST] : []),
-    ...(hasCodex ? [PROBE_CODEX, PROBE_CODEX_LATEST] : []),
+    ...(hasCodex ? [PROBE_CODEX, PROBE_CODEX_LATEST, PROBE_ACP_RELEASES] : []),
   ]);
   const ccRunning = hasCc ? await ccRunningVersions() : new Map<string, string>();
   const [ccInstalled, piInstalled, piLatest] = [cache.get(PROBE_CC.key), cache.get(PROBE_PI.key), cache.get(PROBE_PI_LATEST.key)];
+  const adapter = hasCodex ? currentCodexAcp() : null;
   for (const a of live) {
     const r = regs.get(a.name)!;
     if (isCc(a)) a.updateHint = pickUpdateHint("claude-code", { running: r.sessionId ? ccRunning.get(r.sessionId) : undefined, installed: ccInstalled });
@@ -187,7 +199,7 @@ export async function attachUpdateHints(agents: ListedAgent[], regs: Map<string,
     else if (isCodex(a)) {
       const v = {
         running: readCodexRunning(a.name), installed: cache.get(PROBE_CODEX.key), latest: cache.get(PROBE_CODEX_LATEST.key),
-        npm: codexNpm, acp: r.transport === "acp",
+        npm: codexNpm, acp: r.transport === "acp", adapter, releases: acpReleases,
       };
       a.updateHint = pickUpdateHint("codex", v);
     }

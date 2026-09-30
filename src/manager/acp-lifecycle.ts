@@ -4,10 +4,11 @@
  *   只有声明了 ACP 段的运行时（目前只有 codex）能切 acp；生产切 acp 前要先装好适配器（沙箱只许 stub）。
  *   不拿命令级写锁（write-commands.ts needsWriteLock）：自己锁住改 registry 那一下，放锁之后再起 restart——restart 要同一把锁，
  *   锁着起就要白等 20s 降级。
- * - `acp-install`：下载并校验 codex-acp（lib/acp/install.ts：版本钉死、sha256 写死，校验不过拒装，不走 npm）。
+ * - `acp-install`：装能配本机已装 Codex 的最新 codex-acp 并切过去（lib/acp/install.ts：按 registry 公布的 integrity 验包）。
  * 生命周期本身（create / restart / resume / kill）走 manager 的通用流程，transport=acp 时选 lib/runtimes/codex-acp.ts。
  */
-import { CODEX_ACP_VERSION, codexAcpInstalled, installCodexAcp } from "../lib/acp/install.js";
+import { codexAcpInstalled, ensureCodexAcpFor } from "../lib/acp/install.js";
+import { probeCodexInstall } from "../lib/codex-version.js";
 import { checkAcpReady } from "../lib/acp/readiness.js";
 import { ACP_AGENT_ENV } from "../lib/acp/stub.js";
 import { resolveBunPath } from "../lib/bun-path.js";
@@ -123,8 +124,8 @@ export async function recoverFailedAcpLaunch(
 
 export async function cmdAcp(cmd: string, args: string[]): Promise<void> {
   if (cmd === "acp-install") {
-    const r = await installCodexAcp();
-    return output(r.ok ? { ok: true, version: CODEX_ACP_VERSION, path: r.path, reused: r.reused } : { ok: false, error: r.error });
+    const r = await ensureCodexAcpFor((await probeCodexInstall())?.version);
+    return output(r.ok ? { ok: true, version: r.version, codexRange: r.codexRange, path: r.path, reused: r.reused } : { ok: false, error: r.error });
   }
   return switchTransport(args[0] ?? "", args[1] ?? "");
 }

@@ -2,7 +2,8 @@
 import { resolveCodexBinary } from "../codex-launch.js";
 import { defaultRunner, type Runner } from "../codex-thread.js";
 import { isSandbox } from "../sandbox.js";
-import { codexAcpInstalled, installCodexAcp } from "./install.js";
+import { probeClaudeVersion } from "../claude-binary.js";
+import { codexAcpInstalled, codexPairsWithAdapter, ensureCodexAcpFor } from "./install.js";
 import { repoStubPath } from "./stub.js";
 
 export type AcpReady = { ok: true; codexBin?: string } | { ok: false; reason: string };
@@ -12,7 +13,9 @@ export interface AcpReadyDeps {
   resolveBin?: () => Promise<string | null>;
   run?: Runner;
   installed?: () => ReturnType<typeof codexAcpInstalled>;
-  install?: () => ReturnType<typeof installCodexAcp>;
+  /** 装能配这个 codex 版本的最新适配器并切指针；缺省查 npm registry */
+  install?: (codexVersion: string | undefined) => ReturnType<typeof ensureCodexAcpFor>;
+  pairs?: (codexVersion: string | undefined) => boolean;
   stub?: () => string | null;
 }
 
@@ -33,12 +36,22 @@ export async function probeAcpCli(deps: AcpReadyDeps = {}): Promise<AcpReady> {
   return { ok: true, codexBin: bin };
 }
 
+/**
+ * autoInstall：没装、或已装的不配本机 codex 时，按本机 codex 版本去装配套的最新适配器。查不到 / 下载失败时
+ * 退回已装的那个照常就绪（宿主对错配只告警，见 codex-version.ts）——离线绝不能把一台本来能跑的机器判成未就绪。
+ */
 export async function checkAcpReady(autoInstall = false, deps: AcpReadyDeps = {}): Promise<AcpReady> {
   const cli = await probeAcpCli(deps);
   if (!cli.ok || isSandbox(deps.env ?? process.env)) return cli;
   const have = (deps.installed ?? codexAcpInstalled)();
-  if (have.ok) return cli;
-  if (!autoInstall) return { ok: false, reason: have.hint };
-  const installed = await (deps.install ?? installCodexAcp)();
-  return installed.ok ? cli : { ok: false, reason: installed.error };
+  if (!autoInstall) return have.ok ? cli : { ok: false, reason: have.hint };
+  const version = cli.codexBin ? (await probeClaudeVersion(deps.run ?? defaultRunner, cli.codexBin).catch(() => null)) ?? undefined : undefined;
+  if (have.ok && (!version || (deps.pairs ?? codexPairsWithAdapter)(version))) return cli;
+  const installed = await (deps.install ?? ensureCodexAcpFor)(version);
+  if (installed.ok) return cli;
+  if (have.ok) {
+    console.warn(`⚠️ [acp] 没换上配 codex ${version} 的适配器，沿用已装的 codex-acp ${have.version}：${installed.error}`);
+    return cli;
+  }
+  return { ok: false, reason: installed.error };
 }
