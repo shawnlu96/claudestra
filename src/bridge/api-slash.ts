@@ -92,14 +92,15 @@ export async function handleSlashPassthrough(r: SlashRequest, deps: SlashDeps): 
   // 停在额度菜单 / 撞墙倒计时上不打字（倒计时上一打字就取消自动续跑，菜单上会选项）；原因只告诉能看额度的凭据（canSeeQuota）
   const wall = await (deps.wallWait ?? ((w: string) => windowWallWait(w, rt || undefined)))(win); // Codex 窗口还认选择菜单（T63）
   if (wall) return apiJson(409, { ok: false, error: `${agent.name} ${wallWaitRefusal(wall, canSeeQuota(principal))}，这条命令没有注入` });
+  // owner 打的 /model、/effort 是 Claudestra 代 owner 注入：注入前登记精确目标的短时意图，watcher 见到目标完全一致的框代按一次
+  // （大总管也登记在 "master" 名下）；先登记是因为框可能在发完字、登记之前就画出来
+  const sw = (slashM[1] === "model" || slashM[1] === "effort") && args ? await import("../lib/switch-intent.js") : null;
+  if (sw && slashM[1] === "model") sw.noteModelSwitchIntent(agent.name, resolveModelAlias(args));
+  else if (sw) sw.noteEffortSwitchIntent(agent.name, args);
   try {
     await deps.sendLine(win, resolved.ccText);
-    // v2.16.2 输入框打 /model 也登记切换意图：slash 直通没有代按逻辑，弹窗迟到 1.5s 无人按，agent 卡死——watcher 兜底代按
-    if (slashM[1] === "model" && args) {
-      const { noteModelSwitchIntent } = await import("./permission-watcher.js");
-      noteModelSwitchIntent(agent.name, resolveModelAlias(args));
-    }
   } catch (e) {
+    sw?.clearSwitchIntent(agent.name, slashM[1] as "model" | "effort"); // 没注入就没有框可等
     // 查过之后、真正发键前 Codex 菜单弹出来了（lib/codex-key-guard.ts）：没注入，同上 409
     if ((e as Error).name === "KeysBlockedError") return apiJson(409, { ok: false, error: `${agent.name} ${(e as Error).message}，这条命令没有注入` });
     return apiJson(500, { ok: false, error: `tmux 注入失败: ${(e as Error).message}` });

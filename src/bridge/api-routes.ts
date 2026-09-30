@@ -1365,7 +1365,7 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
       // 会话有 prompt cache 时 /model 弹「Switch model?」、/effort 弹「Change effort level?」
       // (CC 2.1.280 实测两者都弹)。用户已在 web 下拉拍过板,没人按 TUI 就永远卡在框上。
       // runSwitchCommand 注入 → 目标一致的框代按一次 → 等命令真正落地才返回,两条命令不会叠进同一个框。
-      const { noteModelSwitchIntent, noteEffortSwitchIntent, clearSwitchIntent } = await import("./permission-watcher.js");
+      const { noteModelSwitchIntent, noteEffortSwitchIntent, clearSwitchIntent } = await import("../lib/switch-intent.js");
       // 总时长封顶:web BFF 代理超时 20s,两条命令各等满 7s 再加 set-claude 就贴边了
       const deadline = Date.now() + 11_000;
       const TICK_MS = 700;

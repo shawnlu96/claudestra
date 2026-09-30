@@ -4,7 +4,7 @@
  * peer → 永远按普通消息投递（返回 null，调用方走 deliver，带 🤝 头、会被中和）。
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "fs";
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { handleSlashPassthrough, SLASH_OWNER_ONLY, type SlashDeps } from "../src/bridge/api-slash.js";
@@ -207,5 +207,35 @@ describe("窗口停在额度菜单 / 撞墙倒计时上（T24）", () => {
       expect(((await res.json()) as { error: string }).error).toContain("没发任何键");
       expect(h.sent).toEqual([]);
     }
+  });
+});
+
+describe("owner 的 /model、/effort 登记精确目标的短时意图（T41c r1 P1-2）", () => {
+  const fx = (n: string) => readFileSync(join(import.meta.dir, "fixtures", "switch-confirm", `cc2.1.280-${n}.txt`), "utf8");
+  test("owner：/model、/effort 注入即登记，目标一致的框各代按一次；大总管同样", async () => {
+    const { consumeSwitchIntent } = await import("../src/lib/switch-intent.js");
+    const { detectSwitchConfirmPrompt } = await import("../src/lib/tmux-helper.js");
+    const model = detectSwitchConfirmPrompt(fx("switch-model"))!;
+    const effort = detectSwitchConfirmPrompt(fx("change-effort"))!;
+    for (const agent of [{ ...AGENT, name: "agent-t41c-slash" }, { ...AGENT, name: "master", channelId: "local-master" }]) {
+      const h = harness();
+      expect((await call(OWNER, "/model sonnet-5", h.deps, agent))?.status).toBe(202);
+      expect((await call(OWNER, "/effort high", h.deps, agent))?.status).toBe(202);
+      expect(consumeSwitchIntent(agent.name, model)).toBe(true);
+      expect(consumeSwitchIntent(agent.name, effort)).toBe(true);
+      expect(consumeSwitchIntent(agent.name, model)).toBe(false);
+    }
+  });
+  test("guest 被 403 不登记；注入失败撤掉意图", async () => {
+    const { consumeSwitchIntent } = await import("../src/lib/switch-intent.js");
+    const { detectSwitchConfirmPrompt } = await import("../src/lib/tmux-helper.js");
+    const effort = detectSwitchConfirmPrompt(fx("change-effort"))!;
+    const agent = { ...AGENT, name: "agent-t41c-slash2" };
+    const h = harness();
+    expect((await call(GUEST, "/effort high", h.deps, agent))?.status).toBe(403);
+    expect(consumeSwitchIntent(agent.name, effort)).toBe(false);
+    const broken: SlashDeps = { ...h.deps, sendLine: async () => { throw new Error("tmux down"); } };
+    expect((await call(OWNER, "/effort high", broken, agent))?.status).toBe(500);
+    expect(consumeSwitchIntent(agent.name, effort)).toBe(false);
   });
 });

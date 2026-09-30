@@ -573,7 +573,7 @@ async function handleInteraction(discord: Client, deps: InteractionDeps, interac
           await tmuxSendLine(targetWindow, resolved.ccText);
           // Discord slash 的 /model 同样登记切换意图 → watcher 代按二次确认（大总管登记在 "master" 名下，watcher 单独巡检它）
           if (cmd === "model") {
-            const { noteModelSwitchIntent } = await import("./permission-watcher.js");
+            const { noteModelSwitchIntent } = await import("../lib/switch-intent.js");
             const { resolveModelAlias } = await import("../lib/claude-launch.js");
             const arg = resolved.ccText.replace(/^\/model\s*/, "").trim();
             if (arg) noteModelSwitchIntent(targetLabel, resolveModelAlias(arg));
