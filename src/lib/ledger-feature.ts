@@ -4,6 +4,7 @@
  * 写入在 ledger-feature-write.ts。
  */
 import type { Database } from "bun:sqlite";
+import type { DagCancel } from "./ledger-dag-rules.js";
 import type { DagReasonKind, FeatureStatus } from "./ledger-feature-schema.js";
 import { isSatisfied } from "./ledger-deps.js";
 import { TERMINAL_STAGES, type LedgerTask, type Stage } from "./ledger-stages.js";
@@ -51,6 +52,23 @@ export interface DagVersion {
   approvedBy: string | null;
   createdAt: number;
   nodes: DagNode[];
+  /** 这一版取消掉的进行中节点（v1 为空） */
+  cancels: DagCancel[];
+  scopeChange: boolean;
+  /** 要 owner 批的重写：批准它的 ask；直接生效的为 null */
+  askId: string | null;
+}
+
+/** 等 owner 批的重写（dag_proposals 一行）：批了才写成 dag_versions 的 version，期间当前版本不变 */
+export interface DagProposal extends Omit<DagVersion, "approvedBy"> {
+  seq: number;
+  baseVersion: number;
+  sha: string;
+  askId: string;
+  state: "pending" | "approved" | "rejected" | "void";
+  decidedAt: number | null;
+  decidedBy: string | null;
+  decisionNote: string | null;
 }
 
 type Row = Record<string, unknown>;
@@ -58,8 +76,11 @@ type Row = Record<string, unknown>;
 const toFeature = (r: Row): Feature => r as unknown as Feature;
 
 function toVersion(r: Row): DagVersion {
-  return { ...(r as unknown as DagVersion), nodes: JSON.parse(String(r.nodes)) as DagNode[] };
+  return { ...(r as unknown as DagVersion), nodes: JSON.parse(String(r.nodes)) as DagNode[], cancels: JSON.parse(String(r.cancels ?? "[]")) as DagCancel[],
+    scopeChange: r.scopeChange === 1, askId: (r.askId as string | null) ?? null };
 }
+
+const toProposal = (r: Row): DagProposal => ({ ...(r as unknown as DagProposal), ...toVersion(r) } as DagProposal);
 
 export function getFeature(db: Database, id: string): Feature | null {
   const r = db.prepare("SELECT * FROM features WHERE id = ?").get(id) as Row | null;
@@ -77,6 +98,23 @@ export function resolveFeature(db: Database, raw: string | undefined, origin: st
 export function getDagVersion(db: Database, featureId: string, version: number): DagVersion | null {
   const r = db.prepare("SELECT * FROM dag_versions WHERE featureId = ? AND version = ?").get(featureId, version) as Row | null;
   return r ? toVersion(r) : null;
+}
+
+export function getPendingProposal(db: Database, featureId: string): DagProposal | null {
+  const r = db.prepare("SELECT * FROM dag_proposals WHERE featureId = ? AND state = 'pending'").get(featureId) as Row | null;
+  return r ? toProposal(r) : null;
+}
+
+export function getProposal(db: Database, seq: number): DagProposal | null {
+  const r = db.prepare("SELECT * FROM dag_proposals WHERE seq = ?").get(seq) as Row | null;
+  return r ? toProposal(r) : null;
+}
+
+/** 版本快照并上 dag-bind 绑的卡：计划节点开工绑卡不产生新版本，读的时候合进来（快照本身只追加、不改） */
+export function effectiveNodes(db: Database, v: Pick<DagVersion, "featureId" | "version" | "nodes">): DagNode[] {
+  const rows = db.prepare("SELECT nodeKey, taskId FROM dag_bindings WHERE featureId = ? AND version = ?").all(v.featureId, v.version) as { nodeKey: string; taskId: string }[];
+  const bound = new Map(rows.map((r) => [r.nodeKey, r.taskId]));
+  return v.nodes.map((n) => (n.taskId || !bound.has(n.key) ? n : { ...n, taskId: bound.get(n.key) as string }));
 }
 
 /** 投影出来的节点：快照字段 + 任务卡现读的 status / title */

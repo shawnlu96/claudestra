@@ -18,8 +18,16 @@ export function ledgerBackupPath(path: string, target: number, repair = ""): str
 export function backupBeforeMigrate(db: Database, path: string, from: number, target: number, missing: readonly string[]): string | null {
   if (path === ":memory:" || from === 0 || (from >= target && missing.length === 0)) return null;
   const repair = from >= target ? createHash("sha256").update(missing.join("\n")).digest("hex").slice(0, 8) : "";
-  const dest = ledgerBackupPath(path, target, repair);
-  if (existsSync(dest)) return dest;
+  return vacuumBackup(db, ledgerBackupPath(path, target, repair), `台账迁移前备份失败`, `未迁移，库仍是 v${from}`);
+}
+
+/**
+ * VACUUM INTO 临时文件再 link 成 dest；失败抛「<what>（原因），<after>」，调用方据此不改库。
+ * reuse = 同名已在就当已备过（schema 升级：名字由目标版本决定，同名 = 同一次改库前的快照）；
+ * 传 false 时同名已在也算失败——名字不能证明内容是这次改库前的样子（feature 迁移失败后库被改过再重试）。
+ */
+export function vacuumBackup(db: Database, dest: string, what: string, after: string, reuse = true): string {
+  if (reuse && existsSync(dest)) return dest;
   const tmp = `${dest}.${process.pid}.${Date.now()}.tmp`;
   try {
     mkdirSync(dirname(dest), { recursive: true });
@@ -27,8 +35,8 @@ export function backupBeforeMigrate(db: Database, path: string, from: number, ta
     linkSync(tmp, dest);
   } catch (e) {
     // 只有 link 撞 EEXIST 算正常（别的进程先备好了）；mkdir 撞同名文件也是 EEXIST，所以再看一眼备份在不在
-    if ((e as NodeJS.ErrnoException).code !== "EEXIST" || !existsSync(dest)) {
-      throw new Error(`台账迁移前备份失败（${(e as Error).message}），未迁移，库仍是 v${from}`, { cause: e });
+    if (!reuse || (e as NodeJS.ErrnoException).code !== "EEXIST" || !existsSync(dest)) {
+      throw new Error(`${what}（${(e as Error).message}），${after}`, { cause: e });
     }
   } finally {
     // 先看在不在：backups 不是目录时 rm 自己也会抛，盖掉上面那句「备份失败」

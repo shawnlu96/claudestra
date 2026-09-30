@@ -7,7 +7,7 @@ import {
 import { migrateAsksV2 } from "../src/lib/ledger-asks-schema.js";
 import { STEPS_SCHEMA } from "../src/lib/ledger-steps.js";
 import { SCHEDULER_SCHEMA, SCHEDULER_SESSIONS_SCHEMA, SCHEDULER_MERGES_SCHEMA } from "../src/lib/ledger-scheduler-schema.js";
-import { FEATURE_SCHEMA } from "../src/lib/ledger-feature-schema.js";
+import { DAG_REWRITE_SCHEMA, FEATURE_SCHEMA } from "../src/lib/ledger-feature-schema.js";
 import { projectView } from "../src/lib/ledger-read.js";
 import { closeLedger, LEDGER_MIGRATIONS, LEDGER_SCHEMA_VERSION, LedgerError, listEvents, openLedger, schemaVersion } from "../src/lib/ledger-store.js";
 import { appendEvent, createItem, createTask } from "../src/lib/ledger-write.js";
@@ -245,13 +245,14 @@ const tableExists = (d: Database, name: string) => !!d.query("SELECT 1 FROM sqli
 
 describe("迁移到第二版", () => {
   test("顺序：v1 → asks → 依赖边 → 巡检 → asks v2 → 步骤 → 调度意图 → session → merge → feature", () => {
-    expect(LEDGER_MIGRATIONS.length).toBe(10);
+    expect(LEDGER_MIGRATIONS.length).toBe(11);
     expect(LEDGER_MIGRATIONS[4]).toBe(migrateAsksV2);
     expect(LEDGER_MIGRATIONS[5]).toBe(STEPS_SCHEMA);
     expect(LEDGER_MIGRATIONS[6]).toBe(SCHEDULER_SCHEMA);
     expect(LEDGER_MIGRATIONS[7]).toBe(SCHEDULER_SESSIONS_SCHEMA);
     expect(LEDGER_MIGRATIONS[8]).toBe(SCHEDULER_MERGES_SCHEMA);
     expect(LEDGER_MIGRATIONS[9]).toBe(FEATURE_SCHEMA);
+    expect(LEDGER_MIGRATIONS[10]).toBe(DAG_REWRITE_SCHEMA);
   });
 
   test("线上的 v3（T8h）、v4（T29，audit_baseline 里有数据）都升到 v5：asks 重建、task_deps / 巡检表 / 任务负责人列都在", () => {

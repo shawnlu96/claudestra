@@ -7,6 +7,7 @@
 import { existsSync } from "node:fs";
 import { repoEnvVar } from "../lib/env-file.js";
 import { LedgerReader } from "../lib/ledger-read.js";
+import { notify } from "../lib/notify.js";
 import { LedgerError, LEDGER_PATH, openLedger } from "../lib/ledger-store.js";
 import { renameAgentRefs } from "../lib/ledger-write.js";
 import { readProjects } from "../lib/projects.js";
@@ -14,7 +15,9 @@ import { readRegistryAgents } from "../lib/registry.js";
 import { loadRegistry, output, saveRegistry } from "./core.js";
 import { LedgerCli, type LedgerDeps, type Result } from "./ledger-context.js";
 import { DEP_CMDS } from "./ledger-dep-cmds.js";
+import { DAG_CMDS } from "./ledger-dag-cmds.js";
 import { FEATURE_CMDS } from "./ledger-feature-cmds.js";
+import { FEATURE_MIGRATE_CMDS } from "./ledger-feature-migrate-cmd.js";
 import { parseLedgerArgs, resolveActor } from "./ledger-identity.js";
 import { AUDIT_CMDS } from "./ledger-audit-cmd.js";
 import { importCmd } from "./ledger-import.js";
@@ -28,7 +31,7 @@ import { STEP_CMDS } from "./ledger-step-cmds.js";
 import { SCHEDULER_CMDS } from "./ledger-scheduler-cmds.js";
 import { SCHEDULER_OBSERVE_CMDS } from "./ledger-scheduler-observe-cmds.js";
 import { SCHEDULER_AUTO_CMDS } from "./ledger-scheduler-auto-cmds.js";
-import { isWriteInvocation } from "./write-commands.js";
+import { DRY_RUN_READS, isWriteInvocation } from "./write-commands.js";
 import { readSchedulerConfig } from "../lib/scheduler-config.js";
 import { collectCallerWitness } from "../lib/caller-witness.js";
 
@@ -45,6 +48,8 @@ const COMMANDS: Record<string, CommandSpec> = {
   ...TEAM_CMDS,
   ...DEP_CMDS,
   ...FEATURE_CMDS,
+  ...FEATURE_MIGRATE_CMDS,
+  ...DAG_CMDS,
   ...READ_CMDS,
   verify: VERIFY_CMD,
   ...AUDIT_CMDS,
@@ -94,8 +99,8 @@ async function realDeps(args: string[]): Promise<LedgerDeps | { error: string }>
   if (!who.ok && isWriteInvocation("ledger", args)) return { error: who.error };
   const actor = who.ok ? who.actor : UNKNOWN_ACTOR;
   const projects = await readProjects();
-  // ledger audit --dry-run 只读：不走 openLedger（它会建表 / 迁移，分支代码对线上库跑一次就把版本号抬上去）
-  const readOnly = args[0] === "audit" && args.includes("--dry-run") ? new LedgerReader().get() : undefined;
+  // audit / feature-migrate 的 --dry-run 只读：不走 openLedger（它会建表 / 迁移，分支代码对线上库跑一次就把版本号抬上去）
+  const readOnly = DRY_RUN_READS.has(args[0] ?? "") && args.includes("--dry-run") ? new LedgerReader().get() : undefined;
   if (readOnly === null) return { error: "台账库还不存在（或正在建），--dry-run 没东西可看" };
   return {
     db: readOnly ?? openLedger(),
@@ -110,6 +115,7 @@ async function realDeps(args: string[]): Promise<LedgerDeps | { error: string }>
     callerWitness: collectCallerWitness,
     autoProjects: () => { const s = readSchedulerConfig(); return s.enabled ? Object.keys(s.projects) : []; },
     autoDispatch: () => readSchedulerConfig().autoDispatch,
+    notifyOwner: (text) => notify({ source: "ledger", chatId: repoEnvVar("CONTROL_CHANNEL_ID"), text }),
   };
 }
 

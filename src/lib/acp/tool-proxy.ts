@@ -7,6 +7,8 @@
  * - register 就地吞掉、回 registered（channel-server 据此标就绪、清排队），ping 就地回 pong，一概不往上转；
  * - 只转发 channel-server 现有的请求类型（PROXIED_TYPES），别的帧丢掉记日志；
  * - requestId 按连接改写再上送，回包按改写后的 id 找回原连接：Codex 的子线程会各起一个 channel-server，id 都从 req_1 数起。
+ * - 调用方身份（T85）：bridge 把代理转上去的帧都算作宿主那条已验证的连接。token 在 BRIDGE_URL 里、Codex 的 shell 命令也继承得到，
+ *   所以只有登记时没自报 outsideMcpLauncher 的连接才算 Codex 起的 MCP 服务，其余（含没登记就发请求的）转上去一律带 callerDowngraded。
  * tests/acp-tool-proxy.test.ts。
  */
 import { randomBytes, timingSafeEqual } from "node:crypto";
@@ -25,10 +27,13 @@ const PROXIED_TYPES = new Set([
   "check_inbox",
   "fleet_state",
   "fleet_run",
+  "whoami",
 ]);
 
 interface Conn {
   id: number;
+  /** 登记过、且不是 shell 起的（lib/whoami-tool.ts callerRegisterFields） */
+  mcpLaunched?: boolean;
 }
 
 export interface ToolProxy {
@@ -75,12 +80,16 @@ export function startToolProxy(deps: ToolProxyDeps): ToolProxy {
     } catch {
       return deps.log("工具代理：丢掉一帧不是 JSON 的输入");
     }
-    if (m?.type === "register") return send(ws, { type: "registered", channelId: deps.channelId });
+    if (m?.type === "register") {
+      ws.data.mcpLaunched = m.outsideMcpLauncher !== true;
+      return send(ws, { type: "registered", channelId: deps.channelId });
+    }
     if (m?.type === "ping") return send(ws, { type: "pong" });
     if (!PROXIED_TYPES.has(m?.type) || typeof m.requestId !== "string") return deps.log(`工具代理：不转发 ${String(m?.type)} 帧`);
     const upId = `acp${ws.data.id}_${m.requestId}`;
     inflight.set(upId, { ws, orig: m.requestId });
-    if (!deps.toBridge({ ...m, requestId: upId })) {
+    const { callerCred: _cred, callerDowngraded: _down, ...frame } = m; // 身份字段只由代理决定，channel-server 自带的一概丢掉
+    if (!deps.toBridge({ ...frame, requestId: upId, ...(ws.data.mcpLaunched ? {} : { callerDowngraded: true }) })) {
       inflight.delete(upId);
       send(ws, { type: "response", requestId: m.requestId, error: "宿主和 bridge 的连接还没好，稍后再试" });
     }

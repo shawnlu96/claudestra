@@ -73,6 +73,7 @@ export function claudeLaunchOptions(spec: LaunchSpec): LaunchOptions {
     settingsAgent: spec.settingsName,
     projectContext: spec.projectContext,
     role: roleLaunch(x.role),
+    callerCredFile: spec.callerCredFile,
   };
 }
 
@@ -219,6 +220,7 @@ export const claudeCodeAdapter: ManagedRuntimeAdapter = {
   isValidSessionId: (id) => UUID_RE.test(id),
   /** claude 是 Claudestra 的前提，不做预检（与改造前一致） */
   available: async () => ({ ok: true }),
+  callerCred: "mcp-config",
   buildLaunchCommand: (spec) => buildClaudeCommand(claudeLaunchOptions(spec)),
 
   async waitReady(win: WindowOps, budget): Promise<ReadyResult> {
