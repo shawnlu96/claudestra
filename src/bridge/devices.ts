@@ -9,11 +9,11 @@ import { hostname } from "node:os";
 import { instanceKeySync, keyFingerprint } from "../lib/instance-key.js";
 import {
   Approvals, attachCredential, canAdministerPairing, canManage, capGrant, ChallengeStore, checkGuestAgents, cookieValueFrom, DEVICE_HEADER, deviceCookieHeader, ensureOwnerPrincipal,
-  fullGrant, guestGrant, hasPairingApprover, newGuestPrincipal, normalizeGrant, type Grant,
+  fullGrant, guestGrant, newGuestPrincipal, normalizeGrant, type Grant,
 } from "../lib/devices.js";
 import { LEGACY_SESSION_COOKIE, redeemLegacySession } from "../lib/legacy-web.js";
 import { webDb } from "./local-api/db.js";
-import { readPrincipalsStrict, reservedNameError, secretEquals, updatePrincipals, type Principal } from "../lib/principals.js";
+import { readPrincipalsStrict, reservedNameError, secretEquals, updatePrincipals, type Principal, type PrincipalsFile } from "../lib/principals.js";
 import { canonicalAgentName, REGISTRY_PATH, readRegistryAgentsSync } from "../lib/registry.js";
 import { formatCode, randomCode } from "../lib/relay-protocol.js";
 import { extractControlToken } from "./api-auth.js";
@@ -162,6 +162,14 @@ function pairStatus(req: Request, url: URL): Response {
   if (t.state === "pending") return apiJson(202, { ok: true, state: "pending" });
   if (t.state !== "approved") return apiJson(410, { ok: false, state: t.state, error: t.state === "denied" ? "pairing denied on the machine" : "approval expired" });
   return pairedResponse(requestContextOf(req), { ...t.result, grant: t.approval.grant });
+}
+
+/**
+ * 有没有人能批本机浏览器的全权请求：未停用的 principal 下有未停用、未过期、带 manage 的设备凭据（批准门是 canAdministerPairing + capGrant）。
+ * 没有 = 只能走终端 claudestra pair；/devices/local 据此直接回 no_approver，免得网页干等 10 分钟。
+ */
+export function hasPairingApprover(file: PrincipalsFile, now = Date.now()): boolean {
+  return file.principals.some((p) => !p.disabled && !p.peer && (p.credentials ?? []).some((c) => !c.disabled && c.grant.manage && c.grant.agents.includes("*") && Date.parse(c.expiresAt) > now));
 }
 
 /** 本机同时挂着的全权待批上限：本机进程能反复打这个端点，别让它把 owner 的批准横幅和推送刷满 */

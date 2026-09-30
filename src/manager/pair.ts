@@ -8,6 +8,7 @@
 import { toString as qrToString } from "qrcode";
 import { bridgeHttpBase } from "../lib/bridge-port.js";
 import type { Grant } from "../lib/devices.js";
+import { DRIVE_AGENT_SHELL_WARNING } from "../lib/peer-scope-gate.js";
 import { isMasterAgent } from "../lib/registry.js";
 import { output } from "./core.js";
 
@@ -136,14 +137,15 @@ export async function cmdPair(args: string[]): Promise<void> {
   if (!info.ok) {
     return fail({ error: info.error ?? "无法签发配对码", hint: "在仓库根 .env 写 RELAY_URL=wss://<中继地址>（可选 RELAY_NAME=<子域名标签>），重启 bridge 后再跑 pair" });
   }
-  if (json) return output({ ...info });
+  if (json) return output({ ...info, ...(info.guest ? { warnings: [DRIVE_AGENT_SHELL_WARNING] } : {}) });
   const qr = info.link ? await qrToString(info.link, { type: "terminal", small: true }).catch(() => "") : ""; // 终端不支持时只少一张二维码，链接与短码照给
   const where = info.base ? `在 https://${info.base} 输入短码` : "在你打开这台机器网页的地方（http://<局域网 IP>:<bridge 端口>/ 或 Tailscale 地址）进入配对页输入短码";
   const lines = [
     info.link ? `用手机相机扫码，或在任何浏览器打开下面的链接，或${where}——三选一：` : `没连中继：${where}；要二维码 / 链接请加 --url <入口地址>`,
     "", qr.trimEnd(), "",
     ...(info.link ? [`链接：${info.link}`] : [`手动进配对页时也可直接打开 <入口地址>/pair#${info.fragment}`]), `短码：${info.display}`, "",
-    `这条凭据的权限——${describeGrant(info.grant, info.guest)}`, `（缩小范围：--agents a,b  --no-terminal  --no-manage；给别人：--guest 名字 --agents a,b）`, "",
+    `这条凭据的权限——${describeGrant(info.grant, info.guest)}`, `（缩小范围：--agents a,b  --no-terminal  --no-manage；给别人：--guest 名字 --agents a,b）`,
+    ...(info.guest ? [`⚠️ ${DRIVE_AGENT_SHELL_WARNING}`] : []), "",
     ...(info.base ? [`这台机器在中继上的名字：${info.slug}（旧版网页：${info.url}）`] : []), `${new Date(info.expiresAt).toLocaleTimeString()} 前有效，只能用一次。`,
   ];
   process.stdout.write(lines.join("\n") + "\n"); // 人看的命令，bridge 从不调它（要机器可读加 --json）
@@ -168,7 +170,7 @@ async function waitForApproval(info: PairInfo): Promise<void> {
 }
 
 async function decideInteractively(a: Approval): Promise<void> {
-  const all = a.guest && a.grant.agents.includes("*") ? `⚠️ ${GUEST_ALL_WARNING}\n` : "";
+  const all = (a.guest && a.grant.agents.includes("*") ? `⚠️ ${GUEST_ALL_WARNING}\n` : "") + (a.guest ? `⚠️ ${DRIVE_AGENT_SHELL_WARNING}\n` : "");
   const line = await readLine(`\n设备「${a.deviceName}」（${a.clientIp ?? "未知地址"}）输入了短码，请求配对：${describeGrant(a.grant, a.guest)}\n${all}确认？[Y/n] `);
   const approve = !/^\s*n/i.test(line);
   const r = await post("/relay/pair/approve", { id: a.id, approve });

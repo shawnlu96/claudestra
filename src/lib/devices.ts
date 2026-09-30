@@ -244,14 +244,6 @@ export function canAdministerPairing(p: Principal): boolean {
   return canManage(p) && !!p.credential;
 }
 
-/**
- * 有没有人能批本机浏览器的全权请求：未停用的 principal 下有未停用、未过期、带 manage 的设备凭据（批准门是 canAdministerPairing + capGrant）。
- * 没有 = 只能走终端 claudestra pair；/devices/local 据此直接回 no_approver，免得网页干等 10 分钟。
- */
-export function hasPairingApprover(file: PrincipalsFile, now = Date.now()): boolean {
-  return file.principals.some((p) => !p.disabled && !p.peer && (p.credentials ?? []).some((c) => !c.disabled && c.grant.manage && c.grant.agents.includes("*") && Date.parse(c.expiresAt) > now));
-}
-
 /** 给出去的权限不能比自己手里的大：会话取交集，终端 / 管理要自己有才给得出。一个会话都不剩 → null */
 export function capGrant(g: Grant, issuer: Principal): Grant | null {
   const agents = intersectAgents(issuer.agents, g.agents);

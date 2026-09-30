@@ -8,13 +8,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setApiAuthPrincipalsPathForTest, authenticateApi } from "../src/bridge/api-auth.js";
 import {
-  decideApproval, handleDevicesManaged, handleDevicesPublic, issuePairing, pendingApprovals, setDevicesPrincipalsPathForTest, setDevicesRegistryPathForTest,
+  decideApproval, handleDevicesManaged, hasPairingApprover, handleDevicesPublic, issuePairing, pendingApprovals, setDevicesPrincipalsPathForTest, setDevicesRegistryPathForTest,
   setLocalPairingControlTokenForTest,
 } from "../src/bridge/devices.js";
 import { setRequestContext, type RequestContext } from "../src/bridge/request-context.js";
-import { OWNER_PRINCIPAL_ID } from "../src/lib/devices.js";
+import { attachCredential, ensureOwnerPrincipal, fullGrant, guestGrant, newGuestPrincipal, OWNER_PRINCIPAL_ID } from "../src/lib/devices.js";
 import { proofFor } from "../src/lib/pairing-codes.js";
-import { readPrincipalsStrict, type Principal } from "../src/lib/principals.js";
+import { readPrincipalsStrict, type Principal, type PrincipalsFile } from "../src/lib/principals.js";
 
 const FP = "16f9-b5d1-30fb-8923";
 const RELAY: RequestContext = { source: "relay", clientIp: "203.0.113.9", relayBase: "relay.test", pathPrefix: `/m/${FP}`, https: true };
@@ -254,7 +254,8 @@ describe("审计：新凭据记下谁签的码、谁批准的", () => {
 
 describe("本机回环自动配对", () => {
   const LOCAL_H = { "x-cstra-device": "1", origin: "http://bridge.local" };
-  const local = (headers: Record<string, string> = LOCAL_H, ctx: RequestContext = LOOPBACK) => pub("POST", "/api/v1/devices/local", ctx, { headers, body: { deviceName: "Safari" } }) as Promise<Response>;
+  const local = (headers: Record<string, string> = LOCAL_H, ctx: RequestContext = LOOPBACK) =>
+    pub("POST", "/api/v1/devices/local", ctx, { headers, body: { deviceName: "Safari" } }) as Promise<Response>;
   const status = (id: string, ctx: RequestContext = LOOPBACK) => pub("GET", `/api/v1/devices/pair/status?approval=${encodeURIComponent(id)}`, ctx) as Promise<Response>;
   const phone: Principal = { id: OWNER_PRINCIPAL_ID, role: "owner", agents: ["*", "master"], createdAt: "", credential: "dev_phone" };
   afterEach(() => setLocalPairingControlTokenForTest(undefined));
@@ -343,6 +344,27 @@ describe("本机回环自动配对", () => {
     for (let i = 0; i < 3; i++) ids.push(((await (await local()).json()) as { approvalId: string }).approvalId);
     expect((await local()).status).toBe(429);
     for (const id of ids) await decideApproval(id, false);
+  });
+});
+
+describe("hasPairingApprover（本机全权请求有没有人能批）", () => {
+  const T0 = new Date("2026-09-27T12:00:00Z");
+  test("只认未停用、未过期、全 scope 带 manage 的设备凭据；guest / 受限 / 过期 / 停用都不算", () => {
+    const file = ({ principals: [] } as PrincipalsFile);
+    expect(hasPairingApprover(file, T0.getTime())).toBe(false);
+    const guest = newGuestPrincipal("alex", guestGrant(["x"]), T0);
+    attachCredential(guest, "alex", guestGrant(["x"]), { now: T0 });
+    file.principals.push(guest);
+    const owner = ensureOwnerPrincipal(file, T0);
+    attachCredential(owner, "narrow", { agents: ["x"], terminal: false, manage: true }, { now: T0 });
+    const { credential } = attachCredential(owner, "mac", fullGrant(), { now: T0 });
+    expect(hasPairingApprover(file, T0.getTime())).toBe(true);
+    expect(hasPairingApprover(file, Date.parse(credential.expiresAt) + 1)).toBe(false);
+    credential.disabled = true;
+    expect(hasPairingApprover(file, T0.getTime())).toBe(false);
+    credential.disabled = false;
+    owner.disabled = true;
+    expect(hasPairingApprover(file, T0.getTime())).toBe(false);
   });
 });
 

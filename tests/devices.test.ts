@@ -4,7 +4,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   Approvals, ChallengeStore, attachCredential, canManage, cookieValueFrom, csrfOk, deviceCookieHeader, effectivePrincipal, ensureOwnerPrincipal,
-  findCredential, fullGrant, guestGrant, hashDeviceToken, hasPairingApprover, intersectAgents, newGuestPrincipal, normalizeGrant, OWNER_PRINCIPAL_ID, touchCredential,
+  findCredential, fullGrant, guestGrant, hashDeviceToken, intersectAgents, newGuestPrincipal, normalizeGrant, OWNER_PRINCIPAL_ID, touchCredential,
 } from "../src/lib/devices.js";
 import type { Principal, PrincipalsFile } from "../src/lib/principals.js";
 
@@ -150,25 +150,5 @@ describe("ChallengeStore / Approvals", () => {
     now += 1001;
     expect(q.pending()).toEqual([]);
     expect(q.take(e.id)).toEqual({ state: "expired" });
-  });
-});
-
-describe("hasPairingApprover（本机全权请求有没有人能批）", () => {
-  test("只认未停用、未过期、全 scope 带 manage 的设备凭据；guest / 受限 / 过期 / 停用都不算", () => {
-    const file = fresh();
-    expect(hasPairingApprover(file, T0.getTime())).toBe(false);
-    const guest = newGuestPrincipal("alex", guestGrant(["x"]), T0, random);
-    attachCredential(guest, "alex", guestGrant(["x"]), { now: T0, random });
-    file.principals.push(guest);
-    const owner = ensureOwnerPrincipal(file, T0);
-    attachCredential(owner, "narrow", { agents: ["x"], terminal: false, manage: true }, { now: T0, random });
-    const { credential } = attachCredential(owner, "mac", fullGrant(), { now: T0, random });
-    expect(hasPairingApprover(file, T0.getTime())).toBe(true);
-    expect(hasPairingApprover(file, Date.parse(credential.expiresAt) + 1)).toBe(false);
-    credential.disabled = true;
-    expect(hasPairingApprover(file, T0.getTime())).toBe(false);
-    credential.disabled = false;
-    owner.disabled = true;
-    expect(hasPairingApprover(file, T0.getTime())).toBe(false);
   });
 });
