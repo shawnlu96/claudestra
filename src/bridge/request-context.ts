@@ -40,7 +40,9 @@ const LEAST_PRIVILEGE: RequestContext = { source: "unknown", clientIp: null, htt
  *   api      /api/v1 的任何凭据（Bearer、设备 cookie）：四个已知来源都认，只拒没定来源的（unknown）；
  *   bearer   非 peer 的 Bearer（网页 token、scoped token）：peer 入口是对外端口，泄漏的网页 token 不该能从那里用。
  *   keyedInvite  网页上生成 / 加入带密钥的邀请：邀请原文要经过这个页面，经中继打开的页面中继能换掉里面的公钥
- *                （docs/relay/e2e-design.md §5.1）。不在名单里的来源只生成不加密的邀请、拒绝加入加密邀请。
+ *                （docs/relay/e2e-design.md §5.1）。不在名单里的来源只生成不加密的邀请；加入加密邀请另看下一条。
+ *   relayPageJoin  经中继打开的页面加入加密邀请：严格模式关（缺省）时放行，开了就同 keyedInvite 拒（bridge/peer-relay-strict.ts）。
+ *                  判不出来源的（unknown）不在名单里，照旧拒。
  */
 const SOURCE_POLICY = {
   api: ["loopback", "lan", "relay", "peer-ingress"],
@@ -50,6 +52,7 @@ const SOURCE_POLICY = {
   peer: ["loopback", "lan", "peer-ingress"],
   redeem: ["loopback", "lan", "peer-ingress"],
   keyedInvite: ["loopback", "lan"],
+  relayPageJoin: ["relay"],
 } as const satisfies Record<string, readonly RequestSource[]>;
 
 /** peer 入口拒掉非 peer 凭据时的报错（入口本身与 /api/v1 鉴权共用） */

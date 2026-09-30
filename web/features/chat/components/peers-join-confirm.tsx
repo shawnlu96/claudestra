@@ -9,7 +9,7 @@ import { useT } from "@/lib/i18n";
 import { ForceRow, peersAction, ScopePicker, type LocalAgent } from "./peers-shared";
 import { peersList } from "@/lib/api/system";
 
-type Inspect = { ok?: boolean; error?: string; name?: string; reachable?: boolean; agents?: string[]; hint?: string; existing?: string; note?: string };
+type Inspect = { ok?: boolean; error?: string; name?: string; reachable?: boolean; agents?: string[]; hint?: string; existing?: string; note?: string; viaRelayPage?: boolean };
 type Joined = { ok?: boolean; peer?: string; error?: string; hint?: string; warnings?: string[] };
 
 export function JoinConfirm({ code, onJoined }: { code: string; onJoined?: (peer: string) => void }) {
@@ -72,6 +72,7 @@ export function JoinConfirm({ code, onJoined }: { code: string; onJoined?: (peer
           <button className="btn btn-primary btn-sm w-full" disabled={busy || (twoWay && sel.length === 0)} onClick={() => void join()}>
             {busy ? <span className="loading loading-spinner loading-xs" /> : t("加入")}
           </button>
+          {info.viaRelayPage && !info.note && <div className="text-center text-[11px] text-base-content/40">{t("经中继加入")}</div>}
         </>
       )}
     </div>
