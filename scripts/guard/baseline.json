@@ -123,8 +123,8 @@
     "deps:watcher-no-watcher: src/bridge/model-drift.ts -> src/bridge/permission-watcher.ts": 1,
     "deps:watcher-no-watcher: src/bridge/permission-watcher.ts -> src/bridge/bg-activity-watcher.ts": 1,
     "deps:web-src-split: web/scripts/tls-proxy.ts -> src/lib/tailscale.ts": 1,
-    "doc:CLAUDE.md": 24762,
-    "doc:CLAUDE.zh-CN.md": 22459,
+    "doc:CLAUDE.md": 24894,
+    "doc:CLAUDE.zh-CN.md": 22618,
     "doc:web/CLAUDE.en.md": 6532,
     "doc:web/CLAUDE.md": 5810,
     "dup:total": 1038,
@@ -341,6 +341,18 @@
       "from": 0,
       "to": 0,
       "why": "T60 PR2：knip 入口加 src/acp-host.ts（ACP 宿主，在 agent 的 tmux 窗口里直接 bun 运行，和 channel-server 同类入口）与 scripts/acp-stub.ts（沙箱 / 单测按路径 spawn 的假 ACP agent，不被 import）；只加入口，规则不变"
+    },
+    {
+      "key": "doc:CLAUDE.md",
+      "from": 24762,
+      "to": 24894,
+      "why": "i28-L5 子 DAG MCP 工具按防腐规则 9 在 CLAUDE.md / CLAUDE.zh-CN.md 的 Features 加一行文档指针（→ docs/architecture/dag-tools.md），规格卡允许最多一行；细节全在 docs"
+    },
+    {
+      "key": "doc:CLAUDE.zh-CN.md",
+      "from": 22459,
+      "to": 22618,
+      "why": "i28-L5 子 DAG MCP 工具按防腐规则 9 在 CLAUDE.md / CLAUDE.zh-CN.md 的 Features 加一行文档指针（→ docs/architecture/dag-tools.md），规格卡允许最多一行；细节全在 docs"
     }
   ]
 }
