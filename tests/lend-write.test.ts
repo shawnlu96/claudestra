@@ -19,6 +19,8 @@ import { submitLendResult, submitLendWork, type SubmitterDeps } from "../src/lib
 import type { HttpPeer } from "../src/lib/peers.js";
 import { testChildEnv } from "./test-env.ts";
 import type { BoundedResult } from "../src/lib/run-bounded.js";
+import { DOWN_REASON, MISS_GAP_MS, type CodexFailureSeen } from "../src/lib/lend-health.js";
+import type { WorkerLiveness } from "../src/lib/worker-liveness.js";
 
 /** 不读本机全局 / 系统配置（CI 上没有 user.name），提交身份显式给 */
 const GIT_ENV = { ...process.env, GIT_TERMINAL_PROMPT: "0", GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1",
@@ -198,8 +200,13 @@ function harness(o: { roles?: LendEntry["roles"]; until?: string; branch?: strin
   const results = [...(o.result ?? [])];
   const works = [...(o.work ?? [])];
   const registry = new Map<string, { sessionId?: string; cwd?: string }>();
+  /** R5a 判活 / 撞额度的覆盖值（按 agent 名）；没设 = registry 里有就 running */
+  const liveness = new Map<string, WorkerLiveness>();
+  const failures = new Map<string, CodexFailureSeen>();
+  const clock = { t: 1_000_000 };
   const d: LoopDeps = {
-    db, now: () => 1_000_000, env: {}, footer: () => "（本机尾注）", log: () => {},
+    db, now: () => clock.t, env: {}, footer: () => "（本机尾注）", log: () => {},
+    failure: (agent) => failures.get(agent), closeAsks: async () => ({ ok: true }), codexQuota: async () => null,
     call: async (_p, op, body) => {
       calls.push({ op, body });
       if (op === "poll") return { status: 200, body: { ok: true, v: 1, orders: [polled], pollAfterMs: 30_000 } };
@@ -231,13 +238,13 @@ function harness(o: { roles?: LendEntry["roles"]; until?: string; branch?: strin
       create: async (n, dir, purpose) => { log.created.push(`${n} ${dir} ${purpose}`); registry.set(n, { sessionId: "thr-1", cwd: dir }); return { ok: true }; },
       send: async (_n, _s, text) => { log.sent.push(text); return { ok: true, messageId: "m1" }; },
       kill: async (n) => { registry.delete(n); return { ok: true }; },
-      alive: async (n) => registry.has(n),
+      alive: async (n) => liveness.get(n) ?? (registry.has(n) ? "running" : "no_window"),
     },
   };
   const tick = () => lendTick(d);
   /** worker 交活：直接落 journal 的 work（lend submit 的核对另测） */
   const submit = (summary = "实现了 x") => advance(db, "w1", "started", "result_pending", { work: { head: H2, summary, selfCheck: "逐条对了验收线" } });
-  return { db, d, calls, log, tick, submit, ops: () => calls.map((c) => c.op) };
+  return { db, d, calls, log, tick, submit, liveness, failures, clock, ops: () => calls.map((c) => c.op) };
 }
 
 describe("lend 循环：写单", () => {
@@ -342,7 +349,7 @@ describe("lend 循环：写单", () => {
     expect(h.log.pushed.filter((p) => !(p as { probe?: unknown }).probe)).toEqual([]);
     expect(h.log.prs).toEqual([]);
     expect(h.ops()).not.toContain("result");
-    expect(await h.d.worker.alive(getOrder(h.db, "w1")!.agent!)).toBe(false);
+    expect(await h.d.worker.alive(getOrder(h.db, "w1")!.agent!)).toBe("no_window");
 
     const renew2 = { refuse: null as string | null };
     const h2 = harness({ renew: renew2, result: ["unavailable"] }); // 正文已生成、第一次没送到 = 回执丢了
@@ -359,6 +366,36 @@ describe("lend 循环：写单", () => {
     expect(sends).toHaveLength(2);
     expect(sends[0]).toBe(sends[1]);
     expect(h2.log.pushed.filter((p) => !(p as { probe?: unknown }).probe)).toHaveLength(1);
+  });
+});
+
+describe("lend 循环：写单 worker 同样判活（i28-R5a）", () => {
+  test("写单 worker 撞 Codex 额度 → 停下、告诉 A，不推送、不开 PR", async () => {
+    const h = harness();
+    for (let i = 0; i < 5; i++) await h.tick();
+    const agent = getOrder(h.db, "w1")!.agent!;
+    h.failures.set(agent, { kind: "quota", askId: "ask-q", message: "周额度用满" });
+    await h.tick();
+    expect(getOrder(h.db, "w1")).toMatchObject({ state: "stopped", reason: expect.stringContaining("Codex 额度") });
+    expect(h.log.pushed.filter((p) => !(p as { probe?: unknown }).probe)).toEqual([]);
+    expect(h.log.prs).toEqual([]);
+    expect(h.calls.find((c) => c.op === "lease" && c.body.action === "release")?.body).toMatchObject({ reason: "stopped" });
+  });
+
+  test("写单 worker 读不到不判死；宿主退出要连续两次、相隔够久才停", async () => {
+    const h = harness();
+    for (let i = 0; i < 5; i++) await h.tick();
+    const agent = getOrder(h.db, "w1")!.agent!;
+    h.liveness.set(agent, "unknown");
+    for (let i = 0; i < 3; i++) { h.clock.t += MISS_GAP_MS; await h.tick(); }
+    expect(getOrder(h.db, "w1")!.state).toBe("started");
+    h.liveness.set(agent, "no_host");
+    await h.tick();
+    expect(getOrder(h.db, "w1")!.state).toBe("started");
+    h.clock.t += MISS_GAP_MS;
+    await h.tick();
+    expect(getOrder(h.db, "w1")).toMatchObject({ state: "stopped", reason: DOWN_REASON.no_host });
+    expect(h.log.prs).toEqual([]);
   });
 });
 

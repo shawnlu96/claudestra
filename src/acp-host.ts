@@ -115,9 +115,10 @@ for (const sig of ["SIGINT", "SIGTERM", "SIGHUP"] as const) {
 
 // 出借 worker（干净环境）：scheduler 服务挂了也要按租约自停——宿主自己定时看 journal（lib/lend-watchdog.ts）
 if (process.env[CLEAN_ENV_FLAG] === "1") {
-  const { lendStopReason, WATCHDOG_EVERY_MS } = await import("./lib/lend-watchdog.js");
+  const { lendWatchdog, WATCHDOG_EVERY_MS } = await import("./lib/lend-watchdog.js");
+  const stopReason = lendWatchdog(agentName, log);
   setInterval(() => {
-    const why = lendStopReason(agentName);
+    const why = stopReason();
     if (!why) return;
     log(`出借 worker 自停：${why}`);
     host.stop();

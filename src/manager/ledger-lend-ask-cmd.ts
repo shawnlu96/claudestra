@@ -1,6 +1,7 @@
 /** 出借方 B 的台账写入：调度服务身份开逐单确认 ask、预先授权时发 inform（lib/lend-ask.ts）。台账里只有这张 ask，出借单本身记在 lend journal（lib/lend-journal.ts）。 */
-import { openAskFull } from "../lib/ledger-asks.js";
+import { cancelAsksWhere, openAskFull } from "../lib/ledger-asks.js";
 import { LedgerError } from "../lib/ledger-store.js";
+import { isLendWorkerName } from "../lib/runtimes/clean-env.js";
 import { lendAskInput, lendAskProblem, lendInformText, type LendAskParams } from "../lib/lend-ask.js";
 import type { LedgerCli } from "./ledger-context.js";
 import type { CommandSpec } from "./ledger-write-cmds.js";
@@ -34,6 +35,18 @@ export const LEND_ASK_CMDS: Record<string, CommandSpec> = {
       const notified = await c.deps.notifyOwner(text);
       c.deps.assertLease?.();
       return { ok: true, notified };
+    },
+  },
+  "lend-close-asks": {
+    valued: ["agent"], bools: [],
+    usage: "lend-close-asks --agent <agent-lend-…>（调度服务专用：出借单结束后关掉这个 worker 开出的 Codex 额度 / 登录卡）",
+    run(c) {
+      if (c.deps.actor !== "scheduler") throw new LedgerError("forbidden", "lend-close-asks 只给调度服务用");
+      const agent = c.p.flags.agent ?? "";
+      if (!isLendWorkerName(agent) || !/^[\w-]{1,64}$/.test(agent)) throw new LedgerError("invalid", "--agent 要是出借 worker 的名字（agent-lend-…）");
+      // 拿到写锁后再核一次租约（同 lend-ask：等锁期间可能失租）
+      const closed = cancelAsksWhere(c.db, { fromAgent: agent, source: "codex" }, "出借单已结束，worker 已停", c.deps.now(), { beforeWrite: () => c.deps.assertLease?.() });
+      return { ok: true, closed };
     },
   },
 };

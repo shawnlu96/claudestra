@@ -305,6 +305,14 @@ export function closeAsk(db: Database, id: string, state: "expired" | "cancelled
   });
 }
 
+/** 批量撤掉符合条件的 open ask（出借单结束时关 worker 开出的 Codex 卡）；beforeWrite 在拿到写锁之后、写入之前调，同 openAskFull */
+export function cancelAsksWhere(db: Database, q: AskQuery, reason: string, now = Date.now(), opts: { beforeWrite?: () => void } = {}): string[] {
+  return tx(db, () => {
+    opts.beforeWrite?.();
+    return listAsks(db, { ...q, states: ["open"] }).map((a) => closeAsk(db, a.id, "cancelled", reason, now)?.id).filter((id): id is string => !!id);
+  });
+}
+
 /**
  * 答复没送到（押着等目标空闲时收件的 agent 被 kill 了）：已答 / 答了一部分 → 回到 open、清掉答案，owner 再答一次时重新找收件方。
  * 到期时间至少再给 REOPEN_MS，否则过期扫描会马上把它结掉。没答过的、已结成别的状态的返回 null。

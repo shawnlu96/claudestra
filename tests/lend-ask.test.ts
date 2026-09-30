@@ -1,8 +1,9 @@
 /** T94 逐单确认门（src/lib/lend-ask.ts）：只认 owner 本人点「批准」、参数没变、没过期 */
 import { afterEach, describe, expect, test } from "bun:test";
-import { answerAsk, closeAsk, openAskFull, type AskAnswer } from "../src/lib/ledger-asks.js";
+import { answerAsk, closeAsk, getAsk, openAsk, openAskFull, type AskAnswer } from "../src/lib/ledger-asks.js";
 import { closeLedger, openLedger } from "../src/lib/ledger-store.js";
 import { LEND_APPROVE, lendAskInput, lendAskProblem, lendAskVerdict, lendInformText, type LendAskParams } from "../src/lib/lend-ask.js";
+import { SchedulerLeaseLost } from "../src/lib/scheduler-lease-env.js";
 import { runLedger } from "../src/manager/ledger.js";
 
 const P: LendAskParams = {
@@ -104,5 +105,41 @@ describe("T94 预先授权的每单通知（specRev 2）", () => {
     expect(sent).toHaveLength(1);
     expect(await run("scheduler")).toMatchObject({ ok: true, notified: false });
     expect(await run("scheduler", async () => false)).toMatchObject({ ok: true, notified: false });
+  });
+});
+
+describe("i28-R5a 出借单结束后关 worker 的 Codex 卡（ledger lend-close-asks）", () => {
+  const W = "agent-lend-0123456789";
+  function seeded() {
+    const db = openLedger(":memory:");
+    const card = (fromAgent: string, source: "codex" | "permission", title: string) =>
+      openAsk(db, { project: "lend", fromAgent, fromChannelId: "local-x", source, kind: "decide", title, extra: source === "codex" ? { quota: true } : {} }, T0).id;
+    return { db, mine: card(W, "codex", "Codex 额度用完了"), perm: card(W, "permission", "要跑 rm 吗"), other: card("agent-lend-9999999999", "codex", "Codex 额度用完了") };
+  }
+  const run = (db: ReturnType<typeof openLedger>, actor: string, assertLease?: () => void) => runLedger(["lend-close-asks", "--agent", W], {
+    db, actor, projectIds: [], now: () => T0 + 1, loadRegistry: async () => ({ socket: "", agents: {} }) as never, saveRegistry: async () => {},
+    ...(assertLease ? { assertLease } : {}),
+  }) as Promise<Record<string, unknown>>;
+
+  test("只关这个 worker 开的 Codex 卡；权限卡、别的 worker 的卡不动", async () => {
+    const { db, mine, perm, other } = seeded();
+    expect(await run(db, "scheduler")).toMatchObject({ ok: true, closed: [mine] });
+    expect([getAsk(db, mine)!.state, getAsk(db, perm)!.state, getAsk(db, other)!.state]).toEqual(["cancelled", "open", "open"]);
+    expect(await run(db, "scheduler")).toMatchObject({ ok: true, closed: [] }); // 重复调无害
+  });
+
+  test("不是调度服务身份：拒绝", async () => {
+    const { db, mine } = seeded();
+    expect(await run(db, "owner")).toMatchObject({ ok: false, code: "forbidden" });
+    expect(getAsk(db, mine)!.state).toBe("open");
+  });
+
+  test("拿到写锁后核租约不过（等锁期间失租）：一张都不关，报 lease-lost", async () => {
+    const { db, mine } = seeded();
+    let calls = 0;
+    const r = await run(db, "scheduler", () => { if (++calls > 1) throw new SchedulerLeaseLost("lost"); }); // 第 1 次是 runLedger 入口，第 2 次在事务里
+    expect(r).toMatchObject({ ok: false, code: "lease-lost" });
+    expect(calls).toBe(2);
+    expect(getAsk(db, mine)!.state).toBe("open");
   });
 });

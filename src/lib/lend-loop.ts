@@ -14,6 +14,7 @@ import { lendRequest, peerLendProblem, proxyVarsIn, type PolledOrder } from "./l
 import type { HttpPeer } from "./peers.js";
 import type { ProjectDef } from "./projects.js";
 import { SchedulerStopped } from "./scheduler-maintenance.js";
+import { refreshPause } from "./lend-health.js";
 
 export const POLL_MS = 30_000;
 /** v1 只起 Codex worker（审查与 i28-R6 的写单都是）：声明里的 claude 位不报给 A，A 也就不会派 Claude 单来 */
@@ -129,7 +130,9 @@ export async function lendTick(d: LoopDeps): Promise<TickResult> {
     }
   }
   const proxies = proxyVarsIn(d.env);
-  const blocked = eff.invalid ? `lend.json 无效：${eff.invalid}` : !eff.lending ? "没有生效的出借条目" : proxies.length ? `环境里有代理变量 ${proxies.join(", ")}，不 poll` : null;
+  const paused = await refreshPause(d.db, d.codexQuota, d.now(), d.log); // 本机 worker 撞了 Codex 额度：到重置时刻前不领新单（lend-health.ts）
+  const blocked = eff.invalid ? `lend.json 无效：${eff.invalid}` : !eff.lending ? "没有生效的出借条目" : proxies.length ? `环境里有代理变量 ${proxies.join(", ")}，不 poll`
+    : paused !== null ? `本机 Codex 撞了额度，暂停借单到 ${new Date(paused).toISOString()}` : null;
   const status: LendStatus = { at: now, lending: eff.lending, blocked, peers: {} };
   const peers = blocked ? [] : await d.peers();
   for (const entry of blocked ? [] : eff.lend) {
