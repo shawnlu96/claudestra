@@ -5,7 +5,7 @@
 import { listWindowIdsByName, tmuxRaw, windowHasChildProcess, windowTarget } from "../lib/tmux-helper.js";
 import { agentWindowsOrNull } from "../lib/agent-windows.js";
 import { bridgeRequest } from "../lib/bridge-client.js";
-import { archiveSession } from "../lib/session-archive.js";
+import { archiveAgentSession, type ArchivableAgent } from "../lib/session-archive.js";
 import { isForbiddenChannelError, isLocalChannel, isUnknownChannelError, pidAlive } from "../lib/pending-ops.js";
 import { isRestartInProgress } from "./restart-lock.js";
 import { loadRegistry, saveRegistry, type Registry } from "./core.js";
@@ -39,7 +39,7 @@ export interface OpsDeps {
   /** bridge 上还存在的频道 id；null = bridge 不在 */
   listChannels(): Promise<Set<string> | null>;
   agentCleanup(channelId: string, agent: string): Promise<boolean>;
-  archive(agent: string, cwd: string | undefined, sessionId: string): Promise<void>;
+  archive(agent: string, info: ArchivableAgent): Promise<void>;
   rescan(action: "add" | "remove" | "full", agent?: string, cwd?: string): Promise<void>;
   renameLedger(from: string, to: string): Promise<void>;
   now(): number;
@@ -121,8 +121,9 @@ export const realOpsDeps: OpsDeps = {
     }
   },
   agentCleanup: notifyAgentCleanup,
-  async archive(agent, cwd, sessionId) {
-    await archiveSession(agent, cwd, sessionId).catch((e) => console.error(`[archive] ${agent} 归档失败（继续）: ${(e as Error).message}`));
+  async archive(agent, info) {
+    const r = await archiveAgentSession(agent, info).catch((e: Error) => ({ ok: false, note: e.message }));
+    if (!r.ok) console.error(`[archive] ${agent} 归档失败（继续）: ${r.note}`); // 退役不因归档失败卡住；源文件还在原处，下次 archive 可补
   },
   rescan: triggerSkillsRescan,
   async renameLedger(from, to) {
