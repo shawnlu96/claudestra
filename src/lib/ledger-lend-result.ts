@@ -37,7 +37,7 @@ export const RECEIPT_PURPOSE = "claudestra-lend-receipt-v1" as const;
 const PROBE_MAX = 4000;
 
 /** Every line quoted; 【】-style verdict brackets become 〔〕 as in quoteExternal, so a report cannot pass for a code-written 【通过】. */
-export const quoteLines = (s: string): string => s.split("\n").map((l) => `> ${l.replace(/[【〖︻︗]/g, "〔").replace(/[】〗︼︘]/g, "〕")}`).join("\n");
+const quoteLines = (s: string): string => s.split("\n").map((l) => `> ${l.replace(/[【〖︻︗]/g, "〔").replace(/[】〗︼︘]/g, "〕")}`).join("\n");
 
 /** One file per order: two orders of the same round (a reoffer after done) never share, so an entered report is never overwritten. */
 const lendReportName = (o: Pick<LendOrder, "peer" | "orderId">): string => `lend-${o.peer}-${o.orderId.replaceAll(":", "_")}.md`;

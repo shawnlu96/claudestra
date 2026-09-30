@@ -39,8 +39,6 @@ export interface OfferSummary {
   orderId: string; taskId: string; step: LendStep; family: LendFamily; repo: string; pr: number | null; head: string; round: number; specRev: number; offeredAt: number;
 }
 export interface LeaseState { gen: number; expiresAt: number; ms: number }
-/** claim 写单时一并给出：对方只许推的那个分支、它切出来的基线分支名 */
-export interface WriteCoords { branch: string; base: string }
 export interface LendReceipt { orderId: string; sha256: string; eventSeq: number; taskId: string; key: string; sig: string }
 
 /** HTTP status per refusal code; the bridge maps a CLI {code} through this and nothing else. */

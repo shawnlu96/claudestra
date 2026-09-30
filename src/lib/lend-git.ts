@@ -12,9 +12,9 @@ import { isSandbox } from "./sandbox.js";
 import { LAB_ROOT_ENV } from "./sandbox-lab.js";
 
 /** 出借单的步骤：review = 审查；write = 开工单（卡在 build）；fix = 修复单（卡在 fix） */
-export const LEND_STEPS = ["review", "write", "fix"] as const;
+const LEND_STEPS = ["review", "write", "fix"] as const;
 export type LendStep = (typeof LEND_STEPS)[number];
-export const WRITE_STEPS: readonly LendStep[] = ["write", "fix"];
+const WRITE_STEPS: readonly LendStep[] = ["write", "fix"];
 export const isWriteStep = (s: string): boolean => (WRITE_STEPS as readonly string[]).includes(s);
 
 /** 出借角色：审查单要 review，开工 / 修复单要 write（lend.json 两侧各自声明） */

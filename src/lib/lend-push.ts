@@ -27,7 +27,7 @@ const NOT_FF = /non-fast-forward|fetch first|\[rejected\]|stale info/i;
 const tail = (r: BoundedResult): string => (r.timedOut ? "超时" : (r.stderr || r.stdout).trim().split("\n").slice(-2).join(" ").slice(0, 300));
 
 /** 推送目标本身不合格就什么都不做：分支必须是出借分支、不是基线 */
-export function pushTargetProblem(t: Pick<PushTarget, "branch" | "base" | "orderHead">): string | null {
+function pushTargetProblem(t: Pick<PushTarget, "branch" | "base" | "orderHead">): string | null {
   if (!LEND_BRANCH_RE.test(t.branch)) return `订单分支 ${t.branch.slice(0, 80)} 不是出借分支，不推`;
   if (!isBaseBranch(t.base) || t.base === t.branch) return `基线 ${t.base.slice(0, 80)} 不合格，不推`;
   if (!SHA40.test(t.orderHead)) return "订单起点不是完整 40 位 SHA";
