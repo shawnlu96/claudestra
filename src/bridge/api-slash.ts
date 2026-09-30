@@ -14,7 +14,7 @@ import { wallWaitRefusal, windowWallWait, type WallWait } from "../lib/wall-scre
 import { resolveWebInvocation, isProjectSkillForOtherAgent } from "./slash-registry.js";
 import { apiJson } from "./api-respond.js";
 import type { ApiUserEndpoint } from "./router.js";
-import { acpSlash } from "./acp-link.js";
+import { acpClear, acpSlash } from "./acp-link.js";
 import { isConfiguredAcpChannel } from "./acp-state.js";
 
 export const SLASH_OWNER_ONLY = {
@@ -72,8 +72,14 @@ export async function handleSlashPassthrough(r: SlashRequest, deps: SlashDeps): 
   // Pi / Codex 的命令表是它们自己的（lib/runtime-commands.ts），命中就交给运行时原生解释（同名命令语义不同）。
   // Codex 不在表里的 "/xxx" 落回普通消息——CC 的技能注进 Codex 的 TUI 没有意义；Pi 照旧回落到 CC 注册表
   const rt = String(agent.runtime || "");
-  if (rt === "codex" && slashM[1] === "clear" && await isConfiguredAcpChannel(agent.channelId))
-    return owner ? apiJson(409, { ok: false, error: "ACP 模式尚不支持 /clear；会话未改动" }) : apiJson(403, { ok: false, ...SLASH_OWNER_ONLY });
+  if (rt === "codex" && slashM[1] === "clear" && await isConfiguredAcpChannel(agent.channelId)) {
+    if (!owner) return apiJson(403, { ok: false, ...SLASH_OWNER_ONLY });
+    if (r.hasAttachments) return apiJson(409, { ok: false, error: "ACP /clear 不接收附件；会话未改动" });
+    const cleared = await acpClear(agent.channelId);
+    if (!cleared.ok) return apiJson(cleared.uncertain ? 504 : 409, { ok: false, code: cleared.uncertain ? "clear_result_unknown" : undefined, error: cleared.error, sessionId: cleared.sessionId });
+    deps.record("clear", agent);
+    return apiJson(200, { ok: true, agent: agent.name, sessionId: cleared.sessionId, previousSessionId: agent.sessionId, acp: true, slash: true, clear: true });
+  }
   if (r.hasAttachments) return null;
   const args = (slashM[2] || "").trim();
   const nativeHit = runtimeCommandsFor(rt, agent.name)?.find((c) => c.name === slashM[1]);

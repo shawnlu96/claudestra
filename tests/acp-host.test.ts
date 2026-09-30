@@ -28,11 +28,16 @@ afterEach(() => {
   for (const p of procs.splice(0)) p.stop();
 });
 
-function start(extraEnv: Record<string, string> = {}) {
+function start(
+  extraEnv: Record<string, string> = {},
+  rotate: (oldId: string, newId: string) => Promise<{ ok: boolean; error?: string }> = async () => ({ ok: true }),
+  rebind: () => Promise<boolean> = async () => true,
+) {
   const sent: any[] = [];
   const requests: any[] = [];
   const stops: (StopReport & { channelId: string })[] = [];
   const logs: string[] = [];
+  const rebinds: string[] = [];
   let link!: Omit<BridgeLinkDeps, "url">;
   let ready = false;
   host = new AcpHost(
@@ -43,6 +48,7 @@ function start(extraEnv: Record<string, string> = {}) {
       cwd: REPO,
       mcpName: "claudestra",
       preamble: "[claudestra:context] 前言",
+      clearPreamble: "[claudestra:context] 清理后前言",
       model: "stub-luna",
       agentCmd: [process.execPath, join(REPO, "scripts/acp-stub.ts")],
       env: { base: { ...process.env, ...extraEnv }, bunBin: process.execPath, channelServer: join(REPO, "src/channel-server.ts"), mcpName: "claudestra", logsDir: "/tmp" },
@@ -63,7 +69,7 @@ function start(extraEnv: Record<string, string> = {}) {
             if (f.type === "reply") setTimeout(() => link.onFrame({ type: "response", requestId: f.requestId, result: { messageIds: ["m1"] } }), 0);
             return true;
           },
-          request: async (f: any) => (requests.push(f), f.type === "acp_entries" ? true : null), // 像 bridge 一样确认收下了条目
+          request: async (f: any) => (requests.push(f), f.type === "acp_rebind" ? (rebinds.push(f.sessionId), rebind()) : f.type === "acp_entries" ? true : null),
           close: () => {},
           up: true,
         } as any;
@@ -71,16 +77,99 @@ function start(extraEnv: Record<string, string> = {}) {
       startProxy: (d) => startToolProxy(d),
       postHook: async (b) => (stops.push(b), {}),
       markReady: async () => void (ready = true),
+      rotateSession: rotate,
       log: (m) => logs.push(m),
     },
   );
   host.start();
   const entries = () => [...sent, ...requests].filter((f) => f.type === "acp_entries").flatMap((f) => f.entries);
   const inbound = (content: string, meta: Record<string, string> = { chat_id: "api:owner", message_id: "msg1" }) => link.onFrame({ type: "message", content, meta });
-  return { sent, requests, stops, logs, entries, inbound, frame: (m: any) => link.onFrame(m), isReady: () => ready };
+  return { sent, requests, stops, logs, rebinds, entries, inbound, frame: (m: any) => link.onFrame(m), isReady: () => ready };
 }
 
 describe("ACP 宿主整条链（stub）", () => {
+  test("/clear 忙时拒绝；空闲时新线程引导后换 registry，轮换中的人类消息排队到新线程", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const rotations: [string, string][] = [];
+    const h = start({}, async (oldId, newId) => (rotations.push([oldId, newId]), await gate, { ok: true }));
+    await until(h.isReady);
+    h.inbound("[stub:pause] 第一轮");
+    await until(() => h.entries().some((e) => e.message?.content?.[0]?.name === "Bash"));
+    h.frame({ type: "acp_call", id: "busy", op: "clear" });
+    await until(() => h.sent.some((f) => f.id === "busy"));
+    expect(h.sent.find((f) => f.id === "busy")).toMatchObject({ ok: false });
+    await until(() => h.stops.length === 1);
+    h.frame({ type: "acp_call", id: "clear", op: "clear" });
+    await until(() => rotations.length === 1);
+    h.inbound("轮换时发来的消息", { chat_id: "api:owner", message_id: "after-clear" });
+    expect(h.stops).toHaveLength(1);
+    release();
+    await until(() => h.sent.some((f) => f.id === "clear"));
+    const result = h.sent.find((f) => f.id === "clear");
+    expect(result).toMatchObject({ ok: true, sessionId: rotations[0]![1] });
+    expect(rotations[0]![0]).toBe(SID);
+    expect(h.rebinds).toEqual([rotations[0]![1]]);
+    await until(() => h.stops.length === 2);
+    expect(h.sent.filter((f) => f.type === "reply").at(-1).text).toContain("轮换时发来的消息");
+  }, 30_000);
+
+  test("/clear registry 拒绝后不报成功，旧线程由适配器重起接回", async () => {
+    const h = start({}, async () => ({ ok: false, error: "并发轮转" }));
+    await until(h.isReady);
+    h.frame({ type: "acp_call", id: "clear-fail", op: "clear" });
+    await until(() => h.sent.some((f) => f.id === "clear-fail"));
+    expect(h.sent.find((f) => f.id === "clear-fail")).toMatchObject({ ok: false, error: "registry 未换代：并发轮转" });
+    await until(() => procs.length === 2, 20_000);
+    expect(h.logs.filter((l) => l.includes("已接上线程")).at(-1)).toContain(SID.slice(0, 8));
+  }, 30_000);
+
+  test("/clear 写 registry 前适配器退出：自动重起必须等新 id 已提交", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    let newId = "";
+    const h = start({}, async (_old, fresh) => ((newId = fresh), await gate, { ok: true }));
+    await until(h.isReady);
+    h.frame({ type: "acp_call", id: "race", op: "clear" });
+    await until(() => !!newId);
+    procs[0].stop();
+    await procs[0].exited;
+    await new Promise((r) => setTimeout(r, 3_200));
+    expect(procs).toHaveLength(1);
+    release();
+    await until(() => h.sent.some((f) => f.id === "race"));
+    expect(h.sent.find((f) => f.id === "race")).toMatchObject({ ok: true, sessionId: newId });
+    await until(() => procs.length === 2 && h.logs.some((l) => l.includes(`已接上线程 ${newId.slice(0, 8)}`)), 20_000);
+  }, 30_000);
+
+  test("/clear 新线程拒绝钉住的模型：不写 registry，不报成功，接回旧线程", async () => {
+    const rotations: string[] = [];
+    const h = start({}, async (_old, fresh) => (rotations.push(fresh), { ok: true }));
+    await until(h.isReady);
+    (host as any).cfg.model = "not-in-new-session";
+    h.frame({ type: "acp_call", id: "config-fail", op: "clear" });
+    await until(() => h.sent.some((f) => f.id === "config-fail"));
+    expect(h.sent.find((f) => f.id === "config-fail")).toMatchObject({ ok: false });
+    expect(rotations).toEqual([]);
+    await until(() => procs.length === 2, 20_000);
+    expect(h.logs.filter((l) => l.includes("已接上线程")).at(-1)).toContain(SID.slice(0, 8));
+  }, 30_000);
+
+  test("registry 已换但 watcher 未确认：排队消息等重绑成功才进入新线程", async () => {
+    let rebindReady = false;
+    const h = start({}, async () => ({ ok: true }), async () => rebindReady);
+    await until(h.isReady);
+    h.frame({ type: "acp_call", id: "rebind-fail", op: "clear" });
+    await until(() => h.sent.some((f) => f.id === "rebind-fail"));
+    expect(h.sent.find((f) => f.id === "rebind-fail")).toMatchObject({ ok: false });
+    expect(h.sent.find((f) => f.id === "rebind-fail").error).toContain("watcher 尚未就绪");
+    h.inbound("重绑后再说");
+    await Bun.sleep(500);
+    expect(h.stops).toHaveLength(0);
+    rebindReady = true;
+    await until(() => h.rebinds.length >= 2 && h.stops.length === 1, 10_000);
+    expect(h.sent.filter((f) => f.type === "reply").at(-1).text).toContain("重绑后再说");
+  }, 20_000);
   test("起步：登记 + 接上线程 → 标就绪；启动钉的模型经 set_config_option 生效，顶栏条目跟上", async () => {
     const h = start();
     await until(h.isReady);

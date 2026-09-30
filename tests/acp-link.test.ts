@@ -1,6 +1,7 @@
 import { beforeAll, describe, expect, test } from "bun:test";
-import { acpConfigOf, acpSetConfig, answerAcp, answerAcpDiscord, answerAcpResponse, liveAcpButtons, onAcpFrame, onAcpHostGone } from "../src/bridge/acp-link.ts";
+import { acpClear, acpConfigOf, acpSetConfig, answerAcp, answerAcpDiscord, answerAcpResponse, liveAcpButtons, onAcpFrame, onAcpHostGone } from "../src/bridge/acp-link.ts";
 import { noteAcpChannel } from "../src/bridge/acp-state.ts";
+import { handleSlashPassthrough } from "../src/bridge/api-slash.ts";
 import { subscribeEvents } from "../src/bridge/event-bus.ts";
 import { drainChannelWatcher, pushEntries, startWatching, stopWatching, stopWatchingByChannel } from "../src/bridge/jsonl-watcher.ts";
 import { setExtensionSocket } from "../src/bridge/pi-abort.ts";
@@ -52,6 +53,72 @@ describe("onAcpFrame", () => {
       stopWatching("agent-acp-link");
     }
   });
+});
+
+
+test("ACP 调用回包绑定频道、连接和 bridge 代际，旧回包不能完成别人的 clear", async () => {
+  const a = sock("local-call-a");
+  const b = sock("local-call-b");
+  const pending = acpClear("local-call-b");
+  const id = b.sent.at(-1)?.id;
+  expect(id).toMatch(/^acpcall_[0-9a-f]{12}_\d+$/);
+  let settled = false;
+  void pending.then(() => { settled = true; });
+
+  await onAcpFrame({ type: "acp_call_result", channelId: "local-call-a", id, ok: true, sessionId: "a-thread" }, a, discord);
+  await onAcpFrame({ type: "acp_call_result", channelId: "local-call-b", id: "acpcall_000000000000_1",
+    ok: true, sessionId: "old-epoch" }, b, discord);
+  await Bun.sleep(0);
+  expect(settled).toBe(false);
+
+  const reconnected = sock("local-call-b");
+  await onAcpFrame({ type: "acp_call_result", channelId: "local-call-b", id, ok: true, sessionId: "wrong-socket" }, reconnected, discord);
+  await Bun.sleep(0);
+  expect(settled).toBe(false);
+  onAcpHostGone("local-call-b", b);
+  expect(await pending).toMatchObject({ ok: false, uncertain: true });
+
+  const next = acpClear("local-call-b");
+  const nextId = reconnected.sent.at(-1)?.id;
+  expect(nextId).not.toBe(id);
+  await onAcpFrame({ type: "acp_call_result", channelId: "local-call-b", id: nextId,
+    ok: true, sessionId: "b-thread" }, reconnected, discord);
+  expect(await next).toEqual({ ok: true, sessionId: "b-thread" });
+});
+
+
+test("Web 聊天 /clear 确认后按会话清理动作返回，结果不确定时回 504", async () => {
+  const ch = "local-web-clear-result";
+  const s = sock(ch);
+  noteAcpChannel(ch, "acp");
+  const request = () => handleSlashPassthrough({
+    principal: { id: "owner:self", role: "owner", name: "owner", agents: ["*"], createdAt: "2026-01-01T00:00:00Z" },
+    tokenId: "owner:self", agent: { name: "agent-web-clear", channelId: ch, runtime: "codex", sessionId: "old-thread" }, text: "/clear", hasAttachments: false,
+  }, { sendLine: async () => {}, mirror: async () => {}, scheduleClearRotation: () => {},
+    markThinking: () => {}, record: () => {}, wallWait: async () => null });
+  try {
+    const success = request();
+    await Bun.sleep(0);
+    const firstId = s.sent.at(-1)?.id;
+    await onAcpFrame({ type: "acp_call_result", channelId: ch, id: firstId, ok: true, sessionId: "new-thread" }, s, discord);
+    expect((await success)?.status).toBe(200);
+    const response = await success;
+    expect(await response?.json()).toMatchObject({ ok: true, slash: true, clear: true, sessionId: "new-thread", previousSessionId: "old-thread" });
+    const uncertain = request();
+    await Bun.sleep(0);
+    onAcpHostGone(ch, s);
+    expect((await uncertain)?.status).toBe(504);
+    const committedButUnbound = request();
+    await Bun.sleep(0);
+    const latestId = s.sent.at(-1)?.id;
+    await onAcpFrame({ type: "acp_call_result", channelId: ch, id: latestId, ok: false,
+      sessionId: "committed-thread", error: "watcher not ready" }, s, discord);
+    const unknownResponse = await committedButUnbound;
+    expect(unknownResponse?.status).toBe(504);
+    expect(await unknownResponse?.json()).toMatchObject({ code: "clear_result_unknown", sessionId: "committed-thread" });
+  } finally {
+    noteAcpChannel(ch, "tmux");
+  }
 });
 
 // Shawn 本机 Codex r4 P1-2 的 bridge 一侧：watcher 还没挂好（注册后要查 registry）回 false，宿主据此重送、不当成功；
@@ -157,6 +224,26 @@ describe("流式条目的确认与去重（r4 P1-2）", () => {
       stopWatching("agent-acp-overlap");
     }
   });
+
+  test("换线程后旧批次即使全是已处理前缀也不确认", async () => {
+    const ch = "local-acp-session-handoff";
+    const s = sock(ch);
+    noteAcpChannel(ch, "acp");
+    await startWatching("agent-acp-handoff", "/w", "sid-old", ch, discord, { transport: "acp" });
+    const oldBatch = { type: "acp_entries", channelId: ch, sessionId: "sid-old", hostId: "same-host",
+      firstSeq: 1, entries: [tool("old")], requestId: "old-first" };
+    try {
+      await onAcpFrame(oldBatch, s, discord);
+      expect(s.sent.find((f) => f.requestId === "old-first")?.result).toBe(true);
+      await startWatching("agent-acp-handoff", "/w", "sid-new", ch, discord, { transport: "acp", rebind: true });
+      await onAcpFrame({ ...oldBatch, requestId: "old-retry" }, s, discord);
+      expect(s.sent.find((f) => f.requestId === "old-retry")?.result).toBe(false);
+      await onAcpFrame({ ...oldBatch, sessionId: "sid-new", firstSeq: 2, entries: [tool("new")], requestId: "new" }, s, discord);
+      expect(s.sent.find((f) => f.requestId === "new")?.result).toBe(true);
+    } finally {
+      stopWatching("agent-acp-handoff");
+    }
+  });
 });
 
 // outer-codex 合并时的探针（T60 r4 P1-2 补充）：宿主断线重连 / 重新登记会重建推送 watcher，没 flush 的正文跟着旧的丢了
@@ -171,6 +258,7 @@ describe("推送 watcher 重建：未 flush 的正文不丢、序号不回退（
     const unsub = subscribeEvents({}, (e) => void (e.chatId === CH3 && e.type === "assistant_text" && seqs.push(Number((e.data as { seq?: unknown }).seq))));
     try {
       await startWatching(AG, "/w", "sid-1", CH3, discord, { transport: "acp" });
+      expect(await pushEntries(CH3, [say("新线程不能混进旧 watcher")], discord, "sid-2")).toEqual({ ok: false, lost: 0 });
       expect(await pushEntries(CH3, [say("第一段")], discord)).toEqual({ ok: true, lost: 0 });
       stopWatchingByChannel(CH3); // ws close
       expect(await pushEntries(CH3, [say("x")], discord)).toEqual({ ok: false, lost: 0 }); // 断着：宿主会留着重送
@@ -182,7 +270,7 @@ describe("推送 watcher 重建：未 flush 的正文不丢、序号不回退（
       expect(seqs[1]!).toBeGreaterThan(seqs[0]!);
       await pushEntries(CH3, [say("第三段")], discord);
       expect(seqs[2]!).toBeGreaterThan(seqs[1]!);
-      await startWatching(AG, "/w", "sid-2", CH3, discord, { transport: "acp" }); // 换了会话：不沿用
+      await startWatching(AG, "/w", "sid-2", CH3, discord, { transport: "acp", rebind: true }); // 换了会话：不沿用
       expect((await drainChannelWatcher(CH3, discord)).text).toBeNull();
     } finally {
       unsub();

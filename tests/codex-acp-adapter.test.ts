@@ -18,10 +18,14 @@ describe("buildAcpHostCommand", () => {
   test("环境变量前缀 + bun acp-host.ts；resume 带职责前言（与 tmux 同一份），new 不带", () => {
     const cmd = buildAcpHostCommand(SPEC, O);
     const head = "DISCORD_CHANNEL_ID=123 BRIDGE_URL=ws://localhost:3847 CLAUDESTRA_AGENT=agent-cx CLAUDESTRA_SESSION_ID=019a-sid MCP_NAME=claudestra";
-    expect(cmd).toStartWith(`${head} CLAUDESTRA_CODEX_BIN=/usr/local/bin/codex CLAUDESTRA_CODEX_PREAMBLE=`);
+    expect(cmd).toStartWith(`${head} CLAUDESTRA_CODEX_BIN=/usr/local/bin/codex CLAUDESTRA_ACP_DEVELOPER=`);
     expect(cmd).toEndWith(" /opt/bun /repo/src/acp-host.ts");
     const pre = /CLAUDESTRA_CODEX_PREAMBLE='([^']+)'/.exec(cmd)![1];
     expect(decodePreambleEnv(pre)).toContain("你的职责: 写代码");
+    const clearPre = /CLAUDESTRA_ACP_CLEAR_PREAMBLE='([^']+)'/.exec(cmd)![1];
+    expect(decodePreambleEnv(clearPre)).toContain("你的职责: 写代码");
+    const developer = /CLAUDESTRA_ACP_DEVELOPER='([^']+)'/.exec(cmd)![1];
+    expect(Buffer.from(developer, "base64").toString("utf8")).toContain("你的职责: 写代码");
     expect(buildAcpHostCommand({ ...SPEC, mode: "new" }, O)).not.toContain("CLAUDESTRA_CODEX_PREAMBLE");
   });
 

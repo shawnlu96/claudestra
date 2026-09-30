@@ -2449,31 +2449,7 @@ switch (cmd) {
   // 供 bridge 的 clear 端点用：TUI 里 /clear 会轮转 sessionId，registry 若不跟着
   // 换，jsonl-watcher 会盯死文件。registry 写入必须经 manager（唯一写者不变式）。
   case "set-session": {
-    const [name, newSid] = args;
-    if (!name || !newSid) {
-      output({ ok: false, error: "usage: set-session <name> <sessionId>" });
-      break;
-    }
-    if (!/^[0-9a-f-]{8,64}$/i.test(newSid)) {
-      output({ ok: false, error: `sessionId 形状非法: ${newSid}` });
-      break;
-    }
-    assertSandboxSession(newSid); // 沙箱：新会话必须属于沙箱根（否则 set-session + restart 就续到了生产会话）
-    const tmuxName = normalizeName(name);
-    const reg = await loadRegistry();
-    const info = reg.agents[tmuxName];
-    if (!info) {
-      output({ ok: false, error: `${tmuxName} 不在 registry` });
-      break;
-    }
-    const oldSid = info.sessionId || null;
-    // 旧会话退役 → 归档快照（对齐 kill/fork 轮转的退役语义）
-    if (oldSid && oldSid !== newSid) {
-      await archiveAgentSession(tmuxName, info, oldSid).catch(() => {});
-    }
-    info.sessionId = newSid;
-    await saveRegistry(reg);
-    output({ ok: true, name: tmuxName, sessionId: newSid, previousSessionId: oldSid });
+    output(await (await import("./manager/set-session.js")).cmdSetSession(args));
     break;
   }
 

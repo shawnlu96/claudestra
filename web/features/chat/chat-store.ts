@@ -15,6 +15,7 @@ import { consumeSSEStream, processStreamEvent, type StreamSink } from "./stream"
 import { pushNotice } from "./notice-merge";
 import { hydrateHistoryMessages } from "./history-hydrate";
 import { isDuplicateSend, type LastSend } from "./send-dedupe";
+import { canSendClearBoot, classifySendFailure, RetiredAcpStreams, settleClearSend, isClearSend, sendTimeoutMs } from "./clear-send";
 import {
   isHistoryBubble,
   coveredByCursor,
@@ -162,6 +163,7 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
    * jsonl seq，追加只影响尾部），缓存降级为防白屏的过渡帧。
    */
   private messageCache = new Map<string, ChatMessage[]>();
+  private readonly retiredAcpStreams = new RetiredAcpStreams();
   /** 全量对齐重拉的滚动交接（锚点快照 / 保留更早前缀），见 reload-scroll.ts */
   public readonly reloadScroll = new ReloadScroll();
   /** 最近一次 reply 内容落地的时刻——用于丢弃 watcher 迟到的 reply_pending */
@@ -1615,6 +1617,7 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
     if (!entry) return;
     const { agent, wire, files } = entry;
     const hasFiles = !!files && files.length > 0;
+    const clearing = isClearSend(wire, hasFiles);
     const fail = (why: string, handled = false) => {
       const errId = this.nextId();
       entry.errId = errId;
@@ -1632,11 +1635,9 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
       });
     };
     try {
-      // ⚠ 超时必须有(2026-07-27 丢消息实锤):iOS 上带附件的 multipart fetch
-      // 可以既不 resolve 也不 reject 地永久挂起——没有超时的话失败完全静默,
-      // 乐观气泡装作已送达,用户只在重开 PWA 后发现消息没了。附件上传给宽些。
-      // multipart 直接打 bridge 的 messages 端点（每次重试重建 FormData——消费过的不能复用）。
-      const sendTimeout = () => AbortSignal.timeout(hasFiles ? 60_000 : 20_000);
+      // iOS multipart fetch 可能永久挂起；超时保证乐观气泡能报出结果，/clear 则等线程轮换。
+      // 每次重试由 sendMessage 重建已消费的 FormData。
+      const sendTimeout = () => AbortSignal.timeout(sendTimeoutMs(clearing, hasFiles));
       let result: SendResult | undefined;
       // 503 / retryable = agent 活着、只是 channel-server 链路在重连（几秒内自愈）：静默退避重试，别弹「已断开」。
       // 发送失败（agent 离线 / 超限等）则解锁 + 附错误提示，别让「停止」按钮 + 思考态一直卡死。
@@ -1651,9 +1652,8 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
       }
       this.pendingSends.delete(optimisticId); // 送达了,不再需要重发载荷(File 对象随之释放)
       if (result?.heldBy || result?.queued) this.produce((s) => markHeldSend(s, optimisticId, result!.heldBy ?? "queued", this.nextId(), getLang() === "zh")); // 押住了：没有回合
-      // slash 直通（/compact、/context 这类 CC 原生命令走 tmux 注入）：没有常规
-      // 回合,不会有 done 事件——立即解除「正在回复」,并插一条系统线告知已注入。
-      // 普通消息：输出经已打开的持久流回来。
+      // slash 直通没有常规 done；立即解除思考态，普通消息仍等持久流。
+      if (result?.clear) return void this.produce(settleClearSend(this.messageCache, agent, optimisticId, this.retiredAcpStreams, result.previousSessionId));
       if (result?.slash) {
         const ccText = result.ccText;
         this.produce((s) => {
@@ -1676,8 +1676,9 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
         });
       }
     } catch (e) {
-      const timedOut = (e as Error).name === "TimeoutError";
-      fail(timedOut ? (getLang() === "zh" ? "上传超时（网络不稳）" : "upload timed out") : sendErrorText(e), e instanceof ApiError && e.code === "ask_closed");
+      const failure = classifySendFailure(e, clearing, getLang(), sendErrorText);
+      if (failure.unknown) this.pendingSends.delete(optimisticId); // 结果不确定时不提供一键重发。
+      fail(failure.text, failure.handled);
     }
   }
 
@@ -1722,6 +1723,7 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
    * 按 seq 剥掉。老办法按时间戳 ±5s 猜,流一延迟就两份(owner 2026-09-17 两次截图)。
    */
   private dropIfCovered(kind: string, src?: RecordSrc): boolean {
+    if (this.retiredAcpStreams.shouldDrop(this.state.activeAgent, src?.sid)) return true;
     if (!coveredByCursor(this.historyCursor, src)) return false;
     this.coveredDrops++;
     const now = Date.now();
@@ -1878,6 +1880,7 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
     if (!text) return;
     this.pendingText = "";
     this.pendingTextSrc = undefined;
+    if (this.dropIfCovered("text-flush", src)) return;
     this.ensureLiveAssistant();
     this.produce((s) => {
       const last = s.messages[s.messages.length - 1];
@@ -2300,11 +2303,13 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
   }
 
   /** 跑一个交互回传（interrupt / permission / auq / clear），统一把 ApiError 变成 {ok, error}。 */
-  private async postAction(run: () => Promise<{ ok?: boolean; error?: string }>): Promise<{ ok: boolean; error?: string }> {
+  private async postAction(
+    run: () => Promise<{ ok?: boolean; error?: string; sessionId?: string; previousSessionId?: string }>
+  ): Promise<{ ok: boolean; error?: string; sessionId?: string; previousSessionId?: string }> {
     try {
       const json = await run();
       if (json.ok === false) return { ok: false, error: json.error || "操作失败" };
-      return { ok: true };
+      return { ok: true, sessionId: json.sessionId, previousSessionId: json.previousSessionId };
     } catch (e) {
       return { ok: false, error: (e as Error).message || "操作失败" };
     }
@@ -2324,20 +2329,15 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
     initMessage?: string
   ): Promise<{ ok: boolean; error?: string }> {
     if (this.state.activeAgent !== name) await this.openAgent(name);
+    const clearStartedAt = Date.now();
     const res = await this.postAction(() => clearAgentSession(name));
     if (!res.ok) return res;
-    this.messageCache.delete(name);
-    this.produce((s) => {
-      s.messages = [];
-      s.pendingPermission = null;
-      s.pendingAsk = null;
-      s.streaming = false;
-      s.awaitingChunk = false;
-    });
+    this.produce(settleClearSend(this.messageCache, name, null, this.retiredAcpStreams, res.previousSessionId, clearStartedAt));
     const boot = initMessage?.trim();
     if (boot) {
       // /clear 在 TUI 内瞬时完成；隔一拍再注入，避免与 slash 处理竞争
       await new Promise((r) => setTimeout(r, 1500));
+      if (!canSendClearBoot(this.state.activeAgent, name)) return { ok: false, error: "会话已清空；已切换 agent，开机指令未发送" };
       await this.send(boot);
     }
     return { ok: true };

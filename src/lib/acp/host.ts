@@ -1,20 +1,10 @@
-/**
- * ACP 宿主的本体（入口 src/acp-host.ts 只接真实依赖和信号）。一个 agent 一个，跑在它的 tmux 窗口里：
- * - 连 bridge（BridgeLink，register 带 transport=acp），是这个频道唯一的登记者；reply 等工具经回环代理（tool-proxy）转上去；
- * - 起适配器（codex-acp / stub），接上 registry 里的线程；适配器退出 → 在途的都以失败收尾（session.ts），退避后重起、接回同一个线程；
- * - 入站按 CodexQueueSink 同款渲染（<channel …> + reply_via，重启后第一条附前言）后进回合循环（turn.ts）；
- * - 流式：session/update 翻成 CC 形状条目（updates.ts）进出站队列，按序号一批批推给 bridge，bridge 回 true 才出队；回 false
- *   （watcher 还没挂好）/ 断线 / 超时就留着退避重送，重连登记后接着送（bridge 按 hostId + 序号去重）。回合末等队列全被确认才报 Stop，
- *   等不到（或 bridge 太久不在、队列满了丢过）按 StopFailure 报——没确认的不能当成功；
- * - 失败：出结构化帧给 bridge 出卡（额度 / 登录 / 其它），同一个失败只出一次；
- * - 权限请求按 permId 交 bridge 出卡；owner 答了由 bridge 经 acp_call 回来（这里确认还在等才算数）；超时 / 适配器退出按取消回
- *   适配器并通知 bridge 撤卡；重连登记后把还在等的补发上去。
- * 所有外部动作注入，tests/acp-host.test.ts 用假适配器 + 假 bridge 跑整条链。
- */
+/** ACP 宿主协调适配器、bridge、回合与出站确认；协议细节见 docs/runtimes/codex-acp.md。 */
 import { randomBytes } from "node:crypto";
 import { codexReplyHint, wrapChannelContent } from "../codex-thread.js";
 import { adapterEnv, type AdapterEnvSpec, type AdapterProc } from "./adapter-proc.js";
+import { applyAcpLaunchConfig } from "./apply-config.js";
 import type { BridgeLink, BridgeLinkDeps } from "./bridge-link.js";
+import { commitAcpClear, rotateAcpHost } from "./clear.js";
 import { modelStateEntry } from "./config.js";
 import { classifyPromptError, failureEntry, FailureDedup, type AcpFailure } from "./failures.js";
 import { AcpSession } from "./session.js";
@@ -30,6 +20,7 @@ export interface HostConfig {
   mcpName: string;
   /** 重启 / 收编后第一条入站前附的前言（codex-launch.codexContextPreamble） */
   preamble?: string;
+  clearPreamble?: string;
   model?: string;
   effort?: string;
   agentCmd: string[];
@@ -44,12 +35,12 @@ export interface HostDeps {
   startProxy(deps: Omit<ToolProxyDeps, "port">): ToolProxy;
   postHook(body: { channelId: string } & StopReport): Promise<{ block?: boolean; reason?: string }>;
   markReady(): Promise<void>;
+  rotateSession(oldId: string, newId: string): Promise<{ ok: boolean; error?: string }>;
   log(msg: string): void;
 }
 
 const RESTART_BASE_MS = 3_000;
 const RESTART_MAX_MS = 60_000;
-/** 连续跑满这么久才把重起计数清零 */
 const RESTART_STABLE_MS = 5 * 60_000;
 const AUTH_RETRY_MS = 60_000;
 /** prompt 等适配器接回线程最多这么久；等不到按失败收尾（带上最近一次起不来的原因） */
@@ -75,7 +66,8 @@ export class AcpHost {
   private preamblePending: string | undefined;
   private readyMarked = false;
   private registered = false;
-  /** 这个宿主进程的标识：bridge 按它 + 条目序号去重；permId 也以它开头 */
+  private rotating = false;
+  private restartDeferred = false;
   private readonly hostId = randomBytes(6).toString("hex");
   private outbox: { seq: number; entry: Record<string, unknown> }[] = [];
   private entrySeq = 0;
@@ -89,7 +81,7 @@ export class AcpHost {
   private drainWaiters: (() => void)[] = [];
   private readonly permits = new Map<string, { frame: Record<string, unknown>; resolve: (optionId: string | null) => void; timer: ReturnType<typeof setTimeout> }>();
   private permSeq = 0;
-  private readonly translator = createAcpTranslator();
+  private translator = createAcpTranslator();
   private readonly dedup = new FailureDedup();
   private readonly proxy: ToolProxy;
   private readonly link: ReturnType<HostDeps["makeLink"]>;
@@ -104,7 +96,12 @@ export class AcpHost {
         runtime: "codex", transport: "acp", agentName: cfg.agentName, sessionId: cfg.sessionId, abort: true,
       }),
       onFrame: (m) => this.onFrame(m),
-      onRegistered: () => ((this.registered = true), deps.log("已在 bridge 登记"), this.resync(), void this.maybeReady()),
+      onRegistered: () => {
+        this.registered = true;
+        deps.log("已在 bridge 登记");
+        this.resync();
+        void this.maybeReady();
+      },
       onDown: (why) => {
         if (this.loop.busy || this.outbox.length) this.deliveryUncertain = true; // bridge 重启可能丢掉已经确认、但还没 drain 的正文
         this.registered = false;
@@ -143,6 +140,7 @@ export class AcpHost {
 
   private async startAdapter(): Promise<void> {
     if (this.stopping) return;
+    if (this.rotating) return void (this.restartDeferred = true);
     const env = adapterEnv({ ...this.cfg.env, channel: { channelId: this.cfg.channelId, proxyUrl: this.proxy.url, agentName: this.cfg.agentName, sessionId: this.cfg.sessionId } });
     const proc = this.deps.spawn(this.cfg.agentCmd, env, this.cfg.cwd);
     this.proc = proc;
@@ -152,7 +150,7 @@ export class AcpHost {
     try {
       const caps = await session.initialize();
       await session.attach(this.cfg.sessionId, this.cfg.cwd, caps.resume);
-      await this.applyLaunchConfig(session);
+      await applyAcpLaunchConfig(session, this.cfg.model, this.cfg.effort, false, this.deps.log);
       this.session = session;
       this.lastStartError = null;
       this.deps.log(`已接上线程 ${this.cfg.sessionId.slice(0, 8)}（${caps.resume ? "session/resume" : "session/load"}${session.steering ? "，支持 steering" : ""}）`);
@@ -170,19 +168,11 @@ export class AcpHost {
     }
   }
 
-  /** registry 里钉的模型 / 推理强度：接上线程后经 set_config_option 补上（不在选项里只记日志，不拦启动） */
-  private async applyLaunchConfig(s: AcpSession): Promise<void> {
-    for (const [id, v] of [["model", this.cfg.model], ["reasoning_effort", this.cfg.effort]] as const) {
-      if (!v) continue;
-      const r = await s.setConfig(id, v);
-      if (!r.ok) this.deps.log(`启动配置 ${id}=${v} 没生效：${r.error}`);
-    }
-  }
-
   private onAdapterExit(session: AcpSession, code: number, startedAt: number): void {
     if (this.session === session) this.session = null;
     for (const id of [...this.permits.keys()]) this.endPermission(id, null, "适配器退出了");
     if (this.stopping) return;
+    if (this.rotating) return void (this.restartDeferred = true);
     if (Date.now() - startedAt > RESTART_STABLE_MS) this.restarts = 0;
     const auth = this.lastStartError?.kind === "auth";
     const delay = auth ? AUTH_RETRY_MS : Math.min(RESTART_BASE_MS * 2 ** Math.min(this.restarts++, 5), RESTART_MAX_MS);
@@ -207,6 +197,7 @@ export class AcpHost {
   }
 
   private onUpdate(u: Record<string, unknown>): void {
+    if (this.rotating) return; // /clear 的内部引导不能作为用户回合推送
     const entries = this.translator.push(u);
     if (entries.length) this.pushEntries(entries);
   }
@@ -236,7 +227,7 @@ export class AcpHost {
     try {
       while (this.outbox.length && this.registered && !this.stopping) {
         const batch = this.outbox.slice(0, ENTRY_BATCH_MAX);
-        const frame = { channelId: this.cfg.channelId, type: "acp_entries", hostId: this.hostId, firstSeq: batch[0]!.seq, entries: batch.map((b) => b.entry) };
+        const frame = { channelId: this.cfg.channelId, type: "acp_entries", sessionId: this.cfg.sessionId, hostId: this.hostId, firstSeq: batch[0]!.seq, entries: batch.map((b) => b.entry) };
         const ack = await this.link.request<boolean | { ok: true; lost: number; bridgeEpoch?: string }>(frame, ENTRY_ACK_MS)
           .catch((e) => (this.deps.log(`条目没送到：${errText(e)}`), false as const));
         const ok = ack === true || (typeof ack === "object" && ack?.ok === true);
@@ -360,6 +351,7 @@ export class AcpHost {
   /** bridge 发来的调用（改配置）：结果按 id 回 acp_call_result */
   private async call(m: Record<string, any>): Promise<void> {
     const reply = (body: Record<string, unknown>) => this.link.send({ channelId: this.cfg.channelId, type: "acp_call_result", id: m.id, ...body });
+    if (m.op === "clear") return void reply(await this.clearSession());
     if (m.op === "slash") return void (this.loop.submitCommand(String(m.text ?? "")), reply({ ok: true })); // 独占下一轮 prompt，适配器才会识别命令
     if (m.op === "permission") {
       const ok = this.endPermission(String(m.permId ?? ""), typeof m.optionId === "string" ? m.optionId : null);
@@ -371,6 +363,30 @@ export class AcpHost {
     if (r.ok) this.deps.log(`已改 ${m.configId}=${m.value}（不重启）`);
     reply(r.ok ? { ok: true, configOptions: this.session.configOptions } : { ok: false, error: r.error });
     if (r.ok) this.publishConfig(this.session);
+  }
+
+  private async clearSession(): Promise<{ ok: boolean; error?: string; sessionId?: string }> {
+    const oldPreamble = this.preamblePending;
+    return rotateAcpHost({
+      session: this.session, ready: !!this.proc && this.registered, pending: !!(this.outbox.length || this.pumping || this.permits.size),
+      loop: this.loop, oldId: this.cfg.sessionId, cwd: this.cfg.cwd, rotateRegistry: this.deps.rotateSession,
+      configure: (s) => applyAcpLaunchConfig(s, this.cfg.model, this.cfg.effort, true, this.deps.log),
+      begin: () => ((this.rotating = true), (this.preamblePending = this.cfg.clearPreamble)),
+      failed: (changed) => {
+        this.preamblePending = oldPreamble;
+        if (changed) this.session = null, this.proc?.stop(); // 内存线程已变，重起后从 registry 接回旧线程
+      },
+      committed: (id, session) => commitAcpClear({
+        sessionId: id, previousSessionId: this.cfg.sessionId, channelId: this.cfg.channelId, request: (f, ms) => this.link.request<boolean>(f, ms),
+        update: () => { this.cfg.sessionId = id; this.translator = createAcpTranslator(); },
+        ready: () => { if (this.session) this.publishConfig(this.session); if (!this.rotating) this.loop.resume(); },
+        alive: () => !this.stopping && this.cfg.sessionId === id,
+      }),
+      end: () => {
+        this.rotating = false;
+        if (this.restartDeferred) this.restartDeferred = false, void this.startAdapter();
+      },
+    });
   }
 
   /** 配置变了：给 bridge 存一份（设置页 / 额度卡的选项），再推一条 model_state 条目让顶栏跟上 */
