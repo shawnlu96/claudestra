@@ -4,8 +4,20 @@ import { isAbsolute } from "node:path";
 import { statePath } from "./paths.js";
 
 export const SCHEDULER_CONFIG_PATH = statePath("scheduler.json");
+/**
+ * Shared-pool overflow (i28-R9): off = never pool; overflow = pool a ready node only when no local slot is free;
+ * prefer = pool whenever a peer is eligible. Only review nodes can be pooled until remote writing (i28-R6) lands,
+ * so build / fix in roles are refused rather than silently ignored.
+ */
+export type RemoteMode = "off" | "overflow" | "prefer";
+export interface RemotePolicy { mode: RemoteMode; roles: "review"[]; poolTimeoutMin: number }
+export const DEFAULT_REMOTE: RemotePolicy = { mode: "overflow", roles: ["review"], poolTimeoutMin: 15 };
+
 interface ProjectSchedule {
+  /** 0 = no local worker at all (every eligible node goes to the pool; nothing else is dispatched). */
   maxActiveWorkers: number;
+  /** Always set by parseSchedulerConfig (default DEFAULT_REMOTE); a hand-built policy without it never pools. */
+  remote?: RemotePolicy;
   requiredChecks: string[];
   /** Local clone whose `gh` context must match the PR repository; with `deploy` it is also the tree that gets deployed. */
   repoDir: string;
@@ -42,8 +54,8 @@ export function parseSchedulerConfig(raw: unknown): SchedulerConfig {
   for (const [id, value] of Object.entries(r.projects)) {
     if (!/^[\w.-]{1,80}$/.test(id) || !value || typeof value !== "object") throw new Error(`invalid scheduler project ${id}`);
     const p = value as Record<string, unknown>;
-    if (!Number.isInteger(p.maxActiveWorkers) || (p.maxActiveWorkers as number) < 1 || (p.maxActiveWorkers as number) > 32) {
-      throw new Error(`scheduler project ${id} needs maxActiveWorkers 1..32`);
+    if (!Number.isInteger(p.maxActiveWorkers) || (p.maxActiveWorkers as number) < 0 || (p.maxActiveWorkers as number) > 32) {
+      throw new Error(`scheduler project ${id} needs maxActiveWorkers 0..32`);
     }
     const requiredChecks = parseRequiredChecks(p.requiredChecks);
     if (!requiredChecks) throw new Error(`scheduler project ${id} needs 1..20 requiredChecks names`);
@@ -51,10 +63,25 @@ export function parseSchedulerConfig(raw: unknown): SchedulerConfig {
       throw new Error(`scheduler project ${id} needs absolute repoDir`);
     }
     projects[id] = { maxActiveWorkers: p.maxActiveWorkers as number, requiredChecks,
-      repoDir: p.repoDir, ...(p.deploy !== undefined ? { deploy: parseDeployTarget(id, p.deploy) } : {}) };
+      repoDir: p.repoDir, remote: parseRemote(id, p.remote), ...(p.deploy !== undefined ? { deploy: parseDeployTarget(id, p.deploy) } : {}) };
   }
   if (r.enabled && Object.keys(projects).length === 0) throw new Error("enabled scheduler needs at least one project");
   return { enabled: r.enabled, pollMs: pollMs as number, autoDispatch: r.autoDispatch === true, projects };
+}
+
+function parseRemote(id: string, raw: unknown): RemotePolicy {
+  if (raw === undefined) return { ...DEFAULT_REMOTE, roles: [...DEFAULT_REMOTE.roles] };
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error(`scheduler project ${id}: remote must be an object`);
+  const r = raw as Record<string, unknown>;
+  const mode = r.mode ?? DEFAULT_REMOTE.mode;
+  if (mode !== "off" && mode !== "overflow" && mode !== "prefer") throw new Error(`scheduler project ${id}: remote.mode must be off|overflow|prefer`);
+  const roles = r.roles ?? DEFAULT_REMOTE.roles;
+  if (!Array.isArray(roles) || roles.length > 3 || roles.some((x) => x !== "review")) {
+    throw new Error(`scheduler project ${id}: remote.roles only takes "review" (build / fix wait for remote writing, i28-R6)`);
+  }
+  const timeout = r.poolTimeoutMin ?? DEFAULT_REMOTE.poolTimeoutMin;
+  if (!Number.isInteger(timeout) || (timeout as number) < 1 || (timeout as number) > 240) throw new Error(`scheduler project ${id}: remote.poolTimeoutMin must be 1..240`);
+  return { mode, roles: roles.length ? ["review"] : [], poolTimeoutMin: timeout as number };
 }
 
 const argv = (v: unknown): v is string[] => Array.isArray(v) && v.length > 0 && v.length <= 32 &&

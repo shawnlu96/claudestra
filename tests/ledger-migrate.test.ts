@@ -263,11 +263,12 @@ describe("v1 → 依赖边版本", () => {
 describe("写事件的底座只给写入模块", () => {
   // ledger-human.ts：v3.2 例外（human 节点的人工交付与重开指派），它按执行者角色推 build / fix → review，门在 human-node.ts；
   // ledger-steps-write.ts：步骤化台账（T47）的写入，派步骤要 PM，交付 / 审查的钩子挂在 ledger-write.ts 的事务里
-  // ledger-scheduler-write.ts：调度意图与资源锁同事务写，入口只提供限定动作与 CAS
+  // ledger-scheduler-write.ts：调度意图与资源锁同事务写，入口只提供限定动作与 CAS；意图结算（CAS）拆在 ledger-scheduler-settle.ts
   // scheduler-observe.ts / scheduler-fallback.ts：observe 只写观察事件；退回人工是调度身份唯一能做的模式变更（T68e）
   // ledger-feature-write.ts：feature 与子 DAG 初版（T84），权限与 CAS 在它自己的事务里
   // ledger-dag-write.ts：子 DAG 重写 / 审批 / 绑卡（T89），四条规矩与 owner 审批在它自己的事务里
   // ledger-scheduler-resume.ts：改规格后把退回人工的 auto 卡交回调度（T68h），只 PM / master / owner，CAS + 未定意图先对账
+  // ledger-scheduler-pool.ts：调度身份把审查挂进共享池（i28-R9），事务内重算计划核对后才出单，之后只按出借单状态 CAS 结算意图
   // scheduler-apply.ts：调度身份按模板推自动卡（只许 restate→build、review→fix / merge），事务内重算计划核对后才 applyMove（T68f）
   // scheduler-deploy.ts：部署 journal（T68g），只有调度身份推进，deployed 才把本卡 merge→live，结清只 PM / master / owner
   // order-mark.ts：只写两种按意图去重的 scheduler 事件（领单留痕 = 收件人本人本会话、未领单报警 = 调度身份），不推阶段（i28-M4b）
@@ -288,9 +289,10 @@ describe("写事件的底座只给写入模块", () => {
     };
     walk(root);
     expect(tx.sort()).toEqual(["lib/ledger-dag-write.ts", "lib/ledger-deps-write.ts",
-      "lib/ledger-feature-write.ts", "lib/ledger-human.ts", "lib/ledger-lend-result.ts", "lib/ledger-lend.ts", "lib/ledger-scheduler-resume.ts",
-      "lib/ledger-scheduler-write.ts", "lib/ledger-steps-write.ts", "lib/ledger-write.ts", "lib/order-mark.ts",
-      "lib/scheduler-apply.ts", "lib/scheduler-deploy.ts", "lib/scheduler-fallback.ts", "lib/scheduler-merge.ts", "lib/scheduler-observe.ts", "lib/scheduler-sessions.ts"]);
+      "lib/ledger-feature-write.ts", "lib/ledger-human.ts", "lib/ledger-lend-result.ts", "lib/ledger-lend.ts", "lib/ledger-scheduler-pool.ts",
+      "lib/ledger-scheduler-resume.ts", "lib/ledger-scheduler-settle.ts", "lib/ledger-scheduler-write.ts", "lib/ledger-steps-write.ts", "lib/ledger-write.ts",
+      "lib/order-mark.ts", "lib/scheduler-apply.ts", "lib/scheduler-deploy.ts", "lib/scheduler-fallback.ts", "lib/scheduler-merge.ts", "lib/scheduler-observe.ts",
+      "lib/scheduler-sessions.ts"]);
     expect(move.sort()).toEqual(["lib/ledger-human.ts", "lib/scheduler-apply.ts"]);
   });
 });

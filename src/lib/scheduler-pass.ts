@@ -74,7 +74,7 @@ function guardWorker(w: WorkerSession, active: Active): WorkerSession {
 function guardAutoDeps(d: AutoTickDeps, active: Active): AutoTickDeps {
   return {
     manager: guard(active, leaseAware(d.manager)), ensure: guard(active, d.ensure), pinReview: guard(active, d.pinReview),
-    reviewDirty: guard(active, d.reviewDirty), notifyPm: guard(active, d.notifyPm), now: d.now,
+    reviewDirty: guard(active, d.reviewDirty), notifyPm: guard(active, d.notifyPm), now: d.now, borrow: d.borrow && guard(active, d.borrow),
     worker: (ref) => { active(); const w = d.worker(ref); return "manual" in w ? w : guardWorker(w, active); },
   };
 }

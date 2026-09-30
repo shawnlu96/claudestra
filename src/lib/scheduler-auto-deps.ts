@@ -19,6 +19,7 @@ import { boundRef, type AutoTickDeps } from "./scheduler-auto-tick.js";
 import { acpPort, messagePort, type RegistryRow, type StillActive } from "./scheduler-auto-ports.js";
 import { runtimeFamily } from "./scheduler-auto-review.js";
 import { SchedulerStopped, whileOwned } from "./scheduler-maintenance.js";
+import { readEffectiveBorrow } from "./scheduler-pool-borrow.js";
 import { schedulerManagerWith } from "./scheduler-service.js";
 import { encodeLease, SCHEDULER_LEASE_ENV, type SchedulerLease } from "./scheduler-lease-env.js";
 import { git as realGit, gitDirtySync, openReviewWorktree, pinReviewWorktree, type Git } from "./scheduler-review-worktree.js";
@@ -149,5 +150,6 @@ export function autoTickDeps(db: Database, opts: AutoDepsOpts = {}): AutoTickDep
     reviewDirty: async (_task, ref) => { const cwd = registryRow(ref.agent)?.cwd; return cwd ? gitDirtySync(cwd) : null; },
     notifyPm: (task, text) => notifyPm(env, task, text),
     now: () => Date.now(),
+    borrow: readEffectiveBorrow,
   };
 }

@@ -1,10 +1,12 @@
 /**
  * The one mode change the scheduler identity may make: give a card back to PM (peer delegation, Pi, unknown runtime,
- * missing session). It never re-enables automation; pending intents are cancelled, anything in flight stays for PM.
+ * missing session). It never re-enables automation; pending intents are cancelled (an unclaimed pool order is withdrawn with
+ * its intent), anything in flight stays for PM.
  */
 import type { Database } from "bun:sqlite";
 import { isManager, mustTask, type WriteCtx } from "./ledger-checks.js";
 import { getWorkflow, type TaskWorkflow } from "./ledger-scheduler.js";
+import { closePoolOrders } from "./ledger-scheduler-pool.js";
 import { getEventByDedup, getMeta, LedgerError } from "./ledger-store.js";
 import { insertEvent, tx } from "./ledger-tx.js";
 
@@ -25,6 +27,7 @@ export function fallbackToManual(db: Database, ctx: WriteCtx, input: { taskId: s
       throw new LedgerError("conflict", "任务已是 manual");
     }
     const now = ctx.now ?? Date.now();
+    const pool = closePoolOrders(db, { ...ctx, now }, task.id, `退回人工：${reason}`);
     const pending = db.query("SELECT id FROM scheduler_intents WHERE taskId = ? AND status = 'pending'").all(task.id) as { id: string }[];
     db.query("UPDATE scheduler_intents SET status = 'cancelled', updatedAt = ? WHERE taskId = ? AND status = 'pending'").run(now, task.id);
     for (const row of pending) db.query("DELETE FROM scheduler_resources WHERE intentId = ? AND scope = 'intent'").run(row.id);
@@ -32,7 +35,8 @@ export function fallbackToManual(db: Database, ctx: WriteCtx, input: { taskId: s
     insertEvent(db, { actor: ctx.actor, now, dedupKey }, {
       project: task.project, target: task.id, kind: "scheduler", text: `退回人工：${reason}`,
       data: { op: "fallback_manual", from: workflow.mode, reason, intentId: input.intentId ?? null, workflowRev: workflow.rev + 1,
-        cancelledIntents: pending.map((p) => p.id), ...(ctx.actor === "scheduler" ? {} : { manual: true }) },
+        cancelledIntents: pending.map((p) => p.id),
+        ...(pool.withdrawn.length || pool.stray.length ? { poolOrders: pool } : {}), ...(ctx.actor === "scheduler" ? {} : { manual: true }) },
     }, true);
     return { workflow: getWorkflow(db, task.id) as TaskWorkflow, duplicate: false };
   });

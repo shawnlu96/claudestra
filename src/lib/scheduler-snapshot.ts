@@ -10,7 +10,9 @@ import { getWorkflow, type AuthorFamily, type SchedulerIntent } from "./ledger-s
 import type { LedgerEvent, LedgerTask } from "./ledger-stages.js";
 import { currentReview, stepAtStage, stepsOf } from "./ledger-steps.js";
 import { getMeta, listDeps, listEvents, listTasks } from "./ledger-store.js";
+import type { BorrowEntry } from "./lend-config.js";
 import type { RegistryAgent } from "./registry.js";
+import type { RemotePolicy } from "./scheduler-config.js";
 import type { PlannerSnapshot, WorkerRef } from "./scheduler-plan.js";
 import { taskWorkerRefs } from "./scheduler-sessions.js";
 import { projectUiGate } from "./scheduler-ui-gate.js";
@@ -20,6 +22,8 @@ export interface SnapshotOpts {
   maxWorkers: number;
   /** Clock for ask expiry; the observe write passes its own ctx.now so a replayed tick sees the same gate. */
   now?: number;
+  /** Shared-pool policy and the effective borrow list (auto cards only; absent = never pool). */
+  pool?: { remote: RemotePolicy; borrow: readonly BorrowEntry[] };
 }
 
 const familyOf = (a: RegistryAgent): AuthorFamily | null =>

@@ -80,6 +80,36 @@ auto 卡不再发旧的 deliver/review 指令，避免双派；`ledger-audit` �
 合并队列把现有 `merge-queue.sh`、`deploy-full.sh` 的步骤搬进仓库，目标地址从配置注入。每项目串行：update-branch → 若 head 变，回审 → check/CI → merge → 部署 → 验证。记录候选 SHA、CI run、merge SHA、部署产物和核证事实。CI 红、
 部署失败或外部结果未知时冻结队列，保留现场；不能靠超时自动重试不可逆操作。tag/release 不在自动 action 集。
 
+### 共享池溢出（i28-R9）
+
+scheduler.json 每个项目有 `remote: { mode: off | overflow | prefer, roles, poolTimeoutMin }`。缺省值是 overflow、只有 review、15 分钟。build / fix 要等 R6，写进 roles 会被拒。`maxActiveWorkers` 允许设 0。
+
+**本机审查空位**：审查不占卡级 worker 槽，所以按「项目里其它卡上活跃的本机审查 session 数 < maxActiveWorkers」判断。
+
+**什么时候挂池**：只在审查节点，还要满足下面全部条件：
+- 本卡没有绑定的审查 session，也没有在途意图；
+- 本机没有审查空位（prefer 模式不看空位）；
+- 模板不是 security；
+- 要的家族是作者之外的那一家，而且在可借家族里（v1 只借 Codex）；
+- 卡上有 GitHub PR 链接；
+- lend.json 的 borrow 里有本项目 review 的有效条目，而且该 peer 的未结单数 < maxOpen。
+
+满足时，规划器出一个挂池意图（`review`，recipient 是 `peer:<名>`）。**每张卡每一轮、每个 head 最多挂一次池**：超时、对方释放、出单被拒以后，这一轮一律回本机建审查 session。复验先挂给上一轮交结论的同一个 peer，不看本机空位；挂不出去就在本机建跨家族审查 session。
+
+**执行**：`ledger scheduler-pool <intent>`（只有调度身份能调，单事务）。
+- 第一次调用：在事务里用同样的借入配置重算计划，结果一致才通过 T93 的出单核心写 lend_orders，并用 `scheduler:<intent>:pool` 事件把意图和订单连起来。
+- 之后每次调用：按订单状态结算意图。
+  - claimed：意图记 submitted；
+  - done：意图记 done；
+  - unknown：意图记 unknown，停给 PM；
+  - released / cancelled：意图 cancelled，这一轮回本机。
+- 超时：挂出满 poolTimeoutMin 没人领，就在同一事务里 CAS pooled→cancelled，并通知 PM 一次。CAS 落空说明对方已经领了，按 claimed 处理。
+- 接管：转人工、调度退回人工、交回自动这三处，取消 pending 意图之前都先在同一事务里结算挂池意图的池单。没人领就立即撤单，已被领就把意图记为 submitted 或 unknown，留给 PM 对账，交回自动随之被拒。已取消的意图不能拿来证明池单已撤：仍在途却没有在途意图对应的池单，会让交回自动被拒，也会让规划器停给 PM（`pool_order_open`），不在本机另派审查。
+
+**派审回执**：池单的回执是对方领单时写的 note。这个事件一定早于结论事件，而调度器结算 submitted 可能要到结论之后。规划器和合并闸都认这张单的 `peer:<名>` / `lend:<peer>:<orderId>` 作审查者。
+
+doctor 在调度组下多一行「共享池」。实现：`scheduler-pool-plan.ts`（纯选择）、`scheduler-pool-facts.ts`（台账读取）、`ledger-scheduler-pool.ts`（事务）、`scheduler-pool-tick.ts`（服务一步），意图结算在 `ledger-scheduler-settle.ts`。测试：`tests/scheduler-pool.test.ts`。
+
 ## v4 DAG 与 T69
 
 协作视图保持 v4 的大纲、因果线画布、团队区、属性区与时间轴，不改布局。现有 `task_deps` 给显式边（from/to/when/effective state 与判定事件）；`tasks` 给节点 stage、round、head；`task_steps` 与 `currentHandler` 给接手人；scheduler
