@@ -8,6 +8,7 @@ import type { LedgerRun } from "../lib/order-ledger-exit.js";
 import { refuse, routeOrderTool, type OrderToolHandler, type OrderToolResult } from "../lib/order-tool-route.js";
 import { runManagerProcess } from "../lib/run-manager.js";
 import { callerOf } from "./caller-identity.js";
+import { reviewToolHandlers } from "./review-tools.js";
 import { BUN_PATH, ENV_WITH_BUN, MANAGER_PATH } from "./config.js";
 
 /** manager 以调用方频道为身份跑：actor 由 CLI 按 DISCORD_CHANNEL_ID 算（manager/ledger-identity.ts）。handler 经 lib/order-ledger-exit.ts ledgerWrite 用它 */
@@ -15,12 +16,12 @@ const ledgerRun: LedgerRun = (args, channelId) =>
   runManagerProcess(args, { bunPath: BUN_PATH, managerPath: MANAGER_PATH, env: { ...ENV_WITH_BUN, DISCORD_CHANNEL_ID: channelId }, timeoutMs: 30_000 });
 
 const pending: OrderToolHandler = async () => refuse("not_implemented", "这个工具还没接上");
-void ledgerRun; // 管道提交：写台账出口先接好，deliver / submit_verdict 的 handler 接上时用
 
 const HANDLERS: Record<string, OrderToolHandler> = {
   take_order: pending,
   deliver: pending,
   ask: pending,
+  ...reviewToolHandlers(ledgerRun),
 };
 
 export async function answerOrderTool(ws: ServerWebSocket<unknown>, msg: Record<string, unknown>): Promise<void> {

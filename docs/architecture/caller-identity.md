@@ -33,6 +33,14 @@ Every bypass agent is already an unrestricted shell on this machine, so **delibe
 
    `agent`, `sessionId` and `family` come from the registry's current values (master: latest session in `MASTER_DIR`), because `/clear` and ACP thread rotation change the session id after launch. Nothing the caller reports about itself counts. The check runs again on every call, so an old connection drops to `verified=false` as soon as the agent restarts.
 5. **Tools**: `callerIdentity(ws, frame)` gives the identity. `requireVerified()` → `identity_unverified` is the gate for M2/M3 tools. `whoami` returns the structure.
+   - Reviewer tools (M3, `bridge/review-tools.ts`):
+     - `take_review` is read-only. It returns the caller's review orders: an auto card's bound reviewer session, otherwise the executor of the `currentReview` step.
+     - `submit_verdict(VerdictWire)` writes through `ledger submit-verdict`, which re-checks every rule on the write connection (`lib/review-verdict.ts`):
+       - the order is the caller's current one, the head equals the order's head, and the reviewer is not the author;
+       - p0 / p1 / p2 counts match the findings, and the report is a non-empty file under `ledger/reviews/`;
+       - session and family must equal the registry's current values.
+
+     It never moves the stage. The same verdict retried is a no-op; a different second verdict is refused.
 
 ## Misdelivery guard
 

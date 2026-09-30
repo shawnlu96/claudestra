@@ -38,7 +38,7 @@ export interface VerdictDeps {
 const refuse = (error: string, message: string): VerdictResult => ({ ok: false, error, message });
 
 /** 一张单一个幂等键：同单同 head 只能有一个结论 */
-const verdictKey = (w: Pick<VerdictWire, "orderId" | "head">): string => `verdict:${w.orderId}@${w.head}`;
+export const verdictKey = (w: Pick<VerdictWire, "orderId" | "head">): string => `verdict:${w.orderId}@${w.head}`;
 
 /** 事件里存的逐项结论：四个字段，与 PM 用 `ledger review --findings` 代记的同构（说明文字在报告里） */
 const storedFindings = (w: VerdictWire): ReviewFinding[] => w.findings.map(({ findingId, family, severity, probe }) => ({ findingId, family, severity, probe }));
