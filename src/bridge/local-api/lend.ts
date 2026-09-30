@@ -3,10 +3,11 @@
  *   POST /api/v1/lend/poll | claim | lease | result → manager `ledger lend-poll|claim|lease|write -- <peer> <原文>`（bridge 只读台账）
  * 调用方只认 peer token，而且这一次请求必须是 E2E 解开的内层请求、对方公钥已钉住、请求头的钥匙就是钉的那把并带着签名：
  * api-auth 对带钥匙但签名不对的请求已经 401，所以走到这里、钥匙又对得上的就是验签通过的；老 peer（没 E2E、没钉钥、截止日前
- * 放行的不签名请求）一律 401，不退回明文。lease 过期由 startLendSweeper 每分钟兜一次（先只读判有没有到期的，再起 CLI）。
+ * 放行的不签名请求）一律 401，不退回明文。lease 过期、写单挂太久没人领由 startLendSweeper 每分钟兜一次（先只读判有没有，再起 CLI）。
  * 对方公钥一钉住（api-auth 在路由前 commit），就经 `ledger lend-pin` 给借它算力的项目各记一条事件。
  */
 import { SIG_HEADERS } from "../../lib/instance-key.js";
+import { STALE_WRITE_SQL, WRITE_POOL_TTL_MS } from "../../lib/ledger-lend.js";
 import { LEND_BODY_MAX, LEND_STATUS, type LendEndpoint } from "../../lib/lend-wire.js";
 import type { Principal } from "../../lib/principals.js";
 import { runManagerProcess } from "../../lib/run-manager.js";
@@ -65,13 +66,18 @@ export function watchLendPins(): void {
 const SWEEP_MS = 60_000;
 let sweeper: ReturnType<typeof setInterval> | null = null;
 
-/** 租约到期不能等对方下次来：到期没续的单每分钟结一次 unknown 并通知 PM。库里没有到期的就不起进程 */
+/**
+ * 租约到期不能等对方下次来：到期没续的单每分钟结一次 unknown 并通知 PM；挂了太久没人领的写单退回本机（i28-R6）。
+ * 库里两样都没有就不起进程。
+ */
 export function startLendSweeper(): void {
   if (sweeper) return;
   sweeper = setInterval(() => {
     let due = false;
     try {
-      due = !!ledgerDb()?.query("SELECT 1 FROM lend_orders WHERE status = 'claimed' AND leaseUntil < ? LIMIT 1").get(Date.now());
+      const now = Date.now();
+      due = !!ledgerDb()?.query(`SELECT 1 FROM lend_orders WHERE (status = 'claimed' AND leaseUntil < ?)
+        OR (${STALE_WRITE_SQL}) LIMIT 1`).get(now, now - WRITE_POOL_TTL_MS);
     } catch (e) {
       // 表还没建（库还没迁到 T93）或库暂时读不了：这一分钟不扫，下一分钟再看；没有到期的单也就没有要结的
       console.warn(`⚠️ [lend] 查到期租约失败：${(e as Error).message}`);

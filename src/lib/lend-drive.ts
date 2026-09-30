@@ -3,6 +3,8 @@
  * 规矩：先写 journal 再做外部效果；同一件外部效果重启后只会重做幂等的那几种（claim 同 orderId、result 同原始字节、续租），
  * 建 worker 前先把 agent 名记进 journal，重启后先按名字在 registry 里认领、不建第二个；首条派单「发出前」落 sending，重启后不重发。
  * 租约以本机时钟算截止（claim / 续租成功时的 now + ms）：过了还没续上就自停 worker（心跳过期），保留工作副本和 journal。
+ * 写单（i28-R6）：领单要出借声明开了 write、订单分支正是按本机指纹算的那个；clone 后先试推，没权限就退回（not_started）；
+ * worker 交了 head 之后由这里推送、开 PR（lend-push.ts），再把交付原字节转给 A——推送失败可重试的留到下一轮，别的停下交 PM。
  * 依赖全部注入（LendDeps，生产接线在 lend-deps.ts），tests/lend-loop.test.ts 用假依赖逐条走。
  */
 import type { Database } from "bun:sqlite";
@@ -10,7 +12,9 @@ import { advance, localDay, openSlots, orderOf, ordersToday, patchOrder, LEASED_
 import type { LendEntry } from "./lend-config.js";
 import type { LendAskParams, LendAskVerdict } from "./lend-ask.js";
 import { lendRequest, type LendCall, type Lease, type Receipt } from "./lend-remote.js";
-import type { CloneResult } from "./lend-clone.js";
+import type { CloneResult, CloneWrite } from "./lend-clone.js";
+import { isWriteStep, lendBranch, roleOfStep } from "./lend-git.js";
+import type { PrInput, PrResult, PushResult, PushTarget } from "./lend-push.js";
 import type { SendResult } from "./worker-ports.js";
 import { payloadSha } from "./lend-submit.js";
 import { SchedulerStopped } from "./scheduler-maintenance.js";
@@ -19,8 +23,11 @@ import type { WorkerLiveness } from "./worker-liveness.js";
 import { createHash } from "node:crypto";
 
 export const BEAT_MS = 60_000;
-/** 首条派单后一直没交结论的上限：外来任务不能无限期占着 B 的一个 shell */
+/** 首条派单后一直没交结论的上限：外来任务不能无限期占着 B 的一个 shell（写代码比审查给得长些） */
 const MAX_RUN_MS = 3 * 3600_000;
+const MAX_WRITE_RUN_MS = 6 * 3600_000;
+/** 交付正文（lend wire 的请求体）上限，同 T93 */
+const BODY_MAX_BYTES = 96 * 1024;
 
 interface WorkerPort {
   /** registry 里这个名字的 agent（会话 id、工作目录）；没有 = undefined */
@@ -43,7 +50,17 @@ export interface LendDeps {
     verdict(askId: string, p: LendAskParams): LendAskVerdict;
     inform(p: LendAskParams): Promise<{ ok: true } | { ok: false; error: string }>;
   };
-  clone(input: { orderId: string; repo: string; pr: number | null; head: string }): Promise<CloneResult>;
+  clone(input: { orderId: string; repo: string; pr: number | null; head: string; write?: CloneWrite }): Promise<CloneResult>;
+  /** 本机实例公钥的指纹：写单的订单分支按它核；读不到钥匙 = null（不领写单） */
+  selfFp(): string | null;
+  /** 写单副本里提交用的署名（出借人自己的 git 全局身份）；没配 = null，写单不起 worker */
+  identity(): { name: string; email: string } | null;
+  /** 写单的试推 / 推送 / 开 PR（lend-push.ts） */
+  push: {
+    probe(t: PushTarget): Promise<PushResult>;
+    work(t: PushTarget & { head: string }): Promise<PushResult>;
+    pr(p: PrInput): Promise<PrResult>;
+  };
   removeDir(orderId: string): void;
   worker: WorkerPort;
   /** 回执验签：A 钉在 peers.json 的完整公钥；验不过 = false */
@@ -90,6 +107,8 @@ export function askParams(row: LendRow, entry: LendEntry, d: LendDeps): LendAskP
 export function claimProblem(row: LendRow, entry: LendEntry | undefined, db: Database, now: number): string | null {
   if (!entry) return `已不再向 ${row.peer} 出借（lend.json 关了或删了这条）`;
   if (!entry.repos.includes(str(row.preview.repo))) return `仓库 ${str(row.preview.repo)} 已不在白名单`;
+  const role = roleOfStep(str(row.preview.step));
+  if (!role || !entry.roles.includes(role)) return `出借声明没开 ${role ?? str(row.preview.step)} 角色，不领这一单`;
   const slots = entry.families[row.family as "codex"] ?? 0;
   const busy = db.query(`SELECT COUNT(*) AS n FROM lend_orders WHERE peer = ? AND family = ? AND state IN (${LEASED_STATES.map(() => "?").join(",")})`)
     .get(row.peer, row.family, ...LEASED_STATES) as { n: number };
@@ -109,11 +128,19 @@ export async function claimOrder(row: LendRow, d: LendDeps): Promise<void> {
   }
   const o = r.value.order;
   const p = row.preview;
+  const w = r.value.write;
   const mismatch = o.orderId !== row.orderId ? "orderId" : (o.head ?? "").toLowerCase() !== str(p.head) ? "head" : o.repo !== p.repo ? "repo"
-    : o.pr !== (p.pr ?? null) ? "pr" : o.step !== "review" ? "step" : null;
+    : o.pr !== (p.pr ?? null) ? "pr" : o.step !== p.step ? "step" : o.taskId !== p.taskId ? "taskId" : writeMismatch(o.step, o.taskId, w, d);
   const claimed = advance(d.db, row.orderId, "asked", "claimed",
-    { wire: { order: o as unknown as Record<string, unknown>, text: r.value.text }, day: localDay(now), ...leaseFields(r.value.lease, now) }, now);
+    { wire: { order: o as unknown as Record<string, unknown>, text: r.value.text, ...(w ? { write: w } : {}) }, day: localDay(now), ...leaseFields(r.value.lease, now) }, now);
   if (mismatch) await release(claimed, "claimed", `完整订单的 ${mismatch} 与挂单摘要不一致`, d);
+}
+
+/** 写单必须带订单分支，且它正是 lend/<任务>-<本机指纹前 4 位>：A 给别的分支名（比如 main）一律不领；审查单不许带 */
+function writeMismatch(step: string, taskId: string, w: { branch: string } | null, d: LendDeps): string | null {
+  if (!isWriteStep(step)) return w ? "write" : null;
+  const fp = d.selfFp();
+  return !w ? "write" : !fp || lendBranch(taskId, fp) !== w.branch ? "branch" : null;
 }
 
 /** 没起过 worker 就退回：记 released（连同要补做的收尾），再告诉 A（not_started）、删目录、写收据 */
@@ -185,13 +212,54 @@ async function submitOrder(row: LendRow, d: LendDeps): Promise<void> {
   else d.log(`${row.orderId} 首条派单是否送到不明（${r.reason}），不重发`);
 }
 
+/** 写单的推送目标：订单分支、基线、工作副本、起点——全部来自 claim 时落的 journal，不看 worker 说什么 */
+function pushTarget(row: LendRow): PushTarget {
+  const o = orderOf(row);
+  const w = row.wire!.write!;
+  return { orderId: row.orderId, repo: str(o?.repo), branch: w.branch, base: w.base, cloneDir: row.dir ?? "", orderHead: str(o?.head) };
+}
+
+/**
+ * 写单交活之后：推送 → 开 / 沿用 PR → 拼好交付正文落 journal（之后原字节重发）。推送 / PR 可重试的失败留到下一轮（都幂等：
+ * 同一 head 再推是空操作，PR 先查同分支再开）；不可重试的（没权限、远端被别人推过、head 不对）停下、告诉 A，交 PM。
+ */
+async function publishWork(row: LendRow, d: LendDeps): Promise<LendRow | null> {
+  const o = orderOf(row);
+  const t = pushTarget(row);
+  const work = row.work!;
+  const stop = async (r: { reason: string; retry: boolean }) => {
+    if (r.retry) return void d.log(`${row.orderId} 推送 / 开 PR 暂未成功（${r.reason}），下轮再试`);
+    await finish(row, "stopped", r.reason, d, true);
+  };
+  const pushed = await d.push.work({ ...t, head: work.head });
+  if (!pushed.ok) return (await stop(pushed), null);
+  const round = typeof o?.round === "number" ? o.round : 0;
+  const body = [`出借 worker（出借方的一次性 agent）提交，台账 ${str(o?.taskId)} 第 ${round} 轮，单号 ${row.orderId}。`, "", "## 摘要", "", work.summary, "",
+    "## 自查", "", work.selfCheck, ""].join("\n");
+  const pr = await d.push.pr({ orderId: row.orderId, repo: t.repo, branch: t.branch, base: t.base, pr: typeof o?.pr === "number" ? o.pr : null,
+    title: `${str(o?.taskId)}：出借${o?.step === "fix" ? "修复" : "实现"}（第 ${round} 轮）`, body });
+  if (!pr.ok) return (await stop(pr), null);
+  const payload = { v: 1, orderId: row.orderId, gen: row.leaseGen,
+    deliver: { v: 1, orderId: row.orderId, head: work.head, evidence: pr.pr ? `https://github.com/${t.repo}/pull/${pr.pr}` : t.branch, summary: work.summary,
+      selfCheck: work.selfCheck },
+    branch: t.branch, pr: pr.pr, session: { id: row.sessionId, family: row.family } };
+  const raw = JSON.stringify(payload);
+  if (Buffer.byteLength(raw) > BODY_MAX_BYTES) return (await stop({ reason: `交付正文超过 ${BODY_MAX_BYTES} 字节`, retry: false }), null);
+  return patchOrder(d.db, row.orderId, ["result_pending"], { payload, payloadSha: payloadSha(raw) }, d.now());
+}
+
 async function forwardResult(row: LendRow, d: LendDeps): Promise<void> {
+  if (row.work && !row.payload) {
+    const published = await publishWork(row, d);
+    if (!published) return;
+    row = published;
+  }
   const raw = JSON.stringify(row.payload);
   if (payloadSha(raw) !== row.payloadSha) return finish(row, "stopped", "journal 里的结论和记下的 sha256 对不上，不发", d, true);
   const { v: _v, ...body } = row.payload as Record<string, unknown>;
   const r = await lendRequest(d.call, row.peer, "result", body);
   if (!r.ok) {
-    if (r.code === "transport" || r.code === "bad_response") return d.log(`转发 ${row.orderId} 的结论暂未成功（${r.code}），下轮原样重发`);
+    if (r.code === "transport" || r.code === "bad_response" || r.code === "unavailable") return d.log(`转发 ${row.orderId} 的结论暂未成功（${r.code}），下轮原样重发`);
     const gone = GONE[r.code];
     return finish(row, gone ?? "stopped", `A 不收结论：${r.code} ${r.error}`, d, !gone);
   }
@@ -204,16 +272,18 @@ async function forwardResult(row: LendRow, d: LendDeps): Promise<void> {
 
 /**
  * 续租；到点才续。A 说单已不归我们 → 停；本机截止已过还没续上 → 自停（心跳过期）。
- * result_pending 例外：结论已落本地，A 可能已经入账、只是回执丢了（A 的 result 按同一 sha256 回旧回执，不看租约）。
- * 这时只停 worker，单留给 forwardResult 原字节重发取回执；A 明确拒收才按码收尾。
+ * result_pending 且交付正文已生成的例外：A 可能已经入账、只是回执丢了（A 的 result 按同一 sha256 回旧回执，不看租约）。
+ * 这时只停 worker，单留给 forwardResult 原字节重发取回执；A 明确拒收才按码收尾。写单的提交还没推送（没有正文）不算例外：
+ * 失了租约就收尾，不再推送、开 PR（撤单 / 收回之后远端不能再多出副作用）。tests/lend-write.test.ts。
  */
 async function heartbeat(row: LendRow, d: LendDeps): Promise<LendRow | null> {
   const now = d.now();
+  const awaitingReceipt = row.state === "result_pending" && row.payload !== null;
   if (row.lastBeatAt === null || now - row.lastBeatAt >= BEAT_MS) {
     const r = await lendRequest(d.call, row.peer, "lease", { orderId: row.orderId, gen: row.leaseGen, action: "renew", reason: null, detail: null });
     const at = d.now();
     if (r.ok && r.value) return patchOrder(d.db, row.orderId, [row.state], leaseFields(r.value, at), at);
-    if (!r.ok && GONE[r.code] && row.state === "result_pending") return stopForResult(row, `续租被拒：${r.code}`, d);
+    if (!r.ok && GONE[r.code] && awaitingReceipt) return stopForResult(row, `续租被拒：${r.code}`, d);
     if (!r.ok && GONE[r.code] && r.code !== "conflict") {
       await finish(row, GONE[r.code], `续租被拒：${r.code}（${r.error}）`, d, false);
       return null;
@@ -221,7 +291,7 @@ async function heartbeat(row: LendRow, d: LendDeps): Promise<LendRow | null> {
     if (!r.ok) d.log(`${row.orderId} 续租失败（${r.code}）`);
   }
   if (row.leaseUntil !== null && d.now() >= row.leaseUntil) {
-    if (row.state === "result_pending") return stopForResult(row, "心跳过期", d);
+    if (awaitingReceipt) return stopForResult(row, "心跳过期", d);
     await finish(row, "stopped", "心跳过期：租约截止前没续上，自停 worker（保留工作副本与 journal）", d, false);
     return null;
   }
@@ -241,8 +311,18 @@ export async function driveLeased(row: LendRow, d: LendDeps): Promise<void> {
   if (!cur) return;
   const o = orderOf(cur);
   if (cur.state === "claimed") {
-    const got = await d.clone({ orderId: cur.orderId, repo: str(o?.repo), pr: typeof o?.pr === "number" ? o.pr : null, head: str(o?.head) });
+    const w = cur.wire?.write;
+    const who = w ? d.identity() : null;
+    if (w && !who) return release(cur, "claimed", "出借人机器没配 git 全局 user.name / user.email：写单的提交要署出借人自己的名字，配好再借", d);
+    const got = await d.clone({ orderId: cur.orderId, repo: str(o?.repo), pr: typeof o?.pr === "number" ? o.pr : null, head: str(o?.head),
+      ...(w && who ? { write: { branch: w.branch, ...who } } : {}) });
     if (!got.ok) return release(cur, "claimed", got.reason, d);
+    if (w) {
+      // 起 worker 之前先用同一套凭据试推：没权限（fork 路径 v1 只检测）就退回，A 那边写租约结束、卡回本机
+      const probe = await d.push.probe({ ...pushTarget({ ...cur, dir: got.dir }), cloneDir: got.dir });
+      if (!probe.ok && probe.retry) return d.log(`${cur.orderId} 试推暂未成功（${probe.reason}），下轮重来`);
+      if (!probe.ok) return release(cur, "claimed", probe.reason, d);
+    }
     advance(d.db, cur.orderId, "claimed", "cloned", { dir: got.dir }, d.now());
   } else if (cur.state === "cloned") {
     await startWorker(cur, d);
@@ -257,7 +337,8 @@ export async function driveLeased(row: LendRow, d: LendDeps): Promise<void> {
     }
     const down = noteLiveness(d.db, cur, await d.worker.alive(cur.agent!), d.now(), d.log);
     if (down) return finish(cur, "stopped", DOWN_REASON[down], d, true);
-    if (d.now() - (cur.startedAt ?? cur.createdAt) > MAX_RUN_MS) return finish(cur, "stopped", `超过 ${MAX_RUN_MS / 3600_000} 小时没交结论`, d, true);
+    const cap = isWriteStep(str(o?.step)) ? MAX_WRITE_RUN_MS : MAX_RUN_MS;
+    if (d.now() - (cur.startedAt ?? cur.createdAt) > cap) return finish(cur, "stopped", `超过 ${cap / 3600_000} 小时没交结论`, d, true);
     if (cur.submit === null) await submitOrder(cur, d);
   } else if (cur.state === "result_pending") {
     await forwardResult(cur, d);

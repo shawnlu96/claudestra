@@ -1,21 +1,32 @@
 /** Narrow CLI entrypoints for durable scheduler facts; no arbitrary stage or owner action is exposed here. */
-import { INTENT_ACTIONS, INTENT_STATUSES, WORKFLOW_MODES, WORKFLOW_TEMPLATES, AUTHOR_FAMILIES } from "../lib/ledger-scheduler.js";
-import { planIntent, setWorkflow, settleIntent } from "../lib/ledger-scheduler-write.js";
+import { INTENT_ACTIONS, INTENT_STATUSES, WORKFLOW_MODES, WORKFLOW_TEMPLATES, AUTHOR_FAMILIES, getIntent } from "../lib/ledger-scheduler.js";
+import { settleIntent } from "../lib/ledger-scheduler-settle.js";
+import { planIntent, setWorkflow } from "../lib/ledger-scheduler-write.js";
 import { resumeAutoWorkflow } from "../lib/ledger-scheduler-resume.js";
 import { bindSchedulerSession, recordSessionRetirement, type SessionRole, type SessionTransport } from "../lib/scheduler-sessions.js";
 import { advanceMergeRun, beginMergeRun, MERGE_RESOLUTIONS, resolveMergeRun, type MergePhase, type MergeResolution } from "../lib/scheduler-merge.js";
-import { getTask, LedgerError } from "../lib/ledger-store.js";
+import { getMeta, getTask, LedgerError } from "../lib/ledger-store.js";
 import { getDeployRun, resolveDeployRun } from "../lib/scheduler-deploy.js";
 import { intFlag } from "./ledger-identity.js";
 import type { LedgerCli } from "./ledger-context.js";
 import type { CommandSpec } from "./ledger-write-cmds.js";
 import { setWorkerKind } from "../lib/worker-kind.js";
+import { schedulerPoolStep } from "../lib/ledger-scheduler-pool.js";
+import { readEffectiveBorrow } from "../lib/scheduler-pool-borrow.js";
+import { readTextSoft, specPathFor } from "../lib/task-spec.js";
+import type { RemoteMode } from "../lib/scheduler-config.js";
 
 const integer = (c: LedgerCli, flag: string): number => {
   const n = intFlag(c.p, flag);
   if (n === undefined || n < 0) throw new LedgerError("invalid", `要带 --${flag} 非负整数`);
   return n;
 };
+
+/** The spec text travels inside the order (the peer cannot read this machine's files); read outside the transaction. */
+function specOf(c: LedgerCli, intentId: string): string | null {
+  const task = getTask(c.db, getIntent(c.db, intentId)?.taskId ?? "");
+  return task ? readTextSoft(specPathFor(task, getMeta(c.db, task.project).docsDir)) : null;
+}
 
 export const SCHEDULER_CMDS: Record<string, CommandSpec> = {
   "workflow-set": {
@@ -79,6 +90,24 @@ export const SCHEDULER_CMDS: Record<string, CommandSpec> = {
       return { ok: true, intent: settleIntent(c.db, c.ctx(), {
         id: c.p.pos[1] ?? "", from: from as (typeof INTENT_STATUSES)[number], to: to as (typeof INTENT_STATUSES)[number],
         receipt: c.p.flags.receipt,
+      }) };
+    },
+  },
+  "scheduler-pool": {
+    valued: ["max-workers", "mode", "roles", "timeout-min"], bools: [],
+    usage: "scheduler-pool <intent-key> --max-workers N --mode off|overflow|prefer --roles review|none --timeout-min N（调度服务专用：挂池 / 同步出借单 / 超时撤回）",
+    async run(c) {
+      const mode = c.need("mode"), roles = c.need("roles");
+      if (!["off", "overflow", "prefer"].includes(mode) || !["review", "none"].includes(roles)) throw new LedgerError("invalid", "--mode / --roles 不认识");
+      const minutes = integer(c, "timeout-min");
+      if (minutes < 1) throw new LedgerError("invalid", "--timeout-min 至少 1");
+      const intent = c.p.pos[1] ?? "", maxWorkers = integer(c, "max-workers");
+      if (maxWorkers > 32) throw new LedgerError("invalid", "--max-workers 要在 0–32");
+      const borrow = await (c.deps.lend?.borrow() ?? readEffectiveBorrow());
+      return { ok: true, ...schedulerPoolStep(c.db, c.ctx(), {
+        intentId: intent, maxWorkers, timeoutMs: minutes * 60_000, borrow,
+        remote: { mode: mode as RemoteMode, roles: roles === "review" ? ["review"] : [], poolTimeoutMin: minutes },
+        spec: specOf(c, intent),
       }) };
     },
   },

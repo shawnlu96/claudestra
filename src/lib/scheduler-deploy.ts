@@ -11,7 +11,7 @@ import { getIntent, getWorkflow } from "./ledger-scheduler.js";
 import { getMeta, LedgerError } from "./ledger-store.js";
 import { insertEvent, tx } from "./ledger-tx.js";
 import { canTransition, nextTaskState } from "./ledger-stages.js";
-import { settleIntent } from "./ledger-scheduler-write.js";
+import { settleIntent } from "./ledger-scheduler-settle.js";
 import { getMergeRun, type MergeResolution } from "./scheduler-merge.js";
 import { DEPLOY_IN_FLIGHT, type DeployPhase } from "./ledger-deploy-schema.js";
 

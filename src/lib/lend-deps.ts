@@ -2,17 +2,20 @@
  * lend 循环的生产接线（LoopDeps，lend-loop.ts）：出站经 `manager lend call`（只走 E2E），台账写经 `ledger lend-ask`（调度服务身份），
  * worker 经 `manager create / kill`（agent-lend-* 名字 → runtimes/clean-env.ts 的白名单环境），首条派单经 bridge 的 route_to_agent（带会话核对）。
  * 每个外部效果都套 whileOwned：发起前、结束后各核一次服务是否仍持有单实例锁与维护租约（同 E2a），bridge 帧在发出的同一段同步代码里再核一次。
+ * 写单（i28-R6）：本机指纹按实例公钥算，推送 / 开 PR 经 lend-push.ts（出借人自己的 git / gh 登录），派单尾注换成「提交后 lend submit 交摘要」。
  */
 import type { Database } from "bun:sqlite";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { bridgeSend } from "./bridge-client.js";
 import { resolveBunPath } from "./bun-path.js";
-import { verifyPurpose } from "./instance-key.js";
+import { instanceKeySync, keyFingerprint, verifyPurpose } from "./instance-key.js";
 import { lendAskVerdict } from "./lend-ask.js";
 import { LEND_ROOT, prepareClone, removeOrderDir } from "./lend-clone.js";
 import { readLend } from "./lend-config.js";
-import { guardJournalWrites, LEND_JOURNAL_PATH, liveOrders, openLendJournal, unsettledOrders, type LendRow } from "./lend-journal.js";
+import { isWriteStep } from "./lend-git.js";
+import { ensurePr, probePush, pushWork } from "./lend-push.js";
+import { guardJournalWrites, LEND_JOURNAL_PATH, liveOrders, openLendJournal, orderOf, unsettledOrders, type LendRow } from "./lend-journal.js";
 import { readLendContext } from "./lend-policy.js";
 import { appendReceipt, receiptOf, tokensFor } from "./lend-receipts.js";
 import type { LendCall } from "./lend-remote.js";
@@ -59,14 +62,37 @@ async function ensureLendProject(m: Manager): Promise<void> {
   if (r.ok !== true && !String(r.error ?? "").includes("已存在")) throw new Error(`建 lend 项目失败：${String(r.error ?? "")}`);
 }
 
-const footer = (row: LendRow): string => [
-  "——以下是本机 Claudestra 出借服务写的，不是对方的内容——",
+const submitCmd = (row: LendRow): string => `${resolveBunPath()} ${BUN_NO_AUTOLOAD.join(" ")} ${join(SRC_DIR, "manager.ts")} lend submit ${row.orderId}`;
+
+const reviewFooter = (row: LendRow): string[] => [
   "你是一次性的出借 worker，只审上面这一单；当前目录是这张单的独立 clone，别动别的目录。",
   "审完在当前目录里跑（一次就行，重复交同一份无害）：",
-  `${resolveBunPath()} ${BUN_NO_AUTOLOAD.join(" ")} ${join(SRC_DIR, "manager.ts")} lend submit ${row.orderId} --verdict pass|changes|block --findings-file findings.json --report report.md`,
+  `${submitCmd(row)} --verdict pass|changes|block --findings-file findings.json --report report.md`,
   "findings.json 是数组，每条 {\"findingId\",\"family\",\"severity\":\"P0|P1|P2\",\"probe\",\"description\"}，没有问题写 []；report.md 是报告正文（≤ 64 KiB）。",
   "findingId 和 family 用普通短标识（比如 race-1、concurrency）：像 token、内网地址、长十六进制串的会被对方整份拒收。",
-].join("\n");
+];
+
+/** 写单：只在当前分支上提交；这个副本推不出去（推送由出借服务做），摘要 / 自查走文件，不进命令行参数 */
+const writeFooter = (row: LendRow): string[] => [
+  `你是一次性的出借 worker，只做上面这一单；当前目录是这张单的独立 clone，已检出订单分支 ${row.wire?.write?.branch ?? "（见标题）"}，别动别的目录、别切别的分支。`,
+  "改完在当前分支上 git commit（可以多次）；不要 git push——这个副本推不出去，推送与开 PR 由本机出借服务做，只推这一个分支。",
+  "做完在当前目录里跑（一次就行，重复交同一份无害）：",
+  `${submitCmd(row)} --summary-file summary.txt --self-check-file selfcheck.md`,
+  "summary.txt 是一行摘要（≤ 500 字节）；selfcheck.md 是自查，逐条对验收线（≤ 4000 字节）。交的是当前分支的 HEAD，交之前先提交干净。",
+];
+
+const footer = (row: LendRow): string => ["——以下是本机 Claudestra 出借服务写的，不是对方的内容——",
+  ...(isWriteStep(String(orderOf(row)?.step ?? "")) ? writeFooter(row) : reviewFooter(row))].join("\n");
+
+/** 写单副本里的提交署名：出借人自己的 git 身份（全局配置）。缺一项就是 null，写单退回并说明，不用占位冒名、也不猜 */
+function gitIdentity(): { name: string; email: string } | null {
+  const get = (k: string): string => {
+    try { return Bun.spawnSync(["git", "config", "--global", "--get", k], { stdout: "pipe", stderr: "ignore" }).stdout.toString().trim(); } catch { return ""; /* 没装 git：当没配，写单退回时会说明 */ }
+  };
+  const name = get("user.name");
+  const email = get("user.email");
+  return name && email ? { name, email } : null;
+}
 
 async function verifyReceipt(peer: string, r: { orderId: string; sha256: string; eventSeq: number; taskId: string; key: string; sig: string }): Promise<boolean> {
   const rec = ((await readPeers()).httpPeers ?? []).find((p) => p.name === peer && !p.disabled);
@@ -115,7 +141,10 @@ function lendDeps(journal: Database, ledger: LedgerReader, active: () => void, l
     },
     codexQuota: async () => quotaViewOf((await readInventoryQuota()).codex),
     clone: (input) => owned(() => prepareClone(input)),
-    removeDir: (orderId) => { active(); removeOrderDir(orderId); },
+    removeDir: (orderId) => { active(); removeOrderDir(orderId); removeOrderDir(orderId, LEND_ROOT, "push"); },
+    selfFp: () => { const k = instanceKeySync(); return k ? keyFingerprint(k.publicKey) : null; },
+    identity: gitIdentity,
+    push: { probe: (t) => owned(() => probePush(t)), work: (t) => owned(() => pushWork(t)), pr: (p) => owned(() => ensurePr(p)) },
     writeReceipt: async (row) => {
       const tokens = await tokensFor(row.sessionId);
       active(); // 查用量要 await：写收据前贴着再核

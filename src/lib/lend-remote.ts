@@ -5,6 +5,7 @@
  * 前提检查（peer 记录钉钥 + E2E、没有代理变量）也在这里：不满足就不发任何请求。tests/lend-remote.test.ts。
  */
 import type { HttpPeer } from "./peers.js";
+import { isBaseBranch, LEND_BRANCH_RE } from "./lend-git.js";
 import { parseOrderWire, type OrderWire } from "./order-wire.js";
 import { createHash } from "node:crypto";
 
@@ -21,7 +22,8 @@ export interface Lease { gen: number; expiresAt: number; ms: number }
 export interface PolledOrder {
   orderId: string; taskId: string; step: string; family: string; repo: string; pr: number | null; head: string; round: number; specRev: number; offeredAt: number;
 }
-interface Claimed { order: OrderWire; text: string; sha256: string; lease: Lease }
+/** 写单（i28-R6）另带订单分支与基线；审查单没有这一项 */
+interface Claimed { order: OrderWire; text: string; sha256: string; lease: Lease; write: { branch: string; base: string } | null }
 export interface Receipt { orderId: string; sha256: string; eventSeq: number; taskId: string; key: string; sig: string }
 
 class Bad extends Error {}
@@ -45,6 +47,7 @@ const REPO = /^[A-Za-z0-9][A-Za-z0-9-]{0,38}\/(?!\.\.?$)[A-Za-z0-9_.-]{1,100}$/;
 const SHA = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i;
 const HEX64 = /^[0-9a-f]{64}$/i;
 const B64URL = /^[A-Za-z0-9_-]{1,200}$/;
+const BASE = /^[\w./-]{1,100}$/;
 
 function lease(v: unknown): Lease {
   const r = obj(v, ["gen", "expiresAt", "ms"], "lease");
@@ -72,13 +75,17 @@ const PARSE = {
     return { orders: (o.orders as unknown[]).map(polled), pollAfterMs: int(o.pollAfterMs, "pollAfterMs", 1) };
   },
   claim: (r: unknown): Claimed => {
-    const o = obj(r, ["ok", "v", "order", "text", "sha256", "lease"], "claim 响应");
+    const has = !!r && typeof r === "object" && "write" in r;
+    const o = obj(r, ["ok", "v", "order", "text", "sha256", "lease", ...(has ? ["write"] : [])], "claim 响应");
     const order = parseOrderWire(o.order);
     if (!order.ok) bad(`order 不合格：${order.error}`);
     const text = typeof o.text === "string" && o.text ? o.text : bad("text 要是非空字符串");
     const sum = str(o.sha256, HEX64, "sha256").toLowerCase();
     if (sha256(text) !== sum) bad("派单全文的 sha256 对不上");
-    return { order: (order as { ok: true; value: OrderWire }).value, text, sha256: sum, lease: lease(o.lease) };
+    const w = has ? obj(o.write, ["branch", "base"], "write") : null;
+    const write = w ? { branch: str(w.branch, LEND_BRANCH_RE, "write.branch"), base: str(w.base, BASE, "write.base") } : null;
+    if (write && !isBaseBranch(write.base)) bad("write.base 不是能用的分支名");
+    return { order: (order as { ok: true; value: OrderWire }).value, text, sha256: sum, lease: lease(o.lease), write };
   },
   lease: (r: unknown): Lease | null => {
     const o = obj(r, ["ok", "v", "lease"], "lease 响应");

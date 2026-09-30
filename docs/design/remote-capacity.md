@@ -40,7 +40,7 @@
   "lend": [ {
     "peer": "team-a",                                 // B 给 A 起的 peer 名（peers.json 里已握手的那条）
     "families": { "codex": 3, "claude": 2 },          // 同时在跑的上限，按模型家族
-    "roles": ["review"],                              // review | write（write 要仓库写权限，见 §4）
+    "roles": ["review"],                              // review | write（write = 接开工 / 修复单，用出借人的 GitHub 登录推 lend/ 分支，见 §4）
     "repos": ["shawnlu96/claudestra"],                // GitHub owner/repo 白名单，只从这里 clone
     "quota": { "ordersPerDay": 10, "tokensPerDay": null },   // tokensPerDay 预留，v1 不执行
     "confirm": "per-order",                           // per-order（缺省）| auto
@@ -151,8 +151,21 @@ interface OrderWire extends WorkOrder {              // taskId / specRev / head 
 | 私有 | **deploy key**（只读，按仓库） | 私钥要放到 B 机器上，泄露面等同上；只限单仓库，但不能按分支/PR 收窄，也不过期 |
 | 私有 | A 签**细粒度 token**（单仓库、contents:read、带过期） | 最小但要 A 发凭据给 B：token 离开 A 就等于交出，违反「不把我方凭据交给对方」，**不推荐** |
 
-写权限（`roles: ["write"]`）更敏感：B 要能推分支、开 PR。v1 不做；做时推荐 B 用**自己的账号 fork**，PR 从 fork 发到 A 的仓库，
-A 零授权、原有合并门槛不变（T46 规矩 4）。私有仓库的授权方式列为 owner 待确认项。
+写权限（`roles: ["write"]`，i28-R6 起做了，取代原来的「v1 不做」）：出借方的 worker 接**开工单**（卡在 build）和**修复单**（卡在 fix）。
+
+- **两边都要开 write**：A 的 `borrow --roles review,write`、B 的 `lend set --roles review,write`；缺省仍只开 review。poll / claim 两侧都按单子种类核角色。
+- **分支固定**：`lend/<任务 id>-<出借方指纹前 4 位>`。A 按钉住的 B 公钥算，B 按自己的公钥再算一遍，对不上不领。开工单从 `--base`（缺省 main）
+  在远端的 head 切出，修复单从卡上的 head 接着改。
+- **推送用出借人自己的 GitHub 登录**，直接推到 A 的仓库（出借人是协作者时）；没有推送权限的，B 在起 worker 之前 dry-run 试推就发现，
+  按 not_started 退回并写明「推到自己 fork 的路径 v1 不支持，只检测」——fork PR 留给后续。
+- **worker 推不出去**：写单的 clone 上锁（`protocol.allow=never`，生效配置里每一条逐协议许可 `protocol.<协议>.allow` 也在副本里盖成 never——全局配置放行的不算数；清空凭据助手、askPass / ssh 指向 false）；推送只由出借服务在另一个目录做，
+  只推订单分支这一条显式 refspec、不 force，非快进就拒。锁是配置不是边界（§5 同一系统用户）。
+- **A 收货**：自己 ls-remote 订单分支，head 逐字相等、卡仍在 build / fix 且轮次没变、查远端期间卡没被改，才在一个事务里记 deliver
+  （actor `<出借方指纹>/<worker>`，负责人记成 peer_agent）、推到 review、签回执；同一单同一 head 重交幂等。
+- **写租约**：一张卡的写代码在合并或 PM `lend-reclaim` 之前留在同一出借方，修复单缺省派回它；派不回去（授权过期、挂 30 分钟没人领、
+  对方没起得来）就撤单、结束租约、通知 PM，卡退回本机。
+
+私有仓库的授权方式仍是 owner 待确认项。
 
 ## 5. 安全边界
 
@@ -205,7 +218,7 @@ sha256) → acked | stopped | cancelled`。B 重启按 journal 续：未 claim �
 |---|---|
 | `lend.json`（lend / borrow）+ CLI | 网页设置页、token 额度执行 |
 | A：`lend/poll · claim · lease · result` 四接口 + `ledger lend-offer / lend-cancel` | 调度器自动挂池子（v2，等阶段 2 打开 autoDispatch） |
-| B：scheduler 服务里的 lend 循环（同 pass、同租约）+ authorize ask + 一次性 Codex worker（独立 worktree、`env -i` 白名单，§5） | write 角色、fork PR、私有仓库授权 |
+| B：scheduler 服务里的 lend 循环（同 pass、同租约）+ authorize ask + 一次性 Codex worker（独立 worktree、`env -i` 白名单，§5） | fork PR（写单 i28-R6 已做，fork 只检测）、私有仓库授权 |
 | 结果写 A 台账 review 事件（家族标 claim） | 远端 Claude worker、多单并发调优 |
 | B 收据 jsonl | 中心服务撮合、中继直连（只留接口，见下） |
 
@@ -229,7 +242,7 @@ A `lend.json` 加 `borrow` → PM 对一张已交付的卡 `ledger lend-offer <T
 | R5 | 双实例沙箱实测（T81 `--lab --pair`）：上限、逐单确认、撤单、离线租约、回执丢失重发、B 重启；scheduler.json 缺失、autoDispatch=false、无 M3、老 peer 非 E2E、fork PR head | R3、R4 | 4h |
 | R6 | 调度器 peer 分支：本机满才挂池子（v2） | R5、阶段 2 autoDispatch | 4h |
 | R7 | M3 合入后 worker 改走 `take_review` / `submit_verdict` MCP，家族/会话由 B 的 M1 填 | R4、M3 | 2h |
-| R8 | 私有仓库授权 + write 角色（fork PR） | owner 定 §4 | 6h |
+| R8 | 私有仓库授权 + fork PR（write 角色本身已由 i28-R6 做了） | owner 定 §4 | 6h |
 | R9 | 出借 worker 硬隔离（独立 OS 用户或容器） | R5 | 6h |
 
 最小切片 = R1–R5（约 27h agent 工作量；R1、R2 可并行，R3 依赖 R1 定稿，R4 与 R3 要联调，R5 在最后）。

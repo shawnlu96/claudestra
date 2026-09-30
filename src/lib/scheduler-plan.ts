@@ -4,6 +4,7 @@ import { resourceKey, resourcesOverlap, type AuthorFamily, type SchedulerIntent,
 import { currentReviewFacts, p1AnyStreak, p1FindingStreak, type ReviewFacts, type ReviewFinding } from "./scheduler-review.js";
 import { FLOW_TEMPLATES, nodeAt, restateGate, templateFor, type FlowNode } from "./scheduler-template.js";
 import { cardWorkerSlots } from "./scheduler-worker-slot.js";
+import { POOL_RECIPIENT, poolTarget, type PoolFacts } from "./scheduler-pool-plan.js";
 
 export interface WorkerRef {
   agent: string;
@@ -44,6 +45,10 @@ export interface PlannerSnapshot {
   reviewDispatches: readonly ReviewDispatchProof[];
   uiGate: OwnerGate;
   screenshotsDigest: string | null;
+  /** Shared-pool facts (i28-R9); absent = never pool (observe cards, CLI replans of later nodes). */
+  pool?: PoolFacts | null;
+  /** Live pool orders of this card no live intent accounts for (scheduler-pool-facts strayPoolOrders); absent = none. */
+  strayPoolOrders?: readonly string[];
 }
 
 interface WorkOrderFacts { reportPath: string; findings: ReviewFinding[]; fallbackWarning: string | null }
@@ -117,7 +122,8 @@ function sessionGate(s: PlannerSnapshot, node: FlowNode, role: "author" | "revie
     if (role === "author" && (session.family !== s.workflow?.authorFamily || (s.task.agent && session.agent !== s.task.agent))) {
       return escalate("author_family", "执行 session 与任务作者或模型家族不一致");
     }
-    const priorReviewer = s.events.find((e) => e.kind === "review");
+    // A pooled round's reviewer is a one-shot peer worker, not a session this card could keep: a local session may follow it.
+    const priorReviewer = s.events.find((e) => e.kind === "review" && !String(e.data.reviewer ?? "").startsWith(POOL_RECIPIENT));
     if (role === "reviewer" && priorReviewer && (priorReviewer.data.reviewerSessionId !== session.sessionId ||
       priorReviewer.data.reviewer !== session.agent)) return escalate("reviewer_replaced", "同卡复验必须沿用原审查 session");
     if (role === "reviewer" && (session.agent === s.author?.agent || session.family === s.workflow?.authorFamily ||
@@ -172,6 +178,11 @@ function fixPackage(s: PlannerSnapshot): WorkOrderFacts | PlannerDecision {
 function reviewDispatch(s: PlannerSnapshot, node: FlowNode): PlannerDecision {
   const prior = liveIntent(s, node, "review");
   if (prior) return prior;
+  // A peer may still hold this review through such an order: a local reviewer now would be a second dispatch of the node.
+  if (s.strayPoolOrders?.length) return escalate("pool_order_open", `池单 ${s.strayPoolOrders.join("，")} 仍在对方手里或待领，先对账`);
+  const pool = poolTarget(s, latestSeq(s.events, s.task));
+  if (pool) return makeIntent(s, node, "review", `挂池：对抗式跨模型审查挂给 ${pool.peer} 的 ${pool.family} worker${pool.rereview ? "（复验，同一 peer）" : ""}`,
+    [taskResource(s)], { recipient: `${POOL_RECIPIENT}${pool.peer}`, reviewMode: FLOW_TEMPLATES[s.workflow!.template].reviewMode });
   const gate = sessionGate(s, node, "reviewer");
   if (gate) return gate;
   const reviewer = s.reviewer as WorkerRef;

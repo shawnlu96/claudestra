@@ -10,7 +10,7 @@ import { bindHash } from "./ask-bind.js";
 import { getAsk, openAskFull, type Ask } from "./ledger-asks.js";
 import { mustTask, type WriteCtx } from "./ledger-checks.js";
 import { getIntent, getWorkflow, type SchedulerIntent } from "./ledger-scheduler.js";
-import { settleIntent } from "./ledger-scheduler-write.js";
+import { settleIntent } from "./ledger-scheduler-settle.js";
 import type { LedgerTask, Stage } from "./ledger-stages.js";
 import { getEventByDedup, LedgerError } from "./ledger-store.js";
 import { tx } from "./ledger-tx.js";

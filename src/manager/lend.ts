@@ -9,9 +9,9 @@ import { output } from "./core.js";
 import { requireOwnerOrMaster } from "./project-guard.js";
 
 const LEND_USAGE =
-  "usage: lend status | lend set <peer名|指纹> [--codex N] [--claude N] --repos owner/repo[,..] [--roles review] " +
+  "usage: lend status | lend set <peer名|指纹> [--codex N] [--claude N] --repos owner/repo[,..] [--roles review[,write]] " +
   "[--orders-per-day N] [--confirm per-order|auto] [--until <ISO>] | lend off [--peer <名>]";
-const BORROW_USAGE = "usage: borrow status | borrow set <peer名|指纹> --projects <id,..> [--roles review] [--max-open N] | borrow off [--peer <名>]";
+const BORROW_USAGE = "usage: borrow status | borrow set <peer名|指纹> --projects <id,..> [--roles review[,write]] [--max-open N] | borrow off [--peer <名>]";
 
 const LEND_FLAGS = ["codex", "claude", "roles", "repos", "orders-per-day", "confirm", "until"];
 const BORROW_FLAGS = ["projects", "roles", "max-open"];
@@ -52,9 +52,12 @@ async function setEntry(kind: "lend" | "borrow", build: (ctx: Ctx) => Built<AnyE
   });
   if (!built.ok) return output({ ok: false, error: built.error });
   const entry = built.entry;
+  const write = entry.roles.includes("write");
   output({ ok: true, [kind]: entry, message: "confirm" in entry
-    ? `已开始向 ${entry.peer} 出借（${entry.confirm === "auto" ? `预先授权到 ${entry.until}：这段时间免逐单确认，每单仍通知你；到期后恢复逐单确认` : "每单等你确认"}）`
-    : `已允许把 ${entry.projects.join("、")} 的单子给 ${entry.peer}：这些项目的 PR 会发给对方机器上的 agent 审（代码、规格与验收原文都会到对方那边）` });
+    ? `已开始向 ${entry.peer} 出借（${entry.confirm === "auto" ? `预先授权到 ${entry.until}：这段时间免逐单确认，每单仍通知你；到期后恢复逐单确认` : "每单等你确认"}）` +
+      (write ? "；含写代码：对方的开工 / 修复单会在你这台机器上改代码，并用你的 GitHub 登录推到对方仓库的 lend/ 分支、开 PR" : "")
+    : `已允许把 ${entry.projects.join("、")} 的单子给 ${entry.peer}：这些项目的 PR 会发给对方机器上的 agent 审（代码、规格与验收原文都会到对方那边）` +
+      (write ? "；含写代码：开工 / 修复单由对方的 agent 写，推到本仓库的 lend/ 分支再走审查" : "") });
 }
 
 async function off(kind: "lend" | "borrow", peer: string | undefined): Promise<void> {

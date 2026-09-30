@@ -14,7 +14,8 @@ export const LEND_JOURNAL_PATH = statePath("lend", "journal.sqlite");
 
 /**
  * asked = 已看到单子、在等 owner 批（auto 模式也先落这一行再 claim）；claimed = A 已把单给我们（带租约代数）；
- * cloned = 工作副本就绪、head 已核；started = worker 会话已建（记 agent / session）；result_pending = 结论已落本地、等 A 的回执。
+ * cloned = 工作副本就绪、head 已核（写单还核过推送权限）；started = worker 会话已建（记 agent / session）；
+ * result_pending = 结论 / 写单的提交已落本地（写单还要推送、开 PR），等 A 的回执。
  * 终态：acked 回执已验；stopped 我方停了（额度 / 登录 / 心跳过期 / 手动）；cancelled A 撤单；released 没起过 worker 就退回（not_started）；
  * declined 没 claim 就放弃（owner 不批 / 过期 / 声明变了）。
  */
@@ -44,8 +45,8 @@ export interface LendRow {
   /** poll 时看到的摘要（taskId / repo / pr / head / step），ask 正文与收据用；完整订单在 claim 之后才有 */
   preview: Record<string, unknown>;
   askId: string | null;
-  /** claim 返回的 { order: OrderWire, text: A 渲染的派单全文 }（text 的 sha256 在 claim 时已核） */
-  wire: { order: Record<string, unknown>; text: string } | null;
+  /** claim 返回的 { order: OrderWire, text: A 渲染的派单全文, write: 写单的订单分支与基线 }（text 的 sha256 在 claim 时已核） */
+  wire: { order: Record<string, unknown>; text: string; write?: { branch: string; base: string } } | null;
   leaseGen: number | null;
   /** 租约截止（毫秒）：最近一次成功续租 / claim 给的；过了它还没续上 = 自停 */
   leaseUntil: number | null;
@@ -59,6 +60,8 @@ export interface LendRow {
   submit: "sending" | "sent" | null;
   payload: Record<string, unknown> | null;
   payloadSha: string | null;
+  /** 写单：worker 交来的 head / 一行摘要 / 自查（lend submit 落的）；推送、开 PR 之后才拼成 payload 发给 A */
+  work: { head: string; summary: string; selfCheck: string } | null;
   receipt: Record<string, unknown> | null;
   reason: string | null;
   /** 终态之后还没做完的外部效果（lend-drive.ts settleOrder）：和终态同一次写入，做完清成 null；非 null 的单每轮补做 */
@@ -80,9 +83,12 @@ const SCHEMA: SchemaSpec = {
   ], (db) => {
     const cols = (db.prepare("PRAGMA table_info(lend_orders)").all() as { name: string }[]).map((c) => c.name);
     if (!cols.includes("settle")) db.prepare("ALTER TABLE lend_orders ADD COLUMN settle TEXT").run();
+  }, (db) => {
+    const cols = (db.prepare("PRAGMA table_info(lend_orders)").all() as { name: string }[]).map((c) => c.name);
+    if (!cols.includes("work")) db.prepare("ALTER TABLE lend_orders ADD COLUMN work TEXT").run();
   }],
   tables: ["lend_orders", "lend_meta"],
-  columns: { lend_orders: ["settle"] },
+  columns: { lend_orders: ["settle", "work"] },
   indexes: { lend_orders: ["lend_orders_state"] },
 };
 
@@ -103,7 +109,7 @@ export function openLendJournal(path = LEND_JOURNAL_PATH): Database {
   return db;
 }
 
-const JSON_COLS = ["preview", "wire", "payload", "receipt", "settle"] as const;
+const JSON_COLS = ["preview", "wire", "payload", "receipt", "settle", "work"] as const;
 
 function toRow(r: Record<string, unknown>): LendRow {
   const out = { ...r } as Record<string, unknown>;
@@ -138,7 +144,7 @@ export function recordAsked(db: Database, o: { orderId: string; peer: string; fp
 type Patch = Partial<Omit<LendRow, "orderId" | "peer" | "fp" | "family" | "state" | "createdAt" | "updatedAt">>;
 
 const PATCH_COLS = ["preview", "askId", "wire", "leaseGen", "leaseUntil", "lastBeatAt", "dir", "agent", "sessionId", "startedAt", "submit", "payload", "payloadSha",
-  "receipt", "reason", "day", "settle"] as const;
+  "receipt", "reason", "day", "settle", "work"] as const;
 
 function patchSql(p: Patch): { sets: string[]; vals: (string | number | null)[] } {
   const sets: string[] = [];

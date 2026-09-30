@@ -39,7 +39,7 @@ export const SCHEDULER_OBSERVE_CMDS: Record<string, CommandSpec> = {
     usage: "scheduler-observe <task> [--max-workers N]（observe 卡：按模板算出下一步并只记一条观察事件，决定没变就不记）",
     async run(c) {
       const max = intFlag(c.p, "max-workers") ?? DEFAULT_MAX_WORKERS;
-      if (max < 1 || max > 32) throw new LedgerError("invalid", "--max-workers 要在 1–32");
+      if (max < 0 || max > 32) throw new LedgerError("invalid", "--max-workers 要在 0–32（0 = 本机不开 worker，i28-R9）");
       const registry = await registryRows(c);
       c.deps.assertLease?.(); // 读 registry 的 await 之后、同步写观察事件之前再核一次调度服务租约
       const r = observeTask(c.db, c.ctx(), c.task(c.p.pos[1]).id, { registry, maxWorkers: max });

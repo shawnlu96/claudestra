@@ -1,34 +1,26 @@
 /** Scheduler-only ledger writes: every decision and resource claim is one compare-and-swap transaction. */
 import type { Database } from "bun:sqlite";
-import { isManager, mustTask, type WriteCtx } from "./ledger-checks.js";
+import { mustTask, type WriteCtx } from "./ledger-checks.js";
 import { blockedBy, depViews } from "./ledger-deps.js";
 import {
-  activationSeq, AUTHOR_FAMILIES, getIntent, getWorkflow, INTENT_ACTIONS, INTENT_STATUSES, resourceKey, resourcesOverlap, taskCreationSeq,
-  WORKFLOW_MODES, WORKFLOW_TEMPLATES, type AuthorFamily, type IntentAction, type IntentStatus, type SchedulerIntent,
+  activationSeq, AUTHOR_FAMILIES, getIntent, getWorkflow, INTENT_ACTIONS, resourceKey, resourcesOverlap, taskCreationSeq,
+  WORKFLOW_MODES, WORKFLOW_TEMPLATES, type AuthorFamily, type IntentAction, type SchedulerIntent,
   type TaskWorkflow, type WorkflowMode, type WorkflowTemplate,
 } from "./ledger-scheduler.js";
 import { getEventByDedup, getMeta, LedgerError, listDeps, listEvents, listTasks } from "./ledger-store.js";
 import { insertEvent, tx } from "./ledger-tx.js";
-import { releaseFinishedCardLeases } from "./ledger-scheduler-lease.js";
+import { closePoolOrders } from "./ledger-scheduler-pool.js";
+import { actorMayConfigure, actorMaySchedule, textOneLine } from "./ledger-scheduler-settle.js";
 import { cardWorkerSlots } from "./scheduler-worker-slot.js";
 import { currentReviewFacts } from "./scheduler-review.js";
+import { poolAckSeq } from "./scheduler-pool-facts.js";
+import { isPoolIntent } from "./scheduler-pool-plan.js";
 import { templateFor } from "./scheduler-template.js";
 import { bindHash, checkAsk } from "./ask-bind.js";
 import { getAsk, ownerAnswered } from "./ledger-asks.js";
 
-export const textOneLine = (value: string, label: string, max: number): string => {
-  const out = value.trim();
-  if (!out || out.length > max || /[\p{Cc}\p{Cf}\u2028\u2029]/u.test(out)) throw new LedgerError("invalid", `${label}要是 1–${max} 字的单行文字`);
-  return out;
-};
 const projectSeq = (db: Database, project: string): number =>
   (db.query("SELECT COALESCE(MAX(seq), 0) AS seq FROM events WHERE project = ?").get(project) as { seq: number }).seq;
-export const actorMayConfigure = (db: Database, actor: string, project: string): boolean => {
-  const meta = getMeta(db, project);
-  return actor !== meta.team?.dispatcher && isManager(db, actor, { project, agent: null });
-};
-const actorMaySchedule = (db: Database, actor: string, project: string): boolean =>
-  actor === "scheduler" || actorMayConfigure(db, actor, project);
 const cardResource = (action: IntentAction, resource: string): boolean => action === "dispatch" && !resource.startsWith("task:");
 
 function requireReviewedMerge(db: Database, task: ReturnType<typeof mustTask>, workflow: TaskWorkflow, node: string, now: number): void {
@@ -43,12 +35,15 @@ function requireReviewedMerge(db: Database, task: ReturnType<typeof mustTask>, w
   const reviewEntry = db.query(`SELECT COALESCE(MAX(seq), 0) AS seq FROM events WHERE target = ? AND kind = 'stage'
     AND json_extract(data, '$.to') = 'review' AND json_extract(data, '$.round') = ?`).get(task.id, task.round) as { seq: number };
   if (!reviewEntry.seq) throw new LedgerError("conflict", "缺本轮 review 阶段进入事件");
-  const prior = db.query(`SELECT 1 FROM scheduler_intents AS i JOIN events AS ack
-    ON ack.dedupKey = 'scheduler:' || i.id || ':submitted' AND ack.seq > i.eventSeq AND ack.seq < ?
-    WHERE i.taskId = ? AND i.action = 'review' AND i.recipient = ? AND i.head = ?
-    AND i.eventSeq > ? AND i.eventSeq < ? AND i.status IN ('submitted','done') LIMIT 1`).get(
-    read.facts.eventSeq, task.id, read.facts.reviewer, read.facts.head, reviewEntry.seq, read.facts.eventSeq,
-  );
+  const sent = db.query(`SELECT * FROM scheduler_intents AS i WHERE i.taskId = ? AND i.action = 'review' AND i.recipient = ? AND i.head = ?
+    AND i.eventSeq > ? AND i.eventSeq < ? AND i.status IN ('submitted','done')`).all(
+    task.id, read.facts.reviewer, read.facts.head, reviewEntry.seq, read.facts.eventSeq,
+  ) as SchedulerIntent[];
+  // Receipt: the `submitted` settle for a local order; for a pool order the peer's claim note (the settle may trail the verdict).
+  const prior = sent.some((i) => {
+    const ack = isPoolIntent(i) ? poolAckSeq(db, i.id) : getEventByDedup(db, `scheduler:${i.id}:submitted`)?.seq ?? null;
+    return ack !== null && ack > i.eventSeq && ack < read.facts.eventSeq;
+  });
   if (!prior) throw new LedgerError("conflict", "合并前缺本轮审查派单回执");
   if (workflow.template === "ui") {
     const digest = task.extra.screenshotsDigest;
@@ -106,6 +101,7 @@ export function setWorkflow(db: Database, ctx: WriteCtx, input: WorkflowInput): 
       throw new LedgerError("conflict", "任务或流程已被改过，先重读再设置", { taskRev: task.rev, workflowRev: existing?.rev ?? 0 });
     }
     const now = ctx.now ?? Date.now();
+    const pool = existing && input.mode === "manual" ? closePoolOrders(db, { ...ctx, now }, task.id, `转人工：${input.reason?.replace(/\s+/g, " ").trim() || "流程设为 manual"}`) : null;
     const pending = existing && input.mode === "manual"
       ? db.query("SELECT id FROM scheduler_intents WHERE taskId = ? AND status = 'pending'").all(task.id) as { id: string }[] : [];
     if (pending.length) {
@@ -123,7 +119,7 @@ export function setWorkflow(db: Database, ctx: WriteCtx, input: WorkflowInput): 
     insertEvent(db, { actor: ctx.actor, now }, {
       project: task.project, target: task.id, kind: "scheduler", text: `流程设为 ${input.mode}`,
       data: { op: "workflow", ...data, workflowRev: workflow.rev, specRev: task.specRev, cancelledIntents: pending.map((p) => p.id),
-        ...(takeover ? { takeover: textOneLine(input.reason as string, "接管原因", 600), manual: true } : {}) },
+        ...(pool && (pool.withdrawn.length || pool.stray.length) ? { poolOrders: pool } : {}), ...(takeover ? { takeover: textOneLine(input.reason as string, "接管原因", 600), manual: true } : {}) },
     }, false);
     return { workflow, duplicate: false };
   });
@@ -213,38 +209,6 @@ export function planIntent(db: Database, ctx: WriteCtx, input: PlanIntentInput):
     }, true);
     db.prepare("UPDATE scheduler_intents SET eventSeq = ? WHERE id = ?").run(event.seq, id);
     return { intent: getIntent(db, id) as SchedulerIntent, duplicate: false };
-  });
-}
-
-const NEXT: Record<IntentStatus, readonly IntentStatus[]> = {
-  pending: ["submitted", "cancelled", "unknown"], submitted: ["done", "unknown", "cancelled"],
-  done: [], unknown: ["done", "cancelled"], cancelled: [],
-};
-
-/** A timeout only marks unknown; resources stay claimed until reconciliation or explicit cancellation. */
-export function settleIntent(db: Database, ctx: WriteCtx, input: { id: string; from: IntentStatus; to: IntentStatus; receipt?: string }): SchedulerIntent {
-  return tx(db, () => {
-    const intent = getIntent(db, input.id);
-    if (!intent) throw new LedgerError("not_found", "没有这个调度意图");
-    if (!actorMaySchedule(db, ctx.actor, intent.project)) throw new LedgerError("forbidden", "只有调度服务或项目 PM / master / owner 能结算调度意图");
-    if (input.from === "unknown" && (ctx.actor === "scheduler" || !input.receipt?.trim())) {
-      throw new LedgerError("forbidden", "结果不明的意图只有 PM 凭外部核对回执能结算");
-    }
-    if (!INTENT_STATUSES.includes(input.to) || !NEXT[input.from]?.includes(input.to) || intent.status !== input.from) {
-      throw new LedgerError("conflict", `调度意图当前是 ${intent.status}，不能 ${input.from}→${input.to}`);
-    }
-    const now = ctx.now ?? Date.now();
-    const receipt = input.receipt ? textOneLine(input.receipt, "回执", 600) : intent.receipt;
-    db.prepare("UPDATE scheduler_intents SET status = ?, receipt = ?, attempts = attempts + ?, updatedAt = ? WHERE id = ?")
-      .run(input.to, receipt, input.to === "submitted" ? 1 : 0, now, input.id);
-    if (input.to === "done" || input.to === "cancelled") db.prepare("DELETE FROM scheduler_resources WHERE intentId = ? AND scope = 'intent'").run(input.id);
-    releaseFinishedCardLeases(db, intent.taskId);
-    insertEvent(db, { actor: ctx.actor, now, dedupKey: `scheduler:${input.id}:${input.to}` }, {
-      project: intent.project, target: intent.taskId, kind: "scheduler", text: `调度意图 ${input.to}`,
-      data: { op: "settle", id: input.id, from: input.from, to: input.to, receipt,
-        ...(ctx.actor === "scheduler" ? {} : { manual: true }) },
-    }, true);
-    return getIntent(db, input.id) as SchedulerIntent;
   });
 }
 
