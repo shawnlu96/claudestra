@@ -236,10 +236,15 @@ export const codexResumeText = (hitAt: number): string => t(
     + `(your turn at ${hhmm(hitAt)} hit the usage limit). If nothing is left, just end_turn.`,
 );
 
-/** 给在等它答复、收到过 ⛔ 的 caller */
+/**
+ * 给在等它答复、收到过 ⛔ 的 caller。Codex 的 ⛔ 那一轮照常结算（⛔ 当答复推给了 caller，bridge/stop-settle.ts），回程已经没了：
+ * 它接着做完不会自动推回，要结果得再问一次——照实说，别让 caller 干等
+ */
 export const codexCallerText = (agents: string[]): string => t(
-  `[ℹ️ bridge] ${agents.join("、")} 的 Codex 额度已恢复，bridge 已让它接着做被打断的任务；回程还留着，答复到了照常推给你，不用重发。`,
-  `[ℹ️ bridge] Codex usage is back for ${agents.join(", ")}; bridge told it to continue the interrupted task. Your reply slot is kept — no need to resend.`,
+  `[ℹ️ bridge] ${agents.join("、")} 的 Codex 额度已恢复，bridge 已让它接着做被打断的任务。之前推给你的 ⛔ 那一轮已结算，`
+    + "它做完不会自动推回给你；还需要它的结果就再问它一次。",
+  `[ℹ️ bridge] Codex usage is back for ${agents.join(", ")}; bridge told it to continue the interrupted task. The ⛔ turn you got was already settled, `
+    + "so its result will not be pushed back automatically — ask again if you still need it.",
 );
 
 const VIA_TEXT: Record<CodexExitVia, [string, string]> = {
