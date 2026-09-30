@@ -237,7 +237,8 @@ function shipStalled(ts: readonly TaskFacts[], frozen: boolean, unfrozenAt: numb
 function mergeUnknown(runs: NonNullable<AuditSnapshot["mergeUnknown"]>, emit: Emit): void {
   for (const r of runs) {
     emit({ rule: "merge_unknown", taskId: r.taskId, since: r.since, keyParts: [r.intentId],
-      detail: `${r.taskId} 自动合并结果不明（结清前挡 update）：${r.reason.slice(0, 200)}`,
+      detail: r.reason.startsWith("部署：") ? `${r.taskId} 自动部署结果不明（部署进程已确认不在，不挡 update）：${r.reason.slice(3, 203)}`
+        : `${r.taskId} 自动合并结果不明（结清前挡 update）：${r.reason.slice(0, 200)}`,
       suggestion: `核对 PR 后 ledger scheduler-merge-resolve ${r.intentId} --outcome done|failed|cancelled --receipt <证据>，再 unfreeze` });
   }
 }

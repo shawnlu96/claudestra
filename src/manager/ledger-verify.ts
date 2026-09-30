@@ -23,6 +23,8 @@ import { recordVerify } from "../lib/ledger-write.js";
 import { dirKey } from "../lib/project-dirs.js";
 import { normalizeDir, resolveProjectForRealDir } from "../lib/projects.js";
 import { REPO_ROOT } from "../lib/repo-root.js";
+import { readSchedulerConfig } from "../lib/scheduler-config.js";
+import { schedulerCanVerify, schedulerVerifyRepo } from "../lib/scheduler-verify-gate.js";
 import type { LedgerCli, Result } from "./ledger-context.js";
 import type { CommandSpec } from "./ledger-write-cmds.js";
 
@@ -194,7 +196,9 @@ function replayed(c: LedgerCli, task: LedgerTask): Result | null {
 async function verify(c: LedgerCli): Promise<Result> {
   const task = c.task(c.p.pos[1]);
   const dryRun = c.p.bools.has("dry-run");
-  if (dryRun) c.requireOwnOrManager(task, "看完成检查单");
+  if (c.deps.actor === "scheduler") {
+    if (c.p.flags.waive || !schedulerCanVerify(c.db, task.id, c.p.flags.dedup)) throw new LedgerError("forbidden", "调度服务只可核对自己部署过的本卡，不可豁免检查");
+  } else if (dryRun) c.requireOwnOrManager(task, "看完成检查单");
   else c.requireManager(task.project, "跑完成检查");
   const dup = dryRun ? null : replayed(c, task);
   if (dup) return dup;
@@ -202,7 +206,9 @@ async function verify(c: LedgerCli): Promise<Result> {
     throw new LedgerError("invalid", `任务 ${task.id} 在 ${task.stage}，不在 live，不能进 verified；只看检查结果用 --dry-run`, { stage: task.stage });
   }
   const waivers = parseWaivers(c);
-  const fd: FactsDeps = c.deps.factsDeps?.() ?? realFactsDeps(REPO_ROOT);
+  const repo = c.deps.actor === "scheduler" ? schedulerVerifyRepo(task.project, readSchedulerConfig) : REPO_ROOT;
+  if (!repo) throw new LedgerError("conflict", `调度配置里项目 ${task.project} 没配自动部署`);
+  const fd: FactsDeps = c.deps.factsDeps?.() ?? realFactsDeps(repo);
   const evidence = c.p.flags.evidence ?? null;
   const { plan: pl, prStage, note } = await plan(c, fd, task);
   const facts = await collectVerifyFacts(fd, { prStage, probes: pl.probes, evidence, taskBranch: task.branch });
