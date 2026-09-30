@@ -19,7 +19,7 @@ import {
   probeTuiContract,
 } from "../tmux-helper.js";
 import { isAutoConfirmableModal } from "../modal-confirm.js";
-import { belowTrustLeftover, looksLikeTrustPrompt, TRUST_CAPTURE_LINES, trustPromptKey, trustPromptMoves, trustRefusal } from "../trust-prompt.js";
+import { belowTrustLeftover, looksLikeTrustPrompt, modalFooterAtBottom, TRUST_CAPTURE_LINES, trustPromptKey, trustPromptMoves, trustRefusal } from "../trust-prompt.js";
 import { lastUserTextOf } from "./shared.js";
 import { roleLaunch } from "../team-roles.js";
 import type {
@@ -265,14 +265,16 @@ export const claudeCodeAdapter: ManagedRuntimeAdapter = {
       const trustMoves = full ? trustPromptMoves(full) : null;
       if (trustMoves !== null) {
         trustSeen = true;
+        trustUnclear = 0;
         const refusal = trustRefusal(full, realPath(budget.cwd), realPath(homedir())!, { resolve: (p) => realPath(p)! });
         if (refusal) return { ready: false, reason: "blocked-dialog", detail: refusal, recoveredFullSession: false };
         await win.sendKey(trustPromptKey(trustMoves));
         await win.sleep(trustMoves === 0 ? 1000 : 300);
         continue;
       }
-      // 像信任框却认不全（带编号、文案变了、叠着别的框）：一个键都不发，连着几轮（约 3 秒，排除正在画）还这样就直接报，不空等满预算
-      trustUnclear = full ? trustUnclear + 1 : 0;
+      // 像信任框却认不全（带编号、文案变了、叠着别的框）：一个键都不发，连着几轮（约 3 秒，排除正在画）还这样就直接报，不空等满预算。
+      // 只数屏幕底部真是一个框的轮次：restart 复用旧窗口时旧 CC 最后一帧里的信任框文字底下还有 shell，新 CC 画得再慢也不算
+      trustUnclear = full && modalFooterAtBottom(full) ? trustUnclear + 1 : 0;
       if (trustUnclear >= TRUST_UNCLEAR_ROUNDS) {
         return { ready: false, reason: "blocked-dialog", detail: TRUST_UNCLEAR_DETAIL, recoveredFullSession: false };
       }

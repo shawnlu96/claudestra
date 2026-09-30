@@ -268,6 +268,20 @@ describe("claude-code waitReady：信任弹窗", () => {
     }
   });
 
+  test("restart 复用旧窗口：旧 CC 最后一帧里有信任框文字、新 CC 画得慢，不误报被挡住（审查 r3 P2-1）", async () => {
+    // 旧 agent 在对话里贴过信任框（行首特征行都在），退出后 shell 上敲了新命令；新 CC 过了十几轮才画出来
+    const stale = ["⏺ 实抓的框是这样：", " Accessing workspace:", "", ` ${dir}`, " Quick safety check: Is this a project you created",
+      " ❯ 1. No, exit", "   2. Yes, I trust this folder", "", "user@host repo % claude --resume 0000 --dangerously-skip-permissions"].join("\n");
+    for (const slow of [8, 20]) {
+      const w = ccWindow(dir);
+      let rounds = 0;
+      w.win.capture = async (l) => (l === 10 && rounds++, rounds > slow ? READY : stale);
+      expect(looksLikeTrustPrompt(stale)).toBe(true);
+      expect(await cc.waitReady(w.win, budget(dir))).toMatchObject({ ready: true });
+      expect(w.keys).toEqual([]);
+    }
+  });
+
   test("旧信任框残影下面弹出 effort 框：照常按 Enter 过去，不被残影挡住（审查 r2 P1-2）", async () => {
     const w = ccWindow(dir);
     let passed = false;

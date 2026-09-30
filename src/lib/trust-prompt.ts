@@ -16,6 +16,8 @@ const TRUST_OPTION_RE = /^\s*(❯)?\s*(No, exit|Yes, I trust this folder)\s*$/i;
 const TRUST_HINT_RE = /^\s*(?:❯\s*)?(?:\d+[.)]\s*)?(?:Yes, I trust this folder|Accessing workspace:|Quick safety check\b)/i;
 /** 弹窗块里出现这些 = 叠着别的框（Bypass 首启框、编号菜单、另一个确认尾注），不是干净的信任框 */
 const FOREIGN_RE = /Enter to confirm|Accessing workspace|Bypass Permissions|WARNING|Yes, I accept|^\s*(❯\s*)?\d+\.\s/i;
+/** 弹框尾注（信任框、effort 框、Bypass 首启框都是这一行；文案改过的版本至少还留着其中一半） */
+const MODAL_FOOTER_RE = /Enter to confirm|Esc to cancel/i;
 /** 截整个弹窗要的行数（弹窗约 17 行，给长路径折行留余量） */
 export const TRUST_CAPTURE_LINES = 40;
 
@@ -32,7 +34,12 @@ function trimTrailingBlank(pane: string): string[] {
  */
 export function activeModalView(pane: string): string {
   const lines = trimTrailingBlank(pane);
-  return lines.slice(lines.slice(0, -1).findLastIndex((l) => /Enter to confirm|Esc to cancel/i.test(l)) + 1).join("\n");
+  return lines.slice(lines.slice(0, -1).findLastIndex((l) => MODAL_FOOTER_RE.test(l)) + 1).join("\n");
+}
+
+/** 最后一个非空行是弹框尾注 = 屏幕底部此刻真有一个框。restart 复用旧窗口时旧 CC 最后一帧里的信任框文字不满足它（底下还有 shell / 新命令行） */
+export function modalFooterAtBottom(pane: string): boolean {
+  return MODAL_FOOTER_RE.test(trimTrailingBlank(pane).at(-1) ?? "");
 }
 
 function activeRegion(pane: string): string[] {
