@@ -11,6 +11,7 @@
  */
 import { ATTACH_DICT } from "./i18n-dict-attach";
 import { TOOLS_DICT } from "./i18n-dict-tools";
+import { DELIVERY_DICT } from "./i18n-dict-delivery";
 import { BOUNDARY_DICT } from "./i18n-dict-boundary";
 import { COLLAB_DICT } from "./i18n-dict-collab";
 import { LEDGER_DICT } from "./i18n-dict-ledger";
@@ -25,7 +26,7 @@ import { TALK_DICT } from "./i18n-dict-talk";
 import { RELAY_DICT } from "./i18n-dict-relay";
 
 export const DICT: Record<string, string> = {
-  ...LEDGER_DICT, ...COLLAB_DICT, ...BOUNDARY_DICT, ...ATTACH_DICT, ...TOOLS_DICT, ...MEDIA_DICT, ...TALK_DICT,
+  ...LEDGER_DICT, ...COLLAB_DICT, ...BOUNDARY_DICT, ...ATTACH_DICT, ...TOOLS_DICT, ...MEDIA_DICT, ...TALK_DICT, ...DELIVERY_DICT,
   ...QUOTA_DICT, // 订阅额度卡片组与开关（lib/i18n-dict-quota.ts）
   ...FLEET_DICT, // 批量管理面板与 low-priority 徽章（lib/i18n-dict-fleet.ts）
   ...UPDATE_DICT, // 更新提示横幅（lib/i18n-dict-update.ts）
@@ -911,9 +912,6 @@ export const DICT: Record<string, string> = {
   "待兑换的邀请": "Pending invites",
   "撤销": "Revoke",
   "有效期至": "Valid until",
-  "未送达": "Not delivered",
-  "押着，送达后出现在对话里": "Held — it shows up in the chat once delivered",
-  "重新发送": "Resend",
   "iOS 键盘修正（实验）": "iOS keyboard fix (experimental)",
   "开发者模式": "Developer mode",
   "右下角出现调试面板：帧率 / 帧间隔 / 提交突发 / DOM 与消息计数 / 视口实测值 / 最近事件。URL 加 ?dev=1 也能打开。":

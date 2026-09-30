@@ -155,6 +155,8 @@ export interface ChatMessage {
   failed?: boolean;
   /** bridge 押住了（额度闸 / 目标停在额度菜单，features/quota-wall/held-send.ts）：一押可能一两天，保全不按 30 分钟丢 */
   held?: boolean;
+  /** bridge 押在对方这一轮之后（回合中 / 压缩中 / 不在线，chat_held，features/chat/held-echo.ts）：送达或作罢即摘；一轮可以跑几小时，同样不按 30 分钟丢 */
+  queued?: boolean;
 }
 
 export interface AgentSession {

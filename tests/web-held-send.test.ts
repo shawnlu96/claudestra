@@ -43,7 +43,7 @@ describe("押住的发送", () => {
     const view = survivingPending(s.messages, [{ id: "h1", role: "assistant", content: "之前的回复" }], 60_000);
     expect(view.map((m) => [m.id, m.held])).toEqual([["l1", true]]); // 系统说明行不在了，押着的气泡还在、还带 held
     const src = readFileSync(join(import.meta.dir, "../web/features/chat/components/message-list.tsx"), "utf8");
-    expect(src).toContain("{m.held && !m.failed && <HeldMark />}");
+    expect(src).toContain("{(m.held || m.queued) && !m.failed && <HeldMark queued={!m.held} />}");
     expect(readFileSync(join(import.meta.dir, "../web/features/quota-wall/held-mark.tsx"), "utf8")).not.toMatch(/额度|usage|limit/i);
   });
 });

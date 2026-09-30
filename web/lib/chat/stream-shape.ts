@@ -3,7 +3,7 @@
  * （tests/web-stream-shape.test.ts）。事件映射：
  *   agent_status thinking → status:running；done → done（trigger=interrupt → interrupted；bgPending 透传）
  *   tool_start → tool(running)；tool_done → tool-state；assistant_text → text；reply_pending → replying
- *   chat_message(in, 用户来源) → user-in；chat_message(out) → reply（组件 / 附件透传）
+ *   chat_message(in, 用户来源) → user-in；chat_held（本人的发言押着 / 作罢）→ user-in + held；chat_message(out) → reply（组件 / 附件透传）
  *   question → ask；question_cleared → ask-cleared；auto_deny / session_anomaly → 醒目系统文本；bg_task_* → bg-*
  *   compact_progress / compact_done / turn_duration / thinking_telemetry → 对应事件；其余不消费（null）
  */
@@ -156,6 +156,10 @@ export function translate(evt: BridgeEvent, lang: Lang, selfIds: ReadonlySet<str
       return { t: "replying" };
     case "chat_message":
       return chatMessage(d, selfIds);
+    case "chat_held": { // 人发的消息押着 / 作罢（bridge/held-web.ts）：负载同入站镜像，按同一套回声对账落到气泡上；外源的回声不去重，标了会多画一条
+      const e = chatMessage({ ...d, direction: "in" }, selfIds);
+      return e?.t === "user-in" && !e.from && (d.state === "queued" || d.state === "dropped") ? { ...e, held: d.state } : null;
+    }
     case "question":
       return { t: "ask", id: `auq-${evt.seq}`, questions: mapAuqQuestions(d.questions) };
     case "question_cleared":
