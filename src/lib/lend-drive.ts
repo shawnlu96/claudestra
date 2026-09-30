@@ -247,7 +247,8 @@ export async function driveLeased(row: LendRow, d: LendDeps): Promise<void> {
   } else if (cur.state === "cloned") {
     await startWorker(cur, d);
   } else if (cur.state === "started") {
-    if (cur.submit === null) return submitOrder(cur, d);
+    // 失败 / 存活 / 运行上限对 started 的每种 submit 都先查：首条派单一直被拒送时 submit 停在 null，
+    // 放在派单后面就一轮都查不到，worker 登录失败也照样续租占位（i28-R5a r1 P1-3）
     const failed = d.failure(cur.agent!);
     if (failed) {
       if (failed.kind === "quota") pauseForQuota(d.db, cur.orderId, await d.codexQuota(), d.now(), d.log);
@@ -257,6 +258,7 @@ export async function driveLeased(row: LendRow, d: LendDeps): Promise<void> {
     const down = noteLiveness(d.db, cur, await d.worker.alive(cur.agent!), d.now(), d.log);
     if (down) return finish(cur, "stopped", DOWN_REASON[down], d, true);
     if (d.now() - (cur.startedAt ?? cur.createdAt) > MAX_RUN_MS) return finish(cur, "stopped", `超过 ${MAX_RUN_MS / 3600_000} 小时没交结论`, d, true);
+    if (cur.submit === null) await submitOrder(cur, d);
   } else if (cur.state === "result_pending") {
     await forwardResult(cur, d);
   }

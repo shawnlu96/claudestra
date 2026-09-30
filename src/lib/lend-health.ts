@@ -1,9 +1,10 @@
 /**
  * 出借 worker 的健康判定（i28-R5a）：lend-drive 对 started 的单每轮调一次，这里只做判定与 journal meta 记账，停 worker 由 lend-drive 执行。
- * - 存活：一次否定只记下（meta `alive:<orderId>`，重启不丢），隔 ≥ MISS_GAP_MS 的下一轮仍否定才判死；running / unknown 清零。
+ * - 存活：一次否定只记下（meta `alive:<orderId>`，带 agent / session / leaseGen，重启不丢），隔 ≥ MISS_GAP_MS 的下一轮、同一身份仍否定才判死；
+ *   running / unknown 清零，身份变了按第一次算。
  *   一次读失败曾让正在审查的 worker 被当成「窗口没了」杀掉（ledger/reviews/i28-R5a-rootcause.md），所以单次否定不算数。
  * - 撞额度 / 登录失败：认 bridge 为这个 worker 开的 Codex 运行时卡（scheduler-auto-ports codexFailure 同一信号）；撞额度的同时
- *   本机暂停借单（meta `pause:codex`），到 Codex 额度窗口的重置时刻，读不到就 PAUSE_FALLBACK_MS；之后观测到额度不满就提前恢复。
+ *   本机暂停借单（meta `pause:codex`），到 Codex 额度窗口的重置时刻，读不到就 PAUSE_FALLBACK_MS；之后观测到每个窗口都明确不满才提前恢复。
  * tests/lend-health.test.ts、tests/lend-loop.test.ts。
  */
 import type { Database } from "bun:sqlite";
@@ -30,17 +31,22 @@ function readJson<T>(db: Database, key: string): T | null {
   try { return JSON.parse(v) as T; } catch { return null; /* 坏值按没有：最坏多等一轮 / 少暂停一次，不会误判死 */ }
 }
 
-/** 记一次存活探测；返回确认判死的种类（连续第二次否定），否则 null。每次否定、每次判死都打一行日志 */
+interface Miss { at: number; kind: WorkerDown; agent: string | null; sessionId: string | null; leaseGen: number }
+
+/** 记一次存活探测；返回确认判死的种类（同一身份连续第二次否定），否则 null。每次否定、每次判死都打一行日志 */
 export function noteLiveness(db: Database, row: LendRow, v: WorkerLiveness, now: number, log: (m: string) => void): WorkerDown | null {
   const key = aliveKey(row.orderId);
-  const prev = readJson<{ at: number; kind: WorkerDown }>(db, key);
-  const who = `agent ${row.agent ?? "?"}，session ${row.sessionId ?? "?"}，gen ${row.leaseGen}`;
+  const id = { agent: row.agent ?? null, sessionId: row.sessionId ?? null, leaseGen: row.leaseGen };
+  const last = readJson<Miss>(db, key);
+  // 上次否定记的是别的 worker / 会话 / 租约代：不是同一个东西的第二次，按第一次算（i28-R5a r1 P2-1）
+  const prev = last && last.agent === id.agent && last.sessionId === id.sessionId && last.leaseGen === id.leaseGen ? last : null;
+  const who = `agent ${id.agent ?? "?"}，session ${id.sessionId ?? "?"}，gen ${id.leaseGen}`;
   if (v === "running" || v === "unknown") {
-    if (prev) setMeta(db, key, ""), log(`${row.orderId} 存活探测恢复（${v === "running" ? "宿主在" : "读不到，按不知道"}），清掉上次的否定（${who}）`);
+    if (last) setMeta(db, key, ""), log(`${row.orderId} 存活探测恢复（${v === "running" ? "宿主在" : "读不到，按不知道"}），清掉上次的否定（${who}）`);
     return null;
   }
   if (!prev) {
-    setMeta(db, key, JSON.stringify({ at: now, kind: v }));
+    setMeta(db, key, JSON.stringify({ at: now, kind: v, ...id } satisfies Miss));
     log(`${row.orderId} 存活探测否定 1/2：${LABEL[v]}，下一轮再看（${who}）`);
     return null;
   }
@@ -56,14 +62,20 @@ export function failureReason(f: CodexFailureSeen): string {
   return f.kind === "quota" ? `worker 撞了 Codex 额度，没交结论：${f.message}` : `worker 的 Codex 没登录或登录失效，没交结论：${f.message}`;
 }
 
-/** Codex 额度此刻的样子：full = 有窗口用满且没过重置时刻；null = 不知道 */
+/** Codex 额度此刻的样子：full = 有窗口用满且没过重置时刻；false = 每个窗口都明确没满；null = 不知道 */
 export interface QuotaView { observedAt: number | null; full: boolean | null; resetsAt: number | null }
 
+/**
+ * 顶层 known 只说明至少一个窗口有数（ai-quota fromEntry），别的窗口可能没数。没数的窗口可能正是挡住我们的那个，
+ * 所以没有已知满窗时，只要有窗口没数（且没过重置时刻）就给 null，不能当成「不满」提前恢复借单（i28-R5a r1 P1-2）。
+ */
 export function quotaViewOf(q: InventoryQuota): QuotaView {
-  if (q.status !== "known") return { observedAt: q.observedAt, full: null, resetsAt: null };
+  if (q.status !== "known" || !q.windows.length) return { observedAt: q.observedAt, full: null, resetsAt: null };
   const full = q.windows.filter((w) => w.usedPct !== null && w.usedPct >= 100 && !w.resetPassed);
   const resets = full.map((w) => w.resetsAtMs).filter((t): t is number => t !== null);
-  return { observedAt: q.observedAt, full: full.length > 0, resetsAt: resets.length ? Math.max(...resets) : null };
+  if (full.length) return { observedAt: q.observedAt, full: true, resetsAt: resets.length ? Math.max(...resets) : null };
+  const unknown = q.windows.some((w) => w.usedPct === null && !w.resetPassed);
+  return { observedAt: q.observedAt, full: unknown ? null : false, resetsAt: null };
 }
 
 interface Pause { at: number; until: number; orderId: string }

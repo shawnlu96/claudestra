@@ -4,7 +4,7 @@
  */
 import { afterEach, describe, expect, test } from "bun:test";
 import { workerName } from "../src/lib/lend-drive.js";
-import { DOWN_REASON, MISS_GAP_MS, PAUSE_FALLBACK_MS, quotaViewOf } from "../src/lib/lend-health.js";
+import { DOWN_REASON, MISS_GAP_MS, noteLiveness, PAUSE_FALLBACK_MS, quotaViewOf } from "../src/lib/lend-health.js";
 import { advance, getMeta, getOrder, recordAsked } from "../src/lib/lend-journal.js";
 import { acpHostVerdict, defaultIo, probeAcpWorker, type LivenessIo } from "../src/lib/worker-liveness.js";
 import { FP, harness, polled, sha, toStarted } from "./lend-harness.js";
@@ -94,6 +94,18 @@ describe("i28-R5a 存活：两次否定才判死", () => {
     expect(getOrder(h.db, "o1")!.state).toBe("stopped");
   });
 
+  test("换 session / leaseGen / agent 后，上一代留下的否定不算：新身份的第一次否定是 1/2（r1 P2-1）", async () => {
+    const h = harness();
+    await toStarted(h);
+    const row = getOrder(h.db, "o1")!;
+    let t = h.d.now();
+    expect(noteLiveness(h.db, row, "no_host", t, h.d.log)).toBeNull();
+    for (const next of [{ ...row, sessionId: "thr-new" }, { ...row, sessionId: "thr-new", leaseGen: 2 }, { ...row, sessionId: "thr-new", leaseGen: 2, agent: "agent-lend-x" }]) {
+      expect(noteLiveness(h.db, next, "no_host", (t += MISS_GAP_MS), h.d.log)).toBeNull();
+    }
+    expect(noteLiveness(h.db, { ...row, sessionId: "thr-new", leaseGen: 2, agent: "agent-lend-x" }, "no_host", (t += MISS_GAP_MS), h.d.log)).toBe("no_host");
+  });
+
   test("result_pending 失租：窗口已不在就不再调 kill", async () => {
     const h = harness();
     await toStarted(h);
@@ -168,6 +180,36 @@ describe("i28-R5a Codex 撞额度 / 登录失败", () => {
     expect(h.log.closedAsks).toEqual([W]);
   });
 
+  for (const kind of ["auth", "quota"] as const) {
+    test(`首条派单一直被明确拒送（submit 停在 null）时撞${kind === "auth" ? "登录失败" : "额度"}：当轮就报 stopped，不再续租占位（r1 P1-3）`, async () => {
+      const h = harness();
+      await h.tick();
+      h.asks.set("ask-o1", "approved");
+      h.d.worker.send = async () => ({ ok: false, delivered: false, reason: "bridge unavailable" });
+      for (let i = 0; i < 4; i++) await h.tick(); // claim → clone → start → 派单被拒
+      expect(getOrder(h.db, "o1")).toMatchObject({ state: "started", submit: null });
+      h.failures.set(W, { kind, askId: "ask_f", message: "x" });
+      h.advanceTime(60_000);
+      await h.tick();
+      expect(getOrder(h.db, "o1")!.state).toBe("stopped");
+      expect(h.log.killed).toEqual([W]);
+      expect(h.log.closedAsks).toEqual([W]);
+    });
+  }
+
+  test("首条派单一直被拒送、worker 已死：存活探测照样两轮判死（不再被派单早退绕过）", async () => {
+    const h = harness();
+    await h.tick();
+    h.asks.set("ask-o1", "approved");
+    h.d.worker.send = async () => ({ ok: false, delivered: false, reason: "bridge unavailable" });
+    for (let i = 0; i < 4; i++) await h.tick();
+    h.liveness.set(W, "no_host");
+    await h.tick();
+    h.advanceTime(MISS_GAP_MS);
+    await h.tick();
+    expect(getOrder(h.db, "o1")).toMatchObject({ state: "stopped", reason: DOWN_REASON.no_host });
+  });
+
   test("关卡失败：留着收尾，下一轮再关，关成才写收据", async () => {
     const h = harness();
     await toStarted(h);
@@ -189,6 +231,29 @@ describe("i28-R5a Codex 撞额度 / 登录失败", () => {
       .toEqual({ observedAt: 5, full: true, resetsAt: 20 });
     expect(quotaViewOf({ status: "known", source: "live", observedAt: 5, plan: null, reason: null, windows: [w(99, 10)] }).full).toBe(false);
     expect(quotaViewOf({ status: "unknown", source: null, observedAt: null, plan: null, reason: "x", windows: [] }).full).toBeNull();
+    // 部分窗口没数：没有已知满窗时不能说「不满」（r1 P1-2）；过了重置时刻的窗口（usedPct 被置 null）不算没数
+    expect(quotaViewOf({ status: "known", source: "local_cache", observedAt: 5, plan: null, reason: null, windows: [w(20, 10), w(null, 30)] }).full).toBeNull();
+    expect(quotaViewOf({ status: "known", source: "local_cache", observedAt: 5, plan: null, reason: null, windows: [w(20, 10), w(null, 30, true)] }).full).toBe(false);
+    expect(quotaViewOf({ status: "known", source: "local_cache", observedAt: 5, plan: null, reason: null, windows: [w(100, 10), w(null, 30)] }).full).toBe(true);
+  });
+
+  test("暂停后观测到短窗有数、周窗没数：不提前恢复，批了的单也不领（r1 P1-2）", async () => {
+    const h = harness({ entry: { families: { codex: 3 } } });
+    await toStarted(h);
+    const t0 = h.d.now();
+    h.failures.set(W, { kind: "quota", askId: "q", message: "weekly limit" });
+    h.health.quota = { observedAt: t0, full: true, resetsAt: t0 + 86400_000 };
+    await h.tick();
+    recordAsked(h.db, { orderId: "o2", peer: "team-a", fp: FP, family: "codex", preview: { ...polled("o2") } }, h.d.now());
+    h.asks.set("ask-o2", "approved");
+    h.advanceTime(5000);
+    h.health.quota = quotaViewOf({ status: "known", source: "local_cache", observedAt: h.d.now(), plan: null, reason: null,
+      windows: [{ id: "5h", kind: "k", usedPct: 20, resetsAtMs: t0 + 3600_000, resetPassed: false },
+        { id: "7d", kind: "k", usedPct: null, resetsAtMs: t0 + 86400_000, resetPassed: false }] });
+    await h.tick();
+    await h.tick();
+    expect(JSON.parse(getMeta(h.db, "pause:codex")!).until).toBe(t0 + 86400_000);
+    expect(h.calls.filter((c) => c.op === "claim" && c.body.orderId === "o2")).toEqual([]);
   });
 });
 
@@ -196,19 +261,28 @@ describe("i28-R5a worker-liveness：读失败 = unknown，以宿主进程为准"
   // 生产 / lab 实测的 pane 结构：登录 zsh（pane）→ env -i … bun acp-host.ts（宿主）→ 适配器
   const PS = ["  100     1 -zsh", "  200   100 /opt/bun --no-env-file --config=/dev/null /repo/src/acp-host.ts", "  300   200 /opt/bun /x/codex-acp/dist/index.js"].join("\n");
   test("宿主是 pane 的子进程 / pane 进程本身：running；壳里只剩别的进程：no_host；pane 不在快照：unknown", () => {
-    expect(acpHostVerdict(100, PS)).toBe("running");
-    expect(acpHostVerdict(200, PS)).toBe("running");
-    expect(acpHostVerdict(100, "  100     1 -zsh\n  150   100 vim notes.md")).toBe("no_host");
-    expect(acpHostVerdict(100, "  100     1 -zsh")).toBe("no_host");
-    expect(acpHostVerdict(999, PS)).toBe("unknown");
-    expect(acpHostVerdict(100, "")).toBe("unknown");
+    expect(acpHostVerdict([100], PS)).toBe("running");
+    expect(acpHostVerdict([200], PS)).toBe("running");
+    expect(acpHostVerdict([100], "  100     1 -zsh\n  150   100 vim notes.md")).toBe("no_host");
+    expect(acpHostVerdict([100], "  100     1 -zsh")).toBe("no_host");
+    expect(acpHostVerdict([999], PS)).toBe("unknown");
+    expect(acpHostVerdict([100], "")).toBe("unknown");
   });
 
-  const io = (over: Partial<LivenessIo>): LivenessIo => ({ windows: async () => ["master", "agent-lend-a"], panePid: async () => 100, ps: async () => PS, ...over });
+  test("看窗口里所有 pane、整棵进程树（r1 P1-1）：宿主在别的 pane / 隔一层 wrapper 都算 running", () => {
+    const split = `  90     1 -zsh\n${PS}`;
+    expect(acpHostVerdict([90, 100], split)).toBe("running");
+    expect(acpHostVerdict([90], split)).toBe("no_host");
+    expect(acpHostVerdict([100], "100 1 -zsh\n150 100 /bin/sh wrapper\n160 150 bun /repo/src/acp-host.ts")).toBe("running");
+    // 没找到宿主、又有 pane 不在快照里：不知道，不是 no_host
+    expect(acpHostVerdict([90, 777], "  90     1 -zsh")).toBe("unknown");
+  });
+
+  const io = (over: Partial<LivenessIo>): LivenessIo => ({ windows: async () => ["master", "agent-lend-a"], panePids: async () => [100], ps: async () => PS, ...over });
   test("tmux 列窗口 / 读 pane / ps 任一失败：unknown，不是 no_window（根因：tmuxRaw 失败返回空、listWindows 当成没有窗口）", async () => {
     expect(await probeAcpWorker("agent-lend-a", io({}))).toBe("running");
     expect(await probeAcpWorker("agent-lend-a", io({ windows: async () => { throw new Error("error connecting to socket"); } }))).toBe("unknown");
-    expect(await probeAcpWorker("agent-lend-a", io({ panePid: async () => { throw new Error("tmux 超时"); } }))).toBe("unknown");
+    expect(await probeAcpWorker("agent-lend-a", io({ panePids: async () => { throw new Error("tmux 超时"); } }))).toBe("unknown");
     expect(await probeAcpWorker("agent-lend-a", io({ ps: async () => { throw new Error("ps exit 1"); } }))).toBe("unknown");
     expect(await probeAcpWorker("agent-lend-b", io({}))).toBe("no_window");
   });
@@ -225,9 +299,9 @@ describe("i28-R5a worker-liveness：真进程（pane 壳 → 宿主）", () => {
     kids.push(pane);
     const host = async () => (await defaultIo.ps()).split("\n").map((l) => l.trim().split(/\s+/)).find((f) => Number(f[1]) === pane.pid && f.join(" ").includes("/src/acp-host.ts"));
     for (const end = Date.now() + 5_000; Date.now() < end && !(await host()); await Bun.sleep(50));
-    expect(acpHostVerdict(pane.pid, await defaultIo.ps())).toBe("running");
+    expect(acpHostVerdict([pane.pid], await defaultIo.ps())).toBe("running");
     process.kill(Number((await host())![0]), "SIGKILL");
     for (const end = Date.now() + 5_000; Date.now() < end && (await host()); await Bun.sleep(50));
-    expect(acpHostVerdict(pane.pid, await defaultIo.ps())).toBe("no_host");
+    expect(acpHostVerdict([pane.pid], await defaultIo.ps())).toBe("no_host");
   }, 20_000);
 });
