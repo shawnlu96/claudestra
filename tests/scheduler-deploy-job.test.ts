@@ -10,6 +10,9 @@ import { SRC_DIR } from "../src/lib/repo-root.js";
 const SHA = "d".repeat(40);
 const run = { intentId: "m9", taskId: "T9", prRef: "https://github.com/a/b/pull/7", mergeSha: SHA } as DeployRun;
 const target = { restartLabels: ["x.fake.one"], timeoutMs: 60_000 };
+type Jobs = ReturnType<typeof deploymentJobs>;
+/** The journal row as the tick leaves it right before a submit: running under the intent's fixed label. */
+const attempt = (jobs: Jobs): DeployRun => ({ ...run, phase: "running", label: jobs.label(run) });
 const roots: string[] = [];
 afterEach(() => { for (const r of roots.splice(0)) rmSync(r, { recursive: true, force: true }); });
 
@@ -36,14 +39,14 @@ function fixture() {
 describe("T68g deploy job (launchd)", () => {
   test("P1 reload: the deploy is its own launchd job running scheduler.ts --deploy-job, never a scheduler child; submitted once", async () => {
     const x = fixture();
-    const label = await x.jobs.submit(run, "/repo", target);
+    const label = await x.jobs.submit(attempt(x.jobs), "/repo", target);
     expect(label).toMatch(/^com\.claudestra\.scheduler\.deploy\.[a-f0-9]{32}$/);
     const plist = readFileSync(join(x.dir(), "job.plist"), "utf8");
     expect(plist).toContain(`<string>${join(SRC_DIR, "scheduler.ts")}</string>`);
     expect(plist).toContain("<string>--deploy-job</string>");
     expect(plist).toMatch(/<key>KeepAlive<\/key><false\/>/);
     expect(x.calls.filter((a) => a[1] === "bootstrap")).toEqual([["/bin/launchctl", "bootstrap", "gui/501", join(x.dir(), "job.plist")]]);
-    expect(await x.jobs.submit(run, "/repo", target)).toBe(label); // existing claim: observed, not submitted again
+    expect(await x.jobs.submit(attempt(x.jobs), "/repo", target)).toBe(label); // existing claim: observed, not submitted again
     expect(x.calls.filter((a) => a[1] === "bootstrap")).toHaveLength(1);
     expect(readDeployJob(join(x.dir(), "request.json"))).toMatchObject({ mergeSha: SHA, repoDir: "/repo", relayArgv: null });
   });
@@ -55,7 +58,7 @@ describe("T68g deploy job (launchd)", () => {
     x.f.state = "hung";
     expect(await x.jobs.observe(run)).toMatchObject({ liveness: "unreadable", corrupt: expect.stringMatching(/目录丢失/) });
     x.f.state = "running";
-    await x.jobs.submit(run, "/repo", target);
+    await x.jobs.submit(attempt(x.jobs), "/repo", target);
     expect(await x.jobs.observe(run)).toMatchObject({ liveness: "alive", result: null });
     x.f.state = "hung";
     expect(await x.jobs.observe(run)).toMatchObject({ liveness: "unreadable", result: null });
@@ -63,7 +66,7 @@ describe("T68g deploy job (launchd)", () => {
 
   test("P1 killed by a reload: no result + gone from launchd + stale lease → dead with no result (outcome unknown, checked)", async () => {
     const x = fixture();
-    await x.jobs.submit(run, "/repo", target);
+    await x.jobs.submit(attempt(x.jobs), "/repo", target);
     const lock = join(x.root, "maint.lock");
     mkdirSync(lock); writeFileSync(join(lock, "owner"), "tok");
     writeFileSync(join(x.dir(), "lease.json"), JSON.stringify({ path: lock, token: "tok" }));
@@ -77,7 +80,7 @@ describe("T68g deploy job (launchd)", () => {
 
   test("result is read with liveness: a finished job that is still exiting is not judged yet", async () => {
     const x = fixture();
-    await x.jobs.submit(run, "/repo", target);
+    await x.jobs.submit(attempt(x.jobs), "/repo", target);
     writeFileSync(join(x.dir(), "result.json"), JSON.stringify({ intentId: "m9", mergeSha: SHA, ok: true, summary: "done" }));
     expect(await x.jobs.observe(run)).toMatchObject({ liveness: "alive", result: { ok: true } });
     x.f.state = "loaded";
@@ -88,7 +91,7 @@ describe("T68g deploy job (launchd)", () => {
 
   test("an unreadable request.json never wedges running: the label follows from the directory, the deadline counts as passed", async () => {
     const x = fixture();
-    const label = await x.jobs.submit(run, "/repo", target);
+    const label = await x.jobs.submit(attempt(x.jobs), "/repo", target);
     writeFileSync(join(x.dir(), "request.json"), "{ torn");
     expect(await x.jobs.observe(run)).toMatchObject({ label, liveness: "alive", result: null, corrupt: expect.stringMatching(/request\.json/) });
     expect((await x.jobs.observe(run))!.deadline).toBeLessThan(x.f.time);
@@ -98,10 +101,10 @@ describe("T68g deploy job (launchd)", () => {
 
   test("r4-P1-1: a missing request.json or job directory is never read as 'not submitted'; the label is checked with launchd", async () => {
     const x = fixture();
-    const label = await x.jobs.submit(run, "/repo", target);
+    const label = await x.jobs.submit(attempt(x.jobs), "/repo", target);
     rmSync(join(x.dir(), "request.json"));
     expect(await x.jobs.observe(run)).toMatchObject({ label, liveness: "alive", result: null, corrupt: expect.stringMatching(/missing/) });
-    expect(await x.jobs.submit(run, "/repo", target)).toBe(label); // the claim stands; nothing is bootstrapped again
+    expect(await x.jobs.submit(attempt(x.jobs), "/repo", target)).toBe(label); // the claim stands; nothing is bootstrapped again
     expect(x.calls.filter((a) => a[1] === "bootstrap")).toHaveLength(1);
     rmSync(join(x.root, "jobs"), { recursive: true });
     expect(await x.jobs.observe(run)).toMatchObject({ label, liveness: "alive", deadline: 0 });
@@ -110,10 +113,17 @@ describe("T68g deploy job (launchd)", () => {
     expect(await x.jobs.observe(run)).toBeNull();
   });
 
+  test("r4-P1-1: submit refuses a row that is not yet running under its label (the attempt must be durable first)", async () => {
+    const x = fixture();
+    await expect(x.jobs.submit({ ...run, phase: "claimed", label: null }, "/repo", target)).rejects.toThrow(/running under its label/);
+    await expect(x.jobs.submit({ ...run, phase: "running", label: `com.claudestra.scheduler.deploy.${"0".repeat(32)}` }, "/repo", target)).rejects.toThrow(/running under its label/);
+    expect(x.calls).toEqual([]);
+  });
+
   test("remove only touches deploy labels and treats 'already gone' as done", async () => {
     const x = fixture();
     await expect(x.jobs.remove("com.claudestra.bridge")).rejects.toThrow(/non-deploy/);
-    const label = await x.jobs.submit(run, "/repo", target);
+    const label = await x.jobs.submit(attempt(x.jobs), "/repo", target);
     expect(await x.jobs.remove(label)).toBe(true);
     expect(x.calls.at(-1)).toEqual(["/bin/launchctl", "bootout", `gui/501/${label}`]);
   });

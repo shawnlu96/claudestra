@@ -24,6 +24,7 @@ function fakeJobs(view: View = null) {
   const log: string[] = [];
   const s = { view, submitError: null as Error | null, log };
   const jobs: DeployJobs = {
+    label: () => LABEL,
     submit: async () => { log.push("submit"); if (s.submitError) throw s.submitError; s.view = { label: LABEL, liveness: "alive", result: null, deadline: 10_000 }; return LABEL; },
     observe: async () => { log.push("observe"); return s.view; },
     remove: async (l) => { log.push(`remove ${l}`); return true; },
@@ -145,33 +146,52 @@ describe("T68g deploy tick", () => {
     } finally { f.close(); }
   });
 
-  test("r4-P1-1: bootstrapped, crashed before running, request.json lost → recorded as running and checked, never written dead unchecked", async () => {
+  test("r4-P1-1: the attempt is in the journal before the bootstrap; a lost request, then a lost directory, never leads to a second submit", async () => {
     const f = mergedCard(), calls: string[][] = [];
-    let launchd: "running" | "absent" = "running";
+    let launchd: "running" | "absent" = "absent";
     const command: typeof runBounded = async (argv) => {
       calls.push(argv);
+      if (argv[1] === "bootstrap") launchd = "running";
       if (argv[1] !== "list") return { code: 0, timedOut: false, stderr: "", stdout: "" };
       return launchd === "running" ? { code: 0, timedOut: false, stderr: "", stdout: `{ "PID" = 12345; };` }
         : { code: 113, timedOut: false, stderr: "Could not find service", stdout: "" };
     };
     const root = join(f.dir, "jobs"), jobs = deploymentJobs({ root, command, uid: 501 });
+    const bootstraps = () => calls.filter((a) => a[1] === "bootstrap").length;
+    const events = () => f.db.query("SELECT json_extract(data,'$.to') AS t FROM events WHERE kind='scheduler' AND json_extract(data,'$.op')='deploy_phase'").all();
     try {
       const run = beginDeployRun(f.db, { actor: "scheduler", now: 150 }, f.intent).run;
-      const label = await jobs.submit(run, "/repo", config.projects.p.deploy!);
-      rmSync(join(root, readdirSync(root)[0], "request.json"));
-      calls.length = 0;
+      await expect(jobs.submit(run, "/repo", config.projects.p.deploy!)).rejects.toThrow(/running under its label/); // claimed: never
+      expect(bootstraps()).toBe(0);
       await deployTick(f.db, config, deps(f.db, jobs, { now: 1000 }));
-      expect(getDeployRun(f.db, f.intent)).toMatchObject({ phase: "running", label, liveness: null });
+      const label = jobs.label(run);
+      expect(getDeployRun(f.db, f.intent)).toMatchObject({ phase: "running", label });
+      expect(bootstraps()).toBe(1);
+      expect(events()).toContainEqual({ t: "running" });
+      rmSync(join(root, readdirSync(root)[0], "request.json"));
+      await deployTick(f.db, config, deps(f.db, jobs, { now: 2000 }));
+      expect(getDeployRun(f.db, f.intent)).toMatchObject({ phase: "running", liveness: null });
       expect(mergeQueueBusy(f.db)).toBe(true);
-      expect(calls).toContainEqual(["/bin/launchctl", "list", label]);
-      expect(calls.filter((a) => a[1] === "bootstrap")).toEqual([]);
       await deployTick(f.db, config, deps(f.db, jobs, { now: 100_000 })); // no request → deadline counts as passed: booted out
       expect(calls).toContainEqual(["/bin/launchctl", "bootout", `gui/501/${label}`]);
       expect(getDeployRun(f.db, f.intent)?.phase).toBe("running");
-      launchd = "absent";
+      launchd = "absent"; // the job has ended, and its whole directory (request, result, started) is lost with it
+      rmSync(root, { recursive: true });
       await deployTick(f.db, config, deps(f.db, jobs, { now: 101_000 }));
       expect(getDeployRun(f.db, f.intent)).toMatchObject({ phase: "unknown", outcome: "unknown", liveness: "dead" });
+      expect(bootstraps()).toBe(1);
       expect(mergeQueueBusy(f.db)).toBe(false);
+    } finally { f.close(); }
+  });
+
+  test("r4-P1-1: a crash after the attempt was recorded but before any job exists ends unknown from running, never resubmitted", async () => {
+    const f = mergedCard(), j = fakeJobs();
+    try {
+      f.db.query("INSERT INTO scheduler_deploys (intentId,taskId,project,prRef,mergeSha,phase,label,createdAt,updatedAt) SELECT 'm9','T9','p',pr,?,'running',?,1,1 FROM tasks WHERE id='T9'")
+        .run("d".repeat(40), LABEL);
+      await deployTick(f.db, config, deps(f.db, j.jobs));
+      expect(j.s.log).toEqual(["observe", `remove ${LABEL}`]);
+      expect(getDeployRun(f.db, f.intent)).toMatchObject({ phase: "unknown", outcome: "unknown", liveness: "dead" });
     } finally { f.close(); }
   });
 

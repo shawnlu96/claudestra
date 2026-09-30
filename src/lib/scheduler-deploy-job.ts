@@ -25,9 +25,13 @@ export interface DeployJob {
 type Liveness = "alive" | "dead" | "unreadable";
 type JobView = { label: string; liveness: Liveness; result: { ok: boolean; summary: string } | null; corrupt?: string; deadline: number };
 export interface DeployJobs {
-  /** Returns the label; on an existing claim returns the claimed label without submitting again. */
+  /** The intent's launchd label, fixed before anything is written (it follows from the job directory path). */
+  label(run: DeployRun): string;
+  /** Only for a journal row already `running` under label(run): the attempt is durable before the job can exist, so a
+   *  crash or lost directory later never looks like "not submitted". Returns the label; an existing claim is not resubmitted. */
   submit(run: DeployRun, repoDir: string, target: DeployTarget): Promise<string>;
-  /** null only when there is no job directory and launchd confirms it has no job under the intent's label. */
+  /** null when neither disk nor launchd has a trace of the job. That says nothing about whether it ran: only the journal
+   *  (claimed = never attempted, running = attempted) does. */
   observe(run: DeployRun): Promise<JobView | null>;
   /** bootout: SIGTERMs a live job (its runBounded groups die with it) or unloads a finished one; true when the label is gone. */
   remove(label: string): Promise<boolean>;
@@ -111,9 +115,11 @@ export function deploymentJobs(opts: { root?: string; command?: typeof runBounde
     return request;
   };
   return {
+    label: (run) => labelFor(dirFor(run)),
     async submit(run, repoDir, target) {
-      mkdirSync(root, { recursive: true, mode: 0o700 });
       const dir = dirFor(run);
+      if (run.phase !== "running" || run.label !== labelFor(dir)) throw new Error("deploy submit needs the journal row running under its label first");
+      mkdirSync(root, { recursive: true, mode: 0o700 });
       try { mkdirSync(dir, { mode: 0o700 }); }
       catch (e) {
         if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;

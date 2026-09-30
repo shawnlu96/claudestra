@@ -40,22 +40,23 @@ type Policy = SchedulerConfig["projects"][string];
 type Where = { target: NonNullable<Policy["deploy"]>; repoDir: string };
 const whereOf = (p: Policy | undefined): Where | null => (p?.deploy ? { target: p.deploy, repoDir: p.repoDir } : null);
 
-/** claimed: the at-most-once job directory decides between "never submitted" and "submitted, record it". Without a deploy
- *  policy (taken out of the config after the claim) nothing new is submitted. */
+/** claimed means no submit was ever attempted: the row goes to `running` under the fixed label before the job is bootstrapped,
+ *  so a crash after that (or a lost job directory) is judged from `running`, never resubmitted. Without a deploy policy
+ *  (taken out of the config after the claim) nothing is submitted. */
 async function driveClaimed(d: DeployTickDeps, db: Database, run: DeployRun, where: Where | null): Promise<void> {
   const seen = await d.jobs.observe(run);
-  if (seen) return void await step(d, run, { to: "running", label: seen.label, receipt: "重启后接上已提交的部署任务" });
+  if (seen) return void await step(d, run, { to: "running", label: seen.label, receipt: "占位下已有部署任务，按运行中接上" });
   const drift = where ? deployDrift(db, run.intentId) : "scheduler.json 里这个项目已不再自动部署";
   if (drift || !where) return void await step(d, run, { to: "unknown", outcome: "failed", liveness: "dead", receipt: `提交前流程已变，没提交：${drift}` });
   d.assertActive();
+  const label = d.jobs.label(run);
+  const attempt = await step(d, run, { to: "running", label, receipt: `提交部署任务 ${label}` });
   try {
-    const label = await d.jobs.submit(run, where.repoDir, where.target);
-    await step(d, run, { to: "running", label, receipt: `已提交部署任务 ${label}` });
+    await d.jobs.submit(attempt, where.repoDir, where.target);
   } catch (e) {
-    const after = await d.jobs.observe(run);
-    if (after && after.liveness !== "dead") return; // may have started after all: next tick records it as running
-    if (after?.result) return void await step(d, run, { to: "running", label: after.label, receipt: "提交报错但任务已跑完，按运行中接上" });
-    await step(d, run, { to: "unknown", outcome: "failed", liveness: "dead", receipt: `部署任务没起来：${(e as Error).message}` });
+    const after = await d.jobs.observe(attempt);
+    if (after && (after.liveness !== "dead" || after.result)) return; // may have started after all: driveRunning judges it
+    await step(d, attempt, { to: "unknown", outcome: "failed", liveness: "dead", receipt: `部署任务没起来：${(e as Error).message}` });
   }
 }
 
