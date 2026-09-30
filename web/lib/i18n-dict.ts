@@ -729,8 +729,7 @@ export const DICT: Record<string, string> = {
   "这个码已经用不了了（被用掉或已失效），看下面的设备列表确认": "This code no longer works (used or expired) — check the device list below",
   "输入了短码": "entered the code",
   "在电脑本机请求全权": "asks for full access on the computer itself",
-  "电脑上的程序（包括 agent）也能发这个请求；你刚在电脑浏览器上点了、码也对得上再允许":
-    "Programs on the computer (agents included) can send this request too; only allow it if you just clicked it in the computer's browser and the code matches",
+  "电脑上的 agent 也能发这个请求；是你刚点的、码对得上再允许": "Agents on the computer can send this too; allow only if you just clicked it and the code matches",
   "设备名是对方自己填的；短码对得上再允许": "The device name is whatever the other side typed; only allow it if the code matches",
   "全部会话、终端和管理（不会超过你这台设备自己的权限）": "All sessions, terminal and management (never more than this device itself has)",
   "拒绝": "Deny",

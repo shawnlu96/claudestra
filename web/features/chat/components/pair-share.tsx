@@ -10,7 +10,7 @@ import { useEffect, useRef, useState } from "react";
 import { renderSVG } from "uqr";
 import { getLang, useT } from "@/lib/i18n";
 import { decideApproval, listApprovals, listDevices, type PendingApproval, type ShareCode } from "@/lib/api/devices";
-import { DRIVE_AGENT_SHELL_WARNING, grantsAllAgents, GUEST_ALL_WARNING } from "@/lib/guest-share";
+import { grantsAllAgents, GUEST_ALL_WARNING } from "@/lib/guest-share";
 import { fmtRemaining, remainingSeconds } from "../relay-card-logic";
 import { CopyButton } from "./peers-shared";
 
@@ -53,10 +53,7 @@ export function ApprovalRow({ a, onDone }: { a: PendingApproval; onDone: (approv
           {a.clientIp ? ` · ${a.clientIp}` : ""}
         </span>
         {a.guest && grantsAllAgents(a.grant) && <span className="block font-medium text-warning">{t(GUEST_ALL_WARNING)}</span>}
-        {a.guest && <span className="block text-warning">{t(DRIVE_AGENT_SHELL_WARNING)}</span>}
-        <span className="block text-[10.5px] text-base-content/45">
-          {t(a.local ? "电脑上的程序（包括 agent）也能发这个请求；你刚在电脑浏览器上点了、码也对得上再允许" : "设备名是对方自己填的；短码对得上再允许")}
-        </span>
+        <span className="block text-[10.5px] text-base-content/45">{t(a.local ? "电脑上的 agent 也能发这个请求；是你刚点的、码对得上再允许" : "设备名是对方自己填的；短码对得上再允许")}</span>
         {err && <span className="block text-error">{err}</span>}
       </span>
       <span className="flex shrink-0 gap-1">
