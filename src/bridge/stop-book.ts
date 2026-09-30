@@ -3,7 +3,7 @@
  * 终端里按的打断），go = owner 最近一次说「不是停」的话，go 在它之后到 = 已解除。先后只比到达位置（lib/arrival-order.ts），不比墙钟：
  * 两条回调各有 await，同一毫秒现实可达（tests/arrival-order.test.ts、tests/preempt-stop.test.ts）。Autopilot 据此不推进。
  */
-import { isAfter, laterOf, type Order } from "../lib/arrival-order.js";
+import { isAfter, laterOf, plausibleSeq, type Order } from "../lib/arrival-order.js";
 import { PersistedMap } from "./persisted-map.js";
 
 /** at = 记下的墙钟（抬头显示、清理）；seq/t/n = 这次「停」的到达位置（老版本落的盘没有，按 0：比之后的一切都早）；goAt = 解除的墙钟（清理用） */
@@ -19,6 +19,17 @@ export class StopBook {
 
   constructor(path: string | null, private readonly now: () => number) {
     this.stops = new PersistedMap(path, "叫停记录", isStopRec, []);
+    for (const [ch, s] of [...this.stops]) this.scrub(ch, s);
+  }
+
+  /** 盘上写坏的号（lib/arrival-order.ts plausibleSeq）：停按老版本没号的算（之后的开口都能解），坏的开口丢掉；留着的话这条停永远解不开 */
+  private scrub(channelId: string, s: StopRec): void {
+    const badStop = s.seq !== undefined && !plausibleSeq(s.seq);
+    const badGo = s.go !== undefined && !plausibleSeq(s.go.seq);
+    if (!badStop && !badGo) return;
+    console.error(`🚨 叫停记录 ${channelId} 里的到达号不合理（停 ${s.seq}，开口 ${s.go?.seq}），坏的去掉`);
+    const { seq, t, n, go, ...rest } = s;
+    this.stops.set(channelId, { ...rest, ...(badStop ? {} : { seq, t, n }), ...(badGo ? {} : { go }) });
   }
 
   /** owner 说了不是停的话（到达位置 order）：只解除在它之前到的停——作答的回调 await 了一阵才走到这里，之后才到的停不解 */

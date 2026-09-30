@@ -35,9 +35,16 @@ const BLOCK = 1_000;
 const MARK_KEEP_MS = 10 * 60_000;
 const MARK_MAX = 2_000;
 
+/**
+ * 合理的号：非负安全整数、不超过 2^52（按「毫秒 ×1000」起号要到 2112 年才到这儿）。盘上写坏的数（1e300、字符串、超出安全整数）
+ * 进来一个，号就不再严格递增——isAfter(开口, 停) 永远是假，停再也解不开，坏上限还会写回盘、重启不能自愈（tests/arrival-order.test.ts）
+ */
+const MAX_SEQ = 2 ** 52;
+export const plausibleSeq = (x: unknown): x is number => Number.isSafeInteger(x) && (x as number) >= 0 && (x as number) <= MAX_SEQ;
+
 /** 号文件：ceiling = 已预留到的上限；pid = 最后写它的进程；foreign = 最近一次发现别的进程也在写（两个 bridge 共用状态目录，doctor 报） */
 export type SeqFile = { ceiling: number; pid?: number; foreign?: { pid?: number; at: number } };
-const isSeqFile = (d: unknown) => typeof (d as { ceiling?: unknown })?.ceiling === "number";
+const isSeqFile = (d: unknown) => plausibleSeq((d as { ceiling?: unknown })?.ceiling); // 坏上限 = 读不了：按启动时刻起号并记日志
 
 export class ArrivalOrder {
   private next: number;
@@ -59,6 +66,7 @@ export class ArrivalOrder {
 
   /** 盘上已有的号（叫停记录）垫底：之后发的号都比它大 */
   atLeast(seq: number): void {
+    if (!plausibleSeq(seq)) return void console.error(`🚨 垫底的到达号不合理（${seq}），跳过`);
     if (seq < this.next) return;
     this.next = this.ceiling = seq + 1; // 下一次 take 先把新上限落盘
   }

@@ -208,11 +208,11 @@ describe("号不倒退（T13f r1 P2-2）", () => {
 
   test("押着的消息的号也垫底（bridge.ts 启动时）", () => {
     const q = new HeldQueue(null);
-    const env = { to: { kind: "local", channelId: "ch" }, meta: { arrivalSeq: 5_000_000_000_000_000 } } as unknown as Envelope;
+    const env = { to: { kind: "local", channelId: "ch" }, meta: { arrivalSeq: (T0 + 3_600_000) * 1_000 } } as unknown as Envelope; // 时钟往回拨了一小时
     q.holdEnv(env);
     const o = new ArrivalOrder(null, () => T0);
     o.atLeast(q.maxArrivalSeq());
-    expect(o.take()).toBeGreaterThan(5_000_000_000_000_000);
+    expect(o.take()).toBeGreaterThan((T0 + 3_600_000) * 1_000);
   });
 
   test("两个 bridge 写同一份号文件：后发现的一方跳过对方预留的号，记下来；doctor 一天内报 warn", () => {
@@ -229,3 +229,45 @@ describe("号不倒退（T13f r1 P2-2）", () => {
     expect(arrivalSeqVerdict({ ceiling: 1 }, T0)).toEqual([]);
   });
 });
+
+describe("盘上写坏的号不卡死（T13f r2 P2-1）", () => {
+  const increasing = (o: ArrivalOrder) => {
+    const [a, b] = [o.take(), o.take()];
+    return Number.isSafeInteger(a) && b > a;
+  };
+
+  test("号文件的上限是 1e300：当读不了，按启动时刻起号，号照样递增", () => {
+    const path = tmp("seq.json");
+    writeFileSync(path, JSON.stringify({ ceiling: 1e300 }));
+    expect(increasing(new ArrivalOrder(path, () => T0))).toBe(true);
+  });
+
+  test("垫底给了 NaN / 1e300 / 2^53 / 字符串：跳过，号照样递增", () => {
+    const o = new ArrivalOrder(null, () => T0);
+    for (const bad of [NaN, 1e300, 2 ** 53, "5" as unknown as number]) o.atLeast(bad);
+    expect(increasing(o)).toBe(true);
+  });
+
+  test("叫停记录里停和开口的号是 1e300：坏的去掉并写回盘，之后 owner 开口照样解除", () => {
+    const path = tmp("cuts.json");
+    const stops = path.replace(/\.json$/, "-stops.json");
+    writeFileSync(stops, JSON.stringify({ ch: { at: T0, seq: 1e300 }, ch2: { at: T0, seq: 5, go: { seq: 1e300 } } }));
+    const { b } = book(path);
+    expect(b.interruptHold("ch")).toBe("stopped");
+    expect(b.interruptHold("ch2")).toBe("stopped"); // 坏的开口不算解除
+    b.noteHuman("ch", false);
+    expect(b.interruptHold("ch")).toBeNull();
+    expect(JSON.parse(readFileSync(stops, "utf-8")).ch2.go).toBeUndefined();
+  });
+
+  test("押后队列里的到达号是 1e300 / 字符串：去掉并写回盘，垫底只看好的", () => {
+    const path = tmp("held.json");
+    const item = (seq: unknown) => ({ env: { to: { kind: "local", channelId: "ch" }, from: { kind: "api" }, meta: { arrivalSeq: seq } }, to: { channelId: "ch" }, heldAt: T0 });
+    writeFileSync(path, JSON.stringify({ ch: [item(1e300), item("7"), item(42)] }));
+    const q = new HeldQueue(path);
+    expect(q.maxArrivalSeq()).toBe(42);
+    expect(q.get("ch")?.map((i) => i.env.meta.arrivalSeq)).toEqual([undefined, undefined, 42]);
+    expect(JSON.parse(readFileSync(path, "utf-8")).ch.map((i: HeldItemJson) => i.env.meta.arrivalSeq)).toEqual([undefined, undefined, 42]);
+  });
+});
+type HeldItemJson = { env: { meta: { arrivalSeq?: unknown } } };
