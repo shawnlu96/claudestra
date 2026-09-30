@@ -29,6 +29,7 @@ import {
   liveInteractiveHolder, heldFields, stopExtra,
 } from "./api-respond.js";
 import { interruptAgentByName } from "./preempt.js";
+import { arrivalOf, stampArrival } from "./arrival-stamp.js";
 import { existsSync, readdirSync } from "fs";
 import { TMP_DIR, MASTER_DIR, REPO_ROOT, ALLOWED_USER_IDS } from "./config.js";
 import {
@@ -1161,8 +1162,8 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
     }
     if (!text.trim() && attachments.length === 0) return apiJson(400, { ok: false, error: "text is required" });
     waitSec = Math.min(Math.max(waitSec, 0), 300);
-    if (!attachments.length) { const r = await (await import("./ask-entry.js")).answerFromChat({ agent: agent.name, text, principal, askId: url.searchParams.get("ask") }); if (r) return r; }
-
+    const asAnswer = { agent: agent.name, text, principal, askId: url.searchParams.get("ask"), order: arrivalOf(req) }; // 号是请求进来时领的
+    if (!attachments.length) { const r = await (await import("./ask-entry.js")).answerFromChat(asAnswer); if (r) return r; }
     // Web 斜杠直通只给 owner（bridge/api-slash.ts）：能直通就注入 TUI 并在这里返回（非 owner → 403）；不是命令 → 按普通消息往下投
     const slashRes = await handleSlashPassthrough({ principal, tokenId, agent, text, hasAttachments: attachments.length > 0 }, slashDeps(deps));
     if (slashRes) return slashRes;
@@ -1178,10 +1179,9 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
         messageId: `api_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
         triggerKind: "system",
         ts: new Date().toISOString(),
-        threadId,
+        threadId, arrivalSeq: stampArrival(req), // 请求进 bridge 时领的号（读正文、下载附件的 await 之前，bridge/arrival-stamp.ts）
         attachments: attachments.length ? attachments : undefined,
-        // API 请求不需要 inter-agent watchdog（有自己的 wait/轮询语义）
-        skipInterAgentWatchdog: true,
+        skipInterAgentWatchdog: true, // API 请求不需要 inter-agent watchdog（有自己的 wait/轮询语义）
       },
     };
 
@@ -1266,11 +1266,11 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
     if (!inScopeEitherName(principal, agentParam)) return notInScope(agentParam);
     const agent = await findApiAgent(agentParam);
     if (!agent) return apiJson(404, { ok: false, error: `agent "${agentParam}" not found` });
-    // 防重入 + 按键选择都在 interruptGate（与人类消息抢占、Discord 停止按钮同一个每频道冷却）：
-    // 空闲态连发两次 C-c 是 CC 的退出快捷键，双击可能直接把会话关了；CC 主回合空闲一个键都不发
+    // 防重入 + 按键选择都在 interruptGate（与人类消息抢占、Discord 停止按钮同一个每频道冷却）：空闲态连发两次 C-c 是 CC 的退出快捷键
     // 记 cut、指标、停 typing、状态收尾成 done 都在 manualInterrupt（被打断的 CC 回合不发 Stop hook，不收尾黄点常驻）
-    // 非 owner 的 token（外源、peer）照样能打断，但不记成 owner 的「停」（不挂起 Autopilot、不清续做链）
-    const r = await interruptAgentByName(agent.name, agent.channelId, { owner: isOwnerPrincipal(principal), name: principal.name || tokenId, peer: principal.peer }).catch((e: Error) => e);
+    // 非 owner 的 token（外源、peer）照样能打断，但不记成 owner 的「停」（不挂起 Autopilot、不清续做链）；号是请求进来时领的
+    const by = { owner: isOwnerPrincipal(principal), name: principal.name || tokenId, peer: principal.peer };
+    const r = await interruptAgentByName(agent.name, agent.channelId, by, arrivalOf(req)).catch((e: Error) => e);
     if (r instanceof Error) return apiJson(500, { ok: false, error: `tmux send-keys 失败: ${r.message}` });
     if (r.deduped) return apiJson(200, { ok: true, deduped: true });
     const sent = r.keys;

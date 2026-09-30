@@ -5,6 +5,7 @@
  * 订阅 event-bus：打断后又跑了同名同内容的工具 = 那一段续上了；打断后几秒内出错收尾的工具补进 inflight；会话记录里的打断标记。
  * Codex 的「打断后 queue 卡住」相关状态也在这里（能不能打字投递、下一条要不要打字），见 lib/codex-tui-submit.ts。
  */
+import { ArrivalOrder, type Order } from "../lib/arrival-order.js";
 import { statePath } from "../lib/paths.js";
 import { isProgramKey, isProgramText, type ProgramInput } from "../lib/program-input.js";
 import { MASTER_SESSION, programInputsOf, tmuxSendEscape, windowTarget } from "../lib/tmux-helper.js";
@@ -16,9 +17,9 @@ import { emitEvent, inflightTools, subscribeEvents } from "./event-bus.js";
 import { HELD_GIVE_UP_MS } from "./held-queue.js";
 import { isAcpChannel } from "./acp-state.js";
 import { PersistedMap } from "./persisted-map.js";
+import { StopBook } from "./stop-book.js";
 import { newMessageId, newThreadId, type Envelope, type LocalEndpoint } from "./router.js";
 
-const isStopRec = (v: unknown) => !!v && typeof v === "object" && typeof (v as { at?: unknown }).at === "number";
 const isCut = (v: unknown) => !!v && typeof v === "object" && typeof (v as Cut).id === "string" && Array.isArray((v as Cut).inflight);
 /** 收尾提醒自己也是一条入站：不能被记成「被打断的回合在处理它」 */
 const CUT_NOTICE_LABEL = "turn-cuts";
@@ -38,15 +39,16 @@ export interface RecordCutInput {
   tools: { inflight: CutTool[]; lastDone?: { name: string; summary: string } };
   /** 这次真的打断了回合（发出了键）；停字 / 停止按钮没发键时 false（只留档、压提醒） */
   interrupted?: boolean;
+  /** 「停」的到达位置（停字 / 停止按钮：到达时领的号；终端里按的：按会话记录时刻回推）。不给 = 记下时新领一个 */
+  stopOrder?: Order;
 }
 
 export class TurnCuts {
   private readonly cuts: PersistedMap<Cut>;
-  /**
-   * 频道 → owner 最近一次叫停（停字 / 停止按钮 / 终端里按的打断）：at = 叫停时刻，goAt = 之后 owner 说了不是停的话。
-   * 不跟着「最新一条 cut」走：外源消息的抢占会记一条新 cut 盖掉那条停，却不能替 owner 解除（wf2 stop-semantics-1）。落盘、不设期限
-   */
-  private readonly stops: PersistedMap<{ at: number; goAt?: number }>;
+  /** owner 的叫停记录（bridge/stop-book.ts）。不跟着「最新一条 cut」走：外源消息的抢占会记一条新 cut 盖掉那条停，却不能替 owner 解除（wf2 stop-semantics-1） */
+  private readonly stops: StopBook;
+  /** 到达序号（落盘 turn-cuts-seq.json）：bridge 所有「谁先到」的比较都用它领号 */
+  readonly arrivals: ArrivalOrder;
   /** 频道 → 这一回合（上次 Stop / 打断之后）送到的消息，按先后；被打断时它们就是「在处理的」 */
   private readonly inbound = new Map<string, TurnTrigger[]>();
   private readonly agentOf = new Map<string, string>();
@@ -76,7 +78,9 @@ export class TurnCuts {
     private readonly programKeys: (agent: string) => Promise<ProgramInput[]> = async () => [],
   ) {
     this.cuts = new PersistedMap<Cut>(path, "打断记录", isCut, []);
-    this.stops = new PersistedMap(path && path.replace(/\.json$/, "-stops.json"), "叫停记录", isStopRec, []);
+    this.stops = new StopBook(path && path.replace(/\.json$/, "-stops.json"), now);
+    this.arrivals = new ArrivalOrder(path && path.replace(/\.json$/, "-seq.json"), now);
+    this.arrivals.atLeast(this.stops.maxSeq());
   }
 
   get(channelId: string): Cut | undefined {
@@ -132,11 +136,18 @@ export class TurnCuts {
     this.replies.set(k, [...(this.replies.get(k) ?? []), this.now()].slice(-REPLY_KEEP));
   }
 
-  /** owner 开口（抢占判断之前 / 终端里敲字 / 答卡片）：不是「停」就解除「已叫停」。外源（非 owner 的 API 用户）不调：他们不能替 owner 叫停或解除 */
-  noteHuman(channelId: string, isStop: boolean): void {
+  /**
+   * owner 开口（抢占判断之前 / 终端里敲字 / 答卡片）：不是「停」就解除在它之前到的「停」——之后才到的停不解（作答的回调
+   * await 了一阵才走到这里）。order = 这句话的到达位置，调用方在自己的第一个 await 之前领。外源（非 owner 的 API 用户）不调
+   */
+  noteHuman(channelId: string, isStop: boolean, order: Order = this.arrivals.order()): void {
     this.prune(this.now()); // 不只在记新 cut 时清：很少被打断的实例，解除过的叫停记录也要按时清掉
-    const s = this.stops.get(channelId);
-    if (!isStop && s && s.goAt === undefined) this.stops.set(channelId, { ...s, goAt: this.now() });
+    if (!isStop) this.stops.go(channelId, order);
+  }
+
+  /** 位置 order 的那次「停」到达之后，owner 又开过口 = 这条停作废（押着的旧停晚投，bridge 重启后也认得；preempt.ts） */
+  spokeAfter(channelId: string, order: Order): boolean {
+    return this.stops.spokeAfter(channelId, order);
   }
 
   /**
@@ -149,14 +160,17 @@ export class TurnCuts {
     for (const k of [...this.replies.keys()]) if (k.startsWith(`${channelId}\n`)) this.replies.delete(k);
   }
 
-  /** owner 最近一次叫停这个频道的时刻（解除了也还在）：押在它之前、之后才投出去的消息要加抬头（bridge/held-flush.ts） */
-  stoppedAt(channelId: string): number | undefined {
-    return this.stops.get(channelId)?.at;
+  /** owner 最近一次叫停这个频道（解除了也还在）：在它之前到、之后才投出去的消息要加抬头（bridge/held-flush.ts）。at 只给抬头显示 */
+  stopMark(channelId: string): { at: number; order: Order } | undefined {
+    return this.stops.mark(channelId);
   }
 
-  /** bridge 要发打断键了（发之前记：Codex 的打断回报 0.5 秒就到）。preempt = 后面紧跟着要投一条新消息 */
-  noteKeySent(channelId: string, kind: "preempt" | "manual"): void {
-    this.keySentAt.set(channelId, { at: this.now(), kind });
+  /** bridge 要发打断键了（发之前记：Codex 的打断回报 0.5 秒就到）。preempt = 后面紧跟着要投一条新消息。返回撤销：键最后没发（撤回）就还原 */
+  noteKeySent(channelId: string, kind: "preempt" | "manual"): () => void {
+    const prev = this.keySentAt.get(channelId);
+    const mine = { at: this.now(), kind };
+    this.keySentAt.set(channelId, mine);
+    return () => void (this.keySentAt.get(channelId) === mine && (prev ? this.keySentAt.set(channelId, prev) : this.keySentAt.delete(channelId)));
   }
 
   /** 记一次打断。被打断的回合在处理的是打断之前最后送达的那条（打断它的这条此刻还没送达） */
@@ -181,7 +195,7 @@ export class TurnCuts {
       chainable,
     );
     this.cuts.set(i.channelId, cut);
-    if (cut.state === "stopped") this.stops.set(i.channelId, { at }); // 「停」类只由 owner 记（停字认 owner、非 owner 的停止按钮不记）
+    if (cut.state === "stopped") this.stops.stop(i.channelId, at, i.stopOrder ?? this.arrivals.order()); // 「停」类只由 owner 记（停字认 owner、非 owner 的停止按钮不记）
     this.noticePending.delete(i.channelId);
     // 真打断了 Codex 才会卡 queue：停字没发出键（空闲 / 被拦）时下一条照常走 queue，不去打字
     if (i.runtime === "codex" && i.interrupted !== false) this.codexPaused.add(i.channelId), this.codexCutSinceStop.add(i.channelId);
@@ -228,8 +242,7 @@ export class TurnCuts {
 
   /** Autopilot 要不要先别推进：人叫停了、之后没再说别的（不设期限：「等人再开口」），或者还有一条打断收尾提醒没投 */
   interruptHold(channelId: string): "stopped" | "notice" | null {
-    const s = this.stops.get(channelId);
-    if (s && s.goAt === undefined) return "stopped";
+    if (this.stops.stopped(channelId)) return "stopped";
     return this.noticePending.has(channelId) ? "notice" : null;
   }
 
@@ -300,10 +313,11 @@ export class TurnCuts {
    */
   private async onTranscriptInterrupt(e: CutEvent & { chatId: string; agent: string }): Promise<void> {
     const at = Date.parse(String(e.data.ts ?? "")) || Date.parse(e.ts) || this.now(); // 那一行写进会话记录的时刻（watcher 约 2 秒后才读到）
+    const stopOrder = this.arrivals.backdate(at, true); // 读到之前 owner 从网页 / Discord 又开的口排在它后面
     if (this.keySentWithin(e.chatId, at)) return;
     if (await this.programKeyNear(e.agent, at)) return;
     console.log(`⏹ ${e.agent} 在终端里被人打断（bridge 没发键）：记为叫停`);
-    this.record({ channelId: e.chatId, agent: e.agent, cause: "terminal", tools: inflightTools(e.agent) });
+    this.record({ channelId: e.chatId, agent: e.agent, cause: "terminal", tools: inflightTools(e.agent), stopOrder });
     if ((this.deliveredAt.get(e.chatId) ?? 0) <= at) emitEvent({ agent: e.agent, chatId: e.chatId, type: "agent_status", data: { status: "done", trigger: "terminal_interrupt" } });
   }
 
@@ -315,17 +329,18 @@ export class TurnCuts {
   /** 会话记录里一条终端输入：终端前的就是 owner（不是停就解除「已叫停」）——除非是程序敲进去的（cron、manager tmux-send-keys） */
   private async onTerminalInput(e: CutEvent & { chatId: string; agent: string }): Promise<void> {
     const at = Date.parse(String(e.data.ts ?? "")) || Date.parse(e.ts) || this.now();
+    const order = this.arrivals.backdate(at, e.data.stop === true);
     if (isProgramText(await this.programKeys(e.agent).catch(() => []), at, String(e.data.h ?? ""))) return; // 读不到就当人打的
-    this.noteHuman(e.chatId, e.data.stop === true);
+    this.noteHuman(e.chatId, e.data.stop === true, order);
   }
 
   /**
    * 过期很久的记录（agent 早被 kill 的频道）不留在盘上。叫停记录只清已解除、且解除超过押后上限（24 小时）的：
-   * 押后的消息靠 stoppedAt 判「是不是叫停之前押的」，押得再久也不会超过这个上限；还没解除的一直留着（Autopilot 要等 owner 开口）
+   * 押后的消息靠 stopMark 判「是不是叫停之前押的」，押得再久也不会超过这个上限；还没解除的一直留着（Autopilot 要等 owner 开口）
    */
   private prune(now: number): void {
     for (const [ch, c] of this.cuts) if (now - c.at > CUT_TTL_MS * 4) this.cuts.delete(ch);
-    for (const [ch, s] of this.stops) if (s.goAt !== undefined && now - s.goAt > HELD_GIVE_UP_MS) this.stops.delete(ch);
+    this.stops.prune(now, HELD_GIVE_UP_MS);
   }
 }
 

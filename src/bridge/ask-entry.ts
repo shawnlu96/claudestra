@@ -5,6 +5,7 @@
  * 答 = owner 本人（isOwnerPrincipal；老的「*」集成 Bearer、guest、peer 都不行）。Discord 只有 ALLOWED_USER_IDS 点得到。不能答的凭据发 [button:x] 照旧是普通消息。
  * 已结案的 ask 再点：网页带了 askId 才回 409 code=ask_closed（没带的不猜，照常投；带了的不管凭据能不能答都拦）；Discord 按原消息 id 认，悄悄告诉点的人「已处理」。
  */
+import type { Order } from "../lib/arrival-order.js";
 import { matchWire, splitWire, type AskRow, type WireMatch } from "../lib/ask-options.js";
 import { canReadLedger, OWNER_PRINCIPAL_ID } from "../lib/devices.js";
 import { t } from "../lib/i18n.js";
@@ -13,6 +14,7 @@ import { LedgerError } from "../lib/ledger-store.js";
 import { canAnswerAsk, canSeeAsk } from "../lib/ask-access.js";
 import { agentInScope, isOwnerPrincipal, tokenIdOf, type Principal } from "../lib/principals.js";
 import { apiJson, forbidden } from "./api-respond.js";
+import { arrivalOf } from "./arrival-stamp.js";
 import { initRuntimeAsks } from "./ask-runtime.js";
 import { noticeExpired, sweepExpired } from "./ask-expire.js";
 import { initAskPin } from "./ask-pin.js";
@@ -102,7 +104,7 @@ const apiFrom = (p: Principal) => ({ kind: "api" as const, tokenId: tokenIdOf(p)
  * POST /agents/:name/messages 里的一行调用：消息里的 wire 行答的是这个 agent 的某条 ask → 当答复处理，返回响应；
  * 不是（或这个凭据不能答）→ null，调用方照常投递。
  */
-export async function answerFromChat(req: { agent: string; text: string; principal: Principal; askId?: string | null }): Promise<Response | null> {
+export async function answerFromChat(req: { agent: string; text: string; principal: Principal; askId?: string | null; order?: Order }): Promise<Response | null> {
   const p = req.principal;
   const { wires, rest } = splitWire(req.text);
   const stale = staleClick(req.agent, wires, p, req.askId);
@@ -113,7 +115,8 @@ export async function answerFromChat(req: { agent: string; text: string; princip
   if (hit.ask.bind && hit.ask.id !== req.askId) return apiJson(409, { ok: false, code: "ask_id_required", error: BIND_NEEDS_ID, askId: hit.ask.id });
   const blocked = await redirectForbidden(p, hit.ask);
   if (blocked) return blocked;
-  return commitOr409(() => commitNoticing({ ask: hit.ask, picks: hit.picks, text: rest, original: req.text, from: apiFrom(p), principal: p.id, device: p.credential, via: "web_chat" }), hit.ask);
+  const input = { ask: hit.ask, picks: hit.picks, text: rest, original: req.text, from: apiFrom(p), principal: p.id, device: p.credential, via: "web_chat" as const };
+  return commitOr409(() => commitNoticing({ ...input, order: req.order }), hit.ask);
 }
 
 /**
@@ -131,7 +134,7 @@ function staleClick(agent: string, wires: string[], p: Principal, askId?: string
  * 网页卡片：POST /ledger/:project/asks/:id/answer，body {choices: wire[], text?}。卡片是一次提交：不管多行 reply 还有没有没答的组都结案。
  * 运行时弹框（AUQ / 权限）不走这里：卡片按原有端点（POST /agents/:name/answer）发键，由那个端点当场记是谁、选了什么。
  */
-export async function answerFromCard(project: string, id: string, body: { choices?: unknown; text?: unknown; atts?: unknown }, p: Principal): Promise<Response> {
+export async function answerFromCard(project: string, id: string, body: { choices?: unknown; text?: unknown; atts?: unknown }, p: Principal, order?: Order): Promise<Response> {
   const db = askReadDb();
   const a = db ? getAsk(db, id) : null;
   if (!a || a.project !== project || !canSeeAsk(p, a)) return apiJson(404, { ok: false, error: `ask "${id}" not found in "${project}"` });
@@ -147,7 +150,7 @@ export async function answerFromCard(project: string, id: string, body: { choice
   if (atts === null) return apiJson(400, { ok: false, error: "atts must be [{kind, ref, name?, mime?}] (≤ 20)" });
   const blocked = await redirectForbidden(p, a);
   if (blocked) return blocked;
-  return commitOr409(() => commitNoticing({ ask: a, picks, text, from: apiFrom(p), principal: p.id, device: p.credential, via: "web_card", final: true, atts }), a);
+  return commitOr409(() => commitNoticing({ ask: a, picks, text, from: apiFrom(p), principal: p.id, device: p.credential, via: "web_card", final: true, atts, order }), a);
 }
 
 
@@ -176,6 +179,8 @@ export interface DiscordClick {
   whisper: (content: string) => Promise<unknown>;
   /** 起 typing（agent 收到答复就要干活）；单测不给 */
   typing?: () => void;
+  /** 点击到达 bridge 时领的号（bridge/arrival-stamp.ts）：和「停」谁先到只比它 */
+  order?: Order;
 }
 
 /**
@@ -195,7 +200,7 @@ export async function answerFromDiscord(c: DiscordClick, wire: string): Promise<
   }
   try {
     const from = { kind: "user" as const, userId: c.user.id, channelId: c.channelId, username: c.user.username };
-    const out = await commitNoticing({ ask: a, picks, text: "", from, principal: `discord:${c.user.id}`, via: "discord" });
+    const out = await commitNoticing({ ask: a, picks, text: "", from, principal: `discord:${c.user.id}`, via: "discord", order: c.order });
     c.typing?.();
     if (out.state === "open") await c.whisper(t(`已收到：${picks[0].label}（这条还有别的项没答）`, `Got it: ${picks[0].label} (other parts still open)`));
     else await c.edit(`${c.origContent}\n\n✅ ${t("已点击", "Clicked")}：**${(out.answer?.labels ?? [picks[0].label]).join("、")}**`);
@@ -218,7 +223,7 @@ export interface DiscordInteractionLike {
 /** discord-interactions.ts 的一行调用：`if ((await answerDiscordInteraction(interaction, channelId, wire, typing)) || !client) return;` */
 export function answerDiscordInteraction(i: DiscordInteractionLike, channelId: string, wire: string, typing?: () => void): Promise<boolean> {
   return answerFromDiscord({
-    messageId: i.message?.id, user: i.user, channelId, origContent: i.message?.content ?? "", typing,
+    messageId: i.message?.id, user: i.user, channelId, origContent: i.message?.content ?? "", typing, order: arrivalOf(i), // 交互回调入口领的号
     edit: (content) => i.editReply({ content, components: [] }),
     whisper: (content) => i.followUp({ content, ephemeral: true }),
   }, wire);

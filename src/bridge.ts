@@ -176,7 +176,8 @@ import { readRegistryAgents, readRegistryAgentsSync, agentRuntime, type AgentRun
 import { statePath } from "./lib/paths.js";
 import { controlFor, managedFor } from "./lib/runtimes/index.js";
 import { stopNeedsPaneRecheck } from "./lib/runtimes/window-ops.js";
-import { onCodexInterrupt, preemptForHuman, setStopHooks } from "./bridge/preempt.js";
+import { noteAtSend, onCodexInterrupt, preemptForHuman, setStopHooks, waitsForIdle } from "./bridge/preempt.js";
+import { arrivalOf, stampArrival } from "./bridge/arrival-stamp.js";
 import { HTTP_IDLE_TIMEOUT_S, noteRuntimeCaps, onAbortAck, onCodexUndelivered, setExtensionSocket, stopAfterAbort, stopWaitIds } from "./bridge/interrupt-gate.js";
 import { isCutNotice, turnCuts } from "./bridge/turn-cuts.js";
 import { withInterruptNote } from "./lib/turn-cuts.js";
@@ -407,15 +408,12 @@ async function channelStillRegistered(channelId: string): Promise<boolean> {
 const pendingAgentCalls = new AgentCallBook();
 
 /**
- * v2.21.1+ 目标回合中的 agent→agent 消息押后队列(owner 2026-08-28「miniapp 发
- * 不到 backend」实锤)。CC 2.1.247 对回合中到达的 channel 通知**分窗口处置**:
- * 工具执行窗口会 queue-operation 排队到回合后浮出(tmp 对照实验证实),但回合
- * 起始的推理流窗口里到达的通知被静默丢弃(miniapp 08:00:22 → backend 回合始于
- * 08:00:05、首个 assistant 输出 08:00:49,消息永远没落 jsonl)。CC 内部窗口我们
- * 管不了 → bridge 侧根治:目标在回合中就不 ws.send,压进本队列,Stop hook 后
- * 统一投递;每分钟兜底扫描(Stop 丢失/持续忙)。落盘、30 分钟提醒 / 24 小时放弃见 bridge/held-queue.ts。
+ * 目标回合中的 agent→agent 消息押后队列:CC 回合起始的推理流窗口里到达的 channel 通知会被静默丢弃（工具执行窗口才会排队）,
+ * 那个窗口 bridge 管不了,所以目标在回合中就不 ws.send,压进本队列,Stop hook 后统一投递;每分钟兜底扫描(Stop 丢失/持续忙)。
+ * 落盘、30 分钟提醒 / 24 小时放弃见 bridge/held-queue.ts；`git log -S heldLocalMsgs` 有当时的实测。
  */
 const heldLocalMsgs = new HeldQueue();
+turnCuts.arrivals.atLeast(heldLocalMsgs.maxArrivalSeq()); // 押着的消息的号给新号垫底：号文件丢了、时钟又往回拨，也不会发出比它们小的号
 // Pi 的停：经 ws 请扩展 abort()、等回执；作废的消息回显给发送方，并从下面这几本欠账上销掉（bridge/pi-abort.ts）
 setExtensionSocket((ch) => clients.get(ch)?.ws, { deliver, ownerId: primaryOwnerId, hold: (env) => void heldLocalMsgs.holdEnv(env),
   books: () => ({ pendingReplies, pendingThreads, pendingInterAgentMsg, pendingAgentCalls, pendingApiRequests }) });
@@ -431,7 +429,7 @@ function flushHeldLocalMsgs(channelId: string, reason: string): Promise<void> {
   return flushHeld({
     held: heldLocalMsgs, compacting: (a) => getAgentStatus(a) === "compacting", working: localAgentWorking, isHumanRequest, walled: async (c) => !!(await quotaWall()?.gates(c)),
     client: (c) => clients.get(c), deliver: deliverLocalInOrder, touch: (c, env) => pendingAgentCalls.touchDelivered(c, env),
-    stoppedAt: (c) => turnCuts.stoppedAt(c),
+    stopMark: (c) => turnCuts.stopMark(c),
   }, channelId, reason);
 }
 
@@ -781,9 +779,8 @@ function syncMasterWatcher(discord: Client): void {
 }
 
 /**
- * 同一频道的投递按到达顺序整段串行:中间有渲染、抢占(等 1.2s 收尾)、判忙抓屏几处 await,不串行的话后到的消息会先
- * ws.send——owner 语音连发的顺序就乱了(tests/keyed-serial.test.ts)。deliver() 到这里之间没有 await,入队顺序即到达顺序。
- */
+ * 同一频道的投递按到达顺序整段串行:中间有渲染、抢占(等 1.2s 收尾)、判忙抓屏几处 await,不串行的话后到的消息会先 ws.send——owner 语音连发的顺序就乱了
+ * (tests/keyed-serial.test.ts)。deliver() 到这里之间没有 await,入队顺序即到达顺序。 */
 /** 额度闸押后：对调用方同样是「已受理、排队中」，出闸时按序补投（bridge/quota-wall.ts） */
 function holdForQuotaWall(env: RouterEnvelope, agent: string, from: string | undefined): RouterDelivery {
   console.log(`⏸ 消息押后(${agent} 额度闸): 来自 ${from ?? "?"},队列 ${heldLocalMsgs.holdEnv(env, "quota_wall")} 条`);
@@ -791,6 +788,7 @@ function holdForQuotaWall(env: RouterEnvelope, agent: string, from: string | und
 }
 const localSendOrder = createKeyedSerial();
 function deliverLocalInOrder(env: RouterEnvelope, to: RouterLocalEndpoint, stillWanted?: () => boolean): Promise<RouterDelivery> {
+  env.meta.arrivalSeq ??= turnCuts.arrivals.take(); // 到达即领号（押过再投的沿用原号）：「停」与开口谁先到只比它，bridge/preempt.ts
   return localSendOrder(to.channelId, () => deliverToLocal(env, to, stillWanted));
 }
 
@@ -839,16 +837,15 @@ async function deliverToLocal(env: RouterEnvelope, to: RouterLocalEndpoint, stil
   // 人类 request 到达、目标主回合在跑 → 先打断再投(后一条优先,随时补充);停字三种运行时都打断。记 cut、抬头见 bridge/preempt.ts。
   // agent↔agent、peer(对方实例的 agent 请求)、bridge 系统消息、response 不抢占;复核时画面刚变成撞墙等待(没发键)→ 同样押住
   if (isHumanRequest(env) && (await preemptForHuman(env, to.channelId, evAgent)) === "wall_wait") { const h = await holdAtWallWait(env, to, evAgent, stillWanted, true); if (h) return h; }
-  if (env.meta.interruptNote) meta.interrupt_note = "true"; // 历史只剥真由 bridge 加的抬头(lib/inbound-body.ts),用户手写的同样开头不剥
-  const content = await renderContentForLocal(env); // 抢占之后渲染:抬头(env.meta.interruptNote)是抢占时写的
+  const bare = await renderContentForLocal({ ...env, meta: { ...env.meta, interruptNote: undefined } }); // 抬头 ws.send 前一刻才拼(bridge/preempt.ts noteAtSend)
   // agent→agent 与带 waitForIdle 的通知（班子通知等）目标回合中就不发、押到 Stop(回合中通知有丢弃窗口);人类/API 消息上面已抢占 C-c 不押;压缩中一律押(压缩结束放行)
   // 压缩看 turnState(事件态或画面):permission-watcher 8 秒一扫才置 compacting,只看事件态会在压缩开头几秒把消息投进去
   const turn = await probeTurn(to.channelId, evAgent, CONTROL_CHANNEL_ID);
   const compactingNow = turn.main === "compacting";
-  const busy = holdsUntilIdle(env.from.kind, env.meta.waitForIdle, turn);
   // flush 投递途中(上面几处 await)这条已被别处从押后队列摘掉(kill 清理 / 24 小时放弃):既不押回(会复活)也不发
   // 押着的打断收尾提醒:之后又被打断 / 叫停过、那件事已续上、过了 30 分钟,就不投了(turnCuts.noticeWanted)
   const wallHold = await quotaWall()?.holds(env, to.channelId); // 额度闸：agent / bridge 消息押到出闸
+  const busy = holdsUntilIdle(env.from.kind, waitsForIdle(env, to.channelId), turn); // 停之前到的人类消息忙时也押;到 ws.send 之间没有 await
   if ((stillWanted && !stillWanted()) || !turnCuts.noticeWanted(env) || !resumeStillWanted(env)) return { envelope: env, outcome: { kind: "dropped", reason: "已从押后队列撤下" } };
   if (!busy && wallHold) return holdForQuotaWall(env, evAgent, meta.user);
   if (busy) {
@@ -859,7 +856,7 @@ async function deliverToLocal(env: RouterEnvelope, to: RouterLocalEndpoint, stil
   }
   try {
     if (turnCuts.takeAfterInterrupt(to.channelId)) meta.after_interrupt = "true"; // Codex 被打断后 queue 会卡住,这条改打进 TUI
-    to.ws.send(JSON.stringify({ type: "message", content, meta }));
+    to.ws.send(JSON.stringify({ type: "message", content: noteAtSend(env, to.channelId, bare, meta), meta }));
     noteDelivered(to.channelId, env.from, Date.now(), turn.main === "idle"); // 触发这一轮的是谁（撞错后回程只让「接着做」那一轮结算，bridge/stop-settle.ts）
     turnCuts.noteDelivered(env, to.channelId, meta.after_interrupt === "true", turn.main === "busy");
     emitEvent({ agent: evAgent, chatId: to.channelId, type: "chat_message", data: inboundEventData(env, meta) }); // 入站镜像给网页（bridge/inbound-event.ts）
@@ -1350,6 +1347,7 @@ discord.on("messageCreate", async (msg: DiscordMessage) => {
 
   const client = clients.get(channelId);
   if (!client) return;
+  stampArrival(msg); // 到达即领号：下面下载附件、收尾状态消息都有 await，和「停」谁先到只比它（bridge/arrival-stamp.ts）
 
   let content = msg.content
     .replace(new RegExp(`<@!?${getBotUserId()}>`, "g"), "")
@@ -1466,7 +1464,7 @@ discord.on("messageCreate", async (msg: DiscordMessage) => {
       messageId: msg.id,
       triggerKind: "user_discord",
       ts: msg.createdAt.toISOString(),
-      threadId: newThreadId(),
+      threadId: newThreadId(), arrivalSeq: stampArrival(msg), // 上面进来时领的号
       attachments: attachmentPaths.length > 0 ? attachmentPaths : undefined,
     },
   };
@@ -2707,7 +2705,7 @@ async function handleHookRequest(req: Request): Promise<Response> {
         updateStatsDashboard(discord);
         // v2.6.0+ 事件埋点：turn 结束（在去抖/通知判断之前 —— 事件流忠实反映 hook）
         const evAgent = await agentLabelForChannelAsync(channelId);
-        if (body.interrupt) await onCodexInterrupt(channelId, evAgent); // Codex 被打断(typing-hook 报成 StopFailure):先记 cut 再置 done
+        if (body.interrupt) await onCodexInterrupt(channelId, evAgent, arrivalOf(req)); // Codex 被打断(typing-hook 报成 StopFailure):先记 cut 再置 done
         // v2.20.2+ 回合结束≠任务完成:后台还有活(subagent/bg shell)时带上
         // bgPending,web 端把绿勾换成「后台继续中」(owner 实报提前完成误导)
         const bgPending = hasActiveBgActivities(evAgent);
@@ -3033,7 +3031,7 @@ initApiRoutes({
 initHttpPeer({
   deliver, getClientWs: (channelId) => (clients.get(channelId)?.ws as any) ?? null,
   hold: (env) => void heldLocalMsgs.holdEnv(env),
-  handleApi: async (r) => (await handleTerminalApi(r, new URL(r.url))) ?? serveApiRequest(r, new URL(r.url)), // 中继路径模式的进程内 dispatch（relay-dispatch.ts）
+  handleApi: async (r) => (stampArrival(r), (await handleTerminalApi(r, new URL(r.url))) ?? serveApiRequest(r, new URL(r.url))), // 中继路径模式的进程内 dispatch（relay-dispatch.ts）；先领到达号
 });
 
 const CORS_ORIGIN_SETTING = process.env.BRIDGE_CORS_ORIGIN || "";
@@ -3283,12 +3281,10 @@ async function bridgeFetch(req: Request, server: { requestIP(r: Request): { addr
     const reqOrigin = req.headers.get("Origin");
     const crossOrigin = isCrossOrigin(reqOrigin, req.url, req.headers);
     const url0 = new URL(req.url);
+    if (req.method !== "GET") stampArrival(req); // 到达即领号（鉴权、读正文之前）：停止 / 开口 / 作答谁先到只比它（bridge/arrival-stamp.ts）
 
-    // v2.21.1+ 控制面非回环鉴权(security-audit P0,2026-09-01)。最前置,回环是
-    // 最强信任信号——本机 channel-server/manager/web-BFF/discord 全走回环,豁免
-    // 一切;非回环的裸路由 + ws 升级要 control token,/api/v1 交给自己的 Bearer。
-    // 实测 requestIP 对回环 http 与 ws-upgrade 都稳定返回 127.0.0.1(sandbox 验过),
-    // 判定不会把本机 agent 误拦。
+    // 控制面非回环鉴权,最前置:回环是最强信任信号——本机 channel-server/manager/web-BFF/discord 全走回环,豁免一切;
+    // 非回环的裸路由 + ws 升级要 control token,/api/v1 交给自己的 Bearer。requestIP 对回环 http 与 ws-upgrade 都返回 127.0.0.1(沙箱验过)。
     {
       const ip = server.requestIP(req);
       // 定来源并判本机：本机反代（带 XFF）与隧道请求都不算回环，控制面豁免与请求来源同一口径（bridge/relay-inbound.ts socketTrust）

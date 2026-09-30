@@ -19,7 +19,7 @@ export interface InterruptGateDeps {
    */
   wallWait?: (win: string) => Promise<boolean>;
   /** 按运行时声明发打断键（CC / Codex 是 Esc，Pi 是 C-c），返回实际发出的键 */
-  interrupt: (win: string, runtime: string | undefined, channelId: string, kind: "preempt" | "manual") => Promise<readonly string[]>;
+  interrupt: (win: string, runtime: string | undefined, channelId: string, kind: "preempt" | "manual", wanted?: () => boolean) => Promise<readonly string[]>;
   /** 这一次允不允许由 bridge 主动打断（Codex：channel-server 得会打字投递、上次 Stop 之后没抢占过） */
   allow?: (channelId: string, runtime: string | undefined, stop: boolean) => boolean;
   /** 抢占成功后的收尾（指标 + done/interrupt 事件 + 日志） */
@@ -29,7 +29,7 @@ export interface InterruptGateDeps {
 }
 
 /** preempt 的结果：fired = 发了键且画面确认停下了；否则 why 说明为什么没打断 */
-export type PreemptResult = { fired: true } | { fired: false; why: "cooldown" | "not_allowed" | "wall_wait" | "not_busy" | "no_keys" | "ineffective" };
+export type PreemptResult = { fired: true } | { fired: false; why: "cooldown" | "not_allowed" | "wall_wait" | "not_busy" | "no_keys" | "ineffective" | "withdrawn" };
 
 /** 打断之后等 CC 收尾一拍再投递：立刻投会混进垂死回合的尾流 */
 const SETTLE_MS = 1_200;
@@ -58,7 +58,7 @@ export function createInterruptGate(deps: InterruptGateDeps, cooldownMs = 4_000)
      * stop（停字）：人明确要停——不看 preemptOnHumanMessage（Pi 也打断）；离上一次发键不足最小间隔就等够再发（不丢这次停）；
      * 判据失效（unknown）也发键；只有确认空闲或压缩中才不发。中止走扩展 / ACP 宿主的（Pi、ACP Codex）不看 bridge 的忙闲，由运行时回空闲（no_keys）。
      */
-    preempt(channelId: string, agent: string, opts: { stop?: boolean } = {}): Promise<PreemptResult> {
+    preempt(channelId: string, agent: string, opts: { stop?: boolean; wanted?: () => boolean } = {}): Promise<PreemptResult> {
       return serial(channelId, async (): Promise<PreemptResult> => {
         const stop = !!opts.stop;
         const since = sinceKey(channelId);
@@ -81,9 +81,18 @@ export function createInterruptGate(deps: InterruptGateDeps, cooldownMs = 4_000)
           if (await deps.wallWait(win)) return { fired: false, why: "wall_wait" };
           if (!shouldFire((await deps.probe(win, runtime, agent, channelId)).main)) return { fired: false, why: "not_busy" };
         }
+        if (opts.wanted && !opts.wanted()) return { fired: false, why: "withdrawn" }; // 等的这段时间里不需要了；发键那一刻 interrupt 自己再问一次
+        const prev = { at: lastKeyAt.get(channelId), manual: lastManual.has(channelId) };
         lastKeyAt.set(channelId, now());
         lastManual.delete(channelId);
-        const keys = await deps.interrupt(win, runtime, channelId, "preempt");
+        const keys = await deps.interrupt(win, runtime, channelId, "preempt", opts.wanted).catch((e: Error) => {
+          if (e.name !== "KeyWithdrawnError") throw e;
+          // 发键处撤回 = 一个键都没发：冷却 / 间隔还原，不然下一条普通消息碰上假冷却、不抢占
+          prev.at === undefined ? lastKeyAt.delete(channelId) : lastKeyAt.set(channelId, prev.at);
+          if (prev.manual) lastManual.add(channelId);
+          return null;
+        });
+        if (!keys) return { fired: false, why: "withdrawn" };
         if (!keys.length) return { fired: false, why: "no_keys" };
         deps.onPreempted(agent, channelId);
         await deps.sleep(SETTLE_MS);

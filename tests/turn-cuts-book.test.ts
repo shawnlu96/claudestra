@@ -142,6 +142,14 @@ describe("终端里自己按的打断（P1-1 第二条）", () => {
     expect(b.get("ch")?.cause).toBe("terminal");
     expect(b.interruptHold("ch")).toBe("stopped");
   });
+  test("bridge 记了要发键、最后撤回没发（T13e r2）：还原，随后终端里真人的打断照样记成 owner 的停", async () => {
+    const { b, at, tick } = book();
+    b.noteKeySent("ch", "preempt")();
+    tick(400);
+    b.onEvent(interrupted(at()));
+    await flush();
+    expect(b.interruptHold("ch")).toBe("stopped");
+  });
   test("bridge 刚发过键 → 是自己的回声，不记", async () => {
     const { b, at, tick } = book();
     b.noteKeySent("ch", "preempt");
@@ -294,7 +302,11 @@ describe("对抗式第 3 轮（@57b5354）", () => {
     b.onEvent({ type: "terminal_input", ts: iso(T0), data: { stop: true }, chatId: "ch", agent: "a" });
     await flush();
     expect(b.interruptHold("ch")).toBe("stopped");
+    // 和叫停同一毫秒的终端输入判不出先后：按「停」在后，还停着（T13f 口径：拿不准不解除）
     b.onEvent({ type: "terminal_input", ts: iso(T0), data: { stop: false }, chatId: "ch", agent: "a" });
+    await flush();
+    expect(b.interruptHold("ch")).toBe("stopped");
+    b.onEvent({ type: "terminal_input", ts: iso(T0 + 1), data: { stop: false }, chatId: "ch", agent: "a" });
     await flush();
     expect(b.interruptHold("ch")).toBeNull();
   });
@@ -349,15 +361,15 @@ describe("Workflow 复核 wf2（@2968ec7f）", () => {
     expect(b.interruptHold("ch")).toBe("notice"); // 不再挡着「停」；外源那次抢占的收尾提醒照常
   });
 
-  test("stoppedAt：最近一次叫停的时刻，owner 再开口之后也留着（押在它之前的消息投出去时照样加抬头）；落盘", () => {
+  test("stopMark：最近一次叫停的时刻，owner 再开口之后也留着（押在它之前的消息投出去时照样加抬头）；落盘", () => {
     const path = join(mkdtempSync(join(tmpdir(), "turn-cuts-")), "turn-cuts.json");
     const { b, tick } = book({ path });
-    expect(b.stoppedAt("ch")).toBeUndefined();
+    expect(b.stopMark("ch")).toBeUndefined();
     ownerStop(b);
     tick(1_000);
     b.noteHuman("ch", false);
-    expect(b.stoppedAt("ch")).toBe(T0);
-    expect(book({ path }).b.stoppedAt("ch")).toBe(T0);
+    expect(b.stopMark("ch")?.at).toBe(T0);
+    expect(book({ path }).b.stopMark("ch")?.at).toBe(T0);
   });
 
   test("adv5：叫停记录解除超过 24 小时才清（押后消息最长押 24 小时）；没解除的一直留着", () => {
@@ -367,10 +379,10 @@ describe("Workflow 复核 wf2（@2968ec7f）", () => {
     b.noteHuman("ch", false);
     tick(23 * 3_600_000);
     b.record({ channelId: "other", agent: "o", cause: "preempt", tools: { inflight: [] } }); // 记新 cut 时顺带清理
-    expect(b.stoppedAt("ch")).toBe(T0);
+    expect(b.stopMark("ch")?.at).toBe(T0);
     tick(2 * 3_600_000);
     b.record({ channelId: "other", agent: "o", cause: "preempt", tools: { inflight: [] } });
-    expect(b.stoppedAt("ch")).toBeUndefined();
+    expect(b.stopMark("ch")).toBeUndefined();
     b.record({ channelId: "ch2", agent: "a2", cause: "stopword", tools: { inflight: [] } });
     tick(30 * 24 * 3_600_000);
     b.record({ channelId: "other", agent: "o", cause: "preempt", tools: { inflight: [] } });
@@ -384,7 +396,7 @@ describe("Workflow 复核 wf2（@2968ec7f）", () => {
     b.noteHuman("ch", false);
     tick(25 * 3_600_000);
     b.noteHuman("ch2", false);
-    expect(b.stoppedAt("ch")).toBeUndefined();
+    expect(b.stopMark("ch")).toBeUndefined();
   });
 
   test("adv5：agent 被 kill（forget）：打断 / 叫停记录都删，落盘也删；别的频道不受影响", () => {
@@ -395,12 +407,12 @@ describe("Workflow 复核 wf2（@2968ec7f）", () => {
     b.record({ channelId: "ch2", agent: "a2", cause: "stopword", tools: { inflight: [] } });
     b.forget("ch");
     expect(b.get("ch")).toBeUndefined();
-    expect(b.stoppedAt("ch")).toBeUndefined();
+    expect(b.stopMark("ch")).toBeUndefined();
     expect(b.interruptHold("ch")).toBeNull();
     expect(b.deliveredMessage("ch", "m1")).toBeUndefined();
     const reloaded = book({ path }).b;
     expect(reloaded.get("ch")).toBeUndefined();
-    expect(reloaded.stoppedAt("ch")).toBeUndefined();
+    expect(reloaded.stopMark("ch")).toBeUndefined();
     expect(reloaded.interruptHold("ch2")).toBe("stopped");
   });
 

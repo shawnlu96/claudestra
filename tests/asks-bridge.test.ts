@@ -21,6 +21,7 @@ import { unwrapChannelMessage } from "../src/lib/session-history.js";
 import { at, guest, LEGACY_STAR_TOKEN, owner, ownerWithMaster, PEER } from "./asks-test-kit.js";
 import { tempLedgerPath } from "./ledger-test-helpers.js";
 import { turnCuts } from "../src/bridge/turn-cuts.js";
+import { arrivalOf, stampArrival } from "../src/bridge/arrival-stamp.js";
 
 
 const ws = { tag: "ws" } as never;
@@ -114,6 +115,34 @@ describe("作答 → 答复不抢占", () => {
     const after = getAsk(openLedger(path), a.id)!;
     expect(after).toMatchObject({ state: "answered", outboxMessageId: env.meta.messageId, answer: { via: "web_chat", choices: ["[button:go]"] } });
     expect(listEvents(openLedger(path), { project: "p" }).map((e) => e.kind)).toEqual(["ask", "decision"]);
+  });
+
+  // T13f r1 P1-1：号在请求进 bridge 时领（bridge/arrival-stamp.ts）。先到的作答卡在读正文 / 查 ask 的 await 里，后到的停先记下：作答不解除它
+  const stopLandsFirst = async (stamp: object, run: () => Promise<unknown>, release = () => {}) => {
+    const early = stampArrival(stamp); // bridge.ts fetch / interactionCreate 第一行
+    const p = run();
+    turnCuts.record({ channelId: "111", agent: "agent-x", cause: "manual", tools: { inflight: [] } }); // 后到的停：号更大，先走完
+    release();
+    await p;
+    try {
+      expect(delivered.at(-1)?.meta.arrivalSeq).toBe(early);
+      return turnCuts.interruptHold("111");
+    } finally {
+      turnCuts.forget("111");
+    }
+  };
+  test("作答先到、停后到但先走完（T13f r1 P1-1）：卡片 / 聊天 / Discord 三个入口都按进来时的号，不解除后到的停", async () => {
+    let push = (_: string) => {};
+    const body = new ReadableStream({ start: (c) => void (push = (t) => (c.enqueue(new TextEncoder().encode(t)), c.close())) });
+    const card = new Request("http://x/api/v1/ledger/p/asks/a/answer", { method: "POST", body, duplex: "half" } as RequestInit);
+    const a = (await reply())!;
+    expect(await stopLandsFirst(card, () => handleAsksApi(card, `/ledger/p/asks/${a.id}/answer`, owner()), () => push(JSON.stringify({ choices: ["[button:go]"] })))).toBe("stopped");
+    await reply();
+    const chat = new Request("http://x/api/v1/agents/agent-x/messages", { method: "POST" });
+    expect(await stopLandsFirst(chat, () => answerFromChat({ agent: "agent-x", text: "[button:go]", principal: owner(), order: arrivalOf(chat) }))).toBe("stopped");
+    await reply("555");
+    const click = { message: { id: "d1" }, user: { id: "u1", username: "owner" }, editReply: async () => {}, followUp: async () => {} };
+    expect(await stopLandsFirst(click, () => answerDiscordInteraction(click, "555", "[button:go]"))).toBe("stopped");
   });
 
   test("owner 叫停后在卡片上作答也算又开口了：解除这个 agent 的「停」（wf2 classify-merge-9）", async () => {

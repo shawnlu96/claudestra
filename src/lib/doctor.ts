@@ -536,7 +536,7 @@ export async function runDoctor(repoRoot: string): Promise<Check[]> {
     checkBridge(repoRoot),
     checkIntegration(repoRoot),
     checkAgents(), import("./doctor-pending.js").then((m) => m.checkPendingOps(repoRoot)), // 做到一半的 create / kill / rename / update 与孤儿窗口、频道
-    import("./doctor-acp.js").then((m) => m.checkCodexAcp()),
+    import("./doctor-acp.js").then((m) => m.checkCodexAcp()), import("./doctor-arrival.js").then((m) => m.checkArrivalSeq()), // 两个 bridge 共用状态目录
     checkGitHead(repoRoot),
     checkWorktreeClean(repoRoot),
     checkWebBuild(repoRoot),

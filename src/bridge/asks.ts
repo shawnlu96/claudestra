@@ -20,6 +20,7 @@ import { OwnerPresence } from "../lib/owner-presence.js";
 import { readPrincipals } from "../lib/principals.js";
 import { readRegistryAgents, type RegistryAgent } from "../lib/registry.js";
 import { matchStopWord } from "../lib/stop-words.js";
+import type { Order } from "../lib/arrival-order.js";
 import { emitEvent } from "./event-bus.js";
 import { ledgerDb } from "./ledger-feed.js";
 import { ownerChatIds } from "./push/dispatcher.js";
@@ -210,7 +211,7 @@ export async function answerTarget(a: Ask): Promise<Target> {
 const echoOf = (askId: string, e: { text: string; wire?: string }) => ({ askId, echo: e.text, ...(e.wire ? { wire: e.wire } : {}) });
 
 /** bridge 发给 agent 的一封不抢占的消息：在线就 deliver，不在线或出错进押后队列。trigger：owner 的答复是 ask_answer，其余是 bridge_synth */
-export async function sendCalm(from: Endpoint, to: Target, intent: Envelope["intent"], content: string, askId: string, trigger: TriggerKind): Promise<string> {
+export async function sendCalm(from: Endpoint, to: Target, intent: Envelope["intent"], content: string, askId: string, trigger: TriggerKind, arrivalSeq?: number): Promise<string> {
   const d = deps!;
   const live = d.clients.get(to.channelId);
   const env: Envelope = {
@@ -219,7 +220,7 @@ export async function sendCalm(from: Endpoint, to: Target, intent: Envelope["int
     intent,
     content,
     meta: { messageId: newMessageId("ask"), triggerKind: trigger, ts: new Date().toISOString(), threadId: newThreadId(), waitForIdle: true, askId, skipInterAgentWatchdog: true,
-      ...(trigger === "ask_answer" ? { askEcho: echoOf(askId, answerEcho(content)) } : {}) },
+      ...(trigger === "ask_answer" ? { askEcho: echoOf(askId, answerEcho(content)) } : {}), ...(arrivalSeq !== undefined ? { arrivalSeq } : {}) },
   };
   if (live) {
     const r = await d.deliver(env);
@@ -244,6 +245,8 @@ export interface AnswerInput {
   final?: boolean;
   /** 附件引用（指派事项「完成」时附的说明图等），原样存进答案 */
   atts?: AskAtt[];
+  /** 作答请求到达 bridge 时领的号（bridge/arrival-stamp.ts，入口第一个 await 之前）；没给就在这里现领 */
+  order?: Order;
 }
 
 /** 作答后要不要回投给某个 agent：只有 agent 发起的才回投；人 / 系统发起的、指派事项只记账（T28 §2.5 第 5、6 行） */
@@ -280,6 +283,7 @@ export function setPrepareAssigned(fn: typeof prepareAssigned): void {
  */
 export async function commitAnswer(i: AnswerInput): Promise<Ask> {
   if (!deps) throw new Error("asks 未初始化");
+  const order = i.order ?? turnCuts.arrivals.order(); // 和「停」谁先到只比它：入口领的号（鉴权、查 ask 都在它之后）
   const labels = i.picks.map((p) => p.label);
   // 作答的不是 owner 本人（guest）：原话不进台账 decision 的 text（ledger-asks.ts answerAsk）
   const who = { principal: i.principal, device: i.device, ...(isOwnerSource(i.from) ? {} : { external: true }) };
@@ -296,8 +300,8 @@ export async function commitAnswer(i: AnswerInput): Promise<Ask> {
   }
   const to = await answerTarget(a);
   // owner 答卡片也是开口：解除这个 agent 上的「停」（答复带 waitForIdle，不经抢占那条路）；选的 / 写的是停字就不解除（wf2 classify-merge-9）
-  if (isOwnerSource(i.from)) turnCuts.noteHuman(to.channelId, matchStopWord(i.original ?? [...labels, i.text].filter(Boolean).join(" ")).stop);
-  const outbox = await sendCalm(i.from, to, "response", answerContent(a, i.picks, i.text, i.original, to), a.id, "ask_answer");
+  if (isOwnerSource(i.from)) turnCuts.noteHuman(to.channelId, matchStopWord(i.original ?? [...labels, i.text].filter(Boolean).join(" ")).stop, order);
+  const outbox = await sendCalm(i.from, to, "response", answerContent(a, i.picks, i.text, i.original, to), a.id, "ask_answer", order.seq);
   patchAsk(askDb(), a.id, { outboxMessageId: outbox, ...(to.redirected ? { extra: { redirectedTo: to.redirected } } : {}) });
   if (to.redirected) console.log(`↪ ask ${a.id} 的发起方 ${a.fromAgent} 不在了，答复改投 ${to.redirected}`);
   if (a.state === "answered" && i.via !== "discord" && a.discordMessageIds.length && deps.editDiscord) {

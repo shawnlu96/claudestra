@@ -26,6 +26,7 @@ import { parseAuqPane } from "../lib/auq-pane.js";
 import { recordMetric } from "../lib/metrics.js";
 import { describeKeys } from "../lib/runtimes/window-ops.js";
 import { manualInterrupt } from "./preempt.js";
+import { arrivalOf, stampArrival } from "./arrival-stamp.js";
 import {
   tmuxCapture,
   windowTarget,
@@ -401,11 +402,11 @@ async function triggerSaveCompact(interaction: any, targetChannelId: string, run
 }
 
 /**
- * 挂上 interactionCreate 监听。只调一次（bridge.ts 在 new Client 之后、login 之前，原位置）。
- * 处理本体单独成函数：包在这里面会让闸门把它算成两个超长函数。
+ * 挂上 interactionCreate 监听。只调一次（bridge.ts 在 new Client 之后、login 之前，原位置）。处理本体单独成函数：包在这里面会让闸门把它算成两个超长函数。
+ * 到达即领号（鉴权之前，领了不用也无妨）：停止 / 答卡之后还要查 registry、deferUpdate，和「停」谁先到只比它（bridge/arrival-stamp.ts）
  */
 export function registerInteractionHandlers(discord: Client, deps: InteractionDeps): void {
-  discord.on("interactionCreate", (interaction: Interaction) => handleInteraction(discord, deps, interaction));
+  discord.on("interactionCreate", (interaction: Interaction) => (stampArrival(interaction), handleInteraction(discord, deps, interaction)));
 }
 
 async function handleInteraction(discord: Client, deps: InteractionDeps, interaction: Interaction): Promise<void> {
@@ -466,7 +467,7 @@ async function handleInteraction(discord: Client, deps: InteractionDeps, interac
         const listResult = await runManager("list");
         const agent = (listResult.agents || []).find((a: any) => a.channelId === channelId);
         if (agent) {
-          const r = await manualInterrupt(channelId, windowTarget(agent.name), agent.runtime, agent.name, "slash").catch((e: Error) => e);
+          const r = await manualInterrupt(channelId, windowTarget(agent.name), agent.runtime, agent.name, "slash", { owner: true }, arrivalOf(interaction)).catch((e: Error) => e);
           if (r instanceof Error) return void (await interaction.reply(`❌ 发送打断键失败: ${r.message}`));
           const keys = r.keys;
           if (!keys.length) return void (await interaction.reply(r.wall ? `⏸ ${agent.name} ${wallWaitRefusal(r.wall)}` : r.deduped ? `⏳ ${agent.name} 刚被打断过` : `💤 ${agent.name} 当前空闲，无需打断`));
@@ -797,8 +798,7 @@ async function handleInteraction(discord: Client, deps: InteractionDeps, interac
         const targetChannelId = id.slice("interrupt:".length);
         console.log(`⚡ 打断按钮点击: channel=${targetChannelId}`);
         try {
-          // master (CONTROL_CHANNEL_ID) route 到 master:0，
-          // 但它不在 registry.json 里 —— 直接认定目标是 master:0，不用查 registry
+          // master (CONTROL_CHANNEL_ID) route 到 master:0，但它不在 registry.json 里 —— 直接认定目标是 master:0，不用查 registry
           const isMasterTarget = targetChannelId === CONTROL_CHANNEL_ID;
 
           let targetWindow: string;
@@ -821,7 +821,7 @@ async function handleInteraction(discord: Client, deps: InteractionDeps, interac
           }
 
           console.log(`⚡ 打断 tmux window: ${targetWindow}`);
-          const r = await manualInterrupt(targetChannelId, targetWindow, targetRuntime, agentLabel, "button").catch((e: Error) => e);
+          const r = await manualInterrupt(targetChannelId, targetWindow, targetRuntime, agentLabel, "button", { owner: true }, arrivalOf(interaction)).catch((e: Error) => e);
           if (r instanceof Error) {
             console.error(`⚡ tmux send-keys 失败: ${r.message}`);
             return void (await interaction.followUp({ content: `❌ tmux 发送打断键失败: ${r.message}`, ephemeral: true }).catch(() => {})); // 回执发不出无妨：错误已记日志
@@ -1039,7 +1039,7 @@ async function handleInteraction(discord: Client, deps: InteractionDeps, interac
           messageId: interaction.message?.id || newMessageId("btn"),
           triggerKind: "user_discord",
           ts: new Date().toISOString(),
-          threadId: newThreadId(),
+          threadId: newThreadId(), arrivalSeq: stampArrival(interaction), // 点击进来时领的号（registerInteractionHandlers）
         },
       });
       return;

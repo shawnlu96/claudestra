@@ -10,6 +10,7 @@ import type { Envelope, LocalEndpoint } from "./router.js";
 import { HELD_MESSAGES_PATH } from "../lib/paths.js";
 import { PersistedMap } from "./persisted-map.js";
 import { readJsonStateSync } from "../lib/state-file.js";
+import { plausibleSeq } from "../lib/arrival-order.js";
 
 export interface HeldItem {
   env: Envelope;
@@ -65,8 +66,23 @@ export class HeldQueue extends PersistedMap<HeldItem[]> {
   constructor(path: string | null = HELD_PATH) {
     super(path, "押后消息", isQueue);
     for (const [ch, items] of [...this.entries()]) if (!items.length) this.deleteQuiet(ch);
+    for (const [ch, items] of [...this.entries()]) {
+      // 写坏的到达号（lib/arrival-order.ts plausibleSeq）去掉：垫底会让号不再递增；去掉后按押下时刻判是否叫停之前（held-flush.ts）
+      const bad = items.filter((i) => i.env.meta.arrivalSeq !== undefined && !plausibleSeq(i.env.meta.arrivalSeq));
+      if (!bad.length) continue;
+      console.error(`🚨 押后消息 ${ch} 里 ${bad.length} 条的到达号不合理，去掉`);
+      for (const i of bad) delete i.env.meta.arrivalSeq;
+      this.set(ch, items);
+    }
     const n = [...this.values()].reduce((s, q) => s + q.length, 0);
     if (n) console.log(`♻️ 恢复押后消息 ${n} 条（bridge 重启前没投出去的）`);
+  }
+
+  /** 押着的消息里最大的到达号：号文件丢了、时钟回拨时给新号垫底（bridge.ts 启动时，lib/arrival-order.ts atLeast） */
+  maxArrivalSeq(): number {
+    let max = 0;
+    for (const q of this.values()) for (const i of q) max = Math.max(max, i.env.meta.arrivalSeq ?? 0);
+    return max;
   }
 
   override set(channelId: string, items: HeldItem[]): this {
