@@ -204,6 +204,7 @@ import {
 import { registerSlashCommands } from "./bridge/slash-commands.js";
 import { registerInteractionHandlers } from "./bridge/discord-interactions.js";
 import { admitCaller, answerWhoami } from "./bridge/caller-identity.js";
+import { answerOrderTool } from "./bridge/order-tools.js";
 
 // ============================================================
 // 类型定义
@@ -545,14 +546,11 @@ function clearInterAgentPendingsForChannel(channelId: string): number {
 // ============================================================
 // v2.0.0+ 路由抽象
 // ============================================================
-import type {
-  LocalEndpoint as RouterLocalEndpoint,
-  UserEndpoint as RouterUserEndpoint,
-  ApiUserEndpoint as RouterApiUserEndpoint,
-  Envelope as RouterEnvelope,
-  Delivery as RouterDelivery,
+import {
+  type LocalEndpoint as RouterLocalEndpoint, type UserEndpoint as RouterUserEndpoint, type ApiUserEndpoint as RouterApiUserEndpoint,
+  type Envelope as RouterEnvelope, type Delivery as RouterDelivery,
+  endpointLabel, envelopeLabel, inboundBodyForLocal, isHumanRequest, newMessageId, newThreadId, parseChatId, renderApiInbound,
 } from "./bridge/router.js";
-import { endpointLabel, envelopeLabel, inboundBodyForLocal, isHumanRequest, newMessageId, newThreadId, parseChatId, renderApiInbound } from "./bridge/router.js";
 import { HeldQueue, unseenFrom } from "./bridge/held-queue.js";
 import { sweepHeldAges } from "./bridge/held-age.js";
 import { dropHeldOnKill, flushHeld } from "./bridge/held-flush.js";
@@ -2199,6 +2197,7 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
     case "codex_typein_failed": if (clients.get(msg.channelId)?.ws === ws) onCodexTypeInFailed(msg, heldLocalMsgs); break; // 下一条再打字；菜单挡住的押回
     case "forward_to_agent": ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, ...(await handleForward(ws, msg)) })); break;
     case "whoami": answerWhoami(ws, msg); break; // T85 调用方身份探针（bridge/caller-identity.ts）
+    case "order_tool": void answerOrderTool(ws, msg); break; // M2 / M3 派单工具：先认身份再写台账（bridge/order-tools.ts）
     case "fleet_state": case "fleet_run": ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, ...(await (await import("./bridge/fleet/ws.js")).handleFleetWs(msg, ws)) })); break;
     case "route_to_agent": {
       try {
