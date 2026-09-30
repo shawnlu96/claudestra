@@ -1,6 +1,7 @@
 /**
  * `ledger dag-rewrite / dag-approve / dag-bind / dag-show`：子 DAG 的重写、审批、绑卡与查看（T89 = L2，docs/design/feature-dag.md）。
- * 规矩与审批在 lib/ledger-dag-write.ts；这里只解析参数、查发起方频道（审批 ask 的答复要投回发起的 PM）。
+ * 规矩与审批在 lib/ledger-dag-write.ts；这里只解析参数、查发起方频道（审批 ask 的答复要投回发起的 PM），
+ * 直接生效的在事务提交后经 deps.notifyOwner（bridge 的系统通知，lib/notify.ts）告诉 owner——送不到就在结果里写「未通知」，由 PM 补发。
  */
 import { diffNodes, type DagCancel } from "../lib/ledger-dag-rules.js";
 import { approveDag, bindNode, rewriteDag } from "../lib/ledger-dag-write.js";
@@ -46,6 +47,17 @@ function needRev(c: LedgerCli): number {
   return rev;
 }
 
+/** 只在首次生效时发：重放不重发（首次结果已经说了送没送到） */
+async function tellOwner(c: LedgerCli, inform: string | null, duplicate: boolean): Promise<{ notified: boolean; why: string | null }> {
+  if (!inform || duplicate) return { notified: false, why: duplicate ? "重放不重发通知" : null };
+  if (!c.deps.notifyOwner) return { notified: false, why: "这个进程没有通知通道" };
+  try {
+    return (await c.deps.notifyOwner(inform)) ? { notified: true, why: null } : { notified: false, why: "bridge 没收下（见 undelivered-alerts.log）" };
+  } catch (e) {
+    return { notified: false, why: (e as Error).message };
+  }
+}
+
 async function dagRewrite(c: LedgerCli): Promise<Result> {
   const f = feature(c);
   const reg = await c.deps.loadRegistry();
@@ -55,10 +67,13 @@ async function dagRewrite(c: LedgerCli): Promise<Result> {
     cancel: cancels(c.p.flags.cancel), scopeChange: c.p.bools.has("scope-change"), askFrom: { agent: c.deps.actor, channelId },
   });
   const o = r.row;
-  const next = o.version
-    ? "已生效：把 inform 用 reply 的 ask.kind=inform 转告 owner"
-    : `待 owner 批（ask ${o.ask?.id ?? o.proposal?.askId}）：答复会投回你，收到后跑 dag-approve`;
-  return { ok: true, applied: !!o.version, version: o.version, proposal: o.proposal, askId: o.ask?.id ?? null, inform: o.inform, next, event: r.event, duplicate: r.duplicate };
+  const told = await tellOwner(c, o.inform, r.duplicate);
+  const next = !o.version ? `待 owner 批（ask ${o.ask?.id ?? o.proposal?.askId}）：答复会投回你，收到后跑 dag-approve`
+    : told.notified ? "已生效，已通知 owner"
+    : `已生效，未通知 owner（${told.why}）${r.duplicate ? "" : "：把 inform 用 reply 的 ask.kind=inform 转告"}`;
+  return {
+    ok: true, applied: !!o.version, version: o.version, proposal: o.proposal, askId: o.ask?.id ?? null, inform: o.inform, notified: told.notified, next, event: r.event, duplicate: r.duplicate,
+  };
 }
 
 function dagApprove(c: LedgerCli): Result {
