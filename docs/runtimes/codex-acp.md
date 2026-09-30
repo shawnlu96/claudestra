@@ -1,7 +1,7 @@
 # Codex over ACP（T60）
 
 Codex agent 默认经 [Agent Client Protocol](https://agentclientprotocol.com) 驱动
-[codex-acp](https://github.com/agentclientprotocol/codex-acp)（v2.0.0）。这样换来这些：
+[codex-acp](https://github.com/agentclientprotocol/codex-acp)（≥ 2.0.0，按本机 Codex 自动挑版本）。这样换来这些：
 - 切模型、切推理强度都不用重启；
 - 打断干净（`session/cancel`），忙时的消息能插进当前回合（`_session/steering`）；
 - 工具调用是流式的，进行中的命令也看得到；
@@ -25,7 +25,7 @@ Codex 的窗口仍承载宿主日志。`transport tmux` 可立即切回旧 TUI �
 | 默认迁移 PR | Codex 新建 / 收编默认 ACP；升级时装适配器、迁移 registry、重启旧线程；doctor 检查及 tmux 回退 | ACP 优先，条件不足暂退 tmux |
 | 删除 PR | 真机稳定并经审查后移除 Codex tmux 读屏 / 打字链路 | 仅 ACP |
 
-升级时无参数 `migrate` 只做旧 worker→agent 迁移（旧版 updater 也这样调用）；bridge 重载并开始监听后才用 `migrate --startup` 自动执行 ACP 迁移，避免宿主接到旧 bridge。迁移幂等补齐旧 registry：可用则记 `transport: "acp"` 并重启接旧 thread；固定版本适配器下载 / sha256、Codex `app-server` 探测任一失败时，未迁移的记录记 `transport: "tmux", acpPending: true`，已有 ACP 记录保持原样，不打断正在跑的回合。重启 ACP 接旧线程失败也自动再起 tmux；人工执行 `transport <agent> tmux` 会清除待迁移标记，此后保持回退。暂退 tmux 的 agent 不在每次 bridge 重启时自动反复试；条件恢复后人工重跑 `manager migrate --acp`。失败的重启留标记给下次迁移，doctor 会点名。
+升级时无参数 `migrate` 只做旧 worker→agent 迁移（旧版 updater 也这样调用）；bridge 重载并开始监听后才用 `migrate --startup` 自动执行 ACP 迁移，避免宿主接到旧 bridge。迁移幂等补齐旧 registry：可用则记 `transport: "acp"` 并重启接旧 thread；适配器下载 / 校验、Codex `app-server` 探测任一失败时，未迁移的记录记 `transport: "tmux", acpPending: true`，已有 ACP 记录保持原样，不打断正在跑的回合。重启 ACP 接旧线程失败也自动再起 tmux；人工执行 `transport <agent> tmux` 会清除待迁移标记，此后保持回退。暂退 tmux 的 agent 不在每次 bridge 重启时自动反复试；条件恢复后人工重跑 `manager migrate --acp`。失败的重启留标记给下次迁移，doctor 会点名。
 
 ## 架构
 
@@ -79,7 +79,8 @@ Codex 的 ACP 策略（`CODEX_ACP_CONTROL`）：
 | `adapter-proc.ts` | 起哪个 ACP agent（codex-acp / 沙箱里固定的本仓 stub，见 `stub.ts`）、它的环境（CODEX_PATH、full access、CODEX_CONFIG 挂 channel-server）、stdio 接成线路 |
 | `bridge-link.ts` | 宿主到 bridge 的 ws：register 带 transport=acp、abort:true；断了退避重连，被顶替也不退出 |
 | `tool-proxy.ts` | 回环工具代理：127.0.0.1 随机端口 + 一次性 token（在 BRIDGE_URL 里），吞 register、只转白名单请求类型，requestId 按连接改写 |
-| `install.ts` | 适配器安装：npm registry 包文件、版本钉死、sha256 写死，校验不过拒装 |
+| `resolve.ts` | 读 registry 元数据，挑能配本机 Codex 的最高正式版（≥ 2.0.0、tarball 只认 registry.npmjs.org、范围只认 `^`/`~`/精确） |
+| `install.ts` | 适配器安装：按 registry 的 `dist.integrity` 验包，装进 `codex-acp-<版本>/`，`current.json` 指针决定用哪个 |
 
 bridge 那头：`bridge/acp-link.ts`（宿主的帧 → watcher 推送 / 卡片 / 配置；卡上的按钮经 `POST /agents/:name/answer {kind:"acp"}` 回宿主）、`bridge/acp-state.ts`（哪些频道此刻由宿主登记：打断走 abort 帧、watcher 不尾读 rollout、权限巡检 / Codex 回合失败收尾 / Stop 的屏幕复核都跳过它的窗口）。
 
@@ -97,13 +98,20 @@ bridge 那头：`bridge/acp-link.ts`（宿主的帧 → watcher 推送 / 卡片 
   - **不许**用软链或复制 `auth.json`：ChatGPT 登录的 refresh token 会轮换，一边刷新，另一边就失效。
   - `~/.codex/sessions` 是共享的，和 `~/.claude` 一样。
 - **AIR 与终端输出。** 宿主声明了 AIR `sessionFailure`（所有回合失败都结构化，不只是额度），同时声明 `clientCapabilities._meta.terminal_output_delta: true`——声明 AIR 而不声明它，命令输出就收不到了。
-- **适配器安装。** codex-acp 的 GitHub release 上没有任何附件，所以 `manager acp-install` 直接下载 npm registry 上的 `codex-acp-2.0.0.tgz`（269KB），版本钉死，sha256 写死在 `lib/acp/install.ts`（`a8d48bdf70c0e3e585abbdce19f78765450d8fa6ada1da0fd53508e64315905b`），校验不过就拒装、不回退到 npm；只解出 `dist/index.js` 放到状态目录，用我们自己的 bun 跑，并记下它的哈希——宿主每次启动都核对，装好后被改过就拒起。设了 `CODEX_PATH` 它不会加载那份 344MB 的 `@openai/codex`；不进 package.json。
-- **Codex 升级。** Claudestra 不自动升 Codex（launcher 只自动升 Claude Code）。迁移 / 新建 / 重启先用 `codex app-server --help` 探测能力，不能只信退出码：旧 CLI 会把未知子命令当提示词并以 0 退出。宿主还会核对本机 Codex 与适配器配套版本；不匹配先告警。升适配器要改 `install.ts` 的版本和 sha256，再重跑 `acp-install`。
-  - 配套范围只有一份：`install.ts` 的 `CODEX_ACP_PAIRS`。宿主告警、网页更新提示、`codex-update` 端点和 doctor 都读它。
-  - 不配套时宿主只告警、照常起；readiness（`checkAcpReady`）也不看版本。但 restart 时如果接线程失败，会退回 tmux TUI（`manager/acp-lifecycle.ts recoverFailedAcpLaunch`，registry 改成 `transport:"tmux"` 加 `acpPending`）。所以错配真让 app-server 协议对不上时，表现可能是某次 restart 后悄悄回落到 tmux，而不是报错。doctor 的「Codex 与适配器配套」会报 warn，只报告，不改行为。
-  - 网页横幅的规则（`lib/update-hints.ts`）：
-    - npm 上的新版不在配套范围里：只给文字，不给「更新并重启」按钮，端点也回 409；
-    - 已装版本本身就不配套时，ACP agent 的「重启生效」同样只给文字；
+- **适配器安装。** codex-acp 的 GitHub release 上没有任何附件，所以直接下 npm registry 上的包文件（2.0.x 约 270KB）：只解出 `dist/index.js` 放到状态目录的 `acp/codex-acp-<版本>/`，用我们自己的 bun 跑，并记下它的哈希——宿主每次启动都核对，装好后被改过就拒起。设了 `CODEX_PATH` 它不会加载那份 344MB 的 `@openai/codex`；不进 package.json。
+  - **信任链（改了 T60 的设计，待 Shawn 确认）**：原先版本钉死、sha256 写死在代码里，每个 Codex 小版本都要改代码发版。现在版本、配套范围（`dependencies["@openai/codex"]`）和 sha512 都取自 registry 元数据，下载后按 `dist.integrity` 比对，对不上拒装。信任 registry 的理由：Codex 本身就是 `npm install -g` 从同一个 registry 装的，registry 被攻破时 Codex 早已失守，写死 sha 不多挡什么。tarball 地址必须逐字是 `registry.npmjs.org/@agentclientprotocol/codex-acp/-/codex-acp-<该版本>.tgz`（只查前缀的话，元数据能把新版本指到旧版本的包上）；包文件边下边计数（8MB 上限，content-length 超限直接拒），解压也有 32MB 上限。
+  - **版本与回退**：`acp/current.json` 指针（tmp+rename 原子写，临时名带 pid + 随机数）决定用哪个版本；旧目录都留着，指针指回去即回退。
+  - **状态只有一处判定**：`install.ts currentCodexAcp` 返回 ok / null（什么都没装）/ broken，含入口文件和 entrySha256 校验；宿主起适配器、readiness、横幅、`codex-update` 端点、doctor 都读它。broken（指针读不出、指向的版本标记 / 入口 / 哈希对不上）时一律 fail-closed：不算已装、不算配套，网页不给「更新并重启」、端点 409，宿主告警提示跑 `acp-install`。
+  - **老安装**：没有指针、而且状态目录里只有 `codex-acp-2.0.0` 这一个版本目录，才认作老安装（配套 `^0.158.0`）；指针丢了而旁边还有别的版本目录就是 broken，不回退 2.0.0。老安装旁边要装新版本时，先把 2.0.0 写成显式指针，装的过程中它一直可用。
+  - **切指针只经对账**（`reconcileCodexAcp`）：按磁盘上此刻的 Codex 挑版本并装好（锁外，要联网；registry 不通、或最新候选下载 / 安装失败，就用本地已装、完好且配套的最高版本），再在 `acp/.pointer.lock`（`lib/file-lock.ts`）里重探一次 Codex——版本没变才切，变了就按新版本重来（最多三轮，之后明确报错）。`acp-install`、readiness、`codex-update` 收尾都走它，并发时最后对账的一方看到的是最终的 Codex，所以结果一定配套或明确报错，不靠长时间持锁。
+  - **谁来装**：`manager acp-install` 对账到能配本机 Codex 的最新适配器；readiness（迁移 / 新建 / 重启 / 切 transport）在没装、坏了或不配本机 Codex 时也对账，对账失败而已装的完好就沿用（离线不会判成未就绪）。
+- **Codex 升级。** Claudestra 不自动升 Codex（launcher 只自动升 Claude Code）。迁移 / 新建 / 重启先用 `codex app-server --help` 探测能力，不能只信退出码：旧 CLI 会把未知子命令当提示词并以 0 退出。宿主还会核对本机 Codex 与当前适配器的配套范围；不匹配先告警。
+  - 配套范围只有一份：当前适配器标记里的范围原文（`install.ts codexPairsWithAdapter`）。宿主告警、网页更新提示、`codex-update` 端点和 doctor 都读它。
+  - 网页「更新并重启」（`bridge/runtime-update.ts`）：npm latest 配当前适配器就直接 `npm install -g @openai/codex@<latest>`；不配但 registry 上有能配它的适配器时，先把适配器装进它自己的目录（不切指针）再装 Codex。两个分支在 npm 成功后都走同一个收尾：按磁盘上的 Codex 对账切指针（那一刻仍没装过任何适配器就跳过），成功才重启点按钮的 agent。适配器装失败 Codex 不动；Codex 装失败指针没动过，不用回滚；对账失败回 500 并说明。Codex 落盘到对账之间有很短的错配窗口，这期间别的 ACP agent 恰好重启会用上旧适配器 + 新 Codex，已知且可接受。其余在跑的 ACP agent 不动，下次重启自然用上新指针和新 Codex。
+  - 不配套时宿主只告警、照常起。但 restart 时如果接线程失败，会退回 tmux TUI（`manager/acp-lifecycle.ts recoverFailedAcpLaunch`，registry 改成 `transport:"tmux"` 加 `acpPending`）。所以错配真让 app-server 协议对不上时，表现可能是某次 restart 后悄悄回落到 tmux，而不是报错。doctor 显示当前适配器的版本和配套范围，「Codex 与适配器配套」报 warn，只报告，不改行为。
+  - 网页横幅的规则（`lib/update-hints.ts`，registry 的适配器列表缓存 6 小时，列表请求不等网络；冷缓存那一轮先显示「等适配器」，同时触发后台刷新，下一轮轮询出按钮）：
+    - npm 上的新版不在当前配套范围里、registry 上也找不到能配它的适配器：只给文字，不给「更新并重启」按钮，端点也回 409；找得到就照常给按钮；
+    - 已装版本本身就不配当前适配器、也找不到能配的：ACP agent 的「重启生效」同样只给文字（找得到时 restart 经 readiness 换适配器，照常给按钮）；
     - npm latest 是预发布版（带 `-alpha` 之类后缀）时不提示更新，端点也回 409。
   - 运行版本的来源：宿主每次起适配器之前，对 `CODEX_PATH` 异步跑一次 `--version` 并记下（最多等 10 秒，超时记「未知」照常起）（`codex-version.ts noteAcpCodexRunning`）。rollout 里的 `cli_version` 是建线程时的版本，不能用；initialize 只报适配器自己的版本。
 - **新建要跑一轮引导。** 新线程在第一轮之前不落盘，所以 create 时起一个短命的适配器，`session/new` 后跑一轮 `[claudestra:bootstrap]`（和 tmux 下 `codex exec` 引导同一个做法，历史里整轮丢掉），职责与频道规则经 `developer_instructions` 在这一轮写进线程。宿主之后一律接已有线程：适配器声明了 `session/resume` 就用它（不回放历史），否则 `session/load`；首条入站附职责前言（与 tmux 同一份）。

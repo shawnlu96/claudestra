@@ -212,6 +212,28 @@ export function parseVerdictWire(raw: unknown): WireResult<VerdictWire> {
   });
 }
 
+/** M2 ask: a question about one's own current order. options may be omitted (no choices); an empty or over-long one is refused. */
+export interface AskWire {
+  v: typeof ORDER_WIRE_VERSION;
+  orderId: string;
+  question: string;
+  options: string[];
+}
+
+const ASK_LIMITS = { question: 2000, options: 10, option: 200 } as const;
+
+export function parseAskWire(raw: unknown): WireResult<AskWire> {
+  return guarded(raw, () => {
+    const given = raw && typeof raw === "object" && !Array.isArray(raw) && !("options" in raw) ? { ...raw, options: [] } : raw;
+    const r = record(given, "$", ["v", "orderId", "question", "options"]);
+    if (!Array.isArray(r.options) || r.options.length > ASK_LIMITS.options) fail("options", `要是不超过 ${ASK_LIMITS.options} 项的数组`);
+    return {
+      v: version(r.v), orderId: matching(r.orderId, "orderId", ORDER_ID), question: text(r.question, "question", ASK_LIMITS.question, true),
+      options: (r.options as unknown[]).map((o, i) => text(o, `options[${i}]`, ASK_LIMITS.option)),
+    };
+  });
+}
+
 /** Local scheduler orders become wires field for field; only the names differ (dedupKey → orderId, fallbackWarning → fallback). */
 export function orderWireOf(o: WorkOrder, at: { repo?: string | null; pr?: number | null; dagVersion?: number | null } = {}): OrderWire {
   return {

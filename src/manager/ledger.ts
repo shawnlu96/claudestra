@@ -26,6 +26,7 @@ import { VERIFY_CMD } from "./ledger-verify.js";
 import { READ_CMDS } from "./ledger-read-cmds.js";
 import { TEAM_CMDS } from "./ledger-team-cmds.js";
 import { WRITE_CMDS, type CommandSpec } from "./ledger-write-cmds.js";
+import { LEND_CMDS } from "./ledger-lend-cmds.js";
 import { PEER_CMDS } from "./ledger-peer.js";
 import { STEP_CMDS } from "./ledger-step-cmds.js";
 import { SCHEDULER_CMDS } from "./ledger-scheduler-cmds.js";
@@ -55,6 +56,7 @@ const COMMANDS: Record<string, CommandSpec> = {
   verify: VERIFY_CMD,
   ...AUDIT_CMDS,
   ...PEER_CMDS,
+  ...LEND_CMDS,
   ...STEP_CMDS,
   ...SCHEDULER_CMDS,
   ...SCHEDULER_OBSERVE_CMDS,
