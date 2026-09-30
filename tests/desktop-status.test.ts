@@ -53,10 +53,11 @@ describe("overallStatus", () => {
 });
 
 describe("desktopLabels", () => {
-  test("不设就是三个 launchd 服务，launcher 最后", () => {
+  test("不设就是四个 launchd 服务，launcher 最后", () => {
     const l = desktopLabels({});
-    expect(l).toHaveLength(3);
-    expect(l[2]).toBe("com.claudestra.launcher");
+    expect(l).toHaveLength(4);
+    expect(l[2]).toBe("com.claudestra.scheduler");
+    expect(l[3]).toBe("com.claudestra.launcher");
   });
   test("开发实测可换成假 label", () => {
     expect(desktopLabels({ [LABELS_ENV]: " com.x-t18test.dummy , a.b " })).toEqual(["com.x-t18test.dummy", "a.b"]);

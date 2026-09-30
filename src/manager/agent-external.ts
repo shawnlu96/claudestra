@@ -1,5 +1,6 @@
 import { hasUnsafeDisplayChars } from "../lib/display-text.js";
 import { loadRegistry, saveRegistry, output, type Registry } from "./core.js";
+import { setWorkerKind } from "../lib/worker-kind.js";
 
 /** 按裸名 / 带前缀名找 registry 条目；找不到就 output 错误并返回 null（两个命令共用） */
 async function findAgent(bare: string): Promise<{ reg: Registry; key: string } | null> {
@@ -69,4 +70,20 @@ export async function cmdAgentExternal(name: string, mode: string) {
     stillSharedWith = peersSharingAgent(file.principals, bare);
   }
   output({ ok: true, agent: bare, external: on, removedFromPeers, stillSharedWith });
+}
+
+/** Owner can unhide a long-lived agent after an incorrect worker classification. */
+export async function cmdWorkerKind(name: string, kind: string): Promise<void> {
+  if (!name || (kind !== "main" && kind !== "worker")) {
+    output({ ok: false, error: "worker-kind <agent> main|worker" });
+    return;
+  }
+  const hit = await findAgent(name.replace(/^agent-/, ""));
+  if (!hit) return;
+  if (!setWorkerKind(hit.reg.agents, hit.key, kind)) {
+    output({ ok: false, error: `${hit.key} 不可标记为 worker` });
+    return;
+  }
+  await saveRegistry(hit.reg);
+  output({ ok: true, agent: hit.key, kind });
 }

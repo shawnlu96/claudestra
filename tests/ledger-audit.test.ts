@@ -236,6 +236,14 @@ describe("merge / live 没推进", () => {
     const deployed = entered("T1", "merge", NOW - 60 * MIN, [ev("T1", NOW - 10 * MIN, "deploy")]);
     expect(only(snap({ tasks: [deployed] }), "ship_stalled")).toEqual([]);
   });
+  test("调度合并结果不明：冻结让 ship_stalled 静音，merge_unknown 照样推 PM，结清后消失", () => {
+    const frozen = { tasks: [entered("T1", "merge", NOW - 60 * MIN)], queueFrozen: true, pms: [DISPATCH, PM] };
+    const found = only(snap({ ...frozen, mergeUnknown: [{ intentId: "merge-1", taskId: "T1", reason: "gh timeout", since: NOW - 5 * MIN }] }), "merge_unknown");
+    expect(found).toHaveLength(1);
+    expect(found[0]).toMatchObject({ notify: PM, taskId: "T1", key: expect.stringContaining("merge-1") });
+    expect(found[0].suggestion).toContain("scheduler-merge-resolve merge-1");
+    expect(only(snap({ ...frozen, mergeUnknown: [] }), "merge_unknown")).toEqual([]);
+  });
   test("合并队列冻结中：merge 停着不报，live 照报", () => {
     expect(only(snap({ tasks: [entered("T1", "merge", NOW - 60 * MIN)], queueFrozen: true }), "ship_stalled")).toEqual([]);
     expect(only(snap({ tasks: [entered("T1", "live", NOW - 61 * MIN)], queueFrozen: true }), "ship_stalled")).toHaveLength(1);
@@ -354,7 +362,7 @@ describe("收件人与去重 key", () => {
   test("什么都正常 → 没有异常，所有取到数的规则都算跑过", () => {
     const r = auditLedger(snap({ tasks: [entered("T1", "build", NOW - MIN)] }), NOW);
     expect(r.findings).toEqual([]);
-    expect(r.evaluated.length).toBe(10);
+    expect(r.evaluated.length).toBe(11);
     expect(rules(snap({ agents: [agent(PM)] }))).toEqual([]);
     expect(rules(snap())).toEqual(["orphan_executor"]); // 默认快照里的 agent-task-t1 没有任务
   });

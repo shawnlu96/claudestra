@@ -7,7 +7,9 @@ import { useCallback, useEffect, useSyncExternalStore } from "react";
 import { createPortal } from "react-dom";
 import { useCollabT } from "./collab-i18n";
 import { isWorking, type ActionMap, type AgentAction } from "./collab-action";
-import { useChatStore } from "../chat/chat-store";
+import { useChatStore, useChatStoreApi } from "../chat/chat-store";
+import { useChatNav } from "../chat/components/nav-context";
+import { closeCollab } from "./collab-nav";
 import { uiAgentName, type AgentSession } from "@/lib/chat/agents";
 import type { LineAction } from "./collab-action";
 import { fmtEventTime, participants, recentThree, reviewRows, stageSegments, type Participant, type TaskDetail } from "./collab-detail-model";
@@ -59,7 +61,7 @@ function useDetailHistory(narrow: boolean, id: string, onClose: () => void): () 
 const TONE = { red: s.red, amber: s.amber, neutral: s.neutral, green: s.green } as const;
 const EVENT_ICON: Record<string, IconName> = {
   stage: "zap", deliver: "gitPullRequest", review: "fileText", decision: "circleCheck",
-  deploy: "zap", verify: "shieldCheck", rollback: "rotateCcw", note: "history",
+  deploy: "zap", verify: "shieldCheck", rollback: "rotateCcw", note: "history", scheduler: "zap",
 };
 const ROLE: Record<Participant["role"], { label: string; icon: IconName; duty: string }> = {
   executor: { label: "执行者", icon: "code", duty: "按规格实现、写测试、开 PR、按审查意见返工" },
@@ -185,8 +187,11 @@ function RunningReviewerRow({ r, now, tr }: { r: RunningReviewer; now: number; t
   );
 }
 
-function PeopleSec(props: { d: TaskDetail; exec: AgentSession | undefined; action: LineAction; running: readonly RunningReviewer[]; now: number; tr: Tr }) {
-  const { d, exec, action, running, now, tr } = props;
+function PeopleSec(props: {
+  d: TaskDetail; exec: AgentSession | undefined; action: LineAction; running: readonly RunningReviewer[];
+  now: number; tr: Tr; open: (name: string) => void; agents: readonly AgentSession[];
+}) {
+  const { d, exec, action, running, now, tr, open, agents } = props;
   return (
     <Sec title={tr("参与者")}>
       <div className={s.ppl}>
@@ -207,6 +212,10 @@ function PeopleSec(props: { d: TaskDetail; exec: AgentSession | undefined; actio
               </div>
               <div className={s.d}>{tr(ROLE[p.role].duty)}</div>
               {p.role === "executor" && action.text && <div className={s.d}>{action.text}</div>}
+              {(agents.some((a) => a.name === uiAgentName(p.name)) ||
+                [d.sessions?.author, d.sessions?.reviewer].some((ref) => ref?.source !== "peer_claim" && uiAgentName(ref?.agent ?? "") === uiAgentName(p.name))) && (
+                <button type="button" className={s.btn} onClick={() => open(p.name)}>{tr("打开会话")} → {p.name}</button>
+              )}
             </div>
           </div>
         ))}
@@ -220,6 +229,9 @@ function Body(props: {
 }) {
   const { d, line, action, stream, running, now, tr } = props;
   const agents = useChatStore((st) => st.state.agents);
+  const store = useChatStoreApi();
+  const nav = useChatNav();
+  const open = (name: string) => { closeCollab(); void store.openAgent(uiAgentName(name)); nav.toContent(); };
   const exec = line.agent ? agents.find((a) => a.name === line.agent) : undefined;
   const working = isWorking(stream, exec?.busy);
   const pr = d.task.pr && /^https:\/\//.test(d.task.pr) ? d.task.pr : null;
@@ -233,7 +245,7 @@ function Body(props: {
       <CollabReplay d={d} tr={tr} />
       <StepsSec d={d} agents={agents} tr={tr} />
       <ReviewSec d={d} tr={tr} />
-      <PeopleSec d={d} exec={exec} action={action} running={running} now={now} tr={tr} />
+      <PeopleSec d={d} exec={exec} action={action} running={running} now={now} tr={tr} open={open} agents={agents} />
       {pr && (
         <div className={s.links}>
           <a className={s.btn} href={pr} target="_blank" rel="noreferrer">

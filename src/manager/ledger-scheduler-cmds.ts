@@ -1,10 +1,13 @@
 /** Narrow CLI entrypoints for durable scheduler facts; no arbitrary stage or owner action is exposed here. */
 import { INTENT_ACTIONS, INTENT_STATUSES, WORKFLOW_MODES, WORKFLOW_TEMPLATES, AUTHOR_FAMILIES } from "../lib/ledger-scheduler.js";
 import { planIntent, setWorkflow, settleIntent } from "../lib/ledger-scheduler-write.js";
+import { bindSchedulerSession, recordSessionRetirement, type SessionRole, type SessionTransport } from "../lib/scheduler-sessions.js";
+import { advanceMergeRun, beginMergeRun, MERGE_RESOLUTIONS, resolveMergeRun, type MergePhase, type MergeResolution } from "../lib/scheduler-merge.js";
 import { LedgerError } from "../lib/ledger-store.js";
 import { intFlag } from "./ledger-identity.js";
 import type { LedgerCli } from "./ledger-context.js";
 import type { CommandSpec } from "./ledger-write-cmds.js";
+import { setWorkerKind } from "../lib/worker-kind.js";
 
 const integer = (c: LedgerCli, flag: string): number => {
   const n = intFlag(c.p, flag);
@@ -56,6 +59,63 @@ export const SCHEDULER_CMDS: Record<string, CommandSpec> = {
         id: c.p.pos[1] ?? "", from: from as (typeof INTENT_STATUSES)[number], to: to as (typeof INTENT_STATUSES)[number],
         receipt: c.p.flags.receipt,
       }) };
+    },
+  },
+  "scheduler-session-bind": {
+    valued: ["role", "intent", "agent", "session", "family", "transport"], bools: [],
+    usage: "scheduler-session-bind <task> --role author|reviewer --intent <key> --agent <name> --session <id> --family claude|codex --transport acp|tmux|peer",
+    async run(c) {
+      const role = c.need("role"), family = c.need("family"), transport = c.need("transport");
+      if (!["author", "reviewer"].includes(role) || !AUTHOR_FAMILIES.includes(family as never) || !["acp", "tmux", "peer"].includes(transport)) {
+        throw new LedgerError("invalid", "session 角色、模型家族或 transport 不认识");
+      }
+      const agent = c.need("agent");
+      const bound = bindSchedulerSession(c.db, c.ctx(), {
+        taskId: c.p.pos[1] ?? "", role: role as SessionRole, intentId: c.need("intent"), agent,
+        sessionId: c.need("session"), family: family as "claude" | "codex", transport: transport as SessionTransport,
+        registryPath: c.deps.registryPath,
+      });
+      if (transport !== "peer") {
+        const reg = await c.deps.loadRegistry();
+        const priorKind = reg.agents[agent]?.kind;
+        if (!setWorkerKind(reg.agents, agent, "worker")) throw new LedgerError("conflict", "本机 session 已绑定但 registry 中无可标记的 worker；重跑绑定以补标");
+        if (priorKind !== reg.agents[agent].kind) await c.deps.saveRegistry(reg);
+      }
+      return { ok: true, ...bound };
+    },
+  },
+  "scheduler-session-retire": {
+    valued: ["role", "intent", "effect", "receipt"], bools: [],
+    usage: "scheduler-session-retire <task> --role author|reviewer --intent <key> --effect archive|kill --receipt <evidence>",
+    run(c) {
+      const role = c.need("role"), effect = c.need("effect");
+      if (!["author", "reviewer"].includes(role) || !["archive", "kill"].includes(effect)) throw new LedgerError("invalid", "session 角色或退役效果不认识");
+      return { ok: true, session: recordSessionRetirement(c.db, c.ctx(), {
+        taskId: c.p.pos[1] ?? "", role: role as SessionRole, intentId: c.need("intent"),
+        effect: effect as "archive" | "kill", receipt: c.need("receipt"),
+      }) };
+    },
+  },
+  "scheduler-merge-begin": {
+    valued: ["required-checks"], bools: [], usage: "scheduler-merge-begin <intent-key> --required-checks <name,name>",
+    run(c) { return { ok: true, ...beginMergeRun(c.db, c.ctx(), c.p.pos[1] ?? "", c.need("required-checks").split(",")) }; },
+  },
+  "scheduler-merge-step": {
+    valued: ["from", "to", "rev", "receipt", "merge-sha", "new-head"], bools: [],
+    usage: "scheduler-merge-step <intent-key> --from <phase> --to <phase> --rev N [--receipt <evidence>] [--merge-sha <full SHA>] [--new-head <full SHA>]",
+    run(c) { return { ok: true, run: advanceMergeRun(c.db, c.ctx(), {
+      intentId: c.p.pos[1] ?? "", from: c.need("from") as MergePhase, to: c.need("to") as MergePhase, rev: integer(c, "rev"),
+      receipt: c.p.flags.receipt, mergeSha: c.p.flags["merge-sha"], newHead: c.p.flags["new-head"],
+    }) }; },
+  },
+  "scheduler-merge-resolve": {
+    valued: ["outcome", "receipt"], bools: [],
+    usage: "scheduler-merge-resolve <intent-key> --outcome done|failed|cancelled --receipt <外部核对证据>（仅 PM / master / owner）",
+    run(c) {
+      const outcome = c.need("outcome");
+      if (!MERGE_RESOLUTIONS.includes(outcome as never)) throw new LedgerError("invalid", "--outcome 只能是 done / failed / cancelled");
+      const run = resolveMergeRun(c.db, c.ctx(), { intentId: c.p.pos[1] ?? "", outcome: outcome as MergeResolution, receipt: c.need("receipt") });
+      return { ok: true, run, next: "项目合并队列仍冻结；核对无其他 unknown 后用 ledger unfreeze 解冻" };
     },
   },
 };

@@ -109,10 +109,12 @@ describe("写命令判定（认主守卫 + 命令级写锁）", () => {
 
 describe("命令级写锁（只给会写 registry 的 ledger 子命令）", () => {
   test("task-new / task-set / import 拿锁；其余 ledger 写只过认主守卫不拿锁；别的命令照旧", () => {
-    for (const sub of ["task-new", "task-set", "import"]) expect(needsWriteLock("ledger", [sub])).toBe(true);
+    for (const sub of ["task-new", "task-set", "scheduler-session-bind", "import"]) expect(needsWriteLock("ledger", [sub])).toBe(true);
     for (const sub of ["stage", "note", "deliver", "review", "meta", "show"]) expect(needsWriteLock("ledger", [sub])).toBe(false);
     expect(isWriteInvocation("ledger", ["stage"])).toBe(true);
     expect(needsWriteLock("create", [])).toBe(true);
+    expect(needsWriteLock("worker-kind", ["agent-main", "main"])).toBe(true);
+    expect(isWriteInvocation("worker-kind", ["agent-main", "main"])).toBe(true);
     expect(needsWriteLock("list", [])).toBe(false);
   });
 });

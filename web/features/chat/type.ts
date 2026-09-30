@@ -158,6 +158,7 @@ export interface ChatMessage {
 }
 
 export interface AgentSession {
+  kind?: "worker" | "main" | null;
   name: string;
   displayName: string;
   purpose: string;

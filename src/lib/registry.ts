@@ -109,6 +109,9 @@ export function agentRuntime(info: { runtime?: string } | undefined | null): Age
 export interface RegistryAgent {
   /** tmux 名（registry key，"agent-xxx"） */
   name: string;
+  /** T69: work sessions stay addressable but are hidden from the ordinary conversation roster. */
+  kind?: "worker" | "main";
+  role?: string;
   status?: string;
   channelId?: string;
   sessionId?: string;
@@ -157,6 +160,8 @@ function normalizeEntries(agents: Record<string, unknown>): RegistryAgent[] {
     const str = (k: string) => (typeof a[k] === "string" ? (a[k] as string) : undefined);
     return {
       name,
+      kind: a.kind === "worker" || a.kind === "main" ? a.kind : undefined,
+      role: str("role"),
       status: str("status"),
       channelId: str("channelId"),
       sessionId: str("sessionId"),
