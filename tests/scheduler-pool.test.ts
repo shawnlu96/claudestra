@@ -2,8 +2,10 @@
  * i28-R9 shared pool: the planner's pool branches (local slot free / no slot, can pool / no slot, cannot pool / family /
  * one attempt per round), then the whole path on a real ledger through the ledger CLI: pool → peer claims → peer's verdict
  * → card moves on; timeout withdrawal, withdrawal racing a claim, released and unknown orders, and the in-transaction
- * re-plan refusing an offer the current facts no longer justify.
+ * re-plan refusing an offer the current facts no longer justify; a manual takeover, fallback or resume never leaves a pool
+ * order out while the round goes local (review round 1, R9-pool-pending-takeover-double-dispatch).
  */
+import type { Database } from "bun:sqlite";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
@@ -254,5 +256,75 @@ describe("i28-R9 pool path on a real ledger", () => {
       const text = listEvents(p.f.db, { project: "p", target: "T1" }).filter((e) => e.data.op === "pool_offer");
       expect(text).toEqual([]);
     } finally { p.f.close(); }
+  });
+});
+
+describe("i28-R9 takeover / resume with a pool order out", () => {
+  const wfRev = (f: { db: Database }): string =>
+    String((f.db.query("SELECT rev FROM task_workflows WHERE taskId = 'T1'").get() as { rev: number }).rev);
+  const takeover = (p: Awaited<ReturnType<typeof pooled>>) => p.cli("owner", "workflow-set", "T1", "--rev", String(p.f.task().rev), "--workflow-rev", wfRev(p.f),
+    "--template", "code", "--version", "2", "--mode", "manual", "--author-family", "claude", "--fallback", "stop", "--reason", "核对调度配置");
+  const resume = (p: Awaited<ReturnType<typeof pooled>>) => p.cli("owner", "workflow-resume", "T1", "--rev", String(p.f.task().rev),
+    "--workflow-rev", wfRev(p.f), "--reason", "继续自动", "--max-workers", "0");
+
+  test("pooled → manual takeover withdraws the order in the same write → resume → the round goes local, the old order cannot be claimed", async () => {
+    const p = await pooled();
+    try {
+      await p.tick();
+      const [o] = p.orders();
+      expect(await takeover(p)).toMatchObject({ ok: true });
+      expect(p.orders()[0]).toMatchObject({ status: "cancelled", reason: expect.stringContaining("转人工") });
+      expect(p.f.intents().at(-1)).toMatchObject({ recipient: "peer:mate", status: "cancelled" });
+      expect(await resume(p)).toMatchObject({ ok: true });
+      expect(await p.tick()).toMatchObject({ step: "session", detail: "reviewer = agent-rv-t1" });
+      expect(await p.tick()).toMatchObject({ step: "sent" });
+      expect(await p.claim(o.orderId)).toMatchObject({ ok: false, current: { lend: "cancelled" } });
+      expect(p.orders()).toHaveLength(1);
+    } finally { p.f.close(); }
+  });
+
+  test("claimed before the scheduler synced → takeover keeps the claim as submitted; resume refuses until PM reconciles", async () => {
+    const p = await pooled();
+    try {
+      await p.tick();
+      const [o] = p.orders();
+      expect((await p.claim(o.orderId)).ok).toBe(true);
+      expect(await takeover(p)).toMatchObject({ ok: true });
+      expect(p.orders()[0].status).toBe("claimed");
+      expect(p.f.intents().at(-1)).toMatchObject({ recipient: "peer:mate", status: "submitted" });
+      expect(await resume(p)).toMatchObject({ ok: false, error: expect.stringContaining("结果未定") });
+      expect(p.f.sent.filter((s) => s.agent !== "agent-task-one")).toEqual([]); // no local reviewer got the round
+    } finally { p.f.close(); }
+  });
+
+  test("the scheduler's own fallback to manual withdraws an unclaimed order too", async () => {
+    const p = await pooled();
+    try {
+      await p.tick();
+      expect(await p.cli("scheduler", "scheduler-fallback-manual", "T1", "--reason", "peer 委派")).toMatchObject({ ok: true });
+      expect(p.orders()[0].status).toBe("cancelled");
+      expect(p.f.intents().at(-1)).toMatchObject({ status: "cancelled" });
+    } finally { p.f.close(); }
+  });
+
+  test("a live order no live intent owns: resume refuses a claimed one, withdraws a pooled one; an auto card never goes local over it", async () => {
+    const p = await pooled();
+    try {
+      await p.tick();
+      const [o] = p.orders();
+      await p.claim(o.orderId);
+      p.f.db.run("UPDATE scheduler_intents SET status = 'cancelled' WHERE recipient = 'peer:mate'"); // state left by the pre-fix takeover
+      expect(await p.tick()).toMatchObject({ step: "manual", detail: expect.stringContaining("pool_order_open") });
+      expect(p.f.ensured.map((e) => e.role)).toEqual(["author"]);
+      expect(await resume(p)).toMatchObject({ ok: false, error: expect.stringContaining(o.orderId) });
+    } finally { p.f.close(); }
+    const q = await pooled();
+    try {
+      await q.tick();
+      expect(await takeover(q)).toMatchObject({ ok: true });
+      q.f.db.run("UPDATE lend_orders SET status = 'pooled', reason = NULL"); // an order left out under a cancelled intent
+      expect(await resume(q)).toMatchObject({ ok: true });
+      expect(q.orders()[0].status).toBe("cancelled");
+    } finally { q.f.close(); }
   });
 });

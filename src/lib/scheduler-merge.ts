@@ -10,7 +10,7 @@ import { insertEvent, tx } from "./ledger-tx.js";
 import { currentReviewFacts } from "./scheduler-review.js";
 import { getSchedulerSession } from "./scheduler-sessions.js";
 import { canTransition, nextTaskState } from "./ledger-stages.js";
-import { settleIntent } from "./ledger-scheduler-write.js";
+import { settleIntent } from "./ledger-scheduler-settle.js";
 import { parseRequiredChecks } from "./scheduler-config.js";
 
 export type MergePhase = "ready" | "updating" | "await_review" | "await_ci" | "merging" | "merged" | "unknown" | "resolved";

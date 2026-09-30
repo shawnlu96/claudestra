@@ -4,7 +4,8 @@ import { join } from "node:path";
 import { expect, test } from "bun:test";
 import { bindHash } from "../src/lib/ask-bind.js";
 import { answerAsk, openAskFull } from "../src/lib/ledger-asks.js";
-import { planIntent, setWorkflow, settleIntent } from "../src/lib/ledger-scheduler-write.js";
+import { settleIntent } from "../src/lib/ledger-scheduler-settle.js";
+import { planIntent, setWorkflow } from "../src/lib/ledger-scheduler-write.js";
 import { closeLedger, openLedger } from "../src/lib/ledger-store.js";
 import { createTask } from "../src/lib/ledger-write.js";
 

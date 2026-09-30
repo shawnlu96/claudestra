@@ -263,7 +263,7 @@ describe("v1 → 依赖边版本", () => {
 describe("写事件的底座只给写入模块", () => {
   // ledger-human.ts：v3.2 例外（human 节点的人工交付与重开指派），它按执行者角色推 build / fix → review，门在 human-node.ts；
   // ledger-steps-write.ts：步骤化台账（T47）的写入，派步骤要 PM，交付 / 审查的钩子挂在 ledger-write.ts 的事务里
-  // ledger-scheduler-write.ts：调度意图与资源锁同事务写，入口只提供限定动作与 CAS
+  // ledger-scheduler-write.ts：调度意图与资源锁同事务写，入口只提供限定动作与 CAS；意图结算（CAS）拆在 ledger-scheduler-settle.ts
   // scheduler-observe.ts / scheduler-fallback.ts：observe 只写观察事件；退回人工是调度身份唯一能做的模式变更（T68e）
   // ledger-feature-write.ts：feature 与子 DAG 初版（T84），权限与 CAS 在它自己的事务里
   // ledger-dag-write.ts：子 DAG 重写 / 审批 / 绑卡（T89），四条规矩与 owner 审批在它自己的事务里
@@ -288,7 +288,7 @@ describe("写事件的底座只给写入模块", () => {
     walk(root);
     expect(tx.sort()).toEqual(["lib/ledger-dag-write.ts", "lib/ledger-deps-write.ts",
       "lib/ledger-feature-write.ts", "lib/ledger-human.ts", "lib/ledger-lend-result.ts", "lib/ledger-lend.ts", "lib/ledger-scheduler-pool.ts",
-      "lib/ledger-scheduler-resume.ts", "lib/ledger-scheduler-write.ts", "lib/ledger-steps-write.ts", "lib/ledger-write.ts",
+      "lib/ledger-scheduler-resume.ts", "lib/ledger-scheduler-settle.ts", "lib/ledger-scheduler-write.ts", "lib/ledger-steps-write.ts", "lib/ledger-write.ts",
       "lib/scheduler-apply.ts", "lib/scheduler-fallback.ts", "lib/scheduler-merge.ts", "lib/scheduler-observe.ts", "lib/scheduler-sessions.ts"]);
     expect(move.sort()).toEqual(["lib/ledger-human.ts", "lib/scheduler-apply.ts"]);
   });

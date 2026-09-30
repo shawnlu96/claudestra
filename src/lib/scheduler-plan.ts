@@ -47,6 +47,8 @@ export interface PlannerSnapshot {
   screenshotsDigest: string | null;
   /** Shared-pool facts (i28-R9); absent = never pool (observe cards, CLI replans of later nodes). */
   pool?: PoolFacts | null;
+  /** Live pool orders of this card no live intent accounts for (scheduler-pool-facts strayPoolOrders); absent = none. */
+  strayPoolOrders?: readonly string[];
 }
 
 interface WorkOrderFacts { reportPath: string; findings: ReviewFinding[]; fallbackWarning: string | null }
@@ -176,6 +178,8 @@ function fixPackage(s: PlannerSnapshot): WorkOrderFacts | PlannerDecision {
 function reviewDispatch(s: PlannerSnapshot, node: FlowNode): PlannerDecision {
   const prior = liveIntent(s, node, "review");
   if (prior) return prior;
+  // A peer may still hold this review through such an order: a local reviewer now would be a second dispatch of the node.
+  if (s.strayPoolOrders?.length) return escalate("pool_order_open", `池单 ${s.strayPoolOrders.join("，")} 仍在对方手里或待领，先对账`);
   const pool = poolTarget(s, latestSeq(s.events, s.task));
   if (pool) return makeIntent(s, node, "review", `挂池：对抗式跨模型审查挂给 ${pool.peer} 的 ${pool.family} worker${pool.rereview ? "（复验，同一 peer）" : ""}`,
     [taskResource(s)], { recipient: `${POOL_RECIPIENT}${pool.peer}`, reviewMode: FLOW_TEMPLATES[s.workflow!.template].reviewMode });

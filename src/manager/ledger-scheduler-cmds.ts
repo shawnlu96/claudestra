@@ -1,6 +1,7 @@
 /** Narrow CLI entrypoints for durable scheduler facts; no arbitrary stage or owner action is exposed here. */
 import { INTENT_ACTIONS, INTENT_STATUSES, WORKFLOW_MODES, WORKFLOW_TEMPLATES, AUTHOR_FAMILIES, getIntent } from "../lib/ledger-scheduler.js";
-import { planIntent, setWorkflow, settleIntent } from "../lib/ledger-scheduler-write.js";
+import { settleIntent } from "../lib/ledger-scheduler-settle.js";
+import { planIntent, setWorkflow } from "../lib/ledger-scheduler-write.js";
 import { resumeAutoWorkflow } from "../lib/ledger-scheduler-resume.js";
 import { bindSchedulerSession, recordSessionRetirement, type SessionRole, type SessionTransport } from "../lib/scheduler-sessions.js";
 import { advanceMergeRun, beginMergeRun, MERGE_RESOLUTIONS, resolveMergeRun, type MergePhase, type MergeResolution } from "../lib/scheduler-merge.js";

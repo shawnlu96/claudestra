@@ -5,20 +5,20 @@
  * mirror the order onto the intent: claimed → submitted, done → done, unknown → unknown (card stops for PM), released /
  * cancelled → cancelled (the round goes local). An order nobody claimed within the timeout is withdrawn by CAS in this
  * transaction; the CAS losing means the peer claimed first, and that claim is then honoured, never cancelled underneath it.
- * tests/scheduler-pool.test.ts.
+ * tests/scheduler-pool.test.ts, tests/scheduler-pool-takeover.test.ts.
  */
 import type { Database } from "bun:sqlite";
 import { mustTask, type WriteCtx } from "./ledger-checks.js";
 import { getLendOrder, offerLendCore, withdrawPooledLend, type LendOrder } from "./ledger-lend.js";
 import { getIntent, getWorkflow, type AuthorFamily, type IntentStatus, type SchedulerIntent } from "./ledger-scheduler.js";
-import { settleIntent } from "./ledger-scheduler-write.js";
+import { settleIntent } from "./ledger-scheduler-settle.js";
 import { LedgerError } from "./ledger-store.js";
 import { insertEvent, tx } from "./ledger-tx.js";
 import type { BorrowEntry } from "./lend-config.js";
 import { autoSnapshot } from "./scheduler-auto-snapshot.js";
 import type { RemotePolicy } from "./scheduler-config.js";
 import { planScheduler } from "./scheduler-plan.js";
-import { poolLinkKey, poolOrderId, POOL_TIMEOUT_REASON, prCoordinates } from "./scheduler-pool-facts.js";
+import { poolLinkKey, poolOrderId, POOL_TIMEOUT_REASON, prCoordinates, strayPoolOrders } from "./scheduler-pool-facts.js";
 import { isPoolIntent, POOL_RECIPIENT } from "./scheduler-pool-plan.js";
 
 export interface PoolStepInput {
@@ -29,7 +29,7 @@ export interface PoolStepInput {
   /** The card's spec text (the peer cannot read this machine's files); null = cannot be offered. */
   spec: string | null;
 }
-type PoolOutcome = "pooled" | "claimed" | "done" | "unknown" | "timeout" | "returned" | "refused" | "settled";
+type PoolOutcome = "pooled" | "claimed" | "done" | "unknown" | "timeout" | "withdrawn" | "returned" | "refused" | "settled";
 export interface PoolStepResult { outcome: PoolOutcome; orderId: string | null; intent: SchedulerIntent; text: string }
 
 const otherFamily = (f: AuthorFamily): AuthorFamily => f === "claude" ? "codex" : "claude";
@@ -72,18 +72,19 @@ function offer(db: Database, ctx: WriteCtx, intent: SchedulerIntent, input: Pool
   return { outcome: "pooled", orderId: order.orderId, intent, text };
 }
 
-function sync(db: Database, ctx: WriteCtx, intent: SchedulerIntent, orderId: string, timeoutMs: number): PoolStepResult {
+/** `withdraw` = a takeover's reason: an unclaimed order is withdrawn now instead of after the timeout. */
+function sync(db: Database, ctx: WriteCtx, intent: SchedulerIntent, orderId: string, timeoutMs: number, withdraw?: string): PoolStepResult {
   let o = getLendOrder(db, orderId);
   if (!o) throw new LedgerError("not_found", `挂池意图的出借单 ${orderId} 不见了`);
   const out = (outcome: PoolOutcome, next: SchedulerIntent, text: string): PoolStepResult => ({ outcome, orderId, intent: next, text });
   const now = ctx.now ?? Date.now();
   if (o.status === "pooled") {
-    if (now - o.createdAt < timeoutMs) return out("pooled", intent, `${o.peer} 还没领`);
+    if (!withdraw && now - o.createdAt < timeoutMs) return out("pooled", intent, `${o.peer} 还没领`);
     const minutes = Math.round(timeoutMs / 60_000);
-    const w = withdrawPooledLend(db, ctx, { orderId, reason: `${POOL_TIMEOUT_REASON}：${minutes} 分钟没人领，退回本机` });
+    const w = withdrawPooledLend(db, ctx, { orderId, reason: withdraw ?? `${POOL_TIMEOUT_REASON}：${minutes} 分钟没人领，退回本机` });
     if (w.withdrawn) {
-      const text = `挂池 ${minutes} 分钟 ${o.peer} 没人领，已撤回单 ${orderId}，这一轮退回本机审查`;
-      return out("timeout", settle(db, ctx, intent, "cancelled", text), text);
+      const text = withdraw ? `撤回池单 ${orderId}（${o.peer} 还没领）：${withdraw}` : `挂池 ${minutes} 分钟 ${o.peer} 没人领，已撤回单 ${orderId}，这一轮退回本机审查`;
+      return out(withdraw ? "withdrawn" : "timeout", settle(db, ctx, intent, "cancelled", text), text);
     }
     o = w.order;
   }
@@ -93,6 +94,26 @@ function sync(db: Database, ctx: WriteCtx, intent: SchedulerIntent, orderId: str
   if (o.status === "unknown") return out("unknown", settle(db, ctx, intent, "unknown", `出借单 ${orderId} 结果不明（${o.reason ?? ""}），交 PM 核对`), "结果不明，停给 PM");
   const text = `出借单 ${orderId} ${o.status}（${o.reason ?? ""}），这一轮退回本机审查`;
   return out("returned", settle(db, ctx, intent, "cancelled", text), text);
+}
+
+/**
+ * Every path that cancels a card's pending intents in bulk (takeover, fallback to manual, resume) calls this first, in its
+ * own transaction: a pending pool intent's order is an effect already out, so it is settled as a pass would, except an
+ * unclaimed order is withdrawn now. A claim that already won leaves the intent submitted / unknown (resume then refuses);
+ * a live order whose intent is no longer live is reported as stray, never taken as gone. tests/scheduler-pool-takeover.test.ts.
+ */
+export function closePoolOrders(db: Database, ctx: WriteCtx, taskId: string, reason: string): { withdrawn: string[]; stray: string[] } {
+  const withdrawn: string[] = [];
+  const pending = db.query("SELECT id FROM scheduler_intents WHERE taskId = ? AND status = 'pending'").all(taskId) as { id: string }[];
+  for (const row of pending) {
+    const intent = getIntent(db, row.id);
+    const orderId = intent && isPoolIntent(intent) ? poolOrderId(db, intent.id) : null;
+    if (intent && orderId && sync(db, ctx, intent, orderId, 0, reason).outcome === "withdrawn") withdrawn.push(orderId);
+  }
+  for (const o of strayPoolOrders(db, taskId)) {
+    if (o.status === "pooled" && withdrawPooledLend(db, ctx, { orderId: o.orderId, reason }).withdrawn) withdrawn.push(o.orderId);
+  }
+  return { withdrawn, stray: strayPoolOrders(db, taskId).map((o) => o.orderId) };
 }
 
 export function schedulerPoolStep(db: Database, ctx: WriteCtx, input: PoolStepInput & { timeoutMs: number }): PoolStepResult {

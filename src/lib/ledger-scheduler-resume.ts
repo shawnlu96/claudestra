@@ -9,7 +9,8 @@
 import type { Database } from "bun:sqlite";
 import { mustTask, type WriteCtx } from "./ledger-checks.js";
 import { getWorkflow, type TaskWorkflow } from "./ledger-scheduler.js";
-import { actorMayConfigure, textOneLine } from "./ledger-scheduler-write.js";
+import { closePoolOrders } from "./ledger-scheduler-pool.js";
+import { actorMayConfigure, textOneLine } from "./ledger-scheduler-settle.js";
 import { LedgerError } from "./ledger-store.js";
 import { insertEvent, tx } from "./ledger-tx.js";
 import { autoSnapshot } from "./scheduler-auto-snapshot.js";
@@ -29,6 +30,9 @@ export function resumeAutoWorkflow(db: Database, ctx: WriteCtx, input: ResumeInp
     if (task.rev !== input.taskRev || workflow.rev !== input.workflowRev) {
       throw new LedgerError("conflict", "任务或流程已被改过，先重读再交回", { taskRev: task.rev, workflowRev: workflow.rev });
     }
+    // A pool order still out (pooled → withdrawn now; claimed → its intent stays open) is settled before the open check.
+    const pool = closePoolOrders(db, ctx, task.id, `交回自动前撤回：${input.reason.replace(/\s+/g, " ").trim()}`);
+    if (pool.stray.length) throw new LedgerError("conflict", `池单 ${pool.stray.join("，")} 已被对方领走或结果不明，却没有在途意图对应，先对账再交回自动`);
     const open = db.query("SELECT id, status FROM scheduler_intents WHERE taskId = ? AND status IN ('submitted','unknown')").all(task.id) as { id: string; status: string }[];
     if (open.length) throw new LedgerError("conflict", `还有结果未定的调度意图（${open.map((o) => `${o.id}:${o.status}`).join("，")}），先对账再交回自动`);
     const reason = textOneLine(input.reason, "交回原因", 600);

@@ -45,6 +45,17 @@ function scheduledOrders(db: Database, taskId: string): ScheduledOrder[] {
     AND json_extract(e.data, '$.orderId') = o.orderId WHERE o.taskId = ? ORDER BY o.createdAt DESC`).all(taskId) as ScheduledOrder[];
 }
 
+const LIVE_ORDER = ["pooled", "claimed", "unknown"];
+
+/** Live orders of this card whose pool intent is no longer live: a peer may hold the review while no intent accounts for it. */
+export function strayPoolOrders(db: Database, taskId: string): ScheduledOrder[] {
+  const live = (id: string): boolean => {
+    const r = db.query("SELECT status FROM scheduler_intents WHERE id = ?").get(id) as { status: string } | null;
+    return !!r && ["pending", "submitted", "unknown"].includes(r.status);
+  };
+  return scheduledOrders(db, taskId).filter((o) => LIVE_ORDER.includes(o.status) && !live(o.intentId));
+}
+
 const reviewerRef = (o: ScheduledOrder, taskId: string): WorkerRef =>
   ({ agent: `${POOL_RECIPIENT}${o.peer}`, sessionId: lendSessionId(o.peer, o.orderId), taskId, family: o.family, source: "peer_claim" });
 

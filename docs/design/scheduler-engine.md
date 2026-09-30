@@ -104,10 +104,11 @@ scheduler.json 每个项目有 `remote: { mode: off | overflow | prefer, roles, 
   - unknown：意图记 unknown，停给 PM；
   - released / cancelled：意图 cancelled，这一轮回本机。
 - 超时：挂出满 poolTimeoutMin 没人领，就在同一事务里 CAS pooled→cancelled，并通知 PM 一次。CAS 落空说明对方已经领了，按 claimed 处理。
+- 接管：转人工、调度退回人工、交回自动这三处，取消 pending 意图之前都先在同一事务里结算挂池意图的池单。没人领就立即撤单，已被领就把意图记为 submitted 或 unknown，留给 PM 对账，交回自动随之被拒。已取消的意图不能拿来证明池单已撤：仍在途却没有在途意图对应的池单，会让交回自动被拒，也会让规划器停给 PM（`pool_order_open`），不在本机另派审查。
 
 **派审回执**：池单的回执是对方领单时写的 note。这个事件一定早于结论事件，而调度器结算 submitted 可能要到结论之后。规划器和合并闸都认这张单的 `peer:<名>` / `lend:<peer>:<orderId>` 作审查者。
 
-doctor 在调度组下多一行「共享池」。实现：`scheduler-pool-plan.ts`（纯选择）、`scheduler-pool-facts.ts`（台账读取）、`ledger-scheduler-pool.ts`（事务）、`scheduler-pool-tick.ts`（服务一步）。测试：`tests/scheduler-pool.test.ts`。
+doctor 在调度组下多一行「共享池」。实现：`scheduler-pool-plan.ts`（纯选择）、`scheduler-pool-facts.ts`（台账读取）、`ledger-scheduler-pool.ts`（事务）、`scheduler-pool-tick.ts`（服务一步），意图结算在 `ledger-scheduler-settle.ts`。测试：`tests/scheduler-pool.test.ts`。
 
 ## v4 DAG 与 T69
 
