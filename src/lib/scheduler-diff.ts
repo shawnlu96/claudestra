@@ -49,7 +49,7 @@ function describeDecision(d: ObservedDecision): string {
     case "ensure_session": return `新建本卡独立 ${d.sessionRole === "reviewer" ? "审查" : "执行"} session`;
     case "dispatch": return `派「${d.node}」给 ${to}`;
     case "review": return `派对抗式审查给 ${to}`;
-    case "merge": return "进合并队列（合并 + 部署）";
+    case "merge": return "进合并队列（合并后由 PM 部署）";
     case "verify": return "跑完成检查单";
     case "retire": return "归档并结束本卡 session";
     case "ask": return "请 owner 看前后截图";

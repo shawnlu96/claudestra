@@ -2845,7 +2845,7 @@ switch (cmd) {
         bumpedTmuxDashboardLimit: result.bumpedTmuxDashboardLimit,
         allowedMcpTools: result.allowedMcpTools,
         warnings: result.warnings,
-        hint: "打 `claudestra` 试试 —— launchd 3 个 daemon + 进 master TUI。重启机器后服务也会自动起来。",
+        hint: "打 `claudestra` 试试 —— launchd 4 个 daemon + 进 master TUI。重启机器后服务也会自动起来。",
       });
     }
     break;
@@ -2906,7 +2906,7 @@ switch (cmd) {
         "retire-web                      — unload + back up the old com.claudestra.web daemon (the bridge serves web/out now); refuses until BRIDGE_STATIC_DIR is served and migrate-web-state ran",
         "web-release deploy|publish|rollback|migrate|list — build + publish the web bundle as a versioned release (atomic switch of web-releases/current); deploy is the supported manual path",
         "version                         — show the current version and whether an update is available",
-        "update                          — git pull and reload the three launchd daemons",
+        "update                          — git pull and reload the four launchd daemons",
         "auto-update status              — show auto-update toggles",
         "auto-update claudestra on|off   — toggle Claudestra auto-update (default on)",
         "auto-update claude on|off       — toggle Claude Code auto-update (default on)",

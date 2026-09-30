@@ -2,6 +2,7 @@
 import { INTENT_ACTIONS, INTENT_STATUSES, WORKFLOW_MODES, WORKFLOW_TEMPLATES, AUTHOR_FAMILIES } from "../lib/ledger-scheduler.js";
 import { planIntent, setWorkflow, settleIntent } from "../lib/ledger-scheduler-write.js";
 import { bindSchedulerSession, recordSessionRetirement, type SessionRole, type SessionTransport } from "../lib/scheduler-sessions.js";
+import { advanceMergeRun, beginMergeRun, MERGE_RESOLUTIONS, resolveMergeRun, type MergePhase, type MergeResolution } from "../lib/scheduler-merge.js";
 import { LedgerError } from "../lib/ledger-store.js";
 import { intFlag } from "./ledger-identity.js";
 import type { LedgerCli } from "./ledger-context.js";
@@ -97,6 +98,28 @@ export const SCHEDULER_CMDS: Record<string, CommandSpec> = {
         taskId: c.p.pos[1] ?? "", role: role as SessionRole, intentId: c.need("intent"),
         effect: effect as "archive" | "kill", receipt: c.need("receipt"),
       }) };
+    },
+  },
+  "scheduler-merge-begin": {
+    valued: ["required-checks"], bools: [], usage: "scheduler-merge-begin <intent-key> --required-checks <name,name>",
+    run(c) { return { ok: true, ...beginMergeRun(c.db, c.ctx(), c.p.pos[1] ?? "", c.need("required-checks").split(",")) }; },
+  },
+  "scheduler-merge-step": {
+    valued: ["from", "to", "rev", "receipt", "merge-sha", "new-head"], bools: [],
+    usage: "scheduler-merge-step <intent-key> --from <phase> --to <phase> --rev N [--receipt <evidence>] [--merge-sha <full SHA>] [--new-head <full SHA>]",
+    run(c) { return { ok: true, run: advanceMergeRun(c.db, c.ctx(), {
+      intentId: c.p.pos[1] ?? "", from: c.need("from") as MergePhase, to: c.need("to") as MergePhase, rev: integer(c, "rev"),
+      receipt: c.p.flags.receipt, mergeSha: c.p.flags["merge-sha"], newHead: c.p.flags["new-head"],
+    }) }; },
+  },
+  "scheduler-merge-resolve": {
+    valued: ["outcome", "receipt"], bools: [],
+    usage: "scheduler-merge-resolve <intent-key> --outcome done|failed|cancelled --receipt <外部核对证据>（仅 PM / master / owner）",
+    run(c) {
+      const outcome = c.need("outcome");
+      if (!MERGE_RESOLUTIONS.includes(outcome as never)) throw new LedgerError("invalid", "--outcome 只能是 done / failed / cancelled");
+      const run = resolveMergeRun(c.db, c.ctx(), { intentId: c.p.pos[1] ?? "", outcome: outcome as MergeResolution, receipt: c.need("receipt") });
+      return { ok: true, run, next: "项目合并队列仍冻结；核对无其他 unknown 后用 ledger unfreeze 解冻" };
     },
   },
 };

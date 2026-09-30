@@ -283,7 +283,7 @@ describe("写事件的底座只给写入模块", () => {
     };
     walk(root);
     expect(tx.sort()).toEqual(["lib/ledger-deps-write.ts", "lib/ledger-human.ts", "lib/ledger-scheduler-write.ts", "lib/ledger-steps-write.ts", "lib/ledger-write.ts",
-      "lib/scheduler-apply.ts", "lib/scheduler-fallback.ts", "lib/scheduler-observe.ts", "lib/scheduler-sessions.ts"]);
+      "lib/scheduler-apply.ts", "lib/scheduler-fallback.ts", "lib/scheduler-merge.ts", "lib/scheduler-observe.ts", "lib/scheduler-sessions.ts"]);
     expect(move.sort()).toEqual(["lib/ledger-human.ts", "lib/scheduler-apply.ts"]);
   });
 });

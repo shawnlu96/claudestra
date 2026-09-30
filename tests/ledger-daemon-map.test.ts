@@ -7,6 +7,7 @@ import { conservativeDaemonsOf, daemonsOfFromRepo, importClosure, relativeSpecs,
 const FILES: Record<string, string> = {
   "src/bridge.ts": `import { a } from "./lib/a.js";\nimport type { T } from "./lib/types.js";\nimport "./bridge/side.js";\nimport x from "zod";`,
   "src/cron.ts": `export { b } from "./lib/b.js";\nconst m = await import("./lib/dyn.js");`,
+  "src/scheduler.ts": `import { a } from "./lib/a.js";`,
   "src/launcher.ts": `import { a } from "./lib/a.js";`,
   "src/lib/a.ts": `import { c } from "./sub/index.js";`,
   "src/lib/sub/index.ts": ``,
@@ -37,16 +38,16 @@ describe("闭包与映射", () => {
   });
   test("文件归属：共用的 lib 归多个 daemon；没人 import 的 lib 不要求重启", () => {
     const of = daemonsOfFromRepo(read);
-    expect(of("src/lib/sub/index.ts")).toEqual(["bridge", "launcher"]);
+    expect(of("src/lib/sub/index.ts")).toEqual(["bridge", "scheduler", "launcher"]);
     expect(of("src/lib/dyn.ts")).toEqual(["cron"]);
     expect(of("src/lib/orphan.ts")).toEqual([]);
   });
-  test("入口读不到（仓库结构变了）→ 退回保守规则：src/lib 三个都要重启", () => {
+  test("入口读不到（仓库结构变了）→ 退回保守规则：src/lib 四个都要重启", () => {
     const of = daemonsOfFromRepo((rel) => (rel === "src/cron.ts" ? null : read(rel)));
     expect(of).toBe(conservativeDaemonsOf);
-    expect(of("src/lib/orphan.ts")).toEqual(["bridge", "cron", "launcher"]);
+    expect(of("src/lib/orphan.ts")).toEqual(["bridge", "cron", "scheduler", "launcher"]);
   });
-  test("真实仓库：三个入口都能解析；tmux-helper 三个都用，bridge 的子模块只归 bridge", () => {
+  test("真实仓库：四个入口都能解析；tmux-helper 四个都用，bridge 的子模块只归 bridge", () => {
     const root = join(import.meta.dir, "..");
     const of = daemonsOfFromRepo((rel) => {
       try {
@@ -56,7 +57,7 @@ describe("闭包与映射", () => {
       }
     });
     expect(of).not.toBe(conservativeDaemonsOf);
-    expect(of("src/lib/tmux-helper.ts")).toEqual(["bridge", "cron", "launcher"]);
+    expect(of("src/lib/tmux-helper.ts")).toEqual(["bridge", "cron", "scheduler", "launcher"]);
     expect(of("src/bridge/router.ts")).toEqual(["bridge"]);
   });
 });

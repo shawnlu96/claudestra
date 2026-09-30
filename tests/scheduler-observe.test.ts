@@ -115,7 +115,7 @@ describe("T68e observe mode", () => {
       expect(project).toMatchObject({ ok: true, tasks: ["T1"], summary: { diff: 0, unknown: 1, pending: 1 } });
       expect(project.lines).toEqual([
         "T1 · review 第 2 轮 · 未知 · 引擎：（结论后的计划没有记录） ｜ 实际：owner 推阶段 review→merge（审查结论之后直接推阶段、中间没有观察；当时的 session 与授权台账只存现状，无法还原引擎的判断，需核对，0 秒后）",
-        "T1 · merge 第 2 轮 · 未决 · 引擎：进合并队列（合并 + 部署） ｜ 实际：（还没有）（尚无后续动作）",
+        "T1 · merge 第 2 轮 · 未决 · 引擎：进合并队列（合并后由 PM 部署） ｜ 实际：（还没有）（尚无后续动作）",
       ]);
       expect(externalEffects(f.db)).toEqual({ intents: 0, resources: 0, sessions: 0, schedulerMoves: 0 });
     } finally { f.close(); }
