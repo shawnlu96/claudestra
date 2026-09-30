@@ -4,6 +4,7 @@
  */
 import { join } from "path";
 import { settingsLaunchArgs } from "./agent-settings.js";
+import { sandboxAcpHome } from "./acp/stub.js";
 import { SANDBOX_DENY_DIRS_ENV, SANDBOX_DENY_PORTS_ENV, SANDBOX_FLAG, SANDBOX_ROOT_ENV } from "./sandbox.js";
 
 type Env = Record<string, string | undefined>;
@@ -106,6 +107,8 @@ export function sandboxEnv(
     BUN_RUNTIME_TRANSPILER_CACHE_PATH: join(opts.layout.root, "bun-cache"),
     // statusLine 脚本跑的 python3：macOS 自带的那个把字节码缓存写进 ~/Library/Caches/com.apple.python
     PYTHONDONTWRITEBYTECODE: "1",
+    // manager / bridge 定位 Codex 会话与凭据按 CODEX_HOME，不设就回落宿主 ~/.codex；与 ACP 链同一个值（沙箱根非绝对路径时抛）
+    CODEX_HOME: sandboxAcpHome(opts.layout.root).CODEX_HOME,
   });
   if (opts.staticDir) out.BRIDGE_STATIC_DIR = opts.staticDir;
   return out;
