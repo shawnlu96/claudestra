@@ -267,6 +267,7 @@ describe("写事件的底座只给写入模块", () => {
   // scheduler-observe.ts / scheduler-fallback.ts：observe 只写观察事件；退回人工是调度身份唯一能做的模式变更（T68e）
   // ledger-feature-write.ts：feature 与子 DAG 初版（T84），权限与 CAS 在它自己的事务里
   // ledger-dag-write.ts：子 DAG 重写 / 审批 / 绑卡（T89），四条规矩与 owner 审批在它自己的事务里
+  // ledger-scheduler-resume.ts：改规格后把退回人工的 auto 卡交回调度（T68h），只 PM / master / owner，CAS + 未定意图先对账
   // scheduler-apply.ts：调度身份按模板推自动卡（只许 restate→build、review→fix / merge），事务内重算计划核对后才 applyMove（T68f）
   test("src 里 import ledger-tx / applyMove 的只有写入模块（直接写事件、带 asRole 推阶段会绕过阶段机与权限）", () => {
     const root = resolve(import.meta.dir, "../src");
@@ -285,7 +286,7 @@ describe("写事件的底座只给写入模块", () => {
     };
     walk(root);
     expect(tx.sort()).toEqual(["lib/ledger-dag-write.ts", "lib/ledger-deps-write.ts",
-      "lib/ledger-feature-write.ts", "lib/ledger-human.ts", "lib/ledger-scheduler-write.ts", "lib/ledger-steps-write.ts", "lib/ledger-write.ts",
+      "lib/ledger-feature-write.ts", "lib/ledger-human.ts", "lib/ledger-scheduler-resume.ts", "lib/ledger-scheduler-write.ts", "lib/ledger-steps-write.ts", "lib/ledger-write.ts",
       "lib/scheduler-apply.ts", "lib/scheduler-fallback.ts", "lib/scheduler-merge.ts", "lib/scheduler-observe.ts", "lib/scheduler-sessions.ts"]);
     expect(move.sort()).toEqual(["lib/ledger-human.ts", "lib/scheduler-apply.ts"]);
   });
