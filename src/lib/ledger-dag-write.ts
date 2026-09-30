@@ -1,6 +1,6 @@
 /**
  * 子 DAG 的重写、审批与绑卡（T89 = 阶段 1 L2，设计稿 docs/design/feature-dag.md）。规则判定在 ledger-dag-rules.ts（纯函数）。
- * 只加节点 / 只换没开始的节点：直接写成新版本，结果里带一句 inform 由发起的 PM 转告 owner（reply 的 ask.kind=inform）。
+ * 只加节点 / 只换没开始的节点：直接写成新版本，结果里带一句 inform，CLI 提交后经 bridge 的系统通知送到 owner（manager/ledger-dag-cmds.ts）。
  * 取消进行中的节点、改进行中的节点、声明改范围：写成 pending 提案，开一张 owner 的 authorize ask，bind 到 {feature, version, 快照 sha256}；
  * dag-approve 核对 owner 本人批准、哈希按库里的提案行重算、四条规矩按那一刻的卡状态重判，全过才写版本；否则提案作废（这一笔照常提交）。
  * 审批 ask 的 fromAgent 是发起的 PM：owner 作答后 bridge 把答复投回它，由它跑 dag-approve。
@@ -84,28 +84,29 @@ export interface RewriteOutcome {
   version: DagVersion | null;
   proposal: DagProposal | null;
   ask: Ask | null;
-  /** 直接生效时给 owner 的知会（发起方用 reply 的 ask.kind=inform 转告） */
+  /** 直接生效时给 owner 的知会（CLI 提交后发出，送没送到另报） */
   inform: string | null;
 }
 
 /** 已答复且是 owner 本人点了批准：先 dag-approve，不许被新的重写顶掉 */
 const approvedAsk = (a: Ask) => a.state === "answered" && ownerAnswered(a.answer) && (a.answer?.choices ?? []).includes(`[button:${APPROVE}]`);
 
-/** 已有 pending：ask 还开着或 owner 已批 → conflict；ask 已过期 / 撤销 / 驳回 → 这份作废，让位给新的 */
+/** 已有 pending：ask 还开着、或 owner 已批且授权没过期（checkAsk 同样按开出时的 expiresAt 算）→ conflict；其余 → 这份作废，让位给新的 */
 function clearStalePending(db: Database, ctx: WriteCtx, f: Feature, now: number): void {
   const p = getPendingProposal(db, f.id);
   if (!p) return;
   const a = getAsk(db, p.askId);
-  if (a && ((a.state === "open" && a.expiresAt > now) || approvedAsk(a))) {
+  if (a && a.expiresAt > now && (a.state === "open" || approvedAsk(a))) {
     throw new LedgerError("conflict", `feature ${f.id} 已有待批的 v${p.version}（ask ${a.id}${a.state === "open" ? " 还没答" : " owner 已批，先 dag-approve"}）`, { pending: p.version, askId: a.id });
   }
-  closeProposal(db, ctx, f, p, "void", `审批 ask ${a?.state ?? "不见了"}，被新的重写取代`);
+  closeProposal(db, ctx, f, p, "void", `审批 ask ${a ? (a.expiresAt > now ? a.state : "已过期") : "不见了"}，被新的重写取代`, false);
 }
 
-function closeProposal(db: Database, ctx: WriteCtx, f: Feature, p: DagProposal, state: "rejected" | "void", note: string): LedgerEvent {
+/** primary=false：顺带作废时 dedupKey 留给这一笔的主动作（重写 / 提案），否则两条主事件抢同一个键、整笔回滚 */
+function closeProposal(db: Database, ctx: WriteCtx, f: Feature, p: DagProposal, state: "rejected" | "void", note: string, primary: boolean): LedgerEvent {
   db.prepare("UPDATE dag_proposals SET state = ?, decidedAt = ?, decidedBy = ?, decisionNote = ? WHERE seq = ?").run(state, ctx.now ?? Date.now(), ctx.actor, note, p.seq);
   const data = { op: `dag-${state === "void" ? "void" : "reject"}`, version: p.version, proposal: p.seq };
-  return insertEvent(db, ctx, { project: f.project, target: f.id, kind: "feature", text: note, data }, true);
+  return insertEvent(db, ctx, { project: f.project, target: f.id, kind: "feature", text: note, data }, primary);
 }
 
 function reasonOf(kind: string, text: string): { reasonKind: DagReasonKind; reasonText: string } {
@@ -127,13 +128,22 @@ function openApproval(db: Database, f: Feature, c: ProposalContent, sha: string,
   }, now).ask;
 }
 
+const informOf = (f: Feature, v: Pick<DagVersion, "version" | "reasonKind" | "reasonText">, change: string) =>
+  `${f.title}：子 DAG 已重写成 v${v.version}（${v.reasonKind}：${v.reasonText}）。${change}`;
+
+/** 重放按命中的那条事件还原当时的结果（待批的仍是待批、原来的 ask），不拿此刻的当前版本 / 最新提案去拼 */
+function rewriteReplayed(db: Database, f: Feature, e: LedgerEvent): RewriteOutcome {
+  if (e.data.op === "dag-propose") return { version: null, proposal: getProposal(db, Number(e.data.proposal)), ask: getAsk(db, String(e.data.askId)), inform: null };
+  const v = getDagVersion(db, f.id, Number(e.data.version));
+  return { version: v, proposal: null, ask: null, inform: v ? informOf(f, v, e.text) : null };
+}
+
 export function rewriteDag(db: Database, ctx: WriteCtx, input: RewriteInput): WriteResult<RewriteOutcome> {
   return tx(db, () => {
     const f = mustFeature(db, input.id);
     const key = { project: f.project, target: f.id, kind: "feature" as const };
-    const dup = replay(db, ctx, key, () => ({ version: getDagVersion(db, f.id, mustFeature(db, f.id).currentVersion), proposal: getPendingProposal(db, f.id), ask: null, inform: null }),
-      ops("dag-rewrite", "dag-propose"));
-    if (dup) return dup;
+    const dup = replay(db, ctx, key, () => null, ops("dag-rewrite", "dag-propose"));
+    if (dup) return { ...dup, row: rewriteReplayed(db, f, dup.event) };
     requireManager(db, ctx.actor, f.project);
     const cur = currentDag(db, f);
     checkCas(f, input.rev);
@@ -146,8 +156,7 @@ export function rewriteDag(db: Database, ctx: WriteCtx, input: RewriteInput): Wr
     if (!plan.needsOwner.length) {
       const rev = applyVersion(db, ctx, f, c, { proposedBy: ctx.actor, approvedBy: "auto", askId: null });
       const event = insertEvent(db, ctx, { ...key, text: change, data: { op: "dag-rewrite", version: c.version, reasonKind: c.reasonKind, auto: true, rev } }, true);
-      const inform = `${f.title}：子 DAG 已重写成 v${c.version}（${c.reasonKind}：${c.reasonText}）。${change}`;
-      return { row: { version: getDagVersion(db, f.id, c.version), proposal: null, ask: null, inform }, event, duplicate: false };
+      return { row: { version: getDagVersion(db, f.id, c.version), proposal: null, ask: null, inform: informOf(f, c, change) }, event, duplicate: false };
     }
     const sha = proposalSha(c);
     const ask = openApproval(db, f, c, sha, plan.needsOwner, input.askFrom, now);
@@ -197,13 +206,13 @@ export function approveDag(db: Database, ctx: WriteCtx, input: { id: string }): 
   return tx(db, () => {
     const f = mustFeature(db, input.id);
     const key = { project: f.project, target: f.id, kind: "feature" as const };
-    const load = (): ApproveOutcome => {
-      const p = db.prepare("SELECT seq FROM dag_proposals WHERE featureId = ? ORDER BY seq DESC LIMIT 1").get(f.id) as { seq: number };
-      const proposal = getProposal(db, p.seq) as DagProposal;
-      return { applied: proposal.state === "approved", version: getDagVersion(db, f.id, proposal.version), proposal, why: proposal.decisionNote };
-    };
-    const dup = replay(db, ctx, key, load, ops("dag-approve", "dag-reject", "dag-void"));
-    if (dup) return dup;
+    // 重放按事件记下的提案还原，不取最新一份：之后可能又有新的提案
+    const dup = replay(db, ctx, key, () => null, ops("dag-approve", "dag-reject", "dag-void"));
+    if (dup) {
+      const proposal = getProposal(db, Number(dup.event.data.proposal)) as DagProposal;
+      const applied = dup.event.data.op === "dag-approve";
+      return { ...dup, row: { applied, version: applied ? getDagVersion(db, f.id, proposal.version) : null, proposal, why: proposal.decisionNote } };
+    }
     requireManager(db, ctx.actor, f.project);
     const p = getPendingProposal(db, f.id);
     if (!p) throw new LedgerError("not_found", `feature ${f.id} 没有待批的重写`);
@@ -212,7 +221,7 @@ export function approveDag(db: Database, ctx: WriteCtx, input: { id: string }): 
     if (a?.state === "open" && a.expiresAt > now) throw new LedgerError("conflict", `ask ${a.id} owner 还没答`, { askId: a.id });
     const bad = approvalProblem(db, f, p, a, now);
     if (bad) {
-      const event = closeProposal(db, ctx, f, p, bad.state, bad.why);
+      const event = closeProposal(db, ctx, f, p, bad.state, bad.why, true);
       return { row: { applied: false, version: null, proposal: getProposal(db, p.seq) as DagProposal, why: bad.why }, event, duplicate: false };
     }
     const approvedBy = (a as Ask).answer?.principal || "owner";
