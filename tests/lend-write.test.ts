@@ -19,17 +19,20 @@ import { submitLendResult, submitLendWork, type SubmitterDeps } from "../src/lib
 import type { HttpPeer } from "../src/lib/peers.js";
 import type { BoundedResult } from "../src/lib/run-bounded.js";
 
+/** 不读本机全局 / 系统配置（CI 上没有 user.name），提交身份显式给 */
+const GIT_ENV = { ...process.env, GIT_TERMINAL_PROMPT: "0", GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1",
+  GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@example.invalid", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@example.invalid" };
 const git = (cwd: string, ...args: string[]): string => {
-  const r = Bun.spawnSync(["git", ...args], { cwd, stdout: "pipe", stderr: "pipe", env: { ...process.env, GIT_TERMINAL_PROMPT: "0" } });
+  const r = Bun.spawnSync(["git", ...args], { cwd, stdout: "pipe", stderr: "pipe", env: GIT_ENV });
   if (r.exitCode !== 0) throw new Error(`git ${args.join(" ")}: ${r.stderr.toString()}`);
   return r.stdout.toString().trim();
 };
-const tryGit = (cwd: string, ...args: string[]) => Bun.spawnSync(["git", ...args], { cwd, stdout: "pipe", stderr: "pipe", env: { ...process.env, GIT_TERMINAL_PROMPT: "0" } }).exitCode;
+const tryGit = (cwd: string, ...args: string[]) => Bun.spawnSync(["git", ...args], { cwd, stdout: "pipe", stderr: "pipe", env: GIT_ENV }).exitCode;
 
 /** lab 根下 git/<owner>/<repo>.git 的 bare 仓库，main 上一个提交 */
 function lab() {
   const root = mkdtempSync(join(tmpdir(), "lend-lab-"));
-  const env = { PATH: process.env.PATH, HOME: process.env.HOME, CLAUDESTRA_SANDBOX: "1", CLAUDESTRA_LAB_ROOT: root };
+  const env = { PATH: process.env.PATH, HOME: root, CLAUDESTRA_SANDBOX: "1", CLAUDESTRA_LAB_ROOT: root }; // HOME 指到空目录：不读本机全局 git 配置
   const bare = join(root, "git", "o", "r.git");
   mkdirSync(bare, { recursive: true });
   git(bare, "init", "-q", "--bare", "-b", "main");
@@ -163,7 +166,7 @@ const polled = { orderId: "w1", taskId: "T93", step: "write", family: "codex", r
 const wire = { v: 1, orderId: "w1", taskId: "T93", specRev: 1, dagVersion: null, node: "write", step: "write", round: 0, head: BASE, repo: REPO, pr: null,
   inputs: ["规格原文：SPEC-MARKER"], outputs: ["提交"], acceptance: ["只推订单分支"], writeBack: "lend submit", findings: [], fallback: null };
 
-function harness(o: { roles?: LendEntry["roles"]; until?: string; branch?: string; probe?: PushResult; work?: PushResult[]; result?: string[] } = {}) {
+function harness(o: { roles?: LendEntry["roles"]; until?: string; branch?: string; probe?: PushResult; work?: PushResult[]; result?: string[]; anon?: boolean } = {}) {
   const db = openLendJournal(":memory:");
   const calls: { op: LendOp; body: Record<string, unknown> }[] = [];
   const log = { clones: [] as unknown[], created: [] as string[], sent: [] as string[], pushed: [] as unknown[], prs: [] as { title: string; body: string }[] };
@@ -189,7 +192,7 @@ function harness(o: { roles?: LendEntry["roles"]; until?: string; branch?: strin
     ask: { open: async () => ({ ok: false, error: "不该开" }), inform: async () => ({ ok: true }), verdict: () => ({ state: "waiting" }) },
     clone: async (i) => { log.clones.push(i); return { ok: true, dir: `/lend/work/${i.orderId}` }; },
     removeDir: () => {},
-    selfFp: () => FP, identity: () => ({ name: "lender", email: "l@x" }),
+    selfFp: () => FP, identity: () => (o.anon ? null : { name: "lender", email: "l@x" }),
     push: {
       probe: async (t) => { log.pushed.push({ probe: t }); return o.probe ?? { ok: true }; },
       work: async (t) => { log.pushed.push(t); return works.shift() ?? { ok: true }; },
@@ -233,6 +236,15 @@ describe("lend 循环：写单", () => {
     expect(getOrder(h.db, "w1")!.state).toBe("released");
     expect(h.log.clones).toEqual([]);
     expect(h.calls.find((c) => c.op === "lease" && c.body.action === "release")?.body).toMatchObject({ reason: "not_started" });
+  });
+
+  test("出借人机器没配 git 全局身份 → 写单退回并说明，不 clone、不起 worker", async () => {
+    const h = harness({ anon: true });
+    for (let i = 0; i < 3; i++) await h.tick();
+    expect(getOrder(h.db, "w1")!.state).toBe("released");
+    expect(h.log.clones).toEqual([]);
+    expect(h.calls.find((c) => c.op === "lease" && c.body.action === "release")?.body).toMatchObject({ reason: "not_started" });
+    expect(String(h.calls.find((c) => c.op === "lease" && c.body.action === "release")?.body.detail)).toContain("user.email");
   });
 
   test("试推没权限 → 退回并把原因告诉 A（fork 路径只检测），不起 worker", async () => {

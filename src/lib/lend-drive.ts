@@ -51,8 +51,8 @@ export interface LendDeps {
   clone(input: { orderId: string; repo: string; pr: number | null; head: string; write?: CloneWrite }): Promise<CloneResult>;
   /** 本机实例公钥的指纹：写单的订单分支按它核；读不到钥匙 = null（不领写单） */
   selfFp(): string | null;
-  /** 写单副本里提交用的署名（出借人自己的 git 身份） */
-  identity(): { name: string; email: string };
+  /** 写单副本里提交用的署名（出借人自己的 git 全局身份）；没配 = null，写单不起 worker */
+  identity(): { name: string; email: string } | null;
   /** 写单的试推 / 推送 / 开 PR（lend-push.ts） */
   push: {
     probe(t: PushTarget): Promise<PushResult>;
@@ -297,8 +297,10 @@ export async function driveLeased(row: LendRow, d: LendDeps): Promise<void> {
   const o = orderOf(cur);
   if (cur.state === "claimed") {
     const w = cur.wire?.write;
+    const who = w ? d.identity() : null;
+    if (w && !who) return release(cur, "claimed", "出借人机器没配 git 全局 user.name / user.email：写单的提交要署出借人自己的名字，配好再借", d);
     const got = await d.clone({ orderId: cur.orderId, repo: str(o?.repo), pr: typeof o?.pr === "number" ? o.pr : null, head: str(o?.head),
-      ...(w ? { write: { branch: w.branch, ...d.identity() } } : {}) });
+      ...(w && who ? { write: { branch: w.branch, ...who } } : {}) });
     if (!got.ok) return release(cur, "claimed", got.reason, d);
     if (w) {
       // 起 worker 之前先用同一套凭据试推：没权限（fork 路径 v1 只检测）就退回，A 那边写租约结束、卡回本机
