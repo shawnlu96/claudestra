@@ -546,14 +546,11 @@ function clearInterAgentPendingsForChannel(channelId: string): number {
 // ============================================================
 // v2.0.0+ 路由抽象
 // ============================================================
-import type {
-  LocalEndpoint as RouterLocalEndpoint,
-  UserEndpoint as RouterUserEndpoint,
-  ApiUserEndpoint as RouterApiUserEndpoint,
-  Envelope as RouterEnvelope,
-  Delivery as RouterDelivery,
+import {
+  type LocalEndpoint as RouterLocalEndpoint, type UserEndpoint as RouterUserEndpoint, type ApiUserEndpoint as RouterApiUserEndpoint,
+  type Envelope as RouterEnvelope, type Delivery as RouterDelivery,
+  endpointLabel, envelopeLabel, inboundBodyForLocal, isHumanRequest, newMessageId, newThreadId, parseChatId, renderApiInbound,
 } from "./bridge/router.js";
-import { endpointLabel, envelopeLabel, inboundBodyForLocal, isHumanRequest, newMessageId, newThreadId, parseChatId, renderApiInbound } from "./bridge/router.js";
 import { HeldQueue, unseenFrom } from "./bridge/held-queue.js";
 import { sweepHeldAges } from "./bridge/held-age.js";
 import { dropHeldOnKill, flushHeld } from "./bridge/held-flush.js";

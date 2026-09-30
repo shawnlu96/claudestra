@@ -11,6 +11,7 @@ import { getWorkflow, type AuthorFamily, type SchedulerIntent } from "./ledger-s
 import type { LedgerEvent, LedgerTask } from "./ledger-stages.js";
 import { getMeta, getTask, listEvents } from "./ledger-store.js";
 import { currentReview, stepsOf } from "./ledger-steps.js";
+import { manualOrderId } from "./order-take.js";
 import { parseOrderWire, WIRE_LIMITS, type OrderWire } from "./order-wire.js";
 import { statePath } from "./paths.js";
 import { specSection } from "./review-pack.js";
@@ -35,9 +36,6 @@ export interface ReviewSlot { task: LedgerTask; orderId: string; node: string; h
 
 /** 报告都放这里（和 `ledger review-pack` 同一个目录）；submit_verdict 只认这下面的非空文件 */
 export const reviewsDir = (): string => statePath("ledger", "reviews");
-
-/** PM 手动派的单：`<task>:<step>:r<round>`，与 T96 执行者单同一口径，只由台账步骤决定 */
-const manualOrderId = (taskId: string, step: string, round: number): string => `${taskId}:${step}:r${round}`;
 
 /** 自动卡最近一次派审：和 scheduler-auto-review.ts 同一条查询口径（submitted / done 才算发出去了） */
 function lastReviewIntent(db: Database, taskId: string): SchedulerIntent | null {

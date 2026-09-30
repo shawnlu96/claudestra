@@ -1,8 +1,8 @@
-# Token 账：Claude 会话按轮落库（T83）
+# Token 账：会话按轮落库（T83 Claude Code · T92 Codex · T95 算到卡上）
 
-把每个 Claude Code 会话按「轮」切开，存进独立的 `~/.claude-orchestrator/usage/usage.sqlite`（不碰台账 `ledger.sqlite`），给后续的 Codex 采集（T2）、归到任务步骤（T3）和界面（T4）用。
+把每个 Claude Code 会话和 Codex 线程按「轮」切开，存进独立的 `~/.claude-orchestrator/usage/usage.sqlite`（不碰台账 `ledger.sqlite`），每一轮再按台账算到卡 / 步骤 / 轮次 / feature（文末「算到卡上」），给界面（T4）用。Codex 的差异集中在「Codex」一节。
 
-代码：`src/lib/usage-classify.ts`（切轮判定、来源摘要、调用）、`usage-store.ts`（库结构与清理）、`usage-ingest.ts`（导入）、`usage-query.ts`（读），CLI `src/manager/usage.ts`。单测 `tests/usage-classify.test.ts`、`tests/usage-ingest.test.ts`。
+代码：`src/lib/usage-classify.ts`（Claude 的切轮判定、来源摘要、调用）、`usage-codex.ts`（Codex rollout 的同一套）、`usage-store.ts`（库结构与清理）、`usage-ingest.ts`（导入）、`usage-attr.ts`（算到卡上）、`usage-query.ts`（读），CLI `src/manager/usage.ts`，只读 API `src/bridge/local-api/usage.ts`。单测 `tests/usage-classify.test.ts`、`tests/usage-ingest.test.ts`、`tests/usage-codex.test.ts`、`tests/usage-attr.test.ts`、`tests/usage-attr-api.test.ts`。
 
 ## 命令
 
@@ -10,9 +10,12 @@
 bun src/manager.ts usage ingest [--since <ISO|ms>] [--prune] [--db <path>]   # 增量导入（--prune 顺带清超期明细），输出 JSON
 bun src/manager.ts usage turns <agent> [--today|--since <ts>] [--json] [--limit N] [--no-ingest]
 bun src/manager.ts usage summary [--today|--since <ts>] [--json] [--no-ingest]
+bun src/manager.ts usage by-task <卡号> [--json]                 # 一张卡按 步骤 × 轮次 × agent
+bun src/manager.ts usage by-feature <feature 名或 id> [--json]   # 一个 feature（或事项）按卡
+bun src/manager.ts usage attribute [--today|--since <ts>] [--json] # 归属依据分布：未归属占多少、原因是什么
 ```
 
-`turns` / `summary` 默认先增量导入一趟。`--db` 指定别的库文件（对账、测试用，不写生产库）。
+查询默认先增量导入一趟（导完按台账重算归属）。`--db` 指定别的库文件、`--ledger` 指定别的台账（对账、测试用，不写生产库；台账只读打开）。
 
 谁来导（都在 `bridge/archive-sweeper.ts`，都是 manager 子进程，bridge 进程里不读文件）：
 - bridge 起来 5 分钟后开始，**每 10 分钟**一趟 `usage ingest`（增量，通常 1 秒内）；上一趟没完就跳过这一趟。
@@ -54,14 +57,59 @@ agent、sessionId、是否子 agent（sidechain）、开始时间（外来输入
 
 在册 agent 的当前 sessionId → 该 agent；`archive/<agent>/<sessionId>…`（kill / 换代 / 每日兜底时拷的快照，master 的历代会话在 `archive/master/`）→ 目录名；都认不出 → `unowned`，不丢。子 agent 文件（`<sessionId>/subagents/…`、workflow 目录）记到父会话的主人，轮上标 `sidechain`。先记成 `unowned`、后来归档认出主人的会话，下一趟导入时整体改过去（只改 `unowned` 的，不在两个具名 agent 之间搬）。
 
-只收 Claude Code 的记录：Codex（T2 另做）和 Pi 的文件按 `runtimeForSessionPath` 认出来跳过。
+收 Claude Code 和 Codex；Pi 的文件按 `runtimeForSessionPath` 认出来跳过。
 
 ## 保留
 
 - 明细（`calls` / `turns` / `tools`）保留 30 天（本地日期，从今天 00:00 往前数 30 天）；**更早的记录导入时直接跳过**，不回填，因为清理之后再读到同一会话的副本时已经没有主键可以挡重复。
 - 清理只在每日那趟（`--prune`）做；10 分钟一趟的增量不删数据。
-- `daily`（日 × agent × 模型）永久。导入时把涉及的日子记进 `dirty_days`，导完按明细重算那天：保留期内的日子一律照明细重算（调用挪去别的日子后可能变空）；保留期之前、明细已清掉的日子不再动它（它是唯一的记录）。改归属时同样只影响还有明细的日子。
+- `daily`（日 × agent × 运行时 × 模型）永久。同名模型在两个运行时里含义不同（Claude 是应答模型、Codex 是请求模型），汇总也按运行时分行。导入时把涉及的日子记进 `dirty_days`，导完按明细重算那天：保留期内的日子一律照明细重算（调用挪去别的日子后可能变空）；保留期之前、明细已清掉的日子不再动它（它是唯一的记录）。改归属时同样只影响还有明细的日子。
 
 ## 与 `cost --today` 对账
 
 `summary --today` 与 `cost --today` 用同一个「今天」起点（`currentUsageWindow().dayStart`）和同一个去重键。`cost` 只看在册 agent 当前会话的主文件，所以差异只会来自：`unowned`（没登记的会话：owner 自己开的终端、cron 临时 agent 的旧会话…）、归档里的旧会话（agent 今天 /clear、重启换过会话，或已被 kill）、子 agent 文件（按 agent 单列 `sidechainTokens`）。另外跨文件去重会让某个 agent 比 `cost` 少：同一次调用出现在两个文件里时只归一个。
+
+## Codex（T92）
+
+数据源：`$CODEX_HOME/sessions`（缺省 `~/.codex/sessions`；沙箱里 CODEX_HOME 不安全时跳过）下的 `rollout-*.jsonl`，以及归档里的 Codex 副本（`archive/<agent>/<thread>.jsonl`，按首行 `session_meta` 认）。只读这些会话文件，**不碰 `~/.codex/auth.json`、config 或任何凭据**；`session_meta` 里的账号 id 不入库。
+
+- **文件**：`rollout-<ISO>-<threadId>.jsonl`，以及 `thread/revert` 之后的新段 `rollout-<ISO>-<threadId>_<rolloutId>.jsonl`（线程不变、文件换了）。共用的 `codexSessionIdFromFilename` 只认前一种，token 账自己两种都认。
+- **一轮** = Codex 自己的 `turn_id`（`task_started` / `turn_context` 带），轮 id 是 `cx:<turn_id>`：revert 新段、归档副本里的同一轮还是同一行。轮中途追加的用户消息、同一轮的多条 `turn_context` 不切。一段从轮中间开始（没看到 `task_started`）时按 `token_usage_record.turn_id` 接回原来那一轮。来源类型和摘要取本轮第一条外来输入（复用 Claude 的判定：`<channel>` 包装、人敲的字；注入的 AGENTS.md / environment_context 不算），整轮没有就记 `other`。
+- **一次调用** = 一次请求。只有「同一条记录被写了两遍」算重复，计数恰好相同的两次独立请求是两次。
+  - 新 Codex 每请求一条 `token_usage_record`，身份 = 轮 + `response_id`；revert 新段、归档副本带过去的是同一条记录，同一个键。
+  - 紧跟它、计数相同的 `event_msg/token_count`（`last_token_usage`）是同一次请求的回声，不另计。回声的身份记进 `echoes` 表，隔着别的行再落一遍也认得出。和上一条 token_count 的进程累计值、计数都相同的，是紧挨着重复落盘，跳过。本机见过重复那条落在下一轮 `task_started` 之后，所以这一条不看轮。
+  - 老 Codex（本机 0.149）只有 token_count，身份 = 轮 + 进程累计 total + 计数。
+  - 配对状态存在 `files.cx_pair`，跨读块、跨增量导入接得上。
+  - 不拿 record 的 `thread_token_usage` 去配 token_count 的累计：resume 之后两者分叉，本机 30 天里 4 千多次对不上。
+  - 早先按「线程 + 五项计数」做键，同一线程计数相同的两次独立请求会并成一次（T92 r1 P1-1），已改掉。全零的 token_count（只报限流）不算。
+  - 旧键已入库的库（v3 起就有 Codex 明细）：旧键认不出对应哪条记录，副本按新键再导会算两遍。v6 迁移只打个标记，下一趟导入开头清掉保留期内的 Codex 明细、Codex 文件从头重读按新键重建，那几天的 daily 按新明细重算（`rekeyCodexDetail`）；这一趟不管 `--today` 都读全保留期。保留期之前的旧明细导入时本来就跳过，留给清理；Claude 的行不动。读不到 Codex 目录时先不清，标记留着。
+- **四项 + reasoning**：Codex 的 `input_tokens` 含命中缓存、`output_tokens` 含 reasoning。入库时 input = input − cached，cacheRead = cached，cacheCreation = cache_write，output = output − reasoning，reasoning 单列；五项之和 = `total_tokens`。看到的上下文 = 单次请求 input + cacheCreation + cacheRead（= Codex 的 input_tokens）。
+- **`total_token_usage` 只用来对账**：它是进程级累计值，换进程 / resume 会重开，重开那一条丢了时做差会少算（本机 30 天少 0.6%），所以不拿它计数。
+- **模型** = `turn_context.model`，是**请求**的模型（rollout 不记实际应答的模型，T91 查实）。查询结果带 `modelBasis: "request"`，文本视图在模型名后标「(请求)」；Claude 的是 `response`。
+- **归属**：registry 里 Codex agent（tmux / ACP）的 `sessionId` 就是 thread id；其次归档目录名。子线程（`session_meta` 带父线程：subagent、guardian_review 等，判定复用 `codex-subthread.ts`）记到父线程的主人，标 `sidechain`、来源记 `subagent`。`codex exec` 一次性会话（ask_codex 等）和手开的会话认不出主人，记 `unowned`。
+- 其余（按文件偏移 + 文件身份增量、锁、10 分钟增量、查询前导入、30 天清理）与 Claude 完全相同。
+
+## 算到卡上（T95）
+
+每一轮回答两个问题：为哪张卡、哪一步（复述 / 写 / 审 / 修 / 合并 / 验证）、第几轮花的；属于哪个 feature。结果写在 `turns` 的 `attr_task` / `attr_step` / `attr_round` / `attr_feature` / `attr_item` / `attr_basis` 六列，原始用量（`calls`、轮的其他列）不动。
+
+**输入**全部来自台账（只读打开）：`tasks`（featureId、itemId、负责人）、`task_steps`（每一步第几轮派给了谁；老卡没有步骤行时按负责人 / reviewer 推，同 `ledger-steps.ts` 的 `stepsOf`）、`events` 里的阶段事件和派发事件（`kind=step`、`op=assign`）、`scheduler_sessions`、各项目 `meta.pms`。
+
+**按轮的开始时间判**，优先级从高到低：
+
+1. **调度引擎绑定的会话**（`scheduler_sessions.sessionId` = 轮的 session / Codex thread）：整条会话属于那张卡，`basis = session`。步骤取这一刻卡所在的阶段，且要和会话角色对得上（author ↔ 复述 / 写 / 修，reviewer ↔ 审），对不上 step 记空。
+2. **PM 与大总管**（任一项目 `meta.pms`、卡上的 `pm`、`master`）：一律 `coordination`（协调开销），不摊到卡上，哪怕它在某张卡上挂着执行者。
+3. **步骤窗口**：阶段事件把一张卡切成一段段 `[起, 止)`，每段再在派人 / 改派的时刻切开，每一小段按台账同一条规则挑这一刻在干活的那一步（`stepAtStage`：审查阶段按 `currentReview` 取轮次大的、同一轮终审优先；其余按 `STAGE_STEPS` 的退路顺序，修没派人就退到写）。挑中的派给了别的实例或人，这一段本机没有窗口。
+   - 执行者按派发事件还原：同一步同一轮改派会覆盖步骤行上的执行者（`createdAt` 不变），谁在什么时候接的只留在事件里，所以改派前归旧人、之后归新人。没有派发事件的行（交付时补的）一直是行上那个人；行比它的第一条派发事件早（补的行后来又同轮改派），那一段原来是谁已找不回来，记成执行者不明。
+   - 段开始时某一步还没派人、到推出这一段时（1 秒内）才补的行，从段开始就算它的（「修」那一行常在修完交付时才补派）；段中途派的从派的那一刻算。
+   - `blocked` 按卡住之前的阶段算；`spec`（PM 写规格）和 `verified` / `done` / `cancelled` 不开窗口。轮次取那一步的行；退到别的步骤时取阶段事件上的任务轮次。
+   - 这一刻正好落在**一张卡**的窗口里 → `basis = step`。
+   - 落在**两张以上**卡的窗口里 → `overlap`，不猜。
+
+**未归属的原因**（`attr_task` 为空）：`coordination`、`overlap`、`outside_window`（台账里当过执行者，但这一刻不在任何窗口里，常见于台账阶段推晚了：在「规格」阶段就开工、审查阶段里已经在修）、`not_in_ledger`（台账里从没当过执行者：非台账管理的项目 agent）、`unowned`（会话不属于任何 agent）、`executor_lost`（只落在一张卡的窗口里，但这一刻别的卡有一段执行者找不回来，说不准是不是重叠，不归）。
+
+**feature**：卡上有 `featureId`（T84 新台账）就记它；另记卡的事项 `itemId`（还没迁进 feature 的卡挂在事项上）。`by-feature` 先按 id（全 id 或本机前缀后的 slug）精确找 feature / 事项，再按标题包含找，命中多个就列出来让人写 id；API 只认 id。
+
+**何时算**：每次 `usage ingest`（bridge 10 分钟一趟、每日那趟、查询前那趟）导完就按台账**整体重算**一遍、只写变了的行（本机 30 天约 8 千轮，毫秒级）。所以规则改了、台账补推了阶段，下一趟全部跟着变；不需要迁移旧数据。明细清掉（30 天）之后的轮不再有归属，按卡的永久汇总不在本卡范围。
+
+**只读 API**：`GET /api/v1/usage/task/:id`、`GET /api/v1/usage/feature/:id`，只给全权设备（`canAdministerPairing`：全 scope、非 peer、manage、设备凭据，与 `/ai-inventory` 同一道门），只读 usage 库现有数据（只读连接），不导入、不重算。

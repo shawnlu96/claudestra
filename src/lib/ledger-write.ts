@@ -222,12 +222,17 @@ export function moveStage(db: Database, ctx: WriteCtx, input: { taskId: string; 
 export function deliver(
   db: Database,
   ctx: WriteCtx,
-  input: { taskId: string; headSHA?: string; evidence?: string; text?: string; moveFrom?: Stage },
+  input: { taskId: string; headSHA?: string; evidence?: string; text?: string; moveFrom?: Stage; expect?: { rev?: number; branch?: string } },
 ): WriteResult<LedgerTask> {
   return tx(db, () => {
     let task = mustTask(db, input.taskId);
     const dup = replay(db, ctx, { project: task.project, target: task.id, kind: "deliver" }, () => task);
     if (dup) return dup;
+    // 前置条件（MCP deliver 核对远端 head 时的卡快照）：之后卡被改过（换分支等），那次核对就不算数，整笔不写
+    const { rev, branch } = input.expect ?? {};
+    if ((rev !== undefined && task.rev !== rev) || (branch !== undefined && task.branch !== branch)) {
+      throw new LedgerError("conflict", `任务 ${task.id} 在核对之后被改过（现在 rev ${task.rev}、分支 ${task.branch ?? "（空）"}），重新核对后再交付`, { rev: task.rev });
+    }
     if (TERMINAL_STAGES.includes(task.stage)) throw new LedgerError("invalid", `任务 ${task.id} 已是终态 ${task.stage}，不能再交付`, { stage: task.stage });
     // 先换 head 再推阶段（那一步记的交付 head 要是新的，ledger-steps-write.ts），再记交付：deliver 的 round 与同一轮的 review 事件一致
     if (input.headSHA) {

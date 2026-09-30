@@ -1,6 +1,6 @@
 # MCP caller identity (T85)
 
-The bridge has to know **which agent, which session and which model family** made an MCP tool call, without trusting anything the caller reports about itself. M2/M3 dispatch tools (`take_order`, `deliver`, `submit_verdict`, …) build on this. The only tool added so far is the read-only probe `whoami`.
+The bridge has to know **which agent, which session and which model family** made an MCP tool call, without trusting anything the caller reports about itself. M2/M3 dispatch tools (`take_order`, `deliver`, `submit_verdict`, …) build on this. Tools built on it so far: the read-only probe `whoami` and the M2 executor tools `take_order` / `deliver` / `ask` (T96).
 
 ## Threat model (fixed, do not widen)
 
@@ -32,16 +32,37 @@ Every bypass agent is already an unrestricted shell on this machine, so **delibe
    - the frame was not downgraded by the ACP proxy.
 
    `agent`, `sessionId` and `family` come from the registry's current values (master: latest session in `MASTER_DIR`), because `/clear` and ACP thread rotation change the session id after launch. Nothing the caller reports about itself counts. The check runs again on every call, so an old connection drops to `verified=false` as soon as the agent restarts.
-5. **Tools**: `callerIdentity(ws, frame)` gives the identity. `requireVerified()` → `identity_unverified` is the gate for M2/M3 tools. `whoami` returns the structure.
-   - Reviewer tools (M3, `bridge/review-tools.ts`):
-     - `take_review` is read-only. It returns the caller's review orders: an auto card's bound reviewer session, otherwise the executor of the `currentReview` step.
-     - `submit_verdict(VerdictWire)` writes through `ledger submit-verdict`, which re-checks every rule on the write connection (`lib/review-verdict.ts`):
-       - the order is the caller's current one, the head equals the order's head, and the reviewer is not the author;
-       - p0 / p1 / p2 counts match the findings, and the report is a non-empty file under `ledger/reviews/`;
-       - session and family must equal the registry's current values;
-       - the call must carry a one-shot ticket the bridge issued after the identity gate (`lib/verdict-ticket.ts`), bound to the actor and the whole wire. An agent that runs the subcommand from its shell out of habit is refused; a deliberate forgery is not stopped (see Known limits).
+5. **Tools**: `callerOf(ws, frame)` gives the identity and the connection's channel. `requireVerified()` → `identity_unverified` is the gate for M2/M3 tools. `whoami` returns the structure.
 
-     It never moves the stage. The same verdict retried is a no-op; a different second verdict is refused.
+### Dispatch tools (M2, T96)
+
+Every dispatch tool travels as one frame type, `order_tool {tool, args}` (`lib/order-tools.ts` defines the tools on the `channel-server` side). The ACP loopback proxy forwards only that type, and `bridge.ts` hands it to `bridge/order-tools.ts` in one line. To add a tool (M3 `take_review` / `submit_verdict`), add one entry to `ORDER_TOOLS` and one to `HANDLERS`.
+
+- **Gate first** (`lib/order-tool-route.ts`). An unverified caller gets `identity_unverified` before any handler runs. That covers: no credential, a credential replaced by a newer launch, and an ACP frame marked `callerDowngraded`. Handlers receive `agent` / `sessionId` / `family` / `channelId` from the identity only; the arguments cannot set them.
+- **Arguments** go through the T87 parsers: `parseDeliverWire` / `parseAskWire` (`lib/order-wire.ts`). `take_order` output is checked with `parseOrderWire` before it is returned.
+- **Ledger writes** (`lib/order-ledger-exit.ts`). The bridge runs `manager ledger <sub>` with `DISCORD_CHANNEL_ID` set to the caller's channel, so the CLI computes `actor` exactly as for a hand-typed command. Every write carries `--dedup`. Session and family flags come from the identity (`identityFlags`). The bridge writes no ledger rows itself; asks are the existing exception.
+- **`take_order`** (`lib/order-take.ts`) returns the caller's current order: a card in `build` / `fix` whose active step is assigned to the caller. If the card has a non-retired author session binding, that binding's agent and session must also match the caller. The order id is the scheduler's dispatch intent id, or `<task>:<step>:r<round>` for a card a PM assigned by hand. If there is no order, `order` is `null`.
+- **`deliver`** (`lib/order-deliver.ts`) has the same effect as `ledger deliver --from build|fix --head --evidence`. The checks run in this order:
+  1. The wire must parse, and head must be a lowercase 40-hex SHA.
+  2. A retry with the same `mcp-deliver:<orderId>:<head>` key returns the first receipt (order id, `review`, event seq), whatever stage the card is in now. It only does so if the first delivery was this caller's.
+  3. The order id must be one of the caller's current orders.
+  4. The bridge reads the card's branch head on origin itself (`git ls-remote` in the caller's registry cwd, 15 s). If it can't read it, or the head differs, the call is refused.
+  5. The card's `rev` and branch, read before the origin check, go to the CLI as `--rev` / `--branch` preconditions. The CLI checks them, the stage and the executor inside the write transaction; if the card changed during the check (a new branch, a PM taking it back), it refuses and writes nothing.
+- **`ask`** (`lib/order-ask.ts`) takes a question about the caller's current order. It opens an `asks` row assigned to the card's `pm`, or to the first name on the project PM list if the card has none. It then notifies that PM through the team-router delivery path (`sendLedgerNotice`: sent directly if the PM is online and idle, held otherwise). The question and options appear in the notice only as quotes. The ask stays `extra.notice = pending` until the notice is sent or held; a retry with the same arguments re-sends a still-pending notice under the same message id. Answers still come back as ordinary `send_to_agent` messages.
+- **CLI stays**: `ledger deliver` and the rest keep working. Pi, Codex tmux, and anything else that is `verified=false` must use the CLI.
+
+### Reviewer tools (M3, T97)
+
+`bridge/review-tools.ts` adds two entries to the same `HANDLERS`.
+
+- **`take_review`** is read-only (`lib/review-order.ts`). It returns the caller's review orders: on an auto card, the bound reviewer session; otherwise, the executor of the `currentReview` step.
+- **`submit_verdict(VerdictWire)`** writes through `ledger submit-verdict`, which re-checks every rule on the write connection (`lib/review-verdict.ts`):
+  - the order is the caller's current one, the head equals the order's head, and the reviewer is not the author;
+  - p0 / p1 / p2 counts match the findings, and the report is a non-empty file under `ledger/reviews/`;
+  - session and family must equal the registry's current values;
+  - the call must carry a one-shot ticket the bridge issued after the identity gate (`lib/verdict-ticket.ts`), bound to the actor and the whole wire. An agent that runs the subcommand from its shell out of habit is refused; a deliberate forgery is not stopped (see Known limits).
+
+  It never moves the stage. The same verdict retried is a no-op; a different second verdict is refused.
 
 ## Misdelivery guard
 

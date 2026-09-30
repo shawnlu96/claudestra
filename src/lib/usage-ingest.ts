@@ -1,7 +1,7 @@
 /**
- * token 账（T83）的导入：Claude Code 会话文件 → usage.sqlite。按文件记读到的字节偏移，只读新增的整行，重复跑幂等。
- * 覆盖面：在册 agent 的当前会话、archive/<agent>/ 的退役快照、~/.claude/projects 下其余全部会话（认不出主人的记 unowned）；
- * 子 agent（<sid>/subagents/…）记到父会话的主人，标 sidechain。Codex / Pi 的记录不在这里（Codex 归 T2）。
+ * token 账（T83 / T92）的导入：Claude Code 会话文件与 Codex rollout → usage.sqlite。按文件记读到的字节偏移，只读新增的整行，重复跑幂等。
+ * 覆盖面：在册 agent 的当前会话、archive/<agent>/ 的退役快照、~/.claude/projects 与 Codex sessions 下其余全部会话（认不出主人的记 unowned）；
+ * 子 agent（<sid>/subagents/…、Codex 子线程）记到父会话的主人，标 sidechain。Codex 行的解析在 usage-codex.ts；Pi 的记录不收。
  * 只在 manager 子进程里跑（首轮要读几个 GB）：bridge 每 10 分钟拉起一趟增量、每天一趟带清理（bridge/archive-sweeper.ts），
  * 查询命令查之前也导一趟；几路之间靠 ingestLocked 的文件锁串行。
  */
@@ -13,9 +13,12 @@ import { projectJsonlPath } from "./jsonl-cost.js";
 import { ARCHIVE_ROOT } from "./paths.js";
 import { agentRuntime, readRegistryAgentsSync, type RegistryAgent } from "./registry.js";
 import { claudeProjectsRoot } from "./runtimes/claude-code.js";
+import { codexRolloutRootOrSkip } from "./codex-home.js";
+import { attributeFromPath, type AttrResult } from "./usage-attr.js";
+import { CODEX, codexThreadOfFile, handleCodexLine, type CodexLineCtx } from "./usage-codex.js";
 import { runtimeForSessionPath } from "./session-source.js";
 import { callOf, inboundIdentity, inboundOf, triggerSummary } from "./usage-classify.js";
-import { pruneUsage, rebuildDirtyDays, retentionCutoff, UNOWNED, usageWriter, type FileState } from "./usage-store.js";
+import { pruneUsage, rebuildDirtyDays, rekeyCodexDetail, retentionCutoff, UNOWNED, usageWriter, type FileState } from "./usage-store.js";
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const CHUNK_BYTES = 8 * 1024 * 1024;
@@ -23,6 +26,8 @@ const CHUNK_BYTES = 8 * 1024 * 1024;
 export interface IngestOptions {
   projectsRoot?: string;
   archiveRoot?: string;
+  /** Codex rollout 根；缺省 = CODEX_HOME / ~/.codex 的 sessions（沙箱配错时跳过）；null = 不读 Codex */
+  codexRoot?: string | null;
   registry?: Pick<RegistryAgent, "name" | "sessionId" | "cwd" | "runtime">[];
   /** mtime 早于它的文件不读；缺省 = 保留期下界（更早没写过的文件里不可能有保留期内的记录） */
   sinceMs?: number;
@@ -33,6 +38,8 @@ export interface IngestOptions {
   prune?: boolean;
   /** 每读一块、认领 / 清理之前各调一次；返回 false（锁已失）就停在这里，没做完的下一趟接着做 */
   keepAlive?: () => boolean;
+  /** 台账库：给了就在导完之后按它整体重算一遍归属（usage-attr.ts）；缺省不算（单测、没有台账的机器） */
+  ledgerPath?: string | null;
 }
 
 export interface IngestResult {
@@ -44,12 +51,16 @@ export interface IngestResult {
   ms: number;
   /** 导到一半失了锁：停在这里，没读的、清理和 daily 重算都留给下一趟 */
   aborted?: boolean;
+  /** 重算了归属：轮数、改了几行、各依据的轮数；台账不在就没有 */
+  attributed?: AttrResult;
 }
 
 interface SessionFile {
   path: string;
   sessionId: string;
   sidechain: boolean;
+  /** 已知是 Codex rollout；归档副本不知道，首次读时按首行嗅探 */
+  runtime?: typeof CODEX;
 }
 
 /** 路径 → 它属于哪个会话：根下第一个 UUID 形状的段；是目录（后面还有段）= 子 agent 文件 */
@@ -76,7 +87,8 @@ function walkJsonl(dir: string, out: string[], depth = 0): void {
 /** sessionId → agent：在册 agent 的当前会话优先，其次归档目录名（archive/<agent>/<sid>…；master 的历代会话也在这里） */
 function sessionOwners(registry: NonNullable<IngestOptions["registry"]>, archiveRoot: string): Map<string, string> {
   const owners = new Map<string, string>();
-  for (const a of registry) if (a.sessionId && agentRuntime(a) === "claude-code") owners.set(a.sessionId, a.name);
+  // Codex agent（tmux 与 ACP 两种接法）的 sessionId 就是 Codex 的 thread id；Pi 的记录不收
+  for (const a of registry) if (a.sessionId && agentRuntime(a) !== "pi") owners.set(a.sessionId, a.name);
   let agents: string[] = [];
   try { agents = readdirSync(archiveRoot); } catch { return owners; } // 还没有归档目录：只有在册的
   for (const agent of agents) {
@@ -92,7 +104,7 @@ function sessionOwners(registry: NonNullable<IngestOptions["registry"]>, archive
 }
 
 /** 要读的文件，按优先级：在册当前会话 → 归档 → 其余。跨文件重复的调用归第一个读到它的文件，所以顺序决定归属 */
-function listFiles(o: Required<Pick<IngestOptions, "projectsRoot" | "archiveRoot" | "registry">>): SessionFile[] {
+function listFiles(o: Required<Pick<IngestOptions, "projectsRoot" | "archiveRoot" | "registry" | "codexRoot">>): SessionFile[] {
   const seen = new Set<string>();
   const out: SessionFile[] = [];
   const add = (f: SessionFile | null) => {
@@ -111,7 +123,20 @@ function listFiles(o: Required<Pick<IngestOptions, "projectsRoot" | "archiveRoot
     walkJsonl(root, files);
     for (const p of files.sort()) add(sessionOfPath(p, root));
   }
+  const rollouts: string[] = [];
+  if (o.codexRoot) walkJsonl(o.codexRoot, rollouts);
+  for (const p of rollouts.sort()) {
+    const thread = codexThreadOfFile(basename(p));
+    if (thread) add({ path: p, sessionId: thread, sidechain: false, runtime: CODEX });
+  }
   return out;
+}
+
+/** 归档副本是不是 Codex rollout：首行是 session_meta（type 键在行首几十字节内，整行可能几十 KB，不用读完） */
+function sniffCodex(fd: number): boolean {
+  const b = Buffer.alloc(512);
+  const got = readSync(fd, b, 0, 512, 0);
+  return b.toString("utf8", 0, got).split("\n")[0].includes('"type":"session_meta"');
 }
 
 const FP_BYTES = 4096;
@@ -132,7 +157,7 @@ function fingerprint(fd: number, offset: number): string {
  * 调用只收保留期内的：更早的明细反正要清，收进来还会在清理后被副本重复计入 daily。
  * 上次的偏移只在同一个文件、已读部分没变时沿用；变短、换了 inode、已读部分被改写都从头重读（调用按主键去重，不会翻倍）。
  */
-function ingestFile(w: ReturnType<typeof usageWriter>, db: Database, f: SessionFile, agent: string, cutoff: number, chunkBytes: number, alive: () => boolean) {
+function ingestFile(w: ReturnType<typeof usageWriter>, db: Database, f: SessionFile, agent: string, ctx: CodexLineCtx, chunkBytes: number, alive: () => boolean) {
   let fd: number;
   try { fd = openSync(f.path, "r"); } catch { return { bytes: 0, calls: 0, aborted: false }; } // 刚被挪走 / 删掉：下一趟再说
   let bytes = 0;
@@ -145,6 +170,7 @@ function ingestFile(w: ReturnType<typeof usageWriter>, db: Database, f: SessionF
     const st: FileState = same ? { ...prev } : {
       path: f.path, offset: 0, size, session_id: f.sessionId, agent, sidechain: f.sidechain ? 1 : 0,
       turn_id: null, turn_start: null, turn_kind: null, turn_trigger: null, fp: null, turn_input: null,
+      runtime: f.runtime ?? (sniffCodex(fd) ? CODEX : null), model: null, parent: null, cx_pair: null,
     };
     let ensured: string | null = null;
     let want = chunkBytes;
@@ -165,12 +191,12 @@ function ingestFile(w: ReturnType<typeof usageWriter>, db: Database, f: SessionF
       want = chunkBytes;
       db.transaction(() => {
         for (const line of buf.toString("utf8", 0, end).split("\n")) {
-          const r = handleLine(line, st, f, cutoff);
+          const r = st.runtime === CODEX ? handleCodexLine(line, st, ctx) : handleLine(line, st, f, ctx.cutoff);
           if (!r) continue;
           if (ensured !== st.turn_id) {
             w.turn({
-              turnId: st.turn_id!, agent: st.agent, sessionId: f.sessionId, sidechain: f.sidechain,
-              startedAt: st.turn_start!, kind: st.turn_kind ?? "continued", trigger: st.turn_trigger ?? "",
+              turnId: st.turn_id!, agent: st.agent, sessionId: st.session_id, sidechain: st.sidechain === 1,
+              startedAt: st.turn_start!, kind: st.turn_kind ?? "continued", trigger: st.turn_trigger ?? "", runtime: st.runtime ?? "claude-code",
             });
             ensured = st.turn_id;
           }
@@ -227,14 +253,17 @@ function handleLine(line: string, st: FileState, f: SessionFile, cutoff: number)
   return c;
 }
 
-/** 之前记成 unowned 的会话后来认出了主人（归档快照是 kill 时才拷的）：轮和文件都改过去 */
-function claimOwners(db: Database, w: ReturnType<typeof usageWriter>, owners: Map<string, string>): void {
-  const rows = db.prepare(`SELECT DISTINCT session_id FROM files WHERE agent = '${UNOWNED}'`).all() as { session_id: string }[];
+/**
+ * 之前记成 unowned 的会话后来认出了主人（归档快照是 kill 时才拷的；Codex 子线程的父线程后读到）：轮和文件都改过去。
+ * 子线程按父线程找主人，父线程本身也可能是后来才认出的，所以放在每趟最后统一认。
+ */
+function claimOwners(db: Database, w: ReturnType<typeof usageWriter>, ctx: CodexLineCtx): void {
+  const rows = db.prepare(`SELECT DISTINCT session_id, parent FROM files WHERE agent = '${UNOWNED}'`).all() as { session_id: string; parent: string | null }[];
   const setFiles = db.prepare(`UPDATE files SET agent = ? WHERE session_id = ? AND agent = '${UNOWNED}'`);
   db.transaction(() => {
-    for (const { session_id: sid } of rows) {
-      const agent = owners.get(sid);
-      if (!agent) continue;
+    for (const { session_id: sid, parent } of rows) {
+      const agent = ctx.ownerOf(sid, parent);
+      if (agent === UNOWNED) continue;
       w.claimSession(sid, agent);
       setFiles.run(agent, sid);
     }
@@ -250,10 +279,17 @@ export function ingestUsage(db: Database, opts: IngestOptions = {}): IngestResul
     projectsRoot: opts.projectsRoot ?? claudeProjectsRoot(),
     archiveRoot: opts.archiveRoot ?? ARCHIVE_ROOT,
     registry: opts.registry ?? readRegistryAgentsSync(),
+    codexRoot: opts.codexRoot === undefined ? codexRolloutRootOrSkip("token 账导入 Codex") : opts.codexRoot,
   };
   const owners = sessionOwners(o.registry, o.archiveRoot);
-  const since = opts.sinceMs ?? cutoff;
+  // 刚清掉旧键的 Codex 明细：这趟必须把保留期内的文件全读一遍（--today 之类的 sinceMs 会漏掉更早的日子）；读不到 Codex 目录就先不清
+  const rekeyed = !!o.codexRoot && rekeyCodexDetail(db, cutoff);
+  const since = rekeyed ? cutoff : opts.sinceMs ?? cutoff;
   const w = usageWriter(db);
+  const ctx: CodexLineCtx = {
+    cutoff, tool: w.tool, isEcho: w.isEcho, noteEcho: w.noteEcho,
+    ownerOf: (thread, parent) => owners.get(thread) ?? (parent ? owners.get(parent) ?? w.knownOwner(parent) : null) ?? UNOWNED,
+  };
   const res: IngestResult = { files: 0, read: 0, bytes: 0, calls: 0, pruned: 0, ms: 0 };
   // 每块、以及认领 / 清理 / 重算之前都核对一次锁（顺带续租）：导入是同步的，锁的定时续租跑不起来
   const alive = () => !opts.keepAlive || opts.keepAlive();
@@ -262,18 +298,20 @@ export function ingestUsage(db: Database, opts: IngestOptions = {}): IngestResul
     let mtime = 0;
     try { mtime = statSync(f.path).mtimeMs; } catch { continue; } // 在册会话还没生成文件 / 已被清理
     res.files++;
-    if (mtime < since || runtimeForSessionPath(f.path) !== undefined) continue;
-    const r = ingestFile(w, db, f, owners.get(f.sessionId) ?? UNOWNED, cutoff, opts.chunkBytes ?? CHUNK_BYTES, alive);
+    const rt = runtimeForSessionPath(f.path);
+    if (mtime < since || (rt !== undefined && rt !== CODEX)) continue; // Pi 不收
+    const r = ingestFile(w, db, f, owners.get(f.sessionId) ?? UNOWNED, ctx, opts.chunkBytes ?? CHUNK_BYTES, alive);
     if (r.bytes) res.read++;
     res.bytes += r.bytes;
     res.calls += r.calls;
     if (r.aborted) return done(true);
   }
   if (!alive()) return done(true);
-  claimOwners(db, w, owners);
+  claimOwners(db, w, ctx);
   if (!alive()) return done(true);
   if (opts.prune) res.pruned = pruneUsage(db, cutoff);
   else rebuildDirtyDays(db, cutoff);
+  if (opts.ledgerPath && alive()) res.attributed = attributeFromPath(db, opts.ledgerPath) ?? undefined;
   res.ms = Math.round(performance.now() - t0);
   return res;
 }

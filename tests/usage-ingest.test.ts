@@ -52,7 +52,7 @@ function fx() {
   mkdirSync(archive, { recursive: true });
   const db = openUsageDb(":memory:");
   const registry = [{ name: "agent-a", sessionId: S1, cwd: join(root, "nope") }];
-  const opts = (now = NOW, extra: IngestOptions = {}): IngestOptions => ({ projectsRoot: projects, archiveRoot: archive, registry, now, ...extra });
+  const opts = (now = NOW, extra: IngestOptions = {}): IngestOptions => ({ projectsRoot: projects, archiveRoot: archive, codexRoot: null, registry, now, ...extra });
   const run = (now = NOW, chunkBytes?: number, extra: IngestOptions = {}) => ingestUsage(db, opts(now, { chunkBytes, ...extra }));
   const write = (p: string, recs: object[]) => {
     mkdirSync(join(p, ".."), { recursive: true });

@@ -729,14 +729,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (request) => {
 
     case "list_shared_channels": {
       const result = await bridgeRequest({ type: "list_channels" });
-      return {
-        content: [
-          {
-            type: "text" as const,
-            text: JSON.stringify(result.channels || [], null, 2),
-          },
-        ],
-      };
+      return { content: [{ type: "text" as const, text: JSON.stringify(result.channels || [], null, 2) }] };
     }
 
     case "forward_to_agent": return forwardTool(bridgeRequest, args);

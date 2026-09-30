@@ -174,15 +174,19 @@ export function buildNodes(db: Database, feature: Pick<Feature, "id" | "project"
   return nodes;
 }
 
-/** 节点任务卡挂上 featureId：每张卡 rev + 1、附一条 task 事件（和 task-set 的事件同形），依赖任务 rev 的 CAS 能看到这次改动 */
+/** 一张卡挂上 featureId：rev + 1、附一条 task 事件（和 task-set 的事件同形），依赖任务 rev 的 CAS 能看到这次改动 */
+function setTaskFeature(db: Database, ctx: WriteCtx, feature: Feature, t: LedgerTask): void {
+  const rev = t.rev + 1;
+  db.prepare("UPDATE tasks SET featureId = ?, rev = ?, updatedAt = ? WHERE id = ?").run(feature.id, rev, ctx.now ?? Date.now(), t.id);
+  insertEvent(db, ctx, { project: t.project, target: t.id, kind: "task", data: { op: "set", patch: { featureId: feature.id }, rev } }, false);
+}
+
+/** 节点任务卡挂上 featureId（节点已由 buildNodes 校验过）；已挂同一个的跳过 */
 export function linkTasks(db: Database, ctx: WriteCtx, feature: Feature, nodes: readonly DagNode[]): void {
   for (const n of nodes) {
     if (!n.taskId) continue;
     const t = mustTask(db, n.taskId);
-    if (t.featureId === feature.id) continue;
-    const rev = t.rev + 1;
-    db.prepare("UPDATE tasks SET featureId = ?, rev = ?, updatedAt = ? WHERE id = ?").run(feature.id, rev, ctx.now ?? Date.now(), t.id);
-    insertEvent(db, ctx, { project: t.project, target: t.id, kind: "task", data: { op: "set", patch: { featureId: feature.id }, rev } }, false);
+    if (t.featureId !== feature.id) setTaskFeature(db, ctx, feature, t);
   }
 }
 
@@ -209,5 +213,25 @@ export function initDag(db: Database, ctx: WriteCtx, input: { id: string; rev: n
     linkTasks(db, ctx, cur, nodes);
     const event = insertEvent(db, ctx, { ...key, data: { op: "dag-init", version: 1, nodes: nodes.map((n) => n.key), rev } }, true);
     return { row: getDagVersion(db, cur.id, 1) as DagVersion, event, duplicate: false };
+  });
+}
+
+/**
+ * 不进 DAG 的卡挂到 feature 下（L3 迁移：已完成 / 已取消 / 待排的卡）：只写 featureId，阶段、依赖不动。
+ * 卡要在本项目、没挂别的 feature（挂了就整批拒）；已挂这个 feature 的跳过。没有卡真改时不写 feature 事件。
+ */
+export function assignFeature(db: Database, ctx: WriteCtx, input: { id: string; taskIds: readonly string[] }): { feature: Feature; assigned: string[] } {
+  return tx(db, () => {
+    const cur = mustFeature(db, input.id);
+    requireManager(db, ctx.actor, cur.project);
+    const assigned: string[] = [];
+    for (const id of new Set(input.taskIds)) {
+      const t = nodeTask(db, cur, id, id) as LedgerTask;
+      if (t.featureId === cur.id) continue;
+      setTaskFeature(db, ctx, cur, t);
+      assigned.push(t.id);
+    }
+    if (assigned.length) insertEvent(db, ctx, { project: cur.project, target: cur.id, kind: "feature", data: { op: "assign", tasks: assigned } }, true);
+    return { feature: cur, assigned };
   });
 }
