@@ -42,6 +42,12 @@ export function judgeSignature(
   return prev?.publicKey === hdr.key ? done("ok") : done("ok", { publicKey: hdr.key, fingerprint: keyFingerprint(hdr.key), pinnedAt: now });
 }
 
+/** 这次判定是不是刚钉住一把钥匙（首次，或按记录的指纹改钉）：借入方要在台账留一条（bridge/local-api/lend.ts） */
+export function newlyPinned(prev: PinnedPeerKey | undefined, next: PinnedPeerKey): { fingerprint: string; first: boolean } | null {
+  if (next.lastCheck?.result !== "ok" || !next.publicKey || prev?.publicKey === next.publicKey) return null;
+  return { fingerprint: next.fingerprint ?? keyFingerprint(next.publicKey), first: !prev?.publicKey };
+}
+
 function keyMismatch(prev: PinnedPeerKey | undefined, key: string, recordFp: string | null, recordKey: string | null): boolean {
   if (recordKey) return key !== recordKey;
   if (!recordFp) return !!prev?.publicKey && prev.publicKey !== key;
