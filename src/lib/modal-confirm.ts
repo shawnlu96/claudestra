@@ -12,7 +12,7 @@ import {
   parseChoicePrompt,
   parseModalOptions,
 } from "./tmux-helper.js";
-import { activeModalCutClean, activeModalView, looksLikeTrustPrompt } from "./trust-prompt.js";
+import { activeModalView, looksLikeTrustPrompt } from "./trust-prompt.js";
 import { inputBox } from "./input-box.js";
 
 /**
@@ -28,8 +28,6 @@ export function isAutoConfirmableModal(
   if (inputBox(pane.replace(/\s+$/, "").split("\n"))) return false;
   // 要人决定的框整屏先判一遍（和 main 同口径）：权限框的问句里可能就带「Esc to cancel」，裁段会把问句切掉，只看裁出来的段等于替人批准
   if (needsHuman(pane, opts)) return false;
-  // 裁剪线落在问句这类文字中间（不是独占一行的尾注）：分不清哪段是当前的框，宁可不按
-  if (activeModalCutClean(pane) === false) return false;
   pane = activeModalView(pane); // 以下只看当前活动的框：上面旧框的残影既不按、也不挡（lib/trust-prompt.ts）
   const modalOpts = parseModalOptions(pane);
   // v2.23.1+ 无编号选择弹窗（effort 默认档位确认等）也算：默认高亮项 = 保持现状，Enter 无副作用

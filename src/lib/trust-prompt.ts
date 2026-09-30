@@ -27,24 +27,18 @@ function trimTrailingBlank(pane: string): string[] {
   return lines;
 }
 
+/** 独占一行的确认尾注（「Enter to confirm · …」「Esc to cancel · Tab to amend」「Enter to select · … · Esc to cancel」）：行首就是按键提示 */
+const isFooterLine = (l: string): boolean => /^\s*(?:Enter|Esc) to \w/i.test(l) && MODAL_FOOTER_RE.test(l);
+
 /**
- * 当前活动画面：最后一行之前的最后一个确认尾注以下的部分。旧框连同它的尾注都在这条线上面，是残影不是当前画面——
+ * 当前活动画面：最后一行之前的最后一条独占一行的确认尾注以下的部分。旧框连同它的尾注都在这条线上面，是残影不是当前画面——
  * 既不能被当成活弹窗去按（残影下接 shell 时 Enter 会落到 shell 上），也不能挡住它下面新弹出来的框。
- * 通用的自动确认（tmux-helper isAutoConfirmableModal）也只看这一段。
+ * 行中间提到这段字的（撞墙倒计时「… · esc to cancel」、对话、grep 输出、权限框问句）不当裁剪线：拿它裁会把下面正常的框裁坏、
+ * 或把问句切掉；问句带这段字的权限框由 modal-confirm 的整屏判定拦（tests/modal-confirm.test.ts）。
  */
 export function activeModalView(pane: string): string {
   const lines = trimTrailingBlank(pane);
-  return lines.slice(lines.slice(0, -1).findLastIndex((l) => MODAL_FOOTER_RE.test(l)) + 1).join("\n");
-}
-
-/**
- * activeModalView 在哪一行裁的：没裁 = null，裁了 = 那一行是不是独占一行的尾注（「Enter to confirm · …」「Esc to cancel · …」开头）。
- * 不是 = 裁在别的文字中间（权限框问句里带了这段字），裁出来的段不可信，通用自动确认一个键都不按（tests/modal-confirm.test.ts）
- */
-export function activeModalCutClean(pane: string): boolean | null {
-  const lines = trimTrailingBlank(pane);
-  const cut = lines.slice(0, -1).findLastIndex((l) => MODAL_FOOTER_RE.test(l));
-  return cut < 0 ? null : /^\s*(?:Enter to confirm|Esc to cancel)\b/i.test(lines[cut]!);
+  return lines.slice(lines.slice(0, -1).findLastIndex(isFooterLine) + 1).join("\n");
 }
 
 /** 最后一个非空行是弹框尾注 = 屏幕底部此刻真有一个框。restart 复用旧窗口时旧 CC 最后一帧里的信任框文字不满足它（底下还有 shell / 新命令行） */
