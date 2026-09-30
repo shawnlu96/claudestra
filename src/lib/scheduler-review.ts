@@ -1,6 +1,7 @@
 /** Structured review evidence used by the deterministic planner; free-form report text cannot decide a branch. */
 import type { LedgerEvent, LedgerTask, ReviewVerdict } from "./ledger-stages.js";
 import type { AuthorFamily } from "./ledger-scheduler.js";
+import { LedgerError } from "./ledger-store.js";
 
 type FindingSeverity = "P0" | "P1" | "P2";
 export interface ReviewFinding { findingId: string; family: string; severity: FindingSeverity; probe: string }
@@ -35,6 +36,33 @@ function findingsOf(value: unknown): ReviewFinding[] | null {
     rows.push({ findingId, family: r.family, severity: r.severity as FindingSeverity, probe: r.probe as string });
   }
   return rows;
+}
+
+export interface StructuredReviewFields {
+  head?: string;
+  reviewerSessionId?: string;
+  reviewerFamily?: AuthorFamily;
+  findings?: ReviewFinding[];
+}
+
+/**
+ * A structured review is all-or-nothing and must agree with itself before it can drive the planner; a partial one
+ * would read as "invalid" later and stop an auto card, so it is refused at write time instead. Legacy reviews omit all.
+ */
+export function checkStructuredReview(input: StructuredReviewFields & { p0: number; p1: number; p2: number; path?: string }, task: Pick<LedgerTask, "headSHA">): void {
+  const given = [input.head, input.reviewerSessionId, input.reviewerFamily, input.findings].filter((v) => v !== undefined).length;
+  if (given === 0) return;
+  if (given < 4 || !input.path) throw new LedgerError("invalid", "结构化审查要同时带 head、审查 session、模型家族、逐项结论和报告路径");
+  if (!/^[a-f0-9]{40}$/i.test(input.head as string) || input.head !== task.headSHA) throw new LedgerError("invalid", "结构化审查的完整 head 与任务当前 head 不一致");
+  if (!str(input.reviewerSessionId) || (input.reviewerSessionId as string).length > 200 || /[\p{Cc}\p{Cf}]/u.test(input.reviewerSessionId as string)) {
+    throw new LedgerError("invalid", "审查 session id 要是单行且不超过 200 字");
+  }
+  if (!["claude", "codex"].includes(input.reviewerFamily as string)) throw new LedgerError("invalid", "审查模型家族只认 claude / codex");
+  const rows = findingsOf(input.findings);
+  if (!rows) throw new LedgerError("invalid", "逐项结论要有 findingId、family、severity、probe，且 findingId 不重复");
+  if ((["P0", "P1", "P2"] as const).some((p) => rows.filter((f) => f.severity === p).length !== input[p.toLowerCase() as "p0" | "p1" | "p2"])) {
+    throw new LedgerError("invalid", "P0/P1/P2 计数与逐项结论不一致");
+  }
 }
 
 /** Only this round and head may drive the current review branch; a stale report is a hard stop. */

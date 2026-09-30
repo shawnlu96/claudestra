@@ -13,7 +13,7 @@ import { releaseFinishedCardLeases } from "./ledger-scheduler-lease.js";
 import { cardWorkerSlots } from "./scheduler-worker-slot.js";
 import { currentReviewFacts } from "./scheduler-review.js";
 import { bindHash, checkAsk } from "./ask-bind.js";
-import { getAsk } from "./ledger-asks.js";
+import { getAsk, ownerAnswered } from "./ledger-asks.js";
 
 const textOneLine = (value: string, label: string, max: number): string => {
   const out = value.trim();
@@ -57,7 +57,7 @@ function requireReviewedMerge(db: Database, task: ReturnType<typeof mustTask>, w
       ORDER BY updatedAt DESC LIMIT 20`).all(task.id) as { id: string }[];
     const approved = rows.some(({ id }) => {
       const ask = getAsk(db, id);
-      if (!ask || ask.fromAgent !== "scheduler" || ask.bind?.action !== "scheduler_ui_screenshot" || ask.answer?.external === true) return false;
+      if (!ask || ask.fromAgent !== "scheduler" || ask.bind?.action !== "scheduler_ui_screenshot" || !ownerAnswered(ask.answer)) return false;
       return checkAsk(ask, bindHash({ ...ask.bind, params }, "scheduler"), "scheduler", now).ok;
     });
     if (!approved) throw new LedgerError("conflict", "缺同 head/specRev/摘要的 owner 截图授权");

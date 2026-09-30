@@ -2,7 +2,8 @@
 import { readSchedulerConfig } from "./lib/scheduler-config.js";
 import { LedgerReader } from "./lib/ledger-read.js";
 import { schedulerProjectView } from "./lib/ledger-scheduler.js";
-import { schedulerMergeTick } from "./lib/scheduler-service.js";
+import { schedulerManager, schedulerMergeTick } from "./lib/scheduler-service.js";
+import { schedulerObserveTick } from "./lib/scheduler-observe-tick.js";
 import { acquireLock } from "./lib/file-lock.js";
 import { statePath } from "./lib/paths.js";
 import { mkdirSync } from "node:fs";
@@ -30,6 +31,9 @@ export async function runScheduler(signal: AbortSignal, wait: (ms: number) => Pr
           await schedulerMergeTick(db, config, undefined, undefined, () => {
             if (signal.aborted || !lock.held()) throw new SchedulerStopped("scheduler stopped or lost singleton lease");
           });
+          // observe 卡只写观察事件；某张卡失败不挡其余卡，失败汇总后抛给下面的去重日志
+          const observed = await schedulerObserveTick(db, config.projects, schedulerManager);
+          if (observed.failed.length) throw new Error(`observe failed: ${observed.failed.map((f) => `${f.taskId} ${f.error}`).join("; ").slice(0, 500)}`);
         }
         if (lastError) console.error("scheduler recovered");
         lastError = "";
