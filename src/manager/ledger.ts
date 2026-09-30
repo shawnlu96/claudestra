@@ -7,6 +7,7 @@
 import { existsSync } from "node:fs";
 import { repoEnvVar } from "../lib/env-file.js";
 import { LedgerReader } from "../lib/ledger-read.js";
+import { notify } from "../lib/notify.js";
 import { LedgerError, LEDGER_PATH, openLedger } from "../lib/ledger-store.js";
 import { renameAgentRefs } from "../lib/ledger-write.js";
 import { readProjects } from "../lib/projects.js";
@@ -114,6 +115,7 @@ async function realDeps(args: string[]): Promise<LedgerDeps | { error: string }>
     callerWitness: collectCallerWitness,
     autoProjects: () => { const s = readSchedulerConfig(); return s.enabled ? Object.keys(s.projects) : []; },
     autoDispatch: () => readSchedulerConfig().autoDispatch,
+    notifyOwner: (text) => notify({ source: "ledger", chatId: repoEnvVar("CONTROL_CHANNEL_ID"), text }),
   };
 }
 

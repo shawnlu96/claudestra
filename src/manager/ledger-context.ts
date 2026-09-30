@@ -49,6 +49,8 @@ export interface LedgerDeps {
   autoProjects?(): string[];
   /** scheduler.json autoDispatch；不为 true 时 workflow-set 拒绝开 auto（T68h 修好子进程重核前默认关） */
   autoDispatch?(): boolean;
+  /** 系统通知送到 owner（dag-rewrite 直接生效时用）：true = bridge 收下了；不给 = 这个进程没有通道，结果里写「未通知」 */
+  notifyOwner?(text: string): Promise<boolean>;
 }
 
 export type Result = Record<string, unknown>;

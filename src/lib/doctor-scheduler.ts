@@ -38,6 +38,8 @@ export function checkSchedulerJournal(reader = new LedgerReader()): Check[] {
   return out;
 }
 
-export function checkScheduler(): Check[] {
-  return [...checkSchedulerConfig(), ...checkSchedulerJournal()];
+/** 出借循环也跑在 scheduler 服务里（设计稿 remote-capacity §2.3），出借声明一行跟着这里出 */
+export async function checkScheduler(): Promise<Check[]> {
+  const { checkLend } = await import("./doctor-lend.js");
+  return [...checkSchedulerConfig(), ...checkSchedulerJournal(), ...await checkLend()];
 }
