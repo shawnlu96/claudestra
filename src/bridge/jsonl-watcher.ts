@@ -1,9 +1,4 @@
-/**
- * JSONL Session File Watcher
- *
- * 监听 Claude Code 的 JSONL session 文件。
- * Tool use 实时推送到 Discord，一条消息持续 edit 更新状态。
- */
+/** Claude Code / Pi 的 JSONL 尾读与 ACP 推送共用流事件处理。 */
 
 import { watch, type FSWatcher } from "fs";
 import { stat } from "fs/promises";
@@ -24,6 +19,7 @@ import { transcriptUserEvent } from "../lib/turn-cuts.js";
 import { emitEvent, getAgentStatus, isPostTurnActivity } from "./event-bus.js";
 import { isForwardTool } from "../lib/forward.js";
 import { isLimitHitText } from "../lib/quota-wall-text.js";
+import { installAcpPushWatcher } from "./acp-watcher-generation.js";
 import { auqEchoCard } from "../lib/auq-echo.js";
 
 interface ToolEntry { id: string; summary: string; done: boolean; error: boolean }
@@ -684,9 +680,12 @@ const PENDING_POLL_MS = 2000;
 // deliverToLocal 的入站自愈兜底,这里只是第一道。poll 是 2s 一次 stat,便宜。
 const PENDING_MAX_WAIT_MS = 600_000;
 
-export async function startWatching(agentName: string, cwd: string, sessionId: string, channelId: string, discord: Client, opts: { runtime?: string; sessionFile?: string; transport?: string } = {}) {
+type WatchOptions = { runtime?: string; sessionFile?: string; transport?: string; rebind?: boolean };
+export async function startWatching(agentName: string, cwd: string, sessionId: string, channelId: string, discord: Client, opts: WatchOptions = {}) {
   const { runtime, sessionFile } = opts;
-  if (opts.transport === "acp" || isAcpChannel(channelId)) { stopWatching(agentName); return startPushWatcher(agentName, sessionId, channelId, runtime); }
+  if (opts.transport === "acp" || isAcpChannel(channelId)) return void await installAcpPushWatcher(
+    channelId, sessionId, !!opts.rebind, () => { stopWatching(agentName); startPushWatcher(agentName, sessionId, channelId, runtime); },
+  );
   const jsonlPath = resolveSessionPath(runtime, cwd, sessionId, sessionFile);
   // 同一会话文件重新注册（两份 channel-server 对抢、bridge 重连）不重启：新 watcher 从文件末尾起读，两次之间写的行会丢（对抢时每几秒一次）
   const cur = watchers.get(agentName);
@@ -790,9 +789,9 @@ function startPushWatcher(agentName: string, sessionId: string, channelId: strin
 }
 
 /** ACP 宿主推来的一批 CC 形状条目（bridge/acp-link.ts）：走和尾读同一条解析，工具 / 正文 / 状态事件照发 */
-export async function pushEntries(channelId: string, entries: object[], discord: Client): Promise<{ ok: boolean; lost: number }> {
+export async function pushEntries(channelId: string, entries: object[], discord: Client, sessionId?: string): Promise<{ ok: boolean; lost: number }> {
   const state = [...watchers.values()].find((s) => s.channelId === channelId && s.push);
-  return state ? processNewData(state, discord, entries) : { ok: false, lost: 0 };
+  return state && (!sessionId || state.sessionId === `acp:${sessionId}`) ? processNewData(state, discord, entries) : { ok: false, lost: 0 };
 }
 /** v2.6.0+ channelId → agent 名反查（event-bus 埋点用，避免热路径查 registry） */
 export function agentNameForChannel(channelId: string): string | null {

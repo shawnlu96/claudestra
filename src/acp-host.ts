@@ -14,6 +14,8 @@ import { AcpHost } from "./lib/acp/host.js";
 import { startToolProxy } from "./lib/acp/tool-proxy.js";
 import { statePath } from "./lib/paths.js";
 import { SRC_DIR } from "./lib/repo-root.js";
+import { runManagerProcess } from "./lib/run-manager.js";
+import { readRegistryAgents } from "./lib/registry.js";
 import { CODEX_READY_OPTION } from "./lib/runtimes/codex-ready.js";
 import { tmuxRaw } from "./lib/tmux-helper.js";
 
@@ -50,6 +52,7 @@ const host = new AcpHost(
     cwd: process.cwd(),
     mcpName: process.env.MCP_NAME || "claudestra",
     preamble: decodePreambleEnv(process.env.CLAUDESTRA_CODEX_PREAMBLE),
+    clearPreamble: decodePreambleEnv(process.env.CLAUDESTRA_ACP_CLEAR_PREAMBLE),
     model: process.env.CLAUDESTRA_ACP_MODEL?.trim() || undefined,
     effort: process.env.CLAUDESTRA_ACP_EFFORT?.trim() || undefined,
     agentCmd: agent.cmd,
@@ -60,6 +63,7 @@ const host = new AcpHost(
       mcpName: process.env.MCP_NAME || "claudestra",
       codexPath: agent.stub ? undefined : codexPath,
       logsDir: statePath("logs", "acp", agentName),
+      developerInstructions: process.env.CLAUDESTRA_ACP_DEVELOPER ? Buffer.from(process.env.CLAUDESTRA_ACP_DEVELOPER, "base64").toString("utf8") : undefined,
     },
   },
   {
@@ -80,6 +84,15 @@ const host = new AcpHost(
       const pane = process.env.TMUX_PANE;
       if (pane) await tmuxRaw(["set-option", "-w", "-t", pane, CODEX_READY_OPTION, "1"]);
       log("✅ 就绪（manager 在等的 @claudestra_ready 已写）");
+    },
+    rotateSession: async (oldId, newId) => {
+      const r = await runManagerProcess(["set-session", agentName, newId, "--expected", oldId], {
+        bunPath: bunBin, managerPath: join(SRC_DIR, "manager.ts"), env: process.env, timeoutMs: 30_000,
+      });
+      if (r.ok) return { ok: true };
+      // manager 可能已经提交 registry 才丢回包；确认持久状态后再决定是否接回旧线程。
+      const current = (await readRegistryAgents()).find((a) => a.name === agentName)?.sessionId;
+      return current === newId ? { ok: true } : { ok: false, error: r.error ?? "registry 轮转失败" };
     },
     log,
   },

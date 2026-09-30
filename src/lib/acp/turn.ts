@@ -75,12 +75,25 @@ export class AcpTurnLoop {
   private slots: Slot[] = [];
   /** 调度器正在跑一轮（含上报）。steer 在途、调度器停着等它时为 false，但 busy 仍为 true */
   private pumping = false;
+  private suspended = false;
 
   constructor(private readonly io: TurnIO) {}
 
   /** 有一轮在跑、或者还有没落定 / 没开的槽 */
   get busy(): boolean {
-    return this.pumping || this.slots.length > 0;
+    return this.suspended || this.pumping || this.slots.length > 0;
+  }
+
+  /** 会话轮转只在完全空闲时开始；挂起后新入站留在本宿主队列，不送往旧线程。 */
+  suspendIfIdle(): boolean {
+    if (this.busy) return false;
+    this.suspended = true;
+    return true;
+  }
+
+  resume(): void {
+    this.suspended = false;
+    this.pump();
   }
 
   get queued(): number {
@@ -119,7 +132,7 @@ export class AcpTurnLoop {
 
   /** 按规则挑下一轮；null = 没东西可开，或者要等 steer 落定 */
   private next(): Pick | null {
-    if (!this.slots.length || this.slots.some((s) => s.kind === "steer")) return null;
+    if (this.suspended || !this.slots.length || this.slots.some((s) => s.kind === "steer")) return null;
     const ext = this.slots.findIndex((s) => s.kind === "external");
     if (ext >= 0) return this.slots.splice(ext, 1)[0] as Pick;
     const head = this.slots[0];

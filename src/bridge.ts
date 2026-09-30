@@ -2193,7 +2193,9 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
     }
 
     case "abort_ack": onAbortAck(msg, ws); break; // Pi 扩展的中止回执（只认这个频道当前的连接）
-    case "acp_entries": case "acp_config": case "acp_failure": case "acp_permission": case "acp_call_result": await (await import("./bridge/acp-link.js")).onAcpFrame(msg, ws, discord); break;
+    case "acp_entries": case "acp_config": case "acp_failure": case "acp_permission":
+    case "acp_call_result": case "acp_rebind":
+      await (await import("./bridge/acp-link.js")).onAcpFrame(msg, ws, discord); break;
     case "codex_undelivered": void onCodexUndelivered(msg, ws, clients.get(msg.channelId)?.ws === ws); break; // 只了结没投进 Codex 的这一条，不替它宣告完成
     case "codex_typein_failed": if (clients.get(msg.channelId)?.ws === ws) onCodexTypeInFailed(msg, heldLocalMsgs); break; // 下一条再打字；菜单挡住的押回
     case "forward_to_agent": ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, ...(await handleForward(ws, msg)) })); break;
