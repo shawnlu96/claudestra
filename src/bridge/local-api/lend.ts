@@ -4,6 +4,7 @@
  * 调用方只认 peer token，而且这一次请求必须是 E2E 解开的内层请求、对方公钥已钉住、请求头的钥匙就是钉的那把并带着签名：
  * api-auth 对带钥匙但签名不对的请求已经 401，所以走到这里、钥匙又对得上的就是验签通过的；老 peer（没 E2E、没钉钥、截止日前
  * 放行的不签名请求）一律 401，不退回明文。lease 过期由 startLendSweeper 每分钟兜一次（先只读判有没有到期的，再起 CLI）。
+ * 对方公钥一钉住（api-auth 在路由前 commit），就经 `ledger lend-pin` 给借它算力的项目各记一条事件。
  */
 import { SIG_HEADERS } from "../../lib/instance-key.js";
 import { LEND_BODY_MAX, LEND_STATUS, type LendEndpoint } from "../../lib/lend-wire.js";
@@ -12,7 +13,7 @@ import { runManagerProcess } from "../../lib/run-manager.js";
 import { apiJson } from "../api-respond.js";
 import { BUN_PATH, ENV_WITH_BUN, MANAGER_PATH } from "../config.js";
 import { ledgerDb } from "../ledger-feed.js";
-import { peerSignatureState } from "../peer-signature.js";
+import { onPeerKeyPinned, peerSignatureState } from "../peer-signature.js";
 import { requestContextOf } from "../request-context.js";
 
 const CLI: Record<LendEndpoint, string> = { poll: "lend-poll", claim: "lend-claim", lease: "lend-lease", result: "lend-write" };
@@ -50,6 +51,15 @@ export async function handleLendApi(req: Request, path: string, principal: Princ
   const code = (r?.current?.lend ?? r?.code) as string | undefined;
   if (code && code in LEND_STATUS) return refused(code as keyof typeof LEND_STATUS, String(r?.error ?? code));
   return apiJson(code === "busy" ? 503 : 500, { ok: false, code: code ?? "internal", error: String(r?.error ?? "lend 处理失败") });
+}
+
+/** 钉钥只在首次签名请求那一刻发生，事后只剩 peer-keys.json 里的时间：台账这条让 PM 查得到是哪把钥匙、什么时候认下的 */
+export function watchLendPins(): void {
+  onPeerKeyPinned((peer, pin) => {
+    void runManagerProcess(["ledger", "lend-pin", "--", peer, pin.fingerprint, pin.first ? "first" : "repin"], { bunPath: BUN_PATH, managerPath: MANAGER_PATH, env: ENV, timeoutMs: 30_000 })
+      .then((r) => { if (!r?.ok) console.warn(`⚠️ [lend] ${peer} 钉钥事件没记上：${r?.error ?? "无输出"}`); })
+      .catch((e) => console.warn(`⚠️ [lend] ${peer} 钉钥事件起不来：${(e as Error).message}`));
+  });
 }
 
 const SWEEP_MS = 60_000;

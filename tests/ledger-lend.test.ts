@@ -424,3 +424,26 @@ describe("the old peer-ledger door", () => {
     expect(peerTaskDetail(db, "Sekai", "T9")?.task.links).toEqual(["delegate"]);
   });
 });
+
+describe("key pin log (lend-pin)", () => {
+  test("only a fresh pin or a re-pin counts; a repeat ok or a failed check does not", async () => {
+    const { newlyPinned } = await import("../src/lib/peer-keys.js");
+    const ok = (publicKey: string) => ({ publicKey, fingerprint: "b1a2-128b-17da-dfe5", lastCheck: { at: "t", result: "ok" as const } });
+    expect(newlyPinned(undefined, ok("k1"))).toEqual({ fingerprint: "b1a2-128b-17da-dfe5", first: true });
+    expect(newlyPinned(ok("k0"), ok("k1"))).toEqual({ fingerprint: "b1a2-128b-17da-dfe5", first: false });
+    expect(newlyPinned(ok("k1"), ok("k1"))).toBeNull();
+    expect(newlyPinned(undefined, { lastCheck: { at: "t", result: "unsigned" } })).toBeNull();
+  });
+
+  test("a pin is written once per borrowing project as a project-level note; other peers and other identities write nothing", async () => {
+    const pin = (peer: string, actor = "owner", fp = "b1a2-128b-17da-dfe5") => run(["lend-pin", "--", peer, fp, "first"], actor);
+    const notes = () => db.query("SELECT project, target, text, data FROM events WHERE kind = 'note' AND data LIKE '%\"op\":\"pin\"%'").all() as Record<string, string>[];
+    expect(await pin("mate")).toMatchObject({ ok: true, projects: [P] });
+    expect(await pin("mate")).toMatchObject({ ok: true, projects: [] });
+    expect(notes()).toEqual([expect.objectContaining({ project: P, target: "", text: expect.stringContaining("首次钉住：b1a2-128b-17da-dfe5") })]);
+    expect(await pin("stranger")).toMatchObject({ ok: true, projects: [] });
+    expect(await pin("mate", "agent-pm")).toMatchObject({ ok: false, code: "forbidden" });
+    expect(await pin("mate", "owner", "not-a-fp")).toMatchObject({ ok: false, code: "invalid" });
+    expect(notes()).toHaveLength(1);
+  });
+});

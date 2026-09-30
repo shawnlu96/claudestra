@@ -1,7 +1,7 @@
 /**
  * `ledger lend-*`（T93，docs/design/remote-capacity.md §2.2、§3）：
  * - PM：lend-offer / lend-cancel / lend-reoffer 挂单、撤单、重挂；lend-orders 查这张卡的出借单。
- * - bridge 专用（owner 身份，local-api/lend.ts 经 runManager 调）：lend-poll / lend-claim / lend-lease / lend-write / lend-sweep。
+ * - bridge 专用（owner 身份，local-api/lend.ts 经 runManager 调）：lend-poll / lend-claim / lend-lease / lend-write / lend-sweep / lend-pin。
  *   每次先把过期的租约结成 unknown 并通知 PM（不自动重派），再按请求做一次 CAS；拒绝码放在 current.lend 里给 bridge 映射。
  * lend-write 的幂等键是请求体原文的 sha256：bridge 把请求体原样当参数传进来。tests/ledger-lend.test.ts。
  */
@@ -15,6 +15,7 @@ import { LEND_VERSION, parseLendRequest, type LendEndpoint } from "../lib/lend-w
 import { cancelLend, claimLend, leaseLend, listLendOrders, offerLend, pollLend, refuse, reofferLend, sweepLend, type LendNotice, type OfferInput } from "../lib/ledger-lend.js";
 import { RECEIPT_PURPOSE, writeLendResult, type LendResultDeps } from "../lib/ledger-lend-result.js";
 import { getMeta, LedgerError } from "../lib/ledger-store.js";
+import { appendEvent } from "../lib/ledger-write.js";
 import type { LedgerTask } from "../lib/ledger-stages.js";
 import { statePath } from "../lib/paths.js";
 import { notifyProjectPm } from "../lib/pm-notify.js";
@@ -142,6 +143,21 @@ async function sweep(c: LedgerCli): Promise<Result> {
   return { ok: true, expired: notices.length, notified: await tell(c, notices) };
 }
 
+const FP_RE = /^[0-9a-f]{4}(-[0-9a-f]{4}){3}$/;
+
+/** 对方公钥刚钉住：借它算力的每个项目记一条项目级事件（同一把钥匙只记一次）；不借给我们的 peer 不记 */
+async function pinned(c: LedgerCli): Promise<Result> {
+  if (c.deps.actor !== "owner") throw new LedgerError("forbidden", "lend-pin 只给 bridge 用（以 owner 身份调）");
+  const [, peer, fp, how] = c.p.pos;
+  if (!peer || !PEER_RE.test(peer) || !fp || !FP_RE.test(fp) || (how !== "first" && how !== "repin")) throw new LedgerError("invalid", "lend-pin -- <peer> <指纹> first|repin");
+  const projects = (await lendDeps(c).borrow()).find((b) => b.peer === peer)?.projects ?? [];
+  const text = `出借方 ${peer} 的实例公钥${how === "first" ? "首次钉住" : "按配对记录的指纹改钉"}：${fp}（之后换钥匙一律拒）`;
+  const ctx = { ...c.ctx(), dedupKey: `lend-pin:${peer}:${fp}` };
+  const data = { lend: { op: "pin", peer, fingerprint: fp, first: how === "first" } };
+  const written = projects.filter((project) => !appendEvent(c.db, ctx, { project, target: "", kind: "note", text, data }).duplicate);
+  return { ok: true, projects: written };
+}
+
 const OFFER_FLAGS = ["peer", "repo", "pr", "family", "reason", "project"];
 const bridgeSpec = (endpoint: LendEndpoint, what: string): CommandSpec => ({
   valued: [], usage: `lend-${endpoint === "result" ? "write" : endpoint} <peer> <json>（bridge 专用：${what}）`, run: (c) => bridgeCall(c, endpoint),
@@ -162,5 +178,6 @@ export const LEND_CMDS: Record<string, CommandSpec> = {
   "lend-claim": bridgeSpec("claim", "对方领单，拿到完整派单和租约"),
   "lend-lease": bridgeSpec("lease", "续租 / 释放"),
   "lend-write": bridgeSpec("result", "对方交审查结论，核对完才入账"),
+  "lend-pin": { valued: [], usage: "lend-pin -- <peer> <指纹> first|repin（bridge 专用：对方公钥刚钉住，记台账）", run: pinned },
   "lend-sweep": { valued: [], usage: "lend-sweep（bridge 定时调：过期租约结成 unknown 并通知 PM）", run: sweep },
 };
