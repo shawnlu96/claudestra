@@ -102,6 +102,8 @@ export function noteTurnCut(cid: string, at = Date.now()): void {
 const recOf = (t: StopTurn): TriggerRec | undefined => turnTrigger.get(t.cid) ?? resumeRec(t.cid);
 /** 这个频道当前这一轮的开启时刻；没有 = 这一轮不是 bridge 送的消息开的，或已经 Stop / 被打断（bridge/held-flush.ts 用它判补投记录过没过期） */
 export const turnStartedAt = (cid: string): number | undefined => turnTrigger.get(cid)?.at;
+/** 这一轮（已 Stop 的话是上一轮）是哪几个 agent 的 send_to_agent 开的：Codex 撞额度时记下该在出墙时告诉谁（bridge/codex-wall-wiring.ts） */
+export const turnCallers = (cid: string): string[] => (turnTrigger.get(cid) ?? prevTrigger.get(cid))?.callers ?? [];
 const triggerOf = (t: StopTurn): TurnTrigger => t.trigger ?? recOf(t)?.who ?? "stranger";
 const strangerTurn = (t: StopTurn): boolean => triggerOf(t) === "stranger";
 /**

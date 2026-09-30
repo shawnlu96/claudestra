@@ -19,9 +19,12 @@ export interface HeldItem {
   notifiedAt?: number;
   /** 被 check_inbox 领走、还没确认（bridge/inbox.ts）：租约内 Stop 不再投，过期后照常投 */
   lease?: { batchId: string; at: number };
-  /** 为什么押：额度闸（bridge/quota-wall.ts）押的不老化（撞周额度一押就是一两天），出闸时由恢复流程按序补投 */
-  reason?: "quota_wall";
+  /** 为什么押：额度闸（bridge/quota-wall.ts）/ Codex 额度墙（bridge/codex-wall.ts）押的不老化（撞周额度一押就是一两天），出闸时由各自的恢复流程按序补投 */
+  reason?: WallReason;
 }
+
+/** 两道闸各押各的：CC 闸的出闸补投只动 quota_wall，Codex 墙只动 codex_quota_wall */
+export type WallReason = "quota_wall" | "codex_quota_wall";
 
 /** check_inbox 领走后多久没确认就重新投递（按普通消息在回合结束时送达，message_id 不变） */
 export const INBOX_LEASE_MS = 15 * 60_000;
@@ -130,10 +133,10 @@ export class HeldQueue extends PersistedMap<HeldItem[]> {
    * 闸内把这个频道里还押着的非人类消息改记成额度闸（flush 时调）：闸前因「回合中」押下的、caller 不在线时押的推回、
    * asks 的押后都不经过 holdForQuotaWall，不改记的话它们照普通消息老化——30 分钟唤醒撞着墙的发送方，24 小时被丢
    */
-  markWall(channelId: string, pick: (i: HeldItem) => boolean): number {
+  markWall(channelId: string, pick: (i: HeldItem) => boolean, reason: WallReason = "quota_wall"): number {
     const q = this.get(channelId) ?? [];
     const hit = q.filter((i) => !i.reason && pick(i));
-    for (const i of hit) i.reason = "quota_wall";
+    for (const i of hit) i.reason = reason;
     if (hit.length) this.set(channelId, [...q]);
     return hit.length;
   }
@@ -144,25 +147,25 @@ export class HeldQueue extends PersistedMap<HeldItem[]> {
   }
 
   /** 额度闸押着的条数，人发的和 agent / bridge 消息分开数（横幅和进闸通知分开写） */
-  wallCount(isHuman: (env: Envelope) => boolean = () => false): { human: number; agent: number } {
-    const all = [...this.values()].flat().filter((i) => i.reason === "quota_wall");
+  wallCount(isHuman: (env: Envelope) => boolean = () => false, reason: WallReason = "quota_wall"): { human: number; agent: number } {
+    const all = [...this.values()].flat().filter((i) => i.reason === reason);
     const human = all.filter((i) => isHuman(i.env)).length;
     return { human, agent: all.length - human };
   }
 
   /** 有额度闸消息（给了 pick = 其中有 pick 命中的）的频道，按各自最早一条的入队时间排（出闸补投的顺序） */
-  wallChannels(pick: (i: HeldItem) => boolean = () => true): string[] {
-    const first = (q: HeldItem[]) => Math.min(...q.filter((i) => i.reason === "quota_wall").map((i) => i.heldAt));
-    return [...this.entries()].filter(([, q]) => q.some((i) => i.reason === "quota_wall" && pick(i))).sort((a, b) => first(a[1]) - first(b[1])).map(([c]) => c);
+  wallChannels(pick: (i: HeldItem) => boolean = () => true, reason: WallReason = "quota_wall"): string[] {
+    const first = (q: HeldItem[]) => Math.min(...q.filter((i) => i.reason === reason).map((i) => i.heldAt));
+    return [...this.entries()].filter(([, q]) => q.some((i) => i.reason === reason && pick(i))).sort((a, b) => first(a[1]) - first(b[1])).map(([c]) => c);
   }
 
   /** 出闸：额度闸消息转回普通押后，入队时间重置为 now（否则押了一天的立刻被 24 小时放弃），返回条数 */
-  releaseWall(now: number): number {
+  releaseWall(now: number, reason: WallReason = "quota_wall"): number {
     let n = 0;
     for (const [ch, q] of [...this.entries()]) {
-      if (!q.some((i) => i.reason === "quota_wall")) continue;
+      if (!q.some((i) => i.reason === reason)) continue;
       for (const i of q) {
-        if (i.reason !== "quota_wall") continue;
+        if (i.reason !== reason) continue;
         delete i.reason;
         i.heldAt = now;
         n++;
@@ -203,7 +206,7 @@ export function ageHeld(q: HeldQueue, now: number, paused: boolean | ((item: Hel
     const keep: HeldItem[] = [];
     let changed = false;
     for (const item of items) {
-      if (item.reason === "quota_wall" || (paused && paused(item))) {
+      if (item.reason || (paused && paused(item))) {
         keep.push(item); // 额度闸押的不提醒、不放弃：发送方多半也撞着墙，提醒只会唤醒一个注定失败的回合
         continue;
       }

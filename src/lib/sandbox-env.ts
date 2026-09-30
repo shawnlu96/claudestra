@@ -141,6 +141,7 @@ const SANDBOX_MANAGER_COMMANDS = new Set([
   "tmux-send-keys", "team-link", // team-link 只改沙箱 registry 的 parent / task（manager/team.ts），同 label
   "rename", "repair", "fleet", // 只动沙箱 registry / tmux / bridge（manager/agent-rename.ts、manager/repair.ts；fleet 只连沙箱 bridge 的 ws）；doctor 读生产 launchd，仍不开放
   "quota-wall", // 额度闸 status|clear：只读写沙箱状态目录下的 quota-wall.json / 请求文件（manager/quota-wall.ts）
+  "codex-wall", // Codex 额度墙 status|clear：同上，只读写沙箱状态目录下的 codex-wall.json / 请求文件（manager/codex-wall.ts）
   "ledger", // 台账只写沙箱状态目录里的 ledger.sqlite 与沙箱 registry；班子的事件路由、沙箱 bridge 经 runManager 跑的定时巡检都要在沙箱里实测
   "team", // 班子提案只写沙箱状态目录的 team-proposals.json，按钮经沙箱 bridge 贴出
   "skill-toggle", // 只写沙箱状态目录下的 agent-settings（lib/agent-settings.ts），技能目录只读

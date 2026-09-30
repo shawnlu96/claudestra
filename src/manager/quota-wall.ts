@@ -15,11 +15,12 @@ function readWall(): WallState | null {
   return r.status === "ok" ? (r.data as WallState) : null;
 }
 
-function wallQueued(): number {
+/** 押后队列里某道闸押着的条数（Codex 额度墙的 status 也用，reason = codex_quota_wall） */
+export function wallQueued(reason = "quota_wall"): number {
   const r = readJsonStateSync(statePath("held-messages.json"));
   if (r.status !== "ok" || !r.data || typeof r.data !== "object") return 0;
   return Object.values(r.data as Record<string, unknown>).reduce<number>(
-    (n, q) => n + (Array.isArray(q) ? q.filter((i) => (i as { reason?: unknown })?.reason === "quota_wall").length : 0), 0);
+    (n, q) => n + (Array.isArray(q) ? q.filter((i) => (i as { reason?: unknown })?.reason === reason).length : 0), 0);
 }
 
 function summary(s: WallState | null) {

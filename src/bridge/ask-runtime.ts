@@ -144,6 +144,21 @@ export function settleRuntimeAsk(source: RuntimeSource, channelId: string, answe
   markCleared(id);
 }
 
+/** Codex 额度墙出墙（bridge/codex-wall-wiring.ts）：收起还开着的 Codex 额度卡（extra.quota），返回张数。登录卡等别的 Codex 卡不动 */
+export function closeCodexQuotaAsks(now = Date.now()): number {
+  const db = askDbIfExists();
+  if (!db || !hasAsksTable(db)) return 0;
+  let n = 0;
+  for (const a of listAsks(db, { source: "codex", states: ["open"] })) {
+    if (a.extra?.quota !== true) continue;
+    const key = rtKey("codex", a.fromChannelId ?? "");
+    if (runtimeOpen.get(key)?.id.replace(/^~/, "") === a.id) runtimeOpen.delete(key);
+    const c = closeAsk(db, a.id, "cancelled", t("Codex 额度已恢复", "Codex usage restored"), now, { clearedAt: now });
+    if (c) publishAsk(c), n++;
+  }
+  return n;
+}
+
 /**
  * 弹框从屏幕上消失了：记在这条上，同一个弹框以后再出现就是新的一次（删过的、到期的也会重新开）。
  * 不动 updatedAt：这不算一次改动，否则「最近处理过」里的旧卡会跳到最前
