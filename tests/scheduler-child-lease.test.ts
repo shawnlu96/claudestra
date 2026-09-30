@@ -9,6 +9,11 @@ import { join } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
 import { acquireLock, type LockHandle } from "../src/lib/file-lock.js";
 import { closeLedger, openLedger } from "../src/lib/ledger-store.js";
+import { getWorkflow } from "../src/lib/ledger-scheduler.js";
+import { listEvents } from "../src/lib/ledger-store.js";
+import { SchedulerStopped } from "../src/lib/scheduler-maintenance.js";
+import { schedulerPass } from "../src/lib/scheduler-pass.js";
+import { autoFixture } from "./scheduler-auto-helpers.js";
 import { cleanupDaemons, intents, setup, start, until, type Svc } from "./scheduler-daemon-harness.js";
 
 afterEach(cleanupDaemons);
@@ -34,6 +39,16 @@ async function queueBind(s: Svc): Promise<LockHandle> {
     lock = await acquireLock(path, 5_000);
   }
   throw new Error("session-bind never queued");
+}
+
+/** The card is still the engine's: no fallback to manual, no PM notice, no order. */
+function untouched(s: Svc): void {
+  const path = join(s.state, "ledger.sqlite"), db = openLedger(path);
+  try {
+    expect(getWorkflow(db, "T1")?.mode).toBe("auto");
+    expect(listEvents(db, { project: "p", target: "T1" }).filter((e) => e.data?.op === "fallback_manual")).toEqual([]);
+  } finally { closeLedger(path); }
+  expect(s.frames.filter((f) => f.type === "route_to_agent")).toEqual([]);
 }
 
 function bindings(s: Svc): { agent: string }[] {
@@ -66,6 +81,7 @@ describe("a ledger child queued on the write lock re-checks the service's lease 
       expect(bindings(s)).toEqual([]);
       expect(kindOf(s)).toBeUndefined();
       expect(intents(s).find((i) => i.action === "ensure_session")?.status).toBe("submitted");
+      untouched(s);
     }, 90_000);
   }
 
@@ -78,4 +94,20 @@ describe("a ledger child queued on the write lock re-checks the service's lease 
     expect(bindings(s)).toEqual([{ agent: "agent-task-0" }]);
     expect(await until(() => kindOf(s) === "worker", 5_000)).toBe(true);
   }, 90_000);
+
+  test("a lease-lost answer ends the pass as SchedulerStopped even if the parent has not noticed yet: no card failure, no fallback, no PM notice", async () => {
+    const f = autoFixture();
+    try {
+      const lost = async () => ({ ok: false, code: "lease-lost", error: "调度服务已失租或已停止" });
+      const opts = { assertOwner: () => {}, maintenance: { path: join(f.dir, "m.lock"), marker: join(f.dir, "u.marker"), request: join(f.dir, "m.req") } };
+      const config = { enabled: true, pollMs: 1000, autoDispatch: true, projects: { p: { maxActiveWorkers: 2, requiredChecks: ["c"], repoDir: f.dir } } };
+      await expect(schedulerPass(f.db, config, { ...opts, manager: lost, autoDeps: () => ({ ...f.tickDeps, manager: lost }) })).rejects.toBeInstanceOf(SchedulerStopped);
+      expect(f.notices).toEqual([]);
+      expect(getWorkflow(f.db, "T1")?.mode).toBe("auto");
+      expect(listEvents(f.db, { project: "p", target: "T1" }).filter((e) => e.data?.op === "fallback_manual")).toEqual([]);
+      // observe cards count a failing manager call as a card failure; a lease-lost one still stops the pass
+      f.db.query("UPDATE task_workflows SET mode = 'observe' WHERE taskId = 'T1'").run();
+      await expect(schedulerPass(f.db, { ...config, autoDispatch: false }, { ...opts, manager: lost })).rejects.toBeInstanceOf(SchedulerStopped);
+    } finally { f.close(); }
+  });
 });

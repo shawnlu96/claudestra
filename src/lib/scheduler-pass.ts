@@ -46,6 +46,16 @@ const guard = <A extends unknown[], R>(active: Active, fn: (...a: A) => Promise<
   try { return await fn(...a); } finally { active(); }
 };
 
+/**
+ * A child that found the lease gone answers `code: "lease-lost"` (lib/scheduler-lease-env.ts). That is the service stopping,
+ * not a card failing: it ends the pass as SchedulerStopped, so no card is counted failed, handed to PM or reported.
+ */
+const leaseAware = (m: Manager): Manager => async (...args) => {
+  const r = await m(...args);
+  if (r.code === "lease-lost") throw new SchedulerStopped(`manager child: ${String(r.error ?? "lease lost")}`);
+  return r;
+};
+
 function guardWorker(w: WorkerSession, active: Active): WorkerSession {
   return {
     route: w.route, fallbackReason: w.fallbackReason,
@@ -56,7 +66,7 @@ function guardWorker(w: WorkerSession, active: Active): WorkerSession {
 
 function guardAutoDeps(d: AutoTickDeps, active: Active): AutoTickDeps {
   return {
-    manager: guard(active, d.manager), ensure: guard(active, d.ensure), pinReview: guard(active, d.pinReview),
+    manager: guard(active, leaseAware(d.manager)), ensure: guard(active, d.ensure), pinReview: guard(active, d.pinReview),
     reviewDirty: guard(active, d.reviewDirty), notifyPm: guard(active, d.notifyPm), now: d.now,
     worker: (ref) => { active(); const w = d.worker(ref); return "manual" in w ? w : guardWorker(w, active); },
   };
@@ -68,7 +78,7 @@ export async function schedulerPass(db: Database, config: SchedulerConfig, opts:
   if (!lease) return { ran: false, failed: [] };
   const active: Active = () => { opts.assertOwner(); if (!lease.held()) throw new SchedulerStopped("scheduler lost maintenance lease"); };
   const holds = [...(opts.holds ?? []), { path: lease.path, token: lease.token }];
-  const manager = guard(active, opts.manager ?? schedulerManagerWith(holds));
+  const manager = guard(active, leaseAware(opts.manager ?? schedulerManagerWith(holds)));
   // 卡与卡之间：update 在等或本轮超预算就收手，下一轮从停下的下一张接着排（卡内已开始的一步不打断）
   const pace = passPace(opts.cursor ?? {}, { budgetMs: opts.budgetMs, request: opts.maintenance?.request });
   try {
