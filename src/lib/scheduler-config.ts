@@ -31,20 +31,31 @@ export function parseSchedulerConfig(raw: unknown): SchedulerConfig {
     if (!Number.isInteger(p.maxActiveWorkers) || (p.maxActiveWorkers as number) < 1 || (p.maxActiveWorkers as number) > 32) {
       throw new Error(`scheduler project ${id} needs maxActiveWorkers 1..32`);
     }
-    if (!Array.isArray(p.requiredChecks) || p.requiredChecks.length < 1 || p.requiredChecks.length > 20 ||
-      p.requiredChecks.some((x) => typeof x !== "string" || !/^[\w .:/-]{1,80}$/.test(x))) {
-      throw new Error(`scheduler project ${id} needs 1..20 requiredChecks names`);
-    }
+    const requiredChecks = parseRequiredChecks(p.requiredChecks);
+    if (!requiredChecks) throw new Error(`scheduler project ${id} needs 1..20 requiredChecks names`);
     // Refusing beats ignoring: a config written for automatic deployment must not silently run merge-only.
     if (p.deploy !== undefined) throw new Error(`scheduler project ${id}: automatic deploy is not supported (T68g); remove deploy, the PM deploys`);
     if (typeof p.repoDir !== "string" || !isAbsolute(p.repoDir) || /[\p{Cc}\p{Cf}]/u.test(p.repoDir)) {
       throw new Error(`scheduler project ${id} needs absolute repoDir`);
     }
-    projects[id] = { maxActiveWorkers: p.maxActiveWorkers as number, requiredChecks: [...new Set(p.requiredChecks as string[])],
+    projects[id] = { maxActiveWorkers: p.maxActiveWorkers as number, requiredChecks,
       repoDir: p.repoDir };
   }
   if (r.enabled && Object.keys(projects).length === 0) throw new Error("enabled scheduler needs at least one project");
   return { enabled: r.enabled, pollMs: pollMs as number, projects };
+}
+
+/**
+ * The one check-name rule for scheduler.json and `scheduler-merge-begin`; two copies let config accept names the CLI refuses.
+ * Names are compared verbatim (case and spaces) with `gh pr checks` job names such as "typecheck + test + guard".
+ * A comma is refused because the merge journal and `--required-checks` store the list comma-joined;
+ * padding is refused because it could never match and would park the PR in await_ci forever.
+ */
+export function parseRequiredChecks(list: unknown): string[] | null {
+  if (!Array.isArray(list) || list.length < 1 || list.length > 20) return null;
+  const ok = list.every((x) => typeof x === "string" && x.length >= 1 && x.length <= 80 && x === x.trim() && !x.includes(",") &&
+    !/[\p{Cc}\p{Cf}]/u.test(x));
+  return ok ? [...new Set(list as string[])] : null;
 }
 
 export function readSchedulerConfig(path = SCHEDULER_CONFIG_PATH): SchedulerConfig {
