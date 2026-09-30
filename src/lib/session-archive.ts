@@ -18,7 +18,7 @@ import { existsSync, readdirSync, realpathSync } from "fs";
 import { mkdir, readdir } from "fs/promises";
 import { basename, dirname, join, resolve, sep } from "path";
 import { projectsSlug } from "./jsonl-cost.js";
-import { copyIfLarger } from "./archive-copy.js";
+import { copyIfLarger, sweepStaleTmp } from "./archive-copy.js";
 import { archiveWorkflowDirs } from "./workflow-archive.js";
 import { pickCodexRolloutForArchive, type RolloutPick } from "./codex-rollout-pick.js";
 import { writeSessionSidecar } from "./session-sidecar.js";
@@ -149,6 +149,7 @@ export async function archiveSession(
 
   const dir = join(opts.archiveRoot ?? ARCHIVE_ROOT, agentName);
   await mkdir(dir, { recursive: true });
+  await sweepStaleTmp(dir);
   const archived: string[] = [];
   const failed: string[] = [];
   const copy = async (from: string, dest: string) => {

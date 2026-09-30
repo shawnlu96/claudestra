@@ -5,7 +5,7 @@
  * rollout 根走 CODEX_HOME（codexSessionsRoot 每次调用现读环境变量），全部落在临时目录，不碰真实 ~/.codex。
  */
 import { afterAll, beforeAll, describe, expect, spyOn, test } from "bun:test";
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import zlib from "node:zlib";
@@ -13,7 +13,7 @@ import { archiveAgentSession, archiveSession } from "../src/lib/session-archive.
 import { isValidSessionId, readSessionHistory, searchSessionHistory } from "../src/lib/session-history.js";
 import { UNTRUSTED_RUNTIME, sourceIdForPath } from "../src/lib/runtimes/index.js";
 import { readFirstLineSync, sessionSidecarPath } from "../src/lib/session-sidecar.js";
-import { headThenFrame } from "./zstd-test-kit.js";
+import { blockHeaderOffsets, headThenFrame } from "./zstd-test-kit.js";
 
 const base = mkdtempSync(join(tmpdir(), "codex-archive-read-"));
 const realCodexHome = process.env.CODEX_HOME;
@@ -241,6 +241,42 @@ describe("specRev 2：thread/revert 链", () => {
     expect(r.note).toContain("解压超过上限");
     expect(readdirSync(join(root, "agent-cx")).filter((f) => f.includes(".tmp-"))).toEqual([]);
     expect(r.archived).toEqual([join(root, "agent-cx", `${id}.jsonl`)]);
+  });
+
+  // r4 P1：截断的多块 .zst 首行完好（pick 放行），流式解码器遇截断又不报错 → 曾经半截落盘还 ok:true
+  const truncations: Array<[string, (z: Buffer) => Buffer]> = [
+    ["截掉 40%", (z) => z.subarray(0, Math.floor(z.length * 0.6))],
+    ["截在块头中间", (z) => z.subarray(0, blockHeaderOffsets(z)[2]! + 1)],
+    ["截在帧尾前 1 字节", (z) => z.subarray(0, z.length - 1)],
+  ];
+  for (const [label, cut] of truncations) {
+    test(`多块线程的 .zst ${label}（首行完好）：ok:false「.zst 不完整」，归档目录不留任何文件`, async () => {
+      const id = sid();
+      const body = Array.from({ length: 2000 }, (_, i) => userLine(`MSG_${i}_${Array.from({ length: 12 }, () => Math.random().toString(36)).join("")}`));
+      const p = rollout("2026-09-29T01-02-03", id, { id }, [...body, userLine("THE_LAST_MESSAGE")], ".jsonl.zst");
+      const z = readFileSync(p);
+      expect(blockHeaderOffsets(z).length).toBeGreaterThan(3);
+      writeFileSync(p, cut(z));
+      const root = archiveRoot();
+      const r = await archive(id, root);
+      expect(r.ok).toBe(false);
+      expect(r.note).toContain(".zst 不完整");
+      expect(readdirSync(join(root, "agent-cx"))).toEqual([]);
+    });
+  }
+
+  test("归档开始时清掉本 agent 目录下超过 1 小时的临时文件（rename 前被杀留下的）", async () => {
+    const id = sid();
+    rollout("2026-09-29T01-02-03", id, { id }, [userLine("X")]);
+    const root = archiveRoot();
+    const dir = join(root, "agent-cx");
+    mkdirSync(dir, { recursive: true });
+    const stale = join(dir, `${id}.jsonl.tmp-4242-1700000000000`);
+    writeFileSync(stale, "half");
+    const old = new Date(Date.now() - 2 * 60 * 60 * 1000);
+    utimesSync(stale, old, old);
+    expect((await archive(id, root)).ok).toBe(true);
+    expect(readdirSync(dir).sort()).toEqual([`${id}.jsonl`, `${id}.meta.json`]);
   });
 
   // P1（T75 r1）：文件名更新的同线程段没进归档时，不能 ok:true 只存旧正文

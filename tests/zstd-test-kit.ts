@@ -28,3 +28,19 @@ export function headThenFrame(headLine: string, total: number, rest: Buffer = Bu
   const head = Buffer.from(`${headLine}\n`);
   return Buffer.concat([Bun.zstdCompressSync(head), zstdFrame(total - head.length, rest)]);
 }
+
+/** 单帧 .zst 里各块头的偏移（造「截在块头中间」用）；只认 Bun / Codex 那种带 FCS 的单帧 */
+export function blockHeaderOffsets(z: Buffer): number[] {
+  const fhd = z[4]!;
+  const single = (fhd >> 5) & 1;
+  const fcsFlag = fhd >> 6;
+  const fcsSize = fcsFlag === 0 ? single : [0, 2, 4, 8][fcsFlag]!;
+  let p = 5 + (single ? 0 : 1) + [0, 1, 2, 4][fhd & 3]! + fcsSize;
+  const out: number[] = [];
+  for (;;) {
+    out.push(p);
+    const h = z[p]! | (z[p + 1]! << 8) | (z[p + 2]! << 16);
+    p += 3 + (((h >> 1) & 3) === 1 ? 1 : h >>> 3);
+    if (h & 1) return out;
+  }
+}
