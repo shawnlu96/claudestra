@@ -288,6 +288,41 @@ describe("断线、重连、退避", () => {
     await relay.waitOnline(fp);
     await until(() => relay.authCount >= 2, 3000);
   });
+  test("pong 迟到但一直有入站帧 → 顺延不断开", async () => {
+    const relay = startFakeRelay({ pongDelayMs: 400 });
+    opened.push(relay);
+    const { c, fp } = client(relay, "S");
+    await relay.waitOnline(fp);
+    const tick = setInterval(() => relay.sendTo(fp, { t: "presence", peer: { fp: "x", online: true } }), 50);
+    try {
+      await sleep(1500);
+      expect(relay.authCount).toBe(1);
+      expect(c.state).toBe("online");
+    } finally {
+      clearInterval(tick);
+    }
+  });
+  test("入站帧不停但始终等不到 pong → 顺延到上限后仍断开重连", async () => {
+    const relay = startFakeRelay({ noPong: true });
+    opened.push(relay);
+    const { fp } = client(relay, "N");
+    await relay.waitOnline(fp);
+    const tick = setInterval(() => relay.sendTo(fp, { t: "presence", peer: { fp: "x", online: true } }), 50);
+    try {
+      await sleep(400);
+      expect(relay.authCount).toBe(1);
+      await until(() => relay.authCount >= 2, 2000);
+    } finally {
+      clearInterval(tick);
+    }
+  });
+  test("pong 迟到且没有入站、没有积压 → 第一轮就断开", async () => {
+    const relay = startFakeRelay({ pongDelayMs: 400 });
+    opened.push(relay);
+    const { c, fp } = client(relay, "D");
+    await relay.waitOnline(fp);
+    await until(() => (c.info().lastError ?? "").startsWith("pong timeout"), 1000);
+  });
   test("close() 后不再重连", async () => {
     const relay = startFakeRelay();
     opened.push(relay);
