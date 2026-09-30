@@ -56,7 +56,8 @@ export interface CodexWall {
   resetProbed?: boolean;
   /** 上一次探用量没探成（额度服务关着 / 凭据失败 / 退避中）：只能等到点或人手 clear */
   probeDown?: boolean;
-  exit?: { at: number; via: CodexExitVia };
+  /** unconfirmed = 没确认额度回来就出的墙（codexExitConfirmed）：只补投押着的，不续跑、不收卡、不告诉 caller */
+  exit?: { at: number; via: CodexExitVia; unconfirmed?: true };
   recovery?: CodexRecovery;
   /** 出墙之后见过用量 <100：之后再见到 ≥100 才从用量进墙（人手 clear / 到点出的墙，接口还显示满时不马上又进） */
   belowAfterExit?: boolean;
@@ -198,10 +199,17 @@ export function codexExitVia(w: CodexWall, sig: CodexExitSignals): CodexExitVia 
   return null;
 }
 
-export function markCodexExit(s: CodexWallState, via: CodexExitVia, now: number): CodexWallState {
+/**
+ * 出墙算不算确认额度回来了：用量回落（含兑卡后的复查）、人手 clear、换的新号用量没满。到点兜底（resets_at）没看到用量，额度可能还没回来——
+ * 这时群发续跑会让每个被打断的 agent 再撞一次墙，所以只补投押着的消息（tests/codex-wall-runtime.test.ts「到点兜底」）
+ */
+export const codexExitConfirmed = (via: CodexExitVia, u: CodexUsageSignal | null): boolean =>
+  via === "usage" || via === "cli" || (via === "account" && !!u && below(u));
+
+export function markCodexExit(s: CodexWallState, via: CodexExitVia, now: number, confirmed = true): CodexWallState {
   if (!s.wall || s.wall.exit) return s;
   const w = structuredClone(s.wall);
-  w.exit = { at: now, via };
+  w.exit = { at: now, via, ...(confirmed ? {} : { unconfirmed: true as const }) };
   w.recovery = { step: "flush", flushed: 0, resumed: [], running: [], told: [] };
   return { v: 1, wall: w };
 }
@@ -259,6 +267,7 @@ export function codexRecoveredNotice(w: CodexWall): string {
   const r = w.recovery!;
   const via = VIA_TEXT[w.exit!.via];
   const agents = Object.values(w.hits).map((h) => h.agent);
+  if (w.exit!.unconfirmed) return unconfirmedNotice(w, via, agents);
   const lines = [
     t(`🟢 Codex 额度已恢复（${via[0]}），墙从 ${hhmm(w.enteredAt)} 开到 ${hhmm(w.exit!.at)}`, `🟢 Codex usage is back (${via[1]}); wall ${hhmm(w.enteredAt)}–${hhmm(w.exit!.at)}`),
     t(`补投押着的消息 ${r.flushed} 条；续跑 ${r.resumed.length ? r.resumed.join("、") : "无"}`, `Delivered ${r.flushed} held message(s); resumed ${r.resumed.length ? r.resumed.join(", ") : "none"}`),
@@ -267,5 +276,16 @@ export function codexRecoveredNotice(w: CodexWall): string {
   if (r.held?.length) lines.push(t(`续跑消息被押住（要人看一眼）：${r.held.join("、")}`, `Resume message held (needs a look): ${r.held.join(", ")}`));
   if (!agents.length) lines.push(t("墙里没有回合失败的 agent", "No agent turn failed inside the wall"));
   if (r.cards) lines.push(t(`收起 Codex 额度卡 ${r.cards} 张`, `Dismissed ${r.cards} Codex quota card(s)`));
+  return lines.join("\n");
+}
+
+/** 没确认恢复就出的墙：只补投了押着的；被打断的没续跑，额度真回来了要人去叫它们 */
+function unconfirmedNotice(w: CodexWall, via: [string, string], agents: string[]): string {
+  const span = `${hhmm(w.enteredAt)}–${hhmm(w.exit!.at)}`;
+  const lines = [
+    t(`⏱ Codex 额度墙按时放行（${via[0]}），没确认额度已恢复；墙 ${span}`, `⏱ Codex wall released on time (${via[1]}), usage not confirmed; wall ${span}`),
+    t(`补投押着的消息 ${w.recovery!.flushed} 条；没发续跑`, `Delivered ${w.recovery!.flushed} held message(s); no resume sent`),
+  ];
+  if (agents.length) lines.push(t(`被打断、等人叫它继续：${agents.join("、")}`, `Interrupted, waiting for someone to resume: ${agents.join(", ")}`));
   return lines.join("\n");
 }

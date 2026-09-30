@@ -168,6 +168,19 @@ describe("认恢复", () => {
     r.advance(15_000);
     await r.wall.tick();
     expect(r.disk().wall!.exit!.via).toBe("account");
+    expect(r.disk().wall!.exit!.unconfirmed).toBe(true); // 新号也是满的：不算确认恢复，不续跑
+    expect(r.calls).toEqual(["owner"]);
+  });
+
+  test("换的新号用量没满：算确认恢复，照常续跑", async () => {
+    const r = rig();
+    r.view.v = usage({ observedAt: T0 - 5 });
+    await hitWall(r, "a");
+    r.view.v = usage({ account: "other", usedPct: 3, limitReached: false, observedAt: T0 + 10 });
+    r.advance(15_000);
+    await r.wall.tick();
+    expect(r.disk().wall!.exit!.unconfirmed).toBeUndefined();
+    expect(r.calls).toEqual(["resume:a", "cards", "owner"]);
   });
 
   test("探测不可用：到 try-again 时刻复查一次，探不到就按时间放行", async () => {
@@ -179,6 +192,18 @@ describe("认恢复", () => {
     expect(r.view.refreshes).toBe(1);
     expect(r.disk().wall!.resetProbed).toBe(true);
     expect(r.disk().wall!.exit!.via).toBe("resets_at");
+  });
+
+  test("到点兜底放行没确认恢复：只补投押着的，不续跑、不收卡、不告诉 caller，owner 收到待叫名单", async () => {
+    const r = rig();
+    await hitWall(r, "a", ["pm"]);
+    await send(r, env(agentFrom("pm"), "b", "m1"));
+    r.advance(r.disk().wall!.resetsAt! + CODEX_WALL_TIMING.exitSlackMs - T0);
+    await r.wall.tick();
+    expect(r.calls).toEqual(["flush:b", "owner"]);
+    expect(r.disk().wall!.recovery).toMatchObject({ step: "done", flushed: 1, resumed: [], told: [] });
+    expect(r.owner.texts[0]).toContain("没确认额度已恢复");
+    expect(r.owner.texts[0]).toContain("agent-a");
   });
 });
 

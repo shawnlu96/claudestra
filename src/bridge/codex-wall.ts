@@ -9,7 +9,7 @@
 import { gatesAsHuman } from "../lib/quota-wall.js";
 import {
   CODEX_WALL_TIMING, callersToTell, codexCallerText, codexExitVia, codexProbeDue, codexRecoveredNotice, codexResumeTargets, codexResumeText, codexWallActive, codexWallIdle,
-  creditsDropped, enterFromUsage, isCodexAccountWall, markCodexExit, noteBelowAfterExit, noteCodexHit,
+  codexExitConfirmed, creditsDropped, enterFromUsage, isCodexAccountWall, markCodexExit, noteBelowAfterExit, noteCodexHit,
   type CodexExitVia, type CodexRecovery, type CodexUsageSignal, type CodexWall, type CodexWallState,
 } from "../lib/codex-wall.js";
 import type { Envelope } from "./router.js";
@@ -59,10 +59,12 @@ function set(c: Ctx, s: CodexWallState): void {
 
 const patchWall = (c: Ctx, p: Partial<CodexWall>) => set(c, { v: 1, wall: { ...c.state.wall!, ...p } });
 
-function exitWall(c: Ctx, via: CodexExitVia): void {
+function exitWall(c: Ctx, via: CodexExitVia, usage: CodexUsageSignal | null = null): void {
   if (!codexWallActive(c.state)) return;
-  set(c, markCodexExit(c.state, via, c.d.now()));
-  c.d.log(`🟢 Codex 额度墙出墙（${via}），开始恢复：补投 → 续跑 → 收卡 → 告诉 caller / owner`);
+  const confirmed = codexExitConfirmed(via, usage);
+  set(c, markCodexExit(c.state, via, c.d.now(), confirmed));
+  c.d.log(confirmed ? `🟢 Codex 额度墙出墙（${via}），开始恢复：补投 → 续跑 → 收卡 → 告诉 caller / owner`
+    : `⏱ Codex 额度墙按时放行（${via}，没确认恢复）：只补投押着的消息，不续跑`);
 }
 
 /** 恢复途中又撞墙会换成一道新墙（新 id、还没出墙）：旧恢复的进度不能写到新墙上 */
@@ -93,7 +95,7 @@ async function watchWall(c: Ctx, now: number, seen: CodexUsageSignal | null): Pr
   }
   if (usage && usage.credits !== null && usage.credits !== c.state.wall!.credits) patchWall(c, { credits: usage.credits });
   const via = codexExitVia(c.state.wall!, { now, usage, probeDown: probeDown ?? !!c.state.wall!.probeDown });
-  if (via) exitWall(c, via);
+  if (via) exitWall(c, via, usage);
 }
 
 async function deliverQueue(c: Ctx, id: string): Promise<void> {
@@ -105,7 +107,7 @@ async function deliverQueue(c: Ctx, id: string): Promise<void> {
     if (!stillRecovering(c, id)) return;
     await c.d.flush(cid).catch((e) => c.d.log(`Codex 额度墙补投 ${cid} 出错（留在队里，下一次触发再投）: ${(e as Error).message}`));
   }
-  patchRecovery(c, id, { step: "resume" });
+  patchRecovery(c, id, { step: c.state.wall?.exit?.unconfirmed ? "owner" : "resume" }); // 没确认恢复：续跑 / 收卡 / 告诉 caller 都不做
 }
 
 /** 续跑：补投了自己人消息、真送到了的不再续（那几条自会叫醒它）；在跑的不插话；补投的全是外人的照样续，押到那一轮结束（同 CC 闸） */

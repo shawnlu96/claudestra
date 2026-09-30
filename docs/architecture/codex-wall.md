@@ -34,7 +34,9 @@ Every 15 seconds the wall reads the scheduler's view, which makes no request. Wh
 2. **resume**: each agent whose turn failed inside the wall gets "Codex 额度已恢复，继续你被打断的任务；先核对做到哪一步再动手". Agents woken by a delivered message from an insider are skipped, and so are agents already running. The original turn is never replayed automatically.
 3. **cards**: Codex quota cards still open are dismissed. This means both the in-memory ACP cards and the open ledger asks with `extra.quota`.
 4. **callers**: every agent that received the ⛔ is told the Codex agent is back. The ⛔ settled its reply slot, so it has to ask again if it still needs the result.
-5. **owner**: a summary goes to #control (an inform, retried on the next tick if it failed).
+5. **owner**: a summary goes out through the same owner channel as the CC wall's notices (`controlChannelSender`, which web clients see as well). It is an inform, and it is retried on the next tick if sending failed.
+
+Steps 2–4 only run when recovery is confirmed, meaning usage dropped (including the re-check after a card was redeemed), a manual `clear`, or a newly logged-in account whose usage is below the limit. A `resets_at` exit, or an account switch where the new account is also full, only runs step 1. The owner notice then says recovery was not confirmed and lists the interrupted agents that still need someone to resume them. Sending the resume message there would let every interrupted agent hit the wall again if usage is still out.
 
 If the wall is re-entered mid-recovery, the old recovery stops, and any agents it had not resumed yet carry over into the new wall.
 
