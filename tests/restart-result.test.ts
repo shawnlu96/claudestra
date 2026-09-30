@@ -11,9 +11,10 @@ import { describe, test, expect } from "bun:test";
 import {
   restartFailureReason, restartFailedNames, parseManagerList, canaryPlan,
   tempAgentCleanupFailure, restartExceptionResult, readyFailureText, modelPinPlan, modelPinRefusal,
-  restartLaunchMode,
+  restartLaunchPlan,
 } from "../src/lib/restart-result.js";
 import { managedFor } from "../src/lib/runtimes/index.js";
+import { archivedSessionCopies } from "../src/lib/session-archive.js";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 
@@ -203,15 +204,41 @@ describe("modelPinPlan / modelPinRefusal（model 命令只钉 in-session 运行�
   });
 });
 
-describe("restartLaunchMode：从没对话过的 agent 不带 --resume", () => {
+describe("restartLaunchPlan：从没对话过才新起，历史丢了就拒绝", () => {
   const SID = "541b5edb-82ef-43b3-93b7-1cf71dfde4f1";
-  test("会话落过盘 → resume；没落盘 → 同一个 id 新起", () => {
-    expect(restartLaunchMode({ hasSession: () => true }, SID, "/w")).toBe("resume");
-    expect(restartLaunchMode({ hasSession: () => false }, SID, "/w")).toBe("new");
+  const none = () => [];
+  test("会话落过盘 → resume；三条都成立（没 jsonl、notes 空、归档没有）→ 同一个 id 新起", () => {
+    expect(restartLaunchPlan({ hasSession: () => true }, { sessionId: SID, cwd: "/w", notes: "claude session: x" }, none)).toEqual({ mode: "resume" });
+    expect(restartLaunchPlan({ hasSession: () => false }, { sessionId: SID, cwd: "/w", notes: "" }, none)).toEqual({ mode: "new" });
   });
-  test("运行时不实现 hasSession（Pi / Codex）→ 照旧 resume", () => {
-    expect(restartLaunchMode({}, SID, "/w")).toBe("resume");
-    expect(restartLaunchMode(managedFor("pi")!, SID, "/w")).toBe("resume");
+  test("运行时不实现 hasSession（Pi / Codex）或没有 sessionId → 照旧 resume", () => {
+    expect(restartLaunchPlan({}, { sessionId: SID, cwd: "/w" }, none)).toEqual({ mode: "resume" });
+    expect(restartLaunchPlan(managedFor("pi")!, { sessionId: SID, cwd: "/w" }, none)).toEqual({ mode: "resume" });
+    expect(restartLaunchPlan({ hasSession: () => false }, { cwd: "/w" }, none)).toEqual({ mode: "resume" });
+  });
+  test("jsonl 被清理、归档里还有一份 → 拒绝，给出拷回去的命令，绝不新起", () => {
+    const r = restartLaunchPlan({ hasSession: () => false }, { sessionId: SID, cwd: "/w/repo", notes: "" }, () => ["/a/agent-x/s.jsonl"]);
+    expect(r.mode).toBeUndefined();
+    expect(r.refuse).toContain("归档里有一份");
+    expect(r.refuse).toContain(`cp '/a/agent-x/s.jsonl' '`);
+    expect(r.refuse).toContain(`-w-repo/${SID}.jsonl'`);
+  });
+  test("registry 记过接管 / 分叉 / adopt，jsonl 和归档都没有 → 拒绝", () => {
+    for (const notes of [`claude session: ${SID}`, `claude session: ${SID} (forked from 12345678)`, `claude session: ${SID} (adopted, was 1234)`]) {
+      const r = restartLaunchPlan({ hasSession: () => false }, { sessionId: SID, cwd: "/w", notes }, none);
+      expect(r.mode).toBeUndefined();
+      expect(r.refuse).toContain("没有按新会话静默启动");
+    }
+  });
+  test("归档副本按 sessionId 扫所有 agent 目录（含手动归档、改过名的旧目录）", () => {
+    const root = mkdtempSync(`${tmpdir()}/t44-arc-`);
+    expect(archivedSessionCopies(SID, `${root}/missing`)).toEqual([]);
+    mkdirSync(`${root}/agent-old`, { recursive: true });
+    mkdirSync(`${root}/archived/x`, { recursive: true });
+    writeFileSync(`${root}/agent-old/${SID}.jsonl`, "{}\n");
+    writeFileSync(`${root}/archived/x/${SID}.jsonl`, "{}\n");
+    writeFileSync(`${root}/agent-old/other.jsonl`, "{}\n");
+    expect(archivedSessionCopies(SID, root).sort()).toEqual([`${root}/agent-old/${SID}.jsonl`, `${root}/archived/x/${SID}.jsonl`]);
   });
   test("CC 适配器按 jsonl 在不在判", () => {
     const cc = managedFor("claude-code")!;
@@ -219,12 +246,12 @@ describe("restartLaunchMode：从没对话过的 agent 不带 --resume", () => {
     const tmp = mkdtempSync(`${tmpdir()}/t44-`);
     process.env.HOME = tmp;
     try {
-      expect(restartLaunchMode(cc, SID, "/w/repo")).toBe("new");
+      expect(restartLaunchPlan(cc, { sessionId: SID, cwd: "/w/repo", notes: "" }, none)).toEqual({ mode: "new" });
       const dir = `${tmp}/.claude/projects/-w-repo`;
       mkdirSync(dir, { recursive: true });
       writeFileSync(`${dir}/${SID}.jsonl`, "{}\n");
-      expect(restartLaunchMode(cc, SID, "/w/repo")).toBe("resume");
-      expect(restartLaunchMode(cc, SID, undefined)).toBe("resume"); // 没 cwd：按 id 全库找
+      expect(restartLaunchPlan(cc, { sessionId: SID, cwd: "/w/repo" }, none)).toEqual({ mode: "resume" });
+      expect(restartLaunchPlan(cc, { sessionId: SID }, none)).toEqual({ mode: "resume" }); // 没 cwd：按 id 全库找
     } finally {
       process.env.HOME = home;
     }

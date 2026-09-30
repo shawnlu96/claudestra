@@ -211,5 +211,26 @@ export async function listArchivedSessions(agentName: string): Promise<string[]>
   }
 }
 
+/**
+ * 归档里这个 session 的副本（自动快照 <root>/<agent>/<sid>.jsonl、手动归档 <root>/archived/<agent>/<sid>.jsonl）。
+ * 按 sessionId 扫所有 agent 目录：改过名的 agent，快照还在旧名字下。restart 用它分辨「从没对话过」与「历史被清理了」。
+ */
+export function archivedSessionCopies(sessionId: string, root: string = ARCHIVE_ROOT): string[] {
+  const out: string[] = [];
+  for (const base of [root, join(root, "archived")]) {
+    let dirs: string[];
+    try {
+      dirs = readdirSync(base);
+    } catch {
+      continue; // 归档根还没建过 = 没有副本
+    }
+    for (const d of dirs) {
+      const p = join(base, d, `${sessionId}.jsonl`);
+      if (existsSync(p)) out.push(p);
+    }
+  }
+  return out;
+}
+
 // projectsSlug re-export 便于测试同源性（归档与 watcher 用同一套路径规则）
 export { projectsSlug };

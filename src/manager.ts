@@ -127,7 +127,7 @@ import { abandonCreate, beginCreate, commitCreate, gateOps, guardCreateSignals, 
 import { notify } from "./lib/notify.js";
 import { writeJsonAtomic } from "./lib/state-file.js";
 import { stderrTail } from "./lib/run-manager.js";
-import { readyFailureText, modelPinPlan, modelPinRefusal, restartExceptionResult, bigSessionNote, restartLaunchMode, NO_SESSION_NOTE } from "./lib/restart-result.js";
+import { readyFailureText, modelPinPlan, modelPinRefusal, restartExceptionResult, bigSessionNote, restartLaunchPlan, NO_SESSION_NOTE } from "./lib/restart-result.js";
 
 /**
  * 通知 bridge 重新扫 skill 并重新注册 Discord slash commands。
@@ -1275,10 +1275,9 @@ async function cmdRestart(name?: string, opts: { includeMaster?: boolean } = {})
     }
     // 运行时由 registry 决定；只读来源 / 认不出的 runtime 不能由我们拉起
     let adapter = await (await import("./manager/acp-lifecycle.js")).managedForRestart(tmuxName, info as { runtime?: string; transport?: string });
-    if (!adapter) {
-      results.push({ name: tmuxName, ok: false, error: `runtime "${info.runtime}" 不能由 Claudestra 启动` });
-      continue;
-    }
+    // 没对话过 → 同 id 新起；有历史痕迹却找不到 jsonl → 在碰旧进程之前就拒绝（lib/restart-result.ts）
+    const plan = adapter ? restartLaunchPlan(adapter, info) : { refuse: `runtime "${info.runtime}" 不能由 Claudestra 启动` };
+    if (!adapter || plan.refuse !== undefined) { results.push({ name: tmuxName, ok: false, error: plan.refuse }); continue; }
     // 1. 看同名 window 数量决定路径。永远不要用 ambiguous name target 做 kill
     //    —— v2.4.2 之前这里走 `kill-window -t master:<name>`，tmux 遇到多份同名
     //    会报 "more than one window" 错误，外层 `.catch(() => {})` 吞掉错误后
@@ -1342,7 +1341,7 @@ async function cmdRestart(name?: string, opts: { includeMaster?: boolean } = {})
     const purposeForInject =
       info.purpose && !info.purpose.startsWith("resumed:") ? info.purpose : undefined;
     const spec: LaunchSpec = {
-      mode: restartLaunchMode(adapter, info.sessionId, info.cwd), settingsName: tmuxName, // 没对话过 = 没落盘则新起；new 时 launchInWindow 不代填设置名
+      mode: plan.mode, settingsName: tmuxName, // new 时 launchInWindow 不代填设置名
       channelId: info.channelId,
       bridgeUrl: BRIDGE_URL,
       sessionId: info.sessionId,

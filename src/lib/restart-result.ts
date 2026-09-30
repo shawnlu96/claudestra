@@ -14,6 +14,7 @@
 import { statSync } from "fs";
 import { isMasterAgent } from "./registry.js";
 import { projectJsonlPath } from "./jsonl-cost.js";
+import { archivedSessionCopies } from "./session-archive.js";
 import type { ManagedRuntimeAdapter, ReadyResult, RuntimeControl } from "./runtimes/types.js";
 
 export interface RestartRunOutcome {
@@ -69,17 +70,31 @@ export function restartExceptionResult(name: string, e: unknown): { name: string
 
 export const NO_SESSION_NOTE = "这个 agent 还没有会话，按新会话启动";
 
+export type RestartLaunchPlan = { mode: "resume" | "new"; refuse?: undefined } | { mode?: undefined; refuse: string };
+
 /**
- * restart 续旧会话还是新起。create 预先定了 session id，但 CC 要到第一条消息才落 jsonl：
- * 从没对话过的 agent 带 --resume 必报「No conversation found」退出。适配器说没落盘就用
- * 同一个 id 新起（registry 不用改）；不实现 hasSession 的运行时一律照旧 resume。
+ * restart 续旧会话、新起，还是拒绝。create 预先定了 session id，但 CC 要到第一条消息才落 jsonl：
+ * 从没对话过的 agent 带 --resume 必报「No conversation found」退出，这时用同一个 id 新起（registry 不用改）。
+ * 「从没对话过」三条都要成立：registry 没记过接管 / 分叉 / adopt（notes 为空）、项目目录没有 jsonl、归档里也没有这个 id。
+ * 有任何历史痕迹却找不到 jsonl = 历史被清理或挪走了，新起等于静默丢掉整段对话，所以拒绝并给恢复办法。
+ * 不实现 hasSession 的运行时一律照旧 resume。
  */
-export function restartLaunchMode(
+export function restartLaunchPlan(
   adapter: Pick<ManagedRuntimeAdapter, "hasSession">,
-  sessionId: string,
-  cwd?: string,
-): "resume" | "new" {
-  return adapter.hasSession && !adapter.hasSession(sessionId, cwd) ? "new" : "resume";
+  info: { sessionId?: string; cwd?: string; notes?: string },
+  archived: (sessionId: string) => string[] = archivedSessionCopies,
+): RestartLaunchPlan {
+  const sid = info.sessionId;
+  if (!sid || !adapter.hasSession || adapter.hasSession(sid, info.cwd)) return { mode: "resume" };
+  const where = info.cwd ? projectJsonlPath(info.cwd.replace(/^~/, process.env.HOME || "~"), sid) : `~/.claude/projects/<项目目录>/${sid}.jsonl`;
+  const copy = archived(sid)[0];
+  if (copy) {
+    return { refuse: `会话 ${sid} 的 jsonl 不在原处（可能被 Claude Code 清理了），归档里有一份。没有按新会话启动，免得丢历史；恢复：cp '${copy}' '${where}' 后再 restart` };
+  }
+  if (info.notes?.trim()) {
+    return { refuse: `这个 agent 接过已有会话（${info.notes.trim()}），但 ${sid}.jsonl 找不到了、归档里也没有。没有按新会话静默启动；确认不要这段历史的话，kill 后重新 create` };
+  }
+  return { mode: "new" };
 }
 
 /** restart 结果里失败的 agent 名（「完成」消息只能列成功项，失败项要单独报）。 */

@@ -17,10 +17,9 @@ import {
   isAtShell,
   isClaudeReady,
   probeTuiContract,
-  trustPromptMoves,
 } from "../tmux-helper.js";
 import { isAutoConfirmableModal } from "../modal-confirm.js";
-import { belowTrustLeftover, trustPromptKey, trustRefusal } from "../trust-prompt.js";
+import { belowTrustLeftover, hasTrustOption, TRUST_CAPTURE_LINES, trustPromptKey, trustPromptMoves, trustRefusal } from "../trust-prompt.js";
 import { lastUserTextOf } from "./shared.js";
 import { roleLaunch } from "../team-roles.js";
 import type {
@@ -256,11 +255,12 @@ export const claudeCodeAdapter: ManagedRuntimeAdapter = {
         continue;
       }
 
-      // 目录信任弹窗默认高亮 No, exit：一轮只发一个键，高亮停在 Yes 才回车（lib/trust-prompt.ts）
-      const trustMoves = trustPromptMoves(pane);
+      // 目录信任弹窗默认高亮 No, exit：截整个框，完整干净、目录恰好是本次 cwd 才发一个键，高亮停在 Yes 才回车（lib/trust-prompt.ts）
+      const full = hasTrustOption(pane) ? await win.capture(TRUST_CAPTURE_LINES) : "";
+      const trustMoves = full ? trustPromptMoves(full) : null;
       if (trustMoves !== null) {
         trustSeen = true;
-        const refusal = trustRefusal(await win.capture(40), realPath(budget.cwd), realPath(homedir())!);
+        const refusal = trustRefusal(full, realPath(budget.cwd), realPath(homedir())!, { resolve: (p) => realPath(p)! });
         if (refusal) return { ready: false, reason: "blocked-dialog", detail: refusal, recoveredFullSession: false };
         await win.sendKey(trustPromptKey(trustMoves));
         await win.sleep(trustMoves === 0 ? 1000 : 300);
@@ -279,9 +279,9 @@ export const claudeCodeAdapter: ManagedRuntimeAdapter = {
     }
     // 最后再用同样的严格条件捕一次，不靠循环结束的瞬时状态
     const final = await win.capture(10);
-    return isClaudeReady(final)
-      ? { ready: true, recoveredFullSession: sessionIdlePicked }
-      : { ready: false, reason: "timeout", recoveredFullSession: sessionIdlePicked };
+    if (isClaudeReady(final)) return { ready: true, recoveredFullSession: sessionIdlePicked };
+    const detail = hasTrustOption(final) ? "屏幕上有目录信任弹窗但认不全（残缺或叠着别的框），没有自动确认" : undefined;
+    return { ready: false, reason: "timeout", ...(detail ? { detail } : {}), recoveredFullSession: sessionIdlePicked };
   },
 
   async onExitPane(pane, win) {
@@ -290,7 +290,8 @@ export const claudeCodeAdapter: ManagedRuntimeAdapter = {
       await win.sleep(1000);
       return "handled";
     }
-    const trustMoves = trustPromptMoves(pane);
+    // 退出阶段不替用户接受新的目录信任：往 No, exit 挪（它本来就是退出）
+    const trustMoves = hasTrustOption(pane) ? trustPromptMoves(await win.capture(TRUST_CAPTURE_LINES), "no") : null;
     if (trustMoves !== null) {
       await win.sendKey(trustPromptKey(trustMoves));
       await win.sleep(trustMoves === 0 ? 1000 : 300);

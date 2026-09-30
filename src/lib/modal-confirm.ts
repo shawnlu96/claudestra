@@ -11,8 +11,8 @@ import {
   detectSessionIdlePrompt,
   parseChoicePrompt,
   parseModalOptions,
-  trustPromptMoves,
 } from "./tmux-helper.js";
+import { hasTrustOption } from "./trust-prompt.js";
 import { inputBox } from "./input-box.js";
 
 /**
@@ -39,9 +39,9 @@ export function isAutoConfirmableModal(
   if (parseAuqPane(pane)) return false;
   // session-idle 弹窗除非显式允许
   if (!opts.allowSessionIdle && detectSessionIdlePrompt(pane)) return false;
-  // 目录信任弹窗默认高亮「No, exit」——直接 Enter 等于退出。它由 trustPromptMoves
-  // 专门处理（先 Down 到 Yes 再 Enter），这里绝不能当普通弹窗自动 Enter
-  if (trustPromptMoves(pane) !== null) return false;
+  // 目录信任弹窗默认高亮「No, exit」——直接 Enter 等于退出。看得到它的选项就不按：完整的框由
+  // trustPromptMoves 一格一格挪到 Yes，只截到半个、叠着别的框的一律谁都不按
+  if (hasTrustOption(pane)) return false;
   // Bypass 首启确认同样默认高亮「No, exit」，而且接受与否是用户自己的安全决定——
   // 任何自动化都不替用户按（setup 里征得同意后写 skipDangerousModePermissionPrompt）
   if (detectBypassConsentPrompt(pane)) return false;

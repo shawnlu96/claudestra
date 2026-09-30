@@ -1056,7 +1056,7 @@ describe("parseChoicePrompt（v2.23.1+ 无编号选择弹窗）", () => {
     expect(parseChoicePrompt(p)).toBeNull();
     expect(isAutoConfirmableModal(p)).toBe(false);
   });
-  test("目录信任弹窗（默认 No, exit）识别得出但**绝不**自动按——交给 trustPromptMoves", () => {
+  test("目录信任弹窗（默认 No, exit）绝不自动按；缺标题的半个框 trustPromptMoves 也不认", () => {
     const trust = `
 Quick safety check: Is this a project you created or one you trust?
 
@@ -1066,7 +1066,7 @@ Quick safety check: Is this a project you created or one you trust?
 Enter to confirm · Esc to cancel
 `;
     expect(parseChoicePrompt(trust)!.length).toBe(2);
-    expect(trustPromptMoves(trust)).toBe(1);
+    expect(trustPromptMoves(trust)).toBeNull();
     expect(isAutoConfirmableModal(trust)).toBe(false);
   });
 });

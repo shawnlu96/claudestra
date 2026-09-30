@@ -17,7 +17,7 @@ import { sandboxDisabled } from "./sandbox.js";
 import { sandboxTmuxArgv, sandboxVerifyNewWindow } from "./sandbox-tmux.js"; export { sandboxTmuxArgv };
 import { windowKey } from "./tmux-target.js"; export { windowKey };
 import { inputBox } from "./input-box.js";
-import { trustPromptKey, trustPromptMoves } from "./trust-prompt.js"; export { trustPromptMoves };
+import { hasTrustOption, TRUST_CAPTURE_LINES, trustPromptKey, trustPromptMoves } from "./trust-prompt.js"; export { hasTrustOption, trustPromptMoves };
 export const MASTER_SESSION = "master";
 /**
  * 大总管窗口（index 0）的显式名字。不命名的话 tmux 按前台进程自动改名（claude / 版本号），
@@ -573,9 +573,11 @@ export function detectBypassConsentPrompt(pane: string): boolean {
   );
 }
 
-/** 目录信任弹窗上发这一轮的唯一一个键（识别与为什么一次一个键见 lib/trust-prompt.ts） */
-export async function stepTrustPrompt(target: string, moves: number): Promise<void> {
-  await tmuxRaw(["send-keys", "-t", target, trustPromptKey(moves)]);
+/** 目录信任弹窗上发这一轮的唯一一个键：截整个弹窗、完整干净才发（见 lib/trust-prompt.ts）；没发返回 false */
+export async function stepTrustPrompt(target: string): Promise<boolean> {
+  const moves = trustPromptMoves(await tmuxCapture(target, TRUST_CAPTURE_LINES));
+  if (moves !== null) await tmuxRaw(["send-keys", "-t", target, trustPromptKey(moves)]);
+  return moves !== null;
 }
 
 /**
