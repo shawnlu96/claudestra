@@ -12,23 +12,25 @@ const realpathOr = (p: string): string => {
 
 /**
  * 这个窗口是不是大总管正身：窗口名不是 agent-*，且 pane 当前目录就是 MASTER_DIR（launcher ensureMasterAtZero 同一判据）。
- * window 0 被 agent 抢占真实发生过，那时朝 master:0 发键 / 报框都会落到别人身上。meta = "#{window_name}\t#{pane_current_path}"。
+ * window 0 被 agent 抢占真实发生过，那时朝 master:0 发键 / 报框都会落到别人身上。
  */
-export function isMasterWindowMeta(meta: string, masterDir: string): boolean {
-  const [name = "", cwd = ""] = meta.trim().split("\t");
-  return !!cwd && !name.startsWith(AGENT_PREFIX) && realpathOr(cwd) === realpathOr(masterDir);
+export function isMasterWindowMeta(name: string, cwd: string, masterDir: string): boolean {
+  return !!name && !!cwd && !name.startsWith(AGENT_PREFIX) && realpathOr(cwd) === realpathOr(masterDir);
 }
 
 /** 核对不上时回给调用方的话：这次一个键都没发 */
 export const MASTER_WINDOW_MISMATCH = "window 0 此刻不是大总管（launcher 会归位），这次没有发任何键，稍后再试";
 
-/** 只读核对 target 窗口的身份；tmux 问不到也算不是（身份不确定就不发键、不报） */
+/**
+ * 只读核对 target 窗口的身份；tmux 问不到也算不是（身份不确定就不发键、不报）。名字和目录分两次取：
+ * C locale 下 tmux 会把格式串里的 tab 输出成「_」，拼在一起取就恒判「不是」
+ */
 export async function isMasterWindow(target: string, masterDir: string): Promise<boolean> {
-  const meta = await tmuxRaw(["display-message", "-p", "-t", target, "#{window_name}\t#{pane_current_path}"]).catch((e) => {
-    console.error(`大总管窗口身份核对失败（${target}）:`, e);
+  const get = (fmt: string) => tmuxRaw(["display-message", "-p", "-t", target, fmt]).then((s) => s.trim()).catch((e) => {
+    console.error(`大总管窗口身份核对失败（${target} ${fmt}）:`, e);
     return "";
   });
-  return isMasterWindowMeta(meta, masterDir);
+  return isMasterWindowMeta(await get("#{window_name}"), await get("#{pane_current_path}"), masterDir);
 }
 
 /**

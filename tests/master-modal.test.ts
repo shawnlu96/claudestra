@@ -26,15 +26,20 @@ describe("isMasterWindowMeta（窗口名 + pane 目录，同 launcher ensureMast
   symlinkSync(dir, link);
 
   test("大总管正身：名字不是 agent-*、目录就是 MASTER_DIR（软链对齐）", () => {
-    expect(isMasterWindowMeta(`master\t${dir}`, dir)).toBe(true);
-    expect(isMasterWindowMeta(`claude\t${link}\n`, dir)).toBe(true);
+    expect(isMasterWindowMeta("master", dir, dir)).toBe(true);
+    expect(isMasterWindowMeta("claude", link, dir)).toBe(true);
   });
 
   test("window 0 被 agent 抢占 / 目录不对 / 问不到 → 不是", () => {
-    expect(isMasterWindowMeta(`agent-worker\t${dir}`, dir)).toBe(false);
-    expect(isMasterWindowMeta("agent-worker\t/tmp/w", dir)).toBe(false);
-    expect(isMasterWindowMeta("master\t/tmp/w", dir)).toBe(false);
-    expect(isMasterWindowMeta("", dir)).toBe(false);
-    expect(isMasterWindowMeta("master", dir)).toBe(false);
+    expect(isMasterWindowMeta("agent-worker", dir, dir)).toBe(false);
+    expect(isMasterWindowMeta("agent-worker", "/tmp/w", dir)).toBe(false);
+    expect(isMasterWindowMeta("master", "/tmp/w", dir)).toBe(false);
+    expect(isMasterWindowMeta("", "", dir)).toBe(false);
+    expect(isMasterWindowMeta("master", "", dir)).toBe(false);
+  });
+
+  test("T41c r3 P2-6：名字和目录分开取，不靠 tab 分隔（C locale 下 tmux 把 tab 输出成「_」）", () => {
+    expect(isMasterWindowMeta(`master_${dir}`, "", dir)).toBe(false); // 旧写法在 C locale 下拿到的就是这种串
+    expect(readFileSync(join(import.meta.dir, "..", "src", "lib", "master-modal.ts"), "utf8")).not.toMatch(/#\{window_name\}\\t/);
   });
 });
