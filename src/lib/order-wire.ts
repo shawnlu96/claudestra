@@ -8,7 +8,7 @@
 import type { ReviewFinding } from "./scheduler-review.js";
 import type { WorkOrder } from "./worker-session.js";
 
-export const ORDER_WIRE_VERSION = 1;
+const ORDER_WIRE_VERSION = 1;
 /** Whole-wire byte cap: a spec quoted inline plus findings fits; anything larger is refused at both ends, never trimmed. */
 export const WIRE_MAX_BYTES = 32 * 1024;
 
@@ -16,7 +16,7 @@ export const WIRE_LIMITS = {
   items: 20, input: 16 * 1024, line: 2000, writeBack: 2000, findings: 100, probe: 4000, fallback: 500, summary: 500, path: 400,
 } as const;
 
-export type OrderStep = WorkOrder["step"];
+type OrderStep = WorkOrder["step"];
 export interface OrderWire {
   v: typeof ORDER_WIRE_VERSION;
   /** = scheduler intent id (the dedup key); the only handle a deliver / verdict may cite. */
@@ -50,7 +50,7 @@ export interface DeliverWire {
   selfCheck: string;
 }
 
-export interface VerdictFinding extends ReviewFinding { description: string }
+interface VerdictFinding extends ReviewFinding { description: string }
 export interface VerdictWire {
   v: typeof ORDER_WIRE_VERSION;
   orderId: string;
