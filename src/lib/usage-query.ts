@@ -90,18 +90,18 @@ export interface SummaryRow extends TokenSums {
 }
 
 /**
- * 按 agent×模型汇总。sinceMs 给了就从明细按调用时间算（与 cost --today 同口径，只能看保留期内）；
+ * 按 agent × 运行时 × 模型汇总（同名模型在两个运行时里含义不同：Claude 是应答模型、Codex 是请求模型）。sinceMs 给了就从明细按调用时间算（与 cost --today 同口径，只能看保留期内）；
  * 不给就读 daily（全部时段，含已清掉明细的日子）。
  */
 export function usageSummary(db: Database, sinceMs?: number): SummaryRow[] {
   if (sinceMs === undefined) {
-    const rows = db.prepare(`SELECT agent, MAX(runtime) AS runtime, model, SUM(input) AS input, SUM(cache_creation) AS cacheCreation,
-      SUM(cache_read) AS cacheRead, SUM(output) AS output, SUM(reasoning) AS reasoning, SUM(calls) AS calls FROM daily GROUP BY agent, model`).all() as any[];
+    const rows = db.prepare(`SELECT agent, runtime, model, SUM(input) AS input, SUM(cache_creation) AS cacheCreation,
+      SUM(cache_read) AS cacheRead, SUM(output) AS output, SUM(reasoning) AS reasoning, SUM(calls) AS calls FROM daily GROUP BY agent, runtime, model`).all() as any[];
     return rows.map(summaryRow).sort((a, b) => b.totalTokens - a.totalTokens);
   }
-  const rows = db.prepare(`SELECT t.agent, MAX(t.runtime) AS runtime, c.model, ${SUMS},
+  const rows = db.prepare(`SELECT t.agent, t.runtime, c.model, ${SUMS},
       SUM(CASE WHEN t.sidechain = 1 THEN c.input + c.cache_creation + c.cache_read + c.output + c.reasoning ELSE 0 END) AS sidechainTokens
-    FROM calls c JOIN turns t ON t.turn_id = c.turn_id WHERE c.ts >= ? GROUP BY t.agent, c.model`).all(sinceMs) as any[];
+    FROM calls c JOIN turns t ON t.turn_id = c.turn_id WHERE c.ts >= ? GROUP BY t.agent, t.runtime, c.model`).all(sinceMs) as any[];
   return rows.map(summaryRow).sort((a, b) => b.totalTokens - a.totalTokens);
 }
 

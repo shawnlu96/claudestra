@@ -63,7 +63,7 @@ agent、sessionId、是否子 agent（sidechain）、开始时间（外来输入
 
 - 明细（`calls` / `turns` / `tools`）保留 30 天（本地日期，从今天 00:00 往前数 30 天）；**更早的记录导入时直接跳过**，不回填，因为清理之后再读到同一会话的副本时已经没有主键可以挡重复。
 - 清理只在每日那趟（`--prune`）做；10 分钟一趟的增量不删数据。
-- `daily`（日 × agent × 模型）永久。导入时把涉及的日子记进 `dirty_days`，导完按明细重算那天：保留期内的日子一律照明细重算（调用挪去别的日子后可能变空）；保留期之前、明细已清掉的日子不再动它（它是唯一的记录）。改归属时同样只影响还有明细的日子。
+- `daily`（日 × agent × 运行时 × 模型）永久。同名模型在两个运行时里含义不同（Claude 是应答模型、Codex 是请求模型），汇总也按运行时分行。导入时把涉及的日子记进 `dirty_days`，导完按明细重算那天：保留期内的日子一律照明细重算（调用挪去别的日子后可能变空）；保留期之前、明细已清掉的日子不再动它（它是唯一的记录）。改归属时同样只影响还有明细的日子。
 
 ## 与 `cost --today` 对账
 
@@ -75,7 +75,13 @@ agent、sessionId、是否子 agent（sidechain）、开始时间（外来输入
 
 - **文件**：`rollout-<ISO>-<threadId>.jsonl`，以及 `thread/revert` 之后的新段 `rollout-<ISO>-<threadId>_<rolloutId>.jsonl`（线程不变、文件换了）。共用的 `codexSessionIdFromFilename` 只认前一种，token 账自己两种都认。
 - **一轮** = Codex 自己的 `turn_id`（`task_started` / `turn_context` 带），轮 id 是 `cx:<turn_id>`：revert 新段、归档副本里的同一轮还是同一行。轮中途追加的用户消息、同一轮的多条 `turn_context` 不切。一段从轮中间开始（没看到 `task_started`）时按 `token_usage_record.turn_id` 接回原来那一轮。来源类型和摘要取本轮第一条外来输入（复用 Claude 的判定：`<channel>` 包装、人敲的字；注入的 AGENTS.md / environment_context 不算），整轮没有就记 `other`。
-- **一次调用** = 一次请求。新 Codex 每请求一条 `token_usage_record`，紧跟一条同数的 `event_msg/token_count`（`last_token_usage`）；老 Codex（本机 0.149）只有后者。两者落到同一个去重键 = 线程 + 五项原始计数（input / cached / cache_write / output / reasoning）：record 与 token_count、重复落盘的 token_count、revert 新段和归档副本带过去的旧记录都只算一次。不用时间戳（record 和 token_count 差几毫秒），不用 `response_id`（老版本没有）。本机 30 天 7259 次请求里，同一线程五项全同的两次不同请求为 0。全零的 token_count（只报限流）不算。
+- **一次调用** = 一次请求。只有「同一条记录被写了两遍」算重复，计数恰好相同的两次独立请求是两次。
+  - 新 Codex 每请求一条 `token_usage_record`，身份 = 轮 + `response_id`；revert 新段、归档副本带过去的是同一条记录，同一个键。
+  - 紧跟它、计数相同的 `event_msg/token_count`（`last_token_usage`）是同一次请求的回声，不另计。回声的身份记进 `echoes` 表，隔着别的行再落一遍也认得出。和上一条 token_count 的进程累计值、计数都相同的，是紧挨着重复落盘，跳过。本机见过重复那条落在下一轮 `task_started` 之后，所以这一条不看轮。
+  - 老 Codex（本机 0.149）只有 token_count，身份 = 轮 + 进程累计 total + 计数。
+  - 配对状态存在 `files.cx_pair`，跨读块、跨增量导入接得上。
+  - 不拿 record 的 `thread_token_usage` 去配 token_count 的累计：resume 之后两者分叉，本机 30 天里 4 千多次对不上。
+  - 早先按「线程 + 五项计数」做键，同一线程计数相同的两次独立请求会并成一次（T92 r1 P1-1），已改掉。全零的 token_count（只报限流）不算。
 - **四项 + reasoning**：Codex 的 `input_tokens` 含命中缓存、`output_tokens` 含 reasoning。入库时 input = input − cached，cacheRead = cached，cacheCreation = cache_write，output = output − reasoning，reasoning 单列；五项之和 = `total_tokens`。看到的上下文 = 单次请求 input + cacheCreation + cacheRead（= Codex 的 input_tokens）。
 - **`total_token_usage` 只用来对账**：它是进程级累计值，换进程 / resume 会重开，重开那一条丢了时做差会少算（本机 30 天少 0.6%），所以不拿它计数。
 - **模型** = `turn_context.model`，是**请求**的模型（rollout 不记实际应答的模型，T91 查实）。查询结果带 `modelBasis: "request"`，文本视图在模型名后标「(请求)」；Claude 的是 `response`。

@@ -41,22 +41,29 @@ export function codexUsage(u: unknown): Omit<CallUsage, "key" | "ts" | "model" |
   return out.input + out.cacheCreation + out.cacheRead + out.output + out.reasoning > 0 ? out : null;
 }
 
+const USAGE_FIELDS = ["input_tokens", "cached_input_tokens", "cache_write_input_tokens", "output_tokens", "reasoning_output_tokens"];
+const vecOf = (u: Rec) => USAGE_FIELDS.map((k) => n(u[k])).join(":");
+
 /**
- * 一次请求的去重键：线程 + 五项原始计数。同一次请求会落两遍（token_usage_record 和紧跟的 token_count.last_token_usage，数一样）、
- * token_count 会重复落盘、revert 新段 / 归档副本会带着旧段的记录——这几份的线程和计数都相同，落到同一个键。
- * 不用时间戳：record 和 token_count 差几毫秒。不用 response_id：老 Codex 没有 record、token_count 里也没有它。
- * 本机 30 天 7259 次请求实测，同一线程里五项全同的两次不同请求为 0。
+ * 一次请求的身份。只有「同一条记录被写了两遍」算重复；计数恰好相同的两次独立请求必须是两次（T92 r1 P1-1：
+ * 同一线程两轮各 1100、或 revert 新段里的新请求和旧请求计数相同，按计数做键会只剩一次）。
+ * - 新 Codex：token_usage_record 按 轮 + response_id（没有就按它自己的时间戳）；revert 新段 / 归档副本带过去的是同一条记录，同一个键。
+ *   紧跟它、计数相同的 token_count 是同一次请求的回声，不另计（countCall）。
+ * - 老 Codex 只有 token_count：按 轮 + 进程累计 total + 计数；重复落盘的同一行三者都相同，独立请求的累计值不同。
+ * 不拿 record 的线程累计去配 token_count 的累计：resume 之后两者分叉（本机 30 天 4 千多次对不上）。
  */
-function callKey(thread: string, u: Rec): string {
-  const f = ["input_tokens", "cached_input_tokens", "cache_write_input_tokens", "output_tokens", "reasoning_output_tokens"];
-  return `cx:${thread}:${f.map((k) => n(u[k])).join(":")}`;
-}
+const recordKey = (st: FileState, p: Rec, ts: string) =>
+  `cx:${st.session_id}:${st.turn_id}:r:${typeof p.response_id === "string" && p.response_id ? p.response_id : `@${ts}:${vecOf(p.usage ?? {})}`}`;
+const countKey = (st: FileState, info: Rec) => `cx:${st.session_id}:${st.turn_id}:t:${n(info.total_token_usage?.total_tokens)}:${vecOf(info.last_token_usage ?? {})}`;
 
 export interface CodexLineCtx {
   cutoff: number;
   /** 线程（子线程再带父线程）→ 主人；认不出 = unowned */
   ownerOf: (thread: string, parent: string | null) => string;
   tool: (id: string, turnId: string, name: string) => void;
+  /** 认过的回声（token_count 身份）：隔着别的行再落一遍的回声靠它认出来；存库，跨文件、跨增量导入 */
+  isEcho: (key: string) => boolean;
+  noteEcho: (key: string, ts: number) => void;
 }
 
 /**
@@ -86,7 +93,7 @@ function noteInbound(line: string, st: FileState): void {
 /**
  * 一行 rollout：改文件状态（主人、当前轮、模型），是一次保留期内的请求就返回它。
  * 轮边界 = task_started / turn_context 的 turn_id；用量取 token_usage_record.usage（新 Codex，每请求一条）或 token_count.last_token_usage，
- * 两者按 callKey 落成同一次。模型取 turn_context.model：那是**请求**的模型，rollout 不记响应模型（查询时标 modelBasis = request）。
+ * 两者是同一次请求（见 recordKey / countCall）。模型取 turn_context.model：那是**请求**的模型，rollout 不记响应模型（查询时标 modelBasis = request）。
  */
 export function handleCodexLine(line: string, st: FileState, ctx: CodexLineCtx): CallUsage | null {
   if (!RELEVANT_RE.test(line)) return null;
@@ -107,12 +114,15 @@ export function handleCodexLine(line: string, st: FileState, ctx: CodexLineCtx):
       return null;
     case "event_msg":
       if (p.type === "task_started" && typeof p.turn_id === "string") enterTurn(st, p.turn_id, ts, false);
-      if (p.type === "token_count") return callOf(p.info?.last_token_usage, ts, st, ctx);
+      if (p.type === "token_count") return countCall(p.info ?? {}, ts, st, ctx);
       return null;
     case "token_usage_record":
       // 新段从一轮中间开始时这里先看到本轮的 id：单独起一轮，来源记 continued
       if (typeof p.turn_id === "string" && p.turn_id && `cx:${p.turn_id}` !== st.turn_id) enterTurn(st, p.turn_id, ts, true);
-      return callOf(p.usage, ts, st, ctx);
+      return callOf(p.usage, ts, st, ctx, () => {
+        st.cx_pair = `rec|${st.turn_id}|${vecOf(p.usage ?? {})}`;
+        return recordKey(st, p, String(e.timestamp));
+      });
     case "response_item":
       if (p.type === "message" && p.role === "user") noteInbound(line, st);
       else if (TOOL_TYPES.has(p.type) && st.turn_id) ctx.tool(`cx:${p.call_id ?? p.id ?? `${st.turn_id}:${e.ordinal}`}`, st.turn_id, String(p.name ?? p.type));
@@ -122,9 +132,32 @@ export function handleCodexLine(line: string, st: FileState, ctx: CodexLineCtx):
   }
 }
 
-function callOf(u: unknown, ts: number, st: FileState, ctx: CodexLineCtx): CallUsage | null {
+/**
+ * token_count 三种情况不另计：紧跟 record、计数相同 = 它的回声（记下回声身份）；和上一条 token_count 累计值、计数都相同 = 紧挨着重复落盘
+ * （本机见过重复那条落在下一轮 task_started 之后，所以不看轮）；身份是认过的回声 = 隔着别的行又落了一遍。其余是一次独立请求。
+ * 配对状态存 files.cx_pair，跨读块、跨增量导入接得上。
+ */
+function countCall(info: Rec, ts: number, st: FileState, ctx: CodexLineCtx): CallUsage | null {
+  const u: Rec = info.last_token_usage ?? {};
+  if (!codexUsage(u)) return null;
+  const prev = st.cx_pair;
+  st.cx_pair = `tc|${n(info.total_token_usage?.total_tokens)}|${vecOf(u)}`;
+  if (prev === st.cx_pair) return null;
+  if (!st.turn_id) enterTurn(st, `head:${st.session_id}`, ts, true);
+  const key = countKey(st, info);
+  if (prev === `rec|${st.turn_id}|${vecOf(u)}`) {
+    ctx.noteEcho(key, ts);
+    return null;
+  }
+  if (ctx.isEcho(key)) return null;
+  return callOf(u, ts, st, ctx, () => key);
+}
+
+function callOf(u: unknown, ts: number, st: FileState, ctx: CodexLineCtx, key: () => string): CallUsage | null {
   const usage = codexUsage(u);
-  if (!usage || !Number.isFinite(ts) || ts < ctx.cutoff) return null;
+  if (!usage) return null;
   if (!st.turn_id) enterTurn(st, `head:${st.session_id}`, ts, true); // 文件里第一条用量之前没有轮边界（老格式 / 截断的副本）
-  return { key: callKey(st.session_id, u as Rec), ts, model: st.model ?? "unknown", ...usage, tools: [] };
+  const k = key(); // 保留期之前的也要走一遍：record 的配对状态得记下，它的回声才不会被当成独立请求
+  if (!Number.isFinite(ts) || ts < ctx.cutoff) return null;
+  return { key: k, ts, model: st.model ?? "unknown", ...usage, tools: [] };
 }

@@ -199,3 +199,95 @@ describe("归属与模型", () => {
   });
 
 });
+
+/** 老 Codex（0.149）的一轮：只有 token_count，没有 token_usage_record */
+function oldTurn(k: number, at: number, reqs: [number, number, number][], total: { v: number }) {
+  const id = turnUuid(k);
+  const out: object[] = [line(at, "event_msg", { type: "task_started", turn_id: id }), line(at + 1, "turn_context", { turn_id: id, model: "gpt-6.1-sol" })];
+  reqs.forEach(([input, cached, output], r) => {
+    const u = usage(input, cached, output);
+    total.v += u.total_tokens;
+    out.push(line(at + 10 + r, "event_msg", { type: "token_count", info: { total_token_usage: { ...u, total_tokens: total.v }, last_token_usage: u } }));
+  });
+  return out;
+}
+const SAME: [number, number, number, number] = [1000, 500, 100, 20];
+
+describe("r1 回归：计数相同的独立请求不能并成一次（P1-1）", () => {
+  test("审查员反例：同一线程两轮、五项计数完全相同 → 2 次调用、2 轮、2200", () => {
+    const f = fx();
+    const total = { v: 0 };
+    f.write(f.path(TH), [meta(TH), ...turn(1, T, "一", [SAME], { total }), ...turn(2, T + 10_000, "二", [SAME], { total })]);
+    f.run();
+    f.run();
+    expect(turnsFor(f.db, "agent-cx").map((t) => [t.calls, t.totalTokens])).toEqual([[1, 1100], [1, 1100]]);
+    expect(f.total()).toBe(2200);
+  });
+
+  test("同一轮里两次计数相同的请求 → 2 次", () => {
+    const f = fx();
+    f.write(f.path(TH), [meta(TH), ...turn(1, T, "一", [SAME, SAME])]);
+    f.run();
+    expect(usageSummary(f.db, 0)[0].calls).toBe(2);
+  });
+
+  test("revert 新段：带着旧轮副本 + 一个计数相同的新请求 → 旧的不重算、新的要算；再导一遍不变", () => {
+    const f = fx();
+    const total = { v: 0 };
+    const first = [meta(TH), ...turn(1, T, "一", [SAME], { total })];
+    f.write(f.path(TH), first);
+    f.run();
+    f.write(f.path(TH, REV), [...first, ...turn(2, T + 10_000, "二", [SAME], { total })]);
+    f.run();
+    f.run();
+    expect(f.total()).toBe(2200);
+    expect(turnsFor(f.db, "agent-cx").map((t) => t.calls)).toEqual([1, 1]);
+  });
+
+  test("record 和它的回声被增量导入切开：先导到 record，回声下一趟才到，不多算", () => {
+    const f = fx();
+    const recs = [meta(TH), ...turn(1, T, "一", [[20000, 13000, 300]])];
+    const cut = recs.findIndex((r: any) => r.type === "token_usage_record") + 1;
+    f.write(f.path(TH), recs.slice(0, cut));
+    f.run();
+    f.append(f.path(TH), recs.slice(cut));
+    f.run();
+    expect(usageSummary(f.db, 0)[0].calls).toBe(1);
+  });
+
+  test("回声紧挨着重复落盘、重复那条落在下一轮 task_started 之后：不算进下一轮", () => {
+    const f = fx();
+    const a = turn(1, T, "一", [[20000, 13000, 300]]);
+    const echo = a.find((r: any) => r.payload?.type === "token_count")!;
+    const b = turn(2, T + 10_000, "二", [[30000, 20000, 400]]);
+    f.write(f.path(TH), [meta(TH), ...a, b[0], { ...echo, ordinal: ++ord, timestamp: iso(T + 10_001) }, ...b.slice(1)]);
+    f.run();
+    expect(turnsFor(f.db, "agent-cx").map((t) => t.calls)).toEqual([1, 1]);
+  });
+
+  test("老 Codex（只有 token_count）：计数相同、累计值不同的是两次；同一行写两遍是一次", () => {
+    const f = fx();
+    const total = { v: 0 };
+    const a = oldTurn(1, T, [[1000, 500, 100], [1000, 500, 100]], total);
+    const b = oldTurn(2, T + 10_000, [[1000, 500, 100]], total);
+    f.write(f.path(TH), [meta(TH, { cli_version: "0.149.0" }), ...a, a[a.length - 1], ...b]);
+    f.run();
+    expect(usageSummary(f.db, 0)[0].calls).toBe(3);
+    expect(f.total()).toBe(3300);
+  });
+});
+
+describe("r1 回归：汇总按运行时分（P2-1）", () => {
+  test("同一 agent、同名模型的 Claude 与 Codex 各是一行，Claude 那行仍是应答模型；按明细和按 daily 都一样", () => {
+    const f = fx();
+    f.write(f.path(TH), [meta(TH), ...turn(1, T, "一", [SAME], { model: "unknown" })]);
+    f.run();
+    f.db.run("INSERT INTO turns (turn_id, agent, session_id, sidechain, started_at, kind, trigger, runtime) VALUES ('cc', 'agent-cx', 'cc-sid', 0, ?, 'human', '', 'claude-code')", [T]);
+    f.db.run("INSERT INTO calls (key, turn_id, ts, day, model, input, cache_creation, cache_read, output, reasoning) SELECT 'cc-call', 'cc', ts, day, 'unknown', 100, 0, 0, 10, 0 FROM calls LIMIT 1");
+    f.db.run("INSERT OR IGNORE INTO dirty_days SELECT day FROM calls");
+    f.run();
+    for (const rows of [usageSummary(f.db, 0), usageSummary(f.db)]) {
+      expect(rows.map((r) => [r.runtime, r.modelBasis, r.totalTokens])).toEqual([["codex", "request", 1100], ["claude-code", "response", 110]]);
+    }
+  });
+});
