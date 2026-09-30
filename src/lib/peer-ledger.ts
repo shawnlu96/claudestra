@@ -11,6 +11,7 @@ import { resolve } from "node:path";
 import { STAGES, type LedgerEvent, type LedgerTask, type ReviewVerdict, type Stage, type StepName } from "./ledger-stages.js";
 import { getTask, listEvents, toTask } from "./ledger-store.js";
 import { currentReview, listSteps, stepAtStage, stepPeer, stepsByTask, withDerived, type TaskStep } from "./ledger-steps.js";
+import { withoutLendSteps } from "./ledger-lend.js";
 import { REPO_ROOT } from "./repo-root.js";
 
 /** 委托约定的绝对路径：peer 请求的注入头里给接收方 agent 看，它的 cwd 一般是自己的项目，相对路径找不到 */
@@ -69,8 +70,9 @@ export function peerTasks(db: Database, peer: string): PeerTaskView[] {
   const rows = db.query("SELECT * FROM tasks ORDER BY updatedAt DESC").all() as Record<string, unknown>[];
   const steps = stepsByTask(db);
   return rows.map(toTask).flatMap((t) => {
-    const links = peerLinks(t, peer, steps.get(t.id));
-    return links.length ? [peerTaskView(t, links, steps.get(t.id), peer)] : [];
+    const rows = withoutLendSteps(db, steps.get(t.id) ?? []);
+    const links = peerLinks(t, peer, rows);
+    return links.length ? [peerTaskView(t, links, rows, peer)] : [];
   });
 }
 
@@ -107,7 +109,7 @@ export function peerEventView(e: LedgerEvent, peer: string): PeerEventView | nul
 /** 不是委托给它的卡一律当不存在（null → 404），不泄露别的任务在不在 */
 export function peerTaskDetail(db: Database, peer: string, id: string): { task: PeerTaskView; events: PeerEventView[] } | null {
   const t = getTask(db, id);
-  const rows = t ? listSteps(db, t.id) : [];
+  const rows = t ? withoutLendSteps(db, listSteps(db, t.id)) : [];
   const links = t ? peerLinks(t, peer, rows) : [];
   if (!t || !links.length) return null;
   const events = listEvents(db, { project: t.project, target: id }).flatMap((e) => peerEventView(e, peer) ?? []);

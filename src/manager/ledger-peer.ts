@@ -7,6 +7,7 @@
  */
 import { LedgerError, getTask } from "../lib/ledger-store.js";
 import { appendEvent, moveStage, recordReview, setTask } from "../lib/ledger-write.js";
+import { lendManaged, withoutLendSteps } from "../lib/ledger-lend.js";
 import { listSteps, stepsOf } from "../lib/ledger-steps.js";
 import { recordAccept } from "../lib/ledger-steps-write.js";
 import { parsePeerOp, peerEventView, peerLinks, peerOpDenied, peerTaskView } from "../lib/peer-ledger.js";
@@ -29,7 +30,12 @@ function peerWrite(c: LedgerCli): Result {
   const op = parsePeerOp(body);
   if (typeof op === "string") throw new LedgerError("invalid", op);
   const task = id ? getTask(c.db, id) : null;
-  const links = task ? peerLinks(task, peer, listSteps(c.db, task.id)) : [];
+  const all = task ? listSteps(c.db, task.id) : [];
+  const links = task ? peerLinks(task, peer, withoutLendSteps(c.db, all)) : [];
+  // 本轮审查由出借单管着：谁都不能经这里写结论、推阶段、改 PR / head，只能走 lend/result（T93）
+  if (task && (op.op === "review" || op.op === "stage" || op.op === "pr") && lendManaged(c.db, task.id, task.round) && (links.length || peerLinks(task, peer, all).length)) {
+    throw new LedgerError("forbidden", "lend_managed：这一轮审查由出借单管理，只能经 lend/result 回写", { lend: "lend_managed" });
+  }
   if (!task || !links.length) throw new LedgerError("not_found", `没有委托给 ${peer} 的任务 ${id ?? ""}`);
   const denied = peerOpDenied(op, task, stepsOf(c.db, task), peer);
   if (denied) throw new LedgerError("forbidden", denied);

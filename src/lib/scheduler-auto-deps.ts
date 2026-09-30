@@ -7,12 +7,11 @@
 import type { Database } from "bun:sqlite";
 import { realpathSync } from "node:fs";
 import { join } from "node:path";
-import { bridgeSend } from "./bridge-client.js";
 import { resolveBunPath } from "./bun-path.js";
 import type { AuthorFamily } from "./ledger-scheduler.js";
 import type { LedgerTask } from "./ledger-stages.js";
-import { getMeta } from "./ledger-store.js";
 import { statePath } from "./paths.js";
+import { notifyProjectPm } from "./pm-notify.js";
 import { readRegistryAgentsSync, type RegistryAgent } from "./registry.js";
 import { SRC_DIR } from "./repo-root.js";
 import { runManagerProcess } from "./run-manager.js";
@@ -118,12 +117,7 @@ function worker({ db, registryRow, alive }: Env, ref: SessionRef): WorkerSession
   return createChannelWorker({ ...deps, port });
 }
 
-async function notifyPm({ db, alive }: Env, task: LedgerTask, text: string): Promise<void> {
-  const meta = getMeta(db, task.project);
-  const pm = meta.pms.find((p) => p !== meta.team?.dispatcher) ?? "master";
-  const r = await bridgeSend({ type: "route_to_agent", targetName: pm, text, fromName: "scheduler", oneShot: true }, { timeoutMs: 30_000, stillActive: alive });
-  if (!r.ok) throw new Error(`发给 ${pm} 失败：${r.error}`);
-}
+const notifyPm = ({ db, alive }: Env, task: LedgerTask, text: string): Promise<void> => notifyProjectPm(db, task.project, text, { fromName: "scheduler", stillActive: alive });
 
 export interface AutoDepsOpts {
   /** Tests only; production reads the canonical registry fresh on every lookup. */
