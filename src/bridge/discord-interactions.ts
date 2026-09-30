@@ -16,6 +16,7 @@ import { stopTyping, buildComponents } from "./components.js";
 import { tmuxScreenshot } from "./screenshot.js";
 import { isAutoPermButton, parseAutoPermButton, autoRevertButtonId } from "./auto-allow.js";
 import { resetToolTracking, agentNameForChannel } from "./jsonl-watcher.js";
+import { isAcpChannel } from "./acp-state.js";
 import { emitEvent } from "./event-bus.js";
 import { permissionMessages, clearPermissionMessage } from "./permission-watcher.js";
 import { clearWedgeState } from "./wedge-watcher.js";
@@ -532,21 +533,20 @@ async function handleInteraction(discord: Client, deps: InteractionDeps, interac
         // 找 channel 对应的 agent
         let agentName: string | null = null;
         let agentCwd: string | null = null;
-        let agentSid: string | undefined;
+        let agentSid: string | undefined; let acp = isAcpChannel(channelId);
         try {
           const listResult = await runManager("list");
           const agent = (listResult.agents || []).find((a: any) => a.channelId === channelId);
           if (agent) {
             agentName = agent.name;
             agentCwd = agent.project ? String(agent.project).replace(/^~/, process.env.HOME || "~") : null;
-            agentSid = agent.sessionId || undefined;
+            agentSid = agent.sessionId || undefined; acp ||= agent.transport === "acp";
           }
         } catch { /* non-critical */ }
-
+        if (acp) return void await interaction.editReply("ACP agent 的 Discord 斜杠暂不可用，请到网页处理。").catch(() => {});
         // 如果没找到 agent，就是 master channel（control channel）
         const targetWindow = agentName ? windowTarget(agentName) : `master:0`;
         const targetLabel = agentName || "master";
-
         const vals: Record<string, string> = {};
         for (const opt of interaction.options.data) {
           if (typeof opt.value === "string") vals[opt.name] = opt.value;
@@ -1001,7 +1001,7 @@ async function handleInteraction(discord: Client, deps: InteractionDeps, interac
         }
         return;
       }
-
+      if (free && (id.startsWith("acp_perm_") || id.startsWith("acp_quota_"))) return void await (await import("./acp-link.js")).answerAcpDiscordInteraction(interaction, channelId);
       // 未知按钮 → 走 deliver 转发给 LLM，agent 看到 content="[button:<id>]"
       const client = clients.get(channelId);
       if ((await (await import("./ask-entry.js")).answerDiscordInteraction(interaction, channelId, `[button:${id}]`, () => startTypingWithSafety(channelId))) || !client) return;

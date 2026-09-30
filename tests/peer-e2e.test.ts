@@ -16,6 +16,7 @@ import { SessionTable } from "../src/lib/peer-e2e-sessions.ts";
 import { encodeHelloReply, PEER_E2E_LABEL } from "../src/lib/peer-e2e-wire.ts";
 import { toB64url, utf8 } from "../src/lib/e2e/encoding.ts";
 import { createE2eOutbound } from "../src/lib/peer-e2e-outbound.ts";
+import { leakedIn, mark, relayView } from "./relay-leak-test-helpers.ts";
 
 interface Machine {
   id: InstanceKey;
@@ -100,11 +101,12 @@ async function world(opts: { relay?: Relay; limits?: ConstructorParameters<typeo
     ...(opts.now ? { now: opts.now } : {}),
     ...(opts.bodyLimits ? { bodyLimits: opts.bodyLimits } : {}),
   });
-  /** 模拟调用方：内层带 Bearer、一个每次唯一的内层签名和签名时刻（单调时钟） */
+  /** 模拟调用方：内层带 Bearer（每个 world 随机一个，泄露检查拿全文去查）、一个每次唯一的内层签名和签名时刻（单调时钟） */
+  const token = `Bearer ${mark("tok")}`;
   let clock = 0;
   const call = (method: string, path: string, body?: string) =>
     client.fetch(method, path, {
-      authorization: "Bearer tok", [SIG_HEADERS.sig]: randomUUID(), [SIG_HEADERS.ts]: String(++clock), host: "evil", "x-forwarded-for": "127.0.0.1",
+      authorization: token, [SIG_HEADERS.sig]: randomUUID(), [SIG_HEADERS.ts]: String(++clock), host: "evil", "x-forwarded-for": "127.0.0.1",
     }, body === undefined ? undefined : utf8(body));
   /** B 进程重启：会话全丢，内层去重表清空，之前签的非 GET 都算「重启前」 */
   const restartB = () => {
@@ -112,9 +114,8 @@ async function world(opts: { relay?: Relay; limits?: ConstructorParameters<typeo
     r.restart(clock);
   };
   return {
-    a, b, r, bDeps, client, call, posted, pinnedByA, restartB,
-    setBKnowsA: (p: E2ePeer | null) => (bKnowsA = p),
-    setAKnowsB: (p: E2ePeer) => (aKnowsB = p),
+    a, b, r, bDeps, client, call, token, posted, pinnedByA, restartB,
+    setBKnowsA: (p: E2ePeer | null) => (bKnowsA = p), setAKnowsB: (p: E2ePeer) => (aKnowsB = p),
   };
 }
 
@@ -128,24 +129,23 @@ describe("peer E2E：正常往返", () => {
     expect(await res.json()).toEqual({ ok: true, echo: "hi", n: 1 });
     expect((await w.call("GET", "/api/v1/agents")).status).toBe(200);
     expect(w.r.handled.map((h) => [h.method, h.path])).toEqual([["POST", "/api/v1/agents/x/messages"], ["GET", "/api/v1/agents"]]);
-    expect(w.r.handled[0].headers.authorization).toBe("Bearer tok");
+    expect(w.r.handled[0].headers.authorization).toBe(w.token);
     expect(w.r.handled[0].headers["x-forwarded-for"]).toBeUndefined();
     expect(w.r.handled[0].headers.host).not.toBe("evil");
     expect(w.posted.filter((p) => p.endsWith("/hello"))).toHaveLength(1); // 一个会话复用
     expect(w.posted.every((p) => p.startsWith("/api/v1/e2e/"))).toBe(true);
   });
 
-  test("中继看到的字节里没有内层路径、token、正文", async () => {
-    const seen: string[] = [];
+  test("中继看到的 URL、header、body 里都没有内层路径、token、正文（整段和各段分开查，含常见可逆编码）", async () => {
+    const seen: Buffer[] = [];
     const w = await world({ relay: async (req, fwd) => {
-      seen.push(Buffer.from(await req.clone().arrayBuffer()).toString("latin1"));
-      const res = await fwd(req);
-      seen.push(Buffer.from(await res.clone().arrayBuffer()).toString("latin1"));
+      const sent = await relayView(req), res = await fwd(req);
+      seen.push(...sent, ...(await relayView(res)));
       return res;
     } });
-    await w.call("POST", "/api/v1/agents/secretproj/messages", "机密内容");
-    const all = seen.join("\n");
-    for (const needle of ["secretproj", "Bearer", "tok", "机密", "echo"]) expect(all.includes(needle)).toBe(false);
+    const project = mark("proj"), path = `/api/v1/agents/${project}/messages`, bodyMark = mark("body"), body = `机密内容-${bodyMark}`;
+    expect([(await w.call("POST", path, body)).status, w.r.handled[0]?.path]).toEqual([201, path]);
+    expect(leakedIn(seen, [path, project, w.token, w.token.slice("Bearer ".length), body, bodyMark, "机密内容"])).toEqual([]);
   });
 });
 
@@ -221,7 +221,7 @@ describe("peer E2E：重放与重复投递", () => {
     const slow = await w.call("POST", "/api/v1/x", "slow clock");
     expect(slow.status).toBe(401);
     expect(await slow.json()).toMatchObject({ code: "peer_signature", reason: "before_start" });
-    const same = { authorization: "Bearer tok", [SIG_HEADERS.sig]: randomUUID(), [SIG_HEADERS.ts]: "2000" };
+    const same = { authorization: w.token, [SIG_HEADERS.sig]: randomUUID(), [SIG_HEADERS.ts]: "2000" };
     expect((await w.client.fetch("POST", "/api/v1/x", same, utf8("once"))).status).toBe(201);
     const twice = await w.client.fetch("POST", "/api/v1/x", same, utf8("once"));
     expect(twice.status).toBe(401);

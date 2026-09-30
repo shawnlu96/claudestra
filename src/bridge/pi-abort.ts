@@ -31,6 +31,8 @@ export function setExtensionSocket(fn: typeof socketOf, deps: EchoDeps): void {
   socketOf = fn;
   echo = deps;
 }
+/** 频道 → 当前登记的那条连接（bridge/acp-link.ts 认帧的来源、给 ACP 宿主发调用都用它） */
+export const extensionSocketOf = (channelId: string): Socket | undefined => socketOf(channelId);
 
 const abortCapable = new Set<string>();
 export function setAbortCapable(channelId: string, on: boolean): void {
@@ -42,9 +44,11 @@ export function setAbortCapable(channelId: string, on: boolean): void {
 const ABORT_ACK_MS = 1_500;
 /** 等超时之后还认多久迟到的回执：抬头已经发出去了，作废的消息照样要告诉发送方 */
 const LATE_ACK_MS = 60_000;
-type AbortResult = "aborted" | "idle" | "no_ack";
+type AbortResult = "aborted" | "idle" | "no_ack" | "failed";
 /** done 在等到回执或超时后清掉：超时之后到的回执只补回显 */
-type Waiter = { channelId: string; at: number; done?: (r: AbortResult) => void };
+type Waiter = { channelId: string; at: number; done?: (r: AbortResult, why?: string) => void };
+/** 回执的结果：扩展说没法中止（unsupported：这个 Pi 没有 ctx.abort）或中止抛错（error）= failed，不能当成「本来就空闲」（wf2 pi-8） */
+const ackResult = (r: unknown): AbortResult => (r === "aborted" ? "aborted" : r === "idle" ? "idle" : "failed");
 const abortWaiters = new Map<string, Waiter>();
 const lastAbort = new Map<string, { result: AbortResult; inEditor: number }>();
 /** 频道 → 发出中止的时刻：之后第一次 Stop 是叫停的回声（见 stopAfterAbort） */
@@ -52,7 +56,7 @@ const abortedAt = new Map<string, number>();
 const ABORT_STOP_MS = 120_000;
 
 /** 扩展的中止回执。from = 发来回执的连接：只认这个频道当前的连接（别的连接对上 id 也不算） */
-export function onAbortAck(msg: { id?: unknown; result?: unknown; voided?: unknown; inEditor?: unknown }, from: Socket): void {
+export function onAbortAck(msg: { id?: unknown; result?: unknown; voided?: unknown; inEditor?: unknown; error?: unknown }, from: Socket): void {
   const w = abortWaiters.get(String(msg.id));
   if (!w || socketOf(w.channelId) !== from) return;
   abortWaiters.delete(String(msg.id));
@@ -62,8 +66,9 @@ export function onAbortAck(msg: { id?: unknown; result?: unknown; voided?: unkno
   // 先回显再放行：放行之后停字那条会 record() 一条 cut、清掉「这一回合送到了哪些」，就查不到发送方了
   if (ids.length) void settleVoided(w.channelId, ids, w.at);
   if (!done) return; // 迟到的回执：只补回显
-  lastAbort.set(w.channelId, { result: msg.result === "aborted" ? "aborted" : "idle", inEditor: Number(msg.inEditor) || 0 });
-  done(msg.result === "aborted" ? "aborted" : "idle");
+  const result = ackResult(msg.result);
+  lastAbort.set(w.channelId, { result, inEditor: Number(msg.inEditor) || 0 });
+  done(result, result === "failed" ? String(msg.error ?? msg.result ?? "") : undefined);
 }
 
 /** 这个频道最近一次请 Pi 扩展中止的结果（停字抬头照实写：真停了 / 已请求没回执；inEditor = 作废的消息里几条被 Pi 退回了输入框） */
@@ -111,7 +116,7 @@ export function holdStopWait(env: Envelope, channelId: string, agent: string, wa
   };
 }
 
-/** 请 Pi 扩展中止当前回合：真中止了 / 没回执 = ["abort"]，本来就空闲 = []；没连着、扩展太旧不会中止 = 抛错（调用方如实回报，不说「已打断」） */
+/** 请 Pi 扩展中止当前回合：真中止了 / 没回执 = ["abort"]，本来就空闲 = []；没连着、扩展太旧、扩展回执说中止不了 = 抛错（调用方如实回报，不说「已打断」） */
 export async function extensionAbort(channelId: string): Promise<readonly string[]> {
   const ws = socketOf(channelId);
   if (!ws) throw new Error("Pi 会话没连着 bridge，中止请求发不过去");
@@ -119,8 +124,9 @@ export async function extensionAbort(channelId: string): Promise<readonly string
   const id = `abort_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
   const at = Date.now();
   abortedAt.set(channelId, at); // 发之前记：回执和 Stop 几毫秒内先后到
+  let why = "";
   const r = await new Promise<AbortResult>((resolve) => {
-    const w: Waiter = { channelId, at, done: resolve };
+    const w: Waiter = { channelId, at, done: (x, reason) => ((why = reason ?? ""), resolve(x)) };
     abortWaiters.set(id, w);
     setTimeout(() => {
       if (!w.done) return;
@@ -130,7 +136,8 @@ export async function extensionAbort(channelId: string): Promise<readonly string
     }, ABORT_ACK_MS);
     ws.send(JSON.stringify({ type: "abort", id }));
   });
-  if (r === "idle") abortedAt.delete(channelId);
+  if (r === "idle" || r === "failed") abortedAt.delete(channelId);
+  if (r === "failed") throw new Error(`Pi 扩展没能中止当前回合（${why || "未说明原因"}）`);
   if (r === "no_ack") lastAbort.set(channelId, { result: r, inEditor: 0 });
   return r === "idle" ? [] : ["abort"];
 }

@@ -10,6 +10,22 @@ const policy = parseSchedulerConfig({ enabled: true, projects: { p: { maxActiveW
 const row = { intentId: "i", taskId: "T1", prRef: "https://github.com/example/repo/pull/42", mergeSha: M } as MergeRun;
 
 describe("T68 real merge adapter command boundary", () => {
+  test("draft metadata is returned without querying absent or pending checks", async () => {
+    const calls: string[][] = [];
+    const command: typeof runBounded = async (argv) => {
+      calls.push(argv);
+      if (argv[1] === "repo") return { code: 0, stdout: '{"nameWithOwner":"example/repo"}', stderr: "", timedOut: false };
+      if (argv[2] === "view") return { code: 0, stderr: "", timedOut: false, stdout: JSON.stringify({
+        state: "OPEN", headRefOid: H, headRefName: "task/T1", baseRefName: "main", isDraft: true,
+        isCrossRepository: false, mergeStateStatus: "UNKNOWN", mergeCommit: null,
+      }) };
+      throw new Error("draft must not run gh pr checks");
+    };
+    const snapshot = await mergeExternal(policy, async () => ({ ok: true }), command).inspect(row.prRef);
+    expect(snapshot.draft).toBe(true);
+    expect(snapshot.checks).toEqual([]);
+    expect(calls).toHaveLength(2);
+  });
   test("GitHub merge uses the expected reviewed head as an atomic API precondition", async () => {
     const calls: string[][] = [];
     const command: typeof runBounded = async (argv) => {
@@ -25,7 +41,9 @@ describe("T68 real merge adapter command boundary", () => {
   test("deployment receipt must name the exact merge SHA", async () => {
     const command: typeof runBounded = async () => ({ code: 0, stdout: JSON.stringify({ ok: true, mergeSha: H, receipt: "release-1" }),
       stderr: "", timedOut: false });
-    const ops = mergeExternal(policy, async () => ({ ok: true }), command);
-    expect(await ops.deployed(row)).toBeNull();
+    const ops = mergeExternal(policy, async () => ({ ok: true }), command, {
+      submit: async () => "job", observe: async () => ({ status: "complete" }),
+    });
+    expect((await ops.deployed(row)).status).toBe("unknown");
   });
 });

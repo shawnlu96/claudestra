@@ -20,12 +20,14 @@ import {
 } from "../lib/update-inflight.js";
 import { maybeBuildWeb } from "./web-release.js";
 import { output } from "./core.js";
+import { acquireMaintenance, whileOwned } from "../lib/scheduler-maintenance.js";
 
 type Proc = { exited: Promise<number>; stdout: ReadableStream; stderr: ReadableStream };
 export interface UpdateDeps {
   git(...args: string[]): Promise<{ ok: boolean; out: string; err: string }>;
   spawnFailure(proc: Proc, tailLines?: number): Promise<string | null>;
   renderMasterClaude(): Promise<{ rendered: boolean; reason?: string }>;
+  assertActive?: () => void;
 }
 
 /** update.lock 互斥。锁文件里是持有者 pid——持有 pid 已死的锁（launcher 被 bootout 时连坐回收留下的）直接接管；
@@ -93,7 +95,8 @@ type TailOk = { ok: true; rendered: { rendered: boolean; reason?: string }; webB
 /** 切版本之后的尾段；m.step 逐步推进。依赖装不上 → 回退 + 不 reload */
 async function runTail(d: UpdateDeps, m: UpdateMarker): Promise<TailOk | { ok: false; payload: Record<string, unknown> }> {
   const install = await installAfterPull({
-    runInstall: () => d.spawnFailure(Bun.spawn([resolveBunPath(), "install"], { cwd: REPO_ROOT, stdout: "pipe", stderr: "pipe" }), 20),
+    runInstall: () => whileOwned(d.assertActive ?? (() => {}), () =>
+      d.spawnFailure(Bun.spawn([resolveBunPath(), "install"], { cwd: REPO_ROOT, stdout: "pipe", stderr: "pipe" }), 20)),
     depsChanged: async () => !(await d.git("diff", "--quiet", m.fromHead, m.target, "--", ...DEP_MANIFESTS)).ok,
     rollback: rollbackFor(d, m),
   });
@@ -112,13 +115,15 @@ async function runTail(d: UpdateDeps, m: UpdateMarker): Promise<TailOk | { ok: f
   const webBuild = await maybeBuildWeb();
   await setStep(m, "built");
   // 用 subprocess 跑新版的 migrate（当前进程跑的还是旧代码）
-  const migrateError = await d.spawnFailure(Bun.spawn([resolveBunPath(), "run", `${REPO_ROOT}/src/manager.ts`, "migrate"], { cwd: REPO_ROOT, stdout: "pipe", stderr: "pipe" }));
+  const migrateError = await whileOwned(d.assertActive ?? (() => {}), () => d.spawnFailure(Bun.spawn(
+    [resolveBunPath(), "run", `${REPO_ROOT}/src/manager.ts`, "migrate", "--pre-reload"], { cwd: REPO_ROOT, stdout: "pipe", stderr: "pipe" })));
   if (migrateError) console.error(`[update] ⚠️ migrate 失败（继续）: ${migrateError}`);
   await setStep(m, "migrated");
   // daemon reload 不动 tmux 里的 master：让它退出，launcher 用新 CLAUDE.md 重启
   await Bun.sleep(500);
+  d.assertActive?.();
   await tmuxRaw(["send-keys", "-t", `${MASTER_SESSION}:0`, "/exit", "Enter"]).catch((e) => console.error(`[update] 通知 master 退出失败: ${(e as Error).message}`));
-  const reload = await reloadDaemons(m);
+  const reload = await whileOwned(d.assertActive ?? (() => {}), () => reloadDaemons(m));
   return { ok: true, rendered, webBuild, migrateError, installWarning: install.warning, ...reload };
 }
 
@@ -258,6 +263,19 @@ async function cmdUpdateBeta(d: UpdateDeps): Promise<void> {
 
 /** release 通道：查最新 release → 切到 tag → 挂回分支 → 尾段。beta 通道与半截补完在前面分流 */
 export async function cmdUpdate(d: UpdateDeps): Promise<void> {
+  const lock = await acquireMaintenance("update", { ownIntent: process.env.CLAUDESTRA_DEPLOY_INTENT });
+  if (!lock) return output({ ok: false, error: "scheduler merge/deploy or another maintenance operation is in progress" });
+  const active = () => { if (!lock.held()) throw new Error("update lost maintenance lease"); };
+  const guarded: UpdateDeps = {
+    assertActive: active,
+    git: (...args) => whileOwned(active, () => d.git(...args)),
+    spawnFailure: (...args) => whileOwned(active, () => d.spawnFailure(...args)),
+    renderMasterClaude: () => whileOwned(active, () => d.renderMasterClaude()),
+  };
+  try { await updateWithMaintenance(guarded); } finally { lock.release(); }
+}
+
+async function updateWithMaintenance(d: UpdateDeps): Promise<void> {
   if (await resumeUpdate(d)) return;
   const { readConfig } = await import("../lib/config-store.js");
   if (((await readConfig()).autoUpdate.channel ?? "release") === "beta") return cmdUpdateBeta(d);

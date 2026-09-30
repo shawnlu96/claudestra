@@ -74,12 +74,16 @@ interface RuntimeAskInput {
   options: unknown[];
   /** Codex 额度用完：正文换成几点恢复，原文只留在 extra.raw（指纹仍按原文算） */
   quota?: true;
+  /** ACP 宿主的卡（bridge/acp-link.ts）：网页按 extra.acp 出按钮，点了走 POST /agents/:name/answer {kind:"acp"} */
+  acp?: true;
+  /** 卡的代际（ACP 的权限 / 额度卡，按钮 id 里也带着）：进指纹——题面相同的新请求是另一张卡，不沿用旧卡和它的按钮 */
+  instance?: string;
 }
 
 export async function openRuntimeAsk(r: RuntimeAskInput): Promise<void> {
   const key = rtKey(r.source, r.channelId);
   // AUQ 按下标作答：问题 / 选项 / 描述有一处不同就是另一个弹框，换卡（tests/ask-dismiss.test.ts）
-  const fp = runtimeFingerprint(r.source, r.agentName, r.title, r.source === "auq" ? auqIdentity(r.options) : r.context);
+  const fp = runtimeFingerprint(r.source, r.agentName, r.title, r.source === "auq" ? auqIdentity(r.options) : r.instance ? `${r.context}\n#${r.instance}` : r.context);
   const held = runtimeOpen.get(key);
   if (held?.fp === fp) return;
   if (held) settleRuntimeAsk(r.source, r.channelId); // 同一频道换成了另一个弹框：上一个结掉（记消失）再看这个
@@ -100,7 +104,7 @@ export async function openRuntimeAsk(r: RuntimeAskInput): Promise<void> {
     const a = openAsk(askDb(), {
       project: who.project, taskId: taskOf(who.name), fromAgent: who.name, fromChannelId: r.channelId, source: r.source, kind: r.kind, blocking: true,
       urgency: urgent ? "urgent" : "normal", title: r.title, context: r.quota ? codexQuotaText(expiresAt, now) : r.context, options: r.options, allowText: false,
-      chatId: r.channelId, expiresAt, extra: { ...parentExtra(who).extra, fp, ...(r.quota ? { quota: true, raw: r.context } : {}) },
+      chatId: r.channelId, expiresAt, extra: { ...parentExtra(who).extra, fp, ...(r.quota ? { quota: true, raw: r.context } : {}), ...(r.acp ? { acp: true } : {}) },
     }, now);
     publishAsk(a);
     // 建的途中弹框已经没了、或换成了另一个（占位被 settle 拿走）：立刻结案，别留一条永远开着的

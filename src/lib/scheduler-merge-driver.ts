@@ -1,5 +1,6 @@
 /** One bounded merge/deploy step per call. All external effects are preceded by a durable phase claim. */
 import type { MergeRun, MergePhase } from "./scheduler-merge.js";
+import { SchedulerStopped } from "./scheduler-maintenance.js";
 
 export interface PrSnapshot {
   state: "OPEN" | "MERGED" | "CLOSED";
@@ -17,9 +18,11 @@ export interface MergeExternal {
   updateBranch(pr: string): Promise<void>;
   merge(pr: string, expectedHead: string): Promise<string>;
   deploy(run: MergeRun): Promise<string>;
-  deployed(run: MergeRun): Promise<string | null>;
+  deployed(run: MergeRun): Promise<DeploymentObservation>;
   verifyLedger(run: MergeRun): Promise<string>;
 }
+type DeploymentObservation = { status: "running" } | { status: "deployed"; receipt: string } |
+  { status: "unknown" | "failed"; reason: string };
 export type MergeAdvance = (from: MergePhase, to: MergePhase, rev: number, receipt?: string, mergeSha?: string, newHead?: string) => Promise<MergeRun>;
 
 const sameHead = (run: MergeRun, pr: PrSnapshot): boolean => pr.head.toLowerCase() === run.reviewedHead.toLowerCase();
@@ -29,9 +32,11 @@ const green = (run: MergeRun, checks: PrSnapshot["checks"]): boolean =>
 const short = (s: string) => s.slice(0, 12);
 
 /** A changed head always returns to review; an unobserved merge/deploy is never retried. */
-export async function driveMerge(run: MergeRun, external: MergeExternal, advance: MergeAdvance): Promise<MergeRun> {
+export async function driveMerge(run: MergeRun, external: MergeExternal, advance: MergeAdvance,
+  assertActive: () => void = () => {}): Promise<MergeRun> {
   let current = run;
   const step = async (to: MergePhase, receipt?: string, mergeSha?: string, newHead?: string) => {
+    assertActive();
     current = await advance(current.phase, to, current.rev, receipt, mergeSha, newHead);
     return current;
   };
@@ -39,11 +44,13 @@ export async function driveMerge(run: MergeRun, external: MergeExternal, advance
   try {
     if (run.phase === "ready") {
       const pr = await external.inspect(run.prRef);
-      if (pr.state !== "OPEN" || pr.draft || pr.crossRepository || pr.base !== "main" || pr.branch !== run.expectedBranch || !sameHead(run, pr)) {
+      if (pr.state !== "OPEN" || pr.crossRepository || pr.base !== "main" || pr.branch !== run.expectedBranch || !sameHead(run, pr)) {
         return step("unknown", `PR 状态、base 或审查 head 已变：${pr.state}/${pr.base}/${short(pr.head)}`);
       }
+      if (pr.draft) return run;
       if (pr.mergeState === "BEHIND") {
         const claimed = await step("updating");
+        assertActive();
         await external.updateBranch(run.prRef);
         return claimed;
       }
@@ -53,8 +60,9 @@ export async function driveMerge(run: MergeRun, external: MergeExternal, advance
     }
     if (run.phase === "updating") {
       const pr = await external.inspect(run.prRef);
-      if (pr.state !== "OPEN" || pr.base !== "main" || pr.draft || pr.crossRepository || pr.branch !== run.expectedBranch) return step("unknown", "更新分支后 PR 状态、分支或 base 已变");
+      if (pr.state !== "OPEN" || pr.base !== "main" || pr.crossRepository || pr.branch !== run.expectedBranch) return step("unknown", "更新分支后 PR 状态、分支或 base 已变");
       if (!sameHead(run, pr)) return step("await_review", `update-branch 改了 head：${short(pr.head)}，旧审查失效`, undefined, pr.head);
+      if (pr.draft) return run;
       if (pr.mergeState === "BEHIND") return run; // GitHub 更新仍在进行，下一轮只读检查
       if (pr.mergeState === "UNKNOWN") return run;
       if (pr.mergeState !== "CLEAN") return step("unknown", `更新分支后 mergeState=${pr.mergeState}`);
@@ -62,6 +70,8 @@ export async function driveMerge(run: MergeRun, external: MergeExternal, advance
     }
     if (run.phase === "await_ci") {
       const pr = await external.inspect(run.prRef);
+      if (pr.draft && sameHead(run, pr) && pr.state === "OPEN" && !pr.crossRepository &&
+        pr.base === "main" && pr.branch === run.expectedBranch) return run;
       if (pr.mergeState === "UNKNOWN" && sameHead(run, pr) && pr.state === "OPEN" && !pr.draft && !pr.crossRepository &&
         pr.base === "main" && pr.branch === run.expectedBranch) return run;
       if (!sameHead(run, pr) || pr.state !== "OPEN" || pr.draft || pr.crossRepository || pr.base !== "main" || pr.branch !== run.expectedBranch || pr.mergeState !== "CLEAN") {
@@ -75,6 +85,7 @@ export async function driveMerge(run: MergeRun, external: MergeExternal, advance
         fresh.draft || fresh.crossRepository || fresh.mergeState !== "CLEAN" || !green(run, fresh.checks)) {
         return step("unknown", "合并前最后一次核对发现 PR/head/CI 已变");
       }
+      assertActive();
       const mergeSha = await external.merge(run.prRef, run.reviewedHead);
       if (!/^[a-f0-9]{40}$/i.test(mergeSha)) return step("unknown", "merge API 未确认完整合并 SHA");
       const merged = await external.inspect(run.prRef);
@@ -89,24 +100,27 @@ export async function driveMerge(run: MergeRun, external: MergeExternal, advance
         ? step("merged", `重启后核实 PR 已合并 ${short(pr.mergeSha)}`, pr.mergeSha)
         : step("unknown", "合并曾发出但未能核实结果，不重复 gh pr merge");
     }
-    if (run.phase === "merged") {
-      await step("deploying");
-      await external.deploy(run);
-      const receipt = await external.deployed(run);
-      return receipt ? step("deployed", receipt) : step("unknown", "部署调用后核证不到产物");
-    }
-    if (run.phase === "deploying") {
-      const receipt = await external.deployed(run);
-      return receipt ? step("deployed", receipt) : step("unknown", "部署曾发出但无法核实，不重复部署");
+    if (run.phase === "merged" || run.phase === "deploying") {
+      if (run.phase === "merged") {
+        await step("deploying");
+        assertActive();
+        await external.deploy(current);
+      }
+      const result = await external.deployed(current);
+      if (result.status === "running") return current;
+      return result.status === "deployed" ? step("deployed", result.receipt) : step("unknown", result.reason);
     }
     if (run.phase === "deployed") {
       await step("verifying");
+      assertActive();
       const receipt = await external.verifyLedger(run);
       return step("done", receipt);
     }
+    assertActive();
     const receipt = await external.verifyLedger(run);
     return step("done", receipt); // verify 只在适配器证明已有结果时返回；失败冻结而不重复部署
   } catch (e) {
+    if (e instanceof SchedulerStopped) throw e; // Shutdown or lost ownership leaves the journal for the new controller to reconcile.
     if (["unknown", "done"].includes(current.phase)) throw e;
     return step("unknown", `外部步骤失败：${(e as Error).message.slice(0, 450)}`);
   }

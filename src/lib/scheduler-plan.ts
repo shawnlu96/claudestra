@@ -3,6 +3,7 @@ import type { LedgerEvent, LedgerTask, Stage } from "./ledger-stages.js";
 import { resourceKey, resourcesOverlap, type AuthorFamily, type SchedulerIntent, type TaskWorkflow } from "./ledger-scheduler.js";
 import { currentReviewFacts, p1AnyStreak, p1FindingStreak, type ReviewFacts, type ReviewFinding } from "./scheduler-review.js";
 import { FLOW_TEMPLATES, nodeAt, type FlowNode } from "./scheduler-template.js";
+import { cardWorkerSlots } from "./scheduler-worker-slot.js";
 
 export interface WorkerRef {
   agent: string;
@@ -137,10 +138,15 @@ function dispatchWork(s: PlannerSnapshot, node: FlowNode): PlannerDecision {
   if (fix && "kind" in fix) return fix;
   const session = sessionGate(s, node, "author");
   if (session) return session;
-  if (s.workerCount >= s.maxWorkers || !s.freeWorkerSlot) return wait("capacity", "项目 worker 槽已满");
+  const ownedSlots = cardWorkerSlots(s.heldResources, s.task.id);
+  if (ownedSlots.length > 1 || (ownedSlots[0] && !ownedSlots[0].startsWith(`slot:${s.task.project}:`))) {
+    return escalate("worker_slot_invalid", "本卡 worker 槽不唯一或项目不符，交 PM 核对");
+  }
+  const slot = ownedSlots[0] ?? s.freeWorkerSlot;
+  if (!ownedSlots.length && (s.workerCount >= s.maxWorkers || !slot)) return wait("capacity", "项目 worker 槽已满");
   const files = fileResources(s);
   if (!files) return escalate("file_scope", "自动卡缺明确的文件范围 glob");
-  const resources = [taskResource(s), s.freeWorkerSlot, ...files].map(resourceKey);
+  const resources = [taskResource(s), slot as string, ...files].map(resourceKey);
   if (resources.includes(null)) return escalate("resource_name", "worker 槽或资源名不合法");
   const busy = resourceGate(s, resources as string[]);
   if (busy) return busy;

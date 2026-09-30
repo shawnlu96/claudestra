@@ -1,11 +1,11 @@
 /**
- * 撞额度菜单上一个键都不发（T24）：launcher 的自动确认（lib/tmux-helper.ts isAutoConfirmableModal）、打字前的画面检查
+ * 撞额度菜单上一个键都不发（T24）：launcher 的自动确认（lib/modal-confirm.ts isAutoConfirmableModal）、打字前的画面检查
  * （lib/wall-screen.ts）都认 lib/limit-menu.ts 的宽松菜单判定。样本 tests/fixtures/quota-wall/。
  */
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { isAutoConfirmableModal } from "../src/lib/tmux-helper.js";
+import { isAutoConfirmableModal } from "../src/lib/modal-confirm.js";
 import { menuTitleShown } from "../src/lib/limit-menu.js";
 import { matchLimitMenu, wallWaitKind } from "../src/lib/quota-wall-text.js";
 

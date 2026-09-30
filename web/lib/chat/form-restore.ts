@@ -69,9 +69,10 @@ export function restoreFormReply(text: string, messages: ChatMessage[], commit =
 
 /**
  * 他端实时推来的用户消息，与本端气泡、历史还原同一显示：本人的先剥 @ 委托指令行（外源不剥，见 mention-directive.ts），
- * 再把表单回投还原成可读行
+ * 再把表单回投还原成可读行。外源原文照显、不碰表单（T31，delta-clicks.ts liveUserText 同一道闸）
  */
 export function restoreUserText(text: string, messages: ChatMessage[], from?: string): string {
-  const own = from ? text : stripMentionDirective(text);
+  if (from) return text;
+  const own = stripMentionDirective(text);
   return restoreFormReply(own, messages) ?? own;
 }

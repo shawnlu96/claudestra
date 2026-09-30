@@ -9,6 +9,7 @@
  * Claude Code 失败时自己会发 StopFailure，不补。
  */
 import { subscribeEvents } from "./event-bus.js";
+import { isAcpChannel } from "./acp-state.js";
 import { readRegistryAgents } from "../lib/registry.js";
 
 /** 等 watcher 这一轮扫完再收尾：drain 时 ⛔ 那句还在文字队列里（1.5s 防抖之内），才推得到 caller */
@@ -27,7 +28,7 @@ export function startCodexTurnFailureWatch(postStopFailure: (channelId: string) 
         console.error("Codex 回合失败收尾：读 registry 失败，这次不补 StopFailure:", (e as Error).message);
         return [];
       });
-      if (agents.find((a) => a.channelId === evt.chatId)?.runtime !== "codex") return;
+      if (agents.find((a) => a.channelId === evt.chatId)?.runtime !== "codex" || isAcpChannel(evt.chatId)) return; // ACP 宿主自己报 StopFailure
       await new Promise((r) => setTimeout(r, SETTLE_MS));
       console.log(`⛔ Codex 回合以错误结束（不发 hook）→ 替 ${evt.agent} 补 StopFailure`);
       await postStopFailure(evt.chatId).catch((e) => console.error("Codex 回合失败收尾失败:", (e as Error).message));

@@ -31,7 +31,6 @@ import {
   MASTER_SESSION,
   AGENT_PREFIX,
   tmuxRaw,
-  tmuxSendEscape, noteProgramInput,
   tmuxRawStrict,
   sessionTarget,
   windowTarget,
@@ -70,7 +69,7 @@ import { ancestorPids, mayTakeOver, preflightProblems, recoverCommand, resumeOut
 import {
   allSources,
   claudeCodeAdapter,
-  controlFor,
+  controlFor, normalizeTransport,
   managedFor,
   requireManaged,
   type DiscoveredSession,
@@ -88,7 +87,7 @@ import { resolveBunPath } from "./lib/bun-path.js";
 import { REPO_ROOT, SRC_DIR } from "./lib/repo-root.js";
 import { resolveNpm } from "./lib/npm-path.js";
 import { projectsSlug } from "./lib/jsonl-cost.js";
-import { archiveSession, listArchivedSessions } from "./lib/session-archive.js";
+import { archiveAgentSession, listArchivedSessions } from "./lib/session-archive.js";
 import {
   readProjects,
   writeProjects,
@@ -103,8 +102,9 @@ import {
 import { isSandbox, refuseInSandbox, sandboxRootOf } from "./lib/sandbox.js";
 import { sandboxManagerRefusal } from "./lib/sandbox-env.js";
 import { assertResumable, assertSandboxSession } from "./lib/sandbox-sessions.js";
-import { loadRegistry, migrateWorkerToAgent, patchRegistryAgent, saveRegistry, normalizeName, assertValidNewAgent, assertCreatable, formatAge, output, outputSync, extractPermFlags, extractEffortFlag, extractModeFlag, extractModelFlag, extractBoolFlag, extractMultiFlag, extractStringFlag } from "./manager/core.js";
+import { loadRegistry, patchRegistryAgent, saveRegistry, normalizeName, assertValidNewAgent, formatAge, output, outputSync, extractPermFlags, extractEffortFlag, extractModeFlag, extractModelFlag, extractBoolFlag, extractMultiFlag, extractStringFlag } from "./manager/core.js";
 import { runProjectCommand } from "./manager/projects.js";
+import { runSendKeysCommand, SEND_KEYS_USAGE } from "./manager/send-keys.js";
 import { cmdCronAdd, cmdCronList, cmdCronEdit, cmdCronRemove, cmdCronToggle, cmdCronHistory } from "./manager/cron.js";
 import { cmdPermissions } from "./manager/permissions.js";
 import { cmdKill, cmdRemove } from "./manager/agent-kill.js"; // 按 registry 补完剩余步骤、重复跑幂等
@@ -167,7 +167,7 @@ async function isAgentIdle(name: string): Promise<boolean> {
   const bare = name.replace(/^agent-/, "");
   const reg = await loadRegistry();
   const info = reg.agents?.[name] ?? reg.agents?.[bare] ?? reg.agents?.[`agent-${bare}`];
-  if (controlFor(info?.runtime).idleSource === "hook") return true;
+  if (controlFor(info?.runtime, normalizeTransport((info as { transport?: string } | undefined)?.transport)).idleSource !== "pane") return true; // hook / acp 同理
   return isIdle(windowTarget(name));
 }
 
@@ -459,20 +459,14 @@ async function cmdCreate(
   model?: string,
   external?: boolean,
   projectFlag?: string,
-  runtimeFlag?: string,
+  runtimeFlag?: string, transportFlag?: string,
   piBaseFlag?: string,
   teamFlags: import("./manager/team.js").TeamFlags = {},
 ) {
-  dir = assertCreatable(name, dir, runtimeFlag); // 名字合法；沙箱 / 生产各自的目录闸与 runtime 闸（manager/core.ts）
-  // runtime 只决定「用哪个适配器」（启动命令 / 就绪判据 / registry 字段），
-  // 其余（频道 / 窗口 / project / registry 形状）各运行时完全一致。
-  let adapter: ManagedRuntimeAdapter;
-  try {
-    adapter = requireManaged(runtimeFlag);
-  } catch (e) {
-    output({ ok: false, error: (e as Error).message });
-    return;
-  }
+  const selected = await (await import("./manager/acp-lifecycle.js")).prepareCreateRuntime(name, dir, runtimeFlag, transportFlag);
+  if (!selected.ok) return output({ ok: false, error: selected.error });
+  dir = selected.dir;
+  const adapter = selected.adapter;
   if (piBaseFlag && piBaseFlag !== "minimal" && piBaseFlag !== "inherit") {
     output({ ok: false, error: `未知的 --pi-base: "${piBaseFlag}"。可用: inherit, minimal` });
     return;
@@ -635,6 +629,7 @@ async function cmdCreate(
     ...team,
     // 运行时字段由适配器给：Claude Code 返回 {}，老 agent 的 registry 逐字节不变
     ...adapter.registryFields(spec),
+    ...(selected.acpPending || selected.manualTmux ? { transport: "tmux" as const, ...(selected.acpPending ? { acpPending: true } : {}) } : {}),
   }, realOpsDeps, run);
   unguard();
   if (committed === "lost") { // 占位被别的进程当残留接手（本进程被挂起超过 10 分钟？）：只按本次自己的 id 收拾
@@ -653,6 +648,7 @@ async function cmdCreate(
     channelName,
     sessionId,
     ready,
+    transport: (adapter.registryFields(spec) as { transport?: string }).transport ?? "tmux",
     project: proj.id,
     ...(projRes.created ? { projectCreated: true } : {}),
     ...(begun.recovered ? { recoveredResidue: begun.recovered.steps } : {}), // 上次砍在半路的残留，这次先清掉了
@@ -740,7 +736,8 @@ async function cmdResume(
   forkSession = false,
   runtimeFlag?: string,
 ) {
-  const adapter = requireManaged(runtimeFlag);
+  const selected = await (await import("./manager/acp-lifecycle.js")).chooseResumeTransport(runtimeFlag, (await loadRegistry()).agents[normalizeName(name)]);
+  const adapter = requireManaged(runtimeFlag, selected.transport);
   const avail = await adapter.available();
   if (!avail.ok) throw new Error(`无法用 --runtime ${adapter.id} 收编会话：${avail.hint}`);
   // 会话 id 格式各家不同（Claude Code 是 UUID，Pi 收任意自造 id）
@@ -870,6 +867,7 @@ async function cmdResume(
         piEnv: normalizePiEnvProfile((await loadRegistry()).agents[tmuxName]?.piEnv), role: (await loadRegistry()).agents[tmuxName]?.role,
       },
     };
+    if (forkSession) spec = await (await import("./manager/acp-lifecycle.js")).prepareAcpFork(spec, adapter, selected.transport);
     const launched = await launchInWindow(tmuxName, adapter, spec, { cwd: resolvedDir });
     ready = launched.result.ready;
     baseline = launched.baseline;
@@ -885,9 +883,8 @@ async function cmdResume(
 
   // v2.5.4: 会话内补发 /model —— resume 是 --model 失效的重灾区（session 保留原模型）。
   if (adapter.control.modelEnforcement === "in-session") await enforceSessionModel(tmuxName, model);
-
-  // v2.7+ fork 模式：registry 必须记 fork 出的实际新 session id，不是源 id
-  let actualSessionId = sessionId;
+  // ACP fork 已在启动前拿到新 id；tmux fork 仍需窗口探测。
+  let actualSessionId = spec.sessionId;
   if (forkSession && adapter.discoverSessionId) {
     const found = await adapter
       .discoverSessionId({ windowName: tmuxName, cwd: resolvedDir, exclude: sessionId, baseline })
@@ -905,7 +902,7 @@ async function cmdResume(
   // v2.8+ 同名 agent 换 session：旧 session 退役先归档快照
   const prior = reg.agents[tmuxName];
   if (prior?.sessionId && prior.sessionId !== actualSessionId) {
-    await archiveSession(tmuxName, prior.cwd, prior.sessionId).catch(() => {});
+    await archiveAgentSession(tmuxName, prior).catch(() => {});
   }
   reg.agents[tmuxName] = {
     project: dir || resolvedDir.replace(process.env.HOME || "", "~"),
@@ -925,6 +922,7 @@ async function cmdResume(
     ...(model ? { model } : {}),
     // resume 不提供档案编辑，但**不能把已有的档案弄丢**（丢了下次 restart 就变回继承全局）
     ...adapter.registryFields({ ...spec, extras: { piEnv: prior?.piEnv } }),
+    ...(selected.acpPending ? { transport: "tmux" as const, acpPending: true } : {}),
     ...(await import("./manager/team.js")).keepOnResume(prior, actualSessionId), // 派发关系 / 显示名；external 只在同一会话时保留
   };
   await saveRegistry(reg); if (!prior) (await import("./lib/agent-settings.js")).releaseNameForFreshAgent(tmuxName, reg.agents); // 新名字 = 全新 agent，旧设置此时才清
@@ -1129,7 +1127,7 @@ async function cmdAdopt(name: string, sessionId: string) {
   const oldId = info.sessionId;
   // v2.8+ 被替换的旧 session 先归档快照
   if (oldId && oldId !== sessionId) {
-    await archiveSession(tmuxName, info.cwd, oldId).catch(() => {});
+    await archiveAgentSession(tmuxName, info, oldId).catch(() => {});
   }
   info.sessionId = sessionId;
   info.notes = `claude session: ${sessionId} (adopted${oldId ? `, was ${oldId.slice(0, 8)}` : ""})`;
@@ -1276,7 +1274,7 @@ async function cmdRestart(name?: string, opts: { includeMaster?: boolean } = {})
       continue;
     }
     // 运行时由 registry 决定；只读来源 / 认不出的 runtime 不能由我们拉起
-    const adapter = managedFor(info.runtime);
+    let adapter = await (await import("./manager/acp-lifecycle.js")).managedForRestart(tmuxName, info as { runtime?: string; transport?: string });
     if (!adapter) {
       results.push({ name: tmuxName, ok: false, error: `runtime "${info.runtime}" 不能由 Claudestra 启动` });
       continue;
@@ -1294,7 +1292,8 @@ async function cmdRestart(name?: string, opts: { includeMaster?: boolean } = {})
       recreated = true;
     } else if (dupIds.length === 1) {
       // 正常一份 —— 优雅退出，失败 by-id kill 这一份再 new
-      const exited = await gracefulExit(tmuxName, adapter);
+      const priorTransport = (info as { acpRestartFrom?: string; transport?: string }).acpRestartFrom ?? (info as { transport?: string }).transport;
+      const exited = await gracefulExit(tmuxName, managedFor(info.runtime, priorTransport) ?? adapter);
       if (!exited) {
         // v2.21.1+ 死锁进程按键杀不动(peer 2026-08-30 真实救援):kill-window 的
         // SIGHUP 它也可能无视,孤儿继续占着 session → 新实例必「启动超时」且错因
@@ -1365,7 +1364,8 @@ async function cmdRestart(name?: string, opts: { includeMaster?: boolean } = {})
     };
 
     let started = (await launchInWindow(tmuxName, adapter, spec, { waitShell: true })).result;
-
+    ({ adapter, started } = await (await import("./manager/acp-lifecycle.js")).recoverFailedAcpLaunch(tmuxName, info as any, adapter, started,
+      (a) => launchInWindow(tmuxName, a, spec, { waitShell: true }).then((r) => r.result)));
     // v2.7+ 自愈：会话被占用（CC 的 bg agent）→ fork 一份副本重试，就绪后探测
     // 新 session id 回写 registry（否则 watcher / 下次 restart 又会盯回被占用的旧 id）。
     if (!started.ready && started.reason === "occupied") {
@@ -1382,7 +1382,7 @@ async function cmdRestart(name?: string, opts: { includeMaster?: boolean } = {})
         const newId = found?.sessionId;
         if (newId) {
           // v2.8+ fork 换代：旧 session 从 registry 退役，先归档快照
-          await archiveSession(tmuxName, cwd, info.sessionId).catch(() => {});
+          await archiveAgentSession(tmuxName, { ...info, cwd }).catch(() => {});
           const notes = `${adapter.noteTag} session: ${newId} (forked from ${info.sessionId.slice(0, 8)})`;
           Object.assign(reg.agents[tmuxName], { sessionId: newId, notes });
           await patchRegistryAgent(tmuxName, (a) => Object.assign(a, { sessionId: newId, notes })); // 只改这一条，不整份写回开头的快照
@@ -1449,7 +1449,6 @@ async function cmdRestart(name?: string, opts: { includeMaster?: boolean } = {})
       unlockRestart(tmuxName); // 无论成败/异常都释锁，别把 agent 永久锁死
     }
   }
-
 
   // 重启后做一次完整 skill 重扫（每个 agent cwd 可能项目级 skill 有变动）
   await triggerSkillsRescan("full");
@@ -2095,21 +2094,13 @@ async function cmdTmuxScreenshot(name: string) {
   output({ ok: true, agent: tmuxName, path: pngPath });
 }
 
-async function cmdTmuxSendKeys(name: string, keys: string[]) {
+async function cmdTmuxSendKeys(name: string, args: string[]) {
   const tmuxName = normalizeName(name);
   if (!(await windowExists(tmuxName))) {
     output({ ok: false, error: `${tmuxName} 不存在` });
     return;
   }
-  // keys 可以是 "Enter" "Escape" "Left" "C-c" 或普通字符串（用 -l 字面模式）
-  for (const k of keys) {
-    const special = /^(Enter|Escape|Esc|Left|Right|Up|Down|Tab|BTab|BSpace|C-[a-z]|M-[a-z]|Space)$/i.test(k);
-    const args = special ? ["send-keys", "-t", windowTarget(tmuxName), k] : ["send-keys", "-t", windowTarget(tmuxName), "-l", "--", k];
-    if (!/^(Escape|Esc)$/i.test(k)) await noteProgramInput(windowTarget(tmuxName), special ? "" : k); // bridge 别把程序敲的字 / C-c 当成 owner
-    await (/^(Escape|Esc)$/i.test(k) ? tmuxSendEscape(windowTarget(tmuxName), { strict: true }) : tmuxRaw(args)); // Esc 走双击护栏（跨进程也算），没发出去就报错
-    await Bun.sleep(50);
-  }
-  output({ ok: true, agent: tmuxName, keys });
+  output({ agent: tmuxName, ...(await runSendKeysCommand(tmuxName, args)) }); // keys 可以是 "Enter" "Escape" "Left" "C-c" 或普通字符串；画面闸见 manager/send-keys.ts
 }
 
 async function cmdTmuxCapture(name: string, lines: number) {
@@ -2353,7 +2344,7 @@ switch (cmd) {
   case "create": {
     const c = (await import("./manager/create-args.js")).parseCreateArgs(args); // --purpose 最先抽，自由文本不会被当成 flag
     if ("error" in c) output({ ok: false, error: c.error });
-    else await cmdCreate(c.name, c.dir, c.purpose, c.perms, c.effort, c.mode, c.model, c.external, c.projectFlag, c.runtimeFlag, c.piBaseFlag, c.teamFlags);
+    else await cmdCreate(c.name, c.dir, c.purpose, c.perms, c.effort, c.mode, c.model, c.external, c.projectFlag, c.runtimeFlag, c.transportFlag, c.piBaseFlag, c.teamFlags);
     break;
   }
 
@@ -2363,6 +2354,7 @@ switch (cmd) {
     break;
   case "project-migrate": await cmdProjectMigrate(); break;
   case "external": await (await import("./manager/agent-external.js")).cmdAgentExternal(args[0] || "", args[1] || ""); break;
+  case "transport": case "acp-install": await (await import("./manager/acp-lifecycle.js")).cmdAcp(cmd, args); break; // T60 ACP：切 transport / 装适配器
 
   // v2.6.0+ HTTP API token 管理（多前端架构 Phase B）
   case "token-add": {
@@ -2447,7 +2439,7 @@ switch (cmd) {
       output({ ok: false, error: `${tmuxName} 不在 registry 或无 sessionId` });
       break;
     }
-    const r = await archiveSession(tmuxName, info.cwd, info.sessionId);
+    const r = await archiveAgentSession(tmuxName, info);
     const all = await listArchivedSessions(tmuxName);
     output({ ok: r.ok, note: r.note, archived: r.archived, sessions: all });
     break;
@@ -2457,31 +2449,7 @@ switch (cmd) {
   // 供 bridge 的 clear 端点用：TUI 里 /clear 会轮转 sessionId，registry 若不跟着
   // 换，jsonl-watcher 会盯死文件。registry 写入必须经 manager（唯一写者不变式）。
   case "set-session": {
-    const [name, newSid] = args;
-    if (!name || !newSid) {
-      output({ ok: false, error: "usage: set-session <name> <sessionId>" });
-      break;
-    }
-    if (!/^[0-9a-f-]{8,64}$/i.test(newSid)) {
-      output({ ok: false, error: `sessionId 形状非法: ${newSid}` });
-      break;
-    }
-    assertSandboxSession(newSid); // 沙箱：新会话必须属于沙箱根（否则 set-session + restart 就续到了生产会话）
-    const tmuxName = normalizeName(name);
-    const reg = await loadRegistry();
-    const info = reg.agents[tmuxName];
-    if (!info) {
-      output({ ok: false, error: `${tmuxName} 不在 registry` });
-      break;
-    }
-    const oldSid = info.sessionId || null;
-    // 旧会话退役 → 归档快照（对齐 kill/fork 轮转的退役语义）
-    if (oldSid && oldSid !== newSid) {
-      await archiveSession(tmuxName, info.cwd, oldSid).catch(() => {});
-    }
-    info.sessionId = newSid;
-    await saveRegistry(reg);
-    output({ ok: true, name: tmuxName, sessionId: newSid, previousSessionId: oldSid });
+    output(await (await import("./manager/set-session.js")).cmdSetSession(args));
     break;
   }
 
@@ -2778,7 +2746,7 @@ switch (cmd) {
 
   case "tmux-send-keys": {
     const [name, ...rest] = args;
-    if (!name || rest.length === 0) { output({ ok: false, error: "usage: tmux-send-keys <agent> <keys...>" }); break; }
+    if (!name || !rest.length) { output({ ok: false, error: SEND_KEYS_USAGE }); break; }
     await cmdTmuxSendKeys(name, rest);
     break;
   }
@@ -2799,7 +2767,7 @@ switch (cmd) {
     break;
   }
 
-  case "migrate": output({ ok: true, ...(await migrateWorkerToAgent()) }); break;
+  case "migrate": await (await import("./manager/acp-migration.js")).cmdMigrate(args[0]); break;
   case "migrate-web-state": await (await import("./manager/migrate-web-state.js")).cmdMigrateWebState(); break; // 旧 Next BFF 的 settings.db / config.json → bridge（先 tar 备份，幂等）
   case "web-release": await cmdWebRelease(args); break; // 网页版本发布 / 回滚（lib/web-releases.ts）
   case "retire-web": await (await import("./manager/retire-web.js")).cmdRetireWeb(); break; // 卸旧 com.claudestra.web（前端已由 bridge 托管；先验新模式 + 有备份才动手）
@@ -2951,7 +2919,7 @@ switch (cmd) {
         "relay-status                    — show the relay connection (address, fingerprint, contacts online)",
         "metrics [--today|--week|--since <ISO>] [--agent <n>] [--raw]  — summarise the bridge event log",
         "tmux-screenshot <agent>         — screenshot an agent's tmux window (returns a PNG path)",
-        "tmux-send-keys <agent> <keys...>  — send keys/text to an agent (Enter/Escape/Left/C-c …)",
+        "tmux-send-keys <agent> [--force] <keys...>  — send keys/text (refused on limit menu / countdown / permission / AUQ / unreadable pane; --force audits)",
         "tmux-capture <agent> [lines]    — read the last N lines of an agent's pane",
         "fleet state | fleet <lp-on|lp-off|compact|save-compact|lp-compact> --agents a,b|--project p|--all [--walled] [--ctx-over N] [--dry-run]  — batch ops via the bridge",
         "tmux-wait-idle <agent> [ms]     — block until the agent is idle again (default 30s)",

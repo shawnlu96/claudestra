@@ -17,9 +17,9 @@ export function desktopLabels(env: Record<string, string | undefined> = process.
   const raw = env[LABELS_ENV];
   if (raw === undefined) return DAEMONS.map((d) => d.label);
   const labels = raw.split(",").map((s) => s.trim()).filter(Boolean);
-  if (!labels.length) throw new Error(`${LABELS_ENV} 设了但是空的；不用覆盖就别设它`);
+  if (!labels.length) throw new Error(`${LABELS_ENV} is set but empty; unset it unless you mean to override`);
   const bad = labels.filter((l) => !LABEL_RE.test(l) || /^com\.apple\./i.test(l));
-  if (bad.length) throw new Error(`${LABELS_ENV} 里有不合法的 label：${bad.join(", ")}`);
+  if (bad.length) throw new Error(`${LABELS_ENV} has invalid labels: ${bad.join(", ")}`);
   return labels;
 }
 

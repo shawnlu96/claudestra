@@ -179,13 +179,13 @@ export function normalizeName(raw: string): string {
  * 生产里目录不许在沙箱根下（lib/sandbox.ts）。返回调用方后面该用的目录——沙箱里是规范化后的那个
  * （检查的与 tmux -c 实际收到的必须是同一个串），生产里原样返回。
  */
-export function assertCreatable(name: string, dir: string, runtime: string | undefined): string {
+export function assertCreatable(name: string, dir: string, runtime: string | undefined, transport?: string): string {
   assertValidNewAgent(name);
   const d = normalizeSandboxAgentDir(dir);
   const dirProblem = sandboxAgentDirProblem(d);
   if (dirProblem) throw new Error(dirProblem);
   refuseSandboxDirInProduction(d, "建 agent");
-  assertSandboxRuntime(runtime || "claude-code");
+  assertSandboxRuntime(runtime || "claude-code", process.env, transport);
   return d;
 }
 

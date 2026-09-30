@@ -433,3 +433,47 @@ describe("Workflow 复核 wf2（@2968ec7f）", () => {
     expect(b.interruptHold("ch")).toBeNull();
   });
 });
+
+describe("Autopilot 到点收尾（wf2 stop-semantics-7）", () => {
+  test("带 dropIfStopped 的：ws.send 前那一查，叫停中不投、解除了照投（T13e r2 P2）", () => {
+    const { b, tick } = book();
+    const wrap = { ...env("w1", "Autopilot 已关闭"), from: { kind: "bridge", label: "mission" } } as Envelope;
+    wrap.meta.dropIfStopped = true;
+    expect(b.noticeWanted(wrap)).toBe(true);
+    b.record({ channelId: "ch", agent: "a", cause: "manual", tools: { inflight: [] } });
+    expect(b.noticeWanted(wrap)).toBe(false);
+    tick(1_000);
+    b.noteHuman("ch", false);
+    expect(b.noticeWanted(wrap)).toBe(true);
+  });
+});
+
+describe("叫停中止引起的 Stop（wf2 pi-4）", () => {
+  test("不清「这一回合送到了哪些」：随后记的停仍列出停之前 steer 进去的", () => {
+    const { b, tick } = book();
+    b.noteDelivered(env("m1", "部署 X"), "ch");
+    b.noteDelivered(env("m2", "顺便把 Y 也部署了"), "ch");
+    tick(1_000);
+    expect(b.onStop("ch", "Stop", "a", true)).toBeNull();
+    tick(1_200);
+    const cut = b.record({ channelId: "ch", agent: "a", runtime: "pi", cause: "stopword", byMessageId: "m3", tools: { inflight: [] } });
+    expect(cut.turnTrigger?.messageId).toBe("m1");
+    expect(stopHeadline(cut, "fired")).toContain("顺便把 Y 也部署了");
+  });
+  test("对照：正常 Stop 清掉，下一回合从头记", () => {
+    const { b } = book();
+    b.noteDelivered(env("m1", "部署 X"), "ch");
+    b.onStop("ch", "Stop", "a");
+    expect(b.record({ channelId: "ch", agent: "a", cause: "stopword", tools: { inflight: [] } }).turnTrigger).toBeUndefined();
+  });
+  test("插话回合被叫停中止：不按做完提醒续做", () => {
+    const { b, tick } = book();
+    b.noteDelivered(env("m1", "合并 T3"), "ch");
+    preempt(b, "m2");
+    tick(1_200);
+    b.noteDelivered(env("m2", "x"), "ch");
+    tick(5_000);
+    expect(b.onStop("ch", "Stop", "a", true)).toBeNull();
+    expect(b.onStop("ch", "Stop", "a")).not.toBeNull(); // 真正做完的那次照常提醒
+  });
+});

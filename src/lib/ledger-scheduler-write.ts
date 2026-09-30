@@ -10,6 +10,7 @@ import {
 import { getEventByDedup, getMeta, LedgerError, listDeps, listEvents, listTasks } from "./ledger-store.js";
 import { insertEvent, tx } from "./ledger-tx.js";
 import { releaseFinishedCardLeases } from "./ledger-scheduler-lease.js";
+import { cardWorkerSlots } from "./scheduler-worker-slot.js";
 import { currentReviewFacts } from "./scheduler-review.js";
 import { bindHash, checkAsk } from "./ask-bind.js";
 import { getAsk } from "./ledger-asks.js";
@@ -181,6 +182,8 @@ export function planIntent(db: Database, ctx: WriteCtx, input: PlanIntentInput):
       .get(task.id) as { id: string } | null;
     if (live) throw new LedgerError("conflict", `任务已有未结调度意图 ${live.id}`);
     const held = db.query("SELECT resource, taskId FROM scheduler_resources WHERE project = ?").all(task.project) as { resource: string; taskId: string }[];
+    const slots = new Set([...cardWorkerSlots(held, task.id), ...resources.filter((r) => r?.startsWith("slot:"))]);
+    if (slots.size > 1) throw new LedgerError("conflict", "一张卡最多持有一个 worker 槽；后续派单须沿用已持有的槽");
     for (const resource of resources) {
       const used = held.find((row) => row.taskId !== task.id && resourcesOverlap(resource as string, row.resource));
       if (used) throw new LedgerError("conflict", `资源 ${resource} 与 ${used.resource} 重叠（${used.taskId} 占用）`);

@@ -34,6 +34,20 @@ function fakePi(opts: { tui: boolean; editor?: string }) {
 const msg = (text: string) => ({ role: "user", content: [{ type: "text", text }] });
 
 describe("Pi：停之前 steer 进去、还没执行的消息作废", () => {
+  test("pi-8：这个 Pi 的上下文没有 abort()：回 unsupported，不回「已中止」，也不作废消息", () => {
+    const c = createAbortControl(() => 0);
+    const ctx: AbortableCtx = { isIdle: () => false, hasPendingMessages: () => true };
+    c.onRunStart(ctx);
+    c.onBridgeMessage({ text: "部署 Y", messageId: "m2" }, true);
+    expect(c.abort()).toEqual({ result: "unsupported", voided: [], inEditor: 0 });
+    expect(c.onBridgeMessage({ text: "下一条", messageId: "m3" }, true)).toBe(false); // 没进入「叫停中」
+  });
+  test("pi-8：abort() 抛错原样抛给扩展（扩展回 error，bridge 报失败）", () => {
+    const c = createAbortControl(() => 0);
+    c.onRunStart({ isIdle: () => false, abort: () => { throw new Error("stale ctx"); } });
+    expect(() => c.abort()).toThrow("stale ctx");
+  });
+
   test("TUI：回执列出作废的那条、报它被退回了输入框；输入框不动（人在终端里打了一半的字也在）", () => {
     let t = 0;
     const c = createAbortControl(() => t);
@@ -180,6 +194,15 @@ describe("bridge 侧（Workflow 复核 wf2）", () => {
     expect(await p).toEqual([]);
     expect(stopAfterAbort("pi")).toBe(false);
     expect(stopAfterAbort("pi", Date.now() + 1)).toBe(false);
+  });
+
+  test("pi-8：扩展回执说中止不了（没有 ctx.abort / abort 抛错）→ 抛错如实报失败，不当成「本来就空闲」", async () => {
+    for (const ack of [{ result: "unsupported" }, { result: "error", error: "This extension ctx is stale" }]) {
+      const p = extensionAbort("pi");
+      onAbortAck({ id: lastId(), ...ack }, sock);
+      await expect(p).rejects.toThrow(/没能中止/);
+      expect(stopAfterAbort("pi")).toBe(false); // 没中止，之后那次 Stop 照常处理
+    }
   });
 
   test("pi-7：回执晚于 1.5 秒才到，作废的消息照样回显给发送方", async () => {

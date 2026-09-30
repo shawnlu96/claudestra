@@ -35,17 +35,24 @@ export interface RpcWire {
 type Handler = (params: any) => unknown;
 
 export interface RpcPeer {
-  request<T = any>(method: string, params?: unknown, opts?: { timeoutMs?: number }): Promise<T>;
+  /**
+   * onResult：成功回包到达时**同步**调用，在处理下一行之前。宿主靠它在 steer 回包那一刻就登记等待——之后的线程状态行
+   * 一定晚于它被处理，不会「先完成、后挂监听」（promise 的 then 要等微任务，下一行可能已经处理完了）。
+   */
+  request<T = any>(method: string, params?: unknown, opts?: { timeoutMs?: number; onResult?: (result: T) => void }): Promise<T>;
   notify(method: string, params?: unknown): void;
   /** 对端发来的请求（要回结果）。处理器抛 RpcError 原样回，抛别的回 -32603 */
   onRequest(method: string, h: Handler): void;
   /** 对端发来的通知（不回）。同名只留最后一个 */
   onNotification(method: string, h: Handler): void;
   readonly closed: boolean;
+  /** 连接作废（对端退出 / 超长行）之后调，在途请求已经全部 reject。线路只有一个 onClose 槽，别人要听断开都走这里 */
+  onClosed(cb: (why: string) => void): void;
 }
 
 interface Pending {
   resolve: (v: any) => void;
+  onResult?: (v: any) => void;
   reject: (e: Error) => void;
   timer?: ReturnType<typeof setTimeout>;
 }
@@ -131,6 +138,23 @@ function rejectAll(pending: Map<number, Pending>, why: string): void {
   pending.clear();
 }
 
+/** 一条响应 → 对应的在途请求：不合规的让它失败，错误变 RpcError，成功先同步调 onResult 再交结果 */
+function settleResponse(pending: Map<number, Pending>, m: Record<string, any>, log: (msg: string) => void): void {
+  const p = typeof m.id === "number" ? pending.get(m.id) : undefined;
+  if (!p) return log(`acp rpc: 收到没人等的响应 id=${JSON.stringify(m.id)}（超时后才到，或不是我们发的 id）`);
+  pending.delete(m.id);
+  if (p.timer) clearTimeout(p.timer);
+  const problem = responseProblem(m);
+  if (problem) return p.reject(new Error(`acp 对端回了不合规的响应（${problem}）`));
+  if ("error" in m) return p.reject(new RpcError(m.error.code, m.error.message, m.error.data));
+  try {
+    p.onResult?.(m.result);
+  } catch (e) {
+    log(`acp rpc: 回包同步钩子出错：${e}`); // 钩子坏了不能连带把这个请求挂死：结果照常交出去
+  }
+  p.resolve(m.result);
+}
+
 /** 处理器抛的错 → 回给对端的 error 对象 */
 function errorBody(e: unknown): { code: number; message: string; data?: unknown } {
   const err = e instanceof RpcError ? e : new RpcError(INTERNAL_ERROR, e instanceof Error ? e.message : String(e));
@@ -148,10 +172,12 @@ export function createRpcPeer(wire: RpcWire, opts: { log?: (msg: string) => void
     if (!closed) wire.write(JSON.stringify({ jsonrpc: "2.0", ...msg }) + "\n");
   };
 
+  const closedListeners: ((why: string) => void)[] = [];
   const shutdown = (why: string) => {
     if (closed) return;
     closed = true;
     rejectAll(pending, why);
+    for (const cb of closedListeners) cb(why);
   };
 
   const answer = async (id: string | number, method: string, params: unknown) => {
@@ -164,16 +190,7 @@ export function createRpcPeer(wire: RpcWire, opts: { log?: (msg: string) => void
     }
   };
 
-  const settle = (m: Record<string, any>) => {
-    const p = typeof m.id === "number" ? pending.get(m.id) : undefined;
-    if (!p) return log(`acp rpc: 收到没人等的响应 id=${JSON.stringify(m.id)}（超时后才到，或不是我们发的 id）`);
-    pending.delete(m.id);
-    if (p.timer) clearTimeout(p.timer);
-    const problem = responseProblem(m);
-    if (problem) return p.reject(new Error(`acp 对端回了不合规的响应（${problem}）`));
-    if ("error" in m) p.reject(new RpcError(m.error.code, m.error.message, m.error.data));
-    else p.resolve(m.result);
-  };
+  const settle = (m: Record<string, any>) => settleResponse(pending, m, log);
 
   const notified = (method: string, params: unknown) => {
     const h = notifications.get(method);
@@ -204,6 +221,9 @@ export function createRpcPeer(wire: RpcWire, opts: { log?: (msg: string) => void
   wire.onClose(shutdown);
 
   return {
+    onClosed(cb) {
+      closedListeners.push(cb);
+    },
     get closed() {
       return closed;
     },
@@ -211,7 +231,7 @@ export function createRpcPeer(wire: RpcWire, opts: { log?: (msg: string) => void
       if (closed) return Promise.reject(new Error(`acp 连接已断，${method} 发不出去`));
       const id = nextId++;
       return new Promise((resolve, reject) => {
-        const p: Pending = { resolve, reject };
+        const p: Pending = { resolve, reject, onResult: ropts?.onResult };
         if (ropts?.timeoutMs) {
           p.timer = setTimeout(() => {
             pending.delete(id);

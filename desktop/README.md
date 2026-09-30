@@ -59,6 +59,8 @@ cargo test                                     # 纯函数
 CLAUDESTRA_DESKTOP_REPO=… CLAUDESTRA_DESKTOP_LABELS=<假 label> cargo test -- --ignored   # 真跑一次 restart
 ```
 
+CI（`.github/workflows/ci.yml` 的 desktop 作业，macOS runner）每次都会跑 `bun run typecheck`、`build:ui` 和 `cargo test --locked`；`--ignored` 那条要真的 kickstart，只在本机手动跑。
+
 未签名的包拷到别的 Mac 上，会被 Gatekeeper 拦下（提示「无法验证开发者」）。团队内部试用时，右键 →「打开」，或者跑 `xattr -dr com.apple.quarantine Claudestra.app`。
 
 ## 签名和公证（只能在 owner 的 MacBook 上做）

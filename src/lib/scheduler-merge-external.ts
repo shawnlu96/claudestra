@@ -3,6 +3,7 @@ import { runBounded } from "./run-bounded.js";
 import type { SchedulerConfig } from "./scheduler-config.js";
 import type { MergeExternal, PrSnapshot } from "./scheduler-merge-driver.js";
 import type { MergeRun } from "./scheduler-merge.js";
+import { deploymentJobs, type DeployJobs } from "./scheduler-deploy-job.js";
 
 type ProjectSchedule = SchedulerConfig["projects"][string];
 type ManagerCall = (...args: string[]) => Promise<Record<string, unknown>>;
@@ -19,7 +20,8 @@ const parsed = (s: string, label: string): Record<string, unknown> => {
 };
 
 /** External data is bounded and checked before it can become a durable receipt. */
-export function mergeExternal(project: ProjectSchedule, manager: ManagerCall, command: typeof runBounded = runBounded): MergeExternal {
+export function mergeExternal(project: ProjectSchedule, manager: ManagerCall, command: typeof runBounded = runBounded,
+  jobs: DeployJobs = deploymentJobs()): MergeExternal {
   const cwd = project.deploy.cwd;
   const run = async (argv: string[], envExtra: Record<string, string> = {}, timeoutMs = 120_000) => {
     const r = await command(argv, { cwd, env: { ...process.env, DISCORD_CHANNEL_ID: "", CLAUDESTRA_SCHEDULER_SERVICE: "", GIT_TERMINAL_PROMPT: "0", ...envExtra }, timeoutMs });
@@ -40,7 +42,7 @@ export function mergeExternal(project: ProjectSchedule, manager: ManagerCall, co
       const state = String(raw.state);
       if (!["OPEN", "MERGED", "CLOSED"].includes(state) || typeof raw.headRefOid !== "string") throw new Error("PR 状态或 head 无效");
       let checks: PrSnapshot["checks"] = [];
-      if (state === "OPEN") {
+      if (state === "OPEN" && raw.isDraft !== true) {
         const checkRun = await command(["gh", "pr", "checks", prRef, "--json", "bucket,name"],
           { cwd, env: { ...process.env, DISCORD_CHANNEL_ID: "", CLAUDESTRA_SCHEDULER_SERVICE: "", GIT_TERMINAL_PROMPT: "0" }, timeoutMs: 30_000 });
         if (checkRun.timedOut || !checkRun.stdout.trim()) throw new Error(`gh pr checks 无结果：${oneLine(checkRun.stderr)}`);
@@ -68,12 +70,16 @@ export function mergeExternal(project: ProjectSchedule, manager: ManagerCall, co
       }
       return result.sha;
     },
-    async deploy(row) { await run(project.deploy.argv, envFor(row), project.deploy.timeoutMs ?? 20 * 60_000); return "deploy command exited 0"; },
+    async deploy(row) { return jobs.submit(row, project.deploy); },
     async deployed(row) {
+      const job = await jobs.observe(row);
+      if (job.status !== "complete") return job;
       const result = parsed(await run(project.deploy.verifyArgv, envFor(row)), "deploy verify");
       if (result.ok !== true || result.mergeSha !== row.mergeSha || typeof result.receipt !== "string" ||
-        result.receipt.length < 1 || result.receipt.length > 500 || /[\p{Cc}\p{Cf}]/u.test(result.receipt)) return null;
-      return result.receipt;
+        result.receipt.length < 1 || result.receipt.length > 500 || /[\p{Cc}\p{Cf}]/u.test(result.receipt)) {
+        return { status: "unknown", reason: "deployment receipt does not verify the exact merge SHA" };
+      }
+      return { status: "deployed", receipt: result.receipt };
     },
     async verifyLedger(row) {
       const r = await manager("ledger", "verify", row.taskId, "--dedup", `scheduler:${row.intentId}:verify`);

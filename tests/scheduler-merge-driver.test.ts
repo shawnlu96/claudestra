@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { driveMerge, type MergeExternal, type PrSnapshot } from "../src/lib/scheduler-merge-driver.js";
 import type { MergeRun } from "../src/lib/scheduler-merge.js";
+import { SchedulerStopped } from "../src/lib/scheduler-maintenance.js";
 
 const H = "a".repeat(40), M = "b".repeat(40);
 const base: MergeRun = { intentId: "i", taskId: "T1", project: "p", prRef: "https://github.com/a/b/pull/1",
@@ -17,7 +18,7 @@ function fixture(initial = base) {
     updateBranch: async () => { calls.push("update"); },
     merge: async (_, expectedHead) => { expect(expectedHead).toBe(H); calls.push("merge"); snapshot = pr({ state: "MERGED", mergeSha: M }); return M; },
     deploy: async () => { calls.push("deploy"); return "sent"; },
-    deployed: async () => { calls.push("deployed"); return "release-b"; },
+    deployed: async () => { calls.push("deployed"); return { status: "deployed", receipt: "release-b" }; },
     verifyLedger: async () => { calls.push("verify"); return "ledger-verified"; },
   };
   const advance = async (from: MergeRun["phase"], to: MergeRun["phase"], rev: number, receipt?: string, mergeSha?: string, newHead?: string) => {
@@ -33,6 +34,45 @@ function fixture(initial = base) {
 }
 
 describe("T68 merge driver", () => {
+  test("losing ownership during final inspection cannot merge or freeze the replacement's run", async () => {
+    const f = fixture({ ...base, phase: "await_ci" });
+    let active = true, reads = 0;
+    f.ops.inspect = async () => { if (++reads === 2) active = false; return pr(); };
+    await expect(driveMerge(f.row, f.ops, f.advance, () => {
+      if (!active) throw new SchedulerStopped("lease lost");
+    })).rejects.toThrow(/lease lost/);
+    expect(f.row.phase).toBe("merging");
+    expect(f.calls).not.toContain("merge");
+    expect(f.calls).not.toContain("journal:unknown");
+  });
+  test("draft waits for this card without freezing the project or issuing effects", async () => {
+    for (const phase of ["ready", "updating", "await_ci"] as const) {
+      const f = fixture({ ...base, phase });
+      f.snapshot = pr({ draft: true });
+      await driveMerge(f.row, f.ops, f.advance);
+      expect(f.row.phase).toBe(phase);
+      expect(f.calls).toEqual(["inspect"]);
+    }
+  });
+  test("pending independent deployment survives restart without resubmit or freeze", async () => {
+    const f = fixture({ ...base, phase: "merged", mergeSha: M });
+    f.ops.deployed = async () => ({ status: "running" });
+    await driveMerge(f.row, f.ops, f.advance);
+    expect(f.row.phase).toBe("deploying");
+    await driveMerge(f.row, f.ops, f.advance);
+    expect(f.calls.filter((c) => c === "deploy")).toHaveLength(1);
+    expect(f.row.phase).toBe("deploying");
+    f.ops.deployed = async () => ({ status: "deployed", receipt: "four-services-new" });
+    await driveMerge(f.row, f.ops, f.advance);
+    expect(f.row.phase).toBe("deployed");
+  });
+  test("failed independent deployment freezes and is never submitted twice", async () => {
+    const f = fixture({ ...base, phase: "deploying", mergeSha: M });
+    f.ops.deployed = async () => ({ status: "failed", reason: "exit 1" });
+    await driveMerge(f.row, f.ops, f.advance);
+    expect(f.row.phase).toBe("unknown");
+    expect(f.calls).not.toContain("deploy");
+  });
   test("CI and exact head are checked before merge; effects are journaled first", async () => {
     const f = fixture();
     await driveMerge(f.row, f.ops, f.advance);

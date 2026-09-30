@@ -102,11 +102,49 @@ describe("T68 per-card session bindings", () => {
     try {
       f.workflow("T1");
       f.submit("T1", "adversarial_review", "ensure_session", "peer-reviewer");
+      f.db.query("UPDATE tasks SET extra=? WHERE id='T1'").run(JSON.stringify({ reviewer: "reviewer@remote" }));
       bindSchedulerSession(f.db, f.ctx, { taskId: "T1", role: "reviewer", intentId: "peer-reviewer",
-        agent: "agent-peer-reviewer", sessionId: "peer-session", family: "codex", transport: "peer" });
+        agent: "reviewer@remote", sessionId: "peer-session", family: "codex", transport: "peer", registryPath: f.registryPath });
       expect(taskWorkerRefs(f.db, "T1").reviewer?.source).toBe("peer_claim");
       const event = f.db.query("SELECT json_extract(data, '$.source') AS source FROM events WHERE dedupKey = 'scheduler:peer-reviewer:bind'").get();
       expect(event).toEqual({ source: "peer_claim" });
+    } finally { f.close(); }
+  });
+
+  test("peer transport cannot disguise a local runtime or invent a remote assignment", () => {
+    const f = fixture();
+    try {
+      f.workflow("T1");
+      f.submit("T1", "adversarial_review", "ensure_session", "peer-bypass");
+      const input = { taskId: "T1", role: "reviewer" as const, intentId: "peer-bypass",
+        sessionId: "claimed", family: "codex" as const, transport: "peer" as const, registryPath: f.registryPath };
+      for (const agent of ["agent-claude-helper", "claude-helper"]) {
+        expect(() => bindSchedulerSession(f.db, f.ctx, { ...input, agent })).toThrow(/registry runtime/);
+      }
+      expect(() => bindSchedulerSession(f.db, f.ctx, { ...input, agent: "agent-review" })).toThrow(/不能声明 peer/);
+      expect(() => bindSchedulerSession(f.db, f.ctx, { ...input, agent: "review", transport: "acp" })).toThrow(/完整名称/);
+      for (const agent of ["agent-remote", "reviewer@unassigned"]) {
+        expect(() => bindSchedulerSession(f.db, f.ctx, { ...input, agent })).toThrow(/明确委托/);
+      }
+      expect(getSchedulerSession(f.db, "T1", "reviewer")).toBeNull();
+    } finally { f.close(); }
+  });
+
+  test("protected main sessions are refused before a ledger binding is committed", () => {
+    const f = fixture();
+    try {
+      f.workflow("T1");
+      f.submit("T1", "adversarial_review", "ensure_session", "protected-reviewer");
+      const reg = JSON.parse(readFileSync(f.registryPath, "utf8"));
+      reg.agents["agent-codex"] = { runtime: "codex" };
+      reg.agents["agent-project-pm"] = { runtime: "codex", role: "pm" };
+      writeFileSync(f.registryPath, JSON.stringify(reg));
+      for (const agent of ["agent-codex", "agent-project-pm"]) {
+        expect(() => bindSchedulerSession(f.db, f.ctx, { taskId: "T1", role: "reviewer", intentId: "protected-reviewer",
+          agent, sessionId: "main-session", family: "codex", transport: "acp", registryPath: f.registryPath }))
+          .toThrow(/长驻主 agent/);
+      }
+      expect(getSchedulerSession(f.db, "T1", "reviewer")).toBeNull();
     } finally { f.close(); }
   });
 

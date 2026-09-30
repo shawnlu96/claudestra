@@ -14,7 +14,7 @@ import { BubbleMenu, SelectModeBar, useBubbleMenuTrigger } from "./bubble-menu";
 import { InlineActionContext } from "@/components/domd/inline-button";
 import { replyEchoMessageIds, isEchoSegment, postReplyMessageIds } from "../reply-echo";
 import { useInlineActions } from "./use-inline-actions";
-import { messagePlainText, splitQuoted } from "../message-text";
+import { messagePlainText, userQuoteParts } from "../message-text";
 import { ToolGroup } from "./tool-rows";
 import { ClaudeHeader, CompactingLine, ReplyingLine, ThinkingDots, TurnMark, WorkingLine } from "./turn-indicators";
 import { QuoteSwipe } from "./quote-swipe";
@@ -230,7 +230,7 @@ export const Message = memo(function Message({ m, streaming, isLast, awaiting, p
   // hook 必须无条件调用(下面有 system/user 两处提前 return),所以正文在长按那一刻
   // 现算,不依赖分支里的局部变量
   const press = useBubbleMenuTrigger(() => ({
-    text: splitQuoted(m.content).body,
+    text: userQuoteParts(m).body,
     ts: m.ts,
     messageId: m.id,
     getEl: () => bubbleRef.current,
@@ -244,7 +244,7 @@ export const Message = memo(function Message({ m, streaming, isLast, awaiting, p
     const atts = m.attachments ?? [];
     const isSelf = !m.from;
     // 引用条与正文分开渲染;长按菜单的「复制/引用」只拿正文那一半
-    const { quoted: userQuoted, body: userBody } = splitQuoted(m.content);
+    const { quoted: userQuoted, body: userBody } = userQuoteParts(m);
     const showAvatar = isSelf && !!profile.avatar;
     // v2.20.2+ 外源入站(peer/其它 agent/Discord 用户)与本人区分(owner 实报
     // 「看起来像我说的」):来源 chip + 信息色描边,正文走 Domd 渲染 markdown

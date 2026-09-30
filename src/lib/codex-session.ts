@@ -37,14 +37,20 @@
 
 import { existsSync, readdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import type { SubSessionInfo } from "./runtimes/types.js";
 import { codexSubOf, isCodexOneShot, isCodexSubThread } from "./codex-subthread.js";
 
 type AnyRecord = Record<string, any>;
 
-export function codexSessionsRoot(home: string = homedir()): string {
-  return join(home, ".codex", "sessions");
+/**
+ * rollout 根，与 Codex CLI 同规则：CODEX_HOME 优先，没设才是 ~/.codex。不认它，自定义根 / 沙箱 ACP 链的 rollout 找不到，
+ * 同 id 时还会从 ~/.codex 拷错一份（tests/session-archive-runtimes.test.ts）。显式传 home = 只按那个家目录算，不看环境变量。
+ */
+export function codexSessionsRoot(home?: string, env: NodeJS.ProcessEnv = process.env): string {
+  const codexHome = env.CODEX_HOME?.trim();
+  if (home === undefined && codexHome) return join(resolve(codexHome), "sessions");
+  return join(home ?? homedir(), ".codex", "sessions");
 }
 
 /** `rollout-2026-09-04T20-48-22-01a06c3f-….jsonl` → `01a06c3f-…`（取不出返回 null） */
@@ -53,7 +59,7 @@ export function codexSessionIdFromFilename(name: string): string | null {
   return m ? m[1] : null;
 }
 
-export function isCodexSessionPath(path: string | undefined | null, home: string = homedir()): boolean {
+export function isCodexSessionPath(path: string | undefined | null, home?: string): boolean {
   return !!path && path.startsWith(codexSessionsRoot(home) + "/");
 }
 

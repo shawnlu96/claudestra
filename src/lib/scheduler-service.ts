@@ -7,6 +7,7 @@ import type { SchedulerConfig } from "./scheduler-config.js";
 import { mergeExternal } from "./scheduler-merge-external.js";
 import { driveMerge, type MergeExternal } from "./scheduler-merge-driver.js";
 import { getMergeRun, mergeRunDrift, type MergeRun, type MergePhase } from "./scheduler-merge.js";
+import { acquireMaintenance, SchedulerStopped } from "./scheduler-maintenance.js";
 
 type Manager = (...args: string[]) => Promise<Record<string, unknown>>;
 
@@ -22,8 +23,19 @@ const requireOk = (result: Record<string, unknown>, what: string): Record<string
 
 /** One project is serial; journal rows plus project merge lock survive a daemon restart. */
 export async function schedulerMergeTick(db: Database, config: SchedulerConfig, manager: Manager = schedulerManager,
-  externalFactory: (project: SchedulerConfig["projects"][string], manager: Manager) => MergeExternal = mergeExternal): Promise<number> {
+  externalFactory: (project: SchedulerConfig["projects"][string], manager: Manager) => MergeExternal = mergeExternal,
+  assertOwner: () => void = () => {}): Promise<number> {
   if (!config.enabled) return 0;
+  const lock = await acquireMaintenance("scheduler");
+  if (!lock) return 0;
+  const assertActive = () => { assertOwner(); if (!lock.held()) throw new SchedulerStopped("scheduler lost maintenance lease"); };
+  const call = async (...args: string[]) => { assertActive(); const r = await manager(...args); assertActive(); return r; };
+  try { return await mergeTick(db, config, call, externalFactory, assertActive); }
+  finally { lock.release(); }
+}
+
+async function mergeTick(db: Database, config: SchedulerConfig, manager: Manager,
+  externalFactory: (project: SchedulerConfig["projects"][string], manager: Manager) => MergeExternal, assertActive: () => void): Promise<number> {
   let handled = 0;
   for (const [project, policy] of Object.entries(config.projects)) {
     const intents = db.query(`SELECT id, status FROM scheduler_intents WHERE project=? AND action='merge'
@@ -63,7 +75,8 @@ export async function schedulerMergeTick(db: Database, config: SchedulerConfig, 
           const result = requireOk(await manager(...args), "advance merge run");
           return result.run as MergeRun;
         };
-        await driveMerge(run, externalFactory(policy, manager), advance);
+        const advanced = await driveMerge(run, externalFactory(policy, manager), advance, assertActive);
+        if (advanced.phase === "deploying") return handled + 1; // Release the submission lease before another project's slow GitHub calls.
       }
       handled++;
     }

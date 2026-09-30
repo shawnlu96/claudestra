@@ -42,7 +42,7 @@ Lets an agent in a long turn pull what is queued for it, as a tool result.
 - **Explicit answer** (target `send_to_agent`s the caller, or replies into the caller's channel): consumes the caller's seen requests.
 - **Unaddressed answer** (target replies in its own channel, or ends the turn with text): pushed back only if exactly one caller has seen requests. With several callers waiting, nobody gets it (no guessing, no broadcast) and the target is told once to answer each with `send_to_agent`.
 - Several seen requests from the same caller share one answer (their `expecting`s are joined); unseen ones stay for a later answer. There is no explicit per-request reply id yet.
-- Entries expire 2 h after they were actually delivered (not after they were sent). Killing / taking over a channel drops its slots.
+- Expiry is per request: each one expires 2 h after it was actually delivered (`deliveredAt`, not when it was sent); requests still held never expire, and a slot survives as long as it has requests left. Entries from older files without `deliveredAt` fall back to the slot timestamp. Killing / taking over a channel drops its slots.
 
 ## Cross-machine calls (`http-peer.ts`, `peer-call-book.ts`)
 

@@ -4,7 +4,7 @@ import { isManager, mustTask, type WriteCtx } from "./ledger-checks.js";
 import { getIntent, getWorkflow, type AuthorFamily } from "./ledger-scheduler.js";
 import { getMeta, LedgerError } from "./ledger-store.js";
 import { insertEvent, tx } from "./ledger-tx.js";
-import { readRegistryAgentsSync } from "./registry.js";
+import { requireSessionIdentity } from "./scheduler-session-identity.js";
 import type { WorkerRef } from "./scheduler-plan.js";
 
 export type SessionRole = "author" | "reviewer";
@@ -82,12 +82,7 @@ export function bindSchedulerSession(db: Database, ctx: WriteCtx, input: BindSes
     if (input.family !== "claude" && input.family !== "codex") throw new LedgerError("invalid", "模型家族不认识");
     if (input.transport !== "acp" && input.transport !== "tmux" && input.transport !== "peer") throw new LedgerError("invalid", "transport 不认识");
     const agent = field(input.agent, "agent"), sessionId = field(input.sessionId, "sessionId");
-    if (input.transport !== "peer") {
-      const local = readRegistryAgentsSync(input.registryPath).find((row) => row.name === agent);
-      const actualFamily = local?.runtime === "codex" ? "codex" :
-        local && (local.runtime === undefined || local.runtime === "claude-code") ? "claude" : null;
-      if (!actualFamily || actualFamily !== input.family) throw new LedgerError("invalid", "本机 session 模型家族与 registry runtime 不符");
-    }
+    requireSessionIdentity(db, task, input, agent);
     const prior = getSchedulerSession(db, task.id, input.role);
     if (prior) {
       if (prior.agent !== agent || prior.sessionId !== sessionId || prior.family !== input.family || prior.transport !== input.transport ||

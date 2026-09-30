@@ -335,6 +335,12 @@
       "from": 0,
       "to": 0,
       "why": "T45：RULES 注册 testenv 规则（一行），其余不动；package.json 的 check / guard 脚本与 CI Guard 步骤不变"
+    },
+    {
+      "key": "guard:scripts/guard/knip.json",
+      "from": 0,
+      "to": 0,
+      "why": "T60 PR2：knip 入口加 src/acp-host.ts（ACP 宿主，在 agent 的 tmux 窗口里直接 bun 运行，和 channel-server 同类入口）与 scripts/acp-stub.ts（沙箱 / 单测按路径 spawn 的假 ACP agent，不被 import）；只加入口，规则不变"
     }
   ]
 }

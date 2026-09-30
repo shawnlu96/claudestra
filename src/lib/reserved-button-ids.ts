@@ -9,12 +9,12 @@ const EXACT = new Set([
   "cron_history", "browse_sessions", "kill_agent", "cron_toggle", "cron_remove", "peek_agent", "stats_refresh", "stats_savecompact",
 ]);
 
-/** 前缀（都带冒号，后面是参数） */
+/** 前缀（后面是参数） */
 const PREFIXES = [
   "team_ok:", "team_no:", "swmodel_yes:", "swmodel_no:", "sess_detail:", "sess_cleanup:", "sess_adopt:", "savecompact:", "modal:",
   "escalate:", "wedge_esc:", "wedge_restart:", "focus:", "screenshot:", "interrupt:", "auq:",
   "perm_allow:", "perm_allow_session:", "perm_deny:", "session_summary:", "session_full:", "session_noask:",
-  "auto_allow:", "auto_revert:",
+  "auto_allow:", "auto_revert:", "acp_perm_", "acp_quota_",
 ];
 
 export function isReservedButtonId(id: string): boolean {
