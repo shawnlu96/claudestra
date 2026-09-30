@@ -1,0 +1,155 @@
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { describe, expect, test } from "bun:test";
+import { setWorkflow } from "../src/lib/ledger-scheduler-write.js";
+import { closeLedger, getTask, listEvents, openLedger } from "../src/lib/ledger-store.js";
+import { assignStep } from "../src/lib/ledger-steps-write.js";
+import { appendEvent, createTask, deliver, moveStage, recordReview } from "../src/lib/ledger-write.js";
+import { schedulerObserveTick } from "../src/lib/scheduler-observe-tick.js";
+import { runLedger } from "../src/manager/ledger.js";
+import type { LedgerDeps } from "../src/manager/ledger-context.js";
+import type { Registry } from "../src/manager/core.js";
+
+const H1 = "1".repeat(40), H2 = "2".repeat(40);
+const P1 = { findingId: "race-1", family: "concurrency", severity: "P1" as const, probe: "two ticks claim the same intent" };
+const P2 = { findingId: "name-1", family: "naming", severity: "P2" as const, probe: "rename helper" };
+
+function fixture() {
+  const dir = mkdtempSync(join(tmpdir(), "t68e-observe-")), path = join(dir, "ledger.sqlite"), db = openLedger(path);
+  const registryPath = join(dir, "registry.json");
+  writeFileSync(registryPath, JSON.stringify({ socket: "", agents: {
+    "agent-one": { runtime: "claude-code", sessionId: "s-one" }, "agent-review": { runtime: "codex", transport: "acp", sessionId: "s-review" },
+    "agent-other": { runtime: "codex", transport: "acp", sessionId: "s-other" },
+  } }));
+  let now = 1000;
+  const at = (actor: string) => ({ actor, now: (now += 10) });
+  createTask(db, at("owner"), { project: "p", id: "T1", title: "observe", kind: "code", agent: "agent-one", extra: { fileGlobs: ["src/lib/x.ts"] } });
+  setWorkflow(db, at("owner"), { taskId: "T1", taskRev: 1, template: "code", templateVersion: 2, mode: "observe", authorFamily: "claude", fallback: "只报错" });
+  const deps = (actor: string): LedgerDeps => ({
+    db, actor, registryPath, projectIds: ["p"], now: () => (now += 10),
+    loadRegistry: async () => JSON.parse(readFileSync(registryPath, "utf8")) as Registry, saveRegistry: async () => {},
+  });
+  const observe = async () => {
+    const r = await runLedger(["scheduler-observe", "T1"], deps("scheduler"));
+    expect(r.ok).toBe(true);
+    return r as { duplicate: boolean; decision: Record<string, unknown>; event: { data: Record<string, unknown> } };
+  };
+  const review = (verdict: "pass" | "changes", head: string, findings: object[], move?: "fix" | "merge") =>
+    recordReview(db, at("owner"), { taskId: "T1", reviewer: "agent-review", verdict, path: `reviews/T1-r${getTask(db, "T1")!.round}/report.md`,
+      p0: 0, p1: findings.filter((f) => (f as typeof P1).severity === "P1").length, p2: findings.filter((f) => (f as typeof P1).severity === "P2").length,
+      head, reviewerSessionId: "s-review", reviewerFamily: "codex", findings: findings as never, ...(move ? { move: { from: "review", to: move } } : {}) });
+  const dispatch = (head: string) => appendEvent(db, at("owner"), { project: "p", target: "T1", kind: "dispatch",
+    data: { reviewer: "adversarial", round: getTask(db, "T1")!.round, head } });
+  const close = () => { closeLedger(path); rmSync(dir, { recursive: true, force: true }); };
+  return { db, at, deps, observe, review, dispatch, close };
+}
+
+const externalEffects = (db: ReturnType<typeof openLedger>) => ({
+  intents: (db.query("SELECT COUNT(*) AS n FROM scheduler_intents").get() as { n: number }).n,
+  resources: (db.query("SELECT COUNT(*) AS n FROM scheduler_resources").get() as { n: number }).n,
+  sessions: (db.query("SELECT COUNT(*) AS n FROM scheduler_sessions").get() as { n: number }).n,
+  schedulerMoves: (db.query("SELECT COUNT(*) AS n FROM events WHERE actor = 'scheduler' AND kind <> 'scheduler'").get() as { n: number }).n,
+});
+
+describe("T68e observe mode", () => {
+  test("deliver → changes → fix → pass: each plan matches the expected step and PM matches produce no diff", async () => {
+    const f = fixture();
+    try {
+      const restate = await f.observe();
+      expect(restate.decision).toMatchObject({ kind: "intent", action: "dispatch", node: "restate", recipient: "agent-one" });
+      expect(restate.event.data.route).toEqual({ kind: "route", route: "channel", transport: "tmux", family: "claude", fallbackReason: null });
+      expect((await f.observe()).duplicate).toBe(true);
+      moveStage(f.db, f.at("agent-one"), { taskId: "T1", from: "spec", to: "restate" });
+      expect((await f.observe()).decision).toMatchObject({ kind: "wait", code: "pm_restate" });
+      moveStage(f.db, f.at("owner"), { taskId: "T1", from: "restate", to: "build" });
+      expect((await f.observe()).decision).toMatchObject({ kind: "intent", action: "dispatch", node: "write", recipient: "agent-one" });
+      deliver(f.db, f.at("agent-one"), { taskId: "T1", headSHA: H1, moveFrom: "build" });
+      assignStep(f.db, f.at("owner"), { taskId: "T1", step: "review", executor: "agent-review", executorKind: "agent" });
+      const toReview = await f.observe();
+      expect(toReview.decision).toMatchObject({ kind: "intent", action: "review", recipient: "agent-review" });
+      expect(toReview.event.data.route).toMatchObject({ route: "acp", family: "codex" });
+      f.dispatch(H1);
+      expect((await f.observe()).decision).toMatchObject({ kind: "wait", code: "in_flight" });
+      f.review("changes", H1, [P1, P2]);
+      expect((await f.observe()).decision).toMatchObject({ kind: "intent", action: "stage", targetStage: "fix" });
+      moveStage(f.db, f.at("owner"), { taskId: "T1", from: "review", to: "fix" });
+      expect((await f.observe()).decision).toMatchObject({ kind: "intent", action: "dispatch", node: "fix", recipient: "agent-one" });
+      deliver(f.db, f.at("agent-one"), { taskId: "T1", headSHA: H2, moveFrom: "fix" });
+      expect((await f.observe()).decision).toMatchObject({ kind: "intent", action: "review", recipient: "agent-review" });
+      f.dispatch(H2);
+      await f.observe();
+      f.review("pass", H2, [P2], "merge");
+      expect((await f.observe()).decision).toMatchObject({ kind: "intent", action: "merge", node: "merge_deploy" });
+
+      const diff = await runLedger(["scheduler-diff", "T1", "--all"], f.deps("owner"));
+      const rows = diff.rows as { planned: string; verdict: string; note: string }[];
+      expect(rows.filter((r) => r.verdict === "diff")).toEqual([]);
+      expect(rows.at(-1)).toMatchObject({ verdict: "pending" });
+      expect(rows.some((r) => r.note.includes("review --to"))).toBe(true);
+      expect(externalEffects(f.db)).toEqual({ intents: 0, resources: 0, sessions: 0, schedulerMoves: 0 });
+    } finally { f.close(); }
+  });
+
+  test("PM deviations show up in the diff: skipped dispatch record, advancing through an engine stop, another reviewer", async () => {
+    const f = fixture();
+    try {
+      moveStage(f.db, f.at("agent-one"), { taskId: "T1", from: "spec", to: "restate" });
+      moveStage(f.db, f.at("owner"), { taskId: "T1", from: "restate", to: "build" });
+      deliver(f.db, f.at("agent-one"), { taskId: "T1", headSHA: H1, moveFrom: "build" });
+      assignStep(f.db, f.at("owner"), { taskId: "T1", step: "review", executor: "agent-review", executorKind: "agent" });
+      expect((await f.observe()).decision).toMatchObject({ kind: "intent", action: "review", recipient: "agent-review" });
+      // PM never records `ledger dispatch`: the engine refuses the unsolicited result, PM pushes on anyway.
+      f.review("changes", H1, [P1]);
+      expect((await f.observe()).decision).toMatchObject({ kind: "escalate", code: "review_unsolicited" });
+      moveStage(f.db, f.at("owner"), { taskId: "T1", from: "review", to: "fix" });
+      await f.observe();
+      const diff = await runLedger(["scheduler-diff", "T1"], f.deps("owner"));
+      const rows = diff.rows as { planned: string; actual: string; verdict: string; note: string }[];
+      expect(rows).toContainEqual(expect.objectContaining({ verdict: "diff", planned: "停下升级（review_unsolicited）", actual: "推阶段 review→fix" }));
+      expect((diff.summary as { diff: number }).diff).toBeGreaterThan(0);
+    } finally { f.close(); }
+  });
+
+  test("re-observing is idempotent across restarts and duplicate ticks; only the scheduler or PM may write, never on non-observe cards", async () => {
+    const f = fixture();
+    try {
+      const first = await f.observe();
+      for (let i = 0; i < 3; i++) expect((await f.observe()).duplicate).toBe(true);
+      const count = () => listEvents(f.db, { project: "p", target: "T1" }).filter((e) => e.data.op === "observe").length;
+      expect(count()).toBe(1);
+      expect(first.duplicate).toBe(false);
+      expect((await runLedger(["scheduler-observe", "T1"], f.deps("agent-one"))).code).toBe("forbidden");
+      expect((await runLedger(["scheduler-diff", "T1"], f.deps("scheduler"))).code).toBe("forbidden");
+      const calls: string[][] = [];
+      const manager = async (...args: string[]) => { calls.push(args); return runLedger(args.slice(1), f.deps("scheduler")); };
+      const tick = await schedulerObserveTick(f.db, { p: { maxActiveWorkers: 3 } }, manager);
+      expect(tick).toEqual({ recorded: 0, unchanged: 1, failed: [] });
+      expect(calls).toEqual([["ledger", "scheduler-observe", "T1", "--max-workers", "3"]]);
+      const fb = await runLedger(["scheduler-fallback-manual", "T1", "--reason", "peer 委托本段不自动派"], f.deps("scheduler"));
+      expect(fb).toMatchObject({ ok: true, workflow: { mode: "manual" } });
+      expect((await runLedger(["scheduler-observe", "T1"], f.deps("scheduler"))).code).toBe("conflict");
+      expect(await schedulerObserveTick(f.db, { p: { maxActiveWorkers: 3 } }, manager)).toEqual({ recorded: 0, unchanged: 0, failed: [] });
+    } finally { f.close(); }
+  });
+
+  test("structured review is all-or-nothing and must match the task head", async () => {
+    const f = fixture();
+    try {
+      moveStage(f.db, f.at("agent-one"), { taskId: "T1", from: "spec", to: "restate" });
+      moveStage(f.db, f.at("owner"), { taskId: "T1", from: "restate", to: "build" });
+      deliver(f.db, f.at("agent-one"), { taskId: "T1", headSHA: H1, moveFrom: "build" });
+      expect(() => recordReview(f.db, f.at("owner"), { taskId: "T1", reviewer: "agent-review", verdict: "pass", p0: 0, p1: 0, p2: 0, head: H1 }))
+        .toThrow(/同时带/);
+      expect(() => f.review("pass", H2, [])).toThrow(/head/);
+      expect(() => f.review("changes", H1, [{ ...P1, severity: "P0" }])).toThrow(/计数/);
+      const dir = mkdtempSync(join(tmpdir(), "t68e-findings-")), file = join(dir, "findings.json");
+      writeFileSync(file, JSON.stringify([P2]));
+      const r = await runLedger(["review", "T1", "--reviewer", "agent-review", "--verdict", "pass", "--p0", "0", "--p1", "0", "--p2", "1",
+        "--path", "reviews/T1-r1/report.md", "--head", H1, "--session", "s-review", "--family", "codex", "--findings", file], f.deps("owner"));
+      expect(r.ok).toBe(true);
+      expect((r.event as { data: Record<string, unknown> }).data).toMatchObject({ head: H1, reviewerSessionId: "s-review", reviewerFamily: "codex", findings: [P2] });
+      rmSync(dir, { recursive: true, force: true });
+    } finally { f.close(); }
+  });
+});

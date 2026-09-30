@@ -1,0 +1,51 @@
+/**
+ * Claude Code / Pi over the channel protocol, and the tmux compatibility fallback for a Codex session still on its TUI.
+ * Both send through MessagePort (today's send_to_agent path; T48 swaps the port). The fallback cannot be built without a
+ * reason, and every receipt it produces carries that reason, so the ledger always shows why a session was typed into.
+ */
+import { ensureVia, observeVia, sendReceipt, type AdapterDeps, type MessagePort } from "./worker-ports.js";
+import { renderWorkOrder } from "./worker-order.js";
+import type { SubmitReceipt, WorkerSession } from "./worker-session.js";
+
+export interface MessageAdapterOpts extends AdapterDeps {
+  port: MessagePort;
+}
+
+export function createChannelWorker(o: MessageAdapterOpts): WorkerSession {
+  return messageWorker(o, "channel", null);
+}
+
+export function createTmuxFallbackWorker(o: MessageAdapterOpts & { reason: string }): WorkerSession {
+  const reason = o.reason.trim();
+  if (!reason) throw new Error("tmux 回退必须写明原因");
+  return messageWorker(o, "tmux", reason);
+}
+
+function messageWorker(o: MessageAdapterOpts, route: "channel" | "tmux", fallback: string | null): WorkerSession {
+  return {
+    route,
+    ensure: (taskId, role, family) => ensureVia(o, route, taskId, role, family),
+    async submit(ref, intentId, order): Promise<SubmitReceipt> {
+      if (order.dedupKey !== intentId) return { status: "rejected", route, reason: "任务单去重键与调度意图不一致" };
+      try {
+        return sendReceipt(route, intentId, await o.port.send(ref.agent, renderWorkOrder(order), intentId), fallback);
+      } catch (e) {
+        return { status: "unknown", route, reason: `发送中断：${(e as Error).message}` };
+      }
+    },
+    async observe(ref, order) {
+      let live: Awaited<ReturnType<MessagePort["status"]>>;
+      try { live = await o.port.status(ref.agent); } catch (e) { live = "unknown"; void e; /* status read failure = unknown liveness; the ledger result check below still runs */ }
+      return observeVia(o, ref, order, live);
+    },
+    async cancel(ref) {
+      try {
+        const r = await o.port.interrupt(ref.agent);
+        return r.ok && fallback ? { ok: true, evidence: `${r.evidence}; ${fallback}` } : r;
+      } catch (e) {
+        return { ok: false, unknown: true, reason: `打断请求中断：${(e as Error).message}` };
+      }
+    },
+    archive: (ref) => o.sessions.archive(ref),
+  };
+}
