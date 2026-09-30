@@ -125,3 +125,5 @@ owner 截图 ask 属上线闸。
   一次性 Codex 对抗自查找到四个 P2：归档后丢失 worker 标记、无 task.agent 的作者无法从 DAG 进入、绑定未核 intent 收件人、归档后停止前会话过早消失；均已修复并补测试。跨模型复审 r1 又要求本机 session 的家族核对 registry runtime，并让 owner 可撤误标、绑定时统一打标、管理面板可操作 worker。截图改走沙箱 headless 浏览器，不动 owner 屏幕。
 
 - r2 修复：#233 本卡已持有槽时直接复用，台账拒绝第二槽；#235 本机 registry 优先核身份，peer transport 仅认本卡当前步骤明确委托，受保护长驻 session 在台账绑定前拒绝。最新 main 以 merge 合入，保留 T69、ACP 启动迁移与运行时归档源定位。
+- PR E1：`WorkerSession` 契约（`lib/worker-session.ts`）与端口注入的适配器——Codex 走 ACP（额度/登录失败作结果上报、不重试），Claude Code 走 channel，未迁 ACP 的 Codex 才走 tmux 回退且回执必带原因，peer / Pi / 未知 runtime 退回 manual（`ledger scheduler-fallback-manual`）。台账 transport 仍记宿主形态，派单路径由 runtime+transport 推出，不加迁移。
+  派单驱动先认领再投递，重启后无回执只认台账结果，否则交 PM。observe 用真实台账事实代换调度自有事实（步骤执行者即 session、PM 的 `ledger dispatch` 即派审回执）跑规划器，只写观察事件、决定不变不记；`ledger scheduler-diff` 每条一行对照 PM 实际动作。`ledger review` 增结构化结论（head/session/family/findings 四项同给）。沙箱一张 observe 卡走完交付→changes→修→pass，只有观察事件。
