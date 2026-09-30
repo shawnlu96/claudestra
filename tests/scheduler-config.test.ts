@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { checkSchedulerConfig } from "../src/lib/doctor-scheduler.js";
-import { parseSchedulerConfig, readSchedulerConfig } from "../src/lib/scheduler-config.js";
+import { DEFAULT_RESTART_LABELS, parseSchedulerConfig, readSchedulerConfig } from "../src/lib/scheduler-config.js";
 import { DAEMONS } from "../src/lib/cli-install.js";
 
 
@@ -35,10 +35,20 @@ describe("T68 scheduler service configuration", () => {
     expect(parseSchedulerConfig({ enabled: true, autoDispatch: true, projects }).autoDispatch).toBe(true);
     for (const bad of ["true", 1, null, {}]) expect(() => parseSchedulerConfig({ enabled: true, autoDispatch: bad, projects })).toThrow(/autoDispatch/);
   });
-  test("rejects an automatic deploy target, invalid capacity and unknown poll intervals", () => {
+  test("deploy (T68g): defaults to the four daemons; bad argv, labels or timeout and a sandbox pointing at production are invalid", () => {
     const p = { maxActiveWorkers: 2, requiredChecks: ["check"], repoDir: "/tmp/project" };
-    expect(() => parseSchedulerConfig({ enabled: true, projects: { p: { ...p, deploy: { cwd: "/tmp/project", argv: ["deploy"] } } } }))
-      .toThrow(/automatic deploy is not supported/);
+    const parse = (deploy: unknown) => parseSchedulerConfig({ enabled: true, projects: { p: { ...p, deploy } } }).projects.p.deploy;
+    expect(parse({})).toEqual({ restartLabels: DEFAULT_RESTART_LABELS, timeoutMs: 2_400_000 });
+    expect(new Set(DEFAULT_RESTART_LABELS)).toEqual(new Set(DAEMONS.map((d) => d.label)));
+    expect(parse({ relayArgv: ["/x/relay.sh"], restartLabels: ["a.b"], timeoutMs: 60_000 })).toEqual({ relayArgv: ["/x/relay.sh"], restartLabels: ["a.b"], timeoutMs: 60_000 });
+    for (const bad of [[], { relayArgv: [] }, { relayArgv: "x" }, { restartLabels: ["a b"] }, { timeoutMs: 10 }]) expect(() => parse(bad)).toThrow(/deploy/);
+    const prev = process.env.CLAUDESTRA_SANDBOX;
+    process.env.CLAUDESTRA_SANDBOX = "1";
+    try { expect(() => parse({})).toThrow(/sandbox/); expect(parse({ restartLabels: ["x.fake"] })?.restartLabels).toEqual(["x.fake"]); }
+    finally { if (prev === undefined) delete process.env.CLAUDESTRA_SANDBOX; else process.env.CLAUDESTRA_SANDBOX = prev; }
+  });
+  test("rejects invalid capacity and unknown poll intervals", () => {
+    const p = { maxActiveWorkers: 2, requiredChecks: ["check"], repoDir: "/tmp/project" };
     expect(() => parseSchedulerConfig({ enabled: true, projects: { p: { ...p, repoDir: undefined } } })).toThrow(/repoDir/);
     expect(() => parseSchedulerConfig({ enabled: true, projects: { p: { ...p, maxActiveWorkers: 0 } } })).toThrow(/maxActiveWorkers/);
     expect(() => parseSchedulerConfig({ enabled: true, projects: { p: { ...p, requiredChecks: [] } } })).toThrow(/requiredChecks/);

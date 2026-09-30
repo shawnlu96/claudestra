@@ -117,13 +117,24 @@ owner 截图 ask 属上线闸。
 - 第四服务默认无配置即空转，`doctor` 明报；配置无效时不部分启动。PR D 的 UI 模板在 owner 截图 ask 与 head/specRev/摘要的真实联动接通前禁止自动合并，避免把口头通过当授权。
 - GitHub merge API 可原子锁 head，不能原子锁目标 base；最终检查到合并后必须再读 PR，若 base/head/merge SHA 与批准的 main 目标不符，立即冻结，由 PM 核对。
 
-- 合并 journal 的终点是 `merged`：调度器随后把合并意图结为 done（回执「待 PM 部署」）、释放项目合并槽，任务停在 `merge` 阶段，规划器按已结意图等待；PM 部署并核对后照常手工推 live / verified。`merged` 不挡 update——PM 部署本仓自己就是一次 update。
+- 合并 journal 的终点是 `merged`；项目没配 `deploy` 时，调度器随后把合并意图结为 done（回执「待 PM 部署」）、释放项目合并槽，任务停在 `merge` 阶段，规划器按已结意图等待；PM 部署并核对后照常手工推 live / verified。`merged` 不挡 update——PM 部署本仓自己就是一次 update。
 - `unknown` 只来自合并这一步（PR/head/CI/mergeability 变化、merge 调用或核对失败、流程漂移），进入时冻结本项目合并队列，并与 `updating`、`merging` 一样算维护忙碌，挡手动 `update` 和 launcher 自动更新：没人确认 GitHub 侧的效果已经结束之前不换代码。出口是 PM / master / owner 核对 GitHub 后执行 `ledger scheduler-merge-resolve <intent> --outcome done|failed|cancelled --receipt <证据>`：journal 进终态 `resolved`，合并意图结为 done（outcome=done）或 cancelled，释放项目合并槽，写 manual 事件，并把本卡 workflow 转为 manual（任务阶段没有经核实的回执推进，引擎不能继续驱动，PM 核对后再决定是否重开 auto；这一条参考了 t68 未提交稿）。调度身份不能结清；队列冻结不随之自动解除，确认没有其他 unknown 后再 `ledger unfreeze`。待结清项由巡检规则 `merge_unknown` 推给 PM，doctor 单列一行。`manager update` 被维护锁拒绝时退出码为 1。
 - scheduler.pid 单实例锁拿不到或失租即停止，每次动作前重核拥有权；scheduler 与 manager update 共用维护锁，update-inflight 标记挡新调度动作；draft 仅等待本卡并跳过未产生的检查查询。
 
 ### 调度服务配置
 
-`statePath("scheduler.json")` 不存在时 `enabled=false`；启用时逐项目填写 `maxActiveWorkers`、非空 `requiredChecks`（完整 CI job 名）和 `repoDir`（该项目本地仓库绝对路径，`gh` 在这里运行并核对仓库与 PR 一致）。必过检查缺失、pending、失败或 skipped 均不合并。配置里出现 `deploy` 直接判为无效（服务空转、doctor 报 fail），不静默降级为只合并。仓库的 launchd 安装/更新使用同一 `DAEMONS` 清单，scheduler 排在 launcher 之前。
+`statePath("scheduler.json")` 不存在时 `enabled=false`；启用时逐项目填写 `maxActiveWorkers`、非空 `requiredChecks`（完整 CI job 名）和 `repoDir`（该项目本地仓库绝对路径，`gh` 在这里运行并核对仓库与 PR 一致）。必过检查缺失、pending、失败或 skipped 均不合并。可选 `deploy`（T68g，见下节）：`relayArgv`（中继部署命令，含机器地址，只进本机配置）、`restartLabels`（缺省四个服务；沙箱必须写自己的假标签）、`timeoutMs`（缺省 40 分钟）；不写 `deploy` 就停在 `merged` 待 PM 部署。仓库的 launchd 安装/更新使用同一 `DAEMONS` 清单，scheduler 排在 launcher 之前。
+
+### 合并后自动部署（T68g）
+
+项目配了 `deploy` 时，合并意图到 `merged` 不结，由部署 journal（台账表 `scheduler_deploys`，`lib/scheduler-deploy.ts`）接着走：`claimed`（落盘占位，保证从没尝试提交）→ `running`（带确定标签落盘后才 bootstrap 一次性任务，所以之后崩溃、目录丢失都只从 running 判，绝不重提交）→ `deployed`（任务推 live、合并意图结 done、放合并槽）或 `unknown` → PM 结清为 `resolved`。r4 拆卡的根子——「结论」和「部署进程还活不活着」混成一个 unknown——这样拆开：每行分开记结论（`outcome`）和核对过的存活（`liveness`），表级 CHECK 规定 `deployed` / `unknown` 只能在 `liveness=dead` 时写入。
+
+- **重载连坐不到**：部署是 `launchctl bootstrap` 的一次性任务（KeepAlive false，跑 `scheduler.ts --deploy-job`），不是 scheduler 的子进程；重启四个服务（包括 scheduler 自己）、update 重载都碰不到它。任务目录 mkdir 占位 + `started` 标记保证同一请求至多执行一次。
+- **不和 update 重叠**：部署任务整段持有维护租约（与 update、调度 pass 同一把），每步前核对，失租即停并写结果；`claimed` / `running` 也算维护忙碌，双保险。
+- **存活判定**：任务租约新鲜，或 launchd 报它在跑，都算活着；两者都否才算已死；`launchctl` 读不到按活着处理。超过截止（`timeoutMs` + 60 秒）仍活着就 bootout（worker 收 SIGTERM，runBounded 的进程组随之被杀），下一轮核到已死才进 `unknown`。请求文件或任务目录丢失不算「没提交」：标签由目录路径确定，照样问 launchd、按截止已过处理；目录不在且 launchd 也没有这个标签，只说明现在没有任务在跑，不说明没跑过：是否尝试过只看 journal（claimed / running），`submit` 只接受已是 running 且标签对得上的行。所以部署的 `unknown` 必然意味着进程已不在：它冻结项目队列、不挡 update；出口同合并：`ledger scheduler-merge-resolve`（卡转 manual）。失败不自动重试。
+- **配置只管新部署**：`claimed` / `running` 的行每轮直接按 journal 驱动，不看当前是否还配 `deploy`、项目是否还在、合并意图是否仍 submitted；有部署行的合并意图，合并 tick 不按「只合并」结清。运行中去掉 `deploy` 只会让还没提交的占位以失败结束（不提交），已提交的照样看到结束。
+- **步骤**（对齐 PM 的部署脚本，`lib/scheduler-deploy-steps.ts`）：主树须在 main 且干净 → fetch 并核 origin/main 含合并提交 → `merge --ff-only` → `web-release deploy` → 拉取或合并提交改到 `web/`、`src/relay*`、`deploy/relay/`、`src/lib/relay-*` 才跑 `relayArgv`（没配报 not_configured）→ 逐个 `kickstart -k` 重启标签（一个失败不跳过其余，整体判失败）。
+- **部署后验证**：卡到 live 后，调度身份跑 `ledger verify`（只准对自己 `deployed` 的卡、不准豁免，`lib/scheduler-verify-gate.ts`）：先 dry-run，未过就 10 分钟窗口内每分钟再看，窗口过后记一次正式结果（不过就由规划器的 `verify_failed` 交 PM）。daemon 探针「启动时刻 ≥ 代码更新时刻」按秒比较（两边都是秒精度，同秒不再误判为没重启）。
 
 合并使用 GitHub REST merge 的 `sha` 参数原子锁定已审 head；[GitHub 文档](https://docs.github.com/en/rest/pulls/pulls#merge-a-pull-request)明确 head 不符返回 409。`update-branch` 产生新 head 后，台账同事务改为新轮 review、取消旧 merge intent 并释放项目合并槽。
 

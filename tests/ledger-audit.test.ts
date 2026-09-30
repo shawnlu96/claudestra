@@ -244,6 +244,13 @@ describe("merge / live 没推进", () => {
     expect(found[0].suggestion).toContain("scheduler-merge-resolve merge-1");
     expect(only(snap({ ...frozen, mergeUnknown: [] }), "merge_unknown")).toEqual([]);
   });
+  test("部署结果不明（T68g）走同一条 merge_unknown，文案写明部署进程已不在、不挡 update", () => {
+    const frozen = { tasks: [entered("T1", "merge", NOW - 60 * MIN)], queueFrozen: true, pms: [DISPATCH, PM] };
+    const found = only(snap({ ...frozen, mergeUnknown: [{ intentId: "merge-1", taskId: "T1", reason: "部署：web 构建失败", since: NOW - 5 * MIN }] }), "merge_unknown");
+    expect(found[0].detail).toContain("自动部署结果不明");
+    expect(found[0].detail).toContain("web 构建失败");
+    expect(found[0].suggestion).toContain("scheduler-merge-resolve merge-1");
+  });
   test("合并队列冻结中：merge 停着不报，live 照报", () => {
     expect(only(snap({ tasks: [entered("T1", "merge", NOW - 60 * MIN)], queueFrozen: true }), "ship_stalled")).toEqual([]);
     expect(only(snap({ tasks: [entered("T1", "live", NOW - 61 * MIN)], queueFrozen: true }), "ship_stalled")).toHaveLength(1);

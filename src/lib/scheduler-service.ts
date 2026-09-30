@@ -7,6 +7,7 @@ import type { SchedulerConfig } from "./scheduler-config.js";
 import { mergeExternal } from "./scheduler-merge-external.js";
 import { driveMerge, type MergeExternal } from "./scheduler-merge-driver.js";
 import { getMergeRun, mergeRunDrift, type MergeRun, type MergePhase } from "./scheduler-merge.js";
+import { getDeployRun } from "./scheduler-deploy.js";
 import { acquireMaintenance, SchedulerStopped } from "./scheduler-maintenance.js";
 import { encodeLease, SCHEDULER_LEASE_ENV, type SchedulerLease } from "./scheduler-lease-env.js";
 import type { TickPace } from "./scheduler-yield.js";
@@ -75,6 +76,9 @@ export async function mergeTick(db: Database, config: SchedulerConfig, manager: 
       if (drift) {
         requireOk(await manager("ledger", "scheduler-merge-step", intent.id, "--from", run.phase, "--to", "unknown",
           "--rev", String(run.rev), "--receipt", drift), "freeze drifted merge run");
+      } else if (run.phase === "merged" && (policy.deploy || getDeployRun(db, intent.id))) {
+        // lib/scheduler-deploy-tick.ts deploys it; the intent keeps the project merge slot until that deploy ends, even if
+        // `deploy` was taken out of the config meanwhile (the journal, not the config, says a job may still be running).
       } else if (run.phase === "merged") {
         // Settling frees the project merge slot; the task stays in `merge` until the PM deploys and moves it to live by hand.
         requireOk(await manager("ledger", "scheduler-settle", intent.id, "--from", "submitted", "--to", "done",

@@ -78,6 +78,8 @@ interface RuntimeAskInput {
   acp?: true;
   /** 卡的代际（ACP 的权限 / 额度卡，按钮 id 里也带着）：进指纹——题面相同的新请求是另一张卡，不沿用旧卡和它的按钮 */
   instance?: string;
+  /** ACP 回合失败（不是额度 / 登录）：落在 extra.failure，调度器按它认出是哪类失败（scheduler-auto-ports.ts codexFailure） */
+  failure?: "error";
 }
 
 export async function openRuntimeAsk(r: RuntimeAskInput): Promise<void> {
@@ -104,7 +106,9 @@ export async function openRuntimeAsk(r: RuntimeAskInput): Promise<void> {
     const a = openAsk(askDb(), {
       project: who.project, taskId: taskOf(who.name), fromAgent: who.name, fromChannelId: r.channelId, source: r.source, kind: r.kind, blocking: true,
       urgency: urgent ? "urgent" : "normal", title: r.title, context: r.quota ? codexQuotaText(expiresAt, now) : r.context, options: r.options, allowText: false,
-      chatId: r.channelId, expiresAt, extra: { ...parentExtra(who).extra, fp, ...(r.quota ? { quota: true, raw: r.context } : {}), ...(r.acp ? { acp: true } : {}) },
+      chatId: r.channelId, expiresAt, extra: {
+        ...parentExtra(who).extra, fp, ...(r.quota ? { quota: true, raw: r.context } : {}), ...(r.acp ? { acp: true } : {}), ...(r.failure ? { failure: r.failure } : {}),
+      },
     }, now);
     publishAsk(a);
     // 建的途中弹框已经没了、或换成了另一个（占位被 settle 拿走）：立刻结案，别留一条永远开着的
