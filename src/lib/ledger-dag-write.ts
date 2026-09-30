@@ -186,7 +186,7 @@ function approvalProblem(db: Database, f: Feature, p: DagProposal, a: Ask | null
   if (f.currentVersion !== p.baseVersion) return { state: "void", why: `当前版本已是 v${f.currentVersion}，提案基于 v${p.baseVersion}` };
   try {
     const cancel = new Map(p.cancels.map((x: DagCancel) => [x.key, x.reason]));
-    const input = p.nodes.map(({ key, taskId, oneLine, deps, estimate }) => ({ key, taskId, oneLine, deps, estimate }));
+    const input = p.nodes.map(({ key, taskId, oneLine, deps, estimate, fileGlobs }) => ({ key, taskId, oneLine, deps, estimate, fileGlobs }));
     planRewrite(currentDag(db, f), livePhase(db), buildNodes(db, f, input), cancel, p.scopeChange);
   } catch (e) {
     if (e instanceof LedgerError) return { state: "void", why: `卡的状态变了，按现在的规矩不成立：${e.message}` };

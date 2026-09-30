@@ -28,9 +28,10 @@ export interface DagCancel {
 }
 
 const sortedDeps = (n: DagNode) => [...n.deps].sort().join("\n");
-/** 原样：key、绑的卡、一句话、依赖（不计顺序）、粗估都一样 */
+const sortedGlobs = (n: DagNode) => [...(n.fileGlobs ?? [])].sort().join("\n");
+/** 原样：key、绑的卡、一句话、依赖（不计顺序）、粗估、文件范围（不计顺序；没带算空）都一样 */
 const sameNode = (a: DagNode, b: DagNode): boolean =>
-  a.key === b.key && a.taskId === b.taskId && a.oneLine === b.oneLine && a.estimate === b.estimate && sortedDeps(a) === sortedDeps(b);
+  a.key === b.key && a.taskId === b.taskId && a.oneLine === b.oneLine && a.estimate === b.estimate && sortedDeps(a) === sortedDeps(b) && sortedGlobs(a) === sortedGlobs(b);
 
 export interface RewritePlan {
   /** 新版本的节点：和当前版原样一致的标 inheritedFrom = 当前版本号 */
@@ -57,7 +58,7 @@ export function planRewrite(cur: CurrentDag, phase: (n: DagNode) => NodePhase, n
   for (const n of cur.nodes) {
     const p = phase(n);
     const m = byKey.get(n.key);
-    if (p === "done" && !(m && sameNode(n, m))) throw new LedgerError("invalid", `已完成的节点 ${n.key} 必须原样带入（key、一句话、依赖、粗估、绑的卡都不能变）`);
+    if (p === "done" && !(m && sameNode(n, m))) throw new LedgerError("invalid", `已完成的节点 ${n.key} 必须原样带入（key、一句话、依赖、粗估、文件范围、绑的卡都不能变）`);
     if (p !== "active") continue;
     if (!m || m.taskId !== n.taskId) {
       const reason = cancel.get(n.key);
