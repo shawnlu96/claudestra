@@ -867,7 +867,7 @@ async function cmdResume(
         piEnv: normalizePiEnvProfile((await loadRegistry()).agents[tmuxName]?.piEnv), role: (await loadRegistry()).agents[tmuxName]?.role,
       },
     };
-    if (forkSession) spec = await (await import("./manager/acp-lifecycle.js")).prepareAcpFork(spec, adapter, selected.transport);
+    spec = await (await import("./manager/acp-lifecycle.js")).prepareAcpResume(spec, adapter, selected.transport, tmuxName);
     const launched = await launchInWindow(tmuxName, adapter, spec, { cwd: resolvedDir });
     ready = launched.result.ready;
     baseline = launched.baseline;
