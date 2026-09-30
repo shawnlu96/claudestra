@@ -2,12 +2,13 @@
  * 出借单的工作副本（docs/design/remote-capacity.md §2.3 第 4 步、§5）：statePath("lend", <单目录>) 下 git init 一个全新仓库，只从
  * GitHub 取订单给的完整 SHA，checkout 后核 HEAD == 订单 head。不是 B 任何仓库的 worktree：不共享 .git、stash、分支。
  * git 在白名单环境里跑（runtimes/clean-env.ts，外加 GIT_TERMINAL_PROMPT=0：私有仓库没权限就直接失败，不卡在输入密码上）。
- * checkout 出来的树里有指向工作副本外面的软链（比如 .env → 宿主的 ~/.env）就不起 worker：它能把 clone 外的文件递给 worker 和它起的进程。
+ * 软链一律不落盘：core.symlinks=false 让仓库里的软链检出成普通文本文件（内容是链接路径），检出后再扫一遍，树里还有任何软链就不起 worker。
+ * 不判「指向里面还是外面」：链式软链（same → .，.env → same/../x）按字面算在里面、实际逃出去，判不准就不判。
  * 任何一步失败都返回 { ok:false }，调用方按 not_started 释放；删目录只删 LEND_ROOT 之下、名字对得上的那一个。tests/lend-clone.test.ts。
  */
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readdirSync, readlinkSync, realpathSync, rmSync } from "node:fs";
-import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { existsSync, mkdirSync, readdirSync, realpathSync, rmSync } from "node:fs";
+import { join, relative, sep } from "node:path";
 import { isFullSha } from "./order-wire.js";
 import { statePath } from "./paths.js";
 import { runBounded, type BoundedResult } from "./run-bounded.js";
@@ -56,6 +57,7 @@ export async function prepareClone(input: CloneInput, o: { root?: string; env?: 
   }
   const steps: [string, string[]][] = [
     ["git init", ["init", "-q"]],
+    ["关软链", ["config", "core.symlinks", "false"]],
     ["加 origin", ["remote", "add", "origin", `https://github.com/${input.repo}.git`]],
   ];
   for (const [what, args] of steps) {
@@ -65,29 +67,27 @@ export async function prepareClone(input: CloneInput, o: { root?: string; env?: 
   let got = await git(["fetch", "--no-tags", "-q", "origin", input.head]);
   if (got.code !== 0 && input.pr) got = await git(["fetch", "--no-tags", "-q", "origin", `refs/pull/${input.pr}/head`]);
   if (got.code !== 0) return { ok: false, reason: `取不到 ${input.head.slice(0, 12)}：${tail(got)}` };
-  const co = await git(["-c", "advice.detachedHead=false", "checkout", "-q", "--detach", input.head]);
+  const co = await git(["-c", "advice.detachedHead=false", "-c", "core.symlinks=false", "checkout", "-q", "--detach", input.head]);
   if (co.code !== 0) return { ok: false, reason: `checkout 失败：${tail(co)}` };
   const head = await git(["rev-parse", "HEAD"]);
   const actual = head.stdout.trim().toLowerCase();
   if (head.code !== 0 || actual !== input.head.toLowerCase()) return { ok: false, reason: `HEAD ${actual.slice(0, 12) || "读不到"} 与订单 head ${input.head.slice(0, 12)} 不一致` };
-  const link = outsideLink(dir);
-  if (link) return { ok: false, reason: `工作副本里的软链 ${link} 指向工作副本外面，不起 worker` };
+  const link = firstSymlink(dir);
+  if (link) return { ok: false, reason: `工作副本里有软链 ${link}（应已检出成文本文件），不起 worker` };
   // 审查要对比基线：取对方默认分支，取不到不算失败（worker 仍能看提交本身）
   await git(["fetch", "--no-tags", "-q", "origin", "HEAD:refs/remotes/origin/HEAD"]);
   return { ok: true, dir };
 }
 
-/** 第一个指向 dir 外面的软链（相对 dir 的路径）；没有 = null。按字面解析、不跟随软链，链上每一跳都是树里的一个软链、都会被查到 */
-export function outsideLink(dir: string): string | null {
-  const roots = [dir, realpathSync(dir)];
-  const inside = (p: string) => roots.some((r) => { const rel = relative(r, p); return !rel.startsWith("..") && !isAbsolute(rel); });
+/** 工作树里第一个软链（相对 dir 的路径）；没有 = null。不跟随软链、不看它指向哪；根下的 .git 是我们自己 git init 的，不扫 */
+export function firstSymlink(dir: string): string | null {
   const stack = [dir];
   while (stack.length) {
     const cur = stack.pop()!;
     for (const e of readdirSync(cur, { withFileTypes: true })) {
       const p = join(cur, e.name);
-      if (cur === dir && e.name === ".git") continue; // 我们自己 git init 的，不来自对方仓库
-      if (e.isSymbolicLink() && !inside(resolve(dirname(p), readlinkSync(p)))) return relative(dir, p);
+      if (cur === dir && e.name === ".git") continue;
+      if (e.isSymbolicLink()) return relative(dir, p);
       if (e.isDirectory()) stack.push(p);
     }
   }

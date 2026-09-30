@@ -1,9 +1,9 @@
 /** T94 出借单的工作副本（src/lib/lend-clone.ts）：新 clone、按完整 SHA 取、核 HEAD；用本地仓库代替 GitHub */
 import { describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { orderDir, orderDirName, outsideLink, prepareClone, removeOrderDir, type Run } from "../src/lib/lend-clone.js";
+import { firstSymlink, orderDir, orderDirName, prepareClone, removeOrderDir, type Run } from "../src/lib/lend-clone.js";
 import { runBounded } from "../src/lib/run-bounded.js";
 
 const ENV = { PATH: process.env.PATH, HOME: process.env.HOME, GH_TOKEN: "gh-secret", BRIDGE_CONTROL_TOKEN: "ctl" };
@@ -70,18 +70,38 @@ describe("T94 工作副本", () => {
     expect(orderDirName("../../x")).not.toContain("/");
   });
 
-  test("对方仓库里提交了指向工作副本外面的软链（.env → 宿主文件、子目录里的 ../../ 逃逸）：不起 worker；指向里面的软链照常", async () => {
+  test("对方仓库里提交的软链一律检出成文本文件、不被跟随（r2 P1：链式 ../、绝对路径、悬空、指向 ~ 下凭据）", async () => {
     const host = mkdtempSync(join(tmpdir(), "host-"));
-    writeFileSync(join(host, ".env"), "GH_TOKEN=fake-host-gh\n");
+    writeFileSync(join(host, "host.env"), "GH_TOKEN=fake-host-gh\n");
+    const links = {
+      same: ".", ".env": "same/../host.env", // 审查员的链式逃逸：按字面在里面，实际解析到 clone 的父目录
+      "abs.env": join(host, "host.env"),
+      dangling: "no/such/file",
+      "creds/hosts.yml": join(process.env.HOME ?? "/nonexistent", ".config", "gh", "hosts.yml"),
+      "AGENTS.md": "a.txt", // 本仓自己就有这种指向里面的软链：照样检出成文本，不因此拒借
+    };
+    const { dir: src, head } = await sourceRepo(links);
     const root = mkdtempSync(join(tmpdir(), "lend-root-"));
-    for (const [i, links] of ([{ ".env": join(host, ".env") }, { "sub/deep/.env.local": "../../../../host/.env" }] as Record<string, string>[]).entries()) {
-      const { dir: src, head } = await sourceRepo(links);
-      expect(await prepareClone({ orderId: `ln${i}`, repo: "o/r", pr: null, head }, { root, env: ENV, run: localRun(src) }))
-        .toMatchObject({ ok: false, reason: expect.stringContaining("软链") });
+    const r = await prepareClone({ orderId: "ln", repo: "o/r", pr: null, head }, { root, env: ENV, run: localRun(src) });
+    expect(r).toMatchObject({ ok: true });
+    const dir = orderDir("ln", root);
+    for (const [at, to] of Object.entries(links)) {
+      expect(lstatSync(join(dir, at)).isSymbolicLink()).toBe(false);
+      expect(readFileSync(join(dir, at), "utf8")).toBe(to);
     }
-    const { dir: src, head } = await sourceRepo({ "docs/a.txt": "../a.txt", "b": "docs" });
-    expect(await prepareClone({ orderId: "ln-ok", repo: "o/r", pr: null, head }, { root, env: ENV, run: localRun(src) })).toMatchObject({ ok: true });
-    expect(outsideLink(orderDir("ln-ok", root))).toBeNull();
+    expect(firstSymlink(dir)).toBeNull();
+  });
+
+  test("兜底：检出后树里仍有软链（git 没照 core.symlinks 做）就不起 worker", async () => {
+    const { dir: src, head } = await sourceRepo();
+    const root = mkdtempSync(join(tmpdir(), "lend-root-"));
+    const planting: Run = async (argv, opts) => {
+      const r = await localRun(src)(argv, opts);
+      if (argv.includes("checkout")) (mkdirSync(join(opts.cwd!, "sub"), { recursive: true }), symlinkSync("..", join(opts.cwd!, "sub", "up")));
+      return r;
+    };
+    expect(await prepareClone({ orderId: "ln2", repo: "o/r", pr: null, head }, { root, env: ENV, run: planting }))
+      .toMatchObject({ ok: false, reason: expect.stringContaining("sub/up") });
   });
 
   test("删目录只删这张单自己的：软链到别处的不删", () => {
