@@ -45,10 +45,11 @@ export interface SettingsState {
   openCron: () => void;
 }
 
-/** 通用：个人资料 / 语言 / 通知 / 版本与更新 */
+/** 通用：App 服务器地址（仅原生壳）/ 个人资料 / 语言 / 通知 / 版本与更新 */
 function GeneralPage({ s }: { s: SettingsState }) {
   return (
     <>
+      {isNativeShell() && <ShellServerSection />}
       {s.full && <ProfileSection draft={s.profile} busy={s.busy} />}
       <LanguageSection />
       {s.full && <PushSection push={s.push} />}
@@ -81,7 +82,7 @@ function SessionsPage({ s }: { s: SettingsState }) {
   );
 }
 
-/** 连接与集成：手机访问 / App 服务器地址(仅原生壳) ‖ 语音识别 Key / 订阅额度实时读取 */
+/** 连接与集成：手机访问 ‖ 语音识别 Key / 订阅额度实时读取（App 服务器地址在「通用」页顶部） */
 function ConnectPage({ s }: { s: SettingsState }) {
   const t = useT();
   return (
@@ -89,7 +90,6 @@ function ConnectPage({ s }: { s: SettingsState }) {
       <GroupLabel>{t("访问")}</GroupLabel>
       {s.full && <AccessPathsSection />}
       {s.full && <RemoteAccessSection />}
-      {isNativeShell() && <ShellServerSection />}
       {s.full && (
         <>
           <GroupLabel>{t("集成")}</GroupLabel>
