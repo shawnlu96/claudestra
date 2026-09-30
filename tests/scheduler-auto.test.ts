@@ -30,6 +30,7 @@ describe("T68f auto mode: the full code flow on mock workers", () => {
       expect(await f.tick()).toMatchObject({ step: "sent", detail: "acp" });
       expect(f.sent.at(-1)).toMatchObject({ agent: "agent-rv-t1", route: "acp" });
       expect(f.sent.at(-1)?.text).toContain(`--head ${H1} --session s-rv --family codex`);
+      expect(f.sent.at(-1)?.text).toContain("rv-t1（已固定在这个 head；只读");
       await f.tick();
       expect(f.sent).toHaveLength(3);
 
@@ -56,6 +57,23 @@ describe("T68f auto mode: the full code flow on mock workers", () => {
       expect(moves).toEqual(["agent-task-one:spec>restate", "scheduler:restate>build", "agent-task-one:build>review", "scheduler:review>fix",
         "agent-task-one:fix>review", "scheduler:review>merge"]);
       expect(f.notices).toEqual([]);
+      expect(f.pins).toEqual([H1, H2]);
+    } finally { f.close(); }
+  });
+
+  test("a reviewer checkout that cannot be pinned to the head cancels the order before the claim and goes to PM", async () => {
+    const f = autoFixture();
+    try {
+      await toBuild(f);
+      await f.tick();
+      await f.cli("agent-task-one", "deliver", "T1", "--from", "build", "--head", H1);
+      await f.tick(); // ensure reviewer
+      f.refusePin("审查 worktree 有已跟踪文件被改过");
+      expect(await f.tick()).toMatchObject({ step: "manual", detail: expect.stringContaining("已跟踪文件被改过") });
+      expect(f.intents().at(-1)).toMatchObject({ action: "review", status: "cancelled" });
+      expect(f.sent.map((s) => s.agent)).toEqual(["agent-task-one", "agent-task-one"]);
+      expect(f.notices[0]).toContain("已跟踪文件被改过");
+      expect(getWorkflow(f.db, "T1")?.mode).toBe("manual");
     } finally { f.close(); }
   });
 

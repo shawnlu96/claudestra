@@ -26,6 +26,8 @@ export interface AutoTickDeps {
   worker(ref: SessionRef): WorkerSession | { manual: string };
   /** Find or create this card's session for the role. It never binds: binding is a ledger write through the CLI. */
   ensure(task: LedgerTask, role: SessionRole, family: AuthorFamily): Promise<EnsureResult>;
+  /** Put the reviewer's own checkout on the head under review; runs before the claim, so a refusal writes nothing. */
+  pinReview(task: LedgerTask, ref: SessionRef, head: string | null): Promise<{ dir: string } | { manual: string }>;
   notifyPm(task: LedgerTask, text: string): Promise<void>;
   now(): number;
 }
@@ -129,7 +131,16 @@ class Card {
       if (intent.status === "pending") await this.settle(intent.id, "pending", "cancelled", `未投递：${w.manual}`);
       return this.escalate(w.manual, intent.id);
     }
-    const order = workOrderFor(this.task, intent, plan, ref);
+    let checkout: string | undefined;
+    if (ref.role === "reviewer" && intent.status === "pending") {
+      const pinned = await this.deps.pinReview(this.task, ref, intent.head);
+      if ("manual" in pinned) {
+        await this.settle(intent.id, "pending", "cancelled", `未投递：${oneLine(pinned.manual)}`);
+        return this.escalate(pinned.manual, intent.id);
+      }
+      checkout = pinned.dir;
+    }
+    const order = workOrderFor(this.task, intent, plan, ref, checkout);
     if (!order) return this.out("held", `节点 ${intent.node} 没有任务单`);
     return this.fromDrive(await driveDispatch(this.ops(), w, ref, order));
   }

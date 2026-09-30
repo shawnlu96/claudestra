@@ -1,20 +1,24 @@
 /**
  * Production wiring of the auto tick: ledger writes through the scheduler-identity CLI, adapters chosen from the
  * registry, the author taken from the card (PM names it; the engine never invents an executor), and the per-card
- * cross-family reviewer created through `manager create` in the author's working directory. Anything the engine
+ * cross-family reviewer created through `manager create` in its own detached worktree of the author's repository. Anything the engine
  * cannot prove (no session id yet, create timed out) is "unknown" and stops for PM rather than being created twice.
  */
 import type { Database } from "bun:sqlite";
+import { realpathSync } from "node:fs";
+import { join } from "node:path";
 import { bridgeSend } from "./bridge-client.js";
 import { resolveBunPath } from "./bun-path.js";
 import type { AuthorFamily } from "./ledger-scheduler.js";
 import type { LedgerTask } from "./ledger-stages.js";
 import { getMeta } from "./ledger-store.js";
+import { statePath } from "./paths.js";
 import { readRegistryAgentsSync, type RegistryAgent } from "./registry.js";
 import { SRC_DIR } from "./repo-root.js";
 import { runManagerProcess } from "./run-manager.js";
 import { boundRef, type AutoTickDeps } from "./scheduler-auto-tick.js";
 import { acpPort, messagePort, type RegistryRow } from "./scheduler-auto-ports.js";
+import { openReviewWorktree, pinReviewWorktree } from "./scheduler-review-worktree.js";
 import type { SessionRole } from "./scheduler-sessions.js";
 import { ledgerResult } from "./scheduler-work-order.js";
 import { createAcpWorker } from "./worker-acp.js";
@@ -41,10 +45,18 @@ function refOf(task: LedgerTask, role: SessionRole, row: RegistryAgent, family: 
   return { kind: "ready", ref, created: false };
 }
 
-async function createReviewer(db: Database, registryRow: RegistryRow, task: LedgerTask, family: AuthorFamily): Promise<EnsureResult> {
+interface Env { db: Database; registryRow: RegistryRow; worktreeRoot: string }
+const checkoutOf = (env: Env, taskId: string): string => join(env.worktreeRoot, `rv-${taskId.toLowerCase()}`);
+const realOr = (p: string): string => { try { return realpathSync.native(p); } catch { return p; /* not there yet: compare as written */ } };
+
+async function createReviewer(env: Env, task: LedgerTask, family: AuthorFamily): Promise<EnsureResult> {
+  const { db, registryRow } = env;
   const author = boundRef(db, task.id, "author");
-  const dir = author && registryRow(author.agent)?.cwd;
-  if (!dir) return { kind: "manual", reason: "找不到执行者的工作目录，建不了审查 session" };
+  const authorDir = author && registryRow(author.agent)?.cwd;
+  if (!authorDir) return { kind: "manual", reason: "找不到执行者的工作目录，建不了审查 session" };
+  const opened = await openReviewWorktree(authorDir, checkoutOf(env, task.id), task.headSHA);
+  if ("manual" in opened) return { kind: "manual", reason: opened.manual };
+  const dir = opened.dir;
   const name = reviewerName(task.id);
   const runtime = family === "codex" ? ["--runtime", "codex", "--transport", "acp"] : [];
   const r = await plainManager("create", name, dir, "--purpose", `${task.id} 跨模型对抗式审查（调度引擎建）`, "--project", task.project,
@@ -61,14 +73,24 @@ async function createReviewer(db: Database, registryRow: RegistryRow, task: Ledg
   return { kind: "unknown", reason: `${name} 已建，90 秒内没等到 session id` };
 }
 
-async function ensure(db: Database, registryRow: RegistryRow, task: LedgerTask, role: SessionRole, family: AuthorFamily): Promise<EnsureResult> {
+async function ensure(env: Env, task: LedgerTask, role: SessionRole, family: AuthorFamily): Promise<EnsureResult> {
+  const { registryRow } = env;
   if (role === "author") {
     if (!task.agent) return { kind: "manual", reason: "自动卡要先由 PM 指定执行者（task.agent）并建好它的 session" };
     const row = registryRow(task.agent);
     return row ? refOf(task, role, row, family) : { kind: "manual", reason: `执行者 ${task.agent} 不在本机 registry` };
   }
   const existing = registryRow(reviewerName(task.id));
-  return existing ? refOf(task, role, existing, family) : createReviewer(db, registryRow, task, family);
+  return existing ? refOf(task, role, existing, family) : createReviewer(env, task, family);
+}
+
+/** Only a reviewer living in its own checkout gets orders; one created elsewhere (e.g. in the author's tree) stops for PM. */
+async function pinReview(env: Env, task: LedgerTask, ref: SessionRef, head: string | null): Promise<{ dir: string } | { manual: string }> {
+  const dir = checkoutOf(env, task.id);
+  const cwd = env.registryRow(ref.agent)?.cwd;
+  if (!cwd || realOr(cwd) !== realOr(dir)) return { manual: `${ref.agent} 的工作目录 ${cwd ?? "（无）"} 不是它独立的审查 worktree ${dir}` };
+  if (!head) return { manual: "派审意图没有 head" };
+  return pinReviewWorktree(dir, head);
 }
 
 function worker(db: Database, registryRow: RegistryRow, ref: SessionRef): WorkerSession | { manual: string } {
@@ -98,13 +120,15 @@ async function notifyPm(db: Database, task: LedgerTask, text: string): Promise<v
   if (!r.ok) throw new Error(`发给 ${pm} 失败：${r.error}`);
 }
 
-/** registryPath is for tests; production reads the canonical registry fresh on every lookup. */
-export function autoTickDeps(db: Database, registryPath?: string): AutoTickDeps {
+/** registryPath / worktreeRoot are for tests; production reads the canonical registry fresh on every lookup. */
+export function autoTickDeps(db: Database, registryPath?: string, worktreeRoot = statePath("worktrees")): AutoTickDeps {
   const registryRow: RegistryRow = (agent) => readRegistryAgentsSync(registryPath).find((a) => a.name === agent);
+  const env: Env = { db, registryRow, worktreeRoot };
   return {
     manager: schedulerLedger,
     worker: (ref) => worker(db, registryRow, ref),
-    ensure: (task, role, family) => ensure(db, registryRow, task, role, family),
+    ensure: (task, role, family) => ensure(env, task, role, family),
+    pinReview: (task, ref, head) => pinReview(env, task, ref, head),
     notifyPm: (task, text) => notifyPm(db, task, text),
     now: () => Date.now(),
   };

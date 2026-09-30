@@ -19,7 +19,7 @@ const CLI = `bun ${SRC_DIR}/manager.ts ledger`;
 
 export const stepOfNode = (node: string): WorkOrder["step"] | null => STEP_OF[node] ?? null;
 
-export function workOrderFor(task: LedgerTask, intent: SchedulerIntent, plan: Planned | null, ref: SessionRef): WorkOrder | null {
+export function workOrderFor(task: LedgerTask, intent: SchedulerIntent, plan: Planned | null, ref: SessionRef, checkout?: string): WorkOrder | null {
   const step = stepOfNode(intent.node);
   if (!step) return null;
   const w = plan?.workOrder;
@@ -32,7 +32,8 @@ export function workOrderFor(task: LedgerTask, intent: SchedulerIntent, plan: Pl
   }
   if (step === "review") {
     const report = `${statePath("ledger", "reviews", `${task.id}-r${task.round}`)}/report.md`;
-    return { ...base, inputs: [spec, `只审 head ${intent.head ?? "（无）"}`], outputs: ["逐项结论 JSON（findingId / family / severity / probe）", `报告：${report}`],
+    const where = checkout ? [`审查目录：${checkout}（已固定在这个 head；只读，不改、不提交、不推送）`] : [];
+    return { ...base, inputs: [spec, `只审 head ${intent.head ?? "（无）"}`, ...where], outputs: ["逐项结论 JSON（findingId / family / severity / probe）", `报告：${report}`],
       acceptance: ["对抗式：专找能打穿规格保证的路径", "同类问题沿用上一轮的 findingId"],
       writeBack: `${CLI} review ${task.id} --reviewer ${ref.agent} --verdict pass|changes|block --p0 N --p1 N --p2 N --head ${intent.head ?? "<head>"}` +
         ` --session ${ref.sessionId} --family ${ref.family} --findings <逐项结论.json> --path ${report}（不要带 --to，阶段由调度器推）` };

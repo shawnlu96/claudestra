@@ -49,6 +49,8 @@ export function autoFixture(opts: { template?: "code" | "ui"; reviewerRuntime?: 
   const notices: string[] = [];
   const ensured: { role: string; family: string }[] = [];
   let sendMode: "ok" | "refuse" | "lost" = "ok";
+  const pins: string[] = [];
+  let pinRefusal: string | null = null;
   const send = (route: Sent["route"]) => async (agent: string, sessionId: string, text: string, key: string): Promise<SendResult> => {
     if (sendMode === "refuse") return { ok: false, delivered: false, reason: "bridge 拒收" };
     sent.push({ agent, sessionId, text, key, route });
@@ -71,6 +73,7 @@ export function autoFixture(opts: { template?: "code" | "ui"; reviewerRuntime?: 
       return { kind: "ready", created: role === "reviewer", ref: { taskId: task.id, role, agent, sessionId: row.sessionId, family,
         transport: row.transport === "acp" ? "acp" : "tmux" } };
     },
+    pinReview: async (_task, _ref, head) => { pins.push(head ?? ""); return pinRefusal ? { manual: pinRefusal } : { dir: join(dir, "rv-t1") }; },
     notifyPm: async (_task, text) => { notices.push(text); },
     now: () => now,
   };
@@ -91,7 +94,7 @@ export function autoFixture(opts: { template?: "code" | "ui"; reviewerRuntime?: 
   const advance = (ms: number) => { now += ms; };
   const close = () => { closeLedger(path); rmSync(dir, { recursive: true, force: true }); };
   return { db, at, cli, tick, task, intents, review, sent, live, acpState, notices, ensured, advance, close, tickDeps, registryPath,
-    setSend: (m: typeof sendMode) => { sendMode = m; } };
+    setSend: (m: typeof sendMode) => { sendMode = m; }, pins, refusePin: (why: string | null) => { pinRefusal = why; } };
 }
 
 /** Drive the card from spec to the start of build: author session, restate order, worker restates, PM releases it. */
