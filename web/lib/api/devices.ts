@@ -59,12 +59,13 @@ export async function pairStatus(fp: string, approvalId: string, signal?: AbortS
 }
 
 /**
- * 直托管开机时把凭据备好，返回最后有没有凭据。先探 whoami：已有凭据就什么都不做。没有时依次试：
- *   ① 从旧 web 服务升上来的浏览器还带着旧登录 cookie（cstra_session，HttpOnly 看不见）→ 一次性换成设备凭据（POST /devices/legacy-session）；
- *   ② 本机回环打开的（含中继页面切过来的本机直连）→ 一键配对（POST /devices/local，bridge 只认真实回环 socket）。
- * 前两步故意不走 api()/apiRaw()：那两个遇 401 会把机器标成「需重新配对」，而这里的 401 是预期的探测结果。
+ * 直托管开机时把凭据备好，返回最后有没有凭据。先探 whoami：已有凭据就什么都不做。没有时：
+ *   从旧 web 服务升上来的浏览器还带着旧登录 cookie（cstra_session，HttpOnly 看不见）→ 一次性换成设备凭据（POST /devices/legacy-session）。
+ * 本机回环不再自动配对：全权要在别的已配对设备上批准（bridge/devices.ts pairLocal），开机自动发会每次刷新都推一条待批；
+ * 拿不到就由 MachineGate 带去 /pair，点「一键配对本机」才发。
+ * 这里故意不走 api()/apiRaw()：那两个遇 401 会把机器标成「需重新配对」，而这里的 401 是预期的探测结果。
  */
-export async function ensureDirectCredential(fp: string, loopback: boolean): Promise<boolean> {
+export async function ensureDirectCredential(): Promise<boolean> {
   const deviceName = defaultDeviceName(navigator.userAgent, navigator.platform);
   try {
     const who = await fetch("/api/v1/whoami", { credentials: "include", cache: "no-store" });
@@ -74,19 +75,24 @@ export async function ensureDirectCredential(fp: string, loopback: boolean): Pro
       headers: { "Content-Type": "application/json", "x-cstra-device": "1" },
       body: JSON.stringify({ deviceName }),
     });
-    if (r.ok) return true;
-    if (!loopback) return false;
-    await pairLocal(fp, deviceName);
-    return true;
+    return r.ok;
   } catch (e) {
     console.warn("[pair] 直托管自动取凭据失败，按普通配对处理:", (e as Error).message);
     return false;
   }
 }
 
-/** 直托管 + 本机回环：一键配对（bridge 只认真实回环 socket + x-cstra-device 头） */
-export function pairLocal(fp: string, deviceName: string): Promise<PairedInfo> {
-  return api<PairedInfo>("/devices/local", { method: "POST", json: { deviceName } }, m(fp));
+export interface LocalPending {
+  pending: true;
+  approvalId: string;
+  /** 8 位展示码：批准的设备上会显示同一个，对得上再允许 */
+  code: string;
+  machineName: string;
+}
+
+/** 直托管 + 本机回环：一键配对。bridge 带控制 token 才直接签（网页没有）；否则 202 进待批，拿 approvalId 轮询 pairStatus */
+export function pairLocal(fp: string, deviceName: string): Promise<PairedInfo | LocalPending> {
+  return api<PairedInfo | LocalPending>("/devices/local", { method: "POST", json: { deviceName } }, m(fp));
 }
 
 /** 中继的短码查找（不在任何机器的基址下，直接打同源）；404 code_invalid / 429 rate_limited 抛 ApiError */
@@ -127,6 +133,8 @@ export interface PendingApproval {
   clientIp: string | null;
   grant: PairedInfo["grant"];
   guest?: string;
+  /** 本机浏览器请求全权（这台电脑自己的浏览器；本机的 agent 也能冒充，码对得上再允许） */
+  local?: boolean;
   expiresAt: string;
 }
 
@@ -175,6 +183,8 @@ export function pairErrorText(e: unknown, local = false): string {
       return "这台机器没有连上中继";
     case "no_machine":
       return "还没有选择机器";
+    case "no_approver":
+      return "还没有能批准的已配对设备：在电脑终端运行 claudestra pair";
   }
   if (err?.status === 403) return local ? "只能在电脑本机的浏览器里一键配对" : "配对请求被这台机器拒绝了";
   return err?.message || "配对失败";

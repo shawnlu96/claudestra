@@ -51,7 +51,7 @@ owner 点确认后，bridge 先把提案标成「已确认」，再依次做下�
 
 撤下班子：`team down --project <id>`，同样要 owner 确认。撤下后事件路由停止，调度助理移出 PM 名单，班子角色一并撤掉；这个 agent 本身不会被删，需要的话手动 `kill`。
 
-**关于「不能冒充 owner」**：这是产品约束，不是安全边界。所有 agent 都以你的用户身份运行，默认不做权限确认，一个铁了心的 agent 可以直接改状态文件和台账库，也可以自己去配对一台设备（本机的 `/api/v1/devices/local` 能直接签出 owner 设备凭据；计划中（T34，尚未实现）收紧为只接受带 `BRIDGE_CONTROL_TOKEN` 的调用或真人确认）。「已确认」这个标记记在状态目录的提案文件里，同一个用户的进程也能伪造它。卡片和按钮的保证**只在工具面上成立**：只用 Claudestra 给的工具（reply、send_to_agent、edit_message、按钮、ledger 命令）的 agent，执行者和调度助理提不了班子提案；bridge 管理按钮的 id（班子确认、权限弹窗、自动放行、换模型等，见 `src/lib/reserved-buttons.ts`）一律发不出去；edit_message 只能改自己经 reply 发出的消息，带管理按钮的消息谁都改不了。所以在工具面上，owner 点到的是 bridge 按提案渲染、之后没被改过的那张卡片。
+**关于「不能冒充 owner」**：这是产品约束，不是安全边界。所有 agent 都以你的用户身份运行，默认不做权限确认，一个铁了心的 agent 可以直接改状态文件和台账库，也可以自己去配对一台设备（本机的 `/api/v1/devices/local` 现在要 `BRIDGE_CONTROL_TOKEN` 或网页设备批准才签全权，但 agent 读得到 `.env`、也能跑 `claudestra pair` 签码自己兑换，这道闸只挡顺手的一条 curl）。「已确认」这个标记记在状态目录的提案文件里，同一个用户的进程也能伪造它。卡片和按钮的保证**只在工具面上成立**：只用 Claudestra 给的工具（reply、send_to_agent、edit_message、按钮、ledger 命令）的 agent，执行者和调度助理提不了班子提案；bridge 管理按钮的 id（班子确认、权限弹窗、自动放行、换模型等，见 `src/lib/reserved-buttons.ts`）一律发不出去；edit_message 只能改自己经 reply 发出的消息，带管理按钮的消息谁都改不了。所以在工具面上，owner 点到的是 bridge 按提案渲染、之后没被改过的那张卡片。
 
 这不是绝对保证：agent 本身是以你的用户身份运行的 shell，能读仓库的 `.env`，会话环境里本来也带着 `DISCORD_BOT_TOKEN`，拿到 bot token 就能绕开 bridge 直连 Discord，以 bot 身份发带任意按钮 id 的消息或改已有消息。这和上面改状态文件、配对设备一样，属于「铁了心的 agent」，不在防护范围内（同 CLAUDE.md 的 Security posture：guard rail，不是安全边界）。除了 owner 一次性迁移用的 `ledger import`（只在名单为空时写），PM 名单的每次变更都能在台账里查到是 owner 点的哪份提案。
 
