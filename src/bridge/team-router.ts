@@ -165,7 +165,9 @@ export function teamRouterTicker(d: TickerDeps): () => Promise<void> {
   };
 }
 
-function envelopeOf(n: RouteNotice, channelId: string, client: Client | undefined): Envelope {
+type Notice = Pick<RouteNotice, "to" | "text" | "messageId">;
+
+function envelopeOf(n: Notice, channelId: string, client: Client | undefined): Envelope {
   return {
     from: { kind: "bridge", label: "ledger" },
     // 不在线时没有可用的 ws：押后队列落盘本来就剥掉 ws、投递时换最新连接（同 pushBackToCaller）
@@ -181,7 +183,7 @@ function envelopeOf(n: RouteNotice, channelId: string, client: Client | undefine
  * 真实投递：在线且空闲就直接投，否则进押后队列。deliver 报错、丢弃或抛错也进押后队列（下次 Stop / 扫描再投）；
  * deliver 自己押回（queued）的由押后队列送达时再标来源。
  */
-export function makeSender(deps: TeamRouterDeps): (n: RouteNotice, channelId: string) => Promise<string> {
+export function makeSender(deps: TeamRouterDeps): (n: Notice, channelId: string) => Promise<string> {
   return async (n, channelId) => {
     const client = deps.clients.get(channelId);
     const env = envelopeOf(n, channelId, client);
@@ -201,19 +203,30 @@ export function makeSender(deps: TeamRouterDeps): (n: RouteNotice, channelId: st
 }
 
 let timer: ReturnType<typeof setInterval> | null = null;
+let sender: ((n: Notice, channelId: string) => Promise<string>) | null = null;
+const activeChannelOf = (agent: string): string | null => readRegistryAgentsSync().find((a) => a.name === agent && a.status === "active")?.channelId ?? null;
+
+/** 班子路由之外的台账通知（执行者 ask → PM，bridge/order-tools.ts）：同一条投递路径，在线空闲直投、否则押后 */
+export async function sendLedgerNotice(n: Notice): Promise<string> {
+  const channelId = activeChannelOf(n.to);
+  if (!channelId) return `${n.to} 不在 registry（或不活跃），没投`;
+  if (!sender) return "班子路由还没启动，没投";
+  return sender(n, channelId);
+}
 
 /** bridge 启动时调一次（幂等） */
 export function initTeamRouter(deps: TeamRouterDeps): void {
   if (timer) return;
   const log = (m: string) => console.log(m);
+  sender = makeSender(deps);
   onHeldDelivered((channelId, env) => {
     if (isLedgerNotice(env)) deps.markBridgeSource?.(channelId);
   });
   const tick = teamRouterTicker({
     reader: new LedgerReader(),
     cursorPath: CURSOR_PATH,
-    channelOf: (agent) => readRegistryAgentsSync().find((a) => a.name === agent && a.status === "active")?.channelId ?? null,
-    send: makeSender(deps),
+    channelOf: activeChannelOf,
+    send: sender,
     escalate: async (a) => {
       const args = ["ledger", "escalate", a.taskId, "--reason", a.reason, "--auto", "--dedup", a.dedup];
       const r = await runManagerProcess(args, { bunPath: BUN_PATH, managerPath: MANAGER_PATH, env: ENV_WITH_BUN, timeoutMs: 30_000 }).catch((e: Error) => ({ ok: false, error: e.message }));
