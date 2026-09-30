@@ -142,8 +142,9 @@ describe("出墙", () => {
   });
 });
 
-function env(from: Envelope["from"], to: string, msg: string): Envelope {
-  return { from, to: { kind: "local", channelId: to, agentName: `agent-${to}`, ws: {} as never }, intent: "request", content: msg, meta: { messageId: msg, triggerKind: "agent_tool", ts: "", threadId: "" } };
+function env(from: Envelope["from"], cid: string, msg: string): Envelope {
+  const to = { kind: "local" as const, channelId: cid, agentName: `agent-${cid}`, ws: {} as never };
+  return { from, to, intent: "request", content: msg, meta: { messageId: msg, triggerKind: "agent_tool", ts: "", threadId: "" } };
 }
 const agentFrom = (cid: string): Envelope["from"] => ({ kind: "local", agentName: `agent-${cid}`, channelId: cid, ws: {} as never });
 

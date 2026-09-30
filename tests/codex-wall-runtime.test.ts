@@ -14,8 +14,9 @@ const T0 = Date.parse("2026-09-30T01:48:00Z");
 const HIT = "You've hit your usage limit. Upgrade to Pro, visit settings to purchase more credits or try again at Oct 3rd, 2026 9:12 AM.";
 const R = "codex_quota_wall" as const;
 
-function env(from: Envelope["from"], to: string, id: string): Envelope {
-  return { from, to: { kind: "local", channelId: to, agentName: `agent-${to}`, ws: {} as never }, intent: "request", content: id, meta: { messageId: id, triggerKind: "agent_tool", ts: "", threadId: "" } };
+function env(from: Envelope["from"], cid: string, id: string): Envelope {
+  const to = { kind: "local" as const, channelId: cid, agentName: `agent-${cid}`, ws: {} as never };
+  return { from, to, intent: "request", content: id, meta: { messageId: id, triggerKind: "agent_tool", ts: "", threadId: "" } };
 }
 const agentFrom = (cid: string): Envelope["from"] => ({ kind: "local", agentName: `agent-${cid}`, channelId: cid, ws: {} as never });
 const owner: Envelope["from"] = { kind: "user", userId: "u1", username: "owner" } as Envelope["from"];
