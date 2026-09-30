@@ -13,7 +13,7 @@ import type { Subprocess } from "bun";
 import { mkdirSync } from "node:fs";
 import { CODEX_MCP_ENV_VARS } from "../codex-launch.js";
 import { isSandbox, SANDBOX_ROOT_ENV } from "../sandbox.js";
-import { pickWorkerEnv } from "../runtimes/clean-env.js";
+import { LEND_WORKER_MARK, pickWorkerEnv } from "../runtimes/clean-env.js";
 import { codexAcpInstalled } from "./install.js";
 import type { RpcWire } from "./rpc.js";
 import { ACP_AGENT_ENV, isRepoStub, repoStubPath, sandboxAcpHome } from "./stub.js";
@@ -56,7 +56,7 @@ export interface AdapterEnvSpec {
 }
 
 export function adapterEnv(s: AdapterEnvSpec): Record<string, string> {
-  const env: Record<string, string> = s.clean ? pickWorkerEnv(s.base) : {};
+  const env: Record<string, string> = s.clean ? { ...pickWorkerEnv(s.base), [LEND_WORKER_MARK]: "1" } : {};
   if (!s.clean) for (const [k, v] of Object.entries(s.base)) if (typeof v === "string") env[k] = v;
   for (const k of ["TMUX", "TMUX_PANE", "CLAUDESTRA_CODEX_PREAMBLE", "DISCORD_CHANNEL_ID", "BRIDGE_URL", "BRIDGE_PORT", ACP_AGENT_ENV]) delete env[k];
   const config: Record<string, unknown> = { check_for_update_on_startup: false };

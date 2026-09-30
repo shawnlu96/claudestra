@@ -19,6 +19,9 @@ const polled = (orderId = "o1") => ({ orderId, taskId: "T93", step: "review", fa
 const wire = (orderId = "o1") => ({ v: 1, orderId, taskId: "T93", specRev: 1, dagVersion: null, node: "R3", step: "review", round: 1, head: HEAD,
   repo: "shawnlu96/claudestra", pr: 270, inputs: ["规格"], outputs: ["报告"], acceptance: ["验收"], writeBack: "submit_verdict", findings: [], fallback: null });
 
+/** 限时预先授权（specRev 2）：auto 必须带 until 才算数；harness 的时钟从 1970 年开始，2100 年远在未来 */
+const AUTO = { confirm: "auto", until: "2100-01-01T00:00:00.000Z" } as const;
+
 type Reply = { status: number; body: unknown } | "throw";
 
 function harness(opts: { entry?: Partial<LendEntry>; peer?: Partial<HttpPeer>; env?: Record<string, string> } = {}) {
@@ -33,7 +36,8 @@ function harness(opts: { entry?: Partial<LendEntry>; peer?: Partial<HttpPeer>; e
   };
   const asks = new Map<string, "waiting" | "approved" | "declined">();
   const registry = new Map<string, { sessionId?: string; cwd?: string }>();
-  const log = { created: [] as string[], sent: [] as string[], killed: [] as string[], removed: [] as string[], receipts: [] as LendRow[], asksOpened: 0 };
+  const log = { created: [] as string[], sent: [] as string[], killed: [] as string[], removed: [] as string[], receipts: [] as LendRow[], asksOpened: 0, informs: [] as string[] };
+  const inform = { ok: true };
   const entry = { ...ENTRY, ...opts.entry };
   const d: LoopDeps = {
     db, now: () => t, env: opts.env ?? {}, footer: () => "（交结论的办法）", log: () => {},
@@ -48,6 +52,7 @@ function harness(opts: { entry?: Partial<LendEntry>; peer?: Partial<HttpPeer>; e
     peers: async () => [{ ...PEER, ...opts.peer } as HttpPeer],
     ask: {
       open: async (p) => { log.asksOpened++; if (!asks.has(`ask-${p.orderId}`)) asks.set(`ask-${p.orderId}`, "waiting"); return { ok: true, askId: `ask-${p.orderId}` }; },
+      inform: async (p) => { if (!inform.ok) return { ok: false, error: "bridge 不在" }; log.informs.push(p.orderId); return { ok: true }; },
       verdict: (id) => { const s = asks.get(id) ?? "declined"; return s === "declined" ? { state: "declined", reason: "不批" } : { state: s }; },
     },
     clone: async (i) => ({ ok: true, dir: `/lend/work/${i.orderId}` }),
@@ -62,7 +67,7 @@ function harness(opts: { entry?: Partial<LendEntry>; peer?: Partial<HttpPeer>; e
       alive: async (n) => registry.has(n),
     },
   };
-  return { db, d, A, asks, registry, log, calls, tick: () => lendTick(d), advanceTime: (ms: number) => { t += ms; }, ops: () => calls.map((c) => c.op) };
+  return { db, d, A, asks, registry, log, calls, inform, tick: () => lendTick(d), advanceTime: (ms: number) => { t += ms; }, ops: () => calls.map((c) => c.op) };
 }
 
 /** 一路走到 started（首条派单已发） */
@@ -105,11 +110,61 @@ describe("T94 确认门", () => {
   });
 
   test("auto：不开 ask，直接 claim", async () => {
-    const h = harness({ entry: { confirm: "auto" } });
+    const h = harness({ entry: AUTO });
     await h.tick();
     await h.tick();
     expect(h.log.asksOpened).toBe(0);
     expect(h.ops()).toContain("claim");
+  });
+});
+
+describe("T94 限时预先授权（specRev 2）", () => {
+  test("生效期间：不开 ask，每单先通知 owner 一次再 claim；通知只发一次", async () => {
+    const h = harness({ entry: AUTO });
+    for (let i = 0; i < 4; i++) await h.tick();
+    expect(h.log.asksOpened).toBe(0);
+    expect(h.log.informs).toEqual(["o1"]);
+    expect(typeof getOrder(h.db, "o1")!.preview.informedAt).toBe("number");
+    expect(h.log.created).toEqual([workerName("o1")]);
+  });
+
+  test("通知没送到：不 claim、不起 worker，下轮再发", async () => {
+    const h = harness({ entry: AUTO });
+    h.inform.ok = false;
+    await h.tick();
+    await h.tick();
+    expect(h.ops()).not.toContain("claim");
+    expect(getOrder(h.db, "o1")!.state).toBe("asked");
+    h.inform.ok = true;
+    await h.tick();
+    expect(h.log.informs).toEqual(["o1"]);
+    expect(h.ops()).toContain("claim");
+  });
+
+  test("到期：恢复逐单确认——开 ask，owner 没批不 claim", async () => {
+    const h = harness({ entry: { confirm: "auto", until: new Date(1_000_000 + 60_000).toISOString() } });
+    h.advanceTime(120_000);
+    await h.tick();
+    await h.tick();
+    expect(h.log.informs).toEqual([]);
+    expect(h.log.asksOpened).toBe(1);
+    expect(h.ops()).not.toContain("claim");
+  });
+
+  test("没写 until 的 auto 一律按逐单确认", async () => {
+    const h = harness({ entry: { confirm: "auto" } });
+    await h.tick();
+    await h.tick();
+    expect(h.log.asksOpened).toBe(1);
+    expect(h.ops()).not.toContain("claim");
+  });
+
+  test("当天单数用完：第二张单不通知、不 claim", async () => {
+    const h = harness({ entry: { ...AUTO, quota: { ordersPerDay: 1, tokensPerDay: null } } });
+    h.A.poll = () => ({ status: 200, body: { ok: true, v: 1, orders: [polled("o1"), polled("o2")], pollAfterMs: 30_000 } });
+    for (let i = 0; i < 4; i++) await h.tick();
+    expect(h.log.informs).toEqual(["o1"]);
+    expect(h.calls.filter((c) => c.op === "claim").map((c) => c.body.orderId)).toEqual(["o1"]);
   });
 
   test("出借关掉后，还没 claim 的单放弃", async () => {
@@ -139,7 +194,7 @@ describe("T94 前提不满足不 poll", () => {
   });
 
   test("30 秒内不重复 poll", async () => {
-    const h = harness({ entry: { confirm: "auto", repos: ["other/repo"] } });
+    const h = harness({ entry: { ...AUTO, repos: ["other/repo"] } });
     await h.tick();
     await h.tick();
     expect(h.ops().filter((o) => o === "poll")).toHaveLength(1);
@@ -159,7 +214,7 @@ describe("T94 前提不满足不 poll", () => {
 
 describe("T94 失败与释放", () => {
   test("clone / 核 head 失败：没起 worker，记 released 并向 A 报 not_started", async () => {
-    const h = harness({ entry: { confirm: "auto" } });
+    const h = harness({ entry: AUTO });
     h.d.clone = async () => ({ ok: false, reason: "HEAD 与订单 head 不一致" });
     for (let i = 0; i < 3; i++) await h.tick();
     expect(getOrder(h.db, "o1")!.state).toBe("released");
@@ -168,7 +223,7 @@ describe("T94 失败与释放", () => {
   });
 
   test("完整订单的 head 和挂单摘要对不上：领了也立刻按 not_started 退回", async () => {
-    const h = harness({ entry: { confirm: "auto" } });
+    const h = harness({ entry: AUTO });
     h.A.claim = () => ({ status: 200, body: { ok: true, v: 1, order: { ...wire(), head: "f".repeat(40) }, text: TEXT, sha256: sha(TEXT), lease: { gen: 1, expiresAt: 0, ms: 600_000 } } });
     await h.tick();
     await h.tick();
@@ -177,7 +232,7 @@ describe("T94 失败与释放", () => {
   });
 
   test("派单全文的 sha256 对不上：当作没领成（结果不明），不 clone", async () => {
-    const h = harness({ entry: { confirm: "auto" } });
+    const h = harness({ entry: AUTO });
     h.A.claim = () => ({ status: 200, body: { ok: true, v: 1, order: wire(), text: TEXT, sha256: sha("别的"), lease: { gen: 1, expiresAt: 0, ms: 600_000 } } });
     await h.tick();
     await h.tick();

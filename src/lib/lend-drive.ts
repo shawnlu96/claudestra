@@ -34,8 +34,12 @@ export interface LendDeps {
   db: Database;
   now: () => number;
   call: LendCall;
-  /** 开 / 核逐单确认 ask（lend-ask.ts；开经 `ledger lend-ask`，核读台账） */
-  ask: { open(p: LendAskParams): Promise<{ ok: true; askId: string } | { ok: false; error: string }>; verdict(askId: string, p: LendAskParams): LendAskVerdict };
+  /** 开 / 核逐单确认 ask（lend-ask.ts；开经 `ledger lend-ask`，核读台账）；inform = 预先授权期间的每单通知（`ledger lend-inform`） */
+  ask: {
+    open(p: LendAskParams): Promise<{ ok: true; askId: string } | { ok: false; error: string }>;
+    verdict(askId: string, p: LendAskParams): LendAskVerdict;
+    inform(p: LendAskParams): Promise<{ ok: true } | { ok: false; error: string }>;
+  };
   clone(input: { orderId: string; repo: string; pr: number | null; head: string }): Promise<CloneResult>;
   removeDir(orderId: string): void;
   worker: WorkerPort;
@@ -69,7 +73,7 @@ export function askParams(row: LendRow, entry: LendEntry, d: LendDeps): LendAskP
   return {
     orderId: row.orderId, peer: row.peer, fp: row.fp, family: row.family, repo: str(p.repo), pr: typeof p.pr === "number" ? p.pr : null, head: str(p.head),
     taskId: str(p.taskId), step: str(p.step),
-    quota: typeof p.askQuota === "string" ? p.askQuota : fresh,
+    quota: entry.confirm === "auto" ? `${fresh}，预先授权到 ${entry.until ?? "?"}` : typeof p.askQuota === "string" ? p.askQuota : fresh,
   };
 }
 

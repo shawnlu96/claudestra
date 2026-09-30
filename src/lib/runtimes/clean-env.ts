@@ -35,3 +35,10 @@ export function envIPrefix(env: Record<string, string | undefined>, escape: (v: 
 
 /** 宿主告诉自己「起适配器时只给白名单」的标记；只有 envIPrefix 起的宿主才带 */
 export const CLEAN_ENV_FLAG = "CLAUDESTRA_ACP_CLEAN_ENV";
+
+/**
+ * 出借 worker 进程（codex 本体及它起的 shell）带的非秘密标记：ledger / lend / project 的身份判定（manager/ledger-identity.ts）
+ * 看到它一律拒，否则「没有频道号 = owner」会让外来任务以 owner 身份改 lend.json、延长预先授权、替 owner 答 ask。
+ * 同一 OS 用户下仍能绕开（unset 或直接写文件，§5 已知限制），防的是顺手照派单里的命令去做。
+ */
+export const LEND_WORKER_MARK = "CLAUDESTRA_LEND_WORKER";

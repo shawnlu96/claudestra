@@ -2,7 +2,8 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { answerAsk, closeAsk, openAskFull, type AskAnswer } from "../src/lib/ledger-asks.js";
 import { closeLedger, openLedger } from "../src/lib/ledger-store.js";
-import { LEND_APPROVE, lendAskInput, lendAskProblem, lendAskVerdict, type LendAskParams } from "../src/lib/lend-ask.js";
+import { LEND_APPROVE, lendAskInput, lendAskProblem, lendAskVerdict, lendInformText, type LendAskParams } from "../src/lib/lend-ask.js";
+import { runLedger } from "../src/manager/ledger.js";
 
 const P: LendAskParams = {
   orderId: "int_abc:1", peer: "team-a", fp: "abcd-ef01-2345-6789", family: "codex", repo: "shawnlu96/claudestra", pr: 270, head: "c".repeat(40),
@@ -79,5 +80,29 @@ describe("T94 逐单确认 ask", () => {
     expect(lendAskProblem({ ...P, head: "abc" })).toMatch(/head/);
     expect(lendAskProblem({ ...P, quota: "a\nb" })).toMatch(/quota/);
     expect(lendAskProblem({ ...P, repo: "../x" })).toMatch(/repo/);
+  });
+});
+
+describe("T94 预先授权的每单通知（specRev 2）", () => {
+  const run = (actor: string, notifyOwner?: (t: string) => Promise<boolean>) => runLedger(["lend-inform", "--params", JSON.stringify(P)], {
+    db: openLedger(":memory:"), actor, projectIds: [], now: () => T0,
+    loadRegistry: async () => ({ socket: "", agents: {} }) as never, saveRegistry: async () => {}, ...(notifyOwner ? { notifyOwner } : {}),
+  }) as Promise<Record<string, unknown>>;
+
+  test("正文写明外来任务会在 owner 的用户下跑一个 shell，并写出仓库、PR、head", () => {
+    const t = lendInformText(P);
+    expect(t).toContain("这会让一个外来任务在你的用户下跑一个 shell");
+    for (const s of ["shawnlu96/claudestra", "#270", "c".repeat(40), P.quota]) expect(t).toContain(s);
+  });
+
+  test("ledger lend-inform 只给调度服务身份；送到 = notified:true，没通道 = notified:false", async () => {
+    const sent: string[] = [];
+    expect(await run("owner", async (t) => { sent.push(t); return true; })).toMatchObject({ ok: false });
+    expect(await run("agent-lend-0123456789", async (t) => { sent.push(t); return true; })).toMatchObject({ ok: false });
+    expect(sent).toEqual([]);
+    expect(await run("scheduler", async (t) => { sent.push(t); return true; })).toMatchObject({ ok: true, notified: true });
+    expect(sent).toHaveLength(1);
+    expect(await run("scheduler")).toMatchObject({ ok: true, notified: false });
+    expect(await run("scheduler", async () => false)).toMatchObject({ ok: true, notified: false });
   });
 });

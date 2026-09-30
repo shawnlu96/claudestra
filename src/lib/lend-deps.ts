@@ -97,6 +97,10 @@ function lendDeps(journal: Database, ledger: LedgerReader, active: () => void): 
         const r = await svc("ledger", "lend-ask", "--params", JSON.stringify(p));
         return r.ok === true && typeof r.askId === "string" ? { ok: true, askId: r.askId } : { ok: false, error: String(r.error ?? "ledger lend-ask 失败") };
       },
+      inform: async (p) => {
+        const r = await svc("ledger", "lend-inform", "--params", JSON.stringify(p));
+        return r.ok === true && r.notified === true ? { ok: true } : { ok: false, error: String(r.error ?? r.why ?? "bridge 没收下通知") };
+      },
       verdict: (askId, p) => {
         const db = ledger.get();
         return db ? lendAskVerdict(db, askId, p) : { state: "waiting" }; // 台账暂时读不到：不当成批了，也不当成拒了

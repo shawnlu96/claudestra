@@ -11,8 +11,8 @@ import type { ProjectDef } from "./projects.js";
 
 const lendLine = (e: LendEntry): string => {
   const fam = Object.entries(e.families).filter(([, n]) => n! > 0).map(([f, n]) => `${f} ${n}`).join(" / ");
-  const confirm = e.confirm === "auto" ? "自动接单" : "逐单确认";
-  return `${e.peer}（${fam}，每天 ${e.quota.ordersPerDay} 单，${confirm}${e.until ? `，到 ${e.until.slice(0, 16)}` : ""}）`;
+  const confirm = e.confirm === "auto" ? `预先授权到 ${e.until?.slice(0, 16)}` : `逐单确认${e.until ? `，出借到 ${e.until.slice(0, 16)}` : ""}`;
+  return `${e.peer}（${fam}，每天 ${e.quota.ordersPerDay} 单，${confirm}）`;
 };
 
 export async function checkLend(path = LEND_PATH, ctx?: { contacts: LendContact[]; projects: ProjectDef[] }, now = Date.now()): Promise<Check[]> {

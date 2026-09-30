@@ -5,6 +5,7 @@
  * 输出 {ok:true, status, body}：只要请求到了对方并拿回响应就是 ok:true，对方的拒绝在 body 里；发不出去 / 不知道发没发出去是 ok:false。
  */
 import { proxyVarsIn, peerLendProblem, type LendOp } from "../lib/lend-remote.js";
+import { LEND_WORKER_MARK } from "../lib/runtimes/clean-env.js";
 import { output } from "./core.js";
 import { peerE2eOnlyFetch } from "./relay.js";
 
@@ -13,7 +14,7 @@ const USAGE = "usage: lend call <peer> poll|claim|lease|result --body '<json>'�
 const MAX_BODY = 96 * 1024;
 
 export async function cmdLendCall(args: string[]): Promise<void> {
-  if (process.env.CLAUDESTRA_SCHEDULER_SERVICE !== "1" || process.env.DISCORD_CHANNEL_ID) return output({ ok: false, code: "forbidden", error: "lend call 只给调度服务用" });
+  if (process.env.CLAUDESTRA_SCHEDULER_SERVICE !== "1" || process.env.DISCORD_CHANNEL_ID || process.env[LEND_WORKER_MARK]) return output({ ok: false, code: "forbidden", error: "lend call 只给调度服务用" });
   const [peerName, op, flag, body] = args;
   if (!peerName || !OPS.includes(op as LendOp) || flag !== "--body" || body === undefined || args.length !== 4) return output({ ok: false, error: USAGE });
   if (Buffer.byteLength(body) > MAX_BODY) return output({ ok: false, error: `请求体超过 ${MAX_BODY} 字节` });

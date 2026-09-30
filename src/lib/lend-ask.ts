@@ -53,16 +53,37 @@ export function lendAskProblem(p: unknown): string | null {
 
 const bindOf = (p: LendAskParams) => ({ action: LEND_ASK_ACTION, params: p, approve: [LEND_APPROVE] });
 
+const SHELL_WARNING = "这会让一个外来任务在你的用户下跑一个 shell：它和你是同一个系统用户，能读你家目录里的文件、能用你机器上的 git / SSH 凭据。";
+const prOf = (p: LendAskParams) => (p.pr ? `#${p.pr}（https://github.com/${p.repo}/pull/${p.pr}）` : "（无 PR，按 head 审）");
+const familyOf = (p: LendAskParams) => (p.family === "codex" ? "Codex" : p.family === "claude" ? "Claude" : p.family);
+
+/**
+ * 预先授权（lend.json confirm auto，且在 until 之前）生效时不开 ask，但每单仍告诉 owner 一声（specRev 2）：
+ * 调度服务经 `ledger lend-inform` 发到控制频道，送不到就不领这张单（lend-loop.ts）。
+ */
+export function lendInformText(p: LendAskParams): string {
+  return [
+    `出借通知（预先授权）：${p.peer} 借一个 ${familyOf(p)} 位审 ${p.repo}${p.pr ? `#${p.pr}` : ""}，马上开始。`,
+    SHELL_WARNING,
+    `仓库：${p.repo}`,
+    `PR：${prOf(p)}`,
+    `head：${p.head}`,
+    `对方的卡：${p.taskId} · ${p.step}`,
+    `额度：${p.quota}`,
+    "不想再免确认：manager lend set 改回 --confirm per-order，或 manager lend off。",
+  ].join("\n");
+}
+
 export function lendAskInput(p: LendAskParams): NewAsk {
   const bind = bindOf(p);
-  const pr = p.pr ? `#${p.pr}（https://github.com/${p.repo}/pull/${p.pr}）` : "（无 PR，按 head 审）";
-  const family = p.family === "codex" ? "Codex" : p.family === "claude" ? "Claude" : p.family;
+  const pr = prOf(p);
+  const family = familyOf(p);
   return {
     project: MASTER_PROJECT, source: "system", kind: "authorize", fromAgent: LEND_ASKER, createdBy: "system:scheduler", blocking: false,
     title: `出借确认：${p.peer} 想借一个 ${family} 位审 ${p.repo}${p.pr ? `#${p.pr}` : ""}`,
     context: `lend.json 对 ${p.peer} 设了逐单确认`,
     body: [
-      "这会让一个外来任务在你的用户下跑一个 shell：它和你是同一个系统用户，能读你家目录里的文件、能用你机器上的 git / SSH 凭据。只在你信任对方和这个仓库时批准。",
+      `${SHELL_WARNING}只在你信任对方和这个仓库时批准。`,
       `对方：${p.peer}${p.fp ? `（实例指纹 ${p.fp}）` : ""}`,
       `仓库：${p.repo}`,
       `PR：${pr}`,

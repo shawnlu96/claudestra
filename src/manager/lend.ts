@@ -53,7 +53,7 @@ async function setEntry(kind: "lend" | "borrow", build: (ctx: Ctx) => Built<AnyE
   if (!built.ok) return output({ ok: false, error: built.error });
   const entry = built.entry;
   output({ ok: true, [kind]: entry, message: "confirm" in entry
-    ? `已开始向 ${entry.peer} 出借（${entry.confirm === "auto" ? "自动接单" : "每单等你确认"}）`
+    ? `已开始向 ${entry.peer} 出借（${entry.confirm === "auto" ? `预先授权到 ${entry.until}：这段时间免逐单确认，每单仍通知你；到期后恢复逐单确认` : "每单等你确认"}）`
     : `已允许把 ${entry.projects.join("、")} 的单子给 ${entry.peer}：这些项目的 PR 会发给对方机器上的 agent 审（代码、规格与验收原文都会到对方那边）` });
 }
 

@@ -3,7 +3,7 @@ import { describe, expect, test } from "bun:test";
 import { adapterEnv } from "../src/lib/acp/adapter-proc.js";
 import { shellEscape } from "../src/lib/claude-launch.js";
 import { buildAcpHostCommand } from "../src/lib/runtimes/codex-acp.js";
-import { CLEAN_ENV_FLAG, envIPrefix, isLendWorkerName, LEND_WORKER_PREFIX, pickWorkerEnv, WORKER_ENV_WHITELIST } from "../src/lib/runtimes/clean-env.js";
+import { CLEAN_ENV_FLAG, envIPrefix, isLendWorkerName, LEND_WORKER_MARK, LEND_WORKER_PREFIX, pickWorkerEnv, WORKER_ENV_WHITELIST } from "../src/lib/runtimes/clean-env.js";
 import type { LaunchSpec } from "../src/lib/runtimes/types.js";
 import { testChildEnv } from "./test-env.js";
 
@@ -59,7 +59,8 @@ describe("T94 codex-acp 接线", () => {
       base: DIRTY, bunBin: "/b/bun", channelServer: "/r/src/channel-server.ts", mcpName: "claudestra", codexPath: "/b/codex", logsDir: "/l",
       channel: { channelId: "123", proxyUrl: "ws://127.0.0.1:9/tok-secret", agentName: "agent-lend-x", sessionId: "thr-1" }, clean: true,
     });
-    expect(Object.keys(env).sort()).toEqual([...WORKER_ENV_WHITELIST, "CODEX_PATH", "INITIAL_AGENT_MODE", "APP_SERVER_LOGS", "CODEX_CONFIG"].sort());
+    expect(Object.keys(env).sort()).toEqual([...WORKER_ENV_WHITELIST, LEND_WORKER_MARK, "CODEX_PATH", "INITIAL_AGENT_MODE", "APP_SERVER_LOGS", "CODEX_CONFIG"].sort());
+    expect(env[LEND_WORKER_MARK]).toBe("1"); // worker 里跑的 manager / ledger 靠它认出「不是 owner」
     expect(JSON.stringify(env)).not.toContain("tok-secret");
     expect(JSON.parse(env.CODEX_CONFIG).mcp_servers).toBeUndefined();
     for (const s of SECRETS) expect(JSON.stringify(env)).not.toContain(s);
@@ -71,6 +72,7 @@ describe("T94 codex-acp 接线", () => {
       channel: { channelId: "123", proxyUrl: "ws://127.0.0.1:9/t", agentName: "agent-codex", sessionId: "thr-1" },
     });
     expect(env.GH_TOKEN).toBe("gh-secret");
+    expect(env[LEND_WORKER_MARK]).toBeUndefined();
     expect(JSON.parse(env.CODEX_CONFIG).mcp_servers.claudestra).toBeDefined();
   });
 });

@@ -61,6 +61,12 @@ async function driveAsked(row: LendRow, entry: LendEntry | undefined, d: LoopDep
     if (v.state === "declined") return void advance(d.db, row.orderId, "asked", "declined", { reason: `owner 没批：${v.reason}` }, d.now());
   }
   if (problem === "wait") return; // 批了但此刻额度 / 位满了：留着，等空出来再领
+  if (entry!.confirm === "auto" && typeof row.preview.informedAt !== "number") {
+    // 预先授权（effectiveLend 已核过 until）：不开 ask，但 owner 必须先收到这一单的通知；送不到就不领，下轮再发
+    const told = await d.ask.inform(askParams(row, entry!, d));
+    if (!told.ok) return d.log(`${row.orderId} 预先授权通知没送到，暂不领单：${told.error}`);
+    row = patchOrder(d.db, row.orderId, ["asked"], { preview: { ...row.preview, informedAt: d.now() } }, d.now());
+  }
   await claimOrder(row, d);
 }
 
