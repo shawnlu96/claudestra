@@ -83,8 +83,8 @@ describe("写台账出口", () => {
 });
 
 describe("channel-server 侧：一种帧透传", () => {
-  test("三个执行者工具都登记了", () => {
-    expect(ORDER_TOOLS.map((t) => t.name)).toEqual(["take_order", "deliver", "ask"]);
+  test("三个执行者工具、两个审查员工具（T97）都登记了", () => {
+    expect(ORDER_TOOLS.map((t) => t.name)).toEqual(["take_order", "deliver", "ask", "take_review", "submit_verdict"]);
     expect(isOrderTool("deliver")).toBe(true);
     expect(isOrderTool("whoami")).toBe(false);
   });

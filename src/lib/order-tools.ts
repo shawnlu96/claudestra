@@ -54,6 +54,46 @@ export const ORDER_TOOLS = [
       required: ["v", "orderId", "question"],
     },
   },
+  {
+    name: "take_review",
+    description:
+      "Reviewer: fetch the review orders (OrderWire) currently assigned to you — cards in review whose current review / final_review step is yours " +
+      "(auto cards: your bound reviewer session). Returns {ok, orders, errors}; orders is empty when you have none. Verified sessions only.",
+    inputSchema: { type: "object" as const, properties: {} },
+  },
+  {
+    name: "submit_verdict",
+    description:
+      "Reviewer: record your verdict for one review order in the ledger. It never moves the stage. head must be the order's head; p0/p1/p2 must equal " +
+      "the findings per severity; reportPath is the absolute path of your non-empty report under ledger/reviews/. " +
+      "Your session and model family come from your verified identity. Retrying the same verdict is safe; a different second verdict is refused.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        v: WIRE_V,
+        orderId: { type: "string", description: "take_review 返回的 orderId" },
+        head: { type: "string", description: "审查单上的完整 head SHA" },
+        verdict: { type: "string", enum: ["pass", "changes", "block"] },
+        p0: { type: "number" },
+        p1: { type: "number" },
+        p2: { type: "number" },
+        findings: {
+          type: "array",
+          description: "逐项结论（≤100 条）；同类问题沿用上一轮的 findingId",
+          items: {
+            type: "object",
+            properties: {
+              findingId: { type: "string" }, family: { type: "string" }, severity: { type: "string", enum: ["P0", "P1", "P2"] },
+              probe: { type: "string", description: "复现 / 探针（≤4000 字节）" }, description: { type: "string", description: "说明（≤4000 字节）" },
+            },
+            required: ["findingId", "family", "severity", "probe", "description"],
+          },
+        },
+        reportPath: { type: "string", description: "报告的绝对路径，放在 ledger/reviews/ 下，非空" },
+      },
+      required: ["v", "orderId", "head", "verdict", "p0", "p1", "p2", "findings", "reportPath"],
+    },
+  },
 ];
 
 const NAMES = new Set(ORDER_TOOLS.map((t) => t.name));

@@ -253,6 +253,10 @@ export interface ReviewInput {
   reviewerSessionId?: string;
   reviewerFamily?: "claude" | "codex";
   findings?: { findingId: string; family: string; severity: "P0" | "P1" | "P2"; probe: string }[];
+  /** M3 submit_verdict（lib/review-verdict.ts）：对应的审查单、作者与审查员同家族（调度器据此不让安全 / 并发卡凭它合并）、来路 */
+  orderId?: string;
+  sameFamily?: boolean | null;
+  via?: "mcp";
 }
 
 export function checkReview(input: ReviewInput, task: LedgerTask): void {

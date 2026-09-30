@@ -51,6 +51,19 @@ Every dispatch tool travels as one frame type, `order_tool {tool, args}` (`lib/o
 - **`ask`** (`lib/order-ask.ts`) takes a question about the caller's current order. It opens an `asks` row assigned to the card's `pm`, or to the first name on the project PM list if the card has none. It then notifies that PM through the team-router delivery path (`sendLedgerNotice`: sent directly if the PM is online and idle, held otherwise). The question and options appear in the notice only as quotes. The ask stays `extra.notice = pending` until the notice is sent or held; a retry with the same arguments re-sends a still-pending notice under the same message id. Answers still come back as ordinary `send_to_agent` messages.
 - **CLI stays**: `ledger deliver` and the rest keep working. Pi, Codex tmux, and anything else that is `verified=false` must use the CLI.
 
+### Reviewer tools (M3, T97)
+
+`bridge/review-tools.ts` adds two entries to the same `HANDLERS`.
+
+- **`take_review`** is read-only (`lib/review-order.ts`). It returns the caller's review orders: on an auto card, the bound reviewer session; otherwise, the executor of the `currentReview` step.
+- **`submit_verdict(VerdictWire)`** writes through `ledger submit-verdict`, which re-checks every rule on the write connection (`lib/review-verdict.ts`):
+  - the order is the caller's current one, the head equals the order's head, and the reviewer is not the author;
+  - p0 / p1 / p2 counts match the findings, and the report is a non-empty file under `ledger/reviews/`;
+  - session and family must equal the registry's current values;
+  - the call must carry a one-shot ticket the bridge issued after the identity gate (`lib/verdict-ticket.ts`), bound to the actor and the whole wire. An agent that runs the subcommand from its shell out of habit is refused; a deliberate forgery is not stopped (see Known limits).
+
+  It never moves the stage. The same verdict retried is a no-op; a different second verdict is refused.
+
 ## Misdelivery guard
 
 If a channel is held by a connection whose credential is still valid, a registration **without** a valid credential is refused (`rejected` + close 4002). The newcomer backs off 3s → 60s (`lib/link-policy.ts` `reconnectDelayMs`). Its counter resets only on `registered`, not on connect, so a rejected stray does not retry every 3 s. It does not treat this as being replaced, and it does not exit. `tests/caller-reject.test.ts` pins both sides. Situations this does not affect:
@@ -70,3 +83,4 @@ Under ACP the host is the only bridge registrant. Codex's `channel-server` insta
 - Runtimes not covered, always `verified=false`: Pi, Codex tmux transport, HTTP peers / remote agents.
 - If the one-shot file is gone when the MCP server starts (`/mcp` reconnect, a swept file), the session still works, with `verified=false`.
 - The ACP `outsideMcpLauncher` signal is self-reported. It catches accidents, not intent.
+- The `submit_verdict` ticket is not a security boundary. A same-user process can write a one-shot file in the ticket format and compute the hash itself, because the manager has no independent secret to check against: a MAC key handed over by the caller, or a round trip to a bridge address taken from the environment, can be faked the same way. It can also write the ledger's sqlite file directly. The ticket only stops an agent that runs `ledger submit-verdict` from its shell out of habit. `tests/review-tools.test.ts` pins this.
