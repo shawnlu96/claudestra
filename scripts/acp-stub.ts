@@ -71,15 +71,15 @@ async function callMcp(tool: string, args: Rec): Promise<Rec> {
 }
 
 /**
- * 沙箱里的出借 worker（T94）：派单尾注里有本机写的 `<bun> --no-env-file <manager.ts> lend submit <orderId>`（lib/lend-deps.ts）就在当前目录
+ * 沙箱里的出借 worker（T94）：派单尾注里有本机写的 `<bun> --no-env-file --config=/dev/null <manager.ts> lend submit <orderId>`（lib/lend-deps.ts）就在当前目录
  * 交一份 pass。子进程挂在这个 stub 下面，lend submit 的三条绑定（cwd / 会话 / 窗口进程祖先）照真的走。lab 实测走通一单用。
  */
 function lendSubmit(text: string): string {
-  const m = /^(\S+) --no-env-file (\S+manager\.ts) lend submit (\S+) --verdict/m.exec(text);
+  const m = /^(\S+) --no-env-file --config=\/dev\/null (\S+manager\.ts) lend submit (\S+) --verdict/m.exec(text);
   if (!m) return "";
   writeFileSync("findings.json", "[]");
   writeFileSync("report.md", "stub 审过：没有发现问题（lab）\n");
-  const r = Bun.spawnSync([m[1], "--no-env-file", m[2], "lend", "submit", m[3], "--verdict", "pass", "--findings-file", "findings.json", "--report", "report.md"],
+  const r = Bun.spawnSync([m[1], "--no-env-file", "--config=/dev/null", m[2], "lend", "submit", m[3], "--verdict", "pass", "--findings-file", "findings.json", "--report", "report.md"],
     { stdout: "pipe", stderr: "pipe" });
   return `（lend submit：${(r.stdout.toString() || r.stderr.toString()).trim().slice(0, 200)}）`;
 }

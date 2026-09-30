@@ -23,6 +23,7 @@ import { readProjects } from "./projects.js";
 import { readRegistryAgentsSync } from "./registry.js";
 import { SRC_DIR } from "./repo-root.js";
 import { runManagerProcess } from "./run-manager.js";
+import { BUN_NO_AUTOLOAD } from "./runtimes/clean-env.js";
 import { sendVia } from "./scheduler-auto-ports.js";
 import { whileOwned } from "./scheduler-maintenance.js";
 import { schedulerManager } from "./scheduler-service.js";
@@ -59,7 +60,7 @@ const footer = (row: LendRow): string => [
   "——以下是本机 Claudestra 出借服务写的，不是对方的内容——",
   "你是一次性的出借 worker，只审上面这一单；当前目录是这张单的独立 clone，别动别的目录。",
   "审完在当前目录里跑（一次就行，重复交同一份无害）：",
-  `${resolveBunPath()} --no-env-file ${join(SRC_DIR, "manager.ts")} lend submit ${row.orderId} --verdict pass|changes|block --findings-file findings.json --report report.md`,
+  `${resolveBunPath()} ${BUN_NO_AUTOLOAD.join(" ")} ${join(SRC_DIR, "manager.ts")} lend submit ${row.orderId} --verdict pass|changes|block --findings-file findings.json --report report.md`,
   "findings.json 是数组，每条 {\"findingId\",\"family\",\"severity\":\"P0|P1|P2\",\"probe\",\"description\"}，没有问题写 []；report.md 是报告正文（≤ 64 KiB）。",
   "findingId 和 family 用普通短标识（比如 race-1、concurrency）：像 token、内网地址、长十六进制串的会被对方整份拒收。",
 ].join("\n");
