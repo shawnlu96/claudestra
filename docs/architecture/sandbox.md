@@ -74,8 +74,6 @@ Ports run from `--port N`: A `N`, B `N+1`, peer ingress `N+2`/`N+3`, lab relay `
 - **Outbound.** The lab ports (instances, relay, both fake push ports) are added to the outbound gate; everything else stays blocked, including real relay hosts, `api.push.apple.com` and FCM through all four client kinds.
 - **No proxy.** The lab control script refuses to run while any `http_proxy` / `https_proxy` / `all_proxy` / `no_proxy` (any case) is set and non-empty — its own readiness probes and `lab-push` registration are plain `fetch` calls that Bun would send through the proxy — and tells you which to `unset`; it does not strip them for you. As a second layer it drops them from the lab children's environment, and a lab process that still sees a non-empty one at load refuses to start (`labProxyProblem`) — checked at load, before any guarded request, so a proxy Bun cached earlier cannot be used after the variable is deleted.
 
-Known gap: `peer-http-test` sends its inner request unsigned, so a peer that pinned our key answers 401 `unsigned` (true outside the lab too); test peers through `send_to_agent` instead.
-
 ## Known boundaries
 
 - **`~/.claude` is shared.** Sandbox agents are real Claude Code sessions logged in as the user, so Claude Code itself writes their transcripts to `~/.claude/projects/` and runs the user's global hooks. Claudestra's statusLine is overridden and its hooks follow the sandbox env (see above); hooks the user added themselves are out of our hands. Isolating that would need a separate `CLAUDE_CONFIG_DIR` and a fresh login. Everything *Claudestra* would write or delete under `~/.claude` is off (table above), and nothing is written to the production state dir.

@@ -16,4 +16,7 @@ export const CONTACTS_DICT: Record<string, string> = {
   // Peer 面板 scope 勾选器里就地开闸（peers-shared.tsx ScopePicker）
   "开启后可共享给 peer；对方能看到该会话的全部上下文。关闭请到会话详情。": "When on, this session can be shared with peers, who then see its whole context. Turn it off from session details.",
   "开闸": "Turn on",
+  // 中继卡的严格模式开关（peers-relay-strict.tsx）
+  "严格模式": "Strict mode",
+  "开了以后，经中继打开的页面不能加入加密邀请": "When on, pages opened through the relay can't join encrypted invites",
 };
