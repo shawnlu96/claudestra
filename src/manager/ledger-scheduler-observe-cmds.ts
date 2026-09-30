@@ -2,7 +2,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { getMeta, LedgerError, listEvents } from "../lib/ledger-store.js";
 import type { RegistryAgent } from "../lib/registry.js";
-import { schedulerDiff } from "../lib/scheduler-diff.js";
+import { diffLine, schedulerDiff, type DiffRow } from "../lib/scheduler-diff.js";
 import { fallbackToManual } from "../lib/scheduler-fallback.js";
 import { observeTask } from "../lib/scheduler-observe.js";
 import { pathLike } from "../lib/quote-text.js";
@@ -45,15 +45,20 @@ export const SCHEDULER_OBSERVE_CMDS: Record<string, CommandSpec> = {
     },
   },
   "scheduler-diff": {
-    valued: [], bools: ["all"],
-    usage: "scheduler-diff <task> [--all]（只读：观察到的计划 vs PM 实际动作；默认只列差异与未决）",
+    valued: ["project"], bools: ["all"],
+    usage: "scheduler-diff [task] [--project <id>] [--all]（只读：观察到的计划 vs PM 实际动作，每条一行；不带任务 = 项目里所有观察过的卡；默认只列差异与未决）",
     run(c) {
-      const task = c.task(c.p.pos[1]);
-      const pms = new Set([...getMeta(c.db, task.project).pms, "owner", "master"]);
-      const rows = schedulerDiff(listEvents(c.db, { project: task.project, target: task.id }), (a) => pms.has(a));
-      const count = (v: string) => rows.filter((r) => r.verdict === v).length;
-      return { ok: true, task: task.id, summary: { match: count("match"), diff: count("diff"), pending: count("pending") },
-        rows: c.p.bools.has("all") ? rows : rows.filter((r) => r.verdict !== "match") };
+      const one = c.p.pos[1] ? c.task(c.p.pos[1]) : null;
+      const project = one?.project ?? c.project();
+      const ids = one ? [one.id] : (c.db.query(`SELECT DISTINCT target FROM events WHERE project = ? AND kind = 'scheduler'
+        AND json_extract(data, '$.op') = 'observe' ORDER BY target`).all(project) as { target: string }[]).map((r) => r.target);
+      const pms = new Set([...getMeta(c.db, project).pms, "owner", "master"]);
+      const all: (DiffRow & { task: string })[] = ids.flatMap((id) =>
+        schedulerDiff(listEvents(c.db, { project, target: id }), (a) => pms.has(a)).map((r) => ({ ...r, task: id })));
+      const count = (v: string) => all.filter((r) => r.verdict === v).length;
+      const rows = c.p.bools.has("all") ? all : all.filter((r) => r.verdict !== "match");
+      return { ok: true, project, tasks: ids, summary: { match: count("match"), diff: count("diff"), pending: count("pending") },
+        lines: rows.map((r) => diffLine(r.task, r)), rows };
     },
   },
   "scheduler-fallback-manual": {

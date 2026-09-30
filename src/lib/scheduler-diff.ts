@@ -38,10 +38,18 @@ function describeEvent(e: LedgerEvent): string {
 function describeDecision(d: ObservedDecision): string {
   if (d.kind === "wait") return `等待（${d.code}）`;
   if (d.kind === "escalate") return `停下升级（${d.code}）`;
-  const to = d.recipient ? ` → ${d.recipient}` : "";
-  if (d.action === "stage") return `推阶段到 ${d.targetStage}`;
-  if (d.action === "ensure_session") return `新建本卡 ${d.sessionRole} session`;
-  return `${d.action} ${d.node}${to}`;
+  const to = d.recipient ?? "?";
+  switch (d.action) {
+    case "stage": return `推阶段到 ${d.targetStage}`;
+    case "ensure_session": return `新建本卡独立 ${d.sessionRole === "reviewer" ? "审查" : "执行"} session`;
+    case "dispatch": return `派「${d.node}」给 ${to}`;
+    case "review": return `派对抗式审查给 ${to}`;
+    case "merge": return "进合并队列（合并 + 部署）";
+    case "verify": return "跑完成检查单";
+    case "retire": return "归档并结束本卡 session";
+    case "ask": return "请 owner 看前后截图";
+    default: return `${d.action}（${d.node}）`;
+  }
 }
 
 /** Stage the intent's success would lead to; used to recognise PM doing the same thing by hand. */
@@ -129,4 +137,13 @@ export function schedulerDiff(events: readonly LedgerEvent[], isPm: (actor: stri
     }
   });
   return rows;
+}
+
+const VERDICT_WORD: Record<DiffRow["verdict"], string> = { match: "一致", diff: "差异", pending: "未决" };
+
+/** One human line per row for PM / owner: card, stage and round, verdict, engine plan vs what actually happened. */
+export function diffLine(taskId: string, r: DiffRow): string {
+  const actual = r.actual ? `${r.actor ?? "?"} ${r.actual}` : "（还没有）";
+  const lag = r.lagMs === null ? "" : `，${Math.round(r.lagMs / 1000)} 秒后`;
+  return `${taskId} · ${r.stage} 第 ${r.round} 轮 · ${VERDICT_WORD[r.verdict]} · 引擎：${r.planned} ｜ 实际：${actual}（${r.note}${lag}）`;
 }

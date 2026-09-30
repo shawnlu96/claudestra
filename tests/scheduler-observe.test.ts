@@ -87,6 +87,10 @@ describe("T68e observe mode", () => {
       expect(rows.filter((r) => r.verdict === "diff")).toEqual([]);
       expect(rows.at(-1)).toMatchObject({ verdict: "pending" });
       expect(rows.some((r) => r.note.includes("review --to"))).toBe(true);
+      expect(diff.lines).toContain("T1 · review 第 1 轮 · 一致 · 引擎：推阶段到 fix ｜ 实际：owner 推阶段 review→fix（阶段一致，0 秒后）");
+      const project = await runLedger(["scheduler-diff", "--project", "p"], f.deps("owner"));
+      expect(project).toMatchObject({ ok: true, tasks: ["T1"], summary: { diff: 0, pending: 1 } });
+      expect(project.lines).toEqual(["T1 · merge 第 2 轮 · 未决 · 引擎：进合并队列（合并 + 部署） ｜ 实际：（还没有）（尚无后续动作）"]);
       expect(externalEffects(f.db)).toEqual({ intents: 0, resources: 0, sessions: 0, schedulerMoves: 0 });
     } finally { f.close(); }
   });
