@@ -6,6 +6,7 @@
  */
 import { LEND_FAMILIES, type LendFamily } from "./lend-config.js";
 import { parseVerdictWire, type VerdictWire } from "./order-wire.js";
+import { sanitizeForeign } from "./order-wire-render.js";
 
 const LEND_WIRE_VERSION = 1;
 /** Report body bytes; the whole request (verdict + report) must also fit LEND_BODY_MAX, well inside the E2E body cap. */
@@ -103,10 +104,14 @@ function parseLease(raw: unknown): LeaseRequest {
   return { v: LEND_WIRE_VERSION, orderId: matching(r.orderId, "orderId", ORDER_ID), gen: int(r.gen, "gen", 1, 1e9), action, reason, detail };
 }
 
+/** findingId / family are identifiers A keeps and prints as they are: one that masking would change (a token, an address) is refused, never rewritten (T93 r1 P2-3) */
+const plainId = (v: string, path: string): string => (sanitizeForeign(v) === v ? v : fail(path, "看着像凭据或地址，不收"));
+
 function parseResult(raw: unknown): ResultRequest {
   const r = record(raw, "$", ["v", "orderId", "gen", "verdict", "report", "session"]);
   const verdict = parseVerdictWire(r.verdict);
   if (!verdict.ok) return fail("verdict", verdict.error);
+  verdict.value.findings.forEach((f, i) => { plainId(f.findingId, `verdict.findings[${i}].findingId`); plainId(f.family, `verdict.findings[${i}].family`); });
   const orderId = matching(r.orderId, "orderId", ORDER_ID);
   if (verdict.value.orderId !== orderId) fail("verdict.orderId", "与请求的 orderId 不一致");
   if (typeof r.report !== "string" || r.report.length === 0 || Buffer.byteLength(r.report) > LEND_REPORT_MAX) fail("report", `要是非空且不超过 ${LEND_REPORT_MAX} 字节`);

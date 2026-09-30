@@ -7,9 +7,9 @@
  */
 import { createHash } from "node:crypto";
 import { mkdirSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname } from "node:path";
 import { signPurpose } from "../lib/instance-key.js";
-import { readLend, type BorrowEntry, type LendFamily, LEND_FAMILIES, REPO_RE } from "../lib/lend-config.js";
+import { readLend, type BorrowEntry, type LendFamily, REPO_RE } from "../lib/lend-config.js";
 import { effectiveLend, readLendContext } from "../lib/lend-policy.js";
 import { LEND_VERSION, parseLendRequest, type LendEndpoint } from "../lib/lend-wire.js";
 import { cancelLend, claimLend, leaseLend, listLendOrders, offerLend, pollLend, refuse, reofferLend, sweepLend, type LendNotice, type OfferInput } from "../lib/ledger-lend.js";
@@ -38,7 +38,7 @@ function realLendDeps(c: LedgerCli): LendCliDeps {
     },
     notifyPm: (project, text) => notifyProjectPm(c.db, project, text, { fromName: "lend" }),
     result: {
-      reportPath: (o) => join(statePath("ledger", "reviews", `${o.taskId}-r${o.round}`), `lend-${o.peer}.md`),
+      reportDir: (o) => statePath("ledger", "reviews", `${o.taskId}-r${o.round}`),
       writeReport: (path, body) => {
         mkdirSync(dirname(path), { recursive: true });
         writeTextAtomicSync(path, body);
@@ -74,7 +74,8 @@ function offerInput(c: LedgerCli, task: LedgerTask, borrow: BorrowEntry | null):
   const { peer, repo, family = "codex" } = c.p.flags;
   if (!peer || !PEER_RE.test(peer)) throw new LedgerError("invalid", "--peer <peer 名> 必填");
   if (!repo || !REPO_RE.test(repo)) throw new LedgerError("invalid", "--repo <owner/name> 必填（只给对方 GitHub 坐标）");
-  if (!LEND_FAMILIES.includes(family as LendFamily)) throw new LedgerError("invalid", `--family 只能是 ${LEND_FAMILIES.join(" / ")}`);
+  // 表和接口按两家留了位置，这一切片只借 Codex（T93 规格；r1 P2-4）
+  if (family !== "codex") throw new LedgerError("invalid", `这一版只借 Codex 审查，--family 只能是 codex（不是 ${family}）`);
   const prFlag = c.p.flags.pr ?? task.pr?.match(/(\d+)\/?$/)?.[1];
   const pr = prFlag === undefined ? null : Number(prFlag);
   if (pr !== null && (!Number.isInteger(pr) || pr < 1)) throw new LedgerError("invalid", "--pr 要是 PR 编号");

@@ -11,7 +11,7 @@ import { resolve } from "node:path";
 import { STAGES, type LedgerEvent, type LedgerTask, type ReviewVerdict, type Stage, type StepName } from "./ledger-stages.js";
 import { getTask, listEvents, toTask } from "./ledger-store.js";
 import { currentReview, listSteps, stepAtStage, stepPeer, stepsByTask, withDerived, type TaskStep } from "./ledger-steps.js";
-import { withoutLendSteps } from "./ledger-lend.js";
+import { lendBoundStep } from "./ledger-lend.js";
 import { REPO_ROOT } from "./repo-root.js";
 
 /** 委托约定的绝对路径：peer 请求的注入头里给接收方 agent 看，它的 cwd 一般是自己的项目，相对路径找不到 */
@@ -21,9 +21,17 @@ export type PeerLink = "delegate" | "reviewer";
 
 const REVIEW_STEPS: readonly StepName[] = ["review", "final_review"];
 
+/**
+ * 藏掉的步骤（出借单绑着的，lendBoundStep）要在补推出来的步骤之后再藏：先藏再补，显式审查行一没，老 extra.reviewer 就又被推出来，
+ * 对方凭它又看得到、写得到整张卡（T93 r1 P2-2）
+ */
+type Hidden = (s: TaskStep) => boolean;
+const noneHidden: Hidden = () => false;
+const shownSteps = (task: LedgerTask, rows: TaskStep[], hidden: Hidden): TaskStep[] => withDerived(task, rows).filter((s) => !hidden(s));
+
 /** 它在这张卡上接了哪些步骤：审查类算 reviewer，其余算 delegate */
-export function peerLinks(task: LedgerTask, peer: string, rows: TaskStep[] = []): PeerLink[] {
-  const mine = withDerived(task, rows).filter((s) => stepPeer(s) === peer);
+export function peerLinks(task: LedgerTask, peer: string, rows: TaskStep[] = [], hidden: Hidden = noneHidden): PeerLink[] {
+  const mine = shownSteps(task, rows, hidden).filter((s) => stepPeer(s) === peer);
   return (["delegate", "reviewer"] as const).filter((l) => mine.some((s) => REVIEW_STEPS.includes(s.step) === (l === "reviewer")));
 }
 
@@ -55,10 +63,10 @@ const str = (v: unknown): string | null => (typeof v === "string" && v ? v : nul
 const verifiedForPeer = (v: Record<string, unknown>): Record<string, unknown> =>
   Object.fromEntries(Object.entries(v).filter(([k]) => k === "reviewerNotAuthor" || k === "why"));
 
-export function peerTaskView(t: LedgerTask, links: PeerLink[], rows: TaskStep[] = [], peer = ""): PeerTaskView {
+export function peerTaskView(t: LedgerTask, links: PeerLink[], rows: TaskStep[] = [], peer = "", hidden: Hidden = noneHidden): PeerTaskView {
   const { id, project, title, kind, stage, stageBefore, round, rev, pr, headSHA, updatedAt } = t;
   const x = t.extra ?? {};
-  const steps = withDerived(t, rows).map((s) => {
+  const steps = shownSteps(t, rows, hidden).map((s) => {
     const base = { step: s.step, round: s.round, state: s.state, mine: !!peer && stepPeer(s) === peer };
     return base.mine ? { ...base, executor: s.executor, headFrom: s.headFrom, headTo: s.headTo, verdict: s.verdict, verified: verifiedForPeer(s.verified), claims: s.claims } : base;
   });
@@ -69,10 +77,11 @@ export function peerTaskView(t: LedgerTask, links: PeerLink[], rows: TaskStep[] 
 export function peerTasks(db: Database, peer: string): PeerTaskView[] {
   const rows = db.query("SELECT * FROM tasks ORDER BY updatedAt DESC").all() as Record<string, unknown>[];
   const steps = stepsByTask(db);
+  const hidden = lendBoundStep(db);
   return rows.map(toTask).flatMap((t) => {
-    const rows = withoutLendSteps(db, steps.get(t.id) ?? []);
-    const links = peerLinks(t, peer, rows);
-    return links.length ? [peerTaskView(t, links, rows, peer)] : [];
+    const rows = steps.get(t.id) ?? [];
+    const links = peerLinks(t, peer, rows, hidden);
+    return links.length ? [peerTaskView(t, links, rows, peer, hidden)] : [];
   });
 }
 
@@ -109,11 +118,12 @@ export function peerEventView(e: LedgerEvent, peer: string): PeerEventView | nul
 /** 不是委托给它的卡一律当不存在（null → 404），不泄露别的任务在不在 */
 export function peerTaskDetail(db: Database, peer: string, id: string): { task: PeerTaskView; events: PeerEventView[] } | null {
   const t = getTask(db, id);
-  const rows = t ? withoutLendSteps(db, listSteps(db, t.id)) : [];
-  const links = t ? peerLinks(t, peer, rows) : [];
+  const rows = t ? listSteps(db, t.id) : [];
+  const hidden = lendBoundStep(db);
+  const links = t ? peerLinks(t, peer, rows, hidden) : [];
   if (!t || !links.length) return null;
   const events = listEvents(db, { project: t.project, target: id }).flatMap((e) => peerEventView(e, peer) ?? []);
-  return { task: peerTaskView(t, links, rows, peer), events };
+  return { task: peerTaskView(t, links, rows, peer, hidden), events };
 }
 
 /** model：对方自报用的什么模型（跨实例只能凭声明），记进那一步的 claims */
@@ -156,6 +166,14 @@ export function parsePeerOp(body: unknown): PeerOp | string {
   return "op 只能是 note / accept / pr / stage / review";
 }
 
+/** 这个操作写到哪一步（写入层按同一规则选）：审查结论 = currentReview；挂 PR / 推阶段 = 当前在干活的那一步；note / accept 不落到步骤 */
+export function peerOpTarget(op: PeerOp, task: LedgerTask, steps: TaskStep[]): TaskStep | null {
+  if (op.op === "note" || op.op === "accept") return null;
+  if (op.op === "review") return currentReview(steps);
+  const stage = task.stage === "blocked" ? task.stageBefore : task.stage;
+  return stepAtStage(steps, stage === "review" ? { stage: "fix", stageBefore: null } : task);
+}
+
 /** 挂 PR / head 只在开发、返工时：进了 review 再换，发起方审过的就不是现在这份了 */
 const PEER_PR_STAGES: readonly Stage[] = ["build", "fix"];
 
@@ -165,12 +183,8 @@ const PEER_PR_STAGES: readonly Stage[] = ["build", "fix"];
  */
 export function peerOpDenied(op: PeerOp, task: LedgerTask, steps: TaskStep[], peer: string): string | null {
   if (op.op === "note" || op.op === "accept") return null;
-  if (op.op === "review") {
-    const s = currentReview(steps);
-    return s && stepPeer(s) === peer ? null : "这一轮的审查那一步不是你";
-  }
-  const stage = task.stage === "blocked" ? task.stageBefore : task.stage;
-  const active = stepAtStage(steps, stage === "review" ? { stage: "fix", stageBefore: null } : task);
+  const active = peerOpTarget(op, task, steps);
+  if (op.op === "review") return active && stepPeer(active) === peer ? null : "这一轮的审查那一步不是你";
   if (!active || stepPeer(active) !== peer) return `${task.stage} 阶段在干活的那一步不是你（${active?.step ?? "没人"}）`;
   if (op.op === "pr" && !PEER_PR_STAGES.includes(task.stage)) return `任务在 ${task.stage}，只有 build / fix 阶段能挂 PR / head（进了 review 再换就不是审过的那份）`;
   return null;

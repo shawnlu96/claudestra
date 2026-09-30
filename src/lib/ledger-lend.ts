@@ -59,11 +59,17 @@ export function lendManaged(db: Database, taskId: string, round: number): boolea
   return !!db.query("SELECT 1 FROM lend_orders WHERE taskId = ? AND round = ? AND status IN ('claimed','unknown','done') LIMIT 1").get(taskId, round);
 }
 
-/** Step rows a lend claim wrote are not T46 delegations: peer-ledger neither lists the card for them nor lets them write. */
-export function withoutLendSteps<T extends { taskId: string; round: number; executor: string; executorKind: string }>(db: Database, rows: readonly T[]): T[] {
-  if (!hasLendTable(db)) return [...rows];
-  const bound = db.query(`SELECT 1 FROM lend_orders WHERE taskId = ? AND round = ? AND worker || '@' || peer = ? AND status IN ('claimed','unknown','done') LIMIT 1`);
-  return rows.filter((s) => s.executorKind !== "peer" || !bound.get(s.taskId, s.round, s.executor));
+type StepKey = { taskId: string; step: string; round: number; executor: string; executorKind: string };
+
+/**
+ * Is this the exact step row a lend order holds (same task / step / round / worker@peer; claimed, stalled or answered)?
+ * Such a row is not a T46 delegation: peer-ledger neither shows it nor lets it grant anything, whatever round the card is in now.
+ * tests/ledger-lend.test.ts「the old peer-ledger door」.
+ */
+export function lendBoundStep(db: Database): (s: StepKey) => boolean {
+  if (!hasLendTable(db)) return () => false;
+  const q = db.query(`SELECT 1 FROM lend_orders WHERE taskId = ? AND step = ? AND round = ? AND worker || '@' || peer = ? AND status IN ('claimed','unknown','done') LIMIT 1`);
+  return (s) => s.executorKind === "peer" && !!q.get(s.taskId, s.step, s.round, s.executor);
 }
 
 const lease = (o: Pick<LendOrder, "leaseGen" | "leaseUntil" | "leaseMs">): LeaseState => ({ gen: o.leaseGen, expiresAt: o.leaseUntil ?? 0, ms: o.leaseMs });

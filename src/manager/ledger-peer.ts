@@ -7,10 +7,10 @@
  */
 import { LedgerError, getTask } from "../lib/ledger-store.js";
 import { appendEvent, moveStage, recordReview, setTask } from "../lib/ledger-write.js";
-import { lendManaged, withoutLendSteps } from "../lib/ledger-lend.js";
+import { lendBoundStep, lendManaged } from "../lib/ledger-lend.js";
 import { listSteps, stepsOf } from "../lib/ledger-steps.js";
 import { recordAccept } from "../lib/ledger-steps-write.js";
-import { parsePeerOp, peerEventView, peerLinks, peerOpDenied, peerTaskView } from "../lib/peer-ledger.js";
+import { parsePeerOp, peerEventView, peerLinks, peerOpDenied, peerOpTarget, peerTaskView } from "../lib/peer-ledger.js";
 import type { LedgerCli, Result } from "./ledger-context.js";
 import { checkTaskRefs } from "./ledger-field-checks.js";
 import type { CommandSpec } from "./ledger-write-cmds.js";
@@ -31,13 +31,18 @@ function peerWrite(c: LedgerCli): Result {
   if (typeof op === "string") throw new LedgerError("invalid", op);
   const task = id ? getTask(c.db, id) : null;
   const all = task ? listSteps(c.db, task.id) : [];
-  const links = task ? peerLinks(task, peer, withoutLendSteps(c.db, all)) : [];
-  // 本轮审查由出借单管着：谁都不能经这里写结论、推阶段、改 PR / head，只能走 lend/result（T93）
-  if (task && (op.op === "review" || op.op === "stage" || op.op === "pr") && lendManaged(c.db, task.id, task.round) && (links.length || peerLinks(task, peer, all).length)) {
-    throw new LedgerError("forbidden", "lend_managed：这一轮审查由出借单管理，只能经 lend/result 回写", { lend: "lend_managed" });
+  const hidden = lendBoundStep(c.db);
+  const links = task ? peerLinks(task, peer, all, hidden) : [];
+  const steps = task ? stepsOf(c.db, task) : [];
+  // 这次要写的那一步由出借单绑着（不论卡现在在第几轮），或本轮审查由出借单管着：谁都不能经这里写结论、推阶段、改 PR / head，
+  // 只能走 lend/result。按实际要写的那一步判，只看 task.round 的话卡一推进，旧轮的出借步骤就能被写成通过（T93 r1 P1-1）
+  const target = task ? peerOpTarget(op, task, steps) : null;
+  const managed = !!task && (op.op === "review" || op.op === "stage" || op.op === "pr") && ((!!target && hidden(target)) || lendManaged(c.db, task.id, task.round));
+  if (task && managed && (links.length || peerLinks(task, peer, all).length)) {
+    throw new LedgerError("forbidden", "lend_managed：这一步由出借单管理，只能经 lend/result 回写", { lend: "lend_managed" });
   }
   if (!task || !links.length) throw new LedgerError("not_found", `没有委托给 ${peer} 的任务 ${id ?? ""}`);
-  const denied = peerOpDenied(op, task, stepsOf(c.db, task), peer);
+  const denied = peerOpDenied(op, task, steps.filter((s) => !hidden(s)), peer);
   if (denied) throw new LedgerError("forbidden", denied);
   const dedup = (body as { dedup?: unknown }).dedup;
   const ctx = { actor: `peer:${peer}`, now: c.deps.now(), ...(typeof dedup === "string" && dedup ? { dedupKey: `peer:${peer}:${dedup.slice(0, 200)}` } : {}) };
@@ -59,7 +64,7 @@ function peerWrite(c: LedgerCli): Result {
   } else r = recordReview(c.db, ctx, { taskId: task.id, reviewer: ctx.actor, verdict: op.verdict, p0: op.p0, p1: op.p1, p2: op.p2, text: op.text, model: op.model });
   const rows = listSteps(c.db, task.id);
   // 回给 peer 的事件也过白名单：审查事件里本机算的作者名不给（T47 复核 P2-2）
-  return { ok: true, task: peerTaskView(r.row, peerLinks(r.row, peer, rows), rows, peer), event: peerEventView(r.event, peer), duplicate: r.duplicate };
+  return { ok: true, task: peerTaskView(r.row, peerLinks(r.row, peer, rows, hidden), rows, peer, hidden), event: peerEventView(r.event, peer), duplicate: r.duplicate };
 }
 
 export const PEER_CMDS: Record<string, CommandSpec> = {
