@@ -13,7 +13,6 @@ import { useAutoCompact } from "./settings/auto-compact-section";
 import { useKbFixToggle } from "./settings/interface-sections";
 import { SettingsNav, settingsPagesFor, type SettingsPageId } from "./settings/nav";
 import { useFullScope } from "../contacts-data";
-import { isNativeShell } from "@/lib/native";
 import { SettingsPage } from "./settings/pages";
 
 /**
@@ -59,7 +58,7 @@ export function SettingsModal({
   const [showCron, setShowCron] = useState(false);
   // null = 还没在弹窗里切过页 → 显示入口指定的 initialPage；关闭清掉，下次打开重新听入口的
   const [picked, setPicked] = useState<SettingsPageId | null>(null);
-  const pages = settingsPagesFor(full, { native: isNativeShell() });
+  const pages = settingsPagesFor(full);
   const page = pages.includes(picked ?? initialPage) ? (picked ?? initialPage) : "general";
   const close = () => {
     onClose();
