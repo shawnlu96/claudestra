@@ -83,7 +83,7 @@ describe("T68e worker routes", () => {
     expect(await make({ ok: true, messageId: "m" }, { ok: false, unknown: false, reason: "no pane" }).cancel(codexTui)).toMatchObject({ ok: false, ...why });
     const l = ledgerOps("pending", 0, { action: "review", node: "adversarial_review", recipient: "agent-review" }, codexTui);
     await driveDispatch(l.ops, make({ ok: false, delivered: false, reason: "未连接" }), codexTui, reviewOrder());
-    expect(l.log).toEqual([`pending→submitted: claimed; route=tmux; session=s-review; ${reason}`, `submitted→cancelled: 未投递：route=tmux; 未连接; ${reason}`]);
+    expect(l.log).toEqual([`pending→submitted: claimed; delivery=text; route=tmux; session=s-review; ${reason}`, `submitted→cancelled: 未投递：delivery=text; route=tmux; 未连接; ${reason}`]);
   });
 });
 
@@ -164,6 +164,7 @@ function ledgerOps(start: IntentStatus, updatedAt = 0, patch: Partial<SchedulerI
       intent.updatedAt = 1;
       return true;
     },
+    taken: () => null,
     now: () => CLAIM_LEASE_MS + 5,
   };
   return { ops, log, intent, card };
@@ -180,7 +181,7 @@ describe("T68e dispatch driver: the ledger decides, replays never resend", () =>
     const l = ledgerOps("pending");
     const { w, sent } = worker({ ok: true, messageId: "m1" });
     expect(await driveDispatch(l.ops, w, author, order())).toMatchObject({ kind: "sent" });
-    expect(l.log).toEqual(["pending→submitted: claimed; route=channel; session=s-one", "submitted→done: route=channel; key=k1; message:m1"]);
+    expect(l.log).toEqual(["pending→submitted: claimed; delivery=text; route=channel; session=s-one", "submitted→done: delivery=text; route=channel; key=k1; message:m1"]);
     expect(await driveDispatch(l.ops, w, author, order())).toEqual({ kind: "settled", status: "done" });
     expect(sent).toHaveLength(1);
   });
