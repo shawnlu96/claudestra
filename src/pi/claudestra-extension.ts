@@ -268,7 +268,7 @@ export default function claudestraChannel(pi: PiExtensionApi): void {
           sessionId: sessionId || undefined,
           sessionFile: sessionFile || undefined,
           cwd: process.cwd(),
-          abort: true, // 会按 bridge 的 {type:"abort"} 中止并回 abort_ack（老扩展不声明：bridge 不当它能停）
+          abort: aborts.capable(), // 会按 bridge 的 {type:"abort"} 中止并回 abort_ack（老扩展 / 没有 ctx.abort 的 Pi 不声明：bridge 不当它能停）
         }));
       } catch { /* onclose 会兜重连 */ }
       startPing();
@@ -306,11 +306,7 @@ export default function claudestraChannel(pi: PiExtensionApi): void {
           if (aborts.onBridgeMessage({ text: String(msg.content ?? ""), messageId: msg.meta?.message_id }, streaming)) return; // 叫停中：settle 后再投
           void inject(String(msg.content ?? ""));
           return;
-        case "abort": { // 回执照实写，并列出作废的消息（停之前 steer 进去、还没执行的），bridge 逐条告诉发送方
-          let r: ReturnType<typeof aborts.abort> = { result: "idle", voided: [], inEditor: 0 };
-          try { r = aborts.abort(); } catch (e) { console.error(`claudestra: abort 失败: ${(e as Error).message}`); }
-          return void ws.send(JSON.stringify({ type: "abort_ack", id: msg.id, ...r }));
-        }
+        case "abort": return void ws.send(JSON.stringify(aborts.ack(msg.id))); // 回执照实写，并列出作废的消息，bridge 逐条告诉发送方
         case "replaced":
           // 同一个频道被另一条连接顶替。Claude Code 侧的判据是「MCP stdio 还在 ⇒ 绝不死」；
           // 这里等价：会话还活着 ⇒ 不当致命错误，退避后把频道抢回来。
@@ -413,6 +409,7 @@ export default function claudestraChannel(pi: PiExtensionApi): void {
 
   pi.on("session_start", (_event, ctx) => {
     ui = ctx?.ui;
+    aborts.onSession(ctx);
     try {
       sessionId = ctx?.sessionManager?.getSessionId?.() ?? "";
       sessionFile = ctx?.sessionManager?.getSessionFile?.() ?? "";

@@ -24,6 +24,7 @@ const DISPATCH_KEY = "dispatch:";
 
 export function insertEvent(db: Database, ctx: WriteCtx, e: EventDraft, primary: boolean): LedgerEvent {
   if (primary && ctx.dedupKey?.startsWith(DISPATCH_KEY) && e.kind !== "dispatch") throw new LedgerError("invalid", `dedupKey 的 ${DISPATCH_KEY} 前缀只给 dispatch 事件用`);
+  if (primary && ctx.dedupKey?.startsWith("scheduler:") && e.kind !== "scheduler") throw new LedgerError("invalid", "scheduler: 前缀只给调度事件用");
   const r = db
     .prepare("INSERT INTO events (ts, actor, project, target, kind, text, data, dedupKey) VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING *")
     .get(ctx.now ?? Date.now(), ctx.actor, e.project, e.target, e.kind, e.text ?? "", JSON.stringify(eventData(ctx, e)), primary ? ctx.dedupKey || null : null);

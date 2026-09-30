@@ -13,6 +13,7 @@ import { isAskEvent, TERMINAL_STAGES, type LedgerEvent, type LedgerItem, type Le
 import { auditChangedProjects, openFindings, type StoredFinding } from "./ledger-audit-store.js";
 import { listSteps, stepsByTask, type TaskStep } from "./ledger-steps.js";
 import { stepLineInfo, type StepLineInfo } from "./ledger-step-line.js";
+import { schedulerProjectView } from "./ledger-scheduler.js";
 import { getMeta, LEDGER_PATH, LEDGER_SCHEMA_VERSION, listDeps, listEvents, listItems, listTasks, getTask, toEvent, type LedgerMeta } from "./ledger-store.js";
 
 /** 读连接等锁的上限：WAL 下读不等写，只有写者刚建库、还没切 WAL 的那一瞬会撞上；宁可这一轮报 busy 也不卡住 bridge */
@@ -115,6 +116,8 @@ interface TaskView extends LedgerTask {
   stepLine?: StepLineInfo;
 }
 export interface ProjectView {
+  /** Same-snapshot scheduler facts for the existing v4 DAG; absent tables yield manual tasks. */
+  scheduler: ReturnType<typeof schedulerProjectView>;
   meta: LedgerMeta;
   items: LedgerItem[];
   tasks: TaskView[];
@@ -161,6 +164,10 @@ function taskView(task: LedgerTask, own: readonly LedgerEvent[], now: number, de
 
 /** GET /ledger/:project：事项 + 任务（每个带最近一条事件与指标）+ 最近的项目级事件；整个项目的事件只查一次 */
 export function projectView(db: Database, project: string, now: number): ProjectView {
+  return db.transaction(() => projectViewSnapshot(db, project, now)).deferred();
+}
+
+function projectViewSnapshot(db: Database, project: string, now: number): ProjectView {
   const byTarget = new Map<string, LedgerEvent[]>();
   for (const e of listEvents(db, { project })) {
     const list = byTarget.get(e.target);
@@ -176,6 +183,7 @@ export function projectView(db: Database, project: string, now: number): Project
   const deps = depViews(listDeps(db, project), tasks);
   const rows = stepsByTask(db);
   return {
+    scheduler: schedulerProjectView(db, project),
     meta: getMeta(db, project),
     items: listItems(db, project),
     tasks: tasks.map((t) => ({ ...taskView(t, byTarget.get(t.id) ?? [], now, deps), stepLine: stepLineInfo(t, rows.get(t.id) ?? [], byTarget.get(t.id) ?? []) })),

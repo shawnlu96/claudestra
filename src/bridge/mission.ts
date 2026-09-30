@@ -150,7 +150,7 @@ async function sendNudge(agent: string, m: Mission, kind: NudgeKind, now: number
     to: { kind: "local", channelId: c.channelId, ws: c.client.ws, cwd: c.client.cwd },
     intent: "notification",
     content: nudgeText(m, kind, now, DONE_CMD(agent)),
-    meta: { messageId: newMessageId("mission"), triggerKind: "bridge_synth", ts: iso(now), threadId: newThreadId() },
+    meta: { messageId: newMessageId("mission"), triggerKind: "bridge_synth", ts: iso(now), threadId: newThreadId(), dropIfStopped: kind === "deadline" || undefined },
   })) as { outcome?: { kind?: string; reason?: string } } | undefined;
   const failed = r?.outcome?.kind === "error" || r?.outcome?.kind === "dropped";
   console.log(`⏱ Autopilot ${agent}: ${failed ? `${kind} 没递出去（${r?.outcome?.kind}）` : `递出 ${kind}（第 ${m.nudges + 1} 次）`}`);
@@ -176,8 +176,16 @@ async function expire(agent: string, id: string | undefined, now: number): Promi
 /** 到点时 agent 正忙 / 不在线：收尾那句等它下一次回合结束再递。只在内存、绑定那一代：新一代开始就作废（别把「已关闭」发给新一代） */
 const wrapups = new Map<string, Mission>();
 
+/** owner 叫停中不递收尾（它会让 agent 写台账、发总结，等于叫停后又开一轮）：只记一行（wf2 stop-semantics-7）。查忙闲要等一拍，查完、投递之前再看一次 */
 async function deliverWrapup(agent: string, m: Mission, now: number): Promise<void> {
-  if (!(await busyNow(agent)) && (await sendNudge(agent, m, "deadline", now))) wrapups.delete(agent);
+  const ch = channelOf(agent);
+  const stopped = () => !!ch && turnCuts.interruptHold(ch) === "stopped";
+  const busy = stopped() || (await busyNow(agent));
+  if (stopped()) {
+    wrapups.delete(agent);
+    return void appendRunLog({ ts: iso(now), missionId: m.id ?? "unknown", agent, outcome: "skipped", reason: "到点已关闭（owner 叫停中，没有递收尾那句）" });
+  }
+  if (!busy && (await sendNudge(agent, m, "deadline", now))) wrapups.delete(agent);
   else wrapups.set(agent, m);
 }
 

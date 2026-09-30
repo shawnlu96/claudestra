@@ -350,7 +350,7 @@ async function newLines(state: WatcherState, discord: Client): Promise<Item[] | 
   return chunk.lines;
 }
 
-async function processNewData(state: WatcherState, discord: Client, pushed?: object[]): Promise<boolean> {
+async function processNewData(state: WatcherState, discord: Client, pushed?: object[]): Promise<{ ok: boolean; lost: number }> {
   // v2.0.18+ race fix: 之前是 `if (state.processing) return` 直接 bail。问题：
   // Claude Code 写入 jsonl → fs.watch fire → 第一次 processNewData 进 await stat /
   // await read 阶段（async I/O，要十几到上百 ms）→ 期间 Stop hook 抵达 →
@@ -362,11 +362,11 @@ async function processNewData(state: WatcherState, discord: Client, pushed?: obj
   // textQueue 已经被第一次填好了，drain 后续的 flush 就能拿到。
   //
   // 锁等待带 5s 上限防 hang（理论上不应该；processNewData 内部 await 都是 fs / parse，不会卡住）。
-  const lockWaitStart = Date.now(); let pushFailed = false;
+  const lockWaitStart = Date.now(); let lost = 0;
   while (state.processing) {
     if (Date.now() - lockWaitStart > 5000) {
       console.error(`⚠️ processNewData 等锁超过 5s 放弃，agent=${state.agentName}`);
-      return false;
+      return { ok: false, lost: 0 };
     }
     await new Promise((r) => setTimeout(r, 20));
   }
@@ -374,7 +374,7 @@ async function processNewData(state: WatcherState, discord: Client, pushed?: obj
   try {
     // 宿主推来的条目 seq 用本地序号：sid 带 acp: 前缀，前端不拿它比 rollout 的历史游标，走时间戳规则
     const items = pushed ? pushed.map((entry) => ({ seq: state.lineNo++, entry })) : await newLines(state, discord);
-    if (!items) return true;
+    if (!items) return { ok: true, lost: 0 };
     let toolsChanged = false;
     for (const { seq, line, entry: given } of items as Item[]) {
       try {
@@ -615,7 +615,7 @@ async function processNewData(state: WatcherState, discord: Client, pushed?: obj
             }
           }
         }
-      } catch (e) { console.error(`⚠️ 条目处理失败，agent=${state.agentName}: ${String(e)}`); if (pushed) pushFailed = true; }
+      } catch (e) { console.error(`⚠️ 条目处理失败，agent=${state.agentName}: ${String(e)}`); if (pushed) lost++; }
     }
 
     if (toolsChanged) {
@@ -630,9 +630,10 @@ async function processNewData(state: WatcherState, discord: Client, pushed?: obj
       if (state.textTimer) clearTimeout(state.textTimer);
       state.textTimer = setTimeout(() => flushText(state, discord), WATCHER_CONFIG.debounceMs);
     }
-  } catch (e) { console.error(`⚠️ 读取条目失败，agent=${state.agentName}: ${String(e)}`); return false; }
+  // 推送时前面的条目可能已经发到频道；确认这批并报丢失，避免重送造成重复正文。
+  } catch (e) { console.error(`⚠️ 读取条目失败，agent=${state.agentName}: ${String(e)}`); return pushed ? { ok: true, lost: pushed.length } : { ok: false, lost: 0 }; }
   finally { state.processing = false; }
-  return !pushFailed;
+  return { ok: true, lost };
 }
 
 /**
@@ -789,11 +790,10 @@ function startPushWatcher(agentName: string, sessionId: string, channelId: strin
 }
 
 /** ACP 宿主推来的一批 CC 形状条目（bridge/acp-link.ts）：走和尾读同一条解析，工具 / 正文 / 状态事件照发 */
-export async function pushEntries(channelId: string, entries: object[], discord: Client): Promise<boolean> {
+export async function pushEntries(channelId: string, entries: object[], discord: Client): Promise<{ ok: boolean; lost: number }> {
   const state = [...watchers.values()].find((s) => s.channelId === channelId && s.push);
-  return state ? processNewData(state, discord, entries) : false;
+  return state ? processNewData(state, discord, entries) : { ok: false, lost: 0 };
 }
-
 /** v2.6.0+ channelId → agent 名反查（event-bus 埋点用，避免热路径查 registry） */
 export function agentNameForChannel(channelId: string): string | null {
   for (const [agentName, p] of pendingStartTimers.entries()) {

@@ -17,9 +17,10 @@ import { findSessionJsonlBySessionId, sessionJsonlPath } from "./session-source.
 import { existsSync, readdirSync, realpathSync } from "fs";
 import { mkdir, readdir } from "fs/promises";
 import { basename, dirname, join, resolve, sep } from "path";
-import { projectJsonlPath, findJsonlBySessionId, projectsSlug } from "./jsonl-cost.js";
+import { projectsSlug } from "./jsonl-cost.js";
 import { copyIfLarger } from "./archive-copy.js";
 import { archiveWorkflowDirs } from "./workflow-archive.js";
+import { pickCodexRolloutForArchive, type RolloutPick } from "./codex-rollout-pick.js";
 
 export const ARCHIVE_ROOT = STATE_ARCHIVE_ROOT;
 
@@ -94,11 +95,37 @@ function listPiSubagentJsonls(mainPath: string): Array<{ id: string; path: strin
   return out;
 }
 
+/** 找不到源文件时的说明：写明去哪找过，Pi 不能再报成「被 CC 清理」（Codex 的说明由 pickCodexRolloutForArchive 给） */
+function missingSourceNote(runtime: string, sessionId: string): string {
+  if (runtime === "pi") return `Pi 会话文件不存在：~/.pi/agent/sessions 下找不到 ${sessionId}`;
+  return "源 jsonl 不存在（可能已被 CC 清理）";
+}
+
+/** registry 条目里归档要用的几项 */
+export interface ArchivableAgent {
+  cwd?: string;
+  sessionId?: string;
+  runtime?: string;
+}
+
+/**
+ * 按 registry 条目归档（manager 的 archive / kill / 换代都走这里）：runtime 跟着条目走，调用方不用记得传。
+ * sessionId 缺省取条目当前值；换代时传旧 id。
+ */
+export function archiveAgentSession(
+  agentName: string,
+  info: ArchivableAgent,
+  sessionId: string | undefined = info.sessionId,
+  opts: { archiveRoot?: string } = {},
+): Promise<ArchiveResult> {
+  return archiveSession(agentName, info.cwd, sessionId ?? "", { runtime: info.runtime, archiveRoot: opts.archiveRoot });
+}
+
 /**
  * 归档一个 agent 的某个 session：主 jsonl + subagents/*.jsonl（Pi 的子代理产物会
  * 落成与 Claude Code 同构的布局，见下方 listPiSubagentJsonls）+ workflow 目录（workflow-archive.ts）。
  * 落点 ~/.claude-orchestrator/archive/<agent>/<sessionId>[.jsonl|/subagents/]。
- * 源不存在（已被 CC 清理）→ ok:false 但不抛错，调用方 best-effort。
+ * 源找不到 / 认不准（Codex 同 id 多份）/ 任一文件没拷上 → ok:false 并说明原因，不抛错，调用方 best-effort。
  */
 export async function archiveSession(
   agentName: string,
@@ -112,55 +139,65 @@ export async function archiveSession(
   if (typeof sessionId !== "string" || !sessionId) {
     return { ok: false, archived: [], note: `无效 sessionId（期望字符串，实得 ${typeof sessionId}）` };
   }
-  // v2.23+ runtime 感知：Pi 的会话文件在 ~/.pi/agent/sessions/<cwd编码>/ 下，
-  // 文件名带时间戳前缀 ⇒ 只能扫目录（sessionJsonlPath 返回 null 即未找到）
-  const piRuntime = agentRuntime({ runtime: opts.runtime }) === "pi";
-  let src = opts.srcPath ?? "";
-  if (!src && cwd) src = piRuntime ? (sessionJsonlPath(opts.runtime, cwd, sessionId) ?? "") : projectJsonlPath(cwd, sessionId);
-  if (!src || !existsSync(src)) src = findSessionJsonlBySessionId(opts.runtime, sessionId) ?? "";
-  if (!src || !existsSync(src)) {
-    return { ok: false, archived: [], note: "源 jsonl 不存在（可能已被 CC 清理）" };
-  }
+  const runtime = agentRuntime({ runtime: opts.runtime });
+  const located = await locateSource(runtime, cwd, sessionId, opts.srcPath);
+  if ("error" in located) return { ok: false, archived: [], note: located.error };
+  const { path: src, note: pickNote } = located;
 
   const dir = join(opts.archiveRoot ?? ARCHIVE_ROOT, agentName);
   await mkdir(dir, { recursive: true });
   const archived: string[] = [];
+  const failed: string[] = [];
+  const copy = async (from: string, dest: string) => {
+    const r = await copyIfLarger(from, dest, (e) => failed.push(`${basename(from)}: ${e.message}`));
+    if (r === "copied") archived.push(dest);
+  };
 
-  const destMain = join(dir, `${sessionId}.jsonl`);
-  if ((await copyIfLarger(src, destMain)) === "copied") archived.push(destMain);
+  await copy(src, join(dir, `${sessionId}.jsonl`));
 
   // subagents 对话（与主会话同级的 <sessionId>/subagents/ 目录）
   // Pi 的子代理产物布局与 CC 不同：<会话 stem>/<runId>/run-N/session.jsonl。
   // 这里把它们**落成与 CC 同构**的 <sid>/subagents/<runId>[-runN].jsonl，好让
   // 历史面板（只扫 *.jsonl）零改动就能读。
-  const piSubFiles = piRuntime ? listPiSubagentJsonls(src) : [];
+  const piSubFiles = runtime === "pi" ? listPiSubagentJsonls(src) : [];
   for (const { id, path: subPath } of piSubFiles) {
     const destSub = join(dir, sessionId, "subagents");
     await mkdir(destSub, { recursive: true });
-    const dest = join(destSub, `${id}.jsonl`);
-    if ((await copyIfLarger(subPath, dest)) === "copied") archived.push(dest);
+    await copy(subPath, join(destSub, `${id}.jsonl`));
   }
   const subDir = join(src.replace(/\.jsonl$/, ""), "subagents");
   if (existsSync(subDir)) {
     const destSub = join(dir, sessionId, "subagents");
     await mkdir(destSub, { recursive: true });
     try {
-      for (const f of await readdir(subDir)) {
-        if (!f.endsWith(".jsonl")) continue;
-        if ((await copyIfLarger(join(subDir, f), join(destSub, f))) === "copied") {
-          archived.push(join(destSub, f));
-        }
-      }
-    } catch { /* best-effort */ }
+      for (const f of await readdir(subDir)) if (f.endsWith(".jsonl")) await copy(join(subDir, f), join(destSub, f));
+    } catch (e) {
+      failed.push(`subagents 目录: ${(e as Error).message}`);
+    }
   }
   const wf = await archiveWorkflowDirs(src.replace(/\.jsonl$/, ""), join(dir, sessionId));
   archived.push(...wf.copied);
+  failed.push(...wf.failed.map((f) => `workflow ${basename(f)}`));
 
-  return {
-    ok: true,
-    archived,
-    note: (archived.length ? `已归档 ${archived.length} 个文件` : "归档已是最新（无变化）") + (wf.failed.length ? `；workflow 有 ${wf.failed.length} 个文件没拷上（下次再试）` : ""),
-  };
+  // 任何一份没拷上都是 ok:false：kill / remove 靠它记日志，「无变化」和「拷失败」不能混成一句（tests/session-archive-runtimes.test.ts）
+  const extra = pickNote ? `；${pickNote}` : "";
+  if (failed.length) {
+    return { ok: false, archived, note: `归档不完整：${failed.length} 个文件没拷上（${failed.join("；")}）；源文件还在，下次 archive 会补${extra}` };
+  }
+  return { ok: true, archived, note: (archived.length ? `已归档 ${archived.length} 个文件` : "归档已是最新（无变化）") + extra };
+}
+
+/**
+ * 会话源文件。Codex 走 pickCodexRolloutForArchive（核对首行 id，同 id 多份再按 cwd 分，分不开就拒）；
+ * 其余交给运行时适配器：Claude Code 按 cwd 推算，Pi 文件名带时间戳推不出（返回 null）→ 按 id 全库找。
+ */
+async function locateSource(runtime: string, cwd: string | undefined, sessionId: string, srcPath?: string): Promise<RolloutPick> {
+  if (srcPath && existsSync(srcPath)) return { path: srcPath };
+  if (runtime === "codex") return pickCodexRolloutForArchive(sessionId, cwd);
+  let src = !srcPath && cwd ? (sessionJsonlPath(runtime, cwd, sessionId) ?? "") : "";
+  if (!src || !existsSync(src)) src = findSessionJsonlBySessionId(runtime, sessionId) ?? "";
+  if (!src || !existsSync(src)) return { error: missingSourceNote(runtime, sessionId) };
+  return { path: src };
 }
 
 /** 诊断/CLI 用：某 agent 的归档 session 列表 */

@@ -52,6 +52,22 @@ describe("AcpSession · 起步", () => {
     expect(f.last("session/load")).toBeTruthy();
   });
 
+  test("fork 能力和新线程 id 都按 ACP 回包确认", async () => {
+    const f = fakeAdapter();
+    const init = f.session.initialize();
+    f.reply("initialize", { agentCapabilities: { sessionCapabilities: { resume: {}, fork: {} } } });
+    expect(await init).toEqual({ resume: true, fork: true });
+    const fork = f.session.fork(SID, "/w");
+    expect(f.last("session/fork").params).toEqual({ sessionId: SID, cwd: "/w", mcpServers: [] });
+    const newId = "019a0000-0000-7000-8000-000000000002";
+    f.reply("session/fork", { sessionId: newId });
+    expect(await fork).toBe(newId);
+    expect(f.session.sessionId).toBe(newId);
+    const repeated = f.session.fork(SID, "/w");
+    f.reply("session/fork", { sessionId: SID });
+    await expect(repeated).rejects.toThrow("新的 sessionId");
+  });
+
   test("别的会话的更新不进来；本会话的原样交给宿主", async () => {
     const f = fakeAdapter();
     await attached(f);
@@ -91,6 +107,20 @@ describe("AcpSession · prompt 结果", () => {
 });
 
 describe("AcpSession · 外部回合的结束（按序号关联，Shawn 复审要求 1、2）", () => {
+  test("steer 不设局部超时：结果未明时不能把同一消息再当 prompt 投递", async () => {
+    const f = fakeAdapter();
+    await attached(f);
+    const request = f.session.rpc.request.bind(f.session.rpc);
+    let timeout: number | undefined = -1;
+    (f.session.rpc as any).request = (method: string, params: unknown, opts: { timeoutMs?: number }) => {
+      if (method === "_session/steering") timeout = opts.timeoutMs;
+      return request(method, params, opts);
+    };
+    const pending = f.session.steer("late reply");
+    expect(timeout).toBeUndefined();
+    f.reply("_session/steering", { outcome: "injected" });
+    expect(await pending).toEqual({ outcome: "injected" });
+  });
   test("startedNewTurn 的回包和那一轮的 idle 同一个 chunk 到：不漏等", async () => {
     const f = fakeAdapter();
     await attached(f);
