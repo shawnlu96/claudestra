@@ -25,7 +25,12 @@ Codex 的窗口仍承载宿主日志。`transport tmux` 可立即切回旧 TUI �
 | 默认迁移 PR | Codex 新建 / 收编默认 ACP；升级时装适配器、迁移 registry、重启旧线程；doctor 检查及 tmux 回退 | ACP 优先，条件不足暂退 tmux |
 | 删除 PR | 真机稳定并经审查后移除 Codex tmux 读屏 / 打字链路 | 仅 ACP |
 
-升级时无参数 `migrate` 只做旧 worker→agent 迁移（旧版 updater 也这样调用）；bridge 重载并开始监听后才用 `migrate --startup` 自动执行 ACP 迁移，避免宿主接到旧 bridge。迁移幂等补齐旧 registry：可用则记 `transport: "acp"` 并重启接旧 thread；固定版本适配器下载 / sha256、Codex `app-server` 探测任一失败时，未迁移的记录记 `transport: "tmux", acpPending: true`，已有 ACP 记录保持原样，不打断正在跑的回合。重启 ACP 接旧线程失败也自动再起 tmux；人工执行 `transport <agent> tmux` 会清除待迁移标记，此后保持回退。暂退 tmux 的 agent 不在每次 bridge 重启时自动反复试；条件恢复后人工重跑 `manager migrate --acp`。失败的重启留标记给下次迁移，doctor 会点名。
+升级时无参数 `migrate` 只做旧 worker→agent 迁移（旧版 updater 也这样调用）；新 bridge 监听后才执行 `migrate --startup`。活跃旧 Codex 保留 tmux 并记 `acpPending`，启动尾段不重启正在跑的会话；已有 ACP 会话保持原样。未活跃记录可直接补齐 transport，readiness 失败记待迁移，doctor 会点名。
+
+bridge 每 30 秒执行 `migrate --idle` 重试待迁移项。先押住该频道所有新消息，再让接收端确认旧投递已排空；旧接收端不支持确认时保留原会话，由 doctor 提示空闲后手动 `transport <agent> acp`。能排空时，只在两帧明确空闲且没有草稿/菜单的 TUI 上发 `/quit`，不发 Esc、C-c 或强杀。旧进程正常退出后，保留旧窗（`parked-t60-*`），在新窗口直接启动 ACP 接同一线程，避免把启动命令打进被 owner 接管的旧窗。启动失败保留待重启标记，下次安全重试；旧 parked 窗口由 owner 按需关闭，迁移不会杀掉它。
+
+人工 `manager migrate --acp` 和 `transport <agent> acp` 仍是明确重启请求，应在空闲时执行；接旧线程失败可恢复 tmux。人工 `transport <agent> tmux` 清除待迁移标记并保持回退。ACP 的 manager idle 查询直接问宿主，断线、超时、线程对不上都按忙处理。
+
 
 ## 架构
 
@@ -117,7 +122,7 @@ bridge 那头：`bridge/acp-link.ts`（宿主的帧 → watcher 推送 / 卡片 
 
 ```bash
 bun src/manager.ts create <name> <dir> [purpose] --runtime codex  # 缺省 ACP；首次自动下载并校验适配器
-bun src/manager.ts migrate --acp                                 # bridge 启动后自动执行，也可重跑失败的迁移
+bun src/manager.ts migrate --acp                                 # 明确请求迁移/重启；自动启动迁移另走 --startup 与 --idle
 bun src/manager.ts doctor                                        # 看适配器、CLI、暂退与待重启
 bun src/manager.ts transport <agent> tmux                         # 一键回退、记住人工选择
 bun src/manager.ts transport <agent> acp                          # 条件恢复后手动切回（自动 restart）

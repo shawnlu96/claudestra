@@ -84,7 +84,7 @@ async function turn(text: string): Promise<Rec> {
     const rawInput = { command: "/bin/zsh -lc 'echo stub'", cwd: process.cwd() };
     update({ sessionUpdate: "tool_call", toolCallId: cid, kind: "execute", title: "echo stub", status: "in_progress", rawInput, content: [{ type: "terminal", terminalId: cid }] });
     let perm = "";
-    if (text.includes("[stub:perm]")) {
+    if (text.includes("[stub:perm]") || process.env.STUB_BOOTSTRAP_PERMISSION === "1" && !/<channel/.test(text)) {
       const options = [{ optionId: "allow_once", name: "Allow", kind: "allow_once" }, { optionId: "reject_once", name: "Reject", kind: "reject_once" }];
       const r = await requestHost("session/request_permission", { sessionId, toolCall: { toolCallId: cid, title: "echo stub", kind: "execute", rawInput }, options });
       perm = `（权限：${r?.outcome?.outcome === "selected" ? r.outcome.optionId : "cancelled"}）`;

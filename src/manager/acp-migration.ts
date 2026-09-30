@@ -1,6 +1,6 @@
-/** update 的 Codex 迁移：短锁改 registry，放锁后逐个 restart；失败留标记供重跑。 */
+/** Codex 迁移：启动时保住活跃旧回合；人工迁移才重启活跃 agent。 */
 import { checkAcpReady } from "../lib/acp/readiness.js";
-import { migrateCodexTransports, type MigratingAgent } from "../lib/acp/migration.js";
+import { deferActiveCodexMigration, migrateCodexTransports, type MigratingAgent } from "../lib/acp/migration.js";
 import { resolveBunPath } from "../lib/bun-path.js";
 import { acquireLock } from "../lib/file-lock.js";
 import { statePath } from "../lib/paths.js";
@@ -11,7 +11,15 @@ import { loadRegistry, migrateWorkerToAgent, output, patchRegistryAgent, saveReg
 
 const RESTART_TIMEOUT_MS = 240_000;
 
-export async function cmdMigrate(mode?: string): Promise<void> {
+export async function cmdMigrate(mode?: string, name?: string): Promise<void> {
+  if (mode === "--launch-idle") return output(await (await import("./acp-idle-launch.js")).launchIdleAcp(name ?? ""));
+  if (mode === "--idle") {
+    const r = await (await import("./acp-idle-migration.js")).migrateIdleCodex((name) => runManagerProcess(["migrate", "--launch-idle", name], {
+      bunPath: resolveBunPath(), managerPath: `${SRC_DIR}/manager.ts`, timeoutMs: RESTART_TIMEOUT_MS,
+    }));
+    output({ ok: r.failed.length === 0, ...r });
+    return;
+  }
   const r = await runMigrateMode(mode, migrateWorkersOnly, migrateAll);
   output(r);
   if ("failed" in r && r.failed.length) { console.error(`[migrate] Codex 重启失败：${r.failed.join(", ")}`); process.exitCode = 1; }
@@ -19,8 +27,9 @@ export async function cmdMigrate(mode?: string): Promise<void> {
 
 async function migrateWorkersOnly() {
   const lock = await acquireLock(statePath(".manager-write.lock"));
+  if (!lock) throw new Error("migrate 写锁未拿到，跳过本轮而非并发改 registry");
   try { return await migrateWorkerToAgent(); }
-  finally { lock?.release(); }
+  finally { lock.release(); }
 }
 
 export async function runMigrateMode(
@@ -42,6 +51,7 @@ export async function migrateAll(automatic = false) {
     ((a as MigratingAgent).transport !== "tmux" || (!automatic && (a as MigratingAgent).acpPending)));
   const ready = eligible ? await checkAcpReady(true) : { ok: false as const, reason: "没有待迁移的 Codex agent" };
   const lock = await acquireLock(statePath(".manager-write.lock"));
+  if (!lock) throw new Error("ACP 迁移写锁未拿到，跳过本轮而非并发改 registry");
   let worker: Awaited<ReturnType<typeof migrateWorkerToAgent>>;
   let changed: string[] = [];
   let pending: string[] = [];
@@ -52,15 +62,21 @@ export async function migrateAll(automatic = false) {
     worker = await migrateWorkerToAgent();
     const reg = await loadRegistry();
     const agents = reg.agents as Record<string, MigratingAgent>;
+    const deferred = automatic ? deferActiveCodexMigration(agents) : { changed: [], pending: [] };
+    changed = deferred.changed;
+    pending = deferred.pending;
     const candidates = Object.values(agents).some((a) => a.runtime === "codex" && (a.transport !== "tmux" || (!automatic && a.acpPending)));
     if (candidates && eligible) {
       if (!ready.ok) reason = ready.reason;
-      ({ changed, pending, restart } = migrateCodexTransports(agents, ready, !automatic));
-      if (changed.length) await saveRegistry(reg);
+      const planned = migrateCodexTransports(agents, ready, !automatic);
+      changed.push(...planned.changed);
+      pending.push(...planned.pending);
+      restart = planned.restart;
       targets = new Map(restart.map((name) => [name, agents[name]!.transport!]));
     }
+    if (changed.length) await saveRegistry(reg);
   } finally {
-    lock?.release();
+    lock.release();
   }
   const results = await restartMigrated(targets, (name) => runManagerProcess(["restart", "--", name], {
     bunPath: resolveBunPath(), managerPath: `${SRC_DIR}/manager.ts`, timeoutMs: RESTART_TIMEOUT_MS,

@@ -161,14 +161,7 @@ async function windowExists(name: string): Promise<boolean> {
 }
 
 async function isAgentIdle(name: string): Promise<boolean> {
-  // pane 判据只认 Claude Code 的 TUI（❯ / 横幅），套在别的运行时上恒判「忙」。
-  // idleSource=hook 的运行时（Pi）忙闲只由回合结束上报决定，CLI 进程看不到那份
-  // 内存状态 ⇒ 这里一律答「空闲」。
-  const bare = name.replace(/^agent-/, "");
-  const reg = await loadRegistry();
-  const info = reg.agents?.[name] ?? reg.agents?.[bare] ?? reg.agents?.[`agent-${bare}`];
-  if (controlFor(info?.runtime, normalizeTransport((info as { transport?: string } | undefined)?.transport)).idleSource !== "pane") return true; // hook / acp 同理
-  return isIdle(windowTarget(name));
+  return (await import("./manager/agent-idle.js")).agentIdle(name, loadRegistry, () => isIdle(windowTarget(name)));
 }
 
 async function captureLast(name: string, lines = 40): Promise<string> {
@@ -1337,31 +1330,7 @@ async function cmdRestart(name?: string, opts: { includeMaster?: boolean } = {})
 
     // 2. 重新启动 — 沿用 registry 中存储的 channelId + 权限配置
     const displayName = info.displayName || tmuxName.replace(AGENT_PREFIX, "");
-    // v2.16+ purpose 注入 restart 也带上(会话虽有历史,系统提示常驻比翻聊天记录可靠);
-    // resume 写入的占位 purpose("resumed: xxx")无信息量,过滤
-    const purposeForInject =
-      info.purpose && !info.purpose.startsWith("resumed:") ? info.purpose : undefined;
-    const spec: LaunchSpec = {
-      mode: "resume",
-      channelId: info.channelId,
-      bridgeUrl: BRIDGE_URL,
-      sessionId: info.sessionId,
-      displayName,
-      effort: info.effort,
-      // 老 agent（feature 前建的）info.permissionMode 为空 → 启动器回退 bypassPermissions
-      permissionMode: info.permissionMode,
-      // v2.4.20+ 显式 --model 覆盖 --resume 钉死的会话原模型（"改全局无效"的解法）
-      model: info.model,
-      purpose: purposeForInject,
-      agentName: tmuxName,
-      ...(info.cwd ? { cwd: info.cwd } : {}),
-      extras: {
-        disallowedPreset: info.disallowedPreset,
-        disallowedRaw: info.disallowedRaw,
-        // v2.23+ 能力档案、编排班子角色（lib/team-roles.ts）随 registry 复现，否则重启后静默变回「继承全局」/ 丢角色
-        piEnv: normalizePiEnvProfile(info.piEnv), role: info.role,
-      },
-    };
+    const spec = (await import("./manager/restart-spec.js")).restartSpec(tmuxName, info);
 
     let started = (await launchInWindow(tmuxName, adapter, spec, { waitShell: true })).result;
     ({ adapter, started } = await (await import("./manager/acp-lifecycle.js")).recoverFailedAcpLaunch(tmuxName, info as any, adapter, started,
@@ -2767,7 +2736,7 @@ switch (cmd) {
     break;
   }
 
-  case "migrate": await (await import("./manager/acp-migration.js")).cmdMigrate(args[0]); break;
+  case "migrate": await (await import("./manager/acp-migration.js")).cmdMigrate(args[0], args[1]); break;
   case "migrate-web-state": await (await import("./manager/migrate-web-state.js")).cmdMigrateWebState(); break; // 旧 Next BFF 的 settings.db / config.json → bridge（先 tar 备份，幂等）
   case "web-release": await cmdWebRelease(args); break; // 网页版本发布 / 回滚（lib/web-releases.ts）
   case "retire-web": await (await import("./manager/retire-web.js")).cmdRetireWeb(); break; // 卸旧 com.claudestra.web（前端已由 bridge 托管；先验新模式 + 有备份才动手）

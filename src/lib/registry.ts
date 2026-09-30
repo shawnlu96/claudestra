@@ -134,6 +134,7 @@ export interface RegistryAgent {
   acpPending?: boolean;
   /** 迁移改了 transport，但窗口重启尚未成功 */
   acpRestartPending?: boolean;
+  acpRestartFrom?: Transport;
   /** 派发者的 registry 键（`agent-xxx` 或 `master`）：侧栏把它挂在派发者下面（manager/team.ts 写入）。展示用，不参与授权 */
   parent?: string;
   /** 任务短名（≤40 字），侧栏执行者那行的小标 */
@@ -179,6 +180,7 @@ function normalizeEntries(agents: Record<string, unknown>): RegistryAgent[] {
       transport: a.transport === "acp" ? "acp" : a.transport === "tmux" ? "tmux" : undefined,
       acpPending: a.acpPending === true,
       acpRestartPending: a.acpRestartPending === true,
+      acpRestartFrom: a.acpRestartFrom === "tmux" ? "tmux" : a.acpRestartFrom === "acp" ? "acp" : undefined,
       parent: str("parent"),
       task: str("task"),
     };

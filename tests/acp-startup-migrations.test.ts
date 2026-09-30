@@ -19,3 +19,14 @@ test("project 迁移失败不阻止 Codex ACP 迁移", async () => {
   });
   expect(calls).toEqual([["project-migrate"], ["migrate", "--startup"]]);
 });
+
+test("后续启动即使零改动，也点名待迁移的活跃旧 Codex 和手动下一步", async () => {
+  const warnings: string[] = [];
+  await runStartupMigrations(async (...args) => args[0] === "project-migrate"
+    ? { ok: true, migrated: 0 }
+    : { ok: true, changed: [], pending: ["agent-peer-legacy"], restarted: [] },
+  (message) => warnings.push(message));
+  expect(warnings).toHaveLength(1);
+  expect(warnings[0]).toContain("agent-peer-legacy");
+  expect(warnings[0]).toContain("migrate --acp");
+});

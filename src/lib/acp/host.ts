@@ -1,4 +1,8 @@
-/** ACP 宿主协调适配器、bridge、回合与出站确认；协议细节见 docs/runtimes/codex-acp.md。 */
+/**
+ * ACP 宿主协调适配器、bridge 与回合；条目确认后才报 Stop，丢失按 StopFailure 报。
+ * 权限按单次请求等回执，适配器退出与超时撤卡；失败结构化交给 bridge，不自动切模型。
+ * 协议与有界重送约束见 docs/runtimes/codex-acp.md。
+ */
 import { randomBytes } from "node:crypto";
 import { codexReplyHint, wrapChannelContent } from "../codex-thread.js";
 import { adapterEnv, type AdapterEnvSpec, type AdapterProc } from "./adapter-proc.js";
@@ -7,6 +11,7 @@ import type { BridgeLink, BridgeLinkDeps } from "./bridge-link.js";
 import { commitAcpClear, rotateAcpHost } from "./clear.js";
 import { modelStateEntry } from "./config.js";
 import { classifyPromptError, failureEntry, FailureDedup, type AcpFailure } from "./failures.js";
+import { HostPermissions } from "./host-permissions.js";
 import { AcpSession } from "./session.js";
 import type { ToolProxy, ToolProxyDeps } from "./tool-proxy.js";
 import { AcpTurnLoop, type StopReport } from "./turn.js";
@@ -80,8 +85,7 @@ export class AcpHost {
   private retryTimer: ReturnType<typeof setTimeout> | null = null;
   private retries = 0;
   private drainWaiters: (() => void)[] = [];
-  private readonly permits = new Map<string, { frame: Record<string, unknown>; resolve: (optionId: string | null) => void; timer: ReturnType<typeof setTimeout> }>();
-  private permSeq = 0;
+  private readonly permissions: HostPermissions;
   private translator = createAcpTranslator();
   private readonly dedup = new FailureDedup();
   private readonly proxy: ToolProxy;
@@ -110,6 +114,7 @@ export class AcpHost {
       },
       log: deps.log,
     });
+    this.permissions = new HostPermissions(this.cfg.channelId, this.hostId, (f) => this.link.send(f), deps.log, () => this.timing("permissionMs"));
     this.loop = new AcpTurnLoop({
       prompt: async (text) => {
         const s = await this.waitSession();
@@ -132,7 +137,7 @@ export class AcpHost {
   stop(): void {
     this.stopping = true;
     if (this.loop.busy) this.session?.cancel();
-    for (const id of [...this.permits.keys()]) this.endPermission(id, null);
+    for (const id of [...this.permissions.ids()]) this.endPermission(id, null);
     this.proc?.stop();
     this.proxy.close();
     this.link.close();
@@ -172,7 +177,7 @@ export class AcpHost {
 
   private onAdapterExit(session: AcpSession, code: number, startedAt: number): void {
     if (this.session === session) this.session = null;
-    for (const id of [...this.permits.keys()]) this.endPermission(id, null, "适配器退出了");
+    for (const id of [...this.permissions.ids()]) this.endPermission(id, null, "适配器退出了");
     if (this.stopping) return;
     if (this.rotating) return void (this.restartDeferred = true);
     if (Date.now() - startedAt > RESTART_STABLE_MS) this.restarts = 0;
@@ -206,7 +211,7 @@ export class AcpHost {
 
   /** 在 bridge 登记上了（首次 / 重连 / bridge 重启）：还在等的权限请求补发出卡，出站条目接着送 */
   private resync(): void {
-    for (const p of this.permits.values()) this.link.send(p.frame);
+    for (const p of this.permissions.frames()) this.link.send(p);
     void this.pump();
   }
 
@@ -277,7 +282,7 @@ export class AcpHost {
   }
 
   private async reportStop(r: StopReport): Promise<{ block?: boolean; reason?: string }> {
-    for (const id of [...this.permits.keys()]) this.endPermission(id, null, "回合已结束");
+    for (const id of [...this.permissions.ids()]) this.endPermission(id, null, "回合已结束");
     const rest = this.translator.flush();
     if (rest.length) this.pushEntries(rest);
     // 这一轮的条目 bridge 全部确认处理完才报 Stop：Stop 的 drain 要看到收尾文字（ws 与 HTTP 两条路没有先后保证）。
@@ -299,30 +304,10 @@ export class AcpHost {
     this.link.send({ channelId: this.cfg.channelId, type: "acp_failure", failure: f, configOptions: this.session?.configOptions ?? [] });
   }
 
-  /** 权限请求：按 permId 交 bridge 出卡，等 owner 答（bridge 经 acp_call 回来）；到点按取消回适配器 */
   private askPermission(card: unknown): Promise<string | null> {
-    const permId = `${this.hostId}-${++this.permSeq}`;
-    const frame = { channelId: this.cfg.channelId, type: "acp_permission", permId, card };
-    return new Promise((resolve) => {
-      const timer = setTimeout(() => this.endPermission(permId, null, "等太久没人答"), this.timing("permissionMs"));
-      this.permits.set(permId, { frame, resolve, timer });
-      if (!this.link.send(frame)) this.deps.log(`bridge 不在：权限请求 ${permId} 等登记上了再出卡`);
-    });
+    return this.permissions.ask(card, this.rotating);
   }
-
-  /** 结束一个权限请求；why 有值 = 不是 owner 答的（超时 / 适配器退出），通知 bridge 撤卡。返回它是不是还在等 */
-  private endPermission(permId: string, optionId: string | null, why?: string): boolean {
-    const p = this.permits.get(permId);
-    if (!p) return false;
-    this.permits.delete(permId);
-    clearTimeout(p.timer);
-    p.resolve(optionId);
-    if (why) {
-      this.deps.log(`权限请求 ${permId} ${why}：按取消回适配器、撤卡`);
-      this.link.send({ channelId: this.cfg.channelId, type: "acp_permission", permId, gone: why });
-    }
-    return true;
-  }
+  private endPermission(id: string, option: string | null, why?: string): boolean { return this.permissions.end(id, option, why); }
 
   private onFrame(m: Record<string, any>): void {
     if (this.proxy.onBridgeFrame(m)) return;
@@ -345,7 +330,7 @@ export class AcpHost {
   private abort(id: string): void {
     const busy = this.loop.busy && !!this.session;
     if (busy) this.session!.cancel();
-    for (const permId of [...this.permits.keys()]) this.endPermission(permId, null, "回合已打断");
+    for (const permId of [...this.permissions.ids()]) this.endPermission(permId, null, "回合已打断");
     this.link.send({ type: "abort_ack", id, result: busy ? "aborted" : "idle", voided: [], inEditor: 0 });
     this.deps.log(busy ? "收到停止：已调 session/cancel" : "收到停止：当前空闲");
   }
@@ -353,6 +338,7 @@ export class AcpHost {
   /** bridge 发来的调用（改配置）：结果按 id 回 acp_call_result */
   private async call(m: Record<string, any>): Promise<void> {
     const reply = (body: Record<string, unknown>) => this.link.send({ channelId: this.cfg.channelId, type: "acp_call_result", id: m.id, ...body });
+    if (m.op === "status") return void reply({ ok: true, busy: this.loop.busy, sessionId: this.cfg.sessionId });
     if (m.op === "clear") return void reply(await this.clearSession());
     if (m.op === "slash") return void (this.loop.submitCommand(String(m.text ?? "")), reply({ ok: true })); // 独占下一轮 prompt，适配器才会识别命令
     if (m.op === "permission") {
@@ -370,7 +356,7 @@ export class AcpHost {
   private async clearSession(): Promise<{ ok: boolean; error?: string; sessionId?: string }> {
     const oldPreamble = this.preamblePending;
     return rotateAcpHost({
-      session: this.session, ready: !!this.proc && this.registered, pending: !!(this.outbox.length || this.pumping || this.permits.size),
+      session: this.session, ready: !!this.proc && this.registered, pending: !!(this.outbox.length || this.pumping || this.permissions.size),
       loop: this.loop, oldId: this.cfg.sessionId, cwd: this.cfg.cwd, rotateRegistry: this.deps.rotateSession,
       configure: (s) => applyAcpLaunchConfig(s, this.cfg.model, this.cfg.effort, true, this.deps.log),
       begin: () => ((this.rotating = true), (this.preamblePending = this.cfg.clearPreamble)),

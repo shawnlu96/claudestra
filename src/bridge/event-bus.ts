@@ -1,4 +1,9 @@
-/** 进程内旁路事件总线：实时订阅与有限回放；权威历史仍在会话文件。 */
+/**
+ * 进程内旁路事件总线：实时订阅与有限回放，权威历史仍在会话文件。
+ * schema additive-only：BridgeEvent 只加字段，不删字段或改变语义，前端可忽略未知字段。
+ * 回放环在 bridge 重启时清零（已知限制 R6）；契约见 docs/design-multi-frontend.md §4。
+ */
+import { forgetEventAgent, retireSessionEvents } from "../lib/retire-session-events.js";
 import { completedOnlyFrom, inflightFrom } from "../lib/turn-cuts.js";
 
 export type BridgeEventType =
@@ -195,17 +200,9 @@ export function subscribeEvents(
  * 长期运行的 bridge 上，建了又删的 agent 会一直堆积。
  */
 /** clear 换代后从回放环移掉旧线程的流事件，保留排队中的人类消息和新线程事件。 */
-export function retireAgentSessionEvents(agent: string, oldSessionId: string): void {
-  const old = oldSessionId.replace(/^acp:/, "");
-  const ring = rings.get(agent);
-  if (ring) rings.set(agent, ring.filter((e) => !e.data.sid || String(e.data.sid).replace(/^acp:/, "") !== old));
-}
+export const retireAgentSessionEvents = (agent: string, sid: string): void => retireSessionEvents(rings, agent, sid);
 
-export function forgetAgent(agent: string): void {
-  rings.delete(agent);
-  agentStatuses.delete(agent);
-  agentDoneAt.delete(agent);
-}
+export const forgetAgent = (agent: string): void => forgetEventAgent(agent, [rings, agentStatuses, agentDoneAt]);
 
 export function replayEventsSince(
   since: number,

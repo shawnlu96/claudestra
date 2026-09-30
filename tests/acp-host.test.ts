@@ -115,6 +115,20 @@ describe("ACP 宿主整条链（stub）", () => {
     expect(h.logs.some((m) => m.includes("按未知照常起") && m.includes("探测炸了"))).toBe(true);
   }, 20_000);
 
+  test("/clear 内部引导权限自动拒绝且不出卡；宿主状态能查询忙闲", async () => {
+    const h = start({ STUB_BOOTSTRAP_PERMISSION: "1" });
+    await until(h.isReady);
+    h.frame({ type: "acp_call", id: "status-idle", op: "status" });
+    expect(h.sent.find((f) => f.id === "status-idle")).toMatchObject({ ok: true, busy: false, sessionId: SID });
+    h.frame({ type: "acp_call", id: "clear-internal", op: "clear" });
+    h.frame({ type: "acp_call", id: "status-busy", op: "status" });
+    expect(h.sent.find((f) => f.id === "status-busy")).toMatchObject({ ok: true, busy: true });
+    await until(() => h.sent.some((f) => f.id === "clear-internal"));
+    expect(h.sent.find((f) => f.id === "clear-internal").ok).toBe(true);
+    expect(h.sent.some((f) => f.type === "acp_permission")).toBe(false);
+    expect(h.logs.some((s) => s.includes("内部引导轮请求权限：自动拒绝"))).toBe(true);
+  }, 30_000);
+
   test("/clear 忙时拒绝；空闲时新线程引导后换 registry，轮换中的人类消息排队到新线程", async () => {
     let release!: () => void;
     const gate = new Promise<void>((r) => (release = r));

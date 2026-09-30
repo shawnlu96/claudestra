@@ -36,7 +36,7 @@ const entrySeqs = new Map<string, { hostId: string; last: number; lost: number }
 const bridgeEpoch = randomBytes(6).toString("hex");
 /** 同频道的批次处理完才看下一批的序号；ws 消息处理器本身不会等上一个 async 回调。 */
 const entryTurns = new Map<string, Promise<void>>();
-type CallResult = { ok: boolean; error?: string; sessionId?: string; uncertain?: true };
+type CallResult = { ok: boolean; error?: string; sessionId?: string; busy?: boolean; uncertain?: true };
 const calls = new Map<string, { channelId: string; ws: Socket; op: unknown; resolve: (r: CallResult) => void; timer: ReturnType<typeof setTimeout> }>();
 let nextCall = 0;
 const CALL_TIMEOUT_MS = 15_000;
@@ -94,7 +94,7 @@ export async function onAcpFrame(msg: Record<string, any>, ws: Socket, discord: 
       if (!c || c.channelId !== channelId || c.ws !== ws) return;
       calls.delete(id);
       clearTimeout(c.timer);
-      c.resolve(msg.ok ? { ok: true, sessionId: msg.sessionId } : {
+      c.resolve(msg.ok ? { ok: true, sessionId: msg.sessionId, busy: msg.busy } : {
         ok: false, error: String(msg.error ?? "宿主拒绝"),
         ...(c.op === "clear" && typeof msg.sessionId === "string" ? { uncertain: true as const, sessionId: msg.sessionId } : {}),
       });
@@ -204,6 +204,8 @@ export const acpSetConfig = (channelId: string, configId: string, value: string)
 export const acpSlash = (channelId: string, text: string) => acpCall(channelId, { op: "slash", text });
 
 /** 清上下文要新建并引导线程、持久化 registry；比普通配置调用等得久。 */
+export const acpStatus = (channelId: string) => acpCall(channelId, { op: "status" }, 3_000);
+
 export const acpClear = (channelId: string) => acpCall(channelId, { op: "clear" }, 225_000);
 
 function acpCall(channelId: string, body: Record<string, unknown>, timeoutMs = CALL_TIMEOUT_MS): Promise<CallResult> {

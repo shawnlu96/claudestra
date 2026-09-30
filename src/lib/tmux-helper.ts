@@ -1130,12 +1130,13 @@ export async function listAgentWindows(): Promise<string[]> {
  *   1 = 正常一份
  *  ≥2 = zombie 累积（restart 死循环 + 静默吞错的历史遗留），调用方应该全杀重建
  */
-export async function listWindowIdsByName(name: string): Promise<string[]> {
-  const out = await tmuxRaw([
+export async function listWindowIdsByName(name: string, strict = false, query = strict ? tmuxRawStrict : tmuxRaw): Promise<string[]> {
+  const out = await query([
     "list-windows",
     "-t", MASTER_SESSION,
     "-F", "#{window_name}\t#{window_id}",
   ]);
+  if (!out.trim() && strict) throw new Error("窗口列表未确认，不能按不存在处理");
   if (!out) return [];
   const ids: string[] = [];
   for (const line of out.split("\n")) {
@@ -1200,14 +1201,8 @@ export function deadShellVerdict(atShell: boolean, hasChild: boolean | null): bo
  * v2.21.1+ 列出窗口 shell 的直接子进程 pid(peer 2026-08-30 死锁救援):
  * ps 自比对方案与 windowHasChildProcess 同款(pgrep -P 的自保排除坑见其注释)。
  */
-export async function windowChildPids(target: string): Promise<number[]> {
-  const pidRaw = await tmuxRaw(["list-panes", "-t", target, "-F", "#{pane_pid}"]);
-  const pid = parseInt(pidRaw.trim().split("\n")[0] || "", 10);
-  if (!Number.isFinite(pid) || pid <= 0) return [];
-  const proc = Bun.spawn(["ps", "-eo", "pid=,ppid="], { stdout: "pipe", stderr: "pipe" });
-  const out = await new Response(proc.stdout).text();
-  await proc.exited;
-  return childPidsInPsOutput(out, pid);
+export async function windowChildPids(target: string, strict = false): Promise<number[]> {
+  return (await import("./window-child-pids.js")).readWindowChildren(target, strict, strict ? tmuxRawStrict : tmuxRaw, childPidsInPsOutput);
 }
 
 /** `ps -eo pid=,ppid=` 输出里 ppid 匹配的子进程 pid 列表（纯函数，便于单测） */

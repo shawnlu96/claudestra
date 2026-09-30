@@ -18,7 +18,9 @@ import { channelServerMode, mcpCapabilities, shouldConnectBridge } from "./lib/c
 import { REPO_ROOT } from "./lib/repo-root.js";
 import { channelInstructions } from "./lib/channel-instructions.js";
 import { typeIntoOwnPane } from "./lib/codex-tui-submit.js";
-import { CodexQueueSink, decodePreambleEnv, codexParentGone, codexQueueArgs, defaultRunner, heldThreadIds, isPidAlive, type InboundSink } from "./lib/codex-thread.js";
+import { watchCodexParent } from "./lib/codex-parent-watch.js";
+import { ReceiverDrain } from "./lib/receiver-drain.js";
+import { CodexQueueSink, decodePreambleEnv, codexQueueArgs, defaultRunner, heldThreadIds, type InboundSink } from "./lib/codex-thread.js";
 import { FORWARD_TO_AGENT_DESCRIPTION, SEND_TO_AGENT_DESCRIPTION } from "./lib/agent-tool-docs.js";
 import { CHECK_INBOX_TOOL, checkInboxTool, forwardTool, sendToAgentTool } from "./lib/agent-tool-calls.js";
 import { FLEET_TOOL, fleetTool } from "./lib/fleet-tool.js";
@@ -192,6 +194,7 @@ function connectBridge(): Promise<void> {
         return;
       }
 
+      if (IS_CODEX && receiverDrain.frame(msg, (f) => ws.send(JSON.stringify(f)))) return;
       if (msg.type === "registered") {
         registered = true;
         if (IS_CODEX) markCodexReady();
@@ -406,9 +409,10 @@ const codexSink = new CodexQueueSink({
 });
 
 const inboundSink: InboundSink = IS_CODEX ? codexSink : mcpChannelSink;
+const receiverDrain = new ReceiverDrain((c, m) => inboundSink.deliver(c, m), console.error);
 
 function handleInboundMessage(content: string, meta: Record<string, string>) {
-  void inboundSink.deliver(content, meta);
+  receiverDrain.deliver(content, meta);
 }
 
 /**
@@ -426,16 +430,7 @@ async function discoverCodexSession(): Promise<void> {
 }
 
 /** Codex 被强杀时 MCP 子进程会成孤儿（判据见 codexParentGone）：父进程没了就按 stdio 关闭处理 */
-function startCodexParentWatch() {
-  const parent = process.ppid;
-  const timer = setInterval(() => {
-    if (!codexParentGone(parent, process.ppid, isPidAlive)) return;
-    mcpClosed = true;
-    console.error(`👋 Codex 父进程 ${parent} 已退出，channel-server 随之退出`);
-    process.exit(0);
-  }, 2000);
-  timer.unref?.();
-}
+const startCodexParentWatch = () => watchCodexParent(() => { mcpClosed = true; process.exit(0); }, console.error);
 
 /** 就绪标记与 Pi 扩展同款：manager 等 @claudestra_ready=1，而不是嗅探会随版本变的 TUI 文案 */
 function markCodexReady() {

@@ -804,40 +804,14 @@ async function deliverToLocal(env: RouterEnvelope, to: RouterLocalEndpoint, stil
   // chat_id 是 agent reply() 时要传回的 id：消息从哪个会话来，回复就发回那里。
   const replyBackChannel = resolveReplyBackChannel(env);
   rememberInbound(env, to.channelId); // 转交（bridge/forward.ts）只能转最近收到的用户原话
-  const meta: Record<string, string> = {
-    chat_id: replyBackChannel,
-    message_id: env.meta.messageId,
-    ts: env.meta.ts,
-    trigger: env.meta.triggerKind,
-    intent: env.intent,
-    thread_id: env.meta.threadId,
-  };
-  if (env.from.kind === "user") {
-    meta.user = env.from.username ?? "";
-    meta.user_id = env.from.userId;
-  } else if (env.from.kind === "local") {
-    meta.user = env.from.agentName ?? "agent";
-    meta.user_id = "agent";
-    meta.is_agent = "true";
-    meta.from_channel_id = env.from.channelId;
-  } else if (env.from.kind === "bridge") {
-    meta.user = `bridge${env.from.label ? `:${env.from.label}` : ""}`;
-    meta.user_id = "bridge";
-    meta.is_bridge = "true";
-  } else if (env.from.kind === "api") {
-    meta.user = env.from.name;
-    meta.user_id = `api:${env.from.tokenId}`;
-    meta.api = "true";
-  }
-  if (env.meta.attachments && env.meta.attachments.length > 0) {
-    meta.attachment_count = String(env.meta.attachments.length);
-    meta.attachments = env.meta.attachments.join(";");
-  }
+  const meta = (await import("./bridge/inbound-meta.js")).inboundMeta(env, replyBackChannel);
   const evAgent = to.agentName || agentLabelForChannel(to.channelId);
   // 停在额度菜单 / 撞墙等待:先押住、一个键都不发(菜单里有花钱的选项,停字也不发,bridge/quota-wall-wiring.ts)
   const atWallMenu = await holdAtWallWait(env, to, evAgent, stillWanted); if (atWallMenu) return atWallMenu;
   // 人类 request 到达、目标主回合在跑 → 先打断再投(后一条优先,随时补充);停字三种运行时都打断。记 cut、抬头见 bridge/preempt.ts。
   // agent↔agent、peer(对方实例的 agent 请求)、bridge 系统消息、response 不抢占;复核时画面刚变成撞墙等待(没发键)→ 同样押住
+  const migrationHold = (await import("./bridge/acp-migration-hold.js")).holdDuringMigration; const earlyHold = migrationHold(env, to, heldLocalMsgs);
+  if (earlyHold) return earlyHold;
   if (isHumanRequest(env) && (await preemptForHuman(env, to.channelId, evAgent)) === "wall_wait") { const h = await holdAtWallWait(env, to, evAgent, stillWanted, true); if (h) return h; }
   if (env.meta.interruptNote) meta.interrupt_note = "true"; // 历史只剥真由 bridge 加的抬头(lib/inbound-body.ts),用户手写的同样开头不剥
   const content = await renderContentForLocal(env); // 抢占之后渲染:抬头(env.meta.interruptNote)是抢占时写的
@@ -858,6 +832,7 @@ async function deliverToLocal(env: RouterEnvelope, to: RouterLocalEndpoint, stil
     return { envelope: env, outcome: { kind: "sent", note: "queued", ...(wallHold ? { heldBy: "quota_wall" as const } : {}) } };
   }
   try {
+    const held = migrationHold(env, to, heldLocalMsgs); if (held) return held;
     if (turnCuts.takeAfterInterrupt(to.channelId)) meta.after_interrupt = "true"; // Codex 被打断后 queue 会卡住,这条改打进 TUI
     to.ws.send(JSON.stringify({ type: "message", content, meta }));
     noteDelivered(to.channelId, env.from, Date.now(), turn.main === "idle"); // 触发这一轮的是谁（撞错后回程只让「接着做」那一轮结算，bridge/stop-settle.ts）
@@ -1624,6 +1599,7 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
     }
   }
 
+  if (await (await import("./bridge/acp-dispatch.js")).dispatchAcp(msg, ws, discord)) return;
   switch (msg.type) {
     case "ping": {
       // v2.2.0+: keepalive。收到本身就重置了 Bun 的 ws idleTimeout；回个 pong 让 channel-server 那侧的 idle 也重置，无需其它处理。
@@ -2193,9 +2169,6 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
     }
 
     case "abort_ack": onAbortAck(msg, ws); break; // Pi 扩展的中止回执（只认这个频道当前的连接）
-    case "acp_entries": case "acp_config": case "acp_failure": case "acp_permission":
-    case "acp_call_result": case "acp_rebind":
-      await (await import("./bridge/acp-link.js")).onAcpFrame(msg, ws, discord); break;
     case "codex_undelivered": void onCodexUndelivered(msg, ws, clients.get(msg.channelId)?.ws === ws); break; // 只了结没投进 Codex 的这一条，不替它宣告完成
     case "codex_typein_failed": if (clients.get(msg.channelId)?.ws === ws) onCodexTypeInFailed(msg, heldLocalMsgs); break; // 下一条再打字；菜单挡住的押回
     case "forward_to_agent": ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, ...(await handleForward(ws, msg)) })); break;
@@ -3279,7 +3252,7 @@ async function handleHttpRoutes(req: Request, url: URL): Promise<Response> {
 }
 
 // 主端口与接管的旧 web 端口（bridge/legacy-web-port.ts）共用这一个处理函数：同一道控制面闸门
-async function bridgeFetch(req: Request, server: { requestIP(r: Request): { address: string } | null; upgrade(r: Request, o?: { data?: unknown }): boolean }) {
+async function bridgeFetch(req: Request, server: import("./bridge/http-timeout.js").HttpServer) {
     const reqOrigin = req.headers.get("Origin");
     const crossOrigin = isCrossOrigin(reqOrigin, req.url, req.headers);
     const url0 = new URL(req.url);
@@ -3328,6 +3301,7 @@ async function bridgeFetch(req: Request, server: { requestIP(r: Request): { addr
       console.warn(`🚫 拒绝跨源 HTTP: ${req.method} ${url.pathname} Origin=${reqOrigin}`);
       return new Response("cross-origin request refused", { status: 403 });
     }
+    (await import("./bridge/http-timeout.js")).scopeHttpTimeout(req, server);
     const resp = await handleHttpRoutes(req, url);
     if (cors) for (const [k, v] of Object.entries(cors)) resp.headers.set(k, v);
     return resp;

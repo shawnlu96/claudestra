@@ -16,6 +16,23 @@ export interface MigrationResult {
   pending: string[];
 }
 
+/** bridge 启动时没有可信的回合态；活着的旧 Codex 留在 tmux，避免 update 后直接 C-c 正在跑的回合。 */
+export function deferActiveCodexMigration(agents: Record<string, MigratingAgent>): Pick<MigrationResult, "changed" | "pending"> {
+  const changed: string[] = [], pending: string[] = [];
+  for (const [name, agent] of Object.entries(agents)) {
+    if (agent.runtime !== "codex" || agent.status !== "active") continue;
+    if (agent.transport === undefined) {
+      agent.transport = "tmux";
+      agent.acpPending = true;
+      delete agent.acpRestartPending;
+      delete agent.acpRestartFrom;
+      changed.push(name);
+    }
+    if (agent.transport === "tmux" && agent.acpPending) pending.push(name);
+  }
+  return { changed, pending };
+}
+
 export function migrateCodexTransports(agents: Record<string, MigratingAgent>, ready: AcpReady, includePending = true): MigrationResult {
   const result: MigrationResult = { changed: [], restart: [], pending: [] };
   for (const [name, agent] of Object.entries(agents)) {

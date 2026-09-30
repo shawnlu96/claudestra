@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { migrateCodexTransports, type MigratingAgent } from "../src/lib/acp/migration.ts";
+import { deferActiveCodexMigration, migrateCodexTransports, type MigratingAgent } from "../src/lib/acp/migration.ts";
 import { checkAcpReady, type AcpReadyDeps } from "../src/lib/acp/readiness.ts";
 import { acpDoctorChecks } from "../src/lib/doctor-acp.ts";
 import { restartMigrated, runMigrateMode } from "../src/manager/acp-migration.ts";
@@ -92,6 +92,23 @@ test("bridge 启动时跳过暂退 tmux，人工重跑迁移才能重试；旧�
   expect(agents.pending).toMatchObject({ transport: "tmux", acpPending: true });
   delete agents.legacy.acpRestartPending; // 模拟 bridge 启动迁移已完成重启
   expect(migrateCodexTransports(agents, { ok: true })).toMatchObject({ changed: ["pending"], restart: ["pending"] });
+});
+
+test("启动自动迁移保住所有 active 旧 Codex：只记待迁移，不打断；inactive 仍转 ACP", () => {
+  const agents: Record<string, MigratingAgent> = {
+    active: { runtime: "codex", status: "active" },
+    pending: { runtime: "codex", status: "active", transport: "tmux", acpPending: true },
+    manualTmux: { runtime: "codex", status: "active", transport: "tmux" },
+    inactive: { runtime: "codex", status: "inactive" },
+    alreadyAcp: { runtime: "codex", status: "active", transport: "acp" },
+  };
+  expect(deferActiveCodexMigration(agents)).toEqual({ changed: ["active"], pending: ["active", "pending"] });
+  expect(migrateCodexTransports(agents, { ok: true }, false)).toMatchObject({ changed: ["inactive"], restart: [] });
+  expect(agents.active).toMatchObject({ transport: "tmux", acpPending: true, status: "active" });
+  expect(agents.inactive.transport).toBe("acp");
+  expect(agents.manualTmux).toEqual({ runtime: "codex", status: "active", transport: "tmux" });
+  expect(deferActiveCodexMigration(agents)).toEqual({ changed: [], pending: ["active", "pending"] });
+  expect(migrateCodexTransports(agents, { ok: true })).toMatchObject({ changed: ["active", "pending"], restart: ["active", "pending"] });
 });
 
 test("沙箱只认仓库 stub，不探测本机 Codex 或下载安装包", async () => {

@@ -19,7 +19,7 @@ export const ESC_LOCK_WAIT_MS = 12_000;
  * bridge 各 HTTP 入口的连接空闲上限（秒）。打断请求最坏要等打断间隔（≤2.75 秒）+ 窗口锁 ESC_LOCK_WAIT_MS + 锁内 1.2 秒才有结果；
  * Bun 默认 10 秒会先把连接切断；ACP /clear 引导新线程最长约 210 秒，也要在这条 HTTP 连接上等到真实结果。
  */
-export const HTTP_IDLE_TIMEOUT_S = 240;
+export const HTTP_IDLE_TIMEOUT_S = 30;
 
 export interface EscGuardDeps {
   /** 目标 → tmux 的 #{window_id}（如 "@3"）；窗口不在 = null，查询出错 = 抛错 */

@@ -7,7 +7,7 @@
 import { MAX_HTTP_BODY } from "../lib/request-body.js";
 import { HTTP_IDLE_TIMEOUT_S } from "../lib/esc-guard.js";
 
-type Handler = (req: Request, server: { requestIP(r: Request): { address: string } | null; upgrade(r: Request): boolean }) => Promise<Response | undefined>;
+type Handler = (req: Request, server: { requestIP(r: Request): { address: string } | null; upgrade(r: Request): boolean; timeout(r: Request, seconds: number): void }) => Promise<Response | undefined>;
 
 /** 没配 / 配错端口返回 null；接管成功返回 server（单测用来 stop） */
 export function startLegacyWebPort(handler: Handler, env: Record<string, string | undefined> = process.env): { stop(): void } | null {
