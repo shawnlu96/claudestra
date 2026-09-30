@@ -31,12 +31,12 @@ function readJson<T>(db: Database, key: string): T | null {
   try { return JSON.parse(v) as T; } catch { return null; /* 坏值按没有：最坏多等一轮 / 少暂停一次，不会误判死 */ }
 }
 
-interface Miss { at: number; kind: WorkerDown; agent: string | null; sessionId: string | null; leaseGen: number }
+interface Miss { at: number; kind: WorkerDown; agent: string | null; sessionId: string | null; leaseGen: number | null }
 
 /** 记一次存活探测；返回确认判死的种类（同一身份连续第二次否定），否则 null。每次否定、每次判死都打一行日志 */
 export function noteLiveness(db: Database, row: LendRow, v: WorkerLiveness, now: number, log: (m: string) => void): WorkerDown | null {
   const key = aliveKey(row.orderId);
-  const id = { agent: row.agent ?? null, sessionId: row.sessionId ?? null, leaseGen: row.leaseGen };
+  const id = { agent: row.agent ?? null, sessionId: row.sessionId ?? null, leaseGen: row.leaseGen ?? null };
   const last = readJson<Miss>(db, key);
   // 上次否定记的是别的 worker / 会话 / 租约代：不是同一个东西的第二次，按第一次算（i28-R5a r1 P2-1）
   const prev = last && last.agent === id.agent && last.sessionId === id.sessionId && last.leaseGen === id.leaseGen ? last : null;
