@@ -12,7 +12,7 @@ import { sourceFor } from "../lib/runtimes/index.js";
 /**
  * master 的最新 session id：master 不在 registry，从其 cwd 的
  * ~/.claude/projects/<slug>/ 目录里 probe mtime 最新的 jsonl。
- * bridge.ts 的 scheduleClearRotation 也用它（clear 轮转判重用）。
+ * bridge/clear-rotation.ts 也用它（clear 轮转判重用）。
  */
 export function latestSessionIdForCwd(cwd: string, runtime?: string): string | undefined {
   return listSessionIdsForCwd(cwd, runtime)[0];
