@@ -31,14 +31,29 @@ import { sandboxDisabled } from "./sandbox.js";
 export const CODEX_SANDBOXES = ["read-only", "workspace-write"] as const;
 export type CodexSandbox = (typeof CODEX_SANDBOXES)[number];
 
-const DEFAULT_BIN = "/Applications/ChatGPT.app/Contents/Resources/codex";
+const APP_RESOURCES = "/Applications/ChatGPT.app/Contents/Resources";
 export const CODEX_TIMEOUT_MS = 12 * 60 * 1000; // 单轮上限;channel-server 侧给 15min
+
+/**
+ * ChatGPT.app 自带的 codex。新版把 CLI 放进 codex-cli/，入口写在 codex-package.json 的 entrypoint（现为 bin/codex）；
+ * 旧版是 Resources/codex。只认旧路径的话，App 一更新 ask_codex 就全部报「Codex CLI 不存在」（tests/codex-bin.test.ts）。
+ */
+export function appCodexBin(resources = APP_RESOURCES): string | null {
+  const dir = join(resources, "codex-cli");
+  try {
+    const entry = JSON.parse(readFileSync(join(dir, "codex-package.json"), "utf8"))?.entrypoint;
+    if (typeof entry === "string" && existsSync(join(dir, entry))) return join(dir, entry);
+  } catch {
+    // 没有新布局（或清单读不了）：退回旧路径，两个都没有才算没装
+  }
+  const legacy = join(resources, "codex");
+  return existsSync(legacy) ? legacy : null;
+}
 
 export function findCodexBin(): string | null {
   const env = process.env.CODEX_BIN;
   if (env && existsSync(env)) return env;
-  if (existsSync(DEFAULT_BIN)) return DEFAULT_BIN;
-  return null;
+  return appCodexBin();
 }
 
 /* ── 命名线程注册表 ─────────────────────────────────────────────── */
