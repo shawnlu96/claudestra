@@ -5,6 +5,7 @@
 import { join } from "path";
 import { settingsLaunchArgs } from "./agent-settings.js";
 import { sandboxAcpHome } from "./acp/stub.js";
+import { isLab } from "./sandbox-lab.js";
 import { SANDBOX_DENY_DIRS_ENV, SANDBOX_DENY_PORTS_ENV, SANDBOX_FLAG, SANDBOX_ROOT_ENV } from "./sandbox.js";
 
 type Env = Record<string, string | undefined>;
@@ -15,7 +16,7 @@ type Env = Record<string, string | undefined>;
  */
 const INHERITED_KEYS = [
   "PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "LC_ALL", "LC_CTYPE", "TERM", "TMPDIR",
-  // 代理配置只影响「怎么出网」，不带身份；测试靠它把漏网的出站请求引到计数替身上
+  // 代理配置只影响「怎么出网」，不带身份；测试靠它把漏网的出站请求引到计数替身上。lab 模式不继承（scripts/sandbox.ts 的 envFor）
   "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "all_proxy", "no_proxy",
   // CLAUDESTRA_ACP_AGENT 刻意不继承：沙箱里 acp 固定起本仓的 stub（lib/acp/stub.ts），外部 argv 一律不认
 ] as const;
@@ -148,14 +149,25 @@ const SANDBOX_MANAGER_COMMANDS = new Set([
   "migrate", // T60：只改沙箱 registry，重启的 Codex 在沙箱里仍固定走 stub
 ]);
 
-/** 返回拒绝原因；null = 可以跑。agent 目录与 runtime 另由 manager 的 create 入口按 lib/sandbox.ts 再查一遍 */
-export function sandboxManagerRefusal(args: string[]): string | null {
+/**
+ * lab 模式（lib/sandbox-lab.ts）另开的：新版邀请流程、peer 管理、给 agent 开 external（peer scope 只收 external agent）。
+ * peer 落盘由 lib/peers.ts 按 lab 闸再查（只认同一 lab 目录下的沙箱实例），出站由闸门只放行 lab 端口。
+ * 老三步握手（peer-http-invite / join / accept）、peer-http-tidy 不开：lab 用不上，少一条路少一处要审。
+ */
+const LAB_MANAGER_COMMANDS = new Set([
+  "peer-invite-new", "peer-join-auto", "peer-invite-redeem", "peer-invite-list", "peer-invite-revoke", "peer-invite-inspect",
+  "peer-http-list", "peer-http-test", "peer-http-scope", "peer-http-remove", "external",
+]);
+
+/** 返回拒绝原因；null = 可以跑。agent 目录与 runtime 另由 manager 的 create 入口按 lib/sandbox.ts 再查一遍。lab = 沙箱的 lab 模式 */
+export function sandboxManagerRefusal(args: string[], lab = isLab(process.env)): string | null {
   const cmd = args[0] ?? "";
-  if (!SANDBOX_MANAGER_COMMANDS.has(cmd)) {
-    return `沙箱里不开放 manager ${cmd || "（空）"}；可用：${[...SANDBOX_MANAGER_COMMANDS].join(" ")}`;
+  if (!SANDBOX_MANAGER_COMMANDS.has(cmd) && !(lab && LAB_MANAGER_COMMANDS.has(cmd))) {
+    const allowed = [...SANDBOX_MANAGER_COMMANDS, ...(lab ? LAB_MANAGER_COMMANDS : [])];
+    return `沙箱里不开放 manager ${cmd || "（空）"}；可用：${allowed.join(" ")}`;
   }
   if (args.includes("--include-master")) return "沙箱没有大总管，不支持 --include-master";
-  if (args.includes("--external")) return "沙箱不对外共享 agent（--external）";
+  if (args.includes("--external") && !lab) return "沙箱不对外共享 agent（--external；lab 模式可以）";
   if (cmd === "transport" && args[2] === "tmux") return "沙箱 Codex 只许 ACP stub，不起真实 TUI";
   const rt = args.indexOf("--runtime");
   const acp = args[rt + 1] === "codex" && (args.indexOf("--transport") < 0 || args[args.indexOf("--transport") + 1] === "acp");

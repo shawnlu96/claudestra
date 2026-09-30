@@ -7,10 +7,11 @@ import { chmodSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import {
-  assertSandboxRuntime, canonicalPath, enforceSandboxBridgeEnv, enforceSandboxProcess, isSandbox, outboundAllowed, sandboxAgentDirProblem,
+  assertSandboxRuntime, canonicalPath, enforceSandboxBridgeEnv, enforceSandboxProcess, isSandbox, sandboxAgentDirProblem,
   sandboxBridgeEnvProblems, sandboxBridgeUrlProblem, sandboxDirProblems, sandboxStaticDirProblem, sandboxRootOf, SANDBOX_MARKER,
   normalizeSandboxAgentDir, refuseSandboxDirInProduction,
 } from "../src/lib/sandbox.js";
+import { outboundAllowed } from "../src/lib/sandbox-outbound.js";
 import { assertResumable, assertSandboxSession } from "../src/lib/sandbox-sessions.js";
 import { cliWrapperScript } from "../src/lib/cli-install.js";
 import { runCodex } from "../src/lib/codex.js";
@@ -149,7 +150,7 @@ describe("生产改过的端口 / 目录", () => {
     const c = {
       env: { ...ON, CLAUDESTRA_STATE_DIR: "x", CLAUDESTRA_RUNTIME_DIR: "y", BRIDGE_PORT: "23901" },
       stateDir: "/tmp/sbx/state", runtimeDir: "/tmp/sbx/run", defaultStateDir: "/Users/x/.cs", defaultRuntimeDir: "/tmp/co",
-      bridgeUrl: () => "ws://localhost:23902",
+      bridgeUrl: () => "ws://localhost:23902", defaultPort: P,
     };
     expect(() => enforceSandboxProcess(c)).toThrow("不一致");
   });

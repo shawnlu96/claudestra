@@ -1,6 +1,7 @@
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { Database } from "bun:sqlite";
 import { describe, expect, test } from "bun:test";
 import { bindHash } from "../src/lib/ask-bind.js";
 import { answerAsk, openAsk } from "../src/lib/ledger-asks.js";
@@ -8,6 +9,7 @@ import { setWorkflow } from "../src/lib/ledger-scheduler-write.js";
 import { closeLedger, getTask, listEvents, openLedger } from "../src/lib/ledger-store.js";
 import { assignStep } from "../src/lib/ledger-steps-write.js";
 import { appendEvent, createTask, deliver, moveStage, recordReview } from "../src/lib/ledger-write.js";
+import { SchedulerStopped } from "../src/lib/scheduler-maintenance.js";
 import { schedulerObserveTick } from "../src/lib/scheduler-observe-tick.js";
 import { runLedger } from "../src/manager/ledger.js";
 import type { LedgerDeps } from "../src/manager/ledger-context.js";
@@ -331,5 +333,23 @@ describe("T68e observe mode", () => {
       expect(first.event.data.decision).toMatchObject({ workOrder: { findings: [{ findingId: "race-1" }] } });
       expect(second.event.data.decision).toMatchObject({ workOrder: { findings: [{ findingId: "race-2", probe: "probe B" }] } });
     } finally { f.close(); }
+  });
+
+  test("a manager call that throws on one card is reported and the rest of the pass still runs; a stop signal ends it", async () => {
+    const db = new Database(":memory:");
+    db.run("CREATE TABLE tasks (id TEXT, stage TEXT)");
+    db.run("CREATE TABLE task_workflows (taskId TEXT, project TEXT, mode TEXT)");
+    for (const id of ["T2", "T3"]) { db.run("INSERT INTO tasks VALUES (?, 'build')", [id]); db.run("INSERT INTO task_workflows VALUES (?, 'p', 'observe')", [id]); }
+    const calls: string[] = [];
+    const manager = async (...args: string[]) => {
+      calls.push(args[2]);
+      if (args[2] === "T2") throw new Error("spawn failed");
+      return { ok: true, duplicate: false };
+    };
+    expect(await schedulerObserveTick(db, { p: { maxActiveWorkers: 1 } }, manager)).toEqual({ recorded: 1, unchanged: 0, failed: [{ taskId: "T2", error: "spawn failed" }] });
+    expect(calls).toEqual(["T2", "T3"]);
+    const stop = async () => { throw new SchedulerStopped("lost lease"); };
+    await expect(schedulerObserveTick(db, { p: { maxActiveWorkers: 1 } }, stop)).rejects.toBeInstanceOf(SchedulerStopped);
+    db.close();
   });
 });

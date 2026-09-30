@@ -73,6 +73,8 @@ export interface WorkflowInput {
   mode: WorkflowMode;
   authorFamily: AuthorFamily;
   fallback: string;
+  /** Required when PM takes an auto card back to manual; recorded on the workflow event. */
+  reason?: string;
 }
 
 /** Historical cards are excluded by the migration watermark, even when still sitting in spec. */
@@ -85,11 +87,13 @@ export function setWorkflow(db: Database, ctx: WriteCtx, input: WorkflowInput): 
     if (!existing) {
       const born = taskCreationSeq(db, task.id);
       if (task.stage !== "spec" || born === null || born <= activationSeq(db)) {
-        throw new LedgerError("invalid", "只给迁移后新建、尚在 spec 的任务启用自动流程");
+        throw new LedgerError("invalid", `${task.id} 是在途卡（${task.stage}${born !== null && born <= activationSeq(db) ? "，调度迁移前建的" : ""}）：自动流程只收迁移后新建、尚未开写的 spec 卡，在途卡继续人工推进`);
       }
     } else if (task.stage !== "spec" && input.mode !== "manual") {
-      throw new LedgerError("invalid", "已开工的任务可暂停为 manual；重新自动接管须先核对并另走恢复入口");
+      throw new LedgerError("invalid", `${task.id} 已开工（${task.stage}）：只能暂停为 manual（带 --reason）；重新自动接管须先核对并另走恢复入口`);
     }
+    const takeover = existing?.mode === "auto" && input.mode === "manual";
+    if (takeover && !input.reason?.trim()) throw new LedgerError("invalid", "从 auto 退回人工要带 --reason（为什么接管），记进台账");
     if (!WORKFLOW_TEMPLATES.includes(input.template) || !WORKFLOW_MODES.includes(input.mode)) throw new LedgerError("invalid", "流程模板或模式不认识");
     if (!AUTHOR_FAMILIES.includes(input.authorFamily)) throw new LedgerError("invalid", "作者模型家族只认 claude / codex");
     if (input.templateVersion !== 2) throw new LedgerError("invalid", "当前只认模板版本 2");
@@ -117,7 +121,8 @@ export function setWorkflow(db: Database, ctx: WriteCtx, input: WorkflowInput): 
     const workflow = getWorkflow(db, task.id) as TaskWorkflow;
     insertEvent(db, { actor: ctx.actor, now }, {
       project: task.project, target: task.id, kind: "scheduler", text: `流程设为 ${input.mode}`,
-      data: { op: "workflow", ...data, workflowRev: workflow.rev, specRev: task.specRev, cancelledIntents: pending.map((p) => p.id) },
+      data: { op: "workflow", ...data, workflowRev: workflow.rev, specRev: task.specRev, cancelledIntents: pending.map((p) => p.id),
+        ...(takeover ? { takeover: textOneLine(input.reason as string, "接管原因", 600), manual: true } : {}) },
     }, false);
     return { workflow, duplicate: false };
   });

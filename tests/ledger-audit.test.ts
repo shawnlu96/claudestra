@@ -362,7 +362,7 @@ describe("收件人与去重 key", () => {
   test("什么都正常 → 没有异常，所有取到数的规则都算跑过", () => {
     const r = auditLedger(snap({ tasks: [entered("T1", "build", NOW - MIN)] }), NOW);
     expect(r.findings).toEqual([]);
-    expect(r.evaluated.length).toBe(11);
+    expect(r.evaluated.length).toBe(12);
     expect(rules(snap({ agents: [agent(PM)] }))).toEqual([]);
     expect(rules(snap())).toEqual(["orphan_executor"]); // 默认快照里的 agent-task-t1 没有任务
   });

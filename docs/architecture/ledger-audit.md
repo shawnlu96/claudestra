@@ -31,6 +31,7 @@ In a project with `meta.team` (T30), a pass that still owes an adversarial round
 | `task_agent_missing` | A task in `restate` / `build` / `review` / `fix` names an agent that is not in the registry | Reassign | PM |
 | `orphan_executor` | An `agent-task-*` in this project's registry, created > 15 min ago (session-file birth time), has no task in the ledger | Create the task or reclaim | PM |
 | `owner_inbox_stale` | An `ownerInbox` entry in the `ledger.json` next to `meta.docsDir` is `doing` / `in_progress` > 30 min after the owner said it | Check progress | PM |
+| `review_witness_mismatch` | An auto card's `review` event carries `witness.mismatch` (`lib/caller-witness.ts`): the writer's tmux window, parent process chain or cwd does not fit the bound reviewer. Evidence only — every local agent can fake it, so the verdict is recorded, not refused | Check who wrote the verdict; if not the reviewer, take the card over (`workflow-set --mode manual --reason`) and re-review | PM |
 
 Boundaries are strict: exactly at the threshold does not fire.
 

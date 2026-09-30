@@ -8,7 +8,7 @@
 import { join } from "path";
 import { readPeers, type HttpPeer } from "../lib/peers.js";
 import { STATE_DIR } from "../lib/paths.js";
-import { sandboxDisabled } from "../lib/sandbox.js";
+import { sandboxDisabledOutsideLab } from "../lib/sandbox.js";
 import { writeJsonAtomic } from "../lib/state-file.js";
 import { signedFor } from "../lib/instance-key.js";
 import { mergeProbe, probeErrorOf, probeResultOf, type PeerPresence, type ProbeResult } from "../lib/peer-presence.js";
@@ -64,7 +64,7 @@ async function probeAll(): Promise<void> {
 
 /** bridge 启动时调一次（经 initHttpPeer）；探测出错只记日志，下一轮照跑 */
 export function startPeerPresence(): void {
-  if (sandboxDisabled("peer 在线探测")) return; // 沙箱不对外探测（lib/sandbox.ts）
+  if (sandboxDisabledOutsideLab("peer 在线探测")) return; // 沙箱不对外探测；lab 的 peer 只可能是 lab 实例（lib/sandbox-lab.ts）
   const tick = () => void probeAll().catch((e) => console.warn("⚠️ peer 在线探测失败（下一轮再试）:", e));
   setTimeout(tick, 10_000);
   setInterval(tick, PROBE_EVERY_MS);

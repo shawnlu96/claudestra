@@ -3,7 +3,7 @@
  * Both send through MessagePort (today's send_to_agent path; T48 swaps the port). The fallback cannot be built without a
  * reason, and every receipt it produces carries that reason, so the ledger always shows why a session was typed into.
  */
-import { ensureVia, observeVia, orderMismatch, sendReceipt, type AdapterDeps, type MessagePort } from "./worker-ports.js";
+import { ensureVia, observeVia, orderMismatch, sendReceipt, withHostFailure, type AdapterDeps, type HostFailure, type MessagePort } from "./worker-ports.js";
 import { renderWorkOrder } from "./worker-order.js";
 import type { ControlReceipt, SubmitReceipt, WorkerSession } from "./worker-session.js";
 
@@ -43,7 +43,13 @@ function messageWorker(o: MessageAdapterOpts, route: "channel" | "tmux", fallbac
       } catch {
         live = "unknown"; // a failed status read only means unknown liveness; the ledger result check below still runs
       }
-      return observeVia(o, ref, order, live);
+      let failed: HostFailure | undefined;
+      try {
+        failed = await o.port.lastFailure?.(ref.agent, ref.sessionId);
+      } catch (e) {
+        console.error(`⚠️ [scheduler] 读 ${ref.agent} 的失败来源出错，本轮按没有失败看：${(e as Error).message}`); // 下一轮还会再读
+      }
+      return withHostFailure(observeVia(o, ref, order, live), failed, live, order);
     },
     async cancel(ref): Promise<ControlReceipt> {
       try {

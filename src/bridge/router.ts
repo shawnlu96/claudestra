@@ -151,6 +151,7 @@ export interface Envelope {
      * - 永远不触发抢占：即使 from 是人类、intent 是 request，也不算 isHumanRequest（不打断、flush 时也不插队）。
      */
     waitForIdle?: boolean;
+    expectSession?: string; // 调度派单只投给 registry 里仍跑这个 session 的目标：路由时、押后补投前都核（lib/route-session.ts）
     quotaGated?: boolean; // 过额度闸按非人算：只有 fleet 群发文字打，ask 答复不打（缘由见 lib/quota-wall.ts gatesAsHuman）
     /** 这条 reply 建出的 / 这条答复所答的「待你处理」id（bridge/asks.ts）；出站 chat_message 事件带上，网页据此把气泡和 ask 对上 */
     askId?: string;

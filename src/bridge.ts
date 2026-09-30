@@ -168,6 +168,7 @@ import { recordMetric } from "./lib/metrics.js";
 import { nudgeReason, pickUnrepliedForNudge } from "./lib/reply-nudge.js";
 import { dropPendingsForChannel, hangsInterAgentWatchdog, hangsPendingReply, nudgesForOrigin, pendingKeysOwedBy, takeApiPending } from "./lib/pending-reply-scope.js";
 import { holdAtWallWait, quotaWall, rearmResume, resumeStillWanted, startQuotaWall } from "./bridge/quota-wall-wiring.js";
+import { sessionGone } from "./lib/route-session.js";
 import { onCodexTypeInFailed } from "./bridge/codex-menu-hold.js";
 import { initHttpPeer, cancelHttpPeerCallsForChannel } from "./bridge/http-peer.js";
 import { extractControlToken } from "./bridge/api-auth.js";
@@ -850,6 +851,7 @@ async function deliverToLocal(env: RouterEnvelope, to: RouterLocalEndpoint, stil
   // 押着的打断收尾提醒:之后又被打断 / 叫停过、那件事已续上、过了 30 分钟,就不投了(turnCuts.noticeWanted)
   const wallHold = await quotaWall()?.holds(env, to.channelId); // 额度闸：agent / bridge 消息押到出闸
   if ((stillWanted && !stillWanted()) || !turnCuts.noticeWanted(env) || !resumeStillWanted(env)) return { envelope: env, outcome: { kind: "dropped", reason: "已从押后队列撤下" } };
+  const gone = await sessionGone(env.meta.expectSession, to.channelId); if (gone) return { envelope: env, outcome: { kind: "dropped", reason: gone.error } };
   if (!busy && wallHold) return holdForQuotaWall(env, evAgent, meta.user);
   if (busy) {
     const n = heldLocalMsgs.holdEnv(env, wallHold ? "quota_wall" : undefined); // 从 flush 来的是队里那个 env 本身,不会重复入队
@@ -2202,7 +2204,6 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
     case "fleet_state": case "fleet_run": ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, ...(await (await import("./bridge/fleet/ws.js")).handleFleetWs(msg, ws)) })); break;
     case "route_to_agent": {
       try {
-        // 找发送方的 channelId
         let fromChannelId = "";
         let fromName = msg.fromName || "";
         for (const [chId, info] of clients.entries()) {
@@ -2216,10 +2217,8 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
           }
         }
 
-        // v1.9.22+: 解析 target，支持 peer: 语法：
-        //   "future_data"                        → 本地 agent-future_data
-        //   "peer:ahh.future_data"               → 跨 peer（HTTP transport）
-        //   "future_data@ahh"                    → 同上（短格式）
+        // 解析 target:"future_data" → 本地 agent-future_data;"peer:ahh.future_data" → 跨 peer（HTTP transport）
+        //   "future_data@ahh" → 同上（短格式）
         const rawTarget = (msg.targetName as string) || "";
         const peerMatch = rawTarget.match(/^peer:([^.]+)\.(.+)$/) || rawTarget.match(/^([^@]+)@(.+)$/);
         if (peerMatch) {
@@ -2259,7 +2258,6 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
           return;
         }
 
-        // 从 registry 找目标 agent
         const regResult = await runManager("list");
         const agents: any[] = regResult.agents || [];
 
@@ -2278,19 +2276,19 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
         const targetName = rawTarget.startsWith("agent-") ? rawTarget : `agent-${rawTarget}`;
         const target = agents.find((a: any) => a.name === targetName);
         if (!target) {
-          ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, error: `Agent '${targetName}' 不存在或未在 registry 中` }));
+          ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, error: `Agent '${targetName}' 不存在或未在 registry 中`, rejected: "no_target" }));
           break;
         }
+        const gone = await sessionGone(msg.expectSession, target.channelId); // 调度派单:目标换过会话就不投(投递前拒,调用方可重排)
+        if (gone) { ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, ...gone })); break; }
 
         const targetClient = clients.get(target.channelId);
         if (!targetClient) {
-          ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, error: `Agent '${targetName}' 未连接到 Bridge（可能已停止）` }));
+          ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, error: `Agent '${targetName}' 未连接到 Bridge（可能已停止）`, rejected: "not_connected" }));
           break;
         }
 
-        // v2.0.0 Phase 4: 通过 deliver(envelope) 注入消息。
-        // from=local(caller agent), to=local(target agent)。renderContentForLocal
-        // 看到 from.kind=="local" 会自动拼 "[🤖 来自 fromName]" 前缀。
+        // deliver(envelope) 注入:from/to 都是 local,renderContentForLocal 见 from.kind=="local" 自动拼 "[🤖 来自 fromName]" 前缀
         const fromEnv: RouterLocalEndpoint = {
           kind: "local",
           agentName: fromName,
@@ -2317,6 +2315,7 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
             ts: new Date().toISOString(),
             threadId: newThreadId(),
             skipInterAgentWatchdog: oneShot || undefined,
+            expectSession: typeof msg.expectSession === "string" ? msg.expectSession : undefined,
           },
         };
         // v2.24+: 给某个 agent 发消息 = 回了它的消息。它之前发来的那条

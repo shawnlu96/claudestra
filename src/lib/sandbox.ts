@@ -8,6 +8,11 @@
  */
 import { existsSync, realpathSync, statSync } from "fs";
 import { dirname, join, relative, resolve, isAbsolute, basename } from "path";
+import { installOutboundGuard } from "./sandbox-outbound.js";
+import {
+  isLab, LAB_FLAG, labConfigProblems, labInstancePortsOf, labOutboundPorts, labPeerUrlProblem, labPushEndpointProblem, labRelayUrl, labRelayUrlProblem, LAB_ROOT_ENV,
+  readLabInstances,
+} from "./sandbox-lab.js";
 
 export const SANDBOX_FLAG = "CLAUDESTRA_SANDBOX";
 /** 沙箱根目录：agent 只许建在它下面（scripts/sandbox.ts 设） */
@@ -28,9 +33,16 @@ class SandboxViolation extends Error {
   }
 }
 
-/** 只认 1（开）与空 / 0（关）；写成 true / yes 之类直接报错——悄悄当成「关」就是带着沙箱意图跑生产 */
+/**
+ * 只认 1（开）与空 / 0（关）；写成 true / yes 之类直接报错——悄悄当成「关」就是带着沙箱意图跑生产。
+ * 沙箱关着却带了 lab 开关（任何非空、非 0 的值）也报错：所有闸都先问这里，在这儿短路就等于 lab 意图按生产跑
+ */
 export function isSandbox(env: Env = process.env): boolean {
   const v = (env[SANDBOX_FLAG] || "").trim();
+  const lab = (env[LAB_FLAG] || "").trim();
+  if ((v === "" || v === "0") && lab !== "" && lab !== "0") {
+    throw new SandboxViolation([`${LAB_FLAG}=${lab} 但沙箱没开（${SANDBOX_FLAG}=${v || "空"}）：lab 只能和 ${SANDBOX_FLAG}=1 一起用`]);
+  }
   if (v === "" || v === "0") return false;
   if (v === "1") return true;
   throw new SandboxViolation([`${SANDBOX_FLAG}=${v} 不认识：开沙箱写 1，关掉就不设`]);
@@ -72,6 +84,11 @@ export function pathsOverlap(a: string, b: string): boolean {
 
 function denyPorts(env: Env): number[] {
   return (env[SANDBOX_DENY_PORTS_ENV] || "").split(",").map((s) => Number(s.trim())).filter((n) => Number.isInteger(n) && n > 0);
+}
+
+/** 生产端口 = 默认端口（调用方传 lib/bridge-url.ts 的 DEFAULT_BRIDGE_PORT）+ 生产改过的；清单可以缺，默认端口永远在 */
+function productionPorts(defaultPort: number, env: Env): number[] {
+  return [defaultPort, ...denyPorts(env)];
 }
 
 export function denyDirs(env: Env): string[] {
@@ -134,7 +151,7 @@ const SANDBOX_FORBIDDEN_ENTRIES = ["launcher.ts", "cron.ts", "setup.ts"];
  * 两者不一致说明环境拼错了）；入口是 launcher / cron / setup 也抛错；都安全才装出站闸门。
  * bridgeUrl 是惰性的：非沙箱进程不求值。
  */
-export function enforceSandboxProcess(c: DirCheck & { bridgeUrl: () => string; entry?: string }): void {
+export function enforceSandboxProcess(c: DirCheck & { bridgeUrl: () => string; defaultPort: number; entry?: string }): void {
   if (!isSandbox(c.env)) return;
   const problems = sandboxDirProblems(c);
   const entry = basename(c.entry ?? "");
@@ -142,8 +159,15 @@ export function enforceSandboxProcess(c: DirCheck & { bridgeUrl: () => string; e
   const port = portOf(new URL(c.bridgeUrl()));
   const envPort = (c.env.BRIDGE_PORT || "").trim();
   if (envPort && Number(envPort) !== port) problems.push(`BRIDGE_PORT=${envPort} 与 BRIDGE_URL 的端口 ${port} 不一致`);
+  try {
+    problems.push(...labConfigProblems(c.env, port, productionPorts(c.defaultPort, c.env)));
+    // lab 多开了端口：生产改过的端口清单（scripts/sandbox.ts 从生产配置里读出来）缺了就不知道还要避开哪些，不启动
+    if (isLab(c.env) && !denyPorts(c.env).length) problems.push(`lab 模式要带生产端口清单 ${SANDBOX_DENY_PORTS_ENV}（用 scripts/sandbox.ts 起）`);
+  } catch (e) {
+    problems.push((e as Error).message); // lab 开关写法不认识：同沙箱开关，报错不启动
+  }
   if (problems.length) throw new SandboxViolation(problems);
-  installOutboundGuard(new Set([port]));
+  installOutboundGuard(new Set([port, ...labOutboundPorts(c.env)]));
 }
 
 /**
@@ -181,11 +205,27 @@ export function sandboxBridgeEnvProblems(defaultPort: number, env: Env = process
   const out: string[] = [];
   const port = Number(env.BRIDGE_PORT);
   if (!Number.isInteger(port) || port <= 0 || port >= 65536) out.push(`BRIDGE_PORT 没设或不合法：会回落到生产默认端口 ${defaultPort}`);
-  else if ([defaultPort, ...denyPorts(env)].includes(port)) out.push(`BRIDGE_PORT=${port} 是生产端口`);
-  for (const k of SANDBOX_FORBIDDEN_ENV) if ((env[k] || "").trim()) out.push(`环境里有 ${k}（沙箱不连 Discord / 中继 / peer / 推送，也不多开端口）`);
+  else if (productionPorts(defaultPort, env).includes(port)) out.push(`BRIDGE_PORT=${port} 是生产端口`);
+  for (const k of SANDBOX_FORBIDDEN_ENV) {
+    const v = (env[k] || "").trim();
+    if (!v || labAllowsEnv(k, v, port, productionPorts(defaultPort, env), env)) continue;
+    out.push(`环境里有 ${k}（沙箱不连 Discord / 中继 / peer / 推送，也不多开端口；lab 模式只认 lab 中继与 lab 端口）`);
+  }
   const bind = (env.BRIDGE_BIND || "127.0.0.1").trim();
   if (!LOOPBACK_HOSTS.has(bind)) out.push(`BRIDGE_BIND=${bind}：沙箱只许绑回环`);
   return out;
+}
+
+/**
+ * lab 模式下这两个键可以有，但只能指向 lab 自己：RELAY_URL = lab 中继，PEER_INGRESS_PORT = lab 端口之一（不是 bridge 端口）；
+ * 两者都不许落在生产端口上（进程总闸已经查过 lab 端口，这里不依赖它再查一遍）
+ */
+function labAllowsEnv(key: string, value: string, bridgePort: number, prod: number[], env: Env): boolean {
+  if (!isLab(env)) return false;
+  if (key === "RELAY_URL") return labRelayUrlProblem(value, env) === null && !prod.some((p) => labRelayUrl(env) === `ws://127.0.0.1:${p}`);
+  const n = Number(value);
+  if (key === "PEER_INGRESS_PORT") return n !== bridgePort && !prod.includes(n) && labInstancePortsOf(env).includes(n);
+  return false;
 }
 
 export function enforceSandboxBridgeEnv(defaultPort: number, env: Env = process.env): void {
@@ -196,6 +236,36 @@ export function enforceSandboxBridgeEnv(defaultPort: number, env: Env = process.
 /** 沙箱里关掉的功能：调用方拿到非 null 就跳过 / 拒绝，并把这句原因回给用户 */
 export function sandboxDisabled(feature: string, env: Env = process.env): string | null {
   return isSandbox(env) ? `沙箱模式下「${feature}」已关闭（docs/architecture/sandbox.md）` : null;
+}
+
+/**
+ * 沙箱里关掉、lab 模式（lib/sandbox-lab.ts）里打开的功能：中继链路、推送、peer。非沙箱与 lab 返回 null；
+ * 打开之后每个出口还要各自过 lab 的闸（sandboxRelayUrlProblem / sandboxPeerUrlProblem / sandboxPushEndpointProblem）。
+ */
+export function sandboxDisabledOutsideLab(feature: string, env: Env = process.env): string | null {
+  return isSandbox(env) && !isLab(env) ? `沙箱模式下「${feature}」已关闭（lab 模式才开，docs/architecture/sandbox.md）` : null;
+}
+
+/** 沙箱里要连的中继地址：非 lab 一律拒，lab 只认 lab 中继。非沙箱 null */
+export function sandboxRelayUrlProblem(url: string, env: Env = process.env): string | null {
+  if (!isSandbox(env)) return null;
+  return isLab(env) ? labRelayUrlProblem(url, env) : "沙箱不连中继";
+}
+
+/**
+ * 沙箱里要记 / 要连的 peer 地址：非 lab 一律拒，lab 只认同一 lab 目录下的沙箱实例（按它们的沙箱标记）；
+ * 没有地址（只有入站的记录，不往外连）lab 里放行。非沙箱 null
+ */
+export function sandboxPeerUrlProblem(url: string | undefined, env: Env = process.env): string | null {
+  if (!isSandbox(env)) return null;
+  if (!isLab(env)) return "沙箱不建 peer";
+  return url ? labPeerUrlProblem(url, readLabInstances((env[LAB_ROOT_ENV] || "").trim(), SANDBOX_MARKER)) : null;
+}
+
+/** 沙箱里收的推送订阅 endpoint：非 lab 一律拒，lab 只认假推送端点。非沙箱 null（生产照旧按 lib/push-endpoint.ts） */
+export function sandboxPushEndpointProblem(endpoint: string, env: Env = process.env): string | null {
+  if (!isSandbox(env)) return null;
+  return isLab(env) ? labPushEndpointProblem(endpoint, env) : "沙箱不收推送订阅";
 }
 
 /**
@@ -288,57 +358,4 @@ export function assertSandboxRuntime(runtime: string, env: Env = process.env, tr
     throw new SandboxViolation(["沙箱里不认 CLAUDESTRA_ACP_AGENT：acp 固定起本仓的 scripts/acp-stub.ts，把这个变量去掉再试"]);
   }
   throw new SandboxViolation([`沙箱只支持 Claude Code agent（收到 runtime=${runtime}${transport ? `、transport=${transport}` : ""}；Codex 只许 --transport acp，适配器固定是 stub）`]);
-}
-
-// ── 出站闸门 ────────────────────────────────────────────────────────────────
-
-/** 沙箱进程只许访问本机回环上的这些端口（自己的 bridge）；其余一律拒绝 */
-export function outboundAllowed(target: string | URL, allowedPorts: ReadonlySet<number>): boolean {
-  let u: URL;
-  try {
-    u = typeof target === "string" ? new URL(target) : target;
-  } catch {
-    return false;
-  }
-  if (u.protocol === "file:" || u.protocol === "data:" || u.protocol === "blob:") return true;
-  if (!["http:", "https:", "ws:", "wss:"].includes(u.protocol)) return false;
-  return LOOPBACK_HOSTS.has(u.hostname) && allowedPorts.has(portOf(u));
-}
-
-export const OUTBOUND_BLOCKED_MARK = "🧱 sandbox-outbound-blocked";
-
-function requestUrl(input: unknown): string {
-  if (typeof input === "string") return input;
-  if (input instanceof URL) return input.href;
-  return String((input as { url?: string })?.url ?? "");
-}
-
-let guardInstalled = false;
-
-/**
- * 包住 globalThis.fetch 与 WebSocket：非白名单目标直接拒绝并打一行带 OUTBOUND_BLOCKED_MARK 的日志
- * （tests/sandbox-isolation.test.ts 靠这行断言「没有功能试图出站」）。这是兜底：各功能在沙箱里
- * 本来就该自己关掉；discord.js / web-push / APNs 不走 globalThis.fetch，靠的是 bridge 的环境检查。
- */
-function installOutboundGuard(allowedPorts: ReadonlySet<number>): void {
-  if (guardInstalled) return;
-  guardInstalled = true;
-  const blocked = (what: string) => {
-    console.error(`${OUTBOUND_BLOCKED_MARK} ${what}`);
-    return new Error(`沙箱模式拒绝出站请求：${what}`);
-  };
-  const origFetch = globalThis.fetch;
-  const guarded = ((input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
-    const url = requestUrl(input);
-    if (!outboundAllowed(url, allowedPorts)) return Promise.reject(blocked(url));
-    return origFetch(input, init);
-  }) as typeof fetch;
-  globalThis.fetch = Object.assign(guarded, origFetch);
-  const OrigWs = globalThis.WebSocket;
-  globalThis.WebSocket = class extends OrigWs {
-    constructor(url: string | URL, protocols?: string | string[]) {
-      if (!outboundAllowed(String(url), allowedPorts)) throw blocked(String(url));
-      super(url, protocols);
-    }
-  } as typeof WebSocket;
 }
