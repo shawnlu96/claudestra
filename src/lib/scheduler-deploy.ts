@@ -34,11 +34,14 @@ export function getDeployRun(db: Database, intentId: string): DeployRun | null {
   return hasTable(db) ? db.query("SELECT * FROM scheduler_deploys WHERE intentId = ?").get(intentId) as DeployRun | null : null;
 }
 
-/** A deploy job may still be alive: updates wait, and no second deploy starts anywhere. */
-export function deployInFlight(db: Database): boolean {
-  if (!hasTable(db)) return false;
-  return !!db.query(`SELECT 1 FROM scheduler_deploys WHERE phase IN (${DEPLOY_IN_FLIGHT.map(() => "?").join(",")}) LIMIT 1`).get(...DEPLOY_IN_FLIGHT);
+/** Runs whose job may still be alive, oldest first: updates wait, and no second deploy starts anywhere. */
+export function inFlightDeploys(db: Database): DeployRun[] {
+  if (!hasTable(db)) return [];
+  return db.query(`SELECT * FROM scheduler_deploys WHERE phase IN (${DEPLOY_IN_FLIGHT.map(() => "?").join(",")}) ORDER BY createdAt, intentId`)
+    .all(...DEPLOY_IN_FLIGHT) as DeployRun[];
 }
+
+export const deployInFlight = (db: Database): boolean => inFlightDeploys(db).length > 0;
 
 /** Why this merged run must not start deploying now; null = it may. Rechecked right before the job is submitted. */
 export function deployDrift(db: Database, intentId: string): string | null {

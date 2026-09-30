@@ -48,9 +48,13 @@ describe("T68g deploy job (launchd)", () => {
     expect(readDeployJob(join(x.dir(), "request.json"))).toMatchObject({ mergeSha: SHA, repoDir: "/repo", relayArgv: null });
   });
 
-  test("never claimed → null; launchd running → alive; launchd unreadable → unreadable, not dead", async () => {
+  test("never claimed → null only when launchd also has no such job; launchd running → alive; unreadable → unreadable, not dead", async () => {
     const x = fixture();
+    x.f.state = "absent";
     expect(await x.jobs.observe(run)).toBeNull();
+    x.f.state = "hung";
+    expect(await x.jobs.observe(run)).toMatchObject({ liveness: "unreadable", corrupt: expect.stringMatching(/目录丢失/) });
+    x.f.state = "running";
     await x.jobs.submit(run, "/repo", target);
     expect(await x.jobs.observe(run)).toMatchObject({ liveness: "alive", result: null });
     x.f.state = "hung";
@@ -90,6 +94,20 @@ describe("T68g deploy job (launchd)", () => {
     expect((await x.jobs.observe(run))!.deadline).toBeLessThan(x.f.time);
     x.f.state = "absent";
     expect(await x.jobs.observe(run)).toMatchObject({ label, liveness: "dead", result: null });
+  });
+
+  test("r4-P1-1: a missing request.json or job directory is never read as 'not submitted'; the label is checked with launchd", async () => {
+    const x = fixture();
+    const label = await x.jobs.submit(run, "/repo", target);
+    rmSync(join(x.dir(), "request.json"));
+    expect(await x.jobs.observe(run)).toMatchObject({ label, liveness: "alive", result: null, corrupt: expect.stringMatching(/missing/) });
+    expect(await x.jobs.submit(run, "/repo", target)).toBe(label); // the claim stands; nothing is bootstrapped again
+    expect(x.calls.filter((a) => a[1] === "bootstrap")).toHaveLength(1);
+    rmSync(join(x.root, "jobs"), { recursive: true });
+    expect(await x.jobs.observe(run)).toMatchObject({ label, liveness: "alive", deadline: 0 });
+    expect(x.calls.at(-1)).toEqual(["/bin/launchctl", "list", label]);
+    x.f.state = "absent";
+    expect(await x.jobs.observe(run)).toBeNull();
   });
 
   test("remove only touches deploy labels and treats 'already gone' as done", async () => {

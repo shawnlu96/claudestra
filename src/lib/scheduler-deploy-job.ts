@@ -6,7 +6,7 @@
  * maintenance lease). Only a checked "not alive" ends a deploy. Tests: tests/scheduler-deploy-job.test.ts.
  */
 import { createHash } from "node:crypto";
-import { mkdirSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, statSync, writeFileSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import { lockOwnedBy } from "./file-lock.js";
 import { statePath } from "./paths.js";
@@ -27,7 +27,7 @@ type JobView = { label: string; liveness: Liveness; result: { ok: boolean; summa
 export interface DeployJobs {
   /** Returns the label; on an existing claim returns the claimed label without submitting again. */
   submit(run: DeployRun, repoDir: string, target: DeployTarget): Promise<string>;
-  /** null when this intent was never claimed on disk (no job directory). */
+  /** null only when there is no job directory and launchd confirms it has no job under the intent's label. */
   observe(run: DeployRun): Promise<JobView | null>;
   /** bootout: SIGTERMs a live job (its runBounded groups die with it) or unloads a finished one; true when the label is gone. */
   remove(label: string): Promise<boolean>;
@@ -117,7 +117,7 @@ export function deploymentJobs(opts: { root?: string; command?: typeof runBounde
       try { mkdirSync(dir, { mode: 0o700 }); }
       catch (e) {
         if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
-        return requestFor(run).label; // An existing claim is observed, never submitted a second time.
+        return labelFor(dir); // An existing claim is observed, never submitted a second time.
       }
       const label = labelFor(dir);
       const job: DeployJob = { intentId: run.intentId, mergeSha: run.mergeSha, taskId: run.taskId, prRef: run.prRef, label, repoDir,
@@ -132,14 +132,19 @@ export function deploymentJobs(opts: { root?: string; command?: typeof runBounde
     },
     async observe(run) {
       const dir = dirFor(run);
-      // An unreadable request must not wedge the journal in running (it holds off updates): the label follows from the
-      // directory, launchd still answers for it, and the deadline counts as passed so a live job gets booted out.
+      // A missing or unreadable request says nothing about the job: the label follows from the directory path (which
+      // exists before the job does), launchd and the lease still answer for it, and the deadline counts as passed so a
+      // live job gets booted out. Only "no directory and launchd has no such job" means never submitted.
       let request: Pick<DeployJob, "label" | "createdAt" | "timeoutMs">, badRequest: string | undefined;
       try { request = requestFor(run); }
       catch (e) {
-        if (/missing/.test((e as Error).message) || (e as NodeJS.ErrnoException).code === "ENOENT") return null;
         request = { label: labelFor(dir), createdAt: 0, timeoutMs: 0 };
         badRequest = `request.json 读不了：${(e as Error).message.slice(0, 120)}`;
+        if (!existsSync(dir)) {
+          const live = await liveness(dir, request.label, command, now);
+          if (live === "dead") return null;
+          return { label: request.label, liveness: live, result: null, corrupt: "部署任务目录丢失", deadline: 0 };
+        }
       }
       const deadline = request.createdAt + request.timeoutMs + GRACE_MS;
       const read = () => readJsonStateSync(join(dir, "result.json"));

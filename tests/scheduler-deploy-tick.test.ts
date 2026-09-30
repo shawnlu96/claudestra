@@ -1,8 +1,13 @@
 import { describe, expect, test } from "bun:test";
+import { readdirSync, rmSync } from "node:fs";
+import { join } from "node:path";
 import type { Database } from "bun:sqlite";
 import { deployTick, VERIFY_WINDOW_MS } from "../src/lib/scheduler-deploy-tick.js";
 import type { DeployJobs } from "../src/lib/scheduler-deploy-job.js";
-import { getDeployRun } from "../src/lib/scheduler-deploy.js";
+import { beginDeployRun, getDeployRun } from "../src/lib/scheduler-deploy.js";
+import { deploymentJobs } from "../src/lib/scheduler-deploy-job.js";
+import { mergeQueueBusy } from "../src/lib/scheduler-update-gate.js";
+import type { runBounded } from "../src/lib/run-bounded.js";
 import { mergeTick } from "../src/lib/scheduler-service.js";
 import type { SchedulerConfig } from "../src/lib/scheduler-config.js";
 import { SchedulerStopped } from "../src/lib/scheduler-maintenance.js";
@@ -137,6 +142,68 @@ describe("T68g deploy tick", () => {
       expect(f.db.query("SELECT stage FROM tasks WHERE id='T9'").get()).toEqual({ stage: "live" });
       await deployTick(f.db, config, { ...failing, now: () => 5_000_000 + VERIFY_WINDOW_MS + 1 });
       expect(calls.at(-1)).toBe("T9 --dedup deploy-verify:m9");
+    } finally { f.close(); }
+  });
+
+  test("r4-P1-1: bootstrapped, crashed before running, request.json lost → recorded as running and checked, never written dead unchecked", async () => {
+    const f = mergedCard(), calls: string[][] = [];
+    let launchd: "running" | "absent" = "running";
+    const command: typeof runBounded = async (argv) => {
+      calls.push(argv);
+      if (argv[1] !== "list") return { code: 0, timedOut: false, stderr: "", stdout: "" };
+      return launchd === "running" ? { code: 0, timedOut: false, stderr: "", stdout: `{ "PID" = 12345; };` }
+        : { code: 113, timedOut: false, stderr: "Could not find service", stdout: "" };
+    };
+    const root = join(f.dir, "jobs"), jobs = deploymentJobs({ root, command, uid: 501 });
+    try {
+      const run = beginDeployRun(f.db, { actor: "scheduler", now: 150 }, f.intent).run;
+      const label = await jobs.submit(run, "/repo", config.projects.p.deploy!);
+      rmSync(join(root, readdirSync(root)[0], "request.json"));
+      calls.length = 0;
+      await deployTick(f.db, config, deps(f.db, jobs, { now: 1000 }));
+      expect(getDeployRun(f.db, f.intent)).toMatchObject({ phase: "running", label, liveness: null });
+      expect(mergeQueueBusy(f.db)).toBe(true);
+      expect(calls).toContainEqual(["/bin/launchctl", "list", label]);
+      expect(calls.filter((a) => a[1] === "bootstrap")).toEqual([]);
+      await deployTick(f.db, config, deps(f.db, jobs, { now: 100_000 })); // no request → deadline counts as passed: booted out
+      expect(calls).toContainEqual(["/bin/launchctl", "bootout", `gui/501/${label}`]);
+      expect(getDeployRun(f.db, f.intent)?.phase).toBe("running");
+      launchd = "absent";
+      await deployTick(f.db, config, deps(f.db, jobs, { now: 101_000 }));
+      expect(getDeployRun(f.db, f.intent)).toMatchObject({ phase: "unknown", outcome: "unknown", liveness: "dead" });
+      expect(mergeQueueBusy(f.db)).toBe(false);
+    } finally { f.close(); }
+  });
+
+  test("t68g-P1-2: taking deploy (or the project) out of the config mid-deploy stops new deploys only; the running one is still seen to its end", async () => {
+    const f = mergedCard(), j = fakeJobs();
+    const disabled = { ...config, projects: { p: { ...config.projects.p, deploy: undefined } } }, gone = { ...config, projects: {} };
+    try {
+      await deployTick(f.db, config, deps(f.db, j.jobs));
+      expect(getDeployRun(f.db, f.intent)?.phase).toBe("running");
+      await mergeTick(f.db, disabled, deps(f.db, j.jobs).manager, () => { throw new Error("no gh"); }, () => {});
+      expect(f.db.query("SELECT status FROM scheduler_intents WHERE id='m9'").get()).toEqual({ status: "submitted" });
+      j.s.log.length = 0;
+      await deployTick(f.db, gone, deps(f.db, j.jobs));
+      await deployTick(f.db, disabled, deps(f.db, j.jobs));
+      expect(j.s.log).toEqual(["observe", "observe"]);
+      j.s.view = { label: LABEL, liveness: "dead", result: { ok: true, summary: "部署到 dddd" }, deadline: 10_000 };
+      await deployTick(f.db, disabled, deps(f.db, j.jobs));
+      expect(getDeployRun(f.db, f.intent)?.phase).toBe("deployed");
+      expect(f.db.query("SELECT status FROM scheduler_intents WHERE id='m9'").get()).toEqual({ status: "done" });
+      expect(mergeQueueBusy(f.db)).toBe(false);
+      expect(j.s.log).not.toContain("submit"); // nothing new since the one submit before the config changed
+    } finally { f.close(); }
+  });
+
+  test("t68g-P1-2: a claim whose project no longer deploys is not submitted; it ends checked as failed and frees updates", async () => {
+    const f = mergedCard(), j = fakeJobs();
+    try {
+      beginDeployRun(f.db, { actor: "scheduler", now: 150 }, f.intent);
+      await deployTick(f.db, { ...config, projects: {} }, deps(f.db, j.jobs));
+      expect(j.s.log).toEqual(["observe"]);
+      expect(getDeployRun(f.db, f.intent)).toMatchObject({ phase: "unknown", outcome: "failed", reason: expect.stringMatching(/不再自动部署/) });
+      expect(mergeQueueBusy(f.db)).toBe(false);
     } finally { f.close(); }
   });
 });

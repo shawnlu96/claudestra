@@ -8,7 +8,7 @@
 import type { Database } from "bun:sqlite";
 import type { SchedulerConfig } from "./scheduler-config.js";
 import { getMergeRun } from "./scheduler-merge.js";
-import { deployDrift, deployInFlight, getDeployRun, type DeployRun, type DeployStep } from "./scheduler-deploy.js";
+import { deployDrift, deployInFlight, getDeployRun, inFlightDeploys, type DeployRun, type DeployStep } from "./scheduler-deploy.js";
 import type { DeployJobs } from "./scheduler-deploy-job.js";
 import { getMeta, getTask, getEventByDedup } from "./ledger-store.js";
 import type { TickPace } from "./scheduler-yield.js";
@@ -36,16 +36,20 @@ async function step(d: DeployTickDeps, run: DeployRun, s: Omit<DeployStep, "inte
   return requireOk(await d.manager(...args), `deploy ${run.phase}→${s.to}`).run as DeployRun;
 }
 
-/** claimed: the at-most-once job directory decides between "never submitted" and "submitted, record it". */
-async function driveClaimed(d: DeployTickDeps, db: Database, run: DeployRun, target: NonNullable<SchedulerConfig["projects"][string]["deploy"]>,
-  repoDir: string): Promise<void> {
+type Policy = SchedulerConfig["projects"][string];
+type Where = { target: NonNullable<Policy["deploy"]>; repoDir: string };
+const whereOf = (p: Policy | undefined): Where | null => (p?.deploy ? { target: p.deploy, repoDir: p.repoDir } : null);
+
+/** claimed: the at-most-once job directory decides between "never submitted" and "submitted, record it". Without a deploy
+ *  policy (taken out of the config after the claim) nothing new is submitted. */
+async function driveClaimed(d: DeployTickDeps, db: Database, run: DeployRun, where: Where | null): Promise<void> {
   const seen = await d.jobs.observe(run);
   if (seen) return void await step(d, run, { to: "running", label: seen.label, receipt: "重启后接上已提交的部署任务" });
-  const drift = deployDrift(db, run.intentId);
-  if (drift) return void await step(d, run, { to: "unknown", outcome: "failed", liveness: "dead", receipt: `提交前流程已变，没提交：${drift}` });
+  const drift = where ? deployDrift(db, run.intentId) : "scheduler.json 里这个项目已不再自动部署";
+  if (drift || !where) return void await step(d, run, { to: "unknown", outcome: "failed", liveness: "dead", receipt: `提交前流程已变，没提交：${drift}` });
   d.assertActive();
   try {
-    const label = await d.jobs.submit(run, repoDir, target);
+    const label = await d.jobs.submit(run, where.repoDir, where.target);
     await step(d, run, { to: "running", label, receipt: `已提交部署任务 ${label}` });
   } catch (e) {
     const after = await d.jobs.observe(run);
@@ -97,27 +101,31 @@ async function driveVerify(d: DeployTickDeps, db: Database, run: DeployRun): Pro
 export async function deployTick(db: Database, config: SchedulerConfig, d: DeployTickDeps, pace?: TickPace): Promise<number> {
   if (!db.query("SELECT 1 FROM sqlite_master WHERE type='table' AND name='scheduler_deploys'").get()) return 0;
   let handled = 0;
+  // Claimed / running rows are driven from the journal alone, whatever the config or the merge intent says now: dropping
+  // `deploy` (or the project) only stops new deploys, and such a row holds off updates until it is observed to an end.
+  for (const run of inFlightDeploys(db)) {
+    if (pace?.yieldNow()) return handled;
+    if (run.phase === "claimed") await driveClaimed(d, db, run, whereOf(config.projects[run.project]));
+    else await driveRunning(d, run);
+    handled++;
+  }
   for (const [project, policy] of Object.entries(config.projects)) {
     if (!policy.deploy) continue;
     const intents = db.query(`SELECT id FROM scheduler_intents WHERE project=? AND action='merge' AND status='submitted' ORDER BY eventSeq`)
       .all(project) as { id: string }[];
     for (const { id } of intents) {
       if (pace?.yieldNow()) return handled;
-      if (getMergeRun(db, id)?.phase !== "merged") continue;
-      let run = getDeployRun(db, id);
-      if (!run) {
-        const drift = deployDrift(db, id);
-        if (drift && getMeta(db, project).queueFrozen.frozen) continue; // frozen: wait for the PM, keep the merge slot
-        if (drift) {
-          requireOk(await d.manager("ledger", "scheduler-settle", id, "--from", "submitted", "--to", "done", "--receipt",
-            `merge:${getMergeRun(db, id)?.mergeSha}; 不自动部署（${drift}），待 PM 部署`), "settle undeployable merge");
-          continue;
-        }
-        if (deployInFlight(db)) continue;
-        run = requireOk(await d.manager("ledger", "scheduler-deploy-begin", id), "begin deploy").run as DeployRun;
+      if (getMergeRun(db, id)?.phase !== "merged" || getDeployRun(db, id)) continue; // an existing row is the journal's
+      const drift = deployDrift(db, id);
+      if (drift && getMeta(db, project).queueFrozen.frozen) continue; // frozen: wait for the PM, keep the merge slot
+      if (drift) {
+        requireOk(await d.manager("ledger", "scheduler-settle", id, "--from", "submitted", "--to", "done", "--receipt",
+          `merge:${getMergeRun(db, id)?.mergeSha}; 不自动部署（${drift}），待 PM 部署`), "settle undeployable merge");
+        continue;
       }
-      if (run.phase === "claimed") await driveClaimed(d, db, run, policy.deploy, policy.repoDir);
-      else if (run.phase === "running") await driveRunning(d, run);
+      if (deployInFlight(db)) continue;
+      const run = requireOk(await d.manager("ledger", "scheduler-deploy-begin", id), "begin deploy").run as DeployRun;
+      await driveClaimed(d, db, run, whereOf(policy));
       handled++;
     }
     const deployed = db.query(`SELECT d.* FROM scheduler_deploys d JOIN tasks t ON t.id=d.taskId

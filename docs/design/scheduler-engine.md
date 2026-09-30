@@ -131,7 +131,8 @@ owner 截图 ask 属上线闸。
 
 - **重载连坐不到**：部署是 `launchctl bootstrap` 的一次性任务（KeepAlive false，跑 `scheduler.ts --deploy-job`），不是 scheduler 的子进程；重启四个服务（包括 scheduler 自己）、update 重载都碰不到它。任务目录 mkdir 占位 + `started` 标记保证同一请求至多执行一次。
 - **不和 update 重叠**：部署任务整段持有维护租约（与 update、调度 pass 同一把），每步前核对，失租即停并写结果；`claimed` / `running` 也算维护忙碌，双保险。
-- **存活判定**：任务租约新鲜，或 launchd 报它在跑，都算活着；两者都否才算已死；`launchctl` 读不到按活着处理。超过截止（`timeoutMs` + 60 秒）仍活着就 bootout（worker 收 SIGTERM，runBounded 的进程组随之被杀），下一轮核到已死才进 `unknown`。所以部署的 `unknown` 必然意味着进程已不在：它冻结项目队列、不挡 update；出口同合并：`ledger scheduler-merge-resolve`（卡转 manual）。失败不自动重试。
+- **存活判定**：任务租约新鲜，或 launchd 报它在跑，都算活着；两者都否才算已死；`launchctl` 读不到按活着处理。超过截止（`timeoutMs` + 60 秒）仍活着就 bootout（worker 收 SIGTERM，runBounded 的进程组随之被杀），下一轮核到已死才进 `unknown`。请求文件或任务目录丢失不算「没提交」：标签由目录路径确定，照样问 launchd、按截止已过处理；只有目录不在且 launchd 也没有这个标签，才算从没提交。所以部署的 `unknown` 必然意味着进程已不在：它冻结项目队列、不挡 update；出口同合并：`ledger scheduler-merge-resolve`（卡转 manual）。失败不自动重试。
+- **配置只管新部署**：`claimed` / `running` 的行每轮直接按 journal 驱动，不看当前是否还配 `deploy`、项目是否还在、合并意图是否仍 submitted；有部署行的合并意图，合并 tick 不按「只合并」结清。运行中去掉 `deploy` 只会让还没提交的占位以失败结束（不提交），已提交的照样看到结束。
 - **步骤**（对齐 PM 的部署脚本，`lib/scheduler-deploy-steps.ts`）：主树须在 main 且干净 → fetch 并核 origin/main 含合并提交 → `merge --ff-only` → `web-release deploy` → 拉取或合并提交改到 `web/`、`src/relay*`、`deploy/relay/`、`src/lib/relay-*` 才跑 `relayArgv`（没配报 not_configured）→ 逐个 `kickstart -k` 重启标签（一个失败不跳过其余，整体判失败）。
 - **部署后验证**：卡到 live 后，调度身份跑 `ledger verify`（只准对自己 `deployed` 的卡、不准豁免，`lib/scheduler-verify-gate.ts`）：先 dry-run，未过就 10 分钟窗口内每分钟再看，窗口过后记一次正式结果（不过就由规划器的 `verify_failed` 交 PM）。daemon 探针「启动时刻 ≥ 代码更新时刻」按秒比较（两边都是秒精度，同秒不再误判为没重启）。
 
