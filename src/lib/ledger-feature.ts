@@ -25,7 +25,7 @@ export interface Feature {
 
 /** 没有任务卡的节点（计划中，开工时再绑卡，绑卡属于 L2）的状态 */
 export const PLANNED = "planned";
-export type NodeStatus = Stage | typeof PLANNED;
+type NodeStatus = Stage | typeof PLANNED;
 
 /** 版本快照里的一个节点；key 在同一版里唯一，taskId 可空（还没建卡） */
 export interface DagNode {
@@ -55,7 +55,7 @@ export interface DagVersion {
 
 type Row = Record<string, unknown>;
 
-export const toFeature = (r: Row): Feature => r as unknown as Feature;
+const toFeature = (r: Row): Feature => r as unknown as Feature;
 
 function toVersion(r: Row): DagVersion {
   return { ...(r as unknown as DagVersion), nodes: JSON.parse(String(r.nodes)) as DagNode[] };
@@ -77,10 +77,6 @@ export function resolveFeature(db: Database, raw: string | undefined, origin: st
 export function getDagVersion(db: Database, featureId: string, version: number): DagVersion | null {
   const r = db.prepare("SELECT * FROM dag_versions WHERE featureId = ? AND version = ?").get(featureId, version) as Row | null;
   return r ? toVersion(r) : null;
-}
-
-export function listFeatures(db: Database, project: string): Feature[] {
-  return (db.prepare("SELECT * FROM features WHERE project = ? ORDER BY id").all(project) as Row[]).map(toFeature);
 }
 
 /** 投影出来的节点：快照字段 + 任务卡现读的 status / title */

@@ -7,7 +7,7 @@
 import type { Database } from "bun:sqlite";
 import { instanceIdSync } from "./instance-id.js";
 
-export const ORIGIN_KEY = "origin";
+const ORIGIN_KEY = "origin";
 const PREFIX_LEN = 4;
 
 const cache = new WeakMap<Database, string>();

@@ -13,10 +13,10 @@ import type { LedgerEvent, LedgerTask } from "./ledger-stages.js";
 import { LedgerError } from "./ledger-store.js";
 import { insertEvent, replay, tx } from "./ledger-tx.js";
 
-export const FEATURE_TITLE_MAX = 60;
-export const NODE_LINE_MAX = 60;
-export const NODE_ESTIMATE_MAX = 20;
-export const DAG_NODES_MAX = 200;
+const FEATURE_TITLE_MAX = 60;
+const NODE_LINE_MAX = 60;
+const NODE_ESTIMATE_MAX = 20;
+const DAG_NODES_MAX = 200;
 const SLUG = /^[A-Za-z0-9][A-Za-z0-9_-]{0,39}$/;
 const NODE_KEY = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,39}$/;
 
@@ -31,15 +31,6 @@ export interface NewFeature extends FeaturePatch {
   /** 本机内的短名；落库的 id = 「本机前缀-slug」 */
   slug: string;
   title: string;
-}
-
-/** 节点输入：key 在这一版里唯一（缺省取 taskId）；taskId 可空 = 计划中还没建卡；oneLine 有卡时缺省取任务标题 */
-export interface NodeInput {
-  key?: string;
-  taskId?: string | null;
-  oneLine?: string;
-  deps?: string[];
-  estimate?: string;
 }
 
 /** 一行字：换行 / 控制字符 / 不可见格式符会让看板和 CLI 的单行显示错乱，也能藏东西 */
@@ -164,7 +155,7 @@ function buildNode(db: Database, feature: Pick<Feature, "id" | "project">, x: un
 }
 
 /** 整版校验：key 唯一、一张卡只进一个节点、依赖只指向同版节点、不许自环 / 成环 */
-export function buildNodes(db: Database, feature: Pick<Feature, "id" | "project">, raw: unknown): DagNode[] {
+function buildNodes(db: Database, feature: Pick<Feature, "id" | "project">, raw: unknown): DagNode[] {
   if (!Array.isArray(raw) || raw.length === 0) throw new LedgerError("invalid", "--nodes 要是非空 JSON 数组");
   if (raw.length > DAG_NODES_MAX) throw new LedgerError("invalid", `一版最多 ${DAG_NODES_MAX} 个节点，收到 ${raw.length}`);
   const nodes = raw.map((x: unknown) => buildNode(db, feature, x));
@@ -204,7 +195,8 @@ export function initDag(db: Database, ctx: WriteCtx, input: { id: string; rev: n
     requireManager(db, ctx.actor, cur.project);
     const has = db.prepare("SELECT MAX(version) AS v FROM dag_versions WHERE featureId = ?").get(cur.id) as { v: number | null };
     if (cur.currentVersion !== 0 || has.v !== null) {
-      throw new LedgerError("conflict", `feature ${cur.id} 已有 v${Math.max(cur.currentVersion, has.v ?? 0)}：dag-init 只建初版，v2 起是重写（L2，要原因与批准）`, { currentVersion: cur.currentVersion });
+      const v = Math.max(cur.currentVersion, has.v ?? 0);
+      throw new LedgerError("conflict", `feature ${cur.id} 已有 v${v}：dag-init 只建初版，v2 起是重写（L2，要原因与批准）`, { currentVersion: cur.currentVersion });
     }
     if (cur.rev !== input.rev) throw new LedgerError("conflict", `feature ${cur.id} 已被改过：当前 rev ${cur.rev}，你带的是 ${input.rev}`, { rev: cur.rev });
     const nodes = buildNodes(db, cur, input.nodes);

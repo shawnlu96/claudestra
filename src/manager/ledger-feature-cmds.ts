@@ -72,9 +72,17 @@ function dagShow(c: LedgerCli): Result {
 }
 
 export const FEATURE_CMDS: Record<string, CommandSpec> = {
-  "feature-new": { valued: ["title", "words", "status", "project", "dedup"], usage: "feature-new <id> --title <名字> [--words <owner 原话>] [--status active|paused|done|dropped]", run: featureNew },
+  "feature-new": {
+    valued: ["title", "words", "status", "project", "dedup"],
+    usage: "feature-new <id> --title <名字> [--words <owner 原话>] [--status active|paused|done|dropped]",
+    run: featureNew,
+  },
   "feature-set": { valued: ["rev", "title", "words", "status", "project", "dedup"], usage: "feature-set <feature> --rev <n> [--title] [--words] [--status]", run: featureSet },
-  "dag-init": { valued: ["rev", "nodes", "reason", "project", "dedup"], usage: "dag-init <feature> --rev <n> --nodes '<[{key?,taskId?,oneLine?,deps?,estimate?}]>' [--reason <原文>]（只建 v1）", run: dagInit },
+  "dag-init": {
+    valued: ["rev", "nodes", "reason", "project", "dedup"],
+    usage: "dag-init <feature> --rev <n> --nodes '<[{key?,taskId?,oneLine?,deps?,estimate?}]>' [--reason <原文>]（只建 v1）",
+    run: dagInit,
+  },
   "feature-show": { valued: ["project"], usage: "feature-show <feature>", run: featureShow },
   "dag-show": { valued: ["version", "project"], usage: "dag-show <feature> [--version N]", run: dagShow },
 };
