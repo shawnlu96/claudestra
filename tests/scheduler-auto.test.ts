@@ -77,7 +77,7 @@ describe("T68f auto mode: the full code flow on mock workers", () => {
     } finally { f.close(); }
   });
 
-  test("a lost reply leaves the order unknown and it is never resent; a refused send is replanned under a new key", async () => {
+  test("a lost reply leaves the order unknown and it is never resent; a refused send is replanned under a new key, with backoff", async () => {
     const f = autoFixture();
     try {
       await toBuild(f);
@@ -94,9 +94,18 @@ describe("T68f auto mode: the full code flow on mock workers", () => {
       g.setSend("refuse");
       expect(await g.tick()).toMatchObject({ step: "replan", detail: "bridge 拒收" });
       expect(g.intents().at(-1)).toMatchObject({ action: "dispatch", status: "cancelled" });
+      // A bridge that stays down is retried with backoff, not re-planned every poll: 30s, then 60s.
+      const planned = g.intents().length;
+      expect(await g.tick()).toMatchObject({ step: "held", detail: expect.stringContaining("连续 1 次派单未投递") });
+      g.advance(30_000);
+      expect(await g.tick()).toMatchObject({ step: "replan" });
+      g.advance(30_000);
+      expect(await g.tick()).toMatchObject({ step: "held", detail: expect.stringContaining("连续 2 次派单未投递") });
+      expect(g.intents()).toHaveLength(planned + 1);
+      g.advance(30_000);
       g.setSend("ok");
       expect(await g.tick()).toMatchObject({ step: "sent" });
-      expect(g.intents().at(-1)?.id).toMatch(/:write:a1$/);
+      expect(g.intents().at(-1)?.id).toMatch(/:write:a2$/);
       expect(g.sent).toHaveLength(2);
     } finally { g.close(); }
   });

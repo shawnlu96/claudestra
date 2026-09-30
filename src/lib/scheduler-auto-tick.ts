@@ -36,6 +36,7 @@ export interface AutoTickDeps {
 interface CardOutcome { taskId: string; step: string; detail: string }
 export interface AutoTickResult { cards: CardOutcome[]; failed: { taskId: string; error: string }[] }
 
+const UNDELIVERED_BACKOFF_MS = 30_000, UNDELIVERED_BACKOFF_CAP_MS = 600_000;
 const oneLine = (s: string): string => s.replace(/\s+/g, " ").trim().slice(0, 560);
 const roleOfIntent = (i: Pick<SchedulerIntent, "action" | "node">): SessionRole =>
   i.action === "review" || i.node === "adversarial_review" ? "reviewer" : "author";
@@ -215,6 +216,20 @@ class Card {
     return this.out("waiting", wait.reason);
   }
 
+  /**
+   * An order the transport refused (bridge down, session swapped) is safely re-planned, but not every poll: consecutive
+   * refusals back off 30s → 10min, or a bridge restart would write a plan + cancel pair per card per second.
+   */
+  undeliveredBackoff(): string | null {
+    const recent = this.db.query(`SELECT status, receipt, updatedAt FROM scheduler_intents WHERE taskId = ? AND action IN ('dispatch','review')
+      ORDER BY eventSeq DESC LIMIT 6`).all(this.task.id) as Pick<SchedulerIntent, "status" | "receipt" | "updatedAt">[];
+    const n = recent.findIndex((i) => i.status !== "cancelled" || !i.receipt?.startsWith("未投递"));
+    const streak = n === -1 ? recent.length : n;
+    if (!streak) return null;
+    const left = recent[0].updatedAt + Math.min(UNDELIVERED_BACKOFF_MS * 2 ** (streak - 1), UNDELIVERED_BACKOFF_CAP_MS) - this.deps.now();
+    return left > 0 ? `连续 ${streak} 次派单未投递（${oneLine(recent[0].receipt ?? "")}），${Math.ceil(left / 1000)}s 后再派` : null;
+  }
+
   async step(): Promise<CardOutcome> {
     const open = this.db.query(`SELECT * FROM scheduler_intents WHERE taskId = ? AND status IN ('pending','submitted','unknown')
       ORDER BY eventSeq DESC LIMIT 1`).get(this.task.id) as SchedulerIntent | null;
@@ -230,6 +245,8 @@ class Card {
     if (plan.kind === "escalate") return this.escalate(`${plan.code}：${plan.reason}`);
     if (plan.kind === "wait") return this.watch(plan);
     if (plan.action === "verify" || plan.action === "retire") return this.out("waiting", `${plan.node} 由合并队列 / PM 收尾`);
+    const backoff = plan.action === "dispatch" || plan.action === "review" ? this.undeliveredBackoff() : null;
+    if (backoff) return this.out("held", backoff);
     const intent = await this.plan(plan);
     return typeof intent === "string" ? this.out("replan", intent) : this.drive(intent, plan);
   }
