@@ -173,9 +173,10 @@ export interface OpenedAsk {
  * 带 askKey 且有发起 agent：它同 key 还开着的旧 ask 记 superseded（supersedeIn），新的 supersedes 指向最近那条。
  * deferSupersede：先只记指向、不动旧的——reply 路径投递成功后才调 supersedeOlder，发失败时旧的仍然有效（不会两条都失效）
  */
-export function openAskFull(db: Database, input: NewAsk, now = Date.now(), opts: { deferSupersede?: boolean } = {}): OpenedAsk {
+export function openAskFull(db: Database, input: NewAsk, now = Date.now(), opts: { deferSupersede?: boolean; beforeWrite?: () => void } = {}): OpenedAsk {
   const id = newAskId();
   return tx(db, (): OpenedAsk => {
+    opts.beforeWrite?.(); // 已拿到写锁（BEGIN IMMEDIATE 可能同步等了别的连接）：抛了就回滚、什么都不写
     if (input.dedupKey) {
       const hit = db.query("SELECT * FROM asks WHERE dedupKey = ?").get(input.dedupKey) as Row | null;
       if (hit) return { ask: toAsk(hit), existed: true, superseded: [] };
