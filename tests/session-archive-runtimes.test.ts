@@ -167,6 +167,38 @@ describe("复制失败不能报成功（T72 r1 P1-3）", () => {
   });
 });
 
+describe("换目录 resume 与异常目标（T72 r2）", () => {
+  const SID4 = "019a4444-4d5e-7f60-8a9b-0c1d2e3f4a5b";
+  test("Codex 线程在新目录 resume 后（registry cwd 变了、rollout 首行没变）：照常归档，note 提示 cwd 不同", async () => {
+    const codexHome = join(home, "codex-resume");
+    const src = join(codexHome, "sessions", "2026", "09", "30", `rollout-2026-09-30T07-08-09-${SID4}.jsonl`);
+    mkdirSync(join(src, ".."), { recursive: true });
+    writeFileSync(src, L({ timestamp: TS, type: "session_meta", payload: { id: SID4, cwd: join(home, "old-tree") } }) + "\n");
+    const prev = process.env.CODEX_HOME;
+    process.env.CODEX_HOME = codexHome; // 进程内生效：codexSessionsRoot 调用时才读 CODEX_HOME
+    try {
+      const r = await archiveSession("agent-cx", join(home, "new-tree"), SID4, { runtime: "codex", archiveRoot: `${archiveRoot}-resume` });
+      expect(r.ok).toBe(true);
+      expect(r.note).toContain("换目录 resume");
+      expect(readFileSync(join(`${archiveRoot}-resume`, "agent-cx", `${SID4}.jsonl`), "utf8")).toBe(readFileSync(src, "utf8"));
+    } finally {
+      if (prev === undefined) delete process.env.CODEX_HOME;
+      else process.env.CODEX_HOME = prev;
+    }
+  });
+
+  test("归档目标被占成目录：ok:false，不再报「已是最新」", async () => {
+    const src = join(home, "dest-dir", `${SID4}.jsonl`);
+    mkdirSync(join(src, ".."), { recursive: true });
+    writeFileSync(src, '{"type":"user"}\n');
+    const root = `${archiveRoot}-destdir`;
+    mkdirSync(join(root, "agent-x", `${SID4}.jsonl`, "junk"), { recursive: true });
+    const r = await archiveSession("agent-x", undefined, SID4, { srcPath: src, archiveRoot: root });
+    expect(r.ok).toBe(false);
+    expect(r.note).toContain("不是普通文件");
+  });
+});
+
 describe("Pi agent 的归档（同一个缺口）", () => {
   test("按 registry 条目的 cwd + runtime 找到带时间戳前缀的会话文件", async () => {
     const dir = join(home, ".pi", "agent", "sessions", encodePiSessionDir(cwd));

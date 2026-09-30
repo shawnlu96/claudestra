@@ -1,6 +1,6 @@
 /**
- * 归档用的 Codex rollout 定位（T72 r1 P1-1 / P1-2）：同一个 thread id 有多份 rollout 时只认首行 id 与 cwd 都对得上的那一份，
- * 认不准就拒；rollout 根认 CODEX_HOME。全部在临时目录里造假 rollout，不碰真实 ~/.codex。
+ * 归档用的 Codex rollout 定位（T72 r1 P1-1 / P1-2、r2 P1-a）：首行 id 对得上的只有一份就用它（cwd 不同只提示）；
+ * 同 id 多份时才按 registry cwd 分，分不开就拒；rollout 根认 CODEX_HOME。全部在临时目录里造假 rollout，不碰真实 ~/.codex。
  */
 import { afterAll, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
@@ -55,11 +55,20 @@ describe("pickCodexRolloutForArchive", () => {
     expect("error" in r).toBe(true);
   });
 
-  test("只有一份但 cwd 对不上 registry：拒绝（说明里带上它的 cwd）", async () => {
+  test("只有一份、cwd 对不上 registry（换目录 resume）：照常归档，note 里说明两边的 cwd", async () => {
     const root = freshRoot();
-    rollout(root, { id: SID, cwd: "/agent/two" });
-    const r = await pickCodexRolloutForArchive(SID, "/agent/one", root);
-    expect("error" in r && r.error).toContain("cwd=/agent/two");
+    const p = rollout(root, { id: SID, cwd: "/agent/old-tree" });
+    const r = await pickCodexRolloutForArchive(SID, "/agent/new-tree", root);
+    expect(r).toMatchObject({ path: p });
+    for (const s of ["/agent/old-tree", "/agent/new-tree"]) expect("note" in r && r.note).toContain(s);
+  });
+
+  test("同 id 两份、cwd 都对不上 registry：拒绝，不挑", async () => {
+    const root = freshRoot();
+    rollout(root, { id: SID, cwd: "/agent/one" });
+    rollout(root, { id: SID, cwd: "/agent/two" }, { day: "28" });
+    const r = await pickCodexRolloutForArchive(SID, "/agent/three", root);
+    expect("error" in r && r.error).toContain("分不清");
   });
 
   test("文件名是这个 id、首行 id 却是别的：不认", async () => {

@@ -142,7 +142,7 @@ export async function archiveSession(
   const runtime = agentRuntime({ runtime: opts.runtime });
   const located = await locateSource(runtime, cwd, sessionId, opts.srcPath);
   if ("error" in located) return { ok: false, archived: [], note: located.error };
-  const src = located.path;
+  const { path: src, note: pickNote } = located;
 
   const dir = join(opts.archiveRoot ?? ARCHIVE_ROOT, agentName);
   await mkdir(dir, { recursive: true });
@@ -180,14 +180,15 @@ export async function archiveSession(
   failed.push(...wf.failed.map((f) => `workflow ${basename(f)}`));
 
   // 任何一份没拷上都是 ok:false：kill / remove 靠它记日志，「无变化」和「拷失败」不能混成一句（tests/session-archive-runtimes.test.ts）
+  const extra = pickNote ? `；${pickNote}` : "";
   if (failed.length) {
-    return { ok: false, archived, note: `归档不完整：${failed.length} 个文件没拷上（${failed.join("；")}）；源文件还在，下次 archive 会补` };
+    return { ok: false, archived, note: `归档不完整：${failed.length} 个文件没拷上（${failed.join("；")}）；源文件还在，下次 archive 会补${extra}` };
   }
-  return { ok: true, archived, note: archived.length ? `已归档 ${archived.length} 个文件` : "归档已是最新（无变化）" };
+  return { ok: true, archived, note: (archived.length ? `已归档 ${archived.length} 个文件` : "归档已是最新（无变化）") + extra };
 }
 
 /**
- * 会话源文件。Codex 走 pickCodexRolloutForArchive（核对首行 id / cwd，同 id 多份认不准就拒）；
+ * 会话源文件。Codex 走 pickCodexRolloutForArchive（核对首行 id，同 id 多份再按 cwd 分，分不开就拒）；
  * 其余交给运行时适配器：Claude Code 按 cwd 推算，Pi 文件名带时间戳推不出（返回 null）→ 按 id 全库找。
  */
 async function locateSource(runtime: string, cwd: string | undefined, sessionId: string, srcPath?: string): Promise<RolloutPick> {
