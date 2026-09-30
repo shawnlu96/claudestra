@@ -10,6 +10,7 @@ import type { Envelope, LocalEndpoint } from "./router.js";
 import { HELD_MESSAGES_PATH } from "../lib/paths.js";
 import { PersistedMap } from "./persisted-map.js";
 import { readJsonStateSync } from "../lib/state-file.js";
+import { emitHeldToWeb } from "./held-web.js";
 
 export interface HeldItem {
   env: Envelope;
@@ -51,6 +52,7 @@ export function onHeldSettled(l: (env: Envelope, outcome: HeldOutcome) => void):
   return () => settledListeners.delete(l);
 }
 export function notifyHeldSettled(env: Envelope, outcome: HeldOutcome): void {
+  if (outcome !== "delivered") emitHeldToWeb(env, "dropped"); // 送达由投递时的 chat_message(in) 报，这里只补作罢
   for (const l of settledListeners) {
     try {
       l(env, outcome);
@@ -94,6 +96,7 @@ export class HeldQueue extends PersistedMap<HeldItem[]> {
     }
     const q = [...cur, item];
     this.set(channelId, q);
+    emitHeldToWeb(item.env, "queued"); // 只在新入队时报：flush 押回同一封不再报
     return q.length;
   }
 
@@ -117,6 +120,7 @@ export class HeldQueue extends PersistedMap<HeldItem[]> {
     if (cur.some((i) => i.env === env)) return cur.length;
     const q = [{ env, to, heldAt: Date.now() }, ...cur];
     this.set(to.channelId, q);
+    emitHeldToWeb(env, "queued"); // 投出去（网页已见送达）又被退回：重新标排队
     return q.length;
   }
 
