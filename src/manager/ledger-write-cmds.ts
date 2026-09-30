@@ -233,7 +233,8 @@ function deliverCmd(c: LedgerCli): Result {
   if (c.p.flags.evidence !== undefined && !pathLike(c.p.flags.evidence)) throw new LedgerError("invalid", PATH_ONLY("--evidence"));
   checkTaskRefs({ head: c.p.flags.head });
   checkShippedHead(task, c.p.flags.head);
-  const r = deliver(c.db, c.ctx(), { taskId: task.id, headSHA: c.p.flags.head, evidence: c.p.flags.evidence, text: c.p.flags.text, moveFrom });
+  const expect = { rev: intFlag(c.p, "rev"), branch: c.p.flags.branch };
+  const r = deliver(c.db, c.ctx(), { taskId: task.id, headSHA: c.p.flags.head, evidence: c.p.flags.evidence, text: c.p.flags.text, moveFrom, expect });
   // routed：项目开了编排班子，bridge 会自动通知调度助理 / PM，执行者不用再发消息（roles/executor.md）
   return { ok: true, task: r.row, event: r.event, duplicate: r.duplicate, routed: getMeta(c.db, task.project).team !== null };
 }
@@ -337,7 +338,11 @@ export const WRITE_CMDS: Record<string, CommandSpec> = {
   stage: { valued: ["from", "to", "text", "dedup"], usage: "stage <task> --from <当前阶段> --to <阶段> [--text]（进 verified 用 ledger verify）", run: stage },
   note: { valued: ["project", "dedup"], usage: "note <task|item|-> <正文>", run: note },
   "ask-reopen": { valued: ["dedup"], usage: "ask-reopen <task>（指给人的 ask 过期了、或点了做不了之后要再派一次时重开一条；旧的由 bridge 撤掉）", run: askReopen },
-  deliver: { valued: ["head", "evidence", "from", "text", "dedup"], usage: "deliver <task> [--head <sha>] [--evidence <path>] [--from build|fix] [--text]", run: deliverCmd },
+  deliver: {
+    valued: ["head", "evidence", "from", "text", "dedup", "rev", "branch"],
+    usage: "deliver <task> [--head <sha>] [--evidence <path>] [--from build|fix] [--text] [--rev <n> --branch <b>：前置条件，卡已不是这个 rev / 分支就拒]",
+    run: deliverCmd,
+  },
   review: {
     valued: ["reviewer", "verdict", "p0", "p1", "p2", "path", "text", "to", "waive", "dedup", "head", "session", "family", "findings"],
     usage: "review <task> --reviewer <r> --verdict pass|changes|block --p0 N --p1 N --p2 N [--path <md>] [--text] [--to fix|merge|done|spec] [--waive adversarial]" +

@@ -206,12 +206,15 @@ let timer: ReturnType<typeof setInterval> | null = null;
 let sender: ((n: Notice, channelId: string) => Promise<string>) | null = null;
 const activeChannelOf = (agent: string): string | null => readRegistryAgentsSync().find((a) => a.name === agent && a.status === "active")?.channelId ?? null;
 
-/** 班子路由之外的台账通知（执行者 ask → PM，bridge/order-tools.ts）：同一条投递路径，在线空闲直投、否则押后 */
-export async function sendLedgerNotice(n: Notice): Promise<string> {
+/**
+ * 班子路由之外的台账通知（执行者 ask → PM，bridge/order-tools.ts）：同一条投递路径，在线空闲直投、否则押后。
+ * handed = 已送达或已进押后队列（之后由队列补投）；false = 根本没投出去，调用方要留着待投、下次重试再投。
+ */
+export async function sendLedgerNotice(n: Notice): Promise<{ handed: boolean; note: string }> {
   const channelId = activeChannelOf(n.to);
-  if (!channelId) return `${n.to} 不在 registry（或不活跃），没投`;
-  if (!sender) return "班子路由还没启动，没投";
-  return sender(n, channelId);
+  if (!channelId) return { handed: false, note: `${n.to} 不在 registry（或不活跃），没投` };
+  if (!sender) return { handed: false, note: "班子路由还没启动，没投" };
+  return { handed: true, note: await sender(n, channelId) };
 }
 
 /** bridge 启动时调一次（幂等） */

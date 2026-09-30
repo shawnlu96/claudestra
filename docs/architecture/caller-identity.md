@@ -44,11 +44,11 @@ Every dispatch tool travels as one frame type, `order_tool {tool, args}` (`lib/o
 - **`take_order`** (`lib/order-take.ts`) returns the caller's current order: a card in `build` / `fix` whose active step is assigned to the caller. If the card has a non-retired author session binding, that binding's agent and session must also match the caller. The order id is the scheduler's dispatch intent id, or `<task>:<step>:r<round>` for a card a PM assigned by hand. If there is no order, `order` is `null`.
 - **`deliver`** (`lib/order-deliver.ts`) has the same effect as `ledger deliver --from build|fix --head --evidence`. The checks run in this order:
   1. The wire must parse, and head must be a lowercase 40-hex SHA.
-  2. A retry with the same `mcp-deliver:<orderId>:<head>` key returns the first result. It only does so if the first delivery was this caller's.
+  2. A retry with the same `mcp-deliver:<orderId>:<head>` key returns the first receipt (order id, `review`, event seq), whatever stage the card is in now. It only does so if the first delivery was this caller's.
   3. The order id must be one of the caller's current orders.
   4. The bridge reads the card's branch head on origin itself (`git ls-remote` in the caller's registry cwd, 15 s). If it can't read it, or the head differs, the call is refused.
-  5. The CLI re-checks the stage and the executor inside its transaction.
-- **`ask`** (`lib/order-ask.ts`) takes a question about the caller's current order. It opens an `asks` row assigned to the card's `pm`, or to the first name on the project PM list if the card has none. It then notifies that PM through the team-router delivery path (`sendLedgerNotice`: sent directly if the PM is online and idle, held otherwise). The question and options appear in the notice only as quotes. Answers still come back as ordinary `send_to_agent` messages.
+  5. The card's `rev` and branch, read before the origin check, go to the CLI as `--rev` / `--branch` preconditions. The CLI checks them, the stage and the executor inside the write transaction; if the card changed during the check (a new branch, a PM taking it back), it refuses and writes nothing.
+- **`ask`** (`lib/order-ask.ts`) takes a question about the caller's current order. It opens an `asks` row assigned to the card's `pm`, or to the first name on the project PM list if the card has none. It then notifies that PM through the team-router delivery path (`sendLedgerNotice`: sent directly if the PM is online and idle, held otherwise). The question and options appear in the notice only as quotes. The ask stays `extra.notice = pending` until the notice is sent or held; a retry with the same arguments re-sends a still-pending notice under the same message id. Answers still come back as ordinary `send_to_agent` messages.
 - **CLI stays**: `ledger deliver` and the rest keep working. Pi, Codex tmux, and anything else that is `verified=false` must use the CLI.
 
 ## Misdelivery guard

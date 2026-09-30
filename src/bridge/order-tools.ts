@@ -4,7 +4,7 @@
  * lib/order-tools.ts ORDER_TOOLS 加定义），bridge.ts 与 ACP 回环代理都不用动。写台账一律经 lib/order-ledger-exit.ts（runManager）。
  */
 import type { ServerWebSocket } from "bun";
-import { openAskFull } from "../lib/ledger-asks.js";
+import { openAskFull, patchAsk } from "../lib/ledger-asks.js";
 import { askOrder } from "../lib/order-ask.js";
 import { deliverOrder, remoteBranchHead } from "../lib/order-deliver.js";
 import type { LedgerRun } from "../lib/order-ledger-exit.js";
@@ -41,6 +41,7 @@ const HANDLERS: Record<string, OrderToolHandler> = {
   deliver: (call, args) => deliverOrder(call, args, { db: ledgerDb(), run: ledgerRun, remoteHead: (c, branch) => remoteBranchHead(cwdOf(c.agent), branch, runBounded) }),
   ask: (call, args) => askOrder(call, args, {
     db: ledgerDb(), open: (input) => openAskFull(askDb(), input), notify: (to, text, messageId) => sendLedgerNotice({ to, text, messageId }),
+    markHanded: (id) => patchAsk(askDb(), id, { extra: { notice: "handed" } }),
   }),
 };
 

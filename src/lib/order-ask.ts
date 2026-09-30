@@ -1,7 +1,8 @@
 /**
  * M2 ask：执行者就自己当前的单向 PM 提问。参数过 T87 parseAskWire；单号必须是调用方当前的单（lib/order-take.ts）；
  * askee = 卡的 pm，没有就取台账 PM 名单第一位。写进现有 asks 表（bridge 唯一的台账写连接，lib/ledger-asks.ts），再投给 PM。
- * 同一单号、同一问题与选项的重试按 dedupKey 找回原来那条，不重开、不重投（第一次没投到的由押后队列补投）。
+ * 同一单号、同一问题与选项的重试按 dedupKey 找回原来那条，不重开。ask 开的时候 extra.notice = pending，投出去（送达或进押后队列）
+ * 才改成 handed；重试时 ask 还开着、仍是 pending（上次没投出去 / 投时出错 / 进程中途退出）就用同一 messageId 补投。
  * 回答不在这里收：PM 照旧 send_to_agent 回话。tests/order-ask.test.ts。
  */
 import { createHash } from "node:crypto";
@@ -18,8 +19,10 @@ export interface AskDeps {
   db: Database | null;
   /** 开一条 ask（bridge 的 asks 写连接） */
   open(input: NewAsk): OpenedAsk;
-  /** 台账通知投给 PM（在线空闲直投，否则押后），返回给日志看的结果 */
-  notify(to: string, text: string, messageId: string): Promise<string>;
+  /** 台账通知投给 PM（在线空闲直投，否则押后）；handed = 送达或已进押后队列 */
+  notify(to: string, text: string, messageId: string): Promise<{ handed: boolean; note: string }>;
+  /** 记下这条 ask 的通知已交出（extra.notice = handed） */
+  markHanded(askId: string): void;
 }
 
 const TITLE_MAX = 80;
@@ -55,10 +58,15 @@ export async function askOrder(call: VerifiedCall, args: unknown, deps: AskDeps)
   const opened = deps.open({
     project: task.project, taskId: task.id, fromAgent: call.agent, fromChannelId: call.channelId, source: "reply", kind: "decide",
     title: titleOf(task.id, question), body: question, assignee: pm, dedupKey: `mcp-ask:${orderId}:${digest}`,
-    extra: { orderId, options, via: "mcp_ask" },
+    extra: { orderId, options, via: "mcp_ask", notice: "pending" },
   });
   const ask = opened.ask;
-  if (opened.existed) return { ok: true, duplicate: true, askId: ask.id, askee: ask.assignee, delivered: null };
-  const delivered = await deps.notify(pm, askNoticeText({ taskId: task.id, orderId, from: call.agent, askId: ask.id, question, options }), `ledger-ask:${ask.id}`);
-  return { ok: true, duplicate: false, askId: ask.id, askee: pm, delivered };
+  const askee = ask.assignee ?? pm;
+  if (opened.existed && (ask.state !== "open" || ask.extra.notice !== "pending")) {
+    return { ok: true, duplicate: true, askId: ask.id, askee, notified: ask.extra.notice === "handed", delivered: null };
+  }
+  const sent = await deps.notify(askee, askNoticeText({ taskId: task.id, orderId, from: call.agent, askId: ask.id, question, options }), `ledger-ask:${ask.id}`);
+  if (sent.handed) deps.markHanded(ask.id);
+  // 没投出去也回 ok：问题已记下，同样的参数再调一次会补投
+  return { ok: true, duplicate: opened.existed, askId: ask.id, askee, notified: sent.handed, delivered: sent.note };
 }

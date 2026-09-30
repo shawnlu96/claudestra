@@ -1,7 +1,10 @@
 /** M2 执行者工具（T96）：take_order / deliver / ask 对着内存台账跑，写台账走进程内的真实 ledger CLI（runLedger），actor 按频道算 */
 import type { Database } from "bun:sqlite";
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { listAsks, openAskFull } from "../src/lib/ledger-asks.ts";
+import { afterAll, afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { listAsks, openAskFull, patchAsk } from "../src/lib/ledger-asks.ts";
 import { closeLedger, getTask, listEvents, openLedger } from "../src/lib/ledger-store.ts";
 import { setMeta } from "../src/lib/ledger-write.ts";
 import { askNoticeText, askOrder } from "../src/lib/order-ask.ts";
@@ -10,6 +13,7 @@ import type { LedgerRun } from "../src/lib/order-ledger-exit.ts";
 import { currentOrders, orderWireFor } from "../src/lib/order-take.ts";
 import type { VerifiedCall } from "../src/lib/order-tool-route.ts";
 import { parseAskWire } from "../src/lib/order-wire.ts";
+import { runBounded } from "../src/lib/run-bounded.ts";
 import type { Registry } from "../src/manager/core.ts";
 import { runLedger } from "../src/manager/ledger.ts";
 
@@ -97,24 +101,33 @@ describe("take_order：当前的单", () => {
 
 describe("deliver", () => {
   test("效果等同 CLI deliver --from build --head：阶段推到 review、写一条 deliver 事件、head 记上", async () => {
+    const rev = getTask(db, "T1")!.rev;
     const r = await deliverOrder(call(), wire(), deps());
     expect(r).toMatchObject({ ok: true, duplicate: false, orderId: "T1:write:r0", taskId: "T1", stage: "review" });
     expect(getTask(db, "T1")).toMatchObject({ stage: "review", round: 1, headSHA: HEAD });
     const [d] = events("deliver");
     expect(d).toMatchObject({ actor: EXE, dedupKey: deliverDedupKey("T1:write:r0", HEAD), text: "交付\n自查：逐条过" });
     expect(d.data).toEqual({ round: 1, headSHA: HEAD, evidence: "docs/tasks/T1.report.md" });
-    expect(runs).toEqual([["ledger", "deliver", "T1", "--from=build", `--head=${HEAD}`, "--evidence=docs/tasks/T1.report.md", "--text=交付\n自查：逐条过", `--dedup=${deliverDedupKey("T1:write:r0", HEAD)}`]]);
+    expect(runs).toEqual([["ledger", "deliver", "T1", "--from=build", `--head=${HEAD}`, "--evidence=docs/tasks/T1.report.md", "--text=交付\n自查：逐条过",
+      `--rev=${rev}`, "--branch=feat/t1", `--dedup=${deliverDedupKey("T1:write:r0", HEAD)}`]]);
   });
 
   test("同一单号 + head 重试：同一结果，不重复写事件、不重复推阶段", async () => {
     const first = await deliverOrder(call(), wire(), deps());
     const n = events().length;
     const again = await deliverOrder(call(), wire(), deps());
-    expect(again).toMatchObject({ ok: true, duplicate: true, taskId: "T1", stage: "review", eventSeq: first.ok ? first.eventSeq : -1 });
+    expect(again as object).toEqual({ ...(first as object), duplicate: true });
     expect(events().length).toBe(n);
     expect(events("deliver")).toHaveLength(1);
     expect(getTask(db, "T1")).toMatchObject({ stage: "review", round: 1 });
     expect(runs).toHaveLength(1);
+  });
+
+  test("重试回执稳定：卡后来被挪到 blocked，回执仍是这次交付的（单号、review、同一 eventSeq）", async () => {
+    const first = await deliverOrder(call(), wire(), deps());
+    await cli(PM, "stage", "T1", "--from", "review", "--to", "blocked");
+    expect((await deliverOrder(call(), wire(), deps())) as object).toEqual({ ...(first as object), duplicate: true });
+    expect(first).toMatchObject({ orderId: "T1:write:r0", stage: "review" });
   });
 
   test("并发重试都过了前置检查：CLI 按 dedup 回放，仍只写一次", async () => {
@@ -156,6 +169,22 @@ describe("deliver", () => {
     expect(getTask(db, "T1")).toMatchObject({ stage: "blocked", headSHA: null });
   });
 
+  test("查 origin 期间执行者合法地换了分支 → CLI 按 rev / 分支前置条件拒，旧分支的 head 不进台账（本地 bare origin、真 git）", async () => {
+    const [cwd, a] = gitOrigin();
+    await cli(PM, "task-set", "T1", "--rev", String(getTask(db, "T1")!.rev), "--branch", "feat/old");
+    const racing = {
+      db, run,
+      remoteHead: async (_c: VerifiedCall, branch: string) => {
+        const r = await remoteBranchHead(cwd, branch, runBounded);
+        expect(await cli(EXE, "task-set", "T1", "--rev", String(getTask(db, "T1")!.rev), "--branch", "feat/new")).toMatchObject({ ok: true });
+        return r;
+      },
+    };
+    expect(await deliverOrder(call(), wire({ head: a }), racing)).toMatchObject({ ok: false, code: "conflict" });
+    expect(events("deliver")).toEqual([]);
+    expect(getTask(db, "T1")).toMatchObject({ stage: "build", branch: "feat/new", headSHA: null });
+  });
+
   test("wire 不过 → invalid_wire，什么都不查不写（多字段、缺字段、短 SHA、大写 SHA、64 位、证据不是路径、控制字符）", async () => {
     const bad = [wire({ extra: 1 }), { v: 1, orderId: "T1:write:r0", head: HEAD }, wire({ head: "abc1234" }), wire({ head: HEAD.toUpperCase() }),
       wire({ head: "c".repeat(64) }), wire({ evidence: "见 报告" }), wire({ summary: "a\u0007b" }), wire({ v: 2 }), null, "x"];
@@ -184,6 +213,30 @@ describe("deliver", () => {
   });
 });
 
+/** 本地 bare origin：feat/old、feat/new 各一个提交，返回（能 ls-remote 的工作目录，feat/old 的 head） */
+const tmpRoots: string[] = [];
+afterAll(() => tmpRoots.forEach((d) => rmSync(d, { recursive: true, force: true })));
+function gitOrigin(): [string, string] {
+  const root = mkdtempSync(join(tmpdir(), "t96-origin-"));
+  tmpRoots.push(root);
+  const git = (cwd: string, ...args: string[]) => {
+    const r = Bun.spawnSync(["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid", "-c", "commit.gpgsign=false", ...args], { cwd });
+    if (r.exitCode !== 0) throw new Error(`git ${args.join(" ")}: ${r.stderr.toString()}`);
+    return r.stdout.toString().trim();
+  };
+  git(root, "init", "-q", "--bare", "origin.git");
+  git(root, "init", "-q", "work");
+  const work = join(root, "work");
+  git(work, "remote", "add", "origin", join(root, "origin.git"));
+  git(work, "checkout", "-q", "-b", "feat/old");
+  git(work, "commit", "-q", "--allow-empty", "-m", "old");
+  const a = git(work, "rev-parse", "HEAD");
+  git(work, "checkout", "-q", "-b", "feat/new");
+  git(work, "commit", "-q", "--allow-empty", "-m", "new");
+  git(work, "push", "-q", "origin", "feat/old", "feat/new");
+  return [work, a];
+}
+
 describe("查 origin 的 head", () => {
   const out = (stdout: string, code: number | null = 0, timedOut = false) => ({ stdout, stderr: "fatal: x", code, timedOut });
   test("只认恰好一行、ref 名完全一致", () => {
@@ -205,7 +258,10 @@ describe("查 origin 的 head", () => {
 
 describe("ask", () => {
   const notes: { to: string; text: string; id: string }[] = [];
-  const askDeps = () => ({ db, open: (i: Parameters<typeof openAskFull>[1]) => openAskFull(db, i), notify: async (to: string, text: string, id: string) => (notes.push({ to, text, id }), "已送达") });
+  const sent = async (to: string, text: string, id: string) => (notes.push({ to, text, id }), { handed: true, note: "已送达" });
+  const askDeps = (notify = sent) => ({
+    db, open: (i: Parameters<typeof openAskFull>[1]) => openAskFull(db, i), notify, markHanded: (id: string) => patchAsk(db, id, { extra: { notice: "handed" } }),
+  });
   beforeEach(() => void (notes.length = 0));
 
   test("写 asks（askee = PM 名单，没有卡的 pm 时）并投给 PM；重试不重开、不重投", async () => {
@@ -219,7 +275,20 @@ describe("ask", () => {
     expect(notes[0].text).toContain("「要不要改 X？」");
     const q = { v: 1, orderId: "T1:write:r0", question: "第二行才是细节\n要不要改 X？", options: ["改", "不改"] };
     const again = await askOrder(call(), q, askDeps());
-    expect(again).toMatchObject({ ok: true, duplicate: true, askId: a.id });
+    expect(again).toMatchObject({ ok: true, duplicate: true, askId: a.id, notified: true });
+    expect(notes).toHaveLength(1);
+    expect(listAsks(db, { fromAgent: EXE })).toHaveLength(1);
+  });
+
+  test("第一次没投出去（投时抛错 / PM 不在线没交出）→ ask 留着 pending，同样参数重试用同一 messageId 补投，交出后不再投", async () => {
+    const q = { v: 1, orderId: "T1:write:r0", question: "q" };
+    await expect(askOrder(call(), q, askDeps(async () => { throw new Error("working 探测失败"); }))).rejects.toThrow();
+    const [a] = listAsks(db, { fromAgent: EXE });
+    expect(a.extra.notice).toBe("pending");
+    expect(await askOrder(call(), q, askDeps(async () => ({ handed: false, note: "不在 registry，没投" })))).toMatchObject({ ok: true, duplicate: true, notified: false });
+    expect(await askOrder(call(), q, askDeps())).toMatchObject({ ok: true, duplicate: true, notified: true, delivered: "已送达" });
+    expect(notes).toEqual([expect.objectContaining({ to: PM, id: `ledger-ask:${a.id}` })]);
+    expect(await askOrder(call(), q, askDeps())).toMatchObject({ ok: true, duplicate: true, notified: true, delivered: null });
     expect(notes).toHaveLength(1);
     expect(listAsks(db, { fromAgent: EXE })).toHaveLength(1);
   });
