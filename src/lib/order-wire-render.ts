@@ -3,13 +3,15 @@
  * machine wrote appears only inside quoteExternal quotes. Two audiences:
  * - local: byte-for-byte the text renderWorkOrder always produced (tests/order-wire-render.test.ts snapshot). Local orders
  *   carry this machine's absolute paths on purpose (the CLI to run), so they are not redacted.
- * - peer: text is folded to what the peer will read, then redacted (dispatch-redact.ts), then quoted line by line; ids that
- *   carry a secret and fields over their byte cap are refused instead of rewritten or cut (the remote worker cannot go back
- *   and read the original). tests/order-wire.test.ts "peer rendering".
+ * - peer: refuse-first. Text is folded to what the peer will read; any secret (peer-secret-gate.ts), a non-full-SHA head, an
+ *   id carrying an address or a field over its byte cap refuses the whole order (it stays for local review) instead of
+ *   being masked, rewritten or cut. What passes has addresses / personal info masked (dispatch-redact.ts), then is quoted
+ *   line by line. tests/order-wire.test.ts "peer rendering".
  */
 import { redactForPeer } from "./dispatch-redact.js";
-import { WIRE_LIMITS, type OrderWire } from "./order-wire.js";
-import { quoteExternal, refLike, shaLike } from "./quote-text.js";
+import { isFullSha, WIRE_LIMITS, type OrderWire } from "./order-wire.js";
+import { peerSecretHit } from "./peer-secret-gate.js";
+import { quoteExternal, refLike } from "./quote-text.js";
 
 export type RenderAudience = "local" | "peer";
 
@@ -53,21 +55,29 @@ function blocks(title: string, rows: readonly string[], cap: number): string[] {
 const fold = (s: string): string => s.replace(/\p{Cf}+/gu, "").normalize("NFKC").replace(/\p{Cf}+/gu, "").replace(/\r\n?/g, "\n")
   .split("\n").map((l) => l.replace(/[\p{Cc}\u2028\u2029]+/gu, " ").replace(/\s+/g, " ")).join("\n");
 
-/** Ids must reach the peer unchanged (a deliver cites them), so a secret there refuses the order instead of being masked. */
-function refuseSecretIds(o: OrderWire): void {
+/**
+ * Gate for both peer exits. head is checked here too (a caller may skip parseOrderWire) and is the only hex exempt from the
+ * secret gate, by value. Ids must reach the peer unchanged (a deliver cites them), so an address in one refuses as well.
+ */
+function gatePeer(o: OrderWire): void {
+  if (o.head !== null && !isFullSha(o.head)) throw new OrderRenderError("head 不是完整 40 / 64 位 SHA，拒绝外发");
   const ids: [string, string | null][] = [["orderId", o.orderId], ["taskId", o.taskId], ["node", o.node], ["step", o.step], ["repo", o.repo],
     ...o.findings.flatMap((f, i): [string, string][] => [[`findings[${i}].findingId`, f.findingId], [`findings[${i}].family`, f.family]])];
-  for (const [name, v] of ids) {
-    if (v !== null && redactForPeer(fold(v)).count > 0) throw new OrderRenderError(`${name} 含疑似敏感内容，编号不能改写，拒绝外发`);
+  const free: [string, string | null][] = [...o.inputs.map((v, i): [string, string] => [`inputs[${i}]`, v]),
+    ...o.outputs.map((v, i): [string, string] => [`outputs[${i}]`, v]), ...o.acceptance.map((v, i): [string, string] => [`acceptance[${i}]`, v]),
+    ["writeBack", o.writeBack], ["fallback", o.fallback], ...o.findings.map((f, i): [string, string] => [`findings[${i}].probe`, f.probe])];
+  for (const [name, v] of [...ids, ...free]) {
+    if (v === null) continue;
+    const folded = fold(v);
+    const rule = peerSecretHit(folded, o.head);
+    if (rule) throw new OrderRenderError(`${name} 疑似含密钥（${rule}），peer 外发拒绝优先，留在本机审`);
+    if (ids.some(([n]) => n === name) && redactForPeer(folded).count > 0) throw new OrderRenderError(`${name} 含疑似敏感内容，编号不能改写，拒绝外发`);
   }
 }
 
-/**
- * Every string a peer sees: free text is folded then redacted; ids are checked and refused on a hit. head is the one
- * exception: the parser holds it to a full hex SHA, and the 48+ hex rule would mask a sha-256 head the reviewer must match.
- */
+/** The order a peer receives (R3 hand-off): gated as above, then free text folded and masked; ids and head are unchanged. */
 export function redactOrderForPeer(o: OrderWire): { order: OrderWire; count: number } {
-  refuseSecretIds(o);
+  gatePeer(o);
   let count = 0;
   const r = (s: string): string => {
     const out = redactForPeer(fold(s));
@@ -89,7 +99,7 @@ function renderPeer(raw: OrderWire): string {
     ...block(`上一轮问题 ${f.findingId}`, f.probe, WIRE_LIMITS.probe)]);
   return [
     `【出借派单】${id(o.taskId)} · ${o.step} · 第 ${o.round} 轮 · specRev ${o.specRev} · 格式 v${o.v}`,
-    `head：${o.head && shaLike(o.head) ? o.head : "（无）"}`,
+    `head：${o.head ?? "（无）"}`,
     ...where,
     `节点：${id(o.node)}　单号：${id(o.orderId)}`,
     ...blocks("输入", o.inputs, WIRE_LIMITS.input),

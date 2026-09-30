@@ -75,6 +75,8 @@ const NODE = /^[\w.-]{1,64}$/;
 const FINDING_ID = /^[\w.-]{1,80}$/;
 const FAMILY = /^[\w.-]{1,64}$/;
 const FULL_SHA = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i;
+/** The one head test, shared with the peer renderer so a caller that skipped the parser gets the same answer. */
+export const isFullSha = (s: string): boolean => FULL_SHA.test(s);
 /** GitHub owner (alnum / hyphen, not leading) / repo name; "." and ".." are not repos and would walk paths when joined. */
 const REPO = /^[A-Za-z0-9][A-Za-z0-9-]{0,38}\/(?!\.\.?$)[A-Za-z0-9_.-]{1,100}$/;
 /** Same shape as quote-text.ts pathLike: a path, not a sentence. */

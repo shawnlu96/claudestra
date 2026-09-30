@@ -83,25 +83,78 @@ describe("parseDeliverWire / parseVerdictWire", () => {
 });
 
 describe("peer rendering", () => {
-  const secrets = {
-    ...order(),
-    inputs: ["token: ghp_" + "A1b2".repeat(8) + "\n接口在 100.101.102.103:3847，联系 dev@example.com", "路径 /Users/alice/repo"],
-    writeBack: "Bearer abcdefgh12345678", fallback: "内部 build.corp.internal 不可用时退回",
-    findings: [{ findingId: "leak-1", family: "secret", severity: "P1" as const, probe: "日志里有 sk-" + "x".repeat(24) }],
+  const parsed = (patch: Partial<OrderWire>): OrderWire => {
+    const r = parseOrderWire(JSON.parse(JSON.stringify({ ...order(), ...patch })));
+    expect(r.ok).toBe(true);
+    return (r as { value: OrderWire }).value;
   };
+  /** Both peer exits refuse: the rendered text and the redacted wire (R3's order hand-off). */
+  const refusedForPeer = (o: OrderWire) => {
+    expect(() => renderOrderWire(o, { audience: "peer" })).toThrow(OrderRenderError);
+    expect(() => redactOrderForPeer(o)).toThrow(OrderRenderError);
+  };
+  const hex = "1234567890abcdef".repeat(4);
+  const f0 = () => order().findings[0]!;
 
-  test("every free-text field is redacted before it is rendered; ids and head are untouched", () => {
-    const text = renderOrderWire(secrets, { audience: "peer" });
-    for (const leak of ["ghp_", "100.101.102.103", "dev@example.com", "alice", "abcdefgh12345678", "corp.internal", "sk-x"]) expect(text).not.toContain(leak);
-    expect(text).toContain(REDACTED.secret);
+  test("addresses, personal info and home paths are masked; ids and head are untouched", () => {
+    const o = parsed({ inputs: ["接口在 100.101.102.103:3847，联系 dev@example.com", "路径 /Users/alice/repo"], fallback: "内部 build.corp.internal 不可用时退回" });
+    const text = renderOrderWire(o, { audience: "peer" });
+    for (const leak of ["100.101.102.103", "dev@example.com", "alice", "corp.internal"]) expect(text).not.toContain(leak);
     expect(text).toContain(REDACTED.addr);
     expect(text).toContain(REDACTED.personal);
     expect(text).toContain(`head：${H}`);
     expect(text).toContain("单号：t9:s1:r2:adversarial_review:a0");
     expect(text).toMatch(/本单脱敏 [1-9]\d* 处/);
-    const { order: red } = redactOrderForPeer(secrets);
+    const { order: red } = redactOrderForPeer(o);
     expect(red.head).toBe(H);
-    expect(red.orderId).toBe(secrets.orderId);
+    expect(red.orderId).toBe(o.orderId);
+  });
+
+  // T87 r2: secrets are never masked for a peer, the whole order is refused and stays for local review (refuse-first).
+  test("a secret anywhere refuses the whole order instead of being masked", () => {
+    const tok = "ghp_" + "A1b2".repeat(8);
+    const free: Partial<OrderWire>[] = [{ inputs: ["token: " + tok] }, { outputs: ["见 " + tok] }, { acceptance: ["sk-" + "x".repeat(24)] },
+      { writeBack: "Bearer abcdefgh12345678" }, { fallback: "password=hunter2hunter2" }, { findings: [{ ...f0(), probe: "日志里有 " + tok }] },
+      { inputs: ["-----BEGIN RSA PRIVATE KEY-----\nMIIE\n-----END RSA PRIVATE KEY-----"] }, { inputs: ["AbCdEfGh12345678AbCdEfGh12345678"] }];
+    const ids: Partial<OrderWire>[] = [{ orderId: tok }, { taskId: tok }, { node: tok }, { repo: `owner/${tok}` },
+      { findings: [{ ...f0(), findingId: tok }] }, { findings: [{ ...f0(), family: tok }] }];
+    for (const c of [...free, ...ids]) refusedForPeer(parsed(c));
+  });
+
+  // T87 r2 P1-1: "_" is a word character, so a \b-anchored hex rule missed "ref_<hex>"; 32+ hex outside head now refuses.
+  test("a 32+ hex run outside head refuses, whatever is glued to it", () => {
+    for (const c of [{ orderId: "ref_" + hex }, { repo: "owner/ref_" + hex }, { findings: [{ ...f0(), findingId: "ref_" + hex }] },
+      { inputs: ["ref_" + hex] }, { inputs: [hex + "_x"] }, { inputs: ["id=" + "c".repeat(32)] }, { inputs: ["另一个提交 " + "d".repeat(40)] }]) {
+      refusedForPeer(parsed(c));
+    }
+  });
+
+  // T87 r2 P1-2: detection reads a copy with every blank removed, so a tab / space / newline split cannot hide a key.
+  test("a key split by tabs, spaces, newlines, zero-width or full-width characters still refuses", () => {
+    for (const s of ["sk-\t" + "x".repeat(24), "sk-" + "x".repeat(12) + "\t" + "x".repeat(12), "sk-" + "x".repeat(12) + "\n" + "x".repeat(12),
+      "gh p_" + "A1b2".repeat(8), "sk-​" + "x".repeat(24), "to​ken: short-private-value", "ｓｋ－" + "y".repeat(24),
+      "Bearer⁠ abcd\tefgh1234", hex.slice(0, 20) + " " + hex.slice(20)]) {
+      refusedForPeer(parsed({ inputs: [s] }));
+    }
+  });
+
+  test("addresses and contacts split by zero-width, bidi or tab characters are still masked", () => {
+    const o = parsed({ inputs: ["100.101.​102.103", "dev@exam​ple.com", "100.101‮.102.104", "call 138\t1234\t5678"] });
+    const text = renderOrderWire(o, { audience: "peer" });
+    const wire = JSON.stringify(redactOrderForPeer(o).order).replace(/\p{Cf}/gu, "");
+    for (const leak of ["100.101.102.103", "dev@example.com", "100.101.102.104", "1234 5678"]) {
+      expect(text).not.toContain(leak);
+      expect(wire).not.toContain(leak);
+    }
+  });
+
+  // T87 r2 P2: the peer exits check head themselves; a caller that skipped parseOrderWire cannot pass a 48-hex "head".
+  test("head must be a full 40 / 64 hex SHA at the peer exits, and only that value is exempt from the hex rule", () => {
+    for (const head of ["a".repeat(48), "a".repeat(39), "abc123", "a".repeat(40) + "\nrm"]) refusedForPeer({ ...order(), head });
+    const h64 = "e".repeat(64);
+    expect(renderOrderWire(parsed({ head: h64, inputs: [`只审 head ${h64}`] }), { audience: "peer" })).toContain(`head：${h64}`);
+    expect(renderOrderWire(parsed({ inputs: [`只审 head ${H}`] }), { audience: "peer" })).toContain(`「只审 head ${H}」`);
+    refusedForPeer(parsed({ head: null, inputs: [`只审 head ${H}`] }));
   });
 
   test("lines are kept and each is quoted, so a forged heading stays data", () => {
@@ -117,38 +170,6 @@ describe("peer rendering", () => {
     expect(() => renderOrderWire({ ...order(), inputs: [full + "z"] }, { audience: "peer" })).toThrow(OrderRenderError);
   });
 
-  // T87 r1 P1-1: a pattern check proves shape, not absence of secrets; ids cannot be rewritten, so a hit refuses the order.
-  test("ids, repo and finding labels that pass the parser but carry a secret are refused for peers", () => {
-    const tok = "ghp_" + "A1b2".repeat(8);
-    const f0 = order().findings[0]!;
-    const cases = [{ orderId: tok }, { taskId: tok }, { node: tok }, { repo: `owner/${tok}` },
-      { findings: [{ ...f0, findingId: tok }] }, { findings: [{ ...f0, family: tok }] }];
-    for (const c of cases) {
-      const parsed = parseOrderWire(JSON.parse(JSON.stringify({ ...order(), ...c })));
-      expect(parsed.ok).toBe(true);
-      const o = (parsed as { value: OrderWire }).value;
-      expect(() => renderOrderWire(o, { audience: "peer" })).toThrow(OrderRenderError);
-      expect(() => redactOrderForPeer(o)).toThrow(OrderRenderError);
-    }
-  });
-
-  // T87 r1 P1-2: zero-width / bidi / full-width / tab tricks are folded before redaction, so quoting cannot rejoin a secret.
-  test("text split by zero-width, bidi, full-width or tab characters is still redacted", () => {
-    const hidden = ["sk-\u200b" + "x".repeat(24), "to\u200bken: short-private-value", "100.101.\u200b102.103", "dev@exam\u200bple.com",
-      "ｓｋ－" + "y".repeat(24), "100.101\u202e.102.104", "call 138\t1234\t5678", "Bearer\u2060 abcdefgh12345678"];
-    const plain = ["sk-" + "x".repeat(24), "short-private-value", "100.101.102.103", "dev@example.com", "sk-" + "y".repeat(24), "100.101.102.104",
-      "1234 5678", "abcdefgh12345678"];
-    const parsed = parseOrderWire(JSON.parse(JSON.stringify({ ...order(), inputs: hidden })));
-    expect(parsed.ok).toBe(true);
-    const o = (parsed as { value: OrderWire }).value;
-    const text = renderOrderWire(o, { audience: "peer" });
-    const wire = JSON.stringify(redactOrderForPeer(o).order).replace(/\p{Cf}/gu, "");
-    for (const leak of plain) {
-      expect(text).not.toContain(leak);
-      expect(wire).not.toContain(leak);
-    }
-  });
-
   // T87 r1 P1-3: caps are UTF-8 bytes like the whole-wire cap; String.length let a CJK spec through at up to 3x the size.
   test("field caps count UTF-8 bytes, at the parser and at the peer renderer", () => {
     expect(parseOrderWire({ ...order(), inputs: ["界".repeat(5461)] }).ok).toBe(true);
@@ -161,6 +182,6 @@ describe("peer rendering", () => {
   });
 
   test("local rendering keeps this machine's paths (it is the command the local worker runs)", () => {
-    expect(renderOrderWire(secrets, { audience: "local" })).toContain("/Users/alice/repo");
+    expect(renderOrderWire({ ...order(), inputs: ["路径 /Users/alice/repo"] }, { audience: "local" })).toContain("/Users/alice/repo");
   });
 });
