@@ -71,7 +71,7 @@ async function pairApprove(req: Request): Promise<Response> {
   const body = await readJson(req);
   if (typeof body.id !== "string") return json(400, { ok: false, error: '"id" required' });
   const r = await decideApproval(body.id, body.approve === true);
-  return json(r ? 200 : 404, r ?? { ok: false, error: "approval not found or already decided" });
+  return json(!r ? 404 : r.ok === false ? 403 : 200, r ?? { ok: false, error: "approval not found or already decided" }); // 403：本机全权请求回环批不了
 }
 
 /** manager 经中继调对方：正文 base64 进出，整读（CLI 的响应都是小 JSON） */
@@ -105,7 +105,7 @@ export async function relayControlRoutes(req: Request, url: URL): Promise<Respon
   if (p === "/peer-ingress/sync" && req.method === "POST") return peerIngressSyncRoute(req);
   if (p === "/relay/status" && req.method === "GET") return relayStatusResponse();
   if (p === "/relay/pair/new" && req.method === "POST") return pairNew(req);
-  if (p === "/relay/pair/approvals" && req.method === "GET") return json(200, { ok: true, approvals: pendingApprovals(), activeCodes: activePairingCodeList() });
+  if (p === "/relay/pair/approvals" && req.method === "GET") return json(200, { ok: true, approvals: pendingApprovals(true), activeCodes: activePairingCodeList() });
   if (p === "/relay/pair/approve" && req.method === "POST") return pairApprove(req);
   if (p === "/relay/pair/redeem" && req.method === "POST") return pairRedeem(req);
   if (p === "/relay/request" && req.method === "POST") return relayRequest(req);

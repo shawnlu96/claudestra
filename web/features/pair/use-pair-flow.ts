@@ -3,20 +3,29 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { AppConfig } from "@/lib/app-config";
 import { LOCAL_FP } from "@/lib/app-config";
 import { compactCode, defaultDeviceName } from "@/lib/pairing";
-import { pairErrorText, pairLocal, type PairedInfo } from "@/lib/api/devices";
+import { cancelLocalPairing, pairErrorText, pairLocal, type PairedInfo } from "@/lib/api/devices";
 import { finishPairing, pairByProof, pollApproval, resolveCodeTarget, startCodePairing } from "./pair-flow";
 
 export type PairPhase =
   | { kind: "idle" }
   | { kind: "busy"; label: string }
-  | { kind: "pending"; machineName: string }
+  /** code：本机全权请求的展示码，批准的设备上显示同一个；手输短码的待确认没有 */
+  | { kind: "pending"; machineName: string; code?: string }
   | { kind: "error"; message: string };
 
-/** 配对页的三条流程 + 阶段状态；成功后 onPaired（页面跳 /chat）。离开页面时中止轮询。 */
+/** 配对页的三条流程 + 阶段状态；成功后 onPaired（页面跳 /chat）。离开页面时中止轮询，本机待批一并作废。 */
 export function usePairFlow(cfg: AppConfig | null, onPaired: () => void) {
   const [phase, setPhase] = useState<PairPhase>({ kind: "idle" });
   const pollAbort = useRef<AbortController | null>(null);
-  useEffect(() => () => pollAbort.current?.abort(), []);
+  /** 还在等批准的本机请求：放弃时通知 bridge 作废（同时待批有名额上限，废弃的别占着） */
+  const localReq = useRef<{ fp: string; id: string } | null>(null);
+  const abandon = useCallback(() => {
+    const r = localReq.current;
+    localReq.current = null;
+    if (r) cancelLocalPairing(r.fp, r.id).catch((e: Error) => console.warn("[pair] 作废本机待批没发出去，等它过期:", e.message));
+    pollAbort.current?.abort();
+  }, []);
+  useEffect(() => abandon, [abandon]);
 
   const done = useCallback(
     async (info: PairedInfo, fp: string) => {
@@ -40,6 +49,23 @@ export function usePairFlow(cfg: AppConfig | null, onPaired: () => void) {
     [done],
   );
 
+  /** 进待确认后轮询到终态；denied / 过期给各自的提示 */
+  const awaitApproval = useCallback(
+    async (fp: string, approvalId: string, pending: Extract<PairPhase, { kind: "pending" }>, expiredMsg: string) => {
+      const ctrl = new AbortController();
+      pollAbort.current = ctrl;
+      setPhase(pending);
+      try {
+        const st = await pollApproval(fp, approvalId, { signal: ctrl.signal });
+        if (st.state === "paired") return void (await done(st.info, fp));
+        setPhase({ kind: "error", message: st.state === "denied" ? "电脑上拒绝了这次配对" : expiredMsg });
+      } finally {
+        pollAbort.current = null;
+      }
+    },
+    [done],
+  );
+
   /** 手输短码：查机器 → 待确认 → 轮询到终态 */
   const runCode = useCallback(
     async (raw: string, name: string) => {
@@ -50,37 +76,37 @@ export function usePairFlow(cfg: AppConfig | null, onPaired: () => void) {
       try {
         const target = await resolveCodeTarget(cfg, c);
         const pend = await startCodePairing(target.fp, c, name);
-        const ctrl = new AbortController();
-        pollAbort.current = ctrl;
-        setPhase({ kind: "pending", machineName: pend.machineName || target.name });
-        const st = await pollApproval(target.fp, pend.approvalId, { signal: ctrl.signal });
-        if (st.state === "paired") return void (await done(st.info, target.fp));
-        setPhase({ kind: "error", message: st.state === "denied" ? "电脑上拒绝了这次配对" : "确认超时，请重新输入配对码" });
+        await awaitApproval(target.fp, pend.approvalId, { kind: "pending", machineName: pend.machineName || target.name }, "确认超时，请重新输入配对码");
       } catch (e) {
         if ((e as Error)?.name === "AbortError") return setPhase({ kind: "idle" });
         fail(e);
-      } finally {
-        pollAbort.current = null;
       }
     },
-    [cfg, done],
+    [cfg, awaitApproval],
   );
 
-  /** 直托管 + 本机回环：一键 */
+  /** 直托管 + 本机回环：一键——全权要在已配对的设备上核对展示码批准，这里轮询到结果 */
   const runLocal = useCallback(
     async (name: string) => {
       if (!cfg || cfg.mode !== "direct") return;
       setPhase({ kind: "busy", label: "正在配对本机…" });
       try {
         const fp = cfg.fp || LOCAL_FP;
-        await done(await pairLocal(fp, name || defaultDeviceName(navigator.userAgent)), fp);
+        const r = await pairLocal(fp, name || defaultDeviceName(navigator.userAgent));
+        if (!("pending" in r)) return void (await done(r, fp));
+        localReq.current = { fp, id: r.approvalId };
+        try {
+          await awaitApproval(fp, r.approvalId, { kind: "pending", machineName: r.machineName, code: r.code }, "确认超时，请再点一次一键配对");
+        } finally {
+          localReq.current = null;
+        }
       } catch (e) {
+        if ((e as Error)?.name === "AbortError") return setPhase({ kind: "idle" });
         setPhase({ kind: "error", message: pairErrorText(e, true) });
       }
     },
-    [cfg, done],
+    [cfg, done, awaitApproval],
   );
 
-  const cancel = useCallback(() => pollAbort.current?.abort(), []);
-  return useMemo(() => ({ phase, runProof, runCode, runLocal, cancel }), [phase, runProof, runCode, runLocal, cancel]);
+  return useMemo(() => ({ phase, runProof, runCode, runLocal, cancel: abandon }), [phase, runProof, runCode, runLocal, abandon]);
 }
