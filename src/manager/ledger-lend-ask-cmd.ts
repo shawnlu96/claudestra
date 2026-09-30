@@ -4,7 +4,7 @@ import { LedgerError } from "../lib/ledger-store.js";
 import { lendAskInput, lendAskProblem, type LendAskParams } from "../lib/lend-ask.js";
 import type { CommandSpec } from "./ledger-write-cmds.js";
 
-export const LEND_CMDS: Record<string, CommandSpec> = {
+export const LEND_ASK_CMDS: Record<string, CommandSpec> = {
   "lend-ask": {
     valued: ["params"], bools: [],
     usage: "lend-ask --params '<json>'（调度服务专用：出借单逐单确认，给 owner 开 authorize ask；同一张单只开一次）",
