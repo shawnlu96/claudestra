@@ -77,11 +77,15 @@ export async function driveMerge(run: MergeRun, external: MergeExternal, advance
       }
       const mergeSha = await external.merge(run.prRef, run.reviewedHead);
       if (!/^[a-f0-9]{40}$/i.test(mergeSha)) return step("unknown", "merge API 未确认完整合并 SHA");
+      const merged = await external.inspect(run.prRef);
+      if (merged.state !== "MERGED" || merged.base !== "main" || !sameHead(run, merged) || merged.mergeSha !== mergeSha) {
+        return step("unknown", "合并后 PR 目标分支、head 或合并提交无法核实");
+      }
       return step("merged", `PR 已合并 ${short(mergeSha)}`, mergeSha);
     }
     if (run.phase === "merging") {
       const pr = await external.inspect(run.prRef);
-      return pr.state === "MERGED" && pr.mergeSha && /^[a-f0-9]{40}$/i.test(pr.mergeSha) && sameHead(run, pr)
+      return pr.state === "MERGED" && pr.base === "main" && pr.mergeSha && /^[a-f0-9]{40}$/i.test(pr.mergeSha) && sameHead(run, pr)
         ? step("merged", `重启后核实 PR 已合并 ${short(pr.mergeSha)}`, pr.mergeSha)
         : step("unknown", "合并曾发出但未能核实结果，不重复 gh pr merge");
     }

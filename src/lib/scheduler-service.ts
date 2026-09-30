@@ -11,7 +11,8 @@ import { getMergeRun, mergeRunDrift, type MergeRun, type MergePhase } from "./sc
 type Manager = (...args: string[]) => Promise<Record<string, unknown>>;
 
 const schedulerManager: Manager = (...args) => runManagerProcess(args, {
-  bunPath: resolveBunPath(), managerPath: `${SRC_DIR}/manager.ts`, env: { ...process.env, DISCORD_CHANNEL_ID: "" }, timeoutMs: 120_000,
+  bunPath: resolveBunPath(), managerPath: `${SRC_DIR}/manager.ts`,
+  env: { ...process.env, DISCORD_CHANNEL_ID: "", CLAUDESTRA_SCHEDULER_SERVICE: "1" }, timeoutMs: 120_000,
 });
 
 const requireOk = (result: Record<string, unknown>, what: string): Record<string, unknown> => {

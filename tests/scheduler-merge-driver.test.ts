@@ -38,7 +38,7 @@ describe("T68 merge driver", () => {
     await driveMerge(f.row, f.ops, f.advance);
     await driveMerge(f.row, f.ops, f.advance);
     expect(f.row.phase).toBe("merged");
-    expect(f.calls).toEqual(["inspect", "journal:await_ci", "inspect", "journal:merging", "inspect", "merge", "journal:merged"]);
+    expect(f.calls).toEqual(["inspect", "journal:await_ci", "inspect", "journal:merging", "inspect", "merge", "inspect", "journal:merged"]);
     await driveMerge(f.row, f.ops, f.advance);
     await driveMerge(f.row, f.ops, f.advance);
     expect(f.row.phase).toBe("done");
@@ -90,6 +90,13 @@ describe("T68 merge driver", () => {
     await driveMerge(f.row, f.ops, f.advance);
     expect(f.row.phase).toBe("unknown");
     expect(f.calls).not.toContain("merge");
+  });
+  test("a retargeted PR after merge freezes before deployment", async () => {
+    const f = fixture({ ...base, phase: "merging", rev: 3 });
+    f.snapshot = pr({ state: "MERGED", base: "other", mergeSha: M });
+    await driveMerge(f.row, f.ops, f.advance);
+    expect(f.row.phase).toBe("unknown");
+    expect(f.calls).not.toContain("deploy");
   });
   test("restart in deploying observes deployment without rerunning it", async () => {
     const f = fixture({ ...base, phase: "deploying", rev: 5, mergeSha: M });

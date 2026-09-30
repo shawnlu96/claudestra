@@ -35,7 +35,7 @@ const text = (v: string | undefined, label: string): string => {
   return s;
 };
 const canWrite = (db: Database, actor: string, project: string): boolean =>
-  actor !== getMeta(db, project).team?.dispatcher && isManager(db, actor, { project, agent: null });
+  actor === "scheduler" || (actor !== getMeta(db, project).team?.dispatcher && isManager(db, actor, { project, agent: null }));
 
 export function getMergeRun(db: Database, intentId: string): MergeRun | null {
   if (!db.query("SELECT 1 FROM sqlite_master WHERE type='table' AND name='scheduler_merges'").get()) return null;
@@ -102,7 +102,7 @@ export function beginMergeRun(db: Database, ctx: WriteCtx, intentId: string, req
     const now = ctx.now ?? Date.now();
     db.prepare(`INSERT INTO scheduler_merges (intentId, taskId, project, prRef, expectedBranch, reviewedHead, requiredChecks, phase, createdAt, updatedAt)
       VALUES (?, ?, ?, ?, ?, ?, ?, 'ready', ?, ?)`).run(intentId, task.id, task.project, task.pr, task.branch, task.headSHA, checks.join(","), now, now);
-    insertEvent(db, { actor: "scheduler", now, dedupKey: `scheduler:${intentId}:merge:ready` }, {
+    insertEvent(db, { actor: ctx.actor, now, dedupKey: `scheduler:${intentId}:merge:ready` }, {
       project: task.project, target: task.id, kind: "scheduler", text: "合并队列已核对审查与 head",
       data: { op: "merge_phase", intentId, phase: "ready", head: task.headSHA, pr: task.pr, reviewSeq: review.facts.eventSeq },
     }, true);
@@ -152,7 +152,7 @@ export function advanceMergeRun(db: Database, ctx: WriteCtx, input: {
       db.prepare("UPDATE scheduler_intents SET status='cancelled', receipt=?, updatedAt=? WHERE id=?")
         .run(`head changed to ${input.newHead}`, now, row.intentId);
       db.prepare("DELETE FROM scheduler_resources WHERE intentId=?").run(row.intentId);
-      insertEvent(db, { actor: "scheduler", now }, { project: task.project, target: task.id, kind: "stage", text: "分支更新后重新审查新 head",
+      insertEvent(db, { actor: ctx.actor, now }, { project: task.project, target: task.id, kind: "stage", text: "分支更新后重新审查新 head",
         data: { from: "merge", to: "review", round: next.round, specRev: next.specRev, head: input.newHead } }, false);
     }
     if (input.to === "deployed") {
@@ -163,9 +163,9 @@ export function advanceMergeRun(db: Database, ctx: WriteCtx, input: {
       const next = nextTaskState(task, "live");
       db.prepare("UPDATE tasks SET stage=?, stageBefore=?, round=?, specRev=?, rev=rev+1, updatedAt=? WHERE id=?")
         .run(next.stage, next.stageBefore, next.round, next.specRev, now, task.id);
-      insertEvent(db, { actor: "scheduler", now }, { project: task.project, target: task.id, kind: "stage", text: "部署核实后进入 live",
+      insertEvent(db, { actor: ctx.actor, now }, { project: task.project, target: task.id, kind: "stage", text: "部署核实后进入 live",
         data: { from: "merge", to: "live", round: next.round, specRev: next.specRev } }, false);
-      insertEvent(db, { actor: "scheduler", now }, { project: task.project, target: task.id, kind: "deploy", text: "自动部署已核实",
+      insertEvent(db, { actor: ctx.actor, now }, { project: task.project, target: task.id, kind: "deploy", text: "自动部署已核实",
         data: { version: receipt, mergeSha: row.mergeSha } }, false);
     }
     if (input.to === "done") {
@@ -179,7 +179,7 @@ export function advanceMergeRun(db: Database, ctx: WriteCtx, input: {
         input.to === "done" ? receipt : null, ["unknown", "await_review"].includes(input.to) ? receipt : null, now, row.intentId);
     if (input.to === "unknown") db.prepare("INSERT INTO meta (project,key,value) VALUES (?, 'queueFrozen', ?) ON CONFLICT(project,key) DO UPDATE SET value=excluded.value")
       .run(row.project, JSON.stringify({ frozen: true, reason: `合并结果不明：${receipt}`, since: now }));
-    insertEvent(db, { actor: "scheduler", now, dedupKey: `scheduler:${row.intentId}:merge:${input.to}` }, {
+    insertEvent(db, { actor: ctx.actor, now, dedupKey: `scheduler:${row.intentId}:merge:${input.to}` }, {
       project: row.project, target: row.taskId, kind: "scheduler", text: `合并队列：${input.to}${receipt ? `（${receipt}）` : ""}`,
       data: { op: "merge_phase", intentId: row.intentId, from: row.phase, to: input.to, receipt,
         mergeSha: input.to === "merged" ? input.mergeSha : row.mergeSha },

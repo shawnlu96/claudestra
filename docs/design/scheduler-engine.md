@@ -108,11 +108,12 @@ owner 截图 ask 属上线闸。
 - 自动卡必填作者模型家族与退路；只从新卡逐张 opt-in，在途卡不迁。
 - 不清楚外部副作用是否已经发生时冻结并升级，宁可停住也不重复 merge/deploy；未知 runtime 家族不猜审查者。
 - 卡级文件锁和 worker 槽持有到 live/verified 或整卡终止；单个意图结清不释放。归一 family 和沿用 findingId 之外，连续四轮任意 P1 是硬升级上限；换规格版本重新计数。
-- 专用 scheduler actor 只能写调度专用命令；人工写入保留实际 actor 和 manual 标记。结果不明的 merge/deploy 即使被取消也不能自动换 key 重试，须有绑定原 intent 的 PM 明确重试决定及外部事实核对。
+- 专用 scheduler actor 只能写调度专用命令和已部署本卡的 `verify`；人工写入保留实际 actor 和 manual 标记。服务环境标记用于审计归属与避免借 PM/master 身份，不是同一 OS 用户下的安全边界（本地 shell 本就可写台账文件）；所有自动写入仍要逐意图 CAS 和阶段守卫。结果不明的 merge/deploy 即使被取消也不能自动换 key 重试，须有绑定原 intent 的 PM 明确重试决定及外部事实核对。
 - 在自动重试决定的独立入口落地前，已取消的同轮 merge 一律停给 PM 手工核对并接管，调度器与台账写入口都拒绝换 key 重做。UI 合并的第二道写入闸查台账 authorize ask：owner 答复、未过期、非 guest，绑定当前 task/specRev/head/前后截图摘要；产生 ask 和投影视图的适配器仍在 PR E。
 - T69 移除 worker 前的归档会复制 registry 的 kind 到归档标记；默认全文搜索读该标记过滤，显式指定 agent 仍可查。更早已移除且无标记的旧会话只按 `agent-task-*` 命名识别，不猜其他历史目录。
 - 一次派多张卡给 peer 时，并发往对方项目 PM 入口投递，受本项目「对外委托槽」约束，不等待上一张完成。对方实例升级后，有常设授权且 owner 已设并发上限时，每卡自动建立一个执行 session 和一个跨模型审查 session，按本机相同模板推进；超过上限排队，前卡完成即补位。缺授权或上限时只接单排队并提示对方 owner。双实例沙箱验收：A 同时委托五张给 B，B 上限三，先起三组、后补两组。
 - 第四服务默认无配置即空转，`doctor` 明报；配置无效时不部分启动。PR D 的 UI 模板在 owner 截图 ask 与 head/specRev/摘要的真实联动接通前禁止自动合并，避免把口头通过当授权。
+- GitHub merge API 可原子锁 head，不能原子锁目标 base；最终检查到合并后必须再读 PR，若 base/head/merge SHA 与批准的 main 目标不符，立即冻结且不部署，由 PM 核对。验证检查单在每项目配置的 `deploy.cwd` 仓库运行；验证事件落盘后进程中断时，只允许同意图同去重键的 scheduler 结果重放。
 
 ### 调度服务配置与部署回执
 
@@ -132,3 +133,4 @@ owner 截图 ask 属上线闸。
   一次性 Codex 对抗自查找到四个 P2：归档后丢失 worker 标记、无 task.agent 的作者无法从 DAG 进入、绑定未核 intent 收件人、归档后停止前会话过早消失；均已修复并补测试。跨模型复审 r1 又要求本机 session 的家族核对 registry runtime，并让 owner 可撤误标、绑定时统一打标、管理面板可操作 worker。截图改走沙箱 headless 浏览器，不动 owner 屏幕。
 - PR D：独立 scheduler 入口、配置与 doctor 行接到第四个 launchd daemon；v9 台账记合并/部署阶段，项目级合并槽与 CAS、完整 head/跨模型审查重核、防重试的 merging/deploying 状态已落地。gh/部署命令经结构化 argv 调用，外部不明即冻结；本卡 verified 由台账检查单判。沙箱中服务禁用/启用空队列均存活，假卡 CLI journal 的分支更新使 merge→review、新轮 head 入账、旧 intent 取消且项目锁归零；没碰真实 GitHub 或部署目标。
   一次性 Codex 对抗自查找到两项 P1（merge 未原子锁 head、可被无关/跳过的 CI 检查放行）和一项 P2（update-branch 新 head 永久占项目合并槽）；现用 REST `sha` 锁 head，配置必过检查且只认 pass，并在新 head 回审时原子释放锁。UI 模板仍等真实 owner 截图 ask 适配器，当前 fail-closed。
+  修复后自查又指出 CLI 环境标记的本地同用户信任边界、GitHub 无法原子锁 base、验证通过后中断的重放问题、跨仓库项目检查错目录。身份边界与 base 的外部 API 限制已按上节显式记录；代码补了合并后 base/head/SHA 复核、不符冻结且不部署，以及本卡验证重放和按项目部署仓库采事实。

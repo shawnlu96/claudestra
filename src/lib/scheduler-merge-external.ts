@@ -22,7 +22,7 @@ const parsed = (s: string, label: string): Record<string, unknown> => {
 export function mergeExternal(project: ProjectSchedule, manager: ManagerCall, command: typeof runBounded = runBounded): MergeExternal {
   const cwd = project.deploy.cwd;
   const run = async (argv: string[], envExtra: Record<string, string> = {}, timeoutMs = 120_000) => {
-    const r = await command(argv, { cwd, env: { ...process.env, DISCORD_CHANNEL_ID: "", GIT_TERMINAL_PROMPT: "0", ...envExtra }, timeoutMs });
+    const r = await command(argv, { cwd, env: { ...process.env, DISCORD_CHANNEL_ID: "", CLAUDESTRA_SCHEDULER_SERVICE: "", GIT_TERMINAL_PROMPT: "0", ...envExtra }, timeoutMs });
     if (r.code !== 0 || r.timedOut) throw new Error(`${argv[0]} 失败：${oneLine(r.stderr) || `exit ${r.code ?? "timeout"}`}`);
     return r.stdout;
   };
@@ -42,7 +42,7 @@ export function mergeExternal(project: ProjectSchedule, manager: ManagerCall, co
       let checks: PrSnapshot["checks"] = [];
       if (state === "OPEN") {
         const checkRun = await command(["gh", "pr", "checks", prRef, "--json", "bucket,name"],
-          { cwd, env: { ...process.env, DISCORD_CHANNEL_ID: "", GIT_TERMINAL_PROMPT: "0" }, timeoutMs: 30_000 });
+          { cwd, env: { ...process.env, DISCORD_CHANNEL_ID: "", CLAUDESTRA_SCHEDULER_SERVICE: "", GIT_TERMINAL_PROMPT: "0" }, timeoutMs: 30_000 });
         if (checkRun.timedOut || !checkRun.stdout.trim()) throw new Error(`gh pr checks 无结果：${oneLine(checkRun.stderr)}`);
         const list = JSON.parse(checkRun.stdout) as unknown; // gh exits 8 for pending checks while still returning valid JSON
         if (!Array.isArray(list) || list.some((c) => !c || typeof c !== "object" ||

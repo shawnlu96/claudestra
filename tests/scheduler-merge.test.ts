@@ -8,6 +8,9 @@ import { setWorkflow } from "../src/lib/ledger-scheduler-write.js";
 import { createTask } from "../src/lib/ledger-write.js";
 import { parseSchedulerConfig } from "../src/lib/scheduler-config.js";
 import { schedulerMergeTick } from "../src/lib/scheduler-service.js";
+import { schedulerCanVerify } from "../src/lib/scheduler-verify-gate.js";
+import { runLedger } from "../src/manager/ledger.js";
+import type { Registry } from "../src/manager/core.js";
 
 const H = "a".repeat(40), M = "b".repeat(40);
 const review = { round: 1, head: H, verdict: "pass", reviewer: "agent-review", reviewerSessionId: "review-session",
@@ -35,6 +38,29 @@ function fixture() {
 }
 
 describe("T68 durable merge/deploy queue", () => {
+  test("scheduler actor can write a merge journal and replay only its own verified result", async () => {
+    const f = fixture();
+    try {
+      const ctx = { actor: "scheduler", now: 101 };
+      expect(schedulerCanVerify(f.db, "T1")).toBe(false);
+      beginMergeRun(f.db, ctx, "merge-one", ["check"]);
+      expect(f.db.query("SELECT actor FROM events WHERE kind='scheduler' ORDER BY seq DESC LIMIT 1").get()).toEqual({ actor: "scheduler" });
+      f.db.query("UPDATE tasks SET stage='live' WHERE id='T1'").run();
+      f.db.query("UPDATE scheduler_merges SET phase='verifying', mergeSha=?, deployReceipt='build ok' WHERE intentId='merge-one'").run(M);
+      expect(schedulerCanVerify(f.db, "T1")).toBe(true);
+      f.db.query("UPDATE tasks SET stage='verified' WHERE id='T1'").run();
+      f.db.query("INSERT INTO events (ts,actor,project,target,kind,text,data,dedupKey) VALUES (101,'scheduler','p','T1','verify','',?,'scheduler:merge-one:verify')")
+        .run(JSON.stringify({ result: "pass" }));
+      expect(schedulerCanVerify(f.db, "T1", "scheduler:merge-one:verify")).toBe(true);
+      expect(schedulerCanVerify(f.db, "T1", "scheduler:other:verify")).toBe(false);
+      const deps = { db: f.db, actor: "scheduler", projectIds: ["p"], loadRegistry: async () => ({} as Registry),
+        saveRegistry: async () => {}, now: () => 101 };
+      expect(await runLedger(["verify", "T1", "--dedup", "scheduler:merge-one:verify"], deps)).toMatchObject({ ok: true, duplicate: true });
+      expect(await runLedger(["verify", "T1", "--dedup", "scheduler:other:verify"], deps)).toMatchObject({ ok: false, code: "forbidden" });
+      f.db.query("UPDATE scheduler_merges SET phase='unknown' WHERE intentId='merge-one'").run();
+      expect(schedulerCanVerify(f.db, "T1")).toBe(false);
+    } finally { f.close(); }
+  });
   test("requires submitted intent, same reviewed head and project merge lock", () => {
     const f = fixture();
     try {
