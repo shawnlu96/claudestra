@@ -14,6 +14,8 @@ import { connectionOf } from "./fleet/service.js";
 /** 连接 → 它注册时出示的凭据的哈希（连接关了自动回收） */
 const credHashOf = new WeakMap<object, string>();
 let cache: { mtimeMs: number; creds: Record<string, CredRecord> } | null = null;
+/** 被拒的野进程每 3 秒重试一次（它每次连上都把退避清零）：同一个频道 + pid 只记一次日志 */
+const rejectLogged = new Set<string>();
 
 function currentCreds(): Record<string, CredRecord> {
   let mtimeMs = -1;
@@ -46,7 +48,12 @@ export function admitCaller(ws: ServerWebSocket<unknown>, msg: Record<string, un
   const incoming = identityOf(ws, channelId, controlChannelId);
   if (!rejectsTakeover(identityOf(holder, channelId, controlChannelId), incoming)) return true;
   const reason = "频道由已验证身份的会话持有，没有有效凭据的注册不能顶替它（多半是 agent 的 Bash 里误起了 channel-server）";
-  console.error(`⛔ 拒绝注册 ${channelId}（pid ${String(msg.pid ?? "?")}）：${reason}`);
+  const key = `${channelId}#${String(msg.pid ?? "?")}`;
+  if (!rejectLogged.has(key)) {
+    if (rejectLogged.size > 500) rejectLogged.clear();
+    rejectLogged.add(key);
+    console.error(`⛔ 拒绝注册 ${channelId}（pid ${String(msg.pid ?? "?")}，之后它的重试不再记）：${reason}`);
+  }
   try {
     ws.send(JSON.stringify({ type: "rejected", reason }));
     ws.close(4002, "verified holder");
