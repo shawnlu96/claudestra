@@ -16,7 +16,7 @@
 import { writeClaudeSettings } from "./lib/session-recall.js";
 import { configuredBridgePort } from "./lib/bridge-url.js";
 import { repoEnvVar } from "./lib/env-file.js";
-import { RUNTIME_DIR, runtimePath, statePath } from "./lib/paths.js";
+import { RUNTIME_DIR, runtimePath } from "./lib/paths.js";
 import { resolveBridgeUrl } from "./lib/bridge-url.js";
 import { readFile, mkdir, readdir, stat, rename } from "fs/promises";
 import { existsSync, statSync, openSync, writeSync, closeSync, readFileSync, unlinkSync, mkdirSync, realpathSync } from "fs";
@@ -115,7 +115,7 @@ import { cmdPeerHttpInvite, cmdPeerHttpJoin, cmdPeerHttpAccept, cmdPeerHttpTest,
 import { cmdCost, cmdMetrics } from "./manager/cost.js";
 import { cmdAutoUpdate } from "./manager/auto-update.js";
 import { cmdWebRelease } from "./manager/web-release.js";
-import { isWriteInvocation, needsWriteLock, PRINCIPALS_WRITE_COMMANDS } from "./manager/write-commands.js";
+import { isWriteInvocation } from "./manager/write-commands.js";
 
 const BRIDGE_URL = resolveBridgeUrl();
 const CATEGORY_NAME = "agents";
@@ -127,6 +127,7 @@ import { abandonCreate, beginCreate, commitCreate, gateOps, guardCreateSignals, 
 import { notify } from "./lib/notify.js";
 import { writeJsonAtomic } from "./lib/state-file.js";
 import { stderrTail } from "./lib/run-manager.js";
+import { takeWriteLocks } from "./manager/write-lock.js";
 import { launchWithCallerCred } from "./lib/caller-cred-launch.js";
 import { readyFailureText, modelPinPlan, modelPinRefusal, restartExceptionResult, bigSessionNote } from "./lib/restart-result.js";
 
@@ -2286,19 +2287,7 @@ async function cmdPiEnvSet(
   });
 }
 
-// cron、CLI 可能并发跑写命令,registry 等状态文件的 load→mutate→save 会互相
-// 覆盖(saveRegistry 只防撕裂不防丢更新)。命令级锁一把关掉全部窗口;拿不到
-// (20s)降级放行——advisory,宁可退回旧竞态也不卡死命令。进程退出兜底释放。
-let writeLock: { release: () => void } | null = null;
-if (needsWriteLock(cmd, args)) {
-  const { acquireLock } = await import("./lib/file-lock.js");
-  writeLock = await acquireLock(statePath(".manager-write.lock"));
-  if (!writeLock) console.error("⚠ 写锁 20s 未拿到,降级继续(并发写命令可能竞态)");
-  else process.on("exit", () => writeLock?.release());
-  // 写 principals 的命令另持 principals 锁，与 bridge 的设备凭据写（updatePrincipals）互斥
-  const pLock = PRINCIPALS_WRITE_COMMANDS.has(cmd) ? await acquireLock((await import("./lib/principals.js")).principalsLockPath()) : null;
-  if (pLock) process.on("exit", () => pLock.release());
-}
+const writeLock = await takeWriteLocks(cmd, args); // 命令级写锁 + 调度服务租约闸（manager/write-lock.ts）
 
 try {
 switch (cmd) {

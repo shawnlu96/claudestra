@@ -9,7 +9,7 @@ import { readFileSync } from "node:fs";
 import { STATE_DIR } from "../lib/paths.js";
 import { writeJsonAtomic } from "../lib/state-file.js";
 import { SIG_HEADERS, verifySigned } from "../lib/instance-key.js";
-import { judgeSignature, type PinnedPeerKey } from "../lib/peer-keys.js";
+import { judgeSignature, newlyPinned, type PinnedPeerKey } from "../lib/peer-keys.js";
 import { readPeers } from "../lib/peers.js";
 import { LogThrottle } from "../lib/log-throttle.js";
 import { currentPin, inviteTokenVerdict, peerSigVerdict, recordPeerFp, ReplayCache, type PeerOnce, type PeerSigVerdict, type ReplayVerdict } from "../lib/peer-trust.js";
@@ -101,12 +101,21 @@ function rejected(peer: string, v: Extract<PeerSigVerdict, { allow: false }>, ch
   return v;
 }
 
+type PinListener = (peer: string, pin: { fingerprint: string; first: boolean }) => void;
+const pinListeners: PinListener[] = [];
+/** 刚钉住一把钥匙时回调（lend 记台账事件）；监听者自己兜错，拖不住、也改不了这次放行 */
+export function onPeerKeyPinned(fn: PinListener): void {
+  pinListeners.push(fn);
+}
+
 /** 钉住的钥匙变了立刻写；其余（结果没变的 ok、老 peer 的 unsigned）等定时器一分钟最多补写一次。写失败不影响这次判定 */
 async function persist(peer: string, next: PinnedPeerKey): Promise<void> {
   const prev = loaded().get(peer);
   loaded().set(peer, next);
-  if (prev?.publicKey !== next.publicKey && next.lastCheck?.result === "ok") return flush(peer);
-  scheduleFlush(peer);
+  const pinned = newlyPinned(prev, next);
+  if (!pinned) return scheduleFlush(peer);
+  for (const fn of pinListeners) fn(peer, pinned);
+  return flush(peer);
 }
 
 let flushTimer: ReturnType<typeof setTimeout> | null = null;

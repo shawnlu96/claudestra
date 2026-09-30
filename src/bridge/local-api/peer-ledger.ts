@@ -34,5 +34,7 @@ export async function handlePeerLedgerApi(req: Request, path: string, principal:
   const env = { ...ENV_WITH_BUN, DISCORD_CHANNEL_ID: "" };
   const r = await runManagerProcess(["ledger", "peer-write", "--", peer, id, JSON.stringify(body)], { bunPath: BUN_PATH, managerPath: MANAGER_PATH, env, timeoutMs: 30_000 });
   if (r?.ok) return apiJson(200, r);
-  return apiJson(STATUS[r?.code] ?? 500, { ok: false, code: r?.code ?? "internal", error: r?.error ?? "ledger write failed", ...(r?.current ? { current: r.current } : {}) });
+  // lend_managed（T93）：本轮审查归出借单管，对方要看得出不是权限问题而是走错了入口
+  const code = r?.current?.lend === "lend_managed" ? "lend_managed" : r?.code;
+  return apiJson(STATUS[r?.code] ?? 500, { ok: false, code: code ?? "internal", error: r?.error ?? "ledger write failed", ...(r?.current ? { current: r.current } : {}) });
 }

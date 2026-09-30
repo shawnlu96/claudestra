@@ -17,7 +17,9 @@ import { mergeExternal } from "./scheduler-merge-external.js";
 import { runBounded } from "./run-bounded.js";
 import type { MergeExternal } from "./scheduler-merge-driver.js";
 import { schedulerObserveTick } from "./scheduler-observe-tick.js";
-import { mergeTick, schedulerManager } from "./scheduler-service.js";
+import { mergeTick, schedulerManagerWith } from "./scheduler-service.js";
+import type { LeaseHold, SchedulerLease } from "./scheduler-lease-env.js";
+import { passPace } from "./scheduler-yield.js";
 import type { WorkerSession } from "./worker-session.js";
 
 type Manager = (...args: string[]) => Promise<Record<string, unknown>>;
@@ -29,10 +31,15 @@ export interface PassOpts {
   manager?: Manager;
   external?: (project: SchedulerConfig["projects"][string]) => MergeExternal;
   autoDeps?: (active: Active) => AutoTickDeps;
-  /** Tests point this at a private lock / update marker. */
-  maintenance?: { path?: string; marker?: string };
-  /** The lend step (lend-deps.ts lendStep), given only while lend.json is on or journal orders are still running. */
-  lend?: (active: Active) => Promise<{ failed: { orderId: string; error: string }[] }>;
+  /** Tests point this at a private lock / update marker / update request. */
+  maintenance?: { path?: string; marker?: string; request?: string };
+  /** Where each loop stopped last pass (kept by the daemon across passes) and this pass's time budget (lib/scheduler-yield.ts). */
+  cursor?: Record<string, string | undefined>;
+  budgetMs?: number;
+  /** The daemon's singleton lease (scheduler.pid); with the maintenance lease it goes to every manager / ledger child. */
+  singleton?: LeaseHold;
+  /** The lend step (lend-deps.ts lendStep), given only while lend.json is on or journal orders are still running; its children get the same leases. */
+  lend?: (active: Active, lease: SchedulerLease | undefined) => Promise<{ failed: { orderId: string; error: string }[] }>;
 }
 
 export interface PassResult { ran: boolean; failed: { taskId: string; error: string }[] }
@@ -41,6 +48,16 @@ export interface PassResult { ran: boolean; failed: { taskId: string; error: str
 const guard = <A extends unknown[], R>(active: Active, fn: (...a: A) => Promise<R>) => async (...a: A): Promise<R> => {
   active();
   try { return await fn(...a); } finally { active(); }
+};
+
+/**
+ * A child that found the lease gone answers `code: "lease-lost"` (lib/scheduler-lease-env.ts). That is the service stopping,
+ * not a card failing: it ends the pass as SchedulerStopped, so no card is counted failed, handed to PM or reported.
+ */
+const leaseAware = (m: Manager): Manager => async (...args) => {
+  const r = await m(...args);
+  if (r.code === "lease-lost") throw new SchedulerStopped(`manager child: ${String(r.error ?? "lease lost")}`);
+  return r;
 };
 
 function guardWorker(w: WorkerSession, active: Active): WorkerSession {
@@ -53,7 +70,7 @@ function guardWorker(w: WorkerSession, active: Active): WorkerSession {
 
 function guardAutoDeps(d: AutoTickDeps, active: Active): AutoTickDeps {
   return {
-    manager: guard(active, d.manager), ensure: guard(active, d.ensure), pinReview: guard(active, d.pinReview),
+    manager: guard(active, leaseAware(d.manager)), ensure: guard(active, d.ensure), pinReview: guard(active, d.pinReview),
     reviewDirty: guard(active, d.reviewDirty), notifyPm: guard(active, d.notifyPm), now: d.now,
     worker: (ref) => { active(); const w = d.worker(ref); return "manual" in w ? w : guardWorker(w, active); },
   };
@@ -64,20 +81,24 @@ export async function schedulerPass(db: Database | null, config: SchedulerConfig
   const lease = await acquireMaintenance("scheduler", opts.maintenance);
   if (!lease) return { ran: false, failed: [] };
   const active: Active = () => { opts.assertOwner(); if (!lease.held()) throw new SchedulerStopped("scheduler lost maintenance lease"); };
-  const manager = guard(active, opts.manager ?? schedulerManager);
+  const held: SchedulerLease | undefined = opts.singleton && { singleton: opts.singleton, maintenance: { path: lease.path, token: lease.token } };
+  const manager = guard(active, leaseAware(opts.manager ?? schedulerManagerWith(held)));
+  // 卡与卡之间：update 在等或本轮超预算（且本阶段保底份额用完）就收手，下一轮从停下的下一张接着排（卡内已开始的一步不打断）
+  const pace = passPace(opts.cursor ?? {}, { budgetMs: opts.budgetMs, request: opts.maintenance?.request });
   const failed: PassResult["failed"] = [];
   try {
     if (config.enabled) {
       if (!db) throw new Error("scheduler enabled but ledger is unavailable");
       // every gh subprocess of the merge driver, reads included, is checked right before its spawn and after its exit
-      await mergeTick(db, config, manager, opts.external ?? ((p) => mergeExternal(p, guard(active, runBounded))), active);
+      await mergeTick(db, config, manager, opts.external ?? ((p) => mergeExternal(p, guard(active, runBounded))), active, pace.phase());
       // observe 卡只写观察事件，auto 卡每卡推一步；某张卡失败不挡其余卡，失败汇总给服务的去重日志
-      failed.push(...(await schedulerObserveTick(db, config.projects, manager)).failed);
+      failed.push(...(await schedulerObserveTick(db, config.projects, manager, pace.phase())).failed);
       if (config.autoDispatch === true) {
-        failed.push(...(await schedulerAutoTick(db, config.projects, guardAutoDeps((opts.autoDeps ?? ((a) => autoTickDeps(db, { active: a })))(active), active))).failed);
+        const deps = guardAutoDeps((opts.autoDeps ?? ((a) => autoTickDeps(db, { active: a, lease: held })))(active), active);
+        failed.push(...(await schedulerAutoTick(db, config.projects, deps, pace.phase())).failed);
       }
     }
-    if (opts.lend) failed.push(...(await opts.lend(active)).failed.map((f) => ({ taskId: `lend ${f.orderId}`, error: f.error })));
+    if (opts.lend) failed.push(...(await opts.lend(active, held)).failed.map((f) => ({ taskId: `lend ${f.orderId}`, error: f.error })));
     return { ran: true, failed };
   } finally { lease.release(); }
 }

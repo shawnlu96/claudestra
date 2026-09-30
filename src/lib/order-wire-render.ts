@@ -56,6 +56,9 @@ function blocks(title: string, rows: readonly string[], cap: number): string[] {
 const fold = (s: string): string => s.replace(/\p{Cf}+/gu, "").normalize("NFKC").replace(/\p{Cf}+/gu, "").replace(/\r\n?/g, "\n")
   .split("\n").map((l) => l.replace(/[\p{Cc}\u2028\u2029]+/gu, " ").replace(/\s+/g, " ")).join("\n");
 
+/** Text that came from a peer (a lent review's report and findings) is folded and masked the same way before this machine stores it. */
+export const sanitizeForeign = (s: string): string => redactForPeer(fold(s)).text;
+
 /**
  * Gate for both peer exits. The head field is the only value not scanned, and only because it must be a full SHA equal to
  * the ledger's head; every other field is scanned with no exemption, so the head value written anywhere else refuses too

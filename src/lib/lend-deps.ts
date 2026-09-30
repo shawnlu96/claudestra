@@ -25,15 +25,16 @@ import { SRC_DIR } from "./repo-root.js";
 import { runManagerProcess } from "./run-manager.js";
 import { BUN_NO_AUTOLOAD } from "./runtimes/clean-env.js";
 import { sendVia } from "./scheduler-auto-ports.js";
+import { encodeLease, SCHEDULER_LEASE_ENV, type SchedulerLease } from "./scheduler-lease-env.js";
 import { whileOwned } from "./scheduler-maintenance.js";
-import { schedulerManager } from "./scheduler-service.js";
+import { schedulerManagerWith } from "./scheduler-service.js";
 import { listAgentWindows, windowHasChildProcess, windowTarget } from "./tmux-helper.js";
 
 type Manager = (...args: string[]) => Promise<Record<string, unknown>>;
 
-/** 建 / 杀 agent 不用调度服务身份（那个身份只许跑台账的调度命令），同 scheduler-auto-deps 的 plainManager */
-const plainManager: Manager = (...args) =>
-  runManagerProcess(args, { bunPath: resolveBunPath(), managerPath: `${SRC_DIR}/manager.ts`, env: { ...process.env, DISCORD_CHANNEL_ID: "" }, timeoutMs: 180_000 });
+/** 建 / 杀 agent 不用调度服务身份（那个身份只许跑台账的调度命令），同 scheduler-auto-deps 的 plainManager：也带服务租约，服务停了排队中的建 / 杀什么都不做 */
+const plainManager = (lease: SchedulerLease | undefined): Manager => (...args) => runManagerProcess(args, { bunPath: resolveBunPath(), managerPath: `${SRC_DIR}/manager.ts`,
+  env: { ...process.env, DISCORD_CHANNEL_ID: "", [SCHEDULER_LEASE_ENV]: encodeLease(lease) }, timeoutMs: 180_000 });
 
 const LEND_PROJECT = "lend";
 
@@ -71,13 +72,13 @@ async function verifyReceipt(peer: string, r: { orderId: string; sha256: string;
   return verifyPurpose(rec.publicKey, "claudestra-lend-receipt-v1", [r.orderId, r.sha256, String(r.eventSeq), r.taskId], r.sig);
 }
 
-function lendDeps(journal: Database, ledger: LedgerReader, active: () => void): LoopDeps {
+function lendDeps(journal: Database, ledger: LedgerReader, active: () => void, lease: SchedulerLease | undefined): LoopDeps {
   const alive = (): boolean => {
     try { active(); return true; } catch { return false; /* 核不过 = 不能证明仍在持有：什么都不发 */ }
   };
   const owned = <T>(fn: () => Promise<T>) => whileOwned(active, fn);
-  const svc: Manager = (...a) => owned(() => schedulerManager(...a));
-  const plain: Manager = (...a) => owned(() => plainManager(...a));
+  const svc: Manager = (...a) => owned(() => schedulerManagerWith(lease)(...a));
+  const plain: Manager = (...a) => owned(() => plainManager(lease)(...a));
   const call: LendCall = async (peer, op, body) => {
     const r = await svc("lend", "call", peer, op, "--body", JSON.stringify(body));
     if (r.ok !== true) throw new Error(String(r.error ?? "manager lend call 失败"));
@@ -140,7 +141,7 @@ function lendDeps(journal: Database, ledger: LedgerReader, active: () => void): 
 }
 
 /** pass 里 lend 这一步：每轮开一次 journal，跑完关（journal 是 WAL，lend submit 可以同时写） */
-export const lendStep = (ledger: LedgerReader) => async (active: () => void) => {
+export const lendStep = (ledger: LedgerReader) => async (active: () => void, lease?: SchedulerLease) => {
   const journal = openLendJournal();
-  try { return await (await import("./lend-loop.js")).lendTick(lendDeps(journal, ledger, active)); } finally { journal.close(); }
+  try { return await (await import("./lend-loop.js")).lendTick(lendDeps(journal, ledger, active, lease)); } finally { journal.close(); }
 };

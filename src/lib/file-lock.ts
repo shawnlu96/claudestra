@@ -23,11 +23,15 @@ export interface LockHandle {
   release: () => void;
   /** 还是不是自己的锁(核对 token,是就顺手续租)。manager 的命令锁不查:它串行的是整条命令,中途失租也只能退回旧的低概率竞态 */
   held: () => boolean;
+  /** 这次持有的 token：交给子进程，让它在写入前用 lockOwnedBy 自己核（调度服务的租约，lib/scheduler-lease-env.ts） */
+  token: string;
 }
 
 const ownerOf = (dir: string): string | undefined => {
   try { return readFileSync(join(dir, OWNER_FILE), "utf8"); } catch { return undefined; /* 老版本建的空锁 / 刚建还没写 token */ }
 };
+/** 只读核对：path 上的锁此刻是不是 token 这次持有（不续租，子进程核父进程的租约用） */
+export const lockOwnedBy = (path: string, token: string): boolean => ownerOf(path) === token;
 const isStale = (dir: string, staleMs: number): boolean => {
   try { return Date.now() - statSync(dir).mtimeMs > staleMs; } catch { return false; /* 刚被释放 / 挪走:不算过期,下一轮再看 */ }
 };
@@ -90,5 +94,5 @@ export async function acquireLock(
     if (ownerOf(lockPath) !== token) return void console.warn(`⚠️ 锁 ${lockPath} 已不是自己的(被当过期回收过),不去删别人的`);
     rmSync(lockPath, { recursive: true, force: true });
   };
-  return { release, held: renew };
+  return { release, held: renew, token };
 }

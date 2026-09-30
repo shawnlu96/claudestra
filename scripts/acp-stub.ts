@@ -6,6 +6,7 @@
  * - 注入：正文带 [stub:slow] = 慢回合（等 session/cancel），[stub:pause] = 暂停 1.5 秒供忙时插话验收，[stub:quota] = 撞额度（声明了 AIR 给 sessionFailure，没声明给
  *   legacy 的 usageLimitExceeded 错误），[stub:perm] = 跑命令前向宿主要权限（session/request_permission，答案写进回复），
  *   [stub:send:<目标>] = 回复后再调 send_to_agent 发给目标（沙箱 lab 的跨实例实测：<agent>@<peer>），[stub:whoami] = 先调 whoami、结果写进回复（T85）；
+ *   [stub:call:<工具>:<base64url 的 JSON 参数>] = 先调这个 MCP 工具、结果写进回复（T96 派单工具实测，可写多个，按顺序调）；
  *   环境变量 STUB_AUTH_REQUIRED=1 = 没登录（接线程时回 -32000）。
  * 沙箱里 acp 固定起它（lib/acp/stub.ts，不用也不认 CLAUDESTRA_ACP_AGENT）；沙箱外单测 / 排查可用 CLAUDESTRA_ACP_AGENT='["bun","<repo>/scripts/acp-stub.ts"]'。
  */
@@ -115,7 +116,11 @@ async function turn(text: string): Promise<Rec> {
     const model = config[0].currentValue;
     const who = text.includes("[stub:whoami]") ? `（whoami ${JSON.stringify(await callMcp("whoami", {}))}）` : "";
     const lend = lendSubmit(text);
-    const extra = `${perm}${who}${lend}${running.steered.length ? `（途中插话 ${running.steered.length} 条）` : ""}`;
+    let calls = "";
+    for (const [, tool, arg] of text.matchAll(/\[stub:call:([\w-]+):([\w-]*)\]/g)) {
+      calls += `（${tool} ${JSON.stringify(await callMcp(tool, arg ? JSON.parse(Buffer.from(arg, "base64url").toString()) : {}))}）`;
+    }
+    const extra = `${perm}${who}${lend}${calls}${running.steered.length ? `（途中插话 ${running.steered.length} 条）` : ""}`;
     const reply = `stub 回复（${model} / ${config[1].currentValue}）${extra}：${text.replace(/<[^>]+>/g, "").trim().slice(0, 80)}`;
     if (chatId && !text.includes("[stub:noreply]")) await callMcp("reply", { chat_id: chatId, text: reply });
     const sendTo = /\[stub:send:([^\]\s]+)\]/.exec(text)?.[1];

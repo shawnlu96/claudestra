@@ -28,6 +28,7 @@ const PROXIED_TYPES = new Set([
   "fleet_state",
   "fleet_run",
   "whoami",
+  "order_tool",
 ]);
 
 interface Conn {

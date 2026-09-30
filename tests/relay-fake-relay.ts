@@ -13,6 +13,8 @@ export interface FakeRelayOptions {
   rejectAuthWith?: string;
   /** 不回 pong（测心跳判死） */
   noPong?: boolean;
+  /** pong 晚这么久才回（模拟 ping 排在大段上行数据后面） */
+  pongDelayMs?: number;
   /** contacts 帧的应答 */
   peersFor?: (fp: string, fps: string[]) => PeerRecord[];
   /** welcome 里的 slug 覆盖（模拟中继改名） */
@@ -97,7 +99,11 @@ export function startFakeRelay(opts: FakeRelayOptions = {}): FakeRelay {
         const fp = ws.data.fp;
         if (!fp) return;
         received.push({ fp, frame: f });
-        if (f.t === "ping") return opts.noPong ? undefined : send(ws, { t: "pong", ts: f.ts });
+        if (f.t === "ping") {
+          if (opts.noPong) return;
+          if (opts.pongDelayMs) return void setTimeout(() => send(ws, { t: "pong", ts: f.ts }), opts.pongDelayMs);
+          return send(ws, { t: "pong", ts: f.ts });
+        }
         if (f.t === "push") {
           const ack = opts.pushAck ? opts.pushAck(f) : { t: "push-ack", id: f.id, ok: true, status: 201 };
           return ack ? send(ws, ack) : undefined;

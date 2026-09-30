@@ -41,6 +41,16 @@ describe("T94 pass 的 lend 这一步", () => {
     expect(out).toEqual({ ran: true, failed: [{ taskId: "lend o1", error: "坏了" }] });
   });
 
+  test("lend 这一步拿到服务的两份租约（它起的 ledger / manager 子进程带着它们，没有就一律被拒）", async () => {
+    const r = root();
+    let got: unknown;
+    const singleton = { path: join(r, "scheduler.pid"), token: "tok-s" };
+    await schedulerPass(null, OFF, { assertOwner: () => {}, singleton, maintenance: { path: join(r, "m.lock"), marker: join(r, "u") },
+      lend: async (_a, lease) => { got = lease; return { failed: [] }; } });
+    expect(got).toMatchObject({ singleton, maintenance: { path: join(r, "m.lock") } });
+    expect((got as { maintenance: { token: string } }).maintenance.token).toBeTruthy();
+  });
+
   test("update 持着维护租约：整轮跳过，lend 也不跑", async () => {
     const r = root();
     const update = await acquireLock(join(r, "m.lock"), 0);
