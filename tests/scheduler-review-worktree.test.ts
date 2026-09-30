@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
 import { getTask } from "../src/lib/ledger-store.js";
+import { reviewWorktreeChecks } from "../src/lib/doctor-review-worktrees.js";
 import { autoTickDeps } from "../src/lib/scheduler-auto-deps.js";
 import { git, openReviewWorktree, pinReviewWorktree } from "../src/lib/scheduler-review-worktree.js";
 import type { SessionRef } from "../src/lib/worker-session.js";
@@ -75,5 +76,14 @@ describe("T68f reviewer checkout: its own detached worktree, pinned to the head 
       expect(await d.pinReview(task, ref, r.h2)).toEqual({ dir: r.checkout });
       expect((await git(["-C", r.checkout, "rev-parse", "HEAD"])).out).toBe(r.h2);
     } finally { f.close(); r.close(); }
+  });
+
+  test("doctor counts reviewer checkouts and flags the ones whose reviewer is gone", () => {
+    expect(reviewWorktreeChecks(["other"], new Set(), "/w")).toEqual([]);
+    expect(reviewWorktreeChecks(["rv-t1"], new Set(["agent-rv-t1"]), "/w")).toEqual([
+      { group: "调度引擎", name: "审查 worktree", status: "ok", detail: "1 个审查 worktree，审查员都还在" }]);
+    const [c] = reviewWorktreeChecks(["rv-t1", "rv-t2"], new Set(["agent-rv-t1"]), "/w");
+    expect(c).toMatchObject({ status: "warn", detail: "2 个审查 worktree，其中 1 个的审查员已不在：rv-t2" });
+    expect(c.fix).toContain("git -C /w/rv-t2 worktree remove /w/rv-t2");
   });
 });
