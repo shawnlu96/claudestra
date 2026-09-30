@@ -1,8 +1,9 @@
 /**
  * Fairness between `update` and the scheduler's passes over the one maintenance lease (T68f r4 ④). An update that finds
  * the lease held leaves a request file and keeps it fresh while it waits; the scheduler then starts no new pass, and a
- * running pass gives the lease up before its next card. A pass also stops starting cards once its time budget is spent,
- * and the next pass resumes after the last card it handled, so a cut-off never starves the cards at the end of the list.
+ * running pass gives the lease up before its next card. A pass also stops starting cards once its time budget is spent
+ * (each phase keeps a floor, see passPace), and the next pass resumes after the last card it handled, so a cut-off never
+ * starves the cards at the end of a list nor a whole later phase.
  * A card step already started is never interrupted. Tests: tests/scheduler-yield.test.ts.
  */
 import type { Database } from "bun:sqlite";
@@ -29,15 +30,30 @@ export function maintenanceRequested(path = MAINTENANCE_REQUEST, now = Date.now(
 
 export const clearMaintenanceRequest = (path = MAINTENANCE_REQUEST): void => rmSync(path, { force: true });
 
-/** Per-pass pacing handed to the merge / observe / auto loops; `cursor` survives across passes (one per loop). */
+/** Per-phase pacing handed to the merge / observe / auto loops; `cursor` survives across passes (one per loop). */
 export interface TickPace {
   yieldNow(): boolean;
   cursor: Record<string, string | undefined>;
 }
 
-export function passPace(cursor: Record<string, string | undefined>, opts: { budgetMs?: number; request?: string; now?: () => number } = {}): TickPace {
-  const now = opts.now ?? Date.now, deadline = now() + (opts.budgetMs ?? PASS_BUDGET_MS);
-  return { cursor, yieldNow: () => now() >= deadline || maintenanceRequested(opts.request, now()) };
+/** Phases of one pass (merge, observe, auto): each is guaranteed this share of the budget from its own start. */
+const PHASES = 3;
+
+/**
+ * One pass's pacing. A phase stops starting cards once the pass budget is spent *and* its own floor (budget / PHASES from
+ * the phase's start) has run out, or at once when an update is waiting. The floor is what keeps a later phase from being
+ * starved: with one shared deadline a busy merge / observe phase spent it every pass and auto never ran a single card.
+ * So a phase that has work always starts at least one card per pass, and its cursor walks every card in finite passes.
+ * Cost: a pass can run up to budget + 2 floors (plus the card in hand), 100s with the 60s default.
+ */
+export function passPace(cursor: Record<string, string | undefined>, opts: { budgetMs?: number; request?: string; now?: () => number } = {}): { phase(): TickPace } {
+  const now = opts.now ?? Date.now, budget = opts.budgetMs ?? PASS_BUDGET_MS, deadline = now() + budget;
+  return {
+    phase: () => {
+      const floor = now() + budget / PHASES;
+      return { cursor, yieldNow: () => (now() >= deadline && now() >= floor) || maintenanceRequested(opts.request, now()) };
+    },
+  };
 }
 
 /** Sorted by key, starting at the first key after `after` and wrapping round; a card that vanished meanwhile skips nothing. */

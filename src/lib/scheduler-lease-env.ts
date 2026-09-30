@@ -2,7 +2,8 @@
  * The scheduler service's lease, carried into the manager / ledger subprocesses it spawns. The parent only knows it is
  * still the owner before the spawn and after the exit; the child may wait for the manager write lock, read registry and
  * projects, and only then write. So the child takes the lease identity (lock path + token of scheduler.pid and of the
- * maintenance lease) and re-checks it itself, synchronously, right before each write (`assertSchedulerLease`).
+ * maintenance lease) and re-checks it itself, synchronously, right before each effect (`assertSchedulerLease`): file writes,
+ * every tmux spawn (lib/tmux-helper.ts), every program-input record and every bridge frame (lib/bridge-client.ts).
  * A child started as the service (CLAUDESTRA_SCHEDULER_SERVICE=1) without a readable lease fails closed. Ordinary CLI runs
  * carry no lease and are unchanged. Tests: tests/scheduler-lease-env.test.ts, tests/scheduler-child-lease.test.ts.
  */
@@ -12,17 +13,24 @@ import { writeJsonAtomic, writeJsonAtomicSync } from "./state-file.js";
 export const SCHEDULER_LEASE_ENV = "CLAUDESTRA_SCHEDULER_LEASE";
 
 export interface LeaseHold { path: string; token: string }
+/** Both leases, named: a payload missing either (or naming one lock twice) is not a lease and fails closed. */
+export interface SchedulerLease { singleton: LeaseHold; maintenance: LeaseHold }
 
 export class SchedulerLeaseLost extends Error {}
 
-export const encodeLease = (holds: LeaseHold[]): string => JSON.stringify(holds);
+/** No lease → an empty value, which a child reads as "must be leased, is not" and refuses every effect. */
+export const encodeLease = (lease: SchedulerLease | undefined): string => (lease ? JSON.stringify({ v: 1, ...lease }) : "");
+
+const holdOk = (h: unknown): h is LeaseHold => {
+  const x = h as Partial<LeaseHold> | null;
+  return !!x && typeof x.path === "string" && !!x.path && typeof x.token === "string" && !!x.token;
+};
 
 function decode(raw: string): LeaseHold[] | null {
   try {
-    const v = JSON.parse(raw) as unknown;
-    if (!Array.isArray(v) || v.length === 0) return null;
-    const ok = v.every((h) => h && typeof h.path === "string" && h.path && typeof h.token === "string" && h.token);
-    return ok ? (v as LeaseHold[]) : null;
+    const v = JSON.parse(raw) as { v?: unknown; singleton?: unknown; maintenance?: unknown } | null;
+    if (!v || v.v !== 1 || !holdOk(v.singleton) || !holdOk(v.maintenance) || v.singleton.path === v.maintenance.path) return null;
+    return [v.singleton, v.maintenance];
   } catch { return null; /* 坏 env 当没租约：调度身份下随后 fail closed */ }
 }
 

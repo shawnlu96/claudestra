@@ -14,6 +14,7 @@ import { createTask } from "../src/lib/ledger-write.js";
 import { acquireMaintenance } from "../src/lib/scheduler-maintenance.js";
 import { schedulerPass } from "../src/lib/scheduler-pass.js";
 import { maintenanceRequested, passPace, REQUEST_FRESH_MS, rotateAfter } from "../src/lib/scheduler-yield.js";
+import { autoFixture } from "./scheduler-auto-helpers.js";
 
 const roots: string[] = [];
 afterEach(() => { for (const r of roots.splice(0)) rmSync(r, { recursive: true, force: true }); });
@@ -46,10 +47,18 @@ describe("maintenance fairness and the pass budget", () => {
   test("the pace yields once the budget is spent or an update request is fresh, not for a stale one", () => {
     const w = world(0);
     let t = 1_000_000;
-    const pace = passPace({}, { budgetMs: 100, request: w.maintenance.request, now: () => t });
-    expect(pace.yieldNow()).toBe(false);
-    t += 100;
-    expect(pace.yieldNow()).toBe(true);
+    const pace = passPace({}, { budgetMs: 90, request: w.maintenance.request, now: () => t });
+    const first = pace.phase();
+    expect(first.yieldNow()).toBe(false);
+    t += 90;
+    expect(first.yieldNow()).toBe(true);
+    // a later phase still gets its floor (budget / 3) after the pass budget is gone, then yields
+    const late = pace.phase();
+    expect(late.yieldNow()).toBe(false);
+    t += 29;
+    expect(late.yieldNow()).toBe(false);
+    t += 1;
+    expect(late.yieldNow()).toBe(true);
     writeFileSync(w.maintenance.request, "1");
     expect(maintenanceRequested(w.maintenance.request)).toBe(true);
     const old = new Date(Date.now() - REQUEST_FRESH_MS - 1000);
@@ -111,5 +120,26 @@ describe("maintenance fairness and the pass budget", () => {
     await schedulerPass(w.db, config, { assertOwner: () => {}, manager, maintenance: w.maintenance, cursor, budgetMs: 60_000 });
     expect(seen.slice(first, 6)).toEqual(["T00", "T01", "T02", "T03", "T04", "T05"].slice(first));
     closeLedger(w.ledger);
+  });
+
+  test("observe cards that spend the whole budget every pass do not starve auto: auto still drives its card (r1 P1-3)", async () => {
+    const f = autoFixture();
+    try {
+      createTask(f.db, f.at("owner"), { project: "p", id: "O1", title: "O1", kind: "code" });
+      setWorkflow(f.db, f.at("owner"), { taskId: "O1", taskRev: 1, template: "code", templateVersion: 2, mode: "observe", authorFamily: "claude", fallback: "人工" });
+      const calls: string[] = [];
+      const manager = async (...args: string[]) => { calls.push(`${args[1]} ${args[2]}`); await Bun.sleep(40); return { ok: true, duplicate: true }; };
+      const cursor: Record<string, string | undefined> = {};
+      const maintenance = { path: join(f.dir, "m.lock"), marker: join(f.dir, "u.marker"), request: join(f.dir, "m.req") };
+      const cfg = { ...config, autoDispatch: true };
+      for (let i = 0; i < 3; i++) {
+        const r = await schedulerPass(f.db, cfg, { assertOwner: () => {}, manager, maintenance, cursor, budgetMs: 25, autoDeps: () => f.tickDeps });
+        expect(r).toEqual({ ran: true, failed: [] });
+      }
+      expect(calls).toEqual(["scheduler-observe O1", "scheduler-observe O1", "scheduler-observe O1"]);
+      expect(cursor.auto).toBe("p/T1");
+      expect(f.ensured.length).toBeGreaterThan(0); // auto moved its card: author session first, then the restate order
+      expect(f.intents().length).toBeGreaterThan(0);
+    } finally { f.close(); }
   });
 });

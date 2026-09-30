@@ -8,19 +8,19 @@ import { mergeExternal } from "./scheduler-merge-external.js";
 import { driveMerge, type MergeExternal } from "./scheduler-merge-driver.js";
 import { getMergeRun, mergeRunDrift, type MergeRun, type MergePhase } from "./scheduler-merge.js";
 import { acquireMaintenance, SchedulerStopped } from "./scheduler-maintenance.js";
-import { encodeLease, SCHEDULER_LEASE_ENV, type LeaseHold } from "./scheduler-lease-env.js";
+import { encodeLease, SCHEDULER_LEASE_ENV, type SchedulerLease } from "./scheduler-lease-env.js";
 import type { TickPace } from "./scheduler-yield.js";
 
 type Manager = (...args: string[]) => Promise<Record<string, unknown>>;
 
 /**
- * The ledger CLI under the scheduler identity. `holds` are the service's leases (singleton + maintenance): the child
+ * The ledger CLI under the scheduler identity. `lease` is the service's (singleton + maintenance): the child
  * re-checks them itself right before it writes, so a stop or a lost lease while it queued on the write lock writes nothing.
  * Without a lease the child refuses every write (lib/scheduler-lease-env.ts).
  */
-export const schedulerManagerWith = (holds: LeaseHold[]): Manager => (...args) => runManagerProcess(args, {
+export const schedulerManagerWith = (lease: SchedulerLease | undefined): Manager => (...args) => runManagerProcess(args, {
   bunPath: resolveBunPath(), managerPath: `${SRC_DIR}/manager.ts`,
-  env: { ...process.env, DISCORD_CHANNEL_ID: "", CLAUDESTRA_SCHEDULER_SERVICE: "1", [SCHEDULER_LEASE_ENV]: encodeLease(holds) }, timeoutMs: 120_000,
+  env: { ...process.env, DISCORD_CHANNEL_ID: "", CLAUDESTRA_SCHEDULER_SERVICE: "1", [SCHEDULER_LEASE_ENV]: encodeLease(lease) }, timeoutMs: 120_000,
 });
 
 const requireOk = (result: Record<string, unknown>, what: string): Record<string, unknown> => {
@@ -28,16 +28,18 @@ const requireOk = (result: Record<string, unknown>, what: string): Record<string
   return result;
 };
 
-/** One project is serial; journal rows plus project merge lock survive a daemon restart. */
-export async function schedulerMergeTick(db: Database, config: SchedulerConfig, manager?: Manager,
+/**
+ * One project is serial; journal rows plus project merge lock survive a daemon restart. The caller supplies the manager:
+ * this entry holds only the maintenance lease, and a service child needs both (the daemon goes through schedulerPass).
+ */
+export async function schedulerMergeTick(db: Database, config: SchedulerConfig, manager: Manager,
   externalFactory: (project: SchedulerConfig["projects"][string]) => MergeExternal = mergeExternal,
   assertOwner: () => void = () => {}): Promise<number> {
   if (!config.enabled) return 0;
   const lock = await acquireMaintenance("scheduler");
   if (!lock) return 0;
   const assertActive = () => { assertOwner(); if (!lock.held()) throw new SchedulerStopped("scheduler lost maintenance lease"); };
-  const run = manager ?? schedulerManagerWith([{ path: lock.path, token: lock.token }]);
-  const call = async (...args: string[]) => { assertActive(); const r = await run(...args); assertActive(); return r; };
+  const call = async (...args: string[]) => { assertActive(); const r = await manager(...args); assertActive(); return r; };
   try { return await mergeTick(db, config, call, externalFactory, assertActive); }
   finally { lock.release(); }
 }

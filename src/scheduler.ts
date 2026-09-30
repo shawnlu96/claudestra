@@ -31,7 +31,7 @@ export async function runScheduler(signal: AbortSignal, wait: (ms: number) => Pr
           const db = reader.get();
           if (!db) throw new Error("scheduler enabled but ledger is unavailable");
           for (const project of Object.keys(config.projects)) schedulerProjectView(db, project);
-          const { failed } = await schedulerPass(db, config, { holds: [{ path: lockPath, token: lock.token }], cursor, assertOwner: () => {
+          const { failed } = await schedulerPass(db, config, { singleton: { path: lockPath, token: lock.token }, cursor, assertOwner: () => {
             if (signal.aborted || !lock.held()) throw new SchedulerStopped("scheduler stopped or lost singleton lease");
           } });
           if (failed.length) throw new Error(`tick failed: ${failed.map((f) => `${f.taskId} ${f.error}`).join("; ").slice(0, 500)}`);

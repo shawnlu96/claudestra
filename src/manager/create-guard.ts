@@ -4,7 +4,6 @@
  * `manager repair --apply` 据它关窗口（只按记下的 id）、删频道、清 bridge 欠账，再把同名旧条目（prev）
  * 原样放回。频道没删成（bridge 不在）就不动占位：放回 prev 会让那个频道从此无人认领。
  */
-import { assertSchedulerLease } from "../lib/scheduler-lease-env.js";
 import { releaseNameForFreshAgent } from "../lib/agent-settings.js";
 import { isPendingLive, newPending, type PendingOp } from "../lib/pending-ops.js";
 import { channelFailureText } from "./ops-deps.js";
@@ -147,7 +146,6 @@ export function gateOps<T extends object>(ops: T, run: CreateRun): T {
       if (typeof v !== "function") return v;
       return (...args: unknown[]) => {
         if (run.aborting) throw new CreateAborted();
-        assertSchedulerLease(); // 调度服务建的审查 session：父服务失租 / 已停后不再往窗口发任何键
         return (v as (...a: unknown[]) => unknown).apply(target, args);
       };
     },

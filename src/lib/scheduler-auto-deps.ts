@@ -21,7 +21,7 @@ import { acpPort, messagePort, type RegistryRow, type StillActive } from "./sche
 import { runtimeFamily } from "./scheduler-auto-review.js";
 import { SchedulerStopped, whileOwned } from "./scheduler-maintenance.js";
 import { schedulerManagerWith } from "./scheduler-service.js";
-import { encodeLease, SCHEDULER_LEASE_ENV, type LeaseHold } from "./scheduler-lease-env.js";
+import { encodeLease, SCHEDULER_LEASE_ENV, type SchedulerLease } from "./scheduler-lease-env.js";
 import { git as realGit, gitDirtySync, openReviewWorktree, pinReviewWorktree, type Git } from "./scheduler-review-worktree.js";
 import type { SessionRole } from "./scheduler-sessions.js";
 import { ledgerResult } from "./scheduler-work-order.js";
@@ -34,8 +34,8 @@ type Manager = (...args: string[]) => Promise<Record<string, unknown>>;
 
 // Agent creation runs without the scheduler identity (which is limited to ledger commands); ledger writes use the service's.
 // Both carry the service's lease, so a create still queued when the service stops or loses it builds nothing.
-const plainManager = (holds: LeaseHold[]): Manager => (...args) => runManagerProcess(args, { bunPath: resolveBunPath(), managerPath: `${SRC_DIR}/manager.ts`,
-  env: { ...process.env, DISCORD_CHANNEL_ID: "", [SCHEDULER_LEASE_ENV]: encodeLease(holds) }, timeoutMs: 180_000 });
+const plainManager = (lease: SchedulerLease | undefined): Manager => (...args) => runManagerProcess(args, { bunPath: resolveBunPath(), managerPath: `${SRC_DIR}/manager.ts`,
+  env: { ...process.env, DISCORD_CHANNEL_ID: "", [SCHEDULER_LEASE_ENV]: encodeLease(lease) }, timeoutMs: 180_000 });
 
 export const reviewerName = (taskId: string): string => `agent-rv-${taskId.toLowerCase()}`;
 
@@ -136,19 +136,19 @@ export interface AutoDepsOpts {
   active?: () => void;
   /** Tests only: the git underneath the liveness guard. */
   git?: Git;
-  /** The service's leases handed to every manager / ledger child (scheduler-lease-env.ts); none = those children refuse to write. */
-  holds?: LeaseHold[];
+  /** The service's leases handed to every manager / ledger child (scheduler-lease-env.ts); none = those children refuse to act. */
+  lease?: SchedulerLease;
 }
 
 export function autoTickDeps(db: Database, opts: AutoDepsOpts = {}): AutoTickDeps {
-  const { registryPath, worktreeRoot = statePath("worktrees"), active = () => {}, git: baseGit = realGit, holds = [] } = opts;
+  const { registryPath, worktreeRoot = statePath("worktrees"), active = () => {}, git: baseGit = realGit, lease } = opts;
   const registryRow: RegistryRow = (agent) => readRegistryAgentsSync(registryPath).find((a) => a.name === agent);
   const alive: StillActive = () => {
     try { active(); return true; } catch { return false; /* any failure of the liveness check means "not provably active": send nothing */ }
   };
-  const env: Env = { db, registryRow, worktreeRoot, active, alive, git: (args) => whileOwned(active, () => baseGit(args)), create: plainManager(holds) };
+  const env: Env = { db, registryRow, worktreeRoot, active, alive, git: (args) => whileOwned(active, () => baseGit(args)), create: plainManager(lease) };
   return {
-    manager: schedulerManagerWith(holds),
+    manager: schedulerManagerWith(lease),
     worker: (ref) => worker(env, ref),
     ensure: (task, role, family) => ensure(env, task, role, family),
     pinReview: (task, ref, head) => pinReview(env, task, ref, head),

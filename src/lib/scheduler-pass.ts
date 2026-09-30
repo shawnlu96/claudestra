@@ -16,7 +16,7 @@ import { runBounded } from "./run-bounded.js";
 import type { MergeExternal } from "./scheduler-merge-driver.js";
 import { schedulerObserveTick } from "./scheduler-observe-tick.js";
 import { mergeTick, schedulerManagerWith } from "./scheduler-service.js";
-import type { LeaseHold } from "./scheduler-lease-env.js";
+import type { LeaseHold, SchedulerLease } from "./scheduler-lease-env.js";
 import { passPace } from "./scheduler-yield.js";
 import type { WorkerSession } from "./worker-session.js";
 
@@ -35,7 +35,7 @@ export interface PassOpts {
   cursor?: Record<string, string | undefined>;
   budgetMs?: number;
   /** The daemon's singleton lease (scheduler.pid); with the maintenance lease it goes to every manager / ledger child. */
-  holds?: LeaseHold[];
+  singleton?: LeaseHold;
 }
 
 export interface PassResult { ran: boolean; failed: { taskId: string; error: string }[] }
@@ -77,18 +77,18 @@ export async function schedulerPass(db: Database, config: SchedulerConfig, opts:
   const lease = await acquireMaintenance("scheduler", opts.maintenance);
   if (!lease) return { ran: false, failed: [] };
   const active: Active = () => { opts.assertOwner(); if (!lease.held()) throw new SchedulerStopped("scheduler lost maintenance lease"); };
-  const holds = [...(opts.holds ?? []), { path: lease.path, token: lease.token }];
-  const manager = guard(active, leaseAware(opts.manager ?? schedulerManagerWith(holds)));
-  // 卡与卡之间：update 在等或本轮超预算就收手，下一轮从停下的下一张接着排（卡内已开始的一步不打断）
+  const held: SchedulerLease | undefined = opts.singleton && { singleton: opts.singleton, maintenance: { path: lease.path, token: lease.token } };
+  const manager = guard(active, leaseAware(opts.manager ?? schedulerManagerWith(held)));
+  // 卡与卡之间：update 在等或本轮超预算（且本阶段保底份额用完）就收手，下一轮从停下的下一张接着排（卡内已开始的一步不打断）
   const pace = passPace(opts.cursor ?? {}, { budgetMs: opts.budgetMs, request: opts.maintenance?.request });
   try {
     // every gh subprocess of the merge driver, reads included, is checked right before its spawn and after its exit
-    await mergeTick(db, config, manager, opts.external ?? ((p) => mergeExternal(p, guard(active, runBounded))), active, pace);
+    await mergeTick(db, config, manager, opts.external ?? ((p) => mergeExternal(p, guard(active, runBounded))), active, pace.phase());
     // observe 卡只写观察事件，auto 卡每卡推一步；某张卡失败不挡其余卡，失败汇总给服务的去重日志
-    const observed = await schedulerObserveTick(db, config.projects, manager, pace);
+    const observed = await schedulerObserveTick(db, config.projects, manager, pace.phase());
     if (config.autoDispatch !== true) return { ran: true, failed: observed.failed };
-    const deps = guardAutoDeps((opts.autoDeps ?? ((a) => autoTickDeps(db, { active: a, holds })))(active), active);
-    const auto = await schedulerAutoTick(db, config.projects, deps, pace);
+    const deps = guardAutoDeps((opts.autoDeps ?? ((a) => autoTickDeps(db, { active: a, lease: held })))(active), active);
+    const auto = await schedulerAutoTick(db, config.projects, deps, pace.phase());
     return { ran: true, failed: [...observed.failed, ...auto.failed] };
   } finally { lease.release(); }
 }
