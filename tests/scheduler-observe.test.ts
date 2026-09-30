@@ -37,7 +37,7 @@ function fixture() {
   };
   const review = (verdict: "pass" | "changes", head: string, findings: object[], move?: "fix" | "merge") =>
     recordReview(db, at("owner"), { taskId: "T1", reviewer: "agent-review", verdict, path: `reviews/T1-r${getTask(db, "T1")!.round}/report.md`,
-      p0: 0, p1: findings.filter((f) => (f as typeof P1).severity === "P1").length, p2: findings.filter((f) => (f as typeof P1).severity === "P2").length,
+      p0: 0, p1: findings.filter((f) => (f as { severity: string }).severity === "P1").length, p2: findings.filter((f) => (f as { severity: string }).severity === "P2").length,
       head, reviewerSessionId: "s-review", reviewerFamily: "codex", findings: findings as never, ...(move ? { move: { from: "review", to: move } } : {}) });
   const dispatch = (head: string) => appendEvent(db, at("owner"), { project: "p", target: "T1", kind: "dispatch",
     data: { reviewer: "adversarial", round: getTask(db, "T1")!.round, head } });

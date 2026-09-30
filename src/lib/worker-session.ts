@@ -47,7 +47,7 @@ export type SubmitReceipt =
 /** The part of a work order observe() needs to match a ledger result or a host failure to this exact intent. */
 export type OrderProbe = Pick<WorkOrder, "round" | "step" | "head" | "dedupKey">;
 
-export type WorkerFailure = { kind: "quota" | "auth" | "error"; message: string };
+type WorkerFailure = { kind: "quota" | "auth" | "error"; message: string };
 export type WorkerObservation =
   | { state: "running"; busy: boolean }
   | { state: "result"; outcome: "delivered" | "reviewed"; eventSeq: number }

@@ -42,7 +42,7 @@ function routeFor(d: PlannerDecision, opts: SnapshotOpts, peerExecutor: string |
   return selectWorkerRoute({ agent: reg.name, runtime: reg.runtime, transport: reg.transport, acpPending: reg.acpPending });
 }
 
-export function latestObservation(db: Database, taskId: string): LedgerEvent | null {
+function latestObservation(db: Database, taskId: string): LedgerEvent | null {
   const row = db.query(`SELECT * FROM events WHERE target = ? AND kind = 'scheduler' AND json_extract(data, '$.op') = 'observe'
     ORDER BY seq DESC LIMIT 1`).get(taskId);
   return row ? toEvent(row as Parameters<typeof toEvent>[0]) : null;

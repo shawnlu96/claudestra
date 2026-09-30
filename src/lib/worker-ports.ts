@@ -17,7 +17,7 @@ export interface MessagePort {
   interrupt(agent: string): Promise<ControlReceipt>;
 }
 
-export interface SessionPort {
+interface SessionPort {
   /** The ledger binding for this card and role, if one was already recorded (restart / replay reads this first). */
   bound(taskId: string, role: SessionRole): SessionRef | null;
   create(taskId: string, role: SessionRole, family: AuthorFamily, route: WorkerRouteKind): Promise<
@@ -26,7 +26,7 @@ export interface SessionPort {
 }
 
 /** A worker is finished only when the ledger holds its deliver / review event for this round and head. */
-export interface LedgerResultPort {
+interface LedgerResultPort {
   result(ref: SessionRef, order: OrderProbe): { outcome: "delivered" | "reviewed"; eventSeq: number } | null;
 }
 

@@ -26,7 +26,7 @@ const WORKER_WAITS = new Set(["in_flight", "intent_in_flight", "review_transitio
 const isObservation = (e: LedgerEvent): boolean => e.kind === "scheduler" && e.data.op === "observe";
 const moveOf = (e: LedgerEvent): string => `${String(e.data.from ?? "?")}→${String(e.data.to ?? "?")}`;
 
-export function describeEvent(e: LedgerEvent): string {
+function describeEvent(e: LedgerEvent): string {
   if (e.kind === "stage") return `推阶段 ${moveOf(e)}`;
   if (e.kind === "review") return `审查结论 ${String(e.data.verdict ?? "?")}（${String(e.data.reviewer ?? "?")}）`;
   if (e.kind === "dispatch") return `派审（${String(e.data.reviewer ?? "?")}）`;
@@ -35,7 +35,7 @@ export function describeEvent(e: LedgerEvent): string {
   return e.kind;
 }
 
-export function describeDecision(d: ObservedDecision): string {
+function describeDecision(d: ObservedDecision): string {
   if (d.kind === "wait") return `等待（${d.code}）`;
   if (d.kind === "escalate") return `停下升级（${d.code}）`;
   const to = d.recipient ? ` → ${d.recipient}` : "";

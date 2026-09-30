@@ -35,7 +35,11 @@ export function createAcpWorker(o: AdapterDeps & { port: AcpPort }): WorkerSessi
     },
     async observe(ref, order) {
       let state: AcpTurnState;
-      try { state = await o.port.turnState(ref.agent, ref.sessionId); } catch (e) { state = { live: "unknown" }; void e; /* unreadable host = unknown liveness; ledger facts still decide a finished result */ }
+      try {
+        state = await o.port.turnState(ref.agent, ref.sessionId);
+      } catch {
+        state = { live: "unknown" }; // an unreadable host only means unknown liveness; ledger facts still decide a finished result
+      }
       const seen = observeVia(o, ref, order, state.live);
       const failed = state.lastFailure;
       if (seen.state === "result" || !failed || state.live === "busy") return seen;

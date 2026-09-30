@@ -35,7 +35,11 @@ function messageWorker(o: MessageAdapterOpts, route: "channel" | "tmux", fallbac
     },
     async observe(ref, order) {
       let live: Awaited<ReturnType<MessagePort["status"]>>;
-      try { live = await o.port.status(ref.agent); } catch (e) { live = "unknown"; void e; /* status read failure = unknown liveness; the ledger result check below still runs */ }
+      try {
+        live = await o.port.status(ref.agent);
+      } catch {
+        live = "unknown"; // a failed status read only means unknown liveness; the ledger result check below still runs
+      }
       return observeVia(o, ref, order, live);
     },
     async cancel(ref) {
