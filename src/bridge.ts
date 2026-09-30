@@ -73,7 +73,7 @@ import { initPeerIngress, localProbeResponse, relayControlRoutes, requestContext
 import { handleForward, initForward, rememberInbound } from "./bridge/forward.js";
 import { initInbox, takeInbox, inboxOpts } from "./bridge/inbox.js";
 import { inboundEventData } from "./bridge/inbound-event.js";
-import { startArchiveSweeper } from "./bridge/archive-sweeper.js";
+import { startSweepers } from "./bridge/sweepers.js";
 // Web 远程终端（PTY attach → SSE；见 web-terminal.ts 头注释）
 import { handleTerminalApi, sweepStaleTerminalSessions } from "./bridge/web-terminal.js";
 import {
@@ -1200,7 +1200,7 @@ discord.once("ready", async () => {
   });
 
   // v2.9+ 归档每日兜底 — 退役归档之外，每 24h 对 active agent 补快照（幂等）
-  startArchiveSweeper();
+  startSweepers();
   recordMetric("bridge_start", { meta: { channels: clients.size } });
 
   // v2.13.1+ TUI 契约自检 — 见 probeTuiContract 的注释：CC 改一句底部文案不会报错，
@@ -3420,7 +3420,7 @@ if (WEB_ONLY) {
   // v2.8+ bg 活动追踪 — provisionThread 走 local adapter（落空），bg_task_* 事件照发
   startBgActivityWatcher({ sourceProvider: (cid) => lastMessageSource.lastHuman(cid) });
   // v2.9+ 归档每日兜底 — 纯文件系统操作，历史 API 依赖它
-  startArchiveSweeper();
+  startSweepers();
   // 链路哨兵：wedge watcher 只在 Discord ready 里起，web-only 以前完全没有「窗口活着但
   // channel-server 没连上」的探测——而它的 SSE link_down 正是给 web 用户的（D7-6）
   startLinkSentinel((cid) => clients.has(cid));
