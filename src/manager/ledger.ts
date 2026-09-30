@@ -32,6 +32,7 @@ import { PEER_CMDS } from "./ledger-peer.js";
 import { LEND_ASK_CMDS } from "./ledger-lend-ask-cmd.js";
 import { STEP_CMDS } from "./ledger-step-cmds.js";
 import { SCHEDULER_CMDS } from "./ledger-scheduler-cmds.js";
+import { SCHEDULER_DEPLOY_CMDS } from "./ledger-scheduler-deploy-cmds.js";
 import { SCHEDULER_OBSERVE_CMDS } from "./ledger-scheduler-observe-cmds.js";
 import { SCHEDULER_AUTO_CMDS } from "./ledger-scheduler-auto-cmds.js";
 import { VERDICT_CMDS } from "./ledger-verdict-cmds.js";
@@ -45,6 +46,7 @@ export const UNKNOWN_ACTOR = "unknown";
 const SCHEDULER_SERVICE_COMMANDS = new Set([
   "scheduler-plan", "scheduler-settle", "scheduler-session-bind", "scheduler-session-retire", "scheduler-merge-begin", "scheduler-merge-step",
   "scheduler-observe", "scheduler-fallback-manual", "scheduler-stage", "scheduler-ui-ask", "lend-ask", "lend-inform",
+  "scheduler-deploy-begin", "scheduler-deploy-step", "verify",
 ]);
 
 const COMMANDS: Record<string, CommandSpec> = {
@@ -63,6 +65,7 @@ const COMMANDS: Record<string, CommandSpec> = {
   ...LEND_CMDS,
   ...STEP_CMDS,
   ...SCHEDULER_CMDS,
+  ...SCHEDULER_DEPLOY_CMDS,
   ...SCHEDULER_OBSERVE_CMDS,
   ...SCHEDULER_AUTO_CMDS,
   ...VERDICT_CMDS,

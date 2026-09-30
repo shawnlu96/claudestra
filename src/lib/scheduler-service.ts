@@ -75,6 +75,8 @@ export async function mergeTick(db: Database, config: SchedulerConfig, manager: 
       if (drift) {
         requireOk(await manager("ledger", "scheduler-merge-step", intent.id, "--from", run.phase, "--to", "unknown",
           "--rev", String(run.rev), "--receipt", drift), "freeze drifted merge run");
+      } else if (run.phase === "merged" && policy.deploy) {
+        // lib/scheduler-deploy-tick.ts deploys it; the intent keeps the project merge slot until that deploy ends.
       } else if (run.phase === "merged") {
         // Settling frees the project merge slot; the task stays in `merge` until the PM deploys and moves it to live by hand.
         requireOk(await manager("ledger", "scheduler-settle", intent.id, "--from", "submitted", "--to", "done",
