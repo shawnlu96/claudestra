@@ -9,7 +9,7 @@
  *   - bridge 侧策略（打断键、是否抢占、忙闲来源）：`controlFor(runtime, transport)`
  *   - 这个运行时能走哪些 transport：`transportsOf(runtime)`
  */
-import { closeSync, openSync, readSync } from "node:fs";
+import { readFirstLineSync, readSidecarRuntime } from "../session-sidecar.js";
 import { claudeCodeAdapter } from "./claude-code.js";
 import { codexAdapter } from "./codex.js";
 import { codexAcpAdapter } from "./codex-acp.js";
@@ -98,27 +98,40 @@ export function transportsOf(runtime: string | undefined | null): Transport[] {
 const headSniffCache = new Map<string, string | undefined>();
 
 /**
+ * 首行在上限内读不完、或不是 JSON：认不出是谁家的。不能退成 Claude Code——CC 的行翻译会把 Codex / Pi 的记录全丢掉，
+ * CC 的来源解包还会把正文里的头当真。这个 id 不属于任何运行时：翻译照 CC 的默认走，但 cc-own-records 把它当非 CC，
+ * user 记录原文照登、不认来源（tests/codex-archive-read.test.ts）。
+ */
+export const UNTRUSTED_RUNTIME = "untrusted";
+
+/**
  * 路径 → runtime id。
  *
- * 先按根目录判（零 I/O）；**归档副本**的路径两头都不沾（它躺在
- * ~/.claude-orchestrator/archive/ 下），只能读首行让各家自己认。结果按路径缓存。
- * 认不出返回 undefined —— 调用方按 Claude Code 处理（历史行为）。
+ * 先按根目录判（零 I/O）；**归档副本**的路径两头都不沾（它躺在 ~/.claude-orchestrator/archive/ 下）：
+ * 先看归档时写下的 sidecar，老归档没有就读完整首行让各家自己认（lib/session-sidecar.ts）。
+ * 首行是合法 JSON、没人认领 → undefined（Claude Code，历史行为）；读不全 / 坏 JSON → UNTRUSTED_RUNTIME。
+ * 只缓存读到完整首行的结果：文件不存在、还没写完换行时不缓存，免得稍后落盘的归档被永久认错。
  */
 export function sourceIdForPath(path: string | undefined | null): string | undefined {
   if (!path) return undefined;
   for (const s of SOURCES) if (s.ownsPath(path)) return s.id === DEFAULT_RUNTIME ? undefined : s.id;
   if (headSniffCache.has(path)) return headSniffCache.get(path);
+  const side = readSidecarRuntime(path);
+  if (side && isKnownRuntime(side)) return side === DEFAULT_RUNTIME ? undefined : side;
+  const head = readFirstLineSync(path);
+  if (head.kind === "unreadable") return undefined;
+  if (head.kind === "too-long") {
+    headSniffCache.set(path, UNTRUSTED_RUNTIME);
+    return UNTRUSTED_RUNTIME;
+  }
   let hit: string | undefined;
   try {
-    const fd = openSync(path, "r");
-    const buf = Buffer.alloc(512);
-    let n = 0;
-    try { n = readSync(fd, buf, 0, 512, 0); } finally { closeSync(fd); }
-    const rec = JSON.parse(buf.toString("utf8", 0, n).split("\n")[0]);
-    hit = SOURCES.find((s) => s.sniffFirstLine?.(rec))?.id;
+    const rec = JSON.parse(head.text);
+    const id = SOURCES.find((s) => s.sniffFirstLine?.(rec))?.id;
+    hit = id === DEFAULT_RUNTIME ? undefined : id;
   } catch {
-    hit = undefined;
+    hit = UNTRUSTED_RUNTIME;
   }
-  headSniffCache.set(path, hit);
+  if (head.kind === "line") headSniffCache.set(path, hit);
   return hit;
 }

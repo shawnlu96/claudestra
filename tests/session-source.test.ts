@@ -8,6 +8,7 @@ import { tmpdir } from "os";
 import { join } from "path";
 import { runtimeForSessionPath } from "../src/lib/session-source.ts";
 import { piAgentDir } from "../src/lib/pi-session.ts";
+import { UNTRUSTED_RUNTIME } from "../src/lib/runtimes/index.ts";
 
 describe("runtimeForSessionPath", () => {
   test("Pi 会话根之下：按路径判，不读文件", () => {
@@ -34,12 +35,12 @@ describe("runtimeForSessionPath", () => {
     expect(runtimeForSessionPath(p)).toBeUndefined();
   });
 
-  test("不存在 / 空文件 / 坏 JSON ⇒ undefined，不抛", () => {
+  test("不存在 / 空文件 ⇒ undefined，不抛；坏 JSON ⇒ untrusted（不退成 Claude Code，T75）", () => {
     const dir = mkdtempSync(join(tmpdir(), "ss-"));
     expect(runtimeForSessionPath(join(dir, "nope.jsonl"))).toBeUndefined();
     const empty = join(dir, "empty.jsonl"); writeFileSync(empty, "");
     expect(runtimeForSessionPath(empty)).toBeUndefined();
     const bad = join(dir, "bad.jsonl"); writeFileSync(bad, "{not json\n");
-    expect(runtimeForSessionPath(bad)).toBeUndefined();
+    expect(runtimeForSessionPath(bad)).toBe(UNTRUSTED_RUNTIME);
   });
 });

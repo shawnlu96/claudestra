@@ -64,13 +64,13 @@ export function isCodexSessionPath(path: string | undefined | null, home?: strin
 }
 
 /**
- * 返回所有会话文件（新的在前）。
+ * 返回所有会话文件（新的在前）。accept 决定认哪些文件名：缺省不含 revert 段，归档整链定位另传（codex-rollout-pick.ts）。
  *
  * ⚠ 按 **dirent 是不是目录** 递归，不要数层数：布局是 `YYYY/MM/DD/文件` ——四层，
  * 第一版写成「深度 ≥3 就当文件」，于是 `DD` 这一层目录被当成文件名去匹配、一个
  * 会话都扫不出来（实测 0 条）。层数是会变的约定，dirent 不会。
  */
-export function listCodexSessionFiles(root: string = codexSessionsRoot()): string[] {
+export function listCodexSessionFiles(root: string = codexSessionsRoot(), accept = (name: string) => codexSessionIdFromFilename(name) !== null): string[] {
   const out: string[] = [];
   const walk = (dir: string, depth: number) => {
     if (depth > 6) return; // 防环/防意外深目录
@@ -79,7 +79,7 @@ export function listCodexSessionFiles(root: string = codexSessionsRoot()): strin
     for (const ent of ents as unknown as Array<{ name: string; isDirectory(): boolean }>) {
       const p = join(dir, ent.name);
       if (ent.isDirectory()) { walk(p, depth + 1); continue; }
-      if (codexSessionIdFromFilename(ent.name)) out.push(p);
+      if (accept(ent.name)) out.push(p);
     }
   };
   walk(root, 1);

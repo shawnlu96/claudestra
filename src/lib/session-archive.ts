@@ -18,9 +18,10 @@ import { existsSync, readdirSync, realpathSync } from "fs";
 import { mkdir, readdir } from "fs/promises";
 import { basename, dirname, join, resolve, sep } from "path";
 import { projectsSlug } from "./jsonl-cost.js";
-import { copyIfLarger } from "./archive-copy.js";
+import { copyIfLarger, isSourceUnusable, sweepStaleTmp } from "./archive-copy.js";
 import { archiveWorkflowDirs } from "./workflow-archive.js";
 import { pickCodexRolloutForArchive, type RolloutPick } from "./codex-rollout-pick.js";
+import { writeSessionSidecar } from "./session-sidecar.js";
 
 export const ARCHIVE_ROOT = STATE_ARCHIVE_ROOT;
 
@@ -124,8 +125,9 @@ export function archiveAgentSession(
 /**
  * 归档一个 agent 的某个 session：主 jsonl + subagents/*.jsonl（Pi 的子代理产物会
  * 落成与 Claude Code 同构的布局，见下方 listPiSubagentJsonls）+ workflow 目录（workflow-archive.ts）。
- * 落点 ~/.claude-orchestrator/archive/<agent>/<sessionId>[.jsonl|/subagents/]。
- * 源找不到 / 认不准（Codex 同 id 多份）/ 任一文件没拷上 → ok:false 并说明原因，不抛错，调用方 best-effort。
+ * 落点 ~/.claude-orchestrator/archive/<agent>/<sessionId>[.jsonl|/subagents/]；Codex revert 链的后续段落成 <rolloutId>.jsonl。
+ * 非 CC 的每份主 jsonl 旁写 <stem>.meta.json 记 runtime：归档路径认不出运行时，读历史靠它（lib/session-sidecar.ts）。
+ * 源找不到 / 认不准（Codex 同 id 多份）/ revert 链缺段 / 任一文件没拷上 → ok:false 并说明原因，不抛错，调用方 best-effort。
  */
 export async function archiveSession(
   agentName: string,
@@ -142,18 +144,31 @@ export async function archiveSession(
   const runtime = agentRuntime({ runtime: opts.runtime });
   const located = await locateSource(runtime, cwd, sessionId, opts.srcPath);
   if ("error" in located) return { ok: false, archived: [], note: located.error };
-  const { path: src, note: pickNote } = located;
+  const { segments, note: pickNote, incomplete } = located;
+  const src = segments[0]!.path; // 子代理 / workflow 目录跟着原文件走（只有 CC / Pi 有，它们只有一段）
 
   const dir = join(opts.archiveRoot ?? ARCHIVE_ROOT, agentName);
   await mkdir(dir, { recursive: true });
+  await sweepStaleTmp(dir);
   const archived: string[] = [];
   const failed: string[] = [];
+  let unusable = false;
   const copy = async (from: string, dest: string) => {
-    const r = await copyIfLarger(from, dest, (e) => failed.push(`${basename(from)}: ${e.message}`));
+    const r = await copyIfLarger(from, dest, (e) => {
+      failed.push(`${basename(from)}: ${e.message}`);
+      unusable ||= isSourceUnusable(e);
+    });
     if (r === "copied") archived.push(dest);
+    return r;
   };
 
-  await copy(src, join(dir, `${sessionId}.jsonl`));
+  const sidecarNotes: string[] = [];
+  for (const seg of segments) {
+    const dest = join(dir, `${seg.stem}.jsonl`);
+    // sidecar 只给非 CC 写：认不出时本来就按 CC 读，CC 归档目录保持原样；写不上不算归档失败（正文已在，读历史退回首行嗅探），只在 note 留一句
+    if ((await copy(seg.path, dest)) === "failed" || runtime === "claude-code") continue;
+    await writeSessionSidecar(dest, runtime).catch((e) => sidecarNotes.push(`${seg.stem}.meta.json 没写上：${(e as Error).message}`));
+  }
 
   // subagents 对话（与主会话同级的 <sessionId>/subagents/ 目录）
   // Pi 的子代理产物布局与 CC 不同：<会话 stem>/<runId>/run-N/session.jsonl。
@@ -180,24 +195,27 @@ export async function archiveSession(
   failed.push(...wf.failed.map((f) => `workflow ${basename(f)}`));
 
   // 任何一份没拷上都是 ok:false：kill / remove 靠它记日志，「无变化」和「拷失败」不能混成一句（tests/session-archive-runtimes.test.ts）
-  const extra = pickNote ? `；${pickNote}` : "";
+  const extra = [pickNote, ...sidecarNotes].filter(Boolean).map((n) => `；${n}`).join("");
+  const human = unusable ? "；.zst 源文件本身不能用，重试不会好，需人工处理" : "";
+  if (incomplete) return { ok: false, archived, note: `归档不完整：${incomplete}${failed.length ? `；另有 ${failed.join("；")} 没拷上` : ""}${human}${extra}` };
   if (failed.length) {
-    return { ok: false, archived, note: `归档不完整：${failed.length} 个文件没拷上（${failed.join("；")}）；源文件还在，下次 archive 会补${extra}` };
+    const retry = unusable ? human : "；源文件还在，下次 archive 会补";
+    return { ok: false, archived, note: `归档不完整：${failed.length} 个文件没拷上（${failed.join("；")}）${retry}${extra}` };
   }
   return { ok: true, archived, note: (archived.length ? `已归档 ${archived.length} 个文件` : "归档已是最新（无变化）") + extra };
 }
 
 /**
- * 会话源文件。Codex 走 pickCodexRolloutForArchive（核对首行 id，同 id 多份再按 cwd 分，分不开就拒）；
+ * 会话源文件。Codex 走 pickCodexRolloutForArchive（核对首行 id，同 id 多份再按 cwd 分，分不开就拒；revert 链整条返回）；
  * 其余交给运行时适配器：Claude Code 按 cwd 推算，Pi 文件名带时间戳推不出（返回 null）→ 按 id 全库找。
  */
 async function locateSource(runtime: string, cwd: string | undefined, sessionId: string, srcPath?: string): Promise<RolloutPick> {
-  if (srcPath && existsSync(srcPath)) return { path: srcPath };
+  if (srcPath && existsSync(srcPath)) return { segments: [{ path: srcPath, stem: sessionId }] };
   if (runtime === "codex") return pickCodexRolloutForArchive(sessionId, cwd);
   let src = !srcPath && cwd ? (sessionJsonlPath(runtime, cwd, sessionId) ?? "") : "";
   if (!src || !existsSync(src)) src = findSessionJsonlBySessionId(runtime, sessionId) ?? "";
   if (!src || !existsSync(src)) return { error: missingSourceNote(runtime, sessionId) };
-  return { path: src };
+  return { segments: [{ path: src, stem: sessionId }] };
 }
 
 /** 诊断/CLI 用：某 agent 的归档 session 列表 */
