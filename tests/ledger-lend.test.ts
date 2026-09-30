@@ -1,7 +1,7 @@
 /**
- * T93 A 侧出借：挂单（拒绝优先闸、borrow、阶段）、poll 过滤、claim 的 CAS / 幂等 / 上限 / 卡已推进、续租与释放、
- * 租约过期只进 unknown 并通知 PM（不自动重派）、撤单与重挂。全部经 `ledger lend-*` CLI（runLedger）跑，库是内存库。
- * 结论入账在 tests/ledger-lend-result.test.ts。
+ * T93 A 侧出借：挂单（拒绝优先闸、borrow、阶段）、poll 过滤、claim 的 CAS / 幂等 / 上限 / 卡已推进 / 两进程并发、续租与释放、
+ * 租约过期只进 unknown 并通知 PM（不自动重派）、撤单与重挂、lend-write 的事务核对与入账、旧 peer-ledger 入口拒写。
+ * 除并发那条用文件库起两个进程外，全部经 `ledger lend-*` CLI（runLedger）跑内存库。
  */
 import type { Database } from "bun:sqlite";
 import { mkdtempSync, writeFileSync } from "node:fs";
@@ -115,6 +115,41 @@ describe("poll / claim", () => {
     expect(listLendOrders(db, "T9")[0]).toMatchObject({ status: "claimed", worker: "w1", leaseGen: 1 });
     refusedWith(await claim(orderId, "w1", "other"), "not_found");
   });
+
+  test("two processes claiming the same order at once: one transition, one binding, one lease; the loser gets that same lease", async () => {
+    const mem = db;
+    const path = join(mkdtempSync(join(tmpdir(), "lend-race-")), "ledger.sqlite");
+    db = openLedger(path);
+    try {
+      setMeta(db, { actor: "owner", now }, { project: P, key: "pms", value: ["agent-pm"] });
+      card("T9");
+      const { orderId } = await offer();
+      const start = Date.now() + 1500; // 两个进程都开好库再一起抢：bridge 每次调用各起一个 manager 进程，就是这个形状
+      const script = (worker: string) => `
+        import { openLedger } from ${JSON.stringify(join(import.meta.dir, "../src/lib/ledger-store.ts"))};
+        import { claimLend } from ${JSON.stringify(join(import.meta.dir, "../src/lib/ledger-lend.ts"))};
+        const db = openLedger(${JSON.stringify(path)});
+        while (Date.now() < ${start}) {}
+        const borrow = () => ({ peer: "mate", projects: [${JSON.stringify(P)}], roles: ["review"], maxOpen: 2 });
+        try { console.log(JSON.stringify(claimLend(db, { actor: "owner", now: Date.now() }, "mate", { v: 1, orderId: ${JSON.stringify(orderId)}, worker: "${worker}" }, borrow))); }
+        catch (e) { console.log(JSON.stringify({ err: e.code ?? String(e) })); }`;
+      const outs = await Promise.all(["w1", "w2"].map(async (w) => {
+        const p = Bun.spawn([process.execPath, "--no-env-file", "-e", script(w)], { stdout: "pipe", stderr: "inherit" });
+        return JSON.parse((await new Response(p.stdout).text()).trim()) as { lease?: { gen: number; expiresAt: number }; err?: string };
+      }));
+      const won = outs.filter((o) => o.lease);
+      expect(won.length).toBeGreaterThan(0);
+      for (const o of won) expect(o.lease).toEqual(won[0]!.lease);
+      for (const o of outs) if (!o.lease) expect(o.err).toBe("busy");
+      const [order] = listLendOrders(db, "T9");
+      expect(order).toMatchObject({ status: "claimed", leaseGen: 1 });
+      expect(listSteps(db, "T9")).toEqual([expect.objectContaining({ executor: `${order!.worker}@mate`, executorKind: "peer" })]);
+      expect(db.query("SELECT COUNT(*) AS n FROM events WHERE target = 'T9' AND json_extract(data, '$.lend.op') = 'claim'").get()).toEqual({ n: 1 });
+    } finally {
+      closeLedger(path);
+      db = mem;
+    }
+  }, 30_000);
 
   test("maxOpen, a revoked borrow and a card that moved on are refused; the stale order is cancelled, not re-offered", async () => {
     card("T12");
@@ -269,6 +304,15 @@ describe("lend-write (result intake)", () => {
     await run(["lend-cancel", "T9", "--reason", "不要了"]);
     refusedWith(await call("write", result(b.orderId)), "cancelled");
     expect(reviews()).toEqual([]);
+  });
+
+  test("an order parked as unknown is refused even while its lease has time left (a late verdict never lands)", async () => {
+    const orderId = await claimed();
+    expect(await lease(orderId, 1, "release", "stopped")).toMatchObject({ ok: true, lease: null });
+    expect(listLendOrders(db, "T9")[0]).toMatchObject({ status: "unknown", leaseUntil: now + 10 * MIN });
+    refusedWith(await call("write", result(orderId)), "lease_expired");
+    expect(reviews()).toEqual([]);
+    expect(listLendOrders(db, "T9")[0]).toMatchObject({ status: "unknown", resultSha: null, receipt: null });
   });
 
   test("without an instance key nothing is recorded: the checks, the review and the order update are one transaction", async () => {
