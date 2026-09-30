@@ -6,8 +6,8 @@
  * WRITE_POOL_TTL_MS) ends the lease and the card returns to local work, PM told.
  * Every transition is a CAS under BEGIN IMMEDIATE. An expired lease only ever becomes `unknown` for PM (never re-offered by
  * itself); `released` (worker never started) and PM cancels free the card. The order a peer sees is built once, at offer
- * time, through T87's refuse-first peer gate with the ledger head. Result intake is ledger-lend-result.ts (reviews) and
- * ledger-lend-result.ts (write orders). tests/ledger-lend.test.ts, tests/ledger-lend-write.test.ts.
+ * time, through T87's refuse-first peer gate with the ledger head. Result intake is ledger-lend-result.ts (reviews and
+ * write orders). tests/ledger-lend.test.ts, tests/ledger-lend-write.test.ts.
  */
 import { createHash } from "node:crypto";
 import type { Database } from "bun:sqlite";
@@ -140,10 +140,22 @@ export function offerLend(db: Database, ctx: WriteCtx, input: OfferInput): LendO
   return tx(db, () => {
     const task = mustTask(db, input.taskId);
     if (!isManager(db, ctx.actor, task)) throw new LedgerError("forbidden", `挂单要项目 ${task.project} 的 PM / master / owner（你是 ${ctx.actor}）`);
+    if (getWorkflow(db, task.id)?.mode === "auto") throw new LedgerError("invalid", "自动流程的卡由调度器派单，v1 只借 PM 手动挂的卡");
+    return offerLendCore(db, ctx, input);
+  });
+}
+
+/**
+ * The offer itself, without offerLend's two gates (PM identity, manual cards only): the scheduler (i28-R9) calls it for auto cards
+ * under its own identity, which its CLI checks. Stage / head / borrow / live-order checks, T87's peer gate and the wire check all stay.
+ * Safe inside a caller's transaction (tx nests). createdBy is ctx.actor.
+ */
+export function offerLendCore(db: Database, ctx: WriteCtx, input: OfferInput): LendOrder {
+  return tx(db, () => {
+    const task = mustTask(db, input.taskId);
     const step = stepOfStage(task.stage);
     if (!step) throw new LedgerError("invalid", `任务 ${task.id} 在 ${task.stage}，只有 review / build / fix 阶段的卡能借出去`);
     if (step === "review" && (!task.headSHA || !/^[0-9a-f]{40}$/.test(task.headSHA))) throw new LedgerError("invalid", "卡上没有完整的 40 位 head，借不出去");
-    if (getWorkflow(db, task.id)?.mode === "auto") throw new LedgerError("invalid", "自动流程的卡由调度器派单，v1 只借 PM 手动挂的卡");
     const role = roleOfStep(step) as "review" | "write";
     if (!input.borrow || !input.borrow.projects.includes(task.project) || !input.borrow.roles.includes(role)) {
       throw new LedgerError("forbidden", `lend.json 的 borrow 里没有允许把项目 ${task.project} 的${role === "write" ? "写代码" : "审查"}借给 ${input.peer}`);
@@ -190,6 +202,24 @@ export function cancelLend(db: Database, ctx: WriteCtx, input: { taskId: string;
     unbindStep(db, o);
     note(db, ctx, o, `出借：撤单（原状态 ${o.status}）：${input.reason}`, { op: "cancel", from: o.status });
     return getLendOrder(db, o.orderId) as LendOrder;
+  });
+}
+
+/**
+ * The scheduler's timeout withdraw (i28-R9): one CAS pooled → cancelled. An order already claimed, settled or cancelled comes back
+ * as it is with nothing written (withdrawn: false). No manager check here: the caller's CLI gates the scheduler identity.
+ * A write order withdrawn this way also ends the card's write lease, as a send-back does, so a later fix order is not tied to that peer.
+ */
+export function withdrawPooledLend(db: Database, ctx: WriteCtx, input: { orderId: string; reason: string }): { withdrawn: boolean; order: LendOrder } {
+  return tx(db, () => {
+    const o = getLendOrder(db, input.orderId);
+    if (!o) throw new LedgerError("not_found", `没有出借单 ${input.orderId}`);
+    const now = ctx.now ?? Date.now();
+    const r = db.prepare("UPDATE lend_orders SET status = 'cancelled', reason = ?, updatedAt = ? WHERE orderId = ? AND status = 'pooled'").run(input.reason, now, o.orderId);
+    if (r.changes === 0) return { withdrawn: false, order: o };
+    if (isWriteStep(o.step)) endWriteLease(db, o.taskId, input.reason, now);
+    note(db, ctx, o, `出借：撤单（原状态 pooled）：${input.reason}`, { op: "cancel", from: "pooled", withdrawnBy: ctx.actor });
+    return { withdrawn: true, order: getLendOrder(db, o.orderId) as LendOrder };
   });
 }
 
