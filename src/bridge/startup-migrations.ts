@@ -10,6 +10,11 @@ export async function runStartupMigrations(runManager: (...args: string[]) => Pr
     else if (r?.ok === false) console.error(`[startup] project 迁移失败: ${r.error ?? "未知原因"}`);
   } catch (e) { console.error(`[startup] project 迁移异常: ${String(e)}`); }
   try {
+    const r = await runManager("worker-kind-migrate");
+    if (r?.ok && r.marked > 0) console.log(`[startup] worker 标记补齐 ${r.marked} 个 agent`);
+    else if (r?.ok === false) console.error(`[startup] worker 标记迁移失败: ${r.error ?? "未知原因"}`);
+  } catch (e) { console.error(`[startup] worker 标记迁移异常: ${String(e)}`); }
+  try {
     const r = await runManager("migrate", "--startup");
     if (r?.changed?.length || r?.fellBack?.length) console.log(`[startup] Codex ACP 迁移: ${r.changed?.length ?? 0} 个改动, ${r.fellBack?.length ?? 0} 个暂退 tmux`);
     if (r?.ok === false) console.error(`[startup] Codex ACP 迁移失败: ${(r.failed ?? []).join(", ") || r.error || "未知原因"}`);

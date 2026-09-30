@@ -25,6 +25,8 @@ export interface LedgerDeps {
   projectIds: readonly string[];
   loadRegistry(): Promise<Registry>;
   saveRegistry(reg: Registry): Promise<void>;
+  /** Scheduler bind reads this registry snapshot path inside its ledger transaction; tests inject an isolated file. */
+  registryPath?: string;
   now(): number;
   /** dispatch 核对 head 用；不给 = 真跑 git（单测注入） */
   gitHead?(dir: string): string | null;

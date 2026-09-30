@@ -6,7 +6,7 @@ import { describe, test, expect } from "bun:test";
 import { existsSync, mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, symlinkSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
-import { agentArchiveDir, archiveSession, realpathWithin } from "../src/lib/session-archive.js";
+import { agentArchiveDir, archivedWorkerKind, archiveSession, realpathWithin } from "../src/lib/session-archive.js";
 import { listAgentSessions } from "../src/lib/session-history.js";
 
 const SID = "11111111-2222-3333-4444-555555555555";
@@ -29,6 +29,13 @@ describe("archiveSession", () => {
     const dest = join(archiveRoot, "agent-x", `${SID}.jsonl`);
     expect(existsSync(dest)).toBe(true);
     expect(readFileSync(dest, "utf8")).toContain('"assistant"');
+  });
+  test("worker 归档保留 kind，registry 移除后全局搜索仍能过滤", async () => {
+    const { srcPath, archiveRoot } = setup();
+    expect(archivedWorkerKind("agent-review", archiveRoot)).toBe(false);
+    await archiveSession("agent-review", undefined, SID, { srcPath, archiveRoot, kind: "worker" });
+    await archiveSession("agent-review", undefined, SID, { srcPath, archiveRoot, kind: "worker" });
+    expect(archivedWorkerKind("agent-review", archiveRoot)).toBe(true);
   });
 
   test("重复归档：源更大才覆盖，缩水不回写", async () => {

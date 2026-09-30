@@ -8,6 +8,7 @@
 import { isMasterAgent } from "../lib/registry.js";
 import { hasUnsafeDisplayChars } from "../lib/display-text.js";
 import { isTeamRole, TEAM_ROLES } from "../lib/team-roles.js";
+import { markWorkerKinds, workerKind } from "../lib/worker-kind.js";
 import { loadRegistry, saveRegistry, normalizeName, output, type AgentInfo, type Registry } from "./core.js";
 
 export { cmdTeam } from "./team-up.js"; // 编排班子 up / down / status，与 team-link 同一个 manager 入口
@@ -23,7 +24,7 @@ export interface TeamFlags {
   role?: string;
 }
 /** 最终写进 registry 的字段（缺 = 不设） */
-export type TeamFields = Pick<AgentInfo, "parent" | "task" | "role">;
+export type TeamFields = Pick<AgentInfo, "parent" | "task" | "role" | "kind">;
 type ParentMap = Record<string, { parent?: string; channelId?: string }>;
 
 /**
@@ -120,7 +121,7 @@ export function resolveTeamFields(agents: ParentMap, child: string, flags: TeamF
 export async function teamFieldsForCreate(child: string, flags: TeamFlags): Promise<TeamFields | null> {
   const r = resolveTeamFields((await loadRegistry()).agents, child, flags, { channelId: process.env.DISCORD_CHANNEL_ID });
   if ("error" in r) output({ ok: false, error: r.error });
-  return "error" in r ? null : r;
+  return "error" in r ? null : { ...r, ...(workerKind(child, r) === "worker" ? { kind: "worker" as const } : {}) };
 }
 
 /**
@@ -129,9 +130,9 @@ export async function teamFieldsForCreate(child: string, flags: TeamFlags): Prom
  */
 export function keepOnResume(prior: AgentInfo | undefined, sessionId: string): Partial<AgentInfo> {
   if (!prior) return {};
-  const { parent, task, label, role } = prior;
+  const { parent, task, label, role, kind } = prior;
   const external = prior.external === true && prior.sessionId === sessionId;
-  return { ...(parent ? { parent } : {}), ...(task ? { task } : {}), ...(label ? { label } : {}), ...(role ? { role } : {}), ...(external ? { external } : {}) };
+  return { ...(parent ? { parent } : {}), ...(task ? { task } : {}), ...(label ? { label } : {}), ...(role ? { role } : {}), ...(kind ? { kind } : {}), ...(external ? { external } : {}) };
 }
 
 /**
@@ -188,4 +189,16 @@ export async function cmdTeamLink(args: string[]) {
   await saveRegistry(reg);
   const out = { agent: key.replace(/^agent-/, ""), parent: parent ? parent.replace(/^agent-/, "") : null, task: task ?? null, role: info.role ?? null };
   output({ ok: true, ...out });
+}
+
+/** Startup migration: only explicit evidence is tagged; repeat runs do not rewrite registry. */
+export async function cmdWorkerKindMigrate(args: string[] = []): Promise<void> {
+  if (args.some((arg) => arg !== "--dry-run")) { output({ ok: false, error: "worker-kind-migrate [--dry-run]" }); return; }
+  const reg = await loadRegistry();
+  const wouldTag = Object.entries(reg.agents).filter(([name, info]) => info.kind !== "worker" && workerKind(name, info) === "worker")
+    .map(([name]) => name);
+  if (args.includes("--dry-run")) { output({ ok: true, dryRun: true, wouldTag }); return; }
+  const marked = markWorkerKinds(reg.agents);
+  if (marked) await saveRegistry(reg);
+  output({ ok: true, marked, wouldTag });
 }

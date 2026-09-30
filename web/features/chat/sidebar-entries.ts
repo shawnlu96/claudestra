@@ -49,11 +49,12 @@ export function teamRoots(list: AgentSession[], masterName?: string): Map<string
 
 /** 搜索过滤（q 已小写，任务名也参与匹配）+ 只按「置顶」分层的稳定排序；不搜索时置顶只对顶层行生效（执行者留在派发者下面） */
 export function filterAndRankWorkers(workers: AgentSession[], q: string, pinSet: Set<string>, masterName?: string): AgentSession[] {
-  const roots = q ? null : teamRoots(workers, masterName);
+  const visible = workers.filter((a) => a.kind !== "worker");
+  const roots = q ? null : teamRoots(visible, masterName);
   return (
     q
-      ? workers.filter((a) => `${a.displayName} ${a.name} ${a.purpose} ${a.task ?? ""}`.toLowerCase().includes(q))
-      : workers
+      ? visible.filter((a) => `${a.displayName} ${a.name} ${a.purpose} ${a.task ?? ""}`.toLowerCase().includes(q))
+      : visible
   )
     .slice()
     .sort((a, b) => {

@@ -14,6 +14,7 @@ import { auditChangedProjects, openFindings, type StoredFinding } from "./ledger
 import { listSteps, stepsByTask, type TaskStep } from "./ledger-steps.js";
 import { stepLineInfo, type StepLineInfo } from "./ledger-step-line.js";
 import { schedulerProjectView } from "./ledger-scheduler.js";
+import { taskSessionLinks } from "./scheduler-sessions.js";
 import { getMeta, LEDGER_PATH, LEDGER_SCHEMA_VERSION, listDeps, listEvents, listItems, listTasks, getTask, toEvent, type LedgerMeta } from "./ledger-store.js";
 
 /** 读连接等锁的上限：WAL 下读不等写，只有写者刚建库、还没切 WAL 的那一瞬会撞上；宁可这一轮报 busy 也不卡住 bridge */
@@ -212,6 +213,8 @@ export interface TaskDetail {
   steps: TaskStep[];
   /** 步骤线（T51）：steps 加当前这一步、是否在等对方 owner */
   stepLine: StepLineInfo;
+  /** Durable active session refs keep task workers reachable even before their first review event. */
+  sessions: ReturnType<typeof taskSessionLinks>;
 }
 
 /** GET /ledger/:project/tasks/:id：任务不在这个项目下 → null（任务 id 全局唯一，但不许借别的项目名读到） */
@@ -227,6 +230,7 @@ export function taskDetail(db: Database, project: string, id: string, now: numbe
     timeline: stageTimeline(events, now),
     deps: { in: deps.filter((d) => d.to === id), out: deps.filter((d) => d.from === id) },
     reviewBranches: reviewBranches(task, view.lastReview, enteredFrom(task, events)),
+    sessions: taskSessionLinks(db, task.id),
     ...((line) => ({ steps: line.steps, stepLine: line }))(stepLineInfo(task, listSteps(db, task.id), events)),
   };
 }
