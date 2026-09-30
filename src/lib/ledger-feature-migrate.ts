@@ -158,7 +158,7 @@ function dagNodes(fp: FeaturePlan, blocks: { from: string; to: string }[], dropp
   for (const c of fp.cards.done) if (preds.has(c.id)) c.node = "predecessor";
   const inGraph = new Set([...active, ...preds]);
   if (fp.version > 0) {
-    fp.dagNote = `已有 v${fp.version}，不再建初版；新进行中的卡只挂 featureId，进图走 L2 重写`;
+    fp.dagNote = `已有 v${fp.version}，不再建初版；新进行中的卡只挂 featureId，进图走 dag-rewrite`;
     return;
   }
   if (!active.size) {

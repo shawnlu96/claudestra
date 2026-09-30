@@ -2,7 +2,7 @@
  * feature 与子 DAG 的写入（T84 = 阶段 1 L1，设计稿 docs/design/feature-dag.md）：建 feature、改 feature、建 DAG 初版。
  * 每个导出函数一个 BEGIN IMMEDIATE 事务，改行与一条 feature 事件（target = feature id）同进同出；改字段带 rev（CAS），
  * dedupKey 与其它写入同一套（ledger-tx.ts）。只有项目 PM 名单里的人、master、owner 能写。
- * initDag 只建 v1：已有任何版本就拒绝——v2 起是「重写」，要原因与批准，属于 L2，不从这里开口子。
+ * initDag 只建 v1：已有任何版本就拒绝——v2 起只能走 ledger-dag-write.ts 的重写（四条规矩 + owner 审批），不从这里开口子。
  */
 import type { Database } from "bun:sqlite";
 import { isManager, mustTask, type WriteCtx, type WriteResult } from "./ledger-checks.js";
@@ -44,11 +44,11 @@ function line(v: unknown, what: string, max: number, required: boolean): string 
   return s;
 }
 
-function requireManager(db: Database, actor: string, project: string): void {
+export function requireManager(db: Database, actor: string, project: string): void {
   if (!isManager(db, actor, { project, agent: null })) throw new LedgerError("forbidden", `只有项目 ${project} 的 PM / master / owner 能改 feature（你是 ${actor}）`);
 }
 
-function mustFeature(db: Database, id: string): Feature {
+export function mustFeature(db: Database, id: string): Feature {
   const f = getFeature(db, id);
   if (!f) throw new LedgerError("not_found", `没有 feature ${id}`);
   return f;
@@ -132,7 +132,7 @@ function checkAcyclic(nodes: readonly DagNode[]): void {
 }
 
 /** 节点的任务卡：要在本项目、不属于别的 feature；没绑卡返回 null */
-function nodeTask(db: Database, feature: Pick<Feature, "id" | "project">, key: string, raw: unknown): LedgerTask | null {
+export function nodeTask(db: Database, feature: Pick<Feature, "id" | "project">, key: string, raw: unknown): LedgerTask | null {
   if (raw === undefined || raw === null) return null;
   if (typeof raw !== "string" || !raw) throw new LedgerError("invalid", `节点 ${key} 的 taskId 要是任务卡 id 或 null`);
   const task = mustTask(db, raw);
@@ -155,7 +155,7 @@ function buildNode(db: Database, feature: Pick<Feature, "id" | "project">, x: un
 }
 
 /** 整版校验：key 唯一、一张卡只进一个节点、依赖只指向同版节点、不许自环 / 成环 */
-function buildNodes(db: Database, feature: Pick<Feature, "id" | "project">, raw: unknown): DagNode[] {
+export function buildNodes(db: Database, feature: Pick<Feature, "id" | "project">, raw: unknown): DagNode[] {
   if (!Array.isArray(raw) || raw.length === 0) throw new LedgerError("invalid", "--nodes 要是非空 JSON 数组");
   if (raw.length > DAG_NODES_MAX) throw new LedgerError("invalid", `一版最多 ${DAG_NODES_MAX} 个节点，收到 ${raw.length}`);
   const nodes = raw.map((x: unknown) => buildNode(db, feature, x));
@@ -174,18 +174,20 @@ function buildNodes(db: Database, feature: Pick<Feature, "id" | "project">, raw:
   return nodes;
 }
 
-/** 任务卡挂上 featureId：每张卡 rev + 1、附一条 task 事件（和 task-set 的事件同形），依赖任务 rev 的 CAS 能看到这次改动；已挂同一个的跳过，返回真改了的 */
-function linkTasks(db: Database, ctx: WriteCtx, feature: Feature, taskIds: readonly string[]): string[] {
-  const linked: string[] = [];
-  for (const id of taskIds) {
-    const t = nodeTask(db, feature, id, id) as LedgerTask;
-    if (t.featureId === feature.id) continue;
-    linked.push(t.id);
-    const rev = t.rev + 1;
-    db.prepare("UPDATE tasks SET featureId = ?, rev = ?, updatedAt = ? WHERE id = ?").run(feature.id, rev, ctx.now ?? Date.now(), t.id);
-    insertEvent(db, ctx, { project: t.project, target: t.id, kind: "task", data: { op: "set", patch: { featureId: feature.id }, rev } }, false);
+/** 一张卡挂上 featureId：rev + 1、附一条 task 事件（和 task-set 的事件同形），依赖任务 rev 的 CAS 能看到这次改动 */
+function setTaskFeature(db: Database, ctx: WriteCtx, feature: Feature, t: LedgerTask): void {
+  const rev = t.rev + 1;
+  db.prepare("UPDATE tasks SET featureId = ?, rev = ?, updatedAt = ? WHERE id = ?").run(feature.id, rev, ctx.now ?? Date.now(), t.id);
+  insertEvent(db, ctx, { project: t.project, target: t.id, kind: "task", data: { op: "set", patch: { featureId: feature.id }, rev } }, false);
+}
+
+/** 节点任务卡挂上 featureId（节点已由 buildNodes 校验过）；已挂同一个的跳过 */
+export function linkTasks(db: Database, ctx: WriteCtx, feature: Feature, nodes: readonly DagNode[]): void {
+  for (const n of nodes) {
+    if (!n.taskId) continue;
+    const t = mustTask(db, n.taskId);
+    if (t.featureId !== feature.id) setTaskFeature(db, ctx, feature, t);
   }
-  return linked;
 }
 
 export function initDag(db: Database, ctx: WriteCtx, input: { id: string; rev: number; nodes: unknown; reasonText?: string }): WriteResult<DagVersion> {
@@ -198,7 +200,7 @@ export function initDag(db: Database, ctx: WriteCtx, input: { id: string; rev: n
     const has = db.prepare("SELECT MAX(version) AS v FROM dag_versions WHERE featureId = ?").get(cur.id) as { v: number | null };
     if (cur.currentVersion !== 0 || has.v !== null) {
       const v = Math.max(cur.currentVersion, has.v ?? 0);
-      throw new LedgerError("conflict", `feature ${cur.id} 已有 v${v}：dag-init 只建初版，v2 起是重写（L2，要原因与批准）`, { currentVersion: cur.currentVersion });
+      throw new LedgerError("conflict", `feature ${cur.id} 已有 v${v}：dag-init 只建初版，改图用 dag-rewrite`, { currentVersion: cur.currentVersion });
     }
     if (cur.rev !== input.rev) throw new LedgerError("conflict", `feature ${cur.id} 已被改过：当前 rev ${cur.rev}，你带的是 ${input.rev}`, { rev: cur.rev });
     const nodes = buildNodes(db, cur, input.nodes);
@@ -208,7 +210,7 @@ export function initDag(db: Database, ctx: WriteCtx, input: { id: string; rev: n
       .run(cur.id, DAG_REASON_KINDS[0], reasonText, ctx.actor, now, JSON.stringify(nodes));
     const rev = cur.rev + 1;
     db.prepare("UPDATE features SET currentVersion = 1, rev = ?, updatedAt = ? WHERE id = ?").run(rev, now, cur.id);
-    linkTasks(db, ctx, cur, nodes.flatMap((n) => (n.taskId ? [n.taskId] : [])));
+    linkTasks(db, ctx, cur, nodes);
     const event = insertEvent(db, ctx, { ...key, data: { op: "dag-init", version: 1, nodes: nodes.map((n) => n.key), rev } }, true);
     return { row: getDagVersion(db, cur.id, 1) as DagVersion, event, duplicate: false };
   });
@@ -222,7 +224,13 @@ export function assignFeature(db: Database, ctx: WriteCtx, input: { id: string; 
   return tx(db, () => {
     const cur = mustFeature(db, input.id);
     requireManager(db, ctx.actor, cur.project);
-    const assigned = linkTasks(db, ctx, cur, [...new Set(input.taskIds)]);
+    const assigned: string[] = [];
+    for (const id of new Set(input.taskIds)) {
+      const t = nodeTask(db, cur, id, id) as LedgerTask;
+      if (t.featureId === cur.id) continue;
+      setTaskFeature(db, ctx, cur, t);
+      assigned.push(t.id);
+    }
     if (assigned.length) insertEvent(db, ctx, { project: cur.project, target: cur.id, kind: "feature", data: { op: "assign", tasks: assigned } }, true);
     return { feature: cur, assigned };
   });
