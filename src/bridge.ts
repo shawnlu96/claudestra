@@ -1665,14 +1665,9 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
       if (!admitCaller(ws, msg, clients.get(msg.channelId)?.ws, CONTROL_CHANNEL_ID)) return; // T85：无凭据的不能顶替已验证的持有者
       const old = clients.get(msg.channelId);
       if (old && old.ws !== ws) {
-        // 顶替语义保持不变：后来者接管。典型场景是 Claude Code 重启了它的 MCP server
-        // （旧进程尚未完全退出、ws 还没 close 时新进程已连上），这时新连接才是对的。
-        //
-        // 2026-07-25 曾误改成"活连接优先"来解决一次主会话失联，但实测证伪：subagent
-        // 并不会起自己的 channel-server（它复用父会话的 MCP 连接，jsonl 里的工具列表
-        // 只是继承）。真正的现象是 channel-server 被反复重启、Claude Code 重试若干次后
-        // 放弃。"活连接优先"会拒掉重启后的正统实例，反而加速耗尽重试次数 —— 已回滚。
-        // 这里只保留 idle 时长的诊断输出，便于下次判断旧连接究竟是活的还是僵尸。
+        // 后来者接管（唯一例外是上一行 admitCaller）：典型是 CC 重启了它的 MCP server，旧 ws 还没 close 新进程已连上。
+        // 别改成「活连接优先」：subagent 不起自己的 channel-server，那样只会拒掉重启后的正统实例、加速耗尽 CC 的重试
+        // （2026-07-25 改过又回滚，git log -S 活连接优先）。这里只留 idle 时长的诊断，便于判断旧连接是活的还是僵尸。
         const idleMs = Date.now() - (old.lastSeen ?? 0);
         console.log(
           `🔄 频道 ${msg.channelId} 重新注册 — 主动关闭旧连接（旧连接 ${Math.round(idleMs / 1000)}s 前还在通信，` +

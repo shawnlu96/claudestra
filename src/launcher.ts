@@ -86,7 +86,7 @@ initDaemonLogs("launcher");
 import { assertPrimaryOrExit } from "./lib/owner-guard.js";
 import { busyAgentWindows } from "./lib/busy-windows.js";
 import { healSelfDirty } from "./lib/self-dirty.js";
-import { discardOneShot, discardOneShotAfterReady, issueLaunchCred } from "./lib/caller-cred-launch.js";
+import { discardOneShotAfterReady, issueLaunchCred, sweepStaleOneShots, withOneShot } from "./lib/caller-cred-launch.js";
 await assertPrimaryOrExit("launcher");
 
 // 默认 master 目录：仓库根 / master。允许 env 覆盖以支持自定义部署。
@@ -141,36 +141,38 @@ async function bringUpClaudeInMasterWindow(): Promise<boolean> {
   const resume = await takeMasterResume().catch(() => null);
   if (resume) console.log(`↩️  接回大总管原会话 ${resume.sessionId.slice(0, 8)}（${resume.reason ?? "?"}）`);
   const credFile = await issueLaunchCred({ agent: "master", family: "claude-code", sessionId: resume?.sessionId }, "mcp-config");
-  const cmd = buildClaudeCommand({
-    channelId: CONTROL_CHANNEL_ID,
-    bridgeUrl: BRIDGE_URL,
-    effort: MASTER_EFFORT,
-    resumeId: resume?.sessionId, settingsAgent: "master", // 大总管也能按 agent 关技能（manager skill-toggle master …）
-    callerCredFile: credFile, // T85 启动凭据：channel-server 读走即删，就绪 / 超时后兜底再删
-  });
-  // shell init 阶段的 Y/n（oh-my-zsh / homebrew）会吞掉首字符，先清掉。
-  await clearShellInitPrompts(MASTER_WINDOW);
-  await tmuxSendLine(MASTER_WINDOW, cmd);
+  return withOneShot(credFile, async () => { // T85 启动凭据：channel-server 读走即删；就绪等它读走，超时 / 异常 / 信号立即删
+    const cmd = buildClaudeCommand({
+      channelId: CONTROL_CHANNEL_ID,
+      bridgeUrl: BRIDGE_URL,
+      effort: MASTER_EFFORT,
+      resumeId: resume?.sessionId, settingsAgent: "master", // 大总管也能按 agent 关技能（manager skill-toggle master …）
+      callerCredFile: credFile,
+    });
+    // shell init 阶段的 Y/n（oh-my-zsh / homebrew）会吞掉首字符，先清掉。
+    await clearShellInitPrompts(MASTER_WINDOW);
+    await tmuxSendLine(MASTER_WINDOW, cmd);
 
-  // 等待并自动确认各种提示（dev channel、trust、bypass、etc）
-  for (let i = 0; i < 120; i++) {
-    await Bun.sleep(500);
-    const pane = await captureLast(10);
-
-    if (await isIdle()) {
-      console.log(`✅ 大总管已就绪${MASTER_EFFORT && MASTER_EFFORT !== "default" ? `（effort=${MASTER_EFFORT}）` : ""}`);
-      (await import("./lib/agent-settings.js")).dropLaunchSettings("master"); await discardOneShotAfterReady(credFile); return true; // 超长设置落的启动快照：就绪 = CC 已读过
-    }
-
-    if (masterShouldAutoConfirm(pane)) {
-      await confirmMasterModal(pane);
+    // 等待并自动确认各种提示（dev channel、trust、bypass、etc）
+    for (let i = 0; i < 120; i++) {
       await Bun.sleep(500);
-      continue;
-    }
-  }
+      const pane = await captureLast(10);
 
-  console.log("⚠️ 大总管启动超时，但 window 可能仍在初始化"); discardOneShot(credFile);
-  return await masterWindowExists();
+      if (await isIdle()) {
+        console.log(`✅ 大总管已就绪${MASTER_EFFORT && MASTER_EFFORT !== "default" ? `（effort=${MASTER_EFFORT}）` : ""}`);
+        (await import("./lib/agent-settings.js")).dropLaunchSettings("master"); await discardOneShotAfterReady(credFile); return true; // 超长设置落的启动快照：就绪 = CC 已读过
+      }
+
+      if (masterShouldAutoConfirm(pane)) {
+        await confirmMasterModal(pane);
+        await Bun.sleep(500);
+        continue;
+      }
+    }
+
+    console.log("⚠️ 大总管启动超时，但 window 可能仍在初始化");
+    return await masterWindowExists();
+  });
 }
 
 async function startMaster() {
@@ -1085,6 +1087,7 @@ async function main() {
 
   // 持续监控
   while (true) {
+    sweepStaleOneShots(); // T85：启动半路被 kill -9 留下的一次性凭据文件，没人再启动也按时清掉
     await Bun.sleep(CHECK_INTERVAL_MS);
 
     if (!(await sessionExists())) {

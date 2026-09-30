@@ -10,7 +10,9 @@ import { CALLER_CREDS_PATH, hashCred, readCredStore, type CredRecord } from "../
 import { rejectsTakeover, resolveCallerIdentity, type CallerIdentity } from "../lib/caller-identity.js";
 import { REJECTED_CLOSE_CODE } from "../lib/link-policy.js";
 import { readRegistryAgentsSync } from "../lib/registry.js";
+import { MASTER_DIR } from "./config.js";
 import { connectionOf } from "./fleet/service.js";
+import { latestSessionIdForCwd } from "./session-ids.js";
 
 /** 连接 → 它注册时出示的凭据的哈希（连接关了自动回收） */
 const credHashOf = new WeakMap<object, string>();
@@ -32,7 +34,7 @@ function currentCreds(): Record<string, CredRecord> {
 function identityOf(ws: object, channelId: string | undefined, controlChannelId: string | undefined, downgraded = false): CallerIdentity {
   return resolveCallerIdentity(
     { credHash: credHashOf.get(ws), channelId, downgraded },
-    { creds: currentCreds(), agents: readRegistryAgentsSync(), controlChannelId },
+    { creds: currentCreds(), agents: readRegistryAgentsSync(), controlChannelId, masterSessionId: () => latestSessionIdForCwd(MASTER_DIR, "claude-code") },
   );
 }
 

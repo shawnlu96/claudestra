@@ -47,6 +47,17 @@ describe("resolveCallerIdentity", () => {
     expect(resolveCallerIdentity({ credHash: hashCred("c".repeat(64)), channelId: "ctl" }, deps)).toEqual({ agent: "master", sessionId: "m1", family: "claude-code", verified: true });
     expect(resolveCallerIdentity({ credHash: hashCred(TA), channelId: "ctl" }, deps).verified).toBe(false);
   });
+
+  test("master 的会话取 bridge 按 MASTER_DIR 给的当前值（新建时签发记录里没有、/clear 后会换）；未验证不取", () => {
+    const master = hashCred("c".repeat(64));
+    const fresh = { ...deps, creds: { [master]: { agent: "master", family: "claude-code", issuedAt: "t" } } };
+    expect(resolveCallerIdentity({ credHash: master, channelId: "ctl" }, { ...fresh, masterSessionId: () => "m-now" })).toMatchObject({ sessionId: "m-now", verified: true });
+    expect(resolveCallerIdentity({ credHash: master, channelId: "ctl" }, { ...deps, masterSessionId: () => "m-after-clear" }).sessionId).toBe("m-after-clear");
+    expect(resolveCallerIdentity({ credHash: master, channelId: "ctl" }, { ...deps, masterSessionId: () => undefined }).sessionId).toBe("m1");
+    let asked = false;
+    expect(resolveCallerIdentity({ channelId: "ctl" }, { ...deps, masterSessionId: () => ((asked = true), "x") }).sessionId).toBeNull();
+    expect(asked).toBe(false);
+  });
 });
 
 describe("顶替与工具闸", () => {

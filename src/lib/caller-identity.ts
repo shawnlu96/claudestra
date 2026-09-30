@@ -2,7 +2,7 @@
  * bridge 认 MCP 调用方（T85）：一条已注册的连接 → CallerIdentity。纯函数，IO 在 bridge/caller-identity.ts。
  * verified 的唯一来源是注册时出示的凭据（lib/caller-cred.ts）：它得还在存储里（没被同 agent 的新凭据顶掉），
  * 而且签给的 agent 正是这个频道的主人——拿 A 的凭据注册 B 的频道不算数。自报的 agentName / sessionId 一概不信。
- * 会话与家族取 registry 当前值（CC 的 /clear、ACP 的线程轮转都会换会话 id，启动时记的那个会过时）。
+ * 会话与家族取 registry 当前值（CC 的 /clear、ACP 的线程轮转都会换会话 id，启动时记的那个会过时）；大总管取 MASTER_DIR 最新会话。
  * tests/caller-identity.test.ts。
  */
 import type { CredRecord } from "./caller-cred.js";
@@ -38,6 +38,8 @@ export interface IdentityDeps {
   creds: Record<string, CredRecord>;
   agents: readonly IdentityAgent[];
   controlChannelId?: string;
+  /** 大总管不在 registry：它现在的会话 id 由 bridge 按 MASTER_DIR 取（只在 master 已验证时才调） */
+  masterSessionId?: () => string | undefined;
 }
 
 const MASTER = "master";
@@ -50,7 +52,7 @@ export function resolveCallerIdentity(i: IdentityInput, d: IdentityDeps): Caller
   const verified = !!rec && !i.downgraded && !!ownerName && rec.agent === ownerName;
   return {
     agent: ownerName,
-    sessionId: owner?.sessionId ?? (verified ? rec!.sessionId ?? null : null),
+    sessionId: owner?.sessionId ?? (verified ? (isControl ? d.masterSessionId?.() : undefined) ?? rec!.sessionId ?? null : null),
     family: owner ? owner.runtime ?? "claude-code" : verified ? rec!.family : isControl ? "claude-code" : null,
     verified,
   };
