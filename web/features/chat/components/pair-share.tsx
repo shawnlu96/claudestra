@@ -46,14 +46,14 @@ export function ApprovalRow({ a, onDone }: { a: PendingApproval; onDone: (approv
     <div className="flex flex-wrap items-center gap-2 rounded-lg bg-warning/10 px-2.5 py-2 text-xs">
       <span className="min-w-0 flex-1">
         <span className="block font-medium">
-          {a.deviceName} {t("输入了短码")} <span className="font-mono">{a.code.slice(0, 4)}-{a.code.slice(4)}</span>
+          {a.deviceName} {t(a.local ? "在电脑本机请求全权" : "输入了短码")} <span className="font-mono">{a.code.slice(0, 4)}-{a.code.slice(4)}</span>
         </span>
         <span className="block truncate text-base-content/55">
           {grantSummary(t, a.grant, a.guest)}
           {a.clientIp ? ` · ${a.clientIp}` : ""}
         </span>
         {a.guest && grantsAllAgents(a.grant) && <span className="block font-medium text-warning">{t(GUEST_ALL_WARNING)}</span>}
-        <span className="block text-[10.5px] text-base-content/45">{t("设备名是对方自己填的；短码对得上再允许")}</span>
+        <span className="block text-[10.5px] text-base-content/45">{t(a.local ? "电脑上的 agent 也能发这个请求；是你刚点的、码对得上再允许" : "设备名是对方自己填的；短码对得上再允许")}</span>
         {err && <span className="block text-error">{err}</span>}
       </span>
       <span className="flex shrink-0 gap-1">

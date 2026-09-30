@@ -162,7 +162,7 @@ async function prepareReverse(name: string, agents: string[], myUrl: string, for
   const relay = myUrl ? null : await relayStatus(), resolved = relay?.connected && relay.fp ? { url: relayUrlOf(relay.fp) } : await resolveMyBridgeUrl(myUrl); // 同 invite-new：连着中继就让对方经中继找我
   if (!resolved) return { error: "反向开放需要我方对外地址,探测失败——请给 --url" };
   const issued = await issuePeerToken(name, agents);
-  return { ...issued, url: resolved.url.replace(/\/+$/, ""), note: resolved.note ?? "" };
+  return { ...issued, url: resolved.url.replace(/\/+$/, ""), note: [resolved.note, ...check.warnings].filter(Boolean).join("；") };
 }
 
 type RedeemRes = { ok?: boolean; error?: string; code?: string; agents?: string[]; peer?: string; proof?: unknown; iid?: unknown } | null;

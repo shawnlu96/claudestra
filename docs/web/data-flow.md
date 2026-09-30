@@ -26,7 +26,7 @@
   `POST …/devices/pair {proof, deviceName}` → 200 + Set-Cookie + `{fp, machineName, principalId, grant, …}`。秘密只在 `#` 里，不经中继、不出浏览器。
 - **手输 8 位短码**：relay 先 `POST /api/v1/codes/lookup {code}`（中继同源、无基址、限流）拿 fp，direct 跳过；`POST …/devices/pair {code, deviceName}`
   → 202 `{approvalId}`；每 1.5s `GET …/devices/pair/status?approval=` 轮询 ≤10 分钟：202 继续、200 = Mac 侧点头发了 cookie、410 = 拒绝 / 过期。
-- **本机回环一键**（direct 且 hostname 是 localhost / 127.0.0.1 / ::1）：`POST /devices/local {deviceName}`；bridge 只认真实回环 socket，隧道进来 403。
+- **本机回环一键**（direct 且 hostname 是 localhost / 127.0.0.1 / ::1）：配对页点按钮才发 `POST /devices/local {deviceName}`（开机不自动发）；bridge 只认真实回环 socket，隧道进来 403。回 202 就显示展示码、轮询 `/devices/pair/status`，等已配对的全权设备在侧栏横幅里批准。
 
 老链接 `#<短码>` 自动填进短码框走第二条路；`/login` 只是跳 `/pair`。
 

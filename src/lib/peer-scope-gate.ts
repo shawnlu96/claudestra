@@ -4,6 +4,12 @@
  * 已开启 external 的 agent，`*` 不再接受（它会把日后新建的、没开闸的 agent 一并放出去），
  * master 照旧硬禁。CLI 与 web Peer 面板都走这里，两边不会再出现「一边拦一边放」。
  */
+/**
+ * 把 agent 交给别人驱动（peer scope、guest 设备）时必须让 owner 看到的一句：agent 默认 bypassPermissions，驱动它就是驱动一个
+ * 以 owner 身份运行的 shell，授权模型本身管不住（CLAUDE.md「Security posture」）。CLI 与 web 各一份文案（web/lib/guest-share.ts）。
+ */
+export const DRIVE_AGENT_SHELL_WARNING = "能驱动 agent = 能在这台电脑上以你的身份执行任意命令（agent 默认跳过权限确认）；只开放你愿意把这台电脑交给对方的 agent";
+
 export interface GateAgent {
   external?: boolean | null;
 }
