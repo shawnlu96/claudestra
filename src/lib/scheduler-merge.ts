@@ -11,6 +11,7 @@ import { currentReviewFacts } from "./scheduler-review.js";
 import { getSchedulerSession } from "./scheduler-sessions.js";
 import { canTransition, nextTaskState } from "./ledger-stages.js";
 import { settleIntent } from "./ledger-scheduler-write.js";
+import { parseRequiredChecks } from "./scheduler-config.js";
 
 export type MergePhase = "ready" | "updating" | "await_review" | "await_ci" | "merging" | "merged" | "unknown" | "resolved";
 export interface MergeRun {
@@ -69,10 +70,8 @@ export function beginMergeRun(db: Database, ctx: WriteCtx, intentId: string, req
     const task = mustTask(db, intent.taskId), workflow = getWorkflow(db, task.id);
     if (!canWrite(db, ctx.actor, task.project)) throw new LedgerError("forbidden", "只有项目 PM / master / owner 能执行合并队列");
     const old = getMergeRun(db, intentId);
-    const checks = [...new Set(requiredChecks)];
-    if (!checks.length || checks.length > 20 || checks.some((x) => !/^[\w .:/-]{1,80}$/.test(x))) {
-      throw new LedgerError("invalid", "合并队列必须指定 1–20 个 CI 必过检查名");
-    }
+    const checks = parseRequiredChecks(requiredChecks);
+    if (!checks) throw new LedgerError("invalid", "合并队列必须指定 1–20 个 CI 必过检查名");
     if (old) {
       if (old.requiredChecks !== checks.join(",")) throw new LedgerError("dedup_mismatch", "本卡合并检查清单已固定");
       return { run: old, duplicate: true };
