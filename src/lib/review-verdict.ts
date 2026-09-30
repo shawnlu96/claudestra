@@ -1,6 +1,6 @@
 /**
  * M3 交结论（T97）：submit_verdict 的 VerdictWire → recordReview 的结构化记账。只记结论、从不推阶段（修 / 合 / 升级由调度器或 PM 定）。
- * 顺序即判定：身份已验证 → wire 严格校验（计数与逐项对得上）→ 同单重试按幂等键认 → 按 orderId 现算调用方的单（不是本步骤审查员、
+ * 顺序即判定：身份已验证 → wire 严格校验（计数与逐项对得上）→ 拿写锁 → 同单重试按幂等键认 → 按 orderId 现算调用方的单（不是本步骤审查员、
  * 单已过期都拒）→ head 等于派单时的 head → 不是作者 → 报告在 ledger/reviews/ 下且非空 → 自动卡再过 CLI 同一道门（autoReviewWriter）。
  * head / session / family 取身份与单子，参数里的只用来比对；同家族照收，只标 sameFamily。tests/review-verdict.test.ts。
  */
@@ -10,12 +10,12 @@ import { isAbsolute, sep } from "node:path";
 import type { CallerIdentity } from "./caller-identity.js";
 import { getWorkflow, type AuthorFamily } from "./ledger-scheduler.js";
 import type { LedgerEvent } from "./ledger-stages.js";
-import { getEventByDedup, LedgerError, listEvents } from "./ledger-store.js";
+import { busyAsLedgerError, getEventByDedup, LedgerError, listEvents } from "./ledger-store.js";
 import { authorOf, stepsOf, type TaskStep } from "./ledger-steps.js";
 import { recordReview } from "./ledger-write.js";
 import { parseVerdictWire, type VerdictWire } from "./order-wire.js";
 import { agentRuntime, type RegistryAgent } from "./registry.js";
-import { reviewCallerOf, reviewsDir, slotByOrderId, type ReviewSlot } from "./review-order.js";
+import { reviewCallerOf, reviewsDir, slotByOrderId, type ReviewCaller, type ReviewSlot } from "./review-order.js";
 import { autoReviewWriter, runtimeFamily } from "./scheduler-auto-review.js";
 import type { ReviewFinding } from "./scheduler-review.js";
 import { getSchedulerSession } from "./scheduler-sessions.js";
@@ -91,13 +91,12 @@ const recordedElsewhere = (db: Database, slot: ReviewSlot, agent: string): boole
   listEvents(db, { project: slot.task.project, target: slot.task.id })
     .some((e) => e.kind === "review" && e.data.round === slot.task.round && e.data.head === slot.head && e.data.reviewer === agent);
 
-export function submitVerdict(db: Database, identity: CallerIdentity, raw: unknown, deps: VerdictDeps): VerdictResult {
-  const who = reviewCallerOf(identity);
-  if ("error" in who) return refuse(who.error, `${who.message}；什么都没记`);
-  const parsed = parseVerdictWire(raw);
-  if (!parsed.ok) return refuse("invalid_wire", parsed.error);
-  const w = parsed.value;
-  const { caller, family } = who;
+/**
+ * 拿写锁之后才判：幂等键、当前单、head、作者、自动卡门和记账同在一个 IMMEDIATE 事务里（recordReview 的事务嵌成保存点）。
+ * 判定放在锁外会读到旧快照：PM 换审查员的事务没提交时，旧审查员过了判定再等锁，提交后照样记上；并发的另一个结论也会被当成同结论重试。
+ * tests/review-verdict-race.test.ts（两个独立进程）。
+ */
+function verdictInTx(db: Database, caller: ReviewCaller & { sessionId: string }, family: AuthorFamily, w: VerdictWire, deps: VerdictDeps): VerdictResult {
   const key = verdictKey(w);
   const prev = getEventByDedup(db, key);
   if (prev) {
@@ -116,17 +115,25 @@ export function submitVerdict(db: Database, identity: CallerIdentity, raw: unkno
   if (recordedElsewhere(db, slot, caller.agent)) return refuse("conflict", `${slot.task.id} 第 ${slot.task.round} 轮已经有 ${caller.agent} 对这个 head 的结论，交 PM 处理`);
   const aFamily = authorFamily(db, slot, steps, deps.registry);
   const sameFamily = aFamily ? aFamily === family : null;
+  if (slot.auto) {
+    autoReviewWriter(db, slot.task, { actor: caller.agent, callerSession: caller.sessionId, registryPath: deps.registryPath, gitHead: deps.gitHead, gitDirty: deps.gitDirty },
+      { reviewer: caller.agent, session: caller.sessionId, family, head: slot.head });
+  }
+  const r = recordReview(db, { actor: caller.agent, now: deps.now, dedupKey: key }, {
+    taskId: slot.task.id, reviewer: caller.agent, verdict: w.verdict, p0: w.p0, p1: w.p1, p2: w.p2, path: w.reportPath,
+    head: slot.head, reviewerSessionId: caller.sessionId, reviewerFamily: family, findings: storedFindings(w),
+    orderId: w.orderId, sameFamily, via: "mcp",
+  });
+  return { ok: true, duplicate: r.duplicate, taskId: slot.task.id, eventSeq: r.event.seq, sameFamily };
+}
+
+export function submitVerdict(db: Database, identity: CallerIdentity, raw: unknown, deps: VerdictDeps): VerdictResult {
+  const who = reviewCallerOf(identity);
+  if ("error" in who) return refuse(who.error, `${who.message}；什么都没记`);
+  const parsed = parseVerdictWire(raw);
+  if (!parsed.ok) return refuse("invalid_wire", parsed.error);
   try {
-    if (slot.auto) {
-      autoReviewWriter(db, slot.task, { actor: caller.agent, callerSession: caller.sessionId, registryPath: deps.registryPath, gitHead: deps.gitHead, gitDirty: deps.gitDirty },
-        { reviewer: caller.agent, session: caller.sessionId, family, head: slot.head });
-    }
-    const r = recordReview(db, { actor: caller.agent, now: deps.now, dedupKey: key }, {
-      taskId: slot.task.id, reviewer: caller.agent, verdict: w.verdict, p0: w.p0, p1: w.p1, p2: w.p2, path: w.reportPath,
-      head: slot.head, reviewerSessionId: caller.sessionId, reviewerFamily: family, findings: storedFindings(w),
-      orderId: w.orderId, sameFamily, via: "mcp",
-    });
-    return { ok: true, duplicate: r.duplicate, taskId: slot.task.id, eventSeq: r.event.seq, sameFamily };
+    return busyAsLedgerError("交结论", () => db.transaction(() => verdictInTx(db, who.caller, who.family, parsed.value, deps)).immediate());
   } catch (e) {
     if (e instanceof LedgerError) return refuse(e.code, e.message);
     throw e;
