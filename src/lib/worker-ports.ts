@@ -20,7 +20,12 @@ export interface MessagePort {
   send(agent: string, sessionId: string, text: string, key: string): Promise<SendResult>;
   status(agent: string, sessionId: string): Promise<LiveState>;
   interrupt(agent: string, sessionId: string): Promise<ControlReceipt>;
+  /** The runtime's latest failed turn for this session (e.g. a Claude Code usage-limit wall); absent = no such source. */
+  lastFailure?(agent: string, sessionId: string): Promise<HostFailure | undefined>;
 }
+
+/** A failed turn the host reported, tied to the order claimed before it (afterKey null = none was). */
+export type HostFailure = { failure: { kind: "quota" | "auth" | "error"; key: string; message: string }; afterKey: string | null };
 
 interface SessionPort {
   /** The ledger binding for this card and role, if one was already recorded (restart / replay reads this first). */
@@ -76,6 +81,14 @@ export function observeVia(deps: AdapterDeps, ref: SessionRef, order: OrderProbe
   if (done) return { state: "result", outcome: done.outcome, eventSeq: done.eventSeq };
   if (live === "busy" || live === "idle") return { state: "running", busy: live === "busy" };
   return { state: "unknown", reason: live === "offline" ? `${ref.agent} 不在线` : `读不到 ${ref.agent} 的状态` };
+}
+
+/** Ours → failed; unattributed → unknown carrying the failure (it may predate this order); another order's → unchanged. */
+export function withHostFailure(seen: WorkerObservation, failed: HostFailure | undefined, live: LiveState, order: OrderProbe): WorkerObservation {
+  if (seen.state === "result" || !failed || live === "busy") return seen;
+  const failure = { kind: failed.failure.kind, message: failed.failure.message };
+  if (failed.afterKey === null) return { state: "unknown", reason: `宿主报了未归属本单的失败（${failed.failure.kind}）`, failure };
+  return failed.afterKey === order.dedupKey ? { state: "result", outcome: "failed", failure } : seen;
 }
 
 export function sendReceipt(route: WorkerRouteKind, key: string, r: SendResult, fallback: string | null): SubmitReceipt {

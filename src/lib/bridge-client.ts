@@ -49,11 +49,12 @@ export async function bridgeRequest(msg: Record<string, unknown>, opts?: { timeo
   });
 }
 
-type BridgeSendResult = { ok: true; result: any } | { ok: false; sent: boolean; error: string };
+type BridgeSendResult = { ok: true; result: any } | { ok: false; sent: boolean; error: string; rejected?: string };
 
 /**
- * Like bridgeRequest, for callers that must not resend blindly: sent=false means the bridge refused or the request
- * never left this process (safe to plan again); sent=true means it left and no answer came back (the outcome is unknown).
+ * Like bridgeRequest, for callers that must not resend blindly: sent=false means the request never left this process or
+ * the bridge answered with a typed `rejected` code (refused before any delivery) — safe to plan again. Any other error
+ * after sending is sent=true: the bridge may have delivered before failing, so the outcome is unknown.
  */
 export async function bridgeSend(msg: Record<string, unknown>, opts?: { timeoutMs?: number }): Promise<BridgeSendResult> {
   return new Promise((resolve) => {
@@ -81,7 +82,9 @@ export async function bridgeSend(msg: Record<string, unknown>, opts?: { timeoutM
         return; // a frame that is not JSON is some other broadcast on this socket, not our answer
       }
       if (data?.requestId !== requestId) return;
-      finish(data.error ? { ok: false, sent: false, error: String(data.error) } : { ok: true, result: data.result });
+      if (!data.error) return finish({ ok: true, result: data.result });
+      const rejected = typeof data.rejected === "string" ? data.rejected : undefined;
+      finish({ ok: false, sent: rejected ? false : sent, error: String(data.error), ...(rejected ? { rejected } : {}) });
     };
     ws.onerror = () => finish({ ok: false, sent, error: "Bridge 连接出错" });
     ws.onclose = () => finish({ ok: false, sent, error: "Bridge 连接在答复前断开" });

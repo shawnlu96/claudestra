@@ -20,28 +20,39 @@ export const DIGEST = "d".repeat(64);
 export const P1 = { findingId: "race-1", family: "concurrency", severity: "P1" as const, probe: "two ticks claim the same intent" };
 export const P2 = { findingId: "name-1", family: "naming", severity: "P2" as const, probe: "rename helper" };
 
+/** Each agent's own runtime session, as its shell environment would report it. */
+const SESSIONS: Record<string, string> = { "agent-task-one": "s-one", "agent-rv-t1": "s-rv", pm: "s-pm" };
+
 export interface Sent { agent: string; sessionId: string; text: string; key: string; route: "channel" | "acp" }
+
+function shots(dir: string): string[] {
+  const out = [join(dir, "before.png"), join(dir, "after.png")];
+  for (const p of out) writeFileSync(p, "png");
+  return out;
+}
 
 export function autoFixture(opts: { template?: "code" | "ui"; reviewerRuntime?: string } = {}) {
   const template = opts.template ?? "code";
   const dir = mkdtempSync(join(tmpdir(), "t68f-auto-")), path = join(dir, "ledger.sqlite"), db = openLedger(path);
   const registryPath = join(dir, "registry.json");
   writeFileSync(registryPath, JSON.stringify({ socket: "", agents: {
-    "agent-task-one": { runtime: "claude-code", sessionId: "s-one", cwd: dir },
-    "agent-rv-t1": { runtime: opts.reviewerRuntime ?? "codex", transport: "acp", sessionId: "s-rv" },
+    "agent-task-one": { runtime: "claude-code", sessionId: "s-one", cwd: dir, channelId: "ch-one" },
+    "agent-rv-t1": { runtime: opts.reviewerRuntime ?? "codex", transport: "acp", sessionId: "s-rv", cwd: join(dir, "rv-t1") },
     pm: { runtime: "claude-code", sessionId: "s-pm", role: "pm" },
   } }));
   let now = 1000;
   const at = (actor: string) => ({ actor, now: (now += 10) });
   createTask(db, at("owner"), { project: "p", id: "T1", title: "auto", kind: "code", agent: "agent-task-one",
-    extra: { fileGlobs: ["src/lib/x.ts"], ...(template === "ui" ? { screenshotsDigest: DIGEST } : {}) } });
+    extra: { fileGlobs: ["src/lib/x.ts"], ...(template === "ui" ? { screenshotsDigest: DIGEST, screenshots: shots(dir) } : {}) } });
   db.query("INSERT INTO meta (project, key, value) VALUES ('p', 'pms', '[\"pm\"]') ON CONFLICT (project, key) DO UPDATE SET value = excluded.value").run();
   setWorkflow(db, at("owner"), { taskId: "T1", taskRev: 1, template, templateVersion: 2, mode: "auto", authorFamily: "claude", fallback: "只报错不修" });
   const deps = (actor: string): LedgerDeps => ({
-    db, actor, registryPath, projectIds: ["p"], now: () => (now += 10),
+    db, actor, registryPath, projectIds: ["p"], now: () => (now += 10), autoTickWired: true, callerSession: SESSIONS[actor],
+    gitHead: () => reviewerAt ?? getTask(db, "T1")?.headSHA ?? null,
     loadRegistry: async () => JSON.parse(readFileSync(registryPath, "utf8")) as Registry, saveRegistry: async () => {},
   });
   const cli = (actor: string, ...args: string[]) => runLedger(args, deps(actor));
+  const cliWith = (over: Partial<LedgerDeps>, actor: string, ...args: string[]) => runLedger(args, { ...deps(actor), ...over });
 
   const sent: Sent[] = [];
   const live: Record<string, LiveState> = {};
@@ -51,6 +62,7 @@ export function autoFixture(opts: { template?: "code" | "ui"; reviewerRuntime?: 
   let sendMode: "ok" | "refuse" | "lost" = "ok";
   const pins: string[] = [];
   let pinRefusal: string | null = null;
+  let reviewerAt: string | null = null;
   const send = (route: Sent["route"]) => async (agent: string, sessionId: string, text: string, key: string): Promise<SendResult> => {
     if (sendMode === "refuse") return { ok: false, delivered: false, reason: "bridge 拒收" };
     sent.push({ agent, sessionId, text, key, route });
@@ -93,8 +105,9 @@ export function autoFixture(opts: { template?: "code" | "ui"; reviewerRuntime?: 
       "--head", head, "--session", "s-rv", "--family", "codex", "--findings", findingsFile(rows), "--path", `reviews/T1-r${task().round}/report.md`, ...extra);
   const advance = (ms: number) => { now += ms; };
   const close = () => { closeLedger(path); rmSync(dir, { recursive: true, force: true }); };
-  return { db, at, cli, tick, task, intents, review, sent, live, acpState, notices, ensured, advance, close, tickDeps, registryPath,
-    setSend: (m: typeof sendMode) => { sendMode = m; }, pins, refusePin: (why: string | null) => { pinRefusal = why; } };
+  return { db, dir, at, cli, cliWith, tick, task, intents, review, sent, live, acpState, notices, ensured, advance, close, tickDeps, registryPath,
+    setSend: (m: typeof sendMode) => { sendMode = m; }, pins, refusePin: (why: string | null) => { pinRefusal = why; },
+    reviewerCheckoutAt: (h: string | null) => { reviewerAt = h; } };
 }
 
 /** Drive the card from spec to the start of build: author session, restate order, worker restates, PM releases it. */

@@ -102,6 +102,7 @@ async function realDeps(args: string[]): Promise<LedgerDeps | { error: string }>
     loadRegistry,
     saveRegistry,
     now: () => Date.now(),
+    callerSession: process.env.CLAUDESTRA_SESSION_ID || process.env.CLAUDE_CODE_SESSION_ID || undefined,
   };
 }
 

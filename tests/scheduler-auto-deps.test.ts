@@ -51,7 +51,7 @@ describe("T68f production deps (registry-driven, no network)", () => {
     const f = autoFixture();
     try {
       const row = (a: string) => JSON.parse(readFileSync(f.registryPath, "utf8")).agents[a] && { name: a, ...JSON.parse(readFileSync(f.registryPath, "utf8")).agents[a] };
-      expect(await messagePort(row).send("agent-task-one", "s-old", "x", "k")).toEqual({ ok: false, delivered: false, reason: "agent-task-one 的当前 session 不是台账绑定的 s-old" });
+      expect(await messagePort(f.db, row).send("agent-task-one", "s-old", "x", "k")).toEqual({ ok: false, delivered: false, reason: "agent-task-one 的当前 session 不是台账绑定的 s-old" });
       await toBuild(f);
       await f.tick();
       await f.cli("agent-task-one", "deliver", "T1", "--from", "build", "--head", H1);

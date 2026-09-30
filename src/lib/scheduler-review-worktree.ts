@@ -15,6 +15,12 @@ export const git: Git = async (args) => {
   return { code, out: (code === 0 ? out : err || out).trim() };
 };
 
+/** The commit a checkout sits on, or null when it is not a git checkout. */
+export function gitHeadSync(dir: string): string | null {
+  const r = Bun.spawnSync(["git", "-C", dir, "rev-parse", "HEAD"], { stdout: "pipe", stderr: "pipe" });
+  return r.exitCode === 0 ? r.stdout.toString().trim() : null;
+}
+
 /** Move the reviewer's checkout to `head`, refusing when the reviewer changed tracked files. */
 export async function pinReviewWorktree(dir: string, head: string, g: Git = git): Promise<Pinned> {
   const st = await g(["-C", dir, "status", "--porcelain", "--untracked-files=no"]);

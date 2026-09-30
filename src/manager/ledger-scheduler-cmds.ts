@@ -24,6 +24,9 @@ export const SCHEDULER_CMDS: Record<string, CommandSpec> = {
       if (!WORKFLOW_TEMPLATES.includes(template as never) || !WORKFLOW_MODES.includes(mode as never) || !AUTHOR_FAMILIES.includes(family as never)) {
         throw new LedgerError("invalid", "模板、模式或模型家族不认识");
       }
+      if (mode === "auto" && !c.deps.autoTickWired) {
+        throw new LedgerError("forbidden", "调度服务还没接上自动 tick（等 PR D 合入后在服务循环里接线）：现在开 auto 没有东西推它，先用 observe 或 manual");
+      }
       const r = setWorkflow(c.db, c.ctx(), {
         taskId: c.p.pos[1] ?? "", taskRev: integer(c, "rev"),
         workflowRev: c.p.flags["workflow-rev"] === undefined ? undefined : integer(c, "workflow-rev"),

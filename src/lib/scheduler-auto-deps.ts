@@ -18,6 +18,7 @@ import { SRC_DIR } from "./repo-root.js";
 import { runManagerProcess } from "./run-manager.js";
 import { boundRef, type AutoTickDeps } from "./scheduler-auto-tick.js";
 import { acpPort, messagePort, type RegistryRow } from "./scheduler-auto-ports.js";
+import { runtimeFamily } from "./scheduler-auto-review.js";
 import { openReviewWorktree, pinReviewWorktree } from "./scheduler-review-worktree.js";
 import type { SessionRole } from "./scheduler-sessions.js";
 import { ledgerResult } from "./scheduler-work-order.js";
@@ -34,12 +35,10 @@ const run = (env: Record<string, string | undefined>, timeoutMs: number): Manage
 const schedulerLedger: Manager = run({ CLAUDESTRA_SCHEDULER_SERVICE: "1" }, 120_000);
 const plainManager: Manager = run({}, 180_000);
 
-const familyOf = (a: RegistryAgent): AuthorFamily | null =>
-  a.runtime === "codex" ? "codex" : a.runtime === undefined || a.runtime === "claude-code" ? "claude" : null;
 export const reviewerName = (taskId: string): string => `agent-rv-${taskId.toLowerCase()}`;
 
 function refOf(task: LedgerTask, role: SessionRole, row: RegistryAgent, family: AuthorFamily): EnsureResult {
-  if (familyOf(row) !== family) return { kind: "manual", reason: `${row.name} 的 runtime（${row.runtime ?? "claude-code"}）不是要求的 ${family} 家族` };
+  if (runtimeFamily(row.runtime) !== family) return { kind: "manual", reason: `${row.name} 的 runtime（${row.runtime ?? "claude-code"}）不是要求的 ${family} 家族` };
   if (!row.sessionId) return { kind: "unknown", reason: `${row.name} 还没有 session id` };
   const ref: SessionRef = { taskId: task.id, role, agent: row.name, sessionId: row.sessionId, family, transport: row.transport === "acp" ? "acp" : "tmux" };
   return { kind: "ready", ref, created: false };
@@ -108,7 +107,7 @@ function worker(db: Database, registryRow: RegistryRow, ref: SessionRef): Worker
     ledger: { result: (r, probe) => ledgerResult(db, r, probe) },
   };
   if (route.route === "acp") return createAcpWorker({ ...deps, port: acpPort(db, registryRow) });
-  const port = messagePort(registryRow);
+  const port = messagePort(db, registryRow);
   if (route.route === "tmux") return createTmuxFallbackWorker({ ...deps, port, reason: route.fallbackReason ?? "tmux 兼容回退" });
   return createChannelWorker({ ...deps, port });
 }

@@ -38,6 +38,10 @@ export interface LedgerDeps {
   projects?(): ProjectDef[];
   /** ledger audit 的取数来源；不给 = 真实的 registry / tmux / 文件（测试注入假的） */
   auditSources?: SnapshotSources;
+  /** 调用方运行时给的会话 id（CLAUDESTRA_SESSION_ID / CLAUDE_CODE_SESSION_ID）：自动卡的审查结论要它等于台账绑定的 session */
+  callerSession?: string;
+  /** 调度服务已在跑自动 tick：没接上之前开 auto 没人推，workflow-set --mode auto 拒绝 */
+  autoTickWired?: boolean;
 }
 
 export type Result = Record<string, unknown>;

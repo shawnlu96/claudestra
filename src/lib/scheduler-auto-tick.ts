@@ -7,7 +7,8 @@
 import type { Database } from "bun:sqlite";
 import { getIntent, getWorkflow, type AuthorFamily, type IntentStatus, type SchedulerIntent } from "./ledger-scheduler.js";
 import type { LedgerTask } from "./ledger-stages.js";
-import { getTask } from "./ledger-store.js";
+import { getTask, listEvents } from "./ledger-store.js";
+import { deadUiAsk, screenshotRefs } from "./scheduler-apply.js";
 import { autoSnapshot } from "./scheduler-auto-snapshot.js";
 import { CLAIM_LEASE_MS, driveDispatch, type DriveOutcome, type SchedulerLedgerOps } from "./scheduler-dispatch.js";
 import { planScheduler, type PlannerDecision } from "./scheduler-plan.js";
@@ -156,7 +157,13 @@ class Card {
     if (intent.status !== "pending") return this.out("held", `${intent.action} 意图停在 ${intent.status}`);
     const cmd = intent.action === "stage" ? ["scheduler-stage", intent.id, "--to", plan?.targetStage ?? ""] : ["scheduler-ui-ask", intent.id];
     if (intent.action === "stage" && !plan?.targetStage) return this.cancelStale(intent, "计划里没有目标阶段");
+    const shots = intent.action === "ask" ? screenshotRefs(this.task) : null;
+    if (shots && "missing" in shots) {
+      await this.settle(intent.id, "pending", "cancelled", `未开 ask：${shots.missing}`);
+      return this.escalate(shots.missing, intent.id);
+    }
     const r = await this.deps.manager("ledger", ...cmd, "--max-workers", String(this.opts.maxWorkers));
+    if (r.ok === true && r.duplicate !== true && plan?.pmDiffNotice) await this.diffNotice();
     if (r.ok === true) return this.out(intent.action, intent.action === "stage" ? `${this.task.stage}→${plan?.targetStage}` : `ask ${String(r.askId)}`);
     return r.code === "conflict" ? this.cancelStale(intent, String(r.error)) : this.out("held", String(r.error));
   }
@@ -169,8 +176,25 @@ class Card {
     return this.out("held", `意图 ${intent.action} 不由本服务执行`);
   }
 
+  /** P2 findings do not block the merge, but PM reads the diff: best-effort, the stage event itself is the durable record. */
+  async diffNotice(): Promise<void> {
+    const rv = listEvents(this.db, { project: this.task.project, target: this.task.id }).findLast((e) => e.kind === "review");
+    const text = `[调度引擎] ${this.task.id} 审查通过但留有 P2，已进合并队列，请看 diff：head ${String(rv?.data.head ?? this.task.headSHA)}` +
+      `，报告 ${String(rv?.data.path ?? "（无）")}`;
+    await this.deps.notifyPm(this.task, text).catch((e) => console.error(`⚠️ [scheduler] P2 看 diff 通知没发出去：${(e as Error).message}`));
+  }
+
+  /** A screenshot ask that expired or was withdrawn can never be answered; waiting on it would be forever. */
+  uiAskDead(): SchedulerIntent | null {
+    const sent = this.db.query(`SELECT * FROM scheduler_intents WHERE taskId = ? AND action = 'ask' AND status = 'done'
+      ORDER BY eventSeq DESC LIMIT 1`).get(this.task.id) as SchedulerIntent | null;
+    return sent && deadUiAsk(this.db, sent.id, this.deps.now()) ? sent : null;
+  }
+
   /** A sent order is only a receipt: watch its session for a quota / auth failure, which is PM's call, never a resend. */
   async watch(wait: Extract<PlannerDecision, { kind: "wait" }>): Promise<CardOutcome> {
+    const deadAsk = wait.code === "owner_screenshot" ? this.uiAskDead() : null;
+    if (deadAsk) return this.escalate("截图 ask 已过期或被撤下，没人能再答：PM 决定重开还是接管", deadAsk.id);
     if (wait.code !== "in_flight") return this.out("waiting", wait.reason);
     const sent = (this.db.query(`SELECT * FROM scheduler_intents WHERE taskId = ? AND action IN ('dispatch','review') AND status = 'done'
       ORDER BY eventSeq DESC LIMIT 1`).get(this.task.id) as SchedulerIntent | null);
@@ -178,8 +202,11 @@ class Card {
     const ref = sent && boundRef(this.db, this.task.id, roleOfIntent(sent));
     if (!sent || !step || !ref) return this.out("waiting", wait.reason);
     const w = this.deps.worker(ref);
-    if ("manual" in w) return this.out("waiting", wait.reason);
+    if ("manual" in w) return this.out("held", `${wait.reason}；${w.manual}`);
     const seen = await w.observe(ref, { round: this.task.round, step, head: sent.head, dedupKey: sent.id });
+    if (seen.state === "unknown" && seen.failure) {
+      return this.escalate(`${ref.agent} 报了归不到派单上的失败（${seen.failure.kind}），本单可能也没跑：${seen.failure.message}`, sent.id);
+    }
     if (seen.state === "result" && seen.outcome === "failed") {
       const what = seen.failure.kind === "quota" ? "撞额度" : seen.failure.kind === "auth" ? "登录失效" : "回合失败";
       return this.escalate(`${ref.agent} ${what}：${seen.failure.message}`, sent.id);
