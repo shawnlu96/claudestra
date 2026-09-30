@@ -65,7 +65,7 @@ function markIfHeldAcrossStop(item: HeldItem, stop: { at: number; order: Order }
   const m = item.env.meta;
   // 比到达序号，不比押下的毫秒（同一毫秒判不出先后）；老版本押下、没领过号的才退回比押下时刻
   const before = stop && (m.arrivalSeq !== undefined ? isAfter(stop.order, { seq: m.arrivalSeq }) : item.heldAt < stop.at);
-  if (stop && before && item.env.from.kind !== "bridge" && !m.interruptNote) m.interruptNote = heldAcrossStopNote(item.heldAt, stop.at);
+  if (stop && before && item.env.from.kind !== "bridge" && !m.interruptNote) [m.interruptNote, m.sentBeforeStop] = [heldAcrossStopNote(item.heldAt, stop.at), true];
 }
 
 /** 发送人：同一个人（同一个 token / Discord 用户 / agent 频道）连着的几条可以进同一轮 */

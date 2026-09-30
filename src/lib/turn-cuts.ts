@@ -315,10 +315,13 @@ export function staleStopReply(agent: string, interrupted: boolean): string {
   return `[⏹ bridge] 这条「停」生效之前你又开过口，已作废：${interrupted ? `送到时打断了 ${agent} 当时在跑的回合` : `没有打断 ${agent}`}。`;
 }
 
-/** 押在叫停之前、叫停之后才送到的消息（忙时作答的 ask 答复、agent 请求）的抬头：它不是「停之后用户又让你做」 */
-export function heldAcrossStopNote(heldAt: number, stopAt: number): string {
-  const [h, s] = [hhmmss(heldAt).slice(0, 5), hhmmss(stopAt).slice(0, 5)];
-  return `[⏹ 这条是叫停之前（${h}）发来的，押到现在才送到；用户 ${s} 叫停过。它不是停之后又让你做的事：先别照做，问用户还要不要。]`;
+/**
+ * 叫停之前到、叫停之后才送到的消息（忙时作答的 ask 答复、agent 请求、传图慢的「继续」）的抬头：它不是「停之后用户又让你做」。
+ * heldAt = 押下的时刻；不是押后队列来的不给（到达时刻没记，只说晚到了）
+ */
+export function heldAcrossStopNote(heldAt: number | undefined, stopAt: number): string {
+  const how = heldAt === undefined ? "发来的，停之后才送到" : `（${hhmmss(heldAt).slice(0, 5)}）发来的，押到现在才送到`;
+  return `[⏹ 这条是叫停之前${how}；用户 ${hhmmss(stopAt).slice(0, 5)} 叫停过。它不是停之后又让你做的事：先别照做，问用户还要不要。]`;
 }
 
 /**

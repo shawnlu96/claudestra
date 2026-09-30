@@ -8,8 +8,8 @@ import { controlFor } from "../lib/runtimes/index.js";
 import { readRegistryAgents } from "../lib/registry.js";
 import { ownerStopOf } from "../lib/stop-words.js";
 import { windowWallWait, type WallWait } from "../lib/wall-screen.js";
-import { preemptHeadline, staleStopNote, staleStopReply, stopHeadline, stopWaitReply } from "../lib/turn-cuts.js";
-import type { Order } from "../lib/arrival-order.js";
+import { heldAcrossStopNote, preemptHeadline, staleStopNote, staleStopReply, stopHeadline, stopWaitReply, withInterruptNote } from "../lib/turn-cuts.js";
+import { isAfter, type Order } from "../lib/arrival-order.js";
 import { stopTyping } from "./components.js";
 import { clearSafetyTimer } from "./discord-adapter.js";
 import { emitEvent, inflightTools } from "./event-bus.js";
@@ -28,6 +28,29 @@ export const setStopHooks = (h: { clearAgentPendings: typeof clearAgentPendings 
 
 /** 这封信到达 bridge 时领的号（请求入口领，bridge/arrival-stamp.ts；bridge.ts deliverLocalInOrder 补领；单测直调、没领过的现领） */
 const arrivalOf = (env: Envelope): Order => ({ seq: (env.meta.arrivalSeq ??= turnCuts.arrivals.take()) });
+
+/**
+ * 叫停之前到、叫停之后才投给 agent 的（先到的「继续」在传图 / 下载附件，后到的停先走完；答卡片走得慢）：号比频道最近一次叫停早。
+ * 加「停之前发的，先别照做」抬头，不再当开口去抢占——不然 owner 最后一句是停，agent 收到的最后一句却是继续，接着干（tests/preempt-stop.test.ts）。
+ * 投递前查两次：preemptForHuman 入口（不发键），ws.send 前一刻（noteAtSend：途中的 await 里又按了停）。bridge 的通知和停字本身不算
+ */
+function sentBeforeStop(env: Envelope, channelId: string): boolean {
+  const m = env.meta;
+  if (m.sentBeforeStop) return true;
+  const stop = turnCuts.stopMark(channelId);
+  if (!stop || m.arrivalSeq === undefined || env.from.kind === "bridge" || (!m.forwarded && ownerStopOf(env).stop)) return false;
+  if (!isAfter(stop.order, { seq: m.arrivalSeq })) return false;
+  [m.interruptNote, m.sentBeforeStop] = [heldAcrossStopNote(undefined, stop.at), true];
+  return true;
+}
+
+/** ws.send 前一刻（和发送之间没有 await）：再查一次叫停，拼上最终的抬头；bare = 不带抬头渲染好的正文（bridge.ts deliverToLocal） */
+export function noteAtSend(env: Envelope, channelId: string, bare: string, meta: Record<string, string>): string {
+  sentBeforeStop(env, channelId);
+  const note = env.meta.interruptNote;
+  if (note) meta.interrupt_note = "true"; // 历史只剥真由 bridge 加的抬头(lib/inbound-body.ts),用户手写的同样开头不剥
+  return note ? withInterruptNote(bare, note) : bare;
+}
 
 function senderName(env: Envelope): string {
   return env.from.kind === "user" ? (env.from.username ?? "用户") : env.from.kind === "api" ? env.from.name : "用户";
@@ -81,6 +104,7 @@ export async function preemptForHuman(env: Envelope, channelId: string, agent: s
   const { owner, stop } = env.meta.forwarded ? { owner: false, stop: false } : ownerStopOf(env);
   const order = arrivalOf(env);
   if (owner) turnCuts.noteHuman(channelId, stop, order);
+  if (sentBeforeStop(env, channelId)) return; // 停之前到的：不打断、不写「处理完接着做被打断的事」，抬头照实写停之前发的
   // 「停」的先后按到达序号（押过的沿用原号，不按投递时刻）：它之后 owner 又开过口（答卡片、说话）= 作废——不发键、不挂起，只给 agent 一句提示。
   // 入口、发键那一刻（wanted：esc-guard / C-c / Pi·ACP 中止帧前同步再问）、记停之前各查一次，三处和各自的动作之间都没有 await
   const held = stop && env.meta.heldStopNoted === true;

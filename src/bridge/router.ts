@@ -145,6 +145,7 @@ export interface Envelope {
     interruptNote?: string;
     arrivalSeq?: number; // 到达 bridge 时领的号（lib/arrival-order.ts）：跟着押后队列落盘，晚投时「停」与开口的先后按它比（bridge/preempt.ts）
     heldStopNoted?: boolean; // owner 的「停」押在撞墙画面上时已当场记过（bridge/preempt.ts noteHeldStop）：重投不再记，免得清掉之后才来的回程槽
+    sentBeforeStop?: boolean; // 号早于频道最近一次叫停、叫停之后才投：已加「停之前发的」抬头、不再抢占（bridge/preempt.ts sentBeforeStop）
     dropIfStopped?: boolean; // owner 叫停中就不投（Autopilot 到点收尾）：ws.send 前最后那一查（bridge/turn-cuts.ts noticeWanted）
     /**
      * 只在目标主回合空闲时投（与 agent→agent 同规则），语义固定、别的任务直接复用（打断收尾提醒、T11a 的答复）：
