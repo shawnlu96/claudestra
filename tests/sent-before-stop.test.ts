@@ -6,6 +6,7 @@
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { interruptGate } from "../src/bridge/interrupt-gate.js";
+import { createInterruptGate } from "../src/lib/interrupt-gate.js";
 import { setExtensionSocket } from "../src/bridge/pi-abort.js";
 import { manualInterrupt, noteAtSend, preemptForHuman, setStopHooks, waitsForIdle } from "../src/bridge/preempt.js";
 import { flushHeld } from "../src/bridge/held-flush.js";
@@ -178,5 +179,71 @@ describe("停之前到的人类消息：忙时押、闲了投、带抬头、零�
     expect(got[0]).toStartWith("[⏹ 这条是叫停之前");
     expect(log).toEqual([]);
     expect(held.get(CC)).toBeUndefined();
+  });
+});
+
+/**
+ * T13f 终审 P1：入口时还没有停，普通消息照常去抢占；gate 判完忙闲、下层正等窗口 / 锁 / 间隔时，owner 在终端按了 Esc（watcher 记下
+ * 比它晚的停）。发键那一刻（wanted）要撤回、一个键都不发——人的 Esc 已让 CC 空闲，再来一发会开 Rewind；键发出后收尾那一拍里才停的，
+ * 不记抢占 cut（盖掉停的 cut、回合结束还提醒「接着做」）。真实 createInterruptGate，只把发键的 await 换成可控的。
+ * 第一条是审查员的探针（rv-t13f-work/probe-final-stale-preempt.ts）改写的
+ */
+describe("入口之后、发键之前才叫停：普通抢占撤回（T13f 终审 P1）", () => {
+  const terminalStop = () =>
+    turnCuts.record({ channelId: CC, agent: "agent-cc", cause: "terminal", tools: { inflight: [] }, stopOrder: turnCuts.arrivals.backdate(Date.now(), true) });
+  /** 下层发键前停在 during() 上；settle = 键发出后收尾那一拍（SETTLE_MS）里要做的事 */
+  const realGate = (h: { during?: () => void; settle?: () => void }) => {
+    const r = { sends: 0, hasWanted: false };
+    interruptGate.preempt = createInterruptGate({
+      resolve: async () => ({ win: "private", runtime: "claude-code" }), probe: async () => ({ main: r.sends ? "idle" : "busy", bg: false }),
+      sleep: async () => h.settle?.(), onPreempted: () => undefined,
+      interrupt: async (_w, _r, _c, _k, wanted) => {
+        r.hasWanted = !!wanted;
+        await Promise.resolve(h.during?.());
+        if (wanted && !wanted()) throw Object.assign(new Error("withdrawn"), { name: "KeyWithdrawnError" });
+        r.sends++;
+        return ["Escape"];
+      },
+    }).preempt;
+    return r;
+  };
+  afterAll(() => void (interruptGate.preempt = orig.preempt));
+
+  test("下层等着发键时终端记停：零键、不记抢占、停着；忙时押、闲时带「停之前」抬头", async () => {
+    fresh();
+    const r = realGate({ during: terminalStop });
+    const go = env("g10", "继续", ((q) => (stampArrival(q), q))({}));
+    await preemptForHuman(go, CC, "agent-cc");
+    expect(r).toEqual({ sends: 0, hasWanted: true });
+    expect(turnCuts.interruptHold(CC)).toBe("stopped");
+    expect(turnCuts.get(CC)?.cause).toBe("terminal");
+    expect(holdsUntilIdle(go.from.kind, waitsForIdle(go, CC), { main: "busy", bg: false })).toBe(true);
+    const { body, meta } = received(go);
+    expect(body).toStartWith("[⏹ 这条是叫停之前");
+    expect(body).not.toContain("接着做被打断的事");
+    expect(meta.interrupt_note).toBe("true");
+  });
+
+  test("键发出后收尾那一拍里才记停：不记抢占 cut，停的 cut 留着、回合结束不提醒续做", async () => {
+    fresh();
+    let stopped = false;
+    const r = realGate({ settle: () => void (!stopped && r.sends && ((stopped = true), terminalStop())) });
+    const go = env("g11", "继续", ((q) => (stampArrival(q), q))({}));
+    await preemptForHuman(go, CC, "agent-cc");
+    expect(r.sends).toBe(1);
+    expect(turnCuts.get(CC)?.cause).toBe("terminal");
+    expect(received(go).body).toStartWith("[⏹ 这条是叫停之前");
+    expect(turnCuts.onStop(CC, "Stop", "agent-cc")).toBeNull();
+    expect(turnCuts.interruptHold(CC)).toBe("stopped");
+  });
+
+  test("对照：发键途中没人叫停，照常抢占、记抢占 cut", async () => {
+    fresh();
+    const r = realGate({});
+    const go = env("g12", "继续", ((q) => (stampArrival(q), q))({}));
+    await preemptForHuman(go, CC, "agent-cc");
+    expect(r).toEqual({ sends: 1, hasWanted: true });
+    expect(turnCuts.get(CC)?.cause).toBe("preempt");
+    expect(received(go).body).toContain("接着做被打断的事");
   });
 });

@@ -32,7 +32,7 @@ const arrivalOf = (env: Envelope): Order => ({ seq: (env.meta.arrivalSeq ??= tur
 /**
  * 叫停之前到、叫停之后才投给 agent 的（先到的「继续」在传图 / 下载附件，后到的停先走完；答卡片走得慢）：号比频道最近一次叫停早。
  * 加「停之前发的，先别照做」抬头，不再当开口去抢占——不然 owner 最后一句是停，agent 收到的最后一句却是继续，接着干（tests/preempt-stop.test.ts）。
- * 投递前查两次：preemptForHuman 入口（不发键），ws.send 前一刻（noteAtSend：途中的 await 里又按了停）。bridge 的通知和停字本身不算
+ * 查的地方：preemptForHuman 入口、发键那一刻（wanted）、记抢占 cut 之前，ws.send 前一刻（noteAtSend）。bridge 的通知和停字本身不算
  */
 function sentBeforeStop(env: Envelope, channelId: string): boolean {
   const m = env.meta;
@@ -126,7 +126,8 @@ export async function preemptForHuman(env: Envelope, channelId: string, agent: s
   const queuedBefore = stop && runtime === "codex" ? turnCuts.codexQueuedBefore(channelId) : [];
   let r: PreemptResult = { fired: false, why: "not_allowed" };
   try {
-    r = await interruptGate.preempt(channelId, agent, { stop, ...(stop ? { wanted: () => !stale() } : {}) });
+    // 普通消息发键那一刻也再问：入口之后、键发出之前 owner 叫了停（终端 Esc、停止按钮），它就成了停之前到的，一个键都不发
+    r = await interruptGate.preempt(channelId, agent, { stop, wanted: () => !(stop ? stale() : sentBeforeStop(env, channelId)) });
   } catch (e) {
     // 等锁 / 节流期间 Codex 菜单弹出来了，Esc 没发（lib/codex-key-guard.ts）：按停在菜单处理，这条押住
     if ((e as Error).name === "KeysBlockedError") r = { fired: false, why: "wall_wait" };
@@ -135,7 +136,8 @@ export async function preemptForHuman(env: Envelope, channelId: string, agent: s
   if (!r.fired && r.why === "wall_wait") return "wall_wait";
   // 键发出之后 owner 才开口的，也不再挂起（作答那边已按序号解除），抬头照实写打断了没有
   if (stale()) return void (stopWait?.(staleStopReply(agent, r.fired)), (env.meta.interruptNote = staleNote(r.fired)));
-  if (!r.fired && !stop) return;
+  // 键发出后收尾那一拍里才叫停的：不记抢占 cut（会盖掉停的 cut、回合结束还提醒「接着做」），抬头已改写成停之前发的
+  if (!stop && (!r.fired || sentBeforeStop(env, channelId))) return;
   const cut = turnCuts.record({
     channelId, agent, runtime, cause: stop ? "stopword" : "preempt",
     byMessageId: env.meta.messageId, byName: senderName(env), tools: r.fired ? tools : { inflight: [] }, interrupted: r.fired, ...(stop ? { stopOrder: order } : {}),
