@@ -17,11 +17,11 @@ import { readRegistryAgentsSync, type RegistryAgent } from "./registry.js";
 import { SRC_DIR } from "./repo-root.js";
 import { runManagerProcess } from "./run-manager.js";
 import { boundRef, type AutoTickDeps } from "./scheduler-auto-tick.js";
-import { acpPort, messagePort, type RegistryRow } from "./scheduler-auto-ports.js";
+import { acpPort, messagePort, type RegistryRow, type StillActive } from "./scheduler-auto-ports.js";
 import { runtimeFamily } from "./scheduler-auto-review.js";
 import { whileOwned } from "./scheduler-maintenance.js";
 import { schedulerManager } from "./scheduler-service.js";
-import { gitDirtySync, openReviewWorktree, pinReviewWorktree } from "./scheduler-review-worktree.js";
+import { git as realGit, gitDirtySync, openReviewWorktree, pinReviewWorktree, type Git } from "./scheduler-review-worktree.js";
 import type { SessionRole } from "./scheduler-sessions.js";
 import { ledgerResult } from "./scheduler-work-order.js";
 import { createAcpWorker } from "./worker-acp.js";
@@ -44,8 +44,12 @@ function refOf(task: LedgerTask, role: SessionRole, row: RegistryAgent, family: 
   return { kind: "ready", ref, created: false };
 }
 
-/** active throws SchedulerStopped once the service is stopping or lost its lease: checked between the steps of a create. */
-interface Env { db: Database; registryRow: RegistryRow; worktreeRoot: string; active: () => void }
+/**
+ * active throws SchedulerStopped once the service is stopping or lost its lease. It sits right against each effect: every
+ * git subprocess runs through `git` (checked before the spawn and after the exit), and a bridge frame asks `alive` in the
+ * same synchronous block as the send.
+ */
+interface Env { db: Database; registryRow: RegistryRow; worktreeRoot: string; active: () => void; alive: StillActive; git: Git }
 const checkoutOf = (env: Env, taskId: string): string => join(env.worktreeRoot, `rv-${taskId.toLowerCase()}`);
 const realOr = (p: string): string => { try { return realpathSync.native(p); } catch { return p; /* not there yet: compare as written */ } };
 
@@ -54,7 +58,7 @@ async function createReviewer(env: Env, task: LedgerTask, family: AuthorFamily):
   const author = boundRef(db, task.id, "author");
   const authorDir = author && registryRow(author.agent)?.cwd;
   if (!authorDir) return { kind: "manual", reason: "找不到执行者的工作目录，建不了审查 session" };
-  const opened = await whileOwned(env.active, () => openReviewWorktree(authorDir, checkoutOf(env, task.id), task.headSHA));
+  const opened = await openReviewWorktree(authorDir, checkoutOf(env, task.id), task.headSHA, env.git);
   if ("manual" in opened) return { kind: "manual", reason: opened.manual };
   const dir = opened.dir;
   const name = reviewerName(task.id);
@@ -91,10 +95,10 @@ async function pinReview(env: Env, task: LedgerTask, ref: SessionRef, head: stri
   const cwd = env.registryRow(ref.agent)?.cwd;
   if (!cwd || realOr(cwd) !== realOr(dir)) return { manual: `${ref.agent} 的工作目录 ${cwd ?? "（无）"} 不是它独立的审查 worktree ${dir}` };
   if (!head) return { manual: "派审意图没有 head" };
-  return pinReviewWorktree(dir, head);
+  return pinReviewWorktree(dir, head, env.git);
 }
 
-function worker(db: Database, registryRow: RegistryRow, ref: SessionRef): WorkerSession | { manual: string } {
+function worker({ db, registryRow, alive }: Env, ref: SessionRef): WorkerSession | { manual: string } {
   const row = registryRow(ref.agent);
   if (!row) return { manual: `${ref.agent} 不在本机 registry` };
   if (row.sessionId !== ref.sessionId) return { manual: `${ref.agent} 的当前 session 已不是台账绑定的那个` };
@@ -108,30 +112,43 @@ function worker(db: Database, registryRow: RegistryRow, ref: SessionRef): Worker
     },
     ledger: { result: (r, probe) => ledgerResult(db, r, probe) },
   };
-  if (route.route === "acp") return createAcpWorker({ ...deps, port: acpPort(db, registryRow) });
-  const port = messagePort(db, registryRow);
+  if (route.route === "acp") return createAcpWorker({ ...deps, port: acpPort(db, registryRow, alive) });
+  const port = messagePort(db, registryRow, undefined, alive);
   if (route.route === "tmux") return createTmuxFallbackWorker({ ...deps, port, reason: route.fallbackReason ?? "tmux 兼容回退" });
   return createChannelWorker({ ...deps, port });
 }
 
-async function notifyPm(db: Database, task: LedgerTask, text: string): Promise<void> {
+async function notifyPm({ db, alive }: Env, task: LedgerTask, text: string): Promise<void> {
   const meta = getMeta(db, task.project);
   const pm = meta.pms.find((p) => p !== meta.team?.dispatcher) ?? "master";
-  const r = await bridgeSend({ type: "route_to_agent", targetName: pm, text, fromName: "scheduler", oneShot: true }, { timeoutMs: 30_000 });
+  const r = await bridgeSend({ type: "route_to_agent", targetName: pm, text, fromName: "scheduler", oneShot: true }, { timeoutMs: 30_000, stillActive: alive });
   if (!r.ok) throw new Error(`发给 ${pm} 失败：${r.error}`);
 }
 
-/** registryPath / worktreeRoot are for tests; production reads the canonical registry fresh on every lookup. */
-export function autoTickDeps(db: Database, registryPath?: string, worktreeRoot = statePath("worktrees"), active: () => void = () => {}): AutoTickDeps {
+export interface AutoDepsOpts {
+  /** Tests only; production reads the canonical registry fresh on every lookup. */
+  registryPath?: string;
+  worktreeRoot?: string;
+  /** The service pass's liveness check (throws SchedulerStopped); default = always active. */
+  active?: () => void;
+  /** Tests only: the git underneath the liveness guard. */
+  git?: Git;
+}
+
+export function autoTickDeps(db: Database, opts: AutoDepsOpts = {}): AutoTickDeps {
+  const { registryPath, worktreeRoot = statePath("worktrees"), active = () => {}, git: baseGit = realGit } = opts;
   const registryRow: RegistryRow = (agent) => readRegistryAgentsSync(registryPath).find((a) => a.name === agent);
-  const env: Env = { db, registryRow, worktreeRoot, active };
+  const alive: StillActive = () => {
+    try { active(); return true; } catch { return false; /* any failure of the liveness check means "not provably active": send nothing */ }
+  };
+  const env: Env = { db, registryRow, worktreeRoot, active, alive, git: (args) => whileOwned(active, () => baseGit(args)) };
   return {
     manager: schedulerManager,
-    worker: (ref) => worker(db, registryRow, ref),
+    worker: (ref) => worker(env, ref),
     ensure: (task, role, family) => ensure(env, task, role, family),
     pinReview: (task, ref, head) => pinReview(env, task, ref, head),
     reviewDirty: async (_task, ref) => { const cwd = registryRow(ref.agent)?.cwd; return cwd ? gitDirtySync(cwd) : null; },
-    notifyPm: (task, text) => notifyPm(db, task, text),
+    notifyPm: (task, text) => notifyPm(env, task, text),
     now: () => Date.now(),
   };
 }

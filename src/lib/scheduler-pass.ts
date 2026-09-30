@@ -1,15 +1,17 @@
 /**
  * One service pass = merge + observe + auto under a single maintenance lease, the same one `update` takes: while an
- * update holds it the whole pass is skipped, never just the merge part. Every external effect of the pass (ledger CLI,
- * session create, review pin, order submit, PM notice) re-checks the lease, the stop signal and the singleton lock
- * before and after its await, so a stop or a lost lease ends the pass there and no later card is driven.
+ * update holds it the whole pass is skipped, never just the merge part. The lease, the stop signal and the singleton lock
+ * are re-checked with no await between the check and the effect: before each subprocess spawn (ledger CLI, git, gh,
+ * manager create) and after it exits, and inside the bridge client's onopen right before a frame is sent. A stop or a lost
+ * lease ends the pass there; no later card is driven. Tests: tests/scheduler-service-lease.test.ts.
  */
 import type { Database } from "bun:sqlite";
 import { autoTickDeps } from "./scheduler-auto-deps.js";
 import { schedulerAutoTick, type AutoTickDeps } from "./scheduler-auto-tick.js";
 import type { SchedulerConfig } from "./scheduler-config.js";
-import { acquireMaintenance, SchedulerStopped, whileOwned } from "./scheduler-maintenance.js";
+import { acquireMaintenance, SchedulerStopped } from "./scheduler-maintenance.js";
 import { mergeExternal } from "./scheduler-merge-external.js";
+import { runBounded } from "./run-bounded.js";
 import type { MergeExternal } from "./scheduler-merge-driver.js";
 import { schedulerObserveTick } from "./scheduler-observe-tick.js";
 import { mergeTick, schedulerManager } from "./scheduler-service.js";
@@ -30,7 +32,11 @@ export interface PassOpts {
 
 export interface PassResult { ran: boolean; failed: { taskId: string; error: string }[] }
 
-const guard = <A extends unknown[], R>(active: Active, fn: (...a: A) => Promise<R>) => (...a: A): Promise<R> => whileOwned(active, () => fn(...a));
+/** Checked right before the call and again when it settles, failed or not: after a stop, SchedulerStopped wins over the call's own error. */
+const guard = <A extends unknown[], R>(active: Active, fn: (...a: A) => Promise<R>) => async (...a: A): Promise<R> => {
+  active();
+  try { return await fn(...a); } finally { active(); }
+};
 
 function guardWorker(w: WorkerSession, active: Active): WorkerSession {
   return {
@@ -55,10 +61,11 @@ export async function schedulerPass(db: Database, config: SchedulerConfig, opts:
   const active: Active = () => { opts.assertOwner(); if (!lease.held()) throw new SchedulerStopped("scheduler lost maintenance lease"); };
   const manager = guard(active, opts.manager ?? schedulerManager);
   try {
-    await mergeTick(db, config, manager, opts.external ?? mergeExternal, active);
+    // every gh subprocess of the merge driver, reads included, is checked right before its spawn and after its exit
+    await mergeTick(db, config, manager, opts.external ?? ((p) => mergeExternal(p, guard(active, runBounded))), active);
     // observe 卡只写观察事件，auto 卡每卡推一步；某张卡失败不挡其余卡，失败汇总给服务的去重日志
     const observed = await schedulerObserveTick(db, config.projects, manager);
-    const auto = await schedulerAutoTick(db, config.projects, guardAutoDeps((opts.autoDeps ?? ((a) => autoTickDeps(db, undefined, undefined, a)))(active), active));
+    const auto = await schedulerAutoTick(db, config.projects, guardAutoDeps((opts.autoDeps ?? ((a) => autoTickDeps(db, { active: a })))(active), active));
     return { ran: true, failed: [...observed.failed, ...auto.failed] };
   } finally { lease.release(); }
 }

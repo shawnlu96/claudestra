@@ -1,13 +1,36 @@
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
 import { getTask } from "../src/lib/ledger-store.js";
 import { reviewWorktreeChecks } from "../src/lib/doctor-review-worktrees.js";
 import { autoTickDeps } from "../src/lib/scheduler-auto-deps.js";
-import { git, gitDirtySync, gitHeadSync, openReviewWorktree, pinReviewWorktree } from "../src/lib/scheduler-review-worktree.js";
+import { SchedulerStopped } from "../src/lib/scheduler-maintenance.js";
+import { git, gitDirtySync, gitHeadSync, openReviewWorktree, pinReviewWorktree, type Git } from "../src/lib/scheduler-review-worktree.js";
 import type { SessionRef } from "../src/lib/worker-session.js";
 import { autoFixture } from "./scheduler-auto-helpers.js";
+
+const RV: SessionRef = { taskId: "T1", role: "reviewer", agent: "agent-rv-t1", sessionId: "s-rv", family: "codex", transport: "acp" };
+
+/** Real git underneath; the lease is lost the moment `lostAfter` returns, before the scheduler sees its output. */
+function losingLease(lostAfter: string) {
+  const calls: string[] = [];
+  let lost = false;
+  const g: Git = async (args) => {
+    const r = await git(args);
+    calls.push(args[2]);
+    if (args[2] === lostAfter) lost = true;
+    return r;
+  };
+  return { calls, git: g, active: () => { if (lost) throw new SchedulerStopped("maintenance lease lost"); } };
+}
+
+function setAgentCwd(registryPath: string, agent: string, cwd: string | null): void {
+  const reg = JSON.parse(readFileSync(registryPath, "utf8"));
+  if (cwd === null) delete reg.agents[agent];
+  else reg.agents[agent].cwd = cwd;
+  writeFileSync(registryPath, JSON.stringify(reg));
+}
 
 async function repo() {
   const root = mkdtempSync(join(tmpdir(), "t68f-rvwt-")), author = join(root, "author");
@@ -61,7 +84,7 @@ describe("T68f reviewer checkout: its own detached worktree, pinned to the head 
     const r = await repo();
     const f = autoFixture();
     try {
-      const d = autoTickDeps(f.db, f.registryPath, join(r.root, "worktrees"));
+      const d = autoTickDeps(f.db, { registryPath: f.registryPath, worktreeRoot: join(r.root, "worktrees") });
       const task = getTask(f.db, "T1")!;
       const ref: SessionRef = { taskId: "T1", role: "reviewer", agent: "agent-rv-t1", sessionId: "s-rv", family: "codex", transport: "acp" };
       const setCwd = (cwd: string) => {
@@ -86,7 +109,7 @@ describe("T68f reviewer checkout: its own detached worktree, pinned to the head 
       const reg = JSON.parse(readFileSync(f.registryPath, "utf8"));
       reg.agents["agent-rv-t1"].cwd = r.checkout;
       writeFileSync(f.registryPath, JSON.stringify(reg));
-      const d = autoTickDeps(f.db, f.registryPath, join(r.root, "worktrees"));
+      const d = autoTickDeps(f.db, { registryPath: f.registryPath, worktreeRoot: join(r.root, "worktrees") });
       const ref: SessionRef = { taskId: "T1", role: "reviewer", agent: "agent-rv-t1", sessionId: "s-rv", family: "codex", transport: "acp" };
       writeFileSync(join(r.checkout, "notes.md"), "untracked report draft");
       expect(gitDirtySync(r.checkout)).toBeNull();
@@ -108,5 +131,36 @@ describe("T68f reviewer checkout: its own detached worktree, pinned to the head 
     const [c] = reviewWorktreeChecks(["rv-t1", "rv-t2"], new Set(["agent-rv-t1"]), "/w");
     expect(c).toMatchObject({ status: "warn", detail: "2 个审查 worktree，其中 1 个的审查员已不在：rv-t2" });
     expect(c.fix).toContain("git -C /w/rv-t2 worktree remove /w/rv-t2");
+  });
+
+  // T68f r4 P1-2: the liveness check sits on each git subprocess, not around the whole pin / create
+  test("the lease lost as the pin's status returns: no checkout runs, the reviewer's HEAD stays put", async () => {
+    const r = await repo();
+    const f = autoFixture();
+    try {
+      await openReviewWorktree(r.author, r.checkout, r.h1);
+      setAgentCwd(f.registryPath, "agent-rv-t1", r.checkout);
+      const lease = losingLease("status");
+      const d = autoTickDeps(f.db, { registryPath: f.registryPath, worktreeRoot: join(r.root, "worktrees"), ...lease });
+      await expect(d.pinReview(getTask(f.db, "T1")!, RV, r.h2)).rejects.toBeInstanceOf(SchedulerStopped);
+      expect(lease.calls).toEqual(["status"]);
+      expect(gitHeadSync(r.checkout)).toBe(r.h1);
+    } finally { f.close(); r.close(); }
+  });
+
+  test("the lease lost as creating the reviewer's rev-parse returns: no worktree add, no checkout on disk, no manager create", async () => {
+    const r = await repo();
+    const f = autoFixture();
+    try {
+      await f.tick(); // binds the author session
+      setAgentCwd(f.registryPath, "agent-task-one", r.author);
+      setAgentCwd(f.registryPath, "agent-rv-t1", null);
+      const lease = losingLease("rev-parse");
+      const d = autoTickDeps(f.db, { registryPath: f.registryPath, worktreeRoot: join(r.root, "worktrees"), ...lease });
+      await expect(d.ensure({ ...getTask(f.db, "T1")!, headSHA: r.h1 }, "reviewer", "codex")).rejects.toBeInstanceOf(SchedulerStopped);
+      expect(lease.calls).toEqual(["rev-parse"]);
+      expect(existsSync(r.checkout)).toBe(false);
+      expect((await git(["-C", r.author, "worktree", "list"])).out.split("\n")).toHaveLength(1);
+    } finally { f.close(); r.close(); }
   });
 });

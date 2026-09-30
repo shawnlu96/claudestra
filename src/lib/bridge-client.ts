@@ -55,8 +55,9 @@ type BridgeSendResult = { ok: true; result: any } | { ok: false; sent: boolean; 
  * Like bridgeRequest, for callers that must not resend blindly: sent=false means the request never left this process or
  * the bridge answered with a typed `rejected` code (refused before any delivery) — safe to plan again. Any other error
  * after sending is sent=true: the bridge may have delivered before failing, so the outcome is unknown.
+ * stillActive is asked in the same synchronous block as the send: a caller that stopped during the handshake sends nothing.
  */
-export async function bridgeSend(msg: Record<string, unknown>, opts?: { timeoutMs?: number }): Promise<BridgeSendResult> {
+export async function bridgeSend(msg: Record<string, unknown>, opts?: { timeoutMs?: number; stillActive?: () => boolean }): Promise<BridgeSendResult> {
   return new Promise((resolve) => {
     let sent = false;
     let done = false;
@@ -71,6 +72,7 @@ export async function bridgeSend(msg: Record<string, unknown>, opts?: { timeoutM
     };
     const timer = setTimeout(() => finish({ ok: false, sent, error: "Bridge 请求超时" }), opts?.timeoutMs ?? 10000);
     ws.onopen = () => {
+      if (opts?.stillActive && !opts.stillActive()) return finish({ ok: false, sent: false, error: "发送方已停止，帧没有发出" });
       ws.send(JSON.stringify({ ...msg, requestId }));
       sent = true;
     };

@@ -15,12 +15,15 @@ import type { AcpPort, AcpTurnState } from "./worker-acp.js";
 import type { HostFailure, LiveState, MessagePort, SendResult } from "./worker-ports.js";
 
 export type RegistryRow = (agent: string) => RegistryAgent | undefined;
+/** The scheduler's liveness, asked right before the frame goes out (see bridgeSend). */
+export type StillActive = () => boolean;
+const always: StillActive = () => true;
 
-const sendVia = (registryRow: RegistryRow) => async (agent: string, sessionId: string, text: string, key: string): Promise<SendResult> => {
+const sendVia = (registryRow: RegistryRow, stillActive: StillActive) => async (agent: string, sessionId: string, text: string, key: string): Promise<SendResult> => {
   const row = registryRow(agent);
   if (!row || row.sessionId !== sessionId) return { ok: false, delivered: false, reason: `${agent} 的当前 session 不是台账绑定的 ${sessionId}` };
   const r = await bridgeSend({ type: "route_to_agent", targetName: agent, text, fromName: "scheduler", oneShot: true, expectSession: sessionId },
-    { timeoutMs: 30_000 });
+    { timeoutMs: 30_000, stillActive });
   if (r.ok) return { ok: true, messageId: `${key}@${String(r.result?.targetChannelId ?? row.channelId ?? "")}` };
   return { ok: false, delivered: r.sent ? "unknown" : false, reason: r.error };
 };
@@ -52,8 +55,8 @@ function wallFailure(db: Database, row: RegistryAgent | undefined, wallPath: str
   return { failure: { kind: "quota", key: wall.id, message }, afterKey: claimedBefore(db, row.name, hit.at)?.id ?? null };
 }
 
-export function messagePort(db: Database, registryRow: RegistryRow, wallPath = QUOTA_WALL_PATH): MessagePort {
-  return { send: sendVia(registryRow), status: livenessVia(registryRow), interrupt: noInterrupt,
+export function messagePort(db: Database, registryRow: RegistryRow, wallPath = QUOTA_WALL_PATH, stillActive = always): MessagePort {
+  return { send: sendVia(registryRow, stillActive), status: livenessVia(registryRow), interrupt: noInterrupt,
     lastFailure: async (agent) => wallFailure(db, registryRow(agent), wallPath) };
 }
 
@@ -77,10 +80,10 @@ export function codexFailure(db: Database, agent: string): AcpTurnState["lastFai
   return { failure: { kind: quota ? "quota" : "auth", key: card.id, message }, afterKey: before?.id ?? null };
 }
 
-export function acpPort(db: Database, registryRow: RegistryRow): AcpPort {
+export function acpPort(db: Database, registryRow: RegistryRow, stillActive = always): AcpPort {
   const liveness = livenessVia(registryRow);
   return {
-    prompt: sendVia(registryRow),
+    prompt: sendVia(registryRow, stillActive),
     async turnState(agent, sessionId) {
       const live = await liveness(agent, sessionId);
       return { live, lastFailure: codexFailure(db, agent) };

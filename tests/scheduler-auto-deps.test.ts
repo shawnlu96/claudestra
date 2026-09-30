@@ -21,7 +21,7 @@ describe("T68f production deps (registry-driven, no network)", () => {
     const f = autoFixture();
     try {
       withAgents(f, { "agent-cx-tui": { runtime: "codex", sessionId: "s-tui" }, "agent-pi": { runtime: "pi", sessionId: "s-pi" } });
-      const d = autoTickDeps(f.db, f.registryPath);
+      const d = autoTickDeps(f.db, { registryPath: f.registryPath });
       const route = (r: SessionRef) => { const w = d.worker(r); return "manual" in w ? `manual:${w.manual}` : `${w.route}:${w.fallbackReason ?? ""}`; };
       expect(route(ref("agent-task-one", "s-one", "claude"))).toBe("channel:");
       expect(route(ref("agent-rv-t1", "s-rv", "codex", "acp"))).toBe("acp:");
@@ -35,7 +35,7 @@ describe("T68f production deps (registry-driven, no network)", () => {
   test("ensure: the author is the card's named executor; the reviewer is the per-card agent-rv-<task> of the other family", async () => {
     const f = autoFixture();
     try {
-      const d = autoTickDeps(f.db, f.registryPath);
+      const d = autoTickDeps(f.db, { registryPath: f.registryPath });
       const task = getTask(f.db, "T1")!;
       expect(await d.ensure(task, "author", "claude")).toMatchObject({ kind: "ready", created: false, ref: { agent: "agent-task-one", sessionId: "s-one", transport: "tmux" } });
       expect(await d.ensure(task, "author", "codex")).toMatchObject({ kind: "manual", reason: expect.stringContaining("不是要求的 codex 家族") });

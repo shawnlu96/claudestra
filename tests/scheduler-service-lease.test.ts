@@ -18,16 +18,19 @@ interface Frame { type: string; targetName?: string; requestId?: string }
 interface Svc {
   root: string; state: string; lockPath: string; frames: Frame[];
   onDispatch: (f: Frame) => Promise<void> | void;
+  /** Runs before each WebSocket upgrade completes: the client has connected, no frame can have been sent yet. */
+  onUpgrade: () => Promise<void> | void;
   child: ReturnType<typeof Bun.spawn> | null; server: Server<unknown>; stderr: Promise<string> | null;
 }
 
 const live: Svc[] = [];
 const dispatched = (s: Svc) => s.frames.filter((f) => f.type === "route_to_agent");
 
-function setup(cards: string[]): Svc {
+/** ghost: the cards' executor is not in the registry, so the first thing the scheduler sends is the PM notice. */
+function setup(cards: string[], opts: { ghost?: boolean } = {}): Svc {
   const root = mkdtempSync(join(tmpdir(), "t68f-lease-")), state = join(root, "state"), work = join(root, "work");
   for (const d of [state, work, join(root, "home"), join(root, "run"), join(root, "tmp"), join(root, "master")]) mkdirSync(d, { recursive: true });
-  const agents = Object.fromEntries(cards.map((id, i) => [`agent-task-${i}`, { runtime: "claude-code", sessionId: `s-${i}`, cwd: work,
+  const agents = opts.ghost ? {} : Object.fromEntries(cards.map((id, i) => [`agent-task-${i}`, { runtime: "claude-code", sessionId: `s-${i}`, cwd: work,
     channelId: `ch-${i}`, status: "active", projectId: "p", purpose: "", created: "", notes: "" }]));
   writeFileSync(join(state, "projects.json"), JSON.stringify({ projects: [{ id: "p", name: "p", dirs: [work], createdAt: "" }] }));
   writeFileSync(join(state, "registry.json"), JSON.stringify({ socket: "", agents }));
@@ -37,13 +40,17 @@ function setup(cards: string[]): Svc {
   let now = Date.now();
   const at = (actor: string) => ({ actor, now: (now += 10) });
   cards.forEach((id, i) => {
-    createTask(db, at("owner"), { project: "p", id, title: id, kind: "code", agent: `agent-task-${i}`, extra: { fileGlobs: [`f${i}.md`] } });
+    createTask(db, at("owner"), { project: "p", id, title: id, kind: "code", agent: opts.ghost ? "agent-ghost" : `agent-task-${i}`,
+      extra: { fileGlobs: [`f${i}.md`] } });
     setWorkflow(db, at("owner"), { taskId: id, taskRev: 1, template: "code", templateVersion: 2, mode: "auto", authorFamily: "claude", fallback: "退回人工" });
   });
   db.query("INSERT INTO meta (project, key, value) VALUES ('p', 'pms', '[\"agent-pm\"]') ON CONFLICT (project, key) DO UPDATE SET value = excluded.value").run();
   closeLedger(ledger);
-  const svc: Svc = { root, state, lockPath: join(state, "scheduler-maintenance.lock"), frames: [], onDispatch: () => {}, child: null, stderr: null,
-    server: Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: (req, s) => (s.upgrade(req, { data: null }) ? undefined : new Response("stub")), websocket: {
+  const svc: Svc = { root, state, lockPath: join(state, "scheduler-maintenance.lock"), frames: [], onDispatch: () => {}, onUpgrade: () => {}, child: null, stderr: null,
+    server: Bun.serve({ hostname: "127.0.0.1", port: 0, async fetch(req, s) {
+      await svc.onUpgrade();
+      return s.upgrade(req, { data: null }) ? undefined : new Response("stub");
+    }, websocket: {
       async message(ws, msg) {
         const frame = JSON.parse(String(msg)) as Frame;
         svc.frames.push(frame);
@@ -127,5 +134,42 @@ describe("the scheduler daemon's whole pass lives under the maintenance lease", 
     const first = dispatched(s)[0].targetName === "agent-task-0" ? "T1" : "T2";
     expect(intents(s).filter((i) => i.taskId !== first && i.action === "dispatch")).toEqual([]);
     expect(await s.stderr).toBe("");
+  }, 40_000);
+
+  // T68f r4 P1-1: the check sits inside the bridge client's onopen, right before the frame; one per source of "stopped"
+  const STOPS: Record<string, (s: Svc) => void> = {
+    "maintenance lease taken over": (s) => writeFileSync(join(s.lockPath, "owner"), "update-took-over"),
+    "SIGTERM": (s) => { s.child!.kill("SIGTERM"); },
+    "scheduler.pid taken over": (s) => writeFileSync(join(s.state, "scheduler.pid", "owner"), "another-scheduler"),
+  };
+
+  /** Stops the service once, while the first WebSocket (an order or a PM notice) is still in its handshake. */
+  async function stopDuringHandshake(s: Svc, stop: (s: Svc) => void): Promise<void> {
+    let stopped = false;
+    s.onUpgrade = async () => {
+      if (stopped) return;
+      stopped = true;
+      expect(s.frames).toEqual([]);
+      stop(s);
+      await Bun.sleep(300);
+    };
+    start(s);
+    expect(await until(() => stopped, 20_000)).toBe(true);
+    expect(await until(() => s.child!.exitCode !== null, 10_000)).toBe(true);
+    expect(s.frames).toEqual([]);
+  }
+
+  for (const [name, stop] of Object.entries(STOPS)) {
+    test(`stopped during an order's handshake (${name}): the frame is never sent, the next card is not dispatched`, async () => {
+      const s = setup(["T1", "T2"]);
+      await stopDuringHandshake(s, stop);
+      expect(intents(s).filter((i) => i.taskId === "T2" && i.action === "dispatch")).toEqual([]);
+    }, 40_000);
+  }
+
+  test("stopped during the PM notice's handshake: the notice is never sent", async () => {
+    const s = setup(["T1"], { ghost: true });
+    await stopDuringHandshake(s, STOPS["maintenance lease taken over"]);
+    expect(intents(s)).toEqual([expect.objectContaining({ taskId: "T1", action: "ensure_session", status: "cancelled" })]);
   }, 40_000);
 });
