@@ -76,6 +76,7 @@ import { recordMetric } from "../lib/metrics.js";
 import { commandsForAgent } from "./slash-registry.js";
 import { foreignReason, handleSlashPassthrough, type SlashDeps } from "./api-slash.js";
 import { isConfiguredAcpChannel } from "./acp-state.js";
+import { handleAcpClear } from "./acp-clear.js";
 import { runtimeCommandsFor } from "../lib/runtime-commands.js";
 import { sessionTailInfo, type SessionTailInfo } from "../lib/session-tail.js";
 import { resolveModelAlias, isKnownEffort, KNOWN_EFFORT_LEVELS } from "../lib/claude-launch.js";
@@ -1281,9 +1282,7 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
     return apiJson(200, { ok: true, agent: agent.name, ...stopExtra(r, principal) }); // done 照发：前端误判忙时借此解锁
   }
 
-  // POST /api/v1/agents/:name/clear —— 远程调用 CC 原生 /clear（清上下文）。
-  // 只做原生 clear 和会话轮转收尾；clear 后是否发开机指令由前端决定。
-  // master：/clear 后 CLAUDE.md 人设自动重载，且不在 registry、无 watcher —— 只发键。
+  // POST /api/v1/agents/:name/clear：清上下文；前端决定是否发开机指令。
   const clearMatch = path.match(/^\/agents\/([^/]+)\/clear$/);
   if (clearMatch && req.method === "POST") {
     const agentParam = decodeURIComponent(clearMatch[1]);
@@ -1291,8 +1290,7 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
     if (!isFullScope(principal)) return forbidden("clear requires a full-scope token"); // 清掉的是 owner 的上下文
     const agent = await findApiAgent(agentParam);
     if (!agent) return apiJson(404, { ok: false, error: `agent "${agentParam}" not found` });
-    if (await isConfiguredAcpChannel(agent.channelId))
-      return apiJson(409, { ok: false, error: "ACP 模式尚不支持 /clear；会话未改动" });
+    if (await isConfiguredAcpChannel(agent.channelId)) return handleAcpClear(agent);
     const isMasterClear = agent.name === "master";
     const targetWindow = isMasterClear ? `${MASTER_SESSION}:0` : windowTarget(agent.name);
     // 回合进行中打 /clear 会插进对话流 → 先验 idle（与权限按钮同款防误击思路）

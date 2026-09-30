@@ -14,7 +14,12 @@ import { statePath } from "../paths.js";
 export const CODEX_ACP_VERSION = "2.0.0";
 /** registry.npmjs.org 上 codex-acp-2.0.0.tgz 的 sha256（它的 sha512 与 registry 公布的 integrity 对得上） */
 export const CODEX_ACP_SHA256 = "a8d48bdf70c0e3e585abbdce19f78765450d8fa6ada1da0fd53508e64315905b";
-const TARBALL_URL = `https://registry.npmjs.org/@agentclientprotocol/codex-acp/-/codex-acp-${CODEX_ACP_VERSION}.tgz`;
+/** 适配器配套的 codex（2.0.0 的 package.json 依赖 @openai/codex ^0.158.0）；升适配器时和上面两个一起改 */
+export const CODEX_ACP_PAIRS = "0.158.x";
+const CODEX_PAIRS_RE = /\b0\.158\.\d+\b/;
+/** 宿主告警、网页更新提示、codex-update 端点共用：版本（或 `codex --version` 原始输出）落在配套范围内 */
+export const codexPairsWithAdapter = (version: string | undefined): boolean => !!version && CODEX_PAIRS_RE.test(version);
+const TARBALL_URL =`https://registry.npmjs.org/@agentclientprotocol/codex-acp/-/codex-acp-${CODEX_ACP_VERSION}.tgz`;
 const ENTRY_IN_TAR = "package/dist/index.js";
 /** 包文件 269KB；超过这个数一定不是我们要的那个，不读完 */
 const MAX_TARBALL_BYTES = 8 * 1024 * 1024;

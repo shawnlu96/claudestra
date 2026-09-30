@@ -47,6 +47,7 @@ function unitHost(accept: Accept, timings: { drainMs?: number; permissionMs?: nu
       startProxy: () => ({ url: "ws://127.0.0.1:1/?t=fake", onBridgeFrame: () => false, failInFlight() {}, close() {} }) as any,
       postHook: async (b) => (events.push(b.event), stops.push(b), {}),
       markReady: async () => {},
+      rotateSession: async () => ({ ok: true }),
       log: () => {},
     },
   );

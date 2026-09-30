@@ -1,5 +1,7 @@
 import { describe, expect, test } from "bun:test";
-import { buildAcpHostCommand, codexAcpAdapter } from "../src/lib/runtimes/codex-acp.ts";
+import { buildAcpHostCommand, codexAcpAdapter, createCodexAcpAdapter } from "../src/lib/runtimes/codex-acp.ts";
+import { readCodexRunning, recordCodexRunning } from "../src/lib/codex-version.ts";
+import type { WindowOps } from "../src/lib/runtimes/types.ts";
 import { codexAdapter, controlFor, managedFor, requireManaged } from "../src/lib/runtimes/index.ts";
 import { CODEX_ACP_CONTROL } from "../src/lib/runtimes/codex.ts";
 import { decodePreambleEnv } from "../src/lib/codex-thread.ts";
@@ -18,10 +20,14 @@ describe("buildAcpHostCommand", () => {
   test("环境变量前缀 + bun acp-host.ts；resume 带职责前言（与 tmux 同一份），new 不带", () => {
     const cmd = buildAcpHostCommand(SPEC, O);
     const head = "DISCORD_CHANNEL_ID=123 BRIDGE_URL=ws://localhost:3847 CLAUDESTRA_AGENT=agent-cx CLAUDESTRA_SESSION_ID=019a-sid MCP_NAME=claudestra";
-    expect(cmd).toStartWith(`${head} CLAUDESTRA_CODEX_BIN=/usr/local/bin/codex CLAUDESTRA_CODEX_PREAMBLE=`);
+    expect(cmd).toStartWith(`${head} CLAUDESTRA_CODEX_BIN=/usr/local/bin/codex CLAUDESTRA_ACP_DEVELOPER=`);
     expect(cmd).toEndWith(" /opt/bun /repo/src/acp-host.ts");
     const pre = /CLAUDESTRA_CODEX_PREAMBLE='([^']+)'/.exec(cmd)![1];
     expect(decodePreambleEnv(pre)).toContain("你的职责: 写代码");
+    const clearPre = /CLAUDESTRA_ACP_CLEAR_PREAMBLE='([^']+)'/.exec(cmd)![1];
+    expect(decodePreambleEnv(clearPre)).toContain("你的职责: 写代码");
+    const developer = /CLAUDESTRA_ACP_DEVELOPER='([^']+)'/.exec(cmd)![1];
+    expect(Buffer.from(developer, "base64").toString("utf8")).toContain("你的职责: 写代码");
     expect(buildAcpHostCommand({ ...SPEC, mode: "new" }, O)).not.toContain("CLAUDESTRA_CODEX_PREAMBLE");
   });
 
@@ -138,5 +144,22 @@ describe("沙箱：CLAUDESTRA_ACP_AGENT 冒充不了 stub（r4 P1-3）", () => {
     expect(cmd).toContain(`HOME=${home} `);
     expect(cmd).toContain(`CODEX_HOME=${home}/.codex `);
     expect(adapterEnv({ base: { HOME: "/Users/me" }, bunBin: "bun", channelServer: "x", mcpName: "m", logsDir: "/l" }).HOME).toBe("/Users/me");
+  });
+});
+
+describe("ACP 运行版本来源", () => {
+  test("beforeLaunch 只清掉上一次的记录，不探版本：真正的运行版本由宿主起适配器前记（codex-version noteAcpCodexRunning）", async () => {
+    recordCodexRunning("agent-acpv", "0.157.0");
+    let versionProbes = 0;
+    const a = createCodexAcpAdapter({
+      resolveBin: async () => "/x/codex",
+      run: async (cmd: string[]) => (cmd[1] === "--version" && versionProbes++, { ok: true, out: "", err: "" }),
+    });
+    const opts: Record<string, string> = {};
+    const win = { name: "agent-acpv", target: "master:agent-acpv", setOption: async (k: string, v: string) => ((opts[k] = v), true) } as unknown as WindowOps;
+    await a.beforeLaunch!(win);
+    expect(readCodexRunning("agent-acpv")).toBeUndefined();
+    expect(versionProbes).toBe(0);
+    expect(opts["@claudestra_ready"]).toBe("0");
   });
 });

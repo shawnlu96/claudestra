@@ -87,7 +87,7 @@ import { resolveBunPath } from "./lib/bun-path.js";
 import { REPO_ROOT, SRC_DIR } from "./lib/repo-root.js";
 import { resolveNpm } from "./lib/npm-path.js";
 import { projectsSlug } from "./lib/jsonl-cost.js";
-import { archiveSession, listArchivedSessions } from "./lib/session-archive.js";
+import { archiveAgentSession, listArchivedSessions } from "./lib/session-archive.js";
 import {
   readProjects,
   writeProjects,
@@ -902,7 +902,7 @@ async function cmdResume(
   // v2.8+ 同名 agent 换 session：旧 session 退役先归档快照
   const prior = reg.agents[tmuxName];
   if (prior?.sessionId && prior.sessionId !== actualSessionId) {
-    await archiveSession(tmuxName, prior.cwd, prior.sessionId).catch(() => {});
+    await archiveAgentSession(tmuxName, prior).catch(() => {});
   }
   reg.agents[tmuxName] = {
     project: dir || resolvedDir.replace(process.env.HOME || "", "~"),
@@ -1127,7 +1127,7 @@ async function cmdAdopt(name: string, sessionId: string) {
   const oldId = info.sessionId;
   // v2.8+ 被替换的旧 session 先归档快照
   if (oldId && oldId !== sessionId) {
-    await archiveSession(tmuxName, info.cwd, oldId).catch(() => {});
+    await archiveAgentSession(tmuxName, info, oldId).catch(() => {});
   }
   info.sessionId = sessionId;
   info.notes = `claude session: ${sessionId} (adopted${oldId ? `, was ${oldId.slice(0, 8)}` : ""})`;
@@ -1382,7 +1382,7 @@ async function cmdRestart(name?: string, opts: { includeMaster?: boolean } = {})
         const newId = found?.sessionId;
         if (newId) {
           // v2.8+ fork 换代：旧 session 从 registry 退役，先归档快照
-          await archiveSession(tmuxName, cwd, info.sessionId).catch(() => {});
+          await archiveAgentSession(tmuxName, { ...info, cwd }).catch(() => {});
           const notes = `${adapter.noteTag} session: ${newId} (forked from ${info.sessionId.slice(0, 8)})`;
           Object.assign(reg.agents[tmuxName], { sessionId: newId, notes });
           await patchRegistryAgent(tmuxName, (a) => Object.assign(a, { sessionId: newId, notes })); // 只改这一条，不整份写回开头的快照
@@ -2439,7 +2439,7 @@ switch (cmd) {
       output({ ok: false, error: `${tmuxName} 不在 registry 或无 sessionId` });
       break;
     }
-    const r = await archiveSession(tmuxName, info.cwd, info.sessionId);
+    const r = await archiveAgentSession(tmuxName, info);
     const all = await listArchivedSessions(tmuxName);
     output({ ok: r.ok, note: r.note, archived: r.archived, sessions: all });
     break;
@@ -2449,31 +2449,7 @@ switch (cmd) {
   // 供 bridge 的 clear 端点用：TUI 里 /clear 会轮转 sessionId，registry 若不跟着
   // 换，jsonl-watcher 会盯死文件。registry 写入必须经 manager（唯一写者不变式）。
   case "set-session": {
-    const [name, newSid] = args;
-    if (!name || !newSid) {
-      output({ ok: false, error: "usage: set-session <name> <sessionId>" });
-      break;
-    }
-    if (!/^[0-9a-f-]{8,64}$/i.test(newSid)) {
-      output({ ok: false, error: `sessionId 形状非法: ${newSid}` });
-      break;
-    }
-    assertSandboxSession(newSid); // 沙箱：新会话必须属于沙箱根（否则 set-session + restart 就续到了生产会话）
-    const tmuxName = normalizeName(name);
-    const reg = await loadRegistry();
-    const info = reg.agents[tmuxName];
-    if (!info) {
-      output({ ok: false, error: `${tmuxName} 不在 registry` });
-      break;
-    }
-    const oldSid = info.sessionId || null;
-    // 旧会话退役 → 归档快照（对齐 kill/fork 轮转的退役语义）
-    if (oldSid && oldSid !== newSid) {
-      await archiveSession(tmuxName, info.cwd, oldSid).catch(() => {});
-    }
-    info.sessionId = newSid;
-    await saveRegistry(reg);
-    output({ ok: true, name: tmuxName, sessionId: newSid, previousSessionId: oldSid });
+    output(await (await import("./manager/set-session.js")).cmdSetSession(args));
     break;
   }
 

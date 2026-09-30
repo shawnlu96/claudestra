@@ -18,6 +18,7 @@ import { apiJson } from "./api-respond.js";
 import { openRuntimeAsk, settleRuntimeAsk } from "./ask-runtime.js";
 import { agentNameForChannel, pushEntries } from "./jsonl-watcher.js";
 import { extensionSocketOf } from "./pi-abort.js";
+import { rebindAcpWatcher } from "./acp-rebind.js";
 
 type Socket = { send(data: string): void };
 type Who = { principal?: string; device?: string };
@@ -35,7 +36,8 @@ const entrySeqs = new Map<string, { hostId: string; last: number; lost: number }
 const bridgeEpoch = randomBytes(6).toString("hex");
 /** 同频道的批次处理完才看下一批的序号；ws 消息处理器本身不会等上一个 async 回调。 */
 const entryTurns = new Map<string, Promise<void>>();
-const calls = new Map<string, { resolve: (r: { ok: boolean; error?: string }) => void; timer: ReturnType<typeof setTimeout> }>();
+type CallResult = { ok: boolean; error?: string; sessionId?: string; uncertain?: true };
+const calls = new Map<string, { channelId: string; ws: Socket; op: unknown; resolve: (r: CallResult) => void; timer: ReturnType<typeof setTimeout> }>();
 let nextCall = 0;
 const CALL_TIMEOUT_MS = 15_000;
 
@@ -72,6 +74,12 @@ export async function onAcpFrame(msg: Record<string, any>, ws: Socket, discord: 
       if (typeof msg.requestId === "string") ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, result: ok }));
       return;
     }
+    case "acp_rebind": {
+      const result = await rebindAcpWatcher(channelId, String(msg.sessionId ?? ""), discord, String(msg.previousSessionId ?? "")).catch((e) => ({ ok: false, error: String(e) }));
+      if (typeof msg.requestId === "string") ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, result: result.ok }));
+      if (!result.ok) console.warn(`⚠️ ACP watcher 换代未就绪：${result.error}`);
+      return;
+    }
     case "acp_config":
       configs.set(channelId, parseConfigOptions(msg.configOptions));
       if (authCards.delete(channelId)) settleRuntimeAsk("codex", channelId); // 登好了、接上线程了：登录卡结掉
@@ -81,8 +89,15 @@ export async function onAcpFrame(msg: Record<string, any>, ws: Socket, discord: 
     case "acp_permission":
       return onPermission(channelId, ws, msg);
     case "acp_call_result": {
-      const c = calls.get(String(msg.id));
-      if (c) calls.delete(String(msg.id)), clearTimeout(c.timer), c.resolve(msg.ok ? { ok: true } : { ok: false, error: String(msg.error ?? "宿主拒绝") });
+      const id = String(msg.id);
+      const c = calls.get(id);
+      if (!c || c.channelId !== channelId || c.ws !== ws) return;
+      calls.delete(id);
+      clearTimeout(c.timer);
+      c.resolve(msg.ok ? { ok: true, sessionId: msg.sessionId } : {
+        ok: false, error: String(msg.error ?? "宿主拒绝"),
+        ...(c.op === "clear" && typeof msg.sessionId === "string" ? { uncertain: true as const, sessionId: msg.sessionId } : {}),
+      });
       if (msg.ok && msg.configOptions) configs.set(channelId, parseConfigOptions(msg.configOptions));
       return;
     }
@@ -101,9 +116,10 @@ async function acceptEntries(channelId: string, msg: Record<string, any>, discor
   const gap = first > last + 1 ? first - last - 1 : 0;
   if (gap) console.warn(`⚠️ ACP 条目缺口：${channelId} 宿主 ${hostId} 已收至 ${last}，重送从 ${first} 开始；按丢失确认`);
   const fresh = entries.slice(Math.max(0, last - first + 1));
-  if (!fresh.length) return seen?.lost ? { ok: true, lost: seen.lost, bridgeEpoch } : true;
-  const result = await pushEntries(channelId, fresh, discord);
+  const sessionId = typeof msg.sessionId === "string" ? msg.sessionId : undefined;
+  const result = await pushEntries(channelId, fresh, discord, sessionId);
   if (!result.ok) return false;
+  if (!fresh.length) return seen?.lost ? { ok: true, lost: seen.lost, bridgeEpoch } : true;
   const lost = (seen?.hostId === hostId ? seen.lost : 0) + gap + result.lost;
   entrySeqs.set(channelId, { hostId, last: first + entries.length - 1, lost });
   return lost ? { ok: true, lost, bridgeEpoch } : true;
@@ -173,6 +189,12 @@ function dropPerm(channelId: string, p: Perm, why: string, answered?: { label: s
 /** 宿主的连接断了（bridge.ts 的 ws close）：它挂着的权限卡撤掉；宿主重连后会把还在等的补发上来，出新卡 */
 export function onAcpHostGone(channelId: string, ws: Socket): void {
   for (const p of [...(permQueues.get(channelId) ?? [])]) if (p.ws === ws && !p.claimed) dropPerm(channelId, p, "宿主断线");
+  for (const [id, c] of calls) {
+    if (c.channelId !== channelId || c.ws !== ws) continue;
+    calls.delete(id);
+    clearTimeout(c.timer);
+    c.resolve({ ok: false, uncertain: true, error: "宿主连接断开，结果未确认；请先查看当前会话，再决定是否重试" });
+  }
 }
 
 /** 经宿主调 session/set_config_option（设置页的模型 / 推理强度、额度卡的「切到 X」）：不重启 */
@@ -181,14 +203,26 @@ export const acpSetConfig = (channelId: string, configId: string, value: string)
 /** 斜杠命令（/compact 等）原样当一轮 prompt 交给宿主：不包 <channel>，适配器自己认（lib/runtimes/codex-control.ts） */
 export const acpSlash = (channelId: string, text: string) => acpCall(channelId, { op: "slash", text });
 
-function acpCall(channelId: string, body: Record<string, unknown>): Promise<{ ok: boolean; error?: string }> {
+/** 清上下文要新建并引导线程、持久化 registry；比普通配置调用等得久。 */
+export const acpClear = (channelId: string) => acpCall(channelId, { op: "clear" }, 225_000);
+
+function acpCall(channelId: string, body: Record<string, unknown>, timeoutMs = CALL_TIMEOUT_MS): Promise<CallResult> {
   const ws = extensionSocketOf(channelId);
   if (!ws) return Promise.resolve({ ok: false, error: "ACP 宿主不在线" });
-  const id = `acpcall_${++nextCall}`;
+  const id = `acpcall_${bridgeEpoch}_${++nextCall}`;
   return new Promise((resolve) => {
-    const timer = setTimeout(() => (calls.delete(id), resolve({ ok: false, error: "宿主没回应（15s）" })), CALL_TIMEOUT_MS);
-    calls.set(id, { resolve, timer });
-    ws.send(JSON.stringify({ type: "acp_call", id, ...body }));
+    const timer = setTimeout(() => {
+      calls.delete(id);
+      resolve({ ok: false, uncertain: true, error: "宿主未在期限内回应，结果未确认；请先查看当前会话，再决定是否重试" });
+    }, timeoutMs);
+    calls.set(id, { channelId, ws, op: body.op, resolve, timer });
+    try {
+      ws.send(JSON.stringify({ type: "acp_call", id, ...body }));
+    } catch (e) {
+      calls.delete(id);
+      clearTimeout(timer);
+      resolve({ ok: false, error: `无法发送给 ACP 宿主：${e instanceof Error ? e.message : e}` });
+    }
   });
 }
 

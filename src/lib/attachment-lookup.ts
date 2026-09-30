@@ -4,8 +4,8 @@
  * 历史记录里只有原始 basename 的出站附件：inbox 落盘时加了 `<时间戳>_` 前缀，按清洗后的后缀匹配、取名字最大（最新）的一个。
  * 安全：只认 basename，目录白名单固定，拼出的路径再钉一次在目录内。
  */
-import { lstatSync, readdirSync, realpathSync, statSync } from "node:fs";
-import { basename, join, resolve } from "node:path";
+import { closeSync, constants, fstatSync, lstatSync, openSync, readdirSync, realpathSync, statSync } from "node:fs";
+import { basename, dirname, join, resolve } from "node:path";
 import { sanitizeAttachmentBase } from "./attachment-name.js";
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
@@ -48,13 +48,13 @@ export interface AttachmentHit {
   filename: string;
 }
 
-/** dir/name 存在且是普通文件、且真的在 dir 里面 → 绝对路径 */
+/** dir/name 存在且是普通文件、且真的在 dir 里面 → 绝对路径。lstat 不跟软链：目录里一个指向 ~/.ssh/id_rsa 的软链会让接口发出目录外的文件 */
 function fileUnder(dir: string, name: string): string | null {
   const root = resolve(dir);
   const abs = resolve(root, name);
   if (!abs.startsWith(`${root}/`)) return null;
   try {
-    return statSync(abs).isFile() ? abs : null;
+    return lstatSync(abs).isFile() ? abs : null;
   } catch {
     return null; // 不存在 / 无权限：试下一个目录
   }
@@ -98,4 +98,43 @@ export function findAttachment(name: string, day: string | null, dirs: Attachmen
   const suffixed = inbox ? listDir(inbox).filter((f) => /^\d+_/.test(f) && f.endsWith(wanted)).sort().pop() : undefined;
   const path = suffixed ? fileUnder(inbox, suffixed) : null;
   return path && suffixed ? { path, filename: suffixed } : null;
+}
+
+/**
+ * 白名单目录的真实路径（不存在的跳过）：取回时用它钉住「打开的文件确实在这些目录里」。
+ * 目录自己是软链的不算——对它取 realpath 会跟着软链走，把目录整个换成指向外面的软链就能过关；上级目录的软链（/tmp → /private/tmp）照常解析
+ */
+function realRoots(dirs: AttachmentDirs): string[] {
+  const out: string[] = [];
+  for (const d of [dirs.uploadDir, ...dirs.inboxDirs]) {
+    try {
+      if (lstatSync(d).isDirectory()) out.push(join(realpathSync(dirname(resolve(d))), basename(resolve(d))));
+    } catch {
+      continue; // 目录还没建：里面不会有命中
+    }
+  }
+  return out;
+}
+
+/**
+ * 按 fd 打开命中的附件，之后只从这个 fd 读，不再按路径二次打开：查找（lstat）和读之间换成软链 / 把目录换成软链都读不到外面（tests/local-api-attachments.test.ts）。
+ * O_NOFOLLOW 拒最后一级软链；fstat 认普通文件；realpath 在白名单目录里且和 fd 是同一个 inode，挡住中间目录被换。不合格 → null（fd 已关）
+ */
+export function openAttachment(path: string, dirs: AttachmentDirs): { fd: number; size: number } | null {
+  let fd: number;
+  try {
+    fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+  } catch {
+    return null; // 查找之后被删 / 换成了软链（ELOOP）：当没找到
+  }
+  try {
+    const st = fstatSync(fd);
+    const real = realpathSync(path);
+    const same = statSync(real);
+    if (st.isFile() && same.ino === st.ino && same.dev === st.dev && realRoots(dirs).some((r) => real.startsWith(`${r}/`))) return { fd, size: st.size };
+  } catch {
+    // realpath / stat 失败 = 打开之后路径又变了，下面关 fd 当没找到
+  }
+  closeSync(fd);
+  return null;
 }
