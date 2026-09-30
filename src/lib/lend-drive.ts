@@ -176,13 +176,18 @@ async function forwardResult(row: LendRow, d: LendDeps): Promise<void> {
   await finish(row, "acked", null, d, false, { receipt: rc as unknown as Record<string, unknown> });
 }
 
-/** 续租；到点才续。A 说单已不归我们 → 停；本机截止已过还没续上 → 自停（心跳过期） */
+/**
+ * 续租；到点才续。A 说单已不归我们 → 停；本机截止已过还没续上 → 自停（心跳过期）。
+ * result_pending 例外：结论已落本地，A 可能已经入账、只是回执丢了（A 的 result 按同一 sha256 回旧回执，不看租约）。
+ * 这时只停 worker，单留给 forwardResult 原字节重发取回执；A 明确拒收才按码收尾。
+ */
 async function heartbeat(row: LendRow, d: LendDeps): Promise<LendRow | null> {
   const now = d.now();
   if (row.lastBeatAt === null || now - row.lastBeatAt >= BEAT_MS) {
     const r = await lendRequest(d.call, row.peer, "lease", { orderId: row.orderId, gen: row.leaseGen, action: "renew", reason: null, detail: null });
     const at = d.now();
     if (r.ok && r.value) return patchOrder(d.db, row.orderId, [row.state], leaseFields(r.value, at), at);
+    if (!r.ok && GONE[r.code] && row.state === "result_pending") return stopForResult(row, `续租被拒：${r.code}`, d);
     if (!r.ok && GONE[r.code] && r.code !== "conflict") {
       await finish(row, GONE[r.code], `续租被拒：${r.code}（${r.error}）`, d, false);
       return null;
@@ -190,9 +195,17 @@ async function heartbeat(row: LendRow, d: LendDeps): Promise<LendRow | null> {
     if (!r.ok) d.log(`${row.orderId} 续租失败（${r.code}）`);
   }
   if (row.leaseUntil !== null && d.now() >= row.leaseUntil) {
+    if (row.state === "result_pending") return stopForResult(row, "心跳过期", d);
     await finish(row, "stopped", "心跳过期：租约截止前没续上，自停 worker（保留工作副本与 journal）", d, false);
     return null;
   }
+  return row;
+}
+
+/** result_pending 失了租约：worker 一定停（没确认退出就记日志，下一轮再停；已不在跑就不再每轮调 kill），单照常往下转发结论 */
+async function stopForResult(row: LendRow, why: string, d: LendDeps): Promise<LendRow> {
+  const killed = row.agent && (await d.worker.alive(row.agent)) !== false ? await d.worker.kill(row.agent) : { ok: true };
+  if (!killed.ok) d.log(`${row.orderId} ${why}：${row.agent} 没确认退出（${killed.reason ?? "原因不明"}），下轮再停；结论照常重发取回执`);
   return row;
 }
 

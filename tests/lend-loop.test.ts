@@ -319,6 +319,38 @@ describe("T94 重启恢复", () => {
     expect(h.log.receipts.map((r) => r.state)).toEqual(["acked"]);
   });
 
+  test("A 已入账、回执丢了，重启时本机租约已过（r1 P2-1）：worker 照停，结论原样重发取回回执，记 acked", async () => {
+    const h = harness();
+    await toStarted(h);
+    const body = { v: 1, orderId: "o1", gen: 1, verdict: { v: 1 }, report: "r", session: { id: "thr-1", family: "codex" } };
+    advance(h.db, "o1", "started", "result_pending", { payload: body, payloadSha: sha(JSON.stringify(body)) });
+    const real = h.A.result;
+    h.A.result = () => "throw"; // A 已入账，回包丢在路上
+    await h.tick();
+    expect(getOrder(h.db, "o1")!.state).toBe("result_pending");
+    h.A.result = real; // A 对同一 sha256 回旧回执，不看租约
+    h.A.lease = () => ({ status: 409, body: { ok: false, v: 1, code: "conflict", error: "done" } });
+    h.advanceTime(11 * 60_000);
+    await h.tick();
+    const row = getOrder(h.db, "o1")!;
+    expect(row.state).toBe("acked");
+    expect(row.receipt).toMatchObject({ orderId: "o1", eventSeq: 9 });
+    expect(h.log.killed).toContain(workerName("o1"));
+    expect(h.registry.has(workerName("o1"))).toBe(false);
+  });
+
+  test("result_pending 失了租约、A 明确拒收：按码收尾（不因为回执恢复而一直挂着）", async () => {
+    const h = harness();
+    await toStarted(h);
+    const body = { v: 1, orderId: "o1", gen: 1, verdict: { v: 1 }, report: "r", session: { id: "thr-1", family: "codex" } };
+    advance(h.db, "o1", "started", "result_pending", { payload: body, payloadSha: sha(JSON.stringify(body)) });
+    h.A.result = () => ({ status: 409, body: { ok: false, v: 1, code: "lease_expired", error: "过期" } });
+    h.advanceTime(11 * 60_000);
+    await h.tick();
+    expect(getOrder(h.db, "o1")!.state).toBe("stopped");
+    expect(h.registry.has(workerName("o1"))).toBe(false);
+  });
+
   test("回执验签不过：不算入账（stopped），保留工作副本", async () => {
     const h = harness();
     await toStarted(h);
