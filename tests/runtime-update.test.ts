@@ -39,6 +39,8 @@ const restartOk = async () => ({ ok: true });
 /** 当前适配器 2.0.0（配 ^0.158.0）；registry 上只有它时 0.159.x 解析不到 */
 const ADAPTER_200 = {
   adapter: () => ({ version: "2.0.0", codexRange: "^0.158.0", path: "/x/index.js" }),
+  // 有适配器时 npm 成功后一律对账：不桩掉就会真去探本机 codex、查 registry（CI 上没有 codex → 500）
+  reconcile: async () => ({ ok: true as const, path: "/x/index.js", reused: true, version: "2.0.0", codexRange: "^0.158.0" }),
   releases: async (): Promise<AcpRelease[]> => [],
 };
 const post = (name: string, kind: "pi" | "codex", p: Principal, d: RuntimeUpdateDeps, rm = restartOk) =>
