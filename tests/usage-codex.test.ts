@@ -136,6 +136,13 @@ describe("切轮", () => {
     f.run();
     expect(turnsFor(f.db, "agent-cx")[0].trigger).toBe("真正的问题");
   });
+
+  test("整轮没有外来输入（只有注入的说明）：来源记 other，不冒充 continued", () => {
+    const f = fx();
+    f.write(f.path(TH), [meta(TH), ...turn(1, T, "<environment_context>\n  <cwd>/work</cwd>\n</environment_context>", [[1000, 0, 10]])]);
+    f.run();
+    expect(turnsFor(f.db, "agent-cx").map((t) => [t.kind, t.trigger])).toEqual([["other", ""]]);
+  });
 });
 
 describe("revert 新段", () => {

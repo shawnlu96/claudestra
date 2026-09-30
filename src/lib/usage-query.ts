@@ -19,7 +19,7 @@ interface TokenSums {
  * 模型字段的来源：Claude 记的是响应里的 message.model（实际应答的模型）；Codex rollout 只有 turn_context.model，是**请求**的模型，
  * 不能当成实际应答的模型展示（T91 查实 rollout 不记响应模型）。
  */
-export type ModelBasis = "response" | "request";
+type ModelBasis = "response" | "request";
 const basisOf = (runtime: string): ModelBasis => (runtime === "codex" ? "request" : "response");
 
 export interface TurnRow extends TokenSums {

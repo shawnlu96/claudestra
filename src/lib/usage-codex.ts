@@ -59,20 +59,23 @@ export interface CodexLineCtx {
   tool: (id: string, turnId: string, name: string) => void;
 }
 
-/** 切到一轮：Codex 自己的 turn_id 就是轮的身份（revert 新段 / 归档副本里同一轮还是同一个 id，turns 按主键只建一次） */
+/**
+ * 切到一轮：Codex 自己的 turn_id 就是轮的身份（revert 新段 / 归档副本里同一轮还是同一个 id，turns 按主键只建一次）。
+ * 来源先记 other（没有人 / channel 输入的轮：接入时的引导轮等），本轮第一条外来输入再改成它的类型；从中间开始的段记 continued。
+ */
 function enterTurn(st: FileState, turnId: string, ts: number, continued: boolean): void {
   const id = `cx:${turnId}`;
   if (st.turn_id === id) return;
   st.turn_id = id;
   st.turn_start = ts;
-  st.turn_kind = continued ? "continued" : null;
+  st.turn_kind = continued ? "continued" : "other";
   st.turn_trigger = "";
   st.turn_input = null;
 }
 
 /** 本轮第一条外来输入定来源类型和摘要（复用 Claude 那边的判定：channel 包装、人敲的字；注入的环境说明、工具输出不算） */
 function noteInbound(line: string, st: FileState): void {
-  if (!st.turn_id || st.turn_kind) return;
+  if (!st.turn_id || st.turn_trigger) return;
   const shaped = codexLineToClaudeShape(line);
   const i = shaped ? inboundOf(shaped) : null;
   if (!i) return;
