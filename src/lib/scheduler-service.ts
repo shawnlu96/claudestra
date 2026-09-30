@@ -59,14 +59,14 @@ async function mergeTick(db: Database, config: SchedulerConfig, manager: Manager
         }
         run = r.run as MergeRun;
       }
-      const drift = ["done", "unknown", "await_review"].includes(run.phase) ? null : mergeRunDrift(db, run);
+      const drift = ["done", "unknown", "resolved", "await_review"].includes(run.phase) ? null : mergeRunDrift(db, run);
       if (drift) {
         requireOk(await manager("ledger", "scheduler-merge-step", intent.id, "--from", run.phase, "--to", "unknown",
           "--rev", String(run.rev), "--receipt", drift), "freeze drifted merge run");
       } else if (run.phase === "done") {
         requireOk(await manager("ledger", "scheduler-settle", intent.id, "--from", "submitted", "--to", "done",
           "--receipt", `merge:${run.mergeSha}; deploy:${run.deployReceipt?.slice(0, 200)}; verify:${run.verifyReceipt?.slice(0, 200)}`), "settle merge intent");
-      } else if (!["unknown", "await_review"].includes(run.phase)) {
+      } else if (!["unknown", "resolved", "await_review"].includes(run.phase)) {
         const advance = async (from: MergePhase, to: MergePhase, rev: number, receipt?: string, mergeSha?: string, newHead?: string) => {
           const args = ["ledger", "scheduler-merge-step", intent.id, "--from", from, "--to", to, "--rev", String(rev)];
           if (receipt) args.push("--receipt", receipt);

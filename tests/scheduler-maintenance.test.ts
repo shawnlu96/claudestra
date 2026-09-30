@@ -32,10 +32,10 @@ test("update lease and scheduler mutations exclude each other; in-flight reload 
     expect(await acquireMaintenance("scheduler", opts)).toBeNull();
   } finally { update?.release(); rmSync(root, { recursive: true, force: true }); }
 });
-test("unknown deployment blocks update after daemon replacement; only the exact deployment intent can use update", async () => {
+test("in-flight deployment blocks update after daemon replacement; only the exact deployment intent can use update", async () => {
   const root = mkdtempSync(join(tmpdir(), "t68-maintenance-db-"));
   const path = join(root, "ledger.db"), db = new Database(path);
-  db.exec("PRAGMA user_version=1; CREATE TABLE scheduler_merges(intentId TEXT,phase TEXT); INSERT INTO scheduler_merges VALUES ('job','unknown')");
+  db.exec("PRAGMA user_version=1; CREATE TABLE scheduler_merges(intentId TEXT,phase TEXT); INSERT INTO scheduler_merges VALUES ('job','deploying')");
   db.close();
   const opts = { path: join(root, "mutex"), marker: join(root, "update.json"), reader: new LedgerReader(path) };
   try {

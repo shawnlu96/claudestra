@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, readdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, readdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { deploymentJobs, readDeployJob } from "../src/lib/scheduler-deploy-job.js";
@@ -16,15 +16,18 @@ afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: 
 function fixture() {
   const root = mkdtempSync(join(tmpdir(), "t68-deploy-test-")); roots.push(root);
   const calls: string[][] = [];
-  let live = true, time = 1000;
+  let live = true, pid = "123", time = 1000;
   const command: typeof runBounded = async (argv) => {
     calls.push(argv);
     const label = calls.find((a) => a[1] === "submit")?.[3];
-    return { code: 0, timedOut: false, stderr: "", stdout: live && label ? `123\t0\t${label}\n` : "" };
+    if (argv[1] === "remove") { const was = live; live = false; return { code: was ? 0 : 3, timedOut: false, stderr: "", stdout: "" }; }
+    return { code: 0, timedOut: false, stderr: "", stdout: live && label ? `${pid}\t0\t${label}\n` : "" };
   };
   const jobs = deploymentJobs({ root, command, now: () => time });
   const requestPath = () => join(root, readdirSync(root).find((name) => /^[a-f0-9]{64}$/.test(name))!, "request.json");
-  return { root, jobs, calls, requestPath, stop: () => { live = false; time = 20_000; } };
+  const removals = () => calls.filter((a) => a[1] === "remove").length;
+  return { root, jobs, calls, command, requestPath, removals, stop: () => { live = false; time = 20_000; },
+    exited: () => { pid = "-"; time = 20_000; }, late: () => { time = 1_000_000; } };
 }
 
 describe("independent deployment job", () => {
@@ -38,7 +41,7 @@ describe("independent deployment job", () => {
       Object.assign(process.env, env);
       await f.jobs.submit(row, { ...target, timeoutMs: 3000, argv: [process.execPath, "--no-env-file", "-e",
         `await import(${JSON.stringify(join(SRC_DIR, "lib/paths.ts"))});`] });
-      await runDeployJob(f.requestPath());
+      await runDeployJob(f.requestPath(), undefined, f.command);
       expect(await f.jobs.observe(row)).toEqual({ status: "complete" });
     } finally {
       for (const [k, v] of Object.entries(previous)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
@@ -58,14 +61,21 @@ describe("independent deployment job", () => {
   test("worker records result before exit and duplicate worker cannot execute twice", async () => {
     const f = fixture(); await f.jobs.submit(row, target);
     let executions = 0;
+    const resultPath = join(f.requestPath(), "../result.json");
+    const launchctl: typeof runBounded = async (argv, opts) => {
+      if (argv[1] === "remove") expect(existsSync(resultPath)).toBe(true); // removal SIGTERMs the job, so the result must already be durable
+      return f.command(argv, opts);
+    };
     await runDeployJob(f.requestPath(), async (_, opts) => {
       executions++; expect(opts.env?.CLAUDESTRA_MERGE_SHA).toBe(sha);
       return { code: 0, timedOut: false, stdout: "", stderr: "" };
-    });
-    f.stop();
+    }, launchctl);
+    expect(f.removals()).toBe(1);
     expect(await f.jobs.observe(row)).toEqual({ status: "complete" });
-    await expect(runDeployJob(f.requestPath(), async () => { executions++; throw new Error("must not run"); })).rejects.toThrow();
+    expect(f.removals()).toBe(2); // idempotent backstop from the scheduler side
+    await expect(runDeployJob(f.requestPath(), async () => { executions++; throw new Error("must not run"); }, f.command)).rejects.toThrow();
     expect(executions).toBe(1);
+    expect(f.removals()).toBe(3); // a KeepAlive relaunch removes its own label instead of looping every 10s
     expect(JSON.parse(readFileSync(join(f.requestPath(), "../result.json"), "utf8")).mergeSha).toBe(sha);
   });
   test("disappeared job and corrupt or wrong-SHA result cannot be retried or declared deployed", async () => {
@@ -80,7 +90,23 @@ describe("independent deployment job", () => {
   });
   test("nonzero and timed-out results remain failed even if a verifier could see old artifacts", async () => {
     const f = fixture(); await f.jobs.submit(row, target);
-    await runDeployJob(f.requestPath(), async () => ({ code: null, timedOut: true, stdout: "", stderr: "timeout" }));
+    await runDeployJob(f.requestPath(), async () => ({ code: null, timedOut: true, stdout: "", stderr: "timeout" }), f.command);
     expect((await f.jobs.observe(row)).status).toBe("failed");
+  });
+  test("a job that exited without a result is removed; a job still running past the deadline is never killed", async () => {
+    const exited = fixture(); await exited.jobs.submit(row, target); exited.exited();
+    expect((await exited.jobs.observe(row)).status).toBe("unknown");
+    expect(exited.removals()).toBe(1);
+    const running = fixture(); await running.jobs.submit(row, target); running.late();
+    expect(await running.jobs.observe(row)).toEqual({ status: "unknown", reason: "deployment has no result after deadline" });
+    expect(running.removals()).toBe(0);
+  });
+  test("an unreadable launchd inventory keeps observing instead of freezing or removing", async () => {
+    const f = fixture(); await f.jobs.submit(row, target);
+    const flaky = deploymentJobs({ root: f.root, now: () => 20_000, command: async (argv) => {
+      f.calls.push(argv); return { code: 1, timedOut: false, stdout: "", stderr: "launchd busy" };
+    } });
+    expect(await flaky.observe(row)).toEqual({ status: "running" });
+    expect(f.removals()).toBe(0);
   });
 });

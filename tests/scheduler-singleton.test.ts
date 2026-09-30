@@ -12,9 +12,10 @@ test("second scheduler fails closed while the first owns its singleton lock", as
   const argv = [process.execPath, "--no-env-file", join(SRC_DIR, "scheduler.ts")];
   const first = Bun.spawn(argv, { env, cwd: root, stdout: "pipe", stderr: "pipe" });
   try {
-    for (let n = 0; n < 100 && !existsSync(join(root, "scheduler.pid", "owner")); n++) await Bun.sleep(20);
+    // A cold bun start plus the scheduler import graph exceeds 2s while the full suite saturates the CPU.
+    for (let n = 0; n < 400 && !existsSync(join(root, "scheduler.pid", "owner")); n++) await Bun.sleep(20);
     expect(existsSync(join(root, "scheduler.pid", "owner"))).toBe(true);
-    const second = await runBounded(argv, { env, cwd: root, timeoutMs: 3000 });
+    const second = await runBounded(argv, { env, cwd: root, timeoutMs: 8000 });
     expect(second.timedOut).toBe(false);
     expect(second.code).not.toBe(0);
     expect(second.stderr).toContain("another scheduler holds scheduler.pid");
@@ -24,4 +25,4 @@ test("second scheduler fails closed while the first owns its singleton lock", as
     if (stopped === "timeout") { first.kill("SIGKILL"); await first.exited; }
     rmSync(root, { recursive: true, force: true });
   }
-}, 12_000);
+}, 30_000);

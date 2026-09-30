@@ -40,7 +40,7 @@ export async function driveMerge(run: MergeRun, external: MergeExternal, advance
     current = await advance(current.phase, to, current.rev, receipt, mergeSha, newHead);
     return current;
   };
-  if (["done", "unknown", "await_review"].includes(run.phase)) return run;
+  if (["done", "unknown", "resolved", "await_review"].includes(run.phase)) return run;
   try {
     if (run.phase === "ready") {
       const pr = await external.inspect(run.prRef);

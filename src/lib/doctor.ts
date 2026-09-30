@@ -531,7 +531,7 @@ export async function runDoctor(repoRoot: string): Promise<Check[]> {
   const groups = await Promise.all([
     checkRuntime(),
     checkConfig(repoRoot),
-    checkDaemons(), import("./doctor-scheduler.js").then((m) => m.checkSchedulerConfig()),
+    checkDaemons(), import("./doctor-scheduler.js").then((m) => m.checkScheduler()),
     checkUndeliveredAlerts(), checkStateFiles(), import("./doctor-peers.js").then((m) => m.checkLegacyPeers()), // 截止日前还没签名记录的老 peer
     checkBridge(repoRoot),
     checkIntegration(repoRoot),

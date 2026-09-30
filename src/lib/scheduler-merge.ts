@@ -7,9 +7,10 @@ import { insertEvent, tx } from "./ledger-tx.js";
 import { currentReviewFacts } from "./scheduler-review.js";
 import { getSchedulerSession } from "./scheduler-sessions.js";
 import { canTransition, nextTaskState } from "./ledger-stages.js";
+import { settleIntent } from "./ledger-scheduler-write.js";
 
 export type MergePhase = "ready" | "updating" | "await_review" | "await_ci" | "merging" | "merged" |
-  "deploying" | "deployed" | "verifying" | "done" | "unknown";
+  "deploying" | "deployed" | "verifying" | "done" | "unknown" | "resolved";
 export interface MergeRun {
   intentId: string;
   taskId: string;
@@ -114,7 +115,7 @@ const NEXT: Record<MergePhase, readonly MergePhase[]> = {
   ready: ["updating", "await_ci", "unknown"], updating: ["await_review", "await_ci", "unknown"],
   await_review: [], await_ci: ["merging", "unknown"], merging: ["merged", "unknown"],
   merged: ["deploying", "unknown"], deploying: ["deployed", "unknown"],
-  deployed: ["verifying", "unknown"], verifying: ["done", "unknown"], done: [], unknown: [],
+  deployed: ["verifying", "unknown"], verifying: ["done", "unknown"], done: [], unknown: [], resolved: [],
 };
 
 /** A phase claim is committed before the corresponding external call; receipts move it forward after observing reality. */
@@ -183,6 +184,41 @@ export function advanceMergeRun(db: Database, ctx: WriteCtx, input: {
       project: row.project, target: row.taskId, kind: "scheduler", text: `合并队列：${input.to}${receipt ? `（${receipt}）` : ""}`,
       data: { op: "merge_phase", intentId: row.intentId, from: row.phase, to: input.to, receipt,
         mergeSha: input.to === "merged" ? input.mergeSha : row.mergeSha },
+    }, true);
+    return getMergeRun(db, row.intentId) as MergeRun;
+  });
+}
+
+export const MERGE_RESOLUTIONS = ["done", "failed", "cancelled"] as const;
+export type MergeResolution = (typeof MERGE_RESOLUTIONS)[number];
+
+/**
+ * The only exit from `unknown`: a human manager who checked GitHub / the deployment target closes the journal with a receipt.
+ * The scheduler identity can never do this, otherwise "freeze instead of guessing" would become "guess after a restart".
+ * The project queue freeze is left alone on purpose: other unknown runs may remain, so unfreezing stays an explicit `ledger unfreeze`.
+ */
+export function resolveMergeRun(db: Database, ctx: WriteCtx, input: { intentId: string; outcome: MergeResolution; receipt: string | undefined }): MergeRun {
+  return tx(db, () => {
+    const row = getMergeRun(db, input.intentId);
+    if (!row) throw new LedgerError("not_found", "没有合并运行记录；还没开始合并的意图用 scheduler-settle 结算");
+    if (ctx.actor === "scheduler" || !canWrite(db, ctx.actor, row.project)) {
+      throw new LedgerError("forbidden", "结果不明的合并只有项目 PM / master / owner 凭外部核对回执能结清");
+    }
+    if (!MERGE_RESOLUTIONS.includes(input.outcome)) throw new LedgerError("invalid", "--outcome 只能是 done / failed / cancelled");
+    const receipt = text(input.receipt, "回执");
+    if (row.phase !== "unknown") throw new LedgerError("conflict", `合并运行当前是 ${row.phase}，只有 unknown 需要人工结清`);
+    const now = ctx.now ?? Date.now();
+    db.prepare("UPDATE scheduler_merges SET phase='resolved', rev=rev+1, reason=?, updatedAt=? WHERE intentId=?")
+      .run(`${input.outcome}: ${receipt}`, now, row.intentId);
+    const intent = getIntent(db, row.intentId);
+    if (intent && (intent.status === "submitted" || intent.status === "unknown")) {
+      settleIntent(db, { ...ctx, now }, { id: row.intentId, from: intent.status, to: input.outcome === "done" ? "done" : "cancelled",
+        receipt: `merge ${input.outcome}: ${receipt}` });
+    }
+    insertEvent(db, { actor: ctx.actor, now, dedupKey: `scheduler:${row.intentId}:merge:resolved` }, {
+      project: row.project, target: row.taskId, kind: "scheduler", text: `合并队列：人工结清为 ${input.outcome}（${receipt}）`,
+      data: { op: "merge_resolve", intentId: row.intentId, from: "unknown", outcome: input.outcome, receipt, manual: true,
+        queueFrozen: getMeta(db, row.project).queueFrozen.frozen },
     }, true);
     return getMergeRun(db, row.intentId) as MergeRun;
   });

@@ -68,7 +68,7 @@ export function SCHEDULER_MERGES_SCHEMA(db: Database): void {
   db.prepare(`CREATE TABLE IF NOT EXISTS scheduler_merges (
     intentId TEXT PRIMARY KEY REFERENCES scheduler_intents(id), taskId TEXT NOT NULL REFERENCES tasks(id), project TEXT NOT NULL,
     prRef TEXT NOT NULL, expectedBranch TEXT NOT NULL, reviewedHead TEXT NOT NULL, requiredChecks TEXT NOT NULL,
-    phase TEXT NOT NULL CHECK (phase IN ('ready','updating','await_review','await_ci','merging','merged','deploying','deployed','verifying','done','unknown')),
+    phase TEXT NOT NULL CHECK (phase IN ('ready','updating','await_review','await_ci','merging','merged','deploying','deployed','verifying','done','unknown','resolved')),
     rev INTEGER NOT NULL DEFAULT 1, mergeSha TEXT, deployReceipt TEXT, verifyReceipt TEXT, reason TEXT,
     createdAt INTEGER NOT NULL, updatedAt INTEGER NOT NULL
   )`).run();

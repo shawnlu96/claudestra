@@ -117,6 +117,9 @@ owner 截图 ask 属上线闸。
 
 - r2 部署改由独立的一次性 launchd job 执行；scheduler 只提交并观察持久化结果，再以 merge SHA 核对产物。scheduler 自身重启不会杀部署命令；重复 intent 不重派，消失或失败仍冻结。scheduler.pid 单实例锁拿不到或失租即停止，每次动作前重核拥有权；scheduler 与 manager update 共用维护锁，部署/结果不明 journal 在进程替换后继续挡自动更新，update-inflight 标记挡新调度动作。只有同 intent 的部署任务能接手自己的维护；draft 仅等待本卡并跳过未产生的检查查询。
 
+- r3 部署任务的生命周期：`launchctl submit` 的任务是 KeepAlive，不移除就每约 10 秒被重新拉起。worker 写完 `result.json` 后最后一步 `launchctl remove` 自己的标签（launchd 随即 SIGTERM 它，结果已落盘）；被重新拉起时发现 `started` 已存在，也先移除自己再退出，绝不重跑部署命令。scheduler 的 observe 看到结果或看到任务已退出时再幂等移除一次兜底；任务仍在运行时绝不从 scheduler 侧移除（那会杀掉进行中的部署），只报 unknown，由 doctor 列出。`launchctl list` 读不到时继续观察，截止时间仍兜底。
+- r3 `unknown` 的出口：合并 journal 进入 `unknown` 后只冻结本项目合并队列，不再算作维护忙碌，手动 `update`、launcher 自动更新照常可用（真正有外部动作在跑的 updating/merging/merged/deploying/deployed/verifying 才挡）。唯一出口是 PM / master / owner 在核对 GitHub 与部署目标后执行 `ledger scheduler-merge-resolve <intent> --outcome done|failed|cancelled --receipt <证据>`：journal 进终态 `resolved`，合并意图结为 done（outcome=done）或 cancelled，释放项目合并槽，写 manual 事件。调度身份不能结清；队列冻结不随之自动解除，确认没有其他 unknown 后再 `ledger unfreeze`。待结清的 unknown 由巡检规则 `merge_unknown` 推给 PM，doctor 也单列一行。`manager update` 被维护锁拒绝时退出码为 1，部署任务不会把拒绝当成成功。
+
 ### 调度服务配置与部署回执
 
 `statePath("scheduler.json")` 不存在时 `enabled=false`；启用时逐项目填写 `maxActiveWorkers`、非空 `requiredChecks`（完整 CI job 名）和 `deploy`。必过检查缺失、pending、失败或 skipped 均不合并。`deploy.cwd` 是该项目仓库绝对路径，`argv` 是部署命令的字符串数组，`verifyArgv` 是只读部署核证命令；两者都不经 shell 拼接。核证命令输出 JSON：`{"ok":true,"mergeSha":"<完整 SHA>","receipt":"<可核对版本>"}`，合并 SHA 必须与本卡的 merge journal 相同。部署命令以环境变量收到 `CLAUDESTRA_MERGE_SHA`、`CLAUDESTRA_PR_URL`、`CLAUDESTRA_TASK_ID`；可设 `timeoutMs`（1 秒到 1 小时），默认 20 分钟。目标地址与本地凭据只进该机配置，不入仓库。仓库的 launchd 安装/更新使用同一 `DAEMONS` 清单，scheduler 排在 launcher 之前；旧的个人 `deploy-full.sh` 不再是自动合并队列的执行入口。
@@ -150,3 +153,4 @@ owner 截图 ask 属上线闸。
 - 收尾隔离补充：部署 request 只存执行环境白名单，保留 `BRIDGE_PORT`，否则带 sandbox 标记的子进程会回落到生产默认端口并被隔离闸拒绝；真实子进程导入隔离闸的回归已通过（未监听或连接任何端口）。
 
 - r2 最终交付验证：`GUARD_BASE=feat/t68-worker-sessions GUARD_STRICT=1 bun run check` 7326 pass / 0 fail，严格 guard 全绿；定向 27/0，八个入口构建通过。沙箱两次自身部署的证据为 `/tmp/t68-r2-self-deploy.log` 与 `/tmp/t68-r2-self-deploy2.log`；只用随机标识四个假服务和 stub 台账 verify，生产未动。
+- r3 修复（#242 由 Claude Code 接手）：部署任务收尾自行移除 launchd 标签、observe 兜底移除且不杀运行中任务；unknown 不再挡 update，新增 PM 专用 `scheduler-merge-resolve` 与 `resolved` 终态，巡检 `merge_unknown` 与 doctor 行提示待结清项；被拒的 update 以非 0 退出。

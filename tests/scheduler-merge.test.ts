@@ -4,6 +4,9 @@ import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
 import { getMeta, closeLedger, openLedger } from "../src/lib/ledger-store.js";
 import { advanceMergeRun, beginMergeRun, mergeRunDrift } from "../src/lib/scheduler-merge.js";
+import { acquireMaintenance } from "../src/lib/scheduler-maintenance.js";
+import { mergeQueueBusy } from "../src/lib/scheduler-update-gate.js";
+import { LedgerReader } from "../src/lib/ledger-read.js";
 import { setWorkflow } from "../src/lib/ledger-scheduler-write.js";
 import { createTask } from "../src/lib/ledger-write.js";
 import { parseSchedulerConfig } from "../src/lib/scheduler-config.js";
@@ -34,7 +37,7 @@ function fixture() {
   db.query(`INSERT INTO scheduler_sessions (taskId,role,agent,sessionId,family,transport,state,createIntentId,createdAt,updatedAt)
     VALUES ('T1','reviewer','agent-review','review-session','codex','acp','active','review-create',100,100)`).run();
   const close = () => { closeLedger(path); rmSync(dir, { recursive: true, force: true }); };
-  return { db, ctx, close };
+  return { db, ctx, close, path, dir };
 }
 
 describe("T68 durable merge/deploy queue", () => {
@@ -146,6 +149,46 @@ describe("T68 durable merge/deploy queue", () => {
       expect(await schedulerMergeTick(f.db, config, manager)).toBe(1);
       expect(calls.map((args) => args[1])).toEqual(["scheduler-merge-begin", "scheduler-settle"]);
       expect(calls[1]).toContain("unknown");
+    } finally { f.close(); }
+  });
+  test("unknown freezes only the merge queue: update is free, and only a human manager with a receipt resolves it", async () => {
+    const f = fixture();
+    const reader = new LedgerReader(f.path), lock = { path: join(f.dir, "mutex"), marker: join(f.dir, "update.json"), reader };
+    try {
+      beginMergeRun(f.db, f.ctx, "merge-one", ["check"]);
+      advanceMergeRun(f.db, f.ctx, { intentId: "merge-one", from: "ready", to: "await_ci", rev: 1, receipt: "clean" });
+      advanceMergeRun(f.db, f.ctx, { intentId: "merge-one", from: "await_ci", to: "merging", rev: 2 });
+      expect(mergeQueueBusy(f.db)).toBe(true);
+      advanceMergeRun(f.db, f.ctx, { intentId: "merge-one", from: "merging", to: "unknown", rev: 3, receipt: "gh timeout" });
+      expect(mergeQueueBusy(f.db)).toBe(false);
+      const update = await acquireMaintenance("update", lock);
+      expect(update).not.toBeNull(); update!.release();
+      const cli = (actor: string, ...args: string[]) => runLedger(["scheduler-merge-resolve", "merge-one", ...args], {
+        db: f.db, actor, projectIds: ["p"], loadRegistry: async () => ({} as Registry), saveRegistry: async () => {}, now: () => 200 });
+      expect(await cli("scheduler", "--outcome", "failed", "--receipt", "PR still open")).toMatchObject({ ok: false, code: "forbidden" });
+      expect(await cli("agent-author", "--outcome", "failed", "--receipt", "PR still open")).toMatchObject({ ok: false, code: "forbidden" });
+      expect(await cli("owner", "--outcome", "failed")).toMatchObject({ ok: false });
+      expect(await cli("owner", "--outcome", "merged", "--receipt", "x")).toMatchObject({ ok: false, code: "invalid" });
+      const ok = await cli("owner", "--outcome", "failed", "--receipt", "gh pr view 42: OPEN, head aaaa, not merged");
+      expect(ok).toMatchObject({ ok: true, run: { phase: "resolved", reason: "failed: gh pr view 42: OPEN, head aaaa, not merged" } });
+      expect(f.db.query("SELECT status FROM scheduler_intents WHERE id='merge-one'").get()).toEqual({ status: "cancelled" });
+      expect(f.db.query("SELECT count(*) AS n FROM scheduler_resources WHERE intentId='merge-one'").get()).toEqual({ n: 0 });
+      expect(getMeta(f.db, "p").queueFrozen.frozen).toBe(true);
+      const ev = f.db.query("SELECT actor, data FROM events WHERE dedupKey='scheduler:merge-one:merge:resolved'").get() as { actor: string; data: string };
+      expect(ev.actor).toBe("owner");
+      expect(JSON.parse(ev.data)).toMatchObject({ op: "merge_resolve", outcome: "failed", manual: true, queueFrozen: true });
+      expect(await cli("owner", "--outcome", "done", "--receipt", "again")).toMatchObject({ ok: false, code: "conflict" });
+    } finally { reader.close(); f.close(); }
+  });
+  test("resolving as done settles the merge intent done", async () => {
+    const f = fixture();
+    try {
+      beginMergeRun(f.db, f.ctx, "merge-one", ["check"]);
+      advanceMergeRun(f.db, f.ctx, { intentId: "merge-one", from: "ready", to: "unknown", rev: 1, receipt: "mergeState=BLOCKED" });
+      const r = await runLedger(["scheduler-merge-resolve", "merge-one", "--outcome", "done", "--receipt", "merged by PM abc; deploy verified"], {
+        db: f.db, actor: "owner", projectIds: ["p"], loadRegistry: async () => ({} as Registry), saveRegistry: async () => {}, now: () => 200 });
+      expect(r).toMatchObject({ ok: true, run: { phase: "resolved" } });
+      expect(f.db.query("SELECT status FROM scheduler_intents WHERE id='merge-one'").get()).toEqual({ status: "done" });
     } finally { f.close(); }
   });
 });
