@@ -12,7 +12,7 @@ import { probeClaudeVersion } from "./claude-binary.js";
 import { resolveCodexBinary } from "./codex-launch.js";
 import { defaultRunner, type Runner } from "./codex-thread.js";
 import { STATE_DIR } from "./paths.js";
-import { CODEX_ACP_PAIRS, CODEX_ACP_VERSION, codexPairsWithAdapter } from "./acp/install.js";
+import { BROKEN_HINT, codexPairsWithAdapter, currentCodexAcp } from "./acp/install.js";
 
 /** npm 全局装的 @openai/codex：解析出的路径落在包目录里（bin/codex.js 壳，或包内的原生二进制） */
 export function isNpmGlobalCodex(path: string | undefined): boolean {
@@ -68,6 +68,8 @@ export async function noteAcpCodexRunning(o: {
   timeoutMs?: number;
   /** 已告警过的版本（宿主整个进程共用一份），退避重起时不重复刷屏 */
   warned?: Set<string>;
+  /** 适配器状态目录；缺省 statePath("acp")，单测注入 */
+  acpRoot?: string;
 }): Promise<string | undefined> {
   if (!o.codexPath) return undefined;
   const ms = o.timeoutMs ?? ACP_PROBE_MS;
@@ -85,9 +87,12 @@ export async function noteAcpCodexRunning(o: {
     clearTimeout(timer);
   }
   const key = v ?? "读不出版本";
-  if (!codexPairsWithAdapter(v) && !o.warned?.has(key)) {
+  const cur = currentCodexAcp(o.acpRoot);
+  if (cur && !codexPairsWithAdapter(v, o.acpRoot) && !o.warned?.has(key)) {
     o.warned?.add(key);
-    o.log(`⚠️ 本机 codex 是「${key}」，codex-acp ${CODEX_ACP_VERSION} 配套的是 ${CODEX_ACP_PAIRS}：升 codex 要连适配器一起手动对齐（docs/runtimes/codex-acp.md）`);
+    o.log(cur === "broken"
+      ? `⚠️ 本机 codex 是「${key}」，但 ${BROKEN_HINT}（网页此时不给「更新并重启」）`
+      : `⚠️ 本机 codex 是「${key}」，codex-acp ${cur.version} 配套的是 ${cur.codexRange}：网页「更新并重启」或 \`manager acp-install\` 会换上配套的适配器（docs/runtimes/codex-acp.md）`);
   }
   try { recordCodexRunning(o.agent, v, o.dir); } catch (e) { o.log(`⚠️ 记不下 codex 运行版本（网页少一条「重启生效」提示）：${String(e)}`); }
   return v;

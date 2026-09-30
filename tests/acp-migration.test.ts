@@ -12,7 +12,7 @@ import type { LaunchSpec } from "../src/lib/runtimes/types.ts";
 const healthy: AcpReadyDeps = {
   env: {}, resolveBin: async () => "/usr/bin/codex",
   run: async () => ({ ok: true, out: "Usage: codex app-server [OPTIONS]", err: "" }),
-  installed: () => ({ ok: true, path: "/state/acp/index.js" }),
+  installed: () => ({ ok: true, path: "/state/acp/index.js", version: "2.0.0", codexRange: "^0.158.0" }),
 };
 
 test("旧 updater 的无参数 migrate 只搬 worker，不在 daemon reload 前启动 ACP 宿主", async () => {
@@ -46,7 +46,7 @@ test("ACP 闸门识别旧 CLI 打印顶层 help 后 exit 0，不能误判可用"
   expect(await checkAcpReady(false, healthy)).toEqual({ ok: true, codexBin: "/usr/bin/codex" });
 });
 
-test("缺适配器才按固定安装器下载；下载失败留在 tmux，doctor 说明", async () => {
+test("缺适配器才下载；下载失败留在 tmux，doctor 说明", async () => {
   let installs = 0;
   const deps: AcpReadyDeps = { ...healthy,
     installed: () => ({ ok: false, hint: "缺适配器" }),
@@ -63,6 +63,22 @@ test("缺适配器才按固定安装器下载；下载失败留在 tmux，doctor
   expect(agents.old.acpRestartPending).toBeUndefined();
   expect(acpDoctorChecks([{ name: "old", runtime: "codex", acpPending: true } as RegistryAgent], failed)
     .some((c) => c.name === "tmux 暂退" && c.status === "warn")).toBe(true);
+});
+
+test("自动安装按本机 codex 挑适配器；已装且配套不联网；离线 / 解析不到退回已装的，不判未就绪", async () => {
+  const withVersion = (v: string) => async (cmd: string[]) =>
+    ({ ok: true, out: cmd[1] === "--version" ? `codex-cli ${v}\n` : "Usage: codex app-server [OPTIONS]", err: "" });
+  const asked: (string | undefined)[] = [];
+  const offline: AcpReadyDeps["install"] = async (probe) => (asked.push(await probe()), { ok: false, error: "offline" }); // 对账时重探磁盘上的 codex
+  const pairs = (v: string | undefined) => v === "0.158.0";
+  expect(await checkAcpReady(true, { ...healthy, run: withVersion("0.158.0"), pairs, install: offline })).toMatchObject({ ok: true });
+  expect(asked).toEqual([]);
+  expect(await checkAcpReady(true, { ...healthy, run: withVersion("0.159.2"), pairs, install: offline })).toMatchObject({ ok: true });
+  expect(asked).toEqual(["0.159.2"]);
+  const missing = { ...healthy, installed: () => ({ ok: false as const, hint: "缺适配器" }), run: withVersion("0.159.2"), pairs, install: offline };
+  expect(await checkAcpReady(true, missing)).toEqual({ ok: false, reason: "offline" });
+  const upgraded: AcpReadyDeps["install"] = async () => ({ ok: true, path: "/x", reused: false, version: "2.0.1", codexRange: "^0.159.1" });
+  expect(await checkAcpReady(true, { ...missing, install: upgraded })).toMatchObject({ ok: true });
 });
 
 test("迁移可重跑：条件恢复接回旧会话，显式 tmux 回退不再自动改，失败重启可重试", () => {
@@ -203,14 +219,27 @@ test("普通 restart 的 ACP 接线程失败也回退 tmux，成功后保留待�
   expect(state.acpRestartPending).toBeUndefined();
 });
 
+test("R2-③ readiness 对账拿到的是「重探」函数：对账时读的是磁盘上此刻的 codex，不是开头探到的旧值", async () => {
+  let n = 0;
+  const run = async (cmd: string[]) => ({ ok: true, out: cmd[1] === "--version" ? `codex-cli 0.159.${n++}\n` : "Usage: codex app-server [OPTIONS]", err: "" });
+  let seen: string | undefined;
+  const install: AcpReadyDeps["install"] = async (probe) => ((seen = await probe()), { ok: false, error: "offline" });
+  await checkAcpReady(true, { ...healthy, run, pairs: () => false, install });
+  expect(seen).toBe("0.159.1");
+});
+
 test("doctor：本机 codex 与适配器不配套只报 warn（宿主照常起），配套报 ok，没探到不报", () => {
   const ok = { ok: true as const, codexBin: "/usr/bin/codex" };
   const agents = [{ name: "cx", runtime: "codex", transport: "acp" } as RegistryAgent];
-  const pick = (v: string | null | undefined) => acpDoctorChecks(agents, ok, v).find((c) => c.name === "Codex 与适配器配套");
+  const adapter = { version: "2.0.0", codexRange: "^0.158.0", path: "/state/acp/codex-acp-2.0.0/index.js" };
+  const pick = (v: string | null | undefined) => acpDoctorChecks(agents, ok, v, adapter).find((c) => c.name === "Codex 与适配器配套");
+  expect(acpDoctorChecks(agents, ok, "0.158.0", adapter)[0]!.detail).toContain("codex-acp 2.0.0（配 codex ^0.158.0）");
   expect(pick("0.159.0")).toMatchObject({ status: "warn" });
-  expect(pick("0.159.0")!.detail).toContain("0.158.x");
+  expect(pick("0.159.0")!.detail).toContain("codex-acp 2.0.0 的配套范围（^0.158.0）");
   expect(pick("0.159.0")!.detail).toContain("1 个 ACP agent 照常运行");
   expect(pick(null)).toMatchObject({ status: "warn" });
   expect(pick("0.158.0")).toMatchObject({ status: "ok" });
   expect(pick(undefined)).toBeUndefined();
+  const broken = acpDoctorChecks(agents, ok, "0.158.0", "broken").find((c) => c.name === "Codex 与适配器配套");
+  expect(broken).toMatchObject({ status: "warn", detail: expect.stringContaining("指针或标记坏了") }); // F1：坏了不能当配套
 });
