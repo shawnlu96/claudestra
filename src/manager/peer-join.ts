@@ -13,7 +13,7 @@ import { INVITE_MAX_REFUSALS, isPeerBaseUrl, relayPeerFingerprint, relayUrlOf, t
 import { checkInviteProof, inviteUrlKey, judgeJoin, newInviteNonce, signInviteProof, type JoinVerdict } from "../lib/invite-proof.js";
 import { legacyStillOpen, peerAnchorOf } from "../lib/peer-trust.js";
 import { uniquePeerName } from "./peer-names.js";
-import { myFingerprint, peerCliFetch, relayStatus } from "./relay.js";
+import { myFingerprint, peerCliFetch, rawCliFetch, relayStatus } from "./relay.js";
 import { fromB64url } from "../lib/e2e/encoding.js";
 import { verifyE2eKey, type SignedE2eKey } from "../lib/e2e-machine-key.js";
 import { localE2e, type LocalE2e } from "../lib/peer-e2e-local.js";
@@ -180,7 +180,8 @@ async function postRedeem(hs: PeerInviteV2, rev: Reverse, x: { nonce: string; in
   const payload = { join: hs.join, name: selfPeerName(), nonce: x.nonce, inviteUrl: x.inviteUrl, ...(iid ? { iid } : {}), ...(rev.secret ? { url: rev.url, token: rev.secret } : {}) };
   const l = x.local, sealed = l && hs.ek ? await sealRedeemRequest(fromB64url(hs.ek.pub)!, hs.fp!, { ...payload, idk: l.key.publicKey, key: l.signed }) : null;
   try {
-    const r = await peerCliFetch(`${hs.url}/api/v1/peers/redeem`, {
+    // 加密兑换自带信封，直接发到邀请里的地址：进会话层会按指纹撞上本机那条单向记录（有 e2e、没地址）而 e2e_bad_peer（tests/peer-join-oneway.test.ts）
+    const r = await (sealed ? rawCliFetch : peerCliFetch)(`${hs.url}/api/v1/peers/redeem`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(sealed ? sealed.body : payload),
