@@ -58,6 +58,34 @@ export type RemoteView = Record<QuotaProvider, ProviderRemote>;
 
 const usageEndpoint = (p: QuotaProvider): QuotaEndpoint => (p === "claude" ? "claude_usage" : "codex_usage");
 const PROVIDERS: QuotaProvider[] = ["claude", "codex"];
+/**
+ * 持久状态 → 选层用的只读视图（纯函数）：调度器的 view() 与只读取数方（lib/ai-quota.ts，不起调度器、不碰凭据）共用。
+ * enabled = false 时不给账户数据，与看板开关同一口径。
+ */
+export function remoteViewOf(st: QuotaState, now: number, enabled: boolean): RemoteView {
+  const out = {} as RemoteView;
+  for (const p of PROVIDERS) {
+    const key = st.current[p];
+    const acct = key && enabled ? st.accounts[key] : undefined;
+    const ch = st.credHealth[p];
+    const endpoints: ProviderRemote["endpoints"] = {};
+    for (const e of Object.keys(QUOTA_ENDPOINTS) as QuotaEndpoint[]) {
+      if (QUOTA_ENDPOINTS[e].provider !== p || !acct) continue;
+      const snap = acct.snapshots[e] ?? null;
+      const h = acct.health[e];
+      const maxAge = e === "codex_reset_credits" ? QUOTA_TIMING.detailStaleMs : QUOTA_TIMING.usageStaleMs;
+      const stale = !snap || !!h?.lastCode || acct.uncertain || now - snap.observedAt > maxAge;
+      (endpoints as Record<string, EndpointView>)[e] = { snapshot: snap, lastCode: h?.lastCode ?? null, paused: !!h?.paused, stale };
+    }
+    out[p] = {
+      account: acct && key ? { key, identity: acct.identity, uncertain: acct.uncertain } : null,
+      credFailure: ch ? { code: ch.code, needsUserRetry: ch.until === null } : null,
+      endpoints,
+    };
+  }
+  return out;
+}
+
 export class QuotaScheduler {
   private state: Promise<QuotaState> | null = null;
   private gen = 0;
@@ -288,29 +316,7 @@ export class QuotaScheduler {
 
   /** 给选层用的只读视图：只含每家当前账户的数据；开关关着时不给远程数据 */
   async view(): Promise<RemoteView> {
-    const st = await this.load();
-    const now = this.deps.now();
-    const out = {} as RemoteView;
-    for (const p of PROVIDERS) {
-      const key = st.current[p];
-      const acct = key && this.deps.isEnabled() ? st.accounts[key] : undefined;
-      const ch = st.credHealth[p];
-      const endpoints: ProviderRemote["endpoints"] = {};
-      for (const e of Object.keys(QUOTA_ENDPOINTS) as QuotaEndpoint[]) {
-        if (QUOTA_ENDPOINTS[e].provider !== p || !acct) continue;
-        const snap = acct.snapshots[e] ?? null;
-        const h = acct.health[e];
-        const maxAge = e === "codex_reset_credits" ? QUOTA_TIMING.detailStaleMs : QUOTA_TIMING.usageStaleMs;
-        const stale = !snap || !!h?.lastCode || acct.uncertain || now - snap.observedAt > maxAge;
-        (endpoints as Record<string, EndpointView>)[e] = { snapshot: snap, lastCode: h?.lastCode ?? null, paused: !!h?.paused, stale };
-      }
-      out[p] = {
-        account: acct && key ? { key, identity: acct.identity, uncertain: acct.uncertain } : null,
-        credFailure: ch ? { code: ch.code, needsUserRetry: ch.until === null } : null,
-        endpoints,
-      };
-    }
-    return out;
+    return remoteViewOf(await this.load(), this.deps.now(), this.deps.isEnabled());
   }
 
   /** doctor 用：各端点是否暂停、最近错误码（不含任何秘密） */

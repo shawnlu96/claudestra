@@ -139,6 +139,8 @@ export interface CallUsage {
   cacheCreation: number;
   cacheRead: number;
   output: number;
+  /** 推理 token，单列、不含在 output 里（Codex 才有；Claude 的 thinking 算在 output 里，这里恒 0） */
+  reasoning?: number;
   /** 这一行里的工具调用（同一响应的每个内容块各占一行，工具块散在不同行上） */
   tools: { id: string; name: string }[];
 }

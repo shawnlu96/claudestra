@@ -59,6 +59,9 @@ const WRITE_SUBCOMMANDS: Record<string, ReadonlySet<string>> = {
 /** ledger 的读子命令；其余都写台账（备机上也要过认主守卫）。meta 只有带 --pms（写提案）/ --docs-dir 才写，--team / --dispatcher 会被拒，也按写算 */
 const LEDGER_READ_SUBS: ReadonlySet<string> = new Set(["", "help", "whoami", "show", "export", "review-pack", "deps", "ask-check", "steps", "scheduler-diff",
   "feature-show", "dag-show"]);
+/** ledger 里带 --dry-run 就只读的子命令：认主守卫按读算，ledger.ts 给只读连接 */
+export const DRY_RUN_READS: ReadonlySet<string> = new Set(["audit", "feature-migrate"]);
+
 /**
  * ledger 里拿命令级写锁的子命令：task-new / task-set 会写 registry；import 不碰 registry，拿锁只为让一次性迁移与 create / restart 等命令错开，
  * 不影响台账本身的正确性（整批一个 IMMEDIATE 事务）。其余 ledger 写只写 sqlite，不排在 restart 这类长写后面。
@@ -99,7 +102,8 @@ export function isWriteInvocation(cmd: string | undefined, args: readonly string
   const subs = WRITE_SUBCOMMANDS[cmd];
   if (subs) return subs.has(sub);
   if (cmd === "auto-update") return !AUTO_UPDATE_READ_SUBS.has(sub);
-  if (cmd === "ledger" && sub === "audit") return !args.includes("--dry-run"); // 巡检默认把结果写进 audit_findings
+  // 巡检默认把结果写进 audit_findings；feature-migrate 不带 --dry-run 就是正式迁移
+  if (cmd === "ledger" && DRY_RUN_READS.has(sub)) return !args.includes("--dry-run");
   if (cmd === "ledger") return sub === "meta" ? args.slice(1).some((a) => /^--(pms|docs-dir|team|dispatcher)(=|$)/.test(a)) : !LEDGER_READ_SUBS.has(sub);
   return false;
 }

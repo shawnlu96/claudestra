@@ -56,17 +56,21 @@ const col = (s: string | number, w: number) => String(s).padStart(w);
 function turnLine(t: TurnRow): string {
   const tools = Object.entries(t.tools).sort((x, y) => y[1] - x[1]).slice(0, 4).map(([n, k]) => `${n}×${k}`).join(" ");
   const kind = t.sidechain ? `↳${t.kind}` : t.kind;
-  return `${hhmm(t.startedAt)}  ${kind.padEnd(13)}${col(t.calls, 5)}${col(formatTokens(t.contextSeen), 9)}${col(formatTokens(t.totalTokens), 9)}`
-    + `${col(formatTokens(t.output), 7)}  ${tools}${t.trigger ? `  「${t.trigger}」` : ""}`;
+  return `${hhmm(t.startedAt)}  ${t.runtime.padEnd(12)}${kind.padEnd(13)}${col(t.calls, 5)}${col(formatTokens(t.contextSeen), 9)}`
+    + `${col(formatTokens(t.totalTokens), 9)}${col(formatTokens(t.output), 7)}${col(formatTokens(t.reasoning), 7)}  ${tools}${t.trigger ? `  「${t.trigger}」` : ""}`;
 }
 
+/** Codex 的模型是请求模型：名字后面标「(请求)」，不和 Claude 的应答模型混成一个意思 */
+const modelLabel = (r: Pick<SummaryRow, "model" | "modelBasis">) => (r.modelBasis === "request" ? `${r.model}(请求)` : r.model);
+
 function summaryLine(r: SummaryRow): string {
-  return `${r.agent.padEnd(28)} ${r.model.padEnd(26)}${col(r.calls, 7)}${col(formatTokens(r.input), 8)}${col(formatTokens(r.cacheCreation), 8)}`
-    + `${col(formatTokens(r.cacheRead), 8)}${col(formatTokens(r.output), 8)}${col(formatTokens(r.totalTokens), 9)}`;
+  return `${r.agent.padEnd(28)} ${r.runtime.padEnd(12)}${modelLabel(r).padEnd(26)}${col(r.calls, 7)}${col(formatTokens(r.input), 8)}`
+    + `${col(formatTokens(r.cacheCreation), 8)}${col(formatTokens(r.cacheRead), 8)}${col(formatTokens(r.output), 8)}${col(formatTokens(r.reasoning), 8)}`
+    + `${col(formatTokens(r.totalTokens), 9)}`;
 }
 
 function grand(rows: SummaryRow[]) {
-  const g = { input: 0, cacheCreation: 0, cacheRead: 0, output: 0, totalTokens: 0, calls: 0 };
+  const g = { input: 0, cacheCreation: 0, cacheRead: 0, output: 0, reasoning: 0, totalTokens: 0, calls: 0 };
   for (const r of rows) for (const k of Object.keys(g) as (keyof typeof g)[]) g[k] += r[k];
   return g;
 }
@@ -92,8 +96,10 @@ export async function cmdUsage(args: string[]): Promise<void> {
     if (sub === "summary") {
       const rows = usageSummary(db, a.sinceMs);
       if (a.json) return outputSync({ ok: true, period, rows, grand: grand(rows), ...(ingested ? { ingested } : {}) });
-      const head = `${stale}token 账 · ${period}\n${"agent".padEnd(28)} ${"模型".padEnd(24)}   调用    输入  写缓存  读缓存    输出     合计`;
-      outputSync([head, ...rows.map(summaryLine), summaryLine({ agent: "合计", model: "", ...grand(rows) })].join("\n"));
+      const head = `${stale}token 账 · ${period}\n${"agent".padEnd(28)} ${"运行时".padEnd(9)}${"模型".padEnd(24)}   调用    输入  写缓存  读缓存`
+        + `    输出    推理     合计`;
+      const total = summaryLine({ agent: "合计", runtime: "", model: "", modelBasis: "response", ...grand(rows) });
+      outputSync([head, ...rows.map(summaryLine), total].join("\n"));
       return;
     }
     const agent = a.positional[0];
@@ -101,7 +107,7 @@ export async function cmdUsage(args: string[]): Promise<void> {
     let turns = turnsFor(db, agent, a.sinceMs ?? 0, a.limit);
     if (!turns.length && !agent.startsWith("agent-")) turns = turnsFor(db, `agent-${agent}`, a.sinceMs ?? 0, a.limit);
     if (a.json) return outputSync({ ok: true, agent, period, turns, ...(ingested ? { ingested } : {}) });
-    const head = `${stale}${agent} · ${turns.length} 轮 · ${period}\n时间         来源          调用  看到上下文   合计   输出  工具 / 来源摘要`;
+    const head = `${stale}${agent} · ${turns.length} 轮 · ${period}\n时间         运行时      来源          调用  看到上下文   合计   输出   推理  工具 / 来源摘要`;
     outputSync([head, ...turns.map(turnLine)].join("\n"));
   } finally {
     db.close();
