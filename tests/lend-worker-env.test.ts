@@ -24,10 +24,10 @@ describe("T94 白名单环境", () => {
 
   test("状态 / 运行目录改过就带上（worker 里的 lend submit 与自停兜底要找到同一个 journal）；沙箱变量只在沙箱里带", () => {
     const dirs = { CLAUDESTRA_STATE_DIR: "/s/state", CLAUDESTRA_RUNTIME_DIR: "/s/run" };
-    const lab = { CLAUDESTRA_SANDBOX: "1", CLAUDESTRA_SANDBOX_ROOT: "/s", CLAUDESTRA_SANDBOX_DENY_PORTS: "3847", CLAUDESTRA_LAB_ROOT: "/l" };
+    const lab = { CLAUDESTRA_SANDBOX: "1", CLAUDESTRA_SANDBOX_ROOT: "/s", CLAUDESTRA_SANDBOX_DENY_PORTS: "3847", CLAUDESTRA_LAB_ROOT: "/l", BRIDGE_PORT: "24101" };
     expect(pickWorkerEnv({ ...DIRTY, ...dirs })).toMatchObject(dirs);
     expect(Object.keys(pickWorkerEnv({ ...DIRTY, ...dirs, ...lab })).sort()).toEqual([...WORKER_ENV_WHITELIST, ...Object.keys(dirs), ...Object.keys(lab)].sort());
-    expect(pickWorkerEnv({ ...DIRTY, CLAUDESTRA_SANDBOX_ROOT: "/s" }).CLAUDESTRA_SANDBOX_ROOT).toBeUndefined();
+    expect(pickWorkerEnv({ ...DIRTY, CLAUDESTRA_SANDBOX_ROOT: "/s", BRIDGE_PORT: "13847" })).toEqual(pickWorkerEnv(DIRTY));
   });
 
   test("按名字认出借 worker：agent-lend-* 才是，别的不是", () => {

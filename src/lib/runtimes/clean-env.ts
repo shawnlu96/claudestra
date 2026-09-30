@@ -21,7 +21,8 @@ export const isLendWorkerName = (name: string | undefined): boolean => !!name &&
  * 找不到这张单就当它结束了（lend-watchdog.ts）；沙箱实例不带沙箱变量，worker 会被当成生产进程（碰生产目录、起真 Codex）。
  */
 const PLUMBING = ["CLAUDESTRA_STATE_DIR", "CLAUDESTRA_RUNTIME_DIR"] as const;
-const SANDBOX_VAR = /^CLAUDESTRA_(?:SANDBOX(?:_[A-Z_]+)?|LAB_[A-Z_]+)$/;
+/** 沙箱进程加载 lib/paths 时要核 bridge 地址不是生产端口，不带 BRIDGE_* 会回落到默认端口、当场拒绝启动（都是回环地址，不是凭据） */
+const SANDBOX_VAR = /^(?:CLAUDESTRA_(?:SANDBOX(?:_[A-Z_]+)?|LAB_[A-Z_]+)|BRIDGE_(?:PORT|URL|BIND))$/;
 
 /** 只留白名单里有值的变量（外加上面的路径变量；沙箱里再加沙箱变量） */
 export function pickWorkerEnv(env: Record<string, string | undefined>): Record<string, string> {
