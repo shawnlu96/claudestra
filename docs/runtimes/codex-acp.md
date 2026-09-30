@@ -99,6 +99,11 @@ bridge 那头：`bridge/acp-link.ts`（宿主的帧 → watcher 推送 / 卡片 
 - **AIR 与终端输出。** 宿主声明了 AIR `sessionFailure`（所有回合失败都结构化，不只是额度），同时声明 `clientCapabilities._meta.terminal_output_delta: true`——声明 AIR 而不声明它，命令输出就收不到了。
 - **适配器安装。** codex-acp 的 GitHub release 上没有任何附件，所以 `manager acp-install` 直接下载 npm registry 上的 `codex-acp-2.0.0.tgz`（269KB），版本钉死，sha256 写死在 `lib/acp/install.ts`（`a8d48bdf70c0e3e585abbdce19f78765450d8fa6ada1da0fd53508e64315905b`），校验不过就拒装、不回退到 npm；只解出 `dist/index.js` 放到状态目录，用我们自己的 bun 跑，并记下它的哈希——宿主每次启动都核对，装好后被改过就拒起。设了 `CODEX_PATH` 它不会加载那份 344MB 的 `@openai/codex`；不进 package.json。
 - **Codex 升级。** Claudestra 不自动升 Codex（launcher 只自动升 Claude Code）。迁移 / 新建 / 重启先用 `codex app-server --help` 探测能力，不能只信退出码：旧 CLI 会把未知子命令当提示词并以 0 退出。宿主还会核对本机 Codex 与适配器配套版本；不匹配先告警。升适配器要改 `install.ts` 的版本和 sha256，再重跑 `acp-install`。
+  - 配套范围只有一份：`install.ts` 的 `CODEX_ACP_PAIRS`。宿主告警、网页更新提示、`codex-update` 端点都读它。
+  - 网页横幅的规则（`lib/update-hints.ts`）：
+    - npm 上的新版不在配套范围里：只给文字，不给「更新并重启」按钮，端点也回 409；
+    - 已装版本本身就不配套时，ACP agent 的「重启生效」同样只给文字。
+  - 运行版本的来源：宿主每次起适配器之前，对 `CODEX_PATH` 跑一次 `--version` 并记下（`codex-version.ts noteAcpCodexRunning`）。rollout 里的 `cli_version` 是建线程时的版本，不能用；initialize 只报适配器自己的版本。
 - **新建要跑一轮引导。** 新线程在第一轮之前不落盘，所以 create 时起一个短命的适配器，`session/new` 后跑一轮 `[claudestra:bootstrap]`（和 tmux 下 `codex exec` 引导同一个做法，历史里整轮丢掉），职责与频道规则经 `developer_instructions` 在这一轮写进线程。宿主之后一律接已有线程：适配器声明了 `session/resume` 就用它（不回放历史），否则 `session/load`；首条入站附职责前言（与 tmux 同一份）。
 - **fork 与 /clear**：`resume --fork --runtime codex` 经 `session/fork` 建新线程、重新订阅并跑一轮引导，registry 只记新 id。ACP 下 `/clear` 暂未轮转，先切回 tmux；其它斜杠命令（`/compact` 等）原样当一轮 prompt 交给宿主，由适配器自己认。
 - **网页直播的 seq。** 宿主推上来的条目没有 rollout 行号：watcher 给它们本地序号、sid 带 `acp:` 前缀，前端据此不拿它们跟 rollout 的历史游标比，退回按时间戳合并（bridge 直投的 reply 本来就这样）。代价：回合中途刷新网页时，直播气泡的剔重没有按行号那么精确。以后要补，可以让宿主读 rollout 对齐行号。
