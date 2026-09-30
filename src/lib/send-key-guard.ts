@@ -3,7 +3,7 @@
  * 数字 / Enter 会替人选中高亮项（额度菜单里有花钱的选项、权限框等于替人批准），Esc / C-c 等于替人拒绝或取消，
  * 撞墙倒计时上随便敲一个字就取消 CC 排好的自动续跑——所以拦的是整个画面，不挑键。抓不到屏 / 空屏同样不发（认不出 ≠ 安全）。
  * owner 点过的按钮带「授权的画面」（--expect）和那一张框的指纹（--box）：画面是那种、而且还是那一张才发，换了就不发。
- * 切模型 / effort 确认框不能授权发键（没有调用方；按钮已停用，bridge/swmodel-button.ts）。
+ * 切模型 / effort 确认框：程序自发同样拒发（Enter 等于替 owner 选 Yes，要发得 --force 并记审计），而且不能授权发键（按钮已停用，bridge/swmodel-button.ts）。
  * 强发、授权发每次追加一行审计（send-keys-audit.jsonl）；caller、authorizedBy 是调用方声明的，不是身份认证。
  * 单测 tests/send-key-guard.test.ts（真实画面 fixture）。
  */
@@ -41,7 +41,7 @@ export type AuthorizableScreen = GuardedScreen;
 export const AUTHORIZABLE_SCREENS: readonly AuthorizableScreen[] = [
   "limit_menu", "wall_countdown", "codex_menu", "permission", "ask_user_question", "session_idle", "trust_prompt", "bypass_consent",
 ];
-/** 发键前看到的画面：switch_confirm 程序自发不拦、授权发一律不发；unreadable = 抓屏失败 / 超时 / 空屏；null = 普通画面 */
+/** 发键前看到的画面：switch_confirm 程序自发要 --force、授权发一律不发；unreadable = 抓屏失败 / 超时 / 空屏；null = 普通画面 */
 export type SeenScreen = GuardedScreen | "switch_confirm" | "unreadable" | null;
 
 export function seenScreenOf(pane: string, runtime: string | undefined): SeenScreen {
@@ -81,7 +81,7 @@ export function sendKeyRefusal(seen: SeenScreen, expect: AuthorizableScreen | nu
   if (seen === "unreadable") return `抓不到窗口画面（${detail || "空屏"}），认不出停在什么上，没发任何键${force}`;
   if (expect && seen === "switch_confirm") return `窗口停在${SCREEN_TEXT.switch_confirm}上：这种框只能 owner 到终端或网页终端里自己按，授权发键一律不发`;
   if (expect) return seen === expect ? null : `框已经变了：授权的是${SCREEN_TEXT[expect]}，窗口现在是${seen ? SCREEN_TEXT[seen] : "普通画面"}，没发任何键`;
-  if (!seen || seen === "switch_confirm") return null;
+  if (!seen) return null;
   return `窗口停在${SCREEN_TEXT[seen]}上，没发任何键${force}`;
 }
 

@@ -16,6 +16,7 @@ import {
   trustPromptMoves,
 } from "./tmux-helper.js";
 import { inputBox } from "./input-box.js";
+import { switchBoxShown } from "./switch-box.js";
 
 /**
  * pane 上是否有「可以安全自动按 Enter 确认」的 modal：parseModalOptions 几何识别（❯ 标记的选项菜单），再按负向黑名单排除必须人决定的——
@@ -54,9 +55,7 @@ export function isAutoConfirmableModal(
   return true;
 }
 
-/** 黑名单宁宽勿窄：严格识别之外，底部出现框标题或「N. Yes, switch to …」选项也算（CC 改了框的排版也不会漏成自动 Enter） */
+/** 黑名单宁宽勿窄：严格识别之外再加宽口径（lib/switch-box.ts；CC 改了框的排版也不会漏成自动 Enter） */
 export function looksLikeSwitchConfirm(pane: string): boolean {
-  if (detectSwitchConfirmPrompt(pane)) return true;
-  const tail = pane.split("\n").map((l) => l.trim()).filter(Boolean).slice(-12);
-  return tail.some((l) => l === "Switch model?" || l === "Change effort level?" || /^(❯\s*)?\d{1,2}\.\s+Yes, switch to\b/i.test(l));
+  return !!detectSwitchConfirmPrompt(pane) || switchBoxShown(pane);
 }
