@@ -3,6 +3,7 @@
  * 单独收编成 agent 基本都是误操作（owner 就这么把一条自动审查线程收编过）。没带 confirmSubSession:true 就 409，
  * 带回归属信息让前端说清「这是谁的子会话」；前端二次确认后带上标记重发即可。单测 tests/subsession-guard.test.ts。
  */
+import { codexRolloutRoot } from "../lib/codex-home.js";
 import { codexSubSessionOf } from "../lib/codex-session.js";
 import type { SubSessionInfo } from "../lib/runtimes/types.js";
 import { apiJson } from "./api-respond.js";
@@ -13,7 +14,8 @@ export async function refuseUnconfirmedSubSession(
   body: { confirmSubSession?: unknown } | null | undefined,
   sessionId: string,
   runtime: string,
-  lookup: Lookup = codexSubSessionOf,
+  // async 包一层：沙箱 CODEX_HOME 配错时 codexRolloutRoot 同步抛，要变成 rejection 才被下面的 catch 接住（不读宿主 ~/.codex）
+  lookup: Lookup = async (sid) => codexSubSessionOf(sid, codexRolloutRoot()),
 ): Promise<Response | null> {
   if (runtime !== "codex" || body?.confirmSubSession === true) return null;
   const sub = await lookup(sessionId).catch(() => null); // 读不到 rollout 就按普通会话放行：闸是防误操作，不是权限边界

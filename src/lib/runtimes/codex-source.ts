@@ -11,7 +11,7 @@ import {
   newCodexTranslateState,
   readCodexMeta,
 } from "../codex-session.js";
-import { codexRolloutRoot } from "../codex-home.js";
+import { codexRolloutRootOrSkip } from "../codex-home.js";
 import { scanCodexStatsWindow } from "../codex-usage.js";
 import { lastUserTextOf } from "./shared.js";
 import type { AnyRecord, DiscoveredSession, SessionSourceAdapter } from "./types.js";
@@ -19,8 +19,8 @@ import type { AnyRecord, DiscoveredSession, SessionSourceAdapter } from "./types
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 export const isValidCodexSessionId = (id: string): boolean => UUID_RE.test(id);
 async function scanCodexSessions(search?: string): Promise<DiscoveredSession[]> {
-  const root = codexRolloutRoot();
-  if (!existsSync(root)) return [];
+  const root = codexRolloutRootOrSkip("Codex 会话扫描");
+  if (!root || !existsSync(root)) return [];
   const out: DiscoveredSession[] = [];
   for (const filePath of listCodexSessionFiles(root)) {
     const sessionId = codexSessionIdFromFilename(filePath.split("/").pop() || "");
@@ -53,7 +53,10 @@ export const codexSource: Omit<SessionSourceAdapter, "manageable" | "control"> =
   scanSessions: scanCodexSessions,
   /** 文件名带 ISO 时间戳前缀又按日期分目录，光有 cwd+id 推不出路径 */
   sessionPath: () => null,
-  findSessionById: (sessionId) => findCodexSessionPath(sessionId, codexRolloutRoot()),
+  findSessionById: (sessionId) => {
+    const root = codexRolloutRootOrSkip("按 id 找 Codex 会话"); // 沙箱配错：agents 列表 / history 兜底查 Codex 时跳过，不让整条请求 500
+    return root ? findCodexSessionPath(sessionId, root) : null;
+  },
   /** rollout 按日期分目录、不按 cwd 分，没有「某目录下的会话文件」这个概念 */
   listSessionsForCwd: () => [],
   ownsPath: (path, home) => isCodexSessionPath(path, home),
