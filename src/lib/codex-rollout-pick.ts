@@ -10,6 +10,7 @@
 import { realpathSync } from "node:fs";
 import { basename } from "node:path";
 import { codexSessionIdFromFilename, codexSessionsRoot, listCodexSessionFiles, readCodexMetaPayload } from "./codex-session.js";
+import { sandboxCodexHomeProblem } from "./sandbox.js";
 
 export type RolloutPick = { path: string; note?: string } | { error: string };
 
@@ -27,8 +28,14 @@ function canonicalDir(dir: string): string {
 export async function pickCodexRolloutForArchive(
   sessionId: string,
   cwd: string | undefined,
-  root: string = codexSessionsRoot(),
+  root?: string,
 ): Promise<RolloutPick> {
+  // 沙箱里 CODEX_HOME 不安全就不找（不回落宿主 ~/.codex）；归档契约是不抛错，按 ok:false 报原因（ops-deps 会记日志）
+  if (root === undefined) {
+    const refused = sandboxCodexHomeProblem();
+    if (refused) return { error: refused };
+    root = codexSessionsRoot();
+  }
   const named = listCodexSessionFiles(root).filter((p) => codexSessionIdFromFilename(basename(p)) === sessionId);
   if (named.length === 0) return { error: `Codex 会话记录不存在：${root} 下找不到 thread ${sessionId} 的 rollout` };
   const want = cwd ? canonicalDir(cwd) : null;
