@@ -37,6 +37,13 @@ describe("parseConfigOptions", () => {
     expect(parseConfigOptions(undefined)).toEqual([]);
   });
 
+  test("宿主规整过的形状（choices，经 ws 发给 bridge 的）原样认回来，不丢模型", () => {
+    const once = parseConfigOptions(RAW);
+    const again = parseConfigOptions(JSON.parse(JSON.stringify(once)));
+    expect(again).toEqual(once);
+    expect(quotaCardChoices(again).map((c) => c.value)).toEqual([null, "gpt-5.6-luna", "gpt-5.5-codex"]);
+  });
+
   test("fast-mode 的布尔当前值按字符串收", () => {
     const [o] = parseConfigOptions([{ id: "fast-mode", name: "Fast", currentValue: false, options: [{ value: "on", name: "On" }] }]);
     expect(o.currentValue).toBe("false");

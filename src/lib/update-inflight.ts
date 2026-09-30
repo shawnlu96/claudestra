@@ -1,7 +1,7 @@
 /**
  * update 的「进行中」标记：state/update-inflight.json（tests/update-inflight.test.ts）。
  *
- * 为什么不借 update.lock 本身：update 在 reload 三个 daemon **之前**就得释锁——bootout launcher
+ * 为什么不借 update.lock 本身：update 在 reload 四个 daemon **之前**就得释锁——bootout launcher
  * 会连坐回收 launcher 派生的 update 进程（lib/cli-install.ts DAEMONS 的注释），殉锁会封死之后
  * 30 分钟的更新。标记要活过这一刻，reload 做完才删。再跑 update 或 doctor 看到它，按 HEAD 与
  * daemon 的启动时间判断补哪一截；launcher 自杀那种正常情况 bridge / cron 已 reload，只清标记。
@@ -76,7 +76,7 @@ export type UpdateVerdict =
 /**
  * 标记 + 现状 → 该做什么。daemonStart 见 DaemonState：只有「在跑但早于 reloadAt」和「没 load」算 reload 没做完；
  * 已 load 却起不来的交给 doctor 的 daemon 检查，不拿来挡更新。
- * 已到 reloading 且三个 daemon 都在 reloadAt 之后起来过 = 做完了（launcher 连坐回收的常态），不管 HEAD 后来被谁动过。
+ * 已到 reloading 且四个 daemon 都在 reloadAt 之后起来过 = 做完了（launcher 连坐回收的常态），不管 HEAD 后来被谁动过。
  * 其余在 HEAD 等于目标、或在目标之后（headAhead：有人在目标上又提交了，尾段不依赖具体 HEAD）时补做；
  * HEAD 既不在目标线上也不是升级前 = 仓库被改到别处，不补（report）。
  */

@@ -4,6 +4,7 @@
  */
 import { describe, expect, test } from "bun:test";
 import { createInterruptGate, type InterruptGateDeps } from "../src/lib/interrupt-gate.js";
+import type { Transport } from "../src/lib/runtimes/index.js";
 import type { TurnState } from "../src/lib/turn-state.js";
 import { paneShowsWallWait } from "../src/lib/quota-wall-text.js";
 import { readFileSync } from "node:fs";
@@ -13,7 +14,10 @@ const fixture = (f: string) => readFileSync(join(import.meta.dir, "fixtures/quot
 
 type Main = TurnState["main"];
 
-function harness(opts: { main?: Main; runtime?: string; probeDelayMs?: number; afterKey?: Main; allow?: boolean; noKeys?: boolean; screens?: string[]; probeSeq?: Main[] } = {}) {
+function harness(opts: {
+  main?: Main; runtime?: string; transport?: Transport; probeDelayMs?: number; afterKey?: Main;
+  allow?: boolean; noKeys?: boolean; screens?: string[]; probeSeq?: Main[];
+} = {}) {
   let clock = 1_790_000_000_000;
   const keys: string[] = [];
   const keyAt: number[] = [];
@@ -21,7 +25,7 @@ function harness(opts: { main?: Main; runtime?: string; probeDelayMs?: number; a
   let probes = 0;
   let main: Main = opts.main ?? "busy";
   const deps: InterruptGateDeps = {
-    resolve: async () => ({ win: "master:agent-a", runtime: opts.runtime }),
+    resolve: async () => ({ win: "master:agent-a", runtime: opts.runtime, transport: opts.transport }),
     probe: async () => {
       probes++;
       if (opts.probeDelayMs) await new Promise((r) => setTimeout(r, opts.probeDelayMs));
@@ -82,6 +86,14 @@ describe("preempt：人类消息抢占", () => {
     expect(idle.keys).toEqual([]);
   });
 
+  test("Codex ACP 忙时人类消息不发 Esc、不报已打断；交由宿主 steering", async () => {
+    const h = harness({ runtime: "codex", transport: "acp" });
+    expect(await h.gate.preempt("ch", "agent-a")).toEqual({ fired: false, why: "not_allowed" });
+    expect(h.probes()).toBe(0);
+    expect(h.keys).toEqual([]);
+    expect(h.preempted).toEqual([]);
+  });
+
   test("两条人类消息几乎同时到（判忙中间有 await）：只发一次 C-c", async () => {
     const h = harness({ probeDelayMs: 20 });
     const r = await Promise.all([h.gate.preempt("ch", "agent-a"), h.gate.preempt("ch", "agent-a")]);
@@ -133,6 +145,17 @@ describe("preempt stop：停字", () => {
     expect((await cx.gate.preempt("ch", "agent-a", { stop: true })).fired).toBe(true);
     expect(cx.keys).toEqual(["Escape"]);
   });
+
+  test("Pi 的停字不看 bridge 的忙闲（事件态 done / 空）：照样请扩展中止，扩展回空闲才算 not_busy（wf2 pi-3）", async () => {
+    const pi = harness({ runtime: "pi", main: "idle" });
+    expect((await pi.gate.preempt("ch", "agent-a", { stop: true })).fired).toBe(true);
+    expect(pi.probes()).toBe(0);
+    const idle = harness({ runtime: "pi", main: "idle", noKeys: true });
+    expect(await idle.gate.preempt("ch", "agent-a", { stop: true })).toEqual({ fired: false, why: "no_keys" });
+    const cc = harness({ main: "idle" }); // CC 照旧按画面判
+    expect(await cc.gate.preempt("ch", "agent-a", { stop: true })).toEqual({ fired: false, why: "not_busy" });
+  });
+
 
   test("刚抢占完 1s 就说「停」：不被 4s 冷却吞掉，也不丢——等够 1.5s 最小间隔再发", async () => {
     const slept: number[] = [];

@@ -42,14 +42,16 @@ export function uiAgentName(name: string): string {
  * Web 会话 = claudestra 的一个 agent。列表来源是 bridge 的 GET /api/v1/agents（凭据 grant 过滤；
  * master 在 grant 内时由 bridge 置入列表）。此前这段映射在 BFF（lib/chat/agents.ts 的服务端版）——托管前端后搬进浏览器，逻辑原样。
  */
-/** 会话级「该重启 / 该 pi update」提示（bridge lib/update-hints.ts 算好透传） */
+/** 会话级「该重启 / 该更新 Pi·Codex」提示（bridge lib/update-hints.ts 算好透传；codex 的 npm = 能替人 npm 更新，adapterPairs = 不配套 ACP 适配器、只给文字） */
 export type UpdateHint =
-  | { kind: "restart"; running: string; installed: string }
-  | { kind: "pi-update"; installed: string; latest: string };
+  | { kind: "restart"; running: string; installed: string; adapterPairs?: string }
+  | { kind: "pi-update"; installed: string; latest: string }
+  | { kind: "codex-update"; installed: string; latest: string; npm: boolean; adapterPairs?: string };
 
 export interface AgentSession {
   /** agent 名，作为会话 id（大总管用保留名 __master__） */
   name: string;
+  kind?: "worker" | "main" | null;
   displayName: string;
   purpose: string;
   cwd: string;
@@ -100,6 +102,7 @@ export interface AgentSession {
 
 interface ApiAgent {
   name: string;
+  kind?: "worker" | "main" | null;
   status?: string;
   /** 工作目录（registry.cwd）：侧栏标「所在仓」用（features/chat/agent-repo.ts） */
   cwd?: string;
@@ -215,5 +218,5 @@ const lpSig = (lp?: LpState | null) => (lp ? `|lp:${lp.lowPriority}:${lp.walled}
 export function agentExtraSig(a: AgentSession): string {
   const hint = a.updateHint ? JSON.stringify(a.updateHint) : "";
   const m = a.mission ? `${a.mission.until}|${a.mission.nudges}|${a.mission.resumeAt ?? ""}` : "";
-  return hint + m + (a.queued ? `q${a.queued}` : "") + `|${a.parent ?? ""}|${a.task ?? ""}` + ledgerSig(a.ledgerTask) + lpSig(a.lowPriority);
+  return hint + m + (a.queued ? `q${a.queued}` : "") + `|${a.kind ?? ""}|${a.parent ?? ""}|${a.task ?? ""}` + ledgerSig(a.ledgerTask) + lpSig(a.lowPriority);
 }

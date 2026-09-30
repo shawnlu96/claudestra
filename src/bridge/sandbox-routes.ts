@@ -18,7 +18,7 @@ const RULES: Rule[] = [
   { method: "PUT", path: /^\/config\/claude-defaults$/, feature: "改全局 ~/.claude/settings.json" },
   { method: "POST", path: /^\/sessions\/[^/]+\/(manage|cleanup|adopt)$/, feature: "归档 / 删除 / 清理 / 收编会话" },
   { method: "POST", path: /^\/agents\/resume$/, feature: "按会话 id 恢复（可能抢生产会话）" },
-  { method: "POST", path: /^\/agents\/[^/]+\/pi-update$/, feature: "pi update（全局 npm 安装）" },
+  { method: "POST", path: /^\/agents\/[^/]+\/(pi|codex)-update$/, feature: "pi update / npm install -g @openai/codex（全局 npm 安装）" },
   { method: "POST", path: /^\/restart-all$/, feature: "全体重启（含大总管）" },
   { path: /^\/update(\/.*)?$/, feature: "升级与更新检查（git pull / reload daemon / GitHub API）" },
   { path: /^\/peers(\/.*)?$/, feature: "跨实例 peer" },

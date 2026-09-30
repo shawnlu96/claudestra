@@ -1074,7 +1074,7 @@ async function stepFinalize(cfg: Config): Promise<FinalizeResult> {
     print(`  ${c.cyan}npx playwright@1.58.2 install chromium${c.reset}`);
     print(`  ${c.cyan}claude mcp add ${cfg.MCP_NAME} -s user -- bun run ${REPO_ROOT}/src/channel-server.ts${c.reset}`);
     print(`  ${c.dim}# ${t("typing hooks: 手动编辑 ~/.claude/settings.json，或重跑 bun run setup", "typing hooks: edit ~/.claude/settings.json manually, or rerun bun run setup")}${c.reset}`);
-    print(`  ${c.cyan}bun src/manager.ts install-cli${c.reset}  ${c.dim}${t("(写 launchd plist + 启 3 个 daemon)", "(write launchd plists + start 3 daemons)")}${c.reset}`);
+    print(`  ${c.cyan}bun src/manager.ts install-cli${c.reset}  ${c.dim}${t("(写 launchd plist + 启 4 个 daemon)", "(write launchd plists + start 4 daemons)")}${c.reset}`);
     return { deferred: true, failures };
   }
 
@@ -1148,8 +1148,8 @@ async function stepFinalize(cfg: Config): Promise<FinalizeResult> {
       print(`${c.red}✗${c.reset}`);
       for (const e of r.errors) warn(e);
       failures.push(t(
-        `launchd daemon（bridge / launcher / cron 不会自启）— 手动跑：bun src/manager.ts install-cli\n     ${r.errors.join("; ")}`,
-        `launchd daemons (bridge / launcher / cron will not start) — run: bun src/manager.ts install-cli\n     ${r.errors.join("; ")}`,
+        `launchd daemon（bridge / launcher / cron / scheduler 不会自启）— 手动跑：bun src/manager.ts install-cli\n     ${r.errors.join("; ")}`,
+        `launchd daemons (bridge / launcher / cron / scheduler will not start) — run: bun src/manager.ts install-cli\n     ${r.errors.join("; ")}`,
       ));
     } else {
       print(`${c.green}✓${c.reset}`);
@@ -1228,8 +1228,8 @@ async function stepFinalize(cfg: Config): Promise<FinalizeResult> {
       "Run later: bun src/manager.ts install-cli",
     ));
     failures.push(t(
-      `launchd daemon（bridge / launcher / cron 不会自启）— 手动跑：bun src/manager.ts install-cli`,
-      `launchd daemons (bridge / launcher / cron will not start) — run: bun src/manager.ts install-cli`,
+      `launchd daemon（bridge / launcher / cron / scheduler 不会自启）— 手动跑：bun src/manager.ts install-cli`,
+      `launchd daemons (bridge / launcher / cron / scheduler will not start) — run: bun src/manager.ts install-cli`,
     ));
   }
   return { deferred: false, failures, web: webResult };
@@ -1879,7 +1879,7 @@ function stepDone(cfg: Config, fronts: Frontends, fin: FinalizeResult, phoneUrl?
   }
   print(`${c.bold}${t("如果没反应:", "If nothing happens:")}${c.reset}`);
   print(`  ${c.cyan}tail -f ~/.claude-orchestrator/logs/bridge.out${c.reset}  ${c.dim}${t("(bridge 日志,launchd 直管)", "(bridge logs, managed by launchd)")}${c.reset}`);
-  print(`  ${c.cyan}launchctl list | grep claudestra${c.reset} ${c.dim}${t("(三个 daemon 的存活状态)", "(daemon liveness)")}${c.reset}`);
+  print(`  ${c.cyan}launchctl list | grep claudestra${c.reset} ${c.dim}${t("(四个 daemon 的存活状态)", "(daemon liveness)")}${c.reset}`);
   br();
   print(`${c.bold}${t("以后随时把整套拉起来 + 进 master TUI:", "Bring everything up + attach to master TUI anytime:")}${c.reset}`);
   print(`  ${c.cyan}claudestra${c.reset}  ${c.dim}${t("(daemon 由 launchd 拉起 + 在 iTerm 里 tmux attach；机器重启后服务自动回来)", "(launchd brings the daemons up + tmux-attaches in iTerm; services auto-restart on boot)")}${c.reset}`);

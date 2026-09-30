@@ -13,7 +13,9 @@ import { codexDisplayDefaults, loadCodexCatalog, readCodexConfigDefaults, valida
 import { apiJson, forbidden, isFullScope, readJsonBody, INVALID_JSON, invalidJsonBody, notInScope } from "./api-respond.js";
 import { getAgentStatus, isBusyStatus } from "./event-bus.js";
 import { rememberSwitchOverride } from "./switch-override.js";
-import { handlePiUpdate, PI_UPDATE_PATH } from "./pi-update.js";
+import { handleRuntimeUpdate, RUNTIME_UPDATE_PATH } from "./runtime-update.js";
+import { acpSetConfig } from "./acp-link.js";
+import { isAcpChannel } from "./acp-state.js";
 import { isSafeModelArg } from "../lib/claude-settings-runtime.js";
 
 type RunManager = (...args: string[]) => Promise<any>;
@@ -26,7 +28,7 @@ export async function handleRuntimeSettingsRoutes(
 ): Promise<Response | null> {
   if (path === "/pi-models" && req.method === "GET") return piModels(principal);
   if (path === "/codex-models" && req.method === "GET") return codexModels(principal);
-  if (PI_UPDATE_PATH.test(path) && req.method === "POST") return handlePiUpdate(path, principal, runManager); // 横幅「更新并重启」
+  if (RUNTIME_UPDATE_PATH.test(path) && req.method === "POST") return handleRuntimeUpdate(path, principal, runManager); // 横幅「更新并重启」
   const set = path.match(/^\/agents\/([^/]+)\/(pi|codex)-settings$/);
   if (!set || req.method !== "POST") return null;
   const which = set[2] === "pi" ? "pi-settings" : "codex-settings";
@@ -44,6 +46,7 @@ export async function handleRuntimeSettingsRoutes(
   if (reg.runtime !== set[2]) {
     return apiJson(400, { ok: false, error: `agent "${canonical}" 不是 ${set[2] === "pi" ? "Pi" : "Codex"} agent` });
   }
+  if (set[2] === "codex" && reg.channelId && isAcpChannel(reg.channelId)) return acpSettings(canonical, reg.channelId, model, effort, runManager); // ACP：会话里改，不重启
   return set[2] === "pi" ? piSettings(canonical, model, effort) : codexSettings(canonical, reg, model, effort, runManager);
 }
 
@@ -117,6 +120,23 @@ async function codexModels(principal: Principal): Promise<Response> {
   const models = await loadCodexCatalog();
   if (!models) return apiJson(503, { ok: false, error: "读不到 Codex 模型目录（codex 没装或 `codex debug models` 失败）" });
   return apiJson(200, { ok: true, count: models.length, models, defaults: codexDisplayDefaults(models, readCodexConfigDefaults(), null) });
+}
+
+/**
+ * transport=acp 的 Codex：经宿主调 session/set_config_option，会话里直接改、回合进行中也能改（ACP 规范允许），不重启。
+ * 校验交给会话自己的 configOptions（宿主那边 configRefusal）——本机 `codex debug models` 的目录对不上 stub 的模型。
+ * 改成了再写 registry：宿主重起 / agent 重启时照样按它补上。
+ */
+async function acpSettings(canonical: string, channelId: string, model: string, effort: string, runManager: RunManager): Promise<Response> {
+  for (const [id, v] of [["model", model], ["reasoning_effort", effort]] as const) {
+    if (!v) continue;
+    const r = await acpSetConfig(channelId, id, v);
+    if (!r.ok) return apiJson(409, { ok: false, error: `没切成 ${id}=${v}：${r.error}` });
+  }
+  const saved = await runManager("set-claude", canonical, ...(model ? ["--model", model] : []), ...(effort ? ["--effort", effort] : []));
+  rememberSwitchOverride(canonical, { ...(model ? { model } : {}), ...(effort ? { effort } : {}) });
+  const warning = saved?.ok ? {} : { warning: `会话里已经改了，但写 registry 失败（重启后会回到原设置）：${saved?.error || "未知原因"}` };
+  return apiJson(200, { ok: true, agent: canonical, model: model || null, effort: effort || null, live: true, ...warning });
 }
 
 /**

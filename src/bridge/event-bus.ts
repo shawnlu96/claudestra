@@ -1,15 +1,4 @@
-/**
- * v2.6.0+ 进程内事件总线（多前端架构的只读地基）。
- *
- * 设计见 docs/design-multi-frontend.md §4。要点：
- * - 旁路镜像：jsonl-watcher / bridge 在既有分支里加一行 emit()，Discord 渲染
- *   管线一字不动。事件流是镜像不是管线上游 —— 新前端（Web/Telegram）订阅
- *   这里自行渲染，不复用 Discord 的 debounce/edit 逻辑。
- * - 无持久化：权威历史在 jsonl（lib/agent-stats、lib/jsonl-cost 可查），这里
- *   只做实时 + 环形缓冲补发。bridge 重启即清零（已知限制 R6）。
- * - schema additive-only：BridgeEvent 只加字段不删不改语义（对前端作者的
- *   兼容承诺，设计 D7）。
- */
+/** 进程内旁路事件总线：实时订阅与有限回放；权威历史仍在会话文件。 */
 import { completedOnlyFrom, inflightFrom } from "../lib/turn-cuts.js";
 
 export type BridgeEventType =
@@ -205,6 +194,13 @@ export function subscribeEvents(
  * 却会连同里面最多 RING_LIMIT 条事件（含未截断的 assistant_text）一直留在内存里 ——
  * 长期运行的 bridge 上，建了又删的 agent 会一直堆积。
  */
+/** clear 换代后从回放环移掉旧线程的流事件，保留排队中的人类消息和新线程事件。 */
+export function retireAgentSessionEvents(agent: string, oldSessionId: string): void {
+  const old = oldSessionId.replace(/^acp:/, "");
+  const ring = rings.get(agent);
+  if (ring) rings.set(agent, ring.filter((e) => !e.data.sid || String(e.data.sid).replace(/^acp:/, "") !== old));
+}
+
 export function forgetAgent(agent: string): void {
   rings.delete(agent);
   agentStatuses.delete(agent);

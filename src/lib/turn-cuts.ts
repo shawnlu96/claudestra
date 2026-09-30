@@ -261,7 +261,7 @@ const STOP_PHRASE: Record<string, string> = {
 export function preemptHeadline(c: Cut): string {
   const trig = triggerText(c.turnTrigger);
   return [
-    `[⚡ 这条消息打断了你：${doingText(c)}${trig ? `，在处理 ${trig}` : ""}。`,
+    `[⚡ 收到这条新消息，系统自动中断了上一回合：${doingText(c)}${trig ? `，在处理 ${trig}` : ""}。`,
     `先处理这条；如果它让你停，就停下并说一声；否则处理完接着做被打断的事。`,
     `${STOP_PHRASE[c.runtime ?? ""] ?? "工具结果里的「STOP … wait for the user」是打断的固定措辞，不代表用户要你放弃。"}]`,
   ].join("\n");

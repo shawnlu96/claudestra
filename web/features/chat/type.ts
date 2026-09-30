@@ -126,6 +126,8 @@ export interface ChatMessage {
   turnDone?: boolean;
   /** 直播回合被打断(手动停止/连发抢占)——气泡底部黄色「⊘ 已打断」行。 */
   turnInterrupted?: boolean;
+  /** 这次中断由新的人类消息自动触发。 */
+  turnPreempted?: boolean;
   /** 直播回合出错(流 error 事件)——气泡底部红色「✕ 出错」行。 */
   turnError?: boolean;
   /** 回合耗时 ms(jsonl turn_duration)——完成行显示「· 12.3s」。 */
@@ -156,6 +158,7 @@ export interface ChatMessage {
 }
 
 export interface AgentSession {
+  kind?: "worker" | "main" | null;
   name: string;
   displayName: string;
   purpose: string;

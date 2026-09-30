@@ -4,6 +4,7 @@
  * 给送达的那条消息加抬头、「停」压掉续做提醒、手动停止后把回合状态收尾成 done。
  */
 import { recordMetric } from "../lib/metrics.js";
+import { controlFor } from "../lib/runtimes/index.js";
 import { readRegistryAgents } from "../lib/registry.js";
 import { ownerStopOf } from "../lib/stop-words.js";
 import { windowWallWait, type WallWait } from "../lib/wall-screen.js";
@@ -52,7 +53,7 @@ export function holdNotingStop(
 }
 
 export function noteHeldStop(env: Envelope, channelId: string, agent: string, runtime?: string): void {
-  if (!ownerStopOf(env).stop || env.meta.heldStopNoted) return;
+  if (env.meta.forwarded || !ownerStopOf(env).stop || env.meta.heldStopNoted) return; // 转交来的停字不算 owner 在这里叫停（见 preemptForHuman）
   env.meta.heldStopNoted = true;
   clearAgentPendings(channelId);
   const cut = turnCuts.record({
@@ -67,15 +68,16 @@ export function noteHeldStop(env: Envelope, channelId: string, agent: string, ru
  * 真打断了（键发出、画面确认停下）才记 cut、加「这条消息打断了你」的抬头；「停」不管打没打断都记一条「停」类 cut
  * （压掉续做提醒、Autopilot 不推进），抬头照实写打断没打断。发键失败只记日志，消息照常投递。
  * 停字和「解除叫停」只认 owner：外源（非 owner 的 API 用户）的「停」按普通消息处理，也解不开 owner 的「停」。
+ * agent 转交过来的 owner 原话（meta.forwarded）也不算 owner 在这里开口：什么时候转、转给谁是 agent 定的，只保留抢占（wf2 stop-semantics-6）。
  * 返回 "wall_wait" = 复核时画面刚变成撞墙等待（一个键都没发）：调用方改为押住（holdAtWallWait），不照常投递。
  */
 export async function preemptForHuman(env: Envelope, channelId: string, agent: string): Promise<"wall_wait" | void> {
-  const { owner, stop } = ownerStopOf(env);
+  const { owner, stop } = env.meta.forwarded ? { owner: false, stop: false } : ownerStopOf(env);
   if (owner) turnCuts.noteHuman(channelId, stop);
   // owner 的停 = 接管：发键之前就清 agent 间的待回账。Pi 停下马上报 Stop，等打断返回再清就晚了，看门狗已拿旧账把它催起一轮（adv5 P1）。
   // 押在撞墙画面上时已经清过（noteHeldStop）：最终送达不再清，否则停之后才来的回程槽也一起没了
   if (stop && !env.meta.heldStopNoted) clearAgentPendings(channelId);
-  const { runtime } = await resolveTurnWindow(channelId, controlChannelId());
+  const { runtime, transport } = await resolveTurnWindow(channelId, controlChannelId());
   const stopWait = stop && runtime === "pi" ? holdStopWait(env, channelId, agent) : undefined;
   const tools = toolsAt(agent, runtime);
   const queuedBefore = stop && runtime === "codex" ? turnCuts.codexQueuedBefore(channelId) : [];
@@ -100,7 +102,7 @@ export async function preemptForHuman(env: Envelope, channelId: string, agent: s
   // Pi 的中止靠扩展里的 abort()：有回执 = 真停了，等不到回执如实写「已请求」；扩展回「本来就空闲」= 没有在跑的回合
   const pi = runtime === "pi" ? lastAbortResult(channelId) : undefined;
   const outcome = r.fired ? (runtime === "pi" && pi?.result !== "aborted" ? "requested" : "fired")
-    : r.why === "not_busy" || (runtime === "pi" && r.why === "no_keys") ? "not_busy" : "failed";
+    : r.why === "not_busy" || (controlFor(runtime, transport).abortVia === "extension" && r.why === "no_keys") ? "not_busy" : "failed"; // 扩展 / ACP 宿主回的「本来就空闲」
   env.meta.interruptNote = stopHeadline(cut, outcome, queuedBefore, r.fired ? (pi?.inEditor ?? 0) : 0);
   stopWait?.(stopWaitReply(agent, outcome));
   console.log(`⏹ 停字${r.fired ? "打断" : `（没发键：${r.why}）`} ${agent}（${runtime ?? "claude-code"}）`);
@@ -137,7 +139,7 @@ export async function manualInterrupt(
   stopTyping(channelId);
   clearSafetyTimer(channelId);
   // 空闲时也发 done：前端误判忙时借此解锁
-  emitEvent({ agent, chatId: channelId, type: "agent_status", data: { status: "done", trigger: "interrupt", ...(by.peer ? { peer: by.peer } : {}) } });
+  emitEvent({ agent, chatId: channelId, type: "agent_status", data: { status: "done", trigger: "interrupt", cause: "manual", ...(by.peer ? { peer: by.peer } : {}) } });
   return { keys: r.keys };
 }
 

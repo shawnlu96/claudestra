@@ -15,11 +15,11 @@ import { findJsonlBySessionId, projectJsonlPath, projectsDir } from "../jsonl-co
 import {
   acceptTrustPrompt,
   detectSessionIdlePrompt,
-  isAutoConfirmableModal,
   isClaudeReady,
   probeTuiContract,
   trustPromptMoves,
 } from "../tmux-helper.js";
+import { isAutoConfirmableModal } from "../modal-confirm.js";
 import { lastUserTextOf } from "./shared.js";
 import { roleLaunch } from "../team-roles.js";
 import type {

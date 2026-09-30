@@ -74,7 +74,7 @@ jobs:
       # 各可执行入口都要能打包 —— 能抓到类型检查覆盖不到的模块解析/导入错误
       - name: Build entrypoints
         run: |
-          for entry in bridge channel-server manager launcher cron setup relay; do
+          for entry in bridge channel-server manager launcher cron setup relay scheduler; do
             echo "── building src/$entry.ts"
             bun build "src/$entry.ts" --target=bun --outdir=/tmp/ci-build
           done
@@ -108,3 +108,39 @@ jobs:
       # warning 数当棘轮用：只许降，降了就把这个数字改小
       - name: Lint (eslint)
         run: npx eslint --max-warnings 38
+
+  # 菜单栏小程序（desktop/）：窗口 TS 的类型检查 + Rust 外壳的 cargo test。跑在 macOS 上，因为 app 只支持 macOS
+  # （plutil / launchctl / ActivationPolicy）。在 ubuntu 上跑得先装 webkit2gtk、appindicator，测的却是一个永远不会发布的 Linux 构建。
+  desktop:
+    name: desktop typecheck + cargo test
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+
+      # desktop 的 typecheck 用根目录 node_modules 里的 tsc
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Typecheck window UI (tsc)
+        run: bun run typecheck
+        working-directory: desktop
+
+      # tauri::generate_context! 在编译期打包 frontendDist（desktop/dist），没有它 cargo test 连编译都过不了
+      - name: Build window UI
+        run: bun run build:ui
+        working-directory: desktop
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      # 冷编译 tauri 依赖树要十分钟左右，缓存 target/ 之后大约两分钟
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: desktop/src-tauri
+
+      - name: cargo test
+        run: cargo test --locked
+        working-directory: desktop/src-tauri

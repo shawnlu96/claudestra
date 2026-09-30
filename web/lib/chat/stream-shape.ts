@@ -9,7 +9,7 @@
  */
 import { bgEndStatusOf, bgMetaOf, bgProgressOf, type WebAuqQuestion, type WebComponentRow, type WebStreamEvent } from "./events";
 import { attachmentUrl, extractAttachments, isImageName } from "./attachments";
-import { isSelfSource } from "./history-shape";
+import { foreignAware, isSelfSource } from "./history-shape";
 
 export interface BridgeEvent {
   seq: number;
@@ -48,14 +48,16 @@ function chatMessage(d: Record<string, unknown>, selfIds: ReadonlySet<string>): 
     // 只有用户来源（Web / Discord user）才是 user-in：agent / bridge 注入不算；本端自己的回声由前端对账去重
     const src = String(d.srcKind ?? "");
     if ((src === "api" || src === "user") && typeof d.text === "string" && d.text.trim()) {
-      // 剥附件注入块 → 干净正文 + 附件数组；不剥的话另一端渲染出整块路径文字，本端回声与乐观消息也对不上（双份）
-      // owner 对「待你处理」的作答：bridge 给了 echo（选项人话 + 原话，和历史同一个算法，lib/inbound-body.ts answerEcho）；老 bridge 只剥第一行说明
-      const said = typeof d.echo === "string" ? d.echo : typeof d.askId === "string" ? d.text.split("\n").slice(1).join("\n") : d.text;
-      const { content, attachments } = extractAttachments(said);
-      if (!content && !attachments?.length) return null;
       const from = typeof d.from === "string" && d.from !== "?" ? d.from : undefined;
       const fromLabel = isSelfSource(from, typeof d.fromId === "string" ? d.fromId : undefined, selfIds) ? undefined : from;
-      const wire = typeof d.echo === "string" && typeof d.wire === "string" ? extractAttachments(d.wire).content : ""; // 作答的原文：对账、回填已答态用
+      // owner 对「待你处理」的作答：bridge 给了 echo（选项人话 + 原话，和历史同一个算法，lib/inbound-body.ts answerEcho）；老 bridge 只剥第一行说明。
+      // 外源不做这些按文本的改写，原文照显（history-shape userMessage 同一口径）
+      const said = fromLabel ? d.text : typeof d.echo === "string" ? d.echo : typeof d.askId === "string" ? d.text.split("\n").slice(1).join("\n") : d.text;
+      // 本人的剥附件注入块 → 干净正文 + 附件数组（不剥另一端渲染出整块路径文字，回声与乐观消息也对不上）；外源的附件行留在正文里
+      const trusted = Array.isArray(d.attachments) ? d.attachments.filter((p): p is string => typeof p === "string") : []; // bridge 真收下的（bridge/inbound-event.ts）
+      const { content, attachments } = foreignAware(said, !!fromLabel || !from, trusted); // 没带来源的也不可信
+      if (!content && !attachments?.length) return null;
+      const wire = !fromLabel && typeof d.echo === "string" && typeof d.wire === "string" ? extractAttachments(d.wire).content : ""; // 作答的原文：对账、回填已答态用
       const ask = { ...(typeof d.askId === "string" ? { askId: d.askId } : {}), ...(wire && wire !== content ? { wire } : {}) };
       return { t: "user-in", text: content, ...(fromLabel ? { from: fromLabel } : {}), ...(attachments?.length ? { attachments } : {}), ...ask };
     }
@@ -108,8 +110,8 @@ function anomalyText(d: Record<string, unknown>, lang: Lang): string | null {
       const fams = Array.isArray(d.families) ? (d.families as string[]).join("/") : "?";
       return lang === "en"
         ? `🎛 Claude Code is showing a "Switch model?" dialog (${fams}) that doesn't match any user-initiated switch — not auto-confirmed. ` +
-            "Re-pick the model from the dropdown to complete it, or use the Discord buttons."
-        : `🎛 会话弹出了「Switch model?」确认框（涉及 ${fams}），不是你发起的切换，我没有代按。` + "要切就去右上模型下拉重选一次（会自动确认），或到 Discord 点按钮。";
+            "Re-pick the model from the dropdown to complete it, or answer the dialog yourself in the terminal."
+        : `🎛 会话弹出了「Switch model?」确认框（涉及 ${fams}），不是你发起的切换，我没有代按。` + "要切就去右上模型下拉重选一次（会自动确认），或到终端里自己按。";
     }
     case "model_drift":
       return lang === "en"
@@ -133,7 +135,7 @@ export function translate(evt: BridgeEvent, lang: Lang, selfIds: ReadonlySet<str
   switch (evt.type) {
     case "agent_status":
       return d.status === "done"
-        ? { t: "done", ...(d.trigger === "interrupt" ? { interrupted: true } : {}), ...(d.bgPending ? { bgPending: true } : {}) }
+        ? { t: "done", ...(d.trigger === "interrupt" ? { interrupted: true, ...(d.cause === "preempt" ? { preempted: true } : {}) } : {}), ...(d.bgPending ? { bgPending: true } : {}) }
         : { t: "status", status: d.status === "compacting" ? "compacting" : "running" };
     case "tool_start":
       return {

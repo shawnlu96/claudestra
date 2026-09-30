@@ -24,13 +24,17 @@ const EFFORT_CONFIG_ID = "reasoning_effort";
 
 const str = (v: unknown) => (typeof v === "string" ? v : typeof v === "boolean" ? String(v) : "");
 
-/** 原始 configOptions → 规整后的列表；认不出的项（不是 select、没有 id）跳过 */
+/**
+ * configOptions → 规整后的列表；认不出的项（不是 select、没有 id）跳过。两种输入都认：适配器的原始形状（options），
+ * 和宿主已经规整过、经 ws 发给 bridge 的形状（choices）——bridge 收到的是后者，只认前者就会把模型全丢掉（额度卡只剩「等重置」）。
+ */
 export function parseConfigOptions(raw: unknown): ConfigOption[] {
   if (!Array.isArray(raw)) return [];
   const out: ConfigOption[] = [];
   for (const o of raw) {
-    if (!o || typeof o !== "object" || typeof o.id !== "string" || !Array.isArray(o.options)) continue;
-    const choices = (o.options as unknown[])
+    const list = o && typeof o === "object" ? (Array.isArray(o.options) ? o.options : Array.isArray(o.choices) ? o.choices : null) : null;
+    if (!list || typeof o.id !== "string") continue;
+    const choices = (list as unknown[])
       .filter((c): c is Record<string, unknown> => !!c && typeof c === "object" && typeof (c as any).value === "string")
       .map((c) => ({ value: c.value as string, name: str(c.name) || (c.value as string), ...(str(c.description) ? { description: str(c.description) } : {}) }));
     out.push({ id: o.id, name: str(o.name) || o.id, currentValue: str(o.currentValue), choices });

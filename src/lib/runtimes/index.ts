@@ -12,8 +12,9 @@
 import { closeSync, openSync, readSync } from "node:fs";
 import { claudeCodeAdapter } from "./claude-code.js";
 import { codexAdapter } from "./codex.js";
+import { codexAcpAdapter } from "./codex-acp.js";
 import { piAdapter } from "./pi.js";
-import { DEFAULT_TRANSPORT, isManaged, type ManagedRuntimeAdapter, type RuntimeControl, type SessionSourceAdapter, type Transport } from "./types.js";
+import { DEFAULT_TRANSPORT, isManaged, normalizeTransport, type ManagedRuntimeAdapter, type RuntimeControl, type SessionSourceAdapter, type Transport } from "./types.js";
 
 export * from "./types.js";
 export { claudeCodeAdapter, codexAdapter, piAdapter };
@@ -41,12 +42,16 @@ export function isManageableRuntime(runtime: string | undefined | null): boolean
   return sourceFor(runtime).manageable;
 }
 
+/** transport=acp 时的生命周期适配器（窗口里跑 ACP 宿主）：只有声明了 ACP 段的运行时有 */
+const ACP_ADAPTERS: Record<string, ManagedRuntimeAdapter> = { codex: codexAcpAdapter };
+
 /**
  * 可启动的适配器。缺省（undefined / 空串）= Claude Code（历史数据没有 runtime 字段）；
  * 认不出的 id 或只读来源返回 null——**不**像 sourceFor 那样回退，否则拼错的
- * `--runtime` 会被悄悄当成 Claude Code 起。
+ * `--runtime` 会被悄悄当成 Claude Code 起。transport=acp 返回 ACP 版，运行时不支持 acp 返回 null。
  */
-export function managedFor(runtime: string | undefined | null): ManagedRuntimeAdapter | null {
+export function managedFor(runtime: string | undefined | null, transport?: string | null): ManagedRuntimeAdapter | null {
+  if (normalizeTransport(transport) === "acp") return ACP_ADAPTERS[runtime || DEFAULT_RUNTIME] ?? null;
   if (!runtime) return claudeCodeAdapter;
   const s = SOURCES.find((x) => x.id === runtime);
   return s && isManaged(s) ? s : null;
@@ -59,9 +64,10 @@ export function manageableRuntimeIds(): string[] {
 }
 
 /** 同 managedFor，拿不到就抛出能直接给人看的错误 */
-export function requireManaged(runtime: string | undefined | null): ManagedRuntimeAdapter {
-  const m = managedFor(runtime);
+export function requireManaged(runtime: string | undefined | null, transport?: string | null): ManagedRuntimeAdapter {
+  const m = managedFor(runtime, transport);
   if (m) return m;
+  if (normalizeTransport(transport) === "acp") throw new Error(`runtime "${runtime || DEFAULT_RUNTIME}" 不支持 transport=acp（目前只有 codex）`);
   const s = SOURCES.find((x) => x.id === runtime);
   const avail = manageableRuntimeIds().join(", ");
   throw new Error(

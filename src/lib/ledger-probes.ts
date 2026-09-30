@@ -6,7 +6,7 @@
  */
 import { conservativeDaemonsOf, type DaemonsOf } from "./ledger-daemon-map.js";
 
-export const PROBE_IDS = ["pr-merged", "web-local", "web-relay", "daemon-bridge", "daemon-cron", "daemon-launcher", "manual-evidence"] as const;
+export const PROBE_IDS = ["pr-merged", "web-local", "web-relay", "daemon-bridge", "daemon-cron", "daemon-scheduler", "daemon-launcher", "manual-evidence"] as const;
 export type ProbeId = (typeof PROBE_IDS)[number];
 type ProbeStatus = "pass" | "fail" | "unknown";
 type Params = Record<string, string | number>;
@@ -28,10 +28,11 @@ const CHECK_GROUPS: Record<string, readonly ProbeId[]> = {
   web: ["web-local", "web-relay"],
   bridge: ["daemon-bridge"],
   cron: ["daemon-cron"],
+  scheduler: ["daemon-scheduler"],
   launcher: ["daemon-launcher"],
 };
 
-export const DAEMONS = ["bridge", "cron", "launcher"] as const;
+export const DAEMONS = ["bridge", "cron", "scheduler", "launcher"] as const;
 export type Daemon = (typeof DAEMONS)[number];
 
 /** 不能豁免的项：PR 没合并 / 不是这个任务的 PR，就没有「上线」可言 */
@@ -266,6 +267,7 @@ export function judgeProbe(id: ProbeId, f: VerifyFacts): ProbeResult {
     case "web-relay": return judgeRelay(f);
     case "daemon-bridge": return judgeDaemon(id, "bridge", f);
     case "daemon-cron": return judgeDaemon(id, "cron", f);
+    case "daemon-scheduler": return judgeDaemon(id, "scheduler", f);
     case "daemon-launcher": return judgeDaemon(id, "launcher", f);
     case "manual-evidence": return judgeEvidence(f);
   }

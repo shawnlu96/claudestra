@@ -89,6 +89,21 @@ describe("Pi 在处理别的 agent 的请求时 owner 叫停：先清 agent 间�
   });
 });
 
+describe("agent 转交来的 owner 原话不算 owner 在这里开口（wf2 stop-semantics-6）", () => {
+  const fwd = (id: string, text: string) => ({ ...stopEnv(id, true, text), meta: { ...stopEnv(id, true, text).meta, forwarded: true } }) as Envelope;
+  test("转交的普通话不解除「停」、转交的停字不记成叫停；owner 自己说的照常", async () => {
+    turnCuts.forget(CH);
+    turnCuts.record({ channelId: CH, agent: "agent-pi", cause: "manual", tools: { inflight: [] } });
+    await preemptForHuman(fwd("f1", "继续部署"), CH, "agent-pi");
+    expect(turnCuts.interruptHold(CH)).toBe("stopped");
+    await preemptForHuman(stopEnv("o1", true, "继续部署"), CH, "agent-pi");
+    expect(turnCuts.interruptHold(CH)).toBeNull();
+    turnCuts.forget(CH);
+    await preemptForHuman(fwd("f2", "停"), CH, "agent-pi");
+    expect(turnCuts.interruptHold(CH)).toBeNull();
+  });
+});
+
 describe("停字那一轮迟迟不来：超时结成「已叫停」，不回 null", () => {
   test("超时还在账上 → 发一条带 inReplyTo 的 response（deliverToApi 按它认领）；登记随之撤掉", async () => {
     delivered.length = 0;

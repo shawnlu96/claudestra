@@ -8,18 +8,21 @@ import { createEscGuard, ESC_DOUBLE_TAP_MS, type EscGuardDeps } from "../src/lib
 import { windowKey } from "../src/lib/tmux-target.js";
 
 /** 假时钟：sleep 推进时间；send 本身耗时 sendMs（模拟负载高时 tmux 慢） */
-function world(opts: { ids?: Record<string, string>; sendMs?: number; noLock?: boolean } = {}) {
+function world(opts: { ids?: Record<string, string>; sendMs?: number; noLock?: boolean; idError?: boolean; lostLock?: boolean } = {}) {
   let clock = 1_000_000;
   const sent: { target: string; at: number }[] = [];
   const shared = new Map<string, number>();
   const held = new Set<string>();
   const deps: EscGuardDeps = {
-    windowId: async (t) => opts.ids?.[t] ?? null,
+    windowId: async (t) => {
+      if (opts.idError) throw new Error("tmux 超时");
+      return opts.ids?.[t] ?? null;
+    },
     lock: async (key) => {
       if (opts.noLock) return null;
       while (held.has(key)) await new Promise((r) => setTimeout(r, 1));
       held.add(key);
-      return { release: () => void held.delete(key) };
+      return { release: () => void held.delete(key), held: () => !opts.lostLock };
     },
     readShared: (k) => shared.get(k) ?? 0,
     writeShared: (k, at) => void shared.set(k, at),
@@ -134,5 +137,93 @@ describe("拿不到锁（对抗式第 3 轮 P2-1：负载 107 时 7 路并发，
     expect(await esc.lastSentAt("master:0")).toBe(0);
     await esc("master:=master");
     expect(await esc.lastSentAt("master:0")).toBe(w.sent[0].at);
+  });
+});
+
+describe("查窗口 id 出错（wf2 esc-keys-1）", () => {
+  test("不退回另一个键去发：strict 报错、非 strict 只告警，一个键都不发", async () => {
+    const w = world({ idError: true });
+    const esc = createEscGuard(w.deps);
+    const warn = spyOn(console, "warn").mockImplementation(() => {});
+    await expect(esc("master:=a", { strict: true })).rejects.toThrow(/查不到窗口 id/);
+    await esc("master:=a");
+    warn.mockRestore();
+    expect(w.sent).toEqual([]);
+  });
+  test("keyOf（程序敲字记录用）照旧退回 windowKey", async () => {
+    const w = world({ idError: true });
+    const esc = createEscGuard(w.deps);
+    expect(await esc.keyOf("master:=a")).toBe(windowKey("master:=a"));
+  });
+  test("locked（非 Esc 的受闸发键）同一个开头：查不到窗口 id 就抛错，gate 和 send 都不跑（T41a × T13e 合并）", async () => {
+    const w = world({ idError: true });
+    const ran: string[] = [];
+    const locked = createEscGuard(w.deps).locked("master:=a", async () => void ran.push("gate"), async () => void ran.push("send"));
+    await expect(locked).rejects.toThrow(/查不到窗口 id/);
+    expect(ran).toEqual([]);
+  });
+});
+
+describe("持锁进程被暂停过、锁已被回收（T13e r1 P1-2）", () => {
+  test("发之前核对锁不再是自己的：不发，strict 抛错如实回报", async () => {
+    const w = world({ lostLock: true });
+    const esc = createEscGuard(w.deps);
+    const warn = spyOn(console, "warn").mockImplementation(() => {});
+    await expect(esc("master:agent-x", { strict: true })).rejects.toThrow("锁被当过期回收");
+    await esc("master:agent-x");
+    warn.mockRestore();
+    expect(w.sent).toEqual([]);
+    expect(w.shared.size).toBe(0); // 没发不记「发完」：之后真人按的 Esc 不会被认成程序发的（T13e r2 P2-3）
+    expect(await esc.lastSentAt("master:agent-x")).toBe(0);
+  });
+});
+
+describe("调用方的画面闸（gate）与非 Esc 键的同一把锁（T41a 对抗式 r1 P1-3：先查画面、再等锁 / 节流，等的时候弹出来的框挡不住）", () => {
+  test("gate 在拿锁、等完双击节流、blocked 之后才跑，紧挨着发；gate 抛错 = 不发、错误原样给调用方", async () => {
+    const w = world({ ids: { t: "@1" } });
+    const esc = createEscGuard(w.deps);
+    await esc("t");
+    const order: string[] = [];
+    const lock = w.deps.lock;
+    w.deps.lock = async (k) => (order.push("lock"), lock(k));
+    w.deps.sleep = async (ms) => void (order.push("throttle"), w.advance(ms));
+    w.deps.blocked = async () => (order.push("blocked"), null);
+    await esc("t", { strict: true, gate: async () => void order.push(`gate@${w.deps.now()}`) });
+    expect(order).toEqual(["lock", "throttle", "blocked", `gate@${w.sent[1]!.at}`]);
+    await expect(esc("t", { strict: true, gate: async () => { throw new Error("窗口停在额度菜单上"); } })).rejects.toThrow("额度菜单");
+    expect(w.sent.length).toBe(2);
+  });
+  test("locked：非 Esc 的键拿同一个窗口的锁；Esc 还拿着锁（等节流）时排在后面，不会插进 Esc 的查画面和发键之间", async () => {
+    const w = world({ ids: { a: "@1", b: "@1" } });
+    const esc = createEscGuard(w.deps);
+    await esc("a");
+    const order: string[] = [];
+    await Promise.all([
+      esc("a", { gate: async () => void order.push("esc-gate") }).then(() => order.push("esc-sent")),
+      esc.locked("b", async () => void order.push("key-gate"), async () => void order.push("key-sent")),
+    ]);
+    expect(order).toEqual(["esc-gate", "esc-sent", "key-gate", "key-sent"]);
+  });
+  test("locked 拿不到锁：gate、send 都不跑，抛错；gate 抛错：不发", async () => {
+    const w = world({ ids: { t: "@1" }, noLock: true });
+    let ran = false;
+    await expect(createEscGuard(w.deps).locked("t", async () => void (ran = true), async () => void (ran = true))).rejects.toThrow("等不到窗口锁");
+    expect(ran).toBe(false);
+    const ok = createEscGuard(world({ ids: { t: "@1" } }).deps);
+    await expect(ok.locked("t", async () => { throw new Error("额度菜单"); }, async () => void (ran = true))).rejects.toThrow("额度菜单");
+    expect(ran).toBe(false);
+  });
+  test("锁在 gate 期间被当过期回收了（r2 P1-3：持锁进程卡住 / 被暂停）：Esc 和普通键都不发", async () => {
+    const w = world({ ids: { t: "@1" } });
+    let held = true;
+    const lock = w.deps.lock;
+    w.deps.lock = async (k) => ({ ...(await lock(k))!, held: () => held });
+    const esc = createEscGuard(w.deps);
+    const lose = async () => void (held = false);
+    await expect(esc("t", { strict: true, gate: lose })).rejects.toThrow("被当过期回收");
+    held = true;
+    let sent = false;
+    await expect(esc.locked("t", lose, async () => void (sent = true))).rejects.toThrow("被当过期回收");
+    expect([w.sent.length, sent]).toEqual([0, false]);
   });
 });

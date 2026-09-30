@@ -88,8 +88,8 @@ export type WebStreamEvent =
       /** 这条 reply 建出的「待你处理」（bridge 出站事件带）：气泡按它认领 ask */
       askId?: string;
     }
-  /** 本轮结束。interrupted=被打断(手动停止/连发抢占)——标「⊘ 已打断」而非「✓ 完成」 */
-  | { t: "done"; interrupted?: boolean; bgPending?: boolean }
+  /** 本轮结束。interrupted 标中断；preempted 说明是新消息自动触发。 */
+  | { t: "done"; interrupted?: boolean; preempted?: boolean; bgPending?: boolean }
   | { t: "replying" }
   /** 回合耗时(jsonl turn_duration)——完成标记行附带「· 12.3s」 */
   | { t: "turn"; ms: number }

@@ -13,7 +13,7 @@ import { TMUX_SOCK as SOCK, AGENT_PREFIX, tmuxRaw, windowTarget } from "../lib/t
 import { type PiEnvProfile } from "../lib/pi-env.js";
 import { type PendingOp } from "../lib/pending-ops.js";
 import { assertSandboxRuntime, normalizeSandboxAgentDir, refuseSandboxDirInProduction, sandboxAgentDirProblem } from "../lib/sandbox.js";
-
+import { markWorkerKinds } from "../lib/worker-kind.js";
 export const REGISTRY_PATH = STATE_REGISTRY_PATH;
 // ============================================================
 // Registry
@@ -21,6 +21,7 @@ export const REGISTRY_PATH = STATE_REGISTRY_PATH;
 
 export interface AgentInfo {
   project: string;
+  kind?: "worker" | "main";
   purpose: string;
   created: string;
   /** creating = create 的占位（pending.op=create），成功后被正式条目整条覆盖 */
@@ -143,6 +144,7 @@ export async function patchRegistryAgent(name: string, mutate: (a: AgentInfo) =>
 }
 
 export async function saveRegistry(reg: Registry) {
+  markWorkerKinds(reg.agents);
   await mkdir(STATE_DIR, { recursive: true });
   // 原子写：同目录临时文件 + rename（POSIX 下 rename 原子）。防并发 reader 读到
   // 半写文件（JSON.parse 抛错），也防单次写被撕裂。tmp 名带 pid + 进程内递增序号，
@@ -152,7 +154,6 @@ export async function saveRegistry(reg: Registry) {
   // 真出问题再上文件锁。bridge 侧后台写者（clear 轮转）已尽量避开活跃 agent。
   await writeJsonAtomic(REGISTRY_PATH, reg);
 }
-
 // ============================================================
 // 辅助
 // ============================================================
@@ -178,13 +179,13 @@ export function normalizeName(raw: string): string {
  * 生产里目录不许在沙箱根下（lib/sandbox.ts）。返回调用方后面该用的目录——沙箱里是规范化后的那个
  * （检查的与 tmux -c 实际收到的必须是同一个串），生产里原样返回。
  */
-export function assertCreatable(name: string, dir: string, runtime: string | undefined): string {
+export function assertCreatable(name: string, dir: string, runtime: string | undefined, transport?: string): string {
   assertValidNewAgent(name);
   const d = normalizeSandboxAgentDir(dir);
   const dirProblem = sandboxAgentDirProblem(d);
   if (dirProblem) throw new Error(dirProblem);
   refuseSandboxDirInProduction(d, "建 agent");
-  assertSandboxRuntime(runtime || "claude-code");
+  assertSandboxRuntime(runtime || "claude-code", process.env, transport);
   return d;
 }
 

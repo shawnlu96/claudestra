@@ -22,13 +22,20 @@ async function atomicWrite(dest: string, data: Uint8Array): Promise<void> {
   }
 }
 
-export async function copyIfLarger(src: string, dest: string): Promise<CopyOutcome> {
+/** onError 拿到失败原因（归档要把它写进结果说明，只说「失败」没法排查） */
+export async function copyIfLarger(src: string, dest: string, onError?: (e: Error) => void): Promise<CopyOutcome> {
   try {
     const s = await stat(src);
-    if (existsSync(dest) && (await stat(dest)).size >= s.size) return "same";
+    if (existsSync(dest)) {
+      const d = await stat(dest);
+      // 目标被占成目录之类：只比大小会误报「已是最新」，实际没有可读的归档
+      if (!d.isFile()) throw new Error(`归档目标不是普通文件：${dest}`);
+      if (d.size >= s.size) return "same";
+    }
     await atomicWrite(dest, await readFile(src));
     return "copied";
-  } catch {
+  } catch (e) {
+    onError?.(e as Error);
     return "failed"; // 源被 CC 清掉 / 盘满 / 没权限：原归档不动，调用方记失败，下次再试
   }
 }

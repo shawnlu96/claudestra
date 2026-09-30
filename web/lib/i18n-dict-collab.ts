@@ -40,6 +40,7 @@ export const COLLAB_DICT: Record<string, string> = {
   "（冻结：{r}）": " (frozen: {r})",
   "合并队列冻结：{r}": "Merge queue frozen: {r}",
   "拍板：{t}": "Decision: {t}",
+  "调度：{t}": "Scheduler: {t}",
   "{who} 交付": "{who} delivered",
   "{who} 退回返工": "{who} sent it back for fixes",
   "{who} 推到「{to}」": "{who} moved it to {to}",

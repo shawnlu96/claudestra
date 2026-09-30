@@ -7,6 +7,7 @@
 import { resolveBridgePort } from "../bridge-url.js";
 import { closeSync, openSync, readSync } from "node:fs";
 import { resolveCodexBinary } from "../codex-launch.js";
+import { codexRolloutRoot } from "../codex-home.js";
 import { findCodexSessionPath } from "../codex-session.js";
 import { defaultRunner, heldThreadIds, type Runner } from "../codex-thread.js";
 import { REPO_ROOT } from "../repo-root.js";
@@ -34,7 +35,7 @@ export interface CodexAdapterDeps {
 /** 同步读 rollout 首行的 cwd（buildLaunchCommand 是同步的；首行 session_meta 可能好几 KB） */
 export function codexSessionCwdSync(
   sessionId: string,
-  find: (sid: string) => string | null = findCodexSessionPath,
+  find: (sid: string) => string | null = (sid) => findCodexSessionPath(sid, codexRolloutRoot()),
 ): string | null {
   const path = find(sessionId);
   if (!path) return null;

@@ -89,11 +89,12 @@ export function ClaudeHeader({ pulsing = false }: { pulsing?: boolean }) {
 /** 回合结束标记:居中分隔线样式(owner 2026-07-14:「像中段一样居中、横线
  *  隔开、带颜色和 tick 图标」),三态同构:绿=完成 / 黄=已打断 / 红=出错。
  *  横线用 currentColor 低透明度,自动跟随态色。 */
-export function TurnMark({ kind, ms, animate = true }: { kind: "done" | "interrupted" | "error" | "bg"; ms?: number; animate?: boolean }) {
+export function TurnMark({ kind, ms, animate = true }: { kind: "done" | "interrupted" | "preempted" | "error" | "bg"; ms?: number; animate?: boolean }) {
   const t = useT();
   const conf = {
     done: { cls: "text-success", label: "完成", icon: <path d="M8.5 12.5l2.5 2.5 5-5.5" /> },
     interrupted: { cls: "text-warning", label: "已打断", icon: <path d="M5.6 5.6l12.8 12.8" /> },
+    preempted: { cls: "text-warning", label: "新消息触发自动中断", icon: <path d="M5.6 5.6l12.8 12.8" /> },
     error: { cls: "text-error", label: "出错", icon: <path d="M8.5 8.5l7 7M15.5 8.5l-7 7" /> },
     // v2.20.2+ 回合结束但后台任务还在跑——不是「完成」,别给绿勾(owner 实报误导)
     bg: { cls: "text-info", label: "后台任务继续中", icon: <path d="M12 7v5l3.5 2" /> },

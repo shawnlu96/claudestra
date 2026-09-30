@@ -2,6 +2,7 @@ export interface Install {
   repo: string;
   bun: string;
   path: string;
+  path_source: "plist" | "login_shell" | "default";
   daemons_installed: boolean;
   has_checkout: boolean;
   cli_available: boolean;

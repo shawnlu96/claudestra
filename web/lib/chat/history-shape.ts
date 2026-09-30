@@ -39,6 +39,8 @@ export interface NeutralMessage {
   askId?: string;
   /** 同上，owner 的原文（text 已换成选项人话；原文用来回填按钮已答态、和乐观气泡对账） */
   wire?: string;
+  /** bridge 真收下的附件路径（服务端只取 channel 头属性，lib/inbound-body.ts channelAttachments）：外源的附件卡片只认它 */
+  attachments?: string[];
 }
 
 /** owner 设备的聊天身份（§3：owner 的所有设备共享 chat_id = api:owner:self） */
@@ -145,21 +147,31 @@ export function askAnchor(messages: readonly ChatMessage[], askId: string | unde
   return null;
 }
 
+/**
+ * 用户正文 → 显示正文 + 附件卡片：认定是本人的剥掉附件行；不可信的（外源，或记录里没有来源）原文照显，卡片只按服务端给的真附件路径 verified 画
+ * （stream-shape 直播同一口径）。不可信正文里的 [attachment: …] 只当文字：外人写一行 [attachment: /not-an-upload/id_rsa]，owner 会看到一张像是对方真发了文件的卡片
+ */
+export function foreignAware(text: string, untrusted: boolean, verified?: readonly string[]): { content: string; attachments?: ChatAttachmentView[] } {
+  if (!untrusted) return extractAttachments(text);
+  const atts = (verified ?? []).map((p) => attachmentFromPath(p)).filter((a): a is ChatAttachmentView => !!a);
+  return { content: text.trim(), ...(atts.length ? { attachments: atts } : {}) };
+}
+
 function userMessage(m: NeutralMessage, anchor: ChatMessage | null, opts: ShapeOpts, forms: FormLookup): ChatMessage {
   const text = m.text || "";
-  // CC 写入的中断标记 / TUI 斜杠命令记录不是用户打的字 → 轻分隔线
-  if (/^\[Request interrupted/.test(text)) return systemDivider(m, "已被用户中断", opts.sid);
-  const cmd = text.match(/^<command-name>(\/[\w-]+)<\/command-name>/);
-  if (cmd) return systemDivider(m, cmd[1], opts.sid);
   const from = isSelfSource(m.from, m.fromId, opts.selfIds ?? new Set()) ? undefined : m.from; // 本人的所有来源都不标
-  const own = from ? text : stripMentionDirective(text); // @ 委托指令行只给 agent 看；只剥本人的（外源的末行照原样给 owner 看）
-  if (m.wire) markAnswerClicks(m.wire, anchor, forms); // 作答：正文已是人话，原文只用来回填已答态
-  const click = m.wire ? null : resolveUserClick(own, anchor, forms);
-  let raw = click?.text ?? own;
-  // 外源入站剥掉 bridge 注入的来源头（[🤝 来自 peer…] 多行方括号块）——UI 用来源 chip 展示，留着就是双份说明。
-  // 纯附件消息正文以 [attachment: …] 开头，那不是来源头：剥了图就没了
-  if (from) raw = raw.replace(/^\[(?!attachment: )[^\]]{0,800}\]\s*\n*/, "");
-  const { content, attachments } = extractAttachments(raw);
+  // CC 自己写的中断标记 / 斜杠命令记录由服务端按会话类型认成 system 条目（lib/cc-own-records.ts），网页不再按文本认：
+  // Pi 裸记录里写这两种开头的是用户正文，按文本认会变成一条分隔线、正文全藏（tests/pi-foreign-attachments.test.ts）
+  // 不可信 = 外源，或记录里没有来源（Pi 裸记录：Discord 用户直发 Pi 的原文，本人和外人分不出）。下面按文本的还原 / 剥除只对认定是本人的做
+  const untrusted = !!from || !m.from;
+  const own = untrusted ? text : stripMentionDirective(text); // @ 委托指令行只给 agent 看；只剥本人的（外源的末行照原样给 owner 看）
+  // 按钮 / 选单回投只认本人：外源正文里写一行 [button:go] / [select:…]，owner 会看到「✅ 发版」、表单被标已答，agent 收到的却是原文
+  // （T31，直播 delta-clicks.ts 同一道闸）。外源的回投照原文显示，不碰任何表单
+  if (m.wire && !untrusted) markAnswerClicks(m.wire, anchor, forms); // 作答：正文已是人话，原文只用来回填已答态
+  const click = m.wire || untrusted ? null : resolveUserClick(own, anchor, forms);
+  // bridge 注入的来源头只由服务端按 channel 属性剥（lib/inbound-body.ts channelBodyText）；网页对外源正文不做任何按文本的剥除，
+  // 附件行也留在正文里、卡片只是附加预览——否则外人写一行 [attachment: 任意路径]，owner 只看到一个文件名，agent 拿到的是路径
+  const { content, attachments } = foreignAware(click?.text ?? own, untrusted, m.attachments);
   const pending = click && !click.resolved ? { clickRaw: own } : {}; // 存剥过指令行的：翻页补解析时不能把指令行带回气泡
   const ask = { ...(m.askId ? { askId: m.askId } : {}), ...(m.wire ? { wire: m.wire } : {}) };
   return { id: `h${m.seq}`, role: "user", content, ts: m.ts, from, sid: opts.sid, seqEnd: m.seq, ...(attachments ? { attachments } : {}), ...pending, ...ask };

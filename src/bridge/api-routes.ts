@@ -73,6 +73,8 @@ import { paneLooksWorking } from "../lib/turn-state.js";
 import { recordMetric } from "../lib/metrics.js";
 import { commandsForAgent } from "./slash-registry.js";
 import { handleSlashPassthrough, type SlashDeps } from "./api-slash.js";
+import { isConfiguredAcpChannel } from "./acp-state.js";
+import { handleAcpClear } from "./acp-clear.js";
 import { runtimeCommandsFor } from "../lib/runtime-commands.js";
 import { sessionTailInfo, type SessionTailInfo } from "../lib/session-tail.js";
 import { resolveModelAlias, isKnownEffort, KNOWN_EFFORT_LEVELS } from "../lib/claude-launch.js";
@@ -880,7 +882,6 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
     const tasks = [...activeBgTasksFor(name), ...(name !== agentParam ? activeBgTasksFor(agentParam) : [])];
     return apiJson(200, { ok: true, tasks });
   }
-
   // GET /api/v1/history/search —— 跨 agent 跨 session 聊天记录全文搜索。
   //   ?q=<词，≥2 字符>&limit=<1..100，默认 30>&agent=<可选，只搜这个 agent>
   // 场景：compact 后 agent 忘事 / 用户只剩模糊记忆——对话正文全局检索捞回来。
@@ -894,6 +895,8 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
     const agentFilter = url.searchParams.get("agent");
 
     const { readRegistryAgents } = await import("../lib/registry.js");
+    const { visibleInDefaultSearch } = await import("../lib/worker-kind.js");
+    const { archivedWorkerKind } = await import("../lib/session-archive.js");
     const { readdirSync } = await import("fs");
     // scope 内的候选 agent：registry 全量 + 归档目录（已删 agent）+ master（须显式 scope）
     const regAgents = await readRegistryAgents();
@@ -915,8 +918,7 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
         return apiJson(403, { ok: false, error: `agent "${agentFilter}" not in token scope` });
       }
       names = names.filter((n) => n === want || n === agentFilter);
-    }
-
+    } else names = names.filter((n) => visibleInDefaultSearch(n, regMap.get(n), archivedWorkerKind(n)));
     type Hit = { agent: string; sessionId: string; source: string; seq: number; ts: string | null; role: string; snippet: string; from?: string; compact?: boolean };
     const { searchSessionHistory } = await import("../lib/session-history.js");
     const all: Hit[] = [];
@@ -1276,10 +1278,7 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
     return apiJson(200, { ok: true, agent: agent.name, ...stopExtra(r, principal) }); // done 照发：前端误判忙时借此解锁
   }
 
-  // POST /api/v1/agents/:name/clear —— 远程调用 CC 原生 /clear（清上下文）。
-  // 语义分层（owner 哲学对齐）：本端点只做「打 /clear + 会话轮转收尾」这件原生事；
-  // clear 后要不要发开机指令、发什么，是前端（用户层）的事，这里零感知。
-  // master：/clear 后 CLAUDE.md 人设自动重载，且不在 registry、无 watcher —— 只发键。
+  // POST /api/v1/agents/:name/clear：清上下文；前端决定是否发开机指令。
   const clearMatch = path.match(/^\/agents\/([^/]+)\/clear$/);
   if (clearMatch && req.method === "POST") {
     const agentParam = decodeURIComponent(clearMatch[1]);
@@ -1287,6 +1286,7 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
     if (!isFullScope(principal)) return forbidden("clear requires a full-scope token"); // 清掉的是 owner 的上下文
     const agent = await findApiAgent(agentParam);
     if (!agent) return apiJson(404, { ok: false, error: `agent "${agentParam}" not found` });
+    if (await isConfiguredAcpChannel(agent.channelId)) return handleAcpClear(agent);
     const isMasterClear = agent.name === "master";
     const targetWindow = isMasterClear ? `${MASTER_SESSION}:0` : windowTarget(agent.name);
     // 回合进行中打 /clear 会插进对话流 → 先验 idle（与权限按钮同款防误击思路）
@@ -1357,7 +1357,7 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
       if (leftover) {
         const want = leftover.kind === "model" ? model : effort;
         if (!want || !switchPromptMatches(leftover, leftover.kind, want)) {
-          return apiJson(409, { ok: false, error: `会话停在「${promptTitle(leftover.kind)}」确认框上(切到 ${leftover.target}),与本次选择不符,请到终端或 Discord 按钮处理` });
+          return apiJson(409, { ok: false, error: `会话停在「${promptTitle(leftover.kind)}」确认框上(切到 ${leftover.target}),与本次选择不符,请到终端或网页终端里自己按` });
         }
         await pressSwitchConfirm(targetWindow, leftover);
         await Bun.sleep(800);
@@ -1387,9 +1387,9 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
         }
         const stuck = detectSwitchConfirmPrompt(r.pane);
         if (r.outcome === "foreign" && stuck) {
-          return `会话停在「${promptTitle(stuck.kind)}」确认框上(切到 ${stuck.target}),与本次选择不符,请到终端或 Discord 按钮处理`;
+          return `会话停在「${promptTitle(stuck.kind)}」确认框上(切到 ${stuck.target}),与本次选择不符,请到终端或网页终端里自己按`;
         }
-        if (stuck) return `切${label}的确认框没能自动确认,请到终端或 Discord 按钮处理`;
+        if (stuck) return `切${label}的确认框没能自动确认,请到终端或网页终端里自己按`;
         return null;
       };
       if (model) {
@@ -1439,7 +1439,7 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
   }
 
   // POST /api/v1/agents/:name/answer —— 交互卡回传。只给 owner 本人：批准权限弹框、替 agent 回答 = 以 owner 名义拍板（与 ask-entry.ts canAnswerAsk 同一判定）
-  // body {kind:"auq", action:"submit"|"cancel", selections?: number[][]} 或 {kind:"permission", action:"allow"|"allow_session"|"deny"}
+  // body {kind:"auq", action:"submit"|"cancel", selections?: number[][]} 或 {kind:"permission", action:"allow"|"allow_session"|"deny"} 或 {kind:"acp", action:<按钮 id>}
   const answerMatch = path.match(/^\/agents\/([^/]+)\/answer$/);
   if (answerMatch && req.method === "POST") {
     const agentParam = decodeURIComponent(answerMatch[1]);
@@ -1519,7 +1519,7 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
       return apiJson(200, { ok: true });
     }
 
-    return apiJson(400, { ok: false, error: 'kind must be "auq" or "permission"' });
+    return kind === "acp" ? (await import("./acp-link.js")).answerAcpResponse(agent.channelId, body, principal) : apiJson(400, { ok: false, error: 'kind must be "auq", "permission" or "acp"' });
   }
 
   // GET /api/v1/agents/:name/pending —— 当前挂起的交互卡 + thinking 态。

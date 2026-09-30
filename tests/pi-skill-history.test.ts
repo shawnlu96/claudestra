@@ -32,20 +32,18 @@ function piSession(texts: string[]): string {
   return p;
 }
 
+// T31c r2：Pi 记录里的 <skill> 只是正文里的字，外人直发 Pi 也写得出来（<skill name="x">藏起来的话</skill>）；
+// 没有结构化标记前原文照登、照搜——代价是真技能调用显示整份 SKILL.md（PR「已定」，后续卡让 Pi 扩展写结构化来源）
 describe("Pi 技能调用记录", () => {
-  test("折成 system 细条，带参数的保留参数", async () => {
-    const p = piSession([skillText("save-compact"), skillText("code-review", "PR 12"), "正常消息"]);
-    const page = await readSessionHistory(p);
-    expect(page.messages.map((m) => [m.role, m.text])).toEqual([
-      ["system", "/save-compact"],
-      ["system", "/code-review PR 12"],
-      ["user", "正常消息"],
-    ]);
+  test("原文照登，不折成 system 细条", async () => {
+    const texts = [skillText("save-compact"), skillText("code-review", "PR 12"), "正常消息"];
+    const page = await readSessionHistory(piSession(texts));
+    expect(page.messages.map((m) => [m.role, m.text])).toEqual(texts.map((t) => ["user", t]));
   });
 
-  test("历史搜索不命中技能正文", async () => {
+  test("历史搜索与显示同规则：技能正文也搜得到", async () => {
     const p = piSession([skillText("save-compact"), "保存记忆的事"]);
     const hits = await searchSessionHistory(p, "保存记忆");
-    expect(hits.map((h) => h.snippet.includes("保存记忆的事"))).toEqual([true]);
+    expect(hits.length).toBe(2);
   });
 });

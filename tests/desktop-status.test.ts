@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { desktopLabels, labelsOverrideFiles, overallStatus, updateHolder, BUN_AUTO_ENV_FILES, LABELS_ENV } from "../src/lib/desktop-status";
-import { daemonState, launchctlEntry } from "../src/lib/launchd-status";
+import { daemonDetail, daemonState, launchctlEntry, type DaemonReason } from "../src/lib/launchd-status";
 
 const LIST = [
   "PID\tStatus\tLabel",
@@ -26,8 +26,21 @@ describe("daemonState", () => {
     expect(daemonState(LIST, "com.claudestra.cron", true)).toMatchObject({ status: "fail", loaded: true, running: false, pid: null });
   });
   test("没加载：有 plist 是 fail，连 plist 都没有（没装）只是 warn——和 doctor 同口径", () => {
-    expect(daemonState(LIST, "com.claudestra.x", true)).toMatchObject({ status: "fail", loaded: false, detail: "plist 在，但没 load" });
-    expect(daemonState(LIST, "com.claudestra.x", false)).toMatchObject({ status: "warn", loaded: false, detail: "没装" });
+    expect(daemonState(LIST, "com.claudestra.x", true)).toMatchObject({ status: "fail", loaded: false, reason: { code: "not_loaded" } });
+    expect(daemonState(LIST, "com.claudestra.x", false)).toMatchObject({ status: "warn", loaded: false, reason: { code: "not_installed" } });
+  });
+});
+
+describe("daemonDetail", () => {
+  const all: DaemonReason[] = [
+    { code: "running", pid: "1" }, { code: "stopped", exit: "78" }, { code: "sigkilled", pid: "1" },
+    { code: "abnormal_exit", pid: "1", exit: "2" }, { code: "not_loaded" }, { code: "not_installed" },
+  ];
+  test("菜单栏用的英文文案里没有中文，doctor 用的中文照旧", () => {
+    for (const r of all) expect(daemonDetail(r, "en")).not.toMatch(/[\u4e00-\u9fff]/);
+    expect(daemonDetail({ code: "not_installed" }, "zh")).toBe("没装");
+    expect(daemonDetail({ code: "not_loaded" }, "zh")).toBe("plist 在，但没 load");
+    expect(daemonDetail({ code: "stopped", exit: "78" }, "en")).toContain("78");
   });
 });
 
@@ -40,10 +53,11 @@ describe("overallStatus", () => {
 });
 
 describe("desktopLabels", () => {
-  test("不设就是三个 launchd 服务，launcher 最后", () => {
+  test("不设就是四个 launchd 服务，launcher 最后", () => {
     const l = desktopLabels({});
-    expect(l).toHaveLength(3);
-    expect(l[2]).toBe("com.claudestra.launcher");
+    expect(l).toHaveLength(4);
+    expect(l[2]).toBe("com.claudestra.scheduler");
+    expect(l[3]).toBe("com.claudestra.launcher");
   });
   test("开发实测可换成假 label", () => {
     expect(desktopLabels({ [LABELS_ENV]: " com.x-t18test.dummy , a.b " })).toEqual(["com.x-t18test.dummy", "a.b"]);
