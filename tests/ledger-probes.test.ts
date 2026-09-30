@@ -33,11 +33,11 @@ const status = (id: ProbeId, f: VerifyFacts) => judgeProbe(id, f).status;
 const bridge = (d: Partial<NonNullable<VerifyFacts["daemons"]["bridge"]>>) => facts({ daemons: { bridge: { ...facts().daemons.bridge!, ...d } } });
 
 describe("检查单推断", () => {
-  test("web/ 下非 md → web；daemon 按注入的 import 映射；默认映射里 src/lib 三个 daemon 都算", () => {
+  test("web/ 下非 md → web；daemon 按注入的 import 映射；默认映射里 src/lib 四个 daemon 都算", () => {
     expect(inferGroups(["web/features/x.tsx"])).toEqual(["web"]);
     expect(inferGroups(["web/CLAUDE.md", "web/docs/a.md"])).toEqual([]);
     expect(inferGroups(["src/bridge/router.ts"])).toEqual(["bridge"]);
-    expect(inferGroups(["src/lib/x.ts"])).toEqual(["bridge", "cron", "launcher"]);
+    expect(inferGroups(["src/lib/x.ts"])).toEqual(["bridge", "cron", "scheduler", "launcher"]);
     expect(inferGroups(["src/channel-server.ts", "docs/a.md", "src/manager/ledger.ts"])).toEqual([]);
     const byImport: DaemonsOf = (f) => (f === "src/lib/only-cron.ts" ? ["cron"] : []);
     expect(inferGroups(["src/lib/only-cron.ts", "src/lib/unused.ts"], byImport)).toEqual(["cron"]);

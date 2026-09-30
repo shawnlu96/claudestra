@@ -312,7 +312,8 @@ function stageStep(s: PlannerSnapshot, node: FlowNode): PlannerDecision {
   }
   const prior = liveIntent(s, node, node.action);
   if (prior) return prior;
-  return makeIntent(s, node, node.action, `${node.id}：${node.next ?? "执行"}`, [taskResource(s)],
+  return makeIntent(s, node, node.action, `${node.id}：${node.next ?? "执行"}`,
+    node.action === "merge" ? [taskResource(s), `merge:${s.task.project}`] : [taskResource(s)],
     { ...(node.next ? { targetStage: node.next } : {}) });
 }
 

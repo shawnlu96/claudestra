@@ -72,7 +72,8 @@ export function realFactsDeps(repoRoot: string): FactsDeps {
   };
 }
 
-const LABEL: Record<Daemon, string> = { bridge: "com.claudestra.bridge", cron: "com.claudestra.cron", launcher: "com.claudestra.launcher" };
+const LABEL: Record<Daemon, string> = { bridge: "com.claudestra.bridge", cron: "com.claudestra.cron",
+  scheduler: "com.claudestra.scheduler", launcher: "com.claudestra.launcher" };
 
 const firstLine = (s: string) => s.trim().split("\n")[0]?.trim() || "";
 const ancestry = (code: number | null) => (code === 0 ? true : code === 1 ? false : null);
