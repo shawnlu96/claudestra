@@ -1350,21 +1350,12 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
     } catch (e) {
       return apiJson(502, { ok: false, error: `tmux 不可达: ${(e as Error).message}` });
     }
-    const { detectSwitchConfirmPrompt, switchPromptMatches, runSwitchCommand, pressSwitchConfirm } = await import("../lib/tmux-helper.js");
+    const { detectSwitchConfirmPrompt, runSwitchCommand } = await import("../lib/tmux-helper.js");
     const promptTitle = (k: "model" | "effort") => (k === "model" ? "Switch model?" : "Change effort level?");
-    {
-      // 残留的切换确认框也让 paneLooksIdle 为假——以前统一回「正在回合中」,用户照
-      // 提示去下拉重选只会一直 409。框的目标与本次选择一致 = 用户重申了意图,直接代按。
-      const leftover = detectSwitchConfirmPrompt(pane);
-      if (leftover) {
-        const want = leftover.kind === "model" ? model : effort;
-        if (!want || !switchPromptMatches(leftover, leftover.kind, want)) {
-          return apiJson(409, { ok: false, error: `会话停在「${promptTitle(leftover.kind)}」确认框上(切到 ${leftover.target}),与本次选择不符,请到终端或网页终端里自己按` });
-        }
-        await pressSwitchConfirm(targetWindow, leftover);
-        await Bun.sleep(800);
-        pane = await tmuxCapture(targetWindow, 40).catch(() => "");
-      }
+    // 残留的切换确认框不是这次注入引出的(可能是 CC 主动提议),哪怕目标相同也不代按——单独报出来,别回「正在回合中」让用户白等
+    const leftover = detectSwitchConfirmPrompt(pane);
+    if (leftover) {
+      return apiJson(409, { ok: false, error: `会话停在「${promptTitle(leftover.kind)}」确认框上(切到 ${leftover.target}),请先到终端或网页终端里自己按` });
     }
     if (!paneLooksIdle(pane)) {
       return apiJson(409, { ok: false, error: "agent 正在回合中，等回合结束再切换" });
@@ -1373,7 +1364,7 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
     try {
       // 会话有 prompt cache 时 /model 弹「Switch model?」、/effort 弹「Change effort level?」
       // (CC 2.1.280 实测两者都弹)。用户已在 web 下拉拍过板,没人按 TUI 就永远卡在框上。
-      // runSwitchCommand 注入 → 见框代按 → 等命令真正落地才返回,两条命令不会叠进同一个框。
+      // runSwitchCommand 注入 → 目标一致的框代按一次 → 等命令真正落地才返回,两条命令不会叠进同一个框。
       const { noteModelSwitchIntent, noteEffortSwitchIntent, clearSwitchIntent } = await import("./permission-watcher.js");
       // 总时长封顶:web BFF 代理超时 20s,两条命令各等满 7s 再加 set-claude 就贴边了
       const deadline = Date.now() + 11_000;
@@ -1394,11 +1385,12 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
         if (stuck) return `切${label}的确认框没能自动确认,请到终端或网页终端里自己按`;
         return null;
       };
+      // 意图只在没见到框就超时时登记:迟到的框交给 watcher 按意图代按;先登记会让 watcher 和 runSwitchCommand 抢着按同一张框
+      const handOff = (kind: "model" | "effort", r: Awaited<ReturnType<typeof runSwitchCommand>>, note: () => void) =>
+        r.outcome === "timeout" && !r.pressed ? note() : clearSwitchIntent(agent.name, kind);
       if (model) {
-        // 先登记意图:轮询窗外迟到的框由 watcher 按意图代按
-        noteModelSwitchIntent(agent.name, resolveModelAlias(model));
         const r = await runSwitchCommand(targetWindow, "model", model, { intervalMs: TICK_MS });
-        if (r.outcome === "applied" || r.outcome === "confirmed" || r.outcome === "rejected") clearSwitchIntent(agent.name, "model");
+        handOff("model", r, () => noteModelSwitchIntent(agent.name, model));
         const err = failure("model", r);
         if (err) return apiJson(409, { ok: false, error: effort ? `${err}(effort 未切换)` : err });
         if (r.outcome === "timeout") {
@@ -1408,10 +1400,9 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
         }
       }
       if (effort) {
-        noteEffortSwitchIntent(agent.name, effort);
         const ticks = Math.max(4, Math.floor((deadline - Date.now()) / TICK_MS));
         const r = await runSwitchCommand(targetWindow, "effort", effort, { intervalMs: TICK_MS, ticks });
-        if (r.outcome === "applied" || r.outcome === "confirmed" || r.outcome === "rejected") clearSwitchIntent(agent.name, "effort");
+        handOff("effort", r, () => noteEffortSwitchIntent(agent.name, effort));
         // ultracode 有前提(CC /config 开 dynamic workflows),没开时 CC 只在 TUI 里打拒绝
         // 原因——web 用户看不到 TUI,runSwitchCommand 认出拒绝(⎿ 行或 toast)就透传回去
         const err = failure("effort", r);
