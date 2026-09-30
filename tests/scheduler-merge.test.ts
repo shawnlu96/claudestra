@@ -1,15 +1,16 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
 import { getMeta, closeLedger, openLedger } from "../src/lib/ledger-store.js";
-import { advanceMergeRun, beginMergeRun, mergeRunDrift } from "../src/lib/scheduler-merge.js";
+import { advanceMergeRun, beginMergeRun, getMergeRun, mergeRunDrift } from "../src/lib/scheduler-merge.js";
 import { acquireMaintenance } from "../src/lib/scheduler-maintenance.js";
 import { mergeQueueBusy } from "../src/lib/scheduler-update-gate.js";
 import { LedgerReader } from "../src/lib/ledger-read.js";
 import { setWorkflow } from "../src/lib/ledger-scheduler-write.js";
 import { createTask } from "../src/lib/ledger-write.js";
-import { parseSchedulerConfig } from "../src/lib/scheduler-config.js";
+import { parseSchedulerConfig, readSchedulerConfig } from "../src/lib/scheduler-config.js";
+import type { MergeExternal, PrSnapshot } from "../src/lib/scheduler-merge-driver.js";
 import { schedulerMergeTick } from "../src/lib/scheduler-service.js";
 import { runLedger } from "../src/manager/ledger.js";
 import type { Registry } from "../src/manager/core.js";
@@ -129,6 +130,29 @@ describe("T68 durable merge queue", () => {
         .toEqual({ status: "done", receipt: `merge:${M}; 待 PM 部署` });
       expect(f.db.query("SELECT count(*) AS n FROM scheduler_resources WHERE intentId='merge-one'").get()).toEqual({ n: 0 });
       expect(await schedulerMergeTick(f.db, config, manager, noExternal)).toBe(0);
+    } finally { f.close(); }
+  });
+  test("real CI names flow from scheduler.json through merge-begin CLI, the journal and the driver to merged", async () => {
+    const f = fixture();
+    try {
+      const names = ["typecheck + test + guard", "web typecheck + lint", "desktop typecheck + cargo test"];
+      const configPath = join(f.dir, "scheduler.json");
+      writeFileSync(configPath, JSON.stringify({ enabled: true, projects: { p: { maxActiveWorkers: 1, requiredChecks: names, repoDir: "/tmp/p" } } }));
+      const config = readSchedulerConfig(configPath);
+      const manager = async (...args: string[]) => runLedger(args.slice(1), { db: f.db, actor: "scheduler", projectIds: ["p"],
+        loadRegistry: async () => ({} as Registry), saveRegistry: async () => {}, now: () => 300 }) as Promise<Record<string, unknown>>;
+      let snapshot: PrSnapshot = { state: "OPEN", head: H, branch: "task/T1", base: "main", draft: false, crossRepository: false,
+        mergeState: "CLEAN", mergeSha: null, checks: names.map((name) => ({ name, bucket: "pass" as const })) };
+      const external: MergeExternal = {
+        inspect: async () => snapshot,
+        updateBranch: async () => { throw new Error("clean PR must not be updated"); },
+        merge: async () => { snapshot = { ...snapshot, state: "MERGED", mergeSha: M }; return M; },
+      };
+      for (let i = 0; i < 4 && getMergeRun(f.db, "merge-one")?.phase !== "merged"; i++) {
+        expect(await schedulerMergeTick(f.db, config, manager, () => external)).toBe(1);
+      }
+      expect(getMergeRun(f.db, "merge-one")).toMatchObject({ phase: "merged", mergeSha: M, requiredChecks: names.join(",") });
+      expect(f.db.query("SELECT status FROM scheduler_intents WHERE id='merge-one'").get()).toEqual({ status: "submitted" });
     } finally { f.close(); }
   });
   test("preflight rejection records unknown intent instead of retrying it each poll", async () => {

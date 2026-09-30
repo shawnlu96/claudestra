@@ -40,6 +40,19 @@ describe("T68 merge driver", () => {
     expect(f.calls).not.toContain("merge");
     expect(f.calls).not.toContain("journal:unknown");
   });
+  test("required checks match gh job names verbatim, case and spaces included", async () => {
+    const names = ["typecheck + test + guard", "web typecheck + lint", "desktop typecheck + cargo test"];
+    const checks = names.map((name) => ({ name, bucket: "pass" as const }));
+    const ok = fixture({ ...base, phase: "await_ci", requiredChecks: names.join(",") });
+    ok.snapshot = pr({ checks });
+    await driveMerge(ok.row, ok.ops, ok.advance, () => {});
+    expect(ok.row.phase).toBe("merged");
+    const off = fixture({ ...base, phase: "await_ci", requiredChecks: ["Typecheck + test + guard", ...names.slice(1)].join(",") });
+    off.snapshot = pr({ checks });
+    await driveMerge(off.row, off.ops, off.advance, () => {});
+    expect(off.calls).not.toContain("merge");
+    expect(off.row.phase).toBe("await_ci");
+  });
   test("draft waits for this card without freezing the project or issuing effects", async () => {
     for (const phase of ["ready", "updating", "await_ci"] as const) {
       const f = fixture({ ...base, phase });
