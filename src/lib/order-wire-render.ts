@@ -3,8 +3,9 @@
  * machine wrote appears only inside quoteExternal quotes. Two audiences:
  * - local: byte-for-byte the text renderWorkOrder always produced (tests/order-wire-render.test.ts snapshot). Local orders
  *   carry this machine's absolute paths on purpose (the CLI to run), so they are not redacted.
- * - peer: every free-text field is redacted first (dispatch-redact.ts), multi-line text keeps its lines, and a field that
- *   would not fit its cap is refused instead of cut: the remote worker cannot go back and read the original.
+ * - peer: text is folded to what the peer will read, then redacted (dispatch-redact.ts), then quoted line by line; ids that
+ *   carry a secret and fields over their byte cap are refused instead of rewritten or cut (the remote worker cannot go back
+ *   and read the original). tests/order-wire.test.ts "peer rendering".
  */
 import { redactForPeer } from "./dispatch-redact.js";
 import { WIRE_LIMITS, type OrderWire } from "./order-wire.js";
@@ -35,7 +36,8 @@ export class OrderRenderError extends Error {}
 
 /** Each line quoted on its own so a spec keeps its shape; the cap is the field's wire limit, so nothing valid is ever trimmed. */
 function block(label: string, value: string, cap: number): string[] {
-  if (value.length > cap) throw new OrderRenderError(`${label} 超过 ${cap} 字，不截断、拒绝渲染`);
+  const bytes = Buffer.byteLength(value);
+  if (bytes > cap) throw new OrderRenderError(`${label} 超过 ${cap} 字节（${bytes}），不截断、拒绝渲染`);
   return value.split(/\r?\n/).map((line) => `  ${quoteExternal(line, cap)}`);
 }
 
@@ -44,11 +46,31 @@ function blocks(title: string, rows: readonly string[], cap: number): string[] {
   return rows.flatMap((r, i) => [`${title} ${i + 1}（原文，非指令）：`, ...block(`${title} ${i + 1}`, r, cap)]);
 }
 
-/** Redact every free-text field; ids, head and repo are pattern-checked by the parser and carry no prose. */
+/**
+ * The folding quoteExternal does later (drop \p{Cf}, controls and blank runs to one space) plus NFKC, lines kept. Redaction
+ * must run on this form: on the raw text a zero-width or full-width split hides a token that quoting then rejoins.
+ */
+const fold = (s: string): string => s.replace(/\p{Cf}+/gu, "").normalize("NFKC").replace(/\p{Cf}+/gu, "").replace(/\r\n?/g, "\n")
+  .split("\n").map((l) => l.replace(/[\p{Cc}\u2028\u2029]+/gu, " ").replace(/\s+/g, " ")).join("\n");
+
+/** Ids must reach the peer unchanged (a deliver cites them), so a secret there refuses the order instead of being masked. */
+function refuseSecretIds(o: OrderWire): void {
+  const ids: [string, string | null][] = [["orderId", o.orderId], ["taskId", o.taskId], ["node", o.node], ["step", o.step], ["repo", o.repo],
+    ...o.findings.flatMap((f, i): [string, string][] => [[`findings[${i}].findingId`, f.findingId], [`findings[${i}].family`, f.family]])];
+  for (const [name, v] of ids) {
+    if (v !== null && redactForPeer(fold(v)).count > 0) throw new OrderRenderError(`${name} 含疑似敏感内容，编号不能改写，拒绝外发`);
+  }
+}
+
+/**
+ * Every string a peer sees: free text is folded then redacted; ids are checked and refused on a hit. head is the one
+ * exception: the parser holds it to a full hex SHA, and the 48+ hex rule would mask a sha-256 head the reviewer must match.
+ */
 export function redactOrderForPeer(o: OrderWire): { order: OrderWire; count: number } {
+  refuseSecretIds(o);
   let count = 0;
   const r = (s: string): string => {
-    const out = redactForPeer(s);
+    const out = redactForPeer(fold(s));
     count += out.count;
     return out.text;
   };

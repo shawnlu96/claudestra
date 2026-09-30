@@ -12,6 +12,7 @@ const ORDER_WIRE_VERSION = 1;
 /** Whole-wire byte cap: a spec quoted inline plus findings fits; anything larger is refused at both ends, never trimmed. */
 export const WIRE_MAX_BYTES = 32 * 1024;
 
+/** UTF-8 bytes, the unit of WIRE_MAX_BYTES: String.length would let a CJK or emoji field run to 3–4x its stated size. */
 export const WIRE_LIMITS = {
   items: 20, input: 16 * 1024, line: 2000, writeBack: 2000, findings: 100, probe: 4000, fallback: 500, summary: 500, path: 400,
 } as const;
@@ -94,7 +95,8 @@ function record(v: unknown, path: string, keys: readonly string[]): Record<strin
 
 function text(v: unknown, path: string, max: number, multiLine = false): string {
   if (typeof v !== "string" || v.length === 0) return fail(path, "要是非空字符串");
-  if (v.length > max) fail(path, `超长（${v.length} > ${max}）`);
+  const bytes = Buffer.byteLength(v);
+  if (bytes > max) fail(path, `超长（${bytes} > ${max} 字节）`);
   if ((multiLine ? BAD_MULTI : BAD_SINGLE).test(v)) fail(path, "含控制字符");
   return v;
 }
