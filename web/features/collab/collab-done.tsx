@@ -5,7 +5,7 @@
  * 总览重拉后窗口往新挪了，掉出窗口的几张从新游标补一段（ledger-done.ts gapClosed），不重不漏。老 bridge 没有游标 = 不出按钮。
  */
 import { useCallback, useEffect, useRef, useState } from "react";
-import { chainLoadMore, chainOnOverview, chainOnPage, fetchLedgerDone, newChain, type DoneChain, type DonePage } from "@/lib/api/ledger-done";
+import { byDone, chainLoadMore, chainOnOverview, chainOnPage, fetchLedgerDone, newChain, type DoneChain, type DonePage } from "@/lib/api/ledger-done";
 import { collabLoader } from "./collab-loader";
 import type { LedgerOverview, LedgerTaskView, Tr } from "./collab-model";
 import { Icon } from "./collab-icons";
@@ -108,7 +108,7 @@ export function MobileEarlierDone(props: { project: string; ov: LedgerOverview; 
   const d = useDonePages(props.project, ov);
   const [open, setOpen] = useState(false);
   const today = new Set(props.todayDone);
-  const rows = [...ov.tasks.filter((t) => shown(t) && !today.has(t.id)), ...d.pages.filter(shown)];
+  const rows = [...ov.tasks.filter((t) => shown(t) && !today.has(t.id)), ...d.pages.filter(shown)].sort(byDone);
   if (!rows.length && !d.more) return null;
   return (
     <section className={v.msec}>
