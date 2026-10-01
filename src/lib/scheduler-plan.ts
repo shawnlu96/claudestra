@@ -7,6 +7,7 @@ import { cardWorkerSlots } from "./scheduler-worker-slot.js";
 import { POOL_RECIPIENT, type PoolFacts } from "./scheduler-pool-plan.js";
 import { remoteWork, reviewPlacement } from "./scheduler-placement-plan.js";
 import { BOUNCE_LIMIT_REASON, bounceLimitHit, fixBounce, reviewAfterBounce, type MergeBounce } from "./scheduler-merge-conflict.js";
+import { reviewSwapPlan, reviewsAfterSwap } from "./scheduler-review-swap.js";
 import type { PmUiGate } from "./ledger-ui-approve-verdict.js";
 import { uiFixPackage, uiMergeBlock, uiPassStep } from "./scheduler-ui-gate.js";
 import { escalationDowngrade, convergeReview, fixWarning, roundCap, type Downgrade, type FixDiff } from "./review-converge.js";
@@ -68,7 +69,7 @@ interface PlannedIntent {
   kind: "intent";
   id: string;
   node: string;
-  action: "dispatch" | "review" | "stage" | "ask" | "merge" | "verify" | "retire" | "ensure_session";
+  action: "dispatch" | "review" | "stage" | "ask" | "merge" | "verify" | "retire" | "ensure_session" | "review_swap";
   recipient: string | null;
   resources: string[];
   reason: string;
@@ -136,8 +137,9 @@ function sessionGate(s: PlannerSnapshot, node: FlowNode, role: "author" | "revie
     if (role === "author" && (session.family !== s.workflow?.authorFamily || (s.task.agent && session.agent !== s.task.agent))) {
       return escalate("author_family", "执行 session 与任务作者或模型家族不一致");
     }
+    if (role === "reviewer") { const swap = reviewSwapPlan(s, node.id, reviewPlacement); if (swap) return swap; }
     // A pooled round's reviewer is a one-shot peer worker, not a session this card could keep: a local session may follow it.
-    const priorReviewer = s.events.find((e) => e.kind === "review" && !String(e.data.reviewer ?? "").startsWith(POOL_RECIPIENT));
+    const priorReviewer = reviewsAfterSwap(s.events).find((e) => e.kind === "review" && !String(e.data.reviewer ?? "").startsWith(POOL_RECIPIENT));
     if (role === "reviewer" && priorReviewer && (priorReviewer.data.reviewerSessionId !== session.sessionId ||
       priorReviewer.data.reviewer !== session.agent)) return escalate("reviewer_replaced", "同卡复验必须沿用原审查 session");
     if (role === "reviewer" && (session.agent === s.author?.agent || session.family === s.workflow?.authorFamily ||
@@ -204,6 +206,7 @@ function reviewDispatch(s: PlannerSnapshot, node: FlowNode): PlannerDecision {
   if (prior) return prior;
   // A peer may still hold this review through such an order: a local reviewer now would be a second dispatch of the node.
   if (s.strayPoolOrders?.length) return escalate("pool_order_open", `池单 ${s.strayPoolOrders.join("，")} 仍在对方手里或待领，先对账`);
+  const swap = reviewSwapPlan(s, node.id, reviewPlacement); if (swap) return swap;
   const pool = reviewPlacement(s, latestSeq(s.events, s.task));
   if (pool && "wait" in pool) return wait("placement", pool.wait);
   if (pool) return makeIntent(s, node, "review", pool.reason,

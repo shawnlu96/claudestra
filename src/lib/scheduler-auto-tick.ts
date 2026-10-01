@@ -26,6 +26,7 @@ import { peerPrHold } from "./peer-pr-hold.js";
 import type { BorrowEntry } from "./lend-config.js";
 import type { RemotePolicy } from "./scheduler-config.js";
 import { isPoolIntent } from "./scheduler-pool-plan.js";
+import { driveReviewSwap } from "./scheduler-review-swap-runtime.js";
 import { isRoundCap, roundCapNotice } from "./review-converge-notice.js";
 import { drivePool } from "./scheduler-pool-tick.js";
 import { informFamilyWait } from "./scheduler-family-pick-notice.js";
@@ -89,7 +90,6 @@ export function boundRef(db: Database, taskId: string, role: SessionRole): Sessi
   const s = getSchedulerSession(db, taskId, role);
   return s && s.state === "active" ? { taskId, role, agent: s.agent, sessionId: s.sessionId, family: s.family, transport: s.transport } : null;
 }
-
 class Card {
   constructor(readonly db: Database, readonly task: LedgerTask, readonly opts: SnapshotOpts, readonly deps: AutoTickDeps) {}
 
@@ -238,6 +238,7 @@ class Card {
   }
 
   async drive(intent: SchedulerIntent, plan: Planned | null): Promise<CardOutcome> {
+    const swap = await driveReviewSwap(this, intent); if (swap) return swap;
     if (isPoolIntent(intent)) {
       const r = await drivePool({ manager: this.deps.manager, notifyPm: this.deps.notifyPm, lost: noticeLost }, this.task, intent,
         this.opts.maxWorkers, this.opts.pool?.remote);
