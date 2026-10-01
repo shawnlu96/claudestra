@@ -94,8 +94,8 @@ export const SCHEDULER_CMDS: Record<string, CommandSpec> = {
     },
   },
   "scheduler-pool": {
-    valued: ["max-workers", "mode", "roles", "timeout-min"], bools: [],
-    usage: "scheduler-pool <intent-key> --max-workers N --mode balance|off --roles review|none --timeout-min N（调度服务专用：挂池 / 同步出借单 / 超时撤回）",
+    valued: ["max-workers", "mode", "roles", "timeout-min", "review-first"], bools: [],
+    usage: "scheduler-pool <intent-key> --max-workers N --mode balance|off --roles review|none --timeout-min N [--review-first a,b]（调度服务专用：挂池 / 同步出借单 / 超时撤回）",
     async run(c) {
       const raw = c.need("mode"), roles = c.need("roles");
       // A scheduler daemon still on R9 code passes overflow / prefer until it restarts: same meaning as the config reads them.
@@ -105,10 +105,11 @@ export const SCHEDULER_CMDS: Record<string, CommandSpec> = {
       if (minutes < 1) throw new LedgerError("invalid", "--timeout-min 至少 1");
       const intent = c.p.pos[1] ?? "", maxWorkers = integer(c, "max-workers");
       if (maxWorkers > 32) throw new LedgerError("invalid", "--max-workers 要在 0–32");
+      const reviewFirst = (c.p.flags["review-first"] ?? "").split(",").map((x) => x.trim()).filter(Boolean);
       const borrow = await (c.deps.lend?.borrow() ?? readEffectiveBorrow());
       return { ok: true, ...schedulerPoolStep(c.db, c.ctx(), {
         intentId: intent, maxWorkers, timeoutMs: minutes * 60_000, borrow,
-        remote: { mode: mode as RemoteMode, roles: roles === "review" ? ["review"] : [], poolTimeoutMin: minutes },
+        remote: { mode: mode as RemoteMode, roles: roles === "review" ? ["review"] : [], poolTimeoutMin: minutes, ...(reviewFirst.length ? { reviewFirst } : {}) },
         spec: specOf(c, intent),
       }) };
     },
