@@ -48,7 +48,9 @@ const env = { ...process.env };
 const piDir = getAgentDir(env);
 let status = null;
 const mountEnv = { ...env, [PI_MCP_SERVERS_ENV]: JSON.stringify({ claudestra: { command: "x" } }) };
-mount({ registerMcpServer: () => {}, on: (_e, h) => h({}, { cwd, ui: { setStatus: (_k, t) => (status = t) } }) }, mountEnv);
+let started;
+await mount({ on: (_e, h) => void (started = h({}, { cwd, ui: { setStatus: (_k, t) => (status = t) } })), getActiveTools: () => [] }, mountEnv, async () => {});
+await started;
 console.log(JSON.stringify({
   piDir, piReads: existsSync(join(piDir, "mcp.json")), ours: piAgentDirOf(env, cwd), childEnv: piChildEnv(env, {}, cwd).PI_CODING_AGENT_DIR,
   manager: piAcpClash(cwd, env), transport: transportRefusal({ runtime: "pi", cwd }, "x", "acp", env),
