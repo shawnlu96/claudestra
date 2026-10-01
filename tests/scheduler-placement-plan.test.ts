@@ -1,5 +1,5 @@
 /**
- * i28-W5 planner hooks over PlannerSnapshot: what reviewPlacement and pinnedWork turn the pool facts into. Same-family
+ * i28-W5 planner hooks over PlannerSnapshot: what reviewPlacement and remoteWork turn the pool facts into. Same-family
  * reviewers, security cards, bound local reviewers and proto-1 peers never enter the balance; a pinned card's write /
  * fix / restate dispatch waits instead of starting locally; one live pool intent per node.
  */
