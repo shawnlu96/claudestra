@@ -85,6 +85,60 @@ export function isPackageSource(source: string): boolean {
 }
 
 /**
+ * Pi 0.99 起的内建扩展。**`--no-extensions` 会把它们一起关掉**（0.99 之前只关"发现"，
+ * 现在是连内建一起关）——所以 minimal 档想用其中任何一个，必须显式 `-e builtin:<name>`。
+ * 参考：0.99 CHANGELOG「--no-extensions also disables the built-in extensions… load one
+ * explicitly with -e builtin:<name>」。
+ */
+export const PI_BUILTIN_EXTENSIONS = ["mcp", "llama.cpp", "codemode", "tool-search"] as const;
+
+/** `builtin:<name>` 形式的扩展源（Pi 自己的内建扩展，不是包也不是路径） */
+export function isBuiltinExtension(source: string): boolean {
+  return /^builtin:[a-z0-9][a-z0-9.-]*$/i.test(source.trim());
+}
+
+/**
+ * 能力档案预设：把「base + 若干扩展」这套常见组合起个名字，调用方不用手拼。
+ * 只放**已验证有用**的组合，别把它当清单堆料（YAGNI）。
+ */
+export const PI_ENV_PRESETS: Record<string, PiEnvProfile> = {
+  // 0.99 的 codemode：模型写一段 JS 在沙箱里调其它工具，只有脚本输出进上下文。
+  // base=minimal + 显式 builtin:codemode（--no-extensions 会把它一起关掉，必须显式给）。
+  codemode: { base: "minimal", extensions: ["builtin:codemode"] },
+};
+
+export function piEnvPresetNames(): string[] {
+  return Object.keys(PI_ENV_PRESETS);
+}
+
+/**
+ * `builtin:<name>` → 需要在会话内**激活**的工具名。
+ *
+ * 0.99 的 `codemode` / `tool_search` 是「注册但默认不激活」：`-e builtin:codemode` 只让它
+ * 出现在 `getAllTools()` 里，不进 `getActiveTools()`（真机实测：加载后 active 仍只有
+ * read/bash/edit/write）。唯一安全的激活途径是扩展里调 `pi.setActiveTools()`——
+ * `--tools` 是**整体替换**，会把通道工具一起顶掉；写 settings 又要动用户的全局配置。
+ * 所以由启动器把这个清单经环境变量交给我们的通道扩展去激活（见 pi-launch / claudestra-extension）。
+ *
+ * `mcp` / `llama.cpp` 不在这里：MCP 的工具按服务器声明即激活，llama.cpp 是 provider。
+ */
+export function piActivateTools(env: PiEnvProfile | undefined): string[] {
+  const out = new Set<string>();
+  for (const src of env?.extensions ?? []) {
+    const name = src.trim().toLowerCase().replace(/^builtin:/, "");
+    if (name === "codemode") out.add("codemode");
+    else if (name === "tool-search") out.add("tool_search");
+  }
+  // 排序让环境变量值稳定（同一档案永远得到同一个字符串，便于比对与测试）
+  return [...out].sort();
+}
+
+/** 取预设（大小写不敏感；未知名字返回 undefined，调用方负责报错） */
+export function piEnvPreset(name: string): PiEnvProfile | undefined {
+  return PI_ENV_PRESETS[name.trim().toLowerCase()];
+}
+
+/**
  * 档案 → Pi 启动参数（不含 --approve/--no-approve，那个由 pi-launch 统一处理）。
  *
  * ⚠ 顺序不是随意的，实测（pi 0.85.1）：**包源（`-e npm:…`）必须排在文件路径之前**，
@@ -101,9 +155,16 @@ export function piEnvFlags(env: PiEnvProfile | undefined): string[] {
     flags.push("--no-extensions", "--no-skills", "--no-prompt-templates");
   }
   if (profile.trustProject === false) flags.push("--no-approve");
-  // ② 额外扩展：包源在前，路径在后（见上方实测）
+  // ② 额外扩展：包源 → builtin: → 路径（见上方实测：路径必须排最后，否则前面的被静默忽略）。
+  // builtin: 是 0.99 才有的第三类，归在路径之前 —— 它是"声明式资源"，和包源同类。
   const extras = profile.extensions ?? [];
-  for (const src of [...extras.filter(isPackageSource), ...extras.filter((s) => !isPackageSource(s))]) {
+  const tier = (pred: (s: string) => boolean) => extras.filter((s) => pred(s) && !isPackageSource(s));
+  const ordered = [
+    ...extras.filter(isPackageSource),
+    ...tier(isBuiltinExtension),
+    ...extras.filter((s) => !isPackageSource(s) && !isBuiltinExtension(s)),
+  ];
+  for (const src of ordered) {
     flags.push("--extension", src);
   }
   for (const s of profile.skills ?? []) flags.push("--skill", s);

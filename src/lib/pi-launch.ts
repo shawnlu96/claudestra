@@ -17,7 +17,7 @@
 import { dirname, join } from "path";
 import { fileURLToPath } from "url";
 import { shellEscape } from "./claude-launch.js";
-import { piEnvFlags, type PiEnvProfile } from "./pi-env.js";
+import { piEnvFlags, type PiEnvProfile, piActivateTools } from "./pi-env.js";
 
 /** Claudestra 注入的 Pi 扩展：绝对路径（扩展必须能被 Pi 直接 -e 加载） */
 export const PI_EXTENSION_PATH = join(
@@ -54,10 +54,15 @@ export interface PiLaunchOptions {
 export function buildPiCommand(opts: PiLaunchOptions): string {
   const bridgeUrl = opts.bridgeUrl || process.env.BRIDGE_URL || "ws://localhost:3847";
 
+  // 0.99 的 codemode / tool_search 默认不激活，光 -e 加载不够 —— 把要激活的工具名交给
+  // 通道扩展，由它在 session_start 里 setActiveTools（详见 pi-env.ts:piActivateTools）。
+  const activate = piActivateTools(opts.piEnv);
+
   const prefix =
     `DISCORD_CHANNEL_ID=${shellEscape(opts.channelId)} ` +
     `BRIDGE_URL=${shellEscape(bridgeUrl)} ` +
-    `CLAUDESTRA_AGENT=${shellEscape(opts.agentName || "")}`;
+    `CLAUDESTRA_AGENT=${shellEscape(opts.agentName || "")}` +
+    (activate.length ? ` CLAUDESTRA_PI_ACTIVATE=${shellEscape(activate.join(","))}` : "");
 
   const parts: string[] = ["pi"];
 

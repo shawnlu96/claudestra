@@ -114,6 +114,8 @@ interface PiExtensionApi {
   /** 以下三个用于能力快照（v2.23+），老版本 Pi 上没有 ⇒ 全部可选调用 */
   getAllTools?(): Array<{ name?: string }>;
   getActiveTools?(): string[];
+  /** 0.99+：激活/停用工具（用于把 codemode 这类"注册但未激活"的内建扩展打开） */
+  setActiveTools?(names: string[]): void;
   getCommands?(): Array<{ name?: string }>;
   getThinkingLevel?(): string;
   getModel?(): { id?: string; name?: string } | undefined;
@@ -384,6 +386,18 @@ export default function claudestraChannel(pi: PiExtensionApi): void {
       sessionId = ctx?.sessionManager?.getSessionId?.() ?? "";
       sessionFile = ctx?.sessionManager?.getSessionFile?.() ?? "";
     } catch { /* 老版本没有这两个方法时留空，不影响收发 */ }
+    // 0.99 的 codemode / tool_search 是「注册但不激活」：光 -e builtin:codemode 不进工具列表
+    // （真机实测）。启动器把要激活的名字放 CLAUDESTRA_PI_ACTIVATE，这里用官方 API 激活。
+    // 失败不影响通道收发（老版本没有 setActiveTools 时静默跳过）。
+    try {
+      const want = (process.env.CLAUDESTRA_PI_ACTIVATE || "")
+        .split(",")
+        .map((x) => x.trim())
+        .filter(Boolean);
+      const have = pi.getActiveTools?.() ?? [];
+      const add = want.filter((n) => !have.includes(n));
+      if (add.length && typeof pi.setActiveTools === "function") pi.setActiveTools([...have, ...add]);
+    } catch { /* 老版本无此 API：保持原样即可，激活失败不该拖垮通道 */ }
     // 能力快照要在扩展/工具都注册完之后写 —— session_start 时本扩展自己的工具已注册，
     // 但 MCP 等懒加载的工具可能还没进 getAllTools（那时数量偏少，属已知误差）。
     writeEnvSnapshot(ctx);

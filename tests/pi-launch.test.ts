@@ -141,3 +141,20 @@ describe("buildAgentCommand 分发", () => {
     }
   });
 });
+
+// ── 0.99 内建扩展：加载 + 激活（2026-09-15）──────────────────────────────────
+
+describe("buildPiCommand > builtin 扩展的激活", () => {
+  const profile = { base: "minimal" as const, extensions: ["builtin:codemode"] };
+
+  test("带 builtin:codemode 时注入 CLAUDESTRA_PI_ACTIVATE=codemode（光 -e 加载不激活）", () => {
+    const cmd = buildPiCommand({ ...base, piEnv: profile });
+    expect(cmd).toContain("--extension builtin:codemode");
+    expect(cmd).toContain("CLAUDESTRA_PI_ACTIVATE=codemode");
+  });
+
+  test("没有 builtin 扩展时不注入激活变量（不给普通 agent 加噪声）", () => {
+    expect(buildPiCommand({ ...base, piEnv: { base: "minimal" } })).not.toContain("CLAUDESTRA_PI_ACTIVATE");
+    expect(buildPiCommand(base)).not.toContain("CLAUDESTRA_PI_ACTIVATE");
+  });
+});
