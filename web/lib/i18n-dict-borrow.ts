@@ -42,4 +42,16 @@ export const BORROW_DICT: Record<string, string> = {
   "对方没有授权（或已收回）": "No grant from the lender (or revoked)",
   "对方的授权已到期": "The lender's grant has expired",
   "对方今天的单数用完了": "The lender's orders for today are used up",
+  // 分配表（i28-Q1，features/borrow/borrow-alloc.tsx）；「本机」在 i18n-dict-contacts.ts
+  "本机：同时最多跑 {box} 单": "This machine: run up to {box} order at a time|This machine: run up to {box} orders at a time",
+  "档位": "Tier",
+  "角色": "Roles",
+  "先用": "First",
+  "平分": "Even",
+  "少用": "Less",
+  "不用": "Off",
+  "本周已用": "Used this week",
+  "{n} 天后重置": "Resets in {n} day|Resets in {n} days",
+  "{n} 小时后重置": "Resets in {n} hour|Resets in {n} hours",
+  "审查先给": "Reviews first",
 };

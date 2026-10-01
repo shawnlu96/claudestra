@@ -32,7 +32,9 @@ type Role = "review" | "write";
 export interface Grant { until: number; roles: Role[]; repos: string[]; ordersPerDay: number; ordersLeftToday: number }
 export type Slots = Record<LendFamily, { total: number; busy: number }>;
 export interface Paused { reason: string; until: number }
-export interface HelloRequest { v: 1; proto: number; boot: string; seq: number; grant: Grant | null; slots: Slots; paused: Paused | null }
+/** Optional (i28-Q1): the lender's weekly quota per family, percent + reset time only — a peer without it still says hello. */
+export type HelloQuota = Partial<Record<LendFamily, { weekUsedPct: number; resetAt: number }>>;
+export interface HelloRequest { v: 1; proto: number; boot: string; seq: number; grant: Grant | null; slots: Slots; paused: Paused | null; quota?: HelloQuota }
 export interface HelloResponse { proto: number; helloMs: number; beatMs: number }
 
 const PHASES = ["cloning", "starting", "working", "publishing", "result_pending"] as const;
@@ -99,11 +101,24 @@ function slotsOf(v: unknown): Slots {
   return { codex: one("codex"), claude: one("claude") };
 }
 
+/** Exactly {weekUsedPct, resetAt} per family, nothing else: an account, token or session id has no key to ride on. */
+function quotaOf(v: unknown): HelloQuota {
+  const q = fields(v, "quota", [], LEND_FAMILIES);
+  const out: HelloQuota = {};
+  for (const f of LEND_FAMILIES) {
+    if (q[f] === undefined) continue;
+    const w = fields(q[f], `quota.${f}`, ["weekUsedPct", "resetAt"]);
+    out[f] = { weekUsedPct: whole(w.weekUsedPct, `quota.${f}.weekUsedPct`, 0, 100), resetAt: whole(w.resetAt, `quota.${f}.resetAt`, 0, MAX_TS) };
+  }
+  return out;
+}
+
 function parseHello(raw: unknown): HelloRequest {
-  const r = fields(raw, "$", ["v", "proto", "boot", "seq", "grant", "slots", "paused"]);
+  const r = fields(raw, "$", ["v", "proto", "boot", "seq", "grant", "slots", "paused"], ["quota"]);
   const p = r.paused === null ? null : fields(r.paused, "paused", ["reason", "until"]);
   return { v: version(r), proto: whole(r.proto, "proto", LEND_PROTO, 99), boot: pattern(r.boot, "boot", BOOT), seq: whole(r.seq, "seq", 0, MAX_TS),
-    grant: grantOf(r.grant), slots: slotsOf(r.slots), paused: p && { reason: pattern(p.reason, "paused.reason", CODE), until: whole(p.until, "paused.until", 0, MAX_TS) } };
+    grant: grantOf(r.grant), slots: slotsOf(r.slots), paused: p && { reason: pattern(p.reason, "paused.reason", CODE), until: whole(p.until, "paused.until", 0, MAX_TS) },
+    ...(r.quota === undefined ? {} : { quota: quotaOf(r.quota) }) };
 }
 
 /** One line of excerpt text: newlines and tabs allowed, other control characters refused (the lender redacts before sending). */

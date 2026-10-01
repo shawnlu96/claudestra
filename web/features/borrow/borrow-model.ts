@@ -2,7 +2,7 @@
  * 借入面板的纯函数（tests/web-borrow-model.test.ts）：hello 年龄与分档、peer 三态、排序、按钮能不能点。
  * 年龄由调用方传入的 tick 算，渲染里不读时钟；服务端与本机的时钟差靠「服务端 now + 拿到之后过了多久」抵掉。
  */
-import type { BorrowView, DroppedCode, PeerView, PlacementView, RemoteRow } from "./borrow-api";
+import type { BorrowView, DroppedCode, Family, LocalProjectView, PeerView, PlacementView, Priority, QuotaReport, RemoteRow, Role } from "./borrow-api";
 
 /** 与 bridge 的 HELLO_FRESH_MS 同值：超过它 peerCapacity 就按 0 位算 */
 export const HELLO_FRESH_SEC = 180;
@@ -63,7 +63,7 @@ export function toggleProject(cur: readonly string[], id: string, order: readonl
 }
 export const canToggleOff = (cur: readonly string[], id: string): boolean => !cur.includes(id) || cur.length > 1;
 
-export const clampMaxOpen = (n: number, limit: number): number => Math.min(limit, Math.max(1, Math.round(n)));
+export const clampMaxOpen = (n: number, limit: number, min = 1): number => Math.min(limit, Math.max(min, Math.round(n)));
 
 /** 失效原因：整条的（联系人删了 / 禁用 / 换实例）沿用 bridge 的码；联系人还在、声明的项目全失效 = projects_gone */
 export type StaleReason = Exclude<DroppedCode, "project_gone" | "personal"> | "projects_gone";
@@ -102,11 +102,11 @@ export const canSubmitNew = (projects: readonly string[], maxOpen: number, limit
   projects.length > 0 && Number.isInteger(maxOpen) && maxOpen >= 1 && maxOpen <= limit;
 
 /** 输入框里的上限：全角数字也认；空 / 非整数 → null（退回原值、不存）；越界夹到 1..limit 并标 clamped（界面抖一下） */
-export function parseMaxOpen(raw: string, limit: number): { value: number; clamped: boolean } | null {
+export function parseMaxOpen(raw: string, limit: number, min = 1): { value: number; clamped: boolean } | null {
   const s = raw.trim().replace(/[０-９]/g, (c) => String.fromCharCode(c.charCodeAt(0) - 0xfee0));
   if (!/^\d+$/.test(s)) return null;
   const n = Number(s);
-  const value = clampMaxOpen(n, limit);
+  const value = clampMaxOpen(n, limit, min);
   return { value, clamped: value !== n };
 }
 
@@ -147,4 +147,39 @@ export const BOX = "\u0000";
 export function splitAtBox(text: string): [string, string] {
   const i = text.indexOf(BOX);
   return i < 0 ? [text, ""] : [text.slice(0, i).trimEnd(), text.slice(i + 1).trimStart()];
+}
+
+/* ---- 分配表（i28-Q1，tests/web-borrow-alloc.test.ts） ---- */
+
+/** 本机项目上限的范围（scheduler.json maxActiveWorkers 0..32；0 = 本机不接） */
+export const LOCAL_MAX = 32;
+/** 本机档位能不能点：卡片锁着、没写权限都不行；remote.mode=off 时调度器不看本机档位（W9：只用本机），点了也不生效 */
+export const localTierDisabled = (cardDisabled: boolean, p: Pick<LocalProjectView, "mode">): boolean => cardDisabled || p.mode === "off";
+
+/** 老 bridge 没有 priority / roles：按缺省（平分、只审查）显示 */
+export const peerPriority = (p: Pick<PeerView, "priority">): Priority => p.priority ?? "balance";
+export const peerRoles = (p: Pick<PeerView, "roles">): Role[] => (p.roles ?? ["review"]).filter((r): r is Role => r === "review" || r === "write");
+
+/** 勾 / 取消一个角色：至少留一个（borrow set 不收空列表）→ 留空返回 null；顺序固定审查在前 */
+export function toggleRole(cur: readonly Role[], r: Role): Role[] | null {
+  const next = cur.includes(r) ? cur.filter((x) => x !== r) : [...cur, r];
+  if (!next.length) return null;
+  return (["review", "write"] as const).filter((x) => next.includes(x));
+}
+
+/** 哪些项目的 reviewFirst 点名了这台 peer：审查单先给它，压过档位（scheduler-placement.ts），面板标出来 */
+export function reviewFirstFor(view: Pick<BorrowView, "projects">, peer: string): boolean {
+  return view.projects.some((p) => p.reviewFirst?.includes(peer));
+}
+
+/** 一家的本周已用；没有 / 已过重置时刻 = null（显示「—」） */
+export function weekUsed(q: QuotaReport | null | undefined, f: Family, now: number): { pct: number; resetAt: number } | null {
+  const w = q?.[f];
+  return w && w.resetAt > now ? { pct: w.weekUsedPct, resetAt: w.resetAt } : null;
+}
+
+/** 重置还有多久：≥ 1 天按天，否则按小时（至少 1） */
+export function resetIn(resetAt: number, now: number): { n: number; unit: "d" | "h" } {
+  const h = Math.max(1, Math.ceil((resetAt - now) / 3_600_000));
+  return h >= 24 ? { n: Math.floor(h / 24), unit: "d" } : { n: h, unit: "h" };
 }

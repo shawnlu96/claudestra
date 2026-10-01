@@ -9,12 +9,14 @@
  */
 import { SIG_HEADERS } from "../../lib/instance-key.js";
 import { openAskFull, patchAsk } from "../../lib/ledger-asks.js";
+import { appendEvent } from "../../lib/ledger-write.js";
 import { STALE_WRITE_SQL, WRITE_POOL_TTL_MS } from "../../lib/ledger-lend.js";
 import { remoteCaller } from "../../lib/ledger-lend-peers.js";
 import { getTask } from "../../lib/ledger-store.js";
 import { LEND_BODY_MAX, LEND_STATUS, type LendEndpoint } from "../../lib/lend-wire.js";
 import { LEND_V2_STATUS, parseV2Request, V2_BODY_VERSION } from "../../lib/lend-wire-v2.js";
 import { openOrderAsk } from "../../lib/order-ask.js";
+import { notePeerQuota, type QuotaReport } from "../../lib/quota-week.js";
 import type { Principal } from "../../lib/principals.js";
 import { runManagerProcess } from "../../lib/run-manager.js";
 import { apiJson } from "../api-respond.js";
@@ -34,6 +36,17 @@ const CLI: Record<Exclude<Endpoint, "ask">, string> = {
 const STATUS: Record<string, number> = { ...LEND_STATUS, ...LEND_V2_STATUS };
 /** 频道号置空 = 以 owner 身份跑（CLI 只认 owner 调这几条）；「--」之后全当位置参数 */
 const ENV = { ...ENV_WITH_BUN, DISCORD_CHANNEL_ID: "" };
+
+/** 台账已收下的 hello 里的额度（i28-Q1，只给分配表看）；CLI 已按同一解析器验过，这里再解析只为取字段 */
+function helloQuota(body: string): QuotaReport | undefined {
+  try {
+    const p = parseV2Request("hello", JSON.parse(body));
+    return p.ok ? p.value.quota : undefined;
+  } catch {
+    // 不会发生（CLI 刚解析成功过）；万一发生就当对方没报额度，面板显示「—」
+    return undefined;
+  }
+}
 
 const refused = (code: string, error: string) => apiJson(STATUS[code] ?? 500, { ok: false, code, error });
 
@@ -72,9 +85,11 @@ async function remoteAsk(body: string, peer: string): Promise<Response> {
   if (!task) return refused("not_held", "这一单的卡已不在台账里");
   const r = await openOrderAsk(db, {
     open: (input) => openAskFull(askDb(), input), notify: (to, text, messageId) => sendLedgerNotice({ to, text, messageId }),
-    markHanded: (id) => patchAsk(askDb(), id, { extra: { notice: "handed" } }),
+    markHanded: (id) => patchAsk(askDb(), id, { extra: { notice: "handed" } }), record: (ctx, input) => void appendEvent(askDb(), ctx, input),
   }, { task, orderId: who.orderId, from: `${who.worker}@${who.peer}`, keyPrefix: `lend-ask:g${who.gen}` }, req.value);
   if ("refused" in r) return refused("unavailable", r.refused);
+  // 审查单不转 PM：旧版对方只把拒绝原因给审查员看，规则原文放在 error 里它就能读到（lend-tools.ts askPeer）
+  if ("answered" in r) return apiJson(409, { ok: false, code: "review_ask_answered", error: r.answered });
   return apiJson(200, { ok: true, v: V2_BODY_VERSION, askId: r.askId });
 }
 
@@ -91,6 +106,7 @@ export async function handleLendApi(req: Request, path: string, principal: Princ
   if (endpoint === "ask") return remoteAsk(body, principal.peer as string);
   const r = await runManagerProcess(["ledger", CLI[endpoint], "--", principal.peer as string, body], { bunPath: BUN_PATH, managerPath: MANAGER_PATH, env: ENV, timeoutMs: 30_000 });
   if (r?.ok) {
+    if (endpoint === "hello") notePeerQuota(principal.peer as string, helloQuota(body)); // 迟到的旧 hello 也会覆盖：只是参考数，下一次就更正
     const { ok: _ok, notified: _n, ...rest } = r as Record<string, unknown>;
     return apiJson(200, { ok: true, ...rest });
   }

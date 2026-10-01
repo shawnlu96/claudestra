@@ -8,7 +8,7 @@
 import { CODEX_EFFORT_LEVELS } from "../lib/codex-launch.js";
 import { isCodexEffort, isCodexModel, isPriority, LEND_PATH, PRIORITIES, readLend, updateLend, type BorrowEntry, type LendEntry, type LendFile } from "../lib/lend-config.js";
 import { SHELL_SENTENCE } from "../lib/lend-grant-rules.js";
-import { buildBorrowEntry, buildGrant, effectiveLend, readLendContext, type Built } from "../lib/lend-policy.js";
+import { buildBorrowEntry, buildGrant, effectiveLend, isPersonalProject, readLendContext, resolveContact, type Built } from "../lib/lend-policy.js";
 import { isCreateProcess, stopReportText, stopRevokedWorkers, workerOrderLive, type StopReport } from "../lib/lend-grant-spawn.js";
 import { lendStopReason } from "../lib/lend-watchdog.js";
 import { isLendWorkerName } from "../lib/runtimes/clean-env.js";
@@ -22,12 +22,13 @@ const LEND_USAGE =
   "usage: lend status | lend grant <peer名|指纹> --repos owner/repo[,..] --until <ISO|3d|12h>（最长 7 天） [--codex N（缺省 5）] [--claude N] " +
   "[--roles review[,write]] [--orders-per-day N（缺省 200）] [--codex-model <模型>] [--codex-effort <档位>]（不写 = 本机 Codex 默认；重授不带就清掉） | lend revoke [--peer <名>]（不带 --peer = 全部收回）";
 const BORROW_USAGE = "usage: borrow status | borrow set <peer名|指纹> --projects <id,..> [--roles review[,write]] [--max-open N] " +
-  "[--priority first|balance|low|off]（槽池档位，不写 = balance；重设不带就回到 balance） | borrow off [--peer <名>]";
+  "[--priority first|balance|low|off]（槽池档位，不写 = balance；重设不带就回到 balance） [--keep-unset]（没带的旗标沿用现有条目） | borrow off [--peer <名>]";
 
 /** confirm 留在表里只为认出旧写法、报「已退役」，不当未知参数 */
 const LEND_FLAGS = ["codex", "claude", "roles", "repos", "orders-per-day", "confirm", "until", "codex-model", "codex-effort"];
 const CONFIRM_RETIRED = "逐单确认 / 限时预先授权（--confirm）已退役：改用一次授权 lend grant <peer> --repos … --until <到期时间>，到期前来单直接领，随时 lend revoke 收回";
-const BORROW_FLAGS = ["projects", "roles", "max-open", "priority"];
+export const BORROW_FLAGS = ["projects", "roles", "max-open", "priority"];
+export const BORROW_BOOLS = ["keep-unset"];
 
 /** 授权里写的 Codex 模型 / 推理档（lend-config.ts 同一套校验，写盘前 updateLend 还会整份再核）；都没写返回原条目 */
 function withCodexChoice(b: Built<LendEntry>, model: string | undefined, effort: string | undefined): Built<LendEntry> {
@@ -42,6 +43,27 @@ function withPriority(b: Built<BorrowEntry>, priority: string | undefined): Buil
   if (!b.ok || priority === undefined) return b;
   if (!isPriority(priority)) return { ok: false, error: `--priority 只能是 ${PRIORITIES.join(" / ")}：${JSON.stringify(priority)}` };
   return { ok: true, entry: { ...b.entry, priority } };
+}
+
+/**
+ * --keep-unset（网页分配表用，i28-Q1）：没带的旗标从这个 peer 现有的借入条目补，在 lend.json 写锁里读，所以改一格不会把别的字段冲回缺省。
+ * 现有条目里已失效的项目（被删 / 标成个人）不再沿用：它们本来就不生效，带上只会让整次保存被拒。没有现有条目 = 按 CLI 缺省。
+ */
+export function keepUnset(flags: Record<string, string>, ref: string, f: LendFile, ctx: Pick<Ctx, "contacts" | "projects">): Record<string, string> {
+  const who = resolveContact(ctx.contacts, ref);
+  const old = who.ok ? f.borrow.find((e) => e.peer === who.entry.peer) : undefined;
+  if (!old) return flags;
+  const live = old.projects.filter((id) => ctx.projects.some((p) => p.id === id && !isPersonalProject(p)));
+  return {
+    ...(live.length ? { projects: live.join(",") } : {}), roles: old.roles.join(","), "max-open": String(old.maxOpen),
+    ...(old.priority ? { priority: old.priority } : {}), ...flags,
+  };
+}
+
+/** borrow set 在 lend.json 写锁里组条目（网页 PUT 的单测也调它，tests/web-borrow-view.test.ts） */
+export function buildBorrowSet(ref: string, flags: Record<string, string>, keep: boolean, file: LendFile, ctx: Pick<Ctx, "contacts" | "projects">): Built<BorrowEntry> {
+  const b = keep ? keepUnset(flags, ref, file, ctx) : flags;
+  return withPriority(buildBorrowEntry({ ref, projects: b.projects, roles: b.roles, maxOpen: b["max-open"] }, ctx.contacts, ctx.projects), b.priority);
 }
 
 /** 「（codex 模型 x · 推理档 y）」；都没写 = 空串 */
@@ -96,9 +118,9 @@ const stopText = (r: StopReport): string => stopReportText(r, (n) => workerOrder
  * 通过准入的条目按 peer 名 upsert（再授权一次 = 换掉旧条目，暂停的也就恢复了）；lend grant 同时打开总开关（执行它本身就是 owner 的明确意思）。
  * 准入在拿到 lend 锁之后才读 peers / projects 再判：等锁期间联系人被删、项目被标成个人项目，都按新状态拒（tests/lend-cli.test.ts「P1-4」）。
  */
-async function setEntry(kind: "lend" | "borrow", build: (ctx: Ctx) => Built<AnyEntry>): Promise<void> {
+async function setEntry(kind: "lend" | "borrow", build: (ctx: Ctx, f: LendFile) => Built<AnyEntry>): Promise<void> {
   const built = await updateLend(async (f) => {
-    const b = build(await readLendContext());
+    const b = build(await readLendContext(), f);
     if (!b.ok) return b;
     const entry = b.entry;
     const list = (kind === "lend" ? f.lend : f.borrow) as (typeof entry)[];
@@ -152,7 +174,7 @@ export async function cmdLend(kind: "lend" | "borrow", args: string[]): Promise<
   if (sub === "inbox" && kind === "lend") return (await import("./lend-inbox.js")).cmdLendInbox(rest); // bridge 收 A 推来的单（身份在里面核）
   const op = kind === "lend" ? ({ grant: "set", set: "set", revoke: "off", off: "off" } as const)[sub] : sub === "set" || sub === "off" ? sub : undefined;
   if (!op) return output({ ok: false, error: usage });
-  const p = parseLedgerArgs(rest, op === "off" ? ["peer"] : kind === "lend" ? LEND_FLAGS : BORROW_FLAGS);
+  const p = parseLedgerArgs(rest, op === "off" ? ["peer"] : kind === "lend" ? LEND_FLAGS : BORROW_FLAGS, kind === "borrow" && op === "set" ? BORROW_BOOLS : []);
   if ("error" in p) return output({ ok: false, error: `${p.error}；${usage}` });
   const denied = await requireOwnerOrMaster(kind === "lend" ? "改出借声明" : "改借入声明");
   if (denied) return output({ ok: false, code: "forbidden", ...denied });
@@ -164,10 +186,13 @@ export async function cmdLend(kind: "lend" | "borrow", args: string[]): Promise<
     if (p.pos.length !== 1) return output({ ok: false, error: usage });
     const f = p.flags;
     if (kind === "lend" && f.confirm !== undefined) return output({ ok: false, error: CONFIRM_RETIRED });
-    await setEntry(kind, (ctx) => kind === "lend"
-      ? withCodexChoice(buildGrant({ ref: p.pos[0], families: { codex: f.codex, claude: f.claude }, roles: f.roles, repos: f.repos,
-        ordersPerDay: f["orders-per-day"], until: f.until }, ctx.contacts), f["codex-model"], f["codex-effort"])
-      : withPriority(buildBorrowEntry({ ref: p.pos[0], projects: f.projects, roles: f.roles, maxOpen: f["max-open"] }, ctx.contacts, ctx.projects), f.priority));
+    await setEntry(kind, (ctx, file) => {
+      if (kind === "lend") {
+        return withCodexChoice(buildGrant({ ref: p.pos[0], families: { codex: f.codex, claude: f.claude }, roles: f.roles, repos: f.repos,
+          ordersPerDay: f["orders-per-day"], until: f.until }, ctx.contacts), f["codex-model"], f["codex-effort"]);
+      }
+      return buildBorrowSet(p.pos[0], f, p.bools.has("keep-unset"), file, ctx);
+    });
   } catch (e) {
     output({ ok: false, error: (e as Error).message });
   }

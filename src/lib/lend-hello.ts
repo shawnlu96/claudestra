@@ -6,6 +6,8 @@
  * 授权在组包前现读（liveGrant），读完到发出之间没有 await：本轮开头的快照、别的 peer 拖掉的时间都可能已过了收回。
  * seq 存在 journal meta，跨重启只增不减：同一个 boot 里迟到的旧 hello 翻不回已收回的授权。发之前用 A 的解析器自检，过不了不发、原因给 doctor。
  * 结果：成功 → proto 2；404 / 403 messages_only（不讲 v2）→ proto 1；别的失败 → 这一轮按 proto 1 处理并立刻补一次 poll。tests/lend-hello.test.ts。
+ * 有生效授权时顺带本周额度（可选字段 quota，i28-Q1）：不进正文哈希（百分比一动就多发不值）；旧版 A 的严格解析只因这个字段 400 时，
+ * 当场去掉重发，并记「这个 peer 不收」到换 boot 或 6 小时后再试；别的失败不回退。tests/lend-hello-quota.test.ts。
  */
 import type { Database } from "bun:sqlite";
 import { createHash, randomBytes } from "node:crypto";
@@ -17,7 +19,7 @@ import { pausedUntil } from "./lend-health.js";
 import { dailyUsed, LEND_FAMILY } from "./lend-inbox.js";
 import { getMeta, openSlots, setMeta, type LendRow } from "./lend-journal.js";
 import { LEND_OLD_PEER, lendRequest, type LendCall, type LendRes } from "./lend-remote.js";
-import { HELLO_FRESH_MS, LEND_PROTO, parseV2Request, type HelloRequest } from "./lend-wire-v2.js";
+import { HELLO_FRESH_MS, LEND_PROTO, parseV2Request, type HelloQuota, type HelloRequest } from "./lend-wire-v2.js";
 
 /** 协议 v2 的出站与摘要端口（LoopDeps.v2）：不设 = 只讲 v1 */
 export interface V2Port {
@@ -26,6 +28,8 @@ export interface V2Port {
   boot: string;
   /** worker 最近的输出（脱敏前的原文）与活动时刻；读不到 = null（lend-beat.ts 处理顺序固定） */
   excerpt?(row: LendRow): Promise<{ text: string; at: number } | null>;
+  /** 本机本周额度（quota-week.ts readWeekQuota）；不设 = hello 不带 quota */
+  quota?(): Promise<HelloQuota>;
 }
 
 /** 一轮 lend 循环里各步共享的出站状态（lend-loop.ts 建） */
@@ -50,6 +54,20 @@ const KEEP_MS = { min: 30_000, max: 60_000, fallback: 60_000 };
 const OLD_PEER_RETRY_MS = 60_000;
 /** hello / beat 的这几种失败 = 对方不讲 v2：旧版没有这条路由（404），或 A 那边只许这个 peer 投消息（403 messages_only） */
 export const notV2 = (r: LendRes<unknown>): boolean => !r.ok && (r.code === LEND_OLD_PEER || (r.status === 403 && r.code === "messages_only"));
+const noQuotaKey = (peer: string): string => `noQuota:${peer}`;
+const NO_QUOTA_MS = 6 * 3_600_000;
+/** 旧版 A 的 parseHello 认不得 quota 时回的就是这句（lend-wire-v2 fields()）；只认它，别的 400 照常按失败处理 */
+const quotaRefused = (r: LendRes<unknown>): boolean => !r.ok && r.status === 400 && r.code === "invalid" && r.error.includes("不认识的字段 quota");
+
+/** 这一次 hello 可带的额度：没接额度、对方在「不收」期内（同一 boot、没过 6 小时）、一家都读不到 → 不带（没授权由调用方判） */
+async function quotaFor(d: HelloDeps, peer: string): Promise<HelloQuota | undefined> {
+  if (!d.v2.quota) return undefined;
+  const no = metaJson<{ boot: string; until: number }>(d.db, noQuotaKey(peer));
+  if (no && no.boot === d.v2.boot && d.now() < no.until) return undefined;
+  const q = await d.v2.quota().catch((e) => (d.log(`读本机额度失败，hello 不带 quota：${(e as Error).message}`), undefined));
+  return q && Object.keys(q).length ? q : undefined;
+}
+
 const clamp = (v: number | null | undefined, lo: number, hi: number, dflt: number): number => Math.min(hi, Math.max(lo, v ?? dflt));
 
 export interface HelloState {
@@ -112,31 +130,61 @@ function setProto(db: Database, peer: string, proto: 1 | 2, round: LendRound): v
   setMeta(db, protoKey(peer), String(proto));
 }
 
+type HelloWire = Omit<HelloRequest, "v">;
+interface Composed { body: ReturnType<typeof helloBody>; hash: string; now: number; send: HelloWire }
+
+/**
+ * 现读授权、拼一份待发的 hello（seq 取下一个号，占号由调用方在发前做）。读完授权到返回之间没有 await，调用方拿到后要直接发。
+ * 额度只是参考：带着它过不了自检就去掉再验，不能让坏的额度拖住授权和容量（验收线 2）；去掉还过不了才算自检失败。
+ */
+async function compose(d: HelloDeps, peer: string, quota: HelloQuota | undefined): Promise<Composed | { selfCheck: string; now: number; hash: string }> {
+  const g = await liveGrant({ peer, fp: null }, d);
+  const now = d.now();
+  const body = helloBody(d.db, g.ok ? g.entry : undefined, now, d.writeOpen);
+  const hash = hashOf(body);
+  const seq = Number(getMeta(d.db, SEQ_KEY) ?? 0) + 1;
+  const bare: HelloRequest = { v: 1, proto: body.proto, boot: d.v2.boot, seq, grant: body.grant, slots: body.slots, paused: body.paused };
+  let full: HelloRequest = quota && body.grant ? { ...bare, quota } : bare;
+  let check = parseV2Request("hello", full);
+  if (!check.ok && full.quota) {
+    d.log(`给 ${peer} 的 hello 带额度自检没过，去掉额度再发：${check.error}`);
+    check = parseV2Request("hello", (full = bare));
+  }
+  if (!check.ok) return { selfCheck: check.error, now, hash };
+  const { v: _v, ...send } = full;
+  return { body, hash, now, send };
+}
+
 /** 对一个 peer：到点（或状态变了）就发一次 hello，按结果记协议版本与下次时刻。授权现读，读不到 / 失效 = grant:null */
 export async function helloPeer(d: HelloDeps, peer: string, round: LendRound): Promise<void> {
-  const g = await liveGrant({ peer, fp: null }, d);
-  const entry = g.ok ? g.entry : undefined;
-  const now = d.now();
+  const quota = await quotaFor(d, peer); // 在现读授权之前等：读授权到发出之间不能有 await；没授权时 compose 不带
+  let c = await compose(d, peer, quota);
   const st = helloState(d.db, peer);
-  const body = helloBody(d.db, entry, now, d.writeOpen);
-  const hash = hashOf(body);
-  if (st && st.boot === d.v2.boot && st.hash === hash && now < st.nextAt) return;
-  const seq = Number(getMeta(d.db, SEQ_KEY) ?? 0) + 1;
-  const full = { v: 1, proto: body.proto, boot: d.v2.boot, seq, grant: body.grant, slots: body.slots, paused: body.paused };
-  const base: HelloState = { ok: false, okAt: null, grant: false, error: null, selfCheck: null, tries: 0, helloMs: null, beatMs: null, ...st, boot: d.v2.boot, at: now, hash, nextAt: now };
-  const check = parseV2Request("hello", full);
-  if (!check.ok) {
-    d.log(`给 ${peer} 的 hello 自检没过，不发：${check.error}`);
-    return save(d.db, peer, { ...base, ok: false, error: "自检没过", selfCheck: check.error, nextAt: now + KEEP_MS.fallback });
+  if (st && st.boot === d.v2.boot && st.hash === c.hash && c.now < st.nextAt) return;
+  const stateOf = (x: { now: number; hash: string }): HelloState => ({ ok: false, okAt: null, grant: false, error: null, selfCheck: null, tries: 0, helloMs: null,
+    beatMs: null, ...st, boot: d.v2.boot, at: x.now, hash: x.hash, nextAt: x.now });
+  const selfFail = (x: { selfCheck: string; now: number; hash: string }): void => {
+    d.log(`给 ${peer} 的 hello 自检没过，不发：${x.selfCheck}`);
+    save(d.db, peer, { ...stateOf(x), ok: false, error: "自检没过", selfCheck: x.selfCheck, nextAt: x.now + KEEP_MS.fallback });
+  };
+  if ("selfCheck" in c) return selfFail(c);
+  setMeta(d.db, SEQ_KEY, String(c.send.seq)); // 先占号再发：发出去的每个 seq 都比之前的大，进程在中间退出也不会重用
+  let r = await lendRequest(d.v2.call, peer, "hello", c.send);
+  if (c.send.quota && quotaRefused(r)) {
+    d.log(`${peer} 是旧版，不收 hello 里的 quota：去掉重发，${NO_QUOTA_MS / 3_600_000} 小时内（或本机重启前）不再带`);
+    setMeta(d.db, noQuotaKey(peer), JSON.stringify({ boot: d.v2.boot, until: d.now() + NO_QUOTA_MS }));
+    // 等第一次回应期间授权可能被收回或收窄：重发前重新现读、重新拼（seq 自然 +1），不复用第一次的正文
+    c = await compose(d, peer, undefined);
+    if ("selfCheck" in c) return selfFail(c);
+    setMeta(d.db, SEQ_KEY, String(c.send.seq));
+    r = await lendRequest(d.v2.call, peer, "hello", c.send);
   }
-  setMeta(d.db, SEQ_KEY, String(seq)); // 先占号再发：发出去的每个 seq 都比之前的大，进程在中间退出也不会重用
-  const { v: _v, ...send } = full;
-  const r = await lendRequest(d.v2.call, peer, "hello", send);
+  const base = stateOf(c);
   const at = d.now();
   if (r.ok) {
     setProto(d.db, peer, r.value.proto >= LEND_PROTO ? 2 : 1, round);
     const keep = clamp(r.value.helloMs, KEEP_MS.min, KEEP_MS.max, KEEP_MS.fallback);
-    return save(d.db, peer, { ...base, ok: true, okAt: at, grant: body.grant !== null, error: null, selfCheck: null, tries: 0, helloMs: r.value.helloMs,
+    return save(d.db, peer, { ...base, ok: true, okAt: at, grant: c.body.grant !== null, error: null, selfCheck: null, tries: 0, helloMs: r.value.helloMs,
       beatMs: r.value.beatMs, nextAt: at + keep });
   }
   if (notV2(r)) {

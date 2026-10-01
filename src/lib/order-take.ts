@@ -19,6 +19,7 @@ import { clipWire, fitFindings, wireFindings } from "./order-findings.js";
 import { currentReviewFacts } from "./scheduler-review.js";
 import { bounceWork, fixBounce } from "./scheduler-merge-conflict.js";
 import { uiRejectFixFor } from "./ledger-ui-approve-verdict.js";
+import { standardAnswers } from "./order-standard-answers.js";
 
 type WorkStage = "build" | "fix";
 export interface CurrentOrder {
@@ -105,7 +106,7 @@ export function orderWireFor(db: Database, o: CurrentOrder): { ok: true; order: 
     v: 1, orderId: o.orderId, taskId: t.id, specRev: t.specRev, dagVersion: dagVersionOf(db, t), node: o.intent?.node ?? o.step, step: o.step, round: t.round,
     head, repo: null, pr: null,
     inputs: [`规格与验收：${CLI} show ${t.id}`, ...(t.spec ? [`规格卡：${t.spec}`] : []), ...(t.branch ? [`分支：${t.branch}`] : []),
-      ...(fix.report ? [`上一轮审查报告：${fix.report}`] : []), ...(fix.bounce?.inputs ?? [])],
+      ...(fix.report ? [`上一轮审查报告：${fix.report}`] : []), ...(fix.bounce?.inputs ?? []), standardAnswers("author")],
     outputs: ["分支上的提交，已推到 origin（完整 head SHA）", "证据报告路径"],
     acceptance: fix.bounce?.acceptance ?? ["规格里的验收线逐条自查"],
     writeBack: `用 deliver 工具回写：orderId ${o.orderId}，head = 本卡分支在 origin 上的完整 SHA（bridge 会核对）。CLI 仍可用：${CLI} deliver ${t.id} --from ${o.stage} --head <完整 SHA> --evidence <报告路径>`,

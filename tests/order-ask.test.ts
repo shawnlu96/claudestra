@@ -11,7 +11,8 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { listAsks, openAskFull, patchAsk } from "../src/lib/ledger-asks.js";
 import { remoteCaller, type RemoteCaller } from "../src/lib/ledger-lend-peers.js";
 import { closeLedger, getTask, openLedger } from "../src/lib/ledger-store.js";
-import { createTask, setMeta } from "../src/lib/ledger-write.js";
+import type { WriteCtx } from "../src/lib/ledger-checks.js";
+import { appendEvent, createTask, setMeta } from "../src/lib/ledger-write.js";
 import { openOrderAsk } from "../src/lib/order-ask.js";
 import { runLedger } from "../src/manager/ledger.js";
 
@@ -34,6 +35,7 @@ const askDeps = () => ({
   open: (input: Parameters<typeof openAskFull>[1]) => openAskFull(db, input, now),
   notify: async (to: string, text: string) => { sent.push({ to, text }); return { handed: true, note: "delivered" }; },
   markHanded: (id: string) => void patchAsk(db, id, { extra: { notice: "handed" } }),
+  record: (ctx: WriteCtx, input: Parameters<typeof appendEvent>[2]) => void appendEvent(db, ctx, input),
 });
 
 function card(id: string, title: string, pm: string | null = null): void {
@@ -74,6 +76,8 @@ describe("RemoteCaller", () => {
 });
 
 describe("openOrderAsk（远端）", () => {
+  // 审查单上的提问当场回规则、不转 PM（tests/order-ask-review.test.ts）；转 PM 的是写单 / 修复单，这里把借出的单当写单问
+  beforeEach(() => void db.run(`UPDATE lend_orders SET step = 'write' WHERE orderId = '${orderId}'`));
   const ask = async (question: string) => {
     const who = remoteCaller(db, "mate", { orderId, gen: 1 }, now) as RemoteCaller;
     return openOrderAsk(db, askDeps(), { task: getTask(db, who.taskId)!, orderId: who.orderId, from: `${who.worker}@${who.peer}`, keyPrefix: `lend-ask:g${who.gen}` },
