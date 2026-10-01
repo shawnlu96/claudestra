@@ -14,7 +14,7 @@ import { setWorkerKind } from "../lib/worker-kind.js";
 import { schedulerPoolStep } from "../lib/ledger-scheduler-pool.js";
 import { readEffectiveBorrow } from "../lib/scheduler-pool-borrow.js";
 import { readTextSoft, specPathFor } from "../lib/task-spec.js";
-import type { RemoteMode } from "../lib/scheduler-config.js";
+import { isLegacyRemoteMode, type RemoteMode } from "../lib/scheduler-config.js";
 
 const integer = (c: LedgerCli, flag: string): number => {
   const n = intFlag(c.p, flag);
@@ -95,10 +95,12 @@ export const SCHEDULER_CMDS: Record<string, CommandSpec> = {
   },
   "scheduler-pool": {
     valued: ["max-workers", "mode", "roles", "timeout-min"], bools: [],
-    usage: "scheduler-pool <intent-key> --max-workers N --mode off|overflow|prefer --roles review|none --timeout-min N（调度服务专用：挂池 / 同步出借单 / 超时撤回）",
+    usage: "scheduler-pool <intent-key> --max-workers N --mode balance|off --roles review|none --timeout-min N（调度服务专用：挂池 / 同步出借单 / 超时撤回）",
     async run(c) {
-      const mode = c.need("mode"), roles = c.need("roles");
-      if (!["off", "overflow", "prefer"].includes(mode) || !["review", "none"].includes(roles)) throw new LedgerError("invalid", "--mode / --roles 不认识");
+      const raw = c.need("mode"), roles = c.need("roles");
+      // A scheduler daemon still on R9 code passes overflow / prefer until it restarts: same meaning as the config reads them.
+      const mode = isLegacyRemoteMode(raw) ? "balance" : raw;
+      if (!["off", "balance"].includes(mode) || !["review", "none"].includes(roles)) throw new LedgerError("invalid", "--mode / --roles 不认识");
       const minutes = integer(c, "timeout-min");
       if (minutes < 1) throw new LedgerError("invalid", "--timeout-min 至少 1");
       const intent = c.p.pos[1] ?? "", maxWorkers = integer(c, "max-workers");

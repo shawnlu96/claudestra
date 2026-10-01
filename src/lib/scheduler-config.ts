@@ -5,13 +5,17 @@ import { statePath } from "./paths.js";
 
 export const SCHEDULER_CONFIG_PATH = statePath("scheduler.json");
 /**
- * Shared-pool overflow (i28-R9): off = never pool; overflow = pool a ready node only when no local slot is free;
- * prefer = pool whenever a peer is eligible. Only review nodes can be pooled until remote writing (i28-R6) lands,
- * so build / fix in roles are refused rather than silently ignored.
+ * Shared slot pool (i28-W5, lib/scheduler-placement.ts): balance = local and usable peers share the ready nodes, fewest
+ * running first, peers full → local; off = local only. overflow / prefer are i28-R9's spellings: parsing reads them as
+ * balance with a note instead of throwing (a throw would switch the whole scheduler config off); a hand-built policy that
+ * still says them is treated as balance too. Only review nodes can be pooled until remote writing (W8) lands, so build /
+ * fix in roles are refused rather than silently ignored.
  */
-export type RemoteMode = "off" | "overflow" | "prefer";
-export interface RemotePolicy { mode: RemoteMode; roles: "review"[]; poolTimeoutMin: number }
-export const DEFAULT_REMOTE: RemotePolicy = { mode: "overflow", roles: ["review"], poolTimeoutMin: 15 };
+export type RemoteMode = "balance" | "off" | "overflow" | "prefer";
+/** reviewFirst: peers that get every review they can take, in order, before the even spread (i28-W5c); absent = none. */
+export interface RemotePolicy { mode: RemoteMode; roles: "review"[]; poolTimeoutMin: number; reviewFirst?: string[]; note?: string }
+export const DEFAULT_REMOTE: RemotePolicy = { mode: "balance", roles: ["review"], poolTimeoutMin: 15 };
+export const isLegacyRemoteMode = (m: unknown): m is "overflow" | "prefer" => m === "overflow" || m === "prefer";
 
 interface ProjectSchedule {
   /** 0 = no local worker at all (every eligible node goes to the pool; nothing else is dispatched). */
@@ -94,15 +98,23 @@ function parseRemote(id: string, raw: unknown): RemotePolicy {
   if (raw === undefined) return { ...DEFAULT_REMOTE, roles: [...DEFAULT_REMOTE.roles] };
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error(`scheduler project ${id}: remote must be an object`);
   const r = raw as Record<string, unknown>;
-  const mode = r.mode ?? DEFAULT_REMOTE.mode;
-  if (mode !== "off" && mode !== "overflow" && mode !== "prefer") throw new Error(`scheduler project ${id}: remote.mode must be off|overflow|prefer`);
+  const rawMode = r.mode ?? DEFAULT_REMOTE.mode;
+  if (rawMode !== "off" && rawMode !== "balance" && !isLegacyRemoteMode(rawMode)) throw new Error(`scheduler project ${id}: remote.mode must be balance|off`);
+  const mode = isLegacyRemoteMode(rawMode) ? "balance" : rawMode;
   const roles = r.roles ?? DEFAULT_REMOTE.roles;
   if (!Array.isArray(roles) || roles.length > 3 || roles.some((x) => x !== "review")) {
     throw new Error(`scheduler project ${id}: remote.roles only takes "review" (build / fix wait for remote writing, i28-R6)`);
   }
   const timeout = r.poolTimeoutMin ?? DEFAULT_REMOTE.poolTimeoutMin;
   if (!Number.isInteger(timeout) || (timeout as number) < 1 || (timeout as number) > 240) throw new Error(`scheduler project ${id}: remote.poolTimeoutMin must be 1..240`);
-  return { mode, roles: roles.length ? ["review"] : [], poolTimeoutMin: timeout as number };
+  const first = r.reviewFirst === undefined ? [] : r.reviewFirst;
+  if (!Array.isArray(first) || first.length > 8 || new Set(first).size !== first.length
+    || first.some((x) => typeof x !== "string" || !x || /[\p{Cc}\p{Cf}]/u.test(x))) {
+    throw new Error(`scheduler project ${id}: remote.reviewFirst must be up to 8 distinct nonempty peer names`);
+  }
+  const note = isLegacyRemoteMode(rawMode) ? `remote.mode "${rawMode}" 是旧写法，按 balance 处理（i28-W5）` : undefined;
+  return { mode, roles: roles.length ? ["review"] : [], poolTimeoutMin: timeout as number,
+    ...(first.length ? { reviewFirst: first as string[] } : {}), ...(note ? { note } : {}) };
 }
 
 const argv = (v: unknown): v is string[] => Array.isArray(v) && v.length > 0 && v.length <= 32 &&

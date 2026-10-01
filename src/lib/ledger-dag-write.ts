@@ -9,6 +9,7 @@ import type { Database } from "bun:sqlite";
 import { bindHash, checkAsk } from "./ask-bind.js";
 import { getAsk, openAskFull, ownerAnswered, type Ask } from "./ledger-asks.js";
 import { mustTask, type WriteCtx, type WriteResult } from "./ledger-checks.js";
+import { autostartGrant } from "./ledger-autostart-grant.js";
 import { diffNodes, nodePhase, planRewrite, proposalSha, type DagCancel, type ProposalContent } from "./ledger-dag-rules.js";
 import { DAG_REASON_KINDS, type DagReasonKind } from "./ledger-feature-schema.js";
 import {
@@ -240,7 +241,7 @@ export function bindNode(db: Database, ctx: WriteCtx, input: { id: string; rev: 
     const load = () => currentDag(db, mustFeature(db, f.id)).nodes.find((n) => n.key === input.key) as DagNode;
     const dup = replay(db, ctx, key, load, ops("dag-bind"));
     if (dup) return dup;
-    requireManager(db, ctx.actor, f.project);
+    if (!autostartGrant(ctx, input.taskId, { featureId: f.id, key: input.key })) requireManager(db, ctx.actor, f.project);
     const cur = currentDag(db, f);
     checkCas(f, input.rev);
     const node = cur.nodes.find((n) => n.key === input.key);

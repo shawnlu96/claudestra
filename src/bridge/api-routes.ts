@@ -85,6 +85,7 @@ import { agentListExtras, handleAgentInfoRoutes } from "./agent-info-routes.js";
 import { ctxBoundaryViewFor } from "./ctx-boundary.js";
 import { refuseUnconfirmedSubSession } from "./subsession-guard.js";
 import { sseEventAllow } from "./ledger-feed.js";
+import { lendScopeAllows } from "./lend-scope.js";
 import { firstFlagLikeField, textFieldsProblem } from "../lib/flag-like.js";
 import { handleRuntimeSettingsRoutes } from "./runtime-settings-routes.js";
 import { handleCronRoutes } from "./cron-routes.js";
@@ -1110,7 +1111,7 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
   const msgMatch = path.match(/^\/agents\/([^/]+)\/messages$/);
   if (msgMatch && req.method === "POST") {
     const agentParam = decodeURIComponent(msgMatch[1]);
-    if (!inScopeEitherName(principal, agentParam)) return notInScope(agentParam);
+    if (!inScopeEitherName(principal, agentParam) && !(await lendScopeAllows(req, principal, agentParam))) return notInScope(agentParam);
     const agent = await findApiAgent(agentParam);
     if (!agent) return apiJson(404, { ok: false, error: `agent "${agentParam}" not found` });
     const client = agent.status === "creating" ? undefined : deps.clients.get(agent.channelId); // create 还没落盘：当离线，不投递（manager list 的 creating）
