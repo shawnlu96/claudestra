@@ -69,16 +69,3 @@ export function lendWatchdog(agent: string, log: (m: string) => void, path = LEN
     return null;
   };
 }
-
-/**
- * 出借 worker 的宿主每次起适配器（真正开始执行外来任务的那一下，含崩溃后重起）之前同步核一次：单还活着、授权仍在且覆盖这张单。
- * 核完到 spawn 之间没有 await——调度服务那道闸门之后 manager 子进程还要拿写锁、建频道才起宿主，收回落在那段里也只能在这里拦住。
- * 没过就不起，交给 onBlocked（宿主退出）。src/acp-host.ts 接线；tests/lend-watchdog.test.ts。
- */
-export function lendGatedSpawn<A extends unknown[], R>(agent: string, spawn: (...a: A) => R, onBlocked: (why: string) => never,
-  path = LEND_JOURNAL_PATH, lendPath = LEND_PATH, clock: () => number = Date.now): (...a: A) => R {
-  return (...a) => {
-    const why = lendStopReason(agent, path, clock(), lendPath);
-    return why ? onBlocked(why) : spawn(...a);
-  };
-}
