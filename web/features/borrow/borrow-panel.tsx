@@ -9,8 +9,8 @@ import { fleetAccess } from "@/lib/api/fleet";
 import { useT } from "@/lib/i18n";
 import { Section } from "@/features/chat/components/settings/section";
 import { fetchBorrow, saveBorrowPeer, type BorrowView, type DroppedCode, type DroppedView } from "./borrow-api";
-import { addableContacts, canSubmitNew, clampMaxOpen, POLL_MS, sortPeers, toggleProject } from "./borrow-model";
-import { ProjectChips, Stepper } from "./borrow-bits";
+import { addableContacts, canSubmitNew, POLL_MS, sortPeers, toggleProject } from "./borrow-model";
+import { LimitLine, ProjectChips, Stepper } from "./borrow-bits";
 import { BorrowPeerCard, dropPeer } from "./borrow-peer-card";
 import { RemoteRows } from "./borrow-remote";
 import { ActivityIcon, CheckIcon, PlusIcon, ServerIcon, TrashIcon, XIcon } from "./icons";
@@ -153,17 +153,16 @@ function NewPeer({ peer, view, onCancel, onChanged }: { peer: string; view: Borr
         <button
           className="btn btn-primary btn-xs btn-square"
           disabled={busy || !canSubmitNew(projects, maxOpen, limit)}
-          aria-label={t("借入")}
+          aria-label={t("借用这台电脑")}
           onClick={(e) => void submit(e.currentTarget)}
         >
           {busy ? <span className="loading loading-spinner loading-xs" /> : <CheckIcon className="size-3.5" />}
         </button>
       </div>
-      <div className="flex flex-wrap items-center gap-2">
-        <ProjectChips options={view.borrow.projects} picked={projects} disabled={busy}
-          onToggle={(id) => setProjects((cur) => toggleProject(cur, id, order))} />
-        <Stepper value={maxOpen} limit={limit} disabled={busy} onStep={(d) => setMaxOpen((n) => clampMaxOpen(n + d, limit))} />
-      </div>
+      <ProjectChips options={view.borrow.projects} picked={projects} disabled={busy} onToggle={(id) => setProjects((cur) => toggleProject(cur, id, order))} />
+      <LimitLine name={peer} n={maxOpen}>
+        <Stepper value={maxOpen} limit={limit} disabled={busy} onCommit={setMaxOpen} />
+      </LimitLine>
     </div>
   );
 }
@@ -181,7 +180,7 @@ export function BorrowPanel() {
   const stamp = { serverNow: view.now, receivedAt, tick };
   return (
     <div className="mt-3 space-y-3">
-      <Section title={t("借入")}>
+      <Section title={t("借别人的电脑跑我的活")}>
         <div className="space-y-2">
           <ProjectModes view={view} />
           {sortPeers(view.peers).map((p) => (

@@ -1,14 +1,14 @@
 "use client";
 /**
  * 一个借入 peer 的卡片：协议徽章、hello 年龄、各家族「可放 / 上报空闲」、在跑 / 上限、不可用原因原文，
- * 以及按钮改设置（项目逐个开关、上限加减、两下删除）。每次点击立刻经 bridge 写入：
+ * 以及按钮改设置（项目逐个开关、同时最多跑几单、两下删除）。每次点击立刻经 bridge 写入：
  * 成功整卡一闪，失败回到原值并抖一下被点的按钮。
  */
 import { useEffect, useRef, useState, type MouseEvent, type ReactNode } from "react";
 import { useT } from "@/lib/i18n";
 import { removeBorrowPeer, saveBorrowPeer, type DroppedView, type Family, type PeerView } from "./borrow-api";
-import { canToggleOff, clampMaxOpen, peerState, reportedFree, toggleProject, type PeerState } from "./borrow-model";
-import { AgeTag, ProjectChips, Stepper } from "./borrow-bits";
+import { canToggleOff, lenderCap, peerState, reportedFree, toggleProject, type PeerState } from "./borrow-model";
+import { AgeTag, LimitLine, ProjectChips, Stepper } from "./borrow-bits";
 import { CircleAlertIcon, PauseIcon, RepeatIcon, ServerIcon, TrashIcon, ZapIcon } from "./icons";
 import { fadeIn, fadeOut, flash, shake } from "./motion";
 
@@ -52,6 +52,21 @@ function Capacity({ peer, now, age }: { peer: PeerView; now: number; age: ReactN
       </span>
       {peer.grant && <span className="text-base-content/45">{t("今日余 {n} 单", { n: peer.grant.ordersLeftToday })}</span>}
     </div>
+  );
+}
+
+/** 对方授权的名额比我方上限小：实际最多只跑得到它，标在句末（warning 色）；不小于或没上报不显示 */
+function LenderCapBadge({ peer, maxOpen }: { peer: PeerView; maxOpen: number }) {
+  const t = useT();
+  const m = lenderCap(peer, maxOpen);
+  const el = useRef<HTMLSpanElement>(null);
+  useEffect(() => fadeIn(el.current), [m]);
+  if (m === null) return null;
+  return (
+    <span ref={el} className="badge badge-sm shrink-0 gap-1 whitespace-nowrap border-warning/30 bg-warning/10 text-warning">
+      <CircleAlertIcon className="size-3" />
+      {t("对方只开了 {n} 个", { n: m })}
+    </span>
   );
 }
 
@@ -150,13 +165,10 @@ export function BorrowPeerCard(props: {
           disabled={busy || !props.canWrite}
           onToggle={(id, el) => (canToggleOff(cur.projects, id) ? void save({ ...cur, projects: toggleProject(cur.projects, id, options.map((o) => o.id)) }, el) : shake(el))}
         />
-        <Stepper
-          value={cur.maxOpen}
-          limit={limit}
-          disabled={busy || !props.canWrite}
-          onStep={(d, el) => void save({ ...cur, maxOpen: clampMaxOpen(cur.maxOpen + d, limit) }, el)}
-        />
       </div>
+      <LimitLine name={peer.peer} n={cur.maxOpen} badge={<LenderCapBadge peer={peer} maxOpen={cur.maxOpen} />}>
+        <Stepper value={cur.maxOpen} limit={limit} deferred disabled={busy || !props.canWrite} onCommit={(n, el) => void save({ ...cur, maxOpen: n }, el)} />
+      </LimitLine>
     </div>
   );
 }

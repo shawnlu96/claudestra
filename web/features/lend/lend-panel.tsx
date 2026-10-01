@@ -72,7 +72,7 @@ export function LendPanel() {
   return (
     <section className="space-y-3 rounded-xl bg-base-200/60 p-4">
       <div className="flex min-h-8 items-center justify-between gap-3">
-        <span className="text-[13.5px] font-semibold">{t("出借")}</span>
+        <span className="text-[13.5px] font-semibold">{t("把我的电脑借给别人")}</span>
         {!form && (
           <button type="button" className="btn btn-sm gap-1" onClick={() => openForm()}>
             <LendIcon name="plus" />{t("授权")}

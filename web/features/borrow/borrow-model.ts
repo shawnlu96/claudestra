@@ -74,3 +74,67 @@ export function addableContacts(v: Pick<BorrowView, "borrow">): string[] {
 /** 新加一条能不能提交：选了至少一个项目、maxOpen 在范围内 */
 export const canSubmitNew = (projects: readonly string[], maxOpen: number, limit: number): boolean =>
   projects.length > 0 && Number.isInteger(maxOpen) && maxOpen >= 1 && maxOpen <= limit;
+
+/** 输入框里的上限：全角数字也认；空 / 非整数 → null（退回原值、不存）；越界夹到 1..limit 并标 clamped（界面抖一下） */
+export function parseMaxOpen(raw: string, limit: number): { value: number; clamped: boolean } | null {
+  const s = raw.trim().replace(/[０-９]/g, (c) => String.fromCharCode(c.charCodeAt(0) - 0xfee0));
+  if (!/^\d+$/.test(s)) return null;
+  const n = Number(s);
+  const value = clampMaxOpen(n, limit);
+  return { value, clamped: value !== n };
+}
+
+/** 对方授权给出的名额：各家族上报的 total 取最大（peer 卡不分家族，出借方现在只报 codex）；没上报 → null */
+export function grantedSlots(p: Pick<PeerView, "reported">): number | null {
+  const r = p.reported;
+  return r ? Math.max(...Object.values(r).map((s) => s.total)) : null;
+}
+
+/** 「对方只开了 M 个」：对方名额小于我方上限才给 M；不小于或没上报 → null（不显示） */
+export function lenderCap(p: Pick<PeerView, "reported">, maxOpen: number): number | null {
+  const m = grantedSlots(p);
+  return m !== null && m < maxOpen ? m : null;
+}
+
+type TimerId = ReturnType<typeof setTimeout>;
+export interface Timers { set: (fn: () => void, ms: number) => TimerId; clear: (id: TimerId) => void }
+const REAL_TIMERS: Timers = { set: (fn, ms) => setTimeout(fn, ms), clear: (id) => clearTimeout(id) };
+
+/**
+ * 连点合并成一次保存：每次 push 重新计时，停手 ms 后只把最后一个值交给 fire。
+ * flush 立刻交出还没交的值（卸载、改用输入框前），cancel 丢掉。timers 可换成假时钟（tests/web-borrow-model.test.ts）。
+ */
+export interface Coalescer<T> { push: (v: T) => void; flush: () => void; cancel: () => void }
+export function coalescer<T>(ms: number, fire: (v: T) => void, timers: Timers = REAL_TIMERS): Coalescer<T> {
+  let pending: { v: T } | null = null;
+  let id: TimerId | null = null;
+  const stop = () => {
+    if (id !== null) timers.clear(id);
+    id = null;
+  };
+  const run = () => {
+    stop();
+    const p = pending;
+    pending = null;
+    if (p) fire(p.v);
+  };
+  return {
+    push(v: T) {
+      pending = { v };
+      stop();
+      id = timers.set(run, ms);
+    },
+    flush: run,
+    cancel() {
+      stop();
+      pending = null;
+    },
+  };
+}
+
+/** 把带 {box} 的整句拆成框前、框后两段：数字框嵌在句中，语序随语言变（英文的框在句中间） */
+export const BOX = "\u0000";
+export function splitAtBox(text: string): [string, string] {
+  const i = text.indexOf(BOX);
+  return i < 0 ? [text, ""] : [text.slice(0, i).trimEnd(), text.slice(i + 1).trimStart()];
+}
