@@ -19,6 +19,7 @@ import { rotateAfter, type TickPace } from "./scheduler-yield.js";
 import { normalizeRegistryAgents, REGISTRY_PATH, type RegistryAgent } from "./registry.js";
 import { readJsonLenient } from "./state-file.js";
 import { agentWindowsOrNull } from "./agent-windows.js";
+import { cleanSessionTmp, type TmpCleaner, type TmpStepInput } from "./scheduler-retire-tmp.js";
 
 type Manager = (...args: string[]) => Promise<Record<string, unknown>>;
 
@@ -33,6 +34,8 @@ export interface RetireDeps {
   notifyPm(task: LedgerTask, text: string): Promise<void>;
   /** The registry as it is now: kill skips an agent already stopped, and a checkout a live agent works in is kept. */
   agents(): Promise<LiveAgent[]>;
+  /** Session temp folders (scheduler-retire-tmp.ts); absent = that step is skipped. */
+  tmp?: TmpCleaner;
 }
 
 /**
@@ -218,19 +221,22 @@ class RetireCard {
       return this.owe(this.out("unknown", why), "unknown", why, `${this.task.id} 收尾卡住，意图转 unknown 待核对：${why}`);
     }
     // re-derived from durable state every time, so a notice resent after a lost one says the same thing
-    const kept: string[] = [], agents = await this.deps.agents();
-    for (const dir of worktreeDirs(this.deps.worktreeRoot, this.task.id)) {
+    const kept: string[] = [], agents = await this.deps.agents(), checkouts: TmpStepInput["checkouts"] = [];
+    for (const [i, dir] of worktreeDirs(this.deps.worktreeRoot, this.task.id).entries()) {
       const why = await this.worktree(dir, agents);
       if (why) kept.push(`${dir}：${why}`);
+      checkouts.push({ dir, role: i === 0 ? "author" : "reviewer", kept: !!why });
     }
     const all = this.db.query("SELECT * FROM scheduler_sessions WHERE taskId = ? ORDER BY role").all(this.task.id) as SchedulerSession[];
     const left = all.flatMap((r) => [r.archiveReceipt, r.killReceipt].filter((x): x is string => !!x && (x.startsWith(ARCHIVE_FAILED) || x.includes(FOR_PM)))
       .map((x) => `${r.role} ${r.agent}：${x}`));
-    const sessions = rows.length ? `${rows.length} 个 session 已退役` : "session 早已退役";
-    if (!kept.length && !left.length) {
+    const tmp = await cleanSessionTmp(this.deps.tmp, { stage: getTask(this.db, this.task.id)?.stage ?? "", checkouts, sessions: all,
+      liveCwds: agents.flatMap((a) => (!stopped(a) && a.cwd ? [{ name: a.name, cwd: a.cwd }] : [])) });
+    const sessions = (rows.length ? `${rows.length} 个 session 已退役` : "session 早已退役") + (tmp.done.length ? `；临时目录 ${tmp.done.join("、")}` : "");
+    if (!kept.length && !left.length && !tmp.failed.length) {
       return this.out((await settle(this.deps, this.intent.id, "done", `${sessions}；worktree 已清`)) ? "retired" : "held", sessions);
     }
-    const parts = [...(kept.length ? [`worktree 没删：${kept.join(" | ")}`] : []), ...left];
+    const parts = [...(kept.length ? [`worktree 没删：${kept.join(" | ")}`] : []), ...left, ...tmp.failed];
     const text = `${sessions}；交 PM：${parts.join(" | ")}`;
     return this.owe(this.out("handoff", text), "done", text, `${this.task.id} 请看一眼：${parts.join(" | ")}`);
   }
