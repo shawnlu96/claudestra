@@ -22,7 +22,7 @@ import { dirname, join } from "path";
 import { fileURLToPath } from "url";
 import { shellEscape } from "./claude-launch.js";
 import { assertSandboxRuntime } from "./sandbox.js";
-import { piBinName, piEnvFlags, type PiEnvProfile } from "./pi-env.js";
+import { piBinName, piEnvFlags, type PiEnvProfile, piActivateTools } from "./pi-env.js";
 
 /** Claudestra 注入的 Pi 扩展：绝对路径（扩展必须能被 Pi 直接 -e 加载） */
 export const PI_EXTENSION_PATH = join(
@@ -30,6 +30,19 @@ export const PI_EXTENSION_PATH = join(
   "..",
   "pi",
   "claudestra-extension.ts",
+);
+
+/**
+ * 内建工具激活扩展（0.99 的 codemode / tool_search 是「注册但不激活」）。
+ * tmux 与 ACP 两条路共用同一份实现：ACP 在 acp/pi-adapter/args.ts 里 -e 它，
+ * tmux 在这里 -e —— 少了它，能力档里写的 `builtin:codemode` 只会加载不生效
+ * （PR349-r1-activation-tmux）。
+ */
+export const PI_ACTIVATE_TOOLS_EXTENSION = join(
+  dirname(fileURLToPath(import.meta.url)),
+  "acp",
+  "pi-adapter",
+  "activate-tools.ts",
 );
 
 /** Pi 的 --thinking 合法值（与 claude 的 effort 档位不完全重合，只放行交集） */
@@ -68,11 +81,15 @@ export function buildPiCommand(opts: PiLaunchOptions): string {
 
   // BRIDGE_PORT 显式带上的理由同 claude-launch（tmux 全局环境会停在旧端口）
   const port = bridgePortOf(bridgeUrl);
+  // 0.99 内建工具（codemode）要激活才算真的可用，光 -e 加载不够（见 pi-env.ts:piActivateTools）
+  const activate = piActivateTools(opts.piEnv);
   const prefix =
     `DISCORD_CHANNEL_ID=${shellEscape(opts.channelId)} ` +
     `BRIDGE_URL=${shellEscape(bridgeUrl)} ` +
     (port ? `BRIDGE_PORT=${port} ` : "") +
-    `CLAUDESTRA_AGENT=${shellEscape(opts.agentName || "")}${pathOverrideAssignments(shellEscape)}`;
+    `CLAUDESTRA_AGENT=${shellEscape(opts.agentName || "")}` +
+    (activate.length ? ` CLAUDESTRA_PI_ACTIVATE=${shellEscape(activate.join(","))}` : "") +
+    pathOverrideAssignments(shellEscape);
 
   // 可执行文件名与 piAvailable() 的探测**同源**：tmux 窗口不继承 manager 的 env，
   // 这里写死 "pi" 而预检认 PI_BIN 的话 → 预检通过、窗口里 command not found、
@@ -99,6 +116,8 @@ export function buildPiCommand(opts: PiLaunchOptions): string {
   // Claudestra 通道扩展：base=minimal 下 --no-extensions 关掉了发现，但显式 -e 仍然生效
   // （实测：--no-extensions 下只剩内置 8 个工具 + 我们的通道工具）。
   parts.push("--extension", shellEscape(PI_EXTENSION_PATH));
+  // 同一类路径扩展，紧跟着放（顺序规则：任何包源都得排在第一个路径之前，这里已全是路径）
+  if (activate.length) parts.push("--extension", shellEscape(PI_ACTIVATE_TOOLS_EXTENSION));
 
   if (opts.sessionId) parts.push("--session-id", shellEscape(opts.sessionId));
   if (opts.agentName) parts.push("--name", shellEscape(opts.agentName));

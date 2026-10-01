@@ -134,9 +134,15 @@ export function piEnvPresetNames(): string[] {
   return Object.keys(PI_ENV_PRESETS);
 }
 
-/** 取预设（大小写不敏感；未知名字返回 undefined，调用方负责报错） */
+/**
+ * 取预设（大小写不敏感；未知名字返回 undefined，调用方负责报错）。
+ * 必须查**自有属性**：普通对象取下标会把 `__proto__` / `constructor` / `toString` 这类
+ * 原型链上的键当成真值 ⇒ 「未知预设」的检查被绕过，create 会把它展开成空档（= 继承全局），
+ * pi-env-set 会接受却什么都不应用（PR349-r1-preset-prototype）。
+ */
 export function piEnvPreset(name: string): PiEnvProfile | undefined {
-  return PI_ENV_PRESETS[name.trim().toLowerCase()];
+  const key = name.trim().toLowerCase();
+  return Object.hasOwn(PI_ENV_PRESETS, key) ? PI_ENV_PRESETS[key] : undefined;
 }
 
 /**

@@ -421,6 +421,14 @@ export default function claudestraChannel(pi: PiExtensionApi): void {
     connect();
   });
 
+  // 回合开始时再写一次快照：session_start 那次发生在**所有扩展都跑完之前** ——
+  // activate-tools（0.99 内建工具 codemode）是在它自己的 session_start 里调
+  // setActiveTools 的，于是首份快照永远少一个工具，`manager pi-env` 看起来像没生效
+  // （2026-10-01 我在验 tmux 路径时被这份快照误判过一次）。
+  pi.on("agent_start", (_event, ctx) => {
+    void writeEnvSnapshot(ctx);
+  });
+
   // 模型换了就重写快照（档案里钉的模型/用户手动切换都走这里）
   pi.on("model_select", (_event, ctx) => writeEnvSnapshot(ctx));
 
