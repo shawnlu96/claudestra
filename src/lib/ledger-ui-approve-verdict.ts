@@ -4,8 +4,10 @@
  * guard rejects). Writes: ledger-ui-approve.ts. tests/scheduler-ui-pm-gate.test.ts.
  */
 import type { Database } from "bun:sqlite";
+import { getWorkflow } from "./ledger-scheduler.js";
 import { actorMayConfigure } from "./ledger-scheduler-settle.js";
 import type { LedgerEvent, LedgerTask } from "./ledger-stages.js";
+import { listEvents } from "./ledger-store.js";
 import type { ReviewFinding } from "./scheduler-review.js";
 
 export const UI_APPROVED = "ui_approved", UI_REJECTED = "ui_rejected";
@@ -41,4 +43,13 @@ export function rejectFix(task: LedgerTask, template: string | undefined, events
 
 export function uiRejectFixFor(db: Database, task: LedgerTask, events: readonly LedgerEvent[], template: string | undefined): UiFix | null {
   return rejectFix(task, template, events, projectPmUiGate(db, task, events));
+}
+
+/**
+ * The same rejection as a lend fix order's material (ledger-lend.ts findings, lend-write-materials.ts report): the peer cannot read
+ * this machine's ledger, so PM's words go inline as the report text. Null = no PM rejection sent this round to fix.
+ */
+export function uiRejectLend(db: Database, task: LedgerTask): { findings: ReviewFinding[]; report: string } | null {
+  const fix = uiRejectFixFor(db, task, listEvents(db, { project: task.project, target: task.id }), getWorkflow(db, task.id)?.template);
+  return fix && { findings: fix.findings, report: `# PM 截图验收未通过\n\n来源：${fix.reportPath}\n\n${fix.findings[0].probe}` };
 }

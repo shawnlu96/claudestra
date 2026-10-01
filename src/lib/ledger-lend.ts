@@ -19,6 +19,7 @@ import { endWriteLease, holdWriteLease, lastReviewOf, writeOfferBranch, writeOrd
 import { LEND_LIVE, type LendOrderStatus } from "./ledger-lend-schema.js";
 import { sweepPushTtl } from "./ledger-lend-peers-ttl.js";
 import { getWorkflow } from "./ledger-scheduler.js";
+import { uiRejectLend } from "./ledger-ui-approve-verdict.js";
 import { LedgerError, listEvents, type LedgerErrorCode } from "./ledger-store.js";
 import { assignStep } from "./ledger-steps-write.js";
 import { setTask } from "./ledger-write.js";
@@ -146,7 +147,7 @@ function orderFor(db: Database, task: LedgerTask, step: LendStep, orderId: strin
   if (!input.write) throw new LedgerError("invalid", "写单缺出借方指纹与基线（CLI 备好再挂）");
   const branch = writeOfferBranch(db, task, step, input.peer, input.write);
   const head = step === "write" ? input.write.baseSha as string : task.headSHA as string;
-  const findings = step === "fix" ? lastReviewOf(db, task).findings : [];
+  const findings = step === "fix" ? (uiRejectLend(db, task)?.findings ?? lastReviewOf(db, task).findings) : []; // PM 退回截图优先（i28-U1）
   const o = { orderId, step, head, branch, base: input.write.base, spec: input.spec, report: input.write.report, findings, repo: input.repo, pr: input.pr };
   return { wire: writeOrderWire(task, o), whole: writeOrderWire(task, o, wholeInputs), branch, base: input.write.base };
 }
