@@ -16,6 +16,10 @@ type Planned = Extract<PlannerDecision, { kind: "intent" }>;
 const STEP_OF: Record<string, WorkOrder["step"]> = { restate: "restate", write: "write", fix: "fix", adversarial_review: "review" };
 /** Absolute: a worker's cwd is its own worktree or project, not necessarily this repository. */
 const CLI = `bun ${SRC_DIR}/manager.ts ledger`;
+/** The merge gate already waits on the PR's required CI checks; a loaded host's wait-type timeouts must not park a card in fix. */
+const AUTHOR_ACCEPTANCE = ["交付前跑 GUARD_STRICT=1 bun run check：tsc、guard 必须绿，所有入口 build",
+  "bun test 里本机负载造成的等待型超时、且在 base 上同样复现的，不算不过；在证据报告里列出文件名", "全量测试以 PR head 上 CI 必过项全绿为准"];
+const REVIEW_CI_RULE = "全量测试只看 PR head 的 CI；不跑全量，本机超时不判 P1";
 
 export const stepOfNode = (node: string): WorkOrder["step"] | null => STEP_OF[node] ?? null;
 
@@ -34,12 +38,12 @@ export function workOrderFor(task: LedgerTask, intent: SchedulerIntent, plan: Pl
     const report = `${statePath("ledger", "reviews", `${task.id}-r${task.round}`)}/report.md`;
     const where = checkout ? [`审查目录：${checkout}（已固定在这个 head；只读，不改、不提交、不推送）`] : [];
     return { ...base, inputs: [spec, `只审 head ${intent.head ?? "（无）"}`, ...where], outputs: ["逐项结论 JSON（findingId / family / severity / probe）", `报告：${report}`],
-      acceptance: ["对抗式：专找能打穿规格保证的路径", "同类问题沿用上一轮的 findingId"],
+      acceptance: ["对抗式：专找能打穿规格保证的路径", "同类问题沿用上一轮的 findingId", REVIEW_CI_RULE],
       writeBack: `${CLI} review ${task.id} --reviewer ${ref.agent} --verdict pass|changes|block --p0 N --p1 N --p2 N --head ${intent.head ?? "<head>"}` +
         ` --session ${ref.sessionId} --family ${ref.family} --findings <逐项结论.json> --path ${report}（不要带 --to，阶段由调度器推）` };
   }
   return { ...base, inputs: [spec, ...(w?.reportPath ? [`上一轮审查报告：${w.reportPath}`] : [])],
-    outputs: ["分支上的提交（完整 head SHA）", "证据报告路径"], acceptance: ["GUARD_STRICT=1 bun run check 全绿，所有入口 build"],
+    outputs: ["分支上的提交（完整 head SHA）", "证据报告路径"], acceptance: [...AUTHOR_ACCEPTANCE],
     writeBack: `${CLI} deliver ${task.id} --from ${step === "fix" ? "fix" : "build"} --head <完整 SHA> --evidence <报告路径>` };
 }
 
