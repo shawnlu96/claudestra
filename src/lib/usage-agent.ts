@@ -22,9 +22,10 @@ export function parseAgentUsageOptions(url: URL): AgentUsageOptions | null {
 /** Stored summaries already mask credentials. Also hide local paths and the session id if quoted in that stored text. */
 function displayText(value: string, sessionId?: string, max = 160): string {
   const text = sessionId ? value.replaceAll(sessionId, "[session]") : value;
-  // Keep URLs intact; consume path spaces conservatively so a filename suffix cannot leak.
-  return text.replace(/https?:\/\/[^\s"'<>]+|(?:file:\/\/|~)?\/(?:(?!\s+https?:\/\/)[^"'<>\n;,!?)])*|[A-Za-z]:\\[^\s"'<>]+/g,
-    (match) => /^https?:\/\//.test(match) ? match : "[path]").slice(0, max);
+  // A path may contain punctuation or quotes: hide the rest of its line, stopping only before a URL.
+  return text.replace(/https?:\/\/[^\s"'<>]+|(?:file:\/\/|~)?\/(?:(?!https?:\/\/)[^\r\n])*|[A-Za-z]:\\(?:(?!https?:\/\/)[^\r\n])*/g,
+    (match, offset) => /^https?:\/\//.test(match) ? match
+      : "[path]" + (/^https?:\/\//.test(text.slice(offset + match.length)) ? " " : "")).slice(0, max);
 }
 
 function publicTurn(r: TurnRow) {
@@ -57,8 +58,8 @@ export function agentUsage(db: Database | null, agent: string, options: AgentUsa
   const rows = page.slice(0, options.limit), last = rows.at(-1);
   const cutoff = retentionCutoff(now);
   const d = new Date(cutoff), cutoffDay = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
-  const retained = !rows.length && db.prepare(`SELECT 1 FROM turns t WHERE agent = ? AND started_at >= ?
-    AND EXISTS (SELECT 1 FROM calls c WHERE c.turn_id = t.turn_id) LIMIT 1`).get(agent, cutoff);
+  const retained = !rows.length && db.prepare(`SELECT 1 FROM calls c JOIN turns t ON t.turn_id = c.turn_id
+    WHERE t.agent = ? AND c.ts >= ? LIMIT 1`).get(agent, cutoff);
   const expired = !rows.length && !retained && options.since < cutoff && !options.before && !!db.prepare("SELECT 1 FROM daily WHERE agent = ? AND day < ? LIMIT 1").get(agent, cutoffDay);
   return {
     agent, state: rows.length ? "ready" : expired ? "expired" : "empty", turns: rows.map(publicTurn),

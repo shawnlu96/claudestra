@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { agentUsage, parseAgentUsageOptions } from "../src/lib/usage-agent.js";
 import { usageSummary } from "../src/lib/usage-query.js";
-import { openUsageDb, usageWriter } from "../src/lib/usage-store.js";
+import { openUsageDb, retentionCutoff, usageWriter } from "../src/lib/usage-store.js";
 import { currentUsageWindow } from "../src/lib/usage-window.js";
 import { handleUsageApi, setUsageDbPathForTest } from "../src/bridge/local-api/usage.js";
 import { effectivePrincipal, type DeviceCredential } from "../src/lib/devices.js";
@@ -109,12 +109,42 @@ test("path masking covers arbitrary local roots without changing a source URL", 
 test("absolute paths after colons or quotes, single roots and spaced names are fully masked", () => {
   const { db } = fixture(); turn(db, "paths", day + 1);
   for (const path of ["/tmp", "~/secret", "/Users/private/my file.txt", "~/my project", "/"]) {
-    for (const [source, expected] of [[`path:${path}`, "path:[path]"], [`'${path}'`, "'[path]'"],
-      [`"${path}"`, '"[path]"']]) {
+    for (const [source, expected] of [[`path:${path}`, "path:[path]"], [`'${path}'`, "'[path]"],
+      [`"${path}"`, '"[path]']]) {
       db.prepare("UPDATE turns SET trigger = ?").run(source);
       expect(agentUsage(db, "agent-a", { since: 0, limit: 20 }, now).turns[0].trigger).toBe(expected);
     }
   }
+  db.close();
+});
+
+test("path punctuation and quotes cannot expose any suffix, and following URLs survive", () => {
+  const { db } = fixture(); turn(db, "punctuation", day + 1);
+  for (const mark of [",", ";", "!", "?", ")", "'", '"']) {
+    for (const root of ["/private/", "~/", "file:///", "X:\\"]) {
+      const path = `${root}hidden${mark}suffix/file`;
+      for (const tail of ["", " https://example.test/docs", "http://example.test/docs"]) {
+        db.prepare("UPDATE turns SET trigger = ?").run(`path:${path}${tail}`);
+        const trigger = agentUsage(db, "agent-a", { since: 0, limit: 20 }, now).turns[0].trigger;
+        expect(trigger).toBe("path:[path]" + (tail ? " " + tail.trim() : ""));
+        for (const fragment of [root, "hidden", "suffix", "file"]) expect(trigger).not.toContain(fragment);
+      }
+    }
+  }
+  db.prepare("UPDATE turns SET trigger = ?").run("path:/hidden,quoted\nnext line");
+  expect(agentUsage(db, "agent-a", { since: 0, limit: 20 }, now).turns[0].trigger).toBe("path:[path]\nnext line");
+  db.close();
+});
+
+test("a call retained across the cutoff prevents expiry even when its turn is filtered out", () => {
+  const { db } = fixture(), cutoff = retentionCutoff(now);
+  db.prepare(`INSERT INTO daily (day,agent,runtime,model,calls,input,cache_creation,cache_read,output,reasoning)
+    VALUES ('2000-01-01','agent-a','claude-code','m',1,1,0,0,1,0)`).run();
+  turn(db, "boundary", cutoff - 1000, "agent-a", "claude-code", cutoff + 1000);
+  expect(agentUsage(db, "agent-a", { since: 0, limit: 20 }, now).state).toBe("ready");
+  const filtered = agentUsage(db, "agent-a", { since: cutoff - 500, limit: 20 }, now);
+  expect(filtered.turns).toEqual([]);
+  expect(filtered.state).toBe("empty");
   db.close();
 });
 
