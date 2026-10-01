@@ -52,10 +52,11 @@ function legacyPool(s: PlannerSnapshot, p: PoolFacts, since: number): { peer: st
 }
 
 /** Not local: a peer (becomes a `peer:<name>` pool intent) or a wait; null = this machine, as before W5. */
-export type Away = { peer: string; reason: string } | { wait: string; code?: string } | null;
+/** escalate = the write-lease holder already failed this fix once: only PM can move it (reclaim or re-offer). */
+export type Away = { peer: string; reason: string } | { wait: string; code?: string } | { escalate: string } | null;
 
 /** Where this round's review goes when it is not local. */
-export function reviewPlacement(s: PlannerSnapshot, since: number): Away {
+export function reviewPlacement(s: PlannerSnapshot, since: number): Exclude<Away, { escalate: string }> {
   const p = s.pool;
   if (!p || p.remote.mode === "off" || !p.remote.roles.includes("review")) return null;
   if (!s.workflow || s.workflow.template === "security" || s.reviewer || !s.task.headSHA) return null;
@@ -75,7 +76,12 @@ export function remoteWork(s: PlannerSnapshot, since: number, role: Exclude<Plac
   if (!s.workflow) return null;
   const pinned = cardPin(s.task.extra);
   if (!pinned && s.task.stage !== "build" && s.task.stage !== "fix") return null;
-  const placed = placeFor(snapshotPlacementFacts(s, since), role, s.workflow.authorFamily);
+  const facts = snapshotPlacementFacts(s, since);
+  const lease = role === "fix" && facts.remote?.mode !== "off" && facts.remote?.roles.includes("write") ? facts.writeLeasePeer : null;
+  if (lease && facts.tried.includes(lease)) {
+    return { escalate: `修复单派回写租约方 ${lease} 这一轮没成（撤回 / 退回 / 拒挂），写租约还在它那里：PM 核对后 ledger lend-reclaim ${s.task.id} 或 lend-reoffer` };
+  }
+  const placed = placeFor(facts, role, s.workflow.authorFamily);
   const code = pinned ? "placement_pinned" : "placement";
   if (pinned && s.task.stage === "spec") return { code, wait: placed.kind === "peer" ? "固定放在 peer 的卡不在本机复述，等 start_node 把它推过复述" : placed.reason };
   if (placed.kind === "peer") return { peer: placed.peer, reason: `挂池：${role === "fix" ? "修复" : "开工"}单派给 ${placed.peer} 的 ${placed.family} worker（${placed.reason}）` };
@@ -117,6 +123,6 @@ export function explainPlacement(s: PlannerSnapshot): { role: PlaceRole | null; 
   if (sent && sent.status !== "cancelled" && isPoolIntent(sent)) return { role, where: sent.recipient!, reason: `已派给 ${sent.recipient}，等台账结果（${sent.status}）` };
   const away = remoteWork(s, since, role);
   if (away && "peer" in away) return { role, where: `${POOL_RECIPIENT}${away.peer}`, reason: away.reason };
-  if (away) return { role, where: cardPin(s.task.extra) ?? "-", reason: `等：${away.wait}` };
+  if (away) return { role, where: cardPin(s.task.extra) ?? "-", reason: "wait" in away ? `等：${away.wait}` : `交 PM：${away.escalate}` };
   return { role, where: "local", reason: placeFor(snapshotPlacementFacts(s, since), role, s.workflow.authorFamily).reason };
 }

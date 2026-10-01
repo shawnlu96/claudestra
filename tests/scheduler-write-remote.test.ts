@@ -132,33 +132,49 @@ describe("a build order to a peer, delivered, reviewed across families", () => {
   });
 });
 
+/** Build → mate writes → delivered → local Claude review with one P1 at `report` → the card is in fix. */
+async function toRemoteFix(p: Awaited<ReturnType<typeof ready>>, report: string) {
+  p.hello("mate");
+  await p.tick();
+  const [order] = p.orders();
+  await p.lendCall("lend-claim", "mate", { v: 1, orderId: order.orderId, worker: "w1" });
+  p.remote[BRANCH] = { ok: true, head: H2 };
+  await p.lendCall("lend-write", "mate", { v: 1, orderId: order.orderId, gen: 1, branch: BRANCH, pr: 7, session: { id: "sess-1", family: "codex" },
+    deliver: { v: 1, orderId: order.orderId, head: H2, evidence: BRANCH, summary: "实现了 x", selfCheck: "单测全绿" } });
+  await p.tick(); // pool_done
+  await p.tick(); // reviewer session (claude)
+  await p.tick(); // review order
+  const findings = join(p.f.dir, "p1.json");
+  writeFileSync(findings, JSON.stringify([P1]));
+  expect(await p.cli("agent-rv-t1", "review", "T1", "--reviewer", "agent-rv-t1", "--verdict", "changes", "--p0", "0", "--p1", "1", "--p2", "0",
+    "--head", H2, "--session", "s-rv", "--family", "claude", "--findings", findings, "--path", report)).toMatchObject({ ok: true });
+  await p.tick(); // → fix
+  expect(p.f.task().stage).toBe("fix");
+}
+
 describe("the fix of a remote-written card", () => {
   test("goes back to the lease holder with the last report inlined; it never becomes a local work order", async () => {
     const p = await ready({ borrow: [borrowOf("mate"), borrowOf("other", "first")] });
     try {
-      p.hello("mate");
-      await p.tick();
-      const [order] = p.orders();
-      await p.lendCall("lend-claim", "mate", { v: 1, orderId: order.orderId, worker: "w1" });
-      p.remote[BRANCH] = { ok: true, head: H2 };
-      await p.lendCall("lend-write", "mate", { v: 1, orderId: order.orderId, gen: 1, branch: BRANCH, pr: 7, session: { id: "sess-1", family: "codex" },
-        deliver: { v: 1, orderId: order.orderId, head: H2, evidence: BRANCH, summary: "实现了 x", selfCheck: "单测全绿" } });
-      await p.tick(); // pool_done
-      await p.tick(); // reviewer session (claude)
-      await p.tick(); // review order
       const report = join(p.f.dir, "report.md");
       writeFileSync(report, "# 审查报告\nP1：两个 tick 抢同一个意图");
-      const findings = join(p.f.dir, "p1.json");
-      writeFileSync(findings, JSON.stringify([P1]));
-      expect(await p.cli("agent-rv-t1", "review", "T1", "--reviewer", "agent-rv-t1", "--verdict", "changes", "--p0", "0", "--p1", "1", "--p2", "0",
-        "--head", H2, "--session", "s-rv", "--family", "claude", "--findings", findings, "--path", report)).toMatchObject({ ok: true });
-      await p.tick(); // → fix
-      expect(p.f.task().stage).toBe("fix");
+      await toRemoteFix(p, report);
       p.hello("mate");
       p.hello("other"); // a first-tier peer, but it does not hold the lease
       expect(await p.tick()).toMatchObject({ step: "pool_pooled", detail: expect.stringContaining("修复挂给 mate") });
       expect(p.orders().at(-1)).toMatchObject({ step: "fix", peer: "mate", family: "codex", head: H2, branch: BRANCH });
       expect(p.plans().at(-1)?.text).toContain("写租约在 mate，修复单派回它");
+    } finally { p.f.close(); }
+  });
+
+  test("the lease holder's fix could not go out (no report to inline): the card stops for PM, it does not wait silently", async () => {
+    const p = await ready();
+    try {
+      await toRemoteFix(p, join(p.f.dir, "missing-report.md"));
+      p.hello("mate");
+      expect(await p.tick()).toMatchObject({ step: "pool_refused", detail: expect.stringContaining("找不到上一轮审查报告原文") });
+      expect(await p.tick()).toMatchObject({ step: "manual", detail: expect.stringContaining("placement_lease") });
+      expect(p.orders().filter((o) => o.step === "fix")).toEqual([]);
     } finally { p.f.close(); }
   });
 });

@@ -143,6 +143,7 @@ function dispatchWork(s: PlannerSnapshot, node: FlowNode): PlannerDecision {
   if (prior) return prior;
   const away = remoteWork(s, latestSeq(s.events, s.task), node.stage === "fix" ? "fix" : "write");
   if (away && "wait" in away) return wait(away.code ?? "placement", away.wait);
+  if (away && "escalate" in away) return escalate("placement_lease", away.escalate);
   const fix = node.stage === "fix" ? fixPackage(s) : null;
   if (fix && "kind" in fix) return fix;
   const scope = fileResources(s); // no scope: the local path below escalates it, a peer never writes unlocked
