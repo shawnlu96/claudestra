@@ -161,6 +161,29 @@ describe("i28-M9 await_ci: main moving while CI ran is never merged", () => {
     expect(f.row.phase).toBe("updating");
     expect(f.calls).toEqual(["inspect", "fresh:a", "journal:updating", "update"]);
   });
+  test.each([["pass"], ["pending"]] as const)("GitHub BEHIND with %s checks → back to updating without asking compare (M9-R1-001)", async (bucket) => {
+    const f = fixture("await_ci", { snaps: [pr({ mergeState: "BEHIND", checks: [{ name: "check", bucket }] })], fresh: [new Error("must not be asked")] });
+    await f.drive();
+    expect(f.row.phase).toBe("updating");
+    expect(f.calls).toEqual(["inspect", "journal:updating", "update"]);
+  });
+  test("GitHub BEHIND keeps every other guard: failed CI / moved head / base / branch / fork / closed → unknown, draft waits", async () => {
+    const behind = (p: Partial<PrSnapshot>) => pr({ mergeState: "BEHIND", ...p });
+    for (const p of [{ checks: [{ name: "check", bucket: "fail" as const }] }, { head: N }, { base: "dev" }, { branch: "task/T2" },
+      { crossRepository: true }, { state: "CLOSED" as const }]) {
+      const f = fixture("await_ci", { snaps: [behind(p)] });
+      await f.drive();
+      expect([f.row.phase, f.calls.includes("update")]).toEqual(["unknown", false]);
+    }
+    const draft = fixture("await_ci", { snaps: [behind({ draft: true })] });
+    await draft.drive();
+    expect(draft.calls).toEqual(["inspect"]);
+  });
+  test("GitHub BEHIND after the refresh budget is spent → unknown, no update", async () => {
+    const f = fixture("await_ci", { snaps: [pr({ mergeState: "BEHIND" })], refuse: "updating" });
+    await f.drive();
+    expect([f.row.phase, f.calls.includes("update")]).toEqual(["unknown", false]);
+  });
   test("staleness lookup failing right before merge → unknown, no merge", async () => {
     const f = fixture("await_ci", { snaps: [pr()], fresh: [new Error("gh compare 失败")] });
     await f.drive();

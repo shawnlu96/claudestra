@@ -108,6 +108,16 @@ export async function driveMerge(run: MergeRun, external: MergeExternal, advance
         pr.base === "main" && pr.branch === run.expectedBranch) return run;
       if (pr.mergeState === "UNKNOWN" && sameHead(run, pr) && pr.state === "OPEN" && !pr.draft && !pr.crossRepository &&
         pr.base === "main" && pr.branch === run.expectedBranch) return run;
+      // main moved during CI: the run tested another merge result (the journal caps how often). Awaited at the call
+      // sites so a refused 4th refresh lands in the catch below and becomes unknown instead of escaping.
+      const refresh = async (why: string) => {
+        const claimed = await step("updating", `${why}，重新更新分支`);
+        assertActive();
+        await external.updateBranch(run.prRef);
+        return claimed;
+      };
+      if (pr.mergeState === "BEHIND" && sameHead(run, pr) && pr.state === "OPEN" && !pr.draft && !pr.crossRepository &&
+        pr.base === "main" && pr.branch === run.expectedBranch) return failed(pr.checks) ? step("unknown", "CI 失败或取消") : await refresh("等 CI 期间 GitHub 报 BEHIND");
       const unstable = unstableWait(pr); // The final pre-merge check below still demands CLEAN, so waiting here never merges early.
       if (unstable && sameHead(run, pr) && pr.state === "OPEN" && !pr.draft && !pr.crossRepository &&
         pr.base === "main" && pr.branch === run.expectedBranch) return unstable === "wait" ? run : step("unknown", "CI 失败或取消");
@@ -116,14 +126,8 @@ export async function driveMerge(run: MergeRun, external: MergeExternal, advance
       }
       if (pr.checks.some((c) => c.bucket === "fail" || c.bucket === "cancel")) return step("unknown", "CI 失败或取消");
       if (!green(run, pr.checks)) return run;
-      // main moved during CI: the green run tested another merge result, so update again (the journal caps how often).
-      const stale = await external.freshness(run.prRef, pr.head);
-      if (stale.behindBy > 0) {
-        const claimed = await step("updating", `等 CI 期间 main 前进到 ${short(stale.mainHead)}，落后 ${stale.behindBy} 个提交，重新更新分支`);
-        assertActive();
-        await external.updateBranch(run.prRef);
-        return claimed;
-      }
+      const stale = await external.freshness(run.prRef, pr.head); // GitHub keeps saying CLEAN for a stale branch
+      if (stale.behindBy > 0) return await refresh(`等 CI 期间 main 前进到 ${short(stale.mainHead)}，落后 ${stale.behindBy} 个提交`);
       await step("merging", `CI 全绿：${pr.checks.map((c) => c.name).join(", ").slice(0, 300)}`);
       const fresh = await external.inspect(run.prRef);
       if (fresh.state !== "OPEN" || !sameHead(run, fresh) || fresh.branch !== run.expectedBranch || fresh.base !== "main" ||
