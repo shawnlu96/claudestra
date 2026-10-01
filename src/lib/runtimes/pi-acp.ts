@@ -14,10 +14,11 @@ import { pathOverrideAssignments } from "../paths.js";
 import { normalizePiEnvProfile, piBinName, piEnvFlags, type PiEnvProfile } from "../pi-env.js";
 import { isPiThinkingLevel } from "../pi-launch.js";
 import { piAgentDirOf } from "../pi-path.js";
-import { assertSandboxRuntime } from "../sandbox.js";
+import { assertSandboxRuntime, isSandbox } from "../sandbox.js";
 import { ACP_RUNTIME_ENV, PI_ARGS_ENV } from "../acp/host-runtime.js";
 import { piMcpClash } from "../acp/pi-adapter/mcp-clash.js";
 import { keepReplyTool } from "../acp/pi-adapter/reply-tool.js";
+import { SANDBOX_PI_FLAGS } from "../acp/pi-adapter/sandbox-policy.js";
 import { probePiAcp } from "../acp/readiness.js";
 import { REPO_ROOT } from "../repo-root.js";
 import { ACP_CONTROL, acpExitPrelude } from "./acp-control.js";
@@ -29,18 +30,21 @@ const mcpName = (env: Record<string, string | undefined>) => env.MCP_NAME || "cl
 /**
  * 交给适配器的 pi 参数（排在它自己的 rpc / 挂 MCP / 会话 id 之前）：信任开关与能力档同 tmux 版；职责和回复规则走
  * --append-system-prompt，每次起 pi（含 /clear 换的新会话）都带，所以不需要 Codex 那种重启前言。
+ * 沙箱里不认 registry 的能力档（它能加 npm 包、指向 owner 的 MCP 配置），固定最小发现集（acp/pi-adapter/sandbox-policy.ts）。
  * 能力档先过 keepReplyTool（reply-tool.ts）：白名单补上 reply 的 pi 工具名，禁了 reply、MCP_NAME 保证不了就抛。
  */
-export function piAcpArgs(spec: LaunchSpec, agent: string, repoRoot: string, mcp = "claudestra"): string[] {
-  const piEnv = keepReplyTool(spec.extras?.piEnv as PiEnvProfile | undefined, mcp);
+export function piAcpArgs(spec: LaunchSpec, agent: string, repoRoot: string, sandbox = false, mcp = "claudestra"): string[] {
+  const piEnv = keepReplyTool(sandbox ? undefined : (spec.extras?.piEnv as PiEnvProfile | undefined), mcp);
   const prompt = codexDeveloperInstructions({ agentName: agent, purpose: spec.purpose, projectContext: spec.projectContext, channelRules: channelInstructions(repoRoot) });
-  return [piEnv?.trustProject === false ? "--no-approve" : "--approve", ...piEnvFlags(piEnv), "--name", agent, "--append-system-prompt", prompt];
+  const flags = sandbox ? SANDBOX_PI_FLAGS : piEnvFlags(piEnv);
+  return [piEnv?.trustProject === false ? "--no-approve" : "--approve", ...flags, "--name", agent, "--append-system-prompt", prompt];
 }
 
 /** 启动命令：环境变量前缀 + bun acp-host.ts（窗口的 cwd 就是会话的 cwd）。纯函数，单测逐字钉住 */
 export function buildPiAcpHostCommand(spec: LaunchSpec, o: { bunBin: string; repoRoot: string; env?: Record<string, string | undefined> }): string {
   const env = o.env ?? process.env;
-  assertSandboxRuntime("pi", env, "acp"); // 沙箱放开 Pi 是安全边界的改动，单独设计；在那之前和 tmux 版一样拒
+  assertSandboxRuntime("pi", env, "acp"); // 沙箱里 PI_CODING_AGENT_DIR 没钉在沙箱根就拒（docs/architecture/pi-acp-sandbox.md）
+  const sandbox = isSandbox(env);
   const agent = spec.agentName || spec.settingsName;
   if (!agent) throw new Error("ACP 宿主需要 agent 名（LaunchSpec.agentName / settingsName）");
   if (!spec.sessionId) throw new Error("ACP 宿主需要会话 id");
@@ -56,7 +60,9 @@ export function buildPiAcpHostCommand(spec: LaunchSpec, o: { bunBin: string; rep
     ["PI_BIN", piBinName()],
     ["CLAUDESTRA_ACP_MODEL", spec.model?.trim() || undefined],
     ["CLAUDESTRA_ACP_EFFORT", effort && isPiThinkingLevel(effort) ? effort : undefined], // 同 tmux 版：只放 pi 认的档位
-    [PI_ARGS_ENV, JSON.stringify(piAcpArgs(spec, agent, o.repoRoot, mcpName(env)))],
+    [PI_ARGS_ENV, JSON.stringify(piAcpArgs(spec, agent, o.repoRoot, sandbox, mcpName(env)))],
+    // 窗口不继承 manager 的 env（继承 tmux server 的）：沙箱里把上面核过的目录显式带过去，宿主起适配器前会再核一遍
+    ["PI_CODING_AGENT_DIR", sandbox ? env.PI_CODING_AGENT_DIR : undefined],
   ];
   const prefix = pairs.filter(([, v]) => v).map(([k, v]) => `${k}=${shellEscape(v!)}`).join(" ");
   const cred = acpCallerCredAssignment(spec.callerCredFile, shellEscape);
@@ -71,7 +77,7 @@ export function piAcpClash(cwd: string | undefined, env: Record<string, string |
   const clash = piMcpClash([mcpName(env)], cwd ?? "", piAgentDirOf(env, cwd || undefined));
   if (clash) return clash;
   try {
-    keepReplyTool(normalizePiEnvProfile(piEnv), mcpName(env));
+    keepReplyTool(isSandbox(env) ? undefined : normalizePiEnvProfile(piEnv), mcpName(env)); // 沙箱起 pi 时不认 registry 的能力档
     return null;
   } catch (e) {
     return e instanceof Error ? e.message : String(e);

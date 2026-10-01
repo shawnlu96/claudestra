@@ -10,6 +10,7 @@ import { spawnAdapter } from "../adapter-proc.js";
 import type { RpcWire } from "../rpc.js";
 import { piBinName } from "../../pi-env.js";
 import { piAgentDirOf } from "../../pi-path.js";
+import { sandboxPiAgentDirProblem } from "../../sandbox.js";
 import { piRpcArgs, piToolLists } from "./args.js";
 import { piMcpClash } from "./mcp-clash.js";
 import { replyToolProblem } from "./reply-tool.js";
@@ -20,8 +21,13 @@ export const PI_ACP_ADAPTER_MAIN = fileURLToPath(import.meta.url);
 
 type Env = Record<string, string | undefined>;
 
-/** 起 pi 前的闸：pi 配置里有同名 server，或 channel-server（MCP_NAME）的 reply 会被这组参数的工具白名单 / 黑名单筛掉 */
+/**
+ * 起 pi 前的闸（含 /clear 换会话）：沙箱里 Pi 目录及其全局文件的真实路径越出沙箱根（宿主起适配器前查过一次，这里每次起 pi 再查），
+ * pi 配置里有同名 server，或 channel-server（MCP_NAME）的 reply 会被这组参数的工具白名单 / 黑名单筛掉。
+ */
 export function piMountProblem(names: string[], cwd: string, baseArgs: readonly string[], env: Env): string | null {
+  const sandbox = sandboxPiAgentDirProblem(env);
+  if (sandbox) return sandbox;
   const clash = piMcpClash(names, cwd, piAgentDirOf(env, cwd));
   if (clash) return clash;
   const channel = names.find((n) => n === (env.MCP_NAME || "claudestra"));
