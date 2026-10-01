@@ -15,6 +15,7 @@ import { autoSnapshot } from "./scheduler-auto-snapshot.js";
 import { SchedulerStopped } from "./scheduler-maintenance.js";
 import { CLAIM_LEASE_MS, driveDispatch, type DriveOutcome, type SchedulerLedgerOps } from "./scheduler-dispatch.js";
 import { planScheduler, type PlannerDecision } from "./scheduler-plan.js";
+import { isResourceWait } from "./scheduler-plan-refusal.js";
 import { pmNoticeResume, pmUiNotice } from "./scheduler-ui-gate.js";
 import { getSchedulerSession, type SessionRole } from "./scheduler-sessions.js";
 import { planRejectedReason } from "./ledger-scheduler-write.js";
@@ -122,9 +123,9 @@ class Card {
       ...(plan.recipient ? ["--recipient", plan.recipient] : []), ...(plan.resources.length ? ["--resources", plan.resources.join(",")] : []));
     return r.ok === true ? r.intent as SchedulerIntent : { code: String(r.code ?? "unknown"), error: String(r.error) };
   }
-
   /** Count a refused plan; on the threshold record it on the ledger, then tell PM once (see PLAN_REJECT_TICKS). */
   async refused(code: string, error: string): Promise<CardOutcome> {
+    if (isResourceWait(code, error)) return this.out("wait", error);
     const text = planRejectedReason(error), now = this.deps.now(), detail = `计划没写进台账：${oneLine(error)}`;
     const seen = perDb(refusals, this.db), was = seen.get(this.task.id);
     const r: Refusal = was && was.code === code && was.text === text ? { ...was, ticks: was.ticks + 1 } : { code, text, ticks: 1, since: now, told: false };
@@ -139,7 +140,6 @@ class Card {
       `（${Math.floor((now - r.since) / 60_000)} 分钟）：[${code}] ${text}。建议：${advice}` });
     return this.out("replan", `${detail}；${(await sendNotice(this.db, this.deps, key)) ? "已报警 PM" : "报警没发出去，下个 tick 重发"}`);
   }
-
   async ensure(intent: SchedulerIntent, plan: Planned | null): Promise<CardOutcome> {
     const role = roleOfIntent(intent);
     if (intent.status === "submitted") {
