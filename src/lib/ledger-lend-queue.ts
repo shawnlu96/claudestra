@@ -56,12 +56,18 @@ export function queueTimeoutDue(db: Database, orderId: string, cutoff: number): 
   return !q || (q.queuedAt === null && (q.pushedAt === null || q.pushedAt < cutoff));
 }
 
+function overdueQueue(db: Database, now: number): Pick<LendOrder, "orderId" | "project" | "taskId" | "peer">[] {
+  if (!hasQueue(db)) return [];
+  return db.query(`SELECT o.orderId, o.project, o.taskId, o.peer FROM lend_push_queue q JOIN lend_orders o USING(orderId)
+    WHERE o.status = 'pooled' AND q.queuedAt <= ? AND q.overdue = 0`).all(now - WAIT_MS) as Pick<LendOrder, "orderId" | "project" | "taskId" | "peer">[];
+}
+
+/** The bridge must schedule reminders independently of seenAt, including a peer that first polls late in the wait. */
+export const queueNoticeDue = (db: Database, now: number): boolean => overdueQueue(db, now).length > 0;
+
 /** Called by the existing sweeper even while TTL withdrawal is suppressed. Deduplication survives process restarts. */
 export function sweepQueueNotices(db: Database, now: number): LendNotice[] {
-  if (!hasQueue(db)) return [];
-  const due = db.query(`SELECT o.orderId, o.project, o.taskId, o.peer FROM lend_push_queue q JOIN lend_orders o USING(orderId)
-    WHERE o.status = 'pooled' AND q.queuedAt <= ? AND q.overdue = 0`).all(now - WAIT_MS) as Pick<LendOrder, "orderId" | "project" | "taskId" | "peer">[];
-  return due.flatMap((o) => {
+  return overdueQueue(db, now).flatMap((o) => {
     if (!db.prepare("UPDATE lend_push_queue SET overdue = 1 WHERE orderId = ? AND overdue = 0").run(o.orderId).changes) return [];
     return [{ project: o.project, taskId: o.taskId, text: `出借单 ${o.orderId}（${o.taskId}）排队等 ${o.peer} 空位已超过 2 小时；写租约保留，不自动改派` }];
   });

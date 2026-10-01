@@ -9,6 +9,7 @@ import { readJsonCapped } from "../lib/body-reader.js";
 import { signedFor } from "../lib/instance-key.js";
 import { createPushLoop, PUSH_TICK_MS } from "../lib/lend-dispatch.js";
 import { peerLendProblem, proxyVarsIn } from "../lib/lend-remote.js";
+import { queueNoticeDue } from "../lib/ledger-lend-queue.js";
 import { pushCandidates } from "../lib/ledger-lend-peers.js";
 import { pushTtlDue } from "../lib/ledger-lend-peers-ttl.js";
 import { isE2eResponse } from "../lib/peer-e2e-client.js";
@@ -55,7 +56,7 @@ const loop = createPushLoop({
   },
   ttlDue: (now) => {
     const db = ledgerDb();
-    return !!db && pushTtlDue(db, now).length > 0;
+    return !!db && (pushTtlDue(db, now).length > 0 || queueNoticeDue(db, now));
   },
   sweep: async () => {
     const r = await manager(["ledger", "lend-sweep"]);

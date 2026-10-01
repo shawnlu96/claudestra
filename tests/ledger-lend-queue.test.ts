@@ -9,7 +9,7 @@ import { answerPush, pushCandidates, recordHello } from "../src/lib/ledger-lend-
 import { claimLend, getLendOrder, offerLendCore, sweepLend, WRITE_POOL_TTL_MS } from "../src/lib/ledger-lend.js";
 import { getWriteLease } from "../src/lib/ledger-lend-lease.js";
 import { LEND_QUEUE_SCHEMA } from "../src/lib/ledger-lend-queue-schema.js";
-import { startQueuedPush } from "../src/lib/ledger-lend-queue.js";
+import { queueNoticeDue, startQueuedPush } from "../src/lib/ledger-lend-queue.js";
 import { PUSH_ACK_TTL_MS, pushTtlDue } from "../src/lib/ledger-lend-peers-ttl.js";
 
 import { createPushLoop } from "../src/lib/lend-dispatch.js";
@@ -210,4 +210,18 @@ test("version 17 ledger upgrades to queue migration 18 without changing existing
     expect(getWriteLease(migrated, "T1")?.state).toBe("held");
     expect(migrated.query("SELECT * FROM lend_push_queue").all()).toEqual([]);
   } finally { closeLedger(file); }
+});
+
+test("late first poll cannot postpone the automatic two-hour reminder", () => {
+  const id = offer("fix");
+  refuse(id);
+  now += 110 * 60000;
+  db.prepare("UPDATE lend_orders SET seenAt = ? WHERE orderId = ?").run(now, id);
+  now += 10 * 60000 - 1;
+  expect(queueNoticeDue(db, now)).toBe(false);
+  now++;
+  expect(pushTtlDue(db, now)).toEqual([]);
+  expect(queueNoticeDue(db, now)).toBe(true);
+  expect(sweepLend(db, ctx())).toHaveLength(1);
+  expect(queueNoticeDue(db, now)).toBe(false);
 });
