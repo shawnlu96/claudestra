@@ -25,6 +25,8 @@ import { readRegistryAgentsSync } from "../lib/registry.js";
 import { runBounded } from "../lib/run-bounded.js";
 import { runManagerProcess } from "../lib/run-manager.js";
 import { readSchedulerConfig } from "../lib/scheduler-config.js";
+import { startPlacement, type StartPlacementIO } from "../lib/scheduler-placement-start.js";
+import { readEffectiveBorrow } from "../lib/scheduler-pool-borrow.js";
 import { writeTextAtomicSync } from "../lib/state-file.js";
 import { BUN_PATH, ENV_WITH_BUN, MANAGER_PATH } from "./config.js";
 import { ledgerDb } from "./ledger-feed.js";
@@ -179,7 +181,7 @@ function claim(keys: string[]): string | null {
   return null;
 }
 
-const START_OPTIONAL = ["base", "branch", "taskId", "title", "item", "repo"] as const;
+const START_OPTIONAL = ["base", "branch", "taskId", "title", "item", "repo", "placement"] as const;
 
 async function startNode(deps: DagToolDeps, call: VerifiedCall, args: unknown): Promise<OrderToolResult> {
   const o = open(deps, args, call);
@@ -192,6 +194,8 @@ async function startNode(deps: DagToolDeps, call: VerifiedCall, args: unknown): 
   try {
     const input: StartArgs = { featureId: f.id, key };
     for (const k of START_OPTIONAL) if (str(a[k])) input[k] = str(a[k]);
+    // 放哪不能因为传错类型就静默变成 auto：非字符串交给预检按不合法拒
+    if (a.placement !== undefined && typeof a.placement !== "string") input.placement = JSON.stringify(a.placement);
     if (typeof a.spec === "string") input.spec = a.spec;
     const pre = await preflightStart({ ...deps.startEnv(), db, caller: call.agent }, input);
     if (!pre.ok) return refuse(pre.code, pre.error);
@@ -203,6 +207,7 @@ async function startNode(deps: DagToolDeps, call: VerifiedCall, args: unknown): 
     const io: StepIO = { ...deps.stepIO(), db: () => deps.db() ?? db, manager: (args, timeoutMs) => deps.manager(args, call.channelId, timeoutMs), attempt: randomBytes(4).toString("hex") };
     const out = await runStart(io, pre.plan);
     if (!out.ok) return out as unknown as OrderToolResult;
+    if ("placement" in out) return { ...out, next: `卡固定放在 ${out.placement}：复述已跳过，开工单由调度器按放置结果派出（远端写代码等 W8）` };
     return { ...out, next: `调度器会给 ${out.agent} 派复述单；不用给它发消息` };
   } finally {
     for (const k of held) claimed.delete(k);
@@ -225,6 +230,22 @@ function showDag(deps: DagToolDeps, args: unknown): OrderToolResult {
   } catch (e) {
     return refuse("not_found", (e as Error).message);
   }
+}
+
+/** 槽池放置要读的：scheduler.json 的项目策略、生效的借入名单、项目目录 origin 的 GitHub 坐标 */
+function livePlacementIO(git: (cwd: string, args: string[]) => Promise<{ ok: boolean; out: string }>): StartPlacementIO {
+  return {
+    policy: (project) => {
+      const p = readSchedulerConfig().projects[project];
+      return p ? { remote: p.remote ?? null, maxWorkers: p.maxActiveWorkers } : null;
+    },
+    borrow: readEffectiveBorrow,
+    originRepo: async (dir) => {
+      const r = await git(dir, ["remote", "get-url", "origin"]);
+      return r.ok ? r.out.match(/github\.com[:/]([A-Za-z0-9][A-Za-z0-9-]{0,38}\/[A-Za-z0-9._-]{1,100}?)(?:\.git)?$/)?.[1] ?? null : null;
+    },
+    now: Date.now,
+  };
 }
 
 function liveDeps(): DagToolDeps {
@@ -251,6 +272,7 @@ function liveDeps(): DagToolDeps {
         return Object.hasOwn(c.projects, project) ? null : `调度服务没列项目 ${project}（scheduler.json projects）`;
       },
       template: () => (existsSync(statePath("ledger", "prompts", "exec-template.md")) ? readFileSync(statePath("ledger", "prompts", "exec-template.md"), "utf8") : null),
+      placement: (db, q) => startPlacement(db, livePlacementIO(git), q),
     }),
     stepIO: () => ({
       git, exists: existsSync, read: (p) => (existsSync(p) ? readFileSync(p, "utf8") : null),

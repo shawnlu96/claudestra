@@ -92,8 +92,8 @@ export interface AdapterProc {
   exited: Promise<number>;
 }
 
-/** 起子进程；stderr 按行交给 log（适配器自己的详细日志另在 APP_SERVER_LOGS） */
-export function spawnAdapter(cmd: string[], env: Record<string, string>, cwd: string, log: (msg: string) => void): AdapterProc {
+/** 起子进程；stderr 按行加 label 前缀交给 log（适配器自己的详细日志另在 APP_SERVER_LOGS）。Pi 适配器也用它起 pi */
+export function spawnAdapter(cmd: string[], env: Record<string, string>, cwd: string, log: (msg: string) => void, label = "codex-acp"): AdapterProc {
   if (isSandbox(env) && env.HOME) mkdirSync(env.HOME, { recursive: true }); // 沙箱里隔离出来的 HOME（adapterEnv）第一次用时还不存在
   const proc: Subprocess<"pipe", "pipe", "pipe"> = Bun.spawn(cmd, { cwd, env, stdin: "pipe", stdout: "pipe", stderr: "pipe" });
   const closeCbs: ((why: string) => void)[] = [];
@@ -104,7 +104,7 @@ export function spawnAdapter(cmd: string[], env: Record<string, string>, cwd: st
   void pump(proc.stdout, (c) => dataCb(c)).catch((e) => log(`适配器 stdout 读取出错：${e}`));
   const dec = new TextDecoder();
   void pump(proc.stderr, (c) => {
-    for (const line of dec.decode(c).split("\n")) if (line.trim()) log(`[codex-acp] ${line.slice(0, 300)}`);
+    for (const line of dec.decode(c).split("\n")) if (line.trim()) log(`[${label}] ${line.slice(0, 300)}`);
   }).catch((e) => log(`适配器 stderr 读取出错：${e}`));
   void proc.exited.then((code) => closeCbs.splice(0).forEach((cb) => cb(`exit ${code}`)));
   const stop = () => {

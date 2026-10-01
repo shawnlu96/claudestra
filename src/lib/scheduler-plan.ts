@@ -4,7 +4,8 @@ import { resourceKey, resourcesOverlap, type AuthorFamily, type SchedulerIntent,
 import { currentReviewFacts, p1AnyStreak, p1FindingStreak, type ReviewFacts, type ReviewFinding } from "./scheduler-review.js";
 import { FLOW_TEMPLATES, nodeAt, restateGate, templateFor, type FlowNode } from "./scheduler-template.js";
 import { cardWorkerSlots } from "./scheduler-worker-slot.js";
-import { POOL_RECIPIENT, poolTarget, type PoolFacts } from "./scheduler-pool-plan.js";
+import { POOL_RECIPIENT, type PoolFacts } from "./scheduler-pool-plan.js";
+import { pinnedWork, reviewPlacement } from "./scheduler-placement-plan.js";
 
 export interface WorkerRef {
   agent: string;
@@ -138,7 +139,7 @@ function sessionGate(s: PlannerSnapshot, node: FlowNode, role: "author" | "revie
 }
 
 function dispatchWork(s: PlannerSnapshot, node: FlowNode): PlannerDecision {
-  const prior = liveIntent(s, node, "dispatch");
+  const prior = liveIntent(s, node, "dispatch") ?? pinnedWork(s, latestSeq(s.events, s.task), node.stage === "fix" ? "fix" : "write");
   if (prior) return prior;
   const fix = node.stage === "fix" ? fixPackage(s) : null;
   if (fix && "kind" in fix) return fix;
@@ -180,8 +181,8 @@ function reviewDispatch(s: PlannerSnapshot, node: FlowNode): PlannerDecision {
   if (prior) return prior;
   // A peer may still hold this review through such an order: a local reviewer now would be a second dispatch of the node.
   if (s.strayPoolOrders?.length) return escalate("pool_order_open", `池单 ${s.strayPoolOrders.join("，")} 仍在对方手里或待领，先对账`);
-  const pool = poolTarget(s, latestSeq(s.events, s.task));
-  if (pool) return makeIntent(s, node, "review", `挂池：对抗式跨模型审查挂给 ${pool.peer} 的 ${pool.family} worker${pool.rereview ? "（复验，同一 peer）" : ""}`,
+  const pool = reviewPlacement(s, latestSeq(s.events, s.task));
+  if (pool) return makeIntent(s, node, "review", pool.reason,
     [taskResource(s)], { recipient: `${POOL_RECIPIENT}${pool.peer}`, reviewMode: FLOW_TEMPLATES[s.workflow!.template].reviewMode });
   const gate = sessionGate(s, node, "reviewer");
   if (gate) return gate;
