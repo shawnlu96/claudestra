@@ -36,6 +36,7 @@ import {
 } from "./ledger-checks.js";
 import { canTransition, nextTaskState, roleOf, TERMINAL_STAGES, type EventKind, type LedgerEvent, type LedgerItem, type LedgerTask, type Role, type Stage } from "./ledger-stages.js";
 import { checksAllClear } from "./ledger-probes.js";
+import { deliverPrPatch } from "./order-deliver-pr.js";
 import { getItem, getMeta, LedgerError, pmsByProject, type LedgerMeta } from "./ledger-store.js";
 import { insertEvent, replay, tx } from "./ledger-tx.js";
 import { activeStepFor, checkReviewHead, checkReviewStep, noteStepDelivered, noteStepReview } from "./ledger-steps-write.js";
@@ -220,11 +221,11 @@ export function moveStage(db: Database, ctx: WriteCtx, input: { taskId: string; 
   });
 }
 
-/** 交付：记 headSHA 与证据位置；带 moveFrom 时同一事务推到 review（build / fix → review） */
+/** 交付：记 headSHA 与证据位置（带 pr 时按 deliverPrPatch 补 PR 链接）；带 moveFrom 时同一事务推到 review（build / fix → review） */
 export function deliver(
   db: Database,
   ctx: WriteCtx,
-  input: { taskId: string; headSHA?: string; evidence?: string; text?: string; moveFrom?: Stage; expect?: { rev?: number; branch?: string } },
+  input: { taskId: string; headSHA?: string; evidence?: string; text?: string; moveFrom?: Stage; pr?: string; expect?: { rev?: number; branch?: string } },
 ): WriteResult<LedgerTask> {
   return tx(db, () => {
     let task = mustTask(db, input.taskId);
@@ -237,11 +238,9 @@ export function deliver(
     }
     if (TERMINAL_STAGES.includes(task.stage)) throw new LedgerError("invalid", `任务 ${task.id} 已是终态 ${task.stage}，不能再交付`, { stage: task.stage });
     // 先换 head 再推阶段（那一步记的交付 head 要是新的，ledger-steps-write.ts），再记交付：deliver 的 round 与同一轮的 review 事件一致
-    if (input.headSHA) {
-      checkReviewHead(task, input.headSHA);
-      updateTask(db, ctx, task, { headSHA: input.headSHA });
-      task = mustTask(db, task.id);
-    }
+    if (input.headSHA) checkReviewHead(task, input.headSHA);
+    const patch = { ...(input.headSHA ? { headSHA: input.headSHA } : {}), ...deliverPrPatch(task, input.pr) };
+    if (Object.keys(patch).length) task = (updateTask(db, ctx, task, patch), mustTask(db, task.id));
     if (input.moveFrom) task = applyMove(db, ctx, task, { from: input.moveFrom, to: "review" }, false).task;
     const data = { round: task.round, headSHA: input.headSHA ?? null, evidence: input.evidence ?? null };
     const event = insertEvent(db, ctx, { project: task.project, target: task.id, kind: "deliver", text: input.text, data }, true);
