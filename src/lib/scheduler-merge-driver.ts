@@ -133,10 +133,9 @@ export async function driveMerge(run: MergeRun, source: MergeExternal, advance: 
       const pr = await external.inspect(run.prRef);
       // ready never journals await_ci for a draft, so a draft here is a change; UNSTABLE must not hide it behind the draft wait.
       if (pr.draft && pr.mergeState === "UNSTABLE") return step("unknown", "等 CI 时 PR 变成了 draft");
-      if (pr.draft && sameHead(run, pr) && pr.state === "OPEN" && !pr.crossRepository &&
-        pr.base === "main" && pr.branch === run.expectedBranch) return run;
-      if (pr.mergeState === "UNKNOWN" && sameHead(run, pr) && pr.state === "OPEN" && !pr.draft && !pr.crossRepository &&
-        pr.base === "main" && pr.branch === run.expectedBranch) return unknownWait(run, step);
+      const same = sameHead(run, pr) && pr.state === "OPEN" && !pr.crossRepository && pr.base === "main" && pr.branch === run.expectedBranch;
+      if (same && pr.draft) return run;
+      if (same && pr.mergeState === "UNKNOWN") return unknownWait(run, step);
       // main moved during CI: the run tested another merge result (the journal caps how often). Awaited at the call
       // sites so a refused 4th refresh lands in the catch below and becomes unknown instead of escaping.
       const refresh = async (why: string) => {
