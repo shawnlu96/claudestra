@@ -31,8 +31,8 @@ export const LEND_ASK_CMDS: Record<string, CommandSpec> = {
       onlyScheduler(c, "lend-ask");
       const id = c.p.flags.retire ?? "";
       if (!/^[\w-]{1,64}$/.test(id)) throw new LedgerError("invalid", "--retire 要是 ask id");
-      c.deps.assertLease?.(); // 关的是一张已作废的卡，失租后多关一次也无害；核一次只为别在服务停了之后还写台账
-      const bad = retireLendAsk(c.db, id, c.deps.now());
+      // 拿到写锁后再核一次租约：等锁期间可能失租
+      const bad = retireLendAsk(c.db, id, c.deps.now(), { beforeWrite: () => c.deps.assertLease?.() });
       if (bad) throw new LedgerError("invalid", bad);
       return { ok: true };
     },

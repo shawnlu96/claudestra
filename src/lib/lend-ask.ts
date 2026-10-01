@@ -49,13 +49,16 @@ export function lendAskProblem(p: unknown, extra: readonly string[] = []): strin
 export const RETIRED_REASON = "逐单确认已退役，改为一次授权";
 
 /**
- * 关掉一张升级前的逐单确认 ask：不是 lend_claim 的拒（返回原因），已经不 open 的当作已关（重复调无害）。
- * 返回 null = 关了或本来就关着。
+ * 关掉一张升级前的逐单确认 ask：不是 lend_claim 的拒（返回原因），已经不 open 的当作已关（重复调无害）。返回 null = 关了或本来就关着。
+ * beforeWrite 在拿到写锁之后、写之前调（同 openAskFull）：调度服务等锁期间失租就抛，什么都不写。
  */
-export function retireLendAsk(db: Database, askId: string, now = Date.now()): string | null {
-  const a = hasAsksTable(db) ? getAsk(db, askId) : null;
-  if (!a) return null; // 台账里已经没有这张卡：没有可关的，当作已关
-  if (a.bind?.action !== LEND_ASK_ACTION) return `ask ${askId} 不是出借逐单确认`;
-  closeAsk(db, askId, "cancelled", RETIRED_REASON, now);
-  return null;
+export function retireLendAsk(db: Database, askId: string, now = Date.now(), opts: { beforeWrite?: () => void } = {}): string | null {
+  return db.transaction(() => {
+    opts.beforeWrite?.();
+    const a = hasAsksTable(db) ? getAsk(db, askId) : null;
+    if (!a) return null; // 台账里已经没有这张卡：没有可关的，当作已关
+    if (a.bind?.action !== LEND_ASK_ACTION) return `ask ${askId} 不是出借逐单确认`;
+    closeAsk(db, askId, "cancelled", RETIRED_REASON, now);
+    return null;
+  }).immediate();
 }

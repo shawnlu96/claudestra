@@ -166,9 +166,9 @@ export async function settleOrder(row: LendRow, d: LendDeps): Promise<void> {
     const closed = await d.closeAsks(row.agent); // 这个 worker 开出的额度 / 登录卡：单结束了，卡也结掉
     if (!closed.ok) throw new Error(`关 ${row.agent} 的 Codex 卡失败：${closed.error}`); // 留着 settle，下一轮再关
   }
-  await d.writeReceipt(row); // 抛了就留着 settle，下一轮再写（appendReceipt 同 orderId 只写一行）
   const told = await flushEndNotice(row, d);
   if (!told) return; // 交付 / 停止通知没交出去：留着 settle，下一轮补发
+  await d.writeReceipt(told); // 抛了就留着 settle，下一轮再写（appendReceipt 同 orderId 只写一行）
   patchOrder(d.db, row.orderId, [row.state], { settle: null }, d.now());
 }
 
