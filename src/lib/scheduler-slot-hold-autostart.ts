@@ -4,7 +4,8 @@ import { readLendSync, type BorrowEntry } from "./lend-config.js";
 import { readSchedulerConfig, type RemotePolicy } from "./scheduler-config.js";
 import { peerFacts } from "./scheduler-placement-plan.js";
 import { borrowPeers } from "./scheduler-pool-facts.js";
-import { newCardCapacity } from "./scheduler-slot-hold.js";
+import { peerRefusal } from "./scheduler-placement.js";
+import { newLocalWriteRoom, newCardCapacity } from "./scheduler-slot-hold.js";
 import { writeSlotFacts } from "./scheduler-slot-hold-facts.js";
 
 export interface SlotPool { remote: RemotePolicy | null; borrow: readonly BorrowEntry[] }
@@ -24,4 +25,15 @@ export function autostartCapacity(db: Database, project: string, maxWorkers: num
     remote: pool.remote, repo: pool.remote?.repo ?? null, peers: borrowPeers(db, project, pool.borrow, now).map(peerFacts),
     local: { running: slots.workerCount, room: slots.workerCount < maxWorkers }, pin: null, tried: [], lastPeer: null, writeLeasePeer: null, locksFree: true,
   } });
+}
+
+/** The claim transaction checks the selected destination again; a peer vacancy never authorizes a local start. */
+export function autostartPlacementGate(db: Database, project: string, maxWorkers: number,
+  peer: { name: string; repo: string } | null | undefined, pool = configuredPool(project), now = Date.now()): string | null {
+  const slots = writeSlotFacts(db, project);
+  if (!peer) return pool.remote?.localPriority !== "off" && newLocalWriteRoom(slots.workerCount, maxWorkers, slots.waitingFix)
+    ? null : "本机不写代码或写槽已满，不能在本机开卡";
+  const peers = borrowPeers(db, project, pool.borrow, now).map(peerFacts);
+  return peerRefusal({ remote: pool.remote, peers, repo: peer.repo, local: { running: slots.workerCount, room: false },
+    pin: null, tried: [], lastPeer: null, writeLeasePeer: null, locksFree: true }, peers.find((p) => p.peer === peer.name), "write", "claude");
 }

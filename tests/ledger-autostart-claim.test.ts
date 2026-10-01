@@ -178,6 +178,15 @@ describe("step：授权只到本 claim 的那张卡", () => {
     expect(await settle(c.seq, "failed")).toMatchObject({ ok: true });
   });
 
+  test("本机 claim 不能伪造 peer 放置来获得复述或 decision 权限", async () => {
+    const c = (await claim()).claim;
+    await taskNew(c.seq);
+    expect(await step(c.seq, "stage", "i28-a", "--from=spec", "--to=restate", "--dedup=d:fake-restate"))
+      .toMatchObject({ ok: false, code: "forbidden" });
+    expect(await step(c.seq, "decision", "i28-a", "peer:mate")) .toMatchObject({ ok: false, code: "forbidden" });
+    expect(getTask(db, "i28-a")!.stage).toBe("spec");
+  });
+
   test("模板声明不合法的 claim：不授予开 auto", async () => {
     const c = (await claim("a", ARM, "invalid")).claim;
     expect(c.template).toBeNull();
@@ -198,7 +207,7 @@ describe("lib 钩子：调度身份没有核过的 claim 就什么都写不了",
     expect(() => bindNode(db, { actor: "scheduler", autostart: { claim: 1, featureId: FID, key: "b", taskId: "i28-a" } }, bindIn)).toThrow(/PM/);
   });
 
-  test("源码断言：autostartGrant 只在 setWorkflow 与 bindNode 两处；ctx.autostart 只由 step 模块放入；applyMove 带角色的调用只在 step 的回滚取消", () => {
+  test("源码断言：autostartGrant 只在 setWorkflow 与 bindNode 两处；ctx.autostart 只由 step 模块放入；applyMove 只在 step 的取消或授权 peer 复述", () => {
     const root = resolve(import.meta.dir, "../src");
     const hits: Record<string, string[]> = { grant: [], put: [] };
     const walk = (d: string): void => {
@@ -218,7 +227,8 @@ describe("lib 钩子：调度身份没有核过的 claim 就什么都写不了",
     expect(hits.put).toEqual(["lib/ledger-autostart-step.ts"]);
     const step = readFileSync(join(root, "lib/ledger-autostart-step.ts"), "utf8");
     expect([...step.matchAll(/applyMove\(/g)]).toHaveLength(1);
-    expect(step).toMatch(/applyMove\(db, ctx, task, \{ from, to: "cancelled" \}/);
+    expect(step).toMatch(/applyMove\(db, ctx, task, \{ from, to \}/);
+    expect(step).toContain('input.flags.to === "restate" && c.peer && task.stage === "spec"');
     const sw = readFileSync(join(root, "lib/ledger-scheduler-write.ts"), "utf8");
     expect(sw).toMatch(/if \(!actorMayConfigure\(db, ctx\.actor, task\.project\) && !autostartGrant\(ctx, task\.id\)\) throw/);
     const dw = readFileSync(join(root, "lib/ledger-dag-write.ts"), "utf8");

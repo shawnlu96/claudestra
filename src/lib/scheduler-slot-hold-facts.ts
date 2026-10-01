@@ -23,8 +23,24 @@ export function writeSlotFacts(db: Database, project: string) {
   const held = resources.filter((r) => !stale.includes(r));
   const slots = held.filter((r) => r.resource.startsWith("slot:"));
   const writers = new Set(slots.map((r) => r.taskId));
+  // start_node creates the author before build dispatch takes a persisted slot. Project that author now,
+  // including the claim-to-create window, so admission and dispatch see the same reserved capacity.
+  const implicit = tasks.filter((t) => local.has(t.id) && t.agent && ["spec", "restate"].includes(t.stage) &&
+    !(typeof t.extra.placement === "string" && t.extra.placement.startsWith("peer:"))).map((t) => t.id);
+  const claims = db.query(`SELECT json_extract(e.data, '$.taskId') AS taskId FROM events e WHERE e.project = ?
+    AND json_extract(e.data, '$.op') = 'autostart_claim' AND json_extract(e.data, '$.peer') IS NULL
+    AND NOT EXISTS (SELECT 1 FROM events s WHERE s.dedupKey = 'autostart-settle:' || e.seq)
+    AND NOT EXISTS (SELECT 1 FROM tasks t WHERE t.id = json_extract(e.data, '$.taskId'))`).all(project) as { taskId: string }[];
+  const used = new Set(slots.map((r) => r.resource));
+  for (const taskId of [...implicit, ...claims.map((c) => c.taskId)]) {
+    if (writers.has(taskId)) continue;
+    let index = 0;
+    while (used.has(`slot:${project}:${index}`)) index++;
+    const row = { resource: `slot:${project}:${index}`, taskId };
+    used.add(row.resource); writers.add(taskId); slots.push(row); held.push(row);
+  }
   const waitingFix = tasks.some((t) => local.has(t.id) && !writers.has(t.id) && t.stage === "fix" && getWorkflow(db, t.id)?.mode === "auto" &&
     !(typeof t.extra.placement === "string" && t.extra.placement.startsWith("peer:")) &&
     returnedFix(t, listEvents(db, { project, target: t.id })));
-  return { held, stale, slots, workerCount: writers.size, waitingFix };
+  return { held, stale, slots, writers, workerCount: writers.size, waitingFix };
 }

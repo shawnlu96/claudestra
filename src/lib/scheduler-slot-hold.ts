@@ -44,7 +44,8 @@ export const newLocalWriteRoom = (writers: number, maxWorkers: number, waitingFi
 export function newCardCapacity(f: { writers: number; maxWorkers: number; waitingFix: boolean; inFlight: number; placement: PlacementFacts }): string | null {
   const limit = f.maxWorkers * IN_FLIGHT_MACHINES;
   if (f.inFlight >= limit) return `自动卡总在途已到上限 maxActiveWorkers × ${IN_FLIGHT_MACHINES}（${limit}，三台机器）`;
-  if (newLocalWriteRoom(f.writers, f.maxWorkers, f.waitingFix)) return null;
+  if (f.placement.remote?.localPriority !== "off" && newLocalWriteRoom(f.writers, f.maxWorkers, f.waitingFix)) return null;
   if (f.placement.peers.some((p) => !peerRefusal(f.placement, p, "write", "claude"))) return null;
+  if (f.placement.remote?.localPriority === "off") return "本机不写代码（localPriority=off），peer 写单名额已满或不可用";
   return f.waitingFix ? "本机空槽优先留给退回的 fix，且没有当前可接写单的 peer" : `本机写槽已满（maxActiveWorkers ${f.maxWorkers}），且没有当前可接写单的 peer`;
 }

@@ -1,6 +1,6 @@
 /**
  * start_node's placement (i28-W5): where a new card's writing goes, by the same placeFor the planner uses. `auto` picks
- * by tier and load and lands local whenever no peer qualifies (always, unless remote.roles holds write); `peer:<name>` is
+ * by tier and load; a new local start requires writing room and localPriority enabled; `peer:<name>` is
  * a pin that must pass every hard constraint now or start_node refuses. Reading the config / borrow / origin repo is
  * injected; a failed read means no peer, never a guess. tests/dag-tools-placement.test.ts.
  */
@@ -56,6 +56,8 @@ export async function startPlacement(db: Database, io: StartPlacementIO,
     [borrow, repo] = await Promise.all([io.borrow(), io.originRepo(q.repoDir)]);
   } catch (e) {
     if (pin) return { where: "refused", reason: `读借入名单 / 仓库地址失败：${(e as Error).message}` };
+    if (policy?.remote?.localPriority === "off") return { where: "refused", reason: `本机不写代码，读借入名单失败：${(e as Error).message}` };
+    if (!localLoad(db, q.project, policy?.maxWorkers ?? 0).room) return { where: "refused", reason: "本机写槽已满，且无法确认 peer 空位" };
     return { where: "local", reason: `读借入名单 / 仓库地址失败，放本机：${(e as Error).message}` };
   }
   const placed = placeFor({
@@ -64,5 +66,8 @@ export async function startPlacement(db: Database, io: StartPlacementIO,
   }, "write", "claude");
   if (placed.kind === "peer" && repo) return { where: "peer", peer: placed.peer, repo, reason: placed.reason };
   if (placed.kind === "wait") return { where: "refused", reason: placed.reason };
+  if (policy?.remote?.localPriority === "off" || !localLoad(db, q.project, policy?.maxWorkers ?? 0).room) {
+    return { where: "refused", reason: "本机不写代码或写槽已满，peer 写单名额已满或不可用" };
+  }
   return { where: "local", reason: placed.reason };
 }
