@@ -94,6 +94,7 @@ bridge 那头：`bridge/acp-link.ts`（宿主的帧 → watcher 推送 / 卡片 
 ## 已知边界与限制
 
 - **claudestra MCP 的接法。** ACP `mcpServers` 里的同名 server，如果 `~/.codex/config.toml` 已经定义了，会被适配器**静默丢掉**（`CodexAcpClient.ts`），本机的 config.toml 恰好有 `claudestra`。所以 channel-server 经 `CODEX_CONFIG` 的 `mcp_servers.claudestra.*` 传入（`lib/acp/adapter-proc.ts`），和 tmux 下 `-c mcp_servers.claudestra.*` 覆盖是同一个语义（Codex 把它深合并到 config.toml 之上）。环境白名单去掉了 `TMUX` / `TMUX_PANE` / 前言：标就绪、打字投递、前言在 acp 下都归宿主。
+- **Pi 走 ACP 时的挂载闸（残余风险）。** Pi 的 mcp.json 里有同名 server 会静默顶掉扩展挂的 channel-server，所以切 acp / 起宿主、适配器起 pi 前、pi 的 `session_start` 时都查撞名，任何一处不过就拒（`lib/acp/pi-adapter/mcp-clash.ts`，三处调用见 `lib/runtimes/pi-acp.ts`、`pi-adapter/main.ts`、`pi-adapter/mcp-mount.ts`）。挂载闸查的是磁盘上的 mcp.json，不是 Pi 已加载的快照；在加载与检查之间改写再恢复配置的同机进程不防（没有系统级隔离时这类进程本来就能直接改 Pi 配置）。以后可改为 channel-server 回宿主握手确认实际挂上的是自己的实例。
 - **沙箱只用 stub（owner 定的）。** 沙箱端到端不碰真 Codex 的登录和 `~/.codex`，用 `scripts/acp-stub.ts` 这个假的 ACP agent（只讲协议、不连模型，但会像 Codex 一样按 `CODEX_CONFIG` 起 channel-server、真的调 reply），把宿主、代理、bridge、网页整条链路测通。真模型只在合并后切 Shawn 本机的 agent-codex 时跑。沙箱闸门放「codex + `--transport acp`」，适配器固定起本仓的 `scripts/acp-stub.ts`（真实路径要在本仓里，`lib/acp/stub.ts`）；外部的 `CLAUDESTRA_ACP_AGENT` 是任意 argv，沙箱不继承、不认，带着它建 / 切 acp 直接拒。ACP 这条链（宿主、适配器、它起的 channel-server）的 `HOME` / `CODEX_HOME` 挪到沙箱根下的 `acp-home`；沙箱里的 Claude Code agent 仍用真 HOME（登录在那里）。tmux 版 Codex 照旧拒（`lib/sandbox.ts assertSandboxRuntime`）。
   - **不许**用软链或复制 `auth.json`：ChatGPT 登录的 refresh token 会轮换，一边刷新，另一边就失效。
   - `~/.codex/sessions` 是共享的，和 `~/.claude` 一样。
