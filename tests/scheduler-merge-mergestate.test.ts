@@ -6,7 +6,8 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, setSystemTime, test } from "bun:test";
-import { closeLedger, getMeta, listEvents, openLedger } from "../src/lib/ledger-store.js";
+import { closeLedger, getMeta, LEDGER_SCHEMA_VERSION, listEvents, openLedger } from "../src/lib/ledger-store.js";
+import { LedgerReader } from "../src/lib/ledger-read.js";
 import { setWorkflow } from "../src/lib/ledger-scheduler-write.js";
 import { createTask } from "../src/lib/ledger-write.js";
 import { parseSchedulerConfig } from "../src/lib/scheduler-config.js";
@@ -215,6 +216,53 @@ describe("i28-M12c durable UNKNOWN wait", () => {
       expect(() => advanceMergeRun(f.db, { actor: "scheduler" }, { ...input, rev: run.rev, receipt: "arbitrary" })).toThrow(/同阶段/);
       f.db.query("UPDATE scheduler_merges SET phase='resolved' WHERE intentId=?").run(INTENT);
       expect(() => advanceMergeRun(f.db, { actor: "scheduler" }, { ...input, from: "resolved", to: "resolved", rev: run.rev })).toThrow(/活动合并/);
+    });
+  });
+});
+
+/**
+ * Production shape (m12c-stale-reader-1): the scheduler reads through a long-lived LedgerReader opened before the deploy's first
+ * CLI migrates the column in, while writes go through a separate (migrating) ledger connection.
+ */
+async function acrossMigration(body: (tick: (snap: PrSnapshot, at: number) => Promise<void>, db: ReturnType<typeof openLedger>) => Promise<void>) {
+  await with_("await_ci", async (f) => {
+    f.db.exec(`ALTER TABLE scheduler_merges DROP COLUMN unknownSince; PRAGMA user_version = ${LEDGER_SCHEMA_VERSION - 1}`);
+    closeLedger(f.path);
+    const reader = new LedgerReader(f.path);
+    try {
+      expect(getMergeRun(reader.get()!, INTENT)).not.toHaveProperty("unknownSince");
+      const db = openLedger(f.path);
+      expect(getMergeRun(db, INTENT)).toHaveProperty("unknownSince", null);
+      const manager = async (...args: string[]) => runLedger(args.slice(1), { db, actor: "scheduler", projectIds: ["p"],
+        loadRegistry: async () => ({} as Registry), saveRegistry: async () => {}, now: () => Date.now() }) as Promise<Record<string, unknown>>;
+      await body(async (snap, at) => {
+        setSystemTime(new Date(at));
+        await schedulerMergeTick(reader.get()!, config, manager, () => ({ ...f.external, inspect: async () => snap }));
+      }, db);
+    } finally { reader.close(); }
+  });
+}
+
+describe("i28-M12c r1: a reader opened before the migration still sees the durable clock", () => {
+  test("UNKNOWN past ten minutes → unknown and frozen", async () => {
+    await acrossMigration(async (tick, db) => {
+      await tick(computing(), T0);
+      expect(getMergeRun(db, INTENT)).toMatchObject({ phase: "await_ci", unknownSince: T0 });
+      await tick(computing(), T0 + MERGE_STATE_UNKNOWN_LIMIT_MS - 1);
+      expect(getMergeRun(db, INTENT)?.phase).toBe("await_ci");
+      await tick(computing(), T0 + MERGE_STATE_UNKNOWN_LIMIT_MS);
+      expect(getMergeRun(db, INTENT)).toMatchObject({ phase: "unknown", unknownSince: null, reason: UNKNOWN_LIMIT_REASON });
+      expect(getMeta(db, "p").queueFrozen.frozen).toBe(true);
+    });
+  });
+  test("a same-phase non-UNKNOWN read clears the start, so a later UNKNOWN starts a new clock", async () => {
+    await acrossMigration(async (tick, db) => {
+      await tick(computing(), T0);
+      await tick(pr({ mergeState: "UNSTABLE", checks: [{ name: "check", bucket: "pending" }] }), T0 + 60_000);
+      expect(getMergeRun(db, INTENT)).toMatchObject({ phase: "await_ci", unknownSince: null });
+      await tick(computing(), T0 + MERGE_STATE_UNKNOWN_LIMIT_MS + 1);
+      expect(getMergeRun(db, INTENT)).toMatchObject({ phase: "await_ci", unknownSince: T0 + MERGE_STATE_UNKNOWN_LIMIT_MS + 1 });
+      expect(getMeta(db, "p").queueFrozen.frozen).toBe(false);
     });
   });
 });

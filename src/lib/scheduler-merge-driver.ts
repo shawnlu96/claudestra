@@ -55,8 +55,9 @@ function watchUnknown(current: () => MergeRun, external: MergeExternal, step: St
 }
 /** GitHub is still computing mergeability: stay in this phase and re-read next tick, until the limit turns it into unknown. */
 async function unknownWait(run: MergeRun, step: Step): Promise<MergeRun> {
-  if (run.unknownSince == null) return step(run.phase, MERGE_UNKNOWN_WAIT);
-  if (Date.now() - run.unknownSince < MERGE_STATE_UNKNOWN_LIMIT_MS) return run;
+  // Judge the row the WAIT write returns: the journal keeps an existing start, so a stale read still meets the limit.
+  const seen = run.unknownSince == null ? await step(run.phase, MERGE_UNKNOWN_WAIT) : run;
+  if (seen.unknownSince == null || Date.now() - seen.unknownSince < MERGE_STATE_UNKNOWN_LIMIT_MS) return seen;
   return step("unknown", UNKNOWN_LIMIT_REASON);
 }
 

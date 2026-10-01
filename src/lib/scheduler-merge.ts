@@ -46,7 +46,9 @@ const canWrite = (db: Database, actor: string, project: string): boolean =>
 
 export function getMergeRun(db: Database, intentId: string): MergeRun | null {
   if (!db.query("SELECT 1 FROM sqlite_master WHERE type='table' AND name='scheduler_merges'").get()) return null;
-  return db.query("SELECT * FROM scheduler_merges WHERE intentId = ?").get(intentId) as MergeRun | null;
+  // prepare, not query: a cached `SELECT *` keeps its column list, so the scheduler's long-lived reader would never see a
+  // column a newer CLI migrated in (unknownSince → the UNKNOWN limit silently stops). tests/scheduler-merge-mergestate.test.ts.
+  return db.prepare("SELECT * FROM scheduler_merges WHERE intentId = ?").get(intentId) as MergeRun | null;
 }
 
 /** Re-read the ledger before every external effect; a PM pause or changed head invalidates the old run. */
