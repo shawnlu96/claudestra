@@ -38,7 +38,8 @@ export function workOrderFor(task: LedgerTask, intent: SchedulerIntent, plan: Pl
   if (step === "review") {
     const report = `${statePath("ledger", "reviews", `${task.id}-r${task.round}`)}/report.md`;
     const where = checkout ? [`审查目录：${checkout}（已固定在这个 head；只读，不改、不提交、不推送）`] : [];
-    return { ...base, inputs: [spec, `只审 head ${intent.head ?? "（无）"}`, ...(w?.bounce ? [bounceReviewLine(w.bounce)] : []), ...where], outputs: ["逐项结论 JSON（findingId / family / severity / probe）", `报告：${report}`],
+    const targeted = w?.bounce ? [bounceReviewLine(w.bounce)] : [];
+    return { ...base, inputs: [spec, `只审 head ${intent.head ?? "（无）"}`, ...targeted, ...where], outputs: ["逐项结论 JSON（findingId / family / severity / probe）", `报告：${report}`],
       acceptance: ["对抗式：专找能打穿规格保证的路径", "同类问题沿用上一轮的 findingId", REVIEW_CI_RULE],
       writeBack: `${CLI} review ${task.id} --reviewer ${ref.agent} --verdict pass|changes|block --p0 N --p1 N --p2 N --head ${intent.head ?? "<head>"}` +
         ` --session ${ref.sessionId} --family ${ref.family} --findings <逐项结论.json> --path ${report}（不要带 --to，阶段由调度器推）` };

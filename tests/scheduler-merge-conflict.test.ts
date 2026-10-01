@@ -70,7 +70,7 @@ const with_ = async (phase: MergePhase, body: (f: F) => Promise<void>) => {
   try { await body(f); } finally { f.close(); }
 };
 const stateOf = (f: F) => ({
-  run: getMergeRun(f.db, "merge-T1")?.phase,
+  run: getMergeRun(f.db, "merge-T1")?.phase as string | undefined,
   intent: (f.db.query("SELECT status FROM scheduler_intents WHERE id='merge-T1'").get() as { status: string }).status,
   stage: (f.db.query("SELECT stage FROM tasks WHERE id='T1'").get() as { stage: string }).stage,
   frozen: getMeta(f.db, "p").queueFrozen.frozen,

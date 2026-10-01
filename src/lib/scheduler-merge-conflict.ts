@@ -15,13 +15,13 @@ import type { MergeExternal, PrSnapshot } from "./scheduler-merge-driver.js";
 import type { MergePhase, MergeRun } from "./scheduler-merge.js";
 
 export type BounceCause = "conflict" | "ci_fail";
-export interface FailedCheck { name: string; link: string }
+interface FailedCheck { name: string; link: string }
 export interface MergeBounce { cause: BounceCause; prHead: string; mainHead: string | null; checks: FailedCheck[] }
 /** Bounces (conflict + CI failure together) a card gets back to fix automatically; the next one goes to the PM. */
 export const MAX_MERGE_BOUNCES = 3;
 export const BOUNCE_LIMIT_REASON = "反复冲突，可能和别的卡长期改同一处，需要 PM 排期";
 /** No merge has been sent from these phases, so ending the run cannot hide an external merge. */
-export const BOUNCE_PHASES: readonly MergePhase[] = ["ready", "updating", "await_ci"];
+const BOUNCE_PHASES: readonly MergePhase[] = ["ready", "updating", "await_ci"];
 
 const SHA = /^[a-f0-9]{40}$/i;
 const sameSha = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
@@ -34,14 +34,14 @@ function untouched(run: MergeRun, pr: PrSnapshot): boolean {
 }
 
 /** Required checks that failed or were cancelled on the reviewed head; other checks keep their old (unknown) handling. */
-export function failedRequired(run: MergeRun, checks: PrSnapshot["checks"]): FailedCheck[] {
+function failedRequired(run: MergeRun, checks: PrSnapshot["checks"]): FailedCheck[] {
   const names = required(run);
   return checks.filter((c) => names.includes(c.name) && (c.bucket === "fail" || c.bucket === "cancel"))
     .map((c) => ({ name: c.name, link: typeof c.link === "string" && /^https:\/\/\S+$/.test(c.link) ? c.link : "" }));
 }
 
 /** Null whenever any condition fails: the caller then keeps its previous answer (unknown / back to review / wait). */
-export function bounceOf(run: MergeRun, pr: PrSnapshot, only?: BounceCause): BounceCause | null {
+function bounceOf(run: MergeRun, pr: PrSnapshot, only?: BounceCause): BounceCause | null {
   if (!untouched(run, pr)) return null;
   if (pr.mergeState === "DIRTY") return "conflict";
   return only !== "conflict" && failedRequired(run, pr.checks).length ? "ci_fail" : null;
