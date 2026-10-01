@@ -41,12 +41,21 @@ export interface AcpTranslator {
   flush(): Rec[];
 }
 
-/** 线程状态（session_info_update._meta.codex.threadStatus.type：idle / active / systemError / notLoaded）；不是这类更新返回 null */
+/**
+ * 线程状态（session_info_update 的 threadStatus.type：idle / active / systemError / notLoaded）；不是这类更新返回 null。
+ * codex-acp 放在 _meta.codex，Pi 适配器用中性的 _meta.claudestra（pi-adapter/map.ts），两个都认。
+ */
 export function threadStatusOf(update: unknown): string | null {
   const u = update as Rec | null;
   if (u?.sessionUpdate !== "session_info_update") return null;
-  const t = u._meta?.codex?.threadStatus?.type;
+  const t = u._meta?.codex?.threadStatus?.type ?? u._meta?.claudestra?.threadStatus?.type;
   return typeof t === "string" ? t : null;
+}
+
+/** Pi 适配器在 idle 上带的这一轮结局（pi-adapter/map.ts turnEnd）；codex-acp 不带，返回 null，Codex 的解释照旧 */
+export function turnEndOf(update: unknown): { stopReason?: string; failure?: { kind?: string; message?: string } } | null {
+  const t = (update as Rec | null)?._meta?.claudestra?.turn;
+  return t && typeof t === "object" ? t : null;
 }
 
 function toolUseOf(t: ToolState): { name: string; input: Rec } {

@@ -1,0 +1,30 @@
+Third-party notice for tests/pi-upstream-0.99.2.ts
+
+That file contains functions copied from @earendil-works/pi-coding-agent 0.99.2
+(npm tarball SHA-1 6f95461d41661aea1243f6cc2ac0ace8497d21f7; source repository
+https://github.com/earendil-works/pi at commit 005af57d88ee23b33778f343a9595b32e67ff788).
+The published tarball ships no LICENSE file; the text below is the repository's
+LICENSE at that commit, reproduced verbatim:
+
+----------------------------------------------------------------------------
+MIT License
+
+Copyright (c) 2025 Mario Zechner
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.

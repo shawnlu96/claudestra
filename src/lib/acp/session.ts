@@ -1,18 +1,19 @@
 /**
- * 宿主里的一条 ACP 会话（对着 codex-acp 或沙箱的 stub）：initialize、接上已有线程、prompt / steer / cancel / 改配置，
+ * 宿主里的一条 ACP 会话（对着 codex-acp、Pi 适配器或沙箱的 stub）：initialize、接上已有线程、prompt / steer / cancel / 改配置，
  * 以及把适配器发来的权限请求交给宿主。回合结束的关联（Shawn 复审的两条要求）：
- * - 线程状态（session_info_update._meta.codex.threadStatus）每来一次记一个递增序号，idle / systemError 的序号缓存下来；
+ * - 线程状态（session_info_update 的 threadStatus，见 updates.ts）每来一次记一个递增序号，idle / systemError 的序号缓存下来；
  *   steer 答 startedNewTurn 时，在回包那一行处理的**同一刻**（rpc 的 onResult 同步钩子）记下当前序号，那一轮的结束 =
  *   这个序号之后的第一个 idle。已经来过就立刻兑现——不会「先完成、后挂监听」；序号只增，也不会拿上一轮的 idle 充数。
  * - 适配器退出（rpc 断流）：在途请求由 rpc 全部 reject，挂着的外部回合等待在这里一律以失败兑现，没有永远等不到的调用。
+ * - idle 带了这一轮的结局（Pi 适配器的 _meta.claudestra.turn）就按它兑现：steering 另起的回合失败了也得出卡、报 StopFailure。
  * 规矩与形状见 docs/runtimes/codex-acp.md；tests/acp-session.test.ts。
  */
-import { configRefusal, parseConfigOptions, type ConfigOption } from "./config.js";
-import { airFailureOf, classifyAirFailure, classifyPromptError } from "./failures.js";
+import { configRefusal, parseConfigOptions, resolveConfigValue, type ConfigOption } from "./config.js";
+import { airFailureOf, classifyAirFailure, classifyNeutralFailure, classifyPromptError } from "./failures.js";
 import { permissionCard, permissionResponse, CANCELLED, type PermissionCard } from "./permissions.js";
 import { createRpcPeer, type RpcPeer, type RpcWire } from "./rpc.js";
 import type { PromptOutcome, SteerResult } from "./turn.js";
-import { threadStatusOf } from "./updates.js";
+import { threadStatusOf, turnEndOf } from "./updates.js";
 
 /** initialize 时声明的客户端能力：AIR 的 sessionFailure（结构化失败）+ 终端输出增量（声明了 AIR 不声明它，命令输出就收不到） */
 export const CLIENT_CAPABILITIES = {
@@ -27,9 +28,12 @@ export interface SessionDeps {
   /** 适配器要授权：交给宿主出卡、等 owner 点；超时 / 取消由宿主回 null */
   onPermission(card: PermissionCard): Promise<string | null>;
   log(msg: string): void;
+  /** 卡片 / 失败文案里的运行时称呼（缺省 Codex） */
+  label?: string;
 }
 
 type Waiter = { after: number; resolve: (o: PromptOutcome) => void; cancelled: boolean };
+type TurnEnd = ReturnType<typeof turnEndOf>;
 
 export class AcpSession {
   readonly rpc: RpcPeer;
@@ -37,21 +41,22 @@ export class AcpSession {
   configOptions: ConfigOption[] = [];
   steering = false;
   private statusSeq = 0;
-  private lastEnd: { seq: number; status: string } | null = null;
+  private lastEnd: { seq: number; status: string; end: TurnEnd } | null = null;
   private waiters: Waiter[] = [];
   private turnSeq = 0;
 
-  constructor(wire: RpcWire, private readonly deps: SessionDeps) {
+  /** mcpServers：session/new|resume|load|fork 都带同一份（Pi 的 channel-server 只能这样交，/clear 新建时也要再带） */
+  constructor(wire: RpcWire, private readonly deps: SessionDeps, private readonly mcpServers: readonly unknown[] = []) {
     this.rpc = createRpcPeer(wire, { log: deps.log });
     this.rpc.onNotification("session/update", (p: any) => {
       if (!p || (this.sessionId && p.sessionId !== this.sessionId)) return; // 子会话（我们没声明 subagents）等别的会话不管
       const u = p.update ?? {};
       const st = threadStatusOf(u);
-      if (st) this.noteStatus(st);
+      if (st) this.noteStatus(st, turnEndOf(u));
       this.deps.onUpdate(u);
     });
     this.rpc.onRequest("session/request_permission", async (params) => {
-      const card = permissionCard(params);
+      const card = permissionCard(params, this.label);
       if (!card) return CANCELLED;
       const picked = await this.deps.onPermission(card).catch(() => null); // 出卡 / 等答案出错按「没答」：回 cancelled，适配器按拒绝走（fail closed）
       return permissionResponse(card, picked);
@@ -69,13 +74,13 @@ export class AcpSession {
   /** 接上已有线程：支持 resume 就用它（不回放历史），否则 session/load（回放的历史更新宿主不需要，照样只进 onUpdate） */
   async attach(sessionId: string, cwd: string, resume: boolean): Promise<void> {
     this.sessionId = sessionId;
-    const r = await this.rpc.request(resume ? "session/resume" : "session/load", { sessionId, cwd, mcpServers: [] }, { timeoutMs: 120_000 });
+    const r = await this.rpc.request(resume ? "session/resume" : "session/load", { sessionId, cwd, mcpServers: this.mcpServers }, { timeoutMs: 120_000 });
     this.configOptions = parseConfigOptions(r?.configOptions);
   }
 
-  /** 新建线程（只在 create 的引导里用：新线程要先跑一轮才落盘，见 runtimes/codex-acp.ts） */
+  /** 新建线程（create 的引导与 /clear；Codex 新线程要先跑一轮才落盘，见 runtimes/codex-acp.ts） */
   async create(cwd: string, timeoutMs = 120_000): Promise<string> {
-    const r = await this.rpc.request("session/new", { cwd, mcpServers: [] }, { timeoutMs });
+    const r = await this.rpc.request("session/new", { cwd, mcpServers: this.mcpServers }, { timeoutMs });
     if (typeof r?.sessionId !== "string" || !r.sessionId) throw new Error("session/new 没返回 sessionId");
     this.sessionId = r.sessionId;
     this.configOptions = parseConfigOptions(r?.configOptions);
@@ -84,7 +89,7 @@ export class AcpSession {
 
   /** 分叉已持久化的线程；调用方须在短命引导进程退出前接上并跑一轮。 */
   async fork(sessionId: string, cwd: string): Promise<string> {
-    const r = await this.rpc.request("session/fork", { sessionId, cwd, mcpServers: [] }, { timeoutMs: 120_000 });
+    const r = await this.rpc.request("session/fork", { sessionId, cwd, mcpServers: this.mcpServers }, { timeoutMs: 120_000 });
     if (typeof r?.sessionId !== "string" || !r.sessionId || r.sessionId === sessionId) throw new Error("session/fork 没返回新的 sessionId");
     this.sessionId = r.sessionId;
     this.configOptions = parseConfigOptions(r?.configOptions);
@@ -96,7 +101,7 @@ export class AcpSession {
     try {
       const r = await this.rpc.request("session/prompt", { sessionId: this.sessionId, prompt: [{ type: "text", text }] }, { timeoutMs });
       const air = airFailureOf(r);
-      if (air) return { kind: "failed", failure: classifyAirFailure(air) };
+      if (air) return { kind: "failed", failure: classifyAirFailure(air, this.label) };
       return r?.stopReason === "cancelled" ? { kind: "cancelled" } : { kind: "done" };
     } catch (e) {
       return { kind: "failed", failure: classifyPromptError(e, turnKey) };
@@ -122,8 +127,9 @@ export class AcpSession {
     this.rpc.notify("session/cancel", { sessionId: this.sessionId });
   }
 
-  /** 改会话配置（模型 / 推理强度…）：先本地校验，再调 set_config_option，成功后更新缓存 */
-  async setConfig(configId: string, value: string, timeoutMs = 30_000): Promise<{ ok: true } | { ok: false; error: string }> {
+  /** 改会话配置（模型 / 推理强度…）：先把值对上选项（resolveConfigValue）再本地校验，再调 set_config_option，成功后更新缓存 */
+  async setConfig(configId: string, raw: string, timeoutMs = 30_000): Promise<{ ok: true } | { ok: false; error: string }> {
+    const value = resolveConfigValue(this.configOptions, configId, raw);
     const refusal = configRefusal(this.configOptions, configId, value);
     if (refusal) return { ok: false, error: refusal };
     try {
@@ -136,24 +142,34 @@ export class AcpSession {
     }
   }
 
+  private get label(): string {
+    return this.deps.label ?? "Codex";
+  }
+
   /** 序号 after 之后的第一个回合结束（idle / systemError）；已经来过就立刻兑现 */
   private waitEndAfter(after: number): Promise<PromptOutcome> {
-    if (this.lastEnd && this.lastEnd.seq > after) return Promise.resolve(this.endOutcome(this.lastEnd.status, false));
+    if (this.lastEnd && this.lastEnd.seq > after) return Promise.resolve(this.endOutcome(this.lastEnd, false));
     return new Promise((resolve) => this.waiters.push({ after, resolve, cancelled: false }));
   }
 
-  private noteStatus(status: string): void {
+  private noteStatus(status: string, end: TurnEnd): void {
     const seq = ++this.statusSeq;
     if (status !== "idle" && status !== "systemError") return;
-    this.lastEnd = { seq, status };
+    const last = (this.lastEnd = { seq, status, end });
     const due = this.waiters.filter((w) => seq > w.after);
     this.waiters = this.waiters.filter((w) => seq <= w.after);
-    for (const w of due) w.resolve(this.endOutcome(status, w.cancelled));
+    for (const w of due) w.resolve(this.endOutcome(last, w.cancelled));
   }
 
-  private endOutcome(status: string, cancelled: boolean): PromptOutcome {
-    if (status === "systemError") return { kind: "failed", failure: { kind: "error", key: `status:${this.sessionId}#${this.statusSeq}`, message: "Codex 线程出错（systemError）" } };
-    return cancelled ? { kind: "cancelled" } : { kind: "done" };
+  private endOutcome(e: { seq: number; status: string; end: TurnEnd }, cancelled: boolean): PromptOutcome {
+    const key = `status:${this.sessionId}#${e.seq}`;
+    if (e.status === "systemError") return { kind: "failed", failure: { kind: "error", key, message: `${this.label} 线程出错（systemError）` } };
+    const f = e.end?.failure;
+    if (f) {
+      const message = typeof f.message === "string" && f.message ? f.message : `${this.label} 回合失败`;
+      return { kind: "failed", failure: classifyNeutralFailure(f.kind, key, message) ?? { kind: "error", key, message } };
+    }
+    return cancelled || e.end?.stopReason === "cancelled" ? { kind: "cancelled" } : { kind: "done" };
   }
 
   /** 适配器退出：挂着的等待一律以失败兑现（在途请求由 rpc 自己 reject） */

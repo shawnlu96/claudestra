@@ -47,14 +47,25 @@ export function airFailureOf(result: unknown): AirSessionFailure | null {
 }
 
 /** AIR 失败 → 我们的分类（key = air:<id>：同一横幅的后续 revision 不再出第二张卡） */
-export function classifyAirFailure(f: AirSessionFailure): AcpFailure {
+export function classifyAirFailure(f: AirSessionFailure, label = "Codex"): AcpFailure {
   const key = `air:${f.id}`;
-  const message = f.title || `Codex 回合失败（${f.category}）`;
+  const message = f.title || `${label} 回合失败（${f.category}）`;
   if (f.category === "access" || f.actions.includes("login")) return { kind: "auth", key, message };
   const retry = f.actions.includes("retry");
   const newSession = f.actions.includes("new_session");
   if (f.category === "limit" && ((!retry && !newSession) || USAGE_LIMIT_RE.test(f.title))) return { kind: "quota", key, message };
   return { kind: "error", key, message, retry, ...(newSession ? { newSession: true } : {}) };
+}
+
+/**
+ * 运行时无关的失败种类（Pi 适配器给：prompt 错误的 data.failureKind、idle 上 turn.failure.kind）→ 分类。
+ * rate_limit 是暂时限流：只出条目、标可重试，不进额度通道；认不出的种类返回 null，由调用方按 error 处理。
+ */
+export function classifyNeutralFailure(kind: unknown, key: string, message: string): AcpFailure | null {
+  if (kind === "quota") return { kind: "quota", key: `quota:${key}`, message };
+  if (kind === "auth") return { kind: "auth", key: `auth:${key}`, message };
+  if (kind === "rate_limit") return { kind: "error", key: `rpc:${key}`, message, retry: true };
+  return null;
 }
 
 /** session/prompt（或 session/new|load）抛的错 → 分类；认不出的一律 error。turnKey = 宿主给这一轮的编号（同一回合只出一次） */
@@ -64,7 +75,7 @@ export function classifyPromptError(e: unknown, turnKey: string): AcpFailure {
     const data = (e.data ?? {}) as Record<string, unknown>;
     const detail = typeof data.message === "string" && data.message ? data.message : e.message;
     if (data.codexErrorInfo === "usageLimitExceeded") return { kind: "quota", key: `quota:${turnKey}`, message: detail };
-    return { kind: "error", key: `rpc:${turnKey}`, message: detail };
+    return classifyNeutralFailure(data.failureKind, turnKey, detail) ?? { kind: "error", key: `rpc:${turnKey}`, message: detail };
   }
   return { kind: "error", key: `rpc:${turnKey}`, message: e instanceof Error ? e.message : String(e) };
 }

@@ -5,13 +5,15 @@
  * - session/prompt → prompt（followUp：pi 还在跑也能排上），等到 agent_settled 才回 stopReason；session/cancel → abort。
  *   _session/steering → 带 steer 的 prompt：排进在跑的回合 = injected，pi 另起一轮 = startedNewTurn（结束只靠 idle）。
  * - 回合结束后按 get_session_stats 发 usage_update；扩展弹框一律回取消；pi 意外退出 = 适配器退出，由宿主重起。
+ * - 挂 channel-server 的会话：起 pi 前后各查一次撞名 / reply 能否活下来（deps.mountProblem），pi 里的挂载扩展在它读 mcp.json
+ *   的那一刻再报一次（MOUNT_STATUS_KEY）；任何一处不过就拒这个会话，不让宿主把没有 reply 的会话当成接通。
  * tests/pi-acp-replay.test.ts（录制的 pi 0.99.1 事件流回放）、tests/pi-acp-shell.test.ts。
  */
 import { createRpcPeer, RpcError, type RpcPeer, type RpcWire } from "../rpc.js";
 import {
-  configOptions, createPiEventMapper, dialogCancel, mcpServersForPi, splitModelValue, stopReasonOf, textOf, threadStatus, usageUpdate, type TurnOutcome,
+  configOptions, createPiEventMapper, dialogCancel, mcpServersForPi, splitModelValue, textOf, threadStatus, turnEnd, usageUpdate, type TurnOutcome,
 } from "./map.js";
-import { PI_MCP_SERVERS_ENV } from "./mcp-mount.js";
+import { MOUNT_OK, MOUNT_STATUS_KEY, PI_MCP_SERVERS_ENV } from "./mcp-mount.js";
 import type { PiLink } from "./pi-link.js";
 
 type Rec = Record<string, any>;
@@ -25,6 +27,8 @@ const COMMAND_TIMEOUT_MS = 30_000;
 export interface PiServerDeps {
   openPi(o: { sessionId: string; cwd: string; env: Record<string, string> }): PiLink;
   newSessionId(): string;
+  /** 要挂的 MCP server 起 pi 会出问题（和 pi 的 mcp.json 撞名、reply 会被能力档筛掉）就返回原因；有原因就拒起这个会话 */
+  mountProblem?(names: string[], cwd: string): string | null;
   log(msg: string): void;
   /** 适配器该退出了：宿主关了 stdin（0），或 pi 意外退出（1） */
   exit(code: number): void;
@@ -46,9 +50,13 @@ interface Gen {
   running: boolean;
   inflight: number;
   cancelRequested: boolean;
+  /** 挂载扩展在 session_start 报的状态（MOUNT_STATUS_KEY）；没挂 server 的会话不看 */
+  mount?: string;
 }
 
 const STALE = "会话被换掉或关闭了（session/new、resume 或宿主断开），这一轮作废";
+/** 旧会话已经停掉后新会话又起不来：错误带上它，宿主据此重起适配器、接回 registry 里的旧会话（lib/acp/clear.ts） */
+const CLOSED_OLD = { previousSessionClosed: true };
 const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
 export class PiAcpServer {
@@ -109,9 +117,17 @@ export class PiAcpServer {
   private async openNow(id: string, p: Rec): Promise<Gen> {
     const mcp = mcpServersForPi(p?.mcpServers);
     if ("error" in mcp) throw new RpcError(INVALID_PARAMS, mcp.error);
+    const names = Object.keys(mcp.servers);
+    const cwd = typeof p?.cwd === "string" && p.cwd ? p.cwd : process.cwd();
+    const problem = () => (names.length ? (this.deps.mountProblem?.(names, cwd) ?? null) : null);
+    const before = problem(); // 先查：已知有问题就别停掉还好好的旧会话
+    if (before) throw new RpcError(INVALID_PARAMS, before);
+    const hadOld = !!this.gen;
     await this.closePi();
-    const env: Record<string, string> = Object.keys(mcp.servers).length ? { [PI_MCP_SERVERS_ENV]: JSON.stringify(mcp.servers) } : {};
-    const link = this.deps.openPi({ sessionId: id, cwd: typeof p?.cwd === "string" && p.cwd ? p.cwd : process.cwd(), env });
+    const after = problem(); // 等旧 pi 退出期间配置可能变了，起新的之前再查一次
+    if (after) throw new RpcError(INVALID_PARAMS, after, hadOld ? CLOSED_OLD : undefined);
+    const env: Record<string, string> = names.length ? { [PI_MCP_SERVERS_ENV]: JSON.stringify(mcp.servers) } : {};
+    const link = this.deps.openPi({ sessionId: id, cwd, env });
     const g: Gen = { link, sessionId: id, mapper: createPiEventMapper(), waiters: [], options: [], running: false, inflight: 0, cancelRequested: false };
     this.gen = g;
     link.onRecord((rec) => {
@@ -124,6 +140,12 @@ export class PiAcpServer {
       this.deps.exit(1);
     });
     await this.refreshOptions(g, STARTUP_TIMEOUT_MS);
+    // session_start 在 pi 开始读命令之前就跑完了，所以启动查询回来时挂载扩展的状态一定已经到了；没到 = 扩展没加载上
+    if (names.length && g.mount !== MOUNT_OK) {
+      await this.closePi();
+      const why = g.mount ?? "pi 没有报挂载状态（挂载扩展没加载上？），channel-server 没挂上";
+      throw new RpcError(INVALID_PARAMS, why, hadOld ? CLOSED_OLD : undefined);
+    }
     return g;
   }
 
@@ -148,6 +170,10 @@ export class PiAcpServer {
   }
 
   private onRecord(g: Gen, rec: Rec): void {
+    if (rec.type === "extension_ui_request" && rec.method === "setStatus" && rec.statusKey === MOUNT_STATUS_KEY) {
+      g.mount = typeof rec.statusText === "string" ? rec.statusText : undefined;
+      return;
+    }
     if (rec.type === "extension_ui_request") {
       const reply = dialogCancel(rec);
       if (!reply) return;
@@ -165,9 +191,9 @@ export class PiAcpServer {
 
   private settle(g: Gen): void {
     g.running = false;
-    this.update(g, threadStatus("idle"));
     const s: Settled = { outcome: g.mapper.takeOutcome(), cancelled: g.cancelRequested };
     g.cancelRequested = false;
+    this.update(g, threadStatus("idle", turnEnd(s.outcome, s.cancelled))); // steering 另起的回合只能从这里知道结局
     for (const w of g.waiters.splice(0)) w.resolve(s);
     void this.reportUsage(g);
   }
@@ -197,10 +223,9 @@ export class PiAcpServer {
       return { stopReason: "end_turn" };
     }
     const { outcome, cancelled } = await wait;
-    const stopReason = stopReasonOf(outcome, cancelled);
-    if (stopReason) return { stopReason };
-    const message = `Pi 回合失败：${outcome.errorMessage ?? "未说明原因"}`;
-    throw new RpcError(INTERNAL_ERROR, message, { message, piStopReason: "error" });
+    const end = turnEnd(outcome, cancelled);
+    if (!end.failure) return { stopReason: end.stopReason };
+    throw new RpcError(INTERNAL_ERROR, end.failure.message, { message: end.failure.message, piStopReason: "error", failureKind: end.failure.kind });
   }
 
   private async steer(p: Rec): Promise<Rec> {
