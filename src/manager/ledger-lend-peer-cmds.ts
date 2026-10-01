@@ -1,5 +1,5 @@
 /**
- * `ledger lend-*` for lend protocol v2 (i28-W2, docs/design/remote-capacity.md §3):
+ * `ledger lend-*` for lend protocol v2 (i28-W2, docs/design/remote-capacity.md §8):
  * - bridge only (owner identity, local-api/lend.ts and bridge/lend-dispatch.ts via runManager):
  *   lend-hello / lend-beat `-- <peer> <json>` take a lender's hello / batched beat; lend-pushed `-- <peer> <json>` records what
  *   the lender answered to a push (accepted → acknowledged, refused → withdrawn now).

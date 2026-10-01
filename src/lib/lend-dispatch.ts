@@ -1,5 +1,5 @@
 /**
- * The push loop's logic (lend protocol v2, docs/design/remote-capacity.md §3.2), with every effect injected; the bridge wires it
+ * The push loop's logic (lend protocol v2, docs/design/remote-capacity.md §8.2), with every effect injected; the bridge wires it
  * in bridge/lend-dispatch.ts. Each tick announces pooled orders to peers that said a fresh v2 hello, batched per peer; what the
  * lender answers goes to the ledger (accepted → acknowledged, refused → withdrawn). A push is only a notice — the lender's v1
  * claim is still the one authoritative CAS — so a push that fails just backs off (5 s, 15 s, 30 s, then every 60 s) and the

@@ -1,5 +1,5 @@
 /**
- * Lend protocol v2 (docs/design/remote-capacity.md §3): what a v2 lender B sends this instance A — hello (capacity + grant),
+ * Lend protocol v2 (docs/design/remote-capacity.md §8): what a v2 lender B sends this instance A — hello (capacity + grant),
  * beat (batched heartbeat that also renews leases), ask (a remote worker's question, relayed by B) — and the offer A pushes
  * to B. The four v1 calls (lib/lend-wire.ts) stay byte-for-byte as they are; v2 only adds endpoints, never fields to v1
  * bodies (tests/lend-wire-v1-golden.test.ts). Both directions parse strictly, the same way: unknown / missing field, wrong
@@ -12,22 +12,21 @@ import { parseAskWire } from "./order-wire.js";
 /** The protocol generation this build speaks; hello carries it both ways. A peer with no hello on file is proto 1 (poll only). */
 export const LEND_PROTO = 2;
 const BODY_V = 1;
-export const HELLO_MS = 60_000;
-export const BEAT_MS = 15_000;
+const HELLO_MS = 60_000;
+const BEAT_MS = 15_000;
 /** A hello older than this counts as zero capacity: B says hello every HELLO_MS, three missed = gone. */
 export const HELLO_FRESH_MS = 180_000;
 const BEAT_MAX = 50;
 export const OFFER_MAX = 20;
 const EXCERPT_MAX = 1024;
 
-export const LEND_V2_ENDPOINTS = ["hello", "beat", "ask", "offer"] as const;
+const LEND_V2_ENDPOINTS = ["hello", "beat", "ask", "offer"] as const;
 export type LendV2Endpoint = (typeof LEND_V2_ENDPOINTS)[number];
 /**
  * HTTP status per v2 refusal. None of them is 404: a v2 endpoint answering 404 means the other side predates it (old build),
  * which is how B falls back to polling (lib/lend-remote.ts).
  */
 export const LEND_V2_STATUS = { unauthorized: 401, invalid: 400, not_held: 409, no_hello: 409, unavailable: 503 } as const;
-export type LendV2Refusal = keyof typeof LEND_V2_STATUS;
 
 type Role = "review" | "write";
 export interface Grant { until: number; roles: Role[]; repos: string[]; ordersPerDay: number; ordersLeftToday: number }
@@ -41,12 +40,12 @@ export interface BeatOrder {
   orderId: string; gen: number; phase: (typeof PHASES)[number]; lastActivityAt: number; excerpt: string; ended: { reason: "revoked"; clean: boolean } | null;
 }
 export interface BeatRequest { v: 1; orders: BeatOrder[] }
-export const BEAT_VERDICTS = ["ok", "cancelled", "lease_expired", "stale_gen", "not_found", "done"] as const;
-export type BeatVerdict = (typeof BEAT_VERDICTS)[number];
-export interface LeaseV2 { gen: number; expiresAt: number; ms: number }
+const BEAT_VERDICTS = ["ok", "cancelled", "lease_expired", "stale_gen", "not_found", "done"] as const;
+type BeatVerdict = (typeof BEAT_VERDICTS)[number];
+interface LeaseV2 { gen: number; expiresAt: number; ms: number }
 export interface BeatAnswer { orderId: string; verdict: BeatVerdict; lease: LeaseV2 | null }
 
-export interface AskRequest { v: 1; orderId: string; gen: number; question: string; options: string[] }
+interface AskRequest { v: 1; orderId: string; gen: number; question: string; options: string[] }
 export interface OfferRequest { v: 1; proto: number; orders: OfferSummary[] }
 export interface OfferResponse { accepted: string[]; refused: { orderId: string; code: string }[] }
 

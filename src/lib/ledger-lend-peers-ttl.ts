@@ -1,5 +1,5 @@
 /**
- * Push TTL (lend protocol v2, docs/design/remote-capacity.md §3.2): an order pooled for a peer that speaks v2 is pushed to it,
+ * Push TTL (lend protocol v2, docs/design/remote-capacity.md §8.2): an order pooled for a peer that speaks v2 is pushed to it,
  * and a push is only a notice — so a lost push, a lost answer or a lender that accepted and then went quiet must not leave the
  * order hanging. Not acknowledged within PUSH_ACK_TTL_MS of the offer, or acknowledged but unclaimed PUSH_CLAIM_TTL_MS later
  * → withdrawn by the same CAS the scheduler uses (withdrawPooledLend: loses cleanly to a claim that got there first).
@@ -12,10 +12,10 @@ import { getWorkflow } from "./ledger-scheduler.js";
 export const PUSH_ACK_TTL_MS = 2 * 60_000;
 export const PUSH_CLAIM_TTL_MS = 3 * 60_000;
 
-/** Bound with pushTtlArgs(now); the bridge's 5-second check uses the same text read-only. */
-export const PUSH_TTL_SQL = `status = 'pooled' AND peer IN (SELECT peer FROM lend_peers WHERE proto >= 2)
+/** Bound with pushTtlArgs(now). */
+const PUSH_TTL_SQL = `status = 'pooled' AND peer IN (SELECT peer FROM lend_peers WHERE proto >= 2)
   AND ((seenAt IS NULL AND createdAt < ?) OR (seenAt IS NOT NULL AND seenAt < ?))`;
-export const pushTtlArgs = (now: number): [number, number] => [now - PUSH_ACK_TTL_MS, now - PUSH_CLAIM_TTL_MS];
+const pushTtlArgs = (now: number): [number, number] => [now - PUSH_ACK_TTL_MS, now - PUSH_CLAIM_TTL_MS];
 
 const hasPeersTable = (db: Database): boolean => !!db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'lend_peers'").get();
 

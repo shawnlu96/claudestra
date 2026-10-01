@@ -1,5 +1,5 @@
 /**
- * A's side of lend protocol v2 (docs/design/remote-capacity.md §3; wire in lend-wire-v2.ts): a lender's hello lands in
+ * A's side of lend protocol v2 (docs/design/remote-capacity.md §8; wire in lend-wire-v2.ts): a lender's hello lands in
  * lend_peers, its batched beat renews the leases it really holds and answers order by order, and the capacity the scheduler
  * may count on it is min(reported free, borrow.maxOpen − A's live orders there), zero once the hello is stale or the grant gone.
  * A beat that reports an order ended by revocation takes the not_started path only when that is safe: a clean review, or a
@@ -53,7 +53,7 @@ export interface PeerCapacity { peer: string; proto: number; helloAt: number | n
 const zero = (): Record<LendFamily, number> => ({ codex: 0, claude: 0 });
 
 /** Orders A has out with this peer that still hold a place there (pooled, claimed, or stopped for PM). */
-export const liveOrdersAt = (db: Database, peer: string): number =>
+const liveOrdersAt = (db: Database, peer: string): number =>
   (db.query(`SELECT COUNT(*) AS n FROM lend_orders WHERE peer = ? AND status IN (${LEND_LIVE.map(() => "?").join(",")})`).get(peer, ...LEND_LIVE) as { n: number }).n;
 
 /** A family paused for its own quota stops only that family; any other pause stops the peer. */
@@ -149,8 +149,6 @@ export function remoteCaller(db: Database, peer: string, b: { orderId: string; g
 }
 
 /** Is this peer on protocol 2 (has said hello)? Pushes and push TTLs apply only then. */
-export const speaksV2 = (db: Database, peer: string): boolean => (getLendPeer(db, peer)?.proto ?? 1) >= 2;
-
 /** A pooled order the push loop may announce to its peer: its summary is exactly what v1 poll would list (no v2 field). */
 export interface PushCandidate { peer: string; summary: OfferSummary }
 

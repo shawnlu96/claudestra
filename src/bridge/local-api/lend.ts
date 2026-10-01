@@ -1,5 +1,5 @@
 /**
- * lend/*（T93，docs/design/remote-capacity.md §0、§2.2、§3）：出借方 B 调发起方 A 的接口，body 结构在 lib/lend-wire.ts（v1）与 lend-wire-v2.ts（v2）。
+ * lend/*（T93，docs/design/remote-capacity.md §0、§2.2、§8）：出借方 B 调发起方 A 的接口，body 结构在 lib/lend-wire.ts（v1）与 lend-wire-v2.ts（v2）。
  *   v1 POST /api/v1/lend/poll | claim | lease | result → manager `ledger lend-poll|claim|lease|write -- <peer> <原文>`（bridge 只读台账）
  *   v2 POST /api/v1/lend/hello | beat → `ledger lend-hello|lend-beat`；/lend/ask 在 bridge 里开 ask（asks 写连接在这里），只回 {askId}
  * 调用方只认 peer token，而且这一次请求必须是 E2E 解开的内层请求、对方公钥已钉住、请求头的钥匙就是钉的那把并带着签名：
