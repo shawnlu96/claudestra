@@ -1,6 +1,6 @@
 /**
  * i28-M4a: code v3 releases build on the executor's own restate record (no PM approval), PM can brake it with restate-hold,
- * v2 still waits for restate-approve, and ui / security have no v3 at all.
+ * v2 still waits for restate-approve, and ui / security have a v3 too (i28-N4) that differs from their v2 only at approve_restate.
  */
 import { afterEach, describe, expect, test } from "bun:test";
 import { getWorkflow } from "../src/lib/ledger-scheduler.js";
@@ -28,13 +28,12 @@ async function v3AtRestateOrder() {
 }
 
 describe("code v3 template", () => {
-  test("v2 templates are untouched; only code has a v3 and it differs only at approve_restate", () => {
+  test("v2 templates are untouched; every template has a v3 and it differs only at approve_restate", () => {
     expect(templateFor("code", 2)).toBe(FLOW_TEMPLATES.code);
     expect(templateFor("ui", 2)).toBe(FLOW_TEMPLATES.ui);
     expect(templateFor("security", 2)).toBe(FLOW_TEMPLATES.security);
     for (const t of ["code", "ui", "security"] as const) expect(nodeAt(FLOW_TEMPLATES[t], "restate")?.gate).toBe("pm_restate");
-    expect(templateFor("ui", 3)).toBeNull();
-    expect(templateFor("security", 3)).toBeNull();
+    for (const t of ["ui", "security"] as const) expect(templateFor(t, 3)).toEqual({ ...FLOW_TEMPLATES[t], version: 3, nodes: templateFor("code", 3)!.nodes });
     expect(templateFor("code", 4)).toBeNull();
     const v2 = FLOW_TEMPLATES.code, v3 = templateFor("code", 3)!;
     expect(v3.version).toBe(3);
@@ -43,10 +42,10 @@ describe("code v3 template", () => {
       .toEqual([{ id: "approve_restate", stage: "restate", action: "stage", next: "build", gate: "restate_recorded" }]);
   });
 
-  test("workflow-set: code accepts 3; ui / security and unknown versions are refused", async () => {
+  test("workflow-set: code / ui / security accept 3; unknown versions are refused", async () => {
     f = autoFixture();
-    expect(await setVersion("3", "security")).toMatchObject({ ok: false, code: "invalid" });
-    expect(await setVersion("3", "ui")).toMatchObject({ ok: false, code: "invalid" });
+    expect(await setVersion("3", "security")).toMatchObject({ ok: true, workflow: { template: "security", templateVersion: 3 } });
+    expect(await setVersion("3", "ui")).toMatchObject({ ok: true, workflow: { template: "ui", templateVersion: 3 } });
     expect(await setVersion("4")).toMatchObject({ ok: false, code: "invalid" });
     expect(await setVersion("3")).toMatchObject({ ok: true, workflow: { template: "code", templateVersion: 3 } });
   });
