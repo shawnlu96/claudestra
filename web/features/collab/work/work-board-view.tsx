@@ -6,12 +6,14 @@ import type { WorkBoard, WorkRow } from './work-types';
 import s from './work-board.module.css';
 import { workText } from './work-i18n';
 
+const STAGES: Record<string, string> = { spec: '规格', restate: '复述', build: '写', review: '审', fix: '修',
+  merge: '合并', blocked: '被挡' };
 const STEPS = { restate: '复述', write: '写', review: '审', fix: '修', merge: '合并', deploy: '部署', publishing: '交付中' };
 const minutes = (value: number) => value >= 60 ? `${Math.floor(value / 60)}h ${Math.floor(value % 60)}m` : `${Math.floor(value)}m`;
 /** Lucide activity / clock / list-todo / refresh-cw paths; no emoji or external icon dependency. */
 function Icon({ kind, className }: { kind: string; className?: string }) {
   const paths: Record<string, string> = { working: 'M22 12h-4l-3 9L9 3l-3 9H2', waiting: 'M12 8v4l2 2',
-    todo: 'M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01', retry: 'M3 12a9 9 0 0 1 15-6l3 3M21 3v6h-6M21 12a9 9 0 0 1-15 6l-3-3M3 21v-6h6' };
+    chevron: 'm9 18 6-6-6-6', todo: 'M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01', retry: 'M3 12a9 9 0 0 1 15-6l3 3M21 3v6h-6M21 12a9 9 0 0 1-15 6l-3-3M3 21v-6h6' };
   return <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7"
     strokeLinecap="round" strokeLinejoin="round" aria-hidden className={className}>
     {kind === 'waiting' && <circle cx="12" cy="12" r="10" />}<path d={paths[kind]} />
@@ -64,5 +66,12 @@ export function WorkBoardContent({ board, retrying, tr, onNode, onTask }: Omit<P
         {board.todo[group].map(row => rowView(row, key))}</div>)}</> : board[key as 'working' | 'waiting'].length ?
         board[key as 'working' | 'waiting'].map(row => rowView(row, key)) : <div className={s.empty}>{t('暂无')}</div>}
     </section>)}</div>
+    {!!board?.legacy?.length && <details className={s.legacy}>
+      <summary className={s.group}><Icon kind="chevron" />{t('老卡')} · {board.legacy.length}</summary>
+      {board.legacy.map(row => <button type="button" className={s.row} key={row.taskId} onClick={() => onTask(row.taskId)}>
+        <div className={s.title}><span className={s.key}>{row.taskId}</span>{row.title}</div>
+        <div className={s.meta}>{t(STAGES[row.stage] ?? row.stage)}</div>
+      </button>)}
+    </details>}
   </div>;
 }

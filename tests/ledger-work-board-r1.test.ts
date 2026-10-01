@@ -13,8 +13,8 @@ beforeEach(() => { db = openLedger(':memory:'); });
 afterEach(() => closeLedger(':memory:'));
 function task(id: string, stage = 'build', manual = true) {
   createTask(db, { actor: 'owner', now: 0 }, { id, project: 'p', title: id, kind: 'code', stage: stage as never, agent: `agent-${id}` });
-  if (manual) db.query(`INSERT INTO task_workflows (taskId, project, template, templateVersion, mode, authorFamily, fallback,
-    specRev, rev, createdAt, updatedAt) VALUES (?,'p','code',2,'manual','codex','PM',1,1,0,0)`).run(id);
+  db.query(`INSERT INTO task_workflows (taskId, project, template, templateVersion, mode, authorFamily, fallback,
+    specRev, rev, createdAt, updatedAt) VALUES (?,'p','code',2,?,'codex','PM',1,1,0,0)`).run(id, manual ? 'manual' : 'observe');
 }
 function intent(taskId: string, id = taskId, action = 'ensure_session', seq = 1) {
   db.query(`INSERT INTO scheduler_intents (id,taskId,project,node,action,causalSeq,eventSeq,taskRev,specRev,templateVersion,
@@ -34,9 +34,10 @@ function order(id: string, step = 'write', beat: unknown = null, claim = true) {
 }
 function board(slots = 1) {
   db.run('PRAGMA query_only=ON');
-  return db.transaction(() => workBoard(db, 'p', NOW, { registry: [], maxWorkers: 1, availableSlots: slots, now: NOW })).deferred();
+  return db.transaction(() => workBoard(db, 'p', NOW, { registry: [], manualRegistry: [{ name: 'agent-writer', status: 'active' }],
+    maxWorkers: 1, availableSlots: slots, now: NOW })).deferred();
 }
-test('manual-active: active author, reviewer and claimed peer work; idle / retired / retiring sessions wait', () => {
+test('manual-active: live registry author and claimed peer work; sessions alone cannot vouch for workers', () => {
   task('writer'); session('writer', 'author');
   task('reviewer', 'review'); session('reviewer', 'reviewer');
   task('peer'); order('peer');
@@ -44,10 +45,11 @@ test('manual-active: active author, reviewer and claimed peer work; idle / retir
   task('retiring'); session('retiring', 'author', 'retiring');
   const changes = db.query('SELECT total_changes() AS n').get();
   const b = board();
-  expect(b.working.map(r => r.taskId).sort()).toEqual(['peer', 'reviewer', 'writer']);
-  expect(b.waiting.map(r => r.taskId).sort()).toEqual(['idle', 'retired', 'retiring']);
-  expect(b.machines).toEqual({ local: 2, Sekai: 1 });
-  expect(b.waiting.every(r => r.code === 'manual')).toBe(true);
+  expect(b.working.map(r => r.taskId).sort()).toEqual(['peer', 'writer']);
+  expect(b.waiting.map(r => r.taskId).sort()).toEqual(['idle', 'retired', 'retiring', 'reviewer']);
+  expect(b.machines).toEqual({ local: 1, Sekai: 1 });
+  expect(b.waiting.find(r => r.taskId === 'reviewer')?.code).toBe('reviewer');
+  expect(b.waiting.filter(r => r.taskId !== 'reviewer').every(r => r.code === 'executor_missing')).toBe(true);
   expect(db.query('SELECT total_changes() AS n').get()).toEqual(changes);
 });
 test('peer-since: four-hour pool wait is excluded; claim beats heartbeat and publishing uses beat.since', () => {

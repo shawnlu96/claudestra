@@ -7,5 +7,6 @@ export interface WorkRow {
 }
 export interface WorkBoard {
   now: number; asOfSeq: number; working: WorkRow[]; waiting: WorkRow[]; todo: { ready: WorkRow[]; blocked: WorkRow[] };
+  legacy?: { taskId: string; title: string; stage: string }[];
   machines: Record<string, number>; completionHours: number | null; availableSlots: number;
 }
