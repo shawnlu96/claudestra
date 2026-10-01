@@ -6,7 +6,7 @@
  */
 import { useMemo, useRef, useState } from "react";
 import type { Focus } from "../v4/canvas-view";
-import type { Compare } from "./dag-diff";
+import { compareAfterJump, type Compare } from "./dag-diff";
 import { defaultOpen, drawable, openWith } from "./dag-layout";
 import { jumpToNode } from "./dag-progress";
 import type { FeatureCard } from "./dag-types";
@@ -48,11 +48,12 @@ export function useDagUi(features: readonly FeatureCard[]) {
       setCompare(c);
       if (c && !open.includes(c.featureId)) ensureOpen(c.featureId);
     },
-    /** 进度 → DAG：切标签、展开所在 feature（守 MAX_OPEN）、必要时点开 ✓N、居中并闪一次 */
+    /** 进度 → DAG：退出该 feature 的历史对比、切标签、展开所在 feature（守 MAX_OPEN）、必要时点开 ✓N、居中并闪一次 */
     jumpNode: (featureId: string, key: string) => {
       const j = jumpToNode(features, open, featureId, key);
       if (!j) return;
       const seq = ++counter.current;
+      setCompare((c) => compareAfterJump(c, features, featureId));
       setManual(j.open);
       setEvicted(j.evicted);
       if (j.expandDone) setDoneOpen((s) => new Set([...s, featureId]));

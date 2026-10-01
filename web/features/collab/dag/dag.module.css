@@ -117,7 +117,7 @@
 .mnode .nmain { min-height: 44px; padding: 9px 12px 4px; }
 .mnode .nf { padding: 0 12px 6px; }
 .mnode .owner { min-height: 44px; min-width: 44px; padding: 0 6px; }
-.mdone { min-height: 44px; align-self: flex-start; padding: 0 12px; }
+.mdone { min-height: 44px; min-width: 44px; justify-content: center; align-self: flex-start; padding: 0 12px; }
 .backdrop { position: fixed; inset: 0; z-index: 60; background: rgba(0, 0, 0, .4); display: flex; align-items: flex-end; animation: fade 200ms ease; }
 @keyframes fade { from { opacity: 0; } }
 .drawer { width: 100%; max-height: 72vh; display: flex; animation: rise 240ms ease; border-radius: 14px 14px 0 0; overflow: hidden; }

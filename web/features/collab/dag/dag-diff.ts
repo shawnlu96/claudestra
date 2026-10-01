@@ -36,6 +36,15 @@ export function compareOf(featureId: string, a: number | "pending", b: number | 
   return { featureId, from: Math.min(a, b), to: Math.max(a, b) };
 }
 
+/**
+ * 进度 → DAG 跳的是这件事「现在」的节点：同一个 feature 正在看历史对比（to 不是当前版，含 pending）就退出对比，
+ * 否则画布画的是历史那一版，目标节点可能不在、也可能是旧内容（tests/web-collab-dag-diff.test.ts）。别的 feature 的对比不动。
+ */
+export function compareAfterJump(c: Compare | null, features: readonly { id: string; currentVersion: number }[], featureId: string): Compare | null {
+  if (!c || c.featureId !== featureId) return c;
+  return c.to === features.find((f) => f.id === featureId)?.currentVersion ? c : null;
+}
+
 export function diffMarks(d: Pick<DagDiffResponse, "diff" | "rewrittenDone">, toKeys: ReadonlySet<string>): Map<string, DiffMark> {
   const out = new Map<string, DiffMark>();
   const put = (k: string, m: DiffMark) => out.set(k, { ...out.get(k), ...m });

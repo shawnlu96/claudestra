@@ -69,6 +69,11 @@ export function useDagPanes(a: DagPanesArgs) {
   // 正在对比的那个框：版本条点开的是差异页（关掉差异页 = 退出对比），否则是版本列表
   const onVersions = (f: string) => a.select(ui.compare?.featureId === f && !a.narrow ? { kind: "ddiff", f } : { kind: "dver", f });
 
+  // 手机上节点详情是整屏遮罩：从详情跳进度要清掉选中（不走 close，它会回到上一张卡的详情），否则行在遮罩底下；桌面属性区在旁边，留着
+  const jumpRowFromPage = (agent: string) => {
+    if (a.narrow) a.select(null);
+    ui.jumpRow(agent);
+  };
   const s = a.sel;
   const sf = s && (s.kind === "dnode" || s.kind === "dver" || s.kind === "ddiff") ? featureOf(s.f) : undefined;
   const sn = s?.kind === "dnode" && sf ? findNode(sf.id, s.key) : null;
@@ -80,7 +85,7 @@ export function useDagPanes(a: DagPanesArgs) {
   );
   const page = (sn && sf && (
     <NodePage feature={sf} node={sn} owner={ownerOf(rows, sf.id, sn)} mark={overlay?.featureId === sf.id ? overlay.marks.get(sn.key) ?? null : null} now={a.now}
-      onTask={a.pickTask} onOwner={ui.jumpRow} onNode={(k) => onNode(sf.id, k)} onClose={a.close} tr={tr} />
+      onTask={a.pickTask} onOwner={jumpRowFromPage} onNode={(k) => onNode(sf.id, k)} onClose={a.close} tr={tr} />
   )) || (s?.kind === "dver" && sf && (
     <VersionsPage key={sf.id} feature={sf} detail={detail} compare={ui.compare} onClose={a.close} tr={tr} onCompare={(c) => {
       ui.setCompare(c);

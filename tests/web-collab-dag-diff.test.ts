@@ -1,6 +1,6 @@
 /** 子 DAG 版本对比叠图（web/features/collab/dag/dag-diff.ts）：四类分类跟 L4 diff 一致、幽灵节点、rewrittenDone、pending 只当 to */
 import { describe, expect, test } from "bun:test";
-import { compareOf, compareOverlay, defaultCompare, diffLists, diffMarks } from "../web/features/collab/dag/dag-diff";
+import { compareAfterJump, compareOf, compareOverlay, defaultCompare, diffLists, diffMarks } from "../web/features/collab/dag/dag-diff";
 import { layoutDag, nodeId } from "../web/features/collab/dag/dag-layout";
 import type { DagDiffResponse } from "../web/features/collab/dag/dag-types";
 import { feature, node } from "./web-collab-dag-fixture";
@@ -78,5 +78,20 @@ describe("diffLists / 版本选择", () => {
     expect(compareOf("f", "pending", 3)).toEqual({ featureId: "f", from: 3, to: "pending" });
     expect(compareOf("f", 5, 2)).toEqual({ featureId: "f", from: 2, to: 5 });
     expect(compareOf("f", 2, 2)).toBeNull();
+  });
+});
+
+describe("compareAfterJump（进度 → DAG 跳当前工作）", () => {
+  const fs = [{ id: "f", currentVersion: 3 }, { id: "g", currentVersion: 2 }];
+  test("同 feature 在看历史对比（to 不是当前版 / pending）就退出", () => {
+    expect(compareAfterJump({ featureId: "f", from: 1, to: 2 }, fs, "f")).toBeNull();
+    expect(compareAfterJump({ featureId: "f", from: 3, to: "pending" }, fs, "f")).toBeNull();
+  });
+  test("to 就是当前版：画的是当前节点，对比留着；别的 feature 的对比不动", () => {
+    const cur = { featureId: "f", from: 2, to: 3 } as const;
+    expect(compareAfterJump(cur, fs, "f")).toBe(cur);
+    const other = { featureId: "g", from: 1, to: 1 } as const;
+    expect(compareAfterJump(other, fs, "f")).toBe(other);
+    expect(compareAfterJump(null, fs, "f")).toBeNull();
   });
 });
