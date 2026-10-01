@@ -31,7 +31,6 @@ import { informFamilyWait } from "./scheduler-family-pick-notice.js";
 import { deliveryFor, sentAsWake, type EnsureResult, type SessionRef, type WorkerSession } from "./worker-session.js";
 type Manager = (...args: string[]) => Promise<Record<string, unknown>>;
 type Planned = Extract<PlannerDecision, { kind: "intent" }>;
-
 export interface AutoTickDeps {
   /** The ledger CLI under the scheduler identity. */
   manager: Manager;

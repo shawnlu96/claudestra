@@ -1,4 +1,4 @@
-import { localAutostart, localAuthorRuntime } from "./scheduler-local-runtime-start.js";
+import { localAutostartNode, localAuthorRuntime } from "./scheduler-local-runtime-start.js";
 /**
  * 自动开卡（i28-A1 §3）调度侧：每轮在 auto tick 之后最多开一张卡，复用 start_node 的 preflightStart / runStart，不改它们。
  * 顺序：先对账断掉留下的 claim（已绑 → done；否则 unknown 并通知 PM 一次，不重开；本进程正在开的跳过）→ 选候选（scheduler-autostart.ts）→
@@ -225,7 +225,7 @@ export async function autostartTick(env: StartTickEnv, pace?: TickPace): Promise
     if (pace?.yieldNow()) return failed;
     const pick = pickCandidate(env);
     if (!pick || (localAuthorRuntime(pick.cand.f.project) === "claude" && await quotaBlocked(env, pick.cand.f.project, failed))) return failed;
-    await inFlight(env.db, pick.cand.f.id, pick.cand.key, () => localAutostart(pick.cand.f.project, () => openCard(env, pick, failed)));
+    await inFlight(env.db, pick.cand.f.id, pick.cand.key, () => localAutostartNode(env, pick.cand, (next) => openCard(next, pick, failed)));
   } catch (e) {
     if (e instanceof SchedulerStopped) throw e;
     failed.push({ taskId: "autostart", error: (e as Error).message });

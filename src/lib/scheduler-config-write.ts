@@ -6,6 +6,7 @@
  * defaults, drops unknown keys and carries notes). Lock as lend-config.ts updateLend: no lock = no write. The audit event
  * goes through appendEvent (not ledger-tx); if it fails the file is put back. tests/scheduler-config-write.test.ts.
  */
+import { hasLocalRuntimeSlot, localRuntimePatch, type LocalAuthorRuntime } from "./scheduler-local-runtime-config.js";
 import type { Database } from "bun:sqlite";
 import { existsSync, readFileSync } from "node:fs";
 import { acquireLock, type LockHandle } from "./file-lock.js";
@@ -77,12 +78,12 @@ export function patchRemoteMode(raw: string, project: string, mode: SettableRemo
 }
 
 /** What `scheduler-local` may set; an absent key is left exactly as it is in the file. */
-export interface LocalSlots { localPriority?: Priority; maxActiveWorkers?: number }
+export interface LocalSlots { localPriority?: Priority; maxActiveWorkers?: number; localAuthorRuntime?: LocalAuthorRuntime }
 export interface LocalSlotsPatch { text: string; from: LocalSlots; to: LocalSlots; changed: boolean; pollMs: number }
 
 /** maxActiveWorkers' range is parseSchedulerConfig's (0..32); checked here too so a bad value never takes the lock. */
 function checkLocalSlots(set: LocalSlots): void {
-  if (set.localPriority === undefined && set.maxActiveWorkers === undefined) throw new LedgerError("invalid", "至少要改 localPriority / maxActiveWorkers 其中一个");
+  if (!hasLocalRuntimeSlot(set)) throw new LedgerError("invalid", "至少要改 localPriority / maxActiveWorkers / localAuthorRuntime 其中一个");
   if (set.localPriority !== undefined && !isPriority(set.localPriority)) throw new LedgerError("invalid", `localPriority 只能是 ${PRIORITIES.join(" / ")}`);
   const n = set.maxActiveWorkers;
   if (n !== undefined && (!Number.isInteger(n) || n < 0 || n > 32)) throw new LedgerError("invalid", `maxActiveWorkers 要是 0..32 的整数，收到 ${String(n)}`);
@@ -92,7 +93,7 @@ function checkLocalSlots(set: LocalSlots): void {
 export function patchLocalSlots(raw: string, project: string, set: LocalSlots): LocalSlotsPatch {
   checkLocalSlots(set);
   const { doc, p, remote } = projectOf(raw, project);
-  const from: LocalSlots = {
+  const from: LocalSlots = { ...localRuntimePatch(p, set.localAuthorRuntime),
     ...(set.localPriority !== undefined ? { localPriority: (remote?.localPriority ?? "balance") as Priority } : {}),
     ...(set.maxActiveWorkers !== undefined ? { maxActiveWorkers: p.maxActiveWorkers as number } : {}),
   };

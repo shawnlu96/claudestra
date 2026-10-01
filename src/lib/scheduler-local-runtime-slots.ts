@@ -12,14 +12,16 @@ const owned = new AsyncLocalStorage<LockHandle>();
 export type SlotWait = { kind: "wait"; reason: string };
 const wait = (reason: string): SlotWait => ({ kind: "wait", reason });
 
+// Creating reservations precede runtime assignment; only a proven Claude/Pi reservation can leave a Codex slot free.
 function codexSessionCount(rows: RegistryAgent[]): number {
-  return rows.filter((r) => r.runtime === "codex" && (r.status === "active" || r.status === undefined)).length;
+  return rows.filter((r) => (r.status === "creating" && r.runtime !== "claude-code" && r.runtime !== "pi")
+    || (r.runtime === "codex" && (r.status === "active" || r.status === undefined))).length;
 }
 
 function count(path: string): number {
   const raw = JSON.parse(readFileSync(path, "utf8"));
   if (!raw?.agents || typeof raw.agents !== "object" || Array.isArray(raw.agents)
-    || Object.values(raw.agents).some((r) => !r || typeof r !== "object")) throw new Error("invalid registry agents");
+    || Object.values(raw.agents).some((r) => !r || typeof r !== "object" || Array.isArray(r))) throw new Error("invalid registry agents");
   return codexSessionCount(normalizeRegistryAgents(raw));
 }
 
