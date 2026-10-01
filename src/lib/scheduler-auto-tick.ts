@@ -28,7 +28,6 @@ import type { RemotePolicy } from "./scheduler-config.js";
 import { isPoolIntent } from "./scheduler-pool-plan.js";
 import { drivePool } from "./scheduler-pool-tick.js";
 import { deliveryFor, sentAsWake, type EnsureResult, type SessionRef, type WorkerSession } from "./worker-session.js";
-
 type Manager = (...args: string[]) => Promise<Record<string, unknown>>;
 type Planned = Extract<PlannerDecision, { kind: "intent" }>;
 
@@ -155,6 +154,7 @@ class Card {
     if (!family) return this.cancelStale(intent, "计划里没有 session 家族");
     if (!(await this.settle(intent.id, "pending", "submitted", `claimed; ensure ${role} ${family}`))) return this.out("lost_race", "认领失败");
     const got = await this.deps.ensure(this.task, role, family);
+    if (got.kind === "wait") { await this.settle(intent.id, "submitted", "cancelled", `未建：${got.reason}`); return this.out("waiting", got.reason); }
     if (got.kind === "unknown") {
       await this.settle(intent.id, "submitted", "unknown", `建 session 结果不明：${got.reason}`);
       return this.out("held", got.reason);

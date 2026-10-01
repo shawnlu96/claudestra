@@ -77,6 +77,7 @@ export type WorkerObservation =
   | { state: "unknown"; reason: string; failure?: WorkerFailure };
 
 export type EnsureResult =
+  | { kind: "wait"; reason: string }
   | { kind: "ready"; ref: SessionRef; created: boolean }
   | { kind: "manual"; reason: string }
   | { kind: "unknown"; reason: string };

@@ -1,3 +1,4 @@
+import { localEnsure, localCreateGuard } from "./scheduler-local-runtime-start.js";
 /**
  * Production wiring of the auto tick: ledger writes through the scheduler-identity CLI, adapters chosen from the
  * registry, the author taken from the card (PM names it; the engine never invents an executor), and the per-card
@@ -145,11 +146,11 @@ export function autoTickDeps(db: Database, opts: AutoDepsOpts = {}): AutoTickDep
   const alive: StillActive = () => {
     try { active(); return true; } catch { return false; /* any failure of the liveness check means "not provably active": send nothing */ }
   };
-  const env: Env = { db, registryRow, worktreeRoot, active, alive, git: (args) => whileOwned(active, () => baseGit(args)), create: plainManager(lease) };
+  const env: Env = { db, registryRow, worktreeRoot, active, alive, git: (args) => whileOwned(active, () => baseGit(args)), create: localCreateGuard(plainManager(lease)) };
   return {
     manager: schedulerManagerWith(lease),
     worker: (ref) => worker(env, ref),
-    ensure: (task, role, family) => ensure(env, task, role, family),
+    ensure: (task, role, family) => localEnsure(family, role === "author" || !!registryRow(reviewerName(task.id)), () => ensure(env, task, role, family), { registryPath }),
     pinReview: (task, ref, head) => pinReview(env, task, ref, head),
     reviewDirty: async (_task, ref) => { const cwd = registryRow(ref.agent)?.cwd; return cwd ? gitDirtySync(cwd) : null; },
     notifyPm: (task, text) => notifyPm(env, task, text),

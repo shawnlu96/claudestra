@@ -1,4 +1,5 @@
 /** Local scheduler policy; missing or invalid config keeps the fourth daemon idle. */
+import { localRuntimeFields, type LocalAuthorRuntime } from "./scheduler-local-runtime-config.js";
 import { readFileSync } from "node:fs";
 import { isAbsolute } from "node:path";
 import { isPriority, PRIORITIES, REPO_RE, type Priority } from "./lend-config.js";
@@ -28,6 +29,7 @@ export const DEFAULT_REMOTE: RemotePolicy = { mode: "balance", roles: ["review"]
 export const isLegacyRemoteMode = (m: unknown): m is "overflow" | "prefer" => m === "overflow" || m === "prefer";
 
 interface ProjectSchedule {
+  localAuthorRuntime?: LocalAuthorRuntime;
   /** 0 = no local worker at all (every eligible node goes to the pool; nothing else is dispatched). */
   maxActiveWorkers: number;
   /** Always set by parseSchedulerConfig (default DEFAULT_REMOTE); a hand-built policy without it never pools. */
@@ -84,7 +86,7 @@ export function parseSchedulerConfig(raw: unknown): SchedulerConfig {
       throw new Error(`scheduler project ${id} needs absolute repoDir`);
     }
     if (p.supervise !== undefined && typeof p.supervise !== "boolean") throw new Error(`scheduler project ${id}: supervise must be boolean`);
-    projects[id] = { maxActiveWorkers: p.maxActiveWorkers as number, requiredChecks,
+    projects[id] = { ...localRuntimeFields(p.localAuthorRuntime), maxActiveWorkers: p.maxActiveWorkers as number, requiredChecks,
       repoDir: p.repoDir, remote: parseRemote(id, p.remote), ...(p.deploy !== undefined ? { deploy: parseDeployTarget(id, p.deploy) } : {}),
       ...(p.supervise !== undefined ? { supervise: p.supervise as boolean } : {}) };
   }
