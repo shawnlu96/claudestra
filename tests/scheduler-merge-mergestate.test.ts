@@ -20,7 +20,7 @@ import type { Registry } from "../src/manager/core.js";
 
 // Ids no other test file uses: the driver's UNKNOWN streak clock is per process and keyed by merge intent id.
 const ID = "M12B", INTENT = `merge-${ID}`;
-const H = "a".repeat(40), MAIN = "e".repeat(40), M = "b".repeat(40);
+const H = "a".repeat(40), N = "d".repeat(40), MAIN = "e".repeat(40), M = "b".repeat(40), X = "f".repeat(40);
 const config = parseSchedulerConfig({ enabled: true, projects: { p: { maxActiveWorkers: 2, requiredChecks: ["check"], repoDir: "/tmp/p" } } });
 
 const pr = (p: Partial<PrSnapshot> = {}): PrSnapshot => ({ state: "OPEN", head: H, branch: `task/${ID}`, base: "main", draft: false,
@@ -49,11 +49,12 @@ function fixture(phase: MergePhase) {
   beginMergeRun(db, { actor: "scheduler", now: 101 }, INTENT, ["check"]);
   if (phase !== "ready") db.query("UPDATE scheduler_merges SET phase=? WHERE intentId=?").run(phase, INTENT);
   let snaps: PrSnapshot[] = [pr()];
-  const calls: string[] = [], gh = { behindBy: 0 };
+  const calls: string[] = [], gh = { behindBy: 0, carry: false };
   const external: MergeExternal = {
     inspect: async () => snaps.length > 1 ? snaps.shift()! : snaps[0]!,
     freshness: async () => ({ behindBy: gh.behindBy, mainHead: MAIN }),
-    carryReview: async () => ({ ok: false, reason: "不沿用" }),
+    carryReview: async () => gh.carry ? { ok: true, reason: "净 diff 一致", mainParent: X, mainHead: MAIN, diffHash: "9".repeat(64) }
+      : { ok: false, reason: "不沿用" },
     updateBranch: async () => { calls.push("update"); throw new Error("branch cannot be updated due to conflicts"); },
     merge: async () => { calls.push("merge"); return M; },
   };
@@ -136,6 +137,49 @@ describe("i28-M12b r1: UNKNOWN is waited out before any irreversible step", () =
       await f.tick([pr(), pr({ mergeState: "DIRTY", checks: [] })], T0);
       expect(f.state()).toEqual({ run: "resolved", stage: "fix", frozen: false });
       expect(f.calls).toEqual([]);
+    });
+  });
+});
+
+describe("i28-M12b r2: UNKNOWN after a refused update-branch, and on a carried head", () => {
+  for (const phase of ["ready", "await_ci"] as const) {
+    test(`${phase}: green, behind main, update-branch refused, re-read UNKNOWN → waits in updating; next tick DIRTY → bounce (unknown-ready-1)`, async () => {
+      await with_(phase, async (f) => {
+        f.gh.behindBy = 1;
+        await f.tick([pr(), computing()], T0);
+        expect(f.state()).toEqual(WAITING("updating"));
+        expect(f.calls).toEqual(["update"]);
+        await f.tick([pr({ mergeState: "DIRTY", checks: [] })], T0 + 30_000);
+        expect(f.state()).toEqual({ run: "resolved", stage: "fix", frozen: false });
+        expect(f.calls).toEqual(["update"]);
+      });
+    });
+  }
+  test("update-branch refused and the re-read is UNKNOWN for too long → unknown with the limit reason", async () => {
+    await with_("ready", async (f) => {
+      f.gh.behindBy = 1;
+      await f.tick([pr(), computing()], T0);
+      await f.tick([computing()], T0 + MERGE_STATE_UNKNOWN_LIMIT_MS + 1);
+      expect(f.state()).toEqual({ run: "unknown", stage: "merge", frozen: true });
+      expect(getMergeRun(f.db, INTENT)?.reason).toContain(UNKNOWN_LIMIT_REASON);
+    });
+  });
+  test("carried head (pure merge of main) UNKNOWN → waits; then DIRTY → carry journaled, conflict bounce on the new head (unknown-carried-1)", async () => {
+    await with_("updating", async (f) => {
+      f.gh.carry = true;
+      await f.tick([pr({ head: N, mergeState: "UNKNOWN", checks: [] })], T0);
+      expect(f.state()).toEqual(WAITING("updating"));
+      await f.tick([pr({ head: N, mergeState: "DIRTY", checks: [] })], T0 + 30_000);
+      expect(f.state()).toEqual({ run: "resolved", stage: "fix", frozen: false });
+      const stage = f.db.query("SELECT data FROM events WHERE target=? AND kind='stage' ORDER BY seq DESC LIMIT 1").get(ID) as { data: string };
+      expect(JSON.parse(stage.data)).toMatchObject({ from: "merge", to: "fix", mergeBounce: { cause: "conflict", prHead: N, mainHead: MAIN } });
+      expect(f.calls).toEqual([]);
+    });
+  });
+  test("a moved head that is not a pure merge of main still goes back to review, DIRTY or not", async () => {
+    await with_("updating", async (f) => {
+      await f.tick([pr({ head: N, mergeState: "DIRTY", checks: [] })], T0);
+      expect(f.state()).toMatchObject({ run: "await_review", frozen: false });
     });
   });
 });

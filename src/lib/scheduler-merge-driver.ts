@@ -28,6 +28,9 @@ export interface MergeExternal {
 export type MergeAdvance = (from: MergePhase, to: MergePhase, rev: number, receipt?: string, mergeSha?: string, newHead?: string) => Promise<MergeRun>;
 
 const sameHead = (run: MergeRun, pr: PrSnapshot): boolean => pr.head.toLowerCase() === run.reviewedHead.toLowerCase();
+/** This run's own open, non-draft, same-repo PR on main at the reviewed head. */
+const samePr = (run: MergeRun, pr: PrSnapshot): boolean => pr.state === "OPEN" && sameHead(run, pr) && pr.branch === run.expectedBranch &&
+  pr.base === "main" && !pr.draft && !pr.crossRepository;
 const green = (run: MergeRun, checks: PrSnapshot["checks"]): boolean =>
   run.requiredChecks.split(",").every((name) => checks.some((c) => c.name === name && c.bucket === "pass")) &&
   checks.every((c) => c.bucket !== "fail" && c.bucket !== "cancel" && c.bucket !== "pending");
@@ -79,17 +82,31 @@ async function movedHead(run: MergeRun, external: MergeExternal, pr: PrSnapshot,
   if (pr.draft || pr.mergeState === "BEHIND") return run; // re-checked next round on the same evidence
   if (pr.mergeState === "UNKNOWN") return unknownWait(run, step);
   if (unstableWait(pr) === "failed") return step("unknown", "更新分支后 CI 失败或取消");
-  if (pr.mergeState !== "CLEAN" && pr.mergeState !== "UNSTABLE") return step("unknown", `更新分支后 mergeState=${pr.mergeState}`);
-  return step("await_ci", carryReceipt({ oldHead: run.reviewedHead, newHead: pr.head, mainParent: carry.mainParent,
+  if (!["CLEAN", "UNSTABLE", "DIRTY"].includes(pr.mergeState)) return step("unknown", `更新分支后 mergeState=${pr.mergeState}`);
+  const carried = await step("await_ci", carryReceipt({ oldHead: run.reviewedHead, newHead: pr.head, mainParent: carry.mainParent,
     mainHead: carry.mainHead, diffHash: carry.diffHash }), undefined, pr.head);
+  // The carry made pr.head the reviewed head, so a conflict on it bounces through the same reviewed-head check as any other.
+  return pr.mergeState === "DIRTY" ? (await bounceStep(carried, pr, external, step)) ?? carried : carried;
+}
+
+/** update-branch refused while GitHub is still computing: wait in `updating` (bounded) so a conflict it reports next tick bounces. */
+async function updateOrWait(claimed: MergeRun, external: MergeExternal, step: Step): Promise<MergeRun> {
+  let reread: PrSnapshot | null = null;
+  const watched: MergeExternal = { ...external, inspect: async (prRef) => (reread = await external.inspect(prRef)) };
+  try {
+    return await updateOrBounce(claimed, watched, step, stopped);
+  } catch (e) {
+    const pr = reread as PrSnapshot | null;
+    if (stopped(e) || !pr || !samePr(claimed, pr) || pr.mergeState !== "UNKNOWN") throw e;
+    return unknownWait(claimed, step);
+  }
 }
 
 /** The last read is taken before the irreversible `merging` claim, so a transient UNKNOWN there still waits and a conflict
  * still bounces; after the claim only the head-pinned merge API runs (GitHub refuses a moved head, so nothing merges early). */
 async function claimAndMerge(run: MergeRun, external: MergeExternal, step: Step, assertActive: () => void): Promise<MergeRun> {
   const fresh = await external.inspect(run.prRef);
-  const same = fresh.state === "OPEN" && sameHead(run, fresh) && fresh.branch === run.expectedBranch && fresh.base === "main" &&
-    !fresh.draft && !fresh.crossRepository;
+  const same = samePr(run, fresh);
   if (same && fresh.mergeState === "UNKNOWN") return unknownWait(run, step);
   const bounced = await bounceStep(run, fresh, external, step);
   if (bounced) return bounced;
@@ -132,7 +149,7 @@ export async function driveMerge(run: MergeRun, source: MergeExternal, advance: 
       if (fresh.behindBy > 0 || pr.mergeState === "BEHIND") {
         const claimed = await step("updating");
         assertActive();
-        return await updateOrBounce(claimed, external, step, stopped);
+        return await updateOrWait(claimed, external, step);
       }
       if (unstableWait(pr) === "failed") return step("unknown", "CI 失败或取消");
       if (pr.mergeState !== "CLEAN" && pr.mergeState !== "UNSTABLE") return step("unknown", `PR mergeState=${pr.mergeState}`);
@@ -163,7 +180,7 @@ export async function driveMerge(run: MergeRun, source: MergeExternal, advance: 
       const refresh = async (why: string) => {
         const claimed = await step("updating", `${why}，重新更新分支`);
         assertActive();
-        return await updateOrBounce(claimed, external, step, stopped);
+        return await updateOrWait(claimed, external, step);
       };
       const bounced = await bounceStep(run, pr, external, step);
       if (bounced) return bounced;
