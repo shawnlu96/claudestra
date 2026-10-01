@@ -16,6 +16,7 @@ import { projectPmUiGate, rejectFix, type PmUiGate, type UiFix } from "./ledger-
 import { SRC_DIR } from "./repo-root.js";
 import { SchedulerStopped } from "./scheduler-maintenance.js";
 import type { PlannerDecision, PlannerSnapshot } from "./scheduler-plan.js";
+import { currentReviewFacts } from "./scheduler-review.js";
 
 export const UI_ASK_ACTION = "scheduler_ui_screenshot";
 /** Receipt prefix of an ask intent that notified PM instead of opening an owner ask. */
@@ -108,8 +109,19 @@ export function uiPassStep(s: PlannerSnapshot, node: string, reviewSeq: number):
   return pmNoticed ? { kind: "wait", code: "pm_screenshot", reason: "等待 PM 看前后截图（ledger ui-approve / ui-reject）" } : { kind: "notify_pm" };
 }
 
-/** PM's rejection as the planner's fix package (take_order reads the same one through uiRejectFixFor). */
-export const uiRejectFix = (s: PlannerSnapshot): UiFix | null => rejectFix(s.task, s.workflow?.template, s.events, s.pmUiGate);
+/** PM's rejection plus any code P1s as the fix package (take_order shares rejectFix through uiRejectFixFor). */
+export const uiRejectFix = (s: PlannerSnapshot): UiFix | null =>
+  rejectFix(s.task, s.workflow?.template, s.events, s.pmUiGate, currentReviewFacts(s.task, s.events));
+
+/** Screenshot-only fixes need no code report; a combined fix must still pass the planner's P1 history / fallback rules. */
+export function uiFixPackage(s: PlannerSnapshot, codeFix: () => NonNullable<Planned["workOrder"]> | PlannerDecision):
+  NonNullable<Planned["workOrder"]> | PlannerDecision {
+  const ui = uiRejectFix(s);
+  if (!ui) return codeFix();
+  if (!ui.codeReportPath) return ui;
+  const code = codeFix();
+  return "kind" in code ? code : { ...ui, fallbackWarning: code.fallbackWarning };
+}
 
 /** Planner side of the merge gate: why this UI card may not merge yet, or null. */
 export function uiMergeBlock(s: PlannerSnapshot): string | null {

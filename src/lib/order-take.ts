@@ -90,7 +90,7 @@ function fixContext(db: Database, t: LedgerTask, step: "write" | "fix"): { findi
   const events = listEvents(db, { project: t.project, target: t.id });
   const bounce = fixBounce(events, t.stage); // 合并退回（冲突 / CI 红）不是修 P1：不带审查报告（scheduler-merge-conflict.ts）
   if (bounce) return { findings: [], report: null, bounce: bounceWork(bounce) };
-  const ui = uiRejectFixFor(db, t, events, getWorkflow(db, t.id)?.template); // PM 退回截图：意见就是这一轮唯一的 P1（ledger-ui-approve-verdict.ts）
+  const ui = uiRejectFixFor(db, t, events, getWorkflow(db, t.id)?.template); // 同一退回来源的代码 findings / 报告与 PM 截图意见一起带上
   if (ui) return { findings: wireFindings(ui.findings), report: ui.reportPath };
   const read = currentReviewFacts(t, events);
   return read.kind === "facts" ? { findings: wireFindings(read.facts.findings), report: read.facts.reportPath } : { findings: [], report: null };
