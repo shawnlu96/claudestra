@@ -1,6 +1,7 @@
 /**
  * i28-M8 deliver 查 PR：合并驱动只认 task.pr 上完整的 PR URL（scheduler-merge.ts），执行者手填总漏，所以交付时 bridge 自己查。
- * - findPrRows：在调用方 cwd 跑 `gh pr list --head <branch> --state open`，输出严格解析（不是数组、字段缺、多字段、类型不对都拒）。
+ * - findPrRows：在调用方 cwd 认出 origin 的 owner/repo，跑 `gh pr list --repo <它> --head <branch> --state open`，输出严格解析
+ *   （不是数组、字段缺、多字段、类型不对都拒），任何一行 PR 不在 origin 仓也拒。
  * - pickPr：恰好一个、非跨仓、base 是 main、headRefOid 等于交付 head、url 是完整 PR URL 才通过；其余一律拒，调用方什么都不写。
  * - prConflict：卡上已有的完整 URL 和查到的不同 → 拒（PR 换了要 PM 处理）；空或非完整（如 `306`）可被替换。
  *   lib/ledger-write.ts deliver 在写入的同一事务里再核一次，MCP 侧的预检只为早给原因。tests/order-deliver-pr.test.ts。
@@ -75,12 +76,54 @@ export function parseGhPrList(r: BoundedResult): PrRows {
 
 type Runner = (argv: string[], o: { cwd?: string; env?: Record<string, string | undefined>; timeoutMs: number }) => Promise<BoundedResult>;
 
-/** bridge 的真实 findPr：在调用方工作目录里跑 gh（argv 不经 shell，分支名先过 BRANCH） */
+const TIMEOUT_MS = 15_000;
+const OWNER = "[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})";
+const REPO = "(?!\\.\\.?(?:\\.git)?$)[\\w.-]{1,100}?";
+/** origin 只认这两种写法（.git 后缀可选）；ssh://、带凭据、别的主机一律不认，宁可拒交付也不猜 */
+const ORIGIN_RE = [new RegExp(`^https://github\\.com/(${OWNER})/(${REPO})(?:\\.git)?$`), new RegExp(`^git@github\\.com:(${OWNER})/(${REPO})(?:\\.git)?$`)];
+
+/** `git remote get-url origin` 的输出 → `owner/repo`；不是 GitHub 或格式不对 = null */
+export function parseOriginRepo(url: string): string | null {
+  const s = url.trim();
+  for (const re of ORIGIN_RE) {
+    const m = re.exec(s);
+    if (m) return `${m[1]}/${m[2]}`;
+  }
+  return null;
+}
+
+/** 完整 PR URL 属于 owner/repo 吗（GitHub 的 owner / 仓库名不分大小写） */
+export function prInRepo(url: string, repo: string): boolean {
+  const full = fullPrUrl(url);
+  const m = full ? /^https:\/\/github\.com\/([^/]+\/[^/]+)\/pull\/\d+$/.exec(full) : null;
+  return m !== null && m[1].toLowerCase() === repo.toLowerCase();
+}
+
+async function originRepo(cwd: string, run: Runner): Promise<{ ok: true; repo: string } | { ok: false; error: string }> {
+  const r = await run(["git", "remote", "get-url", "origin"], { cwd, timeoutMs: TIMEOUT_MS });
+  if (r.timedOut) return { ok: false, error: "git remote get-url origin 超时，认不出 origin 仓，没法查 PR" };
+  if (r.code !== 0) return { ok: false, error: `git remote get-url origin 失败（exit ${r.code}），认不出 origin 仓，没法查 PR` };
+  const repo = parseOriginRepo(r.stdout);
+  if (!repo) return { ok: false, error: `origin ${r.stdout.trim().slice(0, 120)} 不是 GitHub 仓库地址（https://github.com/<owner>/<repo> 或 git@github.com:<owner>/<repo>），没法查 PR` };
+  return { ok: true, repo };
+}
+
+/** bridge 的真实 findPr：在调用方工作目录里认出 origin 仓，再显式 `--repo` 跑 gh（argv 不经 shell，分支名先过 BRANCH）。
+ *  不带 --repo 时 gh 会听 GH_REPO / repo set-default，镜像仓同名分支的 PR 就会被当成本卡的写进 task.pr；所以 env 去掉 GH_REPO，
+ *  查到的每一行还要在 origin 仓里，有一行不在就整次拒 */
 export async function findPrRows(cwd: string | undefined, branch: string, run: Runner): Promise<PrRows> {
   if (!cwd) return { ok: false, error: "registry 里没有调用方的工作目录，没法查 PR" };
   if (!BRANCH.test(branch)) return { ok: false, error: `台账里的分支名 ${branch.slice(0, 80)} 不合法` };
-  const argv = ["gh", "pr", "list", "--head", branch, "--state", "open", "--json", FIELDS.join(",")];
-  return parseGhPrList(await run(argv, { cwd, env: { ...process.env, GH_PROMPT_DISABLED: "1" }, timeoutMs: 15_000 }));
+  const origin = await originRepo(cwd, run);
+  if (!origin.ok) return origin;
+  const argv = ["gh", "pr", "list", "--repo", origin.repo, "--head", branch, "--state", "open", "--json", FIELDS.join(",")];
+  const env: Record<string, string | undefined> = { ...process.env, GH_PROMPT_DISABLED: "1" };
+  delete env.GH_REPO;
+  const res = parseGhPrList(await run(argv, { cwd, env, timeoutMs: TIMEOUT_MS }));
+  if (!res.ok) return res;
+  const stray = res.rows.find((p) => !prInRepo(p.url, origin.repo));
+  if (stray) return { ok: false, error: `PR 不在 origin 仓 ${origin.repo}：gh 返回了 ${stray.url.slice(0, 200)}` };
+  return res;
 }
 
 /** 从查到的 open PR 里挑出交付对应的那一个 */
