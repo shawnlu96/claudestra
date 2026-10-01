@@ -5,8 +5,8 @@
  * - session/prompt → prompt（followUp：pi 还在跑也能排上），等到 agent_settled 才回 stopReason；session/cancel → abort。
  *   _session/steering → 带 steer 的 prompt：排进在跑的回合 = injected，pi 另起一轮 = startedNewTurn（结束只靠 idle）。
  * - 回合结束后按 get_session_stats 发 usage_update；扩展弹框一律回取消；pi 意外退出 = 适配器退出，由宿主重起。
- * - 挂 channel-server 的会话：起 pi 前后各查一次撞名 / reply 能否活下来（deps.mountProblem），pi 里的挂载扩展在它读 mcp.json
- *   的那一刻再报一次（MOUNT_STATUS_KEY）；任何一处不过就拒这个会话，不让宿主把没有 reply 的会话当成接通。
+ * - 挂 channel-server 的会话：起 pi 前后各查一次撞名 / reply 能否活下来（deps.mountProblem），pi 里的挂载扩展在 session_start
+ *   再报一次（撞名、reply 进没进模型的工具表，MOUNT_STATUS_KEY）；任何一处不过就拒这个会话，不让宿主把没有 reply 的会话当成接通。
  * tests/pi-acp-replay.test.ts（录制的 pi 0.99.1 事件流回放）、tests/pi-acp-shell.test.ts。
  */
 import { createRpcPeer, RpcError, type RpcPeer, type RpcWire } from "../rpc.js";

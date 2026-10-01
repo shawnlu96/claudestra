@@ -96,19 +96,20 @@ describe("Pi 适配器 · 参数经 pi 0.99.2 parseArgs 实际解析", () => {
 });
 
 describe("Pi 适配器 · 挂 MCP 的扩展", () => {
-  test("按环境变量挂上每个 server，exposure 一律 direct；挂完把变量删掉（bash 工具的子进程看不到代理 token）", () => {
-    const calls: [string, Record<string, unknown>][] = [];
+  const api = { on: () => {}, getActiveTools: () => [] };
+  test("按环境变量把每个 server 交给连接器，exposure 一律 direct；挂完把变量删掉（bash 工具的子进程看不到代理 token）", async () => {
+    const calls: Record<string, unknown>[] = [];
     const servers = { claudestra: { command: "/bin/bun", args: ["cs.ts"], env: { A: "1" } } };
     const env: Record<string, string | undefined> = { [PI_MCP_SERVERS_ENV]: JSON.stringify(servers), KEEP: "1" };
-    mountMcpServers({ registerMcpServer: (n, c) => void calls.push([n, c]) }, env);
-    expect(calls).toEqual([["claudestra", { command: "/bin/bun", args: ["cs.ts"], env: { A: "1" }, exposure: "direct" }]]);
+    await mountMcpServers(api, env, async (_pi, s) => void calls.push(s));
+    expect(calls).toEqual([{ claudestra: { command: "/bin/bun", args: ["cs.ts"], env: { A: "1" }, exposure: "direct" } }]);
     expect(env).toEqual({ KEEP: "1" });
   });
 
-  test("没有变量什么都不挂；JSON 坏了照样抛（pi 会发 extension_error，不静默）", () => {
-    const calls: string[] = [];
-    mountMcpServers({ registerMcpServer: (n) => void calls.push(n) }, {});
+  test("没有变量什么都不挂；JSON 坏了照样抛（pi 会发 extension_error，不静默）", async () => {
+    const calls: unknown[] = [];
+    await mountMcpServers(api, {}, async (_pi, s) => void calls.push(s));
     expect(calls).toEqual([]);
-    expect(() => mountMcpServers({ registerMcpServer: () => {} }, { [PI_MCP_SERVERS_ENV]: "{bad" })).toThrow();
+    await expect(mountMcpServers(api, { [PI_MCP_SERVERS_ENV]: "{bad" }, async () => {})).rejects.toThrow();
   });
 });
