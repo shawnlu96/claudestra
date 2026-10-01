@@ -16,7 +16,8 @@ import { SchedulerStopped } from "./scheduler-maintenance.js";
 import { RETIRE_STAGES, type SchedulerSession } from "./scheduler-sessions.js";
 import type { Git } from "./scheduler-review-worktree.js";
 import { rotateAfter, type TickPace } from "./scheduler-yield.js";
-import type { RegistryAgent } from "./registry.js";
+import { normalizeRegistryAgents, REGISTRY_PATH, type RegistryAgent } from "./registry.js";
+import { readJsonLenient } from "./state-file.js";
 
 type Manager = (...args: string[]) => Promise<Record<string, unknown>>;
 
@@ -30,7 +31,19 @@ export interface RetireDeps {
   worktreeRoot: string;
   notifyPm(task: LedgerTask, text: string): Promise<void>;
   /** The registry as it is now: kill skips an agent already stopped, and a checkout a live agent works in is kept. */
-  agents(): Promise<Pick<RegistryAgent, "name" | "status" | "sessionId" | "cwd">[]>;
+  agents(): Promise<LiveAgent[]>;
+}
+
+/** A registry entry as retirement reads it; `pending` = an operation (a kill half done, a create) has not finished on it. */
+type LiveAgent = Pick<RegistryAgent, "name" | "status" | "sessionId" | "cwd"> & { pending: boolean };
+/** Finished stopping: runKill writes `stopped` + pending *before* it closes the window, and clears pending only at the end. */
+const stopped = (a: LiveAgent): boolean => a.status === "stopped" && !a.pending;
+
+/** The registry with each entry's pending flag. Unreadable throws: an empty answer would read as "every agent is gone". */
+export async function readLiveAgents(path = REGISTRY_PATH): Promise<LiveAgent[]> {
+  const raw = await readJsonLenient<{ agents?: Record<string, { pending?: unknown }> } | null>(path, null, { who: "registry", writersGuarded: false });
+  if (!raw?.agents || typeof raw.agents !== "object") throw new Error(`registry 读不出来（${path}），这轮不收`);
+  return normalizeRegistryAgents(raw).map((a) => ({ name: a.name, status: a.status, sessionId: a.sessionId, cwd: a.cwd, pending: !!raw.agents?.[a.name]?.pending }));
 }
 
 interface RetireOutcome { taskId: string; step: "retired" | "handoff" | "held" | "unknown"; detail: string }
@@ -135,7 +148,7 @@ class RetireCard {
     if (user) return { effect: "kill", receipt: `agent 仍被未收尾的 ${user} 使用：不 kill，只标退役` };
     const live = (await this.deps.agents()).find((a) => a.name === row.agent);
     if (!live) return { effect: "kill", receipt: "agent 已不在 registry（先前已清）" };
-    if (live.status === "stopped") return { effect: "kill", receipt: "agent 早已停止，不再 kill" };
+    if (stopped(live)) return { effect: "kill", receipt: "agent 早已停止，不再 kill" }; // stopped + pending = a kill to finish: kill again
     if (live.sessionId && live.sessionId !== row.sessionId) {
       return { effect: "kill", receipt: oneLine(`agent 现在跑的是会话 ${live.sessionId}，不是本卡绑定的 ${row.sessionId}：不 kill，${FOR_PM}`) };
     }
@@ -159,7 +172,7 @@ class RetireCard {
   /** null = removed or not there; otherwise why the checkout stays (with porcelain lines when dirty). */
   async worktree(dir: string, agents: Awaited<ReturnType<RetireDeps["agents"]>>): Promise<string | null> {
     if (!this.deps.exists(dir)) return null;
-    const holder = agents.find((a) => a.status !== "stopped" && a.cwd && within(a.cwd, dir));
+    const holder = agents.find((a) => !stopped(a) && a.cwd && within(a.cwd, dir));
     if (holder) return `${holder.name} 还在这里工作（agent 没停）`;
     const g = (...args: string[]) => this.deps.git(["-C", dir, ...args]);
     const where = await g("rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir");
@@ -218,24 +231,33 @@ async function closeStray(db: Database, deps: RetireDeps, task: LedgerTask): Pro
   return null;
 }
 
+/** Notices delivered whose settle has not landed yet (intent id → text), per ledger: a retried settle must not resend them. */
+const delivered = new WeakMap<Database, Map<string, string>>();
+
 /**
- * One combined PM notice per project, then the settles it covers. A notice that did not go out leaves its cards submitted, so
- * the next pass rebuilds and resends it; a settle that fails after the notice went out means PM may hear that card twice.
+ * One combined PM notice per project, then the settles it covers. A notice that did not go out leaves its cards submitted, so the
+ * next pass rebuilds and resends it. One that went out is remembered until its settle lands, so a failed settle write is retried
+ * without telling PM again; only the service dying between the send and the settle can repeat it (the bridge keeps no send ids).
  */
-async function notifyAndSettle(deps: RetireDeps, owed: Owed[], out: RetireOutcome[]): Promise<void> {
+async function notifyAndSettle(db: Database, deps: RetireDeps, owed: Owed[], out: RetireOutcome[]): Promise<void> {
+  const sentNotes = delivered.get(db) ?? delivered.set(db, new Map()).get(db)!;
   const byProject = new Map<string, Owed[]>();
   for (const o of owed) byProject.set(o.task.project, [...(byProject.get(o.task.project) ?? []), o]);
   for (const group of byProject.values()) {
-    const lines = group.map((o) => `- ${o.notice}`);
+    const fresh = group.filter((o) => sentNotes.get(o.intentId) !== o.notice);
+    const lines = fresh.map((o) => `- ${o.notice}`);
     const text = `[调度引擎] 卡收尾有 ${lines.length} 处要 PM 看（没删的 worktree 不加 --force、不 rm，原样留着）：\n${lines.join("\n")}`;
-    const sent = await deps.notifyPm(group[0].task, text).then(() => null, (e: unknown) => {
+    const failed = !fresh.length ? null : await deps.notifyPm(fresh[0].task, text).then(() => null, (e: unknown) => {
       if (e instanceof SchedulerStopped) throw e;
       console.error(`⚠️ [scheduler] 收尾通知没发出去，下轮重发：${(e as Error).message}`);
       return oneLine((e as Error).message);
     });
+    if (failed === null) for (const o of fresh) sentNotes.set(o.intentId, o.notice);
     for (const o of group) {
-      if (sent !== null) out.push({ ...o.outcome, step: "held", detail: oneLine(`PM 通知没发出去，下轮重发：${sent}`) });
-      else out.push((await settle(deps, o.intentId, o.to, o.receipt)) ? o.outcome : { ...o.outcome, step: "held", detail: "已通知 PM，意图没结上（下轮再结）" });
+      if (sentNotes.get(o.intentId) !== o.notice) { out.push({ ...o.outcome, step: "held", detail: oneLine(`PM 通知没发出去，下轮重发：${failed}`) }); continue; }
+      if (!(await settle(deps, o.intentId, o.to, o.receipt))) { out.push({ ...o.outcome, step: "held", detail: "已通知 PM，意图没结上（下轮再结，不重发）" }); continue; }
+      sentNotes.delete(o.intentId);
+      out.push(o.outcome);
     }
   }
 }
@@ -266,6 +288,6 @@ export async function schedulerRetireTick(db: Database, projects: readonly strin
       out.failed.push({ taskId, error: oneLine((e as Error).message) });
     }
   }
-  await notifyAndSettle(deps, owed, out.cards);
+  await notifyAndSettle(db, deps, owed, out.cards);
   return out;
 }

@@ -7,14 +7,13 @@ import type { Database } from "bun:sqlite";
 import { existsSync } from "node:fs";
 import { resolveBunPath } from "./bun-path.js";
 import { statePath } from "./paths.js";
-import { readRegistryAgents } from "./registry.js";
 import { notifyProjectPm } from "./pm-notify.js";
 import { SRC_DIR } from "./repo-root.js";
 import { runManagerProcess } from "./run-manager.js";
 import type { SchedulerConfig } from "./scheduler-config.js";
 import { encodeLease, SCHEDULER_LEASE_ENV, type SchedulerLease } from "./scheduler-lease-env.js";
 import { SchedulerStopped, whileOwned } from "./scheduler-maintenance.js";
-import { schedulerRetireTick, type RetireDeps } from "./scheduler-retire.js";
+import { readLiveAgents, schedulerRetireTick, type RetireDeps } from "./scheduler-retire.js";
 import { git } from "./scheduler-review-worktree.js";
 import type { TickPace } from "./scheduler-yield.js";
 
@@ -31,7 +30,7 @@ function retireDeps(db: Database, ledger: Manager, active: () => void, lease: Sc
     try { active(); return true; } catch { return false; /* a failed liveness check means "not provably ours": send nothing */ }
   };
   return {
-    ledger, agent, worktreeRoot: statePath("worktrees"), exists: existsSync, agents: () => readRegistryAgents(),
+    ledger, agent, worktreeRoot: statePath("worktrees"), exists: existsSync, agents: () => readLiveAgents(),
     git: (args) => whileOwned(active, () => git(args)),
     notifyPm: (task, text) => whileOwned(active, () => notifyProjectPm(db, task.project, text, { fromName: "scheduler", stillActive: alive })),
   };

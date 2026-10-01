@@ -7,8 +7,9 @@ no longer kills agents and removes worktrees by hand. Code: `src/lib/scheduler-r
 
 ## When
 
-Every service pass with `autoDispatch: true`, right after the auto tick (`scheduler-pass.ts`), as a phase of its own
-(`pace.phase()`: a slow auto tick or autostart cannot spend its share of the budget), for cards of the projects
+Every service pass while `scheduler.json` is enabled — **`autoDispatch` off too**: that switch stops new work, not the
+collection of finished cards — after the auto step (`scheduler-pass.ts`), as a phase of its own (`pace.phase()`: a slow auto
+tick or autostart cannot spend its share of the budget), for cards of the projects
 `scheduler.json` lists, **whatever their workflow mode** — most finished cards were switched to manual on the way, and their
 scheduler-bound sessions still need collecting. A card is picked when:
 
@@ -29,13 +30,15 @@ One `retire` intent per card (`retire:<task>`, opened already claimed by `ledger
 1. **Sessions** (author, then reviewer). Each effect's receipt is on the ledger before the next runs
    (`ledger scheduler-session-retire`): `active → retiring` (archive) `→ retired` (kill).
    - tmux / acp: `manager archive <agent>`, then `manager kill <agent>`. A failed archive is recorded and kill still runs —
-     kill never deletes the session jsonl — and PM is told. Before kill the registry is read: an agent already gone or
-     `stopped` is not killed again (that is how a kill whose receipt never reached the ledger looks next pass), and a name
-     now running a different session than the bound one is left alone and handed to PM.
+     kill never deletes the session jsonl — and PM is told. Before kill the registry is read: an agent already gone, or
+     `stopped` with no `pending`, is not killed again (that is how a kill whose receipt never reached the ledger looks next
+     pass). `stopped` *with* `pending` is a kill cut off half way (`runKill` writes both before it closes the window), so kill
+     runs again to finish it — or answers busy while it is still running. A name now running a different session than the
+     bound one is left alone and handed to PM. An unreadable registry fails the card for this pass; nothing is killed or removed.
    - peer: the worker is on the lender's machine — no command is sent, both receipts just say so.
    - an agent still named / bound on an unfinished card is not killed (receipt says which card).
 2. **Worktrees**: `<worktreeRoot>/<task lowercased>` (the executor's, from dag-tools-start) and `<worktreeRoot>/rv-<task>`
-   (the reviewer's). Not there → skipped. A live (not `stopped`) agent whose registry cwd is inside it → kept. Must be a linked
+   (the reviewer's). Not there → skipped. An agent not finished stopping (see above) whose registry cwd is inside it → kept. Must be a linked
    worktree (git-dir ≠ common-dir). `git status --porcelain` empty →
    `git worktree remove <path>` — never `--force`, never `rm`, and git itself refuses a dirty tree.
 3. The intent settles `done` with a summary receipt.
@@ -50,8 +53,10 @@ One `retire` intent per card (`retire:<task>`, opened already claimed by `ledger
 
 Each card gets one settle event either way. A pass sends the notices as **one combined message per project**, never one per
 card, and a card owing PM a notice settles only **after** its project's notice went out. A notice that fails leaves the intent
-`submitted`; the next pass rebuilds it from durable state (session receipts, the worktrees on disk) and resends it. After a
-settle the card is never picked again, so PM hears once — twice only if the notice went out and the settle write then failed.
+`submitted`; the next pass rebuilds it from durable state (session receipts, the worktrees on disk) and resends it. A notice
+that went out is remembered in the service process until its settle lands, so a failed settle write is retried without telling
+PM again. After a settle the card is never picked again. The one window left is the service dying between the send and the
+settle: the bridge keeps no send ids, so that notice may come twice (never zero times).
 
 ## Not done here
 
