@@ -32,9 +32,14 @@ import { existsSync, readFileSync, readdirSync, realpathSync } from "fs";
 import { homedir } from "os";
 import { join } from "path";
 import { hasInboundHeader } from "./inbound-body.js";
+import { isSandbox, sandboxPiAgentDir, SANDBOX_ROOT_ENV } from "./sandbox.js";
 
-/** Pi 的 agent 目录（`~/.pi/agent`），可用环境变量覆盖（与 Pi 自身一致） */
+/**
+ * Pi 的 agent 目录（`~/.pi/agent`），可用环境变量覆盖（与 Pi 自身一致）。沙箱里只认从沙箱根推出来的那个：不回落 ~/.pi
+ * （会话发现、用量、归档会扫到 owner 真实的 Pi 会话），也不认手设的别处（lib/sandbox.ts sandboxPiAgentDir）。
+ */
 export function piAgentDir(): string {
+  if (isSandbox()) return sandboxPiAgentDir(process.env[SANDBOX_ROOT_ENV]?.trim());
   return process.env.PI_CODING_AGENT_DIR || join(homedir(), ".pi", "agent");
 }
 

@@ -345,11 +345,30 @@ export function refuseInSandbox(what: string, env: Env = process.env): void {
   if (isSandbox(env)) throw new SandboxViolation([`沙箱里不许${what}`]);
 }
 
-/** Pi / Codex 的启动链不经本模块的闸门（Codex 给 MCP 的环境是白名单、还会加载用户全局 MCP）：沙箱里直接拒绝 */
+/** 沙箱里 Pi 的 agent 目录（会话 / 设置 / 凭据）：只从沙箱根推出来，不收调用方给的路径；根不是绝对路径就抛（拼出相对路径会落进 cwd） */
+export function sandboxPiAgentDir(root: string | undefined): string {
+  if (!root || !isAbsolute(root)) throw new SandboxViolation([`${SANDBOX_ROOT_ENV} 不是绝对路径（${root || "空"}），不知道 Pi 的目录该在哪`]);
+  return join(root, "pi-agent");
+}
+
 /**
- * 沙箱只起 Claude Code；唯一例外是 T60 的 Codex over ACP：owner 定的，沙箱不碰真 Codex 登录和本机的 .codex 目录，适配器固定是本仓的
- * 协议 stub（lib/acp/stub.ts）。外部的 CLAUDESTRA_ACP_AGENT 是任意 argv，沙箱里带着它就拒——不让人以为它生效了。
- * tmux 版 Codex（buildCodexCommand 不带 transport）照旧拒。
+ * 沙箱里起 Pi 的前提：PI_CODING_AGENT_DIR 逐字等于 sandboxPiAgentDir（scripts/sandbox.ts 设）。没设就拒：pi 会回落 ~/.pi/agent，
+ * 读到 owner 真实的会话、扩展和凭据；设成别处也拒，不让人以为它生效了。非沙箱 null。docs/architecture/pi-acp-sandbox.md。
+ */
+export function sandboxPiAgentDirProblem(env: Env = process.env): string | null {
+  if (!isSandbox(env)) return null;
+  const root = (env[SANDBOX_ROOT_ENV] || "").trim();
+  if (!root || !isAbsolute(root)) return `沙箱没设绝对路径的 ${SANDBOX_ROOT_ENV}，不知道 Pi 的目录该在哪`;
+  const want = sandboxPiAgentDir(root);
+  const got = env.PI_CODING_AGENT_DIR ?? "";
+  return got === want ? null : `沙箱里的 PI_CODING_AGENT_DIR 必须是 ${want}（收到 ${got || "空"}；用 scripts/sandbox.ts 起的沙箱会自动设好）`;
+}
+
+/**
+ * 沙箱默认只起 Claude Code，例外只有两条，都走 ACP（tmux 版 Codex / Pi 的启动链不经本模块的闸门，照旧拒）：
+ * - Codex：适配器固定是本仓的协议 stub（lib/acp/stub.ts），不碰真 Codex 登录和 ~/.codex。外部的 CLAUDESTRA_ACP_AGENT
+ *   是任意 argv，沙箱里带着它就拒——不让人以为它生效了；
+ * - Pi：PI_CODING_AGENT_DIR 必须钉在沙箱根下（sandboxPiAgentDirProblem）；HOME、参数、凭据的约束在 lib/acp/pi-adapter/sandbox-policy.ts。
  */
 export function assertSandboxRuntime(runtime: string, env: Env = process.env, transport?: string): void {
   if (!isSandbox(env) || runtime === "claude-code") return;
@@ -357,5 +376,10 @@ export function assertSandboxRuntime(runtime: string, env: Env = process.env, tr
     if (!env.CLAUDESTRA_ACP_AGENT?.trim()) return;
     throw new SandboxViolation(["沙箱里不认 CLAUDESTRA_ACP_AGENT：acp 固定起本仓的 scripts/acp-stub.ts，把这个变量去掉再试"]);
   }
-  throw new SandboxViolation([`沙箱只支持 Claude Code agent（收到 runtime=${runtime}${transport ? `、transport=${transport}` : ""}；Codex 只许 --transport acp，适配器固定是 stub）`]);
+  if (runtime === "pi" && transport === "acp") {
+    const p = sandboxPiAgentDirProblem(env);
+    if (!p) return;
+    throw new SandboxViolation([p]);
+  }
+  throw new SandboxViolation([`沙箱只支持 Claude Code agent（收到 runtime=${runtime}${transport ? `、transport=${transport}` : ""}；Codex / Pi 只许 --transport acp，Codex 的适配器固定是 stub）`]);
 }
