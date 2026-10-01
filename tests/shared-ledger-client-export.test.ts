@@ -30,6 +30,8 @@ test("read-only export is deterministic, includes historical bindings and never 
     const options = { localProject: "fake-local-project", projectId: "fake-project", sourceInstanceId: "fake-instance",
       featureIds: ["fake-feature"], batchId: "fake-batch", stateDir: dir,
       scrub: { identity: { username: "fake-user", hostname: "fake-host" } }, summaries: { "fake-task": { summary: "Reviewed team summary", digest: null } } };
+    expect(() => previewSharedLedgerExport(db, options)).toThrow("preview requires persistent planning gate");
+    await writeSharedLedgerMode("fake-feature", { authorityMode: "source", sharedPlanning: true }, dir);
     const before = db.serialize();
     const a = previewSharedLedgerExport(db, options);
     const b = previewSharedLedgerExport(db, options);
@@ -52,14 +54,38 @@ test("read-only export is deterministic, includes historical bindings and never 
         serverSeq: 1, mappings: [] });
     }) as typeof fetch;
     const client = new SharedLedgerClient(fakeConnection, fakeKey(), { fetch: fetcher });
-    await expect(migrateSharedLedgerExport(client, a.payload, a.payload.manifestDigest, dir)).rejects.toThrow("persistent planning gate");
-    await writeSharedLedgerMode("fake-feature", { authorityMode: "source", sharedPlanning: true }, dir);
-    expect((await migrateSharedLedgerExport(client, a.payload, a.payload.manifestDigest, dir)).mode).toBe("commit");
+
+    expect((await migrateSharedLedgerExport(client, a.payload, a.payload.manifestDigest, db, dir)).mode).toBe("commit");
     expect(batches[0]).toEqual(batches[1]);
     expect((await dryRunSharedLedgerExport(client, a.payload)).mode).toBe("dry-run");
-    await expect(migrateSharedLedgerExport(client, a.payload, "fake-wrong-digest", dir)).rejects.toThrow("approval mismatch");
+    await expect(migrateSharedLedgerExport(client, a.payload, "fake-wrong-digest", db, dir)).rejects.toThrow("approval mismatch");
     expect(db.serialize().equals(before)).toBe(true);
     const offline = new SharedLedgerClient(fakeConnection, fakeKey(), { fetch: (async () => { throw new Error("fake offline"); }) as unknown as typeof fetch });
     await expect(dryRunSharedLedgerExport(offline, a.payload)).rejects.toBeInstanceOf(SharedLedgerUnavailable);
+  } finally { closeLedger(path); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("preview v1 then local v2 rejects stale commit even while the gate remains installed", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "shared-ledger-fake-stale-"));
+  const path = join(dir, "fake.sqlite");
+  const db = openLedger(path);
+  try {
+    db.prepare("INSERT INTO features (id, project, title, ownerWords, status, currentVersion, rev, createdBy, createdAt, updatedAt) "
+      + "VALUES ('fake-stale', 'fake-local', 'Plan', '', 'active', 1, 1, 'fake-member', 1, 1)").run();
+    const addVersion = (version: number) => db.prepare(
+      "INSERT INTO dag_versions (featureId, version, reasonKind, proposedBy, createdAt, nodes) VALUES ('fake-stale', ?, ?, 'fake-member', 1, '[]')")
+      .run(version, version === 1 ? "initial" : "new_issue");
+    addVersion(1);
+    await writeSharedLedgerMode("fake-stale", { authorityMode: "source", sharedPlanning: true }, dir);
+    const preview = previewSharedLedgerExport(db, { localProject: "fake-local", projectId: "fake-project", sourceInstanceId: "fake-instance",
+      featureIds: ["fake-stale"], batchId: "fake-stale-batch", stateDir: dir, summaries: {},
+      scrub: { identity: { username: "fake-user", hostname: "fake-host" } } });
+    addVersion(2);
+    db.prepare("UPDATE features SET currentVersion = 2 WHERE id = 'fake-stale'").run();
+    let calls = 0;
+    const client = new SharedLedgerClient(fakeConnection, fakeKey(), {
+      fetch: (async () => { calls++; return Response.json({}); }) as unknown as typeof fetch });
+    await expect(migrateSharedLedgerExport(client, preview.payload, preview.payload.manifestDigest, db, dir)).rejects.toThrow("planning changed");
+    expect(calls).toBe(0);
   } finally { closeLedger(path); rmSync(dir, { recursive: true, force: true }); }
 });

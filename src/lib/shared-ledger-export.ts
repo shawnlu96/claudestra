@@ -43,7 +43,7 @@ export function previewSharedLedgerExport(db: Database, options: SharedLedgerExp
       if (getPendingProposal(db, featureId)) throw new Error("export blocked: pending proposal");
       const mode = readSharedLedgerMode(featureId, options.stateDir);
       if (mode.authorityMode === "execution") throw new Error("execution not shared in V1");
-      if (mode.authorityMode === "planning" && !mode.sharedPlanning) throw new Error("planning export requires persistent write gate");
+      if (!mode.sharedPlanning) throw new Error("preview requires persistent planning gate");
       const versions = Array.from({ length: feature.currentVersion }, (_, index) => {
         const dag = getDagVersion(db, featureId, index + 1);
         if (!dag) throw new Error("export blocked: missing DAG version");
@@ -73,10 +73,16 @@ export async function dryRunSharedLedgerExport(client: SharedLedgerClient, paylo
   return client.import({ ...payload, mode: "dry-run" });
 }
 /** Approval binds to the reviewed digest; changing the manifest requires a new preview. */
-export async function migrateSharedLedgerExport(client: SharedLedgerClient, payload: SharedLedgerImport, approvedDigest: string, stateDir: string) {
+export async function migrateSharedLedgerExport(client: SharedLedgerClient, payload: SharedLedgerImport, approvedDigest: string, db: Database, stateDir: string) {
   if (approvedDigest !== payload.manifestDigest) throw new Error("export preview approval mismatch");
-  for (const feature of payload.manifest.features) {
-    if (!readSharedLedgerMode(feature.sourceFeatureId, stateDir).sharedPlanning) throw new Error("migration requires persistent planning gate");
-  }
+  db.transaction(() => {
+    for (const feature of payload.manifest.features) {
+      if (!readSharedLedgerMode(feature.sourceFeatureId, stateDir).sharedPlanning) throw new Error("migration requires persistent planning gate");
+      const current = getFeature(db, feature.sourceFeatureId);
+      if (!current || current.currentVersion !== feature.versions.length || current.rev !== feature.rev) {
+        throw new Error("planning changed; preview required again");
+      }
+    }
+  }).deferred();
   return client.import({ ...payload, mode: "commit" });
 }

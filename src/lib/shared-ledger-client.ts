@@ -1,3 +1,4 @@
+import { hostname, userInfo } from "node:os";
 import { randomBytes } from "node:crypto";
 import { canonicalJson } from "./ask-bind.js";
 import { signSharedLedgerRequest, SHARED_LEDGER_AUTH_HEADERS, sharedLedgerCommandDigest } from "./shared-ledger-auth.js";
@@ -14,6 +15,9 @@ export interface SharedLedgerConnection {
 }
 export class SharedLedgerRemoteError extends Error {
   constructor(readonly status: number, readonly response: unknown) { super(`shared ledger rejected (${status})`); }
+}
+export class SharedLedgerRollback extends Error {
+  constructor(readonly serverSeq: number) { super("shared ledger sequence rollback; cache rebuilt"); }
 }
 export class SharedLedgerUnavailable extends Error {
   constructor() { super("shared ledger unavailable; outcome unconfirmed"); }
@@ -67,7 +71,11 @@ export class SharedLedgerClient {
     } finally { clearTimeout(timer); signal?.removeEventListener("abort", abort); }
   }
   private scrub<T>(input: unknown, parser: (value: unknown) => T): T {
-    const context = this.options.scrub ?? { identity: { username: "", hostname: "" } };
+    let context = this.options.scrub;
+    if (!context) {
+      try { context = { identity: { username: userInfo().username, hostname: hostname() } }; }
+      catch { throw new Error("shared ledger upload identity unavailable"); } // Missing local identity cannot permit an upload.
+    }
     return scrubSharedLedger(input, parser, { ...context, knownSecrets: [...(context.knownSecrets ?? []), this.connection.bearer] });
   }
   async features(signal?: AbortSignal) {
@@ -140,8 +148,8 @@ export class SharedLedgerClient {
       running = true;
       try {
         const result = await this.features(signal);
-        if (!stopped) cache.store(ticket, { ...result, features: result.features.filter((f) => f.projectId === identity.projectId) },
-          result.serverSeq, this.now());
+        if (!stopped && cache.store(ticket, { ...result, features: result.features.filter((f) => f.projectId === identity.projectId) },
+          result.serverSeq, this.now()) && cache.read(this.now())?.rollback) onError(new SharedLedgerRollback(result.serverSeq));
       } catch (error) {
         if (signal.aborted) return;
         if (error instanceof SharedLedgerRemoteError && [401, 403].includes(error.status)) cache.invalidate(ticket);

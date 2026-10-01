@@ -2,7 +2,7 @@ import { SHARED_LEDGER_STALE_MS } from "./shared-ledger-contract.js";
 
 export interface SharedLedgerCacheIdentity { centerId: string; teamId: string; personId: string; projectId: string }
 export interface CacheTicket { key: string; generation: number; signal: AbortSignal }
-interface Entry<T> { value: T; serverSeq: number; lastSuccessAt: number }
+interface Entry<T> { value: T; serverSeq: number; lastSuccessAt: number; rollback: boolean }
 /** Identity changes invalidate in-flight tickets, including a switch away and back to the same member. */
 export class SharedLedgerCache<T> {
   private generation = 0;
@@ -23,7 +23,9 @@ export class SharedLedgerCache<T> {
     if (ticket.key !== this.active || ticket.generation !== this.generation) return false;
     if (!Number.isSafeInteger(serverSeq) || serverSeq < 0) throw new Error("invalid server sequence");
     // Whole snapshots replace even after a gap or backup rollback; never splice data across watermarks.
-    this.entries.set(ticket.key, { value: structuredClone(value), serverSeq, lastSuccessAt: now });
+    const previous = this.entries.get(ticket.key);
+    const rollback = !!previous && serverSeq < previous.serverSeq;
+    this.entries.set(ticket.key, { value: structuredClone(value), serverSeq, lastSuccessAt: now, rollback });
     return true;
   }
   read(now = Date.now()): (Entry<T> & { stale: boolean }) | null {

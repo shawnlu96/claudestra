@@ -132,3 +132,62 @@ test("valid CAS conflict returns the frozen latest DTO without auto resubmission
   catch (error) { expect((error as SharedLedgerRemoteError).response).toEqual(SHARED_LEDGER_CONFLICT_FIXTURE); }
   expect(posts).toBe(1); expect(command.expectedRev).toBe(6);
 });
+
+test("absolute paths after all non-path delimiters are blocked before signing", async () => {
+  let calls = 0;
+  const fetcher = (async () => { calls++; return Response.json({}); }) as unknown as typeof fetch;
+  const client = new SharedLedgerClient(fakeConnection, fakeKey(), { fetch: fetcher,
+    scrub: { identity: { username: "fake-user", hostname: "fake-host" } } });
+  for (const prefix of ["", "artifact=", ":", ",", ";", "|", "<", "[", "{", "\n"]) {
+    for (const path of ["/srv/private/file", "~/private/file"]) {
+      await expect(client.command({ ...fakeCommand, description: prefix + path })).rejects.toThrow("$.description");
+    }
+  }
+  expect(calls).toBe(0);
+});
+
+test("missing scrub context derives fresh local identity for all upload methods and fails closed", async () => {
+  const { spyOn } = await import("bun:test");
+  const os = await import("node:os");
+  const { SHARED_LEDGER_IMPORT_FIXTURE, SHARED_LEDGER_PROJECTION_FIXTURE } = await import("../src/lib/shared-ledger-contract-fixtures.js");
+  const user = spyOn(os, "userInfo").mockReturnValue({ ...os.userInfo(), username: "alice" });
+  const host = spyOn(os, "hostname").mockReturnValue("fake-alice-host");
+  let calls = 0;
+  const fetcher = (async () => { calls++; return Response.json({}); }) as unknown as typeof fetch;
+  try {
+    const client = new SharedLedgerClient(fakeConnection, fakeKey(), { fetch: fetcher });
+    await expect(client.command({ ...fakeCommand, description: "owner alice" })).rejects.toThrow("$.description");
+    const imported = structuredClone(SHARED_LEDGER_IMPORT_FIXTURE.payload);
+    imported.manifest.features[0]!.description = "owner alice";
+    await expect(client.import(imported)).rejects.toThrow("$.manifest.features[0].description");
+    const projection = structuredClone(SHARED_LEDGER_PROJECTION_FIXTURE.payload);
+    projection.tasks[0]!.specSummary = "owner alice";
+    await expect(client.projection(projection)).rejects.toThrow("$.tasks[0].specSummary");
+    user.mockImplementation(() => { throw new Error("fake identity lookup failure"); });
+    await expect(client.command(fakeCommand)).rejects.toThrow("identity unavailable");
+    expect(calls).toBe(0);
+  } finally { user.mockRestore(); host.mockRestore(); }
+});
+
+test("snapshot regression rebuilds cache and poll warns once", async () => {
+  const { SharedLedgerCache } = await import("../src/lib/shared-ledger-cache.js");
+  const { SharedLedgerRollback } = await import("../src/lib/shared-ledger-client.js");
+  const cache = new SharedLedgerCache<SharedLedgerFeatureList>();
+  const identity = { centerId: "fake-center", teamId: "fake-team", personId: "fake-member", projectId: "fake-project" };
+  cache.store(cache.select(identity), fakeSnapshot(10), 10);
+  const warnings: unknown[] = [];
+  const fetcher = (async () => Response.json(fakeSnapshot(9))) as unknown as typeof fetch;
+  const client = new SharedLedgerClient(fakeConnection, fakeKey(), { fetch: fetcher });
+  let stop = client.poll(cache, identity, (warning) => warnings.push(warning));
+  await new Promise((resolve) => setTimeout(resolve, 1));
+  stop();
+  expect(cache.read()?.serverSeq).toBe(9);
+  expect(cache.read()?.rollback).toBe(true);
+  expect(warnings).toHaveLength(1);
+  expect(warnings[0]).toBeInstanceOf(SharedLedgerRollback);
+  stop = client.poll(cache, identity, (warning) => warnings.push(warning));
+  await new Promise((resolve) => setTimeout(resolve, 1));
+  stop();
+  expect(cache.read()?.rollback).toBe(false);
+  expect(warnings).toHaveLength(1);
+});

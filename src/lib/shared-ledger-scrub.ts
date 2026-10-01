@@ -26,13 +26,17 @@ const allowed: Record<string, readonly string[]> = {
   steps: ["sourceStepId", "sourceRev", "sourceSeq", "state"], asks: ["kind", "state", "blocking"],
   events: ["sourceSeq", "sourceTaskId", "type", "at", "summary"],
 };
-const absolutePath = /(?:^|[\s'"`(])(?:\/[A-Za-z0-9._-]+(?:\/|\b)|[A-Za-z]:[\\/])/;
+const absolutePath = /(?<![A-Za-z0-9._~*?\/\\-])(?:~?\/[A-Za-z0-9._-]+(?:\/|\b)|[A-Za-z]:[\\/])/;
 const address = /\b(?:\d{1,3}\.){3}\d{1,3}\b|\b(?:https?|wss?):\/\/|\b(?:[a-f0-9]{1,4}:){2,}[a-f0-9:]+\b/i;
 /** Inspect originals before masking: detecting a secret must refuse upload even if a masker could hide it. */
 export function scrubSharedLedger<T>(input: unknown, parser: Schema<T>, context: SharedLedgerScrubContext): T {
   const fields = new Set<string>();
   const commits = context.commits ?? new Set<string>();
-  const known = [...(context.knownSecrets ?? []), ...(context.knownAddresses ?? []), ...(context.personalValues ?? []), context.identity.username, context.identity.hostname].filter(Boolean);
+  const known = [...(context.knownSecrets ?? []), ...(context.knownAddresses ?? []), ...(context.personalValues ?? [])].filter(Boolean);
+  if (!context.identity.username.trim() || !context.identity.hostname.trim()) throw new SharedLedgerScrubError(["$.<identity>"]);
+  const escape = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const names = [context.identity.username, context.identity.hostname].map((name) =>
+    new RegExp(`(?<![A-Za-z0-9])${escape(name)}(?![A-Za-z0-9])`, "i"));
   const visit = (value: unknown, path: string, shape: string): void => {
     if (Array.isArray(value)) { value.forEach((v, i) => visit(v, `${path}[${i}]`, shape)); return; }
     if (value && typeof value === "object") {
@@ -46,7 +50,7 @@ export function scrubSharedLedger<T>(input: unknown, parser: Schema<T>, context:
     if (typeof value !== "string") return;
     const digest = ["manifestDigest", "specDigest"].includes(shape) && /^[a-f0-9]{64}$/.test(value);
     const head = shape === "head" && commits.has(value.toLowerCase());
-    if (known.some((secret) => value.includes(secret)) || address.test(value) || absolutePath.test(value)) fields.add(path);
+    if (names.some((name) => name.test(value)) || known.some((secret) => value.includes(secret)) || address.test(value) || absolutePath.test(value)) fields.add(path);
     if (!digest && !head) {
       const peer = redactForPeer(value);
       const pr = redactPeerPr(value, context.identity, commits);

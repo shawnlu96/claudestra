@@ -21,3 +21,18 @@ test("sensitive originals and undeclared fields refuse without echoing values", 
   }
   expect(scrubSharedLedger(fakeCommand, parseSharedLedgerCommand, context)).toEqual(fakeCommand);
 });
+
+test("short identity names use case-insensitive word boundaries", () => {
+  const identity = { identity: { username: "he", hostname: "fake-host" } };
+  expect(scrubSharedLedger({ ...fakeCommand, title: "The plan" }, parseSharedLedgerCommand, identity)).toMatchObject({ title: "The plan" });
+  for (const description of ["owner he", "owner HE", "HE", "<fake-HOST>", "/Users/he/private"]) {
+    expect(() => scrubSharedLedger({ ...fakeCommand, description }, parseSharedLedgerCommand, identity)).toThrow("$.description");
+  }
+});
+
+test("relative repository globs remain valid and empty identities fail closed", () => {
+  const command = { type: "dag.init" as const, projectId: "fake-project", featureId: "fake-feature", requestId: "fake-init", expectedRev: 1,
+    baseVersion: 0, reason: "The plan", nodes: [{ key: "A", oneLine: "Build", deps: [], estimate: "S", fileGlobs: ["src/**/file.ts", "**/test.ts"] }] };
+  expect(scrubSharedLedger(command, parseSharedLedgerCommand, context)).toEqual(command);
+  expect(() => scrubSharedLedger(fakeCommand, parseSharedLedgerCommand, { identity: { username: "", hostname: "" } })).toThrow("<identity>");
+});
