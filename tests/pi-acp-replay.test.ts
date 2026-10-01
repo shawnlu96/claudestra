@@ -11,7 +11,6 @@ import { join } from "node:path";
 import { PI_MCP_SERVERS_ENV } from "../src/lib/acp/pi-adapter/mcp-mount.ts";
 import { piLinkOver, type PiProc } from "../src/lib/acp/pi-adapter/pi-link.ts";
 import { PiAcpServer } from "../src/lib/acp/pi-adapter/server.ts";
-import { parseConfigOptions } from "../src/lib/acp/config.ts";
 import type { RpcWire } from "../src/lib/acp/rpc.ts";
 import { AcpSession } from "../src/lib/acp/session.ts";
 import { createAcpTranslator } from "../src/lib/acp/updates.ts";
@@ -98,7 +97,7 @@ function harness(...runs: Line[][]) {
     exit: (code) => void exits.push(code),
   });
   const updates: Rec[] = [];
-  const session = new AcpSession(hostWire, { onUpdate: (u) => void updates.push(u), onPermission: async () => null, log: (m) => logs.push(m) });
+  const session = new AcpSession(hostWire, { onUpdate: (u) => void updates.push(u), onPermission: async () => null, log: (m) => logs.push(m), label: "Pi" }, MCP_SERVERS);
   return { get pi() { return pis[0]!; }, pis, hostWire, session, updates, opened, exits, logs };
 }
 
@@ -120,11 +119,8 @@ describe("Pi 适配器 · 回放 pi 0.99.1 录制流（契约）", () => {
     expect(await session.initialize()).toEqual({ resume: true, fork: false });
     expect(session.steering).toBe(true);
 
-    // 录制时 session/new 带的是假 MCP server；宿主的 create() 固定传 []，这里直接走 rpc
-    const created = await session.rpc.request("session/new", { cwd: CWD, mcpServers: MCP_SERVERS });
-    session.sessionId = created.sessionId;
-    session.configOptions = parseConfigOptions(created.configOptions);
-    expect(created.sessionId).toBe("sid-replay");
+    // 录制时 session/new 带的是假 MCP server：宿主的 AcpSession 构造时给定的 mcpServers，create / resume 都带它
+    expect(await session.create(CWD)).toBe("sid-replay");
     const mounted = { claudestra: { command: "/bin/bun-rec", args: ["/rec/fake-mcp.ts"], env: { FAKE_MCP_LOG: "/rec/mcp.log" } } };
     expect(h.opened).toEqual([{ sessionId: "sid-replay", cwd: CWD, env: { [PI_MCP_SERVERS_ENV]: JSON.stringify(mounted) } }]);
     expect(session.configOptions.map((o) => [o.id, o.currentValue, o.choices.map((c) => c.value)])).toEqual([
@@ -153,13 +149,12 @@ describe("Pi 适配器 · 回放 pi 0.99.1 录制流（契约）", () => {
     expect(await session.setConfig("model", "cc-switch-deep-seek/deepseek-flash")).toEqual({ ok: true });
     expect(session.configOptions.map((o) => [o.id, o.currentValue])).toEqual([["model", "cc-switch-deep-seek/deepseek-flash"], ["reasoning_effort", "max"]]);
 
-    // 3. 空闲时插话：pi 另起一轮 → startedNewTurn；回包必须先于这一轮的 idle 到宿主（宿主按回包那一刻的序号等 idle）
-    let atReply = -1;
-    const steer1 = await session.rpc.request("_session/steering", { sessionId: session.sessionId, prompt: [{ type: "text", text: "Answer with exactly the word: ok" }] }, {
-      onResult: () => void (atReply = updates.length),
-    });
-    expect(steer1).toEqual({ outcome: "startedNewTurn" });
-    await until(() => updates.slice(atReply).some((u) => status(u) === "idle"), "插话那一轮的 idle");
+    // 3. 空闲时插话：pi 另起一轮 → startedNewTurn；回包必须先于这一轮的 idle 到宿主（宿主按回包那一刻的序号等 idle），
+    //    这一轮的结束靠宿主认出中性的 _meta.claudestra.threadStatus（updates.ts threadStatusOf）
+    const steer1 = await session.steer("Answer with exactly the word: ok");
+    expect(steer1.outcome).toBe("startedNewTurn");
+    const ended = steer1.outcome === "startedNewTurn" ? steer1.done : Promise.resolve(null);
+    expect(await Promise.race([ended, Bun.sleep(3_000).then(() => "等不到插话那一轮的 idle")])).toEqual({ kind: "done" });
 
     // 4. 忙时插话：排进在跑的回合 → injected，回合照常结束
     const t4 = updates.length;

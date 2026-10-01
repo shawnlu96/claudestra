@@ -260,7 +260,7 @@ export interface ManagedRuntimeAdapter extends SessionSourceAdapter {
    * 连按 Esc 在别的 TUI 里是手势（Codex：backtrack 回溯）的运行时必须自己实现。
    */
   exitPrelude?(win: WindowOps): Promise<"at-shell" | "continue">;
-  /** ACP 通道（T60 试点，目前只有 Codex）。不声明 = 这个运行时只能走 tmux */
+  /** ACP 通道（Codex、Pi）。不声明 = 这个运行时只能走 tmux */
   readonly acp?: AcpTransport;
   /** registry notes 里的会话前缀（历史值 "claude" / "pi"，保持不变） */
   readonly noteTag: string;

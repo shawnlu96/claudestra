@@ -58,24 +58,29 @@ export interface AdapterEnvSpec {
   clean?: boolean;
 }
 
-export function adapterEnv(s: AdapterEnvSpec): Record<string, string> {
+/** 宿主环境 → 适配器环境的公共底（两家共用）：拷一份，去掉 tmux / 频道 / bridge 变量；干净模式只拿白名单 */
+export function hostEnvBase(s: AdapterEnvSpec): Record<string, string> {
   const env: Record<string, string> = s.clean ? { ...pickWorkerEnv(s.base), [LEND_WORKER_MARK]: "1" } : {};
   if (!s.clean) for (const [k, v] of Object.entries(s.base)) if (typeof v === "string") env[k] = v;
   // 干净模式的 BRIDGE_* 只可能是 pickWorkerEnv 在沙箱里放进来的（宿主的 bridge 地址，不带 token）：删了 worker 里的 manager 在沙箱里一加载就被拒
   const drop = ["TMUX", "TMUX_PANE", "CLAUDESTRA_CODEX_PREAMBLE", "DISCORD_CHANNEL_ID", ...(s.clean ? [] : ["BRIDGE_URL", "BRIDGE_PORT"]), ACP_AGENT_ENV];
   for (const k of drop) delete env[k];
+  return env;
+}
+
+/** channel-server 要的频道变量（BRIDGE_URL 是宿主回环代理的地址，带 token） */
+export function channelServerEnv(c: NonNullable<AdapterEnvSpec["channel"]>, mcpName: string, runtime: string): Record<string, string> {
+  return { DISCORD_CHANNEL_ID: c.channelId, BRIDGE_URL: c.proxyUrl, CLAUDESTRA_AGENT: c.agentName, CLAUDESTRA_RUNTIME: runtime, CLAUDESTRA_SESSION_ID: c.sessionId, MCP_NAME: mcpName };
+}
+
+/** Codex：channel-server 以 CODEX_CONFIG 的 mcp_servers 交给 codex-acp，它按 env_vars 白名单从适配器环境里取频道变量 */
+export function adapterEnv(s: AdapterEnvSpec): Record<string, string> {
+  const env = hostEnvBase(s);
   const config: Record<string, unknown> = { check_for_update_on_startup: false };
   if (s.developerInstructions) config.developer_instructions = s.developerInstructions;
   if (s.channel && !s.clean) {
     config.mcp_servers = { [s.mcpName]: { command: s.bunBin, args: [s.channelServer], env_vars: ACP_MCP_ENV_VARS } };
-    Object.assign(env, {
-      DISCORD_CHANNEL_ID: s.channel.channelId,
-      BRIDGE_URL: s.channel.proxyUrl,
-      CLAUDESTRA_AGENT: s.channel.agentName,
-      CLAUDESTRA_RUNTIME: "codex",
-      CLAUDESTRA_SESSION_ID: s.channel.sessionId,
-      MCP_NAME: s.mcpName,
-    });
+    Object.assign(env, channelServerEnv(s.channel, s.mcpName, "codex"));
   }
   if (s.codexPath) env.CODEX_PATH = s.codexPath;
   if (isSandbox(s.base)) Object.assign(env, sandboxAcpHome(s.base[SANDBOX_ROOT_ENV])); // 沙箱：适配器和它起的 channel-server 碰不到 owner 的家目录

@@ -1,5 +1,4 @@
-/** ACP /clear：新线程先完成引导，再原子换 registry；失败时由宿主接回旧线程。 */
-import { BOOTSTRAP_PROMPT } from "../codex-launch.js";
+/** ACP /clear：新线程先完成引导（运行时要的话，host-runtime.ts），再原子换 registry；失败时由宿主接回旧线程。 */
 import type { AcpSession } from "./session.js";
 import type { AcpTurnLoop } from "./turn.js";
 
@@ -9,12 +8,13 @@ async function createClearedSession(
   session: AcpSession, oldSessionId: string, cwd: string,
   rotateRegistry: (oldId: string, newId: string) => Promise<{ ok: boolean; error?: string }>,
   configure: (session: AcpSession) => Promise<void>,
+  bootstrap: string | undefined,
 ): Promise<ClearResult> {
   try {
     const fresh = await session.create(cwd, 50_000);
     if (fresh === oldSessionId) throw new Error("session/new 没生成新的线程 id");
     await configure(session);
-    const outcome = await session.prompt(BOOTSTRAP_PROMPT, 60_000);
+    const outcome = bootstrap ? await session.prompt(bootstrap, 60_000) : { kind: "done" as const };
     if (outcome.kind !== "done") throw new Error(`新线程引导未完成：${outcome.kind === "failed" ? outcome.failure.message : "已取消"}`);
     const committed = await rotateRegistry(oldSessionId, fresh);
     if (!committed.ok) throw new Error(`registry 未换代：${committed.error ?? "未知原因"}`);
@@ -27,7 +27,7 @@ async function createClearedSession(
 /** 宿主的轮换闸：只有空闲才能进；挂起期间入站留在 turn 队列，失败按旧 id 接回。 */
 export async function rotateAcpHost(o: {
   session: AcpSession | null; ready: boolean; pending: boolean; loop: AcpTurnLoop;
-  oldId: string; cwd: string;
+  oldId: string; cwd: string; bootstrap?: string;
   rotateRegistry: (oldId: string, newId: string) => Promise<{ ok: boolean; error?: string }>;
   configure: (session: AcpSession) => Promise<void>;
   begin(): void;
@@ -41,7 +41,7 @@ export async function rotateAcpHost(o: {
   o.begin();
   let waitingForRebind = false;
   try {
-    const result = await createClearedSession(o.session, o.oldId, o.cwd, o.rotateRegistry, o.configure);
+    const result = await createClearedSession(o.session, o.oldId, o.cwd, o.rotateRegistry, o.configure, o.bootstrap);
     if (!result.ok) return o.failed(result.changed), { ok: false, error: result.error };
     try {
       await o.committed(result.sessionId, o.session);

@@ -24,7 +24,7 @@ import {
 import { recordCodexRunning } from "../codex-version.js";
 import { probeClaudeVersion } from "../claude-binary.js";
 import { bridgePortOf, defaultCodexDeps, type CodexAdapterDeps } from "./codex-deps.js";
-import { CODEX_ACP_CONTROL } from "./codex-control.js";
+import { ACP_CONTROL } from "./acp-control.js";
 import { codexExitPrelude, codexOnExitPane } from "./codex-exit.js";
 import { CODEX_READY_OPTION, paneBaseline, waitCodexReady, type PaneBaseline } from "./codex-ready.js";
 import { codexSource, isValidCodexSessionId } from "./codex-source.js";
@@ -54,8 +54,6 @@ export const CODEX_CONTROL: RuntimeControl = {
   // 空闲时的 Esc 会挂上 backtrack、第二下打开回溯遮罩（codex-exit.ts）
   interruptOnlyWhenBusy: true,
 };
-
-export { CODEX_ACP_CONTROL } from "./codex-control.js";
 
 const AVAILABILITY_TTL_MS = 5 * 60_000;
 
@@ -203,7 +201,7 @@ export function createCodexAdapter(overrides: Partial<CodexAdapterDeps> = {}): C
     ...codexSource,
     manageable: true,
     control: CODEX_CONTROL,
-    acp: { control: CODEX_ACP_CONTROL },
+    acp: { control: ACP_CONTROL },
     inbound: "codex-queue",
     turnEnd: "codex-hooks",
     exitCommand: "/quit",

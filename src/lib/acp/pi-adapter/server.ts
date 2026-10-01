@@ -25,6 +25,8 @@ const COMMAND_TIMEOUT_MS = 30_000;
 export interface PiServerDeps {
   openPi(o: { sessionId: string; cwd: string; env: Record<string, string> }): PiLink;
   newSessionId(): string;
+  /** 要挂的 MCP server 和 pi 自己的 mcp.json 撞名就返回原因（mcp-clash.ts）；有原因就拒起这个会话 */
+  mcpClash?(names: string[], cwd: string): string | null;
   log(msg: string): void;
   /** 适配器该退出了：宿主关了 stdin（0），或 pi 意外退出（1） */
   exit(code: number): void;
@@ -86,9 +88,12 @@ export class PiAcpServer {
   private async open(id: string, p: Rec): Promise<void> {
     const mcp = mcpServersForPi(p?.mcpServers);
     if ("error" in mcp) throw new RpcError(INVALID_PARAMS, mcp.error);
+    const cwd = typeof p?.cwd === "string" && p.cwd ? p.cwd : process.cwd();
+    const clash = this.deps.mcpClash?.(Object.keys(mcp.servers), cwd);
+    if (clash) throw new RpcError(INVALID_PARAMS, clash);
     await this.closePi();
     const env: Record<string, string> = Object.keys(mcp.servers).length ? { [PI_MCP_SERVERS_ENV]: JSON.stringify(mcp.servers) } : {};
-    const link = this.deps.openPi({ sessionId: id, cwd: typeof p?.cwd === "string" && p.cwd ? p.cwd : process.cwd(), env });
+    const link = this.deps.openPi({ sessionId: id, cwd, env });
     this.pi = link;
     this.sessionId = id;
     this.mapper = createPiEventMapper();

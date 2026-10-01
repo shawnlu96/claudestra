@@ -41,11 +41,14 @@ export interface AcpTranslator {
   flush(): Rec[];
 }
 
-/** 线程状态（session_info_update._meta.codex.threadStatus.type：idle / active / systemError / notLoaded）；不是这类更新返回 null */
+/**
+ * 线程状态（session_info_update 的 threadStatus.type：idle / active / systemError / notLoaded）；不是这类更新返回 null。
+ * codex-acp 放在 _meta.codex，Pi 适配器用中性的 _meta.claudestra（pi-adapter/map.ts），两个都认。
+ */
 export function threadStatusOf(update: unknown): string | null {
   const u = update as Rec | null;
   if (u?.sessionUpdate !== "session_info_update") return null;
-  const t = u._meta?.codex?.threadStatus?.type;
+  const t = u._meta?.codex?.threadStatus?.type ?? u._meta?.claudestra?.threadStatus?.type;
   return typeof t === "string" ? t : null;
 }
 

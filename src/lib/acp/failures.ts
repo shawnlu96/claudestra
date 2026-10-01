@@ -47,9 +47,9 @@ export function airFailureOf(result: unknown): AirSessionFailure | null {
 }
 
 /** AIR 失败 → 我们的分类（key = air:<id>：同一横幅的后续 revision 不再出第二张卡） */
-export function classifyAirFailure(f: AirSessionFailure): AcpFailure {
+export function classifyAirFailure(f: AirSessionFailure, label = "Codex"): AcpFailure {
   const key = `air:${f.id}`;
-  const message = f.title || `Codex 回合失败（${f.category}）`;
+  const message = f.title || `${label} 回合失败（${f.category}）`;
   if (f.category === "access" || f.actions.includes("login")) return { kind: "auth", key, message };
   const retry = f.actions.includes("retry");
   const newSession = f.actions.includes("new_session");

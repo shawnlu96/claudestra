@@ -9,6 +9,7 @@ import { spawnAdapter } from "../adapter-proc.js";
 import type { RpcWire } from "../rpc.js";
 import { piBinName } from "../../pi-env.js";
 import { piRpcArgs } from "./args.js";
+import { piMcpClash } from "./mcp-clash.js";
 import { piLinkOver } from "./pi-link.js";
 import { PiAcpServer } from "./server.js";
 
@@ -29,6 +30,7 @@ function run(baseArgs: string[]): void {
   new PiAcpServer(wire, {
     openPi: (o) => piLinkOver(spawnAdapter([piBinName(), ...piRpcArgs(o.sessionId, baseArgs)], { ...env, ...o.env }, o.cwd, log, "pi"), log),
     newSessionId: () => Bun.randomUUIDv7(),
+    mcpClash: (names, cwd) => (names.length ? piMcpClash(names, cwd) : null),
     log,
     exit: (code) => process.exit(code),
   });
