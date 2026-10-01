@@ -1,6 +1,7 @@
 /**
- * 子 DAG 读接口（i28-L4）的响应形状。web 不 import src：照 src/lib/ledger-dag-board.ts（投影）与
- * src/bridge/local-api/ledger-dag.ts（三条路由）手抄，tests/web-collab-dag-contract.test.ts 拿 src 投影的真输出钉住两边一致。
+ * 子 DAG 读接口（i28-L4）的响应形状。web 不 import src：照 src/lib/ledger-dag-board.ts、ledger-dag-board-history.ts（投影）与
+ * src/bridge/local-api/ledger-dag.ts（三条路由）手抄；tests/web-collab-dag-contract.test.ts 在临时台账上跑 src 投影，
+ * 把输出按路由的样子拼成响应赋给这里的类型（编译期）再喂给前端模型（运行期），两边不一致就红。
  * 字段口径见 docs/design/feature-dag.md；前端一律按「可能缺字段」处理，坏数据不让画布崩。
  */
 
@@ -44,7 +45,8 @@ export interface BoardNode {
   fileGlobs?: string[];
   /** 卡的当前 stage；没卡 = "planned"；卡找不到 / 不属于本项目 = null */
   status: string | null;
-  statusAtVersion: string;
+  /** 快照里记的状态；missing 节点为 null */
+  statusAtVersion: string | null;
   title: string | null;
   satisfied: boolean;
   ready: boolean;
@@ -147,6 +149,7 @@ export interface DagDiffResponse {
   ok: true;
   project: string;
   featureId: string;
+  now: number;
   from: number;
   /** pending 的 to 由路由给成数字（提案的目标版本号），请求参数仍写 pending */
   to: number;
