@@ -100,52 +100,75 @@ type TimerId = ReturnType<typeof setTimeout>;
 export interface Timers { set: (fn: () => void, ms: number) => TimerId; clear: (id: TimerId) => void }
 const REAL_TIMERS: Timers = { set: (fn, ms) => setTimeout(fn, ms), clear: (id) => clearTimeout(id) };
 
-/**
- * 连点合并成一次保存：每次 push 重新计时，停手 ms 后只把最后一个值交给 fire。
- * flush 立刻交出还没交的值（卸载、改用输入框前），cancel 丢掉。timers 可换成假时钟（tests/web-borrow-model.test.ts）。
- */
-export interface Coalescer<T> { push: (v: T) => void; flush: () => void; cancel: () => void }
-export function coalescer<T>(ms: number, fire: (v: T) => void, timers: Timers = REAL_TIMERS): Coalescer<T> {
-  let pending: { v: T } | null = null;
-  let id: TimerId | null = null;
-  const stop = () => {
-    if (id !== null) timers.clear(id);
-    id = null;
-  };
-  const run = () => {
-    stop();
-    const p = pending;
-    pending = null;
-    if (p) fire(p.v);
-  };
-  return {
-    push(v: T) {
-      pending = { v };
-      stop();
-      id = timers.set(run, ms);
-    },
-    flush: run,
-    cancel() {
-      stop();
-      pending = null;
-    },
-  };
+export interface PeerSaver<T> {
+  /** 存一次；delayMs > 0 先等停手，期间同 peer 再存就重新计时、只留新的。after(ok) 只在这次仍是该 peer 最后一次提交时调 */
+  save: (peer: string, v: T, after?: (ok: boolean) => void | Promise<void>, delayMs?: number) => void;
+  /** 删除：丢掉还没发出的值、等在途的写完再 DELETE；成功后这个 peer 的保存一律丢掉，直到 create。失败照抛 */
+  remove: (peer: string) => Promise<void>;
+  /** 新加（或删后重加）：恢复这个 peer 的保存并写入。失败照抛 */
+  create: (peer: string, v: T) => Promise<void>;
 }
 
 /**
- * 同一 peer 的保存串行：一次只在飞一个，后提交的等前一个写完再写；还在排队就被更新的值顶掉的直接跳过。
- * 所以 lend.json 里最后落下的一定是最后提交的值（微调 flush 出的旧值不会盖掉随后输入的新值）。
- * write 自己处理失败；isLatest() 告诉它此刻是否仍是最后一次提交（只有最后一次收尾时清 draft / busy）。
+ * 按 peer 的保存器，模块级一份（borrow-api.ts 的 borrowSaver）：卡片卸载、重挂载都用它，停手计时和在途请求不跟卡片走。
+ * 同一 peer 同时只在飞一个请求，排队中被更新的值顶掉的直接跳过，所以落下的一定是最后提交的值；
+ * 删除排在同一条队里，删掉之后旧卡的保存不会把 peer 建回来。tests/web-borrow-limit.test.ts 用假 io、假时钟覆盖这些交错。
  */
-export function serialLatest<T>(write: (v: T, isLatest: () => boolean) => Promise<void>): (v: T) => Promise<void> {
-  let tail: Promise<void> = Promise.resolve();
-  let seq = 0;
-  return (v) => {
-    const my = ++seq;
-    const isLatest = () => my === seq;
-    // write 抛出也不能让队列断掉，否则之后的保存永远不跑；失败反馈由 write 自己做（抖动 + 回弹）
-    tail = tail.then(() => (isLatest() ? write(v, isLatest) : undefined)).catch((e) => console.warn("[borrow] 保存失败", e));
-    return tail;
+export function peerSaver<T>(io: { put: (peer: string, v: T) => Promise<void>; del: (peer: string) => Promise<void> }, timers: Timers = REAL_TIMERS): PeerSaver<T> {
+  type Lane = { tail: Promise<void>; seq: number; gone: boolean; timer: TimerId | null };
+  const lanes = new Map<string, Lane>();
+  const laneOf = (peer: string): Lane => {
+    let l = lanes.get(peer);
+    if (!l) lanes.set(peer, (l = { tail: Promise.resolve(), seq: 0, gone: false, timer: null }));
+    return l;
+  };
+  /** 新的一次提交：作废排队和计时中的旧值 */
+  const supersede = (l: Lane): number => {
+    if (l.timer !== null) timers.clear(l.timer);
+    l.timer = null;
+    return ++l.seq;
+  };
+  // 队尾不能断：put 失败已交给 after，这里只剩 after 自己抛错，丢了只少一次动效
+  const chain = (l: Lane, step: () => Promise<void>) => void (l.tail = l.tail.then(step).catch((e) => console.warn("[borrow] 保存收尾失败", e)));
+  return {
+    save(peer, v, after, delayMs = 0) {
+      const l = laneOf(peer);
+      if (l.gone) return;
+      const my = supersede(l);
+      const run = async () => {
+        if (l.gone || my !== l.seq) return;
+        let ok = true;
+        try {
+          await io.put(peer, v);
+        } catch (e) {
+          ok = false;
+          console.warn("[borrow] 保存失败", e);
+        }
+        if (my === l.seq) await after?.(ok);
+      };
+      if (delayMs <= 0) return chain(l, run);
+      l.timer = timers.set(() => {
+        l.timer = null;
+        chain(l, run);
+      }, delayMs);
+    },
+    remove(peer) {
+      const l = laneOf(peer);
+      supersede(l);
+      const done = l.tail.then(() => io.del(peer)).then(() => void (l.gone = true));
+      chain(l, () => done.catch((e) => console.warn("[borrow] 删除失败（调用方抖按钮）", e)));
+      return done;
+    },
+    create(peer, v) {
+      const l = laneOf(peer);
+      supersede(l);
+      const done = l.tail.then(() => {
+        l.gone = false;
+        return io.put(peer, v);
+      });
+      chain(l, () => done.catch((e) => console.warn("[borrow] 添加失败（调用方抖按钮）", e)));
+      return done;
+    },
   };
 }
 

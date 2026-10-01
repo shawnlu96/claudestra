@@ -1,11 +1,11 @@
 /**
- * 借入 peer 的「同时最多跑几单」（i28-R7d）：输入框的解析与夹取、−/+ 连点合并成一次保存、「对方只开了 M 个」徽章、
+ * 借入 peer 的「同时最多跑几单」（i28-R7d）：输入框的解析与夹取、按 peer 的保存器（连点合并、跨卡片最后提交的赢、删后不复活）、「对方只开了 M 个」徽章、
  * 嵌框整句的拆分；以及借入 / 出借两个区与 peer 卡上不再只写「借入」「出借」「上限」。
  */
 import { readFileSync } from "node:fs";
 import { describe, expect, test } from "bun:test";
 import type { PeerView } from "@/features/borrow/borrow-api";
-import { BOX, coalescer, grantedSlots, lenderCap, parseMaxOpen, serialLatest, splitAtBox, type Timers } from "@/features/borrow/borrow-model";
+import { BOX, grantedSlots, lenderCap, parseMaxOpen, peerSaver, splitAtBox, type Timers } from "@/features/borrow/borrow-model";
 import { fillParams } from "@/lib/i18n-fill";
 import { BORROW_DICT } from "@/lib/i18n-dict-borrow";
 
@@ -47,119 +47,206 @@ function fakeTimers() {
   return { timers, advance };
 }
 
-describe("−/+ 连点合并成一次保存", () => {
-  test("连点 + 5 下（间隔 < 600ms）只存 1 次，存的是最后的值", () => {
-    const { timers, advance } = fakeTimers();
-    const saved: number[] = [];
-    const c = coalescer<number>(600, (n) => saved.push(n), timers);
-    for (let n = 13; n <= 17; n++) {
-      c.push(n);
-      advance(200);
-    }
-    expect(saved).toEqual([]);
-    advance(599);
-    expect(saved).toEqual([17]);
-    advance(5000);
-    expect(saved).toEqual([17]);
-  });
-  test("停手超过 600ms 再点算新的一次", () => {
-    const { timers, advance } = fakeTimers();
-    const saved: number[] = [];
-    const c = coalescer<number>(600, (n) => saved.push(n), timers);
-    c.push(4);
-    advance(600);
-    c.push(5);
-    advance(600);
-    expect(saved).toEqual([4, 5]);
-  });
-  test("flush 立刻交出（卸载、改用输入框前），之后不再重复；cancel 丢掉", () => {
-    const { timers, advance } = fakeTimers();
-    const saved: number[] = [];
-    const c = coalescer<number>(600, (n) => saved.push(n), timers);
-    c.push(8);
-    c.flush();
-    c.flush();
-    advance(1000);
-    expect(saved).toEqual([8]);
-    c.push(9);
-    c.cancel();
-    advance(1000);
-    expect(saved).toEqual([8]);
-  });
-});
-
 const ticks = async () => {
   for (let k = 0; k < 10; k++) await Promise.resolve();
 };
 
-/** 可控的「写 lend.json」：每次写返回一个手动 resolve / reject 的 Promise，按完成顺序落盘 */
-function fakeStore(initial: number) {
-  const state = { value: initial, started: [] as number[], latestDone: [] as number[] };
-  const gates: { v: number; ok: () => void; fail: () => void }[] = [];
-  const submit = serialLatest<number>(async (v, isLatest) => {
-    state.started.push(v);
-    await new Promise<void>((ok, fail) => gates.push({ v, ok, fail: () => fail(new Error("409")) }));
-    state.value = v;
-    if (isLatest()) state.latestDone.push(v);
-  });
+type Op = { kind: "put" | "del"; peer: string; v?: number };
+/** 可控的 bridge：每个 PUT / DELETE 挂起，按下标手动放行（ok）或打回（fail）；store 是按完成顺序落盘的 lend.json */
+function fakeBridge() {
+  const store = new Map<string, number>([["lab-box", 12]]);
+  const ops: Op[] = [];
+  const gates: { ok: () => void; fail: () => void }[] = [];
+  const hold = (op: Op, apply: () => void) => {
+    ops.push(op);
+    return new Promise<void>((ok, fail) => gates.push({ ok: () => (apply(), ok()), fail: () => fail(new Error("409")) }));
+  };
+  const io = {
+    put: (peer: string, v: number) => hold({ kind: "put", peer, v }, () => store.set(peer, v)),
+    del: (peer: string) => hold({ kind: "del", peer }, () => store.delete(peer)),
+  };
   const settle = async (i: number, ok = true) => {
     await ticks();
     (ok ? gates[i]!.ok : gates[i]!.fail)();
     await ticks();
   };
-  return { state, submit, settle, gates };
+  return { store, ops, io, settle };
 }
 
-describe("同一 peer 的保存串行、最后提交的赢", () => {
-  test("微调 flush 出 13 在飞时又输入 20：20 等 13 写完才写，最后是 20（不会被 13 盖掉）", async () => {
-    const { state, submit, settle } = fakeStore(12);
-    const a = submit(13);
-    await ticks(); // 13 已经发出去了，用户这才输完 20 回车
-    const b = submit(20);
+function rig() {
+  const { timers, advance } = fakeTimers();
+  const b = fakeBridge();
+  const saver = peerSaver<number>(b.io, timers);
+  /** 一张卡：after 记下它收尾时拿到的结果（只有最后一次提交才收尾） */
+  const card = () => {
+    const ends: boolean[] = [];
+    return { ends, save: (v: number, delayMs = 0) => saver.save("lab-box", v, (ok) => void ends.push(ok), delayMs) };
+  };
+  return { ...b, saver, advance: async (ms: number) => (advance(ms), await ticks()), card };
+}
+const puts = (ops: Op[]) => ops.filter((o) => o.kind === "put").map((o) => o.v);
+
+describe("−/+ 连点合并成一次保存", () => {
+  test("连点 + 5 下（间隔 < 600ms）只存 1 次，存的是最后的值", async () => {
+    const r = rig();
+    const c = r.card();
+    for (let n = 13; n <= 17; n++) {
+      c.save(n, 600);
+      await r.advance(200);
+    }
+    expect(r.ops).toEqual([]);
+    await r.advance(599);
+    expect(puts(r.ops)).toEqual([17]);
+    await r.settle(0);
+    await r.advance(5000);
+    expect(puts(r.ops)).toEqual([17]);
+    expect(r.store.get("lab-box")).toBe(17);
+    expect(c.ends).toEqual([true]);
+  });
+  test("停手超过 600ms 再点算新的一次", async () => {
+    const r = rig();
+    const c = r.card();
+    c.save(4, 600);
+    await r.advance(600);
+    await r.settle(0);
+    c.save(5, 600);
+    await r.advance(600);
+    expect(puts(r.ops)).toEqual([4, 5]);
+  });
+  test("点完 + 就关了设置（卡片卸载）：计时在模块里，照样存", async () => {
+    const r = rig();
+    r.card().save(13, 600); // 这张卡随后卸载，没有任何 flush
+    await r.advance(600);
+    await r.settle(0);
+    expect(r.store.get("lab-box")).toBe(13);
+  });
+  test("停手前改用输入框回车 20：只存 20，微调的 13 作废", async () => {
+    const r = rig();
+    const c = r.card();
+    c.save(13, 600);
+    await r.advance(100);
+    c.save(20);
+    await r.settle(0);
+    await r.advance(5000);
+    expect(puts(r.ops)).toEqual([20]);
+    expect(r.store.get("lab-box")).toBe(20);
+  });
+});
+
+describe("同一 peer 跨卡片串行、最后提交的赢", () => {
+  test("卸载后重新挂载：旧卡在飞的 13 不会盖掉新卡输入的 20", async () => {
+    const r = rig();
+    const old = r.card();
+    old.save(13, 600);
+    await r.advance(600); // 旧卡已卸载，PUT 13 在飞
+    const fresh = r.card(); // 重新打开设置，新卡
+    fresh.save(20);
     await ticks();
-    expect(state.started).toEqual([13]); // 不并发：20 还没开始
-    await settle(0);
-    expect(state.value).toBe(13);
-    expect(state.started).toEqual([13, 20]);
-    await settle(1);
-    await Promise.all([a, b]);
-    expect(state.value).toBe(20);
-    expect(state.latestDone).toEqual([20]); // 只有最后一次收尾（清 draft / busy）
+    expect(puts(r.ops)).toEqual([13]); // 不并发：20 等 13 写完
+    await r.settle(0);
+    await r.settle(1);
+    expect(puts(r.ops)).toEqual([13, 20]);
+    expect(r.store.get("lab-box")).toBe(20);
+    expect(old.ends).toEqual([]); // 旧卡不收尾
+    expect(fresh.ends).toEqual([true]);
   });
-  test("还没发出就被更新的值顶掉：只写最后那个", async () => {
-    const { state, submit, settle } = fakeStore(5);
-    void submit(6);
-    void submit(7);
-    await settle(0);
-    expect(state.started).toEqual([7]);
-    expect(state.value).toBe(7);
-  });
-  test("在飞时又连着提交两次：中间那个被顶掉不写", async () => {
-    const { state, submit, settle } = fakeStore(5);
-    void submit(6);
+  test("在飞时连发多次：中间被顶掉不写，最后一次生效", async () => {
+    const r = rig();
+    const c = r.card();
+    c.save(6);
     await ticks();
-    void submit(7);
-    void submit(8);
-    await settle(0);
-    await settle(1);
-    expect(state.started).toEqual([6, 8]);
-    expect(state.value).toBe(8);
+    c.save(7);
+    c.save(8);
+    c.save(9);
+    await r.settle(0);
+    await r.settle(1);
+    expect(puts(r.ops)).toEqual([6, 9]);
+    expect(r.store.get("lab-box")).toBe(9);
+    expect(c.ends).toEqual([true]);
   });
-  test("前一个失败不卡住队列，后一个照写", async () => {
-    const { state, submit, settle } = fakeStore(5);
+  test("前一个失败不卡住队列，后一个照写；最后一次失败才收尾成 false（回弹 + 抖）", async () => {
+    const r = rig();
     const warn = console.warn;
     console.warn = () => {};
     try {
-      void submit(9);
+      const c = r.card();
+      c.save(9);
       await ticks();
-      const last = submit(10);
-      await settle(0, false);
-      await settle(1);
-      await last;
-      expect(state.value).toBe(10);
+      c.save(10);
+      await r.settle(0, false);
+      await r.settle(1, false);
+      expect(puts(r.ops)).toEqual([9, 10]);
+      expect(c.ends).toEqual([false]);
+      expect(r.store.get("lab-box")).toBe(12);
     } finally {
       console.warn = warn;
     }
+  });
+  test("不同 peer 互不排队", async () => {
+    const r = rig();
+    r.saver.save("a", 1);
+    r.saver.save("b", 2);
+    await ticks();
+    expect(r.ops.map((o) => o.peer)).toEqual(["a", "b"]);
+  });
+});
+
+describe("删除和还没发出的微调交错：删掉的 peer 不复活", () => {
+  test("点 + 后 600ms 内删除：微调作废，只发 DELETE；之后旧卡的保存一律丢掉", async () => {
+    const r = rig();
+    const c = r.card();
+    c.save(13, 600);
+    await r.advance(100);
+    const del = r.saver.remove("lab-box");
+    await r.settle(0);
+    await del;
+    await r.advance(5000); // 原来的停手计时到点
+    c.save(14); // 已卸载的旧卡再交一次（任何路径）
+    c.save(15, 600);
+    await r.advance(5000);
+    expect(r.ops).toEqual([{ kind: "del", peer: "lab-box" }]);
+    expect(r.store.has("lab-box")).toBe(false);
+  });
+  test("PUT 在飞时删除：等它写完再 DELETE，DELETE 最后落下", async () => {
+    const r = rig();
+    r.card().save(13);
+    await ticks();
+    const del = r.saver.remove("lab-box");
+    await ticks();
+    expect(r.ops.map((o) => o.kind)).toEqual(["put"]);
+    await r.settle(0);
+    await r.settle(1);
+    await del;
+    expect(r.ops.map((o) => o.kind)).toEqual(["put", "del"]);
+    expect(r.store.has("lab-box")).toBe(false);
+  });
+  test("删除失败：peer 还在，之后的保存照常写", async () => {
+    const r = rig();
+    const warn = console.warn;
+    console.warn = () => {};
+    try {
+      const del = r.saver.remove("lab-box");
+      await r.settle(0, false);
+      expect(await del.then(() => "ok", () => "fail")).toBe("fail");
+      r.card().save(7);
+      await r.settle(1);
+      expect(r.store.get("lab-box")).toBe(7);
+    } finally {
+      console.warn = warn;
+    }
+  });
+  test("删后重新添加（create）：恢复保存", async () => {
+    const r = rig();
+    const del = r.saver.remove("lab-box");
+    await r.settle(0);
+    await del;
+    const add = r.saver.create("lab-box", 3);
+    await r.settle(1);
+    await add;
+    r.card().save(4);
+    await r.settle(2);
+    expect(r.store.get("lab-box")).toBe(4);
+    expect(r.ops.map((o) => o.kind)).toEqual(["del", "put", "put"]);
   });
 });
 

@@ -1,14 +1,14 @@
 "use client";
 /**
  * 一个借入 peer 的卡片：协议徽章、hello 年龄、各家族「可放 / 上报空闲」、在跑 / 上限、不可用原因原文，
- * 以及按钮改设置（项目逐个开关、同时最多跑几单、两下删除）。每次点击立刻经 bridge 写入：
+ * 以及按钮改设置（项目逐个开关、同时最多跑几单、两下删除）。写入经 borrowSaver（−/+ 停手再存，其余立刻存）：
  * 成功整卡一闪，失败回到原值并抖一下被点的按钮。
  */
 import { useEffect, useRef, useState, type MouseEvent, type ReactNode } from "react";
 import { useT } from "@/lib/i18n";
-import { removeBorrowPeer, saveBorrowPeer, type DroppedView, type Family, type PeerView } from "./borrow-api";
-import { canToggleOff, lenderCap, peerState, reportedFree, serialLatest, toggleProject, type PeerState } from "./borrow-model";
-import { AgeTag, LimitLine, ProjectChips, Stepper } from "./borrow-bits";
+import { borrowSaver, type DroppedView, type Family, type PeerView } from "./borrow-api";
+import { canToggleOff, lenderCap, peerState, reportedFree, toggleProject, type PeerState } from "./borrow-model";
+import { AgeTag, LimitLine, ProjectChips, STEP_SETTLE_MS, Stepper } from "./borrow-bits";
 import { CircleAlertIcon, PauseIcon, RepeatIcon, ServerIcon, TrashIcon, ZapIcon } from "./icons";
 import { fadeIn, fadeOut, flash, shake } from "./motion";
 
@@ -70,10 +70,10 @@ function LenderCapBadge({ peer, maxOpen }: { peer: PeerView; maxOpen: number }) 
   );
 }
 
-/** 删一条借入：成功整行淡出再刷新，失败抖被点的按钮（卡片与失效行共用） */
+/** 删一条借入：成功整行淡出再刷新，失败抖被点的按钮（卡片与失效行共用）。经 borrowSaver：没发出的微调先作废，删后不再写 */
 export async function dropPeer(peer: string, row: HTMLElement | null, el: HTMLElement, onChanged: () => Promise<void>): Promise<void> {
   try {
-    await removeBorrowPeer(peer);
+    await borrowSaver.remove(peer);
     await fadeOut(row);
     await onChanged();
   } catch {
@@ -82,7 +82,6 @@ export async function dropPeer(peer: string, row: HTMLElement | null, el: HTMLEl
 }
 
 type Draft = { projects: string[]; maxOpen: number };
-type SaveJob = { peer: string; next: Draft; el: HTMLElement | null; reload: () => Promise<void> };
 
 export function BorrowPeerCard(props: {
   peer: PeerView;
@@ -111,26 +110,22 @@ export function BorrowPeerCard(props: {
     return () => clearTimeout(id);
   }, [armed]);
 
-  // 本卡的保存排成一队（serialLatest）：微调 flush 出的值和随后输入的值不并发，最后落下的是最后提交的
-  const queue = useRef<((job: SaveJob) => Promise<void>) | null>(null);
-  const save = (next: Draft, el: HTMLElement | null) => {
+  // 写入交给模块级的 borrowSaver：同一 peer 跨卡片串行、最后提交的赢；−/+ 等停手再存，计时不随卡片卸载丢掉。
+  // after 只在这次仍是最后一次提交时来，才收 draft / busy；旧卡的 after 落在已卸载的组件上，setState 无害
+  const save = (next: Draft, el: HTMLElement | null, delayMs = 0) => {
     setDraft(next);
-    setBusy(true);
-    queue.current ??= serialLatest<SaveJob>(async (job, isLatest) => {
+    if (!delayMs) setBusy(true);
+    const after = async (ok: boolean) => {
       try {
-        await saveBorrowPeer(job.peer, job.next);
-        await job.reload();
+        if (!ok) return shake(el); // 回弹：draft 清掉就是服务端的原值
+        await onChanged();
         flash(card.current);
-      } catch {
-        shake(job.el); // 回弹：draft 清掉就是服务端的原值
       } finally {
-        if (isLatest()) {
-          setDraft(null);
-          setBusy(false);
-        }
+        setDraft(null);
+        setBusy(false);
       }
-    });
-    void queue.current({ peer: peer.peer, next, el, reload: onChanged });
+    };
+    borrowSaver.save(peer.peer, next, after, delayMs);
   };
   const remove = async (e: MouseEvent<HTMLButtonElement>) => {
     const el = e.currentTarget;
@@ -138,6 +133,7 @@ export function BorrowPeerCard(props: {
     setArmed(false);
     setBusy(true);
     await dropPeer(peer.peer, card.current, el, onChanged);
+    setDraft(null); // 停手前的微调已被删除作废，删失败时显示回服务端的值
     setBusy(false);
   };
 
@@ -171,11 +167,11 @@ export function BorrowPeerCard(props: {
           picked={cur.projects}
           dropped={dropped.filter((d) => d.project).map((d) => d.project as string)}
           disabled={busy || !props.canWrite}
-          onToggle={(id, el) => (canToggleOff(cur.projects, id) ? void save({ ...cur, projects: toggleProject(cur.projects, id, options.map((o) => o.id)) }, el) : shake(el))}
+          onToggle={(id, el) => (canToggleOff(cur.projects, id) ? save({ ...cur, projects: toggleProject(cur.projects, id, options.map((o) => o.id)) }, el) : shake(el))}
         />
       </div>
       <LimitLine name={peer.peer} n={cur.maxOpen} badge={<LenderCapBadge peer={peer} maxOpen={cur.maxOpen} />}>
-        <Stepper value={cur.maxOpen} limit={limit} deferred disabled={busy || !props.canWrite} onCommit={(n, el) => void save({ ...cur, maxOpen: n }, el)} />
+        <Stepper value={cur.maxOpen} limit={limit} disabled={busy || !props.canWrite} onCommit={(n, el, stepped) => save({ ...cur, maxOpen: n }, el, stepped ? STEP_SETTLE_MS : 0)} />
       </LimitLine>
     </div>
   );

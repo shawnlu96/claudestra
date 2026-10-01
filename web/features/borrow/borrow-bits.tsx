@@ -2,7 +2,7 @@
 /** 借入面板的小部件：hello / beat 年龄、项目开关、「同时最多跑几单」的整句与数字框。点击把被点的元素交给调用方，失败时抖它。 */
 import { useEffect, useRef, useState, type MouseEvent, type ReactNode } from "react";
 import { useT } from "@/lib/i18n";
-import { ageBand, ageParts, BOX, clampMaxOpen, coalescer, helloAgeSec, type Coalescer, parseMaxOpen, splitAtBox } from "./borrow-model";
+import { ageBand, ageParts, BOX, clampMaxOpen, helloAgeSec, parseMaxOpen, splitAtBox } from "./borrow-model";
 import { CheckIcon, ClockIcon, MinusIcon, PlusIcon } from "./icons";
 import { shake } from "./motion";
 
@@ -71,47 +71,29 @@ export function LimitLine(props: { name: string; n: number; children: ReactNode;
   );
 }
 
+/** −/+ 停手多久才存（peer 卡每存一次就是一次写 lend.json）；计时在模块级的 borrowSaver 里，卡片卸载不丢 */
 export const STEP_SETTLE_MS = 600;
 
 /**
- * 上限的数字框：点数字变输入框（数字键盘），回车 / 失焦存一次；空或非数字退回原值，越界夹到边界并抖一下。
- * −/+ 做微调：deferred 时连点只先改显示，停手 STEP_SETTLE_MS 后存一次（peer 卡每存一次就是一次写 lend.json）；
- * 新增表单不 deferred，直接改本地值，免得点完马上提交时拿到旧数。onCommit 只在值真的变了时调。
+ * 上限的数字框：点数字变输入框（数字键盘），回车 / 失焦交一次；空或非数字退回原值，越界夹到边界并抖一下。
+ * −/+ 每点一下都交给 onCommit（stepped = true），由调用方决定立刻存还是等停手；onCommit 只在值真的变了时调。
  */
-export function Stepper(props: { value: number; limit: number; disabled: boolean; deferred?: boolean; onCommit: (n: number, el: HTMLElement | null) => void }) {
+export function Stepper(props: { value: number; limit: number; disabled: boolean; onCommit: (n: number, el: HTMLElement | null, stepped: boolean) => void }) {
   const t = useT();
   const box = useRef<HTMLDivElement>(null);
   const input = useRef<HTMLInputElement>(null);
   const done = useRef(false);
-  const latest = useRef({ value: props.value, onCommit: props.onCommit });
-  const [shown, setShown] = useState<number | null>(null);
   const [editing, setEditing] = useState(false);
-  const settle = useRef<Coalescer<number> | null>(null);
-  useEffect(() => {
-    latest.current = { value: props.value, onCommit: props.onCommit };
-  });
-  // 停手前就关了设置：照样存掉。卸载时 DOM ref 已经清空，所以存值不看 box.current（el 为 null 只是没有抖动可放）
-  useEffect(() => () => settle.current?.flush(), []);
   useEffect(() => {
     if (editing) input.current?.focus();
   }, [editing]);
-  const v = shown ?? props.value;
+  const v = props.value;
 
-  const commit = (n: number) => {
-    if (n !== props.value) props.onCommit(n, box.current);
+  const commit = (n: number, stepped: boolean) => {
+    if (n !== v) props.onCommit(n, box.current, stepped);
   };
-  const step = (d: 1 | -1) => {
-    const next = clampMaxOpen(v + d, props.limit);
-    if (!props.deferred) return commit(next);
-    setShown(next);
-    settle.current ??= coalescer<number>(STEP_SETTLE_MS, (n) => {
-      setShown(null);
-      if (n !== latest.current.value) latest.current.onCommit(n, box.current);
-    });
-    settle.current.push(next);
-  };
+  const step = (d: 1 | -1) => commit(clampMaxOpen(v + d, props.limit), true);
   const startEdit = () => {
-    settle.current?.flush();
     done.current = false;
     setEditing(true);
   };
@@ -122,7 +104,7 @@ export function Stepper(props: { value: number; limit: number; disabled: boolean
     if (raw === null) return;
     const p = parseMaxOpen(raw, props.limit);
     if (!p || p.clamped) shake(box.current);
-    if (p) commit(p.value);
+    if (p) commit(p.value, false);
   };
 
   return (

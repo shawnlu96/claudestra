@@ -3,6 +3,7 @@
  * 读回 403（不是 owner 的全权设备）或 404（老 bridge 没这个端点）→ null，面板整块不渲染。形状与 bridge 一致（web 与 src 互不 import）。
  */
 import { api, ApiError } from "@/lib/api/client";
+import { peerSaver } from "./borrow-model";
 
 export type Family = "codex" | "claude";
 export type RemoteModeView = "balance" | "off";
@@ -62,3 +63,6 @@ export async function saveBorrowPeer(peer: string, body: { projects: string[]; m
 export async function removeBorrowPeer(peer: string): Promise<void> {
   await api(peerPath(peer), { method: "DELETE", timeoutMs: 40_000 });
 }
+
+/** 借入 peer 的写入一律经它：按 peer 串行、最后提交的赢，删掉的不复活（borrow-model.ts peerSaver）。模块级，卡片换几次都是这一份 */
+export const borrowSaver = peerSaver<{ projects: string[]; maxOpen: number }>({ put: saveBorrowPeer, del: removeBorrowPeer });
