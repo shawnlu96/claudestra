@@ -253,6 +253,12 @@ export function recordRestateBrake(db: Database, ctx: WriteCtx, input: { taskId:
   });
 }
 
+/** A refused plan's reason: its whole first line; one too long to store is cut and tagged with the full line's digest, so it stays distinct. */
+export const planRejectedReason = (error: string): string => {
+  const line = (error.split("\n")[0] ?? "").replace(/\s+/g, " ").trim() || "（无错误文）";
+  return line.length <= 560 ? line : `${line.slice(0, 540)}…#${createHash("sha256").update(line).digest("hex").slice(0, 16)}`;
+};
+
 /** Dedup key of a refused-plan alarm: card + reason (error code + first line), hashed because the reason is free text. */
 const planRejectedKey = (taskId: string, code: string, text: string): string =>
   `scheduler:plan-rejected:${taskId}:${createHash("sha256").update(`${code}\n${text}`).digest("hex").slice(0, 24)}`;

@@ -86,28 +86,49 @@ describe("i28-M10 refused scheduler plans alarm PM once per reason", () => {
     } finally { f.close(); }
   });
 
-  test("a lost notice is logged, not marked told, and retried on the next tick", async () => {
-    const { f, alarms } = await refusedCard();
-    const real = f.tickDeps.notifyPm;
-    let down = true;
-    f.tickDeps.notifyPm = async (t, text) => { if (down) throw new Error("bridge 不在"); return real(t, text); };
-    const logged: string[] = [];
-    const err = console.error;
-    console.error = (...a: unknown[]) => { logged.push(a.map(String).join(" ")); };
+  /** Fail the third tick's notice, then bring the channel back while the card keeps refusing / plans fine / waits on a freeze. */
+  for (const after of ["still refused", "plan succeeds", "planner waits"] as const) {
+    test(`a lost notice is logged and retried on the next tick (${after})`, async () => {
+      const { f, refuse, alarms } = await refusedCard();
+      const real = f.tickDeps.notifyPm;
+      let down = true, attempts = 0;
+      f.tickDeps.notifyPm = async (t, text) => { attempts++; if (down) throw new Error("bridge 不在"); return real(t, text); };
+      const logged: string[] = [];
+      const err = console.error;
+      console.error = (...a: unknown[]) => { logged.push(a.map(String).join(" ")); };
+      try {
+        await f.tick();
+        await f.tick();
+        expect(await f.tick()).toMatchObject({ detail: expect.stringContaining("报警没发出去，下个 tick 重发") });
+        expect(logged.some((l) => l.includes("计划拒收报警没发出去") && l.includes("bridge 不在"))).toBe(true);
+        await f.tick(); // still down: kept, tried once more
+        expect([f.notices.length, attempts]).toEqual([0, 2]);
+        down = false;
+        if (after === "plan succeeds") refuse.with = null;
+        if (after === "planner waits") expect((await f.cli("pm", "freeze", "--reason", "hold", "--project", "p")).ok).toBe(true);
+        const next = await f.tick();
+        expect(next.step).toBe({ "still refused": "replan", "plan succeeds": "sent", "planner waits": "waiting" }[after]);
+        expect(f.notices).toHaveLength(1);
+        expect(f.notices[0]).toContain(`[conflict] ${FROZEN}`);
+        for (let i = 0; i < 3; i++) await f.tick();
+        expect([f.notices.length, attempts]).toEqual([1, 3]);
+        expect(alarms()).toHaveLength(1);
+      } finally { console.error = err; f.close(); }
+    });
+  }
+
+  test("long first lines that differ only past the stored length are still two reasons", async () => {
+    const { f, refuse, alarms } = await refusedCard();
     try {
-      await f.tick();
-      await f.tick();
-      expect(await f.tick()).toMatchObject({ detail: expect.stringContaining("报警没发出去，下个 tick 重发") });
-      expect(logged.some((l) => l.includes("计划拒收报警没发出去") && l.includes("bridge 不在"))).toBe(true);
-      expect(f.notices).toEqual([]);
-      expect(await f.tick()).toMatchObject({ detail: expect.stringContaining("报警没发出去") });
-      down = false;
-      expect(await f.tick()).toMatchObject({ detail: expect.stringContaining("已报警 PM") });
-      expect(f.notices).toHaveLength(1);
-      await f.tick();
-      expect(f.notices).toHaveLength(1);
-      expect(alarms()).toHaveLength(1);
-    } finally { console.error = err; f.close(); }
+      refuse.with = { code: "conflict", error: `${"x".repeat(560)} reason A` };
+      for (let i = 0; i < 3; i++) await f.tick();
+      refuse.with = { code: "conflict", error: `${"x".repeat(560)} reason B` };
+      for (let i = 0; i < 3; i++) await f.tick();
+      expect(f.notices).toHaveLength(2);
+      expect(alarms()).toHaveLength(2);
+      expect(new Set(alarms().map((e) => e.data.reason)).size).toBe(2);
+      expect(alarms().every((e) => String(e.data.reason).length <= 600)).toBe(true);
+    } finally { f.close(); }
   });
 
   test("an alarm that cannot be recorded is not sent and is retried", async () => {
