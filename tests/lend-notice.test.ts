@@ -16,13 +16,14 @@ const toResult = (h: ReturnType<typeof harness>) => advance(h.db, "o1", "started
 describe("通知正文与参数", () => {
   test("开跑通知写明「这会让发起方的任务在你的用户下随时起 shell」、仓库 / PR / head / 怎么收回；停止通知带原因", () => {
     const start = lendNoticeText(N);
-    for (const s of ["出借开跑", "这会让发起方的任务在你的用户下随时起 shell", "https://github.com/shawnlu96/claudestra/pull/270", "c".repeat(40), "lend revoke --peer team-a"]) {
+    for (const s of ["出借开跑", "这会让发起方的任务在你的用户下随时起 shell", "https://github.com/shawnlu96/claudestra/pull/270", "c".repeat(40), "随时收回：设置 → Peer 协作 → 收回"]) {
       expect(start).toContain(s);
     }
     const stop = lendNoticeText({ ...N, kind: "stopped", why: "出借授权已收回或失效：已收回" });
     expect(stop).toContain("出借停止");
     expect(stop).toContain("原因：出借授权已收回");
     expect(stop).not.toContain("随时起 shell");
+    expect(start).not.toMatch(/manager|lend revoke/); // 不让人去跑命令：收回走网页按钮
     expect(lendNoticeText({ ...N, kind: "acked" })).toContain("出借交付");
   });
 

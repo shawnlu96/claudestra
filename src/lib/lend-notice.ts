@@ -40,7 +40,7 @@ export function lendNoticeText(p: LendNoticeParams): string {
     `head：${p.head}`,
     `对方的卡：${p.taskId} · ${p.step}`,
     `额度：${p.quota}`,
-    `随时收回：manager lend revoke --peer ${p.peer}（收回后在跑的 worker 立刻停）`,
+    "随时收回：设置 → Peer 协作 → 收回（收回后在跑的 worker 立刻停）",
   ].join("\n");
 }
 
