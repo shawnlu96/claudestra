@@ -48,11 +48,24 @@ function bounceOf(run: MergeRun, pr: PrSnapshot, only?: BounceCause): BounceCaus
 }
 
 const PREFIX = "退回 fix";
+/** The ledger's single-line receipt gate; the receipt is fitted under it, the gate is never widened. */
+const RECEIPT_MAX = 600;
+/** A job link narrowed to its workflow run (`…/actions/runs/<id>`), the part the fixer needs to open the logs. */
+const runLink = (link: string): string => link.replace(/^(https:\/\/\S+?\/actions\/runs\/\d+)\/\S*$/, "$1");
 export function bounceReceipt(b: MergeBounce): string {
   const head = `${PREFIX}（${b.cause}）：PR head ${b.prHead}`;
   if (b.cause === "conflict") return `${head}，main head ${b.mainHead}`;
-  const checks = b.checks.slice(0, 3).map((c) => ({ name: c.name.slice(0, 80), link: c.link.length <= 200 ? c.link : "" }));
-  return `${head}，失败检查 ${JSON.stringify(checks)}`;
+  // Required check names are ≤ 80 chars (scheduler-config), so the first one always fits; later ones lose their link
+  // before they are dropped, and a name is never cut (the ledger matches it against the required list).
+  const fits = (list: FailedCheck[]) => `${head}，失败检查 ${JSON.stringify(list)}`.length <= RECEIPT_MAX;
+  const kept: FailedCheck[] = [];
+  for (const c of b.checks) {
+    const link = runLink(c.link);
+    const next = [{ name: c.name, link }, { name: c.name, link: "" }].find((x) => fits([...kept, x]));
+    if (!next) break;
+    kept.push(next);
+  }
+  return `${head}，失败检查 ${JSON.stringify(kept)}`;
 }
 const RECEIPT = /^退回 fix（(conflict|ci_fail)）：PR head ([a-f0-9]{40})，(?:main head ([a-f0-9]{40})|失败检查 (\[.*\]))$/;
 export function parseBounceReceipt(receipt: string): MergeBounce | null {
@@ -92,6 +105,22 @@ export async function updateOrBounce(run: MergeRun, external: MergeExternal, ste
   }
 }
 
+/**
+ * A step refused mid-run (e.g. the PM switched to manual while CI ran, so the merging claim was refused): no merge was sent
+ * from these phases, so the ledger is asked to end the run as cancelled; it refuses unless the card is manual, and the run
+ * then becomes unknown exactly as before.
+ */
+export async function cancelOrUnknown(phase: MergePhase, step: Step, why: string, isStop: (e: unknown) => boolean): Promise<MergeRun> {
+  if (BOUNCE_PHASES.includes(phase)) {
+    try {
+      return await step("resolved", why);
+    } catch (e) {
+      if (isStop(e)) throw e; // Refused = not a manual switch (or a lost race): unknown below is the old, safe answer.
+    }
+  }
+  return step("unknown", why);
+}
+
 /** PM switched the card to manual while no merge was in flight (service drift branch). */
 export const manualCancel = (db: Database, run: MergeRun): boolean =>
   BOUNCE_PHASES.includes(run.phase) && getWorkflow(db, run.taskId)?.mode === "manual";
@@ -118,7 +147,7 @@ export function closeMergeRun(db: Database, ctx: WriteCtx, row: MergeRun, rawRec
   const b = parseBounceReceipt(receipt);
   if (!b) {
     if (!manualCancel(db, row)) throw new LedgerError("conflict", "只有 PM 切手动、且还没发出合并的运行能直接结束；退回 fix 要带冲突 / CI 失败回执");
-    endRun(db, ctx, row, `cancelled: ${receipt}`, `merge cancelled（PM 切手动，未发出 merge）：${receipt}`, now);
+    endRun(db, ctx, row, `cancelled: PM 切手动，未发出 merge（${receipt}）`, `merge cancelled（PM 切手动，未发出 merge）：${receipt.slice(0, 500)}`, now);
     insertEvent(db, { actor: ctx.actor, now, dedupKey: `scheduler:${row.intentId}:merge:cancelled` }, {
       project: row.project, target: row.taskId, kind: "scheduler", text: `合并队列：PM 切手动，撤销未发出的合并（${receipt}）`,
       data: { op: "merge_phase", intentId: row.intentId, from: row.phase, to: "resolved", outcome: "cancelled", receipt },

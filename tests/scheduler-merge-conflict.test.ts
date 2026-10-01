@@ -43,11 +43,11 @@ const pr = (p: Partial<PrSnapshot> = {}): PrSnapshot => ({ state: "OPEN", head: 
   mergeState: "CLEAN", mergeSha: null, checks: [{ name: "check", bucket: "pass" }], ...p });
 const dirty = (p: Partial<PrSnapshot> = {}) => pr({ mergeState: "DIRTY", checks: [], ...p });
 
-function fixture(phase: MergePhase = "ready") {
+function fixture(phase: MergePhase = "ready", required: string[] = ["check"]) {
   const dir = mkdtempSync(join(tmpdir(), "m12-merge-")), path = join(dir, "ledger.sqlite"), db = openLedger(path);
   addCard(db, "T1", 42);
   db.query("INSERT INTO scheduler_resources (project,resource,taskId,intentId,acquiredAt) VALUES ('p','merge:p','T1','merge-T1',100)").run();
-  beginMergeRun(db, { actor: "scheduler", now: 101 }, "merge-T1", ["check"]);
+  beginMergeRun(db, { actor: "scheduler", now: 101 }, "merge-T1", required);
   if (phase !== "ready") db.query("UPDATE scheduler_merges SET phase=? WHERE intentId='merge-T1'").run(phase);
   let snaps: PrSnapshot[] = [pr()];
   const calls: string[] = [];
@@ -65,8 +65,8 @@ function fixture(phase: MergePhase = "ready") {
   return { db, external, calls, tick, close, set snaps(s: PrSnapshot[]) { snaps = s; } };
 }
 type F = ReturnType<typeof fixture>;
-const with_ = async (phase: MergePhase, body: (f: F) => Promise<void>) => {
-  const f = fixture(phase);
+const with_ = async (phase: MergePhase, body: (f: F) => Promise<void>, required?: string[]) => {
+  const f = fixture(phase, required);
   try { await body(f); } finally { f.close(); }
 };
 const stateOf = (f: F) => ({
@@ -184,6 +184,28 @@ describe("i28-M12 ledger guards on the bounce", () => {
     expect(parseBounceReceipt(bounceReceipt(b))).toEqual(b);
     expect(parseBounceReceipt(`退回 fix（ci_fail）：PR head ${H}，失败检查 []`)).toBeNull();
   });
+  test("3 failed checks with long names and job links: receipt fits the 600 gate, names kept, links narrowed to the run", async () => {
+    const names = ["a", "b", "c"].map((x) => `${x} `.repeat(30).trim() + "x".repeat(20));
+    const job = (i: number) => `${RUN}0000${i}/job/${"9".repeat(12)}${"?pr=42&check_suite_focus=true".repeat(4)}`;
+    await with_("await_ci", async (f) => {
+      f.snaps = [pr({ mergeState: "UNSTABLE", checks: names.map((name, i) => ({ name, bucket: "fail" as const, link: job(i) })) })];
+      await f.tick();
+      expect(stateOf(f)).toEqual(BOUNCED);
+      const reason = getMergeRun(f.db, "merge-T1")?.reason as string;
+      expect(reason.length - "ci_fail: ".length).toBeLessThanOrEqual(600);
+      expect(conflictEvents(f)[0].checks).toEqual(names.map((name, i) => ({ name, link: `${RUN}0000${i}` })));
+    }, names);
+  });
+  test("receipt fitting: first check always kept, later links dropped before checks, names never cut", () => {
+    const names = Array.from({ length: 8 }, (_, i) => `${i}`.padEnd(80, "n"));
+    const b = { cause: "ci_fail" as const, prHead: H, mainHead: null, checks: names.map((name) => ({ name, link: `${RUN}/job/1` })) };
+    const receipt = bounceReceipt(b), parsed = parseBounceReceipt(receipt);
+    expect(receipt.length).toBeLessThanOrEqual(600);
+    expect(parsed?.checks[0]).toEqual({ name: names[0], link: RUN });
+    expect(parsed?.checks.every((c, i) => c.name === names[i])).toBe(true);
+    expect(parsed!.checks.length).toBeGreaterThan(1);
+    expect(parsed!.checks.length).toBeLessThan(names.length);
+  });
   test(`bounce ${MAX_MERGE_BOUNCES + 1} is not sent back: card stays in merge, intent cancelled, slot freed, still no freeze`, async () => {
     await with_("ready", async (f) => {
       for (let i = 1; i <= MAX_MERGE_BOUNCES; i++) {
@@ -235,6 +257,29 @@ describe("i28-M12 PM switches the card to manual mid-merge", () => {
       f.db.query("UPDATE task_workflows SET mode='manual' WHERE taskId='T1'").run();
       await f.tick();
       expect(stateOf(f)).toMatchObject({ run: "unknown", frozen: true });
+    });
+  });
+  test("await_ci: PM switches to manual while CI runs, the merging claim is refused → cancelled, no merge, no freeze", async () => {
+    await with_("await_ci", async (f) => {
+      f.external.freshness = async () => {
+        f.db.query("UPDATE task_workflows SET mode='manual' WHERE taskId='T1'").run();
+        return { behindBy: 0, mainHead: MAIN };
+      };
+      await f.tick();
+      expect(stateOf(f)).toEqual({ run: "resolved", intent: "cancelled", stage: "merge", frozen: false, held: 0, mode: "manual" });
+      expect(getMergeRun(f.db, "merge-T1")?.reason).toStartWith("cancelled: PM 切手动");
+      expect(f.calls).not.toContain("merge");
+    });
+  });
+  test("await_ci: a refused merging claim that is not a manual switch (head moved on the card) is still unknown", async () => {
+    await with_("await_ci", async (f) => {
+      f.external.freshness = async () => {
+        f.db.query("UPDATE tasks SET headSHA=? WHERE id='T1'").run(N);
+        return { behindBy: 0, mainHead: MAIN };
+      };
+      await f.tick();
+      expect(stateOf(f)).toMatchObject({ run: "unknown", frozen: true, stage: "merge" });
+      expect(f.calls).not.toContain("merge");
     });
   });
   test("other drift (head changed) in ready is still unknown", async () => {
