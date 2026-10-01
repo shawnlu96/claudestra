@@ -65,26 +65,29 @@ describe("T94 codex-acp 接线", () => {
     expect(cmd).not.toContain(CLEAN_ENV_FLAG);
   });
 
-  test("适配器环境（worker 本体）：clean 时只有白名单 + codex 自己的几项，不挂 claudestra MCP、不给回环代理地址", () => {
+  test("适配器环境（worker 本体）：clean 时只有白名单 + 频道变量 + lend 档位 + codex 自己的几项，挂 lend 档 MCP、BRIDGE_URL 是回环代理", () => {
     const env = adapterEnv({
       base: DIRTY, bunBin: "/b/bun", channelServer: "/r/src/channel-server.ts", mcpName: "claudestra", codexPath: "/b/codex", logsDir: "/l",
-      channel: { channelId: "123", proxyUrl: "ws://127.0.0.1:9/tok-secret", agentName: "agent-lend-x", sessionId: "thr-1" }, clean: true,
+      channel: { channelId: "123", proxyUrl: "ws://127.0.0.1:9/?t=tok", agentName: "agent-lend-x", sessionId: "thr-1" }, clean: true,
     });
-    expect(Object.keys(env).sort()).toEqual([...WORKER_ENV_WHITELIST, LEND_WORKER_MARK, "CODEX_PATH", "INITIAL_AGENT_MODE", "APP_SERVER_LOGS", "CODEX_CONFIG"].sort());
+    const channelVars = ["DISCORD_CHANNEL_ID", "BRIDGE_URL", "CLAUDESTRA_AGENT", "CLAUDESTRA_RUNTIME", "CLAUDESTRA_SESSION_ID", "MCP_NAME", "CLAUDESTRA_MCP_PROFILE"];
+    expect(Object.keys(env).sort()).toEqual([...WORKER_ENV_WHITELIST, LEND_WORKER_MARK, ...channelVars, "CODEX_PATH", "INITIAL_AGENT_MODE", "APP_SERVER_LOGS", "CODEX_CONFIG"].sort());
     expect(env[LEND_WORKER_MARK]).toBe("1"); // worker 里跑的 manager / ledger 靠它认出「不是 owner」
-    expect(JSON.stringify(env)).not.toContain("tok-secret");
-    expect(JSON.parse(env.CODEX_CONFIG).mcp_servers).toBeUndefined();
+    expect(env.BRIDGE_URL).toBe("ws://127.0.0.1:9/?t=tok");
+    expect(env.CLAUDESTRA_MCP_PROFILE).toBe("lend");
+    expect(JSON.parse(env.CODEX_CONFIG).mcp_servers.claudestra).toBeDefined();
     for (const s of SECRETS) expect(JSON.stringify(env)).not.toContain(s);
   });
 
-  test("沙箱里的干净模式保留宿主的 bridge 地址（不是带 token 的回环代理），worker 里的 manager 才过得了沙箱的端口检查", () => {
-    const base = { ...DIRTY, CLAUDESTRA_SANDBOX: "1", CLAUDESTRA_SANDBOX_ROOT: "/s", BRIDGE_URL: "ws://127.0.0.1:24101" };
+  test("沙箱里的干净模式：BRIDGE_URL 是回环代理、宿主的 BRIDGE_PORT 去掉（两者端口对不上会被沙箱总闸拒），仍不带秘密", () => {
+    const base = { ...DIRTY, CLAUDESTRA_SANDBOX: "1", CLAUDESTRA_SANDBOX_ROOT: "/s", BRIDGE_URL: "ws://127.0.0.1:24101", BRIDGE_PORT: "24101" };
     const env = adapterEnv({
       base, bunBin: "/b/bun", channelServer: "/r/c.ts", mcpName: "claudestra", logsDir: "/l",
-      channel: { channelId: "123", proxyUrl: "ws://127.0.0.1:9/tok-secret", agentName: "agent-lend-x", sessionId: "thr-1" }, clean: true,
+      channel: { channelId: "123", proxyUrl: "ws://127.0.0.1:9/?t=tok", agentName: "agent-lend-x", sessionId: "thr-1" }, clean: true,
     });
-    expect(env.BRIDGE_URL).toBe("ws://127.0.0.1:24101");
-    expect(JSON.stringify(env)).not.toContain("tok-secret");
+    expect(env.BRIDGE_URL).toBe("ws://127.0.0.1:9/?t=tok");
+    expect(env.BRIDGE_PORT).toBeUndefined();
+    for (const s of SECRETS) expect(JSON.stringify(env)).not.toContain(s);
   });
 
   test("不 clean 时照旧（回归）：继承环境、挂 MCP", () => {

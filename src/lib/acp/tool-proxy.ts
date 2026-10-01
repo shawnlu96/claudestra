@@ -9,10 +9,15 @@
  * - requestId 按连接改写再上送，回包按改写后的 id 找回原连接：Codex 的子线程会各起一个 channel-server，id 都从 req_1 数起。
  * - 调用方身份（T85）：bridge 把代理转上去的帧都算作宿主那条已验证的连接。token 在 BRIDGE_URL 里、Codex 的 shell 命令也继承得到，
  *   所以只有登记时没自报 outsideMcpLauncher 的连接才算 Codex 起的 MCP 服务，其余（含没登记就发请求的）转上去一律带 callerDowngraded。
+ * - 出借 worker（宿主带 CLAUDESTRA_ACP_CLEAN_ENV=1，i28-W4）：只转 whoami 和 lend 档的派单工具（lib/lend-mcp-profile.ts），
+ *   reply / route_to_agent / forward_to_agent / fleet_* / project_info / check_inbox 等一律不转、记日志、就地回错误（channel-server 不用干等）。
+ *   这是 lend 档的第二层，bridge 那头还会按单再核一次（bridge/lend-tools.ts）。
  * tests/acp-tool-proxy.test.ts。
  */
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import type { ServerWebSocket } from "bun";
+import { LEND_ORDER_TOOLS } from "../lend-mcp-profile.js";
+import { CLEAN_ENV_FLAG } from "../runtimes/clean-env.js";
 
 /** channel-server 会发、且需要 bridge 回包的请求类型（src/channel-server.ts 的工具 + lib/agent-tool-calls.ts + lib/fleet-tool.ts） */
 const PROXIED_TYPES = new Set([
@@ -30,6 +35,16 @@ const PROXIED_TYPES = new Set([
   "whoami",
   "order_tool",
 ]);
+
+/** 出借 worker 只转这两类帧；order_tool 还要是 lend 档的工具 */
+const CLEAN_TYPES = new Set(["whoami", "order_tool"]);
+
+/** clean 下不转的帧：null = 照常转；否则是记日志 / 回错误用的一句话 */
+function cleanRefusal(m: Record<string, unknown>): string | null {
+  if (!CLEAN_TYPES.has(String(m.type))) return `出借 worker 不转发 ${String(m.type).slice(0, 40)} 帧`;
+  if (m.type === "order_tool" && !LEND_ORDER_TOOLS.includes(String(m.tool))) return `出借 worker 不转发派单工具 ${String(m.tool).slice(0, 40)}`;
+  return null;
+}
 
 interface Conn {
   id: number;
@@ -54,6 +69,8 @@ export interface ToolProxyDeps {
   log(msg: string): void;
   /** 单测指定端口；缺省 0 = 系统挑一个空闲端口 */
   port?: number;
+  /** 出借 worker 的宿主；缺省看本进程环境的 CLAUDESTRA_ACP_CLEAN_ENV（宿主不用传，单测显式给） */
+  clean?: boolean;
 }
 
 function tokenOk(got: string | null, want: string): boolean {
@@ -63,6 +80,7 @@ function tokenOk(got: string | null, want: string): boolean {
 
 export function startToolProxy(deps: ToolProxyDeps): ToolProxy {
   const token = randomBytes(24).toString("hex");
+  const clean = deps.clean ?? process.env[CLEAN_ENV_FLAG] === "1";
   let nextConn = 0;
   /** 改写后的 requestId → [原连接, 原 requestId] */
   const inflight = new Map<string, { ws: ServerWebSocket<Conn>; orig: unknown }>();
@@ -87,6 +105,8 @@ export function startToolProxy(deps: ToolProxyDeps): ToolProxy {
     }
     if (m?.type === "ping") return send(ws, { type: "pong" });
     if (!PROXIED_TYPES.has(m?.type) || typeof m.requestId !== "string") return deps.log(`工具代理：不转发 ${String(m?.type)} 帧`);
+    const refused = clean ? cleanRefusal(m) : null;
+    if (refused) return deps.log(`工具代理：${refused}`), send(ws, { type: "response", requestId: m.requestId, error: refused });
     const upId = `acp${ws.data.id}_${m.requestId}`;
     inflight.set(upId, { ws, orig: m.requestId });
     const { callerCred: _cred, callerDowngraded: _down, ...frame } = m; // 身份字段只由代理决定，channel-server 自带的一概丢掉

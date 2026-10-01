@@ -8,10 +8,10 @@
  */
 import type { Database } from "bun:sqlite";
 import { createHash } from "node:crypto";
-import { realpathSync } from "node:fs";
-import { relative, isAbsolute } from "node:path";
+import { closeSync, constants, fstatSync, openSync, readSync, realpathSync, statSync } from "node:fs";
+import { isAbsolute, relative, resolve } from "node:path";
 import { isWriteStep } from "./lend-git.js";
-import { advance, getOrder, orderOf, type LendRow } from "./lend-journal.js";
+import { advance, getOrder, JournalConflict, orderOf, type LendRow } from "./lend-journal.js";
 import { parseVerdictWire, type VerdictWire } from "./order-wire.js";
 
 /** 报告正文与整个请求体的上限（T93 lend wire v1）：超了让 worker 自己精简，不截断 */
@@ -129,22 +129,75 @@ export async function submitLendWork(db: Database, orderId: string, input: WorkI
   return { ok: true, duplicate: false, sha };
 }
 
-/** 核调用方 → 建 payload → started 推到 result_pending（CAS）；已交过同一份 = 幂等成功，换了内容 = 拒 */
+/** 审查单收不收结论：写单、还没起 worker / 已结束的单不收；null = 收 */
+function resultRefusal(row: LendRow): string | null {
+  if (isWriteStep(String(orderOf(row)?.step ?? ""))) return `${row.orderId} 是开工 / 修复单：提交后用 --summary-file / --self-check-file 交`;
+  if (row.state !== "started" && row.state !== "result_pending") return `${row.orderId} 当前是 ${row.state}，不收结论`;
+  return null;
+}
+
+/**
+ * 公共提交核心（CLI `lend submit` 与 bridge 的 submit_verdict 共用）：调用方已证明是这张单的 worker（CLI 靠目录 + 会话 + 进程祖先，
+ * MCP 靠 T85 身份 + journal 绑定）。建 payload → started 推到 result_pending（CAS）；已交过同一份 = 幂等成功，换了内容 = 拒。
+ * 两个入口同时交（CAS 输了）按重读后的那一行再判一次，不会写两次。
+ */
+export function commitLendResult(db: Database, row: LendRow, input: SubmitInput, now = Date.now()): SubmitOutcome {
+  const refused = resultRefusal(row);
+  if (refused) return { ok: false, error: refused };
+  const built = buildPayload(row, input);
+  if (!built.ok) return built;
+  if (row.state === "started") {
+    try {
+      advance(db, row.orderId, "started", "result_pending", { payload: built.payload as unknown as Record<string, unknown>, payloadSha: built.sha }, now);
+      return { ok: true, duplicate: false, sha: built.sha };
+    } catch (e) {
+      if (!(e instanceof JournalConflict)) throw e;
+      const cur = getOrder(db, row.orderId);
+      if (!cur || cur.state !== "result_pending") return { ok: false, error: `${row.orderId} 刚变成 ${cur?.state ?? "不存在"}，不收结论` };
+      row = cur;
+    }
+  }
+  return row.payloadSha === built.sha ? { ok: true, duplicate: true, sha: built.sha }
+    : { ok: false, error: `${row.orderId} 已经交过一份不同的结论（sha ${row.payloadSha?.slice(0, 12)}），不能改` };
+}
+
+/** CLI：核调用方 → 公共提交核心 */
 export async function submitLendResult(db: Database, orderId: string, input: SubmitInput, d: SubmitterDeps, now = Date.now()): Promise<SubmitOutcome> {
   const row = getOrder(db, orderId);
   if (!row) return { ok: false, error: `本机没有出借单 ${orderId}` };
-  if (isWriteStep(String(orderOf(row)?.step ?? ""))) return { ok: false, error: `${orderId} 是开工 / 修复单：提交后用 --summary-file / --self-check-file 交` };
-  if (row.state !== "started" && row.state !== "result_pending") return { ok: false, error: `${orderId} 当前是 ${row.state}，不收结论` };
+  const refused = resultRefusal(row);
+  if (refused) return { ok: false, error: refused };
   const who = await submitterProblem(row, d);
   if (who) return { ok: false, error: who };
-  const built = buildPayload(row, input);
-  if (!built.ok) return built;
-  if (row.state === "result_pending") {
-    return row.payloadSha === built.sha ? { ok: true, duplicate: true, sha: built.sha }
-      : { ok: false, error: `${orderId} 已经交过一份不同的结论（sha ${row.payloadSha?.slice(0, 12)}），不能改` };
-  }
-  advance(db, orderId, "started", "result_pending", { payload: built.payload as unknown as Record<string, unknown>, payloadSha: built.sha }, now);
-  return { ok: true, duplicate: false, sha: built.sha };
+  return commitLendResult(db, row, input, now);
+}
+
+/**
+ * 读工作副本里的报告（CLI 与 MCP 共用）：路径相对副本根，或副本内的绝对路径。拒软链（最后一段 O_NOFOLLOW、中间段解析后必须仍在副本里）、
+ * 硬链（nlink > 1：可能是副本外文件的别名）、非普通文件、超过 64 KiB；打开后再比一次 inode，挡住核对与打开之间换掉目录的竞态。
+ */
+export function readReportIn(dir: string, reportPath: string): { ok: true; text: string } | { ok: false; error: string } {
+  if (!reportPath || reportPath.includes("\0")) return { ok: false, error: "reportPath 不能为空、不能带 NUL" };
+  const root = realOr(dir);
+  const abs = resolve(dir, reportPath);
+  let real: string;
+  try { real = realpathSync.native(abs); } catch { return { ok: false, error: `读不到报告 ${reportPath}（文件不存在？）` }; }
+  const inside = (p: string) => { const rel = relative(root, p); return !!rel && !rel.startsWith("..") && !isAbsolute(rel); };
+  if (!inside(real)) return { ok: false, error: "报告不在这张单的工作副本里（或是指向副本外的软链），不收" };
+  let fd: number;
+  try { fd = openSync(abs, constants.O_RDONLY | constants.O_NOFOLLOW); } catch { return { ok: false, error: "报告打不开（软链不收）" }; }
+  try {
+    const st = fstatSync(fd);
+    const named = statSync(real);
+    if (!st.isFile()) return { ok: false, error: "报告要是普通文件" };
+    if (st.nlink !== 1) return { ok: false, error: "报告是硬链接（可能是副本外文件的别名），不收；另存一份普通文件再交" };
+    if (st.ino !== named.ino || st.dev !== named.dev || !inside(realOr(abs))) return { ok: false, error: "报告在核对时被换掉了，不收" };
+    if (st.size > REPORT_MAX_BYTES) return { ok: false, error: `报告 ${st.size} 字节，超过 ${REPORT_MAX_BYTES}，请精简后再交（不截断）` };
+    const buf = Buffer.alloc(REPORT_MAX_BYTES + 1);
+    const n = readSync(fd, buf, 0, buf.length, 0);
+    if (n > REPORT_MAX_BYTES) return { ok: false, error: `报告超过 ${REPORT_MAX_BYTES} 字节，请精简后再交（不截断）` };
+    return { ok: true, text: buf.subarray(0, n).toString("utf8") };
+  } finally { closeSync(fd); }
 }
 
 /** `ps -eo pid=,ppid=` 输出 → pid 的祖先链（纯函数；成环或断链就停） */

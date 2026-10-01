@@ -9,10 +9,10 @@ afterEach(() => {
   proxy = null;
 });
 
-function setup(toBridge: (f: Record<string, unknown>) => boolean = () => true) {
+function setup(toBridge: (f: Record<string, unknown>) => boolean = () => true, clean = false) {
   const upstream: Record<string, any>[] = [];
   const logs: string[] = [];
-  proxy = startToolProxy({ channelId: "local-acp-1", toBridge: (f) => (upstream.push(f), toBridge(f)), log: (m) => logs.push(m) });
+  proxy = startToolProxy({ channelId: "local-acp-1", toBridge: (f) => (upstream.push(f), toBridge(f)), log: (m) => logs.push(m), clean });
   return { proxy, upstream, logs };
 }
 
@@ -152,5 +152,48 @@ describe("工具代理：调用方身份（T85）", () => {
       { type: "order_tool", requestId: expect.stringMatching(/^acp\d+_req_1$/), tool: "take_order", args: {} },
       { type: "order_tool", requestId: expect.stringMatching(/^acp\d+_req_1$/), tool: "deliver", args: { v: 1 }, callerDowngraded: true },
     ]);
+  });
+});
+
+describe("工具代理：出借 worker（clean 宿主，i28-W4）", () => {
+  test("频道类帧一律不转：reply / route_to_agent / forward_to_agent / fleet_* / project_info / check_inbox 都就地回错误、记日志", async () => {
+    const { proxy, upstream, logs } = setup(() => true, true);
+    const c = await connect(proxy.url);
+    c.send({ type: "register", channelId: "local-acp-1", runtime: "codex" });
+    await c.next();
+    const types = ["reply", "route_to_agent", "forward_to_agent", "fleet_state", "fleet_run", "project_info", "check_inbox", "fetch_messages", "list_channels"];
+    types.forEach((type, i) => c.send({ type, requestId: `req_${i}` }));
+    for (let i = 0; i < types.length; i++) {
+      const r = await c.next();
+      expect(r.type).toBe("response");
+      expect(r.error).toContain("出借 worker 不转发");
+    }
+    await tick();
+    expect(upstream).toEqual([]);
+    expect(logs.filter((l) => l.includes("出借 worker 不转发")).length).toBe(types.length);
+  });
+
+  test("派单帧只转 lend 档的五个工具：DAG / PM 工具（plan_feature 等）就地拒，不往上转", async () => {
+    const { proxy, upstream } = setup(() => true, true);
+    const c = await connect(proxy.url);
+    c.send({ type: "register", channelId: "local-acp-1", runtime: "codex" });
+    await c.next();
+    for (const tool of ["plan_feature", "rewrite_dag", "start_node", "show_dag", "fleet"]) {
+      c.send({ type: "order_tool", requestId: `r_${tool}`, tool, args: {} });
+      expect((await c.next()).error).toContain(tool);
+    }
+    c.send({ type: "order_tool", requestId: "req_1", tool: "take_review", args: {} });
+    c.send({ type: "order_tool", requestId: "req_2", tool: "submit_verdict", args: { v: 1 } });
+    c.send({ type: "whoami", requestId: "req_3" });
+    await tick(50);
+    expect(upstream.map((u) => u.tool ?? u.type)).toEqual(["take_review", "submit_verdict", "whoami"]);
+  });
+
+  test("不 clean 时照旧转 reply（回归）", async () => {
+    const { proxy, upstream } = setup(() => true, false);
+    const c = await connect(proxy.url);
+    c.send({ type: "reply", requestId: "req_1", chatId: "c", text: "x" });
+    await tick();
+    expect(upstream).toHaveLength(1);
   });
 });
