@@ -46,6 +46,19 @@ describe("toChatMessages（历史记录 → 气泡）", () => {
     expect(g.turnDone).toBe(true); // 尾轮正常收尾才标完成
     expect(out[0].sid).toBe("s1");
   });
+  test("还没结果的工具卡（open）记成 running 并带 id（直播 tool-state 按 id 收尾）；有结果的照旧 done / error，时间取记录 ts", () => {
+    const tools = [
+      { name: "Read", summary: "a.ts", id: "t1" },
+      { name: "Edit", summary: "b.ts", id: "t2", error: true },
+      { name: "Bash", summary: "bun test", id: "t3", open: true },
+    ];
+    const g = toChatMessages([a(5, { tools })], { sid: "s1" })[0];
+    expect(g.toolCalls?.map((t) => [t.id, t.state, t.ts])).toEqual([
+      ["t1", "done", "2026-09-27T00:00:05Z"],
+      ["t2", "error", "2026-09-27T00:00:05Z"],
+      ["t3", "running", "2026-09-27T00:00:05Z"],
+    ]);
+  });
   test("user / system / compact 边界断开分组；服务端认出的中断标记与斜杠命令记录（system 条目）渲染成系统分隔线；compactSummary 跳过", () => {
     const items: NeutralMessage[] = [
       a(1, { text: "a" }),

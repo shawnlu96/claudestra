@@ -2,6 +2,8 @@
 import { memo, useEffect, useRef, useState } from "react";
 import { useChatStore, useChatStoreApi } from "../chat-store";
 import type { BgTaskView } from "../type";
+import { fmtClock } from "../fmt-clock";
+import { useNow } from "../use-now";
 import { useT, getLang } from "@/lib/i18n";
 
 /**
@@ -61,24 +63,6 @@ function fmtDuration(ms?: number): string {
   const m = ms / 60_000;
   if (m >= 1) return `${m.toFixed(1)}min`;
   return `${Math.round(ms / 1000)}s`;
-}
-
-/** 运行中耗时：27m 47s / 1h 3m / 45s（与 CC 底栏同一种读法） */
-function fmtClock(ms: number): string {
-  const s = Math.max(0, Math.floor(ms / 1000));
-  if (s >= 3600) return `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m`;
-  return s >= 60 ? `${Math.floor(s / 60)}m ${s % 60}s` : `${s}s`;
-}
-
-/** 每 ms 毫秒刷新一次的「现在」；ms=0 不起定时器（没有在跑的 subagent 时不白白重渲染） */
-function useNow(ms: number): number {
-  const [now, setNow] = useState(() => Date.now());
-  useEffect(() => {
-    if (!ms) return;
-    const id = setInterval(() => setNow(Date.now()), ms);
-    return () => clearInterval(id);
-  }, [ms]);
-  return now;
 }
 
 const QUIET_MS = 3 * 60_000; // subagent 超过这么久没写记录 → 标「静默」（仍在跑，只是在等命令/CI）
