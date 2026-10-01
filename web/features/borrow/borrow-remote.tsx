@@ -25,12 +25,12 @@ const PLACE: Record<PlacementKind, [ReactNode, string]> = {
   none: [<MinusIcon key="n" className="size-3 shrink-0" />, "text-base-content/40"],
 };
 
-/** 放哪 + 原因：图标定形态，peer 去掉前缀只留名字；原因是台账原文，长了截两行 */
+/** 放哪 + 原因：图标定形态；原因是台账原文（挂给 peer 时原文已带名字），只有「等」的原文不带，才补上 peer 名；长了截两行 */
 function Placement({ p }: { p: PlacementView | undefined }) {
   const kind = placementKind(p);
   if (!kind || !p || "error" in p) return null;
   const [icon, cls] = PLACE[kind];
-  const where = kind === "peer" || kind === "wait" ? p.where.replace(/^peer:/, "") : null;
+  const where = kind === "wait" ? p.where.replace(/^peer:/, "") : null;
   return (
     <div className="flex min-w-0 items-start gap-1.5 text-[11px] text-base-content/50">
       <span className={`mt-px inline-flex shrink-0 items-center gap-1 ${cls}`}>
