@@ -16,7 +16,7 @@ import { legacyWebPortFromPlist, redeemLegacySession } from "../src/lib/legacy-w
 import { closeWebState, openWebState } from "../src/lib/web-state.js";
 import { importLegacySessions, sessionIdHash } from "../src/lib/web-state-migrate.js";
 
-const T0 = new Date("2026-09-28T00:00:00Z");
+const T0 = new Date(); // 相对现在：devices 路由按真实时间判过期，写死的日期过了「T0+3 天」这条夹具就成了过期会话
 const later = (days: number) => new Date(T0.getTime() + days * 86_400_000).toISOString();
 
 function oldSettingsDb(): Database {
