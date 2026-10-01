@@ -167,7 +167,7 @@ function NewPeer({ peer, view, onCancel, onChanged }: { peer: string; view: Borr
         </button>
       </div>
       <div className="flex flex-wrap items-center gap-2">
-        <ProjectChips options={view.borrow.projects} picked={projects} disabled={busy} canToggle={() => true}
+        <ProjectChips options={view.borrow.projects} picked={projects} disabled={busy}
           onToggle={(id) => setProjects((cur) => toggleProject(cur, id, order))} />
         <Stepper value={maxOpen} limit={limit} disabled={busy} onStep={(d) => setMaxOpen((n) => clampMaxOpen(n + d, limit))} />
       </div>

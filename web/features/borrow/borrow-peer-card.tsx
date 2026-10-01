@@ -4,7 +4,7 @@
  * 以及按钮改设置（项目逐个开关、上限加减、两下删除）。每次点击立刻经 bridge 写入：
  * 成功整卡一闪，失败回到原值并抖一下被点的按钮。
  */
-import { useEffect, useRef, useState, type MouseEvent } from "react";
+import { useEffect, useRef, useState, type MouseEvent, type ReactNode } from "react";
 import { useT } from "@/lib/i18n";
 import { removeBorrowPeer, saveBorrowPeer, type DroppedView, type Family, type PeerView } from "./borrow-api";
 import { canToggleOff, clampMaxOpen, peerState, reportedFree, toggleProject, type PeerState } from "./borrow-model";
@@ -19,9 +19,9 @@ function ProtoBadge({ state }: { state: PeerState }) {
   if (state === "unknown") return null;
   // proto 1 是老协议，不是故障：中性灰；proto 2 不论此刻能不能放都标「推送」
   return state === "poll" ? (
-    <span className="badge badge-ghost badge-sm gap-1 text-base-content/60"><RepeatIcon className="size-3" />{t("只轮询")}</span>
+    <span className="badge badge-ghost badge-sm shrink-0 gap-1 whitespace-nowrap text-base-content/60"><RepeatIcon className="size-3" />{t("只轮询")}</span>
   ) : (
-    <span className="badge badge-sm gap-1 border-success/30 bg-success/10 text-success"><ZapIcon className="size-3" />{t("推送")}</span>
+    <span className="badge badge-sm shrink-0 gap-1 whitespace-nowrap border-success/30 bg-success/10 text-success"><ZapIcon className="size-3" />{t("推送")}</span>
   );
 }
 
@@ -29,11 +29,12 @@ function ProtoBadge({ state }: { state: PeerState }) {
 const familyPaused = (p: PeerView, f: Family, now: number): boolean =>
   !!p.paused && p.paused.until > now && (p.paused.reason === `${f}_quota` || !p.paused.reason.endsWith("_quota"));
 
-function Capacity({ peer, now }: { peer: PeerView; now: number }) {
+function Capacity({ peer, now, age }: { peer: PeerView; now: number; age: ReactNode }) {
   const t = useT();
   const c = peer.capacity;
   return (
     <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11.5px] tabular-nums text-base-content/65">
+      {age}
       {FAMILIES.map((f) => {
         const free = reportedFree(peer, f);
         return (
@@ -119,7 +120,6 @@ export function BorrowPeerCard(props: {
         <ServerIcon className="size-3.5 shrink-0 text-base-content/50" />
         <span className="min-w-0 truncate font-mono text-[12.5px] font-semibold">{peer.peer}</span>
         <ProtoBadge state={state} />
-        <AgeTag at={peer.capacity?.helloAt ?? null} serverNow={serverNow} receivedAt={receivedAt} tick={tick} />
         {props.canWrite && (
           <button
             className={`btn btn-ghost btn-xs ml-auto btn-square ${armed ? "text-error" : "text-base-content/45"}`}
@@ -131,7 +131,7 @@ export function BorrowPeerCard(props: {
           </button>
         )}
       </div>
-      <Capacity peer={peer} now={serverNow} />
+      <Capacity peer={peer} now={serverNow} age={<AgeTag at={peer.capacity?.helloAt ?? null} serverNow={serverNow} receivedAt={receivedAt} tick={tick} />} />
       {peer.capacity?.why && state !== "poll" && (
         <div className="flex items-start gap-1 text-[11.5px] text-warning">
           <CircleAlertIcon className="mt-0.5 size-3 shrink-0" />
@@ -144,8 +144,7 @@ export function BorrowPeerCard(props: {
           picked={cur.projects}
           dropped={dropped.filter((d) => d.project).map((d) => d.project as string)}
           disabled={busy || !props.canWrite}
-          canToggle={(id) => canToggleOff(cur.projects, id)}
-          onToggle={(id, el) => void save({ ...cur, projects: toggleProject(cur.projects, id, options.map((o) => o.id)) }, el)}
+          onToggle={(id, el) => (canToggleOff(cur.projects, id) ? void save({ ...cur, projects: toggleProject(cur.projects, id, options.map((o) => o.id)) }, el) : shake(el))}
         />
         <Stepper
           value={cur.maxOpen}

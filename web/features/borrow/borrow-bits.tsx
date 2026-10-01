@@ -27,7 +27,6 @@ export function ProjectChips(props: {
   picked: readonly string[];
   dropped?: readonly string[];
   disabled: boolean;
-  canToggle: (id: string) => boolean;
   onToggle: (id: string, el: HTMLElement) => void;
 }) {
   const { options, picked } = props;
@@ -40,7 +39,7 @@ export function ProjectChips(props: {
             key={o.id}
             className={`btn btn-xs h-auto min-h-6 max-w-full gap-1 rounded-full py-0.5 font-normal ${on ? "btn-primary btn-soft" : "btn-ghost border-base-content/15 text-base-content/55"}`}
             aria-pressed={on}
-            disabled={props.disabled || !props.canToggle(o.id)}
+            disabled={props.disabled}
             onClick={(e: MouseEvent<HTMLButtonElement>) => props.onToggle(o.id, e.currentTarget)}
           >
             {on && <CheckIcon className="size-3 shrink-0" />}
