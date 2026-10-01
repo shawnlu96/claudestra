@@ -15,7 +15,7 @@ export const isLendWorkerName = (name: string): boolean => LEND_WORKER_RE.test(n
 export const BEAT_LIVE_MS = 60_000;
 
 /** running = fresh beat under the current lease; silent = stale or wrong generation; no_beat = claimed but never beat; unknown = stopped for PM */
-export type LendWorkerState = "running" | "silent" | "no_beat" | "unknown";
+type LendWorkerState = "running" | "silent" | "no_beat" | "unknown";
 
 export interface LendWorkerRow {
   /** `<worker without agent->@<peer>`: what the team view shows and what send_to_agent addresses */
@@ -59,7 +59,7 @@ function parseBeat(raw: unknown): Beat | null {
 
 const num = (v: unknown): number | null => (typeof v === "number" && Number.isFinite(v) ? v : null);
 
-export function lendWorkerState(status: string, leaseGen: number, beat: Beat | null, now: number): LendWorkerState {
+function lendWorkerState(status: string, leaseGen: number, beat: Beat | null, now: number): LendWorkerState {
   if (status === "unknown") return "unknown";
   const at = num(beat?.at);
   if (!beat || at === null) return "no_beat";
