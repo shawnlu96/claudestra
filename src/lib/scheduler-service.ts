@@ -7,6 +7,7 @@ import type { SchedulerConfig } from "./scheduler-config.js";
 import { mergeExternal } from "./scheduler-merge-external.js";
 import { driveMerge, type MergeExternal } from "./scheduler-merge-driver.js";
 import { getMergeRun, mergeRunDrift, type MergeRun, type MergePhase } from "./scheduler-merge.js";
+import { manualCancel } from "./scheduler-merge-conflict.js";
 import { getDeployRun } from "./scheduler-deploy.js";
 import { acquireMaintenance, SchedulerStopped } from "./scheduler-maintenance.js";
 import { encodeLease, SCHEDULER_LEASE_ENV, type SchedulerLease } from "./scheduler-lease-env.js";
@@ -74,8 +75,8 @@ export async function mergeTick(db: Database, config: SchedulerConfig, manager: 
       }
       const drift = ["merged", "unknown", "resolved", "await_review"].includes(run.phase) ? null : mergeRunDrift(db, run);
       if (drift) {
-        requireOk(await manager("ledger", "scheduler-merge-step", intent.id, "--from", run.phase, "--to", "unknown",
-          "--rev", String(run.rev), "--receipt", drift), "freeze drifted merge run");
+        requireOk(await manager("ledger", "scheduler-merge-step", intent.id, "--from", run.phase, "--to", manualCancel(db, run) ? "resolved" : "unknown",
+          "--rev", String(run.rev), "--receipt", drift), "settle drifted merge run");
       } else if (run.phase === "merged" && (policy.deploy || getDeployRun(db, intent.id))) {
         // lib/scheduler-deploy-tick.ts deploys it; the intent keeps the project merge slot until that deploy ends, even if
         // `deploy` was taken out of the config meanwhile (the journal, not the config, says a job may still be running).

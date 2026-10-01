@@ -10,6 +10,7 @@ import { listEvents } from "./ledger-store.js";
 import { statePath } from "./paths.js";
 import { SRC_DIR } from "./repo-root.js";
 import type { PlannerDecision } from "./scheduler-plan.js";
+import { bounceReviewLine, bounceWork } from "./scheduler-merge-conflict.js";
 import type { OrderProbe, SessionRef, WorkOrder } from "./worker-session.js";
 
 type Planned = Extract<PlannerDecision, { kind: "intent" }>;
@@ -37,13 +38,14 @@ export function workOrderFor(task: LedgerTask, intent: SchedulerIntent, plan: Pl
   if (step === "review") {
     const report = `${statePath("ledger", "reviews", `${task.id}-r${task.round}`)}/report.md`;
     const where = checkout ? [`审查目录：${checkout}（已固定在这个 head；只读，不改、不提交、不推送）`] : [];
-    return { ...base, inputs: [spec, `只审 head ${intent.head ?? "（无）"}`, ...where], outputs: ["逐项结论 JSON（findingId / family / severity / probe）", `报告：${report}`],
+    return { ...base, inputs: [spec, `只审 head ${intent.head ?? "（无）"}`, ...(w?.bounce ? [bounceReviewLine(w.bounce)] : []), ...where], outputs: ["逐项结论 JSON（findingId / family / severity / probe）", `报告：${report}`],
       acceptance: ["对抗式：专找能打穿规格保证的路径", "同类问题沿用上一轮的 findingId", REVIEW_CI_RULE],
       writeBack: `${CLI} review ${task.id} --reviewer ${ref.agent} --verdict pass|changes|block --p0 N --p1 N --p2 N --head ${intent.head ?? "<head>"}` +
         ` --session ${ref.sessionId} --family ${ref.family} --findings <逐项结论.json> --path ${report}（不要带 --to，阶段由调度器推）` };
   }
-  return { ...base, inputs: [spec, ...(w?.reportPath ? [`上一轮审查报告：${w.reportPath}`] : [])],
-    outputs: ["分支上的提交（完整 head SHA）", "证据报告路径"], acceptance: [...AUTHOR_ACCEPTANCE],
+  const bounce = w?.bounce ? bounceWork(w.bounce) : null;
+  return { ...base, inputs: [spec, ...(bounce ? bounce.inputs : w?.reportPath ? [`上一轮审查报告：${w.reportPath}`] : [])],
+    outputs: ["分支上的提交（完整 head SHA）", "证据报告路径"], acceptance: [...(bounce?.acceptance ?? []), ...AUTHOR_ACCEPTANCE],
     writeBack: `${CLI} deliver ${task.id} --from ${step === "fix" ? "fix" : "build"} --head <完整 SHA> --evidence <报告路径>` };
 }
 

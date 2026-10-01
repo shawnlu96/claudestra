@@ -1,5 +1,6 @@
 /** One bounded merge step per call. All external effects are preceded by a durable phase claim; `merged` is terminal. */
 import { carryReceipt, type MergeRun, type MergePhase } from "./scheduler-merge.js";
+import { bounceStep, updateOrBounce } from "./scheduler-merge-conflict.js";
 import { SchedulerStopped } from "./scheduler-maintenance.js";
 
 export interface PrSnapshot {
@@ -11,7 +12,7 @@ export interface PrSnapshot {
   draft: boolean;
   mergeState: string;
   mergeSha: string | null;
-  checks: readonly { name: string; bucket: "pass" | "fail" | "pending" | "skipping" | "cancel" }[];
+  checks: readonly { name: string; bucket: "pass" | "fail" | "pending" | "skipping" | "cancel"; link?: string }[];
 }
 /** How far `head` lags the current main; a failed lookup throws, it never reads as "up to date". */
 export interface MainFreshness { behindBy: number; mainHead: string }
@@ -31,6 +32,7 @@ const green = (run: MergeRun, checks: PrSnapshot["checks"]): boolean =>
   run.requiredChecks.split(",").every((name) => checks.some((c) => c.name === name && c.bucket === "pass")) &&
   checks.every((c) => c.bucket !== "fail" && c.bucket !== "cancel" && c.bucket !== "pending");
 const short = (s: string) => s.slice(0, 12);
+const stopped = (e: unknown): boolean => e instanceof SchedulerStopped;
 const failed = (checks: PrSnapshot["checks"]): boolean => checks.some((c) => c.bucket === "fail" || c.bucket === "cancel");
 /** UNSTABLE = mergeable but some check isn't green yet (CI still running); a failed/cancelled check is a real anomaly. */
 const unstableWait = (pr: PrSnapshot): "wait" | "failed" | null => pr.mergeState !== "UNSTABLE" ? null : failed(pr.checks) ? "failed" : "wait";
@@ -76,13 +78,14 @@ export async function driveMerge(run: MergeRun, external: MergeExternal, advance
         return step("unknown", `PR 状态、base 或审查 head 已变：${pr.state}/${pr.base}/${short(pr.head)}`);
       }
       if (pr.draft) return run;
+      const bounced = await bounceStep(run, pr, external, step);
+      if (bounced) return bounced;
       // GitHub reports CLEAN for a stale branch unless "require up to date" is on, so staleness is asked directly.
       const fresh = await external.freshness(run.prRef, pr.head);
       if (fresh.behindBy > 0 || pr.mergeState === "BEHIND") {
         const claimed = await step("updating");
         assertActive();
-        await external.updateBranch(run.prRef);
-        return claimed;
+        return await updateOrBounce(claimed, external, step, stopped);
       }
       if (pr.mergeState === "UNKNOWN") return run; // GitHub 尚未算出 mergeability，下一轮只读重查
       if (unstableWait(pr) === "failed") return step("unknown", "CI 失败或取消");
@@ -94,6 +97,8 @@ export async function driveMerge(run: MergeRun, external: MergeExternal, advance
       if (pr.state !== "OPEN" || pr.base !== "main" || pr.crossRepository || pr.branch !== run.expectedBranch) return step("unknown", "更新分支后 PR 状态、分支或 base 已变");
       if (!sameHead(run, pr)) return movedHead(run, external, pr, step);
       if (pr.draft) return run;
+      const bounced = await bounceStep(run, pr, external, step);
+      if (bounced) return bounced;
       if (pr.mergeState === "BEHIND") return run; // GitHub 更新仍在进行，下一轮只读检查
       if (pr.mergeState === "UNKNOWN") return run;
       if (unstableWait(pr) === "failed") return step("unknown", "更新分支后 CI 失败或取消");
@@ -113,9 +118,10 @@ export async function driveMerge(run: MergeRun, external: MergeExternal, advance
       const refresh = async (why: string) => {
         const claimed = await step("updating", `${why}，重新更新分支`);
         assertActive();
-        await external.updateBranch(run.prRef);
-        return claimed;
+        return await updateOrBounce(claimed, external, step, stopped);
       };
+      const bounced = await bounceStep(run, pr, external, step);
+      if (bounced) return bounced;
       if (pr.mergeState === "BEHIND" && sameHead(run, pr) && pr.state === "OPEN" && !pr.draft && !pr.crossRepository &&
         pr.base === "main" && pr.branch === run.expectedBranch) return failed(pr.checks) ? step("unknown", "CI 失败或取消") : await refresh("等 CI 期间 GitHub 报 BEHIND");
       const unstable = unstableWait(pr); // The final pre-merge check below still demands CLEAN, so waiting here never merges early.
@@ -152,7 +158,7 @@ export async function driveMerge(run: MergeRun, external: MergeExternal, advance
     return run;
   } catch (e) {
     if (e instanceof SchedulerStopped) throw e; // Shutdown or lost ownership leaves the journal for the new controller to reconcile.
-    if (["unknown", "merged"].includes(current.phase)) throw e;
+    if (["unknown", "merged", "resolved"].includes(current.phase)) throw e;
     return step("unknown", `外部步骤失败：${(e as Error).message.slice(0, 450)}`);
   }
 }
