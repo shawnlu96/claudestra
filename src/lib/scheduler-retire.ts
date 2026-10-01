@@ -167,7 +167,10 @@ class RetireCard {
       return { effect: "kill", receipt: oneLine(`agent 现在跑的是会话 ${live.sessionId}，不是本卡绑定的 ${row.sessionId}：不 kill，${FOR_PM}`) };
     }
     const k = killOutcome(await this.deps.agent("kill", row.agent));
-    return "receipt" in k ? { effect: "kill", receipt: k.receipt } : k;
+    if (!("receipt" in k)) return k;
+    // kill can answer ok without the window gone (tmux errors are not all propagated): only a stop seen here is receipted
+    const after = (await this.deps.agents()).find((a) => a.name === row.agent);
+    return after && !stopped(after) ? { busy: "kill 回了 ok，但窗口 / pending 还在（下轮再 kill）" } : { effect: "kill", receipt: k.receipt };
   }
 
   /** Archive, then kill: each receipt is on the ledger before the next effect; a receipt already there skips its effect. */
@@ -245,8 +248,20 @@ async function closeStray(db: Database, deps: RetireDeps, task: LedgerTask): Pro
   return null;
 }
 
-/** Notices delivered whose settle has not landed yet (intent id → text), per ledger: a retried settle must not resend them. */
-const delivered = new WeakMap<Database, Map<string, string>>();
+/**
+ * Notices delivered whose settle has not landed yet, by intent id only, per ledger: such a card skips the retirement steps and only
+ * retries its settle with what PM was told. Keyed on the id, not the text, so a notice whose text keeps changing goes out once.
+ */
+type Pending = Pick<Owed, "outcome" | "to" | "receipt">;
+const delivered = new WeakMap<Database, Map<string, Pending>>();
+const deliveredFor = (db: Database): Map<string, Pending> => delivered.get(db) ?? delivered.set(db, new Map()).get(db)!;
+
+/** Settle a card whose notice went out; a failed write stays remembered, so the next pass retries the settle and nothing else. */
+async function settleNotified(db: Database, deps: RetireDeps, intentId: string, p: Pending): Promise<RetireOutcome> {
+  if (!(await settle(deps, intentId, p.to, p.receipt))) return { ...p.outcome, step: "held", detail: "已通知 PM，意图没结上（下轮再结，不重发）" };
+  deliveredFor(db).delete(intentId);
+  return p.outcome;
+}
 
 /**
  * One combined PM notice per project, then the settles it covers. A notice that did not go out leaves its cards submitted, so the
@@ -254,24 +269,21 @@ const delivered = new WeakMap<Database, Map<string, string>>();
  * without telling PM again; only the service dying between the send and the settle can repeat it (the bridge keeps no send ids).
  */
 async function notifyAndSettle(db: Database, deps: RetireDeps, owed: Owed[], out: RetireOutcome[]): Promise<void> {
-  const sentNotes = delivered.get(db) ?? delivered.set(db, new Map()).get(db)!;
+  const sent = deliveredFor(db);
   const byProject = new Map<string, Owed[]>();
   for (const o of owed) byProject.set(o.task.project, [...(byProject.get(o.task.project) ?? []), o]);
   for (const group of byProject.values()) {
-    const fresh = group.filter((o) => sentNotes.get(o.intentId) !== o.notice);
-    const lines = fresh.map((o) => `- ${o.notice}`);
+    const lines = group.map((o) => `- ${o.notice}`);
     const text = `[调度引擎] 卡收尾有 ${lines.length} 处要 PM 看（没删的 worktree 不加 --force、不 rm，原样留着）：\n${lines.join("\n")}`;
-    const failed = !fresh.length ? null : await deps.notifyPm(fresh[0].task, text).then(() => null, (e: unknown) => {
+    const failed = await deps.notifyPm(group[0].task, text).then(() => null, (e: unknown) => {
       if (e instanceof SchedulerStopped) throw e;
       console.error(`⚠️ [scheduler] 收尾通知没发出去，下轮重发：${(e as Error).message}`);
       return oneLine((e as Error).message);
     });
-    if (failed === null) for (const o of fresh) sentNotes.set(o.intentId, o.notice);
     for (const o of group) {
-      if (sentNotes.get(o.intentId) !== o.notice) { out.push({ ...o.outcome, step: "held", detail: oneLine(`PM 通知没发出去，下轮重发：${failed}`) }); continue; }
-      if (!(await settle(deps, o.intentId, o.to, o.receipt))) { out.push({ ...o.outcome, step: "held", detail: "已通知 PM，意图没结上（下轮再结，不重发）" }); continue; }
-      sentNotes.delete(o.intentId);
-      out.push(o.outcome);
+      if (failed !== null) { out.push({ ...o.outcome, step: "held", detail: oneLine(`PM 通知没发出去，下轮重发：${failed}`) }); continue; }
+      sent.set(o.intentId, { outcome: o.outcome, to: o.to, receipt: o.receipt });
+      out.push(await settleNotified(db, deps, o.intentId, o));
     }
   }
 }
@@ -295,6 +307,8 @@ export async function schedulerRetireTick(db: Database, projects: readonly strin
       const intent = r.intent as SchedulerIntent | undefined;
       if (r.ok !== true || !intent) { out.cards.push({ taskId, step: "held", detail: oneLine(`退役意图没开成：${String(r.error)}`) }); continue; }
       if (intent.status !== "submitted") continue;
+      const told = deliveredFor(db).get(intent.id);
+      if (told) { out.cards.push(await settleNotified(db, deps, intent.id, told)); continue; }
       const done = await new RetireCard(db, task, intent, deps).run();
       if ("notice" in done) owed.push(done); else out.cards.push(done);
     } catch (e) {

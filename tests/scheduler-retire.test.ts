@@ -5,7 +5,7 @@
  * sessions only marked; and round 1's findings: no second kill, notices resent, cancelled cards, shared checkouts, fairness, budget.
  */
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { getIntent } from "../src/lib/ledger-scheduler.js";
@@ -451,6 +451,44 @@ describe("i28-S2 round 2 findings", () => {
       });
     }
     expect(auto).toBe(0);
+    expect(f.row("T1", "author").state).toBe("retired");
+  });
+});
+
+describe("i28-S2 round 3 findings", () => {
+  test("notice-lost: a notice whose text keeps changing goes out once while its settle keeps failing", async () => {
+    const f = fixture();
+    f.card("T1", "verified", { reviewer: null });
+    const mine = worktreeDirs(f.root, "T1")[0];
+    writeFileSync(join(mine, "draft-0.txt"), "keep");
+    const ledger = f.retireDeps.ledger;
+    let fail = true;
+    f.retireDeps.ledger = async (...args) => (fail && args[1] === "scheduler-settle" && args[2] === "retire:T1" ? { ok: false, error: "injected" } : ledger(...args));
+    for (let n = 0; n < 5; n++) {
+      expect((await f.tick())[0].step).toBe("held");
+      renameSync(join(mine, `draft-${n % 2}.txt`), join(mine, `draft-${(n + 1) % 2}.txt`)); // the porcelain flips between two states
+    }
+    expect(f.notices).toHaveLength(1);
+    expect(getIntent(f.db, "retire:T1")?.status).toBe("submitted");
+    fail = false;
+    expect((await f.tick())[0].step).toBe("handoff");
+    expect(f.notices).toHaveLength(1);
+    expect(getIntent(f.db, "retire:T1")?.status).toBe("done");
+    expect(existsSync(mine)).toBe(true);
+  });
+
+  test("kill-retry: a kill that answers ok with the window still open is not receipted; the next pass kills again", async () => {
+    const f = fixture();
+    f.card("T1", "verified", { reviewer: null });
+    f.replies["kill agent-task-t1"] = () => { f.setAgent("agent-task-t1", { status: "stopped", pending: undefined }); return { ok: true, message: "已销毁" }; };
+    expect((await f.tick())[0].step).toBe("held");
+    expect(f.row("T1", "author").killReceipt).toBeNull();
+    expect(f.row("T1", "author").state).not.toBe("retired");
+    expect(getIntent(f.db, "retire:T1")?.status).toBe("submitted");
+    expect(existsSync(worktreeDirs(f.root, "T1")[0])).toBe(true);
+    delete f.replies["kill agent-task-t1"];
+    expect((await f.tick())[0].step).toBe("retired");
+    expect(f.calls.filter((c) => c[0] === "kill")).toHaveLength(2);
     expect(f.row("T1", "author").state).toBe("retired");
   });
 });
