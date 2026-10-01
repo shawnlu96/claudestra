@@ -8,7 +8,7 @@
  */
 import { resourceKey, resourcesOverlap, type AuthorFamily } from "./ledger-scheduler.js";
 import type { PlannerDecision, PlannerSnapshot } from "./scheduler-plan.js";
-import { PEER_PLACEMENT, peerFamily, placeFor, type PeerFacts, type PlaceRole, type PlacementFacts } from "./scheduler-placement.js";
+import { PEER_PLACEMENT, peerFamily, placeFor, type PeerFacts, type PlaceRole, type PlacementFacts } from "./scheduler-family-pick.js";
 import { isPoolIntent, POOL_RECIPIENT, poolTarget, type PoolFacts } from "./scheduler-pool-plan.js";
 import { cardWorkerSlots } from "./scheduler-worker-slot.js";
 
@@ -127,7 +127,7 @@ export function orderFamily(s: PlannerSnapshot, peer: string, role: PlaceRole): 
   if (!s.workflow) return null;
   if (role === "review") return otherFamily(s.workflow.authorFamily);
   const p = s.pool?.peers.find((x) => x.peer === peer);
-  return p ? peerFamily(peerFacts(p), role, s.workflow.authorFamily) : null;
+  return p ? peerFamily(peerFacts(p), role, s.workflow.authorFamily, s.pool?.remote.writeFamilies) : null;
 }
 
 /**
