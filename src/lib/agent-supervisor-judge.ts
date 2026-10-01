@@ -30,8 +30,8 @@ interface Miss extends Identity {
 
 const same = (a: Identity, b: Identity): boolean => a.agent === b.agent && a.sessionId === b.sessionId && a.workKey === b.workKey;
 
-/** 这一轮的否定种类：窗口 / 宿主没了优先；活着且回合够久没动静 = 卡住；读不到 = 不知道（不算否定） */
-function downOf(look: Look): { kind: Down; evidence: number | null } | null {
+/** 这一轮的否定种类：窗口 / 宿主没了优先；活着且回合够久没动静 = 卡住；读不到 = 不知道（不算否定）。重启前的各次复核也用它判「还是不是那样」 */
+export function downOf(look: Look): { kind: Down; evidence: number | null } | null {
   if (look.liveness === "no_window" || look.liveness === "no_host") return { kind: look.liveness, evidence: null };
   if (look.liveness === "running" && look.stuckSince !== null) return { kind: "stuck", evidence: look.stuckSince };
   return null;
