@@ -107,17 +107,24 @@ machines.onSwitch((prev) => {
   if (prev) abortMachineRequests(prev);
 });
 
-async function parseBody(res: Response): Promise<Record<string, unknown>> {
-  const text = await res.text().catch(() => ""); // 体读不出来（已中止 / 空体）按空对象，状态码仍然生效
+/** 2xx 正文坏了 = 服务端已执行、只是回包丢了：只有 GET / HEAD 标 retryable；POST 等标了会被 chat-store 发送循环自动重发（tests/web-ledger-meta-guard.test.ts） */
+async function parseBody(res: Response, method: string): Promise<Record<string, unknown>> {
+  const retryable = method === "GET" || method === "HEAD";
+  const hint = retryable ? "please retry" : "the request may already have been applied";
+  const text = await res.text().catch(() => {
+    if (res.ok) throw new ApiError(`Response body interrupted — ${hint}`, res.status, { retryable }, "body_read_failed");
+    return ""; // 非 2xx 仍按原状态码报错，特别是 401 必须触发重新配对
+  });
   if (!text) return {};
   try {
     return JSON.parse(text) as Record<string, unknown>;
   } catch {
+    if (res.ok) throw new ApiError(`Response body is not valid JSON — ${hint}`, res.status, { retryable }, "invalid_json");
     return { error: text.slice(0, 300) }; // 非 JSON（反代错误页）：把正文当错误文案带给调用方
   }
 }
 
-async function send(path: string, init: ApiInit, machine: MachineRef | undefined, accept?: string): Promise<{ res: Response; target: Target }> {
+async function send(path: string, init: ApiInit, machine: MachineRef | undefined, accept?: string): Promise<{ res: Response; target: Target; method: string }> {
   const target = await resolveTarget(machine);
   const method = (init.method ?? "GET").toUpperCase();
   const headers: Record<string, string> = { ...(init.headers ?? {}) };
@@ -146,11 +153,11 @@ async function send(path: string, init: ApiInit, machine: MachineRef | undefined
     throw new ApiError("machine switched while request was in flight", 0, {}, "machine_switched");
   }
   if (res.status === 401) {
-    const b = await parseBody(res);
+    const b = await parseBody(res, method);
     machines.markRepair(target.fp);
     throw apiErrorFrom(401, b, target.fp);
   }
-  return { res, target };
+  return { res, target, method };
 }
 
 /** 原始响应（附件 blob、非 JSON）：401 已映射成 DeviceInvalidError，其余状态码由调用方看 */
@@ -160,15 +167,15 @@ export async function apiRaw(path: string, init: ApiInit = {}, machine?: Machine
 
 /** JSON 请求：非 2xx 抛 ApiError（message 取 bridge 的 error，body 原样带上，如 409 的 runId） */
 export async function api<T = Record<string, unknown>>(path: string, init: ApiInit = {}, machine?: MachineRef): Promise<T> {
-  const { res, target } = await send(path, init, machine);
-  const body = await parseBody(res);
+  const { res, target, method } = await send(path, init, machine);
+  const body = await parseBody(res, method);
   if (!res.ok) throw apiErrorFrom(res.status, body, target.fp);
   return body as T;
 }
 
 /** SSE-over-fetch：不限时、Accept text/event-stream；连接留在在途表里，切机器即中止（读端会收到 done/abort） */
 export async function apiStream(path: string, init: ApiInit = {}, machine?: MachineRef): Promise<Response> {
-  const { res, target } = await send(path, { ...init, timeoutMs: 0 }, machine, "text/event-stream");
-  if (!res.ok || !res.body) throw apiErrorFrom(res.status, await parseBody(res), target.fp);
+  const { res, target, method } = await send(path, { ...init, timeoutMs: 0 }, machine, "text/event-stream");
+  if (!res.ok || !res.body) throw apiErrorFrom(res.status, await parseBody(res, method), target.fp);
   return res;
 }

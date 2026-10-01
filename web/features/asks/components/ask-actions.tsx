@@ -8,6 +8,7 @@ import { useT } from "@/lib/i18n";
 import { activeAnswered, clearAnswered, markAnswered } from "../answer-cooldown";
 import { answeredGroups, rowGroup, wireLabels, type WebAsk } from "../asks-model";
 import { asksStore } from "../asks-store";
+import { isAskForViewer } from "../ask-viewer";
 import { AuqChoices, PermissionChoices, ReplyChoices } from "./ask-choices";
 import { AssignedChoices, assignedRejectText, isHumanNodeAsk } from "./assigned-choices";
 import { TerminalIcon } from "./ask-icons";
@@ -19,6 +20,7 @@ import { TerminalIcon } from "./ask-icons";
 export function AskActions({ ask, agent }: { ask: WebAsk; agent: string }) {
   const t = useT();
   const [busy, setBusy] = useState(false);
+  if (!isAskForViewer(ask)) return null;
   const canAnswer = ask.canAnswer !== false;
   // 运行时弹框（AUQ / 权限）一定是某个 agent 卡住的：按键端点按 agent 名走
   const dialogAgent = ask.fromAgent ?? "";

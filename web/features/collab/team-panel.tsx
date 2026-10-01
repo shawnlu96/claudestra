@@ -4,6 +4,7 @@ import { useChatStoreApi } from "../chat/chat-store";
 import { useChatNav } from "../chat/components/nav-context";
 import { useMachineFp } from "../talk/use-talk";
 import { uiAgentName } from "@/lib/chat/agents";
+import { metaOf } from "@/lib/ledger-meta-guard";
 import { closeCollab } from "./collab-nav";
 import type { LedgerOverview } from "./collab-model";
 import type { TeamAgent } from "./team-panel-model";
@@ -35,7 +36,7 @@ export function TeamPanel({ ov, project, agents, now, embedded = false, selected
   const nav = useChatNav();
   const [selection, setSelection] = useState<{ scope: string; id: string } | null>(null);
   const current = selected !== undefined ? selected : selection?.scope === scope ? selection.id : null;
-  const nodes = teamNodes(agents, data.peers ?? [], ov?.meta.pms ?? []).map((node) => {
+  const nodes = teamNodes(agents, data.peers ?? [], metaOf(ov).pms).map((node) => {
     const roles = activity?.roles?.filter((r) => r.id === node.id).map((r) => r.role) ?? [];
     return node.role === "agent" && roles.length ? { ...node, role: [...new Set(roles)].join(" / ") } : node;
   });
