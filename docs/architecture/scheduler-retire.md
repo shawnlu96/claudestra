@@ -58,7 +58,8 @@ One `retire` intent per card (`retire:<task>`, opened already claimed by `ledger
 Each card gets one settle event either way. A pass sends the notices as **one combined message per project**, never one per
 card, and a card owing PM a notice settles only **after** its project's notice went out. A notice that fails leaves the intent
 `submitted`; the next pass rebuilds it from durable state (session receipts, the worktrees on disk) and resends it. A notice
-that went out is remembered in the service process by intent id (not by text) until its settle lands: such a card skips the
+that went out is remembered in the service process by intent id (not by text) — every card of the notice, before the first
+settle is awaited, and kept whether a settle answers not-ok or throws — until its settle lands: such a card skips the
 retirement steps and only retries the settle with what PM was told, so PM hears once even if a kept worktree keeps changing. After a settle the card is never picked again. The one window left is the service dying between the send and the
 settle: the bridge keeps no send ids, so that notice may come twice (never zero times).
 

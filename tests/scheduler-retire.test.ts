@@ -18,6 +18,7 @@ import { archiveReceipt, killOutcome, readLiveAgents, RETIRE_CARDS_PER_PASS, ret
   from "../src/lib/scheduler-retire.js";
 import { git } from "../src/lib/scheduler-review-worktree.js";
 import { getSchedulerSession, retireIntentId, type SchedulerSession } from "../src/lib/scheduler-sessions.js";
+import { runManagerProcess } from "../src/lib/run-manager.js";
 import { runLedger } from "../src/manager/ledger.js";
 import type { LedgerDeps } from "../src/manager/ledger-context.js";
 import type { Registry } from "../src/manager/core.js";
@@ -490,6 +491,28 @@ describe("i28-S2 round 3 findings", () => {
     expect((await f.tick())[0].step).toBe("retired");
     expect(f.calls.filter((c) => c[0] === "kill")).toHaveLength(2);
     expect(f.row("T1", "author").state).toBe("retired");
+  });
+});
+
+describe("i28-S2 round 5 findings", () => {
+  test("notice-lost: a settle that rejects keeps every card of the delivered notice remembered; nothing is resent", async () => {
+    const f = fixture();
+    for (const id of ["T1", "T2"]) {
+      f.card(id, "verified", { reviewer: null });
+      writeFileSync(join(worktreeDirs(f.root, id)[0], "draft.txt"), "keep");
+    }
+    const ledger = f.retireDeps.ledger;
+    let fail = true;
+    f.retireDeps.ledger = async (...a) => {
+      if (!fail || a[1] !== "scheduler-settle" || a[2] !== "retire:T1") return ledger(...a);
+      fail = false; // the manager child failing to start rejects instead of answering {ok:false}
+      return runManagerProcess(a, { bunPath: join(f.dir, "missing-executable"), managerPath: "unused", timeoutMs: 1000, env: {} });
+    };
+    expect((await f.tick()).map((c) => [c.taskId, c.step])).toEqual([["T1", "held"], ["T2", "handoff"]]);
+    expect(f.notices).toHaveLength(1);
+    expect((await f.tick()).map((c) => [c.taskId, c.step])).toEqual([["T1", "handoff"]]);
+    expect(f.notices).toHaveLength(1);
+    expect(["retire:T1", "retire:T2"].map((id) => getIntent(f.db, id)?.status)).toEqual(["done", "done"]);
   });
 });
 

@@ -256,9 +256,16 @@ type Pending = Pick<Owed, "outcome" | "to" | "receipt">;
 const delivered = new WeakMap<Database, Map<string, Pending>>();
 const deliveredFor = (db: Database): Map<string, Pending> => delivered.get(db) ?? delivered.set(db, new Map()).get(db)!;
 
-/** Settle a card whose notice went out; a failed write stays remembered, so the next pass retries the settle and nothing else. */
+/**
+ * Settle a card whose notice went out. A settle that answers not-ok or throws (the manager child failing to start) stays
+ * remembered, so the next pass retries the settle and nothing else; it never stops the other cards of the notice from settling.
+ */
 async function settleNotified(db: Database, deps: RetireDeps, intentId: string, p: Pending): Promise<RetireOutcome> {
-  if (!(await settle(deps, intentId, p.to, p.receipt))) return { ...p.outcome, step: "held", detail: "已通知 PM，意图没结上（下轮再结，不重发）" };
+  const why = await settle(deps, intentId, p.to, p.receipt).then((ok) => (ok ? null : "台账没收"), (e: unknown) => {
+    if (e instanceof SchedulerStopped) throw e;
+    return oneLine((e as Error).message);
+  });
+  if (why !== null) return { ...p.outcome, step: "held", detail: oneLine(`已通知 PM，意图没结上（下轮再结，不重发）：${why}`) };
   deliveredFor(db).delete(intentId);
   return p.outcome;
 }
@@ -280,11 +287,13 @@ async function notifyAndSettle(db: Database, deps: RetireDeps, owed: Owed[], out
       console.error(`⚠️ [scheduler] 收尾通知没发出去，下轮重发：${(e as Error).message}`);
       return oneLine((e as Error).message);
     });
-    for (const o of group) {
-      if (failed !== null) { out.push({ ...o.outcome, step: "held", detail: oneLine(`PM 通知没发出去，下轮重发：${failed}`) }); continue; }
-      sent.set(o.intentId, { outcome: o.outcome, to: o.to, receipt: o.receipt });
-      out.push(await settleNotified(db, deps, o.intentId, o));
+    if (failed !== null) {
+      for (const o of group) out.push({ ...o.outcome, step: "held", detail: oneLine(`PM 通知没发出去，下轮重发：${failed}`) });
+      continue;
     }
+    // the whole group is remembered before the first settle is awaited: a settle that throws must not leave a later card unrecorded
+    for (const o of group) sent.set(o.intentId, { outcome: o.outcome, to: o.to, receipt: o.receipt });
+    for (const o of group) out.push(await settleNotified(db, deps, o.intentId, o));
   }
 }
 
