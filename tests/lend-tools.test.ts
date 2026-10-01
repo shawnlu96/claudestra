@@ -10,6 +10,10 @@ import { advance, getOrder, openLendJournal, recordAsked, setMeta } from "../src
 import { e2eLendCall, isLendCaller, routeLendTool, type LendToolDeps } from "../src/lib/lend-tools.js";
 import { markE2eResponse } from "../src/lib/peer-e2e-client.js";
 import type { HttpPeer } from "../src/lib/peers.js";
+import { startToolProxy } from "../src/lib/acp/tool-proxy.js";
+import { DAG_TOOLS } from "../src/lib/dag-tools.js";
+import { LEND_ORDER_TOOLS } from "../src/lib/lend-mcp-profile.js";
+import { ORDER_TOOLS } from "../src/lib/order-tools.js";
 
 const HEAD = "b".repeat(40);
 const AGENT = "agent-lend-0123456789";
@@ -293,5 +297,65 @@ describe("出站只走 E2E（e2eLendCall）", () => {
     expect(proxied.urls).toEqual([]);
     const plain = ports([peer], () => new Response("{}", { status: 200 }));
     await expect(plain.call("team-a", "result", { v: 1 })).rejects.toThrow("端到端");
+  });
+});
+
+describe("反例：拿代理 token 绕过 channel-server 直连（验收线 1）", () => {
+  /** clean 代理 → 假 bridge（order_tool 帧按出借 worker 身份交给 routeLendTool，回包原路送回）；worker 直接拿 BRIDGE_URL 开 ws，不经 lend 档 MCP */
+  async function direct() {
+    const db = openLendJournal(":memory:");
+    addStarted(db);
+    const { deps, sent } = fake(db);
+    const routed: string[] = [];
+    const proxy = startToolProxy({
+      channelId: "local-acp-1", clean: true, log: () => {},
+      toBridge: (f) => {
+        routed.push(String(f.tool ?? f.type));
+        if (f.type === "order_tool") void routeLendTool(f.tool, who(), f.args, deps).then((result) => proxy.onBridgeFrame({ type: "response", requestId: f.requestId, result }));
+        return true;
+      },
+    });
+    const ws = new WebSocket(proxy.url);
+    const got = new Map<string, Record<string, any>>();
+    ws.onmessage = (e) => { const m = JSON.parse(String(e.data)); got.set(m.requestId, m); };
+    await new Promise<void>((res, rej) => ((ws.onopen = () => res()), (ws.onerror = () => rej(new Error("connect failed")))));
+    const ask = async (frame: Record<string, unknown>) => {
+      ws.send(JSON.stringify(frame));
+      for (let i = 0; i < 100 && !got.has(String(frame.requestId)); i++) await new Promise((r) => setTimeout(r, 5));
+      return got.get(String(frame.requestId));
+    };
+    return { ask, routed, sent, done: () => (ws.close(), proxy.close()) };
+  }
+
+  test("频道类帧（reply / route_to_agent / fleet / check_inbox …）：代理就地拒，到不了 bridge；认不出的帧直接丢", async () => {
+    const c = await direct();
+    for (const type of ["reply", "fetch_messages", "react", "edit_message", "project_info", "list_channels", "forward_to_agent", "route_to_agent",
+      "check_inbox", "fleet_state", "fleet_run"]) {
+      expect((await c.ask({ type, requestId: `r_${type}`, chatId: "c", text: "x" }))?.error).toContain(type);
+    }
+    for (const type of ["send_to_agent", "register_agent", "spawn"]) expect(await c.ask({ type, requestId: `r_${type}` })).toBeUndefined();
+    expect(c.routed).toEqual([]);
+    c.done();
+  });
+
+  test("HANDLERS 里 lend 白名单以外的派单工具：代理拒；哪怕绕过代理到了 bridge，lend 路由照样拒，一个都不落到本机 HANDLERS", async () => {
+    const c = await direct();
+    const outside = [...ORDER_TOOLS, ...DAG_TOOLS].map((t) => t.name).filter((n) => !LEND_ORDER_TOOLS.includes(n));
+    expect(outside.length).toBeGreaterThan(0);
+    for (const tool of outside) expect((await c.ask({ type: "order_tool", requestId: `r_${tool}`, tool, args: {} }))?.error).toContain(tool);
+    expect(c.routed).toEqual([]);
+    const { deps, sent } = fake(openLendJournal(":memory:"));
+    for (const tool of [...outside, "reply", "route_to_agent"]) expect(code(await routeLendTool(tool, who(), {}, deps))).toBe("lend_forbidden");
+    expect(sent).toEqual([]);
+    c.done();
+  });
+
+  test("对照：白名单内的照常过两层（审查单 take_review 拿到订单；写单工具在 W8 前由 bridge 明确拒）", async () => {
+    const c = await direct();
+    expect((await c.ask({ type: "order_tool", requestId: "r1", tool: "take_review", args: {} }))?.result.ok).toBe(true);
+    expect((await c.ask({ type: "order_tool", requestId: "r2", tool: "take_order", args: {} }))?.result.code).toBe("wrong_step");
+    expect(c.routed).toEqual(["take_review", "take_order"]);
+    expect(c.sent).toEqual([]);
+    c.done();
   });
 });
