@@ -86,7 +86,8 @@ const workflowEvents = () => listEvents(db, { project: P, target: "i28-a" }).fil
 
 /** Everything start_node produced, with the per-call random attempt and the temp dir masked so two runs compare equal. */
 function product(out: Record<string, any>): string {
-  const mask = (s: string) => s.replaceAll(dir, "<dir>").replace(/dag-start:([\w.-]+):[0-9a-f]{8}/g, "dag-start:$1:<attempt>");
+  // i28-N8：卡上 spec 改记绝对路径，归一回录 golden 时的相对写法，其余产物仍须逐字节一致
+  const mask = (s: string) => s.replaceAll(`${join(dir, "ledger", "docs", "tasks")}/`, "docs/tasks/").replaceAll(dir, "<dir>").replace(/dag-start:([\w.-]+):[0-9a-f]{8}/g, "dag-start:$1:<attempt>");
   const t = getTask(db, "i28-a");
   const events = listEvents(db, { project: P, target: "i28-a" }).map((e) => ({ kind: e.kind, text: e.text, data: e.data, dedupKey: e.dedupKey }));
   const wf = getWorkflow(db, "i28-a");
