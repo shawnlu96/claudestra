@@ -13,6 +13,7 @@ import { helloState, metaJson, notV2, type HelloDeps } from "./lend-hello.js";
 import { liveOrders, orderOf, patchOrder, setMeta, unsettledOrders, LEASED_STATES, type LendRow } from "./lend-journal.js";
 import { LEND_OLD_PEER, lendRequest, type Lease, type LendRes } from "./lend-remote.js";
 import { parseV2Request, type BeatAnswer, type BeatOrder } from "./lend-wire-v2.js";
+import { publishFail, publishFailLine } from "./lend-pr-takeover-retry.js";
 
 /** heartbeat 拿到的续租结果：res 同 v1 renew 的 lendRequest 结果，at = 收到 beat 应答的时刻 */
 export type Renewal = { res: LendRes<Lease | null>; at: number };
@@ -69,10 +70,13 @@ interface Item { row: LendRow; ended: boolean }
 
 async function lineOf(d: HelloDeps, it: Item): Promise<Record<string, unknown>> {
   const { row } = it;
-  const running = !it.ended && (row.state === "started" || row.state === "result_pending");
+  const phase = phaseOf(row);
+  const failed = !it.ended && phase === "publishing" ? publishFail(d.db, row.orderId) : null; // 发不出交付：摘要报原因，不报 worker 输出
+  const running = !it.ended && !failed && (row.state === "started" || row.state === "result_pending");
   const got = running && d.v2.excerpt ? await d.v2.excerpt(row).catch((e) => (d.log(`读 ${row.orderId} 的输出摘要失败：${(e as Error).message}`), null)) : null;
-  return { orderId: row.orderId, gen: row.leaseGen, phase: phaseOf(row), lastActivityAt: Math.max(0, Math.floor(got?.at ?? row.updatedAt)),
-    excerpt: got ? excerptOf(got.text) : "", ...(it.ended ? { ended: { reason: "revoked", clean: cleanEnd(row) } } : {}) };
+  const excerpt = failed ? excerptOf(publishFailLine(failed, d.now())) : got ? excerptOf(got.text) : "";
+  return { orderId: row.orderId, gen: row.leaseGen, phase, lastActivityAt: Math.max(0, Math.floor(got?.at ?? row.updatedAt)),
+    excerpt, ...(it.ended ? { ended: { reason: "revoked", clean: cleanEnd(row) } } : {}) };
 }
 
 const blank = (lines: Record<string, unknown>[]) => lines.map((l) => ({ ...l, excerpt: "" }));

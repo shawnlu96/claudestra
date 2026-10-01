@@ -19,6 +19,7 @@ import { pmNoticeResume, pmUiNotice } from "./scheduler-ui-gate.js";
 import { getSchedulerSession, type SessionRole } from "./scheduler-sessions.js";
 import { planRejectedReason } from "./ledger-scheduler-write.js";
 import type { SnapshotOpts } from "./scheduler-snapshot.js";
+import { ensureDeliverScope } from "./order-deliver-scope.js";
 import { stepOfNode, workOrderFor } from "./scheduler-work-order.js";
 import { paceCards, type TickPace } from "./scheduler-yield.js";
 import { peerPrHold } from "./peer-pr-hold.js";
@@ -26,8 +27,8 @@ import type { BorrowEntry } from "./lend-config.js";
 import type { RemotePolicy } from "./scheduler-config.js";
 import { isPoolIntent } from "./scheduler-pool-plan.js";
 import { drivePool } from "./scheduler-pool-tick.js";
+import { informFamilyWait } from "./scheduler-family-pick-notice.js";
 import { deliveryFor, sentAsWake, type EnsureResult, type SessionRef, type WorkerSession } from "./worker-session.js";
-
 type Manager = (...args: string[]) => Promise<Record<string, unknown>>;
 type Planned = Extract<PlannerDecision, { kind: "intent" }>;
 
@@ -203,7 +204,8 @@ class Card {
       }
       checkout = pinned.dir;
     }
-    const order = workOrderFor(this.task, intent, plan, ref, checkout);
+    if (stepOfNode(intent.node) === "review") await ensureDeliverScope(this.db, this.task, intent.head); // 派审前事务外补登记规格外文件（i28-ASK2）
+    const order = workOrderFor(this.task, intent, plan, ref, checkout, this.db);
     if (!order) return this.out("held", `节点 ${intent.node} 没有任务单`);
     let delivery = deliveryFor(w.route, order.step);
     const unpullable = delivery.mode === "wake" ? unpullableReason(this.db, ref, intent) : null;
@@ -261,9 +263,9 @@ class Card {
       ORDER BY eventSeq DESC LIMIT 1`).get(this.task.id) as SchedulerIntent | null;
     return sent && deadUiAsk(this.db, sent.id, this.deps.now()) ? sent : null;
   }
-
   /** A sent order is only a receipt: watch its session for a quota / auth failure, which is PM's call, never a resend. */
   async watch(wait: Extract<PlannerDecision, { kind: "wait" }>): Promise<CardOutcome> {
+    await informFamilyWait(this.db, this.task, wait, this.opts.pool?.remote, this.deps);
     const deadAsk = wait.code === "owner_screenshot" ? this.uiAskDead() : null;
     if (deadAsk) return this.escalate("截图 ask 已过期或被撤下，没人能再答：PM 决定重开还是接管", deadAsk.id);
     if (wait.code !== "in_flight") return this.out("waiting", wait.reason);
@@ -326,10 +328,8 @@ class Card {
     return this.out("waiting", `${ref.agent} 未领单，已报警`);
   }
 
-  /**
-   * An order the transport refused (bridge down, session swapped) is safely re-planned, but not every poll: consecutive
-   * refusals back off 30s → 10min, or a bridge restart would write a plan + cancel pair per card per second.
-   */
+  /** An order the transport refused (bridge down, session swapped) is safely re-planned, but not every poll: consecutive
+   *  refusals back off 30s → 10min, or a bridge restart would write a plan + cancel pair per card per second. */
   undeliveredBackoff(): string | null {
     const recent = this.db.query(`SELECT status, receipt, updatedAt FROM scheduler_intents WHERE taskId = ? AND action IN ('dispatch','review')
       ORDER BY eventSeq DESC LIMIT 6`).all(this.task.id) as Pick<SchedulerIntent, "status" | "receipt" | "updatedAt">[];
@@ -356,7 +356,7 @@ class Card {
     const plan = planScheduler(autoSnapshot(this.db, this.task, this.opts));
     if (plan.kind === "escalate") return this.escalate(`${plan.code}：${plan.reason}`);
     if (plan.kind === "wait") return this.watch(plan);
-    if (plan.action === "verify" || plan.action === "retire") return this.out("waiting", `${plan.node} 由合并队列 / PM 收尾`);
+    if (plan.action === "verify" || plan.action === "retire") return this.out("waiting", `${plan.node} 由合并队列 / 收尾步骤（scheduler-retire.ts）处理`);
     const backoff = plan.action === "dispatch" || plan.action === "review" ? this.undeliveredBackoff() : null;
     if (backoff) return this.out("held", backoff);
     const intent = await this.plan(plan);

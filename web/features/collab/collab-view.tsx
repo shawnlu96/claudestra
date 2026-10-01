@@ -76,11 +76,10 @@ function MetricsBar({ m, connected, tr }: { m: Metrics; connected: boolean; tr: 
 function LoadState({ load, refetch, tr }: { load: ReturnType<typeof useCollab>["load"]; refetch: () => void | Promise<void>; tr: Tr }) {
   let body: React.ReactNode;
   if (load.status === "loading") body = <Empty icon="clock" title={tr("正在读取台账…")} />;
-  else if (load.status === "forbidden") body = <Empty icon="listTree" title={tr("这台设备没有读台账的权限")}>{tr("需要全部 agent 范围、带管理权限的设备。")}</Empty>;
-  else if (load.status === "error")
+  else if (load.status === "error" || (load.status === "ok" && load.error))
     body = (
-      <Empty icon="listTree" title={tr("读台账失败")}>
-        <div>{load.message}</div>
+      <Empty icon="listTree" title={tr("没取到，正在重试")}>
+        <div role="status">{load.status === "error" ? load.message : load.error}</div>
         <button type="button" className={s.ib} style={{ marginTop: 12 }} onClick={() => void refetch()}>{tr("重试")}</button>
       </Empty>
     );
@@ -167,7 +166,7 @@ export function CollabView({ project }: { project: string }) {
     return l ? lineAction(l).text : "";
   };
 
-  if (load.status !== "ok" || !ov!.exists || ov!.tasks.length === 0) return <LoadState load={load} refetch={refetch} tr={tr} />;
+  if (load.status !== "ok" || !ov!.exists || (ov?.tasks?.length ?? 0) === 0) return <LoadState load={load} refetch={refetch} tr={tr} />;
 
   const o = ov!, hv = view!;
   const m = metricsOf(o, hv.todayDone.length, agents.filter((a) => members.has(a.name) && a.status === "active").length);
@@ -201,6 +200,9 @@ export function CollabView({ project }: { project: string }) {
         {narrow && <button type="button" className={v.waitsM} onClick={() => select({ kind: "waits" })}>{tr("待你处理")} <b>{waits.length}</b></button>}
         {!narrow && <MetricsBar m={m} connected={connected} tr={tr} />}
       </div>
+      {load.error && <div role="status" className={s.retry}><span>{tr("没取到，正在重试")}</span>
+        <button type="button" className={s.ib} onClick={() => void refetch()}>{tr("重试")}</button>
+      </div>}
       {narrow ? (
         <>
           {dag.mobile(<MobileList ov={o} lines={lines} todayDone={hv.todayDone} now={now} actionText={actionText} onPick={pickTask} tr={tr} />)}

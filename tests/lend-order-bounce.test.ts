@@ -17,6 +17,7 @@ const conflict: MergeBounce = { cause: "conflict", prHead: H, mainHead: MAIN, ch
 const ciFail: MergeBounce = { cause: "ci_fail", prHead: H, mainHead: null,
   checks: [{ name: "typecheck + test + guard", link: "https://github.com/o/r/actions/runs/42" },
     { name: "web typecheck + lint", link: "https://github.com/o/r/actions/runs/43" }] };
+const updateFail: MergeBounce = { cause: "update_fail", prHead: H, mainHead: null, checks: [], error: "GitHub update refused" };
 const finding = { findingId: "race-1", family: "race", severity: "P1" as const, probe: "two concurrent writes" };
 const ctx = { actor: "scheduler", now: 1_000 };
 let db: Database;
@@ -42,7 +43,7 @@ beforeEach(() => {
 afterEach(() => closeLedger(":memory:"));
 
 describe("lent merge-bounce fix orders", () => {
-  for (const b of [conflict, ciFail]) {
+  for (const b of [conflict, ciFail, updateFail]) {
     test(`${b.cause}: the stored and rendered order carries the local work package instead of the passed report`, () => {
       bounceToFix(b);
       const o = offer();
@@ -59,8 +60,8 @@ describe("lent merge-bounce fix orders", () => {
       expect(o.wire.acceptance[1]).toContain("不推 main");
       expect(o.text).not.toContain("All checks pass");
       expect(o.text).not.toContain("逐条修上一轮审查");
-      expect(o.text).toContain(b.cause === "conflict" ? "合入最新 origin/main" : ciFail.checks[0]!.link);
-      expect(o.text).toContain(b.cause === "conflict" ? "解冲突" : ciFail.checks[1]!.name);
+      expect(o.text).toContain(b.cause === "conflict" ? "合入最新 origin/main" : b.cause === "update_fail" ? b.error! : ciFail.checks[0]!.link);
+      expect(o.text).toContain(b.cause === "conflict" ? "解冲突" : b.cause === "update_fail" ? "合入" : ciFail.checks[1]!.name);
       expect(parseOrderWire(JSON.parse(JSON.stringify(o.wire))).ok).toBe(true);
       expect(listLendOrders(db, "T1")[0]!.wire).toEqual(o.wire);
     });

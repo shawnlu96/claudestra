@@ -53,7 +53,7 @@ describe("stepLine", () => {
     expect(lineOf("T51").active).toEqual({ step: "fix", round: 0 }); // 老卡推出来的修也是委托对象
   });
 
-  test("显式派的步骤以库里为准；详情和总览是同一份", () => {
+  test("显式派的步骤以库里为准；总览是详情的投影（只留画小圆点的字段）", () => {
     assignStep(db, PM, { taskId: "T60", step: "write", executor: "agent-x", executorKind: "agent" });
     assignStep(db, PM, { taskId: "T60", step: "review", executor: "outer-codex@Sekai", executorKind: "peer" });
     toStage("T60", "review");
@@ -61,7 +61,8 @@ describe("stepLine", () => {
     expect(line.active).toEqual({ step: "review", round: 0 });
     expect(line.steps.map((s) => [s.step, s.executor, s.derived ?? false])).toEqual([["review", "outer-codex@Sekai", false], ["write", "agent-x", false]]);
     const d = taskDetail(db, P, "T60", 9_000)!;
-    expect(d.stepLine).toEqual(line);
-    expect(d.steps).toEqual(line.steps);
+    const dots = d.stepLine.steps.map((s) => ({ step: s.step, round: s.round, executor: s.executor, executorKind: s.executorKind, state: s.state, ...(s.derived ? { derived: true as const } : {}) }));
+    expect(line).toEqual({ ...d.stepLine, steps: dots });
+    expect(d.steps).toEqual(d.stepLine.steps);
   });
 });

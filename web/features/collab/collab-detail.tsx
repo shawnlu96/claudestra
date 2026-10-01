@@ -290,9 +290,13 @@ export function CollabDetail(props: {
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [close]);
-  const task = ov.tasks.find((t) => t.id === id);
-  // 今日完成的任务不在首页的线里：现算一条，详情照样有「现在」与用时
-  const line = props.line ?? (task ? lineOf(task, ov, new Map(ov.items.map((i) => [i.id, i])), now, tr) : null);
+  // 切卡后 useTaskDetail 要到 effect 里才回到加载态：这一帧的 load 还是上一张卡的，按 id 对上才用
+  const d = load.status === "ok" && load.d.task.id === id ? load.d : null;
+  const task = d?.task ?? ov.tasks?.find((t) => t.id === id);
+  // 已完成的卡在总览里只有摘要（没有目标句、步骤线）：用详情现算一条线；详情到之前不显示目标句，免得先闪事项的一句话
+  const completed = !!task && ["done", "verified", "cancelled"].includes(task.stage);
+  const fullLine = task ? lineOf(task, ov, new Map((ov.items ?? []).map((i) => [i.id, i])), now, tr) : null;
+  const line = completed ? (d ? fullLine : null) : props.line ?? fullLine;
 
   const panel = (
     <aside className={`${s.tokens} ${s.panel} ${narrow ? s.full : ""}`}>
@@ -308,8 +312,8 @@ export function CollabDetail(props: {
           <Icon name={narrow ? "arrowLeft" : "x"} size={15} />
         </button>
       </div>
-      {load.status === "ok" && line ? (
-        <Body d={load.d} line={line} action={props.action(line)} stream={line.agent ? props.actions.get(line.agent) : undefined}
+      {d && line ? (
+        <Body d={d} line={line} action={props.action(line)} stream={line.agent ? props.actions.get(line.agent) : undefined}
           running={props.reviewers} now={now} tr={tr} extra={props.extra} />
       ) : (
         <div className={s.pb}>{load.status === "error" ? tr("读详情失败：{m}", { m: load.message }) : tr("正在读取…")}</div>

@@ -107,7 +107,12 @@ describe("GET /ledger/:project", () => {
     const db = openLedger(dbPath);
     try {
       const all = listEvents(db, { project: "p" });
-      for (const t of body.tasks) expect(t.metrics).toEqual(taskMetrics(t, all, body.now));
+      // 总览只带首页要的几个计数（0 / null 不发），完整指标走单卡接口
+      expect(body.tasks.map((t: any) => t.metrics)).toEqual([{ reviewRounds: 2, p1: 1 }, { endTs: 600 }]);
+      for (const t of body.tasks) {
+        const detail = await (await get(`/ledger/p/tasks/${encodeURIComponent(t.id)}`)).json() as any;
+        expect(detail.task.metrics).toEqual(taskMetrics(detail.task, all, detail.now));
+      }
       expect(body.tasks[0].lastEvent.seq).toBe(all.filter((e) => e.target === "T1").at(-1)!.seq);
     } finally {
       closeLedger(dbPath);

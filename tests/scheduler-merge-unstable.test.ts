@@ -125,7 +125,7 @@ describe("i28-M7 merge driver treats UNSTABLE (CI still running) as waiting, not
     expect(f.row.phase).toBe("await_ci");
     await f.drive();
     expect(f.row.phase).toBe("merged");
-    expect(f.calls).toEqual(["inspect", "journal:await_ci", "inspect", "inspect", "journal:merging", "inspect", "merge", "inspect", "journal:merged"]);
+    expect(f.calls).toEqual(["inspect", "journal:await_ci", "inspect", "inspect", "inspect", "journal:merging", "merge", "inspect", "journal:merged"]);
   });
   test("final pre-merge check is not relaxed: CLEAN then UNSTABLE on re-inspect is unknown without merging", async () => {
     const f = fixture("await_ci", pr(), running({ checks: [{ name: "check", bucket: "pass" }] }));

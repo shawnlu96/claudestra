@@ -83,27 +83,35 @@ describe("视图", () => {
 
   test("总览：事项、本项目任务（不含别的项目）、meta 冻结状态", () => {
     const v = projectView(db, "p", 1000);
-    expect(v.items.map((i) => [i.id, i.ownerWords])).toEqual([["i1", "随时更新"]]);
+    // 事项只带网页画图要的三样，ownerWords / next / extra 不进总览
+    expect(v.items).toEqual([{ id: "i1", title: "台账", oneLine: "" }]);
     expect(v.tasks.map((t) => [t.id, t.stage, t.round])).toEqual([["T1", "merge", 2], ["T2", "done", 0]]);
     expect(v.meta.queueFrozen).toMatchObject({ frozen: true, reason: "等 T1 上线" });
   });
 
-  test("每个任务的指标与 ledger-metrics 直接算的一致；lastEvent 是该任务最后一条事件", () => {
+  test("详情的指标与 ledger-metrics 直接算的一致，总览只带其中的几个计数；lastEvent 是该任务最后一条事件的摘要", () => {
     const v = projectView(db, "p", 1000);
     const all = listEvents(db, { project: "p" });
     for (const t of v.tasks) {
-      expect(t.metrics).toEqual(taskMetrics(t, all, 1000));
-      expect(t.lastEvent).toEqual(all.filter((e) => e.target === t.id).at(-1)!);
+      const full = taskDetail(db, "p", t.id, 1000)!.task.metrics;
+      expect(full).toEqual(taskMetrics(taskDetail(db, "p", t.id, 1000)!.task, all, 1000));
+      // 0 / null 的计数不发；reviewWaitPendingMs 为 0 是真值（刚交付），照发
+      const kept = (k: string, x: unknown) => (k === "endTs" || k === "reviewWaitPendingMs" ? x !== null : ["reviewRounds", "p0", "p1"].includes(k) && x !== 0);
+      expect(t.metrics).toEqual(Object.fromEntries(Object.entries(full).filter(([k, x]) => kept(k, x))));
+      const last = all.filter((e) => e.target === t.id).at(-1)!;
+      const data = Object.fromEntries(Object.entries(last.data).filter(([k]) => k === "to" || k === "result"));
+      expect(t.lastEvent).toEqual({ seq: last.seq, ts: last.ts, actor: last.actor, target: last.target, kind: last.kind, text: last.text.split("\n")[0], data });
     }
-    expect(v.tasks[0].metrics).toMatchObject({ reviewRounds: 2, reworkCount: 1, p1: 1, p2: 3, reviewWaits: [150, 20] });
+    expect(taskDetail(db, "p", "T1", 1000)!.task.metrics).toMatchObject({ reviewRounds: 2, reworkCount: 1, p1: 1, p2: 3, reviewWaits: [150, 20] });
+    expect(v.tasks[0].metrics).toEqual({ reviewRounds: 2, p1: 1 });
   });
 
   test("stageSince 是进入当前阶段的时刻；lastReview 是最近一轮审查的摘要，没审过为 null", () => {
     const [t1, t2] = projectView(db, "p", 1000).tasks;
     expect(t1.stageSince).toBe(520);
     expect(t1.lastReview).toEqual({ round: 2, verdict: "pass", p0: 0, p1: 0, p2: 1, text: "", ts: 520 });
-    expect(t2.stageSince).toBe(600);
-    expect(t2.lastReview).toBeNull();
+    expect(taskDetail(db, "p", t2.id, 1000)!.task.stageSince).toBe(600);
+    expect(t2.lastReview).toBeUndefined();
   });
 
   test("stageSinceApprox：当前阶段由导入推断的时间开出来时为 true；之后真实推进一次就变回 false", () => {
@@ -200,7 +208,9 @@ describe("依赖边视图", () => {
     // T1 停在 merge：过审排队不算满足（code 要到 live），T4 仍被挡
     expect(v.deps.map((d) => [d.from, d.to, d.derived, d.effective])).toEqual([["T1", "T4", "active", "active"], ["T4", "T5", "waiting", "waiting"]]);
     expect(v.tasks.map((t) => [t.id, t.runnable, t.blockedBy])).toEqual([["T1", true, []], ["T2", false, []], ["T4", false, ["T1"]], ["T5", false, ["T4"]]]);
-    expect(v.tasks.find((t) => t.id === "T5")!.lastEvent).toMatchObject({ kind: "task", data: { op: "new" } });
+    const created = listEvents(db, { project: "p", target: "T5" }).find((e) => e.kind === "task")!;
+    expect(created.data).toMatchObject({ op: "new" });
+    expect(v.tasks.find((t) => t.id === "T5")!.lastEvent).toMatchObject({ kind: "task", seq: created.seq });
   });
 
   test("任务详情：进边 / 出边分开给；审查分叉现算", () => {

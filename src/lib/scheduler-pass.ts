@@ -26,6 +26,9 @@ import type { WorkerSession } from "./worker-session.js";
 import { withSupervisorHold } from "./agent-supervisor-hold.js";
 import { peerPrStep } from "./peer-pr-tick.js";
 import { autostartHooks, type AutostartHooks } from "./scheduler-autostart-deps.js";
+import { lendTakeoverStep } from "./lend-pr-takeover.js";
+import { takeoverGh } from "./lend-pr-takeover-gh.js";
+import { retireStep } from "./scheduler-retire-deps.js";
 
 type Manager = (...args: string[]) => Promise<Record<string, unknown>>;
 type Active = () => void;
@@ -51,6 +54,7 @@ export interface PassOpts {
   peerPr?: (active: Active, manager: Manager) => Promise<{ failed: PassResult["failed"] }>; // peer PR 自动审（i28-A2）；默认 peerPrStep，测试注入
   /** 自动交回 / 自动开卡（i28-A1，scheduler-autostart-deps.ts）：tests inject fakes; manager is this pass's guarded scheduler CLI. */
   autostart?: (active: Active, manager: Manager) => AutostartHooks;
+  retire?: typeof retireStep; // 收尾（i28-S2，scheduler-retire.ts）；测试注入
 }
 
 export interface PassResult { ran: boolean; failed: { taskId: string; error: string }[] }
@@ -120,6 +124,9 @@ export async function schedulerPass(db: Database | null, config: SchedulerConfig
         failed.push(...(await schedulerAutoTick(db, config.projects, deps, autoPace)).failed);
         failed.push(...(await auto.start(config, autoPace))); // 开卡在 tick 之后，每轮最多一张，tick 用完预算就不开
       }
+      failed.push(...(await lendTakeoverStep(db, { manager, gh: takeoverGh(guard(active, runBounded)), now: Date.now })).failed); // 出借写单卡在 publishing：按推送分支接管
+      // 收尾不看 autoDispatch（关的是派新活，不是收旧摊子），自带保底份额，开卡吃光预算也轮得到
+      failed.push(...(await (opts.retire ?? retireStep)(db, config, manager, active, held, pace.phase())));
     }
     if (opts.lend) failed.push(...(await opts.lend(active, held)).failed.map((f) => ({ taskId: `lend ${f.orderId}`, error: f.error })));
     return { ran: true, failed };

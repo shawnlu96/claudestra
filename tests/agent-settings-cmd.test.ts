@@ -3,20 +3,23 @@
  * 状态、tmux socket 指到临时目录，bridge 指到没人听的端口，DISCORD_CHANNEL_ID 去掉（按终端 owner 跑），碰不到线上。
  * kill 只是停止、不删文件：没有窗口时它直接拒绝，这里不测；「kill 不删」由 manager.ts 里不再有调用保证（git log -S removeAgentSettings）。
  */
-import { describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { afterAll, describe, expect, test } from "bun:test";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
 const dir = mkdtempSync(join(tmpdir(), "agent-settings-cmd-"));
 const state = join(dir, "state");
+// socket 路径有长度上限（macOS 104 字节），preload 的临时根让 TMPDIR 更长了，tmux socket 放短路径
+const runtime = mkdtempSync("/tmp/cstra-asc-");
+afterAll(() => rmSync(runtime, { recursive: true, force: true }));
 const settings = (name: string) => join(state, "agent-settings", `${name}.json`);
 /** 本机技能库里没有的名字：子进程读的是真 HOME 的技能库，用真技能名会碰上同名的同步技能（lib/agent-skills.ts skillWrites） */
 const PROBE = "t17-probe-skill";
 
 async function manager(...args: string[]): Promise<any> {
   const env: Record<string, string | undefined> = {
-    ...process.env, CLAUDESTRA_STATE_DIR: state, CLAUDESTRA_RUNTIME_DIR: join(dir, "run"), BRIDGE_URL: "ws://127.0.0.1:9", BRIDGE_PORT: "9",
+    ...process.env, CLAUDESTRA_STATE_DIR: state, CLAUDESTRA_RUNTIME_DIR: runtime, BRIDGE_URL: "ws://127.0.0.1:9", BRIDGE_PORT: "9",
   };
   delete env.DISCORD_CHANNEL_ID;
   const proc = Bun.spawn([process.execPath, "--no-env-file", resolve(import.meta.dir, "../src/manager.ts"), ...args], { env, stdout: "pipe", stderr: "pipe" });
@@ -28,7 +31,6 @@ async function manager(...args: string[]): Promise<any> {
 describe("manager 命令层：设置文件的生命周期", () => {
   test("skill-toggle 写文件 → rename 跟着挪 → remove 删掉", async () => {
     mkdirSync(state, { recursive: true });
-    mkdirSync(join(dir, "run"), { recursive: true });
     const agent = { cwd: dir, status: "stopped", channelId: "local-1", project: "", purpose: "", created: "", notes: "" };
     writeFileSync(join(state, "registry.json"), JSON.stringify({ socket: "", agents: { "agent-x": agent } }));
     expect((await manager("skill-toggle", "x", PROBE, "off")).ok).toBe(true);

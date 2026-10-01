@@ -20,6 +20,7 @@ import { acpPort, messagePort, type RegistryRow, type StillActive } from "./sche
 import { runtimeFamily } from "./scheduler-auto-review.js";
 import { SchedulerStopped, whileOwned } from "./scheduler-maintenance.js";
 import { peerPrHeadMissing, peerPrRepoDir } from "./peer-pr-hold.js";
+import { lendReviewDir } from "./lend-pr-takeover-review.js";
 import { readEffectiveBorrow } from "./scheduler-pool-borrow.js";
 import { schedulerManagerWith } from "./scheduler-service.js";
 import { encodeLease, SCHEDULER_LEASE_ENV, type SchedulerLease } from "./scheduler-lease-env.js";
@@ -59,7 +60,7 @@ const realOr = (p: string): string => { try { return realpathSync.native(p); } c
 async function createReviewer(env: Env, task: LedgerTask, family: AuthorFamily): Promise<EnsureResult> {
   const { db, registryRow } = env;
   const author = boundRef(db, task.id, "author");
-  const authorDir = peerPrRepoDir(task) ?? (author && registryRow(author.agent)?.cwd);
+  const authorDir = peerPrRepoDir(task) ?? (author && registryRow(author.agent)?.cwd) ?? (await lendReviewDir(db, task, env.git));
   if (!authorDir) return { kind: "manual", reason: "找不到执行者的工作目录，建不了审查 session" };
   const opened = await openReviewWorktree(authorDir, checkoutOf(env, task.id), task.headSHA, env.git);
   if ("manual" in opened) return { kind: "manual", reason: opened.manual };

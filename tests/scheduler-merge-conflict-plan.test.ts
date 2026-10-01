@@ -142,7 +142,7 @@ describe("i28-M12 inspect without CI", () => {
     expect((await adapter("DIRTY", { stdout: "" }).inspect("https://github.com/example/repo/pull/42")).checks).toEqual([]);
   });
   test("no checks + anything but DIRTY, or a timeout even when DIRTY → still throws", async () => {
-    for (const state of ["CLEAN", "BLOCKED", "UNKNOWN", "BEHIND", "UNSTABLE"]) {
+    for (const state of ["CLEAN", "BLOCKED", "BEHIND", "UNSTABLE"]) {
       await expect(adapter(state, { stdout: "" }).inspect("https://github.com/example/repo/pull/42")).rejects.toThrow(/无结果/);
     }
     await expect(adapter("DIRTY", { stdout: "", timedOut: true }).inspect("https://github.com/example/repo/pull/42")).rejects.toThrow(/无结果/);

@@ -38,7 +38,7 @@ describe("T68 merge driver", () => {
     await expect(driveMerge(f.row, f.ops, f.advance, () => {
       if (!active) throw new SchedulerStopped("lease lost");
     })).rejects.toThrow(/lease lost/);
-    expect(f.row.phase).toBe("merging");
+    expect(f.row.phase).toBe("await_ci");
     expect(f.calls).not.toContain("merge");
     expect(f.calls).not.toContain("journal:unknown");
   });
@@ -69,7 +69,7 @@ describe("T68 merge driver", () => {
     await driveMerge(f.row, f.ops, f.advance);
     await driveMerge(f.row, f.ops, f.advance);
     expect(f.row.phase).toBe("merged");
-    expect(f.calls).toEqual(["inspect", "journal:await_ci", "inspect", "journal:merging", "inspect", "merge", "inspect", "journal:merged"]);
+    expect(f.calls).toEqual(["inspect", "journal:await_ci", "inspect", "inspect", "journal:merging", "merge", "inspect", "journal:merged"]);
     expect(f.row.reason).toContain("待 PM 部署");
     const settled = f.calls.length;
     await driveMerge(f.row, f.ops, f.advance);
@@ -114,7 +114,7 @@ describe("T68 merge driver", () => {
     f.snapshot = pr({ mergeState: "UNKNOWN" });
     await driveMerge(f.row, f.ops, f.advance);
     expect(f.row.phase).toBe("ready");
-    expect(f.calls).toEqual(["inspect"]);
+    expect(f.calls).toEqual(["inspect", "journal:ready"]);
   });
   test("restart in merging reconciles; an open PR freezes without retry", async () => {
     const f = fixture({ ...base, phase: "merging", rev: 3 });

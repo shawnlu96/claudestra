@@ -10,7 +10,7 @@ import type { LedgerEvent, LedgerTask } from "./ledger-stages.js";
 import { listEvents } from "./ledger-store.js";
 import { wireFindings } from "./order-findings.js";
 import { sanitizeForeign } from "./order-wire-render.js";
-import type { ReviewFinding } from "./scheduler-review.js";
+import { currentReviewFacts, type ReviewFinding, type ReviewRead } from "./scheduler-review.js";
 
 export const UI_APPROVED = "ui_approved", UI_REJECTED = "ui_rejected";
 export interface PmUiGate { state: "none" | "approved" | "rejected"; head?: string; specRev?: number; round?: number; screenshotsDigest?: string; seq?: number; note?: string }
@@ -28,23 +28,42 @@ export function projectPmUiGate(db: Database, task: LedgerTask, events: readonly
     ...(typeof d.note === "string" ? { note: d.note } : {}) };
 }
 
-export type UiFix = { reportPath: string; findings: ReviewFinding[]; fallbackWarning: null };
+export type UiFix = { reportPath: string; findings: ReviewFinding[]; fallbackWarning: string | null; codeReportPath?: string };
+
+/** Follow only paired fix→blocked→fix pauses; another entry source or binding belongs to a different fix. */
+function reviewFixEntry(task: LedgerTask, events: readonly LedgerEvent[]): LedgerEvent | null {
+  let at = "fix";
+  for (let i = events.length - 1; i >= 0; i--) {
+    const e = events[i]!;
+    if (e.kind !== "stage") continue;
+    const d = e.data;
+    if (d.to !== at || d.round !== task.round || d.specRev !== task.specRev) return null;
+    if (at === "fix" && d.from === "blocked") { at = "blocked"; continue; }
+    if (at === "blocked" && d.from === "fix" && d.stageBefore === "fix") { at = "fix"; continue; }
+    return at === "fix" && d.from === "review" ? e : null;
+  }
+  return null;
+}
 
 /**
- * The fix order after PM's ui-reject: PM's words are the one P1 finding. Only the rejection that sent this round to fix counts
- * (same round, recorded before the review→fix move); the executor may already be re-shooting, so head / digest are not compared.
+ * Only the rejection that opened this fix counts (same round / specRev, before review→fix, across pauses). The executor may
+ * already be re-shooting, so head / digest may change. Code P1s keep their own currentReviewFacts binding and precede the entry.
  * The planner's full-text order (scheduler-ui-gate.ts) and take_order (order-take.ts) both read it here.
  */
-export function rejectFix(task: LedgerTask, template: string | undefined, events: readonly LedgerEvent[], g: PmUiGate | undefined): UiFix | null {
-  if (template !== "ui" || task.stage !== "fix" || g?.state !== "rejected" || g.round !== task.round || g.seq === undefined) return null;
-  const entered = events.findLast((e) => e.kind === "stage" && e.data.to === "fix");
-  if (!entered || entered.data.from !== "review" || entered.seq < g.seq) return null;
-  return { reportPath: `台账事件 #${g.seq}（PM 截图验收意见：${task.id}）`, fallbackWarning: null,
-    findings: [{ findingId: `ui-screenshot-${g.seq}`, family: "ui_screenshot", severity: "P1", probe: g.note ?? "PM 未通过前后截图" }] };
+export function rejectFix(task: LedgerTask, template: string | undefined, events: readonly LedgerEvent[], g: PmUiGate | undefined, read: ReviewRead): UiFix | null {
+  if (template !== "ui" || task.stage !== "fix" || g?.state !== "rejected" || g.round !== task.round ||
+    g.specRev !== task.specRev || g.seq === undefined) return null;
+  const entered = reviewFixEntry(task, events);
+  if (!entered || entered.seq <= g.seq) return null;
+  const code = read.kind === "facts" && read.facts.eventSeq < entered.seq && read.facts.findings.some((f) => f.severity === "P1") ? read.facts : null;
+  const source = `台账事件 #${g.seq}（PM 截图验收意见：${task.id}）`;
+  return { reportPath: code ? `${code.reportPath}\n${source}` : source, fallbackWarning: null, ...(code ? { codeReportPath: code.reportPath } : {}),
+    findings: [{ findingId: `ui-screenshot-${g.seq}`, family: "ui_screenshot", severity: "P1", probe: g.note ?? "PM 未通过前后截图" },
+      ...(code?.findings ?? [])] };
 }
 
 export function uiRejectFixFor(db: Database, task: LedgerTask, events: readonly LedgerEvent[], template: string | undefined): UiFix | null {
-  return rejectFix(task, template, events, projectPmUiGate(db, task, events));
+  return rejectFix(task, template, events, projectPmUiGate(db, task, events), currentReviewFacts(task, events));
 }
 
 /**
@@ -61,9 +80,10 @@ export const uiNoteBytes = (note: string): number => Buffer.byteLength(sanitizeF
  * form the peer exit measures (order-wire-render.ts), else a long Chinese note (6000 bytes) refuses the pooled order.
  * Null = no PM rejection sent this round to fix.
  */
-export function uiRejectLend(db: Database, task: LedgerTask): { findings: ReviewFinding[]; report: string } | null {
+export function uiRejectLend(db: Database, task: LedgerTask): { findings: ReviewFinding[]; report: string; codeReportPath?: string } | null {
   const fix = uiRejectFixFor(db, task, listEvents(db, { project: task.project, target: task.id }), getWorkflow(db, task.id)?.template);
   if (!fix) return null;
   return { findings: wireFindings(fix.findings.map((f) => ({ ...f, probe: sanitizeForeign(f.probe) }))),
-    report: `# PM 截图验收未通过\n\n来源：${fix.reportPath}\n\n${fix.findings[0].probe}` };
+    report: `# PM 截图验收未通过\n\n来源：${fix.reportPath}\n\n${fix.findings[0].probe}`,
+    ...(fix.codeReportPath ? { codeReportPath: fix.codeReportPath } : {}) };
 }
