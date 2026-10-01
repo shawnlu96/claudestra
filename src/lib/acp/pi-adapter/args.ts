@@ -6,18 +6,19 @@
  * tests/pi-acp-args.test.ts（拿上游 parseArgs 原样核对 mode / sessionId / extensions）。
  */
 import { fileURLToPath } from "node:url";
+import { isPiThinkingLevel, PI_THINKING_LEVELS } from "../../pi-launch.js";
 
 export const MCP_MOUNT_EXTENSION = fileURLToPath(new URL("./mcp-mount.ts", import.meta.url));
 
-/** value：后面跟一个值；repeat：可出现多次；plain：pi 不认它（扩展的选项），值以 - 或 @ 开头时 pi 不吞值，后一个参数会被当成选项 */
+/** value：后面跟一个值；repeat：可出现多次（开关重复给和给一次一样）；plain：pi 不认它（扩展的选项），值以 - 或 @ 开头时 pi 不吞值，后一个参数会被当成选项 */
 type FlagSpec = { value: boolean; repeat?: boolean; plain?: boolean };
 
 const BASE_FLAGS: Record<string, FlagSpec> = {
-  "--approve": { value: false },
-  "--no-approve": { value: false },
-  "--no-extensions": { value: false },
-  "--no-skills": { value: false },
-  "--no-prompt-templates": { value: false },
+  "--approve": { value: false, repeat: true },
+  "--no-approve": { value: false, repeat: true },
+  "--no-extensions": { value: false, repeat: true },
+  "--no-skills": { value: false, repeat: true },
+  "--no-prompt-templates": { value: false, repeat: true },
   "--extension": { value: true, repeat: true },
   "--skill": { value: true, repeat: true },
   "--tools": { value: true },
@@ -55,15 +56,27 @@ function parsePiBaseArgs(args: readonly string[]): PiBaseArg[] {
     if (!spec) throw new Error(`适配器不收这个 pi 参数：${JSON.stringify(raw)}（只收能力档 / 模型类选项，不收正文、文件、--、--x=值）`);
     if (!spec.repeat && out.some((a) => a.flag === flag)) throw new Error(`pi 的 ${flag} 只能给一次（pi 以最后一个为准，前面的会静默作废）`);
     if (!spec.value) {
+      const opposite = flag === "--approve" ? "--no-approve" : flag === "--no-approve" ? "--approve" : "";
+      if (opposite && out.some((a) => a.flag === opposite)) throw new Error("pi 的 --approve 和 --no-approve 同时给了（pi 以最后一个为准）");
       out.push({ flag });
       continue;
     }
     const value = args[++i];
     if (value === undefined || !value.trim()) throw new Error(`pi 的 ${flag} 缺值（缺值会吞掉适配器排在后面的参数）`);
     if (spec.plain && /^[-@]/.test(value)) throw new Error(`pi 的 ${flag} 的值不能以 - 或 @ 开头（pi 不会把它当值）：${value}`);
+    if (flag === "--thinking" && !isPiThinkingLevel(value)) throw new Error(`pi 的 --thinking 只认 ${PI_THINKING_LEVELS.join(" / ")}（收到 ${value}，pi 会只警告、照默认档跑）`);
     out.push({ flag, value });
   }
   return out;
+}
+
+/** pi 实际拿到的工具白名单 / 黑名单（同 pi parseArgs：按逗号切、去空白、丢空项）；没给就是 undefined */
+export function piToolLists(baseArgs: readonly string[]): { tools?: string[]; excludeTools?: string[] } {
+  const list = (flag: string) => {
+    const v = parsePiBaseArgs(baseArgs).find((a) => a.flag === flag)?.value;
+    return v === undefined ? undefined : v.split(",").map((s) => s.trim()).filter((n) => n.length > 0);
+  };
+  return { tools: list("--tools"), excludeTools: list("--exclude-tools") };
 }
 
 export function piRpcArgs(sessionId: string, baseArgs: readonly string[] = []): string[] {

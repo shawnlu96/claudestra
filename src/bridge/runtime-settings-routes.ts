@@ -1,6 +1,6 @@
 /**
  * 非 Claude Code 运行时的模型 / 档位切换（从 api-routes 拆出来：那个文件只许变小）。
- * - Pi：GET /pi-models 读 ~/.pi/agent/models.json；POST /agents/:name/pi-settings 注入扩展命令
+ * - Pi：GET /pi-models 读 ~/.pi/agent/models.json；POST /agents/:name/pi-settings 注入扩展命令（transport=acp 的走宿主，同 Codex）
  * - Codex：GET /codex-models 读 `codex debug models`；POST /agents/:name/codex-settings 写 registry 后重启
  * Claude Code 的 /claude-settings 仍在 api-routes（与 permission-watcher 的代按逻辑缠在一起）。
  * runManager 由调用方注入：它在 management.ts（hub），bridge 模块不能反向 import。
@@ -46,8 +46,14 @@ export async function handleRuntimeSettingsRoutes(
   if (reg.runtime !== set[2]) {
     return apiJson(400, { ok: false, error: `agent "${canonical}" 不是 ${set[2] === "pi" ? "Pi" : "Codex"} agent` });
   }
-  if (set[2] === "codex" && reg.channelId && isAcpChannel(reg.channelId)) return acpSettings(canonical, reg.channelId, model, effort, runManager); // ACP：会话里改，不重启
-  return set[2] === "pi" ? piSettings(canonical, model, effort) : codexSettings(canonical, reg, model, effort, runManager);
+  const route = settingsRoute(set[2] as "pi" | "codex", reg.channelId);
+  if (route === "acp") return acpSettings(canonical, reg.channelId!, model, effort, runManager);
+  return route === "pi" ? piSettings(canonical, model, effort) : codexSettings(canonical, reg, model, effort, runManager);
+}
+
+/** 走哪条：ACP 宿主连着 = 会话里改、不重启（Codex / Pi 同一条）；否则 Pi 注入扩展命令、Codex 写 registry 后重启。tests/pi-acp-runtime.test.ts */
+export function settingsRoute(runtime: "pi" | "codex", channelId: string | undefined): "acp" | "pi" | "codex" {
+  return channelId && isAcpChannel(channelId) ? "acp" : runtime;
 }
 
 // ── Pi ──────────────────────────────────────────────────────────────────────
@@ -123,8 +129,8 @@ async function codexModels(principal: Principal): Promise<Response> {
 }
 
 /**
- * transport=acp 的 Codex：经宿主调 session/set_config_option，会话里直接改、回合进行中也能改（ACP 规范允许），不重启。
- * 校验交给会话自己的 configOptions（宿主那边 configRefusal）——本机 `codex debug models` 的目录对不上 stub 的模型。
+ * transport=acp 的 Codex / Pi：经宿主调 session/set_config_option，会话里直接改、回合进行中也能改（ACP 规范允许），不重启。
+ * 校验交给会话自己的 configOptions（宿主那边 configRefusal）——本机的模型目录（codex debug models / pi 的 models.json）对不上会话实际可选的。
  * 改成了再写 registry：宿主重起 / agent 重启时照样按它补上。
  */
 async function acpSettings(canonical: string, channelId: string, model: string, effort: string, runManager: RunManager): Promise<Response> {

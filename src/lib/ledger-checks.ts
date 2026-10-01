@@ -201,6 +201,8 @@ export interface WriteCtx {
   dedupKey?: string;
   /** 只对导入身份生效：这次的事件时间是推断的，事件标 approxTime（事项的创建时间老台账里没有） */
   approxTime?: boolean;
+  /** 自动开卡的 claim 授权：只由 ledger-autostart-step.ts 在同一事务里核过 claim 后放入，钩子见 ledger-autostart-grant.ts autostartGrant */
+  autostart?: { claim: number; featureId: string; key: string; taskId: string };
 }
 
 export interface WriteResult<T> {

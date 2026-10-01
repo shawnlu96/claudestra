@@ -57,6 +57,13 @@ describe("Pi 适配器 · 参数经 pi 0.99.2 parseArgs 实际解析", () => {
     expect(() => piRpcArgs("owned", ["--session-dir", "/elsewhere"])).toThrow("--session-dir");
   });
 
+  test("--thinking 只收 pi 认的档位：无效档位 pi 只发警告、照默认档跑，适配器直接拒", () => {
+    expect(parseArgs(["--thinking", "bogus"]).diagnostics).toEqual([expect.objectContaining({ type: "warning" })]);
+    expect(() => piRpcArgs("owned", ["--thinking", "bogus"])).toThrow("--thinking");
+    expect(() => piRpcArgs("owned", ["--thinking", "HIGH"])).toThrow("--thinking");
+    for (const level of ["off", "minimal", "low", "medium", "high", "xhigh", "max"]) expect(piSees(piRpcArgs("owned", ["--thinking", level]))).toEqual(SAFE);
+  });
+
   test("正常的能力档 / 模型参数：pi 看到的正是适配器要的", () => {
     for (const base of [
       [], ["--approve", "--no-extensions", "--no-skills", "--no-prompt-templates"], ["-ne", "-e", "npm:pkg", "-e", "/x/ext.ts", "--skill", "/s"],
@@ -69,7 +76,7 @@ describe("Pi 适配器 · 参数经 pi 0.99.2 parseArgs 实际解析", () => {
 
   test("各种边缘写法：要么拒，要么 pi 解析结果安全（随机组合 2000 次）", () => {
     const pool = ["--", "-e", "--extension", "--tools", "--exclude-tools", "--mcp-config", "--name", "-n", "--session-dir", "--session-id", "--mode",
-      "--print", "-p", "@f", "msg", "--x=1", "--tools=read", "--unknown", "-z", "--no-extensions", "--approve", "-", "---x", "", " ", "/abs", "-ne", "--model"];
+      "--print", "-p", "@f", "msg", "--x=1", "--thinking", "bogus", "high", "--tools=read", "--unknown", "-z", "--no-extensions", "--approve", "-", "---x", "", " ", "/abs", "-ne", "--model"];
     let seed = 7;
     const rnd = (n: number) => ((seed = (seed * 1103515245 + 12345) % 2 ** 31), seed % n);
     let accepted = 0;

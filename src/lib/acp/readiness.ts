@@ -1,8 +1,10 @@
-/** Codex 切 ACP 前的共同闸门：迁移、create、restart 和 doctor 使用同一判据。 */
+/** 切 ACP 前的共同闸门：Codex 的迁移、create、restart、doctor 用同一判据；Pi 只看 pi 版本（checkAcpReadyFor）。 */
 import { resolveCodexBinary } from "../codex-launch.js";
 import { defaultRunner, type Runner } from "../codex-thread.js";
 import { isSandbox } from "../sandbox.js";
 import { probeClaudeVersion } from "../claude-binary.js";
+import { piBinName } from "../pi-env.js";
+import { isNewerVersion } from "../update-hints.js";
 import { codexAcpInstalled, codexPairsWithAdapter, reconcileCodexAcp } from "./install.js";
 import { repoStubPath } from "./stub.js";
 
@@ -57,4 +59,20 @@ export async function checkAcpReady(autoInstall = false, deps: AcpReadyDeps = {}
     return cli;
   }
   return { ok: false, reason: installed.error };
+}
+
+/** Pi 走 acp 的最低版本：内置 MCP（-e builtin:mcp）和扩展的 registerMcpServer 都是 0.99.0 才有（pi CHANGELOG） */
+const PI_ACP_MIN_VERSION = "0.99.0";
+
+/** Pi 的适配器在仓库里、不用装；只要 pi 在、版本够。读不出版本号（格式变了）按够了放行，真起不来宿主会报 */
+export async function probePiAcp(run: Runner = defaultRunner): Promise<AcpReady> {
+  const r = await run([piBinName(), "--version"], 8_000);
+  if (!r.ok) return { ok: false, reason: `找不到 pi 或它起不来（${piBinName()}；可用 PI_BIN 指定路径）` };
+  const v = `${r.out}\n${r.err}`.match(/(\d+\.\d+\.\d+)/)?.[1];
+  return v && isNewerVersion(PI_ACP_MIN_VERSION, v) ? { ok: false, reason: `pi ${v} 太旧：acp 要 ${PI_ACP_MIN_VERSION} 以上（内置 MCP）` } : { ok: true };
+}
+
+/** 按运行时分派的就绪闸（transport 命令用）：pi 看版本，其余照旧走 Codex 的判据 */
+export function checkAcpReadyFor(runtime: string | undefined, autoInstall = false, deps: AcpReadyDeps = {}): Promise<AcpReady> {
+  return runtime === "pi" ? probePiAcp(deps.run) : checkAcpReady(autoInstall, deps);
 }
