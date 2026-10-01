@@ -11,6 +11,7 @@ import { useLendT, useRemainingText } from "./lend-i18n";
 import { LendIcon, type LendIconName } from "./lend-icons";
 import { formDefaults, grantStatus, remainingMs, splitRemaining, type GrantForm as Form, type GrantStatus, type GrantView } from "./lend-model";
 import { useLendState } from "./lend-state";
+import { LendClaudeLogin } from "./lend-claude-login";
 import { LentOrders } from "./lent-orders";
 import css from "./lend.module.css";
 
@@ -79,6 +80,7 @@ export function LendPanel() {
           </button>
         )}
       </div>
+      <LendClaudeLogin />
       {form && (
         <GrantForm key={JSON.stringify(form)} peers={data.peers} maxDays={data.maxDays} shellSentence={data.shellSentence} initial={form}
           onCancel={() => setForm(null)} onFail={() => void load()} onDone={(peer) => { setForm(null); setFresh(peer); void load(); }} />

@@ -28,7 +28,7 @@ export const STOPPING_POLL_MS = 2_000;
 
 export const isLive = (o: Pick<OrderView, "live">): boolean => o.live;
 
-export interface GrantForm { peer: string; repos: string[]; codex: number; ordersPerDay: number; days: number }
+export interface GrantForm { peer: string; repos: string[]; codex: number; claude?: number; ordersPerDay: number; days: number }
 
 /** 到期档位：1 / 3 / 7 天里不超过服务端 maxDays 的；maxDays 比 1 还小就只给 maxDays 一档 */
 export function dayChoices(maxDays: number): number[] {
@@ -43,6 +43,7 @@ export function formDefaults(maxDays: number, peers: readonly { name: string }[]
     peer: from?.peer ?? peers[0]?.name ?? "",
     repos: from ? [...from.repos] : [],
     codex: from?.families.codex ?? DEFAULT_CODEX,
+    ...(from?.families.claude === undefined ? {} : { claude: from.families.claude }),
     ordersPerDay: from?.ordersPerDay ?? DEFAULT_PER_DAY,
     days: days[days.length - 1],
   };
@@ -55,13 +56,14 @@ export function addRepos(list: readonly string[], input: string): string[] {
   return out;
 }
 
-/** 请求体：角色不带（bridge 固定 review），write 无从出现；到期按「N 天」交给 CLI 以它的时钟算 */
-export function grantBody(f: GrantForm, maxDays: number): { peer: string; repos: string[]; codex: number; ordersPerDay: number; until: string } {
+/** 请求体：角色由 CLI 沿用；有 initial 时省略未改的名额，防止锁外旧值覆盖并发授权。到期交给 CLI 的时钟算 */
+export function grantBody(f: GrantForm, maxDays: number, initial?: GrantForm): { peer: string; repos: string[]; codex?: number; claude?: number; ordersPerDay: number; until: string } {
   const days = Math.min(f.days, Math.max(1, Math.floor(maxDays)));
-  return { peer: f.peer, repos: [...f.repos], codex: f.codex, ordersPerDay: f.ordersPerDay, until: `${days}d` };
+  return { peer: f.peer, repos: [...f.repos], ...(initial?.codex === f.codex ? {} : { codex: f.codex }),
+    ...(f.claude === undefined || f.claude === initial?.claude ? {} : { claude: f.claude }), ordersPerDay: f.ordersPerDay, until: `${days}d` };
 }
 
-export const canSubmit = (f: GrantForm): boolean => !!f.peer && f.repos.length > 0 && f.codex > 0 && f.ordersPerDay > 0;
+export const canSubmit = (f: GrantForm): boolean => !!f.peer && f.repos.length > 0 && f.codex >= 0 && (f.claude ?? 0) >= 0 && f.ordersPerDay > 0;
 
 export type GrantStatus = "ok" | "paused" | "expired" | "invalid";
 export function grantStatus(g: GrantView, now: number): GrantStatus {

@@ -93,7 +93,7 @@ export function GrantForm({ peers, maxDays, shellSentence, initial, onDone, onFa
     setBusy(true);
     setErr("");
     try {
-      await postGrant(grantBody(form, maxDays));
+      await postGrant(grantBody(form, maxDays, initial));
       onDone(form.peer);
     } catch (e) {
       setErr(e instanceof ApiError || e instanceof Error ? e.message : String(e));
@@ -123,7 +123,7 @@ export function GrantForm({ peers, maxDays, shellSentence, initial, onDone, onFa
       <div className="grid grid-cols-2 gap-2 text-xs">
         <label className="flex items-center gap-2">
           <span className="w-20 shrink-0 text-base-content/60">codex {t("名额")}</span>
-          <input type="number" min={1} className="input input-sm w-full min-w-0" value={f.codex}
+          <input type="number" min={0} className="input input-sm w-full min-w-0" value={f.codex}
             onChange={(e) => setF({ ...f, codex: Number(e.target.value) })} />
         </label>
         <label className="flex items-center gap-2">
@@ -132,6 +132,12 @@ export function GrantForm({ peers, maxDays, shellSentence, initial, onDone, onFa
             onChange={(e) => setF({ ...f, ordersPerDay: Number(e.target.value) })} />
         </label>
       </div>
+
+      <label className="flex items-center gap-2 text-xs">
+        <span className="w-20 shrink-0 text-base-content/60">Claude {t("名额")}</span>
+        <input type="number" min={0} max={16} className="input input-sm min-w-0 flex-1" value={f.claude ?? 0}
+          onChange={(e) => setF({ ...f, claude: Number(e.target.value) })} />
+      </label>
 
       <div className="flex items-center gap-2 text-xs">
         <span className="w-20 shrink-0 text-base-content/60">{t("到期")}</span>

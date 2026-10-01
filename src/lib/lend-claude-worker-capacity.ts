@@ -4,13 +4,15 @@ import type { LendEntry } from "./lend-config.js";
 import { LEASED_STATES, openSlots, ordersToday } from "./lend-journal.js";
 import { pausedUntil } from "./lend-health.js";
 
+import { readClaudeLendToken } from "./lend-claude-token.js";
+
 export const CLAUDE_LEND_TOKEN = "CLAUDE_CODE_OAUTH_TOKEN";
 let warned = false;
 
 export function claudeLendSlots(entry: LendEntry | undefined, env = process.env, log = console.error): number {
   const slots = entry?.families.claude ?? 0;
   if (!slots) return 0;
-  if (env[CLAUDE_LEND_TOKEN]?.trim()) { warned = false; return slots; }
+  if (readClaudeLendToken(env)) { warned = false; return slots; }
   if (!warned) {
     log("[lend] Claude 位不可用：请运行 claude setup-token，将 CLAUDE_CODE_OAUTH_TOKEN 配给出借调度服务，再重授 --claude N；不读取本机 ~/.claude 登录。");
     warned = true;
