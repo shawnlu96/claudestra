@@ -1,4 +1,5 @@
 /** Authors and reviewers serialize count→create under one renewable, fail-closed machine lock. */
+import { codexQuotaWait, type CodexQuotaReader } from "./scheduler-local-runtime-quota.js";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { readFileSync } from "node:fs";
 import { acquireLock, type LockHandle } from "./file-lock.js";
@@ -6,7 +7,7 @@ import { statePath } from "./paths.js";
 import { REGISTRY_PATH, normalizeRegistryAgents, type RegistryAgent } from "./registry.js";
 
 const LOCAL_CODEX_LIMIT = 6;
-export interface CodexSlotOptions { registryPath?: string; lockPath?: string }
+export interface CodexSlotOptions { registryPath?: string; lockPath?: string; codexQuota?: CodexQuotaReader; checkQuota?: boolean }
 const owned = new AsyncLocalStorage<LockHandle>();
 export type SlotWait = { kind: "wait"; reason: string };
 const wait = (reason: string): SlotWait => ({ kind: "wait", reason });
@@ -32,6 +33,8 @@ export async function withCodexSlot<T>(run: () => Promise<T>, opts: CodexSlotOpt
     try { n = count(opts.registryPath ?? REGISTRY_PATH); }
     catch (e) { return wait(`无法核实 Codex 全机会话数，等待：${(e as Error).message}`); }
     if (n >= LOCAL_CODEX_LIMIT) return wait(`Codex 全机会话已达 ${LOCAL_CODEX_LIMIT}，等待空槽`);
+    const quotaWait = opts.checkQuota ? await codexQuotaWait(opts.codexQuota) : null;
+    if (quotaWait) return quotaWait;
     if (!lock.held()) return wait("Codex 全机槽锁已失租，等待重试");
     return await owned.run(lock, run);
   } finally { lock.release(); }

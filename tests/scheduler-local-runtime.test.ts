@@ -1,3 +1,5 @@
+import { codexQuotaWait } from "../src/lib/scheduler-local-runtime-quota.js";
+import { unknownQuota, type InventoryQuota } from "../src/lib/ai-quota.js";
 import { afterEach, expect, test } from "bun:test";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -23,7 +25,7 @@ function fixture(runtime?: string, n = 0) {
   writeFileSync(configPath, JSON.stringify(doc));
   const agents = Object.fromEntries(Array.from({ length: n }, (_, i) => [`agent-${i}`, { runtime: "codex", status: "active", projectId: `p${i}` }]));
   writeFileSync(registryPath, JSON.stringify({ agents }));
-  return { configPath, registryPath, lockPath, doc, dir };
+  return { configPath, registryPath, lockPath, doc, dir, codexQuota: async () => unknownQuota("fixture") };
 }
 const p = { project: "p", taskId: "T", peer: null } as StartPlan;
 const success: StartOutcome = { ok: true, taskId: "T", placement: "local", branch: "b", steps: [], reconciled: [] };
@@ -181,4 +183,28 @@ test("autostart ledger author family comes from the created runtime, not a suppl
   const f = fixture("codex", 1);
   expect(localCreatedFamily("agent-0", f.registryPath)).toBe("codex");
   expect(localCreatedFamily("absent", f.registryPath)).toBe("claude");
+});
+
+test("Codex weekly 85% gate waits before start/claim, never using Claude quota", async () => {
+  const f = fixture("codex"); let calls = 0;
+  const now = Date.now();
+  const q: InventoryQuota = { ...unknownQuota("test"), status: "known", windows: [
+    { id: "7d", kind: "weekly", usedPct: 85, resetsAtMs: now + 60_000, resetPassed: false },
+  ] };
+  const opts = { ...f, codexQuota: async () => q, checkQuota: true };
+  expect(await withCodexSlot(async () => { calls++; }, opts)).toMatchObject({ kind: "wait", reason: expect.stringContaining("85%") });
+  await localAutostart("p", async () => { calls++; }, opts);
+  expect(calls).toBe(0);
+  q.windows[0].usedPct = 84.9;
+  expect(await withCodexSlot(async () => "created", opts)).toBe("created");
+  q.windows[0].usedPct = 99;
+  q.windows[0].resetsAtMs = now - 1;
+  expect(await codexQuotaWait(opts.codexQuota, now)).toBeNull();
+  q.windows[0].resetsAtMs = now + 60_000;
+  q.windows[0].resetPassed = true;
+  expect(await codexQuotaWait(opts.codexQuota, now)).toBeNull();
+  q.windows[0].resetPassed = false;
+  q.windows[0].kind = "session";
+  expect(await codexQuotaWait(opts.codexQuota, now)).toBeNull();
+  expect(await codexQuotaWait(async () => unknownQuota("no snapshot"), now)).toBeNull();
 });

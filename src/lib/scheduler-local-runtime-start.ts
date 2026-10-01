@@ -30,7 +30,7 @@ export async function runLocalStart(io: StepIO, p: StartPlan, run: (io: StepIO, 
       if (index >= 0) { args = [...args]; args[index + 1] = "codex"; }
     }
     return io.manager(args, timeout);
-  } }, p), opts);
+  } }, p), { ...opts, checkQuota: true });
   return "kind" in result ? { ok: false, code: "start_failed", error: result.reason, failedStep: "agent", rolledBack: [], leftovers: [] } : result;
 }
 
@@ -39,7 +39,7 @@ export async function localAutostart(project: string, run: () => Promise<void>, 
   const runtime = selected(project, opts.configPath);
   await selection.run({ project, runtime }, async () => {
     if (runtime === "claude") return run();
-    await withCodexSlot(run, opts);
+    await withCodexSlot(run, { ...opts, checkQuota: true });
   });
 }
 
