@@ -3,7 +3,7 @@
  * <沙箱根>/pi-agent」，其余每条拒绝路径各测一次；适配器的参数 / 环境约束；凭据只能显式拷一家 API key，不拷 OAuth 和 !命令，不打印 key。
  */
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { hostEnvBase, type AdapterEnvSpec } from "../src/lib/acp/adapter-proc.ts";
@@ -17,6 +17,8 @@ import { assertSandboxRuntime, sandboxPiAgentDir } from "../src/lib/sandbox.ts";
 import { sandboxManagerRefusal } from "../src/lib/sandbox-env.ts";
 import { assertSandboxSession } from "../src/lib/sandbox-sessions.ts";
 import { chooseCreateTransport } from "../src/manager/acp-lifecycle.ts";
+import { cmdSetSession } from "../src/manager/set-session.ts";
+import { REGISTRY_PATH } from "../src/lib/registry.ts";
 import { cmdPiAuth, copyPiCredential, pickPiCredential } from "../scripts/sandbox-pi-auth.ts";
 
 const root = mkdtempSync(join(tmpdir(), "pi-acp-sbx-"));
@@ -100,6 +102,24 @@ describe("沙箱里的 Pi 目录：只认推导值", () => {
     expect(() => assertSandboxSession("pi-ok-1")).not.toThrow();
     expect(() => assertSandboxSession("pi-out-1")).toThrow("沙箱");
     expect(() => assertSandboxSession("pi-prod-1")).toThrow("找不到会话");
+  });
+
+  test("set-session：沙箱 ACP 版 Pi 的 /clear 新 id 还没有会话文件（pi 首条助手消息前不写），照样换代；Claude Code agent 仍要查到文件", async () => {
+    const prior = existsSync(REGISTRY_PATH) ? readFileSync(REGISTRY_PATH, "utf8") : null;
+    const agents = {
+      "agent-pa": { runtime: "pi", transport: "acp", channelId: "p1", cwd: join(root, "work"), sessionId: "01a0f519-0000-7000-8000-000000000001" },
+      "agent-cc": { channelId: "c1", cwd: join(root, "work"), sessionId: "01a0f519-0000-7000-8000-0000000000c1" },
+    };
+    writeFileSync(REGISTRY_PATH, JSON.stringify({ socket: "s", agents }));
+    try {
+      withEnv(PINNED);
+      const fresh = "01a0f51a-0000-7000-8000-000000000002";
+      expect(await cmdSetSession(["agent-pa", fresh, "--expected", agents["agent-pa"].sessionId])).toMatchObject({ ok: true, sessionId: fresh });
+      await expect(cmdSetSession(["agent-cc", fresh])).rejects.toThrow("找不到会话");
+    } finally {
+      if (prior === null) unlinkSync(REGISTRY_PATH);
+      else writeFileSync(REGISTRY_PATH, prior);
+    }
   });
 });
 

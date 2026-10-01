@@ -24,6 +24,7 @@ import { deployTick } from "./scheduler-deploy-tick.js";
 import { deploymentJobs, type DeployJobs } from "./scheduler-deploy-job.js";
 import type { WorkerSession } from "./worker-session.js";
 import { withSupervisorHold } from "./agent-supervisor-hold.js";
+import { peerPrStep } from "./peer-pr-tick.js";
 import { autostartHooks, type AutostartHooks } from "./scheduler-autostart-deps.js";
 
 type Manager = (...args: string[]) => Promise<Record<string, unknown>>;
@@ -47,6 +48,7 @@ export interface PassOpts {
   lend?: (active: Active, lease: SchedulerLease | undefined) => Promise<{ failed: { orderId: string; error: string }[] }>;
   /** Agent supervision (i28-S1, agent-supervisor-deps.ts superviseStep); runs only while scheduler.json has supervise on. */
   supervise?: (db: Database, config: SchedulerConfig, active: Active, lease: SchedulerLease | undefined) => Promise<{ failed: { agent: string; error: string }[] }>;
+  peerPr?: (active: Active, manager: Manager) => Promise<{ failed: PassResult["failed"] }>; // peer PR 自动审（i28-A2）；默认 peerPrStep，测试注入
   /** 自动交回 / 自动开卡（i28-A1，scheduler-autostart-deps.ts）：tests inject fakes; manager is this pass's guarded scheduler CLI. */
   autostart?: (active: Active, manager: Manager) => AutostartHooks;
 }
@@ -98,6 +100,7 @@ export async function schedulerPass(db: Database | null, config: SchedulerConfig
   try {
     if (config.enabled) {
       if (!db) throw new Error("scheduler enabled but ledger is unavailable");
+      if (config.autoDispatch === true) failed.push(...(await (opts.peerPr ?? ((a, m) => peerPrStep(db, a, m)))(active, manager)).failed); // 推送先于自动派单
       // every gh subprocess of the merge driver, reads included, is checked right before its spawn and after its exit
       await mergeTick(db, config, manager, opts.external ?? ((p) => mergeExternal(p, guard(active, runBounded))), active, pace.phase());
       // launchctl calls of the deploy step are guarded the same way; the deploy job itself belongs to launchd, not to this pass

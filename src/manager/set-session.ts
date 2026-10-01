@@ -16,8 +16,10 @@ export async function cmdSetSession(args: string[]): Promise<Record<string, unkn
   if (!info) return { ok: false, error: `${tmuxName} 不在 registry` };
   const oldSid = info.sessionId || null;
   if (expected && oldSid !== expected && oldSid !== newSid) return { ok: false, error: `会话已变化：预期 ${expected}，当前 ${oldSid ?? "无"}` };
-  // 沙箱 ACP 的新 id 由隔离 HOME 下的本仓 stub 生成；其它运行时仍须能找到沙箱内会话文件。
-  if (!(isSandbox() && info.runtime === "codex" && (info as { transport?: string }).transport === "acp")) assertSandboxSession(newSid);
+  // 沙箱 ACP 的新 id 由关在沙箱里的适配器生成（Codex：隔离 HOME 下的本仓 stub；Pi：目录钉死的 pi，只在沙箱 Pi 目录里开会话，
+  // 且 pi 首条助手消息前不写会话文件，/clear 时还查不到）。其它运行时仍须能找到沙箱内会话文件。
+  const acpConfined = isSandbox() && (info.runtime === "codex" || info.runtime === "pi") && (info as { transport?: string }).transport === "acp";
+  if (!acpConfined) assertSandboxSession(newSid);
   if (oldSid === newSid) return { ok: true, name: tmuxName, sessionId: newSid, previousSessionId: oldSid };
   if (oldSid) await archiveAgentSession(tmuxName, info, oldSid).catch((e) => console.warn(`⚠️ 归档旧会话 ${tmuxName} 失败：${e}`));
   info.sessionId = newSid;

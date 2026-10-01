@@ -212,7 +212,7 @@ async function cmdUp(o: Opts, layout: SandboxLayout): Promise<void> {
   // 新建 agent 要能按目录归到某个 project：给沙箱工作目录建一个（已存在时 manager 报错，无害）
   runInSandbox(o, layout, [`${SRC_DIR}/manager.ts`, "project-add", "sandbox", "--dirs", layout.workDir, "--name", "Sandbox"], true);
   const self = o.lab ? `bun run sandbox --lab${o.lab.ports.a === DEFAULT_PORT ? "" : ` --port ${o.lab.ports.a}`}${o.lab.side === "b" ? " --as b" : ""}`
-    : `bun run sandbox${o.port === DEFAULT_PORT ? "" : ` --port ${o.port}`}`;
+    : `bun run sandbox${o.port === DEFAULT_PORT ? "" : ` --port ${o.port}`}${o.root ? ` --root ${o.root}` : ""}`;
   console.log([
     `✅ 沙箱 bridge 已启动：http://127.0.0.1:${o.port}（pid ${pid}，Web-only${o.lab ? `，lab 实例 ${o.lab.side}` : ""}）`,
     `   根目录 ${layout.root}（状态 state/、tmux 与截图 run/、日志 bridge.log；agent 只能建在这下面）`,
@@ -369,7 +369,9 @@ async function inner(op: string, layout: SandboxLayout): Promise<void> {
 }
 
 async function main(): Promise<void> {
-  const [cmd = "", ...argv] = process.argv.slice(2);
+  const raw = process.argv.slice(2); // 子命令 = 第一个不是沙箱选项（及其值）的词：up 的提示和文档都把 --port / --lab 写在子命令前面
+  const at = raw.findIndex((a, i) => !a.startsWith("--") && !["--port", "--root", "--static", "--as"].includes(raw[i - 1] ?? ""));
+  const [cmd, argv] = at < 0 ? ["", raw] : [raw[at]!, [...raw.slice(0, at), ...raw.slice(at + 1)]];
   if (cmd === LAB_RELAY) return (await import("./sandbox-lab-relay.ts")).runLabRelay(); // 已在沙箱 + lab 环境里（cmdLabUp 拉起）
   const o = parseOpts(argv, cmd);
   const layout = sandboxLayout(o.root);
