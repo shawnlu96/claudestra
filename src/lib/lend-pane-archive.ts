@@ -9,7 +9,7 @@ import { join, resolve, sep } from "node:path";
 import { LOG_DIR } from "./log-paths.js";
 import { tmuxRawStrict, windowTarget } from "./tmux-helper.js";
 
-export const LEND_PANE_ROOT = join(LOG_DIR, "lend");
+const LEND_PANE_ROOT = join(LOG_DIR, "lend");
 export const PANE_ARCHIVE_LINES = 2000;
 export const PANE_ARCHIVE_KEEP = 20;
 const TMUX_TIMEOUT_MS = 5_000; // 卡住的 tmux 不能把 kill 拖 15s × pane 数
@@ -62,7 +62,7 @@ function errText(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
 }
 
-export function renderPaneArchive(agent: string, nowMs: number, panes: Array<PaneInfo & { text: string }>): string {
+function renderPaneArchive(agent: string, nowMs: number, panes: Array<PaneInfo & { text: string }>): string {
   const head = [`# lend worker ${agent} 现场 @ ${new Date(nowMs).toISOString()}`, `# panes: ${panes.length}`, ""];
   const body = panes.flatMap((p) => [`=== pane ${p.id} (index ${p.index}, ${p.command || "?"}) ===`, p.text, ""]);
   return [...head, ...body].join("\n");
@@ -150,7 +150,7 @@ export function parsePaneList(raw: string): PaneInfo[] {
   }).filter((p) => p.id);
 }
 
-export function defaultPaneArchiveDeps(): PaneArchiveDeps {
+function defaultPaneArchiveDeps(): PaneArchiveDeps {
   return {
     root: LEND_PANE_ROOT,
     // list-panes 而不是 display-message：窗口不在时后者会退回当前窗口（tmux-helper windowTarget 注释）
