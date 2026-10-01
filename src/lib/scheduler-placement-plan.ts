@@ -86,12 +86,29 @@ function poolReview(s: PlannerSnapshot, p: PoolFacts, since: number): Exclude<Aw
 }
 
 /**
+ * With this machine `off` an unpinned card's restate waits wherever its writing would not land here: no peer takes a restate
+ * order (take_order is build / fix only) and v3 needs the restate text, so it can neither go along nor be skipped.
+ * placeFor's local (remote.mode off) still restates here, as build would write here. tests/scheduler-placement-off-restate.test.ts.
+ */
+function offRestate(facts: PlacementFacts, family: AuthorFamily): Away {
+  const placed = placeFor(facts, "write", family);
+  if (placed.kind === "local") return null;
+  return { code: "placement", wait: placed.kind === "wait" ? placed.reason
+    : `${LOCAL_OFF_RESTATE}；写单可派给 ${placed.peer}，但 peer 不接复述单：等本机重新启用，或 PM 用 start_node placement=peer:${placed.peer} 固定放置` };
+}
+
+const LOCAL_OFF_RESTATE = "scheduler.json remote.localPriority = off：本机不复述新卡";
+
+/**
  * Where a build / fix order goes when it is not local (i28-W9). A pinned card never gets a local author session or work
  * order: until its peer can take it, it waits (spec stage included: restate is skipped for it, start_node is the approval).
  */
 export function remoteWork(s: PlannerSnapshot, since: number, role: Exclude<PlaceRole, "review">): Away {
   if (!s.workflow) return null;
   const pinned = cardPin(s.task.extra);
+  if (!pinned && s.task.stage === "spec") {
+    return s.pool?.remote.localPriority === "off" ? offRestate(snapshotPlacementFacts(s, since, "write"), s.workflow.authorFamily) : null;
+  }
   if (!pinned && s.task.stage !== "build" && s.task.stage !== "fix") return null;
   const facts = snapshotPlacementFacts(s, since, role);
   const lease = role === "fix" && facts.remote?.mode !== "off" && facts.remote?.roles.includes("write") ? facts.writeLeasePeer : null;
