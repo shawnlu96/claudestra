@@ -19,7 +19,7 @@ import type { ReviewFinding } from "./scheduler-review.js";
 export const UI_ASK_ACTION = "scheduler_ui_screenshot";
 export const UI_APPROVED = "ui_approved", UI_REJECTED = "ui_rejected", UI_OWNER_VISUAL = "ui_owner_visual";
 /** Receipt prefix of an ask intent that notified PM instead of opening an owner ask. */
-export const PM_NOTICE_RECEIPT = "pm_notice";
+const PM_NOTICE_RECEIPT = "pm_notice";
 export const DIGEST_RE = /^[a-f0-9]{64}$/i;
 
 type UiGate = PlannerSnapshot["uiGate"];
@@ -171,7 +171,7 @@ type Settle = (from: "pending" | "submitted", to: "submitted" | "done", receipt:
 const LEDGER_CLI = `bun ${SRC_DIR}/manager.ts ledger`;
 
 /** What PM gets instead of an owner ask: the images, the digest, and the two commands bound to this head. */
-export function pmUiNoticeText(task: LedgerTask, n: NonNullable<Planned["pmNotice"]>, refs: readonly string[]): string {
+function pmUiNoticeText(task: LedgerTask, n: NonNullable<Planned["pmNotice"]>, refs: readonly string[]): string {
   return [`[调度引擎] ${task.id} 审查已通过，请看前后截图（ui 卡由 PM 验收；只有改整体观感的卡才问 owner）`,
     `head ${n.head}，规格第 ${n.specRev} 版，第 ${n.round} 轮`, "截图：", ...refs.map((r) => `- ${r}`), `截图摘要：${n.screenshotsDigest}`,
     `通过：${LEDGER_CLI} ui-approve ${task.id} --head ${n.head} --digest ${n.screenshotsDigest}`,
@@ -187,6 +187,6 @@ export async function pmUiNotice(task: LedgerTask, n: NonNullable<Planned["pmNot
     if (e instanceof SchedulerStopped) throw e;
     return `截图验收通知没发出去，下轮重发：${(e as Error).message}`;
   }
-  const ok = await settle("pending", "submitted", PM_NOTICE_RECEIPT) && await settle("submitted", "done", `${PM_NOTICE_RECEIPT}：已发给 ${task.pm ?? "PM"}`);
+  const ok = await settle("pending", "submitted", PM_NOTICE_RECEIPT) && await settle("submitted", "done", `${PM_NOTICE_RECEIPT}：已通知项目 PM`);
   return ok ? `${PM_NOTICE_RECEIPT} 已发` : `${PM_NOTICE_RECEIPT} 已发，意图没结上（下轮可能重发一次）`;
 }

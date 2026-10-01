@@ -77,7 +77,8 @@ export const DAG_TOOLS = [
       "Any failure rolls back what was done and reports failedStep. Slow (starts an agent): up to a few minutes. " +
       "placement (default auto) picks this machine or a borrowed peer by the slot pool rules; peer:<name> pins it there (no local worktree / agent, " +
       "restate skipped) and is refused when that peer cannot take writing now. " +
-      "template picks the workflow template (default code, always its latest version); ui adds the before/after screenshot gate (PM accepts; `ledger ui-owner-visual <card> on` hands an overall-look card to the owner), security keeps local-only cross-model review.",
+      "template picks the workflow template (default code, always its latest version); ui adds the before/after screenshot gate " +
+      "(PM accepts; `ledger ui-owner-visual <card> on` hands an overall-look card to the owner), security keeps local-only cross-model review.",
     inputSchema: {
       type: "object" as const,
       properties: {
