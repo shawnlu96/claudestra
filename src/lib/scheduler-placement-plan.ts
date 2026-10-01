@@ -26,7 +26,8 @@ function locksFree(s: PlannerSnapshot): boolean {
     mine.some((r) => resourcesOverlap(r as string, resourceKey(h.resource) ?? h.resource.toLowerCase())));
 }
 
-const peerFacts = (x: PoolFacts["peers"][number]): PeerFacts =>
+/** borrowPeers' row as placeFor reads it; start_node uses it too, so neither entry can drop a field (the tier) the other keeps. */
+export const peerFacts = (x: PoolFacts["peers"][number]): PeerFacts =>
   ({ peer: x.peer, roles: x.roles ?? ["review"], open: x.open, v2: x.v2 ?? null, ...(x.priority ? { priority: x.priority } : {}) });
 
 /** room per role: a review needs a reviewer under the cap; writing needs the card's own worker slot or a free one (dispatchWork's gate). */

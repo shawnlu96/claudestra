@@ -404,7 +404,7 @@ peer 的档位随借入名单一起读，所以复核不会丢档位。
   两道合并闸读的都是这一个函数：Codex 写的卡交 Claude 审（本机，或有 Claude 槽的 peer），Codex 的结论记不进去。
   本机 Claude 写的卡照旧交 Codex 审（优先 reviewFirst）。
 - **已知边界**：远端写过、之后某一轮又回本机写的卡，复审要换家族时原来的 reviewer session 对不上，交 PM（不自动换人）。
-  `start_node` 的 `auto` 放置也走这套档位：有 write 时新卡可能直接固定给 peer（W5 的设计，跳过复述）。
+  `start_node` 的 `auto` 放置也走这套档位（与规划器共用 `peerFacts`，档位不丢；off 的 peer 不会被选成 pin）：有 write 时新卡可能直接固定给 peer（W5 的设计，跳过复述）。
 
 ### 10.4 上线清单（PM 照着带人做）
 

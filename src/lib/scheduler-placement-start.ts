@@ -9,6 +9,7 @@ import { resourceKey, resourcesOverlap } from "./ledger-scheduler.js";
 import type { BorrowEntry } from "./lend-config.js";
 import type { RemotePolicy } from "./scheduler-config.js";
 import { placeFor, PEER_PLACEMENT } from "./scheduler-placement.js";
+import { peerFacts } from "./scheduler-placement-plan.js";
 import { borrowPeers, localReviewerCount, localWriterCount } from "./scheduler-pool-facts.js";
 
 export type StartPlacement = { where: "local"; reason: string } | { where: "peer"; peer: string; repo: string; reason: string } | { where: "refused"; reason: string };
@@ -56,7 +57,7 @@ export async function startPlacement(db: Database, io: StartPlacementIO,
     return { where: "local", reason: `读借入名单 / 仓库地址失败，放本机：${(e as Error).message}` };
   }
   const placed = placeFor({
-    remote: policy?.remote ?? null, peers: borrowPeers(db, q.project, borrow, io.now()).map((p) => ({ peer: p.peer, roles: p.roles ?? ["review"], open: p.open, v2: p.v2 ?? null })),
+    remote: policy?.remote ?? null, peers: borrowPeers(db, q.project, borrow, io.now()).map(peerFacts),
     repo, local: localLoad(db, q.project, policy?.maxWorkers ?? 0), pin, tried: [], lastPeer: null, writeLeasePeer: null, locksFree: locksFree(db, q.project, q.fileGlobs),
   }, "write", "claude");
   if (placed.kind === "peer" && repo) return { where: "peer", peer: placed.peer, repo, reason: placed.reason };
