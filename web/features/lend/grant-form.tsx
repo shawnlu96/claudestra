@@ -134,7 +134,7 @@ export function GrantForm({ peers, maxDays, shellSentence, initial, onDone, onCa
         <span className="w-20 shrink-0 text-base-content/60">{t("到期")}</span>
         <div className="join">
           {dayChoices(maxDays).map((d) => (
-            <button key={d} type="button" className={`btn join-item btn-sm ${f.days === d ? "btn-active" : ""}`} onClick={() => setF({ ...f, days: d })}>
+            <button key={d} type="button" className={`btn join-item btn-sm ${f.days === d ? "btn-primary" : ""}`} onClick={() => setF({ ...f, days: d })}>
               {d}d
             </button>
           ))}
