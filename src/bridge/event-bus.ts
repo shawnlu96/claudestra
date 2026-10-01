@@ -78,6 +78,16 @@ type Subscriber = {
   cb: (evt: BridgeEvent) => void;
 };
 
+/**
+ * GET /events 的查询参数 → 订阅过滤：?agent=<名> 一个，?agents=a,b 几个（网页的会话流带上名字的两种写法，
+ * 只收这一个 agent 的事件和补发——不带的话全机所有 agent 的事件都要经中继慢上行发一遍再在浏览器里扔掉）
+ */
+export function eventsQueryFilter(q: URLSearchParams, extra: EventFilter = {}): EventFilter {
+  const agent = q.get("agent") || undefined;
+  const agents = q.get("agents")?.split(",").map((s) => s.trim()).filter(Boolean);
+  return { ...extra, ...(agent ? { agent } : {}), ...(agents?.length ? { agents } : {}) };
+}
+
 /** 每个 agent 的环形缓冲上限（补发窗口） */
 export const RING_LIMIT = 500;
 

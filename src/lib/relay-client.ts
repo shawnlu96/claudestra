@@ -14,6 +14,7 @@ import { InboundRouter, type Logger } from "./relay-client-inbound.js";
 import { OutboundTable, type RequestOptions } from "./relay-client-outbound.js";
 import { PushTable } from "./relay-client-push.js";
 import { DEFAULT_LIVENESS, RelayLiveness, type LivenessOptions } from "./relay-liveness.js";
+import { RelayTraffic } from "./relay-traffic.js";
 import { remoteCode } from "./remote-text.js";
 import { RelayError, type InboundHandler, type PushAck, type PushRequest, type RelayInfo, type RelayRequest, type RelayResponse, type RelayState } from "./relay-client-types.js";
 
@@ -84,6 +85,7 @@ export class RelayClient {
   private readonly inbound: InboundRouter;
   private readonly pushes: PushTable;
   private readonly liveness: RelayLiveness;
+  private readonly traffic = new RelayTraffic();
 
   constructor(private readonly o: ConnectOptions) {
     this.timing = { ...DEFAULT_TIMING, ...o.timing };
@@ -91,7 +93,7 @@ export class RelayClient {
     this.log = o.log ?? ((level, msg) => (level === "info" ? console.log : console.error)(`[relay] ${msg}`));
     const send = (f: object) => this.send(f);
     this.outbound = new OutboundTable(send, rand, LIMITS.maxChunkBytes, this.timing.headGraceMs);
-    this.inbound = new InboundRouter(send, o.onInbound, this.log);
+    this.inbound = new InboundRouter(send, o.onInbound, this.log, LIMITS.maxChunkBytes, this.traffic);
     this.pushes = new PushTable(send, rand, this.timing.pushTimeoutMs);
     this.open();
   }
@@ -182,6 +184,7 @@ export class RelayClient {
       const raw = JSON.stringify(frame);
       ws.send(raw);
       this.liveness.onSend(raw.length);
+      this.traffic.onWire(raw.length);
       return true;
     } catch (e) {
       this.log("warn", `发帧失败（连接正在关闭，close 回调会收尾）: ${(e as Error).message}`);
@@ -200,6 +203,7 @@ export class RelayClient {
     this.outbound.rejectAll(lost);
     this.pushes.rejectAll(lost);
     this.inbound.abortAll();
+    this.logTraffic(this.traffic.flush());
     if (wasOnline) this.log("warn", `中继连接断开 code=${code} ${reason}${this.lastError && this.lastError !== reason ? `（${this.lastError}）` : ""}`);
     this.scheduleReconnect(fatal);
   }
@@ -230,6 +234,7 @@ export class RelayClient {
     this.clearTimers();
     this.liveness.reset();
     this.heartbeat = setInterval(() => {
+      this.logTraffic(this.traffic.tick());
       this.liveness.onPing();
       this.send({ t: "ping", ts: Date.now() });
       if (this.pongTimer) return;
@@ -242,6 +247,10 @@ export class RelayClient {
         this.ws?.close(4408, "pong timeout");
       }, this.timing.pongTimeoutMs);
     }, this.timing.heartbeatMs);
+  }
+
+  private logTraffic(line: string | null): void {
+    if (line) this.log("info", line);
   }
 
   // ── 帧分发 ─────────────────────────────────────────────────────────────
@@ -351,6 +360,8 @@ export class RelayClient {
       if (this.outbound.owns(f.id, from) || f.origin === "relay") {
         if (this.outbound.onError(f as ErrorFrame & { id: string })) return;
       }
+      // 迟到帧（请求已超时 / 被取消，中继每帧回一条）只计数进流量摘要：积压时一分钟几十条，逐条记会淹掉日志
+      if (f.code === "unknown_request") return this.traffic.onLate();
       return this.log("warn", `中继报错 ${f.code}（id=${f.id}）: ${f.message ?? ""}`);
     }
     this.lastError = remoteCode(f.code, "relay_error"); // 之后会拼进 connection_lost 的说明（见 request），中继能随意填

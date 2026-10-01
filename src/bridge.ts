@@ -64,7 +64,8 @@ import * as fs from "fs/promises";
 // master 历史 probe 用（master 不在 registry，sessionId 从 projects slug 目录取最新）
 import { projectsSlug, projectJsonlPath } from "./lib/jsonl-cost.js";
 // v2.6.0+ 多前端事件总线（设计 docs/design-multi-frontend.md §4）
-import { emitEvent, forgetAgent, subscribeEvents, replayEventsSince, getAgentStatus, markChannelExternallyBusy, unmarkChannelExternallyBusy, type EventFilter } from "./bridge/event-bus.js";
+import { emitEvent, eventsQueryFilter, forgetAgent, subscribeEvents, replayEventsSince, getAgentStatus } from "./bridge/event-bus.js";
+import { markChannelExternallyBusy, unmarkChannelExternallyBusy, type EventFilter } from "./bridge/event-bus.js";
 // v2.7+ Claude Code agents 模式适配：中性会话清单 + bg job 清理 + 分身对账
 import { collectSessions } from "./bridge/sessions-inventory.js";
 import { cleanupBgJob } from "./lib/bg-jobs.js";
@@ -2955,15 +2956,14 @@ async function handleHookRequest(req: Request): Promise<Response> {
 
 /**
  * v2.6.0+ GET /events —— 结构化事件流（SSE）。设计 §4.3。
- * ?agent=<name> 过滤单 agent；?since=<seq> 或 Last-Event-ID 断线补发。
+ * ?agent=<name> / ?agents=a,b 过滤 agent；?since=<seq> 或 Last-Event-ID 断线补发。
  * 30s 心跳注释防代理超时。本机部署默认免鉴权（服务只绑 127.0.0.1，见下）。
  */
 function handleEventsRequest(req: Request, extraFilter?: EventFilter): Response {
   const url = new URL(req.url);
-  const agent = url.searchParams.get("agent") || undefined;
   const sinceParam = url.searchParams.get("since") ?? req.headers.get("Last-Event-ID");
   const since = sinceParam !== null ? Number(sinceParam) : NaN;
-  const filter: EventFilter = { ...(extraFilter || {}), ...(agent ? { agent } : {}) };
+  const filter = eventsQueryFilter(url.searchParams, extraFilter);
   let unsub: (() => void) | null = null;
   let ping: ReturnType<typeof setInterval> | null = null;
   const cleanup = () => {
