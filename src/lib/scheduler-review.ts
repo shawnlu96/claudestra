@@ -118,7 +118,7 @@ export function currentReviewFacts(task: ReviewTask, events: readonly LedgerEven
   };
 }
 
-const normalizedFamily = (family: string): string => family.normalize("NFKC").toLowerCase().replace(/[-_.]/g, "");
+export const normalizedFamily = (family: string): string => family.normalize("NFKC").toLowerCase().replace(/[-_.]/g, "");
 
 /** The planner's record of P1s it treated as P2 in a round (review-converge-followup.ts writes it with the stage move). */
 export const DOWNGRADE_OP = "review_downgrade";

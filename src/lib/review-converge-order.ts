@@ -1,7 +1,7 @@
 /**
  * What a review order tells the reviewer about convergence (i28-CONV1). Local (review-order.ts) and pool (ledger-lend.ts)
  * orders call this one function, so both say the same thing the planner enforces (review-converge.ts). Each line stays under
- * WIRE_LIMITS.line; the scope line appears from SCOPE_ROUND on. tests/review-converge-order.test.ts.
+ * WIRE_LIMITS.line; the scope line appears from SCOPE_ROUND on. tests/review-converge.test.ts.
  */
 import type { LedgerEvent } from "./ledger-stages.js";
 import { prevReviewedHead, SCOPE_ROUND } from "./review-converge.js";

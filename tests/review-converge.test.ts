@@ -66,7 +66,7 @@ describe("round 3 scope", () => {
     expect(result.items.map((x) => [x.findingId, x.why])).toEqual([["outside", "outside_diff"], ["no-path", "outside_diff"]]);
     expect(convergeFindings(prev, facts(rows, 2), diff).items).toEqual([]);
     const sameFamily = finding("new-issue", { family: "open", basis: "acceptance:1" });
-    expect(convergeFindings(prev, facts([sameFamily]), diff).items[0].why).toBe("outside_diff");
+    expect(convergeFindings(prev, facts([sameFamily]), diff).items).toEqual([]);
     for (const unknown of [null, { ...diff, from: H2 }, { ...diff, to: H1 }]) expect(convergeFindings(prev, facts(rows), unknown).items).toEqual([]);
     expect(touchesDiff("src/changed.ts:8", diff.files)).toBe(true);
     expect(touchesDiff("src/unchanged.ts", diff.files)).toBe(false);
@@ -107,4 +107,17 @@ test("round cap and warnings replace four-round escalation; only an explicit PM 
   expect(fixWarning(1, 4, "fallback")).toBeNull();
   expect(fixWarning(2, 2, "fallback")).toContain("同一条 P1 已连续 2 轮");
   expect(fixWarning(1, 7, "fallback")).toContain("第 8 轮");
+});
+
+ test("renamed open P1 uses the streak identity and legacy section headings retain basis", () => {
+  const previous = [event(20, "review", { round: 2, head: H1, findings: [finding("race-a", {
+    family: "Concurrency", basis: "acceptance:3", probe: "src/a.ts",
+  })] })];
+  const renamed = finding("race-b", { family: "con_cur-rency", basis: "acceptance:3", probe: "src/a.ts" });
+  expect(convergeFindings(previous, facts([renamed]), { ...diff, files: ["src/b.ts"] }).findings[0].severity).toBe("P1");
+  const legacy = finding("race-1", { family: "concurrency", probe: "src/x.ts:1" });
+  const report = "## [验收线 2] Race condition\nFinding race-1 in src/x.ts\n## Other\nFinding other\n";
+  expect(reportBasis(legacy, report)).toBe("acceptance:2");
+  expect(reportBasis(finding("other"), report)).toBeNull();
+  expect(convergeFindings([], facts([{ ...legacy, ...storedBasis(legacy, report) }], 1), null).items).toEqual([]);
 });

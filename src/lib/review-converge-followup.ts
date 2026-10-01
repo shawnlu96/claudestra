@@ -5,6 +5,7 @@
  * started: PM collects them daily. Keyed by card + round, so a replayed or re-planned move adds nothing. A draft or node
  * that cannot be written is noted on the event and never blocks the move. tests/review-converge-followup.test.ts.
  */
+import { createHash } from "node:crypto";
 import type { Database } from "bun:sqlite";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -26,6 +27,14 @@ import { DOWNGRADE_OP } from "./scheduler-review.js";
 const WHY_TEXT: Record<DowngradeItem["why"], string> = { no_basis: "没对应验收线", outside_diff: "修复 diff 外的新问题" };
 export const followUpKey = (taskId: string, round: number): string => `scheduler:converge:${taskId}:r${round}`;
 const draftName = (taskId: string, round: number): string => `${taskId}f${round}`;
+
+/** Keep valid 40-character source keys distinguishable while reserving the round suffix. */
+function childKey(key: string, round: number): string {
+  const suffix = `f${round}`;
+  if (key.length + suffix.length <= 40) return key + suffix;
+  const hash = createHash("sha256").update(key).digest("hex").slice(0, 10);
+  return `${key.slice(0, 40 - suffix.length - hash.length - 1)}-${hash}${suffix}`;
+}
 
 /** The draft spec: reviewer text is quoted as external data, never as instructions to whoever opens the card. */
 export function draftSpec(task: Pick<LedgerTask, "id" | "title">, nodeKey: string | null, d: Downgrade): string {
@@ -59,7 +68,7 @@ function placed(db: Database, task: LedgerTask): Placed | string {
 /** Add <key>f<round> after the card's node, written as the card's PM (the standing rule: sub-DAG rewrites need no owner). */
 function addNode(db: Database, ctx: WriteCtx, task: LedgerTask, d: Downgrade, at: Placed): { node: string | null; note: string | null } {
   const { f, cur, own } = at;
-  const key = `${own.key}f${d.round}`;
+  const key = childKey(own.key, d.round);
   if (cur.some((n) => n.key === key)) return { node: key, note: null };
   const pm = task.pm ?? getMeta(db, task.project).pms[0];
   if (!pm || !isManager(db, pm, task)) return { node: null, note: "卡上没有能代记的 PM，没开后续节点" };
@@ -101,13 +110,13 @@ function writeDraft(db: Database, task: LedgerTask, nodeKey: string | null, d: D
 export function convergeFollowUp(db: Database, ctx: WriteCtx, task: LedgerTask, d: Downgrade | undefined, draftsDir?: string): void {
   if (!d?.items.length || getEventByDedup(db, followUpKey(task.id, d.round))) return;
   const at = placed(db, task);
-  const draft = writeDraft(db, task, typeof at === "string" ? null : `${at.own.key}f${d.round}`, d, draftsDir);
+  const draft = writeDraft(db, task, typeof at === "string" ? null : childKey(at.own.key, d.round), d, draftsDir);
   const dag = typeof at === "string" ? { node: null, note: at } : addNode(db, ctx, task, d, at);
   const notes = [draft.note, dag.note].filter(Boolean);
   insertEvent(db, { ...ctx, dedupKey: followUpKey(task.id, d.round) }, {
     project: task.project, target: task.id, kind: "scheduler",
     text: `降级：${d.items.map((i) => `${i.findingId}（${WHY_TEXT[i.why]}）`).join("、")} 按 P2 计${notes.length ? `；${notes.join("；")}` : ""}`,
     data: { op: DOWNGRADE_OP, round: d.round, head: d.head, reportPath: d.reportPath, findingIds: d.items.map((i) => i.findingId),
-      items: d.items.map((i) => ({ findingId: i.findingId, why: i.why })), draft: draft.path, node: dag.node },
+      items: d.items.map((i) => ({ findingId: i.findingId, why: i.why })), draft: draft.path, node: dag.node, followUpFailure: dag.note },
   }, true);
 }

@@ -17,9 +17,11 @@ export function reportBasis(f: BasisSource, report: string): FindingBasis | null
   const escaped = f.findingId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const id = new RegExp(`(^|[^\\w.-])${escaped}(?=$|[^\\w.-])`);
   const lines = report.split(/\r?\n/);
+  let heading = "";
   for (let i = 0; i < lines.length; i++) {
+    if (/^\s*#{1,6}\s/.test(lines[i])) heading = lines[i];
     if (!id.test(lines[i])) continue;
-    const direct = basisFromText(lines[i]);
+    const direct = basisFromText(lines[i]) ?? basisFromText(heading);
     if (direct) return direct;
     if (!/^\s*#{1,6}\s/.test(lines[i])) continue;
     let end = i + 1;

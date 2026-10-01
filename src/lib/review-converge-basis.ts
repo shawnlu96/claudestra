@@ -1,7 +1,7 @@
 /**
  * Which acceptance line (or regression) a review finding hangs on. A P1 must name one, or the planner treats it as P2
  * (review-converge.ts). Remotes that predate the `basis` field still mark the finding text with 「[验收线 N]」 / 「[回归]」;
- * both spellings resolve to the same value, so an old verdict converges like a new one. tests/review-converge-basis.test.ts.
+ * both spellings resolve to the same value, so an old verdict converges like a new one. tests/review-converge.test.ts.
  */
 
 /** `acceptance:<N>` = breaks the spec's acceptance line N (1-based); `regression` = a correctness / security bug this diff added. */

@@ -6,7 +6,7 @@
  */
 import type { LedgerEvent } from "./ledger-stages.js";
 import { findingBasis } from "./review-converge-basis.js";
-import { countsAsP1, downgradedIds, type ReviewFacts, type ReviewFinding } from "./scheduler-review.js";
+import { countsAsP1, downgradedIds, normalizedFamily, type ReviewFacts, type ReviewFinding } from "./scheduler-review.js";
 
 /** From this round the review covers only the fix diff plus last round's open findings (review-converge-order.ts says so). */
 export const SCOPE_ROUND = 3;
@@ -59,7 +59,7 @@ export function convergeFindings(events: readonly LedgerEvent[], facts: Pick<Rev
   diff: FixDiff | null | undefined): { findings: ReviewFinding[]; items: DowngradeItem[] } {
   const scoped = facts.round >= SCOPE_ROUND && !!diff && diff.to === facts.head && diff.from === prevReviewedHead(events, facts.round);
   const open = scoped ? prevOpen(events, facts.round) : [];
-  const isOpen = (f: ReviewFinding) => open.some((o) => o.findingId === f.findingId);
+  const isOpen = (f: ReviewFinding) => open.some((o) => o.findingId === f.findingId || normalizedFamily(o.family) === normalizedFamily(f.family));
   const recorded = downgradedIds(events, facts.round);
   const items: DowngradeItem[] = [];
   const findings = facts.findings.map((f) => {

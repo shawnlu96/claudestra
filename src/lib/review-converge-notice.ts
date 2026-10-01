@@ -1,7 +1,7 @@
 /**
  * PM's notice when a card hits the review round cap (review-converge.ts roundCap): the card holds (no new work, mode stays
  * auto) and PM hears once per verdict, with every round's blocking P1s. The sent receipt survives restarts; a failed send
- * is retried next tick. The planner re-derives the hold from the ledger every pass. tests/review-converge-notice.test.ts.
+ * is retried next tick. The planner re-derives the hold from the ledger every pass. tests/scheduler-plan-converge.test.ts.
  */
 import type { Database } from "bun:sqlite";
 import type { LedgerEvent, LedgerTask } from "./ledger-stages.js";
@@ -64,4 +64,28 @@ export async function roundCapNotice(db: Database, task: LedgerTask, notifyPm: (
     }, true);
   });
   return `第 ${task.round} 轮到上限，已通知 PM`;
+}
+
+/** Failed follow-ups stay visible to PM even after the original card advances to merge. */
+export async function followUpFailureNotice(db: Database, task: LedgerTask,
+  notifyPm: (t: LedgerTask, text: string) => Promise<void>): Promise<void> {
+  const failed = listEvents(db, { project: task.project, target: task.id })
+    .filter((e) => e.data.op === "review_downgrade" && typeof e.data.followUpFailure === "string");
+  for (const e of failed) {
+    const key = `scheduler:converge-notice:${task.id}:${e.seq}`;
+    if (getEventByDedup(db, key)) continue;
+    const text = `[调度引擎] ${task.id} 第 ${e.data.round} 轮降级发现的后续节点未建立，请 PM 补建：${e.data.followUpFailure}；报告 ${e.data.reportPath}`;
+    try { await notifyPm(task, text); }
+    catch (error) {
+      if (error instanceof SchedulerStopped) throw error;
+      console.error(`[scheduler] 后续节点失败通知未发送，下个 tick 重试：${(error as Error).message}`);
+      return;
+    }
+    tx(db, () => {
+      if (!getEventByDedup(db, key)) insertEvent(db, { actor: "scheduler", dedupKey: key }, {
+        project: task.project, target: task.id, kind: "scheduler", text,
+        data: { op: "review_followup_failed", downgradeSeq: e.seq, informed: true },
+      }, true);
+    });
+  }
 }
