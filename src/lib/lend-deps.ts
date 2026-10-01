@@ -1,5 +1,5 @@
 /**
- * lend 循环的生产接线（LoopDeps，lend-loop.ts）：出站经 `manager lend call`（只走 E2E），台账写经 `ledger lend-ask`（调度服务身份），
+ * lend 循环的生产接线（LoopDeps，lend-loop.ts）：出站经 `manager lend call`（只走 E2E），台账写经 `ledger lend-inform / lend-ask`（调度服务身份），
  * worker 经 `manager create / kill`（agent-lend-* 名字 → runtimes/clean-env.ts 的白名单环境），首条派单经 bridge 的 route_to_agent（带会话核对）。
  * 每个外部效果都套 whileOwned：发起前、结束后各核一次服务是否仍持有单实例锁与维护租约（同 E2a），bridge 帧在发出的同一段同步代码里再核一次。
  * 写单（i28-R6）：本机指纹按实例公钥算，推送 / 开 PR 经 lend-push.ts（出借人自己的 git / gh 登录），派单尾注换成「提交后 lend submit 交摘要」。
@@ -10,7 +10,6 @@ import { join } from "node:path";
 import { bridgeSend } from "./bridge-client.js";
 import { resolveBunPath } from "./bun-path.js";
 import { instanceKeySync, keyFingerprint, verifyPurpose } from "./instance-key.js";
-import { lendAskVerdict } from "./lend-ask.js";
 import { LEND_ROOT, prepareClone, removeOrderDir } from "./lend-clone.js";
 import { readLend } from "./lend-config.js";
 import { isWriteStep } from "./lend-git.js";
@@ -121,19 +120,13 @@ function lendDeps(journal: Database, ledger: LedgerReader, active: () => void, l
     db: journal, now: () => Date.now(), call, env: process.env, footer, verifyReceipt,
     readLend: () => readLend(), context: () => readLendContext(), peers: async () => (await readPeers()).httpPeers ?? [],
     log: (m) => console.error(`[lend] ${m}`),
-    ask: {
-      open: async (p) => {
-        const r = await svc("ledger", "lend-ask", "--params", JSON.stringify(p));
-        return r.ok === true && typeof r.askId === "string" ? { ok: true, askId: r.askId } : { ok: false, error: String(r.error ?? "ledger lend-ask 失败") };
-      },
-      inform: async (p) => {
-        const r = await svc("ledger", "lend-inform", "--params", JSON.stringify(p));
-        return r.ok === true && r.notified === true ? { ok: true } : { ok: false, error: String(r.error ?? r.why ?? "bridge 没收下通知") };
-      },
-      verdict: (askId, p) => {
-        const db = ledger.get();
-        return db ? lendAskVerdict(db, askId, p) : { state: "waiting" }; // 台账暂时读不到：不当成批了，也不当成拒了
-      },
+    notify: async (p) => {
+      const r = await svc("ledger", "lend-inform", "--params", JSON.stringify(p));
+      return r.ok === true && r.notified === true ? { ok: true } : { ok: false, error: String(r.error ?? r.why ?? "bridge 没收下通知") };
+    },
+    retireAsk: async (askId) => {
+      const r = await svc("ledger", "lend-ask", "--retire", askId);
+      return r.ok === true ? { ok: true } : { ok: false, error: String(r.error ?? "ledger lend-ask --retire 失败") };
     },
     failure: (agent) => failureOf(ledger, agent),
     closeAsks: async (agent) => {
