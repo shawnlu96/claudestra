@@ -9,9 +9,11 @@ import { getEventByDedup, getMeta, LedgerError, listEvents } from "./ledger-stor
 import { insertEvent, tx } from "./ledger-tx.js";
 import { currentReviewFacts } from "./scheduler-review.js";
 import { getSchedulerSession } from "./scheduler-sessions.js";
+import { currentPooledReviewer } from "./scheduler-pool-facts.js";
 import { canTransition, nextTaskState } from "./ledger-stages.js";
 import { settleIntent } from "./ledger-scheduler-settle.js";
 import { parseRequiredChecks } from "./scheduler-config.js";
+import { cancelMergeRun, closeMergeRun, manualCancel } from "./scheduler-merge-conflict.js";
 
 export type MergePhase = "ready" | "updating" | "await_review" | "await_ci" | "merging" | "merged" | "unknown" | "resolved";
 export interface MergeRun {
@@ -86,7 +88,8 @@ export function beginMergeRun(db: Database, ctx: WriteCtx, intentId: string, req
       .get(task.project, `merge:${task.project}`, intentId);
     if (!lock) throw new LedgerError("conflict", "本意图未占项目合并槽");
     const review = currentReviewFacts(task, listEvents(db, { project: task.project, target: task.id }));
-    const reviewer = getSchedulerSession(db, task.id, "reviewer");
+    // A pooled round never writes scheduler_sessions; a local row may be an earlier round's, so this round's pool order wins.
+    const reviewer = currentPooledReviewer(db, task) ?? getSchedulerSession(db, task.id, "reviewer");
     if (review.kind !== "facts" || !reviewer || review.facts.reviewer !== reviewer.agent ||
       review.facts.reviewerSessionId !== reviewer.sessionId || review.facts.reviewerFamily !== reviewer.family ||
       review.facts.reviewerFamily === workflow.authorFamily ||
@@ -109,8 +112,8 @@ export function beginMergeRun(db: Database, ctx: WriteCtx, intentId: string, req
 }
 
 const NEXT: Record<MergePhase, readonly MergePhase[]> = {
-  ready: ["updating", "await_ci", "unknown"], updating: ["await_review", "await_ci", "unknown"],
-  await_review: [], await_ci: ["merging", "updating", "unknown"], merging: ["merged", "unknown"],
+  ready: ["updating", "await_ci", "unknown", "resolved"], updating: ["await_review", "await_ci", "unknown", "resolved"],
+  await_review: [], await_ci: ["merging", "updating", "unknown", "resolved"], merging: ["merged", "unknown"],
   merged: [], unknown: [], resolved: [],
 };
 /** main moving during CI sends the run back to update-branch; past this many times it is someone else's race to settle. */
@@ -159,6 +162,16 @@ export function advanceMergeRun(db: Database, ctx: WriteCtx, input: {
     if (!canWrite(db, ctx.actor, row.project)) throw new LedgerError("forbidden", "只有项目 PM / master / owner 能推进合并队列");
     if (row.phase !== input.from || row.rev !== input.rev || !NEXT[input.from]?.includes(input.to)) {
       throw new LedgerError("conflict", `合并步骤当前 ${row.phase}@${row.rev}，不能从 ${input.from}@${input.rev} 推 ${input.to}`);
+    }
+    if (input.to === "resolved") { // before any merge was sent: a conflict / red CI goes back to fix, a manual switch ends it; no freeze
+      closeMergeRun(db, ctx, row, input.receipt, mergeRunDrift(db, row));
+      return getMergeRun(db, row.intentId) as MergeRun;
+    }
+    // Every road to unknown passes here: once the PM took the card over and no merge was sent, whatever made the driver
+    // give up (a refused claim, a red optional check, a drift) ends the run as cancelled instead of freezing the queue.
+    if (input.to === "unknown" && manualCancel(db, row)) {
+      cancelMergeRun(db, ctx, row, text(input.receipt, "回执"));
+      return getMergeRun(db, row.intentId) as MergeRun;
     }
     const drift = mergeRunDrift(db, row);
     if (drift && input.to !== "unknown" && input.to !== "await_review") throw new LedgerError("conflict", `合并运行已失效：${drift}`);

@@ -55,10 +55,12 @@ export function mergeExternal(project: ProjectSchedule, command: typeof runBound
       if (!["OPEN", "MERGED", "CLOSED"].includes(state) || typeof raw.headRefOid !== "string") throw new Error("PR 状态或 head 无效");
       let checks: PrSnapshot["checks"] = [];
       if (state === "OPEN" && raw.isDraft !== true) {
-        const checkRun = await command(["gh", "pr", "checks", prRef, "--json", "bucket,name"],
+        const checkRun = await command(["gh", "pr", "checks", prRef, "--json", "bucket,name,link"],
           { cwd, env: { ...process.env, DISCORD_CHANNEL_ID: "", CLAUDESTRA_SCHEDULER_SERVICE: "", GIT_TERMINAL_PROMPT: "0" }, timeoutMs: 30_000 });
-        if (checkRun.timedOut || !checkRun.stdout.trim()) throw new Error(`gh pr checks 无结果：${oneLine(checkRun.stderr)}`);
-        const list = JSON.parse(checkRun.stdout) as unknown; // gh exits 8 for pending checks while still returning valid JSON
+        // A conflicted PR gets no CI run at all; only that case (seen in the same view) reads "no checks" as an empty list.
+        const dirtyNoChecks = !checkRun.timedOut && !checkRun.stdout.trim() && raw.mergeStateStatus === "DIRTY";
+        if (!dirtyNoChecks && (checkRun.timedOut || !checkRun.stdout.trim())) throw new Error(`gh pr checks 无结果：${oneLine(checkRun.stderr)}`);
+        const list = dirtyNoChecks ? [] : JSON.parse(checkRun.stdout) as unknown; // gh exits 8 for pending checks while still returning valid JSON
         if (!Array.isArray(list) || list.some((c) => !c || typeof c !== "object" ||
           !["pass", "fail", "pending", "skipping", "cancel"].includes(String((c as Record<string, unknown>).bucket)))) {
           throw new Error("gh pr checks 输出无效");
