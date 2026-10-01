@@ -2,7 +2,8 @@
  * 自动开卡（i28-A1）的 step：runStart（dag-tools-steps.ts）发出的每条台账写，由调度服务改写成 `ledger scheduler-autostart step <claim> <子命令> …`
  * 到这里执行。每步一个事务：先核 claim 还活着、目标（卡号 / feature / 节点）和 claim 一致，再调现成的 lib 写函数。
  * 卡的字段（kind、branch、pm、project、spec、fileGlobs、模板、作者家族、执行者）一律取 claim 与节点，不信适配器传来的值；
- * 建卡之后的写（开 auto、绑节点、回滚取消）还要求卡就是本 claim 建的（ledger-autostart-grant.ts claimOwnsCard）。
+ * 建卡之后的每一步（核对、开 auto、绑节点、回滚）还要求卡就是本 claim 建的（ledger-autostart-grant.ts claimOwnsCard），且卡上的执行者仍是
+ * claim 的 agent：PM 中途把卡改给别人，就等于接手了这张卡，调度不再碰它。
  * 授权经 ctx.autostart 交给 lib 的两处钩子（setWorkflow / bindNode），回滚取消卡按 pm 角色走 applyMove。tests/ledger-autostart-claim.test.ts。
  */
 import type { Database } from "bun:sqlite";
@@ -35,7 +36,9 @@ function deny(why: string): never {
 function owned(db: Database, c: AutostartClaim, taskId: string | undefined) {
   if (taskId !== c.taskId) deny(`目标 ${taskId ?? "（空）"} 不是 claim ${c.seq} 的卡 ${c.taskId}`);
   if (!claimOwnsCard(db, c, c.taskId)) deny(`${c.taskId} 不是 claim ${c.seq} 建的卡`);
-  return mustTask(db, c.taskId);
+  const task = mustTask(db, c.taskId);
+  if (task.agent !== c.agent) deny(`卡上的执行者 ${task.agent ?? "（空）"} 不是 claim 的 ${c.agent}`);
+  return task;
 }
 
 const grant = (ctx: WriteCtx, c: AutostartClaim): WriteCtx => ({ ...ctx, autostart: { claim: c.seq, featureId: c.featureId, key: c.key, taskId: c.taskId } });
@@ -61,7 +64,6 @@ function taskNew(db: Database, ctx: WriteCtx, c: AutostartClaim, input: StepInpu
 function taskSet(db: Database, c: AutostartClaim, input: StepInput) {
   const task = owned(db, c, input.pos[0]);
   if (input.flags.agent !== undefined && input.flags.agent !== c.agent) deny(`执行者只能是 claim 的 ${c.agent}`);
-  if (task.agent !== c.agent) deny(`卡上的执行者 ${task.agent ?? "（空）"} 不是 claim 的 ${c.agent}`);
   return { ok: true, task, duplicate: true };
 }
 

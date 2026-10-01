@@ -129,6 +129,30 @@ describe("step：授权只到本 claim 的那张卡", () => {
     expect(getTask(db, "i28-a")!.stage).toBe("spec");
   });
 
+  test("PM 中途把卡改给别的执行者：之后 claim 的每一步写都拒（核对、开 auto、退回 manual、绑节点、回滚取消）", async () => {
+    const c = (await claim()).claim;
+    await taskNew(c.seq);
+    expect(await run(PM, ["task-set", "i28-a", `--rev=${getTask(db, "i28-a")!.rev}`, "--agent=agent-other"])).toMatchObject({ ok: true });
+    expect(await step(c.seq, "task-set", "i28-a", `--rev=${getTask(db, "i28-a")!.rev}`, `--agent=${c.agent}`)).toMatchObject({ ok: false, code: "forbidden" });
+    for (const mode of ["auto", "manual"]) expect(await wf(c.seq, "i28-a", mode)).toMatchObject({ ok: false, code: "forbidden" });
+    expect(await bind(c.seq)).toMatchObject({ ok: false, code: "forbidden" });
+    expect(await step(c.seq, "stage", "i28-a", "--from=spec", "--to=cancelled", "--dedup=d:undo")).toMatchObject({ ok: false, code: "forbidden" });
+    expect(getTask(db, "i28-a")).toMatchObject({ agent: "agent-other", stage: "spec" });
+    expect(getWorkflow(db, "i28-a")).toBeNull();
+    expect(db.query("SELECT count(*) AS n FROM dag_bindings WHERE featureId = ?").get(FID)).toEqual({ n: 0 });
+  });
+
+  test("开了 auto 之后 PM 改执行者：回滚的退回 manual 与取消也拒，卡留给新执行者", async () => {
+    const c = (await claim()).claim;
+    await taskNew(c.seq);
+    await wf(c.seq);
+    await run(PM, ["task-set", "i28-a", `--rev=${getTask(db, "i28-a")!.rev}`, "--agent=agent-other"]);
+    expect(await wf(c.seq, "i28-a", "manual")).toMatchObject({ ok: false, code: "forbidden" });
+    expect(await step(c.seq, "stage", "i28-a", "--from=spec", "--to=cancelled", "--dedup=d:undo")).toMatchObject({ ok: false, code: "forbidden" });
+    expect(getWorkflow(db, "i28-a")!.mode).toBe("auto");
+    expect(getTask(db, "i28-a")!.stage).toBe("spec");
+  });
+
   test("回滚：只能把本 claim 建的卡推到 cancelled，开过的 auto 能退回 manual", async () => {
     const c = (await claim()).claim;
     await taskNew(c.seq);

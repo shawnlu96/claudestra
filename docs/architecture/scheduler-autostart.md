@@ -10,7 +10,7 @@
 | 模块 | 职责 |
 |------|------|
 | `src/lib/scheduler-autostart.ts` | 门的判定（纯函数 + 只读台账），调度服务、claim 事务、feature-show 三处共用 |
-| `src/lib/scheduler-autostart-run.ts` | 调度侧开卡：对账 → 选候选 → 额度 → claim → preflight → runStart → settle |
+| `src/lib/scheduler-autostart-run.ts` | 调度侧开卡：对账 → 选候选 → 额度 → 重读规格 → claim → preflight → 再读规格 → runStart → settle |
 | `src/lib/scheduler-autostart-resume.ts` | 交回判定 `resumeVerdict` 与每轮的交回步骤 |
 | `src/lib/scheduler-autostart-deps.ts` | 生产接线（路径、registry、git 加 `whileOwned`、带租约的 manager） |
 | `src/lib/ledger-autostart*.ts` | 台账侧：claim / step / settle、开关、自动交回的事务 |
@@ -43,7 +43,7 @@
 调度身份对一张卡的写权，只由这张卡活着的 claim 授予。
 
 - **claim**（`ledger scheduler-autostart claim`，一个事务）：先重核台账里的全部门，再查这个节点没有未结的 claim，全过才在 feature 上写一条 `autostart_claim` 事件。卡号、agent、分支、PM 都由台账按 start_node 的缺省规则算出，不收调用方给的值。dedupKey 是 `autostart:<feature>:<节点>:<arm>`，同一 arm 再来就返回 duplicate。
-- **step**（`… step <claim> <子命令> …`）：runStart 发出的台账写（task-new、task-set、workflow-set、dag-bind，以及回滚时的 stage→cancelled）都改写成 step，每步一个事务。事务里先核 claim 还没结、目标和 claim 一致；建卡之后的写还要求这张卡就是本 claim 建的。卡的字段一律取 claim 和节点。执行者在建卡时就写进去，所以 task-set 只做核对。
+- **step**（`… step <claim> <子命令> …`）：runStart 发出的台账写（task-new、task-set、workflow-set、dag-bind，以及回滚时的 stage→cancelled）都改写成 step，每步一个事务。事务里先核 claim 还没结、目标和 claim 一致；建卡之后的每一步（核对、开 auto、绑节点、回滚）还要求这张卡就是本 claim 建的，并且卡上的执行者仍是 claim 的 agent。PM 中途把卡改给别的执行者，就等于接手了这张卡，调度不再碰它，连回滚都不做，剩下的写进 leftovers。卡的字段一律取 claim 和节点。执行者在建卡时就写进去，所以 task-set 只做核对。
 - **授权钩子**：lib 里只有两处，钩子由 `ledger-autostart-grant.ts` 的 `autostartGrant` 判定，只认 `ctx.actor === "scheduler"`，并且 ctx 带着 step 在同一事务里核过的 claim。
   - `setWorkflow` 的 actorMayConfigure；
   - `bindNode` 的 requireManager。
@@ -56,9 +56,9 @@
 
 调度侧的顺序如下：
 
-1. **对账**：每轮开头处理还没结的 claim。调度服务是单例，同一轮开的 claim 都会结掉，所以此时没结的都是上一轮断掉留下的。节点已绑就结为 done；否则结为 unknown，并通知 PM 一次，不重开。
-2. **选候选**，写 claim。
-3. **preflight**：被拒就结为 failed；返回 already（节点已经被开过）就结为 done，不通知。
+1. **对账**：每轮开头处理还没结的 claim。节点已绑就结为 done；否则结为 unknown，并通知 PM 一次，不重开。本进程正在开的节点（从 claim 之前到结清之后登记在进程内）跳过，所以同一进程里并发的另一轮不会收回在跑的 claim 的写权。跨进程不用登记：只有拿到调度租约的进程才跑得了，前一个持有者的台账写和 create 都会报 lease-lost，它留下的 claim 就是断掉的。
+2. **选候选**，等额度门，再按规格卡重新算一次 arm（还要过静置、卡首开关、模板这几道门）。等的这段时间里规格卡或节点范围变了，就安静放弃，下一轮按新内容重判。然后写 claim。
+3. **preflight**：被拒就结为 failed；返回 already（节点已经被开过）就结为 done，不通知。之后再读一次规格卡，变了就结为 failed（code `spec_changed`），什么都还没建，通知 PM 一次；新内容是新的 arm，下一轮重判。runStart 本身只要几秒，期间改规格卡等同于 PM 刚用 start_node 开完就改规格：执行者读到的是新规格，模板以 claim 为准。
 4. **runStart**：失败时 runStart 自己倒序回滚，只撤本次建的东西。之后结为 failed，并给 PM 发一条通知，写明在哪一步失败、回滚了什么、留下了什么。卡号被回滚的那张卡占着时，通知里提示用 start_node 带 taskId 手动开。
 
 开卡成功不通知，台账事件和 DAG 图上都看得到。

@@ -224,6 +224,31 @@ describe("失败回滚：只撤本次建的，通知一条，同一 arm 不重�
     });
   }
 
+  test("等额度期间 PM 改了规格卡（关掉 / 换模板）：不 claim、不开、不通知；下一轮按新规格重判", async () => {
+    await autostartTick(env({ quota: async () => { spec("i28-a", "# 规格\n自动开卡：关\n模板：invalid\n", 0); return quota; } }));
+    expect(claims()).toHaveLength(0);
+    expect(creates).toBe(0);
+    expect(notes).toEqual([]);
+    spec("i28-a", "# 规格\n自动开卡：关\n");
+    await autostartTick(env());
+    expect(claims()).toHaveLength(0);
+  });
+
+  test("claim 之后、runStart 之前规格卡改了：这次结为 failed（spec_changed），什么都没建，通知一次", async () => {
+    let edited = false;
+    const se = () => ({ ...startEnv(), projectDirs: async () => {
+      if (!edited) { edited = true; spec("i28-a", "# 规格\n模板：ui\n", 0); }
+      return [repo];
+    } });
+    await autostartTick(env({ startEnv: se }));
+    expect(edited).toBe(true);
+    expect(settles()).toEqual(["failed"]);
+    expect(listEvents(db, { target: FID }).find((e) => e.data.op === "autostart_settle")!.data.code).toBe("spec_changed");
+    expect(getTask(db, "i28-a")).toBeNull();
+    expect(creates).toBe(0);
+    expect(notes).toHaveLength(1);
+  });
+
   test("改了规格卡就重新武装；卡号被回滚的卡占着时提示用 start_node 带 taskId", async () => {
     failOn = (a) => a[0] === "create";
     await autostartTick(env());
@@ -245,6 +270,25 @@ describe("不双开", () => {
     expect(creates).toBe(1);
     expect(db.query("SELECT count(*) AS n FROM tasks").get()).toEqual({ n: 1 });
     expect(bound()).toBe("i28-a");
+  });
+
+  test("同进程另一轮在第一轮 create 卡住时进来：不对账在跑的 claim，也不再开；第一轮放行后照常开完", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    let paused!: () => void;
+    const reached = new Promise<void>((r) => { paused = r; });
+    const first = autostartTick(env({ plain: async (args) => { if (args[0] === "create") { paused(); await gate; } return plain(args); } }));
+    await reached;
+    expect(await autostartTick(env({ memo: new Set() }))).toEqual([]);
+    expect(settles()).toEqual([]);
+    expect(claims()).toHaveLength(1);
+    release();
+    expect(await first).toEqual([]);
+    expect(settles()).toEqual(["done"]);
+    expect(bound()).toBe("i28-a");
+    expect(getTask(db, "i28-a")!.stage).not.toBe("cancelled");
+    expect(creates).toBe(1);
+    expect(notes).toEqual([]);
   });
 
   test("claim 写下后进程被杀（卡建了、没绑）：下一轮结为 unknown、通知一次，不重开", async () => {

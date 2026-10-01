@@ -1,7 +1,7 @@
 /**
  * 自动开卡（i28-A1 §3）调度侧：每轮在 auto tick 之后最多开一张卡，复用 start_node 的 preflightStart / runStart，不改它们。
- * 顺序：先对账上一轮断掉留下的 claim（已绑 → done；否则 unknown 并通知 PM 一次，不重开）→ 选候选（scheduler-autostart.ts）→ 额度门 →
- * 台账 claim（事务里重核全部台账门，同一 arm 只一条）→ preflight → runStart → settle。runStart 发出的台账写一律改写成
+ * 顺序：先对账断掉留下的 claim（已绑 → done；否则 unknown 并通知 PM 一次，不重开；本进程正在开的跳过）→ 选候选（scheduler-autostart.ts）→
+ * 额度门 → 重读规格卡 → 台账 claim（事务里重核全部台账门，同一 arm 只一条）→ preflight → 再读规格卡 → runStart → settle。runStart 发出的台账写一律改写成
  * `ledger scheduler-autostart step <claim> …` 以调度身份执行；create / kill 走带租约、不带调度身份的 manager，且只许本 claim 的 agent；
  * 别的 manager 调用适配器直接抛错，这一步失败、进入回滚。失败只通知 PM 一条，同一 arm 不再重试；开卡成功不通知。
  * tests/scheduler-autostart-run.test.ts。
@@ -15,7 +15,8 @@ import { openClaims, type AutostartClaim } from "./ledger-autostart-grant.js";
 import { getFeature } from "./ledger-feature.js";
 import { getTask } from "./ledger-store.js";
 import {
-  activeFeatures, currentViews, featureGate, isStop, nodeCandidate, quotaOver, readSwitch, templateLabel, weeklyLine, type Candidate, type ServiceFacts, type SpecFile,
+  activeFeatures, armOf, currentViews, featureGate, isStop, nodeCandidate, quotaOver, readSwitch, specGate, templateLabel, weeklyLine,
+  type Candidate, type ServiceFacts, type SpecFile,
 } from "./scheduler-autostart.js";
 import { SchedulerStopped } from "./scheduler-maintenance.js";
 import type { TickPace } from "./scheduler-yield.js";
@@ -60,10 +61,29 @@ async function settle(env: StartTickEnv, c: AutostartClaim, outcome: "done" | "f
 
 const worktreeOf = (env: StartTickEnv, c: AutostartClaim) => `${env.startEnv().worktreeRoot}/${c.taskId.toLowerCase()}`;
 
-/** 上一轮断掉留下的 claim：节点已绑到卡就是开成了；否则结为 unknown，留给 PM 核对，不重开 */
+/**
+ * 本进程里正在开的节点（台账文件 + feature + 节点 → 计数）：从 claim 之前到结清之后，对账一律跳过它们的 claim，不然同进程并发的另一轮
+ * 会把还在跑的 claim 结成 unknown，收回它的写权。跨进程不用登记：拿到调度租约的才跑得了，前一个持有者的台账写和 create 都会报 lease-lost。
+ */
+const INFLIGHT = new Map<string, number>();
+const flightKey = (db: Database, featureId: string, key: string) => `${db.filename}\0${featureId}\0${key}`;
+
+async function inFlight<T>(db: Database, featureId: string, key: string, run: () => Promise<T>): Promise<T> {
+  const k = flightKey(db, featureId, key);
+  INFLIGHT.set(k, (INFLIGHT.get(k) ?? 0) + 1);
+  try {
+    return await run();
+  } finally {
+    const n = (INFLIGHT.get(k) ?? 1) - 1;
+    if (n > 0) INFLIGHT.set(k, n);
+    else INFLIGHT.delete(k);
+  }
+}
+
+/** 断掉留下的 claim：节点已绑到卡就是开成了；否则结为 unknown，留给 PM 核对，不重开 */
 async function reconcile(env: StartTickEnv, failed: Failed): Promise<void> {
   for (const c of openClaims(env.db)) {
-    if (!env.svc.projects.includes(c.project)) continue;
+    if (!env.svc.projects.includes(c.project) || INFLIGHT.has(flightKey(env.db, c.featureId, c.key))) continue;
     const f = getFeature(env.db, c.featureId);
     const bound = f ? currentViews(env.db, f).find((n) => n.key === c.key)?.taskId : null;
     if (!(await settle(env, c, bound ? "done" : "unknown", bound ? [] : ["--text", "开卡中途断了（上一轮没结清）"]))) {
@@ -117,6 +137,16 @@ async function quotaBlocked(env: StartTickEnv, project: string, failed: Failed):
   return true;
 }
 
+/** 挑完候选之后规格卡或节点范围变了（额度、claim、preflight 都要等）：返回原因，没变为 null。变了就按新内容下一轮重判 */
+function specMoved(env: StartTickEnv, cand: Candidate): string | null {
+  const spec = env.readSpec(cand.taskId);
+  const g = specGate(spec, env.now());
+  if ("why" in g) return g.why;
+  const f = getFeature(env.db, cand.f.id);
+  const globs = (f ? currentViews(env.db, f) : []).find((n) => n.key === cand.key)?.fileGlobs ?? [];
+  return armOf((spec as SpecFile).text, globs, templateLabel(g.head.template)) === cand.arm ? null : "规格卡或节点范围在开卡途中改了";
+}
+
 /** runStart 的 manager 调用改写：台账写走 claim 的 step，create / kill 只许本 claim 的 agent，其余一律拒 */
 function adapter(env: StartTickEnv, c: AutostartClaim, p: StartPlan): StepIO["manager"] {
   return async (args, timeoutMs) => {
@@ -155,6 +185,7 @@ async function fail(env: StartTickEnv, c: AutostartClaim, x: Failure, failed: Fa
 
 async function openCard(env: StartTickEnv, pick: Pick, failed: Failed): Promise<void> {
   const { cand } = pick;
+  if (specMoved(env, cand)) return; // 还没写台账：安静放弃，下一轮按新规格重判
   const r = await env.ledger("ledger", "scheduler-autostart", "claim", cand.f.id, cand.key, "--arm", cand.arm, "--template", templateLabel(cand.head.template),
     "--max-workers", String(pick.maxWorkers));
   // 选完到 claim 之间门变了（conflict），或并发的另一方先 claim（duplicate）：下一轮重算，不出声；别的拒绝进服务的失败日志
@@ -169,6 +200,8 @@ async function openCard(env: StartTickEnv, pick: Pick, failed: Failed): Promise<
     return;
   }
   if (!pre.ok) return fail(env, c, { code: pre.code, error: pre.error, failedStep: "preflight", rolledBack: [], leftovers: [] }, failed);
+  const moved = specMoved(env, cand);
+  if (moved) return fail(env, c, { code: "spec_changed", error: moved, failedStep: "spec", rolledBack: [], leftovers: [] }, failed);
   const p = pre.plan;
   if (p.taskId !== c.taskId || p.agent !== c.agent || p.branch !== c.branch || p.pm !== c.pm) {
     return fail(env, c, { code: "mismatch", error: `开工计划（${p.taskId} / ${p.agent}）和 claim 对不上`, failedStep: "preflight", rolledBack: [], leftovers: [] }, failed);
@@ -187,7 +220,7 @@ export async function autostartTick(env: StartTickEnv, pace?: TickPace): Promise
     if (pace?.yieldNow()) return failed;
     const pick = pickCandidate(env);
     if (!pick || (await quotaBlocked(env, pick.cand.f.project, failed))) return failed;
-    await openCard(env, pick, failed);
+    await inFlight(env.db, pick.cand.f.id, pick.cand.key, () => openCard(env, pick, failed));
   } catch (e) {
     if (e instanceof SchedulerStopped) throw e;
     failed.push({ taskId: "autostart", error: (e as Error).message });
