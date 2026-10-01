@@ -15,7 +15,8 @@ function deps(agents: Record<string, Agent>, results: Record<string, Record<stri
     switchTo: async (name, mode) => {
       calls.push(`${name}→${mode}`);
       const r = results[mode]?.shift() ?? { ok: true, agent: name, transport: mode, restarted: true };
-      if (r.ok) agents[name] = { ...agents[name], transport: mode };
+      // 同 switchTransport：先把 transport 写进 registry 再 restart（restart 失败也已经写了）；起来后以实际的为准；切换前就被拒（没有 restarted）不动
+      if (r.restarted !== undefined) agents[name] = { ...agents[name], transport: r.restarted ? String(r.transport ?? mode) : mode };
       return r;
     },
     sandbox,
@@ -58,13 +59,16 @@ describe("tmux → acp", () => {
     expect(calls).toEqual(["agent-pa→acp"]);
   });
 
-  test("acp 起不来：退回 tmux 再起一次，报 fellBack；退也退不回就把两边的原因都给出来", async () => {
+  test("acp 起不来：退回 tmux 再起一次，报 fellBack；退也退不回就把两边的原因都给出来，transport / sessionId 按 registry 的实际", async () => {
     const failed = { ok: false, agent: "agent-pa", from: "tmux", transport: "acp", restarted: false, error: "重启失败：宿主没就绪" };
     const a = deps(fresh(), { acp: [{ ...failed }] });
-    expect(await migratePi(["pa"], a.d)).toEqual({ ok: false, agent: "agent-pa", transport: "tmux", fellBack: true, error: failed.error });
+    expect(await migratePi(["pa"], a.d)).toEqual({ ok: false, agent: "agent-pa", transport: "tmux", sessionId: "s-1", ready: true, fellBack: true, error: failed.error });
     expect(a.calls).toEqual(["agent-pa→acp", "agent-pa→tmux"]);
-    const b = deps(fresh(), { acp: [{ ...failed }], tmux: [{ ok: false, restarted: false, error: "tmux 也起不来" }] });
-    expect(await migratePi(["pa"], b.d)).toEqual({ ok: false, agent: "agent-pa", transport: "acp", fellBack: false, error: failed.error, fallbackError: "tmux 也起不来" });
+    const agents = fresh();
+    const b = deps(agents, { acp: [{ ...failed }], tmux: [{ ok: false, transport: "tmux", restarted: false, error: "tmux 也起不来" }] });
+    const r = await migratePi(["pa"], b.d);
+    expect(r).toEqual({ ok: false, agent: "agent-pa", transport: "tmux", sessionId: "s-1", ready: false, fellBack: true, error: failed.error, fallbackError: "tmux 也起不来" });
+    expect(r.transport).toBe(agents["agent-pa"].transport); // 审查复现：修前这里报 acp，registry 实际是 tmux
   });
 
   test("沙箱里不退回 tmux（沙箱没有 TUI 版 Pi）", async () => {

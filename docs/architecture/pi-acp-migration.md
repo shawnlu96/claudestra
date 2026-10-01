@@ -11,7 +11,7 @@ What `migrate --pi` does:
 
 1. Refuses agents that don't exist or aren't Pi (Codex has its own `migrate --acp`); an agent already on acp is left alone.
 2. Switches through the same path as `transport <agent> acp`: pi ≥ 0.99.0, no `claudestra` server in pi's own `mcp.json` (it would silently replace the mounted channel-server), then registry + restart. A refusal at this stage changes nothing.
-3. If the acp restart fails, switches back to tmux and restarts again, so a working agent is not left as a dead window (`fellBack: true`). The sandbox never falls back: it has no TUI Pi.
+3. If the acp restart fails, switches back to tmux and restarts again, so a working agent is not left as a dead window (`fellBack: true`). The result re-reads the registry afterwards: `transport` / `sessionId` are what the registry actually holds and `ready` says whether the tmux restart came up (if it did not, the registry is already `tmux` and `fallbackError` carries the reason). The sandbox never falls back: it has no TUI Pi.
 4. Reports the session id before and after (`sameSession`). Both transports start pi with the registry's `--session-id` (open-or-create), so the conversation continues.
 
 Differences after the move:

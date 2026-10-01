@@ -52,5 +52,11 @@ export async function migratePi(args: string[], deps: PiMigrateDeps = defaultDep
   // 没有 restarted 字段 = 切换前就被拒（版本 / 同名 MCP），registry 没动，不用回退
   if (r.restarted === undefined || deps.sandbox) return r;
   const back = await deps.switchTo(key, "tmux");
-  return { ok: false, agent: key, transport: back.ok ? "tmux" : "acp", fellBack: back.ok === true, error: r.error, ...(back.ok ? {} : { fallbackError: back.error }) };
+  // 报 registry 里的实际状态：switchTransport 先写 transport 再 restart，回退的 restart 失败时 registry 已是 tmux（只是没起来）
+  const now = (await deps.agents())[key];
+  const transport = normalizeTransport(now?.transport);
+  return {
+    ok: false, agent: key, transport, sessionId: now?.sessionId, ready: back.ok === true, fellBack: transport === "tmux",
+    error: r.error, ...(back.ok ? {} : { fallbackError: back.error }),
+  };
 }
