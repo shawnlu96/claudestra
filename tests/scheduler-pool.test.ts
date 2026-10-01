@@ -13,6 +13,7 @@ import { instanceKeySync, signPurpose } from "../src/lib/instance-key.js";
 import type { BorrowEntry } from "../src/lib/lend-config.js";
 import { RECEIPT_PURPOSE } from "../src/lib/ledger-lend-result.js";
 import { listLendOrders } from "../src/lib/ledger-lend.js";
+import { recordHello } from "../src/lib/ledger-lend-peers.js";
 import type { LedgerTask } from "../src/lib/ledger-stages.js";
 import { listEvents } from "../src/lib/ledger-store.js";
 import { schedulerAutoTick } from "../src/lib/scheduler-auto-tick.js";
@@ -22,6 +23,8 @@ import { LedgerReader } from "../src/lib/ledger-read.js";
 import type { RemotePolicy } from "../src/lib/scheduler-config.js";
 import { planScheduler, type PlannerSnapshot } from "../src/lib/scheduler-plan.js";
 import { poolTarget, type PoolFacts } from "../src/lib/scheduler-pool-plan.js";
+import { drivePool } from "../src/lib/scheduler-pool-tick.js";
+import type { SchedulerIntent } from "../src/lib/ledger-scheduler.js";
 import { autoFixture, H1, H2, P1, toBuild } from "./scheduler-auto-helpers.js";
 
 const REMOTE: RemotePolicy = { mode: "overflow", roles: ["review"], poolTimeoutMin: 15 };
@@ -326,5 +329,63 @@ describe("i28-R9 takeover / resume with a pool order out", () => {
       expect(await resume(q)).toMatchObject({ ok: true });
       expect(q.orders()[0].status).toBe("cancelled");
     } finally { q.f.close(); }
+  });
+});
+
+describe("i28-N10 the offer's re-plan keeps remote.reviewFirst", () => {
+  // He is listed before Sekai in lend.json and both are idle v2 peers: only reviewFirst breaks the tie toward Sekai.
+  const both: BorrowEntry[] = [{ peer: "He", projects: ["p"], roles: ["review"], maxOpen: 2 }, { peer: "Sekai", projects: ["p"], roles: ["review"], maxOpen: 2 }];
+  const BALANCE: RemotePolicy = { mode: "balance", roles: ["review"], poolTimeoutMin: 15 };
+  const helloBoth = (f: { db: Database; tickDeps: { now(): number } }) => {
+    for (const [i, peer] of ["He", "Sekai"].entries()) {
+      recordHello(f.db, peer, null, { v: 1, proto: 2, boot: `boot-${peer}`, seq: i + 1, slots: { codex: { total: 2, busy: 0 }, claude: { total: 0, busy: 0 } }, paused: null,
+        grant: { until: f.tickDeps.now() + 3_600_000, roles: ["review"], repos: ["o/r"], ordersPerDay: 50, ordersLeftToday: 50 } }, f.tickDeps.now());
+    }
+  };
+  const ready = async (remote: RemotePolicy) => {
+    const p = await pooled({ borrow: both, remote });
+    helloBoth(p.f);
+    return p;
+  };
+
+  test("tie with an earlier lend.json peer → pooled to the reviewFirst peer, not cancelled", async () => {
+    const p = await ready({ ...BALANCE, reviewFirst: ["Sekai"] });
+    try {
+      expect(await p.tick()).toMatchObject({ step: "pool_pooled", detail: expect.stringContaining("挂给 Sekai") });
+      expect(p.orders()).toEqual([expect.objectContaining({ status: "pooled", peer: "Sekai" })]);
+      expect(p.f.intents().at(-1)).toMatchObject({ action: "review", status: "pending", recipient: "peer:Sekai" });
+    } finally { p.f.close(); }
+  });
+
+  test("no reviewFirst → unchanged: the tie goes to the first lend.json peer", async () => {
+    const p = await ready(BALANCE);
+    try {
+      expect(await p.tick()).toMatchObject({ step: "pool_pooled", detail: expect.stringContaining("挂给 He") });
+      expect(p.orders()).toEqual([expect.objectContaining({ status: "pooled", peer: "He" })]);
+      expect(p.f.intents().at(-1)).toMatchObject({ recipient: "peer:He" });
+    } finally { p.f.close(); }
+  });
+
+  test("drivePool passes --review-first only when reviewFirst is set; the CLI drops empty items", async () => {
+    const calls: string[][] = [];
+    const deps = { manager: async (...a: string[]) => { calls.push(a); return { ok: true, outcome: "pooled" }; }, notifyPm: async () => {}, lost: () => () => {} };
+    const intent = { id: "i1" } as SchedulerIntent, task = { id: "T1" } as LedgerTask;
+    await drivePool(deps, task, intent, 0, BALANCE);
+    await drivePool(deps, task, intent, 0, { ...BALANCE, reviewFirst: ["Sekai", "He"] });
+    expect(calls[0]).not.toContain("--review-first");
+    expect(calls[1].slice(-2)).toEqual(["--review-first", "Sekai,He"]);
+    const p = await ready(BALANCE);
+    try {
+      const pool = { remote: { ...BALANCE, reviewFirst: ["Sekai"] }, borrow: both };
+      const plan = planScheduler(autoSnapshot(p.f.db, p.f.task(), { registry: [], maxWorkers: 0, now: p.f.tickDeps.now(), pool }));
+      if (plan.kind !== "intent") throw new Error("expected a pool intent");
+      expect(plan.recipient).toBe("peer:Sekai");
+      const seq = (p.f.db.query("SELECT MAX(seq) AS s FROM events").get() as { s: number }).s;
+      expect((await p.cli("scheduler", "scheduler-plan", "T1", "--id", plan.id, "--rev", String(p.f.task().rev), "--workflow-rev", "1", "--seq", String(seq),
+        "--node", plan.node, "--action", "review", "--recipient", plan.recipient!, "--reason", plan.reason, "--resources", plan.resources.join(","))).ok).toBe(true);
+      const pool1 = (...extra: string[]) => p.cli("scheduler", "scheduler-pool", plan.id, "--max-workers", "0", "--mode", "balance", "--roles", "review", "--timeout-min", "15", ...extra);
+      expect(await pool1("--review-first", " ,Sekai, ")).toMatchObject({ ok: true, outcome: "pooled" });
+      expect(p.orders()).toEqual([expect.objectContaining({ peer: "Sekai" })]);
+    } finally { p.f.close(); }
   });
 });

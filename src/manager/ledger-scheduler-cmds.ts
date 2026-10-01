@@ -1,7 +1,7 @@
 /** Narrow CLI entrypoints for durable scheduler facts; no arbitrary stage or owner action is exposed here. */
 import { INTENT_ACTIONS, INTENT_STATUSES, WORKFLOW_MODES, WORKFLOW_TEMPLATES, AUTHOR_FAMILIES, getIntent } from "../lib/ledger-scheduler.js";
 import { settleIntent } from "../lib/ledger-scheduler-settle.js";
-import { planIntent, setWorkflow } from "../lib/ledger-scheduler-write.js";
+import { planIntent, recordPlanRejected, setWorkflow } from "../lib/ledger-scheduler-write.js";
 import { resumeAutoWorkflow } from "../lib/ledger-scheduler-resume.js";
 import { bindSchedulerSession, recordSessionRetirement, type SessionRole, type SessionTransport } from "../lib/scheduler-sessions.js";
 import { advanceMergeRun, beginMergeRun, MERGE_RESOLUTIONS, resolveMergeRun, type MergePhase, type MergeResolution } from "../lib/scheduler-merge.js";
@@ -81,6 +81,13 @@ export const SCHEDULER_CMDS: Record<string, CommandSpec> = {
       return { ok: true, ...r };
     },
   },
+  "scheduler-plan-rejected": {
+    valued: ["code", "text"], bools: [],
+    usage: "scheduler-plan-rejected <task> --code <错误码> --text <拒收原因>（调度服务专用：同一原因连续被台账拒收，记一次报警；按卡 + 原因去重）",
+    run(c) {
+      return { ok: true, ...recordPlanRejected(c.db, c.ctx(), { taskId: c.p.pos[1] ?? "", code: c.need("code"), text: c.need("text") }) };
+    },
+  },
   "scheduler-settle": {
     valued: ["from", "to", "receipt"], bools: [],
     usage: "scheduler-settle <intent-key> --from pending|submitted|unknown --to submitted|done|unknown|cancelled [--receipt <evidence>]",
@@ -94,8 +101,8 @@ export const SCHEDULER_CMDS: Record<string, CommandSpec> = {
     },
   },
   "scheduler-pool": {
-    valued: ["max-workers", "mode", "roles", "timeout-min"], bools: [],
-    usage: "scheduler-pool <intent-key> --max-workers N --mode balance|off --roles review|none --timeout-min N（调度服务专用：挂池 / 同步出借单 / 超时撤回）",
+    valued: ["max-workers", "mode", "roles", "timeout-min", "review-first"], bools: [],
+    usage: "scheduler-pool <intent-key> --max-workers N --mode balance|off --roles review|none --timeout-min N [--review-first a,b]（调度服务专用：挂池 / 同步出借单 / 超时撤回）",
     async run(c) {
       const raw = c.need("mode"), roles = c.need("roles");
       // A scheduler daemon still on R9 code passes overflow / prefer until it restarts: same meaning as the config reads them.
@@ -105,10 +112,11 @@ export const SCHEDULER_CMDS: Record<string, CommandSpec> = {
       if (minutes < 1) throw new LedgerError("invalid", "--timeout-min 至少 1");
       const intent = c.p.pos[1] ?? "", maxWorkers = integer(c, "max-workers");
       if (maxWorkers > 32) throw new LedgerError("invalid", "--max-workers 要在 0–32");
+      const reviewFirst = (c.p.flags["review-first"] ?? "").split(",").map((x) => x.trim()).filter(Boolean);
       const borrow = await (c.deps.lend?.borrow() ?? readEffectiveBorrow());
       return { ok: true, ...schedulerPoolStep(c.db, c.ctx(), {
         intentId: intent, maxWorkers, timeoutMs: minutes * 60_000, borrow,
-        remote: { mode: mode as RemoteMode, roles: roles === "review" ? ["review"] : [], poolTimeoutMin: minutes },
+        remote: { mode: mode as RemoteMode, roles: roles === "review" ? ["review"] : [], poolTimeoutMin: minutes, ...(reviewFirst.length ? { reviewFirst } : {}) },
         spec: specOf(c, intent),
       }) };
     },

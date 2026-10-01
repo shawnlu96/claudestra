@@ -50,7 +50,7 @@ import { assertSchedulerLease, SchedulerLeaseLost } from "../lib/scheduler-lease
 /** 认不出身份时读命令用的 actor：不是 registry 键、不在任何 PM 名单里，roleOf 恒为 null */
 export const UNKNOWN_ACTOR = "unknown";
 const SCHEDULER_SERVICE_COMMANDS = new Set([
-  "scheduler-plan", "scheduler-settle", "scheduler-session-bind", "scheduler-session-retire", "scheduler-merge-begin", "scheduler-merge-step",
+  "scheduler-plan", "scheduler-plan-rejected", "scheduler-settle", "scheduler-session-bind", "scheduler-session-retire", "scheduler-merge-begin", "scheduler-merge-step",
   "scheduler-observe", "scheduler-fallback-manual", "scheduler-stage", "scheduler-ui-ask", "lend-ask", "lend-inform", "lend-close-asks", "scheduler-pool",
   "scheduler-deploy-begin", "scheduler-deploy-step", "verify",
   "scheduler-unclaimed", "scheduler-unclaimed-sent", "scheduler-supervise", "peer-pr-intake", "peer-pr-observe", "peer-pr-push-record",

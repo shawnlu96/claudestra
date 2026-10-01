@@ -16,6 +16,7 @@ import { SchedulerStopped } from "./scheduler-maintenance.js";
 import { CLAIM_LEASE_MS, driveDispatch, type DriveOutcome, type SchedulerLedgerOps } from "./scheduler-dispatch.js";
 import { planScheduler, type PlannerDecision } from "./scheduler-plan.js";
 import { getSchedulerSession, type SessionRole } from "./scheduler-sessions.js";
+import { planRejectedReason } from "./ledger-scheduler-write.js";
 import type { SnapshotOpts } from "./scheduler-snapshot.js";
 import { stepOfNode, workOrderFor } from "./scheduler-work-order.js";
 import { paceCards, type TickPace } from "./scheduler-yield.js";
@@ -59,6 +60,26 @@ const noticeLost = (what: string) => (e: unknown): void => {
 /** 未领单报警没送到 PM 时多久重发一次；上次失败时间只放内存（按库分开），重启后立刻再试一次，无妨 */
 const UNCLAIMED_RETRY_MS = 60_000;
 const alarmFailedAt = new WeakMap<Database, Map<string, number>>();
+/**
+ * A plan the ledger keeps refusing for one reason (code + whole first line) is reported once: after PLAN_REJECT_TICKS refusals or
+ * PLAN_REJECT_MS. Counts live in memory per ledger; a restart re-reports a standing reason at most once (the event dedups).
+ * An undelivered notice is kept per card + reason, apart from the count, and retried at the start of every pass, whatever its card
+ * does now (planned, waiting, taken to manual). tests/scheduler-freeze-alarm.test.ts.
+ */
+const PLAN_REJECT_TICKS = 3;
+export const PLAN_REJECT_MS = 5 * 60_000;
+interface Refusal { code: string; text: string; ticks: number; since: number; told: boolean }
+const refusals = new WeakMap<Database, Map<string, Refusal>>(), unsent = new WeakMap<Database, Map<string, { task: LedgerTask; text: string }>>();
+const perDb = <V>(w: WeakMap<Database, Map<string, V>>, db: Database): Map<string, V> => w.get(db) ?? w.set(db, new Map()).get(db)!;
+/** Send one undelivered refused-plan notice; a failure is logged and the notice stays for the next pass. */
+async function sendNotice(db: Database, deps: AutoTickDeps, key: string): Promise<boolean> {
+  const n = unsent.get(db)?.get(key);
+  if (!n) return true;
+  try { await deps.notifyPm(getTask(db, n.task.id) ?? n.task, n.text); } catch (e) { noticeLost("计划拒收报警没发出去（台账已记，下轮重发）")(e); return false; }
+  unsent.get(db)?.delete(key);
+  return true;
+}
+const FREEZE_ADVICE = "查 scheduler_merges 未结运行 → scheduler-merge-resolve → unfreeze";
 const roleOfIntent = (i: Pick<SchedulerIntent, "action" | "node">): SessionRole =>
   i.action === "review" || i.node === "adversarial_review" ? "reviewer" : "author";
 
@@ -92,13 +113,30 @@ class Card {
     return this.out(ok ? "replan" : "lost_race", why);
   }
 
-  async plan(plan: Planned): Promise<SchedulerIntent | string> {
+  async plan(plan: Planned): Promise<SchedulerIntent | { code: string; error: string }> {
     const workflow = getWorkflow(this.db, this.task.id);
     const seq = (this.db.query("SELECT COALESCE(MAX(seq), 0) AS seq FROM events WHERE project = ?").get(this.task.project) as { seq: number }).seq;
     const r = await this.deps.manager("ledger", "scheduler-plan", this.task.id, "--id", plan.id, "--rev", String(this.task.rev),
       "--workflow-rev", String(workflow?.rev ?? 0), "--seq", String(seq), "--node", plan.node, "--action", plan.action, "--reason", plan.reason,
       ...(plan.recipient ? ["--recipient", plan.recipient] : []), ...(plan.resources.length ? ["--resources", plan.resources.join(",")] : []));
-    return r.ok === true ? r.intent as SchedulerIntent : `计划没写进台账：${String(r.error)}`;
+    return r.ok === true ? r.intent as SchedulerIntent : { code: String(r.code ?? "unknown"), error: String(r.error) };
+  }
+
+  /** Count a refused plan; on the threshold record it on the ledger, then tell PM once (see PLAN_REJECT_TICKS). */
+  async refused(code: string, error: string): Promise<CardOutcome> {
+    const text = planRejectedReason(error), now = this.deps.now(), detail = `计划没写进台账：${oneLine(error)}`;
+    const seen = perDb(refusals, this.db), was = seen.get(this.task.id);
+    const r: Refusal = was && was.code === code && was.text === text ? { ...was, ticks: was.ticks + 1 } : { code, text, ticks: 1, since: now, told: false };
+    seen.set(this.task.id, r);
+    if (r.told || (r.ticks < PLAN_REJECT_TICKS && now - r.since < PLAN_REJECT_MS)) return this.out("replan", detail);
+    const rec = await this.deps.manager("ledger", "scheduler-plan-rejected", this.task.id, "--code", code, "--text", text);
+    if (rec.ok !== true) return this.out("held", `${detail}；拒收报警没记上（下个 tick 再记）：${String(rec.error)}`);
+    const advice = text.includes("冻结") ? FREEZE_ADVICE : "按原因核对台账；处理不了就 workflow-set --mode manual 接管";
+    r.told = true;
+    const key = `${this.task.id}\n${code}\n${text}`;
+    perDb(unsent, this.db).set(key, { task: this.task, text: `[调度引擎] ${this.task.id} 的调度计划连续 ${r.ticks} 次被台账拒收` +
+      `（${Math.floor((now - r.since) / 60_000)} 分钟）：[${code}] ${text}。建议：${advice}` });
+    return this.out("replan", `${detail}；${(await sendNotice(this.db, this.deps, key)) ? "已报警 PM" : "报警没发出去，下个 tick 重发"}`);
   }
 
   async ensure(intent: SchedulerIntent, plan: Planned | null): Promise<CardOutcome> {
@@ -320,7 +358,9 @@ class Card {
     const backoff = plan.action === "dispatch" || plan.action === "review" ? this.undeliveredBackoff() : null;
     if (backoff) return this.out("held", backoff);
     const intent = await this.plan(plan);
-    return typeof intent === "string" ? this.out("replan", intent) : this.drive(intent, plan);
+    if ("error" in intent) return this.refused(intent.code, intent.error);
+    refusals.get(this.db)?.delete(this.task.id);
+    return this.drive(intent, plan);
   }
 }
 
@@ -340,6 +380,7 @@ export async function schedulerAutoTick(db: Database, projects: Record<string, {
   const out: AutoTickResult = { cards: [], failed: [] };
   const poolOf = poolReader(deps);
   if (!db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'task_workflows'").get()) return out;
+  for (const key of [...(unsent.get(db)?.keys() ?? [])]) await sendNotice(db, deps, key);
   for (const { project, policy, taskId } of paceCards(db, projects, "auto", pace)) {
     if (pace?.yieldNow()) break;
     if (pace) pace.cursor.auto = `${project}/${taskId}`;

@@ -1,6 +1,6 @@
 /**
  * pi 的 mcp.json 里有同名 server（`-` 与 `_` 算同名）时，它静默顶掉扩展挂的 channel-server：模型没有 reply、也不报错
- * （pi 0.99 extensions/mcp：配置项优先于 registerMcpServer）。所以起 pi 前查用户级 <agent-dir>/mcp.json 与项目 <cwd>/.pi/mcp.json，
+ * （pi 0.99 的内置 MCP 也会连上配置里那个同名 server、注册同名工具）。所以起 pi 前查用户级 <agent-dir>/mcp.json 与项目 <cwd>/.pi/mcp.json，
  * 撞名就拒起并点名文件。不改名：reply 的识别 / 隐藏、回复提示、bridge 的工具过滤都按 MCP_NAME 认。
  * 比 pi 略严：项目文件不看信任、禁用的条目也算（改一行配置就成了真覆盖）。agent 目录按 Pi 的规则算（lib/pi-path.ts）。
  * 只依赖 node 内置模块和 pi-path：pi 里的挂载扩展也调它。tests/pi-acp-mcp-clash.test.ts、tests/pi-acp-agent-dir.test.ts。

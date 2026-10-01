@@ -7,7 +7,8 @@
  */
 import { Database } from "bun:sqlite";
 import { isCodexEffort, isCodexModel, LEND_PATH, readLendSync } from "./lend-config.js";
-import { getOrder, LEND_JOURNAL_PATH } from "./lend-journal.js";
+import { existsSync } from "node:fs";
+import { getOrder, LEND_JOURNAL_PATH, LIVE_STATES, type LendState } from "./lend-journal.js";
 import { lendStopReason } from "./lend-watchdog.js";
 import { isLendWorkerName } from "./runtimes/clean-env.js";
 import type { WorkerLiveness } from "./worker-liveness.js";
@@ -20,7 +21,7 @@ export interface CreateGateOpts {
   env?: Record<string, string | undefined>; journal?: string; lendPath?: string; now?: number; choice?: { model?: string; effort?: string };
 }
 
-export const CHOICE_CHANGED = "出借 worker 不起：授权里的模型或推理档在起之前改了，本次不起，下一轮按新授权重建参数";
+export const CHOICE_CHANGED = "出借 worker 不起：授权里的模型或推理档在起之前改了，本次不起，单子退回发起方重派，下次领单按新授权起";
 
 /** 只读查这张单的 peer / 指纹（manager create 子进程里没有出借服务的 journal 连接）；读失败往外抛，由调用方按不起处理 */
 function orderPeer(journal: string, orderId: string): { peer: string; fp: string | null } | null {
@@ -131,6 +132,34 @@ export async function stopRevokedWorkers(io: StopIo): Promise<StopReport> {
     out.stopped.push(w.name);
   }
   return out;
+}
+
+/**
+ * 关掉的窗口在 journal 里有没有没结束的单（这个名字最新的一张在 LIVE_STATES）：有 = 停掉了在跑的活，没有 = 只是已结束单的残留窗口。
+ * 只看 journal 不看窗口——窗口在不在说明不了单还在不在跑。journal 读不了按在跑算：宁可多说一句停掉，不把真在跑的说成残留。
+ */
+export function workerOrderLive(agent: string, journal = LEND_JOURNAL_PATH): boolean {
+  if (!existsSync(journal)) return false;
+  try {
+    const db = new Database(journal, { readonly: true });
+    try {
+      db.exec("PRAGMA busy_timeout = 2000");
+      const row = db.query("SELECT state FROM lend_orders WHERE agent = ? ORDER BY createdAt DESC LIMIT 1").get(agent) as { state: LendState } | null;
+      return !!row && LIVE_STATES.includes(row.state);
+    } finally { db.close(); }
+  } catch (e) {
+    console.error(`[lend] 读 journal 判断 ${agent} 的单是否在跑失败，按在跑算：${(e as Error).message}`);
+    return true;
+  }
+}
+
+/** grant / revoke 输出里的那段：在跑被停的和残留窗口分开说，残留的不说「停掉」 */
+export function stopReportText(r: StopReport, orderLive: (agent: string) => boolean): string {
+  const live = r.stopped.filter((n) => orderLive(n));
+  const left = r.stopped.filter((n) => !live.includes(n));
+  return (live.length ? `；已停掉在跑的 ${live.length} 个：${live.join("、")}` : "") +
+    (left.length ? `；清理了 ${left.length} 个已结束单的残留窗口：${left.join("、")}` : "") +
+    (r.unconfirmed.length ? `；没能确认停掉：${r.unconfirmed.map((u) => `${u.name}（${u.why}）`).join("、")}` : "");
 }
 
 /** ps 看这个 pid 的命令行：是 manager.ts create <name> 才算（读失败 = 不是，不发信号；窗口照样按名字关） */

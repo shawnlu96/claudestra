@@ -1,5 +1,6 @@
 /** Scheduler-only ledger writes: every decision and resource claim is one compare-and-swap transaction. */
 import type { Database } from "bun:sqlite";
+import { createHash } from "node:crypto";
 import { mustTask, type WriteCtx } from "./ledger-checks.js";
 import { blockedBy, depViews } from "./ledger-deps.js";
 import {
@@ -8,6 +9,7 @@ import {
   type TaskWorkflow, type WorkflowMode, type WorkflowTemplate,
 } from "./ledger-scheduler.js";
 import { getEventByDedup, getMeta, LedgerError, listDeps, listEvents, listTasks } from "./ledger-store.js";
+import type { LedgerEvent } from "./ledger-stages.js";
 import { insertEvent, tx } from "./ledger-tx.js";
 import { closePoolOrders } from "./ledger-scheduler-pool.js";
 import { actorMayConfigure, actorMaySchedule, textOneLine } from "./ledger-scheduler-settle.js";
@@ -23,6 +25,14 @@ import { autostartGrant } from "./ledger-autostart-grant.js";
 const projectSeq = (db: Database, project: string): number =>
   (db.query("SELECT COALESCE(MAX(seq), 0) AS seq FROM events WHERE project = ?").get(project) as { seq: number }).seq;
 const cardResource = (action: IntentAction, resource: string): boolean => action === "dispatch" && !resource.startsWith("task:");
+
+/**
+ * What a frozen merge queue refuses: new work (every intent of a spec / build / fix card), merging and deploying (the merge stage and
+ * any merge intent). Reviews and the stage moves their verdicts drive keep running. Must equal the planner's own freeze wait
+ * (scheduler-plan.ts `queue_frozen`), or a review plan is refused every tick: tests/scheduler-freeze-align.test.ts.
+ */
+const FROZEN_STAGES: readonly string[] = ["spec", "build", "fix", "merge"];
+export const frozenBlocks = (stage: string, action: IntentAction): boolean => FROZEN_STAGES.includes(stage) || action === "merge";
 
 function requireReviewedMerge(db: Database, task: ReturnType<typeof mustTask>, workflow: TaskWorkflow, node: string, now: number): void {
   if (task.stage !== "merge" || node !== "merge_deploy") throw new LedgerError("invalid", "merge 意图只许在 merge_deploy 节点");
@@ -176,7 +186,7 @@ export function planIntent(db: Database, ctx: WriteCtx, input: PlanIntentInput):
     if (task.rev !== input.taskRev || workflow.rev !== input.workflowRev || projectSeq(db, task.project) !== input.causalSeq) {
       throw new LedgerError("conflict", "任务、流程或项目事件已前进，丢弃旧计划重新计算");
     }
-    if (getMeta(db, task.project).queueFrozen.frozen) throw new LedgerError("conflict", "项目合并队列已冻结");
+    if (getMeta(db, task.project).queueFrozen.frozen && frozenBlocks(task.stage, input.action)) throw new LedgerError("conflict", "项目合并队列已冻结");
     const blocked = blockedBy(task.id, depViews(listDeps(db, task.project), listTasks(db, task.project)));
     if (blocked.length) throw new LedgerError("conflict", `任务被前置挡住：${blocked.map((d) => d.from).join("、")}`);
     if (!INTENT_ACTIONS.includes(input.action)) throw new LedgerError("invalid", "调度动作不认识");
@@ -240,5 +250,33 @@ export function recordRestateBrake(db: Database, ctx: WriteCtx, input: { taskId:
     const event = insertEvent(db, { actor: ctx.actor, now: ctx.now ?? Date.now() }, {
       project: task.project, target: task.id, kind: "decision", text, data: { op: input.op, specRev: task.specRev } }, true);
     return { event };
+  });
+}
+
+/** A refused plan's reason: its whole first line; one too long to store is cut and tagged with the full line's digest, so it stays distinct. */
+export const planRejectedReason = (error: string): string => {
+  const line = (error.split("\n")[0] ?? "").replace(/\s+/g, " ").trim() || "（无错误文）";
+  return line.length <= 560 ? line : `${line.slice(0, 540)}…#${createHash("sha256").update(line).digest("hex").slice(0, 16)}`;
+};
+
+/** Dedup key of a refused-plan alarm: card + reason (error code + first line), hashed because the reason is free text. */
+const planRejectedKey = (taskId: string, code: string, text: string): string =>
+  `scheduler:plan-rejected:${taskId}:${createHash("sha256").update(`${code}\n${text}`).digest("hex").slice(0, 24)}`;
+
+/**
+ * The auto tick's plan kept being refused for one reason: one scheduler event per card + reason so PM can see why the card stalls.
+ * Scheduler-only; a second write for the same reason returns the first event (the notice itself is the tick's job).
+ */
+export function recordPlanRejected(db: Database, ctx: WriteCtx, input: { taskId: string; code: string; text: string }): { event: LedgerEvent; duplicate: boolean } {
+  if (ctx.actor !== "scheduler") throw new LedgerError("forbidden", "计划拒收报警只由调度服务写");
+  const code = textOneLine(input.code, "错误码", 40), text = textOneLine(input.text, "拒收原因", 600);
+  return tx(db, () => {
+    const task = mustTask(db, input.taskId);
+    const key = planRejectedKey(task.id, code, text);
+    const prior = getEventByDedup(db, key);
+    if (prior) return { event: prior, duplicate: true };
+    const event = insertEvent(db, { actor: ctx.actor, now: ctx.now ?? Date.now(), dedupKey: key }, {
+      project: task.project, target: task.id, kind: "scheduler", text: `调度计划被台账连续拒收：${text}`, data: { op: "plan_rejected", code, reason: text } }, true);
+    return { event, duplicate: false };
   });
 }
