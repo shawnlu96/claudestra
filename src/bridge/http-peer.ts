@@ -11,6 +11,7 @@ import type { Envelope, Delivery } from "./router.js";
 import { newMessageId, newThreadId } from "./router.js";
 import { findHttpPeer, type HttpPeer } from "../lib/peers.js";
 import { handoffEnd, handoffStart } from "../lib/handoff-log.js";
+import { isLendWorkerName } from "../lib/lend-workers-view.js";
 import { signedFor } from "../lib/instance-key.js";
 import { peerAuthHint, peerCallFailureText, peerCallIsTimeout, peerErrorText } from "../lib/peer-auth-hints.js";
 import { readJsonCapped } from "../lib/body-reader.js";
@@ -113,6 +114,7 @@ export function routeToHttpPeer(
 ): { ok: true; targetName: string; pushBack: boolean } {
   const caller: CallerRef = { ws, channelId: fromChannelId, name: fromName };
   const callId = `hp_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  if (isLendWorkerName(peerAgentName)) oneShot = true; // 出借 worker 没有 reply，只走 ask 回话：不挂 2 小时轮询、不进调用簿（i28-W6）
   // oneShot 是 FYI 通知，不等回复，不算一次交接
   if (!oneShot) void handoffStart(callId, { dir: "out", peer: peer.name, localAgent: fromName, remoteAgent: peerAgentName }, text.length);
   track(callId, fromChannelId, () => runCall(callId, caller, peer, peerAgentName, text, expecting, oneShot));

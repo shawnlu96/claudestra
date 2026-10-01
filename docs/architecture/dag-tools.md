@@ -45,8 +45,9 @@ actually drive an auto card for the project.
 
 Steps (`src/lib/dag-tools-steps.ts`): `task-new` (with `extra.fileGlobs`) → write spec if given → `git fetch` + `git worktree add -b`
 (+ `node_modules` / `web/node_modules` symlinks) → executor brief to `ledger/reviews/<id>-exec-prompt.md` → `manager create` (purpose points at
-the brief) → `task-set --agent` → `workflow-set --mode auto` (code template v3, author family claude:
-the executor's restate is only recorded and releases build; a PM who wants to stop it uses `ledger restate-hold`) → `dag-bind`.
+the brief) → `task-set --agent` → `workflow-set --mode auto` (template from the `template` parameter, default code, always that template's v3,
+author family claude: ui keeps the owner screenshot gate, security keeps local-only cross-model review; the executor's restate is only
+recorded and releases build, and a PM who wants to stop it uses `ledger restate-hold`) → `dag-bind`.
 Binding is last on purpose: bindings are append-only and a cancelled card counts as a *done* node, which would freeze the node.
 
 Any failure undoes what was done in reverse — workflow back to manual, `manager kill`, brief restored, worktree and branch removed, card

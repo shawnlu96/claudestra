@@ -1,18 +1,19 @@
 /**
- * ACP 宿主入口（T60，transport=acp 的 Codex agent）：在 agent 的 tmux 窗口里代替 `codex` 运行，窗口只显示这里打的可读日志
- * （owner 在这里打字不起作用）。逻辑都在 lib/acp/host.ts，这里只读环境变量、接真实依赖、处理信号。启动命令由
- * lib/runtimes/codex-acp.ts 生成；手动排障：`tmux -S … attach` 看这个窗口，适配器的详细日志在 APP_SERVER_LOGS。
+ * ACP 宿主入口（transport=acp 的 Codex / Pi agent）：在 agent 的 tmux 窗口里代替运行时的 TUI，窗口只显示这里打的可读日志
+ * （owner 在这里打字不起作用）。逻辑都在 lib/acp/host.ts，按运行时不同的几处在 lib/acp/host-runtime.ts，这里只读环境变量、
+ * 接真实依赖、处理信号。启动命令由 lib/runtimes/codex-acp.ts / pi-acp.ts 生成；手动排障：`tmux -S … attach` 看这个窗口。
  */
 import { join } from "node:path";
 import { resolveBunPath } from "./lib/bun-path.js";
 import { resolveBridgeUrl } from "./lib/bridge-url.js";
 import { decodePreambleEnv } from "./lib/codex-thread.js";
 import { noteAcpCodexRunning } from "./lib/codex-version.js";
-import { acpAgentCommand, spawnAdapter } from "./lib/acp/adapter-proc.js";
+import { spawnAdapter } from "./lib/acp/adapter-proc.js";
 import { BridgeLink } from "./lib/acp/bridge-link.js";
 import { AcpHost } from "./lib/acp/host.js";
+import { ACP_RUNTIME_ENV, acpRuntime } from "./lib/acp/host-runtime.js";
 import { startToolProxy } from "./lib/acp/tool-proxy.js";
-import { statePath } from "./lib/paths.js";
+import { acpLogDir, appendLogLine } from "./lib/log-paths.js";
 import { SRC_DIR } from "./lib/repo-root.js";
 import { runManagerProcess } from "./lib/run-manager.js";
 import { readRegistryAgents } from "./lib/registry.js";
@@ -25,11 +26,10 @@ import { takeCallerCred } from "./lib/caller-cred.js";
 // lib/acp/adapter-proc.ts adapterEnv）。宿主自己在 bridge 登记时出示，bridge 按它认这个 agent 的身份。
 const callerCred = takeCallerCred(process.env);
 
-const log = (msg: string) => console.log(`[${new Date().toTimeString().slice(0, 8)}] ${msg}`);
 const need = (k: string) => {
   const v = process.env[k]?.trim();
   if (!v) {
-    console.error(`❌ acp-host 缺环境变量 ${k}（应由 manager 的启动命令给出，见 lib/runtimes/codex-acp.ts）`);
+    console.error(`❌ acp-host 缺环境变量 ${k}（应由 manager 的启动命令给出，见 lib/runtimes/codex-acp.ts / pi-acp.ts）`);
     process.exit(2);
   }
   return v;
@@ -38,9 +38,23 @@ const need = (k: string) => {
 const channelId = need("DISCORD_CHANNEL_ID");
 const agentName = need("CLAUDESTRA_AGENT");
 const sessionId = need("CLAUDESTRA_SESSION_ID");
+const logsDir = acpLogDir(agentName);
+const hostLogFile = join(logsDir, "host.log");
+// 窗口被 kill 日志就没了（出借 worker 自停的原因曾因此丢掉），每行再追加一份到磁盘
+const log = (msg: string) => {
+  console.log(`[${new Date().toTimeString().slice(0, 8)}] ${msg}`);
+  appendLogLine(hostLogFile, `${new Date().toISOString()} ${msg}`);
+};
 const bridgeUrl = resolveBridgeUrl();
 const bunBin = resolveBunPath();
-const agent = acpAgentCommand(process.env, bunBin, undefined, process.env[CLEAN_ENV_FLAG] === "1");
+let runtime: ReturnType<typeof acpRuntime>;
+try {
+  runtime = acpRuntime(process.env[ACP_RUNTIME_ENV]?.trim());
+} catch (e) {
+  console.error(`❌ ${(e as Error).message}`);
+  process.exit(2);
+}
+const agent = runtime.agentCommand(process.env, bunBin, process.env[CLEAN_ENV_FLAG] === "1");
 if ("error" in agent) {
   console.error(`❌ ${agent.error}`);
   process.exit(3);
@@ -62,20 +76,21 @@ const host = new AcpHost(
     model: process.env.CLAUDESTRA_ACP_MODEL?.trim() || undefined,
     effort: process.env.CLAUDESTRA_ACP_EFFORT?.trim() || undefined,
     agentCmd: agent.cmd,
+    runtime,
     env: {
       base: process.env,
       bunBin,
       channelServer: join(SRC_DIR, "channel-server.ts"),
       mcpName: process.env.MCP_NAME || "claudestra",
       codexPath: agent.stub ? undefined : codexPath,
-      logsDir: statePath("logs", "acp", agentName),
+      logsDir,
       developerInstructions: process.env.CLAUDESTRA_ACP_DEVELOPER ? Buffer.from(process.env.CLAUDESTRA_ACP_DEVELOPER, "base64").toString("utf8") : undefined,
       clean: process.env[CLEAN_ENV_FLAG] === "1", // 出借 worker：适配器只拿白名单环境、不挂 claudestra MCP（lib/runtimes/clean-env.ts）
     },
   },
   {
-    spawn: (cmd, env, cwd) => spawnAdapter(cmd, env, cwd, log),
-    beforeSpawn: noteCodex,
+    spawn: (cmd, env, cwd) => spawnAdapter(cmd, env, cwd, log, runtime.logLabel),
+    beforeSpawn: runtime.id === "codex" ? noteCodex : undefined, // Pi 的适配器在仓库里，没有要对账的外部版本
     makeLink: (deps) => new BridgeLink({ ...deps, url: bridgeUrl, registerFrame: () => ({ ...deps.registerFrame(), ...(callerCred ? { callerCred } : {}) }) }),
     startProxy: (deps) => startToolProxy(deps),
     postHook: async (body) => {
@@ -126,5 +141,5 @@ if (process.env[CLEAN_ENV_FLAG] === "1") {
   }, WATCHDOG_EVERY_MS);
 }
 
-log(`ACP 宿主启动：${agentName} · 线程 ${sessionId.slice(0, 8)} · ${agent.stub ? `stub（${agent.cmd.join(" ")}）` : "codex-acp"} · bridge ${bridgeUrl}`);
+log(`ACP 宿主启动：${agentName} · 线程 ${sessionId.slice(0, 8)} · ${agent.stub ? `stub（${agent.cmd.join(" ")}）` : runtime.logLabel} · bridge ${bridgeUrl.replace(/\?.*$/, "")}`); // 查询串里可能带 control_token，不进日志
 host.start();

@@ -55,7 +55,8 @@ export function reviewPlacement(s: PlannerSnapshot, since: number): { peer: stri
   const family = otherFamily(s.workflow.authorFamily);
   const placed = placeFor(snapshotPlacementFacts(s, since), "review", family);
   if (placed.kind === "peer") return { peer: placed.peer, reason: `挂池：对抗式跨模型审查挂给 ${placed.peer} 的 ${family} worker（${placed.reason}）` };
-  return legacyPool(s, p, since);
+  const legacy = legacyPool(s, p, since);
+  return legacy && p.remote.reviewFirst?.length ? { ...legacy, reason: `${legacy.reason}（${placed.reason}）` } : legacy;
 }
 
 /** A card pinned to a peer never gets a local author session or work order; until the peer can take it, it waits. */

@@ -1,37 +1,49 @@
-/** 出借方 B 的台账写入：调度服务身份开逐单确认 ask、预先授权时发 inform（lib/lend-ask.ts）。台账里只有这张 ask，出借单本身记在 lend journal（lib/lend-journal.ts）。 */
-import { cancelAsksWhere, openAskFull } from "../lib/ledger-asks.js";
+/**
+ * 出借方 B 的台账写入（调度服务身份）：给 owner 发开跑 / 交付 / 停止通知（lend-inform，lib/lend-notice.ts）、关升级前遗留的逐单确认 ask
+ * （lend-ask --retire，lib/lend-ask.ts）、出借单结束后关 worker 开出的 Codex 卡。出借单本身记在 lend journal（lib/lend-journal.ts）。
+ */
+import { cancelAsksWhere } from "../lib/ledger-asks.js";
 import { LedgerError } from "../lib/ledger-store.js";
 import { isLendWorkerName } from "../lib/runtimes/clean-env.js";
-import { lendAskInput, lendAskProblem, lendInformText, type LendAskParams } from "../lib/lend-ask.js";
+import { retireLendAsk } from "../lib/lend-ask.js";
+import { lendNoticeProblem, lendNoticeText, type LendNoticeParams } from "../lib/lend-notice.js";
 import type { LedgerCli } from "./ledger-context.js";
 import type { CommandSpec } from "./ledger-write-cmds.js";
 
-function params(c: LedgerCli, sub: string): LendAskParams {
+function onlyScheduler(c: LedgerCli, sub: string): void {
   if (c.deps.actor !== "scheduler") throw new LedgerError("forbidden", `${sub} 只给调度服务用`);
+}
+
+function params(c: LedgerCli, sub: string): LendNoticeParams {
+  onlyScheduler(c, sub);
   let p: unknown;
   try { p = JSON.parse(c.p.flags.params ?? ""); } catch { throw new LedgerError("invalid", "--params 要是 JSON"); }
-  const bad = lendAskProblem(p);
+  const bad = lendNoticeProblem(p);
   if (bad) throw new LedgerError("invalid", `--params 不合格：${bad}`);
-  return p as LendAskParams;
+  return p as LendNoticeParams;
 }
 
 export const LEND_ASK_CMDS: Record<string, CommandSpec> = {
   "lend-ask": {
-    valued: ["params"], bools: [],
-    usage: "lend-ask --params '<json>'（调度服务专用：出借单逐单确认，给 owner 开 authorize ask；同一张单只开一次）",
+    valued: ["retire"], bools: [],
+    usage: "lend-ask --retire <askId>（调度服务专用：逐单确认已退役，关掉升级前遗留的出借确认 ask；重复调无害）",
     run(c) {
-      // 调度服务子进程：BEGIN IMMEDIATE 等锁期间可能失租，拿到写锁后、写入前再核一次（runLedger 那次核在等锁之前）
-      const r = openAskFull(c.db, lendAskInput(params(c, "lend-ask")), c.deps.now(), { beforeWrite: () => c.deps.assertLease?.() });
-      return { ok: true, askId: r.ask.id, duplicate: r.existed };
+      onlyScheduler(c, "lend-ask");
+      const id = c.p.flags.retire ?? "";
+      if (!/^[\w-]{1,64}$/.test(id)) throw new LedgerError("invalid", "--retire 要是 ask id");
+      // 拿到写锁后再核一次租约：等锁期间可能失租
+      const bad = retireLendAsk(c.db, id, c.deps.now(), { beforeWrite: () => c.deps.assertLease?.() });
+      if (bad) throw new LedgerError("invalid", bad);
+      return { ok: true };
     },
   },
   "lend-inform": {
     valued: ["params"], bools: [],
-    usage: "lend-inform --params '<json>'（调度服务专用：预先授权期间每单通知 owner；没送到返回 notified:false，调用方不领单）",
+    usage: "lend-inform --params '<json>'（调度服务专用：出借开跑 / 交付 / 停止时通知 owner；没送到返回 notified:false，开跑通知没送到调用方不起 worker）",
     async run(c) {
-      const text = lendInformText(params(c, "lend-inform"));
+      const text = lendNoticeText(params(c, "lend-inform"));
       if (!c.deps.notifyOwner) return { ok: true, notified: false, why: "这个进程没有通知通道" };
-      c.deps.assertLease?.(); // 发帧那一刻 bridge-client 还会核；发完再核：期间失租就报 lease-lost，不让调用方当成送到了去领单
+      c.deps.assertLease?.(); // 发帧那一刻 bridge-client 还会核；发完再核：期间失租就报 lease-lost，不让调用方当成送到了去起 worker
       const notified = await c.deps.notifyOwner(text);
       c.deps.assertLease?.();
       return { ok: true, notified };
@@ -41,10 +53,10 @@ export const LEND_ASK_CMDS: Record<string, CommandSpec> = {
     valued: ["agent"], bools: [],
     usage: "lend-close-asks --agent <agent-lend-…>（调度服务专用：出借单结束后关掉这个 worker 开出的 Codex 额度 / 登录卡）",
     run(c) {
-      if (c.deps.actor !== "scheduler") throw new LedgerError("forbidden", "lend-close-asks 只给调度服务用");
+      onlyScheduler(c, "lend-close-asks");
       const agent = c.p.flags.agent ?? "";
       if (!isLendWorkerName(agent) || !/^[\w-]{1,64}$/.test(agent)) throw new LedgerError("invalid", "--agent 要是出借 worker 的名字（agent-lend-…）");
-      // 拿到写锁后再核一次租约（同 lend-ask：等锁期间可能失租）
+      // 拿到写锁后再核一次租约：等锁期间可能失租
       const closed = cancelAsksWhere(c.db, { fromAgent: agent, source: "codex" }, "出借单已结束，worker 已停", c.deps.now(), { beforeWrite: () => c.deps.assertLease?.() });
       return { ok: true, closed };
     },

@@ -1,9 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import { normalizeRegistryAgents } from "../src/lib/registry.ts";
-import { CODEX_ACP_CONTROL, CODEX_CONTROL } from "../src/lib/runtimes/codex.ts";
+import { ACP_CONTROL } from "../src/lib/runtimes/acp-control.ts";
+import { CODEX_CONTROL } from "../src/lib/runtimes/codex.ts";
 import { claudeCodeAdapter, controlFor, normalizeTransport, piAdapter, transportsOf } from "../src/lib/runtimes/index.ts";
 
-// T60 transport 开关：缺省 tmux 时一切照旧，acp 只有声明了 ACP 段的运行时（目前只有 Codex）才生效
+// T60 transport 开关：缺省 tmux 时一切照旧，acp 只有声明了 ACP 段的运行时（Codex、Pi）才生效
 
 describe("controlFor(runtime, transport)", () => {
   test("不传 / tmux：与加开关之前逐字相同", () => {
@@ -17,7 +18,8 @@ describe("controlFor(runtime, transport)", () => {
 
   test("codex + acp → acp 的策略：不发键、宿主上报忙闲、会话内改模型、斜杠当 prompt", () => {
     const c = controlFor("codex", "acp");
-    expect(c).toBe(CODEX_ACP_CONTROL);
+    expect(c).toBe(ACP_CONTROL);
+    expect(controlFor("pi", "acp")).toBe(ACP_CONTROL); // Pi 的 acp 版与 Codex 同一份策略
     expect(c).toMatchObject({
       interruptKeys: [],
       preemptOnHumanMessage: false,
@@ -31,15 +33,14 @@ describe("controlFor(runtime, transport)", () => {
 
   test("没声明 ACP 的运行时要 acp → 退回它自己的 tmux 策略（manager 切 transport 前会先拒绝）", () => {
     expect(controlFor("claude-code", "acp")).toBe(claudeCodeAdapter.control);
-    expect(controlFor("pi", "acp")).toBe(piAdapter.control);
     expect(controlFor(undefined, "acp")).toBe(claudeCodeAdapter.control);
   });
 });
 
 describe("transportsOf / normalizeTransport", () => {
-  test("只有 Codex 能走 acp", () => {
+  test("Codex、Pi 能走 acp，其余只有 tmux", () => {
     expect(transportsOf("codex")).toEqual(["tmux", "acp"]);
-    expect(transportsOf("pi")).toEqual(["tmux"]);
+    expect(transportsOf("pi")).toEqual(["tmux", "acp"]);
     expect(transportsOf(undefined)).toEqual(["tmux"]);
     expect(transportsOf("nope")).toEqual(["tmux"]);
   });

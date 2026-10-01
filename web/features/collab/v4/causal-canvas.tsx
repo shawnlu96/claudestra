@@ -12,10 +12,10 @@ import { edgePath, placeLabels, type Focus } from "./canvas-view";
 import { usePort, useViewport } from "./use-viewport";
 import { depKey, edgeSel, type Selection } from "./v4-selection";
 import { StageBar } from "./stage-bar";
+import { ViewportTools } from "./viewport-tools";
 import v from "./v4.module.css";
 
 const STYLE_CLASS = { solid: v.eSolid, flow: v.eFlow, dotted: v.eDotted } as const;
-const MORE = { right: "还有 {n} 件在右边 →", down: "下面还有 {n} 件 ↓", left: "← 左边还有 {n} 件", up: "↑ 上面还有 {n} 件" } as const;
 
 function NodeCard(props: { n: CNode; line: LineView | undefined; act: string; selected: boolean; hot: boolean; onClick: () => void; tr: Tr }) {
   const { n, line, act, selected, onClick, tr } = props;
@@ -68,7 +68,8 @@ export function CausalCanvas(props: {
 }) {
   const { canvas, lines, selection, focus, onSelect, tr } = props;
   const { box, port } = usePort();
-  const { view, glide, bump, fitAll, pan, off, handlers } = useViewport(canvas, port, focus, () => onSelect(null));
+  const vp = useViewport(canvas, port, focus, () => onSelect(null));
+  const { view, glide, handlers } = vp;
 
   const selId = selection?.kind === "task" ? selection.id : null;
   return (
@@ -100,12 +101,7 @@ export function CausalCanvas(props: {
           </button>
         ))}
       </div>
-      <div className={v.tools}>
-        <button type="button" className={`${v.tool} ${bump ? v.bump : ""}`} onClick={fitAll}>{tr("适配全部")}</button>
-      </div>
-      {off && (Object.keys(MORE) as (keyof typeof MORE)[]).filter((d) => off[d] > 0).map((d) => (
-        <button key={d} type="button" className={`${v.more} ${v[`more_${d}`]} ${bump ? v.beckon : ""}`} onClick={() => pan(d)}>{tr(MORE[d], { n: off[d] })}</button>
-      ))}
+      <ViewportTools vp={vp} tr={tr} />
       {canvas.groups.length === 0 && <div className={v.blank}>{tr("没有可画的任务")}</div>}
     </div>
   );

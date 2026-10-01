@@ -1,7 +1,13 @@
+import { createHash } from "node:crypto";
+import { homedir } from "node:os";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
+
 /**
  * Pi 0.99.2 上游纯函数的原样移植，给测试当「pi 实际怎么解析」的判据（不在测试里猜 argv 子串）。
  * 来源：registry.npmjs.org/@earendil-works/pi-coding-agent/-/pi-coding-agent-0.99.2.tgz（SHA-1 6f95461d41661aea1243f6cc2ac0ace8497d21f7，
- * MIT）。函数体逐行照抄 dist 里的同名函数，只补了 TS 类型标注；行号写在每个函数上。pi 升级时对着新版 dist 重新抄一遍。
+ * MIT，版权声明与许可全文见 tests/pi-upstream-0.99.2.LICENSE.txt）。函数体逐行照抄 dist 里的同名函数，只补了 TS 类型标注；
+ * 行号写在每个函数上。pi 升级时对着新版 dist 重新抄一遍。
  */
 
 // dist/cli/args.js:6-9
@@ -249,4 +255,75 @@ export function parseArgs(args: string[]): any {
         }
     }
     return result;
+}
+
+// dist/utils/paths.js:6（UNICODE_SPACES）、:59-82（normalizePath；Windows 分支依赖的 normalizeWindowsShellPath 不移植，测试只在 POSIX 跑）
+const UNICODE_SPACES = /[\u00A0\u2000-\u200A\u202F\u205F\u3000]/g;
+const normalizeWindowsShellPath = (p: string) => p;
+export function normalizePath(input: string, options: any = {}): string {
+    let normalized = options.trim ? input.trim() : input;
+    if (options.normalizeUnicodeSpaces) {
+        normalized = normalized.replace(UNICODE_SPACES, " ");
+    }
+    if (options.stripAtPrefix && normalized.startsWith("@")) {
+        normalized = normalized.slice(1);
+    }
+    if (process.platform === "win32") {
+        normalized = normalizeWindowsShellPath(normalized);
+    }
+    if (options.expandTilde ?? true) {
+        const home = options.homeDir ?? homedir();
+        if (normalized === "~")
+            return home;
+        if (normalized.startsWith("~/") || (process.platform === "win32" && normalized.startsWith("~\\"))) {
+            return join(home, normalized.slice(2));
+        }
+    }
+    if (/^file:\/\//.test(normalized)) {
+        return fileURLToPath(normalized);
+    }
+    return normalized;
+}
+
+// dist/config.js:450-456（getAgentDir，env 作参数传入而不是读 process.env；CONFIG_DIR_NAME = ".pi"）
+export function getAgentDir(env: Record<string, string | undefined>): string {
+    const envDir = env.PI_CODING_AGENT_DIR;
+    if (envDir) {
+        return normalizePath(envDir);
+    }
+    return join(homedir(), ".pi", "agent");
+}
+
+// dist/extensions/mcp/tools.js:30（MAX_TOOL_NAME_LENGTH）、:49-55（createMcpToolName）
+const MAX_TOOL_NAME_LENGTH = 64;
+export function createMcpToolName(server: string, tool: string, isTaken: (n: string) => boolean = () => false): string {
+    const name = `mcp__${server}__${tool}`.replace(/[^A-Za-z0-9_]/g, "_");
+    if (name.length <= MAX_TOOL_NAME_LENGTH && !isTaken(name))
+        return name;
+    const hash = createHash("sha256").update(`${server}\0${tool}`).digest("hex").slice(0, 8);
+    return `${name.slice(0, MAX_TOOL_NAME_LENGTH - hash.length - 1)}_${hash}`;
+}
+
+/**
+ * 工具筛选，三处拼起来：dist/main.js:420-431（parsed → options.tools / noTools / excludeTools）、dist/core/sdk.js:145-146
+ * （allowedToolNames / excludedToolNames）、dist/core/agent-session.js:2753（isAllowedTool）。返回 pi 会不会留下这个工具。
+ */
+export function piKeepsTool(parsed: any, name: string): boolean {
+    const options: any = {};
+    if (parsed.noTools) {
+        options.noTools = "all";
+    }
+    else if (parsed.noBuiltinTools) {
+        options.noTools = "builtin";
+    }
+    if (parsed.tools) {
+        options.tools = [...parsed.tools];
+    }
+    if (parsed.excludeTools) {
+        options.excludeTools = [...parsed.excludeTools];
+    }
+    const allowedToolNames = options.tools ?? (options.noTools === "all" ? [] : undefined);
+    const excludedToolNames = options.excludeTools ? new Set(options.excludeTools) : undefined;
+    const allowed = allowedToolNames ? new Set(allowedToolNames) : undefined;
+    return (!allowed || allowed.has(name)) && !excludedToolNames?.has(name);
 }

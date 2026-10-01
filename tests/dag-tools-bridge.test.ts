@@ -193,7 +193,7 @@ describe("正常路径：规划 → 两条车道 → 两次开工", () => {
     expect((await start("b")).ok).toBe(true);
     for (const [id, key, globs] of [["i28-a", "a", ["src/lib/a*.ts"]], ["i28-b", "b", ["src/bridge/b.ts"]]] as const) {
       const t = getTask(db, id)!;
-      expect(t).toMatchObject({ stage: "spec", agent: `agent-task-${id}`, pm: PM.agent, branch: `feat/${id}`, featureId: "ab12-i28", spec: `docs/tasks/${id}.md` });
+      expect(t).toMatchObject({ stage: "spec", agent: `agent-task-${id}`, pm: PM.agent, branch: `feat/${id}`, featureId: "ab12-i28", spec: join(dir, "ledger", "docs", "tasks", `${id}.md`) });
       expect(t.extra.fileGlobs).toEqual([...globs]);
       expect(getWorkflow(db, id)).toMatchObject({ mode: "auto", template: "code", templateVersion: 3, authorFamily: "claude" });
       const prompt = readFileSync(join(dir, "ledger", "reviews", `${id}-exec-prompt.md`), "utf8");
