@@ -3,7 +3,9 @@
  * 按 CLAUDESTRA_PI_MCP_SERVERS 拉起 channel-server 并握手（值按 pi 的模板规则反转义）、在 PI_CODING_AGENT_DIR 下写会话文件、
  * 答适配器开会话时的三问；收到 prompt 就像模型那样取 <channel> 头里的 chat_id 调 mcp__claudestra__reply 回 pong，再按 agent_settled 收尾。
  * 每次启动把 argv 和要核对的环境变量记一行 JSON，给断言看 Pi 链上的目录、HOME、发现开关是不是沙箱里的那一套。
+ * 也像真 pi 那样加载本仓的挂载扩展、在读命令前跑它的 session_start（它报撞名状态，适配器没收到 OK 就拒会话）。
  */
+import { MCP_MOUNT_EXTENSION } from "../src/lib/acp/pi-adapter/args.ts";
 
 export function fakePiSource(bunPath: string, logPath: string): string {
   return `#!${bunPath}
@@ -32,6 +34,8 @@ const mcp = (method, params) => new Promise((resolve) => {
   child.stdin.flush();
 });
 const out = (r) => process.stdout.write(JSON.stringify(r) + "\\n");
+const ui = { setStatus: (k, t) => out({ type: "extension_ui_request", id: "st", method: "setStatus", statusKey: k, statusText: t }) };
+(await import(${JSON.stringify(MCP_MOUNT_EXTENSION)})).default({ registerMcpServer: () => {}, on: (_e, h) => h({}, { cwd: process.cwd(), ui }) });
 (async () => {
   let buf = "";
   for await (const chunk of child.stdout) {

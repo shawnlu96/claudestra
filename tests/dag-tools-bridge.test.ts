@@ -195,7 +195,7 @@ describe("正常路径：规划 → 两条车道 → 两次开工", () => {
       const t = getTask(db, id)!;
       expect(t).toMatchObject({ stage: "spec", agent: `agent-task-${id}`, pm: PM.agent, branch: `feat/${id}`, featureId: "ab12-i28", spec: `docs/tasks/${id}.md` });
       expect(t.extra.fileGlobs).toEqual([...globs]);
-      expect(getWorkflow(db, id)).toMatchObject({ mode: "auto", template: "code", templateVersion: 2, authorFamily: "claude" });
+      expect(getWorkflow(db, id)).toMatchObject({ mode: "auto", template: "code", templateVersion: 3, authorFamily: "claude" });
       const prompt = readFileSync(join(dir, "ledger", "reviews", `${id}-exec-prompt.md`), "utf8");
       expect(prompt).toContain("本卡是自动卡");
       expect(prompt).toContain(`不要给 ${PM.agent} 发任何进度`);

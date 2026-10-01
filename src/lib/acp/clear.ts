@@ -1,4 +1,5 @@
 /** ACP /clear：新线程先完成引导（运行时要的话，host-runtime.ts），再原子换 registry；失败时由宿主接回旧线程。 */
+import { RpcError } from "./rpc.js";
 import type { AcpSession } from "./session.js";
 import type { AcpTurnLoop } from "./turn.js";
 
@@ -20,7 +21,9 @@ async function createClearedSession(
     if (!committed.ok) throw new Error(`registry 未换代：${committed.error ?? "未知原因"}`);
     return { ok: true, sessionId: fresh };
   } catch (error) {
-    return { ok: false, error: error instanceof Error ? error.message : String(error), changed: session.sessionId !== oldSessionId };
+    // Pi 适配器先停旧会话再起新的：新的起不来时它在错误里标 previousSessionClosed，适配器手上已没有旧会话，要按「变了」重起接回
+    const closedOld = error instanceof RpcError && (error.data as { previousSessionClosed?: unknown } | undefined)?.previousSessionClosed === true;
+    return { ok: false, error: error instanceof Error ? error.message : String(error), changed: closedOld || session.sessionId !== oldSessionId };
   }
 }
 

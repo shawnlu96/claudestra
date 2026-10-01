@@ -108,6 +108,10 @@ export interface HistoryToolCall {
   detail?: string;
   /** 该次调用的 tool_result 带 is_error——web 把失败的工具卡标红。 */
   error?: boolean;
+  /** tool_use id：直播的 tool_done 按它给网页上的这张卡收尾 */
+  id?: string;
+  /** 本次读到的范围里还没有它的 tool_result（还在跑）：网页把回合进行中的最后一张卡画成「运行中 · 计时」 */
+  open?: boolean;
 }
 
 /** reply() 附带的交互组件（按钮/选单），点击回投 [button:id]/[select:id:v]。
@@ -619,7 +623,7 @@ function parseHistoryLines(
               if (dt) tc.detail = dt;
             }
             tools.push(tc);
-            if (typeof b.id === "string" && b.id) toolById.set(b.id, tc);
+            if (typeof b.id === "string" && b.id) toolById.set(b.id, Object.assign(tc, { id: b.id, open: true })); // 结果到了由 settleToolCard 摘掉 open
           }
         }
       }
@@ -631,7 +635,11 @@ function parseHistoryLines(
       Object.assign(msg, replyFiles.length ? { replyFiles } : {}, tools.length ? { tools } : {});
       if (typeof rec.message?.model === "string") msg.model = rec.message.model;
       for (const id of replyIds) replyById.set(id, msg);
-      for (const b of content) if (b?.type === "tool_result" && replyIds.includes(b.tool_use_id)) msg.replyAskId = askIdOfReplyResult(b) ?? msg.replyAskId; // Codex：结果和调用同一条
+      for (const b of content) {
+        if (b?.type !== "tool_result") continue; // Codex 的 MCP 调用：结果和调用同一条
+        settleToolCard(toolById.get(b.tool_use_id), b, rec);
+        if (replyIds.includes(b.tool_use_id)) msg.replyAskId = askIdOfReplyResult(b) ?? msg.replyAskId;
+      }
       all.push(msg);
     }
   }

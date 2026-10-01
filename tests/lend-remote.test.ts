@@ -1,10 +1,10 @@
 /** T94 B→A 出借接口的响应解析与前提（src/lib/lend-remote.ts） */
 import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { lendRequest, peerLendProblem, proxyVarsIn, type LendCall } from "../src/lib/lend-remote.js";
+import { LEND_OLD_PEER, lendRequest, peerLendProblem, proxyVarsIn, type LendCall } from "../src/lib/lend-remote.js";
 import type { HttpPeer } from "../src/lib/peers.js";
 
-const reply = (status: number, body: unknown): LendCall => async () => ({ status, body });
+const reply = (status: number, body: unknown): LendCall<string> => async () => ({ status, body });
 const sha = (s: string) => createHash("sha256").update(s, "utf8").digest("hex");
 const lease = { gen: 1, expiresAt: 5, ms: 600_000 };
 
@@ -56,5 +56,25 @@ describe("T94 前提", () => {
 
   test("代理变量（大小写都算），空值不算", () => {
     expect(proxyVarsIn({ https_proxy: "http://p", ALL_PROXY: "socks5://x", HTTP_PROXY: " ", NO_PROXY: "*" })).toEqual(["ALL_PROXY", "https_proxy"]);
+  });
+});
+
+describe("i28-W2 v2 op", () => {
+  test("hello / beat / ask 的成功体按 lend-wire-v2 严格解析", async () => {
+    expect(await lendRequest(reply(200, { ok: true, v: 1, proto: 2, helloMs: 60_000, beatMs: 15_000 }), "a", "hello", {}))
+      .toEqual({ ok: true, value: { proto: 2, helloMs: 60_000, beatMs: 15_000 } });
+    expect(await lendRequest(reply(200, { ok: true, v: 1, orders: [{ orderId: "o", verdict: "ok", lease }] }), "a", "beat", {}))
+      .toEqual({ ok: true, value: [{ orderId: "o", verdict: "ok", lease }] });
+    expect(await lendRequest(reply(200, { ok: true, v: 1, askId: "ask_1" }), "a", "ask", {})).toEqual({ ok: true, value: { askId: "ask_1" } });
+    expect(await lendRequest(reply(200, { ok: true, v: 1, askId: "ask_1", taskId: "T2" }), "a", "ask", {})).toMatchObject({ code: "bad_response" });
+  });
+
+  test("v2 接口回 404（不管正文是不是 JSON）= 对方是旧版：old_peer，调用方退回轮询；v1 接口的 404 照旧按对方的码", async () => {
+    for (const op of ["hello", "beat", "ask"] as const) {
+      expect(await lendRequest(reply(404, { ok: false, error: "not found" }), "a", op, {})).toMatchObject({ ok: false, status: 404, code: LEND_OLD_PEER });
+      expect(await lendRequest(reply(404, null), "a", op, {})).toMatchObject({ code: LEND_OLD_PEER });
+    }
+    expect(await lendRequest(reply(404, { ok: false, code: "not_found", error: "没有" }), "a", "claim", {})).toMatchObject({ code: "not_found" });
+    expect(await lendRequest(reply(409, { ok: false, code: "not_held", error: "不在你名下" }), "a", "ask", {})).toMatchObject({ code: "not_held" });
   });
 });

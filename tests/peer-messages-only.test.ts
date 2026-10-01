@@ -37,6 +37,26 @@ describe("messagesOnlyAllows", () => {
   });
 });
 
+describe("出借接口（i28-W2）", () => {
+  test("v1 四个、v2 的 hello / beat / ask，加出借方收推送的 offer：只认 POST 精确路径", () => {
+    for (const e of ["poll", "claim", "lease", "result", "hello", "beat", "ask", "offer"]) expect(messagesOnlyAllows("POST", `/api/v1/lend/${e}`)).toBe(true);
+  });
+  test("lend 以外的新路径、lend 下别的名字、别的方法、多一段都拒", () => {
+    for (const [m, p] of [
+      ["GET", "/api/v1/lend/hello"],
+      ["POST", "/api/v1/lend/hello/"],
+      ["POST", "/api/v1/lend/beat/x"],
+      ["POST", "/api/v1/lend/pushed"],
+      ["GET", "/api/v1/lend/workers"],
+      ["POST", "/api/v1/lend/workers"],
+      ["POST", "/api/v1/lend/grant"],
+      ["POST", "/api/v1/lend"],
+      ["POST", "/api/v1/lendx/hello"],
+      ["POST", "/api/v1/asks"],
+    ]) expect(messagesOnlyAllows(m, p)).toBe(false);
+  });
+});
+
 describe("setMessagesOnly", () => {
   test("只动该 peer 的有效 token，返回改动条数；重复设置为 0", () => {
     const ps = [

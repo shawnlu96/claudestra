@@ -16,15 +16,16 @@ import { legacyWebPortFromPlist, redeemLegacySession } from "../src/lib/legacy-w
 import { closeWebState, openWebState } from "../src/lib/web-state.js";
 import { importLegacySessions, sessionIdHash } from "../src/lib/web-state-migrate.js";
 
-const T0 = new Date(); // 相对现在：devices 路由按真实时间判过期，写死的日期过了「T0+3 天」这条夹具就成了过期会话
-const later = (days: number) => new Date(T0.getTime() + days * 86_400_000).toISOString();
+const T0 = new Date("2026-09-28T00:00:00Z");
+const later = (days: number, base = T0) => new Date(base.getTime() + days * 86_400_000).toISOString();
 
-function oldSettingsDb(): Database {
+// base: HTTP 路径按真实时钟判过期，那边要传 new Date()，写死 T0 的话 T0+3 天后 live 就过期了
+function oldSettingsDb(base = T0): Database {
   const db = new Database(":memory:");
   db.exec("CREATE TABLE sessions (id TEXT PRIMARY KEY, username TEXT NOT NULL, expires_at TEXT NOT NULL, created_at TEXT NOT NULL)");
   const ins = db.prepare("INSERT INTO sessions VALUES (?, ?, ?, ?)");
-  ins.run("live-session-id-0000000000000000", "shawn", later(3), T0.toISOString());
-  ins.run("dead-session-id-0000000000000000", "shawn", later(-1), T0.toISOString());
+  ins.run("live-session-id-0000000000000000", "shawn", later(3, base), base.toISOString());
+  ins.run("dead-session-id-0000000000000000", "shawn", later(-1, base), base.toISOString());
   return db;
 }
 
@@ -65,7 +66,8 @@ describe("POST /api/v1/devices/legacy-session", () => {
     setDevicesPrincipalsPathForTest(join(dir, "principals.json"));
     setApiAuthPrincipalsPathForTest(join(dir, "principals.json"));
     setWebStatePathForTest(join(dir, "web-state.sqlite"));
-    importLegacySessions(oldSettingsDb(), openWebState(join(dir, "web-state.sqlite")), new Date());
+    const now = new Date();
+    importLegacySessions(oldSettingsDb(now), openWebState(join(dir, "web-state.sqlite")), now);
   });
   afterAll(() => {
     setDevicesPrincipalsPathForTest(undefined);

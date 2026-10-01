@@ -9,6 +9,7 @@
 import { existsSync, realpathSync, statSync } from "fs";
 import { dirname, join, relative, resolve, isAbsolute, basename } from "path";
 import { installOutboundGuard } from "./sandbox-outbound.js";
+import { piStateDirProblem } from "./sandbox-pi-fs.js";
 import {
   isLab, LAB_FLAG, labConfigProblems, labInstancePortsOf, labOutboundPorts, labPeerUrlProblem, labPushEndpointProblem, labRelayUrl, labRelayUrlProblem, LAB_ROOT_ENV,
   readLabInstances,
@@ -353,7 +354,7 @@ export function sandboxPiAgentDir(root: string | undefined): string {
 
 /**
  * 沙箱里起 Pi 的前提：PI_CODING_AGENT_DIR 逐字等于 sandboxPiAgentDir（scripts/sandbox.ts 设）。没设就拒：pi 会回落 ~/.pi/agent，
- * 读到 owner 真实的会话、扩展和凭据；设成别处也拒，不让人以为它生效了。非沙箱 null。docs/architecture/pi-acp-sandbox.md。
+ * 读到 owner 真实的会话、扩展和凭据；设成别处也拒，不让人以为它生效了；字面对了还要真实路径在根下（不许是链接）。非沙箱 null。
  */
 export function sandboxPiAgentDirProblem(env: Env = process.env): string | null {
   if (!isSandbox(env)) return null;
@@ -361,7 +362,8 @@ export function sandboxPiAgentDirProblem(env: Env = process.env): string | null 
   if (!root || !isAbsolute(root)) return `沙箱没设绝对路径的 ${SANDBOX_ROOT_ENV}，不知道 Pi 的目录该在哪`;
   const want = sandboxPiAgentDir(root);
   const got = env.PI_CODING_AGENT_DIR ?? "";
-  return got === want ? null : `沙箱里的 PI_CODING_AGENT_DIR 必须是 ${want}（收到 ${got || "空"}；用 scripts/sandbox.ts 起的沙箱会自动设好）`;
+  if (got !== want) return `沙箱里的 PI_CODING_AGENT_DIR 必须是 ${want}（收到 ${got || "空"}；用 scripts/sandbox.ts 起的沙箱会自动设好）`;
+  return piStateDirProblem(root, want);
 }
 
 /**

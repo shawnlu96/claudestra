@@ -138,7 +138,9 @@ export async function cmdAcp(cmd: string, args: string[]): Promise<void> {
 }
 
 /** 改 registry 前的检查：拒绝就返回原因 */
-export function transportRefusal(info: { runtime?: string; cwd?: string } | undefined, bare: string, to: Transport, env: Record<string, string | undefined> = process.env): string | null {
+export function transportRefusal(
+  info: { runtime?: string; cwd?: string; piEnv?: unknown } | undefined, bare: string, to: Transport, env: Record<string, string | undefined> = process.env,
+): string | null {
   if (bare === "master") return "大总管不切 transport";
   if (!info) return `agent "${bare}" 不存在`;
   const runtime = info.runtime || "claude-code";
@@ -146,7 +148,7 @@ export function transportRefusal(info: { runtime?: string; cwd?: string } | unde
   if (runtime === "codex" && to === "tmux" && isSandbox(env)) return "沙箱 Codex 只许 ACP stub，不起真实 TUI";
   if (runtime === "pi" && to === "tmux" && isSandbox(env)) return "沙箱里的 Pi 只走 ACP，不起 TUI 版（docs/architecture/pi-acp-sandbox.md）"; // migrate --pi --to tmux 不经 manager 白名单
   if (to === "acp" && isSandbox(env) && env[ACP_AGENT_ENV]?.trim()) return "沙箱里不认 CLAUDESTRA_ACP_AGENT：acp 固定起本仓 stub";
-  if (to === "acp" && runtime === "pi") return piAcpClash(info.cwd, env); // 适配器在仓库里不用装；只拦会静默丢掉 reply 的同名 MCP
+  if (to === "acp" && runtime === "pi") return piAcpClash(info.cwd, env, info.piEnv); // 适配器在仓库里不用装；只拦会静默丢掉 reply 的配置
   if (to === "acp" && !isSandbox(env) && !env[ACP_AGENT_ENV]?.trim()) { // 沙箱里适配器固定是本仓 stub，不用装
     const inst = codexAcpInstalled();
     if (!inst.ok) return inst.hint;
@@ -181,7 +183,7 @@ export async function switchTransport(name: string, mode: string): Promise<Recor
     const reg = await loadRegistry();
     key = reg.agents[`agent-${bare}`] ? `agent-${bare}` : reg.agents[bare] ? bare : "";
     const info = key ? reg.agents[key] : undefined;
-    const refusal = transportRefusal(info as { runtime?: string; cwd?: string } | undefined, bare, mode);
+    const refusal = transportRefusal(info as { runtime?: string; cwd?: string; piEnv?: unknown } | undefined, bare, mode);
     if (refusal) return { ok: false, error: refusal };
     from = normalizeTransport((info as { transport?: string }).transport);
     if (from === mode) {

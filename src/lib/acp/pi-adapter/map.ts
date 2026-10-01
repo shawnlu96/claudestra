@@ -19,8 +19,29 @@ export interface TurnOutcome {
   errorMessage?: string;
 }
 
-export function threadStatus(type: "active" | "idle"): Rec {
-  return { sessionUpdate: "session_info_update", _meta: { claudestra: { threadStatus: { type } } } };
+/** idle 可带这一轮的结局（turnEnd）：steering 另起的回合没有 session/prompt 可回错误，宿主只能从这里知道它失败了 */
+export function threadStatus(type: "active" | "idle", turn?: Rec): Rec {
+  return { sessionUpdate: "session_info_update", _meta: { claudestra: { threadStatus: { type }, ...(turn ? { turn } : {}) } } };
+}
+
+/** 运行时无关的失败种类，宿主据此进额度 / 登录通道（lib/acp/failures.ts）。先认额度：429 insufficient_quota 不是限流 */
+type PiFailureKind = "quota" | "auth" | "rate_limit" | "error";
+const QUOTA_RE = /insufficient[_ ]quota|quota|credits?\b|billing|balance|usage limit|payment required|\b402\b/i;
+const AUTH_RE = /\b401\b|unauthori[sz]ed|invalid[ _-]?api[ _-]?key|no api key|api key (?:is )?(?:missing|not (?:set|found))|authenticat|not logged in/i;
+const RATE_RE = /\b429\b|rate[ _-]?limit|too many requests|overloaded|\b529\b/i;
+
+function piFailureKind(message: string): PiFailureKind {
+  if (QUOTA_RE.test(message)) return "quota";
+  if (AUTH_RE.test(message)) return "auth";
+  return RATE_RE.test(message) ? "rate_limit" : "error";
+}
+
+/** 回合结局 → 给宿主的结构化结果：stopReason 同 session/prompt；失败带 failure（种类 + 给人看的原因） */
+export function turnEnd(o: TurnOutcome, cancelled: boolean): Rec {
+  const stopReason = stopReasonOf(o, cancelled);
+  if (stopReason) return { stopReason };
+  const message = `Pi 回合失败：${o.errorMessage ?? "未说明原因"}`;
+  return { stopReason: "error", failure: { kind: piFailureKind(o.errorMessage ?? ""), message } };
 }
 
 function chunk(messageId: string, text: string): Rec {

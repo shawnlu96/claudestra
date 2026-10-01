@@ -23,6 +23,7 @@ import { passPace } from "./scheduler-yield.js";
 import { deployTick } from "./scheduler-deploy-tick.js";
 import { deploymentJobs, type DeployJobs } from "./scheduler-deploy-job.js";
 import type { WorkerSession } from "./worker-session.js";
+import { withSupervisorHold } from "./agent-supervisor-hold.js";
 
 type Manager = (...args: string[]) => Promise<Record<string, unknown>>;
 type Active = () => void;
@@ -43,6 +44,8 @@ export interface PassOpts {
   singleton?: LeaseHold;
   /** The lend step (lend-deps.ts lendStep), given only while lend.json is on or journal orders are still running; its children get the same leases. */
   lend?: (active: Active, lease: SchedulerLease | undefined) => Promise<{ failed: { orderId: string; error: string }[] }>;
+  /** Agent supervision (i28-S1, agent-supervisor-deps.ts superviseStep); runs only while scheduler.json has supervise on. */
+  supervise?: (db: Database, config: SchedulerConfig, active: Active, lease: SchedulerLease | undefined) => Promise<{ failed: { agent: string; error: string }[] }>;
 }
 
 export interface PassResult { ran: boolean; failed: { taskId: string; error: string }[] }
@@ -99,8 +102,12 @@ export async function schedulerPass(db: Database | null, config: SchedulerConfig
         assertActive: active, now: Date.now }, pace.phase());
       // observe 卡只写观察事件，auto 卡每卡推一步；某张卡失败不挡其余卡，失败汇总给服务的去重日志
       failed.push(...(await schedulerObserveTick(db, config.projects, manager, pace.phase())).failed);
+      // 监护先于自动派单：它认领了恢复的回合失败，auto-tick 这一轮就让开（agent-supervisor-hold.ts）；关着时两步都不碰
+      const supervising = config.supervise?.enabled === true && !!opts.supervise;
+      if (supervising) failed.push(...(await opts.supervise!(db, config, active, held)).failed.map((f) => ({ taskId: `supervise ${f.agent}`, error: f.error })));
       if (config.autoDispatch === true) {
-        const deps = guardAutoDeps((opts.autoDeps ?? ((a) => autoTickDeps(db, { active: a, lease: held })))(active), active);
+        const base = guardAutoDeps((opts.autoDeps ?? ((a) => autoTickDeps(db, { active: a, lease: held })))(active), active);
+        const deps = supervising ? withSupervisorHold(base, db) : base;
         failed.push(...(await schedulerAutoTick(db, config.projects, deps, pace.phase())).failed);
       }
     }
