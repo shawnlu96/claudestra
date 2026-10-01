@@ -26,6 +26,7 @@ import type { WorkerSession } from "./worker-session.js";
 import { withSupervisorHold } from "./agent-supervisor-hold.js";
 import { peerPrStep } from "./peer-pr-tick.js";
 import { autostartHooks, type AutostartHooks } from "./scheduler-autostart-deps.js";
+import { retireStep } from "./scheduler-retire-deps.js";
 
 type Manager = (...args: string[]) => Promise<Record<string, unknown>>;
 type Active = () => void;
@@ -51,6 +52,7 @@ export interface PassOpts {
   peerPr?: (active: Active, manager: Manager) => Promise<{ failed: PassResult["failed"] }>; // peer PR 自动审（i28-A2）；默认 peerPrStep，测试注入
   /** 自动交回 / 自动开卡（i28-A1，scheduler-autostart-deps.ts）：tests inject fakes; manager is this pass's guarded scheduler CLI. */
   autostart?: (active: Active, manager: Manager) => AutostartHooks;
+  retire?: typeof retireStep; // 收尾（i28-S2，scheduler-retire.ts）；测试注入
 }
 
 export interface PassResult { ran: boolean; failed: { taskId: string; error: string }[] }
@@ -119,6 +121,7 @@ export async function schedulerPass(db: Database | null, config: SchedulerConfig
         const autoPace = pace.phase();
         failed.push(...(await schedulerAutoTick(db, config.projects, deps, autoPace)).failed);
         failed.push(...(await auto.start(config, autoPace))); // 开卡在 tick 之后，每轮最多一张，tick 用完预算就不开
+        failed.push(...(await (opts.retire ?? retireStep)(db, config, manager, active, held, autoPace))); // verified / cancelled 卡收尾
       }
     }
     if (opts.lend) failed.push(...(await opts.lend(active, held)).failed.map((f) => ({ taskId: `lend ${f.orderId}`, error: f.error })));

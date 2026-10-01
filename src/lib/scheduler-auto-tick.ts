@@ -354,7 +354,7 @@ class Card {
     const plan = planScheduler(autoSnapshot(this.db, this.task, this.opts));
     if (plan.kind === "escalate") return this.escalate(`${plan.code}：${plan.reason}`);
     if (plan.kind === "wait") return this.watch(plan);
-    if (plan.action === "verify" || plan.action === "retire") return this.out("waiting", `${plan.node} 由合并队列 / PM 收尾`);
+    if (plan.action === "verify" || plan.action === "retire") return this.out("waiting", `${plan.node} 由合并队列 / 收尾步骤（scheduler-retire.ts）处理`);
     const backoff = plan.action === "dispatch" || plan.action === "review" ? this.undeliveredBackoff() : null;
     if (backoff) return this.out("held", backoff);
     const intent = await this.plan(plan);

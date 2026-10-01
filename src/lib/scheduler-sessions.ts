@@ -1,4 +1,4 @@
-/** Durable per-card session claims. Creation and retirement effects are performed by the later worker adapter. */
+/** Durable per-card session claims. Sessions are created by the auto tick's ensure step and retired by scheduler-retire.ts. */
 import type { Database } from "bun:sqlite";
 import { isManager, mustTask, type WriteCtx } from "./ledger-checks.js";
 import { getIntent, getWorkflow, type AuthorFamily } from "./ledger-scheduler.js";
@@ -6,8 +6,11 @@ import { getMeta, LedgerError } from "./ledger-store.js";
 import { insertEvent, tx } from "./ledger-tx.js";
 import { requireSessionIdentity } from "./scheduler-session-identity.js";
 import type { WorkerRef } from "./scheduler-plan.js";
+import type { Stage } from "./ledger-stages.js";
 
 export type SessionRole = "author" | "reviewer";
+/** Stages a card is finished in: only these retire. build / review / fix / merge / live never do (tests/scheduler-retire.test.ts). */
+export const RETIRE_STAGES: readonly Stage[] = ["verified", "done", "cancelled"];
 export type SessionTransport = "acp" | "tmux" | "peer";
 export interface SchedulerSession {
   taskId: string;
@@ -125,7 +128,7 @@ export function recordSessionRetirement(db: Database, ctx: WriteCtx, input: {
   return tx(db, () => {
     const task = mustTask(db, input.taskId);
     if (!mayWrite(db, ctx, task.project)) throw new LedgerError("forbidden", "只有项目 PM / master / owner 能记录 session 退役");
-    if (task.stage !== "verified" && task.stage !== "done") throw new LedgerError("conflict", "任务未验证，不能退役 session");
+    if (!RETIRE_STAGES.includes(task.stage)) throw new LedgerError("conflict", "任务未验证也未取消，不能退役 session");
     const intent = getIntent(db, input.intentId);
     if (!intent || intent.taskId !== task.id || intent.action !== "retire" || !["submitted", "unknown"].includes(intent.status)) {
       throw new LedgerError("conflict", "缺本卡已派出的退役意图");

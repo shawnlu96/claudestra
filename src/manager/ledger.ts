@@ -54,7 +54,7 @@ const SCHEDULER_SERVICE_COMMANDS = new Set([
   "scheduler-observe", "scheduler-fallback-manual", "scheduler-stage", "scheduler-ui-ask", "lend-ask", "lend-inform", "lend-close-asks", "scheduler-pool",
   "scheduler-deploy-begin", "scheduler-deploy-step", "verify",
   "scheduler-unclaimed", "scheduler-unclaimed-sent", "scheduler-supervise", "peer-pr-intake", "peer-pr-observe", "peer-pr-push-record",
-  "scheduler-autostart", "scheduler-auto-resume",
+  "scheduler-autostart", "scheduler-auto-resume", "scheduler-retire",
 ]);
 
 const COMMANDS: Record<string, CommandSpec> = {
