@@ -12,6 +12,7 @@ import type { StartPlan } from "./dag-tools-start.js";
 import { getFeature } from "./ledger-feature.js";
 import { getWorkflow } from "./ledger-scheduler.js";
 import { getEventByDedup, getTask } from "./ledger-store.js";
+import { LATEST_TEMPLATE_VERSION } from "./scheduler-template.js";
 import { ledgerArgs } from "./order-ledger-exit.js";
 
 interface GitResult {
@@ -75,7 +76,7 @@ function taskSteps(io: StepIO, p: StartPlan): Step[] {
     {
       name: "task-new",
       run: async () => failed(await ledger(io, p, "task-new", p.taskId, {
-        title: p.title, kind: "code", item: p.item ?? undefined, branch: p.branch, spec: p.specRel, pm: p.pm, project: p.project,
+        title: p.title, kind: "code", item: p.item ?? undefined, branch: p.branch, spec: p.specPath, pm: p.pm, project: p.project,
         extra: JSON.stringify(p.peer ? { fileGlobs: p.fileGlobs, placement: `peer:${p.peer.name}`, repo: p.peer.repo } : { fileGlobs: p.fileGlobs }),
       }, "task-new")),
       landed: () => ours(io, p, "task-new"),
@@ -205,11 +206,12 @@ function agentSteps(io: StepIO, p: StartPlan): Step[] {
 
 /** 开 auto 与绑节点：本机卡、peer 卡都走，且总在最后（绑定撤不掉） */
 function cardSteps(io: StepIO, p: StartPlan): Step[] {
+  const { template, version } = p.workflow ?? { template: "code", version: LATEST_TEMPLATE_VERSION.code };
   return [
     {
       name: "workflow",
       run: async () => failed(await ledger(io, p, "workflow-set", p.taskId, {
-        rev: rev(io, p.taskId), "workflow-rev": "0", template: "code", version: "3", mode: "auto", "author-family": "claude", fallback: FALLBACK,
+        rev: rev(io, p.taskId), "workflow-rev": "0", template, version: String(version), mode: "auto", "author-family": "claude", fallback: FALLBACK,
       }, null)),
       // workflow-set 没有 dedup：卡是本次建的（task-new 已确认归属），它的 workflow 是 auto 就是这一笔落了
       landed: () => getWorkflow(io.db(), p.taskId)?.mode === "auto",
