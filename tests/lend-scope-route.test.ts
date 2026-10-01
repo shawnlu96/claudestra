@@ -118,6 +118,18 @@ describe("消息路由的例外", () => {
     expect(delivered.length).toBe(before);
   }, 30_000);
 
+  test("带文件的 multipart、参数里藏 application/json（或 JSON 头参数里藏 multipart）→ 403", async () => {
+    // 每次 body 不同：同一秒内同 body 的签名一模一样，会被重放检查拒成 401
+    const body = (text: string) => ["--x", 'Content-Disposition: form-data; name="text"', "", text, "--x",
+      'Content-Disposition: form-data; name="files"; filename="a.txt"', "Content-Type: text/plain", "", "0123456789", "--x--", ""].join("\r\n");
+    const sneaky = "multipart/form-data; boundary=x; note=application/json";
+    const form = await new Request("http://x", { method: "POST", headers: { "Content-Type": sneaky }, body: body("hi") }).formData();
+    expect(form.get("files")).toBeInstanceOf(File); // 前提：下游 req.formData() 真能从这条请求里拿到文件
+    for (const contentType of [sneaky, "application/json; boundary=x; y=multipart/form-data"]) {
+      expect((await msg(WORKER, { contentType, body: body(`hi ${++n}`) })).status).toBe(403);
+    }
+  }, 30_000);
+
   test("授权收回（lend.json 关掉）后立刻拒；再打开又放行（每次现读）", async () => {
     await passedGate(await msg(WORKER));
     lendFile(false);

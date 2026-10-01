@@ -122,6 +122,15 @@ describe("验收线 1：只放行该放的", () => {
     expect(await judge({ contentType: "" })).toContain("只收 JSON");
     expect(await judge({ hasAsk: true })).toContain("只收 JSON");
   });
+
+  test("Content-Type 按媒体类型精确比：参数里藏 application/json 的 multipart、参数里藏 multipart 的 JSON、近似类型都拒", async () => {
+    seed();
+    for (const contentType of [
+      "multipart/form-data; boundary=x; note=application/json", "Multipart/Form-Data; boundary=x; a=Application/JSON",
+      "application/json; x=multipart/form-data", "application/json-patch+json", "text/plain; charset=application/json", "application/jsonx",
+    ]) expect(await judge({ contentType })).toContain("只收 JSON");
+    for (const contentType of ["application/json", " Application/JSON ; charset=utf-8", "application/json;charset=UTF-8"]) expect(await judge({ contentType })).toBeNull();
+  });
 });
 
 describe("验收线 2：立刻失效、读不到就拒", () => {

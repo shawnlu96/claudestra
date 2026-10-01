@@ -31,10 +31,16 @@ export interface LendScopeInput { agent: string; peer: string | undefined; conte
 
 const JOURNAL_BUSY_MS = 2_000;
 
+/** 媒体类型（参数前那段）必须正好是 application/json；下游消息路由按子串认 multipart，所以参数里出现 multipart/form-data 也拒（tests/lend-scope.test.ts） */
+function isJsonOnly(contentType: string): boolean {
+  const ct = contentType.toLowerCase();
+  return ct.split(";")[0]!.trim() === "application/json" && !ct.includes("multipart/form-data");
+}
+
 /** null = 放行；否则是拒绝原因（只记日志，调用方照旧回 not in scope，不把内部状态说给对方） */
 export async function judgeLendScope(i: LendScopeInput, d: LendScopeDeps): Promise<string | null> {
   if (!isLendWorkerName(i.agent)) return "不是出借 worker";
-  if (!i.contentType.toLowerCase().includes("application/json") || i.hasAsk) return "只收 JSON 文本消息（附件、ask 回答不走例外）";
+  if (!isJsonOnly(i.contentType) || i.hasAsk) return "只收 JSON 文本消息（附件、ask 回答不走例外）";
   const why = d.callerRefusal();
   if (why) return why;
   const peer = i.peer as string; // callerRefusal 已保证是已兑换的 peer
