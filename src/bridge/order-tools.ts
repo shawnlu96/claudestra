@@ -7,6 +7,7 @@ import type { ServerWebSocket } from "bun";
 import { openAskFull, patchAsk } from "../lib/ledger-asks.js";
 import { askOrder } from "../lib/order-ask.js";
 import { deliverOrder, remoteBranchHead } from "../lib/order-deliver.js";
+import { findPrRows } from "../lib/order-deliver-pr.js";
 import type { LedgerRun } from "../lib/order-ledger-exit.js";
 import { markingTakes, recordTaken } from "../lib/order-mark.js";
 import { currentOrders, orderWireFor } from "../lib/order-take.js";
@@ -48,7 +49,10 @@ const HANDLERS: Record<string, OrderToolHandler> = {
   // 领到调度器的单就留痕（lib/order-mark.ts）：调度器据此判「唤醒发出后有没有人领」，对账也认它
   take_order: markingTakes(takeOrder, (r) => orderIdOf(r.order), markTaken),
   take_review: markingTakes(reviewHandlers.take_review, (r) => (Array.isArray(r.orders) ? r.orders.flatMap(orderIdOf) : []), markTaken),
-  deliver: (call, args) => deliverOrder(call, args, { db: ledgerDb(), run: ledgerRun, remoteHead: (c, branch) => remoteBranchHead(cwdOf(c.agent), branch, runBounded) }),
+  deliver: (call, args) => deliverOrder(call, args, {
+    db: ledgerDb(), run: ledgerRun, remoteHead: (c, branch) => remoteBranchHead(cwdOf(c.agent), branch, runBounded),
+    findPr: (c, branch) => findPrRows(cwdOf(c.agent), branch, runBounded),
+  }),
   ask: (call, args) => askOrder(call, args, {
     db: ledgerDb(), open: (input) => openAskFull(askDb(), input), notify: (to, text, messageId) => sendLedgerNotice({ to, text, messageId }),
     markHanded: (id) => patchAsk(askDb(), id, { extra: { notice: "handed" } }),
