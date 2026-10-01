@@ -5,6 +5,7 @@
  * machine, then borrow order. No candidate peer → local, whose own gates queue the node exactly as before W5. A card
  * pinned to a peer by start_node goes there or waits; it is never moved. Proto-1 peers (no hello) are not candidates
  * here: scheduler-placement-plan.ts keeps them on the i28-R9 overflow rule. tests/scheduler-placement.test.ts.
+ * A review goes to the first remote.reviewFirst peer that passes the same constraints, whatever its load (i28-W5c).
  */
 import type { LendRole } from "./lend-config.js";
 import type { AuthorFamily } from "./ledger-scheduler.js";
@@ -85,6 +86,17 @@ export function placeFor(f: PlacementFacts, role: PlaceRole, family: AuthorFamil
     return why ? { kind: "wait", reason: `固定放在 ${f.pin}，它现在不能接：${why}` } : { kind: "peer", peer: name, reason: `start_node 固定放在 ${f.pin}` };
   }
   if (!f.remote || f.remote.mode === "off") return { kind: "local", reason: "scheduler.json remote.mode = off，只用本机" };
+  const first = role === "review" ? f.remote.reviewFirst ?? [] : [];
+  const firstWhy = (name: string) => f.tried.includes(name) ? "本轮已试过" : peerRefusal(f, f.peers.find((p) => p.peer === name), role, family);
+  const lead = first.find((name) => !firstWhy(name));
+  if (lead) return { kind: "peer", peer: lead, reason: `scheduler.json remote.reviewFirst 指定先给 ${lead}` };
+  const placed = balance(f, role, family);
+  if (!first.length) return placed;
+  return { ...placed, reason: `reviewFirst 里的 peer 都不能接（${first.map((n) => `${n}：${firstWhy(n)}`).join("；")}）；${placed.reason}` };
+}
+
+/** The even spread over this machine and every usable peer. */
+function balance(f: PlacementFacts, role: PlaceRole, family: AuthorFamily): Placement {
   const usable = f.peers.map((p, order) => ({ p, order })).filter(({ p }) => !f.tried.includes(p.peer) && !peerRefusal(f, p, role, family));
   const rows: Ranked[] = usable.map(({ p, order }) => ({ where: p.peer, local: false, load: p.open, order }));
   if (f.local.room) rows.push({ where: "本机", local: true, load: f.local.running, order: f.peers.length });

@@ -12,7 +12,8 @@ export const SCHEDULER_CONFIG_PATH = statePath("scheduler.json");
  * fix in roles are refused rather than silently ignored.
  */
 export type RemoteMode = "balance" | "off" | "overflow" | "prefer";
-export interface RemotePolicy { mode: RemoteMode; roles: "review"[]; poolTimeoutMin: number; note?: string }
+/** reviewFirst: peers that get every review they can take, in order, before the even spread (i28-W5c); absent = none. */
+export interface RemotePolicy { mode: RemoteMode; roles: "review"[]; poolTimeoutMin: number; reviewFirst?: string[]; note?: string }
 export const DEFAULT_REMOTE: RemotePolicy = { mode: "balance", roles: ["review"], poolTimeoutMin: 15 };
 export const isLegacyRemoteMode = (m: unknown): m is "overflow" | "prefer" => m === "overflow" || m === "prefer";
 
@@ -106,8 +107,14 @@ function parseRemote(id: string, raw: unknown): RemotePolicy {
   }
   const timeout = r.poolTimeoutMin ?? DEFAULT_REMOTE.poolTimeoutMin;
   if (!Number.isInteger(timeout) || (timeout as number) < 1 || (timeout as number) > 240) throw new Error(`scheduler project ${id}: remote.poolTimeoutMin must be 1..240`);
+  const first = r.reviewFirst ?? [];
+  if (!Array.isArray(first) || first.length > 8 || new Set(first).size !== first.length
+    || first.some((x) => typeof x !== "string" || !x || /[\p{Cc}\p{Cf}]/u.test(x))) {
+    throw new Error(`scheduler project ${id}: remote.reviewFirst must be up to 8 distinct nonempty peer names`);
+  }
   const note = isLegacyRemoteMode(rawMode) ? `remote.mode "${rawMode}" 是旧写法，按 balance 处理（i28-W5）` : undefined;
-  return { mode, roles: roles.length ? ["review"] : [], poolTimeoutMin: timeout as number, ...(note ? { note } : {}) };
+  return { mode, roles: roles.length ? ["review"] : [], poolTimeoutMin: timeout as number,
+    ...(first.length ? { reviewFirst: first as string[] } : {}), ...(note ? { note } : {}) };
 }
 
 const argv = (v: unknown): v is string[] => Array.isArray(v) && v.length > 0 && v.length <= 32 &&
