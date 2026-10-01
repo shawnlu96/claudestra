@@ -43,11 +43,11 @@ const DEFAULTS: LendGrantDeps = {
   now: Date.now,
 };
 
-export interface GrantView {
+interface GrantView {
   peer: string; repos: string[]; roles: string[]; families: Record<string, number>; ordersPerDay: number;
   until: string | null; grantedAt: string | null; paused: string | null; problem: string | null;
 }
-export interface OrderView {
+interface OrderView {
   orderId: string; peer: string; family: string; state: string; repo: string | null; pr: number | null; taskId: string | null; step: string | null;
   agent: string | null; startedAt: number | null; updatedAt: number; reason: string | null; notices: NoticesView | null;
 }
@@ -105,7 +105,7 @@ function orderView(r: Record<string, unknown>): OrderView {
 }
 
 /** 在跑的全部 + 7 天内最近 50 张已结束的；journal 还没建 = 没借出过 */
-export function readOrders(path: string, now: number, peer?: string): { live: OrderView[]; ended: OrderView[] } {
+function readOrders(path: string, now: number, peer?: string): { live: OrderView[]; ended: OrderView[] } {
   if (!existsSync(path)) return { live: [], ended: [] };
   const db = new Database(path, { readonly: true });
   try {

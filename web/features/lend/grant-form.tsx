@@ -21,6 +21,56 @@ interface Props {
   onCancel: () => void;
 }
 
+/** 仓库：已加的是徽章（可删），输入框回车 / 逗号 / 失焦即加 */
+function RepoField({ repos, text, setText, onCommit, onRemove }: {
+  repos: string[]; text: string; setText: (v: string) => void; onCommit: () => void; onRemove: (r: string) => void;
+}) {
+  const t = useLendT();
+  return (
+      <div className="flex items-start gap-2 text-xs">
+        <span className="mt-1.5 w-20 shrink-0 text-base-content/60">{t("仓库")}</span>
+        <div className="min-w-0 flex-1 space-y-1.5">
+          {repos.length > 0 && (
+            <div className="flex flex-wrap gap-1">
+              {repos.map((r) => (
+                <span key={r} className="badge badge-sm gap-1 font-mono">
+                  {r}
+                  <button type="button" aria-label={`remove ${r}`} onClick={() => onRemove(r)}>
+                    <LendIcon name="x" size={11} />
+                  </button>
+                </span>
+              ))}
+            </div>
+          )}
+          <div className="flex gap-1">
+            <input className="input input-sm min-w-0 flex-1 font-mono" placeholder="owner/repo" value={text}
+              onChange={(e) => setText(e.target.value)} onBlur={onCommit}
+              onKeyDown={(e) => { if (e.key === "Enter" || e.key === ",") { e.preventDefault(); onCommit(); } }} />
+            <button type="button" className="btn btn-sm btn-square" aria-label={t("添加")} onClick={onCommit}><LendIcon name="plus" /></button>
+          </div>
+        </div>
+      </div>
+  );
+}
+
+/** 角色固定审查；写代码是一把锁：点了只抖一下、锁闪一下，永远选不中 */
+function RoleField() {
+  const t = useLendT();
+  const [lockFlash, setLockFlash] = useState(false);
+  return (
+      <div className="flex items-center gap-2 text-xs">
+        <span className="w-20 shrink-0 text-base-content/60">{t("角色")}</span>
+        <span className="badge badge-sm badge-primary">{t("审查")}</span>
+        <button type="button" role="switch" aria-checked="false" aria-disabled="true" aria-label={t("写代码")}
+          className={`flex items-center gap-1 rounded-full bg-base-300/60 px-2 py-0.5 text-base-content/35 ${lockFlash ? css.lockFlash : ""}`}
+          onClick={() => setLockFlash(true)} onAnimationEnd={(e) => { e.stopPropagation(); setLockFlash(false); }}>
+          <LendIcon name="lock" size={12} />
+          <span className="line-through decoration-base-content/30">{t("写代码")}</span>
+        </button>
+      </div>
+  );
+}
+
 export function GrantForm({ peers, maxDays, shellSentence, initial, onDone, onCancel }: Props) {
   const t = useLendT();
   const [f, setF] = useState<Form>(initial);
@@ -28,7 +78,6 @@ export function GrantForm({ peers, maxDays, shellSentence, initial, onDone, onCa
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
   const [shake, setShake] = useState(false);
-  const [lockFlash, setLockFlash] = useState(false);
   const peerNames = peers.some((p) => p.name === f.peer) || !f.peer ? peers.map((p) => p.name) : [f.peer, ...peers.map((p) => p.name)];
 
   const commitRepos = () => {
@@ -64,40 +113,9 @@ export function GrantForm({ peers, maxDays, shellSentence, initial, onDone, onCa
         </select>
       </label>
 
-      <div className="flex items-start gap-2 text-xs">
-        <span className="mt-1.5 w-20 shrink-0 text-base-content/60">{t("仓库")}</span>
-        <div className="min-w-0 flex-1 space-y-1.5">
-          {f.repos.length > 0 && (
-            <div className="flex flex-wrap gap-1">
-              {f.repos.map((r) => (
-                <span key={r} className="badge badge-sm gap-1 font-mono">
-                  {r}
-                  <button type="button" aria-label={`remove ${r}`} onClick={() => setF({ ...f, repos: f.repos.filter((x) => x !== r) })}>
-                    <LendIcon name="x" size={11} />
-                  </button>
-                </span>
-              ))}
-            </div>
-          )}
-          <div className="flex gap-1">
-            <input className="input input-sm min-w-0 flex-1 font-mono" placeholder="owner/repo" value={repoText}
-              onChange={(e) => setRepoText(e.target.value)} onBlur={commitRepos}
-              onKeyDown={(e) => { if (e.key === "Enter" || e.key === ",") { e.preventDefault(); commitRepos(); } }} />
-            <button type="button" className="btn btn-sm btn-square" aria-label={t("添加")} onClick={commitRepos}><LendIcon name="plus" /></button>
-          </div>
-        </div>
-      </div>
-
-      <div className="flex items-center gap-2 text-xs">
-        <span className="w-20 shrink-0 text-base-content/60">{t("角色")}</span>
-        <span className="badge badge-sm badge-primary">{t("审查")}</span>
-        <button type="button" role="switch" aria-checked="false" aria-disabled="true" aria-label={t("写代码")}
-          className={`flex items-center gap-1 rounded-full bg-base-300/60 px-2 py-0.5 text-base-content/35 ${lockFlash ? css.lockFlash : ""}`}
-          onClick={() => setLockFlash(true)} onAnimationEnd={(e) => { e.stopPropagation(); setLockFlash(false); }}>
-          <LendIcon name="lock" size={12} />
-          <span className="line-through decoration-base-content/30">{t("写代码")}</span>
-        </button>
-      </div>
+      <RepoField repos={f.repos} text={repoText} setText={setRepoText} onCommit={commitRepos}
+        onRemove={(r) => setF({ ...f, repos: f.repos.filter((x) => x !== r) })} />
+      <RoleField />
 
       <div className="grid grid-cols-2 gap-2 text-xs">
         <label className="flex items-center gap-2">
