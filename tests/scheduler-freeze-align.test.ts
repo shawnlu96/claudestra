@@ -29,28 +29,26 @@ const review = (seq: number, verdict: string, findings: object[]): LedgerEvent =
 const sentReview: SchedulerIntent = { id: "review-r1", taskId: "T1", project: "p", node: "adversarial_review", action: "review",
   recipient: reviewer.agent, causalSeq: 15, eventSeq: 16, taskRev: 1, specRev: 1, head: HEAD, templateVersion: 2, status: "done",
   attempts: 0, receipt: null, reason: "x", createdAt: 15, updatedAt: 15 };
+const more = (s: PlannerSnapshot, ...events: LedgerEvent[]): PlannerSnapshot => { s.events = [...s.events, ...events]; return s; };
+const delivered = (): LedgerEvent => event(12, "deliver", { round: 1, headSHA: HEAD });
 const proof = { intentId: "review-r1", round: 1, head: HEAD, reviewer: reviewer.agent, reviewerSessionId: reviewer.sessionId, ackSeq: 17 };
 
 /** Frozen snapshots on which the planner still has work; each must produce an intent the write entry accepts. */
 const FROZEN_WORK: [string, () => PlannerSnapshot, SchedulerIntent["action"]][] = [
-  ["review stage dispatches its reviewer", () => { const s = snapshot("review"); s.events.push(event(12, "deliver", { round: 1, headSHA: HEAD })); return s; }, "review"],
-  ["review stage provisions a missing reviewer", () => { const s = snapshot("review"); s.reviewer = null; s.events.push(event(12, "deliver", { round: 1, headSHA: HEAD })); return s; }, "ensure_session"],
+  ["review stage dispatches its reviewer", () => more(snapshot("review"), delivered()), "review"],
+  ["review stage provisions a missing reviewer", () => { const s = more(snapshot("review"), delivered()); s.reviewer = null; return s; }, "ensure_session"],
   ["changes verdict moves review → fix", () => {
-    const s = snapshot("review");
-    s.events.push(event(12, "deliver", { round: 1, headSHA: HEAD }), review(20, "changes", [{ findingId: "x-P1", family: "x", severity: "P1", probe: "p" }]));
+    const s = more(snapshot("review"), delivered(), review(20, "changes", [{ findingId: "x-P1", family: "x", severity: "P1", probe: "p" }]));
     s.intents = [sentReview]; s.reviewDispatches = [proof];
     return s;
   }, "stage"],
   ["pass verdict moves review → merge", () => {
-    const s = snapshot("review");
-    s.events.push(event(12, "deliver", { round: 1, headSHA: HEAD }), review(20, "pass", []));
+    const s = more(snapshot("review"), delivered(), review(20, "pass", []));
     s.intents = [sentReview]; s.reviewDispatches = [proof];
     return s;
   }, "stage"],
   ["approved restate moves restate → build", () => {
-    const s = snapshot("restate", 0);
-    s.events.push(event(30, "decision", { op: "restate_approved", specRev: 1 }));
-    return s;
+    return more(snapshot("restate", 0), event(30, "decision", { op: "restate_approved", specRev: 1 }));
   }, "stage"],
   ["live card is verified", () => snapshot("live"), "verify"],
 ];
@@ -72,7 +70,7 @@ describe("i28-M10 frozen queue: write entry accepts exactly what the planner sti
     for (const [name, make, action] of FROZEN_WORK) {
       const s = make();
       const d = planScheduler(s);
-      expect({ name, kind: d.kind, action: d.kind === "intent" ? d.action : null }).toEqual({ name, kind: "intent", action });
+      expect({ name, kind: d.kind, action: d.kind === "intent" ? d.action as string : null }).toEqual({ name, kind: "intent", action });
       if (d.kind === "intent") expect({ name, blocked: frozenBlocks(s.task.stage, d.action) }).toEqual({ name, blocked: false });
       s.queueFrozen = false;
       expect(planScheduler(s)).toMatchObject({ kind: "intent", action }); // the freeze changes nothing for these
