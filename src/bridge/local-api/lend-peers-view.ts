@@ -1,22 +1,25 @@
 /**
- * 借入方管理面（i28-R7b，方案 ledger/docs/remote-pool-v2-plan.md §2.3、§2.6）：A 侧 owner 在网页看「借谁的机器」并用按钮改。
- *   GET    /api/v1/borrow              canReadLedger：项目的 remote.mode、borrow 声明 / 生效 / 失效、各 peer 容量、远端在跑的单与放置结果
- *   PUT    /api/v1/borrow/peers/:peer  canRunFleet：`borrow set --projects … --roles review --max-open N -- <peer>`
- *   DELETE /api/v1/borrow/peers/:peer  canRunFleet：`borrow off --peer <peer>`
- * 写只经 manager CLI（准入以 buildBorrowEntry 为准，bridge 只查形状），回包只带固定错误码：CLI 原文里有命令提示，不给网页。
- * scheduler.json 没有写入口，remote.mode 这里只读。容量原样取 peerCapacity，不另算。tests/web-borrow-view.test.ts。
+ * 借入方管理面（i28-R7b，方案 ledger/docs/remote-pool-v2-plan.md §2.3、§2.6）+ 分配表（i28-Q1）：A 侧 owner 在网页看「借谁的机器」并用按钮改。
+ *   GET    /api/v1/borrow                 canReadLedger：项目的 remote（档位 / 角色只读）、borrow 声明 / 生效 / 失效、各 peer 容量与上报额度、本机额度、远端单与放置
+ *   PUT    /api/v1/borrow/peers/:peer     canRunFleet：`borrow set --keep-unset [--projects …] [--roles …] [--max-open N] [--priority …] -- <peer>`
+ *   DELETE /api/v1/borrow/peers/:peer     canRunFleet：`borrow off --peer <peer>`
+ *   PUT    /api/v1/borrow/local/:project  canRunFleet：`ledger scheduler-local <project> [--priority …] [--max-workers N] --reason …`
+ * 写只经 manager CLI（准入以 CLI 为准，bridge 只查形状），回包只带固定错误码：CLI 原文里有命令提示，不给网页。
+ * PUT 只传改的那格：没传的字段由 CLI 在 lend.json 写锁里沿用（--keep-unset），不在这里读旧值拼全量。
+ * 额度只读、只做参考（quota-week.ts），读不到给 null，不影响别的字段。容量原样取 peerCapacity，不另算。tests/web-borrow-view.test.ts、web-borrow-alloc.test.ts。
  */
 import type { Database } from "bun:sqlite";
 import { canReadLedger } from "../../lib/devices.js";
 import { LEND_LIVE } from "../../lib/ledger-lend-schema.js";
 import { getTask } from "../../lib/ledger-store.js";
 import { getLendPeer, peerCapacity, type PeerCapacity } from "../../lib/ledger-lend-peers.js";
-import { LEND_PATH, MAX_OPEN, readLend, type BorrowEntry } from "../../lib/lend-config.js";
+import { isPriority, LEND_PATH, MAX_OPEN, readLend, type BorrowEntry, type Priority } from "../../lib/lend-config.js";
 import { placementOf } from "../../lib/lend-placement-view.js";
 import { effectiveLend, isPersonalProject, readLendContext, type LendContact } from "../../lib/lend-policy.js";
 import { canRunFleet, type Principal } from "../../lib/principals.js";
 import type { ProjectDef } from "../../lib/projects.js";
 import { runManagerProcess } from "../../lib/run-manager.js";
+import { localWalled, peerQuota, readWeekQuota, type QuotaReport } from "../../lib/quota-week.js";
 import { readSchedulerConfig, SCHEDULER_CONFIG_PATH, type SchedulerConfig } from "../../lib/scheduler-config.js";
 import { apiJson, forbidden } from "../api-respond.js";
 import { BUN_PATH, ENV_WITH_BUN, MANAGER_PATH } from "../config.js";
@@ -29,6 +32,8 @@ export interface BorrowViewDeps {
   context(): Promise<{ contacts: LendContact[]; projects: (ProjectDef & { personal?: boolean })[] }>;
   run(args: string[]): Promise<Record<string, unknown> | null>;
   now(): number;
+  /** 本机本周额度与撞墙标；单测换成固定值或抛错 */
+  localQuota(now: number): Promise<{ quota: QuotaReport; walled: boolean }>;
 }
 
 /** 频道号置空 = 以 owner 身份跑（borrow set / off 只认 owner 或大总管，project-guard.ts） */
@@ -40,6 +45,7 @@ const DEFAULT_DEPS: BorrowViewDeps = {
   context: readLendContext,
   run: (args) => runManagerProcess(args, { bunPath: BUN_PATH, managerPath: MANAGER_PATH, env: ENV, timeoutMs: 30_000 }),
   now: () => Date.now(),
+  localQuota: async (now) => ({ quota: await readWeekQuota(now), walled: localWalled() }),
 };
 let deps: BorrowViewDeps = DEFAULT_DEPS;
 
@@ -53,7 +59,10 @@ const PEER_RE = /^[\w-]{1,32}$/;
 const PROJECT_RE = /^[a-z0-9][a-z0-9_-]{0,31}$/;
 
 type RemoteModeView = "balance" | "off";
-interface BorrowProjectView { id: string; mode: RemoteModeView; maxActiveWorkers: number }
+/** 本机这一行：档位与并发上限可改；roles / repo / reviewFirst 是项目级配置，只读 */
+interface BorrowProjectView {
+  id: string; mode: RemoteModeView; maxActiveWorkers: number; localPriority: Priority; roles: string[]; repo: string | null; reviewFirst: string[];
+}
 /** 声明里有、生效里没有的条目 / 项目：原因只给固定码，网页按码翻译 */
 interface DroppedView { peer: string; project?: string; code: "contact_gone" | "contact_disabled" | "fp_changed" | "project_gone" | "personal" }
 export interface PeerView {
@@ -65,6 +74,11 @@ export interface PeerView {
   reported: Record<string, { total: number; busy: number }> | null;
   paused: { reason: string; until: number } | null;
   grant: { roles: string[]; repos: string[]; until: number; ordersLeftToday: number } | null;
+  /** 我方借入条目的角色与档位（不写 = balance） */
+  roles: string[];
+  priority: Priority;
+  /** 对方 hello 里报的本周额度（bridge 内存）；没报 / 太旧 = null */
+  quota: QuotaReport | null;
 }
 /** explainPlacement 原样；算不出（卡没了 / scheduler.json 坏 / 快照抛错）只给固定码，原文进日志 */
 export type PlacementView = { role: string | null; where: string; reason: string } | { error: "unavailable" };
@@ -79,7 +93,10 @@ const modeView = (mode: string | undefined): RemoteModeView => (mode === "off" ?
 function projectsView(): { projects: BorrowProjectView[]; cfg: SchedulerConfig | null } {
   try {
     const cfg = readSchedulerConfig(deps.schedulerPath);
-    const projects = Object.entries(cfg.projects).map(([id, p]) => ({ id, mode: modeView(p.remote?.mode), maxActiveWorkers: p.maxActiveWorkers }));
+    const projects = Object.entries(cfg.projects).map(([id, p]) => ({
+      id, mode: modeView(p.remote?.mode), maxActiveWorkers: p.maxActiveWorkers, localPriority: p.remote?.localPriority ?? "balance",
+      roles: [...(p.remote?.roles ?? [])], repo: p.remote?.repo ?? null, reviewFirst: [...(p.remote?.reviewFirst ?? [])],
+    }));
     return { projects, cfg };
   } catch (e) {
     // scheduler.json 坏了：调度服务自己也不跑，这里只是不列项目、远端行的放置给 unavailable，网页照常显示 borrow 与 peer
@@ -133,7 +150,7 @@ function openDb(): Database | null {
 }
 
 function peerView(db: Database | null, b: BorrowEntry, now: number): PeerView {
-  const base = { peer: b.peer, maxOpen: b.maxOpen, projects: b.projects };
+  const base = { peer: b.peer, maxOpen: b.maxOpen, projects: b.projects, roles: b.roles, priority: b.priority ?? "balance", quota: peerQuota(b.peer, now) };
   if (!db || !hasTable(db, "lend_orders")) return { ...base, capacity: null, reported: null, paused: null, grant: null };
   const p = getLendPeer(db, b.peer);
   const g = p?.grant;
@@ -168,13 +185,23 @@ function phaseOf(raw: string | null): string | null {
   }
 }
 
+/** 额度只是参考：读失败给 null，整份视图照常 */
+async function localQuotaView(now: number): Promise<{ quota: QuotaReport; walled: boolean } | null> {
+  try {
+    return await deps.localQuota(now);
+  } catch (e) {
+    console.warn(`⚠️ [borrow] 读本机额度失败：${(e as Error).message}`);
+    return null;
+  }
+}
+
 export async function borrowView(now = deps.now()): Promise<Record<string, unknown>> {
-  const [read, ctx] = await Promise.all([readLend(deps.lendPath), deps.context()]);
+  const [read, ctx, localQuota] = await Promise.all([readLend(deps.lendPath), deps.context(), localQuotaView(now)]);
   const eff = effectiveLend(read, ctx.contacts, ctx.projects, now);
   const db = openDb();
   const { projects, cfg } = projectsView();
   return {
-    ok: true, now, schedulerOk: cfg !== null, projects,
+    ok: true, now, schedulerOk: cfg !== null, projects, localQuota,
     borrow: {
       file: read.status, invalid: read.status === "invalid", declared: read.file.borrow, effective: eff.borrow,
       dropped: droppedOf(read.file.borrow, eff.borrow, ctx.contacts, ctx.projects),
@@ -190,24 +217,53 @@ export async function borrowView(now = deps.now()): Promise<Record<string, unkno
 
 const fail = (status: number, code: string) => apiJson(status, { ok: false, code });
 
-function decodePeer(raw: string): string | null {
+function decodeSegment(raw: string, re: RegExp): string | null {
   try {
     const p = decodeURIComponent(raw);
-    return PEER_RE.test(p) ? p : null;
+    return re.test(p) ? p : null;
   } catch {
     // 非法百分号编码：调用方回 400
     return null;
   }
 }
 
-/** PUT 的体：projects 非空不重复的项目 id，maxOpen 1..MAX_OPEN；不合形状 → null */
-function parsePut(body: unknown): { projects: string[]; maxOpen: number } | null {
-  if (!body || typeof body !== "object" || Array.isArray(body)) return null;
-  const { projects, maxOpen } = body as Record<string, unknown>;
-  if (!Array.isArray(projects) || projects.length === 0 || projects.length > 100) return null;
-  if (!projects.every((p) => typeof p === "string" && PROJECT_RE.test(p)) || new Set(projects).size !== projects.length) return null;
-  if (!Number.isInteger(maxOpen) || (maxOpen as number) < 1 || (maxOpen as number) > MAX_OPEN) return null;
-  return { projects: projects as string[], maxOpen: maxOpen as number };
+type PeerPut = { projects?: string[]; maxOpen?: number; roles?: string[]; priority?: Priority };
+const ROLES = ["review", "write"];
+const isObj = (v: unknown): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v);
+/** 字符串数组：非空、不重复、每项过 ok；不合 = null */
+const listOf = (v: unknown, max: number, ok: (x: string) => boolean): string[] | null =>
+  Array.isArray(v) && v.length > 0 && v.length <= max && v.every((x) => typeof x === "string" && ok(x)) && new Set(v).size === v.length ? v as string[] : null;
+
+/** PUT 的体：projects / maxOpen / roles / priority 都可选（没带的 CLI 沿用），至少带一个、不认识的键拒；不合形状 → null */
+function parsePut(body: unknown): PeerPut | null {
+  if (!isObj(body) || Object.keys(body).some((k) => !["projects", "maxOpen", "roles", "priority"].includes(k))) return null;
+  const { projects, maxOpen, roles, priority } = body;
+  const out: PeerPut = {};
+  if (projects !== undefined) {
+    const v = listOf(projects, 100, (p) => PROJECT_RE.test(p));
+    if (!v) return null;
+    out.projects = v;
+  }
+  if (maxOpen !== undefined) {
+    if (!Number.isInteger(maxOpen) || (maxOpen as number) < 1 || (maxOpen as number) > MAX_OPEN) return null;
+    out.maxOpen = maxOpen as number;
+  }
+  if (roles !== undefined) {
+    const v = listOf(roles, 2, (r) => ROLES.includes(r));
+    if (!v) return null;
+    out.roles = v;
+  }
+  if (priority !== undefined) {
+    if (!isPriority(priority)) return null;
+    out.priority = priority;
+  }
+  return Object.keys(out).length ? out : null;
+}
+
+/** 值一律 `--flag=value`、peer 放 `--` 之后（与 lend-grant.ts 同一写法） */
+function borrowSetArgs(peer: string, put: PeerPut): string[] {
+  return ["borrow", "set", "--keep-unset", ...(put.projects ? [`--projects=${put.projects.join(",")}`] : []), ...(put.roles ? [`--roles=${put.roles.join(",")}`] : []),
+    ...(put.maxOpen !== undefined ? [`--max-open=${put.maxOpen}`] : []), ...(put.priority ? [`--priority=${put.priority}`] : []), "--", peer];
 }
 
 /** CLI 结果 → 固定码；原文只进 bridge 日志 */
@@ -236,8 +292,29 @@ async function writePeer(req: Request, peer: string): Promise<Response> {
   }
   const put = parsePut(body);
   if (!put) return fail(400, "bad_body");
-  const args = ["borrow", "set", "--projects", put.projects.join(","), "--roles", "review", "--max-open", String(put.maxOpen), "--", peer];
-  return cliResult(await deps.run(args), `borrow set ${peer}`);
+  return cliResult(await deps.run(borrowSetArgs(peer, put)), `borrow set ${peer}`);
+}
+
+async function readBody(req: Request): Promise<unknown> {
+  try {
+    return await req.json();
+  } catch {
+    // 体不是 JSON：和形状不对一样回 400
+    return null;
+  }
+}
+
+/** 本机这一行：{priority?, maxActiveWorkers?}，至少一个；项目在不在、范围对不对以 scheduler-local 为准 */
+async function writeLocal(req: Request, project: string): Promise<Response> {
+  const body = await readBody(req);
+  if (!isObj(body) || Object.keys(body).some((k) => k !== "priority" && k !== "maxActiveWorkers")) return fail(400, "bad_body");
+  const { priority, maxActiveWorkers: n } = body;
+  if (priority === undefined && n === undefined) return fail(400, "bad_body");
+  if (priority !== undefined && !isPriority(priority)) return fail(400, "bad_body");
+  if (n !== undefined && (!Number.isInteger(n) || (n as number) < 0 || (n as number) > 32)) return fail(400, "bad_body");
+  const args = ["ledger", "scheduler-local", project, ...(priority !== undefined ? [`--priority=${priority}`] : []),
+    ...(n !== undefined ? [`--max-workers=${n}`] : []), "--reason=网页分配表"];
+  return cliResult(await deps.run(args), `scheduler-local ${project}`);
 }
 
 export async function handleBorrowApi(req: Request, path: string, principal: Principal): Promise<Response | null> {
@@ -246,11 +323,18 @@ export async function handleBorrowApi(req: Request, path: string, principal: Pri
     if (!canReadLedger(principal)) return forbidden("borrow requires a full-scope owner credential");
     return apiJson(200, await borrowView());
   }
+  const local = path.match(/^\/borrow\/local\/([^/]+)$/);
+  if (local) {
+    if (req.method !== "PUT") return apiJson(405, { ok: false, error: "method not allowed" });
+    if (!canRunFleet(principal)) return forbidden("borrow settings require the owner's full-scope credential");
+    const project = decodeSegment(local[1], PROJECT_RE);
+    return project ? writeLocal(req, project) : fail(400, "bad_project");
+  }
   const m = path.match(/^\/borrow\/peers\/([^/]+)$/);
   if (!m) return null;
   if (req.method !== "PUT" && req.method !== "DELETE") return apiJson(405, { ok: false, error: "method not allowed" });
   if (!canRunFleet(principal)) return forbidden("borrow settings require the owner's full-scope credential");
-  const peer = decodePeer(m[1]);
+  const peer = decodeSegment(m[1], PEER_RE);
   if (!peer) return fail(400, "bad_peer");
   return writePeer(req, peer);
 }
