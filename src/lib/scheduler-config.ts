@@ -23,7 +23,12 @@ interface ProjectSchedule {
   repoDir: string;
   /** Absent = merge only, the PM deploys (T68g). */
   deploy?: DeployTarget;
+  /** false = this project's agents are never supervised (i28-S1); absent = follow the global switch */
+  supervise?: boolean;
 }
+/** Agent supervision (i28-S1, lib/agent-supervisor.ts): on unless scheduler.json says otherwise; stuckMin = silent-turn threshold. */
+interface SuperviseConfig { enabled: boolean; stuckMin: number }
+const DEFAULT_SUPERVISE: SuperviseConfig = { enabled: true, stuckMin: 20 };
 /** Steps are fixed in code (lib/scheduler-deploy-steps.ts); only machine-specific parts live here, never in the repo. */
 export interface DeployTarget {
   /** Relay deploy command, run only when the pulled commits touch web / relay code; absent = that step is reported as skipped. */
@@ -39,6 +44,8 @@ export interface SchedulerConfig {
   /** Auto cards are driven only when this is true; off by default until T68h re-checks the lease inside CLI subprocesses. */
   autoDispatch: boolean;
   projects: Record<string, ProjectSchedule>;
+  /** Always set by parseSchedulerConfig; a hand-built config without it never supervises. */
+  supervise?: SuperviseConfig;
 }
 
 /** Invalid config is an explicit error, never a partial activation with guessed defaults. */
@@ -62,11 +69,25 @@ export function parseSchedulerConfig(raw: unknown): SchedulerConfig {
     if (typeof p.repoDir !== "string" || !isAbsolute(p.repoDir) || /[\p{Cc}\p{Cf}]/u.test(p.repoDir)) {
       throw new Error(`scheduler project ${id} needs absolute repoDir`);
     }
+    if (p.supervise !== undefined && typeof p.supervise !== "boolean") throw new Error(`scheduler project ${id}: supervise must be boolean`);
     projects[id] = { maxActiveWorkers: p.maxActiveWorkers as number, requiredChecks,
-      repoDir: p.repoDir, remote: parseRemote(id, p.remote), ...(p.deploy !== undefined ? { deploy: parseDeployTarget(id, p.deploy) } : {}) };
+      repoDir: p.repoDir, remote: parseRemote(id, p.remote), ...(p.deploy !== undefined ? { deploy: parseDeployTarget(id, p.deploy) } : {}),
+      ...(p.supervise !== undefined ? { supervise: p.supervise as boolean } : {}) };
   }
   if (r.enabled && Object.keys(projects).length === 0) throw new Error("enabled scheduler needs at least one project");
-  return { enabled: r.enabled, pollMs: pollMs as number, autoDispatch: r.autoDispatch === true, projects };
+  return { enabled: r.enabled, pollMs: pollMs as number, autoDispatch: r.autoDispatch === true, projects, supervise: parseSupervise(r.supervise) };
+}
+
+/** `supervise: false` / `true` / `{ enabled?, stuckMin? }`; absent = DEFAULT_SUPERVISE */
+function parseSupervise(raw: unknown): SuperviseConfig {
+  if (raw === undefined) return { ...DEFAULT_SUPERVISE };
+  if (typeof raw === "boolean") return { ...DEFAULT_SUPERVISE, enabled: raw };
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("scheduler.supervise must be boolean or an object");
+  const r = raw as Record<string, unknown>;
+  if (r.enabled !== undefined && typeof r.enabled !== "boolean") throw new Error("scheduler.supervise.enabled must be boolean");
+  const stuckMin = r.stuckMin ?? DEFAULT_SUPERVISE.stuckMin;
+  if (!Number.isInteger(stuckMin) || (stuckMin as number) < 5 || (stuckMin as number) > 240) throw new Error("scheduler.supervise.stuckMin must be 5..240");
+  return { enabled: r.enabled !== false, stuckMin: stuckMin as number };
 }
 
 function parseRemote(id: string, raw: unknown): RemotePolicy {

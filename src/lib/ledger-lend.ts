@@ -17,6 +17,7 @@ import { LEASE_MS_DEFAULT, POLL_AFTER_MS, pollLimit, type ClaimRequest, type Lea
 import { isManager, mustTask, type WriteCtx } from "./ledger-checks.js";
 import { endWriteLease, holdWriteLease, lastReviewOf, writeOfferBranch, writeOrderWire, type WriteLease as WriteLeaseRow, type WriteOffer } from "./ledger-lend-lease.js";
 import { LEND_LIVE, type LendOrderStatus } from "./ledger-lend-schema.js";
+import { sweepPushTtl } from "./ledger-lend-peers-ttl.js";
 import { getWorkflow } from "./ledger-scheduler.js";
 import { LedgerError, type LedgerErrorCode } from "./ledger-store.js";
 import { assignStep } from "./ledger-steps-write.js";
@@ -256,7 +257,7 @@ export function sweepLend(db: Database, ctx: WriteCtx): LendNotice[] {
     });
     const stale = (db.query(`SELECT * FROM lend_orders WHERE ${STALE_WRITE_SQL}`).all(now - WRITE_POOL_TTL_MS) as Record<string, unknown>[]).map(toOrder);
     const why = `挂出或对方看到后 ${WRITE_POOL_TTL_MS / 60_000} 分钟没人领（对方离线、名额满或没批）`;
-    return [...expired, ...stale.map((o) => sendBack(db, ctx, o, why, now))];
+    return [...expired, ...stale.map((o) => sendBack(db, ctx, o, why, now)), ...sweepPushTtl(db, now, (orderId, reason) => withdrawPooledLend(db, ctx, { orderId, reason }).withdrawn)];
   });
 }
 

@@ -3,6 +3,8 @@ import { memo, useState } from "react";
 import type { ToolCallView } from "../type";
 import { highlightCode, langForPath } from "../highlight";
 import { fmtTs } from "../fmt-time";
+import { elapsedSince } from "../fmt-clock";
+import { useNow } from "../use-now";
 import { cleanSummary, toolIcon } from "../message-text";
 import { QuoteSwipe } from "./quote-swipe";
 import { ChevronRightIcon, TriangleAlertIcon } from "./line-icons";
@@ -35,10 +37,24 @@ const TOOL_TONE = {
   error: { box: "border-error/30 bg-error/[0.06]", name: "text-error" },
 } as const;
 
+/** 运行中的工具卡右侧的耗时。长命令（跑测试 5 分钟）期间会话记录一行不写，没有这个时钟看起来就像卡死了。
+ *  每秒的时钟只放在这个小组件里：同一时刻只有最后一张在跑的卡挂着它，别的卡不跟着重渲染。 */
+function RunningClock({ ts }: { ts?: string }) {
+  const t = useT();
+  const clock = elapsedSince(ts, useNow(1000));
+  return (
+    <span className="ml-auto shrink-0 pl-2 font-mono text-[10.5px] tabular-nums text-info/70">
+      {t("运行中")}
+      {clock && ` · ${clock}`}
+    </span>
+  );
+}
+
 export const ActiveToolRow = memo(function ActiveToolRow({ tool, active }: { tool: ToolCallView; active: boolean }) {
   const summary = cleanSummary(tool.summary);
   const [open, setOpen] = useState(false);
   const err = tool.state === "error";
+  const running = active && tool.state === "running";
   const tone = TOOL_TONE[tool.state] ?? TOOL_TONE.running;
   return (
     <QuoteSwipe quote={`${tool.name} ${summary}`}>
@@ -47,7 +63,7 @@ export const ActiveToolRow = memo(function ActiveToolRow({ tool, active }: { too
         className="flex cursor-pointer items-center gap-1.5 px-2.5 py-1.5 font-mono cstra-tool-text"
         onClick={() => setOpen((v) => !v)}
       >
-        {active && tool.state === "running" ? (
+        {running ? (
           <span className="loading loading-spinner loading-xs text-info" />
         ) : err ? (
           <span className="shrink-0">❌</span>
@@ -61,6 +77,7 @@ export const ActiveToolRow = memo(function ActiveToolRow({ tool, active }: { too
           </span>
         )}
         <TsBadge ts={tool.ts} shown={open} />
+        {running && <RunningClock ts={tool.ts} />}
       </div>
       {open && (
         <div className="px-2.5 pb-2 pt-0.5">
@@ -88,7 +105,8 @@ export const HistoryToolRow = memo(function HistoryToolRow({ tool }: { tool: Too
   const summary = cleanSummary(tool.summary);
   const err = tool.state === "error";
   const [open, setOpen] = useState(false);
-  const tone = TOOL_TONE[tool.state] ?? TOOL_TONE.done;
+  // 这里只画不在进行中回合里的卡，它们不会还在跑：没等到结果的（会话中途被杀 / 差量先于结果读到）按完成画
+  const tone = TOOL_TONE[tool.state === "running" ? "done" : tool.state] ?? TOOL_TONE.done;
   return (
     <QuoteSwipe quote={`${tool.name} ${summary}`}>
     <div data-tool-row="" className={`rounded-lg border ${tone.box}`}>

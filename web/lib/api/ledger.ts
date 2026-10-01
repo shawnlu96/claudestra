@@ -80,5 +80,6 @@ export async function followEventStream(path: string, opts: { signal: AbortSigna
 
 /** 协作视图：只关心 WANTED 这几类 */
 export function followCollabEvents(opts: { signal: AbortSignal; onOpen: () => void; onEvent: (e: BridgeEvent) => void }): Promise<void> {
-  return followEventStream("/events", { ...opts, onEvent: (evt) => WANTED.has(evt.type) && opts.onEvent(evt) });
+  // types= 让 bridge 先滤（thinking_telemetry、assistant_text 之类不必经中继上行再扔掉）；老 bridge 不认就照发，这里再筛一道
+  return followEventStream(`/events?types=${[...WANTED].join(",")}`, { ...opts, onEvent: (evt) => WANTED.has(evt.type) && opts.onEvent(evt) });
 }

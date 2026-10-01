@@ -8,10 +8,13 @@
  * 4. bridge 自己查 origin 上这张卡分支的 head（台账的 branch，不收参数），查不到或不一致就拒，不写。
  * 5. 查远端之前记下卡的 rev 与分支，作为 CLI 的前置条件（--rev / --branch）：CLI 在写入的同一事务里核对，查询期间卡被改过
  *    （换分支、PM 收回等）就抛 conflict，台账不动；阶段与执行者 CLI 也会再核一次。
+ * 6. 远端 head 核对过后查这个分支的 open PR（lib/order-deliver-pr.ts）：0 个 / 多个 / 跨仓 / base 不是 main / head 不一致 / gh 失败都拒，不写；
+ *    通过的 URL 以 --pr 交给 CLI，在同一事务里写进空的或非完整的 task.pr；卡上已是另一个完整 URL 就拒（PR 换了要 PM 处理）。
  * 回执只由单号与交付事件决定（阶段固定是交付推到的 review），重试每次一样，不随卡后来的阶段变。
  */
 import type { Database } from "bun:sqlite";
 import { getEventByDedup } from "./ledger-store.js";
+import { BRANCH, pickPr, prConflict, type PrRows } from "./order-deliver-pr.js";
 import { ledgerWrite, type LedgerRun } from "./order-ledger-exit.js";
 import { currentOrders } from "./order-take.js";
 import { refuse, type OrderToolResult, type VerifiedCall } from "./order-tool-route.js";
@@ -19,8 +22,6 @@ import { parseDeliverWire } from "./order-wire.js";
 import type { BoundedResult } from "./run-bounded.js";
 
 const SHA40 = /^[0-9a-f]{40}$/;
-/** git 分支名里能出现、又不会被当成选项或路径穿越的字符；台账写 branch 时不校验形状，这里兜一次 */
-const BRANCH = /^(?!-)(?!.*\.\.)[\w./-]{1,200}$/;
 
 export type RemoteHead = { ok: true; head: string } | { ok: false; error: string };
 
@@ -29,6 +30,8 @@ export interface DeliverDeps {
   db: Database | null;
   /** origin 上某个分支现在的 head（bridge 在调用方的工作目录里跑 git ls-remote） */
   remoteHead(call: VerifiedCall, branch: string): Promise<RemoteHead>;
+  /** 这个分支在 origin 上 open 的 PR（bridge 在调用方工作目录跑 gh，lib/order-deliver-pr.ts findPrRows）；必填，没有就不让交付 */
+  findPr(call: VerifiedCall, branch: string): Promise<PrRows>;
   run: LedgerRun;
 }
 
@@ -81,7 +84,12 @@ export async function deliverOrder(call: VerifiedCall, args: unknown, deps: Deli
   const remote = await deps.remoteHead(call, branch);
   if (!remote.ok) return refuse("head_unverifiable", remote.error);
   if (remote.head !== head) return refuse("head_mismatch", `origin 上 ${branch} 的 head 是 ${remote.head}，不是 ${head}：先 push，或用远端的 head 交付`);
-  const flags = { from: cur.stage, head, evidence, text: `${summary}\n自查：${selfCheck}`, rev: String(rev), branch };
+  const found = await deps.findPr(call, branch);
+  if (!found.ok) return refuse("pr_unverifiable", found.error);
+  const pr = pickPr(found.rows, branch, head);
+  if (!pr.ok) return refuse(pr.code, pr.error);
+  if (prConflict(cur.task.pr, pr.url)) return refuse("pr_mismatch", `台账里 ${cur.task.id} 的 PR 是 ${cur.task.pr}，查到的是 ${pr.url}：PR 换了请 PM 处理`);
+  const flags = { from: cur.stage, head, evidence, text: `${summary}\n自查：${selfCheck}`, rev: String(rev), branch, pr: pr.url };
   const r = await ledgerWrite(call, deps.run, "deliver", cur.task.id, flags, key);
   if (!r.ok) return r;
   return receipt(r.duplicate === true, orderId, cur.task.id, (r.event as { seq?: number } | undefined)?.seq ?? null);

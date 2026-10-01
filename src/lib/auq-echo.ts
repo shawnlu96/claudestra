@@ -28,9 +28,10 @@ export function auqAnswerSummary(rec: unknown): string | null {
   return parts.length ? `💬 ${t("答复", "Answer")}：${parts.join("；")}` : null;
 }
 
-/** 历史：tool_result 回填到对应工具卡——失败标红；AUQ 的换成作答摘要 */
-export function settleToolCard(tc: { name: string; summary: string; error?: boolean } | undefined, b: { is_error?: unknown }, rec: unknown): void {
+/** 历史：tool_result 回填到对应工具卡——摘掉「还没结果」标记、失败标红；AUQ 的换成作答摘要 */
+export function settleToolCard(tc: { name: string; summary: string; error?: boolean; open?: boolean } | undefined, b: { is_error?: unknown }, rec: unknown): void {
   if (!tc) return;
+  delete tc.open;
   if (b.is_error === true) tc.error = true;
   const echo = tc.name === "AskUserQuestion" ? auqAnswerSummary(rec) : null;
   if (echo) tc.summary = echo;

@@ -10,6 +10,8 @@ import { dirname } from "node:path";
 import { SchedulerStopped } from "./lib/scheduler-maintenance.js";
 import { lendStep, lendWanted } from "./lib/lend-deps.js";
 import { runDeployJob } from "./lib/scheduler-deploy-worker.js";
+import { AgentSupervisor } from "./lib/agent-supervisor.js";
+import { superviseStep } from "./lib/agent-supervisor-deps.js";
 
 export async function runScheduler(signal: AbortSignal, wait: (ms: number) => Promise<void> = Bun.sleep,
   lockPath = statePath("scheduler.pid")): Promise<void> {
@@ -22,6 +24,7 @@ export async function runScheduler(signal: AbortSignal, wait: (ms: number) => Pr
   const reader = new LedgerReader();
   let lastError = "";
   const cursor: Record<string, string | undefined> = {}; // where each loop stopped: the next pass resumes after it
+  const supervise = superviseStep(new AgentSupervisor()); // its two-observation memory lives across passes
   try {
     while (!signal.aborted) {
       if (!lock.held()) throw new Error("scheduler lost its singleton lock");
@@ -37,7 +40,7 @@ export async function runScheduler(signal: AbortSignal, wait: (ms: number) => Pr
           if (db && config.enabled) for (const project of Object.keys(config.projects)) schedulerProjectView(db, project);
           const { failed } = await schedulerPass(db, config, { singleton: { path: lockPath, token: lock.token }, cursor, assertOwner: () => {
             if (signal.aborted || !lock.held()) throw new SchedulerStopped("scheduler stopped or lost singleton lease");
-          }, ...(lend ? { lend: lendStep(reader) } : {}) });
+          }, supervise, ...(lend ? { lend: lendStep(reader) } : {}) });
           if (failed.length) throw new Error(`tick failed: ${failed.map((f) => `${f.taskId} ${f.error}`).join("; ").slice(0, 500)}`);
         }
         if (lastError) console.error("scheduler recovered");
