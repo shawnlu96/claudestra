@@ -6,9 +6,11 @@
  * one-shot worker); if that peer cannot take it, the planner falls through to a local cross-family session.
  * tests/scheduler-pool.test.ts.
  */
+import type { LendRole } from "./lend-config.js";
 import type { AuthorFamily, SchedulerIntent } from "./ledger-scheduler.js";
 import type { RemotePolicy } from "./scheduler-config.js";
 import type { PlannerSnapshot } from "./scheduler-plan.js";
+import type { PeerFacts } from "./scheduler-placement.js";
 
 /** Pool intents are review intents addressed to `peer:<name>`; the merge gate compares this exact string with the verdict's reviewer. */
 export const POOL_RECIPIENT = "peer:";
@@ -18,7 +20,8 @@ export const isPoolIntent = (i: Pick<SchedulerIntent, "action" | "recipient">): 
 /** Families a borrowed worker may review in (mirrors lend-offer's v1 slice: only Codex is lent). */
 const LENDABLE_FAMILIES: readonly AuthorFamily[] = ["codex"];
 
-interface PoolPeer { peer: string; open: number; maxOpen: number }
+/** `roles` absent = review only (how R9 built the list); `v2` absent or null = proto 1 (no hello on file), i28-W5. */
+interface PoolPeer { peer: string; open: number; maxOpen: number; roles?: readonly LendRole[]; v2?: PeerFacts["v2"] }
 export interface PoolFacts {
   remote: RemotePolicy;
   /** Active local reviewer sessions on the project's other cards; review holds no worker slot, so this is its capacity. */
@@ -29,6 +32,8 @@ export interface PoolFacts {
   repo: string | null;
   /** Peer of the newest answered pool order on this card (a re-review goes back to it). */
   lastPeer: string | null;
+  /** Peer of the card's newest claimed / answered write or fix order (a fix goes back to it first, i28-W5). */
+  writeLeasePeer?: string | null;
 }
 
 export interface PoolTarget { peer: string; family: AuthorFamily; rereview: boolean }

@@ -11,6 +11,8 @@ import type { LedgerTask } from "./ledger-stages.js";
 import { getEventByDedup } from "./ledger-store.js";
 import type { RemotePolicy } from "./scheduler-config.js";
 import type { WorkerRef } from "./scheduler-plan.js";
+import { getLendPeer, peerCapacity } from "./ledger-lend-peers.js";
+import type { PeerFacts } from "./scheduler-placement.js";
 import { POOL_RECIPIENT, type PoolFacts } from "./scheduler-pool-plan.js";
 
 export const poolLinkKey = (intentId: string): string => `scheduler:${intentId}:pool`;
@@ -77,16 +79,32 @@ export function prCoordinates(pr: string | null): { repo: string; pr: number } |
   return m ? { repo: m[1], pr: Number(m[2]) } : null;
 }
 
-export function poolFacts(db: Database, task: LedgerTask, cfg: { remote: RemotePolicy; borrow: readonly BorrowEntry[] }): PoolFacts {
+/** A peer's lend-v2 view (i28-W5): null = no hello on file (proto 1); otherwise what may be placed there now and why not. */
+function peerV2(db: Database, b: BorrowEntry, now: number): PeerFacts["v2"] {
+  const row = getLendPeer(db, b.peer);
+  if (!row || row.proto < 2) return null;
+  const cap = peerCapacity(db, b.peer, b.maxOpen, now);
+  return { why: cap.why, slots: cap.slots, roles: row.grant?.roles ?? [], repos: row.grant?.repos ?? [] };
+}
+
+/** The card's newest claimed / answered write or fix order: that peer holds the branch, so its fix goes back there first. */
+function writeLeasePeer(db: Database, taskId: string): string | null {
+  if (!hasLendTable(db)) return null;
+  const r = db.query(`SELECT peer FROM lend_orders WHERE taskId = ? AND step IN ('write','fix') AND status IN ('claimed','done')
+    ORDER BY createdAt DESC LIMIT 1`).get(taskId) as { peer: string } | null;
+  return r?.peer ?? null;
+}
+
+export function poolFacts(db: Database, task: LedgerTask, cfg: { remote: RemotePolicy; borrow: readonly BorrowEntry[]; now: number }): PoolFacts {
   const localReviewers = db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'scheduler_sessions'").get()
     ? (db.query(`SELECT COUNT(*) AS n FROM scheduler_sessions AS s JOIN tasks AS t ON t.id = s.taskId WHERE t.project = ? AND s.taskId != ?
       AND s.role = 'reviewer' AND s.state = 'active' AND s.transport != 'peer'`).get(task.project, task.id) as { n: number }).n : 0;
   const live = (peer: string): number => hasLendTable(db)
     ? (db.query("SELECT COUNT(*) AS n FROM lend_orders WHERE peer = ? AND status IN ('pooled','claimed','unknown')").get(peer) as { n: number }).n : 0;
-  const peers = cfg.borrow.filter((b) => b.projects.includes(task.project) && b.roles.includes("review"))
-    .map((b) => ({ peer: b.peer, open: live(b.peer), maxOpen: b.maxOpen }));
+  const peers = cfg.borrow.filter((b) => b.projects.includes(task.project))
+    .map((b) => ({ peer: b.peer, open: live(b.peer), maxOpen: b.maxOpen, roles: b.roles, v2: peerV2(db, b, cfg.now) }));
   const lastPeer = scheduledOrders(db, task.id).find((o) => o.status === "done")?.peer ?? null;
-  return { remote: cfg.remote, localReviewers, peers, repo: prCoordinates(task.pr)?.repo ?? null, lastPeer };
+  return { remote: cfg.remote, localReviewers, peers, repo: prCoordinates(task.pr)?.repo ?? null, lastPeer, writeLeasePeer: writeLeasePeer(db, task.id) };
 }
 
 export interface PoolCounts { pooled: number; claimed: number; done: number; timedOut: number; unknown: number }
