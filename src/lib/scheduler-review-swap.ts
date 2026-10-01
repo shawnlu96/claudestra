@@ -3,7 +3,7 @@ import type { Database } from "bun:sqlite";
 import { mustTask, type WriteCtx } from "./ledger-checks.js";
 import { getIntent, getWorkflow, type SchedulerIntent } from "./ledger-scheduler.js";
 import { settleIntent } from "./ledger-scheduler-settle.js";
-import type { LedgerEvent } from "./ledger-stages.js";
+import type { LedgerEvent, LedgerTask } from "./ledger-stages.js";
 import { getEventByDedup, LedgerError, listEvents } from "./ledger-store.js";
 import { remoteHeadFamily } from "./scheduler-head-family.js";
 import type { PlannerDecision, PlannerSnapshot } from "./scheduler-plan.js";
@@ -131,10 +131,18 @@ export function applyReviewerSwapEffect(db: Database, ctx: WriteCtx, id: string,
 /** Only a completed, explicitly recorded swap permits a new binding for the same role. */
 export function mayRebindReviewer(db: Database, prior: SchedulerSession, intentId: string): boolean {
   if (prior.role !== "reviewer" || prior.state !== "retired" || !prior.retireIntentId) return false;
-  const reused = prior.archiveReceipt === `reused_by_author:${prior.agent}` && mustTask(db, prior.taskId).agent === prior.agent;
+  const reused = prior.archiveReceipt === `reused_by_author:${prior.agent}`;
   if (!prior.killReceipt && !reused) return false;
   const swap = getEventByDedup(db, swapKey(prior.retireIntentId));
   const intent = getIntent(db, intentId);
   return !!swap && swap.data.sessionId === prior.sessionId && !!intent && intent.eventSeq > swap.seq &&
     getIntent(db, prior.retireIntentId)?.status === "done";
+}
+
+/** The receipt proves past ownership; reassignment must not invalidate it or silently lose the unfinished retirement. */
+export function reviewerReuseNote(task: LedgerTask, prior: SchedulerSession | null) {
+  if (!prior || prior.archiveReceipt !== `reused_by_author:${prior.agent}` || prior.killReceipt || prior.agent === task.agent) return null;
+  return { project: task.project, target: task.id, kind: "note" as const,
+    text: `旧审查会话 ${prior.agent} 曾由作者沿用，作者已改派，该会话未停用，交退役流程收尾`,
+    data: { op: "reviewer_reuse_reassigned", agent: prior.agent, sessionId: prior.sessionId, retireIntentId: prior.retireIntentId } };
 }

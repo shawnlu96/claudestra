@@ -187,22 +187,27 @@ describe("i28-RI1 automatic reviewer replacement", () => {
   });
 
   for (const security of [true, false]) {
-    test(`same-agent local replacement binds within two ticks (${security ? "security" : "no peer"})`, async () => {
-      const p = await scenario(security);
-      try {
-        p.f.db.run("UPDATE tasks SET agent = 'agent-rv-t1' WHERE id = 'T1'");
-        p.f.db.run("UPDATE scheduler_sessions SET agent = 'agent-rv-t1' WHERE role = 'author'");
-        p.effectsDeps.ensure = async (task, family) => {
-          p.effects.push(`ensure:${family}`);
-          p.editRegistry((r) => {
-            r.agents["agent-rv-new"] = { runtime: "codex", transport: "acp", sessionId: "s-new", status: "active" };
-          });
+    for (const reassigned of [false, true]) {
+      test(`same-agent local replacement binds within two ticks (${security ? "security" : "no peer"}; reassigned=${reassigned})`, async () => {
+        const p = await scenario(security);
+        try {
+          p.f.db.run("UPDATE tasks SET agent = 'agent-rv-t1' WHERE id = 'T1'");
+          p.f.db.run("UPDATE scheduler_sessions SET agent = 'agent-rv-t1' WHERE role = 'author'");
+          p.effectsDeps.ensure = async (task, family) => {
+            p.effects.push(`ensure:${family}`);
+            p.editRegistry((r) => {
+              r.agents["agent-rv-new"] = { runtime: "codex", transport: "acp", sessionId: "s-new", status: "active" };
+            });
           return { kind: "ready", created: true, ref: { taskId: task.id, role: "reviewer", agent: "agent-rv-new",
             sessionId: "s-new", family, transport: "acp" } };
         };
         expect(await p.tick()).toMatchObject({ step: "session", detail: "旧审查已更换" });
         const swapId = String(p.swaps()[0].data.intentId);
         expect(swappedSession(p.f.db, swapId)).toMatchObject({ archiveReceipt: "reused_by_author:agent-rv-t1", killReceipt: null });
+        if (reassigned) {
+          expect(await p.cli("owner", "task-set", "T1", "--rev", String(p.f.task().rev), "--agent", "agent-task-one"))
+            .toMatchObject({ ok: true });
+        }
         expect(await p.tick()).toMatchObject({ step: "session", detail: "跨家族审查新会话已绑定" });
         const replacement = getSchedulerSession(p.f.db, "T1", "reviewer")!;
         expect(replacement).toMatchObject({ agent: "agent-rv-new", sessionId: "s-new", family: "codex", state: "active" });
@@ -210,13 +215,17 @@ describe("i28-RI1 automatic reviewer replacement", () => {
         expect(mayRebindReviewer(p.f.db, old, replacement.createIntentId)).toBe(true);
         expect(mayRebindReviewer(p.f.db, { ...old, archiveReceipt: null }, replacement.createIntentId)).toBe(false);
         expect(mayRebindReviewer(p.f.db, { ...old, archiveReceipt: "reused_by_author:someone-else" }, replacement.createIntentId)).toBe(false);
-        p.f.db.run("UPDATE tasks SET agent = 'agent-task-one' WHERE id = 'T1'");
-        expect(mayRebindReviewer(p.f.db, old, replacement.createIntentId)).toBe(false);
+        expect(getIntent(p.f.db, replacement.createIntentId)?.status).toBe("done");
+        const notes = listEvents(p.f.db, { project: "p", target: "T1" })
+          .filter((e) => e.kind === "note" && e.data.op === "reviewer_reuse_reassigned");
+        expect(notes).toHaveLength(reassigned ? 1 : 0);
+        if (reassigned) expect(notes[0].text).toBe("旧审查会话 agent-rv-t1 曾由作者沿用，作者已改派，该会话未停用，交退役流程收尾");
         expect(p.effects).toEqual(["ensure:codex"]);
         expect(listLendOrders(p.f.db, "T1")).toEqual([]);
         expect(getSchedulerSession(p.f.db, "T1", "author")).toMatchObject({ agent: "agent-rv-t1", state: "active" });
       } finally { p.f.close(); }
     });
+    }
   }
 
   test("security stays local: new Codex session binds, reviews twice in the same epoch, then passes merge proof", async () => {

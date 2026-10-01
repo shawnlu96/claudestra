@@ -8,7 +8,7 @@ import { insertEvent, tx } from "./ledger-tx.js";
 import { requireSessionIdentity } from "./scheduler-session-identity.js";
 import type { WorkerRef } from "./scheduler-plan.js";
 import type { Stage } from "./ledger-stages.js";
-import { applyReviewerSwap, applyReviewerSwapEffect, mayRebindReviewer } from "./scheduler-review-swap.js";
+import { applyReviewerSwap, applyReviewerSwapEffect, mayRebindReviewer, reviewerReuseNote } from "./scheduler-review-swap.js";
 import { remoteHeadFamily } from "./scheduler-head-family.js";
 
 export type SessionRole = "author" | "reviewer";
@@ -121,6 +121,8 @@ export function bindSchedulerSession(db: Database, ctx: WriteCtx, input: BindSes
         source: input.transport === "peer" ? "peer_claim" : "registry_runtime", intentId: input.intentId,
         ...(ctx.actor === "scheduler" ? {} : { manual: true }) },
     }, true);
+    const note = reviewer ? reviewerReuseNote(task, prior) : null;
+    if (note) insertEvent(db, { actor: ctx.actor, now, dedupKey: `reviewer-reuse:${input.intentId}` }, note, true);
     return { session: getSchedulerSession(db, task.id, input.role) as SchedulerSession, duplicate: false };
   });
 }
