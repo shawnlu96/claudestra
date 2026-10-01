@@ -16,8 +16,9 @@ import { createFeature, initDag, setFeature } from "../src/lib/ledger-feature-wr
 import { closeLedger, openLedger } from "../src/lib/ledger-store.js";
 import { createTask, setFrozen, setMeta } from "../src/lib/ledger-write.js";
 import {
-  armOf, currentViews, featureGate, isStop, nodeCandidate, parseSpecHead, quotaOver, specGate, SPEC_SETTLE_MS, type ServiceFacts, type SpecFile,
+  armOf, currentViews, featureGate, isStop, nodeCandidate, parseSpecHead, quotaOver, specGate, SPEC_SETTLE_MS, TEMPLATE_VERSION, type ServiceFacts, type SpecFile,
 } from "../src/lib/scheduler-autostart.js";
+import { templateFor } from "../src/lib/scheduler-template.js";
 
 const P = "claude-orchestrator", PM = "agent-pm";
 let dir: string, db: Database, now: number, svc: ServiceFacts;
@@ -59,15 +60,22 @@ afterEach(() => {
 
 describe("卡首：模板行与开关行", () => {
   const cases: [string, string, unknown][] = [
-    ["不写 = code v3", "# T\n\n## 目标\n", { ok: true, template: "code", version: 3 }],
-    ["全角冒号", "# T\n模板：ui\n## 目标\n", { ok: true, template: "ui", version: 2 }],
-    ["半角冒号 + 大写", "# T\n模板: Security\n## 目标\n", { ok: true, template: "security", version: 2 }],
-    ["值不分大小写", "# T\n模板：CODE\n", { ok: true, template: "code", version: 3 }],
+    ["不写 = code 最高版", "# T\n\n## 目标\n", { ok: true, template: "code", version: TEMPLATE_VERSION.code }],
+    ["全角冒号", "# T\n模板：ui\n## 目标\n", { ok: true, template: "ui", version: TEMPLATE_VERSION.ui }],
+    ["半角冒号 + 大写", "# T\n模板: Security\n## 目标\n", { ok: true, template: "security", version: TEMPLATE_VERSION.security }],
+    ["值不分大小写", "# T\n模板：CODE\n", { ok: true, template: "code", version: TEMPLATE_VERSION.code }],
     ["未知值", "# T\n模板：web\n", { ok: false }],
     ["写了两行（同值也算）", "# T\n模板：ui\n模板：ui\n", { ok: false }],
-    ["## 之后的模板行不算卡首", "# T\n## 目标\n模板：ui\n", { ok: true, template: "code", version: 3 }],
+    ["## 之后的模板行不算卡首", "# T\n## 目标\n模板：ui\n", { ok: true, template: "code", version: TEMPLATE_VERSION.code }],
   ];
   for (const [name, text, want] of cases) test(name, () => expect(parseSpecHead(text).template).toMatchObject(want as object));
+
+  test("模板版本取 scheduler-template.ts 的最高版，不写死", () => {
+    for (const t of ["code", "ui", "security"] as const) {
+      expect(templateFor(t, TEMPLATE_VERSION[t])).not.toBeNull();
+      expect(templateFor(t, TEMPLATE_VERSION[t] + 1)).toBeNull();
+    }
+  });
 
   test("「自动开卡：关」只认卡首", () => {
     expect(parseSpecHead("# T\n自动开卡：关\n## 目标\n").off).toBe(true);

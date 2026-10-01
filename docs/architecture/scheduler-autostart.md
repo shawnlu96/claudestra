@@ -34,7 +34,7 @@
 
 ## 模板声明
 
-卡首写一行 `模板：code|ui|security`，冒号全角半角都行，值不分大小写。不写就是 code。版本取该模板现有的最高版：code 3，ui / security 2。值不认识或写了两行，就不开卡：照常写一条 claim 并结为 failed，通知 PM 一次。
+卡首写一行 `模板：code|ui|security`，冒号全角半角都行，值不分大小写。不写就是 code。版本取 `scheduler-template.ts` 里该模板现有的最高版（运行时从 `templateFor` 探出来，不写死；今天是 code 3，ui / security 2），模板加了新版，自动开的卡就跟着用新版。值不认识或写了两行，就不开卡：照常写一条 claim 并结为 failed，通知 PM 一次。
 
 模板在 workflow-set 那一步由 claim 决定，所以卡从落库那一刻起就是声明的模板。N4 给 start_node 加上模板参数后，由后合并的一方改用那个参数。
 

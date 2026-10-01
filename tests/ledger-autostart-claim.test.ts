@@ -14,6 +14,7 @@ import { getWorkflow } from "../src/lib/ledger-scheduler.js";
 import { setWorkflow } from "../src/lib/ledger-scheduler-write.js";
 import { closeLedger, getTask, listEvents, openLedger } from "../src/lib/ledger-store.js";
 import { createTask, setFrozen, setMeta } from "../src/lib/ledger-write.js";
+import { TEMPLATE_VERSION } from "../src/lib/scheduler-autostart.js";
 import { runLedger } from "../src/manager/ledger.js";
 
 const P = "claude-orchestrator", PM = "agent-pm", FID = "ab12-i28", ARM = "0123456789abcdef", ARM2 = "fedcba9876543210";
@@ -52,7 +53,7 @@ afterEach(() => {
 describe("claim", () => {
   test("卡号 / agent / 分支 / PM 由台账按规则算，同一 arm 再来是 duplicate，节点有活 claim 时别的 arm 也拒", async () => {
     const r = await claim();
-    expect(r).toMatchObject({ ok: true, duplicate: false, claim: { taskId: "i28-a", agent: "agent-task-i28-a", branch: "feat/i28-a", pm: PM, template: "code", version: 3 } });
+    expect(r).toMatchObject({ ok: true, duplicate: false, claim: { taskId: "i28-a", agent: "agent-task-i28-a", branch: "feat/i28-a", pm: PM, template: "code", version: TEMPLATE_VERSION.code } });
     expect(await claim()).toMatchObject({ ok: true, duplicate: true, claim: { seq: r.claim.seq } });
     expect(await claim("a", ARM2)).toMatchObject({ ok: false, code: "conflict" });
     await settle(r.claim.seq, "failed");
@@ -99,7 +100,7 @@ describe("step：授权只到本 claim 的那张卡", () => {
     expect(getTask(db, "i28-a")).toMatchObject({ branch: "feat/i28-a", pm: PM, agent: "agent-task-i28-a", kind: "code", extra: { fileGlobs: ["src/lib/a*.ts"] } });
     expect(await step(c.seq, "task-set", "i28-a", "--rev=1", "--agent=agent-task-i28-a", "--dedup=d:ts")).toMatchObject({ ok: true, duplicate: true });
     expect(await wf(c.seq)).toMatchObject({ ok: true });
-    expect(getWorkflow(db, "i28-a")).toMatchObject({ mode: "auto", template: "ui", templateVersion: 2, authorFamily: "claude" });
+    expect(getWorkflow(db, "i28-a")).toMatchObject({ mode: "auto", template: "ui", templateVersion: TEMPLATE_VERSION.ui, authorFamily: "claude" });
     expect(await bind(c.seq)).toMatchObject({ ok: true });
     expect(await settle(c.seq, "done")).toMatchObject({ ok: true });
   });

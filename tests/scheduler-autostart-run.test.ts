@@ -14,6 +14,7 @@ import { getWorkflow } from "../src/lib/ledger-scheduler.js";
 import { closeLedger, getTask, listEvents, openLedger } from "../src/lib/ledger-store.js";
 import { setMeta } from "../src/lib/ledger-write.js";
 import type { StepIO } from "../src/lib/dag-tools-steps.js";
+import { TEMPLATE_VERSION } from "../src/lib/scheduler-autostart.js";
 import { autostartTick, type StartTickEnv } from "../src/lib/scheduler-autostart-run.js";
 import { SchedulerStopped } from "../src/lib/scheduler-maintenance.js";
 import { resolveActor } from "../src/manager/ledger-identity.js";
@@ -149,7 +150,7 @@ describe("完整开卡", () => {
   test("依赖满足 + 规格定稿：建卡、worktree、执行者、auto、绑节点一次做完；claim 结 done；成功不通知", async () => {
     expect(await autostartTick(env())).toEqual([]);
     expect(getTask(db, "i28-a")).toMatchObject({ stage: "spec", agent: "agent-task-i28-a", pm: PM, branch: "feat/i28-a" });
-    expect(getWorkflow(db, "i28-a")).toMatchObject({ mode: "auto", template: "code", templateVersion: 3, authorFamily: "claude" });
+    expect(getWorkflow(db, "i28-a")).toMatchObject({ mode: "auto", template: "code", templateVersion: TEMPLATE_VERSION.code, authorFamily: "claude" });
     expect(bound()).toBe("i28-a");
     expect(existsSync(WT())).toBe(true);
     expect(agents["agent-task-i28-a"]).toBeDefined();
@@ -161,11 +162,11 @@ describe("完整开卡", () => {
     expect(calls).toEqual([]);
   });
 
-  test("卡首声明 ui：workflow 从落库那一刻就是 ui v2，不存在先写 code 的窗口", async () => {
+  test("卡首声明 ui：workflow 从落库那一刻就是 ui 最高版，不存在先写 code 的窗口", async () => {
     spec("i28-a", "# 规格\n模板：UI\n\n## 目标\n");
     await autostartTick(env());
     const wfEvents = listEvents(db, { target: "i28-a" }).filter((e) => e.data.op === "workflow");
-    expect(wfEvents.map((e) => [e.data.template, e.data.templateVersion, e.data.mode])).toEqual([["ui", 2, "auto"]]);
+    expect(wfEvents.map((e) => [e.data.template, e.data.templateVersion, e.data.mode])).toEqual([["ui", TEMPLATE_VERSION.ui, "auto"]]);
   });
 
   test("模板值不认识：不开卡，记失败并通知 PM 一次，同一份规格不再试", async () => {

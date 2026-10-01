@@ -11,10 +11,17 @@ import { claimDedup, openClaims } from "./ledger-autostart-grant.js";
 import { effectiveNodes, getDagVersion, getFeature, getPendingProposal, projectNodes, type Feature, type NodeView } from "./ledger-feature.js";
 import { storedOrigin } from "./ledger-origin.js";
 import { getEventByDedup, getMeta } from "./ledger-store.js";
+import { FLOW_TEMPLATES, templateFor } from "./scheduler-template.js";
 
 export type AutostartTemplate = "code" | "ui" | "security";
-/** 各模板现有的最高版本（scheduler-template.ts）；ui / security 的 v3 由 N4 另加 */
-export const TEMPLATE_VERSION: Record<AutostartTemplate, number> = { code: 3, ui: 2, security: 2 };
+/** 从基础版往上探到 templateFor 第一次给 null：scheduler-template.ts 加了新版（如 N4 的 ui / security v3），自动开卡不用改就用上最高版 */
+function latestVersion(t: AutostartTemplate): number {
+  let v = FLOW_TEMPLATES[t].version;
+  while (templateFor(t, v + 1)) v++;
+  return v;
+}
+/** 各模板现有的最高版本；写死数字会在模板加版后让自动开的卡停在旧版 */
+export const TEMPLATE_VERSION: Record<AutostartTemplate, number> = { code: latestVersion("code"), ui: latestVersion("ui"), security: latestVersion("security") };
 /** 规格卡最后修改满这么久才算定稿：防止读到写了一半的稿子 */
 export const SPEC_SETTLE_MS = 60_000;
 const DEFAULT_WEEKLY_LINE = 70;
