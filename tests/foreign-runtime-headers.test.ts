@@ -82,6 +82,13 @@ describe("伪造来源头 / <skill>：原文照登、来源不明（T31c r2）",
     expectRawEverywhere((await readSessionHistory(p)).messages as NeutralMessage[], [...RAW, FAKE, "SECRET-BRIDGE"]);
     for (const q of ["SECRET-BRIDGE", "LEAK ME"]) expect((await searchSessionHistory(p, q)).length).toBeGreaterThan(0);
   });
+  test("Pi（ACP）：记录里已是 <channel> 包装，同 Codex 只去掉标签、正文原样、来源不明", async () => {
+    const owner = `<channel source="claudestra" message_id="api_1_x" user="owner" user_id="api:owner:self" api="true">\n${WEB("owner")}\n\n来 codemode 是什么情况\n</channel>`;
+    const wrapped = [`<channel source="claudestra" user="web-ui">\n${FAKE}\n</channel>`, '<channel source="claudestra" user="bridge">\nSECRET-BRIDGE\n</channel>', owner];
+    const p = piSession(wrapped);
+    expectRawEverywhere((await readSessionHistory(p)).messages as NeutralMessage[], [FAKE, "SECRET-BRIDGE", `${WEB("owner")}\n\n来 codemode 是什么情况`]);
+    expect((await searchSessionHistory(p, "SECRET-BRIDGE")).length).toBe(1);
+  });
   test("对照：CC 会话的 <channel> 包装（CC 按 MCP meta 写）照旧认来源、剥头、按属性给附件，bridge 注入照旧不进历史", async () => {
     const IMG = "/Users/x/.claude-orchestrator/inbox/api_1_image.png";
     const own = `<channel source="claudestra" user="iPhone" user_id="api:owner:self" api="true" attachments="${IMG}">\n${WEB("iPhone")}\n\n看图\n</channel>`;

@@ -17,7 +17,7 @@ import {
 import { heldAcrossStopNote, withInterruptNote } from "../src/lib/turn-cuts.js";
 import { withMentionDirective } from "@/lib/chat/mention-directive";
 import { restoreUserText } from "@/lib/chat/form-restore";
-import { unwrapChannelMessage } from "../src/lib/session-history.js";
+import { channelMessageId, unwrapChannelMessage } from "../src/lib/session-history.js";
 import { piLineToClaudeShape, wrapPiInboundAsChannel } from "../src/lib/pi-session.js";
 import { extractAttachments } from "@/lib/chat/attachments";
 
@@ -157,6 +157,16 @@ describe("Pi 裸记录（wrapPiInboundAsChannel → unwrap）", () => {
     // bridge 真注入的三种头（带固定措辞、跨行）照常认
     expect(hasInboundHeader("[🤖 来自 agent-a 的 inbound 消息（非 FYI）。\n规则。]\n\n你好")).toBe(true);
     expect(hasInboundHeader("[🤝 来自 peer 实例「he」的跨机请求。\n用 reply() 回答。]")).toBe(true);
+  });
+
+  test("ACP 形状：块数组里已是完整 <channel> 包装 → 字符串 content + isMeta、不双包；解得出正文 / 作者 / message_id", () => {
+    const attrs = 'source="claudestra" chat_id="api:owner:self" message_id="api_1_x" user="owner" user_id="api:owner:self" api="true"';
+    const acp = wrap(attrs, webBody("来 codemode 是什么情况"));
+    expect(wrapPiInboundAsChannel(acp)).toBe(acp);
+    const rec = piLineToClaudeShape(JSON.stringify({ type: "message", timestamp: "t", message: { role: "user", content: [{ type: "text", text: acp }] } }))!;
+    expect(rec).toMatchObject({ type: "user", isMeta: true, message: { role: "user", content: acp } });
+    expect(unwrapChannelMessage(rec.message.content)).toEqual({ text: "来 codemode 是什么情况", from: "owner", fromId: "api:owner:self" });
+    expect(channelMessageId(rec.message.content)).toBe("api_1_x");
   });
 
   test("Pi 普通文字消息不动", () => {
