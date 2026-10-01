@@ -47,12 +47,13 @@ const int = (v: string | undefined, what: string): number => {
 
 function taskNew(db: Database, ctx: WriteCtx, c: AutostartClaim, input: StepInput) {
   if (input.pos[0] !== c.taskId) deny(`建的卡号 ${input.pos[0] ?? "（空）"} 不是 claim 的 ${c.taskId}`);
-  const node = currentViews(db, getFeature(db, c.featureId) as NonNullable<ReturnType<typeof getFeature>>).find((n) => n.key === c.key);
-  if (!node?.fileGlobs?.length) deny(`节点 ${c.key} 不在当前版本或没有文件范围`);
+  const f = getFeature(db, c.featureId);
+  const globs = (f ? currentViews(db, f) : []).find((n) => n.key === c.key)?.fileGlobs;
+  if (!globs?.length) return deny(`节点 ${c.key} 不在当前版本或没有文件范围`);
   const r = createTask(db, ctx, {
-    id: c.taskId, project: c.project, title: c.title, kind: "code", itemId: c.item ?? undefined, branch: c.branch, spec: `docs/tasks/${c.taskId}.md`, pm: c.pm,
-    agent: c.agent, extra: { fileGlobs: node?.fileGlobs ?? [] },
-  } as never);
+    id: c.taskId, project: c.project, title: c.title, kind: "code", itemId: c.item, branch: c.branch, spec: `docs/tasks/${c.taskId}.md`, pm: c.pm,
+    agent: c.agent, extra: { fileGlobs: globs },
+  });
   return { ok: true, task: r.row, duplicate: r.duplicate };
 }
 

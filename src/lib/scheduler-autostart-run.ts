@@ -157,7 +157,9 @@ async function openCard(env: StartTickEnv, pick: Pick, failed: Failed): Promise<
   const { cand } = pick;
   const r = await env.ledger("ledger", "scheduler-autostart", "claim", cand.f.id, cand.key, "--arm", cand.arm, "--template", templateLabel(cand.head.template),
     "--max-workers", String(pick.maxWorkers));
-  if (r.ok !== true || r.duplicate === true) return; // 选完到 claim 之间门变了，或并发的另一方先 claim：下一轮重算，不出声
+  // 选完到 claim 之间门变了（conflict），或并发的另一方先 claim（duplicate）：下一轮重算，不出声；别的拒绝进服务的失败日志
+  if (r.ok !== true && r.code !== "conflict") failed.push({ taskId: `${cand.f.id}/${cand.key}`, error: `claim 被拒：${short(r.error ?? r.code)}` });
+  if (r.ok !== true || r.duplicate === true) return;
   const c = r.claim as AutostartClaim;
   const t = cand.head.template;
   if (!t.ok) return fail(env, c, { code: "bad_template", error: t.error, failedStep: "template", rolledBack: [], leftovers: [] }, failed);
