@@ -38,6 +38,28 @@ const failed = (checks: PrSnapshot["checks"]): boolean => checks.some((c) => c.b
 const unstableWait = (pr: PrSnapshot): "wait" | "failed" | null => pr.mergeState !== "UNSTABLE" ? null : failed(pr.checks) ? "failed" : "wait";
 type Step = (to: MergePhase, receipt?: string, mergeSha?: string, newHead?: string) => Promise<MergeRun>;
 
+/** GitHub leaves mergeability UNKNOWN for seconds to minutes after main moves; an unbroken streak past this is an anomaly. */
+export const MERGE_STATE_UNKNOWN_LIMIT_MS = 10 * 60_000;
+export const UNKNOWN_LIMIT_REASON = `GitHub 合并状态 ${MERGE_STATE_UNKNOWN_LIMIT_MS / 60_000} 分钟仍未算出`;
+/** Start of each run's UNKNOWN streak. In memory only: a scheduler restart restarts the clock, every process life stays bounded. */
+const unknownSince = new Map<string, number>();
+/** Any inspect that reads something other than a non-draft UNKNOWN ends the streak, so only consecutive UNKNOWNs count. */
+function watchUnknown(run: MergeRun, external: MergeExternal): MergeExternal {
+  return { ...external, inspect: async (prRef) => {
+    const pr = await external.inspect(prRef);
+    if (pr.mergeState !== "UNKNOWN" || pr.draft) unknownSince.delete(run.intentId);
+    return pr;
+  } };
+}
+/** GitHub is still computing mergeability: stay in this phase and re-read next tick, until the limit turns it into unknown. */
+async function unknownWait(run: MergeRun, step: Step): Promise<MergeRun> {
+  const now = Date.now(), since = unknownSince.get(run.intentId);
+  if (since === undefined) unknownSince.set(run.intentId, now);
+  if (since === undefined || now - since <= MERGE_STATE_UNKNOWN_LIMIT_MS) return run;
+  unknownSince.delete(run.intentId);
+  return step("unknown", UNKNOWN_LIMIT_REASON);
+}
+
 /** A query failure or any mismatch is a refusal, so a carried review can only ever be narrower than a re-review. */
 async function carryOf(run: MergeRun, external: MergeExternal, head: string): Promise<ReviewCarry> {
   try {
@@ -54,7 +76,8 @@ async function movedHead(run: MergeRun, external: MergeExternal, pr: PrSnapshot,
   if (!carry.ok || !carry.mainParent || !carry.mainHead || !carry.diffHash) {
     return step("await_review", `update-branch 改了 head：${short(pr.head)}，${carry.reason.slice(0, 300)}，旧审查失效`, undefined, pr.head);
   }
-  if (pr.draft || pr.mergeState === "BEHIND" || pr.mergeState === "UNKNOWN") return run; // re-checked next round on the same evidence
+  if (pr.draft || pr.mergeState === "BEHIND") return run; // re-checked next round on the same evidence
+  if (pr.mergeState === "UNKNOWN") return unknownWait(run, step);
   if (unstableWait(pr) === "failed") return step("unknown", "更新分支后 CI 失败或取消");
   if (pr.mergeState !== "CLEAN" && pr.mergeState !== "UNSTABLE") return step("unknown", `更新分支后 mergeState=${pr.mergeState}`);
   return step("await_ci", carryReceipt({ oldHead: run.reviewedHead, newHead: pr.head, mainParent: carry.mainParent,
@@ -62,9 +85,10 @@ async function movedHead(run: MergeRun, external: MergeExternal, pr: PrSnapshot,
 }
 
 /** A changed head returns to review unless it only merged main in; an unobserved merge is never retried. */
-export async function driveMerge(run: MergeRun, external: MergeExternal, advance: MergeAdvance,
+export async function driveMerge(run: MergeRun, source: MergeExternal, advance: MergeAdvance,
   assertActive: () => void = () => {}): Promise<MergeRun> {
   let current = run;
+  const external = watchUnknown(run, source);
   const step = async (to: MergePhase, receipt?: string, mergeSha?: string, newHead?: string) => {
     assertActive();
     current = await advance(current.phase, to, current.rev, receipt, mergeSha, newHead);
@@ -87,7 +111,7 @@ export async function driveMerge(run: MergeRun, external: MergeExternal, advance
         assertActive();
         return await updateOrBounce(claimed, external, step, stopped);
       }
-      if (pr.mergeState === "UNKNOWN") return run; // GitHub 尚未算出 mergeability，下一轮只读重查
+      if (pr.mergeState === "UNKNOWN") return unknownWait(run, step); // GitHub 尚未算出 mergeability，下一轮只读重查
       if (unstableWait(pr) === "failed") return step("unknown", "CI 失败或取消");
       if (pr.mergeState !== "CLEAN" && pr.mergeState !== "UNSTABLE") return step("unknown", `PR mergeState=${pr.mergeState}`);
       return step("await_ci", `PR ${short(pr.head)} 可合并，等待 CI`);
@@ -100,7 +124,7 @@ export async function driveMerge(run: MergeRun, external: MergeExternal, advance
       const bounced = await bounceStep(run, pr, external, step);
       if (bounced) return bounced;
       if (pr.mergeState === "BEHIND") return run; // GitHub 更新仍在进行，下一轮只读检查
-      if (pr.mergeState === "UNKNOWN") return run;
+      if (pr.mergeState === "UNKNOWN") return unknownWait(run, step);
       if (unstableWait(pr) === "failed") return step("unknown", "更新分支后 CI 失败或取消");
       if (pr.mergeState !== "CLEAN" && pr.mergeState !== "UNSTABLE") return step("unknown", `更新分支后 mergeState=${pr.mergeState}`);
       return step("await_ci", `head ${short(pr.head)} 未变，等待 CI`);
@@ -112,7 +136,7 @@ export async function driveMerge(run: MergeRun, external: MergeExternal, advance
       if (pr.draft && sameHead(run, pr) && pr.state === "OPEN" && !pr.crossRepository &&
         pr.base === "main" && pr.branch === run.expectedBranch) return run;
       if (pr.mergeState === "UNKNOWN" && sameHead(run, pr) && pr.state === "OPEN" && !pr.draft && !pr.crossRepository &&
-        pr.base === "main" && pr.branch === run.expectedBranch) return run;
+        pr.base === "main" && pr.branch === run.expectedBranch) return unknownWait(run, step);
       // main moved during CI: the run tested another merge result (the journal caps how often). Awaited at the call
       // sites so a refused 4th refresh lands in the catch below and becomes unknown instead of escaping.
       const refresh = async (why: string) => {
