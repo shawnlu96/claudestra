@@ -29,6 +29,8 @@ export interface MergeRun {
   rev: number;
   mergeSha: string | null;
   reason: string | null;
+  /** Absent only when a read-only client sees a database its writer has not migrated yet. */
+  unknownSince?: number | null;
   createdAt: number;
   updatedAt: number;
 }
@@ -153,6 +155,24 @@ const ciRefreshes = (db: Database, row: MergeRun): number => (db.query(`SELECT C
   AND json_extract(data,'$.op')='merge_phase' AND json_extract(data,'$.intentId')=? AND json_extract(data,'$.from')='await_ci'
   AND json_extract(data,'$.to')='updating'`).get(row.taskId, row.intentId) as { n: number }).n;
 
+export const MERGE_UNKNOWN_WAIT = "GitHub 合并状态：UNKNOWN，等待计算";
+export const MERGE_UNKNOWN_CLEAR = "GitHub 合并状态：结束 UNKNOWN 等待";
+
+/** Same-phase observations use the existing manager step (lease + CAS), without claiming an external effect. */
+function observeMergeState(db: Database, ctx: WriteCtx, row: MergeRun, receipt: string | undefined): MergeRun {
+  if (!["ready", "updating", "await_ci"].includes(row.phase) || ![MERGE_UNKNOWN_WAIT, MERGE_UNKNOWN_CLEAR].includes(receipt ?? "")) {
+    throw new LedgerError("invalid", "同阶段只接受活动合并的 UNKNOWN 等待观察");
+  }
+  const drift = mergeRunDrift(db, row);
+  if (drift) throw new LedgerError("conflict", `合并运行已失效：${drift}`);
+  const now = ctx.now ?? Date.now();
+  const since = receipt === MERGE_UNKNOWN_WAIT ? row.unknownSince ?? now : null;
+  if (since !== row.unknownSince) {
+    db.prepare("UPDATE scheduler_merges SET unknownSince=?, rev=rev+1, updatedAt=? WHERE intentId=?").run(since, now, row.intentId);
+  }
+  return getMergeRun(db, row.intentId) as MergeRun;
+}
+
 /** A phase claim is committed before the corresponding external call; receipts move it forward after observing reality. */
 export function advanceMergeRun(db: Database, ctx: WriteCtx, input: {
   intentId: string; from: MergePhase; to: MergePhase; rev: number; receipt?: string; mergeSha?: string; newHead?: string;
@@ -161,9 +181,10 @@ export function advanceMergeRun(db: Database, ctx: WriteCtx, input: {
     const row = getMergeRun(db, input.intentId);
     if (!row) throw new LedgerError("not_found", "没有合并运行记录");
     if (!canWrite(db, ctx.actor, row.project)) throw new LedgerError("forbidden", "只有项目 PM / master / owner 能推进合并队列");
-    if (row.phase !== input.from || row.rev !== input.rev || !NEXT[input.from]?.includes(input.to)) {
+    if (row.phase !== input.from || row.rev !== input.rev || (input.from !== input.to && !NEXT[input.from]?.includes(input.to))) {
       throw new LedgerError("conflict", `合并步骤当前 ${row.phase}@${row.rev}，不能从 ${input.from}@${input.rev} 推 ${input.to}`);
     }
+    if (input.from === input.to) return observeMergeState(db, ctx, row, input.receipt);
     if (input.to === "resolved") { // before any merge was sent: a conflict / red CI goes back to fix, a manual switch ends it; no freeze
       closeMergeRun(db, ctx, row, input.receipt, mergeRunDrift(db, row));
       return getMergeRun(db, row.intentId) as MergeRun;
@@ -203,7 +224,7 @@ export function advanceMergeRun(db: Database, ctx: WriteCtx, input: {
       insertEvent(db, { actor: ctx.actor, now }, { project: task.project, target: task.id, kind: "stage", text: "分支更新后重新审查新 head",
         data: { from: "merge", to: "review", round: next.round, specRev: next.specRev, head: input.newHead } }, false);
     }
-    db.prepare("UPDATE scheduler_merges SET phase=?, rev=rev+1, mergeSha=COALESCE(?,mergeSha), reason=?, updatedAt=? WHERE intentId=?")
+    db.prepare("UPDATE scheduler_merges SET phase=?, rev=rev+1, mergeSha=COALESCE(?,mergeSha), reason=?, unknownSince=NULL, updatedAt=? WHERE intentId=?")
       .run(input.to, input.to === "merged" ? input.mergeSha ?? null : null, ["unknown", "await_review"].includes(input.to) ? receipt : null, now, row.intentId);
     if (input.to === "unknown") db.prepare("INSERT INTO meta (project,key,value) VALUES (?, 'queueFrozen', ?) ON CONFLICT(project,key) DO UPDATE SET value=excluded.value")
       .run(row.project, JSON.stringify({ frozen: true, reason: `合并结果不明：${receipt}`, since: now }));
@@ -237,7 +258,7 @@ export function resolveMergeRun(db: Database, ctx: WriteCtx, input: { intentId: 
     const receipt = text(input.receipt, "回执");
     if (row.phase !== "unknown") throw new LedgerError("conflict", `合并运行当前是 ${row.phase}，只有 unknown 需要人工结清`);
     const now = ctx.now ?? Date.now();
-    db.prepare("UPDATE scheduler_merges SET phase='resolved', rev=rev+1, reason=?, updatedAt=? WHERE intentId=?")
+    db.prepare("UPDATE scheduler_merges SET phase='resolved', rev=rev+1, reason=?, unknownSince=NULL, updatedAt=? WHERE intentId=?")
       .run(`${input.outcome}: ${receipt}`, now, row.intentId);
     const intent = getIntent(db, row.intentId);
     if (intent && (intent.status === "submitted" || intent.status === "unknown")) {

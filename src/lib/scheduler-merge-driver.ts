@@ -1,5 +1,5 @@
 /** One bounded merge step per call. All external effects are preceded by a durable phase claim; `merged` is terminal. */
-import { carryReceipt, type MergeRun, type MergePhase } from "./scheduler-merge.js";
+import { carryReceipt, MERGE_UNKNOWN_WAIT, MERGE_UNKNOWN_CLEAR, type MergeRun, type MergePhase } from "./scheduler-merge.js";
 import { bounceStep, updateOrBounce } from "./scheduler-merge-conflict.js";
 import { SchedulerStopped } from "./scheduler-maintenance.js";
 
@@ -44,22 +44,19 @@ type Step = (to: MergePhase, receipt?: string, mergeSha?: string, newHead?: stri
 /** GitHub leaves mergeability UNKNOWN for seconds to minutes after main moves; an unbroken streak past this is an anomaly. */
 export const MERGE_STATE_UNKNOWN_LIMIT_MS = 10 * 60_000;
 export const UNKNOWN_LIMIT_REASON = `GitHub 合并状态 ${MERGE_STATE_UNKNOWN_LIMIT_MS / 60_000} 分钟仍未算出`;
-/** Start of each run's UNKNOWN streak. In memory only: a scheduler restart restarts the clock, every process life stays bounded. */
-const unknownSince = new Map<string, number>();
 /** Any inspect that reads something other than a non-draft UNKNOWN ends the streak, so only consecutive UNKNOWNs count. */
-function watchUnknown(run: MergeRun, external: MergeExternal): MergeExternal {
+function watchUnknown(current: () => MergeRun, external: MergeExternal, step: Step): MergeExternal {
   return { ...external, inspect: async (prRef) => {
     const pr = await external.inspect(prRef);
-    if (pr.mergeState !== "UNKNOWN" || pr.draft) unknownSince.delete(run.intentId);
+    const run = current();
+    if ((pr.mergeState !== "UNKNOWN" || pr.draft) && run.unknownSince != null) await step(run.phase, MERGE_UNKNOWN_CLEAR);
     return pr;
   } };
 }
 /** GitHub is still computing mergeability: stay in this phase and re-read next tick, until the limit turns it into unknown. */
 async function unknownWait(run: MergeRun, step: Step): Promise<MergeRun> {
-  const now = Date.now(), since = unknownSince.get(run.intentId);
-  if (since === undefined) unknownSince.set(run.intentId, now);
-  if (since === undefined || now - since <= MERGE_STATE_UNKNOWN_LIMIT_MS) return run;
-  unknownSince.delete(run.intentId);
+  if (run.unknownSince == null) return step(run.phase, MERGE_UNKNOWN_WAIT);
+  if (Date.now() - run.unknownSince < MERGE_STATE_UNKNOWN_LIMIT_MS) return run;
   return step("unknown", UNKNOWN_LIMIT_REASON);
 }
 
@@ -112,13 +109,12 @@ async function claimAndMerge(run: MergeRun, external: MergeExternal, step: Step,
 /** A changed head returns to review unless it only merged main in; an unobserved merge is never retried. */
 export async function driveMerge(run: MergeRun, source: MergeExternal, advance: MergeAdvance,
   assertActive: () => void = () => {}): Promise<MergeRun> {
-  let current = run;
-  const external = watchUnknown(run, source);
   const step = async (to: MergePhase, receipt?: string, mergeSha?: string, newHead?: string) => {
     assertActive();
-    current = await advance(current.phase, to, current.rev, receipt, mergeSha, newHead);
-    return current;
+    run = await advance(run.phase, to, run.rev, receipt, mergeSha, newHead);
+    return run;
   };
+  const external = watchUnknown(() => run, source, step);
   if (["merged", "unknown", "resolved", "await_review"].includes(run.phase)) return run;
   try {
     if (run.phase === "ready") {
@@ -194,7 +190,7 @@ export async function driveMerge(run: MergeRun, source: MergeExternal, advance: 
     return run;
   } catch (e) {
     if (e instanceof SchedulerStopped) throw e; // Shutdown or lost ownership leaves the journal for the new controller to reconcile.
-    if (["unknown", "merged", "resolved"].includes(current.phase)) throw e;
+    if (["unknown", "merged", "resolved"].includes(run.phase)) throw e;
     return step("unknown", `外部步骤失败：${(e as Error).message.replace(/\s+/g, " ").slice(0, 450)}`);
   }
 }
