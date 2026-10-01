@@ -219,14 +219,32 @@ describe("收回", () => {
     expect(j.orders.map((o) => [o.orderId, o.state])).toEqual([["o-live", "started"]]);
   });
 
-  test("不带 peer = 全部收回；CLI 失败不带快照、回非 2xx", async () => {
+  test("不带 peer = 全部收回；CLI 失败且条目还在：不带快照、回非 2xx", async () => {
     const s = setup();
     await s.api(req("/lend/grants/revoke", "POST", {}), "/lend/grants/revoke", OWNER);
     expect(s.calls[0]).toEqual(["lend", "revoke"]);
-    s.setReply({ ok: false, error: "lend 里没有 peer x" });
-    const r = await s.api(req("/lend/grants/revoke", "POST", { peer: "x" }), "/lend/grants/revoke", OWNER);
+    s.setReply({ ok: false, error: "等 lend 锁超时" });
+    const r = await s.api(req("/lend/grants/revoke", "POST", { peer: "team-a" }), "/lend/grants/revoke", OWNER);
     expect(r?.status).toBe(400);
-    expect(await r!.json()).toEqual({ ok: false, error: "lend 里没有 peer x" });
+    expect(await r!.json()).toEqual({ ok: false, error: "等 lend 锁超时" });
+    const all = await s.api(req("/lend/grants/revoke", "POST", {}), "/lend/grants/revoke", OWNER);
+    expect(all?.status).toBe(400);
+  });
+
+  test("超时但已删：CLI 停 worker 时被强杀，lend.json 里条目已不在 → 按收回成功回、带快照，CLI 原话进 warning", async () => {
+    const s = setup([G(), G({ peer: "team-b", fp: "1111-2222-3333-4444" })]);
+    s.setReply({ ok: false, error: "manager lend 超时（>50s）已强杀" });
+    writeFileSync(s.lendPath, JSON.stringify({ version: 2, enabled: true, lend: [G({ peer: "team-b", fp: "1111-2222-3333-4444" })], borrow: [] }));
+    const r = await s.api(req("/lend/grants/revoke", "POST", { peer: "team-a" }), "/lend/grants/revoke", OWNER);
+    expect(r?.status).toBe(200);
+    const j = await r!.json() as { ok: boolean; warning: string; orders: { orderId: string }[] };
+    expect(j.ok).toBe(true);
+    expect(j.warning).toBe("manager lend 超时（>50s）已强杀");
+    expect(j.orders.map((o) => o.orderId)).toEqual(["o-live"]);
+    // 全部收回：总开关还开着、还有条目 = 没收回
+    expect((await s.api(req("/lend/grants/revoke", "POST", {}), "/lend/grants/revoke", OWNER))?.status).toBe(400);
+    writeFileSync(s.lendPath, JSON.stringify({ version: 2, enabled: false, lend: [], borrow: [] }));
+    expect((await s.api(req("/lend/grants/revoke", "POST", {}), "/lend/grants/revoke", OWNER))?.status).toBe(200);
   });
 
   test("GET 只接 GET / POST；其它方法 405", async () => {

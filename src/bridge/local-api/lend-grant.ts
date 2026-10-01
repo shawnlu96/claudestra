@@ -26,6 +26,8 @@ const BODY_MAX = 16_384;
 const READ_BUSY_MS = 2_000;
 const ENDED_WINDOW_MS = 7 * 86_400_000;
 const ENDED_LIMIT = 50;
+/** grant / revoke 写完 lend.json 会当场停出错的 worker（每个最多等十几秒）；留在网页 POST 的 60 秒之内，回包才到得了前端 */
+const CLI_TIMEOUT_MS = 50_000;
 
 export interface LendGrantDeps {
   run: (args: string[]) => Promise<any>;
@@ -36,7 +38,7 @@ export interface LendGrantDeps {
 }
 
 const DEFAULTS: LendGrantDeps = {
-  run: (args) => runManagerProcess(args, { bunPath: BUN_PATH, managerPath: MANAGER_PATH, env: ENV, timeoutMs: 30_000 }),
+  run: (args) => runManagerProcess(args, { bunPath: BUN_PATH, managerPath: MANAGER_PATH, env: ENV, timeoutMs: CLI_TIMEOUT_MS }),
   lendPath: LEND_PATH,
   journalPath: LEND_JOURNAL_PATH,
   context: readLendContext,
@@ -194,10 +196,21 @@ async function listAll(d: LendGrantDeps): Promise<Response> {
   return apiJson(200, { ok: true, writeOpen: WRITE_ROLE_OPEN, maxDays: GRANT_MAX_DAYS, shellSentence: SHELL_SENTENCE, grants, peers, orders: [...orders.live, ...orders.ended] });
 }
 
+/**
+ * CLI 报错不等于没收回：条目先删、再当场停 worker，停的那段超时被强杀也会报失败。以 lend.json 为准——条目已经不在就按收回成功回，
+ * CLI 原话放 warning；否则界面会留着一条其实已收回的授权（tests/web-lend-api.test.ts「超时但已删」）。
+ */
+async function revokedOnDisk(d: LendGrantDeps, peer: string | undefined): Promise<boolean> {
+  const read = await readLend(d.lendPath);
+  if (read.status !== "ok") return false;
+  return peer === undefined ? !read.file.enabled && !read.file.lend.length : !read.file.lend.some((e) => e.peer === peer);
+}
+
 async function revoke(d: LendGrantDeps, b: Record<string, unknown>): Promise<Response> {
   const peer = b.peer;
   if (peer !== undefined && (typeof peer !== "string" || !peer.trim() || hasNul(peer))) return bad("peer 要是非空字符串；不带 peer = 全部收回");
-  const r = await runCli(d, ["lend", "revoke", ...(peer === undefined ? [] : [`--peer=${peer}`])]);
+  let r = await runCli(d, ["lend", "revoke", ...(peer === undefined ? [] : [`--peer=${peer}`])]);
+  if (!r?.ok && (await revokedOnDisk(d, peer as string | undefined))) r = { ok: true, warning: r?.error, message: r?.message };
   if (!r?.ok) return cliReply(r);
   let live: OrderView[] = [];
   try {

@@ -121,6 +121,7 @@ export function LendPanel() {
       }, FADE_MS);
     } catch (e) {
       setRevokeErr((x) => ({ peer, msg: e instanceof Error ? e.message : String(e), n: (x?.n ?? 0) + 1 })); // 收回没成：授权和单子都保持原样
+      void load(); // 请求本身断了（网页超时）时 bridge 可能已收回：以重拉的列表为准
     } finally {
       setBusy(null);
     }
@@ -140,7 +141,7 @@ export function LendPanel() {
       </div>
       {form && (
         <GrantForm key={JSON.stringify(form)} peers={data.peers} maxDays={data.maxDays} shellSentence={data.shellSentence} initial={form}
-          onCancel={() => setForm(null)} onDone={(peer) => { setForm(null); setFresh(peer); void load(); }} />
+          onCancel={() => setForm(null)} onFail={() => void load()} onDone={(peer) => { setForm(null); setFresh(peer); void load(); }} />
       )}
       <div className="space-y-1.5">
         {data.grants.map((g) => (

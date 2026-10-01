@@ -18,6 +18,8 @@ interface Props {
   shellSentence: string;
   initial: Form;
   onDone: (peer: string) => void;
+  /** 失败也让父组件重拉：CLI 停 worker 超时被强杀时授权其实已写进 lend.json */
+  onFail: () => void;
   onCancel: () => void;
 }
 
@@ -71,7 +73,7 @@ function RoleField() {
   );
 }
 
-export function GrantForm({ peers, maxDays, shellSentence, initial, onDone, onCancel }: Props) {
+export function GrantForm({ peers, maxDays, shellSentence, initial, onDone, onFail, onCancel }: Props) {
   const t = useLendT();
   const [f, setF] = useState<Form>(initial);
   const [repoText, setRepoText] = useState("");
@@ -96,6 +98,7 @@ export function GrantForm({ peers, maxDays, shellSentence, initial, onDone, onCa
     } catch (e) {
       setErr(e instanceof ApiError || e instanceof Error ? e.message : String(e));
       setShake(true);
+      onFail();
     } finally {
       setBusy(false);
     }
