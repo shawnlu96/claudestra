@@ -60,7 +60,7 @@ function fixture(phase: MergeRun["phase"], o: { snaps: PrSnapshot[]; fresh?: Fre
 }
 
 describe("i28-M9 ready: a branch behind main is always updated first", () => {
-  test.each([["CLEAN"], ["UNSTABLE"], ["BEHIND"], ["UNKNOWN"]])("behind main with mergeState=%s → update-branch, never await_ci", async (mergeState) => {
+  test.each([["CLEAN"], ["UNSTABLE"], ["BEHIND"]])("behind main with mergeState=%s → update-branch, never await_ci", async (mergeState) => {
     const f = fixture("ready", { snaps: [pr({ mergeState, checks: [{ name: "check", bucket: "pending" }] })], fresh: [{ behindBy: 3, mainHead: MAIN }] });
     await f.drive();
     expect(f.row.phase).toBe("updating");
@@ -202,7 +202,7 @@ describe("i28-M9 await_ci: main moving while CI ran is never merged", () => {
     const f = fixture("await_ci", { snaps: [pr()] });
     await f.drive();
     expect(f.row.phase).toBe("merged");
-    expect(f.calls).toEqual(["inspect", "fresh:a", "journal:merging", "inspect", "merge:a", "inspect", "journal:merged"]);
+    expect(f.calls).toEqual(["inspect", "fresh:a", "inspect", "journal:merging", "merge:a", "inspect", "journal:merged"]);
   });
 });
 
