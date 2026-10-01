@@ -30,13 +30,13 @@ function input(id: string): OfferInput {
   return { taskId: id, peer: "mate", family: "codex", repo: "org/repo", pr: null, spec: "Implement x; validate x", borrow,
     write: { fp: "abcd-ef01-2345-6789", base: "main", baseSha: "b".repeat(40), report: null } };
 }
-function offered(id: string) {
+function offered(id: string, review = false) {
   createTask(db, ctx(), { id, project: "p", title: id, kind: "code", agent: "agent-dev" });
-  db.run("UPDATE tasks SET stage = 'build' WHERE id = ?", [id]);
-  return offerLend(db, ctx(), input(id));
+  db.run("UPDATE tasks SET stage = ?, headSHA = ? WHERE id = ?", [review ? "review" : "build", review ? "b".repeat(40) : null, id]);
+  return offerLend(db, ctx(), { ...input(id), pr: review ? 7 : null });
 }
-function held(id: string) {
-  const order = offered(id);
+function held(id: string, review = false) {
+  const order = offered(id, review);
   claimLend(db, ctx(), "mate", { v: 1, orderId: order.orderId, worker: "agent-worker" }, () => borrow);
   return order;
 }
@@ -117,4 +117,32 @@ test("failed PM reoffer rolls back cooldown clear with the cancelled order", () 
   expect(() => reofferLend(db, ctx(), { ...input("T1"), borrow: null, reason: "invalid" })).toThrow();
   expect(rows()).toHaveLength(1);
   expect(db.query("SELECT status FROM lend_orders WHERE orderId = ?").get(o.orderId)).toEqual({ status: "claimed" });
+});
+
+
+test.each([
+  { peer: "other", family: "codex" as const, cleared: false },
+  { peer: "mate", family: "claude" as const, cleared: false },
+  { peer: "mate", family: "codex" as const, cleared: true },
+])("PM reoffer $peer/$family clears old mate/Codex only for the same target", ({ peer, family, cleared }) => {
+  const a = held("T1");
+  held("T2", true);
+  released(a.orderId);
+  const destination = { ...input("T2"), pr: 7, peer, family, borrow: { ...borrow, peer }, reason: "PM chooses destination" };
+  const order = reofferLend(db, ctx(), destination);
+  expect(order).toMatchObject({ peer, family });
+  expect(rows()).toHaveLength(cleared ? 0 : 1);
+  expect(borrowPeers(db, "p", [borrow], RELEASE_AT)[0].v2?.slots.codex).toBe(cleared ? 4 : 0);
+});
+
+test("past reset falls back to six hours and repeated quota release emits one notice", () => {
+  const a = held("T1"), b = held("T2");
+  const pastError = ERROR.replace("Oct 9th", "Sep 30th");
+  const first = released(a.orderId, pastError);
+  expect(rows()[0].until).toBe(Date.parse("2026-10-02T05:07:00Z"));
+  expect(first.notices.filter(n => n.text.includes("额度冷却"))).toHaveLength(1);
+  expect(first.notices.some(n => n.text.includes("2026-10-02T05:07:00.000Z"))).toBe(true);
+  expect(released(b.orderId, pastError).notices.filter(n => n.text.includes("额度冷却"))).toHaveLength(0);
+  expect(borrowPeers(db, "p", [borrow], RELEASE_AT)[0].v2?.slots.codex).toBe(0);
+  expect(peerCooldownUntil("try again at 2026-10-01T23:07Z", RELEASE_AT)).toBe(RELEASE_AT + 6 * 3600_000);
 });

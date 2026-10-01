@@ -22,11 +22,12 @@ export function peerCooldownUntil(reason: string, now: number): number {
   const value = english ? `${english[1]} ${english[2]}, ${english[3]} ${english[4]}:${english[5]} ${english[6]} ${english[7] ?? 'UTC'}`
     : iso ? `${iso[1]}${/Z$|[+-]\d{2}:?\d{2}$/.test(iso[1]) ? '' : 'Z'}` : '';
   const reset = Date.parse(value);
-  return Math.min(Number.isFinite(reset) ? reset : now + 6 * HOUR, now + MAX_COOLDOWN);
+  return Math.min(Number.isFinite(reset) && reset > now ? reset : now + 6 * HOUR, now + MAX_COOLDOWN);
 }
 
-/** Clearing happens only after a successful claim / PM reoffer inside the owning transaction. */
-export function clearPeerCooldown(db: Database, peer: string, family: LendFamily): void {
+/** Claims clear their target; an explicit reoffer clears only when it retries the same peer and family. */
+export function clearPeerCooldown(db: Database, peer: string, family: LendFamily, destination?: Pick<LendOrder, "peer" | "family">): void {
+  if (destination && (destination.peer !== peer || destination.family !== family)) return;
   db.run("DELETE FROM lend_peer_cooldowns WHERE peer = ? AND family = ?", [peer, family]);
 }
 

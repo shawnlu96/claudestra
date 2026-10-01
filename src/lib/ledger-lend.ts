@@ -9,8 +9,7 @@
  * time, through T87's refuse-first peer gate with the ledger head. Result intake is ledger-lend-result.ts (reviews and
  * write orders). tests/ledger-lend.test.ts, tests/ledger-lend-write.test.ts.
  */
-import { clearPeerCooldown, cooldownReleaseNotices } from "./lend-peer-cooldown.js";
-import { createHash } from "node:crypto";
+import { clearPeerCooldown, cooldownReleaseNotices } from "./lend-peer-cooldown.js"; import { createHash } from "node:crypto";
 import type { Database } from "bun:sqlite";
 import type { BorrowEntry, LendFamily } from "./lend-config.js";
 import { LEASE_MS_DEFAULT, POLL_AFTER_MS, pollLimit, type ClaimRequest, type LeaseRequest, type LeaseState, type LendReceipt, type LendRefusal,
@@ -252,7 +251,7 @@ export function withdrawPooledLend(db: Database, ctx: WriteCtx, input: { orderId
 export function reofferLend(db: Database, ctx: WriteCtx, input: OfferInput & { reason: string }): LendOrder {
   return tx(db, () => {
     const old = cancelLend(db, ctx, { taskId: input.taskId, reason: `重挂：${input.reason}` });
-    return (clearPeerCooldown(db, old.peer, old.family), offerLend(db, ctx, { ...input, supersedes: old.orderId }));
+    return (clearPeerCooldown(db, old.peer, old.family, input), offerLend(db, ctx, { ...input, supersedes: old.orderId }));
   });
 }
 
