@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { parseSchedulerConfig } from "../src/lib/scheduler-config.js";
 import { driveMerge, type MainFreshness, type MergeExternal, type PrSnapshot, type ReviewCarry } from "../src/lib/scheduler-merge-driver.js";
 import { mergeExternal } from "../src/lib/scheduler-merge-external.js";
-import type { MergeRun } from "../src/lib/scheduler-merge.js";
+import { parseCarryReceipt, type MergeRun } from "../src/lib/scheduler-merge.js";
 import { SchedulerStopped } from "../src/lib/scheduler-maintenance.js";
 import { runBounded } from "../src/lib/run-bounded.js";
 
@@ -20,7 +20,7 @@ const CARRY: ReviewCarry = { ok: true, reason: "净 diff 一致", mainParent: X,
 
 type Fresh = MainFreshness | Error;
 /** Fakes GitHub: inspect replays snapshots (last one repeats), freshness / carry replay their own queues the same way. */
-function fixture(phase: MergeRun["phase"], o: { snaps: PrSnapshot[]; fresh?: Fresh[]; carry?: (ReviewCarry | Error)[] }) {
+function fixture(phase: MergeRun["phase"], o: { snaps: PrSnapshot[]; fresh?: Fresh[]; carry?: (ReviewCarry | Error)[]; refuse?: MergeRun["phase"] }) {
   let row: MergeRun = { ...base, phase };
   const snaps = [...o.snaps], fresh = [...(o.fresh ?? [{ behindBy: 0, mainHead: MAIN }])], carry = [...(o.carry ?? [CARRY])];
   const calls: string[] = [], heads: (string | undefined)[] = [];
@@ -48,6 +48,7 @@ function fixture(phase: MergeRun["phase"], o: { snaps: PrSnapshot[]; fresh?: Fre
   };
   const advance = async (from: MergeRun["phase"], to: MergeRun["phase"], rev: number, receipt?: string, mergeSha?: string, newHead?: string) => {
     expect([from, rev]).toEqual([row.phase, row.rev]);
+    if (to === o.refuse) throw new Error("等 CI 期间 main 已前进 3 次，不再自动更新"); // what the journal says on the 4th refresh
     calls.push(`journal:${to}`);
     heads.push(newHead);
     // Mirrors the journal: a carried await_ci re-pins the run on the new head.
@@ -93,7 +94,7 @@ describe("i28-M9 updating: a moved head keeps its review only when it merely mer
     await f.drive();
     expect(f.row.phase).toBe("await_ci");
     expect(f.heads).toEqual([N]);
-    for (const part of [H, N, X, MAIN, CARRY.diffHash!]) expect(f.row.reason).toContain(part);
+    expect(parseCarryReceipt(f.row.reason!)).toEqual({ oldHead: H, newHead: N, mainParent: X, mainHead: MAIN, diffHash: CARRY.diffHash! });
     expect(f.calls).toEqual(["inspect", "carry:a>d", "journal:await_ci"]);
   });
   const refusals: [string, ReviewCarry | Error][] = [
@@ -132,6 +133,17 @@ describe("i28-M9 updating: a moved head keeps its review only when it merely mer
     await expect(f.drive()).rejects.toBeInstanceOf(SchedulerStopped);
     expect(f.calls).toEqual(["inspect", "carry:a>d"]);
   });
+  test("end to end: main moves during CI → re-update → carried again → merged on the newest head", async () => {
+    const f = fixture("await_ci", { snaps: [pr(), pr({ head: N }), pr({ head: N })],
+      fresh: [{ behindBy: 1, mainHead: MAIN }, { behindBy: 0, mainHead: MAIN }] });
+    await f.drive();
+    expect(f.row.phase).toBe("updating");
+    await f.drive();
+    expect([f.row.phase, f.row.reviewedHead]).toEqual(["await_ci", N]);
+    await f.drive();
+    expect(f.row.phase).toBe("merged");
+    expect(f.calls).toContain("merge:d");
+  });
   test("end to end: stale CLEAN PR → update → carried → CI green on the new head → merged pinned to the new head", async () => {
     const f = fixture("ready", { snaps: [pr(), pr({ head: N, mergeState: "UNKNOWN" }), pr({ head: N })],
       fresh: [{ behindBy: 2, mainHead: MAIN }, { behindBy: 0, mainHead: MAIN }] });
@@ -143,13 +155,24 @@ describe("i28-M9 updating: a moved head keeps its review only when it merely mer
 });
 
 describe("i28-M9 await_ci: main moving while CI ran is never merged", () => {
-  test("green but behind → unknown without merging; lookup failure → unknown without merging", async () => {
-    for (const fresh of [{ behindBy: 1, mainHead: MAIN }, new Error("gh compare 失败")] as Fresh[]) {
-      const f = fixture("await_ci", { snaps: [pr()], fresh: [fresh] });
-      await f.drive();
-      expect(f.row.phase).toBe("unknown");
-      expect(f.calls.some((c) => c.startsWith("merge:"))).toBe(false);
-    }
+  test("green but behind → back to updating and update-branch again, never a merge", async () => {
+    const f = fixture("await_ci", { snaps: [pr()], fresh: [{ behindBy: 1, mainHead: MAIN }] });
+    await f.drive();
+    expect(f.row.phase).toBe("updating");
+    expect(f.calls).toEqual(["inspect", "fresh:a", "journal:updating", "update"]);
+  });
+  test("staleness lookup failing right before merge → unknown, no merge", async () => {
+    const f = fixture("await_ci", { snaps: [pr()], fresh: [new Error("gh compare 失败")] });
+    await f.drive();
+    expect(f.row.phase).toBe("unknown");
+    expect(f.calls.some((c) => c.startsWith("merge:"))).toBe(false);
+  });
+  test("the journal refusing another refresh (4th time) → unknown, no update, no merge", async () => {
+    const f = fixture("await_ci", { snaps: [pr()], fresh: [{ behindBy: 1, mainHead: MAIN }], refuse: "updating" });
+    await f.drive();
+    expect(f.row.phase).toBe("unknown");
+    expect(f.row.reason).toContain("前进 3 次");
+    expect(f.calls.some((c) => c === "update" || c.startsWith("merge:"))).toBe(false);
   });
   test("green and up to date → merges on the reviewed head", async () => {
     const f = fixture("await_ci", { snaps: [pr()] });

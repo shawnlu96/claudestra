@@ -15,6 +15,8 @@ function fixture(initial = base) {
   const calls: string[] = [];
   const ops: MergeExternal = {
     inspect: async () => { calls.push("inspect"); return snapshot; },
+    freshness: async () => ({ behindBy: 0, mainHead: "e".repeat(40) }), // i28-M9: never behind main here
+    carryReview: async () => ({ ok: false, reason: "不沿用" }),
     updateBranch: async () => { calls.push("update"); },
     merge: async (_, expectedHead) => { expect(expectedHead).toBe(H); calls.push("merge"); snapshot = pr({ state: "MERGED", mergeSha: M }); return M; },
   };

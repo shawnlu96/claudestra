@@ -1,5 +1,5 @@
 /** One bounded merge step per call. All external effects are preceded by a durable phase claim; `merged` is terminal. */
-import type { MergeRun, MergePhase } from "./scheduler-merge.js";
+import { carryReceipt, type MergeRun, type MergePhase } from "./scheduler-merge.js";
 import { SchedulerStopped } from "./scheduler-maintenance.js";
 
 export interface PrSnapshot {
@@ -55,8 +55,8 @@ async function movedHead(run: MergeRun, external: MergeExternal, pr: PrSnapshot,
   if (pr.draft || pr.mergeState === "BEHIND" || pr.mergeState === "UNKNOWN") return run; // re-checked next round on the same evidence
   if (unstableWait(pr) === "failed") return step("unknown", "更新分支后 CI 失败或取消");
   if (pr.mergeState !== "CLEAN" && pr.mergeState !== "UNSTABLE") return step("unknown", `更新分支后 mergeState=${pr.mergeState}`);
-  return step("await_ci", `沿用审查：原 head ${run.reviewedHead} → 新 head ${pr.head}，main 父提交 ${carry.mainParent}，` +
-    `main 头 ${carry.mainHead}，净 diff 一致 sha256=${carry.diffHash}，等待 CI`, undefined, pr.head);
+  return step("await_ci", carryReceipt({ oldHead: run.reviewedHead, newHead: pr.head, mainParent: carry.mainParent,
+    mainHead: carry.mainHead, diffHash: carry.diffHash }), undefined, pr.head);
 }
 
 /** A changed head returns to review unless it only merged main in; an unobserved merge is never retried. */
@@ -116,9 +116,14 @@ export async function driveMerge(run: MergeRun, external: MergeExternal, advance
       }
       if (pr.checks.some((c) => c.bucket === "fail" || c.bucket === "cancel")) return step("unknown", "CI 失败或取消");
       if (!green(run, pr.checks)) return run;
-      // main moving during CI means the green run tested a different merge result; never merge it, and never guess.
+      // main moved during CI: the green run tested another merge result, so update again (the journal caps how often).
       const stale = await external.freshness(run.prRef, pr.head);
-      if (stale.behindBy > 0) return step("unknown", `等 CI 期间 main 前进到 ${short(stale.mainHead)}，PR 已落后 ${stale.behindBy} 个提交`);
+      if (stale.behindBy > 0) {
+        const claimed = await step("updating", `等 CI 期间 main 前进到 ${short(stale.mainHead)}，落后 ${stale.behindBy} 个提交，重新更新分支`);
+        assertActive();
+        await external.updateBranch(run.prRef);
+        return claimed;
+      }
       await step("merging", `CI 全绿：${pr.checks.map((c) => c.name).join(", ").slice(0, 300)}`);
       const fresh = await external.inspect(run.prRef);
       if (fresh.state !== "OPEN" || !sameHead(run, fresh) || fresh.branch !== run.expectedBranch || fresh.base !== "main" ||
