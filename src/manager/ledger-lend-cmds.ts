@@ -13,12 +13,13 @@ import { dirname } from "node:path";
 import { keyFingerprint, signPurpose } from "../lib/instance-key.js";
 import { readLend, type BorrowEntry, type LendFamily, REPO_RE } from "../lib/lend-config.js";
 import { effectiveLend, readLendContext } from "../lib/lend-policy.js";
-import { isBaseBranch, remoteHeadAt, stepOfStage } from "../lib/lend-git.js";
+import { remoteHeadAt, stepOfStage } from "../lib/lend-git.js";
+import { writeMaterials } from "../lib/lend-write-materials.js";
 import { isDeliverRequest, LEND_VERSION, parseLendRequest, type LendEndpoint } from "../lib/lend-wire.js";
 import { cancelLend, claimLend, leaseLend, listLendOrders, offerLend, pollLend, reclaimLend, refuse, reofferLend, sweepLend, type LendNotice,
   type OfferInput } from "../lib/ledger-lend.js";
 
-import { heldLease, lastReviewOf } from "../lib/ledger-lend-lease.js";
+import { heldLease } from "../lib/ledger-lend-lease.js";
 import { placementOf } from "../lib/lend-placement-view.js";
 import { lendPeerCmds, type BranchState } from "./ledger-lend-peer-cmds.js";
 import { RECEIPT_PURPOSE, writeLendDeliver, writeLendResult, type LendDeliverDeps, type LendResultDeps } from "../lib/ledger-lend-result.js";
@@ -73,7 +74,8 @@ function realLendDeps(c: LedgerCli): LendCliDeps {
 
 const lendDeps = (c: LedgerCli): LendCliDeps => c.deps.lend ?? realLendDeps(c);
 
-function writeDeps(c: LedgerCli): LendDeliverDeps {
+/** Also the scheduler's pool step (ledger-scheduler-cmds.ts): the same injected / real probes for a write order's materials. */
+export function writeDeps(c: LedgerCli): LendDeliverDeps {
   const r = lendDeps(c).result;
   if (!r.remoteHead || !r.peerFp) throw new LedgerError("invalid", "这台机器没接上写单要的远端查询（注入缺 remoteHead / peerFp）");
   return { ...(r as LendDeliverDeps), now: () => c.deps.now() };
@@ -121,37 +123,19 @@ function offerInput(c: LedgerCli, task: LedgerTask, borrow: BorrowEntry | null):
   return { taskId: task.id, peer, family: family as LendFamily, repo, pr: stepOfStage(task.stage) === "write" ? null : pr, spec, borrow };
 }
 
-/**
- * 写单要的材料都在事务外备好：对方指纹（按钉住的公钥算，分支名由它定）、开工单的基线在远端的 head、修复单的上一轮审查报告原文。
- * 查远端 / 读文件失败一律拒挂，不带半张单出去。
- */
-async function writeMaterials(c: LedgerCli, task: LedgerTask, input: OfferInput): Promise<OfferInput> {
+/** 写单材料（lib/lend-write-materials.ts，调度服务挂池同一份）：查远端 / 读文件失败一律拒挂，不带半张单出去 */
+async function withWrite(c: LedgerCli, task: LedgerTask, input: OfferInput): Promise<OfferInput> {
   const step = stepOfStage(task.stage);
   if (step !== "write" && step !== "fix") return input;
-  const deps = writeDeps(c);
-  const fp = await deps.peerFp(input.peer);
-  if (!fp) throw new LedgerError("invalid", `${input.peer} 没有钉住的实例公钥，出借分支没法定名（先让对方完成 E2E 配对）`);
-  const base = c.p.flags.base ?? "main";
-  if (!isBaseBranch(base)) throw new LedgerError("invalid", `--base ${base} 不是能用的基线分支名`);
-  let baseSha: string | null = null;
-  let report: string | null = null;
-  if (step === "write") {
-    const r = await deps.remoteHead(input.repo, base);
-    if (!r.ok) throw new LedgerError("invalid", `查不到 ${input.repo} 的 ${base}：${r.error}`);
-    baseSha = r.head;
-  } else {
-    const path = lastReviewOf(c.db, task).path;
-    report = readTextSoft(path);
-    if (!report) throw new LedgerError("invalid", `找不到上一轮审查报告原文（${path ?? "卡上最近的审查没记报告路径"}），修复单要把它内联给对方`);
-  }
-  return { ...input, write: { fp, base, baseSha, report } };
+  const write = await writeMaterials(c.db, task, { peer: input.peer, repo: input.repo, base: c.p.flags.base ?? "main" }, writeDeps(c));
+  return write ? { ...input, write } : input;
 }
 
 async function offer(c: LedgerCli, again: boolean): Promise<Result> {
   const task = c.task(c.p.pos[1]);
   c.requireManager(task.project, again ? "重挂出借单" : "挂出借单");
   const peer = offerPeer(c, task).peer;
-  const input = await writeMaterials(c, task, offerInput(c, task, (await borrowOf(c, peer))(task.project)));
+  const input = await withWrite(c, task, offerInput(c, task, (await borrowOf(c, peer))(task.project)));
   const reason = c.p.flags.reason ?? "";
   if (again && !reason.trim()) throw new LedgerError("invalid", "重挂要写 --reason（核对了什么）");
   const o = again ? reofferLend(c.db, c.ctx(), { ...input, reason }) : offerLend(c.db, c.ctx(), input);

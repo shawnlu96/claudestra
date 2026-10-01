@@ -21,6 +21,7 @@ import { templateFor } from "./scheduler-template.js";
 import { bindHash, checkAsk } from "./ask-bind.js";
 import { getAsk, ownerAnswered } from "./ledger-asks.js";
 import { autostartGrant } from "./ledger-autostart-grant.js";
+import { remoteHeadFamily } from "./scheduler-head-family.js";
 
 const projectSeq = (db: Database, project: string): number =>
   (db.query("SELECT COALESCE(MAX(seq), 0) AS seq FROM events WHERE project = ?").get(project) as { seq: number }).seq;
@@ -42,7 +43,7 @@ function requireReviewedMerge(db: Database, task: ReturnType<typeof mustTask>, w
     (read.facts.verdict === "changes" && !read.facts.findings.some((f) => f.severity === "P2"))) {
     throw new LedgerError("conflict", "合并前缺本轮同 head 的通过审查");
   }
-  if (read.facts.reviewerFamily === workflow.authorFamily) throw new LedgerError("conflict", "合并前缺跨模型审查");
+  if (read.facts.reviewerFamily === (remoteHeadFamily(db, task) ?? workflow.authorFamily)) throw new LedgerError("conflict", "合并前缺跨模型审查");
   const reviewEntry = db.query(`SELECT COALESCE(MAX(seq), 0) AS seq FROM events WHERE target = ? AND kind = 'stage'
     AND json_extract(data, '$.to') = 'review' AND json_extract(data, '$.round') = ?`).get(task.id, task.round) as { seq: number };
   if (!reviewEntry.seq) throw new LedgerError("conflict", "缺本轮 review 阶段进入事件");
@@ -209,6 +210,10 @@ export function planIntent(db: Database, ctx: WriteCtx, input: PlanIntentInput):
       if (used) throw new LedgerError("conflict", `资源 ${resource} 与 ${used.resource} 重叠（${used.taskId} 占用）`);
     }
     const now = ctx.now ?? Date.now();
+    // A peer writes the card now: the local worker slot it held since restate would count a remote writer against this
+    // machine's cap. Coming back local (a fix without lease, a refused offer) takes a free slot again like any card.
+    const released = isPoolIntent({ action: input.action, recipient }) && input.action === "dispatch" ? cardWorkerSlots(held, task.id) : [];
+    for (const slot of released) db.query("DELETE FROM scheduler_resources WHERE taskId = ? AND resource = ?").run(task.id, slot);
     db.prepare(`INSERT INTO scheduler_intents (id, taskId, project, node, action, recipient, causalSeq, taskRev, specRev, head,
       templateVersion, status, reason, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)`).run(
       id, task.id, task.project, node, input.action, recipient, input.causalSeq, task.rev, task.specRev, task.headSHA,
@@ -223,7 +228,7 @@ export function planIntent(db: Database, ctx: WriteCtx, input: PlanIntentInput):
       project: task.project, target: task.id, kind: "scheduler", text: reason,
       data: { op: "plan", id, node, action: input.action, recipient, resources, causalSeq: input.causalSeq,
         taskRev: task.rev, specRev: task.specRev, head: task.headSHA, template: workflow.template, version: workflow.templateVersion,
-        ...(ctx.actor === "scheduler" ? {} : { manual: true }) },
+        ...(released.length ? { releasedSlots: released } : {}), ...(ctx.actor === "scheduler" ? {} : { manual: true }) },
     }, true);
     db.prepare("UPDATE scheduler_intents SET eventSeq = ? WHERE id = ?").run(event.seq, id);
     return { intent: getIntent(db, id) as SchedulerIntent, duplicate: false };

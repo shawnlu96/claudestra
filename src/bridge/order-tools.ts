@@ -6,6 +6,7 @@
  */
 import type { ServerWebSocket } from "bun";
 import { openAskFull, patchAsk } from "../lib/ledger-asks.js";
+import { appendEvent } from "../lib/ledger-write.js";
 import { isLendCaller } from "../lib/lend-tools.js";
 import { askOrder } from "../lib/order-ask.js";
 import { deliverOrder, remoteBranchHead } from "../lib/order-deliver.js";
@@ -59,7 +60,7 @@ const HANDLERS: Record<string, OrderToolHandler> = {
   }),
   ask: (call, args) => askOrder(call, args, {
     db: ledgerDb(), open: (input) => openAskFull(askDb(), input), notify: (to, text, messageId) => sendLedgerNotice({ to, text, messageId }),
-    markHanded: (id) => patchAsk(askDb(), id, { extra: { notice: "handed" } }),
+    markHanded: (id) => patchAsk(askDb(), id, { extra: { notice: "handed" } }), record: (ctx, input) => void appendEvent(askDb(), ctx, input),
   }),
   ...dagToolHandlers(),
 };

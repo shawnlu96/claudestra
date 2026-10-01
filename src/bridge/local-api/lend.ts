@@ -9,6 +9,7 @@
  */
 import { SIG_HEADERS } from "../../lib/instance-key.js";
 import { openAskFull, patchAsk } from "../../lib/ledger-asks.js";
+import { appendEvent } from "../../lib/ledger-write.js";
 import { STALE_WRITE_SQL, WRITE_POOL_TTL_MS } from "../../lib/ledger-lend.js";
 import { remoteCaller } from "../../lib/ledger-lend-peers.js";
 import { getTask } from "../../lib/ledger-store.js";
@@ -72,9 +73,11 @@ async function remoteAsk(body: string, peer: string): Promise<Response> {
   if (!task) return refused("not_held", "这一单的卡已不在台账里");
   const r = await openOrderAsk(db, {
     open: (input) => openAskFull(askDb(), input), notify: (to, text, messageId) => sendLedgerNotice({ to, text, messageId }),
-    markHanded: (id) => patchAsk(askDb(), id, { extra: { notice: "handed" } }),
+    markHanded: (id) => patchAsk(askDb(), id, { extra: { notice: "handed" } }), record: (ctx, input) => void appendEvent(askDb(), ctx, input),
   }, { task, orderId: who.orderId, from: `${who.worker}@${who.peer}`, keyPrefix: `lend-ask:g${who.gen}` }, req.value);
   if ("refused" in r) return refused("unavailable", r.refused);
+  // 审查单不转 PM：旧版对方只把拒绝原因给审查员看，规则原文放在 error 里它就能读到（lend-tools.ts askPeer）
+  if ("answered" in r) return apiJson(409, { ok: false, code: "review_ask_answered", error: r.answered });
   return apiJson(200, { ok: true, v: V2_BODY_VERSION, askId: r.askId });
 }
 
