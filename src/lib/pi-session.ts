@@ -33,6 +33,7 @@ import { join } from "path";
 import { hasInboundHeader } from "./inbound-body.js";
 import { piAgentDirOf } from "./pi-path.js";
 import { isSandbox, sandboxPiAgentDir, SANDBOX_ROOT_ENV } from "./sandbox.js";
+import { realInside } from "./sandbox-pi-fs.js";
 
 /**
  * Pi 的 agent 目录（`~/.pi/agent`），可用环境变量覆盖；`~` / file:// 的展开与 Pi 自身一致（lib/pi-path.ts）。沙箱里只认从沙箱根
@@ -41,6 +42,11 @@ import { isSandbox, sandboxPiAgentDir, SANDBOX_ROOT_ENV } from "./sandbox.js";
 export function piAgentDir(): string {
   if (isSandbox()) return sandboxPiAgentDir(process.env[SANDBOX_ROOT_ENV]?.trim());
   return piAgentDirOf(process.env);
+}
+
+/** 沙箱里会话目录 / 文件的真实路径必须在真实沙箱根下：链接指到根外的当它不存在（不用 jsonl 里的 cwd 代替文件边界）；非沙箱不查 */
+export function piSessionPathAllowed(p: string): boolean {
+  return !isSandbox() || realInside(process.env[SANDBOX_ROOT_ENV]?.trim() ?? "", p);
 }
 
 /** 解析软链；路径不存在时原样返回（不抛） */
@@ -79,7 +85,8 @@ export function listPiSessionJsonls(cwd: string, agentDir = piAgentDir()): strin
     return readdirSync(dir)
       .filter((n) => n.endsWith(".jsonl"))
       .sort()
-      .map((n) => join(dir, n));
+      .map((n) => join(dir, n))
+      .filter(piSessionPathAllowed);
   } catch {
     return [];
   }
@@ -91,7 +98,7 @@ export function piSessionPath(cwd: string, sessionId: string, agentDir = piAgent
   const dir = piSessionsDir(cwd, agentDir);
   try {
     const hit = readdirSync(dir).find((n) => n.endsWith(`_${sessionId}.jsonl`));
-    return hit ? join(dir, hit) : null;
+    return hit && piSessionPathAllowed(join(dir, hit)) ? join(dir, hit) : null;
   } catch {
     return null;
   }
@@ -110,7 +117,7 @@ export function findPiSessionBySessionId(sessionId: string, agentDir = piAgentDi
   for (const d of dirs) {
     try {
       const hit = readdirSync(join(root, d)).find((n) => n.endsWith(`_${sessionId}.jsonl`));
-      if (hit) return join(root, d, hit);
+      if (hit && piSessionPathAllowed(join(root, d, hit))) return join(root, d, hit);
     } catch { /* 单目录读不了就跳过 */ }
   }
   return null;

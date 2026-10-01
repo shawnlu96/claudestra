@@ -3,13 +3,15 @@
  * 沙箱的 Pi 默认没有任何凭据（HOME 与 PI_CODING_AGENT_DIR 都在沙箱根下，provider 的 key 变量不继承），要跑真模型只有这条显式的路。
  * - 源只读：<PI_CODING_AGENT_DIR 或 ~/.pi/agent>/auth.json 的同名条目、models.json 的同名 provider 块；
  * - 只拷字面的 API key：OAuth 不拷（沙箱里一刷新就轮换 refresh token，owner 那份登录随之失效）；`!命令` 不拷（会在沙箱里跑命令取 key）；
- * - 写沙箱 <root>/pi-agent/{auth,models}.json，目录 0700、文件 0600、tmp+rename；输出只有 provider 名和路径，不含 key。
+ * - 写沙箱 <root>/pi-agent/{auth,models}.json：目录不许是链接、真实路径在根下、强制 0700；文件唯一名排他创建、强制 0600、原子 rename，
+ *   已有的目标是链接就拒（lib/sandbox-pi-fs.ts）；输出只有 provider 名和路径，不含 key。
  * 只能从沙箱外的 shell 跑：沙箱 agent 自己的 Bash 带着沙箱环境，不能替 owner 做这个决定。tests/pi-acp-sandbox.test.ts。
  */
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, lstatSync, readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { piAgentDir } from "../src/lib/pi-session.js";
 import { isSandbox, sandboxPiAgentDir } from "../src/lib/sandbox.js";
+import { ensurePrivateDir, piStateDirProblem, writePrivateFile } from "../src/lib/sandbox-pi-fs.js";
 
 type Json = Record<string, unknown>;
 
@@ -46,13 +48,16 @@ function readJson(path: string): Json {
   return v;
 }
 
-function writeSecret(path: string, data: Json): void {
-  writeFileSync(`${path}.tmp`, `${JSON.stringify(data, null, 2)}\n`, { mode: 0o600 });
-  renameSync(`${path}.tmp`, path);
+/** 沙箱里已有的目标文件：是链接就拒（读它会把根外文件的内容合并进来），不存在 = 空对象 */
+function readTarget(path: string): Json {
+  if (existsSync(path) && !lstatSync(path).isFile()) throw new Error(`${path} 不是普通文件（链接？），不读也不覆盖`);
+  return readJson(path);
 }
 
-/** 拷一家进 dst（与已拷进来的别家合并）；返回写了的文件 */
-export function copyPiCredential(provider: string, srcDir: string, dstDir: string): { written: string[] } | { error: string } {
+const writeSecret = (path: string, data: Json) => writePrivateFile(path, `${JSON.stringify(data, null, 2)}\n`);
+
+/** 拷一家进 dst（与已拷进来的别家合并）；返回写了的文件。root = 沙箱根，dst 必须是它下面的真实目录 */
+export function copyPiCredential(provider: string, srcDir: string, dstDir: string, root = dirname(dstDir)): { written: string[] } | { error: string } {
   let picked: ReturnType<typeof pickPiCredential>;
   try {
     picked = pickPiCredential(provider, readJson(join(srcDir, "auth.json")), readJson(join(srcDir, "models.json")));
@@ -60,18 +65,24 @@ export function copyPiCredential(provider: string, srcDir: string, dstDir: strin
     return { error: (e as Error).message };
   }
   if ("error" in picked) return picked;
-  mkdirSync(dstDir, { recursive: true, mode: 0o700 });
+  const dirProblem = piStateDirProblem(root, dstDir);
+  if (dirProblem) return { error: dirProblem };
   const written: string[] = [];
-  if (picked.auth) {
-    const p = join(dstDir, "auth.json");
-    writeSecret(p, { ...readJson(p), [provider]: picked.auth });
-    written.push(p);
-  }
-  if (picked.model) {
-    const p = join(dstDir, "models.json");
-    const cur = readJson(p);
-    writeSecret(p, { ...cur, providers: { ...(isObj(cur.providers) ? cur.providers : {}), [provider]: picked.model } });
-    written.push(p);
+  try {
+    ensurePrivateDir(dstDir);
+    if (picked.auth) {
+      const p = join(dstDir, "auth.json");
+      writeSecret(p, { ...readTarget(p), [provider]: picked.auth });
+      written.push(p);
+    }
+    if (picked.model) {
+      const p = join(dstDir, "models.json");
+      const cur = readTarget(p);
+      writeSecret(p, { ...cur, providers: { ...(isObj(cur.providers) ? cur.providers : {}), [provider]: picked.model } });
+      written.push(p);
+    }
+  } catch (e) {
+    return { error: (e as Error).message }; // 报错只带路径：readJson / 本模块的错都不引用文件内容
   }
   return { written };
 }
@@ -82,7 +93,7 @@ export function cmdPiAuth(args: string[], root: string, marker: string | null, f
   if (marker) fail(marker);
   const provider = args[0] ?? "";
   if (!/^[\w.-]+$/.test(provider) || args.length !== 1) fail("用法：bun run sandbox pi-auth <provider> [--port N | --root DIR]（一次一家）");
-  const r = copyPiCredential(provider, piAgentDir(), sandboxPiAgentDir(root));
+  const r = copyPiCredential(provider, piAgentDir(), sandboxPiAgentDir(root), root);
   if ("error" in r) fail(r.error);
   console.log(`🔑 已把「${provider}」的凭据拷进沙箱（不打印 key）：${r.written.join("、")}；sandbox clean 会连它一起删`);
 }
