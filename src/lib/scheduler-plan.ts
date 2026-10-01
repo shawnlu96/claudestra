@@ -7,7 +7,8 @@ import { cardWorkerSlots } from "./scheduler-worker-slot.js";
 import { POOL_RECIPIENT, type PoolFacts } from "./scheduler-pool-plan.js";
 import { pinnedWork, reviewPlacement } from "./scheduler-placement-plan.js";
 import { BOUNCE_LIMIT_REASON, bounceLimitHit, fixBounce, reviewAfterBounce, type MergeBounce } from "./scheduler-merge-conflict.js";
-import { uiMergeBlock, uiPassStep, uiRejectFix, type PmUiGate } from "./scheduler-ui-gate.js";
+import type { PmUiGate } from "./ledger-ui-approve-verdict.js";
+import { uiMergeBlock, uiPassStep, uiRejectFix } from "./scheduler-ui-gate.js";
 
 export interface WorkerRef {
   agent: string;

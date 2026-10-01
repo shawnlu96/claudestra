@@ -15,7 +15,7 @@ import { autoSnapshot } from "./scheduler-auto-snapshot.js";
 import { SchedulerStopped } from "./scheduler-maintenance.js";
 import { CLAIM_LEASE_MS, driveDispatch, type DriveOutcome, type SchedulerLedgerOps } from "./scheduler-dispatch.js";
 import { planScheduler, type PlannerDecision } from "./scheduler-plan.js";
-import { pmUiNotice } from "./scheduler-ui-gate.js";
+import { pmNoticeResume, pmUiNotice } from "./scheduler-ui-gate.js";
 import { getSchedulerSession, type SessionRole } from "./scheduler-sessions.js";
 import { planRejectedReason } from "./ledger-scheduler-write.js";
 import type { SnapshotOpts } from "./scheduler-snapshot.js";
@@ -219,7 +219,7 @@ class Card {
   }
 
   async internal(intent: SchedulerIntent, plan: Planned | null): Promise<CardOutcome> {
-    if (intent.status !== "pending") return this.out("held", `${intent.action} 意图停在 ${intent.status}`);
+    if (intent.status !== "pending") return this.out(...await pmNoticeResume(intent, (f, t, r) => this.settle(intent.id, f, t, r)));
     const cmd = intent.action === "stage" ? ["scheduler-stage", intent.id, "--to", plan?.targetStage ?? ""] : ["scheduler-ui-ask", intent.id];
     if (intent.action === "stage" && !plan?.targetStage) return this.cancelStale(intent, "计划里没有目标阶段");
     const shots = intent.action === "ask" ? screenshotRefs(this.task) : null;

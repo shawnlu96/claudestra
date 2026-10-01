@@ -15,7 +15,8 @@ import type { RegistryAgent } from "./registry.js";
 import type { RemotePolicy } from "./scheduler-config.js";
 import type { PlannerSnapshot, WorkerRef } from "./scheduler-plan.js";
 import { taskWorkerRefs } from "./scheduler-sessions.js";
-import { ownerVisualOf, projectPmUiGate, projectUiGate } from "./scheduler-ui-gate.js";
+import { projectPmUiGate } from "./ledger-ui-approve-verdict.js";
+import { ownerVisualOf, projectUiGate } from "./scheduler-ui-gate.js";
 
 export interface SnapshotOpts {
   registry: readonly RegistryAgent[];

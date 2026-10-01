@@ -11,8 +11,9 @@ import { getWorkflow } from "./ledger-scheduler.js";
 import { actorMayConfigure } from "./ledger-scheduler-settle.js";
 import type { LedgerEvent, LedgerTask } from "./ledger-stages.js";
 import { LedgerError, listEvents } from "./ledger-store.js";
-import { appendEvent } from "./ledger-write.js";
-import { DIGEST_RE, ownerVisualOf, UI_APPROVED, UI_OWNER_VISUAL, UI_REJECTED } from "./scheduler-ui-gate.js";
+import { appendEvent, setTask } from "./ledger-write.js";
+import { UI_APPROVED, UI_REJECTED } from "./ledger-ui-approve-verdict.js";
+import { DIGEST_RE, ownerVisualOf } from "./scheduler-ui-gate.js";
 
 const NOTE_MAX = 2000;
 
@@ -57,10 +58,13 @@ export function recordUiVerdict(db: Database, ctx: WriteCtx, input: UiVerdictInp
   return appendEvent(db, ctx, { project: task.project, target: task.id, kind: "decision", text, data });
 }
 
-/** Turn the owner gate on (global look) or off for one UI card; the planner reads it from the ledger on the next pass. */
+/**
+ * Turn the owner gate on (global look) or off for one UI card. It writes `extra.ownerVisual`, the flag's only home, so a later
+ * `{...extra}` rewrite keeps it; the planner reads it on the next pass.
+ */
 export function setOwnerVisual(db: Database, ctx: WriteCtx, input: { taskId: string; on: boolean }): { event: LedgerEvent; duplicate: boolean } {
   const task = uiCard(db, ctx, input.taskId, "改 owner 看截图的开关");
   if (task.stage === "done" || task.stage === "cancelled") throw new LedgerError("conflict", `${task.id} 已经结束（${task.stage}）`);
-  return appendEvent(db, ctx, { project: task.project, target: task.id, kind: "decision",
-    text: input.on ? "这张卡改整体观感：合并前 owner 看截图" : "这张卡的截图由 PM 验收", data: { op: UI_OWNER_VISUAL, on: input.on } });
+  const r = setTask(db, ctx, { id: task.id, rev: task.rev, patch: { extra: { ...task.extra, ownerVisual: input.on } } });
+  return { event: r.event, duplicate: r.duplicate };
 }

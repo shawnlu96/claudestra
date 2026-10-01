@@ -7,10 +7,12 @@ import { describe, expect, test } from "bun:test";
 import { bindHash } from "../src/lib/ask-bind.js";
 import { answerAsk, openAsk } from "../src/lib/ledger-asks.js";
 import { getWorkflow } from "../src/lib/ledger-scheduler.js";
+import { currentOrders, orderWireFor } from "../src/lib/order-take.js";
 import { appendEvent, setTask } from "../src/lib/ledger-write.js";
 import { autoSnapshot } from "../src/lib/scheduler-auto-snapshot.js";
 import { planScheduler } from "../src/lib/scheduler-plan.js";
-import { uiMergeRefusal, uiRejectFix, UI_APPROVED } from "../src/lib/scheduler-ui-gate.js";
+import { UI_APPROVED } from "../src/lib/ledger-ui-approve-verdict.js";
+import { uiMergeRefusal, uiRejectFix } from "../src/lib/scheduler-ui-gate.js";
 import { autoFixture, DIGEST, H2, toBuild } from "./scheduler-auto-helpers.js";
 
 type F = ReturnType<typeof autoFixture>;
@@ -124,6 +126,47 @@ describe("default ui card: PM accepts the screenshots", () => {
       expect(await f.tick()).toMatchObject({ step: "sent" });
       expect(f.intents().at(-1)).toMatchObject({ node: "fix", action: "dispatch", recipient: "agent-task-one" });
       expect(getWorkflow(f.db, "T1")?.mode).toBe("auto");
+      // The wake path only says "take_order"; the order the executor actually pulls must carry PM's words.
+      const [order] = currentOrders(f.db, { agent: "agent-task-one", sessionId: "s-one", family: "claude-code", channelId: "ch-one" } as never);
+      const pulled = orderWireFor(f.db, order!);
+      if (!pulled.ok) throw new Error(pulled.error);
+      expect(pulled.order).toMatchObject({ step: "fix", findings: [{ severity: "P1", family: "ui_screenshot", probe: "深色模式下按钮看不清" }] });
+      expect(pulled.order.inputs).toContain(`上一轮审查报告：${fix!.reportPath}`);
+      expect(fix!.reportPath).toMatch(/^台账事件 #\d+/);
+    } finally { f.close(); }
+  });
+
+  test("a notice whose done write was lost is finished on the next pass, without a second send, and the card moves on", async () => {
+    const f = await passed();
+    try {
+      const manager = f.tickDeps.manager;
+      let lose = 1;
+      f.tickDeps.manager = (async (...args: string[]) => args[1] === "scheduler-settle" && args[args.indexOf("--to") + 1] === "done" && lose-- > 0
+        ? { ok: false, code: "conflict", error: "injected lost write" } : manager(...args)) as typeof manager;
+      const sent = f.notices.length;
+      expect(await f.tick()).toMatchObject({ step: "ask", detail: expect.stringContaining("下轮补结") });
+      expect(f.intents().at(-1)).toMatchObject({ action: "ask", status: "submitted" });
+      expect(await approve(f)).toMatchObject({ ok: true });
+      expect(await f.tick()).toMatchObject({ step: "ask", detail: "pm_notice 补结" });
+      expect(f.intents().at(-1)).toMatchObject({ action: "ask", status: "done" });
+      expect(f.notices).toHaveLength(sent + 1);
+      expect(await f.tick()).toMatchObject({ step: "stage", detail: "review→merge" });
+    } finally { f.close(); }
+  });
+
+  test("new screenshots after the same pass get a new notice bound to the new digest", async () => {
+    const f = await passed();
+    try {
+      await f.tick();
+      const sent = f.notices.length, D2 = "e".repeat(64);
+      expect(await f.cli("pm", "task-set", "T1", "--rev", String(f.task().rev), "--extra", JSON.stringify({ ...f.task().extra, screenshotsDigest: D2 })))
+        .toMatchObject({ ok: true });
+      expect(await f.tick()).toMatchObject({ step: "ask", detail: expect.stringContaining("pm_notice 已发") });
+      expect(f.notices).toHaveLength(sent + 1);
+      expect(f.notices.at(-1)).toContain(`--digest ${D2}`);
+      expect(await f.tick()).toMatchObject({ step: "waiting", detail: expect.stringContaining("等待 PM 看前后截图") });
+      expect(await approve(f, "pm", H2, D2)).toMatchObject({ ok: true });
+      expect(await f.tick()).toMatchObject({ step: "stage", detail: "review→merge" });
     } finally { f.close(); }
   });
 
@@ -165,6 +208,26 @@ describe("ownerVisual card: the owner looks, PM cannot release it", () => {
       expect(f.task().extra.ownerVisual).toBeUndefined();
       expect(await f.tick()).toMatchObject({ step: "ask", detail: expect.stringMatching(/^ask /) });
       expect(asks(f)).toBe(1);
+    } finally { f.close(); }
+  });
+
+  test("ui-owner-visual on lives in extra: a later extra rewrite for new screenshots keeps the owner gate", async () => {
+    const f = await passed({ before: (g) => g.cli("pm", "ui-owner-visual", "T1", "on") });
+    try {
+      expect(f.task().extra.ownerVisual).toBe(true);
+      const D2 = "e".repeat(64);
+      const { ownerVisual: _drop, ...rest } = f.task().extra;
+      // Faithful copy of extra, and a manager rewrite that does not name the flag: neither turns the gate off.
+      for (const extra of [{ ...f.task().extra, screenshotsDigest: D2 }, { ...rest, screenshotsDigest: D2 }]) {
+        expect(await f.cli("pm", "task-set", "T1", "--rev", String(f.task().rev), "--extra", JSON.stringify(extra))).toMatchObject({ ok: true });
+        expect(await approve(f, "pm", H2, D2)).toMatchObject({ ok: false, code: "conflict" });
+        expect(uiMergeRefusal(f.db, f.task(), 10_000)).toContain("owner");
+      }
+      expect(await f.tick()).toMatchObject({ step: "ask", detail: expect.stringMatching(/^ask /) });
+      expect(asks(f)).toBe(1);
+      expect(await f.cli("pm", "task-set", "T1", "--rev", String(f.task().rev), "--extra", JSON.stringify({ ...rest, screenshotsDigest: D2, ownerVisual: false })))
+        .toMatchObject({ ok: true });
+      expect(uiMergeRefusal(f.db, f.task(), 10_000)).toContain("PM 截图验收");
     } finally { f.close(); }
   });
 
