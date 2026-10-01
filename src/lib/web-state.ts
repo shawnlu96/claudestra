@@ -20,15 +20,26 @@ export function openWebState(path: string = WEB_STATE_PATH): Database {
   if (hit) return hit;
   if (path !== ":memory:") mkdirSync(dirname(path), { recursive: true });
   const db = new Database(path);
-  try {
-    if (path !== ":memory:") chmodSync(path, 0o600); // 推送凭据、入站账：只给本 OS 用户读写（-wal / -shm 由 SQLite 按主库权限建）
-  } catch (e) {
-    console.error(`web 状态库没能收紧到 0600（推送 / 本地 API 照常）: ${(e as Error).message}`);
-  }
+  if (path !== ":memory:") tightenModes(path);
   db.exec("PRAGMA journal_mode = WAL");
   migrate(db);
   cache.set(path, db);
   return db;
+}
+
+/**
+ * 推送凭据、入站账只给本 OS 用户读写：主库连同已经在的 -wal / -shm / -journal 一起收紧到 0600（只收主库的话，老库留下的 0644 WAL
+ * 会接着装新写的数据）；之后新建的 sidecar 由 SQLite 按主库权限建（tests/web-state.test.ts）。不存在的跳过；
+ * 收紧失败（文件不归本用户等）只记日志、库照常开——收紧前本来就是这个权限，拒开会让推送 / 本地 API 整体失效
+ */
+function tightenModes(path: string): void {
+  for (const f of [path, `${path}-wal`, `${path}-shm`, `${path}-journal`]) {
+    try {
+      chmodSync(f, 0o600);
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== "ENOENT") console.error(`web 状态库 ${f} 没能收紧到 0600（推送 / 本地 API 照常）: ${(e as Error).message}`);
+    }
+  }
 }
 
 export function closeWebState(path: string = WEB_STATE_PATH): void {

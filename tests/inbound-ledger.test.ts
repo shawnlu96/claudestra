@@ -9,8 +9,9 @@ import { mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { noteAcpChannel } from "../src/bridge/acp-state.ts";
-import { inboundFor, noteForeignInbound } from "../src/bridge/inbound-event.js";
+import { inboundFor, inboundLedgerGate } from "../src/bridge/inbound-event.js";
 import { setWebStatePathForTest } from "../src/bridge/local-api/db.js";
+import type { Envelope } from "../src/bridge/router.js";
 import { ensureInboundTable, forgetInbound, inboundLookup, inboundSha, noteInbound, pruneInbound } from "../src/lib/inbound-ledger.js";
 import { closeWebState, openWebState } from "../src/lib/web-state.js";
 
@@ -82,28 +83,41 @@ describe("noteInbound / inboundLookup", () => {
   });
 });
 
-describe("bridge 接线（noteForeignInbound / inboundFor）", () => {
-  test("CC 不记；tmux Codex、ACP 宿主记；tmux 版 Pi 的原样投递清掉该 agent 已有的账", () => {
+/** 押后队列替身 + 投给某频道的信封（gate 只看 env.to.channelId） */
+function heldSpy() {
+  const envs: Envelope[] = [];
+  return { envs, holdEnv: (e: Envelope) => envs.push(e) };
+}
+const envTo = (channelId: string) => ({ to: { kind: "local", channelId } }) as unknown as Envelope;
+const meta = (mid: string) => ({ ...META, message_id: mid });
+
+describe("bridge 接线（inboundLedgerGate / inboundFor）", () => {
+  test("CC 不记；tmux Codex、ACP 宿主记；tmux 版 Pi 先清掉该 agent 已有的账再放行", async () => {
     setWebStatePathForTest(join(dir, "wiring.sqlite"));
-    const meta = (mid: string) => ({ ...META, message_id: mid });
-    noteForeignInbound(undefined, "c-cc", "cc", "x", meta("cc_1"));
-    noteForeignInbound("codex", "c-codex", "codex", "x", meta("cx_1"));
+    const held = heldSpy();
+    expect(await inboundLedgerGate(envTo("c-cc"), undefined, "cc", "x", meta("cc_1"), held)).toBeNull();
+    expect(await inboundLedgerGate(envTo("c-codex"), "codex", "codex", "x", meta("cx_1"), held)).toBeNull();
     noteAcpChannel("c-pi", "acp");
-    noteForeignInbound("pi", "c-pi", "pi", "x", meta("pi_1"));
+    expect(await inboundLedgerGate(envTo("c-pi"), "pi", "pi", "x", meta("pi_1"), held)).toBeNull();
     expect(inboundFor("cc")("cc_1")).toBeNull();
     expect(inboundFor("codex")("cx_1")?.sha).toBe(inboundSha("x"));
     expect(inboundFor("pi")("pi_1")?.sha).toBe(inboundSha("x"));
     noteAcpChannel("c-pi", undefined); // 回退到 tmux 版 Pi
-    noteForeignInbound("pi", "c-pi", "pi", "<channel message_id=\"pi_1\">…", meta("pi_2"));
+    expect(await inboundLedgerGate(envTo("c-pi"), "pi", "pi", "<channel message_id=\"pi_1\">…", meta("pi_2"), held)).toBeNull();
     expect(inboundFor("pi")("pi_1")).toBeNull();
     expect(inboundFor("pi")("pi_2")).toBeNull();
     expect(inboundFor("codex")("cx_1")).not.toBeNull();
+    expect(held.envs).toEqual([]);
   });
-  test("web 状态库打不开（文件是垃圾）：记账不抛（投递照常），查账给永远查不到的", () => {
+  test("web 状态库打不开（文件是垃圾）：包装投递照常发、不抛；tmux 版 Pi 清不掉账就押后；查账给永远查不到的", async () => {
     const junk = join(dir, "junk.sqlite");
     writeFileSync(junk, "this is not a database ".repeat(200));
     setWebStatePathForTest(junk);
-    expect(() => noteForeignInbound("codex", "c-codex", "codex", "x", { ...META, message_id: "j1" })).not.toThrow();
+    const held = heldSpy();
+    expect(await inboundLedgerGate(envTo("c-codex"), "codex", "codex", "x", meta("j1"), held)).toBeNull();
+    const env = envTo("c-junk-pi");
+    expect((await inboundLedgerGate(env, "pi", "pi", "x", meta("j2"), held))?.outcome).toEqual({ kind: "sent", note: "queued" });
+    expect(held.envs).toEqual([env]);
     expect(inboundFor("codex")("j1")).toBeNull();
   });
 });

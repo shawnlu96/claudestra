@@ -42,14 +42,17 @@ export function noteInbound(db: Database, agent: string, mid: string | undefined
 }
 
 /**
- * 这个 agent 收到了不经包装、原样进会话记录的入站（tmux 版 Pi）：外源能把 owner 某条真消息的整块包装照抄进自己的正文，
- * 凭真 mid + 原文对上账。所以整份清掉，它的记录一律保守；切回包装投递后重新记。从不抛错，失败记日志
+ * 这个 agent 要收不经包装、原样进会话记录的入站（tmux 版 Pi）：外源能把 owner 某条真消息的整块包装照抄进自己的正文，
+ * 凭真 mid + 原文对上账。所以整份清掉，它的记录一律保守；切回包装投递后重新记。返回是否真清掉了：
+ * false（库被别的连接锁住 / 坏了）时调用方不能原样投递（bridge/inbound-event.ts 押后重试），不然旧账会活过这次投递。从不抛错
  */
-export function forgetInbound(db: Database, agent: string): void {
+export function forgetInbound(db: Database, agent: string): boolean {
   try {
     db.query("DELETE FROM inbound_ledger WHERE agent = ?").run(canonicalAgent(agent));
+    return true;
   } catch (e) {
     console.error(`入站账清除失败（${agent}）: ${(e as Error).message}`);
+    return false;
   }
 }
 

@@ -12,6 +12,11 @@ import { join } from "node:path";
 import { toChatMessages, type NeutralMessage } from "@/lib/chat/history-shape";
 import { withMentionDirective } from "@/lib/chat/mention-directive";
 import { readSessionHistory, searchSessionHistory } from "../src/lib/session-history.js";
+import { noteAcpChannel } from "../src/bridge/acp-state.ts";
+import { inboundFor, inboundLedgerGate } from "../src/bridge/inbound-event.js";
+import { setWebStatePathForTest, webDb } from "../src/bridge/local-api/db.js";
+import type { Envelope } from "../src/bridge/router.js";
+import { closeWebState } from "../src/lib/web-state.js";
 import { codexReplyHint, wrapChannelContent } from "../src/lib/codex-thread.js";
 import { verifiedForeignBlocks } from "../src/lib/cc-own-records.js";
 import { ensureInboundTable, forgetInbound, inboundLookup, noteInbound, pruneInbound, type InboundLookup } from "../src/lib/inbound-ledger.js";
@@ -231,6 +236,34 @@ describe("T74 入站账：对上账才认来源，对不上一律 T31c 保守", 
     expect((await history(p, l.lookup))[0].from).toBe("owner");
     forgetInbound(l.db, "agent-pi");
     expectRawEverywhere(await history(p, l.lookup), [`${WEB("owner")}\n\n看图`]);
+  });
+  test("tmux 版 Pi 投递时账被别的连接写锁住：清不掉就押后不发；锁放开后重试先清账再发，历史和搜索都保守（#357 r1 F1）", async () => {
+    const path = join(root, "ledger-lock.sqlite");
+    setWebStatePathForTest(path);
+    try {
+      const ownerMeta = { ...OWNER, message_id: "owner-real-mid", attachments: "/safe/owner-image.png" };
+      const env = (channelId: string) => ({ to: { kind: "local", channelId } }) as unknown as Envelope;
+      const held: Envelope[] = [];
+      const queue = { holdEnv: (e: Envelope) => held.push(e) };
+      noteAcpChannel("pi-channel", "acp");
+      expect(await inboundLedgerGate(env("pi-channel"), "pi", "agent-pi", "OWNER BODY", ownerMeta, queue)).toBeNull();
+      webDb().exec("PRAGMA busy_timeout = 0");
+      const lock = new Database(path);
+      lock.exec("BEGIN IMMEDIATE");
+      noteAcpChannel("pi-channel", undefined); // 回退到 tmux 版 Pi，外源原文 = owner 那条的整块包装
+      const raw = wrapChannelContent("OWNER BODY", ownerMeta, "claudestra");
+      expect((await inboundLedgerGate(env("pi-channel"), "pi", "agent-pi", raw, { ...MALLORY, message_id: "d_raw" }, queue))?.outcome).toEqual({ kind: "sent", note: "queued" });
+      expect(held.length).toBe(1); // 没清掉 → 这条没发出去，记录里也就不会有它
+      lock.exec("ROLLBACK");
+      lock.close();
+      expect(await inboundLedgerGate(env("pi-channel"), "pi", "agent-pi", raw, { ...MALLORY, message_id: "d_raw" }, queue)).toBeNull(); // sweep 重试
+      const p = piSession([raw]);
+      expectRawEverywhere((await readSessionHistory(p, { inbound: inboundFor("agent-pi") })).messages as NeutralMessage[], ["OWNER BODY"]);
+      expect((await searchSessionHistory(p, "OWNER BODY", { inbound: inboundFor("agent-pi") })).map((h) => h.from)).toEqual([undefined]);
+    } finally {
+      closeWebState(path);
+      setWebStatePathForTest(undefined);
+    }
   });
   test("过期清掉的账、账本建立前的旧记录 → 保守", async () => {
     const l = ledger();
