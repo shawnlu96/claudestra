@@ -76,7 +76,7 @@ function taskSteps(io: StepIO, p: StartPlan): Step[] {
     {
       name: "task-new",
       run: async () => failed(await ledger(io, p, "task-new", p.taskId, {
-        title: p.title, kind: "code", item: p.item ?? undefined, branch: p.branch, spec: p.specRel, pm: p.pm, project: p.project,
+        title: p.title, kind: "code", item: p.item ?? undefined, branch: p.branch, spec: p.specPath, pm: p.pm, project: p.project,
         extra: JSON.stringify(p.peer ? { fileGlobs: p.fileGlobs, placement: `peer:${p.peer.name}`, repo: p.peer.repo } : { fileGlobs: p.fileGlobs }),
       }, "task-new")),
       landed: () => ours(io, p, "task-new"),
