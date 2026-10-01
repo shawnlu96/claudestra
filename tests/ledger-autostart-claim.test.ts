@@ -6,7 +6,7 @@ import type { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { isAbsolute, join, resolve } from "node:path";
 import { bindNode } from "../src/lib/ledger-dag-write.js";
 import { getFeature } from "../src/lib/ledger-feature.js";
 import { createFeature, initDag } from "../src/lib/ledger-feature-write.js";
@@ -15,6 +15,7 @@ import { setWorkflow } from "../src/lib/ledger-scheduler-write.js";
 import { closeLedger, getTask, listEvents, openLedger } from "../src/lib/ledger-store.js";
 import { createTask, setFrozen, setMeta } from "../src/lib/ledger-write.js";
 import { TEMPLATE_VERSION } from "../src/lib/scheduler-autostart.js";
+import { autostartSpecPath } from "../src/lib/scheduler-autostart-deps.js";
 import { runLedger } from "../src/manager/ledger.js";
 
 const P = "claude-orchestrator", PM = "agent-pm", FID = "ab12-i28", ARM = "0123456789abcdef", ARM2 = "fedcba9876543210";
@@ -103,6 +104,19 @@ describe("step：授权只到本 claim 的那张卡", () => {
     expect(getWorkflow(db, "i28-a")).toMatchObject({ mode: "auto", template: "ui", templateVersion: TEMPLATE_VERSION.ui, authorFamily: "claude" });
     expect(await bind(c.seq)).toMatchObject({ ok: true });
     expect(await settle(c.seq, "done")).toMatchObject({ ok: true });
+  });
+
+  test("卡上 spec 记绝对路径，就是 specGate 读的那个文件；拼法只有 deps 一处（i28-N9b）", async () => {
+    const c = (await claim()).claim;
+    expect(await taskNew(c.seq)).toMatchObject({ ok: true });
+    const spec = getTask(db, "i28-a")!.spec!;
+    expect(isAbsolute(spec)).toBe(true);
+    expect(spec).toBe(autostartSpecPath("i28-a"));
+    const root = resolve(import.meta.dir, "../src/lib");
+    const deps = readFileSync(join(root, "scheduler-autostart-deps.ts"), "utf8");
+    expect(deps).toContain("readSpec(autostartSpecPath(taskId))");
+    expect(deps.match(/"docs", "tasks"/g)).toHaveLength(1);
+    expect(readFileSync(join(root, "ledger-autostart-step.ts"), "utf8")).not.toMatch(/docs[/"', ]+tasks/);
   });
 
   test("拒：卡号不是 claim 的、换执行者、别的子命令、claim 已结、claim 不存在", async () => {

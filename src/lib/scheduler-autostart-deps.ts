@@ -41,7 +41,8 @@ const serviceFacts = (config: SchedulerConfig): ServiceFacts => ({
 /** 跨轮的去重表：额度窗口、被核心拒绝的交付（重启后各最多再发一次） */
 const MEMO = new Set<string>();
 
-const specPath = (ledgerDir: string, taskId: string) => join(ledgerDir, "docs", "tasks", `${taskId}.md`);
+/** 自动开卡规格卡的唯一拼法：specGate 读它，建卡时 task.spec 也记它（绝对路径，挂给远端审查才找得到原文） */
+export const autostartSpecPath = (taskId: string) => join(statePath("ledger"), "docs", "tasks", `${taskId}.md`);
 
 function readSpec(path: string): SpecFile | null {
   try {
@@ -93,7 +94,7 @@ export function autostartHooks(o: WireOpts): AutostartHooks {
     resume: (config, pace) => autoResumeTick({ db: o.db, svc: serviceFacts(config), ledger: o.ledger, notifyPm, memo: MEMO }, pace),
     start: (config, pace) => autostartTick({
       db: o.db, svc: serviceFacts(config), ledger: o.ledger, ...startIo(o, config), notifyPm, memo: MEMO, now: Date.now,
-      readSpec: (taskId) => readSpec(specPath(statePath("ledger"), taskId)),
+      readSpec: (taskId) => readSpec(autostartSpecPath(taskId)),
       quota: async () => (await readInventoryQuota()).claude, attempt: () => randomBytes(4).toString("hex"),
     }, pace),
   };

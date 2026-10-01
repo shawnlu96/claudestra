@@ -12,6 +12,7 @@ import { liveClaim } from "./ledger-autostart.js";
 import { mustTask, type WriteCtx } from "./ledger-checks.js";
 import { bindNode } from "./ledger-dag-write.js";
 import { currentViews } from "./scheduler-autostart.js";
+import { autostartSpecPath } from "./scheduler-autostart-deps.js";
 import { getFeature } from "./ledger-feature.js";
 import { setWorkflow } from "./ledger-scheduler-write.js";
 import { LedgerError } from "./ledger-store.js";
@@ -54,7 +55,7 @@ function taskNew(db: Database, ctx: WriteCtx, c: AutostartClaim, input: StepInpu
   const globs = (f ? currentViews(db, f) : []).find((n) => n.key === c.key)?.fileGlobs;
   if (!globs?.length) return deny(`节点 ${c.key} 不在当前版本或没有文件范围`);
   const r = createTask(db, ctx, {
-    id: c.taskId, project: c.project, title: c.title, kind: "code", itemId: c.item, branch: c.branch, spec: `docs/tasks/${c.taskId}.md`, pm: c.pm,
+    id: c.taskId, project: c.project, title: c.title, kind: "code", itemId: c.item, branch: c.branch, spec: autostartSpecPath(c.taskId), pm: c.pm,
     agent: c.agent, extra: { fileGlobs: globs },
   });
   return { ok: true, task: r.row, duplicate: r.duplicate };
