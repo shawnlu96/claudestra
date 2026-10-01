@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { listEvents } from "../src/lib/ledger-store.js";
-import { PLAN_REJECT_MS } from "../src/lib/scheduler-auto-tick.js";
+import { getWorkflow } from "../src/lib/ledger-scheduler.js";
+import { PLAN_REJECT_MS, schedulerAutoTick } from "../src/lib/scheduler-auto-tick.js";
 import { autoFixture, toBuild } from "./scheduler-auto-helpers.js";
 
 const FROZEN = "项目合并队列已冻结";
@@ -116,6 +117,46 @@ describe("i28-M10 refused scheduler plans alarm PM once per reason", () => {
       } finally { console.error = err; f.close(); }
     });
   }
+
+  test("a second reason while the channel is down does not drop the first reason's notice", async () => {
+    const { f, refuse, alarms } = await refusedCard();
+    let down = true;
+    const real = f.tickDeps.notifyPm;
+    f.tickDeps.notifyPm = async (t, text) => { if (down) throw new Error("bridge 不在"); return real(t, text); };
+    const err = console.error;
+    console.error = () => {};
+    try {
+      refuse.with = { code: "conflict", error: "reason A" };
+      for (let i = 0; i < 3; i++) await f.tick();
+      refuse.with = { code: "conflict", error: "reason B" };
+      for (let i = 0; i < 3; i++) await f.tick();
+      expect(alarms().map((e) => e.data.reason)).toEqual(["reason A", "reason B"]);
+      down = false;
+      for (let i = 0; i < 4; i++) await f.tick();
+      expect(f.notices.map((n) => n.match(/reason [AB]/)?.[0]).sort()).toEqual(["reason A", "reason B"]);
+    } finally { console.error = err; f.close(); }
+  });
+
+  test("a notice still owed when PM takes the card to manual is sent on the next pass", async () => {
+    const { f } = await refusedCard();
+    let down = true;
+    const real = f.tickDeps.notifyPm;
+    f.tickDeps.notifyPm = async (t, text) => { if (down) throw new Error("bridge 不在"); return real(t, text); };
+    const err = console.error;
+    console.error = () => {};
+    try {
+      for (let i = 0; i < 3; i++) await f.tick();
+      const wf = getWorkflow(f.db, "T1")!;
+      expect((await f.cli("pm", "workflow-set", "T1", "--rev", String(f.task().rev), "--workflow-rev", String(wf.rev), "--template", "code",
+        "--version", String(wf.templateVersion), "--author-family", "claude", "--fallback", "人工", "--mode", "manual", "--reason", "接管")).ok).toBe(true);
+      down = false;
+      expect(await schedulerAutoTick(f.db, { p: { maxActiveWorkers: 2 } }, f.tickDeps)).toEqual({ cards: [], failed: [] });
+      expect(f.notices).toHaveLength(1);
+      expect(f.notices[0]).toContain(`[conflict] ${FROZEN}`);
+      await schedulerAutoTick(f.db, { p: { maxActiveWorkers: 2 } }, f.tickDeps);
+      expect(f.notices).toHaveLength(1);
+    } finally { console.error = err; f.close(); }
+  });
 
   test("long first lines that differ only past the stored length are still two reasons", async () => {
     const { f, refuse, alarms } = await refusedCard();

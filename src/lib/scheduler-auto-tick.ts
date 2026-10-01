@@ -63,14 +63,22 @@ const alarmFailedAt = new WeakMap<Database, Map<string, number>>();
 /**
  * A plan the ledger keeps refusing for one reason (code + whole first line) is reported once: after PLAN_REJECT_TICKS refusals or
  * PLAN_REJECT_MS. Counts live in memory per ledger; a restart re-reports a standing reason at most once (the event dedups).
- * An undelivered notice is kept apart from the count and retried at the start of each tick of the card, whatever it does next.
- * tests/scheduler-freeze-alarm.test.ts.
+ * An undelivered notice is kept per card + reason, apart from the count, and retried at the start of every pass, whatever its card
+ * does now (planned, waiting, taken to manual). tests/scheduler-freeze-alarm.test.ts.
  */
 const PLAN_REJECT_TICKS = 3;
 export const PLAN_REJECT_MS = 5 * 60_000;
 interface Refusal { code: string; text: string; ticks: number; since: number; told: boolean }
-const refusals = new WeakMap<Database, Map<string, Refusal>>(), unsent = new WeakMap<Database, Map<string, string>>();
+const refusals = new WeakMap<Database, Map<string, Refusal>>(), unsent = new WeakMap<Database, Map<string, { task: LedgerTask; text: string }>>();
 const perDb = <V>(w: WeakMap<Database, Map<string, V>>, db: Database): Map<string, V> => w.get(db) ?? w.set(db, new Map()).get(db)!;
+/** Send one undelivered refused-plan notice; a failure is logged and the notice stays for the next pass. */
+async function sendNotice(db: Database, deps: AutoTickDeps, key: string): Promise<boolean> {
+  const n = unsent.get(db)?.get(key);
+  if (!n) return true;
+  try { await deps.notifyPm(getTask(db, n.task.id) ?? n.task, n.text); } catch (e) { noticeLost("计划拒收报警没发出去（台账已记，下轮重发）")(e); return false; }
+  unsent.get(db)?.delete(key);
+  return true;
+}
 const FREEZE_ADVICE = "查 scheduler_merges 未结运行 → scheduler-merge-resolve → unfreeze";
 const roleOfIntent = (i: Pick<SchedulerIntent, "action" | "node">): SessionRole =>
   i.action === "review" || i.node === "adversarial_review" ? "reviewer" : "author";
@@ -125,18 +133,10 @@ class Card {
     if (rec.ok !== true) return this.out("held", `${detail}；拒收报警没记上（下个 tick 再记）：${String(rec.error)}`);
     const advice = text.includes("冻结") ? FREEZE_ADVICE : "按原因核对台账；处理不了就 workflow-set --mode manual 接管";
     r.told = true;
-    perDb(unsent, this.db).set(this.task.id, `[调度引擎] ${this.task.id} 的调度计划连续 ${r.ticks} 次被台账拒收` +
-      `（${Math.floor((now - r.since) / 60_000)} 分钟）：[${code}] ${text}。建议：${advice}`);
-    return this.out("replan", `${detail}；${(await this.flushNotice()) ? "已报警 PM" : "报警没发出去，下个 tick 重发"}`);
-  }
-
-  /** Send this card's undelivered refused-plan notice; a failure is logged and the notice stays for the next tick. */
-  async flushNotice(): Promise<boolean> {
-    const text = unsent.get(this.db)?.get(this.task.id);
-    if (!text) return true;
-    try { await this.deps.notifyPm(this.task, text); } catch (e) { noticeLost("计划拒收报警没发出去（台账已记，下个 tick 重发）")(e); return false; }
-    unsent.get(this.db)?.delete(this.task.id);
-    return true;
+    const key = `${this.task.id}\n${code}\n${text}`;
+    perDb(unsent, this.db).set(key, { task: this.task, text: `[调度引擎] ${this.task.id} 的调度计划连续 ${r.ticks} 次被台账拒收` +
+      `（${Math.floor((now - r.since) / 60_000)} 分钟）：[${code}] ${text}。建议：${advice}` });
+    return this.out("replan", `${detail}；${(await sendNotice(this.db, this.deps, key)) ? "已报警 PM" : "报警没发出去，下个 tick 重发"}`);
   }
 
   async ensure(intent: SchedulerIntent, plan: Planned | null): Promise<CardOutcome> {
@@ -339,7 +339,6 @@ class Card {
   }
 
   async step(): Promise<CardOutcome> {
-    await this.flushNotice();
     const open = this.db.query(`SELECT * FROM scheduler_intents WHERE taskId = ? AND status IN ('pending','submitted','unknown')
       ORDER BY eventSeq DESC LIMIT 1`).get(this.task.id) as SchedulerIntent | null;
     if (open?.status === "unknown") return this.out("held", `外部结果不明，等 PM 核对：${open.receipt ?? open.reason}`);
@@ -381,6 +380,7 @@ export async function schedulerAutoTick(db: Database, projects: Record<string, {
   const out: AutoTickResult = { cards: [], failed: [] };
   const poolOf = poolReader(deps);
   if (!db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'task_workflows'").get()) return out;
+  for (const key of [...(unsent.get(db)?.keys() ?? [])]) await sendNotice(db, deps, key);
   for (const { project, policy, taskId } of paceCards(db, projects, "auto", pace)) {
     if (pace?.yieldNow()) break;
     if (pace) pace.cursor.auto = `${project}/${taskId}`;
