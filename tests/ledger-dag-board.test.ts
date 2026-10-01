@@ -164,7 +164,7 @@ describe("版本与对比", () => {
     expect((await run(PM, "dag-bind", "i28", "L", "T5", "--rev", rev())).ok).toBe(true);
     expect(node(board(), "L")).toMatchObject({ taskId: "T5", phase: "idle", status: "spec" });
     expect(await rewrite([T1, T2, T3, T4, Lb, Z, W, M])).toMatchObject({ ok: true, applied: true });
-    const r = await rewrite([T1, { ...T3, deps: ["T1"] }, T4, Lb, Z, W, M], "--cancel", "T2=方向变了");
+    const r = await rewrite([T1, { ...T3, deps: ["T1"] }, T4, Lb, Z, W, M], "--cancel", "T2=方向变了", "--scope-change");
     expect(r).toMatchObject({ ok: true, applied: false, proposal: { version: 3 } });
     const b = board();
     expect(b.features[0]).toMatchObject({ currentVersion: 2, pending: { version: 3, baseVersion: 2, askId: r.askId, cancels: [{ key: "T2", reason: "方向变了" }] } });
@@ -194,7 +194,7 @@ describe("版本与对比", () => {
   });
 
   test("key 还在、换了卡的进行中节点：同时在 carried.changed 和 cancelled；只移走没开始的节点算 removed", async () => {
-    const r = await rewrite([T1, T2, { ...T4, taskId: "T6", oneLine: "任务 T6" }, L, Z, W], "--cancel", "T4=换人");
+    const r = await rewrite([T1, T2, { ...T4, taskId: "T6", oneLine: "任务 T6" }, L, Z, W], "--cancel", "T4=换人", "--scope-change");
     expect(r).toMatchObject({ ok: true, applied: false });
     const d = featureDiff(db, getFeature(db, F)!, undefined, "pending", NOW).diff;
     expect(d.carried.find((c) => c.key === "T4")).toEqual({ key: "T4", changed: true });

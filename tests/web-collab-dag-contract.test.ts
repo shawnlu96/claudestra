@@ -74,7 +74,7 @@ beforeAll(async () => {
   expect(await run("dag-rewrite", "i28", "--rev", rev(), "--nodes", J([T1, T2, T3, T4, Z, M]), "--reason-kind", "new_issue", "--reason", "加 M"))
     .toMatchObject({ ok: true, applied: true });
   expect(await run("dag-rewrite", "i28", "--rev", rev(), "--nodes", J([T1, { ...T3, deps: ["T1"] }, T4, Z, M]), "--reason-kind", "requirement_change",
-    "--reason", "方向变了", "--cancel", "T2=方向变了")).toMatchObject({ ok: true, applied: false });
+    "--reason", "方向变了", "--cancel", "T2=方向变了", "--scope-change")).toMatchObject({ ok: true, applied: false });
   // 手改库：v2 的 Z 绑到别的项目的卡（放在重写之后，否则它算已完成节点、重写必须原样带入）
   db.prepare("INSERT INTO dag_bindings (featureId, version, nodeKey, taskId, boundBy, boundAt) VALUES (?, 2, 'Z', 'X1', 'hand', 1)").run(F);
   expect((await run("feature-new", "later", "--title", "以后再说")).ok).toBe(true);

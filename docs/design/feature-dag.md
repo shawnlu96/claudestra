@@ -102,8 +102,8 @@
 节点三态看绑的卡：没卡或卡在 `spec` = 没开始；`verified` / `done` / `cancelled` = 已完成；其余（含 `blocked`、卡找不到）= 进行中。
 
 - 已完成的节点必须原样带入（key、一句话、依赖、粗估、绑的卡），否则拒；进行中的节点不在新版里（key 没了或换了卡）必须 `--cancel <key>=<原因>`，否则拒；没开始的节点随便换。一模一样的重写拒。
-- **直接生效**：只加节点、只换没开始的节点。批准人记 `auto`，写 `feature` 事件；事务提交后 CLI 把 `inform` 经 bridge 的系统通知（`lib/notify.ts`，投到 #control）发给 owner，结果带 `notified`；送不到写「未通知」，由 PM 用 reply 的 `ask.kind=inform` 补发。`--dedup` 重放不重发。
-- **要 owner 批**：取消进行中的节点、改进行中节点的内容、或 `--scope-change`。写 pending 提案，开一张 `authorize` ask（`fromAgent` = 发起的 PM 与它的频道，答复投回它），bind 到 `{feature, version, sha256(提案内容)}`，有效期 7 天。pending 期间当前版本不变，别的重写被拒；ask 过期（owner 已批但授权过期也算）、撤销或被驳回后，下一次重写先把它作废再继续（作废事件不占这一笔的 `--dedup`）。
+- **直接生效**：不带 `--scope-change` 的重写都直接生效，包括改进行中节点的内容、取消进行中的节点（仍要写原因）。批准人记 `auto`，写 `feature` 事件；**不通知 owner**，结果里的 `inform` 只给发起的 PM 看，`next` = 「已生效」，台账版本与事件照常可查。
+- **要 owner 批**：只有 `--scope-change`（PM 判断改了 feature 范围或大改机制）。写 pending 提案，开一张 `authorize` ask（`fromAgent` = 发起的 PM 与它的频道，答复投回它），bind 到 `{feature, version, sha256(提案内容)}`，有效期 7 天。pending 期间当前版本不变，别的重写被拒；ask 过期（owner 已批但授权过期也算）、撤销或被驳回后，下一次重写先把它作废再继续（作废事件不占这一笔的 `--dedup`）。
 - `dag-approve`：ask 须是 owner 本人答的「批准」、`ask-check` 同口径（`checkAsk`，哈希按库里的提案行重算）、当前版本仍是提案的基础版、四条规矩按**此刻**的卡状态重判——全过才写版本（批准人 = 作答的 principal）；驳回记 `rejected`，其余记 `void`，都不动当前版本。重放按命中的事件还原当时那份提案 / 版本，不取最新的。
 - 生效时换绑卡：移出新版的卡清 `featureId`、新卡挂上，各 rev + 1 附 `task` 事件。
 

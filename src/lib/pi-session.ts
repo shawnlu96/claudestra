@@ -228,6 +228,9 @@ export function wrapPiInboundAsChannel(text: string): string {
   return `<channel source="claudestra"${from ? ` user="${from}"` : ""}${mark}>\n${text}\n</channel>`;
 }
 
+/** 已是 <channel …>…</channel>（ACP 下的入站；排队几条拼成的一串也算，拼缝由 cc-own-records.plainUserText 去）：wrapPiInboundAsChannel 原样返回、不双包 */
+const CHANNEL_WRAPPED_RE = /^\s*<channel\s[^>]*>[\s\S]*<\/channel>\s*$/;
+
 /** 把 content（字符串或块数组）转成"可包 channel 的正文" */
 function inboundWrapped(text: string): string {
   return wrapPiInboundAsChannel(text);
@@ -367,7 +370,8 @@ export function piLineToClaudeShape(line: string): AnyRecord | null {
         : Array.isArray(blocks)
           ? blocks.filter((b: AnyRecord) => b?.type === "text").map((b: AnyRecord) => String(b.text ?? "")).join("\n")
           : "";
-    if (joined && hasInboundHeader(joined)) {
+    // ACP 宿主投给 Pi 的已是完整 <channel> 包装（同 Codex，lib/codex-session.ts）：不认头也要标 isMeta，否则标签原样进历史
+    if (joined && (hasInboundHeader(joined) || CHANNEL_WRAPPED_RE.test(joined))) {
       // ⚠ isMeta:true 是 Claude Code 侧 channel 记录的标记，session-history 只在
       // isMeta 为真时才走 unwrapChannelMessage（其余 isMeta 是 caveat 之类，过滤）。
       // 不带这个标记 ⇒ <channel> 标签原样留在正文里（实测过）。

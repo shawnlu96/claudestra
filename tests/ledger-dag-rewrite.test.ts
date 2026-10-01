@@ -1,4 +1,4 @@
-/** 子 DAG 重写 + 审批 + 绑卡（T89）：四条规矩、直接生效 / owner 审批两条路（含驳回、快照被换、卡状态变了）、dag-bind 的约束、diff */
+/** 子 DAG 重写 + 审批 + 绑卡（T89）：四条规矩、直接生效 / owner 审批（只剩 --scope-change）两条路（含驳回、快照被换、卡状态变了）、dag-bind 的约束、diff */
 import type { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { answerAsk, getAsk } from "../src/lib/ledger-asks.js";
@@ -41,7 +41,7 @@ const T2 = { key: "T2", taskId: "T2", oneLine: "任务 T2", deps: ["T1"] };
 const T3 = { key: "T3", taskId: "T3", oneLine: "任务 T3", deps: ["T2"] };
 const L = { key: "L", oneLine: "以后再做", deps: ["T1"] };
 
-beforeEach(async () => {
+async function setup() {
   now = 1_000;
   sent = [];
   notifier = async (text) => (sent.push(text), true);
@@ -55,7 +55,8 @@ beforeEach(async () => {
   stage("T2", "build");
   expect((await run(PM, "feature-new", "i28", "--title", "协作底座改版")).ok).toBe(true);
   expect((await run(PM, "dag-init", "i28", "--rev", "1", "--nodes", J(V1))).ok).toBe(true);
-});
+}
+beforeEach(setup);
 afterEach(() => closeLedger(":memory:"));
 
 describe("四条规矩", () => {
@@ -110,8 +111,8 @@ describe("四条规矩", () => {
 });
 
 describe("owner 审批", () => {
-  test("取消进行中的节点 → pending + authorize ask（bind 到快照）；批之前当前版本不变；owner 批准后 dag-approve 生效", async () => {
-    const r = await rewrite([T1, { ...T3, deps: ["T1"] }, L], "--cancel", "T2=方向变了");
+  test("--scope-change（这里带着取消进行中的节点）→ pending + authorize ask（bind 到快照）；批之前当前版本不变；owner 批准后 dag-approve 生效", async () => {
+    const r = await rewrite([T1, { ...T3, deps: ["T1"] }, L], "--cancel", "T2=方向变了", "--scope-change");
     expect(r).toMatchObject({ ok: true, applied: false, version: null, proposal: { version: 2, baseVersion: 1, state: "pending" } });
     const ask = getAsk(db, r.askId)!;
     expect(ask).toMatchObject({ kind: "authorize", fromAgent: PM, fromChannelId: "c-pm", bind: { action: "dag_rewrite", params: { feature: F, version: 2, sha: r.proposal.sha } } });
@@ -127,19 +128,19 @@ describe("owner 审批", () => {
     expect(await run(PM, "dag-approve", "i28")).toMatchObject({ ok: false, code: "not_found" });
   });
 
-  test("--scope-change 与改进行中节点的内容也要批；owner 驳回 → 作废，当前版本不变，可以重新提", async () => {
+  test("--scope-change 只改计划节点也要批；owner 驳回 → 作废，当前版本不变，可以重新提", async () => {
     const r = await rewrite([T1, T2, T3, { ...L, oneLine: "换个做法" }], "--scope-change");
     expect(r).toMatchObject({ ok: true, applied: false });
+    expect(getAsk(db, r.askId)!.context).toContain("--scope-change");
     answer(r.askId, "dag_rewrite_reject");
     expect(await run(PM, "dag-approve", "i28")).toMatchObject({ ok: false, code: "rejected", proposal: { state: "rejected" } });
     expect(versions()).toEqual([1]);
-    const again = await rewrite([T1, { ...T2, oneLine: "改一句话" }, T3, L]);
-    expect(again).toMatchObject({ ok: true, applied: false });
-    expect(getAsk(db, again.askId)!.context).toContain("改了进行中的节点 T2");
+    const again = await rewrite([T1, T2, T3, { ...L, oneLine: "换个做法" }], "--scope-change");
+    expect(again).toMatchObject({ ok: true, applied: false, askId: expect.any(String) });
   });
 
   test("审批绑定的快照被替换：库里拦改提案；强改后批准也对不上哈希，提案作废", async () => {
-    const r = await rewrite([T1, { ...T3, deps: ["T1"] }, L], "--cancel", "T2=方向变了");
+    const r = await rewrite([T1, { ...T3, deps: ["T1"] }, L], "--cancel", "T2=方向变了", "--scope-change");
     expect(() => db.prepare("UPDATE dag_proposals SET nodes = '[]'").run()).toThrow(/rewrite-only/);
     expect(() => db.prepare("DELETE FROM dag_proposals").run()).toThrow(/rewrite-only/);
     answer(r.askId, "dag_rewrite_approve");
@@ -152,10 +153,10 @@ describe("owner 审批", () => {
   });
 
   test("不是 owner 本人答的、ask 过期了：都不生效，提案作废", async () => {
-    const r = await rewrite([T1, { ...T3, deps: ["T1"] }, L], "--cancel", "T2=方向变了");
+    const r = await rewrite([T1, { ...T3, deps: ["T1"] }, L], "--cancel", "T2=方向变了", "--scope-change");
     answer(r.askId, "dag_rewrite_approve", false);
     expect(await run(PM, "dag-approve", "i28")).toMatchObject({ ok: false, proposal: { state: "void" } });
-    const r2 = await rewrite([T1, { ...T3, deps: ["T1"] }, L], "--cancel", "T2=方向变了");
+    const r2 = await rewrite([T1, { ...T3, deps: ["T1"] }, L], "--cancel", "T2=方向变了", "--scope-change");
     now += 8 * 24 * 3600_000;
     expect(await run(PM, "dag-approve", "i28")).toMatchObject({ ok: false, proposal: { state: "void", askId: r2.askId } });
     expect(versions()).toEqual([1]);
@@ -197,7 +198,7 @@ describe("dag-bind", () => {
 
 describe("dag-show --diff", () => {
   test("增 / 删 / 带入 / 取消四类；pending 也能比", async () => {
-    const r = await rewrite([T1, { ...T3, deps: ["T1"] }, { key: "N", oneLine: "新节点" }], "--cancel", "T2=方向变了");
+    const r = await rewrite([T1, { ...T3, deps: ["T1"] }, { key: "N", oneLine: "新节点" }], "--cancel", "T2=方向变了", "--scope-change");
     const d = await run(PM, "dag-show", "i28", "--diff", "1", "pending");
     expect(d).toMatchObject({ ok: true, from: 1, to: 2, diff: {
       added: ["N"], removed: ["L"], cancelled: [{ key: "T2", reason: "方向变了" }],
@@ -212,9 +213,10 @@ describe("dag-show --diff", () => {
   });
 });
 
-describe("T89b：失效提案让位、重放还原原结果、通知 owner", () => {
+describe("T89b：失效提案让位、重放还原原结果", () => {
   const DAY8 = 8 * 24 * 3600_000;
-  const cancelT2 = (...more: string[]) => rewrite([T1, { ...T3, deps: ["T1"] }, L], "--cancel", "T2=方向变了", ...more);
+  /** 要 owner 批的提案：只有 --scope-change 才开审批 */
+  const cancelT2 = (...more: string[]) => rewrite([T1, { ...T3, deps: ["T1"] }, L], "--cancel", "T2=方向变了", "--scope-change", ...more);
 
   test("pending 被驳回 / 过期后，带 --dedup 的新重写照常生效，重放只返回新动作的事件", async () => {
     const p = await cancelT2();
@@ -242,30 +244,12 @@ describe("T89b：失效提案让位、重放还原原结果、通知 owner", () 
     const auto = await rewrite([T1, { ...T3, deps: ["T1"] }, L, { key: "M", oneLine: "新计划" }], "--dedup", "auto-1");
     expect(auto).toMatchObject({ ok: true, applied: true, version: { version: 3 } });
     stage("T3", "build");
-    const p4 = await rewrite([T1, L, { key: "M", oneLine: "新计划" }], "--cancel", "T3=不做了");
+    const p4 = await rewrite([T1, L, { key: "M", oneLine: "新计划" }], "--cancel", "T3=不做了", "--scope-change");
     expect(p4).toMatchObject({ ok: true, applied: false, proposal: { version: 4 } });
     expect(await run(PM, "dag-approve", "i28", "--dedup", "ap-1"))
       .toMatchObject({ ok: true, duplicate: true, version: { version: 2 }, proposal: { seq: p.proposal.seq, state: "approved", version: 2 } });
     expect(await run(PM, "dag-rewrite", "i28", "--rev", "1", "--nodes", "[]", "--reason-kind", "new_issue", "--reason", "x", "--dedup", "auto-1"))
       .toMatchObject({ ok: true, duplicate: true, applied: true, version: { version: 3 }, proposal: null, askId: null });
-  });
-
-  test("直接生效后经通知通道告诉 owner；通道失败 / 没有通道都在结果里写「未通知」；要批的与重放不发", async () => {
-    const r = await rewrite([T1, T2, T3, L, { key: "M", oneLine: "新计划" }], "--dedup", "n-1");
-    expect(r).toMatchObject({ ok: true, applied: true, notified: true });
-    expect(sent).toEqual([r.inform]);
-    expect((await run(PM, "dag-rewrite", "i28", "--rev", "1", "--nodes", "[]", "--reason-kind", "new_issue", "--reason", "x", "--dedup", "n-1")).duplicate).toBe(true);
-    expect(await cancelT2()).toMatchObject({ ok: true, applied: false });
-    expect(sent.length).toBe(1);
-    now += DAY8;
-    notifier = async () => false;
-    const bad = await rewrite([T1, T2, T3, L, { key: "M", oneLine: "新计划" }, { key: "N", oneLine: "再加一个" }]);
-    expect(bad).toMatchObject({ ok: true, applied: true, notified: false });
-    expect(bad.next).toContain("未通知");
-    notifier = undefined;
-    const none = await rewrite([T1, T2, T3, L, { key: "M", oneLine: "新计划" }, { key: "N", oneLine: "再加一个" }, { key: "O", oneLine: "第三个" }]);
-    expect(none).toMatchObject({ ok: true, applied: true, notified: false });
-    expect(none.next).toContain("未通知");
   });
 
   test("owner 批了但授权已过期：不再挡新的重写，旧提案作废让位", async () => {
@@ -276,5 +260,56 @@ describe("T89b：失效提案让位、重放还原原结果、通知 owner", () 
     const r = await rewrite([T1, T2, T3, L, { key: "M", oneLine: "新计划" }]);
     expect(r).toMatchObject({ ok: true, applied: true, version: { version: 2 } });
     expect(db.prepare("SELECT state FROM dag_proposals WHERE seq = ?").get(p.proposal.seq)).toEqual({ state: "void" });
+  });
+});
+
+describe("i28-L6：只有 --scope-change 找 owner，其余直接生效、不通知", () => {
+  const asks = () => (db.prepare("SELECT COUNT(*) AS n FROM asks").get() as { n: number }).n;
+  /** 被移出的卡此刻的样子：卡行 + 它身上的 task 事件 */
+  const card = (id: string) => {
+    const t = getTask(db, id)!;
+    return { featureId: t.featureId, stage: t.stage, rev: t.rev, events: listEvents(db).filter((e) => e.target === id && e.kind === "task").map((e) => e.data) };
+  };
+
+  test("改进行中节点的内容：直接生效，approvedBy auto，不开 ask、不通知 owner", async () => {
+    const r = await rewrite([T1, { ...T2, oneLine: "改一句话" }, T3, L]);
+    expect(r).toMatchObject({ ok: true, applied: true, version: { version: 2, approvedBy: "auto", askId: null }, proposal: null, askId: null, next: "已生效" });
+    expect(r.inform).toContain("改动 T2");
+    expect(r.notified).toBeUndefined();
+    expect([asks(), sent]).toEqual([0, []]);
+  });
+
+  test("取消进行中节点：直接生效；被取消的卡和走 owner 批准的结果一模一样", async () => {
+    const r = await rewrite([T1, { ...T3, deps: ["T1"] }, L], "--cancel", "T2=方向变了");
+    expect(r).toMatchObject({ ok: true, applied: true, version: { version: 2, approvedBy: "auto", cancels: [{ key: "T2", taskId: "T2", reason: "方向变了" }] }, next: "已生效" });
+    expect([asks(), sent]).toEqual([0, []]);
+    const auto = card("T2");
+    expect(auto).toMatchObject({ featureId: null, stage: "build" });
+    closeLedger(":memory:");
+    await setup();
+    const p = await rewrite([T1, { ...T3, deps: ["T1"] }, L], "--cancel", "T2=方向变了", "--scope-change");
+    answer(p.askId, "dag_rewrite_approve");
+    expect(await run(PM, "dag-approve", "i28")).toMatchObject({ ok: true, version: { version: 2, approvedBy: "owner" } });
+    expect(card("T2")).toEqual(auto);
+  });
+
+  test("--scope-change 仍开审批、不生效、不发通知；不带的照常拦已完成节点和没写原因的取消", async () => {
+    const r = await rewrite([T1, T2, T3, L, { key: "M", oneLine: "新机制" }], "--scope-change");
+    expect(r).toMatchObject({ ok: true, applied: false, version: null, askId: expect.any(String) });
+    expect(r.next).toContain("待 owner 批");
+    expect([getFeature(db, F)!.currentVersion, asks(), sent]).toEqual([1, 1, []]);
+    now += 8 * 24 * 3600_000;
+    expect(await rewrite([{ ...T1, oneLine: "改名" }, T2, T3, L])).toMatchObject({ ok: false, code: "invalid", error: expect.stringContaining("T1") });
+    expect(await rewrite([T1, { ...T3, deps: ["T1"] }, L])).toMatchObject({ ok: false, code: "invalid", error: expect.stringContaining("--cancel T2") });
+    expect(await rewrite([T1, { ...T3, deps: ["T1"] }, L], "--cancel", "T2=")).toMatchObject({ ok: false, code: "invalid" });
+  });
+
+  test("直接生效的重写从不调 notifyOwner（加节点 / 改 / 取消，重放也不发）", async () => {
+    await rewrite([T1, T2, T3, L, { key: "M", oneLine: "新计划" }], "--dedup", "n-1");
+    await run(PM, "dag-rewrite", "i28", "--rev", "1", "--nodes", "[]", "--reason-kind", "new_issue", "--reason", "x", "--dedup", "n-1");
+    await rewrite([T1, { ...T2, oneLine: "改" }, T3, L, { key: "M", oneLine: "新计划" }]);
+    await rewrite([T1, { ...T3, deps: ["T1"] }, L, { key: "M", oneLine: "新计划" }], "--cancel", "T2=不做了");
+    expect(versions()).toEqual([1, 2, 3, 4]);
+    expect(sent).toEqual([]);
   });
 });

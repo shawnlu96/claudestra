@@ -50,7 +50,8 @@ export const DAG_TOOLS = [
     name: "rewrite_dag",
     description:
       "PM / master: change an existing sub-DAG — add / update / remove planned nodes, split one (remove + add + update dependents), or cancel an in-progress node. " +
-      "reasonKind + reason are required; cancelling an in-progress node needs its own reason in cancel and goes to the owner for approval. " +
+      "reasonKind + reason are required; cancelling an in-progress node needs its own reason in cancel. Everything applies at once without notifying the owner, " +
+      "except scopeChange (changes the feature's scope or overhauls a mechanism — your call), which waits for owner approval. " +
       "Completed nodes cannot change. New or updated nodes must carry fileGlobs. Returns the result (applied now, or pending owner approval) plus lanes.",
     inputSchema: {
       type: "object" as const,
@@ -62,7 +63,7 @@ export const DAG_TOOLS = [
         update: { type: "array", items: NODE, description: "按 key 整个替换的节点（绑的卡保留）" },
         remove: { type: "array", items: { type: "string" }, description: "移出的没开始 / 计划中节点 key" },
         cancel: { type: "object", additionalProperties: { type: "string" }, description: "{节点 key: 取消原因}：移出进行中的节点" },
-        scopeChange: { type: "boolean", description: "这次改了 feature 的范围（要 owner 批）" },
+        scopeChange: { type: "boolean", description: "改 feature 范围或大改机制（PM 判断，要 owner 批）；不带则直接生效、不通知 owner" },
       },
       required: ["featureId", "reasonKind", "reason"],
     },
