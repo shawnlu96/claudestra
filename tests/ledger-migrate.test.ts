@@ -350,8 +350,8 @@ describe("写事件的底座只给写入模块", () => {
       "lib/ledger-human.ts", "lib/ledger-lend-peers.ts", "lib/ledger-lend-queue.ts",
       "lib/ledger-lend-result.ts", "lib/ledger-lend.ts", "lib/ledger-scheduler-pool.ts",
       "lib/ledger-scheduler-resume.ts", "lib/ledger-scheduler-settle.ts", "lib/ledger-scheduler-write.ts", "lib/ledger-steps-write.ts", "lib/ledger-write.ts",
-      "lib/lend-pr-takeover-ledger.ts",
-      "lib/order-mark.ts", "lib/scheduler-apply.ts", "lib/scheduler-deploy.ts", "lib/scheduler-fallback.ts", "lib/scheduler-merge-conflict.ts", "lib/scheduler-merge.ts",
+      "lib/lend-pr-takeover-ledger.ts", "lib/order-mark.ts", "lib/review-converge-followup.ts", "lib/review-converge-notice.ts",
+      "lib/scheduler-apply.ts", "lib/scheduler-deploy.ts", "lib/scheduler-fallback.ts", "lib/scheduler-merge-conflict.ts", "lib/scheduler-merge.ts",
       "lib/scheduler-observe.ts",
       "lib/scheduler-sessions.ts"]);
     expect(move.sort()).toEqual(["lib/ledger-autostart-step.ts", "lib/ledger-human.ts", "lib/scheduler-apply.ts"]);

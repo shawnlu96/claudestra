@@ -144,7 +144,7 @@ const numText = (v: unknown): string | null | undefined =>
 const hasNul = (s: string) => s.includes("\0");
 
 const ROLES = ["review", "write"];
-const CARRIED = { roles: "roles", codexModel: "codex-model", codexEffort: "codex-effort" };
+const CARRIED = { codex: "codex", claude: "claude", roles: "roles", codexModel: "codex-model", codexEffort: "codex-effort" };
 
 /** roles：非空、只含 review / write，去重后原样传；不带交给 CLI 沿用，没有条目 = CLI 缺省 */
 function rolesArg(v: unknown): string | undefined {
@@ -174,7 +174,9 @@ export function grantArgv(b: Record<string, unknown>): string[] | string {
   }
   if (typeof b.until !== "string" || !b.until.trim() || hasNul(b.until)) return "until 要是非空字符串（ISO 时间或 3d 这样的时长）";
   const codex = numText(b.codex);
+  const claude = numText(b.claude);
   const perDay = numText(b.ordersPerDay);
+  if (claude === null) return "claude 要是数字";
   if (codex === null) return "codex 要是数字";
   if (perDay === null) return "ordersPerDay 要是数字";
   const model = codexArg(b.codexModel, "codex-model");
@@ -184,7 +186,7 @@ export function grantArgv(b: Record<string, unknown>): string[] | string {
   const keep = Object.entries(CARRIED).filter(([key]) => b[key] === undefined).map(([, flag]) => flag);
   return [
     "lend", "grant", `--repos=${(repos as string[]).join(",")}`, `--until=${b.until.trim()}`,
-    ...(codex === undefined ? [] : [`--codex=${codex}`]), ...(perDay === undefined ? [] : [`--orders-per-day=${perDay}`]),
+    ...(codex === undefined ? [] : [`--codex=${codex}`]), ...(claude === undefined ? [] : [`--claude=${claude}`]), ...(perDay === undefined ? [] : [`--orders-per-day=${perDay}`]),
     ...model, ...effort, ...(roles === undefined ? [] : [`--roles=${roles}`]), ...(keep.length ? [`--keep-unset=${keep.join(",")}`] : []), "--", peer,
   ];
 }

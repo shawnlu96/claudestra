@@ -20,6 +20,7 @@ import { writeDeps } from "./ledger-lend-cmds.js";
 import { readEffectiveBorrow } from "../lib/scheduler-pool-borrow.js";
 import { readTextSoft, specPathFor } from "../lib/task-spec.js";
 import { parseRemotePolicy, type RemotePolicy } from "../lib/scheduler-config.js";
+import { reviewSwapStep } from "../lib/scheduler-review-swap-runtime.js";
 import { familyWaitCommand } from "../lib/scheduler-family-pick-notice.js";
 
 const integer = (c: LedgerCli, flag: string): number => {
@@ -53,6 +54,8 @@ async function poolWrite(c: LedgerCli, intentId: string, remote: RemotePolicy): 
 }
 
 export const SCHEDULER_CMDS: Record<string, CommandSpec> = {
+  "scheduler-review-swap": { valued: ["max-workers"], bools: [], usage: "scheduler-review-swap <intent> --max-workers N",
+    run: (c) => reviewSwapStep(c.db, c.ctx(), c.p.pos[1] ?? "", integer(c, "max-workers")) },
   "scheduler-family-wait": familyWaitCommand,
   "workflow-set": {
     valued: ["rev", "workflow-rev", "template", "version", "mode", "author-family", "fallback", "reason"], bools: [],
