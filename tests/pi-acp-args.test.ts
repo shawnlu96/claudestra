@@ -1,8 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import { existsSync } from "node:fs";
-import { MCP_MOUNT_EXTENSION, piRpcArgs } from "../src/lib/acp/pi-adapter/args.ts";
+import { ACTIVATE_TOOLS_EXTENSION, MCP_MOUNT_EXTENSION, piRpcArgs } from "../src/lib/acp/pi-adapter/args.ts";
 import mountMcpServers, { PI_MCP_SERVERS_ENV } from "../src/lib/acp/pi-adapter/mcp-mount.ts";
 import { parseArgs } from "./pi-upstream-0.99.2.ts";
+import { piEnvFlags } from "../src/lib/pi-env.ts";
 
 /** `-e X` 成对出现的位置：返回 X 的列表 */
 const extensions = (args: string[]) => args.flatMap((a, i) => (a === "-e" || a === "--extension" ? [args[i + 1]] : []));
@@ -13,12 +14,13 @@ describe("Pi 适配器 · 启动参数", () => {
       const args = piRpcArgs("sid-1", base);
       expect(extensions(args)).toContain("builtin:mcp");
       expect(extensions(args)).toContain(MCP_MOUNT_EXTENSION);
+      expect(extensions(args)).toContain(ACTIVATE_TOOLS_EXTENSION); // 0.99 内建工具（codemode）靠它激活
     }
   });
 
   test("rpc 模式、能力档参数原样保序、会话 id 由适配器给", () => {
     expect(piRpcArgs("sid-1", ["--no-extensions", "--model", "p/m"])).toEqual([
-      "--mode", "rpc", "--no-extensions", "--model", "p/m", "-e", "builtin:mcp", "-e", MCP_MOUNT_EXTENSION, "--session-id", "sid-1",
+      "--mode", "rpc", "--no-extensions", "--model", "p/m", "-e", "builtin:mcp", "-e", MCP_MOUNT_EXTENSION, "-e", ACTIVATE_TOOLS_EXTENSION, "--session-id", "sid-1",
     ]);
   });
 
@@ -111,5 +113,15 @@ describe("Pi 适配器 · 挂 MCP 的扩展", () => {
     await mountMcpServers(api, {}, async (_pi, s) => void calls.push(s));
     expect(calls).toEqual([]);
     await expect(mountMcpServers(api, { [PI_MCP_SERVERS_ENV]: "{bad" }, async () => {})).rejects.toThrow();
+  });
+});
+
+describe("Pi 适配器 · 能力档里的 builtin 扩展", () => {
+  test("codemode 预设经能力档进 argv：--extension builtin:codemode 会被保留（白名单认它）", () => {
+    const base = piEnvFlags({ base: "minimal", extensions: ["builtin:codemode"] });
+    const args = piRpcArgs("sid-cm", base);
+    expect(extensions(args)).toContain("builtin:codemode");
+    expect(extensions(args)).toContain(ACTIVATE_TOOLS_EXTENSION);
+    expect(args).toContain("--no-extensions");
   });
 });

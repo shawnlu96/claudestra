@@ -184,3 +184,20 @@ describe("PI_BIN / thinking 白名单（review #10 修复）", () => {
     expect(isPiThinkingLevel("ultra")).toBe(false);
   });
 });
+
+describe("buildPiCommand · 内建工具激活（tmux 路径，PR349-r1-activation-tmux）", () => {
+  const base2 = { channelId: "c", bridgeUrl: "ws://x", agentName: "a" };
+
+  test("codemode 档案：既加载 builtin:codemode，也带激活扩展与环境变量（只加载不激活 = 空操作）", () => {
+    const cmd = buildPiCommand({ ...base2, piEnv: { base: "minimal", extensions: ["builtin:codemode"] } });
+    expect(cmd).toContain("--extension builtin:codemode");
+    expect(cmd).toContain("CLAUDESTRA_PI_ACTIVATE=codemode");
+    expect(cmd).toContain("activate-tools.ts");
+  });
+
+  test("普通档案：两样都不加（不给每个 Pi agent 添噪声）", () => {
+    const cmd = buildPiCommand({ ...base2, piEnv: { base: "minimal" } });
+    expect(cmd).not.toContain("CLAUDESTRA_PI_ACTIVATE");
+    expect(cmd).not.toContain("activate-tools.ts");
+  });
+});
