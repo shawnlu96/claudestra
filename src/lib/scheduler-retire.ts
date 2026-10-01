@@ -1,19 +1,22 @@
 /**
  * Card retirement (docs/architecture/scheduler-retire.md): once a card is verified / done / cancelled, archive and kill the
- * sessions the scheduler bound to it, then remove its clean worktrees; a dirty one, or one git refuses to remove, stays and
- * goes to PM. Every effect is recorded on the ledger before the next one runs, so a restart resumes where it stopped and
- * never kills or notifies twice: the session row's receipts skip finished effects, and the PM notice follows only the one
- * settle that closes the intent. Removal is only ever `git worktree remove` without --force, which itself refuses dirty trees.
+ * sessions the scheduler bound to it, then remove its clean worktrees; a dirty one, one a live agent still works in, or one git
+ * refuses to remove stays and goes to PM. Every effect is recorded on the ledger before the next one runs, and kill is skipped
+ * for an agent the registry already shows stopped, so a restart resumes where it stopped without killing twice. A card that owes
+ * PM a notice settles only after the notice went out: a lost notice is resent next pass, never dropped.
+ * Removal is only ever `git worktree remove` without --force, which itself refuses dirty trees.
  */
 import type { Database } from "bun:sqlite";
-import { join } from "node:path";
+import { realpathSync } from "node:fs";
+import { join, resolve, sep } from "node:path";
 import type { SchedulerIntent } from "./ledger-scheduler.js";
 import { getTask } from "./ledger-store.js";
 import type { LedgerTask } from "./ledger-stages.js";
 import { SchedulerStopped } from "./scheduler-maintenance.js";
 import { RETIRE_STAGES, type SchedulerSession } from "./scheduler-sessions.js";
 import type { Git } from "./scheduler-review-worktree.js";
-import type { TickPace } from "./scheduler-yield.js";
+import { rotateAfter, type TickPace } from "./scheduler-yield.js";
+import type { RegistryAgent } from "./registry.js";
 
 type Manager = (...args: string[]) => Promise<Record<string, unknown>>;
 
@@ -26,32 +29,38 @@ export interface RetireDeps {
   exists(path: string): boolean;
   worktreeRoot: string;
   notifyPm(task: LedgerTask, text: string): Promise<void>;
+  /** The registry as it is now: kill skips an agent already stopped, and a checkout a live agent works in is kept. */
+  agents(): Promise<Pick<RegistryAgent, "name" | "status" | "sessionId" | "cwd">[]>;
 }
 
-interface RetireOutcome {
-  taskId: string; step: "retired" | "handoff" | "held" | "unknown"; detail: string;
-  /** For PM, set only by the settle that closed the intent; the pass sends one combined notice per project. */
-  notice?: string;
-}
+interface RetireOutcome { taskId: string; step: "retired" | "handoff" | "held" | "unknown"; detail: string }
+/** A card that owes PM a notice: it settles only after the pass's combined notice for its project went out. */
+interface Owed { outcome: RetireOutcome; task: LedgerTask; intentId: string; to: "done" | "unknown"; receipt: string; notice: string }
 export interface RetireTickResult { cards: RetireOutcome[]; failed: { taskId: string; error: string }[] }
 
 /** Cards per pass: the first pass after rollout backfills dozens, and each kill is a manager child plus a channel delete. */
 export const RETIRE_CARDS_PER_PASS = 5;
 const RS = RETIRE_STAGES.map((s) => `'${s}'`).join(",");
 const oneLine = (s: string, max = 560): string => s.replace(/\s+/g, " ").trim().slice(0, max) || "（空）";
+/** Receipt markers of a session that retired but left something for PM (a failed archive, a kill skipped for a changed session). */
+const ARCHIVE_FAILED = "归档没成", FOR_PM = "交 PM";
+/** On a cancelled card these open intents are closed before retiring; merge / verify belong to the merge queue and are waited for. */
+const QUEUE_ACTIONS = "('merge','verify')";
 
 /**
- * Finished cards with a session still to retire or a claimed retire intent to finish. A card with any other open intent waits
- * (beginRetire would refuse it, and it must not take a slot every pass); an unknown retire intent is PM's to reconcile.
+ * Finished cards with a session still to retire or a claimed retire intent to finish, by id. A card with another open intent
+ * waits (beginRetire would refuse it) unless it was cancelled: nothing drives a cancelled card's dispatch / review intents any
+ * more, so the tick closes them itself (closeStray). An unknown intent, retire or not, is PM's to reconcile.
  */
 export function retireCandidates(db: Database, projects: readonly string[]): string[] {
   if (!projects.length || !db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'scheduler_sessions'").get()) return [];
   const rows = db.query(`SELECT t.id FROM tasks t WHERE t.stage IN (${RS}) AND t.project IN (${projects.map(() => "?").join(",")})
     AND NOT EXISTS (SELECT 1 FROM scheduler_intents i WHERE i.taskId = t.id AND i.action = 'retire' AND i.status IN ('done','unknown','cancelled'))
-    AND NOT EXISTS (SELECT 1 FROM scheduler_intents i WHERE i.taskId = t.id AND i.action != 'retire' AND i.status IN ('pending','submitted','unknown'))
+    AND NOT EXISTS (SELECT 1 FROM scheduler_intents i WHERE i.taskId = t.id AND i.action != 'retire' AND (i.status = 'unknown'
+      OR (i.status IN ('pending','submitted') AND (t.stage != 'cancelled' OR i.action IN ${QUEUE_ACTIONS}))))
     AND (EXISTS (SELECT 1 FROM scheduler_sessions s WHERE s.taskId = t.id AND s.state != 'retired')
       OR EXISTS (SELECT 1 FROM scheduler_intents i WHERE i.taskId = t.id AND i.action = 'retire' AND i.status = 'submitted'))
-    ORDER BY t.updatedAt, t.id`).all(...projects) as { id: string }[];
+    ORDER BY t.id`).all(...projects) as { id: string }[];
   return rows.map((r) => r.id);
 }
 
@@ -61,6 +70,13 @@ function agentStillInUse(db: Database, agent: string, taskId: string): string | 
     OR EXISTS (SELECT 1 FROM scheduler_sessions s WHERE s.taskId = t.id AND s.agent = ? AND s.state != 'retired')) LIMIT 1`)
     .get(taskId, agent, agent) as { id: string } | null;
   return row?.id ?? null;
+}
+
+/** dir itself or a path inside it, both resolved through symlinks (macOS tmp dirs live behind /private). */
+function within(path: string, dir: string): boolean {
+  const real = (p: string): string => { try { return realpathSync(p); } catch { return resolve(p); /* gone or unreadable: compare as written */ } };
+  const p = real(path), d = real(dir);
+  return p === d || p.startsWith(d + sep);
 }
 
 /** The two checkouts the scheduler makes per card: the executor's (dag-tools-start) and the reviewer's (scheduler-auto-deps). */
@@ -88,6 +104,11 @@ export function killOutcome(r: Record<string, unknown>): { receipt: string } | {
 
 type Effect = { effect: "archive" | "kill"; receipt: string } | { busy: string } | { failed: string };
 
+async function settle(deps: RetireDeps, intentId: string, to: "done" | "unknown", receipt: string): Promise<boolean> {
+  const r = await deps.ledger("ledger", "scheduler-settle", intentId, "--from", "submitted", "--to", to, "--receipt", oneLine(receipt));
+  return r.ok === true;
+}
+
 class RetireCard {
   constructor(readonly db: Database, readonly task: LedgerTask, readonly intent: SchedulerIntent, readonly deps: RetireDeps) {}
 
@@ -104,10 +125,20 @@ class RetireCard {
     return { effect: "archive", receipt: archiveReceipt(await this.deps.agent("archive", row.agent)) };
   }
 
+  /**
+   * kill only an agent the registry shows running the bound session: one already stopped is how a kill whose receipt never
+   * reached the ledger looks next pass, and a name now running another session is not this card's to stop (PM decides).
+   */
   async kill(row: SchedulerSession): Promise<Effect> {
     if (row.transport === "peer") return { effect: "kill", receipt: "peer 会话：不在本机，不发命令，只标退役" };
     const user = agentStillInUse(this.db, row.agent, this.task.id);
     if (user) return { effect: "kill", receipt: `agent 仍被未收尾的 ${user} 使用：不 kill，只标退役` };
+    const live = (await this.deps.agents()).find((a) => a.name === row.agent);
+    if (!live) return { effect: "kill", receipt: "agent 已不在 registry（先前已清）" };
+    if (live.status === "stopped") return { effect: "kill", receipt: "agent 早已停止，不再 kill" };
+    if (live.sessionId && live.sessionId !== row.sessionId) {
+      return { effect: "kill", receipt: oneLine(`agent 现在跑的是会话 ${live.sessionId}，不是本卡绑定的 ${row.sessionId}：不 kill，${FOR_PM}`) };
+    }
     const k = killOutcome(await this.deps.agent("kill", row.agent));
     return "receipt" in k ? { effect: "kill", receipt: k.receipt } : k;
   }
@@ -126,8 +157,10 @@ class RetireCard {
   }
 
   /** null = removed or not there; otherwise why the checkout stays (with porcelain lines when dirty). */
-  async worktree(dir: string): Promise<string | null> {
+  async worktree(dir: string, agents: Awaited<ReturnType<RetireDeps["agents"]>>): Promise<string | null> {
     if (!this.deps.exists(dir)) return null;
+    const holder = agents.find((a) => a.status !== "stopped" && a.cwd && within(a.cwd, dir));
+    if (holder) return `${holder.name} 还在这里工作（agent 没停）`;
     const g = (...args: string[]) => this.deps.git(["-C", dir, ...args]);
     const where = await g("rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir");
     const [gitDir, common] = where.out.split("\n");
@@ -140,70 +173,99 @@ class RetireCard {
     return rm.code === 0 ? null : `git worktree remove 失败：${rm.out}`;
   }
 
-  async settle(to: "done" | "unknown", receipt: string): Promise<boolean> {
-    const r = await this.deps.ledger("ledger", "scheduler-settle", this.intent.id, "--from", "submitted", "--to", to, "--receipt", oneLine(receipt));
-    return r.ok === true;
+  owe(outcome: RetireOutcome, to: Owed["to"], receipt: string, notice: string): Owed {
+    return { outcome, task: this.task, intentId: this.intent.id, to, receipt, notice: oneLine(notice) };
   }
 
-  async run(): Promise<RetireOutcome> {
+  /** Settled here when nothing is owed to PM; otherwise handed back to settle after the pass's notice (notifyAndSettle). */
+  async run(): Promise<RetireOutcome | Owed> {
     const rows = this.db.query("SELECT * FROM scheduler_sessions WHERE taskId = ? AND state != 'retired' ORDER BY role").all(this.task.id) as SchedulerSession[];
     for (const row of rows) {
       const stop = await this.session(row);
       if (!stop) continue;
       if ("busy" in stop) return this.out("held", stop.busy);
       const why = `${row.role} session ${row.agent} 收不掉：${stop.failed}`;
-      const told = await this.settle("unknown", why);
-      return { ...this.out("unknown", why), ...(told ? { notice: `${this.task.id} 收尾卡住，意图转 unknown 待核对：${oneLine(why)}` } : {}) };
+      return this.owe(this.out("unknown", why), "unknown", why, `${this.task.id} 收尾卡住，意图转 unknown 待核对：${why}`);
     }
-    const kept: string[] = [];
+    // re-derived from durable state every time, so a notice resent after a lost one says the same thing
+    const kept: string[] = [], agents = await this.deps.agents();
     for (const dir of worktreeDirs(this.deps.worktreeRoot, this.task.id)) {
-      const why = await this.worktree(dir);
+      const why = await this.worktree(dir, agents);
       if (why) kept.push(`${dir}：${why}`);
     }
+    const all = this.db.query("SELECT * FROM scheduler_sessions WHERE taskId = ? ORDER BY role").all(this.task.id) as SchedulerSession[];
+    const left = all.flatMap((r) => [r.archiveReceipt, r.killReceipt].filter((x): x is string => !!x && (x.startsWith(ARCHIVE_FAILED) || x.includes(FOR_PM)))
+      .map((x) => `${r.role} ${r.agent}：${x}`));
     const sessions = rows.length ? `${rows.length} 个 session 已退役` : "session 早已退役";
-    if (!kept.length) return this.out((await this.settle("done", `${sessions}；worktree 已清`)) ? "retired" : "held", sessions);
-    const text = `${sessions}；worktree 没删，交 PM：${kept.join(" | ")}`;
-    const told = await this.settle("done", text);
-    return { ...this.out("handoff", text), ...(told ? { notice: `${this.task.id} worktree 没删，请看一眼：${oneLine(kept.join(" | "))}` } : {}) };
+    if (!kept.length && !left.length) {
+      return this.out((await settle(this.deps, this.intent.id, "done", `${sessions}；worktree 已清`)) ? "retired" : "held", sessions);
+    }
+    const parts = [...(kept.length ? [`worktree 没删：${kept.join(" | ")}`] : []), ...left];
+    const text = `${sessions}；交 PM：${parts.join(" | ")}`;
+    return this.owe(this.out("handoff", text), "done", text, `${this.task.id} 请看一眼：${parts.join(" | ")}`);
   }
 }
 
-/** One combined PM notice per project for this pass; a lost one is logged (each card's settle event is the durable record). */
-async function notifyBatch(db: Database, deps: RetireDeps, cards: RetireOutcome[]): Promise<void> {
-  const byProject = new Map<string, { task: LedgerTask; lines: string[] }>();
-  for (const c of cards) {
-    const task = c.notice ? getTask(db, c.taskId) : null;
-    if (!task || !c.notice) continue;
-    const group = byProject.get(task.project) ?? byProject.set(task.project, { task, lines: [] }).get(task.project)!;
-    group.lines.push(`- ${c.notice}`);
+/** For a cancelled card: close its open dispatch / review / ask intents, which nothing will settle once the card is out of work. */
+async function closeStray(db: Database, deps: RetireDeps, task: LedgerTask): Promise<string | null> {
+  if (task.stage !== "cancelled") return null;
+  const open = db.query(`SELECT id, status FROM scheduler_intents WHERE taskId = ? AND action NOT IN ('retire', 'merge', 'verify')
+    AND status IN ('pending','submitted') ORDER BY id`).all(task.id) as { id: string; status: string }[];
+  for (const i of open) {
+    const r = await deps.ledger("ledger", "scheduler-settle", i.id, "--from", i.status, "--to", "cancelled", "--receipt", "卡已取消：收尾前关掉这个没结的意图");
+    if (r.ok !== true) return `取消卡上的意图 ${i.id} 关不掉：${String(r.error)}`;
   }
-  for (const { task, lines } of byProject.values()) {
+  return null;
+}
+
+/**
+ * One combined PM notice per project, then the settles it covers. A notice that did not go out leaves its cards submitted, so
+ * the next pass rebuilds and resends it; a settle that fails after the notice went out means PM may hear that card twice.
+ */
+async function notifyAndSettle(deps: RetireDeps, owed: Owed[], out: RetireOutcome[]): Promise<void> {
+  const byProject = new Map<string, Owed[]>();
+  for (const o of owed) byProject.set(o.task.project, [...(byProject.get(o.task.project) ?? []), o]);
+  for (const group of byProject.values()) {
+    const lines = group.map((o) => `- ${o.notice}`);
     const text = `[调度引擎] 卡收尾有 ${lines.length} 处要 PM 看（没删的 worktree 不加 --force、不 rm，原样留着）：\n${lines.join("\n")}`;
-    await deps.notifyPm(task, text).catch((e: unknown) => {
+    const sent = await deps.notifyPm(group[0].task, text).then(() => null, (e: unknown) => {
       if (e instanceof SchedulerStopped) throw e;
-      console.error(`⚠️ [scheduler] 收尾通知没发出去（台账已记）：${(e as Error).message}`);
+      console.error(`⚠️ [scheduler] 收尾通知没发出去，下轮重发：${(e as Error).message}`);
+      return oneLine((e as Error).message);
     });
+    for (const o of group) {
+      if (sent !== null) out.push({ ...o.outcome, step: "held", detail: oneLine(`PM 通知没发出去，下轮重发：${sent}`) });
+      else out.push((await settle(deps, o.intentId, o.to, o.receipt)) ? o.outcome : { ...o.outcome, step: "held", detail: "已通知 PM，意图没结上（下轮再结）" });
+    }
   }
 }
 
-/** One retirement step per pass for up to RETIRE_CARDS_PER_PASS finished cards; a card that fails does not stop the others. */
+/**
+ * One retirement step per pass for up to RETIRE_CARDS_PER_PASS finished cards, in rotation after where the last pass stopped
+ * (pace.cursor.retire), so cards held every pass never keep the rest from their turn. A card that fails does not stop the others.
+ */
 export async function schedulerRetireTick(db: Database, projects: readonly string[], deps: RetireDeps, pace?: TickPace): Promise<RetireTickResult> {
-  const out: RetireTickResult = { cards: [], failed: [] };
-  for (const taskId of retireCandidates(db, projects).slice(0, RETIRE_CARDS_PER_PASS)) {
+  const out: RetireTickResult = { cards: [], failed: [] }, owed: Owed[] = [];
+  const ids = retireCandidates(db, projects);
+  for (const taskId of (pace ? rotateAfter(ids, (id) => id, pace.cursor.retire) : ids).slice(0, RETIRE_CARDS_PER_PASS)) {
     if (pace?.yieldNow()) break;
+    if (pace) pace.cursor.retire = taskId;
     const task = getTask(db, taskId);
     if (!task) continue;
     try {
+      const stray = await closeStray(db, deps, task);
+      if (stray) { out.cards.push({ taskId, step: "held", detail: oneLine(stray) }); continue; }
       const r = await deps.ledger("ledger", "scheduler-retire", taskId);
       const intent = r.intent as SchedulerIntent | undefined;
       if (r.ok !== true || !intent) { out.cards.push({ taskId, step: "held", detail: oneLine(`退役意图没开成：${String(r.error)}`) }); continue; }
       if (intent.status !== "submitted") continue;
-      out.cards.push(await new RetireCard(db, task, intent, deps).run());
+      const done = await new RetireCard(db, task, intent, deps).run();
+      if ("notice" in done) owed.push(done); else out.cards.push(done);
     } catch (e) {
       if (e instanceof SchedulerStopped) throw e;
       out.failed.push({ taskId, error: oneLine((e as Error).message) });
     }
   }
-  await notifyBatch(db, deps, out.cards);
+  await notifyAndSettle(deps, owed, out.cards);
   return out;
 }

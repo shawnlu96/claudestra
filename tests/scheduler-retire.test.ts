@@ -1,7 +1,8 @@
 /**
- * i28-S2 card retirement: a real ledger and the ledger CLI in-process, real git worktrees, a fake `manager` for archive / kill.
- * Covers the acceptance lines: full retirement, dirty worktree kept + PM told once, no --force / rm, idempotent across ticks and a
- * restart, unfinished cards untouched, peer sessions only marked.
+ * i28-S2 card retirement: a real ledger and the ledger CLI in-process, real git worktrees, a registry file, a fake `manager` for
+ * archive / kill (a kill that works marks the agent stopped, as the real one does). Covers the acceptance lines: full retirement,
+ * dirty worktree kept + PM told once, no --force / rm, idempotent across ticks and a restart, unfinished cards untouched, peer
+ * sessions only marked; and round 1's findings: no second kill, notices resent, cancelled cards, shared checkouts, fairness, budget.
  */
 import { afterEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -9,7 +10,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { getIntent } from "../src/lib/ledger-scheduler.js";
 import { closeLedger, listEvents, openLedger } from "../src/lib/ledger-store.js";
-import { createTask } from "../src/lib/ledger-write.js";
+import { createTask, moveStage } from "../src/lib/ledger-write.js";
+import { readRegistryAgents } from "../src/lib/registry.js";
+import { schedulerPass } from "../src/lib/scheduler-pass.js";
+import type { SchedulerConfig } from "../src/lib/scheduler-config.js";
+import type { TickPace } from "../src/lib/scheduler-yield.js";
 import { archiveReceipt, killOutcome, RETIRE_CARDS_PER_PASS, retireCandidates, schedulerRetireTick, worktreeDirs, type RetireDeps } from "../src/lib/scheduler-retire.js";
 import { git } from "../src/lib/scheduler-review-worktree.js";
 import { getSchedulerSession, retireIntentId, type SchedulerSession } from "../src/lib/scheduler-sessions.js";
@@ -35,16 +40,23 @@ function fixture() {
   });
   const calls: string[][] = [], gitCalls: string[][] = [], notices: string[] = [];
   const replies: Record<string, (args: string[]) => Reply> = {};
+  const setAgent = (name: string, fields: Record<string, unknown> | null) => {
+    const reg = JSON.parse(readFileSync(registryPath, "utf8")) as { agents: Record<string, unknown> };
+    if (fields) reg.agents[name] = { ...(reg.agents[name] as object | undefined), ...fields }; else delete reg.agents[name];
+    writeFileSync(registryPath, JSON.stringify(reg));
+  };
   const agent = async (...args: string[]): Promise<Reply> => {
     calls.push(args);
     const own = replies[`${args[0]} ${args[1]}`];
     if (own) return own(args);
+    if (args[0] === "kill") setAgent(args[1], { status: "stopped" });
     return args[0] === "archive" ? { ok: true, archived: ["a.jsonl"] } : { ok: true, message: `${args[1]} 已销毁。` };
   };
   const retireDeps: RetireDeps = {
     ledger: async (...args) => runLedger(args.slice(1), deps("scheduler")), agent,
     git: async (args) => { gitCalls.push(args); return git(args); },
     exists: existsSync, worktreeRoot: root, notifyPm: async (_t, text) => { notices.push(text); },
+    agents: () => readRegistryAgents(registryPath),
   };
   const sh = (cwd: string, ...args: string[]) => {
     const r = Bun.spawnSync(["git", "-C", cwd, ...args], { stdout: "pipe", stderr: "pipe" });
@@ -60,29 +72,30 @@ function fixture() {
     const author = opts.agent ?? `agent-task-${id.toLowerCase()}`;
     createTask(db, { actor: "owner", now: (now += 10) }, { project: opts.project ?? "p", id, title: id, kind: "code", agent: author });
     db.query("UPDATE tasks SET stage = ? WHERE id = ?").run(stage, id);
+    const [mine, rv] = worktreeDirs(root, id);
     const bind = (role: "author" | "reviewer", name: string, transport: string) => {
       const ens = `ens:${id}:${role}`;
       db.query(`INSERT INTO scheduler_intents (id, taskId, project, node, action, causalSeq, taskRev, specRev, templateVersion, status, reason, createdAt, updatedAt)
         VALUES (?, ?, ?, 'restate', 'ensure_session', 0, 1, 1, 2, 'done', 'test', 0, 0)`).run(ens, id, opts.project ?? "p");
       db.query(`INSERT INTO scheduler_sessions (taskId, role, agent, sessionId, family, transport, state, createIntentId, createdAt, updatedAt)
         VALUES (?, ?, ?, ?, ?, ?, 'active', ?, 0, 0)`).run(id, role, name, `s-${id}-${role}`, role === "author" ? "claude" : "codex", transport, ens);
+      if (transport !== "peer") setAgent(name, { status: "active", sessionId: `s-${id}-${role}`, cwd: role === "author" ? mine : rv });
     };
     bind("author", author, opts.transport ?? "tmux");
     if (opts.reviewer !== null) bind("reviewer", opts.reviewer ?? `agent-rv-${id.toLowerCase()}`, opts.transport === "peer" ? "peer" : "acp");
     if (opts.worktrees !== false) {
-      const [mine, rv] = worktreeDirs(root, id);
       sh(repo, "worktree", "add", "-q", mine, "-b", `feat/${id.toLowerCase()}`);
       sh(repo, "worktree", "add", "-q", "--detach", rv);
     }
   };
-  const tick = async (projects = ["p"]) => {
-    const r = await schedulerRetireTick(db, projects, retireDeps);
+  const tick = async (projects = ["p"], pace?: TickPace) => {
+    const r = await schedulerRetireTick(db, projects, retireDeps, pace);
     if (r.failed.length) throw new Error(JSON.stringify(r.failed));
     return r.cards;
   };
   const row = (id: string, role: "author" | "reviewer") => getSchedulerSession(db, id, role) as SchedulerSession;
   cleanup.push(() => { closeLedger(path); rmSync(dir, { recursive: true, force: true }); });
-  return { db, root, repo, card, tick, row, calls, gitCalls, notices, replies, retireDeps, cli: (actor: string, ...a: string[]) => runLedger(a, deps(actor)) };
+  return { db, root, repo, card, tick, row, calls, gitCalls, notices, replies, retireDeps, setAgent, cli: (actor: string, ...a: string[]) => runLedger(a, deps(actor)) };
 }
 
 describe("i28-S2 card retirement", () => {
@@ -176,13 +189,14 @@ describe("i28-S2 card retirement", () => {
     expect(f.row("P1", "author")).toMatchObject({ state: "retired", killReceipt: "peer 会话：不在本机，不发命令，只标退役" });
   });
 
-  test("an agent PM already cleared counts as killed; a missing registry entry has nothing to archive", async () => {
+  test("an agent PM already cleared is not killed again; a missing registry entry has nothing to archive", async () => {
     const f = fixture();
     f.card("T1", "verified", { reviewer: null, worktrees: false });
+    f.setAgent("agent-task-t1", null);
     f.replies["archive agent-task-t1"] = () => ({ ok: false, error: "agent-task-t1 不在 registry 或无 sessionId" });
-    f.replies["kill agent-task-t1"] = () => ({ ok: false, error: "agent-task-t1 不存在" });
     expect((await f.tick())[0].step).toBe("retired");
-    expect(f.row("T1", "author")).toMatchObject({ state: "retired", archiveReceipt: "agent 已不在 registry，无可归档", killReceipt: "agent 已不存在（先前已清）" });
+    expect(f.calls).toEqual([["archive", "agent-task-t1"]]);
+    expect(f.row("T1", "author")).toMatchObject({ state: "retired", archiveReceipt: "agent 已不在 registry，无可归档", killReceipt: "agent 已不在 registry（先前已清）" });
   });
 
   test("busy kill resumes next tick without archiving again; repeated ticks and a fresh service never kill twice", async () => {
@@ -234,12 +248,129 @@ describe("i28-S2 card retirement", () => {
   });
 });
 
+const intentRow = (id: string, taskId: string, action: string, status: string) =>
+  [`INSERT INTO scheduler_intents (id, taskId, project, node, action, causalSeq, taskRev, specRev, templateVersion, status, reason, createdAt, updatedAt)
+    VALUES (?, ?, 'p', 'write', ?, 0, 1, 1, 2, ?, 'test', 0, 0)`, id, taskId, action, status] as const;
+
+describe("i28-S2 round 1 findings", () => {
+  test("kill-retry: a kill whose receipt never reached the ledger is not sent again", async () => {
+    const f = fixture();
+    f.card("T1", "verified", { reviewer: null, worktrees: false });
+    const ledger = f.retireDeps.ledger;
+    let fail = true;
+    f.retireDeps.ledger = async (...args) => {
+      if (fail && args[1] === "scheduler-session-retire" && args.includes("kill")) { fail = false; return { ok: false, error: "injected" }; }
+      return ledger(...args);
+    };
+    expect((await f.tick())[0].step).toBe("held");
+    expect(f.row("T1", "author").killReceipt).toBeNull();
+    expect((await schedulerRetireTick(f.db, ["p"], { ...f.retireDeps })).cards[0].step).toBe("retired");
+    expect(f.calls.filter((c) => c[0] === "kill")).toHaveLength(1);
+    expect(f.row("T1", "author").killReceipt).toBe("agent 早已停止，不再 kill");
+  });
+
+  test("kill-retry: a name now running another session is not killed; PM hears about it", async () => {
+    const f = fixture();
+    f.card("T1", "verified", { reviewer: null, worktrees: false });
+    f.setAgent("agent-task-t1", { sessionId: "s-other" });
+    expect((await f.tick())[0].step).toBe("handoff");
+    expect(f.calls.filter((c) => c[0] === "kill")).toEqual([]);
+    expect(f.notices).toHaveLength(1);
+    expect(f.notices[0]).toContain("s-other");
+  });
+
+  test("notice-lost: a notice that failed keeps the card open and goes out next pass, once", async () => {
+    const f = fixture();
+    f.card("T1", "verified", { reviewer: null });
+    const dir = worktreeDirs(f.root, "T1")[0];
+    writeFileSync(join(dir, "draft.txt"), "keep");
+    const notify = f.retireDeps.notifyPm;
+    f.retireDeps.notifyPm = async () => { throw new Error("bridge down"); };
+    expect((await f.tick())[0]).toMatchObject({ step: "held" });
+    expect(getIntent(f.db, "retire:T1")?.status).toBe("submitted");
+    f.retireDeps.notifyPm = notify;
+    expect((await f.tick())[0].step).toBe("handoff");
+    expect(await f.tick()).toEqual([]);
+    expect(f.notices).toHaveLength(1);
+    expect(f.notices[0]).toContain(dir);
+    expect(existsSync(join(dir, "draft.txt"))).toBe(true);
+    expect(getIntent(f.db, "retire:T1")?.status).toBe("done");
+  });
+
+  test("archive-notice: a failed archive still retires the session and reaches PM in the combined notice", async () => {
+    const f = fixture();
+    f.card("T1", "verified", { reviewer: null, worktrees: false });
+    f.replies["archive agent-task-t1"] = () => ({ ok: false, archived: [], note: "archive destination full" });
+    expect((await f.tick())[0].step).toBe("handoff");
+    expect(f.row("T1", "author").state).toBe("retired");
+    expect(f.notices).toHaveLength(1);
+    expect(f.notices[0]).toContain("archive destination full");
+  });
+
+  test("shared-worktree: a checkout a live agent of an unfinished card works in stays and goes to PM", async () => {
+    const f = fixture();
+    f.card("T1", "verified", { agent: "agent-shared", reviewer: null });
+    createTask(f.db, { actor: "owner", now: 5000 }, { project: "p", id: "T9", title: "busy", kind: "code", agent: "agent-shared" });
+    f.db.query("UPDATE tasks SET stage = 'build' WHERE id = 'T9'").run();
+    const [mine, rv] = worktreeDirs(f.root, "T1");
+    expect((await f.tick())[0].step).toBe("handoff");
+    expect(f.calls.filter((c) => c[0] === "kill")).toEqual([]);
+    expect(existsSync(mine)).toBe(true);
+    expect(existsSync(rv)).toBe(false);
+    expect(f.notices[0]).toContain("agent-shared 还在这里工作");
+  });
+
+  test("cancel-open: a card cancelled mid-dispatch has its stray intent closed and its sessions retired", async () => {
+    const f = fixture();
+    f.card("T1", "build", { reviewer: null, worktrees: false });
+    f.db.query(intentRow("write:T1", "T1", "dispatch", "submitted")[0]).run(...intentRow("write:T1", "T1", "dispatch", "submitted").slice(1));
+    moveStage(f.db, { actor: "owner", now: 5000 }, { taskId: "T1", from: "build", to: "cancelled" });
+    expect((await f.tick())[0].step).toBe("retired");
+    expect(getIntent(f.db, "write:T1")?.status).toBe("cancelled");
+    expect(f.row("T1", "author").state).toBe("retired");
+  });
+
+  test("cancel-open: merge queue intents and unknown ones still make a cancelled card wait", () => {
+    const f = fixture();
+    f.card("T1", "cancelled", { reviewer: null, worktrees: false });
+    f.card("T2", "cancelled", { reviewer: null, worktrees: false });
+    for (const r of [intentRow("m:T1", "T1", "merge", "submitted"), intentRow("w:T2", "T2", "dispatch", "unknown")]) f.db.query(r[0]).run(...r.slice(1));
+    expect(retireCandidates(f.db, ["p"])).toEqual([]);
+  });
+
+  test("retire-fairness: five cards held every pass do not keep a sixth from its turn", async () => {
+    const f = fixture();
+    for (let n = 0; n < 6; n++) {
+      f.card(`T${n}`, "verified", { reviewer: null, worktrees: false });
+      if (n < 5) f.replies[`kill agent-task-t${n}`] = () => ({ ok: false, error: "正在 restart，等它结束再 kill" });
+    }
+    const pace: TickPace = { cursor: {}, yieldNow: () => false };
+    for (let n = 0; n < 2; n++) expect(await f.tick(["p"], pace)).toHaveLength(RETIRE_CARDS_PER_PASS);
+    expect(f.row("T5", "author").state).toBe("retired");
+  });
+
+  test("retire-budget: retirement gets its own floor after a slow autostart spent the pass budget", async () => {
+    const f = fixture();
+    f.card("T1", "verified", { reviewer: null, worktrees: false });
+    const config = { enabled: true, pollMs: 1000, autoDispatch: true, projects: { p: { repo: f.repo, requiredChecks: [], maxActiveWorkers: 1 } } };
+    await schedulerPass(f.db, config as unknown as SchedulerConfig, {
+      assertOwner: () => {}, budgetMs: 6, manager: f.retireDeps.ledger, peerPr: async () => ({ failed: [] }),
+      maintenance: { path: join(f.root, "m.lock"), marker: join(f.root, "u.marker"), request: join(f.root, "u.request") },
+      autoDeps: () => ({}) as never,
+      autostart: () => ({ resume: async () => [], start: async () => { await Bun.sleep(12); return []; } }),
+      retire: async (db, _c, _m, _a, _l, pace) => (await schedulerRetireTick(db, ["p"], f.retireDeps, pace)).failed,
+    });
+    expect(f.row("T1", "author").state).toBe("retired");
+  });
+});
+
 describe("i28-S2 receipts", () => {
   test("archive / kill answers map to receipts, busy or failure", () => {
     expect(archiveReceipt({ ok: false, note: "源已被 CC 清理" })).toBe("归档没成，源 jsonl 留在原处：源已被 CC 清理");
     expect(killOutcome({ ok: true, alreadyStopped: true })).toEqual({ receipt: "agent 早已停止" });
     expect(killOutcome({ ok: false, error: "x 正在 kill（pid 1），等它结束再试" })).toHaveProperty("busy");
     expect(killOutcome({ ok: false, error: "boom" })).toEqual({ failed: "boom" });
+    expect(killOutcome({ ok: false, error: "x 不存在" })).toEqual({ receipt: "agent 已不存在（先前已清）" });
     expect(worktreeDirs("/w", "../x")).toEqual([]);
   });
 });

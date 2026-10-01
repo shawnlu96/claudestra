@@ -121,7 +121,7 @@ export async function schedulerPass(db: Database | null, config: SchedulerConfig
         const autoPace = pace.phase();
         failed.push(...(await schedulerAutoTick(db, config.projects, deps, autoPace)).failed);
         failed.push(...(await auto.start(config, autoPace))); // 开卡在 tick 之后，每轮最多一张，tick 用完预算就不开
-        failed.push(...(await (opts.retire ?? retireStep)(db, config, manager, active, held, autoPace))); // verified / cancelled 卡收尾
+        failed.push(...(await (opts.retire ?? retireStep)(db, config, manager, active, held, pace.phase()))); // 收尾自带保底份额，开卡吃光预算也轮得到
       }
     }
     if (opts.lend) failed.push(...(await opts.lend(active, held)).failed.map((f) => ({ taskId: `lend ${f.orderId}`, error: f.error })));
