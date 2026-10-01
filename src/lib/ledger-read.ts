@@ -9,7 +9,7 @@ import { Database } from "bun:sqlite";
 import { statSync } from "node:fs";
 import { depViews, reviewBranches, type DepView, type ReviewBranches } from "./ledger-deps.js";
 import { stageTimeline, type StageEntry } from "./ledger-metrics.js";
-import { compactStage, doneCard, eventsByTarget, liveCard, taskView, type OverviewItem, type OverviewTask, type TaskView } from "./ledger-read-cards.js";
+import { compactStage, doneCard, eventsByTarget, liveCard, overviewCard, taskView, type OverviewItem, type OverviewTask, type TaskView } from "./ledger-read-cards.js";
 import { dayStartOf, doneWindow, type DoneRest } from "./ledger-read-done.js";
 import { TERMINAL_STAGES, type LedgerEvent, type LedgerTask, type Stage } from "./ledger-stages.js";
 import { auditChangedProjects, openFindings, type StoredFinding } from "./ledger-audit-store.js";
@@ -132,7 +132,7 @@ function projectViewSnapshot(db: Database, project: string, now: number, dayStar
   return {
     meta: getMeta(db, project),
     items: listItems(db, project).map((i) => ({ id: i.id, title: i.title, oneLine: i.oneLine })),
-    tasks: views.flatMap((v) => (!compactStage(v.stage) ? [liveCard(v, line(v))] : win.keep.has(v.id) ? [doneCard(v, win.today.has(v.id) ? line(v) : null)] : [])),
+    tasks: views.flatMap((v) => (!compactStage(v.stage) ? [liveCard(v, line(v))] : win.keep.has(v.id) ? [doneCard(v, win.today.has(v.id) ? line(v) : null)] : [])).map(overviewCard),
     doneCursor: win.cursor,
     doneRest: win.rest,
     deps: deps.filter((d) => visible.has(d.from) && visible.has(d.to)),

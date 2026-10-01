@@ -103,6 +103,36 @@ describe("总览窗口", () => {
     expect(Object.values(vb.doneRest.byItem).reduce((s, m) => s + Object.values(m).reduce((a, b) => a + (b ?? 0), 0), 0)).toBe(vb.doneRest.n);
   });
 
+  test("未满足前置 50 / 500 张：每张卡最多 10 个阻塞 ID、总览字节封顶，详情保留全量", () => {
+    const sample = (n: number) => {
+      const db = fixture(0, 1);
+      const ids = Array.from({ length: n }, (_, k) => `cancelled-card-${String(k).padStart(4, "0")}`);
+      for (const [k, id] of ids.entries()) {
+        card(db, id, "cancelled", NOW - 48 * H - k * MIN, "i0");
+        addDep(db, OWNER, { from: id, to: "l0", when: "前置上线" });
+      }
+      // 已完成卡也可能有未满足前置：总览所有卡都要限长。
+      for (const id of ids.slice(1)) addDep(db, OWNER, { from: id, to: ids[0]!, when: "前置上线" });
+      const view = projectView(db, "p", NOW);
+      const live = view.tasks.find((t) => t.id === "l0")!;
+      const done = view.tasks.find((t) => t.id === ids[0])!;
+      expect([live.blockedBy, live.blockedByMore, live.runnable]).toEqual([ids.slice(0, 10), n - 10, false]);
+      expect([done.blockedBy.length, done.blockedByMore, done.runnable]).toEqual([10, n - 11, false]);
+      expect(view.tasks.every((t) => t.blockedBy.length <= 10)).toBe(true);
+      const detail = taskDetail(db, "p", "l0", NOW)!;
+      expect(detail.task.blockedBy).toEqual(ids);
+      expect(detail.task.runnable).toBe(false);
+      expect(detail.deps.in).toHaveLength(n);
+      expect("blockedByMore" in detail.task).toBe(false);
+      expect(wire(view)).toBeLessThan(35_000);
+      closeLedger(":memory:");
+      return view;
+    };
+    const small = sample(50), large = sample(500);
+    console.log(`waiting overview bytes: 50=${wire(small)} 500=${wire(large)} diff=${wire(large) - wire(small)}`);
+    expect(Math.abs(wire(large) - wire(small))).toBeLessThan(5_000);
+  });
+
   test("今日完成与最近窗口共用 30 张上限、只有今天的带小圆点；不足补到 30；没有更早的 = doneCursor null", () => {
     const db = fixture(0, 0);
     for (let k = 0; k < 60; k++) card(db, `t${k}`, "verified", NOW - k * 30 * MIN, "i0");

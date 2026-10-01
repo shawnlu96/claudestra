@@ -48,10 +48,18 @@ type DotStep = Pick<TaskStep, "step" | "round" | "executor" | "executorKind" | "
 type DotLine = Omit<StepLineInfo, "steps"> & { steps: DotStep[] };
 type OverviewEvent = Pick<LedgerEvent, "seq" | "ts" | "actor" | "target" | "kind" | "text" | "data">;
 export type OverviewTask = Partial<Omit<TaskView, "metrics" | "lastEvent">> & Pick<TaskView, "id" | "title" | "kind" | "stage" | "round" | "updatedAt" | "stageSince" | "blockedBy" | "runnable"> & {
+  /** 总览省略的未满足前置数；详情仍返回全量 blockedBy。 */
+  blockedByMore?: number;
   lastEvent?: OverviewEvent | null;
   metrics: MetricsSummary;
   stepLine?: DotLine;
 };
+/** 只裁总览输出：runnable 已按全量依赖计算，不能拿截断后的列表重算。 */
+export function overviewCard(card: OverviewTask): OverviewTask {
+  const more = card.blockedBy.length - 10;
+  return more > 0 ? { ...card, blockedBy: card.blockedBy.slice(0, 10), blockedByMore: more } : card;
+}
+
 export const compactStage = (stage: Stage) => stage === "verified" || TERMINAL_STAGES.includes(stage);
 
 function metricsSummary(m: TaskMetrics): MetricsSummary {
