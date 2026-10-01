@@ -14,6 +14,7 @@ import { lendAskVerdict } from "./lend-ask.js";
 import { LEND_ROOT, prepareClone, removeOrderDir } from "./lend-clone.js";
 import { readLend } from "./lend-config.js";
 import { isWriteStep } from "./lend-git.js";
+import { withPaneArchive } from "./lend-pane-archive.js";
 import { ensurePr, probePush, pushWork } from "./lend-push.js";
 import { guardJournalWrites, LEND_JOURNAL_PATH, liveOrders, openLendJournal, orderOf, unsettledOrders, type LendRow } from "./lend-journal.js";
 import { readLendContext } from "./lend-policy.js";
@@ -158,12 +159,12 @@ function lendDeps(journal: Database, ledger: LedgerReader, active: () => void, l
         return r.ok === true ? { ok: true } : { ok: false, error: String(r.error ?? "manager create 失败") };
       },
       send: (name, sessionId, text, key) => owned(() => send(name, sessionId, text, key)),
-      kill: async (name) => {
+      kill: withPaneArchive(async (name) => { // kill 前先存 pane 现场（lend-pane-archive.ts），存档失败不挡 kill
         const r = await plain("kill", name);
         const still = await probe(name);
         if (still === "no_window") return { ok: true };
         return { ok: false, reason: still === "unknown" ? "读不到 tmux 窗口 / 进程，没法确认已退出" : `kill 后窗口还在（${String(r.error ?? "")}）` };
-      },
+      }),
       alive: probe,
     },
   };
