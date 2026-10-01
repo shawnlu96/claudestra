@@ -115,14 +115,15 @@ export function stepState(events: readonly SuperviseEvent[], faultKey: string, s
 }
 
 /**
- * 之前每次自动处置的时刻（认领那一刻算一次，不管结果：做到一半崩了也算，宁可少做不能多做）。按处置表的计数范围筛：
+ * 之前每次自动处置的时刻（认领那一刻算一次，不管结果：做到一半崩了也算，宁可少做不能多做；只有重启认领后核下来没动手的 skipped 不算）。按处置表的计数范围筛：
  * work = 同一件活的同一类故障；hour = 这个 agent 最近一小时（重启额度宿主死、卡住共用）。
  */
 export function priorAttempts(events: readonly SuperviseEvent[], kind: FaultKind, workKey: string, now: number): number[] {
   const rule = SUPERVISE_RULES[kind];
   const kinds = RESTART_FAULTS.includes(kind) ? RESTART_FAULTS : [kind];
   const step = rule.action;
-  return events.filter((e) => e.phase === "claim" && e.step === step && kinds.includes(e.fault) &&
+  const skipped = new Set(step === "restart" ? events.filter((e) => e.phase === "done" && e.step === step && e.result === "skipped").map((e) => e.faultKey) : []);
+  return events.filter((e) => e.phase === "claim" && e.step === step && kinds.includes(e.fault) && !skipped.has(e.faultKey) &&
     (rule.scope === "hour" ? now - e.ts < HOUR_MS : e.workKey === workKey)).map((e) => e.ts);
 }
 

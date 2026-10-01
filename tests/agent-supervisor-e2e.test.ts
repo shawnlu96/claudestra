@@ -216,6 +216,37 @@ describe("宿主死了 → 重启 → 补发接着做 → 交付不重复", () =
     expect(h.log.restarts).toEqual([]);
   });
 
+  test("认领期间恢复了 / 会话被换了：不重启，记 skipped，不占重启额度", async () => {
+    const f = autoFixture();
+    cleanup.push(() => f.close());
+    await building(f);
+    let registry = REGISTRY;
+    const h = harness(f, { registry: undefined });
+    h.deps.registry = () => registry;
+    const record = h.deps.record;
+    let flip: (() => void) | null = () => { h.live["agent-task-one"] = "running"; };
+    h.deps.record = async (rec) => {
+      const r = await record(rec);
+      if (rec.step === "restart" && rec.phase === "claim" && flip) flip(), (flip = null); // 台账写完、真正重启之前 agent 回来了
+      return r;
+    };
+    h.live["agent-task-one"] = "no_window";
+    await h.tick();
+    expect((await h.tick()).outcomes[0]).toMatchObject({ step: "recovered" });
+    expect(h.log.restarts).toEqual([]);
+    expect(h.events("agent-task-one").map((e) => `${e.step}/${e.phase}/${e.result ?? ""}`)).toEqual(["restart/claim/", "restart/done/skipped"]);
+    // 换会话：PM 刚把 registry 换成新会话
+    h.live["agent-task-one"] = "no_window";
+    flip = () => { registry = REGISTRY.map((a) => (a.name === "agent-task-one" ? { ...a, sessionId: "s-new" } : a)); };
+    await h.tick();
+    expect((await h.tick()).outcomes[0]).toMatchObject({ step: "recovered", detail: expect.stringContaining("不在监护范围") });
+    expect(h.log.restarts).toEqual([]);
+    // 两次 skipped 都不算数：恢复原会话后照常还有 2 次重启额度
+    registry = REGISTRY;
+    for (let i = 0; i < 40; i++) await h.tick();
+    expect(h.log.restarts).toEqual(["agent-task-one", "agent-task-one"]);
+  });
+
   test("一小时最多重启 2 次，超了报派活方 + 告诉 owner，这件活不再自动重启", async () => {
     const f = autoFixture();
     cleanup.push(() => f.close());

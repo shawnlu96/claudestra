@@ -9,7 +9,7 @@
  * wedge watcher 盯的是「在动但不结束」，这里补的是「已结束但是被错误结束的」。
  * 纯逻辑，单测 tests/api-error-resume.test.ts。
  */
-import { overloadResumeAllowed } from "./agent-supervisor-bridge.js";
+import { overloadEscalate } from "./agent-supervisor-bridge.js";
 export { noteOverload } from "./agent-supervisor-bridge.js"; // 给 quota-wall-wiring 用：它的单测按本模块的导出注入依赖
 
 export interface ApiErrorState {
@@ -26,7 +26,7 @@ export type NoteResult = "track" | "escalate";
 
 export function noteApiError(m: Map<string, ApiErrorState>, cid: string, error: string, now: number): NoteResult {
   const prev = m.get(cid);
-  if (prev?.resumedAt !== undefined && now - prev.resumedAt < RESUME_WINDOW_MS && !overloadResumeAllowed(cid, now)) {
+  if (overloadEscalate(cid, now, prev, RESUME_WINDOW_MS)) {
     m.delete(cid);
     return "escalate";
   }

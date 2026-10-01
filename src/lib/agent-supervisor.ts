@@ -44,7 +44,8 @@ export interface SuperviseDeps {
   record(rec: SuperviseRecord): Promise<{ ok: boolean; duplicate?: boolean; error?: string }>;
   /** 同会话发一条（route_to_agent 带 expectSession） */
   send(agent: string, sessionId: string, text: string): Promise<SendResult>;
-  restart(agent: string): Promise<{ ok: boolean; error?: string }>;
+  /** 按 registry 重启；sessionId = 判定时的会话，生产在拉起 manager 前再对一次，不是它就不动（skipped） */
+  restart(agent: string, sessionId: string): Promise<{ ok: boolean; error?: string; skipped?: string }>;
   /** 调度单退回人工并通知 PM（auto-tick 的 escalate 同一条路） */
   escalate(taskId: string, intentId: string, reason: string): Promise<void>;
   notifyCaller(caller: string, text: string): Promise<void>;
@@ -87,7 +88,7 @@ export class AgentSupervisor {
     const stuckMs = config.supervise.stuckMin * 60_000;
     for (const s of list) {
       try {
-        const r = await new AgentRound(db, s, deps, this.strikes, stuckMs).run();
+        const r = await new AgentRound(db, config, s, deps, this.strikes, stuckMs).run();
         if (r) out.outcomes.push({ agent: s.agent, ...r });
       } catch (e) {
         if (e instanceof SchedulerStopped) throw e;
@@ -106,7 +107,8 @@ class AgentRound {
   /** 重启的去重键在这一轮开始时就定（看到的台账是同一份）：同时开始的两轮算出同一个键，后认领的撞去重 */
   private readonly restartKey: string;
 
-  constructor(readonly db: Database, readonly s: Supervised, readonly deps: SuperviseDeps, readonly strikes: TwoStrikes, readonly stuckMs: number) {
+  constructor(readonly db: Database, readonly config: SchedulerConfig, readonly s: Supervised, readonly deps: SuperviseDeps, readonly strikes: TwoStrikes,
+    readonly stuckMs: number) {
     this.events = superviseEvents(db, s.agent, deps.now() - EVENT_LOOKBACK_MS);
     this.workKey = workKeyOf(s.work);
     this.restartKey = restartKey(db, s.agent);
@@ -225,12 +227,13 @@ class AgentRound {
     let n = this.events.filter((x) => x.fault === "overload" && x.step === "resume" && x.workKey === this.workKey).length;
     for (const e of (this.deps.overload()[this.s.channelId]?.events ?? []).filter((x) => x.at >= since)) {
       const key = `overload:${this.s.agent}:${e.at}`;
+      const workReport = `overload:${this.s.agent}:${this.workKey}`; // 用完以后每次撞都是 escalate：同一件活只报一次
       if (e.act === "track" && !stepState(this.events, key, "resume").done) {
         const rec = this.base("overload", key, "resume", ++n, SUPERVISE_RULES.overload.limit);
         await this.done(rec, "ok", `bridge 60 秒后同会话续跑：${e.error}`);
-      } else if (e.act === "escalate" && !this.tried(key, "report")) {
+      } else if (e.act === "escalate" && !this.tried(workReport, "report")) {
         const d = { attempts: SUPERVISE_RULES.overload.limit, limit: SUPERVISE_RULES.overload.limit };
-        const step = await this.report("overload", key, d, e.error);
+        const step = await this.report("overload", workReport, d, e.error);
         if (step) return step;
       }
     }
@@ -261,15 +264,30 @@ class AgentRound {
     const d = decide(fault, priorAttempts(this.events, fault, this.workKey, now), now, now);
     if (d.kind === "report") return this.report(fault, `${fault}:${this.s.agent}:${this.workKey}`, d, down);
     if (d.kind === "wait") return { step: "wait", detail: `${down}，重启退避到 ${new Date(d.untilMs).toISOString()}` };
-    // 判定和动手之间可能恢复了（宿主自己起来了、终于来了 update）：动手前再看一眼，不是同一种否定就不动
-    const again = await this.look();
-    const still = down === "stuck" ? again.liveness === "running" && again.stuckSince !== null : again.liveness === down;
-    if (!still) return { step: "recovered", detail: `${down} 确认后又恢复了（${again.liveness}），不重启` };
+    // 判定和动手之间可能恢复了：认领前看一眼（省得白占额度），认领后再核一遍（认领要等台账写完）
+    const pre = await this.stillDown(down);
+    if (pre) return { step: "recovered", detail: `${pre}，不重启` };
     const rec = this.base(fault, this.restartKey, "restart", d.attempt, d.limit);
     if (!(await this.claim(rec))) return null;
-    const r = await this.deps.restart(this.s.agent);
+    const late = await this.stillDown(down);
+    const r = late ? { ok: false, skipped: late } : await this.deps.restart(this.s.agent, this.s.sessionId);
+    if (r.skipped) return await this.done(rec, "skipped", r.skipped), { step: "recovered", detail: `${r.skipped}，不重启` };
     await this.done(rec, r.ok ? "ok" : "failed", r.ok ? down : `${down}；${r.error ?? ""}`);
     return { step: "restart", detail: r.ok ? `${down} → 已重启（第 ${d.attempt}/${d.limit} 次）` : `重启失败：${r.error ?? ""}` };
+  }
+
+  /**
+   * 重启的前提此刻还成立吗（null = 成立）：还在监护名单里、会话和活没换（PM 换会话、活交了 / 退回人工都算换），
+   * 而且还是同一种否定。tests/agent-supervisor-e2e.test.ts「认领期间恢复 / 换会话」。
+   */
+  private async stillDown(down: Down): Promise<string | null> {
+    const now = this.deps.now();
+    const s = supervisedAgents({ config: this.config, registry: this.deps.registry(), db: this.db, calls: this.deps.calls(), held: this.deps.held, now })
+      .find((x) => x.agent === this.s.agent);
+    if (!s || s.sessionId !== this.s.sessionId || workKeyOf(s.work) !== this.workKey) return `${down} 确认后不在监护范围了（会话或在途的活变了）`;
+    const again = await this.look();
+    const still = down === "stuck" ? again.liveness === "running" && again.stuckSince !== null : again.liveness === down;
+    return still ? null : `${down} 确认后又恢复了（${again.liveness}）`;
   }
 
   /**
@@ -283,6 +301,7 @@ class AgentRound {
     const graced = now - last.ts < RESTART_GRACE_MS;
     const quiet = graced ? null : undefined;
     const done = stepState(this.events, last.faultKey, "restart").done;
+    if (done?.result === "skipped") return undefined; // 认领了但核下来不用重启：没有善后
     if (done?.result !== "ok" || last.workKey !== this.workKey || this.tried(last.faultKey, "nudge")) return quiet;
     if ((await this.deps.probe(this.s)) !== "running") return quiet;
     const text = restartNudgeText(this.s.work, last.fault === "stuck" ? "stuck" : "dead");

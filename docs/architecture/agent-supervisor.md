@@ -40,7 +40,7 @@ the auto tick is not wrapped, and the bridge-side hooks see an empty list — be
 
 | Fault | Action | Limit | After the limit |
 |---|---|---|---|
-| overload / rate limit / 5xx | the bridge's 60-second resume, same session | 3 per run of errors (others keep the old 1) | report dispatcher |
+| overload / rate limit / 5xx | the bridge's 60-second resume, same session | 3 per piece of work, persisted (others keep the old 1 per run) | escalate every further error, report dispatcher once |
 | cyber_policy | one fixed recovery message in the same session | 1 per piece of work | report dispatcher, advise "改 Claude 同家审、标待换模型终审" |
 | host / window gone, stuck | `manager restart` (resumes the registry session), then one "上次中断了，接着做原来的单" | 2 restarts per agent per hour, 5 min apart | report dispatcher + tell the owner; no more auto-restarts for that work |
 | quota / login | none | — | owner card as before + report dispatcher |
@@ -54,12 +54,19 @@ the scheduler identity's `ledger scheduler-supervise`. Each external action is *
 (fault key + step + phase) and only performed if the claim was new; a claim without a result counts as done ("unknown",
 never repeated). Counts for the limits come from these events, so a scheduler restart cannot reset them. The restart key is
 anchored on the agent's previous restart claim, taken at the start of the round, so two rounds starting together claim the
-same key. Right before restarting the supervisor looks again and does nothing if the agent came back.
+same key. Right before restarting the supervisor checks again — once before the claim (so a recovered agent does not use up
+the quota) and once after it (the claim waits on the ledger CLI): the agent must still be supervised with the same session and
+work, and still down the same way; the production effect compares the registry session once more just before it spawns
+`manager restart`. A failed re-check records the claim as `skipped`, which does not count toward the restart limit.
 
 ## Bridge side (`agent-supervisor-bridge.ts`)
 
-- `api-error-resume.ts` asks `overloadResumeAllowed` once a resumed agent errors again; `quota-wall-wiring.ts` records each
-  error and what the bridge did (`noteOverload`, supervised agents only) for the supervisor to book and report.
+- `api-error-resume.ts` asks `overloadEscalate` on every API-error turn. Unsupervised channels get the old answer (escalate
+  only when the error follows a resume within the window). For a supervised agent the grants are counted per work + session
+  in `state/supervise-overload.json` (and, if that file is lost, from the ledger's booked resumes), so a bridge restart or a
+  long gap cannot reset them; once 3 are used every further error escalates until the work changes, and a failed write
+  escalates too. `quota-wall-wiring.ts` records each error and what the bridge did (`noteOverload`, supervised agents only)
+  for the supervisor to book and report.
 - Failure cards: a supervised agent's cyber_policy card is opened without an owner push while recovery attempts remain.
 - Recovery: in a supervised project, the agent's next normally finished turn (`Stop`, own channel, not an API error)
   closes its open failed-turn cards (`stop-settle.ts` `closeRecoveredCards`); quota / login cards and other agents' cards are
