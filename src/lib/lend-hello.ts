@@ -52,27 +52,37 @@ export interface HelloState {
   tries: number; nextAt: number; helloMs: number | null; beatMs: number | null;
 }
 
-export function helloState(db: Database, peer: string): HelloState | null {
-  const raw = getMeta(db, helloKey(peer));
-  return raw ? JSON.parse(raw) as HelloState : null;
+/** journal meta 里的 JSON；没有或读坏了都当没有（hello 会重发一遍、重新记，坏值不能让整轮抛出去） */
+export function metaJson<T>(db: Database, key: string): T | null {
+  const raw = getMeta(db, key);
+  if (!raw) return null;
+  try { return JSON.parse(raw) as T; } catch { return null; /* 见上：当没有 */ }
 }
+
+export const helloState = (db: Database, peer: string): HelloState | null => metaJson<HelloState>(db, helloKey(peer));
 
 /** 协商出来的对方协议版本（W4 的 ask 转发也用）：没协商过 = 1 */
 export const peerProto = (db: Database, peer: string): 1 | 2 => (getMeta(db, protoKey(peer)) === "2" ? 2 : 1);
 
-/** 这一刻按 v2 对待这个 peer：协商过 proto 2、最近一次 hello 成功且没过 180 秒。否则一律按 v1（轮询 30 秒、逐单续租） */
+/**
+ * 续租走 beat、收回停单在 beat 里报：协商过 proto 2、最近一次 hello 没失败（404 / 403 / 超时之后这一段一律按 v1 逐单续租）。
+ * 不看新鲜度：收回、说完 grant:null 之后不再 hello，但手上还有单时 A 照样认 beat。
+ */
+export const speaksV2 = (db: Database, peer: string): boolean => peerProto(db, peer) === 2 && helloState(db, peer)?.ok === true;
+
+/** 轮询能降到兜底节奏的前提：speaksV2，而且最近一次成功的 hello 没过 180 秒（A 那边也还当它在线） */
 export function v2Live(db: Database, peer: string, now: number): boolean {
   const s = helloState(db, peer);
-  return peerProto(db, peer) === 2 && !!s?.ok && s.okAt !== null && now - s.okAt <= HELLO_FRESH_MS;
+  return speaksV2(db, peer) && s!.okAt !== null && now - s!.okAt <= HELLO_FRESH_MS;
 }
 
 /** 收回之后还欠一句 grant:null 的 peer：最近一次成功的 hello 带着授权、且没过 180 秒（过了 A 自己就按 0 槽算） */
 export function owedPeers(db: Database, now: number): string[] {
   const rows = db.query("SELECT key, value FROM lend_meta WHERE key LIKE 'hello:%'").all() as { key: string; value: string }[];
-  return rows.filter((r) => {
-    const s = JSON.parse(r.value) as HelloState;
-    return s.grant && s.okAt !== null && now - s.okAt <= HELLO_FRESH_MS;
-  }).map((r) => r.key.slice("hello:".length));
+  return rows.map((r) => r.key.slice("hello:".length)).filter((peer) => {
+    const s = helloState(db, peer);
+    return !!s?.grant && s.okAt !== null && now - s.okAt <= HELLO_FRESH_MS;
+  });
 }
 
 /** hello 正文（不含 v / boot / seq）。没有生效授权 = grant:null、0 槽；W8 前 roles 不会含 write；claude 永远 0 槽；busy 含已接下没领的单 */

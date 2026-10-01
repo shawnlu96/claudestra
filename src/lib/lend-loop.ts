@@ -13,7 +13,7 @@ import { advance, getMeta, liveOrders, ordersToday, patchOrder, setMeta, unsettl
 import { claimOrder, claimProblem, driveLeased, revoke, settleOrder, type LendDeps } from "./lend-drive.js";
 import { liveGrant, isRevoked } from "./lend-grant.js";
 import { admitOrders, LEND_FAMILY, pushKey, TICK_KEY } from "./lend-inbox.js";
-import { helloPeer, helloTargets, helloView, protoKey, v2Live, type LendRound, type V2Port } from "./lend-hello.js";
+import { helloPeer, helloTargets, helloView, metaJson, protoKey, speaksV2, v2Live, type LendRound, type V2Port } from "./lend-hello.js";
 import { beatPeer, beatView, type Renewal } from "./lend-beat.js";
 import { lendRequest, peerLendProblem, proxyVarsIn, type LendCall } from "./lend-remote.js";
 import type { HttpPeer } from "./peers.js";
@@ -120,7 +120,7 @@ function roundDeps(d: LoopDeps, r: Round): LoopDeps {
       throw e;
     }
   };
-  const live = (peer: string) => !!d.v2 && v2Live(d.db, peer, d.now());
+  const live = (peer: string) => !!d.v2 && speaksV2(d.db, peer);
   return {
     ...d, call: gate(d.call), ...(d.v2 ? { v2: { ...d.v2, call: gate(d.v2.call) } } : {}),
     settleHold: (row) => r.offline || r.failed.has(row.peer) || (row.settle?.notify === "stopped" && isRevoked(row) && live(row.peer)),
@@ -164,7 +164,7 @@ async function v2Step(d: LoopDeps & { v2: V2Port }, entries: LendEntry[], proble
   }
   const holders = new Set([...liveOrders(d.db), ...unsettledOrders(d.db)].map((x) => x.peer));
   for (const peer of holders) {
-    if (!v2Live(d.db, peer, d.now())) continue;
+    if (!speaksV2(d.db, peer)) continue;
     await perPeer(d, peer, "beat", async () => {
       if ((await beatPeer(d, peer, r.renewals)) !== "old_peer") return;
       setMeta(d.db, protoKey(peer), "1");
@@ -178,8 +178,7 @@ function pollDue(d: LoopDeps, peer: string, now: number, r: Round): { due: boole
   const fallback = !!d.v2 && v2Live(d.db, peer, now) && now - Number(getMeta(d.db, pushKey(peer)) ?? 0) <= PUSH_SEEN_MS;
   if (r.pollNow.has(peer)) return { due: true, every: fallback ? FALLBACK_POLL_MS : POLL_MS };
   if (!fallback) return { due: now >= Number(getMeta(d.db, `nextPoll:${peer}`) ?? 0), every: POLL_MS };
-  const last = JSON.parse(getMeta(d.db, `lastPoll:${peer}`) ?? "{}") as { at?: number };
-  return { due: now >= (last.at ?? 0) + FALLBACK_POLL_MS, every: FALLBACK_POLL_MS };
+  return { due: now >= (metaJson<{ at?: number }>(d.db, `lastPoll:${peer}`)?.at ?? 0) + FALLBACK_POLL_MS, every: FALLBACK_POLL_MS };
 }
 
 export async function lendTick(d: LoopDeps): Promise<TickResult> {
@@ -214,7 +213,7 @@ export async function lendTick(d: LoopDeps): Promise<TickResult> {
   const status: LendStatus = { at: now, lending: eff.lending, blocked, peers: {} };
   for (const entry of blocked ? [] : eff.lend) {
     // 被节流跳过的轮次沿用上一次 poll 的时间与错误（meta lastPoll:<peer>），doctor 才看得到「最近一次 poll 失败在哪」
-    const last = JSON.parse(getMeta(d.db, `lastPoll:${entry.peer}`) ?? "{}") as { at?: number; error?: string | null };
+    const last = metaJson<{ at?: number; error?: string | null }>(d.db, `lastPoll:${entry.peer}`) ?? {};
     const s: LendStatus["peers"][string] = { problem: problemOf(entry.peer), lastPollAt: last.at ?? null, lastError: last.error ?? null };
     status.peers[entry.peer] = s;
     const due = pollDue(d, entry.peer, now, r);

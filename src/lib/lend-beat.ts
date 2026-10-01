@@ -9,8 +9,8 @@
 import { redactForPeer } from "./dispatch-redact.js";
 import { roleOfStep } from "./lend-git.js";
 import { isRevoked } from "./lend-grant.js";
-import { helloState, type HelloDeps } from "./lend-hello.js";
-import { getMeta, liveOrders, orderOf, patchOrder, setMeta, unsettledOrders, LEASED_STATES, type LendRow } from "./lend-journal.js";
+import { helloState, metaJson, type HelloDeps } from "./lend-hello.js";
+import { liveOrders, orderOf, patchOrder, setMeta, unsettledOrders, LEASED_STATES, type LendRow } from "./lend-journal.js";
 import { LEND_OLD_PEER, lendRequest, type Lease, type LendRes } from "./lend-remote.js";
 import { parseV2Request, type BeatAnswer, type BeatOrder } from "./lend-wire-v2.js";
 
@@ -120,7 +120,7 @@ export async function beatPeer(d: HelloDeps, peer: string, renewals: Map<string,
   const leased = liveOrders(d.db).filter((r) => r.peer === peer && LEASED_STATES.includes(r.state) && (r.leaseGen ?? 0) >= 1);
   const ended = endedRows(d, peer, now);
   if (!leased.length && !ended.length) return null;
-  const last = JSON.parse(getMeta(d.db, beatKey(peer)) ?? "null") as { at: number; error: string | null } | null;
+  const last = metaJson<{ at: number; error: string | null }>(d.db, beatKey(peer));
   const every = Math.min(EVERY_MS.max, Math.max(EVERY_MS.min, helloState(d.db, peer)?.beatMs ?? EVERY_MS.fallback));
   if (last && now - last.at < every) return null;
   const items: Item[] = [...leased.map((row) => ({ row, ended: false })), ...ended.map((row) => ({ row, ended: true }))];
@@ -140,6 +140,6 @@ export async function beatPeer(d: HelloDeps, peer: string, renewals: Map<string,
 
 /** doctor 用：最近一次 beat 的时刻与错误 */
 export function beatView(d: Pick<HelloDeps, "db">, peer: string): string | null {
-  const last = JSON.parse(getMeta(d.db, beatKey(peer)) ?? "null") as { at: number; error: string | null } | null;
+  const last = metaJson<{ at: number; error: string | null }>(d.db, beatKey(peer));
   return last ? `${new Date(last.at).toISOString().slice(11, 19)}${last.error ? `（${last.error}）` : ""}` : null;
 }

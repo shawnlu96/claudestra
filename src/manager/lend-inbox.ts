@@ -8,6 +8,7 @@
 import { keyFingerprint } from "../lib/instance-key.js";
 import { admitOrders, type Admitted } from "../lib/lend-inbox.js";
 import { readLend } from "../lib/lend-config.js";
+import type { LendDeps } from "../lib/lend-drive.js";
 import { openLendJournal } from "../lib/lend-journal.js";
 import { readLendContext } from "../lib/lend-policy.js";
 import { peerLendProblem } from "../lib/lend-remote.js";
@@ -28,9 +29,11 @@ export interface InboxDeps {
   env: Record<string, string | undefined>;
   findPeer(name: string): Promise<HttpPeer | null>;
   journalPath?: string;
+  readLend: LendDeps["readLend"];
+  context: LendDeps["context"];
 }
 
-const realDeps: InboxDeps = { env: process.env, findPeer: findHttpPeer };
+const realDeps: InboxDeps = { env: process.env, findPeer: findHttpPeer, readLend: () => readLend(), context: () => readLendContext() };
 
 /** 参数与身份都核完、交给收单闸；纯 JSON 结果（tests 直接调） */
 export async function lendInbox(args: string[], deps: InboxDeps = realDeps): Promise<Out> {
@@ -52,7 +55,7 @@ export async function lendInbox(args: string[], deps: InboxDeps = realDeps): Pro
   try {
     const caller = { peer, fp: peerLendProblem(rec ?? undefined, peer) || !rec?.publicKey || keyFingerprint(rec.publicKey) !== fp ? null : fp };
     // 记录对不上（没钉钥、禁用、指纹不是钉住的那把）按「没有授权」整批拒：admitOrders 对 fp 为 null 的调用方一单不收
-    const r = await admitOrders({ db, now: () => Date.now(), readLend: () => readLend(), context: () => readLendContext() }, caller, req.value.orders, "push");
+    const r = await admitOrders({ db, now: () => Date.now(), readLend: deps.readLend, context: deps.context }, caller, req.value.orders, "push");
     return { ok: true, ...r };
   } finally { db.close(); }
 }
