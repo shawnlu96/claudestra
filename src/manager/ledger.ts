@@ -43,6 +43,7 @@ import { SUPERVISE_CMDS } from "./ledger-supervise-cmds.js";
 import { PEER_PR_CMDS } from "./ledger-peer-pr-cmds.js";
 import { AUTOSTART_CMDS } from "./ledger-autostart-cmds.js";
 import { SCHEDULER_REMOTE_CMDS } from "./ledger-scheduler-remote-cmds.js";
+import { LEND_TAKEOVER_CMDS } from "./ledger-lend-takeover-cmds.js";
 import { DRY_RUN_READS, isWriteInvocation } from "./write-commands.js";
 import { readSchedulerConfig } from "../lib/scheduler-config.js";
 import { collectCallerWitness } from "../lib/caller-witness.js";
@@ -55,7 +56,7 @@ const SCHEDULER_SERVICE_COMMANDS = new Set([
   "scheduler-observe", "scheduler-fallback-manual", "scheduler-stage", "scheduler-ui-ask", "lend-ask", "lend-inform", "lend-close-asks", "scheduler-pool",
   "scheduler-deploy-begin", "scheduler-deploy-step", "verify",
   "scheduler-unclaimed", "scheduler-unclaimed-sent", "scheduler-supervise", "peer-pr-intake", "peer-pr-observe", "peer-pr-push-record",
-  "scheduler-autostart", "scheduler-auto-resume", "scheduler-retire",
+  "scheduler-autostart", "scheduler-auto-resume", "scheduler-retire", "lend-takeover",
 ]);
 
 const COMMANDS: Record<string, CommandSpec> = {
@@ -71,7 +72,7 @@ const COMMANDS: Record<string, CommandSpec> = {
   ...AUDIT_CMDS,
   ...PEER_CMDS,
   ...LEND_ASK_CMDS,
-  ...LEND_CMDS,
+  ...LEND_CMDS, ...LEND_TAKEOVER_CMDS,
   ...STEP_CMDS,
   ...SCHEDULER_CMDS,
   ...SCHEDULER_DEPLOY_CMDS,
