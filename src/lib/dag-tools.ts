@@ -73,7 +73,9 @@ export const DAG_TOOLS = [
       "PM / master: start one planned node as an auto card in one step — creates the ledger card (<feature slug>-<key>), a git worktree (base default origin/main, " +
       "node_modules symlinked), the executor brief, the executor agent, records its fileGlobs, turns the scheduler workflow to auto, and binds the node. " +
       "The scheduler then dispatches the restate order itself; do not message the executor. Needs the spec card at ledger/docs/tasks/<card>.md or pass spec. " +
-      "Any failure rolls back what was done and reports failedStep. Slow (starts an agent): up to a few minutes.",
+      "Any failure rolls back what was done and reports failedStep. Slow (starts an agent): up to a few minutes. " +
+      "placement (default auto) picks this machine or a borrowed peer by the slot pool rules; peer:<name> pins it there (no local worktree / agent, " +
+      "restate skipped) and is refused when that peer cannot take writing now.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -86,6 +88,7 @@ export const DAG_TOOLS = [
         item: { type: "string", description: "挂到哪个事项，缺省与 feature 短名同名的事项（有的话）" },
         spec: { type: "string", description: "规格卡正文：规格卡还没写时给，会写进 ledger/docs/tasks/<卡号>.md" },
         repo: { type: "string", description: "项目目录之一（缺省项目第一个 git 目录）" },
+        placement: { type: "string", description: "放哪：auto（缺省，按槽池规则；算出本机就和不带一样）| local | peer:<名>（固定给这个 peer，过不了硬约束就拒）" },
       },
       required: ["featureId", "key"],
     },
