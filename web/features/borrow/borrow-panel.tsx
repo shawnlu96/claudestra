@@ -4,18 +4,18 @@
  * 开着时每 15 秒拉一次，页面切到后台就停；读接口 403 / 404（不是 owner 全权设备 / 老 bridge）整块不渲染。
  * 改设置的按钮只给 canRunFleet 的设备（与 bridge 写门同一来源）。remote.mode 还没有写入口，这里只读显示。
  */
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { fleetAccess } from "@/lib/api/fleet";
 import { useT } from "@/lib/i18n";
 import { Section } from "@/features/chat/components/settings/section";
-import { machineNow, saveBorrowPeer, type BorrowView, type DroppedCode, type DroppedView } from "./borrow-api";
-import { addableContacts, canSubmitNew, POLL_MS, sortPeers, toggleProject } from "./borrow-model";
-import { LimitLine, ProjectChips, Stepper } from "./borrow-bits";
+import type { BorrowView } from "./borrow-api";
+import { addableContacts, POLL_MS, sortPeers, stalePeers } from "./borrow-model";
 import { BorrowPeerCard } from "./borrow-peer-card";
-import { borrowFeed, dropPeer, EMPTY_FEED, visiblePeers, type Feed, type FeedState } from "./borrow-feed";
+import { borrowFeed, EMPTY_FEED, visiblePeers, type FeedState } from "./borrow-feed";
+import { NewPeer } from "./borrow-new-peer";
 import { RemoteRows } from "./borrow-remote";
-import { ActivityIcon, CheckIcon, PlusIcon, ServerIcon, TrashIcon, XIcon } from "./icons";
-import { fadeIn, fadeOut, shake } from "./motion";
+import { StaleEntry } from "./borrow-stale";
+import { ActivityIcon, PlusIcon } from "./icons";
 
 function useBorrowView() {
   const [s, setS] = useState<FeedState>(EMPTY_FEED);
@@ -62,10 +62,6 @@ function useCanWrite(): boolean {
   return ok;
 }
 
-const DROPPED_TEXT: Record<DroppedCode, string> = {
-  contact_gone: "联系人已删除", contact_disabled: "联系人已禁用", fp_changed: "对方实例换了", project_gone: "项目已删除", personal: "个人项目",
-};
-
 function ProjectModes({ view }: { view: BorrowView }) {
   const t = useT();
   const names = new Map(view.borrow.projects.map((p) => [p.id, p.name]));
@@ -85,75 +81,6 @@ function ProjectModes({ view }: { view: BorrowView }) {
   );
 }
 
-/** 声明了、但整条已失效的借入（联系人删了 / 禁用 / 换实例）：只给删除 */
-function DeadEntry({ d, canWrite, feed }: { d: DroppedView; canWrite: boolean; feed: Feed }) {
-  const t = useT();
-  const row = useRef<HTMLDivElement>(null);
-  const [busy, setBusy] = useState(false);
-  const drop = async (el: HTMLElement) => {
-    setBusy(true);
-    await dropPeer(d.peer, feed, { fade: () => fadeOut(row.current), fail: () => shake(el) });
-    setBusy(false);
-  };
-  return (
-    <div ref={row} className="flex min-w-0 items-center gap-2 rounded-lg bg-base-100 px-3 py-2 text-[12px] text-base-content/45">
-      <ServerIcon className="size-3.5 shrink-0" />
-      <span className="min-w-0 truncate font-mono line-through">{d.peer}</span>
-      <span className="shrink-0 text-[11px]">{t(DROPPED_TEXT[d.code])}</span>
-      {canWrite && (
-        <button className="btn btn-ghost btn-xs btn-square ml-auto" disabled={busy} aria-label={t("移除")} onClick={(e) => void drop(e.currentTarget)}>
-          <TrashIcon className="size-3.5" />
-        </button>
-      )}
-    </div>
-  );
-}
-
-function NewPeer({ peer, view, onCancel, onChanged }: { peer: string; view: BorrowView; onCancel: () => void; onChanged: () => Promise<void> }) {
-  const t = useT();
-  const box = useRef<HTMLDivElement>(null);
-  const [projects, setProjects] = useState<string[]>([]);
-  const [maxOpen, setMaxOpen] = useState(3);
-  const [busy, setBusy] = useState(false);
-  const limit = view.borrow.maxOpenLimit;
-  const order = view.borrow.projects.map((p) => p.id);
-  useEffect(() => fadeIn(box.current), []);
-  const submit = async (el: HTMLElement) => {
-    setBusy(true);
-    try {
-      await saveBorrowPeer(peer, { projects, maxOpen }, machineNow());
-      await onChanged();
-      onCancel();
-    } catch {
-      shake(el);
-      setBusy(false);
-    }
-  };
-  return (
-    <div ref={box} className="space-y-2 rounded-lg border border-dashed border-base-content/20 bg-base-100 px-3 py-2.5">
-      <div className="flex min-w-0 items-center gap-2">
-        <ServerIcon className="size-3.5 shrink-0 text-base-content/50" />
-        <span className="min-w-0 truncate font-mono text-[12.5px] font-semibold">{peer}</span>
-        <button className="btn btn-ghost btn-xs btn-square ml-auto" disabled={busy} aria-label={t("取消")} onClick={onCancel}>
-          <XIcon className="size-3.5" />
-        </button>
-        <button
-          className="btn btn-primary btn-xs btn-square"
-          disabled={busy || !canSubmitNew(projects, maxOpen, limit)}
-          aria-label={t("借用这台电脑")}
-          onClick={(e) => void submit(e.currentTarget)}
-        >
-          {busy ? <span className="loading loading-spinner loading-xs" /> : <CheckIcon className="size-3.5" />}
-        </button>
-      </div>
-      <ProjectChips options={view.borrow.projects} picked={projects} disabled={busy} onToggle={(id) => setProjects((cur) => toggleProject(cur, id, order))} />
-      <LimitLine name={peer} n={maxOpen}>
-        <Stepper value={maxOpen} limit={limit} disabled={busy} onCommit={setMaxOpen} />
-      </LimitLine>
-    </div>
-  );
-}
-
 export function BorrowPanel() {
   const t = useT();
   const { view, receivedAt, hidden, seq, gone, feed } = useBorrowView();
@@ -163,7 +90,7 @@ export function BorrowPanel() {
   const [adding, setAdding] = useState<string | null>(null);
   if (hidden || !view) return null;
   const options = view.borrow.projects;
-  const deadPeers = view.borrow.dropped.filter((d) => !d.project && !gone.has(d.peer));
+  const stale = stalePeers(view).filter((s) => !gone.has(s.peer));
   const addable = addableContacts(view).filter((c) => c !== adding);
   const stamp = { serverNow: view.now, receivedAt, tick };
   return (
@@ -175,7 +102,7 @@ export function BorrowPanel() {
             <BorrowPeerCard key={p.peer} peer={p} options={options} limit={view.borrow.maxOpenLimit} canWrite={canWrite} seq={seq} feed={feed}
               dropped={view.borrow.dropped.filter((d) => d.peer === p.peer)} {...stamp} />
           ))}
-          {deadPeers.map((d) => <DeadEntry key={d.peer} d={d} canWrite={canWrite} feed={feed} />)}
+          {stale.map((s) => <StaleEntry key={s.peer} s={s} view={view} canWrite={canWrite} feed={feed} />)}
           {adding && <NewPeer key={adding} peer={adding} view={view} onCancel={() => setAdding(null)} onChanged={reload} />}
           {canWrite && addable.length > 0 && (
             <div className="flex flex-wrap gap-1.5">
