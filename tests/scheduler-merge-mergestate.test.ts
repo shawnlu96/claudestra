@@ -49,12 +49,13 @@ function fixture(phase: MergePhase) {
   beginMergeRun(db, { actor: "scheduler", now: 101 }, INTENT, ["check"]);
   if (phase !== "ready") db.query("UPDATE scheduler_merges SET phase=? WHERE intentId=?").run(phase, INTENT);
   let snaps: PrSnapshot[] = [pr()];
+  const calls: string[] = [], gh = { behindBy: 0 };
   const external: MergeExternal = {
     inspect: async () => snaps.length > 1 ? snaps.shift()! : snaps[0]!,
-    freshness: async () => ({ behindBy: 0, mainHead: MAIN }),
+    freshness: async () => ({ behindBy: gh.behindBy, mainHead: MAIN }),
     carryReview: async () => ({ ok: false, reason: "不沿用" }),
-    updateBranch: async () => {},
-    merge: async () => M,
+    updateBranch: async () => { calls.push("update"); throw new Error("branch cannot be updated due to conflicts"); },
+    merge: async () => { calls.push("merge"); return M; },
   };
   const manager = async (...args: string[]) => runLedger(args.slice(1), { db, actor: "scheduler", projectIds: ["p"],
     loadRegistry: async () => ({} as Registry), saveRegistry: async () => {}, now: () => 300 }) as Promise<Record<string, unknown>>;
@@ -70,7 +71,7 @@ function fixture(phase: MergePhase) {
     frozen: getMeta(db, "p").queueFrozen.frozen,
   });
   const close = () => { closeLedger(path); rmSync(dir, { recursive: true, force: true }); };
-  return { db, tick, state, close };
+  return { db, tick, state, close, calls, gh };
 }
 type F = ReturnType<typeof fixture>;
 const with_ = async (phase: MergePhase, body: (f: F) => Promise<void>) => {
@@ -104,6 +105,37 @@ describe("i28-M12b UNKNOWN with no checks waits for GitHub instead of freezing",
       expect(f.state()).toEqual(WAITING("await_ci"));
       await f.tick([pr({ checks: [{ name: "check", bucket: "pending" }] })], T0 + 120_000);
       expect(f.state()).toEqual(WAITING("await_ci"));
+    });
+  });
+});
+
+describe("i28-M12b r1: UNKNOWN is waited out before any irreversible step", () => {
+  test("ready + behind main + UNKNOWN → no update-branch yet; next tick DIRTY → conflict bounce (unknown-ready-1)", async () => {
+    await with_("ready", async (f) => {
+      f.gh.behindBy = 1;
+      await f.tick([computing()], T0);
+      expect(f.state()).toEqual(WAITING("ready"));
+      expect(f.calls).toEqual([]);
+      await f.tick([pr({ mergeState: "DIRTY", checks: [] })], T0 + 30_000);
+      expect(f.state()).toEqual({ run: "resolved", stage: "fix", frozen: false });
+      expect(f.calls).toEqual([]);
+    });
+  });
+  test("await_ci green, then the last pre-merge read is UNKNOWN → no merging claim, waits; next tick merges (unknown-final-1)", async () => {
+    await with_("await_ci", async (f) => {
+      await f.tick([pr(), computing()], T0);
+      expect(f.state()).toEqual(WAITING("await_ci"));
+      expect(f.calls).toEqual([]);
+      await f.tick([pr(), pr(), pr({ state: "MERGED", mergeSha: M })], T0 + 30_000);
+      expect(f.state().run).toBe("merged");
+      expect(f.calls).toEqual(["merge"]);
+    });
+  });
+  test("await_ci green, then the last pre-merge read is DIRTY → conflict bounce, never merges", async () => {
+    await with_("await_ci", async (f) => {
+      await f.tick([pr(), pr({ mergeState: "DIRTY", checks: [] })], T0);
+      expect(f.state()).toEqual({ run: "resolved", stage: "fix", frozen: false });
+      expect(f.calls).toEqual([]);
     });
   });
 });

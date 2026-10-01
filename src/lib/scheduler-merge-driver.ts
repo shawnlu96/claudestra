@@ -84,6 +84,27 @@ async function movedHead(run: MergeRun, external: MergeExternal, pr: PrSnapshot,
     mainHead: carry.mainHead, diffHash: carry.diffHash }), undefined, pr.head);
 }
 
+/** The last read is taken before the irreversible `merging` claim, so a transient UNKNOWN there still waits and a conflict
+ * still bounces; after the claim only the head-pinned merge API runs (GitHub refuses a moved head, so nothing merges early). */
+async function claimAndMerge(run: MergeRun, external: MergeExternal, step: Step, assertActive: () => void): Promise<MergeRun> {
+  const fresh = await external.inspect(run.prRef);
+  const same = fresh.state === "OPEN" && sameHead(run, fresh) && fresh.branch === run.expectedBranch && fresh.base === "main" &&
+    !fresh.draft && !fresh.crossRepository;
+  if (same && fresh.mergeState === "UNKNOWN") return unknownWait(run, step);
+  const bounced = await bounceStep(run, fresh, external, step);
+  if (bounced) return bounced;
+  if (!same || fresh.mergeState !== "CLEAN" || !green(run, fresh.checks)) return step("unknown", "合并前最后一次核对发现 PR/head/CI 已变");
+  await step("merging", `CI 全绿：${fresh.checks.map((c) => c.name).join(", ").slice(0, 300)}`);
+  assertActive();
+  const mergeSha = await external.merge(run.prRef, run.reviewedHead);
+  if (!/^[a-f0-9]{40}$/i.test(mergeSha)) return step("unknown", "merge API 未确认完整合并 SHA");
+  const merged = await external.inspect(run.prRef);
+  if (merged.state !== "MERGED" || merged.base !== "main" || !sameHead(run, merged) || merged.mergeSha !== mergeSha) {
+    return step("unknown", "合并后 PR 目标分支、head 或合并提交无法核实");
+  }
+  return step("merged", `PR 已合并 ${short(mergeSha)}，待 PM 部署`, mergeSha);
+}
+
 /** A changed head returns to review unless it only merged main in; an unobserved merge is never retried. */
 export async function driveMerge(run: MergeRun, source: MergeExternal, advance: MergeAdvance,
   assertActive: () => void = () => {}): Promise<MergeRun> {
@@ -104,6 +125,8 @@ export async function driveMerge(run: MergeRun, source: MergeExternal, advance: 
       if (pr.draft) return run;
       const bounced = await bounceStep(run, pr, external, step);
       if (bounced) return bounced;
+      // Before update-branch: a stale PR GitHub is still computing may be a conflict, which only bounces once it reads DIRTY.
+      if (pr.mergeState === "UNKNOWN") return unknownWait(run, step); // GitHub 尚未算出 mergeability，下一轮只读重查
       // GitHub reports CLEAN for a stale branch unless "require up to date" is on, so staleness is asked directly.
       const fresh = await external.freshness(run.prRef, pr.head);
       if (fresh.behindBy > 0 || pr.mergeState === "BEHIND") {
@@ -111,7 +134,6 @@ export async function driveMerge(run: MergeRun, source: MergeExternal, advance: 
         assertActive();
         return await updateOrBounce(claimed, external, step, stopped);
       }
-      if (pr.mergeState === "UNKNOWN") return unknownWait(run, step); // GitHub 尚未算出 mergeability，下一轮只读重查
       if (unstableWait(pr) === "failed") return step("unknown", "CI 失败或取消");
       if (pr.mergeState !== "CLEAN" && pr.mergeState !== "UNSTABLE") return step("unknown", `PR mergeState=${pr.mergeState}`);
       return step("await_ci", `PR ${short(pr.head)} 可合并，等待 CI`);
@@ -157,20 +179,7 @@ export async function driveMerge(run: MergeRun, source: MergeExternal, advance: 
       if (!green(run, pr.checks)) return run;
       const stale = await external.freshness(run.prRef, pr.head); // GitHub keeps saying CLEAN for a stale branch
       if (stale.behindBy > 0) return await refresh(`等 CI 期间 main 前进到 ${short(stale.mainHead)}，落后 ${stale.behindBy} 个提交`);
-      await step("merging", `CI 全绿：${pr.checks.map((c) => c.name).join(", ").slice(0, 300)}`);
-      const fresh = await external.inspect(run.prRef);
-      if (fresh.state !== "OPEN" || !sameHead(run, fresh) || fresh.branch !== run.expectedBranch || fresh.base !== "main" ||
-        fresh.draft || fresh.crossRepository || fresh.mergeState !== "CLEAN" || !green(run, fresh.checks)) {
-        return step("unknown", "合并前最后一次核对发现 PR/head/CI 已变");
-      }
-      assertActive();
-      const mergeSha = await external.merge(run.prRef, run.reviewedHead);
-      if (!/^[a-f0-9]{40}$/i.test(mergeSha)) return step("unknown", "merge API 未确认完整合并 SHA");
-      const merged = await external.inspect(run.prRef);
-      if (merged.state !== "MERGED" || merged.base !== "main" || !sameHead(run, merged) || merged.mergeSha !== mergeSha) {
-        return step("unknown", "合并后 PR 目标分支、head 或合并提交无法核实");
-      }
-      return step("merged", `PR 已合并 ${short(mergeSha)}，待 PM 部署`, mergeSha);
+      return await claimAndMerge(run, external, step, assertActive);
     }
     if (run.phase === "merging") {
       const pr = await external.inspect(run.prRef);
