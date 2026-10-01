@@ -28,6 +28,10 @@ import { appendEvent } from "../lib/ledger-write.js";
 import type { LedgerTask } from "../lib/ledger-stages.js";
 import { statePath } from "../lib/paths.js";
 import { notifyProjectPm } from "../lib/pm-notify.js";
+import { autoSnapshot } from "../lib/scheduler-auto-snapshot.js";
+import { readSchedulerConfig, type RemotePolicy } from "../lib/scheduler-config.js";
+import { explainPlacement } from "../lib/scheduler-placement-plan.js";
+import { readEffectiveBorrow } from "../lib/scheduler-pool-borrow.js";
 import { writeTextAtomicSync } from "../lib/state-file.js";
 import { readTextSoft, specPathFor } from "../lib/task-spec.js";
 import type { LedgerCli, Result } from "./ledger-context.js";
@@ -41,6 +45,8 @@ export interface LendCliDeps {
   result: LendResultDeps & Partial<Pick<LendDeliverDeps, "remoteHead" | "peerFp">>;
   /** v2 收回核对（i28-W2）：订单分支在远端的状态；不给 = 真 git ls-remote */
   branchState?: (repo: string, branch: string) => Promise<BranchState>;
+  /** 槽池放置要的项目调度策略（i28-W5）；不给 = 读真 scheduler.json */
+  schedulerPolicy?: (project: string) => { remote?: RemotePolicy; maxActiveWorkers: number } | null;
 }
 
 function realLendDeps(c: LedgerCli): LendCliDeps {
@@ -170,9 +176,21 @@ function cancel(c: LedgerCli): Result {
   return { ok: true, orderId: o.orderId, status: o.status };
 }
 
-function orders(c: LedgerCli): Result {
+/** 这张卡的出借单 + 当前节点放哪、为什么（i28-W5，与调度器下一轮用同一套规则）；读策略 / 借入名单失败只影响 placement 一栏 */
+async function orders(c: LedgerCli): Promise<Result> {
   const task = c.task(c.p.pos[1]);
-  return { ok: true, task: task.id, orders: listLendOrders(c.db, task.id).map(({ wire: _w, text: _t, ...o }) => o) };
+  const rows = listLendOrders(c.db, task.id).map(({ wire: _w, text: _t, ...o }) => o);
+  let placement: Record<string, unknown>;
+  try {
+    const policy = (c.deps.lend?.schedulerPolicy ?? ((p: string) => readSchedulerConfig().projects[p] ?? null))(task.project);
+    const remote = policy?.remote;
+    const borrow = remote && remote.mode !== "off" ? await (c.deps.lend?.borrow() ?? readEffectiveBorrow()) : [];
+    const snap = autoSnapshot(c.db, task, { registry: [], maxWorkers: policy?.maxActiveWorkers ?? 0, now: c.deps.now(), ...(remote ? { pool: { remote, borrow } } : {}) });
+    placement = explainPlacement(snap);
+  } catch (e) {
+    placement = { error: `算不出放置：${(e as Error).message}` };
+  }
+  return { ok: true, task: task.id, orders: rows, placement };
 }
 
 /** Bridge-only entry: owner identity (the bridge has no channel), `-- <peer> <json>`, expiries swept and told first. */

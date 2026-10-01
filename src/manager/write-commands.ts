@@ -52,7 +52,7 @@ const WRITE_SUBCOMMANDS: Record<string, ReadonlySet<string>> = {
   mode: new Set(["set", "reset", "all"]),
   model: new Set(["set", "reset", "all"]),
   "ctx-boundary": new Set(["on", "off"]),
-  lend: new Set(["set", "off"]), // lend.json（manager/lend.ts）；status 是读
+  lend: new Set(["set", "off", "grant", "revoke"]), // lend.json（manager/lend.ts）；status 是读
   borrow: new Set(["set", "off"]),
 };
 
