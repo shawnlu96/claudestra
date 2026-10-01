@@ -12,6 +12,12 @@ const valid = () => ({ ok: true, exists: true, now: 123, meta: metaOf(null), tas
 beforeEach(() => setAppConfigForTest({ mode: "direct", fp: "ledger-test", machineName: "test", version: "" }));
 afterEach(() => { globalThis.fetch = realFetch; setAppConfigForTest(previousConfig); });
 
+interface SendStore {
+  produce(fn: (s: { activeAgent: string }) => void): void;
+  send(text: string): Promise<void>;
+  readonly state: { streaming: boolean };
+}
+
 function respond(response: Response): void {
   globalThis.fetch = (async () => response) as unknown as typeof fetch;
 }
@@ -60,6 +66,33 @@ describe("2xx body failures are errors, not successful empty objects", () => {
     expect(body).toEqual(valid());
   });
 
+  test("POST 2xx body failures keep the code but are not retryable (the server already acted)", async () => {
+    respond(interrupted());
+    expect(await api("/agents/worker/messages", { method: "POST", json: { text: "hi" } }).catch((e: unknown) => e))
+      .toMatchObject({ status: 200, code: "body_read_failed", retryable: false });
+    respond(new Response("<html>proxy</html>"));
+    expect(await api("/agents/worker/clear", { method: "POST", json: {} }).catch((e: unknown) => e))
+      .toMatchObject({ code: "invalid_json", retryable: false });
+    respond(interrupted());
+    expect(await api("/ledger/test", { method: "head" }).catch((e: unknown) => e)).toMatchObject({ code: "body_read_failed", retryable: true });
+  });
+
+  test("chat-store send loop posts once when a 200 body is cut off", async () => {
+    let posts = 0;
+    globalThis.fetch = (async (_url: unknown, init?: RequestInit) => {
+      if (init?.method === "POST") posts++;
+      return interrupted();
+    }) as unknown as typeof fetch;
+    // 根 tsc 解析不了 chat-store 牵到的 zenith 别名，只能按运行时路径导入；这里只声明用到的公开面
+    const spec = "@/features/chat/chat-store";
+    const { ChatStore } = (await import(spec)) as { ChatStore: new () => SendStore };
+    const store = new ChatStore();
+    store.produce((s) => { s.activeAgent = "worker"; });
+    await store.send("hello");
+    expect(posts).toBe(1);
+    expect(store.state.streaming).toBe(false);
+  });
+
   test("non-2xx keeps status/body semantics, including interrupted 401", async () => {
     respond(new Response("proxy unavailable", { status: 502 }));
     expect(await api("/test").catch((e: unknown) => e)).toMatchObject({ status: 502, message: "proxy unavailable" });
@@ -81,6 +114,13 @@ describe("ledger shape and metadata fallback", () => {
     }
     respond(Response.json(valid()));
     expect(await fetchLedger("test")).toEqual(valid());
+  });
+
+  test("overview without deps (older bridge) is accepted", async () => {
+    const { deps: _deps, ...noDeps } = valid();
+    expect(isLedgerOverview(noDeps)).toBe(true);
+    respond(Response.json(noDeps));
+    expect(await fetchLedger("test")).toEqual(noDeps);
   });
 
   test("missing metadata renders with empty PMs/team/docs and an unfrozen queue", () => {

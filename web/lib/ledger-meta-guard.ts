@@ -5,10 +5,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
-/** Check the wire/cache boundary before a partial response can become render state. */
+/** Check the wire/cache boundary before a partial response can become render state. deps is optional: pre-T8h bridges omit it. */
 export function isLedgerOverview(value: unknown): value is LedgerOverview {
   return isRecord(value) && isRecord(value.meta)
-    && Array.isArray(value.tasks) && Array.isArray(value.items) && Array.isArray(value.deps);
+    && Array.isArray(value.tasks) && Array.isArray(value.items) && (value.deps === undefined || Array.isArray(value.deps));
 }
 
 export function assertLedgerOverview(value: unknown): asserts value is LedgerOverview {
