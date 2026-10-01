@@ -15,11 +15,12 @@ import type { RegistryAgent } from "./registry.js";
 import type { SchedulerConfig } from "./scheduler-config.js";
 import type { HeldFromLike } from "./held-pac.js";
 import type { WorkerLiveness } from "./worker-liveness.js";
-import { stuckSince, type ActivityRecord } from "./agent-supervisor-activity.js";
-import { TwoStrikes, type Down } from "./agent-supervisor-judge.js";
+import type { ActivityRecord } from "./agent-supervisor-activity.js";
+import { downOf, TwoStrikes, type Down, type Look } from "./agent-supervisor-judge.js";
 import { priorAttempts, restartKey, stepState, superviseEvents, type SuperviseEvent, type SuperviseRecord, type SuperviseResult, type SuperviseStep } from "./agent-supervisor-ledger.js";
 import { CYBER_RECOVERY_TEXT, SUPERVISE_RULES, decide, isCyberPolicy, RESTART_FAULTS, reportText, restartNudgeText, workKeyOf, type FaultKind } from "./agent-supervisor-policy.js";
-import { supervisedAgents, type CallRow, type Supervised } from "./agent-supervisor-scope.js";
+import { lookAt } from "./agent-supervisor-probe.js";
+import { stillSupervised, supervisedAgents, type CallRow, type Supervised } from "./agent-supervisor-scope.js";
 import type { OverloadFile } from "./agent-supervisor-bridge.js";
 
 /** 重启后这么久里不再判死判卡住（宿主要起来、会话要接回），只做补发 */
@@ -44,7 +45,10 @@ export interface SuperviseDeps {
   record(rec: SuperviseRecord): Promise<{ ok: boolean; duplicate?: boolean; error?: string }>;
   /** 同会话发一条（route_to_agent 带 expectSession） */
   send(agent: string, sessionId: string, text: string): Promise<SendResult>;
-  /** 按 registry 重启。expect.eligible() = 前提此刻还成立吗（同步、读最新的 registry 和台账）：生产在拉起 manager 前最后调一次，不成立就不动（skipped） */
+  /**
+   * 按 registry 重启。expect.eligible() = 前提此刻还成立吗（同步、读最新的 registry 和台账）：生产在拉起 manager 前最后调一次，不成立就不动（skipped）；
+   * down / workKey 随 `--expect` 交给 manager，它拿到重启锁后自己再核一次（manager/restart-expect.ts），核下来不重启也回 skipped
+   */
   restart(agent: string, expect: RestartExpect): Promise<{ ok: boolean; error?: string; skipped?: string }>;
   /** 调度单退回人工并通知 PM（auto-tick 的 escalate 同一条路） */
   escalate(taskId: string, intentId: string, reason: string): Promise<void>;
@@ -56,6 +60,8 @@ export interface SuperviseDeps {
 
 interface RestartExpect {
   sessionId: string;
+  down: Down;
+  workKey: string;
   /** null = 还在监护名单里、会话和在途的活都没换；否则是不重启的原因 */
   eligible(): string | null;
 }
@@ -251,10 +257,8 @@ class AgentRound {
     return this.events.some((e) => e.step === "report" && e.workKey === this.workKey && RESTART_FAULTS.includes(e.fault));
   }
 
-  private async look(): Promise<{ liveness: WorkerLiveness; stuckSince: number | null }> {
-    const liveness = await this.deps.probe(this.s);
-    const since = this.s.transport === "acp" ? stuckSince(this.deps.activity(this.s.agent), this.s.sessionId, this.deps.now(), this.stuckMs) : null;
-    return { liveness, stuckSince: since };
+  private look(): Promise<Look> {
+    return lookAt(this.s, this.deps, this.stuckMs);
   }
 
   private async liveness(): Promise<Step> {
@@ -276,7 +280,8 @@ class AgentRound {
     const rec = this.base(fault, this.restartKey, "restart", d.attempt, d.limit);
     if (!(await this.claim(rec))) return null;
     const late = await this.stillDown(down);
-    const r = late ? { ok: false, skipped: late } : await this.deps.restart(this.s.agent, { sessionId: this.s.sessionId, eligible: () => this.eligible(down) });
+    const r = late ? { ok: false, skipped: late } : await this.deps.restart(this.s.agent, { sessionId: this.s.sessionId, down, workKey: this.workKey,
+      eligible: () => this.eligible(down) });
     if (r.skipped) return await this.done(rec, "skipped", r.skipped), { step: "recovered", detail: `${r.skipped}，不重启` };
     await this.done(rec, r.ok ? "ok" : "failed", r.ok ? down : `${down}；${r.error ?? ""}`);
     return { step: "restart", detail: r.ok ? `${down} → 已重启（第 ${d.attempt}/${d.limit} 次）` : `重启失败：${r.error ?? ""}` };
@@ -288,16 +293,14 @@ class AgentRound {
    */
   private async stillDown(down: Down): Promise<string | null> {
     const again = await this.look();
-    const still = down === "stuck" ? again.liveness === "running" && again.stuckSince !== null : again.liveness === down;
-    return still ? this.eligible(down) : `${down} 确认后又恢复了（${again.liveness}）`;
+    return downOf(again)?.kind === down ? this.eligible(down) : `${down} 确认后又恢复了（${again.liveness}）`;
   }
 
   /** 同步读最新的 registry、回程簿和台账：这件活、这个会话还在监护名单里吗 */
   private eligible(down: Down): string | null {
-    const now = this.deps.now();
-    const s = supervisedAgents({ config: this.config, registry: this.deps.registry(), db: this.db, calls: this.deps.calls(), held: this.deps.held, now })
-      .find((x) => x.agent === this.s.agent);
-    return s && s.sessionId === this.s.sessionId && workKeyOf(s.work) === this.workKey ? null : `${down} 确认后不在监护范围了（会话或在途的活变了）`;
+    const input = { config: this.config, registry: this.deps.registry(), db: this.db, calls: this.deps.calls(), held: this.deps.held, now: this.deps.now() };
+    return stillSupervised(input, { agent: this.s.agent, sessionId: this.s.sessionId, workKey: this.workKey }) ? null
+      : `${down} 确认后不在监护范围了（会话或在途的活变了）`;
   }
 
   /**
