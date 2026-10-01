@@ -1,16 +1,18 @@
 "use client";
 /**
- * 一个借入 peer 的卡片：协议徽章、hello 年龄、各家族「可放 / 上报空闲」、在跑 / 上限、不可用原因原文，
- * 以及按钮改设置（项目逐个开关、同时最多跑几单、两下删除）。每次点击立刻存一次，存的期间到拿回写之后的快照为止整张卡禁用（不留本地草稿）：
+ * 一个借入 peer 的卡片（分配表的一行）：协议徽章、hello 年龄、各家族「可放 / 上报空闲」、在跑 / 上限、本周已用、不可用原因原文，
+ * 以及按钮改设置（项目逐个开关、档位、角色、同时最多跑几单、两下删除）。每次点击只存改的那一格（没带的 CLI 沿用），
+ * 存的期间到拿回写之后的快照为止整张卡禁用（不留本地草稿）：
  * 成功整卡一闪，失败抖一下被点的按钮。请求在点击那一刻绑定机器，切了机器就不再动这张卡。
  */
 import { useEffect, useRef, useState, type MouseEvent, type ReactNode } from "react";
 import { useT } from "@/lib/i18n";
-import { machineNow, stillOn, type DroppedView, type Family, type PeerView } from "./borrow-api";
+import { machineNow, stillOn, type DroppedView, type Family, type PeerBody, type PeerView } from "./borrow-api";
 import { cardLocked, dropPeer, saveThenRefresh, type Feed } from "./borrow-feed";
-import { canToggleOff, lenderCap, oneAtATime, peerState, reportedFree, toggleProject, type PeerState } from "./borrow-model";
+import { canToggleOff, lenderCap, oneAtATime, peerPriority, peerRoles, peerState, reportedFree, toggleProject, toggleRole, type PeerState } from "./borrow-model";
+import { AllocStrip, QuotaLine } from "./borrow-alloc";
 import { AgeTag, LimitLine, ProjectChips, Stepper } from "./borrow-bits";
-import { CircleAlertIcon, PauseIcon, RepeatIcon, ServerIcon, TrashIcon, ZapIcon } from "./icons";
+import { CircleAlertIcon, FlagIcon, PauseIcon, RepeatIcon, ServerIcon, TrashIcon, ZapIcon } from "./icons";
 import { fadeIn, fadeOut, flash, shake } from "./motion";
 
 const FAMILIES: Family[] = ["codex", "claude"];
@@ -71,7 +73,15 @@ function LenderCapBadge({ peer, maxOpen }: { peer: PeerView; maxOpen: number }) 
   );
 }
 
-type PeerSettings = { projects: string[]; maxOpen: number };
+/** 这台 peer 被某项目的 reviewFirst 点名：审查单先给它，压过档位 */
+function ReviewFirstBadge() {
+  const t = useT();
+  return (
+    <span className="badge badge-sm shrink-0 gap-1 whitespace-nowrap border-primary/30 bg-primary/10 text-primary">
+      <FlagIcon className="size-3" />{t("审查先给")}
+    </span>
+  );
+}
 
 export function BorrowPeerCard(props: {
   peer: PeerView;
@@ -84,6 +94,8 @@ export function BorrowPeerCard(props: {
   canWrite: boolean;
   /** 当前快照的序号（borrow-feed.ts）：写成功后要等更大的才解锁 */
   seq: number;
+  /** scheduler.json 某项目的 reviewFirst 点名了它 */
+  reviewFirst: boolean;
   feed: Feed;
 }) {
   const { peer, options, limit, dropped, serverNow, receivedAt, tick, feed } = props;
@@ -94,7 +106,7 @@ export function BorrowPeerCard(props: {
   const locked = cardLocked(busy, waitAfter, props.seq);
   const [armed, setArmed] = useState(false);
   const state = peerState(peer);
-  const cur: PeerSettings = { projects: peer.projects, maxOpen: peer.maxOpen };
+  const cur = { projects: peer.projects, maxOpen: peer.maxOpen, roles: peerRoles(peer) };
 
   useEffect(() => fadeIn(card.current), []);
   useEffect(() => {
@@ -108,7 +120,7 @@ export function BorrowPeerCard(props: {
   const write = (job: () => Promise<void>) => {
     if (!locked) void (gate.current ??= oneAtATime(setBusy))(job);
   };
-  const save = (next: PeerSettings, el: HTMLElement | null) =>
+  const save = (next: PeerBody, el: HTMLElement | null) =>
     write(async () => {
       const at = machineNow();
       const r = await saveThenRefresh({ peer: peer.peer, body: next, at, feed, hold: setWaitAfter });
@@ -124,10 +136,11 @@ export function BorrowPeerCard(props: {
 
   return (
     <div ref={card} className="space-y-2 rounded-lg bg-base-100 px-3 py-2.5">
-      <div className="flex min-w-0 items-center gap-2">
+      <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
         <ServerIcon className="size-3.5 shrink-0 text-base-content/50" />
-        <span className="min-w-0 truncate font-mono text-[12.5px] font-semibold">{peer.peer}</span>
+        <span className="max-w-full truncate font-mono text-[12.5px] font-semibold">{peer.peer}</span>
         <ProtoBadge state={state} />
+        {props.reviewFirst && <ReviewFirstBadge />}
         {props.canWrite && (
           <button
             className={`btn btn-ghost btn-xs ml-auto btn-square ${armed ? "text-error" : "text-base-content/45"}`}
@@ -140,6 +153,7 @@ export function BorrowPeerCard(props: {
         )}
       </div>
       <Capacity peer={peer} now={serverNow} age={<AgeTag at={peer.capacity?.helloAt ?? null} serverNow={serverNow} receivedAt={receivedAt} tick={tick} />} />
+      <QuotaLine quota={peer.quota} now={serverNow} />
       {peer.capacity?.why && state !== "poll" && (
         <div className="flex items-start gap-1 text-[11.5px] text-warning">
           <CircleAlertIcon className="mt-0.5 size-3 shrink-0" />
@@ -152,11 +166,16 @@ export function BorrowPeerCard(props: {
           picked={cur.projects}
           dropped={dropped.filter((d) => d.project).map((d) => d.project as string)}
           disabled={locked || !props.canWrite}
-          onToggle={(id, el) => (canToggleOff(cur.projects, id) ? save({ ...cur, projects: toggleProject(cur.projects, id, options.map((o) => o.id)) }, el) : shake(el))}
+          onToggle={(id, el) => (canToggleOff(cur.projects, id) ? save({ projects: toggleProject(cur.projects, id, options.map((o) => o.id)) }, el) : shake(el))}
         />
       </div>
+      <AllocStrip tier={peerPriority(peer)} roles={cur.roles} disabled={locked || !props.canWrite} onTier={(priority, el) => save({ priority }, el)}
+        onRole={(r, el) => {
+          const roles = toggleRole(cur.roles, r);
+          return roles ? save({ roles }, el) : shake(el);
+        }} />
       <LimitLine name={peer.peer} n={cur.maxOpen} badge={<LenderCapBadge peer={peer} maxOpen={cur.maxOpen} />}>
-        <Stepper value={cur.maxOpen} limit={limit} disabled={locked || !props.canWrite} onCommit={(n, el) => save({ ...cur, maxOpen: n }, el)} />
+        <Stepper value={cur.maxOpen} limit={limit} disabled={locked || !props.canWrite} onCommit={(n, el) => save({ maxOpen: n }, el)} />
       </LimitLine>
     </div>
   );

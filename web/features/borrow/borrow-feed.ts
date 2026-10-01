@@ -5,7 +5,7 @@
  * 刷新 503 或被 15 秒轮询中止都不解锁，免得用旧 props 再写一次盖掉刚存的值。
  */
 import type { MachineRef } from "@/lib/machines";
-import { fetchBorrow, machineNow, removeBorrowPeer, saveBorrowPeer, stillOn, type BorrowView, type PeerView } from "./borrow-api";
+import { fetchBorrow, machineNow, removeBorrowPeer, saveBorrowLocal, saveBorrowPeer, stillOn, type BorrowView, type LocalBody, type PeerBody, type PeerView } from "./borrow-api";
 
 export interface FeedState {
   view: BorrowView | null;
@@ -63,17 +63,16 @@ export const cardLocked = (busy: boolean, waitAfter: number | null, seq: number)
 
 /**
  * 卡片的一次保存：PUT → 成功就 hold(当时的 issued)，再刷新。failed = 写本身失败（立即解锁、回到原值）；
- * away = 回来时已切到别的机器（不动这张卡）；saved = 已存，卡片锁到写后快照到达
+ * away = 回来时已切到别的机器（不动这张卡）；saved = 已存，卡片锁到写后快照到达。peer 行与本机行（project）同一节奏
  */
-export async function saveThenRefresh(o: {
-  peer: string;
-  body: { projects: string[]; maxOpen: number };
+export async function saveThenRefresh(o: ({ peer: string; body: PeerBody } | { project: string; body: LocalBody }) & {
   at: MachineRef | undefined;
   feed: Pick<Feed, "issued" | "load">;
   hold: (waitAfter: number) => void;
 }): Promise<"failed" | "away" | "saved"> {
   try {
-    await saveBorrowPeer(o.peer, o.body, o.at);
+    if ("peer" in o) await saveBorrowPeer(o.peer, o.body, o.at);
+    else await saveBorrowLocal(o.project, o.body, o.at);
   } catch {
     return "failed";
   }
