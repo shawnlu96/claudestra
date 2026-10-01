@@ -12,7 +12,7 @@ import { hasRoundVerdict, inFlightPeerCards, peerPrOf, type PeerPrMeta } from ".
 import { renderDriftPush } from "./peer-pr-message.js";
 import { fallbackOnce, logUnlessStopped, noticeOnce, record, type PeerPrCtx } from "./peer-pr-notice.js";
 
-export const VERIFY_RETRY_MS = 15_000;
+const VERIFY_RETRY_MS = 15_000;
 
 /** Every pass: a review card whose verdict is in but not yet re-checked against GitHub gets one `gh pr view` (throttled). */
 export async function verifyHolds(c: PeerPrCtx, repo: () => Promise<string>): Promise<void> {

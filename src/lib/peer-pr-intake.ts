@@ -11,11 +11,11 @@ import { cardForPr, inFlightPeerCards } from "./peer-pr-ledger.js";
 import { logUnlessStopped, noticeOnce, oneLine, type PeerPrCtx, type PeerPrState } from "./peer-pr-notice.js";
 import { peerPrSurface } from "./peer-pr-surface.js";
 
-export type IntakeDecision = { kind: "skip" } | { kind: "wait"; why: string } | { kind: "notice"; key: string; text: string } | { kind: "intake"; peer: PeerPrPeer };
+type IntakeDecision = { kind: "skip" } | { kind: "wait"; why: string } | { kind: "notice"; key: string; text: string } | { kind: "intake"; peer: PeerPrPeer };
 
-export interface IntakeFacts { repoOwner: string; hasCard: boolean; inFlight: number; stable: boolean }
+interface IntakeFacts { repoOwner: string; hasCard: boolean; inFlight: number; stable: boolean }
 
-export function classifyPr(pr: OpenPr, cfg: PeerPrConfig, f: IntakeFacts): IntakeDecision {
+function classifyPr(pr: OpenPr, cfg: PeerPrConfig, f: IntakeFacts): IntakeDecision {
   if (pr.number < cfg.fromNumber || f.hasCard) return { kind: "skip" };
   const peer = peerOfLogin(cfg, pr.login);
   if (!peer) return { kind: "skip" };

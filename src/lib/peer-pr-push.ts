@@ -13,14 +13,14 @@ import { GATE_REJECTED, PUSH_MAX_BYTES, renderMergedPush, renderReviewPush } fro
 import { logUnlessStopped, noticeOnce, oneLine, record, type BridgeSendResult, type PeerPrCtx } from "./peer-pr-notice.js";
 import { hexCandidates, peerPrSecretHit, redactPeerPr } from "./peer-pr-redact.js";
 
-export const PUSH_BACKOFF_MS = 30_000, PUSH_BACKOFF_CAP_MS = 600_000, LATE_MS = 15 * 60_000, GIVE_UP_MS = 24 * 3600_000;
+const PUSH_BACKOFF_MS = 30_000, PUSH_BACKOFF_CAP_MS = 600_000, LATE_MS = 15 * 60_000, GIVE_UP_MS = 24 * 3600_000;
 
-export interface PushItem { task: LedgerTask; meta: PeerPrMeta; key: string; source: LedgerEvent }
+interface PushItem { task: LedgerTask; meta: PeerPrMeta; key: string; source: LedgerEvent }
 interface History { terminal: boolean; firstClaim: number | null; failures: number; lastFail: { at: number; reason: string } | null }
 
 const isPush = (e: LedgerEvent, key: string): boolean => e.kind === "note" && e.data.op === "peer_pr_push" && e.data.key === key;
 
-export function pushHistory(events: readonly LedgerEvent[], key: string): History {
+function pushHistory(events: readonly LedgerEvent[], key: string): History {
   const rows = events.filter((e) => isPush(e, key));
   const fails = rows.filter((e) => e.data.result === "failed");
   const last = fails.at(-1);
@@ -32,7 +32,7 @@ export function pushHistory(events: readonly LedgerEvent[], key: string): Histor
 }
 
 /** Everything still owed to the peers of this project's peer cards, oldest first. */
-export function pendingPushes(db: Database, project: string): PushItem[] {
+function pendingPushes(db: Database, project: string): PushItem[] {
   const out: PushItem[] = [];
   for (const task of listTasks(db, project)) {
     const meta = peerPrOf(task);
@@ -80,7 +80,7 @@ async function render(c: PeerPrCtx, item: PushItem): Promise<Rendered> {
 }
 
 /** sent only on a 2xx from the peer; the bridge's typed gate refusal is terminal; everything else (unknown included) retries. */
-export function classify(r: BridgeSendResult): { result: "sent" | "refused" | "failed"; reason: string; status?: number } {
+function classify(r: BridgeSendResult): { result: "sent" | "refused" | "failed"; reason: string; status?: number } {
   if (r.ok) {
     const status = Number(r.result?.status);
     return status >= 200 && status < 300 ? { result: "sent", reason: `HTTP ${status}`, status } : { result: "failed", reason: `对方回 HTTP ${status || "?"}`, status };
@@ -97,7 +97,7 @@ async function refuse(c: PeerPrCtx, item: PushItem, why: string): Promise<string
   return "refused";
 }
 
-export async function pushOne(c: PeerPrCtx, item: PushItem): Promise<string> {
+async function pushOne(c: PeerPrCtx, item: PushItem): Promise<string> {
   const h = pushHistory(listEvents(c.db, { project: item.task.project, target: item.task.id }), item.key);
   const now = c.deps.now();
   if (h.firstClaim !== null && now - h.firstClaim >= GIVE_UP_MS) {

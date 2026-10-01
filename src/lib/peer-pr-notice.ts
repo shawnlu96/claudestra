@@ -49,7 +49,7 @@ export function stateFor(db: Database): PeerPrState {
   return s;
 }
 
-export const NOTICE_RETRY_MS = 60_000;
+const NOTICE_RETRY_MS = 60_000;
 export const oneLine = (s: string, max = 400): string => s.replace(/\s+/g, " ").trim().slice(0, max);
 
 /** A stop / lost lease always ends the pass; any other failure of one step is logged and the step is retried later. */
