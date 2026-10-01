@@ -63,10 +63,11 @@ export function e2eLendCall(p: LendCallPorts): LendCall<"result" | "ask"> {
 export const isLendCaller = (identity: Pick<CallerIdentity, "agent">): boolean => isLendWorkerName(identity.agent ?? undefined);
 
 /**
- * 出借身份的连接在 bridge 原生帧入口只放这些：ping / whoami / order_tool（之后照旧过 routeLendTool 白名单），
- * 加 ACP 宿主自己的帧——宿主那条连接就注册在 agent-lend-* 的频道上，register / acp_* / abort_ack 拦了 worker 就跑不起来。
+ * 出借身份的连接在 bridge 原生帧入口只放这些：ping / whoami / order_tool（之后照旧过 routeLendTool 白名单），加宿主自己的帧——
+ * 宿主那条连接就注册在 agent-lend-* 的频道上，register / response / acp_* / codex_* / abort_ack 拦了 worker 就跑不起来。
+ * 白名单而不是黑名单：频道类、ask_codex、建删频道、peer_pr_push 以及以后新加的帧缺省都拒。
  */
-const LEND_FRAMES = new Set(["ping", "whoami", "order_tool", "register", "abort_ack",
+const LEND_FRAMES = new Set(["ping", "whoami", "order_tool", "register", "response", "abort_ack", "codex_undelivered", "codex_typein_failed",
   "acp_entries", "acp_config", "acp_failure", "acp_permission", "acp_call_result", "acp_rebind"]);
 
 /**

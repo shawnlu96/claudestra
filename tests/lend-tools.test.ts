@@ -365,7 +365,8 @@ describe("反例：出借 worker 的连接直接发原生频道帧（bridge.ts �
   const handler = bridgeSrc.slice(bridgeSrc.indexOf("async function handleClientMessage("));
   /** bridge.ts handleClientMessage 的 switch 认的全部帧类型（真实入口，不是 order_tool 的别名） */
   const nativeTypes = [...new Set([...handler.slice(0, handler.indexOf("\n}\n")).matchAll(/case "([a-z_]+)":/g)].map((m) => m[1]))];
-  const HOST = ["ping", "register", "whoami", "order_tool", "abort_ack", "acp_entries", "acp_config", "acp_failure", "acp_permission", "acp_call_result", "acp_rebind"];
+  const HOST = ["ping", "register", "response", "whoami", "order_tool", "abort_ack", "codex_undelivered", "codex_typein_failed",
+    "acp_entries", "acp_config", "acp_failure", "acp_permission", "acp_call_result", "acp_rebind"];
   const gate = (type: string, agent: string | null) => {
     const replies: Record<string, unknown>[] = [];
     let asked = 0;
@@ -380,9 +381,9 @@ describe("反例：出借 worker 的连接直接发原生频道帧（bridge.ts �
   });
 
   test("project_info / reply / route_to_agent / forward_to_agent / fleet_* / check_inbox 等真实帧：出借身份一律回 error，不进 handler", () => {
-    for (const t of ["project_info", "reply", "route_to_agent", "forward_to_agent", "fleet_state", "fleet_run", "check_inbox", "fetch_messages", "notify", "ask_codex"]) {
-      expect(nativeTypes).toContain(t);
-    }
+    const CHANNEL = ["reply", "fetch_messages", "react", "edit_message", "project_info", "list_channels", "forward_to_agent", "route_to_agent",
+      "check_inbox", "fleet_state", "fleet_run"];
+    for (const t of [...CHANNEL, "notify", "ask_codex", "create_channel", "peer_pr_push"]) expect(nativeTypes).toContain(t);
     const outside = nativeTypes.filter((t) => !HOST.includes(t));
     expect(outside.length).toBeGreaterThan(15);
     for (const t of outside) {
@@ -391,6 +392,11 @@ describe("反例：出借 worker 的连接直接发原生频道帧（bridge.ts �
       expect(g.replies).toEqual([{ type: "response", requestId: `r_${t}`, error: `lend_forbidden:${t}` }]);
     }
     expect(gate("some_future_frame", AGENT).refused).toBe(true); // 新加的帧类型缺省也拒
+  });
+
+  test("出借身份连接发 acp_* / register / response / codex_*：照常放行（宿主那条连接就是出借身份）", () => {
+    for (const t of nativeTypes.filter((x) => x.startsWith("acp_") || x.startsWith("codex_"))) expect(gate(t, AGENT).refused).toBe(false);
+    for (const t of ["register", "response", "abort_ack"]) expect(gate(t, AGENT)).toEqual({ refused: false, replies: [], asked: 0 });
   });
 
   test("对照：ACP 宿主自己的帧、派单工具、whoami 放行且不查身份；本机 agent / 没注册的连接什么都不拦（回归）", () => {
