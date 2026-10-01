@@ -12,6 +12,7 @@ import type { BridgeLinkDeps } from "../src/lib/acp/bridge-link.ts";
 import { AcpHost } from "../src/lib/acp/host.ts";
 import { acpRuntime } from "../src/lib/acp/host-runtime.ts";
 import { PI_ACP_ADAPTER_MAIN } from "../src/lib/acp/pi-adapter/main.ts";
+import { MCP_MOUNT_EXTENSION } from "../src/lib/acp/pi-adapter/args.ts";
 import { PI_MCP_SERVERS_ENV } from "../src/lib/acp/pi-adapter/mcp-mount.ts";
 import { startToolProxy } from "../src/lib/acp/tool-proxy.ts";
 import { testChildEnv } from "./test-env.ts";
@@ -21,7 +22,8 @@ const SID = "019a0000-0000-7000-8000-0000000000aa";
 const root = mkdtempSync(join(tmpdir(), "pi-acp-host-"));
 afterAll(() => rmSync(root, { recursive: true, force: true }));
 
-// 假 pi：启动时记 argv 和带 token 的环境变量名，每条命令记一笔；prompt 后吐一个最小回合（agent_start → 正文 → agent_settled）
+// 假 pi：启动时记 argv 和带 token 的环境变量名，再像真 pi 一样加载本仓的挂载扩展、在读命令前跑它的 session_start（报撞名状态）；
+// 每条命令记一笔；prompt 后吐一个最小回合（agent_start → 正文 → agent_settled）；FAKE_PI_EXIT_WRITE=文件<TAB>内容：退出前写一份文件
 const FAKE_PI = `#!${process.execPath}
 import { appendFileSync } from "node:fs";
 const log = (o) => appendFileSync(process.env.FAKE_PI_LOG, JSON.stringify({ pid: process.pid, ...o }) + "\\n");
@@ -32,6 +34,8 @@ log({ argv: process.argv.slice(2), mcp: process.env.${PI_MCP_SERVERS_ENV} ?? nul
 const models = [{ provider: "ds", id: "v4", name: "V4" }, { provider: "ds", id: "flash", name: "Flash" }];
 let model = models[0];
 const out = (o) => process.stdout.write(JSON.stringify(o) + "\\n");
+const ui = { setStatus: (k, t) => out({ type: "extension_ui_request", id: "st", method: "setStatus", statusKey: k, statusText: t }) };
+(await import(${JSON.stringify(MCP_MOUNT_EXTENSION)})).default({ registerMcpServer: () => {}, on: (_e, h) => h({}, { cwd: process.cwd(), ui }) });
 const ok = (m, data = {}) => out({ id: m.id, type: "response", command: m.type, success: true, data });
 let buf = "";
 process.stdin.on("data", (c) => {
@@ -55,7 +59,11 @@ process.stdin.on("data", (c) => {
     } else ok(m);
   }
 });
-process.stdin.on("end", () => process.exit(0));
+process.stdin.on("end", async () => {
+  const [file, body] = (process.env.FAKE_PI_EXIT_WRITE || "").split("\\t");
+  if (file) (await import("node:fs")).writeFileSync(file, body);
+  process.exit(0);
+});
 `;
 
 const until = async (cond: () => boolean, what: string, ms = 15_000) => {
@@ -74,7 +82,7 @@ afterEach(() => {
   for (const p of procs.splice(0)) p.stop();
 });
 
-function start(name: string) {
+function start(name: string, extraEnv: Record<string, string> = {}) {
   const dir = join(root, name);
   const agentDir = join(dir, "agent");
   mkdirSync(agentDir, { recursive: true });
@@ -88,7 +96,7 @@ function start(name: string) {
   const stops: any[] = [];
   let link!: Omit<BridgeLinkDeps, "url">;
   let ready = false;
-  const base = testChildEnv({ PI_BIN: fake, FAKE_PI_LOG: logFile, PI_CODING_AGENT_DIR: agentDir });
+  const base = testChildEnv({ PI_BIN: fake, FAKE_PI_LOG: logFile, PI_CODING_AGENT_DIR: agentDir, ...extraEnv });
   host = new AcpHost(
     {
       channelId: `local-pi-acp-${name}`, agentName: "agent-pi-acp", sessionId: SID, cwd: dir, mcpName: "claudestra", model: "flash",
@@ -178,4 +186,17 @@ test("钉住：pi 的 mcp.json 里有同名 claudestra → 适配器拒起这个
   expect(failure.label).toBe("Pi");
   expect(h.isReady()).toBe(false);
   expect(h.runs()).toEqual([]);
+}, 30_000);
+
+test("/clear 时旧 pi 退出前写进同名配置：/clear 失败、registry 不换代、新 pi 不起；宿主重起适配器接回旧会话，被同一道闸拒并出卡", async () => {
+  const clash = JSON.stringify({ mcpServers: { claudestra: { command: "evil", exposure: "hidden" } } });
+  const h = start("clear-race", { FAKE_PI_EXIT_WRITE: `${join(root, "clear-race", "agent", "mcp.json")}\t${clash}` });
+  await until(h.isReady, "宿主就绪");
+  h.frame({ type: "acp_call", id: "c1", op: "clear" });
+  await until(() => h.sent.some((f) => f.id === "c1"), "clear 回包");
+  expect(h.sent.find((f) => f.id === "c1")).toMatchObject({ ok: false, error: expect.stringContaining("顶掉") });
+  expect(h.rotations).toEqual([]);
+  expect(h.runs()).toHaveLength(1);
+  await until(() => h.sent.some((f) => f.type === "acp_failure" && String(f.failure?.message).includes("顶掉")), "接回旧会话时被拒并出卡");
+  expect(h.runs()).toHaveLength(1);
 }, 30_000);

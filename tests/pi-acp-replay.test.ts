@@ -8,7 +8,7 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { PI_MCP_SERVERS_ENV } from "../src/lib/acp/pi-adapter/mcp-mount.ts";
+import { MOUNT_OK, MOUNT_STATUS_KEY, PI_MCP_SERVERS_ENV } from "../src/lib/acp/pi-adapter/mcp-mount.ts";
 import { piLinkOver, type PiProc } from "../src/lib/acp/pi-adapter/pi-link.ts";
 import { PiAcpServer } from "../src/lib/acp/pi-adapter/server.ts";
 import type { RpcWire } from "../src/lib/acp/rpc.ts";
@@ -21,8 +21,9 @@ type Line = { d: "in" | "out"; r: Rec };
 const FIXTURE: Line[] = readFileSync(join(import.meta.dir, "fixtures", "pi-rpc-0.99.1.jsonl"), "utf8").trim().split("\n").map((l) => JSON.parse(l));
 
 /** 假 pi：收到的命令对上录的下一条 in，就把其后到下一条 in 之前的 out 整块吐出（响应 id 换成现场的） */
-function replayPi(lines: Line[]) {
+function replayPi(lines: Line[], preface: Rec[] = []) {
   let cursor = 0;
+  let prefaced = false;
   let onData: (c: string) => void = () => {};
   const closeCbs: ((why: string) => void)[] = [];
   const ids = new Map<string, string>();
@@ -30,7 +31,8 @@ function replayPi(lines: Line[]) {
   let exit!: (code: number) => void;
   const exited = new Promise<number>((r) => (exit = r));
   const pump = () => {
-    const out: string[] = [];
+    const out: string[] = prefaced ? [] : preface.map((r) => JSON.stringify(r));
+    prefaced = true;
     while (lines[cursor]?.d === "out") {
       const r = { ...lines[cursor++]!.r };
       if (r.type === "response" && ids.has(r.id)) r.id = ids.get(r.id);
@@ -42,6 +44,7 @@ function replayPi(lines: Line[]) {
   const proc: PiProc = {
     wire: {
       write(line) {
+        if (!prefaced) pump();
         const cmd = JSON.parse(line);
         const want = lines[cursor];
         if (want?.d !== "in" || !Bun.deepEquals(strip(want.r), strip(cmd))) return void mismatches.push(`#${cursor} 期望 ${JSON.stringify(want?.r)}，实际 ${line.trim()}`);
@@ -77,6 +80,12 @@ function pipePair(): [RpcWire, RpcWire] {
   return [wire(a, b), wire(b, a)];
 }
 
+/**
+ * 挂了 server 的会话，真 pi 里的挂载扩展在 session_start 报一次状态；rpc-mode.js 先跑完 session_start 才开始读命令，
+ * 所以它总在所有命令回包之前。录制时的挂载扩展还没有这一步，回放时补在最前面。
+ */
+const MOUNT_STATUS = { type: "extension_ui_request", id: "mount", method: "setStatus", statusKey: MOUNT_STATUS_KEY, statusText: MOUNT_OK };
+
 /** 每次起 pi（session/new|resume）消费下一段录制流；h.pi 是第一个 */
 function harness(...runs: Line[][]) {
   const pis: ReturnType<typeof replayPi>[] = [];
@@ -86,7 +95,8 @@ function harness(...runs: Line[][]) {
   const logs: string[] = [];
   new PiAcpServer(adapterWire, {
     openPi: (o) => {
-      const pi = replayPi(runs[pis.length] ?? []);
+      const run = runs[pis.length] ?? [];
+      const pi = replayPi(run, o.env[PI_MCP_SERVERS_ENV] ? [MOUNT_STATUS] : []);
       pis.push(pi);
       opened.push(o);
       pi.start();

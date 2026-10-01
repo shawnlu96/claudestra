@@ -11,12 +11,13 @@ import { acpCallerCredAssignment } from "../caller-cred-launch.js";
 import { shellEscape } from "../claude-launch.js";
 import { codexDeveloperInstructions } from "../codex-launch.js";
 import { pathOverrideAssignments } from "../paths.js";
-import { piBinName, piEnvFlags, type PiEnvProfile } from "../pi-env.js";
+import { normalizePiEnvProfile, piBinName, piEnvFlags, type PiEnvProfile } from "../pi-env.js";
 import { isPiThinkingLevel } from "../pi-launch.js";
-import { piAgentDir } from "../pi-session.js";
+import { piAgentDirOf } from "../pi-path.js";
 import { assertSandboxRuntime } from "../sandbox.js";
 import { ACP_RUNTIME_ENV, PI_ARGS_ENV } from "../acp/host-runtime.js";
 import { piMcpClash } from "../acp/pi-adapter/mcp-clash.js";
+import { keepReplyTool } from "../acp/pi-adapter/reply-tool.js";
 import { probePiAcp } from "../acp/readiness.js";
 import { REPO_ROOT } from "../repo-root.js";
 import { ACP_CONTROL, acpExitPrelude } from "./acp-control.js";
@@ -28,9 +29,10 @@ const mcpName = (env: Record<string, string | undefined>) => env.MCP_NAME || "cl
 /**
  * 交给适配器的 pi 参数（排在它自己的 rpc / 挂 MCP / 会话 id 之前）：信任开关与能力档同 tmux 版；职责和回复规则走
  * --append-system-prompt，每次起 pi（含 /clear 换的新会话）都带，所以不需要 Codex 那种重启前言。
+ * 能力档先过 keepReplyTool（reply-tool.ts）：白名单补上 reply 的 pi 工具名，禁了 reply、MCP_NAME 保证不了就抛。
  */
-export function piAcpArgs(spec: LaunchSpec, agent: string, repoRoot: string): string[] {
-  const piEnv = spec.extras?.piEnv as PiEnvProfile | undefined;
+export function piAcpArgs(spec: LaunchSpec, agent: string, repoRoot: string, mcp = "claudestra"): string[] {
+  const piEnv = keepReplyTool(spec.extras?.piEnv as PiEnvProfile | undefined, mcp);
   const prompt = codexDeveloperInstructions({ agentName: agent, purpose: spec.purpose, projectContext: spec.projectContext, channelRules: channelInstructions(repoRoot) });
   return [piEnv?.trustProject === false ? "--no-approve" : "--approve", ...piEnvFlags(piEnv), "--name", agent, "--append-system-prompt", prompt];
 }
@@ -54,16 +56,26 @@ export function buildPiAcpHostCommand(spec: LaunchSpec, o: { bunBin: string; rep
     ["PI_BIN", piBinName()],
     ["CLAUDESTRA_ACP_MODEL", spec.model?.trim() || undefined],
     ["CLAUDESTRA_ACP_EFFORT", effort && isPiThinkingLevel(effort) ? effort : undefined], // 同 tmux 版：只放 pi 认的档位
-    [PI_ARGS_ENV, JSON.stringify(piAcpArgs(spec, agent, o.repoRoot))],
+    [PI_ARGS_ENV, JSON.stringify(piAcpArgs(spec, agent, o.repoRoot, mcpName(env)))],
   ];
   const prefix = pairs.filter(([, v]) => v).map(([k, v]) => `${k}=${shellEscape(v!)}`).join(" ");
   const cred = acpCallerCredAssignment(spec.callerCredFile, shellEscape);
   return `${prefix}${cred}${pathOverrideAssignments(shellEscape, env)} ${shellEscape(o.bunBin)} ${shellEscape(join(o.repoRoot, "src/acp-host.ts"))}`;
 }
 
-/** pi 的 mcp.json 里有同名 server 会静默顶掉 channel-server（mcp-clash.ts）：起之前就拒，别等模型发现没有 reply */
-export function piAcpClash(cwd: string | undefined, env: Record<string, string | undefined> = process.env): string | null {
-  return piMcpClash([mcpName(env)], cwd ?? "", env.PI_CODING_AGENT_DIR || piAgentDir());
+/**
+ * 起之前就拒、别等模型发现没有 reply：pi 的 mcp.json 里有同名 server 会静默顶掉 channel-server（mcp-clash.ts，agent 目录按 Pi 的
+ * 规则算），能力档会把 reply 筛掉（reply-tool.ts）。piEnv 是 registry 里的原始能力档。
+ */
+export function piAcpClash(cwd: string | undefined, env: Record<string, string | undefined> = process.env, piEnv?: unknown): string | null {
+  const clash = piMcpClash([mcpName(env)], cwd ?? "", piAgentDirOf(env, cwd || undefined));
+  if (clash) return clash;
+  try {
+    keepReplyTool(normalizePiEnvProfile(piEnv), mcpName(env));
+    return null;
+  } catch (e) {
+    return e instanceof Error ? e.message : String(e);
+  }
 }
 
 export const piAcpAdapter: ManagedRuntimeAdapter = {

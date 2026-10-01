@@ -52,6 +52,12 @@ export function threadStatusOf(update: unknown): string | null {
   return typeof t === "string" ? t : null;
 }
 
+/** Pi 适配器在 idle 上带的这一轮结局（pi-adapter/map.ts turnEnd）；codex-acp 不带，返回 null，Codex 的解释照旧 */
+export function turnEndOf(update: unknown): { stopReason?: string; failure?: { kind?: string; message?: string } } | null {
+  const t = (update as Rec | null)?._meta?.claudestra?.turn;
+  return t && typeof t === "object" ? t : null;
+}
+
 function toolUseOf(t: ToolState): { name: string; input: Rec } {
   const raw = t.rawInput ?? {};
   if (t.mcp || (typeof raw.server === "string" && typeof raw.tool === "string")) {
