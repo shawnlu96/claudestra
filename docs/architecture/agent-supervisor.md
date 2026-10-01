@@ -56,7 +56,8 @@ never repeated). Counts for the limits come from these events, so a scheduler re
 anchored on the agent's previous restart claim, taken at the start of the round, so two rounds starting together claim the
 same key. Right before restarting the supervisor checks again — once before the claim (so a recovered agent does not use up
 the quota) and once after it (the claim waits on the ledger CLI): the agent must still be supervised with the same session and
-work, and still down the same way; the production effect compares the registry session once more just before it spawns
+work, and still down the same way (the scope is read after the probe, since the probe itself waits). The production effect
+runs the same scope check (`RestartExpect.eligible`, synchronous: latest registry + ledger) once more right before it spawns
 `manager restart`. A failed re-check records the claim as `skipped`, which does not count toward the restart limit.
 
 ## Bridge side (`agent-supervisor-bridge.ts`)
@@ -71,3 +72,17 @@ work, and still down the same way; the production effect compares the registry s
 - Recovery: in a supervised project, the agent's next normally finished turn (`Stop`, own channel, not an API error)
   closes its open failed-turn cards (`stop-settle.ts` `closeRecoveredCards`); quota / login cards and other agents' cards are
   never touched. The auto tick stands aside (`agent-supervisor-hold.ts`) for the one card whose recovery the supervisor claimed.
+
+## Known risk (fixed for good by node i28-S1c)
+
+`manager restart` only takes a name, so the last check happens in the scheduler, not inside the child after it takes the
+per-agent restart lock. The window between that check and the lock is the child's start-up, about one second.
+
+- Worst case: the work is delivered or handed back to the PM inside that second, and an agent whose window / host is
+  already gone is restarted anyway. It resumes its own session and sits idle — the same thing the launcher's
+  `restoreDeadAgents` already does every minute for dead tmux agents.
+- A working agent cannot be killed by it: a window coming back or a session being swapped in that second can only be the
+  work of another `manager restart` / `resume` / `adopt`, and those go through the same restart lock or registry `pending`.
+
+PM rated this P2 (ledger note on i28-S1). Node i28-S1c adds `restart --expect <json>`: the child re-checks scope and liveness
+after taking the lock.

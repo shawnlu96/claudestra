@@ -72,10 +72,10 @@ function superviseDeps(env: SuperviseEnv): SuperviseDeps {
       return { ok: r.ok === true, duplicate: r.duplicate === true, error: r.ok === true ? undefined : String(r.error ?? "") };
     },
     send: (agent, sessionId, text) => route(agent, text, sessionId),
-    async restart(agent, sessionId) {
-      // 最后一道：拉起 manager 前再对一次 registry 的会话（PM 刚换了会话就不动，manager restart 自己只认 registry 里的那个）
-      const row = readRegistryAgentsSync(env.registryPath).find((x) => x.name === agent);
-      if (row?.sessionId !== sessionId) return { ok: false, skipped: `registry 里的会话已经换了（${row?.sessionId ?? "没有这条"}）` };
+    async restart(agent, expect) {
+      // 最后一道，紧挨着拉起 manager、中间没有 await：会话、在途的活、监护名单按最新的 registry 和台账再核一次（manager restart 自己只认名字）
+      const why = expect.eligible();
+      if (why) return { ok: false, skipped: why };
       const r = await plain("restart", "--", agent);
       if (r.code === "lease-lost") throw new SchedulerStopped(`manager restart: ${String(r.error)}`);
       const one = (r.results as { name: string; ok: boolean; error?: string }[] | undefined)?.find((x) => x.name === agent);

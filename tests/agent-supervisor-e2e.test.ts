@@ -247,6 +247,43 @@ describe("宿主死了 → 重启 → 补发接着做 → 交付不重复", () =
     expect(h.log.restarts).toEqual(["agent-task-one", "agent-task-one"]);
   });
 
+  test("最后一次探活期间活交了 / 退回人工：不重启；生产的重启在拉起 manager 前再核一次", async () => {
+    for (const change of ["deliver", "manual"] as const) {
+      const f = autoFixture();
+      cleanup.push(() => f.close());
+      await building(f);
+      const h = harness(f);
+      let n = 0;
+      h.deps.probe = async () => {
+        if (++n === 4) { // 认领之后那次探活：探活还没返回，结果先到了
+          const r = change === "deliver" ? await f.cli("agent-task-one", "deliver", "T1", "--from", "build", "--head", H1)
+            : await f.cli("scheduler", "scheduler-fallback-manual", "T1", "--reason", "PM 接手");
+          expect(r.ok).toBe(true);
+        }
+        return "no_window";
+      };
+      await h.tick();
+      expect((await h.tick()).outcomes[0]).toMatchObject({ step: "recovered", detail: expect.stringContaining("不在监护范围") });
+      expect(h.log.restarts).toEqual([]);
+    }
+    // 探活通过之后、拉起 manager 之前才交的：效果里的 eligible() 拦下
+    const f = autoFixture();
+    cleanup.push(() => f.close());
+    await building(f);
+    const h = harness(f);
+    h.live["agent-task-one"] = "no_window";
+    let checked: string | null = "未调";
+    h.deps.restart = async (_a, want) => {
+      await f.cli("agent-task-one", "deliver", "T1", "--from", "build", "--head", H1);
+      checked = want.eligible();
+      return checked ? { ok: false, skipped: checked } : { ok: true };
+    };
+    await h.tick();
+    expect((await h.tick()).outcomes[0]).toMatchObject({ step: "recovered" });
+    expect(checked).toContain("不在监护范围");
+    expect(h.events("agent-task-one").map((e) => `${e.step}/${e.phase}/${e.result ?? ""}`)).toEqual(["restart/claim/", "restart/done/skipped"]);
+  });
+
   test("一小时最多重启 2 次，超了报派活方 + 告诉 owner，这件活不再自动重启", async () => {
     const f = autoFixture();
     cleanup.push(() => f.close());

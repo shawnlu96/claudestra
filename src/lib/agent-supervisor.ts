@@ -44,14 +44,20 @@ export interface SuperviseDeps {
   record(rec: SuperviseRecord): Promise<{ ok: boolean; duplicate?: boolean; error?: string }>;
   /** 同会话发一条（route_to_agent 带 expectSession） */
   send(agent: string, sessionId: string, text: string): Promise<SendResult>;
-  /** 按 registry 重启；sessionId = 判定时的会话，生产在拉起 manager 前再对一次，不是它就不动（skipped） */
-  restart(agent: string, sessionId: string): Promise<{ ok: boolean; error?: string; skipped?: string }>;
+  /** 按 registry 重启。expect.eligible() = 前提此刻还成立吗（同步、读最新的 registry 和台账）：生产在拉起 manager 前最后调一次，不成立就不动（skipped） */
+  restart(agent: string, expect: RestartExpect): Promise<{ ok: boolean; error?: string; skipped?: string }>;
   /** 调度单退回人工并通知 PM（auto-tick 的 escalate 同一条路） */
   escalate(taskId: string, intentId: string, reason: string): Promise<void>;
   notifyCaller(caller: string, text: string): Promise<void>;
   notifyOwner(channelId: string, text: string): Promise<void>;
   now(): number;
   log(msg: string): void;
+}
+
+interface RestartExpect {
+  sessionId: string;
+  /** null = 还在监护名单里、会话和在途的活都没换；否则是不重启的原因 */
+  eligible(): string | null;
 }
 
 export interface SuperviseOutcome { agent: string; step: string; detail: string }
@@ -270,24 +276,28 @@ class AgentRound {
     const rec = this.base(fault, this.restartKey, "restart", d.attempt, d.limit);
     if (!(await this.claim(rec))) return null;
     const late = await this.stillDown(down);
-    const r = late ? { ok: false, skipped: late } : await this.deps.restart(this.s.agent, this.s.sessionId);
+    const r = late ? { ok: false, skipped: late } : await this.deps.restart(this.s.agent, { sessionId: this.s.sessionId, eligible: () => this.eligible(down) });
     if (r.skipped) return await this.done(rec, "skipped", r.skipped), { step: "recovered", detail: `${r.skipped}，不重启` };
     await this.done(rec, r.ok ? "ok" : "failed", r.ok ? down : `${down}；${r.error ?? ""}`);
     return { step: "restart", detail: r.ok ? `${down} → 已重启（第 ${d.attempt}/${d.limit} 次）` : `重启失败：${r.error ?? ""}` };
   }
 
   /**
-   * 重启的前提此刻还成立吗（null = 成立）：还在监护名单里、会话和活没换（PM 换会话、活交了 / 退回人工都算换），
-   * 而且还是同一种否定。tests/agent-supervisor-e2e.test.ts「认领期间恢复 / 换会话」。
+   * 重启的前提此刻还成立吗（null = 成立）：还是同一种否定，并且（探活之后再看，探活本身要等）还在监护名单里、会话和活没换
+   * （PM 换会话、活交了 / 退回人工都算换）。tests/agent-supervisor-e2e.test.ts「认领期间恢复 / 换会话 / 活交了」。
    */
   private async stillDown(down: Down): Promise<string | null> {
+    const again = await this.look();
+    const still = down === "stuck" ? again.liveness === "running" && again.stuckSince !== null : again.liveness === down;
+    return still ? this.eligible(down) : `${down} 确认后又恢复了（${again.liveness}）`;
+  }
+
+  /** 同步读最新的 registry、回程簿和台账：这件活、这个会话还在监护名单里吗 */
+  private eligible(down: Down): string | null {
     const now = this.deps.now();
     const s = supervisedAgents({ config: this.config, registry: this.deps.registry(), db: this.db, calls: this.deps.calls(), held: this.deps.held, now })
       .find((x) => x.agent === this.s.agent);
-    if (!s || s.sessionId !== this.s.sessionId || workKeyOf(s.work) !== this.workKey) return `${down} 确认后不在监护范围了（会话或在途的活变了）`;
-    const again = await this.look();
-    const still = down === "stuck" ? again.liveness === "running" && again.stuckSince !== null : again.liveness === down;
-    return still ? null : `${down} 确认后又恢复了（${again.liveness}）`;
+    return s && s.sessionId === this.s.sessionId && workKeyOf(s.work) === this.workKey ? null : `${down} 确认后不在监护范围了（会话或在途的活变了）`;
   }
 
   /**
