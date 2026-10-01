@@ -1,10 +1,10 @@
 /**
  * bridge/local-api/lend-grant.ts（i28-R7a）：出借方管理面三条接口。门禁矩阵（owner 本人 + 全权凭据，不过就不起进程）、
- * 授权 / 收回只经 W1 的 `lend grant` / `lend revoke`（argv 形状、`--xx` 注入反例、write 不起进程）、借出单的字段白名单、
+ * 授权 / 收回只经 W1 的 `lend grant` / `lend revoke`（argv 形状、`--xx` 注入反例、roles 原样传、重授沿用 roles / 模型 / 推理档）、借出单的字段白名单、
  * journal 不存在、收回回包带在跑单快照、grants 与 W1 effectiveLend 一致。全部注入依赖 + 临时目录，不碰生产 ~/.claude-orchestrator。
  */
 import { afterAll, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { handleLocalApi } from "../src/bridge/local-api/index.js";
@@ -111,8 +111,8 @@ describe("门禁矩阵：非 owner 本人全权凭据三条都 403，且不起�
   });
 });
 
-describe("授权：argv 形状、注入反例、write 拒绝", () => {
-  test("值一律 --flag=value，roles 固定 review，peer 在 -- 之后", async () => {
+describe("授权：argv 形状、注入反例", () => {
+  test("值一律 --flag=value，没有现有条目时 roles 缺省 review，peer 在 -- 之后", async () => {
     const s = setup();
     const r = await s.api(req("/lend/grants", "POST", GOOD), "/lend/grants", OWNER);
     expect(s.calls[0]).toEqual(["lend", "grant", "--repos=o/r,o/s", "--until=7d", "--codex=5", "--orders-per-day=200", "--roles=review", "--", "team-a"]);
@@ -120,10 +120,12 @@ describe("授权：argv 形状、注入反例、write 拒绝", () => {
   });
 
   test("注入反例：peer / repos / until 里的 --xx 只会落在值位或 -- 之后", () => {
-    const argv = grantArgv({ peer: "--peer=evil", repos: ["--roles=write"], until: "--codex=99", codex: "--x", ordersPerDay: 1 }) as string[];
-    expect(argv).toEqual(["lend", "grant", "--repos=--roles=write", "--until=--codex=99", "--codex=--x", "--orders-per-day=1", "--roles=review", "--", "--peer=evil"]);
+    const argv = grantArgv({ peer: "--peer=evil", repos: ["--roles=write"], until: "--codex=99", codex: "--x", ordersPerDay: 1, codexModel: "--roles=write",
+      codexEffort: "-- x" }) as string[];
+    expect(argv).toEqual(["lend", "grant", "--repos=--roles=write", "--until=--codex=99", "--codex=--x", "--orders-per-day=1", "--codex-model=--roles=write",
+      "--codex-effort=-- x", "--roles=review", "--", "--peer=evil"]);
     const dash = argv.indexOf("--");
-    expect(argv.slice(2, dash).every((a) => /^--(repos|until|codex|orders-per-day|roles)=/.test(a))).toBe(true);
+    expect(argv.slice(2, dash).every((a) => /^--(repos|until|codex|orders-per-day|codex-model|codex-effort|roles)=/.test(a))).toBe(true);
     expect(argv.slice(dash + 1)).toEqual(["--peer=evil"]);
   });
 
@@ -133,14 +135,22 @@ describe("授权：argv 形状、注入反例、write 拒绝", () => {
     expect(s.calls[0]).toEqual(["lend", "revoke", "--peer=--all"]);
   });
 
-  test("roles 带 write：400，不起进程、不写盘", async () => {
+  test("roles：review / write 任意非空组合去重后原样传；空数组、null、不认得的值 400，不起进程、不写盘", async () => {
     const s = setup(null);
-    for (const roles of [["review", "write"], ["write"]]) {
+    const rolesOf = async (roles: unknown) => {
+      await s.api(req("/lend/grants", "POST", { ...GOOD, roles }), "/lend/grants", OWNER);
+      return s.calls.at(-1)!.find((a) => a.startsWith("--roles="));
+    };
+    expect(await rolesOf(["review", "write"])).toBe("--roles=review,write");
+    expect(await rolesOf(["write"])).toBe("--roles=write");
+    expect(await rolesOf(["write", "review", "write"])).toBe("--roles=write,review");
+    const n = s.calls.length;
+    for (const roles of [[], null, "write", ["admin"], ["review", "admin"], ["Write"], [1]]) {
       const r = await s.api(req("/lend/grants", "POST", { ...GOOD, roles }), "/lend/grants", OWNER);
-      expect(r?.status).toBe(400);
-      expect(((await r!.json()) as { error: string }).error).toMatch(/write/);
+      expect(r?.status, JSON.stringify(roles)).toBe(400);
+      expect(((await r!.json()) as { error: string }).error).toMatch(/roles/);
     }
-    expect(s.calls).toEqual([]);
+    expect(s.calls.length).toBe(n);
     expect((await readLend(s.lendPath)).status).toBe("missing");
   });
 
@@ -173,7 +183,7 @@ describe("GET：字段白名单、journal 不存在、grants 与 effectiveLend �
     expect(text).not.toContain(SENTINEL);
     const j = JSON.parse(text);
     expect(Object.keys(j).sort()).toEqual(["grants", "maxDays", "ok", "orders", "peers", "shellSentence", "writeOpen"]);
-    expect(j).toMatchObject({ writeOpen: false, maxDays: GRANT_MAX_DAYS, shellSentence: SHELL_SENTENCE });
+    expect(j).toMatchObject({ writeOpen: true, maxDays: GRANT_MAX_DAYS, shellSentence: SHELL_SENTENCE });
     const KEYS = ["agent", "family", "live", "notices", "orderId", "peer", "pr", "reason", "repo", "startedAt", "state", "step", "taskId", "updatedAt"];
     for (const o of j.orders) expect(Object.keys(o).sort()).toEqual(KEYS);
     expect(j.orders.map((o: { orderId: string }) => o.orderId)).toEqual(["o-b", "o-live", "o-done"]); // 在跑在前，8 天前结束的不列
@@ -253,4 +263,82 @@ describe("收回", () => {
     expect((await s.api(req("/lend/grants", "DELETE"), "/lend/grants", OWNER))?.status).toBe(405);
     expect((await s.api(req("/lend/grants/revoke"), "/lend/grants/revoke", OWNER))?.status).toBe(405);
   });
+});
+
+describe("重授沿用：请求体没带 roles / codexModel / codexEffort 就按这个 peer 现有的条目补齐（i28-R7e）", () => {
+  const KEPT = G({ roles: ["review", "write"], codexModel: "gpt-6-astra", codexEffort: "xhigh" });
+  const post = async (s: ReturnType<typeof setup>, body: Record<string, unknown>) => {
+    const r = await s.api(req("/lend/grants", "POST", body), "/lend/grants", OWNER);
+    return { status: r!.status, argv: s.calls.at(-1) };
+  };
+  const tail = (argv: string[] | undefined) => argv!.slice(argv!.indexOf("--orders-per-day=200") + 1);
+
+  test("P1 没带：沿用现有的 roles（含 write）、模型、推理档；按指纹指名也认得出同一条", async () => {
+    const s = setup([KEPT]);
+    expect(tail((await post(s, GOOD)).argv)).toEqual(["--codex-model=gpt-6-astra", "--codex-effort=xhigh", "--roles=review,write", "--", "team-a"]);
+    expect(tail((await post(s, { ...GOOD, peer: FP.toUpperCase() })).argv)).toEqual(["--codex-model=gpt-6-astra", "--codex-effort=xhigh", "--roles=review,write", "--",
+      FP.toUpperCase()]);
+  });
+
+  test("带了：用新值覆盖（roles 收窄也照传）；null：不传，CLI 规则即清掉；只清一个，另一个照旧沿用", async () => {
+    const s = setup([KEPT]);
+    expect(tail((await post(s, { ...GOOD, roles: ["review"], codexModel: "gpt-6-sol", codexEffort: "high" })).argv))
+      .toEqual(["--codex-model=gpt-6-sol", "--codex-effort=high", "--roles=review", "--", "team-a"]);
+    expect(tail((await post(s, { ...GOOD, codexModel: null })).argv)).toEqual(["--codex-effort=xhigh", "--roles=review,write", "--", "team-a"]);
+    expect(tail((await post(s, { ...GOOD, codexModel: null, codexEffort: null })).argv)).toEqual(["--roles=review,write", "--", "team-a"]);
+  });
+
+  test("没有现有条目（新 peer / 认不出的名字）：roles 缺省 review，不带模型；暂停 / 过期的条目照样沿用（规则交给 CLI）", async () => {
+    const s = setup([KEPT, G({ peer: "team-b", fp: "1111-2222-3333-4444", roles: ["write"], codexModel: "m1", paused: { reason: "旧" }, until: iso(T - 1) })]);
+    expect(tail((await post(s, { ...GOOD, peer: "stranger" })).argv)).toEqual(["--roles=review", "--", "stranger"]);
+    expect(tail((await post(s, { ...GOOD, peer: "team-b" })).argv)).toEqual(["--codex-model=m1", "--roles=write", "--", "team-b"]);
+    const fresh = setup(null);
+    expect(tail((await post(fresh, GOOD)).argv)).toEqual(["--roles=review", "--", "team-a"]);
+  });
+
+  test("lend.json 无效：没带齐就 400 不起进程（不按缺省静默清掉）；三个都带了照常授权", async () => {
+    const s = setup(null);
+    writeFileSync(s.lendPath, "{oops");
+    for (const body of [GOOD, { ...GOOD, roles: ["review"] }, { ...GOOD, roles: ["review"], codexModel: null }]) {
+      const r = await post(s, body);
+      expect(r.status).toBe(400);
+    }
+    expect(s.calls).toEqual([]);
+    expect((await post(s, { ...GOOD, roles: ["review"], codexModel: null, codexEffort: "high" })).status).toBe(200);
+    expect(s.calls.length).toBe(1);
+  });
+
+  test("模型字段类型不对：400 不起进程", async () => {
+    const s = setup([KEPT]);
+    for (const bad of [{ codexModel: 5 }, { codexModel: "" }, { codexEffort: false }, { codexEffort: ["xhigh"] }, { codexModel: "a\0b" }]) {
+      expect((await post(s, { ...GOOD, ...bad })).status, JSON.stringify(bad)).toBe(400);
+    }
+    expect(s.calls).toEqual([]);
+  });
+
+  test("P1 真 CLI 端到端：命令行设了 write + 模型 + 推理档，网页（不带这三个字段）重授后盘上原值都在；传 null 才清掉", async () => {
+    const state = mkdtempSync(join(tmpdir(), "web-lend-e2e-"));
+    dirs.push(state);
+    writeFileSync(join(state, "registry.json"), JSON.stringify({ socket: "", agents: {} }));
+    writeFileSync(join(state, "peers.json"), JSON.stringify({ httpPeers: [{ name: "team-a", fp: FP, addedAt: "" }], pendingInvites: [] }));
+    mkdirSync(join(state, "lend"), { recursive: true });
+    const manager = join(import.meta.dir, "../src/manager.ts");
+    const run = async (args: string[]) => {
+      const env: Record<string, string | undefined> = { ...process.env, CLAUDESTRA_STATE_DIR: state };
+      delete env.DISCORD_CHANNEL_ID;
+      const r = Bun.spawnSync([process.execPath, manager, ...args], { env, stdout: "pipe", stderr: "pipe" });
+      return JSON.parse(r.stdout.toString().trim().split("\n").at(-1)!);
+    };
+    const lendPath = join(state, "lend.json");
+    const api = makeLendGrantApi({ lendPath, journalPath: join(state, "lend", "journal.sqlite"), run, context: async () => ({ contacts: [{ name: "team-a", fp: FP }], projects: [] }) });
+    const entry = () => JSON.parse(readFileSync(lendPath, "utf8")).lend[0] as LendEntry;
+    expect(await run(["lend", "grant", "team-a", "--repos", "o/r", "--until", "3d", "--roles", "review,write", "--codex-model", "gpt-6-astra", "--codex-effort", "xhigh"]))
+      .toMatchObject({ ok: true });
+    const web = async (body: Record<string, unknown>) => (await api(req("/lend/grants", "POST", body), "/lend/grants", OWNER))!;
+    expect((await web({ peer: "team-a", repos: ["o/r", "o/s"], until: "5d" })).status).toBe(200);
+    expect(entry()).toMatchObject({ repos: ["o/r", "o/s"], roles: ["review", "write"], codexModel: "gpt-6-astra", codexEffort: "xhigh" });
+    expect((await web({ peer: "team-a", repos: ["o/r"], until: "5d", codexModel: null })).status).toBe(200);
+    expect(entry().codexModel).toBeUndefined();
+    expect(entry()).toMatchObject({ roles: ["review", "write"], codexEffort: "xhigh" });
+  }, 30_000);
 });

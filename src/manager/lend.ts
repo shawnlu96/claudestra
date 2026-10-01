@@ -20,7 +20,7 @@ import { requireOwnerOrMaster } from "./project-guard.js";
 
 const LEND_USAGE =
   "usage: lend status | lend grant <peer名|指纹> --repos owner/repo[,..] --until <ISO|3d|12h>（最长 7 天） [--codex N（缺省 5）] [--claude N] " +
-  "[--roles review] [--orders-per-day N（缺省 200）] [--codex-model <模型>] [--codex-effort <档位>]（不写 = 本机 Codex 默认；重授不带就清掉） | lend revoke [--peer <名>]（不带 --peer = 全部收回）";
+  "[--roles review[,write]] [--orders-per-day N（缺省 200）] [--codex-model <模型>] [--codex-effort <档位>]（不写 = 本机 Codex 默认；重授不带就清掉） | lend revoke [--peer <名>]（不带 --peer = 全部收回）";
 const BORROW_USAGE = "usage: borrow status | borrow set <peer名|指纹> --projects <id,..> [--roles review[,write]] [--max-open N] " +
   "[--priority first|balance|low|off]（槽池档位，不写 = balance；重设不带就回到 balance） | borrow off [--peer <名>]";
 
