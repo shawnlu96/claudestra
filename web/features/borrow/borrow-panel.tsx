@@ -8,13 +8,13 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { fleetAccess } from "@/lib/api/fleet";
 import { useT } from "@/lib/i18n";
 import { Section } from "@/features/chat/components/settings/section";
-import { fetchBorrow, removeBorrowPeer, saveBorrowPeer, type BorrowView, type DroppedCode, type DroppedView } from "./borrow-api";
+import { fetchBorrow, saveBorrowPeer, type BorrowView, type DroppedCode, type DroppedView } from "./borrow-api";
 import { addableContacts, canSubmitNew, clampMaxOpen, POLL_MS, sortPeers, toggleProject } from "./borrow-model";
 import { ProjectChips, Stepper } from "./borrow-bits";
-import { BorrowPeerCard } from "./borrow-peer-card";
+import { BorrowPeerCard, dropPeer } from "./borrow-peer-card";
 import { RemoteRows } from "./borrow-remote";
 import { ActivityIcon, CheckIcon, PlusIcon, ServerIcon, TrashIcon, XIcon } from "./icons";
-import { fadeIn, fadeOut, shake } from "./motion";
+import { fadeIn, shake } from "./motion";
 
 type Loaded = { view: BorrowView | null; receivedAt: number; hidden: boolean };
 
@@ -105,15 +105,8 @@ function DeadEntry({ d, canWrite, onChanged }: { d: DroppedView; canWrite: boole
   const [busy, setBusy] = useState(false);
   const drop = async (el: HTMLElement) => {
     setBusy(true);
-    try {
-      await removeBorrowPeer(d.peer);
-      await fadeOut(row.current);
-      await onChanged();
-    } catch {
-      shake(el);
-    } finally {
-      setBusy(false);
-    }
+    await dropPeer(d.peer, row.current, el, onChanged);
+    setBusy(false);
   };
   return (
     <div ref={row} className="flex min-w-0 items-center gap-2 rounded-lg bg-base-100 px-3 py-2 text-[12px] text-base-content/45">

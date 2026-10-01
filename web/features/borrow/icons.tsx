@@ -1,5 +1,7 @@
 import { Svg } from "@/features/fleet/icons";
 
+export { CheckIcon, ClockIcon, MinusIcon, XIcon } from "@/features/fleet/icons";
+
 /** 手抄的 lucide 线条图标（网页不用 emoji），颜色跟随 currentColor；外框复用 fleet 的 Svg */
 type IconProps = { className?: string };
 
@@ -19,25 +21,6 @@ export const PlusIcon = ({ className }: IconProps) => (
   </Svg>
 );
 
-export const MinusIcon = ({ className }: IconProps) => (
-  <Svg className={className}>
-    <path d="M5 12h14" />
-  </Svg>
-);
-
-export const XIcon = ({ className }: IconProps) => (
-  <Svg className={className}>
-    <path d="M18 6 6 18" />
-    <path d="m6 6 12 12" />
-  </Svg>
-);
-
-export const CheckIcon = ({ className }: IconProps) => (
-  <Svg className={className}>
-    <path d="M20 6 9 17l-5-5" />
-  </Svg>
-);
-
 /** lucide trash-2 */
 export const TrashIcon = ({ className }: IconProps) => (
   <Svg className={className}>
@@ -46,13 +29,6 @@ export const TrashIcon = ({ className }: IconProps) => (
     <path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2" />
     <path d="M10 11v6" />
     <path d="M14 11v6" />
-  </Svg>
-);
-
-export const ClockIcon = ({ className }: IconProps) => (
-  <Svg className={className}>
-    <circle cx="12" cy="12" r="10" />
-    <path d="M12 6v6l4 2" />
   </Svg>
 );
 

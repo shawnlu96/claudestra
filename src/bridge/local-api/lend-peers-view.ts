@@ -50,10 +50,10 @@ export function setBorrowViewDepsForTest(over?: Partial<BorrowViewDeps>): void {
 const PEER_RE = /^[\w-]{1,32}$/;
 const PROJECT_RE = /^[a-z0-9][a-z0-9_-]{0,31}$/;
 
-export type RemoteModeView = "balance" | "off";
-export interface BorrowProjectView { id: string; mode: RemoteModeView; maxActiveWorkers: number }
+type RemoteModeView = "balance" | "off";
+interface BorrowProjectView { id: string; mode: RemoteModeView; maxActiveWorkers: number }
 /** 声明里有、生效里没有的条目 / 项目：原因只给固定码，网页按码翻译 */
-export interface DroppedView { peer: string; project?: string; code: "contact_gone" | "contact_disabled" | "fp_changed" | "project_gone" | "personal" }
+interface DroppedView { peer: string; project?: string; code: "contact_gone" | "contact_disabled" | "fp_changed" | "project_gone" | "personal" }
 export interface PeerView {
   peer: string;
   maxOpen: number;

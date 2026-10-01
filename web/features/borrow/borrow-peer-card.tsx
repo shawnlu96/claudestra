@@ -55,6 +55,17 @@ function Capacity({ peer, now, age }: { peer: PeerView; now: number; age: ReactN
   );
 }
 
+/** 删一条借入：成功整行淡出再刷新，失败抖被点的按钮（卡片与失效行共用） */
+export async function dropPeer(peer: string, row: HTMLElement | null, el: HTMLElement, onChanged: () => Promise<void>): Promise<void> {
+  try {
+    await removeBorrowPeer(peer);
+    await fadeOut(row);
+    await onChanged();
+  } catch {
+    shake(el);
+  }
+}
+
 type Draft = { projects: string[]; maxOpen: number };
 
 export function BorrowPeerCard(props: {
@@ -103,15 +114,8 @@ export function BorrowPeerCard(props: {
     if (!armed) return setArmed(true);
     setArmed(false);
     setBusy(true);
-    try {
-      await removeBorrowPeer(peer.peer);
-      await fadeOut(card.current);
-      await onChanged();
-    } catch {
-      shake(el);
-    } finally {
-      setBusy(false);
-    }
+    await dropPeer(peer.peer, card.current, el, onChanged);
+    setBusy(false);
   };
 
   return (
