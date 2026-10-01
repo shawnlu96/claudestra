@@ -84,9 +84,9 @@ function peerOrder(id: string, step = "write", status = "claimed"): void {
     VALUES (?,?,'p','mate','codex',?,1,1,?,'o/r','{}','x','sha',?,60000,'scheduler',1,1)`, [`lend-${id}`, id, step, HEAD, status]);
 }
 
-function hello(at = NOW): void {
+function hello(at = NOW, claudeSlots = 0): void {
   recordHello(db, "mate", null, { v: 1, proto: 2, boot: "b", seq: 1, paused: null,
-    slots: { codex: { total: 5, busy: 0 }, claude: { total: 0, busy: 0 } },
+    slots: { codex: { total: 5, busy: 0 }, claude: { total: claudeSlots, busy: 0 } },
     grant: { until: NOW + 3_600_000, roles: ["write"], repos: ["o/r"], ordersPerDay: 20, ordersLeftToday: 20 } }, at);
 }
 
@@ -174,7 +174,8 @@ describe("local write slots", () => {
   test("a repair with a peer write lease stays remote without a local slot or priority reservation", () => {
     repair("fix");
     holdWriteLease(db, getTask(db, "fix")!, { peer: "mate", fp: "aaaa-bbbb-cccc-dddd", branch: "lend/fix-aaaa", repo: "o/r" }, NOW);
-    hello();
+    // A fix stays in the original Claude author family; Codex-only capacity cannot resume this writer.
+    hello(NOW, 1);
     const s = snapshot("fix");
     s.pool = poolFacts(db, s.task, { remote: pool.remote!, borrow: pool.borrow, now: NOW });
     expect(planScheduler(s)).toMatchObject({ kind: "intent", action: "dispatch", recipient: "peer:mate" });
