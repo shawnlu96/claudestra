@@ -6,6 +6,11 @@
  * `--tools` 是整体替换（会把通道工具一起顶掉 ✗），写 settings 要动用户的全局配置 ✗，
  * 所以走扩展的 `pi.setActiveTools()`。
  *
+ * 与显式工具选择的关系（真机实测 pi 0.99.1，三个场景）：`--exclude-tools codemode` 时激活**被挡住**、
+ * `--tools read,bash`（白名单不含它）同样挡住、`--tools read,bash,codemode` 才可用 ——
+ * 即 **Pi 的显式白/黑名单优先于本扩展的激活**，所以这里不需要自己再判一遍，也永远不会
+ * "把用户明确排除的工具偷偷放回来"。
+ *
  * 要激活的名字由能力档决定、经 `CLAUDESTRA_PI_ACTIVATE` 传进来（runtimes/pi-acp.ts 注入，
  * 适配器把 env 原样交给 pi）。读完立刻从 env 删掉：pi 的 bash 工具按 process.env 起子进程，
  * 留着等于把我们内部的开关给了模型（与 mcp-mount 同款处理）。
