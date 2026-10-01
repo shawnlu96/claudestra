@@ -352,7 +352,7 @@ test("生产库按旧顺序把出借写单跑成了第 13 版（部署表缺）�
   closeLedger(file);
   const m = openLedger(file);
   expect(m.query("PRAGMA user_version").get()).toEqual({ user_version: LEDGER_SCHEMA_VERSION });
-  expect(LEDGER_SCHEMA_VERSION).toBe(16);
+  expect(LEDGER_SCHEMA_VERSION).toBe(17);
   expect(m.query("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'scheduler_deploys'").all()).toHaveLength(1);
   expect(m.query("SELECT orderId, step, branch, seenAt FROM lend_orders").all()).toEqual([{ orderId: "lend:T1:s1:r0:a0", step: "write", branch: BR, seenAt: 5 }]);
   closeLedger(file);

@@ -1,3 +1,4 @@
+import { handleProductBoardApi } from "./product-board.js";
 /**
  * bridge 本地 API（docs/design-hosted-frontend.md §13.2）：原 Next BFF 里「逻辑在服务端」的那批路由搬进 bridge，
  * 在 api-extensions.ts 登记、api-routes 鉴权之后被调。每个端点族一个模块，handler 返回 null = 不是我的路径。
@@ -39,7 +40,7 @@ import { versionResponse } from "./version.js";
 export const LOCAL_API_FEATURES = [
   "version", "settings", "profile", "agent-settings", "hidden-messages", "skill-prefs", "transcribe", "client-log", "host-open", "attachments",
   "control", "handoff", "mission", "access-paths", "skill-library", "ledger", "quota", "last-seen", "asks", "fleet", "agent-skill-settings", "media", "talk",
-  "peer-ledger", "ai-inventory", "lend", "usage", "ledger-dag",
+  "peer-ledger", "ai-inventory", "lend", "usage", "ledger-dag", "ledger-product",
 ];
 
 type Family = (req: Request, path: string, principal: Principal, url: URL) => Promise<Response | null> | Response | null;
@@ -47,7 +48,7 @@ const FAMILIES: Family[] = [
   handleSettings, handleAgentPrefs, handleTranscribe, handleClientLog, handleHost, handleAttachments, handleControl, handleHandoff, handleMissionApi,
   handleAccessPaths, handleSkillLibrary, handleAgentSkills, handleAsksApi, handleLedgerApi, handleQuotaApi, handleLastSeen, handleFleetApi, handleMedia,
   handleTalkApi, handlePeerLedgerApi, handleLendApi, handleLendInbox, handleTeamApi, handleAiInventoryApi, handleUsageApi, handleLedgerDagApi, handleLendWorkersApi,
-  handleLendGrantApi, handleBorrowApi,
+  handleLendGrantApi, handleBorrowApi, handleProductBoardApi,
 ];
 
 export async function handleLocalApi(req: Request, url: URL, principal: Principal): Promise<Response | null> {
