@@ -9,7 +9,7 @@ import { remoteWork, reviewPlacement } from "./scheduler-placement-plan.js";
 import { BOUNCE_LIMIT_REASON, bounceLimitHit, fixBounce, reviewAfterBounce, type MergeBounce } from "./scheduler-merge-conflict.js";
 import type { PmUiGate } from "./ledger-ui-approve-verdict.js";
 import { uiFixPackage, uiMergeBlock, uiPassStep } from "./scheduler-ui-gate.js";
-import { convergeReview, fixWarning, roundCap, type Downgrade, type FixDiff } from "./review-converge.js";
+import { escalationDowngrade, convergeReview, fixWarning, roundCap, type Downgrade, type FixDiff } from "./review-converge.js";
 
 export interface WorkerRef {
   agent: string;
@@ -83,7 +83,7 @@ interface PlannedIntent {
   downgrade?: Downgrade;
 }
 export type PlannerDecision = PlannedIntent | { kind: "wait"; code: string; reason: string } |
-  { kind: "escalate"; code: string; reason: string; reviewSeq?: number; history?: ReviewFinding[][] };
+  { kind: "escalate"; code: string; reason: string; reviewSeq?: number; history?: ReviewFinding[][]; downgrade?: Downgrade };
 
 const wait = (code: string, reason: string): PlannerDecision => ({ kind: "wait", code, reason });
 const escalate = (code: string, reason: string, reviewSeq?: number): PlannerDecision => ({ kind: "escalate", code, reason, ...(reviewSeq ? { reviewSeq } : {}) });
@@ -361,5 +361,5 @@ export function planScheduler(s: PlannerSnapshot): PlannerDecision {
   const decision = task.stage === "spec" || task.stage === "build" || task.stage === "fix" ? dispatchWork(s, node)
     : task.stage === "review" ? reviewStep(s, node) : stageStep(s, node);
   const active = s.intents.find((i) => i.status === "pending" || i.status === "submitted" || i.status === "unknown");
-  return decision.kind === "intent" && active ? wait("intent_in_flight", `先结清调度意图 ${active.id}（${active.status}）`) : decision;
+  return escalationDowngrade(decision.kind === "intent" && active ? wait("intent_in_flight", `先结清调度意图 ${active.id}（${active.status}）`) : decision, task, s.events, s.fixDiff);
 }

@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { writeFileSync, readFileSync } from "node:fs";
+import { writeFileSync, readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { getWorkflow } from "../src/lib/ledger-scheduler.js";
 import { listEvents } from "../src/lib/ledger-store.js";
@@ -86,5 +86,43 @@ test("different P1s fix past round four, round eight holds without dispatch, sen
       "--reason", "已收窄规格")).toMatchObject({ ok: true });
     expect(await f.tick()).toMatchObject({ step: "sent" });
     expect(getWorkflow(f.db, "T1")?.mode).toBe("auto");
+  } finally { f.close(); }
+});
+
+test.each(["three_p1_rounds", "review_block"])("%s persists mixed demotions before manual fallback without duplicates", async (code) => {
+  const f = autoFixture();
+  try {
+    expect(await f.cli("owner", "meta", "--project", "p", "--docs-dir", f.dir)).toMatchObject({ ok: true });
+    f.db.query("INSERT OR REPLACE INTO ledger_instance (key, value) VALUES ('origin', 'abcd')").run();
+    f.db.query("UPDATE tasks SET pm = 'pm' WHERE id = 'T1'").run();
+    const feature = createFeature(f.db, f.at("pm"), { project: "p", slug: "manual", title: "manual" }).row;
+    initDag(f.db, f.at("pm"), { id: feature.id, rev: feature.rev, nodes: [{ key: "A", taskId: "T1", fileGlobs: ["src/a.ts"] }] });
+    await ready(f);
+    const round = code === "three_p1_rounds" ? 3 : 1;
+    for (let r = 1; r <= round; r++) {
+      const head = String(r).repeat(40);
+      const rows = [{ findingId: "persistent", family: "logic", severity: code === "review_block" ? "P0" : "P1",
+        basis: "acceptance:1", probe: "src/a.ts" },
+      ...(r === round ? [{ findingId: "cleanup", family: "cleanup", severity: "P1", probe: "src/a.ts" }] : [])];
+      const report = join(f.dir, `report-${r}.md`); writeFileSync(report, "# Findings\ncleanup: deferred improvement\n");
+      const file = join(f.dir, `findings-${r}.json`); writeFileSync(file, JSON.stringify(rows));
+      expect(await f.cli("agent-rv-t1", "review", "T1", "--reviewer", "agent-rv-t1", "--verdict", code === "review_block" ? "block" : "changes",
+        "--p0", code === "review_block" ? "1" : "0", "--p1", String(rows.filter((x) => x.severity === "P1").length), "--p2", "0",
+        "--head", head, "--session", "s-rv", "--family", "codex", "--findings", file, "--path", report)).toMatchObject({ ok: true });
+      if (r === round) break;
+      expect(await f.tick()).toMatchObject({ step: "stage", detail: "review→fix" });
+      await f.tick();
+      expect(await f.cli("agent-task-one", "deliver", "T1", "--from", "fix", "--head", String(r + 1).repeat(40))).toMatchObject({ ok: true });
+      await f.tick();
+    }
+    expect(await f.tick()).toMatchObject({ step: "manual", detail: expect.stringContaining(code) });
+    await f.tick(); await f.tick();
+    expect(getWorkflow(f.db, "T1")?.mode).toBe("manual");
+    expect(listEvents(f.db, { target: "T1" }).filter((e) => e.data.op === "review_downgrade")).toHaveLength(1);
+    expect(getFeature(f.db, feature.id)?.currentVersion).toBe(2);
+    const nodes = getDagVersion(f.db, feature.id, 2)!.nodes;
+    expect(nodes).toHaveLength(2);
+    expect(nodes.find((n) => n.key === `Af${round}`)?.deps).toEqual(["A"]);
+    expect(existsSync(join(f.dir, "tasks", "drafts", `T1f${round}.md`))).toBe(true);
   } finally { f.close(); }
 });

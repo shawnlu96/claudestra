@@ -4,9 +4,9 @@
  * touched counts as P2 too: rounds stop growing because each reviewer digs somewhere new. The real stop is the round cap: at
  * MAX_REVIEW_ROUND a remaining P1 holds the card (no new work, mode stays auto) until PM resumes it. tests/review-converge.test.ts.
  */
-import type { LedgerEvent } from "./ledger-stages.js";
+import type { LedgerEvent, LedgerTask } from "./ledger-stages.js";
 import { findingBasis } from "./review-converge-basis.js";
-import { countsAsP1, downgradedIds, normalizedFamily, type ReviewFacts, type ReviewFinding } from "./scheduler-review.js";
+import { currentReviewFacts, countsAsP1, downgradedIds, normalizedFamily, type ReviewFacts, type ReviewFinding } from "./scheduler-review.js";
 
 /** From this round the review covers only the fix diff plus last round's open findings (review-converge-order.ts says so). */
 export const SCOPE_ROUND = 3;
@@ -99,4 +99,14 @@ export function fixWarning(streakMax: number, round: number, fallback: string): 
     ...(round >= MAX_REVIEW_ROUND - 1 ? [`已到第 ${round} 轮：第 ${MAX_REVIEW_ROUND} 轮仍有挂验收线的 P1 就停下交 PM（拆卡或改规格）`] : []),
   ];
   return lines.length ? lines.join("；") : null;
+}
+
+/** Only validated review exits carry demotions; identity/history errors must never legitimize an invalid verdict. */
+export function escalationDowngrade<T extends { kind: string; code?: string; reviewSeq?: number }>(decision: T,
+  task: Pick<LedgerTask, "round" | "headSHA" | "specRev">, events: readonly LedgerEvent[], diff?: FixDiff | null): T & { downgrade?: Downgrade } {
+  if (decision.kind !== "escalate" || !["three_p1_rounds", "review_block"].includes(decision.code ?? "")) return decision;
+  const read = currentReviewFacts(task, events);
+  if (read.kind !== "facts" || read.facts.eventSeq !== decision.reviewSeq) return decision;
+  const { downgrade } = convergeReview(events, read.facts, diff);
+  return downgrade ? { ...decision, downgrade } : decision;
 }

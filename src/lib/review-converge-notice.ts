@@ -9,7 +9,7 @@ import { getEventByDedup, listEvents } from "./ledger-store.js";
 import { insertEvent, tx } from "./ledger-tx.js";
 import { MAX_REVIEW_ROUND, ROUND_CAP_CODE } from "./review-converge.js";
 import { convergeReview } from "./review-converge.js";
-import { convergeFollowUp } from "./review-converge-followup.js";
+import { convergeFollowUp, escalationFollowUp } from "./review-converge-followup.js";
 import { fixDiffOf } from "./review-converge-scope.js";
 import { SchedulerStopped } from "./scheduler-maintenance.js";
 import { countsAsP1, currentReviewFacts, type ReviewFinding } from "./scheduler-review.js";
@@ -88,4 +88,13 @@ export async function followUpFailureNotice(db: Database, task: LedgerTask,
       }, true);
     });
   }
+}
+
+/** Review demotions survive automatic exits; failure informs are sent before the card stops receiving auto ticks. */
+export async function escalationWithFollowUp<T>(db: Database, task: LedgerTask,
+  plan: { code: string; reason: string; reviewSeq?: number; downgrade?: import("./review-converge.js").Downgrade },
+  notifyPm: (task: LedgerTask, text: string) => Promise<void>, fallback: (reason: string) => Promise<T>): Promise<T> {
+  escalationFollowUp(db, task, plan);
+  await followUpFailureNotice(db, task, notifyPm);
+  return fallback(`${plan.code}：${plan.reason}`);
 }

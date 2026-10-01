@@ -16,13 +16,13 @@ import { rewriteDag } from "./ledger-dag-write.js";
 import { effectiveNodes, getDagVersion, getFeature, type DagNode } from "./ledger-feature.js";
 import { resourceKey } from "./ledger-scheduler.js";
 import type { LedgerTask } from "./ledger-stages.js";
-import { getEventByDedup, getMeta, getTask, LedgerError } from "./ledger-store.js";
-import { insertEvent } from "./ledger-tx.js";
+import { getEventByDedup, getMeta, getTask, listEvents, LedgerError } from "./ledger-store.js";
+import { insertEvent, tx } from "./ledger-tx.js";
 import { quoteExternal } from "./quote-text.js";
 import { quotedReviewReport } from "./review-converge-report.js";
 import { statePath } from "./paths.js";
 import { probePaths, type Downgrade, type DowngradeItem } from "./review-converge.js";
-import { DOWNGRADE_OP } from "./scheduler-review.js";
+import { currentReviewFacts, DOWNGRADE_OP } from "./scheduler-review.js";
 
 const WHY_TEXT: Record<DowngradeItem["why"], string> = { no_basis: "没对应验收线", outside_diff: "修复 diff 外的新问题" };
 export const followUpKey = (taskId: string, round: number): string => `scheduler:converge:${taskId}:r${round}`;
@@ -119,4 +119,18 @@ export function convergeFollowUp(db: Database, ctx: WriteCtx, task: LedgerTask, 
     data: { op: DOWNGRADE_OP, round: d.round, head: d.head, reportPath: d.reportPath, findingIds: d.items.map((i) => i.findingId),
       items: d.items.map((i) => ({ findingId: i.findingId, why: i.why })), draft: draft.path, node: dag.node, followUpFailure: dag.note },
   }, true);
+}
+
+/** Persist a validated verdict's demotions before manual fallback, rechecking the verdict inside the write transaction. */
+export function escalationFollowUp(db: Database, task: LedgerTask, plan: { reviewSeq?: number; downgrade?: Downgrade }): void {
+  const d = plan.downgrade;
+  if (!d) return;
+  tx(db, () => {
+    const current = getTask(db, task.id);
+    const events = current ? listEvents(db, { project: current.project, target: current.id }) : [];
+    const read = current ? currentReviewFacts(current, events) : null;
+    if (!current || current.stage !== "review" || read?.kind !== "facts" || read.facts.eventSeq !== plan.reviewSeq ||
+      read.facts.head !== d.head || read.facts.round !== d.round) throw new LedgerError("conflict", "退人工前审查结论已变，重新核对降级发现");
+    convergeFollowUp(db, { actor: "scheduler" }, current, d);
+  });
 }

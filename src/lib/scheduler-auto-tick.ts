@@ -354,7 +354,7 @@ class Card {
     if (open) return this.drive(open, null);
     const peerHold = peerPrHold(this.db, this.task); if (peerHold) return this.out("held", peerHold); // 只拦 peer PR 卡（i28-A2）
     const plan = planScheduler(autoSnapshot(this.db, this.task, this.opts));
-    if (plan.kind === "escalate") return this.escalate(`${plan.code}：${plan.reason}`);
+    if (plan.kind === "escalate") return (await import("./review-converge-notice.js")).escalationWithFollowUp(this.db, this.task, plan, this.deps.notifyPm, (r) => this.escalate(r));
     if (plan.kind === "wait") return this.watch(plan);
     if (plan.action === "verify" || plan.action === "retire") return this.out("waiting", `${plan.node} 由合并队列 / 收尾步骤（scheduler-retire.ts）处理`);
     const backoff = plan.action === "dispatch" || plan.action === "review" ? this.undeliveredBackoff() : null;
