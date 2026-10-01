@@ -5,8 +5,7 @@
  * 视口不用补偿。按钮触发的移动带过渡（glide），拖拽 / 滚轮不带，否则手跟不上。
  */
 import { useEffect, useRef, useState } from "react";
-import type { Canvas } from "./causal-model";
-import { fitAllView, fitsAll, MAX_K, MIN_K, offscreen, panView, reconcileView, VIEW_PAD, type Dir, type Focus, type View, type ViewState } from "./canvas-view";
+import { fitAllView, fitsAll, MAX_K, MIN_K, offscreen, panView, reconcileView, VIEW_PAD, type Dir, type Focus, type View, type ViewCanvas, type ViewState } from "./canvas-view";
 
 const INITIAL: ViewState = { view: { x: VIEW_PAD, y: VIEW_PAD, k: 1 }, placed: false, centered: 0 };
 
@@ -25,7 +24,7 @@ export function usePort() {
 }
 
 /** 点空白 = onBackground */
-export function useViewport(canvas: Canvas, port: { w: number; h: number }, focus: Focus | null, onBackground: () => void) {
+export function useViewport(canvas: ViewCanvas, port: { w: number; h: number }, focus: Focus | null, onBackground: () => void) {
   const drag = useRef<{ x: number; y: number; vx: number; vy: number; moved: boolean } | null>(null);
   const [st, setSt] = useState<ViewState>(INITIAL);
   const [glide, setGlide] = useState(false);

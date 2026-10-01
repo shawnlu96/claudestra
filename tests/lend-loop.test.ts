@@ -1,130 +1,65 @@
-/** T94 lend 循环（src/lib/lend-loop.ts + lend-drive.ts）：确认门、重启恢复、心跳自停、前提不满足不 poll。A 与 worker 都是假的（tests/lend-harness.ts）。 */
+/** T94 lend 循环（src/lib/lend-loop.ts + lend-drive.ts）：一次授权、重启恢复、心跳自停、前提不满足不 poll。A 与 worker 都是假的（tests/lend-harness.ts）。 */
 import { describe, expect, test } from "bun:test";
 import { BEAT_MS, detailOf, workerName } from "../src/lib/lend-drive.js";
 import { MISS_GAP_MS } from "../src/lib/lend-health.js";
 import { advance, getMeta, getOrder, patchOrder, recordAsked } from "../src/lib/lend-journal.js";
-import { AUTO, ENTRY, FP, HEAD, harness, polled, sha, TEXT, toStarted, wire } from "./lend-harness.js";
+import { FP, HEAD, harness, polled, sha, TEXT, toStarted, wire } from "./lend-harness.js";
 
-describe("T94 确认门", () => {
-  test("per-order：poll 到单只开 ask，owner 没批之前不 claim、不 clone、不起 worker", async () => {
-    const h = harness();
-    await h.tick();
-    await h.tick();
-    expect(getOrder(h.db, "o1")).toMatchObject({ state: "asked", askId: "ask-o1" });
-    expect(h.log.asksOpened).toBe(1);
-    expect(h.ops()).not.toContain("claim");
-    expect(h.log.created).toEqual([]);
-  });
-
-  test("owner 批了才 claim → clone → 起 worker → 首条派单（订单全文 + 本机尾注）", async () => {
+describe("i28-W1 一次授权（取代逐单确认）", () => {
+  test("授权内：poll 到单直接 claim → clone → 开跑通知 → 起 worker → 首条派单（订单全文 + 本机尾注），不开确认", async () => {
     const h = harness();
     await toStarted(h);
+    expect(h.ops().slice(0, 2)).toEqual(["poll", "claim"]);
+    expect(h.noticeKinds()).toEqual(["start:o1"]);
     expect(h.log.created).toEqual([workerName("o1")]);
     expect(h.log.sent).toHaveLength(1);
     expect(h.log.sent[0]).toContain(TEXT);
-    expect(getOrder(h.db, "o1")!.submit).toBe("sent");
+    expect(getOrder(h.db, "o1")).toMatchObject({ submit: "sent", askId: null });
   });
 
-  test("owner 不批 / 过期 → declined，永远不 claim", async () => {
+  test("开跑通知没交出去：工作副本好了也不起 worker，下一轮补发交出去才起", async () => {
     const h = harness();
-    await h.tick();
-    h.asks.set("ask-o1", "declined");
-    await h.tick();
-    await h.tick();
-    expect(getOrder(h.db, "o1")!.state).toBe("declined");
-    expect(h.ops()).not.toContain("claim");
-    expect(h.log.created).toEqual([]);
-  });
-
-  test("auto：不开 ask，直接 claim", async () => {
-    const h = harness({ entry: AUTO });
-    await h.tick();
-    await h.tick();
-    expect(h.log.asksOpened).toBe(0);
-    expect(h.ops()).toContain("claim");
-  });
-});
-
-describe("T94 限时预先授权（specRev 2）", () => {
-  test("生效期间：不开 ask，每单先通知 owner 一次再 claim；通知只发一次", async () => {
-    const h = harness({ entry: AUTO });
-    for (let i = 0; i < 4; i++) await h.tick();
-    expect(h.log.asksOpened).toBe(0);
-    expect(h.log.informs).toEqual(["o1"]);
-    expect(typeof getOrder(h.db, "o1")!.preview.informedAt).toBe("number");
-    expect(h.log.created).toEqual([workerName("o1")]);
-  });
-
-  test("通知没送到：不 claim、不起 worker，下轮再发", async () => {
-    const h = harness({ entry: AUTO });
     h.inform.ok = false;
-    await h.tick();
-    await h.tick();
-    expect(h.ops()).not.toContain("claim");
-    expect(getOrder(h.db, "o1")!.state).toBe("asked");
+    for (let i = 0; i < 5; i++) await h.tick();
+    expect(getOrder(h.db, "o1")).toMatchObject({ state: "cloned", notices: null });
+    expect(h.log.created).toEqual([]);
     h.inform.ok = true;
     await h.tick();
-    expect(h.log.informs).toEqual(["o1"]);
-    expect(h.ops()).toContain("claim");
+    expect(h.noticeKinds()).toEqual(["start:o1"]);
+    expect(h.log.created).toEqual([workerName("o1")]);
+    expect(typeof getOrder(h.db, "o1")!.notices!.start).toBe("number");
   });
 
-  test("通知送出去的这段时间里到期（r1 P1-2）：通知回来后按此刻重算，不再免确认 claim，下一轮开 ask", async () => {
-    const h = harness({ entry: { confirm: "auto", until: new Date(1_000_000 + 1_000).toISOString() } });
-    await h.tick(); // poll 到单，落 asked
-    h.inform.delayMs = 2_000; // bridge / manager 往返跨过了 until
-    await h.tick();
-    expect(h.log.informs).toEqual(["o1"]);
-    expect(h.ops()).not.toContain("claim");
-    await h.tick();
-    expect(h.log.asksOpened).toBe(1);
-    expect(h.ops()).not.toContain("claim");
-    expect(h.log.created).toEqual([]);
-  });
-
-  test("同一轮里前一张单的通知慢、跨过了 until：后一张单也不用本轮开头的快照去 claim", async () => {
-    const h = harness({ entry: { confirm: "auto", until: new Date(1_000_000 + 1_000).toISOString() } });
-    h.A.poll = () => ({ status: 200, body: { ok: true, v: 1, orders: [polled("o1"), polled("o2")], pollAfterMs: 30_000 } });
-    await h.tick();
-    h.inform.delayMs = 2_000; // 只有第一张单的通知慢
-    await h.tick();
-    expect(h.ops()).not.toContain("claim");
-    expect(getOrder(h.db, "o2")!.state).toBe("asked");
-  });
-
-  test("到期：恢复逐单确认——开 ask，owner 没批不 claim", async () => {
-    const h = harness({ entry: { confirm: "auto", until: new Date(1_000_000 + 60_000).toISOString() } });
-    h.advanceTime(120_000);
-    await h.tick();
-    await h.tick();
-    expect(h.log.informs).toEqual([]);
-    expect(h.log.asksOpened).toBe(1);
-    expect(h.ops()).not.toContain("claim");
-  });
-
-  test("没写 until 的 auto 一律按逐单确认", async () => {
-    const h = harness({ entry: { confirm: "auto" } });
-    await h.tick();
-    await h.tick();
-    expect(h.log.asksOpened).toBe(1);
-    expect(h.ops()).not.toContain("claim");
-  });
-
-  test("当天单数用完：第二张单不通知、不 claim", async () => {
-    const h = harness({ entry: { ...AUTO, quota: { ordersPerDay: 1, tokensPerDay: null } } });
+  test("当天单数用完：第二张单不 claim", async () => {
+    const h = harness({ entry: { ordersPerDay: 1 } });
     h.A.poll = () => ({ status: 200, body: { ok: true, v: 1, orders: [polled("o1"), polled("o2")], pollAfterMs: 30_000 } });
     for (let i = 0; i < 4; i++) await h.tick();
-    expect(h.log.informs).toEqual(["o1"]);
     expect(h.calls.filter((c) => c.op === "claim").map((c) => c.body.orderId)).toEqual(["o1"]);
   });
 
-  test("出借关掉后，还没 claim 的单放弃", async () => {
+  test("出借总开关关了：还没 claim 的单放弃", async () => {
     const h = harness();
     await h.tick();
-    h.d.readLend = async () => ({ status: "ok", file: { version: 1, enabled: false, lend: [ENTRY], borrow: [] } });
-    h.asks.set("ask-o1", "approved");
+    h.lend.enabled = false;
     await h.tick();
     expect(getOrder(h.db, "o1")!.state).toBe("declined");
     expect(h.ops()).not.toContain("claim");
+  });
+
+  test("升级前挂着逐单确认 ask 的单：有授权 → 关掉旧 ask、按授权 claim；没授权 → declined，写明要重新授权", async () => {
+    const h = harness();
+    recordAsked(h.db, { orderId: "o1", peer: "team-a", fp: FP, family: "codex", preview: { ...polled("o1") } });
+    patchOrder(h.db, "o1", ["asked"], { askId: "ask_old1" });
+    await h.tick();
+    expect(h.log.retired).toEqual(["ask_old1"]);
+    expect(h.calls.filter((c) => c.op === "claim").map((c) => c.body.orderId)).toEqual(["o1"]);
+    const g = harness();
+    g.lend.lend = [];
+    recordAsked(g.db, { orderId: "o9", peer: "team-a", fp: FP, family: "codex", preview: { ...polled("o9") } });
+    patchOrder(g.db, "o9", ["asked"], { askId: "ask_old9" });
+    await g.tick();
+    expect(g.log.retired).toEqual(["ask_old9"]);
+    expect(getOrder(g.db, "o9")).toMatchObject({ state: "declined", reason: expect.stringContaining("逐单确认已退役，请重新授权") });
   });
 });
 
@@ -157,7 +92,7 @@ describe("T94 前提不满足不 poll", () => {
   });
 
   test("30 秒内不重复 poll", async () => {
-    const h = harness({ entry: { ...AUTO, repos: ["other/repo"] } });
+    const h = harness({ entry: { repos: ["other/repo"] } });
     await h.tick();
     await h.tick();
     expect(h.ops().filter((o) => o === "poll")).toHaveLength(1);
@@ -177,7 +112,7 @@ describe("T94 前提不满足不 poll", () => {
 
 describe("T94 失败与释放", () => {
   test("clone / 核 head 失败：没起 worker，记 released 并向 A 报 not_started", async () => {
-    const h = harness({ entry: AUTO });
+    const h = harness();
     h.d.clone = async () => ({ ok: false, reason: "HEAD 与订单 head 不一致" });
     for (let i = 0; i < 3; i++) await h.tick();
     expect(getOrder(h.db, "o1")!.state).toBe("released");
@@ -186,7 +121,7 @@ describe("T94 失败与释放", () => {
   });
 
   test("完整订单的 head 和挂单摘要对不上：领了也立刻按 not_started 退回", async () => {
-    const h = harness({ entry: AUTO });
+    const h = harness();
     h.A.claim = () => ({ status: 200, body: { ok: true, v: 1, order: { ...wire(), head: "f".repeat(40) }, text: TEXT, sha256: sha(TEXT), lease: { gen: 1, expiresAt: 0, ms: 600_000 } } });
     await h.tick();
     await h.tick();
@@ -195,7 +130,7 @@ describe("T94 失败与释放", () => {
   });
 
   test("派单全文的 sha256 对不上：当作没领成（结果不明），不 clone", async () => {
-    const h = harness({ entry: AUTO });
+    const h = harness();
     h.A.claim = () => ({ status: 200, body: { ok: true, v: 1, order: wire(), text: TEXT, sha256: sha("别的"), lease: { gen: 1, expiresAt: 0, ms: 600_000 } } });
     await h.tick();
     await h.tick();

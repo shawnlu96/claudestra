@@ -1,4 +1,4 @@
-/** Data-only workflows (v2 all templates, v3 code only). The interpreter in scheduler-plan.ts owns conditions and side effects. */
+/** Data-only workflows: v2 and v3 for every template, v3 differing only at approve_restate. The interpreter in scheduler-plan.ts owns conditions and side effects. */
 import type { LedgerEvent, LedgerTask, Stage, StepName } from "./ledger-stages.js";
 import type { SchedulerIntent, WorkflowTemplate } from "./ledger-scheduler.js";
 
@@ -37,11 +37,18 @@ export const FLOW_TEMPLATES: Record<WorkflowTemplate, FlowTemplate> = {
   security: { id: "security", version: 2, reviewMode: "adversarial", crossFamily: true, uiGate: false, nodes: CODE_NODES },
 };
 
-/** code v3: the executor's own restate record releases build; PM steps in only via restate-hold. ui / security stay on v2. */
+/**
+ * v3 of every template: the executor's own restate record releases build; PM steps in only via restate-hold. It differs from v2
+ * only at approve_restate's gate — the ui screenshot gate and security's local-only review key off the template name, not the version.
+ */
 const CODE_V3_NODES: readonly FlowNode[] = CODE_NODES.map((n) => n.id === "approve_restate" ? { ...n, gate: "restate_recorded" as const } : n);
-const FLOW_TEMPLATES_V3: Partial<Record<WorkflowTemplate, FlowTemplate>> = {
+const FLOW_TEMPLATES_V3: Record<WorkflowTemplate, FlowTemplate> = {
   code: { ...FLOW_TEMPLATES.code, version: 3, nodes: CODE_V3_NODES },
+  ui: { ...FLOW_TEMPLATES.ui, version: 3, nodes: CODE_V3_NODES },
+  security: { ...FLOW_TEMPLATES.security, version: 3, nodes: CODE_V3_NODES },
 };
+/** What a newly opened auto card gets (start_node, scheduler autostart): read the version here, never hard-code it. */
+export const LATEST_TEMPLATE_VERSION: Record<WorkflowTemplate, 3> = { code: 3, ui: 3, security: 3 };
 
 /** null = no such (template, version); callers treat that as drift / invalid, never as a default. */
 export function templateFor(template: WorkflowTemplate, version: number): FlowTemplate | null {

@@ -96,6 +96,23 @@ const COLLAB_WORDS: Record<string, string> = {
   "还没到": "Not yet",
   "各阶段": "By stage",
   "成员": "Members",
+  // 子 DAG / 进度两张图（dag/）
+  "子 DAG": "Sub-DAG",
+  "进度": "Progress",
+  "审": "Review",
+  "待批": "Pending",
+  "版本": "Versions",
+  "对比": "Compare",
+  "计划中": "Planned",
+  "取消原因": "Why cancelled",
+  "卡": "Card",
+  "前置": "Depends on",
+  "粗估": "Estimate",
+  "初版": "Initial",
+  "需求变了": "Scope change",
+  "增": "Added",
+  "删": "Removed",
+  "带入有改": "Carried, changed",
 };
 
 export function useCollabT(): Tr {

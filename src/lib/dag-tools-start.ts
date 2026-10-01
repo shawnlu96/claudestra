@@ -9,7 +9,10 @@ import { computeLanes, laneNodes } from "./dag-tools-lanes.js";
 import { renderExecPrompt } from "./dag-tools-prompt.js";
 import { effectiveNodes, getDagVersion, projectNodes, resolveFeature, type Feature } from "./ledger-feature.js";
 import { storedOrigin } from "./ledger-origin.js";
+import { WORKFLOW_TEMPLATES, type WorkflowTemplate } from "./ledger-scheduler.js";
 import { getItem, getTask } from "./ledger-store.js";
+import { parseStartPlacement, type StartPlacement } from "./scheduler-placement-start.js";
+import { LATEST_TEMPLATE_VERSION } from "./scheduler-template.js";
 
 export interface StartArgs {
   featureId: string;
@@ -23,6 +26,10 @@ export interface StartArgs {
   spec?: string;
   /** 项目目录之一；缺省取项目第一个是 git 仓库的目录 */
   repo?: string;
+  /** 放哪（i28-W5）：auto（缺省，按槽池规则）| local | peer:<名>（固定给这个 peer，不满足硬约束就拒） */
+  placement?: string;
+  /** 流程模板（i28-N4）：code（缺省）| ui | security，总是该模板的最高版；开卡那一步就写对，不留 code 窗口 */
+  template?: string;
 }
 
 /** 预检要读的环境（bridge 注入真实的，测试注入假的） */
@@ -41,6 +48,8 @@ export interface StartEnv {
   autoReady(project: string): string | null;
   /** ledger/prompts/exec-template.md 的内容；没有为 null */
   template(): string | null;
+  /** 槽池放置（lib/scheduler-placement-start.ts）；不注入 = 只能放本机，auto 即 local，peer:<名> 一律拒 */
+  placement?(db: Database, q: { project: string; repoDir: string; fileGlobs: readonly string[]; want: "auto" | `peer:${string}` }): Promise<StartPlacement>;
 }
 
 export interface StartPlan {
@@ -60,11 +69,16 @@ export interface StartPlan {
   agent: string;
   fileGlobs: string[];
   specRel: string;
+  /** 卡上 task.spec 记这个绝对路径：多数项目没设 docsDir，相对路径 specPathFor 解析不到，派审 / 挂 peer 会找不到规格卡 */
   specPath: string;
   specText: string | null;
   promptPath: string;
   promptText: string;
   purpose: string;
+  /** 放到 peer（i28-W5）：不建 worktree、不起本机 agent；null = 本机，步骤与 W5 之前逐字一样 */
+  peer?: { name: string; repo: string; reason: string } | null;
+  /** workflow-set 写的模板与版本，本机卡、peer 卡同一步。preflightStart 总是填；只有手拼的计划（测试）不带，按 code 最高版 */
+  workflow?: { template: WorkflowTemplate; version: number };
 }
 
 export type Preflight = { ok: true; plan: StartPlan } | { ok: true; already: { taskId: string; key: string } } | { ok: false; code: string; error: string };
@@ -97,6 +111,17 @@ function nodeReady(env: StartEnv, f: Feature, key: string) {
   return { node, wait: lanes.waiting.find((w) => w.key === key && w.why === "deps") ?? null } as const;
 }
 
+/** auto 算出本机（或没注入放置）= 本机；peer:<名> 没注入放置 = 拒（不能核对硬约束就不放出去） */
+async function placeStart(env: StartEnv, want: "auto" | `peer:${string}`, project: string, repoDir: string, fileGlobs: readonly string[]): Promise<StartPlacement> {
+  if (!env.placement) return want === "auto" ? { where: "local", reason: "没有放置信息，放本机" } : { where: "refused", reason: "这台 bridge 没接槽池放置" };
+  try {
+    return await env.placement(env.db, { project, repoDir, fileGlobs, want });
+  } catch (e) {
+    const why = `算放置出错：${(e as Error).message}`;
+    return want === "auto" ? { where: "local", reason: `${why}，放本机` } : { where: "refused", reason: why };
+  }
+}
+
 export async function preflightStart(env: StartEnv, args: StartArgs): Promise<Preflight> {
   let f: Feature;
   try {
@@ -104,6 +129,10 @@ export async function preflightStart(env: StartEnv, args: StartArgs): Promise<Pr
   } catch (e) {
     return no("not_found", (e as Error).message);
   }
+  const want = parseStartPlacement(args.placement);
+  if (!want) return no("invalid", `placement 只能是 auto / local / peer:<名>（收到 ${String(args.placement).slice(0, 80)}）`);
+  const template = args.template ?? "code";
+  if (!(WORKFLOW_TEMPLATES as readonly string[]).includes(template)) return no("invalid", `template 只能是 code / ui / security（收到 ${template.slice(0, 80)}）`);
   const r = nodeReady(env, f, args.key);
   if ("error" in r) return no("not_found", r.error as string);
   const { node, wait } = r;
@@ -117,7 +146,8 @@ export async function preflightStart(env: StartEnv, args: StartArgs): Promise<Pr
   if (taken) return no("conflict", `卡号 ${taken.id} 已被占用：换一个 taskId`);
   const low = taskId.toLowerCase();
   const agentName = agentNameFor(taskId);
-  if (env.agentNames().includes(`agent-${agentName}`)) return no("conflict", `agent agent-${agentName} 已存在`);
+  const pinned = want.startsWith("peer:");
+  if (!pinned && env.agentNames().includes(`agent-${agentName}`)) return no("conflict", `agent agent-${agentName} 已存在`);
   const base = args.base ?? "origin/main";
   const branch = args.branch ?? `feat/${low}`;
   if (!REF.test(base) || !REF.test(branch)) return no("invalid", "base / branch 只能是普通分支名（字母数字 . _ / -，不含 .. 与 //）");
@@ -125,7 +155,7 @@ export async function preflightStart(env: StartEnv, args: StartArgs): Promise<Pr
   if (!repo) return no("invalid", args.repo ? `${args.repo} 不是项目 ${f.project} 的 git 目录` : `项目 ${f.project} 没有 git 仓库目录`);
   if (await env.branchExists(repo, branch)) return no("conflict", `分支 ${branch} 已存在：换一个 branch`);
   const worktree = join(env.worktreeRoot, low);
-  if (env.exists(worktree)) return no("conflict", `worktree 目录 ${worktree} 已存在`);
+  if (!pinned && env.exists(worktree)) return no("conflict", `worktree 目录 ${worktree} 已存在`);
   const specRel = `docs/tasks/${taskId}.md`;
   const specPath = join(env.ledgerDir, specRel);
   const hasSpec = env.exists(specPath);
@@ -133,10 +163,12 @@ export async function preflightStart(env: StartEnv, args: StartArgs): Promise<Pr
   if (hasSpec && args.spec !== undefined) return no("conflict", `规格卡 ${specPath} 已存在：不覆盖，去掉 spec 参数`);
   const auto = env.autoReady(f.project);
   if (auto) return no("auto_off", auto);
+  const placed = want === "local" ? null : await placeStart(env, want, f.project, repo, node.fileGlobs);
+  if (placed?.where === "refused") return no("placement", `不能放到 ${want}：${placed.reason}`);
   const title = args.title ?? node.oneLine;
   const item = args.item ?? (getItem(env.db, f.project, featureSlug(f, storedOrigin(env.db))) ? featureSlug(f, storedOrigin(env.db)) : null);
   const promptPath = join(env.ledgerDir, "reviews", `${taskId}-exec-prompt.md`);
-  const vars = { task: taskId, title, pm: env.caller, branch, base, worktree, spec: specPath, ledgerDir: env.ledgerDir };
+  const vars = { task: taskId, title, pm: env.caller, branch, base, worktree, spec: specPath, ledgerDir: env.ledgerDir, template: template as WorkflowTemplate };
   const promptText = renderExecPrompt(vars, env.template() ?? undefined);
   return {
     ok: true,
@@ -144,6 +176,8 @@ export async function preflightStart(env: StartEnv, args: StartArgs): Promise<Pr
       feature: f, key: node.key, taskId, title, project: f.project, item, pm: env.caller, base, branch, repo, worktree, agentName, agent: `agent-${agentName}`,
       fileGlobs: node.fileGlobs, specRel, specPath, specText: hasSpec ? null : (args.spec as string), promptPath, promptText,
       purpose: `${taskId} 执行者（自动卡）：${title}。先读 ${promptPath}`,
+      peer: placed?.where === "peer" ? { name: placed.peer, repo: placed.repo, reason: placed.reason } : null,
+      workflow: { template: template as WorkflowTemplate, version: LATEST_TEMPLATE_VERSION[template as WorkflowTemplate] },
     },
   };
 }
