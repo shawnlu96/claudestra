@@ -13,8 +13,14 @@ export interface PrSnapshot {
   mergeSha: string | null;
   checks: readonly { name: string; bucket: "pass" | "fail" | "pending" | "skipping" | "cancel" }[];
 }
+/** How far `head` lags the current main; a failed lookup throws, it never reads as "up to date". */
+export interface MainFreshness { behindBy: number; mainHead: string }
+/** Whether a head moved by update-branch only merged main in; `ok` needs both the parent shape and a byte-identical net diff. */
+export interface ReviewCarry { ok: boolean; reason: string; mainParent?: string; mainHead?: string; diffHash?: string }
 export interface MergeExternal {
   inspect(pr: string): Promise<PrSnapshot>;
+  freshness(pr: string, head: string): Promise<MainFreshness>;
+  carryReview(pr: string, oldHead: string, newHead: string): Promise<ReviewCarry>;
   updateBranch(pr: string): Promise<void>;
   merge(pr: string, expectedHead: string): Promise<string>;
 }
@@ -28,8 +34,32 @@ const short = (s: string) => s.slice(0, 12);
 const failed = (checks: PrSnapshot["checks"]): boolean => checks.some((c) => c.bucket === "fail" || c.bucket === "cancel");
 /** UNSTABLE = mergeable but some check isn't green yet (CI still running); a failed/cancelled check is a real anomaly. */
 const unstableWait = (pr: PrSnapshot): "wait" | "failed" | null => pr.mergeState !== "UNSTABLE" ? null : failed(pr.checks) ? "failed" : "wait";
+type Step = (to: MergePhase, receipt?: string, mergeSha?: string, newHead?: string) => Promise<MergeRun>;
 
-/** A changed head always returns to review; an unobserved merge is never retried. */
+/** A query failure or any mismatch is a refusal, so a carried review can only ever be narrower than a re-review. */
+async function carryOf(run: MergeRun, external: MergeExternal, head: string): Promise<ReviewCarry> {
+  try {
+    return await external.carryReview(run.prRef, run.reviewedHead, head);
+  } catch (e) {
+    if (e instanceof SchedulerStopped) throw e;
+    return { ok: false, reason: `核对失败：${(e as Error).message.slice(0, 200)}` };
+  }
+}
+
+/** update-branch moved the head: keep the review only for a pure "merge main in" commit, else the old review is void. */
+async function movedHead(run: MergeRun, external: MergeExternal, pr: PrSnapshot, step: Step): Promise<MergeRun> {
+  const carry = await carryOf(run, external, pr.head);
+  if (!carry.ok || !carry.mainParent || !carry.mainHead || !carry.diffHash) {
+    return step("await_review", `update-branch 改了 head：${short(pr.head)}，${carry.reason.slice(0, 300)}，旧审查失效`, undefined, pr.head);
+  }
+  if (pr.draft || pr.mergeState === "BEHIND" || pr.mergeState === "UNKNOWN") return run; // re-checked next round on the same evidence
+  if (unstableWait(pr) === "failed") return step("unknown", "更新分支后 CI 失败或取消");
+  if (pr.mergeState !== "CLEAN" && pr.mergeState !== "UNSTABLE") return step("unknown", `更新分支后 mergeState=${pr.mergeState}`);
+  return step("await_ci", `沿用审查：原 head ${run.reviewedHead} → 新 head ${pr.head}，main 父提交 ${carry.mainParent}，` +
+    `main 头 ${carry.mainHead}，净 diff 一致 sha256=${carry.diffHash}，等待 CI`, undefined, pr.head);
+}
+
+/** A changed head returns to review unless it only merged main in; an unobserved merge is never retried. */
 export async function driveMerge(run: MergeRun, external: MergeExternal, advance: MergeAdvance,
   assertActive: () => void = () => {}): Promise<MergeRun> {
   let current = run;
@@ -46,7 +76,9 @@ export async function driveMerge(run: MergeRun, external: MergeExternal, advance
         return step("unknown", `PR 状态、base 或审查 head 已变：${pr.state}/${pr.base}/${short(pr.head)}`);
       }
       if (pr.draft) return run;
-      if (pr.mergeState === "BEHIND") {
+      // GitHub reports CLEAN for a stale branch unless "require up to date" is on, so staleness is asked directly.
+      const fresh = await external.freshness(run.prRef, pr.head);
+      if (fresh.behindBy > 0 || pr.mergeState === "BEHIND") {
         const claimed = await step("updating");
         assertActive();
         await external.updateBranch(run.prRef);
@@ -60,7 +92,7 @@ export async function driveMerge(run: MergeRun, external: MergeExternal, advance
     if (run.phase === "updating") {
       const pr = await external.inspect(run.prRef);
       if (pr.state !== "OPEN" || pr.base !== "main" || pr.crossRepository || pr.branch !== run.expectedBranch) return step("unknown", "更新分支后 PR 状态、分支或 base 已变");
-      if (!sameHead(run, pr)) return step("await_review", `update-branch 改了 head：${short(pr.head)}，旧审查失效`, undefined, pr.head);
+      if (!sameHead(run, pr)) return movedHead(run, external, pr, step);
       if (pr.draft) return run;
       if (pr.mergeState === "BEHIND") return run; // GitHub 更新仍在进行，下一轮只读检查
       if (pr.mergeState === "UNKNOWN") return run;
@@ -84,6 +116,9 @@ export async function driveMerge(run: MergeRun, external: MergeExternal, advance
       }
       if (pr.checks.some((c) => c.bucket === "fail" || c.bucket === "cancel")) return step("unknown", "CI 失败或取消");
       if (!green(run, pr.checks)) return run;
+      // main moving during CI means the green run tested a different merge result; never merge it, and never guess.
+      const stale = await external.freshness(run.prRef, pr.head);
+      if (stale.behindBy > 0) return step("unknown", `等 CI 期间 main 前进到 ${short(stale.mainHead)}，PR 已落后 ${stale.behindBy} 个提交`);
       await step("merging", `CI 全绿：${pr.checks.map((c) => c.name).join(", ").slice(0, 300)}`);
       const fresh = await external.inspect(run.prRef);
       if (fresh.state !== "OPEN" || !sameHead(run, fresh) || fresh.branch !== run.expectedBranch || fresh.base !== "main" ||
