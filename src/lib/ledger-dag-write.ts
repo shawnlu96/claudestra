@@ -1,7 +1,7 @@
 /**
  * 子 DAG 的重写、审批与绑卡（T89 = 阶段 1 L2，设计稿 docs/design/feature-dag.md）。规则判定在 ledger-dag-rules.ts（纯函数）。
- * 只加节点 / 只换没开始的节点：直接写成新版本，结果里带一句 inform，CLI 提交后经 bridge 的系统通知送到 owner（manager/ledger-dag-cmds.ts）。
- * 取消进行中的节点、改进行中的节点、声明改范围：写成 pending 提案，开一张 owner 的 authorize ask，bind 到 {feature, version, 快照 sha256}；
+ * 不带 scopeChange 的重写（含改 / 取消进行中的节点）：直接写成新版本，结果里带一句 inform 给发起的 PM 看，不通知 owner；台账版本与事件照常可查。
+ * 声明改 feature 范围或大改机制（scopeChange）：写成 pending 提案，开一张 owner 的 authorize ask，bind 到 {feature, version, 快照 sha256}；
  * dag-approve 核对 owner 本人批准、哈希按库里的提案行重算、四条规矩按那一刻的卡状态重判，全过才写版本；否则提案作废（这一笔照常提交）。
  * 审批 ask 的 fromAgent 是发起的 PM：owner 作答后 bridge 把答复投回它，由它跑 dag-approve。
  */
@@ -85,7 +85,7 @@ export interface RewriteOutcome {
   version: DagVersion | null;
   proposal: DagProposal | null;
   ask: Ask | null;
-  /** 直接生效时给 owner 的知会（CLI 提交后发出，送没送到另报） */
+  /** 直接生效时的一句变化摘要，回给调用方（PM）；不发给 owner */
   inform: string | null;
 }
 

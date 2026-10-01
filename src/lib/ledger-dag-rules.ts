@@ -37,7 +37,7 @@ export interface RewritePlan {
   /** 新版本的节点：和当前版原样一致的标 inheritedFrom = 当前版本号 */
   nodes: DagNode[];
   cancels: DagCancel[];
-  /** 为什么要 owner 批（空 = 只加节点 / 只换没开始的节点，直接生效） */
+  /** 为什么要 owner 批：只有声明改范围 / 大改机制（--scope-change）；空 = 直接生效 */
   needsOwner: string[];
 }
 
@@ -49,12 +49,11 @@ export interface CurrentDag {
 
 /**
  * 判一次重写：已完成的节点必须原样带入；进行中的节点移出去（key 没了或换了卡）必须在 cancel 里写原因；cancel 只能点名被移出的进行中节点。
- * 要 owner 批：取消了进行中的节点、改了进行中节点的内容、或声明改范围。违规抛 invalid，不猜。
+ * 要 owner 批的只有 PM 声明改 feature 范围或大改机制（scopeChange）；改 / 取消进行中的节点都直接生效。违规抛 invalid，不猜。
  */
 export function planRewrite(cur: CurrentDag, phase: (n: DagNode) => NodePhase, next: readonly DagNode[], cancel: ReadonlyMap<string, string>, scopeChange: boolean): RewritePlan {
   const byKey = new Map(next.map((n) => [n.key, n]));
   const cancels: DagCancel[] = [];
-  const needsOwner: string[] = [];
   for (const n of cur.nodes) {
     const p = phase(n);
     const m = byKey.get(n.key);
@@ -64,7 +63,7 @@ export function planRewrite(cur: CurrentDag, phase: (n: DagNode) => NodePhase, n
       const reason = cancel.get(n.key);
       if (!reason) throw new LedgerError("invalid", `进行中的节点 ${n.key}（${n.taskId}）不在新版本里：要在 --cancel ${n.key}=<原因> 里写明`);
       cancels.push({ key: n.key, taskId: n.taskId, reason });
-    } else if (!sameNode(n, m)) needsOwner.push(`改了进行中的节点 ${n.key}`);
+    }
   }
   for (const key of cancel.keys()) {
     if (!cancels.some((c) => c.key === key)) throw new LedgerError("invalid", `--cancel ${key}：它不是这次被移出的进行中节点`);
@@ -75,9 +74,7 @@ export function planRewrite(cur: CurrentDag, phase: (n: DagNode) => NodePhase, n
     return old && sameNode(old, n) ? { ...n, inheritedFrom: cur.version } : { ...n, inheritedFrom: null };
   });
   if (nodes.length === cur.nodes.length && nodes.every((n) => n.inheritedFrom !== null)) throw new LedgerError("invalid", "新版本和当前版本一模一样，不用重写");
-  if (cancels.length) needsOwner.push(`取消进行中的节点 ${cancels.map((c) => c.key).join(", ")}`);
-  if (scopeChange) needsOwner.push("声明改 feature 范围（--scope-change）");
-  return { nodes, cancels, needsOwner };
+  return { nodes, cancels, needsOwner: scopeChange ? ["声明改 feature 范围或大改机制（--scope-change）"] : [] };
 }
 
 export interface ProposalContent {

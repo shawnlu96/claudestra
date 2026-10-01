@@ -7,7 +7,7 @@ PM / master sessions plan a feature's sub-DAG and start its nodes through four c
 | Tool | Who | What it does |
 |------|-----|--------------|
 | `plan_feature` | PM / master of the project | `slug` → new feature + v1; `featureId` without a DAG → v1; with a DAG → rewrite to exactly this node list (`reasonKind` + `reason` required, bound cards kept by key). Returns the DAG and **lanes**. |
-| `rewrite_dag` | PM / master | `add` / `update` / `remove` planned nodes, `cancel: {key: reason}` in-progress ones; `reasonKind` + `reason` required. Same rules and owner approval as `ledger dag-rewrite`. Returns lanes. |
+| `rewrite_dag` | PM / master | `add` / `update` / `remove` planned nodes, `cancel: {key: reason}` in-progress ones; `reasonKind` + `reason` required. Same rules as `ledger dag-rewrite`: applies at once without notifying the owner; only `scopeChange` (feature scope or a mechanism overhaul, PM's call) waits for owner approval. Returns lanes. |
 | `start_node` | PM / master | One call = the old private `mk-auto.sh`: card → worktree → executor brief → `manager create` → agent + fileGlobs → workflow `auto` → `dag-bind`. |
 | `show_dag` | any verified session | Current (or `version`) snapshot with each node's card, stage, executor agent, fileGlobs, the pending rewrite and lanes; `diff: [a, b]` instead compares versions. |
 
