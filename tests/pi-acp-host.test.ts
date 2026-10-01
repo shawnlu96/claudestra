@@ -35,7 +35,10 @@ const models = [{ provider: "ds", id: "v4", name: "V4" }, { provider: "ds", id: 
 let model = models[0];
 const out = (o) => process.stdout.write(JSON.stringify(o) + "\\n");
 const ui = { setStatus: (k, t) => out({ type: "extension_ui_request", id: "st", method: "setStatus", statusKey: k, statusText: t }) };
-(await import(${JSON.stringify(MCP_MOUNT_EXTENSION)})).default({ registerMcpServer: () => {}, on: (_e, h) => h({}, { cwd: process.cwd(), ui }) });
+let started;
+const piApi = { on: (_e, h) => void (started = h({}, { cwd: process.cwd(), ui })), getActiveTools: () => ["mcp__claudestra__reply"] };
+await (await import(${JSON.stringify(MCP_MOUNT_EXTENSION)})).default(piApi, process.env, async () => {});
+await started;
 const ok = (m, data = {}) => out({ id: m.id, type: "response", command: m.type, success: true, data });
 let buf = "";
 process.stdin.on("data", (c) => {

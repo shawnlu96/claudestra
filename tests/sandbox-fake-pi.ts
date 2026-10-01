@@ -35,7 +35,10 @@ const mcp = (method, params) => new Promise((resolve) => {
 });
 const out = (r) => process.stdout.write(JSON.stringify(r) + "\\n");
 const ui = { setStatus: (k, t) => out({ type: "extension_ui_request", id: "st", method: "setStatus", statusKey: k, statusText: t }) };
-(await import(${JSON.stringify(MCP_MOUNT_EXTENSION)})).default({ registerMcpServer: () => {}, on: (_e, h) => h({}, { cwd: process.cwd(), ui }) });
+let started;
+const piApi = { on: (_e, h) => void (started = h({}, { cwd: process.cwd(), ui })), getActiveTools: () => ["mcp__claudestra__reply"] };
+await (await import(${JSON.stringify(MCP_MOUNT_EXTENSION)})).default(piApi, process.env, async () => {});
+await started;
 (async () => {
   let buf = "";
   for await (const chunk of child.stdout) {
