@@ -5,8 +5,9 @@
  * - 收：lend revoke / 改授权写完 lend.json 后 stopRevokedWorkers 读 registry，授权已不覆盖的出借 worker 当场停：在途的 create 发 SIGTERM
  *   等它退出（信号清理撤占位、频道、窗口），再按名字关窗口、确认 no_window，revoke 返回前做完。tests/lend-grant-spawn.test.ts。
  */
-import { LEND_PATH } from "./lend-config.js";
-import { LEND_JOURNAL_PATH } from "./lend-journal.js";
+import type { Database } from "bun:sqlite";
+import { isCodexEffort, isCodexModel, LEND_PATH, readLendSync } from "./lend-config.js";
+import { getOrder, LEND_JOURNAL_PATH } from "./lend-journal.js";
 import { lendStopReason } from "./lend-watchdog.js";
 import { isLendWorkerName } from "./runtimes/clean-env.js";
 import type { WorkerLiveness } from "./worker-liveness.js";
@@ -26,6 +27,21 @@ export function lendCreateDenied(name: string, o: CreateGateOpts = {}): string |
   if (!order) return `${name} 是出借 worker，只能由出借服务带订单号起`;
   const why = lendStopReason(name, o.journal ?? LEND_JOURNAL_PATH, o.now ?? Date.now(), o.lendPath ?? LEND_PATH, order);
   return why ? `出借 worker 不起：${why}` : null;
+}
+
+/**
+ * 起出借 worker 时给 manager create 追加的 --model / --effort（lend-deps.ts worker.create）：gate 之后、create 之前现读 lend.json，
+ * 按 journal 里这张单的 peer / 指纹找授权条目——不用领单时的快照，也不看订单 / hello / beat 里对方说了什么（模型只由出借方在授权里定）。
+ * 没授权 / 文件无效 / 指纹对不上 = 不加参数，起不起由 manager create 的 lendCreateDenied 现核；读出的值再核一遍字符集，参数按数组传。
+ * tests/lend-grant-model.test.ts。
+ */
+export function lendModelArgs(db: Database, orderId: string, lendPath = LEND_PATH): string[] {
+  const row = getOrder(db, orderId);
+  const read = readLendSync(lendPath);
+  if (!row || read.status !== "ok" || !read.file.enabled) return [];
+  const e = read.file.lend.find((x) => x.peer === row.peer);
+  if (!e || (row.fp && e.fp !== row.fp)) return [];
+  return [...(isCodexModel(e.codexModel) ? ["--model", e.codexModel] : []), ...(isCodexEffort(e.codexEffort) ? ["--effort", e.codexEffort] : [])];
 }
 
 /** registry 里的一个出借 worker；createPid = 还在建（creating 占位里记的 manager create 进程），正式条目没有 */
