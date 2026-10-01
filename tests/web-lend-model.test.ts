@@ -5,7 +5,8 @@
 import { describe, expect, test } from "bun:test";
 import {
   addRepos, canSubmit, dayChoices, formDefaults, grantBody, grantStatus, markStopping, mergeOrders, needsFastPoll, orderPhase, orderTitle,
-  remainingMs, splitRemaining, STUCK_MS, timeline, unmarkStopping, withSnapshot, type GrantView, type OrderView,
+  remainingMs, splitRemaining, STUCK_MS, timeline, unmarkStopping, withSnapshot, newLoadGate, startLoad, finishLoad, invalidateLoads,
+  type GrantView, type OrderView,
 } from "../web/features/lend/lend-model";
 
 const T = Date.parse("2026-10-01T00:00:00Z");
@@ -137,5 +138,45 @@ describe("notices → 时间线", () => {
     expect(timeline({ start: T })).toEqual([{ kind: "start", at: T, pending: false, why: null }]);
     expect(timeline({ start: T, end: { kind: "acked", why: null, sentAt: T + 5 } })[1]).toEqual({ kind: "delivered", at: T + 5, pending: false, why: null });
     expect(timeline({ end: { kind: "stopped", why: "收回", sentAt: null } })).toEqual([{ kind: "stopped", at: null, pending: true, why: "收回" }]);
+  });
+});
+
+describe("GET 落地闸", () => {
+  test("轮询重叠：每个 GET 都在下一个发出后才回来，回来的照样落地，不会被后发的饿死", () => {
+    const g = newLoadGate();
+    let prev = startLoad(g);
+    for (let i = 0; i < 4; i++) {
+      const next = startLoad(g);
+      expect(finishLoad(g, prev, true)).toBe(true);
+      prev = next;
+    }
+    expect(finishLoad(g, prev, true)).toBe(true);
+    expect(g.inflight).toBe(0);
+  });
+
+  test("乱序：新的先落地，旧的晚到不覆盖", () => {
+    const g = newLoadGate();
+    const a = startLoad(g);
+    const b = startLoad(g);
+    expect(finishLoad(g, b, true)).toBe(true);
+    expect(finishLoad(g, a, true)).toBe(false);
+  });
+
+  test("收回换代：之前发出的 GET 晚到一律不落地，之后发出的照常落地", () => {
+    const g = newLoadGate();
+    const before = startLoad(g);
+    invalidateLoads(g);
+    const after = startLoad(g);
+    expect(finishLoad(g, before, true)).toBe(false);
+    expect(finishLoad(g, after, true)).toBe(true);
+  });
+
+  test("失败不推进：报错的那次不挡住后面更早发出的成功结果", () => {
+    const g = newLoadGate();
+    const a = startLoad(g);
+    const b = startLoad(g);
+    expect(finishLoad(g, b, false)).toBe(true);
+    expect(finishLoad(g, a, true)).toBe(true);
+    expect(g.inflight).toBe(0);
   });
 });

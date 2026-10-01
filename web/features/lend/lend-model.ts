@@ -124,6 +124,26 @@ export function mergeOrders(prev: readonly OrderView[], fresh: readonly OrderVie
   return { orders, stopping: next };
 }
 
+/**
+ * GET 落地闸（只改传进来的 gate）：收回时换一代，之前发出的 GET 一律不落地，否则收回前的旧列表会把已收回的授权画回来。
+ * 同一代里按发起顺序，比已落地的新就落地：慢请求不会被后发的饿死（tests/web-lend-model.test.ts「轮询重叠」）。
+ */
+export interface LoadGate { epoch: number; issued: number; applied: number; inflight: number }
+export interface LoadTicket { epoch: number; seq: number }
+export const newLoadGate = (): LoadGate => ({ epoch: 0, issued: 0, applied: 0, inflight: 0 });
+export function startLoad(g: LoadGate): LoadTicket {
+  g.inflight++;
+  return { epoch: g.epoch, seq: ++g.issued };
+}
+/** 请求结束时调一次；true = 这份结果（或这个错误）该显示。只有成功的才推进 applied */
+export function finishLoad(g: LoadGate, t: LoadTicket, ok: boolean): boolean {
+  g.inflight--;
+  if (t.epoch !== g.epoch || t.seq <= g.applied) return false;
+  if (ok) g.applied = t.seq;
+  return true;
+}
+export const invalidateLoads = (g: LoadGate): void => { g.epoch++; };
+
 /** 还有停止中的单就每 2 秒拉一次 */
 export const needsFastPoll = (stopping: ReadonlyMap<string, number>): boolean => stopping.size > 0;
 
