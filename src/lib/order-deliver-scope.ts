@@ -112,7 +112,8 @@ export function scopeInputs(db: Database, task: LedgerTask, head: string | null)
 
 /**
  * 把范围信息放进审查单：先只放指针、交 fit（fitFindings）压上一轮 findings，保证至少留指针；再在压好的单里把指针换成放得下的最完整清单。
- * 反过来先放清单再压，预算紧时清单整段丢、压完腾出的空间也补不回来（r2 P1）。连指针都放不下的单不加这一行，事件仍在台账里。
+ * 反过来先放清单再压，预算紧时清单整段丢、压完腾出的空间也补不回来（r2 P1）。指针是必带项：连指针都放不下就抛错拒单，
+ * 绝不交出没有指针的合规单（规格「PM 定 第 3 轮」1）。不带范围本来就不合规的单（出借闸扫描用的整段原文版）照旧交给后面的校验。
  */
 export function withDeliverScope<T extends { inputs: string[]; head: string | null }>(db: Database | undefined, task: LedgerTask, order: T,
   fit: (w: T) => T = (w) => w): T {
@@ -128,7 +129,10 @@ export function withDeliverScope<T extends { inputs: string[]; head: string | nu
     const next = { ...fitted, inputs: fitted.inputs.with(at, slot(limit >= Buffer.byteLength(scope) ? scope : `${clipWire(scope, limit)}\n${pointer}`)) };
     if (ok(next, WIRE_MAX_BYTES - 512)) return next;
   }
-  return ok(fitted, WIRE_MAX_BYTES) ? fitted : fit(order);
+  if (ok(fitted, WIRE_MAX_BYTES)) return fitted;
+  const bare = fit(order);
+  if (!ok(bare, WIRE_MAX_BYTES)) return bare;
+  throw new Error(`${task.id} 的审查单放不下规格外文件指针（单子已到 ${WIRE_MAX_BYTES} 字节上限），拒单：缩短规格或上一轮结论后再派`);
 }
 
 /** 挂池入口（CLI lend-offer、调度 scheduler-pool-step）在事务外调：卡在 review 才登记，挂池事务里的 reviewOrder 只读 */

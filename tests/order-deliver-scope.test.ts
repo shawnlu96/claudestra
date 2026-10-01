@@ -10,7 +10,7 @@ import { ensureDeliverScope, ensureReviewScope, scopeInputs, SCOPE_RETRY_MS } fr
 import { scopeNumstat } from "../src/lib/order-deliver-scope-git.js";
 import { reviewOrderOf } from "../src/lib/review-order.js";
 import { workOrderFor } from "../src/lib/scheduler-work-order.js";
-import { offerLend } from "../src/lib/ledger-lend.js";
+import { cancelLend, offerLend } from "../src/lib/ledger-lend.js";
 import type { SchedulerIntent } from "../src/lib/ledger-scheduler.js";
 import { runLedger } from "../src/manager/ledger.js";
 import type { Registry } from "../src/manager/core.js";
@@ -173,3 +173,21 @@ test("long prior findings are fitted first: the pool order keeps the registered 
   const local = reviewOrderOf(db, { task: task(), orderId: "T1:review:r2", node: "review", head: H, auto: false });
   expect(local.ok && local.order.inputs.join("\n")).toContain("src/outside.ts");
 });
+
+test("near the wire cap the pointer is mandatory: every pool offer either carries it or is refused", async () => {
+  await ensureDeliverScope(db, task(), H, async () => ({ base: B, files: [{ path: "src/out.ts", added: 1, deleted: 0 }] }));
+  const offer = (lines: number) => offerLend(db, { actor: "owner" }, { taskId: "T1", peer: "mate", family: "codex", repo: "o/r", pr: 1,
+    spec: "spec line\n".repeat(lines), borrow: { peer: "mate", projects: ["p"], roles: ["review"], maxOpen: 3 } });
+  // 第 3 轮复现：2850 行时单子到 32 KiB 边上，之前会静默丢掉清单和指针
+  expect(() => offer(2850)).toThrow("放不下规格外文件指针");
+  let carried = 0;
+  for (const lines of [2800, 2830, 2840, 2850, 2860]) {
+    // 拒单（本卡的指针拒单，或不带范围也超限的格式拒单）都行；只要出了单，就必须带指针
+    let made: string | null = null;
+    try { made = JSON.stringify(offer(lines)); } catch { continue; /* 拒单正是允许的结果之一，下一档 */ }
+    expect(made).toContain("deliver_scope");
+    carried++;
+    cancelLend(db, { actor: "owner" }, { taskId: "T1", reason: "下一档" });
+  }
+  expect(carried).toBeGreaterThan(0);
+}, 30_000); // 五次真实挂池、每次压 32 KiB 的单：负载高时超过默认 5 秒

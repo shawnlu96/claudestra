@@ -70,12 +70,19 @@ function appendFailed(db: Database, a: Ask, e: Error, now: number): void {
   }
 }
 
-/** 到了次数线就真正投递给 PM（同一 messageId 幂等）；投出去才记 alerted，没投出去下次扫描再投 */
+/**
+ * 到了次数线就真正投递给 PM（同一 messageId 幂等）；投出去才记 alerted，没投出去下次扫描再投。
+ * 永不抛出：告警失败只记日志，不能挡住本次追加（规格「PM 定 第 3 轮」2）。
+ */
 async function alertPm(db: Database, id: string, notify: SweepDeps["notify"], now: number): Promise<void> {
-  const a = getAsk(db, id);
-  if (!notify || !a?.assignee || a.extra.defaultAppendAlerted || (Number(a.extra.defaultAppendTries) || 0) < APPEND_ALERT_TRIES) return;
-  const sent = await notify(a.assignee, failText(a, String(a.extra.defaultAppendError ?? "")), `ask-default-failed:${a.id}`);
-  if (sent.handed) patchAsk(db, a.id, { extra: { defaultAppendAlerted: true } }, now);
+  try {
+    const a = getAsk(db, id);
+    if (!notify || !a?.assignee || a.extra.defaultAppendAlerted || (Number(a.extra.defaultAppendTries) || 0) < APPEND_ALERT_TRIES) return;
+    const sent = await notify(a.assignee, failText(a, String(a.extra.defaultAppendError ?? "")), `ask-default-failed:${a.id}`);
+    if (sent.handed) patchAsk(db, a.id, { extra: { defaultAppendAlerted: true } }, now);
+  } catch (e) {
+    console.error(`⚠️ ask ${id} 追加失败的 PM 告警没发出去（下次扫描再发，追加照常进行）：${(e as Error).message}`);
+  }
 }
 
 function appendOnce(db: Database, id: string, now: number): boolean {

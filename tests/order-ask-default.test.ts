@@ -238,3 +238,14 @@ test("an ask queued behind an unfinished append on the same spec waits without c
   expect(getAsk(db, a.id)?.extra.defaultAppendTries).toBe(3);
   expect(Number(getAsk(db, b.id)?.extra.defaultAppendTries) || 0).toBe(0);
 });
+
+test("a PM alert that keeps throwing never blocks the append itself", async () => {
+  const a = await ask();
+  const at = now + ASK_DEFAULT_MS;
+  answerAsk(db, a.id, { choices: [], labels: [], text: "按执行者默认做法定", principal: "system:ask-default", via: "terminal", at, final: true });
+  patchAsk(db, a.id, { extra: { defaultAppend: "pending", defaultAt: at, defaultAppendTries: 10 } });
+  const notify = async (): Promise<{ handed: boolean; note: string }> => { throw new Error("queue unavailable"); };
+  expect(await sweepAskDefaults(db, at + 60_000, { notify })).toBe(1);
+  expect(readFileSync(spec, "utf8")).toContain("## 自动定（");
+  expect(getAsk(db, a.id)?.extra.defaultAppend).toBe("done");
+});
