@@ -1,12 +1,13 @@
 "use client";
 /**
  * 一个借入 peer 的卡片：协议徽章、hello 年龄、各家族「可放 / 上报空闲」、在跑 / 上限、不可用原因原文，
- * 以及按钮改设置（项目逐个开关、同时最多跑几单、两下删除）。每次点击立刻存一次，存的期间整张卡禁用，返回后用服务端的值刷新（不留本地草稿）：
+ * 以及按钮改设置（项目逐个开关、同时最多跑几单、两下删除）。每次点击立刻存一次，存的期间到拿回写之后的快照为止整张卡禁用（不留本地草稿）：
  * 成功整卡一闪，失败抖一下被点的按钮。请求在点击那一刻绑定机器，切了机器就不再动这张卡。
  */
 import { useEffect, useRef, useState, type MouseEvent, type ReactNode } from "react";
 import { useT } from "@/lib/i18n";
-import { machineNow, removeBorrowPeer, saveBorrowPeer, stillOn, type DroppedView, type Family, type PeerView } from "./borrow-api";
+import { machineNow, stillOn, type DroppedView, type Family, type PeerView } from "./borrow-api";
+import { cardLocked, dropPeer, saveThenRefresh, type Feed } from "./borrow-feed";
 import { canToggleOff, lenderCap, oneAtATime, peerState, reportedFree, toggleProject, type PeerState } from "./borrow-model";
 import { AgeTag, LimitLine, ProjectChips, Stepper } from "./borrow-bits";
 import { CircleAlertIcon, PauseIcon, RepeatIcon, ServerIcon, TrashIcon, ZapIcon } from "./icons";
@@ -70,19 +71,6 @@ function LenderCapBadge({ peer, maxOpen }: { peer: PeerView; maxOpen: number }) 
   );
 }
 
-/** 删一条借入：成功整行淡出再刷新（卡片随之卸载），失败抖被点的按钮（卡片与失效行共用）。请求绑定点击那一刻的机器 */
-export async function dropPeer(peer: string, row: HTMLElement | null, el: HTMLElement, onChanged: () => Promise<void>): Promise<void> {
-  const at = machineNow();
-  try {
-    await removeBorrowPeer(peer, at);
-    if (!stillOn(at)) return;
-    await fadeOut(row);
-    await onChanged();
-  } catch {
-    if (stillOn(at)) shake(el);
-  }
-}
-
 type PeerSettings = { projects: string[]; maxOpen: number };
 
 export function BorrowPeerCard(props: {
@@ -94,12 +82,16 @@ export function BorrowPeerCard(props: {
   receivedAt: number;
   tick: number;
   canWrite: boolean;
-  onChanged: () => Promise<void>;
+  /** 当前快照的序号（borrow-feed.ts）：写成功后要等更大的才解锁 */
+  seq: number;
+  feed: Feed;
 }) {
-  const { peer, options, limit, dropped, serverNow, receivedAt, tick, onChanged } = props;
+  const { peer, options, limit, dropped, serverNow, receivedAt, tick, feed } = props;
   const t = useT();
   const card = useRef<HTMLDivElement>(null);
   const [busy, setBusy] = useState(false);
+  const [waitAfter, setWaitAfter] = useState<number | null>(null);
+  const locked = cardLocked(busy, waitAfter, props.seq);
   const [armed, setArmed] = useState(false);
   const state = peerState(peer);
   const cur: PeerSettings = { projects: peer.projects, maxOpen: peer.maxOpen };
@@ -111,26 +103,23 @@ export function BorrowPeerCard(props: {
     return () => clearTimeout(id);
   }, [armed]);
 
-  // 一张卡同时只做一件写；在途时 busy 禁用 −、+、输入框、项目开关和删除，返回后 onChanged 拿服务端的值
+  // 一张卡同时只做一件写；写在途、或写成功后还没拿到写之后的快照，都锁着 −、+、输入框、项目开关和删除（borrow-feed.ts）
   const gate = useRef<ReturnType<typeof oneAtATime> | null>(null);
-  const write = (job: () => Promise<void>) => void (gate.current ??= oneAtATime(setBusy))(job);
+  const write = (job: () => Promise<void>) => {
+    if (!locked) void (gate.current ??= oneAtATime(setBusy))(job);
+  };
   const save = (next: PeerSettings, el: HTMLElement | null) =>
     write(async () => {
       const at = machineNow();
-      try {
-        await saveBorrowPeer(peer.peer, next, at);
-        if (!stillOn(at)) return;
-        await onChanged();
-        flash(card.current);
-      } catch {
-        if (stillOn(at)) shake(el);
-      }
+      const r = await saveThenRefresh({ peer: peer.peer, body: next, at, feed, hold: setWaitAfter });
+      if (r === "failed" && stillOn(at)) shake(el);
+      if (r === "saved") flash(card.current);
     });
   const remove = (e: MouseEvent<HTMLButtonElement>) => {
     const el = e.currentTarget;
     if (!armed) return setArmed(true);
     setArmed(false);
-    write(() => dropPeer(peer.peer, card.current, el, onChanged));
+    write(() => dropPeer(peer.peer, feed, { fade: () => fadeOut(card.current), fail: () => shake(el) }));
   };
 
   return (
@@ -142,7 +131,7 @@ export function BorrowPeerCard(props: {
         {props.canWrite && (
           <button
             className={`btn btn-ghost btn-xs ml-auto btn-square ${armed ? "text-error" : "text-base-content/45"}`}
-            disabled={busy}
+            disabled={locked}
             aria-label={t("移除")}
             onClick={remove}
           >
@@ -162,12 +151,12 @@ export function BorrowPeerCard(props: {
           options={options}
           picked={cur.projects}
           dropped={dropped.filter((d) => d.project).map((d) => d.project as string)}
-          disabled={busy || !props.canWrite}
+          disabled={locked || !props.canWrite}
           onToggle={(id, el) => (canToggleOff(cur.projects, id) ? save({ ...cur, projects: toggleProject(cur.projects, id, options.map((o) => o.id)) }, el) : shake(el))}
         />
       </div>
       <LimitLine name={peer.peer} n={cur.maxOpen} badge={<LenderCapBadge peer={peer} maxOpen={cur.maxOpen} />}>
-        <Stepper value={cur.maxOpen} limit={limit} disabled={busy || !props.canWrite} onCommit={(n, el) => save({ ...cur, maxOpen: n }, el)} />
+        <Stepper value={cur.maxOpen} limit={limit} disabled={locked || !props.canWrite} onCommit={(n, el) => save({ ...cur, maxOpen: n }, el)} />
       </LimitLine>
     </div>
   );
