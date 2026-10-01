@@ -42,6 +42,14 @@ describe("available family under the existing placement rules", () => {
     expect(peerFamily(p, "write", "codex", preferClaude.writeFamilies)).toBe(family);
     expect(JSON.stringify(f)).toBe(original);
   });
+  test("same-tier family preference precedes borrow order and load ranking", () => {
+    const p = [peer("codex-first", 0, 1), peer("claude-second", 1, 0)];
+    expect(placeFor(facts(p, preferClaude), "write", "codex"))
+      .toMatchObject({ kind: "peer", peer: "claude-second", family: "claude" });
+    p[1].open = 2;
+    expect(placeFor(facts(p, preferClaude), "write", "codex"))
+      .toMatchObject({ kind: "peer", peer: "claude-second", family: "claude" });
+  });
   test("tier wins before family preference; full first tier falls back to balance", () => {
     const p = [peer("first", 0, 1, "first"), peer("balance", 1, 1)];
     expect(placeFor(facts(p, preferClaude), "write", "claude")).toMatchObject({ peer: "first", family: "codex" });

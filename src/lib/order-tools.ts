@@ -44,13 +44,15 @@ export const ORDER_TOOLS = [
     name: "ask",
     description:
       "Executor: ask this card's PM a question about your current order. It is recorded in the ledger (asks) and delivered to the PM; " +
-      "the answer arrives as a normal agent message.",
+      "design/scope: include default and continue immediately; only blocker (credentials, owner decision, security) waits for a PM reply.",
     inputSchema: {
       type: "object" as const,
       properties: {
         v: WIRE_V,
         orderId: ORDER_ID,
         question: { type: "string", description: "问题正文（≤2000 字节）" },
+        default: { type: "string", description: "我打算怎么做（design / scope 必填，≤600 字）" },
+        class: { type: "string", enum: ["design", "scope", "blocker"], description: "做法选择 / 范围 / 需要人；远端出借单仍按 blocker" },
         options: { type: "array", items: { type: "string" }, description: "可选：候选答案（≤10 项，每项 ≤200 字节）" },
       },
       required: ["v", "orderId", "question"],

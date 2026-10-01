@@ -1,6 +1,6 @@
 /** Family policy overlays the existing placement gates, tiers and load ranking; it never edits the hello's slot counts. */
 import type { AuthorFamily } from "./ledger-scheduler.js";
-import { peerFamily as availableFamily, placeFor as placeByTier, type PeerFacts, type PlaceRole, type PlacementFacts, type Placement } from "./scheduler-placement.js";
+import { peerFamily as availableFamily, peerRefusal, placeFor as placeByTier, type PeerFacts, type PlaceRole, type PlacementFacts, type Placement } from "./scheduler-placement.js";
 
 export { PEER_PLACEMENT, type PeerFacts, type PlaceRole, type PlacementFacts } from "./scheduler-placement.js";
 
@@ -35,5 +35,18 @@ export function placeFor(facts: PlacementFacts, role: PlaceRole, family: AuthorF
     const slots = { claude: selected === "claude" ? p.v2.slots.claude : 0, codex: selected === "codex" ? p.v2.slots.codex : 0 };
     return { ...p, v2: { ...p.v2, slots } };
   });
+  if (role === "write" && !facts.pin) {
+    for (const tier of ["first", "balance", "low"] as const) {
+      const usable = peers.filter((p) => (p.priority ?? "balance") === tier &&
+        !facts.tried.includes(p.peer) && !peerRefusal({ ...facts, peers }, p, role, family));
+      const selected = (facts.remote?.writeFamilies ?? DEFAULT_WRITE_FAMILIES)
+        .find((f) => usable.some((p) => (p.v2?.slots[f] ?? 0) > 0));
+      if (!selected) continue;
+      // Choose the family's pool before ranking load, so a Codex-only peer cannot defeat Claude preference within this tier.
+      for (const p of usable) {
+        if (p.v2 && !p.v2.slots[selected]) p.v2.slots = { claude: 0, codex: 0 };
+      }
+    }
+  }
   return placeByTier({ ...facts, peers }, role, family);
 }

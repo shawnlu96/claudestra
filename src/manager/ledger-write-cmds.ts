@@ -28,6 +28,7 @@ import { MASTER_PARENT, TASK_MAX, validateParent, validateTask } from "./team.js
 import { structuredReviewFlags } from "./ledger-scheduler-observe-cmds.js";
 import { autoReviewWriter } from "../lib/scheduler-auto-review.js";
 import { witnessMismatch } from "../lib/caller-witness.js";
+import { ensureReviewScope } from "../lib/order-deliver-scope.js";
 
 const ITEM_FLAGS: Record<string, string> = { title: "title", status: "status", priority: "priority", "owner-words": "ownerWords", "one-line": "oneLine", next: "next" };
 const TASK_FLAGS: Record<string, string> = {
@@ -225,7 +226,7 @@ function note(c: LedgerCli): Result {
 
 const PATH_ONLY = (flag: string) => `${flag} 只收文件路径：字母数字和 ASCII 路径标点，不含空白、全角标点、控制或不可见字符`;
 
-function deliverCmd(c: LedgerCli): Result {
+async function deliverCmd(c: LedgerCli): Promise<Result> {
   const task = c.task(c.p.pos[1]);
   c.requireOwnOrManager(task, "交付");
   const moveFrom = c.p.flags.from === undefined ? undefined : stageFlag(c, "from");
@@ -235,6 +236,7 @@ function deliverCmd(c: LedgerCli): Result {
   checkShippedHead(task, c.p.flags.head);
   const expect = { rev: intFlag(c.p, "rev"), branch: c.p.flags.branch };
   const r = deliver(c.db, c.ctx(), { taskId: task.id, headSHA: c.p.flags.head, evidence: c.p.flags.evidence, text: c.p.flags.text, moveFrom, pr: c.p.flags.pr, expect });
+  await ensureReviewScope(c.db, task.id); // 规格外文件在交付事务外登记，本机 take_review 只读（i28-ASK2）
   // routed：项目开了编排班子，bridge 会自动通知调度助理 / PM，执行者不用再发消息（roles/executor.md）
   return { ok: true, task: r.row, event: r.event, duplicate: r.duplicate, routed: getMeta(c.db, task.project).team !== null };
 }

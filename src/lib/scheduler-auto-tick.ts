@@ -19,6 +19,7 @@ import { pmNoticeResume, pmUiNotice } from "./scheduler-ui-gate.js";
 import { getSchedulerSession, type SessionRole } from "./scheduler-sessions.js";
 import { planRejectedReason } from "./ledger-scheduler-write.js";
 import type { SnapshotOpts } from "./scheduler-snapshot.js";
+import { ensureDeliverScope } from "./order-deliver-scope.js";
 import { stepOfNode, workOrderFor } from "./scheduler-work-order.js";
 import { paceCards, type TickPace } from "./scheduler-yield.js";
 import { peerPrHold } from "./peer-pr-hold.js";
@@ -203,7 +204,8 @@ class Card {
       }
       checkout = pinned.dir;
     }
-    const order = workOrderFor(this.task, intent, plan, ref, checkout);
+    if (stepOfNode(intent.node) === "review") await ensureDeliverScope(this.db, this.task, intent.head); // 派审前事务外补登记规格外文件（i28-ASK2）
+    const order = workOrderFor(this.task, intent, plan, ref, checkout, this.db);
     if (!order) return this.out("held", `节点 ${intent.node} 没有任务单`);
     let delivery = deliveryFor(w.route, order.step);
     const unpullable = delivery.mode === "wake" ? unpullableReason(this.db, ref, intent) : null;
@@ -326,10 +328,8 @@ class Card {
     return this.out("waiting", `${ref.agent} 未领单，已报警`);
   }
 
-  /**
-   * An order the transport refused (bridge down, session swapped) is safely re-planned, but not every poll: consecutive
-   * refusals back off 30s → 10min, or a bridge restart would write a plan + cancel pair per card per second.
-   */
+  /** An order the transport refused (bridge down, session swapped) is safely re-planned, but not every poll: consecutive
+   *  refusals back off 30s → 10min, or a bridge restart would write a plan + cancel pair per card per second. */
   undeliveredBackoff(): string | null {
     const recent = this.db.query(`SELECT status, receipt, updatedAt FROM scheduler_intents WHERE taskId = ? AND action IN ('dispatch','review')
       ORDER BY eventSeq DESC LIMIT 6`).all(this.task.id) as Pick<SchedulerIntent, "status" | "receipt" | "updatedAt">[];

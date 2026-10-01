@@ -13,6 +13,7 @@ import type { CommandSpec } from "./ledger-write-cmds.js";
 import { setWorkerKind } from "../lib/worker-kind.js";
 import { schedulerPoolStep, type PoolStepInput } from "../lib/ledger-scheduler-pool.js";
 import { writeMaterials } from "../lib/lend-write-materials.js";
+import { ensureReviewScope } from "../lib/order-deliver-scope.js";
 import { poolOrderId, prCoordinates } from "../lib/scheduler-pool-facts.js";
 import { isPoolIntent, POOL_RECIPIENT } from "../lib/scheduler-pool-plan.js";
 import { writeDeps } from "./ledger-lend-cmds.js";
@@ -144,6 +145,7 @@ export const SCHEDULER_CMDS: Record<string, CommandSpec> = {
           ...(c.p.flags.repo ? { repo: c.p.flags.repo } : {}) }, "--remote");
       } catch (e) { throw new LedgerError("invalid", `--mode / --roles / --local-priority / --repo 不认识：${(e as Error).message}`); }
       const borrow = await (c.deps.lend?.borrow() ?? readEffectiveBorrow());
+      await ensureReviewScope(c.db, getIntent(c.db, intent)?.taskId); // 规格外文件在挂池事务外先登记（i28-ASK2）
       return { ok: true, ...schedulerPoolStep(c.db, c.ctx(), {
         intentId: intent, maxWorkers, timeoutMs: minutes * 60_000, borrow, remote, spec: specOf(c, intent), write: await poolWrite(c, intent, remote),
       }) };
