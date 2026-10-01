@@ -9,7 +9,7 @@ import { join } from "node:path";
 import { acquireLock } from "../src/lib/file-lock.js";
 import { checkLend } from "../src/lib/doctor-lend.js";
 import { defaultLendFile, lendFileProblem, readLend, updateLend, type LendFile } from "../src/lib/lend-config.js";
-import { buildBorrowEntry, buildLendEntry, effectiveLend, isPersonalProject, resolveContact, type LendContact } from "../src/lib/lend-policy.js";
+import { buildBorrowEntry, buildGrant, effectiveLend, isPersonalProject, resolveContact, type LendContact } from "../src/lib/lend-policy.js";
 import type { ProjectDef } from "../src/lib/projects.js";
 import { writeTextAtomicSync } from "../src/lib/state-file.js";
 import { isWriteInvocation } from "../src/manager/write-commands.js";
@@ -34,28 +34,31 @@ const projects = [
   proj("home", [HOME, repoDir("router")]),
   proj("scratch", ["/tmp"]),
 ];
-const lendOk = (over: Partial<Parameters<typeof buildLendEntry>[0]> = {}) =>
-  buildLendEntry({ ref: "team-a", families: { codex: "2" }, repos: "shawnlu96/claudestra", ...over }, contacts);
+const lendOk = (over: Partial<Parameters<typeof buildGrant>[0]> = {}, now?: number) =>
+  buildGrant({ ref: "team-a", families: { codex: "2" }, repos: "shawnlu96/claudestra", until: "3d", ...over }, contacts, now);
+/** 固定一次授权时刻：validFile() 每次调出来的内容逐字节相同 */
+const NOW = Date.now();
 const validFile = (): LendFile => {
-  const l = lendOk();
+  const l = lendOk({}, NOW);
   const b = buildBorrowEntry({ ref: "mate-b", projects: "claude-orchestrator" }, contacts, projects);
   if (!l.ok || !b.ok) throw new Error("fixture");
-  return { version: 1, enabled: true, lend: [l.entry], borrow: [b.entry] };
+  return { version: 2, enabled: true, lend: [l.entry], borrow: [b.entry] };
 };
 
 describe("缺省值", () => {
   test("文件不存在 = 不出借、不借入", async () => {
     const r = await readLend(tmpPath());
     expect(r.status).toBe("missing");
-    expect(r.file).toEqual({ version: 1, enabled: false, lend: [], borrow: [] });
+    expect(r.file).toEqual({ version: 2, enabled: false, lend: [], borrow: [] });
     const eff = effectiveLend(r, contacts, projects);
     expect(eff).toMatchObject({ lending: false, lend: [], borrow: [] });
   });
-  test("lend set 的缺省：只 review、逐单确认、每天 5 单、tokensPerDay 预留为 null；borrow maxOpen 3", () => {
-    const l = lendOk();
+  test("lend grant 的缺省（He 10-01）：只 review、只 codex 5 个位、每天 200 单、记下授权时刻；borrow maxOpen 3", () => {
+    const now = Date.parse("2026-10-01T00:00:00Z");
+    const l = lendOk({ families: {}, until: "2d" }, now);
     expect(l.ok && l.entry).toEqual({
-      peer: "team-a", fp: FP_A, families: { codex: 2 }, roles: ["review"], repos: ["shawnlu96/claudestra"],
-      quota: { ordersPerDay: 5, tokensPerDay: null }, confirm: "per-order",
+      peer: "team-a", fp: FP_A, families: { codex: 5 }, roles: ["review"], repos: ["shawnlu96/claudestra"], ordersPerDay: 200,
+      grantedAt: "2026-10-01T00:00:00.000Z", until: "2026-10-03T00:00:00.000Z",
     });
     const b = buildBorrowEntry({ ref: "mate-b", projects: "claude-orchestrator" }, contacts, projects);
     expect(b.ok && b.entry).toEqual({ peer: "mate-b", fp: FP_B, projects: ["claude-orchestrator"], roles: ["review"], maxOpen: 3 });
@@ -63,11 +66,12 @@ describe("缺省值", () => {
 });
 
 describe("校验", () => {
-  test("合法文件通过；缺版本 / 不认识的版本 / enabled 不是布尔都算无效", () => {
+  test("合法文件通过；缺版本 / 不认识的版本 / enabled 不是布尔都算无效；v1 头配 v2 条目也无效", () => {
     expect(lendFileProblem(validFile())).toBeNull();
     const { version: _v, ...noVer } = validFile();
     expect(lendFileProblem(noVer)).toContain("version");
-    expect(lendFileProblem({ ...validFile(), version: 2 })).toContain("version");
+    expect(lendFileProblem({ ...validFile(), version: 3 })).toContain("version");
+    expect(lendFileProblem({ ...validFile(), version: 1 })).toContain("quota");
     expect(lendFileProblem({ ...validFile(), enabled: "yes" })).toContain("enabled");
   });
   test("条目里任一字段不对，整份无效", () => {
@@ -75,25 +79,31 @@ describe("校验", () => {
     expect(bad((f) => { f.lend[0].families = { gpt: 1 } as never; })).toContain("家族");
     expect(bad((f) => { f.lend[0].families = { codex: 99 }; })).toContain("families.codex");
     expect(bad((f) => { f.lend[0].repos = ["../etc"]; })).toContain("repos");
-    expect(bad((f) => { f.lend[0].confirm = "maybe" as never; })).toContain("confirm");
-    expect(bad((f) => { f.lend[0].quota = { ordersPerDay: 5, tokensPerDay: 1000 as never }; })).toContain("tokensPerDay");
+    expect(bad((f) => { f.lend[0].ordersPerDay = 0; })).toContain("ordersPerDay");
+    expect(bad((f) => { f.lend[0].until = "tomorrow"; })).toContain("until");
+    expect(bad((f) => { Object.assign(f.lend[0], { confirm: "auto" }); })).toContain("已退役");
+    expect(bad((f) => { delete f.lend[0].until; })).toContain("until");
+    expect(bad((f) => { delete f.lend[0].fp; })).toContain("fp");
+    expect(bad((f) => { f.lend[0].paused = { reason: "" }; })).toContain("paused");
     expect(bad((f) => { f.lend.push({ ...f.lend[0] }); })).toContain("两次");
     expect(bad((f) => { f.borrow[0].maxOpen = 0; })).toContain("maxOpen");
     expect(bad((f) => { f.borrow[0].fp = "not-a-fp"; })).toContain("fp");
   });
-  test("CLI 输入：至少一个家族出位、仓库要是 owner/repo、角色只认 review / write（缺省只开 review）、until 要在未来", () => {
+  test("CLI 输入：至少一个家族出位、仓库要是 owner/repo、只认 review（write 在 W8 前拒）、到期时间必填且 ≤ 7 天、对方要有指纹", () => {
     expect(lendOk({ families: { codex: "0" } })).toMatchObject({ ok: false });
     expect(lendOk({ families: { codex: "2x" } })).toMatchObject({ ok: false });
     expect(lendOk({ repos: undefined })).toMatchObject({ ok: false });
     expect(lendOk({ repos: "https://github.com/a/b" })).toMatchObject({ ok: false });
-    expect(lendOk({ roles: "review,write" })).toMatchObject({ ok: true, entry: { roles: ["review", "write"] } }); // i28-R6 放开 write
+    expect(lendOk({ roles: "review,write" })).toMatchObject({ ok: false, error: expect.stringContaining("W8") });
+    expect(lendOk({ roles: "write" })).toMatchObject({ ok: false });
     expect(lendOk({ roles: undefined })).toMatchObject({ ok: true, entry: { roles: ["review"] } });
     expect(lendOk({ roles: "review,admin" })).toMatchObject({ ok: false });
-    expect(lendOk({ confirm: "auto" })).toMatchObject({ ok: false }); // 预先授权必须限时（specRev 2）
-    expect(lendOk({ confirm: "auto", until: "2100-01-01T00:00:00Z" })).toMatchObject({ ok: true, entry: { confirm: "auto", until: "2100-01-01T00:00:00.000Z" } });
-    expect(lendOk({ confirm: "yes" })).toMatchObject({ ok: false });
-    expect(lendOk({ until: "2020-01-01T00:00:00Z" })).toMatchObject({ ok: false });
+    expect(lendOk({ until: undefined })).toMatchObject({ ok: false, error: expect.stringContaining("到期时间") });
+    for (const until of ["8d", "169h", "2100-01-01T00:00:00Z", "2020-01-01T00:00:00Z", "0d", "soon"]) expect(lendOk({ until }), until).toMatchObject({ ok: false });
+    for (const until of ["7d", "168h", "1h"]) expect(lendOk({ until }), until).toMatchObject({ ok: true });
     expect(lendOk({ ordersPerDay: "0" })).toMatchObject({ ok: false });
+    expect(lendOk({ ordersPerDay: "201" })).toMatchObject({ ok: false });
+    expect(buildGrant({ ref: "nofp", families: {}, repos: "a/b", until: "1d" }, [{ name: "nofp" }])).toMatchObject({ ok: false, error: expect.stringContaining("指纹") });
   });
 });
 
@@ -136,7 +146,8 @@ describe("无效文件按关处理", () => {
     await updateLend((f) => Object.assign(f, validFile()), p);
     const ok = (await checkLend(p, { contacts, projects }))[0];
     expect(ok.status).toBe("ok");
-    expect(ok.detail).toContain("team-a（codex 2，每天 5 单，逐单确认）");
+    expect(ok.detail).toContain("team-a（review，codex 2，每天 200 单，授权到 ");
+    expect(ok.detail).toMatch(/还剩 (2 天|7\d 小时)，对方协议 v1（未协商）/);
     expect(ok.detail).toContain("借入：mate-b（claude-orchestrator");
     writeFileSync(p, "[]");
     expect((await checkLend(p, { contacts, projects }))[0]).toMatchObject({ status: "fail" });
@@ -201,27 +212,11 @@ describe("联系人校验", () => {
       expect(eff.dropped[0]).toContain("team-a");
     }
   });
-  test("until 过了的出借条目失效", () => {
+  test("until 过了的授权失效（规则细节见 tests/lend-grant.test.ts）", () => {
     const f = validFile();
-    f.lend[0].until = "2026-01-01T00:00:00.000Z";
-    const eff = effectiveLend({ status: "ok", file: f }, contacts, projects, Date.parse("2026-02-01T00:00:00Z"));
+    const eff = effectiveLend({ status: "ok", file: f }, contacts, projects, Date.parse(f.lend[0].until!) + 1);
     expect(eff.lending).toBe(false);
     expect(eff.dropped[0]).toContain("到期");
-  });
-  test("预先授权（auto）：until 之前算数；到期或没写 until → 条目照常出借但退回逐单确认（specRev 2）", () => {
-    const at = (until: string | undefined, now: string) => {
-      const f = validFile();
-      f.lend[0] = { ...f.lend[0], confirm: "auto", ...(until ? { until } : {}) };
-      if (!until) delete f.lend[0].until;
-      return effectiveLend({ status: "ok", file: f }, contacts, projects, Date.parse(now));
-    };
-    expect(at("2026-01-01T00:00:00.000Z", "2025-12-31T00:00:00Z").lend[0]).toMatchObject({ confirm: "auto" });
-    for (const eff of [at("2026-01-01T00:00:00.000Z", "2026-01-01T00:00:01Z"), at(undefined, "2025-01-01T00:00:00Z")]) {
-      expect(eff.lending).toBe(true);
-      expect(eff.lend[0].confirm).toBe("per-order");
-      expect(eff.lend[0].until).toBeUndefined();
-      expect(eff.dropped[0]).toContain("按逐单确认");
-    }
   });
 });
 
@@ -249,7 +244,9 @@ describe("个人项目永不外借", () => {
 });
 
 describe("命令权限", () => {
-  test("lend / borrow 的 set、off 是写（过认主守卫），status 是读", () => {
+  test("lend 的 grant、revoke 与 lend / borrow 的 set、off 是写（过认主守卫），status 是读", () => {
+    expect(isWriteInvocation("lend", ["grant", "x"])).toBe(true);
+    expect(isWriteInvocation("lend", ["revoke"])).toBe(true);
     for (const c of ["lend", "borrow"]) {
       expect(isWriteInvocation(c, ["set", "x"])).toBe(true);
       expect(isWriteInvocation(c, ["off"])).toBe(true);
