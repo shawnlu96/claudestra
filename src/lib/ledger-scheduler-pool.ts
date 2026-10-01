@@ -11,6 +11,7 @@
  */
 import type { Database } from "bun:sqlite";
 import { mustTask, type WriteCtx } from "./ledger-checks.js";
+import { queueTimeoutDue } from "./ledger-lend-queue.js";
 import { getLendOrder, offerLendCore, withdrawPooledLend, type LendOrder } from "./ledger-lend.js";
 import { getIntent, getWorkflow, type IntentStatus, type SchedulerIntent } from "./ledger-scheduler.js";
 import { settleIntent } from "./ledger-scheduler-settle.js";
@@ -95,7 +96,7 @@ function sync(db: Database, ctx: WriteCtx, intent: SchedulerIntent, orderId: str
   const out = (outcome: PoolOutcome, next: SchedulerIntent, text: string): PoolStepResult => ({ outcome, orderId, intent: next, text });
   const now = ctx.now ?? Date.now();
   if (o.status === "pooled") {
-    if (!withdraw && now - o.createdAt < timeoutMs) return out("pooled", intent, `${o.peer} 还没领`);
+    if (!withdraw && (now - o.createdAt < timeoutMs || !queueTimeoutDue(db, orderId, now - timeoutMs, true))) return out("pooled", intent, `${o.peer} 还没领`);
     const minutes = Math.round(timeoutMs / 60_000);
     const w = withdrawPooledLend(db, ctx, { orderId, reason: withdraw ?? `${POOL_TIMEOUT_REASON}：${minutes} 分钟没人领，退回本机` });
     if (w.withdrawn) {
