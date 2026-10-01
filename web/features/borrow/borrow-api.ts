@@ -20,9 +20,13 @@ export interface PeerView {
   paused: { reason: string; until: number } | null;
   grant: { roles: string[]; repos: string[]; until: number; ordersLeftToday: number } | null;
 }
+/** 卡此刻放哪（与 `ledger lend-orders` 同一份 explainPlacement）；算不出 → error */
+export type PlacementView = { role: string | null; where: string; reason: string } | { error: "unavailable" };
 export interface RemoteRow {
   orderId: string; taskId: string; title: string | null; project: string; peer: string; family: string; step: string; status: string;
   leaseUntil: number | null; beatAt: number | null; phase: string | null;
+  /** 老 bridge 没有这个字段 */
+  placement?: PlacementView;
 }
 export interface BorrowView {
   now: number;

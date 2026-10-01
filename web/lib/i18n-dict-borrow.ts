@@ -24,6 +24,8 @@ export const BORROW_DICT: Record<string, string> = {
   "对方实例换了": "Instance changed",
   "项目已删除": "Project removed",
   "个人项目": "Personal project",
+  "项目都已失效": "All projects gone",
+  "重选项目": "Pick projects again",
   // 远端行的状态 / 步骤 / 阶段
   "等领取": "Waiting",
   "待 PM": "Needs PM",
