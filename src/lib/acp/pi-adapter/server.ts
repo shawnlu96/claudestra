@@ -9,7 +9,8 @@
  */
 import { createRpcPeer, RpcError, type RpcPeer, type RpcWire } from "../rpc.js";
 import {
-  configOptions, createPiEventMapper, dialogCancel, mcpServersForPi, splitModelValue, stopReasonOf, textOf, threadStatus, usageUpdate, type TurnOutcome,
+  compactCommand, compactNotice, configOptions, createPiEventMapper, dialogCancel, mcpServersForPi, splitModelValue, stopReasonOf, textOf, threadStatus, usageUpdate,
+  type TurnOutcome,
 } from "./map.js";
 import { PI_MCP_SERVERS_ENV } from "./mcp-mount.js";
 import type { PiLink } from "./pi-link.js";
@@ -21,6 +22,8 @@ const INTERNAL_ERROR = -32603;
 /** pi 起来要加载扩展、连 MCP，头几条命令给足时间 */
 const STARTUP_TIMEOUT_MS = 60_000;
 const COMMAND_TIMEOUT_MS = 30_000;
+/** 压缩要跑一次摘要模型调用，长会话可能几分钟 */
+const COMPACT_TIMEOUT_MS = 600_000;
 
 export interface PiServerDeps {
   openPi(o: { sessionId: string; cwd: string; env: Record<string, string> }): PiLink;
@@ -166,10 +169,13 @@ export class PiAcpServer {
 
   private async prompt(p: Rec): Promise<Rec> {
     const link = this.live(p);
+    const message = textOf(p.prompt);
+    const compact = compactCommand(message);
+    if (compact) return this.compact(link, compact);
     let wait: Promise<Settled> | null = null;
     this.inflight++;
     try {
-      const r = await link.command({ type: "prompt", message: textOf(p.prompt), streamingBehavior: "followUp" }, COMMAND_TIMEOUT_MS);
+      const r = await link.command({ type: "prompt", message, streamingBehavior: "followUp" }, COMMAND_TIMEOUT_MS);
       if (r?.disposition !== "handled") wait = new Promise((resolve, reject) => this.waiters.push({ resolve, reject }));
     } finally {
       this.inflight--;
@@ -181,8 +187,27 @@ export class PiAcpServer {
     const { outcome, cancelled } = await wait;
     const stopReason = stopReasonOf(outcome, cancelled);
     if (stopReason) return { stopReason };
-    const message = `Pi 回合失败：${outcome.errorMessage ?? "未说明原因"}`;
-    throw new RpcError(INTERNAL_ERROR, message, { message, piStopReason: "error" });
+    const failure = `Pi 回合失败：${outcome.errorMessage ?? "未说明原因"}`;
+    throw new RpcError(INTERNAL_ERROR, failure, { message: failure, piStopReason: "error" });
+  }
+
+  /**
+   * pi 的 rpc prompt 不认内置命令，/compact 会被当普通文字发给模型：换成 rpc compact。session/cancel 的 abort 也停压缩。
+   * 没压成（最常见的是会话太短）只回一句话、照常结束：会话没坏，不值得出回合失败卡。
+   */
+  private async compact(link: PiLink, cmd: Rec): Promise<Rec> {
+    this.inflight++;
+    try {
+      this.update(compactNotice(await link.command(cmd, COMPACT_TIMEOUT_MS)));
+    } catch (e) {
+      if (this.cancelRequested) return { stopReason: "cancelled" };
+      this.update(compactNotice(null, errText(e)));
+    } finally {
+      this.inflight--;
+      this.cancelRequested = false;
+    }
+    void this.reportUsage(link);
+    return { stopReason: "end_turn" };
   }
 
   private async steer(p: Rec): Promise<Rec> {

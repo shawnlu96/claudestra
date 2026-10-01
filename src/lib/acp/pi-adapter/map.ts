@@ -101,6 +101,22 @@ export function createPiEventMapper() {
   };
 }
 
+/** 整条 prompt 是 `/compact [指示]` → rpc compact 命令；别的（含带 <channel> 头的普通消息）返回 null */
+export function compactCommand(text: string): Rec | null {
+  const m = /^\/compact(?:\s+([\s\S]+))?$/.exec(text.trim());
+  if (!m) return null;
+  const customInstructions = m[1]?.trim();
+  return { type: "compact", ...(customInstructions ? { customInstructions } : {}) };
+}
+
+/** compact 的回包 / 失败原因 → 给网页看的一句话（压缩本身不产生助手消息，不说一声就像什么都没发生） */
+export function compactNotice(result: unknown, error?: string): Rec {
+  const r = obj(result);
+  const after = typeof r.estimatedTokensAfter === "number" ? ` → 约 ${r.estimatedTokensAfter}` : "";
+  const text = error ? `上下文没有压缩：${error}` : typeof r.tokensBefore === "number" ? `上下文已压缩：${r.tokensBefore}${after} tokens` : "上下文已压缩";
+  return chunk(`compact-${Date.now()}`, text);
+}
+
 /** get_session_stats 的 contextUsage → usage_update；压缩后 tokens 为 null 时没有可报的 */
 export function usageUpdate(stats: unknown): Rec | null {
   const c = obj(obj(stats).contextUsage);

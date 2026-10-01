@@ -16,7 +16,7 @@ import { buildPiCommand, PI_EXTENSION_PATH } from "../src/lib/pi-launch.ts";
 import { ACP_CONTROL, acpExitPrelude } from "../src/lib/runtimes/acp-control.ts";
 import { controlFor, managedFor, piAdapter, transportsOf } from "../src/lib/runtimes/index.ts";
 import { PI_CONTROL, piLaunchOptions } from "../src/lib/runtimes/pi.ts";
-import { buildPiAcpHostCommand, piAcpAdapter, piAcpArgs } from "../src/lib/runtimes/pi-acp.ts";
+import { buildPiAcpHostCommand, keepReplyTool, piAcpAdapter, piAcpArgs } from "../src/lib/runtimes/pi-acp.ts";
 import type { LaunchSpec } from "../src/lib/runtimes/types.ts";
 import { transportRefusal } from "../src/manager/acp-lifecycle.ts";
 
@@ -102,6 +102,16 @@ describe("acp 版的选择与启动命令", () => {
     expect(() => buildPiAcpHostCommand({ ...SPEC, sessionId: "" }, O)).toThrow("会话 id");
     expect(() => buildPiAcpHostCommand(SPEC, { ...O, env: { CLAUDESTRA_SANDBOX: "1", CLAUDESTRA_SANDBOX_ROOT: "/tmp/sb" } })).toThrow("沙箱");
   });
+
+  test("能力档的 --tools 白名单补上 reply（pi 连 MCP 工具一起筛，e2e 实测只列 read,bash 时看不到 reply）；没白名单不动", () => {
+    const tools = (spec: typeof SPEC, mcp?: string) => { const a = piAcpArgs(spec, "agent-pa", "/repo", false, mcp); return a[a.indexOf("--tools") + 1]; };
+    expect(tools({ ...SPEC, extras: { piEnv: { tools: ["read", "bash"] } } })).toBe("read,bash,mcp__claudestra__reply");
+    expect(tools({ ...SPEC, extras: { piEnv: { tools: ["read", "mcp__claudestra__reply"] } } })).toBe("read,mcp__claudestra__reply");
+    expect(tools({ ...SPEC, extras: { piEnv: { tools: ["read"] } } }, "cs-dev")).toBe("read,mcp__cs_dev__reply");
+    expect(piAcpArgs(SPEC, "agent-pa", "/repo")).not.toContain("--tools");
+    expect(keepReplyTool(["--exclude-tools", "bash"], "claudestra")).toEqual(["--exclude-tools", "bash"]);
+    expect(buildPiAcpHostCommand({ ...SPEC, extras: { piEnv: { tools: ["read"] } } }, { ...O, env: { MCP_NAME: "cs2" } })).toContain("read,mcp__cs2__reply");
+  });
 });
 
 describe("同名 MCP 撞名闸：pi 的 mcp.json 会静默顶掉 channel-server，起 pi 之前就拒", () => {
@@ -131,6 +141,8 @@ describe("同名 MCP 撞名闸：pi 的 mcp.json 会静默顶掉 channel-server�
     expect(transportRefusal({ runtime: "pi", cwd: work }, "pa", "acp", env)).toContain("顶掉");
     expect(transportRefusal({ runtime: "pi", cwd: work }, "pa", "acp", { ...env, MCP_NAME: "cs2" })).toBeNull();
     expect(transportRefusal({ runtime: "pi", cwd: work }, "pa", "tmux", env)).toBeNull(); // tmux 版走扩展的 ws，不受影响
+    // migrate --pi --to tmux 不经 manager 白名单：沙箱里切 tmux 要在这里拒，不能先改 registry、停掉宿主再被启动闸拦下
+    expect(transportRefusal({ runtime: "pi", cwd: work }, "pa", "tmux", { ...env, CLAUDESTRA_SANDBOX: "1" })).toContain("只走 ACP");
     expect(() => piAcpAdapter.buildLaunchCommand({ ...SPEC, cwd: work })).toThrow("顶掉");
     writeMcp(join(work, ".pi", "mcp.json"), {});
     expect(piAcpAdapter.buildLaunchCommand({ ...SPEC, cwd: work })).toContain(`${ACP_RUNTIME_ENV}=pi`);

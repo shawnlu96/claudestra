@@ -31,11 +31,23 @@ const mcpName = (env: Record<string, string | undefined>) => env.MCP_NAME || "cl
  * --append-system-prompt，每次起 pi（含 /clear 换的新会话）都带，所以不需要 Codex 那种重启前言。
  * 沙箱里不认 registry 的能力档（它能加 npm 包、指向 owner 的 MCP 配置），固定最小发现集（acp/pi-adapter/sandbox-policy.ts）。
  */
-export function piAcpArgs(spec: LaunchSpec, agent: string, repoRoot: string, sandbox = false): string[] {
+export function piAcpArgs(spec: LaunchSpec, agent: string, repoRoot: string, sandbox = false, mcp = "claudestra"): string[] {
   const piEnv = sandbox ? undefined : (spec.extras?.piEnv as PiEnvProfile | undefined);
   const prompt = codexDeveloperInstructions({ agentName: agent, purpose: spec.purpose, projectContext: spec.projectContext, channelRules: channelInstructions(repoRoot) });
-  const flags = sandbox ? SANDBOX_PI_FLAGS : piEnvFlags(piEnv);
+  const flags = sandbox ? SANDBOX_PI_FLAGS : keepReplyTool(piEnvFlags(piEnv), mcp);
   return [piEnv?.trustProject === false ? "--no-approve" : "--approve", ...flags, "--name", agent, "--append-system-prompt", prompt];
+}
+
+/**
+ * 能力档的 --tools 白名单连 MCP 工具一起筛（pi 0.99.2 agent-session _refreshToolRegistry；e2e 实测只列 read,bash 时模型看不到
+ * reply），所以给白名单补上 reply 的 pi 工具名（mcp__<server>__<tool>，非字母数字下划线换成 _）。没写白名单就不动。
+ */
+export function keepReplyTool(flags: string[], mcp: string): string[] {
+  const i = flags.indexOf("--tools");
+  if (i < 0) return flags;
+  const reply = `mcp__${mcp.replace(/[^A-Za-z0-9_]/g, "_")}__reply`;
+  const list = flags[i + 1]!.split(",");
+  return list.includes(reply) ? flags : flags.map((f, j) => (j === i + 1 ? [...list, reply].join(",") : f));
 }
 
 /** 启动命令：环境变量前缀 + bun acp-host.ts（窗口的 cwd 就是会话的 cwd）。纯函数，单测逐字钉住 */
@@ -58,7 +70,7 @@ export function buildPiAcpHostCommand(spec: LaunchSpec, o: { bunBin: string; rep
     ["PI_BIN", piBinName()],
     ["CLAUDESTRA_ACP_MODEL", spec.model?.trim() || undefined],
     ["CLAUDESTRA_ACP_EFFORT", effort && isPiThinkingLevel(effort) ? effort : undefined], // 同 tmux 版：只放 pi 认的档位
-    [PI_ARGS_ENV, JSON.stringify(piAcpArgs(spec, agent, o.repoRoot, sandbox))],
+    [PI_ARGS_ENV, JSON.stringify(piAcpArgs(spec, agent, o.repoRoot, sandbox, mcpName(env)))],
     // 窗口不继承 manager 的 env（继承 tmux server 的）：沙箱里把上面核过的目录显式带过去，宿主起适配器前会再核一遍
     ["PI_CODING_AGENT_DIR", sandbox ? env.PI_CODING_AGENT_DIR : undefined],
   ];
