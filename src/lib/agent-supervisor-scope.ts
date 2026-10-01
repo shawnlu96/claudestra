@@ -15,7 +15,7 @@ import { isMasterAgent, type RegistryAgent } from "./registry.js";
 import { LEND_WORKER_PREFIX } from "./runtimes/clean-env.js";
 import type { SchedulerConfig } from "./scheduler-config.js";
 import { stepOfNode, ledgerResult } from "./scheduler-work-order.js";
-import type { WorkRef } from "./agent-supervisor-policy.js";
+import { workKeyOf, type WorkRef } from "./agent-supervisor-policy.js";
 
 /** 与 bridge.ts 的 PAC_STALE_MS 同值：回程簿两小时没消化就会被扫掉，过了这个点就不算「还在等」 */
 export const CALL_STALE_MS = 2 * 3_600_000;
@@ -126,6 +126,15 @@ export function supervisedAgents(input: ScopeInput): Supervised[] {
       runtime: row.runtime ?? "claude-code", transport: row.transport === "acp" ? "acp" : "tmux", work });
   }
   return out;
+}
+
+/**
+ * 这个 agent 此刻还在名单里、会话和在途的活都没换吗（换了 / 不在 = null）：调度服务认领后的复核（agent-supervisor.ts eligible）
+ * 和 `manager restart --expect` 拿锁后的复核（manager/restart-expect.ts）用同一个判定，PM 换会话、活交了、退回人工、开关关了都算换。
+ */
+export function stillSupervised(input: ScopeInput, want: { agent: string; sessionId: string; workKey: string }): Supervised | null {
+  const s = supervisedAgents(input).find((x) => x.agent === want.agent);
+  return s && s.sessionId === want.sessionId && workKeyOf(s.work) === want.workKey ? s : null;
 }
 
 /** bridge/agent-calls.ts 落盘的回程簿（bridge 是唯一写者，这里只读） */
