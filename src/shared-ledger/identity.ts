@@ -42,11 +42,16 @@ export function hasRead(principal: SharedLedgerPrincipal, project: string): bool
 export function actorCode(store: Store, p: SharedLedgerPrincipal): string {
   return store.get<{ code: string }>("SELECT code FROM members WHERE teamId=? AND personId=?", p.teamId, p.personId)!.code;
 }
+function homeGrants(store: Store, team: string, instance: string, now: number): SharedLedgerCredential["projects"] {
+  return store.all<{ grants: string }>(`SELECT c.grants FROM credentials c JOIN members m
+    ON m.teamId=c.teamId AND m.personId=c.personId
+    JOIN instance_bindings b ON b.teamId=c.teamId AND b.personId=c.personId AND b.instanceId=c.instanceId
+    WHERE c.teamId=? AND c.instanceId=? AND m.status='active' AND c.revokedAt IS NULL AND c.expiresAt > ?`,
+  team, instance, now).flatMap((r) => decode<SharedLedgerCredential["projects"]>(r.grants));
+}
 export function registeredHome(store: Store, team: string, instance: string, project: string): boolean {
-  return store.all<{ bearerHash: string }>(`SELECT c.hash bearerHash FROM credentials c JOIN members m
-    ON m.teamId=c.teamId AND m.personId=c.personId WHERE c.teamId=? AND c.instanceId=? AND m.status='active' AND c.revokedAt IS NULL AND c.expiresAt > ?`,
-  team, instance, Date.now()).some((r) => {
-    const row = store.get<{ grants: string }>("SELECT grants FROM credentials WHERE hash=?", r.bearerHash)!;
-    return decode<SharedLedgerCredential["projects"]>(row.grants).some((g) => g.projectId === project);
-  });
+  return homeGrants(store, team, instance, Date.now()).some((g) => g.projectId === project);
+}
+export function projectionHome(store: Store, team: string, instance: string, project: string, now: number): boolean {
+  return homeGrants(store, team, instance, now).some((g) => g.projectId === project && g.role === "service" && g.actions.includes("project"));
 }

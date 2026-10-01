@@ -1,7 +1,7 @@
 import { SharedLedgerError, type SharedLedgerImport, type SharedLedgerImportResult, type SharedLedgerFeature } from "../lib/shared-ledger-contract.js";
 import type { SharedLedgerPrincipal } from "../lib/shared-ledger-auth.js";
 import { assertSharedLedgerMutation } from "../lib/shared-ledger-contract-validation.js";
-import { actorCode, registeredHome } from "./identity.js";
+import { actorCode, projectionHome } from "./identity.js";
 import { conflict, meta } from "./reads.js";
 import { insertFeature, saveDag } from "./commands.js";
 import { applyProjection } from "./projections.js";
@@ -10,7 +10,9 @@ import { Store, decode, encode, newId, rejectSensitive } from "./store.js";
 export function importManifest(store: Store, p: SharedLedgerPrincipal, input: SharedLedgerImport, now: number): SharedLedgerImportResult {
   rejectSensitive(input);
   const m = input.manifest;
-  if (!registeredHome(store, p.teamId, m.sourceInstanceId, m.projectId)) throw new SharedLedgerError("forbidden");
+  if (!projectionHome(store, p.teamId, m.sourceInstanceId, m.projectId, now)) {
+    throw new SharedLedgerError("forbidden", "主场没有可投影的服务身份");
+  }
   const previous = store.get<{ digest: string; projectId: string; response: string }>(
     "SELECT digest,projectId,response FROM import_batches WHERE teamId=? AND sourceInstanceId=? AND batchId=?", p.teamId, p.instanceId, input.batchId);
   if (previous) {

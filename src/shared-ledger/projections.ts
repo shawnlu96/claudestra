@@ -3,6 +3,7 @@ import type { SharedLedgerPrincipal } from "../lib/shared-ledger-auth.js";
 import { sharedLedgerProjectionDigest } from "../lib/shared-ledger-contract-transfer.js";
 import { conflict, feature } from "./reads.js";
 import { saveFeature } from "./commands.js";
+import { refreshFeatureState } from "./feature-state.js";
 import { actorCode } from "./identity.js";
 import { Store, encode, decode, newId, rejectSensitive } from "./store.js";
 
@@ -61,18 +62,7 @@ export function applyProjection(store: Store, p: SharedLedgerPrincipal, projecti
     if (!old) store.run("INSERT INTO source_event_mirrors VALUES (?,?,?,?)", p.instanceId, event.sourceSeq, f.id, encode(event));
   }
   f.projection = { sourceInstanceId: p.instanceId, sourceSeq: projection.sourceSeq, observedAt: projection.observedAt, receivedAt: now };
-  const tasks = store.all<{ data: string }>("SELECT data FROM task_mirrors WHERE featureId=?", f.id).map((r) => decode<SharedLedgerTaskProjection>(r.data));
-  f.executorInstanceIds = [...new Set(tasks.flatMap((t) => t.executorInstanceId ? [t.executorInstanceId] : []))];
-  // Only explicit task state counts as complete; absent mirror rows remain missing, never inferred done.
-  const table = f.authorityMode === "source" ? "source_dag_mirrors" : "dag_versions";
-  const dagRow = store.get<{ data: string }>(`SELECT data FROM ${table} WHERE featureId=? AND version=?`, f.id, f.version);
-  const bindings = dagRow ? decode<{ bindings: { taskId: string }[] }>(dagRow.data).bindings : [];
-  const mirrors = store.all<{ taskId: string; data: string }>("SELECT taskId,data FROM task_mirrors WHERE featureId=?", f.id);
-  const bound = bindings.map((b) => mirrors.find((t) => t.taskId === b.taskId)).filter((t) => t !== undefined);
-  f.counts.completed = bound.filter((t) => decode<SharedLedgerTaskProjection>(t.data).stage === "done").length;
-  f.counts.blocked = bound.filter((t) => decode<SharedLedgerTaskProjection>(t.data).stage === "blocked").length;
-  f.counts.missing = bindings.length - bound.length;
-  f.status = f.counts.total > 0 && f.counts.completed === f.counts.total ? "done" : f.counts.blocked ? "blocked" : tasks.length ? "active" : "planned";
+  refreshFeatureState(store, f);
   saveFeature(store, p.teamId, f);
   const response: SharedLedgerProjectionResult = { schemaVersion: 1,
     serverSeq: store.event(p.teamId, f.projectId, f.id, "projection", actorCode(store, p), now),

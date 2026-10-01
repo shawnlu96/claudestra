@@ -3,6 +3,7 @@ import { SharedLedgerError } from "../lib/shared-ledger-contract.js";
 import type { SharedLedgerPrincipal } from "../lib/shared-ledger-auth.js";
 import { sharedLedgerCommandDigest } from "../lib/shared-ledger-auth.js";
 import { assertSharedLedgerMutation } from "../lib/shared-ledger-contract-validation.js";
+import { refreshFeatureState } from "./feature-state.js";
 import { actorCode, registeredHome } from "./identity.js";
 import { conflict, detail, ownReceipt } from "./reads.js";
 import { Store, decode, encode, newId, rejectSensitive } from "./store.js";
@@ -56,6 +57,7 @@ export function executeCommand(store: Store, p: SharedLedgerPrincipal, command: 
       f.version++;
       saveDag(store, f.id, { version: f.version, nodes: command.nodes, bindings: current.dag.bindings }, command.reason);
       f.counts = { ...f.counts, total: command.nodes.length };
+      refreshFeatureState(store, f);
     }
     saveFeature(store, p.teamId, f);
   }
