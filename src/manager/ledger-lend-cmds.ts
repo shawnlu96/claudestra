@@ -19,6 +19,7 @@ import { cancelLend, claimLend, leaseLend, listLendOrders, offerLend, pollLend, 
   type OfferInput } from "../lib/ledger-lend.js";
 
 import { heldLease, lastReviewOf } from "../lib/ledger-lend-lease.js";
+import { lendPeerCmds, type BranchState } from "./ledger-lend-peer-cmds.js";
 import { RECEIPT_PURPOSE, writeLendDeliver, writeLendResult, type LendDeliverDeps, type LendResultDeps } from "../lib/ledger-lend-result.js";
 import { readPeers } from "../lib/peers.js";
 import { runBounded } from "../lib/run-bounded.js";
@@ -38,6 +39,8 @@ export interface LendCliDeps {
   notifyPm(project: string, text: string): Promise<void>;
   /** 审查结论与写单交付共用（报告目录、写报告、签回执）；写单另要查远端 head 与对方指纹（只测审查的注入可以不给） */
   result: LendResultDeps & Partial<Pick<LendDeliverDeps, "remoteHead" | "peerFp">>;
+  /** v2 收回核对（i28-W2）：订单分支在远端的状态；不给 = 真 git ls-remote */
+  branchState?: (repo: string, branch: string) => Promise<BranchState>;
 }
 
 function realLendDeps(c: LedgerCli): LendCliDeps {
@@ -247,5 +250,6 @@ export const LEND_CMDS: Record<string, CommandSpec> = {
   "lend-lease": bridgeSpec("lease", "续租 / 释放"),
   "lend-write": bridgeSpec("result", "对方交审查结论 / 写单交付，核对完才入账"),
   "lend-pin": { valued: [], usage: "lend-pin -- <peer> <指纹> first|repin（bridge 专用：对方公钥刚钉住，记台账）", run: pinned },
-  "lend-sweep": { valued: [], usage: "lend-sweep（bridge 定时调：过期租约结成 unknown 并通知 PM）", run: sweep },
+  "lend-sweep": { valued: [], usage: "lend-sweep（bridge 定时调：过期租约结成 unknown 并通知 PM，推送超时的池单撤回）", run: sweep },
+  ...lendPeerCmds({ deps: lendDeps, tell }),
 };

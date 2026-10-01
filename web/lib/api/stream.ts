@@ -30,7 +30,10 @@ export async function openAgentEventStream(agent: string, opts: { since?: number
   const apiName = apiAgentName(agent);
   const name = encodeURIComponent(apiName);
   const variants = agentNameVariants(apiName);
-  const [res, ids] = await Promise.all([apiStream(`/events${opts.since ? `?since=${opts.since}` : ""}`, { signal: opts.signal }), selfIds()]);
+  // agents=：只要这个 agent 的事件与补发（下面照旧按名字再筛一道——老 bridge 不认这个参数，照发全部）
+  const q = new URLSearchParams({ agents: [...variants].join(",") });
+  if (opts.since) q.set("since", String(opts.since));
+  const [res, ids] = await Promise.all([apiStream(`/events?${q}`, { signal: opts.signal }), selfIds()]);
   const upstream = res.body!.getReader();
   const dec = new TextDecoder();
   // 连流即补拉挂起态（thinking → composer 立刻进「停止」态；未答的 AUQ）与 bg 任务快照；失败不阻塞流

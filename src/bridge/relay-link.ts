@@ -248,7 +248,8 @@ function relayFetchError(e: unknown): Error {
 
 /** 发往 required peer 的一律包进 E2E 会话（lib/peer-e2e-outbound.ts）；外层签名在这里加，内层由调用方照旧签 */
 const e2eOutbound = createE2eOutbound({ ...defaultOutboundDeps(), sign: (method, path, body) => signedHeaders(method, path, body) });
-type PeerFetchOpts = { fetchImpl?: typeof fetch; timeoutMs?: number };
+/** e2eOnly：目标此刻不是 E2E peer（刚被禁用、地址变了）就抛错不发——出借推送用，事前检查和这里之间 peers.json 可能变 */
+type PeerFetchOpts = { fetchImpl?: typeof fetch; timeoutMs?: number; e2eOnly?: boolean };
 
 /**
  * 所有 peer 调用的唯一出口：目标是 required peer → 走 E2E（走不了就抛错，绝不退回明文）；否则明文照旧。
@@ -256,6 +257,7 @@ type PeerFetchOpts = { fetchImpl?: typeof fetch; timeoutMs?: number };
  */
 export async function peerFetch(url: string, init: PeerFetchInit, opts: PeerFetchOpts = {}): Promise<Response> {
   const viaE2e = await e2eOutbound.fetch(url, init, (u, outer) => rawPeerFetch(u, { ...outer, ...(init.signal ? { signal: init.signal } : {}) }, opts));
+  if (!viaE2e && opts.e2eOnly) throw new Error("目标不是端到端加密的 peer（可能刚被禁用或地址变了），不发明文");
   return viaE2e ?? rawPeerFetch(url, init, opts);
 }
 

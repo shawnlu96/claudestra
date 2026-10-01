@@ -9,6 +9,7 @@ import { closeLedger, getTask, listEvents, openLedger } from "../src/lib/ledger-
 import { setMeta } from "../src/lib/ledger-write.ts";
 import { askNoticeText, askOrder } from "../src/lib/order-ask.ts";
 import { deliverDedupKey, deliverOrder, parseLsRemote, remoteBranchHead, type RemoteHead } from "../src/lib/order-deliver.ts";
+import type { PrRows } from "../src/lib/order-deliver-pr.ts";
 import type { LedgerRun } from "../src/lib/order-ledger-exit.ts";
 import { currentOrders, orderWireFor } from "../src/lib/order-take.ts";
 import type { VerifiedCall } from "../src/lib/order-tool-route.ts";
@@ -54,7 +55,10 @@ afterEach(() => closeLedger(":memory:"));
 const events = (kind?: string) => listEvents(db, { project: P, target: "T1" }).filter((e) => !kind || e.kind === kind);
 const wire = (o: Record<string, unknown> = {}) => ({ v: 1, orderId: "T1:write:r0", head: HEAD, evidence: "docs/tasks/T1.report.md", summary: "交付", selfCheck: "逐条过", ...o });
 const remote = (head: string | null) => async (): Promise<RemoteHead> => (head ? { ok: true, head } : { ok: false, error: "git ls-remote 超时" });
-const deps = (head: string | null = HEAD) => ({ db, run, remoteHead: remote(head) });
+/** i28-M8：origin 上这个分支恰好一个指向 head 的 open PR（PR 检查本身的用例在 tests/order-deliver-pr.test.ts） */
+const PR = "https://github.com/o/r/pull/1";
+const prFor = (head: string) => async (): Promise<PrRows> => ({ ok: true, rows: [{ url: PR, headRefOid: head, baseRefName: "main", isCrossRepository: false }] });
+const deps = (head: string | null = HEAD) => ({ db, run, remoteHead: remote(head), findPr: prFor(HEAD) });
 
 describe("take_order：当前的单", () => {
   test("build 阶段、写那一步派给我 → 手动单号 <task>:<step>:r<round>，字段过 OrderWire 校验", () => {
@@ -109,7 +113,7 @@ describe("deliver", () => {
     expect(d).toMatchObject({ actor: EXE, dedupKey: deliverDedupKey("T1:write:r0", HEAD), text: "交付\n自查：逐条过" });
     expect(d.data).toEqual({ round: 1, headSHA: HEAD, evidence: "docs/tasks/T1.report.md" });
     expect(runs).toEqual([["ledger", "deliver", "T1", "--from=build", `--head=${HEAD}`, "--evidence=docs/tasks/T1.report.md", "--text=交付\n自查：逐条过",
-      `--rev=${rev}`, "--branch=feat/t1", `--dedup=${deliverDedupKey("T1:write:r0", HEAD)}`]]);
+      `--rev=${rev}`, "--branch=feat/t1", `--pr=${PR}`, `--dedup=${deliverDedupKey("T1:write:r0", HEAD)}`]]);
   });
 
   test("同一单号 + head 重试：同一结果，不重复写事件、不重复推阶段", async () => {
@@ -163,7 +167,7 @@ describe("deliver", () => {
     await cli(PM, "stage", "T1", "--from", "build", "--to", "blocked");
     expect(await deliverOrder(call(), wire(), deps())).toMatchObject({ ok: false, code: "not_current_order" });
     await cli(PM, "stage", "T1", "--from", "blocked", "--to", "build");
-    const racing = { db, run, remoteHead: async (): Promise<RemoteHead> => (await cli(PM, "stage", "T1", "--from", "build", "--to", "blocked"), { ok: true, head: HEAD }) };
+    const racing = { db, run, findPr: prFor(HEAD), remoteHead: async (): Promise<RemoteHead> => (await cli(PM, "stage", "T1", "--from", "build", "--to", "blocked"), { ok: true, head: HEAD }) };
     expect(await deliverOrder(call(), wire(), racing)).toMatchObject({ ok: false, code: "conflict" });
     expect(events("deliver")).toEqual([]);
     expect(getTask(db, "T1")).toMatchObject({ stage: "blocked", headSHA: null });
@@ -173,7 +177,7 @@ describe("deliver", () => {
     const [cwd, a] = gitOrigin();
     await cli(PM, "task-set", "T1", "--rev", String(getTask(db, "T1")!.rev), "--branch", "feat/old");
     const racing = {
-      db, run,
+      db, run, findPr: prFor(a),
       remoteHead: async (_c: VerifiedCall, branch: string) => {
         const r = await remoteBranchHead(cwd, branch, runBounded);
         expect(await cli(EXE, "task-set", "T1", "--rev", String(getTask(db, "T1")!.rev), "--branch", "feat/new")).toMatchObject({ ok: true });
@@ -190,7 +194,7 @@ describe("deliver", () => {
       wire({ head: "c".repeat(64) }), wire({ evidence: "见 报告" }), wire({ summary: "a\u0007b" }), wire({ v: 2 }), null, "x"];
     let asked = 0;
     for (const w of bad) {
-      expect(await deliverOrder(call(), w, { db, run, remoteHead: async () => (asked++, { ok: true, head: HEAD }) })).toMatchObject({ ok: false, code: "invalid_wire" });
+      expect(await deliverOrder(call(), w, { db, run, findPr: prFor(HEAD), remoteHead: async () => (asked++, { ok: true, head: HEAD }) })).toMatchObject({ ok: false, code: "invalid_wire" });
     }
     expect(asked).toBe(0);
     expect(runs).toEqual([]);
@@ -201,7 +205,7 @@ describe("deliver", () => {
     for (const f of forged) expect(await deliverOrder(call(), wire(f), deps())).toMatchObject({ ok: false, code: "invalid_wire" });
     expect(runs).toEqual([]);
     const seen: string[] = [];
-    await deliverOrder(call(), wire(), { db, remoteHead: remote(HEAD), run: (args, ch) => (seen.push(ch), run(args, ch)) });
+    await deliverOrder(call(), wire(), { db, remoteHead: remote(HEAD), findPr: prFor(HEAD), run: (args, ch) => (seen.push(ch), run(args, ch)) });
     expect(seen).toEqual(["ch-t1"]);
     expect(events("deliver")[0].actor).toBe(EXE);
   });

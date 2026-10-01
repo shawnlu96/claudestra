@@ -201,7 +201,7 @@ function agentSteps(io: StepIO, p: StartPlan): Step[] {
     {
       name: "workflow",
       run: async () => failed(await ledger(io, p, "workflow-set", p.taskId, {
-        rev: rev(io, p.taskId), "workflow-rev": "0", template: "code", version: "2", mode: "auto", "author-family": "claude", fallback: FALLBACK,
+        rev: rev(io, p.taskId), "workflow-rev": "0", template: "code", version: "3", mode: "auto", "author-family": "claude", fallback: FALLBACK,
       }, null)),
       // workflow-set 没有 dedup：卡是本次建的（task-new 已确认归属），它的 workflow 是 auto 就是这一笔落了
       landed: () => getWorkflow(io.db(), p.taskId)?.mode === "auto",

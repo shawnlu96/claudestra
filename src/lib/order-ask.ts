@@ -44,6 +44,45 @@ export function askNoticeText(a: { taskId: string; orderId: string; from: string
   ].join("\n");
 }
 
+/** Who asks about which card; the caller resolved all of it (local: the verified agent's current order; remote: the lend order row). */
+export interface AskSource {
+  task: { id: string; project: string; pm: string | null };
+  orderId: string;
+  /** the asker as the PM should answer it: a local agent name, or worker@peer */
+  from: string;
+  fromChannelId?: string;
+  /** dedupKey prefix: retries of the same question on the same order find the same ask */
+  keyPrefix: string;
+}
+
+export type OpenedOrderAsk = { askId: string; askee: string; duplicate: boolean; notified: boolean; delivered: string | null };
+
+/**
+ * Open (or find again) the ask on the card's PM and hand the notice over; shared by the local ask tool and a remote worker's
+ * lend/ask (lib/ledger-lend-peers.ts RemoteCaller). The notice quotes the question; nothing else of the card goes in it.
+ */
+export async function openOrderAsk(db: Database, deps: Omit<AskDeps, "db">, src: AskSource, q: { question: string; options: string[] }):
+  Promise<OpenedOrderAsk | { refused: string }> {
+  const pm = src.task.pm ?? getMeta(db, src.task.project).pms[0] ?? null;
+  if (!pm) return { refused: `${src.task.id} 没有 PM，项目 ${src.task.project} 的 PM 名单也是空的` };
+  const digest = createHash("sha256").update(JSON.stringify([q.question, q.options])).digest("hex").slice(0, 16);
+  const opened = deps.open({
+    project: src.task.project, taskId: src.task.id, fromAgent: src.from, ...(src.fromChannelId ? { fromChannelId: src.fromChannelId } : {}), source: "reply",
+    kind: "decide", title: titleOf(src.task.id, q.question), body: q.question, assignee: pm, dedupKey: `${src.keyPrefix}:${src.orderId}:${digest}`,
+    extra: { orderId: src.orderId, options: q.options, via: "mcp_ask", notice: "pending" },
+  });
+  const ask = opened.ask;
+  const askee = ask.assignee ?? pm;
+  if (opened.existed && (ask.state !== "open" || ask.extra.notice !== "pending")) {
+    return { askId: ask.id, askee, duplicate: true, notified: ask.extra.notice === "handed", delivered: null };
+  }
+  const text = askNoticeText({ taskId: src.task.id, orderId: src.orderId, from: src.from, askId: ask.id, question: q.question, options: q.options });
+  const sent = await deps.notify(askee, text, `ledger-ask:${ask.id}`);
+  if (sent.handed) deps.markHanded(ask.id);
+  // 没投出去也回 ok：问题已记下，同样的参数再调一次会补投
+  return { askId: ask.id, askee, duplicate: opened.existed, notified: sent.handed, delivered: sent.note };
+}
+
 export async function askOrder(call: VerifiedCall, args: unknown, deps: AskDeps): Promise<OrderToolResult> {
   const w = parseAskWire(args);
   if (!w.ok) return refuse("invalid_wire", w.error);
@@ -51,22 +90,6 @@ export async function askOrder(call: VerifiedCall, args: unknown, deps: AskDeps)
   if (!deps.db) return refuse("no_ledger", "这台机器没有台账");
   const cur = currentOrders(deps.db, call).find((o) => o.orderId === orderId);
   if (!cur) return refuse("not_current_order", `${orderId} 不是你当前的单，只能就自己当前的单提问`);
-  const task = cur.task;
-  const pm = task.pm ?? getMeta(deps.db, task.project).pms[0] ?? null;
-  if (!pm) return refuse("no_pm", `${task.id} 没有 PM，项目 ${task.project} 的 PM 名单也是空的`);
-  const digest = createHash("sha256").update(JSON.stringify([question, options])).digest("hex").slice(0, 16);
-  const opened = deps.open({
-    project: task.project, taskId: task.id, fromAgent: call.agent, fromChannelId: call.channelId, source: "reply", kind: "decide",
-    title: titleOf(task.id, question), body: question, assignee: pm, dedupKey: `mcp-ask:${orderId}:${digest}`,
-    extra: { orderId, options, via: "mcp_ask", notice: "pending" },
-  });
-  const ask = opened.ask;
-  const askee = ask.assignee ?? pm;
-  if (opened.existed && (ask.state !== "open" || ask.extra.notice !== "pending")) {
-    return { ok: true, duplicate: true, askId: ask.id, askee, notified: ask.extra.notice === "handed", delivered: null };
-  }
-  const sent = await deps.notify(askee, askNoticeText({ taskId: task.id, orderId, from: call.agent, askId: ask.id, question, options }), `ledger-ask:${ask.id}`);
-  if (sent.handed) deps.markHanded(ask.id);
-  // 没投出去也回 ok：问题已记下，同样的参数再调一次会补投
-  return { ok: true, duplicate: opened.existed, askId: ask.id, askee, notified: sent.handed, delivered: sent.note };
+  const r = await openOrderAsk(deps.db, deps, { task: cur.task, orderId, from: call.agent, fromChannelId: call.channelId, keyPrefix: "mcp-ask" }, { question, options });
+  return "refused" in r ? refuse("no_pm", r.refused) : { ok: true, ...r };
 }
