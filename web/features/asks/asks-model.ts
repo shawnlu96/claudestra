@@ -8,6 +8,8 @@ import { attachmentUrl, isImageName } from "@/lib/chat/attachments";
 import { replyRowKey } from "@/lib/chat/reply-clicks";
 import { isReservedButtonId } from "@/lib/chat/reserved-button-ids";
 import type { ChatMessage } from "@/features/chat/type";
+import { isAskForAudience } from "./ask-audience";
+import { isAskForViewer } from "./ask-viewer";
 
 /** superseded = 同一个 agent 同一件事又问了新的一版（授权参数变了），旧卡片失效 */
 export type AskState = "open" | "answered" | "expired" | "cancelled" | "superseded";
@@ -60,7 +62,7 @@ export interface WebAskAtt {
 
 /** 协作视图的「等你」：开着、非验收、没指给别人的（指给 guest 的指派事项是在等那个 guest，不是等 owner） */
 export const waitsOnOwner = (a: Pick<WebAsk, "state" | "kind" | "assignee">): boolean =>
-  a.state === "open" && a.kind !== "accept" && (!a.assignee || a.assignee === "local:owner:self");
+  a.state === "open" && a.kind !== "accept" && isAskForAudience(a);
 
 export interface AskGroups {
   /** 等你拍板 / 授权 / 亲自处理的（按等待时长，久的在前） */
@@ -78,7 +80,7 @@ const rank = (a: WebAsk) => (a.urgency === "urgent" ? 0 : a.blocking === true ? 
 export const deletedAsk = (a: Pick<WebAsk, "extra">): boolean => !!(a.extra?.dismissed || a.extra?.hidden);
 
 export function groupAsks(all: WebAsk[]): AskGroups {
-  const asks = all.filter((a) => !deletedAsk(a));
+  const asks = all.filter((a) => isAskForViewer(a) && !deletedAsk(a));
   const open = asks.filter((a) => a.state === "open").sort((x, y) => rank(x) - rank(y) || x.createdAt - y.createdAt);
   return {
     waiting: open.filter((a) => a.kind !== "accept"),
