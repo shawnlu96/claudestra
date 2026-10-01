@@ -14,7 +14,7 @@ import type { LendContact } from "./lend-policy.js";
 import type { ProjectDef } from "./projects.js";
 import { liveGrant, REVOKED } from "./lend-grant.js";
 import { endNotice, ensureStartNotice, flushEndNotice, type LendNoticeParams } from "./lend-notice.js";
-import { lendRequest, type LendCall, type Lease, type Receipt } from "./lend-remote.js";
+import { lendRequest, type LendCall, type Lease, type LendRes, type Receipt } from "./lend-remote.js";
 import type { CloneResult, CloneWrite } from "./lend-clone.js";
 import { isWriteStep, lendBranch, roleOfStep } from "./lend-git.js";
 import type { PrInput, PrResult, PushResult, PushTarget } from "./lend-push.js";
@@ -85,6 +85,10 @@ export interface LendDeps {
   /** 本机 Codex 额度（撞额度暂停借单用）；读不到 = null */
   codexQuota(): Promise<QuotaView | null>;
   log(msg: string): void;
+  /** proto 2 只认这轮 beat 的应答（lend-beat.ts，at = 收到的时刻）：null = 这轮没续上，截止不动；不设 / undefined = proto 1 逐单 lease renew */
+  renewal?(row: LendRow): { res: LendRes<Lease | null>; at: number } | null | undefined;
+  /** true = 这轮先不发这张单的结束通知（不联网阶段、这个 peer 本轮出站已失败、proto 2 的收回停单改在 beat 里带 ended）：不算发过，标记留着 */
+  settleHold?(row: LendRow): boolean;
 }
 
 export const workerName = (orderId: string): string => `agent-lend-${createHash("sha256").update(orderId).digest("hex").slice(0, 10)}`;
@@ -100,7 +104,8 @@ export function detailOf(s: string | null): string | null {
 const leaseFields = (l: Lease, now: number) => ({ leaseGen: l.gen, leaseUntil: now + l.ms, lastBeatAt: now });
 
 /** A 回这几个码 = 这张单在 A 那边已经不归我们了：停 worker，按码记终态 */
-const GONE: Record<string, "cancelled" | "stopped"> = { cancelled: "cancelled", lease_expired: "stopped", stale_gen: "stopped", not_found: "stopped", conflict: "cancelled" };
+const GONE: Record<string, "cancelled" | "stopped"> = { cancelled: "cancelled", lease_expired: "stopped", stale_gen: "stopped", not_found: "stopped", conflict: "cancelled",
+  done: "stopped" };
 
 /** 这张还没 claim 的单现在还能不能领：声明仍在、仓库仍在白名单、今日额度与在跑位都还有 */
 export function claimProblem(row: LendRow, entry: LendEntry | undefined, db: Database, now: number): string | null {
@@ -153,7 +158,7 @@ async function release(row: LendRow, from: LendState, why: string, d: LendDeps):
  */
 export async function settleOrder(row: LendRow, d: LendDeps): Promise<void> {
   const s = row.settle;
-  if (!s) return;
+  if (!s || (s.notify && d.settleHold?.(row))) return;
   if (s.notify) {
     const r = await lendRequest(d.call, row.peer, "lease", { orderId: row.orderId, gen: row.leaseGen, action: "release", reason: s.notify, detail: detailOf(row.reason) });
     if (!r.ok) d.log(`告诉 A ${row.orderId} 已${s.notify === "stopped" ? "停" : "退回（not_started）"}没送到：${r.code}`);
@@ -286,9 +291,10 @@ async function forwardResult(row: LendRow, d: LendDeps): Promise<void> {
 async function heartbeat(row: LendRow, d: LendDeps): Promise<LendRow | null> {
   const now = d.now();
   const awaitingReceipt = row.state === "result_pending" && row.payload !== null;
-  if (row.lastBeatAt === null || now - row.lastBeatAt >= BEAT_MS) {
-    const r = await lendRequest(d.call, row.peer, "lease", { orderId: row.orderId, gen: row.leaseGen, action: "renew", reason: null, detail: null });
-    const at = d.now();
+  const beat = d.renewal?.(row);
+  if (beat !== undefined ? beat !== null : row.lastBeatAt === null || now - row.lastBeatAt >= BEAT_MS) {
+    const r = beat ? beat.res : await lendRequest(d.call, row.peer, "lease", { orderId: row.orderId, gen: row.leaseGen, action: "renew", reason: null, detail: null });
+    const at = beat ? beat.at : d.now();
     if (r.ok && r.value) return patchOrder(d.db, row.orderId, [row.state], leaseFields(r.value, at), at);
     if (!r.ok && GONE[r.code] && awaitingReceipt) return stopForResult(row, `续租被拒：${r.code}`, d);
     if (!r.ok && GONE[r.code] && r.code !== "conflict") {
@@ -316,7 +322,7 @@ async function stopForResult(row: LendRow, why: string, d: LendDeps): Promise<Le
  * 授权没了（收回 / 过期 / 失效 / 范围收窄，§2.5 的表）：没起 worker 的退回 not_started；在跑的 kill 并确认退出记 stopped（没确认就下一轮再停）；
  * 结论已落成交付正文的只停 worker，返回行让调用方照常转交。写单的提交还没推送也按停处理：收回之后远端不能再多出副作用。
  */
-async function revoke(row: LendRow, problem: string, d: LendDeps): Promise<LendRow | null> {
+export async function revoke(row: LendRow, problem: string, d: LendDeps): Promise<LendRow | null> {
   const why = `${REVOKED}：${problem}`;
   // cloned 已记了 agent：上次可能建出了 worker 才中断（还没记 started），按在跑的停，确认退出才收尾
   const made = row.state === "cloned" && row.agent && (d.worker.find(row.agent) || (await d.worker.alive(row.agent)) !== "no_window");

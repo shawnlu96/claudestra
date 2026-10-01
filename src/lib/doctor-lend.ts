@@ -1,7 +1,8 @@
 /**
  * doctor 的出借 / 借入一行（lend.json，lib/lend-config.ts）：当前授权（对谁、角色、名额、每天几单、到期时间和剩余）、对方协议版本；
  * 文件无效时报 fail（此时实际按「关」处理），暂停 / 过期 / 失效的授权列进 warn。
- * 另一行「出借循环」读 lend journal（lib/lend-journal.ts）：scheduler 服务最近有没有跑出借这一步、为什么没 poll、在跑几单、哪些单停下来保留了现场。
+ * 另一行「出借循环」读 lend journal（lib/lend-journal.ts）：scheduler 服务最近有没有跑出借这一步、为什么没 poll、在跑几单、哪些单停下来保留了现场；
+ * 协议 v2 起每个 peer 再列协议版本、最近一次 hello / beat、最近收到推送的时刻和当前轮询节奏，hello 自检没过、收到推送却没有同名授权列进 warn。
  */
 import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -55,6 +56,22 @@ export async function checkLend(path = LEND_PATH, ctx?: { contacts: LendContact[
 
 /** 出借开着却这么久没见到一轮 = 第四服务没装、没在跑或卡住了 */
 const STALE_TICK_MS = 3 * 60_000;
+/** 这么久之内收到过的推送才拿来对授权名字 */
+const PUSH_RECENT_MS = 86_400_000;
+const hhmmss = (ms: number): string => new Date(ms).toISOString().slice(11, 19);
+
+type PeerStatus = import("./lend-loop.js").LendStatus["peers"][string];
+
+/** 一个 peer 的 poll 与 v2 状态（没有 v2 字段的老摘要只报 poll） */
+const peerLine = (peer: string, p: PeerStatus): string => `${peer} 最近 poll ${p.lastPollAt ? hhmmss(p.lastPollAt) : "未到点"}${p.lastError ? `（失败：${p.lastError}）` : ""}` +
+  (p.proto === undefined ? "" : `，协议 ${p.proto}，hello ${p.hello ?? "没发过"}，beat ${p.beat ?? "没发过"}，推送 ${p.pushAt ? hhmmss(p.pushAt) : "没收到过"}` +
+    `，轮询每 ${Math.round((p.pollMs ?? 0) / 1000)} 秒`);
+
+/** 收到了推送、lend.json 却没有这个名字的授权：多半是两边记的 peer 名对不上 */
+function pushWithoutGrant(db: import("bun:sqlite").Database, names: string[], now: number): string[] {
+  const rows = db.query("SELECT key, value FROM lend_meta WHERE key LIKE 'pushAt:%'").all() as { key: string; value: string }[];
+  return rows.filter((r) => now - Number(r.value) <= PUSH_RECENT_MS && !names.includes(r.key.slice("pushAt:".length))).map((r) => r.key.slice("pushAt:".length));
+}
 
 export async function checkLendLoop(lendPath = LEND_PATH, journalPath?: string, now = Date.now()): Promise<Check[]> {
   const base = { group: "Peer", name: "出借循环" };
@@ -79,8 +96,10 @@ export async function checkLendLoop(lendPath = LEND_PATH, journalPath?: string, 
     if (st?.blocked && on) warns.push(`不 poll：${st.blocked}`);
     for (const [peer, p] of Object.entries(st?.peers ?? {})) {
       if (p.problem) warns.push(`不向 ${peer} 借单：${p.problem}`);
-      else parts.push(`${peer} 最近 poll ${p.lastPollAt ? new Date(p.lastPollAt).toISOString().slice(11, 19) : "未到点"}${p.lastError ? `（失败：${p.lastError}）` : ""}`);
+      else parts.push(peerLine(peer, p));
+      if (p.selfCheck) warns.push(`给 ${peer} 的 hello 自检没过、没发出去：${p.selfCheck}`);
     }
+    for (const peer of pushWithoutGrant(db, read.file.lend.map((e) => e.peer), now)) warns.push(`收到 ${peer} 的推送，但 lend.json 里没有叫这个名字的授权（多半是名字对不上）`);
     if (kept.length) warns.push(`停下的单：${kept.map((k) => `${k.orderId}（${(k.reason ?? "").slice(0, 80)}）`).join("；")}`);
     const detail = [...parts, ...warns].join("；");
     return [warns.length ? { ...base, status: "warn", detail, fix: `manager lend status 看声明；停下保留现场的单在 ${join(dirname(path), "work")} 下，核对后可手动删` }

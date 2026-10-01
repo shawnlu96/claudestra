@@ -126,6 +126,7 @@ export async function cmdLend(kind: "lend" | "borrow", args: string[]): Promise<
   if (sub === "status") return status(kind);
   if (sub === "submit" && kind === "lend") return (await import("./lend-submit.js")).cmdLendSubmit(rest); // 出借 worker 交结论（不过 owner 守卫）
   if (sub === "call" && kind === "lend") return (await import("./lend-call.js")).cmdLendCall(rest); // 调度服务调 A 的出借接口
+  if (sub === "inbox" && kind === "lend") return (await import("./lend-inbox.js")).cmdLendInbox(rest); // bridge 收 A 推来的单（身份在里面核）
   const op = kind === "lend" ? ({ grant: "set", set: "set", revoke: "off", off: "off" } as const)[sub] : sub === "set" || sub === "off" ? sub : undefined;
   if (!op) return output({ ok: false, error: usage });
   const p = parseLedgerArgs(rest, op === "off" ? ["peer"] : kind === "lend" ? LEND_FLAGS : BORROW_FLAGS);
