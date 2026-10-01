@@ -19,6 +19,7 @@ import { getSchedulerSession, type SessionRole } from "./scheduler-sessions.js";
 import type { SnapshotOpts } from "./scheduler-snapshot.js";
 import { stepOfNode, workOrderFor } from "./scheduler-work-order.js";
 import { paceCards, type TickPace } from "./scheduler-yield.js";
+import { peerPrHold } from "./peer-pr-hold.js";
 import type { BorrowEntry } from "./lend-config.js";
 import type { RemotePolicy } from "./scheduler-config.js";
 import { isPoolIntent } from "./scheduler-pool-plan.js";
@@ -311,6 +312,7 @@ class Card {
       return this.drive(open, again);
     }
     if (open) return this.drive(open, null);
+    const peerHold = peerPrHold(this.db, this.task); if (peerHold) return this.out("held", peerHold); // 只拦 peer PR 卡（i28-A2）
     const plan = planScheduler(autoSnapshot(this.db, this.task, this.opts));
     if (plan.kind === "escalate") return this.escalate(`${plan.code}：${plan.reason}`);
     if (plan.kind === "wait") return this.watch(plan);

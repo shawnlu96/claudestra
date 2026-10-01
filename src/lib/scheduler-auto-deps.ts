@@ -19,6 +19,7 @@ import { boundRef, type AutoTickDeps } from "./scheduler-auto-tick.js";
 import { acpPort, messagePort, type RegistryRow, type StillActive } from "./scheduler-auto-ports.js";
 import { runtimeFamily } from "./scheduler-auto-review.js";
 import { SchedulerStopped, whileOwned } from "./scheduler-maintenance.js";
+import { peerPrHeadMissing, peerPrRepoDir } from "./peer-pr-hold.js";
 import { readEffectiveBorrow } from "./scheduler-pool-borrow.js";
 import { schedulerManagerWith } from "./scheduler-service.js";
 import { encodeLease, SCHEDULER_LEASE_ENV, type SchedulerLease } from "./scheduler-lease-env.js";
@@ -58,7 +59,7 @@ const realOr = (p: string): string => { try { return realpathSync.native(p); } c
 async function createReviewer(env: Env, task: LedgerTask, family: AuthorFamily): Promise<EnsureResult> {
   const { db, registryRow } = env;
   const author = boundRef(db, task.id, "author");
-  const authorDir = author && registryRow(author.agent)?.cwd;
+  const authorDir = peerPrRepoDir(task) ?? (author && registryRow(author.agent)?.cwd);
   if (!authorDir) return { kind: "manual", reason: "找不到执行者的工作目录，建不了审查 session" };
   const opened = await openReviewWorktree(authorDir, checkoutOf(env, task.id), task.headSHA, env.git);
   if ("manual" in opened) return { kind: "manual", reason: opened.manual };
@@ -98,6 +99,8 @@ async function pinReview(env: Env, task: LedgerTask, ref: SessionRef, head: stri
   const cwd = env.registryRow(ref.agent)?.cwd;
   if (!cwd || realOr(cwd) !== realOr(dir)) return { manual: `${ref.agent} 的工作目录 ${cwd ?? "（无）"} 不是它独立的审查 worktree ${dir}` };
   if (!head) return { manual: "派审意图没有 head" };
+  const missing = await peerPrHeadMissing(task, head, env.git);
+  if (missing) return { manual: missing };
   return pinReviewWorktree(dir, head, env.git);
 }
 
