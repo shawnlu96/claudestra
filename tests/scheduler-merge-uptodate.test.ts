@@ -167,10 +167,11 @@ describe("i28-M9 await_ci: main moving while CI ran is never merged", () => {
     expect(f.row.phase).toBe("updating");
     expect(f.calls).toEqual(["inspect", "journal:updating", "update"]);
   });
-  test("GitHub BEHIND keeps every other guard: failed CI / moved head / base / branch / fork / closed → unknown, draft waits", async () => {
+  test("GitHub BEHIND keeps every other guard: failed optional CI / moved head / base / branch / fork / closed → unknown, draft waits", async () => {
     const behind = (p: Partial<PrSnapshot>) => pr({ mergeState: "BEHIND", ...p });
-    for (const p of [{ checks: [{ name: "check", bucket: "fail" as const }] }, { head: N }, { base: "dev" }, { branch: "task/T2" },
-      { crossRepository: true }, { state: "CLOSED" as const }]) {
+    // A failed *required* check on the reviewed head is a bounce back to fix since i28-M12 (tests/scheduler-merge-conflict.test.ts).
+    for (const p of [{ checks: [{ name: "check", bucket: "pass" as const }, { name: "lint", bucket: "fail" as const }] }, { head: N }, { base: "dev" },
+      { branch: "task/T2" }, { crossRepository: true }, { state: "CLOSED" as const }]) {
       const f = fixture("await_ci", { snaps: [behind(p)] });
       await f.drive();
       expect([f.row.phase, f.calls.includes("update")]).toEqual(["unknown", false]);

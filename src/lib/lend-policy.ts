@@ -80,7 +80,7 @@ function parseCount(raw: string | undefined, label: string, min: number, max: nu
 }
 
 /**
- * review = 审查单；write = 开工 / 修复单（i28-R6）。缺省只开 review；write 在硬隔离（i28-W8）合并前一律拒（lend-grant-rules.ts WRITE_ROLE_OPEN）。
+ * review = 审查单；write = 开工 / 修复单（i28-R6）。缺省只开 review；lend-grant-rules.ts WRITE_ROLE_OPEN 关着时 write 一律拒。
  * borrow 侧不受这条限制：那是本机的单子给别人写，隔离在对方机器上。
  */
 function parseRoles(raw: string | undefined, writeOpen = true): LendRole[] | string {
@@ -88,7 +88,7 @@ function parseRoles(raw: string | undefined, writeOpen = true): LendRole[] | str
   if (roles.length === 0) return "--roles 不能为空";
   const bad = roles.find((r) => r !== "review" && r !== "write");
   if (bad) return `--roles 只认 review / write（不认识 ${bad}）`;
-  return !writeOpen && roles.includes("write") ? "write 角色在硬隔离（i28-W8）上线之前不开：出借只能授权 review" : (roles as LendRole[]);
+  return !writeOpen && roles.includes("write") ? "本机关着写代码的单（WRITE_ROLE_OPEN）：出借只能授权 review" : (roles as LendRole[]);
 }
 
 /** 一次授权的缺省（He 10-01 拍板）：只开 review、只出 codex 5 个位、每天 200 单；到期时间必填、最长 7 天 */
@@ -175,7 +175,7 @@ export interface EffectiveLend {
 
 /**
  * 实际生效的声明：文件无效 = 全关；enabled=false = 不出借；每条授权再按当下的联系人（指纹）与 grantProblem（暂停 / 到期 / write / 期限）过滤，
- * 借入按个人项目过滤。writeOpen 只给测试走 W8 之后的写单路径，生产调用一律不传（= WRITE_ROLE_OPEN）。
+ * 借入按个人项目过滤。writeOpen 只给测试切换写单开关，生产调用一律不传（= WRITE_ROLE_OPEN）。
  */
 export function effectiveLend(
   read: LendRead, contacts: readonly LendContact[], projects: readonly (ProjectDef & { personal?: boolean })[], now = Date.now(),

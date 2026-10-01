@@ -6,7 +6,7 @@
  * 协议 v2（i28-W3）：hello / beat 走同一个 `manager lend call`，单次出站 15 秒封顶（子进程超时强杀），挂死的对方拖不住这一轮；
  * 输出摘要从 worker 的 Codex 会话文件末尾读（lend-beat.ts 负责脱敏与截断）。
  * lend 档 MCP（i28-W4）：审查单的首条派单只是一句唤醒，订单由 worker 自己 take_review 领、submit_verdict 交（bridge/lend-tools.ts），
- * 不再把整份订单塞进会话；lend-drive 照旧在发之前同步重读授权，这里在发送接线上把正文换成唤醒行。写单不变（W8 之前也不开）。
+ * 不再把整份订单塞进会话；lend-drive 照旧在发之前同步重读授权，这里在发送接线上把正文换成唤醒行。写单不变：整份派单进会话，交付走 lend submit。
  */
 import type { Database } from "bun:sqlite";
 import { existsSync } from "node:fs";
@@ -133,7 +133,7 @@ async function verifyReceipt(peer: string, r: { orderId: string; sha256: string;
   return verifyPurpose(rec.publicKey, "claudestra-lend-receipt-v1", [r.orderId, r.sha256, String(r.eventSeq), r.taskId], r.sig);
 }
 
-/** 生产依赖。不设 writeOpen：写单在 W8 之前只认 lend-grant-rules.ts WRITE_ROLE_OPEN（tests/lend-grant.test.ts 钉住） */
+/** 生产依赖。不设 writeOpen：写单开关只认 lend-grant-rules.ts WRITE_ROLE_OPEN（tests/lend-grant.test.ts 钉住） */
 export function lendDeps(journal: Database, ledger: LedgerReader, active: () => void, lease: SchedulerLease | undefined): LoopDeps {
   const alive = (): boolean => {
     try { active(); return true; } catch { return false; /* 核不过 = 不能证明仍在持有：什么都不发 */ }

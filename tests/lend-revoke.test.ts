@@ -25,7 +25,7 @@ describe("P1-1 没有有效授权：一单都不 claim、不起 worker", () => {
     ["v1 迁移来的暂停条目", (h) => { h.lend.lend = [{ ...ENTRY, paused: { reason: "旧条目" } }]; }],
     ["期限超过 7 天（手改）", (h) => { h.lend.lend = [{ ...ENTRY, until: new Date(Date.parse(ENTRY.grantedAt!) + 8 * 86_400_000).toISOString() }]; }],
     ["没写到期时间（手改）", (h) => { const { until: _u, ...e } = ENTRY; h.lend.lend = [e]; }],
-    ["含 write 角色（W8 之前）", (h) => { h.lend.lend = [{ ...ENTRY, roles: ["review", "write"] }]; }],
+    ["写单开关关着时含 write 角色", (h) => { h.lend.lend = [{ ...ENTRY, roles: ["review", "write"] }]; h.d.writeOpen = false; }],
   ];
   for (const [name, setup] of cases) {
     test(name, async () => {

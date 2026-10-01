@@ -58,7 +58,7 @@ export interface LendDeps {
   notify(p: LendNoticeParams): Promise<{ ok: true } | { ok: false; error: string }>;
   /** 关一张升级前的逐单确认 ask（`ledger lend-ask --retire`） */
   retireAsk(askId: string): Promise<{ ok: true } | { ok: false; error: string }>;
-  /** 只给测试走 W8 之后的写单路径；生产不设 = lend-grant-rules.ts WRITE_ROLE_OPEN */
+  /** 只给测试切换写单开关；生产不设 = lend-grant-rules.ts WRITE_ROLE_OPEN */
   writeOpen?: boolean;
   clone(input: { orderId: string; repo: string; pr: number | null; head: string; write?: CloneWrite }): Promise<CloneResult>;
   /** 本机实例公钥的指纹：写单的订单分支按它核；读不到钥匙 = null（不领写单） */

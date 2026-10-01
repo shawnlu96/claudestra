@@ -4,7 +4,7 @@
  * 1. T85 已验证、没被代理降级（requireVerified）；工具在 lend 档白名单里；
  * 2. 一单一绑定：按身份里的 agent 名查 journal 里活着的单（agent = 该名），恰好一行；会话也得是这一行记的会话；
  * 3. 参数带了 orderId 而且对不上 → 拒；单子没起 worker / 已结束 → 拒；
- * 4. 工具对步骤：审查单只有 take_review / submit_verdict，开工 / 修复单只有 take_order / deliver（W8 硬隔离之前一律明确拒），ask 都可以。
+ * 4. 工具对步骤：审查单只有 take_review / submit_verdict，开工 / 修复单只有 take_order / deliver（一律明确拒：写单的派单全文已在会话里、交付走 lend submit），ask 都可以。
  * 原生频道帧（reply / project_info / route_to_agent …）不走 order-tools：bridge.ts 入口先过 lendFrameGate。
  * 转发给 A 的 peer / orderId / gen 只取自这一行（结论正文由 lend-submit.ts 按这一行拼），请求参数里的一概不用；出站只走 E2E（注入的 call）。
  * tests/lend-tools.test.ts（含拿代理 token 直连的反例）。
@@ -85,7 +85,7 @@ export function lendFrameGate(msg: Record<string, unknown>, identityOf: () => Pi
 
 const REVIEW_TOOLS = ["take_review", "submit_verdict", "ask"];
 const WRITE_TOOLS = ["take_order", "deliver", "ask"];
-const WRITE_CLOSED = "出借 worker 在硬隔离（i28-W8）上线之前不接写代码的单：take_order / deliver 一律不开，这张单不会有交付";
+const WRITE_CLOSED = "写代码的单不用 take_order / deliver：派单全文已在会话里，提交后按派单末尾的 lend submit 命令交付";
 
 type Bound = { ok: true; row: LendRow; write: boolean } | { ok: false; result: OrderToolResult };
 

@@ -74,3 +74,51 @@ export function addableContacts(v: Pick<BorrowView, "borrow">): string[] {
 /** 新加一条能不能提交：选了至少一个项目、maxOpen 在范围内 */
 export const canSubmitNew = (projects: readonly string[], maxOpen: number, limit: number): boolean =>
   projects.length > 0 && Number.isInteger(maxOpen) && maxOpen >= 1 && maxOpen <= limit;
+
+/** 输入框里的上限：全角数字也认；空 / 非整数 → null（退回原值、不存）；越界夹到 1..limit 并标 clamped（界面抖一下） */
+export function parseMaxOpen(raw: string, limit: number): { value: number; clamped: boolean } | null {
+  const s = raw.trim().replace(/[０-９]/g, (c) => String.fromCharCode(c.charCodeAt(0) - 0xfee0));
+  if (!/^\d+$/.test(s)) return null;
+  const n = Number(s);
+  const value = clampMaxOpen(n, limit);
+  return { value, clamped: value !== n };
+}
+
+/** 对方能同时接的总单数：各家族上报的 total 相加（我方上限管派给这个 peer 的总单数，不分家族）；没上报 → null */
+export function grantedSlots(p: Pick<PeerView, "reported">): number | null {
+  const r = p.reported;
+  return r ? Object.values(r).reduce((sum, s) => sum + s.total, 0) : null;
+}
+
+/** 「对方只开了 M 个」：对方名额小于我方上限才给 M；不小于或没上报 → null（不显示） */
+export function lenderCap(p: Pick<PeerView, "reported">, maxOpen: number): number | null {
+  const m = grantedSlots(p);
+  return m !== null && m < maxOpen ? m : null;
+}
+
+/**
+ * 一张卡同时只做一件写（存 / 删）：在途时再来的直接忽略（返回 false），不排队、不合并，返回后由调用方用服务端的值刷新。
+ * 按钮在 busy 时已禁用，这里再挡一次同一帧里的连击。tests/web-borrow-machine.test.ts
+ */
+export function oneAtATime(onBusy: (busy: boolean) => void): (job: () => Promise<void>) => Promise<boolean> {
+  let busy = false;
+  return async (job) => {
+    if (busy) return false;
+    busy = true;
+    onBusy(true);
+    try {
+      await job();
+    } finally {
+      busy = false;
+      onBusy(false);
+    }
+    return true;
+  };
+}
+
+/** 把带 {box} 的整句拆成框前、框后两段：数字框嵌在句中，语序随语言变（英文的框在句中间） */
+export const BOX = "\u0000";
+export function splitAtBox(text: string): [string, string] {
+  const i = text.indexOf(BOX);
+  return i < 0 ? [text, ""] : [text.slice(0, i).trimEnd(), text.slice(i + 1).trimStart()];
+}

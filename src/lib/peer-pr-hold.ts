@@ -8,6 +8,8 @@ import type { Database } from "bun:sqlite";
 import type { LedgerTask } from "./ledger-stages.js";
 import { hasRoundVerdict, peerPrOf } from "./peer-pr-ledger.js";
 import { readSchedulerConfig } from "./scheduler-config.js";
+import { fixBounce } from "./scheduler-merge-conflict.js";
+import { listEvents } from "./ledger-store.js";
 import type { Git } from "./scheduler-review-worktree.js";
 
 const checked = new WeakMap<Database, Map<string, { seq: number; head: string }>>();
@@ -27,7 +29,11 @@ export function headChecked(db: Database, task: LedgerTask, verdictSeq: number):
 /** Why the planner must not run for this card this pass; null = plan as usual (every non-peer card). */
 export function peerPrHold(db: Database, task: LedgerTask): string | null {
   if (!peerPrOf(task)) return null;
-  if (task.stage === "fix") return "peer PR 卡在 fix：等对方往 PR 推新 head（peer tick 处理，不派作者）";
+  if (task.stage === "fix") {
+    const bounce = fixBounce(listEvents(db, { project: task.project, target: task.id }), task.stage);
+    return bounce ? `peer PR 卡因合并${bounce.cause === "conflict" ? "冲突" : "前 CI 失败"}退回 fix：等对方往 PR 推新 head（不派本机作者）`
+      : "peer PR 卡在 fix：等对方往 PR 推新 head（peer tick 处理，不派作者）";
+  }
   if (task.stage !== "review") return null;
   const verdict = hasRoundVerdict(db, task);
   if (!verdict || headChecked(db, task, verdict.seq)) return null;

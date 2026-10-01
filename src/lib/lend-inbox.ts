@@ -1,6 +1,6 @@
 /**
  * 出借方 B 唯一的收单闸（docs/design/remote-capacity.md §2.3 第 1 步）：A 推来的单（manager lend inbox）和兜底轮询拿到的单（lend-loop.ts）都过这里，
- * 各核对项只写这一份。逐单核：生效授权（含暂停、过期、指纹变了、文件无效）、家族（claude 一律拒，等 clean 启动 + strict MCP）、角色（W8 前写单一律拒）、
+ * 各核对项只写这一份。逐单核：生效授权（含暂停、过期、指纹变了、文件无效）、家族（claude 一律拒，等 clean 启动 + strict MCP）、角色（写单开关关着时一律拒）、
  * 仓库白名单、今日剩余单数、空位（已接下没领的 asked 也占位）、本机 Codex 撞额度暂停。
  * 读完 lend.json（liveGrant 最后读它）之后不再 await：计数和插入在同一个 BEGIN IMMEDIATE 事务里，推送和轮询并发也不会超额，
  * lend.json 收回写盘之后才开始的请求一定看得到收回。收下只记 asked，claim 在调度服务下一个 pass 做（lend-loop.ts driveAsked）。
