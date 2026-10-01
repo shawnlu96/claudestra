@@ -7,7 +7,7 @@ import { beforeEach, describe, expect, mock, test } from "bun:test";
 
 type A = Record<string, unknown>;
 interface AsksStore {
-  get(): { asks: A[]; loaded: boolean; full?: boolean; notes: Record<string, { ok: boolean; text: string } | undefined> };
+  get(): { asks: A[]; loaded: boolean; full?: boolean; banner: A | null; notes: Record<string, { ok: boolean; text: string } | undefined> };
   refresh(): Promise<void>;
   start(key: string): () => void;
   answer(id: string, shown: unknown, submit: () => Promise<unknown>, words: { ok: string; fail: (e: unknown) => string }): Promise<boolean>;
@@ -51,6 +51,24 @@ beforeEach(async () => {
   queue.length = 0;
   serverList = [ask({ id: "ask_1" }), ask({ id: "ask_2" })];
   await asksStore.refresh();
+});
+
+test("PM 提问（包括急件）不进收件箱 / 角标 / 横幅，owner 新件正常弹；改派 PM 清掉旧横幅", async () => {
+  const pm = ask({ id: "pm", fromAgent: "agent-lend-x@Sekai", assignee: "agent-claudestra", blocking: true, urgency: "urgent", canAnswer: true });
+  serverList = [pm];
+  await asksStore.refresh();
+  expect(asksStore.get().asks).toEqual([]);
+  expect(askCounts(asksStore.get().asks as never)).toEqual({ waiting: 0, accept: 0 });
+  expect(asksStore.get().banner).toBeNull();
+  const owner = ask({ id: "owner-new", assignee: "local:owner:self" });
+  serverList = [pm, owner];
+  await asksStore.refresh();
+  expect(asksStore.get().asks).toEqual([owner]);
+  expect(asksStore.get().banner?.id).toBe(owner.id);
+  serverList = [pm, { ...owner, assignee: "agent-claudestra" }];
+  await asksStore.refresh();
+  expect(asksStore.get().asks).toEqual([]);
+  expect(asksStore.get().banner).toBeNull();
 });
 
 test("成功但服务端一直 open：从请求回来算 20 秒，到点自己撤（不等下一次拉取）", async () => {

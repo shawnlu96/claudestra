@@ -4,22 +4,26 @@
  * 记了的话这条引用条到关页面前一直没标题、点不了（tests/web-ask-by-id.test.ts）。
  */
 import { ApiError } from "@/lib/api/client";
+import { machines } from "@/lib/machines";
 import type { WebAsk } from "./asks-model";
+import { isAskForViewer } from "./ask-viewer";
 
 export function askByIdCache(fetchOne: (id: string) => Promise<{ ask: WebAsk }>): (id: string) => Promise<WebAsk | null> {
   const fetched = new Map<string, Promise<WebAsk | null>>();
   return (id) => {
-    let p = fetched.get(id);
+    const machine = machines.current();
+    const key = `${machine?.fp ?? "local"}:${machine?.principalId ?? "owner:self"}:${id}`;
+    let p = fetched.get(key);
     if (!p) {
       p = fetchOne(id).then(
         (r) => r.ask,
         (e) => {
-          if (!(e instanceof ApiError && e.status === 404)) fetched.delete(id); // 下次挂载再取
+          if (!(e instanceof ApiError && e.status === 404)) fetched.delete(key); // 下次挂载再取
           return null;
         },
       );
-      fetched.set(id, p);
+      fetched.set(key, p);
     }
-    return p;
+    return p.then((ask) => ask && isAskForViewer(ask) ? ask : null);
   };
 }

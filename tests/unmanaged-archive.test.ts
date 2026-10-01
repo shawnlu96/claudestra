@@ -151,6 +151,18 @@ describe("归档目录名来自文件内容，不能写出归档区", () => {
   });
 });
 
+describe("副本 mtime = 归档时刻（保留期从这一刻算）", () => {
+  test("大文件（Bun 在 macOS 上 copyFile 走 clonefile、会带上原 mtime）：副本 mtime 也是现在", async () => {
+    const w = world();
+    const src = w.sub(2, 1, 60);
+    writeFileSync(src, Buffer.alloc(3 * 1024 * 1024, 97)); // 小文件 copyFile 本来就换 mtime，测不出来
+    const old = (Date.now() - 60 * DAY) / 1000;
+    utimesSync(src, old, old);
+    const dest = await archiveUnmanagedFile(src, { sessionId: id(2), runtime: "codex" }, w.opts.archiveRoot);
+    expect(Date.now() - statSync(join(dest, src.split("/").pop()!)).mtimeMs).toBeLessThan(60_000);
+  });
+});
+
 describe("开关：config.json autoArchiveCodexSubs，缺省关", () => {
   test("没开（缺省）：不扫描；开了：按 registry 全部 agent 的会话建 keep 去扫", async () => {
     const calls: Array<ReadonlySet<string>> = [];
