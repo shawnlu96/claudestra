@@ -1,6 +1,7 @@
 /**
- * 收件箱（台账 i15，codex 复核意见「可见、可拉取的未读收件箱」）：agent 调 check_inbox，把排队给它的 agent 消息
- * （它在回合中时别的 agent 发来、押在 bridge/held-queue.ts 里等 Stop 的那些）现在就领回来，作为工具结果交给它——
+ * 收件箱（台账 i15，codex 复核意见「可见、可拉取的未读收件箱」）：agent 调 check_inbox，把排队给它的消息
+ * （它在回合中时押在 bridge/held-queue.ts 里等 Stop 的 agent 消息、owner 消息、卡片答复、peer 消息；bridge 通知和 guest 的不领，
+ * 见 inboxTakeable）现在就领回来，作为工具结果交给它，owner 和卡片答复排在批首——
  * 走的是工具结果这条通道，不是回合开头会被静默丢掉的 channel 通知；工具结果本身也可能丢（断线 / 回合取消），所以要租约。
  *
  * 领取 = 租约，不是出队：工具结果丢了、客户端断线、回合被取消都不该丢整批（codex 2026-09-28 复核）。agent 处理完用
@@ -10,7 +11,7 @@
 import { randomUUID } from "node:crypto";
 import type { ServerWebSocket } from "bun";
 import type { AgentCallBook } from "./agent-calls.js";
-import { INBOX_LEASE_MS, leaseActive, type HeldItem, type HeldQueue } from "./held-queue.js";
+import { heldKindOf, INBOX_LEASE_MS, inboxTakeable, leaseActive, notifyHeldSettled, type HeldItem, type HeldQueue } from "./held-queue.js";
 import type { Envelope } from "./router.js";
 
 export interface InboxDeps {
@@ -30,14 +31,21 @@ export function initInbox(d: InboxDeps): void {
 /** 一批最多这么多条、这么多字（工具结果太长模型读不全）；单条超过字数上限的不放进批里，回合结束时完整送达 */
 const MAX_TAKE = 10;
 const MAX_CHARS = 16_000;
-const isAgentMsg = (i: HeldItem) => i.env.from.kind === "local";
+/** owner 本人和卡片答复排在批首，其余按到达顺序 */
+const ownerFirst = (q: HeldItem[]): HeldItem[] => {
+  const front = (i: HeldItem) => ["ask", "owner"].includes(heldKindOf(i.env));
+  return [...q.filter(front), ...q.filter((i) => !front(i))];
+};
 
 type Result = { result: { n: number; text: string } } | { error: string };
 
-/** 确认一批：这批的条目出队落盘（只认本频道、租约里记的 batchId） */
+/** 确认一批：这批的条目出队落盘（只认本频道、租约里记的 batchId），和押后投递一样报送达（网页「丢进工作台」据此标已送达） */
 function ackBatch(d: InboxDeps, channelId: string, batchId: string): number {
   const mine = (d.held.get(channelId) ?? []).filter((i) => i.lease?.batchId === batchId);
-  for (const it of mine) d.held.remove(channelId, it);
+  for (const it of mine) {
+    d.held.remove(channelId, it);
+    notifyHeldSettled(it.env, "delivered");
+  }
   return mine.length;
 }
 
@@ -55,14 +63,23 @@ async function fitEntry(d: InboxDeps, it: HeldItem, now: number): Promise<{ text
 }
 
 async function entryText(d: InboxDeps, it: HeldItem, now: number): Promise<string> {
-  const from = it.env.from.kind === "local" ? it.env.from.agentName || it.env.from.channelId : "?";
+  const from = senderLabel(it.env);
   const mins = Math.max(0, Math.round((now - it.heldAt) / 60_000));
   return `── 来自 ${from} · message_id=${it.env.meta.messageId} · 排队 ${mins} 分钟 ──\n${await d.render(it.env)}`;
 }
 
+function senderLabel(env: Envelope): string {
+  const f = env.from;
+  if (f.kind === "local") return f.agentName || f.channelId;
+  const kind = heldKindOf(env);
+  if (kind === "ask") return "owner 的卡片答复";
+  if (kind === "owner") return "owner";
+  return f.kind === "api" ? `peer ${f.peer}` : "?";
+}
+
 function batchText(batchId: string, texts: string[], note: string, left: number): string {
   const head = `[📬 收件箱 ${batchId}：${texts.length} 条${left > 0 ? `，还有 ${left} 条` : ""}。${note}`
-    + `处理完调 check_inbox({ ack: "${batchId}" }) 确认（会顺带领下一批）；${INBOX_LEASE_MS / 60_000} 分钟内不确认，这批会在你回合结束时按普通消息重新送达（message_id 不变）。答复别的 agent 用 send_to_agent。]`;
+    + `处理完调 check_inbox({ ack: "${batchId}" }) 确认（会顺带领下一批）；${INBOX_LEASE_MS / 60_000} 分钟内不确认，这批会在你回合结束时按普通消息重新送达（message_id 不变）。答复别的 agent 用 send_to_agent，答复 owner / peer 照抬头里的 chat_id 用 reply。]`;
   return [head, ...texts.map((t, k) => t.replace("── 来自", `── ${k + 1}/${texts.length} · 来自`))].join("\n\n");
 }
 
@@ -70,7 +87,7 @@ const PAGE_CHARS = 12_000;
 
 /** 分页读一条（太长进不了批的）：第一次读就给它单独打租约，读完照样 ack 确认，全文不会在回合结束时再投一遍 */
 async function readPaged(d: InboxDeps, channelId: string, readId: string, page: number, now: number): Promise<Result> {
-  const q = (d.held.get(channelId) ?? []).filter(isAgentMsg);
+  const q = (d.held.get(channelId) ?? []).filter(inboxTakeable);
   // 也认 thread_id：旧版的分页读入口给的是 thread_id，agent 手里可能还拿着
   const it = q.find((i) => i.env.meta.messageId === readId) ?? q.find((i) => i.env.meta.threadId === readId);
   if (!it) return { result: { n: 0, text: `收件箱里没有 ${readId}（已确认过，或已按普通消息送达）。` } };
@@ -117,14 +134,14 @@ export async function takeInbox(ws: ServerWebSocket<unknown>, now = Date.now(), 
     const ackNote = ack ? (acked ? `已确认 ${ack}（${acked} 条出队）。` : `${ack} 没有待确认的条目（已确认过，或租约过期后已按普通消息送达）。`) : "";
     const q = d.held.get(channelId) ?? [];
     // 没带 ack、手上还有没确认的一批（工具结果丢了 / 回合被取消 / 忘了 ack）：原样重给这批，不续租、不领新的
-    const open = ack ? [] : q.filter((i) => isAgentMsg(i) && leaseActive(i, now));
+    const open = ack ? [] : q.filter((i) => inboxTakeable(i) && leaseActive(i, now));
     if (open.length) {
       const batchId = open[0].lease!.batchId;
       const mine = open.filter((i) => i.lease!.batchId === batchId);
       const texts = (await Promise.all(mine.map((it) => fitEntry(d, it, now)))).map((e) => e.text); // 超长的仍只给开头，不绕过预算
       return { result: { n: mine.length, text: batchText(batchId, texts, "这是你领过还没确认的一批，原样重给。", 0) } };
     }
-    const free = q.filter((i) => isAgentMsg(i) && !leaseActive(i, now));
+    const free = ownerFirst(q.filter((i) => inboxTakeable(i) && !leaseActive(i, now)));
     const picked: { it: HeldItem; text: string }[] = [];
     const previews: string[] = [];
     let chars = 0;

@@ -1,6 +1,6 @@
 /**
  * bridge/inbox.ts：agent 调 check_inbox 领取排队给它的 agent 消息——领取是租约不是出队（ack 才出队、过期可重领）、
- * 和 Stop 投递共用频道锁、一批最多 10 条 / 16000 字、人类消息不碰、认不出调用方就报错。
+ * 和 Stop 投递共用频道锁、一批最多 10 条 / 16000 字、认不出调用方就报错。owner / 卡片答复 / peer 也领（i28-M11，见 inbox-all-kinds.test.ts）。
  */
 import { describe, expect, test } from "bun:test";
 import { AgentCallBook } from "../src/bridge/agent-calls.js";
@@ -36,18 +36,19 @@ function setup(items: HeldItem[]) {
 }
 
 describe("takeInbox", () => {
-  test("领取：带批次号 / 来源 / message_id，不出队只落租约，网页镜像，回程钟重起；人类消息不碰", async () => {
+  test("领取：带批次号 / 来源 / message_id，不出队只落租约，网页镜像，回程钟重起；owner 的人类消息也领、排批首", async () => {
     const { held, calls, mirrored } = setup([item("复核意见 1", "local", 0), item("人类补充", "user"), item("复核意见 2", "local", 0)]);
     const r = await takeInbox(me, 5 * 60_000);
     if ("error" in r) throw new Error(r.error);
-    expect(r.result.n).toBe(2);
-    expect(r.result.text).toMatch(/收件箱 inbox_[\w-]+：2 条/);
-    expect(r.result.text).toContain("1/2 · 来自 agent-codex · message_id=m-复核意见 1 · 排队 5 分钟");
+    expect(r.result.n).toBe(3);
+    expect(r.result.text).toMatch(/收件箱 inbox_[\w-]+：3 条/);
+    expect(r.result.text).toContain("1/3 · 来自 owner · message_id=m-人类补充");
+    expect(r.result.text).toContain("2/3 · 来自 agent-codex · message_id=m-复核意见 1 · 排队 5 分钟");
     expect(r.result.text).toMatch(/ack: "inbox_[\w-]+"/);
     const q = held.get("c-me")!;
     expect(q.map((i) => i.env.content)).toEqual(["复核意见 1", "人类补充", "复核意见 2"]); // 还在队里
-    expect(q.filter((i) => leaseActive(i, 5 * 60_000)).length).toBe(2);
-    expect(mirrored).toEqual(["复核意见 1", "复核意见 2"]);
+    expect(q.filter((i) => leaseActive(i, 5 * 60_000)).length).toBe(3);
+    expect(mirrored).toEqual(["人类补充", "复核意见 1", "复核意见 2"]);
     expect(calls.slot("c-me", "c-codex")!.requests![0]!.deliveredAt).toBeGreaterThan(1); // 失效钟记在这条请求上
   });
 

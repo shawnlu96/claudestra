@@ -3,13 +3,14 @@
  * 把「投到一半目标又忙」「await 期间条目被别处摘掉」这些交错场景跑一遍（codex 2026-09-28 复核要求的集成测试）。
  * 规则：压缩中不投；目标在回合中只投人类消息（它们只因「别掐压缩」被押）；check_inbox 租约内的不投；
  * 投出去之后才出队；目标又忙就停，原条目留着、计时不变；每个频道同一时刻只有一个投递者（held.claim）。
+ * owner 本人消息和卡片答复押满 OWNER_HELD_MAX_MS 的例外见 ownerLate。
  */
 import { isOwnerSource } from "../lib/delegate-marker.js";
 import { gatesAsHuman } from "../lib/quota-wall.js";
 import { tmuxCapture } from "../lib/tmux-helper.js";
 import { inputBox } from "../lib/turn-state.js";
 import { heldAcrossStopNote } from "../lib/turn-cuts.js";
-import { leaseActive, notifyHeldSettled, type HeldItem, type HeldQueue } from "./held-queue.js";
+import { heldKindOf, leaseActive, notifyHeldSettled, type HeldItem, type HeldQueue } from "./held-queue.js";
 import type { Delivery, Envelope, LocalEndpoint } from "./router.js";
 import { resolveTurnWindow } from "./turn-probe.js";
 import { senderTrigger, turnStartedAt } from "./stop-settle.js";
@@ -34,6 +35,23 @@ export interface FlushDeps {
   settled?: (channelId: string) => Promise<boolean>;
   /** 这个频道当前这一轮的开启时刻（stop-settle 的 turnTrigger；Stop / 打断就没了）；不给 = turnStartedAt */
   turnAt?: (channelId: string) => number | undefined;
+  /** 算 owner 答复押了多久的钟；不给 = Date.now（租约照旧按真钟） */
+  now?: () => number;
+}
+
+/**
+ * owner 本人消息和卡片答复押满这么久，下一次扫描直接投：不再等画面静止、不看这一轮是谁开的、排在外人前面——
+ * 一直有后台任务 / Monitor 在出字的会话（PM）等不到 Stop、画面也静不下来，答复会押上几个小时。压缩中、check_inbox 租约内仍不投
+ */
+export const OWNER_HELD_MAX_MS = 2 * 60_000;
+/**
+ * 押满时限的 owner 答复。owner 带 waitForIdle 的别的消息（fleet 群发）不算：它承诺过不抢占也不插进回合，清掉标记就成了抢占的 request。
+ * 卡片答复是 response，清掉 waitForIdle 也不会抢占（router.ts isHumanRequest），flushHeld 投之前清掉，否则 deliverToLocal 又把它押回来
+ */
+export function ownerLate(i: HeldItem, now: number): boolean {
+  const k = heldKindOf(i.env);
+  const owns = k === "ask" ? i.env.intent !== "request" : k === "owner" && !i.env.meta.waitForIdle;
+  return owns && now - i.heldAt >= OWNER_HELD_MAX_MS;
 }
 
 const SETTLE_GAP_MS = 1_500;
@@ -87,10 +105,10 @@ const outsider = (env: Envelope): boolean => senderTrigger(env.from) !== "inside
  * （它不算「人类消息」，但撞墙期间押得最多）。在跑的一轮不是补投开的（CC 到点自己续跑、别处送进来的）：外人的不塞进去，owner 的
  * 照常抢占。只有本机 agent / bridge 消息的一趟照旧一起投
  */
-async function mayJoin(d: FlushDeps, item: HeldItem, channelId: string, working: boolean, first: HeldItem | undefined): Promise<boolean> {
+async function mayJoin(d: FlushDeps, item: HeldItem, channelId: string, working: boolean, first: HeldItem | undefined, late: boolean): Promise<boolean> {
   const who = senderOf(item.env);
   if (first && (outsider(item.env) || outsider(first.env)) && senderOf(first.env) !== who) return false;
-  if (!outsider(item.env)) return true;
+  if (!outsider(item.env) || late) return true;
   const rec = openedBy.get(channelId);
   const opener = rec && rec.at === (d.turnAt ?? turnStartedAt)(channelId) ? rec.who : undefined;
   if (working) return opener ? opener === who : isOwnerSource(item.env.from);
@@ -129,14 +147,18 @@ export async function flushHeld(d: FlushDeps, channelId: string, reason: string)
     // agent→agent 仍等空闲(回合中通知有丢弃窗口)。快照:遍历中别处可能往这个频道 hold 新消息,只投这一刻到期的。
     // 闸内另看能不能穿闸(gatesAsHuman),和忙时能不能投(isHumanRequest)是两回事:ask 答复带 waitForIdle,闸内目标空闲照投、忙时照旧等,
     // 拿 isHumanRequest 判闸的话它会被改记成额度闸、等到出闸(tests/held-flush.test.ts T64)
-    const due = q.filter((i) => (!walled || gatesAsHuman(i.env)) && (working ? d.isHumanRequest(i.env) : !leaseActive(i)));
-    for (const item of due) {
+    // check_inbox 现在也领人类消息：租约内的一律不投（忙时也一样）。押满时限的 owner 答复忙时也投、排最前，不被前面等画面静止的外人挡住
+    const now = (d.now ?? Date.now)();
+    const late = new Set(q.filter((i) => ownerLate(i, now)));
+    const due = q.filter((i) => !leaseActive(i) && (!walled || gatesAsHuman(i.env)) && (!working || d.isHumanRequest(i.env) || late.has(i)));
+    for (const item of [...due.filter((i) => late.has(i)), ...due.filter((i) => !late.has(i))]) {
       // ws 可能已换代(channel-server 重连 / bridge 重启后从盘上恢复的没有 ws):按 channelId 取最新连接;不在线就留着
       const fresh = d.client(channelId);
       if (!fresh) break;
       // claim 只挡别的 flush / check_inbox:await 期间 ageHeld 放弃、kill 清理都可能已把它摘掉,摘掉的就别再投
       if (!d.held.get(channelId)?.includes(item)) continue;
-      if (!(await mayJoin(d, item, channelId, working, first))) break;
+      if (!(await mayJoin(d, item, channelId, working, first, late.has(item)))) break;
+      if (late.has(item) && item.env.meta.waitForIdle) delete item.env.meta.waitForIdle; // 只有卡片答复走到这里（见 ownerLate）
       const to: LocalEndpoint = { ...item.to, ws: fresh.ws, cwd: fresh.cwd };
       markIfHeldAcrossStop(item, d.stoppedAt?.(channelId));
       const r = await d.deliver(item.env, to, () => !!d.held.get(channelId)?.includes(item));

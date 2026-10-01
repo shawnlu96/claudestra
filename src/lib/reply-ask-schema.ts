@@ -38,8 +38,25 @@ export function askIdOfReplyResult(b: { content?: unknown }): string | null {
   return /^Sent message\(s\): .* · ask (ask_[a-z0-9]{1,40})\b/.exec(text)?.[1] ?? null;
 }
 
-/** reply 结果里给 agent 的那句：带 askId（授权类另带 askHash），不带就是普通回复 */
-export function replyResultText(r: { messageIds?: unknown; askId?: unknown; askHash?: unknown }): string {
+/** reply 结果里给 agent 的那句：带 askId（授权类另带 askHash），不带就是普通回复；本频道还押着消息就在末尾提醒去领 */
+export function replyResultText(r: { messageIds?: unknown; askId?: unknown; askHash?: unknown; held?: unknown }): string {
   const ask = typeof r.askId === "string" ? ` · ask ${r.askId}${typeof r.askHash === "string" ? ` · askHash ${r.askHash}` : ""}` : "";
-  return `Sent message(s): ${JSON.stringify(r.messageIds)}${ask}`;
+  return `Sent message(s): ${JSON.stringify(r.messageIds)}${ask}${heldHint(r.held)}`;
+}
+
+const HELD_LABELS = [["owner", "owner"], ["ask", "卡片答复"], ["peer", "peer"], ["agent", "agent"]] as const;
+/**
+ * bridge 带回的押后计数（bridge/held-queue.ts heldTally）→ 「 · 押后 N 条（owner 1、卡片答复 1），调 check_inbox 领」。
+ * 只报计数和类别、不带正文；没有 / 认不出 / 全是 0 返回空串，reply 结果逐字照旧（askIdOfReplyResult 认的就是那个格式）
+ */
+export function heldHint(held: unknown): string {
+  if (!held || typeof held !== "object") return "";
+  const t = held as Record<string, unknown>;
+  const parts = HELD_LABELS.flatMap(([k, label]) => {
+    const n = t[k];
+    return typeof n === "number" && Number.isInteger(n) && n > 0 ? [[label, n] as const] : [];
+  });
+  if (!parts.length) return "";
+  const total = parts.reduce((s, [, n]) => s + n, 0);
+  return ` · 押后 ${total} 条（${parts.map(([l, n]) => `${l} ${n}`).join("、")}），调 check_inbox 领`;
 }
