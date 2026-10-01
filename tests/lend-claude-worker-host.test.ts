@@ -8,6 +8,25 @@ import { advance, openLendJournal, patchOrder, recordAsked } from "../src/lib/le
 import { BUN_NO_AUTOLOAD, pickWorkerEnv } from "../src/lib/runtimes/clean-env.js";
 import { pidAlive } from "../src/lib/tmux-helper.js";
 import { testChildEnv } from "./test-env.js";
+import { runClaudeWorkerHost } from "../src/lib/lend-claude-worker-host.js";
+
+test("宿主失败保留脱敏原因；只有清理成功才报告已清理", async () => {
+  const plan = {} as ReturnType<typeof claudeWorkerPlan>;
+  for (const cleanupFails of [false, true]) {
+    const logs: string[] = [];
+    const code = await runClaudeWorkerHost(plan, { reason: () => null, log: (s) => logs.push(s),
+      receive: async () => "test-only-secret",
+      spawn: () => { throw new Error("CLI ENOENT test-only-secret sk-ant-secret12345"); }, stop: async () => {},
+      cleanup: () => { if (cleanupFails) throw new Error("cleanup EACCES"); },
+    });
+    expect(code).toBe(1);
+    expect(logs.join("\n")).toContain(cleanupFails ? "cleanup EACCES" : "CLI ENOENT");
+    expect(logs.join("\n")).toContain(cleanupFails ? "清理未确认" : "配置目录已清理");
+    expect(logs.join("\n")).not.toContain("test-only-secret");
+    expect(logs.join("\n")).not.toContain("sk-ant-secret12345");
+    if (cleanupFails) expect(logs.join("\n")).not.toContain("配置目录已清理");
+  }
+});
 
 test("真实宿主只给 Claude 子进程 token；停止后进程和隔离目录均消失", async () => {
   const root = realpathSync(mkdtempSync(join(tmpdir(), "cc-host-")));

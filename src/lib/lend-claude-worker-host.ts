@@ -8,6 +8,7 @@ import { type ClaudeWorkerPlan } from "./lend-claude-worker.js";
 import { CLAUDE_LEND_TOKEN } from "./lend-claude-worker-capacity.js";
 import { lendWatchdog, WATCHDOG_EVERY_MS } from "./lend-watchdog.js";
 import { childPidsInPsOutput, killPidsEscalating } from "./tmux-helper.js";
+import { redactSecrets } from "./usage-classify.js";
 
 interface Child { pid: number; exited: Promise<number> }
 interface HostIo {
@@ -66,6 +67,23 @@ async function stopTree(child: Child): Promise<void> {
   if (left.length) throw new Error("Claude worker 子进程未确认退出");
 }
 
+/** 顶层失败转换为退出码，宿主不重试；记录脱敏原因供 owner 排查，清理成功才给成功提示。 */
+export async function runClaudeWorkerHost(plan: ClaudeWorkerPlan, io: HostIo): Promise<number> {
+  let token = "", cleaned = false;
+  try {
+    return await runClaudeWorker(plan, { ...io,
+      receive: async (path) => { token = await io.receive(path); return token; },
+      cleanup: async () => { await io.cleanup(); cleaned = true; },
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    const safe = redactSecrets(token ? message.split(token).join("[redacted]") : message);
+    // 子进程宿主以非零退出码报告失败，继续抛出只会重复日志；调用方按退出码处理。
+    io.log(`Claude 出借启动或停止失败：${safe}；${cleaned ? "配置目录已清理" : "配置目录清理未确认，请检查隔离目录"}`);
+    return 1;
+  }
+}
+
 if (import.meta.main) {
   const file = process.argv[2];
   const plan = JSON.parse(readFileSync(file, "utf8")) as ClaudeWorkerPlan;
@@ -74,14 +92,9 @@ if (import.meta.main) {
   unlinkSync(file);
   const log = (text: string) => console.error(`[lend] ${text}`);
   const reason = lendWatchdog(plan.agent, log);
-  try {
-    process.exitCode = await runClaudeWorker(plan, { reason, log, receive: receiveClaudeToken, stop: stopTree,
-      spawn: (p, token) => Bun.spawn(p.argv, { cwd: p.cwd, env: { ...p.env, [CLAUDE_LEND_TOKEN]: token }, stdin: "inherit", stdout: "inherit", stderr: "inherit" }),
-      cleanup: async () => {
-        try { await archiveClaudeWorker(plan, log); } finally { rmSync(plan.dir, { recursive: true, force: true }); }
-      } });
-  } catch {
-    log("Claude 出借启动或停止失败；核对 token、CLI 和授权，配置目录已清理");
-    process.exitCode = 1;
-  }
+  process.exitCode = await runClaudeWorkerHost(plan, { reason, log, receive: receiveClaudeToken, stop: stopTree,
+    spawn: (p, token) => Bun.spawn(p.argv, { cwd: p.cwd, env: { ...p.env, [CLAUDE_LEND_TOKEN]: token }, stdin: "inherit", stdout: "inherit", stderr: "inherit" }),
+    cleanup: async () => {
+      try { await archiveClaudeWorker(plan, log); } finally { rmSync(plan.dir, { recursive: true, force: true }); }
+    } });
 }
