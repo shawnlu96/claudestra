@@ -186,7 +186,7 @@ describe("r1 审查：核对与效果之间的空档、建出 worker 后中断�
     const h = harness();
     for (let i = 0; i < 3; i++) await h.tick();
     const create = h.d.worker.create;
-    h.d.worker.create = async (n, dir, p, gate) => { revoke(h); return create(n, dir, p, gate); };
+    h.d.worker.create = async (n, dir, p, gate, order) => { revoke(h); return create(n, dir, p, gate, order); };
     await h.tick();
     expect(h.log.created).toEqual([]);
     expect(getOrder(h.db, "o1")).toMatchObject({ state: "released", reason: expect.stringContaining("授权") });
@@ -224,5 +224,25 @@ describe("r1 审查：核对与效果之间的空档、建出 worker 后中断�
     await s.tick();
     expect(s.log.killed).toEqual([W]);
     expect(getOrder(s.db, "o1")).toMatchObject({ state: "stopped", reason: expect.stringContaining("codex 位") });
+  });
+});
+
+describe("r2 审查：调度这边的闸门过了之后、manager create 子进程里才收回", () => {
+  test("子进程起窗口前的核对拦下（create 失败）：调度这边再核一次，按收回收尾，退回并补停止通知，不当成「起 worker 失败」", async () => {
+    const h = harness();
+    for (let i = 0; i < 3; i++) await h.tick();
+    const orders: string[] = [];
+    h.d.worker.create = async (_n, _dir, _p, gate, order) => {
+      orders.push(order);
+      if (await gate()) return { ok: false, error: "父进程闸门就该拦下" };
+      revoke(h); // 父进程闸门之后：子进程拿写锁、建频道期间收回
+      return { ok: false, error: "出借 worker 不起：对 a 的出借授权已收回（已清理：频道已删；占位已删）" };
+    };
+    await h.tick();
+    expect(orders).toEqual(["o1"]);
+    expect(h.log.created).toEqual([]);
+    expect(getOrder(h.db, "o1")).toMatchObject({ state: "released", reason: expect.stringContaining("授权") });
+    expect(releases(h)).toEqual(["not_started"]);
+    expect(h.noticeKinds()).toEqual(["start:o1", "stopped:o1"]);
   });
 });

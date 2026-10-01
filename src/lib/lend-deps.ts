@@ -15,6 +15,7 @@ import { readLend } from "./lend-config.js";
 import { isWriteStep } from "./lend-git.js";
 import { withPaneArchive } from "./lend-pane-archive.js";
 import { ensurePr, probePush, pushWork } from "./lend-push.js";
+import { LEND_ORDER_ENV } from "./lend-grant-spawn.js";
 import { guardJournalWrites, LEND_JOURNAL_PATH, liveOrders, openLendJournal, orderOf, unsettledOrders, type LendRow } from "./lend-journal.js";
 import { readLendContext } from "./lend-policy.js";
 import { appendReceipt, receiptOf, tokensFor } from "./lend-receipts.js";
@@ -38,8 +39,9 @@ import { quotaViewOf, type CodexFailureSeen } from "./lend-health.js";
 type Manager = (...args: string[]) => Promise<Record<string, unknown>>;
 
 /** 建 / 杀 agent 不用调度服务身份（那个身份只许跑台账的调度命令），同 scheduler-auto-deps 的 plainManager：也带服务租约，服务停了排队中的建 / 杀什么都不做 */
-const plainManager = (lease: SchedulerLease | undefined): Manager => (...args) => runManagerProcess(args, { bunPath: resolveBunPath(), managerPath: `${SRC_DIR}/manager.ts`,
-  env: { ...process.env, DISCORD_CHANNEL_ID: "", [SCHEDULER_LEASE_ENV]: encodeLease(lease) }, timeoutMs: 180_000 });
+const plainManager = (lease: SchedulerLease | undefined, extra: Record<string, string> = {}): Manager => (...args) => runManagerProcess(args, {
+  bunPath: resolveBunPath(), managerPath: `${SRC_DIR}/manager.ts`, env: { ...process.env, DISCORD_CHANNEL_ID: "", [SCHEDULER_LEASE_ENV]: encodeLease(lease), ...extra },
+  timeoutMs: 180_000 });
 
 const LEND_PROJECT = "lend";
 
@@ -147,11 +149,12 @@ export function lendDeps(journal: Database, ledger: LedgerReader, active: () => 
     },
     worker: {
       find: (name) => { const r = registryRow(name); return r ? { sessionId: r.sessionId, cwd: r.cwd } : undefined; },
-      create: async (name, dir, purpose, gate) => {
+      create: async (name, dir, purpose, gate, order) => {
         await ensureLendProject(plain);
-        const denied = await gate(); // 建项目要拿 manager 写锁：这段工夫里收回了就不起
+        const denied = await gate(); // 建项目要拿 manager 写锁：这段工夫里收回了就不起（之后到起窗口之间由 manager create 按订单号再核，lend-grant-spawn.ts）
         if (denied) return { ok: false, error: denied };
-        const r = await plain("create", name, dir, "--purpose", purpose, "--project", LEND_PROJECT, "--runtime", "codex", "--transport", "acp");
+        const create: Manager = (...a) => owned(() => plainManager(lease, { [LEND_ORDER_ENV]: order })(...a));
+        const r = await create("create", name, dir, "--purpose", purpose, "--project", LEND_PROJECT, "--runtime", "codex", "--transport", "acp");
         return r.ok === true ? { ok: true } : { ok: false, error: String(r.error ?? "manager create 失败") };
       },
       send: (name, sessionId, text, key) => owned(() => send(name, sessionId, text, key)),

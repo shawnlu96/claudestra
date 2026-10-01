@@ -561,6 +561,7 @@ async function cmdCreate(
     unguard();
     output({ ok: false, error: r.ok ? `${reason}（已清理：${r.steps.join("；") || "无残留"}）` : `${reason}（${r.error}）` });
   }
+  const lendNo = (await import("./lib/lend-grant-spawn.js")).lendCreateDenied(tmuxName); if (lendNo) return cleanup(lendNo); // 出借 worker：已登记占位，起窗口前现核授权
 
   let ready = false;
   let spec: LaunchSpec;

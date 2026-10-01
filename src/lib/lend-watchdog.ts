@@ -32,30 +32,31 @@ function grantGone(peer: string, fp: string | null, scope: OrderScope, lendPath:
   return bad ? `出借授权失效：${bad}` : null;
 }
 
-function check(agent: string, path: string, now: number, lendPath: string): Check {
+function check(agent: string, path: string, now: number, lendPath: string, order?: string): Check {
   if (!existsSync(path)) return { why: "出借 journal 不在", unreadable: false };
-  let row: { state: LendState; leaseUntil: number | null; peer: string; fp: string | null; family: string; preview: string } | null;
+  let row: { orderId: string; state: LendState; leaseUntil: number | null; peer: string; fp: string | null; family: string; preview: string } | null;
   let p: Record<string, unknown> = {};
   try {
     const db = new Database(path, { readonly: true });
     try {
       db.exec(`PRAGMA busy_timeout = ${READ_BUSY_MS}`);
-      row = db.query("SELECT state, leaseUntil, peer, fp, family, preview FROM lend_orders WHERE agent = ? ORDER BY createdAt DESC LIMIT 1").get(agent) as typeof row;
+      row = db.query("SELECT orderId, state, leaseUntil, peer, fp, family, preview FROM lend_orders WHERE agent = ? ORDER BY createdAt DESC LIMIT 1").get(agent) as typeof row;
       if (row) p = JSON.parse(row.preview) as Record<string, unknown>; // 坏的摘要和读不了一样处理（fail-closed）
     } finally { db.close(); }
   } catch (e) {
     return { why: `读不了出借 journal：${(e as Error).message}`, unreadable: true };
   }
   if (!row) return { why: "journal 里没有这个 worker 的单", unreadable: false };
+  if (order !== undefined && row.orderId !== order) return { why: `${agent} 登记的是单 ${row.orderId}，不是 ${order}`, unreadable: false };
   if (!LEASED_STATES.includes(row.state)) return { why: `这张单已结束（${row.state}）`, unreadable: false };
   if (row.leaseUntil !== null && now > row.leaseUntil + WATCHDOG_GRACE_MS) return { why: "心跳过期：租约截止后一直没续上", unreadable: false };
   const gone = grantGone(row.peer, row.fp, { repo: String(p.repo ?? ""), step: String(p.step ?? ""), family: row.family }, lendPath, now);
   return gone ? { why: gone, unreadable: false } : null;
 }
 
-/** 单次检查：该不该停；null = 接着跑（读不了也返回原因，要不要停由 lendWatchdog 数次数） */
-export function lendStopReason(agent: string, path = LEND_JOURNAL_PATH, now = Date.now(), lendPath = LEND_PATH): string | null {
-  return check(agent, path, now, lendPath)?.why ?? null;
+/** 单次检查：该不该停；null = 接着跑（读不了也返回原因，要不要停由 lendWatchdog 数次数）。带 order = 还要求这个名字登记的正是这张单 */
+export function lendStopReason(agent: string, path = LEND_JOURNAL_PATH, now = Date.now(), lendPath = LEND_PATH, order?: string): string | null {
+  return check(agent, path, now, lendPath, order)?.why ?? null;
 }
 
 /** 宿主每 WATCHDOG_EVERY_MS 调一次：定性的该停立即停；读不了要连续 UNREADABLE_LIMIT 次，中间读到一次就清零 */

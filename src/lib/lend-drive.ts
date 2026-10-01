@@ -35,8 +35,11 @@ const BODY_MAX_BYTES = 96 * 1024;
 interface WorkerPort {
   /** registry 里这个名字的 agent（会话 id、工作目录）；没有 = undefined */
   find(name: string): { sessionId?: string; cwd?: string } | undefined;
-  /** gate 在真正起进程之前最后调一次（前面的准备工作也要时间）：返回原因 = 授权没了，不起，原样作为 error 返回 */
-  create(name: string, dir: string, purpose: string, gate: () => Promise<string | null>): Promise<{ ok: true } | { ok: false; error: string }>;
+  /**
+   * gate：准备工作做完、调 manager create 之前再核一次（提前拦）；返回原因 = 授权没了，不起。order 带给 manager create，
+   * 它在登记占位之后、起窗口之前按这张单现核（lend-grant-spawn.ts），收回一侧由 lend revoke 当场停掉已登记的
+   */
+  create(name: string, dir: string, purpose: string, gate: () => Promise<string | null>, order: string): Promise<{ ok: true } | { ok: false; error: string }>;
   send(name: string, sessionId: string, text: string, key: string): Promise<SendResult>;
   /** 结束 worker 并确认窗口已不在；ok:false = 没确认退出（调用方保留现场） */
   kill(name: string): Promise<{ ok: boolean; reason?: string }>;
@@ -196,9 +199,9 @@ async function startWorker(row: LendRow, entry: LendEntry, d: LendDeps): Promise
     const o = orderOf(row);
     let denied: string | null = null;
     const gate = async () => { const g = await liveGrant(told, d); return (denied = g.ok ? null : g.problem); };
-    const made = await d.worker.create(name, row.dir!, `出借：${row.peer} 的 ${str(o?.taskId)} ${str(o?.step)}（${row.orderId}）`, gate);
+    const made = await d.worker.create(name, row.dir!, `出借：${row.peer} 的 ${str(o?.taskId)} ${str(o?.step)}（${row.orderId}）`, gate, row.orderId);
     found = d.worker.find(name);
-    if (denied && !made.ok) return void (await revoke(told, denied, d));
+    if (!made.ok && (denied ?? (await gate()))) return void (await revoke(told, denied!, d)); // 子进程那道核对拦下的也按收回收尾
     if (!found && !made.ok) return release(row, "cloned", `起 worker 失败：${made.error}`.slice(0, 400), d);
   }
   if (!found?.sessionId) return d.log(`${name} 已在 registry，还没有会话 id，下轮再看`);
