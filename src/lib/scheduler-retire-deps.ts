@@ -16,6 +16,7 @@ import { SchedulerStopped, whileOwned } from "./scheduler-maintenance.js";
 import { readLiveAgents, schedulerRetireTick, type RetireDeps } from "./scheduler-retire.js";
 import { git } from "./scheduler-review-worktree.js";
 import type { TickPace } from "./scheduler-yield.js";
+import { removeClaudeTmp } from "./scheduler-retire-tmp.js";
 
 type Manager = (...args: string[]) => Promise<Record<string, unknown>>;
 
@@ -32,6 +33,7 @@ function retireDeps(db: Database, ledger: Manager, active: () => void, lease: Sc
   return {
     ledger, agent, worktreeRoot: statePath("worktrees"), exists: existsSync, agents: () => whileOwned(active, () => readLiveAgents()),
     git: (args) => whileOwned(active, () => git(args)),
+    removeTmp: (cwd, verify) => removeClaudeTmp(cwd, () => { active(); verify(); }),
     notifyPm: (task, text) => whileOwned(active, () => notifyProjectPm(db, task.project, text, { fromName: "scheduler", stillActive: alive })),
   };
 }

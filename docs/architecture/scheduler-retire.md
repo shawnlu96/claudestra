@@ -45,13 +45,46 @@ One `retire` intent per card (`retire:<task>`, opened already claimed by `ledger
    (the reviewer's). Not there → skipped. An agent not finished stopping (see above) whose registry cwd is inside it → kept. Must be a linked
    worktree (git-dir ≠ common-dir). `git status --porcelain` empty →
    `git worktree remove <path>` — never `--force`, never `rm`, and git itself refuses a dirty tree.
-3. The intent settles `done` with a summary receipt.
+3. **Claude Code scratch directories**: after the local session stopped and its worktree was removed (or was already absent),
+   apply the checks below, remove its scratch directory and record the outcome.
+4. The intent settles `done` with a summary receipt.
+
+## Claude Code temporary directories
+
+`scheduler-retire-tmp.ts` derives the root from `realpath(os.tmpdir())/claude-<process.getuid()>`. The pure
+`claudeTmpDirFor(cwd)` returns the relative child name, replacing `/` and `.` with `-` (not the broader project-history slug
+rule). The cwd comes from the scheduler's per-card author/reviewer worktree mapping; a surviving registry entry must agree
+with that cwd and bound session. No CLI option supplies a root or deletion path. Legacy manual scratch workspaces are not
+backfilled, and completed retire intents are never reopened for cleanup.
+
+Immediately before cleanup the card must still be `verified`, `done` or `cancelled`, its local session must have a durable
+kill receipt, and the registry/tmux inventory must show no live agent using that slug. A stopped entry with a pending operation
+or surviving window still counts as live. All agents participate in the collision check, including PM and workers on other
+cards; another stopped owner of the same slug is also protected. Comparison conservatively folds case and Unicode form for
+macOS aliases. Other cards' scheduler-bound checkout slugs also block deletion even after their registry entries disappear.
+Main/PM sessions, changed session identities, agents still
+bound to unfinished cards, and unknown live cwd values block cleanup. `transport=peer` skips this step entirely.
+
+The root and candidate must be ordinary directories: `lstat` rejects symlinks, and their real paths must match the generated
+paths. The candidate must be exactly one level below the root, never the root itself or any sibling/grandchild. Nested
+symlinks also keep the whole directory intact. The root/candidate are checked again after walking the contents; the stage and
+scheduler lease are checked next to `fs.rm({recursive: true, maxRetries: 0})`. Only that one generated child is removed. A
+missing root/child counts as success; other filesystem failures preserve their error for PM.
+
+The existing `ledger scheduler-session-retire` command records `tmp-start` before deletion and `tmp` with the outcome, using
+per-intent/per-role dedup keys in the existing event log (no schema change). Both success and failure are auditable. Repeated
+ticks read the saved result without re-running deletion, including when PM delivery fails or the service restarts. An
+interrupted `tmp-start` without a result is handed to PM for reconciliation rather than reattempting an unobserved deletion.
+The service continues to use its read-only ledger connection; all receipt writes use the lease-aware ledger CLI.
+
+Failures join S2's single combined PM notice for the project/tick. Once that notice and the intent settle, cleanup is not
+retried. The existing send/settle crash window described below still applies. Tests: `tests/scheduler-retire-tmp*.test.ts`.
 
 ## When PM is told
 
-- **A worktree stays** (uncommitted or untracked files, a live agent works in it, unreadable, not a linked worktree, or
+- **A temporary directory stays**, **a worktree stays** (uncommitted or untracked files, a live agent works in it, unreadable, not a linked worktree, or
   `worktree remove` failed), **an archive failed**, or **a kill was skipped for a changed session**: the intent settles `done`,
-  its receipt (an event on the card) says what was left, and PM gets one notice. Nothing is deleted; PM decides.
+  its receipt (an event on the card) says what was left, and PM gets one notice. The blocked directory is kept; PM decides.
 - **A kill fails** for any reason other than "already gone" or "busy" (`正在 …`, retried next pass): the intent settles
   `unknown` and PM gets one notice. The card is not retried until PM reconciles the intent.
 

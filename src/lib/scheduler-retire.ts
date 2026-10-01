@@ -4,11 +4,11 @@
  * refuses to remove stays and goes to PM. Every effect is recorded on the ledger before the next one runs, and kill is skipped
  * for an agent the registry already shows stopped, so a restart resumes where it stopped without killing twice. A card that owes
  * PM a notice settles only after the notice went out: a lost notice is resent next pass, never dropped.
- * Removal is only ever `git worktree remove` without --force, which itself refuses dirty trees.
+ * Worktree removal is `git worktree remove` without --force; only then may the bounded Claude scratch cleanup run.
  */
 import type { Database } from "bun:sqlite";
 import { realpathSync } from "node:fs";
-import { join, resolve, sep } from "node:path";
+import { resolve, sep } from "node:path";
 import type { SchedulerIntent } from "./ledger-scheduler.js";
 import { getTask } from "./ledger-store.js";
 import type { LedgerTask } from "./ledger-stages.js";
@@ -17,8 +17,12 @@ import { RETIRE_STAGES, type SchedulerSession } from "./scheduler-sessions.js";
 import type { Git } from "./scheduler-review-worktree.js";
 import { rotateAfter, type TickPace } from "./scheduler-yield.js";
 import { normalizeRegistryAgents, REGISTRY_PATH, type RegistryAgent } from "./registry.js";
-import { readJsonLenient } from "./state-file.js";
+import { readJsonState } from "./state-file.js";
 import { agentWindowsOrNull } from "./agent-windows.js";
+import { retireAgentStopped as stopped, type TmpRemoval } from "./scheduler-retire-tmp.js";
+import { retireClaudeTmp } from "./scheduler-retire-tmp-step.js";
+import { worktreeDirs } from "./scheduler-retire-paths.js";
+export { worktreeDirs } from "./scheduler-retire-paths.js";
 
 type Manager = (...args: string[]) => Promise<Record<string, unknown>>;
 
@@ -33,15 +37,15 @@ export interface RetireDeps {
   notifyPm(task: LedgerTask, text: string): Promise<void>;
   /** The registry as it is now: kill skips an agent already stopped, and a checkout a live agent works in is kept. */
   agents(): Promise<LiveAgent[]>;
+  /** Production also checks the scheduler lease immediately before recursive rm; tests may inject an isolated filesystem. */
+  removeTmp?(cwd: string, verify: () => void): Promise<TmpRemoval>;
 }
 
 /**
  * An agent as retirement reads it: its registry entry (absent = only a window by that name is left) and whether a tmux window by
  * that name is still open. `pending` = an operation on it (a kill cut off half way, a create) has not finished.
  */
-type LiveAgent = Pick<RegistryAgent, "name" | "status" | "sessionId" | "cwd"> & { pending: boolean; window: boolean };
-/** Stopped for good: runKill writes `stopped` + pending *before* it closes the window, so neither alone proves the stop. */
-const stopped = (a: LiveAgent): boolean => a.status === "stopped" && !a.pending && !a.window;
+export type LiveAgent = Pick<RegistryAgent, "name" | "status" | "sessionId" | "cwd" | "kind" | "role"> & { pending: boolean; window: boolean };
 
 const agentWindowNames = async (): Promise<string[] | null> => (await agentWindowsOrNull())?.map((w) => w.name) ?? null;
 
@@ -50,12 +54,15 @@ const agentWindowNames = async (): Promise<string[] | null> => (await agentWindo
  * Either unreadable throws, failing the card for this pass: an empty answer would read as "every agent is gone".
  */
 export async function readLiveAgents(path = REGISTRY_PATH, windows: () => Promise<string[] | null> = agentWindowNames): Promise<LiveAgent[]> {
-  const raw = await readJsonLenient<{ agents?: Record<string, { pending?: unknown }> } | null>(path, null, { who: "registry", writersGuarded: false });
-  if (!raw?.agents || typeof raw.agents !== "object") throw new Error(`registry 读不出来（${path}），这轮不收`);
+  // A cached last-good snapshot can miss a newly running owner; deletion needs the actual file to be readable now.
+  const state = await readJsonState(path);
+  const raw = state.status === "ok" ? state.data as { agents?: Record<string, { pending?: unknown }> } | null : null;
+  if (!raw?.agents || typeof raw.agents !== "object" || Array.isArray(raw.agents) ||
+    Object.values(raw.agents).some((a) => !a || typeof a !== "object" || Array.isArray(a))) throw new Error(`registry 读不出来（${path}），这轮不收`);
   const open = await windows();
   if (!open) throw new Error("tmux 列不出窗口，判断不了 agent 停没停，这轮不收");
   const listed = normalizeRegistryAgents(raw).map((a) => ({ name: a.name, status: a.status, sessionId: a.sessionId, cwd: a.cwd,
-    pending: !!raw.agents?.[a.name]?.pending, window: open.includes(a.name) }));
+    kind: a.kind, role: a.role, pending: !!raw.agents?.[a.name]?.pending, window: open.includes(a.name) }));
   const orphans = open.filter((w) => !listed.some((a) => a.name === w)).map((name) => ({ name, pending: false, window: true }));
   return [...listed, ...orphans];
 }
@@ -104,13 +111,6 @@ function within(path: string, dir: string): boolean {
   const real = (p: string): string => { try { return realpathSync(p); } catch { return resolve(p); /* gone or unreadable: compare as written */ } };
   const p = real(path), d = real(dir);
   return p === d || p.startsWith(d + sep);
-}
-
-/** The two checkouts the scheduler makes per card: the executor's (dag-tools-start) and the reviewer's (scheduler-auto-deps). */
-export function worktreeDirs(root: string, taskId: string): string[] {
-  const low = taskId.toLowerCase();
-  if (!/^[\w.-]+$/.test(low) || /^\.+$/.test(low)) return []; // never build a path from a name that could leave the root
-  return [join(root, low), join(root, `rv-${low}`)];
 }
 
 export const archiveReceipt = (r: Record<string, unknown>): string => {
@@ -218,17 +218,18 @@ class RetireCard {
       return this.owe(this.out("unknown", why), "unknown", why, `${this.task.id} 收尾卡住，意图转 unknown 待核对：${why}`);
     }
     // re-derived from durable state every time, so a notice resent after a lost one says the same thing
-    const kept: string[] = [], agents = await this.deps.agents();
-    for (const dir of worktreeDirs(this.deps.worktreeRoot, this.task.id)) {
+    const kept: string[] = [], removed: string[] = [], agents = await this.deps.agents(), dirs = worktreeDirs(this.deps.worktreeRoot, this.task.id);
+    for (const dir of dirs) {
       const why = await this.worktree(dir, agents);
-      if (why) kept.push(`${dir}：${why}`);
+      if (why) kept.push(`${dir}：${why}`); else removed.push(dir);
     }
     const all = this.db.query("SELECT * FROM scheduler_sessions WHERE taskId = ? ORDER BY role").all(this.task.id) as SchedulerSession[];
     const left = all.flatMap((r) => [r.archiveReceipt, r.killReceipt].filter((x): x is string => !!x && (x.startsWith(ARCHIVE_FAILED) || x.includes(FOR_PM)))
       .map((x) => `${r.role} ${r.agent}：${x}`));
+    left.push(...await retireClaudeTmp(this.db, this.task, this.intent, this.deps, dirs, removed, (a) => agentStillInUse(this.db, a, this.task.id)));
     const sessions = rows.length ? `${rows.length} 个 session 已退役` : "session 早已退役";
     if (!kept.length && !left.length) {
-      return this.out((await settle(this.deps, this.intent.id, "done", `${sessions}；worktree 已清`)) ? "retired" : "held", sessions);
+      return this.out((await settle(this.deps, this.intent.id, "done", `${sessions}；worktree、临时目录已清（peer 除外）`)) ? "retired" : "held", sessions);
     }
     const parts = [...(kept.length ? [`worktree 没删：${kept.join(" | ")}`] : []), ...left];
     const text = `${sessions}；交 PM：${parts.join(" | ")}`;

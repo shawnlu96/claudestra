@@ -3,7 +3,7 @@ import type { Database } from "bun:sqlite";
 import { isManager, mustTask, type WriteCtx } from "./ledger-checks.js";
 import { getIntent, getWorkflow, type AuthorFamily, type SchedulerIntent } from "./ledger-scheduler.js";
 import { actorMaySchedule } from "./ledger-scheduler-settle.js";
-import { getMeta, LedgerError } from "./ledger-store.js";
+import { getEventByDedup, getMeta, LedgerError } from "./ledger-store.js";
 import { insertEvent, tx } from "./ledger-tx.js";
 import { requireSessionIdentity } from "./scheduler-session-identity.js";
 import type { WorkerRef } from "./scheduler-plan.js";
@@ -14,6 +14,7 @@ export type SessionRole = "author" | "reviewer";
 /** Stages a card is finished in: only these retire. build / review / fix / merge / live never do (tests/scheduler-retire.test.ts). */
 export const RETIRE_STAGES: readonly Stage[] = ["verified", "done", "cancelled"];
 export type SessionTransport = "acp" | "tmux" | "peer";
+export type RetireEffect = "archive" | "kill" | "tmp-start" | "tmp";
 export interface SchedulerSession {
   taskId: string;
   role: SessionRole;
@@ -126,7 +127,7 @@ export function bindSchedulerSession(db: Database, ctx: WriteCtx, input: BindSes
 
 /** Archive must be observed before kill; each receipt is durable before the next external effect. */
 export function recordSessionRetirement(db: Database, ctx: WriteCtx, input: {
-  taskId: string; role: SessionRole; intentId: string; effect: "archive" | "kill"; receipt: string;
+  taskId: string; role: SessionRole; intentId: string; effect: RetireEffect; receipt: string;
 }): SchedulerSession {
   return tx(db, () => {
     const task = mustTask(db, input.taskId);
@@ -140,6 +141,26 @@ export function recordSessionRetirement(db: Database, ctx: WriteCtx, input: {
     if (!row) throw new LedgerError("not_found", "本卡没有该角色 session");
     if (row.retireIntentId && row.retireIntentId !== input.intentId) throw new LedgerError("conflict", "session 已由另一个意图退役");
     const receipt = field(input.receipt, "回执", 600);
+    if (input.effect === "tmp-start" || input.effect === "tmp") {
+      if (row.transport === "peer" || row.state !== "retired" || !row.killReceipt) throw new LedgerError("conflict", "临时目录清理须在本机会话停止后");
+      if (input.effect === "tmp") {
+        let result;
+        try { result = JSON.parse(receipt); } catch { throw new LedgerError("invalid", "临时目录回执须为 JSON"); }
+        if (!result || typeof result.ok !== "boolean" || typeof result.detail !== "string") throw new LedgerError("invalid", "临时目录回执须含 ok 和 detail");
+      }
+      const key = `scheduler:${input.intentId}:${input.role}:${input.effect}`;
+      const prior = getEventByDedup(db, key);
+      if (prior) {
+        if (prior.data.receipt !== receipt) throw new LedgerError("dedup_mismatch", "同一临时目录清理回执不一致");
+        return row;
+      }
+      insertEvent(db, { actor: ctx.actor, now: ctx.now ?? Date.now(), dedupKey: key }, {
+        project: task.project, target: task.id, kind: "scheduler", text: `${input.role} session ${input.effect} 已确认`,
+        data: { op: "session_retire", role: input.role, effect: input.effect, intentId: input.intentId, receipt,
+          ...(ctx.actor === "scheduler" ? {} : { manual: true }) },
+      }, true);
+      return row;
+    }
     const col = input.effect === "archive" ? "archiveReceipt" : input.effect === "kill" ? "killReceipt" : null;
     if (!col) throw new LedgerError("invalid", "退役效果不认识");
     if (col === "killReceipt" && !row.archiveReceipt) throw new LedgerError("conflict", "必须先确认归档，再停止 session");

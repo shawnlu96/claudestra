@@ -3,7 +3,7 @@ import { INTENT_ACTIONS, INTENT_STATUSES, WORKFLOW_MODES, WORKFLOW_TEMPLATES, AU
 import { settleIntent } from "../lib/ledger-scheduler-settle.js";
 import { planIntent, recordPlanRejected, setWorkflow } from "../lib/ledger-scheduler-write.js";
 import { resumeAutoWorkflow } from "../lib/ledger-scheduler-resume.js";
-import { beginRetire, bindSchedulerSession, recordSessionRetirement, type SessionRole, type SessionTransport } from "../lib/scheduler-sessions.js";
+import { beginRetire, bindSchedulerSession, recordSessionRetirement, type RetireEffect, type SessionRole, type SessionTransport } from "../lib/scheduler-sessions.js";
 import { advanceMergeRun, beginMergeRun, MERGE_RESOLUTIONS, resolveMergeRun, type MergePhase, type MergeResolution } from "../lib/scheduler-merge.js";
 import { getMeta, getTask, LedgerError } from "../lib/ledger-store.js";
 import { getDeployRun, resolveDeployRun } from "../lib/scheduler-deploy.js";
@@ -175,13 +175,13 @@ export const SCHEDULER_CMDS: Record<string, CommandSpec> = {
   },
   "scheduler-session-retire": {
     valued: ["role", "intent", "effect", "receipt"], bools: [],
-    usage: "scheduler-session-retire <task> --role author|reviewer --intent <key> --effect archive|kill --receipt <evidence>",
+    usage: "scheduler-session-retire <task> --role author|reviewer --intent <key> --effect archive|kill|tmp-start|tmp --receipt <evidence>",
     run(c) {
       const role = c.need("role"), effect = c.need("effect");
-      if (!["author", "reviewer"].includes(role) || !["archive", "kill"].includes(effect)) throw new LedgerError("invalid", "session 角色或退役效果不认识");
+      if (!["author", "reviewer"].includes(role) || !["archive", "kill", "tmp-start", "tmp"].includes(effect)) throw new LedgerError("invalid", "session 角色或退役效果不认识");
       return { ok: true, session: recordSessionRetirement(c.db, c.ctx(), {
         taskId: c.p.pos[1] ?? "", role: role as SessionRole, intentId: c.need("intent"),
-        effect: effect as "archive" | "kill", receipt: c.need("receipt"),
+        effect: effect as RetireEffect, receipt: c.need("receipt"),
       }) };
     },
   },
