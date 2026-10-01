@@ -1,4 +1,15 @@
-/** Local author asks can proceed on explicit defaults; pool writes keep blocking and review asks return grading rules. */
+/**
+ * M2 ask：执行者就自己当前的单向 PM 提问。参数过 T87 parseAskWire；单号必须是调用方当前的单（lib/order-take.ts）；
+ * askee = 卡的 pm，没有就取台账 PM 名单第一位。写进现有 asks 表（bridge 唯一的台账写连接，lib/ledger-asks.ts），再投给 PM。
+ * 同一单号、同一问题与选项的重试按 dedupKey 找回原来那条，不重开。ask 开的时候 extra.notice = pending，投出去（送达或进押后队列）
+ * 才改成 handed；重试时 ask 还开着、仍是 pending（上次没投出去 / 投时出错 / 进程中途退出）就用同一 messageId 补投。
+ * 回答不在这里收：PM 照旧 send_to_agent 回话。tests/order-ask.test.ts。
+ * 审查单（本机 take_review 的单、出借池 step=review 的单）上的提问不转 PM：当场回分级规则（order-standard-answers.ts），卡上记一条 note，
+ * 远端的单在本机按 lend_orders.step 判，不靠对方升级。tests/order-ask-review.test.ts。
+ * i28-ASK2：本机单上 class=design|scope 且带 default 的不阻塞（blocking=false，立刻回「按默认继续」，15 分钟没回按默认定，
+ * order-ask-default.ts）；其余（blocker、没写 class 的旧版、出借池远端写单）照旧，blocking 列不写（null）——写成 true 会让
+ * owner 侧推送 / 横幅把它当成要 owner 处理的事（ask-push.ts）。tests/order-ask-default.test.ts。
+ */
 import { createHash } from "node:crypto";
 import type { Database } from "bun:sqlite";
 import type { NewAsk, OpenedAsk } from "./ledger-asks.js";
@@ -85,11 +96,11 @@ function answerReviewAsk(deps: Pick<AskDeps, "record">, src: AskSource, q: { que
  * lend/ask (lib/ledger-lend-peers.ts RemoteCaller). The notice quotes the question; nothing else of the card goes in it.
  */
 export async function openOrderAsk(db: Database, deps: Omit<AskDeps, "db">, src: AskSource, q: Question):
-  Promise<OpenedOrderAsk | AnsweredReviewAsk | { refused: string }> {
+  Promise<OpenedOrderAsk | AnsweredReviewAsk | { refused: string; code?: "invalid_wire" }> {
   const step = lendStepOf(db, src.orderId);
   if (step === "review") return answerReviewAsk(deps, src, q);
   const nonblocking = step === null && (q.class === "design" || q.class === "scope");
-  if (nonblocking && !q.default?.trim()) return { refused: "design / scope 提问必须补上 default（我打算怎么做，≤600 字）" };
+  if (nonblocking && !q.default?.trim()) return { refused: "design / scope 提问必须补上 default（我打算怎么做，≤600 字）", code: "invalid_wire" };
   const behavior = { blocking: !nonblocking, message: nonblocking ? "已登记，按你的默认做法继续" : "已登记，等待 PM 回复后继续" };
   const pm = src.task.pm ?? getMeta(db, src.task.project).pms[0] ?? null;
   if (!pm) return { refused: `${src.task.id} 没有 PM，项目 ${src.task.project} 的 PM 名单也是空的` };
@@ -97,7 +108,8 @@ export async function openOrderAsk(db: Database, deps: Omit<AskDeps, "db">, src:
   const opened = deps.open({
     project: src.task.project, taskId: src.task.id, fromAgent: src.from, ...(src.fromChannelId ? { fromChannelId: src.fromChannelId } : {}), source: "reply",
     kind: "decide", title: titleOf(src.task.id, q.question), body: q.question, assignee: pm, dedupKey: `${src.keyPrefix}:${src.orderId}:${digest}`,
-    blocking: !nonblocking, ...(nonblocking ? { expiresAt: 253402300799999 } : {}),
+    // 不阻塞的到期由自动定收口，不走 24 小时过期；其余不写 blocking，保持改动前的 null
+    ...(nonblocking ? { blocking: false, expiresAt: 253402300799999 } : {}),
     extra: { orderId: src.orderId, options: q.options, via: "mcp_ask", notice: "pending",
       class: nonblocking ? q.class : "blocker", ...(nonblocking ? { default: q.default } : {}) },
   });
@@ -130,5 +142,5 @@ export async function askOrder(call: VerifiedCall, args: unknown, deps: AskDeps)
     return refuse("not_current_order", `${orderId} 不是你当前的单，只能就自己当前的单提问`);
   }
   const r = await openOrderAsk(deps.db, deps, { task: cur.task, orderId, from: call.agent, fromChannelId: call.channelId, keyPrefix: "mcp-ask" }, w.value);
-  return "refused" in r ? refuse(r.refused.includes("default") ? "invalid_wire" : "no_pm", r.refused) : { ok: true, ...r };
+  return "refused" in r ? refuse(r.code ?? "no_pm", r.refused) : { ok: true, ...r };
 }

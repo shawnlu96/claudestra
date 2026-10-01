@@ -93,6 +93,6 @@ export async function deliverOrder(call: VerifiedCall, args: unknown, deps: Deli
   const flags = { from: cur.stage, head, evidence, text: `${summary}\n自查：${selfCheck}`, rev: String(rev), branch, pr: pr.url };
   const r = await ledgerWrite(call, deps.run, "deliver", cur.task.id, flags, key);
   if (!r.ok) return r;
-  deliveredScope(deps.db, cur.task.id, head);
+  await deliveredScope(deps.db, cur.task.id, head); // 规格外文件登记：异步、不抛，失败只记事件（order-deliver-scope.ts）
   return receipt(r.duplicate === true, orderId, cur.task.id, (r.event as { seq?: number } | undefined)?.seq ?? null);
 }

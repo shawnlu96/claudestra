@@ -13,6 +13,7 @@ import type { LedgerTask } from "../lib/ledger-stages.js";
 import { getTask } from "../lib/ledger-store.js";
 import { sweepAskDefaults } from "../lib/order-ask-default.js";
 import { answersGoToAgent, answerTarget, askDbIfExists, asksDeps, hhmm, publishAsk, registry, sendCalm } from "./asks.js";
+import { sendLedgerNotice } from "./team-router.js";
 
 /** 刚结成 expired 的一条（sweep 或作答时才发现到点）：发 SSE，再按来源通知 */
 export async function noticeExpired(a: Ask): Promise<void> {
@@ -57,7 +58,7 @@ export async function notifyTaskPm(task: LedgerTask | null, project: string, tex
 export async function sweepExpired(now = Date.now()): Promise<number> {
   const db = askDbIfExists();
   if (!db || !hasAsksTable(db)) return 0;
-  sweepAskDefaults(db, now, publishAsk);
+  await sweepAskDefaults(db, now, { publish: publishAsk, notify: (to, text, messageId) => sendLedgerNotice({ to, text, messageId }) }); // 不抛
   const due = dueAsks(db, now);
   for (const a0 of due) {
     const a = closeAsk(db, a0.id, "expired", "", now);

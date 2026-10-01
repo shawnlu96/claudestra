@@ -2217,7 +2217,6 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
     case "fleet_state": case "fleet_run": ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, ...(await (await import("./bridge/fleet/ws.js")).handleFleetWs(msg, ws)) })); break;
     case "route_to_agent": {
       try {
-        recordDefaultPmReply(askDbIfExists(), callerOf(ws, msg).identity, msg.targetName, msg.text);
         let fromChannelId = "";
         let fromName = msg.fromName || "";
         for (const [chId, info] of clients.entries()) {
@@ -2384,6 +2383,7 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
         }
 
         if (answering && fromChannelId) pendingAgentCalls.consume(fromChannelId, target.channelId, answering);
+        recordDefaultPmReply(askDbIfExists, callerOf(ws, msg).identity, targetName, msg.text); // 投出去之后：PM 带 ask id 答了默认做法提问（不抛）
         // v1.9.6+: send_to_agent 触发的 turn 不发完成 @（用户没在这个 channel 问问题）
         lastMessageSource.set(target.channelId, "agent");
 
