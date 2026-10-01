@@ -70,7 +70,7 @@ function repair(id: string, from: "review" | "merge" | "live" = "review"): void 
   review(id);
   insertEvent(db, ctx, { project: "p", target: id, kind: "review", data: { round: 1, head: HEAD, verdict: "changes", p0: 0, p1: 1, p2: 0,
     reviewer: "reviewer", reviewerSessionId: "rv", reviewerFamily: "codex", path: "review.md",
-    findings: [{ findingId: "race", family: "race", severity: "P1", probe: "concurrent writes" }] } }, false);
+    findings: [{ findingId: "race", family: "race", severity: "P1", basis: "acceptance:1", probe: "concurrent writes" }] } }, false);
   if (from !== "review") db.run("UPDATE tasks SET stage = ? WHERE id = ?", [from, id]);
   moveStage(db, ctx, { taskId: id, from, to: "fix" });
   if (from === "merge") {

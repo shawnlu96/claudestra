@@ -262,6 +262,16 @@ describe("lend-write (result intake)", () => {
     return orderId;
   }
 
+  test("旧 peer 按逐项报告/说明补依据，新 peer 的 basis 照存", async () => {
+    const orderId = await claimed();
+    const findings = [finding, { ...finding, findingId: "desc", description: "[回归] 新 bug" },
+      { ...finding, findingId: "field", basis: "acceptance:4" }, { ...finding, findingId: "unmarked" }];
+    const r = await call("write", result(orderId, { report: "## race-1 [验收线 2]\n复现\n## unmarked\n无依据" }, { p1: 4, findings }));
+    expect(r.ok).toBe(true);
+    expect(JSON.parse(reviews()[0].data).findings.map((f: { basis?: string }) => f.basis))
+      .toEqual(["acceptance:2", "regression", "acceptance:4", undefined]);
+  });
+
   test("a held, live order's verdict is recorded whole as peer:<name> with a signed receipt; the report is stored as quoted, masked foreign data", async () => {
     const orderId = await claimed();
     const r = await call("write", result(orderId));

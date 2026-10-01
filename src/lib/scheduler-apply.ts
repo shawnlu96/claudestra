@@ -19,6 +19,7 @@ import { autoSnapshot } from "./scheduler-auto-snapshot.js";
 import { planScheduler, type PlannerDecision } from "./scheduler-plan.js";
 import type { SnapshotOpts } from "./scheduler-snapshot.js";
 import { UI_ASK_ACTION } from "./scheduler-ui-gate.js";
+import { convergeFollowUp } from "./review-converge-followup.js";
 
 const UI_APPROVE = "scheduler_ui_approve";
 /** Moves the engine may make itself; build/fix→review is the worker's deliver, merge→live is the merge queue's. */
@@ -64,6 +65,7 @@ export function applySchedulerStage(db: Database, ctx: WriteCtx, input: { intent
     // Role only feeds the legality table here; the template allowlist and the re-plan above are the real gate.
     const why = plan.pmDiffNotice ? `${plan.reason}；留有 P2，PM 看 diff` : plan.reason;
     const moved = applyMove(db, ctx, task, { from: task.stage, to: input.to }, true, why, "pm");
+    convergeFollowUp(db, ctx, moved.task, plan.downgrade); // 本轮降级：事件 + drafts 草稿 + 子 DAG 后续节点（review-converge-followup.ts）
     settleDone(db, ctx, intent.id, `stage ${task.stage}→${input.to}; event ${moved.event.seq}`);
     return { task: moved.task, duplicate: false };
   });

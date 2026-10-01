@@ -15,7 +15,7 @@ import { SRC_DIR } from "./repo-root.js";
 import { MCP_PROFILE_ENV, LEND_PROFILE } from "./lend-mcp-profile.js";
 import { BUN_NO_AUTOLOAD, envIPrefix, isLendWorkerName, LEND_WORKER_MARK, pickWorkerEnv } from "./runtimes/clean-env.js";
 import type { LaunchSpec } from "./runtimes/types.js";
-import { CLAUDE_LEND_TOKEN } from "./lend-claude-worker-capacity.js";
+import { readClaudeLendToken } from "./lend-claude-token.js";
 import { serveClaudeToken } from "./lend-claude-worker-auth.js";
 
 import { CLAUDE_LEND_ROOT } from "./lend-claude-worker-session.js";
@@ -68,7 +68,7 @@ export function claudeWorkerPlan(spec: LaunchSpec, dir: string, authSocket: stri
 export function buildLendClaudeCommand(spec: LaunchSpec, o: { base?: Record<string, string | undefined>; root?: string; bin?: string; authRoot?: string } = {}): string {
   const base = o.base ?? process.env;
   const root = o.root ?? CLAUDE_LEND_ROOT;
-  const token = base[CLAUDE_LEND_TOKEN]?.trim();
+  const token = readClaudeLendToken(base);
   if (!token) throw new Error("Claude 出借未配置 CLAUDE_CODE_OAUTH_TOKEN：先 claude setup-token，再重授 --claude N");
   const bin = o.bin ?? Bun.which("claude");
   if (!bin) throw new Error("找不到 Claude Code CLI");
