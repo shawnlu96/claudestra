@@ -83,7 +83,7 @@ export function signedFor(method: string, url: string, body: string | Uint8Array
  * （claudestra-req-v1）或中继登录签名（claudestra-relay-auth-v2）——这两种的原文拼法和这里一样，所以只认登记过的用途，
  * 新用途在这里加一行，首行不能和任何已有签名原文相同。
  */
-const SIGN_PURPOSES = ["claudestra-invite-pop-v1", "claudestra-lend-receipt-v1"] as const;
+const SIGN_PURPOSES = ["claudestra-invite-pop-v1", "claudestra-lend-receipt-v1", "claudestra-shared-ledger-v1"] as const;
 export type SignPurpose = (typeof SIGN_PURPOSES)[number];
 
 /** 字段里不许有换行，否则字段边界能被挪动 */
