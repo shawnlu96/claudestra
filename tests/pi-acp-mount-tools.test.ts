@@ -67,8 +67,13 @@ describe("挂载闸：认工具表", () => {
 });
 
 const piVersion = (() => {
-  const r = Bun.spawnSync([piBinName(), "--version"], { env: testChildEnv({ PI_OFFLINE: "1" }) });
-  return r.exitCode === 0 ? r.stdout.toString().trim() : "";
+  // 没装 pi 时 spawnSync 直接抛 ENOENT（不是返回非零），不接住整个文件在 import 阶段就挂（CI 没有 pi）
+  try {
+    const r = Bun.spawnSync([piBinName(), "--version"], { env: testChildEnv({ PI_OFFLINE: "1" }) });
+    return r.exitCode === 0 ? r.stdout.toString().trim() : "";
+  } catch {
+    return "";
+  }
 })();
 const realPi = /^0\.(99|\d{3,})\.|^[1-9]\d*\./.test(piVersion);
 
