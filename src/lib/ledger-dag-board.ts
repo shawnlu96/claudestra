@@ -18,7 +18,7 @@ import { getMeta, listEvents, listTasks } from "./ledger-store.js";
 export type VersionMeta = Omit<DagVersion, "featureId" | "nodes">;
 export type PendingMeta = VersionMeta & { seq: number; baseVersion: number; askId: string };
 
-export interface BoardHandler {
+interface BoardHandler {
   role: "executor" | "reviewer" | "pm" | "dispatcher" | "owner";
   agent: string | null;
   since: number;
@@ -50,7 +50,7 @@ export interface FeatureCard {
   nodes: BoardNode[];
 }
 
-export interface ProgressRow {
+interface ProgressRow {
   agent: string;
   pm: boolean;
   work: { featureId: string; nodeKey: string; taskId: string; role: string; step: StepName | null; round: number | null; since: number }[];
@@ -110,7 +110,7 @@ function lineOf(ctx: BoardCtx, task: LedgerTask): StepLineInfo {
 }
 
 /** schedulerProjectView 的 handler；agent 为空且是执行者 / 审查员时，用 stepAtStage 认出的那一步的执行人补（同 team-activity） */
-export function handlerOf(ctx: BoardCtx, task: LedgerTask): BoardHandler | null {
+function handlerOf(ctx: BoardCtx, task: LedgerTask): BoardHandler | null {
   const h = ctx.sched.get(task.id)?.handler;
   if (!h) return null;
   const fill = !h.agent && (h.role === "executor" || h.role === "reviewer") ? stepAtStage(lineOf(ctx, task).steps, task)?.executor ?? null : null;
@@ -156,7 +156,7 @@ export function pendingMeta(p: Omit<DagProposal, "nodes">): PendingMeta {
   return { ...versionMeta({ ...p, approvedBy: null }), seq: p.seq, baseVersion: p.baseVersion, askId: p.askId };
 }
 
-export function listProjectFeatures(db: Database, project: string): Feature[] {
+function listProjectFeatures(db: Database, project: string): Feature[] {
   return db.query("SELECT * FROM features WHERE project = ? ORDER BY id").all(project) as Feature[];
 }
 
@@ -178,13 +178,13 @@ export function featureCard(ctx: BoardCtx, f: Feature): FeatureCard {
 const STATUS_ORDER: Record<Feature["status"], number> = { active: 0, paused: 1, done: 2, dropped: 3 };
 
 /** 行名：去掉 agent- 前缀；peer 执行者 <agent>@<peer> 只去名字那一段的前缀 */
-export function rowName(agent: string): string {
+function rowName(agent: string): string {
   const at = agent.lastIndexOf("@");
   return at > 0 ? `${agent.slice(0, at).replace(/^agent-/, "")}${agent.slice(at)}` : agent.replace(/^agent-/, "");
 }
 
 /** 进度图的行：节点上的 handler 一条不漏地进对应行；不在任何当前版里、却有人在做的卡进 offGraph；PM 名单每人一行 */
-export function progressRows(ctx: BoardCtx, features: readonly FeatureCard[]): ProgressRow[] {
+function progressRows(ctx: BoardCtx, features: readonly FeatureCard[]): ProgressRow[] {
   const rows = new Map<string, ProgressRow>();
   const row = (agent: string) => {
     const name = rowName(agent);

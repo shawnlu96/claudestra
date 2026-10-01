@@ -39,6 +39,15 @@ function versionParam(raw: string | null, allowPending: boolean): VersionSel | n
 }
 
 type Db = NonNullable<ReturnType<typeof ledgerDb>>;
+
+/** 台账只读连接：库不存在 = { db: null }；打开出错 = 503 */
+function openReadDb(): { db: Db | null } | Response {
+  try {
+    return { db: ledgerDb() };
+  } catch (e) {
+    return apiJson(503, { ok: false, error: `ledger unavailable: ${(e as Error).message}` });
+  }
+}
 type Route = { kind: "board" } | { kind: "detail"; version: VersionSel } | { kind: "diff"; from: number | undefined; to: VersionSel };
 
 export async function handleLedgerDagApi(req: Request, path: string, principal: Principal, url: URL): Promise<Response | null> {
@@ -61,16 +70,13 @@ export async function handleLedgerDagApi(req: Request, path: string, principal: 
     route = { kind: "detail", version };
   }
   if (!(await ledgerProjectExists(project))) return notFound(`project "${project}" not found`);
-  let db: ReturnType<typeof ledgerDb>;
-  try {
-    db = ledgerDb();
-  } catch (e) {
-    return apiJson(503, { ok: false, error: `ledger unavailable: ${(e as Error).message}` });
-  }
+  const opened = openReadDb();
+  if (opened instanceof Response) return opened;
+  const { db } = opened;
   const now = Date.now();
   if (featureId === undefined) {
     if (!db) return apiJson(200, { ok: true, project, exists: false, now, asOfSeq: 0, features: [], agents: [] });
-    const board = (db as Db).transaction(() => dagBoard(db as Db, project, now)).deferred();
+    const board = db.transaction(() => dagBoard(db, project, now)).deferred();
     return apiJson(200, { ok: true, project, exists: true, now, ...board });
   }
   return db ? featureRoute(db, project, featureId, route, now) : notFound(`feature "${featureId}" not found in "${project}"`);

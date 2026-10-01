@@ -10,7 +10,7 @@ import { stageTimeline } from "./ledger-metrics.js";
 import { LedgerError } from "./ledger-store.js";
 import { boardContext, boardNodes, featureCard, ownTask, pendingMeta, phaseNow, versionMeta, type BoardCtx, type BoardNode, type FeatureCard, type VersionMeta } from "./ledger-dag-board.js";
 
-export interface VersionEntry extends VersionMeta {
+interface VersionEntry extends VersionMeta {
   /** 相对上一版；v1 为 null */
   delta: { added: number; removed: number; changed: number; cancelled: number } | null;
 }

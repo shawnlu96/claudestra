@@ -107,9 +107,23 @@
 - `dag-approve`：ask 须是 owner 本人答的「批准」、`ask-check` 同口径（`checkAsk`，哈希按库里的提案行重算）、当前版本仍是提案的基础版、四条规矩按**此刻**的卡状态重判——全过才写版本（批准人 = 作答的 principal）；驳回记 `rejected`，其余记 `void`，都不动当前版本。重放按命中的事件还原当时那份提案 / 版本，不取最新的。
 - 生效时换绑卡：移出新版的卡清 `featureId`、新卡挂上，各 rev + 1 附 `task` 事件。
 
-## 以后
+## 看板读接口（L4，`src/lib/ledger-dag-board*.ts` + `src/bridge/local-api/ledger-dag.ts`）
 
-- L4 给看板加读接口（按 feature 列节点与现读状态）。
+DAG 图与进度图（「每个 agent 此刻在干嘛」）共用一份快照，只读、不写库、不加事件类型；实时仍靠 SSE `ledger` 事件触发重拉。
+
+| 路由 | 返回 |
+|---|---|
+| `GET /api/v1/ledger/:project/dag` | `asOfSeq` + `features`（status 分组 active→paused→done→dropped，组内按 `lastActivityAt` 降序）+ `agents`（PM 在前，其余按最早 `since`） |
+| `GET /api/v1/ledger/:project/dag/:featureId[?version=<n>\|pending]` | feature 元信息（不带 nodes）+ `versions`（升序，`delta` 相对上一版）+ `snapshot`（缺省当前版；没建图为 null） |
+| `GET /api/v1/ledger/:project/dag/:featureId/diff?from=<n>&to=<n\|pending>` | 原样 `dagDiff` + `phaseNow`（两版出现过的 key 此刻的三态）+ `rewrittenDone` |
+
+- **门**：`canReadLedger`（和 `/ledger/:project` 同一道），先于参数解析、projects.json、查库；非全权一律 403，全权的非 GET 回 405。project 要在 projects.json；feature 只认全 id（≤200 字符、无控制字符），不存在和属于别的项目同一个 404。坏编码 / 坏参数 400，`from ≥ to` 400，版本不存在 404，`pending` 只能出现在 `to`。库不存在时 `/dag` 回 `exists:false`，库打不开 503。
+- **一个请求一个 deferred 读事务**（`ledgerDb()` 的 query_only 连接）：节点投影、agent 行、handler（`schedulerProjectView` 嵌套成 SAVEPOINT）出自同一份快照。
+- **节点**：`dagSnapshot` 的 NodeView 原样保留快照字段（key / oneLine / deps / estimate / fileGlobs / taskId / statusAtVersion），再叠：`phase`（`nodePhase`）、`round`、`handler`（只给进行中节点；agent 为空的执行者 / 审查员用 `stepAtStage` 那一步的执行人补）、`stepLine`（`stepLineInfo` 的当前一步与各步 step/round/state）、`since`（当前阶段起点，与 `/ledger/:project` 的 `stageSince` 同口径；没开始与已完成为 null，不计时）、`pr`、`branch`。done 节点照样在，折叠是前端的事；pending 只给元信息，不并进 nodes。
+- **只出本项目的卡**：绑的卡属于别的项目或找不到，一律 `missing`，status / title / handler / stepLine / pr / branch / round / since 全为 null，`satisfied` 为 false，依赖它的节点不 `ready`。`counts` 里 missing 单独计，四项之和 = total。
+- **agent 行**：名字去掉 `agent-` 前缀（peer 写 `<名>@<peer>`）。每个有 `handler.agent` 的节点进该行 `work`，`work` 每一项都能在节点上找回同一个 agent；PM 名单每人一行（`work` 可空）；进行中、有人在做、却不在任何 feature 当前版里的卡进 `offGraph`（没开始的待排卡不进）。busy、成员名单由前端从 `/agents` 合并，本接口不读 registry / event-bus。
+- **版本对比**：历史版也按卡现读状态。`rewrittenDone` = `carried.changed` 且在 `to` 版生效 / 提出那一刻（卡的阶段时间线或快照 status）已完成的 key——正常重写走不到，出现就是库被手改过或 L2 之前的历史。
+- 不做：lanes（L5）、token 用量（T4，走 `/usage/*` 更严的门）。`show_dag` 的同一缺口（不核卡的项目）没在这里修。
 
 ## L3 旧卡迁移（`ledger feature-migrate`，`src/lib/ledger-feature-migrate.ts`）
 

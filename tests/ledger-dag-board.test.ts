@@ -11,7 +11,7 @@ import { getDagVersion, getFeature } from "../src/lib/ledger-feature.js";
 import { projectView } from "../src/lib/ledger-read.js";
 import { schedulerProjectView } from "../src/lib/ledger-scheduler.js";
 import { closeLedger, openLedger } from "../src/lib/ledger-store.js";
-import { createTask, moveStage, setMeta } from "../src/lib/ledger-write.js";
+import { appendEvent, createTask, deliver, moveStage, setMeta } from "../src/lib/ledger-write.js";
 import { runLedger } from "../src/manager/ledger.js";
 
 const P = "claude-orchestrator";
@@ -110,6 +110,17 @@ describe("当前版投影", () => {
     for (const r of b.agents) for (const w of r.work) {
       expect(nodes.find((x) => x.f === w.featureId && x.n.key === w.nodeKey)!.n.handler!.agent!.replace(/^agent-/, "")).toBe(r.agent);
     }
+  });
+
+  test("审查员 handler 的 agent 为空：用 stepAtStage 认出的审查那一步补，审查员也占一行", () => {
+    db.prepare("UPDATE tasks SET extra = ? WHERE id = 'T3'").run(J({ reviewer: "agent-rv" }));
+    walk("T3", ["spec", "restate", 1100], ["restate", "build", 1200]);
+    deliver(db, owner(1300), { taskId: "T3", headSHA: "abc", moveFrom: "build" });
+    appendEvent(db, owner(1400), { project: P, target: "T3", kind: "dispatch" });
+    expect(schedulerProjectView(db, P).tasks.find((t) => t.taskId === "T3")!.handler).toMatchObject({ role: "reviewer", agent: null });
+    const b = board();
+    expect(node(b, "T3")).toMatchObject({ phase: "active", since: 1300, handler: { role: "reviewer", agent: "agent-rv", since: 1400 }, stepLine: { active: { step: "review" } } });
+    expect(b.agents.find((r) => r.agent === "rv")!.work).toEqual([{ featureId: F, nodeKey: "T3", taskId: "T3", role: "reviewer", step: "review", round: 0, since: 1400 }]);
   });
 
   test("绑到别的项目的卡 / 找不到的卡 → missing，字段全空，依赖它的节点不 ready；别的项目的任何字段都不带出来", () => {
