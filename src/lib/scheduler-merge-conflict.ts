@@ -1,7 +1,7 @@
 /**
- * Settled merge bounces (i28-M12): a PR that conflicts with main, a PR head whose required CI failed, or a run the PM switched
- * to manual before any merge was sent is a known state, not an unobservable one, so it never freezes the project queue.
- * Conflict / CI failure send the card back to fix (re-reviewed before it can merge again); the 4th bounce goes to the PM.
+ * Settled merge bounces (i28-M12): a PR that conflicts with main, a PR head whose required CI failed, a refused update-branch
+ * (i28-M12b), or a run the PM switched to manual before any merge was sent is a known state, not an unobservable one, so it never
+ * freezes the project queue. Bounces send the card back to fix (re-reviewed before it can merge again); the 4th goes to the PM.
  * The receipt is the single place the evidence is spelled out; the ledger re-parses it. tests/scheduler-merge-conflict*.test.ts.
  */
 import type { Database } from "bun:sqlite";
@@ -14,9 +14,10 @@ import { insertEvent } from "./ledger-tx.js";
 import type { MergeExternal, PrSnapshot } from "./scheduler-merge-driver.js";
 import type { MergePhase, MergeRun } from "./scheduler-merge.js";
 
-export type BounceCause = "conflict" | "ci_fail";
+export type BounceCause = "conflict" | "ci_fail" | "update_fail";
 interface FailedCheck { name: string; link: string }
-export interface MergeBounce { cause: BounceCause; prHead: string; mainHead: string | null; checks: FailedCheck[] }
+/** `error` (update_fail only): GitHub's refusal, one line, so the fixer sees why main could not be merged in. */
+export interface MergeBounce { cause: BounceCause; prHead: string; mainHead: string | null; checks: FailedCheck[]; error?: string }
 /** Bounces (conflict + CI failure together) a card gets back to fix automatically; the next one goes to the PM. */
 export const MAX_MERGE_BOUNCES = 3;
 export const BOUNCE_LIMIT_REASON = "反复冲突，可能和别的卡长期改同一处，需要 PM 排期";
@@ -52,9 +53,25 @@ const PREFIX = "退回 fix";
 const RECEIPT_MAX = 600;
 /** A job link narrowed to its workflow run (`…/actions/runs/<id>`), the part the fixer needs to open the logs. */
 const runLink = (link: string): string => link.replace(/^(https:\/\/\S+?\/actions\/runs\/\d+)\/\S*$/, "$1");
+const UPDATE_FAIL_TAIL = "；请合入 main 后重新交付";
+/** Control / format characters are refused by the ledger's receipt gate, so the error is flattened before it is fitted. */
+const oneLine = (text: string): string => text.replace(/[\s\p{Cc}\p{Cf}\u2028\u2029]+/gu, " ").trim() || "（无错误信息）";
+/** Whole code points up to `max` UTF-16 units (the unit the ledger's length gate counts), so no surrogate pair is split. */
+const fitUnits = (text: string, max: number): string => {
+  let out = "";
+  for (const ch of text) {
+    if (out.length + ch.length > max) break;
+    out += ch;
+  }
+  return out;
+};
 export function bounceReceipt(b: MergeBounce): string {
   const head = `${PREFIX}（${b.cause}）：PR head ${b.prHead}`;
   if (b.cause === "conflict") return `${head}，main head ${b.mainHead}`;
+  if (b.cause === "update_fail") {
+    const lead = `${head}，更新分支失败：`;
+    return `${lead}${fitUnits(oneLine(b.error ?? ""), RECEIPT_MAX - lead.length - UPDATE_FAIL_TAIL.length)}${UPDATE_FAIL_TAIL}`;
+  }
   // Required check names are ≤ 80 chars (scheduler-config), so the first one always fits; later ones lose their link
   // before they are dropped, and a name is never cut (the ledger matches it against the required list).
   const fits = (list: FailedCheck[]) => `${head}，失败检查 ${JSON.stringify(list)}`.length <= RECEIPT_MAX;
@@ -68,7 +85,10 @@ export function bounceReceipt(b: MergeBounce): string {
   return `${head}，失败检查 ${JSON.stringify(kept)}`;
 }
 const RECEIPT = /^退回 fix（(conflict|ci_fail)）：PR head ([a-f0-9]{40})，(?:main head ([a-f0-9]{40})|失败检查 (\[.*\]))$/;
+const UPDATE_FAIL_RECEIPT = /^退回 fix（update_fail）：PR head ([a-f0-9]{40})，更新分支失败：(.+)；请合入 main 后重新交付$/;
 export function parseBounceReceipt(receipt: string): MergeBounce | null {
+  const u = UPDATE_FAIL_RECEIPT.exec(receipt);
+  if (u) return { cause: "update_fail", prHead: u[1]!, mainHead: null, checks: [], error: u[2]! };
   const m = RECEIPT.exec(receipt);
   if (!m || (m[1] === "conflict") !== !!m[3]) return null;
   if (m[1] === "conflict") return { cause: "conflict", prHead: m[2]!, mainHead: m[3]!, checks: [] };
@@ -92,16 +112,27 @@ export async function bounceStep(run: MergeRun, pr: PrSnapshot, external: MergeE
   return step("resolved", bounceReceipt({ cause, prHead: pr.head, mainHead, checks: [] }));
 }
 
-/** update-branch refused: a re-read showing a conflict on the untouched reviewed head is a bounce, anything else stays an error. */
+/**
+ * update-branch refused: one re-read, never a wait (i28-M12b, PM 10-02 02:4x). A conflict on the untouched reviewed head bounces as
+ * a conflict; anything else (UNKNOWN, BEHIND, CLEAN, a moved head, a failed read) bounces as update_fail on the reviewed head with
+ * GitHub's error, so nothing is left in `updating` waiting for an update that is not running. tests/scheduler-merge-mergestate.test.ts.
+ */
 export async function updateOrBounce(run: MergeRun, external: MergeExternal, step: Step, isStop: (e: unknown) => boolean): Promise<MergeRun> {
   try {
     await external.updateBranch(run.prRef);
     return run;
   } catch (e) {
     if (isStop(e)) throw e;
-    const bounced = await bounceStep(run, await external.inspect(run.prRef), external, step, "conflict");
+    let pr: PrSnapshot | null = null;
+    try {
+      pr = await external.inspect(run.prRef);
+    } catch (reread) {
+      if (isStop(reread)) throw reread;
+      console.error(`⚠️ [merge] ${run.taskId} 更新分支失败后重读出错，按更新失败退回：${(reread as Error).message}`);
+    }
+    const bounced = pr && await bounceStep(run, pr, external, step, "conflict");
     if (bounced) return bounced;
-    throw e;
+    return step("resolved", bounceReceipt({ cause: "update_fail", prHead: run.reviewedHead, mainHead: null, checks: [], error: (e as Error).message }));
   }
 }
 
@@ -160,7 +191,7 @@ export function closeMergeRun(db: Database, ctx: WriteCtx, row: MergeRun, rawRec
     db.prepare("UPDATE tasks SET stage=?, stageBefore=?, round=?, specRev=?, rev=rev+1, updatedAt=? WHERE id=?")
       .run(next.stage, next.stageBefore, next.round, next.specRev, now, task.id);
     insertEvent(db, { actor: ctx.actor, now }, { project: task.project, target: task.id, kind: "stage",
-      text: b.cause === "conflict" ? "PR 和 main 冲突，退回 fix 解冲突" : "PR 头 CI 失败，退回 fix",
+      text: b.cause === "update_fail" ? "更新分支失败，退回 fix 合入 main" : b.cause === "conflict" ? "PR 和 main 冲突，退回 fix 解冲突" : "PR 头 CI 失败，退回 fix",
       data: { from: "merge", to: "fix", round: next.round, specRev: next.specRev, head: task.headSHA, mergeBounce: b } }, false);
   }
   insertEvent(db, { actor: ctx.actor, now, dedupKey: `scheduler:${row.intentId}:merge:conflict` }, {
@@ -173,7 +204,7 @@ export function closeMergeRun(db: Database, ctx: WriteCtx, row: MergeRun, rawRec
 
 const asBounce = (v: unknown): MergeBounce | null => {
   const b = v as MergeBounce | null;
-  return b && (b.cause === "conflict" || b.cause === "ci_fail") && typeof b.prHead === "string" && Array.isArray(b.checks) ? b : null;
+  return b && (b.cause === "conflict" || b.cause === "ci_fail" || b.cause === "update_fail") && typeof b.prHead === "string" && Array.isArray(b.checks) ? b : null;
 };
 
 /** Planner: the bounce that put the card into its current fix stage (that stage event carries it), else null. */
@@ -196,6 +227,13 @@ export const bounceLimitHit = (events: readonly LedgerEvent[], intentId: string)
 
 /** The work package text for a bounce fix (dispatch message and take_order share it); never reads a review report. */
 export function bounceWork(b: MergeBounce): { inputs: string[]; acceptance: string[] } {
+  if (b.cause === "update_fail") {
+    return {
+      inputs: [`更新分支失败：PR head ${b.prHead} 没能自动合入 main（${b.error ?? "无错误信息"}），合并队列已退回`],
+      acceptance: ["git fetch 后合入最新 origin/main，有冲突只 git add 冲突文件、两边的改动都保留", "本机 tsc、guard、相关测试通过",
+        "推送后报新 head；不读审查报告，这一轮不算 P1 修复"],
+    };
+  }
   if (b.cause === "conflict") {
     return {
       inputs: [`解冲突：PR head ${b.prHead} 和 main（${b.mainHead ?? "最新"}）冲突，合并队列已退回`],
@@ -211,6 +249,8 @@ export function bounceWork(b: MergeBounce): { inputs: string[]; acceptance: stri
 }
 
 /** The targeted re-review line for the reviewer after a bounce fix. */
-export const bounceReviewLine = (b: MergeBounce): string => b.cause === "conflict"
+export const bounceReviewLine = (b: MergeBounce): string => b.cause === "update_fail"
+  ? `定向复验：本轮只因更新分支失败退回过（原 head ${b.prHead.slice(0, 12)}），只看合入 main 的合并提交，不沿用旧审查`
+  : b.cause === "conflict"
   ? `定向复验：本轮只因和 main 冲突退回过（原 head ${b.prHead.slice(0, 12)}），只看解冲突的合并提交，不沿用旧审查`
   : `定向复验：本轮只因 PR 头 CI 失败退回过（原 head ${b.prHead.slice(0, 12)}），只看修 CI 的改动，不沿用旧审查`;

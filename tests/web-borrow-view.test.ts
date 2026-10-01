@@ -17,10 +17,11 @@ import { peerCapacity, recordHello } from "../src/lib/ledger-lend-peers.js";
 import { closeLedger, openLedger } from "../src/lib/ledger-store.js";
 import { createTask } from "../src/lib/ledger-write.js";
 import { readLend, updateLend } from "../src/lib/lend-config.js";
-import { buildBorrowEntry, effectiveLend, type LendContact } from "../src/lib/lend-policy.js";
+import { effectiveLend, type LendContact } from "../src/lib/lend-policy.js";
 import type { Principal } from "../src/lib/principals.js";
 import type { ProjectDef } from "../src/lib/projects.js";
 import { parseLedgerArgs } from "../src/manager/ledger-identity.js";
+import { BORROW_BOOLS, BORROW_FLAGS, buildBorrowSet } from "../src/manager/lend.js";
 
 const at = "2026-09-29T00:00:00Z";
 const cred = (grant: Grant): DeviceCredential => ({ id: "dev_x", v: 1, type: "bearer", hash: "h", deviceName: "d", grant, createdAt: at, expiresAt: "2099-01-01T00:00:00Z" });
@@ -54,11 +55,11 @@ let schedPath: string;
 let calls: string[][];
 let runner: (args: string[]) => Promise<Record<string, unknown> | null>;
 
-/** 假 runner：按 CLI 同一个解析器拆参数，再走 buildBorrowEntry / updateLend 写临时 lend.json —— 写进去的就是 CLI 会写的 */
+/** 假 runner：按 CLI 同一个解析器与组条目函数（buildBorrowSet，锁内读旧值）写临时 lend.json —— 写进去的就是 CLI 会写的 */
 async function fakeCli(args: string[]): Promise<Record<string, unknown>> {
   const [kind, sub, ...rest] = args;
   expect(kind).toBe("borrow");
-  const p = parseLedgerArgs(rest, sub === "off" ? ["peer"] : ["projects", "roles", "max-open"]);
+  const p = parseLedgerArgs(rest, sub === "off" ? ["peer"] : BORROW_FLAGS, sub === "off" ? [] : BORROW_BOOLS);
   if ("error" in p) return { ok: false, error: p.error };
   if (sub === "off") {
     const err = await updateLend((f) => {
@@ -69,14 +70,15 @@ async function fakeCli(args: string[]): Promise<Record<string, unknown>> {
     }, lendPath);
     return err ? { ok: false, error: err } : { ok: true };
   }
-  const built = buildBorrowEntry({ ref: p.pos[0]!, projects: p.flags.projects, roles: p.flags.roles, maxOpen: p.flags["max-open"] }, contacts, PROJECTS);
-  if (!built.ok) return { ok: false, error: `${built.error}（manager project-list 看项目 id）` };
-  await updateLend((f) => {
-    const i = f.borrow.findIndex((e) => e.peer === built.entry.peer);
-    if (i >= 0) f.borrow[i] = built.entry;
-    else f.borrow.push(built.entry);
+  const built = await updateLend((f) => {
+    const b = buildBorrowSet(p.pos[0]!, p.flags, p.bools.has("keep-unset"), f, { contacts, projects: PROJECTS });
+    if (!b.ok) return b;
+    const i = f.borrow.findIndex((e) => e.peer === b.entry.peer);
+    if (i >= 0) f.borrow[i] = b.entry;
+    else f.borrow.push(b.entry);
+    return b;
   }, lendPath);
-  return { ok: true };
+  return built.ok ? { ok: true } : { ok: false, error: `${built.error}（manager project-list 看项目 id）` };
 }
 
 const writeLend = (borrow: unknown[]) => writeFileSync(lendPath, JSON.stringify({ version: 1, enabled: false, lend: [], borrow }));
@@ -137,10 +139,10 @@ describe("鉴权", () => {
 });
 
 describe("写路径只经 CLI", () => {
-  test("PUT：参数逐字（peer 在 -- 之后，角色只有 review），写回后 borrow status 与 GET 一致", async () => {
+  test("PUT：参数逐字（--keep-unset、值用 --k=v、peer 在 -- 之后、没带的不传），写回后 borrow status 与 GET 一致", async () => {
     const r = await call(OWNER, "/borrow/peers/fresh", put({ projects: ["claude-orchestrator", "side"], maxOpen: 5 }));
     expect(r?.status).toBe(200);
-    expect(calls).toEqual([["borrow", "set", "--projects", "claude-orchestrator,side", "--roles", "review", "--max-open", "5", "--", "fresh"]]);
+    expect(calls).toEqual([["borrow", "set", "--keep-unset", "--projects=claude-orchestrator,side", "--max-open=5", "--", "fresh"]]);
     const status = effectiveLend(await readLend(lendPath), contacts, PROJECTS, NOW).borrow;
     const v = await view();
     expect(v.borrow.effective).toEqual(status);
@@ -179,7 +181,7 @@ describe("写路径只经 CLI", () => {
     contacts.push({ name: "--max-open" });
     await call(OWNER, "/borrow/peers/--max-open", put({ projects: ["side"], maxOpen: 2 }));
     expect(calls[0]!.slice(-2)).toEqual(["--", "--max-open"]);
-    expect(parseLedgerArgs(calls[0]!.slice(2), ["projects", "roles", "max-open"])).toMatchObject({ pos: ["--max-open"], flags: { "max-open": "2" } });
+    expect(parseLedgerArgs(calls[0]!.slice(2), BORROW_FLAGS, BORROW_BOOLS)).toMatchObject({ pos: ["--max-open"], flags: { "max-open": "2" } });
   });
   test("个人项目选进来：CLI 拒（准入以 buildBorrowEntry 为准），回固定码不透传原文，文件不变", async () => {
     const before = readFileSync(lendPath);
@@ -239,10 +241,11 @@ describe("容量与协议版本如实（同一 now 下与 peerCapacity 逐字段
     expect(by.revoked!.grant).toBeNull();
     for (const p of ["revoked", "expired", "spent"]) expect(by[p]!.capacity!.why).toBeTruthy();
   });
-  test("projects：overflow / prefer 显示成 balance，off 原样；maxActiveWorkers 照抄", async () => {
+  test("projects：overflow / prefer 显示成 balance，off 原样；maxActiveWorkers 照抄；档位缺省 balance、角色缺省 review", async () => {
+    const local = { localPriority: "balance", roles: ["review"], repo: null, reviewFirst: [] };
     expect((await view()).projects).toEqual([
-      { id: "claude-orchestrator", mode: "balance", maxActiveWorkers: 4 },
-      { id: "side", mode: "off", maxActiveWorkers: 1 },
+      { id: "claude-orchestrator", mode: "balance", maxActiveWorkers: 4, ...local },
+      { id: "side", mode: "off", maxActiveWorkers: 1, ...local },
     ]);
   });
   test("可选项目不含个人项目；可选 peer 不含禁用联系人；失效条目按码给原因", async () => {

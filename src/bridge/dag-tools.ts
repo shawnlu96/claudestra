@@ -184,7 +184,7 @@ function claim(keys: string[]): string | null {
 const START_OPTIONAL = ["base", "branch", "taskId", "title", "item", "repo", "placement"] as const;
 /** 回执里给 ui / security 卡补的一句；code 卡的 next 逐字不变 */
 const TEMPLATE_NOTE: Record<string, string> = {
-  ui: "；ui 卡：合并前要 owner 看前后截图（extra.screenshots ≥ 2 + screenshotsDigest）", security: "；security 卡：只在本机跨模型审查，不进借算力池",
+  ui: "；ui 卡：合并前 PM 验收前后截图（extra.screenshots ≥ 2 + screenshotsDigest；改整体观感的用 ledger ui-owner-visual <卡> on 交 owner 看）", security: "；security 卡：只在本机跨模型审查，不进借算力池",
 };
 
 async function startNode(deps: DagToolDeps, call: VerifiedCall, args: unknown): Promise<OrderToolResult> {

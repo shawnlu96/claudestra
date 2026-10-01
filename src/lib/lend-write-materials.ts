@@ -7,6 +7,7 @@
 import type { Database } from "bun:sqlite";
 import { lastReviewOf, type WriteOffer } from "./ledger-lend-lease.js";
 import type { LedgerTask } from "./ledger-stages.js";
+import { uiRejectLend } from "./ledger-ui-approve-verdict.js";
 import { LedgerError } from "./ledger-store.js";
 import { isBaseBranch, stepOfStage } from "./lend-git.js";
 import type { RemoteHead } from "./order-deliver.js";
@@ -30,6 +31,8 @@ export async function writeMaterials(db: Database, task: LedgerTask, q: { peer: 
     if (!r.ok) throw new LedgerError("invalid", `查不到 ${q.repo} 的 ${q.base}：${r.error}`);
     return { fp, base: q.base, baseSha: r.head, report: null };
   }
+  const ui = uiRejectLend(db, task); // PM 退回截图：内联 PM 的意见，不是那份已通过的审查报告（ledger-ui-approve-verdict.ts）
+  if (ui) return { fp, base: q.base, baseSha: null, report: ui.report };
   const path = lastReviewOf(db, task).path;
   const report = readTextSoft(path);
   if (!report) throw new LedgerError("invalid", `找不到上一轮审查报告原文（${path ?? "卡上最近的审查没记报告路径"}），修复单要把它内联给对方`);

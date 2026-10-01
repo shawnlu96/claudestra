@@ -2,14 +2,15 @@
 /**
  * 设置 · Peer 协作页底部的「借入」面板（i28-R7b）：借谁的机器、每台现在能放几单、协议版本、远端在跑的单。
  * 开着时每 15 秒拉一次，页面切到后台就停；读接口 403 / 404（不是 owner 全权设备 / 老 bridge）整块不渲染。
- * 改设置的按钮只给 canRunFleet 的设备（与 bridge 写门同一来源）。remote.mode 还没有写入口，这里只读显示。
+ * 改设置的按钮只给 canRunFleet 的设备（与 bridge 写门同一来源）。分配表（i28-Q1）：本机一行（每个项目）+ 每台 peer 一行，
+ * 档位 / 角色 / 上限一点就存，旁边是本周已用（只读参考）。remote.mode 还没有网页写入口，这里只读显示。
  */
 import { useEffect, useState } from "react";
 import { fleetAccess } from "@/lib/api/fleet";
 import { useT } from "@/lib/i18n";
 import { Section } from "@/features/chat/components/settings/section";
-import type { BorrowView } from "./borrow-api";
-import { addableContacts, POLL_MS, sortPeers, stalePeers } from "./borrow-model";
+import { addableContacts, POLL_MS, reviewFirstFor, sortPeers, stalePeers } from "./borrow-model";
+import { LocalRow } from "./borrow-alloc";
 import { BorrowPeerCard } from "./borrow-peer-card";
 import { borrowFeed, EMPTY_FEED, visiblePeers, type FeedState } from "./borrow-feed";
 import { NewPeer } from "./borrow-new-peer";
@@ -62,25 +63,6 @@ function useCanWrite(): boolean {
   return ok;
 }
 
-function ProjectModes({ view }: { view: BorrowView }) {
-  const t = useT();
-  const names = new Map(view.borrow.projects.map((p) => [p.id, p.name]));
-  if (!view.projects.length) return null;
-  return (
-    <ul className="divide-y divide-base-content/5 rounded-lg bg-base-100">
-      {view.projects.map((p) => (
-        <li key={p.id} className="flex min-w-0 items-center gap-2 px-3 py-2 text-[12px]">
-          <span className="min-w-0 truncate">{names.get(p.id) ?? p.id}</span>
-          <span className="shrink-0 text-[11px] tabular-nums text-base-content/45">{t("本机 {n} 位", { n: p.maxActiveWorkers })}</span>
-          <span className={`badge badge-sm ml-auto shrink-0 ${p.mode === "off" ? "badge-ghost text-base-content/55" : "border-primary/30 bg-primary/10 text-primary"}`}>
-            {t(p.mode === "off" ? "只用本机" : "平均分配")}
-          </span>
-        </li>
-      ))}
-    </ul>
-  );
-}
-
 export function BorrowPanel() {
   const t = useT();
   const { view, receivedAt, hidden, seq, gone, feed } = useBorrowView();
@@ -93,13 +75,17 @@ export function BorrowPanel() {
   const stale = stalePeers(view).filter((s) => !gone.has(s.peer));
   const addable = addableContacts(view).filter((c) => c !== adding);
   const stamp = { serverNow: view.now, receivedAt, tick };
+  const names = new Map(options.map((p) => [p.id, p.name]));
   return (
     <div className="mt-3 space-y-3">
       <Section title={t("借别人的电脑跑我的活")}>
         <div className="space-y-2">
-          <ProjectModes view={view} />
+          {view.projects.map((p) => (
+            <LocalRow key={p.id} project={p} name={names.get(p.id) ?? p.id} quota={view.localQuota} serverNow={view.now} canWrite={canWrite} seq={seq} feed={feed} />
+          ))}
           {sortPeers(visiblePeers({ view, gone })).map((p) => (
             <BorrowPeerCard key={p.peer} peer={p} options={options} limit={view.borrow.maxOpenLimit} canWrite={canWrite} seq={seq} feed={feed}
+              reviewFirst={reviewFirstFor(view, p.peer)}
               dropped={view.borrow.dropped.filter((d) => d.peer === p.peer)} {...stamp} />
           ))}
           {stale.map((s) => <StaleEntry key={s.peer} s={s} view={view} canWrite={canWrite} feed={feed} />)}

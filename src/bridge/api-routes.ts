@@ -621,12 +621,8 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
     // 只建标记目录（瞬间）⇒ 列表立刻隐藏、归档栏立刻出现，请求亚秒返回；
     // 会话快照与停窗口 fire-and-forget 跑后台，卡住/失败都不影响分类结果。
     {
-      const { USER_ARCHIVE_ROOT } = await import("../lib/session-archive.js");
-      const { existsSync: ex2 } = await import("node:fs");
-      const { mkdir: mk2 } = await import("node:fs/promises");
-      if (!ex2(`${USER_ARCHIVE_ROOT}/${name}`)) {
-        await mk2(`${USER_ARCHIVE_ROOT}/${name}`, { recursive: true }).catch(() => {});
-      }
+      const marked = await (await import("../lib/agent-archive-marker.js")).markAgentArchived(name).catch((e: Error) => e);
+      if (marked instanceof Error) return apiJson(500, { ok: false, error: `写归档标记失败: ${marked.message}` });
       void runManager("archive", name).catch(() => {});
       void runManager("kill", name).catch(() => {});
       return apiJson(200, { ok: true, archived: true, background: "快照 + 停窗口在后台跑" });
@@ -744,7 +740,7 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
           const full = `${d}/${e.name}`;
           if (e.isDirectory()) await rec(full);
           else {
-            files++;
+            if (e.name !== ".meta.json") files++; // meta 不是会话：agent 归档标记只有它，显示 0 个会话
             const st = await fsp.stat(full).catch(() => null);
             if (st) {
               bytes += st.size;
