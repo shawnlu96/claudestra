@@ -11,12 +11,13 @@ import type { CallerIdentity } from "./caller-identity.js";
 import { answerAsk, getAsk, hasAsksTable, patchAsk, type Ask } from "./ledger-asks.js";
 import { getMeta, getTask } from "./ledger-store.js";
 import { appendEvent } from "./ledger-write.js";
-import { appendDefaultSpec, prepareDefaultSpec, SpecReplan } from "./order-ask-default-spec.js";
+import { appendDefaultSpec, prepareDefaultSpec, SpecBusy, SpecReplan } from "./order-ask-default-spec.js";
 import { askNoticeText } from "./order-ask.js";
 
 export const ASK_DEFAULT_MS = 15 * 60_000;
-/** 追加连续失败这么多次（每分钟一次）就停手、记事件交 PM，不再挡同一规格后面的自动定 */
-const APPEND_MAX_TRIES = 10;
+/** 追加连续失败这么多次（每分钟一次）就投递给 PM 一次，之后退避重试（翻倍，最长一小时）：任务一直留着，文件恢复了就补上 */
+const APPEND_ALERT_TRIES = 10;
+const APPEND_BACKOFF_MAX_MS = 60 * 60_000;
 
 export interface SweepDeps {
   /** 状态变了发 SSE（bridge publishAsk） */
@@ -53,17 +54,28 @@ function closeIfDue(db: Database, id: string, now: number): Ask | null {
   }).immediate();
 }
 
-/** 追加失败：计数；规格已变、计划作废的重新计划；到上限记 failed + 卡上一条事件，PM 手动补 */
+const failText = (a: Ask, why: string): string => `${a.taskId ?? a.project} 自动定（ask ${a.id}）连续 ${APPEND_ALERT_TRIES} 次没能追加进规格：`
+  + `${why.slice(0, 300)}。已按执行者默认做法结案；追加任务还在，之后退避重试（最长每小时一次），修好规格文件就会补上，也可以直接手动写进规格。`;
+
+/** 追加失败：计数、退避；计划作废的重新计划；排在同一规格前一条后面的（SpecBusy）不计次。任务永远保持 pending，不设终态 */
 function appendFailed(db: Database, a: Ask, e: Error, now: number): void {
+  if (e instanceof SpecBusy) return;
   const tries = (Number(a.extra.defaultAppendTries) || 0) + 1;
   const replan = e instanceof SpecReplan ? { defaultAppendPlan: null } : {};
-  if (tries < APPEND_MAX_TRIES) return patchAsk(db, a.id, { extra: { defaultAppendTries: tries, ...replan } }, now);
-  patchAsk(db, a.id, { extra: { defaultAppendTries: tries, defaultAppend: "failed", ...replan } }, now);
-  if (a.taskId) {
+  const wait = tries < APPEND_ALERT_TRIES ? 0 : Math.min(APPEND_BACKOFF_MAX_MS, 60_000 * 2 ** (tries - APPEND_ALERT_TRIES));
+  patchAsk(db, a.id, { extra: { defaultAppendTries: tries, defaultAppendNextAt: now + wait, defaultAppendError: e.message.slice(0, 1000), ...replan } }, now);
+  if (tries === APPEND_ALERT_TRIES && a.taskId) {
     appendEvent(db, { actor: "system:ask-default", dedupKey: `ask-default-failed:${a.id}`, now }, { project: a.project, target: a.taskId, kind: "note",
-      text: `${a.taskId} 自动定（ask ${a.id}）没能追加进规格：${e.message.slice(0, 300)}。已按执行者默认做法结案，请 PM 手动把这条写进规格。`,
-      data: { op: "ask_default_append_failed", askId: a.id, error: e.message.slice(0, 1000) } });
+      text: failText(a, e.message), data: { op: "ask_default_append_failed", askId: a.id, error: e.message.slice(0, 1000) } });
   }
+}
+
+/** 到了次数线就真正投递给 PM（同一 messageId 幂等）；投出去才记 alerted，没投出去下次扫描再投 */
+async function alertPm(db: Database, id: string, notify: SweepDeps["notify"], now: number): Promise<void> {
+  const a = getAsk(db, id);
+  if (!notify || !a?.assignee || a.extra.defaultAppendAlerted || (Number(a.extra.defaultAppendTries) || 0) < APPEND_ALERT_TRIES) return;
+  const sent = await notify(a.assignee, failText(a, String(a.extra.defaultAppendError ?? "")), `ask-default-failed:${a.id}`);
+  if (sent.handed) patchAsk(db, a.id, { extra: { defaultAppendAlerted: true } }, now);
 }
 
 function appendOnce(db: Database, id: string, now: number): boolean {
@@ -90,10 +102,13 @@ export async function sweepAskDefaults(db: Database, now = Date.now(), deps: Swe
       if (deps.notify && open?.state === "open" && isDefaultAsk(open) && open.extra.notice !== "handed") await renotify(db, open, deps.notify, now);
       const a = closeIfDue(db, id, now);
       if (!a) continue;
+      await alertPm(db, id, deps.notify, now);
+      if (Number(a.extra.defaultAppendNextAt) > now) continue;
       try {
         if (!appendOnce(db, id, now)) continue;
       } catch (e) {
         appendFailed(db, a, e as Error, now);
+        await alertPm(db, id, deps.notify, now);
         console.error(`⚠️ ask ${id} 自动定追加未完成（第 ${(Number(a.extra.defaultAppendTries) || 0) + 1} 次）：${(e as Error).message}`);
         deps.publish?.(getAsk(db, id) as Ask);
         continue;

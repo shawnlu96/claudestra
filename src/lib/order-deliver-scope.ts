@@ -110,20 +110,25 @@ export function scopeInputs(db: Database, task: LedgerTask, head: string | null)
   return globs(task).length ? [UNREGISTERED] : [];
 }
 
-/** Keep oversized lists in the event with a pointer in the order; scope registration must never make a valid order too large. */
-export function withDeliverScope<T extends { inputs: string[]; head: string | null }>(db: Database | undefined, task: LedgerTask, order: T): T {
-  if (!db) return order;
-  const scope = scopeInputs(db, task, order.head).join("\n");
-  if (!scope) return order;
+/**
+ * 把范围信息放进审查单：先只放指针、交 fit（fitFindings）压上一轮 findings，保证至少留指针；再在压好的单里把指针换成放得下的最完整清单。
+ * 反过来先放清单再压，预算紧时清单整段丢、压完腾出的空间也补不回来（r2 P1）。连指针都放不下的单不加这一行，事件仍在台账里。
+ */
+export function withDeliverScope<T extends { inputs: string[]; head: string | null }>(db: Database | undefined, task: LedgerTask, order: T,
+  fit: (w: T) => T = (w) => w): T {
+  const scope = db ? scopeInputs(db, task, order.head).join("\n") : "";
+  if (!scope) return fit(order);
   const pointer = `完整规格外文件清单见 ${task.id} 台账 deliver_scope 事件（当前审查 head）；理由不充分记 P2。`;
-  const append = (text: string): T => ({ ...order, inputs: order.inputs.length < WIRE_LIMITS.items ? [...order.inputs, text]
-    : [...order.inputs.slice(0, -1), `${order.inputs.at(-1)}\n${text}`] });
-  for (let limit = Buffer.byteLength(scope); limit >= 0; limit = limit > 0 ? Math.floor(limit / 2) : -1) {
-    const next = append(limit >= Buffer.byteLength(scope) ? scope : `${clipWire(scope, limit)}\n${pointer}`);
-    if (Buffer.byteLength(JSON.stringify(next)) <= WIRE_MAX_BYTES - 512 && next.inputs.every((s) => Buffer.byteLength(s) <= WIRE_LIMITS.input)) return next;
+  // 条数到上限就并进最后一条，否则另起一条；fitFindings 只在后面追加说明，这个位置不会变
+  const full = order.inputs.length >= WIRE_LIMITS.items, at = full ? order.inputs.length - 1 : order.inputs.length;
+  const slot = (text: string) => (full ? `${order.inputs[at]}\n${text}` : text);
+  const fitted = fit({ ...order, inputs: full ? order.inputs.with(at, slot(pointer)) : [...order.inputs, slot(pointer)] });
+  const ok = (w: T, max: number) => Buffer.byteLength(JSON.stringify(w)) <= max && w.inputs.every((s) => Buffer.byteLength(s) <= WIRE_LIMITS.input);
+  for (let limit = Buffer.byteLength(scope); limit > 0; limit = Math.floor(limit / 2)) {
+    const next = { ...fitted, inputs: fitted.inputs.with(at, slot(limit >= Buffer.byteLength(scope) ? scope : `${clipWire(scope, limit)}\n${pointer}`)) };
+    if (ok(next, WIRE_MAX_BYTES - 512)) return next;
   }
-  // A wire already at its cap cannot hold even a pointer. Its durable event still exists, and dispatch is not refused.
-  return order;
+  return ok(fitted, WIRE_MAX_BYTES) ? fitted : fit(order);
 }
 
 /** 挂池入口（CLI lend-offer、调度 scheduler-pool-step）在事务外调：卡在 review 才登记，挂池事务里的 reviewOrder 只读 */

@@ -193,15 +193,48 @@ test("a stale plan whose section never reached the file is re-planned at the cur
   expect(text.split(`<!-- ask-default:${a.id} -->`)).toHaveLength(2);
 });
 
-test("an append that keeps failing gives up after the cap, tells the PM via an event and stops blocking the spec", async () => {
+test("an append that keeps failing alerts the PM through the notice channel, backs off, and still lands once the spec is back", async () => {
   const a = await ask();
-  rmSync(spec);
-  for (let i = 0; i < 10; i++) await sweepAskDefaults(db, now + ASK_DEFAULT_MS + i * 60_000);
-  expect(getAsk(db, a.id)?.extra).toMatchObject({ defaultAppend: "failed", defaultAppendTries: 10 });
-  expect(listEvents(db, { target: "T1" }).filter((e) => e.data.op === "ask_default_append_failed")).toHaveLength(1);
-  writeFileSync(spec, original);
   const b = await ask({ question: "第二个" });
-  expect(await sweepAskDefaults(db, now + ASK_DEFAULT_MS * 2)).toBe(1);
-  expect(readFileSync(spec, "utf8")).toContain(`<!-- ask-default:${b.id} -->`);
-  expect(getAsk(db, a.id)?.extra.defaultAppend).toBe("failed");
+  rmSync(spec);
+  const sent: string[][] = [];
+  let up = false;
+  const notify = async (to: string, _text: string, messageId: string) => (sent.push([to, messageId]), { handed: up, note: up ? "queued" : "offline" });
+  const t0 = now + ASK_DEFAULT_MS, min = 60_000;
+  for (let i = 0; i < 10; i++) await sweepAskDefaults(db, t0 + i * min, { notify });
+  for (const x of [a, b]) expect(getAsk(db, x.id)?.extra).toMatchObject({ defaultAppend: "pending", defaultAppendTries: 10 });
+  expect(sent.sort()).toEqual([["agent-pm", `ask-default-failed:${a.id}`], ["agent-pm", `ask-default-failed:${b.id}`]].sort());
+  // 没投出去：下次扫描同一 messageId 再投；投出去才记 alerted，之后不再投
+  up = true;
+  await sweepAskDefaults(db, t0 + 10 * min, { notify });
+  expect(sent).toHaveLength(4);
+  expect(getAsk(db, a.id)?.extra).toMatchObject({ defaultAppendAlerted: true, defaultAppendTries: 11 });
+  await sweepAskDefaults(db, t0 + 11 * min, { notify });
+  expect(getAsk(db, a.id)?.extra.defaultAppendTries).toBe(11);
+  writeFileSync(spec, original);
+  await sweepAskDefaults(db, t0 + 12 * min, { notify });
+  await sweepAskDefaults(db, t0 + 13 * min, { notify });
+  const text = readFileSync(spec, "utf8");
+  expect(text.startsWith(original)).toBe(true);
+  for (const x of [a, b]) expect(text.split(`<!-- ask-default:${x.id} -->`)).toHaveLength(2);
+  expect([getAsk(db, a.id)?.extra.defaultAppend, getAsk(db, b.id)?.extra.defaultAppend]).toEqual(["done", "done"]);
+  expect(sent).toHaveLength(4);
+  expect(listEvents(db, { target: "T1" }).filter((e) => e.data.op === "ask_default_append_failed")).toHaveLength(2);
+});
+
+test("an ask queued behind an unfinished append on the same spec waits without counting failures", async () => {
+  const a = await ask();
+  const b = await ask({ question: "第二个" });
+  const at = now + ASK_DEFAULT_MS;
+  for (const x of [a, b]) {
+    answerAsk(db, x.id, { choices: [], labels: [], text: "按执行者默认做法定", principal: "system:ask-default", via: "terminal", at, final: true });
+    patchAsk(db, x.id, { extra: { defaultAppend: "pending", defaultAt: at } });
+  }
+  prepareDefaultSpec(db, getAsk(db, a.id)!);
+  // a 只写了半截、规格又被改过：a 计次，b 排在后面不计次
+  appendFileSync(spec, `\n\n<!-- ask-default:${a.id} -->\n半截`);
+  appendFileSync(spec, "\n## PM 定\n后改的\n");
+  for (let i = 0; i < 3; i++) await sweepAskDefaults(db, at + i * 60_000);
+  expect(getAsk(db, a.id)?.extra.defaultAppendTries).toBe(3);
+  expect(Number(getAsk(db, b.id)?.extra.defaultAppendTries) || 0).toBe(0);
 });

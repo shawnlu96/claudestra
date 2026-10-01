@@ -130,13 +130,13 @@ function reviewOrder(db: Database, task: LedgerTask, orderId: string, input: Off
   const events = listEvents(db, { project: task.project, target: task.id });
   const prev = prevReview(events, task.round);
   const bounce = reviewAfterBounce(events);
-  return fitFindings(withDeliverScope(db, task, orderWireOf({
+  return withDeliverScope(db, task, orderWireOf({
     taskId: task.id, specRev: task.specRev, head, round: task.round, node: "adversarial_review", step: "review", dedupKey: orderId,
     inputs: [...split([[`规格原文（specRev ${task.specRev}）`, input.spec]]), ...(bounce ? [bounceReviewLine(bounce)] : []), standardAnswers("review")],
     outputs: ["逐项结论（findingId / family / severity / probe / description）", "报告正文（markdown），随结论一起交"],
     acceptance: ["对抗式：专找能打穿规格保证的路径", "只审标题里的 head：只读，不改、不提交、不推送"],
     writeBack: "用 submit_verdict（M3 前是 lend submit）交结论和报告正文，单号见标题", findings: prev.findings,
-  }, { repo: input.repo, pr: input.pr })), prev.report);
+  }, { repo: input.repo, pr: input.pr }), (w) => fitFindings(w, prev.report));
 }
 
 /**

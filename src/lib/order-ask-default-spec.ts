@@ -2,7 +2,7 @@
  * 「自动定」一节怎么追加进规格：先把计划（文件、偏移、前缀哈希、整节文字）落库，再按计划用 O_APPEND 只写缺的尾巴——只追加，从不改写
  * 已有字节（验收线 5，改写 = P0）。崩溃在中途：下次核对前缀哈希与已写的那段，补齐剩下的。
  * 计划失效（规格在两次尝试之间被改过）：文件里还没有本条的起始标记 → 抛 SpecReplan，按当前文件末尾重新计划；
- * 已经有完整的一节 → 算写完；只有半截又被改过 → 抛错计次，到上限由 order-ask-default.ts 交 PM。tests/order-ask-default.test.ts。
+ * 已经有完整的一节 → 算写完；只有半截又被改过 → 抛错计次，到次数线由 order-ask-default.ts 投递给 PM、之后退避重试。tests/order-ask-default.test.ts。
  */
 import type { Database } from "bun:sqlite";
 import { createHash } from "node:crypto";
@@ -18,6 +18,8 @@ const startMarker = (id: string) => `<!-- ask-default:${id} -->`;
 
 /** 计划作废、可以按当前文件末尾重来（文件里没有本条的任何完整标记） */
 export class SpecReplan extends Error {}
+/** 同一规格前一条追加还没完成：排队等它，不算本条失败 */
+export class SpecBusy extends Error {}
 
 /** Called under the ledger write lock, in a separate transaction from appendDefaultSpec. */
 export function prepareDefaultSpec(db: Database, a: Ask): void {
@@ -27,7 +29,7 @@ export function prepareDefaultSpec(db: Database, a: Ask): void {
   if (!path) throw new Error("找不到规格文件路径，保留追加任务");
   // A failed append owns this file's tail until repaired; later asks must not interleave their sections with it.
   if (listAsks(db, { states: ["answered"] }).some((x) => x.id !== a.id && x.extra.defaultAppend === "pending" && planOf(x)?.path === path)) {
-    throw new Error("同一规格有未完成的追加，先恢复前一条");
+    throw new SpecBusy("同一规格有未完成的追加，先恢复前一条");
   }
   const before = readFileSync(path);
   const quote = (s: string) => s.split(/\r?\n/).map((l) => `> ${l}`).join("\n");

@@ -129,7 +129,7 @@ export function reviewOrderOf(db: Database, slot: ReviewSlot, dir = reviewsDir()
     findings: prev.findings,
     fallback: wf?.fallback ? clip(wf.fallback, WIRE_LIMITS.fallback) : null,
   };
-  const checked = parseOrderWire(fitFindings(withDeliverScope(db, task, order), prev.report));
+  const checked = parseOrderWire(withDeliverScope(db, task, order, (w) => fitFindings(w, prev.report)));
   return checked.ok ? { ok: true, order: checked.value } : { ok: false, error: `审查单构造出错（${checked.error}）` };
 }
 

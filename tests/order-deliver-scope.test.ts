@@ -12,6 +12,8 @@ import { reviewOrderOf } from "../src/lib/review-order.js";
 import { workOrderFor } from "../src/lib/scheduler-work-order.js";
 import { offerLend } from "../src/lib/ledger-lend.js";
 import type { SchedulerIntent } from "../src/lib/ledger-scheduler.js";
+import { runLedger } from "../src/manager/ledger.js";
+import type { Registry } from "../src/manager/core.js";
 
 let db: Database, path: string, dir: string;
 const H = "a".repeat(40), B = "b".repeat(40);
@@ -144,4 +146,30 @@ test("deliver still succeeds when scope collection is unavailable and records th
     });
   expect(r).toMatchObject({ ok: true, stage: "review" });
   expect(listEvents(db, { target: "T1" }).filter((e) => e.data.op === "deliver_scope_unavailable")).toHaveLength(1);
+});
+
+test("CLI deliver registers outside the transaction too, so a manual card's local take_review is not left without a record", async () => {
+  db.run("UPDATE tasks SET stage = 'build', round = 0, agent = 'agent-author' WHERE id = 'T1'");
+  const r = await runLedger(["deliver", "T1", "--from", "build", "--head", H], { db, actor: "owner", projectIds: ["p"], now: () => Date.now(),
+    loadRegistry: async () => ({ agents: {} }) as unknown as Registry, saveRegistry: async () => {} });
+  expect(r).toMatchObject({ ok: true });
+  expect(task().stage).toBe("review");
+  // 测试里读不到真仓库，登记落成「未能登记」；关键是登记跑过了，审查单不再是「还没有登记记录」
+  expect(listEvents(db, { target: "T1" }).filter((e) => String(e.data.op).startsWith("deliver_scope"))).toHaveLength(1);
+  expect(listed()).not.toContain("还没有登记记录");
+});
+
+test("long prior findings are fitted first: the pool order keeps the registered list (or at least its pointer)", async () => {
+  db.run("UPDATE tasks SET round = 2 WHERE id = 'T1'");
+  const findings = Array.from({ length: 7 }, (_, i) => ({ findingId: `F${i}`, family: "f", severity: "P1", probe: "repro text. ".repeat(280) }));
+  db.query("INSERT INTO events (ts,actor,project,target,kind,text,data) VALUES (100,'agent-rv','p','T1','review','',?)")
+    .run(JSON.stringify({ round: 1, verdict: "changes", findings, p0: 0, p1: 7, p2: 0, path: "reviews/T1-r1.md" }));
+  await ensureDeliverScope(db, task(), H, async () => ({ base: B, files: [{ path: "src/outside.ts", added: 2, deleted: 1 }] }));
+  const offer = (spec: string) => JSON.stringify(offerLend(db, { actor: "owner" }, { taskId: "T1", peer: "mate", family: "codex", repo: "o/r", pr: 1,
+    spec, borrow: { peer: "mate", projects: ["p"], roles: ["review"], maxOpen: 3 } }));
+  const pool = offer("spec line\n".repeat(1200));
+  expect(pool).toContain("上一轮逐项结论单子装不下");
+  expect(pool).toContain("src/outside.ts");
+  const local = reviewOrderOf(db, { task: task(), orderId: "T1:review:r2", node: "review", head: H, auto: false });
+  expect(local.ok && local.order.inputs.join("\n")).toContain("src/outside.ts");
 });
