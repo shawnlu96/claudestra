@@ -27,7 +27,8 @@ if [ "${RELAY_WITH_WEB:-0}" = "1" ]; then
   [ -f "${ROOT:?}/web/out/index.html" ] || { echo "web/out 里没有 index.html：next.config 还不是 output: export？" >&2; exit 1; }
   # 上面的 rsync 排除了 web/，第一次部署时远端没有 web/ 父目录——macOS 自带的 openrsync 不会替你建，只会断连报 unexpected end of file
   ssh "${TARGET:?}" "mkdir -p '${REMOTE_DIR:?}/web/out'"
-  rsync -az --delete "${ROOT:?}/web/out/" "${TARGET:?}:${REMOTE_DIR:?}/web/out/"
+  # 远端 share/ 是手工放的分享页，不在构建产物里，排除以免被 --delete 删除。
+  rsync -az --delete --exclude '/share/' "${ROOT:?}/web/out/" "${TARGET:?}:${REMOTE_DIR:?}/web/out/"
 fi
 
 # 远端：install.sh 自己会 chown 给 relay 用户；端口从单元文件读，改过 RELAY_PORT 也能探到
