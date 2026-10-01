@@ -117,3 +117,14 @@ describe("explainPlacement (the lend-orders column)", () => {
     expect(explainPlacement(snap("review", { pool: two, intents: [poolIntent("cancelled", "mate")] }))).toMatchObject({ where: "peer:b" });
   });
 });
+
+describe("a merge bounce on a peer-written card (i28-M12 × W9)", () => {
+  test("the fix would go back to the write-lease peer, which only gets a review report: PM takes it, nothing is sent", () => {
+    const WRITE: RemotePolicy = { mode: "balance", roles: ["review", "write"], poolTimeoutMin: 15, repo: "o/r" };
+    const mate = { peer: "mate", open: 0, maxOpen: 2, roles: ["review" as const, "write" as const], v2: { ...v2({ codex: 1, claude: 0 }), roles: ["review" as const, "write" as const] } };
+    const bounce = { cause: "conflict", prHead: HEAD, mainHead: "e".repeat(40), checks: [] };
+    const s = snap("fix", { pool: pool({ remote: WRITE, peers: [mate], writeLeasePeer: "mate" }),
+      events: [ev(1, "task", { op: "new" }), ev(11, "stage", { from: "merge", to: "fix", round: 1, specRev: 1, head: HEAD, mergeBounce: bounce })] });
+    expect(planScheduler(s)).toMatchObject({ kind: "escalate", code: "placement_bounce" });
+  });
+});

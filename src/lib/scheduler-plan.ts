@@ -147,6 +147,8 @@ function dispatchWork(s: PlannerSnapshot, node: FlowNode): PlannerDecision {
   if (away && "escalate" in away) return escalate("placement_lease", away.escalate);
   const fix = node.stage === "fix" ? bouncePackage(fixBounce(s.events, s.task.stage)) ?? fixPackage(s) : null;
   if (fix && "kind" in fix) return fix;
+  // A lend fix order inlines the last review report only: a merge bounce's conflict / red CI would never reach the peer.
+  if (away && fix?.bounce) return escalate("placement_bounce", "合并退回（冲突 / CI 失败）的修复单带不到远端写租约方（它只收审查报告），交 PM 手动推进");
   const scope = fileResources(s); // no scope: the local path below escalates it, a peer never writes unlocked
   if (away && scope) return makeIntent(s, node, "dispatch", away.reason, [taskResource(s), ...scope],
     { recipient: `${POOL_RECIPIENT}${away.peer}`, ...(fix ? { workOrder: fix } : {}) });
