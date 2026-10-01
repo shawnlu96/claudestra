@@ -6,6 +6,7 @@
  * ui 卡另附截图交付一节（同样覆盖不掉）：缺截图时调度器在审查通过后把卡交回 PM，执行者得先知道要交什么。
  */
 import type { WorkflowTemplate } from "./ledger-scheduler.js";
+import { ASK_DEFAULT_GUIDANCE } from "./order-standard-answers.js";
 
 export interface PromptVars {
   task: string;
@@ -40,7 +41,8 @@ const AUTO_SECTION = `
 - 派单全部来自调度服务（take_order 取单）。**不要给 {PM} 发任何进度、交付或「收到」消息**，PM 不在这条链上。
 - 「复述」单：把复述（≤ 40 行）写进 {LEDGER}/reviews/{TASK}-restate.md，再把阶段推到 restate（\`ledger stage {TASK} --from spec --to restate --text "复述见 reviews/{TASK}-restate.md"\`），然后停下等开工单。
 - 「开工 / 修复」单：做完 push，**开好 PR（base main，已开过的不用重开）**，再用 deliver 工具（或 \`ledger deliver {TASK} --from build|fix --head <完整 sha> --pr <完整 PR 链接>\`）交付，就结束这一轮。PR 链接由 deliver 自动登记，没开 PR 会被拒。调度器会自己派审、转修复、排合并。
-- 只有这三种情况才找 PM：要改的文件超出卡上的文件范围；规格有歧义、必须有人拍板；环境坏了、自己修不了。找的时候一条消息说清楚，首行写「[需 PM 定 {TASK}]」。
+- ${ASK_DEFAULT_GUIDANCE}
+- 规格外文件交付时自动登记，审查员判断理由是否充分（不充分记 P2）；与其他在跑卡共改时冲突两边保留。
 `;
 
 const UI_SECTION = `

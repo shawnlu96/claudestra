@@ -205,7 +205,9 @@ import {
 // Discord 交互块（D5-4 从本文件搬出；import 时零副作用，下面显式注册）
 import { registerSlashCommands } from "./bridge/slash-commands.js";
 import { registerInteractionHandlers } from "./bridge/discord-interactions.js";
-import { admitCaller, answerWhoami } from "./bridge/caller-identity.js";
+import { admitCaller, answerWhoami, callerOf } from "./bridge/caller-identity.js";
+import { recordDefaultPmReply } from "./lib/order-ask-default.js";
+import { askDbIfExists } from "./bridge/asks.js";
 import { answerOrderTool, lendFrameDenied } from "./bridge/order-tools.js";
 
 // ============================================================
@@ -2381,6 +2383,7 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
         }
 
         if (answering && fromChannelId) pendingAgentCalls.consume(fromChannelId, target.channelId, answering);
+        recordDefaultPmReply(askDbIfExists, callerOf(ws, msg).identity, targetName, msg.text); // 投出去之后：PM 带 ask id 答了默认做法提问（不抛）
         // v1.9.6+: send_to_agent 触发的 turn 不发完成 @（用户没在这个 channel 问问题）
         lastMessageSource.set(target.channelId, "agent");
 

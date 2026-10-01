@@ -15,6 +15,7 @@ import { readLend, type BorrowEntry, type LendFamily, REPO_RE } from "../lib/len
 import { effectiveLend, readLendContext } from "../lib/lend-policy.js";
 import { remoteHeadAt, stepOfStage } from "../lib/lend-git.js";
 import { writeMaterials } from "../lib/lend-write-materials.js";
+import { ensureReviewScope } from "../lib/order-deliver-scope.js";
 import { isDeliverRequest, LEND_VERSION, parseLendRequest, type LendEndpoint } from "../lib/lend-wire.js";
 import { cancelLend, claimLend, leaseLend, listLendOrders, offerLend, pollLend, reclaimLend, refuse, reofferLend, sweepLend, type LendNotice,
   type OfferInput } from "../lib/ledger-lend.js";
@@ -134,6 +135,7 @@ async function withWrite(c: LedgerCli, task: LedgerTask, input: OfferInput): Pro
 async function offer(c: LedgerCli, again: boolean): Promise<Result> {
   const task = c.task(c.p.pos[1]);
   c.requireManager(task.project, again ? "重挂出借单" : "挂出借单");
+  await ensureReviewScope(c.db, task.id); // 规格外文件在挂池事务外先登记，事务里的审查单只读（i28-ASK2）
   const peer = offerPeer(c, task).peer;
   const input = await withWrite(c, task, offerInput(c, task, (await borrowOf(c, peer))(task.project)));
   const reason = c.p.flags.reason ?? "";
