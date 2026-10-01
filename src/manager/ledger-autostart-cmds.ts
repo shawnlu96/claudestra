@@ -42,7 +42,8 @@ function claim(c: LedgerCli): Result {
   const t = c.need("template");
   if (t !== "invalid" && !Object.hasOwn(TEMPLATE_VERSION, t)) throw new LedgerError("invalid", "--template 只能是 code / ui / security / invalid");
   const max = int(c, "max-workers");
-  const r = claimNode(c.db, c.ctx(), { featureId, key, arm: c.need("arm"), template: t === "invalid" ? null : (t as AutostartTemplate), svc: svcOf(c, () => max) });
+  const r = claimNode(c.db, c.ctx(), { featureId, key, arm: c.need("arm"), template: t === "invalid" ? null : (t as AutostartTemplate), svc: svcOf(c, () => max),
+    ownerVisual: c.p.bools.has("owner-visual") });
   return { ok: true, ...r };
 }
 
@@ -112,8 +113,8 @@ export function autostartShow(c: LedgerCli, f: Feature): Record<string, unknown>
 
 export const AUTOSTART_CMDS: Record<string, CommandSpec> = {
   "scheduler-autostart": {
-    valued: [...STEP_FLAGS, "arm", "max-workers", "outcome", "code", "failed-step", "rolled-back", "leftovers"],
-    usage: "scheduler-autostart claim <feature> <节点> --arm --template --max-workers | step <claim> <子命令> … | settle <claim> --outcome done|failed|unknown（调度服务专用）",
+    valued: [...STEP_FLAGS, "arm", "max-workers", "outcome", "code", "failed-step", "rolled-back", "leftovers"], bools: ["owner-visual"],
+    usage: "scheduler-autostart claim <feature> <节点> --arm --template --max-workers [--owner-visual] | step <claim> <子命令> … | settle <claim> --outcome done|failed|unknown（调度服务专用）",
     run(c) {
       const sub = AUTOSTART_SUBS[c.p.pos[1] ?? ""];
       if (!sub) throw new LedgerError("invalid", "scheduler-autostart claim|step|settle");

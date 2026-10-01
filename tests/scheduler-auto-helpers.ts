@@ -32,7 +32,8 @@ function shots(dir: string): string[] {
   return out;
 }
 
-export function autoFixture(opts: { template?: "code" | "ui"; reviewerRuntime?: string } = {}) {
+/** ownerVisual: a ui card whose screenshots go to the owner ask; without it PM accepts them (scheduler-ui-gate.ts). */
+export function autoFixture(opts: { template?: "code" | "ui"; reviewerRuntime?: string; ownerVisual?: boolean } = {}) {
   const template = opts.template ?? "code";
   const dir = mkdtempSync(join(tmpdir(), "t68f-auto-")), path = join(dir, "ledger.sqlite"), db = openLedger(path);
   const registryPath = join(dir, "registry.json");
@@ -44,7 +45,7 @@ export function autoFixture(opts: { template?: "code" | "ui"; reviewerRuntime?: 
   let now = 1000;
   const at = (actor: string) => ({ actor, now: (now += 10) });
   createTask(db, at("owner"), { project: "p", id: "T1", title: "auto", kind: "code", agent: "agent-task-one",
-    extra: { fileGlobs: ["src/lib/x.ts"], ...(template === "ui" ? { screenshotsDigest: DIGEST, screenshots: shots(dir) } : {}) } });
+    extra: { fileGlobs: ["src/lib/x.ts"], ...(template === "ui" ? { screenshotsDigest: DIGEST, screenshots: shots(dir) } : {}), ...(opts.ownerVisual ? { ownerVisual: true } : {}) } });
   db.query("INSERT INTO meta (project, key, value) VALUES ('p', 'pms', '[\"pm\"]') ON CONFLICT (project, key) DO UPDATE SET value = excluded.value").run();
   setWorkflow(db, at("owner"), { taskId: "T1", taskRev: 1, template, templateVersion: 2, mode: "auto", authorFamily: "claude", fallback: "只报错不修" });
   const deps = (actor: string): LedgerDeps => ({

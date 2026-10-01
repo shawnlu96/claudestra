@@ -7,6 +7,7 @@ import { cardWorkerSlots } from "./scheduler-worker-slot.js";
 import { POOL_RECIPIENT, type PoolFacts } from "./scheduler-pool-plan.js";
 import { pinnedWork, reviewPlacement } from "./scheduler-placement-plan.js";
 import { BOUNCE_LIMIT_REASON, bounceLimitHit, fixBounce, reviewAfterBounce, type MergeBounce } from "./scheduler-merge-conflict.js";
+import { uiMergeBlock, uiPassStep, uiRejectFix, type PmUiGate } from "./scheduler-ui-gate.js";
 
 export interface WorkerRef {
   agent: string;
@@ -47,6 +48,10 @@ export interface PlannerSnapshot {
   reviewDispatches: readonly ReviewDispatchProof[];
   uiGate: OwnerGate;
   screenshotsDigest: string | null;
+  /** PM's ui-approve / ui-reject (scheduler-ui-gate.ts); absent = none. */
+  pmUiGate?: PmUiGate;
+  /** The card's screenshots go to the owner, not PM; absent = PM accepts. */
+  ownerVisual?: boolean;
   /** Shared-pool facts (i28-R9); absent = never pool (observe cards, CLI replans of later nodes). */
   pool?: PoolFacts | null;
   /** Live pool orders of this card no live intent accounts for (scheduler-pool-facts strayPoolOrders); absent = none. */
@@ -68,6 +73,7 @@ interface PlannedIntent {
   sessionRole?: "author" | "reviewer";
   sessionFamily?: AuthorFamily;
   askBind?: { task: string; specRev: number; head: string; screenshotsDigest: string };
+  pmNotice?: { task: string; specRev: number; head: string; screenshotsDigest: string; round: number };
   pmDiffNotice?: boolean;
   reviewMode?: "adversarial";
 }
@@ -142,7 +148,7 @@ function sessionGate(s: PlannerSnapshot, node: FlowNode, role: "author" | "revie
 function dispatchWork(s: PlannerSnapshot, node: FlowNode): PlannerDecision {
   const prior = liveIntent(s, node, "dispatch") ?? pinnedWork(s, latestSeq(s.events, s.task), node.stage === "fix" ? "fix" : "write");
   if (prior) return prior;
-  const fix = node.stage === "fix" ? bouncePackage(fixBounce(s.events, s.task.stage)) ?? fixPackage(s) : null;
+  const fix = node.stage === "fix" ? bouncePackage(fixBounce(s.events, s.task.stage)) ?? uiRejectFix(s) ?? fixPackage(s) : null;
   if (fix && "kind" in fix) return fix;
   const session = sessionGate(s, node, "author");
   if (session) return session;
@@ -227,23 +233,14 @@ function fixDecision(s: PlannerSnapshot, node: FlowNode, facts: ReviewFacts): Pl
 
 function reviewPass(s: PlannerSnapshot, node: FlowNode, facts: ReviewFacts): PlannerDecision {
   if (s.workflow?.template === "ui") {
-    const gate = s.uiGate;
-    if (!s.screenshotsDigest || !/^[a-f0-9]{64}$/i.test(s.screenshotsDigest)) {
-      return escalate("ui_missing_screenshots", "前后截图摘要缺失，不能请 owner 看旧图", facts.eventSeq);
-    }
-    if (gate.state === "rejected") return escalate("ui_rejected", "owner 未批准前后截图", facts.eventSeq);
-    if (gate.state !== "none" && (gate.head !== s.task.headSHA || gate.specRev !== s.task.specRev ||
-      gate.screenshotsDigest !== s.screenshotsDigest)) {
-      return escalate("ui_stale", "截图许可绑定的 head/specRev 已过期", facts.eventSeq);
-    }
-    if (gate.state === "open") return wait("owner_screenshot", "等待 owner 看前后截图");
-    if (gate.state === "approved" && !gate.ownerVerified) return escalate("ui_unverified", "截图许可缺已认证的 owner 答复", facts.eventSeq);
-    if (gate.state === "none") {
-      const sent = s.intents.findLast((i) => i.node === node.id && i.action === "ask" && i.causalSeq >= facts.eventSeq);
-      if (sent?.status === "done") return wait("owner_screenshot", "截图 ask 已发，等待 owner 答复入账");
-      return makeIntent(s, node, "ask", "请 owner 看前后截图", [taskResource(s)], {
-        askBind: { task: s.task.id, specRev: s.task.specRev, head: s.task.headSHA as string, screenshotsDigest: s.screenshotsDigest },
-      });
+    const ui = uiPassStep(s, node.id, facts.eventSeq);
+    const bind = { task: s.task.id, specRev: s.task.specRev, head: s.task.headSHA as string, screenshotsDigest: s.screenshotsDigest as string };
+    if (ui.kind === "wait") return wait(ui.code, ui.reason);
+    if (ui.kind === "escalate") return escalate(ui.code, ui.reason, facts.eventSeq);
+    if (ui.kind === "ask_owner") return makeIntent(s, node, "ask", "请 owner 看前后截图", [taskResource(s)], { askBind: bind });
+    if (ui.kind === "notify_pm") return makeIntent(s, node, "ask", "请 PM 看前后截图", [taskResource(s)], { pmNotice: { ...bind, round: s.task.round } });
+    if (ui.kind === "fix") {
+      return makeIntent(s, node, "stage", "PM 未通过前后截图，进入 fix", [taskResource(s)], { targetStage: "fix" });
     }
   }
   return makeIntent(s, node, "stage", "审查通过，进入合并队列", [taskResource(s)], {
@@ -278,14 +275,8 @@ function mergeReviewGate(s: PlannerSnapshot): PlannerDecision | null {
     (facts.verdict === "changes" && !facts.findings.some((f) => f.severity === "P2"))) {
     return escalate("merge_review_changes", "审查结论尚未通过合并闸", facts.eventSeq);
   }
-  if (s.workflow?.template === "ui") {
-    const gate = s.uiGate;
-    if (gate.state !== "approved" || gate.ownerVerified !== true || !s.screenshotsDigest ||
-      !/^[a-f0-9]{64}$/i.test(s.screenshotsDigest) || gate.head !== s.task.headSHA ||
-      gate.specRev !== s.task.specRev || gate.screenshotsDigest !== s.screenshotsDigest) {
-      return escalate("merge_ui_unapproved", "前后截图许可未由 owner 核实，或与当前 head/specRev/摘要不符", facts.eventSeq);
-    }
-  }
+  const ui = s.workflow?.template === "ui" ? uiMergeBlock(s) : null;
+  if (ui) return escalate("merge_ui_unapproved", ui, facts.eventSeq);
   return null;
 }
 

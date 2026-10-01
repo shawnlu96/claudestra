@@ -15,7 +15,7 @@ import type { RegistryAgent } from "./registry.js";
 import type { RemotePolicy } from "./scheduler-config.js";
 import type { PlannerSnapshot, WorkerRef } from "./scheduler-plan.js";
 import { taskWorkerRefs } from "./scheduler-sessions.js";
-import { projectUiGate } from "./scheduler-ui-gate.js";
+import { ownerVisualOf, projectPmUiGate, projectUiGate } from "./scheduler-ui-gate.js";
 
 export interface SnapshotOpts {
   registry: readonly RegistryAgent[];
@@ -95,5 +95,6 @@ export function observeSnapshot(db: Database, task: LedgerTask, opts: SnapshotOp
     queueFrozen: getMeta(db, task.project).queueFrozen.frozen, fileGlobs: globs,
     heldResources: slots.held, workerCount: slots.workerCount, maxWorkers: opts.maxWorkers, freeWorkerSlot: slots.freeWorkerSlot,
     author, reviewer, reviewDispatches: shadow.proofs, uiGate: projectUiGate(db, task, opts.now ?? Date.now()), screenshotsDigest: digest,
+    pmUiGate: projectPmUiGate(db, task, events), ownerVisual: ownerVisualOf(db, task, events),
   };
 }

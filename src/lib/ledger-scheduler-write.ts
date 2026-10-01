@@ -18,8 +18,7 @@ import { currentReviewFacts } from "./scheduler-review.js";
 import { poolAckSeq } from "./scheduler-pool-facts.js";
 import { isPoolIntent } from "./scheduler-pool-plan.js";
 import { templateFor } from "./scheduler-template.js";
-import { bindHash, checkAsk } from "./ask-bind.js";
-import { getAsk, ownerAnswered } from "./ledger-asks.js";
+import { uiMergeRefusal } from "./scheduler-ui-gate.js";
 import { autostartGrant } from "./ledger-autostart-grant.js";
 
 const projectSeq = (db: Database, project: string): number =>
@@ -56,19 +55,8 @@ function requireReviewedMerge(db: Database, task: ReturnType<typeof mustTask>, w
     return ack !== null && ack > i.eventSeq && ack < read.facts.eventSeq;
   });
   if (!prior) throw new LedgerError("conflict", "合并前缺本轮审查派单回执");
-  if (workflow.template === "ui") {
-    const digest = task.extra.screenshotsDigest;
-    if (typeof digest !== "string" || !/^[a-f0-9]{64}$/i.test(digest)) throw new LedgerError("conflict", "UI 前后截图摘要缺失");
-    const params = { task: task.id, specRev: task.specRev, head: task.headSHA, screenshotsDigest: digest };
-    const rows = db.query(`SELECT id FROM asks WHERE taskId = ? AND kind = 'authorize' AND state = 'answered'
-      ORDER BY updatedAt DESC LIMIT 20`).all(task.id) as { id: string }[];
-    const approved = rows.some(({ id }) => {
-      const ask = getAsk(db, id);
-      if (!ask || ask.fromAgent !== "scheduler" || ask.bind?.action !== "scheduler_ui_screenshot" || !ownerAnswered(ask.answer)) return false;
-      return checkAsk(ask, bindHash({ ...ask.bind, params }, "scheduler"), "scheduler", now).ok;
-    });
-    if (!approved) throw new LedgerError("conflict", "缺同 head/specRev/摘要的 owner 截图授权");
-  }
+  const ui = workflow.template === "ui" ? uiMergeRefusal(db, task, now) : null;
+  if (ui) throw new LedgerError("conflict", ui);
 }
 
 export interface WorkflowInput {

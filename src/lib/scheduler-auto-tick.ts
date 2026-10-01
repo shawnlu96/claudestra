@@ -15,6 +15,7 @@ import { autoSnapshot } from "./scheduler-auto-snapshot.js";
 import { SchedulerStopped } from "./scheduler-maintenance.js";
 import { CLAIM_LEASE_MS, driveDispatch, type DriveOutcome, type SchedulerLedgerOps } from "./scheduler-dispatch.js";
 import { planScheduler, type PlannerDecision } from "./scheduler-plan.js";
+import { pmUiNotice } from "./scheduler-ui-gate.js";
 import { getSchedulerSession, type SessionRole } from "./scheduler-sessions.js";
 import { planRejectedReason } from "./ledger-scheduler-write.js";
 import type { SnapshotOpts } from "./scheduler-snapshot.js";
@@ -226,6 +227,7 @@ class Card {
       await this.settle(intent.id, "pending", "cancelled", `未开 ask：${shots.missing}`);
       return this.escalate(shots.missing, intent.id);
     }
+    if (shots && plan?.pmNotice) return this.out("ask", await pmUiNotice(this.task, plan.pmNotice, shots.refs, this.deps.notifyPm, (f, t, r) => this.settle(intent.id, f, t, r)));
     const r = await this.deps.manager("ledger", ...cmd, "--max-workers", String(this.opts.maxWorkers));
     if (r.ok === true && r.duplicate !== true && plan?.pmDiffNotice) await this.diffNotice();
     if (r.ok === true) return this.out(intent.action, intent.action === "stage" ? `${this.task.stage}→${plan?.targetStage}` : `ask ${String(r.askId)}`);
