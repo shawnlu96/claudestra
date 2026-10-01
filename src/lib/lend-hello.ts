@@ -90,7 +90,7 @@ export function owedPeers(db: Database, now: number): string[] {
   });
 }
 
-/** hello 正文（不含 v / boot / seq）。没有生效授权 = grant:null、0 槽；W8 前 roles 不会含 write；claude 永远 0 槽；busy 含已接下没领的单 */
+/** hello 正文（不含 v / boot / seq）。没有生效授权 = grant:null、0 槽；WRITE_ROLE_OPEN 关着时 roles 不会含 write；claude 永远 0 槽；busy 含已接下没领的单 */
 export function helloBody(db: Database, entry: LendEntry | undefined, now: number, writeOpen = WRITE_ROLE_OPEN): Omit<HelloRequest, "v" | "boot" | "seq"> {
   const grant = entry ? {
     until: Date.parse(entry.until ?? ""), roles: entry.roles.filter((r) => r !== "write" || writeOpen), repos: entry.repos, ordersPerDay: entry.ordersPerDay,

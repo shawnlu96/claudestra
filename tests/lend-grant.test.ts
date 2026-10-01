@@ -1,6 +1,7 @@
 /**
  * i28-W1 一次授权的判定与 v1 迁移（src/lib/lend-grant-rules.ts、lend-config.ts migrateV1、lend-policy.ts effectiveLend）：
- * 暂停 / 缺到期时间 / 过期 / 超 7 天 / 含 write 都整条不生效；v1 条目一律迁成暂停，任何边界都不放宽，迁移可以重跑。
+ * 暂停 / 缺到期时间 / 过期 / 超 7 天 / 写单开关关着时含 write 都整条不生效；v1 条目一律迁成暂停，任何边界都不放宽，迁移可以重跑。
+ * 写单已开（i28-R7e）：授权里写了 write 才接写单，没写的照旧只接审查单。
  */
 import { describe, expect, test } from "bun:test";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -23,11 +24,13 @@ describe("授权判定（grantProblem）", () => {
     expect(grantProblem(G, T + DAY)).toBeNull();
   });
 
-  test("P1-3 W8 合并前 write 一律不开：常量是关的；含 write 的授权整条不生效，只有测试显式打开才算", () => {
-    expect(WRITE_ROLE_OPEN).toBe(false);
-    expect(grantProblem({ ...G, roles: ["review", "write"] }, T)).toMatch(/write/);
-    expect(grantProblem({ ...G, roles: ["write"] }, T)).toMatch(/write/);
-    expect(grantProblem({ ...G, roles: ["review", "write"] }, T, true)).toBeNull();
+  test("写单开关：生产缺省开着，含 write 的授权生效；开关关上（writeOpen=false）则含 write 的整条不生效", () => {
+    expect(WRITE_ROLE_OPEN).toBe(true);
+    expect(grantProblem({ ...G, roles: ["review", "write"] }, T)).toBeNull();
+    expect(grantProblem({ ...G, roles: ["write"] }, T)).toBeNull();
+    expect(grantProblem({ ...G, roles: ["review", "write"] }, T, false)).toMatch(/write/);
+    expect(grantProblem({ ...G, roles: ["write"] }, T, false)).toMatch(/write/);
+    expect(grantProblem(G, T, false)).toBeNull();
   });
 
   test("P1-3 没写到期时间 / 授权时间 / 指纹，期限超过 7 天（按授权时刻和按现在都算），授权时间在未来：都不生效", () => {
@@ -49,7 +52,8 @@ describe("授权判定（grantProblem）", () => {
 
   test("effectiveLend 用同一套判定：不生效的列进 dropped，指纹对不上的联系人也剔", () => {
     const file = { version: 2 as const, enabled: true, borrow: [], lend: [G, { ...G, peer: "team-b", fp: "1111-2222-3333-4444", roles: ["review", "write"] as LendEntry["roles"] }] };
-    const eff = effectiveLend({ status: "ok", file }, contacts, [], T + DAY);
+    expect(effectiveLend({ status: "ok", file }, contacts, [], T + DAY).lend.map((e) => e.peer)).toEqual(["team-a", "team-b"]);
+    const eff = effectiveLend({ status: "ok", file }, contacts, [], T + DAY, false);
     expect(eff.lend.map((e) => e.peer)).toEqual(["team-a"]);
     expect(eff.dropped.join()).toContain("team-b");
     expect(effectiveLend({ status: "ok", file }, [{ name: "team-a", fp: "9999-9999-9999-9999" }], [], T + DAY).lending).toBe(false);
@@ -107,8 +111,8 @@ describe("P1-5 v1 → v2 迁移", () => {
   });
 });
 
-describe("P1-3 生产依赖打不开 write（writeOpen 只能由测试注入）", () => {
-  test("lendDeps 不设 writeOpen；按真实状态目录里写了 write 的授权现读，结论仍是不生效", async () => {
+describe("P1 生产依赖的写单开关只认 WRITE_ROLE_OPEN（writeOpen 只能由测试注入）", () => {
+  test("lendDeps 不设 writeOpen；按真实状态目录现读：写了 write 的授权接写单，没写的只接审查单", async () => {
     const { lendDeps } = await import("../src/lib/lend-deps.js");
     const { openLendJournal } = await import("../src/lib/lend-journal.js");
     const { LedgerReader } = await import("../src/lib/ledger-read.js");
@@ -126,10 +130,13 @@ describe("P1-3 生产依赖打不开 write（writeOpen 只能由测试注入）"
       writeFileSync(statePath("peers.json"), JSON.stringify({ httpPeers: [{ name: "team-a", fp: FP, addedAt: "" }], pendingInvites: [] }));
       writeFileSync(LEND_PATH, JSON.stringify({ version: 2, enabled: true, borrow: [],
         lend: [{ ...G, roles: ["review", "write"], grantedAt: iso(now), until: iso(now + DAY) }] }));
-      const g = await liveGrant({ peer: "team-a", fp: FP }, d);
-      expect(g).toMatchObject({ ok: false, problem: expect.stringContaining("write") });
+      const write = { peer: "team-a", fp: FP, family: "codex", preview: { repo: "o/r", step: "write" } };
+      const review = { ...write, preview: { repo: "o/r", step: "review" } };
+      expect(await liveGrant(write, d)).toMatchObject({ ok: true });
+      expect(await liveGrant(review, d)).toMatchObject({ ok: true });
       writeFileSync(LEND_PATH, JSON.stringify({ version: 2, enabled: true, borrow: [], lend: [{ ...G, grantedAt: iso(now), until: iso(now + DAY) }] }));
-      expect(await liveGrant({ peer: "team-a", fp: FP }, d)).toMatchObject({ ok: true });
+      expect(await liveGrant(write, d)).toMatchObject({ ok: false, problem: expect.stringContaining("write") });
+      expect(await liveGrant(review, d)).toMatchObject({ ok: true });
     } finally {
       db.close();
       reader.close();

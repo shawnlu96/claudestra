@@ -132,7 +132,7 @@ describe("bridge 层拦截与一单一绑定", () => {
     expect(code(await routeLendTool("take_review", who(), {}, fake(db).deps))).toBe("invalid_order");
   });
 
-  test("工具对步骤：审查单不能 take_order / deliver；写单不能 take_review / submit_verdict，take_order / deliver 在 W8 前明确拒", async () => {
+  test("工具对步骤：审查单不能 take_order / deliver；写单不能 take_review / submit_verdict，take_order / deliver 明确拒并指向 lend submit", async () => {
     const review = openLendJournal(":memory:");
     addStarted(review);
     for (const tool of ["take_order", "deliver"]) expect(code(await routeLendTool(tool, who(), {}, fake(review).deps))).toBe("wrong_step");
@@ -142,7 +142,7 @@ describe("bridge 层拦截与一单一绑定", () => {
     for (const tool of ["take_order", "deliver"]) {
       const r = await routeLendTool(tool, who(), {}, fake(write).deps);
       expect(code(r)).toBe("write_closed");
-      expect(String(r.error)).toContain("W8");
+      expect(String(r.error)).toContain("lend submit");
     }
   });
 
@@ -350,7 +350,7 @@ describe("反例：拿代理 token 绕过 channel-server 直连（验收线 1）
     c.done();
   });
 
-  test("对照：白名单内的照常过两层（审查单 take_review 拿到订单；写单工具在 W8 前由 bridge 明确拒）", async () => {
+  test("对照：白名单内的照常过两层（审查单 take_review 拿到订单；写单工具由 bridge 明确拒）", async () => {
     const c = await direct();
     expect((await c.ask({ type: "order_tool", requestId: "r1", tool: "take_review", args: {} }))?.result.ok).toBe(true);
     expect((await c.ask({ type: "order_tool", requestId: "r2", tool: "take_order", args: {} }))?.result.code).toBe("wrong_step");
