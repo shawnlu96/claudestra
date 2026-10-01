@@ -1,3 +1,4 @@
+import { FEATURE_DEPS_TOOL } from "./ledger-feature-deps-tool.js";
 /**
  * 子 DAG 与开卡的 MCP 工具定义（i28-L5，docs/architecture/dag-tools.md）：plan_feature / rewrite_dag / start_node / show_dag。
  * 和派单工具走同一条管道（lib/order-tools.ts 的 order_tool 帧 → bridge 认身份 → bridge/dag-tools.ts），这里只放 schema 与说明：
@@ -24,6 +25,7 @@ const REASON_KIND = { type: "string", enum: ["new_issue", "requirement_change", 
 const REASON = { type: "string", description: "原因原文（owner 原话或审查结论），必填" };
 
 export const DAG_TOOLS = [
+  FEATURE_DEPS_TOOL,
   {
     name: "plan_feature",
     description:
