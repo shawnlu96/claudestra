@@ -9,8 +9,11 @@
  */
 import type { Database } from "bun:sqlite";
 import { advance, localDay, openSlots, orderOf, ordersToday, patchOrder, LEASED_STATES, type LendRow, type LendState } from "./lend-journal.js";
-import type { LendEntry } from "./lend-config.js";
-import type { LendAskParams, LendAskVerdict } from "./lend-ask.js";
+import type { LendEntry, LendRead } from "./lend-config.js";
+import type { LendContact } from "./lend-policy.js";
+import type { ProjectDef } from "./projects.js";
+import { liveGrant, REVOKED } from "./lend-grant.js";
+import { endNotice, ensureStartNotice, flushEndNotice, type LendNoticeParams } from "./lend-notice.js";
 import { lendRequest, type LendCall, type Lease, type Receipt } from "./lend-remote.js";
 import type { CloneResult, CloneWrite } from "./lend-clone.js";
 import { isWriteStep, lendBranch, roleOfStep } from "./lend-git.js";
@@ -32,7 +35,11 @@ const BODY_MAX_BYTES = 96 * 1024;
 interface WorkerPort {
   /** registry 里这个名字的 agent（会话 id、工作目录）；没有 = undefined */
   find(name: string): { sessionId?: string; cwd?: string } | undefined;
-  create(name: string, dir: string, purpose: string): Promise<{ ok: true } | { ok: false; error: string }>;
+  /**
+   * gate：准备工作做完、调 manager create 之前再核一次（提前拦）；返回原因 = 授权没了，不起。order 带给 manager create，
+   * 它在登记占位之后、起窗口之前按这张单现核（lend-grant-spawn.ts），收回一侧由 lend revoke 当场停掉已登记的
+   */
+  create(name: string, dir: string, purpose: string, gate: () => Promise<string | null>, order: string): Promise<{ ok: true } | { ok: false; error: string }>;
   send(name: string, sessionId: string, text: string, key: string): Promise<SendResult>;
   /** 结束 worker 并确认窗口已不在；ok:false = 没确认退出（调用方保留现场） */
   kill(name: string): Promise<{ ok: boolean; reason?: string }>;
@@ -44,12 +51,15 @@ export interface LendDeps {
   db: Database;
   now: () => number;
   call: LendCall;
-  /** 开 / 核逐单确认 ask（lend-ask.ts；开经 `ledger lend-ask`，核读台账）；inform = 预先授权期间的每单通知（`ledger lend-inform`） */
-  ask: {
-    open(p: LendAskParams): Promise<{ ok: true; askId: string } | { ok: false; error: string }>;
-    verdict(askId: string, p: LendAskParams): LendAskVerdict;
-    inform(p: LendAskParams): Promise<{ ok: true } | { ok: false; error: string }>;
-  };
+  /** lend.json 与联系人：每个核对点现读（lend-grant.ts liveGrant） */
+  readLend(): Promise<LendRead>;
+  context(): Promise<{ contacts: LendContact[]; projects: ProjectDef[] }>;
+  /** 给出借方 owner 的开跑 / 交付 / 停止通知（`ledger lend-inform`，lend-notice.ts）；ok = bridge 收下了 */
+  notify(p: LendNoticeParams): Promise<{ ok: true } | { ok: false; error: string }>;
+  /** 关一张升级前的逐单确认 ask（`ledger lend-ask --retire`） */
+  retireAsk(askId: string): Promise<{ ok: true } | { ok: false; error: string }>;
+  /** 只给测试走 W8 之后的写单路径；生产不设 = lend-grant-rules.ts WRITE_ROLE_OPEN */
+  writeOpen?: boolean;
   clone(input: { orderId: string; repo: string; pr: number | null; head: string; write?: CloneWrite }): Promise<CloneResult>;
   /** 本机实例公钥的指纹：写单的订单分支按它核；读不到钥匙 = null（不领写单） */
   selfFp(): string | null;
@@ -92,17 +102,6 @@ const leaseFields = (l: Lease, now: number) => ({ leaseGen: l.gen, leaseUntil: n
 /** A 回这几个码 = 这张单在 A 那边已经不归我们了：停 worker，按码记终态 */
 const GONE: Record<string, "cancelled" | "stopped"> = { cancelled: "cancelled", lease_expired: "stopped", stale_gen: "stopped", not_found: "stopped", conflict: "cancelled" };
 
-export function askParams(row: LendRow, entry: LendEntry, d: LendDeps): LendAskParams {
-  const p = row.preview;
-  const fam = entry.families[row.family as "codex"] ?? 0;
-  const fresh = `今天第 ${ordersToday(d.db, row.peer, d.now()) + 1}/${entry.quota.ordersPerDay} 单，${row.family} 位 ${openSlots(d.db, row.peer, row.family)}/${fam}`;
-  return {
-    orderId: row.orderId, peer: row.peer, fp: row.fp, family: row.family, repo: str(p.repo), pr: typeof p.pr === "number" ? p.pr : null, head: str(p.head),
-    taskId: str(p.taskId), step: str(p.step),
-    quota: entry.confirm === "auto" ? `${fresh}，预先授权到 ${entry.until ?? "?"}` : typeof p.askQuota === "string" ? p.askQuota : fresh,
-  };
-}
-
 /** 这张还没 claim 的单现在还能不能领：声明仍在、仓库仍在白名单、今日额度与在跑位都还有 */
 export function claimProblem(row: LendRow, entry: LendEntry | undefined, db: Database, now: number): string | null {
   if (!entry) return `已不再向 ${row.peer} 出借（lend.json 关了或删了这条）`;
@@ -113,7 +112,7 @@ export function claimProblem(row: LendRow, entry: LendEntry | undefined, db: Dat
   const busy = db.query(`SELECT COUNT(*) AS n FROM lend_orders WHERE peer = ? AND family = ? AND state IN (${LEASED_STATES.map(() => "?").join(",")})`)
     .get(row.peer, row.family, ...LEASED_STATES) as { n: number };
   if (busy.n >= slots) return "wait";
-  if (ordersToday(db, row.peer, now) >= entry.quota.ordersPerDay) return "wait";
+  if (ordersToday(db, row.peer, now) >= entry.ordersPerDay) return "wait";
   if (pausedUntil(db, now) !== null) return "wait"; // 本机 Codex 撞额度暂停中：批了也先不领
   return null;
 }
@@ -145,7 +144,7 @@ function writeMismatch(step: string, taskId: string, w: { branch: string } | nul
 
 /** 没起过 worker 就退回：记 released（连同要补做的收尾），再告诉 A（not_started）、删目录、写收据 */
 async function release(row: LendRow, from: LendState, why: string, d: LendDeps): Promise<void> {
-  await settleOrder(advance(d.db, row.orderId, from, "released", { reason: why, settle: { notify: "not_started", removeDir: true } }, d.now()), d);
+  await settleOrder(advance(d.db, row.orderId, from, "released", { reason: why, settle: { notify: "not_started", removeDir: true }, ...endNotice(row, "released", why) }, d.now()), d);
 }
 
 /**
@@ -171,7 +170,9 @@ export async function settleOrder(row: LendRow, d: LendDeps): Promise<void> {
     const closed = await d.closeAsks(row.agent); // 这个 worker 开出的额度 / 登录卡：单结束了，卡也结掉
     if (!closed.ok) throw new Error(`关 ${row.agent} 的 Codex 卡失败：${closed.error}`); // 留着 settle，下一轮再关
   }
-  await d.writeReceipt(row); // 抛了就留着 settle，下一轮再写（appendReceipt 同 orderId 只写一行）
+  const told = await flushEndNotice(row, d);
+  if (!told) return; // 交付 / 停止通知没交出去：留着 settle，下一轮补发
+  await d.writeReceipt(told); // 抛了就留着 settle，下一轮再写（appendReceipt 同 orderId 只写一行）
   patchOrder(d.db, row.orderId, [row.state], { settle: null }, d.now());
 }
 
@@ -185,17 +186,22 @@ async function finish(row: LendRow, to: "acked" | "stopped" | "cancelled", why: 
   const killed = row.agent ? await d.worker.kill(row.agent) : { ok: true };
   if (!killed.ok) return d.log(`${row.orderId} 要收尾（${to}：${why ?? ""}），但 ${row.agent} 没确认退出（${killed.reason ?? "原因不明"}），下轮再停`);
   const settle = { notify: notify && to === "stopped" ? ("stopped" as const) : null, removeDir: to === "acked" || to === "cancelled" };
-  await settleOrder(advance(d.db, row.orderId, row.state, to, { reason: why, ...extra, settle }, d.now()), d);
+  await settleOrder(advance(d.db, row.orderId, row.state, to, { reason: why, ...extra, settle, ...endNotice(row, to, why) }, d.now()), d);
 }
 
-async function startWorker(row: LendRow, d: LendDeps): Promise<void> {
+async function startWorker(row: LendRow, entry: LendEntry, d: LendDeps): Promise<void> {
   const name = row.agent ?? workerName(row.orderId);
   if (!row.agent) row = patchOrder(d.db, row.orderId, ["cloned"], { agent: name }, d.now()); // 先记名字：重启后按名字认领，不建第二个
   let found = d.worker.find(name);
   if (!found) {
+    const told = await ensureStartNotice(row, entry, d);
+    if (!told || !(await stillGranted(told, d))) return; // 通知要先交出去；通知那一下的工夫里收回了也不起
     const o = orderOf(row);
-    const made = await d.worker.create(name, row.dir!, `出借：${row.peer} 的 ${str(o?.taskId)} ${str(o?.step)}（${row.orderId}）`);
+    let denied: string | null = null;
+    const gate = async () => { const g = await liveGrant(told, d); return (denied = g.ok ? null : g.problem); };
+    const made = await d.worker.create(name, row.dir!, `出借：${row.peer} 的 ${str(o?.taskId)} ${str(o?.step)}（${row.orderId}）`, gate, row.orderId);
     found = d.worker.find(name);
+    if (!made.ok && (denied ?? (await gate()))) return void (await revoke(told, denied!, d)); // 子进程那道核对拦下的也按收回收尾
     if (!found && !made.ok) return release(row, "cloned", `起 worker 失败：${made.error}`.slice(0, 400), d);
   }
   if (!found?.sessionId) return d.log(`${name} 已在 registry，还没有会话 id，下轮再看`);
@@ -204,6 +210,7 @@ async function startWorker(row: LendRow, d: LendDeps): Promise<void> {
 }
 
 async function submitOrder(row: LendRow, d: LendDeps): Promise<void> {
+  if (!(await stillGranted(row, d))) return;
   const text = `${row.wire!.text}\n\n${d.footer(row)}`;
   row = patchOrder(d.db, row.orderId, ["started"], { submit: "sending" }, d.now());
   const r = await d.worker.send(row.agent!, row.sessionId!, text, row.orderId);
@@ -305,9 +312,31 @@ async function stopForResult(row: LendRow, why: string, d: LendDeps): Promise<Le
   return row;
 }
 
-/** 已 claim 的单推一步；asked 由 lend-loop 处理（要看声明和 ask） */
+/**
+ * 授权没了（收回 / 过期 / 失效 / 范围收窄，§2.5 的表）：没起 worker 的退回 not_started；在跑的 kill 并确认退出记 stopped（没确认就下一轮再停）；
+ * 结论已落成交付正文的只停 worker，返回行让调用方照常转交。写单的提交还没推送也按停处理：收回之后远端不能再多出副作用。
+ */
+async function revoke(row: LendRow, problem: string, d: LendDeps): Promise<LendRow | null> {
+  const why = `${REVOKED}：${problem}`;
+  // cloned 已记了 agent：上次可能建出了 worker 才中断（还没记 started），按在跑的停，确认退出才收尾
+  const made = row.state === "cloned" && row.agent && (d.worker.find(row.agent) || (await d.worker.alive(row.agent)) !== "no_window");
+  if (made) return (await finish(row, "stopped", why, d, true), null);
+  if (row.state === "claimed" || row.state === "cloned") return (await release(row, row.state, why, d), null);
+  if (row.state === "started" || !row.payload) return (await finish(row, "stopped", why, d, true), null);
+  return stopForResult(row, why, d);
+}
+
+/** 起 worker / 首条派单之前贴着再核一次；没了就按 revoke 收尾，返回 false */
+async function stillGranted(row: LendRow, d: LendDeps): Promise<boolean> {
+  const g = await liveGrant(row, d);
+  return g.ok || (await revoke(row, g.problem, d), false);
+}
+
+/** 已 claim 的单推一步；asked 由 lend-loop 处理。先核授权（每次续租之前都核），没了按 revoke 收尾 */
 export async function driveLeased(row: LendRow, d: LendDeps): Promise<void> {
-  const cur = await heartbeat(row, d);
+  const g = await liveGrant(row, d);
+  const kept = g.ok ? row : await revoke(row, g.problem, d);
+  const cur = kept && (await heartbeat(kept, d));
   if (!cur) return;
   const o = orderOf(cur);
   if (cur.state === "claimed") {
@@ -324,8 +353,8 @@ export async function driveLeased(row: LendRow, d: LendDeps): Promise<void> {
       if (!probe.ok) return release(cur, "claimed", probe.reason, d);
     }
     advance(d.db, cur.orderId, "claimed", "cloned", { dir: got.dir }, d.now());
-  } else if (cur.state === "cloned") {
-    await startWorker(cur, d);
+  } else if (cur.state === "cloned" && g.ok) {
+    await startWorker(cur, g.entry, d);
   } else if (cur.state === "started") {
     // 失败 / 存活 / 运行上限对 started 的每种 submit 都先查：首条派单一直被拒送时 submit 停在 null，
     // 放在派单后面就一轮都查不到，worker 登录失败也照样续租占位（i28-R5a r1 P1-3）
