@@ -95,16 +95,25 @@ function writeLeasePeer(db: Database, taskId: string): string | null {
   return r?.peer ?? null;
 }
 
-export function poolFacts(db: Database, task: LedgerTask, cfg: { remote: RemotePolicy; borrow: readonly BorrowEntry[]; now: number }): PoolFacts {
-  const localReviewers = db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'scheduler_sessions'").get()
-    ? (db.query(`SELECT COUNT(*) AS n FROM scheduler_sessions AS s JOIN tasks AS t ON t.id = s.taskId WHERE t.project = ? AND s.taskId != ?
-      AND s.role = 'reviewer' AND s.state = 'active' AND s.transport != 'peer'`).get(task.project, task.id) as { n: number }).n : 0;
+/** Active local reviewer sessions on the project's other cards (review holds no worker slot, so this is its load). */
+export function localReviewerCount(db: Database, project: string, exceptTask: string | null): number {
+  if (!db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'scheduler_sessions'").get()) return 0;
+  return (db.query(`SELECT COUNT(*) AS n FROM scheduler_sessions AS s JOIN tasks AS t ON t.id = s.taskId WHERE t.project = ? AND s.taskId != ?
+    AND s.role = 'reviewer' AND s.state = 'active' AND s.transport != 'peer'`).get(project, exceptTask ?? "") as { n: number }).n;
+}
+
+/** The project's borrow entries in lend.json order, each with A's live orders there and its lend-v2 view. */
+export function borrowPeers(db: Database, project: string, borrow: readonly BorrowEntry[], now: number): PoolFacts["peers"] {
   const live = (peer: string): number => hasLendTable(db)
     ? (db.query("SELECT COUNT(*) AS n FROM lend_orders WHERE peer = ? AND status IN ('pooled','claimed','unknown')").get(peer) as { n: number }).n : 0;
-  const peers = cfg.borrow.filter((b) => b.projects.includes(task.project))
-    .map((b) => ({ peer: b.peer, open: live(b.peer), maxOpen: b.maxOpen, roles: b.roles, v2: peerV2(db, b, cfg.now) }));
+  return borrow.filter((b) => b.projects.includes(project))
+    .map((b) => ({ peer: b.peer, open: live(b.peer), maxOpen: b.maxOpen, roles: b.roles, v2: peerV2(db, b, now) }));
+}
+
+export function poolFacts(db: Database, task: LedgerTask, cfg: { remote: RemotePolicy; borrow: readonly BorrowEntry[]; now: number }): PoolFacts {
   const lastPeer = scheduledOrders(db, task.id).find((o) => o.status === "done")?.peer ?? null;
-  return { remote: cfg.remote, localReviewers, peers, repo: prCoordinates(task.pr)?.repo ?? null, lastPeer, writeLeasePeer: writeLeasePeer(db, task.id) };
+  return { remote: cfg.remote, localReviewers: localReviewerCount(db, task.project, task.id), peers: borrowPeers(db, task.project, cfg.borrow, cfg.now),
+    repo: prCoordinates(task.pr)?.repo ?? null, lastPeer, writeLeasePeer: writeLeasePeer(db, task.id) };
 }
 
 export interface PoolCounts { pooled: number; claimed: number; done: number; timedOut: number; unknown: number }

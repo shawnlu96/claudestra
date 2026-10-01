@@ -7,6 +7,7 @@ import { describe, expect, test } from "bun:test";
 import type { SchedulerIntent } from "../src/lib/ledger-scheduler.js";
 import type { LedgerEvent, LedgerTask, Stage } from "../src/lib/ledger-stages.js";
 import type { RemotePolicy } from "../src/lib/scheduler-config.js";
+import { explainPlacement } from "../src/lib/scheduler-placement-plan.js";
 import { planScheduler, type PlannerSnapshot, type WorkerRef } from "../src/lib/scheduler-plan.js";
 import type { PoolFacts } from "../src/lib/scheduler-pool-plan.js";
 
@@ -91,5 +92,16 @@ describe("pinned card", () => {
   test("a pin that is not a peer string is ignored (no pin)", () => {
     const s = snap("build", { task: { ...snap("build").task, extra: { placement: "local" } } });
     expect(planScheduler(s)).toMatchObject({ kind: "intent", action: "dispatch", recipient: author.agent });
+  });
+});
+
+describe("explainPlacement (the lend-orders column)", () => {
+  test("says what the planner does: pooled review, local review with the cause, pinned writing that waits, stages without placement", () => {
+    expect(explainPlacement(snap("review"))).toMatchObject({ role: "review", where: "peer:mate", reason: expect.stringContaining("在跑：mate 0 / 本机 0") });
+    expect(explainPlacement(snap("review", { pool: null }))).toEqual({ role: "review", where: "local", reason: "没有借入信息" });
+    const pinned = snap("build", { task: { ...snap("build").task, extra: { placement: "peer:mate" } } });
+    expect(explainPlacement(pinned)).toEqual({ role: "write", where: "peer:mate", reason: "等：固定放在 peer:mate，它现在不能接：scheduler.json remote.roles 不含 write" });
+    expect(explainPlacement(snap("fix"))).toMatchObject({ role: "fix", where: "local" });
+    expect(explainPlacement(snap("merge"))).toEqual({ role: null, where: "-", reason: "merge 阶段不放置" });
   });
 });

@@ -1,10 +1,9 @@
 /**
- * Shared-pool choice for a review node (i28-R9), pure: which peer, if any, gets this round's review instead of a local
- * session. Called only when the node has no live intent. At most one pool attempt per card round and head: after a
- * timeout, a release or a refused offer the round goes local, so a peer that never claims cannot loop the card.
- * A re-review after a pooled round goes back to the same peer first (identity = peer name; each order is a fresh
- * one-shot worker); if that peer cannot take it, the planner falls through to a local cross-family session.
- * tests/scheduler-pool.test.ts.
+ * i28-R9's pool choice for a review node, pure; since i28-W5 the planner uses it only for proto-1 peers (no hello), in
+ * overflow mode (scheduler-placement-plan.ts). At most one pool attempt per card round and head: after a timeout, a
+ * release or a refused offer the round goes local, so a peer that never claims cannot loop the card. A re-review after
+ * a pooled round goes back to the same peer first (identity = peer name; each order is a fresh one-shot worker); if that
+ * peer cannot take it, the planner falls through to a local cross-family session. tests/scheduler-pool.test.ts.
  */
 import type { LendRole } from "./lend-config.js";
 import type { AuthorFamily, SchedulerIntent } from "./ledger-scheduler.js";

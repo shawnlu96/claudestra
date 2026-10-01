@@ -66,3 +66,24 @@ export function pinnedWork(s: PlannerSnapshot, since: number, role: Exclude<Plac
   const why = placed.kind === "peer" ? `${lendRoleOf(role)} 单还不能派给 peer（远端写代码等 W8）` : placed.reason;
   return { kind: "wait", code: "placement_pinned", reason: why };
 }
+
+/**
+ * Read-only view for `ledger lend-orders` (i28-W5): where the card's current node would be placed now and why. Same hooks
+ * as the planner, so it cannot disagree with what the next pass does; stages without a placement say so.
+ */
+export function explainPlacement(s: PlannerSnapshot): { role: PlaceRole | null; where: string; reason: string } {
+  const since = s.events.findLast((e) => e.kind === "stage" && e.data.to === s.task.stage)?.seq ?? s.events.find((e) => e.kind === "task")?.seq ?? 0;
+  if (!s.workflow) return { role: null, where: "local", reason: "不是自动卡，PM 手动派" };
+  if (s.task.stage === "review") {
+    const peer = reviewPlacement(s, since);
+    if (peer) return { role: "review", where: `${POOL_RECIPIENT}${peer.peer}`, reason: peer.reason };
+    const why = !s.pool ? "没有借入信息" : s.reviewer ? "本卡已有审查 session，复审沿用" : s.workflow.template === "security" ? "安全卡只在本机审"
+      : placeFor(snapshotPlacementFacts(s, since), "review", otherFamily(s.workflow.authorFamily)).reason;
+    return { role: "review", where: "local", reason: why };
+  }
+  if (!["spec", "build", "fix"].includes(s.task.stage)) return { role: null, where: "-", reason: `${s.task.stage} 阶段不放置` };
+  const role = s.task.stage === "fix" ? "fix" : "write";
+  const pinned = pinnedWork(s, since, role);
+  if (pinned && pinned.kind === "wait") return { role, where: cardPin(s.task.extra) as string, reason: `等：${pinned.reason}` };
+  return { role, where: "local", reason: placeFor(snapshotPlacementFacts(s, since), role, s.workflow.authorFamily).reason };
+}

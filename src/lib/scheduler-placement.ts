@@ -84,6 +84,7 @@ export function placeFor(f: PlacementFacts, role: PlaceRole, family: AuthorFamil
     const why = peerRefusal(f, f.peers.find((p) => p.peer === name), role, family);
     return why ? { kind: "wait", reason: `固定放在 ${f.pin}，它现在不能接：${why}` } : { kind: "peer", peer: name, reason: `start_node 固定放在 ${f.pin}` };
   }
+  if (!f.remote || f.remote.mode === "off") return { kind: "local", reason: "scheduler.json remote.mode = off，只用本机" };
   const usable = f.peers.map((p, order) => ({ p, order })).filter(({ p }) => !f.tried.includes(p.peer) && !peerRefusal(f, p, role, family));
   const rows: Ranked[] = usable.map(({ p, order }) => ({ where: p.peer, load: p.open, order }));
   if (f.local.room) rows.push({ where: "local", load: f.local.running, order: f.peers.length });

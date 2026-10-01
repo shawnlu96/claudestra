@@ -31,13 +31,13 @@ async function ready(opts: { maxWorkers?: number; borrow?: BorrowEntry[] } = {})
   mkdirSync(reports);
   const key = instanceKeySync(mkdtempSync(join(f.dir, "key-")));
   const borrow = opts.borrow ?? BORROW;
+  const policy: { maxActiveWorkers: number; remote: RemotePolicy } = { maxActiveWorkers: opts.maxWorkers ?? 2, remote: REMOTE };
   const lend = {
-    borrow: async () => borrow, notifyPm: async () => {},
+    borrow: async () => borrow, notifyPm: async () => {}, schedulerPolicy: () => policy,
     result: { reportDir: () => reports, writeReport: (p: string, b: string) => writeFileSync(p, b), sign: (x: string[]) => signPurpose(RECEIPT_PURPOSE, x, key) },
   };
   const cli = (actor: string, ...args: string[]) => f.cliWith({ lend }, actor, ...args) as Promise<Record<string, any>>;
   const deps = { ...f.tickDeps, manager: (...args: string[]) => cli("scheduler", ...args.slice(1)), borrow: async () => borrow };
-  const policy: { maxActiveWorkers: number; remote: RemotePolicy } = { maxActiveWorkers: opts.maxWorkers ?? 2, remote: REMOTE };
   const tick = async () => {
     const r = await schedulerAutoTick(f.db, { p: policy }, deps);
     if (r.failed.length) throw new Error(JSON.stringify(r.failed));
@@ -141,6 +141,22 @@ describe("i28-W5 balance on a real ledger", () => {
       } finally { p.f.close(); }
     });
   }
+});
+
+describe("read-only view: ledger lend-orders shows where the current node goes and why", () => {
+  test("the next pass's choice, with the same reason; a peer gone offline flips it to local with the cause", async () => {
+    const p = await ready();
+    try {
+      p.hello("mate");
+      p.hello("b");
+      expect((await p.cli("pm", "lend-orders", "T1")).placement).toEqual({ role: "review", where: "peer:mate",
+        reason: "挂池：对抗式跨模型审查挂给 mate 的 codex worker（在跑：mate 0 / b 0 / 本机 0；选最少，平手按 复审回上次的 peer > peer 先于本机 > 借入顺序）" });
+      p.f.advance(10 * MIN);
+      expect((await p.cli("pm", "lend-orders", "T1")).placement).toEqual({ role: "review", where: "local", reason: "没有可用的 peer，放本机" });
+      p.policy.remote = { ...REMOTE, mode: "off" };
+      expect((await p.cli("pm", "lend-orders", "T1")).placement).toEqual({ role: "review", where: "local", reason: "scheduler.json remote.mode = off，只用本机" });
+    } finally { p.f.close(); }
+  });
 });
 
 describe("pinned card", () => {
