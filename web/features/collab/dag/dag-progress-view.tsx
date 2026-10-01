@@ -37,7 +37,7 @@ function Row(props: {
           {r.pm && <span className={d.pm}>PM</span>}
           <span>{r.agent}</span>
         </span>
-        <span className={d.pact}>{props.act || (r.work.length || r.offGraph.length ? "" : tr("空闲"))}</span>
+        <span className={d.pact}>{props.act || (r.work.length || r.offGraph.length || r.state !== "idle" ? "" : tr("空闲"))}</span>
       </div>
       <div className={d.cards}>
         {r.work.map((w) => (

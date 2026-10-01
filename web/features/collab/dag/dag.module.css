@@ -98,7 +98,7 @@
 .vmeta { grid-column: 2 / 4; color: var(--muted); font-size: var(--fs-3); }
 .go { display: inline-flex; align-items: center; gap: 6px; margin: 0 0 8px; padding: 6px 12px; border-radius: 8px; border: 1px solid var(--line-2); background: var(--panel-2); color: var(--text); }
 .go:disabled { opacity: .45; }
-.ditem { display: flex; gap: 6px; align-items: baseline; padding: 3px 0; }
+.ditem { display: flex; gap: 6px; align-items: center; padding: 3px 0; }
 .dreason { color: var(--muted); font-size: var(--fs-3); padding-left: 2px; }
 .dk_added { color: var(--ok); } .dk_changed { color: var(--warn); } .dk_cancelled, .dk_rewritten { color: var(--err); }
 

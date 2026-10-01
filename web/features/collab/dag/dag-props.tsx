@@ -91,10 +91,10 @@ const KINDS = [
   ["added", "增", "plus"], ["removed", "删", "x"], ["changed", "带入有改", "rotateCcw"], ["cancelled", "取消", "circleX"], ["rewrittenDone", "已完成被改写", "circleAlert"],
 ] as const;
 
-function Items({ list, kind }: { list: DiffItem[]; kind: string }) {
+function Items({ list, kind, icon }: { list: DiffItem[]; kind: string; icon: IconName }) {
   return list.map((it) => (
     <div key={it.key}>
-      <div className={`${d.ditem} ${d[`dk_${kind}`] ?? ""}`}><span className={v.tid}>{it.key}</span><span>{it.oneLine}</span></div>
+      <div className={`${d.ditem} ${d[`dk_${kind}`] ?? ""}`}><Icon name={icon} size={12} /><span className={v.tid}>{it.key}</span><span>{it.oneLine}</span></div>
       {it.reason !== undefined && <div className={d.dreason}>{it.reason || "—"}</div>}
     </div>
   ));
@@ -110,8 +110,7 @@ export function DiffPage(props: { feature: FeatureCard; compare: Compare; data: 
       {!lists && <div className={v.muted}>{tr("正在读取…")}</div>}
       {lists && KINDS.filter(([k]) => k !== "rewrittenDone" || lists.rewrittenDone.length > 0).map(([k, label, icon]) => (
         <Sec key={k} title={`${tr(label)} · ${lists[k].length}`}>
-          <span className={d[`dk_${k === "rewrittenDone" ? "rewritten" : k}`]}><Icon name={icon} size={12} /></span>
-          <Items list={lists[k]} kind={k === "rewrittenDone" ? "rewritten" : k} />
+          <Items list={lists[k]} kind={k === "rewrittenDone" ? "rewritten" : k} icon={icon} />
         </Sec>
       ))}
     </Shell>
