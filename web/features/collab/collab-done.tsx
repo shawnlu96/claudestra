@@ -9,6 +9,8 @@ import { byDone, chainLoadMore, chainOnOverview, chainOnPage, fetchLedgerDone, n
 import { collabLoader } from "./collab-loader";
 import type { LedgerOverview, LedgerTaskView, Tr } from "./collab-model";
 import { Icon } from "./collab-icons";
+import { StepDots } from "./collab-step-line";
+import { stepLineView } from "./collab-step-line-model";
 import s from "./collab.module.css";
 import { pageVisibility } from "./use-collab";
 import v from "./v4/v4.module.css";
@@ -102,7 +104,7 @@ export function DoneMoreButton({ d, tr }: { d: DonePages; tr: Tr }) {
 
 const shown = (t: LedgerTaskView) => t.stage === "done" || t.stage === "verified";
 
-/** 手机「更早完成」：今日完成以外的已完成卡（窗口里的 + 翻到的），默认收起；展开后在底部接着翻 */
+/** 手机「更早完成」：最近窗口之外（含今日溢出）的已完成卡，默认收起；翻页卡保留步骤小点 */
 export function MobileEarlierDone(props: { project: string; ov: LedgerOverview; todayDone: readonly string[]; onPick: (id: string) => void; tr: Tr }) {
   const { ov, tr } = props;
   const d = useDonePages(props.project, ov);
@@ -118,14 +120,18 @@ export function MobileEarlierDone(props: { project: string; ov: LedgerOverview; 
       </button>
       {open && (
         <div className={v.og} style={{ marginTop: 6 }}>
-          {rows.map((t) => (
-            <button key={t.id} type="button" className={v.ot} onClick={() => props.onPick(t.id)}>
-              <span className={`${v.dot} ${v.green}`} />
-              <span className={v.tid}>{t.id}</span>
-              <span className={v.ott}>{t.title}</span>
-              <span className={v.ost}>{tr(t.stage === "done" ? "已完成" : t.stage)}</span>
-            </button>
-          ))}
+          {rows.map((t) => {
+            const steps = stepLineView(t.stepLine, t.stage);
+            return (
+              <button key={t.id} type="button" className={v.ot} onClick={() => props.onPick(t.id)}>
+                <span className={`${v.dot} ${v.green}`} />
+                <span className={v.tid}>{t.id}</span>
+                <span className={v.ott}>{t.title}</span>
+                <span className={v.ost}>{tr(t.stage === "done" ? "已完成" : t.stage)}</span>
+                {steps && steps.slots.some((x) => x.filled) && <div style={{ gridColumn: "2 / 4", minWidth: 0 }}><StepDots v={steps} tr={tr} /></div>}
+              </button>
+            );
+          })}
           <DoneMoreButton d={d} tr={tr} />
         </div>
       )}

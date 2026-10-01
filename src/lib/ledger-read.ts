@@ -127,6 +127,7 @@ function projectViewSnapshot(db: Database, project: string, now: number, dayStar
   const rows = stepsByTask(db);
   const views = tasks.map((t) => taskView(t, byTarget.get(t.id) ?? [], now, deps));
   const win = doneWindow(views.filter((v) => compactStage(v.stage)), deps, dayStart);
+  const visible = new Set(views.filter((v) => !compactStage(v.stage) || win.keep.has(v.id)).map((v) => v.id));
   const line = (v: TaskView) => stepLineInfo(v, rows.get(v.id) ?? [], byTarget.get(v.id) ?? []);
   return {
     meta: getMeta(db, project),
@@ -134,7 +135,7 @@ function projectViewSnapshot(db: Database, project: string, now: number, dayStar
     tasks: views.flatMap((v) => (!compactStage(v.stage) ? [liveCard(v, line(v))] : win.keep.has(v.id) ? [doneCard(v, win.today.has(v.id) ? line(v) : null)] : [])),
     doneCursor: win.cursor,
     doneRest: win.rest,
-    deps,
+    deps: deps.filter((d) => visible.has(d.from) && visible.has(d.to)),
     projectEvents: recent.reverse().map(toEvent),
     audit: openFindings(db, project),
   };

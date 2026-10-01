@@ -11,7 +11,7 @@ import { join } from "node:path";
 import { setLedgerFeedForTest } from "../src/bridge/ledger-feed.js";
 import { handleLedgerApi, setLedgerApiProjectsForTest } from "../src/bridge/local-api/ledger.js";
 import { dagBoard } from "../src/lib/ledger-dag-board.js";
-import { projectView } from "../src/lib/ledger-read.js";
+import { projectView, taskDetail } from "../src/lib/ledger-read.js";
 import { dayStartOf, DONE_RECENT, donePage, parseDoneCursor } from "../src/lib/ledger-read-done.js";
 import { closeLedger, LEDGER_SCHEMA_VERSION, openLedger } from "../src/lib/ledger-store.js";
 import { addDep } from "../src/lib/ledger-deps-write.js";
@@ -75,7 +75,7 @@ function walk(db: Database, limit: number) {
   while (before) {
     const page = donePage(db, "p", parseDoneCursor(before), limit, NOW);
     pages.push(page.tasks.map((t) => t.id));
-    expect(page.tasks.every((t) => !("stepLine" in t) && !("extra" in t))).toBe(true);
+    expect(page.tasks.every((t) => (t.stepLine?.steps.length ?? 0) > 0 && !("extra" in t))).toBe(true);
     before = page.nextCursor;
   }
   return { view, pages, windowIds: view.tasks.filter((t) => DONE_STAGES.includes(t.stage as never)).map((t) => t.id) };
@@ -103,19 +103,61 @@ describe("总览窗口", () => {
     expect(Object.values(vb.doneRest.byItem).reduce((s, m) => s + Object.values(m).reduce((a, b) => a + (b ?? 0), 0), 0)).toBe(vb.doneRest.n);
   });
 
-  test("dayStart 之后完成的全在窗口里（多于 30 张也在）、只有它们带小圆点；不到 30 张补到 30；没有更早的 = doneCursor null", () => {
+  test("今日完成与最近窗口共用 30 张上限、只有今天的带小圆点；不足补到 30；没有更早的 = doneCursor null", () => {
     const db = fixture(0, 0);
     for (let k = 0; k < 60; k++) card(db, `t${k}`, "verified", NOW - k * 30 * MIN, "i0");
     const ids = (n: number) => Array.from({ length: n }, (_, k) => `t${k}`).sort();
     const dotted = (v: ReturnType<typeof projectView>) => v.tasks.filter((t) => t.stepLine && t.lastEvent).map((t) => t.id).sort();
     const long = projectView(db, "p", NOW, NOW - 20 * H); // 0 … 40 号在 20 小时内
-    expect([long.tasks.map((t) => t.id).sort(), dotted(long)]).toEqual([ids(41), ids(41)]);
+    expect([long.tasks.map((t) => t.id).sort(), dotted(long)]).toEqual([ids(DONE_RECENT), ids(DONE_RECENT)]);
     const short = projectView(db, "p", NOW, NOW - 2 * H); // 今天只有 0 … 4 号
     expect([short.tasks.map((t) => t.id).sort(), dotted(short)]).toEqual([ids(DONE_RECENT), ids(5)]);
     expect(long.doneCursor).not.toBeNull();
     closeLedger(":memory:");
     const all = projectView(fixture(3, 0), "p", NOW);
     expect([all.doneCursor, all.doneRest.n, all.doneRest.groups]).toEqual([null, 0, []]);
+  });
+
+  test.each(["deps", "today"] as const)("%s：500 vs 50 张字节差 < 5KB；只带窗口内的边，溢出卡分页仍有步骤点", (mode) => {
+    const sample = (n: number) => {
+      const db = fixture(0, mode === "deps" ? 1 : 30);
+      for (let k = 0; k < n; k++) {
+        const id = `c${String(k).padStart(4, "0")}`;
+        card(db, id, "verified", NOW - (mode === "deps" ? 48 * H : 0) - k * MIN, "i0");
+        // 今日窗口外再挂 30 张依赖卡，也不能把今日完成扩到 60 张。
+        if (mode === "deps" || k >= DONE_RECENT) addDep(db, OWNER, { from: id, to: "l0", when: "前置完成" });
+      }
+      const view = projectView(db, "p", NOW, NOW - 20 * H);
+      const ids = new Set(view.tasks.map((t) => t.id));
+      expect(view.tasks.filter((t) => t.stage === "verified")).toHaveLength(DONE_RECENT);
+      expect(view.doneRest.n).toBe(n - DONE_RECENT);
+      expect(view.deps.every((d) => ids.has(d.from) && ids.has(d.to))).toBe(true);
+      expect(view.deps).toHaveLength(mode === "deps" ? DONE_RECENT : 0);
+      expect(view.tasks.find((t) => t.id === "l0")?.runnable).toBe(true);
+      const page = donePage(db, "p", parseDoneCursor(view.doneCursor!), 10, NOW);
+      expect(page.tasks.map((t) => t.id)).toEqual(Array.from({ length: 10 }, (_, k) => `c${String(k + DONE_RECENT).padStart(4, "0")}`));
+      expect(page.tasks.every((t) => stepLineView(t.stepLine, t.stage)?.slots.some((s) => s.filled))).toBe(true);
+      closeLedger(":memory:");
+      return view;
+    };
+    const small = sample(50), large = sample(500);
+    console.log(`${mode} overview bytes: 50=${wire(small)} 500=${wire(large)} diff=${wire(large) - wire(small)}`);
+    expect(Math.abs(wire(large) - wire(small))).toBeLessThan(5_000);
+  });
+
+  test("独立历史依赖窗口按完成时间取最近 30 张，两方向都封顶；被省略的边仍在详情里", () => {
+    const db = fixture(100, 2);
+    for (let k = 40; k < 100; k++) {
+      const id = `d${String(k).padStart(4, "0")}`;
+      addDep(db, OWNER, k % 2 ? { from: id, to: "l0", when: "历史前置" } : { from: "l1", to: id, when: "历史后续" });
+    }
+    const view = projectView(db, "p", NOW);
+    const done = view.tasks.filter((t) => DONE_STAGES.includes(t.stage as never));
+    expect(done.length).toBeLessThanOrEqual(2 * DONE_RECENT);
+    expect(done.some((t) => t.id === "d0040")).toBe(true);
+    expect(done.some((t) => t.id === "d0099")).toBe(false);
+    expect(view.deps.every((d) => view.tasks.some((t) => t.id === d.from) && view.tasks.some((t) => t.id === d.to))).toBe(true);
+    expect(taskDetail(db, "p", "l0", NOW)!.deps.in.some((d) => d.from === "d0099")).toBe(true);
   });
 });
 

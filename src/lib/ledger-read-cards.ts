@@ -95,7 +95,7 @@ export function liveCard(v: TaskView, line: StepLineInfo): OverviewTask {
 
 /**
  * 已完成的卡：大纲 / 计数 / 成员 / PR 对审查员只要这些，空字段不发。dots 给了（今天完成的，「今天」按网页传来的零点，
- * ledger-read-done.ts dayStartOf）就另带手机「今日完成」卡片要的最近事件（红 / 黄色调）和小圆点。分页接口不带。
+ * ledger-read-done.ts dayStartOf）就另带手机「今日完成」卡片要的最近事件（红 / 黄色调）和小圆点。分页接口始终带小圆点。
  */
 export function doneCard(v: TaskView, dots: StepLineInfo | null): OverviewTask {
   const card: OverviewTask = {

@@ -1,6 +1,6 @@
 /**
  * 已完成卡分页（bridge i28-V1p：GET /api/v1/ledger/:project/done，src/lib/ledger-read-done.ts）与窗口外计数。
- * 总览只带已完成卡的窗口（最近 24 小时 ∪ 最近 30 张 ∪ 连着没完成卡的），更早的给游标 doneCursor 和聚合 doneRest；
+ * 总览只带已完成卡的窗口（最近 30 张，另带至多 30 张历史依赖卡），更早的给游标 doneCursor 和聚合 doneRest；
  * 这里把 doneRest 补进筛选计数 / 指标条 / 阶段列 / 画布 ✓ N，并把翻到的页和总览合成一份。web 不 import src：类型按服务端手抄。
  * 老 bridge 不带 doneCursor / doneRest = 总览就是全量，这里一律按 0 / 不翻页处理。单测 tests/web-collab-done.test.ts。
  */
