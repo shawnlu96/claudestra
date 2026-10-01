@@ -18,6 +18,7 @@ import { isPoolIntent } from "./scheduler-pool-plan.js";
 import { templateFor } from "./scheduler-template.js";
 import { bindHash, checkAsk } from "./ask-bind.js";
 import { getAsk, ownerAnswered } from "./ledger-asks.js";
+import { autostartGrant } from "./ledger-autostart-grant.js";
 
 const projectSeq = (db: Database, project: string): number =>
   (db.query("SELECT COALESCE(MAX(seq), 0) AS seq FROM events WHERE project = ?").get(project) as { seq: number }).seq;
@@ -80,8 +81,8 @@ export interface WorkflowInput {
 export function setWorkflow(db: Database, ctx: WriteCtx, input: WorkflowInput, intake = false): { workflow: TaskWorkflow; duplicate: boolean } {
   return tx(db, () => {
     const task = mustTask(db, input.taskId);
-    if (!intake && !actorMayConfigure(db, ctx.actor, task.project)) throw new LedgerError("forbidden", "只有项目 PM / master / owner 能配置自动任务");
-    if (intake && (input.template !== "security" || input.mode !== "auto" || !task.extra.peerPr)) throw new LedgerError("forbidden", "收 peer PR 只能给新建的 peer 卡开 security 自动流程");
+    if (intake) { if (input.template !== "security" || input.mode !== "auto" || !task.extra.peerPr) throw new LedgerError("forbidden", "收 peer PR 只能给新建的 peer 卡开 security 自动流程"); }
+    else if (!actorMayConfigure(db, ctx.actor, task.project) && !autostartGrant(ctx, task.id)) throw new LedgerError("forbidden", "只有项目 PM / master / owner 能配置自动任务");
     if (task.kind !== "code") throw new LedgerError("invalid", "自动流程只接 code 任务");
     const existing = getWorkflow(db, task.id);
     if (!existing) {
@@ -99,7 +100,9 @@ export function setWorkflow(db: Database, ctx: WriteCtx, input: WorkflowInput, i
     if (!templateFor(input.template, input.templateVersion)) throw new LedgerError("invalid", `模板 ${input.template} 没有版本 ${input.templateVersion}（code 有 2 / 3，ui、security 只有 2）`);
     const fallback = textOneLine(input.fallback, "退路方案", 600);
     const data = { template: input.template, templateVersion: input.templateVersion, mode: input.mode, authorFamily: input.authorFamily, fallback };
-    const unchanged = existing && existing.specRev === task.specRev && Object.entries(data).every(([k, v]) => existing[k as keyof TaskWorkflow] === v);
+    // PM hold：已是 manual 的卡带 --reason 再设 manual = 「留在人工」，照样记一条带 hold 的事件，自动交回见到它就不碰（scheduler-autostart-resume.ts）
+    const hold = existing?.mode === "manual" && input.mode === "manual" && !!input.reason?.trim();
+    const unchanged = !hold && existing && existing.specRev === task.specRev && Object.entries(data).every(([k, v]) => existing[k as keyof TaskWorkflow] === v);
     if (unchanged) return { workflow: existing, duplicate: true };
     if (task.rev !== input.taskRev || (existing?.rev ?? 0) !== (input.workflowRev ?? 0)) {
       throw new LedgerError("conflict", "任务或流程已被改过，先重读再设置", { taskRev: task.rev, workflowRev: existing?.rev ?? 0 });
@@ -123,7 +126,8 @@ export function setWorkflow(db: Database, ctx: WriteCtx, input: WorkflowInput, i
     insertEvent(db, { actor: ctx.actor, now }, {
       project: task.project, target: task.id, kind: "scheduler", text: `流程设为 ${input.mode}`,
       data: { op: "workflow", ...data, workflowRev: workflow.rev, specRev: task.specRev, cancelledIntents: pending.map((p) => p.id),
-        ...(pool && (pool.withdrawn.length || pool.stray.length) ? { poolOrders: pool } : {}), ...(takeover ? { takeover: textOneLine(input.reason as string, "接管原因", 600), manual: true } : {}) },
+        ...(pool && (pool.withdrawn.length || pool.stray.length) ? { poolOrders: pool } : {}), ...(takeover ? { takeover: textOneLine(input.reason as string, "接管原因", 600), manual: true } : {}),
+        ...(hold ? { hold: textOneLine(input.reason as string, "留人工原因", 600), manual: true } : {}) },
     }, false);
     return { workflow, duplicate: false };
   });

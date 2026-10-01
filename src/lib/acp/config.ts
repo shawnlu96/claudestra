@@ -46,6 +46,17 @@ export function currentValueOf(opts: readonly ConfigOption[], id: string): strin
   return opts.find((o) => o.id === id)?.currentValue || undefined;
 }
 
+/**
+ * 要设的值 → 会话选项里的值：选项里有原值就用原值；否则找「provider/<原值>」且只有一个的那项。Pi 的模型选项是 provider/id，
+ * registry 里常只记 id（tmux 版的 --model 两种都认）；同名模型分属两家就不猜，交给 configRefusal 报。Codex 的选项不带斜杠，原样通过。
+ */
+export function resolveConfigValue(opts: readonly ConfigOption[], id: string, value: string): string {
+  const choices = opts.find((x) => x.id === id)?.choices ?? [];
+  if (choices.some((c) => c.value === value)) return value;
+  const hits = choices.filter((c) => c.value.indexOf("/") > 0 && c.value.slice(c.value.indexOf("/") + 1) === value);
+  return hits.length === 1 ? hits[0]!.value : value;
+}
+
 /** set_config_option 之前的本地校验：拒绝就返回给人看的原因，放行返回 null */
 export function configRefusal(opts: readonly ConfigOption[], id: string, value: string): string | null {
   const o = opts.find((x) => x.id === id);

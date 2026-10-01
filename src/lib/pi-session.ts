@@ -29,13 +29,13 @@
  */
 
 import { existsSync, readFileSync, readdirSync, realpathSync } from "fs";
-import { homedir } from "os";
 import { join } from "path";
 import { hasInboundHeader } from "./inbound-body.js";
+import { piAgentDirOf } from "./pi-path.js";
 
-/** Pi 的 agent 目录（`~/.pi/agent`），可用环境变量覆盖（与 Pi 自身一致） */
+/** Pi 的 agent 目录（`~/.pi/agent`），可用环境变量覆盖；`~` / file:// 的展开与 Pi 自身一致（lib/pi-path.ts） */
 export function piAgentDir(): string {
-  return process.env.PI_CODING_AGENT_DIR || join(homedir(), ".pi", "agent");
+  return piAgentDirOf(process.env);
 }
 
 /** 解析软链；路径不存在时原样返回（不抛） */
