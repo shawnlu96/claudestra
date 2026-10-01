@@ -87,12 +87,17 @@ const stopped = (a: Awaited<ReturnType<RetireDeps["agents"]>>[number]): boolean 
 async function stopOld(db: Database, ctx: WriteCtx, intent: SchedulerIntent, deps: ReviewSwapDeps): Promise<string | null> {
   const row = beginReviewerSwap(db, ctx, intent.id);
   if (row.killReceipt) return null;
+  const reusedByAuthor = mustTask(db, intent.taskId).agent === row.agent;
+  const excludedTask = reusedByAuthor ? intent.taskId : "";
+  const shared = db.query(`SELECT id FROM tasks WHERE stage NOT IN ('verified','done','cancelled') AND agent = ? AND id != ? UNION
+    SELECT taskId AS id FROM scheduler_sessions WHERE agent = ? AND state != 'retired' AND taskId != ? LIMIT 1`)
+    .get(row.agent, excludedTask, row.agent, excludedTask);
+  if (shared) return "旧审查 agent 仍被作者或另一张卡使用，等绑定解除后再停止";
+  // The current author owns this live session; retiring its review binding must not stop the author's work.
+  if (reusedByAuthor) return null;
   const live = (await deps.agents()).find((a) => a.name === row.agent);
   deps.active();
   if (live && live.sessionId !== row.sessionId) return "旧审查 agent 当前已是其他会话，不能归档或停止它";
-  const shared = db.query(`SELECT id FROM tasks WHERE stage NOT IN ('verified','done','cancelled') AND agent = ? UNION
-    SELECT taskId AS id FROM scheduler_sessions WHERE agent = ? AND state != 'retired' LIMIT 1`).get(row.agent, row.agent);
-  if (shared) return "旧审查 agent 仍被作者或另一张卡使用，等绑定解除后再停止";
   if (!row.archiveReceipt) {
     const r = live ? await deps.agent("archive", row.agent) : { ok: true, note: "agent 已不存在，保留历史归档" };
     deps.active();
@@ -151,7 +156,11 @@ export async function reviewSwapStep(db: Database, ctx: WriteCtx, id: string, ma
   const wait = intent.action === "review_swap" ? await stopOld(db, ctx, intent, deps) : await ensureNew(db, ctx, intent, maxWorkers, deps);
   deps.active();
   if (wait) return { ok: true, step: "waiting", detail: wait };
-  settleIntent(db, ctx, { id, from: "submitted", to: "done", receipt: intent.action === "review_swap" ? "旧审查已归档并停止，允许重新放置" : "新审查 session 已绑定" });
+  const receipt = intent.action === "review_swap"
+    ? mustTask(db, intent.taskId).agent === swappedSession(db, id).agent
+      ? "旧审查会话由本卡作者沿用，未停用" : "旧审查已归档并停止，允许重新放置"
+    : "新审查 session 已绑定";
+  settleIntent(db, ctx, { id, from: "submitted", to: "done", receipt });
   return { ok: true, step: "session", detail: intent.action === "review_swap" ? "旧审查已更换" : "跨家族审查新会话已绑定" };
 }
 

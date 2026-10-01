@@ -9,6 +9,7 @@ import { recordHello } from "../src/lib/ledger-lend-peers.js";
 import { RECEIPT_PURPOSE } from "../src/lib/ledger-lend-result.js";
 import { getIntent, getWorkflow } from "../src/lib/ledger-scheduler.js";
 import { planIntent } from "../src/lib/ledger-scheduler-write.js";
+import { createTask } from "../src/lib/ledger-write.js";
 import { getTask, listEvents } from "../src/lib/ledger-store.js";
 import { schedulerAutoTick } from "../src/lib/scheduler-auto-tick.js";
 import { autoSnapshot } from "../src/lib/scheduler-auto-snapshot.js";
@@ -154,6 +155,35 @@ describe("i28-RI1 automatic reviewer replacement", () => {
       expect(p.f.notices).toEqual([]);
       expect(p.swaps()).toHaveLength(1);
     } finally { p.f.close(); }
+  });
+
+  test("same-agent takeover completes within two ticks without stopping the author; other cards still block", async () => {
+    const p = await scenario();
+    try {
+      p.hello("Sekai");
+      p.f.db.run("UPDATE tasks SET agent = 'agent-rv-t1' WHERE id = 'T1'");
+      p.f.db.run("UPDATE scheduler_sessions SET agent = 'agent-rv-t1' WHERE role = 'author'");
+      expect(await p.tick()).toMatchObject({ step: "session", detail: "旧审查已更换" });
+      const id = String(p.swaps()[0].data.intentId);
+      expect(getIntent(p.f.db, id)).toMatchObject({ status: "done", receipt: "旧审查会话由本卡作者沿用，未停用" });
+      expect(await p.tick()).toMatchObject({ step: "pool_pooled" });
+      expect(listLendOrders(p.f.db, "T1")[0]).toMatchObject({ peer: "Sekai", family: "codex", round: 2 });
+      expect(p.effects).toEqual([]);
+      expect(getSchedulerSession(p.f.db, "T1", "author")).toMatchObject({ sessionId: "s-one", state: "active" });
+      expect(taskWorkerRefs(p.f.db, "T1").reviewer).toBeNull();
+    } finally { p.f.close(); }
+    const blocked = await scenario();
+    try {
+      blocked.f.db.run("UPDATE tasks SET agent = 'agent-rv-t1' WHERE id = 'T1'");
+      createTask(blocked.f.db, blocked.f.at("owner"), { project: "p", id: "OTHER", title: "other", kind: "code", agent: "agent-rv-t1" });
+      blocked.f.db.run("UPDATE scheduler_sessions SET taskId = 'OTHER', agent = 'agent-rv-t1' WHERE role = 'author'");
+      for (let n = 0; n < 2; n++) {
+        expect(await blocked.tick()).toMatchObject({ step: "waiting", detail: expect.stringContaining("另一张卡") });
+      }
+      expect(getIntent(blocked.f.db, String(blocked.swaps()[0].data.intentId))?.status).toBe("submitted");
+      expect(blocked.effects).toEqual([]);
+      expect(listLendOrders(blocked.f.db, "T1")).toEqual([]);
+    } finally { blocked.f.close(); }
   });
 
   test("security stays local: new Codex session binds, reviews twice in the same epoch, then passes merge proof", async () => {
