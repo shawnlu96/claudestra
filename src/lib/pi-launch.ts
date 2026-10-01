@@ -38,7 +38,7 @@ export const PI_EXTENSION_PATH = join(
  * tmux 在这里 -e —— 少了它，能力档里写的 `builtin:codemode` 只会加载不生效
  * （PR349-r1-activation-tmux）。
  */
-export const PI_ACTIVATE_TOOLS_EXTENSION = join(
+const PI_ACTIVATE_TOOLS_EXTENSION = join(
   dirname(fileURLToPath(import.meta.url)),
   "acp",
   "pi-adapter",
