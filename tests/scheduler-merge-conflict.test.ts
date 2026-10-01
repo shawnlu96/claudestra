@@ -6,7 +6,8 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
-import { closeLedger, getMeta, openLedger } from "../src/lib/ledger-store.js";
+import { closeLedger, getMeta, getTask, openLedger } from "../src/lib/ledger-store.js";
+import { getWorkflow } from "../src/lib/ledger-scheduler.js";
 import { setWorkflow } from "../src/lib/ledger-scheduler-write.js";
 import { createTask } from "../src/lib/ledger-write.js";
 import { parseSchedulerConfig } from "../src/lib/scheduler-config.js";
@@ -196,6 +197,16 @@ describe("i28-M12 ledger guards on the bounce", () => {
       expect(conflictEvents(f)[0].checks).toEqual(names.map((name, i) => ({ name, link: `${RUN}0000${i}` })));
     }, names);
   });
+  test("r1 ci-receipt shape: 3 required 70-char names, 132-char job links (755 chars before) → bounced, not frozen", async () => {
+    const names = ["test-", "lint-", "type-"].map((x) => x + "x".repeat(65));
+    const link = `https://github.com/${"o".repeat(35)}/${"r".repeat(40)}/actions/runs/12345678900/job/23456789011`;
+    await with_("ready", async (f) => {
+      f.snaps = [pr({ mergeState: "UNSTABLE", checks: names.map((name) => ({ name, bucket: "fail" as const, link })) })];
+      await f.tick();
+      expect(stateOf(f)).toEqual(BOUNCED);
+      expect(conflictEvents(f)[0].checks.map((c: { name: string }) => c.name)).toEqual(names);
+    }, names);
+  });
   test("receipt fitting: first check always kept, later links dropped before checks, names never cut", () => {
     const names = Array.from({ length: 8 }, (_, i) => `${i}`.padEnd(80, "n"));
     const b = { cause: "ci_fail" as const, prHead: H, mainHead: null, checks: names.map((name) => ({ name, link: `${RUN}/job/1` })) };
@@ -269,6 +280,19 @@ describe("i28-M12 PM switches the card to manual mid-merge", () => {
       expect(stateOf(f)).toEqual({ run: "resolved", intent: "cancelled", stage: "merge", frozen: false, held: 0, mode: "manual" });
       expect(getMergeRun(f.db, "merge-T1")?.reason).toStartWith("cancelled: PM 切手动");
       expect(f.calls).not.toContain("merge");
+    });
+  });
+  test("await_ci: PM switches to manual through the real setWorkflow while inspect is in flight (r1 manual-race) → cancelled", async () => {
+    await with_("await_ci", async (f) => {
+      f.external.inspect = async () => {
+        const t = getTask(f.db, "T1")!, w = getWorkflow(f.db, "T1")!;
+        setWorkflow(f.db, { actor: "owner", now: 250 }, { taskId: "T1", taskRev: t.rev, workflowRev: w.rev, template: "code", templateVersion: 2,
+          mode: "manual", authorFamily: "claude", fallback: "缩小范围", reason: "PM 接管" });
+        return pr();
+      };
+      await f.tick();
+      expect(f.calls).not.toContain("merge");
+      expect(stateOf(f)).toEqual({ run: "resolved", intent: "cancelled", stage: "merge", frozen: false, held: 0, mode: "manual" });
     });
   });
   test("await_ci: a refused merging claim that is not a manual switch (head moved on the card) is still unknown", async () => {
