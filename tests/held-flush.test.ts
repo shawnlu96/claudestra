@@ -41,6 +41,7 @@ function harness(items: HeldItem[], over: Partial<FlushDeps> = {}) {
       return sent(env);
     },
     touch: (c) => touched.push(c),
+    now: () => 1000, // 和 item 默认的 heldAt 同一刻：这些用例里 owner 答复都没押满 OWNER_HELD_MAX_MS（押满的见 held-owner-max.test.ts）
     ...over,
   };
   return { held, deps, delivered, touched, contents: () => (held.get("c-me") ?? []).map((i) => String(i.env.content)) };
