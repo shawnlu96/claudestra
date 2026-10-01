@@ -10,6 +10,9 @@ import { readdir, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, join } from "node:path";
 import { resolveSessionIdForWindow } from "../cc-sessions.js";
+import { claudeWorkerSessionPath } from "../lend-claude-worker-session.js";
+import { buildLendClaudeCommand } from "../lend-claude-worker.js";
+import { isLendWorkerName } from "./clean-env.js";
 import { buildClaudeCommand, type LaunchOptions } from "../claude-launch.js";
 import { findJsonlBySessionId, projectJsonlPath, projectsDir } from "../jsonl-cost.js";
 import {
@@ -182,8 +185,8 @@ export const claudeCodeAdapter: ManagedRuntimeAdapter = {
     return out;
   },
 
-  sessionPath: (cwd, sessionId) => projectJsonlPath(cwd, sessionId),
-  findSessionById: (sessionId) => findJsonlBySessionId(sessionId),
+  sessionPath: (cwd, sessionId) => claudeWorkerSessionPath(sessionId) ?? projectJsonlPath(cwd, sessionId),
+  findSessionById: (sessionId) => claudeWorkerSessionPath(sessionId) ?? findJsonlBySessionId(sessionId),
 
   listSessionsForCwd(cwd) {
     const dir = projectsDir(cwd);
@@ -221,7 +224,7 @@ export const claudeCodeAdapter: ManagedRuntimeAdapter = {
   /** claude 是 Claudestra 的前提，不做预检（与改造前一致） */
   available: async () => ({ ok: true }),
   callerCred: "mcp-config",
-  buildLaunchCommand: (spec) => buildClaudeCommand(claudeLaunchOptions(spec)),
+  buildLaunchCommand: (spec) => isLendWorkerName(spec.agentName) ? buildLendClaudeCommand(spec) : buildClaudeCommand(claudeLaunchOptions(spec)),
 
   async waitReady(win: WindowOps, budget): Promise<ReadyResult> {
     let sessionIdlePicked = false;
