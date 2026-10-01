@@ -50,8 +50,6 @@ export const BORROW_DICT: Record<string, string> = {
   "平分": "Even",
   "少用": "Less",
   "不用": "Off",
-  "审查": "Review",
-  "开发": "Build",
   "本周已用": "Used this week",
   "{n} 天后重置": "Resets in {n} day|Resets in {n} days",
   "{n} 小时后重置": "Resets in {n} hour|Resets in {n} hours",

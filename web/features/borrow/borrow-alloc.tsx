@@ -5,7 +5,7 @@
  * 额度只读、只做参考：读不到显示「—」，派单不看它。
  */
 import { useEffect, useRef, useState, type MouseEvent } from "react";
-import { useT } from "@/lib/i18n";
+import { useLang, useT } from "@/lib/i18n";
 import { machineNow, PRIORITIES, stillOn, type Family, type LocalProjectView, type Priority, type QuotaReport, type Role } from "./borrow-api";
 import { cardLocked, saveThenRefresh, type Feed } from "./borrow-feed";
 import { LOCAL_MAX, oneAtATime, resetIn, weekUsed } from "./borrow-model";
@@ -15,7 +15,8 @@ import { fadeIn, flash, shake } from "./motion";
 
 const FAMILIES: Family[] = ["codex", "claude"];
 const TIER_TEXT: Record<Priority, string> = { first: "先用", balance: "平分", low: "少用", off: "不用" };
-const ROLE_TEXT: Record<Role, string> = { review: "审查", write: "开发" };
+/** 「审查」「开发」也是台账阶段短词，不能进全局字典（tests/web-ledger-stage.test.ts）：角色名在这里按语言取 */
+const ROLE_TEXT: Record<Role, { zh: string; en: string }> = { review: { zh: "审查", en: "Review" }, write: { zh: "开发", en: "Build" } };
 
 /** 四个短词的分段按钮；当前档高亮，「不用」用中性色。点同一档不发请求 */
 export function TierPicker(props: { value: Priority; disabled: boolean; onPick: (p: Priority, el: HTMLElement) => void }) {
@@ -45,13 +46,13 @@ export function TierPicker(props: { value: Priority; disabled: boolean; onPick: 
 
 /** 审查 / 开发两个勾；readOnly = 只显示（本机这一行的角色是项目级配置） */
 export function RolePicker(props: { roles: readonly Role[]; disabled: boolean; readOnly?: boolean; onToggle?: (r: Role, el: HTMLElement) => void }) {
-  const t = useT();
+  const lang = useLang();
   return (
     <div className="flex shrink-0 gap-1">
       {(["review", "write"] as const).map((r) => {
         const on = props.roles.includes(r);
         if (props.readOnly) {
-          return on ? <span key={r} className="badge badge-ghost badge-sm gap-1 text-base-content/60"><CheckIcon className="size-3" />{t(ROLE_TEXT[r])}</span> : null;
+          return on ? <span key={r} className="badge badge-ghost badge-sm gap-1 text-base-content/60"><CheckIcon className="size-3" />{ROLE_TEXT[r][lang]}</span> : null;
         }
         return (
           <button
@@ -62,7 +63,7 @@ export function RolePicker(props: { roles: readonly Role[]; disabled: boolean; r
             onClick={(e: MouseEvent<HTMLButtonElement>) => props.onToggle?.(r, e.currentTarget)}
           >
             {on && <CheckIcon className="size-3" />}
-            {t(ROLE_TEXT[r])}
+            {ROLE_TEXT[r][lang]}
           </button>
         );
       })}

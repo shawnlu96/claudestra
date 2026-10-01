@@ -107,9 +107,9 @@ describe("面板源码", () => {
   // 注释不上屏：先剥掉块注释与行注释，只看会渲染出来的代码和字典
   const code = (f: string) => readFileSync(new URL(f, dir), "utf8").replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|\s)\/\/.*$/gm, "$1");
   const src = readdirSync(dir).map(code).join("\n") + JSON.stringify(BORROW_DICT);
-  test("没有要人去跑的命令文本、没有 write 角色开关", () => {
+  // 「没有 write 角色开关」是 R7b 时远端写代码还没做（W8）的约束；W9 后 i28-Q1 规格要求分配表每行有「审查 / 开发」勾选，这条撤掉
+  test("没有要人去跑的命令文本", () => {
     expect(src).not.toMatch(/manager|bun |borrow set|borrow off|claudestra |--max-open|--projects/);
-    expect(src).not.toMatch(/"write"/);
   });
   test("不用 emoji", () => expect(src).not.toMatch(/\p{Extended_Pictographic}/u));
 });
