@@ -21,7 +21,7 @@ import { templateFor } from "./scheduler-template.js";
 import { bindHash, checkAsk } from "./ask-bind.js";
 import { getAsk, ownerAnswered } from "./ledger-asks.js";
 import { autostartGrant } from "./ledger-autostart-grant.js";
-import { remoteHeadFamily } from "./scheduler-pool-facts.js";
+import { remoteHeadFamily } from "./scheduler-head-family.js";
 
 const projectSeq = (db: Database, project: string): number =>
   (db.query("SELECT COALESCE(MAX(seq), 0) AS seq FROM events WHERE project = ?").get(project) as { seq: number }).seq;

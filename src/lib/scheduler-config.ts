@@ -13,8 +13,8 @@ export const SCHEDULER_CONFIG_PATH = statePath("scheduler.json");
  * roles: "review" and "write" (= build + fix, i28-W9); absent = review only. Writing needs `repo` (the GitHub owner/repo a
  * peer clones and pushes its lend/ branch to): a build card has no PR yet to take it from.
  */
-export type RemoteMode = "balance" | "off" | "overflow" | "prefer";
-export type RemoteRole = "review" | "write";
+type RemoteMode = "balance" | "off" | "overflow" | "prefer";
+type RemoteRole = "review" | "write";
 /** reviewFirst: peers that get every review they can take, in order, before the tiers (i28-W5c); absent = none. */
 export interface RemotePolicy {
   mode: RemoteMode; roles: RemoteRole[]; poolTimeoutMin: number; reviewFirst?: string[];

@@ -1,6 +1,6 @@
 /**
  * start_node's placement (i28-W5): where a new card's writing goes, by the same placeFor the planner uses. `auto` picks
- * by load and lands local whenever no peer qualifies (before W8 always: remote.roles never holds write); `peer:<name>` is
+ * by tier and load and lands local whenever no peer qualifies (always, unless remote.roles holds write); `peer:<name>` is
  * a pin that must pass every hard constraint now or start_node refuses. Reading the config / borrow / origin repo is
  * injected; a failed read means no peer, never a guess. tests/dag-tools-placement.test.ts.
  */

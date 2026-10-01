@@ -105,8 +105,13 @@ function sync(db: Database, ctx: WriteCtx, intent: SchedulerIntent, orderId: str
     o = w.order;
   }
   const who = `${o.worker ?? "?"}@${o.peer}`;
-  if (o.status === "claimed") return out("claimed", intent.status === "pending" ? settle(db, ctx, intent, "submitted", `claimed by ${who} gen ${o.leaseGen}`) : intent, `${who} ${o.step === "review" ? "在审" : "在写"}`);
-  if (o.status === "done") return out("done", settle(db, ctx, intent, "done", `lend ${orderId} answered by ${who}; event ${o.eventSeq ?? "?"}`), `${who} ${o.step === "review" ? "已交结论" : "已交付"}`);
+  const review = o.step === "review";
+  if (o.status === "claimed") {
+    return out("claimed", intent.status === "pending" ? settle(db, ctx, intent, "submitted", `claimed by ${who} gen ${o.leaseGen}`) : intent, `${who} ${review ? "在审" : "在写"}`);
+  }
+  if (o.status === "done") {
+    return out("done", settle(db, ctx, intent, "done", `lend ${orderId} answered by ${who}; event ${o.eventSeq ?? "?"}`), `${who} ${review ? "已交结论" : "已交付"}`);
+  }
   if (o.status === "unknown") return out("unknown", settle(db, ctx, intent, "unknown", `出借单 ${orderId} 结果不明（${o.reason ?? ""}），交 PM 核对`), "结果不明，停给 PM");
   const text = `出借单 ${orderId} ${o.status}（${o.reason ?? ""}），${backHome(o.step)}`;
   return out("returned", settle(db, ctx, intent, "cancelled", text), text);

@@ -6,7 +6,7 @@ import { getMeta, LedgerError } from "./ledger-store.js";
 import { insertEvent, tx } from "./ledger-tx.js";
 import { requireSessionIdentity } from "./scheduler-session-identity.js";
 import type { WorkerRef } from "./scheduler-plan.js";
-import { remoteHeadFamily } from "./scheduler-pool-facts.js";
+import { remoteHeadFamily } from "./scheduler-head-family.js";
 
 export type SessionRole = "author" | "reviewer";
 export type SessionTransport = "acp" | "tmux" | "peer";

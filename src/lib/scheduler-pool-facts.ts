@@ -8,7 +8,6 @@
 import type { Database } from "bun:sqlite";
 import type { BorrowEntry } from "./lend-config.js";
 import { heldLease } from "./ledger-lend-lease.js";
-import type { AuthorFamily } from "./ledger-scheduler.js";
 import type { LedgerTask } from "./ledger-stages.js";
 import { getEventByDedup } from "./ledger-store.js";
 import type { RemotePolicy } from "./scheduler-config.js";
@@ -91,19 +90,6 @@ function peerV2(db: Database, b: BorrowEntry, now: number): PeerFacts["v2"] {
 
 /** The peer holding the card's write lease now: its lend/ branch is the card's branch, so a fix can only go back there. */
 const writeLeasePeer = (db: Database, task: LedgerTask): string | null => hasLendTable(db) ? heldLease(db, task)?.peer ?? null : null;
-
-/**
- * Family that wrote the card's current head when a peer did (i28-W9): the newest answered write / fix order whose delivery
- * recorded exactly this head. null = the head is not a lend delivery, and the workflow's authorFamily stands. Cross-family
- * review, the reviewer session bind and the merge gates all read it (one rule, so a Codex-written card is never Codex-reviewed).
- */
-export function remoteHeadFamily(db: Database, task: Pick<LedgerTask, "id" | "headSHA">): AuthorFamily | null {
-  if (!task.headSHA || !hasLendTable(db)) return null;
-  const r = db.query(`SELECT o.family FROM lend_orders AS o JOIN events AS e ON e.seq = o.eventSeq WHERE o.taskId = ? AND o.step IN ('write','fix')
-    AND o.status = 'done' AND e.kind = 'deliver' AND json_extract(e.data, '$.headSHA') = ? ORDER BY o.createdAt DESC LIMIT 1`).get(task.id, task.headSHA) as
-    { family: AuthorFamily } | null;
-  return r?.family ?? null;
-}
 
 /** Active local reviewer sessions on the project's other cards (review holds no worker slot, so this is its load). */
 export function localReviewerCount(db: Database, project: string, exceptTask: string | null): number {

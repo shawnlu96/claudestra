@@ -49,11 +49,11 @@ export interface PlacementFacts {
 export type Placement = { kind: "local"; reason: string } | { kind: "peer"; peer: string; family: AuthorFamily; reason: string } | { kind: "wait"; reason: string };
 
 export const PEER_PLACEMENT = "peer:";
-export const lendRoleOf = (role: PlaceRole): LendRole => role === "review" ? "review" : "write";
+const lendRoleOf = (role: PlaceRole): LendRole => role === "review" ? "review" : "write";
 const sameRepo = (a: string, b: string): boolean => a.toLowerCase() === b.toLowerCase();
 
 /** Writing goes to the lender's free family in this order: the owner wants the lender's Codex used first (i28-W9). */
-export const WRITE_FAMILIES: readonly AuthorFamily[] = ["codex", "claude"];
+const WRITE_FAMILIES: readonly AuthorFamily[] = ["codex", "claude"];
 
 /** The family the order would run in at this peer: review = the cross family asked for, writing = the first free one. */
 export function peerFamily(p: PeerFacts, role: PlaceRole, family: AuthorFamily): AuthorFamily | null {
