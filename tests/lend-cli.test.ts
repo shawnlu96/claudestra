@@ -57,6 +57,54 @@ describe("manager lend / borrow 接线", () => {
     expect(file()).toMatchObject({ enabled: false, lend: [] });
   }, 60_000);
 
+  test("lend grant --keep-unset 只继承列出的缺失字段；显式值优先，坏字段 / 空 roles 拒写，旧 CLI 语义不变", () => {
+    const g = ["lend", "grant", "team-a", "--repos=o/r", "--until=3d"];
+    const keep = "--keep-unset=roles,codex-model,codex-effort";
+    expect(run([...g, "--roles=review,write", "--codex-model=gpt-6-astra", "--codex-effort=xhigh"])).toMatchObject({ ok: true });
+    expect(run([...g, keep])).toMatchObject({ ok: true, lend: { roles: ["review", "write"], codexModel: "gpt-6-astra", codexEffort: "xhigh" } });
+    expect(run([...g, keep, "--roles=review", "--codex-model=gpt-6-sol", "--codex-effort=low"]))
+      .toMatchObject({ ok: true, lend: { roles: ["review"], codexModel: "gpt-6-sol", codexEffort: "low" } });
+    const before = readFileSync(join(state, "lend.json"), "utf8");
+    for (const bad of ["", "repos", "roles,bogus", "codexModel", "roles,"]) {
+      expect(run([...g, `--keep-unset=${bad}`])).toMatchObject({ ok: false, error: expect.stringContaining("--keep-unset") });
+    }
+    expect(run([...g, keep, "--roles="])).toMatchObject({ ok: false, error: expect.stringContaining("--roles") });
+    expect(run([...g, keep, "--codex-effort=nope"])).toMatchObject({ ok: false });
+    expect(readFileSync(join(state, "lend.json"), "utf8")).toBe(before);
+    expect(run([...g, "--keep-unset=roles,codex-effort"])).toMatchObject({ ok: true });
+    expect(file().lend[0]).toMatchObject({ roles: ["review"], codexEffort: "low" });
+    expect(file().lend[0].codexModel).toBeUndefined();
+    expect(run([...g, "--roles=write", "--codex-model=gpt-6-astra", "--codex-effort=high"])).toMatchObject({ ok: true });
+    expect(run(g)).toMatchObject({ ok: true });
+    expect(file().lend[0].roles).toEqual(["review"]);
+    expect(file().lend[0].codexModel).toBeUndefined();
+    expect(file().lend[0].codexEffort).toBeUndefined();
+  }, 60_000);
+
+  test("P1 沿用只读锁内最新值：等锁期间 roles / 模型 / 推理档改变，不覆盖成锁外旧值", async () => {
+    const g = ["lend", "grant", "team-a", "--repos=o/r", "--until=3d"];
+    expect(run([...g, "--roles=review,write", "--codex-model=gpt-6-astra", "--codex-effort=xhigh"])).toMatchObject({ ok: true });
+    const path = join(state, "lend.json");
+    const lock = await acquireLock(`${path}.lock`, 0);
+    expect(lock).not.toBeNull();
+    const env: Record<string, string | undefined> = { ...process.env, CLAUDESTRA_STATE_DIR: state };
+    delete env.DISCORD_CHANNEL_ID;
+    const child = Bun.spawn([process.execPath, manager, ...g, "--keep-unset=roles,codex-model,codex-effort"], { env, stdout: "pipe", stderr: "pipe" });
+    try {
+      await Bun.sleep(1500);
+      expect(child.exitCode).toBeNull();
+      const latest = file();
+      Object.assign(latest.lend[0], { roles: ["review"], codexModel: "gpt-6-sol", codexEffort: "low" });
+      writeFileSync(path, JSON.stringify(latest)); // 当前持锁写者先提交，等锁的网页 CLI 随后才能继承
+    } finally {
+      lock?.release();
+    }
+    expect(await child.exited).toBe(0);
+    const out = JSON.parse((await new Response(child.stdout).text()).trim().split("\n").at(-1)!);
+    expect(out).toMatchObject({ ok: true });
+    expect(file().lend[0]).toMatchObject({ roles: ["review"], codexModel: "gpt-6-sol", codexEffort: "low" });
+  }, 60_000);
+
   test("v1 文件：照读、出借条目一律暂停（不生效）；再授权一次落成 v2，别的旧条目仍暂停", () => {
     const v1 = (peer: string, fp: string, confirm: string, until?: string) => ({ peer, fp, families: { codex: 2 }, roles: ["review"], repos: ["shawnlu96/claudestra"],
       quota: { ordersPerDay: 5, tokensPerDay: null }, confirm, ...(until ? { until } : {}) });
