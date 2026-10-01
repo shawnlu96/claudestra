@@ -8,6 +8,7 @@ import { effectiveNodes, getDagVersion, getPendingProposal, projectNodes, resolv
 import { createFeature, initDag, setFeature, type FeaturePatch } from "../lib/ledger-feature-write.js";
 import { storedOrigin } from "../lib/ledger-origin.js";
 import { LedgerError } from "../lib/ledger-store.js";
+import { autostartShow } from "./ledger-autostart-cmds.js";
 import type { LedgerCli, Result } from "./ledger-context.js";
 import { intFlag } from "./ledger-identity.js";
 import type { CommandSpec } from "./ledger-write-cmds.js";
@@ -61,7 +62,7 @@ function featureShow(c: LedgerCli): Result {
   const v = f.currentVersion ? getDagVersion(c.db, f.id, f.currentVersion) : null;
   const p = getPendingProposal(c.db, f.id);
   return { ok: true, feature: f, version: v ? { ...v, nodes: undefined } : null, nodes: v ? projectNodes(c.db, effectiveNodes(c.db, v)) : [],
-    pending: p ? { version: p.version, askId: p.askId, proposedBy: p.proposedBy, createdAt: p.createdAt } : null };
+    pending: p ? { version: p.version, askId: p.askId, proposedBy: p.proposedBy, createdAt: p.createdAt } : null, autostart: autostartShow(c, f) };
 }
 
 export const FEATURE_CMDS: Record<string, CommandSpec> = {
