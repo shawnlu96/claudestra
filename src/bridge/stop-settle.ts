@@ -15,6 +15,10 @@ import { isOwnStopChannel } from "../lib/pushback-scope.js";
 import { isModelLimitHit, wallHitOf } from "../lib/quota-wall-text.js";
 import { DEFAULT_RUNTIME } from "../lib/runtimes/index.js";
 import { withExpecting, withheldNotice, withheldParts, type PendingAgentCall } from "./agent-calls.js";
+import { cardsToClose, productionView } from "../lib/agent-supervisor-bridge.js";
+import { closeAsk } from "../lib/ledger-asks.js";
+import { readRegistryAgentsSync } from "../lib/registry.js";
+import { askDbIfExists, publishAsk } from "./asks.js";
 
 export interface StopTurn {
   /** 要结算的频道（channelsToClear 里的一个） */
@@ -147,6 +151,7 @@ export async function settleStopTurn(d: CallerSettleDeps, t: StopTurn): Promise<
   try {
     return await settleOwn(d, t, mine);
   } finally {
+    if (mine && t.event === "Stop" && !ranIntoApiError(t)) (d.recovered ?? closeRecoveredCards)(t.cid); // 正常结束的一轮 = 恢复了（i28-S1 监护关卡）
     if (mine) {
       const rec = { at: 0, callers: [], ...recOf(t), who: triggerOf(t) };
       if (ranIntoApiError(t)) errTrigger.set(t.cid, rec);
@@ -285,6 +290,26 @@ export interface CallerSettleDeps {
   /** 推给 caller 一条 intent=notification（不带 expecting、不当答复） */
   notify(pac: PendingAgentCall, cid: string, body: string): Promise<unknown>;
   metric(name: MetricEvent, callerChannelId: string, meta: Record<string, string>): void;
+  /** cid 正常结束了一轮：关掉它开着的回合失败卡（缺省 closeRecoveredCards；单测注入） */
+  recovered?(cid: string): void;
+}
+
+/**
+ * 监护开着的项目里，agent 下一个正常结束的回合 = 它从回合失败里恢复了：关掉它此前开出、还开着的「回合失败」卡（额度 / 登录卡不动，
+ * lib/agent-supervisor-bridge.ts cardsToClose），当场发布让网页即时刷新。监护关着时一张都不关（与改动前一致）。关卡出错只记日志：最坏卡多开一会儿。
+ */
+export function closeRecoveredCards(cid: string, now = Date.now()): void {
+  try {
+    const db = askDbIfExists();
+    const row = db && readRegistryAgentsSync().find((a) => a.channelId === cid);
+    if (!db || !row) return;
+    for (const a of cardsToClose(db, row.name, row.projectId, now, productionView.config())) {
+      const c = closeAsk(db, a.id, "cancelled", "agent 已恢复：下一个回合正常结束", now, { recoveredAt: now });
+      if (c) publishAsk(c), console.log(`✅ ${row.name} 恢复，关掉回合失败卡 ${a.id}`);
+    }
+  } catch (e) {
+    console.error(`⚠️ 恢复后关回合失败卡出错（卡留着，owner 可手动关）：${(e as Error).message}`);
+  }
 }
 
 /** 只在 settlesOwnTurn 为真时调（settleStopTurn） */
