@@ -3,8 +3,7 @@ import { INTENT_ACTIONS, INTENT_STATUSES, WORKFLOW_MODES, WORKFLOW_TEMPLATES, AU
 import { settleIntent } from "../lib/ledger-scheduler-settle.js";
 import { planIntent, recordPlanRejected, setWorkflow } from "../lib/ledger-scheduler-write.js";
 import { resumeAutoWorkflow } from "../lib/ledger-scheduler-resume.js";
-import { bindSchedulerSession, recordSessionRetirement, type SessionRole, type SessionTransport } from "../lib/scheduler-sessions.js";
-import { beginRetire } from "../lib/scheduler-retire-ledger.js";
+import { beginRetire, bindSchedulerSession, recordSessionRetirement, type SessionRole, type SessionTransport } from "../lib/scheduler-sessions.js";
 import { advanceMergeRun, beginMergeRun, MERGE_RESOLUTIONS, resolveMergeRun, type MergePhase, type MergeResolution } from "../lib/scheduler-merge.js";
 import { getMeta, getTask, LedgerError } from "../lib/ledger-store.js";
 import { getDeployRun, resolveDeployRun } from "../lib/scheduler-deploy.js";

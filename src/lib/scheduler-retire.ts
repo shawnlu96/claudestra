@@ -28,7 +28,7 @@ export interface RetireDeps {
   notifyPm(task: LedgerTask, text: string): Promise<void>;
 }
 
-export interface RetireOutcome {
+interface RetireOutcome {
   taskId: string; step: "retired" | "handoff" | "held" | "unknown"; detail: string;
   /** For PM, set only by the settle that closed the intent; the pass sends one combined notice per project. */
   notice?: string;
@@ -56,7 +56,7 @@ export function retireCandidates(db: Database, projects: readonly string[]): str
 }
 
 /** An unfinished card still using this agent (bound session or named executor): killing it would kill that card's work. */
-export function agentStillInUse(db: Database, agent: string, taskId: string): string | null {
+function agentStillInUse(db: Database, agent: string, taskId: string): string | null {
   const row = db.query(`SELECT t.id FROM tasks t WHERE t.id != ? AND t.stage NOT IN (${RS}) AND (t.agent = ?
     OR EXISTS (SELECT 1 FROM scheduler_sessions s WHERE s.taskId = t.id AND s.agent = ? AND s.state != 'retired')) LIMIT 1`)
     .get(taskId, agent, agent) as { id: string } | null;

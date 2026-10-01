@@ -19,7 +19,7 @@ import type { TickPace } from "./scheduler-yield.js";
 
 type Manager = (...args: string[]) => Promise<Record<string, unknown>>;
 
-export function retireDeps(db: Database, ledger: Manager, active: () => void, lease: SchedulerLease | undefined): RetireDeps {
+function retireDeps(db: Database, ledger: Manager, active: () => void, lease: SchedulerLease | undefined): RetireDeps {
   const agent: Manager = async (...args) => {
     const r = await whileOwned(active, () => runManagerProcess(args, { bunPath: resolveBunPath(), managerPath: `${SRC_DIR}/manager.ts`,
       env: { ...process.env, DISCORD_CHANNEL_ID: "", [SCHEDULER_LEASE_ENV]: encodeLease(lease) }, timeoutMs: 180_000 }));

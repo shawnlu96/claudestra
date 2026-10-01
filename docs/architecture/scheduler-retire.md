@@ -2,7 +2,7 @@
 
 Once a card is finished, the scheduler service collects what it created for it — the per-card sessions and worktrees — so PM
 no longer kills agents and removes worktrees by hand. Code: `src/lib/scheduler-retire.ts` (steps),
-`src/lib/scheduler-retire-ledger.ts` (the intent), `src/lib/scheduler-retire-deps.ts` (production wiring); tests in
+`beginRetire` in `src/lib/scheduler-sessions.ts` (the intent), `src/lib/scheduler-retire-deps.ts` (production wiring); tests in
 `tests/scheduler-retire.test.ts`.
 
 ## When
