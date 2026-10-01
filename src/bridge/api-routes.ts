@@ -70,6 +70,7 @@ import {
 } from "../lib/tmux-helper.js";
 import { clearRefusal, runtimeOfWindow } from "../lib/wall-screen.js";
 import { paneLooksWorking } from "../lib/turn-state.js";
+import { paneTail } from "../lib/pane-tail.js";
 import { recordMetric } from "../lib/metrics.js";
 import { commandsForAgent } from "./slash-registry.js";
 import { handleSlashPassthrough, type SlashDeps } from "./api-slash.js";
@@ -346,10 +347,7 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
           a.compacting = st === "compacting";
           if (!a.busy && st === undefined && a.status !== "stopped") {
             try {
-              const tail = (await tmuxRaw(["capture-pane", "-t", windowTarget(a.name), "-p"]))
-                .split("\n")
-                .slice(-10)
-                .join("\n");
+              const tail = paneTail(await tmuxRaw(["capture-pane", "-t", windowTarget(a.name), "-p"]), 10).join("\n");
               if (paneLooksWorking(tail)) a.busy = true;
             } catch {
               /* 窗口不存在等,保持不忙 */

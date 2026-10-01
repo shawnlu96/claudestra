@@ -43,3 +43,22 @@ describe("盖住输入框的普通确认框：照常自动按", () => {
     expect(isAutoConfirmableModal(pane)).toBe(false);
   });
 });
+
+// CC 把启动确认框画在屏幕顶部，capture-pane 原样输出下面整片空行（49 行高的 pane 只有前几行有字）：判定先剪掉尾部空行再看末尾
+describe("框在顶部 + 35 行尾部空行", () => {
+  const blankTail = (pane: string) => [...pane.replace(/\s+$/, "").split("\n"), ...Array(35).fill("")].map((l) => `${l}\n`).join("");
+  const devChannels = ["WARNING: Loading development channels", "", "--dangerously-load-development-channels is for local channel development only.", "",
+    "Channels: server:claudestra", "", "❯ 1. I am using this for local development", "  2. Exit", "", "Enter to confirm · Esc to cancel"].join("\n");
+  test("dev-channels 确认框 → 照常自动按", () => {
+    expect(isAutoConfirmableModal(blankTail(devChannels))).toBe(true);
+  });
+  test("尾部空行上面是普通输出、不是弹窗（没有 ❯ 高亮的编号列表、输入框里的编号草稿）→ 不按", () => {
+    const plain = "⏺ 步骤：\n  1. First do X\n  2. Then do Y\nEnter to confirm something? (just text)";
+    for (const pane of [plain, fx("turn-zone/cc-numlist-draft.txt"), fx("turn-zone/cc-draft-num.txt")]) expect(both(blankTail(pane))).toEqual([false, false]);
+  });
+  test("要人决定的框画在顶部也照样认得出、不按：session-idle（Enter = 从摘要恢复）、权限框、AskUserQuestion", () => {
+    const idle = "This session is 21h 6m old and 913.2k tokens.\n\n❯ 1. Resume from summary\n  2. Resuming the full session\n\nEnter to confirm · Esc to cancel";
+    expect(both(blankTail(idle))).toEqual([false, true]); // master 启动时允许：它另走 Down + Enter 选「完整恢复」
+    for (const f of ["turn-zone/modal-permission.txt", "turn-zone/modal-auq.txt"]) expect([f, ...both(blankTail(fx(f)))]).toEqual([f, false, false]);
+  });
+});
