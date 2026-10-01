@@ -31,6 +31,8 @@ export interface PoolFacts {
   repo: string | null;
   /** Peer of the newest answered pool order on this card (a re-review goes back to it). */
   lastPeer: string | null;
+  /** Other cards' executors working locally now (writing stages; i28-W5 load). Absent = the snapshot's slot count stands in. */
+  localWriters?: number;
   /** Peer of the card's newest claimed / answered write or fix order (a fix goes back to it first, i28-W5). */
   writeLeasePeer?: string | null;
 }

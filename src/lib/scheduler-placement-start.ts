@@ -9,7 +9,7 @@ import { resourceKey, resourcesOverlap } from "./ledger-scheduler.js";
 import type { BorrowEntry } from "./lend-config.js";
 import type { RemotePolicy } from "./scheduler-config.js";
 import { placeFor, PEER_PLACEMENT } from "./scheduler-placement.js";
-import { borrowPeers, localReviewerCount } from "./scheduler-pool-facts.js";
+import { borrowPeers, localReviewerCount, localWriterCount } from "./scheduler-pool-facts.js";
 
 export type StartPlacement = { where: "local"; reason: string } | { where: "peer"; peer: string; repo: string; reason: string } | { where: "refused"; reason: string };
 
@@ -31,9 +31,10 @@ export function parseStartPlacement(raw: unknown): "auto" | "local" | `peer:${st
   return typeof raw === "string" && raw.startsWith(PEER_PLACEMENT) && PEER_NAME.test(raw.slice(PEER_PLACEMENT.length)) ? raw as `peer:${string}` : null;
 }
 
+/** Load counts working executors (as the planner does); room is the worker-slot cap, which a card in review still holds. */
 function localLoad(db: Database, project: string, maxWorkers: number) {
   const slots = db.query("SELECT DISTINCT taskId FROM scheduler_resources WHERE project = ? AND resource LIKE 'slot:%'").all(project).length;
-  return { running: slots + localReviewerCount(db, project, null), room: slots < maxWorkers };
+  return { running: localWriterCount(db, project, null) + localReviewerCount(db, project, null), room: slots < maxWorkers };
 }
 
 function locksFree(db: Database, project: string, globs: readonly string[]): boolean {

@@ -34,7 +34,7 @@ function snapshotPlacementFacts(s: PlannerSnapshot, since: number): PlacementFac
   return {
     remote: p?.remote ?? null, repo, pin: cardPin(s.task.extra), lastPeer: p?.lastPeer ?? null, writeLeasePeer: p?.writeLeasePeer ?? null,
     peers: (p?.peers ?? []).map((x) => ({ peer: x.peer, roles: x.roles ?? ["review"], open: x.open, v2: x.v2 ?? null })),
-    local: { running: Math.max(0, s.workerCount - own) + reviewers, room: reviewers < s.maxWorkers },
+    local: { running: (p?.localWriters ?? Math.max(0, s.workerCount - own)) + reviewers, room: reviewers < s.maxWorkers },
     tried: s.intents.filter((i) => isPoolIntent(i) && i.causalSeq >= since && i.head === s.task.headSHA).map((i) => i.recipient!.slice(POOL_RECIPIENT.length)),
     locksFree: locksFree(s),
   };

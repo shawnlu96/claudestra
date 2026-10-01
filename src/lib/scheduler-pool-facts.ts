@@ -102,6 +102,12 @@ export function localReviewerCount(db: Database, project: string, exceptTask: st
     AND s.role = 'reviewer' AND s.state = 'active' AND s.transport != 'peer'`).get(project, exceptTask ?? "") as { n: number }).n;
 }
 
+/** The project's other cards whose executor is working locally now: holding a worker slot in a writing stage (review idles it). */
+export function localWriterCount(db: Database, project: string, exceptTask: string | null): number {
+  return (db.query(`SELECT COUNT(DISTINCT r.taskId) AS n FROM scheduler_resources AS r JOIN tasks AS t ON t.id = r.taskId WHERE r.project = ?
+    AND r.resource LIKE 'slot:%' AND r.taskId != ? AND t.stage IN ('spec','restate','build','fix')`).get(project, exceptTask ?? "") as { n: number }).n;
+}
+
 /** The project's borrow entries in lend.json order, each with A's live orders there and its lend-v2 view. */
 export function borrowPeers(db: Database, project: string, borrow: readonly BorrowEntry[], now: number): PoolFacts["peers"] {
   const live = (peer: string): number => hasLendTable(db)
@@ -112,7 +118,8 @@ export function borrowPeers(db: Database, project: string, borrow: readonly Borr
 
 export function poolFacts(db: Database, task: LedgerTask, cfg: { remote: RemotePolicy; borrow: readonly BorrowEntry[]; now: number }): PoolFacts {
   const lastPeer = scheduledOrders(db, task.id).find((o) => o.status === "done")?.peer ?? null;
-  return { remote: cfg.remote, localReviewers: localReviewerCount(db, task.project, task.id), peers: borrowPeers(db, task.project, cfg.borrow, cfg.now),
+  return { remote: cfg.remote, localReviewers: localReviewerCount(db, task.project, task.id), localWriters: localWriterCount(db, task.project, task.id),
+    peers: borrowPeers(db, task.project, cfg.borrow, cfg.now),
     repo: prCoordinates(task.pr)?.repo ?? null, lastPeer, writeLeasePeer: writeLeasePeer(db, task.id) };
 }
 

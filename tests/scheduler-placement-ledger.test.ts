@@ -4,6 +4,7 @@
  * next peer, then local; a claim that beats the withdrawal is kept; offline / expired / revoked / wrong-repo / wrong-family
  * peers never get the order and the round goes local; a card pinned to a peer never gets a local work order.
  */
+import type { Database } from "bun:sqlite";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
@@ -13,6 +14,7 @@ import { listLendOrders } from "../src/lib/ledger-lend.js";
 import { recordHello } from "../src/lib/ledger-lend-peers.js";
 import { RECEIPT_PURPOSE } from "../src/lib/ledger-lend-result.js";
 import { listEvents } from "../src/lib/ledger-store.js";
+import { createTask } from "../src/lib/ledger-write.js";
 import type { Grant } from "../src/lib/lend-wire-v2.js";
 import { schedulerAutoTick } from "../src/lib/scheduler-auto-tick.js";
 import type { RemotePolicy } from "../src/lib/scheduler-config.js";
@@ -155,6 +157,28 @@ describe("read-only view: ledger lend-orders shows where the current node goes a
       expect((await p.cli("pm", "lend-orders", "T1")).placement).toEqual({ role: "review", where: "local", reason: "没有可用的 peer，放本机" });
       p.policy.remote = { ...REMOTE, mode: "off" };
       expect((await p.cli("pm", "lend-orders", "T1")).placement).toEqual({ role: "review", where: "local", reason: "scheduler.json remote.mode = off，只用本机" });
+    } finally { p.f.close(); }
+  });
+});
+
+describe("this machine's load", () => {
+  /** Another card of the project holding a worker slot in `stage` (the slot stays held through review). */
+  const holding = (db: Database, id: string, stage: string, slot: number) => {
+    createTask(db, { actor: "owner", now: 1 }, { project: "p", id, title: id, kind: "code" });
+    db.run("UPDATE tasks SET stage = ? WHERE id = ?", [stage, id]);
+    db.run(`INSERT INTO scheduler_intents (id, taskId, project, node, action, causalSeq, taskRev, specRev, templateVersion, status, reason, createdAt, updatedAt)
+      VALUES (?, ?, 'p', 'write', 'dispatch', 1, 1, 1, 2, 'done', 'x', 1, 1)`, [`i-${id}`, id]);
+    db.run("INSERT INTO scheduler_resources (project, resource, taskId, intentId, acquiredAt, scope) VALUES ('p', ?, ?, ?, 1, 'card')", [`slot:p:${slot}`, id, `i-${id}`]);
+  };
+
+  test("counts executors that are writing, not ones idling in review behind their slot", async () => {
+    const p = await ready({ maxWorkers: 4 });
+    try {
+      p.hello("mate");
+      holding(p.f.db, "T2", "review", 5);
+      holding(p.f.db, "T3", "build", 6);
+      holding(p.f.db, "T4", "fix", 7);
+      expect((await p.cli("pm", "lend-orders", "T1")).placement).toMatchObject({ where: "peer:mate", reason: expect.stringContaining("在跑：mate 0 / 本机 2；") });
     } finally { p.f.close(); }
   });
 });
