@@ -74,7 +74,8 @@ describe("pickPr / fullPrUrl / prConflict", () => {
     expect(pickPr([row({ isCrossRepository: true })], "feat/x", SHA)).toMatchObject({ ok: false, code: "pr_invalid" });
     expect(pickPr([row({ baseRefName: "dev" })], "feat/x", SHA)).toMatchObject({ ok: false, code: "pr_invalid" });
     expect(pickPr([row({ headRefOid: SHA_B })], "feat/x", SHA)).toMatchObject({ ok: false, code: "pr_head_mismatch" });
-    for (const url of ["306", "#306", "http://github.com/o/r/pull/7", "https://github.com/o/r/pull/7?x", "https://evil.com/o/r/pull/7", "https://github.com/o/../pull/7", "https://github.com/o/r/pull/0"]) {
+    const badUrls = ["306", "#306", "http://github.com/o/r/pull/7", "https://github.com/o/r/pull/7?x", "https://evil.com/o/r/pull/7"];
+    for (const url of [...badUrls, "https://github.com/o/../pull/7", "https://github.com/o/r/pull/0"]) {
       expect(pickPr([row({ url })], "feat/x", SHA)).toMatchObject({ ok: false, code: "pr_invalid" });
     }
   });
