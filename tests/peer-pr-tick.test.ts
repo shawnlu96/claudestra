@@ -10,6 +10,8 @@ import type { PeerPrDeps } from "../src/lib/peer-pr-notice.ts";
 import { peerPrTick, readReviewReport } from "../src/lib/peer-pr-tick.ts";
 import { getWorkflow } from "../src/lib/ledger-scheduler.ts";
 import { getTask, listEvents } from "../src/lib/ledger-store.ts";
+import { insertEvent } from "../src/lib/ledger-tx.ts";
+import type { LedgerTask } from "../src/lib/ledger-stages.ts";
 import { SCHEDULER_CONFIG_PATH } from "../src/lib/scheduler-config.ts";
 import { schedulerAutoTick } from "../src/lib/scheduler-auto-tick.ts";
 import { statePath } from "../src/lib/paths.ts";
@@ -92,6 +94,30 @@ async function intake(w: ReturnType<typeof world>) {
   expect(await w.peerTick()).toContain("#401 收卡 PR401（plain）");
 }
 
+async function until(w: ReturnType<typeof world>, stage: LedgerTask["stage"]) {
+  for (let i = 0; i < 3 && w.card()!.stage !== stage; i++) await w.autoTick();
+  expect(w.card()!.stage).toBe(stage);
+}
+
+/** The peer pushes `head`; two polls later (headSettleSec 0) the peer tick has seen it stable and handed it to the card. */
+async function pushHead(w: ReturnType<typeof world>, head: string) {
+  w.open[0]!.head = head;
+  w.poll();
+  await w.peerTick();
+  w.poll();
+  await w.peerTick();
+}
+
+/** Intake → first review order → verdict on H1 → report pushed → card in fix (P1) or merge (pass). */
+async function firstRound(w: ReturnType<typeof world>, verdict: "pass" | "changes") {
+  await intake(w);
+  await w.autoTick();
+  await w.autoTick();
+  await w.review(verdict, H1, verdict === "pass" ? [P2] : [P1]);
+  await w.peerTick();
+  await until(w, verdict === "pass" ? "merge" : "fix");
+}
+
 describe("peer PR 全链路", () => {
   test("收卡 → P1 推给 peer → fix 等 → 新 head 复验 → 只剩 P2 进 merge", async () => {
     const w = world();
@@ -113,8 +139,7 @@ describe("peer PR 全链路", () => {
     expect(text.split("\n")[0]).toBe("[Claudestra 调度器 · PR #401 第 1 轮审查] 不通过（1 个 P1）");
     expect(text).toContain("<本机临时目录>");
 
-    for (let i = 0; i < 3 && w.card()!.stage !== "fix"; i++) await w.autoTick();
-    expect(w.card()!.stage).toBe("fix");
+    await until(w, "fix");
     expect((await w.autoTick())?.step).toBe("held"); // nobody local to dispatch to
 
     w.open[0]!.head = H2;
@@ -134,8 +159,51 @@ describe("peer PR 全链路", () => {
     expect((await w.review("pass", H2, [P2])).ok).toBe(true);
     await w.peerTick();
     expect(String(w.frames.at(-1)!.text).split("\n")[0]).toBe("[Claudestra 调度器 · PR #401 第 2 轮审查] 通过，留 1 个 P2");
-    for (let i = 0; i < 3 && w.card()!.stage !== "merge"; i++) await w.autoTick();
-    expect(w.card()!.stage).toBe("merge");
+    await until(w, "merge");
+    w.f.close();
+  });
+
+  test("第 2 轮仍有 P1：对方收到「已转 PM」，卡退回人工", async () => {
+    const w = world();
+    await firstRound(w, "changes");
+    await pushHead(w, H2);
+    await w.autoTick();
+    await w.autoTick();
+    await w.review("changes", H2, [P1]);
+    await w.peerTick();
+    expect(String(w.frames.at(-1)!.text)).toContain("复验轮次已到上限，已转 PM");
+    await until(w, "fix");
+    w.poll();
+    await w.peerTick();
+    expect(getWorkflow(w.f.db, "PR401")?.mode).toBe("manual");
+    expect(w.notices.filter((n) => n.includes("复验轮次到顶"))).toHaveLength(1);
+    w.f.close();
+  });
+
+  test("合并队列记了 merged：告诉对方一次（带合并 SHA）", async () => {
+    const w = world();
+    await firstRound(w, "pass");
+    const sha = "c3".repeat(20);
+    insertEvent(w.f.db, w.f.at("scheduler"), { project: "p", target: "PR401", kind: "scheduler", text: "合并队列：merged",
+      data: { op: "merge_phase", intentId: "i-merge", from: "merging", to: "merged", mergeSha: sha } }, true);
+    await w.peerTick();
+    await w.peerTick();
+    const merged = w.frames.filter((fr) => String(fr.text).includes("已合并"));
+    expect(merged.map((fr) => [fr.key, String(fr.text).split("\n")[0]])).toEqual([["PR401:merged:i-merge", `[Claudestra 调度器 · PR #401] 已合并 ${sha.slice(0, 12)}，部署中`]]);
+    w.f.close();
+  });
+
+  test("合并途中 head 变了：不碰合并，告诉 PM 和对方各一次", async () => {
+    const w = world();
+    await firstRound(w, "pass");
+    await pushHead(w, H2);
+    expect(w.card()).toMatchObject({ stage: "merge", headSHA: H1 });
+    expect(w.notices.filter((n) => n.includes("合并途中 PR head 变了"))).toHaveLength(1);
+    w.poll();
+    await w.peerTick();
+    const drift = w.frames.filter((fr) => String(fr.text).includes("合并途中 PR head 变了"));
+    expect(drift).toHaveLength(1);
+    expect(w.notices.filter((n) => n.includes("合并途中 PR head 变了"))).toHaveLength(1);
     w.f.close();
   });
 
