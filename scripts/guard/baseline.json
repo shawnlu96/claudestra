@@ -359,6 +359,12 @@
       "from": 22459,
       "to": 22618,
       "why": "i28-L5 子 DAG MCP 工具按防腐规则 9 在 CLAUDE.md / CLAUDE.zh-CN.md 的 Features 加一行文档指针（→ docs/architecture/dag-tools.md），规格卡允许最多一行；细节全在 docs"
+    },
+    {
+      "key": "guard:scripts/guard/knip.json",
+      "from": 0,
+      "to": 0,
+      "why": "PM approved independent shared-ledger entry registration for i28-C2; no gate relaxation."
     }
   ]
 }
