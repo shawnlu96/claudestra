@@ -17,7 +17,8 @@ export interface NeutralMessage {
   ts?: string;
   role: "user" | "assistant" | "system";
   text?: string;
-  tools?: { name: string; summary: string; detail?: string; error?: boolean }[];
+  /** open：这次读到的范围里还没有 tool_result（bridge lib/session-history.ts）；id = tool_use id */
+  tools?: { name: string; summary: string; detail?: string; error?: boolean; id?: string; open?: boolean }[];
   /** reply() 的最终回复正文（后端从 jsonl 的 reply tool_use 提取） */
   replyText?: string;
   /** reply() 附带的按钮/选单 */
@@ -214,6 +215,15 @@ function accumulate(group: ChatMessage | null, m: NeutralMessage, toolCalls: Too
   return g;
 }
 
+/**
+ * 没结果的工具卡记成 running：回合中每 7s 的差量会把直播卡换成历史卡，记成 done 的话跑着的 Bash 几秒后就显示成已完成、计时也没了。
+ * 带上 id，直播的 tool-state 才找得到它收尾；running 只在回合进行中的最后一张卡上显示为运行中（components/tool-rows.tsx）。
+ */
+function toolView(t: NonNullable<NeutralMessage["tools"]>[number], ts?: string): ToolCallView {
+  const state = t.error ? "error" : t.open ? "running" : "done";
+  return { name: t.name, summary: t.summary, state, ts, ...(t.detail ? { detail: t.detail } : {}), ...(t.id ? { id: t.id } : {}) };
+}
+
 export function toChatMessages(items: NeutralMessage[], opts: ShapeOpts = {}): ChatMessage[] {
   const out: ChatMessage[] = [];
   let group: ChatMessage | null = null; // 当前正在累积的 assistant 回合气泡
@@ -236,9 +246,7 @@ export function toChatMessages(items: NeutralMessage[], opts: ShapeOpts = {}): C
       out.push(systemDivider(m, (m.text || "上下文已压缩").replace(/^[─—\s]+|[─—\s]+$/g, ""), opts.sid));
       continue;
     }
-    const toolCalls: ToolCallView[] | undefined = m.tools?.length
-      ? m.tools.map((t) => ({ name: t.name, summary: t.summary, state: t.error ? ("error" as const) : ("done" as const), ts: m.ts, ...(t.detail ? { detail: t.detail } : {}) }))
-      : undefined;
+    const toolCalls: ToolCallView[] | undefined = m.tools?.length ? m.tools.map((t) => toolView(t, m.ts)) : undefined;
     if (!m.text && !toolCalls && !m.replyText && !m.progress) continue;
 
     if (m.role === "user") {
