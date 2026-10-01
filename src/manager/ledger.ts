@@ -39,6 +39,7 @@ import { RESTATE_CMDS } from "./ledger-restate-cmds.js";
 import { VERDICT_CMDS } from "./ledger-verdict-cmds.js";
 import { ORDER_MARK_CMDS } from "./ledger-order-mark-cmds.js";
 import { SUPERVISE_CMDS } from "./ledger-supervise-cmds.js";
+import { PEER_PR_CMDS } from "./ledger-peer-pr-cmds.js";
 import { DRY_RUN_READS, isWriteInvocation } from "./write-commands.js";
 import { readSchedulerConfig } from "../lib/scheduler-config.js";
 import { collectCallerWitness } from "../lib/caller-witness.js";
@@ -50,7 +51,7 @@ const SCHEDULER_SERVICE_COMMANDS = new Set([
   "scheduler-plan", "scheduler-settle", "scheduler-session-bind", "scheduler-session-retire", "scheduler-merge-begin", "scheduler-merge-step",
   "scheduler-observe", "scheduler-fallback-manual", "scheduler-stage", "scheduler-ui-ask", "lend-ask", "lend-inform", "lend-close-asks", "scheduler-pool",
   "scheduler-deploy-begin", "scheduler-deploy-step", "verify",
-  "scheduler-unclaimed", "scheduler-unclaimed-sent", "scheduler-supervise",
+  "scheduler-unclaimed", "scheduler-unclaimed-sent", "scheduler-supervise", "peer-pr-intake", "peer-pr-observe", "peer-pr-push-record",
 ]);
 
 const COMMANDS: Record<string, CommandSpec> = {
@@ -73,7 +74,7 @@ const COMMANDS: Record<string, CommandSpec> = {
   ...SCHEDULER_OBSERVE_CMDS,
   ...SCHEDULER_AUTO_CMDS, ...RESTATE_CMDS,
   ...VERDICT_CMDS,
-  ...ORDER_MARK_CMDS, ...SUPERVISE_CMDS,
+  ...ORDER_MARK_CMDS, ...SUPERVISE_CMDS, ...PEER_PR_CMDS,
   import: { valued: ["map", "project"], bools: ["dry-run"], usage: "import <ledger.json> --map <map.json> [--project <id>] [--dry-run]（owner 一次性迁移；映射里的 pms 只在 PM 名单为空时写入）", run: importCmd },
 };
 
