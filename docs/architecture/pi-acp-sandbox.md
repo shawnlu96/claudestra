@@ -40,7 +40,7 @@ Outside the sandbox (`CLAUDESTRA_SANDBOX` unset) none of this runs: production l
 
 **Rule.**
 - The adapter, pi and the channel-server pi spawns run with `HOME=<root>/acp-home` — the same isolated home the Codex ACP chain uses (`sandboxAcpHome`).
-- pi always gets `--no-extensions --no-skills --no-prompt-templates` (pi's help: *disable extension discovery and built-in extensions; explicit -e paths still work*). The adapter's own `-e builtin:mcp -e <mcp-mount>` come after and still load — that is what gives the model `reply`. Flags that load code or config from elsewhere are refused (table above); `npm:` / `git:` sources would download and execute packages.
+- pi always gets `--no-extensions --no-skills --no-prompt-templates` (pi's help: *disable extension discovery and built-in extensions; explicit -e paths still work*). The adapter's own `-e builtin:mcp -e <mcp-mount>` come after and still load; `<mcp-mount>` connects the channel-server itself (it does not rely on `builtin:mcp`, which pi skips when another extension registers `/mcp`), and that is what gives the model `reply`. Flags that load code or config from elsewhere are refused (table above); `npm:` / `git:` sources would download and execute packages.
 - `PI_OFFLINE=1` (no version check, catalog refresh or package install at startup; the bundled model catalog still works — checked with 0.99.2) and `PI_TELEMETRY=0`.
 - Kept on: project trust (`--approve`) and context files (`AGENTS.md` / `CLAUDE.md`). Both are discovered from the agent's cwd, which must be under the sandbox root, so they are the tester's own files.
 

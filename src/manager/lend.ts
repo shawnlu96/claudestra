@@ -9,7 +9,7 @@ import { CODEX_EFFORT_LEVELS } from "../lib/codex-launch.js";
 import { isCodexEffort, isCodexModel, LEND_PATH, readLend, updateLend, type LendEntry, type LendFile } from "../lib/lend-config.js";
 import { SHELL_SENTENCE } from "../lib/lend-grant-rules.js";
 import { buildBorrowEntry, buildGrant, effectiveLend, readLendContext, type Built } from "../lib/lend-policy.js";
-import { isCreateProcess, stopRevokedWorkers, type StopReport } from "../lib/lend-grant-spawn.js";
+import { isCreateProcess, stopReportText, stopRevokedWorkers, workerOrderLive, type StopReport } from "../lib/lend-grant-spawn.js";
 import { lendStopReason } from "../lib/lend-watchdog.js";
 import { isLendWorkerName } from "../lib/runtimes/clean-env.js";
 import { probeAcpWorker } from "../lib/worker-liveness.js";
@@ -82,8 +82,7 @@ const stopNow = (): Promise<StopReport> => stopRevokedWorkers({
   sleep: (ms) => Bun.sleep(ms),
 }).catch((e) => ({ stopped: [], unconfirmed: [{ name: "出借 worker", why: `当场停出错：${(e as Error).message}` }] }));
 
-const stopText = (r: StopReport): string => (r.stopped.length ? `；已当场停掉 ${r.stopped.join("、")}` : "") +
-  (r.unconfirmed.length ? `；没能确认停掉：${r.unconfirmed.map((u) => `${u.name}（${u.why}）`).join("、")}` : "");
+const stopText = (r: StopReport): string => stopReportText(r, (n) => workerOrderLive(n));
 
 /**
  * 通过准入的条目按 peer 名 upsert（再授权一次 = 换掉旧条目，暂停的也就恢复了）；lend grant 同时打开总开关（执行它本身就是 owner 的明确意思）。

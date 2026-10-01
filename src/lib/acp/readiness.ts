@@ -61,7 +61,7 @@ export async function checkAcpReady(autoInstall = false, deps: AcpReadyDeps = {}
   return { ok: false, reason: installed.error };
 }
 
-/** Pi 走 acp 的最低版本：内置 MCP（-e builtin:mcp）和扩展的 registerMcpServer 都是 0.99.0 才有（pi CHANGELOG） */
+/** Pi 走 acp 的最低版本：内置 MCP（挂载扩展借它的 createMcpExtension 连 channel-server）是 0.99.0 才有（pi CHANGELOG） */
 const PI_ACP_MIN_VERSION = "0.99.0";
 
 /** Pi 的适配器在仓库里、不用装；只要 pi 在、版本够。读不出版本号（格式变了）按够了放行，真起不来宿主会报 */

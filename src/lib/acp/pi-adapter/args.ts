@@ -2,7 +2,8 @@
  * 适配器起 pi 的参数：rpc 模式 + 调用方给的能力档参数 + 挂 MCP 的两件套 + 会话 id。
  * 调用方参数先按 pi 0.99.2 parseArgs 的元数解析成结构，只收白名单里的选项，再由结构重新拼 argv：`--`（其后全成正文）、
  * 位置正文、缺值选项（会吞掉后面适配器的 -e / --session-id）、`--x=值`、会话 / 模式类选项一律拒，不靠字符串里有没有某个词。
- * `-e builtin:mcp` 无条件带上：能力档的 --no-extensions 会连内置 MCP 一起关掉（pi 0.99.1 实测）。
+ * `-e builtin:mcp` 照旧带上：能力档的 --no-extensions 会连内置 MCP 一起关掉（pi 0.99.1 实测），用户自己 mcp.json 里的 server 靠它；
+ * channel-server 不靠它（第三方扩展注册 /mcp 时 pi 根本不加载它），挂载扩展自带连接器（mcp-mount.ts）。
  * tests/pi-acp-args.test.ts（拿上游 parseArgs 原样核对 mode / sessionId / extensions）。
  */
 import { fileURLToPath } from "node:url";
