@@ -151,3 +151,79 @@ describe("start_node without template: calls, workflow and receipt are the pre-N
     expect(workflowEvents().map((e) => [e.data.template, e.data.templateVersion])).toEqual([["code", 3]]);
   });
 });
+
+describe("template code is the default, byte for byte", () => {
+  for (const [name, run] of runs) {
+    test(name, async () => {
+      expect((await plan()).ok).toBe(true);
+      calls = [];
+      const viaCode = name === "peer" ? () => start({ placement: "peer:mate", template: "code" }, peerEnv()) : () => {
+        if (name === "rollback") failOn = (a) => a[0] === "ledger" && a[1] === "workflow-set";
+        return start({ template: "code" });
+      };
+      expect(digest(product(await viaCode()))).toBe(TEMPLATE_GOLDEN[name]);
+    });
+  }
+});
+
+const NOTE = { ui: "ui 卡：合并前要 owner 看前后截图", security: "security 卡：只在本机跨模型审查" } as const;
+const firstRow = () => db.query("SELECT template, templateVersion FROM task_workflows WHERE taskId = 'i28-a'").all();
+
+describe("ui / security land right from the first write", () => {
+  for (const t of ["ui", "security"] as const) {
+    test(`${t}, local card: workflow row is ${t} v3, no code workflow event ever, receipt notes the gate`, async () => {
+      expect((await plan()).ok).toBe(true);
+      calls = [];
+      const out = await start({ template: t });
+      expect(out).toMatchObject({ ok: true, taskId: "i28-a", agent: "agent-task-i28-a" });
+      expect(out.next).toBe(`调度器会给 agent-task-i28-a 派复述单；不用给它发消息；${NOTE[t]}${t === "ui" ? "（extra.screenshots ≥ 2 + screenshotsDigest）" : "，不进借算力池"}`);
+      expect(firstRow()).toEqual([{ template: t, templateVersion: 3 }]);
+      expect(workflowEvents().map((e) => [e.data.template, e.data.templateVersion, e.data.mode])).toEqual([[t, 3, "auto"]]);
+      const set = calls.filter((c) => c[1] === "workflow-set");
+      expect(set).toHaveLength(1);
+      expect(set[0]).toContain(`--template=${t}`);
+      expect(set[0]).toContain("--version=3");
+      const brief = readFileSync(join(dir, "ledger", "reviews", "i28-a-exec-prompt.md"), "utf8");
+      expect(brief.includes("## ui 卡：合并前 owner 要看前后截图")).toBe(t === "ui");
+    });
+
+    test(`${t}, peer card (fake placement): same workflow, restate skipped after it, receipt notes the gate`, async () => {
+      expect((await plan()).ok).toBe(true);
+      const out = await start({ placement: "peer:mate", template: t }, peerEnv());
+      expect(out).toMatchObject({ ok: true, placement: "peer:mate", steps: ["task-new", "spec", "workflow", "restate", "bind"] });
+      expect(out.next).toContain(`；${NOTE[t]}`);
+      expect(firstRow()).toEqual([{ template: t, templateVersion: 3 }]);
+      expect(workflowEvents().map((e) => [e.data.template, e.data.templateVersion])).toEqual([[t, 3]]);
+      expect(getTask(db, "i28-a")?.stage).toBe("restate");
+    });
+  }
+});
+
+describe("a bad template is refused before anything is written", () => {
+  test("wrong case, unknown, empty, padded, number, object, null: invalid, no manager / git call, no card, worktree or agent", async () => {
+    expect((await plan()).ok).toBe(true);
+    calls = [];
+    for (const bad of ["UI", "design", "", " ui", 3, { t: "ui" }, null]) {
+      const out = await start({ template: bad });
+      expect(out).toMatchObject({ ok: false, code: "invalid", error: expect.stringContaining("template 只能是 code / ui / security") });
+    }
+    expect(calls).toEqual([]);
+    expect(getTask(db, "i28-a")).toBeNull();
+    expect(existsSync(join(dir, "wt", "i28-a"))).toBe(false);
+    expect(Object.keys(agents)).toEqual([PM.agent]);
+  });
+
+  test("workflow-set refused on a ui card: card cancelled, agent killed, worktree removed, node left unbound", async () => {
+    expect((await plan()).ok).toBe(true);
+    failOn = (a) => a[0] === "ledger" && a[1] === "workflow-set";
+    const out = await start({ template: "ui" });
+    expect(out).toMatchObject({ ok: false, failedStep: "workflow", leftovers: [] });
+    expect(out.rolledBack).toEqual(expect.arrayContaining(["task-new", "worktree", "agent"]));
+    expect(getTask(db, "i28-a")?.stage).toBe("cancelled");
+    expect(Object.keys(agents)).toEqual([PM.agent]);
+    expect(existsSync(join(dir, "wt", "i28-a"))).toBe(false);
+    expect(branches.has("feat/i28-a")).toBe(false);
+    expect(workflowEvents()).toEqual([]);
+    expect((await call(deps(), "show_dag", { featureId: "i28" })).version.nodes[0].taskId ?? null).toBeNull();
+  });
+});
