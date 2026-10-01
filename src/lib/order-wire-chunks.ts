@@ -8,22 +8,27 @@ import { LedgerError } from "./ledger-store.js";
 import { WIRE_LIMITS } from "./order-wire.js";
 
 const bytes = (s: string): number => Buffer.byteLength(s);
+/** The peer gate measures each input after folding (NFKC) and redaction, which can grow it; parts leave this much headroom under the cap. */
+export const CHUNK_HEADROOM = 1024;
 
-/** One part keeps today's exact input (`<label>：\n<text>`); more parts are headed `<label>（第 i/n 段）：\n`, header counted in the cap. */
-export function chunkInput(label: string, text: string, cap: number = WIRE_LIMITS.input): string[] {
+/**
+ * One part keeps today's exact input (`<label>：\n<text>`, judged against the full cap); more parts are headed `<label>（第 i/n 段）：\n`
+ * and each, header included, stays within cap − headroom.
+ */
+export function chunkInput(label: string, text: string, cap: number = WIRE_LIMITS.input, headroom: number = CHUNK_HEADROOM): string[] {
   const whole = `${label}：\n${text}`;
   if (bytes(whole) <= cap) return [whole];
   const lines = text.match(/[^\n]*\n|[^\n]+$/g) ?? [];
   const head = (i: number, n: number) => `${label}（第 ${i}/${n} 段）：\n`;
   // The header grows with n's digits, so pack for a guessed n and repack until the count it yields fits that header.
   for (let n = 2; ; ) {
-    const room = cap - bytes(head(n, n));
+    const room = cap - headroom - bytes(head(n, n));
     const parts: string[] = [];
     let cur = "";
     let used = 0;
     for (const line of lines) {
       const size = bytes(line);
-      if (size > room) throw new LedgerError("invalid", `${label}有一行 ${size} 字节，一段装不下（每段上限 ${cap} 字节），不截断、拒绝出单`);
+      if (size > room) throw new LedgerError("invalid", `${label}有一行 ${size} 字节，一段装不下（分段时每段上限 ${cap - headroom} 字节），不截断、拒绝出单`);
       if (cur && used + size > room) { parts.push(cur); cur = ""; used = 0; }
       cur += line;
       used += size;

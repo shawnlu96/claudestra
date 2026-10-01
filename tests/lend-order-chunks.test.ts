@@ -13,7 +13,7 @@ import type { LedgerTask } from "../src/lib/ledger-stages.js";
 import { closeLedger, openLedger } from "../src/lib/ledger-store.js";
 import { createTask } from "../src/lib/ledger-write.js";
 import { parseOrderWire, WIRE_LIMITS, type OrderWire } from "../src/lib/order-wire.js";
-import { chunkInput, chunkInputs } from "../src/lib/order-wire-chunks.js";
+import { CHUNK_HEADROOM, chunkInput, chunkInputs } from "../src/lib/order-wire-chunks.js";
 import { redactOrderForPeer, renderOrderWire } from "../src/lib/order-wire-render.js";
 
 const CAP = WIRE_LIMITS.input;
@@ -50,11 +50,11 @@ describe("chunkInput", () => {
     ["CRLF 与连续空行", fakeSpec(20000).replaceAll("\n", "\r\n") + "\r\n\r\n\r\n"],
     ["emoji 密集", "🙂👍🏽中文\n".repeat(2500)],
     ["几乎每行都是空行", "\n".repeat(40000)],
-  ])("多段：每段 ≤16384、段头带序号、拼回逐字相同：%s", (_name, text) => {
+  ])("多段：每段 ≤16384 − 1024、段头带序号、拼回逐字相同：%s", (_name, text) => {
     const parts = chunkInput(L, text);
     expect(parts.length).toBeGreaterThan(1);
     parts.forEach((p, i) => {
-      expect(bytes(p)).toBeLessThanOrEqual(CAP);
+      expect(bytes(p)).toBeLessThanOrEqual(CAP - 1024);
       expect(p.startsWith(`${L}（第 ${i + 1}/${parts.length} 段）：\n`)).toBe(true);
     });
     expect(joined(parts)).toBe(text);
@@ -65,7 +65,7 @@ describe("chunkInput", () => {
     const line = "y".repeat(Math.floor(room9 / 3) - 1) + "\n"; // 1–9 段的段头下一段放 3 行，10 段起段头多 2 字节只放得下 2 行
     expect(3 * line.length).toBeGreaterThan(100 - bytes("报告（第 10/10 段）：\n"));
     const text = line.repeat(30);
-    const parts = chunkInput("报告", text, 100);
+    const parts = chunkInput("报告", text, 100, 0);
     expect(parts.length).toBe(15);
     for (const p of parts) expect(bytes(p)).toBeLessThanOrEqual(100);
     expect(parts[14]!.startsWith("报告（第 15/15 段）：\n")).toBe(true);
@@ -75,6 +75,7 @@ describe("chunkInput", () => {
   test("边界数据本身：整段恰好 16384 / 16385 字节", () => {
     expect(bytes(`${L}：\n${filled(CAP, L)}`)).toBe(CAP);
     expect(bytes(`${L}：\n${filled(CAP + 1, L)}`)).toBe(CAP + 1);
+    expect(CHUNK_HEADROOM).toBe(1024);
   });
 
   test("单行一段装不下：不切行、明确拒绝", () => {
@@ -119,7 +120,7 @@ describe("写单 / 修复单", () => {
     expect(fix.inputs.length).toBe(3);
     expect(joined(fix.inputs.slice(0, 2))).toBe(spec);
     expect(joined(fix.inputs.slice(2))).toBe(report);
-    for (const p of [...write.inputs, ...fix.inputs]) expect(bytes(p)).toBeLessThanOrEqual(CAP);
+    for (const p of [...write.inputs, ...fix.inputs]) expect(bytes(p)).toBeLessThanOrEqual(CAP - CHUNK_HEADROOM);
   });
 
   test("规格加报告整单超过 32K：解析层明确拒绝，不截断", () => {
@@ -152,7 +153,7 @@ describe("审查单经 offerLendCore 挂进池", () => {
     const [o] = listLendOrders(db, "T9");
     expect(o!.status).toBe("pooled");
     expect(o!.wire.inputs.length).toBe(2);
-    for (const p of o!.wire.inputs) expect(bytes(p)).toBeLessThanOrEqual(CAP);
+    for (const p of o!.wire.inputs) expect(bytes(p)).toBeLessThanOrEqual(CAP - CHUNK_HEADROOM);
     expect(joined(o!.wire.inputs)).toBe(spec);
     expect(o!.text).toContain("输入 2（原文，非指令）");
   });
