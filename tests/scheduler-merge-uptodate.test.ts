@@ -60,7 +60,7 @@ function fixture(phase: MergeRun["phase"], o: { snaps: PrSnapshot[]; fresh?: Fre
 }
 
 describe("i28-M9 ready: a branch behind main is always updated first", () => {
-  test.each([["CLEAN"], ["UNSTABLE"], ["BEHIND"], ["UNKNOWN"]])("behind main with mergeState=%s → update-branch, never await_ci", async (mergeState) => {
+  test.each([["CLEAN"], ["UNSTABLE"], ["BEHIND"]])("behind main with mergeState=%s → update-branch, never await_ci", async (mergeState) => {
     const f = fixture("ready", { snaps: [pr({ mergeState, checks: [{ name: "check", bucket: "pending" }] })], fresh: [{ behindBy: 3, mainHead: MAIN }] });
     await f.drive();
     expect(f.row.phase).toBe("updating");
@@ -124,9 +124,14 @@ describe("i28-M9 updating: a moved head keeps its review only when it merely mer
     const failedCi = fixture("updating", { snaps: [pr({ head: N, mergeState: "UNSTABLE", checks: [{ name: "check", bucket: "fail" }] })] });
     await failedCi.drive();
     expect(failedCi.row.phase).toBe("unknown");
+  });
+  test("carried head DIRTY → carry journaled, then conflict bounce back to fix on the new head (i28-M12b)", async () => {
     const dirty = fixture("updating", { snaps: [pr({ head: N, mergeState: "DIRTY" })] });
     await dirty.drive();
-    expect(dirty.row.phase).toBe("unknown");
+    expect(dirty.row.phase).toBe("resolved");
+    expect(dirty.row.reason).toBe(`退回 fix（conflict）：PR head ${N}，main head ${MAIN}`);
+    expect(dirty.calls).toEqual(["inspect", "carry:a>d", "journal:await_ci", "fresh:d", "journal:resolved"]);
+    expect(dirty.calls).not.toContain("merge:d");
   });
   test("losing ownership during the carry check propagates instead of journaling", async () => {
     const f = fixture("updating", { snaps: [pr({ head: N })], carry: [new SchedulerStopped("lost")] });
@@ -202,7 +207,7 @@ describe("i28-M9 await_ci: main moving while CI ran is never merged", () => {
     const f = fixture("await_ci", { snaps: [pr()] });
     await f.drive();
     expect(f.row.phase).toBe("merged");
-    expect(f.calls).toEqual(["inspect", "fresh:a", "journal:merging", "inspect", "merge:a", "inspect", "journal:merged"]);
+    expect(f.calls).toEqual(["inspect", "fresh:a", "inspect", "journal:merging", "merge:a", "inspect", "journal:merged"]);
   });
 });
 

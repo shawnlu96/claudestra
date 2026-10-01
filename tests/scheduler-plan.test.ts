@@ -138,6 +138,7 @@ describe("T68 data workflow planner", () => {
 
   test("P2-only review proceeds without re-review; UI approval is bound to head and spec", () => {
     const s = snapshot("review", 1, "ui");
+    s.ownerVisual = true; // the owner-ask path; PM acceptance: tests/scheduler-ui-pm-gate.test.ts
     const digest = "d".repeat(64);
     s.screenshotsDigest = digest;
     s.events = [...s.events, delivery(19, 1), review(20, 1, [finding("layout", "P2")], "pass")];

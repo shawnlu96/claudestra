@@ -21,7 +21,8 @@ const P2 = { findingId: "name-1", family: "naming", severity: "P2" as const, pro
 
 const DIGEST = "d".repeat(64);
 
-function fixture(template: "code" | "ui" = "code") {
+/** ownerVisual: the ui card goes to the owner (the screenshot-ask path); without it PM accepts (tests/scheduler-ui-pm-gate.test.ts). */
+function fixture(template: "code" | "ui" = "code", ownerVisual = false) {
   const dir = mkdtempSync(join(tmpdir(), "t68e-observe-")), path = join(dir, "ledger.sqlite"), db = openLedger(path);
   const registryPath = join(dir, "registry.json");
   const setReviewSession = (sessionId: string) => writeFileSync(registryPath, JSON.stringify({ socket: "", agents: {
@@ -32,7 +33,7 @@ function fixture(template: "code" | "ui" = "code") {
   let now = 1000;
   const at = (actor: string) => ({ actor, now: (now += 10) });
   createTask(db, at("owner"), { project: "p", id: "T1", title: "observe", kind: "code", agent: "agent-one",
-    extra: { fileGlobs: ["src/lib/x.ts"], ...(template === "ui" ? { screenshotsDigest: DIGEST } : {}) } });
+    extra: { fileGlobs: ["src/lib/x.ts"], ...(template === "ui" ? { screenshotsDigest: DIGEST } : {}), ...(ownerVisual ? { ownerVisual: true } : {}) } });
   setWorkflow(db, at("owner"), { taskId: "T1", taskRev: 1, template, templateVersion: 2, mode: "observe", authorFamily: "claude", fallback: "只报错" });
   const deps = (actor: string): LedgerDeps => ({
     db, actor, registryPath, projectIds: ["p"], now: () => (now += 10),
@@ -282,7 +283,7 @@ describe("T68e observe mode", () => {
   });
 
   test("P1-3 regression: the owner's real screenshot ask is projected — none / open / approved / rejected / stale", async () => {
-    const f = fixture("ui");
+    const f = fixture("ui", true);
     try {
       f.toReview();
       f.dispatch(H1);
@@ -304,7 +305,7 @@ describe("T68e observe mode", () => {
   });
 
   test("r2 P2 regression: only an answer carrying the authenticated owner mark counts as the owner's approval", async () => {
-    const f = fixture("ui");
+    const f = fixture("ui", true);
     try {
       f.toReview();
       f.dispatch(H1);

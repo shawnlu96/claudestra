@@ -44,9 +44,10 @@ const AUTO_SECTION = `
 `;
 
 const UI_SECTION = `
-## ui 卡：合并前 owner 要看前后截图
+## ui 卡：合并前要过前后截图验收
+- 审查通过后调度器把截图发给 PM 验收（改整体观感的卡由 owner 看）；PM 不通过时卡退回 fix，意见在修复单里。
 - 交付前登记截图：\`extra.screenshots\` 至少 2 个图片的绝对路径（改前 / 改后；深浅色或桌面 / 手机按规格），\`extra.screenshotsDigest\` 写这组图片的 sha256（64 位十六进制）。
-- 用 \`ledger task-set {TASK} --rev <rev> --extra '<json>'\` 写，它整份替换 extra，原有字段（fileGlobs 等）要带上；截图用 headless 脚本拍，不用 Playwright MCP 工具。
+- 用 \`ledger task-set {TASK} --rev <rev> --extra '<json>'\` 写，它整份替换 extra，原有字段（fileGlobs、ownerVisual 等）要带上；截图用 headless 脚本拍，不用 Playwright MCP 工具。
 - 缺截图或摘要，审查通过了也合不了，调度器会把卡交回 PM；代码再改过就重拍、重算摘要。
 `;
 

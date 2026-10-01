@@ -43,8 +43,8 @@ const adapter = (f: F): AdapterDeps => ({
 });
 const row = (f: F) => (a: string) => readRegistryAgentsSync(f.registryPath).find((x) => x.name === a);
 
-async function atReview(template: "code" | "ui" = "code"): Promise<F> {
-  const f = autoFixture({ template });
+async function atReview(template: "code" | "ui" = "code", ownerVisual = false): Promise<F> {
+  const f = autoFixture({ template, ownerVisual });
   await toBuild(f);
   await f.tick();
   await f.cli("agent-task-one", "deliver", "T1", "--from", "build", "--head", H1);
@@ -207,7 +207,7 @@ test("T68f r6: auto is refused while scheduler.json autoDispatch is not true; ma
 
 describe("r1 P2s", () => {
   test("P2-1 an expired screenshot ask goes to PM instead of waiting forever", async () => {
-    const f = await atReview("ui");
+    const f = await atReview("ui", true);
     try {
       await f.review("pass", H1, []);
       const opened = await f.tick();

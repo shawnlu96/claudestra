@@ -56,7 +56,7 @@ function taskNew(db: Database, ctx: WriteCtx, c: AutostartClaim, input: StepInpu
   if (!globs?.length) return deny(`节点 ${c.key} 不在当前版本或没有文件范围`);
   const r = createTask(db, ctx, {
     id: c.taskId, project: c.project, title: c.title, kind: "code", itemId: c.item, branch: c.branch, spec: autostartSpecPath(c.taskId), pm: c.pm,
-    agent: c.agent, extra: { fileGlobs: globs },
+    agent: c.agent, extra: { fileGlobs: globs, ...(c.ownerVisual ? { ownerVisual: true } : {}) },
   });
   return { ok: true, task: r.row, duplicate: r.duplicate };
 }
