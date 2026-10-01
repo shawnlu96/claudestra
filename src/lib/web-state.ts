@@ -4,8 +4,9 @@
  * 推送（bridge/push/*）与本地 API（bridge/local-api/*）都从这里拿 db；测试传 ":memory:" 或临时路径。
  */
 import { Database } from "bun:sqlite";
-import { mkdirSync } from "node:fs";
+import { chmodSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { ensureInboundTable } from "./inbound-ledger.js";
 import { STATE_DIR } from "./paths.js";
 
 const WEB_STATE_PATH = join(STATE_DIR, "web-state.sqlite");
@@ -19,6 +20,11 @@ export function openWebState(path: string = WEB_STATE_PATH): Database {
   if (hit) return hit;
   if (path !== ":memory:") mkdirSync(dirname(path), { recursive: true });
   const db = new Database(path);
+  try {
+    if (path !== ":memory:") chmodSync(path, 0o600); // 推送凭据、入站账：只给本 OS 用户读写（-wal / -shm 由 SQLite 按主库权限建）
+  } catch (e) {
+    console.error(`web 状态库没能收紧到 0600（推送 / 本地 API 照常）: ${(e as Error).message}`);
+  }
   db.exec("PRAGMA journal_mode = WAL");
   migrate(db);
   cache.set(path, db);
@@ -68,4 +74,5 @@ function migrate(db: Database): void {
   // 旧 web 的登录会话（只存 sha256）：升级后浏览器带着旧 cstra_session 来，一次性换成设备凭据（lib/legacy-web.ts）
   db.exec(`CREATE TABLE IF NOT EXISTS legacy_sessions (
     id_hash TEXT PRIMARY KEY, username TEXT NOT NULL DEFAULT '', expires_at TEXT NOT NULL, used_at TEXT)`);
+  ensureInboundTable(db); // 非 CC 会话的入站账（lib/inbound-ledger.ts）：旧 BFF 没有，同样不进 WEB_STATE_TABLES
 }

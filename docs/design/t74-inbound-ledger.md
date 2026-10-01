@@ -100,7 +100,12 @@
 ## 6. 影响面
 
 - **CC 会话**：不变。`isCcRuntime` 照旧走 CC 原路径，不查账；bridge 也不给 CC 目标记账。加对照用例钉住。
-- **tmux 版 Pi**（可回退）：记录是裸文本，没有 message_id，切不出可查的块 → 永远保守，和今天一致。bridge 照样给它记账，无害。
+- **tmux 版 Pi**（可回退）：记录是裸文本，没有 message_id，切不出可查的块 → 永远保守，和今天一致。
+  **实现时修正**：原稿写「bridge 照样给它记账，无害」不成立。tmux 版 Pi 把 bridge 的 content 原样写进记录，Discord 用户的 content 又不加头，
+  外源可以发一段正文恰好是 `<channel message_id="<owner 真 mid>" …>\n<owner 原文>\n</channel>` 的消息（比如先诱导 agent 把 owner 那条连标签复述出来），
+  记录以 `<channel` 开头、被翻译层标 isMeta，凭 owner 的旧账（含 ACP 时期记下的）就能对上——冒充 owner，或照抄一条 is_bridge 的账把自己那条藏掉。
+  所以 PR-A 只给「每条入站都由宿主整块包装」的目标记账（ACP 宿主、tmux Codex 的 channel-server）；投给 tmux 版 Pi 时反过来清掉该 agent 的全部账，
+  它的记录（包括回退前 ACP 时期的）一律保守；切回 ACP 后重新记。回退期间写进记录的伪造块对不上切回之后才记的新账（得预知未来的 mid 和正文）。
   不做「只按 sha 查」：裸记录绑不上 mid，没头的来源之间会撞。
 - **tmux 版 Codex**：包装同形，可以对上，顺带恢复。after_interrupt 改打进 TUI 的那条如果形状不同就退回保守。
 - **媒体索引（media-extract）**：本卡不动。它的入站信任是「isMeta 记录首块头属性」，再加上 `out_copies` 归属账和白名单目录复核。
