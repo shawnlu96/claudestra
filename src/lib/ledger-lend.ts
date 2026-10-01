@@ -17,7 +17,7 @@ import { LEASE_MS_DEFAULT, POLL_AFTER_MS, pollLimit, type ClaimRequest, type Lea
 import { isManager, mustTask, type WriteCtx } from "./ledger-checks.js";
 import { endWriteLease, holdWriteLease, lastReviewOf, writeOfferBranch, writeOrderWire, type WriteLease as WriteLeaseRow, type WriteOffer } from "./ledger-lend-lease.js";
 import { LEND_LIVE, type LendOrderStatus } from "./ledger-lend-schema.js";
-import { sweepPushTtl } from "./ledger-lend-peers-ttl.js";
+import { queueTimeoutDue, sweepPushTtl } from "./ledger-lend-peers-ttl.js";
 import { getWorkflow } from "./ledger-scheduler.js";
 import { uiRejectLend } from "./ledger-ui-approve-verdict.js";
 import { LedgerError, listEvents, type LedgerErrorCode } from "./ledger-store.js";
@@ -33,7 +33,7 @@ import { OrderRenderError, redactOrderForPeer, renderOrderWire } from "./order-w
 import { fitFindings } from "./order-findings.js";
 import { standardAnswers } from "./order-standard-answers.js";
 import { prevReview } from "./review-order.js";
-import { bounceReviewLine, reviewAfterBounce } from "./scheduler-merge-conflict.js";
+import { bounceReviewLine, bounceWork, fixBounce, reviewAfterBounce } from "./scheduler-merge-conflict.js";
 
 export interface LendOrder {
   orderId: string; taskId: string; project: string; peer: string; family: LendFamily; step: LendStep; specRev: number; round: number; head: string;
@@ -149,8 +149,12 @@ function orderFor(db: Database, task: LedgerTask, step: LendStep, orderId: strin
   if (!input.write) throw new LedgerError("invalid", "写单缺出借方指纹与基线（CLI 备好再挂）");
   const branch = writeOfferBranch(db, task, step, input.peer, input.write);
   const head = step === "write" ? input.write.baseSha as string : task.headSHA as string;
-  const findings = step === "fix" ? (uiRejectLend(db, task)?.findings ?? lastReviewOf(db, task).findings) : []; // 与本机修复单共用截图 / 代码合成
-  const o = { orderId, step, head, branch, base: input.write.base, spec: input.spec, report: input.write.report, findings, repo: input.repo, pr: input.pr };
+  const b = step === "fix" ? fixBounce(listEvents(db, { project: task.project, target: task.id }), task.stage) : null;
+  // Peer free text cannot carry full SHAs (the secret gate rejects them); keep refs short, as in bounceReviewLine.
+  const shortRef = (sha: string): string => sha.slice(0, 12);
+  const bounce = b ? bounceWork({ ...b, prHead: shortRef(b.prHead), mainHead: b.mainHead ? shortRef(b.mainHead) : null }) : null;
+  const findings = step === "fix" && !bounce ? (uiRejectLend(db, task)?.findings ?? lastReviewOf(db, task).findings) : [];
+  const o = { orderId, step, head, branch, base: input.write.base, spec: input.spec, report: input.write.report, findings, repo: input.repo, pr: input.pr, bounce };
   return { wire: writeOrderWire(task, o), whole: writeOrderWire(task, o, wholeInputs), branch, base: input.write.base };
 }
 
@@ -259,7 +263,6 @@ function sendBack(db: Database, ctx: WriteCtx, o: LendOrder, why: string, now: n
   note(db, ctx, o, `出借：${LABEL[o.step]}派不回 ${o.peer}（${why}），写租约结束，退回本机`, { op: "send_back", from: o.status });
   return { project: o.project, taskId: o.taskId, text: `出借单 ${o.orderId}（${o.taskId} ${LABEL[o.step]}）派不回 ${o.peer}：${why}。写租约已结束，这张卡退回本机做` };
 }
-
 /**
  * Leases past their deadline become `unknown` for PM, in their own transaction so a refusal that follows keeps them.
  * Write orders nobody claimed within WRITE_POOL_TTL_MS go back to local work (the peer is offline or out of slots).
@@ -276,7 +279,8 @@ export function sweepLend(db: Database, ctx: WriteCtx): LendNotice[] {
     });
     const stale = (db.query(`SELECT * FROM lend_orders WHERE ${STALE_WRITE_SQL}`).all(now - WRITE_POOL_TTL_MS) as Record<string, unknown>[]).map(toOrder);
     const why = `挂出或对方看到后 ${WRITE_POOL_TTL_MS / 60_000} 分钟没人领（对方离线、名额满或没批）`;
-    return [...expired, ...stale.map((o) => sendBack(db, ctx, o, why, now)), ...sweepPushTtl(db, now, (orderId, reason) => withdrawPooledLend(db, ctx, { orderId, reason }).withdrawn)];
+    return [...expired, ...stale.filter((o) => queueTimeoutDue(db, o.orderId, now - WRITE_POOL_TTL_MS)).map((o) => sendBack(db, ctx, o, why, now)),
+      ...sweepPushTtl(db, now, (orderId, reason) => withdrawPooledLend(db, ctx, { orderId, reason }).withdrawn)];
   });
 }
 

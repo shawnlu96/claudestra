@@ -7,6 +7,8 @@
  * transaction; the withdraw is passed in so this file does not import ledger-lend.ts. tests/ledger-lend-peers-ttl.test.ts.
  */
 import type { Database } from "bun:sqlite";
+import { queueTimeoutDue, sweepQueueNotices } from "./ledger-lend-queue.js";
+export { queueTimeoutDue } from "./ledger-lend-queue.js";
 import { getWorkflow } from "./ledger-scheduler.js";
 
 export const PUSH_ACK_TTL_MS = 2 * 60_000;
@@ -23,7 +25,8 @@ interface Due { orderId: string; taskId: string; project: string; peer: string; 
 
 export function pushTtlDue(db: Database, now: number): Due[] {
   if (!hasPeersTable(db)) return [];
-  return db.query(`SELECT orderId, taskId, project, peer, seenAt FROM lend_orders WHERE ${PUSH_TTL_SQL} ORDER BY createdAt`).all(...pushTtlArgs(now)) as Due[];
+  const rows = db.query(`SELECT orderId, taskId, project, peer, seenAt FROM lend_orders WHERE ${PUSH_TTL_SQL} ORDER BY createdAt`).all(...pushTtlArgs(now)) as Due[];
+  return rows.filter((d) => queueTimeoutDue(db, d.orderId, now - (d.seenAt === null ? PUSH_ACK_TTL_MS : PUSH_CLAIM_TTL_MS)));
 }
 
 /** Same shape as ledger-lend.ts LendNotice (not imported: ledger-lend.ts imports this file). */
@@ -35,13 +38,13 @@ type Notice = { project: string; taskId: string; text: string };
  */
 
 export function sweepPushTtl(db: Database, now: number, withdraw: (orderId: string, reason: string) => boolean): Notice[] {
-  return pushTtlDue(db, now).flatMap((d) => {
+  return [...sweepQueueNotices(db, now), ...pushTtlDue(db, now).flatMap((d) => {
     const why = d.seenAt === null ? `推送 ${PUSH_ACK_TTL_MS / 60_000} 分钟没收到 ${d.peer} 的确认`
       : `${d.peer} 确认收到后 ${PUSH_CLAIM_TTL_MS / 60_000} 分钟没领`;
     if (!withdraw(d.orderId, `推送超时撤回：${why}`)) return [];
     if (getWorkflow(db, d.taskId)?.mode === "auto") return [];
     return [{ project: d.project, taskId: d.taskId, text: `出借单 ${d.orderId}（${d.taskId}）${why}，已撤回；要再借就 ledger lend-offer ${d.taskId}` }];
-  });
+  })];
 }
 
 /** Mark pushed orders as acknowledged (first ack only) — only this peer's, only while still pooled. */

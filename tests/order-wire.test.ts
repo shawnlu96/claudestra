@@ -167,14 +167,23 @@ describe("peer rendering", () => {
     refusedForPeer(parsed({ head: "C".repeat(40) }), "c".repeat(40));
   });
 
-  // T87 r3 P1: head was exempt by value everywhere, so the same hex (bare, "ref_"-prefixed or tab-split) left in any field.
-  test("the head value anywhere but the head field refuses, bare, prefixed or split", () => {
+  // Whole ledger heads in free text are report metadata; ids, prefixed/split heads and other hex remain refused.
+  test("the head value is allowed only whole in free text, never in ids, prefixed or split", () => {
     const f = f0();
-    for (const c of [{ orderId: H }, { taskId: H }, { node: H }, { repo: `owner/${H}` }, { findings: [{ ...f, findingId: H }] }, { findings: [{ ...f, probe: H }] },
-      { inputs: [H] }, { inputs: [`只审 head ${H}`] }, { outputs: [H] }, { acceptance: [H] }, { writeBack: H }, { fallback: H }, { orderId: H, inputs: [H] }]) {
+    for (const c of [{ orderId: H }, { taskId: H }, { node: H }, { repo: `owner/${H}` }, { findings: [{ ...f, findingId: H }] }, { orderId: H, inputs: [H] }]) {
       refusedForPeer(parsed(c));
     }
-    for (const s of ["ref_" + hex, hex.slice(0, 32) + "\t" + hex.slice(32), hex]) refusedForPeer(parsed({ head: hex, inputs: [s] }), hex);
+    for (const c of [{ findings: [{ ...f, probe: H }] }, { inputs: [H] }, { inputs: [`只审 head ${H}`] },
+      { outputs: [H] }, { acceptance: [H] }, { writeBack: H }, { fallback: H }]) {
+      expect(() => renderOrderWire(parsed(c), PEER)).not.toThrow();
+      expect(() => redactOrderForPeer(parsed(c), H)).not.toThrow();
+    }
+    for (const s of ["ref_" + hex, hex.slice(0, 32) + "\t" + hex.slice(32)]) refusedForPeer(parsed({ head: hex, inputs: [s] }), hex);
+    expect(() => renderOrderWire(parsed({ head: hex, inputs: [hex] }), { audience: "peer", ledgerHead: hex })).not.toThrow();
+    expect(() => redactOrderForPeer(parsed({ head: hex, inputs: [hex] }), hex)).not.toThrow();
+    const other = "d".repeat(40);
+    for (const c of [{ inputs: [other] }, { outputs: [other] }, { acceptance: [other] }, { writeBack: other }, { fallback: other },
+      { findings: [{ ...f, probe: other }] }]) refusedForPeer(parsed(c));
   });
 
   test("lines are kept and each is quoted, so a forged heading stays data", () => {

@@ -33,7 +33,7 @@ const RETRY_MAX_MS = 30_000;
 const FORBIDDEN_RETRY_CAP_MS = 5 * 60_000;
 const forbidden = (e: unknown) => e instanceof ApiError && e.status === 403;
 /** 标签页隐藏时总览的失败重试先停（事件流此时也断开），回到前台再拉 */
-const pageVisibility: Visibility = {
+export const pageVisibility: Visibility = {
   hidden: () => document.visibilityState === "hidden",
   onShow: (cb) => {
     const h = () => document.visibilityState === "visible" && cb();

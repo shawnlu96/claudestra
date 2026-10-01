@@ -8,6 +8,7 @@
  *     指向折叠组的往往是好几条依赖，合成一根：线型取最「活」的（active > waiting > done），代表边按固定顺序挑，deps 里留全部。
  */
 import type { LedgerDepView, LedgerOverview, LedgerTaskView, Stage } from "../collab-model";
+import { restInItems } from "@/lib/api/ledger-done";
 
 export type NodeKind = "full" | "mini";
 export type EdgeStyle = "solid" | "flow" | "dotted";
@@ -105,7 +106,7 @@ function placeGroup(id: string, title: string, slots: Slot[], done: number, top:
   return { id, title, nodes, folds, done, x: 0, y: top, w: ncols * NODE_W + (ncols - 1) * COL_GAP + PAD * 2, h: HEAD + Math.max(tallest, MINI_H) + PAD };
 }
 
-export function causalCanvas(ov: Pick<LedgerOverview, "tasks" | "items" | "deps">): Canvas {
+export function causalCanvas(ov: Pick<LedgerOverview, "tasks" | "items" | "deps" | "doneRest">): Canvas {
   const deps = ov.deps ?? [];
   const drawn = ov.tasks.filter((t) => t.kind !== "ops" && !TERMINAL.has(t.stage));
   const rank = ranks(drawn.map((t) => t.id), deps);
@@ -116,7 +117,9 @@ export function causalCanvas(ov: Pick<LedgerOverview, "tasks" | "items" | "deps"
   let top = 0;
   for (const g of order) {
     const mine = drawn.filter((t) => groupOf(t) === g.id);
-    const done = ov.tasks.filter((t) => groupOf(t) === g.id && t.stage === "done").length;
+    // 窗口外的已完成卡只有按事项的计数（ov.doneRest）：未归事项框收没归事项的和挂在不认识的事项上的
+    const restIds = g.id === LOOSE_GROUP ? Object.keys(ov.doneRest?.byItem ?? {}).filter((id) => !known.has(id)) : [g.id];
+    const done = ov.tasks.filter((t) => groupOf(t) === g.id && t.stage === "done").length + restInItems(ov, restIds, "done");
     if (!mine.length && !done) continue;
     const group = placeGroup(g.id, g.title, slotsOf(g.id, mine, rank), done, top);
     groups.push(group);
