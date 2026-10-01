@@ -152,7 +152,7 @@ export async function discordEditMessage(
 }
 
 /**
- * v2.21+ 把已有频道挪到指定 category(不存在则自动创建)。project-assign 用——
+ * 把已有频道挪到指定 category(不存在则自动创建,满 50 用溢出分类「<名> 2」…)。project-assign 用——
  * 频道随 agent 的 project 归属走。lockPermissions:false 保留频道自身的权限覆盖
  * (allowlist 隐藏策略是建频道时写在频道上的,同步 category 权限会把它冲掉)。
  */
