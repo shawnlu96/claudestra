@@ -11,7 +11,7 @@ import { readJsonStateSync } from "./state-file.js";
 
 export interface WeekQuota { weekUsedPct: number; resetAt: number }
 export type QuotaReport = Partial<Record<"codex" | "claude", WeekQuota>>;
-export const QUOTA_FAMILIES = ["codex", "claude"] as const;
+const QUOTA_FAMILIES = ["codex", "claude"] as const;
 
 /** 周窗口的整数百分比（0..100 夹住）与重置时刻；没有周窗口、百分比未知、重置时刻没有或已过 → null */
 export function weekOf(q: InventoryQuota, now: number): WeekQuota | null {
