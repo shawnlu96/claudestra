@@ -113,6 +113,13 @@ describe("peer secret gate: review prose", () => {
       "ledger/reviews/i28-V1p-r1/lend-Sekai-lend_i28-V1p_s1_r2_a0.md",
       "lend-HedeMacBook-Pro-lend_i28-CONV1_s1_r1_a0",
       "lend-OpenAI-lend_i28-GATE1_s1_r2_a0.md",
+      // Verbatim sentences from the GATE1-r1 adversarial review, with its synthetic-secret discussion kept as prose.
+      "Isolating one character in the middle of the 40-character test secret resets the run; " +
+        "the other fragments are 8 and 31 characters, so no detected run reaches 32.",
+      "The current test at `tests/peer-secret-gate.test.ts:124-136` never makes a fragment shorter than eight characters.",
+      "Peer names with uppercase suffixes are enough to recreate the original false-positive class.",
+      "The submitted test does not exercise that report, leaving the specified full-report peer dispatch " +
+        "and its potentially different prose, headings and metadata remain unverified.",
     ]) {
       expect(peerSecretHit(input)).toBeNull();
       expect(() => redactOrderForPeer(order(input), HEAD)).not.toThrow();
@@ -163,6 +170,10 @@ describe("peer secret gate: exact ledger head", () => {
 describe("peer secret gate: real secret shapes", () => {
   // Synthetic base62 values, never real credentials.
   const random = "Q7mZ2rXa9Lk4Vp8Nc3Tj6Hw0Bs5Dy1FuE2oRgP9v";
+  const randomValues = [random,
+    "yXLnkjkqFSDitHmG0WahVU66R3UgKjxPALZUUudj",
+    "7gl3AS8UFvevnKoESFrBRpn0Q3hBitihfD2t36PZ",
+  ];
 
   test("a 40-character random value refuses alone and inside a filename or identifier", () => {
     expect(random.length).toBe(40);
@@ -173,30 +184,40 @@ describe("peer secret gate: real secret shapes", () => {
     }
   });
 
-  test("space/newline/tab splits into two or three mixed fragments still refuse", () => {
-    for (const blank of [" ", "\n", "\t"]) {
-      for (let first = 8; first <= random.length - 8; first++) {
-        const two = random.slice(0, first) + blank + random.slice(first);
-        expect(peerSecretHit(two)).toBe("随机串");
-        peerRefuses(two);
-        for (let second = first + 8; second <= random.length - 8; second++) {
-          const three = [random.slice(0, first), random.slice(first, second), random.slice(second)].join(blank);
-          expect(peerSecretHit(three)).toBe("随机串");
-          peerRefuses(three);
+  test("all two/three-piece partitions of three base62 values refuse with four whitespace forms", () => {
+    let checked = 0;
+    const blanks = [[" ", " "], ["\n", "\n"], ["\t", "\t"], [" \t", "\n\t"]];
+    for (const value of randomValues) {
+      expect(value.length).toBe(40);
+      expect(peerSecretHit(value)).toBe("随机串");
+      for (const [left, right] of blanks) {
+        for (let first = 1; first < value.length; first++) {
+          expect(peerSecretHit(value.slice(0, first) + left + value.slice(first))).toBe("随机串");
+          checked++;
+          for (let second = first + 1; second < value.length; second++) {
+            const split = value.slice(0, first) + left + value.slice(first, second) + right + value.slice(second);
+            expect(peerSecretHit(split)).toBe("随机串");
+            checked++;
+          }
+        }
+        // Both peer exits sample two-piece, one-character and word-shaped middle pieces from every fixture/form.
+        for (const cuts of [[20], [8, 9], [9, 11], [13, 27], [30, 32]]) {
+          const bounds = [0, ...cuts, value.length];
+          const split = bounds.slice(0, -1).map((start, i) => value.slice(start, bounds[i + 1])).join(left);
+          peerRefuses(split);
+          peerRefuses(`The P1 value ${split} remains unresolved`);
         }
       }
     }
+    expect(checked).toBe(3 * 4 * (39 + 741));
   });
 
-  test("one-character middle pieces and required 8/1/31, 20/20, 13/14/13 splits refuse", () => {
-    for (const blank of [" ", "\n", "\t"]) {
-      const cuts = [[8, 9], [20], [13, 27]];
-      for (let first = 8; first <= 31; first++) cuts.push([first, first + 1]);
-      for (const cut of cuts) {
-        const bounds = [0, ...cut, random.length];
-        const value = bounds.slice(0, -1).map((start, i) => random.slice(start, bounds[i + 1])).join(blank);
-        expect(peerSecretHit(value)).toBe("随机串");
-        peerRefuses(value);
+  test("all eight title-case middle-piece regressions refuse through both peer exits", () => {
+    for (const [left, right] of [[" ", " "], ["\n", "\n"], ["\t", "\t"], [" \t", "\n\t"]]) {
+      for (let first = 9; first <= 30; first += 3) {
+        const split = random.slice(0, first) + left + random.slice(first, first + 2) + right + random.slice(first + 2);
+        expect(peerSecretHit(split)).toBe("随机串");
+        peerRefuses(split);
       }
     }
   });

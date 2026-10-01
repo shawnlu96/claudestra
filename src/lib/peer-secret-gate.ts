@@ -1,8 +1,8 @@
 /**
  * Refuse secrets before peer dispatch; address / personal-info masking belongs to dispatch-redact.ts.
  * Prefixes, Bearer, PEM and hex still ignore whitespace; only a whole, exact ledger head in free text is exempt.
- * Random values are checked per token, joining adjacent non-word fragments, including single characters, never English sentences or ids.
- * Flattening prose for that rule again would strand peer repair orders containing review reports. Tests: peer-secret-gate*.
+ * Random checks join all adjacent ASCII fragments across whitespace, then measure 32-character windows.
+ * Category-switch density separates random values from prose; word-shaped split pieces must never bypass the gate. Tests: peer-secret-gate*.
  */
 import { redactFields } from "./redact-fields.js";
 
@@ -15,31 +15,31 @@ const RULES: readonly (readonly [string, RegExp])[] = [
 /** Folded text has no control characters, so this placeholder never makes a real value look already masked. */
 const SENTINEL = "\u0000";
 
-/** Word-shaped segments keep camelCase, snake_case and lend/card ids out of the random-value heuristic. */
-function identifier(token: string): boolean {
-  const camel = (part: string) => /^(?:[a-z]+\d*|[A-Z][a-z]+\d*)(?:[A-Z][a-z]+\d*|[A-Z]+\d*)+$/.test(part)
-    && (part.match(/[A-Za-z][a-z]{2,}/g)?.length ?? 0) >= 2;
-  const word = /^(?:[a-z]+|[A-Z][a-z]+|[A-Z]+)(?:\d+[a-z]?)?$|^\d+$/;
-  const acronym = (part: string) => /^[A-Za-z][a-z]{2,}(?:[A-Z][a-z]{2,})*[A-Z]{2,}\d*$/.test(part);
-  return camel(token) || acronym(token) || (/[_-]/.test(token) && token.split(/[_-]/).every((part) => word.test(part) || camel(part) || acronym(part)));
+/** A 32-character window needs all three classes and at least 14 letter/digit class switches (14/31).
+ * Separators contribute no switches: report filenames and prose stay below the density of mixed random values.
+ */
+function randomWindow(value: string): boolean {
+  const classes = [...value].map((c) => /[a-z]/.test(c) ? 0 : /[A-Z]/.test(c) ? 1 : /[0-9]/.test(c) ? 2 : 3);
+  const counts = [0, 0, 0, 0];
+  let switches = 0;
+  const change = (a: number, b: number) => a < 3 && b < 3 && a !== b ? 1 : 0;
+  for (let i = 0; i < classes.length; i++) {
+    counts[classes[i]!]!++;
+    if (i > 0) switches += change(classes[i - 1]!, classes[i]!);
+    if (i >= 32) {
+      counts[classes[i - 32]!]!--;
+      switches -= change(classes[i - 32]!, classes[i - 31]!);
+    }
+    if (i >= 31 && switches >= 14 && counts[0]! > 0 && counts[1]! > 0 && counts[2]! > 0) return true;
+  }
+  return false;
 }
 
-/** Ordinary words and identifiers stop joins; short random fragments must not reset a split secret. */
-function randomBarrier(token: string): boolean {
-  return /^(?:[a-z]{2,}|[A-Z][a-z]+|\d{2,})$/.test(token) || identifier(token);
-}
-
-/** Punctuation breaks a join; whitespace joins non-word fragments before testing the combined value. */
+/** Whitespace never breaks an ASCII run, even when a secret's middle piece happens to spell a word. */
 function randomHit(text: string): boolean {
-  let end = 0;
-  let run = "";
-  for (const match of text.matchAll(/[\w-]+/g)) {
-    const token = match[0];
-    if (!randomBarrier(token)) {
-      run = run && /^\s+$/.test(text.slice(end, match.index)) ? run + token : token;
-      if (run.length >= 32 && /\d/.test(run) && /[A-Z]/.test(run) && /[a-z]/.test(run)) return true;
-    } else run = "";
-    end = match.index + token.length;
+  for (const match of text.matchAll(/[A-Za-z0-9_-]+(?:\s+[A-Za-z0-9_-]+)*/g)) {
+    const value = match[0].replace(/\s+/g, "");
+    if (value.length >= 32 && randomWindow(value)) return true;
   }
   return false;
 }
