@@ -16,7 +16,7 @@ import type { LedgerDeps } from "../src/manager/ledger-context.js";
 import type { Registry } from "../src/manager/core.js";
 
 const H1 = "1".repeat(40), H2 = "2".repeat(40);
-const P1 = { findingId: "race-1", family: "concurrency", severity: "P1" as const, probe: "two ticks claim the same intent" };
+const P1 = { findingId: "race-1", family: "concurrency", severity: "P1" as const, probe: "[验收线 1] two ticks claim the same intent" };
 const P2 = { findingId: "name-1", family: "naming", severity: "P2" as const, probe: "rename helper" };
 
 const DIGEST = "d".repeat(64);
@@ -328,11 +328,11 @@ describe("T68e observe mode", () => {
       await f.observe();
       f.review("changes", H1, [P1]);
       const first = await f.observe();
-      f.review("changes", H1, [{ ...P1, findingId: "race-2", probe: "probe B" }]);
+      f.review("changes", H1, [{ ...P1, findingId: "race-2", probe: "[验收线 1] probe B" }]);
       const second = await f.observe();
       expect(second.duplicate).toBe(false);
       expect(first.event.data.decision).toMatchObject({ workOrder: { findings: [{ findingId: "race-1" }] } });
-      expect(second.event.data.decision).toMatchObject({ workOrder: { findings: [{ findingId: "race-2", probe: "probe B" }] } });
+      expect(second.event.data.decision).toMatchObject({ workOrder: { findings: [{ findingId: "race-2", probe: "[验收线 1] probe B" }] } });
     } finally { f.close(); }
   });
 

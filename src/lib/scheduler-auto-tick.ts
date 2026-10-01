@@ -26,6 +26,7 @@ import { peerPrHold } from "./peer-pr-hold.js";
 import type { BorrowEntry } from "./lend-config.js";
 import type { RemotePolicy } from "./scheduler-config.js";
 import { isPoolIntent } from "./scheduler-pool-plan.js";
+import { isRoundCap, roundCapNotice } from "./review-converge-notice.js";
 import { drivePool } from "./scheduler-pool-tick.js";
 import { informFamilyWait } from "./scheduler-family-pick-notice.js";
 import { deliveryFor, sentAsWake, type EnsureResult, type SessionRef, type WorkerSession } from "./worker-session.js";
@@ -248,7 +249,6 @@ class Card {
     if (intent.action === "merge") return this.out("merge_queue", "合并意图交合并队列");
     return this.out("held", `意图 ${intent.action} 不由本服务执行`);
   }
-
   /** P2 findings do not block the merge, but PM reads the diff: best-effort, the stage event itself is the durable record. */
   async diffNotice(): Promise<void> {
     const rv = listEvents(this.db, { project: this.task.project, target: this.task.id }).findLast((e) => e.kind === "review");
@@ -256,7 +256,6 @@ class Card {
       `，报告 ${String(rv?.data.path ?? "（无）")}`;
     await this.deps.notifyPm(this.task, text).catch(noticeLost("P2 看 diff 通知没发出去"));
   }
-
   /** A screenshot ask that expired or was withdrawn can never be answered; waiting on it would be forever. */
   uiAskDead(): SchedulerIntent | null {
     const sent = this.db.query(`SELECT * FROM scheduler_intents WHERE taskId = ? AND action = 'ask' AND status = 'done'
@@ -268,6 +267,7 @@ class Card {
     await informFamilyWait(this.db, this.task, wait, this.opts.pool?.remote, this.deps);
     const deadAsk = wait.code === "owner_screenshot" ? this.uiAskDead() : null;
     if (deadAsk) return this.escalate("截图 ask 已过期或被撤下，没人能再答：PM 决定重开还是接管", deadAsk.id);
+    if (isRoundCap(wait.code)) return this.out("held", await roundCapNotice(this.db, this.task, this.deps.notifyPm)); // 第 8 轮安全阀
     if (wait.code !== "in_flight") return this.out("waiting", wait.reason);
     const sent = (this.db.query(`SELECT * FROM scheduler_intents WHERE taskId = ? AND action IN ('dispatch','review') AND status = 'done'
       ORDER BY eventSeq DESC LIMIT 1`).get(this.task.id) as SchedulerIntent | null);
@@ -340,7 +340,7 @@ class Card {
     return left > 0 ? `连续 ${streak} 次派单未投递（${oneLine(recent[0].receipt ?? "")}），${Math.ceil(left / 1000)}s 后再派` : null;
   }
 
-  async step(): Promise<CardOutcome> {
+  async step(): Promise<CardOutcome> { await (await import("./review-converge-notice.js")).followUpFailureNotice(this.db, this.task, this.deps.notifyPm);
     const open = this.db.query(`SELECT * FROM scheduler_intents WHERE taskId = ? AND status IN ('pending','submitted','unknown')
       ORDER BY eventSeq DESC LIMIT 1`).get(this.task.id) as SchedulerIntent | null;
     if (open?.status === "unknown") return this.out("held", `外部结果不明，等 PM 核对：${open.receipt ?? open.reason}`);
@@ -354,7 +354,7 @@ class Card {
     if (open) return this.drive(open, null);
     const peerHold = peerPrHold(this.db, this.task); if (peerHold) return this.out("held", peerHold); // 只拦 peer PR 卡（i28-A2）
     const plan = planScheduler(autoSnapshot(this.db, this.task, this.opts));
-    if (plan.kind === "escalate") return this.escalate(`${plan.code}：${plan.reason}`);
+    if (plan.kind === "escalate") return (await import("./review-converge-notice.js")).escalationWithFollowUp(this.db, this.task, plan, this.deps.notifyPm, (r) => this.escalate(r));
     if (plan.kind === "wait") return this.watch(plan);
     if (plan.action === "verify" || plan.action === "retire") return this.out("waiting", `${plan.node} 由合并队列 / 收尾步骤（scheduler-retire.ts）处理`);
     const backoff = plan.action === "dispatch" || plan.action === "review" ? this.undeliveredBackoff() : null;

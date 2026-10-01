@@ -14,6 +14,7 @@ import { currentPooledReviewer, poolAckSeq, poolFacts, poolReviewerOf, strayPool
 import { isPoolIntent } from "./scheduler-pool-plan.js";
 import { taskWorkerRefs } from "./scheduler-sessions.js";
 import { observeSnapshot, type SnapshotOpts } from "./scheduler-snapshot.js";
+import { fixDiffOf } from "./review-converge-scope.js";
 
 type ReviewProof = PlannerSnapshot["reviewDispatches"][number];
 
@@ -46,5 +47,6 @@ export function autoSnapshot(db: Database, task: LedgerTask, opts: SnapshotOpts,
   const wrote = remoteHeadFamily(db, task);
   const workflow = wrote && base.workflow ? { ...base.workflow, authorFamily: wrote } : base.workflow;
   return { ...base, workflow, author: bound.author, reviewer, intents, reviewDispatches: reviewProofs(db, base.events, intents, reviewer),
-    pool: opts.pool ? poolFacts(db, task, { ...opts.pool, now: opts.now ?? Date.now() }) : null, strayPoolOrders: strayPoolOrders(db, task.id).map((o) => o.orderId) };
+    pool: opts.pool ? poolFacts(db, task, { ...opts.pool, now: opts.now ?? Date.now() }) : null, strayPoolOrders: strayPoolOrders(db, task.id).map((o) => o.orderId),
+    fixDiff: fixDiffOf(task, base.events) }; // 第 3 轮起的修复 diff（review-converge-scope.ts）
 }

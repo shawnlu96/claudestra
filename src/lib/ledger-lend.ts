@@ -17,7 +17,7 @@ import { LEASE_MS_DEFAULT, POLL_AFTER_MS, pollLimit, type ClaimRequest, type Lea
 import { isManager, mustTask, type WriteCtx } from "./ledger-checks.js";
 import { endWriteLease, holdWriteLease, lastReviewOf, writeOfferBranch, writeOrderWire, type WriteLease as WriteLeaseRow, type WriteOffer } from "./ledger-lend-lease.js";
 import { LEND_LIVE, type LendOrderStatus } from "./ledger-lend-schema.js";
-import { sweepPushTtl } from "./ledger-lend-peers-ttl.js";
+import { queueTimeoutDue, sweepPushTtl } from "./ledger-lend-peers-ttl.js";
 import { getWorkflow } from "./ledger-scheduler.js";
 import { uiRejectLend } from "./ledger-ui-approve-verdict.js";
 import { LedgerError, listEvents, type LedgerErrorCode } from "./ledger-store.js";
@@ -33,8 +33,8 @@ import { OrderRenderError, redactOrderForPeer, renderOrderWire } from "./order-w
 import { fitFindings } from "./order-findings.js";
 import { standardAnswers } from "./order-standard-answers.js";
 import { prevReview } from "./review-order.js";
+import { convergeOrderLines } from "./review-converge-order.js";
 import { bounceReviewLine, bounceWork, fixBounce, reviewAfterBounce } from "./scheduler-merge-conflict.js";
-
 export interface LendOrder {
   orderId: string; taskId: string; project: string; peer: string; family: LendFamily; step: LendStep; specRev: number; round: number; head: string;
   repo: string; pr: number | null; wire: OrderWire; text: string; sha256: string; status: LendOrderStatus; worker: string | null; leaseGen: number;
@@ -134,7 +134,7 @@ function reviewOrder(db: Database, task: LedgerTask, orderId: string, input: Off
     taskId: task.id, specRev: task.specRev, head, round: task.round, node: "adversarial_review", step: "review", dedupKey: orderId,
     inputs: [...split([[`规格原文（specRev ${task.specRev}）`, input.spec]]), ...(bounce ? [bounceReviewLine(bounce)] : []), standardAnswers("review")],
     outputs: ["逐项结论（findingId / family / severity / probe / description）", "报告正文（markdown），随结论一起交"],
-    acceptance: ["对抗式：专找能打穿规格保证的路径", "只审标题里的 head：只读，不改、不提交、不推送"],
+    acceptance: ["对抗式：专找能打穿规格保证的路径", "只审标题里的 head：只读，不改、不提交、不推送", ...convergeOrderLines(task.round, events, head)],
     writeBack: "用 submit_verdict（M3 前是 lend submit）交结论和报告正文，单号见标题", findings: prev.findings,
   }, { repo: input.repo, pr: input.pr }), (w) => fitFindings(w, prev.report));
 }
@@ -263,7 +263,6 @@ function sendBack(db: Database, ctx: WriteCtx, o: LendOrder, why: string, now: n
   note(db, ctx, o, `出借：${LABEL[o.step]}派不回 ${o.peer}（${why}），写租约结束，退回本机`, { op: "send_back", from: o.status });
   return { project: o.project, taskId: o.taskId, text: `出借单 ${o.orderId}（${o.taskId} ${LABEL[o.step]}）派不回 ${o.peer}：${why}。写租约已结束，这张卡退回本机做` };
 }
-
 /**
  * Leases past their deadline become `unknown` for PM, in their own transaction so a refusal that follows keeps them.
  * Write orders nobody claimed within WRITE_POOL_TTL_MS go back to local work (the peer is offline or out of slots).
@@ -280,7 +279,8 @@ export function sweepLend(db: Database, ctx: WriteCtx): LendNotice[] {
     });
     const stale = (db.query(`SELECT * FROM lend_orders WHERE ${STALE_WRITE_SQL}`).all(now - WRITE_POOL_TTL_MS) as Record<string, unknown>[]).map(toOrder);
     const why = `挂出或对方看到后 ${WRITE_POOL_TTL_MS / 60_000} 分钟没人领（对方离线、名额满或没批）`;
-    return [...expired, ...stale.map((o) => sendBack(db, ctx, o, why, now)), ...sweepPushTtl(db, now, (orderId, reason) => withdrawPooledLend(db, ctx, { orderId, reason }).withdrawn)];
+    return [...expired, ...stale.filter((o) => queueTimeoutDue(db, o.orderId, now - WRITE_POOL_TTL_MS)).map((o) => sendBack(db, ctx, o, why, now)),
+      ...sweepPushTtl(db, now, (orderId, reason) => withdrawPooledLend(db, ctx, { orderId, reason }).withdrawn)];
   });
 }
 
