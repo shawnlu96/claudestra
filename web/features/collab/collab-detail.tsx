@@ -290,9 +290,11 @@ export function CollabDetail(props: {
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [close]);
-  const task = ov.tasks.find((t) => t.id === id);
+  const task = load.status === "ok" ? load.d.task : ov.tasks?.find((t) => t.id === id);
   // 今日完成的任务不在首页的线里：现算一条，详情照样有「现在」与用时
-  const line = props.line ?? (task ? lineOf(task, ov, new Map(ov.items.map((i) => [i.id, i])), now, tr) : null);
+  const fullLine = task ? lineOf(task, ov, new Map((ov.items ?? []).map((i) => [i.id, i])), now, tr) : null;
+  const completed = task && ["done", "verified", "cancelled"].includes(task.stage);
+  const line = completed && load.status === "ok" ? fullLine : props.line ?? fullLine;
 
   const panel = (
     <aside className={`${s.tokens} ${s.panel} ${narrow ? s.full : ""}`}>

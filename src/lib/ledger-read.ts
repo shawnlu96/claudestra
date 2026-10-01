@@ -116,12 +116,35 @@ interface TaskView extends LedgerTask {
   /** 步骤线（T51，ledger-step-line.ts）：只有总览里带，详情在 TaskDetail.stepLine */
   stepLine?: StepLineInfo;
 }
+/** Completed cards keep graph identity and the few counters used by overview widgets; full history stays in taskDetail. */
+type OverviewTask = Partial<Omit<TaskView, "metrics">> & Pick<TaskView, "id" | "title" | "kind" | "stage" | "round" | "updatedAt" | "stageSince"> & {
+  metrics: Partial<TaskMetrics>;
+};
+const compactStage = (stage: Stage) => stage === "verified" || TERMINAL_STAGES.includes(stage);
+
+function overviewTask(view: TaskView): OverviewTask {
+  if (!compactStage(view.stage)) return view;
+  const { id, title, kind, stage, round, updatedAt, metrics } = view;
+  // Keep completion time and counters: falling back to updatedAt after a later note changes “done today”.
+  return {
+    id, title, kind, stage, round, updatedAt,
+    itemId: view.itemId ?? undefined, featureId: view.featureId ?? undefined,
+    pr: view.pr ?? undefined, agent: view.agent ?? undefined, pm: view.pm ?? undefined,
+    assignee: view.assignee ?? undefined, assigneeKind: view.assigneeKind ?? undefined,
+    stageSince: view.stageSince,
+    stageSinceApprox: view.stageSinceApprox || undefined,
+    blockedBy: view.blockedBy, runnable: view.runnable,
+    metrics: { endTs: metrics.endTs, reviewRounds: metrics.reviewRounds || undefined, p0: metrics.p0 || undefined, p1: metrics.p1 || undefined,
+      reviewWaitPendingMs: metrics.reviewWaitPendingMs ?? undefined },
+  };
+}
+
 export interface ProjectView {
   /** Same-snapshot scheduler facts for the existing v4 DAG; absent tables yield manual tasks. */
   scheduler: ReturnType<typeof schedulerProjectView>;
   meta: LedgerMeta;
   items: LedgerItem[];
-  tasks: TaskView[];
+  tasks: OverviewTask[];
   /** 项目的依赖边，带推导值与最终状态 */
   deps: DepView[];
   /** 最近 PROJECT_EVENTS_LIMIT 条 target 为空的项目级事件，seq 升序 */
@@ -183,11 +206,16 @@ function projectViewSnapshot(db: Database, project: string, now: number): Projec
   const tasks = listTasks(db, project);
   const deps = depViews(listDeps(db, project), tasks);
   const rows = stepsByTask(db);
+  const scheduler = schedulerProjectView(db, project);
   return {
-    scheduler: schedulerProjectView(db, project),
+    scheduler: { ...scheduler, tasks: scheduler.tasks.filter((t) => !compactStage(t.stage)) },
     meta: getMeta(db, project),
     items: listItems(db, project),
-    tasks: tasks.map((t) => ({ ...taskView(t, byTarget.get(t.id) ?? [], now, deps), stepLine: stepLineInfo(t, rows.get(t.id) ?? [], byTarget.get(t.id) ?? []) })),
+    tasks: tasks.map((t) => {
+      const own = byTarget.get(t.id) ?? [];
+      const view = overviewTask(taskView(t, own, now, deps));
+      return compactStage(t.stage) ? view : { ...view, stepLine: stepLineInfo(t, rows.get(t.id) ?? [], own) };
+    }),
     deps,
     projectEvents: recent.reverse().map(toEvent),
     audit: openFindings(db, project),

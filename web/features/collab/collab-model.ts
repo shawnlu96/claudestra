@@ -49,7 +49,7 @@ export interface LedgerTaskView {
   pr: string | null;
   spec: string | null;
   model: string | null;
-  extra: Record<string, unknown>;
+  extra?: Record<string, unknown>;
   createdAt: number;
   updatedAt: number;
   lastEvent: LedgerEventView | null;
@@ -57,7 +57,7 @@ export interface LedgerTaskView {
   /** stageSince 是导入推断的近似时间（老 bridge 没有这个字段 = false） */
   stageSinceApprox?: boolean;
   lastReview?: ReviewSummaryView | null;
-  metrics: TaskMetricsView;
+  metrics: Partial<TaskMetricsView>;
   /** 步骤线（T51，collab-step-line-model.ts 解析）；老 bridge 没有 */
   stepLine?: unknown;
   /** 挡着它的前置任务（src/lib/ledger-deps.ts blockedBy）；老 bridge 没有 = 不挡 */
@@ -366,8 +366,8 @@ export function homeView(ov: LedgerOverview, now: number, tr: Tr = zh, waits: re
       owner: lines.filter((l) => l.attention === "owner").length,
     },
     todayDone: ov.tasks
-      .filter((t) => (t.stage === "done" || t.stage === "verified") && (t.metrics.endTs ?? t.updatedAt) >= midnight)
-      .sort((a, b) => (a.metrics.endTs ?? a.updatedAt) - (b.metrics.endTs ?? b.updatedAt))
+      .filter((t) => (t.stage === "done" || t.stage === "verified") && (t.metrics?.endTs ?? t.updatedAt) >= midnight)
+      .sort((a, b) => (a.metrics?.endTs ?? a.updatedAt) - (b.metrics?.endTs ?? b.updatedAt))
       .map((t) => t.id),
     pm: {
       pm: bareAgent(pm),

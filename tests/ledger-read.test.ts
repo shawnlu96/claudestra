@@ -91,8 +91,8 @@ describe("视图", () => {
   test("每个任务的指标与 ledger-metrics 直接算的一致；lastEvent 是该任务最后一条事件", () => {
     const v = projectView(db, "p", 1000);
     const all = listEvents(db, { project: "p" });
-    for (const t of v.tasks) {
-      expect(t.metrics).toEqual(taskMetrics(t, all, 1000));
+    for (const t of v.tasks.filter((t) => t.stage !== "done")) {
+      expect(t.metrics).toEqual(taskMetrics(taskDetail(db, "p", t.id, 1000)!.task, all, 1000));
       expect(t.lastEvent).toEqual(all.filter((e) => e.target === t.id).at(-1)!);
     }
     expect(v.tasks[0].metrics).toMatchObject({ reviewRounds: 2, reworkCount: 1, p1: 1, p2: 3, reviewWaits: [150, 20] });
@@ -102,8 +102,8 @@ describe("视图", () => {
     const [t1, t2] = projectView(db, "p", 1000).tasks;
     expect(t1.stageSince).toBe(520);
     expect(t1.lastReview).toEqual({ round: 2, verdict: "pass", p0: 0, p1: 0, p2: 1, text: "", ts: 520 });
-    expect(t2.stageSince).toBe(600);
-    expect(t2.lastReview).toBeNull();
+    expect(taskDetail(db, "p", t2.id, 1000)!.task.stageSince).toBe(600);
+    expect(t2.lastReview).toBeUndefined();
   });
 
   test("stageSinceApprox：当前阶段由导入推断的时间开出来时为 true；之后真实推进一次就变回 false", () => {

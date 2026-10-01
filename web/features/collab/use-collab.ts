@@ -6,16 +6,16 @@
  * 时间：总览带服务端 now，本地记偏移，之后每 30s 本地推算停留时长，不为了走表去重拉。
  */
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ApiError } from "@/lib/api/client";
+import { collabLoader } from "./collab-loader";
 import { fetchLedger, fetchLedgerTask, followCollabEvents } from "@/lib/api/ledger";
 import { reduceAction, type ActionMap } from "./collab-action";
-import { cachedOverview, cacheOverview, setLedgerAccess } from "./collab-cache";
+import { cachedOverview, cacheOverview } from "./collab-cache";
 import type { LedgerOverview, Stage } from "./collab-model";
 import type { TaskDetail } from "./collab-detail-model";
 import type { BridgeEvent } from "@/lib/chat/stream-shape";
 import { useReviewers } from "./use-collab-extra";
 
-export type CollabLoad = { status: "loading" } | { status: "forbidden" } | { status: "error"; message: string } | { status: "ok"; ov: LedgerOverview };
+export type CollabLoad = { status: "loading" } | { status: "error"; message: string } | { status: "ok"; ov: LedgerOverview; error?: string };
 
 /** 刚推进的那一条：从哪个阶段来、什么时候（驱动品牌色高亮与短标签） */
 export interface Advance {
@@ -39,47 +39,40 @@ export function useCollab(project: string, members: ReadonlySet<string>) {
   const [rev, setRev] = useState(0);
   const [advance, setAdvance] = useState<Advance | null>(null);
   const prevStages = useRef<Map<string, Stage> | null>(null);
-  const inflight = useRef<AbortController | null>(null);
-
-  const refetch = useCallback(async () => {
-    inflight.current?.abort();
-    const ctrl = new AbortController();
-    inflight.current = ctrl;
-    try {
-      const ov = await fetchLedger(project, ctrl.signal);
-      if (ctrl.signal.aborted) return;
-      const prev = prevStages.current;
-      const moved = prev ? ov.tasks.find((t) => prev.has(t.id) && prev.get(t.id) !== t.stage) : undefined;
-      if (moved) setAdvance({ id: moved.id, from: prev!.get(moved.id)!, at: Date.now() });
-      prevStages.current = new Map(ov.tasks.map((t) => [t.id, t.stage]));
-      cacheOverview(project, ov, ov.now - Date.now());
-      setOffset(ov.now - Date.now());
-      setClock(Date.now());
-      setLoad({ status: "ok", ov });
-      setRev((r) => r + 1);
-    } catch (e) {
-      if (ctrl.signal.aborted) return;
-      if (e instanceof ApiError && e.status === 403) {
-        setLedgerAccess(project, "no");
-        setLoad({ status: "forbidden" });
-      }
-      // 已经有数据时重拉失败不清屏：留着旧的，下次事件 / 重连再拉
-      else setLoad((cur) => (cur.status === "ok" ? cur : { status: "error", message: (e as Error).message }));
-    }
-  }, [project]);
+  const loader = useRef<ReturnType<typeof collabLoader<LedgerOverview>> | null>(null);
+  const refetch = useCallback(async () => { await loader.current?.refetch(); }, []);
 
   useEffect(() => {
-    const seen = cachedOverview(project)?.ov;
-    prevStages.current = seen ? new Map(seen.tasks.map((t) => [t.id, t.stage])) : null;
+    const seen = cachedOverview(project);
+    setLoad(seen ? { status: "ok", ov: seen.ov } : { status: "loading" });
+    prevStages.current = seen ? new Map((seen.ov.tasks ?? []).map((t) => [t.id, t.stage])) : null;
     setAdvance(null);
-    // 先拉一次：事件流连不上（老 bridge / 限流）也有数据看；连上后 onOpen 再全量拉一次（会中止这一次）
-    void refetch();
+    const reader = collabLoader({
+      fetch: (signal) => fetchLedger(project, signal),
+      success: (ov) => {
+        const prev = prevStages.current;
+        const moved = prev ? (ov.tasks ?? []).find((t) => prev.has(t.id) && prev.get(t.id) !== t.stage) : undefined;
+        if (moved) setAdvance({ id: moved.id, from: prev!.get(moved.id)!, at: Date.now() });
+        prevStages.current = new Map((ov.tasks ?? []).map((t) => [t.id, t.stage]));
+        cacheOverview(project, ov, ov.now - Date.now());
+        setOffset(ov.now - Date.now());
+        setClock(Date.now());
+        setLoad({ status: "ok", ov });
+        setRev((r) => r + 1);
+      },
+      failure: (e) => {
+        const message = e instanceof Error ? e.message : String(e);
+        setLoad((cur) => cur.status === "ok" ? { ...cur, error: message } : { status: "error", message });
+      },
+    });
+    loader.current = reader;
+    void reader.refetch();
     const tick = setInterval(() => setClock(Date.now()), TICK_MS);
     return () => {
       clearInterval(tick);
-      inflight.current?.abort();
+      reader.dispose();
     };
-  }, [project, refetch]);
+  }, [project]);
   const membersRef = useRef(members);
   useEffect(() => {
     membersRef.current = members;
@@ -171,6 +164,7 @@ export function useTaskDetail(project: string, id: string | null, rev: number): 
     if (shown.current !== id) setLoad({ status: "loading" });
     fetchLedgerTask(project, id, ctrl.signal).then(
       (d) => {
+        if (ctrl.signal.aborted) return;
         shown.current = id;
         setLoad({ status: "ok", d });
       },

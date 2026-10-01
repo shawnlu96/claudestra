@@ -22,13 +22,13 @@ export interface Metrics {
 }
 
 export function metricsOf(ov: Pick<LedgerOverview, "tasks">, todayDone: number, present: number): Metrics {
-  const waits = ov.tasks.map((t) => t.metrics.reviewWaitPendingMs).filter((ms): ms is number => typeof ms === "number");
+  const waits = ov.tasks.map((t) => t.metrics?.reviewWaitPendingMs).filter((ms): ms is number => typeof ms === "number");
   return {
     present,
     active: ov.tasks.filter(open).length,
     todayDone,
-    reviewRounds: ov.tasks.reduce((s, t) => s + t.metrics.reviewRounds, 0),
-    fixed: ov.tasks.filter((t) => PAST_REVIEW.has(t.stage)).reduce((s, t) => s + t.metrics.p0 + t.metrics.p1, 0),
+    reviewRounds: ov.tasks.reduce((s, t) => s + (t.metrics?.reviewRounds ?? 0), 0),
+    fixed: ov.tasks.filter((t) => PAST_REVIEW.has(t.stage)).reduce((s, t) => s + (t.metrics?.p0 ?? 0) + (t.metrics?.p1 ?? 0), 0),
     avgReviewWaitMs: waits.length ? Math.round(waits.reduce((a, b) => a + b, 0) / waits.length) : null,
   };
 }
@@ -42,7 +42,7 @@ export function matchFilter(t: LedgerTaskView, f: Filter): boolean {
   if (f === "runnable") return open(t) && !blocked(t);
   if (f === "waiting") return open(t) && blocked(t);
   if (f === "done") return t.stage === "done" || t.stage === "verified";
-  return t.metrics.p0 > 0 || (t.lastReview?.p0 ?? 0) > 0;
+  return (t.metrics?.p0 ?? 0) > 0 || (t.lastReview?.p0 ?? 0) > 0;
 }
 
 /** 大纲：事项 → 任务（按筛选），没归事项的放最后一组；空组不出 */
