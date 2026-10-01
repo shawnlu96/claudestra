@@ -195,3 +195,18 @@ describe("一个 peer 出问题不拖别人", () => {
     expect(h.calls.filter((c) => c.op === "claim").map((c) => c.body.orderId)).toEqual(["a1"]);
   });
 });
+
+describe("有代理变量（v2 那一步不跑）", () => {
+  test("收回停单不押给 beat：照 v1 release stopped 试一次，收尾照做，不会一直挂着", async () => {
+    const h = harness();
+    rig(h);
+    started(h, "o1");
+    await h.tick(); // hello → proto 2
+    h.d.env = { HTTPS_PROXY: "http://proxy.invalid:3128" };
+    h.lend.lend = [];
+    h.advanceTime(16_000);
+    await h.tick();
+    expect(releases(h)).toEqual(["o1:stopped"]);
+    expect(getOrder(h.db, "o1")!.settle).toBeNull();
+  });
+});

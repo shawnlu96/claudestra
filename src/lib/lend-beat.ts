@@ -51,7 +51,7 @@ export function phaseOf(row: LendRow): BeatOrder["phase"] {
  * 收回停单能不能报 clean：worker 已确认退出（走到 stopped 终态本身就是 kill 确认之后），并且是审查单，或者是从没推送过的写单
  * （没有交来的 work，也没有交付正文）。work 交了但还没有正文时推送可能已经做过，不算 clean。
  */
-export const cleanEnd = (row: LendRow): boolean => roleOfStep(stepOf(row)) === "review" || (!row.work && !row.payload);
+const cleanEnd = (row: LendRow): boolean => roleOfStep(stepOf(row)) === "review" || (!row.work && !row.payload);
 
 const clearNotify = (d: HelloDeps, row: LendRow): LendRow => patchOrder(d.db, row.orderId, [row.state], { settle: { ...row.settle!, notify: null } }, d.now());
 

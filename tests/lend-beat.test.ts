@@ -134,9 +134,11 @@ describe("逐个 verdict", () => {
 });
 
 describe("异常与失败：一单不续、截止不放宽", () => {
+  const okAll = (ids: string[]): Reply => ({ status: 200, body: { ok: true, v: 1,
+    orders: ids.map((orderId) => ({ orderId, verdict: "ok", lease: { gen: 1, expiresAt: 0, ms: 600_000 } })) } });
   const cases: [string, (lines: Line[]) => Reply][] = [
-    ["没发过的单号", (l) => ({ status: 200, body: { ok: true, v: 1, orders: [...l, { orderId: "ghost", gen: 1 }].map((o) => ({ orderId: o.orderId, verdict: "ok", lease: { gen: 1, expiresAt: 0, ms: 600_000 } })) } })],
-    ["重复单号", (l) => ({ status: 200, body: { ok: true, v: 1, orders: [...l, l[0]].map((o) => ({ orderId: o.orderId, verdict: "ok", lease: { gen: 1, expiresAt: 0, ms: 600_000 } })) } })],
+    ["没发过的单号", (l) => okAll([...l.map((o) => o.orderId), "ghost"])],
+    ["重复单号", (l) => okAll([...l.map((o) => o.orderId), l[0].orderId])],
     ["看不懂", () => ({ status: 200, body: { ok: true, v: 1, orders: [{ orderId: "o1", verdict: "great" }] } })],
     ["多字段", (l) => ({ status: 200, body: { ok: true, v: 1, extra: 1, orders: l.map((o) => ({ orderId: o.orderId, verdict: "ok", lease: null })) } })],
     ["超时", () => "throw"],

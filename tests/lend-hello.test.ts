@@ -204,3 +204,28 @@ describe("全部收回时 lendWanted", () => {
     expect(helloState(h.db, "team-a")!.grant).toBe(false);
   });
 });
+
+describe("doctor 的出借循环一行", () => {
+  const dir = mkdtempSync(join(tmpdir(), "lend-hello-doctor-"));
+  afterAll(() => rmSync(dir, { recursive: true, force: true }));
+
+  test("每个 peer 带协议 / hello / beat / 推送 / 轮询节奏；hello 自检没过、收到推送却没有同名授权列进 warn", async () => {
+    const { checkLendLoop } = await import("../src/lib/doctor-lend.js");
+    const lendPath = join(dir, "lend.json");
+    const journal = join(dir, "journal.sqlite");
+    const h = harness({ entry: { repos: ["o/."] } });
+    withV2(h);
+    await h.tick();
+    writeFileSync(lendPath, JSON.stringify(h.lend));
+    const db = openLendJournal(journal);
+    setMeta(db, "status", getMeta(h.db, "status")!);
+    setMeta(db, "pushAt:team-z", String(Date.now()));
+    db.close();
+    const [c] = await checkLendLoop(lendPath, journal, JSON.parse(getMeta(h.db, "status")!).at + 1000);
+    expect(c.status).toBe("warn");
+    expect(c.detail).toContain("协议 未协商");
+    expect(c.detail).toContain("轮询每 30 秒");
+    expect(c.detail).toContain("hello 自检没过");
+    expect(c.detail).toContain("收到 team-z 的推送，但 lend.json 里没有叫这个名字的授权");
+  });
+});

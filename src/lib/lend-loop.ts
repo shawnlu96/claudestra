@@ -48,7 +48,8 @@ export interface LendStatus {
 
 export interface TickResult { failed: { orderId: string; error: string }[] }
 
-type Round = LendRound & { renewals: Map<string, Renewal> };
+/** v2 = 这一轮 hello / beat 那一步真的跑了（有代理变量就不跑）：没跑就别把续租、收回通知押给 beat，按 v1 走 */
+type Round = LendRound & { renewals: Map<string, Renewal>; v2: boolean };
 
 /**
  * 授权内等 claim 的单。升级前挂着逐单确认 ask 的单先把 ask 关掉（改为一次授权）；没有授权就 declined，原因写清要重新授权。
@@ -120,7 +121,7 @@ function roundDeps(d: LoopDeps, r: Round): LoopDeps {
       throw e;
     }
   };
-  const live = (peer: string) => !!d.v2 && speaksV2(d.db, peer);
+  const live = (peer: string) => r.v2 && speaksV2(d.db, peer);
   return {
     ...d, call: gate(d.call), ...(d.v2 ? { v2: { ...d.v2, call: gate(d.v2.call) } } : {}),
     settleHold: (row) => r.offline || r.failed.has(row.peer) || (row.settle?.notify === "stopped" && isRevoked(row) && live(row.peer)),
@@ -184,7 +185,7 @@ function pollDue(d: LoopDeps, peer: string, now: number, r: Round): { due: boole
 export async function lendTick(d: LoopDeps): Promise<TickResult> {
   const now = d.now();
   setMeta(d.db, TICK_KEY, String(now));
-  const r: Round = { offline: true, failed: new Set(), pollNow: new Set(), renewals: new Map() };
+  const r: Round = { offline: true, failed: new Set(), pollNow: new Set(), renewals: new Map(), v2: false };
   const rd = roundDeps(d, r);
   const failed: TickResult["failed"] = [];
   const done = await revokeOffline(rd, failed);
@@ -196,7 +197,8 @@ export async function lendTick(d: LoopDeps): Promise<TickResult> {
   const proxies = proxyVarsIn(d.env);
   const peers = await d.peers();
   const problemOf = (peer: string) => peerLendProblem(peers.find((p) => p.name === peer), peer);
-  if (rd.v2 && !proxies.length) await v2Step(rd as LoopDeps & { v2: V2Port }, eff.lend, problemOf, r);
+  r.v2 = !!rd.v2 && !proxies.length;
+  if (r.v2) await v2Step(rd as LoopDeps & { v2: V2Port }, eff.lend, problemOf, r);
   for (const row of [...unsettledOrders(d.db), ...liveOrders(d.db).filter((x) => !done.has(x.orderId))]) {
     try {
       if (row.settle) await settleOrder(row, rd); // 上次终态之后没做完的收尾（通知 A、删目录、收据）
