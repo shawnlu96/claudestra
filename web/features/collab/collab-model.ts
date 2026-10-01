@@ -37,28 +37,32 @@ export interface TaskMetricsView {
   p2: number;
 }
 
+/**
+ * 一张卡。总览只带协作视图读的字段（src/lib/ledger-read.ts liveCard / doneCard）：已完成的卡没有空字段、extra、最近事件、
+ * 步骤线（今天完成的除外），在跑的卡没有 spec / model / createdAt，extra 只有 goal / delegate；详情接口给全量。
+ */
 export interface LedgerTaskView {
   id: string;
-  itemId: string | null;
+  itemId?: string | null;
   title: string;
   kind: string;
   stage: Stage;
-  stageBefore: Stage | null;
+  stageBefore?: Stage | null;
   round: number;
-  agent: string | null;
-  pm: string | null;
-  pr: string | null;
-  spec: string | null;
-  model: string | null;
-  extra: Record<string, unknown>;
-  createdAt: number;
+  agent?: string | null;
+  pm?: string | null;
+  pr?: string | null;
+  spec?: string | null;
+  model?: string | null;
+  extra?: Record<string, unknown>;
+  createdAt?: number;
   updatedAt: number;
-  lastEvent: LedgerEventView | null;
+  lastEvent?: LedgerEventView | null;
   stageSince?: number | null;
   /** stageSince 是导入推断的近似时间（老 bridge 没有这个字段 = false） */
   stageSinceApprox?: boolean;
   lastReview?: ReviewSummaryView | null;
-  metrics: TaskMetricsView;
+  metrics: Partial<TaskMetricsView>;
   /** 步骤线（T51，collab-step-line-model.ts 解析）；老 bridge 没有 */
   stepLine?: unknown;
   /** 挡着它的前置任务（src/lib/ledger-deps.ts blockedBy）；老 bridge 没有 = 不挡 */
@@ -334,7 +338,7 @@ export function lineOf(
     delegate: t.agent ? null : delegateOf(t),
     pm: bareAgent(t.pm),
     round: t.round,
-    pr: t.pr,
+    pr: t.pr ?? null,
     stepLine: t.stepLine,
   };
 }
@@ -367,8 +371,8 @@ export function homeView(ov: LedgerOverview, now: number, tr: Tr = zh, waits: re
       owner: lines.filter((l) => l.attention === "owner").length,
     },
     todayDone: ov.tasks
-      .filter((t) => (t.stage === "done" || t.stage === "verified") && (t.metrics.endTs ?? t.updatedAt) >= midnight)
-      .sort((a, b) => (a.metrics.endTs ?? a.updatedAt) - (b.metrics.endTs ?? b.updatedAt))
+      .filter((t) => (t.stage === "done" || t.stage === "verified") && (t.metrics?.endTs ?? t.updatedAt) >= midnight)
+      .sort((a, b) => (a.metrics?.endTs ?? a.updatedAt) - (b.metrics?.endTs ?? b.updatedAt))
       .map((t) => t.id),
     pm: {
       pm: bareAgent(pm),
