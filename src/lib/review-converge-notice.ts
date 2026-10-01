@@ -1,17 +1,20 @@
 /**
  * PM's notice when a card hits the review round cap (review-converge.ts roundCap): the card holds (no new work, mode stays
- * auto) and PM hears once per verdict, with every round's blocking P1s. "Once" lives in memory per ledger: a lost notice is
- * retried next tick, and a restart re-sends a standing cap at most once more — the hold itself is the durable state, the
- * planner re-derives it from the ledger every pass. tests/review-converge-notice.test.ts.
+ * auto) and PM hears once per verdict, with every round's blocking P1s. The sent receipt survives restarts; a failed send
+ * is retried next tick. The planner re-derives the hold from the ledger every pass. tests/review-converge-notice.test.ts.
  */
 import type { Database } from "bun:sqlite";
 import type { LedgerEvent, LedgerTask } from "./ledger-stages.js";
-import { listEvents } from "./ledger-store.js";
-import { MAX_REVIEW_ROUND } from "./review-converge.js";
+import { getEventByDedup, listEvents } from "./ledger-store.js";
+import { insertEvent, tx } from "./ledger-tx.js";
+import { MAX_REVIEW_ROUND, ROUND_CAP_CODE } from "./review-converge.js";
+import { convergeReview } from "./review-converge.js";
+import { convergeFollowUp } from "./review-converge-followup.js";
+import { fixDiffOf } from "./review-converge-scope.js";
 import { SchedulerStopped } from "./scheduler-maintenance.js";
-import { countsAsP1, type ReviewFinding } from "./scheduler-review.js";
+import { countsAsP1, currentReviewFacts, type ReviewFinding } from "./scheduler-review.js";
 
-const told = new WeakMap<Database, Set<string>>();
+export const isRoundCap = (code: string): boolean => code === ROUND_CAP_CODE;
 const PER_ROUND = 6;
 
 /** One line per round: the P1s that still blocked then (named a basis, not demoted). */
@@ -35,18 +38,30 @@ export function roundCapText(task: Pick<LedgerTask, "id" | "round">, events: rea
 
 /** Tell PM once per capped verdict; returns the card outcome detail. */
 export async function roundCapNotice(db: Database, task: LedgerTask, notifyPm: (t: LedgerTask, text: string) => Promise<void>): Promise<string> {
-  const events = listEvents(db, { project: task.project, target: task.id });
+  let events = listEvents(db, { project: task.project, target: task.id });
+  const review = currentReviewFacts(task, events);
+  if (review.kind === "facts") {
+    const { downgrade } = convergeReview(events, review.facts, fixDiffOf(task, events));
+    // A capped verdict has no stage move to carry its nonblocking findings; keep their drafts here instead.
+    if (downgrade) tx(db, () => convergeFollowUp(db, { actor: "scheduler" }, task, downgrade));
+    events = listEvents(db, { project: task.project, target: task.id });
+  }
   const verdict = events.findLast((e) => e.kind === "review" && e.data.round === task.round)?.seq ?? 0;
-  const key = `${task.id}@${verdict}`;
-  const seen = told.get(db) ?? told.set(db, new Set()).get(db)!;
-  if (seen.has(key)) return `第 ${task.round} 轮到上限，等 PM 交回（已通知）`;
+  const key = `scheduler:review-cap:${task.id}:${verdict}`;
+  if (getEventByDedup(db, key)) return `第 ${task.round} 轮到上限，等 PM 交回（已通知）`;
+  const text = roundCapText(task, events);
   try {
-    await notifyPm(task, roundCapText(task, events));
+    await notifyPm(task, text);
   } catch (e) {
     if (e instanceof SchedulerStopped) throw e; // a lost lease ends the pass, like every other notice in scheduler-auto-tick.ts
     console.error(`⚠️ [scheduler] 轮次上限通知没发出去（下个 tick 重发）：${(e as Error).message}`);
     return `第 ${task.round} 轮到上限，通知 PM 没发出去，下个 tick 重发`;
   }
-  seen.add(key);
+  tx(db, () => {
+    if (!getEventByDedup(db, key)) insertEvent(db, { actor: "scheduler", dedupKey: key }, {
+      project: task.project, target: task.id, kind: "scheduler", text,
+      data: { op: "review_round_hold", round: task.round, reviewSeq: verdict, informed: true },
+    }, true);
+  });
   return `第 ${task.round} 轮到上限，已通知 PM`;
 }

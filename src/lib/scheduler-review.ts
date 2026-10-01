@@ -36,8 +36,9 @@ function findingsOf(value: unknown): ReviewFinding[] | null {
       !["P0", "P1", "P2"].includes(String(r.severity)) || !str(r.probe) || (r.probe as string).length > 4000) return null;
     if (r.basis !== undefined && r.basis !== null && !basisField(r.basis)) return null;
     ids.add(findingId);
-    const basis = basisField(r.basis);
-    rows.push({ findingId, family: r.family, severity: r.severity as FindingSeverity, probe: r.probe as string, ...(basis ? { basis } : {}) });
+    const basis = findingBasis({ findingId, family: r.family, probe: r.probe as string, basis: r.basis,
+      description: typeof r.description === "string" ? r.description : undefined });
+    rows.push({ findingId, family: r.family, severity: r.severity as FindingSeverity, probe: r.probe as string, ...(basis && (r.basis || r.description) ? { basis } : {}) });
   }
   return rows;
 }
@@ -108,14 +109,16 @@ export function currentReviewFacts(task: ReviewTask, events: readonly LedgerEven
   }
   const counts = ["P0", "P1", "P2"].map((p) => findings.filter((f) => f.severity === p).length);
   if ([d.p0, d.p1, d.p2].some((v, i) => count(v) !== counts[i])) return { kind: "invalid", reason: "P0/P1/P2 计数与逐项结论不一致" };
+  const demoted = downgradedIds(events, task.round);
   return {
     kind: "facts",
     facts: { eventSeq: review.seq, round: task.round, head, verdict: verdict as ReviewVerdict, reviewer,
-      reviewerSessionId, reviewerFamily: reviewerFamily as AuthorFamily, reportPath, findings },
+      reviewerSessionId, reviewerFamily: reviewerFamily as AuthorFamily, reportPath,
+      findings: findings.map((f) => f.severity === "P1" && demoted.has(f.findingId) ? { ...f, severity: "P2" } : f) },
   };
 }
 
-export const normalizedFamily = (family: string): string => family.normalize("NFKC").toLowerCase().replace(/[-_.]/g, "");
+const normalizedFamily = (family: string): string => family.normalize("NFKC").toLowerCase().replace(/[-_.]/g, "");
 
 /** The planner's record of P1s it treated as P2 in a round (review-converge-followup.ts writes it with the stage move). */
 export const DOWNGRADE_OP = "review_downgrade";

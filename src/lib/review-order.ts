@@ -123,7 +123,7 @@ export function reviewOrderOf(db: Database, slot: ReviewSlot, dir = reviewsDir()
       // 自动卡的审查员建在自己的审查 worktree 里，调度器派审前把它固定在这个 head（scheduler-review-worktree.ts）
       ...(slot.auto ? ["审查目录：你当前会话的工作目录（调度器已固定在这个 head；只读，不改、不提交、不推送）"] : []),
       ...(bounce ? [bounceReviewLine(bounce)] : []), ...convergeOrderLines(task.round, events, slot.head), standardAnswers("review")],
-    outputs: ["结论：submit_verdict（VerdictWire：verdict、p0/p1/p2 计数与逐项 findings 一致）", `报告：${report}（非空；bridge 只校验路径，不读内容）`],
+    outputs: ["结论：submit_verdict（VerdictWire：verdict、p0/p1/p2 计数与逐项 findings 一致）", `报告：${report}（非空；旧版逐项标记可从报告读取）`],
     acceptance: acceptanceOf(specPath),
     writeBack: `submit_verdict({v:1, orderId:"${slot.orderId}", head:"${slot.head}", …, reportPath:"${report}"})；只记结论，不推阶段`,
     findings: prev.findings,

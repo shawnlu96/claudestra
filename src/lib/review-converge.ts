@@ -6,7 +6,7 @@
  */
 import type { LedgerEvent } from "./ledger-stages.js";
 import { findingBasis } from "./review-converge-basis.js";
-import { countsAsP1, normalizedFamily, type ReviewFacts, type ReviewFinding } from "./scheduler-review.js";
+import { countsAsP1, downgradedIds, type ReviewFacts, type ReviewFinding } from "./scheduler-review.js";
 
 /** From this round the review covers only the fix diff plus last round's open findings (review-converge-order.ts says so). */
 export const SCOPE_ROUND = 3;
@@ -16,7 +16,7 @@ export const ROUND_CAP_CODE = "review_round_cap";
 
 /** Files changed between the head reviewed last round and this round's head (review-converge-scope.ts computes it). */
 export interface FixDiff { from: string; to: string; files: string[] }
-export type DowngradeWhy = "no_basis" | "outside_diff";
+type DowngradeWhy = "no_basis" | "outside_diff";
 export interface DowngradeItem { findingId: string; family: string; probe: string; why: DowngradeWhy }
 /** What one round's convergence demoted; rides on the stage intent so the move and its record land in one transaction. */
 export interface Downgrade { round: number; head: string; reportPath: string; items: DowngradeItem[] }
@@ -34,7 +34,7 @@ function prevOpen(events: readonly LedgerEvent[], round: number): ReviewFinding[
   return rows.filter((f) => f && typeof f === "object" && countsAsP1(events, round - 1, f));
 }
 
-const PATH_TOKEN = /(?:[\w@.-]+\/)*[\w@-][\w@.-]*\.[A-Za-z][\w]{0,7}/g;
+const PATH_TOKEN = /(?:[\p{L}\p{N}_@.-]+\/)+[\p{L}\p{N}_@.-]+|[\p{L}\p{N}_@-][\p{L}\p{N}_@.-]*\.[A-Za-z][\w]{0,7}/gu;
 
 /** File-looking tokens in a probe (`src/a.ts:12` → `src/a.ts`). */
 export function probePaths(probe: string): string[] {
@@ -43,8 +43,12 @@ export function probePaths(probe: string): string[] {
 
 /** A probe touches the diff when one of its paths names a changed file (either may be the shorter, repo-relative one). */
 export function touchesDiff(probe: string, files: readonly string[]): boolean {
+  const literal = files.some((f) => {
+    const path = f.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    return new RegExp(`(?<![\\p{L}\\p{N}_@.-])${path}(?![\\p{L}\\p{N}_@./-])`, "u").test(probe);
+  });
   const paths = probePaths(probe);
-  return paths.some((p) => files.some((f) => f === p || f.endsWith(`/${p}`) || p.endsWith(`/${f}`)));
+  return literal || paths.some((p) => files.some((f) => f === p || f.endsWith(`/${p}`) || p.endsWith(`/${f}`)));
 }
 
 /**
@@ -55,14 +59,16 @@ export function convergeFindings(events: readonly LedgerEvent[], facts: Pick<Rev
   diff: FixDiff | null | undefined): { findings: ReviewFinding[]; items: DowngradeItem[] } {
   const scoped = facts.round >= SCOPE_ROUND && !!diff && diff.to === facts.head && diff.from === prevReviewedHead(events, facts.round);
   const open = scoped ? prevOpen(events, facts.round) : [];
-  const isOpen = (f: ReviewFinding) => open.some((o) => o.findingId === f.findingId || normalizedFamily(o.family) === normalizedFamily(f.family));
+  const isOpen = (f: ReviewFinding) => open.some((o) => o.findingId === f.findingId);
+  const recorded = downgradedIds(events, facts.round);
   const items: DowngradeItem[] = [];
   const findings = facts.findings.map((f) => {
     if (f.severity !== "P1") return f;
+    if (recorded.has(f.findingId)) return { ...f, severity: "P2" as const };
     const basis = findingBasis(f);
     const why: DowngradeWhy | null = !basis ? "no_basis"
       : scoped && basis !== "regression" && !isOpen(f) && !touchesDiff(f.probe, diff!.files) ? "outside_diff" : null;
-    if (!why) return basis === f.basis || !basis ? f : { ...f, basis };
+    if (!why) return f;
     items.push({ findingId: f.findingId, family: f.family, probe: f.probe, why });
     return { ...f, severity: "P2" as const };
   });

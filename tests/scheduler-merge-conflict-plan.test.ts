@@ -27,7 +27,7 @@ const ciFail: MergeBounce = { cause: "ci_fail", prHead: H, mainHead: null, check
 let seq = 1;
 const ev = (kind: LedgerEvent["kind"], data: Record<string, unknown>): LedgerEvent =>
   ({ seq: ++seq, kind, data, ts: seq, actor: "scheduler", project: "p", target: "T1", text: "", dedupKey: null });
-const P1 = { findingId: "race-1", family: "race", severity: "P1", probe: "p" };
+const P1 = { findingId: "race-1", family: "race", severity: "P1", probe: "[验收线 1] p" };
 const review = (round: number, findings: unknown[]) => ev("review", { round, head: H, reviewer: reviewer.agent, reviewerSessionId: reviewer.sessionId,
   reviewerFamily: "codex", path: `reviews/T1-r${round}/report.md`, verdict: findings.length ? "changes" : "pass", findings,
   p0: 0, p1: findings.length, p2: 0 });

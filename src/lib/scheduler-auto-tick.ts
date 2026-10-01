@@ -25,8 +25,7 @@ import { peerPrHold } from "./peer-pr-hold.js";
 import type { BorrowEntry } from "./lend-config.js";
 import type { RemotePolicy } from "./scheduler-config.js";
 import { isPoolIntent } from "./scheduler-pool-plan.js";
-import { ROUND_CAP_CODE } from "./review-converge.js";
-import { roundCapNotice } from "./review-converge-notice.js";
+import { isRoundCap, roundCapNotice } from "./review-converge-notice.js";
 import { drivePool } from "./scheduler-pool-tick.js";
 import { deliveryFor, sentAsWake, type EnsureResult, type SessionRef, type WorkerSession } from "./worker-session.js";
 
@@ -248,7 +247,6 @@ class Card {
     if (intent.action === "merge") return this.out("merge_queue", "合并意图交合并队列");
     return this.out("held", `意图 ${intent.action} 不由本服务执行`);
   }
-
   /** P2 findings do not block the merge, but PM reads the diff: best-effort, the stage event itself is the durable record. */
   async diffNotice(): Promise<void> {
     const rv = listEvents(this.db, { project: this.task.project, target: this.task.id }).findLast((e) => e.kind === "review");
@@ -256,7 +254,6 @@ class Card {
       `，报告 ${String(rv?.data.path ?? "（无）")}`;
     await this.deps.notifyPm(this.task, text).catch(noticeLost("P2 看 diff 通知没发出去"));
   }
-
   /** A screenshot ask that expired or was withdrawn can never be answered; waiting on it would be forever. */
   uiAskDead(): SchedulerIntent | null {
     const sent = this.db.query(`SELECT * FROM scheduler_intents WHERE taskId = ? AND action = 'ask' AND status = 'done'
@@ -268,7 +265,7 @@ class Card {
   async watch(wait: Extract<PlannerDecision, { kind: "wait" }>): Promise<CardOutcome> {
     const deadAsk = wait.code === "owner_screenshot" ? this.uiAskDead() : null;
     if (deadAsk) return this.escalate("截图 ask 已过期或被撤下，没人能再答：PM 决定重开还是接管", deadAsk.id);
-    if (wait.code === ROUND_CAP_CODE) return this.out("held", await roundCapNotice(this.db, this.task, this.deps.notifyPm)); // 第 8 轮安全阀
+    if (isRoundCap(wait.code)) return this.out("held", await roundCapNotice(this.db, this.task, this.deps.notifyPm)); // 第 8 轮安全阀
     if (wait.code !== "in_flight") return this.out("waiting", wait.reason);
     const sent = (this.db.query(`SELECT * FROM scheduler_intents WHERE taskId = ? AND action IN ('dispatch','review') AND status = 'done'
       ORDER BY eventSeq DESC LIMIT 1`).get(this.task.id) as SchedulerIntent | null);

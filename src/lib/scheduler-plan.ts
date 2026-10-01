@@ -228,6 +228,8 @@ function reviewHistory(s: PlannerSnapshot, facts: ReviewFacts): ReviewFinding[][
 }
 
 function fixDecision(s: PlannerSnapshot, node: FlowNode, facts: ReviewFacts, downgrade: Downgrade | null): PlannerDecision {
+  const cap = roundCap(s.events, facts);
+  if (cap) return wait(cap.code, cap.reason);
   const p1 = facts.findings.filter((f) => f.severity === "P1");
   const minRound = reviewStartRound(s);
   const streaks = p1.map((f) => p1FindingStreak(s.events, f, facts.round, minRound));
@@ -237,8 +239,6 @@ function fixDecision(s: PlannerSnapshot, node: FlowNode, facts: ReviewFacts, dow
     kind: "escalate", code: "three_p1_rounds", reason: `同一条 P1 连续 3 轮；按规格退到：${s.workflow!.fallback}`,
     reviewSeq: facts.eventSeq, history: reviewHistory(s, facts),
   };
-  const cap = roundCap(s.events, facts);
-  if (cap) return wait(cap.code, cap.reason);
   const warning = fixWarning(Math.max(...(streaks as number[])), facts.round, s.workflow!.fallback);
   return makeIntent(s, node, "stage", `P1 ${p1.length} 项，自动进入 fix`, [taskResource(s)], {
     targetStage: "fix", workOrder: { reportPath: facts.reportPath, findings: facts.findings, fallbackWarning: warning }, ...(downgrade ? { downgrade } : {}),
