@@ -1,15 +1,15 @@
 /**
  * T60 ACP 的 manager 命令（manager.ts 一行分派进来）：
  * - `transport <agent> tmux|acp`：切这个 agent 的 transport（registry 的 transport 字段），然后自动 restart——切回 tmux 就是一键回退。
- *   只有声明了 ACP 段的运行时（目前只有 codex）能切 acp；生产切 acp 前要先装好适配器（沙箱只许 stub）。
+ *   只有声明了 ACP 段的运行时（codex、pi）能切 acp；Codex 生产切 acp 前要先装好适配器（沙箱只许 stub），Pi 的适配器在仓库里、只看 pi 版本。
  *   不拿命令级写锁（write-commands.ts needsWriteLock）：自己锁住改 registry 那一下，放锁之后再起 restart——restart 要同一把锁，
  *   锁着起就要白等 20s 降级。
  * - `acp-install`：装能配本机已装 Codex 的最新 codex-acp 并切过去（lib/acp/install.ts：按 registry 公布的 integrity 验包）。
- * 生命周期本身（create / restart / resume / kill）走 manager 的通用流程，transport=acp 时选 lib/runtimes/codex-acp.ts。
+ * 生命周期本身（create / restart / resume / kill）走 manager 的通用流程，transport=acp 时选 lib/runtimes/codex-acp.ts / pi-acp.ts。
  */
 import { codexAcpInstalled, reconcileCodexAcp } from "../lib/acp/install.js";
 import { probeCodexInstall } from "../lib/codex-version.js";
-import { checkAcpReady } from "../lib/acp/readiness.js";
+import { checkAcpReady, checkAcpReadyFor } from "../lib/acp/readiness.js";
 import { ACP_AGENT_ENV } from "../lib/acp/stub.js";
 import { resolveBunPath } from "../lib/bun-path.js";
 import { acquireLock } from "../lib/file-lock.js";
@@ -19,14 +19,16 @@ import { runManagerProcess } from "../lib/run-manager.js";
 import { isSandbox } from "../lib/sandbox.js";
 import { managedFor, normalizeTransport, requireManaged, transportsOf, type LaunchSpec, type ManagedRuntimeAdapter, type ReadyResult, type Transport } from "../lib/runtimes/index.js";
 import { gracefulExitWindow } from "../lib/runtimes/graceful-exit.js";
+import { piAcpClash } from "../lib/runtimes/pi-acp.js";
 import { tmuxWindowOps } from "../lib/runtimes/window-ops.js";
 import { killPidsEscalating, listWindowIdsByName, MASTER_SESSION, sessionTarget, tmuxRaw, tmuxRawStrict, windowChildPids } from "../lib/tmux-helper.js";
 import { assertCreatable, loadRegistry, output, patchRegistryAgent, saveRegistry } from "./core.js";
 
 const RESTART_TIMEOUT_MS = 240_000;
 
-/** 新建 / resume 的 Codex 缺省 ACP；前置条件不齐时给明确原因并沿用可工作的 tmux。 */
+/** 新建 / resume 的 Codex 缺省 ACP；前置条件不齐时给明确原因并沿用可工作的 tmux。Pi 缺省 tmux，沙箱里只有 acp 一条路（tmux 版照旧拒） */
 export async function chooseCreateTransport(runtime?: string, requested?: string): Promise<{ transport: Transport; acpPending?: true; manualTmux?: true }> {
+  if (runtime === "pi") return { transport: isSandbox() && requested !== "tmux" ? "acp" : "tmux" };
   if (runtime !== "codex") return { transport: "tmux" };
   if (requested === "tmux") return { transport: "tmux", manualTmux: true };
   const ready = await checkAcpReady(true);
@@ -136,13 +138,16 @@ export async function cmdAcp(cmd: string, args: string[]): Promise<void> {
 }
 
 /** 改 registry 前的检查：拒绝就返回原因 */
-export function transportRefusal(info: { runtime?: string } | undefined, bare: string, to: Transport, env: Record<string, string | undefined> = process.env): string | null {
+export function transportRefusal(
+  info: { runtime?: string; cwd?: string; piEnv?: unknown } | undefined, bare: string, to: Transport, env: Record<string, string | undefined> = process.env,
+): string | null {
   if (bare === "master") return "大总管不切 transport";
   if (!info) return `agent "${bare}" 不存在`;
   const runtime = info.runtime || "claude-code";
-  if (!transportsOf(runtime).includes(to)) return `runtime "${runtime}" 不支持 transport=${to}（目前只有 codex 能走 acp）`;
+  if (!transportsOf(runtime).includes(to)) return `runtime "${runtime}" 不支持 transport=${to}（目前只有 codex / pi 能走 acp）`;
   if (runtime === "codex" && to === "tmux" && isSandbox(env)) return "沙箱 Codex 只许 ACP stub，不起真实 TUI";
   if (to === "acp" && isSandbox(env) && env[ACP_AGENT_ENV]?.trim()) return "沙箱里不认 CLAUDESTRA_ACP_AGENT：acp 固定起本仓 stub";
+  if (to === "acp" && runtime === "pi") return piAcpClash(info.cwd, env, info.piEnv); // 适配器在仓库里不用装；只拦会静默丢掉 reply 的配置
   if (to === "acp" && !isSandbox(env) && !env[ACP_AGENT_ENV]?.trim()) { // 沙箱里适配器固定是本仓 stub，不用装
     const inst = codexAcpInstalled();
     if (!inst.ok) return inst.hint;
@@ -163,11 +168,12 @@ export function persistManualTmux(info: { transport?: string; acpPending?: boole
 
 async function switchTransport(name: string, mode: string): Promise<void> {
   if (!name || (mode !== "tmux" && mode !== "acp")) return output({ ok: false, error: "transport <agent> tmux|acp" });
-  if (mode === "acp") {
-    const ready = await checkAcpReady(true);
+  const bare = name.replace(/^agent-/, "");
+  if (mode === "acp") { // 锁外探就绪（Codex 可能要装适配器）；按运行时分派，先不加锁读一眼它是谁
+    const pre = (await loadRegistry()).agents;
+    const ready = await checkAcpReadyFor((pre[`agent-${bare}`] ?? pre[bare])?.runtime, true);
     if (!ready.ok) return output({ ok: false, error: ready.reason });
   }
-  const bare = name.replace(/^agent-/, "");
   const lock = await acquireLock(statePath(".manager-write.lock"));
   let key = "";
   let from: Transport = "tmux";
@@ -175,7 +181,7 @@ async function switchTransport(name: string, mode: string): Promise<void> {
     const reg = await loadRegistry();
     key = reg.agents[`agent-${bare}`] ? `agent-${bare}` : reg.agents[bare] ? bare : "";
     const info = key ? reg.agents[key] : undefined;
-    const refusal = transportRefusal(info as { runtime?: string } | undefined, bare, mode);
+    const refusal = transportRefusal(info as { runtime?: string; cwd?: string; piEnv?: unknown } | undefined, bare, mode);
     if (refusal) return output({ ok: false, error: refusal });
     from = normalizeTransport((info as { transport?: string }).transport);
     if (from === mode) {

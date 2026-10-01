@@ -3,7 +3,7 @@ import { buildAcpHostCommand, codexAcpAdapter, createCodexAcpAdapter } from "../
 import { readCodexRunning, recordCodexRunning } from "../src/lib/codex-version.ts";
 import type { WindowOps } from "../src/lib/runtimes/types.ts";
 import { codexAdapter, controlFor, managedFor, requireManaged } from "../src/lib/runtimes/index.ts";
-import { CODEX_ACP_CONTROL } from "../src/lib/runtimes/codex.ts";
+import { ACP_CONTROL } from "../src/lib/runtimes/acp-control.ts";
 import { decodePreambleEnv } from "../src/lib/codex-thread.ts";
 import { transportRefusal } from "../src/manager/acp-lifecycle.ts";
 import { parseCreateArgs } from "../src/manager/create-args.ts";
@@ -52,7 +52,7 @@ describe("适配器选择（managedFor / requireManaged 带 transport）", () =>
     expect(managedFor("codex", "tmux")).toBe(codexAdapter);
     const a = managedFor("codex", "acp")!;
     expect(a).toBe(codexAcpAdapter);
-    expect(a.control).toBe(CODEX_ACP_CONTROL);
+    expect(a.control).toBe(ACP_CONTROL);
     expect(a.control).toBe(controlFor("codex", "acp"));
     expect(a.scanSessions).toBe(codexAdapter.scanSessions);
     expect(a.registryFields(SPEC)).toEqual({ runtime: "codex", transport: "acp" });
@@ -64,9 +64,9 @@ describe("适配器选择（managedFor / requireManaged 带 transport）", () =>
   });
 
   test("不支持 acp 的运行时：managedFor 返回 null，requireManaged 报清楚", () => {
-    expect(managedFor("pi", "acp")).toBeNull();
+    expect(managedFor("claude-code", "acp")).toBeNull();
     expect(managedFor(undefined, "acp")).toBeNull();
-    expect(() => requireManaged("pi", "acp")).toThrow("不支持 transport=acp");
+    expect(() => requireManaged("claude-code", "acp")).toThrow("不支持 transport=acp");
   });
 
   test("resume 原样返回 thread id", async () => {
@@ -75,8 +75,8 @@ describe("适配器选择（managedFor / requireManaged 带 transport）", () =>
 });
 
 describe("transport 命令的检查", () => {
-  test("只有 codex 能切 acp；大总管不切；不存在的报清楚", () => {
-    expect(transportRefusal({ runtime: "pi" }, "x", "acp", { CLAUDESTRA_ACP_AGENT: "[\"stub\"]" })).toContain("不支持 transport=acp");
+  test("没声明 ACP 的运行时不能切 acp；大总管不切；不存在的报清楚", () => {
+    expect(transportRefusal({ runtime: "claude-code" }, "x", "acp", { CLAUDESTRA_ACP_AGENT: "[\"stub\"]" })).toContain("不支持 transport=acp");
     expect(transportRefusal({ runtime: "codex" }, "master", "tmux")).toBe("大总管不切 transport");
     expect(transportRefusal(undefined, "ghost", "acp")).toContain("不存在");
     expect(transportRefusal({ runtime: "codex" }, "x", "tmux")).toBeNull();

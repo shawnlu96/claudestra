@@ -9,9 +9,12 @@ import { openSync, readSync, closeSync } from "fs";
 import { isSandbox, refuseInSandbox, sandboxAgentDirProblem, sandboxRootOf } from "./sandbox.js";
 import { findSessionJsonlBySessionId } from "./session-source.js";
 
-/** Claude Code 会话的工作目录：读会话 jsonl 开头 64KB 里第一个带 cwd 的记录；找不到返回 null */
+/**
+ * 会话的工作目录（Claude Code / Pi，Pi 的头行同样带 cwd）：读会话 jsonl 开头 64KB 里第一个带 cwd 的记录；找不到返回 null。
+ * Pi 只在 piAgentDir() 下找，沙箱里那是钉在沙箱根的目录（lib/sandbox.ts sandboxPiAgentDir），找不到生产的 ~/.pi。
+ */
 function sessionCwd(sessionId: string): string | null {
-  const p = findSessionJsonlBySessionId("claude-code", sessionId);
+  const p = findSessionJsonlBySessionId("claude-code", sessionId) ?? findSessionJsonlBySessionId("pi", sessionId);
   if (!p) return null;
   const buf = Buffer.alloc(65536);
   let n = 0;

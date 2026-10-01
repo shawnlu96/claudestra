@@ -18,7 +18,9 @@ import {
   piLineToClaudeShape,
   piSessionIdFromFilename,
   piSessionPath,
+  piSessionPathAllowed,
 } from "../pi-session.js";
+import { ACP_CONTROL } from "./acp-control.js";
 import { lastUserTextOf } from "./shared.js";
 import type {
   AnyRecord,
@@ -63,6 +65,8 @@ export const piAdapter: ManagedRuntimeAdapter = {
   label: "Pi",
   manageable: true,
   control: PI_CONTROL,
+  // 声明了才能 `manager transport <agent> acp`（runtimes/pi-acp.ts）；缺省仍是 tmux，tmux 下的策略还是 PI_CONTROL
+  acp: { control: ACP_CONTROL },
   inbound: "pi-extension",
   turnEnd: "pi-extension",
   exitCommand: "/quit",
@@ -80,6 +84,7 @@ export const piAdapter: ManagedRuntimeAdapter = {
         const sessionId = piSessionIdFromFilename(file);
         if (!sessionId) continue;
         const filePath = join(dirPath, file);
+        if (!piSessionPathAllowed(filePath)) continue; // 沙箱：链接到根外的会话不扫
         const fileStat = await stat(filePath).catch(() => null);
         if (!fileStat) continue;
 

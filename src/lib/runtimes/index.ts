@@ -14,6 +14,7 @@ import { claudeCodeAdapter } from "./claude-code.js";
 import { codexAdapter } from "./codex.js";
 import { codexAcpAdapter } from "./codex-acp.js";
 import { piAdapter } from "./pi.js";
+import { piAcpAdapter } from "./pi-acp.js";
 import { DEFAULT_TRANSPORT, isManaged, normalizeTransport, type ManagedRuntimeAdapter, type RuntimeControl, type SessionSourceAdapter, type Transport } from "./types.js";
 
 export * from "./types.js";
@@ -43,7 +44,7 @@ export function isManageableRuntime(runtime: string | undefined | null): boolean
 }
 
 /** transport=acp 时的生命周期适配器（窗口里跑 ACP 宿主）：只有声明了 ACP 段的运行时有 */
-const ACP_ADAPTERS: Record<string, ManagedRuntimeAdapter> = { codex: codexAcpAdapter };
+const ACP_ADAPTERS: Record<string, ManagedRuntimeAdapter> = { codex: codexAcpAdapter, pi: piAcpAdapter };
 
 /**
  * 可启动的适配器。缺省（undefined / 空串）= Claude Code（历史数据没有 runtime 字段）；
@@ -67,7 +68,7 @@ export function manageableRuntimeIds(): string[] {
 export function requireManaged(runtime: string | undefined | null, transport?: string | null): ManagedRuntimeAdapter {
   const m = managedFor(runtime, transport);
   if (m) return m;
-  if (normalizeTransport(transport) === "acp") throw new Error(`runtime "${runtime || DEFAULT_RUNTIME}" 不支持 transport=acp（目前只有 codex）`);
+  if (normalizeTransport(transport) === "acp") throw new Error(`runtime "${runtime || DEFAULT_RUNTIME}" 不支持 transport=acp（目前只有 codex / pi）`);
   const s = SOURCES.find((x) => x.id === runtime);
   const avail = manageableRuntimeIds().join(", ");
   throw new Error(
