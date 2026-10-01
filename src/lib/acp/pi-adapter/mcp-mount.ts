@@ -30,5 +30,7 @@ export default function mountMcpServers(pi: MountApi, env: Record<string, string
   const servers = JSON.parse(raw) as Record<string, Record<string, unknown>>;
   for (const [name, config] of Object.entries(servers)) pi.registerMcpServer(name, { ...config, exposure: "direct" });
   const names = Object.keys(servers);
+  // 残余风险：挂载闸查的是磁盘上的 mcp.json，不是 Pi 已加载的快照；在加载与检查之间改写再恢复配置的同机进程不防
+  // （没有系统级隔离时这类进程本来就能直接改 Pi 配置）。以后可改为 channel-server 回宿主握手确认实际挂上的是自己的实例。
   pi.on?.("session_start", (_e, ctx) => ctx.ui.setStatus(MOUNT_STATUS_KEY, piMcpClash(names, ctx.cwd, piAgentDirOf(env, ctx.cwd)) ?? MOUNT_OK));
 }
