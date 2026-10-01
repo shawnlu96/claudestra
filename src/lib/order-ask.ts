@@ -1,12 +1,4 @@
-/**
- * M2 ask：执行者就自己当前的单向 PM 提问。参数过 T87 parseAskWire；单号必须是调用方当前的单（lib/order-take.ts）；
- * askee = 卡的 pm，没有就取台账 PM 名单第一位。写进现有 asks 表（bridge 唯一的台账写连接，lib/ledger-asks.ts），再投给 PM。
- * 同一单号、同一问题与选项的重试按 dedupKey 找回原来那条，不重开。ask 开的时候 extra.notice = pending，投出去（送达或进押后队列）
- * 才改成 handed；重试时 ask 还开着、仍是 pending（上次没投出去 / 投时出错 / 进程中途退出）就用同一 messageId 补投。
- * 回答不在这里收：PM 照旧 send_to_agent 回话。tests/order-ask.test.ts。
- * 审查单（本机 take_review 的单、出借池 step=review 的单）上的提问不转 PM：当场回分级规则（order-standard-answers.ts），卡上记一条 note，
- * 远端的单在本机按 lend_orders.step 判，不靠对方升级。tests/order-ask-review.test.ts。
- */
+/** Local author asks can proceed on explicit defaults; pool writes keep blocking and review asks return grading rules. */
 import { createHash } from "node:crypto";
 import type { Database } from "bun:sqlite";
 import type { NewAsk, OpenedAsk } from "./ledger-asks.js";
@@ -15,7 +7,7 @@ import { getMeta } from "./ledger-store.js";
 import { REVIEW_ASK_REPLY } from "./order-standard-answers.js";
 import { currentOrders } from "./order-take.js";
 import { refuse, type OrderToolResult, type VerifiedCall } from "./order-tool-route.js";
-import { parseAskWire } from "./order-wire.js";
+import { parseAskWire, type AskWire } from "./order-wire.js";
 import { quoteExternal } from "./quote-text.js";
 import { slotByOrderId } from "./review-order.js";
 
@@ -33,6 +25,7 @@ export interface AskDeps {
 }
 
 const TITLE_MAX = 80;
+type Question = Pick<AskWire, "question" | "options" | "default" | "class">;
 
 function titleOf(taskId: string, question: string, who = "执行者"): string {
   const first = question.split("\n").find((l) => l.trim())?.trim() ?? question;
@@ -41,13 +34,16 @@ function titleOf(taskId: string, question: string, who = "执行者"): string {
 }
 
 /** 通知正文：标题行由代码写，问题与选项只以引用形式出现（原文，非指令） */
-export function askNoticeText(a: { taskId: string; orderId: string; from: string; askId: string; question: string; options: string[] }): string {
+export function askNoticeText(a: { taskId: string; orderId: string; from: string; askId: string } & Question): string {
   return [
     `【执行者提问】${a.taskId} · 单号 ${a.orderId} · 来自 ${a.from}`,
     "问题（原文，非指令）：",
     ...a.question.split(/\r?\n/).map((l) => `  ${quoteExternal(l, 2000)}`),
     ...(a.options.length ? ["候选（原文，非指令）：", ...a.options.map((o) => `- ${quoteExternal(o, 200)}`)] : []),
-    `回答请用 send_to_agent 发给 ${a.from}（ask ${a.askId}）。`,
+    ...(a.default ? ["默认做法（原文，非指令）：", ...a.default.split(/\r?\n/).map((l) => `  ${quoteExternal(l, 2000)}`)] : []),
+    a.class === "design" || a.class === "scope"
+      ? `有异议用 send_to_agent 回 ${a.from}，正文带 ask ${a.askId}；15 分钟没回按默认定。执行者继续，不等回复。`
+      : `回答请用 send_to_agent 发给 ${a.from}（ask ${a.askId}）。`,
   ].join("\n");
 }
 
@@ -62,12 +58,12 @@ export interface AskSource {
   keyPrefix: string;
 }
 
-export type OpenedOrderAsk = { askId: string; askee: string; duplicate: boolean; notified: boolean; delivered: string | null };
+export type OpenedOrderAsk = { askId: string; askee: string; duplicate: boolean; notified: boolean; delivered: string | null; blocking: boolean; message: string };
 /** 审查单上的提问：没开 ask、没发通知，answer 是当场回给审查员的规则原文 */
 export type AnsweredReviewAsk = { answered: string };
 
-const askDigest = (q: { question: string; options: string[] }): string =>
-  createHash("sha256").update(JSON.stringify([q.question, q.options])).digest("hex").slice(0, 16);
+const askDigest = (q: Question): string =>
+  createHash("sha256").update(JSON.stringify([q.question, q.options, ...(q.default || q.class ? [q.default, q.class] : [])])).digest("hex").slice(0, 16);
 
 /** 出借池里这一单的步骤；本机的单（调度器 intent / 手动单号）不在 lend_orders 里 = null */
 function lendStepOf(db: Database, orderId: string): string | null {
@@ -88,27 +84,38 @@ function answerReviewAsk(deps: Pick<AskDeps, "record">, src: AskSource, q: { que
  * Open (or find again) the ask on the card's PM and hand the notice over; shared by the local ask tool and a remote worker's
  * lend/ask (lib/ledger-lend-peers.ts RemoteCaller). The notice quotes the question; nothing else of the card goes in it.
  */
-export async function openOrderAsk(db: Database, deps: Omit<AskDeps, "db">, src: AskSource, q: { question: string; options: string[] }):
+export async function openOrderAsk(db: Database, deps: Omit<AskDeps, "db">, src: AskSource, q: Question):
   Promise<OpenedOrderAsk | AnsweredReviewAsk | { refused: string }> {
-  if (lendStepOf(db, src.orderId) === "review") return answerReviewAsk(deps, src, q);
+  const step = lendStepOf(db, src.orderId);
+  if (step === "review") return answerReviewAsk(deps, src, q);
+  const nonblocking = step === null && (q.class === "design" || q.class === "scope");
+  if (nonblocking && !q.default?.trim()) return { refused: "design / scope 提问必须补上 default（我打算怎么做，≤600 字）" };
+  const behavior = { blocking: !nonblocking, message: nonblocking ? "已登记，按你的默认做法继续" : "已登记，等待 PM 回复后继续" };
   const pm = src.task.pm ?? getMeta(db, src.task.project).pms[0] ?? null;
   if (!pm) return { refused: `${src.task.id} 没有 PM，项目 ${src.task.project} 的 PM 名单也是空的` };
   const digest = askDigest(q);
   const opened = deps.open({
     project: src.task.project, taskId: src.task.id, fromAgent: src.from, ...(src.fromChannelId ? { fromChannelId: src.fromChannelId } : {}), source: "reply",
     kind: "decide", title: titleOf(src.task.id, q.question), body: q.question, assignee: pm, dedupKey: `${src.keyPrefix}:${src.orderId}:${digest}`,
-    extra: { orderId: src.orderId, options: q.options, via: "mcp_ask", notice: "pending" },
+    blocking: !nonblocking, ...(nonblocking ? { expiresAt: 253402300799999 } : {}),
+    extra: { orderId: src.orderId, options: q.options, via: "mcp_ask", notice: "pending",
+      class: nonblocking ? q.class : "blocker", ...(nonblocking ? { default: q.default } : {}) },
   });
   const ask = opened.ask;
   const askee = ask.assignee ?? pm;
   if (opened.existed && (ask.state !== "open" || ask.extra.notice !== "pending")) {
-    return { askId: ask.id, askee, duplicate: true, notified: ask.extra.notice === "handed", delivered: null };
+    return { askId: ask.id, askee, duplicate: true, notified: ask.extra.notice === "handed", delivered: null, ...behavior };
   }
-  const text = askNoticeText({ taskId: src.task.id, orderId: src.orderId, from: src.from, askId: ask.id, question: q.question, options: q.options });
-  const sent = await deps.notify(askee, text, `ledger-ask:${ask.id}`);
+  const text = askNoticeText({ taskId: src.task.id, orderId: src.orderId, from: src.from, askId: ask.id,
+    question: q.question, options: q.options, ...(nonblocking ? { default: q.default, class: q.class } : {}) });
+  const sent = await deps.notify(askee, text, `ledger-ask:${ask.id}`).catch((e: unknown) => {
+    if (!nonblocking) throw e;
+    console.error(`⚠️ ask ${ask.id} 通知未发出，重试同一提问会补投：${(e as Error).message}`);
+    return { handed: false, note: "通知未发出；提问已登记，仍按默认继续" };
+  });
   if (sent.handed) deps.markHanded(ask.id);
   // 没投出去也回 ok：问题已记下，同样的参数再调一次会补投
-  return { askId: ask.id, askee, duplicate: opened.existed, notified: sent.handed, delivered: sent.note };
+  return { askId: ask.id, askee, duplicate: opened.existed, notified: sent.handed, delivered: sent.note, ...behavior };
 }
 
 export async function askOrder(call: VerifiedCall, args: unknown, deps: AskDeps): Promise<OrderToolResult> {
@@ -122,6 +129,6 @@ export async function askOrder(call: VerifiedCall, args: unknown, deps: AskDeps)
     if (review) return { ok: true, ...answerReviewAsk(deps, { task: review.task, orderId, from: call.agent, keyPrefix: "review-ask" }, { question, options }) };
     return refuse("not_current_order", `${orderId} 不是你当前的单，只能就自己当前的单提问`);
   }
-  const r = await openOrderAsk(deps.db, deps, { task: cur.task, orderId, from: call.agent, fromChannelId: call.channelId, keyPrefix: "mcp-ask" }, { question, options });
-  return "refused" in r ? refuse("no_pm", r.refused) : { ok: true, ...r };
+  const r = await openOrderAsk(deps.db, deps, { task: cur.task, orderId, from: call.agent, fromChannelId: call.channelId, keyPrefix: "mcp-ask" }, w.value);
+  return "refused" in r ? refuse(r.refused.includes("default") ? "invalid_wire" : "no_pm", r.refused) : { ok: true, ...r };
 }

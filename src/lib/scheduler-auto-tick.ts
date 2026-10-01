@@ -203,7 +203,7 @@ class Card {
       }
       checkout = pinned.dir;
     }
-    const order = workOrderFor(this.task, intent, plan, ref, checkout);
+    const order = workOrderFor(this.task, intent, plan, ref, checkout, this.db);
     if (!order) return this.out("held", `节点 ${intent.node} 没有任务单`);
     let delivery = deliveryFor(w.route, order.step);
     const unpullable = delivery.mode === "wake" ? unpullableReason(this.db, ref, intent) : null;

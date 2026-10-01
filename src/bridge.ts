@@ -205,7 +205,9 @@ import {
 // Discord 交互块（D5-4 从本文件搬出；import 时零副作用，下面显式注册）
 import { registerSlashCommands } from "./bridge/slash-commands.js";
 import { registerInteractionHandlers } from "./bridge/discord-interactions.js";
-import { admitCaller, answerWhoami } from "./bridge/caller-identity.js";
+import { admitCaller, answerWhoami, callerOf } from "./bridge/caller-identity.js";
+import { recordDefaultPmReply } from "./lib/order-ask-default.js";
+import { askDbIfExists } from "./bridge/asks.js";
 import { answerOrderTool, lendFrameDenied } from "./bridge/order-tools.js";
 
 // ============================================================
@@ -2215,6 +2217,7 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
     case "fleet_state": case "fleet_run": ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, ...(await (await import("./bridge/fleet/ws.js")).handleFleetWs(msg, ws)) })); break;
     case "route_to_agent": {
       try {
+        recordDefaultPmReply(askDbIfExists(), callerOf(ws, msg).identity, msg.targetName, msg.text);
         let fromChannelId = "";
         let fromName = msg.fromName || "";
         for (const [chId, info] of clients.entries()) {
