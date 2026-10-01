@@ -36,23 +36,27 @@ export interface TaskMetricsView {
   p2: number;
 }
 
+/**
+ * 一张卡。总览只带协作视图读的字段（src/lib/ledger-read.ts liveCard / doneCard）：已完成的卡没有空字段、extra、最近事件、
+ * 步骤线（今天完成的除外），在跑的卡没有 spec / model / createdAt，extra 只有 goal / delegate；详情接口给全量。
+ */
 export interface LedgerTaskView {
   id: string;
-  itemId: string | null;
+  itemId?: string | null;
   title: string;
   kind: string;
   stage: Stage;
-  stageBefore: Stage | null;
+  stageBefore?: Stage | null;
   round: number;
-  agent: string | null;
-  pm: string | null;
-  pr: string | null;
-  spec: string | null;
-  model: string | null;
+  agent?: string | null;
+  pm?: string | null;
+  pr?: string | null;
+  spec?: string | null;
+  model?: string | null;
   extra?: Record<string, unknown>;
-  createdAt: number;
+  createdAt?: number;
   updatedAt: number;
-  lastEvent: LedgerEventView | null;
+  lastEvent?: LedgerEventView | null;
   stageSince?: number | null;
   /** stageSince 是导入推断的近似时间（老 bridge 没有这个字段 = false） */
   stageSinceApprox?: boolean;
@@ -333,7 +337,7 @@ export function lineOf(
     delegate: t.agent ? null : delegateOf(t),
     pm: bareAgent(t.pm),
     round: t.round,
-    pr: t.pr,
+    pr: t.pr ?? null,
     stepLine: t.stepLine,
   };
 }

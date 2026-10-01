@@ -67,3 +67,39 @@ test("retry delay caps at 30s; disposal cancels a scheduled retry", async () => 
   reader.dispose();
   jest.advanceTimersByTime(60_000); await flush(); expect(requests).toBe(7);
 });
+
+test("page hidden: a due retry waits for the page to come back, then fetches at once; dispose unsubscribes", async () => {
+  jest.useFakeTimers();
+  let hidden = false, requests = 0;
+  let show: (() => void) | null = null;
+  const reader = collabLoader({
+    fetch: async () => { requests++; throw new Error("offline"); }, success: () => {}, failure: () => {},
+    visibility: { hidden: () => hidden, onShow: (cb) => { show = cb; return () => { show = null; }; } },
+  });
+  await reader.refetch();
+  hidden = true;
+  jest.advanceTimersByTime(2000); await flush(); expect(requests).toBe(1);
+  jest.advanceTimersByTime(600_000); await flush(); expect(requests).toBe(1);
+  hidden = false;
+  show!(); await flush(); expect(requests).toBe(2);
+  show!(); await flush(); expect(requests).toBe(2); // 没有挂着的重试：回前台不额外拉
+  jest.advanceTimersByTime(4000); await flush(); expect(requests).toBe(3);
+  reader.dispose();
+  expect(show).toBeNull();
+});
+
+test("capOf: forbidden reads back off to a longer cap than transient failures", async () => {
+  jest.useFakeTimers();
+  let requests = 0;
+  const reader = collabLoader({
+    fetch: async () => { requests++; throw new Error("HTTP 403"); }, success: () => {}, failure: () => {},
+    capOf: (e) => ((e as Error).message === "HTTP 403" ? 300_000 : 30_000),
+  });
+  await reader.refetch();
+  for (const delay of [2000, 4000, 8000, 16000, 32000, 64000, 128000, 256000, 300000, 300000]) {
+    const before = requests;
+    jest.advanceTimersByTime(delay - 1); await flush(); expect(requests).toBe(before);
+    jest.advanceTimersByTime(1); await flush(); expect(requests).toBe(before + 1);
+  }
+  reader.dispose();
+});

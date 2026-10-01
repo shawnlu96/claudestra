@@ -107,13 +107,11 @@ describe("GET /ledger/:project", () => {
     const db = openLedger(dbPath);
     try {
       const all = listEvents(db, { project: "p" });
+      // 总览只带首页要的几个计数（0 / null 不发），完整指标走单卡接口
+      expect(body.tasks.map((t: any) => t.metrics)).toEqual([{ reviewRounds: 2, p1: 1 }, { endTs: 600 }]);
       for (const t of body.tasks) {
-        if (!["verified", "done", "cancelled"].includes(t.stage)) expect(t.metrics).toEqual(taskMetrics(t, all, body.now));
-        else {
-          expect(t.metrics).toEqual({ endTs: 600 }); // T2: empty counters are omitted from the compact overview.
-          const detail = await (await get(`/ledger/p/tasks/${encodeURIComponent(t.id)}`)).json() as any;
-          expect(detail.task.metrics).toEqual(taskMetrics(detail.task, all, detail.now));
-        }
+        const detail = await (await get(`/ledger/p/tasks/${encodeURIComponent(t.id)}`)).json() as any;
+        expect(detail.task.metrics).toEqual(taskMetrics(detail.task, all, detail.now));
       }
       expect(body.tasks[0].lastEvent.seq).toBe(all.filter((e) => e.target === "T1").at(-1)!.seq);
     } finally {

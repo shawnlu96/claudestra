@@ -6,10 +6,11 @@
  * 时间：总览带服务端 now，本地记偏移，之后每 30s 本地推算停留时长，不为了走表去重拉。
  */
 import { useCallback, useEffect, useRef, useState } from "react";
-import { collabLoader } from "./collab-loader";
+import { ApiError } from "@/lib/api/client";
+import { collabLoader, type Visibility } from "./collab-loader";
 import { fetchLedger, fetchLedgerTask, followCollabEvents } from "@/lib/api/ledger";
 import { reduceAction, type ActionMap } from "./collab-action";
-import { cachedOverview, cacheOverview } from "./collab-cache";
+import { cachedOverview, cacheOverview, setLedgerAccess } from "./collab-cache";
 import type { LedgerOverview, Stage } from "./collab-model";
 import type { TaskDetail } from "./collab-detail-model";
 import type { BridgeEvent } from "@/lib/chat/stream-shape";
@@ -28,6 +29,18 @@ const TICK_MS = 30_000;
 const REFETCH_DEBOUNCE_MS = 250;
 const RETRY_MIN_MS = 2_000;
 const RETRY_MAX_MS = 30_000;
+/** 总览 403（设备没有台账权限）不会自己好：重试封顶放到 5 分钟，权限补上后最多等这么久 */
+const FORBIDDEN_RETRY_CAP_MS = 5 * 60_000;
+const forbidden = (e: unknown) => e instanceof ApiError && e.status === 403;
+/** 标签页隐藏时总览的失败重试先停（事件流此时也断开），回到前台再拉 */
+const pageVisibility: Visibility = {
+  hidden: () => document.visibilityState === "hidden",
+  onShow: (cb) => {
+    const h = () => document.visibilityState === "visible" && cb();
+    document.addEventListener("visibilitychange", h);
+    return () => document.removeEventListener("visibilitychange", h);
+  },
+};
 
 /** members：本项目的 agent（前端会话名）；别的项目的 agent 在跑什么与这里无关，不进此刻动作表 */
 export function useCollab(project: string, members: ReadonlySet<string>) {
@@ -43,10 +56,9 @@ export function useCollab(project: string, members: ReadonlySet<string>) {
   const refetch = useCallback(async () => { await loader.current?.refetch(); }, []);
 
   useEffect(() => {
-    const seen = cachedOverview(project);
-    setLoad(seen ? { status: "ok", ov: seen.ov } : { status: "loading" });
-    prevStages.current = seen ? new Map((seen.ov.tasks ?? []).map((t) => [t.id, t.stage])) : null;
-    setAdvance(null);
+    const seen = cachedOverview(project)?.ov;
+    // 切项目会整个重挂（collab-switch.tsx 按 project 加 key），load / advance 的初值就是这个项目的，这里不再重置
+    prevStages.current = seen ? new Map((seen.tasks ?? []).map((t) => [t.id, t.stage])) : null;
     const reader = collabLoader({
       fetch: (signal) => fetchLedger(project, signal),
       success: (ov) => {
@@ -61,9 +73,13 @@ export function useCollab(project: string, members: ReadonlySet<string>) {
         setRev((r) => r + 1);
       },
       failure: (e) => {
+        // 没权限：侧栏入口先收起（读成功会再放出来），视图照样显示重试，只是隔得久一些
+        if (forbidden(e)) setLedgerAccess(project, "no");
         const message = e instanceof Error ? e.message : String(e);
         setLoad((cur) => cur.status === "ok" ? { ...cur, error: message } : { status: "error", message });
       },
+      capOf: (e) => (forbidden(e) ? FORBIDDEN_RETRY_CAP_MS : RETRY_MAX_MS),
+      visibility: pageVisibility,
     });
     loader.current = reader;
     void reader.refetch();
