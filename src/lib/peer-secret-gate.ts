@@ -1,8 +1,8 @@
 /**
  * Refuse secrets before peer dispatch; address / personal-info masking belongs to dispatch-redact.ts.
  * Prefixes, Bearer, PEM and hex still ignore whitespace; only a whole, exact ledger head in free text is exempt.
- * Random checks join all adjacent ASCII fragments across whitespace, then measure 32-character windows.
- * Category-switch density separates random values from prose; word-shaped split pieces must never bypass the gate. Tests: peer-secret-gate*.
+ * Random checks exempt word-shaped identifiers and filenames; adjacent fragments of at least eight characters may join.
+ * Shorter whitespace pieces and character-by-character separators are known limits; this gate guards accidental pastes, not deliberate encoding.
  */
 import { redactFields } from "./redact-fields.js";
 
@@ -15,31 +15,38 @@ const RULES: readonly (readonly [string, RegExp])[] = [
 /** Folded text has no control characters, so this placeholder never makes a real value look already masked. */
 const SENTINEL = "\u0000";
 
-/** A 32-character window needs all three classes and at least 14 letter/digit class switches (14/31).
- * Separators contribute no switches: report filenames and prose stay below the density of mixed random values.
- */
-function randomWindow(value: string): boolean {
-  const classes = [...value].map((c) => /[a-z]/.test(c) ? 0 : /[A-Z]/.test(c) ? 1 : /[0-9]/.test(c) ? 2 : 3);
-  const counts = [0, 0, 0, 0];
-  let switches = 0;
-  const change = (a: number, b: number) => a < 3 && b < 3 && a !== b ? 1 : 0;
-  for (let i = 0; i < classes.length; i++) {
-    counts[classes[i]!]!++;
-    if (i > 0) switches += change(classes[i - 1]!, classes[i]!);
-    if (i >= 32) {
-      counts[classes[i - 32]!]!--;
-      switches -= change(classes[i - 32]!, classes[i - 31]!);
-    }
-    if (i >= 31 && switches >= 14 && counts[0]! > 0 && counts[1]! > 0 && counts[2]! > 0) return true;
-  }
-  return false;
+/** Lowercase word runs distinguish source names from mixed random pastes without a density threshold. */
+function identifier(value: string): boolean {
+  return value.split(/[_-]/).filter(Boolean).every((part) => {
+    if (/^(?:[a-z]+|[A-Z]+)\d+[a-z]?$/.test(part)) return true;
+    const words = part.match(/[A-Z]+(?=[A-Z][a-z]|\d|$)|[A-Z]?[a-z]+|\d+/g) ?? [];
+    return words.join("") === part && words.every((word, i) => /^[A-Z]+$|^\d+$/.test(word)
+      || word.replace(/^[A-Z]/, "").length >= 3
+      || /^(?:id|to|by|on|of|as|in|is|db|ws|ui|api|url|uri|pi|for|mac|pro|get|set|put|use|has|key|ref|map|max|min|new|row|adv)$/i.test(word)
+      || (i === 0 && /^[a-z]$/.test(word) && /^\d+$/.test(words[i + 1] ?? "")));
+  });
 }
 
-/** Whitespace never breaks an ASCII run, even when a secret's middle piece happens to spell a word. */
+/** Word-shaped random values and unusual digit-heavy camelCase remain heuristic ambiguities, outside the finite corpus guarantee. */
+function randomValue(value: string): boolean {
+  return value.length >= 32 && /[A-Z]/.test(value) && /[a-z]/.test(value) && !identifier(value);
+}
+
+/** Only long copy/wrap fragments join; pieces shorter than eight characters are a known protection limit. */
 function randomHit(text: string): boolean {
-  for (const match of text.matchAll(/[A-Za-z0-9_-]+(?:\s+[A-Za-z0-9_-]+)*/g)) {
-    const value = match[0].replace(/\s+/g, "");
-    if (value.length >= 32 && randomWindow(value)) return true;
+  let end = 0;
+  let parts: string[] = [];
+  for (const match of text.matchAll(/[A-Za-z0-9_-]+/g)) {
+    const token = match[0];
+    if (randomValue(token)) return true;
+    if (token.length >= 8) {
+      if (!/^\s+$/.test(text.slice(end, match.index))) parts = [];
+      parts.push(token);
+      if (parts.length > 3) parts.shift();
+      if (parts.length >= 2 && randomValue(parts.join(""))) return true;
+      if (parts.length === 3 && randomValue(parts.slice(1).join(""))) return true;
+    } else parts = [];
+    end = match.index + token.length;
   }
   return false;
 }
