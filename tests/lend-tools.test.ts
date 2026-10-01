@@ -7,7 +7,7 @@ import { join } from "node:path";
 import type { CallerIdentity } from "../src/lib/caller-identity.js";
 import { protoKey } from "../src/lib/lend-hello.js";
 import { advance, getOrder, openLendJournal, recordAsked, setMeta } from "../src/lib/lend-journal.js";
-import { e2eLendCall, isLendCaller, routeLendTool, type LendToolDeps } from "../src/lib/lend-tools.js";
+import { e2eLendCall, isLendCaller, lendFrameGate, routeLendTool, type LendToolDeps } from "../src/lib/lend-tools.js";
 import { markE2eResponse } from "../src/lib/peer-e2e-client.js";
 import type { HttpPeer } from "../src/lib/peers.js";
 import { startToolProxy } from "../src/lib/acp/tool-proxy.js";
@@ -357,5 +357,54 @@ describe("反例：拿代理 token 绕过 channel-server 直连（验收线 1）
     expect(c.routed).toEqual(["take_review", "take_order"]);
     expect(c.sent).toEqual([]);
     c.done();
+  });
+});
+
+describe("反例：出借 worker 的连接直接发原生频道帧（bridge.ts 入口，r1 w4-native-frame-bypass）", () => {
+  const bridgeSrc = readFileSync(join(import.meta.dir, "../src/bridge.ts"), "utf8");
+  const handler = bridgeSrc.slice(bridgeSrc.indexOf("async function handleClientMessage("));
+  /** bridge.ts handleClientMessage 的 switch 认的全部帧类型（真实入口，不是 order_tool 的别名） */
+  const nativeTypes = [...new Set([...handler.slice(0, handler.indexOf("\n}\n")).matchAll(/case "([a-z_]+)":/g)].map((m) => m[1]))];
+  const HOST = ["ping", "register", "whoami", "order_tool", "abort_ack", "acp_entries", "acp_config", "acp_failure", "acp_permission", "acp_call_result", "acp_rebind"];
+  const gate = (type: string, agent: string | null) => {
+    const replies: Record<string, unknown>[] = [];
+    let asked = 0;
+    const refused = lendFrameGate({ type, requestId: `r_${type}` }, () => (asked++, { agent }), (f) => replies.push(f as Record<string, unknown>), () => {});
+    return { refused, replies, asked };
+  };
+
+  test("入口在 switch 之前：handleClientMessage 先过 lendFrameDenied，被拒就 return，任何 case 的 handler 都到不了", () => {
+    const head = handler.slice(0, handler.indexOf("switch (msg.type)"));
+    expect(head).toMatch(/if \(lendFrameDenied\(ws, msg\)\) return;/);
+    expect(head.indexOf("lendFrameDenied")).toBeGreaterThan(head.indexOf("JSON.parse(raw)"));
+  });
+
+  test("project_info / reply / route_to_agent / forward_to_agent / fleet_* / check_inbox 等真实帧：出借身份一律回 error，不进 handler", () => {
+    for (const t of ["project_info", "reply", "route_to_agent", "forward_to_agent", "fleet_state", "fleet_run", "check_inbox", "fetch_messages", "notify", "ask_codex"]) {
+      expect(nativeTypes).toContain(t);
+    }
+    const outside = nativeTypes.filter((t) => !HOST.includes(t));
+    expect(outside.length).toBeGreaterThan(15);
+    for (const t of outside) {
+      const g = gate(t, AGENT);
+      expect(g.refused).toBe(true);
+      expect(g.replies).toEqual([{ type: "response", requestId: `r_${t}`, error: `lend_forbidden:${t}` }]);
+    }
+    expect(gate("some_future_frame", AGENT).refused).toBe(true); // 新加的帧类型缺省也拒
+  });
+
+  test("对照：ACP 宿主自己的帧、派单工具、whoami 放行且不查身份；本机 agent / 没注册的连接什么都不拦（回归）", () => {
+    for (const t of HOST) expect(gate(t, AGENT)).toEqual({ refused: false, replies: [], asked: 0 });
+    for (const t of nativeTypes) for (const agent of ["agent-codex", "master", null]) expect(gate(t, agent).refused).toBe(false);
+  });
+
+  test("出借连接的 order_tool 过闸口后照旧进 routeLendTool：白名单内的能领单，白名单外的 lend_forbidden", async () => {
+    expect(gate("order_tool", AGENT).refused).toBe(false);
+    expect(readFileSync(join(import.meta.dir, "../src/bridge/order-tools.ts"), "utf8")).toContain("isLendCaller(identity) ? await answerLendTool(msg.tool, identity, msg.args)");
+    const db = openLendJournal(":memory:");
+    addStarted(db);
+    const { deps } = fake(db);
+    expect(code(await routeLendTool("take_review", who(), {}, deps))).toBe("ok");
+    expect(code(await routeLendTool("project_info", who(), {}, deps))).toBe("lend_forbidden");
   });
 });

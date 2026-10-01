@@ -5,6 +5,7 @@
  * 2. 一单一绑定：按身份里的 agent 名查 journal 里活着的单（agent = 该名），恰好一行；会话也得是这一行记的会话；
  * 3. 参数带了 orderId 而且对不上 → 拒；单子没起 worker / 已结束 → 拒；
  * 4. 工具对步骤：审查单只有 take_review / submit_verdict，开工 / 修复单只有 take_order / deliver（W8 硬隔离之前一律明确拒），ask 都可以。
+ * 原生频道帧（reply / project_info / route_to_agent …）不走 order-tools：bridge.ts 入口先过 lendFrameGate。
  * 转发给 A 的 peer / orderId / gen 只取自这一行（结论正文由 lend-submit.ts 按这一行拼），请求参数里的一概不用；出站只走 E2E（注入的 call）。
  * tests/lend-tools.test.ts（含拿代理 token 直连的反例）。
  */
@@ -60,6 +61,26 @@ export function e2eLendCall(p: LendCallPorts): LendCall<"result" | "ask"> {
 
 /** bridge/order-tools.ts 的分流条件：出借 worker 的身份（不看是否已验证——没验证的也进这里被拒，不落回本机 HANDLERS） */
 export const isLendCaller = (identity: Pick<CallerIdentity, "agent">): boolean => isLendWorkerName(identity.agent ?? undefined);
+
+/**
+ * 出借身份的连接在 bridge 原生帧入口只放这些：ping / whoami / order_tool（之后照旧过 routeLendTool 白名单），
+ * 加 ACP 宿主自己的帧——宿主那条连接就注册在 agent-lend-* 的频道上，register / acp_* / abort_ack 拦了 worker 就跑不起来。
+ */
+const LEND_FRAMES = new Set(["ping", "whoami", "order_tool", "register", "abort_ack",
+  "acp_entries", "acp_config", "acp_failure", "acp_permission", "acp_call_result", "acp_rebind"]);
+
+/**
+ * bridge.ts handleClientMessage 进 switch 之前调（bridge/lend-tools.ts lendFrameDenied）：连接认出是出借 worker（注册在 agent-lend-* 的频道上，
+ * 不论凭据是否有效），reply / project_info / route_to_agent / fleet_* 等频道与管理类原生帧回 error「lend_forbidden:<type>」后丢弃。
+ * 放行的类型不查身份（ping、acp_* 是热路径）；新加的帧类型缺省就拒。没注册的匿名本机连接认不出身份，不归这里——同一 OS 用户的限制，W8 收。
+ */
+export function lendFrameGate(msg: Record<string, unknown>, identityOf: () => Pick<CallerIdentity, "agent">, reply: (frame: object) => void, log: (m: string) => void): boolean {
+  if (LEND_FRAMES.has(String(msg.type)) || !isLendCaller(identityOf())) return false;
+  const type = String(msg.type).slice(0, 40);
+  log(`出借 worker 发了原生帧 ${type}，拒绝（只开派单工具与 whoami）`);
+  reply({ type: "response", requestId: msg.requestId, error: `lend_forbidden:${type}` });
+  return true;
+}
 
 const REVIEW_TOOLS = ["take_review", "submit_verdict", "ask"];
 const WRITE_TOOLS = ["take_order", "deliver", "ask"];
