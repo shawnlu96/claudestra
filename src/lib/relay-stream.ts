@@ -3,6 +3,7 @@
  * 拼回 ReadableStream 的小闸门，服务端 front 与 bridge 侧的隧道 / peer 转发共用，两边分块大小与头规则才一致。
  * 不依赖 WebSocket、不知道帧要发给谁；发送由调用方注入的 emit 完成。
  */
+import { gzipSync } from "node:zlib";
 import { LIMITS, type Headers } from "./relay-protocol.js";
 
 /** hop-by-hop 与由传输层重算的头，任何方向都不透传 */
@@ -194,3 +195,20 @@ export async function collectBody(body: ReadableStream<Uint8Array> | Uint8Array 
 
 /** 这些状态码的 Response 不许带 body，硬塞会抛 */
 export const NULL_BODY_STATUS: ReadonlySet<number> = new Set([101, 204, 205, 304]);
+
+/** 小于这个就不压：省下的字节抵不过 gzip 头尾 */
+const GZIP_MIN_BYTES = 1024;
+
+/**
+ * 路径模式的 JSON 响应在本机 gzip 后再上中继（隧道模式靠 decompress:false 原样转本机 Web 的压缩正文，早就是压过的）。
+ * 上行慢时 JSON 原文再经 base64 是大头，历史 / agent 列表压完约剩两成；浏览器按 content-encoding 自己解。
+ * 只碰 application/json：SSE 等流式正文不能整读，图片等本来就压过。整读可以——JSON 响应本来就是一次性的。
+ */
+export async function gzipJson(headers: Headers, body: ReadableStream<Uint8Array> | null, acceptEncoding = ""): Promise<{ headers: Headers; body: Uint8Array | ReadableStream<Uint8Array> | null }> {
+  if (!body || headers["content-encoding"] || !/\bgzip\b/i.test(acceptEncoding) || !/^application\/json\b/i.test(headers["content-type"] ?? "")) return { headers, body };
+  const raw = new Uint8Array(await new Response(body).arrayBuffer());
+  if (raw.length < GZIP_MIN_BYTES) return { headers, body: raw };
+  const { "content-length": _len, ...rest } = headers;
+  const vary = rest.vary ? `${rest.vary}, Accept-Encoding` : "Accept-Encoding";
+  return { headers: { ...rest, "content-encoding": "gzip", vary }, body: new Uint8Array(gzipSync(raw)) };
+}

@@ -5,7 +5,7 @@
  */
 import { apiPathOk, isRedeemRequest, RELAY_BASE_HEADER } from "../lib/relay-protocol.js";
 import { RELAY_MODE_HEADER, RELAY_PREFIX_HEADER, RELAY_SAME_NET_HEADER } from "../lib/relay-machine-path.js";
-import { forwardHeaders, headersToObject } from "../lib/relay-stream.js";
+import { forwardHeaders, gzipJson, headersToObject } from "../lib/relay-stream.js";
 import { RelayError, type InboundContext, type InboundRequest, type InboundResponse } from "../lib/relay-client-types.js";
 import { setRequestContext } from "./request-context.js";
 
@@ -35,5 +35,5 @@ export async function dispatchMachineRequest(req: InboundRequest, ctx: InboundCo
     ...(req.headers[RELAY_SAME_NET_HEADER] === "1" ? { sameNetwork: true } : {}),
   });
   const r = await handleApi(request);
-  return { status: r.status, headers: headersToObject(r.headers), body: r.body };
+  return { status: r.status, ...(await gzipJson(headersToObject(r.headers), r.body, req.headers["accept-encoding"])) };
 }
