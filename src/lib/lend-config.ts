@@ -5,6 +5,7 @@
  * 绝不退回「上次好的值」。v1 文件照读，但出借条目一律迁成暂停（逐单确认已退役，要出借方本人重新授权）；写一律写 v2。
  * 写入只经 updateLend：独占锁（拿不到就拒写，不降级）+ 锁内重读 + tmp/rename 原子写 + 坏文件拒写。tests/lend-config.test.ts、tests/lend-grant.test.ts。
  */
+import { CODEX_EFFORT_LEVELS } from "./codex-launch.js";
 import { acquireLock } from "./file-lock.js";
 import { statePath } from "./paths.js";
 import { FP_RE } from "./relay-protocol.js";
@@ -44,6 +45,9 @@ export interface LendEntry {
   grantedAt?: string;
   /** 暂停 = 整条不生效（v1 迁移来的条目、待出借方本人重新授权） */
   paused?: { reason: string };
+  /** 出借 worker 用的 Codex 模型 / 推理档；只由出借方本人在授权里写，不写 = 出借方 Codex 的默认配置（lend-grant-spawn.ts lendModelArgs） */
+  codexModel?: string;
+  codexEffort?: string;
 }
 
 export interface BorrowEntry {
@@ -75,6 +79,12 @@ export type LendRead =
 const PEER_NAME_RE = /^[\w-]{1,32}$/;
 export const REPO_RE = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})\/[A-Za-z0-9._-]{1,100}$/;
 const PROJECT_ID_RE = /^[a-z0-9][a-z0-9_-]{0,31}$/;
+
+/** 值会作为 manager create 的 --model 参数：只收小写字母数字、点、横线，首字符不能是 `-`（否则会被当成参数），最长 64 */
+const CODEX_MODEL_RE = /^[a-z0-9][a-z0-9.\-]{0,63}$/;
+export const isCodexModel = (v: unknown): v is string => typeof v === "string" && CODEX_MODEL_RE.test(v);
+/** 档位只认 Codex 原名（codex-launch.ts 的全集），不收 ultracode 之类的折算别名 */
+export const isCodexEffort = (v: unknown): v is string => typeof v === "string" && (CODEX_EFFORT_LEVELS as readonly string[]).includes(v);
 
 const isObj = (v: unknown): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v);
 const isInt = (v: unknown, min: number, max: number): v is number => Number.isInteger(v) && (v as number) >= min && (v as number) <= max;
@@ -121,7 +131,9 @@ function lendEntryProblem(e: unknown): string | null {
   if (p) return p;
   if (!isInt(e.ordersPerDay, 1, MAX_ORDERS_PER_DAY)) return `ordersPerDay 必须是 1..${MAX_ORDERS_PER_DAY} 的整数`;
   for (const k of ["until", "grantedAt"] as const) if (e[k] !== undefined && !isIso(e[k])) return `${k} 必须是 ISO 时间`;
-  const known = ["peer", "fp", "families", "roles", "repos", "ordersPerDay", "until", "grantedAt", "paused"];
+  if (e.codexModel !== undefined && !isCodexModel(e.codexModel)) return "codexModel 只能是小写字母、数字、点、横线（首字符不能是 -，最长 64）";
+  if (e.codexEffort !== undefined && !isCodexEffort(e.codexEffort)) return `codexEffort 只能是 ${CODEX_EFFORT_LEVELS.join(" / ")}`;
+  const known = ["peer", "fp", "families", "roles", "repos", "ordersPerDay", "until", "grantedAt", "paused", "codexModel", "codexEffort"];
   const extra = Object.keys(e).find((k) => !known.includes(k));
   if (extra) return `不认识的字段 ${extra}（逐单确认 confirm / quota 是 v1 的写法，已退役）`;
   if (e.paused !== undefined) {
