@@ -108,11 +108,15 @@ machines.onSwitch((prev) => {
 });
 
 async function parseBody(res: Response): Promise<Record<string, unknown>> {
-  const text = await res.text().catch(() => ""); // 体读不出来（已中止 / 空体）按空对象，状态码仍然生效
+  const text = await res.text().catch(() => {
+    if (res.ok) throw new ApiError("Response body interrupted — please retry", res.status, { retryable: true }, "body_read_failed");
+    return ""; // 非 2xx 仍按原状态码报错，特别是 401 必须触发重新配对
+  });
   if (!text) return {};
   try {
     return JSON.parse(text) as Record<string, unknown>;
   } catch {
+    if (res.ok) throw new ApiError("Response body is not valid JSON — please retry", res.status, { retryable: true }, "invalid_json");
     return { error: text.slice(0, 300) }; // 非 JSON（反代错误页）：把正文当错误文案带给调用方
   }
 }
