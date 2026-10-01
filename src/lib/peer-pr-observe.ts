@@ -59,23 +59,25 @@ async function mergeDrift(c: PeerPrCtx, card: LedgerTask, meta: PeerPrMeta, head
 
 /**
  * The card sits in a fix the merge queue bounced it into: queue one push to the author for M12's merge_conflict event (keyed by
- * its seq, so a re-run never queues it twice) and report true. Only the bounce that made this very fix is pushed; an escalated
- * one never moved the card. False for every other card, which keeps the P1 fix's maxRounds rule.
+ * its seq, so a re-run never queues it twice). "none" for every other card, which keeps the P1 fix's maxRounds rule. "retry"
+ * while the queue write fails: the caller must not take a new head then, since once the card leaves fix nothing looks here again
+ * and the bounce would never reach the author. Only the bounce that made this very fix is pushed; an escalated one never moved it.
  */
-async function bounceFix(c: PeerPrCtx, card: LedgerTask, meta: PeerPrMeta): Promise<boolean> {
-  if (card.stage !== "fix") return false;
+async function bounceFix(c: PeerPrCtx, card: LedgerTask, meta: PeerPrMeta): Promise<"none" | "queued" | "retry"> {
+  if (card.stage !== "fix") return "none";
   const events = listEvents(c.db, { project: card.project, target: card.id });
-  if (!fixBounce(events, "fix")) return false;
+  if (!fixBounce(events, "fix")) return "none";
   const e = events.findLast((x) => x.kind === "scheduler" && x.data.op === "merge_conflict" && x.data.escalated !== true);
-  if (!e) return true;
+  if (!e) return "queued";
   const key = `bounce:${e.seq}`;
-  if (getEventByDedup(c.db, pushDedupKey(card.id, key, "queued")!)) return true;
+  if (getEventByDedup(c.db, pushDedupKey(card.id, key, "queued")!)) return "queued";
   const rows = (Array.isArray(e.data.checks) ? e.data.checks : []) as Record<string, unknown>[];
   const checks = rows.filter((x) => x && typeof x.name === "string").map((x) => ({ name: x.name as string, link: typeof x.link === "string" ? x.link : "" }));
   const text = renderBouncePush(meta.number, { cause: String(e.data.cause), prHead: String(e.data.prHead ?? card.headSHA ?? ""), checks }, c.cfg.replyTo);
   const q = await record(c, card.id, key, "queued", "合并队列退回 fix，排队告诉对方", { message: text });
-  if (q.ok !== true) console.error(`⚠️ [peer-pr] ${card.id} 合并退回的说明没排上队（下一轮再试）：${String(q.error)}`);
-  return true;
+  if (q.ok === true) return "queued";
+  console.error(`⚠️ [peer-pr] ${card.id} 合并退回的说明没排上队（下一轮再试，排上前不收新 head）：${String(q.error)}`);
+  return "retry";
 }
 
 async function newHead(c: PeerPrCtx, card: LedgerTask, meta: PeerPrMeta, head: string, bounced: boolean): Promise<string> {
@@ -96,12 +98,14 @@ async function checkCard(c: PeerPrCtx, repo: string, card: LedgerTask, meta: Pee
   if (!pr) return closedPr(c, repo, card, meta);
   if (pr.base !== "main") return (await fallbackOnce(c, card.id, "base", `PR #${meta.number} 的 base 改成了 ${pr.base.slice(0, 80)}`), "退回人工");
   if (!sameOwner(pr, repo)) return (await fallbackOnce(c, card.id, "cross", `PR #${meta.number} 改成了跨仓 / head 仓库 owner 不对`), "退回人工");
-  const bounced = await bounceFix(c, card, meta);
+  const bounce = await bounceFix(c, card, meta);
+  const bounced = bounce !== "none";
   if (card.stage === "fix" && !bounced && card.round >= c.cfg.maxRounds) {
     await fallbackOnce(c, card.id, "rounds", `第 ${card.round} 轮审查后仍有 P1，复验轮次到顶（maxRounds ${c.cfg.maxRounds}）`);
     return "退回人工";
   }
   if (pr.head === card.headSHA) return "";
+  if (bounce === "retry") return "合并退回的说明还没排上队：先不收新 head";
   if (!headStable(c.state, meta.number, pr.head, c.deps.now(), c.cfg.headSettleSec)) return "新 head 还没稳";
   return newHead(c, card, meta, pr.head, bounced);
 }

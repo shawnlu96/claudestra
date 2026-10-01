@@ -299,6 +299,29 @@ describe("合并退回 fix（i28-A2b）", () => {
     w.f.close();
   });
 
+  test("r1 P1：说明入队失败时不收新 head，恢复后补排一次并送达，再收新 head", async () => {
+    const w = world();
+    await firstRound(w, "pass");
+    await mergeBounce(w, { mergeState: "UNSTABLE", checks: [{ name: "check", bucket: "fail", link: RUN }] });
+    const manager = w.deps.manager;
+    let attempts = 0;
+    w.deps.manager = async (...args) => {
+      if (args[1] === "peer-pr-push-record" && args.includes("queued")) return (attempts++, { ok: false, error: "暂时写不进" });
+      return manager(...args);
+    };
+    await pushHead(w, H2);
+    w.poll();
+    await w.peerTick();
+    expect(attempts).toBeGreaterThanOrEqual(2);
+    expect(w.card()).toMatchObject({ stage: "fix", headSHA: H1 }); // the new head waits for the bounce to be queued
+    w.deps.manager = manager;
+    for (let i = 0; i < 3; i++) { w.poll(); await w.peerTick(); }
+    expect(w.card()).toMatchObject({ stage: "review", round: 2, headSHA: H2 });
+    expect(bouncePushes(w)).toHaveLength(1);
+    expect(listEvents(w.f.db, { project: "p", target: "PR401" }).filter((e) => e.data.op === "peer_pr_push" && e.data.result === "queued")).toHaveLength(1);
+    w.f.close();
+  });
+
   test("P1 进的 fix 到顶照旧退人工，也不推合并退回说明", async () => {
     const w = world();
     await firstRound(w, "changes");
