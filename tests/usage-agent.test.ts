@@ -106,6 +106,31 @@ test("path masking covers arbitrary local roots without changing a source URL", 
   db.close();
 });
 
+test("absolute paths after colons or quotes, single roots and spaced names are fully masked", () => {
+  const { db } = fixture(); turn(db, "paths", day + 1);
+  for (const path of ["/tmp", "~/secret", "/Users/private/my file.txt", "~/my project", "/"]) {
+    for (const [source, expected] of [[`path:${path}`, "path:[path]"], [`'${path}'`, "'[path]'"],
+      [`"${path}"`, '"[path]"']]) {
+      db.prepare("UPDATE turns SET trigger = ?").run(source);
+      expect(agentUsage(db, "agent-a", { since: 0, limit: 20 }, now).turns[0].trigger).toBe(expected);
+    }
+  }
+  db.close();
+});
+
+test("filtered and exhausted pages do not mistake old daily totals for expired details", () => {
+  const { db } = fixture();
+  db.prepare(`INSERT INTO daily (day,agent,runtime,model,calls,input,cache_creation,cache_read,output,reasoning)
+    VALUES ('2000-01-01','agent-a','claude-code','m',1,1,0,0,1,0)`).run();
+  turn(db, "current", day + 1);
+  expect(agentUsage(db, "agent-a", { since: day + 2, limit: 20 }, now).state).toBe("empty");
+  expect(agentUsage(db, "agent-a", { since: 0, limit: 20, before: { at: 0, row: 0 } }, now).state).toBe("empty");
+  db.prepare("DELETE FROM calls").run();
+  expect(agentUsage(db, "agent-a", { since: now, limit: 20 }, now).state).toBe("empty");
+  expect(agentUsage(db, "agent-a", { since: 0, limit: 20 }, now).state).toBe("expired");
+  db.close();
+});
+
 test("missing store, empty agent and expired details are successful empty states", async () => {
   const { db, path } = fixture();
   expect(agentUsage(db, "agent-a", { since: 0, limit: 20 }, now).state).toBe("empty");

@@ -106,7 +106,7 @@ function UsageBody({ name, projects, onClose }: Props) {
     </div>}
     <h4 className={`${css.title} mt-4 mb-2`}>{t("最近轮次")}</h4>
     {data && !data.turns.length && <p className={css.muted}>{t(data.state === "missing" ? "尚未建立 token 账。"
-      : data.state === "expired" ? "轮次明细已超过 30 天保留期。" : "暂时没有 token 记录。")}</p>}
+      : data.state === "expired" ? "轮次明细已超过 30 天保留期。" : "没有符合条件的记录。")}</p>}
     <ol className={css.turns}>{data?.turns.map((turn) => <UsageTurn key={turn.id} turn={turn} t={t} lang={lang}
       open={() => void open(turn.attr.task!)} busy={opening === turn.attr.task && opening !== null} failed={linkFailed === turn.attr.task && linkFailed !== null} />)}</ol>
     <div className={css.footer}>

@@ -4,7 +4,7 @@ export const AGENT_USAGE_WORDS: Record<string, string> = {
   "输入": "Input", "cache 读": "Cache read", "cache 写": "Cache write", "输出": "Output", "推理": "Reasoning", "调用数": "Calls",
   "看到的上下文": "Context seen", "新产出": "New output", "最近轮次": "Recent turns", "加载更多": "Load more",
   "请求": "requested", "第 {n} 轮": "Round {n}", "步骤不明": "Unknown step", "轮次不明": "Unknown round",
-  "暂时没有 token 记录。": "No token records yet.", "尚未建立 token 账。": "The token ledger is not available yet.",
+  "没有符合条件的记录。": "No matching records.", "尚未建立 token 账。": "The token ledger is not available yet.",
   "轮次明细已超过 30 天保留期。": "Turn details have passed the 30-day retention period.",
   "加载中": "Loading", "重试": "Retry", "打开卡片": "Open card",
   "人工输入": "Human", "频道消息": "Channel", "Peer 消息": "Peer", "后台通知": "Notification", "定时唤醒": "Scheduled",

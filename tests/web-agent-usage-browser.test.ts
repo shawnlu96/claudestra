@@ -111,7 +111,7 @@ test.skipIf(!enabled)("mobile/desktop, period numbers, paginated loading and his
 }, 20_000);
 
 test.skipIf(!enabled)("missing/empty/expired copy and forbidden section", async () => {
-  for (const [mode, message] of [["missing", "尚未建立 token 账。"], ["empty", "暂时没有 token 记录。"], ["expired", "轮次明细已超过 30 天保留期。"]]) {
+  for (const [mode, message] of [["missing", "尚未建立 token 账。"], ["empty", "没有符合条件的记录。"], ["expired", "轮次明细已超过 30 天保留期。"]]) {
     const page = await pageWith(mode); await page.getByText(message, { exact: true }).waitFor(); await page.close();
   }
   const denied = await pageWith("forbidden");
@@ -133,7 +133,7 @@ test.skipIf(!enabled)("switching agent cancels stale data; failed load-more retr
     await route.fulfill({ json: { state: "empty", turns: [], today: null, week: null, next: null } });
   });
   await page.evaluate("window.switchUsageAgent('agent-b')");
-  await page.getByText("暂时没有 token 记录。", { exact: true }).waitFor();
+  await page.getByText("没有符合条件的记录。", { exact: true }).waitFor();
   expect(await page.locator("li").count()).toBe(0);
   await page.close();
 }, 20_000);
