@@ -61,14 +61,15 @@ export function dropAgentFromPeerScopes(principals: ScopedPrincipal[], name: str
 /**
  * 「只能投递消息」的 token 放行哪些请求（tests/peer-messages-only.test.ts）。对方 bridge 互发只用这三个：
  * 投递（http-peer.ts）、轮询这次调用的回复（/threads/:id，属主另有校验）、探在线与 scope（GET /agents，peer-presence.ts）；
- * 外加委托卡的台账接口（local-api/peer-ledger.ts，只碰委托给它的卡）和出借的四个接口（local-api/lend.ts：拉单不经 agent、不注入会话）。
+ * 外加委托卡的台账接口（local-api/peer-ledger.ts，只碰委托给它的卡）和出借接口（local-api/lend.ts：v1 四个 + v2 的 hello / beat / ask，
+ * 以及出借方收推送的 offer；都不经 agent、不注入会话，ask 只开一条问 PM 的 ask）。
  * 其余（历史、事件流、打断、斜杠命令、附件……）一律拒；路径多一个斜杠也拒，宁可错杀。
  */
 export function messagesOnlyAllows(method: string, pathname: string): boolean {
   const m = method.toUpperCase();
   const card = /^\/api\/v1\/peer-ledger\/tasks\/[^/]+$/.test(pathname);
   if (m === "GET") return pathname === "/api/v1/agents" || pathname === "/api/v1/peer-ledger" || card || /^\/api\/v1\/threads\/[^/]+$/.test(pathname);
-  return m === "POST" && (card || /^\/api\/v1\/agents\/[^/]+\/messages$/.test(pathname) || /^\/api\/v1\/lend\/(poll|claim|lease|result)$/.test(pathname));
+  return m === "POST" && (card || /^\/api\/v1\/agents\/[^/]+\/messages$/.test(pathname) || /^\/api\/v1\/lend\/(poll|claim|lease|result|hello|beat|ask|offer)$/.test(pathname));
 }
 
 /** 把签给该 peer 的有效 token 设成 / 取消「只能投递消息」；返回改了几条（0 = 没有有效 token 或已是目标状态） */
