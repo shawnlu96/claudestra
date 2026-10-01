@@ -34,6 +34,7 @@ describe("remote.reviewFirst", () => {
     ["a control character", ["a\nb"]],
     ["a format character", ["a\u200bb"]],
     ["a non-string", ["a", 1]],
+    ["null (only an absent field means none)", null],
   ];
   for (const [name, reviewFirst] of bad) {
     test(`refuses ${name}`, () => {

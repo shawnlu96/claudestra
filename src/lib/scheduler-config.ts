@@ -107,7 +107,7 @@ function parseRemote(id: string, raw: unknown): RemotePolicy {
   }
   const timeout = r.poolTimeoutMin ?? DEFAULT_REMOTE.poolTimeoutMin;
   if (!Number.isInteger(timeout) || (timeout as number) < 1 || (timeout as number) > 240) throw new Error(`scheduler project ${id}: remote.poolTimeoutMin must be 1..240`);
-  const first = r.reviewFirst ?? [];
+  const first = r.reviewFirst === undefined ? [] : r.reviewFirst;
   if (!Array.isArray(first) || first.length > 8 || new Set(first).size !== first.length
     || first.some((x) => typeof x !== "string" || !x || /[\p{Cc}\p{Cf}]/u.test(x))) {
     throw new Error(`scheduler project ${id}: remote.reviewFirst must be up to 8 distinct nonempty peer names`);
