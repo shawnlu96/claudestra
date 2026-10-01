@@ -5,7 +5,7 @@
  * - 收：lend revoke / 改授权写完 lend.json 后 stopRevokedWorkers 读 registry，授权已不覆盖的出借 worker 当场停：在途的 create 发 SIGTERM
  *   等它退出（信号清理撤占位、频道、窗口），再按名字关窗口、确认 no_window，revoke 返回前做完。tests/lend-grant-spawn.test.ts。
  */
-import type { Database } from "bun:sqlite";
+import { Database } from "bun:sqlite";
 import { isCodexEffort, isCodexModel, LEND_PATH, readLendSync } from "./lend-config.js";
 import { getOrder, LEND_JOURNAL_PATH } from "./lend-journal.js";
 import { lendStopReason } from "./lend-watchdog.js";
@@ -15,7 +15,24 @@ import type { WorkerLiveness } from "./worker-liveness.js";
 /** 出借服务起 worker 时带给 manager create 的订单号（lend-deps.ts worker.create） */
 export const LEND_ORDER_ENV = "CLAUDESTRA_LEND_ORDER";
 
-export interface CreateGateOpts { env?: Record<string, string | undefined>; journal?: string; lendPath?: string; now?: number }
+/** choice = 这次 create 实际带的 --model / --effort（出借服务在父进程按当时的授权组好） */
+export interface CreateGateOpts {
+  env?: Record<string, string | undefined>; journal?: string; lendPath?: string; now?: number; choice?: { model?: string; effort?: string };
+}
+
+export const CHOICE_CHANGED = "出借 worker 不起：授权里的模型或推理档在起之前改了，本次不起，下一轮按新授权重建参数";
+
+/** 只读查这张单的 peer / 指纹（manager create 子进程里没有出借服务的 journal 连接）；读失败往外抛，由调用方按不起处理 */
+function orderPeer(journal: string, orderId: string): { peer: string; fp: string | null } | null {
+  const db = new Database(journal, { readonly: true });
+  try {
+    db.exec("PRAGMA busy_timeout = 2000");
+    return (db.query("SELECT peer, fp FROM lend_orders WHERE orderId = ?").get(orderId) as { peer: string; fp: string | null } | null) ?? null;
+  } finally { db.close(); }
+}
+
+const argsOf = (model: string | undefined, effort: string | undefined): string[] =>
+  [...(model ? ["--model", model] : []), ...(effort ? ["--effort", effort] : [])];
 
 /**
  * manager create 起窗口前调（同步读，读完到建窗口之间不再看授权）：不是出借 worker → null；是出借 worker → 要带订单号、
@@ -25,8 +42,15 @@ export function lendCreateDenied(name: string, o: CreateGateOpts = {}): string |
   if (!isLendWorkerName(name)) return null;
   const order = (o.env ?? process.env)[LEND_ORDER_ENV];
   if (!order) return `${name} 是出借 worker，只能由出借服务带订单号起`;
-  const why = lendStopReason(name, o.journal ?? LEND_JOURNAL_PATH, o.now ?? Date.now(), o.lendPath ?? LEND_PATH, order);
-  return why ? `出借 worker 不起：${why}` : null;
+  const journal = o.journal ?? LEND_JOURNAL_PATH;
+  const lendPath = o.lendPath ?? LEND_PATH;
+  const why = lendStopReason(name, journal, o.now ?? Date.now(), lendPath, order);
+  if (why) return `出借 worker 不起：${why}`;
+  // 收回闸口过了再比模型：父进程组参数之后、这里之前出借方改了模型 / 推理档，带着旧参数起就违背「按当下授权起」（tests/lend-grant-model.test.ts）
+  let row: ReturnType<typeof orderPeer>;
+  try { row = orderPeer(journal, order); } catch (e) { return `出借 worker 不起：读不了出借 journal（${(e as Error).message}）`; }
+  if (!row) return `出借 worker 不起：journal 里没有单 ${order}`;
+  return JSON.stringify(argsOf(o.choice?.model, o.choice?.effort)) === JSON.stringify(choiceArgs(row.peer, row.fp, lendPath)) ? null : CHOICE_CHANGED;
 }
 
 /**
@@ -37,11 +61,16 @@ export function lendCreateDenied(name: string, o: CreateGateOpts = {}): string |
  */
 export function lendModelArgs(db: Database, orderId: string, lendPath = LEND_PATH): string[] {
   const row = getOrder(db, orderId);
+  return row ? choiceArgs(row.peer, row.fp, lendPath) : [];
+}
+
+/** 这个 peer 当下授权里的模型 / 推理档参数：出借服务组 create 参数和 manager create 最终闸口用同一个算法 */
+function choiceArgs(peer: string, fp: string | null, lendPath: string): string[] {
   const read = readLendSync(lendPath);
-  if (!row || read.status !== "ok" || !read.file.enabled) return [];
-  const e = read.file.lend.find((x) => x.peer === row.peer);
-  if (!e || (row.fp && e.fp !== row.fp)) return [];
-  return [...(isCodexModel(e.codexModel) ? ["--model", e.codexModel] : []), ...(isCodexEffort(e.codexEffort) ? ["--effort", e.codexEffort] : [])];
+  if (read.status !== "ok" || !read.file.enabled) return [];
+  const e = read.file.lend.find((x) => x.peer === peer);
+  if (!e || (fp && e.fp !== fp)) return [];
+  return argsOf(isCodexModel(e.codexModel) ? e.codexModel : undefined, isCodexEffort(e.codexEffort) ? e.codexEffort : undefined);
 }
 
 /** registry 里的一个出借 worker；createPid = 还在建（creating 占位里记的 manager create 进程），正式条目没有 */

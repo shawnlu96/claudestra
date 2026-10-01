@@ -7,7 +7,7 @@ import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { lendFileProblem, type LendEntry } from "../src/lib/lend-config.js";
-import { LEND_ORDER_ENV, lendCreateDenied, lendModelArgs } from "../src/lib/lend-grant-spawn.js";
+import { CHOICE_CHANGED, LEND_ORDER_ENV, lendCreateDenied, lendModelArgs } from "../src/lib/lend-grant-spawn.js";
 import { advance, openLendJournal, patchOrder, recordAsked } from "../src/lib/lend-journal.js";
 
 const FP = "abcd-ef01-2345-6789";
@@ -56,7 +56,11 @@ function fixture() {
   advance(db, "o1", "claimed", "cloned", { dir: "/w" });
   patchOrder(db, "o1", ["cloned"], { agent: "agent-lend-x" });
   const args = (order = "o1") => lendModelArgs(db, order, f.lendPath);
-  const gate = () => lendCreateDenied("agent-lend-x", { ...f, env: { [LEND_ORDER_ENV]: "o1" } });
+  /** manager create 子进程的最终闸口；argv = 父进程组好的 --model / --effort（manager.ts 解析成 model / effort 传进来） */
+  const gate = (argv: string[] = []) => {
+    const at = (flag: string) => (argv.includes(flag) ? argv[argv.indexOf(flag) + 1] : undefined);
+    return lendCreateDenied("agent-lend-x", { ...f, env: { [LEND_ORDER_ENV]: "o1" }, choice: { model: at("--model"), effort: at("--effort") } });
+  };
   return { db, grant, args, gate };
 }
 
@@ -75,7 +79,7 @@ describe("起出借 worker 时的 create 参数（lendModelArgs）", () => {
   test("每次现读：两步之间改了就用新的；收回 / 关掉 / 指纹变了 / 文件坏了 = 不带参数，且 manager create 的核对照样拒起", () => {
     const { grant, args, gate } = fixture();
     grant([{ ...GRANT, codexModel: "gpt-6-astra", codexEffort: "xhigh" }]);
-    expect(gate()).toBeNull();
+    expect(gate(args())).toBeNull();
     grant([{ ...GRANT, codexModel: "gpt-6", codexEffort: "medium" }]); // gate 之后、create 之前出借方改了授权
     expect(args()).toEqual(["--model", "gpt-6", "--effort", "medium"]);
     grant([]); // 两步之间收回
@@ -102,6 +106,38 @@ describe("起出借 worker 时的 create 参数（lendModelArgs）", () => {
   test("出借服务起 worker 那一行把现读的参数接在 create 后面（lend-deps.ts）", () => {
     const src = readFileSync(join(import.meta.dir, "../src/lib/lend-deps.ts"), "utf8");
     expect(src).toContain(`"--runtime", "codex", "--transport", "acp", ...lendModelArgs(journal, order));`);
+  });
+});
+
+describe("manager create 最终闸口：父进程组好参数之后授权里的模型 / 推理档变了就不起（r1 P1）", () => {
+  const cases: [string, object, object][] = [
+    ["只改模型", { codexModel: "gpt-6-astra", codexEffort: "xhigh" }, { codexModel: "gpt-6-sol", codexEffort: "xhigh" }],
+    ["只改推理档", { codexModel: "gpt-6-astra", codexEffort: "xhigh" }, { codexModel: "gpt-6-astra", codexEffort: "high" }],
+    ["无字段改有字段", {}, { codexModel: "gpt-6-astra", codexEffort: "xhigh" }],
+    ["无字段改只有档位", {}, { codexEffort: "low" }],
+    ["有字段改无字段", { codexModel: "gpt-6-astra", codexEffort: "xhigh" }, {}],
+  ];
+  for (const [label, before, after] of cases) {
+    test(`${label}：拒起；下一轮按新授权重建参数就放行`, () => {
+      const { grant, args, gate } = fixture();
+      grant([{ ...GRANT, ...before }]);
+      const argv = args(); // 出借服务（父进程）组参数
+      grant([{ ...GRANT, ...after }]); // 子进程走到闸口之前出借方改了授权
+      expect(gate(argv)).toBe(CHOICE_CHANGED);
+      expect(gate(args())).toBeNull();
+    });
+  }
+
+  test("授权没变照常放行（有字段、无字段）；先查收回再比模型；参数和授权对不上（手传别的模型）也拒", () => {
+    const { grant, args, gate } = fixture();
+    expect(gate(args())).toBeNull();
+    grant([{ ...GRANT, codexModel: "gpt-6-astra", codexEffort: "xhigh" }]);
+    expect(gate(args())).toBeNull();
+    expect(gate(["--model", "gpt-6-astra"])).toBe(CHOICE_CHANGED);
+    expect(gate(["--model", "other", "--effort", "xhigh"])).toBe(CHOICE_CHANGED);
+    const argv = args();
+    grant([]);
+    expect(gate(argv)).toMatch(/已收回/);
   });
 });
 
