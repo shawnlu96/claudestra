@@ -45,7 +45,35 @@ One `retire` intent per card (`retire:<task>`, opened already claimed by `ledger
    (the reviewer's). Not there → skipped. An agent not finished stopping (see above) whose registry cwd is inside it → kept. Must be a linked
    worktree (git-dir ≠ common-dir). `git status --porcelain` empty →
    `git worktree remove <path>` — never `--force`, never `rm`, and git itself refuses a dirty tree.
-3. The intent settles `done` with a summary receipt.
+3. **Session temp folders** (i28-S2b, `src/lib/scheduler-retire-tmp.ts`, tests in `tests/scheduler-retire-tmp.test.ts`) — see below.
+4. The intent settles `done` with a summary receipt.
+
+## Session temp folders
+
+Claude Code keeps each session's tool output and scratchpad under `<tmp root>/<cwd slug>/<session id>/`, often hundreds of
+MB per card. Once the card's sessions are all `retired`, each worktree from step 2 that is **gone** (removed now, or never there)
+has its folder deleted:
+
+- tmp root = `realpath(CLAUDE_CODE_TMPDIR || "/tmp")` + `/claude-<uid>`. It is not `os.tmpdir()`, because on macOS that resolves
+  to `/var/folders/…`, and Claude Code writes nothing there. The folder name is the checkout path with every non-alphanumeric
+  character replaced by `-` (`projectSlug`). Paths are only ever computed from the card's own two checkouts. The executor's
+  checkout belongs to the author session and `rv-<task>` to the reviewer session. No path is taken from outside.
+- Deleted only if every check passes: the card stage is re-read and is `verified` / `done` / `cancelled`. The role's session is
+  not `peer` (a peer session's folder is on the lender's machine). The worktree was not kept. The root and the folder are real
+  directories, not symlinks (a symlink is never followed or deleted), and the folder resolves to exactly one level under the
+  resolved root. No agent that is not provably stopped (PM included) has a registry cwd that maps to the same folder name.
+  No other card on the ledger, at any stage, has a checkout that maps to the same name: distinct ids such as `a.b` and `a-b`
+  share one folder, so such a folder is left for PM.
+- Threat boundary: a symlink or out-of-root path that exists when the folder is checked is never followed or deleted. A process
+  running as the same uid that swaps the parent folder after the check is out of scope. That process could delete those files
+  directly anyway, since every agent and the scheduler run as one user.
+- The folder is deleted with Node `fs.rm(dir, {recursive: true})`, which unlinks symlinks inside it rather than following them.
+  A folder that is already gone counts as done. The settle receipt names each folder (`已删` / `本不在`), so the card's events show it.
+- A refusal, a failed check (for example `EACCES` from `lstat` / `realpath`) or a failed `rm` goes into the same combined PM notice as a kept worktree. The intent still settles `done`, so it
+  is never retried and PM hears once. A kept worktree keeps its folder without a separate notice.
+
+Not covered: PM's own session folders, and folders of old cards retired before this step existed (old manual-card checkouts
+live under PM's scratchpad and have different names).
 
 ## When PM is told
 
