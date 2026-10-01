@@ -67,19 +67,35 @@ export interface TmpStepInput {
   checkouts: { dir: string; role: SchedulerSession["role"]; kept: boolean }[];
   sessions: Pick<SchedulerSession, "role" | "transport" | "state">[];
   liveCwds: { name: string; cwd: string }[];
+  /**
+   * Both checkout paths of every other card on the ledger, whatever its stage: distinct ids such as `a.b` and `a-b` map to the
+   * same folder name, and that card's sessions may still be using it (or need its files) even when no agent is running.
+   */
+  otherCheckouts: readonly string[];
 }
 
-/** One pass of the step: `done` goes into the settle receipt, `failed` (refused or rm failed) into PM's combined notice. */
+/** The verdict, with any filesystem error (EACCES on lstat / realpath) turned into a refusal reported once like a failed rm. */
+function verdictOrRefuse(dir: string, root: string, liveCwds: TmpStepInput["liveCwds"]): TmpVerdict {
+  try { return tmpDirVerdict(dir, root, liveCwds); } catch (e) { return { refuse: `检查 ${dir} 出错：${(e as Error).message}` }; }
+}
+
+/**
+ * One pass of the step: `done` goes into the settle receipt, `failed` (refused, unreadable, or rm failed) into PM's combined notice;
+ * nothing here throws except the service stopping, so the retire intent always settles and a failure is reported once.
+ */
 export async function cleanSessionTmp(t: TmpCleaner | undefined, input: TmpStepInput): Promise<{ done: string[]; failed: string[] }> {
   const done: string[] = [], failed: string[] = [];
-  if (!t?.root || !RETIRE_STAGES.includes(input.stage as (typeof RETIRE_STAGES)[number])) return { done, failed };
+  const root = t?.root;
+  if (!t || !root || !RETIRE_STAGES.includes(input.stage as (typeof RETIRE_STAGES)[number])) return { done, failed };
   if (input.sessions.some((s) => s.state !== "retired")) return { done, failed };
   for (const c of input.checkouts) {
     if (c.kept || input.sessions.some((s) => s.role === c.role && s.transport === "peer")) continue; // peer: the folder is on the lender's machine
-    const v = tmpDirVerdict(claudeTmpDirFor(c.dir, t.root), t.root, input.liveCwds);
+    const dir = claudeTmpDirFor(c.dir, root), shared = input.otherCheckouts.find((o) => claudeTmpDirFor(o, root) === dir);
+    if (shared) { failed.push(`临时目录没删：${dir} 和另一张卡的 ${shared} 同名，可能是那张卡的会话资料`); continue; }
+    const v = verdictOrRefuse(dir, root, input.liveCwds);
     if ("refuse" in v) { failed.push(`临时目录没删：${v.refuse}`); continue; }
     if ("gone" in v) { done.push(`${basename(v.gone)} 本不在`); continue; }
-    const err = await t.rm(v.rm).then(() => null, (e: unknown) => {
+    const err = await Promise.resolve().then(() => t.rm(v.rm)).then(() => null, (e: unknown) => {
       if (e instanceof SchedulerStopped) throw e; // the service stopping is not a failed delete
       return (e as NodeJS.ErrnoException).code === "ENOENT" ? null : (e as Error).message;
     });

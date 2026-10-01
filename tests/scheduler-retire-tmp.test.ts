@@ -4,7 +4,7 @@
  * saying so, other folders untouched, a refusal told to PM once, a repeated tick a no-op.
  */
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { getIntent } from "../src/lib/ledger-scheduler.js";
@@ -82,7 +82,7 @@ describe("i28-S2b deletion guards", () => {
   });
 
   const input = (over: Partial<TmpStepInput> = {}): TmpStepInput => ({
-    stage: "verified", liveCwds: [],
+    stage: "verified", liveCwds: [], otherCheckouts: [],
     checkouts: [{ dir: "/w/t1", role: "author", kept: false }, { dir: "/w/rv-t1", role: "reviewer", kept: false }],
     sessions: [{ role: "author", transport: "tmux", state: "retired" }, { role: "reviewer", transport: "acp", state: "retired" }], ...over,
   });
@@ -119,6 +119,38 @@ describe("i28-S2b deletion guards", () => {
   });
 });
 
+describe("i28-S2b round 2: shared folder names and unreadable folders", () => {
+  const base = (over: Partial<TmpStepInput> = {}): TmpStepInput => ({
+    stage: "verified", liveCwds: [], otherCheckouts: [], checkouts: [{ dir: "/worktrees/a.b", role: "author", kept: false }],
+    sessions: [{ role: "author", transport: "tmux", state: "retired" }], ...over,
+  });
+
+  test("card a.b never deletes the folder it shares with card a-b, even with no agent running; reported as failed", async () => {
+    const { root, dirs: [shared] } = tmpRoot("/worktrees/a-b"), calls: string[] = [];
+    expect(claudeTmpDirFor("/worktrees/a.b", root)).toBe(shared);
+    writeFileSync(join(shared, "sess", "keep.txt"), "card a-b");
+    const r = await cleanSessionTmp({ root, rm: nodeRm(calls) }, base({ otherCheckouts: ["/worktrees/a-b", "/worktrees/rv-a-b"] }));
+    expect(r.done).toEqual([]);
+    expect(r.failed).toEqual([`临时目录没删：${shared} 和另一张卡的 /worktrees/a-b 同名，可能是那张卡的会话资料`]);
+    expect(calls).toEqual([]);
+    expect(readFileSync(join(shared, "sess", "keep.txt"), "utf8")).toBe("card a-b");
+  });
+
+  test("EACCES on lstat (root mode 000) and a throwing rm become failed results, never a throw", async () => {
+    const { root, dirs: [d] } = tmpRoot("/worktrees/a.b");
+    chmodSync(root, 0o000);
+    try {
+      const r = await cleanSessionTmp({ root, rm: nodeRm() }, base());
+      expect(r.done).toEqual([]);
+      expect(r.failed).toHaveLength(1);
+      expect(r.failed[0]).toContain("EACCES");
+    } finally { chmodSync(root, 0o700); }
+    expect(existsSync(d)).toBe(true);
+    const sync = await cleanSessionTmp({ root, rm: () => { throw Object.assign(new Error("EACCES: rm"), { code: "EACCES" }); } }, base());
+    expect(sync.failed).toEqual([`临时目录 ${d} 删除失败：EACCES: rm`]);
+  });
+});
+
 describe("i28-S2b in the retire tick", () => {
   function fixture() {
     const dir = scratch(), path = join(dir, "ledger.sqlite"), db = openLedger(path), registryPath = join(dir, "registry.json");
@@ -131,13 +163,14 @@ describe("i28-S2b in the retire tick", () => {
     const ledger = async (...a: string[]) => runLedger(a.slice(1), { db, actor: "scheduler", registryPath, projectIds: ["p"], now: () => (now += 10),
       loadRegistry: async () => JSON.parse(readFileSync(registryPath, "utf8")) as Registry, saveRegistry: async () => {} });
     const card = (id: string, stage: string) => {
-      createTask(db, { actor: "owner", now: (now += 10) }, { project: "p", id, title: id, kind: "code", agent: `agent-${id}` });
+      const ag = `agent-${id.replace(/\W/g, "_")}`; // agent names may not contain a dot (card a.b)
+      createTask(db, { actor: "owner", now: (now += 10) }, { project: "p", id, title: id, kind: "code", agent: ag });
       db.query("UPDATE tasks SET stage = ? WHERE id = ?").run(stage, id);
       for (const role of ["author", "reviewer"]) {
         db.query(`INSERT INTO scheduler_intents (id, taskId, project, node, action, causalSeq, taskRev, specRev, templateVersion, status, reason, createdAt, updatedAt)
           VALUES (?, ?, 'p', 'restate', 'ensure_session', 0, 1, 1, 2, 'done', 't', 0, 0)`).run(`e:${id}:${role}`, id);
         db.query(`INSERT INTO scheduler_sessions (taskId, role, agent, sessionId, family, transport, state, createIntentId, createdAt, updatedAt)
-          VALUES (?, ?, ?, ?, 'claude', 'tmux', 'active', ?, 0, 0)`).run(id, role, `agent-${id}-${role}`, `s-${id}-${role}`, `e:${id}:${role}`);
+          VALUES (?, ?, ?, ?, 'claude', 'tmux', 'active', ?, 0, 0)`).run(id, role, `${ag}-${role}`, `s-${id}-${role}`, `e:${id}:${role}`);
       }
     };
     const tmp = (root: string, rm = nodeRm()): RetireDeps => ({
@@ -183,5 +216,40 @@ describe("i28-S2b in the retire tick", () => {
     expect((await schedulerRetireTick(f.db, ["p"], f.tmp(root, nodeRm(calls)))).cards).toEqual([]);
     expect(f.notices).toHaveLength(1);
     expect(existsSync(dirs[0])).toBe(true);
+  });
+
+  test("round 2 repro: verified a.b while a-b is unfinished with no agent running: a-b's files stay, PM told once", async () => {
+    const f = fixture();
+    f.card("a.b", "verified");
+    f.card("a-b", "build");
+    const { root, dirs: [shared] } = tmpRoot(worktreeDirs(f.wtRoot, "a-b")[0]), calls: string[] = [];
+    writeFileSync(join(shared, "sess", "keep.txt"), "card a-b");
+    const [out] = (await schedulerRetireTick(f.db, ["p"], f.tmp(root, nodeRm(calls)))).cards;
+    expect(out).toMatchObject({ taskId: "a.b", step: "handoff" });
+    expect(calls).toEqual([]);
+    expect(existsSync(join(shared, "sess", "keep.txt"))).toBe(true);
+    expect(f.notices).toHaveLength(1);
+    expect(f.notices[0]).toContain("同名");
+    expect(getIntent(f.db, retireIntentId("a.b"))?.status).toBe("done");
+    expect((await schedulerRetireTick(f.db, ["p"], f.tmp(root, nodeRm(calls)))).cards).toEqual([]);
+    expect(f.notices).toHaveLength(1);
+  });
+
+  test("round 2 repro: root mode 000: one failure event and notice, the intent settles, the next tick does not fail again", async () => {
+    const f = fixture();
+    f.card("T1", "verified");
+    const { root } = tmpRoot(...worktreeDirs(f.wtRoot, "T1"));
+    chmodSync(root, 0o000);
+    try {
+      const r = await schedulerRetireTick(f.db, ["p"], f.tmp(root));
+      expect(r.failed).toEqual([]);
+      expect(r.cards).toEqual([expect.objectContaining({ taskId: "T1", step: "handoff" })]);
+      expect(getIntent(f.db, retireIntentId("T1"))?.status).toBe("done");
+      expect(f.settles("T1")).toHaveLength(1);
+      expect(String(f.settles("T1")[0].data.receipt)).toContain("EACCES");
+      expect(f.notices).toHaveLength(1);
+      expect(await schedulerRetireTick(f.db, ["p"], f.tmp(root))).toEqual({ cards: [], failed: [] });
+      expect(f.notices).toHaveLength(1);
+    } finally { chmodSync(root, 0o700); }
   });
 });

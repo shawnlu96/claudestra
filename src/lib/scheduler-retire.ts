@@ -230,8 +230,10 @@ class RetireCard {
     const all = this.db.query("SELECT * FROM scheduler_sessions WHERE taskId = ? ORDER BY role").all(this.task.id) as SchedulerSession[];
     const left = all.flatMap((r) => [r.archiveReceipt, r.killReceipt].filter((x): x is string => !!x && (x.startsWith(ARCHIVE_FAILED) || x.includes(FOR_PM)))
       .map((x) => `${r.role} ${r.agent}：${x}`));
+    const others = (this.db.query("SELECT id FROM tasks WHERE id != ?").all(this.task.id) as { id: string }[])
+      .flatMap((t) => worktreeDirs(this.deps.worktreeRoot, t.id));
     const tmp = await cleanSessionTmp(this.deps.tmp, { stage: getTask(this.db, this.task.id)?.stage ?? "", checkouts, sessions: all,
-      liveCwds: agents.flatMap((a) => (!stopped(a) && a.cwd ? [{ name: a.name, cwd: a.cwd }] : [])) });
+      liveCwds: agents.flatMap((a) => (!stopped(a) && a.cwd ? [{ name: a.name, cwd: a.cwd }] : [])), otherCheckouts: others });
     const sessions = (rows.length ? `${rows.length} 个 session 已退役` : "session 早已退役") + (tmp.done.length ? `；临时目录 ${tmp.done.join("、")}` : "");
     if (!kept.length && !left.length && !tmp.failed.length) {
       return this.out((await settle(this.deps, this.intent.id, "done", `${sessions}；worktree 已清`)) ? "retired" : "held", sessions);
