@@ -18,6 +18,7 @@ import { SRC_DIR } from "./repo-root.js";
 import { clipWire, fitFindings, wireFindings } from "./order-findings.js";
 import { currentReviewFacts } from "./scheduler-review.js";
 import { bounceWork, fixBounce } from "./scheduler-merge-conflict.js";
+import { uiRejectFixFor } from "./ledger-ui-approve-verdict.js";
 import { standardAnswers } from "./order-standard-answers.js";
 
 type WorkStage = "build" | "fix";
@@ -89,6 +90,8 @@ function fixContext(db: Database, t: LedgerTask, step: "write" | "fix"): { findi
   const events = listEvents(db, { project: t.project, target: t.id });
   const bounce = fixBounce(events, t.stage); // 合并退回（冲突 / CI 红）不是修 P1：不带审查报告（scheduler-merge-conflict.ts）
   if (bounce) return { findings: [], report: null, bounce: bounceWork(bounce) };
+  const ui = uiRejectFixFor(db, t, events, getWorkflow(db, t.id)?.template); // PM 退回截图：意见就是这一轮唯一的 P1（ledger-ui-approve-verdict.ts）
+  if (ui) return { findings: wireFindings(ui.findings), report: ui.reportPath };
   const read = currentReviewFacts(t, events);
   return read.kind === "facts" ? { findings: wireFindings(read.facts.findings), report: read.facts.reportPath } : { findings: [], report: null };
 }

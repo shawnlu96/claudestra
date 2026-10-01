@@ -23,6 +23,8 @@ export interface AutostartClaim {
   template: "code" | "ui" | "security" | null;
   version: number | null;
   arm: string;
+  /** 规格卡首写了「owner 看截图：是」：建卡时写进 extra.ownerVisual */
+  ownerVisual: boolean;
 }
 
 export const claimDedup = (featureId: string, key: string, arm: string): string => `autostart:${featureId}:${key}:${arm}`;
@@ -35,6 +37,7 @@ function toClaim(row: Record<string, unknown>): AutostartClaim {
     seq: e.seq, project: e.project, featureId: e.target, key: String(d.key), taskId: String(d.taskId), agent: String(d.agent), pm: String(d.pm),
     branch: String(d.branch), item: typeof d.item === "string" ? d.item : null, title: String(d.title),
     template: (d.template ?? null) as AutostartClaim["template"], version: typeof d.version === "number" ? d.version : null, arm: String(d.arm),
+    ownerVisual: d.ownerVisual === true,
   };
 }
 

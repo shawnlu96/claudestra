@@ -27,7 +27,8 @@ const requireScheduler = (ctx: WriteCtx, what: string): void => {
   if (ctx.actor !== "scheduler") throw new LedgerError("forbidden", `${what}只有调度服务能做`);
 };
 
-export interface ClaimInput { featureId: string; key: string; arm: string; template: AutostartTemplate | null; svc: ServiceFacts }
+/** ownerVisual: the spec head says「owner 看截图：是」; the card is born with extra.ownerVisual (scheduler-ui-gate.ts) */
+export interface ClaimInput { featureId: string; key: string; arm: string; template: AutostartTemplate | null; svc: ServiceFacts; ownerVisual?: boolean }
 
 export function claimNode(db: Database, ctx: WriteCtx, input: ClaimInput): { claim: AutostartClaim; duplicate: boolean } {
   return tx(db, () => {
@@ -44,6 +45,7 @@ export function claimNode(db: Database, ctx: WriteCtx, input: ClaimInput): { cla
     const data = {
       op: "autostart_claim", key: input.key, taskId: names.taskId, agent: names.agent, pm: projectPm(db, f.project), branch: names.branch,
       item: getItem(db, f.project, names.slug) ? names.slug : null, title: node?.oneLine ?? input.key, template: input.template, version, arm: input.arm,
+      ...(input.ownerVisual ? { ownerVisual: true } : {}),
     };
     const event = insertEvent(db, { ...ctx, dedupKey: claimDedup(f.id, input.key, input.arm) },
       { project: f.project, target: f.id, kind: "feature", text: `自动开卡：${input.key} → ${names.taskId}`, data }, true);

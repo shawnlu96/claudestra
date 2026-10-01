@@ -51,10 +51,12 @@ export function switchOff(sw: AutostartSwitch, featureId: string | null): string
 export const weeklyLine = (sw: AutostartSwitch): number => sw.weeklyLinePct ?? DEFAULT_WEEKLY_LINE;
 
 export type TemplateDecl = { ok: true; template: AutostartTemplate; version: number } | { ok: false; error: string };
-export interface SpecHead { off: boolean; template: TemplateDecl }
+/** ownerVisual: the card changes the overall look (palette, theme tokens, redesign), so the owner sees its screenshots, not PM */
+export interface SpecHead { off: boolean; template: TemplateDecl; ownerVisual: boolean }
 
 const TEMPLATE_LINE = /^模板\s*[:：]\s*(.*)$/;
 const OFF_LINE = /^自动开卡\s*[:：]\s*关\s*$/;
+const OWNER_VISUAL_LINE = /^owner\s*看截图\s*[:：]\s*是\s*$/i;
 
 /** 卡首 = 标题（第一个 `# ` 行）之后、第一个 `## ` 之前；没有标题行就从第一行算 */
 export function parseSpecHead(text: string): SpecHead {
@@ -67,11 +69,12 @@ export function parseSpecHead(text: string): SpecHead {
   }
   const decls = head.map((l) => l.match(TEMPLATE_LINE)?.[1]?.trim()).filter((v): v is string => v !== undefined);
   const off = head.some((l) => OFF_LINE.test(l));
-  if (decls.length > 1) return { off, template: { ok: false, error: `卡首写了 ${decls.length} 行模板声明，只能有一行` } };
-  if (!decls.length) return { off, template: { ok: true, template: "code", version: TEMPLATE_VERSION.code } };
+  const ownerVisual = head.some((l) => OWNER_VISUAL_LINE.test(l));
+  if (decls.length > 1) return { off, ownerVisual, template: { ok: false, error: `卡首写了 ${decls.length} 行模板声明，只能有一行` } };
+  if (!decls.length) return { off, ownerVisual, template: { ok: true, template: "code", version: TEMPLATE_VERSION.code } };
   const v = decls[0].toLowerCase();
-  if (!Object.hasOwn(TEMPLATE_VERSION, v)) return { off, template: { ok: false, error: `模板「${decls[0]}」不认识（只认 code / ui / security）` } };
-  return { off, template: { ok: true, template: v as AutostartTemplate, version: TEMPLATE_VERSION[v as AutostartTemplate] } };
+  if (!Object.hasOwn(TEMPLATE_VERSION, v)) return { off, ownerVisual, template: { ok: false, error: `模板「${decls[0]}」不认识（只认 code / ui / security）` } };
+  return { off, ownerVisual, template: { ok: true, template: v as AutostartTemplate, version: TEMPLATE_VERSION[v as AutostartTemplate] } };
 }
 
 export const templateLabel = (t: TemplateDecl): string => (t.ok ? t.template : "invalid");

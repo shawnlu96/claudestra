@@ -99,7 +99,7 @@ describe("T68f review writes on auto cards", () => {
 
 describe("T68f UI screenshot gate", () => {
   test("pass on a ui card opens one bound owner ask; approval lets the planner move to merge and plan the merge intent", async () => {
-    const f = autoFixture({ template: "ui" });
+    const f = autoFixture({ template: "ui", ownerVisual: true });
     try {
       await toBuild(f);
       await f.tick();
@@ -124,7 +124,7 @@ describe("T68f UI screenshot gate", () => {
   });
 
   test("a guest pressing approve does not release the merge", async () => {
-    const f = autoFixture({ template: "ui" });
+    const f = autoFixture({ template: "ui", ownerVisual: true });
     try {
       await toBuild(f);
       await f.tick();
@@ -140,7 +140,7 @@ describe("T68f UI screenshot gate", () => {
   });
 
   test("a rejected screenshot ask sends the card back to PM", async () => {
-    const f = autoFixture({ template: "ui" });
+    const f = autoFixture({ template: "ui", ownerVisual: true });
     try {
       await toBuild(f);
       await f.tick();

@@ -167,7 +167,7 @@ describe("template code is the default, byte for byte", () => {
   }
 });
 
-const NOTE = { ui: "ui 卡：合并前要 owner 看前后截图", security: "security 卡：只在本机跨模型审查" } as const;
+const NOTE = { ui: "ui 卡：合并前 PM 验收前后截图", security: "security 卡：只在本机跨模型审查" } as const;
 const firstRow = () => db.query("SELECT template, templateVersion FROM task_workflows WHERE taskId = 'i28-a'").all();
 
 describe("ui / security land right from the first write", () => {
@@ -177,7 +177,7 @@ describe("ui / security land right from the first write", () => {
       calls = [];
       const out = await start({ template: t });
       expect(out).toMatchObject({ ok: true, taskId: "i28-a", agent: "agent-task-i28-a" });
-      expect(out.next).toBe(`调度器会给 agent-task-i28-a 派复述单；不用给它发消息；${NOTE[t]}${t === "ui" ? "（extra.screenshots ≥ 2 + screenshotsDigest）" : "，不进借算力池"}`);
+      expect(out.next).toBe(`调度器会给 agent-task-i28-a 派复述单；不用给它发消息；${NOTE[t]}${t === "ui" ? "（extra.screenshots ≥ 2 + screenshotsDigest；改整体观感的用 ledger ui-owner-visual <卡> on 交 owner 看）" : "，不进借算力池"}`);
       expect(firstRow()).toEqual([{ template: t, templateVersion: 3 }]);
       expect(workflowEvents().map((e) => [e.data.template, e.data.templateVersion, e.data.mode])).toEqual([[t, 3, "auto"]]);
       const set = calls.filter((c) => c[1] === "workflow-set");
@@ -185,7 +185,7 @@ describe("ui / security land right from the first write", () => {
       expect(set[0]).toContain(`--template=${t}`);
       expect(set[0]).toContain("--version=3");
       const brief = readFileSync(join(dir, "ledger", "reviews", "i28-a-exec-prompt.md"), "utf8");
-      expect(brief.includes("## ui 卡：合并前 owner 要看前后截图")).toBe(t === "ui");
+      expect(brief.includes("## ui 卡：合并前要过前后截图验收")).toBe(t === "ui");
     });
 
     test(`${t}, peer card (fake placement): same workflow, restate skipped after it, receipt notes the gate`, async () => {

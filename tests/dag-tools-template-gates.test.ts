@@ -30,8 +30,8 @@ const setTemplate = async (template: WorkflowTemplate, version: string) => {
 const restate = () => f.cli("agent-task-one", "stage", "T1", "--from", "spec", "--to", "restate", "--text", "复述见 reviews/T1-restate.md");
 
 /** A v3 card of this template, its restate order sent. */
-async function v3Card(template: WorkflowTemplate) {
-  f = autoFixture({ template: template === "ui" ? "ui" : "code" });
+async function v3Card(template: WorkflowTemplate, ownerVisual = false) {
+  f = autoFixture({ template: template === "ui" ? "ui" : "code", ownerVisual });
   expect(await setTemplate(template, "3")).toMatchObject({ ok: true, workflow: { template, templateVersion: 3 } });
   await f.tick(); // ensure author session
   await f.tick(); // restate order
@@ -52,7 +52,7 @@ async function toPassedReview() {
 
 describe("ui v3: restate like code v3, merge still behind the owner screenshot gate", () => {
   test("restate record releases build with no PM; review pass opens the owner ask and waits on it", async () => {
-    await v3Card("ui");
+    await v3Card("ui", true);
     await toPassedReview();
     expect(await f.tick()).toMatchObject({ step: "ask" });
     for (let i = 0; i < 2; i++) expect(await f.tick()).toMatchObject({ step: "waiting", detail: "等待 owner 看前后截图" });
