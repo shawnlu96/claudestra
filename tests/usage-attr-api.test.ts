@@ -48,8 +48,8 @@ async function call(p: Principal, path = "/usage/task/T1", method = "GET"): Prom
 
 describe("权限矩阵", () => {
   for (const [name, p, ok] of MATRIX) {
-    test(`${name} → ${ok ? "200" : "403"}（卡与 feature 两条都是）`, async () => {
-      for (const path of ["/usage/task/T1", "/usage/feature/i1"]) {
+    test(`${name} → ${ok ? "200" : "403"}（卡、feature、agent 三类路径）`, async () => {
+      for (const path of ["/usage/task/T1", "/usage/feature/i1", "/usage/agent/agent-a"]) {
         const r = await call(p, path);
         expect(r.status).toBe(ok ? 200 : 403);
       }
@@ -74,7 +74,7 @@ test("只读：非 GET 一律 405（非全权先 403）", async () => {
 
 test("能力列表登记 usage；别的路径不认", async () => {
   expect(LOCAL_API_FEATURES).toContain("usage");
-  for (const p of ["/usage/task", "/usage/task/T1/x", "/usage/agent/a", "/usage"]) {
+  for (const p of ["/usage/task", "/usage/task/T1/x", "/usage/agent", "/usage"]) {
     const r = new Request(`http://bridge.local/api/v1${p}`);
     expect(await handleLocalApi(r, new URL(r.url), OWNER)).toBeNull();
   }

@@ -24,6 +24,7 @@ import type { RemotePolicy } from "../src/lib/scheduler-config.js";
 import { autoSnapshot } from "../src/lib/scheduler-auto-snapshot.js";
 import { remoteHeadFamily } from "../src/lib/scheduler-head-family.js";
 import { advanceMergeRun, beginMergeRun } from "../src/lib/scheduler-merge.js";
+import { bounceReceipt, type MergeBounce } from "../src/lib/scheduler-merge-conflict.js";
 import { planScheduler } from "../src/lib/scheduler-plan.js";
 import { autoFixture, H2, P1, toBuild } from "./scheduler-auto-helpers.js";
 
@@ -183,6 +184,8 @@ describe("the fix of a remote-written card", () => {
       p.hello("other"); // a first-tier peer, but it does not hold the lease
       expect(await p.tick()).toMatchObject({ step: "pool_pooled", detail: expect.stringContaining("修复挂给 mate") });
       expect(p.orders().at(-1)).toMatchObject({ step: "fix", peer: "mate", family: "codex", head: H2, branch: BRANCH });
+      expect(p.orders().at(-1)!.wire.inputs.join("\n")).toContain("P1:两个 tick 抢同一个意图");
+      expect(p.orders().at(-1)!.wire.findings).toEqual([P1]);
       expect(p.plans().at(-1)?.text).toContain("写租约在 mate，修复单派回它");
     } finally { p.f.close(); }
   });
@@ -233,6 +236,43 @@ describe("the fix of a remote-written card", () => {
       expect(p.orders().filter((o) => o.step === "fix")).toEqual([]);
     } finally { p.f.close(); }
   });
+});
+
+describe("merge-bounced remote writes (i28-W9b)", () => {
+  for (const cause of ["conflict", "ci_fail"] as const) {
+    test(`${cause}: pass → merge bounce → the lease holder receives the cause without a report file`, async () => {
+      const p = await ready();
+      try {
+        await toRemoteReview(p);
+        const none = join(p.f.dir, "none.json");
+        writeFileSync(none, "[]");
+        expect(await p.cli("agent-rv-t1", "review", "T1", "--reviewer", "agent-rv-t1", "--verdict", "pass", "--p0", "0", "--p1", "0", "--p2", "0",
+          "--head", H2, "--session", "s-rv", "--family", "claude", "--findings", none, "--path", join(p.f.dir, "missing-pass.md"))).toMatchObject({ ok: true });
+        await p.tick(); // → merge
+        await p.tick(); // merge intent
+        const intent = p.f.intents().at(-1)!;
+        const ctx = { actor: "scheduler", now: p.f.tickDeps.now() + 1 };
+        if (intent.status === "pending") settleIntent(p.f.db, ctx, { id: intent.id, from: "pending", to: "submitted", receipt: "merge claimed" });
+        const run = beginMergeRun(p.f.db, ctx, intent.id, ["check"]).run;
+        const bounce: MergeBounce = { cause, prHead: H2, mainHead: cause === "conflict" ? BASE_SHA : null,
+          checks: cause === "ci_fail" ? [{ name: "check", link: "https://github.com/o/r/actions/runs/42" }] : [] };
+        advanceMergeRun(p.f.db, ctx, { intentId: intent.id, from: "ready", to: "resolved", rev: run.rev, receipt: bounceReceipt(bounce) });
+        expect(p.f.task().stage).toBe("fix");
+        p.hello("mate");
+        expect(planScheduler(snapshot(p))).toMatchObject({ kind: "intent", action: "dispatch", recipient: "peer:mate",
+          workOrder: { bounce, findings: [], reportPath: "", fallbackWarning: null } });
+        expect(await p.tick()).toMatchObject({ step: "pool_pooled", detail: expect.stringContaining("修复挂给 mate") });
+        const fix = p.orders().at(-1)!;
+        expect(fix).toMatchObject({ step: "fix", peer: "mate", branch: BRANCH, head: H2 });
+        expect(fix.wire.findings).toEqual([]);
+        expect(fix.text).not.toContain("missing-pass.md");
+        expect(fix.text).not.toContain("上一轮审查报告");
+        expect(fix.text).toContain(cause === "conflict" ? "合入最新 origin/main" : bounce.checks[0]!.link);
+        const claimed = await p.lendCall("lend-claim", "mate", { v: 1, orderId: fix.orderId, worker: "fixer" });
+        expect(claimed).toMatchObject({ ok: true, order: fix.wire, text: fix.text });
+      } finally { p.f.close(); }
+    });
+  }
 });
 
 describe("tiers on the real path (the pool step re-plans with the same tiers)", () => {

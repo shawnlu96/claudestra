@@ -8,7 +8,8 @@
  * 依赖全部注入（LendDeps，生产接线在 lend-deps.ts），tests/lend-loop.test.ts 用假依赖逐条走。
  */
 import type { Database } from "bun:sqlite";
-import { advance, localDay, openSlots, orderOf, ordersToday, patchOrder, LEASED_STATES, type LendRow, type LendState } from "./lend-journal.js";
+import { advance, localDay, orderOf, ordersToday, patchOrder, LEASED_STATES, type LendRow, type LendState } from "./lend-journal.js";
+import { claudeLendSlots } from "./lend-claude-worker-capacity.js";
 import type { LendEntry, LendRead } from "./lend-config.js";
 import type { LendContact } from "./lend-policy.js";
 import type { ProjectDef } from "./projects.js";
@@ -24,6 +25,7 @@ import { SchedulerStopped } from "./scheduler-maintenance.js";
 import { DOWN_REASON, failureReason, noteLiveness, pausedUntil, pauseForQuota, type CodexFailureSeen, type QuotaView } from "./lend-health.js";
 import type { WorkerLiveness } from "./worker-liveness.js";
 import { createHash } from "node:crypto";
+import { clearPublishFail, notePublishFail, PUBLISH_GIVE_UP_MS } from "./lend-pr-takeover-retry.js";
 
 export const BEAT_MS = 60_000;
 /** 首条派单后一直没交结论的上限：外来任务不能无限期占着 B 的一个 shell（写代码比审查给得长些） */
@@ -113,12 +115,12 @@ export function claimProblem(row: LendRow, entry: LendEntry | undefined, db: Dat
   if (!entry.repos.includes(str(row.preview.repo))) return `仓库 ${str(row.preview.repo)} 已不在白名单`;
   const role = roleOfStep(str(row.preview.step));
   if (!role || !entry.roles.includes(role)) return `出借声明没开 ${role ?? str(row.preview.step)} 角色，不领这一单`;
-  const slots = entry.families[row.family as "codex"] ?? 0;
+  const slots = row.family === "claude" ? claudeLendSlots(entry) : row.family === "codex" ? entry.families.codex ?? 0 : 0;
   const busy = db.query(`SELECT COUNT(*) AS n FROM lend_orders WHERE peer = ? AND family = ? AND state IN (${LEASED_STATES.map(() => "?").join(",")})`)
     .get(row.peer, row.family, ...LEASED_STATES) as { n: number };
   if (busy.n >= slots) return "wait";
   if (ordersToday(db, row.peer, now) >= entry.ordersPerDay) return "wait";
-  if (pausedUntil(db, now) !== null) return "wait"; // 本机 Codex 撞额度暂停中：批了也先不领
+  if (row.family === "codex" && pausedUntil(db, now) !== null) return "wait"; // 本机 Codex 撞额度暂停中：批了也先不领
   return null;
 }
 
@@ -159,6 +161,7 @@ async function release(row: LendRow, from: LendState, why: string, d: LendDeps):
 export async function settleOrder(row: LendRow, d: LendDeps): Promise<void> {
   const s = row.settle;
   if (!s || (s.notify && d.settleHold?.(row))) return;
+  clearPublishFail(d.db, row.orderId); // 单结束了，发布失败的记账一并清掉（幂等）
   if (s.notify) {
     const r = await lendRequest(d.call, row.peer, "lease", { orderId: row.orderId, gen: row.leaseGen, action: "release", reason: s.notify, detail: detailOf(row.reason) });
     if (!r.ok) d.log(`告诉 A ${row.orderId} 已${s.notify === "stopped" ? "停" : "退回（not_started）"}没送到：${r.code}`);
@@ -233,15 +236,17 @@ function pushTarget(row: LendRow): PushTarget {
 
 /**
  * 写单交活之后：推送 → 开 / 沿用 PR → 拼好交付正文落 journal（之后原字节重发）。推送 / PR 可重试的失败留到下一轮（都幂等：
- * 同一 head 再推是空操作，PR 先查同分支再开）；不可重试的（没权限、远端被别人推过、head 不对）停下、告诉 A，交 PM。
+ * 同一 head 再推是空操作，PR 先查同分支再开），原因进心跳摘要，连续 30 分钟不成就停（lend-pr-takeover-retry.ts）；
+ * 不可重试的（没权限、远端被别人推过、head 不对）停下、告诉 A，交 PM。
  */
 async function publishWork(row: LendRow, d: LendDeps): Promise<LendRow | null> {
   const o = orderOf(row);
   const t = pushTarget(row);
   const work = row.work!;
   const stop = async (r: { reason: string; retry: boolean }) => {
-    if (r.retry) return void d.log(`${row.orderId} 推送 / 开 PR 暂未成功（${r.reason}），下轮再试`);
-    await finish(row, "stopped", r.reason, d, true);
+    const f = r.retry ? notePublishFail(d.db, row.orderId, r.reason, d.now()) : null; // 原因进心跳摘要；连续失败超时按不可重试停
+    if (f && d.now() - f.since < PUBLISH_GIVE_UP_MS) return void d.log(`${row.orderId} 推送 / 开 PR 暂未成功（${r.reason}），下轮再试`);
+    await finish(row, "stopped", f ? `推送 / 开 PR 连续 ${PUBLISH_GIVE_UP_MS / 60_000} 分钟没成功，停单：${r.reason}` : r.reason, d, true);
   };
   const pushed = await d.push.work({ ...t, head: work.head });
   if (!pushed.ok) return (await stop(pushed), null);
@@ -257,6 +262,7 @@ async function publishWork(row: LendRow, d: LendDeps): Promise<LendRow | null> {
     branch: t.branch, pr: pr.pr, session: { id: row.sessionId, family: row.family } };
   const raw = JSON.stringify(payload);
   if (Buffer.byteLength(raw) > BODY_MAX_BYTES) return (await stop({ reason: `交付正文超过 ${BODY_MAX_BYTES} 字节`, retry: false }), null);
+  clearPublishFail(d.db, row.orderId);
   return patchOrder(d.db, row.orderId, ["result_pending"], { payload, payloadSha: payloadSha(raw) }, d.now());
 }
 
@@ -364,7 +370,7 @@ export async function driveLeased(row: LendRow, d: LendDeps): Promise<void> {
   } else if (cur.state === "started") {
     // 失败 / 存活 / 运行上限对 started 的每种 submit 都先查：首条派单一直被拒送时 submit 停在 null，
     // 放在派单后面就一轮都查不到，worker 登录失败也照样续租占位（i28-R5a r1 P1-3）
-    const failed = d.failure(cur.agent!);
+    const failed = cur.family === "codex" ? d.failure(cur.agent!) : undefined;
     if (failed) {
       if (failed.kind === "quota") pauseForQuota(d.db, cur.orderId, await d.codexQuota(), d.now(), d.log);
       d.log(`${cur.orderId} ${failureReason(failed)}（agent ${cur.agent}，session ${cur.sessionId}，gen ${cur.leaseGen}，卡 ${failed.askId}）`);

@@ -27,14 +27,14 @@ import type { LedgerTask } from "./ledger-stages.js";
 import { insertEvent, tx } from "./ledger-tx.js";
 import { isWriteStep, roleOfStep, stepOfStage, type LendStep } from "./lend-git.js";
 import { orderWireOf, parseOrderWire, type OrderWire } from "./order-wire.js";
+import { withDeliverScope } from "./order-deliver-scope.js";
 import { chunkInputs, wholeInputs, type InputSplit } from "./order-wire-chunks.js";
 import { OrderRenderError, redactOrderForPeer, renderOrderWire } from "./order-wire-render.js";
 import { fitFindings } from "./order-findings.js";
 import { standardAnswers } from "./order-standard-answers.js";
 import { prevReview } from "./review-order.js";
 import { convergeOrderLines } from "./review-converge-order.js";
-import { bounceReviewLine, reviewAfterBounce } from "./scheduler-merge-conflict.js";
-
+import { bounceReviewLine, bounceWork, fixBounce, reviewAfterBounce } from "./scheduler-merge-conflict.js";
 export interface LendOrder {
   orderId: string; taskId: string; project: string; peer: string; family: LendFamily; step: LendStep; specRev: number; round: number; head: string;
   repo: string; pr: number | null; wire: OrderWire; text: string; sha256: string; status: LendOrderStatus; worker: string | null; leaseGen: number;
@@ -130,13 +130,13 @@ function reviewOrder(db: Database, task: LedgerTask, orderId: string, input: Off
   const events = listEvents(db, { project: task.project, target: task.id });
   const prev = prevReview(events, task.round);
   const bounce = reviewAfterBounce(events);
-  return fitFindings(orderWireOf({
+  return withDeliverScope(db, task, orderWireOf({
     taskId: task.id, specRev: task.specRev, head, round: task.round, node: "adversarial_review", step: "review", dedupKey: orderId,
     inputs: [...split([[`规格原文（specRev ${task.specRev}）`, input.spec]]), ...(bounce ? [bounceReviewLine(bounce)] : []), standardAnswers("review")],
     outputs: ["逐项结论（findingId / family / severity / probe / description）", "报告正文（markdown），随结论一起交"],
     acceptance: ["对抗式：专找能打穿规格保证的路径", "只审标题里的 head：只读，不改、不提交、不推送", ...convergeOrderLines(task.round, events, head)],
     writeBack: "用 submit_verdict（M3 前是 lend submit）交结论和报告正文，单号见标题", findings: prev.findings,
-  }, { repo: input.repo, pr: input.pr }), prev.report);
+  }, { repo: input.repo, pr: input.pr }), (w) => fitFindings(w, prev.report));
 }
 
 /**
@@ -149,8 +149,12 @@ function orderFor(db: Database, task: LedgerTask, step: LendStep, orderId: strin
   if (!input.write) throw new LedgerError("invalid", "写单缺出借方指纹与基线（CLI 备好再挂）");
   const branch = writeOfferBranch(db, task, step, input.peer, input.write);
   const head = step === "write" ? input.write.baseSha as string : task.headSHA as string;
-  const findings = step === "fix" ? (uiRejectLend(db, task)?.findings ?? lastReviewOf(db, task).findings) : []; // 与本机修复单共用截图 / 代码合成
-  const o = { orderId, step, head, branch, base: input.write.base, spec: input.spec, report: input.write.report, findings, repo: input.repo, pr: input.pr };
+  const b = step === "fix" ? fixBounce(listEvents(db, { project: task.project, target: task.id }), task.stage) : null;
+  // Peer free text cannot carry full SHAs (the secret gate rejects them); keep refs short, as in bounceReviewLine.
+  const shortRef = (sha: string): string => sha.slice(0, 12);
+  const bounce = b ? bounceWork({ ...b, prHead: shortRef(b.prHead), mainHead: b.mainHead ? shortRef(b.mainHead) : null }) : null;
+  const findings = step === "fix" && !bounce ? (uiRejectLend(db, task)?.findings ?? lastReviewOf(db, task).findings) : [];
+  const o = { orderId, step, head, branch, base: input.write.base, spec: input.spec, report: input.write.report, findings, repo: input.repo, pr: input.pr, bounce };
   return { wire: writeOrderWire(task, o), whole: writeOrderWire(task, o, wholeInputs), branch, base: input.write.base };
 }
 

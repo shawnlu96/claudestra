@@ -220,6 +220,8 @@ export interface AskWire {
   orderId: string;
   question: string;
   options: string[];
+  default?: string;
+  class?: "design" | "scope" | "blocker";
 }
 
 const ASK_LIMITS = { question: 2000, options: 10, option: 200 } as const;
@@ -227,11 +229,16 @@ const ASK_LIMITS = { question: 2000, options: 10, option: 200 } as const;
 export function parseAskWire(raw: unknown): WireResult<AskWire> {
   return guarded(raw, () => {
     const given = raw && typeof raw === "object" && !Array.isArray(raw) && !("options" in raw) ? { ...raw, options: [] } : raw;
-    const r = record(given, "$", ["v", "orderId", "question", "options"]);
+    const r = record(given, "$", ["v", "orderId", "question", "options",
+      ...(given && typeof given === "object" ? ["default", "class"].filter((k) => k in given) : [])]);
+    if ("class" in r && !["design", "scope", "blocker"].includes(r.class as string)) fail("class", "只认 design / scope / blocker");
+    if ("default" in r && (typeof r.default !== "string" || !r.default.trim() || [...r.default].length > 600)) fail("default", "默认做法要非空且不超过 600 字");
     if (!Array.isArray(r.options) || r.options.length > ASK_LIMITS.options) fail("options", `要是不超过 ${ASK_LIMITS.options} 项的数组`);
     return {
       v: version(r.v), orderId: matching(r.orderId, "orderId", ORDER_ID), question: text(r.question, "question", ASK_LIMITS.question, true),
       options: (r.options as unknown[]).map((o, i) => text(o, `options[${i}]`, ASK_LIMITS.option)),
+      ...("default" in r ? { default: text(r.default, "default", 2400, true) } : {}),
+      ...("class" in r ? { class: r.class as AskWire["class"] } : {}),
     };
   });
 }

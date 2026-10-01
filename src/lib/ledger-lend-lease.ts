@@ -14,6 +14,7 @@ import { orderWireOf, WIRE_LIMITS, type OrderWire } from "./order-wire.js";
 import { chunkInputs, type InputSplit } from "./order-wire-chunks.js";
 import { standardAnswers } from "./order-standard-answers.js";
 import type { ReviewFinding } from "./scheduler-review.js";
+import type { bounceWork } from "./scheduler-merge-conflict.js";
 
 export interface WriteLease {
   taskId: string; project: string; peer: string; fp: string; branch: string; repo: string;
@@ -92,19 +93,21 @@ export function lastReviewOf(db: Database, task: LedgerTask): { path: string | n
 }
 
 export interface WriteOrderInput { orderId: string; step: LendStep; head: string; branch: string; base: string; spec: string; report: string | null;
-  findings: ReviewFinding[]; repo: string; pr: number | null }
+  findings: ReviewFinding[]; repo: string; pr: number | null; bounce?: ReturnType<typeof bounceWork> | null }
 
 /** 开工 / 修复单：外来原文只进 inputs / findings（外发闸逐行引用），标题、验收、回写说明是本机写的 */
 export function writeOrderWire(task: LedgerTask, o: WriteOrderInput, split: InputSplit = chunkInputs): OrderWire {
-  const inputs = split([[`规格原文（specRev ${task.specRev}）`, o.spec], ...(o.step === "fix" && o.report ? [["上一轮审查报告原文", o.report] as const] : [])]);
+  const bounce = o.step === "fix" ? o.bounce : null;
+  const inputs = split([[`规格原文（specRev ${task.specRev}）`, o.spec], ...(o.step === "fix" && !bounce && o.report ? [["上一轮审查报告原文", o.report] as const] : [])]);
   // head 只放在 head 字段里：外发闸扫全部自由文本，别处再写一遍 40 位十六进制会被当成疑似密钥整单拒掉
   const start = o.step === "write" ? `从基线 ${o.base} 切出分支 ${o.branch}（起点是标题里的 head）` : `在分支 ${o.branch} 上接着改（起点是标题里的 head）`;
   return orderWireOf({
-    taskId: task.id, specRev: task.specRev, head: o.head, round: task.round, node: o.step, step: o.step, dedupKey: o.orderId, inputs: [...inputs, standardAnswers("author")],
+    taskId: task.id, specRev: task.specRev, head: o.head, round: task.round, node: o.step, step: o.step, dedupKey: o.orderId,
+    inputs: [...inputs, ...(bounce?.inputs ?? []), standardAnswers("author")],
     outputs: ["分支上的提交（出借服务推送、开 / 更新 PR）", "一行摘要 + 自查（逐条对验收线）"],
     acceptance: [`${start}；工作副本里已检出好，只在这个分支上提交`, `只动这一个分支：推送由出借服务做，只推 ${o.branch}，不推 ${o.base}、不改别的分支`,
-      o.step === "fix" ? "逐条修上一轮审查的问题，自查里写明每条怎么修的" : "按规格与验收线实现，自查逐条对验收线"],
+      ...(bounce?.acceptance ?? [o.step === "fix" ? "逐条修上一轮审查的问题，自查里写明每条怎么修的" : "按规格与验收线实现，自查逐条对验收线"])],
     writeBack: "提交后用 deliver（M2 前是 lend submit）交一行摘要和自查，单号见标题",
-    findings: o.step === "fix" ? o.findings : [],
+    findings: o.step === "fix" && !bounce ? o.findings : [],
   }, { repo: o.repo, pr: o.pr });
 }
