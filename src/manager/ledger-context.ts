@@ -52,7 +52,7 @@ export interface LedgerDeps {
   autoProjects?(): string[];
   /** scheduler.json autoDispatch；不为 true 时 workflow-set 拒绝开 auto（T68h 修好子进程重核前默认关） */
   autoDispatch?(): boolean;
-  /** 系统通知送到 owner（dag-rewrite 直接生效时用）：true = bridge 收下了；不给 = 这个进程没有通道，结果里写「未通知」 */
+  /** 系统通知送到 owner（借算力开跑 / 交付 / 停止通知用；dag-rewrite 直接生效不通知 owner）：true = bridge 收下了；不给 = 这个进程没有通道，结果里写「未通知」 */
   notifyOwner?(text: string): Promise<boolean>;
   /** 出借（T93）的 borrow 名单、通知 PM、结论落盘与回执签名；不给 = 读真实的 lend.json / 实例钥匙（单测注入） */
   lend?: LendCliDeps;
