@@ -75,6 +75,12 @@ export function explainPlacement(s: PlannerSnapshot): { role: PlaceRole | null; 
   const since = s.events.findLast((e) => e.kind === "stage" && e.data.to === s.task.stage)?.seq ?? s.events.find((e) => e.kind === "task")?.seq ?? 0;
   if (!s.workflow) return { role: null, where: "local", reason: "不是自动卡，PM 手动派" };
   if (s.task.stage === "review") {
+    // A live review intent is where the planner waits; recomputing would count its peer as tried and point elsewhere.
+    const live = s.intents.filter((i) => i.action === "review" && i.causalSeq >= since).at(-1);
+    if (live && live.status !== "cancelled") {
+      const where = isPoolIntent(live) ? live.recipient! : "local";
+      return { role: "review", where, reason: `已派给 ${live.recipient}，等台账结果（${live.status}）` };
+    }
     const peer = reviewPlacement(s, since);
     if (peer) return { role: "review", where: `${POOL_RECIPIENT}${peer.peer}`, reason: peer.reason };
     const why = !s.pool ? "没有借入信息" : s.reviewer ? "本卡已有审查 session，复审沿用" : s.workflow.template === "security" ? "安全卡只在本机审"

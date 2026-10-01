@@ -104,4 +104,16 @@ describe("explainPlacement (the lend-orders column)", () => {
     expect(explainPlacement(snap("fix"))).toMatchObject({ role: "fix", where: "local" });
     expect(explainPlacement(snap("merge"))).toEqual({ role: null, where: "-", reason: "merge 阶段不放置" });
   });
+
+  test("a live review intent is shown as where the review is, not a fresh pick that skips its peer", () => {
+    const two = pool({ peers: [{ peer: "mate", open: 0, maxOpen: 2, roles: ["review"], v2: v2() }, { peer: "b", open: 0, maxOpen: 2, roles: ["review"], v2: v2() }] });
+    for (const p of [pool(), two]) {
+      const s = snap("review", { pool: p, intents: [poolIntent("submitted", "mate")] });
+      expect(planScheduler(s)).toMatchObject({ kind: "wait", code: "in_flight" });
+      expect(explainPlacement(s)).toEqual({ role: "review", where: "peer:mate", reason: "已派给 peer:mate，等台账结果（submitted）" });
+    }
+    const local = { ...poolIntent("pending", "x"), recipient: "rv" };
+    expect(explainPlacement(snap("review", { intents: [local] }))).toEqual({ role: "review", where: "local", reason: "已派给 rv，等台账结果（pending）" });
+    expect(explainPlacement(snap("review", { pool: two, intents: [poolIntent("cancelled", "mate")] }))).toMatchObject({ where: "peer:b" });
+  });
 });

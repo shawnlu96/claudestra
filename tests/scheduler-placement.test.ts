@@ -60,6 +60,14 @@ describe("even spread", () => {
     expect(where(write, "write", "claude")).toBe("a");
     expect(placeFor(facts(), "review", "codex")).toMatchObject({ kind: "peer", reason: expect.stringContaining("本机 0") });
   });
+
+  test("a peer named local is still a peer: this machine is a flag, never the name", () => {
+    const named = facts({ peers: [peer("local")], local: { running: 5, room: true } });
+    expect(placeFor(named, "review", "codex")).toMatchObject({ kind: "peer", peer: "local", reason: expect.stringContaining("在跑：local 0 / 本机 5") });
+    expect(placeFor({ ...named, local: { running: 5, room: false } }, "review", "codex")).toMatchObject({ kind: "peer", peer: "local" });
+    expect(placeFor({ ...named, peers: [peer("local", 5)], local: { running: 5, room: true } }, "review", "codex")).toMatchObject({ kind: "peer", peer: "local" });
+    expect(placeFor({ ...named, peers: [peer("local", 6)], lastPeer: "local" }, "review", "codex")).toMatchObject({ kind: "local" });
+  });
 });
 
 describe("full, offline, expired, revoked → local, never stuck", () => {

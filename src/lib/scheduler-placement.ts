@@ -63,19 +63,19 @@ export function peerRefusal(f: PlacementFacts, p: PeerFacts | undefined, role: P
   return null;
 }
 
-interface Ranked { where: string; load: number; order: number }
+/** `local` marks this machine; a peer may be named "local" too, so the name never stands for it. */
+interface Ranked { where: string; local: boolean; load: number; order: number }
 
 /** Lower sorts first: fewest running, then the tie-breaks in the header comment. */
 function rank(f: PlacementFacts, role: PlaceRole, a: Ranked, b: Ranked): number {
   if (a.load !== b.load) return a.load - b.load;
   const favoured = role === "fix" ? f.writeLeasePeer : role === "review" ? f.lastPeer : null;
-  const fav = (r: Ranked) => (favoured && r.where === favoured ? 0 : 1);
+  const fav = (r: Ranked) => (favoured && !r.local && r.where === favoured ? 0 : 1);
   if (fav(a) !== fav(b)) return fav(a) - fav(b);
-  const local = (r: Ranked) => (r.where === "local" ? 1 : 0);
-  return local(a) - local(b) || a.order - b.order;
+  return Number(a.local) - Number(b.local) || a.order - b.order;
 }
 
-const loads = (rows: readonly Ranked[]): string => rows.map((r) => `${r.where === "local" ? "本机" : r.where} ${r.load}`).join(" / ");
+const loads = (rows: readonly Ranked[]): string => rows.map((r) => `${r.local ? "本机" : r.where} ${r.load}`).join(" / ");
 
 export function placeFor(f: PlacementFacts, role: PlaceRole, family: AuthorFamily): Placement {
   // The pin is where the card is written; its review is placed like any other (cross-family, possibly elsewhere).
@@ -86,10 +86,10 @@ export function placeFor(f: PlacementFacts, role: PlaceRole, family: AuthorFamil
   }
   if (!f.remote || f.remote.mode === "off") return { kind: "local", reason: "scheduler.json remote.mode = off，只用本机" };
   const usable = f.peers.map((p, order) => ({ p, order })).filter(({ p }) => !f.tried.includes(p.peer) && !peerRefusal(f, p, role, family));
-  const rows: Ranked[] = usable.map(({ p, order }) => ({ where: p.peer, load: p.open, order }));
-  if (f.local.room) rows.push({ where: "local", load: f.local.running, order: f.peers.length });
+  const rows: Ranked[] = usable.map(({ p, order }) => ({ where: p.peer, local: false, load: p.open, order }));
+  if (f.local.room) rows.push({ where: "本机", local: true, load: f.local.running, order: f.peers.length });
   if (!usable.length) return { kind: "local", reason: f.local.room ? "没有可用的 peer，放本机" : "本机满且没有可用的 peer：本机照常排队" };
   const pick = [...rows].sort((a, b) => rank(f, role, a, b))[0];
   const why = `在跑：${loads(rows)}；选最少，平手按 ${role === "fix" ? "写租约方 > " : role === "review" ? "复审回上次的 peer > " : ""}peer 先于本机 > 借入顺序`;
-  return pick.where === "local" ? { kind: "local", reason: why } : { kind: "peer", peer: pick.where, reason: why };
+  return pick.local ? { kind: "local", reason: why } : { kind: "peer", peer: pick.where, reason: why };
 }
