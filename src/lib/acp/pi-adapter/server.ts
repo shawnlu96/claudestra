@@ -11,7 +11,8 @@
  */
 import { createRpcPeer, RpcError, type RpcPeer, type RpcWire } from "../rpc.js";
 import {
-  configOptions, createPiEventMapper, dialogCancel, mcpServersForPi, splitModelValue, textOf, threadStatus, turnEnd, usageUpdate, type TurnOutcome,
+  compactCommand, compactNotice, configOptions, createPiEventMapper, dialogCancel, mcpServersForPi, splitModelValue, textOf, threadStatus, turnEnd, usageUpdate,
+  type TurnOutcome,
 } from "./map.js";
 import { MOUNT_OK, MOUNT_STATUS_KEY, PI_MCP_SERVERS_ENV } from "./mcp-mount.js";
 import type { PiLink } from "./pi-link.js";
@@ -23,6 +24,8 @@ const INTERNAL_ERROR = -32603;
 /** pi 起来要加载扩展、连 MCP，头几条命令给足时间 */
 const STARTUP_TIMEOUT_MS = 60_000;
 const COMMAND_TIMEOUT_MS = 30_000;
+/** 压缩要跑一次摘要模型调用，长会话可能几分钟 */
+const COMPACT_TIMEOUT_MS = 600_000;
 
 export interface PiServerDeps {
   openPi(o: { sessionId: string; cwd: string; env: Record<string, string> }): PiLink;
@@ -209,10 +212,13 @@ export class PiAcpServer {
 
   private async prompt(p: Rec): Promise<Rec> {
     const g = this.live(p);
+    const message = textOf(p.prompt);
+    const compact = compactCommand(message);
+    if (compact) return this.compact(g, compact);
     let wait: Promise<Settled> | null = null;
     g.inflight++;
     try {
-      const r = await g.link.command({ type: "prompt", message: textOf(p.prompt), streamingBehavior: "followUp" }, COMMAND_TIMEOUT_MS);
+      const r = await g.link.command({ type: "prompt", message, streamingBehavior: "followUp" }, COMMAND_TIMEOUT_MS);
       this.stillLive(g); // 确认回来前被 /clear 换下了：等待既不该挂到新会话上，也不会再有人兑现
       if (r?.disposition !== "handled") wait = new Promise((resolve, reject) => g.waiters.push({ resolve, reject }));
     } finally {
@@ -226,6 +232,28 @@ export class PiAcpServer {
     const end = turnEnd(outcome, cancelled);
     if (!end.failure) return { stopReason: end.stopReason };
     throw new RpcError(INTERNAL_ERROR, end.failure.message, { message: end.failure.message, piStopReason: "error", failureKind: end.failure.kind });
+  }
+
+  /**
+   * pi 的 rpc prompt 不认内置命令，/compact 会被当普通文字发给模型：换成 rpc compact。session/cancel 的 abort 也停压缩。
+   * 没压成（最常见的是会话太短）只回一句话、照常结束：会话没坏，不值得出回合失败卡。期间被 /clear 换下就以错误收尾。
+   */
+  private async compact(g: Gen, cmd: Rec): Promise<Rec> {
+    g.inflight++;
+    try {
+      const r = await g.link.command(cmd, COMPACT_TIMEOUT_MS);
+      this.stillLive(g);
+      this.update(g, compactNotice(r));
+    } catch (e) {
+      this.stillLive(g);
+      if (g.cancelRequested) return { stopReason: "cancelled" };
+      this.update(g, compactNotice(null, errText(e)));
+    } finally {
+      g.inflight--;
+      g.cancelRequested = false;
+    }
+    void this.reportUsage(g);
+    return { stopReason: "end_turn" };
   }
 
   private async steer(p: Rec): Promise<Rec> {

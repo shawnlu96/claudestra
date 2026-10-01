@@ -65,6 +65,26 @@ test("ACP Codex 的 Web 聊天 /clear：宿主不在线与带附件都拒绝，g
   }
 });
 
+test("ACP 版 Pi：/clear 走宿主换会话（不当 prompt 发给 pi），TUI 内置命令按普通消息投，/compact 交给宿主", async () => {
+  const agent = { ...AGENT, name: "agent-pi-acp-slash", channelId: "local-pi-acp", runtime: "pi" };
+  noteAcpChannel(agent.channelId, "acp");
+  try {
+    const h = harness();
+    const clear = (await call(OWNER, "/clear", h.deps, agent))!;
+    expect(clear.status).toBe(409); // 宿主不在线：走的是 acpClear，不是「没交给宿主」的 slash 分支
+    expect(((await clear.json()) as { error: string }).error).not.toContain("没交给宿主");
+    expect(await call(OWNER, "/reload", h.deps, agent)).toBeNull();
+    const compact = (await call(OWNER, "/compact 只留结论", h.deps, agent))!;
+    expect(((await compact.json()) as { error: string }).error).toContain("没交给宿主");
+    expect(h.sent).toEqual([]);
+    const tmuxPi = harness();
+    expect((await call(OWNER, "/reload", tmuxPi.deps, { ...agent, channelId: "local-pi-tmux" }))!.status).toBe(202);
+    expect(tmuxPi.sent).toEqual(["/reload"]);
+  } finally {
+    noteAcpChannel(agent.channelId, "tmux");
+  }
+});
+
 describe("四种凭据 × 带参数和换行的斜杠命令", () => {
   test("owner：原文（含参数、换行）注入 TUI，202", async () => {
     for (const p of [OWNER, OWNER_LIMITED, LEGACY_WEB_UI]) {
