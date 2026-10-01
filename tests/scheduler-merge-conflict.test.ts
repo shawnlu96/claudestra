@@ -125,13 +125,13 @@ describe("i28-M12 conflict goes back to fix without freezing the queue", () => {
         receipt: bounceReceipt({ cause: "conflict", prHead: H, mainHead: MAIN, checks: [] }) })).toThrow(/不能从/);
     });
   });
-  test("update-branch refused: re-read DIRTY → conflict; re-read anything else → unknown (error text is never matched)", async () => {
-    for (const [after, expected] of [[dirty(), "resolved"], [pr({ mergeState: "BEHIND" }), "unknown"], [dirty({ head: N }), "unknown"]] as const) {
+  test("update-branch refused: re-read DIRTY → conflict; re-read anything else → back to fix as update_fail (i28-M12b)", async () => {
+    for (const [after, expected] of [[dirty(), "resolved"], [pr({ mergeState: "BEHIND" }), "resolved"], [dirty({ head: N }), "resolved"]] as const) {
       await with_("ready", async (f) => {
         f.snaps = [pr({ mergeState: "BEHIND" }), after];
         f.external.updateBranch = async () => { f.calls.push("update"); throw new Error("gh 失败：merge conflict"); };
         await f.tick();
-        expect([expected, stateOf(f).run, stateOf(f).frozen]).toEqual([expected, expected, expected === "unknown"]);
+        expect([expected, stateOf(f).run, stateOf(f).frozen]).toEqual([expected, expected, false]);
         expect(f.calls).toEqual(["inspect", "update", "inspect"]);
       });
     }
