@@ -19,6 +19,8 @@ import type { Grant } from "../src/lib/lend-wire-v2.js";
 import type { RemoteHead } from "../src/lib/order-deliver.js";
 import { schedulerAutoTick } from "../src/lib/scheduler-auto-tick.js";
 import type { RemotePolicy } from "../src/lib/scheduler-config.js";
+import { autoSnapshot } from "../src/lib/scheduler-auto-snapshot.js";
+import { planScheduler } from "../src/lib/scheduler-plan.js";
 import { autoFixture, H2, P1, toBuild } from "./scheduler-auto-helpers.js";
 
 const BASE_SHA = "b".repeat(40);
@@ -65,7 +67,7 @@ async function ready(o: { remote?: RemotePolicy; borrow?: BorrowEntry[]; maxWork
   const lendCall = (op: string, peer: string, body: unknown) => cli("owner", op, "--", peer, JSON.stringify(body));
   const plans = () => listEvents(f.db, { project: "p", target: "T1" }).filter((e) => e.kind === "scheduler" && e.data.op === "plan");
   await toBuild(f);
-  return { f, cli, tick, hello, lendCall, remote, orders: () => listLendOrders(f.db, "T1"), plans };
+  return { f, cli, tick, hello, lendCall, remote, policy, borrow, orders: () => listLendOrders(f.db, "T1"), plans };
 }
 
 describe("a build order to a peer, delivered, reviewed across families", () => {
@@ -79,6 +81,10 @@ describe("a build order to a peer, delivered, reviewed across families", () => {
       const [order] = p.orders();
       expect(order).toMatchObject({ step: "write", peer: "mate", family: "codex", status: "pooled", branch: BRANCH, head: BASE_SHA });
       expect(p.f.sent.filter((s) => s.text.includes("开工"))).toEqual([]); // the local author got no work order
+      // The worker slot the card held since restate is released: a peer writing it takes nothing of this machine's cap.
+      expect(p.plans().at(-1)?.data.releasedSlots).toEqual([expect.stringMatching(/^slot:p:/)]);
+      expect(slotsOf(p, "T1")).toEqual([]);
+      expect(snapshot(p)).toMatchObject({ workerCount: 0, freeWorkerSlot: expect.stringMatching(/^slot:p:/) });
 
       expect(await p.lendCall("lend-claim", "mate", { v: 1, orderId: order.orderId, worker: "w1" })).toMatchObject({ ok: true });
       expect(await p.tick()).toMatchObject({ step: "pool_claimed", detail: "w1@mate 在写" });
@@ -131,6 +137,11 @@ describe("a build order to a peer, delivered, reviewed across families", () => {
     } finally { p.f.close(); }
   });
 });
+
+const slotsOf = (p: Awaited<ReturnType<typeof ready>>, task: string) =>
+  p.f.db.query("SELECT resource FROM scheduler_resources WHERE taskId = ? AND resource LIKE 'slot:%'").all(task);
+const snapshot = (p: Awaited<ReturnType<typeof ready>>) => autoSnapshot(p.f.db, p.f.task(), { registry: [], maxWorkers: p.policy.maxActiveWorkers,
+  now: p.f.tickDeps.now(), pool: { remote: p.policy.remote, borrow: p.borrow } });
 
 /** Build → mate writes → delivered → local Claude review with one P1 at `report` → the card is in fix. */
 async function toRemoteFix(p: Awaited<ReturnType<typeof ready>>, report: string) {
@@ -206,6 +217,8 @@ describe("tiers on the real path (the pool step re-plans with the same tiers)", 
     try {
       b.hello("b", {}, full);
       b.hello("l");
+      // The card's own restate slot is room for its writing (dispatchWork's gate); without one this machine is full.
+      b.f.db.run("DELETE FROM scheduler_resources WHERE taskId = 'T1' AND resource LIKE 'slot:%'");
       await b.tick();
       expect(b.orders()).toMatchObject([{ peer: "l" }]);
     } finally { b.f.close(); }
@@ -262,5 +275,64 @@ describe("no write, no write order", () => {
       expect(strip(p.plans().at(-1)!)).toEqual(strip(q.plans().at(-1)!));
       expect(p.orders()).toEqual([]);
     } finally { p.f.close(); q.f.close(); }
+  });
+});
+
+describe("off is off on every path, and writing room is the writer's (r1)", () => {
+  /** Built here (the fixture's own tick, no pool) and delivered at H2 with its PR: the card is in review, not placed yet. */
+  async function builtHere(p: Awaited<ReturnType<typeof ready>>) {
+    await p.f.tick();
+    p.f.db.run("UPDATE tasks SET pr = 'https://github.com/o/r/pull/7' WHERE id = 'T1'");
+    expect(await p.cli("agent-task-one", "deliver", "T1", "--from", "build", "--head", H2)).toMatchObject({ ok: true });
+  }
+
+  test("an off peer without hello (proto 1) is not picked by the old overflow rule either; local off too: the review waits", async () => {
+    const p = await ready({ remote: { ...REVIEW_ONLY, localPriority: "off" }, borrow: [borrowOf("mate", "off", ["review"])], maxWorkers: 0 });
+    try {
+      await builtHere(p);
+      expect(await p.tick()).toMatchObject({ step: "waiting", detail: expect.stringContaining("localPriority = off") });
+      expect(p.orders()).toEqual([]);
+    } finally { p.f.close(); }
+  });
+
+  test("a balance peer without hello still takes the overflow when this machine is off (off counts as full)", async () => {
+    const p = await ready({ remote: { ...REVIEW_ONLY, localPriority: "off" }, borrow: [borrowOf("mate", undefined, ["review"])] });
+    try {
+      await builtHere(p);
+      expect(await p.tick()).toMatchObject({ step: "pool_pooled" });
+      expect(p.orders()).toMatchObject([{ peer: "mate", step: "review" }]);
+    } finally { p.f.close(); }
+  });
+
+  test("this machine turned off after its reviewer session was bound: the review waits, nothing is sent here", async () => {
+    const p = await ready({ borrow: [] });
+    try {
+      // Written here by Claude: the reviewer is the fixture's own Codex (ACP) session again.
+      const reg = JSON.parse(readFileSync(p.f.registryPath, "utf8"));
+      reg.agents["agent-rv-t1"] = { ...reg.agents["agent-rv-t1"], runtime: "codex", transport: "acp" };
+      writeFileSync(p.f.registryPath, JSON.stringify(reg));
+      await builtHere(p);
+      expect(await p.tick()).toMatchObject({ step: "session" });
+      p.policy.remote = { ...WRITE, localPriority: "off" };
+      const sent = p.f.sent.length;
+      expect(await p.tick()).toMatchObject({ step: "waiting", detail: expect.stringContaining("localPriority = off") });
+      expect(p.f.sent.length).toBe(sent);
+      p.policy.remote = WRITE;
+      expect(await p.tick()).toMatchObject({ step: "sent" });
+    } finally { p.f.close(); }
+  });
+
+  test("writing room is the card's own worker slot, not the reviewer count: local first keeps the build here", async () => {
+    const p = await ready({ remote: { ...WRITE, localPriority: "first" }, borrow: [borrowOf("mate", "low")] });
+    try {
+      p.hello("mate");
+      const s = snapshot(p);
+      expect(slotsOf(p, "T1")).toHaveLength(1);
+      s.pool!.localReviewers = 2; // every reviewer place taken by other cards
+      expect(planScheduler(s)).toMatchObject({ kind: "intent", recipient: "agent-task-one" });
+      s.heldResources = s.heldResources.filter((h) => h.taskId !== "T1");
+      s.workerCount = 2; // no slot of its own and none free: the low peer writes it
+      expect(planScheduler(s)).toMatchObject({ kind: "intent", recipient: "peer:mate" });
+    } finally { p.f.close(); }
   });
 });

@@ -210,6 +210,10 @@ export function planIntent(db: Database, ctx: WriteCtx, input: PlanIntentInput):
       if (used) throw new LedgerError("conflict", `资源 ${resource} 与 ${used.resource} 重叠（${used.taskId} 占用）`);
     }
     const now = ctx.now ?? Date.now();
+    // A peer writes the card now: the local worker slot it held since restate would count a remote writer against this
+    // machine's cap. Coming back local (a fix without lease, a refused offer) takes a free slot again like any card.
+    const released = isPoolIntent({ action: input.action, recipient }) && input.action === "dispatch" ? cardWorkerSlots(held, task.id) : [];
+    for (const slot of released) db.query("DELETE FROM scheduler_resources WHERE taskId = ? AND resource = ?").run(task.id, slot);
     db.prepare(`INSERT INTO scheduler_intents (id, taskId, project, node, action, recipient, causalSeq, taskRev, specRev, head,
       templateVersion, status, reason, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)`).run(
       id, task.id, task.project, node, input.action, recipient, input.causalSeq, task.rev, task.specRev, task.headSHA,
@@ -224,7 +228,7 @@ export function planIntent(db: Database, ctx: WriteCtx, input: PlanIntentInput):
       project: task.project, target: task.id, kind: "scheduler", text: reason,
       data: { op: "plan", id, node, action: input.action, recipient, resources, causalSeq: input.causalSeq,
         taskRev: task.rev, specRev: task.specRev, head: task.headSHA, template: workflow.template, version: workflow.templateVersion,
-        ...(ctx.actor === "scheduler" ? {} : { manual: true }) },
+        ...(released.length ? { releasedSlots: released } : {}), ...(ctx.actor === "scheduler" ? {} : { manual: true }) },
     }, true);
     db.prepare("UPDATE scheduler_intents SET eventSeq = ? WHERE id = ?").run(event.seq, id);
     return { intent: getIntent(db, id) as SchedulerIntent, duplicate: false };

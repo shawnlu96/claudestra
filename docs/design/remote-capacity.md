@@ -382,12 +382,19 @@ worker 按 R6 的写单路子做（从基线切 `lend/<卡>-<指纹前 4 位>` �
    `first` 档没有能接的，再看 `balance`（本机和 peer 一起平分，就是 W5 的规则）；最后才看 `low`。`off` 永远不派。
 5. 一台 peer 都接不了：本机照常排队（本机 `off` 时改成等，不在本机跑）。
 
+本机能不能接按角色算：审查看本项目在跑的 reviewer 数没到上限；写单看这张卡已持有的 worker 槽，或者还有空槽（与本机派单的闸口同一口径）。
+`off` 在每条路径上都是不派：没有 hello 的老 peer（R9 的溢出规则）设成 off 一样出局；本机 off 时，原本会留在本机的审查
+（已绑了 reviewer session 的复审、安全卡、没开 review 外借）也改成等，session 保留，本机改回来就照常派。本机 off 时老 peer 的溢出按「本机已满」算。
+只有 `remote.mode = off` 例外：那是整个关掉外借，一律本机，localPriority 不看。
+
 所有机器都是 balance（或者都没写档位）时，放置结果和理由文字与 W5 逐字相同。挂池复核（`ledger scheduler-pool` 出单前在事务里重算）
 用的是同一份策略：调度服务把 roles / reviewFirst / localPriority / repo 原样传过去，由 `parseRemotePolicy` 解析（和读 scheduler.json 同一个函数），
 peer 的档位随借入名单一起读，所以复核不会丢档位。
 
 ### 10.3 写单派出去之后
 
+- **本机名额**：写单派到 peer 时（`planIntent` 出 `peer:` 的 dispatch），这张卡复述起占的本机 worker 槽当场释放，计划事件记 `releasedSlots`；
+  之后回本机写（拒挂、没有写租约的修复单）再按空槽重新占。
 - **出单**：开工单的起点是 `main` 在远端的 head，修复单带上一轮审查报告原文（出借方读不到本机文件）；材料在事务外备好
   （`lib/lend-write-materials.ts`，PM 手挂的 `ledger lend-offer` 用同一份）。查不到就这一轮不挂，换下一台或回本机。
 - **家族**：写单用出借方有空槽的家族，先 Codex 再 Claude（owner：先用孟总的 Codex）。
@@ -397,7 +404,7 @@ peer 的档位随借入名单一起读，所以复核不会丢档位。
   两道合并闸读的都是这一个函数：Codex 写的卡交 Claude 审（本机，或有 Claude 槽的 peer），Codex 的结论记不进去。
   本机 Claude 写的卡照旧交 Codex 审（优先 reviewFirst）。
 - **已知边界**：远端写过、之后某一轮又回本机写的卡，复审要换家族时原来的 reviewer session 对不上，交 PM（不自动换人）。
-  一张卡复述时占的本机 worker 槽，写单派远端期间仍算在这张卡上。`start_node` 的 `auto` 放置也走这套档位：有 write 时新卡可能直接固定给 peer（W5 的设计，跳过复述）。
+  `start_node` 的 `auto` 放置也走这套档位：有 write 时新卡可能直接固定给 peer（W5 的设计，跳过复述）。
 
 ### 10.4 上线清单（PM 照着带人做）
 

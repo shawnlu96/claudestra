@@ -29,7 +29,8 @@ function locksFree(s: PlannerSnapshot): boolean {
 const peerFacts = (x: PoolFacts["peers"][number]): PeerFacts =>
   ({ peer: x.peer, roles: x.roles ?? ["review"], open: x.open, v2: x.v2 ?? null, ...(x.priority ? { priority: x.priority } : {}) });
 
-function snapshotPlacementFacts(s: PlannerSnapshot, since: number): PlacementFacts {
+/** room per role: a review needs a reviewer under the cap; writing needs the card's own worker slot or a free one (dispatchWork's gate). */
+function snapshotPlacementFacts(s: PlannerSnapshot, since: number, role: PlaceRole): PlacementFacts {
   const p = s.pool ?? null;
   const own = cardWorkerSlots(s.heldResources, s.task.id).length ? 1 : 0;
   const reviewers = p?.localReviewers ?? 0;
@@ -38,16 +39,21 @@ function snapshotPlacementFacts(s: PlannerSnapshot, since: number): PlacementFac
   return {
     remote: p?.remote ?? null, repo, pin: cardPin(s.task.extra), lastPeer: p?.lastPeer ?? null, writeLeasePeer: p?.writeLeasePeer ?? null,
     peers: (p?.peers ?? []).map(peerFacts),
-    local: { running: (p?.localWriters ?? Math.max(0, s.workerCount - own)) + reviewers, room: reviewers < s.maxWorkers },
+    local: { running: (p?.localWriters ?? Math.max(0, s.workerCount - own)) + reviewers,
+      room: role === "review" ? reviewers < s.maxWorkers : !!own || (s.workerCount < s.maxWorkers && !!s.freeWorkerSlot) },
     tried: s.intents.filter((i) => isPoolIntent(i) && i.causalSeq >= since && i.head === s.task.headSHA).map((i) => i.recipient!.slice(POOL_RECIPIENT.length)),
     locksFree: locksFree(s),
   };
 }
 
-/** i28-R9 for proto-1 peers only, as it was: the overflow rule whatever the configured mode now says. */
+/**
+ * i28-R9 for proto-1 peers only, as it was: the overflow rule whatever the configured mode now says. An `off` peer is out here
+ * too, and with this machine `off` its reviewers count as full, so the overflow is the only way a review leaves.
+ */
 function legacyPool(s: PlannerSnapshot, p: PoolFacts, since: number): { peer: string; reason: string } | null {
-  const peers = p.peers.filter((x) => !x.v2 && (x.roles ?? ["review"]).includes("review")).map(({ peer, open, maxOpen }) => ({ peer, open, maxOpen }));
-  const t = poolTarget({ ...s, pool: { ...p, peers, remote: { ...p.remote, mode: "overflow" } } }, since);
+  const peers = p.peers.filter((x) => !x.v2 && x.priority !== "off" && (x.roles ?? ["review"]).includes("review")).map(({ peer, open, maxOpen }) => ({ peer, open, maxOpen }));
+  const localReviewers = p.remote.localPriority === "off" ? Math.max(p.localReviewers, s.maxWorkers) : p.localReviewers;
+  const t = poolTarget({ ...s, pool: { ...p, peers, localReviewers, remote: { ...p.remote, mode: "overflow" } } }, since);
   return t && { peer: t.peer, reason: `挂池：对抗式跨模型审查挂给 ${t.peer} 的 ${t.family} worker${t.rereview ? "（复验，同一 peer）" : ""}` };
 }
 
@@ -55,13 +61,23 @@ function legacyPool(s: PlannerSnapshot, p: PoolFacts, since: number): { peer: st
 /** escalate = the write-lease holder already failed this fix once: only PM can move it (reclaim or re-offer). */
 export type Away = { peer: string; reason: string } | { wait: string; code?: string } | { escalate: string } | null;
 
-/** Where this round's review goes when it is not local. */
+const LOCAL_OFF = "scheduler.json remote.localPriority = off：本机不接审查（已有的审查 session 留着），等本机重新启用或 peer 接";
+
+/**
+ * Where this round's review goes when it is not local. With this machine `off` a review that would stay here (a bound
+ * reviewer's re-review, a security card, no review role lent) waits instead; remote.mode off still means local only.
+ */
 export function reviewPlacement(s: PlannerSnapshot, since: number): Exclude<Away, { escalate: string }> {
   const p = s.pool;
-  if (!p || p.remote.mode === "off" || !p.remote.roles.includes("review")) return null;
+  if (!p || p.remote.mode === "off") return null;
+  return poolReview(s, p, since) ?? (p.remote.localPriority === "off" && s.workflow ? { wait: LOCAL_OFF } : null);
+}
+
+function poolReview(s: PlannerSnapshot, p: PoolFacts, since: number): Exclude<Away, { escalate: string }> {
+  if (!p.remote.roles.includes("review")) return null;
   if (!s.workflow || s.workflow.template === "security" || s.reviewer || !s.task.headSHA) return null;
   const family = otherFamily(s.workflow.authorFamily);
-  const placed = placeFor(snapshotPlacementFacts(s, since), "review", family);
+  const placed = placeFor(snapshotPlacementFacts(s, since, "review"), "review", family);
   if (placed.kind === "peer") return { peer: placed.peer, reason: `挂池：对抗式跨模型审查挂给 ${placed.peer} 的 ${family} worker（${placed.reason}）` };
   const legacy = legacyPool(s, p, since);
   if (placed.kind === "wait") return legacy ?? { wait: placed.reason };
@@ -76,7 +92,7 @@ export function remoteWork(s: PlannerSnapshot, since: number, role: Exclude<Plac
   if (!s.workflow) return null;
   const pinned = cardPin(s.task.extra);
   if (!pinned && s.task.stage !== "build" && s.task.stage !== "fix") return null;
-  const facts = snapshotPlacementFacts(s, since);
+  const facts = snapshotPlacementFacts(s, since, role);
   const lease = role === "fix" && facts.remote?.mode !== "off" && facts.remote?.roles.includes("write") ? facts.writeLeasePeer : null;
   if (lease && facts.tried.includes(lease)) {
     return { escalate: `修复单派回写租约方 ${lease} 这一轮没成（撤回 / 退回 / 拒挂），写租约还在它那里：PM 核对后 ledger lend-reclaim ${s.task.id} 或 lend-reoffer` };
@@ -114,7 +130,7 @@ export function explainPlacement(s: PlannerSnapshot): { role: PlaceRole | null; 
     if (away && "peer" in away) return { role: "review", where: `${POOL_RECIPIENT}${away.peer}`, reason: away.reason };
     if (away) return { role: "review", where: "-", reason: `等：${away.wait}` };
     const why = !s.pool ? "没有借入信息" : s.reviewer ? "本卡已有审查 session，复审沿用" : s.workflow.template === "security" ? "安全卡只在本机审"
-      : placeFor(snapshotPlacementFacts(s, since), "review", otherFamily(s.workflow.authorFamily)).reason;
+      : placeFor(snapshotPlacementFacts(s, since, "review"), "review", otherFamily(s.workflow.authorFamily)).reason;
     return { role: "review", where: "local", reason: why };
   }
   if (!["spec", "build", "fix"].includes(s.task.stage)) return { role: null, where: "-", reason: `${s.task.stage} 阶段不放置` };
@@ -124,5 +140,5 @@ export function explainPlacement(s: PlannerSnapshot): { role: PlaceRole | null; 
   const away = remoteWork(s, since, role);
   if (away && "peer" in away) return { role, where: `${POOL_RECIPIENT}${away.peer}`, reason: away.reason };
   if (away) return { role, where: cardPin(s.task.extra) ?? "-", reason: "wait" in away ? `等：${away.wait}` : `交 PM：${away.escalate}` };
-  return { role, where: "local", reason: placeFor(snapshotPlacementFacts(s, since), role, s.workflow.authorFamily).reason };
+  return { role, where: "local", reason: placeFor(snapshotPlacementFacts(s, since, role), role, s.workflow.authorFamily).reason };
 }
