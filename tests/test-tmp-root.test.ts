@@ -6,6 +6,9 @@ import { testChildEnv } from "./test-env.ts";
 import { createTestTmpRoot } from "./test-tmp-root.ts";
 
 const preload = join(import.meta.dir, "preload.ts");
+const tmpRootModule = join(import.meta.dir, "test-tmp-root.ts");
+// Every case spawns nested bun processes; a loaded machine easily exceeds the default 5 s.
+const SPAWN_TIMEOUT = 60_000;
 const fixtures: string[] = [];
 afterEach(() => {
   for (const dir of fixtures.splice(0)) rmSync(dir, { recursive: true, force: true });
@@ -70,7 +73,7 @@ for (const failing of [false, true]) {
     expect(result.exitCode, result.stderr.toString()).toBe(failing ? 1 : 0);
     expect(result.stderr.toString()).toContain(failing ? "1 fail" : "2 pass");
     expect(readdirSync(f.parent)).toEqual([]);
-  });
+  }, SPAWN_TIMEOUT);
 }
 
 test("uncaught exceptions keep the failure exit status and remove the root", () => {
@@ -80,14 +83,14 @@ test("uncaught exceptions keep the failure exit status and remove the root", () 
   expect(result.exitCode).not.toBe(0);
   expect(result.stderr.toString()).toContain("tmp-root-uncaught");
   expect(readdirSync(f.parent)).toEqual([]);
-});
+}, SPAWN_TIMEOUT);
 
 for (const [signal, code] of [["SIGINT", 130], ["SIGTERM", 143]] as const) {
   test(`${signal} exits with ${code} and removes the root`, async () => {
     const f = fixture();
     const file = testFile(f.dir, `mkdtempSync(join(tmpdir(), "signal-")); console.log("ready"); await new Promise(() => {});`);
     const child = Bun.spawn([process.execPath, "test", file], { cwd: f.dir, env: f.env, stdout: "pipe", stderr: "pipe" });
-    const timeout = setTimeout(() => child.kill("SIGKILL"), 4_000);
+    const timeout = setTimeout(() => child.kill("SIGKILL"), SPAWN_TIMEOUT / 2);
     try {
       const reader = child.stdout.getReader();
       let output = "";
@@ -105,16 +108,20 @@ for (const [signal, code] of [["SIGINT", 130], ["SIGTERM", 143]] as const) {
       if (child.exitCode === null) child.kill("SIGKILL");
       await child.exited;
     }
-  });
+  }, SPAWN_TIMEOUT);
 }
 
-test("startup reaps only old prefixed directories, never symlinks, recent roots or other prefixes", () => {
+test("startup reaps only old prefixed directories of dead owners, never symlinks, recent roots or other prefixes", () => {
   const f = fixture();
   const old = join(f.parent, "cstra-test-run-old");
+  const dead = Bun.spawnSync(["true"]).pid;
+  const deadOwner = join(f.parent, `cstra-test-run-${dead}-gone`);
+  // This runner is alive; its root must survive however old its mtime looks (e.g. a quiet `bun test --watch`).
+  const liveOwner = join(f.parent, `cstra-test-run-${process.pid}-quiet`);
   const recent = join(f.parent, "cstra-test-run-recent");
   const unrelated = join(f.parent, "ledger-read-old");
   const outside = join(f.dir, "outside");
-  for (const dir of [old, recent, unrelated, outside]) mkdirSync(dir);
+  for (const dir of [old, deadOwner, liveOwner, recent, unrelated, outside]) mkdirSync(dir);
   writeFileSync(join(outside, "keep"), "untouched");
   // A link inside an otherwise removable root must not cause its target to be traversed.
   symlinkSync(outside, join(old, "inner-link"));
@@ -123,14 +130,26 @@ test("startup reaps only old prefixed directories, never symlinks, recent roots 
   symlinkSync(join(outside, "missing"), join(f.parent, "cstra-test-run-dangling"));
   writeFileSync(join(f.parent, "cstra-test-run-file"), "keep");
   const stale = new Date(Date.now() - 3 * 60 * 60 * 1_000);
-  for (const dir of [old, unrelated, outside]) utimesSync(dir, stale, stale);
-  const result = Bun.spawnSync([process.execPath, "test", testFile(f.dir, "void 0")], { cwd: f.dir, env: f.env });
-  expect(result.exitCode).toBe(0);
+  for (const dir of [old, deadOwner, liveOwner, unrelated, outside]) utimesSync(dir, stale, stale);
+  // The sweep runs in the background; the probe waits for it so the assertion below is deterministic.
+  const probe = testFile(f.dir, `await (await import(${JSON.stringify(tmpRootModule)})).staleRootSweep;`);
+  const result = Bun.spawnSync([process.execPath, "test", probe], { cwd: f.dir, env: f.env });
+  expect(result.exitCode, result.stderr.toString()).toBe(0);
   expect(readdirSync(f.parent).sort()).toEqual([
-    "cstra-test-run-dangling", "cstra-test-run-file", "cstra-test-run-link", "cstra-test-run-local-link", "cstra-test-run-recent", "ledger-read-old",
-  ]);
+    "cstra-test-run-dangling", "cstra-test-run-file", "cstra-test-run-link", "cstra-test-run-local-link", "cstra-test-run-recent",
+    basename(liveOwner), "ledger-read-old",
+  ].sort());
   expect(readFileSync(join(outside, "keep"), "utf8")).toBe("untouched");
   expect(result.stderr.toString()).toContain("not a real directory");
+}, SPAWN_TIMEOUT);
+
+test("the stale sweep does not block root creation", async () => {
+  const f = fixture();
+  const root = createTestTmpRoot(f.parent);
+  expect(existsSync(root.path)).toBe(true);
+  await root.swept;
+  root.cleanup();
+  expect(readdirSync(f.parent)).toEqual([]);
 });
 
 test("cleanup checks the captured root identity, refuses replacement directories and symlinks", () => {
@@ -189,7 +208,7 @@ test("nested bun test inherits the parent root and only removes its own subtree"
   const result = Bun.spawnSync([process.execPath, "test", testFile(f.dir, body)], { cwd: f.dir, env: f.env });
   expect(result.exitCode, result.stderr.toString()).toBe(0);
   expect(readdirSync(f.parent)).toEqual([]);
-});
+}, SPAWN_TIMEOUT);
 
 test("exit cleanup uses its captured root even if a test changes TMPDIR, and preserves explicit state", () => {
   const f = fixture();
@@ -207,4 +226,4 @@ test("exit cleanup uses its captured root even if a test changes TMPDIR, and pre
   expect(result.exitCode).toBe(0);
   expect(readdirSync(f.parent)).toEqual([]);
   expect(readFileSync(join(explicit, "keep"), "utf8")).toBe("untouched");
-});
+}, SPAWN_TIMEOUT);

@@ -1,9 +1,11 @@
-import { lstatSync, mkdtempSync, readdirSync, realpathSync, rmSync, type Stats } from "node:fs";
+import { lstatSync, mkdtempSync, realpathSync, rmSync, type Stats } from "node:fs";
+import { readdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 
 const PREFIX = "cstra-test-run-";
 const STALE_MS = 2 * 60 * 60 * 1_000;
+const OWNER_PID = /^cstra-test-run-(\d+)-/;
 type Identity = Pick<Stats, "dev" | "ino">;
 
 function checkedRoot(path: string, parent: string, identity?: Identity): Stats {
@@ -30,26 +32,47 @@ function removeRoot(path: string, parent: string, identity?: Identity, olderThan
   }
 }
 
-/** Only this prefix belongs to the preload; old per-test prefixes and other applications' temp files are never swept. */
-function sweepStaleRoots(parent: string): void {
+/** A root's mtime only moves when direct children change, so a live long-running owner (`--watch`) could look stale. */
+function ownerAlive(name: string): boolean {
+  const pid = Number(OWNER_PID.exec(name)?.[1]);
+  if (!Number.isSafeInteger(pid) || pid <= 0) return false;
   try {
-    const cutoff = Date.now() - STALE_MS;
-    for (const entry of readdirSync(parent, { withFileTypes: true })) {
-      if (entry.name.startsWith(PREFIX)) removeRoot(join(parent, entry.name), parent, undefined, cutoff);
-    }
+    process.kill(pid, 0);
+    return true;
   } catch (error) {
-    console.warn(`[test-tmp-root] Could not scan ${parent}: ${error}`);
+    // EPERM still means the pid exists; a reused pid only keeps the root until a later sweep.
+    return (error as NodeJS.ErrnoException).code === "EPERM";
   }
 }
 
-export function createTestTmpRoot(originalTmpDir = tmpdir()): { path: string; cleanup: () => void } {
+/**
+ * Only this prefix belongs to the preload; old per-test prefixes and other applications' temp files are never swept.
+ * Asynchronous: listing a tmpdir with ~10^6 leftovers takes 10–100 s, which must not delay every test start.
+ * A short run may exit before the listing finishes; any later long run reaps the leftovers.
+ */
+async function sweepStaleRoots(parent: string): Promise<void> {
+  try {
+    const names = await readdir(parent);
+    const cutoff = Date.now() - STALE_MS;
+    for (const name of names) {
+      if (name.startsWith(PREFIX) && !ownerAlive(name)) removeRoot(join(parent, name), parent, undefined, cutoff);
+    }
+  } catch (error) {
+    // A parent that vanished before the background listing ran (a test's throwaway fixture) has nothing left to reap.
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") console.warn(`[test-tmp-root] Could not scan ${parent}: ${error}`);
+  }
+}
+
+export function createTestTmpRoot(originalTmpDir = tmpdir()): { path: string; cleanup: () => void; swept: Promise<void> } {
   // Resolve the parent once: /tmp and /var on macOS are themselves legitimate symlinks.
   const parent = realpathSync(originalTmpDir);
-  sweepStaleRoots(parent);
   const path = mkdtempSync(join(parent, `${PREFIX}${process.pid}-`));
   const identity = checkedRoot(path, parent);
-  return { path, cleanup: () => removeRoot(path, parent, identity) };
+  return { path, cleanup: () => removeRoot(path, parent, identity), swept: sweepStaleRoots(parent) };
 }
+
+/** Settles when the preload's stale-root sweep has finished; tests await it instead of sleeping. */
+export let staleRootSweep: Promise<void> = Promise.resolve();
 
 function inheritEnv<T extends (...args: any[]) => any>(spawn: T): T {
   return ((command: string[] | { env?: NodeJS.ProcessEnv }, options?: { env?: NodeJS.ProcessEnv }) => {
@@ -60,7 +83,8 @@ function inheritEnv<T extends (...args: any[]) => any>(spawn: T): T {
 }
 
 export function installTestTmpRoot(): () => void {
-  const { path, cleanup } = createTestTmpRoot();
+  const { path, cleanup, swept } = createTestTmpRoot();
+  staleRootSweep = swept;
   // Synchronous exit cleanup also covers failing tests and uncaught errors without swallowing the failure.
   process.once("exit", cleanup);
   process.once("SIGINT", () => process.exit(130));
