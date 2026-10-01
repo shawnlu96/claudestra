@@ -69,6 +69,7 @@ export interface StartPlan {
   agent: string;
   fileGlobs: string[];
   specRel: string;
+  /** 卡上 task.spec 记这个绝对路径：多数项目没设 docsDir，相对路径 specPathFor 解析不到，派审 / 挂 peer 会找不到规格卡 */
   specPath: string;
   specText: string | null;
   promptPath: string;
