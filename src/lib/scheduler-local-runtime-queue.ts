@@ -1,4 +1,5 @@
 /** The bridge owns queued start callbacks so retries retain the original caller and all explicit opening parameters. */
+import { currentLocalProjectDirs } from "./scheduler-local-runtime-projects.js";
 import { dirname } from "node:path";
 import { actorMayConfigure } from "./ledger-scheduler-settle.js";
 import type { StartOutcome, StepIO } from "./dag-tools-steps.js";
@@ -69,7 +70,7 @@ async function stillReady({ io, plan: p, opts }: Pending): Promise<string | null
   const result = await preflightStart({
     db: io.db(), caller: p.pm, ledgerDir: dirname(dirname(dirname(p.specPath))),
     worktreeRoot: dirname(p.worktree),
-    projectDirs: async () => [p.repo], agentNames: () => readRegistryAgentsSync(opts.registryPath).map((r) => r.name), exists: io.exists,
+    projectDirs: (project) => currentLocalProjectDirs(project, opts.projectsPath), agentNames: () => readRegistryAgentsSync(opts.registryPath).map((r) => r.name), exists: io.exists,
     branchExists: async (repo, branch) => (await io.git(repo, ["rev-parse", "--verify", "--quiet", `refs/heads/${branch}`])).ok,
     autoReady: (project) => config.enabled && config.autoDispatch && config.projects[project] ? null : "调度服务已关闭，排队开卡取消",
     template: () => null,

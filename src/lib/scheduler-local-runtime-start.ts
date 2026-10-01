@@ -20,7 +20,7 @@ const selected = (project: string, path?: string) => {
 };
 
 export interface LocalStartOptions extends CodexSlotOptions {
-  configPath?: string; queuedReady?: (plan: StartPlan) => Promise<string | null>; queuedNotice?: (text: string) => Promise<void>;
+  configPath?: string; projectsPath?: string; queuedReady?: (plan: StartPlan) => Promise<string | null>; queuedNotice?: (text: string) => Promise<void>;
 }
 
 export type { QueuedStart } from "./scheduler-local-runtime-queue.js";

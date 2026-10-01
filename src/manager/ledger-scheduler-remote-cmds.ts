@@ -1,13 +1,13 @@
 /**
  * `ledger scheduler-remote <project> balance|off --reason`：借算力总开关（i28-W5b），只改 scheduler.json 里该项目的 remote.mode。
- * `ledger scheduler-local <project> [--priority first|balance|low|off] [--max-workers N] --reason`：本机档位 / 并发上限（i28-Q1 网页分配表），没带的不动。
+ * `ledger scheduler-local <project> [--priority first|balance|low|off] [--max-workers N] --reason`：本机档位 / 并发上限 / 作者运行时，没带的不动。
  * 写入、校验、锁、审计都在 lib/scheduler-config-write.ts；网页开关（R7b）以 owner 身份经 runManager 跑这条命令，不在 bridge 直调 lib
  * （bridge 的台账连接只读，写不了审计事件）。path 参数只给测试指向临时文件。tests/scheduler-config-write-cli.test.ts。
  */
 import { LedgerError } from "../lib/ledger-store.js";
 import { isLegacyRemoteMode, SCHEDULER_CONFIG_PATH } from "../lib/scheduler-config.js";
 import { isPriority, PRIORITIES } from "../lib/lend-config.js";
-import { setLocalSlots, setRemoteMode } from "../lib/scheduler-config-write.js";
+import { setLocalSlots, setRemoteMode, type LocalSlots } from "../lib/scheduler-config-write.js";
 import type { CommandSpec } from "./ledger-write-cmds.js";
 
 export function schedulerRemoteCmds(path = SCHEDULER_CONFIG_PATH): Record<string, CommandSpec> {
@@ -29,15 +29,17 @@ export function schedulerRemoteCmds(path = SCHEDULER_CONFIG_PATH): Record<string
       },
     },
     "scheduler-local": {
-      valued: ["priority", "max-workers", "reason", "dedup"],
-      usage: "scheduler-local <project> [--priority first|balance|low|off] [--max-workers N] --reason <为什么>（只改本机的 remote.localPriority / maxActiveWorkers；PM / master / owner）",
+      valued: ["priority", "max-workers", "author-runtime", "reason", "dedup"],
+      usage: "scheduler-local <project> [--priority first|balance|low|off] [--max-workers N] [--author-runtime claude|codex] --reason <为什么>（PM / master / owner）",
       async run(c) {
         const [, project, ...extra] = c.p.pos;
-        if (!project || extra.length) throw new LedgerError("invalid", "用法：scheduler-local <project> [--priority …] [--max-workers N] --reason <为什么>");
-        const { priority, "max-workers": max } = c.p.flags;
+        if (!project || extra.length) throw new LedgerError("invalid", "用法：scheduler-local <project> [--priority …] [--max-workers N] [--author-runtime claude|codex] --reason <为什么>");
+        const { priority, "max-workers": max, "author-runtime": runtime } = c.p.flags;
         if (priority !== undefined && !isPriority(priority)) throw new LedgerError("invalid", `--priority 只能是 ${PRIORITIES.join(" / ")}，收到 ${priority}`);
         if (max !== undefined && !/^\d{1,2}$/.test(max)) throw new LedgerError("invalid", `--max-workers 要是 0..32 的整数，收到 ${max}`);
-        const set = { ...(priority !== undefined ? { localPriority: priority } : {}), ...(max !== undefined ? { maxActiveWorkers: Number(max) } : {}) };
+        if (runtime !== undefined && runtime !== "claude" && runtime !== "codex") throw new LedgerError("invalid", "--author-runtime 只能是 claude / codex");
+        const set: LocalSlots = { ...(priority !== undefined ? { localPriority: priority } : {}), ...(max !== undefined ? { maxActiveWorkers: Number(max) } : {}),
+          ...(runtime !== undefined ? { localAuthorRuntime: runtime } : {}) };
         const r = await setLocalSlots(c.db, c.ctx(), { project, set, reason: c.need("reason") }, { path });
         return { ok: true, project, from: r.from, to: r.to, changed: r.changed, path: r.path, event: r.event, ...(r.duplicate ? { duplicate: true } : {}),
           effective: `调度器下一轮（≤ ${r.pollMs ?? "pollMs"} 毫秒）生效` };

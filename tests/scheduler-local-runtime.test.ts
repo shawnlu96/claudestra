@@ -30,6 +30,8 @@ afterEach(() => { clearQueuedLocalStarts(); for (const path of dbPaths.splice(0)
 function fixture(runtime?: string, n = 0) {
   const dir = mkdtempSync(join(tmpdir(), "lc1-")); dirs.push(dir);
   const ledgerPath = join(dir, "config-ledger.sqlite"), db = openLedger(ledgerPath); dbPaths.push(ledgerPath);
+  const projectsPath = join(dir, "projects.json");
+  writeFileSync(projectsPath, JSON.stringify({ projects: [{ id: "p", name: "p", dirs: [dir], createdAt: "" }] }));
   const configPath = join(dir, "scheduler.json"), registryPath = join(dir, "registry.json"), lockPath = join(dir, "codex.lock");
   const doc = { enabled: true, autoDispatch: true, projects: { p: { maxActiveWorkers: 2, requiredChecks: ["check"], repoDir: dir,
     ...(runtime ? { localAuthorRuntime: runtime } : {}), untouched: { keep: true } } } };
@@ -38,7 +40,7 @@ function fixture(runtime?: string, n = 0) {
   writeFileSync(registryPath, JSON.stringify({ agents }));
   const setRuntime = (runtime: "claude" | "codex") => setLocalAuthorRuntime(db, { actor: "owner", now: Date.now() },
     { project: "p", runtime, reason: "配置测试选择作者运行时" }, { path: configPath });
-  return { db, setRuntime, configPath, registryPath, lockPath, doc, dir, codexQuota: async () => unknownQuota("fixture") };
+  return { db, setRuntime, configPath, projectsPath, registryPath, lockPath, doc, dir, codexQuota: async () => unknownQuota("fixture") };
 }
 const p = { project: "p", taskId: "T", peer: null, feature: { id: "F" }, key: "one" } as StartPlan;
 const success: StartOutcome = { ok: true, taskId: "T", placement: "local", branch: "b", steps: [], reconciled: [] };
@@ -375,4 +377,41 @@ test("LS1 peer destination bypasses full local Codex slots and remains pinned be
   expect(opened).toBe(1);
   await localAutostartNode(env, cand, async () => { opened++; }, f);
   expect(opened).toBe(1);
+});
+
+test("queued repo removed from current projects.json cancels without worktree, worker or card and records failure", async () => {
+  const { f, io, opts, plan, calls, notices } = await realQueuedFixture();
+  let gitEffects = 0;
+  const git = io.git;
+  io.git = async (...args) => { gitEffects++; return git(...args); };
+  await runLocalStart(io, plan, runStart, opts);
+  const projects = JSON.parse(readFileSync(f.projectsPath, "utf8"));
+  projects.projects[0].dirs = [];
+  writeFileSync(f.projectsPath, JSON.stringify(projects));
+  const reg = JSON.parse(readFileSync(f.registryPath, "utf8")); delete reg.agents["agent-0"];
+  writeFileSync(f.registryPath, JSON.stringify(reg));
+  await retryQueuedLocalStarts();
+  expect(getTask(f.db, plan.taskId)).toBeNull();
+  expect(calls.filter((c) => c[1] !== "note")).toEqual([]);
+  expect(gitEffects).toBe(0);
+  expect(io.exists(plan.worktree)).toBe(false);
+  const notes = f.db.query("SELECT text FROM events WHERE kind = 'note' ORDER BY seq").all() as { text: string }[];
+  expect(notes.map((n) => n.text.match(/Codex 排队 (\w+)/)?.[1])).toEqual(["queued", "failed"]);
+  expect(notes.at(-1)?.text).toContain("不是项目 p 的 git 目录");
+  expect(notes.at(-1)?.text).toContain("原调用 PM agent-pm");
+  expect(notices.at(-1)).toContain("排队开卡取消");
+});
+
+test("queued repo validation reads fresh directories on every retry, refusing unreadable snapshots", async () => {
+  const { f, io, opts, plan } = await realQueuedFixture();
+  await runLocalStart(io, plan, runStart, opts);
+  await retryQueuedLocalStarts(); // A good file is read while all slots remain occupied.
+  writeFileSync(f.projectsPath, "invalid JSON");
+  const reg = JSON.parse(readFileSync(f.registryPath, "utf8")); delete reg.agents["agent-0"];
+  writeFileSync(f.registryPath, JSON.stringify(reg));
+  await retryQueuedLocalStarts();
+  expect(getTask(f.db, plan.taskId)).toBeNull();
+  const last = f.db.query("SELECT text FROM events WHERE kind = 'note' ORDER BY seq DESC LIMIT 1").get() as { text: string };
+  expect(last.text).toContain("Codex 排队 failed");
+  expect(last.text).toContain("无法确认当前项目目录");
 });
