@@ -1,7 +1,8 @@
 /**
  * The bridge's push loop for lend protocol v2 (logic in lib/lend-dispatch.ts): every PUSH_TICK_MS it announces pooled orders to
- * v2 lenders over `peerFetch(<peer>/api/v1/lend/offer)` — E2E only, the peer record must pass peerLendProblem first, so a peer
- * without E2E gets nothing rather than plaintext — and writes the answers through `ledger lend-pushed`. Pooled orders past
+ * v2 lenders over `peerFetch(<peer>/api/v1/lend/offer, { e2eOnly })` — E2E only: the peer record must pass peerLendProblem first,
+ * and the transport refuses outright if the target stopped being an E2E peer since (disabled / address changed), so nothing goes
+ * out in plaintext — and writes the answers through `ledger lend-pushed`. Pooled orders past
  * the push TTL are withdrawn by `ledger lend-sweep`. Ledger reads go through the bridge's read-only connection.
  */
 import { readJsonCapped } from "../lib/body-reader.js";
@@ -42,7 +43,7 @@ const loop = createPushLoop({
     const res = await peerFetch(url, {
       method: "POST", headers: { Authorization: `Bearer ${peer.outToken}`, "Content-Type": "application/json", ...signedFor("POST", url, body) },
       body, signal: AbortSignal.timeout(SEND_TIMEOUT_MS),
-    }, { timeoutMs: SEND_TIMEOUT_MS });
+    }, { timeoutMs: SEND_TIMEOUT_MS, e2eOnly: true });
     return { status: res.status, e2e: isE2eResponse(res), body: await readJsonCapped(res) };
   },
   record: async (peer, answer) => {
