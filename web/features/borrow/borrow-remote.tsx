@@ -1,9 +1,14 @@
 "use client";
-/** 远端行：放在 peer 上还没结的单（lend_orders 里 pooled / claimed / unknown）。只读，没有可点的东西。 */
+/**
+ * 远端行：放在 peer 上还没结的单（lend_orders 里 pooled / claimed / unknown），以及这张卡此刻放哪、为什么
+ * （bridge 给的 explainPlacement 原文，与 `ledger lend-orders` 同一份）。只读，没有可点的东西。
+ */
 import { useT } from "@/lib/i18n";
-import type { RemoteRow } from "./borrow-api";
-import { sortRemote } from "./borrow-model";
+import type { ReactNode } from "react";
+import type { PlacementView, RemoteRow } from "./borrow-api";
+import { placementKind, sortRemote, type PlacementKind } from "./borrow-model";
 import { AgeTag } from "./borrow-bits";
+import { HourglassIcon, MinusIcon, MonitorIcon, ServerIcon } from "./icons";
 
 const STATUS: Record<string, [string, string]> = {
   claimed: ["在跑", "border-success/30 bg-success/10 text-success"],
@@ -12,6 +17,30 @@ const STATUS: Record<string, [string, string]> = {
 };
 const PHASE: Record<string, string> = { cloning: "克隆中", starting: "启动中", working: "工作中", publishing: "推送中", result_pending: "交结果" };
 const STEP: Record<string, string> = { review: "审查单", write: "开工单", fix: "修复单" };
+
+const PLACE: Record<PlacementKind, [ReactNode, string]> = {
+  local: [<MonitorIcon key="l" className="size-3 shrink-0" />, "text-base-content/60"],
+  peer: [<ServerIcon key="p" className="size-3 shrink-0" />, "text-primary"],
+  wait: [<HourglassIcon key="w" className="size-3 shrink-0" />, "text-warning"],
+  none: [<MinusIcon key="n" className="size-3 shrink-0" />, "text-base-content/40"],
+};
+
+/** 放哪 + 原因：图标定形态，peer 去掉前缀只留名字；原因是台账原文，长了截两行 */
+function Placement({ p }: { p: PlacementView | undefined }) {
+  const kind = placementKind(p);
+  if (!kind || !p || "error" in p) return null;
+  const [icon, cls] = PLACE[kind];
+  const where = kind === "peer" || kind === "wait" ? p.where.replace(/^peer:/, "") : null;
+  return (
+    <div className="flex min-w-0 items-start gap-1.5 text-[11px] text-base-content/50">
+      <span className={`mt-px inline-flex shrink-0 items-center gap-1 ${cls}`}>
+        {icon}
+        {where && <span className="max-w-[8rem] truncate font-mono">{where}</span>}
+      </span>
+      <span className="line-clamp-2 min-w-0 break-words">{p.reason}</span>
+    </div>
+  );
+}
 
 export function RemoteRows({ rows, serverNow, receivedAt, tick }: { rows: RemoteRow[]; serverNow: number; receivedAt: number; tick: number }) {
   const t = useT();
@@ -33,6 +62,7 @@ export function RemoteRows({ rows, serverNow, receivedAt, tick }: { rows: Remote
               {r.phase && <span>{t(PHASE[r.phase] ?? r.phase)}</span>}
               {r.beatAt !== null && <AgeTag at={r.beatAt} serverNow={serverNow} receivedAt={receivedAt} tick={tick} />}
             </div>
+            <Placement p={r.placement} />
           </li>
         );
       })}
