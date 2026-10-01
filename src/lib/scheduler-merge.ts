@@ -9,6 +9,7 @@ import { getEventByDedup, getMeta, LedgerError, listEvents } from "./ledger-stor
 import { insertEvent, tx } from "./ledger-tx.js";
 import { currentReviewFacts } from "./scheduler-review.js";
 import { getSchedulerSession } from "./scheduler-sessions.js";
+import { currentPooledReviewer } from "./scheduler-pool-facts.js";
 import { canTransition, nextTaskState } from "./ledger-stages.js";
 import { settleIntent } from "./ledger-scheduler-settle.js";
 import { parseRequiredChecks } from "./scheduler-config.js";
@@ -86,7 +87,8 @@ export function beginMergeRun(db: Database, ctx: WriteCtx, intentId: string, req
       .get(task.project, `merge:${task.project}`, intentId);
     if (!lock) throw new LedgerError("conflict", "本意图未占项目合并槽");
     const review = currentReviewFacts(task, listEvents(db, { project: task.project, target: task.id }));
-    const reviewer = getSchedulerSession(db, task.id, "reviewer");
+    // A pooled round never writes scheduler_sessions; a local row may be an earlier round's, so this round's pool order wins.
+    const reviewer = currentPooledReviewer(db, task) ?? getSchedulerSession(db, task.id, "reviewer");
     if (review.kind !== "facts" || !reviewer || review.facts.reviewer !== reviewer.agent ||
       review.facts.reviewerSessionId !== reviewer.sessionId || review.facts.reviewerFamily !== reviewer.family ||
       review.facts.reviewerFamily === workflow.authorFamily ||
