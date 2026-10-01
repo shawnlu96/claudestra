@@ -132,11 +132,11 @@ describe("台账门（表驱动）：全放开时是候选，拧任一道就拦�
       reasonText: "改范围", cancel: new Map(), scopeChange: true, askFrom: { agent: PM, channelId: null } })],
     ["autoDispatch 关着", "service", () => { svc = { ...svc, autoDispatch: false }; }],
     ["项目没列在 scheduler.json", "service", () => { svc = { ...svc, projects: [] }; }],
-    ["容量满（持槽的卡 + auto 没拿槽的卡）", "capacity", () => {
+    ["未持槽的 auto 卡只计总在途，本机仍有写槽", "open", () => {
       for (const id of ["T1", "T2", "T3"]) createTask(db, ctx(), { project: P, id, title: id, kind: "code" });
       db.query(`INSERT INTO scheduler_intents (id, taskId, project, node, action, causalSeq, eventSeq, taskRev, specRev, head, templateVersion, status, reason, createdAt, updatedAt)
         VALUES ('i1', 'T3', ?, 'build', 'dispatch', 1, 1, 1, 1, NULL, 3, 'done', 'x', 1, 1)`).run(P);
-      // T3 是 manual 但持槽，T1 / T2 是 auto 还没拿槽：合计 3 = maxActiveWorkers
+      // T3 是 manual 且持槽；T1 / T2 是 auto 未拿槽：本机只占 1，另有 2 张计入总在途。
       db.query("INSERT INTO scheduler_resources (project, resource, taskId, intentId, acquiredAt) VALUES (?, ?, 'T3', 'i1', 1)").run(P, `slot:${P}:1`);
       for (const id of ["T1", "T2", "T3"]) {
         db.query(`INSERT INTO task_workflows (taskId, project, template, templateVersion, mode, authorFamily, fallback, specRev, createdAt, updatedAt)

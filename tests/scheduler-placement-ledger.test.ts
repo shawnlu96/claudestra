@@ -162,7 +162,7 @@ describe("read-only view: ledger lend-orders shows where the current node goes a
 });
 
 describe("this machine's load", () => {
-  /** Another card of the project holding a worker slot in `stage` (the slot stays held through review). */
+  /** Seed another card's slot, including a stale review slot from before the local-writing-only policy. */
   const holding = (db: Database, id: string, stage: string, slot: number) => {
     createTask(db, { actor: "owner", now: 1 }, { project: "p", id, title: id, kind: "code" });
     db.run("UPDATE tasks SET stage = ? WHERE id = ?", [stage, id]);
