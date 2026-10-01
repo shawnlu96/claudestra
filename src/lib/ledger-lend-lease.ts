@@ -11,6 +11,7 @@ import { LedgerError, listEvents } from "./ledger-store.js";
 import type { LedgerTask } from "./ledger-stages.js";
 import { lendBranch, type LendStep } from "./lend-git.js";
 import { orderWireOf, WIRE_LIMITS, type OrderWire } from "./order-wire.js";
+import { chunkInputs } from "./order-wire-chunks.js";
 import type { ReviewFinding } from "./scheduler-review.js";
 
 export interface WriteLease {
@@ -94,7 +95,7 @@ export interface WriteOrderInput { orderId: string; step: LendStep; head: string
 
 /** 开工 / 修复单：外来原文只进 inputs / findings（外发闸逐行引用），标题、验收、回写说明是本机写的 */
 export function writeOrderWire(task: LedgerTask, o: WriteOrderInput): OrderWire {
-  const inputs = [`规格原文（specRev ${task.specRev}）：\n${o.spec}`, ...(o.step === "fix" && o.report ? [`上一轮审查报告原文：\n${o.report}`] : [])];
+  const inputs = chunkInputs([[`规格原文（specRev ${task.specRev}）`, o.spec], ...(o.step === "fix" && o.report ? [["上一轮审查报告原文", o.report] as const] : [])]);
   // head 只放在 head 字段里：外发闸扫全部自由文本，别处再写一遍 40 位十六进制会被当成疑似密钥整单拒掉
   const start = o.step === "write" ? `从基线 ${o.base} 切出分支 ${o.branch}（起点是标题里的 head）` : `在分支 ${o.branch} 上接着改（起点是标题里的 head）`;
   return orderWireOf({
