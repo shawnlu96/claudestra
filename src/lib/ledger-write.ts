@@ -184,8 +184,8 @@ function updateTask(db: Database, ctx: WriteCtx, cur: LedgerTask, patch: Record<
 
 /**
  * 在已开的事务里推一步：CAS from → 现算角色 → canTransition → 改行 + stage 事件。
- * asRole 只给 ledger-human.ts（v3.2：human 节点的人按执行者推 build / fix → review，actor 是 person id，roleOf 认不出）
- * 与 recordVerify（调度身份过了 schedulerCanVerify 闸，按 pm 推 live → verified，T68g）；
+ * asRole 只给 ledger-human.ts（v3.2：human 节点的人按执行者推 build / fix → review，actor 是 person id，roleOf 认不出）、
+ * recordVerify（调度身份过了 schedulerCanVerify 闸，按 pm 推 live → verified，T68g）与 moveStage 的 asPm（只收 peer PR 卡，peer-pr-ledger.ts）；
  * 别的调用方传它就绕过了角色判定，tests/ledger-migrate.test.ts 查着只有那一处 import。
  */
 export function applyMove(
@@ -210,13 +210,14 @@ export function applyMove(
 /** 进 verified 只经 recordVerify（系统核对完成检查单）；从 blocked 回到原本就是 verified 的阶段不算「进」 */
 export const VERIFY_HINT = "进 verified 要跑 `ledger verify <task>`：系统核对完成检查单，全过才推（stage 不能直接推 verified）";
 
-export function moveStage(db: Database, ctx: WriteCtx, input: { taskId: string; text?: string } & StageMove): WriteResult<LedgerTask> {
+export function moveStage(db: Database, ctx: WriteCtx, input: { taskId: string; text?: string; asPm?: boolean } & StageMove): WriteResult<LedgerTask> {
   return tx(db, () => {
     const task = mustTask(db, input.taskId);
     const dup = replay(db, ctx, { project: task.project, target: task.id, kind: "stage" }, () => task);
     if (dup) return dup;
     if (input.to === "verified" && task.stage !== "blocked") throw new LedgerError("forbidden", VERIFY_HINT, { stage: task.stage });
-    const { task: row, event } = applyMove(db, ctx, task, input, true, input.text);
+    if (input.asPm && !task.extra.peerPr) throw new LedgerError("forbidden", "按 PM 角色代推阶段只给 peer PR 卡（收卡 / 漂移事务）");
+    const { task: row, event } = applyMove(db, ctx, task, input, true, input.text, input.asPm ? "pm" : undefined);
     return { row, event, duplicate: false };
   });
 }

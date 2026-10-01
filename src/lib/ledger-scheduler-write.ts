@@ -73,11 +73,15 @@ export interface WorkflowInput {
   reason?: string;
 }
 
-/** Historical cards are excluded by the migration watermark, even when still sitting in spec. */
-export function setWorkflow(db: Database, ctx: WriteCtx, input: WorkflowInput): { workflow: TaskWorkflow; duplicate: boolean } {
+/**
+ * Historical cards are excluded by the migration watermark, even when still sitting in spec. `intake` is passed only by the peer PR
+ * intake transaction (peer-pr-ledger.ts, which re-read peer-prs.json and created this card): it skips the PM check for that card alone.
+ */
+export function setWorkflow(db: Database, ctx: WriteCtx, input: WorkflowInput, intake = false): { workflow: TaskWorkflow; duplicate: boolean } {
   return tx(db, () => {
     const task = mustTask(db, input.taskId);
-    if (!actorMayConfigure(db, ctx.actor, task.project)) throw new LedgerError("forbidden", "只有项目 PM / master / owner 能配置自动任务");
+    if (!intake && !actorMayConfigure(db, ctx.actor, task.project)) throw new LedgerError("forbidden", "只有项目 PM / master / owner 能配置自动任务");
+    if (intake && (input.template !== "security" || input.mode !== "auto" || !task.extra.peerPr)) throw new LedgerError("forbidden", "收 peer PR 只能给新建的 peer 卡开 security 自动流程");
     if (task.kind !== "code") throw new LedgerError("invalid", "自动流程只接 code 任务");
     const existing = getWorkflow(db, task.id);
     if (!existing) {
