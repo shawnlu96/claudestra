@@ -46,6 +46,7 @@ import { isMasterName, readRegistryAgents } from "../lib/registry.js";
 import { claudeSwitchInputError, isSafeModelArg, nonClaudeRuntimeError } from "../lib/claude-settings-runtime.js";
 import { collectSessions, visibleSessions } from "./sessions-inventory.js";
 import { archivedOnlyAgent, locateSessionFile, masterSessionHidden } from "./session-file.js";
+import { inboundFor } from "./inbound-event.js";
 import { readPiRuntimeSnapshot } from "../lib/pi-env.js";
 import { findSessionJsonlBySessionId } from "../lib/session-source.js";
 import { cleanupBgJob } from "../lib/bg-jobs.js";
@@ -830,10 +831,7 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
     const file = locateSessionFile(sid, runtime, cwd);
     if (!file) return apiJson(404, { ok: false, error: `session "${sid}" not found on disk` });
     if (masterSessionHidden(principal, file, MASTER_DIR)) return notInScope("master"); // "*" 不含 master（bridge/session-file.ts）
-    const page = await readSessionHistory(file, {
-      limit,
-      ...(before ? { before: Number(before) } : {}),
-    });
+    const page = await readSessionHistory(file, { limit, ...(before ? { before: Number(before) } : {}) }); // 没有 agent 名 → 不查入站账，Pi / Codex 保守显示
     return apiJson(200, { ok: true, sessionId: sid, path: file, ...page });
   }
 
@@ -961,7 +959,7 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
         const idx = cursor++;
         const f = files[idx];
         try {
-          const hits = await searchSessionHistory(f.path, q, { maxHits: 20 });
+          const hits = await searchSessionHistory(f.path, q, { maxHits: 20, inbound: inboundFor(f.agent) }); // 与历史同规则：对上入站账的认来源
           perFile[idx] = hits.map((h) => ({ agent: f.agent, sessionId: f.sessionId, source: f.source, ...h }));
           collected += hits.length;
         } catch {
@@ -1092,7 +1090,7 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
         before: before != null && Number.isFinite(before) ? before : undefined,
         after: after != null && Number.isFinite(after) ? after : undefined,
         formatToolFn: formatTool,
-        toolDetailFn: formatToolDetail,
+        toolDetailFn: formatToolDetail, inbound: inboundFor(canonical), // Pi / Codex 对上入站账的认来源（lib/inbound-ledger.ts）
       });
       return apiJson(200, {
         ok: true,

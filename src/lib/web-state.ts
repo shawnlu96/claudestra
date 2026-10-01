@@ -4,8 +4,9 @@
  * 推送（bridge/push/*）与本地 API（bridge/local-api/*）都从这里拿 db；测试传 ":memory:" 或临时路径。
  */
 import { Database } from "bun:sqlite";
-import { mkdirSync } from "node:fs";
+import { chmodSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { ensureInboundTable } from "./inbound-ledger.js";
 import { STATE_DIR } from "./paths.js";
 
 const WEB_STATE_PATH = join(STATE_DIR, "web-state.sqlite");
@@ -19,10 +20,26 @@ export function openWebState(path: string = WEB_STATE_PATH): Database {
   if (hit) return hit;
   if (path !== ":memory:") mkdirSync(dirname(path), { recursive: true });
   const db = new Database(path);
+  if (path !== ":memory:") tightenModes(path);
   db.exec("PRAGMA journal_mode = WAL");
   migrate(db);
   cache.set(path, db);
   return db;
+}
+
+/**
+ * 推送凭据、入站账只给本 OS 用户读写：主库连同已经在的 -wal / -shm / -journal 一起收紧到 0600（只收主库的话，老库留下的 0644 WAL
+ * 会接着装新写的数据）；之后新建的 sidecar 由 SQLite 按主库权限建（tests/web-state.test.ts）。不存在的跳过；
+ * 收紧失败（文件不归本用户等）只记日志、库照常开——收紧前本来就是这个权限，拒开会让推送 / 本地 API 整体失效
+ */
+function tightenModes(path: string): void {
+  for (const f of [path, `${path}-wal`, `${path}-shm`, `${path}-journal`]) {
+    try {
+      chmodSync(f, 0o600);
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== "ENOENT") console.error(`web 状态库 ${f} 没能收紧到 0600（推送 / 本地 API 照常）: ${(e as Error).message}`);
+    }
+  }
 }
 
 export function closeWebState(path: string = WEB_STATE_PATH): void {
@@ -68,4 +85,5 @@ function migrate(db: Database): void {
   // 旧 web 的登录会话（只存 sha256）：升级后浏览器带着旧 cstra_session 来，一次性换成设备凭据（lib/legacy-web.ts）
   db.exec(`CREATE TABLE IF NOT EXISTS legacy_sessions (
     id_hash TEXT PRIMARY KEY, username TEXT NOT NULL DEFAULT '', expires_at TEXT NOT NULL, used_at TEXT)`);
+  ensureInboundTable(db); // 非 CC 会话的入站账（lib/inbound-ledger.ts）：旧 BFF 没有，同样不进 WEB_STATE_TABLES
 }

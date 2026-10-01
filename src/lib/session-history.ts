@@ -20,7 +20,8 @@ import { join } from "path";
 import { projectJsonlPath, findJsonlBySessionId } from "./jsonl-cost.js";
 import { agentArchiveDir, ARCHIVE_ROOT, realpathWithin } from "./session-archive.js";
 import { channelAnswer, channelAttachments, channelBodyText, commandRecordLine, commandStdoutLine, senderOf, type AskAnswerRef, type InboundAttachmentsRef } from "./inbound-body.js";
-import { ccOwnRecord, plainUserText } from "./cc-own-records.js";
+import { ccOwnRecord, plainUserText, verifiedForeignRecord } from "./cc-own-records.js";
+import type { InboundLookup } from "./inbound-ledger.js";
 import { settleToolCard } from "./auq-echo.js";
 import { dropFailedReplyRows, keepReplyRows, sanitizeComponents } from "./history-components.js";
 import { askIdOfReplyResult } from "./reply-ask-schema.js";
@@ -276,6 +277,14 @@ export function unwrapChannelMessage(raw: string): ({ text: string; from?: strin
   return { text, from, fromId, ...channelAnswer(m[1], m[2]), ...channelAttachments(m[1]) }; // 附件只取头属性：正文里的附件行不可信
 }
 
+/** <channel> 入站 → 历史里的一条用户消息；不是包装、或是 bridge 内部注入（user="bridge:*"，看门狗 nudge 等是指令不是对话，直播侧 srcKind 同款排除）→ null */
+function channelUserMessage(raw: string, seq: number, ts: string | null): HistoryMessage | null {
+  const un = unwrapChannelMessage(raw);
+  if (!un || (un.from && /^bridge(:|$)/.test(un.from))) return null;
+  const msg: HistoryMessage = { seq, ts, role: "user", text: un.text };
+  return Object.assign(msg, senderOf(un));
+}
+
 function summarize(sessionId: string, source: "live" | "archive", path: string): SessionSummary | null {
   try {
     const st = statSync(path);
@@ -379,6 +388,7 @@ export async function readSessionHistory(
     toolDetailFn?: (name: string, input: any) => string;
     /** 超过此字节走尾读(默认 16MB);单测可调低来在小 fixture 上验尾读路径 */
     maxFullReadBytes?: number;
+    inbound?: InboundLookup; // T74 入站账（bridge 按 agent 传）：非 CC 记录对上账才认来源；不传一律保守
   } = {},
 ): Promise<HistoryPage> {
   const limit = Math.max(1, Math.min(500, Math.floor(opts.limit ?? 100)));
@@ -395,7 +405,7 @@ export async function readSessionHistory(
 
   // 小文件:一次全读,total 精确。单测与绝大多数会话走这条,行为与 v1 完全一致。
   if (size <= maxFull) {
-    const all = parseHistoryLines((await f.text()).split("\n"), 0, fmt, detailFn, runtime);
+    const all = parseHistoryLines((await f.text()).split("\n"), 0, fmt, detailFn, runtime, opts.inbound);
     return sliceHistoryPage(all, limit, before, after, all.length, false);
   }
 
@@ -429,7 +439,7 @@ export async function readSessionHistory(
     // ⚠ runtime 必须传：全读分支(上面 442)传了、这里漏传的话，>16MB 的 Pi 会话会被
     //   当成 Claude Code 行解析 → 一条都认不出来 → all.length 恒为 0 → satisfied 永远
     //   不成立 → 扩窗一路跑到文件头，既全文读又返回空历史。
-    const all = parseHistoryLines((await f.slice(cut, hi).text()).split("\n"), lineOffset, fmt, detailFn, runtime);
+    const all = parseHistoryLines((await f.slice(cut, hi).text()).split("\n"), lineOffset, fmt, detailFn, runtime, opts.inbound);
 
     let satisfied = reachedStart;
     if (!satisfied) {
@@ -508,6 +518,7 @@ function parseHistoryLines(
   detailFn: ((name: string, input: any) => string) | undefined,
   /** v2.23+ 运行时：Pi 的行要翻译成 Claude Code 形状后再解析 */
   runtime?: string,
+  inbound?: InboundLookup,
 ): HistoryMessage[] {
   const all: HistoryMessage[] = [];
   // tool_use id → 工具卡 / reply 气泡：后续 user 记录里的 tool_result 回填失败态、建出的 askId
@@ -534,15 +545,9 @@ function parseHistoryLines(
       // harness 的后台任务通知,不进历史。
       const queued = queuedPromptOf(rec);
       if (queued) {
-        const un = unwrapChannelMessage(queued);
-        if (un && !(un.from && /^bridge(:|$)/.test(un.from))) {
-          const mid = channelMessageId(queued);
-          if (!mid || !seenChannelIds.has(mid)) {
-            const msg: HistoryMessage = { seq, ts, role: "user", text: un.text };
-            Object.assign(msg, senderOf(un));
-            all.push(msg);
-          }
-        }
+        const msg = channelUserMessage(queued, seq, ts);
+        const mid = channelMessageId(queued);
+        if (msg && (!mid || !seenChannelIds.has(mid))) all.push(msg);
       }
       continue;
     }
@@ -563,18 +568,13 @@ function parseHistoryLines(
           : Array.isArray(c)
             ? c.filter((b: any) => b?.type === "text").map((b: any) => b.text || "").join("\n")
             : "";
-      const plain = plainUserText(rec, text, runtime); // Pi / Codex：原文照登，不认文本头（lib/cc-own-records.ts）
+      const verified = verifiedForeignRecord(rec, text, runtime, inbound); // Pi / Codex 对上入站账的：按账上 meta 重渲染，同 CC 解包
+      const plain = verified === undefined ? plainUserText(rec, text, runtime) : undefined; // 其余 Pi / Codex：原文照登，不认文本头（lib/cc-own-records.ts）
       if (plain !== undefined) { if (plain.trim()) all.push({ seq, ts, role: "user", text: plain }); continue; }
       if (rec.isMeta === true) {
-        // isMeta + <channel> 包装 = channel 送达的真实入站消息，解包进历史；
-        // 其余 isMeta（caveat / local-command 输出等）照旧过滤
-        const un = unwrapChannelMessage(text);
-        if (!un) continue;
-        // bridge 内部注入(看门狗 nudge 等,user="bridge:*")是发给 agent 的指令,不是对话,不进历史(直播侧 srcKind 同款排除)
-        if (un.from && /^bridge(:|$)/.test(un.from)) continue;
-        const msg: HistoryMessage = { seq, ts, role: "user", text: un.text };
-        Object.assign(msg, senderOf(un));
-        all.push(msg);
+        // isMeta + <channel> 包装 = channel 送达的真实入站消息，解包进历史；其余 isMeta（caveat / local-command 输出等）照旧过滤
+        const msg = channelUserMessage(verified ?? text, seq, ts);
+        if (msg) all.push(msg);
         continue;
       }
       if (!text.trim()) continue; // 纯 tool_result 载荷
@@ -863,7 +863,7 @@ async function* grepJsonlLines(
 export async function searchSessionHistory(
   filePath: string,
   query: string,
-  opts: { maxHits?: number; maxFullScanBytes?: number; chunkBytes?: number } = {},
+  opts: { maxHits?: number; maxFullScanBytes?: number; chunkBytes?: number; inbound?: InboundLookup } = {},
 ): Promise<HistorySearchHit[]> {
   const maxHits = Math.max(1, Math.min(100, Math.floor(opts.maxHits ?? 20)));
   const q = query.toLowerCase();
@@ -888,8 +888,8 @@ export async function searchSessionHistory(
     // v2.21.4 被队列吸收的入站消息(attachment queued_command/prompt)与历史同规则可搜
     const queued = rec.type === "attachment" ? queuedPromptOf(rec) : null;
     if (queued) {
-      const un = unwrapChannelMessage(queued);
-      if (!un || (un.from && /^bridge(:|$)/.test(un.from))) continue;
+      const un = channelUserMessage(queued, idx, ts);
+      if (!un) continue;
       const lower = un.text.toLowerCase();
       if (!lower.includes(q)) continue;
       const hit: HistorySearchHit = { seq: idx, ts, role: "user", snippet: makeSnippet(un.text, lower, q) };
@@ -908,13 +908,12 @@ export async function searchSessionHistory(
             : "";
       let body = text;
       let from: string | undefined;
-      const plain = plainUserText(rec, text, runtime); // 与历史同规则：Pi / Codex 原文照搜
+      const verified = verifiedForeignRecord(rec, text, runtime, opts.inbound); // 与历史同规则：对上入站账的按 CC 解包，其余 Pi / Codex 原文照搜
+      const plain = verified === undefined ? plainUserText(rec, text, runtime) : undefined;
       if (plain !== undefined) body = plain;
       else if (rec.isMeta === true) {
-        // channel 送达的入站消息解包；其余 isMeta（caveat / 命令输出）不搜
-        const un = unwrapChannelMessage(text);
+        const un = channelUserMessage(verified ?? text, idx, ts); // channel 送达的入站消息解包；其余 isMeta（caveat / 命令输出）、bridge 注入不搜
         if (!un) continue;
-        if (un.from && /^bridge(:|$)/.test(un.from)) continue; // bridge 注入不搜(同历史过滤)
         body = un.text;
         from = un.from;
       } else {
