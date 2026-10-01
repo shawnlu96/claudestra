@@ -182,6 +182,10 @@ function claim(keys: string[]): string | null {
 }
 
 const START_OPTIONAL = ["base", "branch", "taskId", "title", "item", "repo", "placement"] as const;
+/** 回执里给 ui / security 卡补的一句；code 卡的 next 逐字不变 */
+const TEMPLATE_NOTE: Record<string, string> = {
+  ui: "；ui 卡：合并前要 owner 看前后截图（extra.screenshots ≥ 2 + screenshotsDigest）", security: "；security 卡：只在本机跨模型审查，不进借算力池",
+};
 
 async function startNode(deps: DagToolDeps, call: VerifiedCall, args: unknown): Promise<OrderToolResult> {
   const o = open(deps, args, call);
@@ -196,6 +200,8 @@ async function startNode(deps: DagToolDeps, call: VerifiedCall, args: unknown): 
     for (const k of START_OPTIONAL) if (str(a[k])) input[k] = str(a[k]);
     // 放哪不能因为传错类型就静默变成 auto：非字符串交给预检按不合法拒
     if (a.placement !== undefined && typeof a.placement !== "string") input.placement = JSON.stringify(a.placement);
+    // 模板同理，且不 trim、不跳过空串：""、" ui"、对象都交预检拒，不能静默落成 code 卡（ui 卡就没了截图闸）
+    if (a.template !== undefined) input.template = typeof a.template === "string" ? a.template : JSON.stringify(a.template);
     if (typeof a.spec === "string") input.spec = a.spec;
     const pre = await preflightStart({ ...deps.startEnv(), db, caller: call.agent }, input);
     if (!pre.ok) return refuse(pre.code, pre.error);
@@ -207,8 +213,9 @@ async function startNode(deps: DagToolDeps, call: VerifiedCall, args: unknown): 
     const io: StepIO = { ...deps.stepIO(), db: () => deps.db() ?? db, manager: (args, timeoutMs) => deps.manager(args, call.channelId, timeoutMs), attempt: randomBytes(4).toString("hex") };
     const out = await runStart(io, pre.plan);
     if (!out.ok) return out as unknown as OrderToolResult;
-    if ("placement" in out) return { ...out, next: `卡固定放在 ${out.placement}：复述已跳过，开工单由调度器按放置结果派出（远端写代码等 W8）` };
-    return { ...out, next: `调度器会给 ${out.agent} 派复述单；不用给它发消息` };
+    const note = TEMPLATE_NOTE[pre.plan.workflow?.template ?? "code"] ?? "";
+    if ("placement" in out) return { ...out, next: `卡固定放在 ${out.placement}：复述已跳过，开工单由调度器按放置结果派出（远端写代码等 W8）${note}` };
+    return { ...out, next: `调度器会给 ${out.agent} 派复述单；不用给它发消息${note}` };
   } finally {
     for (const k of held) claimed.delete(k);
   }
