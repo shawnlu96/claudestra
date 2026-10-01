@@ -1,7 +1,7 @@
 /**
  * 监护的生产接线（i28-S1）：名单从 registry、回程簿（pending-agent-calls.json）、押后队列（held-messages.json）读；台账写经调度服务身份的
- * `ledger scheduler-supervise`；重启经 `manager restart`（接回 registry 里的原会话）；消息经 bridge 的 route_to_agent（带 expectSession，
- * 会话换了 bridge 拒投）。每个外部效果都套 whileOwned / stillActive：服务停了、丢了租约，排着的动作什么都不做（同 lend-deps.ts）。
+ * `ledger scheduler-supervise`；重启经 `manager restart --expect`（接回 registry 里的原会话，拿锁后子进程再核前提）；消息经 bridge 的
+ * route_to_agent（带 expectSession，会话换了 bridge 拒投）。每个外部效果都套 whileOwned / stillActive：服务停了、丢了租约，排着的动作什么都不做（同 lend-deps.ts）。
  * 只在 scheduler.json 开着 supervise 时由调度 pass 调（lib/scheduler-pass.ts）。
  */
 import type { Database } from "bun:sqlite";
@@ -17,25 +17,15 @@ import type { SchedulerConfig } from "./scheduler-config.js";
 import { encodeLease, SCHEDULER_LEASE_ENV, type SchedulerLease } from "./scheduler-lease-env.js";
 import { SchedulerStopped, whileOwned } from "./scheduler-maintenance.js";
 import { schedulerManagerWith } from "./scheduler-service.js";
-import { MASTER_SESSION, tmuxRawStrict } from "./tmux-helper.js";
-import { probeAcpWorker } from "./worker-liveness.js";
 import { readActivity } from "./agent-supervisor-activity.js";
 import { readOverload } from "./agent-supervisor-bridge.js";
+import { encodeExpect } from "./agent-supervisor-expect.js";
+import { probeSupervised } from "./agent-supervisor-probe.js";
 import type { AgentSupervisor, SendResult, SuperviseDeps } from "./agent-supervisor.js";
 import { readCallRows, readHeld } from "./agent-supervisor-scope.js";
 
 type Manager = (...args: string[]) => Promise<Record<string, unknown>>;
 type Active = () => void;
-
-/** tmux 版 agent 只看窗口在不在；读失败 = 不知道（绝不当成「没了」） */
-async function windowLiveness(agent: string): Promise<"running" | "no_window" | "unknown"> {
-  try {
-    const names = (await tmuxRawStrict(["list-windows", "-t", MASTER_SESSION, "-F", "#{window_name}"])).split("\n");
-    return names.includes(agent) ? "running" : "no_window";
-  } catch {
-    return "unknown"; // tmux 读失败：这一轮不知道，监护不判死
-  }
-}
 
 interface SuperviseEnv {
   db: Database;
@@ -63,7 +53,7 @@ function superviseDeps(env: SuperviseEnv): SuperviseDeps {
     registry: () => readRegistryAgentsSync(env.registryPath),
     calls: () => readCallRows(),
     held: (ch) => (held ??= readHeld())(ch),
-    probe: (s) => owned(() => (s.transport === "acp" ? probeAcpWorker(s.agent) : windowLiveness(s.agent))),
+    probe: (s) => owned(() => probeSupervised(s)),
     activity: (agent) => readActivity(agent),
     overload: () => readOverload(),
     async record(rec) {
@@ -73,12 +63,15 @@ function superviseDeps(env: SuperviseEnv): SuperviseDeps {
     },
     send: (agent, sessionId, text) => route(agent, text, sessionId),
     async restart(agent, expect) {
-      // 最后一道，紧挨着拉起 manager、中间没有 await：会话、在途的活、监护名单按最新的 registry 和台账再核一次（manager restart 自己只认名字）
+      // 紧挨着拉起 manager、中间没有 await：会话、在途的活、监护名单按最新的 registry 和台账再核一次；manager 拿到重启锁后按 --expect
+      // 再核最后一道（manager/restart-expect.ts），那边核下来不重启回 skipped，与这里同样记 skipped、不占重启额度
       const why = expect.eligible();
       if (why) return { ok: false, skipped: why };
-      const r = await plain("restart", "--", agent);
+      const wire = encodeExpect({ agent, sessionId: expect.sessionId, down: expect.down, workKey: expect.workKey });
+      const r = await plain("restart", "--expect", wire, "--", agent);
       if (r.code === "lease-lost") throw new SchedulerStopped(`manager restart: ${String(r.error)}`);
-      const one = (r.results as { name: string; ok: boolean; error?: string }[] | undefined)?.find((x) => x.name === agent);
+      const one = (r.results as { name: string; ok: boolean; error?: string; skipped?: unknown }[] | undefined)?.find((x) => x.name === agent);
+      if (one && !one.ok && typeof one.skipped === "string") return { ok: false, skipped: one.skipped };
       return one?.ok ? { ok: true } : { ok: false, error: String(one?.error ?? r.error ?? "restart 没有结果") };
     },
     async escalate(taskId, intentId, reason) {

@@ -110,6 +110,7 @@ import { cmdPermissions } from "./manager/permissions.js";
 import { cmdKill, cmdRemove } from "./manager/agent-kill.js"; // 按 registry 补完剩余步骤、重复跑幂等
 import { cmdRename } from "./manager/agent-rename.js";
 import { isRestartInProgress, tryLockRestart, unlockRestart } from "./manager/restart-lock.js";
+import { expectArg, expectSkip } from "./manager/restart-expect.js";
 import { cmdTokenAdd, cmdTokenList, cmdTokenRevoke } from "./manager/tokens.js";
 import { cmdPeerHttpInvite, cmdPeerHttpJoin, cmdPeerHttpAccept, cmdPeerHttpTest, cmdPeerHttpList, cmdPeerHttpScopeCli, cmdPeerHttpRemove, cmdPeerInviteList, cmdPeerInviteRevoke } from "./manager/peers.js";
 import { cmdCost, cmdMetrics } from "./manager/cost.js";
@@ -1220,7 +1221,7 @@ async function restartMaster(): Promise<{ name: string; ok: boolean; error?: str
   };
 }
 
-async function cmdRestart(name?: string, opts: { includeMaster?: boolean } = {}) {
+async function cmdRestart(name?: string, opts: { includeMaster?: boolean; expect?: string } = {}) {
   const reg = await loadRegistry();
   const liveWindows = await listAgentWindowsShared();
 
@@ -1247,7 +1248,7 @@ async function cmdRestart(name?: string, opts: { includeMaster?: boolean } = {})
     return;
   }
 
-  const results: { name: string; ok: boolean; error?: string; recreated?: boolean; note?: string }[] = [];
+  const results: { name: string; ok: boolean; error?: string; recreated?: boolean; note?: string; skipped?: string }[] = [];
 
   for (const tmuxName of targets) {
     const info = reg.agents[tmuxName];
@@ -1270,10 +1271,9 @@ async function cmdRestart(name?: string, opts: { includeMaster?: boolean } = {})
     const fresh = (await loadRegistry()).agents[tmuxName];
     const late = pendingRefusal(fresh?.pending, "restart", fresh?.pending ? await listAgentWindowsShared() : [], Date.now(), pidAlive)
       ?? (!name && fresh?.status !== "active" ? "排队期间已被 kill / 移除，跳过" : null);
-    if (late) {
-      results.push({ name: tmuxName, ok: false, error: late });
-      continue;
-    }
+    if (late) { results.push({ name: tmuxName, ok: false, error: late }); continue; }
+    const skip = await expectSkip(tmuxName, opts.expect); // 监护传来的重启前提：拿锁后、碰窗口前再核（manager/restart-expect.ts）
+    if (skip) { results.push(skip); continue; }
     // 运行时由 registry 决定；只读来源 / 认不出的 runtime 不能由我们拉起
     let adapter = await (await import("./manager/acp-lifecycle.js")).managedForRestart(tmuxName, info as { runtime?: string; transport?: string });
     if (!adapter) {
@@ -2536,7 +2536,7 @@ switch (cmd) {
       output({ ok: false, error: includeMaster ? "--include-master 只能用于全体重启（不要同时指定 agent 名）" : "大总管由 launcher 守护：要重启它用 restart --include-master" });
       break;
     }
-    await cmdRestart(name || undefined, { includeMaster });
+    await cmdRestart(name || undefined, { includeMaster, expect: expectArg(args) });
     break;
   }
 
