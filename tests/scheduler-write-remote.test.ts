@@ -15,11 +15,15 @@ import { listLendOrders } from "../src/lib/ledger-lend.js";
 import { recordHello } from "../src/lib/ledger-lend-peers.js";
 import { RECEIPT_PURPOSE } from "../src/lib/ledger-lend-result.js";
 import { listEvents } from "../src/lib/ledger-store.js";
+import { deliver } from "../src/lib/ledger-write.js";
+import { settleIntent } from "../src/lib/ledger-scheduler-settle.js";
 import type { Grant } from "../src/lib/lend-wire-v2.js";
 import type { RemoteHead } from "../src/lib/order-deliver.js";
 import { schedulerAutoTick } from "../src/lib/scheduler-auto-tick.js";
 import type { RemotePolicy } from "../src/lib/scheduler-config.js";
 import { autoSnapshot } from "../src/lib/scheduler-auto-snapshot.js";
+import { remoteHeadFamily } from "../src/lib/scheduler-head-family.js";
+import { advanceMergeRun, beginMergeRun } from "../src/lib/scheduler-merge.js";
 import { planScheduler } from "../src/lib/scheduler-plan.js";
 import { autoFixture, H2, P1, toBuild } from "./scheduler-auto-helpers.js";
 
@@ -143,8 +147,8 @@ const slotsOf = (p: Awaited<ReturnType<typeof ready>>, task: string) =>
 const snapshot = (p: Awaited<ReturnType<typeof ready>>) => autoSnapshot(p.f.db, p.f.task(), { registry: [], maxWorkers: p.policy.maxActiveWorkers,
   now: p.f.tickDeps.now(), pool: { remote: p.policy.remote, borrow: p.borrow } });
 
-/** Build → mate writes → delivered → local Claude review with one P1 at `report` → the card is in fix. */
-async function toRemoteFix(p: Awaited<ReturnType<typeof ready>>, report: string) {
+/** Build → mate's Codex writes H2 → delivered → a local Claude reviewer holds the review order. */
+async function toRemoteReview(p: Awaited<ReturnType<typeof ready>>) {
   p.hello("mate");
   await p.tick();
   const [order] = p.orders();
@@ -155,6 +159,11 @@ async function toRemoteFix(p: Awaited<ReturnType<typeof ready>>, report: string)
   await p.tick(); // pool_done
   await p.tick(); // reviewer session (claude)
   await p.tick(); // review order
+}
+
+/** toRemoteReview, then one P1 at `report` → the card is in fix. */
+async function toRemoteFix(p: Awaited<ReturnType<typeof ready>>, report: string) {
+  await toRemoteReview(p);
   const findings = join(p.f.dir, "p1.json");
   writeFileSync(findings, JSON.stringify([P1]));
   expect(await p.cli("agent-rv-t1", "review", "T1", "--reviewer", "agent-rv-t1", "--verdict", "changes", "--p0", "0", "--p1", "1", "--p2", "0",
@@ -333,6 +342,47 @@ describe("off is off on every path, and writing room is the writer's (r1)", () =
       s.heldResources = s.heldResources.filter((h) => h.taskId !== "T1");
       s.workerCount = 2; // no slot of its own and none free: the low peer writes it
       expect(planScheduler(s)).toMatchObject({ kind: "intent", recipient: "peer:mate" });
+    } finally { p.f.close(); }
+  });
+});
+
+describe("the author is the newest delivery, not the newest head (r3)", () => {
+  const H3 = "3".repeat(40);
+  test("update-branch to a new head after the Claude pass: still Codex-written, the same Claude reviewer reviews it again", async () => {
+    const p = await ready();
+    try {
+      await toRemoteReview(p);
+      const findings = join(p.f.dir, "none.json");
+      writeFileSync(findings, "[]");
+      expect(await p.cli("agent-rv-t1", "review", "T1", "--reviewer", "agent-rv-t1", "--verdict", "pass", "--p0", "0", "--p1", "0", "--p2", "0",
+        "--head", H2, "--session", "s-rv", "--family", "claude", "--findings", findings, "--path", "reviews/T1-r1/report.md")).toMatchObject({ ok: true });
+      await p.tick(); // → merge
+      await p.tick(); // merge intent
+      const intent = p.f.intents().at(-1)!;
+      expect(intent.action).toBe("merge");
+      const ctx = { actor: "scheduler", now: p.f.tickDeps.now() + 1 };
+      if (intent.status === "pending") settleIntent(p.f.db, ctx, { id: intent.id, from: "pending", to: "submitted", receipt: "merge claimed" });
+      const run = beginMergeRun(p.f.db, ctx, intent.id, ["check"]).run;
+      const updating = advanceMergeRun(p.f.db, ctx, { intentId: intent.id, from: "ready", to: "updating", rev: run.rev });
+      advanceMergeRun(p.f.db, ctx, { intentId: intent.id, from: "updating", to: "await_review", rev: updating.rev, newHead: H3,
+        receipt: "update-branch succeeded; carry unavailable, review again" });
+      expect(p.f.task()).toMatchObject({ stage: "review", headSHA: H3 });
+      expect(remoteHeadFamily(p.f.db, p.f.task())).toBe("codex");
+      const snap = autoSnapshot(p.f.db, p.f.task(), { registry: [], maxWorkers: 2, now: ctx.now, pool: { remote: p.policy.remote, borrow: p.borrow } });
+      expect(snap.workflow?.authorFamily).toBe("codex");
+      expect(planScheduler(snap).kind).not.toBe("escalate");
+    } finally { p.f.close(); }
+  });
+
+  test("a later local delivery is the author again: the remote family no longer applies", async () => {
+    const p = await ready();
+    try {
+      await toRemoteFix(p, "reviews/T1-r1/report.md");
+      expect(remoteHeadFamily(p.f.db, p.f.task())).toBe("codex");
+      // The fix written here (as a fix without lease would be): a delivery with a head that no lend order recorded.
+      deliver(p.f.db, { actor: "agent-task-one", now: p.f.tickDeps.now() + 1 }, { taskId: "T1", headSHA: H3 });
+      expect(p.f.task()).toMatchObject({ stage: "fix", headSHA: H3 });
+      expect(remoteHeadFamily(p.f.db, p.f.task())).toBeNull();
     } finally { p.f.close(); }
   });
 });

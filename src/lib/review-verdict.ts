@@ -81,7 +81,7 @@ function authorsOf(db: Database, slot: ReviewSlot, steps: TaskStep[]): Set<strin
 /** 作者的模型家族：自动卡按绑定的作者 session / 工作流，其它按作者 agent 的 registry runtime；查不出 null */
 function authorFamily(db: Database, slot: ReviewSlot, steps: TaskStep[], registry: VerdictDeps["registry"]): AuthorFamily | null {
   if (slot.auto) {
-    return remoteHeadFamily(db, { id: slot.task.id, headSHA: slot.head }) ?? getSchedulerSession(db, slot.task.id, "author")?.family ??
+    return remoteHeadFamily(db, { id: slot.task.id, project: slot.task.project, headSHA: slot.head }) ?? getSchedulerSession(db, slot.task.id, "author")?.family ??
       getWorkflow(db, slot.task.id)?.authorFamily ?? null;
   }
   const author = authorOf(steps, slot.head) ?? steps.filter((s) => s.step === "write" || s.step === "fix").at(-1) ?? null;

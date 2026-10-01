@@ -399,8 +399,9 @@ peer 的档位随借入名单一起读，所以复核不会丢档位。
   （`lib/lend-write-materials.ts`，PM 手挂的 `ledger lend-offer` 用同一份）。查不到就这一轮不挂，换下一台或回本机。
 - **家族**：写单用出借方有空槽的家族，先 Codex 再 Claude（owner：先用孟总的 Codex）。
 - **交付**：出借方 `deliver` 时 A 核远端分支 head，卡记 head / 分支 / PR 并推到 review（R6 `writeLendDeliver`），下一轮调度把挂池意图记 done。
-- **审查跨家族**：卡的作者家族开卡时写在 `task_workflows.authorFamily`（自动开卡写 claude）。当前 head 是某张远端写单交付的，作者家族就按那张单的家族算
-  （`lib/scheduler-head-family.ts` 的 `remoteHeadFamily`），不改 workflow 那一行。审查放置、建 reviewer session、绑定校验、结论记账、
+- **审查跨家族**：卡的作者家族开卡时写在 `task_workflows.authorFamily`（自动开卡写 claude）。卡最近一次带 head 的交付若来自某张远端写单，作者家族就按那张单的家族算
+  （`lib/scheduler-head-family.ts` 的 `remoteHeadFamily`），不改 workflow 那一行。看的是交付、不是 head：合并队列 update-branch 换了 head
+  但没有新交付（合 main 不算写代码），作者家族不变；之后本机又交付一次，就回到 workflow 的家族。审查放置、建 reviewer session、绑定校验、结论记账、
   两道合并闸读的都是这一个函数：Codex 写的卡交 Claude 审（本机，或有 Claude 槽的 peer），Codex 的结论记不进去。
   本机 Claude 写的卡照旧交 Codex 审（优先 reviewFirst）。
 - **已知边界**：远端写过、之后某一轮又回本机写的卡，复审要换家族时原来的 reviewer session 对不上，交 PM（不自动换人）。
