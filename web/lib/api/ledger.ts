@@ -12,8 +12,11 @@ import { api, apiStream } from "./client";
 
 const enc = encodeURIComponent;
 
+/** dayStart = 本机零点：bridge 按它定哪些已完成卡算「今天」、带小圆点（和 homeView 的今日完成同一个零点）；老 bridge 不认就忽略 */
 export async function fetchLedger(project: string, signal?: AbortSignal): Promise<LedgerOverview & { ok: boolean }> {
-  const ov = await api<LedgerOverview & { ok: boolean }>(`/ledger/${enc(project)}`, { timeoutMs: 10_000, signal });
+  const day = new Date();
+  day.setHours(0, 0, 0, 0);
+  const ov = await api<LedgerOverview & { ok: boolean }>(`/ledger/${enc(project)}?dayStart=${day.getTime()}`, { timeoutMs: 10_000, signal });
   assertLedgerOverview(ov);
   return ov;
 }

@@ -14,6 +14,7 @@ import { HELLO_FRESH_MS, type BeatAnswer, type BeatOrder, type BeatRequest, type
 import type { WriteCtx } from "./ledger-checks.js";
 import { getLendOrder, leaseLend, withdrawPooledLend, type LendNotice, type LendOrder } from "./ledger-lend.js";
 import { ackPushed } from "./ledger-lend-peers-ttl.js";
+import { phaseSince } from "./lend-pr-takeover.js";
 import { getWorkflow } from "./ledger-scheduler.js";
 import { LEND_LIVE } from "./ledger-lend-schema.js";
 import { tx } from "./ledger-tx.js";
@@ -123,7 +124,8 @@ function endOrder(db: Database, ctx: WriteCtx, o: LendOrder, b: BeatOrder, check
 
 /**
  * One batched heartbeat: each line renews the lease of an order this peer holds under that gen, or says why not; an `ended`
- * line releases it (see endOrder). The phase / excerpt land in lend_orders.beat (excerpt masked again here). One transaction.
+ * line releases it (see endOrder). The phase / excerpt land in lend_orders.beat (excerpt masked again here), with since = when this phase
+ * began (kept while the phase stays the same). One transaction.
  */
 export function beatLend(db: Database, ctx: WriteCtx, peer: string, req: BeatRequest, checks: Map<string, CleanCheck>): { orders: BeatAnswer[]; notices: LendNotice[] } {
   return tx(db, () => {
@@ -132,7 +134,9 @@ export function beatLend(db: Database, ctx: WriteCtx, peer: string, req: BeatReq
     const orders = req.orders.map((b): BeatAnswer => {
       const o = heldOrder(db, peer, b, now);
       if (typeof o === "string") return { orderId: b.orderId, verdict: o, lease: null };
-      const beat = JSON.stringify({ gen: b.gen, phase: b.phase, lastActivityAt: b.lastActivityAt, excerpt: sanitizeForeign(b.excerpt), at: now });
+      const prev = (db.query("SELECT beat FROM lend_orders WHERE orderId = ?").get(o.orderId) as { beat: string | null } | null)?.beat ?? null;
+      const since = phaseSince(prev, b.phase, now); // 这个 phase 从哪一刻起：A 侧 publishing 卡住的接管按它算（lend-pr-takeover.ts）
+      const beat = JSON.stringify({ gen: b.gen, phase: b.phase, lastActivityAt: b.lastActivityAt, excerpt: sanitizeForeign(b.excerpt), at: now, since });
       db.prepare("UPDATE lend_orders SET beatAt = ?, beat = ? WHERE orderId = ?").run(now, beat, o.orderId);
       if (b.ended) {
         notices.push(...endOrder(db, ctx, o, b, checks));

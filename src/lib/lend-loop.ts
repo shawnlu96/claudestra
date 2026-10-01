@@ -9,10 +9,11 @@
  */
 import { effectiveLend } from "./lend-policy.js";
 import type { LendEntry } from "./lend-config.js";
-import { advance, getMeta, liveOrders, ordersToday, patchOrder, setMeta, unsettledOrders, LEASED_STATES, type LendRow } from "./lend-journal.js";
+import { advance, getMeta, liveOrders, patchOrder, setMeta, unsettledOrders, LEASED_STATES, type LendRow } from "./lend-journal.js";
 import { claimOrder, claimProblem, driveLeased, revoke, settleOrder, type LendDeps } from "./lend-drive.js";
 import { liveGrant, isRevoked } from "./lend-grant.js";
-import { admitOrders, LEND_FAMILY, pushKey, TICK_KEY } from "./lend-inbox.js";
+import { claudeLendSlots, lendPollCapacity } from "./lend-claude-worker-capacity.js";
+import { admitOrders, pushKey, TICK_KEY } from "./lend-inbox.js";
 import { helloPeer, helloTargets, helloView, metaJson, protoKey, speaksV2, v2Live, type LendRound, type V2Port } from "./lend-hello.js";
 import { beatPeer, beatView, type Renewal } from "./lend-beat.js";
 import { lendRequest, peerLendProblem, proxyVarsIn, type LendCall } from "./lend-remote.js";
@@ -81,21 +82,8 @@ async function claimIfStill(row: LendRow, d: LoopDeps): Promise<void> {
   await claimOrder(row, d);
 }
 
-const busyOf = (d: LoopDeps, peer: string): number => {
-  const r = d.db.query(`SELECT COUNT(*) AS n FROM lend_orders WHERE peer = ? AND family = ? AND state IN (${LEASED_STATES.map(() => "?").join(",")})`)
-    .get(peer, LEND_FAMILY, ...LEASED_STATES) as { n: number };
-  return r.n;
-};
-
-/** poll 的 capacity 正文（v1 冻结的形状，tests/lend-wire-v1-golden.test.ts）：busy 只算占着租约的单 */
-function capacityOf(entry: LendEntry, d: LoopDeps) {
-  const left = Math.max(0, entry.ordersPerDay - ordersToday(d.db, entry.peer, d.now()));
-  return { families: { [LEND_FAMILY]: entry.families[LEND_FAMILY] ?? 0 }, busy: { [LEND_FAMILY]: busyOf(d, entry.peer) }, roles: entry.roles, repos: entry.repos,
-    ordersLeftToday: left };
-}
-
 async function pollPeer(entry: LendEntry, d: LoopDeps, status: LendStatus["peers"][string]): Promise<void> {
-  const r = await lendRequest(d.call, entry.peer, "poll", { capacity: capacityOf(entry, d) });
+  const r = await lendRequest(d.call, entry.peer, "poll", { capacity: lendPollCapacity(entry, d.db, d.now()) });
   status.lastPollAt = d.now();
   status.lastError = r.ok ? null : `${r.code} ${r.error}`.slice(0, 200);
   setMeta(d.db, `lastPoll:${entry.peer}`, JSON.stringify({ at: status.lastPollAt, error: status.lastError }));
@@ -184,7 +172,7 @@ interface Pass {
 /** ④ poll 一个出借条目（被节流跳过的轮次沿用上一次 poll 的时间与错误，doctor 才看得到「最近一次 poll 失败在哪」） */
 async function pollStep(p: Pass, entry: LendEntry): Promise<void> {
   const { d, r } = p;
-  if (p.blocked || pausedUntil(d.db, d.now()) !== null) return;
+  if (p.blocked || (pausedUntil(d.db, d.now()) !== null && !claudeLendSlots(entry))) return;
   const last = metaJson<{ at?: number; error?: string | null }>(d.db, `lastPoll:${entry.peer}`) ?? {};
   const s: LendStatus["peers"][string] = { problem: p.problemOf(entry.peer), lastPollAt: last.at ?? null, lastError: last.error ?? null };
   p.status.peers[entry.peer] = s;
@@ -253,7 +241,7 @@ export async function lendTick(d: LoopDeps): Promise<TickResult> {
   const bad = out.find((x): x is PromiseRejectedResult => x.status === "rejected");
   if (bad) throw bad.reason;
   const paused = pausedUntil(d.db, d.now());
-  p.status.blocked = p.blocked ?? (paused !== null ? `本机 Codex 撞了额度，暂停借单到 ${new Date(paused).toISOString()}` : null);
+  p.status.blocked = p.blocked ?? (paused !== null && !eff.lend.some((e) => claudeLendSlots(e) > 0) ? `本机 Codex 撞了额度，暂停借单到 ${new Date(paused).toISOString()}` : null);
   if (p.status.blocked) p.status.peers = {};
   setMeta(d.db, "status", JSON.stringify(p.status));
   return { failed };

@@ -1,5 +1,6 @@
 /** i28-M8b 自动卡派单提示：开工 / 修复单要先开 PR 再 deliver；DEFAULT_TEMPLATE 与 AUTO_SECTION 其它句子逐字不变 */
 import { describe, expect, test } from "bun:test";
+import { ASK_DEFAULT_GUIDANCE } from "../src/lib/order-standard-answers.js";
 import { renderExecPrompt, type PromptVars } from "../src/lib/dag-tools-prompt.ts";
 
 const V: PromptVars = { task: "T1", title: "标题", pm: "agent-pm", branch: "feat/t1", base: "origin/main", worktree: "/wt/t1", spec: "/l/docs/tasks/T1.md", ledgerDir: "/l" };
@@ -23,7 +24,8 @@ const AUTO_KEPT = [
   "## 本卡是自动卡：生命周期归调度器，不找 PM",
   "- 派单全部来自调度服务（take_order 取单）。**不要给 agent-pm 发任何进度、交付或「收到」消息**，PM 不在这条链上。",
   "- 「复述」单：把复述（≤ 40 行）写进 /l/reviews/T1-restate.md，再把阶段推到 restate（`ledger stage T1 --from spec --to restate --text \"复述见 reviews/T1-restate.md\"`），然后停下等开工单。",
-  "- 只有这三种情况才找 PM：要改的文件超出卡上的文件范围；规格有歧义、必须有人拍板；环境坏了、自己修不了。找的时候一条消息说清楚，首行写「[需 PM 定 T1]」。",
+  `- ${ASK_DEFAULT_GUIDANCE}`,
+  "- 规格外文件交付时自动登记，审查员判断理由是否充分（不充分记 P2）；与其他在跑卡共改时冲突两边保留。",
 ];
 
 describe("renderExecPrompt：自动卡开工 / 修复先开 PR", () => {

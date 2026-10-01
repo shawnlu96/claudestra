@@ -8,7 +8,7 @@ import type { Database } from "bun:sqlite";
 import { resourceKey, resourcesOverlap } from "./ledger-scheduler.js";
 import type { BorrowEntry } from "./lend-config.js";
 import type { RemotePolicy } from "./scheduler-config.js";
-import { placeFor, PEER_PLACEMENT } from "./scheduler-placement.js";
+import { placeFor, PEER_PLACEMENT } from "./scheduler-family-pick.js";
 import { peerFacts } from "./scheduler-placement-plan.js";
 import { borrowPeers, localReviewerCount, localWriterCount } from "./scheduler-pool-facts.js";
 import { writeSlotFacts } from "./scheduler-slot-hold-facts.js";
