@@ -16,7 +16,7 @@ import { openClaims, type AutostartClaim } from "./ledger-autostart-grant.js";
 import { getFeature } from "./ledger-feature.js";
 import { getTask } from "./ledger-store.js";
 import {
-  activeFeatures, armOf, currentViews, featureGate, isStop, nodeCandidate, quotaOver, readSwitch, specGate, templateLabel, weeklyLine,
+  activeFeatures, projectPm, armOf, currentViews, featureGate, isStop, nodeCandidate, quotaOver, readSwitch, specGate, templateLabel, weeklyLine,
   type Candidate, type ServiceFacts, type SpecFile,
 } from "./scheduler-autostart.js";
 import { SchedulerStopped } from "./scheduler-maintenance.js";
@@ -187,15 +187,19 @@ async function fail(env: StartTickEnv, c: AutostartClaim, x: Failure, failed: Fa
 async function openCard(env: StartTickEnv, pick: Pick, failed: Failed): Promise<void> {
   const { cand } = pick;
   if (specMoved(env, cand)) return; // 还没写台账：安静放弃，下一轮按新规格重判
+  const pm = projectPm(env.db, cand.f.project) ?? "";
+  const pre = await preflightStart({ ...env.startEnv(), db: env.db, caller: pm },
+    { featureId: cand.f.id, key: cand.key, template: cand.head.template.ok ? cand.head.template.template : undefined });
+  if (!pre.ok && pre.code === "placement") return; // Destination has no room: leave the arm unclaimed for the next tick.
+  const selected = pre.ok && "plan" in pre ? pre.plan.peer : null;
   const r = await env.ledger("ledger", "scheduler-autostart", "claim", cand.f.id, cand.key, "--arm", cand.arm, "--template", templateLabel(cand.head.template),
-    "--max-workers", String(pick.maxWorkers), ...(cand.head.ownerVisual ? ["--owner-visual"] : []));
+    "--max-workers", String(pick.maxWorkers), "--pm", pm, ...(selected ? ["--peer", JSON.stringify(selected)] : []), ...(cand.head.ownerVisual ? ["--owner-visual"] : []));
   // 选完到 claim 之间门变了（conflict），或并发的另一方先 claim（duplicate）：下一轮重算，不出声；别的拒绝进服务的失败日志
   if (r.ok !== true && r.code !== "conflict") failed.push({ taskId: `${cand.f.id}/${cand.key}`, error: `claim 被拒：${short(r.error ?? r.code)}` });
   if (r.ok !== true || r.duplicate === true) return;
   const c = r.claim as AutostartClaim;
   const t = cand.head.template;
   if (!t.ok) return fail(env, c, { code: "bad_template", error: t.error, failedStep: "template", rolledBack: [], leftovers: [] }, failed);
-  const pre = await preflightStart({ ...env.startEnv(), db: env.db, caller: c.pm }, { featureId: c.featureId, key: c.key });
   if (pre.ok && "already" in pre) {
     if (!(await settle(env, c, "done"))) failed.push({ taskId: c.taskId, error: `结清 claim ${c.seq} 失败` });
     return;

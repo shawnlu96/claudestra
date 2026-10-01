@@ -12,6 +12,7 @@ import { effectiveNodes, getDagVersion, getFeature, getPendingProposal, projectN
 import { storedOrigin } from "./ledger-origin.js";
 import { getEventByDedup, getMeta } from "./ledger-store.js";
 import { FLOW_TEMPLATES, templateFor } from "./scheduler-template.js";
+import { autostartCapacity, type SlotPool } from "./scheduler-slot-hold-autostart.js";
 
 export type AutostartTemplate = "code" | "ui" | "security";
 /** 从基础版往上探到 templateFor 第一次给 null：scheduler-template.ts 加了新版（如 N4 的 ui / security v3），自动开卡不用改就用上最高版 */
@@ -115,21 +116,15 @@ export function projectPm(db: Database, project: string): string | null {
   return meta.pms.find((p) => p !== meta.team?.dispatcher) ?? null;
 }
 
-/** 容量：持有本项目 worker 槽的卡，加上 auto、还没到 live 及以后、也还没拿到槽的卡 */
-function activeCards(db: Database, project: string): number {
-  const prefix = `slot:${project}:`;
-  const rows = db.query(`SELECT taskId FROM scheduler_resources WHERE project = ? AND substr(resource, 1, ?) = ?
-    UNION SELECT w.taskId FROM task_workflows AS w JOIN tasks AS t ON t.id = w.taskId
-    WHERE w.project = ? AND w.mode = 'auto' AND t.stage NOT IN ('live','verified','done','cancelled')`).all(project, prefix.length, prefix, project);
-  return rows.length;
-}
-
 /** 调度服务那边的事实：scheduler.json 有没有列这个项目、autoDispatch、这个项目的 maxActiveWorkers */
 export interface ServiceFacts {
   autoDispatch: boolean;
   /** enabled 时 scheduler.json 列出的项目 */
   projects: readonly string[];
   maxWorkers(project: string): number;
+  /** Omitted in production: the gate re-reads current scheduler/lend policy and the ledger's latest hello. */
+  pool?(project: string): SlotPool;
+  now?(): number;
 }
 
 type GateCode =
@@ -150,7 +145,8 @@ export function featureGate(db: Database, f: Feature, svc: ServiceFacts): GateSt
   if (getMeta(db, f.project).queueFrozen.frozen) return stop("frozen", "项目合并队列冻结着");
   if (!projectPm(db, f.project)) return stop("no_pm", "项目没有 PM（PM 名单里除调度助理外没人）");
   const max = svc.maxWorkers(f.project);
-  if (activeCards(db, f.project) >= max) return stop("capacity", `项目在跑的卡已到 maxActiveWorkers（${max}）`);
+  const capacity = autostartCapacity(db, f.project, max, svc.pool?.(f.project), svc.now?.());
+  if (capacity) return stop("capacity", capacity);
   return null;
 }
 

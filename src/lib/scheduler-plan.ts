@@ -9,6 +9,7 @@ import { remoteWork, reviewPlacement } from "./scheduler-placement-plan.js";
 import { BOUNCE_LIMIT_REASON, bounceLimitHit, fixBounce, reviewAfterBounce, type MergeBounce } from "./scheduler-merge-conflict.js";
 import type { PmUiGate } from "./ledger-ui-approve-verdict.js";
 import { uiFixPackage, uiMergeBlock, uiPassStep } from "./scheduler-ui-gate.js";
+import { availableWriteSlot } from "./scheduler-slot-hold.js";
 
 export interface WorkerRef {
   agent: string;
@@ -163,8 +164,8 @@ function dispatchWork(s: PlannerSnapshot, node: FlowNode): PlannerDecision {
   if (ownedSlots.length > 1 || (ownedSlots[0] && !ownedSlots[0].startsWith(`slot:${s.task.project}:`))) {
     return escalate("worker_slot_invalid", "本卡 worker 槽不唯一或项目不符，交 PM 核对");
   }
-  const slot = ownedSlots[0] ?? s.freeWorkerSlot;
-  if (!ownedSlots.length && (s.workerCount >= s.maxWorkers || !slot)) return wait("capacity", "项目 worker 槽已满");
+  const slot = ownedSlots[0] ?? availableWriteSlot(s);
+  if (!slot) return wait("capacity", "项目 worker 槽已满");
   const files = fileResources(s);
   if (!files) return escalate("file_scope", "自动卡缺明确的文件范围 glob");
   const resources = [taskResource(s), slot as string, ...files].map(resourceKey);
