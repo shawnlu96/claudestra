@@ -9,8 +9,10 @@ import { computeLanes, laneNodes } from "./dag-tools-lanes.js";
 import { renderExecPrompt } from "./dag-tools-prompt.js";
 import { effectiveNodes, getDagVersion, projectNodes, resolveFeature, type Feature } from "./ledger-feature.js";
 import { storedOrigin } from "./ledger-origin.js";
+import { WORKFLOW_TEMPLATES, type WorkflowTemplate } from "./ledger-scheduler.js";
 import { getItem, getTask } from "./ledger-store.js";
 import { parseStartPlacement, type StartPlacement } from "./scheduler-placement-start.js";
+import { LATEST_TEMPLATE_VERSION } from "./scheduler-template.js";
 
 export interface StartArgs {
   featureId: string;
@@ -26,6 +28,8 @@ export interface StartArgs {
   repo?: string;
   /** 放哪（i28-W5）：auto（缺省，按槽池规则）| local | peer:<名>（固定给这个 peer，不满足硬约束就拒） */
   placement?: string;
+  /** 流程模板（i28-N4）：code（缺省）| ui | security，总是该模板的最高版；开卡那一步就写对，不留 code 窗口 */
+  template?: string;
 }
 
 /** 预检要读的环境（bridge 注入真实的，测试注入假的） */
@@ -72,6 +76,8 @@ export interface StartPlan {
   purpose: string;
   /** 放到 peer（i28-W5）：不建 worktree、不起本机 agent；null = 本机，步骤与 W5 之前逐字一样 */
   peer?: { name: string; repo: string; reason: string } | null;
+  /** workflow-set 写的模板与版本，本机卡、peer 卡同一步。preflightStart 总是填；只有手拼的计划（测试）不带，按 code 最高版 */
+  workflow?: { template: WorkflowTemplate; version: number };
 }
 
 export type Preflight = { ok: true; plan: StartPlan } | { ok: true; already: { taskId: string; key: string } } | { ok: false; code: string; error: string };
@@ -124,6 +130,8 @@ export async function preflightStart(env: StartEnv, args: StartArgs): Promise<Pr
   }
   const want = parseStartPlacement(args.placement);
   if (!want) return no("invalid", `placement 只能是 auto / local / peer:<名>（收到 ${String(args.placement).slice(0, 80)}）`);
+  const template = args.template ?? "code";
+  if (!(WORKFLOW_TEMPLATES as readonly string[]).includes(template)) return no("invalid", `template 只能是 code / ui / security（收到 ${template.slice(0, 80)}）`);
   const r = nodeReady(env, f, args.key);
   if ("error" in r) return no("not_found", r.error as string);
   const { node, wait } = r;
@@ -159,7 +167,7 @@ export async function preflightStart(env: StartEnv, args: StartArgs): Promise<Pr
   const title = args.title ?? node.oneLine;
   const item = args.item ?? (getItem(env.db, f.project, featureSlug(f, storedOrigin(env.db))) ? featureSlug(f, storedOrigin(env.db)) : null);
   const promptPath = join(env.ledgerDir, "reviews", `${taskId}-exec-prompt.md`);
-  const vars = { task: taskId, title, pm: env.caller, branch, base, worktree, spec: specPath, ledgerDir: env.ledgerDir };
+  const vars = { task: taskId, title, pm: env.caller, branch, base, worktree, spec: specPath, ledgerDir: env.ledgerDir, template: template as WorkflowTemplate };
   const promptText = renderExecPrompt(vars, env.template() ?? undefined);
   return {
     ok: true,
@@ -168,6 +176,7 @@ export async function preflightStart(env: StartEnv, args: StartArgs): Promise<Pr
       fileGlobs: node.fileGlobs, specRel, specPath, specText: hasSpec ? null : (args.spec as string), promptPath, promptText,
       purpose: `${taskId} 执行者（自动卡）：${title}。先读 ${promptPath}`,
       peer: placed?.where === "peer" ? { name: placed.peer, repo: placed.repo, reason: placed.reason } : null,
+      workflow: { template: template as WorkflowTemplate, version: LATEST_TEMPLATE_VERSION[template as WorkflowTemplate] },
     },
   };
 }
