@@ -36,8 +36,8 @@ export function normalMinutes(step: WorkStep, samples: Record<WorkStep, number[]
   return estimate.trim() ? estimateMinutes(estimate) * DEFAULT_MINUTES[step] / 130 : DEFAULT_MINUTES[step];
 }
 export function remainingMinutes(step: WorkStep, elapsed: number, samples: Record<WorkStep, number[]>, estimate: string, code: boolean): number {
-  const tails: Record<WorkStep, WorkStep[]> = { restate: ['write', 'review', 'merge'], write: ['review', 'merge'],
-    review: ['merge'], fix: ['review', 'merge'], merge: [], deploy: [] };
+  const tails: Record<WorkStep, WorkStep[]> = { restate: ['write', 'review', 'merge', 'deploy'], write: ['review', 'merge', 'deploy'],
+    review: ['merge', 'deploy'], fix: ['review', 'merge', 'deploy'], merge: ['deploy'], deploy: [] };
   return Math.max(normalMinutes(step, samples, estimate) - elapsed, 0) +
     (code ? tails[step] : []).reduce((sum, next) => sum + normalMinutes(next, samples, estimate), 0);
 }

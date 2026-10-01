@@ -9,8 +9,8 @@ test('seven-day completed stage medians, five samples required, current stage ex
   expect(samples.write).toEqual([1, 2, 3, 4, 5]);
   expect(samples.review).toEqual([]);
   expect(normalMinutes('write', samples, '1天')).toBe(3);
-  expect(remainingMinutes('write', 10, samples, '', true)).toBe(45);
-  expect(remainingMinutes('fix', 50, samples, '', true)).toBe(45);
+  expect(remainingMinutes('write', 10, samples, '', true)).toBe(60);
+  expect(remainingMinutes('fix', 50, samples, '', true)).toBe(60);
   expect(stepSamples(events, 8 * 86400000).write).toEqual([]);
   expect(normalMinutes('write', { ...samples, write: [1, 2] }, '')).toBe(60);
   expect(normalMinutes('write', { ...samples, write: [] }, '半天')).toBeCloseTo(240 * 60 / 130);

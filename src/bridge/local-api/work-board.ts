@@ -3,7 +3,7 @@ import { canReadLedger } from '../../lib/devices.js';
 import { workBoard } from '../../lib/ledger-work-board.js';
 import { readSchedulerConfig } from '../../lib/scheduler-config.js';
 import { readLendSync } from '../../lib/lend-config.js';
-import { peerCapacity } from '../../lib/ledger-lend-peers.js';
+import { workBoardSlots } from '../../lib/ledger-work-board-slots.js';
 import type { Principal } from '../../lib/principals.js';
 import { apiJson, forbidden } from '../api-respond.js';
 import { ledgerDb } from '../ledger-feed.js';
@@ -29,13 +29,8 @@ export async function handleWorkBoardApi(req: Request, path: string, principal: 
     const opts = { registry: [], maxWorkers: policy?.maxActiveWorkers ?? 0, now,
       ...(policy?.remote ? { pool: { remote: policy.remote, borrow } } : {}) };
     const result = db.transaction(() => {
-      const used = (db.query("SELECT COUNT(DISTINCT resource) AS n FROM scheduler_resources WHERE project=? AND resource LIKE 'slot:%'")
-        .get(project) as { n: number }).n;
-      const free = Math.max(0, opts.maxWorkers - used) + borrow.reduce((sum, b) => {
-        const capacity = peerCapacity(db, b.peer, b.maxOpen, now);
-        return sum + Math.min(Math.max(0, b.maxOpen - capacity.open), capacity.slots.codex + capacity.slots.claude);
-      }, 0);
-      return workBoard(db, project, now, { ...opts, availableSlots: free });
+      const total = workBoardSlots(db, project, opts.maxWorkers, borrow, policy?.remote, now);
+      return workBoard(db, project, now, { ...opts, availableSlots: total });
     }).deferred();
     return apiJson(200, { ok: true, ...result });
   } catch (error) {

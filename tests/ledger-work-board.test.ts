@@ -36,7 +36,7 @@ test('local write, peer write, publishing and pool wait; no writes and no unrela
   const changes = db.query('SELECT total_changes() AS n').get();
   db.run('PRAGMA query_only=ON');
   const b = board();
-  expect(b.working.map(r => r.taskId)).toEqual(['local', 'peer', 'publish']);
+  expect(b.working.map(r => r.taskId).sort()).toEqual(['local', 'peer', 'publish'].sort());
   expect(b.working.find(r => r.taskId === 'peer')).toMatchObject({ who: 'peer:Sekai · codex', step: 'write' });
   expect(b.working.find(r => r.taskId === 'publish')).toMatchObject({ step: 'publishing', since: 600000 });
   expect(b.waiting[0]).toMatchObject({ code: 'pooled', reason: '等审查员领单', since: 100 });

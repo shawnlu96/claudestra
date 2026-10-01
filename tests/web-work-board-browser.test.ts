@@ -7,11 +7,11 @@ import type { WorkBoard, WorkRow } from '../web/features/collab/work/work-types'
 const enabled = process.env.WORK_BOARD_BROWSER === '1';
 const out = '/Users/shawn/.claude-orchestrator/ledger/reviews/i28-WB1-shots';
 const row = (id: string, patch: Partial<WorkRow> = {}): WorkRow => ({ taskId: id, featureId: 'f', nodeKey: id, title: '协作视图：看清谁在干活与剩余时间',
-  who: `agent-${id}`, machine: 'local', step: 'write', round: 1, since: 0, normalMinutes: 60, remainingMinutes: 45, overMinutes: 0,
+  who: `agent-${id}`, machine: 'local', step: 'write', round: 1, since: 85 * 60000, normalMinutes: 60, remainingMinutes: 115, overMinutes: 0,
   reason: null, code: null, estimate: '半天', ...patch });
-const board: WorkBoard = { now: 90 * 60000, asOfSeq: 1, machines: { local: 1, Sekai: 1, 'HedeMacBook-Pro': 1 }, availableSlots: 3, completionHours: 8,
-  working: [row('WB1', { overMinutes: 30 }), row('R9', { who: 'peer:Sekai · codex', machine: 'Sekai', step: 'review' }),
-    row('W2', { who: 'peer:HedeMacBook-Pro · claude', machine: 'HedeMacBook-Pro', step: 'publishing' })],
+const board: WorkBoard = { now: 90 * 60000, asOfSeq: 1, machines: { local: 2, Sekai: 1, 'HedeMacBook-Pro': 1 }, availableSlots: 3, completionHours: 8,
+  working: [row('WB1', { since: 0, overMinutes: 30, remainingMinutes: 60 }), row('R9', { who: 'peer:Sekai · codex', machine: 'Sekai', step: 'review', normalMinutes: 30, remainingMinutes: 55 }),
+    row('W2', { who: 'peer:HedeMacBook-Pro · claude', machine: 'HedeMacBook-Pro', step: 'publishing' }), row('M1', { who: 'agent-manual-writer', title: 'PM 人工推进 · 执行者正在写代码' })],
   waiting: [row('C5', { reason: '等审查员领单', code: 'pooled' }), row('PD2', { reason: '合并排队：前面是 W3', code: 'merge_queue' }),
     row('V2', { reason: '等 CI', code: 'ci' }), row('Q1', { reason: '等 owner', code: 'owner' })],
   todo: { ready: [row('A1')], blocked: [row('A2', { reason: '被 A1 挡住' }), row('A3', { reason: '缺规格' })] } };

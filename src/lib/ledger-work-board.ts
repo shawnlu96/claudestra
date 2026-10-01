@@ -5,7 +5,7 @@ import type { Feature } from './ledger-feature.js';
 import { autoSnapshot } from './scheduler-auto-snapshot.js';
 import { planScheduler } from './scheduler-plan.js';
 import type { SnapshotOpts } from './scheduler-snapshot.js';
-import { taskWorkerRefs } from './scheduler-sessions.js';
+import { getSchedulerSession, taskWorkerRefs } from './scheduler-sessions.js';
 import { phaseSince } from './lend-pr-takeover.js';
 import { listDeps } from './ledger-store.js';
 import { stepAtStage } from './ledger-steps.js';
@@ -22,21 +22,27 @@ export interface WorkBoard {
   now: number; asOfSeq: number; working: WorkRow[]; waiting: WorkRow[]; todo: { ready: WorkRow[]; blocked: WorkRow[] };
   machines: Record<string, number>; completionHours: number | null; availableSlots: number;
 }
-interface Order { taskId: string; peer: string; family: string; step: string; status: string; createdAt: number; updatedAt: number; beat: string | null }
+interface Order { orderId: string; taskId: string; peer: string; family: string; step: string; status: string; createdAt: number; updatedAt: number; beat: string | null }
 interface Ask { taskId: string; assignee: string | null; kind: string; createdAt: number; title: string }
-interface Merge { taskId: string; phase: string; createdAt: number; updatedAt: number; reason: string | null }
+interface Merge { intentId: string; taskId: string; phase: string; createdAt: number; updatedAt: number; reason: string | null }
 interface NodeRef { featureId: string; node: BoardNode }
 export interface WorkBoardOptions extends SnapshotOpts { availableSlots?: number }
 function rows<T>(db: Database, table: string, project: string, where = ''): T[] {
   if (!db.query("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(table)) return [];
   return db.query(`SELECT * FROM ${table} WHERE project=? ${where}`).all(project) as T[];
 }
-function orderWork(order: Order, now: number): { step: WorkRow['step']; since: number } {
+function orderWork(ctx: BoardCtx, order: Order, now: number): { step: WorkRow['step']; since: number } {
   if (order.beat) {
     const beat = JSON.parse(order.beat) as { phase?: string };
     if (beat.phase === 'publishing') return { step: 'publishing', since: phaseSince(order.beat, 'publishing', now) };
   }
-  return { step: order.step === 'write' ? 'write' : order.step === 'fix' ? 'fix' : 'review', since: order.createdAt };
+  const claimed = ctx.events.get(order.taskId)?.findLast(e => {
+    const lend = e.data.lend as { op?: string; orderId?: string } | undefined;
+    return e.kind === 'note' && lend?.op === 'claim' && lend.orderId === order.orderId;
+  });
+  const beat = order.beat ? JSON.parse(order.beat) as { since?: number; at?: number } : null;
+  return { step: order.step === 'write' ? 'write' : order.step === 'fix' ? 'fix' : 'review',
+    since: claimed?.ts ?? beat?.since ?? beat?.at ?? now };
 }
 function baseRow(ctx: BoardCtx, task: LedgerTask | null, ref: NodeRef | undefined): WorkRow {
   const node = ref?.node, view = task && ctx.sched.get(task.id);
@@ -69,9 +75,13 @@ function waiting(ctx: BoardCtx, task: LedgerTask, row: WorkRow, opts: WorkBoardO
     const ahead = merges.filter(m => !['merged', 'resolved'].includes(m.phase) && m.taskId !== task.id).sort((a, b) => a.createdAt - b.createdAt);
     if (ahead.length) return set('merge_queue', `合并排队：前面是 ${ahead.map(m => m.taskId).join('、')}`);
   }
+  if (order?.status === 'claimed') return false;
+  if (view.workflow?.mode === 'manual' && ['spec', 'restate', 'build', 'fix', 'review'].includes(task.stage)) {
+    const session = getSchedulerSession(ctx.db, task.id, task.stage === 'review' ? 'reviewer' : 'author');
+    if (session?.state === 'active') return false;
+  }
   if (view.workflow?.mode === 'manual') return set(/额度|quota/.test(manualReason) ? 'quota' : 'manual',
     /额度|quota/.test(manualReason) ? `额度到线暂停：${manualReason}` : `退回人工（manual）：${manualReason}`, fallback?.ts ?? view.workflow.updatedAt);
-  if (order?.status === 'claimed') return false;
   if (view.workflow?.mode === 'auto') {
     const decision = planScheduler(autoSnapshot(ctx.db, task, opts));
     if (decision.kind === 'escalate') return set(decision.code, `退回人工（${decision.code}）：${decision.reason}`);
@@ -103,10 +113,13 @@ export function workBoard(db: Database, project: string, now: number, opts: Work
     if (['verified', 'done', 'cancelled'].includes(task.stage) || (task.stage === 'spec' && !restating)) continue;
     const row = baseRow(ctx, task, byTask.get(task.id));
     if (restating) { row.step = 'restate'; row.since = latest!.createdAt; }
-    const order = orders.find(o => o.taskId === task.id), merge = merges.find(m => m.taskId === task.id);
+    const order = orders.find(o => o.taskId === task.id);
+    const mergeIntent = ctx.db.query("SELECT id FROM scheduler_intents WHERE taskId=? AND action='merge' ORDER BY eventSeq DESC, createdAt DESC, id DESC LIMIT 1")
+      .get(task.id) as { id: string } | null;
+    const merge = mergeIntent ? merges.find(m => m.intentId === mergeIntent.id) : undefined;
     if (order?.status === 'claimed') {
       row.who = `peer:${order.peer} · ${order.family}`; row.machine = order.peer;
-      const work = orderWork(order, now); row.step = work.step; row.since = work.since;
+      const work = orderWork(ctx, order, now); row.step = work.step; row.since = work.since;
     }
     if (merge?.phase === 'merged') { row.step = 'deploy'; row.since = merge.updatedAt; }
     const step = row.step === 'publishing' ? 'write' : row.step;
