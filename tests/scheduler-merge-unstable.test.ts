@@ -95,21 +95,24 @@ describe("i28-M7 merge driver treats UNSTABLE (CI still running) as waiting, not
       expect(f.calls).not.toContain("merge");
     }
   });
-  test("await_ci: UNSTABLE with any of head/base/branch/cross-repo/state changed is unknown, not waiting", async () => {
-    for (const [name, change] of changes.filter(([k]) => k !== "draft")) {
+  test("await_ci: UNSTABLE with any of head/base/branch/draft/cross-repo/state changed is unknown, not waiting", async () => {
+    for (const [name, change] of changes) {
       const f = fixture("await_ci", running(change));
       await f.drive();
       expect([name, f.row.phase]).toEqual([name, "unknown"]);
       expect(f.calls).not.toContain("merge");
     }
   });
-  test("await_ci: draft keeps the existing draft-wait (pre-existing rule, independent of UNSTABLE); draft plus a moved head is unknown", async () => {
-    const drafted = fixture("await_ci", running({ draft: true }));
-    await drafted.drive();
-    expect(drafted.calls).toEqual(["inspect"]);
-    const moved = fixture("await_ci", running({ draft: true, head: OTHER }));
-    await moved.drive();
-    expect(moved.row.phase).toBe("unknown");
+  test("await_ci: UNSTABLE with the PR turned draft is unknown; a CLEAN draft keeps the existing draft-wait", async () => {
+    for (const change of [{ draft: true }, { draft: true, head: OTHER }]) {
+      const f = fixture("await_ci", running(change));
+      await f.drive();
+      expect(f.row.phase).toBe("unknown");
+      expect(f.calls).not.toContain("merge");
+    }
+    const clean = fixture("await_ci", pr({ draft: true }));
+    await clean.drive();
+    expect(clean.calls).toEqual(["inspect"]);
   });
   test("UNSTABLE while CI runs, then CLEAN and green: ready → await_ci → wait → merged", async () => {
     const f = fixture("ready", running(), running(), pr());

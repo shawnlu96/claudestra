@@ -70,6 +70,8 @@ export async function driveMerge(run: MergeRun, external: MergeExternal, advance
     }
     if (run.phase === "await_ci") {
       const pr = await external.inspect(run.prRef);
+      // ready never journals await_ci for a draft, so a draft here is a change; UNSTABLE must not hide it behind the draft wait.
+      if (pr.draft && pr.mergeState === "UNSTABLE") return step("unknown", "等 CI 时 PR 变成了 draft");
       if (pr.draft && sameHead(run, pr) && pr.state === "OPEN" && !pr.crossRepository &&
         pr.base === "main" && pr.branch === run.expectedBranch) return run;
       if (pr.mergeState === "UNKNOWN" && sameHead(run, pr) && pr.state === "OPEN" && !pr.draft && !pr.crossRepository &&
