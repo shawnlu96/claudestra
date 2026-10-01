@@ -29,6 +29,7 @@ import { orderWireOf, parseOrderWire, type OrderWire } from "./order-wire.js";
 import { chunkInputs, wholeInputs, type InputSplit } from "./order-wire-chunks.js";
 import { OrderRenderError, redactOrderForPeer, renderOrderWire } from "./order-wire-render.js";
 import { fitFindings } from "./order-findings.js";
+import { standardAnswers } from "./order-standard-answers.js";
 import { prevReview } from "./review-order.js";
 import { bounceReviewLine, reviewAfterBounce } from "./scheduler-merge-conflict.js";
 
@@ -129,7 +130,7 @@ function reviewOrder(db: Database, task: LedgerTask, orderId: string, input: Off
   const bounce = reviewAfterBounce(events);
   return fitFindings(orderWireOf({
     taskId: task.id, specRev: task.specRev, head, round: task.round, node: "adversarial_review", step: "review", dedupKey: orderId,
-    inputs: [...split([[`规格原文（specRev ${task.specRev}）`, input.spec]]), ...(bounce ? [bounceReviewLine(bounce)] : [])],
+    inputs: [...split([[`规格原文（specRev ${task.specRev}）`, input.spec]]), ...(bounce ? [bounceReviewLine(bounce)] : []), standardAnswers("review")],
     outputs: ["逐项结论（findingId / family / severity / probe / description）", "报告正文（markdown），随结论一起交"],
     acceptance: ["对抗式：专找能打穿规格保证的路径", "只审标题里的 head：只读，不改、不提交、不推送"],
     writeBack: "用 submit_verdict（M3 前是 lend submit）交结论和报告正文，单号见标题", findings: prev.findings,
